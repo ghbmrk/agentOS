@@ -663,11 +663,11 @@ API_TARGETS = ("/dev/null", "/dev/shm", "/proc/self/mounts")
 
 
 class OnMount(Exception):
-    """A walk stepped on MOUNT, a mount point (MountView)."""
+    """A walk stepped past MOUNT, a mount point, or (LINKED) onto one the tree holds as a link (MountView)."""
 
-    def __init__(self, mount):
+    def __init__(self, mount, linked=False):
         super().__init__(mount)
-        self.mount = mount
+        self.mount, self.linked = mount, linked
 
 
 class Dotted(Exception):
@@ -680,11 +680,12 @@ class Dotted(Exception):
 
 class MountView(BootView):
     """VIEW (a BootView) with LINES ({path: target}, the tmpfiles.d L lines' links) made, where no walk may step
-    at or under one of MOUNTS (mount_points). #5725 re-plan: at boot a mounted file system, not the tree, holds
+    past one of MOUNTS (mount_points). #5725 re-plan: at boot a mounted file system, not the tree, holds
     what is under its Where=, so where a walk goes once it steps past one (a link, a .. after a directory, a
-    nested mount) is not the tree's to say; the Where= itself is a directory, which a walk may end at. The refusal sits in the host primitive _lstat, which resolve()
-    calls on every component it steps on, a link's target, a chain's next link and a .. included, so every walk
-    onto a mount raises OnMount, by construction, and none is read on. A path kept as given past a missing
+    nested mount) is not the tree's to say; the Where= itself is a directory, which a walk may end at or leave
+    again by ... The refusal sits in the host primitive _lstat, which resolve() calls on every component it
+    steps on, a link's target, a chain's next link and a .. included, so every walk past a mount point, or onto
+    one the tree holds as a link, raises OnMount, by construction, and none is read on. A path kept as given past a missing
     component is held to the same: each of its own components is checked against MOUNTS, and one keeping a .
     or .. raises Dotted, since a directory made there at boot may be a link the kernel follows first. An L
     line's missing directories read as directories, as systemd-tmpfiles makes them."""
@@ -710,9 +711,11 @@ class MountView(BootView):
     def _lstat(self, q):
         self._refuse(q)
         if q in self.mounts:
-            st = super()._lstat(q)  # systemd mounts nothing over a link (a non-canonical Where=): it stays
+            # systemd mounts nothing over a link (a non-canonical Where=), so the tree's link stays there at boot
+            # and is refused.
+            st = super()._lstat(q)
             if st is not None and st.st_mode & 0o170000 == 0o120000:
-                raise OnMount(q)
+                raise OnMount(q, linked=True)
             return os.stat_result((0o040755,) + (0,) * 9)
         if q in self.lines:
             return os.stat_result((0o120777,) + (0,) * 9)  # the link the L line makes at boot
@@ -740,8 +743,8 @@ def boot_links(view, usr_view=None):
     lines', each one that does not resolve to a file other than a directory (one an endpoint path's directory
     may pass through, a dangling one included, #5620 R-c, R-i), read at a MountView. The mount points are read
     from VIEW, not the BootView, since generators write their units under /run. Every link, one to a file
-    included, is resolved there, and the run fails (#5725 re-plan) on one that steps on a mount point: at its
-    own path (move it off the mount), or on the way to its target, through a link, an L line's link, a .. or
+    included, is resolved there, and the run fails (#5725 re-plan) on one that steps past a mount point, or is
+    or passes through a link at one: at its own path (move it off the mount), or on the way to its target, through a link, an L line's link, a .. or
     a chain of them (point it at a path no mount covers); on one the walk cannot follow (a loop or more than 40
     links: no mount is on its way, since the walk stops at the first); on one that keeps a . or .. past a path
     the tree does not hold; and on an L line whose path's directory passes through another L line's link. A
@@ -774,6 +777,13 @@ def boot_links(view, usr_view=None):
                                  "which the unit lint does not read" % k)
             return mv.resolve(p)[0]
         except OnMount as e:
+            if e.linked:  # #5735 UX 6878301805 1
+                if k == e.mount:
+                    raise SystemExit("unit rules: a link %s (%s) is the Where= of a mount unit, and systemd mounts "
+                                     "nothing over a link (a non-canonical Where=); remove the link or the mount "
+                                     "unit%s" % (k, what, "" if line else drop))
+                raise SystemExit("unit rules: a link %s (%s)%s passes through %s, a link at a mount unit's Where=; "
+                                 "remove that link or the mount unit" % (k, what, to, e.mount))
             if k == e.mount or k.startswith(e.mount + "/"):
                 raise SystemExit("unit rules: a link %s (%s) sits at or under %s, where a mount puts a file system "
                                  "the unit lint does not see; move the %s off the mount%s"

@@ -750,10 +750,13 @@ class BootLinksTest(unittest.TestCase):
                     r.boot_links(tree(d, {**stock, **self.MOUNT, **more}))
         # systemd mounts nothing over a link (a non-canonical Where=), so a tree link at a mount point stays.
         with tempfile.TemporaryDirectory() as d:
-            with self.assertRaisesRegex(SystemExit, "a link /var/lib/foo \\(the tree's\\) sits at or under /var/lib/foo"):
+            with self.assertRaisesRegex(SystemExit, "a link /var/lib/foo \\(the tree's\\) is the Where= of a mount unit, and "
+                                        "systemd mounts nothing over a link \\(a non-canonical Where=\\); remove the link or "
+                                        "the mount unit, or drop it \\(mkosi.conf RemoveFiles=\\) if a package makes it$"):
                 r.boot_links(tree(d, {**self.MOUNT, "/var/lib/foo": "-> /etc"}))
         with tempfile.TemporaryDirectory() as d:
-            with self.assertRaisesRegex(SystemExit, "a link /etc/a \\(the tree's\\) to /var/lib/foo steps on the mount point"):
+            with self.assertRaisesRegex(SystemExit, "a link /etc/a \\(the tree's\\) to /var/lib/foo passes through /var/lib/foo, "
+                                        "a link at a mount unit's Where=; remove that link or the mount unit$"):
                 r.boot_links(tree(d, {**self.MOUNT, "/var/lib/foo": "-> /etc", "/etc/a": "-> /var/lib/foo"}))
 
     def test_a_tree_link_on_the_path_or_the_target_fails_the_run(self):
@@ -818,7 +821,8 @@ class BootLinksTest(unittest.TestCase):
     def test_a_link_loop_or_over_long_chain_fails_the_run(self):
         chain = {"/etc/l%d" % i: "-> /etc/l%d" % (i + 1) for i in range(1, 41)}
         chain.update({"/etc/l0": "-> /var/lib/foo/m0", "/var/lib/foo/m0": "-> /etc/l1", "/etc/l41": "-> /usr"})
-        on = "a link /[a-z/0-9]+ \\(the tree's\\) (sits %s|to [a-z/0-9.]+ %s)" % (self.MOUNTED, self.STEPS)
+        on = ("a link /[a-z/0-9]+ \\(the tree's\\) (sits %s|to [a-z/0-9.]+ %s|is the Where= of a mount unit|"
+              "to [a-z/0-9]+ passes through /var/lib/foo, a link at a mount unit's Where=)" % (self.MOUNTED, self.STEPS))
         loop = ("a link /etc/[a-z0-9]+ \\(the tree's\\) to [a-z/0-9]+ is on a loop or a chain of more than 40 links, "
                 "which the unit lint cannot follow; remove the loop or shorten the chain, or drop it \\(mkosi.conf RemoveFiles=\\) if a "
                 "package makes it$")
