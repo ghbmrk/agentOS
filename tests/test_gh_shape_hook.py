@@ -99,10 +99,11 @@ class GhShapeHookTest(unittest.TestCase):
 
     def test_hook_is_wired_for_every_bash_call(self):
         settings = json.loads((ROOT / ".claude/settings.json").read_text())
-        self.assertEqual(settings["hooks"], {"PreToolUse": [{"matcher": "Bash", "hooks": [{
+        # The first PreToolUse entry; tests/test_close_guard_hook.py pins the whole block.
+        self.assertEqual(settings["hooks"]["PreToolUse"][0], {"matcher": "Bash", "hooks": [{
             "type": "command",
             "command": 'python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/gh_shape.py"'
-                       ' || { echo "gh_shape hook failed" >&2; exit 2; }'}]}]})
+                       ' || { echo "gh_shape hook failed" >&2; exit 2; }'}]})
 
     def test_hook_command_blocks_when_the_hook_cannot_run(self):
         settings = json.loads((ROOT / ".claude/settings.json").read_text())
