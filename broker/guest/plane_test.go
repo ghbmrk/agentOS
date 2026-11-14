@@ -357,6 +357,461 @@ func TestOP1RetriesAndForksRunAPlanOnce(t *testing.T) {
 	}
 }
 
+func TestPlaneMutNewNeedsMachines(t *testing.T) {
+	// The TestPlaneMut tests each fail when one plane.go statement that
+	// mutgate found unchecked is deleted (GUEST-mut-plane, #5748).
+	if _, err := New(Config{Dir: filepath.Join(t.TempDir(), "guests")}); err == nil {
+		t.Fatal("New took a Config with no Machines")
+	}
+}
+
+func TestPlaneMutNewDefaults(t *testing.T) {
+	p, err := New(Config{Dir: filepath.Join(t.TempDir(), "guests"), Machines: newMachines()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Shutdown()
+	if p.cfg.StepInterval != 2*time.Second || p.cfg.SubmitEvery != 3*time.Second {
+		t.Fatalf("StepInterval %v, SubmitEvery %v; want the documented 2s and 3s", p.cfg.StepInterval, p.cfg.SubmitEvery)
+	}
+}
+
+func TestPlaneMutNewTightensDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "guests")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(Config{Dir: dir, Machines: newMachines()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Shutdown()
+	fi, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o700 {
+		t.Fatalf("an existing Dir kept mode %v; want 0700", fi.Mode().Perm())
+	}
+}
+
+func TestPlaneMutNewRefusesABadInbox(t *testing.T) {
+	tmp := t.TempDir()
+	link := filepath.Join(tmp, "inbox.json")
+	if err := os.Symlink(filepath.Join(tmp, "elsewhere"), link); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := New(Config{Dir: filepath.Join(tmp, "guests"), Machines: newMachines(), InboxPath: link}); err == nil {
+		p.Shutdown()
+		t.Fatal("New opened an inbox it cannot read (a symlink)")
+	}
+}
+
+func TestPlaneMutOpenTwiceKeepsTheMachine(t *testing.T) {
+	r := newRig(t, nil)
+	dir, err := r.p.Open("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := r.p.get("m1")
+	again, err := r.p.Open("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != dir || r.p.get("m1") != m {
+		t.Fatal("a second Open replaced the running machine")
+	}
+}
+
+func TestPlaneMutOpenClearsAStaleDir(t *testing.T) {
+	r := newRig(t, nil)
+	stale := filepath.Join(r.p.cfg.Dir, "m1")
+	if err := os.MkdirAll(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "left"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.p.Open("m1"); err != nil {
+		t.Fatalf("Open over a stale directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stale, "left")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the stale file survived Open: %v", err)
+	}
+}
+
+func TestPlaneMutOpenReportsAListenFailure(t *testing.T) {
+	// A socket path past the kernel's limit (108 bytes) cannot be bound.
+	dir := filepath.Join(t.TempDir(), strings.Repeat("d", 110))
+	p, err := New(Config{Dir: dir, Machines: newMachines()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Shutdown()
+	if _, err := p.Open("m1"); err == nil {
+		t.Fatal("Open succeeded with no socket to serve")
+	}
+	if p.get("m1") != nil {
+		t.Fatal("a machine with no socket was recorded")
+	}
+}
+
+func TestPlaneMutOpenCountsClosedConns(t *testing.T) {
+	r := newRig(t, nil)
+	c := r.client("m1")
+	resp, err := c.Get("http://broker/nope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	m := r.p.get("m1")
+	if m.conns.Load() != 1 {
+		t.Fatalf("%d open connections; want 1", m.conns.Load())
+	}
+	c.CloseIdleConnections()
+	for deadline := time.Now().Add(5 * time.Second); m.conns.Load() != 0; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d connections still counted open after the guest closed its only one", m.conns.Load())
+		}
+	}
+}
+
+func TestPlaneMutCloseStopsServing(t *testing.T) {
+	r := newRig(t, nil)
+	c := r.client("m1")
+	resp, err := c.Get("http://broker/nope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	r.p.Close("m1")
+	// The guest's kept-alive connection must end with its machine.
+	if resp, err := c.Get("http://broker/nope"); err == nil {
+		resp.Body.Close()
+		t.Fatalf("a closed machine still answered %d", resp.StatusCode)
+	}
+}
+
+func TestPlaneMutCloseStopsTheStepper(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.StepInterval = time.Hour })
+	r.client("m1")
+	r.client("m2")
+	m1, m2 := r.p.get("m1"), r.p.get("m2")
+	// m1: one snapshot taken, a trailing one armed for the interval.
+	r.p.step(m1)
+	r.p.step(m1)
+	r.p.Close("m1")
+	s := &m1.steps
+	if !s.mu.TryLock() {
+		t.Fatal("Close left the stepper locked")
+	}
+	timer := s.timer
+	s.mu.Unlock()
+	if timer == nil {
+		t.Fatal("no trailing snapshot was armed")
+	}
+	if timer.Stop() {
+		t.Fatal("Close left the trailing snapshot armed")
+	}
+	// m2: never snapshotted, so only stop keeps a late step from one.
+	r.p.Close("m2")
+	r.p.step(m2)
+	if n := r.ms.stepsOf("m2"); n != 0 {
+		t.Fatalf("a closed machine was snapshotted %d times", n)
+	}
+	if n := r.ms.stepsOf("m1"); n != 1 {
+		t.Fatalf("m1 snapshotted %d times; want 1", n)
+	}
+}
+
+func TestPlaneMutShutdownClosesEveryMachine(t *testing.T) {
+	r := newRig(t, nil)
+	r.client("m1")
+	r.client("m2")
+	r.p.Shutdown()
+	if r.p.get("m1") != nil || r.p.get("m2") != nil {
+		t.Fatal("Shutdown left a machine open")
+	}
+}
+
+func TestPlaneMutHandlerBusyIsOnlyBusy(t *testing.T) {
+	r := newRig(t, nil)
+	r.client("m1")
+	m := r.p.get("m1")
+	for range cap(m.slot) {
+		m.slot <- struct{}{}
+	}
+	code, body := r.do("m1", "GET", "/nope", "")
+	for range cap(m.slot) {
+		<-m.slot
+	}
+	if code != http.StatusTooManyRequests || body != "too many requests in flight\n" {
+		t.Fatalf("a full machine answered %d %q; want 429 and nothing more", code, body)
+	}
+}
+
+func TestPlaneMutHandlerEscapedPathIsOnlyNotFound(t *testing.T) {
+	r := newRig(t, nil)
+	code, body := r.do("m1", "GET", "/nope%41", "")
+	if code != http.StatusNotFound || body != "404 page not found\n" {
+		t.Fatalf("an escaped path answered %d %q; want one 404", code, body)
+	}
+}
+
+func TestPlaneMutHandlerModelWithoutGoal(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.WithGoal = nil })
+	code, body := r.do("m1", "GET", "/model/a/v1", "")
+	if code != 200 || !strings.Contains(body, `"path":"/a/v1"`) {
+		t.Fatalf("model call with no WithGoal: %d %q", code, body)
+	}
+}
+
+func TestPlaneMutDeadlineHandlerSetIsKept(t *testing.T) {
+	set := time.Now().Add(time.Minute)
+	w := &deadlineWriter{d: time.Hour, set: set}
+	if got := w.until(); !got.Equal(set) {
+		t.Fatalf("until() = %v; want the handler's earlier deadline %v", got, set)
+	}
+	w.set = time.Now().Add(2 * time.Hour)
+	if got := w.until(); !got.Before(w.set) {
+		t.Fatalf("until() = %v; want now+d, before the handler's later deadline", got)
+	}
+}
+
+func TestPlaneMutDeadlineRenewedOnHeaderAndFlush(t *testing.T) {
+	// Each handler first expires the connection's write deadline behind
+	// the writer's back, so a header or flush write it does not renew for
+	// fails the reply.
+	cases := map[string]func(w http.ResponseWriter){
+		"header": func(w http.ResponseWriter) {
+			w.(*deadlineWriter).rc.SetWriteDeadline(time.Now().Add(-time.Second))
+			w.WriteHeader(http.StatusEarlyHints) // written at once
+			w.WriteHeader(http.StatusTeapot)
+		},
+		"flush": func(w http.ResponseWriter) {
+			w.WriteHeader(http.StatusTeapot) // buffered: nothing written yet
+			w.(*deadlineWriter).rc.SetWriteDeadline(time.Now().Add(-time.Second))
+			w.(http.Flusher).Flush()
+		},
+	}
+	for name, h := range cases {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := &http.Server{Handler: withWriteDeadline(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { h(w) }), time.Minute)}
+		go srv.Serve(l)
+		resp, err := http.Get("http://" + l.Addr().String() + "/")
+		if err == nil {
+			_, err = io.ReadAll(resp.Body)
+			resp.Body.Close()
+		}
+		srv.Close()
+		if err != nil || resp.StatusCode != http.StatusTeapot {
+			t.Fatalf("%s: reply failed or lost its status: %v %v", name, resp, err)
+		}
+	}
+}
+
+func TestPlaneMutDeadlineFlushReachesTheGuest(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, early := make(chan struct{}), make(chan bool, 1)
+	srv := &http.Server{Handler: withWriteDeadline(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, "a")
+		w.(http.Flusher).Flush()
+		select {
+		case <-got:
+			early <- true
+		case <-time.After(5 * time.Second):
+			early <- false
+		}
+	}), time.Minute)}
+	go srv.Serve(l)
+	defer srv.Close()
+	resp, err := http.Get("http://" + l.Addr().String() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(got)
+	resp.Body.Close()
+	if !<-early {
+		t.Fatal("Flush did not send the reply's start before the handler returned")
+	}
+}
+
+func TestPlaneMutStepCoalescesWhileRunning(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.StepInterval = 20 * time.Millisecond })
+	r.client("m1")
+	m := r.p.get("m1")
+	s := &m.steps
+	r.ms.mu.Lock() // holds the first snapshot inside Step
+	go r.p.step(m)
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		s.mu.Lock()
+		running := s.running
+		s.mu.Unlock()
+		if running {
+			break
+		}
+		if time.Now().After(deadline) {
+			r.ms.mu.Unlock()
+			t.Fatal("a snapshot in progress is not marked running")
+		}
+	}
+	done := make(chan struct{})
+	go func() { r.p.step(m); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		r.ms.mu.Unlock()
+		t.Fatal("a step during a snapshot started a second one")
+	}
+	r.ms.mu.Unlock()
+	// The step it covered is owed: one trailing snapshot follows.
+	for deadline := time.Now().Add(5 * time.Second); r.ms.stepsOf("m1") != 2; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d snapshots; want the first and one trailing", r.ms.stepsOf("m1"))
+		}
+	}
+}
+
+func TestPlaneMutStepTrailingNeedsAPendingStep(t *testing.T) {
+	r := newRig(t, nil)
+	r.client("m1")
+	r.p.trailing(r.p.get("m1"))
+	if n := r.ms.stepsOf("m1"); n != 0 {
+		t.Fatalf("a trailing snapshot with nothing owed ran %d times", n)
+	}
+}
+
+func TestPlaneMutStepFailureIsLogged(t *testing.T) {
+	var logged atomic.Value
+	r := newRig(t, func(c *Config) {
+		c.Logf = func(format string, args ...any) { logged.Store(fmt.Sprintf(format, args...)) }
+	})
+	r.client("m1")
+	r.ms.failSteps(errors.New("disk on fire"))
+	r.p.step(r.p.get("m1"))
+	if s, _ := logged.Load().(string); !strings.Contains(s, "step snapshot after tool call failed: disk on fire") {
+		t.Fatalf("failed snapshot logged %q", s)
+	}
+}
+
+func TestPlaneMutBucketRefills(t *testing.T) {
+	b := bucket{last: time.Now().Add(-1500 * time.Millisecond)}
+	if !b.take(5, time.Second) {
+		t.Fatal("an empty bucket did not refill over 1.5 s at one token a second")
+	}
+	if b.take(5, time.Second) {
+		t.Fatal("the same 1.5 s refilled the bucket twice")
+	}
+}
+
+func TestPlaneMutLimitListenerClose(t *testing.T) {
+	inner, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := newLimitListener(inner, 1)
+	dial, err := net.Dial("tcp", inner.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dial.Close()
+	held, err := l.Accept() // the only slot
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Close()
+	within := func(what string, f func()) {
+		t.Helper()
+		done := make(chan struct{})
+		go func() { f(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s did not return", what)
+		}
+	}
+	within("Accept on a closed, full listener", func() {
+		if _, err := l.Accept(); !errors.Is(err, net.ErrClosed) {
+			t.Errorf("Accept after Close: %v", err)
+		}
+	})
+	within("closing the held connection", func() { held.Close() })
+}
+
+func TestPlaneMutLimitListenerFailedAcceptFreesItsSlot(t *testing.T) {
+	inner, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := newLimitListener(inner, 1)
+	inner.Close() // Accept fails, but the limit listener is not closed
+	for i := range 3 {
+		done := make(chan error, 1)
+		go func() { _, err := l.Accept(); done <- err }()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatal("Accept on a closed socket succeeded")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("Accept %d blocked: a failed Accept kept its slot", i+1)
+		}
+	}
+}
+
+func TestPlaneMutInboxDropsAnsweredOnOpen(t *testing.T) {
+	// Open and Close run these inbox statements too, so their mutgate
+	// targets include them (GUEST-mut-plane, #5748).
+	st, err := openStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.msgs["m1"] = []storedMsg{{ID: "a", Text: "answered"}, {ID: "b", Text: "open"}}
+	st.outbox = []PendingReply{{Machine: "m1", Reply: Reply{ID: "a"}}}
+	b := newInbox("m1", st)
+	if len(b.msgs) != 1 || b.msgs[0].ID != "b" {
+		t.Fatalf("inbox holds %d messages; want only the unanswered one", len(b.msgs))
+	}
+	if left := st.load("m1"); len(left) != 1 || left[0].ID != "b" {
+		t.Fatalf("store still holds %v; the answered message must leave it", left)
+	}
+}
+
+func TestPlaneMutInboxWakesOnRequeueAndClose(t *testing.T) {
+	st, err := openStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.msgs["m1"] = []storedMsg{{ID: "a", Text: "x"}}
+	b := newInbox("m1", st)
+	woken := func(what string, w chan struct{}) {
+		t.Helper()
+		select {
+		case <-w:
+		default:
+			t.Fatalf("%s did not wake the guest's waiting fetch", what)
+		}
+	}
+	w := b.wake
+	b.requeue()
+	woken("requeue", w)
+	w = b.wake
+	b.close(true)
+	woken("close", w)
+	b.close(true) // idempotent: a second close must not close the channel again
+	if left := st.load("m1"); len(left) != 0 {
+		t.Fatalf("a forgetting close left %d stored messages", len(left))
+	}
+}
+
 // TestPLN5NoKeyNoPlan: a machine with no key, or a plane with no kernel,
 // has every plan refused in fixed words, and nothing reaches the kernel.
 // Malformed calls are refused before anything is signed.
