@@ -7071,6 +7071,8 @@ class SetupServicesTest(unittest.TestCase):
                 self.assertRegex(build, r"for cmd in [^;]*\b%s\b" % cmd)
                 self.assertRegex(build, r'install -D -m 0644 "\$REPO/broker/cmd/{0}/{0}.service" '
                                         r'"\$STAGE/usr/lib/systemd/system/{0}.service"'.format(cmd))
+        # The page's root step, its own binary (#5678); the page's unit runs it.
+        self.assertRegex(build, r"for cmd in [^;]*\bagentos-port1\b")
         # The rule that gives the bridge its modems.
         self.assertIn('install -D -m 0644 "$REPO/broker/modem/at/udev/71-agentos-modem.rules" '
                       '"$STAGE/usr/lib/udev/rules.d/71-agentos-modem.rules"', build)
