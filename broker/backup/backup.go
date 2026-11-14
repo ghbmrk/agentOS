@@ -240,19 +240,25 @@ func Write(w io.Writer, t Target, in Input) (Record, error) {
 // exact, since a sealed backup's length depends only on what it holds.
 func Size(in Input) (uint64, error) {
 	var n counter
-	t := &MemTarget{}
-	rec, err := Write(&n, t, in)
-	if err != nil {
+	if _, err := Write(&n, &n, in); err != nil {
 		return 0, err
 	}
-	tb, err := t.GetTable(rec.BackupID, rec.Generation)
-	return uint64(n) + uint64(len(tb)), err
+	return uint64(n), nil
 }
 
-// counter counts the bytes written to it and keeps none.
+// counter counts the bytes written to it, as a writer and as the target of
+// the key table, and keeps none. Write puts one table and reads none back.
 type counter uint64
 
 func (c *counter) Write(p []byte) (int, error) { *c += counter(len(p)); return len(p), nil }
+func (c *counter) PutTable(_ string, _ uint64, b []byte) error {
+	_, err := c.Write(b)
+	return err
+}
+func (*counter) GetTable(string, uint64) ([]byte, error) { return nil, ErrNoTable }
+func (*counter) DeleteTable(string, uint64) error        { return nil }
+func (*counter) Tables(string) ([]uint64, error)         { return nil, nil }
+func (*counter) AppendOnly() bool                        { return false }
 
 func sumHex(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:]) }
 

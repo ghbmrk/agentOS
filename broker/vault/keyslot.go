@@ -123,7 +123,7 @@ type Factor interface {
 }
 
 // ErrSkipSlot is what a factor's KEK returns for a slot that is not its
-// own, such as a TPM slot sealed on another PC: unwrap tries the next one.
+// own, such as a TPM slot sealed on another PC: unwrapSlot tries the next one.
 var ErrSkipSlot = errors.New("vault: key slot belongs to another factor instance")
 
 // ErrNoSlotOpens is the one answer for a wrong factor, a slot of another
@@ -220,14 +220,7 @@ func parseKeys(raw []byte) (*keyFile, error) {
 	return &kf, nil
 }
 
-// unwrap returns the data key from the first slot of f's kind that opens,
-// among the slots for key ID want.
-func (kf *keyFile) unwrap(f Factor, want []byte) ([]byte, error) {
-	key, _, err := kf.unwrapSlot(f, want)
-	return key, err
-}
-
-// unwrapSlot is unwrap also returning the slot that opened.
+// unwrapSlot returns the data key from the first slot for want that opens, and that slot.
 func (kf *keyFile) unwrapSlot(f Factor, want []byte) ([]byte, Slot, error) {
 	for _, s := range kf.Slots {
 		if s.Kind != f.Kind() || !bytes.Equal(s.KeyID, want) {

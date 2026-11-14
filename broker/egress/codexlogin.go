@@ -95,7 +95,7 @@ type refreshFlight struct {
 	ready   chan struct{}
 	res     *Exchanged
 	err     error
-	joined  int // refreshes that joined the leader's exchange
+	joined  int // refreshes that joined the leader's exchange (tests read it)
 	members int // refreshes not yet done with this flight
 }
 
@@ -144,16 +144,6 @@ func (f *refreshFlights) ShareRefresh(ctx context.Context, provider string, exch
 	case <-ctx.Done():
 		return nil, done, ctx.Err()
 	}
-}
-
-// joined reports how many refreshes joined provider's flight in progress.
-func (f *refreshFlights) joined(provider string) int {
-	f.fmu.Lock()
-	defer f.fmu.Unlock()
-	if fl := f.flights[provider]; fl != nil {
-		return fl.joined
-	}
-	return 0
 }
 
 type workerPH struct {

@@ -62,7 +62,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/firstboot"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localui"
-	"github.com/ghbmrk/agentos/broker/netguard"
+	"github.com/ghbmrk/agentos/broker/netguard/inbound"
 )
 
 // memoryLimit is the Go heap's soft ceiling, under the unit's MemoryMax,
@@ -176,7 +176,7 @@ func admitPort1(sys, iface, file string, nft func(script string) error, wait fun
 	if err := localui.Wired(sys, p); err != nil {
 		return "", err
 	}
-	script, err := netguard.InboundPageAdmit(p)
+	script, err := inbound.InboundPageAdmit(p)
 	if err != nil {
 		return "", err
 	}

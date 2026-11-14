@@ -32,7 +32,7 @@ StateDirectoryMode=0700
 # with none or several, the page serves nothing (localui.Port1). AGENTOS_PAGE_IFACE, unset on the image, lets a test harness
 # name another for the page (broker/e2e/boxe2e).
 # The inbound firewall boots with the page's ports closed on every link (an empty page set,
-# netguard InboundPageSet). Before each start, one step runs as root (+) and takes port 1 itself:
+# netguard/inbound InboundPageSet). Before each start, one step runs as root (+) and takes port 1 itself:
 # it refuses a radio or a missing link, makes port 1 the set's only element and hands its name to
 # the page through the runtime directory; the page serves only if that is its port 1. Every stop,
 # failed starts included, empties the set (HW12-port1-set). The root step passes no -iface: the

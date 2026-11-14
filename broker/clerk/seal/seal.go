@@ -652,7 +652,7 @@ func (s *Store) encode(nf file, e map[string][]byte) ([]byte, error) {
 // they were. Once the rename is done the file holds the new slots, so the
 // store takes them even if the directory sync then fails, and returns that
 // error: otherwise the next commit would write the old slots back, and a
-// failed Replace of a compromised passphrase would revive it (REC-4).
+// failed ReplaceAndPut of a compromised factor would revive it (REC-4).
 func (s *Store) commit(slots []slot, e map[string][]byte) error {
 	nf := s.f
 	nf.Slots = slots
@@ -756,28 +756,6 @@ func (s *Store) RemoveSlot(id string) error {
 	return s.commit(slices.Delete(slices.Clone(s.f.Slots), i, i+1), s.entries.Get())
 }
 
-// Replace puts a new slot for f in place of slot id in one write: a new
-// passphrase or recovery key (REC-4), or a TPM slot sealed again. The old
-// slot no longer opens the store once Replace returns.
-func (s *Store) Replace(id string, f Factor) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.live(); err != nil {
-		return "", err
-	}
-	i := s.find(id)
-	if i < 0 {
-		return "", ErrNoSlot
-	}
-	sl, err := makeSlot(s.f.ID, s.key.Get(), f)
-	if err != nil {
-		return "", err
-	}
-	slots := slices.Clone(s.f.Slots)
-	slots[i] = sl
-	return s.committed(sl.ID, s.commit(slots, s.entries.Get()))
-}
-
 // SetPolicies replaces a tpm slot's signed boot paths: an update adds the
 // next release's path before it reboots (HW-5a). Each must be signed by the
 // policy key the slot was sealed under; the TPM checks that again at unseal.
@@ -843,13 +821,13 @@ type Swap struct {
 	F  Factor
 }
 
-// ReplaceAndPut is Replace of each swap's slot and Put of entry name in one
-// write: a new recovery key's slot and its backup recipient (REC-4, BAK-1,
-// MIG-4-recovery-r2), and on the lost-card route the new card's passphrase
-// slot with them (MIG-4-recovery-r4d). A crash leaves every old slot and
-// the old entry, or every new slot and the new entry, never a mix. Like
-// Replace it returns the new slots' IDs, in the swaps' order, once they
-// are in place, even with the directory sync's error.
+// ReplaceAndPut puts a new slot for each swap's factor in place of its slot,
+// and entry name, in one write: a new recovery key's slot and its backup
+// recipient (REC-4, BAK-1, MIG-4-recovery-r2), and on the lost-card route
+// the new card's passphrase slot with them (MIG-4-recovery-r4d). A crash
+// leaves every old slot and the old entry, or every new slot and the new
+// entry, never a mix. It returns the new slots' IDs, in the swaps' order,
+// once they are in place, even with the directory sync's error.
 func (s *Store) ReplaceAndPut(name string, value []byte, swaps ...Swap) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

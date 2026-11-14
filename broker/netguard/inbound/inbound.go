@@ -1,4 +1,9 @@
-package netguard
+// Package inbound renders the box's inbound nftables rules (DEV-2 In): the
+// agentos_inbound table, its exempt, page and link sets, and the scripts that
+// change them. Its rows are in ../ASSUMPTIONS.md (N13, N14, WIFI-del-a3-1,
+// EDGE-link-core-c2c-1). It is apart from netguard so the clerk's dial check,
+// which the trusted core links, does not carry it (KEY-9-reach-b2-cut).
+package inbound
 
 import (
 	"fmt"
