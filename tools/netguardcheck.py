@@ -50,9 +50,10 @@ def sites(path):
     return out
 
 
-def strip_comments(text):
+def strip_comments(text, literals=True):
     """Text with each comment replaced by a space (a newline kept per line comment), or None if a
-    comment or literal does not terminate. Interpreted, raw and rune literals are kept verbatim."""
+    comment or literal does not terminate. Interpreted, raw and rune literals are kept verbatim, or
+    replaced by `""` when `literals` is false (code identifiers only)."""
     out, i, n = [], 0, len(text)
     while i < n:
         c = text[i]
@@ -70,7 +71,7 @@ def strip_comments(text):
             j = text.find("`", i + 1)
             if j < 0:
                 return None
-            out.append(text[i:j + 1])
+            out.append(text[i:j + 1] if literals else '""')
             i = j + 1
         elif c in "\"'":
             j = i + 1
@@ -80,7 +81,7 @@ def strip_comments(text):
                 j += 2 if text[j] == "\\" else 1
             if j >= n:
                 return None
-            out.append(text[i:j + 1])
+            out.append(text[i:j + 1] if literals else '""')
             i = j + 1
         else:
             out.append(c)
@@ -165,7 +166,7 @@ def check(root, allow_file):
             continue
         text = f.read_text(encoding="utf-8", errors="replace")
         if any(SIP_CLIENT.search(l) for l in text.split("\n") if not l.lstrip().startswith("//")) \
-                and not ("DialerCreate" in (strip_comments(text) or "") and hooked(f)):
+                and not (re.search(r"\bDialerCreate\b", strip_comments(text, literals=False) or "") and hooked(f)):
             if rel not in allow:
                 problems.append(f"{rel}: SIP client built without a guarded dialer (give the transport layer netguard.Policy's dialer through DialerCreate)")
             seen.add(rel)

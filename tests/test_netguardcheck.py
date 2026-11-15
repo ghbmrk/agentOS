@@ -107,7 +107,10 @@ class Check(unittest.TestCase):
 
     def test_sip_needs_a_real_import_and_dialer(self):
         for src in (f"// {IMPORT}\nimport \"github.com/emiago/sipgo\"\nfunc f() {{ sipgo.NewUA(); _ = sip.TransportTCP{{DialerCreate: nil}} }}\n",
-                    f"import ({IMPORT}; \"github.com/emiago/sipgo\")\nfunc f() {{ sipgo.NewUA() }} // DialerCreate\n"):
+                    f"import ({IMPORT}; \"github.com/emiago/sipgo\")\nfunc f() {{ sipgo.NewUA() }} // DialerCreate\n",
+                    # L3 on #5850: the name in a string literal is not a use either.
+                    f"import ({IMPORT}; \"github.com/emiago/sipgo\")\nfunc f() {{ sipgo.NewUA(); _ = \"DialerCreate\" }}\n",
+                    f"import ({IMPORT}; \"github.com/emiago/sipgo\")\nfunc f() {{ sipgo.NewUA(); _ = `DialerCreate` }}\n"):
             t = self.tree()
             t.go("broker/sip/line.go", src)
             self.assertEqual(len(t.run()), 1, src)

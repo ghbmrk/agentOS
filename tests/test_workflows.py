@@ -17,17 +17,30 @@ import unittest
 WORKFLOWS = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows"
 
 
+STEP_USES = re.compile(r"""(?:uses|"uses"|'uses')\s*:\s*([^\s#]+)""")  # plain, quoted, `uses :`
+PINNED = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$")
+NO_TOKEN = re.compile(r"persist-credentials:\s*false")
+
+
+def unpinned(action):
+    """True if a step's action is neither local nor pinned by full commit SHA."""
+    return not action.startswith("./") and not PINNED.match(action)
+
+
+def keeps_no_token(step):
+    return bool(NO_TOKEN.search(step))
+
+
 def steps(text):
     """Yield (action, step text) for each `uses:` step, whatever key the step lists first: a list
     item's mapping is read to its end and `uses:` found at the item's own key column (REV-LOW-tools
     finding 23; a `name:`-first step used to skip the pin and checkout-token checks)."""
     lines = text.splitlines()
     for i, line in enumerate(lines):
-        m = re.match(r"^(\s*)-(\s+)\S", line)
+        m = re.match(r"^(\s*)-(?:(\s+)\S|\s*$)", line)
         if not m:
             continue
         indent = len(m.group(1))
-        col = indent + 1 + len(m.group(2))
         body = [line]
         for nxt in lines[i + 1:]:
             if nxt.strip() and len(nxt) - len(nxt.lstrip()) <= indent:
@@ -35,8 +48,15 @@ def steps(text):
             body.append(nxt)
         while len(body) > 1 and not body[-1].strip():
             body.pop()
-        keys = [line[col:]] + [l[col:] for l in body[1:] if len(l) - len(l.lstrip()) == col]
-        uses = [u.group(1) for u in (re.match(r"uses:\s*([^\s#]+)", k) for k in keys) if u]
+        if m.group(2) is not None:
+            col, keys = indent + 1 + len(m.group(2)), [line[indent + 1 + len(m.group(2)):]]
+        else:  # a bare `-`: the mapping's keys start on the next line, at its indent
+            first = next((l for l in body[1:] if l.strip()), None)
+            if first is None:
+                continue
+            col, keys = len(first) - len(first.lstrip()), []
+        keys += [l[col:] for l in body[1:] if l.strip() and len(l) - len(l.lstrip()) == col]
+        uses = [u.group(1) for u in (STEP_USES.match(k) for k in keys) if u]
         if uses:
             yield uses[0], "\n".join(body)
 
@@ -1215,9 +1235,7 @@ class WorkflowTest(unittest.TestCase):
     def test_actions_are_pinned_by_full_sha(self):
         for f in self.files():
             for action, _ in steps(f.read_text()):
-                if action.startswith("./"):
-                    continue
-                self.assertRegex(action, r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$", f"{f.name}: {action}")
+                self.assertFalse(unpinned(action), f"{f.name}: {action}")
 
     def test_checkouts_running_pr_code_keep_no_token(self):
         for f in self.files():
@@ -1226,7 +1244,7 @@ class WorkflowTest(unittest.TestCase):
                 continue
             for action, step in steps(text):
                 if action.startswith("actions/checkout@"):
-                    self.assertRegex(step, r"persist-credentials:\s*false", f"{f.name}: {step}")
+                    self.assertTrue(keeps_no_token(step), f"{f.name}: {step}")
 
     def test_no_workflow_pushes_to_main(self):
         # main requires status checks, so a workflow push to it would be rejected; trace.yml
@@ -1605,7 +1623,6 @@ class WorkflowTest(unittest.TestCase):
 
     def test_step_order_does_not_hide_an_unpinned_action(self):
         # REV-LOW-tools finding 23: the real pin and token predicates, fed name-first synthetic steps.
-        pin = r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$"
         sha = "0" * 40
         text = ("jobs:\n  a:\n    steps:\n"
                 "      - name: unpinned\n        uses: actions/cache@v4\n"
@@ -1614,10 +1631,23 @@ class WorkflowTest(unittest.TestCase):
                 f"      - name: tokenless\n        uses: actions/checkout@{sha}\n        with:\n          persist-credentials: false\n"
                 f"      - id: persisting\n        uses: actions/checkout@{sha}\n        with:\n          fetch-depth: 0\n")
         got = list(steps(text))
-        self.assertEqual([a for a, _ in got if not a.startswith("./") and not re.match(pin, a)], ["actions/cache@v4"])
+        self.assertEqual([a for a, _ in got if unpinned(a)], ["actions/cache@v4"])
         self.assertEqual(len(got), 5)
-        token = [bool(re.search(r"persist-credentials:\s*false", s)) for a, s in got if a.startswith("actions/checkout@")]
-        self.assertEqual(token, [True, False])
+        self.assertEqual([keeps_no_token(s) for a, s in got if a.startswith("actions/checkout@")], [True, False])
+        # L3 on #5850: a bare `-` with the keys below it, a quoted key and `uses :` are steps too.
+        for step in ("      -\n        name: x\n        uses: actions/cache@v4\n",
+                     "      -\n\n        uses: actions/cache@v4\n",
+                     '      - name: x\n        "uses": actions/cache@v4\n',
+                     "      - 'uses': actions/cache@v4\n",
+                     "      - name: x\n        uses : actions/cache@v4\n",
+                     "      -   id: x\n          uses:   actions/cache@v4\n"):
+            with self.subTest(step=step):
+                self.assertEqual([a for a, _ in steps("jobs:\n  a:\n    steps:\n" + step) if unpinned(a)],
+                                 ["actions/cache@v4"])
+        for step in ("      -\n        name: x\n        uses: actions/checkout@" + sha + "\n",
+                     '      - "uses": actions/checkout@' + sha + "\n        with:\n          fetch-depth: 0\n"):
+            with self.subTest(step=step):
+                self.assertEqual([keeps_no_token(s) for _, s in steps("jobs:\n  a:\n    steps:\n" + step)], [False])
 
 
 # PREMERGE-stale (#1946): run premerge.yml's own script under the runner's shell with `gh`, `git`,
