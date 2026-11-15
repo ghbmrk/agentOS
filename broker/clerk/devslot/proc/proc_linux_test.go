@@ -103,10 +103,14 @@ func startDriver(t *testing.T, hostUID int, keyFiles ...*os.File) (*os.File, *ex
 	host, end := os.NewFile(uintptr(fds[0]), "host"), os.NewFile(uintptr(fds[1]), "driver")
 	t.Cleanup(func() { host.Close() })
 	cmd := exec.Command(os.Args[0], "-test.run=^$")
-	// GOCOVERDIR: a -cover test binary (as tools/mutgate.py plan builds)
-	// otherwise warns on stderr at exit, which the output checks read as
-	// the driver's own output (#5795).
-	cmd.Env = append(os.Environ(), childEnv+"=1", proc.HostUIDEnv+"="+strconv.Itoa(hostUID), "GOCOVERDIR="+t.TempDir())
+	cmd.Env = append(os.Environ(), childEnv+"=1", proc.HostUIDEnv+"="+strconv.Itoa(hostUID))
+	// GOCOVERDIR: a -cover test binary run without one (as tools/mutgate.py
+	// plan runs it) warns on stderr at exit, which the output checks read
+	// as the driver's own output (#5795). An inherited one is kept, so
+	// go test -coverprofile still counts the driver's process.
+	if os.Getenv("GOCOVERDIR") == "" {
+		cmd.Env = append(cmd.Env, "GOCOVERDIR="+t.TempDir())
+	}
 	cmd.ExtraFiles = append([]*os.File{end}, keyFiles...)
 	if len(keyFiles) > 0 {
 		cmd.Env = append(cmd.Env, "LISTEN_FDS=3", "LISTEN_FDNAMES=connection:"+proc.KeyFDName+":"+proc.DeviceFDName, proc.DriverEnv+"=probe")
