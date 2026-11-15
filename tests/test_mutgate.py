@@ -2096,7 +2096,8 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
         from unittest import mock
         extra = ('\nfunc TestMain(m *testing.M) {\n\tm.Run()\n}\n\nfunc init() {\n\t_ = 1\n}\n\n'
                  'var seed = 1\n\nvar plain int\n')
-        base = TWO_TEST.replace('import "testing"', 'import (\n\t"testing"\n)') + extra
+        base = (TWO_TEST.replace('import "testing"', 'import (\n\t"testing"\n)').replace("\tif Down(3)", "\t_ = plain\n\tif Down(3)")
+                + extra)
         for name, pr in (
                 ("TestMain", base.replace("\tm.Run()", "\tm.Run()\n\t_ = 2")),
                 ("init", base.replace("\t_ = 1", "\t_ = 2")),
@@ -2112,14 +2113,14 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
                     bases = mutgate.bases_for(diff, "HEAD~1", "HEAD", tests, ["hint"])
                     self.assertEqual(bases, {"hint": None})
                     self.assertIsNone(mutgate.changed_tests(tests, "hint", bases))
-        # A var with no initializer is reached by the tests that name it, here none.
+        # A var with no initializer is reached by the tests that name it, here TestDown.
         with tempfile.TemporaryDirectory() as d:
             git = self.repo(d, base.replace("var plain int", "var plain int64"), test_base=base)
             diff = git("diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1").stdout
             with mock.patch.object(mutgate, "BROKER", pathlib.Path(d) / "broker"), \
                     mock.patch.object(mutgate, "ROOT", pathlib.Path(d)):
                 tests = mutgate.added_lines(diff)[1]
-                self.assertEqual(mutgate.bases_for(diff, "HEAD~1", "HEAD", tests, ["hint"]), {"hint": []})
+                self.assertEqual(mutgate.bases_for(diff, "HEAD~1", "HEAD", tests, ["hint"]), {"hint": ["TestDown"]})
         with tempfile.TemporaryDirectory() as d:
             self.repo(d, base.replace("var seed = 1", "var seed = 2"), test_base=base)
             out = pathlib.Path(d) / "out"
@@ -2149,8 +2150,9 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
         self.assertEqual(reach(at("func inner() int { return 1 }")), ["TestUp"])  # through one()
         self.assertEqual(reach(at("func (b *box) three() int { return 3 }")), ["TestDown"])  # through box
         self.assertEqual(reach(at("func one() int { return inner() }") + 1), ["TestUp"])  # a comment line after it
+        # A line no test reaches (dead code, a benchmark) fails closed to every test (Security on #5838).
         for line in (at("func unused() {}"), at("func Testhelper() {}"), at("func BenchmarkUp(b *testing.B) {}")):
-            self.assertEqual(reach(line), [], rows[line - 1])
+            self.assertIsNone(reach(line), rows[line - 1])
         self.assertEqual(reach(1), ["FuzzUp", "TestDown", "TestUp"])  # the header: what its file reaches
         self.assertEqual(reach(at('import "testing"')), ["FuzzUp", "TestDown", "TestUp"])
         # Another file's tests reach a helper by name, and its header reaches only its own file's reach.
@@ -2165,6 +2167,19 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
                          ["TestB", "TestUp"], reach_in)
         self.assertEqual(mutgate.reaching_tests({**files, "broker/h/d_test.go": doc}, {"broker/h/d_test.go": {8}}), ["TestD"])
         self.assertEqual(mutgate.reaching_tests({**files, "broker/h/d_test.go": doc}, {"broker/h/d_test.go": {5}}), ["TestC"])
+        # Security on #5838: a column-0 line inside a raw string starts no declaration, so the lines
+        # after it stay the helper's; a type declared by the x_test package is not x's test type, so
+        # an x test file's method on x's own Owner is every test.
+        raw = ('package h\n\nimport "testing"\n\nfunc helper() int {\n\t_ = `\nfunc zzz() {\n`\n\treturn 1\n}\n'
+               '\nfunc TestA(t *testing.T) { _ = helper() }\n')
+        self.assertEqual(mutgate.reaching_tests({"broker/h/r_test.go": raw}, {"broker/h/r_test.go": {9}}), ["TestA"])
+        lint = ('package h\n\nimport "testing"\n\nfunc lintSrc() (string, bool) {\n\ts := `package q\n\nfunc zzz() {}\n`\n'
+                '\treturn s, true\n}\n\nfunc TestA(t *testing.T) { if _, ok := lintSrc(); !ok { t.Fatal("x") } }\n')
+        self.assertEqual(mutgate.reaching_tests({"broker/h/l_test.go": lint}, {"broker/h/l_test.go": {9, 10}}), ["TestA"])
+        own = {"broker/h/a_test.go": 'package h\n\nfunc (o *Owner) String() string {\n\treturn "o"\n}\n',
+               "broker/h/b_test.go": 'package h_test\n\nimport "testing"\n\ntype Owner struct{}\n\nfunc TestB(t *testing.T) { _ = Owner{} }\n',
+               "broker/h/c_test.go": 'package h\n\nimport (\n\t"fmt"\n\t"testing"\n)\n\nfunc TestPrint(t *testing.T) { _ = fmt.Sprint(New()) }\n'}
+        self.assertIsNone(mutgate.reaching_tests(own, {"broker/h/a_test.go": {4}}))
         # Every test: a method on a type no test file declares (package code may call it through an
         # interface), a file with a linkname, a dot import, a line of a file not read.
         self.assertIsNone(mutgate.reaching_tests({**files, "broker/h/c_test.go": "package h\n\nfunc (s *Store) Hook() {}\n"},

@@ -442,8 +442,9 @@ def bases_for(diff_text, base, head, tests, pkgs):
 # declaration whose name is a word of its code (string literals too: more is safe), and a type
 # reaches its methods. A test reaches what it reaches, transitively; what every test may run
 # (TestMain, init, a package var with an initializer, a blank or dot import, a method on a type no
-# test file declares, which package code may call through an interface, a file with a linkname)
-# reaches all of them. A named import reaches its file's declarations' tests (D-319).
+# test file of its package clause declares, which package code may call through an interface, a
+# file with a linkname) reaches all of them, as does a line no test reaches (fail closed). A named
+# import reaches its file's declarations' tests (D-319).
 WORD = re.compile(r"[A-Za-z_]\w*")
 FUNC_HEAD = re.compile(r"^func\s*(?:\(\s*(?:\w+\s+)?\*?\s*(\w+)[^)]*\)\s*)?(\w+)")
 NAMED = re.compile(r"^(?:var|const|type)\s+(\w+(?:\s*,\s*\w+)*)")
@@ -453,9 +454,11 @@ SIDE_IMPORT = re.compile(r'(?:^|[\s(;])[_.]\s*["`]', re.M)
 EVERY = None
 
 
-def _uncommented(text):
+def _uncommented(text, literals=True):
     """Go source with its comments blanked (newlines kept, so lines keep their numbers); string and
-    rune literals stay, since a name in one can reach code (reflect's MethodByName)."""
+    rune literals stay, since a name in one can reach code (reflect's MethodByName), or with
+    literals False have their contents blanked too, so a column-0 line inside a raw string is no
+    declaration (Security on #5838)."""
     out, i, n = [], 0, len(text)
     while i < n:
         c = text[i]
@@ -472,7 +475,8 @@ def _uncommented(text):
             while j < n and text[j] != c and not (c != "`" and text[j] == "\n"):
                 j += 2 if c != "`" and text[j] == "\\" else 1
             j = min(j + 1, n)
-            out.append(text[i:j])
+            out.append(text[i:j] if literals else
+                       c + "".join(ch if ch == "\n" else " " for ch in text[i + 1:j - 1]) + text[j - 1:j])
         else:
             j = i + 1
             out.append(c)
@@ -481,14 +485,16 @@ def _uncommented(text):
 
 
 def _decls(path, text):
-    """[(path, kind, names, receiver, words, every, first, last)] of one test file's declarations,
+    """[(path, kind, names, receiver, words, every, first, last, package clause)] of one test file's declarations,
     each from its doc comment (the `//` lines right above it, directives such as go:embed too) to
     the next one's; words are its code's, comments left out. The lines before the first declaration,
     the package clause and the imports are kind 'header'. A group's names are read from gofmt's
     layout; a shape not read so names every word of it, which reaches more, never less."""
-    rows, code = text.split("\n"), _uncommented(text).split("\n")
+    # Declarations are split and read on a copy without comments or literal contents; words come
+    # from one with literals (code), line for line the same.
+    rows, code, bare = text.split("\n"), _uncommented(text).split("\n"), _uncommented(text, False).split("\n")
     starts, prev = [], 0  # (first line, declaration line)
-    for i, row in enumerate(code):
+    for i, row in enumerate(bare):
         if DECL.match(row):
             k = i
             while k > prev and rows[k - 1].startswith("//"):
@@ -498,13 +504,15 @@ def _decls(path, text):
     if not starts or starts[0][0] > 1:
         starts.insert(0, (1, None))
     linked = "go:linkname" in text
+    # x and x_test share a directory: a type is the test type of its own package clause only.
+    clause = (m := re.search(r"^package\s+(\w+)", "\n".join(bare), re.M)) and m.group(1)
     out = []
     for n, (first, at) in enumerate(starts):
         last = starts[n + 1][0] - 1 if n + 1 < len(starts) else len(rows)
         if last < first:
             continue
-        body = "\n".join(code[first - 1:last])
-        head = code[at - 1] if at else ""
+        body, plain = "\n".join(code[first - 1:last]), "\n".join(bare[first - 1:last])
+        head = bare[at - 1] if at else ""
         kind, names, recv, every = "header", set(), None, linked
         if head.startswith("import"):
             every = every or bool(SIDE_IMPORT.search(body[body.index("import") + len("import"):]))
@@ -517,9 +525,9 @@ def _decls(path, text):
                 every = True
         elif head.startswith(("var", "const", "type")):
             kind = head.split()[0].split("(")[0]
-            every = every or (kind == "var" and "=" in body)
+            every = every or (kind == "var" and "=" in plain)
             names = set(re.split(r"\s*,\s*", NAMED.match(head).group(1))) if NAMED.match(head) else set()
-            inner = [r for r in code[at:last] if r.strip()]
+            inner = [r for r in bare[at:last] if r.strip()]
             if GROUPED.match(head) and head.rstrip().endswith("(") and inner and inner[-1] == ")":
                 # gofmt's group: one name list per line at the group's indent, `)` alone at column 0.
                 indent = min(len(r) - len(r.lstrip()) for r in inner[:-1]) if inner[:-1] else 0
@@ -527,17 +535,17 @@ def _decls(path, text):
                          if (g := GROUP_NAMES.match(r.lstrip())) for n in re.split(r"\s*,\s*", g.group(1))}
             elif not names:
                 names = set(WORD.findall(body))  # a shape not read here: every word stands in (more is safe)
-        out.append((path, kind, names, recv, set(WORD.findall(body)), every, first, last))
+        out.append((path, kind, names, recv, set(WORD.findall(body)), every, first, last, clause))
     return out
 
 
 def reaching_tests(files, changed):
     """Sorted names of the test functions in files ({path: text}, every _test.go file of one
     package) that reach the lines changed names ({path: set(line)}), or None when one of those lines
-    is in a declaration every test may run (see WORD above). A line of a file's header (before its
+    is in a declaration every test may run (see WORD above) or that no test reaches. A line of a file's header (before its
     first declaration, the package clause, an import) reaches what that file's declarations reach."""
     decls = [d for path, text in sorted(files.items()) for d in _decls(path, text)]
-    by_name, types = collections.defaultdict(list), {n for d in decls if d[1] == "type" for n in d[2]}
+    by_name, types = collections.defaultdict(list), {(d[8], n) for d in decls if d[1] == "type" for n in d[2]}
     methods = collections.defaultdict(list)
     for i, (_, kind, names, recv, *_rest) in enumerate(decls):
         for n in names:
@@ -549,7 +557,7 @@ def reaching_tests(files, changed):
     reach = [set() for _ in decls]
     for i, (_, kind, names, recv, _w, every, *_rest) in enumerate(decls):
         test = kind == "func" and not every and TEST_FUNC.match(f"func {next(iter(names), '')}(")
-        if kind == "method" and recv not in types:
+        if kind == "method" and (decls[i][8] is None or (decls[i][8], recv) not in types):
             every = True
         if not (test or every):
             continue
@@ -570,10 +578,11 @@ def reaching_tests(files, changed):
             hit = [i for i in mine if decls[i][6] <= line <= decls[i][7]]
             if not hit or decls[hit[0]][1] == "header":
                 hit = mine if not hit or not decls[hit[0]][5] else hit
-            for i in hit:
-                if EVERY in reach[i] or (decls[i][1] == "header" and decls[i][5]):
-                    return None
-                out |= reach[i]
+            got = set().union(*(reach[i] for i in hit))
+            # No test reaches it (dead code, a benchmark, or a shape this reading missed): fail closed.
+            if not got or EVERY in got or any(decls[i][1] == "header" and decls[i][5] for i in hit):
+                return None
+            out |= got
     return sorted(out)
 
 
