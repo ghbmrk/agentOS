@@ -2,6 +2,7 @@
 // time (MUTGATE-stmt-delete, #4573): gremlins v0.6.0 has no mutator that deletes a statement.
 //
 //	go run mutgate_stmts.go FILE.go...
+//	go run mutgate_stmts.go -decls FILE.go...
 //
 // It prints one JSON array of sites, one for every statement in a statement list (a block, a
 // case or select clause body, and the clauses of a switch or select): file is the base name, line
@@ -10,6 +11,9 @@
 // deleted clause goes, and lines, the lines whose edit makes it a site (see site). Declarations (`var`, `const`, `type`, `:=`) and empty
 // statements are left out: deleting one never compiles or changes nothing. A file holding a
 // `//line` directive is refused.
+// With -decls it prints instead one JSON array of each file's top-level declarations: file, name
+// (`Recv.Name` for a method, a func's name, the first name a var or const declares, else ""), and the
+// first and last lines of its own text, which tools/mutgate.py's waiver record digests (#5776).
 // It reads the files as data with go/parser and runs nothing in them.
 package main
 
@@ -103,10 +107,55 @@ func deletable(s ast.Stmt) bool {
 	return true
 }
 
+type decl struct {
+	File  string `json:"file"`
+	Name  string `json:"name"`
+	Start int    `json:"start"`
+	End   int    `json:"end"`
+}
+
+func declName(d ast.Decl) string {
+	switch d := d.(type) {
+	case *ast.FuncDecl:
+		if d.Recv != nil && len(d.Recv.List) == 1 {
+			t := d.Recv.List[0].Type
+			if s, ok := t.(*ast.StarExpr); ok {
+				t = s.X
+			}
+			switch r := t.(type) {
+			case *ast.IndexExpr:
+				t = r.X
+			case *ast.IndexListExpr:
+				t = r.X
+			}
+			if id, ok := t.(*ast.Ident); ok {
+				return id.Name + "." + d.Name.Name
+			}
+		}
+		return d.Name.Name
+	case *ast.GenDecl:
+		for _, sp := range d.Specs {
+			switch sp := sp.(type) {
+			case *ast.ValueSpec:
+				return sp.Names[0].Name
+			case *ast.TypeSpec:
+				return sp.Name.Name
+			}
+		}
+	}
+	return ""
+}
+
 func main() {
 	sites := []site{}
+	decls := []decl{}
 	fset := token.NewFileSet()
-	for _, path := range os.Args[1:] {
+	args := os.Args[1:]
+	listDecls := len(args) > 0 && args[0] == "-decls"
+	if listDecls {
+		args = args[1:]
+	}
+	for _, path := range args {
 		f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution|parser.ParseComments)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -124,6 +173,12 @@ func main() {
 					os.Exit(1)
 				}
 			}
+		}
+		if listDecls {
+			for _, d := range f.Decls {
+				decls = append(decls, decl{filepath.Base(path), declName(d), pos(d.Pos()).Line, pos(d.End()).Line})
+			}
+			continue
 		}
 		add := func(s ast.Stmt, cover token.Pos, keepAt int, keepDefault bool) {
 			if deletable(s) {
@@ -186,7 +241,11 @@ func main() {
 			return true
 		})
 	}
-	if err := json.NewEncoder(os.Stdout).Encode(sites); err != nil {
+	var out any = sites
+	if listDecls {
+		out = decls
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
