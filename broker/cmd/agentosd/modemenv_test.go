@@ -273,6 +273,16 @@ func TestSignInRouteRulesEachRefuseTheirOwnCase(t *testing.T) {
 		t.Fatalf("linked -signin-routes: %v", err)
 	}
 
+	// -signin-routes naming a file is refused by the ownership check, before the chmod reaches it.
+	file := filepath.Join(base, "routes-file")
+	os.WriteFile(file, nil, 0o600)
+	if err := prepareSignInRoutes(file); err == nil || !strings.Contains(err.Error(), "is not root's or agentosd's") {
+		t.Fatalf("-signin-routes naming a file: %v", err)
+	}
+	if fi, err := os.Lstat(file); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("-signin-routes naming a file changed it: %v %v", fi.Mode(), err)
+	}
+
 	h := &signInHost{UID: uid, GID: os.Getgid(), Routes: signInRoutes(t)}
 	// A route outside -signin-routes is never removed.
 	outside := filepath.Join(base, "real", "r")
