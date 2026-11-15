@@ -166,6 +166,135 @@ func TestModemEnvRefusesANumberThatIsNotE164(t *testing.T) {
 	}
 }
 
+func TestModemEnvEdgeCasesEachHaveTheirOwnOutcome(t *testing.T) {
+	// REQ: REV-CHK-mut (#5847): each refusal and outcome of modemenv.go is checked, so deleting
+	// any of its statements fails a test.
+	log := &logRec{}
+	p := modemEnvAt(t)
+	os.MkdirAll(filepath.Dir(p), 0o755)
+	writeOwnerEnv(p, modemOwner, log.logf)
+	if !strings.Contains(log.all(), "names the owner") {
+		t.Fatalf("a write is not logged: %q", log.all())
+	}
+	writeOwnerEnv(p, modemOwner, log.logf)
+	if n := strings.Count(log.all(), "names the owner"); n != 1 {
+		t.Fatalf("an unchanged file is logged as written: %q", log.all())
+	}
+
+	// A number that is not E.164 is refused before the directory is made.
+	q := filepath.Join(t.TempDir(), "etc", "modem.env")
+	if wrote, err := setOwnerNumber(q, "5550100"); wrote || err != errOwnerNotE164 {
+		t.Fatalf("not E.164: %v %v", wrote, err)
+	}
+	if _, err := os.Lstat(filepath.Dir(q)); !os.IsNotExist(err) {
+		t.Fatalf("a refused number made the directory: %v", err)
+	}
+
+	// A directory whose parent is missing is not made, and the failure is named.
+	deep := filepath.Join(t.TempDir(), "no", "etc")
+	if err := ensureDir(deep); err == nil || !strings.Contains(err.Error(), "make its directory") {
+		t.Fatalf("missing parent: %v", err)
+	}
+	// A directory under a file fails its Lstat with an error, not a panic.
+	file := filepath.Join(t.TempDir(), "file")
+	os.WriteFile(file, nil, 0o600)
+	if err := ensureDir(filepath.Join(file, "etc")); err == nil || err == errModemEnvDir {
+		t.Fatalf("directory under a file: %v", err)
+	}
+
+	// A path under a file is a read error that names why.
+	if _, _, err := readModemEnv(filepath.Join(file, "modem.env")); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("read under a file: %v", err)
+	}
+	// A link is refused by kind; a directory is refused by kind, not as a read error.
+	dir := t.TempDir()
+	link := filepath.Join(dir, "link")
+	os.Symlink(file, link)
+	if _, _, err := readModemEnv(link); err != errModemEnvKind {
+		t.Fatalf("link: %v", err)
+	}
+	if _, _, err := readModemEnv(dir); err != errModemEnvKind {
+		t.Fatalf("directory: %v", err)
+	}
+	// One byte over the cap is refused.
+	big := filepath.Join(dir, "big")
+	os.WriteFile(big, make([]byte, maxModemEnv+1), 0o600)
+	if _, _, err := readModemEnv(big); err != errModemEnvTooBig {
+		t.Fatalf("too big: %v", err)
+	}
+	// Each read closes its file.
+	fds := func() int { e, _ := os.ReadDir("/proc/self/fd"); return len(e) }
+	before := fds()
+	for range 64 {
+		readModemEnv(big)
+	}
+	if after := fds(); after > before+16 {
+		t.Fatalf("reads leave files open: %d then %d", before, after)
+	}
+}
+
+func TestSplitOwnerLinesTrailingNewlineAndContinuation(t *testing.T) {
+	// REQ: REV-CHK-mut (#5847)
+	kept, owners := splitOwnerLines("A=1\n")
+	if len(kept) != 1 || kept[0] != "A=1" || owners != nil {
+		t.Fatalf("trailing newline: %q %q", kept, owners)
+	}
+	kept, owners = splitOwnerLines("OWNER_NUMBER=+1\\\nmore\nB=2\n")
+	if strings.Join(owners, "|") != "OWNER_NUMBER=+1\\|more" || strings.Join(kept, "|") != "B=2" {
+		t.Fatalf("continuation: %q %q", kept, owners)
+	}
+}
+
+func TestSignInRouteRulesEachRefuseTheirOwnCase(t *testing.T) {
+	// REQ: REV-CHK-mut (#5847): each refusal of checkRoute, prepareSignInRoutes, removeRoute,
+	// Open and Close (signinhost.go) is checked, so deleting any of their statements fails a test.
+	uid := os.Getuid()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(base, 0o755)
+	// A relative route is refused even where it names a fit directory.
+	if err := os.Mkdir(filepath.Join(base, "rel"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(base)
+	if err := checkRoute("rel", uid); err != errSignInRoute {
+		t.Fatalf("relative route: %v", err)
+	}
+	// A link above the route is refused, by checkRoute and by prepareSignInRoutes.
+	os.MkdirAll(filepath.Join(base, "real", "r"), 0o700)
+	os.Chmod(filepath.Join(base, "real"), 0o755)
+	os.Symlink(filepath.Join(base, "real"), filepath.Join(base, "link"))
+	if err := checkRoute(filepath.Join(base, "link", "r"), uid); err != errSignInRoute {
+		t.Fatalf("linked route: %v", err)
+	}
+	if err := prepareSignInRoutes(filepath.Join(base, "link", "routes")); err == nil || !strings.Contains(err.Error(), "has a link on the way") {
+		t.Fatalf("linked -signin-routes: %v", err)
+	}
+
+	h := &signInHost{UID: uid, GID: os.Getgid(), Routes: signInRoutes(t)}
+	// A route outside -signin-routes is never removed.
+	outside := filepath.Join(base, "real", "r")
+	h.removeRoute(outside)
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("removed a route outside -signin-routes: %v", err)
+	}
+	// A sign-in machine with no route is told so; with no fallback another worker has none.
+	if _, err := h.Open(signInPrefix + "nobody"); err != errSignInNone {
+		t.Fatalf("open with no route: %v", err)
+	}
+	if route, err := h.Open("other"); route != "" || err != nil {
+		t.Fatalf("open with no fallback: %q %v", route, err)
+	}
+	// Close forgets a sign-in machine's route.
+	h.routes = map[string]string{signInPrefix + "x": outside}
+	h.Close(signInPrefix + "x")
+	if _, ok := h.routes[signInPrefix+"x"]; ok {
+		t.Fatal("Close kept the route")
+	}
+}
+
 // -1: a modem.env that is a link, a directory or a pipe is refused, not
 // followed or replaced; so is an /etc/agentos that is a link.
 func TestModemEnvRefusesAFileThatIsNotRegular(t *testing.T) {

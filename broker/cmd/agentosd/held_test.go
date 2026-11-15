@@ -290,6 +290,119 @@ func TestAnAnswerThatCannotBeSavedFailsClosed(t *testing.T) {
 	}
 }
 
+func TestHeldRepliesStatesAndLogsEachHaveTheirOwnOutcome(t *testing.T) {
+	// REQ: REV-CHK-mut (#5847): each state and log of heldReplies and heldNotice is checked,
+	// so deleting any of their statements fails a test.
+	learn := t.TempDir()
+	writeHeld(t, learn, recovery.PendingUnanchored, 2, nil)
+	question := mustHeldText(t, learn)
+	if got := (&heldReplies{dir: learn, released: true}).opening(); got != "" {
+		t.Fatalf("a released hold opens with %q", got)
+	}
+	if got := (&heldReplies{dir: learn, broken: true}).opening(); got != heldNotice(learn) || got == question {
+		t.Fatalf("a broken hold opens with %q", got)
+	}
+	if got, rel := (&heldReplies{dir: learn, released: true}).reply("A"); got != "" || !rel {
+		t.Fatalf("a released hold replies %v %q", rel, got)
+	}
+	// Once released, a later reply stays released without asking the disk again.
+	h := &heldReplies{dir: learn}
+	if _, rel := h.reply("C"); !rel {
+		t.Fatal("the right answer did not release")
+	}
+	if got, rel := h.reply("C"); got != "" || !rel {
+		t.Fatalf("a reply after release: %v %q", rel, got)
+	}
+
+	// A hold with no question answers with its notice and logs nothing: it is not a failed save.
+	gone := t.TempDir()
+	writeMarker(t, gone, recovery.PendingRolledBack, recovery.PendingNotice(recovery.PendingRolledBack))
+	log := &logRec{}
+	h = &heldReplies{dir: gone, logf: log.logf}
+	if got, rel := h.reply("A"); rel || got != recovery.PendingNotice(recovery.PendingRolledBack) || log.all() != "" || h.broken {
+		t.Fatalf("no question: %v %q, broken %v, log %q", rel, got, h.broken, log.all())
+	}
+
+	// A failed save is logged, and with no logger it does not panic.
+	for _, lg := range []*logRec{{}, nil} {
+		dir := t.TempDir()
+		writeHeld(t, dir, recovery.PendingUnanchored, 2, nil)
+		h := &heldReplies{dir: dir}
+		if lg != nil {
+			h.logf = lg.logf
+		}
+		hookSyncs(t, func(string) error { return errors.New("synthetic sync failure") })
+		h.reply("A")
+		hookSyncs(t, durable.SyncDir)
+		if !h.broken || (lg != nil && !strings.Contains(lg.all(), "was not saved")) {
+			t.Fatalf("a failed save: broken %v, log %v", h.broken, lg)
+		}
+	}
+
+	// The notice line is trimmed on both sides.
+	spaced := t.TempDir()
+	writeMarker(t, spaced, recovery.PendingForged, "  Restore on hold.")
+	if got := heldNotice(spaced); got != "Restore on hold." {
+		t.Fatalf("notice %q", got)
+	}
+
+	// A setup record that does not read is that error, not "never finished".
+	rec := localsrv.FileRecord{Path: filepath.Join(t.TempDir(), "setup.json")}
+	os.WriteFile(rec.Path, []byte("{"), 0o600)
+	if _, err := heldOwner("", rec); err == nil || strings.Contains(err.Error(), "never finished") {
+		t.Fatalf("an unreadable record: %v", err)
+	}
+
+	// The question the restore asks (restoreconfirm.go) is read only beside its marker, and one
+	// that does not read is no question and no answer.
+	crashed := t.TempDir()
+	writeHeld(t, crashed, recovery.PendingUnanchored, 2, nil)
+	os.Remove(filepath.Join(crashed, forgetLogFile+recovery.PendingSuffix))
+	if _, ok, err := loadHeld(crashed); ok || err != nil {
+		t.Fatalf("a question without its marker: %v %v", ok, err)
+	}
+	bad := t.TempDir()
+	writeHeld(t, bad, recovery.PendingUnanchored, 2, nil)
+	os.WriteFile(filepath.Join(bad, forgetLogFile+recovery.ConfirmSuffix), []byte("{"), 0o600)
+	if text, ok, err := heldText(bad); ok || err == nil || text != "" {
+		t.Fatalf("held text of a question that does not read: %q %v %v", text, ok, err)
+	}
+	if text, rel, err := answerHeld(bad, "C"); rel || !errors.Is(err, errBadQuestion) || text != "" {
+		t.Fatalf("an answer to a question that does not read: %q %v %v", text, rel, err)
+	}
+	// The right answer is not reported as a release until its directory is synced.
+	unsynced := t.TempDir()
+	writeHeld(t, unsynced, recovery.PendingUnanchored, 2, nil)
+	sd := syncDir
+	syncDir = func(string) error { return errors.New("synthetic sync failure") }
+	text, rel, err := answerHeld(unsynced, "C")
+	syncDir = sd
+	if rel || err == nil || text != "" {
+		t.Fatalf("a release whose sync failed: %q %v %v", text, rel, err)
+	}
+	// A closed question opens with the wrong-answer text, and a release removes the question.
+	closed := t.TempDir()
+	writeHeld(t, closed, recovery.PendingUnanchored, 2, nil)
+	wrong, _, _ := answerHeld(closed, "A")
+	if text, ok, err := heldText(closed); !ok || err != nil || text != wrong {
+		t.Fatalf("held text of a closed question: %q %v %v, want %q", text, ok, err, wrong)
+	}
+	right := t.TempDir()
+	writeHeld(t, right, recovery.PendingUnanchored, 2, nil)
+	if _, rel, err := answerHeld(right, "C"); !rel || err != nil {
+		t.Fatalf("the right answer: %v %v", rel, err)
+	}
+	if _, err := os.Lstat(filepath.Join(right, forgetLogFile+recovery.ConfirmSuffix)); !os.IsNotExist(err) {
+		t.Fatalf("a release left its question: %v", err)
+	}
+	// A marker with no notice holds the start with the default one.
+	blank := t.TempDir()
+	writeMarker(t, blank, recovery.PendingForged, "")
+	if err := restoreHold(blank); err == nil || !strings.Contains(err.Error(), "(Restore on hold.)") && !strings.Contains(err.Error(), "Restore on hold. (") {
+		t.Fatalf("a marker with no notice: %v", err)
+	}
+}
+
 // A hold with no question (rolled back, forged, or a question that does
 // not read) texts the marker's notice, at start and to every reply.
 func TestAHoldWithNoQuestionTextsItsNotice(t *testing.T) {
