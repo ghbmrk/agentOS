@@ -45,12 +45,11 @@ func serveMain(drv devslot.Driver, fd int, hostUID string) error {
 	if _, _, e := syscall.RawSyscall6(syscall.SYS_PRCTL, syscall.PR_SET_DUMPABLE, 0, 0, 0, 0, 0); e != 0 {
 		return e
 	}
-	uid, err := strconv.ParseUint(hostUID, 10, 32)
-	if err != nil {
-		return ErrPeer
-	}
+	// The peer's uid as the unit spells it, in plain decimal: one
+	// comparison, so any other hostUID (empty, "0900", " 900") matches no
+	// peer, root's included.
 	cred, err := syscall.GetsockoptUcred(fd, syscall.SOL_SOCKET, syscall.SO_PEERCRED)
-	if err != nil || uint64(cred.Uid) != uid {
+	if err != nil || strconv.FormatUint(uint64(cred.Uid), 10) != hostUID {
 		return ErrPeer
 	}
 	// Non-blocking, so the file is pollable and its deadlines work.

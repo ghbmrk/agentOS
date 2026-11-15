@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/netip"
 	"os"
@@ -27,6 +28,36 @@ import (
 // childEnv marks the test binary run as a driver's process: Main serves
 // the probe driver on descriptor 3 and exits.
 const childEnv = "DEVSLOT_TEST_CHILD"
+
+// keyFilesEnv gives the driver's process the (device, inode) of each key
+// file the parent passed, "dev:ino" joined by commas, so the probe can
+// tell whether it still holds one: the process is non-dumpable, so only it
+// can see its own descriptors without root.
+const keyFilesEnv = "DEVSLOT_TEST_KEYFILES"
+
+// heldKeyFile reports whether any descriptor of this process is open on a
+// file keyFilesEnv names. It compares file identity, not descriptor
+// numbers, which a closed key file's may be reused under.
+func heldKeyFile() bool {
+	want := map[[2]uint64]bool{}
+	for _, f := range strings.Split(os.Getenv(keyFilesEnv), ",") {
+		var dev, ino uint64
+		if _, err := fmt.Sscanf(f, "%d:%d", &dev, &ino); err == nil {
+			want[[2]uint64{dev, ino}] = true
+		}
+	}
+	var lim syscall.Rlimit
+	if syscall.Getrlimit(syscall.RLIMIT_NOFILE, &lim) != nil || len(want) == 0 {
+		return true // the check cannot run: read as held, so the test fails
+	}
+	for fd := 0; uint64(fd) < min(lim.Cur, 1<<16); fd++ {
+		var st syscall.Stat_t
+		if syscall.Fstat(fd, &st) == nil && want[[2]uint64{uint64(st.Dev), st.Ino}] {
+			return true
+		}
+	}
+	return false
+}
 
 func TestMain(m *testing.M) {
 	if os.Getenv(childEnv) == "1" {
@@ -52,7 +83,7 @@ func (probe) Declare() devslot.Declaration {
 		Device:      "probe",
 		Link:        devslot.GATT,
 		Channels:    []devslot.Channel{{Name: "data", Service: "fff0", Char: "fff1"}},
-		Operations:  []devslot.Operation{{Name: "dumpable", Verb: key.Read}, {Name: "key", Verb: key.Read}},
+		Operations:  []devslot.Operation{{Name: "dumpable", Verb: key.Read}, {Name: "key", Verb: key.Read}, {Name: "wait", Verb: key.Read}},
 		Readings:    []string{"dumpable", "key"},
 		MaxRead:     1,
 		MaxReadings: 1,
@@ -63,9 +94,21 @@ func (probe) Declare() devslot.Declaration {
 // otherCanary a slot beside it that no Lend may yield.
 const keyCanary, otherCanary = "canary-devkey-0001", "canary-devkey-0002"
 
-func (probe) Run(_ context.Context, op string, _ devslot.Link, s devslot.Secrets) ([]devslot.Reading, error) {
+func (probe) Run(ctx context.Context, op string, l devslot.Link, s devslot.Secrets) ([]devslot.Reading, error) {
+	if op == "wait" {
+		// A read the host never answers, under a short deadline of the
+		// driver's own: it ends only if the connection is pollable.
+		ctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		defer cancel()
+		_, _, err := l.Read(ctx)
+		return nil, err
+	}
 	if op == "key" {
-		// 1: the canary; 2: the other slot; 3: no key; 0: anything else.
+		// 1: the canary; 2: the other slot; 3: no key; 0: anything else;
+		// 4: the process still holds a key file keyLend was given.
+		if os.Getenv(keyFilesEnv) != "" && heldKeyFile() {
+			return []devslot.Reading{{Kind: "key", Value: 4, Time: time.Unix(1e9, 0)}}, nil
+		}
 		v := int64(0)
 		err := s.Open(func(k []byte) error {
 			switch string(k) {
@@ -104,9 +147,27 @@ func startDriver(t *testing.T, hostUID int, keyFiles ...*os.File) (*os.File, *ex
 	t.Cleanup(func() { host.Close() })
 	cmd := exec.Command(os.Args[0], "-test.run=^$")
 	cmd.Env = append(os.Environ(), childEnv+"=1", proc.HostUIDEnv+"="+strconv.Itoa(hostUID))
+	// GOCOVERDIR: a -cover test binary run without one (as tools/mutgate.py
+	// plan runs it) warns on stderr at exit, which the output checks read
+	// as the driver's own output (#5795). An inherited one is kept, so
+	// go test -coverprofile still counts the driver's process.
+	if os.Getenv("GOCOVERDIR") == "" {
+		cmd.Env = append(cmd.Env, "GOCOVERDIR="+t.TempDir())
+	}
 	cmd.ExtraFiles = append([]*os.File{end}, keyFiles...)
 	if len(keyFiles) > 0 {
-		cmd.Env = append(cmd.Env, "LISTEN_FDS=3", "LISTEN_FDNAMES=connection:"+proc.KeyFDName+":"+proc.DeviceFDName, proc.DriverEnv+"=probe")
+		// The key's file first, then the device file's, as many as given.
+		names := []string{"connection", proc.KeyFDName, proc.DeviceFDName}[:1+len(keyFiles)]
+		cmd.Env = append(cmd.Env, "LISTEN_FDS="+strconv.Itoa(len(names)), "LISTEN_FDNAMES="+strings.Join(names, ":"), proc.DriverEnv+"=probe")
+		var ids []string
+		for _, f := range keyFiles {
+			var st syscall.Stat_t
+			if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
+				t.Fatal(err)
+			}
+			ids = append(ids, fmt.Sprintf("%d:%d", st.Dev, st.Ino))
+		}
+		cmd.Env = append(cmd.Env, keyFilesEnv+"="+strings.Join(ids, ","))
 	}
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
@@ -197,6 +258,8 @@ func TestMainLendsTheDeviceKey(t *testing.T) {
 	}{
 		{"the template's files", func(t *testing.T) []*os.File { return keyFiles(t, "driver-probe") }, 1},
 		{"no files", func(*testing.T) []*os.File { return nil }, 3},
+		// The key's file alone is no key, and is still closed.
+		{"the key's file alone", func(t *testing.T) []*os.File { return keyFiles(t, "driver-probe")[:1] }, 3},
 	} {
 		host, cmd, out := startDriver(t, os.Getuid(), c.files(t)...)
 		if m, err := devslot.ReadMsg(host); err != nil || m.T != devslot.MsgDeclare {
@@ -206,7 +269,7 @@ func TestMainLendsTheDeviceKey(t *testing.T) {
 			t.Fatal(err)
 		}
 		if r, err := devslot.ReadMsg(host); err != nil || r.T != devslot.MsgReading || r.Kind != "key" || r.Value != c.want {
-			t.Fatalf("%s: reading %+v, %v; want key=%d", c.name, r, err, c.want)
+			t.Fatalf("%s: reading %+v, %v; want key=%d (4: the process still holds a key file)", c.name, r, err, c.want)
 		}
 		if d, err := devslot.ReadMsg(host); err != nil || d.T != devslot.MsgDone || d.Err != "" {
 			t.Fatalf("%s: done %+v, %v", c.name, d, err)
@@ -222,6 +285,31 @@ func TestMainLendsTheDeviceKey(t *testing.T) {
 	}
 	if cmd.Wait(); cmd.ProcessState.ExitCode() != 1 {
 		t.Fatal("the driver's process did not exit 1 under another driver's key")
+	}
+}
+
+// The connection is non-blocking in the driver's process, so a call the
+// driver's own context ends returns, and the process reports the
+// operation failed, rather than waiting on a host that never answers.
+// Fails if serveMain leaves the descriptor blocking: deadlines on it do
+// nothing.
+func TestMainEndsAnUnansweredRead(t *testing.T) {
+	host, cmd, out := startDriver(t, os.Getuid())
+	host.SetDeadline(time.Now().Add(10 * time.Second))
+	if m, err := devslot.ReadMsg(host); err != nil || m.T != devslot.MsgDeclare {
+		t.Fatalf("first message %+v, %v (%s)", m, err, out)
+	}
+	if err := devslot.WriteMsg(host, devslot.PinMsg("wait", devslot.Pin{Address: "02:00:00:00:00:01"}, netip.Prefix{})); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := devslot.ReadMsg(host); err != nil || r.T != devslot.MsgRead {
+		t.Fatalf("read request %+v, %v", r, err)
+	}
+	if d, err := devslot.ReadMsg(host); err != nil || d.T != devslot.MsgDone || d.Err == "" {
+		t.Fatalf("done %+v, %v; want a failed operation once the driver's deadline passes", d, err)
+	}
+	if cmd.Wait(); cmd.ProcessState.ExitCode() != 1 {
+		t.Fatalf("exit %d, want 1 (%s)", cmd.ProcessState.ExitCode(), out)
 	}
 }
 
