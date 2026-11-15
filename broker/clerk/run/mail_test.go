@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
@@ -349,8 +348,9 @@ func TestMailSettingsFileIsTheClerksOwn(t *testing.T) {
 	}
 	// The open itself refuses the link (O_NOFOLLOW), and its error is the
 	// one returned (#5774, readMail's open-error return).
-	if _, err := readMail(dir); !errors.Is(err, syscall.ELOOP) {
-		t.Fatalf("a symlinked settings file: readMail = %v; want the open's ELOOP", err)
+	var open *os.PathError
+	if _, err := readMail(dir); !errors.As(err, &open) || open.Op != "open" {
+		t.Fatalf("a symlinked settings file: readMail = %v; want the open's own error", err)
 	}
 }
 
