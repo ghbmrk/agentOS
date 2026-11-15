@@ -74,3 +74,31 @@
 
 # libformw (ncurses forms); nothing in the image needs it.
 /usr/lib/x86_64-linux-gnu/libformw.so.6.*
+
+[cipher]
+# The files of the built image (main tree and initrds) whose bytes name an OpenSSL cipher fetch by name
+# string (EVP_CIPHER_fetch, EVP_get_cipherbyname, systemd's openssl_cipher_many), each with the call and
+# jump sites to them that were reviewed, or "*" where the sites are not counted (#5341). AES-GCM-SIV has
+# no OID or NID in OpenSSL 3.5.7, so these are the only ways to select it, and only by one of the names
+# AES-128-GCM-SIV, AES-192-GCM-SIV or AES-256-GCM-SIV. A new file or a changed count fails the step:
+# review where its names come from, then update the entry and the openssl records' reach note.
+
+# libcryptsetup's one fetch (crypto_openssl.c _cipher_init, 2.7.5) asks for "<cipher>-<key bits>-<mode>",
+# the mode cut at its first '-' by every caller that takes it from a header (crypto_storage.c
+# crypt_storage_init, for LUKS1 and LUKS2 keyslots and reencryption; tcrypt.c from its fixed table). The
+# name always ends in "-<digits>-<a part with no '-'>", which no AES-GCM-SIV name does ("-GCM-SIV"), so no
+# header, LUKS1's raw cipher field included, can select it. FileVault2 and BitLocker use fixed ciphers.
+/usr/lib/x86_64-linux-gnu/libcryptsetup.so.12.* EVP_CIPHER_fetch=1
+
+# libsystemd-shared's openssl_cipher_many formats "%s-%zu-%s" from its caller; its one caller
+# (tpm2-util.c tpm2_calculate_seal's import path, v257) maps a TPM parent key's algorithm and mode ids
+# to "aes" and one of ctr, ofb, cbc, cfb or ecb, none of which names GCM-SIV.
+/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so EVP_CIPHER_fetch=1 openssl_cipher_many=1
+
+# OpenSSL itself. libcrypto's internal fetches take the name from an OID (none names AES-GCM-SIV) or from
+# its API caller, whose own entry here covers it; libssl fetches only its cipher suites' fixed names, and no
+# TLS suite uses AES-GCM-SIV; the openssl CLI takes a name from its command line, which nothing on the
+# box runs (the records' QUIC and CMS reasoning). Their sites are not counted.
+/usr/lib/x86_64-linux-gnu/libcrypto.so.3 *
+/usr/lib/x86_64-linux-gnu/libssl.so.3 *
+/usr/bin/openssl *
