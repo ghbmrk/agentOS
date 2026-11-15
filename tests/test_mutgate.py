@@ -193,7 +193,7 @@ class Gate(unittest.TestCase):
                 {"type": "T", "status": "LIVED", "line": 3},
                 {"type": "T", "status": "KILLED", "line": 4}]}]}
             (pathlib.Path(d) / "vm+gvisor.json").write_text(json.dumps(data))
-            self.assertEqual(mutgate.survivors(d), {"vm/gvisor": [("a.go", 3, "T")]})
+            self.assertEqual(mutgate.survivors(d), {"vm/gvisor": [("a.go", 3, "T", None)]})
             self.assertEqual(mutgate.package_of("broker/vm/gvisor/a.go"), "vm/gvisor")
 
     def test_tier_b_package_is_claimed(self):
@@ -2232,7 +2232,7 @@ class Summary(unittest.TestCase):
         ]
         data = {"files": [{"file_name": "a.go", "mutations": muts}]}
         targets = {"broker/p/a.go": {2, 3, 4, 5}}
-        waived = {("broker/p/a.go", 7): "names no survivor"}
+        waived = {("broker/p/a.go", 7, None, None): "names no survivor"}
         text = mutgate.summary({"p": (data, targets)}, {"p": None}, waived)
         rows = [l for l in text.split("\n") if l.startswith("| broker/") or l.startswith("| ")]
         body = [l for l in text.split("\n") if l.startswith("| broker/")]
@@ -2366,7 +2366,7 @@ class Equivalent(unittest.TestCase):
         row = [l for l in r.summary.split("\n") if l.startswith("| broker/netguard/a.go:3")][0]
         self.assertEqual(row.count(" | "), 2, row)
         self.assertIn("waives another site \\| \\<img src=x\\> \\`x\\`", row)
-        self.assertEqual(mutgate.waivers(hostile), {("broker/netguard/a.go", 3): "waives another site | <img src=x> `x`"})
+        self.assertEqual(mutgate.waivers(hostile), {("broker/netguard/a.go", 3, None, None): "waives another site | <img src=x> `x`"})
 
 
 class Record(unittest.TestCase):
@@ -2616,7 +2616,7 @@ class Record(unittest.TestCase):
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("broker/netguard/a.go:4 ARITHMETIC_BASE survives", r.stdout)
         self.assertEqual(mutgate.violations({"p": {"broker/p/a.go": {4}}}, {"p": [("a.go", 4, "STATEMENT_DELETION"),
-                         ("a.go", 4, "CONDITIONALS_NEGATION")]}, {("broker/p/a.go", 4, "STATEMENT_DELETION"): "r"}),
+                         ("a.go", 4, "CONDITIONALS_NEGATION")]}, {("broker/p/a.go", 4, "STATEMENT_DELETION", None): "r"}),
                          [("p", "broker/p/a.go", 4, "CONDITIONALS_NEGATION")])
 
     def test_a_stale_entry_fails_the_gate(self):
@@ -2687,6 +2687,157 @@ class Record(unittest.TestCase):
                          ["CONDITIONALS_BOUNDARY #5774"] * 3 + ["CONDITIONALS_NEGATION #5774"] * 6
                          + ["STATEMENT_DELETION #5743"] * 22 + ["STATEMENT_DELETION #5780"] * 2)
 
+
+
+class MutantScope(unittest.TestCase):
+    """MUT-waiver-mutant-scope (#5792, Security on #5774): a waiver waives the one mutant it proves, never
+    every mutant of its kind on its line."""
+    # REQ: MUT-waiver-mutant-scope
+
+    # broker/clerk/run/mail.go:144's shape: three CONDITIONALS_BOUNDARY mutants on one line, the proof for
+    # the cover-gap `< 0` at column 113 and the `len(p) >= 12` one at column 16 alive.
+    LINE = [("a.go", 4, "CONDITIONALS_BOUNDARY", 16), ("a.go", 4, "CONDITIONALS_BOUNDARY", 32),
+            ("a.go", 4, "CONDITIONALS_BOUNDARY", 113), ("a.go", 4, "CONDITIONALS_NEGATION", 113)]
+    TARGETS = {"p": {"broker/p/a.go": {4}}}
+
+    def test_a_two_comparison_line_with_one_proved_mutant_fails_on_the_other(self):
+        every = {"p": self.LINE}
+        live = {"p": [self.LINE[0]]}
+        gone = {"p": [self.LINE[2]]}  # NOT COVERED: what the proof is for
+        for waived in ({("broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", None): "the < 0 is killed by hand"},  # a record entry
+                       {("broker/p/a.go", 4, None, None): "the < 0 is killed by hand"}):                     # a body line
+            with self.subTest(waived):
+                # #5774's gate passed this: the entry waived the live `>= 12` mutant with the proof for `< 0`.
+                self.assertEqual(mutgate.violations(self.TARGETS, live, waived, every),
+                                 [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY")])
+                # It names three mutants, so it waives none, the one it proves included.
+                self.assertEqual(mutgate.violations(self.TARGETS, gone, waived, every),
+                                 [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY")])
+                cover, ambiguous = mutgate.covering(waived, every)
+                self.assertEqual(cover, {})
+                self.assertEqual(len(ambiguous[0][1]), 3 if list(waived)[0][2] else 4)
+        # Named by its column and kind, it waives that mutant alone: the live one still fails.
+        exact = {("broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", 113): "the < 0 is killed by hand"}
+        self.assertEqual(mutgate.violations(self.TARGETS, gone, exact, every), [])
+        self.assertEqual(mutgate.violations(self.TARGETS, live, exact, every),
+                         [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY")])
+        # A column alone still matches both kinds there, so a body line needs the kind too.
+        self.assertEqual(mutgate.violations(self.TARGETS, gone, {("broker/p/a.go", 4, None, 113): "r"}, every),
+                         [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY")])
+        self.assertEqual(mutgate.violations(self.TARGETS, gone, {("broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", 113): "r"},
+                                            every), [])
+        # A waiver whose line holds one mutant of its scope needs no column, as before.
+        one = {"p": [("a.go", 4, "STATEMENT_DELETION", 2), ("a.go", 4, "CONDITIONALS_NEGATION", 9)]}
+        self.assertEqual(mutgate.violations(self.TARGETS, one, {("broker/p/a.go", 4, "STATEMENT_DELETION", None): "r"}, one),
+                         [("p", "broker/p/a.go", 4, "CONDITIONALS_NEGATION")])
+        # A killed sibling still counts: the proof cannot say which one it is for, and a later run may not kill it.
+        self.assertEqual(mutgate.violations(self.TARGETS, {"p": [self.LINE[3]]},
+                                            {("broker/p/a.go", 4, None, None): "r"}, every),
+                         [("p", "broker/p/a.go", 4, "CONDITIONALS_NEGATION")])
+
+    def test_the_body_line_names_a_column_and_kind(self):
+        self.assertEqual(mutgate.waivers("Mutant-equivalent: broker/p/a.go:4:113:CONDITIONALS_BOUNDARY the < 0 is dead\n"
+                                         "Mutant-equivalent: broker/p/a.go:5:9 a column only\n"
+                                         "Mutant-equivalent: broker/p/a.go:6:STATEMENT_DELETION a kind only\n"
+                                         "Mutant-equivalent: broker/p/a.go:7:0 column zero\n"
+                                         "Mutant-equivalent: broker/p/a.go:8:9:lower a lower-case kind\n"
+                                         "Mutant-equivalent: broker/p/a.go:9:9:X:Y two kinds\n"),
+                         {("broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", 113): "the < 0 is dead",
+                          ("broker/p/a.go", 5, None, 9): "a column only",
+                          ("broker/p/a.go", 6, "STATEMENT_DELETION", None): "a kind only"})
+        self.assertEqual(mutgate.site_text(("broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", 113)),
+                         "broker/p/a.go:4:113:CONDITIONALS_BOUNDARY")
+
+    def test_verify_waives_only_the_named_mutant(self):
+        v = Verify()
+        src = "package netguard\nvar a = 1 + 1 + 1\n"
+        muts = [{"type": "ARITHMETIC_BASE", "status": "LIVED", "line": 2, "column": c} for c in (11, 15)]
+        result = {"files": [{"file_name": "a.go", "mutations": muts}], "mutants_lived": 2, "statement_deletions": 0}
+        reason = "a is never read, so no value tells the mutants apart"
+        r = v.verify({"netguard.json": result}, src=src, body=f"Mutant-equivalent: broker/netguard/a.go:2 {reason}\n",
+                     summary=True)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("the waiver broker/netguard/a.go:2 matches 2 mutants (broker/netguard/a.go:2:11:ARITHMETIC_BASE, "
+                      "broker/netguard/a.go:2:15:ARITHMETIC_BASE), so it waives none", r.stdout)
+        self.assertIn("Waivers matching more than one mutant", r.summary)
+        self.assertNotIn("equivalent:", r.summary)
+        r = v.verify({"netguard.json": result}, src=src, body=f"Mutant-equivalent: broker/netguard/a.go:2:15 {reason}\n",
+                     summary=True)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("broker/netguard/a.go:2 ARITHMETIC_BASE survives", r.stdout)
+        rows = [l for l in r.summary.split("\n") if l.startswith("| broker/")]
+        self.assertEqual(rows, ["| broker/netguard/a.go:2:11 | ARITHMETIC\\_BASE | **LIVED**: no test fails |",
+                                f"| broker/netguard/a.go:2:15 | ARITHMETIC\\_BASE | equivalent: {reason} |"])
+        body = "".join(f"Mutant-equivalent: broker/netguard/a.go:2:{c}:ARITHMETIC_BASE {reason}\n" for c in (11, 15))
+        r = v.verify({"netguard.json": result}, src=src, body=body)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_a_record_entry_with_a_column_waives_that_mutant_only(self):
+        rec = Record()
+        head = rec.VAR + "var b = 2 + 2 + 2\n"
+        muts = [{"type": "ARITHMETIC_BASE", "status": "LIVED", "line": 4, "column": c} for c in (11, 15)]
+        result = {"files": [{"file_name": "a.go", "mutations": muts}], "mutants_lived": 2, "statement_deletions": 0}
+
+        def verify(d, run):
+            res = pathlib.Path(d) / "res" / "mutants-0"
+            res.mkdir(parents=True, exist_ok=True)
+            (res / "netguard.json").write_text(json.dumps(result))
+            return run("verify", str(res.parent), "--git", "HEAD~1", "--summary", str(pathlib.Path(d) / "summary.md"))
+
+        with tempfile.TemporaryDirectory() as d:
+            run = rec.repo(d, rec.VAR, head)
+            w = pathlib.Path(d) / "w.txt"
+            # waive refuses a column past its line's end, and a kind other than --mutant's.
+            w.write_text("Mutant-equivalent: broker/netguard/a.go:4:99:ARITHMETIC_BASE b is never read\n")
+            r = run("waive", str(w), "--accepted", "#5792")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("no such line: broker/netguard/a.go:4:99", r.stderr)
+            w.write_text("Mutant-equivalent: broker/netguard/a.go:4:15:ARITHMETIC_BASE b is never read\n")
+            r = run("waive", str(w), "--accepted", "#5792", "--mutant", "STATEMENT_DELETION")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("names another mutant kind than --mutant", r.stderr)
+            self.assertFalse((pathlib.Path(d) / "broker" / "netguard" / mutgate.RECORD).exists())
+            r = run("waive", str(w), "--accepted", "#5792")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            entry = json.loads((pathlib.Path(d) / "broker" / "netguard" / mutgate.RECORD).read_text().split("\n")[1])
+            self.assertEqual((entry["mutant"], entry["col"]), ("ARITHMETIC_BASE", 15))
+            r = run("records", "netguard")
+            self.assertEqual((r.returncode, r.stdout.split(" ")[:2]), (0, ["broker/netguard/a.go:4:15", "ARITHMETIC_BASE"]))
+            r = verify(d, run)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("broker/netguard/a.go:4 ARITHMETIC_BASE survives", r.stdout)
+            summary = (pathlib.Path(d) / "summary.md").read_text()
+            self.assertIn("| broker/netguard/a.go:4:15 | ARITHMETIC\\_BASE | equivalent: b is never read", summary)
+            self.assertIn("| broker/netguard/a.go:4:11 | ARITHMETIC\\_BASE | **LIVED**", summary)
+            self.assertIn("- broker/netguard/a.go:4:15 ARITHMETIC\\_BASE (\\#5792): b is never read", summary)
+        # The same entry with no column names two mutants, so it waives neither.
+        del entry["col"]
+        with tempfile.TemporaryDirectory() as d:
+            run = rec.repo(d, rec.VAR, head, record=json.dumps(entry) + "\n")
+            r = verify(d, run)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("broker/netguard/a.go:4 ARITHMETIC_BASE survives", r.stdout)
+            self.assertIn("the waiver broker/netguard/a.go:4:ARITHMETIC_BASE matches 2 mutants", r.stdout)
+
+    def test_a_record_column_is_a_positive_integer(self):
+        good = {"file": "a.go", "mutant": "ARITHMETIC_BASE", "func": "b", "decl": "0" * 64, "stmt": ["var b = 2"], "at": 0,
+                "after": "", "occurrence": [1, 1], "reason": "b is never read", "accepted": "#5792"}
+        self.assertEqual(mutgate.record_entries(json.dumps({**good, "col": 9}))[0][0]["col"], 9)
+        for bad in ({**good, "col": 0}, {**good, "col": "9"}, {**good, "col": True}, {**good, "col": 9, "x": 1}):
+            with self.subTest(bad):
+                self.assertIsNone(mutgate.record_entries(json.dumps(bad))[0])
+
+    def test_the_clerk_run_entries_on_two_comparison_lines_name_their_column(self):
+        # The #5774 proofs for mail.go:103's `>= 0` and :144's `< 0` sit on lines of several comparisons.
+        r = subprocess.run([sys.executable, "-I", str(ROOT / "tools" / "mutgate.py"), "records", "clerk/run"],
+                           capture_output=True, text=True, cwd=ROOT)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        sites = {" ".join(l.split(" ")[:2]) for l in r.stdout.split("\n") if "mail.go:1" in l.split(" ")[0]}
+        self.assertTrue({"broker/clerk/run/mail.go:103:102 CONDITIONALS_BOUNDARY", "broker/clerk/run/mail.go:103:102 CONDITIONALS_NEGATION",
+                         "broker/clerk/run/mail.go:144:113 CONDITIONALS_BOUNDARY",
+                         "broker/clerk/run/mail.go:144:113 CONDITIONALS_NEGATION"} <= sites, sites)
+        src = (ROOT / "broker" / "clerk" / "run" / "mail.go").read_bytes().split(b"\n")
+        self.assertEqual((src[102][101:103], src[143][112:114]), (b">=", b"< "))
 
 def job(text, name):
     """The body of job `name` in a workflow's jobs: block."""
