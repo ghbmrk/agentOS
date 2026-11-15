@@ -191,6 +191,28 @@ class LintTest(unittest.TestCase):
             (root / "reviews/ux/2026-10-09-scratch.md").write_text("# scratch\n")
             self.assertEqual(doclint.lint(root), [])
 
+    def test_tracked_names_needing_quotes_are_listed(self):
+        # REV-LOW-tools finding 21: without -z git quotes a non-ASCII, quote or backslash name, and
+        # splitting on whitespace broke a name with a space, so those files went unchecked.
+        names = ("2026-10-09-two words.md", "2026-10-09-caf\u00e9.md", '2026-10-09-say"hi.md')
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            for name, text in GOOD.items():
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text(text)
+            (root / "reviews/ux").mkdir(parents=True)
+            for name in names:
+                (root / "reviews/ux" / name).write_text("# no record line\n")
+            (root / "notes/caf\u00e9").mkdir(parents=True)
+            (root / "notes/caf\u00e9/x.md").write_text("See OPERATING \u00a79.\n")
+            subprocess.run(["git", "-c", "core.quotePath=true", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+            got = doclint.lint(root)
+            for name in names:
+                self.assertTrue(any(g.startswith(f"reviews/ux/{name}: no complete") for g in got), (name, got))
+            self.assertIn("notes/caf\u00e9/x.md", doclint.markdown_files(root))
+            self.assertTrue(any(g.startswith("notes/caf\u00e9/x.md:1:") for g in got), got)
+
     DECISIONS = ("# DECISIONS\n\n| ID | Date | Status | Decision | Source |\n|---|---|---|---|---|\n"
                  "| D-001 | 2026-10-04 | active | %s | Mark |\n")
 

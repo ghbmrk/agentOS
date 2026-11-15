@@ -113,6 +113,31 @@ class GitTest(unittest.TestCase):
             self.assertEqual(run("--git", "HEAD~1", "HEAD", "--body-file", "body.md").returncode, 1)
             self.assertEqual(run("--git", "HEAD", "HEAD~1").returncode, 0)
 
+    def test_quoted_skill_path_is_counted(self):
+        # REV-LOW-tools finding 21: git quotes a non-ASCII, quote or backslash path unless -z, so a
+        # skill under such a name was never counted and the process set could grow unchecked.
+        for name in ("caf\u00e9", 'say"hi', "back\\slash", "two words"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
+                git = lambda *a: subprocess.run(["git", "-C", d, "-c", "core.quotePath=true", *a], check=True,
+                                                capture_output=True)
+                git("init", "-q")
+                git("config", "user.email", "t@example.invalid")
+                git("config", "user.name", "t")
+                root = pathlib.Path(d)
+                (root / "CLAUDE.md").write_text("a b")
+                (root / "DECISIONS.md").write_text(DECISIONS)
+                git("add", "-A")
+                git("commit", "-qm", "base")
+                (root / ".claude/skills" / name).mkdir(parents=True)
+                (root / ".claude/skills" / name / "SKILL.md").write_text("c d e")
+                git("add", "-A")
+                git("commit", "-qm", "head")
+                tool = pathlib.Path(word_budget.__file__)
+                r = subprocess.run([sys.executable, "-I", str(tool), "--git", "HEAD~1", "HEAD"], cwd=d,
+                                   capture_output=True, text=True, env={"PATH": "/usr/bin:/bin", "PR_NUMBER": "42"})
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("process: 2 -> 5 words (+3)", r.stdout)
+
     def test_the_workflow_counts_the_merge_not_a_stale_tip(self):
         # A branch forked before main changed CLAUDE.md. Its tip still has the old text, so
         # comparing the tip with main reads main's later edit as the branch's own: a false
