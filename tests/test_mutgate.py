@@ -1937,11 +1937,17 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
         files = {"broker/h/a_test.go": base}
         self.assertEqual(mutgate.reaching_tests(files, {"broker/h/a_test.go": gap(at("}")) | {at("\ta()")}}), ["TestA"])
         self.assertEqual(mutgate.reaching_tests(files, {"broker/h/a_test.go": {at("\tb()")}}), ["TestB"])
-        # At the head the new test's doc comment and closing brace belong to it, not the one above.
+        # At the head the lines the diff adds, read from a real unified diff (the blank line before the
+        # new test comes first), name only the new test, not the one above (L3 on #5860).
         head = base + "\n// TestC checks c.\nfunc TestC(t *testing.T) {\n\tc()\n}\n"
-        n = len(base.split("\n"))
-        self.assertEqual(mutgate.reaching_tests({"broker/h/a_test.go": head}, {"broker/h/a_test.go": set(range(n + 1, n + 6))}),
-                         ["TestC"])
+        import difflib
+        added = set()
+        for row in difflib.unified_diff(base.splitlines(), head.splitlines(), n=0, lineterm=""):
+            if m := re.match(r"@@ -\S+ \+(\d+)(?:,(\d+))? @@", row):
+                start, count = int(m[1]), int(m[2] or 1)
+                added.update(range(start, start + count))
+        self.assertIn(len(base.splitlines()) + 1, added)  # the blank line after TestB's closing brace
+        self.assertEqual(mutgate.reaching_tests({"broker/h/a_test.go": head}, {"broker/h/a_test.go": added}), ["TestC"])
 
     def test_targets_for_unions_own_lines_with_changed_tests_coverage(self):
         # REQ: MUT-deleted-test-own-lines

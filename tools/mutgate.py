@@ -405,19 +405,20 @@ def base_text(mb, path):
     return blob.stdout.decode("utf-8", "replace")
 
 
+def _body(bare, d):
+    """(head line, closing brace line or None) of the func or method declaration d, read from the
+    text with comments blanked, so `} // note` is `}` plus spaces. None: no closing brace found."""
+    head = next(i for i in range(d[6], d[7] + 1) if DECL.match(bare[i - 1]))
+    return head, max((i for i in range(head, d[7] + 1) if bare[i - 1].rstrip() == "}"), default=None)
+
+
 def _gap_lines(text, after):
     """The base lines a hunk adding after line `after` of a test file's text touches: the line
     either side, except that a function's doc comment, closing brace and the blank lines after it
     belong to no function body, so an addition between functions touches none (#5832). An addition
     inside a body, even right after its head or before its closing brace, still touches it."""
     bare, out = _uncommented(text, False).split("\n"), set()
-    spans = []
-    for d in _decls("", text):
-        if d[1] in ("func", "method"):
-            head = next(i for i in range(d[6], d[7] + 1) if DECL.match(bare[i - 1]))
-            # `} // note` is blanked to `}` plus spaces; no closing brace found keeps the wide rule.
-            close = max([i for i in range(head, d[7] + 1) if bare[i - 1].rstrip() == "}"] or [None], key=lambda i: i or 0)
-            spans.append((d[6], d[7], head, close))
+    spans = [(d[6], d[7], *_body(bare, d)) for d in _decls("", text) if d[1] in ("func", "method")]
     for n, inside in ((after, lambda h, c: h <= n < c), (after + 1, lambda h, c: h < n <= c)):
         span = next(((h, c) for a, b, h, c in spans if a <= n <= b), None)
         if span is None or span[1] is None or inside(*span):
@@ -602,8 +603,12 @@ def reaching_tests(files, changed):
         mine = [i for i, d in enumerate(decls) if d[0] == path]
         if path not in files:
             return None
+        bare = _uncommented(files[path], False).split("\n")
         for line in lines:
             hit = [i for i in mine if decls[i][6] <= line <= decls[i][7]]
+            if len(hit) == 1 and decls[hit[0]][1] in ("func", "method") and (
+                    (close := _body(bare, decls[hit[0]])[1]) is not None and line > close):
+                continue  # the blank lines after a function's closing brace are no code of it
             if not hit or decls[hit[0]][1] == "header":
                 hit = mine if not hit or not decls[hit[0]][5] else hit
             got = set().union(*(reach[i] for i in hit))
