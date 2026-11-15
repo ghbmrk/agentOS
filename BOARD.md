@@ -153,7 +153,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | OWN-page-session-hold | OWN-page-session-hold: owner-set hold size (MaxInbox to match) and mid-message code hygiene on held text (CH-14, CH-18; release of #4941) | #4941 | queued (tier A) |
 | KEY-9-reach-b2a | KEY-9-reach-b2a: graph reach over declarations, a decl.reach log entry and its fold (KEY-9, D-307) | #5060 | queued (release; tier A; lane primary) |
 | KEY-9-reach-b2b | KEY-9-reach-b2b: grows-then-narrows, the kernel narrows a grown key to its old worth and logs the offer (KEY-9, D-307) | #5060 | queued (release; tier A; lane primary) |
-| KEY-9-reach-inbound-wiring | KEY-9-reach-inbound-wiring: count the root-run inbound renderer in the trusted base (KRN-2, D-310) | #5677 | building (release; tier A; lane primary; waits for #5677) |
 | KEY-9-reach-inbound-offset | KEY-9-reach-inbound-offset: move kernel/proc's unreached client types out of the trusted core (KRN-2, D-310) | #5678 | queued (release; tier A; lane primary; after #5678's PR) |
 
 ## Identity, onboarding and setup (SPEC §11-12)
@@ -414,7 +413,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | NET-2-cap-sizing-owner | NET-2-cap-sizing-owner: the agentosd call site and backups wording call enflist.Propose, show ErrNoDailyBytes, and hand the owner the link. Sub B half of #4578. | #4578 | queued (release; tier A; sub B) |
 | ENF-down-report | ENF-down-report: a refused first firewall load exits the enforcer before any page is served and nothing reports the down enforcer. Release; from #5243. | #5243 | queued (release; tier A) |
 | TIM-1-interval-fu-b | TIM-1-interval-fu-b: agentosd's STATUS line moves to the interval, and the PLAN ON reply says consent is withdrawn. Release; from #5215. | #5215, #5216 | queued (release; tier A) |
-| CLK-run-signin-ctx | CLK-run-signin-ctx: SignInWorker contract, a sign-in's contexts end with it; kill plansignin.go:351 with a ctx-recording fake (needs clerk/run's package-wide survivors cleared). Release; from #5290. | #5290 | building (release; tier A) |
 | KRN-forget-c-notice-words | KRN-forget-c-notice-words: the after-erase Forget notice names kinds in the kernel's household words, as the ask does, not raw class names. From #5163. | #5163, #5125 | queued (release; tier A) |
 | KRN-clock-second-source | KRN-clock-second-source: give the kernel's sandbox a second time source and pass the TIM-1 guard's reading as KernelConfig.Clock. Release; from #5387. | #5147, #5387 | building (release; tier A) |
 | KRN-clock-hold-gap | KRN-clock-hold-gap: a hold started while Latest-Earliest is wide is not lengthened by the gap (unit after time-sync, window from Earliest while monotonic, or bound via #5391); STATUS can say why. Release; from #5387. | #5147, #5387, #5391, #5279 | queued (release; tier A) |
@@ -423,9 +421,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-initrd-global-ext-dirs | IMG-initrd-global-ext-dirs: INITRD_IMAGE_DIRS adds /.extra/global_sysext and /.extra/global_confext when the image's systemd moves past v257. Release; blocked on that bump; from #5501 (Security). | #5488, #5501 | queued (release; tier A; blocked on the systemd bump) |
 | IMG-keyring-pin | IMG-keyring-pin: the Debian archive keyring is checked against committed fingerprints before any image or guest build uses it. Release; from #5573. | #5573 | queued (release; tier A; gate files) |
 | GUEST-bridge-tree-dead-fu | GUEST-bridge-tree-dead-fu: retire the stale TREE rows and B16, bound the idle-bridge test, drop the guest-plane tree exemption (#5611 reviews) | - | queued (release; tier B) |
-| OWN-resume-says-cancelled-fu | OWN-resume-says-cancelled-fu: RESUME's cancel note only when the STOP cancelled something. | #5664 | building (release; tier A) |
 | CLK-run-mut-mail-fu | CLK-run-mut-mail-fu: StartTLS setting delivers nothing, gmailtest.Waiting matches any goroutine, a replaced warm-up notice can go unshown. Release; from #5662. | #5324 | building (release; tier A) |
-| CLK-run-open-wipe-senders | CLK-run-open-wipe-senders: a senders plaintext handed back with an Open error is wiped too. Release; from #5666. | #5666 | building (release; tier A) |
 | GUEST-mut-plane | GUEST-mut-plane: kill or waive the old mutgate deletion survivors in the guest plane (42). Release; from #5621. | #5621 | building (release; tier A) |
 | GUEST-mut-owner | GUEST-mut-owner: kill or waive the old mutgate deletion survivors in the guest owner channel (33). Release; from #5621. | #5621 | queued (release; tier A) |
 | GUEST-mut-dispatch | GUEST-mut-dispatch: kill or waive the old mutgate deletion survivors in guest mcp, goal, plan and compact (27). Release; from #5621. | #5621 | queued (release; tier A) |
@@ -441,6 +437,10 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MUT-waiver-store | MUT-waiver-store: keep accepted Mutant-equivalent proofs in a statement-keyed record per package, so a widened mutgate target does not re-surface them. Release; from #5743. | #5743 | building (release; tier A) |
 | CLK-run-mut-mail-fu2 | CLK-run-mut-mail-fu2: a mail account stored with starttls is refused as unreadable instead of losing its password slot; the sign-in overlap test pins the refresh path. Release; from #5774. | #5774, #5694 | queued (release; tier A) |
 | MUT-deleted-test-own-lines-fu | MUT-deleted-test-own-lines-fu: #5770's release items: NOT COVERED rule scope, testdata as a test change, Mutant-uncovered alias, archive error text. Release; after #5776. | #5770 | queued (release; tier A) |
+| CLK-open-wipe-lint | CLK-open-wipe-lint: a sealer's Open plaintext is wiped on every path, held by a lint. Release; from #5772. | #5772 | building (release; tier A) |
+| MUT-waiver-store-claim | MUT-waiver-store-claim: claim a package whose mutant record changes, so new entries show in mutgate's summary. Release; from #5780. | #5780 | queued (release; tier A) |
+| MUT-waiver-store-cites | MUT-waiver-store-cites: mutant-record reasons cite statements, not line numbers. Release; from #5780. | #5780 | queued (release; tier A) |
+| CLK-aead-open-wipe | CLK-aead-open-wipe: direct cipher.AEAD.Open plaintexts in broker/clerk are wiped on success too. Release; from #5785. | #5785 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
