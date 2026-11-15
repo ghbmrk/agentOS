@@ -305,6 +305,29 @@ class Claimed(unittest.TestCase):
         tests_only = DIFF.split("diff --git a/broker/hint/hint_test.go")[1]
         self.assertEqual(mutgate.claimed("diff --git a/broker/hint/hint_test.go" + tests_only, packages=["hint"]), ["hint"])
 
+    def test_a_changed_record_claims_its_package(self):
+        # MUT-waiver-store-claim (#5786): a diff that changes only broker/<pkg>/MUTANTS-EQUIVALENT claims a
+        # gated package, with no target line, so verify resolves the record and lists its new entries.
+        rec = ("diff --git a/broker/hint/MUTANTS-EQUIVALENT b/broker/hint/MUTANTS-EQUIVALENT\n"
+               "--- a/broker/hint/MUTANTS-EQUIVALENT\n+++ b/broker/hint/MUTANTS-EQUIVALENT\n@@ -1,0 +2 @@\n+{}\n")
+        self.assertEqual(mutgate.claimed(rec, packages=["hint"]), ["hint"])
+        self.assertEqual(mutgate.claimed(rec, packages=["mail"]), [])
+        added, tests = mutgate.added_lines(rec)
+        self.assertEqual((mutgate.diff_targets(added, "hint"), mutgate.tests_changed(tests, "hint")), ({}, False))
+        # Added, deleted, or only lines removed: each changes the record.
+        for d in (rec.replace("--- a/broker/hint/MUTANTS-EQUIVALENT", "--- /dev/null"),
+                  rec.replace("+++ b/broker/hint/MUTANTS-EQUIVALENT", "+++ /dev/null").replace("@@ -1,0 +2 @@\n+{}", "@@ -1 +0,0 @@\n-{}"),
+                  rec.replace("@@ -1,0 +2 @@\n+{}", "@@ -2 +1,0 @@\n-{}")):
+            with self.subTest(d):
+                self.assertEqual(mutgate.claimed(d, packages=["hint"]), ["hint"])
+        # A file of another name, a record of another directory (testdata is never gated), or a `+++` line inside a
+        # hunk claims no package.
+        for d in (rec.replace("MUTANTS-EQUIVALENT", "MUTANTS-EQUIVALENT.md"),
+                  rec.replace("broker/hint/MUTANTS", "broker/hint/testdata/MUTANTS"),
+                  DOCS_ONLY + "@@ -3,0 +4 @@\n+++ b/broker/hint/MUTANTS-EQUIVALENT\n"):
+            with self.subTest(d):
+                self.assertEqual(mutgate.claimed(d, packages=["hint"]), [])
+
     def test_claimed_covers_every_package_violations_reads(self):
         # Any listed package outside claimed() could never yield a violation, whatever survives
         # there. The real tier list, not an injected one, so a prefix-line package counts (#3948).
@@ -2143,6 +2166,12 @@ class Plan(unittest.TestCase):
         self.assertEqual(mutgate.shard_count(lines(1048), [0] * 367, 0.0), 5)
         self.assertEqual(mutgate.shard_count({}, [], 1000.0), 1)
 
+    def test_a_package_with_no_target_line_plans_one_shard_and_no_suite_run(self):
+        # MUT-waiver-store-claim (#5786): a record-only claim runs one cheap shard, never its suite.
+        code, out, err = self.plan({"netguard": ({}, [])}, (None, "the suite must not run"))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out), [{"pkg": "netguard", "shard": 0, "of": 1}])
+
     def test_plan_sizes_each_package_by_its_suite(self):
         sim = ({"broker/kernel/sim/a.go": set(range(1, 824))}, [{}] * 534)
         code, out, err = self.plan({"kernel/sim": sim}, (48.0, None))
@@ -2568,6 +2597,42 @@ class Record(unittest.TestCase):
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("names no statement at the head", r.stdout)
             self.assertIn("Stale MUTANTS-EQUIVALENT entries", r.summary)
+
+    def test_a_record_only_change_lists_its_new_entries(self):
+        # MUT-waiver-store-claim (#5786): a PR that adds an entry and changes no .go line is claimed, its
+        # (empty) result read, and the summary lists the entry as new for review; a stale one fails.
+        head = self.VAR + "var b = 2 + 2\n"
+        rec = json.dumps({"file": "a.go", "mutant": "ARITHMETIC_BASE", "func": "b", "decl": Record.digest("var b = 2 + 2"),
+                          "stmt": ["var b = 2 + 2"], "at": 0, "after": "var a = 1 + 1", "occurrence": [1, 1],
+                          "reason": "b is never read", "accepted": "#5743"}) + "\n"
+        old = rec.replace("ARITHMETIC_BASE", "STATEMENT_DELETION")
+        with tempfile.TemporaryDirectory() as d:
+            run = self.repo(d, head, head, base_record=old, record=old + rec)
+            r = run("claimed", "--git", "HEAD~1", "--json")
+            self.assertEqual((r.returncode, json.loads(r.stdout)), (0, ["netguard"]), r.stderr)
+            r = self.verify(d, run)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("- netguard: 0 target lines", r.summary)
+            self.assertIn("New MUTANTS-EQUIVALENT entries in this PR", r.summary)
+            self.assertIn("- broker/netguard/a.go:4 ARITHMETIC\\_BASE (\\#5743): b is never read", r.summary)
+            self.assertNotIn("STATEMENT\\_DELETION (", r.summary)  # the base's entry is not new
+            # The claimed package needs its result, as any claim does.
+            shutil.rmtree(pathlib.Path(d) / "res")
+            (pathlib.Path(d) / "res").mkdir()
+            r = run("verify", str(pathlib.Path(d) / "res"), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("0 results for netguard", r.stderr)
+        with tempfile.TemporaryDirectory() as d:
+            # A record-only PR whose new entry names no statement fails the gate.
+            run = self.repo(d, head, head, record=rec.replace("2 + 2", "2 + 3"))
+            r = self.verify(d, run)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("names no statement at the head", r.stdout)
+        with tempfile.TemporaryDirectory() as d:
+            # Unchanged records claim nothing, so no result is needed.
+            run = self.repo(d, self.VAR, self.VAR, base_record=rec, record=rec)
+            r = run("claimed", "--git", "HEAD~1", "--json")
+            self.assertEqual((r.returncode, json.loads(r.stdout)), (0, []), r.stderr)
 
     def test_every_record_in_the_repository_resolves(self):
         # A record-only PR, or an edit to a proven statement in any package, fails here as well as in mutgate.
