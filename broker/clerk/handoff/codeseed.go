@@ -121,9 +121,9 @@ func OpenCodeSeed(key, blob []byte) (CodeSeed, error) {
 		return CodeSeed{}, ErrCodeSeed
 	}
 	plain, err := g.Open(nil, rest[:g.NonceSize()], rest[g.NonceSize():], []byte(sealedSeedTag))
+	defer clear(plain)
 	if err != nil {
 		return CodeSeed{}, ErrCodeSeed
 	}
-	defer clear(plain)
 	return ParseCodeSeed(plain)
 }

@@ -14,23 +14,110 @@ import sys
 import tempfile
 import unittest
 
+
 WORKFLOWS = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows"
 
 
+STEP_USES = re.compile(r"""(?:uses|"uses"|'uses')\s*:\s*([^\s#]+)""")  # plain, quoted, `uses :`
+PINNED = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$")
+
+
+def _indent(line):
+    return len(line) - len(line.lstrip())
+
+
+def _code(line):
+    return line.strip() and not line.lstrip().startswith("#")
+
+
+def _keys(body, col):
+    """[(index, text from col)] of body lines that sit at the step's key column (comments skipped)."""
+    return [(n, l[col:]) for n, l in enumerate(body) if n and _code(l) and _indent(l) == col]
+
+
+def _item(body):
+    """The key column of a list item and its first key's text ('' when the dash stands alone or is
+    followed only by a comment, so the keys start below it), or None if it has no keys."""
+    m = re.match(r"^(\s*)-(\s+)(\S.*)$", body[0])
+    if m and not m.group(3).startswith("#"):
+        col = len(m.group(1)) + 1 + len(m.group(2))
+        return col, body[0][col:]
+    first = next((l for l in body[1:] if _code(l)), None)
+    return None if first is None else (_indent(first), "")
+
+
+def unpinned(action):
+    """True if a step's action is neither local nor pinned by full commit SHA."""
+    return not action.startswith("./") and not PINNED.match(action)
+
+
+def load_steps(text):
+    """[(job id, step mapping)] for every step of every job, read by a real YAML loader, plus each
+    reusable-workflow job as a step of its own (its `uses`). The pin and token checks read these, so no
+    text form of a step can hide it (REV-LOW-tools finding 23; three rounds of hand-parser misses on
+    #5850 closed the class this way). PyYAML is pinned by hash in tests/requirements.txt."""
+    # Imported here, not at module level: other test modules import helpers from this one and run
+    # in jobs without PyYAML. A missing loader still errors every test that reads workflows, never
+    # skips it.
+    import yaml
+
+    class UniqueKeys(yaml.SafeLoader):
+        """A safe loader that refuses a duplicate mapping key, which PyYAML would resolve silently to
+        the last one (L3 on #5850: two `with:` keys in one step)."""
+
+    def mapping(loader, node, deep=False):
+        keys = set()
+        for k, _ in node.value:
+            key = loader.construct_object(k, deep=deep)
+            if key in keys:
+                raise yaml.constructor.ConstructorError(None, None, f"duplicate key {key!r}", k.start_mark)
+            keys.add(key)
+        return loader.construct_mapping(node, deep=deep)
+
+    UniqueKeys.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
+    doc = yaml.load(text, Loader=UniqueKeys)
+    out = []
+    for job, spec in ((doc or {}).get("jobs") or {}).items():
+        if "uses" in spec:
+            out.append((f"{job} (job)", {"uses": spec["uses"]}))
+        for step in spec.get("steps") or []:
+            out.append((job, step))
+    return out
+
+
+def keeps_no_token(step):
+    """True if a loaded checkout step's own `with:` sets persist-credentials to false: not a comment,
+    not `env:`, not a nested key, since the loader reads the mapping as checkout does."""
+    w = step.get("with")
+    return isinstance(w, dict) and w.get("persist-credentials") in (False, "false")
+
+
 def steps(text):
-    """Yield (action, step text) for each `uses:` step."""
+    """Yield (action, step text) for each `uses:` step, whatever key the step lists first: a list
+    item's mapping is read to its end and `uses:` found at the item's own key column (REV-LOW-tools
+    finding 23; a `name:`-first step used to skip the pin and checkout-token checks). A form this
+    misses (a flow mapping `- {uses: …}`) fails test_every_uses_line_is_a_step instead of passing."""
     lines = text.splitlines()
     for i, line in enumerate(lines):
-        m = re.match(r"^(\s*)-\s+uses:\s*([^\s#]+)", line)
+        m = re.match(r"^(\s*)-(?:\s|$)", line)
         if not m:
             continue
         indent = len(m.group(1))
         body = [line]
         for nxt in lines[i + 1:]:
-            if nxt.strip() and len(nxt) - len(nxt.lstrip()) <= indent:
+            if nxt.strip() and _indent(nxt) <= indent:
                 break
             body.append(nxt)
-        yield m.group(2), "\n".join(body)
+        while len(body) > 1 and not body[-1].strip():
+            body.pop()
+        item = _item(body)
+        if item is None:
+            continue
+        col, first = item
+        keys = [first] + [k for _, k in _keys(body, col)]
+        uses = [u.group(1) for u in (STEP_USES.match(k) for k in keys) if u]
+        if uses:
+            yield uses[0], "\n".join(body)
 
 
 def job_steps(text, job):
@@ -1206,19 +1293,18 @@ class WorkflowTest(unittest.TestCase):
 
     def test_actions_are_pinned_by_full_sha(self):
         for f in self.files():
-            for action, _ in steps(f.read_text()):
-                if action.startswith("./"):
-                    continue
-                self.assertRegex(action, r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$", f"{f.name}: {action}")
+            for job, step in load_steps(f.read_text()):
+                if "uses" in step:
+                    self.assertFalse(unpinned(str(step["uses"])), f"{f.name}: {job}: {step['uses']}")
 
     def test_checkouts_running_pr_code_keep_no_token(self):
         for f in self.files():
             text = f.read_text()
             if not re.search(r"^\s*pull_request(_target)?\s*:", text, re.M):
                 continue
-            for action, step in steps(text):
-                if action.startswith("actions/checkout@"):
-                    self.assertRegex(step, r"persist-credentials:\s*false", f"{f.name}: {step}")
+            for job, step in load_steps(text):
+                if str(step.get("uses", "")).startswith("actions/checkout@"):
+                    self.assertTrue(keeps_no_token(step), f"{f.name}: {job}: {step}")
 
     def test_no_workflow_pushes_to_main(self):
         # main requires status checks, so a workflow push to it would be rejected; trace.yml
@@ -1571,9 +1657,85 @@ class WorkflowTest(unittest.TestCase):
             # broker-race's copy also skips on a records-only change (CI-par-4); the rest is the same.
             self.assertEqual(dict(mut)[want], race[want].replace(guard, "", 1))
 
+    def test_mutants_matrix_holds_at_most_half_the_runner_floor(self):
+        # CI-mutgate-cap: a 32-shard plan (#5817) must not queue every shard at once ahead of the
+        # 5-minute gate jobs; 3 is half the 6-runner floor measured on 2026-11-15 (see mutgate.yml).
+        text = (WORKFLOWS / "mutgate.yml").read_text()
+        block = text[text.index("\n  mutants:\n"):text.index("\n  mutgate:\n")]
+        self.assertRegex(block, r"\n    strategy:\n(?:      .*\n)*?      max-parallel: 3\n")
+
     def test_steps_finds_steps(self):
         sample = "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          x: 1\n      - run: echo\n"
         self.assertEqual(list(steps(sample)), [("actions/checkout@v4", "      - uses: actions/checkout@v4\n        with:\n          x: 1")])
+        # REV-LOW-tools finding 23: a step found only when `uses` came first let name-, id- or if-first
+        # steps skip the pin and checkout-token checks. Every key order yields the same action and the
+        # whole step.
+        for first in ("name: Check out", "id: co", "if: always()", "with:\n          x: 1"):
+            with self.subTest(first=first):
+                step = f"      - {first}\n        uses: actions/checkout@v4\n        env:\n          Y: 2"
+                got = list(steps("jobs:\n  a:\n    steps:\n" + step + "\n      - run: echo\n"))
+                self.assertEqual(got, [("actions/checkout@v4", step)])
+        # Not a step's action: `uses:` deeper than the step's own keys (a run body, a nested value).
+        for body in ("      - run: |\n          uses: evil/x@main\n          echo\n",
+                     "      - name: n\n        with:\n          uses: evil/x@main\n"):
+            with self.subTest(body=body):
+                self.assertEqual(list(steps("jobs:\n  a:\n    steps:\n" + body)), [])
+
+    def test_hand_parser_agrees_with_the_loader(self):
+        # steps() still supplies step text to the other tests here; it must find exactly the actions
+        # the YAML loader finds, in order, so a step it misreads fails instead of going unread.
+        for f in self.files():
+            text = f.read_text()
+            with self.subTest(file=f.name):
+                self.assertEqual([a for a, _ in steps(text)],
+                                 [str(s["uses"]) for job, s in load_steps(text) if "uses" in s and not job.endswith(" (job)")])
+        H = "jobs:\n  a:\n    steps:\n"
+        sha = "0" * 40
+        # The run-body decoy from the third fix-list on #5850: a count matched, the loader does not.
+        decoy = (H + "      - run: |\n           -  x: 1\n            - y: 2\n              uses: actions/cache@" + sha + "\n"
+                 "      - {uses: evil/x@v1}\n")
+        self.assertNotEqual([a for a, _ in steps(decoy)], [str(s["uses"]) for _, s in load_steps(decoy) if "uses" in s])
+        self.assertEqual([s["uses"] for _, s in load_steps(decoy) if "uses" in s and unpinned(s["uses"])], ["evil/x@v1"])
+
+    def test_step_order_does_not_hide_an_unpinned_action(self):
+        # REV-LOW-tools finding 23 and the three fix-lists on #5850: every form of a step, read by the
+        # loader, meets the same pin and token predicates the real-workflow tests use.
+        H = "jobs:\n  a:\n    steps:\n"
+        sha = "0" * 40
+        for step in ("      - name: x\n        uses: actions/cache@v4\n",
+                     "      -\n        name: x\n        uses: actions/cache@v4\n",
+                     "      -\n          # c\n        uses: actions/cache@v4\n",
+                     "      -   # c\n        uses: actions/cache@v4\n",
+                     '      - name: x\n        "uses": actions/cache@v4\n',
+                     "      - 'uses': actions/cache@v4\n",
+                     "      - name: x\n        uses : actions/cache@v4\n",
+                     "      - {name: x, uses: actions/cache@v4}\n",
+                     "      - run: |\n          echo\n      - {uses: actions/cache@v4}\n"):
+            with self.subTest(step=step):
+                got = [s["uses"] for _, s in load_steps(H + step) if "uses" in s]
+                self.assertEqual([u for u in got if unpinned(u)], ["actions/cache@v4"])
+        self.assertEqual([s["uses"] for _, s in load_steps("jobs:\n  r:\n    uses: o/r/.github/workflows/w.yml@main\n")
+                          if unpinned(s["uses"])], ["o/r/.github/workflows/w.yml@main"])
+        self.assertEqual([s for _, s in load_steps(H + "      - uses: ./.github/actions/x\n") if unpinned(s["uses"])], [])
+        co = "      - name: co\n        uses: actions/checkout@" + sha + "\n"
+        for tail, ok in (("        with:\n          persist-credentials: false\n", True),
+                         ("        with:\n          fetch-depth: 0\n          persist-credentials: false # drop it\n", True),
+                         ("        with:\n          # x\n          'persist-credentials': 'false'\n", True),
+                         ("        with: {persist-credentials: false}\n", True),
+                         ("        with:\n          fetch-depth: 0 # persist-credentials: false\n", False),
+                         ("        with:\n          # persist-credentials: false\n          fetch-depth: 0\n", False),
+                         ("        env:\n          persist-credentials: false\n", False),
+                         ("        with:\n          fetch-depth: 0\n        env:\n          persist-credentials: false\n", False),
+                         ("        with:\n          path: x\n          extra:\n            persist-credentials: false\n", False),
+                         ("        with:\n          persist-credentials: true\n", False),
+                         ("        run: |\n          persist-credentials: false\n", False),
+                         ('        with:\n          ref: "main\n          persist-credentials: false"\n', False)):
+            with self.subTest(tail=tail):
+                self.assertEqual([keeps_no_token(s) for _, s in load_steps(H + co + tail)], [ok])
+        # A duplicate key is refused, not resolved to whichever copy a reader picks.
+        import yaml
+        with self.assertRaises(yaml.YAMLError):
+            load_steps(H + co + "        with:\n          persist-credentials: false\n        with:\n          fetch-depth: 0\n")
 
 
 # PREMERGE-stale (#1946): run premerge.yml's own script under the runner's shell with `gh`, `git`,

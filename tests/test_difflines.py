@@ -69,6 +69,12 @@ class DiffLines(unittest.TestCase):
         self.assertEqual(self.run_tool("a.txt:6", "a.txt:7")[0], 0)
         self.assertEqual(self.run_tool("a.txt:5")[0], 1)
 
+    def test_configured_inter_hunk_context_does_not_fuse_hunks(self):
+        git(self.dir, "config", "diff.interHunkContext", "10")
+        code, out = self.run_tool("a.txt:3", "a.txt:5", "a.txt:6")
+        self.assertEqual(out, ["in-diff a.txt:3", "unchanged a.txt:5", "in-diff a.txt:6"])
+        self.assertEqual(code, 1)
+
     def test_deleted_file_counts_as_in_diff(self):
         self.assertEqual(self.run_tool("gone.txt:1"), (0, ["in-diff gone.txt:1"]))
 

@@ -15,13 +15,15 @@ package wipelint_test
 // The rule, over every non-test file of every package under broker/clerk,
 // type-checked: a call of a method named Open whose signature is
 // func([]byte, []byte) ([]byte, error) (clerk.Sealer's Open, whatever type
-// or interface spells it) appears only as `v, err := x.Open(a, b)` (or =)
+// or interface spells it) or func([]byte, []byte, []byte, []byte) ([]byte,
+// error) (cipher.AEAD's, CLK-aead-open-wipe #5788) appears only as `v, err := x.Open(a, b)` (or =)
 // with v a named variable, and the very next statement is
 // `defer clear(v)` with the builtin clear, so the wipe covers every return
-// path, the error path included. The one exception is a sealer wrapper
-// listed by name in wipeWrappers: a method that must hand its plaintext to
-// its caller, which this rule then holds. Every Open in a listed wrapper is
-// exempt, so the entry's reason and the wrapper's body are held by review;
+// path, the error path included. The one exception is a function listed
+// by name in wipeWrappers: a sealer wrapper that must hand its plaintext to
+// its caller, which this rule then holds, or a function whose plaintext
+// another wipe covers or is no secret, the reason given. Every Open in a
+// listed function is exempt, so the entry's reason and the wrapper's body are held by review;
 // a new wrapper fails until a reviewed PR lists it, and a listed wrapper
 // that is gone fails too (stale). Any other use fails: the plaintext
 // discarded to _, opened in an if or switch header, returned from a
@@ -49,12 +51,34 @@ import (
 	"github.com/ghbmrk/agentos/broker/internal/lintload"
 )
 
-// wipeWrappers names, by types.Func.FullName, each sealer wrapper whose
-// Open hands its plaintext to its caller, with the reason.
+// wipeWrappers names, by types.Func.FullName, each function whose Open
+// hands its plaintext on unwiped, with the reason.
 var wipeWrappers = map[string]string{
 	// The test sealer records each plaintext so a test can check its
 	// caller wiped it (Wiped); it returns the plaintext beside OpenErr.
 	"(*github.com/ghbmrk/agentos/broker/clerk/inbox/gmailtest.Kept).Open": "test sealer: hands back and records the plaintext",
+	// The clerk's sealer: its plaintext goes to the callers of its Open,
+	// which this rule holds.
+	"(github.com/ghbmrk/agentos/broker/clerk.aesSealer).Open": "the sealer itself: its Open's callers are held here",
+	// The store's unwrap: Unlock wipes each plaintext by hand on every
+	// path, and keeps the store key only inside its secret.Secret.
+	"github.com/ghbmrk/agentos/broker/clerk/seal.open": "Unlock wipes each opened key and entry set by hand",
+	// A driver's key: opened through a closure, once at start and once
+	// per Lend, each plaintext wiped on success (clear at start, defer
+	// clear in the Lend); stdlib GCM returns a nil plaintext with every
+	// error, so the error paths hold nothing. The shape is held by review:
+	// reshaping it moves devslot/proc under the mutation gate, whose
+	// driver tests fail under coverage (#5788's Findings line).
+	"github.com/ghbmrk/agentos/broker/clerk/devslot/proc.lendFrom": "each open wiped at the start check and in the Lend",
+	// A session frame is an accessory's HTTP response (characteristic
+	// values, no key): Read copies it into the session's bufio.Reader and
+	// the HTTP parser keeps more copies, so a wipe here would erase one
+	// copy of several (#5788).
+	"(*github.com/ghbmrk/agentos/broker/clerk/homekit.frameReader).next": "frame handed to Read; an HTTP response copied on by bufio",
+	// Pair-setup M6 and pair-verify M2 carry the accessory's identifier,
+	// long-term public key and signature, all public; the pin keeps
+	// slices of the plaintext, so a wipe would erase the pin.
+	"github.com/ghbmrk/agentos/broker/clerk/homekit.openMsg": "pairing plaintext is public: identifier, public key, signature",
 }
 
 // clerkDir is broker/clerk, the tree the rule reads. The lint sits in its
@@ -97,8 +121,9 @@ func TestEveryOpenedPlaintextIsWipedOnEveryPath(t *testing.T) {
 		}
 	}
 	// A loader that read nothing would pass every tree: the clerk's own
-	// stores alone call the sealer's Open more than this.
-	if opens < 5 {
+	// stores alone call the sealer's Open more than this, and the five
+	// direct AEAD Opens of #5788 add to them.
+	if opens < 10 {
 		t.Fatalf("the lint saw %d sealer Open calls; want the clerk's stores among them", opens)
 	}
 	for w := range wipeWrappers {
@@ -124,7 +149,7 @@ func wipeProblems(fset *token.FileSet, f *ast.File, info *types.Info, wrappers m
 	for _, decl := range f.Decls {
 		fd, isFn := decl.(*ast.FuncDecl)
 		wrapper := false
-		if isFn && fd.Recv != nil {
+		if isFn {
 			if fn, isFunc := info.Defs[fd.Name].(*types.Func); isFunc {
 				_, wrapper = wrappers[fn.FullName()]
 				if wrapper {
@@ -172,9 +197,9 @@ func wipeProblems(fset *token.FileSet, f *ast.File, info *types.Info, wrappers m
 		switch {
 		case ok[id]:
 		case !called[id]:
-			problems = append(problems, line(id)+": a sealer's Open taken as a value; call it and defer clear on its plaintext")
+			problems = append(problems, line(id)+": an Open taken as a value; call it and defer clear on its plaintext")
 		default:
-			problems = append(problems, line(id)+": a sealer's Open plaintext is not wiped on every path; write `v, err := x.Open(...)` then `defer clear(v)` as the next statement")
+			problems = append(problems, line(id)+": an Open's plaintext is not wiped on every path; write `v, err := x.Open(...)` then `defer clear(v)` as the next statement")
 		}
 		return true
 	})
@@ -223,22 +248,26 @@ func defersClear(s ast.Stmt, lhs ast.Expr, info *types.Info) bool {
 }
 
 // isSealerOpen reports whether obj is a method named Open with the
-// signature func([]byte, []byte) ([]byte, error).
+// signature func([]byte, []byte) ([]byte, error), a sealer's, or
+// func([]byte, []byte, []byte, []byte) ([]byte, error), an AEAD's.
 func isSealerOpen(obj types.Object) bool {
 	fn, isFn := obj.(*types.Func)
 	if !isFn || fn.Name() != "Open" {
 		return false
 	}
 	sig := fn.Type().(*types.Signature)
-	if sig.Recv() == nil || sig.Variadic() || sig.Params().Len() != 2 || sig.Results().Len() != 2 {
+	if n := sig.Params().Len(); sig.Recv() == nil || sig.Variadic() || (n != 2 && n != 4) || sig.Results().Len() != 2 {
 		return false
 	}
 	// Underlying types, so an Open over a named slice (type Blob []byte) is one too.
 	bytes := types.NewSlice(types.Typ[types.Byte])
 	isBytes := func(t types.Type) bool { return types.Identical(t.Underlying(), bytes) }
-	return isBytes(sig.Params().At(0).Type()) &&
-		isBytes(sig.Params().At(1).Type()) &&
-		isBytes(sig.Results().At(0).Type()) &&
+	for i := range sig.Params().Len() {
+		if !isBytes(sig.Params().At(i).Type()) {
+			return false
+		}
+	}
+	return isBytes(sig.Results().At(0).Type()) &&
 		types.Identical(sig.Results().At(1).Type(), types.Universe.Lookup("error").Type())
 }
 
@@ -261,6 +290,10 @@ type Sealer interface {
 type aead struct{}
 
 func (aead) Open(blob, aad []byte) ([]byte, error) { return blob, nil }
+
+type AEAD interface {
+	Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error)
+}
 
 type vm struct{}
 
@@ -422,6 +455,51 @@ func (x w) Open(b, a []byte) ([]byte, error) {
 	p, err := x.S.Open(b, a)
 	return p, err
 }`, 1},
+		{"an AEAD Open with its defer next", `func f(g AEAD, b []byte) error {
+	plain, err := g.Open(nil, b[:12], b[12:], nil)
+	defer clear(plain)
+	return err
+}`, 0},
+		{"an AEAD Open wiped after the error check (codeseed)", `func f(g AEAD, b []byte) error {
+	plain, err := g.Open(nil, b[:12], b[12:], nil)
+	if err != nil {
+		return err
+	}
+	defer clear(plain)
+	return nil
+}`, 1},
+		{"an AEAD Open returned from a closure (devslot)", `func f(g AEAD, b []byte) func() ([]byte, error) {
+	return func() ([]byte, error) { return g.Open(nil, b[:12], b[12:], nil) }
+}`, 1},
+		{"an AEAD Open into an outer variable (camera)", `func f(g AEAD, b []byte, lend func(func(AEAD) error) error) error {
+	var plain []byte
+	err := lend(func(g AEAD) error {
+		var err error
+		plain, err = g.Open(nil, b[:12], b[12:], nil)
+		return err
+	})
+	defer clear(plain)
+	return err
+}`, 1},
+		{"an AEAD Open in a listed function that is no method", `func openListed(g AEAD, b []byte) ([]byte, error) {
+	return g.Open(nil, b[:12], b[12:], nil)
+}`, 0},
+		{"an AEAD Open in an unlisted function returned on", `func openOther(g AEAD, b []byte) ([]byte, error) {
+	p, err := g.Open(nil, b[:12], b[12:], nil)
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}`, 1},
+		{"an Open of three byte slices is neither shape", `type three struct{}
+
+func (three) Open(a, b, c []byte) ([]byte, error) { return nil, nil }
+
+func f(x three) error {
+	p, err := x.Open(nil, nil, nil)
+	_ = p
+	return err
+}`, 0},
 		{"an Open of another shape is no sealer's", `func f(v vm) error {
 	m, err := v.Open("x", 1)
 	_ = m
@@ -506,7 +584,7 @@ func f(s Sealer, b []byte) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			listed := map[string]string{"(*example.test/p.listed).Open": "case"}
+			listed := map[string]string{"(*example.test/p.listed).Open": "case", "example.test/p.openListed": "case"}
 			if _, got := wipeProblems(l.Fset, f, info, listed, map[string]bool{}); len(got) != c.want {
 				t.Fatalf("got %d problems %q; want %d", len(got), got, c.want)
 			}

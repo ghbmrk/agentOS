@@ -17,7 +17,7 @@ Read this first, on either subscription (both are equal peers, OPERATING §7; D-
 - **D-099** Both subscriptions are equal peers; no main one, no lane restriction between them, except during the D-139 migration until the old core is deleted (§3).
 - **D-173, D-312** No sacrifice of the final form for staging, and no stopgaps: no interim mode, temporary fallback or "until X" workaround is offered or built; build the final path and make it work.
 - **D-306** No path freeze (retires D-128's G2 freeze and D-198): any row's paths may be built; D-098 rows stay frozen.
-- The session posting the last required accept arms the merge (head = accepted head, CI green, OPERATING §7; D-120); PRs matching `tools/premerge.py --needs-mark` also need a separate Security accept at an equal head, and no PR waits for Mark's line (D-137). Asks to Mark are cards, never typed phrases.
+- Every accepting session arms the merge at its accepted head, and the required `premerge` status holds it until all required accepts match (OPERATING §7; #5701); PRs matching `tools/premerge.py --needs-mark` also need a separate Security accept at an equal head, and no PR waits for Mark's line (D-137). Asks to Mark are cards, never typed phrases.
 - **D-121** Speed rules (OPERATING §5): run CI's exact commands (and a `-count=N` stress run on new concurrency tests) before a PR or verdict; briefs pre-approve their guard files (`tools/risk_tier.py` class, `broker/daemon/arc2_test.go` allowlist); readiness reads the code; one push per round; on the G1 critical path stack on a review-accepted interface and run disjoint packages in parallel; tier-A builders on Opus, B/C on Sonnet, no model switch mid-session; fix a flake the second time. Tier A keeps two reviews (Security; Potency/UX/L3).
 - **D-122** Phone custody (#1843): an app login on a box-owned dedicated phone is broker custody only if the phone has no SIM, is not on the owner's number, every commit tap is gated by the approval tiers, and it is never the approval phone (CH-4).
 - Chat layout: standing threads Decisions, Questions, PR updates, Alerts; finished threads are resolved at once. Project memory may be off, so durable state lives in the repo.
@@ -41,7 +41,7 @@ Written by sub A at Mark's request. Sub B is already building here, so this snap
   - the checker rebuilt as `broker/clerk/codecheck` (D-244).
 
 **How to pick work, either sub**
-1. Reviews owed on open PRs come before new builds. Use the one-thread shape above, and the last accept arms, whichever sub posts it.
+1. Reviews owed on open PRs come before new builds. Use the one-thread shape above, and each accept arms, whichever sub posts it.
 2. Before starting any row, check its issue for a claim and for merged work (`git log origin/main -- <dir>`), and check open PRs for overlapping files (D-111). Rows that read `queued` may already be merged or claimed.
 3. Then, in order: the UPD-5 requalification chain, deletion rows (D-245; kernel-lane rows one at a time across both subs), then the new-capability lanes in their own directories (enforcer, HomeKit, camera, vision, device slot, Withings, decoys, the CLK-8 line).
 4. Rows that share `image/` or `broker/core/core.txt` run one at a time.
