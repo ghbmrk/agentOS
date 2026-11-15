@@ -140,3 +140,20 @@ func TestTrimSpaceOfBlankBodies(t *testing.T) {
 		t.Fatal("trimSpace differs from strings.TrimSpace on ASCII space")
 	}
 }
+
+func TestAWrongPairingCodeCompletesNothingAndThreeEndTheAttempt(t *testing.T) {
+	nc := &NumberChange{Code: "12345678", Expires: t0.Add(PairingTTL)}
+	const newNum = "+15550000002"
+	for i := 0; i < 3; i++ {
+		if n, _, err := nc.Complete(ownerNum, newNum, "87654321", t0); n != "" || !errors.Is(err, ErrPairing) {
+			t.Fatalf("wrong code %d completed: %q, %v", i+1, n, err)
+		}
+	}
+	if n, _, err := nc.Complete(ownerNum, newNum, "12345678", t0); n != "" || !errors.Is(err, ErrPairing) {
+		t.Fatalf("the right code after three wrong ones completed: %q, %v", n, err)
+	}
+	ok := &NumberChange{Code: "12345678", Expires: t0.Add(PairingTTL)}
+	if n, txt, err := ok.Complete(ownerNum, newNum, " 12345678\n", t0); err != nil || n != newNum || !strings.Contains(txt.ToOld, "...0002") {
+		t.Fatalf("the right code: %q, %+v, %v", n, txt, err)
+	}
+}
