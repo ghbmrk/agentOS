@@ -415,11 +415,12 @@ def _gap_lines(text, after):
     for d in _decls("", text):
         if d[1] in ("func", "method"):
             head = next(i for i in range(d[6], d[7] + 1) if DECL.match(bare[i - 1]))
-            close = max([i for i in range(head, d[7] + 1) if bare[i - 1] == "}"] or [head])
+            # `} // note` is blanked to `}` plus spaces; no closing brace found keeps the wide rule.
+            close = max([i for i in range(head, d[7] + 1) if bare[i - 1].rstrip() == "}"] or [None], key=lambda i: i or 0)
             spans.append((d[6], d[7], head, close))
     for n, inside in ((after, lambda h, c: h <= n < c), (after + 1, lambda h, c: h < n <= c)):
         span = next(((h, c) for a, b, h, c in spans if a <= n <= b), None)
-        if span is None or inside(*span):
+        if span is None or span[1] is None or inside(*span):
             out.add(n)
     return out
 

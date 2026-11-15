@@ -1926,6 +1926,13 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
         self.assertEqual(gap(at("func TestA(t *testing.T) {")), {at("func TestA(t *testing.T) {"), at("func TestA(t *testing.T) {") + 1})
         self.assertEqual(gap(at("\ta()") + 1), {at("\ta()") + 1, at("\ta()") + 2})
         self.assertEqual(gap(at("\tb()")), {at("\tb()"), at("\tb()") + 1})
+        # A closing brace with a trailing comment is still the closing brace (Security on #5860).
+        noted = base.replace("\n}\n\n// TestB", "\n} // done\n\n// TestB")
+        self.assertEqual(mutgate._gap_lines(noted, at("}")), set())
+        self.assertEqual(mutgate._gap_lines(noted, at("\ta()")), {at("\ta()"), at("\ta()") + 1})
+        # No closing brace found: the wide rule, both lines.
+        open_ = "package h\n\nfunc TestA(t *testing.T) {\n\ta()\n"
+        self.assertEqual(mutgate._gap_lines(open_, 4), {4, 5})
         # Reached by name: the appended test names none of the old ones at the base.
         files = {"broker/h/a_test.go": base}
         self.assertEqual(mutgate.reaching_tests(files, {"broker/h/a_test.go": gap(at("}")) | {at("\ta()")}}), ["TestA"])
