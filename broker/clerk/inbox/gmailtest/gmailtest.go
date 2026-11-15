@@ -841,15 +841,10 @@ func known(id string) G {
 // processor first, so a caller's spin on it lets g run.
 func (g G) Waiting(fn, on string) bool { return waiting(g.id, fn, on) }
 
-// Waiting is G.Waiting over every goroutine in the process: any one so
-// blocked satisfies it, a leaked one included. Prefer a G's Waiting.
-func Waiting(fn, on string) bool { return waiting("", fn, on) }
-
 // createdIn reads a dump's "created by ... in goroutine N" line.
 var createdIn = regexp.MustCompile(`(?m)^created by .* in goroutine (\d+)$`)
 
-// waiting is Waiting over the G numbered id, or over every goroutine when
-// id is empty.
+// waiting is G.Waiting over the G numbered id.
 func waiting(id, fn, on string) bool {
 	dump := strings.Split(stacks(true), "\n\n")
 	parent := make(map[string]string, len(dump))
@@ -871,7 +866,7 @@ func waiting(id, fn, on string) bool {
 	}
 	for _, g := range dump {
 		header, _, _ := strings.Cut(g, "\n")
-		if (id == "" || in(goID(header))) && strings.Contains(header, "["+on) && strings.Contains(g, fn+"(") {
+		if in(goID(header)) && strings.Contains(header, "["+on) && strings.Contains(g, fn+"(") {
 			return true
 		}
 	}
