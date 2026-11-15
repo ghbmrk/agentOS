@@ -1,4 +1,4 @@
-package clerk_test
+package wipelint_test
 
 // REQ: CLK-1, STO-2
 
@@ -8,6 +8,9 @@ package clerk_test
 // in a row found a caller that returned on that error before its wipe
 // (#5666, #5772, and the keys, secrets and plan stores fixed with this
 // lint), so the shape is now refused here instead of in review.
+// The keys and secrets stores open through sealopen.With, whose tests
+// observe the wipe (a lint cannot fail a mutant); this lint holds the
+// shape of every Open, With's own included.
 //
 // The rule, over every non-test file of every package under broker/clerk,
 // type-checked: a call of a method named Open whose signature is
@@ -36,7 +39,6 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -55,8 +57,13 @@ var wipeWrappers = map[string]string{
 	"(*github.com/ghbmrk/agentos/broker/clerk/inbox/gmailtest.Kept).Open": "test sealer: hands back and records the plaintext",
 }
 
+// clerkDir is broker/clerk, the tree the rule reads. The lint sits in its
+// own package so that package clerk's tests, and so the mutation gate's
+// targets for it, stay those of the clerk itself.
+const clerkDir = ".."
+
 var wipeLoad = sync.OnceValues(func() (*lintload.Loaded, error) {
-	return lintload.Load(".", lintload.Build{}, "./...")
+	return lintload.Load(clerkDir, lintload.Build{}, "./...")
 })
 
 // TestEveryOpenedPlaintextIsWipedOnEveryPath runs the rule over the tree.
@@ -65,7 +72,7 @@ func TestEveryOpenedPlaintextIsWipedOnEveryPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wd, err := os.Getwd()
+	wd, err := filepath.Abs(clerkDir)
 	if err != nil {
 		t.Fatal(err)
 	}

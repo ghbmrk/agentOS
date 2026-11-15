@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
+	"github.com/ghbmrk/agentos/broker/clerk/sealopen"
 )
 
 // Keys is the model clerk's API keys in one sealed value (CLK-1, STO-2): a
@@ -48,14 +49,8 @@ func (k *Keys) Load(atRest []byte) error {
 	if len(atRest) == 0 {
 		return nil
 	}
-	plain, err := k.s.Open(atRest, keysAAD)
-	// Wiped on the error path too: a sealer may fail after it decrypted.
-	defer clear(plain)
-	if err != nil {
-		return ErrKeysOpen
-	}
 	var m map[string]keyEntry
-	if json.Unmarshal(plain, &m) != nil {
+	if sealopen.With(k.s, atRest, keysAAD, func(plain []byte) error { return json.Unmarshal(plain, &m) }) != nil {
 		return ErrKeysOpen
 	}
 	k.blob = append([]byte(nil), atRest...)
@@ -75,13 +70,7 @@ func (k *Keys) openLocked() (map[string]keyEntry, error) {
 	if k.blob == nil {
 		return m, nil
 	}
-	plain, err := k.s.Open(k.blob, keysAAD)
-	// Wiped on the error path too: a sealer may fail after it decrypted.
-	defer clear(plain)
-	if err != nil {
-		return nil, ErrKeysOpen
-	}
-	if json.Unmarshal(plain, &m) != nil {
+	if sealopen.With(k.s, k.blob, keysAAD, func(plain []byte) error { return json.Unmarshal(plain, &m) }) != nil {
 		return nil, ErrKeysOpen
 	}
 	return m, nil
