@@ -849,11 +849,14 @@ func TestDispatchMutMCPRefusesGetWithAllow(t *testing.T) {
 
 func TestDispatchMutMCPBodyBound(t *testing.T) {
 	// A request of exactly maxMCPBody bytes is answered; one byte more is
-	// refused before it is decoded.
+	// refused before it is decoded: its answer is the refusal alone.
 	r := newRig(t, nil)
 	ping := `{"jsonrpc":"2.0","id":1,"method":"ping"}`
-	for _, c := range []struct{ n, code int }{{maxMCPBody, http.StatusOK}, {maxMCPBody + 1, http.StatusRequestEntityTooLarge}} {
-		if code, out := r.do("m1", "POST", "/mcp", ping+strings.Repeat(" ", c.n-len(ping))); code != c.code {
+	for _, c := range []struct {
+		n, code int
+		want    string
+	}{{maxMCPBody, http.StatusOK, `{"id":1,"jsonrpc":"2.0","result":{}}` + "\n"}, {maxMCPBody + 1, http.StatusRequestEntityTooLarge, "body too large or unreadable\n"}} {
+		if code, out := r.do("m1", "POST", "/mcp", ping+strings.Repeat(" ", c.n-len(ping))); code != c.code || out != c.want {
 			t.Fatalf("%d-byte body: %d %.80q", c.n, code, out)
 		}
 	}
