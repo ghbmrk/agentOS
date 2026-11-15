@@ -1,10 +1,6 @@
 package kernel
 
-import (
-	"slices"
-
-	"github.com/ghbmrk/agentos/broker/kernel/key"
-)
+import "github.com/ghbmrk/agentos/broker/kernel/key"
 
 // SendCheck is sendCheck at one time, for the external tests.
 func SendCheck(s *State, p *PlanState, st *StepState, i int, now int64) *key.Refusal {
@@ -22,18 +18,4 @@ var (
 func Emit(k *Kernel, now int64, typ string, body any) error {
 	_, err := k.emit(At(now), typ, body)
 	return err
-}
-
-// GraphReach is the classes clerk's keys reach through the declarations.
-func GraphReach(s *State, clerk string) []key.Asset { return s.graphReach(clerk) }
-
-// Reached is the sorted nodes node reaches, itself included; nil when no
-// declaration names it.
-func Reached(s *State, node string) []string {
-	var out []string
-	for id := range s.reached(node) {
-		out = append(out, id)
-	}
-	slices.Sort(out)
-	return out
 }
