@@ -149,6 +149,7 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 		notice   bool   // the box's line sends recoveryNotice before its first reply
 		note     string // the step's note, "" for none
 		diag     bool   // a timeout, whose error carries modemDiag; a reply out of order carries none
+		early    bool   // the step fails before its stranger stage, so the unpaired number never texts
 	}{
 		{name: "pass", st: owner.State{LastStep: step}, enrolled: true, done: true},
 		{name: "recovery notice passed over, noted and failed", st: owner.State{LastStep: step}, enrolled: true, done: true,
@@ -190,14 +191,14 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 					m.Text = "HELP"
 				}
 				return m
-			}, want: "no reply to a fresh code", diag: true},
+			}, want: "no reply to a fresh code", diag: true, early: true},
 		{name: "STATUS unanswered", st: owner.State{LastStep: step}, enrolled: true, done: true,
 			mutate: func(_ *modem.Line, _ *modem.Carrier, m modem.SMS) modem.SMS {
 				if m.Text == "STATUS" && m.From == phoneNum {
 					m.Text = "HELP"
 				}
 				return m
-			}, want: "no locked reply to STATUS", diag: true},
+			}, want: "no locked reply to STATUS", diag: true, early: true},
 		{name: "code dropped", st: owner.State{LastStep: step}, enrolled: true, done: true,
 			mutate: func(_ *modem.Line, _ *modem.Carrier, m modem.SMS) modem.SMS {
 				if codeRe.MatchString(m.Text) && m.From == phoneNum {
@@ -281,6 +282,15 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 			}
 			if got := strings.Join(notes, "|"); got != c.note {
 				t.Fatalf("notes %q, want %q", got, c.note)
+			}
+			// A failed stage ends the step: no later stage sends (mutgate
+			// on #5194: main_linux.go's locked check, #5202).
+			if c.early {
+				for _, m := range carrier.Log() {
+					if m.From == strangerNum {
+						t.Fatalf("the unpaired number texted %q after the step failed", m.Text)
+					}
+				}
 			}
 		})
 	}
