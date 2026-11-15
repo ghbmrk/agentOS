@@ -121,7 +121,9 @@ func startDriver(t *testing.T, hostUID int, keyFiles ...*os.File) (*os.File, *ex
 	}
 	cmd.ExtraFiles = append([]*os.File{end}, keyFiles...)
 	if len(keyFiles) > 0 {
-		cmd.Env = append(cmd.Env, "LISTEN_FDS=3", "LISTEN_FDNAMES=connection:"+proc.KeyFDName+":"+proc.DeviceFDName, proc.DriverEnv+"=probe")
+		// The key's file first, then the device file's, as many as given.
+		names := []string{"connection", proc.KeyFDName, proc.DeviceFDName}[:1+len(keyFiles)]
+		cmd.Env = append(cmd.Env, "LISTEN_FDS="+strconv.Itoa(len(names)), "LISTEN_FDNAMES="+strings.Join(names, ":"), proc.DriverEnv+"=probe")
 	}
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
@@ -212,6 +214,8 @@ func TestMainLendsTheDeviceKey(t *testing.T) {
 	}{
 		{"the template's files", func(t *testing.T) []*os.File { return keyFiles(t, "driver-probe") }, 1},
 		{"no files", func(*testing.T) []*os.File { return nil }, 3},
+		// The key's file alone is no key, and is still closed.
+		{"the key's file alone", func(t *testing.T) []*os.File { return keyFiles(t, "driver-probe")[:1] }, 3},
 	} {
 		files := c.files(t)
 		host, cmd, out := startDriver(t, os.Getuid(), files...)
