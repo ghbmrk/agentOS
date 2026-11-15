@@ -3142,6 +3142,24 @@ class Misread(unittest.TestCase):
         self.assertIn("Waivers matching more than one mutant", text)
         self.assertNotIn("Mutant-misread lines naming no", text)  # listed once, as ambiguous
 
+    def test_a_case_entered_by_fallthrough_is_refused(self):
+        # Security delta on #5870: `case x > 0:` ran and fell through into `case y > 5:`, whose body ran
+        # with `y > 5` never evaluated; the profile is real `go test -covermode=set` output for F(1, 0).
+        src = b"package p\n\nfunc F(x, y int) int {\n\tswitch {\n\tcase x > 0:\n\t\tfallthrough\n\tcase y > 5:\n" \
+              b"\t\treturn 1\n\t}\n\treturn 0\n}\n"
+        blocks = [((3, 22), (4, 9), True), ((5, 13), (6, 14), True), ((7, 13), (8, 11), True), ((10, 2), (10, 10), False)]
+        lines = src.split(b"\n")
+        self.assertIsNone(mutgate.misread_evidence(blocks, lines, 7, 9))
+        self.assertEqual(mutgate.misread_evidence(blocks, lines, 5, 9), "its case clause's body, which the changed tests ran")
+        # A comment between, a trailing comment on it, or a block comment still refuses; a plain statement does not.
+        for before, refused in ((b"\t\tfallthrough\n\t\t// next\n", True), (b"\t\tfallthrough // into y\n", True),
+                                (b"\t\t/* x */\n", True), (b"\t\treturn 2\n", False)):
+            with self.subTest(before):
+                text = (b"\tswitch {\n\tcase x > 0:\n" + before + b"\tcase y > 5:\n").split(b"\n")
+                at = len(text) - 1
+                ran = [((at, 13), (at + 1, 11), True)]
+                self.assertEqual(mutgate.misread_evidence(ran, text, at, 9) is None, refused)
+
     def test_a_misread_names_a_changed_test(self):
         code, out, _ = self.decide(body=self.line(self.CASE, "it is killed, trust me"))
         self.assertEqual(code, 1, out)

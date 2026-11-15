@@ -721,7 +721,8 @@ def misread_evidence(blocks, src, line, col):
     starts on that line just past the clause's colon and ran. Go's cover blocks hold no `case`
     expression (#5822): the switch header's ends at `switch {`, the body's starts after the colon.
     A position in a block that never ran (an `} else if` condition after a ran if-body, a later
-    `case` after a ran clause) is never evidence (Security on #5870)."""
+    `case` after a ran clause) is never evidence (Security on #5870), nor is a clause the one before
+    it may enter by `fallthrough` without evaluating its expression (Security delta on #5870)."""
     pos = (line, col)
     inside = [ran for start, end, ran in blocks if start <= pos < end]
     if any(inside):
@@ -733,9 +734,21 @@ def misread_evidence(blocks, src, line, col):
     text = src[line - 1] if 0 < line <= len(src) else b""
     lead = len(text) - len(text.lstrip(b" \t"))
     if ran and bl == line and text[lead:lead + 5] in (b"case ", b"case\t") and col > lead + 5 and bc >= 2 \
-            and text[bc - 2:bc - 1] == b":":
+            and text[bc - 2:bc - 1] == b":" and not falls_into(src, line):
         return "its case clause's body, which the changed tests ran"
     return None
+
+
+def falls_into(src, line):
+    """Whether the clause before the `case` on line may end in `fallthrough`, read as text, failing
+    closed: the last code line before it (blank and `//` lines skipped) names `fallthrough` anywhere,
+    or a block comment or the file's start comes first. `fallthrough` is a clause's last statement."""
+    for n in range(line - 2, -1, -1):
+        row = src[n].strip()
+        if not row or row.startswith(b"//"):
+            continue
+        return b"*/" in row or re.search(rb"\bfallthrough\b", row) is not None
+    return True
 
 
 def misread_lines(misread, results, tested, every):
