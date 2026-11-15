@@ -15,21 +15,20 @@ package clerk_test
 // or interface spells it) appears only as `v, err := x.Open(a, b)` (or =)
 // with v a named variable, and the very next statement is
 // `defer clear(v)` with the builtin clear, so the wipe covers every return
-// path, the error path included. The one exception is a sealer wrapper, a
-// method named Open with that same signature, handing its plaintext
-// straight to its caller, which this rule then holds: a body of only
-// `return x.Open(a, b)`, or one whose single Open is its first statement
-// `v, err := x.Open(a, b)`, with v never assigned again nor its address
-// taken, and every return returning v itself first (handedBack). Any other
-// Open in a wrapper falls under the general rule. Any other use fails: the plaintext
+// path, the error path included. The one exception is a sealer wrapper
+// listed by name in wipeWrappers: a method that must hand its plaintext to
+// its caller, which this rule then holds. Every Open in a listed wrapper is
+// exempt, so the entry's reason and the wrapper's body are held by review;
+// a new wrapper fails until a reviewed PR lists it, and a listed wrapper
+// that is gone fails too (stale). Any other use fails: the plaintext
 // discarded to _, opened in an if or switch header, returned from a
-// function that is not itself such an Open, passed straight to another
+// function that is not a listed wrapper, passed straight to another
 // call, or the method taken as a value.
 //
 // Bound: what the code does with v between the Open and its return (a copy
 // kept, a string(v), an append that moves the bytes elsewhere) is held by
-// review (a later v = ... does not escape: defer evaluates v at the defer); so are files a build tag leaves out of the default
-// build, callers outside broker/clerk, and an Open that is a struct field
+// review (a later v = ... does not escape: defer evaluates v at the
+// defer); so are files a build tag leaves out of the default build, callers outside broker/clerk, and an Open that is a struct field
 // or variable of func type rather than a method (none exists today).
 
 import (
@@ -48,6 +47,14 @@ import (
 	"github.com/ghbmrk/agentos/broker/internal/lintload"
 )
 
+// wipeWrappers names, by types.Func.FullName, each sealer wrapper whose
+// Open hands its plaintext to its caller, with the reason.
+var wipeWrappers = map[string]string{
+	// The test sealer records each plaintext so a test can check its
+	// caller wiped it (Wiped); it returns the plaintext beside OpenErr.
+	"(*github.com/ghbmrk/agentos/broker/clerk/inbox/gmailtest.Kept).Open": "test sealer: hands back and records the plaintext",
+}
+
 var wipeLoad = sync.OnceValues(func() (*lintload.Loaded, error) {
 	return lintload.Load(".", lintload.Build{}, "./...")
 })
@@ -64,6 +71,7 @@ func TestEveryOpenedPlaintextIsWipedOnEveryPath(t *testing.T) {
 	}
 	var problems []string
 	opens := 0
+	seen := map[string]bool{}
 	for _, p := range l.Packages {
 		for _, f := range p.Files {
 			name := l.Fset.File(f.Pos()).Name()
@@ -74,7 +82,7 @@ func TestEveryOpenedPlaintextIsWipedOnEveryPath(t *testing.T) {
 			if err != nil {
 				rel = name
 			}
-			n, ps := wipeProblems(l.Fset, f, p.Info)
+			n, ps := wipeProblems(l.Fset, f, p.Info, wipeWrappers, seen)
 			opens += n
 			for _, s := range ps {
 				problems = append(problems, filepath.ToSlash(rel)+":"+s)
@@ -86,6 +94,11 @@ func TestEveryOpenedPlaintextIsWipedOnEveryPath(t *testing.T) {
 	if opens < 5 {
 		t.Fatalf("the lint saw %d sealer Open calls; want the clerk's stores among them", opens)
 	}
+	for w := range wipeWrappers {
+		if !seen[w] {
+			problems = append(problems, "wipeWrappers: "+w+" is no method in broker/clerk any more; remove the stale entry")
+		}
+	}
 	sort.Strings(problems)
 	for _, s := range problems {
 		t.Error(s)
@@ -93,8 +106,9 @@ func TestEveryOpenedPlaintextIsWipedOnEveryPath(t *testing.T) {
 }
 
 // wipeProblems returns how many sealer Open uses the file holds and, for
-// each one the rule refuses, its line and why.
-func wipeProblems(fset *token.FileSet, f *ast.File, info *types.Info) (int, []string) {
+// each one the rule refuses, its line and why. A method listed in wrappers
+// is marked in seen, and its Opens are exempt.
+func wipeProblems(fset *token.FileSet, f *ast.File, info *types.Info, wrappers map[string]string, seen map[string]bool) (int, []string) {
 	ok := map[*ast.Ident]bool{}     // Open selectors in an allowed shape
 	called := map[*ast.Ident]bool{} // Open selectors that are a call's callee
 	var problems []string
@@ -102,16 +116,22 @@ func wipeProblems(fset *token.FileSet, f *ast.File, info *types.Info) (int, []st
 
 	for _, decl := range f.Decls {
 		fd, isFn := decl.(*ast.FuncDecl)
-		wrapper := isFn && fd.Recv != nil && fd.Name.Name == "Open" && isSealerOpen(info.Defs[fd.Name])
-		if wrapper {
-			for _, id := range handedBack(fd.Body, info) {
-				ok[id] = true
+		wrapper := false
+		if isFn && fd.Recv != nil {
+			if fn, isFunc := info.Defs[fd.Name].(*types.Func); isFunc {
+				_, wrapper = wrappers[fn.FullName()]
+				if wrapper {
+					seen[fn.FullName()] = true
+				}
 			}
 		}
 		ast.Inspect(decl, func(n ast.Node) bool {
 			if c, isCall := n.(*ast.CallExpr); isCall {
 				if sel, isSel := ast.Unparen(c.Fun).(*ast.SelectorExpr); isSel && isSealerOpen(info.Uses[sel.Sel]) {
 					called[sel.Sel] = true
+					if wrapper {
+						ok[sel.Sel] = true
+					}
 				}
 			}
 			var list []ast.Stmt
@@ -152,74 +172,6 @@ func wipeProblems(fset *token.FileSet, f *ast.File, info *types.Info) (int, []st
 		return true
 	})
 	return uses, problems
-}
-
-// handedBack returns the one Open selector a sealer wrapper's body hands
-// straight to its caller, or nil. The body holds exactly one Open call
-// (function literals included), and either the body is that one
-// `return x.Open(a, b)`, or its first statement is `v, err := x.Open(a, b)`,
-// nothing else in the body (function literals included) assigns v or takes
-// its address, and every return of the body's own (not a function
-// literal's) returns v itself first. So a second Open, an Open in a loop or
-// a branch, a reassigned or resliced v, and a return of anything but v all
-// fall under the general rule.
-func handedBack(body *ast.BlockStmt, info *types.Info) []*ast.Ident {
-	var opens []*ast.Ident
-	ast.Inspect(body, func(n ast.Node) bool {
-		if c, isCall := n.(*ast.CallExpr); isCall {
-			if sel, isSel := ast.Unparen(c.Fun).(*ast.SelectorExpr); isSel && isSealerOpen(info.Uses[sel.Sel]) {
-				opens = append(opens, sel.Sel)
-			}
-		}
-		return true
-	})
-	if len(opens) != 1 || len(body.List) == 0 {
-		return nil
-	}
-	if r, isRet := body.List[0].(*ast.ReturnStmt); isRet && len(body.List) == 1 && len(r.Results) == 1 {
-		if c, isCall := ast.Unparen(r.Results[0]).(*ast.CallExpr); isCall && ast.Unparen(c.Fun).(*ast.SelectorExpr).Sel == opens[0] {
-			return opens
-		}
-		return nil
-	}
-	first, isAssign := body.List[0].(*ast.AssignStmt)
-	if !isAssign || first.Tok != token.DEFINE || openAssign(first, info) != opens[0] {
-		return nil
-	}
-	v := info.ObjectOf(first.Lhs[0].(*ast.Ident))
-	isV := func(e ast.Expr) bool {
-		id, isID := ast.Unparen(e).(*ast.Ident)
-		return isID && info.ObjectOf(id) == v
-	}
-	kept := true
-	ast.Inspect(body, func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.AssignStmt:
-			if n != first {
-				for _, l := range n.Lhs {
-					kept = kept && !isV(l)
-				}
-			}
-		case *ast.UnaryExpr:
-			kept = kept && !(n.Op == token.AND && isV(n.X))
-		case *ast.RangeStmt:
-			kept = kept && !(n.Key != nil && isV(n.Key)) && !(n.Value != nil && isV(n.Value))
-		}
-		return true
-	})
-	ast.Inspect(body, func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.FuncLit:
-			return false
-		case *ast.ReturnStmt:
-			kept = kept && len(n.Results) == 2 && isV(n.Results[0])
-		}
-		return true
-	})
-	if !kept {
-		return nil
-	}
-	return opens
 }
 
 // openAssign returns the Open selector of s when s is `v, err := x.Open(a,
@@ -331,17 +283,23 @@ var sink []byte
 	defer clear(plain)
 	return err
 }`, 0},
-		{"a sealer wrapper hands its plaintext to its caller", `type kept struct{ Sealer }
+		{"a listed wrapper hands its plaintext to its caller", `type listed struct{ Sealer }
+
+func (k *listed) Open(blob, aad []byte) ([]byte, error) {
+	plain, err := k.Sealer.Open(blob, aad)
+	return plain, err
+}`, 0},
+		{"the same wrapper unlisted", `type kept struct{ Sealer }
 
 func (k kept) Open(blob, aad []byte) ([]byte, error) {
 	plain, err := k.Sealer.Open(blob, aad)
 	return plain, err
-}`, 0},
-		{"a wrapper returning the Open straight on", `type kept struct{ Sealer }
+}`, 1},
+		{"an unlisted wrapper returning the Open straight on", `type kept struct{ Sealer }
 
 func (k kept) Open(blob, aad []byte) ([]byte, error) {
 	return k.Sealer.Open(blob, aad)
-}`, 0},
+}`, 1},
 		{"a wrapper dropping the plaintext on its error path", `type w struct{ Sealer }
 
 func (x w) Open(b, a []byte) ([]byte, error) {
@@ -541,7 +499,8 @@ func f(s Sealer, b []byte) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, got := wipeProblems(l.Fset, f, info); len(got) != c.want {
+			listed := map[string]string{"(*example.test/p.listed).Open": "case"}
+			if _, got := wipeProblems(l.Fset, f, info, listed, map[string]bool{}); len(got) != c.want {
 				t.Fatalf("got %d problems %q; want %d", len(got), got, c.want)
 			}
 		})
