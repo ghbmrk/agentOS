@@ -772,16 +772,25 @@ func (s *Store) Open(camera string, seg Segment) ([]Record, error) {
 		return nil, ErrSegment
 	}
 	salt, ct := file[len(segMagic):len(segMagic)+saltLen], file[len(segMagic)+saltLen:]
-	var plain []byte
+	var out []Record
 	err = s.segAEAD(camera, salt, func(g cipher.AEAD) error {
-		var err error
-		plain, err = g.Open(nil, make([]byte, g.NonceSize()), ct, segAAD(camera, seg.Name))
+		plain, err := g.Open(nil, make([]byte, g.NonceSize()), ct, segAAD(camera, seg.Name))
+		defer clear(plain)
+		if err != nil {
+			return err
+		}
+		out, err = segRecords(plain)
 		return err
 	})
 	if err != nil {
 		return nil, ErrSegment
 	}
-	defer clear(plain)
+	return out, nil
+}
+
+// segRecords parses an opened segment into its records, each payload a
+// copy, so the caller's wipe of plain leaves the records whole.
+func segRecords(plain []byte) ([]Record, error) {
 	var out []Record
 	for len(plain) > 0 {
 		if len(plain) < recHead {
