@@ -70,9 +70,11 @@ var wipeWrappers = map[string]string{
 	// reshaping it moves devslot/proc under the mutation gate, whose
 	// driver tests fail under coverage (#5788's Findings line).
 	"github.com/ghbmrk/agentos/broker/clerk/devslot/proc.lendFrom": "each open wiped at the start check and in the Lend",
-	// A session frame goes to frameReader.Read, which wipes each byte as
-	// it copies it out (TestAReadFrameIsWipedAsItIsRead).
-	"(*github.com/ghbmrk/agentos/broker/clerk/homekit.frameReader).next": "frame handed to Read, which wipes it",
+	// A session frame is an accessory's HTTP response (characteristic
+	// values, no key): Read copies it into the session's bufio.Reader and
+	// the HTTP parser keeps more copies, so a wipe here would erase one
+	// copy of several (#5788).
+	"(*github.com/ghbmrk/agentos/broker/clerk/homekit.frameReader).next": "frame handed to Read; an HTTP response copied on by bufio",
 	// Pair-setup M6 and pair-verify M2 carry the accessory's identifier,
 	// long-term public key and signature, all public; the pin keeps
 	// slices of the plaintext, so a wipe would erase the pin.

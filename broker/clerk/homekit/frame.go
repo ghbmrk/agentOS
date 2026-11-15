@@ -86,10 +86,7 @@ func (fr *frameReader) Read(p []byte) (int, error) {
 		}
 		fr.buf, fr.err = fr.next()
 	}
-	// Each byte is wiped as it is handed on, so a frame read whole
-	// leaves no plaintext behind in the reader (CLK-1).
 	n := copy(p, fr.buf)
-	clear(fr.buf[:n])
 	fr.buf = fr.buf[n:]
 	return n, nil
 }

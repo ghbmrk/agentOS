@@ -469,38 +469,6 @@ func TestTamperedOrReplayedFrameIsRefused(t *testing.T) {
 	}
 }
 
-// REQ: CLK-1
-// TestAReadFrameIsWipedAsItIsRead: each plaintext byte a frame reader
-// hands on is wiped in the reader, so a frame read whole leaves none
-// behind (CLK-aead-open-wipe, #5788).
-func TestAReadFrameIsWipedAsItIsRead(t *testing.T) {
-	key := make([]byte, 32)
-	wc, _ := newFrameCipher(key)
-	var wire bytes.Buffer
-	(&frameWriter{w: &wire, c: wc}).Write([]byte("hello"))
-	rc, _ := newFrameCipher(key)
-	fr := &frameReader{r: &wire, c: rc}
-	// The frame as Read gets it, held whole here.
-	frame, err := fr.next()
-	if err != nil || string(frame) != "hello" {
-		t.Fatalf("frame: %q %v", frame, err)
-	}
-	fr.buf = frame
-	b := make([]byte, 2)
-	if n, err := fr.Read(b); err != nil || string(b[:n]) != "he" {
-		t.Fatalf("first read: %q %v", b[:n], err)
-	}
-	if string(frame) != "\x00\x00llo" {
-		t.Fatalf("after a 2-byte read the frame holds %q; want the read bytes wiped", frame)
-	}
-	if n, err := fr.Read(make([]byte, 8)); err != nil || n != 3 {
-		t.Fatalf("second read: %d %v", n, err)
-	}
-	if string(frame) != "\x00\x00\x00\x00\x00" {
-		t.Fatalf("a frame read whole still holds %q", frame)
-	}
-}
-
 // REQ: KRN-2
 func TestCheckPathDoesNotLinkHomeKit(t *testing.T) {
 	const pkg = "github.com/ghbmrk/agentos/broker/clerk/homekit"
