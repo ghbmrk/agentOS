@@ -287,6 +287,10 @@ func TestADeclarationThatLowersOrBreaksIsRefused(t *testing.T) {
 	if w := worth(t, s, true, key.Read); w != key.MaxRank {
 		t.Fatalf("a redeclared bank lowered the mail key to %d", w)
 	}
+	// A node declared with no clerk may gain one later: that only adds.
+	if got := kernel.GraphReach(s, "bank"); !slices.Equal(got, []key.Asset{key.AssetIdentity}) {
+		t.Fatalf("the bank's clerk, bound on redeclaring, reaches %v", got)
+	}
 	if err := s.Apply(kernel.Entry{Seq: s.Seq + 1, Type: kernel.TDeclReach, V: 1, Body: []byte(`{"nodes":7}`)}); err == nil {
 		t.Fatal("an undecodable body folds")
 	}

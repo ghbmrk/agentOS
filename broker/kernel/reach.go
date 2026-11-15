@@ -48,9 +48,9 @@ func (s *State) applyDecl(e Entry) error {
 	for _, n := range b.Nodes {
 		c, bound := bind[n.Clerk]
 		old, had := d.nodes[n.ID]
-		if seen[n.ID] || n.ID == "" || slices.ContainsFunc(n.Classes, func(a key.Asset) bool { return a > key.AssetSafety }) ||
-			!had && slices.ContainsFunc(d.edges, func(e ReachEdge) bool { return e.To == n.ID || slices.Contains(e.From, n.ID) }) ||
-			n.Clerk != "" && (had && old.Clerk != "" && old.Clerk != n.Clerk || bound && c != n.ID) {
+		rebound := n.Clerk != "" && (had && old.Clerk != "" && old.Clerk != n.Clerk || bound && c != n.ID)
+		if rebound || seen[n.ID] || n.ID == "" || slices.ContainsFunc(n.Classes, func(a key.Asset) bool { return a > key.AssetSafety }) ||
+			!had && slices.ContainsFunc(d.edges, func(e ReachEdge) bool { return e.To == n.ID || slices.Contains(e.From, n.ID) }) {
 			return nil
 		}
 		seen[n.ID], bind[n.Clerk] = true, n.ID
