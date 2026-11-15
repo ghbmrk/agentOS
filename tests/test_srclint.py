@@ -186,6 +186,46 @@ class SrcLintTest(unittest.TestCase):
         self.t.put("image/build.sh", b"git fetch --no-tags newtag\n")
         self.assertEqual(len(self.t.check()), 1)
 
+    def test_go_verb_counts_only_at_a_command_position(self):
+        # REV-LOW-tools-c c1. A go verb inside an echo or a message is not a build.
+        self.t.workflow("-race")
+        for text in (b'echo "run go build -tags newtag"\n',
+                     b"echo run go build -tags newtag\n",
+                     b'msg="try go test -tags newtag"\n',
+                     b'printf "%s" "x && go build -tags newtag"\n',
+                     b"make go build -tags newtag\n"):
+            self.t.put("image/build.sh", text)
+            self.assertEqual(len(self.t.check()), 1, text)
+        # A separator, a subshell, env assignments, wrappers and YAML `run:` keep the command position.
+        for text in (b"cd broker && CGO_ENABLED=0 go build -tags newtag ./...\n",
+                     b"true; go test -tags newtag ./...\n",
+                     b"(jail env CGO_ENABLED=1 go build -tags newtag ./...)\n",
+                     b"        run: cd broker && go vet -tags newtag ./...\n",
+                     b"x=$(go list -tags newtag ./...)\n",
+                     b"export CGO_ENABLED=1 GOFLAGS=-tags=newtag\n",
+                     b"go test -run 'TestA|TestB' -tags newtag ./...\n"):
+            self.t.put("image/build.sh", text)
+            self.assertEqual(self.t.check(), [], text)
+        # A tag after the go command's segment ends is in another command.
+        self.t.put("image/build.sh", b'go build ./... && echo "-tags newtag"\n')
+        self.assertEqual(len(self.t.check()), 1)
+
+    def test_tags_on_continuation_lines_and_in_variables_count(self):
+        # REV-LOW-tools-c c2. A continued line and a variable-held flag are still one build.
+        self.t.workflow("-race")
+        self.t.put("image/build.sh", b"go build \\\n  -tags newtag ./...\n")
+        self.assertEqual(self.t.check(), [])
+        self.t.put("image/build.sh", b'TAGS="-tags newtag"\ngo build $TAGS ./...\n')
+        self.assertEqual(self.t.check(), [])
+        self.t.put("image/build.sh", b"TAGS='-tags=newtag'\ngo test ${TAGS} ./...\n")
+        self.assertEqual(self.t.check(), [])
+        # A variable no go command expands authorizes nothing.
+        self.t.put("image/build.sh", b'TAGS="-tags newtag"\necho $TAGS\n')
+        self.assertEqual(len(self.t.check()), 1)
+        # A continued echo is still an echo.
+        self.t.put("image/build.sh", b'echo "old" \\\n  "go build -tags newtag"\n')
+        self.assertEqual(len(self.t.check()), 1)
+
     def test_platform_tags_come_from_the_builds(self):
         tags = srclint.build_tags(self.t.root)
         self.assertTrue({"linux", "amd64", "unix", "race", "newtag", "other", "gc", "ignore"} <= tags, tags)
