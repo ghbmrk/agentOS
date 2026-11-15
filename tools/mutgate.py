@@ -1460,8 +1460,16 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
     # fewer workers run when their share would leave a run less than that headroom.
     free = available_memory()
     alone_mem = free // 2 if free else None
+    # A child the tests re-execute from the binary (proc.Main's driver) writes its counters only
+    # into GOCOVERDIR, which it inherits; given that directory as -test.gocoverdir too, the binary
+    # merges them into its profile, as `go test -cover` does (#5803). Else child-only lines read NOT COVERED.
+    counters = tmp / "gocoverdir"
+    shutil.rmtree(counters, ignore_errors=True)
+    counters.mkdir()
     began = time.monotonic()
-    end, peak = watch(subprocess.Popen([str(base), "-test.failfast", f"-test.coverprofile={profile}"], cwd=pkg_dir,
+    end, peak = watch(subprocess.Popen([str(base), "-test.failfast", f"-test.gocoverdir={counters}",
+                                        f"-test.coverprofile={profile}"], cwd=pkg_dir,
+                                       env={**os.environ, "GOCOVERDIR": str(counters)},
                                        start_new_session=True), mem=alone_mem)
     if alone_mem and (end == "over" or 2 * peak > alone_mem):
         return None, (f"broker/{pkg}/'s tests hold {peak >> 20} MB before any statement is deleted, more than "
