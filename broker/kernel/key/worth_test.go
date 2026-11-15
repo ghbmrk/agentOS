@@ -115,6 +115,37 @@ func TestUnknownPricesHighest(t *testing.T) {
 	}
 }
 
+// KEY-9 (#5672, D-307): a grant's graph reach enters only through a verb
+// that reaches data or more, so a mail `read` key over a mailbox that resets
+// a bank is worth what reaching identity is worth, while `draft` stays at its
+// own verb's worth.
+func TestWorthAddsGraphReachToADataVerb(t *testing.T) {
+	owner := gen(1)
+	for _, c := range []struct {
+		verb Verb
+		want Rank
+	}{
+		{Read, WorthOf([]Asset{AssetData, AssetIdentity}, false)},
+		{Draft, WorthOf(AssetsOf(Draft), false)},
+	} {
+		k := Issue(owner.pass, Root{Clerk: "mail", Verbs: []Verb{c.verb}, Serial: "g"})
+		alone, err := Worth(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := Worth(k, AssetIdentity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != c.want || alone != WorthOf(AssetsOf(c.verb), false) {
+			t.Fatalf("%s: worth %d with the graph, %d alone; want %d", c.verb, got, alone, c.want)
+		}
+	}
+	if WorthOf([]Asset{AssetData, AssetIdentity}, false) <= WorthOf([]Asset{AssetData}, false) {
+		t.Fatal("identity does not raise a read key's worth, so the test proves nothing")
+	}
+}
+
 // Generated keys: adding a verb never lowers worth, and narrowing (fewer
 // verbs, a spend cap) never raises it; price never falls as worth rises.
 func TestWorthIsMonotone(t *testing.T) {
@@ -349,36 +380,5 @@ func TestOnlyAOneUseApprovalWaivesTheWorthTerm(t *testing.T) {
 		if got := v.Window(ChangeAccount, false); got != want {
 			t.Errorf("a %d-use passkey narrowing waits %d, want %d", uses, got, want)
 		}
-	}
-}
-
-// KEY-9 (#5672, D-307): a grant's graph reach enters only through a verb
-// that reaches data or more, so a mail `read` key over a mailbox that resets
-// a bank is worth what reaching identity is worth, while `draft` stays at its
-// own verb's worth.
-func TestWorthAddsGraphReachToADataVerb(t *testing.T) {
-	owner := gen(1)
-	for _, c := range []struct {
-		verb Verb
-		want Rank
-	}{
-		{Read, WorthOf([]Asset{AssetData, AssetIdentity}, false)},
-		{Draft, WorthOf(AssetsOf(Draft), false)},
-	} {
-		k := Issue(owner.pass, Root{Clerk: "mail", Verbs: []Verb{c.verb}, Serial: "g"})
-		alone, err := Worth(k)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got, err := Worth(k, AssetIdentity)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != c.want || alone != WorthOf(AssetsOf(c.verb), false) {
-			t.Fatalf("%s: worth %d with the graph, %d alone; want %d", c.verb, got, alone, c.want)
-		}
-	}
-	if WorthOf([]Asset{AssetData, AssetIdentity}, false) <= WorthOf([]Asset{AssetData}, false) {
-		t.Fatal("identity does not raise a read key's worth, so the test proves nothing")
 	}
 }
