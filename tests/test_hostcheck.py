@@ -1719,13 +1719,18 @@ class ImageTest(unittest.TestCase):
                 raise AssertionError(f"{tool} missing")
         if not os.path.isfile(IMAGE):
             raise AssertionError(f"HOSTCHECK_IMAGE {IMAGE} is not a file")
-        cls.tmp = tempfile.TemporaryDirectory(dir=os.environ.get("RUNNER_TEMP"))
-        cls.dir = pathlib.Path(cls.tmp.name)
+        # HOSTCHECK_WORK (CI): a directory kept after the run, so the job uploads its consoles and reports.
+        cls.tmp = None if os.environ.get("HOSTCHECK_WORK") else tempfile.TemporaryDirectory()
+        cls.dir = pathlib.Path(os.environ.get("HOSTCHECK_WORK") or cls.tmp.name)
+        cls.dir.mkdir(parents=True, exist_ok=True)
         subprocess.run(["sh", str(ROOT / "tools" / "hostcheck_standin.sh"), str(cls.dir / "standin")], check=True)
 
     @classmethod
     def tearDownClass(cls):
-        cls.tmp.cleanup()
+        for drive in cls.dir.glob("*.raw"):
+            drive.unlink()
+        if cls.tmp:
+            cls.tmp.cleanup()
 
     def argv(self, name, phases, phases_file=IMAGE_DIR / "phases.json"):
         """hostcheck's arguments for a run on a fresh copy of the image (the run writes to its drive)."""
@@ -1741,6 +1746,11 @@ class ImageTest(unittest.TestCase):
         return argv
 
     def report(self, name):
+        # The consoles' lines that explain a result, in the job's log beside the uploaded files.
+        for log in sorted((self.dir / name).glob("console-*.log")):
+            lines = [ln for ln in log.read_bytes().splitlines()
+                     if re.search(rb"agentos-mor|agentos-health|HOSTCHECK-[A-Z]+-FAILED|fallback|Boot[0-9A-F]{4}|efibootmgr", ln)]
+            print(f"--- {log.name}", *(ln.decode(errors="replace")[:300] for ln in lines[-40:]), sep="\n", file=sys.stderr)
         report = self.dir / name / "report.json"
         self.assertTrue(report.exists(), f"no report for {name}")
         return json.loads(report.read_text())

@@ -454,19 +454,17 @@ jobs:
       - name: Host-untouched check on the image, and the image in shutdown
         env:
           HOSTCHECK_IMAGE: ${{ runner.temp }}/agentos.raw
+          HOSTCHECK_WORK: ${{ runner.temp }}/hostcheck-work
           HOSTCHECK_TOOLS_ROOT: ${{ runner.temp }}/hostcheck-tools
         run: python -m unittest tests.test_hostcheck.ImageTest -v
-      - name: Keep the host check's consoles and reports
-        if: always()
-        run: |
-          mkdir -p "$RUNNER_TEMP/hostcheck-logs"
-          find "$RUNNER_TEMP" -maxdepth 3 \( -name 'console-*.log' -o -name 'report.json' -o -name 'events-*.json' \) \
-            -exec sh -c 'for f; do cp "$f" "$RUNNER_TEMP/hostcheck-logs/$(basename "$(dirname "$f")")-$(basename "$f")"; done' sh {} +
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
           name: hostcheck-image
-          path: ${{ runner.temp }}/hostcheck-logs
+          path: |
+            ${{ runner.temp }}/hostcheck-work/*/console-*.log
+            ${{ runner.temp }}/hostcheck-work/*/events-*.json
+            ${{ runner.temp }}/hostcheck-work/*/report.json
           retention-days: 7
           if-no-files-found: warn
   # Not named vulncheck: that is vulncheck.yml's required check.
