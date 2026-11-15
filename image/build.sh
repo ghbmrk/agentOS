@@ -50,8 +50,8 @@ STAGE=$OUT/stage; rm -rf "$STAGE"; mkdir -p "$STAGE/usr/lib/agentos/images"
 # static and path-free. No access point or Wi-Fi join (D-178). The device-driver host (DEVSLOT b2b). The
 # core's end of the edge link (EDGE-link-core c2c). The camera clerk (CAM-clerk-image) and its decoder
 # sessions' process (CAM-decoder-uid). The HomeKit clerk (DEV-homekit-b2c). The shutdown step that
-# clears the memory-overwrite request (HW-8, #4794).
-for cmd in agentosd agentos-egress agentos-localui agentos-modem \
+# clears the memory-overwrite request (HW-8, #4794). The owner page's root step (agentos-port1, #5678).
+for cmd in agentosd agentos-egress agentos-localui agentos-port1 agentos-modem \
 	agentos-enroll agentos-unlock agentos-kernel agentos-clerk-mail agentos-hostdisk agentos-devices agentos-link \
 	agentos-camera agentos-camdecode-host agentos-homekit agentos-mor; do
 	(cd "$REPO/broker" && CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= \
