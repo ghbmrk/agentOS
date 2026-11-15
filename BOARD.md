@@ -108,10 +108,12 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-openclaw-glob | Bump npm in the guest once it bundles minimatch >= 11.0.1 and glob >= 14.0.2 (GHSA-g3hv-75wg-m249, GHSA-3g3m-2fjr-6pw4). | #2855 | queued (release; tier A) |
 | VULN-openclaw-held | VULN-openclaw-held: inlined copies in the OpenClaw 2026.10.9 guest accepted until a holder release inlines fixed versions | VULN-openclaw-inlined (#4187) | queued (later; tier A) |
 | VULN-unmarked-gaps | VULN-unmarked-gaps: unmarked copies the string-fingerprint check cannot see (small packages, minified-only packages, copies inside the holder's own unminified scripts, a second copy in a file that already names the package) | VULN-inlined-minified (#4234) | queued (later; tier A) |
-| REV-LOW-tools | REV-LOW-tools: review-tool and CI-check findings (srclint tags, next-id order, netguard imports, packet brief source, NUL path parsing, inter-hunk context, workflow step keys) | 23-Low review (2026-11-01) | queued(release; tier A; brief to write) |
+| REV-LOW-tools | REV-LOW-tools: review-tool and CI-check findings (srclint tags, next-id order, netguard imports, packet brief source, NUL path parsing, inter-hunk context, workflow step keys) | 23-Low review (2026-11-01) | building(release; tier A; brief to write) |
 | MET-owner-export | MET-owner-export: the box writes its weekly owner-outcome counts to records/owner/ (needs brief; after G1) | #4935; G1 | queued (release; needs brief; after G1) |
 | VULN-prune-requalify | VULN-prune-requalify: requalify the pruned OpenClaw image (PLN-5, HLD-3) | VULN-controlui-drop (#4436) | queued (release) |
 | MUT-test-helper-scope | MUT-test-helper-scope: a changed test line outside a test function (an import or helper) widens mutgate only to the tests that use it, not to the whole package. Tier A, gate file. | #5762, #5753 | building (tier A) |
+| MUT-brief-test-name-fu | MUT-brief-test-name-fu: the MUT-deleted-test-own-lines brief cites the helper test by its old name after #5838 renames it. Release; from #5838. | #5826, #5838 | queued (release; tier A) |
+| REV-LOW-tools-b | REV-LOW-tools-b: srclint build-text tags, lookup next-id fetch order, reviewpacket brief source, difflines inter-hunk context | 23-Low review (2026-11-01), split from #4400 | queued(release; tier C; brief to write) |
 
 ## Owner channel and approvals (SPEC §10)
 
@@ -316,16 +318,17 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-m-d | ENF-m-d: enforcer state partition sealed to the V1410's TPM | #3671; the device | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-core-pair | ENF-core-pair: pin the core's and the enforcer's channel keys at set-up on the page | ENF-l-a | queued(tier A; lane primary; brief briefs/ENF.md) |
 | UNLOCK-closure-exec | UNLOCK-closure-exec: the commands of every unit the unlock step can start are on a closed list, not a word list (#4696 Security R1) | UNLOCK-unit-deps (#4667) | queued (release; tier A) |
-| ENF-l-mut | ENF-l-mut: kill the enforcer daemon's surviving deleted statements and restore its REQ claims (NET-2, STO-5, KEY-7) | #4755 (same package; reuse its fault seam) | queued (release; tier A; lane primary; brief briefs/ENF.md) |
+| ENF-l-mut | ENF-l-mut: kill the enforcer daemon's surviving deleted statements and restore its REQ claims (NET-2, STO-5, KEY-7) | #4755 (same package; reuse its fault seam) | building (release; tier A; lane primary; brief briefs/ENF.md) |
 | IMG-offline-verity | IMG-offline-verity: the offline manager mounts /usr through dm-verity (#4767 Security 6) | UNLOCK-unit-deps (#4667) | queued (release; tier A) |
 | UNLOCK-allow-wording | UNLOCK-allow-wording: one direction for unlock.allow lines (#4894 L3 4, 5) | UNLOCK-unit-deps (#4667) | queued (release; tier B) |
 | NET-2-cap-basis-required | NET-2-cap-basis-required: every signed byte cap names its basis (D-248) | #4578, #5165 | queued (release; tier A) |
 | HOST-1h | HOST-1h: an image's hostcheck liveness answer must stop before its MOR clear, or a shutdown in progress could answer and then halt. Release; from #5266. | #5266, #5256 | queued (release; tier A) |
 | ENF-shared-quota-b | ENF-shared-quota-b: a host cannot fill its shared segment's records (ct timeout plus per-MAC count and meter). Release; split from #4701; waits for Mark's card. | #4701 | queued (release; tier A; lane primary) |
-| VULN-debian-r5-reach | VULN-debian-r5-reach: on a built image, check whether cryptsetup or systemd can reach libssl3t64's AES-GCM-SIV through a cipher name read from a disk header; constrain it or record the reach in the #2919 records. Release; from #5338. | #5338, #2919 | queued (release; tier A; lane primary) |
-| HOST-1e2 | HOST-1e2: host-untouched check on the P2-1 image: phases file, image responder ordered to stop before the MOR clear (HOST-1h part 2), image-in-shutdown test, S1 PC procedure. | #326, #5267, #5744 | building (tier A) |
+| VULN-debian-r5-reach | VULN-debian-r5-reach: on a built image, check whether cryptsetup or systemd can reach libssl3t64's AES-GCM-SIV through a cipher name read from a disk header; constrain it or record the reach in the #2919 records. Release; from #5338. | #5338, #2919 | building (release; tier A; lane primary) |
+| HOST-1e2 | HOST-1e2: host-untouched check on the P2-1 image: phases file, image responder ordered to stop before the MOR clear (HOST-1h part 2), image-in-shutdown test, S1 PC procedure. | #326, #5267, #5744 | queued (tier A) |
 | HOST-1e2b | HOST-1e2b: host-untouched check on an S1 PC: the third-system snapshot procedure, RTC offset, the pcrlock index if P2-1 pins one, HOST-1d's opted-in disk excluded by the owner's flag. | #5746 | queued (tier A) |
-| MOR-setup-hold | MOR-setup-hold: an orderly shutdown before enrollment leaves MOR set, because the staged page CA holds /run/agentos-setup. Release; from HOST-1e2a. | #5816, #4794 | queued (release; tier A) |
+| MOR-setup-hold | MOR-setup-hold: an orderly shutdown before enrollment leaves MOR set, because the staged page CA holds /run/agentos-setup. Release; from HOST-1e2a. | #5816, #4794 | building (release; tier A) |
+| MOR-setup-factors | MOR-setup-factors: an orderly shutdown after the confirm and before a successful enrollment leaves MOR set, because the factors hold /run/agentos-setup. Release; from MOR-setup-hold. | #5836, #4794 | queued (release; tier A) |
 
 ## Model routes and the Codex lane
 
@@ -441,7 +444,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-dbus-reach | IMG-dbus-reach: hide /run/dbus from the agentOS units that make no bus call, and pin dbus-daemon's start-up command line. | #5766, #5794 | queued (release; tier A) |
 | MUT-case-clause-cover | MUT-case-clause-cover: mutgate reads every mutant in a switch case's expression as NOT COVERED. Release; from #5810. | #5810 | queued (release) |
 | MUT-import-widen | MUT-import-widen: an added import should not widen mutgate's targets to the whole package. Release; from #5808. | #5808 | queued (release; tier B) |
-| IMG-security-pin-fu | IMG-security-pin-fu: the snapshot resolver's edge cases are tested, a bad timestamp gets a clear error, I9 matches, and the enforcer image reads the pinned security snapshot. Release; from #5606. | #5021, #5606 | queued (release; tier A; gate file) |
+| IMG-security-pin-fu | IMG-security-pin-fu: the snapshot resolver's edge cases are tested, a bad timestamp gets a clear error, I9 matches, and the enforcer image reads the pinned security snapshot. Release; from #5606. | #5021, #5606 | building (release; tier A; gate file) |
 | MUT-waiver-messages | MUT-waiver-messages: mutgate failures name the mutant as path:line:col:KIND, ambiguous waivers are not listed as unused, malformed waiver lines are warned about, and the workflow header shows the new syntax. Release; from #5824. | #5824 | queued (release; tier A) |
 | MUT-add-neighbour-widen | MUT-add-neighbour-widen: a new test appended after another should not widen mutgate to the neighbour's coverage. Release; from #5808. | #5808 | queued (release; tier B) |
 | MUT-failed-test-bounded | MUT-failed-test-bounded: mutgate's failed_test reads a mutant's output unbounded; a flooding mutant crashes the deletion step. Release; from #5796. | #5796 | queued (release; tier C) |
@@ -483,9 +486,12 @@ issue #4954: body has no board-row block
 issue #4982: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5062: body has no board-row block
 issue #5177: body has no board-row block
-issue #5202: body has no board-row block
+issue #5202: title 'OWN-page-session mutants part 1: kill the survivors mutgate lists at #5194 on its new lines' does not start with '<ID>: '
 issue #5709: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5736: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5756: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5811: a second issue for TIM-1-interval-fu-e (first is #5758)
+issue #5847: title 'OWN-page-session mutants part 2: kill the old cmd/agentosd survivors in forget, signinhost, recallheld, main, evidence, held, modemenv' does not start with '<ID>: '
+issue #5848: title 'OWN-page-session mutants part 3: kill the other old cmd/agentosd survivors (agent, backups, passkeys, lostcard and 21 more files)' does not start with '<ID>: '
+issue #5849: title 'OWN-page-session mutants part 4: kill the old broker/recovery survivors (69)' does not start with '<ID>: '
 ```
