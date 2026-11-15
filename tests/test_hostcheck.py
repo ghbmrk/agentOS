@@ -1066,7 +1066,7 @@ class StandinTest(unittest.TestCase):
 
 
 IMAGE_DIR = ROOT / "tools" / "hostcheck_image"
-RESPONDER = "agentos-hostcheck-responder.service"
+RESPONDER = "hostcheck-responder.service"
 # HOST-1e2: what the image boots with on the QEMU host, as SMBIOS credentials: the responder unit and its
 # script, its start, and the serial login kept off its console.
 IMAGE_CREDENTIALS = {
@@ -1185,13 +1185,15 @@ class ResponderTest(unittest.TestCase):
             p = subprocess.Popen(["/bin/sh", str(IMAGE_DIR / "responder.sh")], stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, text=True, env={"PATH": f"{d}:/usr/bin:/bin"})
             try:
-                lines = [p.stdout.readline() for _ in range(7)]  # the start's diagnosis, then READY
+                lines = [p.stdout.readline()]  # the start's diagnosis, then READY
+                while lines[-1] not in ("HOSTCHECK-READY\n", ""):
+                    lines.append(p.stdout.readline())
                 self.assertEqual(lines[-1], "HOSTCHECK-READY\n", lines)
                 p.stdin.write("alive A\n")
                 p.stdin.flush()
                 self.assertEqual(p.stdout.readline(), "HOSTCHECK-ALIVE A\n")
                 p.send_signal(signal.SIGTERM)
-                stop = [p.stdout.readline() for _ in range(6)]
+                stop = [p.stdout.readline() for _ in range(len(lines) - 1)]
                 p.stdin.write("alive B\n")
                 p.stdin.close()
                 rest = p.stdout.read()
@@ -1202,6 +1204,8 @@ class ResponderTest(unittest.TestCase):
         self.assertIn("HOSTCHECK-DIAG start agentos-mor.service systemctl show -p ActiveState -p SubState -p Result "
                       "--value agentos-mor.service \n", lines)
         self.assertIn("HOSTCHECK-DIAG start journal -1: journalctl -q -b -1 -u agentos-mor.service -o cat\n", lines)
+        self.assertIn("HOSTCHECK-DIAG start order: journalctl -q -b -1 -o short-monotonic -t hostcheck-responder "
+                      "-t agentos-mor\n", lines)
         self.assertTrue(all(x.startswith("HOSTCHECK-DIAG stop ") for x in stop), stop)
         self.assertEqual(rest, "HOSTCHECK-ALIVE B\n")  # still answering after the SIGTERM
 
@@ -1808,9 +1812,12 @@ class ImageTest(unittest.TestCase):
     def test_the_image_in_shutdown_does_not_answer(self):
         # HOST-1h part 2 (#5267): the host sends alive every 50 ms from before a poweroff until QEMU
         # exits. The responder keeps answering into the shutdown until systemd stops it, so answers
-        # after the poweroff show the window was open; every one must come before the MOR clear.
+        # after the poweroff show the window was open; every one must come before the MOR clear. The
+        # clear's line reaches no console, so the next boot's responder prints the last boot's last
+        # answers and the clear from the journal, on its monotonic clock.
         phases = self.dir / "shutdown.json"
-        phases.write_text(json.dumps({"shutdown": [[OS_START, "os"], ["HOSTCHECK-READY", None]]}))
+        phases.write_text(json.dumps({"shutdown": [[OS_START, "os"], ["HOSTCHECK-READY", None]],
+                                      "after": [[OS_START, "os"], ["HOSTCHECK-READY", "serial:poweroff\n"]]}))
         sent = {}
         drive = hostcheck.Qemu.drive
 
@@ -1832,21 +1839,24 @@ class ImageTest(unittest.TestCase):
             sent["last"] = i
 
         with unittest.mock.patch.object(hostcheck.Qemu, "drive", flooding):
-            rc = hostcheck.main(self.argv("shutdown", "shutdown", phases))
-        (phase,) = self.report("shutdown")["phases"]
-        self.assertEqual(rc, 0, dict(phase, snapshot=None))
-        self.assertNotIn("mor", [d["change_id"] for d in phase["disclosed"]])  # the clear ran
+            rc = hostcheck.main(self.argv("shutdown", "shutdown,after", phases))
         console = (self.dir / "shutdown" / "console-shutdown.log").read_bytes()
-        answers = [(m.start(), int(m.group(1))) for m in re.finditer(rb"HOSTCHECK-ALIVE s(\d+)\r?\n", console)]
+        answers = [int(n) for n in re.findall(rb"HOSTCHECK-ALIVE s(\d+)\r?\n", console)]
         self.assertIn("poweroff", sent)
-        late = [n for _, n in answers if n >= sent["poweroff"]]
+        late = [n for n in answers if n >= sent["poweroff"]]
         self.assertTrue(late, f"no answer after the poweroff (sent {sent}): the test saw no shutdown window")
         self.assertLess(max(late), sent["last"], "the flood outlasted every answer")
-        clears = list(re.finditer(rb"agentos-mor: [^\r\n]*", console))
-        self.assertTrue(clears, "agentos-mor printed nothing on the console")
-        self.assertEqual(clears[-1].group(), b"agentos-mor: mor=cleared")
-        self.assertLess(max(pos for pos, _ in answers), clears[-1].start(), "an answer came after the MOR clear")
-
+        after = (self.dir / "shutdown" / "console-after.log").read_bytes()
+        lines = re.findall(rb"HOSTCHECK-DIAG start order: \[\s*([0-9.]+)\] \S+ (\S+?)(?:\[\d+\])?: ([^\r\n]*)", after)
+        clear = [(float(t), text) for t, who, text in lines if who == b"agentos-mor"]
+        alive = [float(t) for t, who, text in lines if who == b"hostcheck-responder"]
+        self.assertTrue(clear, f"no MOR clear in the last boot's journal: {lines}")
+        self.assertTrue(alive, f"no answer in the last boot's journal: {lines}")
+        self.assertLess(max(alive), clear[-1][0], f"an answer came after the MOR clear: {lines}")
+        self.assertEqual(clear[-1][1], b"agentos-mor: mor=cleared", lines)
+        report = self.report("shutdown")
+        self.assertEqual(rc, 0, [dict(x, snapshot=None) for x in report["phases"]])
+        self.assertFalse([x for x in report["phases"] if "mor" in [d["change_id"] for d in x["disclosed"]]])
 
 if __name__ == "__main__":
     unittest.main()

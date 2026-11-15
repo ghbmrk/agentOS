@@ -1,6 +1,6 @@
 # shellcheck shell=sh
 # hostcheck's liveness responder in the agentOS image (HOST-1e2; HOST-1h part 2). Runs as
-# agentos-hostcheck-responder.service; tools/hostcheck.py passes the unit and this script as SMBIOS
+# hostcheck-responder.service; tools/hostcheck.py passes the unit and this script as SMBIOS
 # credentials (tests/test_hostcheck.py IMAGE_CREDENTIALS), so the shipped image holds neither.
 # It reads command lines from its console (ttyS0):
 #   alive NONCE       print HOSTCHECK-ALIVE NONCE: hostcheck's power cut waits for it
@@ -21,6 +21,10 @@ diag() {
 	for b in 0 -1; do
 		journalctl -q -b "$b" -u agentos-mor.service -o cat 2>&1 | tail -n 5 | sed "s/^/HOSTCHECK-DIAG $1 journal $b: /"
 	done
+	# The last boot's last answers and its MOR clear on one clock (the journal's monotonic stamps), for
+	# the image-in-shutdown test: the console shows no agentos-mor line, so it reads the order here.
+	journalctl -q -b -1 -o short-monotonic -t hostcheck-responder -t agentos-mor 2>&1 | tail -n 4 |
+		sed "s/^/HOSTCHECK-DIAG $1 order: /"
 }
 # A trapped SIGTERM ends a pending read, so the loop below resumes reading after one; only end of
 # input with no SIGTERM since ends it.
@@ -32,7 +36,9 @@ echo HOSTCHECK-READY
 while :; do
 	while read -r cmd arg; do
 		case $cmd in
-		alive) echo "HOSTCHECK-ALIVE $arg" ;;
+		alive)
+			echo "HOSTCHECK-ALIVE $arg"
+			echo "HOSTCHECK-ALIVE $arg" | systemd-cat -t hostcheck-responder 2>/dev/null ;;
 		poweroff | reboot) systemctl --no-block "$cmd" || echo "HOSTCHECK-EXIT-FAILED $cmd" ;;
 		esac
 	done

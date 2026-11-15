@@ -1,4 +1,5 @@
-# hostcheck's responder (HOST-1e2), passed as an SMBIOS credential; see responder.sh.
+# hostcheck's responder (HOST-1e2), passed as an SMBIOS credential; see responder.sh. Not named agentos-*:
+# the image's agentos-.service.d drop-in would mask the clear's hold directories from its diagnosis.
 [Unit]
 Description=hostcheck liveness responder (QEMU host check only)
 # HOST-1h: an answer must come before the MOR clear, agentos-mor.service's ExecStop. systemd stops
