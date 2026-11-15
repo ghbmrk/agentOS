@@ -141,7 +141,8 @@ func TestTailShowsAtMostTheLastFourDigits(t *testing.T) {
 }
 
 func TestTrimSpaceOfBlankBodies(t *testing.T) {
-	for in, want := range map[string]string{"": "", " ": "", " \t\r\n ": "", "  1  ": "1", "\n12345678\r\n": "12345678"} {
+	for in, want := range map[string]string{"": "", " ": "", " \t\r\n ": "", "  1  ": "1", "\n12345678\r\n": "12345678",
+		"\t12345678": "12345678", "12345678\t": "12345678", " 12345678": "12345678", "12345678 ": "12345678", "\r12345678": "12345678", "12345678\r": "12345678", "\n12345678": "12345678", "12345678\n": "12345678"} {
 		if got := trimSpace(in); got != want {
 			t.Errorf("trimSpace(%q) = %q, want %q", in, got, want)
 		}
