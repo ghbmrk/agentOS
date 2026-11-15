@@ -26,8 +26,8 @@ package clerk_test
 // call, or the method taken as a value.
 //
 // Bound: what the code does with v between the Open and its return (a copy
-// kept, v reassigned before the deferred clear runs, a string made of it)
-// is held by review; so are files a build tag leaves out of the default
+// kept, a string(v), an append that moves the bytes elsewhere) is held by
+// review (a later v = ... does not escape: defer evaluates v at the defer); so are files a build tag leaves out of the default
 // build, callers outside broker/clerk, and an Open that is a struct field
 // or variable of func type rather than a method (none exists today).
 
@@ -257,10 +257,12 @@ func isSealerOpen(obj types.Object) bool {
 	if sig.Recv() == nil || sig.Variadic() || sig.Params().Len() != 2 || sig.Results().Len() != 2 {
 		return false
 	}
+	// Underlying types, so an Open over a named slice (type Blob []byte) is one too.
 	bytes := types.NewSlice(types.Typ[types.Byte])
-	return types.Identical(sig.Params().At(0).Type(), bytes) &&
-		types.Identical(sig.Params().At(1).Type(), bytes) &&
-		types.Identical(sig.Results().At(0).Type(), bytes) &&
+	isBytes := func(t types.Type) bool { return types.Identical(t.Underlying(), bytes) }
+	return isBytes(sig.Params().At(0).Type()) &&
+		isBytes(sig.Params().At(1).Type()) &&
+		isBytes(sig.Results().At(0).Type()) &&
 		types.Identical(sig.Results().At(1).Type(), types.Universe.Lookup("error").Type())
 }
 
@@ -353,6 +355,35 @@ func (x w) Open(b, a []byte) ([]byte, error) {
 func (x w) Open(b, a []byte) ([]byte, error) {
 	f := func() ([]byte, error) { return x.Sealer.Open(b, a) }
 	return f()
+}`, 1},
+		{"a wrapper opening twice, the first left unwiped", `type w struct{ S Sealer }
+
+func (x w) Open(b, a []byte) ([]byte, error) {
+	inner, err := x.S.Open(b, a)
+	if err != nil {
+		return nil, err
+	}
+	return x.S.Open(inner, a)
+}`, 1},
+		{"a wrapper discarding an Open", `type w struct{ S Sealer }
+
+func (x w) Open(b, a []byte) ([]byte, error) {
+	_, _ = x.S.Open(b, a)
+	return nil, nil
+}`, 1},
+		{"an Open over a named byte slice", `type Blob []byte
+
+type named interface {
+	Open(blob, aad Blob) (Blob, error)
+}
+
+func f(s named, b Blob) error {
+	plain, err := s.Open(b, nil)
+	if err != nil {
+		return err
+	}
+	defer clear(plain)
+	return nil
 }`, 1},
 		{"an Open of another shape is no sealer's", `func f(v vm) error {
 	m, err := v.Open("x", 1)
