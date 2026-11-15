@@ -3,6 +3,7 @@ package proc
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,6 +48,14 @@ func TestKeyFDs(t *testing.T) {
 		k, d, err := keyFDs(c.env, 7)
 		if (err != nil) != c.refused || k != c.key || d != c.dev {
 			t.Errorf("%s: key %d, device %d, %v", name, k, d, err)
+		}
+		// A refused set is refused by keyLend too, not read as no key
+		// (a device with no key would serve). Only refused sets: an
+		// accepted one would close this process's descriptors 4 and 5.
+		if c.refused {
+			if l, err := keyLend(c.env, 7); l != nil || !errors.Is(err, ErrKeyFiles) {
+				t.Errorf("%s: keyLend gave a Lend %v, %v; want ErrKeyFiles", name, l != nil, err)
+			}
 		}
 	}
 }

@@ -52,7 +52,7 @@ func (probe) Declare() devslot.Declaration {
 		Device:      "probe",
 		Link:        devslot.GATT,
 		Channels:    []devslot.Channel{{Name: "data", Service: "fff0", Char: "fff1"}},
-		Operations:  []devslot.Operation{{Name: "dumpable", Verb: key.Read}, {Name: "key", Verb: key.Read}},
+		Operations:  []devslot.Operation{{Name: "dumpable", Verb: key.Read}, {Name: "key", Verb: key.Read}, {Name: "wait", Verb: key.Read}},
 		Readings:    []string{"dumpable", "key"},
 		MaxRead:     1,
 		MaxReadings: 1,
@@ -63,7 +63,15 @@ func (probe) Declare() devslot.Declaration {
 // otherCanary a slot beside it that no Lend may yield.
 const keyCanary, otherCanary = "canary-devkey-0001", "canary-devkey-0002"
 
-func (probe) Run(_ context.Context, op string, _ devslot.Link, s devslot.Secrets) ([]devslot.Reading, error) {
+func (probe) Run(ctx context.Context, op string, l devslot.Link, s devslot.Secrets) ([]devslot.Reading, error) {
+	if op == "wait" {
+		// A read the host never answers, under a short deadline of the
+		// driver's own: it ends only if the connection is pollable.
+		ctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		defer cancel()
+		_, _, err := l.Read(ctx)
+		return nil, err
+	}
 	if op == "key" {
 		// 1: the canary; 2: the other slot; 3: no key; 0: anything else.
 		v := int64(0)
@@ -205,9 +213,15 @@ func TestMainLendsTheDeviceKey(t *testing.T) {
 		{"the template's files", func(t *testing.T) []*os.File { return keyFiles(t, "driver-probe") }, 1},
 		{"no files", func(*testing.T) []*os.File { return nil }, 3},
 	} {
-		host, cmd, out := startDriver(t, os.Getuid(), c.files(t)...)
+		files := c.files(t)
+		host, cmd, out := startDriver(t, os.Getuid(), files...)
 		if m, err := devslot.ReadMsg(host); err != nil || m.T != devslot.MsgDeclare {
 			t.Fatalf("%s: first message %+v, %v (%s)", c.name, m, err, out)
+		}
+		// keyLend has returned before Declare: the process holds neither
+		// key file while the driver runs.
+		if fd := holds(t, cmd.Process.Pid, files); fd != "" {
+			t.Fatalf("%s: the driver's process still holds a key file on descriptor %s", c.name, fd)
 		}
 		if err := devslot.WriteMsg(host, devslot.PinMsg("key", devslot.Pin{Address: "02:00:00:00:00:01"}, netip.Prefix{})); err != nil {
 			t.Fatal(err)
@@ -229,6 +243,53 @@ func TestMainLendsTheDeviceKey(t *testing.T) {
 	}
 	if cmd.Wait(); cmd.ProcessState.ExitCode() != 1 {
 		t.Fatal("the driver's process did not exit 1 under another driver's key")
+	}
+}
+
+// holds names a descriptor of process pid open on one of files, or "".
+func holds(t *testing.T, pid int, files []*os.File) string {
+	t.Helper()
+	dir := "/proc/" + strconv.Itoa(pid) + "/fd"
+	ents, err := os.ReadDir(dir)
+	if err != nil || len(ents) == 0 {
+		t.Fatalf("reading %s: %v", dir, err)
+	}
+	for _, e := range ents {
+		got, err := os.Stat(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue // closed since the listing
+		}
+		for _, f := range files {
+			if want, err := f.Stat(); err == nil && os.SameFile(got, want) {
+				return e.Name()
+			}
+		}
+	}
+	return ""
+}
+
+// The connection is non-blocking in the driver's process, so a call the
+// driver's own context ends returns, and the process reports the
+// operation failed, rather than waiting on a host that never answers.
+// Fails if serveMain leaves the descriptor blocking: deadlines on it do
+// nothing.
+func TestMainEndsAnUnansweredRead(t *testing.T) {
+	host, cmd, out := startDriver(t, os.Getuid())
+	host.SetDeadline(time.Now().Add(10 * time.Second))
+	if m, err := devslot.ReadMsg(host); err != nil || m.T != devslot.MsgDeclare {
+		t.Fatalf("first message %+v, %v (%s)", m, err, out)
+	}
+	if err := devslot.WriteMsg(host, devslot.PinMsg("wait", devslot.Pin{Address: "02:00:00:00:00:01"}, netip.Prefix{})); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := devslot.ReadMsg(host); err != nil || r.T != devslot.MsgRead {
+		t.Fatalf("read request %+v, %v", r, err)
+	}
+	if d, err := devslot.ReadMsg(host); err != nil || d.T != devslot.MsgDone || d.Err == "" {
+		t.Fatalf("done %+v, %v; want a failed operation once the driver's deadline passes", d, err)
+	}
+	if cmd.Wait(); cmd.ProcessState.ExitCode() != 1 {
+		t.Fatalf("exit %d, want 1 (%s)", cmd.ProcessState.ExitCode(), out)
 	}
 }
 
