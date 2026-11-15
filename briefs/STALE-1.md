@@ -8,9 +8,10 @@ Board section: Harness and operating model. Source: Questions-thread recommendat
 
 - **STALE-1-1** `board.py stale --repo o/r` lists each open work item whose state is queued, building, in review or escalated and whose ID-named PR merged while no open PR names it.
 - **STALE-1-2** With `--comment` it posts one comment per issue and merged PR (marker `<!-- board-stale: #N -->`), saying to set `state:merged` or name the follow-up. It never relabels, closes or fails the run.
+- **STALE-1-4** A comment by a collaborator (not the bot) carrying `<!-- board-followup: #N -->` names what is still owed after PR N and clears that row's flag; a newer merged PR flags it again. Added 2026-11-15: 37 rows whose follow-up was already named in a comment were flagged on every run, so each sweep re-read them.
 - **STALE-1-3** `.github/workflows/stale-labels.yml` runs it after each push to main, daily, and on dispatch, with `issues: write` and no write to contents; it checks out main only.
 
-**Acceptance tests:** STALE-1-1 `tests/test_board.py::StaleLabelTest::test_a_merged_pr_on_an_open_row_is_flagged`; STALE-1-2 `test_flagging_changes_nothing_and_exits_zero`, `test_comment_is_posted_once_per_issue_and_pr`; STALE-1-3 `test_workflow_comments_with_the_issue_token_only`.
+**Acceptance tests:** STALE-1-1 `tests/test_board.py::StaleLabelTest::test_a_merged_pr_on_an_open_row_is_flagged`; STALE-1-2 `test_flagging_changes_nothing_and_exits_zero`, `test_comment_is_posted_once_per_issue_and_pr`; STALE-1-3 `test_workflow_comments_with_the_issue_token_only`; STALE-1-4 `test_a_named_follow_up_clears_the_flag_until_a_newer_pr_merges`, `test_only_a_collaborator_clears_the_flag`.
 
 ## Acceptance
 
