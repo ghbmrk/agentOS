@@ -731,18 +731,18 @@ func TestASendersStepWaitsForTheStepInFlight(t *testing.T) {
 	h.stepping = other
 	h.mu.Unlock()
 	done := make(chan bool)
-	go func() {
+	step := gmailtest.Go(func() {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		done <- h.readSenders()
-	}()
+	})
 	eventually(t, "the step waiting for the one in flight", func() bool {
 		select {
 		case <-done:
 			t.Fatal("the step ran while another was in flight")
 		default:
 		}
-		return gmailtest.Waiting("(*MailHost).wait", "chan receive")
+		return step.Waiting("(*MailHost).wait", "chan receive")
 	})
 	if n := steps.Load(); n != 0 || len(srv.Logins()) != 0 {
 		t.Fatalf("while another step was in flight: %d steps told, logins %v", n, srv.Logins())
