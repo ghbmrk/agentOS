@@ -120,3 +120,8 @@
 # The openclaw guest's node (nodejs.org v24.22.2) links its own OpenSSL statically. That copy is not
 # libssl3t64 and is outside these records; #5853 checks it against the same advisories.
 /usr/lib/agentos/images/openclaw/usr/local/bin/node *
+# The codex guest's two static (musl) Rust binaries hold no OpenSSL selector name but spell GCM-SIV three
+# times, as OpenSSL's default provider does (AES-128/192/256-GCM-SIV): they may carry a stripped static
+# copy of OpenSSL or another crypto library. Either way not libssl3t64; #5853 identifies it.
+/usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex GCM-SIV=3
+/usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host GCM-SIV=3
