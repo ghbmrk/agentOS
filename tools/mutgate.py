@@ -47,13 +47,14 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
 
 Target lines. A package's target lines are the lines the diff adds or changes in its non-test .go
 files (no `REQ:` marker is needed, #4908). When the diff also changes or deletes the package's
-_test.go files, they include the lines of its non-test files that the changed test functions run,
-even beside an added line, which would otherwise hide a deleted test's lines (#5762): `run` names them
-with one `go test -run '^(T1|T2)$' -coverprofile` run and records them in the result, and a change
-no single test function holds (a helper, TestMain, an import, a deleted declaration or file) runs
-every test, so the set is at most the package's covered lines. A weakened test (a t.Skip, an early
-return, a build tag, a deletion) runs nothing at the head, so the base's version of the changed
-tests (every base test when the head's change reaches every test) also runs, on a `git archive` of
+_test.go files, they include the lines of its non-test files that the test functions reaching the
+changed lines run, even beside an added line, which would otherwise hide a deleted test's lines (#5762):
+`run` names them with one `go test -run '^(T1|T2)$' -coverprofile` run and records them in the result.
+A changed helper, type or import reaches the tests that name it, transitively, read as text
+(reaching_tests, D-319); a change every test may run (TestMain, init, a package var's initializer)
+runs every test, so the set is at most the package's covered lines. A weakened test (a t.Skip, an early
+return, a build tag, a deletion) runs nothing at the head, so the base's version of the tests reaching
+the changed base lines (every base test when either side reaches every test) also runs, on a `git archive` of
 the base, its lines moved to the head's; the record holds both. In a package whose tests change, a
 mutant NOT COVERED on any target line fails the gate (#5762): a weakened test plus an edit to the
 lines it ran, or a moved file, drops those lines from the base record's mapping. Coverage can differ from run to run
@@ -224,8 +225,8 @@ def is_test(path):
 def added_lines(diff_text):
     """({path: set(line)} of the lines the diff adds, {path: set(line) or None} of the broker/
     _test.go files it changes). A test file's set holds the lines it adds and, for a hunk that only
-    deletes, the line either side; it is None when the diff deletes the file or a line that starts
-    a top-level declaration, so no test function left in it holds the change."""
+    deletes, the line either side; it is None when the diff deletes the file. What a deleted line
+    reached is read at the base (base_test_lines)."""
     added, tests, path, old, line, in_hunk = {}, {}, None, None, 0, False
 
     def touch(p, lines):
@@ -261,10 +262,7 @@ def added_lines(diff_text):
             if is_test(path):
                 touch(path, {line})
             line += 1
-        elif raw.startswith("-"):
-            if is_test(path) and DECL.match(raw[1:]):
-                tests[path] = None
-        else:
+        elif not raw.startswith("-"):
             line += 1
     return added, tests
 
@@ -327,9 +325,10 @@ def union(*parts):
 
 def base_test_lines(diff_text):
     """{path: set(base line) or None} of the broker/ _test.go files the base has and a -U0 diff
-    changes: the base lines it deletes or changes and, for a hunk that only adds, the base line
-    either side; None when the diff deletes the file. The base side of added_lines' tests (#5762)."""
-    out, old, path, in_hunk, line = {}, None, None, False, 0
+    changes: the base lines it deletes or changes; None when the diff deletes the file. The base
+    side of added_lines' tests (#5762). Returns (that, gaps): gaps is {path: set(base line)} of
+    where a hunk only adds, after that base line, for base_changed_tests to place by the file's text."""
+    out, gaps, old, path, in_hunk, line = {}, {}, None, None, False, 0
 
     def touch(lines):
         if out.get(old, ()) is not None:
@@ -346,7 +345,7 @@ def base_test_lines(diff_text):
                 if path is None:
                     out[old] = None  # the file is deleted
                 elif m[2] == "0":
-                    touch({line, line + 1})  # the hunk adds after base line `line`
+                    gaps.setdefault(old, set()).add(line)  # the hunk adds after base line `line`
             continue
         if not in_hunk:
             if raw.startswith("--- "):
@@ -358,7 +357,7 @@ def base_test_lines(diff_text):
             if old is not None and is_test(old):
                 touch({line})
             line += 1
-    return out
+    return out, gaps
 
 
 def head_line_of(diff_text):
@@ -406,66 +405,245 @@ def base_text(mb, path):
     return blob.stdout.decode("utf-8", "replace")
 
 
-def base_changed_tests(btests, pkg, mb, head_names):
-    """Sorted names of the base's test functions holding the base lines btests names in
-    broker/<pkg>/, or None for every test. head_names None (a change every head test may run, such as
-    a new file's init or a helper) is every base test too, so no head-wide change hides a base test."""
-    if head_names is None:
-        return None
-    names = set()
-    for path, lines in sorted(btests.items()):
-        if package_of(path) != pkg:
+def _body(bare, d):
+    """(head line, closing brace line or None) of the func or method declaration d, read from the
+    text with comments blanked, so `} // note` is `}` plus spaces. None: no closing brace found."""
+    head = next(i for i in range(d[6], d[7] + 1) if DECL.match(bare[i - 1]))
+    return head, max((i for i in range(head, d[7] + 1) if bare[i - 1].rstrip() == "}"), default=None)
+
+
+def _gap_lines(text, after):
+    """The base lines a hunk adding after line `after` of a test file's text touches: the line
+    either side, except that a function's doc comment, closing brace and the blank lines after it
+    belong to no function body, so an addition between functions touches none (#5832). An addition
+    inside a body, even right after its head or before its closing brace, still touches it."""
+    bare, out = _uncommented(text, False).split("\n"), set()
+    spans = [(d[6], d[7], *_body(bare, d)) for d in _decls("", text) if d[1] in ("func", "method")]
+    for n, inside in ((after, lambda h, c: h <= n < c), (after + 1, lambda h, c: h < n <= c)):
+        span = next(((h, c) for a, b, h, c in spans if a <= n <= b), None)
+        if span is None or span[1] is None or inside(*span):
+            out.add(n)
+    return out
+
+
+def base_changed_tests(btests, pkg, mb):
+    """Sorted names of the base's test functions that reach the base lines btests names in
+    broker/<pkg>/ (every line of a deleted file), or None for every test (reaching_tests).
+    btests is base_test_lines' pair."""
+    touched_lines, gaps = btests
+    changed = {p: ls for p, ls in touched_lines.items() if package_of(p) == pkg}
+    files = {}
+    listing = subprocess.run(["git", "ls-tree", "-z", mb, "--", f"broker/{pkg}/"], cwd=ROOT,
+                             capture_output=True, text=True, check=True).stdout
+    for entry in filter(None, listing.split("\0")):
+        meta, path = entry.split("\t", 1)
+        if not path.endswith("_test.go") or meta.split()[1] != "blob":
             continue
-        text = None if lines is None else base_text(mb, path)
-        found = None if text is None else test_functions(text, lines)
-        if found is None:
-            return None
-        names |= found
-    return sorted(names)
+        text = base_text(mb, path)
+        if text is None:
+            return None  # a link: its tests are unread, so any of them may reach the change
+        files[path] = text
+    for path, lines in changed.items():
+        if lines is None:
+            if path not in files:
+                return None
+            changed[path] = set(range(1, files[path].count("\n") + 2))
+    for path, afters in gaps.items():
+        if package_of(path) == pkg and changed.get(path, ()) is not None and path in files:
+            for after in afters:
+                changed.setdefault(path, set()).update(_gap_lines(files[path], after))
+    changed = {p: ls for p, ls in changed.items() if ls}
+    return reaching_tests(files, changed)
 
 
 def bases_for(diff_text, base, head, tests, pkgs):
-    """{pkg: base_changed_tests} for each of pkgs whose tests the diff changes."""
+    """{pkg: base_changed_tests} for each of pkgs whose tests the diff changes; None (every test)
+    when either side's change reaches every test, so neither side hides what the other runs.
+    changed_tests reads the same None for its head side."""
     pkgs = [pkg for pkg in pkgs if tests_changed(tests, pkg)]
     if not pkgs:
         return {}
-    mb, btests = merge_base(base, head), base_test_lines(diff_text)
-    return {pkg: base_changed_tests(btests, pkg, mb, changed_tests(tests, pkg)) for pkg in pkgs}
+    mb, btests = merge_base(base, head), base_test_lines(diff_text)  # (lines, gaps)
+    return {pkg: None if head_tests(tests, pkg) is None else base_changed_tests(btests, pkg, mb) for pkg in pkgs}
 
 
-def test_functions(text, lines):
-    """The names of the test functions holding lines (1-based) of a _test.go file's text, or None
-    when one is outside every test function: a helper, TestMain, a method, a declaration or the
-    file's header, which any test may run."""
-    rows = text.split("\n")
-    starts = [i + 1 for i, row in enumerate(rows) if DECL.match(row)]
-    names = set()
-    for line in lines:
-        k = bisect.bisect_right(starts, line)
-        if k == 0:
-            return None
-        m = TEST_FUNC.match(rows[starts[k - 1] - 1])
-        if not m or m.group(1) == "TestMain":
-            return None
-        names.add(m.group(1))
-    return names
+# Lexical reach over a package's _test.go files (D-319, #5826). A declaration (_decls) reaches every
+# declaration whose name is a word of its code (string literals too: more is safe), and a type
+# reaches its methods. A test reaches what it reaches, transitively; what every test may run
+# (TestMain, init, a package var with an initializer, a blank or dot import, a method on a type no
+# test file of its package clause declares, which package code may call through an interface, a
+# file with a linkname) reaches all of them, as does a line no test reaches (fail closed). A named
+# import reaches its file's declarations' tests (D-319).
+WORD = re.compile(r"[A-Za-z_]\w*")
+FUNC_HEAD = re.compile(r"^func\s*(?:\(\s*(?:\w+\s+)?\*?\s*(\w+)[^)]*\)\s*)?(\w+)")
+NAMED = re.compile(r"^(?:var|const|type)\s+(\w+(?:\s*,\s*\w+)*)")
+GROUPED = re.compile(r"^(?:var|const|type)\s*\(")
+GROUP_NAMES = re.compile(r"(\w+(?:\s*,\s*\w+)*)")
+SIDE_IMPORT = re.compile(r'(?:^|[\s(;])[_.]\s*["`]', re.M)
+EVERY = None
 
 
-def changed_tests(tests, pkg):
-    """Sorted names of the test functions the diff changes in broker/<pkg>/, or None for every test.
-    The files are read as text from the tree, never run; a link is not followed (L3 on #4643)."""
-    names = set()
-    for path, lines in sorted(tests.items()):
-        if package_of(path) != pkg:
+def _uncommented(text, literals=True):
+    """Go source with its comments blanked (newlines kept, so lines keep their numbers); string and
+    rune literals stay, since a name in one can reach code (reflect's MethodByName), or with
+    literals False have their contents blanked too, so a column-0 line inside a raw string is no
+    declaration (Security on #5838)."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            out.append(" " * (j - i))
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            out.append("".join(ch if ch == "\n" else " " for ch in text[i:j]))
+        elif c in "\"'`":
+            j = i + 1
+            while j < n and text[j] != c and not (c != "`" and text[j] == "\n"):
+                j += 2 if c != "`" and text[j] == "\\" else 1
+            j = min(j + 1, n)
+            out.append(text[i:j] if literals else
+                       c + "".join(ch if ch == "\n" else " " for ch in text[i + 1:j - 1]) + text[j - 1:j])
+        else:
+            j = i + 1
+            out.append(c)
+        i = j
+    return "".join(out)
+
+
+def _decls(path, text):
+    """[(path, kind, names, receiver, words, every, first, last, package clause)] of one test file's declarations,
+    each from its doc comment (the `//` lines right above it, directives such as go:embed too) to
+    the next one's; words are its code's, comments left out. The lines before the first declaration,
+    the package clause and the imports are kind 'header'. A group's names are read from gofmt's
+    layout; a shape not read so names every word of it, which reaches more, never less."""
+    # Declarations are split and read on a copy without comments or literal contents; words come
+    # from one with literals (code), line for line the same.
+    rows, code, bare = text.split("\n"), _uncommented(text).split("\n"), _uncommented(text, False).split("\n")
+    starts, prev = [], 0  # (first line, declaration line)
+    for i, row in enumerate(bare):
+        if DECL.match(row):
+            k = i
+            while k > prev and rows[k - 1].startswith("//"):
+                k -= 1
+            starts.append((k + 1, i + 1))
+            prev = i + 1
+    if not starts or starts[0][0] > 1:
+        starts.insert(0, (1, None))
+    linked = "go:linkname" in text
+    # x and x_test share a directory: a type is the test type of its own package clause only.
+    clause = (m := re.search(r"^package\s+(\w+)", "\n".join(bare), re.M)) and m.group(1)
+    out = []
+    for n, (first, at) in enumerate(starts):
+        last = starts[n + 1][0] - 1 if n + 1 < len(starts) else len(rows)
+        if last < first:
             continue
-        f = BROKER / path.split("/", 1)[1]
-        if lines is None or f.is_symlink() or not f.is_file():
+        body, plain = "\n".join(code[first - 1:last]), "\n".join(bare[first - 1:last])
+        head = bare[at - 1] if at else ""
+        kind, names, recv, every = "header", set(), None, linked
+        if head.startswith("import"):
+            every = every or bool(SIDE_IMPORT.search(body[body.index("import") + len("import"):]))
+        elif head.startswith("func"):
+            m = FUNC_HEAD.match(head)
+            recv, name = (m.group(1), m.group(2)) if m else (None, None)
+            kind = "method" if recv else "func"
+            names = {name} if name and not recv else set()
+            if m is None or (not recv and name in ("TestMain", "init")):
+                every = True
+        elif head.startswith(("var", "const", "type")):
+            kind = head.split()[0].split("(")[0]
+            every = every or (kind == "var" and "=" in plain)
+            names = set(re.split(r"\s*,\s*", NAMED.match(head).group(1))) if NAMED.match(head) else set()
+            inner = [r for r in bare[at:last] if r.strip()]
+            if GROUPED.match(head) and head.rstrip().endswith("(") and inner and inner[-1] == ")":
+                # gofmt's group: one name list per line at the group's indent, `)` alone at column 0.
+                indent = min(len(r) - len(r.lstrip()) for r in inner[:-1]) if inner[:-1] else 0
+                names = {n for r in inner[:-1] if len(r) - len(r.lstrip()) == indent
+                         if (g := GROUP_NAMES.match(r.lstrip())) for n in re.split(r"\s*,\s*", g.group(1))}
+            elif not names:
+                names = set(WORD.findall(body))  # a shape not read here: every word stands in (more is safe)
+        out.append((path, kind, names, recv, set(WORD.findall(body)), every, first, last, clause))
+    return out
+
+
+def reaching_tests(files, changed):
+    """Sorted names of the test functions in files ({path: text}, every _test.go file of one
+    package) that reach the lines changed names ({path: set(line)}), or None when one of those lines
+    is in a declaration every test may run (see WORD above) or that no test reaches. A line of a file's header (before its
+    first declaration, the package clause, an import) reaches what that file's declarations reach."""
+    decls = [d for path, text in sorted(files.items()) for d in _decls(path, text)]
+    by_name, types = collections.defaultdict(list), {(d[8], n) for d in decls if d[1] == "type" for n in d[2]}
+    methods = collections.defaultdict(list)
+    for i, (_, kind, names, recv, *_rest) in enumerate(decls):
+        for n in names:
+            by_name[n].append(i)
+        if kind == "method":
+            methods[recv].append(i)
+    edges = [{j for w in d[4] for j in by_name.get(w, ())}
+             | {j for n in (d[2] if d[1] == "type" else ()) for j in methods.get(n, ())} for d in decls]
+    reach = [set() for _ in decls]
+    for i, (_, kind, names, recv, _w, every, *_rest) in enumerate(decls):
+        test = kind == "func" and not every and TEST_FUNC.match(f"func {next(iter(names), '')}(")
+        if kind == "method" and (decls[i][8] is None or (decls[i][8], recv) not in types):
+            every = True
+        if not (test or every):
+            continue
+        mark = EVERY if every else next(iter(names))
+        seen, todo = {i}, [i]
+        while todo:
+            for j in edges[todo.pop()] - seen:
+                seen.add(j)
+                todo.append(j)
+        for j in seen:
+            reach[j].add(mark)
+    out = set()
+    for path, lines in changed.items():
+        mine = [i for i, d in enumerate(decls) if d[0] == path]
+        if path not in files:
             return None
-        found = test_functions(f.read_bytes().decode("utf-8", "replace"), lines)
-        if found is None:
+        bare = _uncommented(files[path], False).split("\n")
+        for line in lines:
+            hit = [i for i in mine if decls[i][6] <= line <= decls[i][7]]
+            if len(hit) == 1 and decls[hit[0]][1] in ("func", "method") and (
+                    (close := _body(bare, decls[hit[0]])[1]) is not None and line > close):
+                continue  # the blank lines after a function's closing brace are no code of it
+            if not hit or decls[hit[0]][1] == "header":
+                hit = mine if not hit or not decls[hit[0]][5] else hit
+            got = set().union(*(reach[i] for i in hit))
+            # No test reaches it (dead code, a benchmark, or a shape this reading missed): fail closed.
+            if not got or EVERY in got or any(decls[i][1] == "header" and decls[i][5] for i in hit):
+                return None
+            out |= got
+    return sorted(out)
+
+
+def head_tests(tests, pkg):
+    """Sorted names of the head's test functions that reach the lines the diff changes in
+    broker/<pkg>/'s _test.go files, or None for every test (reaching_tests). Every _test.go file of
+    the package is read as text from the tree, never run; a link is not followed, so one in the
+    package is every test (L3 on #4643). A deleted file has no head lines: its base side runs."""
+    d = BROKER / pkg
+    if not any(package_of(p) == pkg for p in tests):
+        return []
+    if d.is_symlink():
+        return None
+    files = {}
+    for f in sorted(d.glob("*_test.go")) if d.is_dir() else ():
+        if f.is_symlink():
             return None
-        names |= found
-    return sorted(names)
+        if f.is_file():
+            files[f"broker/{pkg}/{f.name}"] = f.read_bytes().decode("utf-8", "replace")
+    changed = {p: ls for p, ls in tests.items() if package_of(p) == pkg and p in files}
+    if any(ls is None for ls in changed.values()):
+        return None
+    return reaching_tests(files, changed)
+
+
+def changed_tests(tests, pkg, bases):
+    """head_tests, or None when the base side's change reaches every test (bases_for)."""
+    return None if pkg in bases and bases[pkg] is None else head_tests(tests, pkg)
 
 
 def _recorded_lines(pkg, lines):
@@ -493,7 +671,7 @@ def targets_for(pkg, added, tests, data, bases):
         return own, None
     rec = data.get("targets") if isinstance(data, dict) else None
     base = rec.get("base") if isinstance(rec, dict) else None
-    for part, want, where in ((rec, changed_tests(tests, pkg), ""), (base, bases.get(pkg, ()), " at the base")):
+    for part, want, where in ((rec, changed_tests(tests, pkg, bases), ""), (base, bases.get(pkg, ()), " at the base")):
         if not isinstance(part, dict) or part.get("tests") != want or not isinstance(part.get("lines"), dict):
             return None, (f"holds no record of the lines that {'every test' if want is None else want} covers{where}, "
                           f"the tests this diff changes in broker/{pkg}/ (`mutgate.py run --git` writes it)")
@@ -1122,7 +1300,7 @@ def base_covered(pkg, mb, names, tmp, diff_text):
 def record_for(pkg, tests, bases, diff_text, base, tmp):
     """(record, None) of the lines the changed tests of broker/<pkg>/ cover at the head and, as its
     `base` part, at the base (#5762); or (None, problem). Runs the PR's tests: untrusted jobs only."""
-    names = changed_tests(tests, pkg)
+    names = changed_tests(tests, pkg, bases)
     covered, problem = covered_by(pkg, names, tmp)
     if problem:
         return None, problem
@@ -1753,7 +1931,8 @@ def decide(results, added, tests, args, records=({}, [])):
     # test plus an edit to the lines it ran (or a moved file) would otherwise leave them unrun unseen.
     lost = violations({pkg: t for pkg, t in targets.items() if tests_changed(tests, pkg)},
                       {pkg: uncovered_of(d) for pkg, (d, _) in results.items()}, waived, every)
-    tested = {pkg: changed_tests(tests, pkg) for pkg in results if tests_changed(tests, pkg)}
+    # targets_for checked each record's tests against changed_tests, so the record names them.
+    tested = {pkg: d["targets"]["tests"] for pkg, (d, _) in results.items() if tests_changed(tests, pkg)}
     fresh = sorted(((site, reason, accepted) for site, (reason, accepted, new) in kept.items() if new),
                    key=lambda f: (site_text(f[0]), f[1]))
     write_summary(args.summary, summary(results, tested, waived, {pkg for pkg in results if diff_targets(added, pkg)},
@@ -1796,7 +1975,7 @@ def summary(results, tested, waived, own=(), body=None, stale=(), fresh=()):
         lines.append(f"- {cell(pkg)}: {n} target lines, " + (
             "the lines the diff changes" if pkg not in tested
             else ("the lines the diff changes and " if pkg in own else "") + (
-                "the lines every test covers (a change outside one test function)" if tested[pkg] is None
+                "the lines every test covers (a change every test may run)" if tested[pkg] is None
                 else "the lines " + cell(", ".join(tested[pkg])) + " cover")))
         for f in data["files"]:
             path = f"broker/{pkg}/{f['file_name']}"
