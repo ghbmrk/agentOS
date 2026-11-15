@@ -108,12 +108,10 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-openclaw-glob | Bump npm in the guest once it bundles minimatch >= 11.0.1 and glob >= 14.0.2 (GHSA-g3hv-75wg-m249, GHSA-3g3m-2fjr-6pw4). | #2855 | queued (release; tier A) |
 | VULN-openclaw-held | VULN-openclaw-held: inlined copies in the OpenClaw 2026.10.9 guest accepted until a holder release inlines fixed versions | VULN-openclaw-inlined (#4187) | queued (later; tier A) |
 | VULN-unmarked-gaps | VULN-unmarked-gaps: unmarked copies the string-fingerprint check cannot see (small packages, minified-only packages, copies inside the holder's own unminified scripts, a second copy in a file that already names the package) | VULN-inlined-minified (#4234) | queued (later; tier A) |
-| REV-LOW-tools | REV-LOW-tools: review-tool and CI-check findings (srclint tags, next-id order, netguard imports, packet brief source, NUL path parsing, inter-hunk context, workflow step keys) | 23-Low review (2026-11-01) | building(release; tier A; brief to write) |
 | MET-owner-export | MET-owner-export: the box writes its weekly owner-outcome counts to records/owner/ (needs brief; after G1) | #4935; G1 | queued (release; needs brief; after G1) |
 | VULN-prune-requalify | VULN-prune-requalify: requalify the pruned OpenClaw image (PLN-5, HLD-3) | VULN-controlui-drop (#4436) | queued (release) |
-| MUT-brief-test-name-fu | MUT-brief-test-name-fu: the MUT-deleted-test-own-lines brief cites the helper test by its old name after #5838 renames it. Release; from #5838. | #5826, #5838 | queued (release; tier A) |
-| REV-LOW-tools-b | REV-LOW-tools-b: srclint build-text tags, lookup next-id fetch order, reviewpacket brief source, difflines inter-hunk context | 23-Low review (2026-11-01), split from #4400 | building(release; tier C; brief to write) |
 | REV-LOW-tools-c | REV-LOW-tools-c: srclint GO_CMD anchoring and continuation lines | follow-up of #5846 | queued(release; tier C; brief to write) |
+| REV-LOW-tools-assume | REV-LOW-tools-assume: record #5850's assumptions in tools/ASSUMPTIONS.md | release finding of #4400 | building(release; tier C; after #5838) |
 
 ## Owner channel and approvals (SPEC §10)
 
@@ -327,7 +325,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-debian-r5-reach | VULN-debian-r5-reach: on a built image, check whether cryptsetup or systemd can reach libssl3t64's AES-GCM-SIV through a cipher name read from a disk header; constrain it or record the reach in the #2919 records. Release; from #5338. | #5338, #2919 | building (release; tier A; lane primary) |
 | HOST-1e2 | HOST-1e2: host-untouched check on the P2-1 image: phases file, image responder ordered to stop before the MOR clear (HOST-1h part 2), image-in-shutdown test, S1 PC procedure. | #326, #5267, #5744 | queued (tier A) |
 | HOST-1e2b | HOST-1e2b: host-untouched check on an S1 PC: the third-system snapshot procedure, RTC offset, the pcrlock index if P2-1 pins one, HOST-1d's opted-in disk excluded by the owner's flag. | #5746 | queued (tier A) |
-| MOR-setup-hold | MOR-setup-hold: an orderly shutdown before enrollment leaves MOR set, because the staged page CA holds /run/agentos-setup. Release; from HOST-1e2a. | #5816, #4794 | building (release; tier A) |
 | MOR-setup-factors | MOR-setup-factors: an orderly shutdown after the confirm and before a successful enrollment leaves MOR set, because the factors hold /run/agentos-setup. Release; from MOR-setup-hold. | #5836, #4794 | queued (release; tier A) |
 | VULN-guest-node-openssl | VULN-guest-node-openssl: check the openclaw guest's node-bundled OpenSSL against the 2026-11-10 OpenSSL advisories; pin a fixed node or record the acceptance with reach. Release; from #5842. | #5842, #5341 | queued (release; tier A; lane primary) |
 | MOR-setup-isolate | MOR-setup-isolate: an isolate before enrollment re-mints the page authority under a printed card; the pageca unit's crash-rerun comment is stale. Release; from MOR-setup-hold. | #5844, #5836 | queued (release; tier A) |
@@ -445,13 +442,13 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MUT-case-clause-cover | MUT-case-clause-cover: mutgate reads every mutant in a switch case's expression as NOT COVERED. Release; from #5810. | #5810 | queued (release) |
 | MUT-import-widen | MUT-import-widen: an added import should not widen mutgate's targets to the whole package. Release; from #5808. | #5808 | queued (release; tier B) |
 | MUT-waiver-messages | MUT-waiver-messages: mutgate failures name the mutant as path:line:col:KIND, ambiguous waivers are not listed as unused, malformed waiver lines are warned about, and the workflow header shows the new syntax. Release; from #5824. | #5824 | queued (release; tier A) |
-| MUT-add-neighbour-widen | MUT-add-neighbour-widen: a new test appended after another should not widen mutgate to the neighbour's coverage. Release; from #5808. | #5808 | building (release; tier B) |
 | MUT-failed-test-bounded | MUT-failed-test-bounded: mutgate's failed_test reads a mutant's output unbounded; a flooding mutant crashes the deletion step. Release; from #5796. | #5796 | queued (release; tier C) |
 | OWN-page-session-mut2 | OWN-page-session mutants part 2: old cmd/agentosd survivors in forget, signinhost, recallheld, main, evidence, held, modemenv (198) | #5202 | building (release; tier A) |
 | OWN-page-session-mut4 | OWN-page-session mutants part 4: old broker/recovery survivors (69) | #5202 | building (release; tier A) |
 | OWN-page-session-mut2b | OWN-page-session mutants part 2b: remaining old cmd/agentosd survivors in evidence, forget, recallheld, main, held, signinhost (152) | #5847 | queued (release; tier A) |
-| MUT-notcovered-misread | MUT-notcovered-misread: mutgate record kind for killed mutants gremlins reads as NOT COVERED | #5863 | queued (release; tier B) |
+| MUT-notcovered-misread | MUT-notcovered-misread: mutgate record kind for killed mutants gremlins reads as NOT COVERED | #5863 | building (release; tier B) |
 | MUT-wipe-lint | MUT-wipe-lint: lint that derived key buffers are wiped | #5857 | queued (release; tier B) |
+| VULN-debian-r10 | VULN-debian-r10: accept gcc-14's new Debian 13 advisory DEBIAN-CVE-2026-125709 so image-vulncheck passes again. Release; sixth no-fix Debian round. | #2919, #5764 | building (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
