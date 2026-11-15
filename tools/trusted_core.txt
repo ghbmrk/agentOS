@@ -20,6 +20,7 @@ root cmd/agentos-kernel
 root clerk
 root clerk/check
 root clerk/seal
+root clerk/sealopen
 root cmd/agentos-unlock
 root backup
 # The owner page's root step (KEY-9-reach-inbound-wiring, #5678): agentos-localui.service's

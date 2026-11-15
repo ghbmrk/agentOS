@@ -86,10 +86,11 @@ func (s *Store) open(name string, fn func(plain []byte) error) error {
 		return nil
 	}
 	plain, err := s.s.Open(blob, aad(name))
+	// Wiped on the error path too: a sealer may fail after it decrypted.
+	defer clear(plain)
 	if err != nil {
 		return errors.New("clerk: the plan login does not open")
 	}
-	defer clear(plain)
 	return fn(plain)
 }
 
