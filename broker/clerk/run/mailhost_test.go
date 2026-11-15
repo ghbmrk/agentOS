@@ -6,6 +6,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +29,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
 )
 
@@ -1230,6 +1233,68 @@ func TestUnreadableSettingsAreToldAtTheNextReread(t *testing.T) {
 	want := "I could not read your mailbox: I could not read my own settings for your mail account. Set up the mail account again on my Wi-Fi page."
 	if st, _ := r.owner.Status(); !slices.Contains(st.Lines, want) {
 		t.Fatalf("status with unreadable settings: %q", st.Lines)
+	}
+}
+
+// An account stored before #5774 with "starttls" set keeps its password in
+// the slot named for the settings with that field. The clerk no longer has
+// the setting, so it refuses the file as unreadable: the owner is told to set
+// the account up again, which works, rather than that a server answer was
+// unusable, which waiting never fixes; and the setup page shows no account
+// (#5777 item 1).
+func TestAStoredStartTLSAccountIsToldToBeSetUpAgain(t *testing.T) {
+	r := newHostRig(t, imaptest.Password)
+	cur, err := readMail(r.h.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The pre-#5774 form: its fields in their order then, and its slot the
+	// hash of those bytes, holding the password alone.
+	old, err := json.Marshal(struct {
+		Address  string `json:"address"`
+		IMAP     string `json:"imap,omitempty"`
+		SMTP     string `json:"smtp,omitempty"`
+		StartTLS bool   `json:"starttls,omitempty"`
+	}{cur.Address, cur.IMAP, cur.SMTP, true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.Sum256(old)
+	slot := clerk.MailSlots + hex.EncodeToString(h[:16])
+	if err := r.h.sec.Put(slot, clerk.KindStatic, []byte(imaptest.Password)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.h.sec.RemovePrefix(clerk.MailSlots, slot); err != nil {
+		t.Fatal(err)
+	}
+	if err := privfile.WriteAtomic(r.h.dir, mailSettings, old, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.owner.Account(); err == nil || err.Error() != errMailUnreadable.Error() {
+		t.Fatalf("a stored starttls account: %v", err)
+	}
+	r.moved()
+	before := r.dials.Load()
+	if _, err := r.planner.Reread(); err != nil {
+		t.Fatal(err)
+	}
+	if n := r.dials.Load() - before; n != 0 {
+		t.Fatalf("a re-read of a stored starttls account made %d connections", n)
+	}
+	want := "I could not read your mailbox: I could not read my own settings for your mail account. Set up the mail account again on my Wi-Fi page."
+	st, _ := r.owner.Status()
+	if !slices.Contains(st.Lines, want) {
+		t.Fatalf("status of a stored starttls account: %q", st.Lines)
+	}
+	// The step named works: setup again reads the mailbox.
+	if err := r.owner.SetMail(cur, imaptest.Password); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.planner.Reread(); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := r.owner.Status(); has(st.Lines, "I could not read your mailbox: ") {
+		t.Fatalf("status after setting the account up again: %q", st.Lines)
 	}
 }
 
