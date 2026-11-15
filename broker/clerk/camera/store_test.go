@@ -635,7 +635,7 @@ func TestStoreRefusesBadInput(t *testing.T) {
 	if err := r.s.Frame(testID, video()); err != nil {
 		t.Errorf("a frame with the wall clock: %v", err)
 	}
-	r.s.cams[testID].gone = true // as a Remove landing between held and the lock
+	r.s.cams[testID].gone = true // as an Erase landing between held and the lock
 	if err := r.s.Frame(testID, video()); !errors.Is(err, ErrUnknown) {
 		t.Errorf("a frame for a camera marked gone: %v", err)
 	}
@@ -712,8 +712,42 @@ func TestAddHoldsTheKeptLock(t *testing.T) {
 	if err := <-added; err != nil {
 		t.Fatal(err)
 	}
-	if !k.gone || r.s.kept[testID] != nil {
-		t.Errorf("after Add the kept hold is gone %v and still listed %v", k.gone, r.s.kept[testID] != nil)
+	if !k.gone || r.s.kept[testID] != nil || !k.mu.TryLock() {
+		t.Errorf("after Add the kept hold is gone %v, still listed %v, or still locked", k.gone, r.s.kept[testID] != nil)
+	}
+}
+
+func TestFlushSkipsACameraErasedMidway(t *testing.T) {
+	// REQ: DEV-7
+	// An Erase that lands while Flush seals an earlier camera, after
+	// Flush listed the ids, leaves Flush skipping the erased camera, not
+	// crashing on it (#5808 Security, comment 6898637143). The test
+	// unlists the camera as Erase's first step does (store.go, Erase:
+	// delete from s.cams under s.mu), so it reaches no more of Erase.
+	r := newStoreRig(t, nil)
+	for _, id := range []string{"a-cam", "b-cam"} {
+		if err := r.s.Add(id, 24*time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.feed(t, "a-cam", 2, time.Second)
+	writing, release := make(chan struct{}), make(chan struct{})
+	r.s.writeStop = func(i int) bool {
+		if i == 0 {
+			close(writing)
+			<-release
+		}
+		return false
+	}
+	flushed := make(chan error, 1)
+	go func() { flushed <- r.s.Flush() }()
+	<-writing
+	r.s.mu.Lock()
+	delete(r.s.cams, "b-cam")
+	r.s.mu.Unlock()
+	close(release)
+	if err := <-flushed; err != nil {
+		t.Fatalf("Flush beside an Erase: %v", err)
 	}
 }
 
