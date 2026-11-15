@@ -80,7 +80,9 @@
 # string (EVP_CIPHER_fetch, EVP_get_cipherbyname, systemd's openssl_cipher_many), each with the call and
 # jump sites to them that were reviewed, or "*" where the sites are not counted (#5341). AES-GCM-SIV has
 # no OID or NID in OpenSSL 3.5.7, so these are the only ways to select it, and only by one of the names
-# AES-128-GCM-SIV, AES-192-GCM-SIV or AES-256-GCM-SIV. A new file or a changed count fails the step:
+# AES-128-GCM-SIV, AES-192-GCM-SIV or AES-256-GCM-SIV. EVP_get_cipherbyname cannot return it at all: it
+# returns only the legacy method table's ciphers (crypto/evp/names.c), and crypto/evp/c_allc.c adds no
+# GCM-SIV, so only EVP_CIPHER_fetch and openssl_cipher_many sites matter. A new file or a changed count fails the step:
 # review where its names come from, then update the entry and the openssl records' reach note.
 
 # libcryptsetup's one fetch (crypto_openssl.c _cipher_init, 2.7.5) asks for "<cipher>-<key bits>-<mode>",
@@ -102,3 +104,15 @@
 /usr/lib/x86_64-linux-gnu/libcrypto.so.3 *
 /usr/lib/x86_64-linux-gnu/libssl.so.3 *
 /usr/bin/openssl *
+
+# OpenSSL's loader_attic engine: both fetches are of the fixed name "RC4" (crypto/pem/pvkfmt.c, built
+# into it); nothing on the box loads engines.
+/usr/lib/x86_64-linux-gnu/engines-3/loader_attic.so EVP_CIPHER_fetch=2
+# The legacy provider: its one fetch and one EVP_get_cipherbyname are providers/common/provider_util.c
+# ossl_prov_cipher_load_from_params, for an algorithm's "cipher" parameter; none of legacy's algorithms
+# (old digests and ciphers, PBKDF1, PVKKDF) takes one.
+/usr/lib/x86_64-linux-gnu/ossl-modules/legacy.so EVP_CIPHER_fetch=1 EVP_get_cipherbyname=1
+
+# The openclaw guest's node (nodejs.org v24.22.2) links its own OpenSSL statically. That copy is not
+# libssl3t64 and is outside these records; #5853 checks it against the same advisories.
+/usr/lib/agentos/images/openclaw/usr/local/bin/node *
