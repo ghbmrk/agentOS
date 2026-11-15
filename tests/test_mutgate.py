@@ -2586,10 +2586,12 @@ class Record(unittest.TestCase):
         self.assertEqual(len(sites), 33, r.stdout)
         # Two kinds of mutant on one line (mail.go:103, :144, mailhost.go:272) are two entries on one site.
         self.assertEqual(len(set(sites)), 30, r.stdout)
-        # The two loadSenders proofs were re-read on #5780 after #5733 edited that func.
+        # The two loadSenders proofs were re-read on #5780 after #5733 edited that func, and readMail's
+        # ReadAll proof on #5804 after it gained the setup-form check.
         self.assertEqual(sorted(" ".join(l.split(" ")[1:3]) for l in r.stdout.strip().split("\n")),
                          ["CONDITIONALS_BOUNDARY #5774"] * 3 + ["CONDITIONALS_NEGATION #5774"] * 6
-                         + ["STATEMENT_DELETION #5743"] * 22 + ["STATEMENT_DELETION #5780"] * 2)
+                         + ["STATEMENT_DELETION #5743"] * 21 + ["STATEMENT_DELETION #5780"] * 2
+                         + ["STATEMENT_DELETION #5804"])
 
 
 def job(text, name):
