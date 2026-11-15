@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+
+	"github.com/ghbmrk/agentos/broker/clerk/sealopen"
 )
 
 // Sealer seals and opens one secret under a key that never leaves it. The
@@ -291,12 +293,7 @@ func (s *Secrets) with(slot string, k Kind, fn func(secret []byte) error) error 
 	if !ok {
 		return errors.New("clerk: no such secret slot")
 	}
-	plain, err := s.s.Open(b.Blob, slotAAD(slot, k))
-	if err != nil {
-		return err
-	}
-	defer clear(plain)
-	return fn(plain)
+	return sealopen.With(s.s, b.Blob, slotAAD(slot, k), fn)
 }
 
 // MarshalBinary is the store's at-rest form: sealed blobs and their kinds only.
@@ -314,14 +311,18 @@ func (s *Secrets) UnmarshalBinary(b []byte) error {
 		return err
 	}
 	for slot, v := range m {
-		plain, err := s.s.Open(v.Blob, slotAAD(slot, v.Kind))
-		if err != nil {
+		if !s.opens(slot, v) {
 			return errors.New("clerk: secret slot does not open: " + slot)
 		}
-		clear(plain)
 	}
 	s.mu.Lock()
 	s.m = m
 	s.mu.Unlock()
 	return nil
+}
+
+// opens reports whether one stored slot opens under its slot and kind, and
+// wipes the plaintext on every path, the failing one included.
+func (s *Secrets) opens(slot string, v sealed) bool {
+	return sealopen.With(s.s, v.Blob, slotAAD(slot, v.Kind), func([]byte) error { return nil }) == nil
 }

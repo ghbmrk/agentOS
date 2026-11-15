@@ -1790,10 +1790,10 @@ TPM_DEVICE_GROUPS = ("tpm", "tpmrm", "misc")
 # the old core's vault process (its drive-id and egress-setup steps, image/ASSUMPTIONS.md I14).
 FULL_PRIVILEGE_EXEMPT = ("agentos-egress.service",)
 # Single "+" commands a unit may run, exactly as written (HW12-port1-set): the page's unit opens and
-# closes its ports in the inbound firewall as root, and so does the edge link's for its port
+# closes its ports in the inbound firewall as root (agentos-port1, a trusted-core root, #5678), and so does the edge link's for its port
 # (EDGE-link-core c2c). None opens a device or reads the keeper's state.
 FULL_PRIVILEGE_COMMANDS = (
-    ("agentos-localui.service", "ExecStartPre", "+/usr/lib/agentos/agentos-localui -admit-port1 "
+    ("agentos-localui.service", "ExecStartPre", "+/usr/lib/agentos/agentos-port1 "
      "-port1-file /run/agentos-localui/port1"),
     ("agentos-localui.service", "ExecStopPost", "+/usr/sbin/nft flush set inet agentos_inbound page"),
     ("agentos-link.service", "ExecStartPre", "+/usr/sbin/nft 'flush set inet agentos_inbound link; add element inet "

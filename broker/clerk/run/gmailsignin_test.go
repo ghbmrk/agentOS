@@ -400,8 +400,8 @@ func TestARevokedGmailAccountServesNoStep(t *testing.T) {
 // giveBack called without h.mu takes it: it neither asks Google nor tells
 // the owner while another change of the account holds it, and it returns
 // promptly once that change lets go. Both sides are checked with no time
-// window (#5324 item 3): the give-back is seen blocked in h.mu's Lock (the
-// runtime's goroutine stacks, read by gmailtest.Waiting), so a give-back
+// window (#5324 item 3): the give-back is seen blocked in h.mu's Lock (its
+// goroutine's runtime stack, read by gmailtest's G.Waiting), so a give-back
 // that never waits fails however slow it is, and each wait is bounded by a
 // named timeout only as a backstop for a hang. The file imports no time,
 // so the bounds are contexts.
@@ -419,10 +419,10 @@ func TestAGiveBackWaitsForTheHostsLock(t *testing.T) {
 	}
 	h.mu.Lock()
 	done := make(chan struct{})
-	go func() { h.giveBack(g, false); close(done) }()
+	giver := gmailtest.Go(func() { h.giveBack(g, false); close(done) })
 	park, cancelPark := context.WithTimeout(context.Background(), parkTimeout)
 	defer cancelPark()
-	for !gmailtest.Waiting(").giveBack", "sync.Mutex.Lock") {
+	for !giver.Waiting(").giveBack", "sync.Mutex.Lock") {
 		select {
 		case <-done:
 			h.mu.Unlock()
@@ -461,13 +461,16 @@ func TestAGiveBackWaitsForTheHostsLock(t *testing.T) {
 
 // A re-read that overlaps the read in flight waits for that read and starts
 // none of its own (#5324, refresh's shared read): it is seen blocked in the
-// host's wait while the first read is held (gmailtest.Waiting), so one that
+// host's wait while the first read is held (the stacks of this test's own
+// goroutines, read by gmailtest's G.Waiting, #5694), so one that
 // does not wait fails however slow it is; it returns once the held read
 // ends; and the overlap makes only the connections one read makes. The
 // timeouts are named backstops for a hang; the file imports no time, so
 // they are contexts.
 func TestAnOverlappingRereadWaitsForTheReadInFlight(t *testing.T) {
 	const parkTimeout, returnTimeout = 30e9, 30e9 // 30 s each
+	// The planner socket's handlers are goroutines this test started.
+	self := gmailtest.Self()
 	r := newHostRig(t, imaptest.Password)
 	// One re-read alone, of a moved mailbox: the connections one read makes.
 	r.moved()
@@ -485,7 +488,7 @@ func TestAnOverlappingRereadWaitsForTheReadInFlight(t *testing.T) {
 	go func() { _, err := r.planner.Reread(); second <- err }()
 	park, cancelPark := context.WithTimeout(context.Background(), parkTimeout)
 	defer cancelPark()
-	for !gmailtest.Waiting(").wait", "chan receive") {
+	for !self.Waiting(").wait", "chan receive") {
 		select {
 		case err := <-second:
 			close(r.release)
