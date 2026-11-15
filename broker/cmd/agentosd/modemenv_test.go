@@ -171,7 +171,9 @@ func TestModemEnvEdgeCasesEachHaveTheirOwnOutcome(t *testing.T) {
 	// any of its statements fails a test.
 	log := &logRec{}
 	p := modemEnvAt(t)
-	os.MkdirAll(filepath.Dir(p), 0o755)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	writeOwnerEnv(p, modemOwner, log.logf)
 	if !strings.Contains(log.all(), "names the owner") {
 		t.Fatalf("a write is not logged: %q", log.all())
@@ -197,7 +199,9 @@ func TestModemEnvEdgeCasesEachHaveTheirOwnOutcome(t *testing.T) {
 	}
 	// A directory under a file fails its Lstat with an error, not a panic.
 	file := filepath.Join(t.TempDir(), "file")
-	os.WriteFile(file, nil, 0o600)
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := ensureDir(filepath.Join(file, "etc")); err == nil || err == errModemEnvDir {
 		t.Fatalf("directory under a file: %v", err)
 	}
@@ -209,7 +213,9 @@ func TestModemEnvEdgeCasesEachHaveTheirOwnOutcome(t *testing.T) {
 	// A link is refused by kind; a directory is refused by kind, not as a read error.
 	dir := t.TempDir()
 	link := filepath.Join(dir, "link")
-	os.Symlink(file, link)
+	if err := os.Symlink(file, link); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := readModemEnv(link); err != errModemEnvKind {
 		t.Fatalf("link: %v", err)
 	}
@@ -218,18 +224,30 @@ func TestModemEnvEdgeCasesEachHaveTheirOwnOutcome(t *testing.T) {
 	}
 	// One byte over the cap is refused.
 	big := filepath.Join(dir, "big")
-	os.WriteFile(big, make([]byte, maxModemEnv+1), 0o600)
+	if err := os.WriteFile(big, make([]byte, maxModemEnv+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := readModemEnv(big); err != errModemEnvTooBig {
 		t.Fatalf("too big: %v", err)
 	}
-	// Each read closes its file.
-	fds := func() int { e, _ := os.ReadDir("/proc/self/fd"); return len(e) }
-	before := fds()
-	for range 64 {
-		readModemEnv(big)
+	// Each read closes its file: no descriptor names it straight after the call. The scan runs
+	// before any GC could close a leaked descriptor through its finalizer, since the read of an
+	// empty file allocates too little to start one between the return and the scan.
+	empty := filepath.Join(dir, "empty")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if after := fds(); after > before+16 {
-		t.Fatalf("reads leave files open: %d then %d", before, after)
+	for range 3 {
+		readModemEnv(empty)
+		fds, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			t.Fatalf("no /proc/self/fd to count descriptors: %v", err)
+		}
+		for _, e := range fds {
+			if to, _ := os.Readlink(filepath.Join("/proc/self/fd", e.Name())); to == empty {
+				t.Fatalf("a read left %s open (fd %s)", empty, e.Name())
+			}
+		}
 	}
 }
 
@@ -248,12 +266,16 @@ func TestSplitOwnerLinesTrailingNewlineAndContinuation(t *testing.T) {
 func TestSignInRouteRulesEachRefuseTheirOwnCase(t *testing.T) {
 	// REQ: REV-CHK-mut (#5847): each refusal of checkRoute, prepareSignInRoutes, removeRoute,
 	// Open and Close (signinhost.go) is checked, so deleting any of their statements fails a test.
+	// It sits in this file, not signinhost_test.go, because every test there runs Start and the
+	// sign-in server, and mutgate would count the lines of the test above this one as targets.
 	uid := os.Getuid()
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.Chmod(base, 0o755)
+	if err := os.Chmod(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	// A relative route is refused even where it names a fit directory.
 	if err := os.Mkdir(filepath.Join(base, "rel"), 0o700); err != nil {
 		t.Fatal(err)
@@ -263,9 +285,15 @@ func TestSignInRouteRulesEachRefuseTheirOwnCase(t *testing.T) {
 		t.Fatalf("relative route: %v", err)
 	}
 	// A link above the route is refused, by checkRoute and by prepareSignInRoutes.
-	os.MkdirAll(filepath.Join(base, "real", "r"), 0o700)
-	os.Chmod(filepath.Join(base, "real"), 0o755)
-	os.Symlink(filepath.Join(base, "real"), filepath.Join(base, "link"))
+	if err := os.MkdirAll(filepath.Join(base, "real", "r"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(base, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(base, "real"), filepath.Join(base, "link")); err != nil {
+		t.Fatal(err)
+	}
 	if err := checkRoute(filepath.Join(base, "link", "r"), uid); err != errSignInRoute {
 		t.Fatalf("linked route: %v", err)
 	}
@@ -275,7 +303,9 @@ func TestSignInRouteRulesEachRefuseTheirOwnCase(t *testing.T) {
 
 	// -signin-routes naming a file is refused by the ownership check, before the chmod reaches it.
 	file := filepath.Join(base, "routes-file")
-	os.WriteFile(file, nil, 0o600)
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := prepareSignInRoutes(file); err == nil || !strings.Contains(err.Error(), "is not root's or agentosd's") {
 		t.Fatalf("-signin-routes naming a file: %v", err)
 	}

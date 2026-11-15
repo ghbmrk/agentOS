@@ -334,21 +334,27 @@ func TestHeldRepliesStatesAndLogsEachHaveTheirOwnOutcome(t *testing.T) {
 		hookSyncs(t, func(string) error { return errors.New("synthetic sync failure") })
 		h.reply("A")
 		hookSyncs(t, durable.SyncDir)
-		if !h.broken || (lg != nil && !strings.Contains(lg.all(), "was not saved")) {
-			t.Fatalf("a failed save: broken %v, log %v", h.broken, lg)
+		logged := ""
+		if lg != nil {
+			logged = lg.all()
+		}
+		if !h.broken || (lg != nil && !strings.Contains(logged, "was not saved")) {
+			t.Fatalf("a failed save: broken %v, log %q", h.broken, logged)
 		}
 	}
 
 	// The notice line is trimmed on both sides.
 	spaced := t.TempDir()
-	writeMarker(t, spaced, recovery.PendingForged, "  Restore on hold.")
+	writeMarker(t, spaced, recovery.PendingForged, "  Restore on hold.  ")
 	if got := heldNotice(spaced); got != "Restore on hold." {
 		t.Fatalf("notice %q", got)
 	}
 
 	// A setup record that does not read is that error, not "never finished".
 	rec := localsrv.FileRecord{Path: filepath.Join(t.TempDir(), "setup.json")}
-	os.WriteFile(rec.Path, []byte("{"), 0o600)
+	if err := os.WriteFile(rec.Path, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := heldOwner("", rec); err == nil || strings.Contains(err.Error(), "never finished") {
 		t.Fatalf("an unreadable record: %v", err)
 	}
@@ -357,13 +363,17 @@ func TestHeldRepliesStatesAndLogsEachHaveTheirOwnOutcome(t *testing.T) {
 	// that does not read is no question and no answer.
 	crashed := t.TempDir()
 	writeHeld(t, crashed, recovery.PendingUnanchored, 2, nil)
-	os.Remove(filepath.Join(crashed, forgetLogFile+recovery.PendingSuffix))
+	if err := os.Remove(filepath.Join(crashed, forgetLogFile+recovery.PendingSuffix)); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok, err := loadHeld(crashed); ok || err != nil {
 		t.Fatalf("a question without its marker: %v %v", ok, err)
 	}
 	bad := t.TempDir()
 	writeHeld(t, bad, recovery.PendingUnanchored, 2, nil)
-	os.WriteFile(filepath.Join(bad, forgetLogFile+recovery.ConfirmSuffix), []byte("{"), 0o600)
+	if err := os.WriteFile(filepath.Join(bad, forgetLogFile+recovery.ConfirmSuffix), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if text, ok, err := heldText(bad); ok || err == nil || text != "" {
 		t.Fatalf("held text of a question that does not read: %q %v %v", text, ok, err)
 	}
@@ -373,10 +383,10 @@ func TestHeldRepliesStatesAndLogsEachHaveTheirOwnOutcome(t *testing.T) {
 	// The right answer is not reported as a release until its directory is synced.
 	unsynced := t.TempDir()
 	writeHeld(t, unsynced, recovery.PendingUnanchored, 2, nil)
-	sd := syncDir
+	hookSyncs(t, func(string) error { return nil })
 	syncDir = func(string) error { return errors.New("synthetic sync failure") }
 	text, rel, err := answerHeld(unsynced, "C")
-	syncDir = sd
+	hookSyncs(t, durable.SyncDir)
 	if rel || err == nil || text != "" {
 		t.Fatalf("a release whose sync failed: %q %v %v", text, rel, err)
 	}
@@ -398,7 +408,7 @@ func TestHeldRepliesStatesAndLogsEachHaveTheirOwnOutcome(t *testing.T) {
 	// A marker with no notice holds the start with the default one.
 	blank := t.TempDir()
 	writeMarker(t, blank, recovery.PendingForged, "")
-	if err := restoreHold(blank); err == nil || !strings.Contains(err.Error(), "(Restore on hold.)") && !strings.Contains(err.Error(), "Restore on hold. (") {
+	if err := restoreHold(blank); err == nil || !strings.Contains(err.Error(), "not starting: Restore on hold. (") {
 		t.Fatalf("a marker with no notice: %v", err)
 	}
 }
