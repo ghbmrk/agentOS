@@ -382,3 +382,33 @@ func TestTIM1AChronyReplySocketLifecycle(t *testing.T) {
 	}
 	closed(c, "after a failed answer")
 }
+
+// A chronyd gone since its last answer refuses the next request at once:
+// the decision waits for no reply (TIM-1).
+//
+// REQ: TIM-1
+func TestTIM1AChronyGoneFailsWithoutWaiting(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "chronyd.sock")
+	l, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: sock, Net: "unixgram"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		q := make([]byte, 512)
+		if n, from, err := l.ReadFromUnix(q); err == nil && n == chronyLen {
+			l.WriteToUnix(tracking(binary.BigEndian.Uint32(q[8:]), corrZero), from)
+		}
+	}()
+	s := NewChrony(sock, filepath.Join(dir, "reply.sock"))
+	defer s.Close()
+	if r := s.Read(); r.Earliest == 0 {
+		t.Fatalf("chronyd's answer read %+v", r)
+	}
+	l.Close()
+	start := time.Now()
+	if r := s.Read(); r.Earliest != 0 || time.Since(start) >= chronyWait {
+		t.Fatalf("a gone chronyd read %+v after %v", r, time.Since(start))
+	}
+}
