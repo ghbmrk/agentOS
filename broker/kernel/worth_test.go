@@ -109,3 +109,35 @@ func TestAZeroHoldIsNoHold(t *testing.T) {
 		t.Fatalf("a post with no window: %+v, %d effects", s, len(r.mail.Effects()))
 	}
 }
+
+// A grant is priced over its graph reach (KEY-9, D-307): a new `read` mail
+// key is rank 1 and asks only the tap, until a declaration says the mailbox
+// resets an account; then the same key is rank 3 and asks the hardware key.
+func TestAGrantPricesItsGraphReach(t *testing.T) {
+	r := newRig(t)
+	read := func(serial string) key.Key {
+		return key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Read}, Serial: serial})
+	}
+	draft := func(serial string) key.Key {
+		return key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Draft}, Serial: serial})
+	}
+	must(t, r.issue(0, read("r0"), draft("d0"))) // new verbs: big, co-signed
+	live := kernel.GrantHold
+	if err := r.k.Issue(live, nil, read("r1")); err != nil {
+		t.Fatalf("a rank-1 read key with one tap: %v", err)
+	}
+	must(t, kernel.Emit(r.k, live, kernel.TDeclReach, kernel.DeclReach{
+		Nodes: []kernel.ReachNode{{ID: "mbox", Clerk: "mail", Classes: []key.Asset{key.AssetData}},
+			{ID: "bank", Classes: []key.Asset{key.AssetMoney, key.AssetIdentity}}},
+		Edges: []kernel.ReachEdge{{Kind: "reset", From: []string{"mbox"}, To: "bank"}},
+	}))
+	if err := r.k.Issue(live, nil, read("r2")); !errors.Is(err, kernel.ErrNeedsCosign) {
+		t.Fatalf("a read key over a reset edge with one tap: %v", err)
+	}
+	if err := r.issue(live, read("r2")); err != nil {
+		t.Fatalf("a read key over a reset edge with the hardware key: %v", err)
+	}
+	if err := r.k.Issue(live, nil, draft("d1")); err != nil {
+		t.Fatalf("a draft key reaches nothing, so the edge does not price it: %v", err)
+	}
+}
