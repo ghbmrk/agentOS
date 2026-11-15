@@ -2583,7 +2583,9 @@ class Record(unittest.TestCase):
         sites = sorted(l.split(" ")[0] for l in r.stdout.strip().split("\n"))
         self.assertEqual(len(sites), 27, r.stdout)
         self.assertEqual(len(set(sites)), 27, r.stdout)
-        self.assertEqual({l.split(" ")[1:3] == ["STATEMENT_DELETION", "#5743"] for l in r.stdout.strip().split("\n")}, {True})
+        # The two loadSenders proofs were re-read on #5780 after #5733 edited that func.
+        self.assertEqual(sorted(" ".join(l.split(" ")[1:3]) for l in r.stdout.strip().split("\n")),
+                         ["STATEMENT_DELETION #5743"] * 25 + ["STATEMENT_DELETION #5780"] * 2)
 
 
 def job(text, name):
