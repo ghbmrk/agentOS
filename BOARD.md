@@ -111,7 +111,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | REV-LOW-tools | REV-LOW-tools: review-tool and CI-check findings (srclint tags, next-id order, netguard imports, packet brief source, NUL path parsing, inter-hunk context, workflow step keys) | 23-Low review (2026-11-01) | queued(release; tier A; brief to write) |
 | MET-owner-export | MET-owner-export: the box writes its weekly owner-outcome counts to records/owner/ (needs brief; after G1) | #4935; G1 | queued (release; needs brief; after G1) |
 | VULN-prune-requalify | VULN-prune-requalify: requalify the pruned OpenClaw image (PLN-5, HLD-3) | VULN-controlui-drop (#4436) | queued (release) |
-| MUT-test-helper-scope | MUT-test-helper-scope: a changed test line outside a test function (an import or helper) widens mutgate only to the tests that use it, not to the whole package. Tier A, gate file. | #5762, #5753 | queued (tier A) |
+| MUT-test-helper-scope | MUT-test-helper-scope: a changed test line outside a test function (an import or helper) widens mutgate only to the tests that use it, not to the whole package. Tier A, gate file. | #5762, #5753 | building (tier A) |
 
 ## Owner channel and approvals (SPEC §10)
 
@@ -325,6 +325,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-debian-r5-reach | VULN-debian-r5-reach: on a built image, check whether cryptsetup or systemd can reach libssl3t64's AES-GCM-SIV through a cipher name read from a disk header; constrain it or record the reach in the #2919 records. Release; from #5338. | #5338, #2919 | queued (release; tier A; lane primary) |
 | HOST-1e2 | HOST-1e2: host-untouched check on the P2-1 image: phases file, image responder ordered to stop before the MOR clear (HOST-1h part 2), image-in-shutdown test, S1 PC procedure. | #326, #5267, #5744 | building (tier A) |
 | HOST-1e2b | HOST-1e2b: host-untouched check on an S1 PC: the third-system snapshot procedure, RTC offset, the pcrlock index if P2-1 pins one, HOST-1d's opted-in disk excluded by the owner's flag. | #5746 | queued (tier A) |
+| MOR-setup-hold | MOR-setup-hold: an orderly shutdown before enrollment leaves MOR set, because the staged page CA holds /run/agentos-setup. Release; from HOST-1e2a. | #5816, #4794 | queued (release; tier A) |
 
 ## Model routes and the Codex lane
 
@@ -433,7 +434,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | LINT-dial-configured | LINT-dial-configured: the inference lint's configured() refuses a local bound to a literal (NET-2). Release; from #5757. | #5757 | queued (release) |
 | CLK-run-mut-mail-fu2 | CLK-run-mut-mail-fu2: a mail account stored with starttls is refused as unreadable instead of losing its password slot; the sign-in overlap test pins the refresh path. Release; from #5774. | #5774, #5694 | building (release; tier A) |
 | MUT-deleted-test-own-lines-fu | MUT-deleted-test-own-lines-fu: #5770's release items: NOT COVERED rule scope, testdata as a test change, Mutant-uncovered alias, archive error text. Release; after #5776. | #5770 | queued (release; tier A) |
-| MUT-waiver-mutant-scope | MUT-waiver-mutant-scope: a waiver waives only the mutant it proves (column and kind), never every mutant of its kind on its line. Release; from #5774. | #5774 | in review (release; tier A) |
 | MUT-proc-coverdir | MUT-proc-coverdir: the mutation gate cannot size broker/clerk/devslot/proc (driver tests fail under a -cover binary). Release; from #5788. | #5788 | building (release; tier B) |
 | CLK-wipe-lint-callsites | CLK-wipe-lint-callsites: hold a listed wipe helper's call sites, not exempt the whole function. Release; from #5797. | #5797 | building (release; tier A) |
 | CLK-seal-entries-wipe | CLK-seal-entries-wipe: wipe decoded entry values when Unlock refuses them. Release; from #5799. | #5799 | queued (release; tier A) |
@@ -443,6 +443,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MUT-import-widen | MUT-import-widen: an added import should not widen mutgate's targets to the whole package. Release; from #5808. | #5808 | queued (release; tier B) |
 | IMG-security-pin-fu | IMG-security-pin-fu: the snapshot resolver's edge cases are tested, a bad timestamp gets a clear error, I9 matches, and the enforcer image reads the pinned security snapshot. Release; from #5606. | #5021, #5606 | queued (release; tier A; gate file) |
 | MUT-waiver-messages | MUT-waiver-messages: mutgate failures name the mutant as path:line:col:KIND, ambiguous waivers are not listed as unused, malformed waiver lines are warned about, and the workflow header shows the new syntax. Release; from #5824. | #5824 | queued (release; tier A) |
+| MUT-add-neighbour-widen | MUT-add-neighbour-widen: a new test appended after another should not widen mutgate to the neighbour's coverage. Release; from #5808. | #5808 | queued (release; tier B) |
+| MUT-failed-test-bounded | MUT-failed-test-bounded: mutgate's failed_test reads a mutant's output unbounded; a flooding mutant crashes the deletion step. Release; from #5796. | #5796 | queued (release; tier C) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -486,5 +488,4 @@ issue #5709: needs exactly one state label of queued, building, in review, merge
 issue #5736: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5756: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5811: a second issue for TIM-1-interval-fu-e (first is #5758)
-issue #5821: body has no board-row block
 ```
