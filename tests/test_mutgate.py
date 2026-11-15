@@ -1393,6 +1393,37 @@ func set(n, m int) {
             self.assertIsNone(problem)
             self.assertEqual({m["line"]: m["status"] for m in got if m["line"] in (6, 7)}, {6: "KILLED", 7: "LIVED"})
 
+    def test_lines_only_a_re_executed_child_runs_are_covered_and_mutated(self):
+        # #5803 (Security on #5800): a test binary re-executed as a child (proc.Main's driver) writes
+        # its counters only where GOCOVERDIR says, so the base run's profile must merge them, or the
+        # child's lines read NOT COVERED instead of being mutated. Without GOCOVERDIR the child also
+        # prints a warning, which failed proc's output checks before any deletion; the test checks that too.
+        pr = ("package hint\n\nimport \"os\"\n\nvar count int\n\nfunc Child() {\n"
+              "\tif os.Getenv(\"HINT_CHILD\") != \"1\" {\n\t\treturn\n\t}\n\tcount = 7\n\tos.Exit(count)\n}\n")
+        test = ("package hint\n\nimport (\n\t\"errors\"\n\t\"os\"\n\t\"os/exec\"\n\t\"testing\"\n)\n\n"
+                "func TestMain(m *testing.M) {\n\tChild()\n\tos.Exit(m.Run())\n}\n\n"
+                "// REQ: CRED-1\nfunc TestChild(t *testing.T) {\n"
+                "\tc := exec.Command(os.Args[0], \"-test.run=^$\")\n"
+                "\tc.Env = append(os.Environ(), \"HINT_CHILD=1\")\n"
+                "\tvar e *exec.ExitError\n"
+                "\tout, err := c.CombinedOutput()\n"
+                "\tif !errors.As(err, &e) || e.ExitCode() != 7 || len(out) != 0 {\n\t\tt.Fatal(err, string(out))\n\t}\n}\n")
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.repo(d, "package hint\n", pr, test)
+            added = mutgate.added_lines(subprocess.run(
+                ["git", "-C", d, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1", "--", "broker"],
+                capture_output=True, text=True, check=True).stdout)[0]
+            broker, mutgate.BROKER = mutgate.BROKER, pkg.parent
+            try:
+                tmp = pathlib.Path(d) / "tmp"
+                tmp.mkdir()
+                got, problem = mutgate.deletion_mutants("hint", added, tmp, self.lister(tmp), 1)
+            finally:
+                mutgate.BROKER = broker
+            self.assertIsNone(problem)
+            # Lines 11 and 12 run only in the child; 8 and 9 in the parent, as before.
+            self.assertEqual({m["line"]: m["status"] for m in got}, {8: "KILLED", 9: "KILLED", 11: "KILLED", 12: "KILLED"})
+
     def test_a_batch_that_mostly_times_out_leaves_the_rest_to_one_worker(self):
         # L3 on #4643: when every worker's run times out, retrying each alone costs more than one
         # worker would, so after such a batch the rest runs alone, once each.
