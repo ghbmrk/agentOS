@@ -22,7 +22,7 @@ Subcommands:
             (baseline and firmware noise), then each phase in its own QEMU
             process, a snapshot after each. The image is an input: the
             stand-in guest (tools/hostcheck_standin.sh), or P2-1's drive image
-            with image/hostcheck/'s phases file and responder (HOST-1e2).
+            with tools/hostcheck_image/'s phases file and responder (HOST-1e2).
             The phase named `unclean` is one boot cut off by a power cut (QMP
             quit as soon as the guest answers a fresh liveness check on its
             console) with no orderly shutdown or reboot in it, and is the only
@@ -661,7 +661,7 @@ def standin_phases(plant):
     }
 
 
-# HOST-1e2: what the image needs only on this host (its responder, image/hostcheck/) rides as
+# HOST-1e2: what the image needs only on this host (its responder, tools/hostcheck_image/) rides as
 # systemd credentials in SMBIOS type 11 strings, which systemd honours only in a VM, so the image under
 # test is the shipped one. They go to the OS boots alone: the firmware-only boots have no OS to read them.
 CREDENTIAL_NAME = re.compile(r"[A-Za-z0-9_.@-]+")

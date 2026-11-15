@@ -1056,7 +1056,7 @@ class StandinTest(unittest.TestCase):
         self.assertFalse(hostcheck.with_guest_errors({"pass": False}, [])["pass"])
 
 
-IMAGE_DIR = ROOT / "image" / "hostcheck"
+IMAGE_DIR = ROOT / "tools" / "hostcheck_image"
 RESPONDER = "agentos-hostcheck-responder.service"
 # HOST-1e2: what the image boots with on the QEMU host, as SMBIOS credentials: the responder unit and its
 # script, its start, and the serial login kept off its console.

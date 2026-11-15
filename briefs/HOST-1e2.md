@@ -7,9 +7,9 @@ Board section: Devices, hardware and image (SPEC §13-14). Work item #5746; part
 **Requirements:** HW-8 (host untouched; the `unclean` phase's MOR-left-set disclosure, flag `unclean-end`).
 
 **This package (HOST-1e2a, the QEMU half):**
-- The responder: `image/hostcheck/responder.sh` and its unit, `agentos-hostcheck-responder.service`, ordered `After=agentos-mor.service` with default dependencies (so `Conflicts=` and `Before=shutdown.target`): systemd stops units in reverse start order, so its answers end before the MOR clear. It answers `alive NONCE`, and `poweroff` or `reboot` asks systemd for that exit and keeps answering, so only the unit's stop ends the answers. The unit, the script and two drop-ins (start it from `multi-user.target`; keep `serial-getty@ttyS0` off its console) ride as SMBIOS credentials, as `image/ci_boot.sh`'s checks do, so the shipped image is unchanged: no console reader ships, and `image/mkosi/` is untouched.
+- The responder: `tools/hostcheck_image/responder.sh` and its unit, `agentos-hostcheck-responder.service`, ordered `After=agentos-mor.service` with default dependencies (so `Conflicts=` and `Before=shutdown.target`): systemd stops units in reverse start order, so its answers end before the MOR clear. It answers `alive NONCE`, and `poweroff` or `reboot` asks systemd for that exit and keeps answering, so only the unit's stop ends the answers. The unit, the script and two drop-ins (start it from `multi-user.target`; keep `serial-getty@ttyS0` off its console) ride as SMBIOS credentials, as `image/ci_boot.sh`'s checks do, so the shipped image is unchanged: no console reader ships, and `image/mkosi/` is untouched. They live under `tools/`, not `image/`: every unit file under `image/` is read as installed (`broker/kernel/privfile`'s lint, `imageUnits`), and these never are.
 - `tools/hostcheck.py`: `--credential NAME=FILE` (passed to the OS boots only) and `--memory MIB`.
-- `image/hostcheck/phases.json`: `boot`, `restart` and `unclean`, each OS start marked at OVMF's `BdsDxe: starting Boot` line (before the boot loader, so no guest RTC write falls before the mark).
+- `tools/hostcheck_image/phases.json`: `boot`, `restart` and `unclean`, each OS start marked at OVMF's `BdsDxe: starting Boot` line (before the boot loader, so no guest RTC write falls before the mark).
 - A CI job, `image.yml`'s `hostcheck-image`, that runs the three phases on the built image with the stack from the image's Debian snapshot (the same root step as ci.yml's `hostcheck` job), and the image-in-shutdown test.
 - `image/ASSUMPTIONS.md` records what the image's power cut rests on.
 
@@ -25,7 +25,7 @@ Board section: Devices, hardware and image (SPEC §13-14). Work item #5746; part
 - `tests/test_hostcheck.py::ImageTest::test_the_image_in_shutdown_does_not_answer` (CI): the host sends `alive` every 50 ms from before a `poweroff` until QEMU exits; answers come after the `poweroff` (the responder lived into the shutdown), every answer comes before the console's `agentos-mor: mor=cleared` line, and MOR is cleared.
 - `tests/test_hostcheck.py::HostcheckJobTest::test_the_image_job_takes_the_pinned_stack`.
 
-**Scope:** `image/hostcheck/` (new), `tools/hostcheck.py`, `tests/test_hostcheck.py`, `.github/workflows/image.yml` (the new job and its path filters), `image/ASSUMPTIONS.md` (one row), this brief.
+**Scope:** `tools/hostcheck_image/` (new), `tools/hostcheck.py`, `tests/test_hostcheck.py`, `.github/workflows/image.yml` (the new job and its path filters), `image/ASSUMPTIONS.md` (one row), this brief.
 
 **Guard files:** `.github/workflows/image.yml` (gate file: Security accept).
 

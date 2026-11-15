@@ -16,6 +16,7 @@ on:
       - "image/**"
       - ".github/workflows/image.yml"
       - "tools/hostcheck.py"
+      - "tools/hostcheck_image/**"
       - "tests/test_hostcheck.py"
       # The setup path the in-image run drives (#1688): claim, SMS pairing, code generator,
       # Owner Card, recovery and the services behind them.
@@ -55,6 +56,7 @@ on:
       - "image/**"
       - ".github/workflows/image.yml"
       - "tools/hostcheck.py"
+      - "tools/hostcheck_image/**"
       - "tests/test_hostcheck.py"
       # The setup path the in-image run drives (#1688): claim, SMS pairing, code generator,
       # Owner Card, recovery and the services behind them.
@@ -408,7 +410,7 @@ jobs:
     # HOST-1e2 (HW-8): the host-untouched check on the image just built, booted from a USB drive on a
     # QEMU/OVMF/swtpm host with a Windows-like internal disk: boot, restart and a power cut, then the
     # image in shutdown, whose liveness answers must end before its MOR clear (HOST-1h). The responder
-    # rides as SMBIOS credentials (image/hostcheck/), so the image booted is the one built. The VM stack
+    # rides as SMBIOS credentials (tools/hostcheck_image/), so the image booted is the one built. The VM stack
     # comes from the image's Debian snapshot, by ci.yml's hostcheck job's step (CI-hostcheck-image-tools).
     needs: build
     runs-on: ubuntu-24.04
