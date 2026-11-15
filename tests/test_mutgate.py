@@ -193,7 +193,7 @@ class Gate(unittest.TestCase):
                 {"type": "T", "status": "LIVED", "line": 3},
                 {"type": "T", "status": "KILLED", "line": 4}]}]}
             (pathlib.Path(d) / "vm+gvisor.json").write_text(json.dumps(data))
-            self.assertEqual(mutgate.survivors(d), {"vm/gvisor": [("a.go", 3, "T")]})
+            self.assertEqual(mutgate.survivors(d), {"vm/gvisor": [("a.go", 3, "T", None)]})
             self.assertEqual(mutgate.package_of("broker/vm/gvisor/a.go"), "vm/gvisor")
 
     def test_tier_b_package_is_claimed(self):
@@ -304,6 +304,29 @@ class Claimed(unittest.TestCase):
         self.assertEqual(mutgate.claimed(other, packages=["hint"]), [])
         tests_only = DIFF.split("diff --git a/broker/hint/hint_test.go")[1]
         self.assertEqual(mutgate.claimed("diff --git a/broker/hint/hint_test.go" + tests_only, packages=["hint"]), ["hint"])
+
+    def test_a_changed_record_claims_its_package(self):
+        # MUT-waiver-store-claim (#5786): a diff that changes only broker/<pkg>/MUTANTS-EQUIVALENT claims a
+        # gated package, with no target line, so verify resolves the record and lists its new entries.
+        rec = ("diff --git a/broker/hint/MUTANTS-EQUIVALENT b/broker/hint/MUTANTS-EQUIVALENT\n"
+               "--- a/broker/hint/MUTANTS-EQUIVALENT\n+++ b/broker/hint/MUTANTS-EQUIVALENT\n@@ -1,0 +2 @@\n+{}\n")
+        self.assertEqual(mutgate.claimed(rec, packages=["hint"]), ["hint"])
+        self.assertEqual(mutgate.claimed(rec, packages=["mail"]), [])
+        added, tests = mutgate.added_lines(rec)
+        self.assertEqual((mutgate.diff_targets(added, "hint"), mutgate.tests_changed(tests, "hint")), ({}, False))
+        # Added, deleted, or only lines removed: each changes the record.
+        for d in (rec.replace("--- a/broker/hint/MUTANTS-EQUIVALENT", "--- /dev/null"),
+                  rec.replace("+++ b/broker/hint/MUTANTS-EQUIVALENT", "+++ /dev/null").replace("@@ -1,0 +2 @@\n+{}", "@@ -1 +0,0 @@\n-{}"),
+                  rec.replace("@@ -1,0 +2 @@\n+{}", "@@ -2 +1,0 @@\n-{}")):
+            with self.subTest(d):
+                self.assertEqual(mutgate.claimed(d, packages=["hint"]), ["hint"])
+        # A file of another name, a record of another directory (testdata is never gated), or a `+++` line inside a
+        # hunk claims no package.
+        for d in (rec.replace("MUTANTS-EQUIVALENT", "MUTANTS-EQUIVALENT.md"),
+                  rec.replace("broker/hint/MUTANTS", "broker/hint/testdata/MUTANTS"),
+                  DOCS_ONLY + "@@ -3,0 +4 @@\n+++ b/broker/hint/MUTANTS-EQUIVALENT\n"):
+            with self.subTest(d):
+                self.assertEqual(mutgate.claimed(d, packages=["hint"]), [])
 
     def test_claimed_covers_every_package_violations_reads(self):
         # Any listed package outside claimed() could never yield a violation, whatever survives
@@ -1370,6 +1393,37 @@ func set(n, m int) {
             self.assertIsNone(problem)
             self.assertEqual({m["line"]: m["status"] for m in got if m["line"] in (6, 7)}, {6: "KILLED", 7: "LIVED"})
 
+    def test_lines_only_a_re_executed_child_runs_are_covered_and_mutated(self):
+        # #5803 (Security on #5800): a test binary re-executed as a child (proc.Main's driver) writes
+        # its counters only where GOCOVERDIR says, so the base run's profile must merge them, or the
+        # child's lines read NOT COVERED instead of being mutated. Without GOCOVERDIR the child also
+        # prints a warning, which failed proc's output checks before any deletion; the test checks that too.
+        pr = ("package hint\n\nimport \"os\"\n\nvar count int\n\nfunc Child() {\n"
+              "\tif os.Getenv(\"HINT_CHILD\") != \"1\" {\n\t\treturn\n\t}\n\tcount = 7\n\tos.Exit(count)\n}\n")
+        test = ("package hint\n\nimport (\n\t\"errors\"\n\t\"os\"\n\t\"os/exec\"\n\t\"testing\"\n)\n\n"
+                "func TestMain(m *testing.M) {\n\tChild()\n\tos.Exit(m.Run())\n}\n\n"
+                "// REQ: CRED-1\nfunc TestChild(t *testing.T) {\n"
+                "\tc := exec.Command(os.Args[0], \"-test.run=^$\")\n"
+                "\tc.Env = append(os.Environ(), \"HINT_CHILD=1\")\n"
+                "\tvar e *exec.ExitError\n"
+                "\tout, err := c.CombinedOutput()\n"
+                "\tif !errors.As(err, &e) || e.ExitCode() != 7 || len(out) != 0 {\n\t\tt.Fatal(err, string(out))\n\t}\n}\n")
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.repo(d, "package hint\n", pr, test)
+            added = mutgate.added_lines(subprocess.run(
+                ["git", "-C", d, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1", "--", "broker"],
+                capture_output=True, text=True, check=True).stdout)[0]
+            broker, mutgate.BROKER = mutgate.BROKER, pkg.parent
+            try:
+                tmp = pathlib.Path(d) / "tmp"
+                tmp.mkdir()
+                got, problem = mutgate.deletion_mutants("hint", added, tmp, self.lister(tmp), 1)
+            finally:
+                mutgate.BROKER = broker
+            self.assertIsNone(problem)
+            # Lines 11 and 12 run only in the child; 8 and 9 in the parent, as before.
+            self.assertEqual({m["line"]: m["status"] for m in got}, {8: "KILLED", 9: "KILLED", 11: "KILLED", 12: "KILLED"})
+
     def test_a_batch_that_mostly_times_out_leaves_the_rest_to_one_worker(self):
         # L3 on #4643: when every worker's run times out, retrying each alone costs more than one
         # worker would, so after such a batch the rest runs alone, once each.
@@ -2143,6 +2197,12 @@ class Plan(unittest.TestCase):
         self.assertEqual(mutgate.shard_count(lines(1048), [0] * 367, 0.0), 5)
         self.assertEqual(mutgate.shard_count({}, [], 1000.0), 1)
 
+    def test_a_package_with_no_target_line_plans_one_shard_and_no_suite_run(self):
+        # MUT-waiver-store-claim (#5786): a record-only claim runs one cheap shard, never its suite.
+        code, out, err = self.plan({"netguard": ({}, [])}, (None, "the suite must not run"))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out), [{"pkg": "netguard", "shard": 0, "of": 1}])
+
     def test_plan_sizes_each_package_by_its_suite(self):
         sim = ({"broker/kernel/sim/a.go": set(range(1, 824))}, [{}] * 534)
         code, out, err = self.plan({"kernel/sim": sim}, (48.0, None))
@@ -2172,7 +2232,7 @@ class Summary(unittest.TestCase):
         ]
         data = {"files": [{"file_name": "a.go", "mutations": muts}]}
         targets = {"broker/p/a.go": {2, 3, 4, 5}}
-        waived = {("broker/p/a.go", 7): "names no survivor"}
+        waived = {("broker/p/a.go", 7, None, None): "names no survivor"}
         text = mutgate.summary({"p": (data, targets)}, {"p": None}, waived)
         rows = [l for l in text.split("\n") if l.startswith("| broker/") or l.startswith("| ")]
         body = [l for l in text.split("\n") if l.startswith("| broker/")]
@@ -2306,7 +2366,7 @@ class Equivalent(unittest.TestCase):
         row = [l for l in r.summary.split("\n") if l.startswith("| broker/netguard/a.go:3")][0]
         self.assertEqual(row.count(" | "), 2, row)
         self.assertIn("waives another site \\| \\<img src=x\\> \\`x\\`", row)
-        self.assertEqual(mutgate.waivers(hostile), {("broker/netguard/a.go", 3): "waives another site | <img src=x> `x`"})
+        self.assertEqual(mutgate.waivers(hostile), {("broker/netguard/a.go", 3, None, None): "waives another site | <img src=x> `x`"})
 
 
 class Record(unittest.TestCase):
@@ -2556,7 +2616,7 @@ class Record(unittest.TestCase):
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("broker/netguard/a.go:4 ARITHMETIC_BASE survives", r.stdout)
         self.assertEqual(mutgate.violations({"p": {"broker/p/a.go": {4}}}, {"p": [("a.go", 4, "STATEMENT_DELETION"),
-                         ("a.go", 4, "CONDITIONALS_NEGATION")]}, {("broker/p/a.go", 4, "STATEMENT_DELETION"): "r"}),
+                         ("a.go", 4, "CONDITIONALS_NEGATION")]}, {("broker/p/a.go", 4, "STATEMENT_DELETION", None): "r"}),
                          [("p", "broker/p/a.go", 4, "CONDITIONALS_NEGATION")])
 
     def test_a_stale_entry_fails_the_gate(self):
@@ -2568,6 +2628,42 @@ class Record(unittest.TestCase):
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("names no statement at the head", r.stdout)
             self.assertIn("Stale MUTANTS-EQUIVALENT entries", r.summary)
+
+    def test_a_record_only_change_lists_its_new_entries(self):
+        # MUT-waiver-store-claim (#5786): a PR that adds an entry and changes no .go line is claimed, its
+        # (empty) result read, and the summary lists the entry as new for review; a stale one fails.
+        head = self.VAR + "var b = 2 + 2\n"
+        rec = json.dumps({"file": "a.go", "mutant": "ARITHMETIC_BASE", "func": "b", "decl": Record.digest("var b = 2 + 2"),
+                          "stmt": ["var b = 2 + 2"], "at": 0, "after": "var a = 1 + 1", "occurrence": [1, 1],
+                          "reason": "b is never read", "accepted": "#5743"}) + "\n"
+        old = rec.replace("ARITHMETIC_BASE", "STATEMENT_DELETION")
+        with tempfile.TemporaryDirectory() as d:
+            run = self.repo(d, head, head, base_record=old, record=old + rec)
+            r = run("claimed", "--git", "HEAD~1", "--json")
+            self.assertEqual((r.returncode, json.loads(r.stdout)), (0, ["netguard"]), r.stderr)
+            r = self.verify(d, run)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("- netguard: 0 target lines", r.summary)
+            self.assertIn("New MUTANTS-EQUIVALENT entries in this PR", r.summary)
+            self.assertIn("- broker/netguard/a.go:4 ARITHMETIC\\_BASE (\\#5743): b is never read", r.summary)
+            self.assertNotIn("STATEMENT\\_DELETION (", r.summary)  # the base's entry is not new
+            # The claimed package needs its result, as any claim does.
+            shutil.rmtree(pathlib.Path(d) / "res")
+            (pathlib.Path(d) / "res").mkdir()
+            r = run("verify", str(pathlib.Path(d) / "res"), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("0 results for netguard", r.stderr)
+        with tempfile.TemporaryDirectory() as d:
+            # A record-only PR whose new entry names no statement fails the gate.
+            run = self.repo(d, head, head, record=rec.replace("2 + 2", "2 + 3"))
+            r = self.verify(d, run)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("names no statement at the head", r.stdout)
+        with tempfile.TemporaryDirectory() as d:
+            # Unchanged records claim nothing, so no result is needed.
+            run = self.repo(d, self.VAR, self.VAR, base_record=rec, record=rec)
+            r = run("claimed", "--git", "HEAD~1", "--json")
+            self.assertEqual((r.returncode, json.loads(r.stdout)), (0, []), r.stderr)
 
     def test_every_record_in_the_repository_resolves(self):
         # A record-only PR, or an edit to a proven statement in any package, fails here as well as in mutgate.
@@ -2593,6 +2689,145 @@ class Record(unittest.TestCase):
                          + ["STATEMENT_DELETION #5743"] * 21 + ["STATEMENT_DELETION #5780"] * 2
                          + ["STATEMENT_DELETION #5804"])
 
+
+
+class MutantScope(unittest.TestCase):
+    """MUT-waiver-mutant-scope (#5792, Security on #5774): a waiver waives the one mutant it proves, never
+    every mutant of its kind on its line."""
+    # REQ: MUT-waiver-mutant-scope
+
+    # broker/clerk/run/mail.go:144's shape: three CONDITIONALS_BOUNDARY mutants on one line, the proof for
+    # the cover-gap `< 0` at column 113 and the `len(p) >= 12` one at column 16 alive.
+    LINE = [("a.go", 4, "CONDITIONALS_BOUNDARY", 16), ("a.go", 4, "CONDITIONALS_BOUNDARY", 32),
+            ("a.go", 4, "CONDITIONALS_BOUNDARY", 113), ("a.go", 4, "CONDITIONALS_NEGATION", 113)]
+    TARGETS = {"p": {"broker/p/a.go": {4}}}
+
+    def test_a_two_comparison_line_with_one_proved_mutant_fails_on_the_other(self):
+        every = {"p": self.LINE}
+        live = {"p": [self.LINE[0]]}
+        gone = {"p": [self.LINE[2]]}  # NOT COVERED: what the proof is for
+        for waived in ({("broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", None): "the < 0 is killed by hand"},  # a record entry
+                       {("broker/p/a.go", 4, None, None): "the < 0 is killed by hand"}):                     # a body line
+            with self.subTest(waived):
+                # #5774's gate passed this: the entry waived the live `>= 12` mutant with the proof for `< 0`.
+                self.assertEqual(mutgate.violations(self.TARGETS, live, waived, every),
+                                 [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY")])
+                # It names three mutants, so it waives none, the one it proves included.
+                self.assertEqual(mutgate.violations(self.TARGETS, gone, waived, every),
+                                 [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY")])
+                cover, ambiguous = mutgate.covering(waived, every)
+                self.assertEqual(cover, {})
+                self.assertEqual(len(ambiguous[0][1]), 3 if list(waived)[0][2] else 4)
+        # Named by its column and kind, it waives that mutant alone: the live one still fails.
+        exact = {("broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", 113): "the < 0 is killed by hand"}
+        self.assertEqual(mutgate.violations(self.TARGETS, gone, exact, every), [])
+        self.assertEqual(mutgate.violations(self.TARGETS, live, exact, every),
+                         [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY")])
+        # A column alone still matches both kinds there, so a body line needs the kind too.
+        self.assertEqual(mutgate.violations(self.TARGETS, gone, {("broker/p/a.go", 4, None, 113): "r"}, every),
+                         [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY")])
+        self.assertEqual(mutgate.violations(self.TARGETS, gone, {("broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", 113): "r"},
+                                            every), [])
+        # A waiver whose line holds one mutant of its scope needs no column, as before.
+        one = {"p": [("a.go", 4, "STATEMENT_DELETION", 2), ("a.go", 4, "CONDITIONALS_NEGATION", 9)]}
+        self.assertEqual(mutgate.violations(self.TARGETS, one, {("broker/p/a.go", 4, "STATEMENT_DELETION", None): "r"}, one),
+                         [("p", "broker/p/a.go", 4, "CONDITIONALS_NEGATION")])
+        # A killed sibling still counts: the proof cannot say which one it is for, and a later run may not kill it.
+        self.assertEqual(mutgate.violations(self.TARGETS, {"p": [self.LINE[3]]},
+                                            {("broker/p/a.go", 4, None, None): "r"}, every),
+                         [("p", "broker/p/a.go", 4, "CONDITIONALS_NEGATION")])
+
+    def test_the_body_line_names_a_column_and_kind(self):
+        self.assertEqual(mutgate.waivers("Mutant-equivalent: broker/p/a.go:4:113:CONDITIONALS_BOUNDARY the < 0 is dead\n"
+                                         "Mutant-equivalent: broker/p/a.go:5:9 a column only\n"
+                                         "Mutant-equivalent: broker/p/a.go:6:STATEMENT_DELETION a kind only\n"
+                                         "Mutant-equivalent: broker/p/a.go:7:0 column zero\n"
+                                         "Mutant-equivalent: broker/p/a.go:8:9:lower a lower-case kind\n"
+                                         "Mutant-equivalent: broker/p/a.go:9:9:X:Y two kinds\n"),
+                         {("broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", 113): "the < 0 is dead",
+                          ("broker/p/a.go", 5, None, 9): "a column only",
+                          ("broker/p/a.go", 6, "STATEMENT_DELETION", None): "a kind only"})
+        self.assertEqual(mutgate.site_text(("broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", 113)),
+                         "broker/p/a.go:4:113:CONDITIONALS_BOUNDARY")
+
+    def test_verify_waives_only_the_named_mutant(self):
+        v = Verify()
+        src = "package netguard\nvar a = 1 + 1 + 1\n"
+        muts = [{"type": "ARITHMETIC_BASE", "status": "LIVED", "line": 2, "column": c} for c in (11, 15)]
+        result = {"files": [{"file_name": "a.go", "mutations": muts}], "mutants_lived": 2, "statement_deletions": 0}
+        reason = "a is never read, so no value tells the mutants apart"
+        r = v.verify({"netguard.json": result}, src=src, body=f"Mutant-equivalent: broker/netguard/a.go:2 {reason}\n",
+                     summary=True)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("the waiver broker/netguard/a.go:2 matches 2 mutants (broker/netguard/a.go:2:11:ARITHMETIC_BASE, "
+                      "broker/netguard/a.go:2:15:ARITHMETIC_BASE), so it waives none", r.stdout)
+        self.assertIn("Waivers matching more than one mutant", r.summary)
+        self.assertNotIn("equivalent:", r.summary)
+        r = v.verify({"netguard.json": result}, src=src, body=f"Mutant-equivalent: broker/netguard/a.go:2:15 {reason}\n",
+                     summary=True)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("broker/netguard/a.go:2 ARITHMETIC_BASE survives", r.stdout)
+        rows = [l for l in r.summary.split("\n") if l.startswith("| broker/")]
+        self.assertEqual(rows, ["| broker/netguard/a.go:2:11 | ARITHMETIC\\_BASE | **LIVED**: no test fails |",
+                                f"| broker/netguard/a.go:2:15 | ARITHMETIC\\_BASE | equivalent: {reason} |"])
+        body = "".join(f"Mutant-equivalent: broker/netguard/a.go:2:{c}:ARITHMETIC_BASE {reason}\n" for c in (11, 15))
+        r = v.verify({"netguard.json": result}, src=src, body=body)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_a_record_entry_with_a_column_waives_that_mutant_only(self):
+        rec = Record()
+        head = rec.VAR + "var b = 2 + 2 + 2\n"
+        muts = [{"type": "ARITHMETIC_BASE", "status": "LIVED", "line": 4, "column": c} for c in (11, 15)]
+        result = {"files": [{"file_name": "a.go", "mutations": muts}], "mutants_lived": 2, "statement_deletions": 0}
+
+        def verify(d, run):
+            res = pathlib.Path(d) / "res" / "mutants-0"
+            res.mkdir(parents=True, exist_ok=True)
+            (res / "netguard.json").write_text(json.dumps(result))
+            return run("verify", str(res.parent), "--git", "HEAD~1", "--summary", str(pathlib.Path(d) / "summary.md"))
+
+        with tempfile.TemporaryDirectory() as d:
+            run = rec.repo(d, rec.VAR, head)
+            w = pathlib.Path(d) / "w.txt"
+            # waive refuses a column past its line's end, and a kind other than --mutant's.
+            w.write_text("Mutant-equivalent: broker/netguard/a.go:4:99:ARITHMETIC_BASE b is never read\n")
+            r = run("waive", str(w), "--accepted", "#5792")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("no such line: broker/netguard/a.go:4:99", r.stderr)
+            w.write_text("Mutant-equivalent: broker/netguard/a.go:4:15:ARITHMETIC_BASE b is never read\n")
+            r = run("waive", str(w), "--accepted", "#5792", "--mutant", "STATEMENT_DELETION")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("names another mutant kind than --mutant", r.stderr)
+            self.assertFalse((pathlib.Path(d) / "broker" / "netguard" / mutgate.RECORD).exists())
+            r = run("waive", str(w), "--accepted", "#5792")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            entry = json.loads((pathlib.Path(d) / "broker" / "netguard" / mutgate.RECORD).read_text().split("\n")[1])
+            self.assertEqual((entry["mutant"], entry["col"]), ("ARITHMETIC_BASE", 15))
+            r = run("records", "netguard")
+            self.assertEqual((r.returncode, r.stdout.split(" ")[:2]), (0, ["broker/netguard/a.go:4:15", "ARITHMETIC_BASE"]))
+            r = verify(d, run)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("broker/netguard/a.go:4 ARITHMETIC_BASE survives", r.stdout)
+            summary = (pathlib.Path(d) / "summary.md").read_text()
+            self.assertIn("| broker/netguard/a.go:4:15 | ARITHMETIC\\_BASE | equivalent: b is never read", summary)
+            self.assertIn("| broker/netguard/a.go:4:11 | ARITHMETIC\\_BASE | **LIVED**", summary)
+            self.assertIn("- broker/netguard/a.go:4:15 ARITHMETIC\\_BASE (\\#5792): b is never read", summary)
+        # The same entry with no column names two mutants, so it waives neither.
+        del entry["col"]
+        with tempfile.TemporaryDirectory() as d:
+            run = rec.repo(d, rec.VAR, head, record=json.dumps(entry) + "\n")
+            r = verify(d, run)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("broker/netguard/a.go:4 ARITHMETIC_BASE survives", r.stdout)
+            self.assertIn("the waiver broker/netguard/a.go:4:ARITHMETIC_BASE matches 2 mutants", r.stdout)
+
+    def test_a_record_column_is_a_positive_integer(self):
+        good = {"file": "a.go", "mutant": "ARITHMETIC_BASE", "func": "b", "decl": "0" * 64, "stmt": ["var b = 2"], "at": 0,
+                "after": "", "occurrence": [1, 1], "reason": "b is never read", "accepted": "#5792"}
+        self.assertEqual(mutgate.record_entries(json.dumps({**good, "col": 9}))[0][0]["col"], 9)
+        for bad in ({**good, "col": 0}, {**good, "col": "9"}, {**good, "col": True}, {**good, "col": 9, "x": 1}):
+            with self.subTest(bad):
+                self.assertIsNone(mutgate.record_entries(json.dumps(bad))[0])
 
 def job(text, name):
     """The body of job `name` in a workflow's jobs: block."""

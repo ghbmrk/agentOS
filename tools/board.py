@@ -38,6 +38,8 @@ the GENERATED line and its rows come from the live issues, never from hand edits
   board.py stale --repo o/r      print each open work item whose PR merged while its state label is still
            [--comment]           queued, building, in review or escalated (STALE-1); with --comment, say so
                                  once per item and PR on the issue. Flags only: never relabels or closes.
+                                 A collaborator's comment carrying FOLLOWUP_MARK for that PR names what
+                                 is still owed and clears the flag until a newer PR merges (STALE-1-4).
   board.py intake --repo o/r --issue N
                                  judge issue N with render's checks among the live work items and
                                  keep one comment on it naming every problem (INTAKE_MARK): posted,
@@ -328,6 +330,7 @@ def pr_notes(items, prs):
 
 
 STALE_MARK = "<!-- board-stale: #{} -->"
+FOLLOWUP_MARK = "<!-- board-followup: #{} -->"
 
 
 def readable_row(item):
@@ -360,21 +363,32 @@ def stale(items, prs):
 def stale_comment(row_id, state, pr):
     return (f"{STALE_MARK.format(pr['number'])}\n{row_id} still reads `state:{state}`, but PR #{pr['number']} "
             "merged. If the work is done, set the issue's state label to `state:merged`; "
-            "if more is owed, keep the label and name the follow-up here.")
+            "if more is owed, keep the label and name the follow-up here in a comment that starts with "
+            f"`{FOLLOWUP_MARK.format(pr['number'])}`.")
+
+
+def followed_up(comments, pr):
+    """True when a collaborator's comment names the follow-up owed after this PR (STALE-1-4). The bot's
+    own notice quotes the marker and an outsider can comment, so neither clears the flag."""
+    mark = FOLLOWUP_MARK.format(pr["number"])
+    return any(mark in (c.get("body") or "") and c.get("author_association") in COLLABORATORS
+               and (c.get("user") or {}).get("login") != BOT for c in comments)
 
 
 def report_stale(fetch, repo, comment):
     items = work_items(fetch, repo)
-    found = stale(items, fetch(f"/repos/{repo}/pulls?state=all"))
-    for item, pr in found:
+    flagged = 0
+    for item, pr in stale(items, fetch(f"/repos/{repo}/pulls?state=all")):
+        seen = fetch(f"/repos/{repo}/issues/{item['number']}/comments")
+        if followed_up(seen, pr):
+            continue
+        flagged += 1
         row = row_of(item)  # stale() already read it
         print(f"board: {row['id']} (#{item['number']}): state {row['state']} but PR #{pr['number']} merged")
-        if comment:
-            seen = fetch(f"/repos/{repo}/issues/{item['number']}/comments")
-            if not any(STALE_MARK.format(pr["number"]) in (c.get("body") or "") for c in seen):
-                fetch(f"/repos/{repo}/issues/{item['number']}/comments", "POST",
-                      {"body": stale_comment(row["id"], row["state"], pr)})
-    return len(found)
+        if comment and not any(STALE_MARK.format(pr["number"]) in (c.get("body") or "") for c in seen):
+            fetch(f"/repos/{repo}/issues/{item['number']}/comments", "POST",
+                  {"body": stale_comment(row["id"], row["state"], pr)})
+    return flagged
 
 
 def render_problems(skeleton, items):
