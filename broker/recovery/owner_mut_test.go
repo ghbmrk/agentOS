@@ -3,6 +3,7 @@ package recovery
 import (
 	"bytes"
 	"errors"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -54,10 +55,19 @@ func TestReEnrollRefusesASeedEntryOfAnotherKind(t *testing.T) {
 }
 
 func TestOtpauthNamesEveryParameterTheCodeGeneratorNeeds(t *testing.T) {
-	got := otpauth([]byte("12345678901234567890"))
-	want := "otpauth://totp/AgentOS:box?algorithm=SHA1&digits=6&issuer=AgentOS&period=30&secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
-	if got != want {
-		t.Fatalf("otpauth = %q\nwant      %q", got, want)
+	u, err := url.Parse(otpauth([]byte("12345678901234567890")))
+	must(t, err)
+	label, _, _ := strings.Cut(strings.TrimPrefix(u.Path, "/"), ":")
+	q := u.Query()
+	want := url.Values{"secret": {"GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"}, "issuer": {label},
+		"algorithm": {"SHA1"}, "digits": {"6"}, "period": {"30"}}
+	if u.Scheme != "otpauth" || u.Host != "totp" || label == "" || len(q) != len(want) {
+		t.Fatalf("otpauth = %s", u)
+	}
+	for k, v := range want {
+		if q.Get(k) != v[0] {
+			t.Errorf("%s = %q, want %q", k, q.Get(k), v[0])
+		}
 	}
 }
 
