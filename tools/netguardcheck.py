@@ -3,7 +3,7 @@
 
 Every non-test Go file under broker/ that opens a network connection (net.Dialer, net.Dial*,
 tls.Dial*, smtp.Dial*, an http.Transport, an http.Client or net.Resolver value (a *pointer* type is a reference, not a construction), http.DefaultClient/DefaultTransport, http.Get/Post/Head)
-must import broker/netguard, or be listed in tools/netguard_allow.txt with a reason. A SIP user agent (sipgo.NewUA) must also hand its transport the guard's dialer (DialerCreate), not
+must import broker/netguard (a real import declaration, not the path in a comment or string), or be listed in tools/netguard_allow.txt with a reason. A SIP user agent (sipgo.NewUA) must also hand its transport the guard's dialer (DialerCreate), not
 merely import the guard. Unix-socket
 dials are exempt, as is testdata/ (guest programs). The allowlist is a debt list: an entry whose
 file is gone, now imports the guard, or no longer has an unhooked dial fails the check, so it
@@ -50,8 +50,90 @@ def sites(path):
     return out
 
 
+def strip_comments(text):
+    """Text with each comment replaced by a space (a newline kept per line comment), or None if a
+    comment or literal does not terminate. Interpreted, raw and rune literals are kept verbatim."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            out.append(" ")
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            if j < 0:
+                return None
+            out.append("\n" if "\n" in text[i:j] else " ")
+            i = j + 2
+        elif c == "`":
+            j = text.find("`", i + 1)
+            if j < 0:
+                return None
+            out.append(text[i:j + 1])
+            i = j + 1
+        elif c in "\"'":
+            j = i + 1
+            while j < n and text[j] != c:
+                if text[j] == "\n":
+                    return None
+                j += 2 if text[j] == "\\" else 1
+            if j >= n:
+                return None
+            out.append(text[i:j + 1])
+            i = j + 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+_SPEC = r'(?:([A-Za-z_]\w*|\.)\s+)?("(?:[^"\\\n]|\\.)*"|`[^`]*`)'
+_HEAD = re.compile(r"\s*package\s+\w+\s*?(?:;|\n|$)")
+_DECL = re.compile(r"\s*import\b\s*")
+
+
+def imports(text):
+    """[(name, path)] of a Go file's import declarations, or None if they do not parse. Comments
+    are stripped first, so only real declarations count (REV-LOW-tools finding 19)."""
+    code = strip_comments(text)
+    if code is None:
+        return None
+    m = _HEAD.match(code)
+    if not m:
+        return None
+    pos, out = m.end(), []
+    spec = re.compile(r"\s*" + _SPEC + r"\s*(?:;|\n)?")
+    while True:
+        d = _DECL.match(code, pos)
+        if not d:
+            return out
+        pos = d.end()
+        if code.startswith("(", pos):
+            pos += 1
+            while True:
+                end = re.compile(r"\s*\)\s*(?:;|\n|$)").match(code, pos)
+                if end:
+                    pos = end.end()
+                    break
+                s = spec.match(code, pos)
+                if not s or s.end() == pos:
+                    return None
+                out.append((s.group(1) or "", s.group(2)[1:-1]))
+                pos = s.end()
+        else:
+            s = re.compile(r"\s*" + _SPEC + r"[ \t]*(?:;|\n|$)").match(code, pos)
+            if not s:
+                return None
+            out.append((s.group(1) or "", s.group(2)[1:-1]))
+            pos = s.end()
+
+
 def hooked(path):
-    return GUARD in path.read_text(encoding="utf-8", errors="replace")
+    """True if the file imports the guard under a usable name (a blank import cannot use it); an
+    unparsable file is not hooked, so it fails closed."""
+    specs = imports(path.read_text(encoding="utf-8", errors="replace"))
+    return bool(specs) and any(p == GUARD.strip('"') and name != "_" for name, p in specs)
 
 
 def load_allow(path):
@@ -83,7 +165,7 @@ def check(root, allow_file):
             continue
         text = f.read_text(encoding="utf-8", errors="replace")
         if any(SIP_CLIENT.search(l) for l in text.split("\n") if not l.lstrip().startswith("//")) \
-                and not ("DialerCreate" in text and GUARD in text):
+                and not ("DialerCreate" in (strip_comments(text) or "") and hooked(f)):
             if rel not in allow:
                 problems.append(f"{rel}: SIP client built without a guarded dialer (give the transport layer netguard.Policy's dialer through DialerCreate)")
             seen.add(rel)

@@ -64,7 +64,9 @@ def _git(*args):
 
 
 def git_counts(ref):
-    paths = _git("ls-tree", "-r", "--name-only", ref).decode().splitlines()
+    # NUL-delimited: without -z git quotes a path holding a non-ASCII byte, quote or backslash, so
+    # such a skill would not match and its words would go uncounted (REV-LOW-tools finding 21).
+    paths = [p for p in _git("ls-tree", "-r", "-z", "--name-only", ref).decode("utf-8").split("\0") if p]
     return counts(lambda p: _git("show", f"{ref}:{p}").decode("utf-8"), paths)
 
 

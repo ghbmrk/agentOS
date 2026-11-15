@@ -18,19 +18,27 @@ WORKFLOWS = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workfl
 
 
 def steps(text):
-    """Yield (action, step text) for each `uses:` step."""
+    """Yield (action, step text) for each `uses:` step, whatever key the step lists first: a list
+    item's mapping is read to its end and `uses:` found at the item's own key column (REV-LOW-tools
+    finding 23; a `name:`-first step used to skip the pin and checkout-token checks)."""
     lines = text.splitlines()
     for i, line in enumerate(lines):
-        m = re.match(r"^(\s*)-\s+uses:\s*([^\s#]+)", line)
+        m = re.match(r"^(\s*)-(\s+)\S", line)
         if not m:
             continue
         indent = len(m.group(1))
+        col = indent + 1 + len(m.group(2))
         body = [line]
         for nxt in lines[i + 1:]:
             if nxt.strip() and len(nxt) - len(nxt.lstrip()) <= indent:
                 break
             body.append(nxt)
-        yield m.group(2), "\n".join(body)
+        while len(body) > 1 and not body[-1].strip():
+            body.pop()
+        keys = [line[col:]] + [l[col:] for l in body[1:] if len(l) - len(l.lstrip()) == col]
+        uses = [u.group(1) for u in (re.match(r"uses:\s*([^\s#]+)", k) for k in keys) if u]
+        if uses:
+            yield uses[0], "\n".join(body)
 
 
 def job_steps(text, job):
@@ -1581,6 +1589,35 @@ class WorkflowTest(unittest.TestCase):
     def test_steps_finds_steps(self):
         sample = "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          x: 1\n      - run: echo\n"
         self.assertEqual(list(steps(sample)), [("actions/checkout@v4", "      - uses: actions/checkout@v4\n        with:\n          x: 1")])
+        # REV-LOW-tools finding 23: a step found only when `uses` came first let name-, id- or if-first
+        # steps skip the pin and checkout-token checks. Every key order yields the same action and the
+        # whole step.
+        for first in ("name: Check out", "id: co", "if: always()", "with:\n          x: 1"):
+            with self.subTest(first=first):
+                step = f"      - {first}\n        uses: actions/checkout@v4\n        env:\n          Y: 2"
+                got = list(steps("jobs:\n  a:\n    steps:\n" + step + "\n      - run: echo\n"))
+                self.assertEqual(got, [("actions/checkout@v4", step)])
+        # Not a step's action: `uses:` deeper than the step's own keys (a run body, a nested value).
+        for body in ("      - run: |\n          uses: evil/x@main\n          echo\n",
+                     "      - name: n\n        with:\n          uses: evil/x@main\n"):
+            with self.subTest(body=body):
+                self.assertEqual(list(steps("jobs:\n  a:\n    steps:\n" + body)), [])
+
+    def test_step_order_does_not_hide_an_unpinned_action(self):
+        # REV-LOW-tools finding 23: the real pin and token predicates, fed name-first synthetic steps.
+        pin = r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$"
+        sha = "0" * 40
+        text = ("jobs:\n  a:\n    steps:\n"
+                "      - name: unpinned\n        uses: actions/cache@v4\n"
+                f"      - name: pinned\n        uses: actions/cache@{sha}\n"
+                "      - name: local\n        uses: ./.github/actions/x\n"
+                f"      - name: tokenless\n        uses: actions/checkout@{sha}\n        with:\n          persist-credentials: false\n"
+                f"      - id: persisting\n        uses: actions/checkout@{sha}\n        with:\n          fetch-depth: 0\n")
+        got = list(steps(text))
+        self.assertEqual([a for a, _ in got if not a.startswith("./") and not re.match(pin, a)], ["actions/cache@v4"])
+        self.assertEqual(len(got), 5)
+        token = [bool(re.search(r"persist-credentials:\s*false", s)) for a, s in got if a.startswith("actions/checkout@")]
+        self.assertEqual(token, [True, False])
 
 
 # PREMERGE-stale (#1946): run premerge.yml's own script under the runner's shell with `gh`, `git`,

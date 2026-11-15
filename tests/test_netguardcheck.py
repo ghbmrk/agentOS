@@ -72,9 +72,45 @@ class Check(unittest.TestCase):
         self.assertEqual(t.run(), [])
 
     def test_a_comment_naming_the_guard_is_not_a_hook(self):
+        # REV-LOW-tools finding 19: the quoted import path in a comment must not count.
+        for text in ("// uses broker/netguard\n", f"// see {IMPORT}\n", f"/* {IMPORT} */\n"):
+            t = self.tree()
+            t.go("broker/a/a.go", text + "func f() { net.Dial(\"tcp\", a) }\n")
+            self.assertEqual(len(t.run()), 1, text)
+
+    def hooked(self, src):
         t = self.tree()
-        t.go("broker/a/a.go", "// uses broker/netguard\nfunc f() { net.Dial(\"tcp\", a) }\n")
-        self.assertEqual(len(t.run()), 1)
+        t.go("broker/a/a.go", src)
+        return netguardcheck.hooked(t.root / "broker/a/a.go")
+
+    def test_hooked_reads_only_imports(self):
+        # REV-LOW-tools finding 19: the production predicate, not a copy of it.
+        for src in (f"// {IMPORT}\n", f"/* {IMPORT} */\n", f"/*\n{IMPORT}\n*/\n",
+                    f"var s = {IMPORT}\n", f"var s = `\n{IMPORT}\n`\n",
+                    f"import \"fmt\"\nvar s = {IMPORT}\n", f"import _ {IMPORT}\n",
+                    f"import (\n\t\"fmt\"\n)\n\nfunc f() {{ _ = {IMPORT} }}\n",
+                    f"import \"fmt\" // {IMPORT}\n", f"func f() {{}}\nimport {IMPORT}\n"):
+            self.assertFalse(self.hooked(src), src)
+        for src in (f"import {IMPORT}\n", f"import ng {IMPORT}\n", f"import . {IMPORT}\n",
+                    f"import (\n\t\"fmt\"\n\tng {IMPORT} // guard\n)\n",
+                    f"import \"fmt\"\nimport (\n\t/* x */ {IMPORT}\n)\n",
+                    f"// a comment\nimport (\"fmt\"; {IMPORT})\n",
+                    f"import `github.com/ghbmrk/agentos/broker/netguard`\n"):
+            self.assertTrue(self.hooked(src), src)
+
+    def test_parse_error_is_not_hooked(self):
+        for src in (f"/* open\nimport {IMPORT}\n", f"import (\n\t{IMPORT}\n", f"import ({IMPORT} \"fmt\n)\n"):
+            self.assertFalse(self.hooked(src), src)
+            t = self.tree()
+            t.go("broker/a/a.go", src + "func f() { net.Dial(\"tcp\", a) }\n")
+            self.assertEqual(len(t.run()), 1, src)
+
+    def test_sip_needs_a_real_import_and_dialer(self):
+        for src in (f"// {IMPORT}\nimport \"github.com/emiago/sipgo\"\nfunc f() {{ sipgo.NewUA(); _ = sip.TransportTCP{{DialerCreate: nil}} }}\n",
+                    f"import ({IMPORT}; \"github.com/emiago/sipgo\")\nfunc f() {{ sipgo.NewUA() }} // DialerCreate\n"):
+            t = self.tree()
+            t.go("broker/sip/line.go", src)
+            self.assertEqual(len(t.run()), 1, src)
 
     def test_unix_tests_vendor_testdata_and_netguard_are_exempt(self):
         t = self.tree()
