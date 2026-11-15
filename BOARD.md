@@ -111,9 +111,9 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | REV-LOW-tools | REV-LOW-tools: review-tool and CI-check findings (srclint tags, next-id order, netguard imports, packet brief source, NUL path parsing, inter-hunk context, workflow step keys) | 23-Low review (2026-11-01) | building(release; tier A; brief to write) |
 | MET-owner-export | MET-owner-export: the box writes its weekly owner-outcome counts to records/owner/ (needs brief; after G1) | #4935; G1 | queued (release; needs brief; after G1) |
 | VULN-prune-requalify | VULN-prune-requalify: requalify the pruned OpenClaw image (PLN-5, HLD-3) | VULN-controlui-drop (#4436) | queued (release) |
-| MUT-test-helper-scope | MUT-test-helper-scope: a changed test line outside a test function (an import or helper) widens mutgate only to the tests that use it, not to the whole package. Tier A, gate file. | #5762, #5753 | building (tier A) |
 | MUT-brief-test-name-fu | MUT-brief-test-name-fu: the MUT-deleted-test-own-lines brief cites the helper test by its old name after #5838 renames it. Release; from #5838. | #5826, #5838 | queued (release; tier A) |
-| REV-LOW-tools-b | REV-LOW-tools-b: srclint build-text tags, lookup next-id fetch order, reviewpacket brief source, difflines inter-hunk context | 23-Low review (2026-11-01), split from #4400 | queued(release; tier C; brief to write) |
+| REV-LOW-tools-b | REV-LOW-tools-b: srclint build-text tags, lookup next-id fetch order, reviewpacket brief source, difflines inter-hunk context | 23-Low review (2026-11-01), split from #4400 | building(release; tier C; brief to write) |
+| REV-LOW-tools-c | REV-LOW-tools-c: srclint GO_CMD anchoring and continuation lines | follow-up of #5846 | queued(release; tier C; brief to write) |
 
 ## Owner channel and approvals (SPEC §10)
 
@@ -329,6 +329,9 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | HOST-1e2b | HOST-1e2b: host-untouched check on an S1 PC: the third-system snapshot procedure, RTC offset, the pcrlock index if P2-1 pins one, HOST-1d's opted-in disk excluded by the owner's flag. | #5746 | queued (tier A) |
 | MOR-setup-hold | MOR-setup-hold: an orderly shutdown before enrollment leaves MOR set, because the staged page CA holds /run/agentos-setup. Release; from HOST-1e2a. | #5816, #4794 | building (release; tier A) |
 | MOR-setup-factors | MOR-setup-factors: an orderly shutdown after the confirm and before a successful enrollment leaves MOR set, because the factors hold /run/agentos-setup. Release; from MOR-setup-hold. | #5836, #4794 | queued (release; tier A) |
+| VULN-guest-node-openssl | VULN-guest-node-openssl: check the openclaw guest's node-bundled OpenSSL against the 2026-11-10 OpenSSL advisories; pin a fixed node or record the acceptance with reach. Release; from #5842. | #5842, #5341 | queued (release; tier A; lane primary) |
+| MOR-setup-isolate | MOR-setup-isolate: an isolate before enrollment re-mints the page authority under a printed card; the pageca unit's crash-rerun comment is stale. Release; from MOR-setup-hold. | #5844, #5836 | queued (release; tier A) |
+| VULN-cipher-sweep-tidy | VULN-cipher-sweep-tidy: key import_sweep's [cipher] entries to package versions; refuse malformed, empty, duplicate and overlapping entries; point refusals at the reach notes. Release; from #5842. | #5842, #5341 | queued (release; tier A; lane primary) |
 
 ## Model routes and the Codex lane
 
@@ -428,8 +431,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-initrd-global-ext-dirs | IMG-initrd-global-ext-dirs: INITRD_IMAGE_DIRS adds /.extra/global_sysext and /.extra/global_confext when the image's systemd moves past v257. Release; blocked on that bump; from #5501 (Security). | #5488, #5501 | queued (release; tier A; blocked on the systemd bump) |
 | IMG-keyring-pin | IMG-keyring-pin: the Debian archive keyring is checked against committed fingerprints before any image or guest build uses it. Release; from #5573. | #5573 | queued (release; tier A; gate files) |
 | GUEST-bridge-tree-dead-fu | GUEST-bridge-tree-dead-fu: retire the stale TREE rows and B16, bound the idle-bridge test, drop the guest-plane tree exemption (#5611 reviews) | - | queued (release; tier B) |
-| GUEST-mut-owner | GUEST-mut-owner: kill or waive the old mutgate deletion survivors in the guest owner channel (33). Release; from #5621. | #5621 | building (release; tier A) |
-| GUEST-mut-dispatch | GUEST-mut-dispatch: kill or waive the old mutgate deletion survivors in guest mcp, goal, plan and compact (27). Release; from #5621. | #5621 | building (release; tier A) |
 | TIM-1-interval-fu-c | TIM-1-interval-fu-c: the question book moves off Guard.Now to the interval, and the clock drops the restricted mode's last API. Release; from #5216. | #5216, #5279 | queued (release; tier A) |
 | TIM-1-interval-fu-d | TIM-1-interval-fu-d: a lost clock state file widens the interval until carrier time is read. Release; from #5216. | #5216 | building (release; tier A) |
 | TIM-1-interval-fu-e | TIM-1-interval-fu-e: losing NTS during an outlier re-alerts the owner, and the outlier bound outlives the NTS sync. Release; from #5754. | #5216, #5754 | queued (release; tier A) |
@@ -437,17 +438,20 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | LINT-dial-configured | LINT-dial-configured: the inference lint's configured() refuses a local bound to a literal (NET-2). Release; from #5757. | #5757 | queued (release) |
 | CLK-run-mut-mail-fu2 | CLK-run-mut-mail-fu2: a mail account stored with starttls is refused as unreadable instead of losing its password slot; the sign-in overlap test pins the refresh path. Release; from #5774. | #5774, #5694 | building (release; tier A) |
 | MUT-deleted-test-own-lines-fu | MUT-deleted-test-own-lines-fu: #5770's release items: NOT COVERED rule scope, testdata as a test change, Mutant-uncovered alias, archive error text. Release; after #5776. | #5770 | queued (release; tier A) |
-| MUT-proc-coverdir | MUT-proc-coverdir: the mutation gate cannot size broker/clerk/devslot/proc (driver tests fail under a -cover binary). Release; from #5788. | #5788 | building (release; tier B) |
 | CLK-wipe-lint-callsites | CLK-wipe-lint-callsites: hold a listed wipe helper's call sites, not exempt the whole function. Release; from #5797. | #5797 | building (release; tier A) |
 | CLK-seal-entries-wipe | CLK-seal-entries-wipe: wipe decoded entry values when Unlock refuses them. Release; from #5799. | #5799 | queued (release; tier A) |
 | MUT-waiver-store-claim-fu | MUT-waiver-store-claim-fu: name the record in mutgate's no-claim message and workflow comment, mark cut reasons and cap the new-entry list, local gate reads record-only packages. Release; from #5802. | #5802 | queued (release; tier A) |
 | IMG-dbus-reach | IMG-dbus-reach: hide /run/dbus from the agentOS units that make no bus call, and pin dbus-daemon's start-up command line. | #5766, #5794 | queued (release; tier A) |
 | MUT-case-clause-cover | MUT-case-clause-cover: mutgate reads every mutant in a switch case's expression as NOT COVERED. Release; from #5810. | #5810 | queued (release) |
 | MUT-import-widen | MUT-import-widen: an added import should not widen mutgate's targets to the whole package. Release; from #5808. | #5808 | queued (release; tier B) |
-| IMG-security-pin-fu | IMG-security-pin-fu: the snapshot resolver's edge cases are tested, a bad timestamp gets a clear error, I9 matches, and the enforcer image reads the pinned security snapshot. Release; from #5606. | #5021, #5606 | building (release; tier A; gate file) |
 | MUT-waiver-messages | MUT-waiver-messages: mutgate failures name the mutant as path:line:col:KIND, ambiguous waivers are not listed as unused, malformed waiver lines are warned about, and the workflow header shows the new syntax. Release; from #5824. | #5824 | queued (release; tier A) |
-| MUT-add-neighbour-widen | MUT-add-neighbour-widen: a new test appended after another should not widen mutgate to the neighbour's coverage. Release; from #5808. | #5808 | queued (release; tier B) |
+| MUT-add-neighbour-widen | MUT-add-neighbour-widen: a new test appended after another should not widen mutgate to the neighbour's coverage. Release; from #5808. | #5808 | building (release; tier B) |
 | MUT-failed-test-bounded | MUT-failed-test-bounded: mutgate's failed_test reads a mutant's output unbounded; a flooding mutant crashes the deletion step. Release; from #5796. | #5796 | queued (release; tier C) |
+| OWN-page-session-mut2 | OWN-page-session mutants part 2: old cmd/agentosd survivors in forget, signinhost, recallheld, main, evidence, held, modemenv (198) | #5202 | building (release; tier A) |
+| OWN-page-session-mut4 | OWN-page-session mutants part 4: old broker/recovery survivors (69) | #5202 | building (release; tier A) |
+| OWN-page-session-mut2b | OWN-page-session mutants part 2b: remaining old cmd/agentosd survivors in evidence, forget, recallheld, main, held, signinhost (152) | #5847 | queued (release; tier A) |
+| MUT-notcovered-misread | MUT-notcovered-misread: mutgate record kind for killed mutants gremlins reads as NOT COVERED | #5863 | queued (release; tier B) |
+| MUT-wipe-lint | MUT-wipe-lint: lint that derived key buffers are wiped | #5857 | queued (release; tier B) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -491,7 +495,5 @@ issue #5709: needs exactly one state label of queued, building, in review, merge
 issue #5736: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5756: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5811: a second issue for TIM-1-interval-fu-e (first is #5758)
-issue #5847: title 'OWN-page-session mutants part 2: kill the old cmd/agentosd survivors in forget, signinhost, recallheld, main, evidence, held, modemenv' does not start with '<ID>: '
 issue #5848: title 'OWN-page-session mutants part 3: kill the other old cmd/agentosd survivors (agent, backups, passkeys, lostcard and 21 more files)' does not start with '<ID>: '
-issue #5849: title 'OWN-page-session mutants part 4: kill the old broker/recovery survivors (69)' does not start with '<ID>: '
 ```
