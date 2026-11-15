@@ -2,7 +2,7 @@
 glibc's POSIX regex or wide scanf functions, directly or through a library they need, in the main
 tree and in each initrd, so the glibc records' reachability claims come from the tree CI builds.
 VULN-debian-r5-reach (#5341): it also counts, in each file whose bytes name an OpenSSL cipher fetch by
-name string (the only way to select AES-GCM-SIV), the call sites to it, held to the allowlist's
+name string (the only way to select AES-GCM-SIV), the references to it, held to the allowlist's
 [cipher] section, so the openssl records' reach note is checked on each build."""
 # REQ: EVL-5
 import contextlib
@@ -45,6 +45,15 @@ SHARED = ('void *EVP_CIPHER_fetch(void *, const char *, const char *);\n'
           'void *openssl_cipher_many(const char *n) { return EVP_CIPHER_fetch(0, n, 0); }\n'
           'void *tpm2_seal(void) { return openssl_cipher_many("aes-128-cfb"); }\n')
 SD_MAP = "SD_SHARED { global: openssl_cipher_many; tpm2_seal; local: *; };\n"
+# L3 6899461135: the same direct call, then the same plus a table holding the fetch's address and a call
+# through it. The table must change the count, as a new call would.
+ONE_CALL = ('void *EVP_CIPHER_fetch(void *, const char *, const char *);\n'
+            'void *a(const char *n) { return EVP_CIPHER_fetch(0, n, 0); }\n')
+TABLE = ONE_CALL + ('typedef void *(*F)(void *, const char *, const char *);\n'
+                    'F table[] = {EVP_CIPHER_fetch};\n'
+                    'void *b(int i, const char *n) { return table[i](0, n, 0); }\n')
+# A program spelling the cipher, with no fetch name (Security 6899468190).
+SPELLS = 'const char *c = "aes-256-gcm-siv";\nint main(void) { return c[0]; }\n'
 
 
 def newc(members):
@@ -96,6 +105,9 @@ class Tree(unittest.TestCase):
            "-Wl,--version-script," + str(src / "openssl.map"))
         cc("fetcher.c", FETCHER, lib / "libfetcher.so.1", "-shared", "-fPIC", "-L" + str(lib), "-l:libcrypto.so.3")
         cc("dlsym.c", DLSYM, cls.tree / "usr/bin/dlsymmer", "-ldl")
+        cc("one.c", ONE_CALL, lib / "libonecall.so.1", "-shared", "-fPIC", "-L" + str(lib), "-l:libcrypto.so.3")
+        cc("table.c", TABLE, lib / "libtable.so.1", "-shared", "-fPIC", "-L" + str(lib), "-l:libcrypto.so.3")
+        cc("spells.c", SPELLS, cls.tree / "usr/bin/spells")
         cc("shared.c", SHARED, lib / "libsystemd-shared-257.so", "-shared", "-fPIC", "-L" + str(lib),
            "-l:libcrypto.so.3", "-Wl,--version-script," + str(src / "sd.map"))
         subprocess.run(["strip", str(lib / "libsystemd-shared-257.so")], check=True)
@@ -112,8 +124,8 @@ class ImportSweepTest(Tree):
 
     def test_tree_imports_and_reach(self):
         got = sweep.run_tree(str(self.tree))["tree"]
-        # Eleven ELF files; the text file and the symbolic links are not read.
-        self.assertEqual(got["scanned"], 11)
+        # Fourteen ELF files; the text file and the symbolic links are not read.
+        self.assertEqual(got["scanned"], 14)
         self.assertEqual(got["imports"]["/usr/lib/libregex-user.so.1.0.0"], ["regcomp"])
         wide = got["imports"]["/usr/bin/wtool"]
         self.assertEqual(len(wide), 1)
@@ -204,7 +216,7 @@ class ImportSweepTest(Tree):
 
 @NEEDS_CC
 class CipherSitesTest(Tree):
-    """#5341: the files that can fetch an OpenSSL cipher by name, and their call sites, from the binary."""
+    """#5341: the files that can fetch an OpenSSL cipher by name, and their references, from the binary."""
 
     def test_sites_counted_per_file(self):
         got = sweep.run_tree(str(self.tree))["tree"]["cipher"]
@@ -217,11 +229,25 @@ class CipherSitesTest(Tree):
         self.assertIn("/usr/lib/libcrypto.so.3", got)
         self.assertNotIn("/usr/bin/plain", got)
 
+    def test_address_taken_counts(self):
+        # L3 6899461135: a pointer to the fetch in a table is a reference, so the two libraries differ.
+        got = sweep.run_tree(str(self.tree))["tree"]["cipher"]
+        one, table = got["/usr/lib/libonecall.so.1"], got["/usr/lib/libtable.so.1"]
+        self.assertEqual(one, {"EVP_CIPHER_fetch": 1})
+        self.assertGreater(table["EVP_CIPHER_fetch"], one["EVP_CIPHER_fetch"])
+
+    def test_cipher_spelt_is_held(self):
+        got = sweep.run_tree(str(self.tree))["tree"]["cipher"]
+        self.assertEqual(got["/usr/bin/spells"], {"GCM-SIV": 1})
+
     def test_site_patterns(self):
         lines = {"  4f2a3:\tcall   4a0d0 <EVP_CIPHER_fetch@plt>": "EVP_CIPHER_fetch",
                  "  1139:\tjmp    1030 <openssl_cipher_many@@SD_SHARED>": "openssl_cipher_many",
                  "  1139:\tcall   *0x2e91(%rip)        # 3fd0 <EVP_get_cipherbyname@OPENSSL_3.0.0>": "EVP_get_cipherbyname",
                  "  1140:\tjmp    1150 <openssl_cipher_many+0x20>": None,
+                 "  1139:\tmov    0x2e99(%rip),%rax        # 3fd8 <EVP_CIPHER_fetch@Base>": "EVP_CIPHER_fetch",
+                 "  1139:\tlea    -0x7(%rip),%rax        # 1139 <openssl_cipher_many>": "openssl_cipher_many",
+                 "0000000000001139 <openssl_cipher_many@@SD_SHARED>:": None,
                  "  1140:\tmov    0x8(%rsp),%rax": None}
         for line, want in lines.items():
             with self.subTest(line=line):
@@ -232,9 +258,11 @@ class CipherSitesTest(Tree):
         places = sweep.run_tree(str(self.tree))
         ok = {"/usr/lib/libfetcher.so.*": {"EVP_CIPHER_fetch": 2},
               "/usr/lib/libsystemd-shared-*.so": {"EVP_CIPHER_fetch": 1, "openssl_cipher_many": 1},
-              "/usr/lib/libcrypto.so.3": "*", "/usr/bin/dlsymmer": {"EVP_get_cipherbyname": 0}}
+              "/usr/lib/libcrypto.so.3": "*", "/usr/bin/dlsymmer": {"EVP_get_cipherbyname": 0},
+              "/usr/lib/libonecall.so.1": {"EVP_CIPHER_fetch": 1}, "/usr/lib/libtable.so.1": "*",
+              "/usr/bin/spells": {"GCM-SIV": 1}}
         self.assertEqual(sweep.cipher_refusals(places, ok), [])
-        # A new call site in a reviewed library fails until its entry is reviewed again.
+        # A new reference in a reviewed library fails until its entry is reviewed again.
         more = dict(ok, **{"/usr/lib/libfetcher.so.*": {"EVP_CIPHER_fetch": 1}})
         errs = sweep.cipher_refusals(places, more)
         self.assertEqual(len(errs), 1)
@@ -249,7 +277,7 @@ class CipherSitesTest(Tree):
 
     def test_summary_lists_sites(self):
         lines = sweep.summary(sweep.run_tree(str(self.tree)))
-        self.assertIn("tree cipher: 4 files can fetch an OpenSSL cipher by name", lines)
+        self.assertIn("tree cipher: 7 files can fetch an OpenSSL cipher by name", lines)
         self.assertIn("  sites /usr/lib/libfetcher.so.1: EVP_CIPHER_fetch=2", lines)
 
 

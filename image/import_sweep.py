@@ -14,13 +14,13 @@ initrd of the boot entry (OUT/initrd/, every cpio member).
                                   held to ALLOW (default image/import_sweep.allow)
 
 It also reads, for the openssl records (#5341), which files can fetch an OpenSSL cipher by a name
-string, the only way to select AES-GCM-SIV (see CIPHER_NAMES), and counts their call sites.
+string, the only way to select AES-GCM-SIV (see CIPHER_NAMES), and counts their references to it.
 
 The JSON maps each place ("tree", and "initrd:<path>" for each initrd) to: "scanned", the ELF files
 read; "imports", each file importing an affected glibc symbol and those symbols; and "via", each other
 ELF file whose NEEDED closure (by SONAME or file name, within that place) holds an importing library, and those
-libraries; "cipher", each file whose bytes hold a CIPHER_NAMES name and its call and jump sites to
-each; "unread", each ELF file objdump failed on; and, for an initrd, "others", its executable
+libraries; "cipher", each file whose bytes hold a CIPHER_NAMES name and its references to each
+(cipher_sites); "unread", each ELF file objdump failed on; and, for an initrd, "others", its executable
 members that are not ELF files. Only symbols bound to a GLIBC_ version count, so a library's own re_*
 names do not.
 
@@ -61,12 +61,22 @@ GROUPS = {
 # (crypto/objects/objects.txt, 3.5.7), so only a fetch by name string selects it: EVP_CIPHER_fetch or
 # EVP_get_cipherbyname, or systemd's openssl_cipher_many (src/shared/openssl-util.c, v257), which formats
 # "%s-%zu-%s" from its caller's arguments and fetches that. Every ELF file whose bytes hold one of these
-# names (an importer, the library defining it, or a dlsym caller's string) is disassembled and its call
-# and jump sites to each counted, for image/import_sweep.allow's [cipher] section.
-CIPHER_NAMES = ("EVP_CIPHER_fetch", "EVP_get_cipherbyname", "openssl_cipher_many")
-# A call or jump to the start of a function: <name>, <name@plt>, <name@@VERSION>, or through the GOT
-# (call *0x..(%rip) # <name@VERSION>). <name+0x..> is a branch inside it, not a call.
-SITE = re.compile(r"\s(?:call|jmp)\w*\s.*<([A-Za-z_]\w*)(?:@[\w.@]*)?>\s*$")
+# names (an importer, the library defining it, or a dlsym caller's string) is disassembled and its
+# references to each counted, for image/import_sweep.allow's [cipher] section.
+# Security 6899468190: a provider cipher can also be picked by name through EVP_CIPHER_do_all_provided
+# with EVP_CIPHER_is_a, or OSSL_ENCODER_CTX_set_cipher, so those count too.
+CIPHER_NAMES = ("EVP_CIPHER_fetch", "EVP_get_cipherbyname", "openssl_cipher_many", "EVP_CIPHER_do_all_provided",
+                "EVP_CIPHER_is_a", "OSSL_ENCODER_CTX_set_cipher")
+# And a file whose bytes spell the cipher itself, in any case, is held under this key with the number of
+# times it does: a name passed some other way (an OSSL_PARAM "cipher" to a MAC or KDF) still has to be spelt.
+GCM_SIV = "GCM-SIV"
+# A reference: any instruction naming the start of a function, <name>, <name@plt>, <name@@VERSION> or
+# a GOT slot (# <name@VERSION>), so a call, a jump and an instruction taking its address all count
+# (L3 6899461135). <name+0x..> is a place inside it, and "addr <name>:" a label, neither a reference.
+SITE = re.compile(r"^\s*[0-9a-f]+:\s.*<([A-Za-z_]\w*)(?:@[\w.@]*)?>\s*$")
+# A dynamic relocation against the name: one in data (a function-pointer table, R_X86_64_64) or a GOT
+# slot (GLOB_DAT) is a reference no instruction shows; JUMP_SLOT is the PLT's, already counted at its calls.
+RELOC = re.compile(r"^[0-9a-f]+\s+(R_\w+)\s+([A-Za-z_]\w*)(?:@[\w.@]*)?(?:[+-]0x[0-9a-f]+)?\s*$")
 UND = re.compile(r"\*UND\*\s+\S+\s+(?:Base\s+)?\((GLIBC_[^)]*)\)\s+(\S+)$")
 DYNAMIC = re.compile(r"^\s+(NEEDED|SONAME)\s+(\S+)$")
 
@@ -97,24 +107,37 @@ def read_elf(path):
 
 
 def cipher_sites(path):
-    """({name: call and jump sites} in the ELF file at PATH for each CIPHER_NAMES name its bytes hold, or
-    None when they hold none; read). A name held with no site (a dlsym caller's string) maps to 0. READ
-    is False when objdump -d fails, so a file it cannot disassemble is never counted clean."""
+    """({name: references} in the ELF file at PATH for each CIPHER_NAMES name its bytes hold, or None when
+    they hold none; read). A reference is an instruction outside the PLT naming the function (SITE) or a
+    dynamic relocation against it other than the PLT's JUMP_SLOT (RELOC), so a pointer to the fetch, in
+    code or in a table, changes the count as a call does. A name held with no reference (a dlsym caller's
+    string) maps to 0. READ is False when objdump fails, so a file it cannot read is never counted clean."""
     with open(path, "rb") as f:
         data = f.read()
     held = [n for n in CIPHER_NAMES if n.encode() in data]
-    if not held:
+    spelt = data.lower().count(GCM_SIV.lower().encode())
+    if not held and not spelt:
         return None, True
     r = subprocess.run(["objdump", "-d", "--no-show-raw-insn", str(path)], stdout=subprocess.PIPE,
                        stderr=subprocess.DEVNULL, text=True, errors="replace")
     sites, plt = dict.fromkeys(held, 0), False
+    if spelt:
+        sites[GCM_SIV] = spelt
     for line in r.stdout.splitlines():
         if line.startswith("Disassembly of section "):
             plt = line.split()[-1].startswith(".plt")  # a PLT stub's own jump through the GOT is no call site
         m = not plt and SITE.search(line)
         if m and m.group(1) in sites:
             sites[m.group(1)] += 1
-    return sites, r.returncode == 0
+    rel = subprocess.run(["objdump", "-R", str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         text=True, errors="replace")
+    for line in rel.stdout.splitlines():
+        m = RELOC.match(line)
+        if m and m.group(1) != "R_X86_64_JUMP_SLOT" and m.group(2) in sites:
+            sites[m.group(2)] += 1
+    # A static or relocatable file has no dynamic relocations; any other failure is a file not read.
+    rel_ok = rel.returncode == 0 or "not a dynamic object" in rel.stderr
+    return sites, r.returncode == 0 and rel_ok
 
 
 def is_elf(path):

@@ -76,14 +76,18 @@
 /usr/lib/x86_64-linux-gnu/libformw.so.6.*
 
 [cipher]
-# The files of the built image (main tree and initrds) whose bytes name an OpenSSL cipher fetch by name
-# string (EVP_CIPHER_fetch, EVP_get_cipherbyname, systemd's openssl_cipher_many), each with the call and
-# jump sites to them that were reviewed, or "*" where the sites are not counted (#5341). AES-GCM-SIV has
-# no OID or NID in OpenSSL 3.5.7, so these are the only ways to select it, and only by one of the names
-# AES-128-GCM-SIV, AES-192-GCM-SIV or AES-256-GCM-SIV. EVP_get_cipherbyname cannot return it at all: it
+# The files of the built image (main tree and initrds) whose bytes name an OpenSSL by-name cipher
+# selector (import_sweep.py CIPHER_NAMES: EVP_CIPHER_fetch, EVP_get_cipherbyname, systemd's
+# openssl_cipher_many, EVP_CIPHER_do_all_provided, EVP_CIPHER_is_a, OSSL_ENCODER_CTX_set_cipher) or spell
+# GCM-SIV, each with the references to them that were reviewed (instructions naming them and data
+# relocations against them, and GCM-SIV the times it is spelt), or "*" where they are not counted (#5341).
+# AES-GCM-SIV has no OID or NID in OpenSSL 3.5.7, so it is selected only by one of the names
+# AES-128-GCM-SIV, AES-192-GCM-SIV or AES-256-GCM-SIV (or a MAC or KDF "cipher" parameter, which has to
+# spell one; CMAC and GMAC refuse it by mode). EVP_get_cipherbyname cannot return it at all: it
 # returns only the legacy method table's ciphers (crypto/evp/names.c), and crypto/evp/c_allc.c adds no
-# GCM-SIV, so only EVP_CIPHER_fetch and openssl_cipher_many sites matter. A new file or a changed count fails the step:
-# review where its names come from, then update the entry and the openssl records' reach note.
+# GCM-SIV; its references are counted so that a change to the file is still seen. A new file or a
+# changed count fails the step: review where its names come from, then update the entry and the
+# openssl records' reach note.
 
 # libcryptsetup's one fetch (crypto_openssl.c _cipher_init, 2.7.5) asks for "<cipher>-<key bits>-<mode>",
 # the mode cut at its first '-' by every caller that takes it from a header (crypto_storage.c
