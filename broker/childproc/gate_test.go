@@ -48,6 +48,12 @@ var exempt = map[string]string{
 	// one fixed absolute binary, an empty environment, its own process
 	// group so a stop kills its TCP children. Same reason and limits.
 	"enforcer/dns/run": "the enforcer's resolver runner starts its dnsmasq instances; enforcer code cannot import childproc (ENF-f-9)",
+	// The owner page's root step (KEY-9-reach-inbound-wiring, #5678) runs
+	// nft itself: one fixed absolute binary, an empty environment, the
+	// script on stdin, as the enforcer's loader does. It is a root of the
+	// trusted core, which links only the standard library (and childproc
+	// would add a known line); a main package, so nothing imports it.
+	"cmd/agentos-port1": "the page's root step runs nft -f; a trusted-core root links no childproc (#5678)",
 	// The source lints' shared loader (REV-CHK-lintload, #4273) runs go
 	// list. Only _test.go files import it, which its own
 	// TestOnlyTestsImportTheLoader holds, so no shipped binary links it.
