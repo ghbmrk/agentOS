@@ -216,7 +216,7 @@ class ImportSweepTest(Tree):
 
 @NEEDS_CC
 class CipherSitesTest(Tree):
-    """#5341: the files that can fetch an OpenSSL cipher by name, and their references, from the binary."""
+    """#5341: the files holding a by-name cipher selector or spelling GCM-SIV, and their counts, from the binary."""
 
     def test_sites_counted_per_file(self):
         got = sweep.run_tree(str(self.tree))["tree"]["cipher"]
@@ -266,7 +266,7 @@ class CipherSitesTest(Tree):
         more = dict(ok, **{"/usr/lib/libfetcher.so.*": {"EVP_CIPHER_fetch": 1}})
         errs = sweep.cipher_refusals(places, more)
         self.assertEqual(len(errs), 1)
-        self.assertIn("/usr/lib/libfetcher.so.1 holds cipher-fetch sites EVP_CIPHER_fetch=2, not the "
+        self.assertIn("/usr/lib/libfetcher.so.1 holds cipher references EVP_CIPHER_fetch=2, not the "
                       "EVP_CIPHER_fetch=1", errs[0])
         # A file with no entry fails, naming the entry to add; so does an entry that matches nothing.
         errs = sweep.cipher_refusals(places, dict({k: v for k, v in ok.items() if k != "/usr/bin/dlsymmer"},
@@ -277,7 +277,7 @@ class CipherSitesTest(Tree):
 
     def test_summary_lists_sites(self):
         lines = sweep.summary(sweep.run_tree(str(self.tree)))
-        self.assertIn("tree cipher: 7 files can fetch an OpenSSL cipher by name", lines)
+        self.assertIn("tree cipher: 7 files hold a by-name cipher selector or spell GCM-SIV", lines)
         self.assertIn("  sites /usr/lib/libfetcher.so.1: EVP_CIPHER_fetch=2", lines)
 
 

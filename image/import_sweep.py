@@ -13,8 +13,9 @@ initrd of the boot entry (OUT/initrd/, every cpio member).
                                   the JSON the two forms print, as lines and as ::notice annotations,
                                   held to ALLOW (default image/import_sweep.allow)
 
-It also reads, for the openssl records (#5341), which files can fetch an OpenSSL cipher by a name
-string, the only way to select AES-GCM-SIV (see CIPHER_NAMES), and counts their references to it.
+It also reads, for the openssl records (#5341), which files hold the name of a by-name OpenSSL cipher
+selector or spell GCM-SIV, as selecting AES-GCM-SIV takes one of its names (see CIPHER_NAMES), and
+counts their references to each selector and their spellings.
 
 The JSON maps each place ("tree", and "initrd:<path>" for each initrd) to: "scanned", the ELF files
 read; "imports", each file importing an affected glibc symbol and those symbols; and "via", each other
@@ -27,7 +28,7 @@ names do not.
 --summary exits 1 when a claim the glibc records rest on stops holding: any file, in any place, imports
 or reaches a wide scanf function, or imports or reaches a regex function and matches no glob in ALLOW
 (each a file the image -100290 record names); a glob that matches nothing also fails, so the list
-stays the record's. It also exits 1 when a file holding a cipher-fetch name matches no [cipher]
+stays the record's. It also exits 1 when a file holding a selector name or spelling GCM-SIV matches no [cipher]
 entry of ALLOW, or holds other sites than the entry it matches, or an entry matches nothing. The
 control is the scan itself: it also exits 1 when objdump failed on a file,
 the main tree or an initrd with executable members read no ELF file, the main tree has no importer
@@ -58,9 +59,10 @@ GROUPS = {
 }
 # #5341: the openssl records (DEBIAN-CVE-2026-88823 and -95692 among them, AES-GCM-SIV) rest on no file
 # passing a name read from data to an OpenSSL cipher fetch. AES-GCM-SIV has no OID or NID
-# (crypto/objects/objects.txt, 3.5.7), so only a fetch by name string selects it: EVP_CIPHER_fetch or
-# EVP_get_cipherbyname, or systemd's openssl_cipher_many (src/shared/openssl-util.c, v257), which formats
-# "%s-%zu-%s" from its caller's arguments and fetches that. Every ELF file whose bytes hold one of these
+# (crypto/objects/objects.txt, 3.5.7), so only a selector given one of its names picks it: EVP_CIPHER_fetch,
+# or systemd's openssl_cipher_many (src/shared/openssl-util.c, v257), which formats "%s-%zu-%s" from its
+# caller's arguments and fetches that. EVP_get_cipherbyname cannot return it (crypto/evp/names.c reads only
+# the legacy table) but is counted, as it hands a name to the same table. Every ELF file whose bytes hold one of these
 # names (an importer, the library defining it, or a dlsym caller's string) is disassembled and its
 # references to each counted, for image/import_sweep.allow's [cipher] section.
 # Security 6899468190: a provider cipher can also be picked by name through EVP_CIPHER_do_all_provided
@@ -283,7 +285,7 @@ def read_allow(path):
 
 
 def cipher_refusals(places, entries):
-    """Each file of PLACES holding a cipher-fetch name whose sites match no [cipher] entry of ENTRIES."""
+    """Each file of PLACES holding a selector name or spelling GCM-SIV whose counts match no [cipher] entry."""
     errs, used = [], set()
     for place, v in places.items():
         for p, sites in v.get("cipher", {}).items():
@@ -291,14 +293,14 @@ def cipher_refusals(places, entries):
             used.update(hit)
             got = " ".join("%s=%d" % kv for kv in sorted(sites.items()))
             if not hit:
-                errs.append("%s: %s can fetch an OpenSSL cipher by name (%s) and is not in import_sweep.allow "
+                errs.append("%s: %s holds a by-name cipher selector or spells GCM-SIV (%s) and is not in import_sweep.allow "
                             "[cipher]; review where its names come from, then add the entry: %s %s"
                             % (place, p, got, p, got))
             elif all(entries[g] != "*" and entries[g] != sites for g in hit):
-                errs.append("%s: %s holds cipher-fetch sites %s, not the %s its [cipher] entry reviewed; review "
+                errs.append("%s: %s holds cipher references %s, not the %s its [cipher] entry reviewed; review "
                             "the new sites, then update the entry" % (place, p, got, " / ".join(
                                 " ".join("%s=%d" % kv for kv in sorted(entries[g].items())) for g in hit)))
-    errs += ["import_sweep.allow: [cipher] %s matches no file that can fetch a cipher by name; remove it" % g
+    errs += ["import_sweep.allow: [cipher] %s matches no file holding a selector name or spelling GCM-SIV; remove it" % g
              for g in entries if g not in used]
     return errs
 
@@ -335,7 +337,7 @@ def summary(places):
             lines += ["  imports %s: %s" % (p, " ".join(s)) for p, s in imp.items()]
             lines += ["  via %s: %s" % (p, " ".join(libs)) for p, libs in via.items()]
         cipher = v.get("cipher", {})
-        lines.append("%s cipher: %d files can fetch an OpenSSL cipher by name" % (place, len(cipher)))
+        lines.append("%s cipher: %d files hold a by-name cipher selector or spell GCM-SIV" % (place, len(cipher)))
         lines += ["  sites %s: %s" % (p, " ".join("%s=%d" % kv for kv in sorted(s.items()))) for p, s in cipher.items()]
     return lines
 
