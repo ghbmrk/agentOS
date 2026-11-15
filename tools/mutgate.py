@@ -742,12 +742,15 @@ def misread_evidence(blocks, src, line, col):
 def falls_into(src, line):
     """Whether the clause before the `case` on line may end in `fallthrough`, read as text, failing
     closed: the last code line before it (blank and `//` lines skipped) names `fallthrough` anywhere,
-    or a block comment or the file's start comes first. `fallthrough` is a clause's last statement."""
+    or a block comment mark (on any line, a `//` one included) or the file's start comes first. `fallthrough` is a clause's last statement."""
     for n in range(line - 2, -1, -1):
         row = src[n].strip()
+        # A block comment's marks first, even on a `//` line: `// end */` may close a comment hiding code.
+        if b"*/" in row or b"/*" in row:
+            return True
         if not row or row.startswith(b"//"):
             continue
-        return b"*/" in row or re.search(rb"\bfallthrough\b", row) is not None
+        return re.search(rb"\bfallthrough\b", row) is not None
     return True
 
 

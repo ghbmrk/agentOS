@@ -3153,7 +3153,10 @@ class Misread(unittest.TestCase):
         self.assertEqual(mutgate.misread_evidence(blocks, lines, 5, 9), "its case clause's body, which the changed tests ran")
         # A comment between, a trailing comment on it, or a block comment still refuses; a plain statement does not.
         for before, refused in ((b"\t\tfallthrough\n\t\t// next\n", True), (b"\t\tfallthrough // into y\n", True),
-                                (b"\t\t/* x */\n", True), (b"\t\treturn 2\n", False)):
+                                (b"\t\t/* x */\n", True), (b"\t\treturn 2\n", False),
+                                # Security delta at de22f59b: a block comment closed on a `//` line.
+                                (b"\t\tfallthrough\n\t\t/* note\n\t\t// end */\n", True),
+                                (b"\t\treturn 2\n\t\t// end */\n", True)):
             with self.subTest(before):
                 text = (b"\tswitch {\n\tcase x > 0:\n" + before + b"\tcase y > 5:\n").split(b"\n")
                 at = len(text) - 1
