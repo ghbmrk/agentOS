@@ -110,7 +110,9 @@ class Check(unittest.TestCase):
                     f"import ({IMPORT}; \"github.com/emiago/sipgo\")\nfunc f() {{ sipgo.NewUA() }} // DialerCreate\n",
                     # L3 on #5850: the name in a string literal is not a use either.
                     f"import ({IMPORT}; \"github.com/emiago/sipgo\")\nfunc f() {{ sipgo.NewUA(); _ = \"DialerCreate\" }}\n",
-                    f"import ({IMPORT}; \"github.com/emiago/sipgo\")\nfunc f() {{ sipgo.NewUA(); _ = `DialerCreate` }}\n"):
+                    f"import ({IMPORT}; \"github.com/emiago/sipgo\")\nfunc f() {{ sipgo.NewUA(); _ = `DialerCreate` }}\n",
+                    f"import ({IMPORT}; \"github.com/emiago/sipgo\")\nfunc f() {{ sipgo.NewUA(); _ = DialerCreateX }}\n",
+                    f"import ({IMPORT}; \"github.com/emiago/sipgo\")\nfunc f() {{ sipgo.NewUA(); _ = xDialerCreate }}\n"):
             t = self.tree()
             t.go("broker/sip/line.go", src)
             self.assertEqual(len(t.run()), 1, src)

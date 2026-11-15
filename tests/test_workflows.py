@@ -18,8 +18,34 @@ WORKFLOWS = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workfl
 
 
 STEP_USES = re.compile(r"""(?:uses|"uses"|'uses')\s*:\s*([^\s#]+)""")  # plain, quoted, `uses :`
+USES_LINE = re.compile(r"""(?<![\w-])["']?uses["']?\s*:""")  # any line naming a uses key
 PINNED = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$")
-NO_TOKEN = re.compile(r"persist-credentials:\s*false")
+NO_TOKEN = re.compile(r"""^["']?persist-credentials["']?\s*:\s*["']?false["']?\s*(?:#.*)?$""")
+WITH = re.compile(r"""^["']?with["']?\s*:\s*(?:#.*)?$""")
+
+
+def _indent(line):
+    return len(line) - len(line.lstrip())
+
+
+def _code(line):
+    return line.strip() and not line.lstrip().startswith("#")
+
+
+def _keys(body, col):
+    """[(index, text from col)] of body lines that sit at the step's key column (comments skipped)."""
+    return [(n, l[col:]) for n, l in enumerate(body) if n and _code(l) and _indent(l) == col]
+
+
+def _item(body):
+    """The key column of a list item and its first key's text ('' when the dash stands alone or is
+    followed only by a comment, so the keys start below it), or None if it has no keys."""
+    m = re.match(r"^(\s*)-(\s+)(\S.*)$", body[0])
+    if m and not m.group(3).startswith("#"):
+        col = len(m.group(1)) + 1 + len(m.group(2))
+        return col, body[0][col:]
+    first = next((l for l in body[1:] if _code(l)), None)
+    return None if first is None else (_indent(first), "")
 
 
 def unpinned(action):
@@ -28,34 +54,54 @@ def unpinned(action):
 
 
 def keeps_no_token(step):
-    return bool(NO_TOKEN.search(step))
+    """True if the step's own `with:` mapping has `persist-credentials: false` as a key line: not in a
+    comment, not under `env:` or another key, where checkout ignores it (L3 on #5850)."""
+    body = step.splitlines()
+    item = _item(body)
+    if item is None:
+        return False
+    col, first = item
+    heads = ([0] if WITH.match(first) else []) + [n for n, k in _keys(body, col) if WITH.match(k)]
+    for h in heads:
+        kids = []
+        for l in body[h + 1:]:
+            if l.strip() and _indent(l) <= col:
+                break
+            kids.append(l)
+        code = [l for l in kids if _code(l)]
+        if code and any(_indent(l) == _indent(code[0]) and NO_TOKEN.match(l.strip()) for l in code):
+            return True
+    return False
+
+
+def uses_lines(text):
+    """Number of non-comment lines naming a `uses` key: the cross-check that steps() missed no step."""
+    return sum(1 for l in text.splitlines() if _code(l) and USES_LINE.search(l))
 
 
 def steps(text):
     """Yield (action, step text) for each `uses:` step, whatever key the step lists first: a list
     item's mapping is read to its end and `uses:` found at the item's own key column (REV-LOW-tools
-    finding 23; a `name:`-first step used to skip the pin and checkout-token checks)."""
+    finding 23; a `name:`-first step used to skip the pin and checkout-token checks). A form this
+    misses (a flow mapping `- {uses: …}`) fails test_every_uses_line_is_a_step instead of passing."""
     lines = text.splitlines()
     for i, line in enumerate(lines):
-        m = re.match(r"^(\s*)-(?:(\s+)\S|\s*$)", line)
+        m = re.match(r"^(\s*)-(?:\s|$)", line)
         if not m:
             continue
         indent = len(m.group(1))
         body = [line]
         for nxt in lines[i + 1:]:
-            if nxt.strip() and len(nxt) - len(nxt.lstrip()) <= indent:
+            if nxt.strip() and _indent(nxt) <= indent:
                 break
             body.append(nxt)
         while len(body) > 1 and not body[-1].strip():
             body.pop()
-        if m.group(2) is not None:
-            col, keys = indent + 1 + len(m.group(2)), [line[indent + 1 + len(m.group(2)):]]
-        else:  # a bare `-`: the mapping's keys start on the next line, at its indent
-            first = next((l for l in body[1:] if l.strip()), None)
-            if first is None:
-                continue
-            col, keys = len(first) - len(first.lstrip()), []
-        keys += [l[col:] for l in body[1:] if l.strip() and len(l) - len(l.lstrip()) == col]
+        item = _item(body)
+        if item is None:
+            continue
+        col, first = item
+        keys = [first] + [k for _, k in _keys(body, col)]
         uses = [u.group(1) for u in (STEP_USES.match(k) for k in keys) if u]
         if uses:
             yield uses[0], "\n".join(body)
@@ -1621,6 +1667,23 @@ class WorkflowTest(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertEqual(list(steps("jobs:\n  a:\n    steps:\n" + body)), [])
 
+    def test_every_uses_line_is_a_step(self):
+        # Second fix-list on #5850: fail closed on any step form steps() cannot read, rather than
+        # chasing shapes. Each workflow's non-comment `uses` key lines must equal the steps found.
+        for f in self.files():
+            text = f.read_text()
+            with self.subTest(file=f.name):
+                self.assertEqual(uses_lines(text), len(list(steps(text))), f.name)
+        H = "jobs:\n  a:\n    steps:\n"
+        flow = H + "      - {name: x, uses: actions/cache@v4}\n"
+        self.assertEqual(list(steps(flow)), [])
+        self.assertNotEqual(uses_lines(flow), len(list(steps(flow))))
+        for text in (H + "      -\n          # c\n        uses: actions/cache@v4\n",
+                     H + "      -   # c\n        uses: actions/cache@v4\n",
+                     H + "      - name: x\n        # uses: evil/x@v1\n        uses: actions/cache@v4\n"):
+            with self.subTest(text=text):
+                self.assertEqual(uses_lines(text), len(list(steps(text))), text)
+
     def test_step_order_does_not_hide_an_unpinned_action(self):
         # REV-LOW-tools finding 23: the real pin and token predicates, fed name-first synthetic steps.
         sha = "0" * 40
@@ -1644,6 +1707,27 @@ class WorkflowTest(unittest.TestCase):
             with self.subTest(step=step):
                 self.assertEqual([a for a, _ in steps("jobs:\n  a:\n    steps:\n" + step) if unpinned(a)],
                                  ["actions/cache@v4"])
+        # Second fix-list on #5850: a comment before the keys under a bare `-`, or after the dash.
+        for step in ("      -\n          # c\n        uses: actions/cache@v4\n",
+                     "      -   # c\n        uses: actions/cache@v4\n",
+                     "      - # c\n        name: x\n        # uses: evil/x@v1\n        uses: actions/cache@v4\n"):
+            with self.subTest(step=step):
+                self.assertEqual([a for a, _ in steps("jobs:\n  a:\n    steps:\n" + step) if unpinned(a)],
+                                 ["actions/cache@v4"])
+        # The token setting counts only as a key line of the step's own `with:`.
+        co = "      - name: co\n        uses: actions/checkout@" + sha + "\n"
+        for tail, ok in (("        with:\n          persist-credentials: false\n", True),
+                         ("        with:\n          fetch-depth: 0\n          persist-credentials: false # drop it\n", True),
+                         ("        with:\n          # x\n          'persist-credentials': 'false'\n", True),
+                         ("        with:\n          fetch-depth: 0 # persist-credentials: false\n", False),
+                         ("        with:\n          # persist-credentials: false\n          fetch-depth: 0\n", False),
+                         ("        env:\n          persist-credentials: false\n", False),
+                         ("        with:\n          fetch-depth: 0\n        env:\n          persist-credentials: false\n", False),
+                         ("        with:\n          path: x\n          extra:\n            persist-credentials: false\n", False),
+                         ("        with:\n          persist-credentials: true\n", False),
+                         ("        run: |\n          persist-credentials: false\n", False)):
+            with self.subTest(tail=tail):
+                self.assertEqual([keeps_no_token(s) for _, s in steps("jobs:\n  a:\n    steps:\n" + co + tail)], [ok])
         for step in ("      -\n        name: x\n        uses: actions/checkout@" + sha + "\n",
                      '      - "uses": actions/checkout@' + sha + "\n        with:\n          fetch-depth: 0\n"):
             with self.subTest(step=step):
