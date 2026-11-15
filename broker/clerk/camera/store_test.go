@@ -457,35 +457,6 @@ func TestSegmentWriteRateCapped(t *testing.T) {
 	}
 }
 
-// REQ: CLK-1
-// TestSegmentKeyInSealedStore: each camera's segment key is a static
-// device slot of the sealed store, made once, lent only per call, and
-// never in a file under the store's directory or its log.
-func TestSegmentKeyInSealedStore(t *testing.T) {
-	r := newStoreRig(t, nil)
-	r.s.Add(testID, time.Hour)
-	var key []byte
-	if err := SecretsKeys(r.secrets).Lend(testID, func(k []byte) error {
-		key = bytes.Clone(k)
-		return nil
-	}); err != nil || len(key) != 32 {
-		t.Fatalf("segment key slot: %d bytes, %v", len(key), err)
-	}
-	r.s.SetRetention(testID, 2*time.Hour) // Make keeps the key there is
-	SecretsKeys(r.secrets).Lend(testID, func(k []byte) error {
-		if !bytes.Equal(k, key) {
-			t.Fatal("a second Make replaced the key, orphaning segments")
-		}
-		return nil
-	})
-	r.feed(t, testID, 4, time.Second)
-	r.s.Flush()
-	_, all := r.files(t)
-	if bytes.Contains(all, key) || strings.Contains(r.log.all(), string(key)) {
-		t.Fatal("the segment key is on disk or in the log")
-	}
-}
-
 func TestSegmentFailingPartwayCopiesNoPayload(t *testing.T) {
 	// REQ: CLK-1
 	// a segment whose first record
@@ -748,6 +719,35 @@ func TestFlushSkipsACameraErasedMidway(t *testing.T) {
 	close(release)
 	if err := <-flushed; err != nil {
 		t.Fatalf("Flush beside an Erase: %v", err)
+	}
+}
+
+// REQ: CLK-1
+// TestSegmentKeyInSealedStore: each camera's segment key is a static
+// device slot of the sealed store, made once, lent only per call, and
+// never in a file under the store's directory or its log.
+func TestSegmentKeyInSealedStore(t *testing.T) {
+	r := newStoreRig(t, nil)
+	r.s.Add(testID, time.Hour)
+	var key []byte
+	if err := SecretsKeys(r.secrets).Lend(testID, func(k []byte) error {
+		key = bytes.Clone(k)
+		return nil
+	}); err != nil || len(key) != 32 {
+		t.Fatalf("segment key slot: %d bytes, %v", len(key), err)
+	}
+	r.s.SetRetention(testID, 2*time.Hour) // Make keeps the key there is
+	SecretsKeys(r.secrets).Lend(testID, func(k []byte) error {
+		if !bytes.Equal(k, key) {
+			t.Fatal("a second Make replaced the key, orphaning segments")
+		}
+		return nil
+	})
+	r.feed(t, testID, 4, time.Second)
+	r.s.Flush()
+	_, all := r.files(t)
+	if bytes.Contains(all, key) || strings.Contains(r.log.all(), string(key)) {
+		t.Fatal("the segment key is on disk or in the log")
 	}
 }
 
