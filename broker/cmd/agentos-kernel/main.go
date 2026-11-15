@@ -159,14 +159,15 @@ func parse(args []string, stderr io.Writer) (config, error) {
 		return c, errors.New("an absolute -content-dir is required")
 	case c.Up != "" && !filepath.IsAbs(c.Up):
 		return c, errors.New("-up must be an absolute path")
-	case (c.Chrony == "") != (c.ChronyReply == "") || c.Chrony != "" && (!filepath.IsAbs(c.Chrony) || !filepath.IsAbs(c.ChronyReply)):
-		return c, errors.New("-chrony and -chrony-reply come together, as absolute paths")
 	case c.OwnerUID <= 0 || c.MeterUID <= 0:
 		return c, errors.New("-owner-uid and -meter-uid are required, and never root")
 	case (c.LinkSock == "") != (c.LinkUID == -1):
 		return c, errors.New("-link-sock and -link-uid come together")
 	case c.LinkSock != "" && (!filepath.IsAbs(c.LinkSock) || c.LinkUID <= 0):
 		return c, errors.New("-link-sock is an absolute path and -link-uid never root")
+	}
+	if (c.Chrony == "") != (c.ChronyReply == "") || c.Chrony != "" && (!filepath.IsAbs(c.Chrony) || !filepath.IsAbs(c.ChronyReply)) {
+		return c, errors.New("-chrony and -chrony-reply come together, as absolute paths")
 	}
 	c.Peers = []int{c.OwnerUID, c.MeterUID}
 	for _, r := range c.Clerks {

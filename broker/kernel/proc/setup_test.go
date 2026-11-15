@@ -48,7 +48,7 @@ func TestASetupOnlyKernelServesOnlySetup(t *testing.T) {
 		t.Fatalf("STATUS before setup: %v", err)
 	}
 	for name, err := range map[string]error{
-		"stop": o.Stop(), "resume": o.Resume(0), "readpool": m.ReadPool(0, "codex", []kernel.WindowReading{{Window: "5h", Used: 1, ResetAt: 2}}),
+		"stop": o.Stop(), "resume": ownerClient{o}.Resume(0), "readpool": m.ReadPool(0, "codex", []kernel.WindowReading{{Window: "5h", Used: 1, ResetAt: 2}}),
 	} {
 		if !errors.Is(err, ErrSetupOnly) {
 			t.Errorf("%s before setup: got %v, want ErrSetupOnly", name, err)
@@ -73,7 +73,7 @@ func TestASetupOnlyKernelServesOnlySetup(t *testing.T) {
 // logged, in order, and nothing before setup (#2779a's a0).
 func TestOwnerReadsTheAnchors(t *testing.T) {
 	o, _ := setupOnly(t)
-	if a, err := o.Anchors(); !errors.Is(err, ErrSetupOnly) || a != nil {
+	if a, err := (ownerClient{o}).Anchors(); !errors.Is(err, ErrSetupOnly) || a != nil {
 		t.Fatalf("anchors before setup: %v %v, want ErrSetupOnly", a, err)
 	}
 	info, err := o.SetupInfo()
@@ -83,7 +83,7 @@ func TestOwnerReadsTheAnchors(t *testing.T) {
 	if err := o.Setup(kernel.SignSetup(info.Box, key.Ed25519Signer(ownerPriv), key.Ed25519Signer(sparePriv))); err != nil {
 		t.Fatal(err)
 	}
-	a, err := o.Anchors()
+	a, err := ownerClient{o}.Anchors()
 	want := []key.PublicKey{key.Ed25519(ownerPub), key.Ed25519(sparePub)}
 	if err != nil || !slices.Equal(a, want) {
 		t.Fatalf("anchors after setup: %v %v, want %v", a, err, want)

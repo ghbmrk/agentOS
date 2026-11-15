@@ -55,7 +55,7 @@ func (b *box) entries() int {
 // refusal keeps its code, and each read answers as State() does.
 func TestOwnerSocketServesTheSeam(t *testing.T) {
 	b := newBox(t, filepath.Join(shortDir(t), "web.sock"))
-	o := Owner{serveSide(t, b, OwnerSide, os.Getuid())}
+	o := ownerClient{Owner{serveSide(t, b, OwnerSide, os.Getuid())}}
 
 	p := kernel.SignPlan(kernel.Plan{ID: "o1", Key: b.key, Steps: []kernel.PlanStep{{Verb: key.Post, Clerk: "web",
 		Args: map[string]string{"to": "alice", "msg": "hi"}, Content: "text", Labels: []string{"public"}}}}, holderPriv)
@@ -398,7 +398,7 @@ func TestAWrappedErrorCrossesAsWhatItWraps(t *testing.T) {
 type twin struct {
 	name string
 	op   string // the table row the call reaches
-	sock func(Owner, Meter) (any, error)
+	sock func(ownerClient, Meter) (any, error)
 	call func(*kernel.Kernel) (any, error) // the direct call
 	read func(any) bool                    // for a read: whether its result is not empty
 }
@@ -427,7 +427,7 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 		go ServeKernel(ln, sock.h, side, clk.Load)
 		conns[side.name] = Conn{Socket: path, UID: os.Getuid(), Timeout: 10 * time.Second}
 	}
-	o, m := Owner{conns["owner"]}, Meter{conns["meter"]}
+	o, m := ownerClient{Owner{conns["owner"]}}, Meter{conns["meter"]}
 
 	// A plan under a key capped at 100 a task, for the metering calls, and
 	// a second root whose capped key can release it once held.
@@ -497,18 +497,18 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 
 	var admitted kernel.Admitted // the socket's admission, settled by both kernels' meter
 	cases := []twin{
-		{name: "submit", op: "submit", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Submit(p1) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Submit(now(), p1) }},
-		{name: "issue", op: "issue", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Issue(ocos, other) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Issue(now(), ocos, other) }},
-		{name: "submit capped", op: "submit", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Submit(pm) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Submit(now(), pm) }},
-		{name: "enroll", op: "enroll", sock: func(o Owner, _ Meter) (any, error) {
+		{name: "submit", op: "submit", sock: func(o ownerClient, _ Meter) (any, error) { return nil, o.Submit(p1) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Submit(now(), p1) }},
+		{name: "issue", op: "issue", sock: func(o ownerClient, _ Meter) (any, error) { return nil, o.Issue(ocos, other) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Issue(now(), ocos, other) }},
+		{name: "submit capped", op: "submit", sock: func(o ownerClient, _ Meter) (any, error) { return nil, o.Submit(pm) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Submit(now(), pm) }},
+		{name: "enroll", op: "enroll", sock: func(o ownerClient, _ Meter) (any, error) {
 			return nil, o.Enroll(key.Enroll(key.Ed25519Signer(ownerPriv), key.Ed25519(phone)))
 		}, call: func(k *kernel.Kernel) (any, error) {
 			return nil, k.Enroll(now(), key.Enroll(key.Ed25519Signer(ownerPriv), key.Ed25519(phone)))
 		}},
-		{name: "approvetask", op: "approvetask", sock: func(o Owner, _ Meter) (any, error) { return nil, o.ApproveTask("t1", approval) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.ApproveTask(now(), "t1", approval) }},
-		{name: "approvecode", op: "approvecode", sock: func(o Owner, _ Meter) (any, error) { return nil, o.ApproveCode(code) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.ApproveCode(now(), code) }},
+		{name: "approvetask", op: "approvetask", sock: func(o ownerClient, _ Meter) (any, error) { return nil, o.ApproveTask("t1", approval) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.ApproveTask(now(), "t1", approval) }},
+		{name: "approvecode", op: "approvecode", sock: func(o ownerClient, _ Meter) (any, error) { return nil, o.ApproveCode(code) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.ApproveCode(now(), code) }},
 		{name: "task", op: "task", read: func(v any) bool { return len(v.(kernel.Task).Approvals) > 0 },
-			sock: func(o Owner, _ Meter) (any, error) {
+			sock: func(o ownerClient, _ Meter) (any, error) {
 				tk, ok, err := o.Task("t1")
 				if !ok {
 					return nil, err
@@ -522,68 +522,68 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 				}
 				return tk, nil
 			}},
-		{name: "setline", op: "setline", sock: func(o Owner, _ Meter) (any, error) { return nil, o.SetLine(100) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.SetLine(now(), 100) }},
-		{name: "reserve", op: "reserve", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Reserve("full", kernel.PoolFull) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Reserve(now(), "full", kernel.PoolFull) }},
+		{name: "setline", op: "setline", sock: func(o ownerClient, _ Meter) (any, error) { return nil, o.SetLine(100) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.SetLine(now(), 100) }},
+		{name: "reserve", op: "reserve", sock: func(o ownerClient, _ Meter) (any, error) { return nil, o.Reserve("full", kernel.PoolFull) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Reserve(now(), "full", kernel.PoolFull) }},
 		// A lowering with no passkey is refused alike, as ErrReserveSig itself;
 		// signed by both hardware keys (from 1000 it is big), it is logged
 		// and held (RES-5a).
-		{name: "reserve unsigned", op: "reserve", sock: func(o Owner, _ Meter) (any, error) {
+		{name: "reserve unsigned", op: "reserve", sock: func(o ownerClient, _ Meter) (any, error) {
 			err := o.Reserve("full", 900)
 			if !errors.Is(err, kernel.ErrReserveSig) {
 				t.Errorf("an unsigned lowering over the socket: %v, want %v", err, kernel.ErrReserveSig)
 			}
 			return nil, err
 		}, call: func(k *kernel.Kernel) (any, error) { return nil, k.Reserve(now(), "full", 900) }},
-		{name: "reserve one passkey", op: "reserve", sock: func(o Owner, _ Meter) (any, error) {
+		{name: "reserve one passkey", op: "reserve", sock: func(o ownerClient, _ Meter) (any, error) {
 			err := o.Reserve("full", 900, lowered(ownerPriv))
 			if !errors.Is(err, kernel.ErrNeedsCosign) {
 				t.Errorf("a big lowering with one passkey over the socket: %v, want %v", err, kernel.ErrNeedsCosign)
 			}
 			return nil, err
 		}, call: func(k *kernel.Kernel) (any, error) { return nil, k.Reserve(now(), "full", 900, lowered(ownerPriv)) }},
-		{name: "reserve lowered", op: "reserve", sock: func(o Owner, _ Meter) (any, error) {
+		{name: "reserve lowered", op: "reserve", sock: func(o ownerClient, _ Meter) (any, error) {
 			return nil, o.Reserve("full", 900, lowered(ownerPriv), lowered(sparePriv))
 		}, call: func(k *kernel.Kernel) (any, error) {
 			return nil, k.Reserve(now(), "full", 900, lowered(ownerPriv), lowered(sparePriv))
 		}},
 		{name: "admit", op: "admitspend", read: func(v any) bool { return v.(kernel.Admitted).Seq > 0 },
-			sock: func(_ Owner, m Meter) (any, error) {
+			sock: func(_ ownerClient, m Meter) (any, error) {
 				a, r := m.AdmitSpend(0, "m", 37)
 				admitted = a
 				return a, refusal(r)
 			},
 			call: func(k *kernel.Kernel) (any, error) { a, r := k.AdmitSpend(now(), "m", 37); return a, refusal(r) }},
-		{name: "meter", op: "meter", sock: func(_ Owner, m Meter) (any, error) { return nil, m.Meter(0, admitted, "api", 37, "provider") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Meter(now(), admitted, "api", 37, "provider") }},
-		{name: "meter again", op: "meter", sock: func(_ Owner, m Meter) (any, error) {
+		{name: "meter", op: "meter", sock: func(_ ownerClient, m Meter) (any, error) { return nil, m.Meter(0, admitted, "api", 37, "provider") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Meter(now(), admitted, "api", 37, "provider") }},
+		{name: "meter again", op: "meter", sock: func(_ ownerClient, m Meter) (any, error) {
 			err := m.Meter(0, admitted, "api", 37, "provider")
 			if !errors.Is(err, kernel.ErrNotAdmitted) { // the model clerk's retry reads it as recorded
 				t.Errorf("a second settlement over the socket: %v, want %v", err, kernel.ErrNotAdmitted)
 			}
 			return nil, err
 		}, call: func(k *kernel.Kernel) (any, error) { return nil, k.Meter(now(), admitted, "api", 37, "provider") }},
-		{name: "spent", op: "spent", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Spent(at - 1) }, call: func(k *kernel.Kernel) (any, error) { return k.State().Spent(at - 1), nil }},
-		{name: "admitspend", op: "admitspend", sock: func(_ Owner, m Meter) (any, error) { a, r := m.AdmitSpend(0, "m", 1000); return a, refusal(r) }, call: func(k *kernel.Kernel) (any, error) { a, r := k.AdmitSpend(now(), "m", 1000); return a, refusal(r) }},
-		{name: "admitpool", op: "admitpool", sock: func(_ Owner, m Meter) (any, error) { return nil, refusal(m.AdmitPool(0, "full")) }, call: func(k *kernel.Kernel) (any, error) { return nil, refusal(k.AdmitPool(now(), "full")) }},
-		{name: "readpool", op: "readpool", sock: func(_ Owner, m Meter) (any, error) { return nil, m.ReadPool(0, "codex", win(300, at+1000)) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.ReadPool(now(), "codex", win(300, at+1000)) }},
-		{name: "hold", op: "hold", sock: func(_ Owner, m Meter) (any, error) { return nil, m.Hold(0, "m", spend) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Hold(now(), "m", spend) }},
-		{name: "spendheld", op: "spendheld", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.SpendHeld() }, call: func(k *kernel.Kernel) (any, error) { return k.State().Held(), nil }},
-		{name: "extend", op: "extend", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Extend(ext, "m") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Extend(now(), ext, "m") }},
-		{name: "pause", op: "pause", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Pause(ver.ID()) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Pause(now(), ver.ID()) }},
-		{name: "unpause", op: "unpause", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Unpause(ver.ID()) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Unpause(now(), ver.ID()) }},
-		{name: "stop", op: "stop", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Stop() }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Stop(now()) }},
-		{name: "changes", op: "changes", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Changes() }, call: func(k *kernel.Kernel) (any, error) { return *k.State().ChangesView(), nil }},
-		{name: "resume", op: "resume", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Resume(1) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Resume(now(), 1) }}, // the one STOP above
-		{name: "status", op: "status", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Status() }, call: func(k *kernel.Kernel) (any, error) { return k.State().Status(), nil }},
+		{name: "spent", op: "spent", read: nonEmpty, sock: func(o ownerClient, _ Meter) (any, error) { return o.Spent(at - 1) }, call: func(k *kernel.Kernel) (any, error) { return k.State().Spent(at - 1), nil }},
+		{name: "admitspend", op: "admitspend", sock: func(_ ownerClient, m Meter) (any, error) { a, r := m.AdmitSpend(0, "m", 1000); return a, refusal(r) }, call: func(k *kernel.Kernel) (any, error) { a, r := k.AdmitSpend(now(), "m", 1000); return a, refusal(r) }},
+		{name: "admitpool", op: "admitpool", sock: func(_ ownerClient, m Meter) (any, error) { return nil, refusal(m.AdmitPool(0, "full")) }, call: func(k *kernel.Kernel) (any, error) { return nil, refusal(k.AdmitPool(now(), "full")) }},
+		{name: "readpool", op: "readpool", sock: func(_ ownerClient, m Meter) (any, error) { return nil, m.ReadPool(0, "codex", win(300, at+1000)) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.ReadPool(now(), "codex", win(300, at+1000)) }},
+		{name: "hold", op: "hold", sock: func(_ ownerClient, m Meter) (any, error) { return nil, m.Hold(0, "m", spend) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Hold(now(), "m", spend) }},
+		{name: "spendheld", op: "spendheld", read: nonEmpty, sock: func(o ownerClient, _ Meter) (any, error) { return o.SpendHeld() }, call: func(k *kernel.Kernel) (any, error) { return k.State().Held(), nil }},
+		{name: "extend", op: "extend", sock: func(o ownerClient, _ Meter) (any, error) { return nil, o.Extend(ext, "m") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Extend(now(), ext, "m") }},
+		{name: "pause", op: "pause", sock: func(o ownerClient, _ Meter) (any, error) { return nil, o.Pause(ver.ID()) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Pause(now(), ver.ID()) }},
+		{name: "unpause", op: "unpause", sock: func(o ownerClient, _ Meter) (any, error) { return nil, o.Unpause(ver.ID()) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Unpause(now(), ver.ID()) }},
+		{name: "stop", op: "stop", sock: func(o ownerClient, _ Meter) (any, error) { return nil, o.Stop() }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Stop(now()) }},
+		{name: "changes", op: "changes", read: nonEmpty, sock: func(o ownerClient, _ Meter) (any, error) { return o.Changes() }, call: func(k *kernel.Kernel) (any, error) { return *k.State().ChangesView(), nil }},
+		{name: "resume", op: "resume", sock: func(o ownerClient, _ Meter) (any, error) { return nil, o.Resume(1) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Resume(now(), 1) }}, // the one STOP above
+		{name: "status", op: "status", read: nonEmpty, sock: func(o ownerClient, _ Meter) (any, error) { return o.Status() }, call: func(k *kernel.Kernel) (any, error) { return k.State().Status(), nil }},
 		// The retry call carries the attempt the ask named: an older one is
 		// the kernel's refusal on both sides, the parked attempt (1) is sent
 		// (CH-10).
-		{name: "retry moved", op: "retry", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Retry("p1", 0, 0) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Retry(now(), "p1", 0, 0) }},
-		{name: "retry", op: "retry", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Retry("p1", 0, 1) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Retry(now(), "p1", 0, 1) }},
-		{name: "linechanges", op: "linechanges", read: func(v any) bool { return v.(int) > 0 }, sock: func(o Owner, _ Meter) (any, error) { return o.LineChanges() }, call: func(k *kernel.Kernel) (any, error) { return k.State().LineChanges(), nil }},
-		{name: "pools", op: "pools", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Pools() }, call: func(k *kernel.Kernel) (any, error) { return k.State().PoolsAt(now()), nil }},
-		{name: "anchors", op: "anchors", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Anchors() }, call: func(k *kernel.Kernel) (any, error) { return k.State().Anchors, nil }},
+		{name: "retry moved", op: "retry", sock: func(o ownerClient, _ Meter) (any, error) { return nil, o.Retry("p1", 0, 0) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Retry(now(), "p1", 0, 0) }},
+		{name: "retry", op: "retry", sock: func(o ownerClient, _ Meter) (any, error) { return nil, o.Retry("p1", 0, 1) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Retry(now(), "p1", 0, 1) }},
+		{name: "linechanges", op: "linechanges", read: func(v any) bool { return v.(int) > 0 }, sock: func(o ownerClient, _ Meter) (any, error) { return o.LineChanges() }, call: func(k *kernel.Kernel) (any, error) { return k.State().LineChanges(), nil }},
+		{name: "pools", op: "pools", read: nonEmpty, sock: func(o ownerClient, _ Meter) (any, error) { return o.Pools() }, call: func(k *kernel.Kernel) (any, error) { return k.State().PoolsAt(now()), nil }},
+		{name: "anchors", op: "anchors", read: nonEmpty, sock: func(o ownerClient, _ Meter) (any, error) { return o.Anchors() }, call: func(k *kernel.Kernel) (any, error) { return k.State().Anchors, nil }},
 		{name: "enrollments", op: "enrollments", read: func(v any) bool { return len(v.(enrolled).Enrolled) > 0 },
-			sock: func(o Owner, _ Meter) (any, error) {
+			sock: func(o ownerClient, _ Meter) (any, error) {
 				es, un, err := o.Enrollments()
 				return enrolled{es, un}, err
 			},
@@ -592,13 +592,13 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 				return enrolled{es, un}, nil
 			}},
 		{name: "plan", op: "plan", read: func(v any) bool { return v.(kernel.PlanView).Status != "" },
-			sock: func(o Owner, _ Meter) (any, error) {
+			sock: func(o ownerClient, _ Meter) (any, error) {
 				v, _, err := o.Plan("p1")
 				return v, err
 			},
 			call: func(k *kernel.Kernel) (any, error) { return k.State().PlanView("p1"), nil }},
 		{name: "granted", op: "granted", read: func(v any) bool { return v.(grantRead).OK },
-			sock: func(o Owner, _ Meter) (any, error) {
+			sock: func(o ownerClient, _ Meter) (any, error) {
 				from, ok, err := o.Granted(ver.Root())
 				return grantRead{from, ok}, err
 			},
@@ -606,21 +606,21 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 				from, ok := k.State().Granted(ver.Root())
 				return grantRead{from, ok}, nil
 			}},
-		{name: "undo", op: "undo", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Undo("p1", 0) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Undo(now(), "p1", 0) }},
-		{name: "unenroll", op: "unenroll", sock: func(o Owner, _ Meter) (any, error) {
+		{name: "undo", op: "undo", sock: func(o ownerClient, _ Meter) (any, error) { return nil, o.Undo("p1", 0) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Undo(now(), "p1", 0) }},
+		{name: "unenroll", op: "unenroll", sock: func(o ownerClient, _ Meter) (any, error) {
 			return nil, o.Unenroll(key.Unenroll(key.Ed25519Signer(ownerPriv), key.Ed25519(phone)))
 		}, call: func(k *kernel.Kernel) (any, error) {
 			return nil, k.Unenroll(now(), key.Unenroll(key.Ed25519Signer(ownerPriv), key.Ed25519(phone)))
 		}},
-		{name: "revoke", op: "revoke", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Revoke(ver.ID()) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Revoke(now(), ver.ID()) }},
-		{name: "cancel", op: "cancel", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Cancel("p1") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Cancel(now(), "p1") }},
-		{name: "untarget", op: "untarget", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Untarget("none") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Untarget(now(), "none") }},
-		{name: "edgeenroll", op: "edgeenroll", sock: func(o Owner, _ Meter) (any, error) { return nil, o.EdgeEnroll(edge, edgeEnrollSig(sock, edge)) }, call: func(k *kernel.Kernel) (any, error) {
+		{name: "revoke", op: "revoke", sock: func(o ownerClient, _ Meter) (any, error) { return nil, o.Revoke(ver.ID()) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Revoke(now(), ver.ID()) }},
+		{name: "cancel", op: "cancel", sock: func(o ownerClient, _ Meter) (any, error) { return nil, o.Cancel("p1") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Cancel(now(), "p1") }},
+		{name: "untarget", op: "untarget", sock: func(o ownerClient, _ Meter) (any, error) { return nil, o.Untarget("none") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Untarget(now(), "none") }},
+		{name: "edgeenroll", op: "edgeenroll", sock: func(o ownerClient, _ Meter) (any, error) { return nil, o.EdgeEnroll(edge, edgeEnrollSig(sock, edge)) }, call: func(k *kernel.Kernel) (any, error) {
 			return nil, k.EdgeEnroll(now(), edge, key.Approve(key.Ed25519Signer(ownerPriv), kernel.EdgeEnrollHash(k.State().EdgeChanges(), k.Box(), edge, k.EdgeReplaces(edge))))
 		}},
-		{name: "edgerevoke", op: "edgerevoke", sock: func(o Owner, _ Meter) (any, error) { return nil, o.EdgeRevoke(edge) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.EdgeRevoke(now(), edge) }},
-		{name: "setupinfo", op: "setupinfo", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.SetupInfo() }, call: func(k *kernel.Kernel) (any, error) { return SetupInfo{k.State().SetupOpen(), k.Box()}, nil }},
-		{name: "setup", op: "setup", sock: func(o Owner, _ Meter) (any, error) {
+		{name: "edgerevoke", op: "edgerevoke", sock: func(o ownerClient, _ Meter) (any, error) { return nil, o.EdgeRevoke(edge) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.EdgeRevoke(now(), edge) }},
+		{name: "setupinfo", op: "setupinfo", read: nonEmpty, sock: func(o ownerClient, _ Meter) (any, error) { return o.SetupInfo() }, call: func(k *kernel.Kernel) (any, error) { return SetupInfo{k.State().SetupOpen(), k.Box()}, nil }},
+		{name: "setup", op: "setup", sock: func(o ownerClient, _ Meter) (any, error) {
 			return nil, o.Setup(kernel.SignSetup(headPub, key.Ed25519Signer(ownerPriv), key.Ed25519Signer(sparePriv)))
 		}, call: func(k *kernel.Kernel) (any, error) {
 			return nil, k.Setup(now(), kernel.SignSetup(headPub, key.Ed25519Signer(ownerPriv), key.Ed25519Signer(sparePriv)))
@@ -687,7 +687,7 @@ func logged(b *box, from int) string {
 // kernel.ErrNotUnenrolled and logs nothing; the anchor's cuts it off.
 func TestOwnerSocketCutsAPhoneOffOnlyOnAHardwareKey(t *testing.T) {
 	b := newBox(t, filepath.Join(shortDir(t), "web.sock"))
-	o := Owner{serveSide(t, b, OwnerSide, os.Getuid())}
+	o := ownerClient{Owner{serveSide(t, b, OwnerSide, os.Getuid())}}
 	phone, phonePriv := gen(8)
 	pk := key.Ed25519(phone)
 	if err := o.Enroll(key.Enroll(key.Ed25519Signer(ownerPriv), pk)); err != nil {
@@ -749,7 +749,7 @@ func TestCertifyIssuesForThePageNameOnly(t *testing.T) {
 	ca, a := testPageCA(t)
 	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 	clock := func() int64 { return now.UnixMilli() }
-	open := func(pageCA []byte, anchors []key.PublicKey) Owner {
+	open := func(pageCA []byte, anchors []key.PublicKey) ownerClient {
 		t.Helper()
 		logPath := filepath.Join(t.TempDir(), "log")
 		h, err := OpenKernel(KernelConfig{Log: logPath, Anchor: anchor(t, logPath), Key: [32]byte{7}, Pub: headPub, Sign: headPriv,
@@ -758,11 +758,11 @@ func TestCertifyIssuesForThePageNameOnly(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { h.Close() })
-		return serveOwner(t, h, clock)
+		return ownerClient{serveOwner(t, h, clock)}
 	}
 	pool := x509.NewCertPool()
 	pool.AddCert(get(t, func() (*x509.Certificate, error) { return x509.ParseCertificate(a.Certificate()) }))
-	for name, o := range map[string]Owner{"claimed": open(ca, anchors), "setup": open(ca, nil)} {
+	for name, o := range map[string]ownerClient{"claimed": open(ca, anchors), "setup": open(ca, nil)} {
 		c, err := o.Certify(pageKey(t, elliptic.P256()))
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -991,7 +991,7 @@ func TestEdgecandidateOnlyFromTheLinkUid(t *testing.T) {
 	if err := other.Call("edgecandidate", edgeHello(edgePriv, 1), nil); err == nil {
 		t.Fatal("a link socket for another uid took this uid's candidate")
 	}
-	owner := Owner{serveSide(t, b, OwnerSide, os.Getuid())}
+	owner := ownerClient{Owner{serveSide(t, b, OwnerSide, os.Getuid())}}
 	meter := serveSide(t, b, MeterSide, os.Getuid())
 	for _, c := range []Conn{owner.Conn, meter} {
 		for _, op := range []string{"edgecandidate", "edgekey", "linkkey", "linksign"} {

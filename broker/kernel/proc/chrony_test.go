@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -410,5 +411,28 @@ func TestTIM1AChronyGoneFailsWithoutWaiting(t *testing.T) {
 	start := time.Now()
 	if r := s.Read(); r.Earliest != 0 || time.Since(start) >= chronyWait {
 		t.Fatalf("a gone chronyd read %+v after %v", r, time.Since(start))
+	}
+}
+
+// REQ: TIM-1
+// The kernel process reads chronyd when the unit names its socket (#5391):
+// started so, it asks chronyd at its start and holds its reply socket while
+// running, then removes it; started without, it binds none. Revert mutants:
+// RunKernel's `cfg.Chrony != ""` negated, or its source swap dropped.
+func TestRunKernelReadsChronydWhenItsSocketIsNamed(t *testing.T) {
+	m := newMainBox(t)
+	var asked atomic.Int32
+	m.cfg.Chrony = fakeChronyd(t, m.dir, func(seq uint32) []byte { asked.Add(1); return tracking(seq, corrZero) })
+	m.cfg.ChronyReply = filepath.Join(m.dir, "cr.sock")
+	_, stop := m.boot(handoff.SlotTPM, nil)
+	if asked.Load() == 0 {
+		t.Fatal("the kernel came up without asking chronyd")
+	}
+	if _, err := os.Stat(m.cfg.ChronyReply); err != nil {
+		t.Fatalf("the running kernel holds no reply socket: %v", err)
+	}
+	stop()
+	if _, err := os.Lstat(m.cfg.ChronyReply); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the stopped kernel left its reply socket: %v", err)
 	}
 }

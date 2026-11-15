@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -856,10 +857,14 @@ func (o Owner) Submit(p kernel.Plan) error { return o.Call("submit", p, nil) }
 func (o Owner) Retry(plan string, index, attempt int) error {
 	return o.Call("retry", retryArgs{plan, index, attempt}, nil)
 }
+func (o Owner) Enroll(e key.Enrollment) error { return o.Call("enroll", e, nil) }
 func (o Owner) SetLine(percent int64, cos ...key.Cosign) error {
 	return o.Call("setline", lineArgs{percent, cos}, nil)
 }
 
+func (o Owner) Issue(cos []key.Cosign, keys ...key.Key) error {
+	return o.Call("issue", issueArgs{cos, keys}, nil)
+}
 func (o Owner) ApproveCode(a kernel.CodeApproval) error { return o.Call("approvecode", a, nil) }
 func (o Owner) Stop() error                             { return o.Call("stop", nil, nil) }
 
@@ -872,6 +877,12 @@ func (o Owner) SetupInfo() (i SetupInfo, err error) { err = o.Call("setupinfo", 
 func (o Owner) Status() (u []kernel.Unsettled, err error) { err = o.Call("status", nil, &u); return }
 func (o Owner) LineChanges() (n int, err error)           { err = o.Call("linechanges", nil, &n); return }
 
+func (o Owner) Enrollments() ([]key.Enrollment, []key.PublicKey, error) {
+	var e enrolled
+	err := o.Call("enrollments", nil, &e)
+	return e.Enrolled, e.Unenrolled, err
+}
+
 // Changes is the revocations, pauses and STOP in force.
 func (o Owner) Changes() (c key.Changes, err error) { err = o.Call("changes", nil, &c); return }
 
@@ -882,8 +893,47 @@ func (o Owner) Plan(id string) (v kernel.PlanView, ok bool, err error) {
 	return v, v.Status != "", err
 }
 
+// Granted is when key id's grant is live from, if it is granted.
+func (o Owner) Granted(id key.ID) (from int64, ok bool, err error) {
+	var r grantRead
+	err = o.Call("granted", id, &r)
+	return r.From, r.OK, err
+}
+
+// Task is task id while it is live on the kernel's clock.
+func (o Owner) Task(id string) (kernel.Task, bool, error) {
+	var t taskRead
+	if err := o.Call("task", id, &t); err != nil || t.Task == nil {
+		return kernel.Task{}, false, err
+	}
+	return *t.Task, true, nil
+}
+
+// BackupTarget adds a backup destination on an anchor's signature over
+// kernel.BackupTargetHash.
+func (o Owner) BackupTarget(t kernel.BackupTarget, c key.Cosign) error {
+	return o.Call("backuptarget", targetArgs{t, c}, nil)
+}
+
+// Untarget stops new backups to a destination; its backups keep their
+// erase reach.
+func (o Owner) Untarget(name string) error { return o.Call("untarget", untargetArgs{name}, nil) }
+
+// Backup takes one backup now to every current destination.
+func (o Owner) Backup() (t []Taken, err error) { err = o.Call("backup", nil, &t); return }
+
 // Backups is the recipient's ID, every destination and every kept backup.
 func (o Owner) Backups() (v BackupsView, err error) { err = o.Call("backups", nil, &v); return }
+
+// RecoveryRotate asks for a recovery-key approval on an anchor's signature
+// c over kernel.RecoveryRotateHash(old, next), old the recipient the
+// kernel holds (Backups' Recipient): next is the new key's recipient ID,
+// or "" when the card is lost. The approval is handoff.Approval's form.
+func (o Owner) RecoveryRotate(next string, c key.Cosign) ([]byte, error) {
+	var r approvalRead
+	err := o.Call("recoveryrotate", rotateArgs{next, c}, &r)
+	return r.Approval, err
+}
 
 // MarshalJSON encodes the card's bits and clears them, so no copy stays
 // once the frame is written (#4128).
@@ -892,6 +942,12 @@ func (r recoveryCardRead) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Key []byte `json:"key"`
 	}{r.Key})
+}
+
+// SwitchRecipient makes r, in its wire form, the backup recipient, on the
+// card-route approval RecoveryRotate gave for it.
+func (o Owner) SwitchRecipient(r, approval []byte) error {
+	return o.Call("recipient", recipientArgs{r, approval}, nil)
 }
 
 // RecoveryCardID is the held card's backup recipient ID.
@@ -912,6 +968,52 @@ func (o Owner) RecoveryCard(c key.Cosign) ([]byte, error) {
 
 // RecoveryCardDone wipes it, once the owner has confirmed the card.
 func (o Owner) RecoveryCardDone() error { return o.Call("recoverycarddone", nil, nil) }
+
+// Named is the live subjects a label reads as (kernel.Named): those found,
+// and those whose labels could not be read. A blank label is
+// kernel.ErrLabel. Invalid UTF-8 is ErrArgs here, since JSON would carry it
+// as U+FFFD and match a label the owner did not type (LOG-4).
+func (o Owner) Named(label string) (found, unread []string, err error) {
+	if !utf8.ValidString(label) {
+		return nil, nil, ErrArgs
+	}
+	var r namedRead
+	err = o.Call("named", labelArgs{label}, &r)
+	return r.Found, r.Unread, err
+}
+
+// Recall is what the box knows of subject; ok is false when it has none.
+func (o Owner) Recall(subject string) (kernel.Recall, bool, error) {
+	var r recallRead
+	if err := o.Call("recall", subject, &r); err != nil || r.Recall == nil {
+		return kernel.Recall{}, false, err
+	}
+	return *r.Recall, true, nil
+}
+
+// Erase erases subject. A Confirmation with its Subject set means the
+// erase is logged, even with an error: a step after it failed, and Tick
+// retries it.
+func (o Owner) Erase(subject string) (kernel.Confirmation, error) {
+	var r eraseRead
+	if err := o.Call("erase", subject, &r); err != nil {
+		return kernel.Confirmation{}, err
+	}
+	if r.Err == "" {
+		return r.Confirmation, nil
+	}
+	return r.Confirmation, fromWire(r.Err, r.Is)
+}
+
+// Unerased is every erase a store or the key table has not confirmed.
+func (o Owner) Unerased() (u []kernel.Unerased, err error) { err = o.Call("unerased", nil, &u); return }
+
+// ErasedReads is each lineage that read an erased subject's item, at its
+// first read: what agentosd rewinds (D-169).
+func (o Owner) ErasedReads() (r []kernel.ErasedRead, err error) {
+	err = o.Call("erasedreads", nil, &r)
+	return
+}
 
 // Meter is the metering seam over the kernel process's meter socket: a
 // model.Ledger for the model clerk's process. The now each method takes is
@@ -939,4 +1041,30 @@ func (m Meter) AdmitPool(_ int64, pool string) *key.Refusal {
 }
 func (m Meter) ReadPool(_ int64, pool string, windows []kernel.WindowReading) error {
 	return m.Call("readpool", poolArgs{Pool: pool, Windows: windows}, nil)
+}
+
+// Content is a content clerk's seam over its content socket (ContentSide).
+type Content struct{ Conn }
+
+// OpenSubject opens a new subject and returns its ID.
+func (c Content) OpenSubject() (sub string, err error) {
+	err = c.Call("opensubject", nil, &sub)
+	return
+}
+
+// Seal seals data as an item of subject, of class, in the clerk's own
+// store, and returns its hash.
+func (c Content) Seal(subject, class string, data []byte) (h kernel.Hash, err error) {
+	if len(data) > MaxItem {
+		return h, ErrArgs
+	}
+	err = c.Call("seal", sealArgs{subject, class, data}, &h)
+	return
+}
+
+// ReadFor opens the item named h, of the clerk's own store, for the agent
+// session of lineage; the kernel logs the read first.
+func (c Content) ReadFor(h kernel.Hash, lineage string) (data []byte, err error) {
+	err = c.Call("readfor", readForArgs{h, lineage}, &data)
+	return
 }

@@ -356,3 +356,22 @@ func TestTheKernelProcessOpensNoClockGuard(t *testing.T) {
 		}
 	}
 }
+
+// REQ: KRN-2
+// parse writes its usage to the stderr it is handed, never the process's,
+// runs plans every second unless -tick says otherwise, and takes -up's path.
+// Revert mutants: SetOutput, the -tick or the -up flag dropped.
+func TestParseFlagsBesideTheSockets(t *testing.T) {
+	var usage strings.Builder
+	if _, err := parse(append(slices.Clone(good), "-none"), &usage); err == nil || !strings.Contains(usage.String(), "-tick") {
+		t.Fatalf("an unknown flag: %v, usage %q", err, usage.String())
+	}
+	c, err := parse(good, io.Discard)
+	if err != nil || c.Tick.String() != "1s" || c.Up != "" {
+		t.Fatalf("defaults: tick %v, up %q, %v", c.Tick, c.Up, err)
+	}
+	c, err = parse(append(slices.Clone(good), "-tick", "250ms", "-up", "/run/agentos-kernel/up"), io.Discard)
+	if err != nil || c.Tick.String() != "250ms" || c.Up != "/run/agentos-kernel/up" {
+		t.Fatalf("-tick and -up: tick %v, up %q, %v", c.Tick, c.Up, err)
+	}
+}

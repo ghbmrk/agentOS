@@ -411,17 +411,14 @@ func (h *Kernel) Close() error {
 	return h.store.Close()
 }
 
-// onLog is the kernel process's clock from source c, whose Earliest is the
-// time true time is vouched past (0 for none: the box clock alone vouches for
-// nothing, TIM-1) and whose Latest bounds it above. Earliest starts at the
-// later of the log's last time and c's Earliest at the start, or c's Latest
-// when c vouches for none (a box with no second source starts as before),
-// and runs on the monotonic clock; c only raises Latest. So a box clock ahead
-// at a start ends no hold early when the second source disagrees, a step of
-// the box clock while running, back or forward, never moves Earliest (chronyd
-// misses a step under 10 s until its next sample, so its reading follows such
-// a step), a start behind the log neither revives a key nor stops time, and
-// the log's times never go back (TIM-1, KEY-7, KEY-8).
+// onLog is the kernel process's clock from source c (Earliest: the time true
+// time is vouched past, 0 for none, as the box clock alone, TIM-1; Latest: its
+// bound above). Earliest starts at the later of the log's last time and c's
+// Earliest (its Latest when it vouches for none) and runs on the monotonic
+// clock; c only raises Latest. So a box clock ahead at a start ends no hold
+// early when the second source disagrees, a running box-clock step never moves
+// Earliest (chronyd follows a step under 10 s until its next sample), and a
+// start behind the log revives no key nor stops time (TIM-1, KEY-7, KEY-8).
 func onLog(l *kernel.Log, c kernel.Clock) kernel.Clock {
 	r, start := c(), time.Now()
 	base := r.Earliest
