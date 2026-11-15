@@ -3,12 +3,10 @@ package camera
 import (
 	"bytes"
 	"crypto/rand"
-	"encoding/binary"
 	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -848,20 +846,18 @@ func TestSweepWaitsForRetention(t *testing.T) {
 // wipe of the plaintext (#5799). No allocation at all means no clone.
 func TestSegmentFailingPartwayCopiesNoPayload(t *testing.T) {
 	rec := func(typ camwire.Type, n int, payload []byte) []byte {
-		b := make([]byte, recHead, recHead+len(payload))
-		b[0] = byte(typ)
-		binary.BigEndian.PutUint64(b[1:], 7)
-		binary.BigEndian.PutUint32(b[9:], uint32(n))
-		return append(b, payload...)
+		// type, time 7 (big-endian), length n (big-endian), payload
+		b := []byte{byte(typ), 0, 0, 0, 0, 0, 0, 0, 7, byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
+		return append(b[:recHead], payload...)
 	}
 	good := rec(camwire.TypeVideo, 4, []byte("left"))
 	cases := map[string][]byte{
-		"a short header":        append(slices.Clone(good), 0x01, 0x02),
-		"an unknown type":       append(slices.Clone(good), rec(0x7f, 1, []byte("x"))...),
-		"a length past the end": append(slices.Clone(good), rec(camwire.TypeThermal, 9, []byte("short"))...),
+		"a short header":        append(append([]byte(nil), good...), 0x01, 0x02),
+		"an unknown type":       append(append([]byte(nil), good...), rec(0x7f, 1, []byte("x"))...),
+		"a length past the end": append(append([]byte(nil), good...), rec(camwire.TypeThermal, 9, []byte("short"))...),
 	}
 	// A last record of no payload is exactly a header: whole, not short.
-	whole := append(slices.Clone(good), rec(camwire.TypeThermal, 0, nil)...)
+	whole := append(append([]byte(nil), good...), rec(camwire.TypeThermal, 0, nil)...)
 	if recs, err := segRecords(whole); err != nil || len(recs) != 2 || string(recs[0].Frame.Payload) != "left" || len(recs[1].Frame.Payload) != 0 {
 		t.Fatalf("a whole segment parses to %v, %v", recs, err)
 	}
