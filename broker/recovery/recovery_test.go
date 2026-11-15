@@ -4,12 +4,16 @@ import (
 	"archive/tar"
 	"bytes"
 	"crypto/ecdh"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -609,3 +613,486 @@ func restoredOwner(t *testing.T, p string) {
 }
 
 var _ = errors.Is
+
+// OWN-page-session mutants part 4 (#5849): owner.go's steps.
+
+// These tests pin owner.go's lost-phone and lost-number steps line by line
+// (OWN-page-session mutants part 4, #5849): each fails if one statement
+// or comparison they name is removed or turned.
+
+var errShort = errors.New("test: the random source ran dry")
+
+// dryReader yields n bytes, then fails.
+type dryReader struct{ n int }
+
+func (r *dryReader) Read(p []byte) (int, error) {
+	if r.n <= 0 {
+		return 0, errShort
+	}
+	k := min(len(p), r.n)
+	for i := range p[:k] {
+		p[i] = 7
+	}
+	r.n -= k
+	return k, nil
+}
+
+func TestReEnrollStopsWhenTheRandomSourceFails(t *testing.T) {
+	x := newBox(t)
+	if _, err := ReEnroll(x.b, x.rk, true, &dryReader{n: 3}); err == nil {
+		t.Fatal("a short random seed was enrolled")
+	}
+	s, ok := x.b.V.Secret(SeedName)
+	if !ok || !bytes.Equal([]byte(s.Reveal()), x.seed) {
+		t.Fatal("a failed re-enrollment replaced the seed")
+	}
+}
+
+func TestReEnrollRefusesASeedEntryOfAnotherKind(t *testing.T) {
+	x := newBox(t)
+	must(t, x.b.V.Put(SeedName, vault.KindAPIKey, []byte("sk-synthetic-not-a-seed")))
+	if _, err := ReEnroll(x.b, x.rk, true, nil); !errors.Is(err, ErrWrongKind) {
+		t.Fatalf("err = %v, want ErrWrongKind", err)
+	}
+	if k, _ := entryKind(x.b.V, SeedName); k != vault.KindAPIKey {
+		t.Fatalf("the entry of another kind was overwritten: kind %q", k)
+	}
+}
+
+func TestOtpauthNamesEveryParameterTheCodeGeneratorNeeds(t *testing.T) {
+	u, err := url.Parse(otpauth([]byte("12345678901234567890")))
+	must(t, err)
+	label, _, _ := strings.Cut(strings.TrimPrefix(u.Path, "/"), ":")
+	q := u.Query()
+	want := url.Values{"secret": {"GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"}, "issuer": {label},
+		"algorithm": {"SHA1"}, "digits": {"6"}, "period": {"30"}}
+	if u.Scheme != "otpauth" || u.Host != "totp" || label == "" || len(q) != len(want) {
+		t.Fatalf("otpauth = %s", u)
+	}
+	for k, v := range want {
+		if q.Get(k) != v[0] {
+			t.Errorf("%s = %q, want %q", k, q.Get(k), v[0])
+		}
+	}
+}
+
+func TestBeginNumberChangeStopsWhenTheRandomSourceFails(t *testing.T) {
+	x := newBox(t)
+	if nc, err := BeginNumberChange(x.b, x.rk, true, t0, &dryReader{n: 5}); err == nil || nc != nil {
+		t.Fatalf("a short random pairing code was issued: %v, %v", nc, err)
+	}
+}
+
+func TestPairingCodeIsTheRandomBytesModuloOneHundredMillion(t *testing.T) {
+	x := newBox(t)
+	// 0x0102030405060708 = 72623859790382856; mod 1e8 = 90382856.
+	nc, err := BeginNumberChange(x.b, x.rk, true, t0, bytes.NewReader([]byte{1, 2, 3, 4, 5, 6, 7, 8}))
+	must(t, err)
+	if nc.Code != "90382856" {
+		t.Fatalf("code = %q, want 90382856", nc.Code)
+	}
+	if !nc.Expires.Equal(t0.Add(PairingTTL)) {
+		t.Fatalf("expires = %v", nc.Expires)
+	}
+}
+
+func TestANilNumberChangeCompletesNothing(t *testing.T) {
+	var nc *NumberChange
+	if n, _, err := nc.Complete(ownerNum, "+15550000002", "12345678", t0); n != "" || !errors.Is(err, ErrPairing) {
+		t.Fatalf("nil change completed: %q, %v", n, err)
+	}
+}
+
+func TestOnlyEightDigitsCountAsAPairingTry(t *testing.T) {
+	for s, want := range map[string]bool{
+		"12345678": true, "00000000": true, "99999999": true,
+		"1234567": false, "123456789": false, "": false,
+		"1234a678": false, "/2345678": false, ":2345678": false, "1234567:": false,
+	} {
+		if got := eightDigits(s); got != want {
+			t.Errorf("eightDigits(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
+
+// failStore fails its Load, or records its Save.
+type failStore struct {
+	load  error
+	saved *owner.State
+}
+
+func (f *failStore) Load() (owner.State, error) {
+	return owner.State{UnlockedUntil: t0, GridUsed: []string{"A1"}}, f.load
+}
+
+func (f *failStore) Save(s owner.State) error { f.saved = &s; return nil }
+
+func TestEndSessionSavesNothingWhenTheStoreCannotLoad(t *testing.T) {
+	st := &failStore{load: errShort}
+	if err := EndSession(st, true); !errors.Is(err, errShort) {
+		t.Fatalf("err = %v", err)
+	}
+	if st.saved != nil {
+		t.Fatalf("saved %+v over a state it could not read", *st.saved)
+	}
+}
+
+func TestTailShowsAtMostTheLastFourDigits(t *testing.T) {
+	for in, want := range map[string]string{"": "", "1234": "1234", "12345": "...2345", "+15550000002": "...0002"} {
+		if got := tail(in); got != want {
+			t.Errorf("tail(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestTrimSpaceOfBlankBodies(t *testing.T) {
+	for in, want := range map[string]string{"": "", " ": "", " \t\r\n ": "", "  1  ": "1", "\n12345678\r\n": "12345678",
+		"\t12345678": "12345678", "12345678\t": "12345678", " 12345678": "12345678", "12345678 ": "12345678", "\r12345678": "12345678", "12345678\r": "12345678", "\n12345678": "12345678", "12345678\n": "12345678"} {
+		if got := trimSpace(in); got != want {
+			t.Errorf("trimSpace(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if strings.TrimSpace(" x ") != trimSpace(" x ") {
+		t.Fatal("trimSpace differs from strings.TrimSpace on ASCII space")
+	}
+}
+
+func TestAWrongPairingCodeCompletesNothingAndThreeEndTheAttempt(t *testing.T) {
+	nc := &NumberChange{Code: "12345678", Expires: t0.Add(PairingTTL)}
+	const newNum = "+15550000002"
+	for i := 0; i < 3; i++ {
+		if n, _, err := nc.Complete(ownerNum, newNum, "87654321", t0); n != "" || !errors.Is(err, ErrPairing) {
+			t.Fatalf("wrong code %d completed: %q, %v", i+1, n, err)
+		}
+	}
+	if n, _, err := nc.Complete(ownerNum, newNum, "12345678", t0); n != "" || !errors.Is(err, ErrPairing) {
+		t.Fatalf("the right code after three wrong ones completed: %q, %v", n, err)
+	}
+	ok := &NumberChange{Code: "12345678", Expires: t0.Add(PairingTTL)}
+	if n, txt, err := ok.Complete(ownerNum, newNum, " 12345678\n", t0); err != nil || n != newNum || !strings.Contains(txt.ToOld, "...0002") {
+		t.Fatalf("the right code: %q, %+v, %v", n, txt, err)
+	}
+}
+
+// OWN-page-session mutants part 4 (#5849): keys, derivations, reserved entries.
+
+// These tests pin the recovery key's checks, its derivations and the
+// reserved vault entries line by line (OWN-page-session mutants part 4,
+// #5849): each fails if one statement or comparison they name is removed
+// or turned.
+
+func TestAWrongRecoveryKeyIsRefusedEvenWithACodeAndTheLocalPage(t *testing.T) {
+	x := newBox(t)
+	a := Auth{Code: true, Local: true, Recovery: mustKey(t)}
+	if err := a.check(x.b); !errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("a wrong recovery key beside a code and the local page: %v", err)
+	}
+	if err := (Auth{Code: true, Local: true}).check(x.b); err != nil {
+		t.Fatalf("code and local page: %v", err)
+	}
+}
+
+func TestNoBackupKeyDerivesFromAnEmptyRecoveryKey(t *testing.T) {
+	if _, err := backupPrivate(RecoveryKey{}); err == nil {
+		t.Fatal("backupPrivate of no key")
+	}
+	if _, err := backupPublic(RecoveryKey{}); err == nil {
+		t.Fatal("backupPublic of no key")
+	}
+}
+
+func TestAnEmptyRecoveryKeyEnrollsNoSlot(t *testing.T) {
+	s, kek, err := Factor(RecoveryKey{}).Enroll()
+	if err == nil || kek != nil || s.Kind != "" || s.Sealed != nil {
+		t.Fatalf("Enroll of no key: %+v, %x, %v", s, kek, err)
+	}
+}
+
+func TestTheRecoverySlotKEKNeedsABareThirtyTwoByteSalt(t *testing.T) {
+	rk := mustKey(t)
+	salt := bytes.Repeat([]byte{5}, 32)
+	if _, err := Factor(rk).KEK(vault.Slot{Kind: vault.SlotRecovery, Sealed: salt}); err != nil {
+		t.Fatal(err)
+	}
+	for name, s := range map[string]vault.Slot{
+		"kdf":     {Kind: vault.SlotRecovery, Sealed: salt, KDF: &vault.KDF{}},
+		"short":   {Kind: vault.SlotRecovery, Sealed: salt[:31]},
+		"long":    {Kind: vault.SlotRecovery, Sealed: append(salt, 0)},
+		"no-salt": {Kind: vault.SlotRecovery},
+	} {
+		if _, err := Factor(rk).KEK(s); !errors.Is(err, vault.ErrNoSlotOpens) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if _, err := Factor(RecoveryKey{}).KEK(vault.Slot{Kind: vault.SlotRecovery, Sealed: salt}); !errors.Is(err, vault.ErrNoSlotOpens) {
+		t.Errorf("no key: %v", err)
+	}
+}
+
+func TestStoreBackupKeyNeedsAKeyASlotFileAndItsOwnKind(t *testing.T) {
+	x := newBox(t)
+	before, _, err := reserved(x.b.V, BackupKeyName, KindBackupKey)
+	must(t, err)
+	if err := storeBackupKey(x.b, RecoveryKey{}); err == nil {
+		t.Fatal("stored a backup key for no recovery key")
+	}
+	gone := &Box{VaultPath: x.b.VaultPath, KeysPath: filepath.Join(t.TempDir(), "missing.keys"), V: x.b.V}
+	if err := storeBackupKey(gone, x.rk); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing slot file: %v", err)
+	}
+	after, _, err := reserved(x.b.V, BackupKeyName, KindBackupKey)
+	must(t, err)
+	if !bytes.Equal(before, after) {
+		t.Fatal("a failed storeBackupKey changed the backup key")
+	}
+	must(t, x.b.V.Put(BackupKeyName, vault.KindAPIKey, []byte("sk-synthetic-not-a-backup-key")))
+	if err := storeBackupKey(x.b, x.rk); !errors.Is(err, ErrWrongKind) {
+		t.Fatalf("wrong-kind entry: %v", err)
+	}
+	if k, _ := entryKind(x.b.V, BackupKeyName); k != vault.KindAPIKey {
+		t.Fatalf("the entry of another kind was overwritten: %q", k)
+	}
+}
+
+func TestEnsureMACKeyKeepsTheKeyItHasAndRefusesAnotherKind(t *testing.T) {
+	x := newBox(t)
+	k1, err := macKey(x.b.V)
+	must(t, err)
+	must(t, ensureMACKey(x.b.V))
+	k2, err := macKey(x.b.V)
+	must(t, err)
+	if !bytes.Equal(k1, k2) {
+		t.Fatal("ensureMACKey replaced an existing MAC key")
+	}
+	must(t, x.b.V.Put(MACKeyName, vault.KindAPIKey, []byte("sk-synthetic-not-a-mac-key")))
+	if err := ensureMACKey(x.b.V); !errors.Is(err, ErrWrongKind) {
+		t.Fatalf("ensureMACKey over another kind: %v", err)
+	}
+	if err := rotateMACKey(x.b.V); !errors.Is(err, ErrWrongKind) {
+		t.Fatalf("rotateMACKey over another kind: %v", err)
+	}
+	if k, _ := entryKind(x.b.V, MACKeyName); k != vault.KindAPIKey {
+		t.Fatalf("the entry of another kind was overwritten: %q", k)
+	}
+}
+
+func TestAnEmptyRecoveryKeyPrintsNothing(t *testing.T) {
+	if s := (RecoveryKey{}).Text(); s != "" {
+		t.Fatalf("Text of no key = %q", s)
+	}
+}
+
+// RFC 5869 appendix A.1 (SHA-256, 42 bytes: two blocks).
+func TestHKDFMatchesRFC5869(t *testing.T) {
+	ikm := bytes.Repeat([]byte{0x0b}, 22)
+	salt, _ := hex.DecodeString("000102030405060708090a0b0c")
+	info, _ := hex.DecodeString("f0f1f2f3f4f5f6f7f8f9")
+	want := "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
+	if got := hex.EncodeToString(hkdf(ikm, salt, string(info), 42)); got != want {
+		t.Fatalf("hkdf = %s\nwant   %s", got, want)
+	}
+}
+
+func readKeys(t *testing.T, path string) keysFile {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	must(t, err)
+	var kf keysFile
+	must(t, json.Unmarshal(raw, &kf))
+	return kf
+}
+
+func TestKeySlotsNeedATwelveByteNonceAndAWrappedKey(t *testing.T) {
+	x := newBox(t)
+	for name, bad := range map[string]func(*keysSlot){
+		"nonce":   func(s *keysSlot) { s.Nonce = s.Nonce[:11] },
+		"wrapped": func(s *keysSlot) { s.Wrapped = s.Wrapped[:vault.KeySize+15] },
+	} {
+		kf := readKeys(t, x.b.KeysPath)
+		bad(&kf.Slots[0])
+		raw, err := json.Marshal(kf)
+		must(t, err)
+		if err := CheckKeys(raw); err == nil {
+			t.Errorf("%s: a malformed slot passed", name)
+		}
+	}
+}
+
+func TestRecoverySlotIDIsTheDomainSeparatedSaltHash(t *testing.T) {
+	x := newBox(t)
+	var salt []byte
+	for _, s := range readKeys(t, x.b.KeysPath).Slots {
+		if s.Kind == vault.SlotRecovery {
+			salt = s.Sealed
+		}
+	}
+	want := sha256.Sum256(append([]byte("agentos-recovery-slot-id/v2\x00"), salt...))
+	got, err := recoverySlotID(x.b.KeysPath)
+	must(t, err)
+	if !bytes.Equal(got, want[:]) {
+		t.Fatalf("slot id %x, want %x", got, want)
+	}
+	if _, err := recoverySlotID(filepath.Join(t.TempDir(), "none")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing file: %v", err)
+	}
+	bad := filepath.Join(t.TempDir(), "bad.keys")
+	must(t, os.WriteFile(bad, []byte(`{"magic":"agentos-vault-keys","version":2,"slots":[]}`), 0o600))
+	if _, err := recoverySlotID(bad); err == nil || !strings.Contains(err.Error(), "version") {
+		t.Fatalf("unreadable file: %v", err)
+	}
+}
+
+// The forget log's header and chain start are MACs of a fixed layout, so a
+// log a later build reads verifies; each field is bound into the header.
+func TestForgetLogHeaderAndChainStartLayout(t *testing.T) {
+	key := bytes.Repeat([]byte{9}, 32)
+	l := forgetLog{Format: forgetLogFmt, ID: bytes.Repeat([]byte{1}, 16), Host: "pc-a", Base: 7, AnchorSeq: 3}
+	m := hmac.New(sha256.New, key)
+	m.Write([]byte("agentos-forget-header-v1\x00" + l.Format + "\x00"))
+	m.Write(l.ID)
+	m.Write([]byte("\x00pc-a\x00"))
+	var n [16]byte
+	binary.BigEndian.PutUint64(n[:8], 7)
+	binary.BigEndian.PutUint64(n[8:], 3)
+	m.Write(n[:])
+	if got, want := l.headerMAC(key), hex.EncodeToString(m.Sum(nil)); got != want {
+		t.Fatalf("header MAC %s, want %s", got, want)
+	}
+	c := hmac.New(sha256.New, key)
+	c.Write([]byte("agentos-forget-chain-v1\x00"))
+	c.Write(l.ID)
+	if got, want := chainStart(key, l.ID), hex.EncodeToString(c.Sum(nil)); got != want {
+		t.Fatalf("chain start %s, want %s", got, want)
+	}
+}
+
+func TestEnsureForgetLogStopsOnAMalformedKeyOrLog(t *testing.T) {
+	for _, name := range []string{ForgetKeyName, ForgetLogName} {
+		x := newBox(t)
+		kind := map[string]string{ForgetKeyName: KindForgetKey, ForgetLogName: KindForgetLog}[name]
+		junk := []byte(`{"format":"not-this-one"}`)
+		must(t, x.b.V.Put(name, kind, junk))
+		if err := ensureForgetLog(x.b.V, x.rk, nil); err == nil {
+			t.Errorf("%s: a malformed entry was replaced", name)
+		}
+		got, _, err := reserved(x.b.V, name, kind)
+		must(t, err)
+		if !bytes.Equal(got, junk) {
+			t.Errorf("%s: the malformed entry changed", name)
+		}
+	}
+}
+
+func TestSaveForgetLogReportsAnEntryItCannotEncode(t *testing.T) {
+	x := newBox(t)
+	l := forgetLog{Format: forgetLogFmt, ID: bytes.Repeat([]byte{1}, 16),
+		Entries: []ForgetEntry{{Seq: 1, Goal: "g", At: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)}}}
+	var me *json.MarshalerError
+	if err := saveForgetLog(x.b.V, l); !errors.As(err, &me) {
+		t.Fatalf("err = %v, want the encoding error", err)
+	}
+}
+
+func TestProvisionStopsAtABadKeyOrAFactorThatOpensNothing(t *testing.T) {
+	x := newBox(t)
+	bad := x.card
+	bad.RecoveryKey = "not a recovery key"
+	_, perr := ParseRecoveryKey(bad.RecoveryKey)
+	if err := Provision(x.b, bad, Factor(x.rk)); err == nil || err.Error() != perr.Error() {
+		t.Fatalf("Provision with an unreadable key: %v, want %v", err, perr)
+	}
+	if err := Provision(x.b, x.card, Factor(mustKey(t))); !errors.Is(err, vault.ErrNoSlotOpens) {
+		t.Fatalf("Provision with a factor that opens nothing: %v", err)
+	}
+}
+
+func TestStoreCardChecksEachEntryKindAndTheSecretLength(t *testing.T) {
+	x := newBox(t)
+	c := x.card
+	c.SetupSecret = strings.Repeat("S", vault.MinValueLen)
+	must(t, storeCard(x.b, c))
+	c.SetupSecret = c.SetupSecret[1:]
+	if err := storeCard(x.b, c); err == nil || !strings.Contains(err.Error(), "card setup too short") {
+		t.Fatalf("short setup secret: %v", err)
+	}
+	for _, name := range []string{CardName, CardName + "-setup"} {
+		y := newBox(t)
+		must(t, y.b.V.Put(name, vault.KindAPIKey, []byte("sk-synthetic-not-a-card")))
+		if err := storeCard(y.b, y.card); !errors.Is(err, ErrWrongKind) {
+			t.Errorf("%s of another kind: %v", name, err)
+		}
+		if k, _ := entryKind(y.b.V, name); k != vault.KindAPIKey {
+			t.Errorf("%s: the entry of another kind was overwritten: %q", name, k)
+		}
+	}
+}
+
+// A key whose last symbol is not zero prints and reads back whole: the
+// last five bits are a symbol of their own.
+func TestARecoveryKeyPrintsItsLastSymbol(t *testing.T) {
+	k, err := NewRecoveryKey(bytes.NewReader(bytes.Repeat([]byte{0xff}, 64)))
+	must(t, err)
+	txt := k.Text()
+	groups := strings.Split(txt, "-")
+	if last := groups[len(groups)-1]; last[:4] != strings.Repeat(string(Alphabet[31]), 4) {
+		t.Fatalf("last group %q of %q", last, txt)
+	}
+	back, err := ParseRecoveryKey(txt)
+	must(t, err)
+	if !bytes.Equal(back.b[:], k.b[:]) {
+		t.Fatalf("read back %x, printed %x", back.b[:], k.b[:])
+	}
+}
+
+// withFailingDraw makes the next crypto/rand draw fail and later ones
+// succeed. No test in this package is parallel, so the failure lands on
+// the first draw the code under test makes.
+func withFailingDraw(t *testing.T) {
+	t.Helper()
+	real := rand.Reader
+	failed := false
+	rand.Reader = readerFunc(func(p []byte) (int, error) {
+		if !failed {
+			failed = true
+			return 0, errShort
+		}
+		return real.Read(p)
+	})
+	t.Cleanup(func() { rand.Reader = real })
+}
+
+type readerFunc func([]byte) (int, error)
+
+func (r readerFunc) Read(p []byte) (int, error) { return r(p) }
+
+func TestNewEntriesStopWhenTheirRandomDrawFails(t *testing.T) {
+	x := newBox(t)
+	must(t, x.b.V.Delete(MACKeyName))
+	withFailingDraw(t)
+	if err := ensureMACKey(x.b.V); !errors.Is(err, errShort) {
+		t.Fatalf("ensureMACKey: %v", err)
+	}
+	if _, ok := entryKind(x.b.V, MACKeyName); ok {
+		t.Fatal("a MAC key was stored from a failed draw")
+	}
+	// No forget key: the draw for its counter authorization fails.
+	y := newBox(t)
+	must(t, y.b.V.Delete(ForgetKeyName))
+	withFailingDraw(t)
+	if err := ensureForgetLog(y.b.V, y.rk, nil); !errors.Is(err, errShort) {
+		t.Fatalf("no forget key: %v", err)
+	}
+	if _, ok := entryKind(y.b.V, ForgetKeyName); ok {
+		t.Fatal("a forget key was stored from a failed draw")
+	}
+	// No log: the draw for its ID fails.
+	z := newBox(t)
+	must(t, z.b.V.Delete(ForgetLogName))
+	withFailingDraw(t)
+	if err := ensureForgetLog(z.b.V, z.rk, nil); !errors.Is(err, errShort) {
+		t.Fatalf("no forget log: %v", err)
+	}
+	if _, ok := entryKind(z.b.V, ForgetLogName); ok {
+		t.Fatal("a forget log was stored from a failed draw")
+	}
+}
