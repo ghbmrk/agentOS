@@ -1298,6 +1298,35 @@ func TestAStoredStartTLSAccountIsToldToBeSetUpAgain(t *testing.T) {
 	}
 }
 
+// Settings in setup's exact form that fail the settings check do not load:
+// the form check alone passes them, since json.Marshal of what they decode
+// to is the same bytes (#5804, the mutgate survivor of deleting readMail's
+// first refusal).
+func TestSettingsInSetupsFormThatFailTheCheckDoNotLoad(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		s     MailSettings
+		loads bool
+	}{
+		{MailSettings{Address: "owner@example.com", API: APIGmail}, true},
+		{MailSettings{Address: "not an address", API: APIGmail}, false},
+	} {
+		b, err := json.Marshal(c.s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := privfile.WriteAtomic(dir, mailSettings, b, nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readMail(dir); (err == nil) != c.loads {
+			t.Fatalf("settings %+v in setup's form: loads %v, want %v (%v)", c.s, err == nil, c.loads, err)
+		}
+	}
+}
+
 // failReads makes every read attempt fail while its Mark still works: from
 // the next re-read on, each re-read's first connection (its change check,
 // or the read's own Mark on a new day) reaches the server, and every later
