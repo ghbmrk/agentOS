@@ -1,5 +1,7 @@
 package main
 
+// REQ: NET-2, NET-4, NET-6, STO-1, STO-4, STO-5, KEY-7, KRN-12
+
 import (
 	"bytes"
 	"context"
@@ -1384,5 +1386,27 @@ func TestCutCoreReconnectGetsUnsentAlert(t *testing.T) {
 	x.advance(Silence - 15*time.Second)
 	if x.d.alerts.Status().CoreDown || x.page("Core") != "up" {
 		t.Fatal("a cut core that reconnected inside Silence counts as down: its dropped hello did not count it seen")
+	}
+}
+
+// TestCoreSeenOnEachRequest (NET-2, NET-6): every authenticated request
+// counts the core seen, not only the session's start, so a core that
+// keeps one session open and keeps talking stays up past Silence from
+// its connect. Catches the channel's log hook not storing the seen time
+// (enforcer.go event, #4814).
+func TestCoreSeenOnEachRequest(t *testing.T) {
+	x, _ := enrolled(t, true)
+	c, _ := x.dial(x.serve(), x.core)
+	x.advance(Silence - 10*time.Second)
+	if code := c.read(); code != wire.OK {
+		t.Fatalf("a read on the open session: %v", code)
+	}
+	x.advance(20 * time.Second) // past Silence since the connect, inside it since the read
+	if x.d.alerts.Status().CoreDown || x.page("Core") != "up" {
+		t.Fatal("a core that spoke inside Silence counts as down: its request did not count it seen")
+	}
+	x.advance(Silence)
+	if !x.d.alerts.Status().CoreDown || x.page("Core") != "down" {
+		t.Fatal("a core silent for Silence after its last request counts as up")
 	}
 }
