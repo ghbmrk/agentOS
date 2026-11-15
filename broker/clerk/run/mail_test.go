@@ -599,6 +599,25 @@ func TestAnUnprintableCharacterIsRefusedEvenFirst(t *testing.T) {
 	}
 }
 
+// A sign-in name is at most 256 bytes and a password 12 to 256: each bound
+// takes its own length and refuses one past it (#5774, Security: the
+// boundary mutants of these comparisons share a line with the index test
+// the record names, so a test must kill them).
+func TestMailLengthBoundsAreInclusive(t *testing.T) {
+	s := MailSettings{Address: imaptest.User, IMAP: "imap.example.test:993", SMTP: "smtp.example.test:465"}
+	for n, want := range map[int]error{255: nil, 256: nil, 257: ErrMailUser} {
+		s.User = strings.Repeat("u", n)
+		if err := s.check(); err != want {
+			t.Errorf("a %d-byte sign-in name: check = %v; want %v", n, err, want)
+		}
+	}
+	for n, want := range map[int]bool{11: false, 12: true, 13: true, 255: true, 256: true, 257: false} {
+		if got := mailPassword(strings.Repeat("p", n)); got != want {
+			t.Errorf("a %d-byte password: mailPassword = %v; want %v", n, got, want)
+		}
+	}
+}
+
 // SetMail refuses a directory others can reach before it writes anything:
 // no password is sealed and no settings are written (#5324, setMail's
 // directory check).
