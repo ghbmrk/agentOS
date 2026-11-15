@@ -1571,6 +1571,13 @@ class WorkflowTest(unittest.TestCase):
             # broker-race's copy also skips on a records-only change (CI-par-4); the rest is the same.
             self.assertEqual(dict(mut)[want], race[want].replace(guard, "", 1))
 
+    def test_mutants_matrix_holds_at_most_half_the_runner_floor(self):
+        # CI-mutgate-cap: a 32-shard plan (#5817) must not queue every shard at once ahead of the
+        # 5-minute gate jobs; 3 is half the 6-runner floor measured on 2026-11-15 (see mutgate.yml).
+        text = (WORKFLOWS / "mutgate.yml").read_text()
+        block = text[text.index("\n  mutants:\n"):text.index("\n  mutgate:\n")]
+        self.assertRegex(block, r"\n    strategy:\n(?:      .*\n)*?      max-parallel: 3\n")
+
     def test_steps_finds_steps(self):
         sample = "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          x: 1\n      - run: echo\n"
         self.assertEqual(list(steps(sample)), [("actions/checkout@v4", "      - uses: actions/checkout@v4\n        with:\n          x: 1")])
