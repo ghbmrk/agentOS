@@ -63,6 +63,13 @@ var wipeWrappers = map[string]string{
 	// The store's unwrap: Unlock wipes each plaintext by hand on every
 	// path, and keeps the store key only inside its secret.Secret.
 	"github.com/ghbmrk/agentos/broker/clerk/seal.open": "Unlock wipes each opened key and entry set by hand",
+	// A driver's key: opened through a closure, once at start and once
+	// per Lend, each plaintext wiped on success (clear at start, defer
+	// clear in the Lend); stdlib GCM returns a nil plaintext with every
+	// error, so the error paths hold nothing. The shape is held by review:
+	// reshaping it moves devslot/proc under the mutation gate, whose
+	// driver tests fail under coverage (#5788's Findings line).
+	"github.com/ghbmrk/agentos/broker/clerk/devslot/proc.lendFrom": "each open wiped at the start check and in the Lend",
 	// A session frame goes to frameReader.Read, which wipes each byte as
 	// it copies it out (TestAReadFrameIsWipedAsItIsRead).
 	"(*github.com/ghbmrk/agentos/broker/clerk/homekit.frameReader).next": "frame handed to Read, which wipes it",

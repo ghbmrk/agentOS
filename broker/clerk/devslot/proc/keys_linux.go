@@ -135,19 +135,21 @@ func lendFrom(name string, key, device *os.File) (Lend, error) {
 	}
 	// clerk's slotAAD: the seal binds the slot's kind and name.
 	aad := []byte("agentos/clerk/slot/static/" + slotPrefix + name)
-	lend := func(fn func(key []byte) error) error {
-		p, err := g.Open(nil, blob[:g.NonceSize()], blob[g.NonceSize():], aad)
-		defer clear(p)
+	open := func() ([]byte, error) { return g.Open(nil, blob[:g.NonceSize()], blob[g.NonceSize():], aad) }
+	// Opened once here, so a wrong key or a swapped slot fails at start.
+	p, err := open()
+	if err != nil {
+		return nil, ErrKeyFiles
+	}
+	clear(p)
+	return func(fn func(key []byte) error) error {
+		p, err := open()
 		if err != nil {
 			return ErrKeyFiles
 		}
+		defer clear(p)
 		return fn(p)
-	}
-	// Opened once here, so a wrong key or a swapped slot fails at start.
-	if err := lend(func([]byte) error { return nil }); err != nil {
-		return nil, err
-	}
-	return lend, nil
+	}, nil
 }
 
 // slotPrefix is clerk.DeviceSlots: the only slots a device key comes from.
