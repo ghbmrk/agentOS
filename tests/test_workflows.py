@@ -14,7 +14,6 @@ import sys
 import tempfile
 import unittest
 
-import yaml  # tests/requirements.txt; a missing loader fails the module, never skips it
 
 WORKFLOWS = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows"
 
@@ -52,30 +51,31 @@ def unpinned(action):
     return not action.startswith("./") and not PINNED.match(action)
 
 
-class _UniqueKeys(yaml.SafeLoader):
-    """A safe loader that refuses a duplicate mapping key, which PyYAML would resolve silently to the
-    last one (L3 on #5850: two `with:` keys in one step)."""
-
-
-def _mapping(loader, node, deep=False):
-    keys = set()
-    for k, _ in node.value:
-        key = loader.construct_object(k, deep=deep)
-        if key in keys:
-            raise yaml.constructor.ConstructorError(None, None, f"duplicate key {key!r}", k.start_mark)
-        keys.add(key)
-    return loader.construct_mapping(node, deep=deep)
-
-
-_UniqueKeys.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping)
-
-
 def load_steps(text):
     """[(job id, step mapping)] for every step of every job, read by a real YAML loader, plus each
     reusable-workflow job as a step of its own (its `uses`). The pin and token checks read these, so no
     text form of a step can hide it (REV-LOW-tools finding 23; three rounds of hand-parser misses on
     #5850 closed the class this way). PyYAML is pinned by hash in tests/requirements.txt."""
-    doc = yaml.load(text, Loader=_UniqueKeys)
+    # Imported here, not at module level: other test modules import helpers from this one and run
+    # in jobs without PyYAML. A missing loader still errors every test that reads workflows, never
+    # skips it.
+    import yaml
+
+    class UniqueKeys(yaml.SafeLoader):
+        """A safe loader that refuses a duplicate mapping key, which PyYAML would resolve silently to
+        the last one (L3 on #5850: two `with:` keys in one step)."""
+
+    def mapping(loader, node, deep=False):
+        keys = set()
+        for k, _ in node.value:
+            key = loader.construct_object(k, deep=deep)
+            if key in keys:
+                raise yaml.constructor.ConstructorError(None, None, f"duplicate key {key!r}", k.start_mark)
+            keys.add(key)
+        return loader.construct_mapping(node, deep=deep)
+
+    UniqueKeys.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
+    doc = yaml.load(text, Loader=UniqueKeys)
     out = []
     for job, spec in ((doc or {}).get("jobs") or {}).items():
         if "uses" in spec:
@@ -1733,6 +1733,7 @@ class WorkflowTest(unittest.TestCase):
             with self.subTest(tail=tail):
                 self.assertEqual([keeps_no_token(s) for _, s in load_steps(H + co + tail)], [ok])
         # A duplicate key is refused, not resolved to whichever copy a reader picks.
+        import yaml
         with self.assertRaises(yaml.YAMLError):
             load_steps(H + co + "        with:\n          persist-credentials: false\n        with:\n          fetch-depth: 0\n")
 
