@@ -177,6 +177,11 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      # CI-mutgate-cap: the runner pool ran 6 to 9 jobs at once while jobs stayed queued
+      # (2026-11-15, 13:40-14:27Z), and one plan can ask for 32 shards (#5817). 3 is half the
+      # floor of 6, so one run's shards leave the other half to the rest of CI. A held shard is
+      # queued only when another ends, so later runs' short jobs reach runners in between.
+      max-parallel: 3
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.shards) }}
     permissions:
