@@ -9,6 +9,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"math"
+	"math/rand/v2"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -106,6 +107,23 @@ func (*noReadStore) ReadAll() ([]byte, error) { return nil, errNoRead{} }
 func TestALogIsNotOpenedFromAnUnreadableStore(t *testing.T) {
 	if _, err := Open(Config{Store: &noReadStore{}}); !errors.Is(err, errNoRead{}) {
 		t.Fatalf("open on a store that cannot be read: %v", err)
+	}
+}
+
+// Append refuses a body JSON cannot write, and logs nothing.
+func TestAppendRefusesABodyJSONCannotWrite(t *testing.T) {
+	priv := seedKey(5)
+	l, err := Open(Config{Store: &MemStore{}, Anchor: &MemAnchor{}, Pub: priv.Public().(ed25519.PublicKey), Sign: priv,
+		Rand: rand.NewChaCha8([32]byte{5})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := len(l.Entries())
+	if _, err := l.Append(1, TPlanCancel, schema[TPlanCancel], make(chan int)); err == nil {
+		t.Fatal("a channel body was logged")
+	}
+	if len(l.Entries()) != n {
+		t.Fatal("a refused entry was logged")
 	}
 }
 
