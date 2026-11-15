@@ -820,7 +820,7 @@ func TestUnreadableSettingsAreToldInFixedWords(t *testing.T) {
 }
 
 // A warm-up notice already waiting keeps its place and takes the newer
-// text, so the owner side's Told for it still covers it (#5324, notify).
+// text (#5324, notify).
 func TestAWaitingWarmUpNoticeTakesTheNewerText(t *testing.T) {
 	dir := shortDir(t)
 	sec, err := OpenSecrets(dir, testSealer())
@@ -835,6 +835,41 @@ func TestAWaitingWarmUpNoticeTakesTheNewerText(t *testing.T) {
 	h.notify(true, "warm two")
 	if len(h.notices) != 2 || !h.notices[0].warm || h.notices[0].text != "warm two" || h.notices[1].text != "other" {
 		t.Fatalf("notices %+v; want the warm-up notice first with the newer text, then the other", h.notices)
+	}
+}
+
+// Told covers only what the owner side read: a waiting warm-up notice
+// whose text a later read replaced is still waiting after the Told for the
+// read before, while one a re-read gave again with the same text is the
+// news the owner was shown and goes (#5694, notify keeping the seq).
+func TestToldLeavesAReplacedWarmUpTextWaiting(t *testing.T) {
+	dir := shortDir(t)
+	sec, err := OpenSecrets(dir, testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewMailHost(context.Background(), dir, sec, mailConfig())
+	h.mu.Lock()
+	h.notify(true, "warm one")
+	h.mu.Unlock()
+	read := h.status()
+	h.mu.Lock()
+	h.notify(true, "warm two")
+	h.mu.Unlock()
+	h.told(read.Through)
+	if st := h.status(); !slices.Equal(st.Notices, []string{"warm two"}) || st.Through <= read.Through {
+		t.Fatalf("after Told(%d) for %v: %+v; want the newer text waiting under a later seq", read.Through, read.Notices, st)
+	}
+	read = h.status()
+	h.mu.Lock()
+	h.notify(true, "warm two")
+	h.mu.Unlock()
+	if st := h.status(); st.Through != read.Through {
+		t.Fatalf("the same text given again moved the seq: %d, was %d", st.Through, read.Through)
+	}
+	h.told(read.Through)
+	if st := h.status(); len(st.Notices) != 0 {
+		t.Fatalf("a warm-up text the owner side read was told again: %v", st.Notices)
 	}
 }
 
