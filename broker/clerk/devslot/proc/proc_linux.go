@@ -45,8 +45,9 @@ func serveMain(drv devslot.Driver, fd int, hostUID string) error {
 	if _, _, e := syscall.RawSyscall6(syscall.SYS_PRCTL, syscall.PR_SET_DUMPABLE, 0, 0, 0, 0, 0); e != 0 {
 		return e
 	}
-	// The peer's uid as the unit spells it: one comparison, so a hostUID
-	// that names no uid matches no peer, root's included.
+	// The peer's uid as the unit spells it, in plain decimal: one
+	// comparison, so any other hostUID (empty, "0900", " 900") matches no
+	// peer, root's included.
 	cred, err := syscall.GetsockoptUcred(fd, syscall.SOL_SOCKET, syscall.SO_PEERCRED)
 	if err != nil || strconv.FormatUint(uint64(cred.Uid), 10) != hostUID {
 		return ErrPeer

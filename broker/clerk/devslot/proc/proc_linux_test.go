@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/netip"
 	"os"
@@ -27,6 +28,36 @@ import (
 // childEnv marks the test binary run as a driver's process: Main serves
 // the probe driver on descriptor 3 and exits.
 const childEnv = "DEVSLOT_TEST_CHILD"
+
+// keyFilesEnv gives the driver's process the (device, inode) of each key
+// file the parent passed, "dev:ino" joined by commas, so the probe can
+// tell whether it still holds one: the process is non-dumpable, so only it
+// can see its own descriptors without root.
+const keyFilesEnv = "DEVSLOT_TEST_KEYFILES"
+
+// heldKeyFile reports whether any descriptor of this process is open on a
+// file keyFilesEnv names. It compares file identity, not descriptor
+// numbers, which a closed key file's may be reused under.
+func heldKeyFile() bool {
+	want := map[[2]uint64]bool{}
+	for _, f := range strings.Split(os.Getenv(keyFilesEnv), ",") {
+		var dev, ino uint64
+		if _, err := fmt.Sscanf(f, "%d:%d", &dev, &ino); err == nil {
+			want[[2]uint64{dev, ino}] = true
+		}
+	}
+	var lim syscall.Rlimit
+	if syscall.Getrlimit(syscall.RLIMIT_NOFILE, &lim) != nil || len(want) == 0 {
+		return true // the check cannot run: read as held, so the test fails
+	}
+	for fd := 0; uint64(fd) < min(lim.Cur, 1<<16); fd++ {
+		var st syscall.Stat_t
+		if syscall.Fstat(fd, &st) == nil && want[[2]uint64{uint64(st.Dev), st.Ino}] {
+			return true
+		}
+	}
+	return false
+}
 
 func TestMain(m *testing.M) {
 	if os.Getenv(childEnv) == "1" {
@@ -73,7 +104,11 @@ func (probe) Run(ctx context.Context, op string, l devslot.Link, s devslot.Secre
 		return nil, err
 	}
 	if op == "key" {
-		// 1: the canary; 2: the other slot; 3: no key; 0: anything else.
+		// 1: the canary; 2: the other slot; 3: no key; 0: anything else;
+		// 4: the process still holds a key file keyLend was given.
+		if os.Getenv(keyFilesEnv) != "" && heldKeyFile() {
+			return []devslot.Reading{{Kind: "key", Value: 4, Time: time.Unix(1e9, 0)}}, nil
+		}
 		v := int64(0)
 		err := s.Open(func(k []byte) error {
 			switch string(k) {
@@ -124,6 +159,15 @@ func startDriver(t *testing.T, hostUID int, keyFiles ...*os.File) (*os.File, *ex
 		// The key's file first, then the device file's, as many as given.
 		names := []string{"connection", proc.KeyFDName, proc.DeviceFDName}[:1+len(keyFiles)]
 		cmd.Env = append(cmd.Env, "LISTEN_FDS="+strconv.Itoa(len(names)), "LISTEN_FDNAMES="+strings.Join(names, ":"), proc.DriverEnv+"=probe")
+		var ids []string
+		for _, f := range keyFiles {
+			var st syscall.Stat_t
+			if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
+				t.Fatal(err)
+			}
+			ids = append(ids, fmt.Sprintf("%d:%d", st.Dev, st.Ino))
+		}
+		cmd.Env = append(cmd.Env, keyFilesEnv+"="+strings.Join(ids, ","))
 	}
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
@@ -217,21 +261,15 @@ func TestMainLendsTheDeviceKey(t *testing.T) {
 		// The key's file alone is no key, and is still closed.
 		{"the key's file alone", func(t *testing.T) []*os.File { return keyFiles(t, "driver-probe")[:1] }, 3},
 	} {
-		files := c.files(t)
-		host, cmd, out := startDriver(t, os.Getuid(), files...)
+		host, cmd, out := startDriver(t, os.Getuid(), c.files(t)...)
 		if m, err := devslot.ReadMsg(host); err != nil || m.T != devslot.MsgDeclare {
 			t.Fatalf("%s: first message %+v, %v (%s)", c.name, m, err, out)
-		}
-		// keyLend has returned before Declare: the process holds neither
-		// key file while the driver runs.
-		if fd := holds(t, cmd.Process.Pid, files); fd != "" {
-			t.Fatalf("%s: the driver's process still holds a key file on descriptor %s", c.name, fd)
 		}
 		if err := devslot.WriteMsg(host, devslot.PinMsg("key", devslot.Pin{Address: "02:00:00:00:00:01"}, netip.Prefix{})); err != nil {
 			t.Fatal(err)
 		}
 		if r, err := devslot.ReadMsg(host); err != nil || r.T != devslot.MsgReading || r.Kind != "key" || r.Value != c.want {
-			t.Fatalf("%s: reading %+v, %v; want key=%d", c.name, r, err, c.want)
+			t.Fatalf("%s: reading %+v, %v; want key=%d (4: the process still holds a key file)", c.name, r, err, c.want)
 		}
 		if d, err := devslot.ReadMsg(host); err != nil || d.T != devslot.MsgDone || d.Err != "" {
 			t.Fatalf("%s: done %+v, %v", c.name, d, err)
@@ -248,28 +286,6 @@ func TestMainLendsTheDeviceKey(t *testing.T) {
 	if cmd.Wait(); cmd.ProcessState.ExitCode() != 1 {
 		t.Fatal("the driver's process did not exit 1 under another driver's key")
 	}
-}
-
-// holds names a descriptor of process pid open on one of files, or "".
-func holds(t *testing.T, pid int, files []*os.File) string {
-	t.Helper()
-	dir := "/proc/" + strconv.Itoa(pid) + "/fd"
-	ents, err := os.ReadDir(dir)
-	if err != nil || len(ents) == 0 {
-		t.Fatalf("reading %s: %v", dir, err)
-	}
-	for _, e := range ents {
-		got, err := os.Stat(filepath.Join(dir, e.Name()))
-		if err != nil {
-			continue // closed since the listing
-		}
-		for _, f := range files {
-			if want, err := f.Stat(); err == nil && os.SameFile(got, want) {
-				return e.Name()
-			}
-		}
-	}
-	return ""
 }
 
 // The connection is non-blocking in the driver's process, so a call the

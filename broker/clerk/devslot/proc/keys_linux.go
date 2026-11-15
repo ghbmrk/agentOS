@@ -81,7 +81,7 @@ func keyFDs(getenv func(string) string, pid int) (key, device int, err error) {
 
 // keyLend reads the descriptors the template passed and returns the Lend
 // for the device key, or nil for a device with no key (neither file, or
-// only one). It closes both descriptors.
+// only one). It closes every descriptor passed.
 func keyLend(getenv func(string) string, pid int) (Lend, error) {
 	kfd, dfd, err := keyFDs(getenv, pid)
 	if err != nil {
