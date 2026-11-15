@@ -99,6 +99,75 @@ func TestAddingAnEdgeNeverLowersWorth(t *testing.T) {
 	}
 }
 
+// KEY-9 (Security on #5813): no appended entry lowers any key's worth. Each
+// entry draws nodes and edges over a pool of IDs wider than what is
+// declared, so a later entry may first declare a node an edge already named,
+// and the fold must refuse it.
+func TestNoEntryLowersWorth(t *testing.T) {
+	rng := rand.New(rand.NewPCG(5, 8))
+	verbs := [][]key.Verb{{key.Read}, {key.Draft}, {key.Buy}}
+	for range 300 {
+		s := declared(t, kernel.DeclReach{Nodes: []kernel.ReachNode{{ID: "n0", Clerk: "mail"}}})
+		for range 6 {
+			var d kernel.DeclReach
+			for range rng.IntN(3) {
+				nd := kernel.ReachNode{ID: "n" + strconv.Itoa(rng.IntN(6))}
+				for a := key.AssetData; a <= key.AssetSafety; a++ {
+					if rng.IntN(5) == 0 {
+						nd.Classes = append(nd.Classes, a)
+					}
+				}
+				if !slices.ContainsFunc(d.Nodes, func(n kernel.ReachNode) bool { return n.ID == nd.ID }) {
+					d.Nodes = append(d.Nodes, nd)
+				}
+			}
+			for range rng.IntN(3) {
+				d.Edges = append(d.Edges, genEdge(rng, 6))
+			}
+			var before []key.Rank
+			for _, vs := range verbs {
+				before = append(before, worth(t, s, true, vs...))
+			}
+			must(t, s.Apply(declEntry(t, s.Seq+1, d)))
+			for i, vs := range verbs {
+				if a := worth(t, s, true, vs...); a < before[i] {
+					t.Fatalf("%v: worth %d fell to %d appending %+v", vs, before[i], a, d)
+				}
+			}
+		}
+	}
+}
+
+// Security on #5813: an undeclared node an edge reached keeps every class;
+// a later first declaration of it, with fewer classes, is refused.
+func TestALaterDeclarationCannotNarrowAnUnknownNode(t *testing.T) {
+	mbox := kernel.ReachNode{ID: "mbox", Clerk: "mail", Classes: []key.Asset{key.AssetData}}
+	first := kernel.DeclReach{Nodes: []kernel.ReachNode{mbox}, Edges: []kernel.ReachEdge{{Kind: "reset", From: []string{"mbox"}, To: "bank"}}}
+	if w := worth(t, declared(t, first), true, key.Read); w != key.MaxRank {
+		t.Fatalf("before: worth %d", w)
+	}
+	for _, later := range []kernel.DeclReach{
+		{Nodes: []kernel.ReachNode{{ID: "bank"}}},
+		{Nodes: []kernel.ReachNode{{ID: "bank", Classes: []key.Asset{key.AssetData}}}},
+	} {
+		if w := worth(t, declared(t, first, later), true, key.Read); w != key.MaxRank {
+			t.Fatalf("after %+v: worth %d, want %d", later, w, key.MaxRank)
+		}
+	}
+	// An undeclared From, reached later by a new edge, is covered the same way.
+	s := declared(t, kernel.DeclReach{Nodes: []kernel.ReachNode{mbox}, Edges: []kernel.ReachEdge{{Kind: "act", From: []string{"ghost"}, To: "mbox"}}},
+		kernel.DeclReach{Edges: []kernel.ReachEdge{{Kind: "copy", From: []string{"mbox"}, To: "ghost"}}},
+		kernel.DeclReach{Nodes: []kernel.ReachNode{{ID: "ghost"}}})
+	if w := worth(t, s, true, key.Read); w != key.MaxRank {
+		t.Fatalf("a ghost From declared late: worth %d", w)
+	}
+	// Declared in the same entry as the edge, a node prices as declared.
+	same := declared(t, kernel.DeclReach{Nodes: []kernel.ReachNode{mbox, {ID: "bank"}}, Edges: first.Edges})
+	if w := worth(t, same, true, key.Read); w != 1 {
+		t.Fatalf("declared with its edge: worth %d, want 1", w)
+	}
+}
+
 // KEY-9: an edge the graph cannot rule out counts, so an edge to a node no
 // declaration gave classes reaches every class.
 func TestAnUnknownEdgePricesAsReached(t *testing.T) {

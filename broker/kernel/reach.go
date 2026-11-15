@@ -37,8 +37,8 @@ type (
 
 // applyDecl folds a decl.reach entry. It refuses the whole entry, changing
 // nothing, on an empty ID, a class past the table, a repeated node, an edge
-// not reset, copy or act or without From, or a clerk or node rebound, which
-// would drop what the old binding reached.
+// not reset, copy or act or without From, a clerk or node rebound, or a first
+// declaration of a node an edge named (priced as every class): each lowers.
 func (s *State) applyDecl(e Entry) error {
 	b, err := body[DeclReach](e)
 	if err != nil {
@@ -49,6 +49,7 @@ func (s *State) applyDecl(e Entry) error {
 		c, bound := bind[n.Clerk]
 		old, had := d.nodes[n.ID]
 		if seen[n.ID] || n.ID == "" || slices.ContainsFunc(n.Classes, func(a key.Asset) bool { return a > key.AssetSafety }) ||
+			!had && slices.ContainsFunc(d.edges, func(e ReachEdge) bool { return e.To == n.ID || slices.Contains(e.From, n.ID) }) ||
 			n.Clerk != "" && (had && old.Clerk != "" && old.Clerk != n.Clerk || bound && c != n.ID) {
 			return nil
 		}
@@ -91,8 +92,7 @@ func (s *State) reached(node string) map[string]bool {
 	return in
 }
 
-// graphReach is the classes clerk's node reaches, nil when no node roots
-// it. An undeclared node reached is every class: the graph cannot rule it out.
+// graphReach is clerk's node's reach (nil: none); an undeclared node is all.
 func (s *State) graphReach(clerk string) []key.Asset {
 	var out []key.Asset
 	for id := range s.reached(s.decl.clerks[clerk]) {
