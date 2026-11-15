@@ -62,6 +62,7 @@ RELEASE = re.compile(r"go1\.\d+\Z")
 SKIP_TOP = ("broker/vendor/", "broker/third_party/")
 
 TAGS = re.compile(r"""(?<![\w-])-tags(?:=|\s+)(?:"([^"]*)"|'([^']*)'|([^\s"']+))""")
+GO_CMD = re.compile(r"""(?<![\w-])go\s+(?:build|test|vet|run|install|list|generate)\b|\bGOFLAGS\s*=""")
 RACE = re.compile(r"(?<![\w-])-race\b")
 GOENV = re.compile(r"""\b(GOOS|GOARCH)\s*[=:]\s*["']?([A-Za-z0-9_]+)""")
 CGO_ON = re.compile(r"""\bCGO_ENABLED\s*[=:]\s*["']?1\b""")
@@ -88,7 +89,9 @@ def build_tags(root):
         for line in text.split("\n"):
             if line.lstrip().startswith("#"):
                 continue
-            for m in TAGS.finditer(line):
+            # `-tags` counts only on a line that runs go or sets GOFLAGS: a stale string in an echo,
+            # a message or a doc is not a build.
+            for m in (TAGS.finditer(line) if GO_CMD.search(line) else ()):
                 for t in re.split(r"[,\s]+", next(g for g in m.groups() if g is not None)):
                     if TAG.match(t):
                         tags.add(t)

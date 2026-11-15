@@ -177,6 +177,11 @@ class SrcLintTest(unittest.TestCase):
         self.assertEqual(len(self.t.check()), 1)
         self.t.put("image/build.sh", b"#!/bin/sh\nGOFLAGS=-tags=newtag go build ./...\n")
         self.assertEqual(self.t.check(), [])
+        # A stale `-tags` string in an echo, a message or a doc line is not a build.
+        self.t.put("image/build.sh", b'echo "old builds passed -tags newtag"\nmsg="use -tags=newtag here"\n')
+        self.assertEqual(len(self.t.check()), 1)
+        self.t.put("image/build.sh", b"go vet -tags newtag ./...\n")
+        self.assertEqual(self.t.check(), [])
         # `--no-tags` is not a tag flag.
         self.t.put("image/build.sh", b"git fetch --no-tags newtag\n")
         self.assertEqual(len(self.t.check()), 1)

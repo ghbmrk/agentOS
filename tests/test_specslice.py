@@ -153,6 +153,21 @@ class PacketTest(Repo):
         self.assertEqual(code, 0)
         self.assertIn("no brief found", dest.read_text())
 
+    def test_brief_absent_at_head_falls_back_to_the_checkout_and_says_so(self):
+        (self.root / "briefs" / "PK-2.md").write_text("# PK-2\n\n**Needs:** BB-2\n")  # untracked: not at head
+        _, dest, _, _ = self.packet("--id", "PK-2")
+        text = dest.read_text()
+        self.assertIn("**Needs:** BB-2", text)
+        self.assertIn("the checkout's working tree, not at head", text)
+
+    def test_brief_at_head_wins_over_a_different_checkout_brief(self):
+        (self.root / "briefs" / "PK-1.md").write_text("# PK-1\n\n**Needs:** BB-2\n")  # dirty checkout copy
+        _, dest, _, _ = self.packet("--id", "PK-1")
+        text = dest.read_text()
+        self.assertIn("**Needs:** AA-2", text)
+        self.assertNotIn("**Needs:** BB-2", text)
+        self.assertIn(f"at head {self.head[:10]}", text)
+
     def test_pr_number_resolves_through_resolver(self):
         calls = []
 
