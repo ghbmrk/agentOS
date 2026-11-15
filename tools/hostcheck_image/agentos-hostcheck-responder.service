@@ -10,7 +10,7 @@ Conflicts=shutdown.target
 
 [Service]
 Type=simple
-# The responder ignores SIGTERM (responder.sh), so it answers into the shutdown until this timeout's
+# The responder outlives SIGTERM (responder.sh), so it answers into the shutdown until this timeout's
 # SIGKILL: the worst case a responder can be, and the image-in-shutdown test's window.
 TimeoutStopSec=2s
 ImportCredential=hostcheck.responder

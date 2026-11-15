@@ -15,6 +15,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1158,7 +1159,9 @@ class ResponderTest(unittest.TestCase):
             p = subprocess.run(["/bin/sh", str(path)], input=cmds, capture_output=True, text=True, timeout=30,
                                env={"PATH": f"{d}:/usr/bin:/bin"})
             calls = pathlib.Path(d, "calls")
-            return p.stdout.splitlines(), calls.read_text().splitlines() if calls.exists() else []
+            out = [ln for ln in p.stdout.splitlines() if not ln.startswith("HOSTCHECK-DIAG ")]
+            calls = calls.read_text().splitlines() if calls.exists() else []
+            return out, [c for c in calls if not c.startswith("show ")]  # the diagnosis's reads
 
     def test_the_responder_answers_and_keeps_answering_after_an_exit(self):
         for exit_ in ("poweroff", "reboot"):
@@ -1171,9 +1174,36 @@ class ResponderTest(unittest.TestCase):
         quits = script.replace('"$cmd" || echo "HOSTCHECK-EXIT-FAILED $cmd" ;;', '"$cmd"; exit 0 ;;')
         self.assertNotEqual(quits, script)
         self.assertNotIn("HOSTCHECK-ALIVE B", self.run_responder("poweroff\nalive B\n", quits)[0])
-        # It ignores SIGTERM, so only the unit's stop timeout ends it.
-        self.assertIn("\ntrap '' TERM\n", script)
+        # It outlives SIGTERM, so only the unit's stop timeout ends it.
         self.assertEqual(unit_values(self.unit)[("Service", "TimeoutStopSec")], ["2s"])
+
+    def test_the_responder_outlives_sigterm_and_says_what_the_clear_will_find(self):
+        with tempfile.TemporaryDirectory() as d:
+            for tool in ("systemctl", "journalctl"):
+                pathlib.Path(d, tool).write_text(f'#!/bin/sh\necho "{tool} $*"\n')
+                pathlib.Path(d, tool).chmod(0o755)
+            p = subprocess.Popen(["/bin/sh", str(IMAGE_DIR / "responder.sh")], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, text=True, env={"PATH": f"{d}:/usr/bin:/bin"})
+            try:
+                lines = [p.stdout.readline() for _ in range(7)]  # the start's diagnosis, then READY
+                self.assertEqual(lines[-1], "HOSTCHECK-READY\n", lines)
+                p.stdin.write("alive A\n")
+                p.stdin.flush()
+                self.assertEqual(p.stdout.readline(), "HOSTCHECK-ALIVE A\n")
+                p.send_signal(signal.SIGTERM)
+                stop = [p.stdout.readline() for _ in range(6)]
+                p.stdin.write("alive B\n")
+                p.stdin.close()
+                rest = p.stdout.read()
+                self.assertEqual(p.wait(timeout=30), 0)  # end of input, with no SIGTERM since, ends it
+            finally:
+                p.kill()
+        self.assertTrue(all(x.startswith("HOSTCHECK-DIAG start ") for x in lines[:-1]), lines)
+        self.assertIn("HOSTCHECK-DIAG start agentos-mor.service systemctl show -p ActiveState -p SubState -p Result "
+                      "--value agentos-mor.service \n", lines)
+        self.assertIn("HOSTCHECK-DIAG start journal -1: journalctl -q -b -1 -u agentos-mor.service -o cat\n", lines)
+        self.assertTrue(all(x.startswith("HOSTCHECK-DIAG stop ") for x in stop), stop)
+        self.assertEqual(rest, "HOSTCHECK-ALIVE B\n")  # still answering after the SIGTERM
 
     def test_a_failed_exit_request_says_so(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1757,7 +1787,7 @@ class ImageTest(unittest.TestCase):
         # The consoles' lines that explain a result, in the job's log beside the uploaded files.
         for log in sorted((self.dir / name).glob("console-*.log")):
             lines = [ln for ln in log.read_bytes().splitlines()
-                     if re.search(rb"agentos-mor|agentos-health|HOSTCHECK-[A-Z]+-FAILED|fallback|Boot[0-9A-F]{4}|efibootmgr", ln)]
+                     if re.search(rb"agentos-mor|agentos-health|HOSTCHECK-(?:DIAG|[A-Z]+-FAILED)|fallback|Boot[0-9A-F]{4}", ln)]
             print(f"--- {log.name}", *(ln.decode(errors="replace")[:300] for ln in lines[-40:]), sep="\n", file=sys.stderr)
         report = self.dir / name / "report.json"
         self.assertTrue(report.exists(), f"no report for {name}")

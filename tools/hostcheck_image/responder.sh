@@ -5,15 +5,37 @@
 # It reads command lines from its console (ttyS0):
 #   alive NONCE       print HOSTCHECK-ALIVE NONCE: hostcheck's power cut waits for it
 #   poweroff | reboot ask systemd for that orderly exit, and keep answering
-# It never stops itself, and it ignores SIGTERM, so it answers into a shutdown until the unit's stop
+# It never stops itself, and it outlives SIGTERM, so it answers into a shutdown until the unit's stop
 # timeout kills it: only that stop ends the answers, and the unit is ordered so that the stop comes
 # before agentos-mor.service's ExecStop clears MOR. The image-in-shutdown test holds that.
-trap '' TERM
+# At its start and at SIGTERM it prints HOSTCHECK-DIAG lines: what the MOR clear will find (its
+# unit's state, MOR, the directories the clear refuses on while they hold files) and the clear's
+# journal, this boot's and the last one's, so a phase that finds MOR set says why on the console.
+MOR=/sys/firmware/efi/efivars/MemoryOverwriteRequestControl-e20939be-32d4-41be-a150-897f85d49829
+diag() {
+	echo "HOSTCHECK-DIAG $1 agentos-mor.service $(systemctl show -p ActiveState -p SubState -p Result --value agentos-mor.service | tr '\n' ' ')"
+	echo "HOSTCHECK-DIAG $1 mor $(od -An -tu1 -v "$MOR" 2>&1 | tr -s ' \n' ' ')"
+	for d in /run/agentos-setup /run/agentos-link-capture; do
+		echo "HOSTCHECK-DIAG $1 $d $(ls -A "$d" 2>&1 | tr '\n' ' ')"
+	done
+	for b in 0 -1; do
+		journalctl -q -b "$b" -u agentos-mor.service -o cat 2>&1 | tail -n 5 | sed "s/^/HOSTCHECK-DIAG $1 journal $b: /"
+	done
+}
+# A trapped SIGTERM ends a pending read, so the loop below resumes reading after one; only end of
+# input with no SIGTERM since ends it.
+stopping=
+trap 'stopping=1; diag stop' TERM
 stty -echo 2>/dev/null
+diag start
 echo HOSTCHECK-READY
-while read -r cmd arg; do
-	case $cmd in
-	alive) echo "HOSTCHECK-ALIVE $arg" ;;
-	poweroff | reboot) systemctl --no-block "$cmd" || echo "HOSTCHECK-EXIT-FAILED $cmd" ;;
-	esac
+while :; do
+	while read -r cmd arg; do
+		case $cmd in
+		alive) echo "HOSTCHECK-ALIVE $arg" ;;
+		poweroff | reboot) systemctl --no-block "$cmd" || echo "HOSTCHECK-EXIT-FAILED $cmd" ;;
+		esac
+	done
+	[ -n "$stopping" ] || exit 0
+	stopping=
 done
