@@ -1,9 +1,11 @@
 package proc
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
@@ -93,8 +95,13 @@ func TestLendFromRefuses(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got string
-	if err := lend(func(k []byte) error { got = string(k); return nil }); err != nil || got != "canary-kl-0001" {
+	var held []byte
+	if err := lend(func(k []byte) error { got, held = string(k), k; return nil }); err != nil || got != "canary-kl-0001" {
 		t.Fatalf("lent %q, %v", got, err)
+	}
+	// The lent key is wiped once the call returns (Lend: "wiped after").
+	if strings.Trim(string(held), "\x00") != "" {
+		t.Fatalf("the lent key outlived its call: %q", held)
 	}
 
 	// A slot sealed as device/hue, renamed device/scale in the file.
@@ -123,9 +130,87 @@ func TestLendFromRefuses(t *testing.T) {
 			return file(store("driver-scale", func(s *clerk.Secrets) { s.Put("device/scale", clerk.KindGrant, []byte("canary-g")) }))
 		}},
 		"a swapped slot": {"scale", key("driver-scale"), func() *os.File { return file(sw) }},
+		// A blob shorter than a GCM nonce is refused, not sliced past its end.
+		"a short blob": {"scale", key("driver-scale"), func() *os.File {
+			return file([]byte(`{"device/scale":{"kind":"static","blob":"AAAA"}}`))
+		}},
 	} {
 		if l, err := lendFrom(c.name, c.key, c.device()); err == nil || l != nil {
 			t.Errorf("%s: lent", name)
+		}
+	}
+}
+
+// A name that the clerk's alphabet allows but mkosi.finalize's DRIVER_NAME
+// does not (here one past its 19 characters) is refused at start, even
+// with that clerk's own key and a slot sealed for it. Fails if lendFrom
+// leans on clerkkey's wider name rule.
+func TestLendFromRefusesANameTooLong(t *testing.T) {
+	name := "a" + strings.Repeat("b", 19)
+	var root [clerkkey.Len]byte
+	root[0] = 2
+	k, err := clerkkey.Derive(&root, "driver-"+name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := clerkkey.Marshal(k)
+	r, w, _ := os.Pipe()
+	w.Write(b)
+	w.Close()
+	sk, _ := k.Sealer()
+	sl, _ := clerk.NewAESSealer(sk)
+	s := clerk.NewSecrets(sl, nil)
+	if err := s.Put("device/"+name, clerk.KindStatic, []byte("canary-kl-0003")); err != nil {
+		t.Fatal(err)
+	}
+	sealed, _ := s.MarshalBinary()
+	p := filepath.Join(t.TempDir(), "device")
+	os.WriteFile(p, sealed, 0o400)
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if l, err := lendFrom(name, r, f); err == nil || l != nil {
+		t.Fatalf("lent under a %d-character name", len(name))
+	}
+}
+
+// deviceSlot returns only a static slot device/<name>, from a regular file
+// of at most maxDeviceFile bytes: one of exactly that size is read whole,
+// and a missing slot or a grant in its place is refused here, before any
+// key opens it. Fails if the bound is off by one or a non-static slot is
+// handed on.
+func TestDeviceSlot(t *testing.T) {
+	file := func(b []byte) *os.File {
+		p := filepath.Join(t.TempDir(), "device")
+		if err := os.WriteFile(p, b, 0o400); err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.Open(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { f.Close() })
+		return f
+	}
+	at := func(slots string, size int) []byte {
+		// Padded in front, so a read cut short ends inside the object.
+		return append(bytes.Repeat([]byte(" "), size-len(slots)), slots...)
+	}
+	static := `{"device/scale":{"kind":"static","blob":"Y2FuYXJ5LWtsLTAwMDQ="}}`
+	if blob, err := deviceSlot(file(at(static, maxDeviceFile)), "scale"); err != nil || string(blob) != "canary-kl-0004" {
+		t.Fatalf("a file of exactly maxDeviceFile bytes: %q, %v", blob, err)
+	}
+	if _, err := deviceSlot(file(at(static, maxDeviceFile+1)), "scale"); err == nil {
+		t.Fatal("a file one byte over maxDeviceFile was read")
+	}
+	for name, slots := range map[string]string{
+		"a grant": `{"device/scale":{"kind":"grant","blob":"Y2FuYXJ5LWtsLTAwMDQ="}}`,
+		"no slot": `{"device/hue":{"kind":"static","blob":"Y2FuYXJ5LWtsLTAwMDQ="}}`,
+	} {
+		if blob, err := deviceSlot(file([]byte(slots)), "scale"); err == nil || blob != nil {
+			t.Errorf("%s: handed on %q", name, blob)
 		}
 	}
 }
