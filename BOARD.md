@@ -319,10 +319,9 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-offline-verity | IMG-offline-verity: the offline manager mounts /usr through dm-verity (#4767 Security 6) | UNLOCK-unit-deps (#4667) | queued (release; tier A) |
 | UNLOCK-allow-wording | UNLOCK-allow-wording: one direction for unlock.allow lines (#4894 L3 4, 5) | UNLOCK-unit-deps (#4667) | queued (release; tier B) |
 | NET-2-cap-basis-required | NET-2-cap-basis-required: every signed byte cap names its basis (D-248) | #4578, #5165 | queued (release; tier A) |
-| HOST-1h | HOST-1h: an image's hostcheck liveness answer must stop before its MOR clear, or a shutdown in progress could answer and then halt. Release; from #5266. | #5266, #5256 | building (release; tier A) |
+| HOST-1h | HOST-1h: an image's hostcheck liveness answer must stop before its MOR clear, or a shutdown in progress could answer and then halt. Release; from #5266. | #5266, #5256 | queued (release; tier A) |
 | ENF-shared-quota-b | ENF-shared-quota-b: a host cannot fill its shared segment's records (ct timeout plus per-MAC count and meter). Release; split from #4701; waits for Mark's card. | #4701 | queued (release; tier A; lane primary) |
 | VULN-debian-r5-reach | VULN-debian-r5-reach: on a built image, check whether cryptsetup or systemd can reach libssl3t64's AES-GCM-SIV through a cipher name read from a disk header; constrain it or record the reach in the #2919 records. Release; from #5338. | #5338, #2919 | queued (release; tier A; lane primary) |
-| ENF-shared-nd-ll | ENF-shared-nd-ll: a host's link-local address gets a neighbour hold on a shared segment | #5686 (ENF-shared-nd-input) | building(tier A; lane primary) |
 | HOST-1e2 | HOST-1e2: host-untouched check on the P2-1 image: phases file, image responder ordered to stop before the MOR clear (HOST-1h part 2), image-in-shutdown test, S1 PC procedure. | #326, #5267, #5744 | queued (tier A) |
 
 ## Model routes and the Codex lane
@@ -415,25 +414,18 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | NET-2-cap-sizing-owner | NET-2-cap-sizing-owner: the agentosd call site and backups wording call enflist.Propose, show ErrNoDailyBytes, and hand the owner the link. Sub B half of #4578. | #4578 | queued (release; tier A; sub B) |
 | ENF-down-report | ENF-down-report: a refused first firewall load exits the enforcer before any page is served and nothing reports the down enforcer. Release; from #5243. | #5243 | queued (release; tier A) |
 | TIM-1-interval-fu-b | TIM-1-interval-fu-b: agentosd's STATUS line moves to the interval, and the PLAN ON reply says consent is withdrawn. Release; from #5215. | #5215, #5216 | queued (release; tier A) |
-| VOICE-ro-d-ending-wording | VOICE-ro-d-ending-wording: the call-limit notice's wording is recorded in SPEC or a UX entry. Release (spec-gap); from #5299. | #5299, #5262 | building (release) |
 | CLK-run-signin-ctx | CLK-run-signin-ctx: SignInWorker contract, a sign-in's contexts end with it; kill plansignin.go:351 with a ctx-recording fake (needs clerk/run's package-wide survivors cleared). Release; from #5290. | #5290 | building (release; tier A) |
 | KRN-forget-c-notice-words | KRN-forget-c-notice-words: the after-erase Forget notice names kinds in the kernel's household words, as the ask does, not raw class names. From #5163. | #5163, #5125 | queued (release; tier A) |
 | KRN-clock-second-source | KRN-clock-second-source: give the kernel's sandbox a second time source and pass the TIM-1 guard's reading as KernelConfig.Clock. Release; from #5387. | #5147, #5387 | building (release; tier A) |
 | KRN-clock-hold-gap | KRN-clock-hold-gap: a hold started while Latest-Earliest is wide is not lengthened by the gap (unit after time-sync, window from Earliest while monotonic, or bound via #5391); STATUS can say why. Release; from #5387. | #5147, #5387, #5391, #5279 | queued (release; tier A) |
-| IMG-keeper-reach-gen-doc | IMG-keeper-reach-gen-doc: image/ASSUMPTIONS.md records the partition-type pin and the extra-unit/fstab.extra firmware routes (I21, I22). Release; from #5289. | #5289 | building (release; tier A) |
 | CTL-owner-text-lost | CTL-owner-text-lost: an owner text that arrives while the agent has no open services is dropped, and the reply says it was lost and to resend. Release; from #5427. | #5425, #5427 | queued (release; tier A; sub B) |
 | VM-snap-unread-notice-fu | VM-snap-unread-notice-fu: the unread-snapshot deletion notice is held and retried until the owner channel delivers it. Release; from #5499 (UX). | #5481, #5499 | queued (release; tier B) |
 | IMG-initrd-global-ext-dirs | IMG-initrd-global-ext-dirs: INITRD_IMAGE_DIRS adds /.extra/global_sysext and /.extra/global_confext when the image's systemd moves past v257. Release; blocked on that bump; from #5501 (Security). | #5488, #5501 | queued (release; tier A; blocked on the systemd bump) |
 | IMG-keyring-pin | IMG-keyring-pin: the Debian archive keyring is checked against committed fingerprints before any image or guest build uses it. Release; from #5573. | #5573 | queued (release; tier A; gate files) |
 | GUEST-bridge-tree-dead-fu | GUEST-bridge-tree-dead-fu: retire the stale TREE rows and B16, bound the idle-bridge test, drop the guest-plane tree exemption (#5611 reviews) | - | queued (release; tier B) |
 | OWN-resume-says-cancelled-fu | OWN-resume-says-cancelled-fu: RESUME's cancel note only when the STOP cancelled something. | #5664 | building (release; tier A) |
-| CLK-run-open-wipe | CLK-run-open-wipe: a plaintext handed back with an Open error is wiped too. Release; from #5662. | #5324 | building (release; tier A) |
-| CLK-run-mut-mail-fu | CLK-run-mut-mail-fu: StartTLS setting delivers nothing, gmailtest.Waiting matches any goroutine, a replaced warm-up notice can go unshown. Release; from #5662. | #5324 | queued (release; tier A) |
-| VULN-debian-r6-f2 | VULN-debian-r6-f2: confirm glibc regex and wide-scanf reachability on the Debian image tree CI builds, as a CI sweep, and drop the Ubuntu caveat. Release follow-up of #5695. | #5695, #5624, #5503 | in review (release; tier A) |
-| TEST-flake-ap-abandoned-call-token | TEST-flake-ap-abandoned-call-token: TestAbandonedOpensCountedAndCapped keeps one open counted; TestNoTokenTryFollowsTheCall hangs up before rung P2 (broker-race). Release; from #5712. | #5438, #5592, #5712 | queued (release; tier A) |
-| VOICE-ro-d-ending-lateness | VOICE-ro-d-ending-lateness: the ending clip's 'one minute' matches the time left after a late notice. Release (UX); from #5724. | #5683, #5304 | building (release; tier A) |
-| CLK-run-open-wipe-senders | CLK-run-open-wipe-senders: a senders plaintext handed back with an Open error is wiped too. Release; from #5666. | #5666 | queued (release; tier A) |
-| GUEST-mut-store | GUEST-mut-store: kill or waive the old mutgate deletion survivors in the guest store (26). Release; from #5621. | #5621 | building (release; tier A) |
+| CLK-run-mut-mail-fu | CLK-run-mut-mail-fu: StartTLS setting delivers nothing, gmailtest.Waiting matches any goroutine, a replaced warm-up notice can go unshown. Release; from #5662. | #5324 | building (release; tier A) |
+| CLK-run-open-wipe-senders | CLK-run-open-wipe-senders: a senders plaintext handed back with an Open error is wiped too. Release; from #5666. | #5666 | building (release; tier A) |
 | GUEST-mut-plane | GUEST-mut-plane: kill or waive the old mutgate deletion survivors in the guest plane (42). Release; from #5621. | #5621 | building (release; tier A) |
 | GUEST-mut-owner | GUEST-mut-owner: kill or waive the old mutgate deletion survivors in the guest owner channel (33). Release; from #5621. | #5621 | queued (release; tier A) |
 | GUEST-mut-dispatch | GUEST-mut-dispatch: kill or waive the old mutgate deletion survivors in guest mcp, goal, plan and compact (27). Release; from #5621. | #5621 | queued (release; tier A) |
@@ -441,6 +433,14 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | TIM-1-interval-fu-d | TIM-1-interval-fu-d: a lost clock state file widens the interval until carrier time is read. Release; from #5216. | #5216 | queued (release; tier A) |
 | TIM-1-interval-fu-e | TIM-1-interval-fu-e: losing NTS during an outlier re-alerts the owner, and the outlier bound outlives the NTS sync. Release; from #5754. | #5216, #5754 | queued (release; tier A) |
 | KRN-clock-fresh-rise | KRN-clock-fresh-rise: a kernel started behind the log catches up on a fresh chronyd sample (TIM-1). Release; from #5757. | #5391, #5757 | queued (release; tier A) |
+| VULN-debian-r9 | VULN-debian-r9: accept expat's and dbus's new Debian 13 advisories DEBIAN-CVE-2026-128241, -128885, -128886 so image-vulncheck passes again. Release; fifth no-fix Debian round. | #2919, #5660 | building (release; tier A) |
+| VULN-debian-r9-f1 | VULN-debian-r9-f1: name the flaw class and local reachability of dbus DEBIAN-CVE-2026-128885/-128886 and expat -128241 in their records. | #5764, #5765 | queued (release; tier A) |
+| UI-inbox-fail-race | UI-inbox-fail-race: the Inbox mutants test sets its failing store's flag while the owner channel's goroutine saves through it, a data race that reddens broker-race. Release; flake, seen on #5743. | #5743 | building (release; tier B) |
+| CLK-run-waiting-scope | CLK-run-waiting-scope: world_test's step-in-flight wait uses the unscoped gmailtest.Waiting; move it to G.Waiting and drop the unscoped one. Release; from #5694. | #5694 | queued (release; tier A) |
+| LINT-dial-configured | LINT-dial-configured: the inference lint's configured() refuses a local bound to a literal (NET-2). Release; from #5757. | #5757 | queued (release) |
+| MUT-waiver-store | MUT-waiver-store: keep accepted Mutant-equivalent proofs in a statement-keyed record per package, so a widened mutgate target does not re-surface them. Release; from #5743. | #5743 | building (release; tier A) |
+| CLK-run-mut-mail-fu2 | CLK-run-mut-mail-fu2: a mail account stored with starttls is refused as unreadable instead of losing its password slot; the sign-in overlap test pins the refresh path. Release; from #5774. | #5774, #5694 | queued (release; tier A) |
+| MUT-deleted-test-own-lines-fu | MUT-deleted-test-own-lines-fu: #5770's release items: NOT COVERED rule scope, testdata as a test change, Mutant-uncovered alias, archive error text. Release; after #5776. | #5770 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -478,7 +478,6 @@ issue #4950: body has no board-row block
 issue #4954: body has no board-row block
 issue #4982: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5021: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has ['done']
-issue #5047: body has no board-row block
 issue #5062: body has no board-row block
 issue #5177: body has no board-row block
 issue #5202: body has no board-row block
@@ -486,6 +485,5 @@ issue #5216: body has no board-row block
 issue #5708: body has no board-row block
 issue #5709: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5736: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #5753: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5756: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 ```

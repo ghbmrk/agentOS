@@ -11,13 +11,15 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/ghbmrk/agentos/broker/netguard/port1"
 )
 
 // InboundTable is the nftables table InboundRules renders. It is separate
 // from CH-9's agentos_ap table, which stays as it is: a drop in either
 // table is final, so the access point's interface is exempt here and
 // governed there.
-const InboundTable = "agentos_inbound"
+const InboundTable = port1.Table
 
 var ifaceRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,15}$`)
 
@@ -136,22 +138,15 @@ func InboundExemptRemove(iface string) (string, error) {
 
 // InboundPageSet is the named set of the one interface the page's ports
 // are open on (Page).
-const InboundPageSet = "page"
+const InboundPageSet = port1.PageSet
 
-// InboundPageAdmit renders the nft script that makes iface the page set's
-// only element: a flush then an add in one nft -f transaction, so the set
-// never holds two names, or none while it is being replaced. It refuses
-// "lo" and any name ifaceRe refuses.
-func InboundPageAdmit(iface string) (string, error) {
-	if !ifaceRe.MatchString(iface) || iface == "lo" {
-		return "", fmt.Errorf("netguard: %q is not an interface the page may serve on", iface)
-	}
-	return InboundPageClose + fmt.Sprintf("add element inet %s %s { %q }\n", InboundTable, InboundPageSet, iface), nil
-}
+// InboundPageAdmit is port1.Admit: the nft script that makes iface the
+// page set's only element, run by the page's root step (cmd/agentos-port1).
+func InboundPageAdmit(iface string) (string, error) { return port1.Admit(iface) }
 
-// InboundPageClose is the nft script that empties the page set, closing
-// the page's ports on every link.
-const InboundPageClose = "flush set inet " + InboundTable + " " + InboundPageSet + "\n"
+// InboundPageClose is port1.Close, the nft script that empties the page
+// set, closing the page's ports on every link.
+const InboundPageClose = port1.Close
 
 // InboundLinkSet is the named set of the one interface the edge link's
 // port is open on (Link).
