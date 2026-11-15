@@ -868,3 +868,79 @@ func TestSegmentFailingPartwayCopiesNoPayload(t *testing.T) {
 		}
 	}
 }
+
+// REQ: CLK-1
+// TestSealWipesItsPlaintextAndKey: seal zeroes the open segment's bytes
+// and the segment key it derived, whether or not the write succeeds,
+// empties the buffer and resets the dropped count; two segments of one
+// span get distinct names and salts, and a lent key of the wrong length
+// derives nothing and writes nothing (#5808).
+func TestSealWipesItsPlaintextAndKey(t *testing.T) {
+	k := make([]byte, 32)
+	rand.Read(k)
+	sealer, err := clerk.NewAESSealer(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secrets := clerk.NewSecrets(sealer, nil)
+	keys := SecretsKeys(secrets)
+	if err := keys.Make("cam1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := secrets.Put(SegmentSlots+"cam2", clerk.KindStatic, []byte("sixteen byte key")); err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	var derived [][]byte
+	dir := t.TempDir()
+	s := &Store{
+		cfg:        StoreConfig{Dir: dir, Keys: keys, Log: func(l string) { logged = append(logged, l) }},
+		keyDerived: func(k []byte) { derived = append(derived, k) },
+	}
+	seal := func(camera string) error {
+		plain := []byte("synthetic frame bytes")
+		h := &held{pend: plain, pendFrom: time.Unix(100, 0), pendTo: time.Unix(200, 0), dropped: 3}
+		err := s.seal(camera, h)
+		if h.pend != nil || h.dropped != 0 || !bytes.Equal(plain, make([]byte, len(plain))) {
+			t.Errorf("%s: after seal the buffer is %q, the dropped count %d and the plaintext %q; want nil, 0 and zeros", camera, h.pend, h.dropped, plain)
+		}
+		return err
+	}
+	for range 2 {
+		if err := seal("cam1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(derived) != 2 {
+		t.Fatalf("two seals derived %d segment keys", len(derived))
+	}
+	for i, k := range derived {
+		if len(k) != 32 || !bytes.Equal(k, make([]byte, 32)) {
+			t.Errorf("segment key %d is %d bytes and not wiped after its seal", i, len(k))
+		}
+	}
+	des, err := os.ReadDir(filepath.Join(dir, "cam1"))
+	if err != nil || len(des) != 2 {
+		t.Fatalf("two seals of one span left %d segments (%v); want 2 distinct names", len(des), err)
+	}
+	var salts [][]byte
+	for _, de := range des {
+		file, err := os.ReadFile(filepath.Join(dir, "cam1", de.Name()))
+		if err != nil || len(file) < len(segMagic)+saltLen {
+			t.Fatalf("%s: %d bytes, %v", de.Name(), len(file), err)
+		}
+		salts = append(salts, file[len(segMagic):len(segMagic)+saltLen])
+	}
+	if bytes.Equal(salts[0], salts[1]) || bytes.Equal(salts[0], make([]byte, saltLen)) {
+		t.Errorf("two segments share the salt %x", salts[0])
+	}
+	if len(logged) != 2 || !strings.Contains(logged[1], "; 3 frames over the write rate kept in memory only") {
+		t.Errorf("seal logged %q; want each segment and its 3 dropped frames", logged)
+	}
+	if err := seal("cam2"); !errors.Is(err, ErrWrite) || len(derived) != 2 {
+		t.Errorf("a 16-byte segment key sealed with %v and derived %d keys; want ErrWrite and none", err, len(derived)-2)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cam2")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a 16-byte segment key left the camera's directory: %v", err)
+	}
+}

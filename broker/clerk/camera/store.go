@@ -138,6 +138,9 @@ type Store struct {
 	// writeStop, for tests only, is each segment write's
 	// privfile.WriteAtomic stop; nil runs every step.
 	writeStop func(i int) bool
+	// keyDerived, for tests only, sees each derived segment key before
+	// its wipe, so a test can check the wipe; nil does nothing.
+	keyDerived func(k []byte)
 }
 
 // held is one camera's capture, or a kept camera's retention. mu orders
@@ -687,6 +690,9 @@ func (s *Store) segAEAD(camera string, salt []byte, fn func(cipher.AEAD) error) 
 			return err
 		}
 		defer clear(k)
+		if s.keyDerived != nil {
+			s.keyDerived(k)
+		}
 		b, err := aes.NewCipher(k)
 		if err != nil {
 			return err
