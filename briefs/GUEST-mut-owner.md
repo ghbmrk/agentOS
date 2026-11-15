@@ -20,6 +20,10 @@ Rules (`briefs/GUEST-bridge-tree-dead-fu.md`, "Rules for each kill row"): plain 
 
 `broker/guest/outbox_test.go` (appended funcs only), this brief.
 
+## Cross-group lines
+
+The new tests run an owner delivery, `Open`, `Close` and the store, so mutgate also targets lines of `goal.go`, `plane.go` and `store.go`. `goal.go` 25, 26 and 29 (GUEST-mut-dispatch, #5750) are killed here by `TestOwnerMutLineageIsCachedOnlyWhenKnown`; `plane.go` 243 and `store.go` 78, 79, 309, 310, 312, 313, 316 and 326 carry the proofs #5760 and #5761 had accepted.
+
 ## Done
 
 CI green, `mutgate` included; every listed line killed or waived with a reason a reviewer can check.
