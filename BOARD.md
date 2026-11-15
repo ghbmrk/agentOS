@@ -111,6 +111,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | REV-LOW-tools | REV-LOW-tools: review-tool and CI-check findings (srclint tags, next-id order, netguard imports, packet brief source, NUL path parsing, inter-hunk context, workflow step keys) | 23-Low review (2026-11-01) | queued(release; tier A; brief to write) |
 | MET-owner-export | MET-owner-export: the box writes its weekly owner-outcome counts to records/owner/ (needs brief; after G1) | #4935; G1 | queued (release; needs brief; after G1) |
 | VULN-prune-requalify | VULN-prune-requalify: requalify the pruned OpenClaw image (PLN-5, HLD-3) | VULN-controlui-drop (#4436) | queued (release) |
+| MUT-test-helper-scope | MUT-test-helper-scope: a changed test line outside a test function (an import or helper) widens mutgate only to the tests that use it, not to the whole package. Tier A, gate file. | #5762, #5753 | queued (tier A) |
 
 ## Owner channel and approvals (SPEC §10)
 
@@ -429,16 +430,19 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | TIM-1-interval-fu-d | TIM-1-interval-fu-d: a lost clock state file widens the interval until carrier time is read. Release; from #5216. | #5216 | building (release; tier A) |
 | TIM-1-interval-fu-e | TIM-1-interval-fu-e: losing NTS during an outlier re-alerts the owner, and the outlier bound outlives the NTS sync. Release; from #5754. | #5216, #5754 | queued (release; tier A) |
 | KRN-clock-fresh-rise | KRN-clock-fresh-rise: a kernel started behind the log catches up on a fresh chronyd sample (TIM-1). Release; from #5757. | #5391, #5757 | queued (release; tier A) |
-| UI-inbox-fail-race | UI-inbox-fail-race: the Inbox mutants test sets its failing store's flag while the owner channel's goroutine saves through it, a data race that reddens broker-race. Release; flake, seen on #5743. | #5743 | building (release; tier B) |
 | LINT-dial-configured | LINT-dial-configured: the inference lint's configured() refuses a local bound to a literal (NET-2). Release; from #5757. | #5757 | queued (release) |
 | CLK-run-mut-mail-fu2 | CLK-run-mut-mail-fu2: a mail account stored with starttls is refused as unreadable instead of losing its password slot; the sign-in overlap test pins the refresh path. Release; from #5774. | #5774, #5694 | building (release; tier A) |
 | MUT-deleted-test-own-lines-fu | MUT-deleted-test-own-lines-fu: #5770's release items: NOT COVERED rule scope, testdata as a test change, Mutant-uncovered alias, archive error text. Release; after #5776. | #5770 | queued (release; tier A) |
+| MUT-waiver-mutant-scope | MUT-waiver-mutant-scope: a waiver waives only the mutant it proves (column and kind), never every mutant of its kind on its line. Release; from #5774. | #5774 | in review (release; tier A) |
 | MUT-proc-coverdir | MUT-proc-coverdir: the mutation gate cannot size broker/clerk/devslot/proc (driver tests fail under a -cover binary). Release; from #5788. | #5788 | building (release; tier B) |
 | CLK-wipe-lint-callsites | CLK-wipe-lint-callsites: hold a listed wipe helper's call sites, not exempt the whole function. Release; from #5797. | #5797 | building (release; tier A) |
-| MUT-gocoverdir-child | MUT-gocoverdir-child: mutgate's binary run misses re-executed children's coverage (child-only lines read NOT COVERED). Release; from #5800. | #5800 | building (release; tier A) |
 | CLK-seal-entries-wipe | CLK-seal-entries-wipe: wipe decoded entry values when Unlock refuses them. Release; from #5799. | #5799 | queued (release; tier A) |
 | MUT-waiver-store-claim-fu | MUT-waiver-store-claim-fu: name the record in mutgate's no-claim message and workflow comment, mark cut reasons and cap the new-entry list, local gate reads record-only packages. Release; from #5802. | #5802 | queued (release; tier A) |
 | IMG-dbus-reach | IMG-dbus-reach: hide /run/dbus from the agentOS units that make no bus call, and pin dbus-daemon's start-up command line. | #5766, #5794 | queued (release; tier A) |
+| MUT-case-clause-cover | MUT-case-clause-cover: mutgate reads every mutant in a switch case's expression as NOT COVERED. Release; from #5810. | #5810 | queued (release) |
+| MUT-import-widen | MUT-import-widen: an added import should not widen mutgate's targets to the whole package. Release; from #5808. | #5808 | queued (release; tier B) |
+| IMG-security-pin-fu | IMG-security-pin-fu: the snapshot resolver's edge cases are tested, a bad timestamp gets a clear error, I9 matches, and the enforcer image reads the pinned security snapshot. Release; from #5606. | #5021, #5606 | queued (release; tier A; gate file) |
+| MUT-waiver-messages | MUT-waiver-messages: mutgate failures name the mutant as path:line:col:KIND, ambiguous waivers are not listed as unused, malformed waiver lines are warned about, and the workflow header shows the new syntax. Release; from #5824. | #5824 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -475,13 +479,12 @@ issue #4934: board-row block: Expecting value: line 1 column 1 (char 0)
 issue #4950: body has no board-row block
 issue #4954: body has no board-row block
 issue #4982: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #5021: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has ['done']
 issue #5062: body has no board-row block
 issue #5177: body has no board-row block
 issue #5202: body has no board-row block
 issue #5709: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5736: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5756: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #5792: body has no board-row block
 issue #5811: a second issue for TIM-1-interval-fu-e (first is #5758)
+issue #5821: body has no board-row block
 ```
