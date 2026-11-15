@@ -17,10 +17,11 @@ package clerk_test
 // `defer clear(v)` with the builtin clear, so the wipe covers every return
 // path, the error path included. The one exception is a sealer wrapper, a
 // method named Open with that same signature, handing its plaintext
-// straight to its caller, which this rule then holds: `return x.Open(a,
-// b)`, or `v, err := x.Open(a, b)` where every return of the wrapper's own
-// body (not a function literal in it) returns v first. Any other Open in a
-// wrapper falls under the general rule. Any other use fails: the plaintext
+// straight to its caller, which this rule then holds: a body of only
+// `return x.Open(a, b)`, or one whose single Open is its first statement
+// `v, err := x.Open(a, b)`, with v never assigned again nor its address
+// taken, and every return returning v itself first (handedBack). Any other
+// Open in a wrapper falls under the general rule. Any other use fails: the plaintext
 // discarded to _, opened in an if or switch header, returned from a
 // function that is not itself such an Open, passed straight to another
 // call, or the method taken as a value.
@@ -153,56 +154,72 @@ func wipeProblems(fset *token.FileSet, f *ast.File, info *types.Info) (int, []st
 	return uses, problems
 }
 
-// handedBack returns the Open selectors a sealer wrapper's body hands
-// straight to its caller: the operand of `return x.Open(a, b)`, or the Open
-// of `v, err := x.Open(a, b)` when every return of the body returns v as
-// its first result. Both look only at the wrapper's own statements, never
-// into a function literal, whose Opens fall under the general rule.
+// handedBack returns the one Open selector a sealer wrapper's body hands
+// straight to its caller, or nil. The body holds exactly one Open call
+// (function literals included), and either the body is that one
+// `return x.Open(a, b)`, or its first statement is `v, err := x.Open(a, b)`,
+// nothing else in the body (function literals included) assigns v or takes
+// its address, and every return of the body's own (not a function
+// literal's) returns v itself first. So a second Open, an Open in a loop or
+// a branch, a reassigned or resliced v, and a return of anything but v all
+// fall under the general rule.
 func handedBack(body *ast.BlockStmt, info *types.Info) []*ast.Ident {
-	var direct, assigned []*ast.Ident
-	var vars []types.Object
-	var returns []*ast.ReturnStmt
+	var opens []*ast.Ident
+	ast.Inspect(body, func(n ast.Node) bool {
+		if c, isCall := n.(*ast.CallExpr); isCall {
+			if sel, isSel := ast.Unparen(c.Fun).(*ast.SelectorExpr); isSel && isSealerOpen(info.Uses[sel.Sel]) {
+				opens = append(opens, sel.Sel)
+			}
+		}
+		return true
+	})
+	if len(opens) != 1 || len(body.List) == 0 {
+		return nil
+	}
+	if r, isRet := body.List[0].(*ast.ReturnStmt); isRet && len(body.List) == 1 && len(r.Results) == 1 {
+		if c, isCall := ast.Unparen(r.Results[0]).(*ast.CallExpr); isCall && ast.Unparen(c.Fun).(*ast.SelectorExpr).Sel == opens[0] {
+			return opens
+		}
+		return nil
+	}
+	first, isAssign := body.List[0].(*ast.AssignStmt)
+	if !isAssign || first.Tok != token.DEFINE || openAssign(first, info) != opens[0] {
+		return nil
+	}
+	v := info.ObjectOf(first.Lhs[0].(*ast.Ident))
+	isV := func(e ast.Expr) bool {
+		id, isID := ast.Unparen(e).(*ast.Ident)
+		return isID && info.ObjectOf(id) == v
+	}
+	kept := true
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			if n != first {
+				for _, l := range n.Lhs {
+					kept = kept && !isV(l)
+				}
+			}
+		case *ast.UnaryExpr:
+			kept = kept && !(n.Op == token.AND && isV(n.X))
+		case *ast.RangeStmt:
+			kept = kept && !(n.Key != nil && isV(n.Key)) && !(n.Value != nil && isV(n.Value))
+		}
+		return true
+	})
 	ast.Inspect(body, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.FuncLit:
 			return false
 		case *ast.ReturnStmt:
-			returns = append(returns, n)
-			if len(n.Results) == 1 {
-				if c, isCall := ast.Unparen(n.Results[0]).(*ast.CallExpr); isCall {
-					if sel, isSel := ast.Unparen(c.Fun).(*ast.SelectorExpr); isSel && isSealerOpen(info.Uses[sel.Sel]) {
-						direct = append(direct, sel.Sel)
-					}
-				}
-			}
-		case ast.Stmt:
-			if id := openAssign(n, info); id != nil {
-				assigned = append(assigned, id)
-				vars = append(vars, info.ObjectOf(n.(*ast.AssignStmt).Lhs[0].(*ast.Ident)))
-			}
+			kept = kept && len(n.Results) == 2 && isV(n.Results[0])
 		}
 		return true
 	})
-	for i, id := range assigned {
-		every := true
-		for _, r := range returns {
-			if len(r.Results) == 1 {
-				continue // return x.Open(a, b), checked above
-			}
-			v, isID := (ast.Expr)(nil), false
-			if len(r.Results) == 2 {
-				v = ast.Unparen(r.Results[0])
-				_, isID = v.(*ast.Ident)
-			}
-			if !isID || info.ObjectOf(v.(*ast.Ident)) != vars[i] {
-				every = false
-			}
-		}
-		if every && len(returns) > 0 {
-			direct = append(direct, id)
-		}
+	if !kept {
+		return nil
 	}
-	return direct
+	return opens
 }
 
 // openAssign returns the Open selector of s when s is `v, err := x.Open(a,
@@ -364,7 +381,7 @@ func (x w) Open(b, a []byte) ([]byte, error) {
 		return nil, err
 	}
 	return x.S.Open(inner, a)
-}`, 1},
+}`, 2},
 		{"a wrapper discarding an Open", `type w struct{ S Sealer }
 
 func (x w) Open(b, a []byte) ([]byte, error) {
@@ -384,6 +401,61 @@ func f(s named, b Blob) error {
 	}
 	defer clear(plain)
 	return nil
+}`, 1},
+		{"a wrapper opening twice into one variable", `type w struct{ S Sealer }
+
+func (x w) Open(b, a []byte) ([]byte, error) {
+	p, err := x.S.Open(b, a)
+	p, err = x.S.Open(p, a)
+	return p, err
+}`, 2},
+		{"a wrapper opening in a loop", `type w struct{ S Sealer }
+
+func (x w) Open(b, a []byte) ([]byte, error) {
+	var p []byte
+	var err error
+	for i := 0; i < 2; i++ {
+		p, err = x.S.Open(b, a)
+	}
+	return p, err
+}`, 1},
+		{"a wrapper clearing its variable before return", `type w struct{ S Sealer }
+
+func (x w) Open(b, a []byte) ([]byte, error) {
+	p, err := x.S.Open(b, a)
+	p = nil
+	return p, err
+}`, 1},
+		{"a wrapper reslicing its plaintext", `type w struct{ S Sealer }
+
+func (x w) Open(b, a []byte) ([]byte, error) {
+	p, err := x.S.Open(b, a)
+	return p[:0], err
+}`, 1},
+		{"a wrapper's closure reassigning its variable", `type w struct{ S Sealer }
+
+func (x w) Open(b, a []byte) ([]byte, error) {
+	p, err := x.S.Open(b, a)
+	func() { p = nil }()
+	return p, err
+}`, 1},
+		{"a wrapper taking its variable's address", `type w struct{ S Sealer }
+
+func reset(p *[]byte) { *p = nil }
+
+func (x w) Open(b, a []byte) ([]byte, error) {
+	p, err := x.S.Open(b, a)
+	reset(&p)
+	return p, err
+}`, 1},
+		{"a wrapper opening after another statement", `type w struct{ S Sealer }
+
+func (x w) Open(b, a []byte) ([]byte, error) {
+	if len(b) == 0 {
+		return nil, errors.New("empty")
+	}
+	p, err := x.S.Open(b, a)
+	return p, err
 }`, 1},
 		{"an Open of another shape is no sealer's", `func f(v vm) error {
 	m, err := v.Open("x", 1)
