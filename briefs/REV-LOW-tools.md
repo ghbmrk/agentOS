@@ -2,7 +2,7 @@
 
 Work item #4400. Written 2026-11-15 against main f97dd399. Findings 16, 17, 20 and 22 of the same issue moved to #5846 (REV-LOW-tools-b, tier C) at claim: none of them lets a gate pass on a real violation. This package builds the three that can. Source: Mark's 23-Low review, cmsg_01R91wiieBzMSvPKFsAJVvuKGzpVhVhSFNMJuM4ZAmLuTq; finding text in #4400's body.
 
-**Scope:** `tools/netguardcheck.py`, `tests/test_netguardcheck.py`, `tools/word_budget.py`, `tests/test_word_budget.py`, `tools/doclint.py`, `tests/test_doclint.py`, `tests/test_workflows.py`, this brief. Not `tools/ASSUMPTIONS.md` (open in #5838; the assumptions below go there in a later PR). Tier A (`tests/test_workflows.py`); `premerge.py --needs-mark` decides the Security accept.
+**Scope:** `tools/netguardcheck.py`, `tests/test_netguardcheck.py`, `tools/word_budget.py`, `tests/test_word_budget.py`, `tools/doclint.py`, `tests/test_doclint.py`, `tests/test_workflows.py`, `tests/requirements.txt` (new) and one install step in `.github/workflows/ci.yml` (added in review, below), this brief. Not `tools/ASSUMPTIONS.md` (open in #5838; the assumptions below go there in a later PR). Tier A (`tests/test_workflows.py`); `premerge.py --needs-mark` decides the Security accept.
 **Guard files:** none (no broker package added).
 **Requirement IDs:** DEV-2 (19: every broker dialer is hooked into the address guard). 21 and 23: none, assurance tooling (D-086).
 **Dependencies:** none. D-111: no open PR touches the scope (dispatch pass 2026-11-15 16:30Z).
@@ -29,6 +29,8 @@ Work item #4400. Written 2026-11-15 against main f97dd399. Findings 16, 17, 20 a
 
 - netguardcheck still trusts a file that imports the guard to use it for every dial (unchanged; review holds use).
 - Git's `-z` output is the only listing form these tools read in a git checkout.
-- Workflow files use block-style step lists; a flow-style `- {uses: …}` step stays held by review.
+- PyYAML (6.0.2, one hash-pinned wheel) reads workflows as GitHub's runner does for the keys checked (`uses`, `with.persist-credentials`); a duplicate key is refused.
+
+**Review change (three fix-lists on #5850):** the hand step parser kept missing text forms (bare `-`, quoted and spaced keys, comments, flow mappings, `run: |` decoys, multi-line quoted values). The pin and token checks now read steps through PyYAML with a duplicate-key-refusing loader; `steps()` stays for the step text other tests read, and `test_hand_parser_agrees_with_the_loader` fails if it disagrees with the loader. CI installs the wheel by hash (`tests/requirements.txt`); a missing loader fails the module rather than skipping it.
 
 **Size:** S. **Model:** Opus 5.5 (tier A).
