@@ -7,8 +7,9 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
   tools/mutgate.py packages                  list the tier-A and tier-B broker packages
   tools/mutgate.py claimed --git BASE [HEAD] [--json]
                                              the listed packages where the diff BASE...HEAD adds or
-                                             changes a line of a .go file: the only ones the gate
-                                             can fail, so the only ones CI runs gremlins on
+                                             changes a line of a .go file or changes the package's
+                                             MUTANTS-EQUIVALENT record: the only ones the gate can
+                                             fail, so the only ones CI runs gremlins on
   tools/mutgate.py plan --git BASE [--targets-out FILE]
                                              the `mutants` matrix as JSON: K shards for each claimed
                                              package, K from its target lines, deletion sites and
@@ -287,10 +288,28 @@ def touched(added, tests):
     return ({package_of(p) for p in added if is_source(p)} | {package_of(p) for p in tests}) - {None}
 
 
+def records_changed(diff_text):
+    """The broker/ packages whose MUTANTS-EQUIVALENT record the diff adds, changes or deletes (#5786)."""
+    out, in_hunk = set(), False
+    for raw in diff_text.split("\n"):
+        if raw.startswith("diff "):
+            in_hunk = False
+        elif HUNK.match(raw):
+            in_hunk = True
+        elif not in_hunk and raw.startswith(("--- ", "+++ ")):
+            path = _header_path(raw, "a/" if raw.startswith("-") else "b/")
+            if path and path.rsplit("/", 1)[-1] == RECORD:
+                out.add(package_of(path))
+    return out - {None}
+
+
 def claimed(diff_text, packages=None):
-    """Tier-A and tier-B packages where the diff adds or changes a .go line, sorted (#4908). A
-    `REQ:` marker is no longer needed; violations() reads no other package."""
-    return sorted(touched(*added_lines(diff_text)) & set(gated_packages() if packages is None else packages))
+    """Tier-A and tier-B packages where the diff adds or changes a .go line, or changes the package's
+    MUTANTS-EQUIVALENT record, sorted (#4908). A record-only claim has no target line; it is claimed so
+    verify resolves the record and lists its new entries in the summary for review (#5786). A `REQ:`
+    marker is no longer needed; violations() reads no other package."""
+    return sorted((touched(*added_lines(diff_text)) | records_changed(diff_text))
+                  & set(gated_packages() if packages is None else packages))
 
 
 def diff_targets(added, pkg):
@@ -1441,8 +1460,16 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
     # fewer workers run when their share would leave a run less than that headroom.
     free = available_memory()
     alone_mem = free // 2 if free else None
+    # A child the tests re-execute from the binary (proc.Main's driver) writes its counters only
+    # into GOCOVERDIR, which it inherits; given that directory as -test.gocoverdir too, the binary
+    # merges them into its profile, as `go test -cover` does (#5803). Else child-only lines read NOT COVERED.
+    counters = tmp / "gocoverdir"
+    shutil.rmtree(counters, ignore_errors=True)
+    counters.mkdir()
     began = time.monotonic()
-    end, peak = watch(subprocess.Popen([str(base), "-test.failfast", f"-test.coverprofile={profile}"], cwd=pkg_dir,
+    end, peak = watch(subprocess.Popen([str(base), "-test.failfast", f"-test.gocoverdir={counters}",
+                                        f"-test.coverprofile={profile}"], cwd=pkg_dir,
+                                       env={**os.environ, "GOCOVERDIR": str(counters)},
                                        start_new_session=True), mem=alone_mem)
     if alone_mem and (end == "over" or 2 * peak > alone_mem):
         return None, (f"broker/{pkg}/'s tests hold {peak >> 20} MB before any statement is deleted, more than "
@@ -1675,8 +1702,9 @@ def decide(results, added, tests, args, records=({}, [])):
     lost = violations({pkg: t for pkg, t in targets.items() if tests_changed(tests, pkg)},
                       {pkg: uncovered_of(d) for pkg, (d, _) in results.items()}, waived)
     tested = {pkg: changed_tests(tests, pkg) for pkg in results if tests_changed(tests, pkg)}
+    fresh = sorted((site, reason, accepted) for site, (reason, accepted, new) in kept.items() if new)
     write_summary(args.summary, summary(results, tested, waived, {pkg for pkg in results if diff_targets(added, pkg)},
-                                        set(body), stale))
+                                        set(body), stale, fresh))
     for problem in stale:
         print(f"mutgate: {problem}")
     return report_violations(found, lost) or (1 if stale else 0)
@@ -1698,10 +1726,11 @@ VERDICTS = {"TIMED OUT": "killed (timed out)", "NOT COVERED": "not covered", "NO
 ROWS = 2000
 
 
-def summary(results, tested, waived, own=(), body=None, stale=()):
+def summary(results, tested, waived, own=(), body=None, stale=(), fresh=()):
     """One Markdown table of every mutant on a target line, survivors first, and its verdict.
     tested names the changed tests of each package whose tests changed (None: every test); own
-    names the packages where the diff also adds non-test lines."""
+    names the packages where the diff also adds non-test lines; fresh lists ((path, line, mutant),
+    reason, accepted) of each record entry the base does not hold, whether or not a mutant uses it."""
     lines = ["### mutgate", ""]
     rows, used = [], set()
     for pkg, (data, targets) in sorted(results.items()):
@@ -1745,6 +1774,10 @@ def summary(results, tested, waived, own=(), body=None, stale=()):
     if unused := sorted((set(waived) if body is None else body) - used):
         lines += ["", "Mutant-equivalent lines naming no surviving mutant on a target line: "
                   + ", ".join(cell(f"{p}:{n}") for p, n in unused)]
+    if fresh:
+        lines += ["", f"New {RECORD} entries in this PR (read each proof as a Mutant-equivalent body line is read):",
+                  *(f"- {cell(f'{p}:{n}')} {cell(kind)} ({cell(accepted)}): {cell(reason)}"
+                    for (p, n, kind), reason, accepted in fresh)]
     if stale:
         lines += ["", f"Stale {RECORD} entries (each fails the gate):", *(f"- {cell(p)}" for p in stale)]
     return "\n".join(lines) + "\n"

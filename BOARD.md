@@ -421,25 +421,22 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-initrd-global-ext-dirs | IMG-initrd-global-ext-dirs: INITRD_IMAGE_DIRS adds /.extra/global_sysext and /.extra/global_confext when the image's systemd moves past v257. Release; blocked on that bump; from #5501 (Security). | #5488, #5501 | queued (release; tier A; blocked on the systemd bump) |
 | IMG-keyring-pin | IMG-keyring-pin: the Debian archive keyring is checked against committed fingerprints before any image or guest build uses it. Release; from #5573. | #5573 | queued (release; tier A; gate files) |
 | GUEST-bridge-tree-dead-fu | GUEST-bridge-tree-dead-fu: retire the stale TREE rows and B16, bound the idle-bridge test, drop the guest-plane tree exemption (#5611 reviews) | - | queued (release; tier B) |
-| CLK-run-mut-mail-fu | CLK-run-mut-mail-fu: StartTLS setting delivers nothing, gmailtest.Waiting matches any goroutine, a replaced warm-up notice can go unshown. Release; from #5662. | #5324 | building (release; tier A) |
-| GUEST-mut-plane | GUEST-mut-plane: kill or waive the old mutgate deletion survivors in the guest plane (42). Release; from #5621. | #5621 | building (release; tier A) |
-| GUEST-mut-owner | GUEST-mut-owner: kill or waive the old mutgate deletion survivors in the guest owner channel (33). Release; from #5621. | #5621 | queued (release; tier A) |
+| GUEST-mut-owner | GUEST-mut-owner: kill or waive the old mutgate deletion survivors in the guest owner channel (33). Release; from #5621. | #5621 | building (release; tier A) |
 | GUEST-mut-dispatch | GUEST-mut-dispatch: kill or waive the old mutgate deletion survivors in guest mcp, goal, plan and compact (27). Release; from #5621. | #5621 | queued (release; tier A) |
 | TIM-1-interval-fu-c | TIM-1-interval-fu-c: the question book moves off Guard.Now to the interval, and the clock drops the restricted mode's last API. Release; from #5216. | #5216, #5279 | queued (release; tier A) |
 | TIM-1-interval-fu-d | TIM-1-interval-fu-d: a lost clock state file widens the interval until carrier time is read. Release; from #5216. | #5216 | queued (release; tier A) |
 | TIM-1-interval-fu-e | TIM-1-interval-fu-e: losing NTS during an outlier re-alerts the owner, and the outlier bound outlives the NTS sync. Release; from #5754. | #5216, #5754 | queued (release; tier A) |
 | KRN-clock-fresh-rise | KRN-clock-fresh-rise: a kernel started behind the log catches up on a fresh chronyd sample (TIM-1). Release; from #5757. | #5391, #5757 | queued (release; tier A) |
-| VULN-debian-r9 | VULN-debian-r9: accept expat's and dbus's new Debian 13 advisories DEBIAN-CVE-2026-128241, -128885, -128886 so image-vulncheck passes again. Release; fifth no-fix Debian round. | #2919, #5660 | building (release; tier A) |
-| VULN-debian-r9-f1 | VULN-debian-r9-f1: name the flaw class and local reachability of dbus DEBIAN-CVE-2026-128885/-128886 and expat -128241 in their records. | #5764, #5765 | queued (release; tier A) |
+| VULN-debian-r9-f1 | VULN-debian-r9-f1: name the flaw class and local reachability of dbus DEBIAN-CVE-2026-128885/-128886 and expat -128241 in their records. | #5764, #5765 | building (release; tier A) |
 | UI-inbox-fail-race | UI-inbox-fail-race: the Inbox mutants test sets its failing store's flag while the owner channel's goroutine saves through it, a data race that reddens broker-race. Release; flake, seen on #5743. | #5743 | building (release; tier B) |
-| CLK-run-waiting-scope | CLK-run-waiting-scope: world_test's step-in-flight wait uses the unscoped gmailtest.Waiting; move it to G.Waiting and drop the unscoped one. Release; from #5694. | #5694 | queued (release; tier A) |
 | LINT-dial-configured | LINT-dial-configured: the inference lint's configured() refuses a local bound to a literal (NET-2). Release; from #5757. | #5757 | queued (release) |
-| CLK-run-mut-mail-fu2 | CLK-run-mut-mail-fu2: a mail account stored with starttls is refused as unreadable instead of losing its password slot; the sign-in overlap test pins the refresh path. Release; from #5774. | #5774, #5694 | queued (release; tier A) |
+| CLK-run-mut-mail-fu2 | CLK-run-mut-mail-fu2: a mail account stored with starttls is refused as unreadable instead of losing its password slot; the sign-in overlap test pins the refresh path. Release; from #5774. | #5774, #5694 | building (release; tier A) |
 | MUT-deleted-test-own-lines-fu | MUT-deleted-test-own-lines-fu: #5770's release items: NOT COVERED rule scope, testdata as a test change, Mutant-uncovered alias, archive error text. Release; after #5776. | #5770 | queued (release; tier A) |
-| CLK-open-wipe-lint | CLK-open-wipe-lint: a sealer's Open plaintext is wiped on every path, held by a lint. Release; from #5772. | #5772 | building (release; tier A) |
-| MUT-waiver-store-claim | MUT-waiver-store-claim: claim a package whose mutant record changes, so new entries show in mutgate's summary. Release; from #5780. | #5780 | queued (release; tier A) |
-| MUT-waiver-store-cites | MUT-waiver-store-cites: mutant-record reasons cite statements, not line numbers. Release; from #5780. | #5780 | queued (release; tier A) |
-| CLK-aead-open-wipe | CLK-aead-open-wipe: direct cipher.AEAD.Open plaintexts in broker/clerk are wiped on success too. Release; from #5785. | #5785 | queued (release; tier A) |
+| MUT-waiver-store-claim | MUT-waiver-store-claim: claim a package whose mutant record changes, so new entries show in mutgate's summary. Release; from #5780. | #5780 | building (release; tier A) |
+| MUT-waiver-store-cites | MUT-waiver-store-cites: mutant-record reasons cite statements, not line numbers. Release; from #5780. | #5780 | building (release; tier A) |
+| MUT-proc-coverdir | MUT-proc-coverdir: the mutation gate cannot size broker/clerk/devslot/proc (driver tests fail under a -cover binary). Release; from #5788. | #5788 | building (release; tier B) |
+| CLK-wipe-lint-callsites | CLK-wipe-lint-callsites: hold a listed wipe helper's call sites, not exempt the whole function. Release; from #5797. | #5797 | building (release; tier A) |
+| MUT-gocoverdir-child | MUT-gocoverdir-child: mutgate's binary run misses re-executed children's coverage (child-only lines read NOT COVERED). Release; from #5800. | #5800 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -484,4 +481,5 @@ issue #5216: body has no board-row block
 issue #5709: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5736: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5756: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #5792: body has no board-row block
 ```

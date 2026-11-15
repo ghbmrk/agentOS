@@ -27,13 +27,13 @@ func spin(t *testing.T, what string, ok func() bool) {
 // A goroutine an earlier test leaked, parked in the very function a test
 // waits on, does not pass for the goroutine under test: G.Waiting reads
 // only its own goroutine's stack (#5694, gmailtest.Waiting matching any
-// goroutine). The process-wide Waiting is the control that the leaked one
-// is parked there.
+// goroutine). The test's own Self, which covers the leaked one while the
+// test that started it runs, is the control that it is parked there.
 func TestWaitingIsTheGoroutineUnderTestOnly(t *testing.T) {
 	leak, other, own := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	defer close(leak)
 	go parkIn(leak)
-	spin(t, "the leaked goroutine parked in parkIn", func() bool { return Waiting("gmailtest.parkIn", "chan receive") })
+	spin(t, "the leaked goroutine parked in parkIn", func() bool { return Self().Waiting("gmailtest.parkIn", "chan receive") })
 	g := Go(func() { parkElsewhere(other) })
 	spin(t, "the goroutine under test parked in parkElsewhere", func() bool { return g.Waiting("gmailtest.parkElsewhere", "chan receive") })
 	if g.Waiting("gmailtest.parkIn", "chan receive") {
@@ -52,11 +52,12 @@ func TestWaitingIsTheGoroutineUnderTestOnly(t *testing.T) {
 // running, and none whose creator has exited, as an earlier test's leaked
 // goroutine's has (#5694).
 func TestSelfIsWhatTheTestStarted(t *testing.T) {
-	leak, own := make(chan struct{}), make(chan struct{})
+	leak, own, exit := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	defer close(leak)
 	defer close(own)
-	creator := Go(func() { go parkIn(leak) })
-	spin(t, "the leaked goroutine parked in parkIn", func() bool { return Waiting("gmailtest.parkIn", "chan receive") })
+	creator := Go(func() { go parkIn(leak); <-exit })
+	spin(t, "the leaked goroutine parked in parkIn", func() bool { return creator.Waiting("gmailtest.parkIn", "chan receive") })
+	close(exit)
 	spin(t, "the leaked goroutine's creator exiting", func() bool { return !alive(creator.id) })
 	self := Self()
 	if self.Waiting("gmailtest.parkIn", "chan receive") {
