@@ -504,37 +504,37 @@ func Unlock(path string, f Factor) (*Store, error) {
 			errs = append(errs, err)
 			continue
 		}
+		// Each opened key and the entry set are wiped by a defer on every
+		// path (the wipe lint holds it, #5799); the store keeps a copy of
+		// the key, so a slot that fails later in the loop is wiped at
+		// Unlock's return, not at once.
 		key, err := open(k, sl.Wrap, slotAAD(fl.ID, *sl))
+		defer clear(key)
 		wipe(k)
 		if err != nil {
 			continue
 		}
 		if !hmac.Equal(mac(key, *fl), fl.MAC) {
-			wipe(key)
 			return nil, ErrTampered
 		}
 		// A whole store someone else wrote MACs under their own key, and
 		// its tpm slot unseals here; only the off-drive anchor tells it
 		// from the owner's.
 		if isTPM && !hmac.Equal(anchor(key, fl.ID), t.Anchor) {
-			wipe(key)
 			return nil, ErrTampered
 		}
 		ek := derive(key, fl.ID, "entries", keyLen)
 		plain, err := open(ek, fl.Entries, entriesAAD(fl.ID))
+		defer clear(plain)
 		wipe(ek)
 		if err != nil {
-			wipe(key)
 			return nil, ErrTampered
 		}
 		entries := map[string][]byte{}
-		err = json.Unmarshal(plain, &entries)
-		wipe(plain)
-		if err != nil || !validEntries(entries) {
-			wipe(key)
+		if err := json.Unmarshal(plain, &entries); err != nil || !validEntries(entries) {
 			return nil, ErrCorrupt
 		}
-		return &Store{path: path, key: secret.Hide(key), f: *fl, entries: secret.Hide(entries)}, nil
+		return &Store{path: path, key: secret.Hide(slices.Clone(key)), f: *fl, entries: secret.Hide(entries)}, nil
 	}
 	if !tried {
 		return nil, ErrNoSlot

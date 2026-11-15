@@ -789,22 +789,27 @@ func (s *Store) Open(camera string, seg Segment) ([]Record, error) {
 }
 
 // segRecords parses an opened segment into its records, each payload a
-// copy, so the caller's wipe of plain leaves the records whole.
+// copy, so the caller's wipe of plain leaves the records whole. The whole
+// segment is checked before any payload is copied, so a segment that
+// fails partway leaves no copy unwiped (#5799).
 func segRecords(plain []byte) ([]Record, error) {
+	for rest := plain; len(rest) > 0; {
+		if len(rest) < recHead {
+			return nil, ErrSegment
+		}
+		t, n := camwire.Type(rest[0]), int(binary.BigEndian.Uint32(rest[9:]))
+		rest = rest[recHead:]
+		if (t != camwire.TypeVideo && t != camwire.TypeThermal) || n > len(rest) {
+			return nil, ErrSegment
+		}
+		rest = rest[n:]
+	}
 	var out []Record
 	for len(plain) > 0 {
-		if len(plain) < recHead {
-			return nil, ErrSegment
-		}
-		t := camwire.Type(plain[0])
 		at := int64(binary.BigEndian.Uint64(plain[1:]))
 		n := int(binary.BigEndian.Uint32(plain[9:]))
-		plain = plain[recHead:]
-		if (t != camwire.TypeVideo && t != camwire.TypeThermal) || n > len(plain) {
-			return nil, ErrSegment
-		}
-		out = append(out, Record{Time: time.Unix(0, at), Frame: camwire.Frame{Type: t, Payload: slices.Clone(plain[:n])}})
-		plain = plain[n:]
+		out = append(out, Record{Time: time.Unix(0, at), Frame: camwire.Frame{Type: camwire.Type(plain[0]), Payload: slices.Clone(plain[recHead : recHead+n])}})
+		plain = plain[recHead+n:]
 	}
 	return out, nil
 }
