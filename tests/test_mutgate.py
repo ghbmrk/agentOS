@@ -2581,11 +2581,15 @@ class Record(unittest.TestCase):
                            capture_output=True, text=True, cwd=ROOT)
         self.assertEqual(r.returncode, 0, r.stderr)
         sites = sorted(l.split(" ")[0] for l in r.stdout.strip().split("\n"))
-        self.assertEqual(len(sites), 27, r.stdout)
-        self.assertEqual(len(set(sites)), 27, r.stdout)
+        # #5774 dropped three of them (boxFor's StartTLS branch is gone; readMail's open-error branch and
+        # its return are now killed by the ELOOP check) and added nine for gremlins' cover-gap lines.
+        self.assertEqual(len(sites), 33, r.stdout)
+        # Two kinds of mutant on one line (mail.go:103, :144, mailhost.go:272) are two entries on one site.
+        self.assertEqual(len(set(sites)), 30, r.stdout)
         # The two loadSenders proofs were re-read on #5780 after #5733 edited that func.
         self.assertEqual(sorted(" ".join(l.split(" ")[1:3]) for l in r.stdout.strip().split("\n")),
-                         ["STATEMENT_DELETION #5743"] * 25 + ["STATEMENT_DELETION #5780"] * 2)
+                         ["CONDITIONALS_BOUNDARY #5774"] * 3 + ["CONDITIONALS_NEGATION #5774"] * 6
+                         + ["STATEMENT_DELETION #5743"] * 22 + ["STATEMENT_DELETION #5780"] * 2)
 
 
 def job(text, name):
