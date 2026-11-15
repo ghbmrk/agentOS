@@ -579,17 +579,20 @@ func TestOwnerMutStoreErrorsAreLogged(t *testing.T) {
 }
 
 func TestOwnerMutRoutesTakeOneMethod(t *testing.T) {
-	// owner.go:291, 314, 328: a fetch is a GET whose message is JSON, a
-	// reply a POST.
+	// owner.go:291, 293, 314, 328: a fetch is a GET whose message is JSON,
+	// a reply a POST; a refused fetch hands nothing out.
 	shortPoll(t)
 	r := newRig(t, nil)
 	r.client("m1")
-	if code, _ := r.do("m1", "POST", "/owner/next", ""); code != 405 {
-		t.Fatalf("POST /owner/next: %d; want 405", code)
-	}
 	id, err := r.p.DeliverOwner("m1", "book the dentist", true)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if code, _ := r.do("m1", "POST", "/owner/next", ""); code != 405 {
+		t.Fatalf("POST /owner/next: %d; want 405", code)
+	}
+	if got := r.p.get("m1").box.handed(); len(got) != 0 {
+		t.Fatalf("a refused fetch handed out %v", got)
 	}
 	if code, _ := r.do("m1", "GET", "/owner/reply", reply(id, "booked")); code != 405 {
 		t.Fatalf("GET /owner/reply: %d; want 405", code)
@@ -703,5 +706,30 @@ func TestOwnerMutNilCheckRefusesNothing(t *testing.T) {
 	id := r.hand("m1", "book the dentist")
 	if code, body := r.do("m1", "POST", "/owner/reply", reply(id, "booked")); code != 204 {
 		t.Fatalf("reply after the check was removed: %d %s", code, body)
+	}
+}
+
+func TestOwnerMutLineageIsCachedOnlyWhenKnown(t *testing.T) {
+	// goal.go:25, 26, 29, which an owner delivery runs (taken here off
+	// GUEST-mut-dispatch, #5750): a known lineage is cached, so the manager
+	// is asked once; an unknown one is not, so it is asked again.
+	r := newRig(t, nil)
+	r.client("m1")
+	r.client("m2")
+	set := func(f func()) { r.ms.mu.Lock(); f(); r.ms.mu.Unlock() }
+	set(func() { r.ms.lineage["m1"] = "first"; r.ms.gone["m2"] = true })
+	m1, m2 := r.p.get("m1"), r.p.get("m2")
+	if l := r.p.lineageOf(m1); l != "first" {
+		t.Fatalf("lineage %q; want first", l)
+	}
+	if l := r.p.lineageOf(m2); l != "" {
+		t.Fatalf("an unknown machine's lineage %q; want none", l)
+	}
+	set(func() { r.ms.lineage["m1"] = "second"; r.ms.lineage["m2"] = "later"; delete(r.ms.gone, "m2") })
+	if l := r.p.lineageOf(m1); l != "first" {
+		t.Fatalf("a cached lineage became %q; want first", l)
+	}
+	if l := r.p.lineageOf(m2); l != "later" {
+		t.Fatalf("a lineage the manager now knows is %q; want later", l)
 	}
 }
