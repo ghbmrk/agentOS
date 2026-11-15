@@ -7,12 +7,26 @@
 # Usage: security-snapshot.sh resolve
 #          print the timestamp of the debian-security mirror run before the newest (a snapshot that never
 #          changes, and whose import has finished)
-#        security-snapshot.sh sources TIMESTAMP
-#          print the image's apt sources (mkosi.pkgmngr's mkosi.sources) with the security stanza on
-#          that snapshot; every other line is unchanged. Apt still checks the stanza's Valid-Until, so
-#          a snapshot older than the security archive's expiry window (a week) is refused.
+#        security-snapshot.sh sources TIMESTAMP [FILE]
+#          print FILE (default: the image's mkosi.pkgmngr mkosi.sources; image/enforcer/build.sh passes
+#          the enforcer's) with the security stanza on that snapshot; every other line is unchanged.
+#          Apt still checks the stanza's Valid-Until, so a snapshot older than the security archive's
+#          expiry window (a week) is refused.
 set -eu
-usage() { echo "usage: security-snapshot.sh resolve | sources TIMESTAMP" >&2; exit 2; }
+usage() { echo "usage: security-snapshot.sh resolve | sources TIMESTAMP [FILE]" >&2; exit 2; }
+# bad_ts VALUE: a hand-run build's timestamp is not one resolve prints (#5825). The value is shown cut to
+# 40 bytes, every byte outside [0-9A-Za-z] as "?", so it cannot forge a log line.
+bad_ts() {
+	shown=$(printf '%s' "$1" | head -c 40 | LC_ALL=C tr -c '0-9A-Za-z' '?')
+	cat >&2 <<-EOT
+	security-snapshot.sh: "$shown" is not a debian-security snapshot timestamp: it must be exactly
+	YYYYMMDDTHHMMSSZ (UTC), as "security-snapshot.sh resolve" prints, for example 20261112T180512Z.
+	For a hand-run build, unset AGENTOS_SECURITY_SNAPSHOT so build.sh resolves one, run
+	"sh image/security-snapshot.sh resolve" and pass what it prints, or copy the timestamp from a CI run's
+	"debian-security snapshot" log line (within a week: apt refuses an older one).
+	EOT
+	exit 2
+}
 is_ts() {
 	case $1 in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) return 0 ;; esac
 	return 1
@@ -53,8 +67,9 @@ resolve)
 	echo "$ts"
 	;;
 sources)
-	[ $# -eq 2 ] && is_ts "$2" || usage
-	src=$(cd "$(dirname "$0")" && pwd)/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources
+	[ $# -eq 2 ] || [ $# -eq 3 ] || usage
+	is_ts "$2" || bad_ts "$2"
+	src=${3:-$(cd "$(dirname "$0")" && pwd)/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources}
 	[ "$(grep -cxF "$live" "$src")" = 1 ] || {
 		echo "security-snapshot.sh: $src has no single live security stanza to pin" >&2
 		exit 1
