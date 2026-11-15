@@ -1906,11 +1906,35 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
                 "@@ -1,2 +0,0 @@\n-package h\n-\n"
                 "diff --git a/broker/h/c_test.go b/broker/h/c_test.go\n--- /dev/null\n+++ b/broker/h/c_test.go\n"
                 "@@ -0,0 +1 @@\n+package h\n")
-        self.assertEqual(mutgate.base_test_lines(diff), {"broker/h/a_test.go": {4, 5, 9, 10}, "broker/h/b_test.go": None})
+        self.assertEqual(mutgate.base_test_lines(diff),
+                         ({"broker/h/a_test.go": {4, 5}, "broker/h/b_test.go": None}, {"broker/h/a_test.go": {9}}))
         move = mutgate.head_line_of(diff.replace("_test.go", ".go"))
         self.assertEqual([move["broker/h/a.go"](n) for n in (3, 4, 5, 6, 9, 10)], [3, None, None, 5, 8, 11])
         self.assertIsNone(move["broker/h/b.go"](1))
         self.assertNotIn("broker/h/c.go", move)
+
+    def test_a_test_appended_after_another_widens_to_no_neighbour(self):
+        # REQ: MUT-add-neighbour-widen
+        base = ("package h\n\nimport \"testing\"\n\n// TestA checks a.\nfunc TestA(t *testing.T) {\n\ta()\n\ta()\n}\n\n"
+                "// TestB checks b.\nfunc TestB(t *testing.T) {\n\tb()\n}\n")
+        rows = base.split("\n")
+        at = lambda s: rows.index(s) + 1
+        gap = lambda after: mutgate._gap_lines(base, after)
+        # After TestA's closing brace, in the blank line, or beside TestB's doc: no function body.
+        self.assertEqual([gap(at("}")), gap(at("}") + 1), gap(at("// TestB checks b."))], [set(), set(), set()])
+        # Inside a body, even right after its head or before its closing brace, still touches it.
+        self.assertEqual(gap(at("func TestA(t *testing.T) {")), {at("func TestA(t *testing.T) {"), at("func TestA(t *testing.T) {") + 1})
+        self.assertEqual(gap(at("\ta()") + 1), {at("\ta()") + 1, at("\ta()") + 2})
+        self.assertEqual(gap(at("\tb()")), {at("\tb()"), at("\tb()") + 1})
+        # Reached by name: the appended test names none of the old ones at the base.
+        files = {"broker/h/a_test.go": base}
+        self.assertEqual(mutgate.reaching_tests(files, {"broker/h/a_test.go": gap(at("}")) | {at("\ta()")}}), ["TestA"])
+        self.assertEqual(mutgate.reaching_tests(files, {"broker/h/a_test.go": {at("\tb()")}}), ["TestB"])
+        # At the head the new test's doc comment and closing brace belong to it, not the one above.
+        head = base + "\n// TestC checks c.\nfunc TestC(t *testing.T) {\n\tc()\n}\n"
+        n = len(base.split("\n"))
+        self.assertEqual(mutgate.reaching_tests({"broker/h/a_test.go": head}, {"broker/h/a_test.go": set(range(n + 1, n + 6))}),
+                         ["TestC"])
 
     def test_targets_for_unions_own_lines_with_changed_tests_coverage(self):
         # REQ: MUT-deleted-test-own-lines

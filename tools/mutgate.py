@@ -325,9 +325,10 @@ def union(*parts):
 
 def base_test_lines(diff_text):
     """{path: set(base line) or None} of the broker/ _test.go files the base has and a -U0 diff
-    changes: the base lines it deletes or changes and, for a hunk that only adds, the base line
-    either side; None when the diff deletes the file. The base side of added_lines' tests (#5762)."""
-    out, old, path, in_hunk, line = {}, None, None, False, 0
+    changes: the base lines it deletes or changes; None when the diff deletes the file. The base
+    side of added_lines' tests (#5762). Returns (that, gaps): gaps is {path: set(base line)} of
+    where a hunk only adds, after that base line, for base_changed_tests to place by the file's text."""
+    out, gaps, old, path, in_hunk, line = {}, {}, None, None, False, 0
 
     def touch(lines):
         if out.get(old, ()) is not None:
@@ -344,7 +345,7 @@ def base_test_lines(diff_text):
                 if path is None:
                     out[old] = None  # the file is deleted
                 elif m[2] == "0":
-                    touch({line, line + 1})  # the hunk adds after base line `line`
+                    gaps.setdefault(old, set()).add(line)  # the hunk adds after base line `line`
             continue
         if not in_hunk:
             if raw.startswith("--- "):
@@ -356,7 +357,7 @@ def base_test_lines(diff_text):
             if old is not None and is_test(old):
                 touch({line})
             line += 1
-    return out
+    return out, gaps
 
 
 def head_line_of(diff_text):
@@ -404,10 +405,31 @@ def base_text(mb, path):
     return blob.stdout.decode("utf-8", "replace")
 
 
+def _gap_lines(text, after):
+    """The base lines a hunk adding after line `after` of a test file's text touches: the line
+    either side, except that a function's doc comment, closing brace and the blank lines after it
+    belong to no function body, so an addition between functions touches none (#5832). An addition
+    inside a body, even right after its head or before its closing brace, still touches it."""
+    bare, out = _uncommented(text, False).split("\n"), set()
+    spans = []
+    for d in _decls("", text):
+        if d[1] in ("func", "method"):
+            head = next(i for i in range(d[6], d[7] + 1) if DECL.match(bare[i - 1]))
+            close = max([i for i in range(head, d[7] + 1) if bare[i - 1] == "}"] or [head])
+            spans.append((d[6], d[7], head, close))
+    for n, inside in ((after, lambda h, c: h <= n < c), (after + 1, lambda h, c: h < n <= c)):
+        span = next(((h, c) for a, b, h, c in spans if a <= n <= b), None)
+        if span is None or inside(*span):
+            out.add(n)
+    return out
+
+
 def base_changed_tests(btests, pkg, mb):
     """Sorted names of the base's test functions that reach the base lines btests names in
-    broker/<pkg>/ (every line of a deleted file), or None for every test (reaching_tests)."""
-    changed = {p: ls for p, ls in btests.items() if package_of(p) == pkg}
+    broker/<pkg>/ (every line of a deleted file), or None for every test (reaching_tests).
+    btests is base_test_lines' pair."""
+    touched_lines, gaps = btests
+    changed = {p: ls for p, ls in touched_lines.items() if package_of(p) == pkg}
     files = {}
     listing = subprocess.run(["git", "ls-tree", "-z", mb, "--", f"broker/{pkg}/"], cwd=ROOT,
                              capture_output=True, text=True, check=True).stdout
@@ -424,6 +446,11 @@ def base_changed_tests(btests, pkg, mb):
             if path not in files:
                 return None
             changed[path] = set(range(1, files[path].count("\n") + 2))
+    for path, afters in gaps.items():
+        if package_of(path) == pkg and changed.get(path, ()) is not None and path in files:
+            for after in afters:
+                changed.setdefault(path, set()).update(_gap_lines(files[path], after))
+    changed = {p: ls for p, ls in changed.items() if ls}
     return reaching_tests(files, changed)
 
 
@@ -434,7 +461,7 @@ def bases_for(diff_text, base, head, tests, pkgs):
     pkgs = [pkg for pkg in pkgs if tests_changed(tests, pkg)]
     if not pkgs:
         return {}
-    mb, btests = merge_base(base, head), base_test_lines(diff_text)
+    mb, btests = merge_base(base, head), base_test_lines(diff_text)  # (lines, gaps)
     return {pkg: None if head_tests(tests, pkg) is None else base_changed_tests(btests, pkg, mb) for pkg in pkgs}
 
 
