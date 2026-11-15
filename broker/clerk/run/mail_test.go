@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
@@ -346,8 +347,10 @@ func TestMailSettingsFileIsTheClerksOwn(t *testing.T) {
 	if err := os.Symlink(other, path); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readMail(dir); err == nil {
-		t.Fatal("a symlinked settings file was read")
+	// The open itself refuses the link (O_NOFOLLOW), and its error is the
+	// one returned (#5774, readMail's open-error return).
+	if _, err := readMail(dir); !errors.Is(err, syscall.ELOOP) {
+		t.Fatalf("a symlinked settings file: readMail = %v; want the open's ELOOP", err)
 	}
 }
 
@@ -568,6 +571,30 @@ func TestAServerNeedsAHostItCanName(t *testing.T) {
 		s := MailSettings{Address: imaptest.User, IMAP: c.imap, SMTP: "smtp.example.test:465"}
 		if err := s.check(); err != c.err {
 			t.Fatalf("IMAP server %.40q: check = %v; want %v", c.imap, err, c.err)
+		}
+	}
+}
+
+// A sign-in name or a password holding a character that does not print is
+// refused wherever it stands, its first character too (#5774: an index test
+// of "> 0" or "<= 0" in place of the one there passed a first character).
+func TestAnUnprintableCharacterIsRefusedEvenFirst(t *testing.T) {
+	s := MailSettings{Address: imaptest.User, IMAP: "imap.example.test:993", SMTP: "smtp.example.test:465", User: "owner"}
+	if err := s.check(); err != nil {
+		t.Fatalf("a printable sign-in name: check = %v", err)
+	}
+	for _, u := range []string{"\x00owner", "\nowner", "own\x00er", "owner\x7f"} {
+		s.User = u
+		if err := s.check(); err != ErrMailUser {
+			t.Errorf("sign-in name %q: check = %v; want %v", u, err, ErrMailUser)
+		}
+	}
+	if !mailPassword("synthetic-password") {
+		t.Fatal("a printable password was refused")
+	}
+	for _, p := range []string{"\x00synthetic-password", "\tsynthetic-password", "synthetic\x00password", "synthetic-password\x7f"} {
+		if mailPassword(p) {
+			t.Errorf("password %q was accepted", p)
 		}
 	}
 }

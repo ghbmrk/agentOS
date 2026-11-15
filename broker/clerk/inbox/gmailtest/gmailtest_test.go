@@ -101,3 +101,26 @@ func TestAGoroutineWithNoNumberIsRefused(t *testing.T) {
 	}()
 	known("")
 }
+
+//go:noinline
+func parkInMany(c chan struct{}) { <-c }
+
+// A dump larger than stacks' first buffer is read whole, not cut at it: the
+// buffer doubles until the runtime's dump fits (#5774, gmailtest.go's
+// doubling line, which no test's dump had been large enough to reach).
+func TestStacksReadsADumpPastItsFirstBuffer(t *testing.T) {
+	const n = 1000
+	c := make(chan struct{})
+	defer close(c)
+	for range n {
+		go parkInMany(c)
+	}
+	var dump string
+	spin(t, "every goroutine parked in parkInMany", func() bool {
+		dump = stacks(true)
+		return strings.Count(dump, "gmailtest.parkInMany(") >= n
+	})
+	if len(dump) <= 1<<16 {
+		t.Fatalf("the dump is %d bytes, within stacks' first buffer: the test reaches no doubling", len(dump))
+	}
+}
