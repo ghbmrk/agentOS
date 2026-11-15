@@ -380,7 +380,14 @@ class CmdQemuTest(unittest.TestCase):
                                                  flags=["owner-boot-order"])
         self.assertEqual(rc, 0, report)
         self.assertEqual([s[0] for s in seen], ["firmware-1", "firmware-2", "task", "unclean", "task"])
-        self.assertEqual([s[2] for s in seen[:2]], [None, None])  # firmware-only boots have no drive
+        # The firmware-only boots have a blank USB drive at the image's slot, so the boot option the
+        # firmware adds for a plugged drive is in the baseline (HOST-1e2); the image is never attached.
+        blank = [s[2] for s in seen[:2]]
+        self.assertEqual(blank[0], blank[1])
+        self.assertEqual(blank[0][0], "-drive")
+        self.assertRegex(blank[0][1], r"\Aif=none,id=agentos,format=raw,file=.*/work/blank-usb\.img\Z")
+        self.assertEqual(blank[0][2:], seen[2][2][2:6])  # the same controller and slot as the image's
+        self.assertNotIn("/x/agentos.img", " ".join(blank[0]))
         self.assertTrue(all(s[2] for s in seen[2:]))
         self.assertEqual(seen[3][1], [tuple(x) for x in self.PHASES["unclean"]])
         self.assertEqual(judged, [["owner-boot-order"], ["owner-boot-order", "unclean-end"], ["owner-boot-order"]])
@@ -399,7 +406,7 @@ class CmdQemuTest(unittest.TestCase):
                                                   "--memory", "8192"))
             self.assertEqual(rc, 0)
             self.assertEqual(memory, [8192] * 3)
-            self.assertEqual([s[2] for s in seen[:2]], [None, None])
+            self.assertNotIn("-smbios", seen[0][2] + seen[1][2])
             boot = seen[2][2]
             want = "type=11,value=io.systemd.credential.binary:systemd.extra-unit.x@y.service=W1VuaXRdCkRlc2NyaXB0aW9uPXgK"
             self.assertEqual(boot[-2:], ["-smbios", want])
@@ -417,6 +424,7 @@ class CmdQemuTest(unittest.TestCase):
                                       source=("--kernel", "k", "--initrd", "i"))
         self.assertEqual(seen[2][1], [tuple(x) for x in self.PHASES["unclean"]])
         self.assertEqual(seen[2][2][:2], ["-kernel", "k"])
+        self.assertEqual([s[2] for s in seen[:2]], [None, None])  # the stand-in's firmware-only boots: no drive
 
     def test_an_unclean_phase_from_a_phases_file_with_an_orderly_end_is_refused(self):
         # The row's failure path: a phases file whose unclean phase powers off in order before the quit.

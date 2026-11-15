@@ -736,11 +736,21 @@ def cmd_qemu(args):
         args.host_disks_bus.append((m.group(1), m.group(3) or "nvme"))
     shutil.copyfile(args.ovmf_vars, work / "vars.fd")
     seed_tpm(args, work)
+    usb = lambda path: ["-drive", f"if=none,id=agentos,format=raw,file={path}",
+                        "-device", "qemu-xhci", "-device", "usb-storage,drive=agentos"]
+    firmware_boot = None
     if args.kernel:
         boot = ["-kernel", args.kernel, "-initrd", args.initrd, "-append", "console=ttyS0 rdinit=/init"]
     else:
-        boot = ["-drive", f"if=none,id=agentos,format=raw,file={args.image}",
-                "-device", "qemu-xhci", "-device", "usb-storage,drive=agentos"]
+        boot = usb(args.image)
+        # HOST-1e2: OVMF, like a PC's firmware, adds a boot option (Boot####, BootOrder) for a USB drive
+        # it finds plugged in, before anything on the drive runs. That is the owner plugging the drive in,
+        # not the image, so the firmware-only boots have a blank drive at the same slot: the option the
+        # firmware makes for that slot is in the baseline, and the image's boots are judged against it.
+        blank = work / "blank-usb.img"
+        with open(blank, "wb") as f:
+            f.truncate(64 << 20)
+        firmware_boot = usb(blank)
     boot += smbios_credentials(args.credential)
     if args.phases_file:
         phases = {k: [tuple(s) for s in v] for k, v in json.loads(pathlib.Path(args.phases_file).read_text()).items()}
@@ -748,7 +758,7 @@ def cmd_qemu(args):
         phases = standin_phases(args.plant)
     snaps = {}
     for label in ("firmware-1", "firmware-2"):
-        boot_once(args, work, label, FIRMWARE_ONLY, None)
+        boot_once(args, work, label, FIRMWARE_ONLY, firmware_boot)
         snaps[label] = qemu_snapshot(args, work)
     noise = {(f["kind"], f["key"]) for f in diff(snaps["firmware-1"], snaps["firmware-2"])}
     unstable = sorted(k for k in noise if k[0] != "uefi")
