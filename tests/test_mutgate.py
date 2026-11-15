@@ -1814,6 +1814,29 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("broker/hint/hint.go:4 CONDITIONALS_NEGATION survives", r.stdout)
 
+    def test_base_tree_skips_a_link_the_data_filter_refuses(self):
+        from unittest import mock
+        # #5523 put an absolute symlink on main, and the data filter's AbsoluteLinkError failed every
+        # plan that reached base_covered (#5774). The link is left out; files and in-tree links stay.
+        # REQ: MUT-deleted-test-own-lines
+        with tempfile.TemporaryDirectory() as d:
+            git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+            (pathlib.Path(d) / "spikes").mkdir()
+            (pathlib.Path(d) / "spikes" / "unit").write_text("x\n")
+            os.symlink("/etc/systemd/system/x.service", pathlib.Path(d) / "spikes" / "abs")
+            os.symlink("../../outside", pathlib.Path(d) / "spikes" / "up")
+            os.symlink("unit", pathlib.Path(d) / "spikes" / "rel")
+            git("init", "-q")
+            git("add", "-A")
+            git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "base")
+            with mock.patch.object(mutgate, "ROOT", pathlib.Path(d)):
+                self.assertEqual(mutgate.base_covered("absent", "HEAD", None, d, ""), ({}, None))
+            tree = pathlib.Path(d) / "base-tree" / "spikes"
+            self.assertEqual((tree / "unit").read_text(), "x\n")
+            self.assertEqual(os.readlink(tree / "rel"), "unit")
+            self.assertFalse((tree / "abs").is_symlink())
+            self.assertFalse((tree / "up").is_symlink())
+
     def test_base_side_lines_of_a_diff(self):
         # REQ: MUT-deleted-test-own-lines
         diff = ("diff --git a/broker/h/a_test.go b/broker/h/a_test.go\n--- a/broker/h/a_test.go\n+++ b/broker/h/a_test.go\n"
