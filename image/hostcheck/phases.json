@@ -1,0 +1,6 @@
+{
+ "boot": [["BdsDxe: starting Boot", "os"], ["HOSTCHECK-READY", "serial:poweroff\n"]],
+ "restart": [["BdsDxe: starting Boot", "os"], ["HOSTCHECK-READY", "serial:reboot\n"],
+             ["BdsDxe: starting Boot", "os"], ["HOSTCHECK-READY", "serial:poweroff\n"]],
+ "unclean": [["BdsDxe: starting Boot", "os"], ["HOSTCHECK-READY", "power-cut"]]
+}

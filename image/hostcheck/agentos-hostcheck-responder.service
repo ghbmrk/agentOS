@@ -1,0 +1,23 @@
+# hostcheck's responder (HOST-1e2), passed as an SMBIOS credential; see responder.sh.
+[Unit]
+Description=hostcheck liveness responder (QEMU host check only)
+# HOST-1h: an answer must come before the MOR clear, agentos-mor.service's ExecStop. systemd stops
+# units in reverse start order, so After= puts this unit's stop first. Default dependencies stay on
+# (After=sysinit.target, which agentos-mor.service is before; Conflicts= and Before=shutdown.target),
+# so the shutdown transaction stops it. Before=agentos-mor.service would stop it after the clear.
+After=agentos-mor.service
+Conflicts=shutdown.target
+
+[Service]
+Type=simple
+# The responder ignores SIGTERM (responder.sh), so it answers into the shutdown until this timeout's
+# SIGKILL: the worst case a responder can be, and the image-in-shutdown test's window.
+TimeoutStopSec=2s
+ImportCredential=hostcheck.responder
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/ttyS0
+TTYReset=no
+TTYVHangup=no
+ExecStart=/bin/sh -c 'exec /bin/sh "$$CREDENTIALS_DIRECTORY/hostcheck.responder"'
