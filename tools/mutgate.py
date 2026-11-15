@@ -71,6 +71,11 @@ or kind to tell them apart) waives none of them (#5792). The body is read as tex
 A proof accepted once moves into the package's record, broker/<pkg>/MUTANTS-EQUIVALENT (`waive`;
 see RECORD below), keyed by statement, so a later run that widens the targets reads it without the
 body line and a moved line keeps it; an entry whose statement changed is stale and fails (#5776).
+Gremlins v0.6.0 reads some mutants on a multi-clause `case` as NOT COVERED although a test runs and kills
+them (#5863). Such a mutant passes on the body line `Mutant-misread: <path>:<line>[:<col>][:<KIND>] <test
+that kills it>`, matched as a waiver is, only where the head part of the package's coverage record (the
+changed tests' own `go test -cover` run) holds the line; it never passes a LIVED mutant, and `waive`
+never moves it into the record, which holds equivalence proofs only (#5864).
 Not covered mutants are not failures here; gremlins' coverage run is the only judge of "covered".
 The gate reads no other line, and gremlins tests each mutant alone, so `run --git` mutates only
 target lines (60-minute timeouts on #4014) and the gate decides the same; `run` fails if gremlins
@@ -134,6 +139,10 @@ TEST_FUNC = re.compile(r"^func ((?:Test|Fuzz|Example)(?![a-z])\w*)\(")
 # kind, then a reason. A waiver that matches more than one mutant of the result waives none (#5792).
 EQUIVALENT = re.compile(r"^Mutant-equivalent: (broker/[^\s:*?\[\]]+\.go):([1-9]\d*)(?::([1-9]\d*))?(?::([A-Z][A-Z_]{0,63}))?"
                         r" +(\S.*?)\s*$")
+# A killed mutant gremlins v0.6.0 reads as NOT COVERED (a multi-clause `case`, #5863): the same site
+# shape, a separate kind that passes only a NOT COVERED mutant on a line the changed tests' own
+# coverage record runs at the head, and that `waive` never records as an equivalence proof (#5864).
+MISREAD = re.compile(EQUIVALENT.pattern.replace("Mutant-equivalent", "Mutant-misread", 1))
 
 
 # A package name that reaches the workflow's matrix: path segments of plain characters only.
@@ -680,15 +689,24 @@ def targets_for(pkg, added, tests, data, bases):
     return (None, problem) if problem else (union(own, out, was), None)
 
 
-def waivers(body):
-    """{(path, line, kind, col): reason} of the PR body's `Mutant-equivalent:` lines, kind and col None
-    where the line names none. The body is text only."""
+def waivers(body, pattern=EQUIVALENT):
+    """{(path, line, kind, col): reason} of the PR body's `Mutant-equivalent:` lines (pattern's, such as
+    MISREAD's), kind and col None where the line names none. The body is text only."""
     out = {}
     for row in (body or "").replace("\r\n", "\n").split("\n"):
-        m = EQUIVALENT.match(row)
+        m = pattern.match(row)
         if m and re.search(r"[A-Za-z]{2}", m.group(5)):
             out[(m.group(1), int(m.group(2)), m.group(4), int(m.group(3)) if m.group(3) else None)] = m.group(5)
     return out
+
+
+def misread_lines(misread, covered):
+    """({site: reason} of the `Mutant-misread:` lines on a line that covered ({pkg: {path: lines}}, the
+    head part of the coverage record of each package whose tests the diff changes) runs, [site] of the
+    rest, which pass nothing: only there is a NOT COVERED verdict gated, and the record's `go test
+    -cover` run is the evidence that a test runs the line gremlins says none does (#5864)."""
+    ok = {w: r for w, r in misread.items() if w[1] in covered.get(package_of(w[0]), {}).get(w[0], ())}
+    return ok, sorted(set(misread) - set(ok), key=site_text)
 
 
 def site_text(w):
@@ -1920,7 +1938,8 @@ def cmd_verify(args):
 def decide(results, added, tests, args, records=({}, [])):
     """Gate the read results against the PR body's waivers and the packages' records (record_waivers'
     pair; a stale entry fails), and write the summary table. A body line wins over a record entry."""
-    body = waivers(pathlib.Path(args.body).read_text(encoding="utf-8", errors="replace") if args.body else "")
+    text = pathlib.Path(args.body).read_text(encoding="utf-8", errors="replace") if args.body else ""
+    body = waivers(text)
     kept, stale = records
     waived = {**{site: f"{reason} (record, {accepted}{', new in this PR' if new else ''})"
                  for site, (reason, accepted, new) in kept.items()}, **body}
@@ -1929,17 +1948,24 @@ def decide(results, added, tests, args, records=({}, [])):
     found = violations(targets, {pkg: survivors_of(d) for pkg, (d, _) in results.items()}, waived, every)
     # A package whose tests change must run every target line (#5762, Security on #5770): a weakened
     # test plus an edit to the lines it ran (or a moved file) would otherwise leave them unrun unseen.
-    lost = violations({pkg: t for pkg, t in targets.items() if tests_changed(tests, pkg)},
-                      {pkg: uncovered_of(d) for pkg, (d, _) in results.items()}, waived, every)
-    # targets_for checked each record's tests against changed_tests, so the record names them.
+    # targets_for checked each record's tests against changed_tests and its lines, so the record names them.
     tested = {pkg: d["targets"]["tests"] for pkg, (d, _) in results.items() if tests_changed(tests, pkg)}
+    # A `Mutant-misread:` line passes a NOT COVERED mutant only (never a LIVED one, in found above) on
+    # a line the changed tests run at the head (#5864).
+    misread, refused = misread_lines(waivers(text, MISREAD), {
+        pkg: {f"broker/{pkg}/{n}": set(ls) for n, ls in results[pkg][0]["targets"]["lines"].items()} for pkg in tested})
+    lost = violations({pkg: t for pkg, t in targets.items() if tests_changed(tests, pkg)},
+                      {pkg: uncovered_of(d) for pkg, (d, _) in results.items()}, {**waived, **misread}, every)
     fresh = sorted(((site, reason, accepted) for site, (reason, accepted, new) in kept.items() if new),
                    key=lambda f: (site_text(f[0]), f[1]))
     write_summary(args.summary, summary(results, tested, waived, {pkg for pkg in results if diff_targets(added, pkg)},
-                                        set(body), stale, fresh))
+                                        set(body), stale, fresh, misread))
     for problem in stale:
         print(f"mutgate: {problem}")
-    for w, hit in covering(waived, every)[1]:
+    for w in refused:
+        print(f"mutgate: the Mutant-misread line {site_text(w)} names a line the changed tests of package "
+              f"{package_of(w[0])} do not run at the head (their -coverprofile record), so it passes nothing")
+    for w, hit in covering({**waived, **misread}, every)[1]:
         print(f"mutgate: the waiver {site_text(w)} matches {len(hit)} mutants ("
               + ", ".join(site_text((p, n, k, c)) for p, n, k, c in hit) + "), so it waives none: name the one it "
               "proves by its column and kind, `Mutant-equivalent: <path>:<line>:<col>:<KIND> <reason>`")
@@ -1962,14 +1988,18 @@ VERDICTS = {"TIMED OUT": "killed (timed out)", "NOT COVERED": "not covered", "NO
 ROWS = 2000
 
 
-def summary(results, tested, waived, own=(), body=None, stale=(), fresh=()):
+def summary(results, tested, waived, own=(), body=None, stale=(), fresh=(), misread=None):
     """One Markdown table of every mutant on a target line, survivors first, and its verdict.
     tested names the changed tests of each package whose tests changed (None: every test); own
     names the packages where the diff also adds non-test lines; fresh lists ((path, line, mutant),
-    reason, accepted) of each record entry the base does not hold, whether or not a mutant uses it."""
+    reason, accepted) of each record entry the base does not hold, whether or not a mutant uses it;
+    misread holds the accepted `Mutant-misread:` lines, read for NOT COVERED mutants only."""
     lines = ["### mutgate", ""]
     rows, used = [], set()
+    misread = misread or {}
     cover, ambiguous = covering(waived, {pkg: mutants_of(d) for pkg, (d, _) in results.items()})
+    mcover, mambiguous = covering(misread, {pkg: mutants_of(d) for pkg, (d, _) in results.items()})
+    mused = set()
     for pkg, (data, targets) in sorted(results.items()):
         n = sum(len(v) for v in targets.values())
         lines.append(f"- {cell(pkg)}: {n} target lines, " + (
@@ -1987,11 +2017,15 @@ def summary(results, tested, waived, own=(), body=None, stale=(), fresh=()):
                 status = m["status"]
                 w = cover.get((path, m["line"], m.get("type"), col if type(col) is int else None))
                 reason = waived[w] if w else None
+                mw = mcover.get((path, m["line"], m.get("type"), col if type(col) is int else None))
                 if status == "LIVED" and reason:
                     used.add(w)
                     rank, verdict = 1, "equivalent: " + cell(reason)
                 elif status == "LIVED":
                     rank, verdict = 0, "**LIVED**: no test fails"
+                elif status == "NOT COVERED" and pkg in tested and mw:
+                    mused.add(mw)
+                    rank, verdict = 1, "misread as not covered, the changed tests run the line: " + cell(misread[mw])
                 elif status == "NOT COVERED" and pkg in tested and reason:
                     used.add(w)
                     rank, verdict = 1, "equivalent: " + cell(reason)
@@ -2012,9 +2046,13 @@ def summary(results, tested, waived, own=(), body=None, stale=(), fresh=()):
     if unused := sorted((set(waived) if body is None else body) - used):
         lines += ["", "Mutant-equivalent lines naming no surviving mutant on a target line: "
                   + ", ".join(cell(site_text(w)) for w in sorted(unused, key=site_text))]
-    if ambiguous:
+    if unread := sorted(set(misread) - mused, key=site_text):
+        lines += ["", "Mutant-misread lines naming no NOT COVERED mutant on a target line: "
+                  + ", ".join(cell(site_text(w)) for w in unread)]
+    if ambiguous or mambiguous:
         lines += ["", "Waivers matching more than one mutant, which waive none of them (#5792):",
-                  *(f"- {cell(site_text(w))}: " + ", ".join(cell(site_text(m)) for m in hit) for w, hit in ambiguous)]
+                  *(f"- {cell(site_text(w))}: " + ", ".join(cell(site_text(m)) for m in hit)
+                    for w, hit in ambiguous + mambiguous)]
     if fresh:
         lines += ["", f"New {RECORD} entries in this PR (read each proof as a Mutant-equivalent body line is read):",
                   *(f"- {cell(site_text((p, n, None, col)))} {cell(kind)} ({cell(accepted)}): {cell(reason)}"
@@ -2156,7 +2194,9 @@ def report_violations(found, lost=()):
         print(f"mutgate: {path}:{line} {what} survives, on a line of package {pkg} that this PR changes or tests")
     for pkg, path, line, kind in sorted(set(lost)):
         print(f"mutgate: {path}:{line} is a target line no test of package {pkg} runs at the head ({kind} not "
-              f"covered), and this PR changes that package's tests: cover it, or name it in a Mutant-equivalent line")
+              f"covered), and this PR changes that package's tests: cover it, or name it in a Mutant-equivalent line, or, "
+              f"where a changed test runs and kills it, a `Mutant-misread: {path}:{line}[:<col>][:<KIND>] <test that "
+              f"kills it>` line")
     found = [*found, *lost]
     if found:
         print("mutgate: add a test that fails when the line changes; if no test can tell, add a line "

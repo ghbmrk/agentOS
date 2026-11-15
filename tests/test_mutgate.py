@@ -2976,6 +2976,81 @@ class MutantScope(unittest.TestCase):
         src = (ROOT / "broker" / "clerk" / "run" / "mail.go").read_bytes().split(b"\n")
         self.assertEqual((src[102][101:103], src[143][112:114]), (b">=", b"< "))
 
+class Misread(unittest.TestCase):
+    """MUT-notcovered-misread (#5864, Security on #5863): gremlins v0.6.0 reads some mutants on a
+    multi-clause `case` as NOT COVERED although a test runs the line and kills them. A `Mutant-misread:`
+    body line passes such a mutant only on a line the gate's own `go test -cover` record of the
+    changed tests runs at the head, never passes a LIVED one, and `waive` never records it."""
+    # REQ: MUT-notcovered-misread
+
+    SITE = ("broker/p/a.go", 4, "CONDITIONALS_NEGATION", 56)
+    LINE = "Mutant-misread: broker/p/a.go:4:56:CONDITIONALS_NEGATION TestCase fails when the case clause is negated\n"
+
+    def decide(self, status="NOT COVERED", head=(3, 4), base=(), body=""):
+        """(decide's exit code, its stdout, the summary) for one mutant at SITE in package p, whose tests
+        the diff changes; the record says the changed test TestCase runs head lines at the head and
+        base lines at the base."""
+        import contextlib
+        import io
+        import types
+        muts = [{"type": self.SITE[2], "status": status, "line": 4, "column": 56}]
+        data = {"files": [{"file_name": "a.go", "mutations": muts}],
+                "targets": {"tests": ["TestCase"], "lines": {"a.go": sorted(head)} if head else {},
+                            "base": {"tests": ["TestCase"], "lines": {"a.go": sorted(base)} if base else {}}}}
+        targets = {"broker/p/a.go": set(head) | set(base)}
+        with tempfile.TemporaryDirectory() as d:
+            b, s = pathlib.Path(d) / "body", pathlib.Path(d) / "summary"
+            b.write_text(body)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = mutgate.decide({"p": (data, targets)}, {}, {"broker/p/a_test.go": {9}},
+                                      types.SimpleNamespace(body=str(b), summary=str(s)))
+            return code, out.getvalue(), s.read_text()
+
+    def test_the_body_line_parses_as_its_own_kind(self):
+        text = self.LINE + "Mutant-equivalent: broker/p/a.go:5 a real proof\n"
+        self.assertEqual(mutgate.waivers(text, mutgate.MISREAD),
+                         {self.SITE: "TestCase fails when the case clause is negated"})
+        # The equivalence reader never sees it, so `waive` cannot move it into MUTANTS-EQUIVALENT.
+        self.assertEqual(mutgate.waivers(text), {("broker/p/a.go", 5, None, None): "a real proof"})
+
+    def test_a_misread_on_a_line_the_changed_tests_run_passes(self):
+        code, out, summary = self.decide()
+        self.assertEqual(code, 1, out)  # #5863's gate: the killed mutant fails as NOT COVERED
+        self.assertIn("broker/p/a.go:4 is a target line no test of package p runs at the head", out)
+        self.assertIn("Mutant-misread", out)  # the remedy names the new line kind
+        code, out, summary = self.decide(body=self.LINE)
+        self.assertEqual(code, 0, out)
+        self.assertIn("| broker/p/a.go:4:56 | CONDITIONALS\\_NEGATION | misread as not covered, the changed tests run "
+                      "the line: TestCase fails when the case clause is negated |", summary)
+        self.assertNotIn("Mutant-misread lines naming no", summary)
+
+    def test_a_misread_on_a_line_only_the_base_ran_is_refused(self):
+        # A weakened test: the line is a target from the base record alone, so no test runs it at the head.
+        code, out, _ = self.decide(head=(3,), base=(4,), body=self.LINE)
+        self.assertEqual(code, 1, out)
+        self.assertIn("broker/p/a.go:4 is a target line no test of package p runs at the head", out)
+        self.assertIn("the Mutant-misread line broker/p/a.go:4:56:CONDITIONALS_NEGATION names a line the changed "
+                      "tests of package p do not run at the head", out)
+        # Nor does a misread line count in a package whose tests the diff leaves alone.
+        self.assertEqual(mutgate.misread_lines({self.SITE: "r"}, {}), ({}, [self.SITE]))
+
+    def test_a_misread_never_passes_a_live_mutant(self):
+        code, out, summary = self.decide(status="LIVED", body=self.LINE)
+        self.assertEqual(code, 1, out)
+        self.assertIn("broker/p/a.go:4 CONDITIONALS_NEGATION survives", out)
+        self.assertIn("| broker/p/a.go:4:56 | CONDITIONALS\\_NEGATION | **LIVED**: no test fails |", summary)
+        self.assertIn("Mutant-misread lines naming no NOT COVERED mutant on a target line: "
+                      "broker/p/a.go:4:56:CONDITIONALS\\_NEGATION", summary)
+
+    def test_waive_writes_no_misread_line(self):
+        import types
+        with tempfile.TemporaryDirectory() as d:
+            w = pathlib.Path(d) / "w.txt"
+            w.write_text(self.LINE)
+            self.assertEqual(mutgate.cmd_waive(types.SimpleNamespace(lines=str(w), accepted="#5864", mutant=None)), 1)
+
+
 def job(text, name):
     """The body of job `name` in a workflow's jobs: block."""
     m = re.search(rf"(?ms)^  {re.escape(name)}:\n(.*?)(?=^  [a-z][\w-]*:\n|\Z)", text.split("\njobs:\n", 1)[1])
