@@ -163,8 +163,10 @@ type resume struct {
 
 // changes is the part of kernel/proc's changes read used here.
 type changes struct {
-	Stopped bool
-	Stops   uint64 `json:"stops"`
+	Stopped       bool
+	Stops         uint64 `json:"stops"`
+	StopCancelled *int   `json:"stopcancelled"`
+	StopUnsettled bool   `json:"stopunsettled"`
 }
 
 // Stopped reads whether a STOP is in force on the kernel (its log's
@@ -174,6 +176,18 @@ func (o Owner) Stopped(ctx context.Context) (bool, uint64, error) {
 	var c changes
 	err := o.call(ctx, "changes", nil, &c)
 	return c.Stopped, c.Stops, err
+}
+
+// StopCancelled reads whether a STOP is in force on the kernel and how many
+// steps it cancelled for good, summed over the STOPs since the last lift
+// (#5665). known is false while a step the STOP ended is still unsettled,
+// or when the kernel predates the count. A setup-only kernel refuses it.
+func (o Owner) StopCancelled(ctx context.Context) (stopped bool, steps int, known bool, err error) {
+	var c changes
+	if err = o.call(ctx, "changes", nil, &c); err != nil || c.StopCancelled == nil || c.StopUnsettled {
+		return c.Stopped, 0, false, err
+	}
+	return c.Stopped, *c.StopCancelled, true, nil
 }
 
 // Step is a step the kernel's log has not settled (kernel.Unsettled, the

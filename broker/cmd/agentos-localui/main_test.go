@@ -26,6 +26,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localui"
 	"github.com/ghbmrk/agentos/broker/netguard/inbound"
+	"github.com/ghbmrk/agentos/broker/netguard/port1"
 	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
@@ -195,7 +196,7 @@ func TestTheUnitIsHardened(t *testing.T) {
 // WIFI-del-a3 (CH-9, HW-15, D-178): the page serves on port 1, the core's
 // cable to the enforcer, never on the access point the core no longer runs:
 // the unit names no Wi-Fi interface or fixed address, leaves -iface to
-// localui.Port1 with no Environment= naming another, and admits only
+// port1.Port1 with no Environment= naming another, and admits only
 // private home sources. It catches a unit
 // still bound to wlan0 at 10.42.0.1, which serves nothing once the access
 // point is gone.
@@ -234,7 +235,7 @@ func TestUnitServesThePageOnTheWiredPort(t *testing.T) {
 		}
 	}
 	if iface != "${AGENTOS_PAGE_IFACE}" {
-		t.Errorf("-iface %q, want ${AGENTOS_PAGE_IFACE} (empty on the image: localui.Port1)", iface)
+		t.Errorf("-iface %q, want ${AGENTOS_PAGE_IFACE} (empty on the image: port1.Port1)", iface)
 	}
 	if allow != "10.0.0.0/8 172.16.0.0/12 192.168.0.0/16" {
 		t.Errorf("IPAddressAllow=%q", allow)
@@ -516,7 +517,7 @@ func TestTheUnitWiresTheSetupFiles(t *testing.T) {
 		"LimitCORE":          {"0"},
 		// #1688: the mask below binds `+` commands too, so the hand-over is a unit of its own;
 		// the one `+` step is port 1's admission, which reads no state (HW12-port1-set).
-		"ExecStartPre": {"+/usr/lib/agentos/agentos-localui -admit-port1 -port1-file /run/agentos-localui/port1"},
+		"ExecStartPre": {"+/usr/lib/agentos/agentos-port1 -port1-file /run/agentos-localui/port1"},
 	} {
 		if got := set[k]; strings.Join(got, "|") != strings.Join(want, "|") {
 			t.Errorf("%s = %q, want %q", k, got, want)
@@ -889,19 +890,19 @@ func TestPageStopsWhenPort1Changes(t *testing.T) {
 		}
 	}
 	add("enp1s0", "pci0000:00/0000:00:1c.0/0000:01:00.0")
-	p, err := settledPort1(sys, func() bool { return true })
+	p, err := port1.Settled(sys, func() bool { return true })
 	if err != nil || p != "enp1s0" {
 		t.Fatalf("port 1: %q, %v", p, err)
 	}
 	// Security release 1 on e867557: a fixed port that appears while the
 	// page waits for the hardware to settle refuses before it listens.
-	if q, err := settledPort1(sys, func() bool { add("enp0s31f6", "pci0000:00/0000:00:1f.6"); return true }); err == nil {
+	if q, err := port1.Settled(sys, func() bool { add("enp0s31f6", "pci0000:00/0000:00:1f.6"); return true }); err == nil {
 		t.Fatalf("a port that probed during start-up: chose %q", q)
 	}
 	if err := os.Remove(filepath.Join(sys, "class", "net", "enp0s31f6")); err != nil {
 		t.Fatal(err)
 	}
-	if q, err := settledPort1(sys, func() bool { return false }); err == nil {
+	if q, err := port1.Settled(sys, func() bool { return false }); err == nil {
 		t.Fatalf("stopped while settling: chose %q", q)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1073,6 +1074,61 @@ func TestNamedPort1StopsThePageWhenItsLinkChanges(t *testing.T) {
 	}
 }
 
+// HW12-port1-set (CH-9, HW-12, HW-15; #3350 Security 1 and L3 1): the
+// page serves only on the port the root step (agentos-port1) admitted and
+// handed over, and refuses, naming both ports, when its own port 1 is
+// another or nothing was admitted.
+// REQ: CH-9, HW-12, HW-15
+func TestThePageServesOnlyOnTheAdmittedPort(t *testing.T) {
+	sys, add := fakeLinks(t)
+	add("eth0", "pci0000:00/0000:00:1c.0/0000:01:00.0", false)
+	add("enx001122334455", "pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0", false)
+	add("enowner0", "virtual", false)
+	dir := t.TempDir()
+	eth0, enowner0 := filepath.Join(dir, "eth0"), filepath.Join(dir, "enowner0")
+	if err := port1.Write(eth0, "eth0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := port1.Write(enowner0, "enowner0"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := servedPort1(sys, "", eth0); err != nil || got != "eth0" {
+		t.Fatalf("the page serves on %q, %v", got, err)
+	}
+	if got, err := servedPort1(sys, "enowner0", enowner0); err != nil || got != "enowner0" {
+		t.Fatalf("the page serves on %q, %v", got, err)
+	}
+	// The firewall admits enowner0, but the page's own port 1 is eth0.
+	if _, err := servedPort1(sys, "", enowner0); err == nil || !strings.Contains(err.Error(), "admits the page on enowner0 but port 1 is eth0") {
+		t.Fatalf("a page whose port 1 the firewall drops: %v", err)
+	}
+	if _, err := servedPort1(sys, "", filepath.Join(dir, "none")); err == nil || !strings.Contains(err.Error(), "has not opened the page's ports") || !strings.Contains(err.Error(), "agentos-port1") {
+		t.Fatalf("no admitted port: %v", err)
+	}
+}
+
+// KEY-9-reach-inbound-wiring update stage (#5678): a drop-in written before
+// the root step moved still runs "agentos-localui -admit-port1 -iface X"; it
+// must fail, so the unit does not start and the page's ports stay closed, and
+// say which line replaces it.
+// REQ: HW-12
+func TestTheOldAdmitLineFailsNamingItsReplacement(t *testing.T) {
+	if os.Getenv("AGENTOS_TEST_OLD_ADMIT") == "1" {
+		os.Args = []string{"agentos-localui", "-admit-port1", "-iface", "eth0", "-port1-file", filepath.Join(t.TempDir(), "port1")}
+		main()
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestTheOldAdmitLineFailsNamingItsReplacement$")
+	cmd.Env = append(os.Environ(), "AGENTOS_TEST_OLD_ADMIT=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("agentos-localui -admit-port1 exited 0: %s", out)
+	}
+	if !strings.Contains(string(out), "ExecStartPre=+/usr/lib/agentos/agentos-port1 -iface <port> -port1-file /run/agentos-localui/port1") {
+		t.Fatalf("the refusal does not name the replacement line: %s", out)
+	}
+}
+
 // fakeLinks is a sysfs tree with add(name, dev, radio) placing one
 // Ethernet-typed link at its device path, as Port1 and Wired read it.
 func fakeLinks(t *testing.T) (string, func(name, dev string, radio bool)) {
@@ -1101,99 +1157,6 @@ func fakeLinks(t *testing.T) (string, func(name, dev string, radio bool)) {
 	}
 }
 
-// HW12-port1-set (CH-9, HW-12, HW-15; #3350 Security 1 and L3 1): the
-// unit's root step opens the page's ports on port 1 alone, the same port
-// the page chooses, and hands the page its name; a radio, a missing link,
-// no port 1 or a failed load opens nothing and says why. The page then
-// serves only on the port the firewall admits, and refuses, naming both
-// ports, when port 1 is another or nothing was admitted.
-// REQ: CH-9, HW-12, HW-15
-func TestAdmitPort1LoadsTheSetAndHandsOverTheName(t *testing.T) {
-	sys, add := fakeLinks(t)
-	add("eth0", "pci0000:00/0000:00:1c.0/0000:01:00.0", false)
-	add("enx001122334455", "pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0", false)
-	add("wlan0", "pci0000:00/0000:00:14.3", true)
-	add("enowner0", "virtual", false)
-	file := filepath.Join(t.TempDir(), "port1")
-	var loaded []string
-	nft := func(s string) error { loaded = append(loaded, s); return nil }
-	now := func() bool { return true }
-
-	p, err := admitPort1(sys, "", file, nft, now)
-	if err != nil || p != "eth0" {
-		t.Fatalf("port 1: %q, %v", p, err)
-	}
-	if want := "flush set inet agentos_inbound page\nadd element inet agentos_inbound page { \"eth0\" }\n"; len(loaded) != 1 || loaded[0] != want {
-		t.Fatalf("loaded %q, want %q", loaded, want)
-	}
-	if b, err := os.ReadFile(file); err != nil || string(b) != "eth0\n" {
-		t.Fatalf("hand-over file: %q, %v", b, err)
-	}
-	if got, err := servedPort1(sys, "", file); err != nil || got != "eth0" {
-		t.Fatalf("the page serves on %q, %v", got, err)
-	}
-	// The file is made fresh, never written through a link or over an old one.
-	if _, err := admitPort1(sys, "eth0", file, nft, now); err == nil {
-		t.Fatal("wrote over an existing hand-over file")
-	}
-	link := filepath.Join(t.TempDir(), "link")
-	if err := os.Symlink(filepath.Join(t.TempDir(), "target"), link); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := admitPort1(sys, "eth0", link, nft, now); err == nil {
-		t.Fatal("wrote through a symlink")
-	}
-	loaded = loaded[:1]
-	if err := os.Remove(file); err != nil {
-		t.Fatal(err)
-	}
-	// A unit naming port 1 (the harness's veth) is admitted under that name.
-	if p, err := admitPort1(sys, "enowner0", file, nft, now); err != nil || p != "enowner0" {
-		t.Fatalf("named port 1: %q, %v", p, err)
-	}
-	if got, err := servedPort1(sys, "enowner0", file); err != nil || got != "enowner0" {
-		t.Fatalf("the page serves on %q, %v", got, err)
-	}
-	// The firewall admits enowner0, but the page's own port 1 is eth0.
-	if _, err := servedPort1(sys, "", file); err == nil || !strings.Contains(err.Error(), "admits the page on enowner0 but port 1 is eth0") {
-		t.Fatalf("a page whose port 1 the firewall drops: %v", err)
-	}
-	if _, err := servedPort1(sys, "", filepath.Join(t.TempDir(), "none")); err == nil || !strings.Contains(err.Error(), "has not opened the page's ports") {
-		t.Fatalf("no admitted port: %v", err)
-	}
-
-	loaded = nil
-	for _, c := range []struct{ iface, file, why string }{
-		{"wlan0", file, "radio"},
-		{"enp9s0", file, "not a link"},
-		{"lo", file, "not an interface name"},
-		{"eth0", "", "needs -port1-file"},
-	} {
-		if p, err := admitPort1(sys, c.iface, c.file, nft, now); err == nil || !strings.Contains(err.Error(), c.why) {
-			t.Errorf("%q: admitted %q, %v; want an error saying %q", c.iface, p, err, c.why)
-		}
-	}
-	if len(loaded) != 0 {
-		t.Errorf("a refused port 1 still loaded %q", loaded)
-	}
-	// Port1 itself names none here: the USB adapter is left out, so only
-	// eth0 counts; a second fixed port makes it refuse, and nothing loads.
-	add("enp2s0", "pci0000:00/0000:00:1c.1/0000:02:00.0", false)
-	if p, err := admitPort1(sys, "", file, nft, now); err == nil || len(loaded) != 0 {
-		t.Errorf("two fixed ports: admitted %q, %v, loaded %q", p, err, loaded)
-	}
-	failing := func(string) error { return errors.New("no such table") }
-	if err := os.Remove(file); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := admitPort1(sys, "eth0", file, failing, now); err == nil || !strings.Contains(err.Error(), "could not open the page's ports on port 1 eth0") {
-		t.Errorf("a failed load: %v", err)
-	}
-	if _, err := os.Stat(file); err == nil {
-		t.Error("a failed load still handed the page a port")
-	}
-}
-
 // HW12-port1-set (CH-9): the unit runs the admit step as root before the
 // page, with the page's -iface, hands its name over a runtime directory
 // the stop removes, makes the page check it, and empties the page set at
@@ -1217,7 +1180,7 @@ func TestUnitAdmitsPort1AsRootAndClosesOnStop(t *testing.T) {
 	for k, want := range map[string][]string{
 		"RuntimeDirectory":     {"agentos-localui"},
 		"RuntimeDirectoryMode": {"0700"},
-		"ExecStartPre":         {"+/usr/lib/agentos/agentos-localui -admit-port1 -port1-file " + file},
+		"ExecStartPre":         {"+/usr/lib/agentos/agentos-port1 -port1-file " + file},
 		"ExecStopPost":         {"+/usr/sbin/nft flush set inet agentos_inbound page"},
 	} {
 		if got := set[k]; strings.Join(got, "|") != strings.Join(want, "|") {
@@ -1243,50 +1206,6 @@ func TestUnitAdmitsPort1AsRootAndClosesOnStop(t *testing.T) {
 	}
 	if close := strings.TrimPrefix(set["ExecStopPost"][0], "+/usr/sbin/nft ") + "\n"; close != inbound.InboundPageClose {
 		t.Errorf("the stop runs %q, not inbound.InboundPageClose %q", close, inbound.InboundPageClose)
-	}
-}
-
-// #3382 L3 1, Security 1: the unit's UMask=0077 binds the root step too,
-// so the hand-over file's mode is set explicitly: the page, another uid,
-// can read it. Run as root, it also reads it back as nobody.
-// REQ: CH-9, HW-12
-func TestAdmitPort1HandOverIsReadableUnderTheUnitsUmask(t *testing.T) {
-	sys, add := fakeLinks(t)
-	add("eth0", "pci0000:00/0000:00:1c.0/0000:01:00.0", false)
-	// Not under t.TempDir, whose parent another uid cannot traverse.
-	dir, err := os.MkdirTemp("", "port1-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	if err := os.Chmod(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	file := filepath.Join(dir, "port1")
-	old := syscall.Umask(0o077)
-	_, err = admitPort1(sys, "", file, func(string) error { return nil }, func() bool { return true })
-	syscall.Umask(old)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fi, err := os.Stat(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode().Perm() != 0o644 {
-		t.Fatalf("hand-over file mode %v, want -rw-r--r--", fi.Mode())
-	}
-	if os.Geteuid() != 0 {
-		return
-	}
-	cat, err := exec.LookPath("cat")
-	if err != nil {
-		t.Skip("no cat")
-	}
-	cmd := exec.Command(cat, file)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65534, Gid: 65534}}
-	if out, err := cmd.CombinedOutput(); err != nil || string(out) != "eth0\n" {
-		t.Fatalf("another uid reads %q, %v", out, err)
 	}
 }
 

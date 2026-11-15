@@ -22,6 +22,12 @@ root clerk/check
 root clerk/seal
 root cmd/agentos-unlock
 root backup
+# The owner page's root step (KEY-9-reach-inbound-wiring, #5678): agentos-localui.service's
+# ExecStartPre=+/usr/lib/agentos/agentos-port1 runs as root at every page start and puts port 1 in
+# the inbound page set. Standard library only. tests/test_trusted_root_steps.py fails on a unit's
+# root step whose binary is not a root here.
+root netguard/port1
+root cmd/agentos-port1
 
 allow golang.org/x/sys/unix
 allow golang.org/x/sys/cpu

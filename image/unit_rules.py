@@ -96,9 +96,9 @@ CONTROL_WANT = 'variable "LD_PRELOAD"'
 class View:
     """A tree at ROOT (optionally with USR as its /usr), every path absolute in the tree, links
     resolved in it, never on the runner: each public reader (lstat, kind, entries, text, data, readlink)
-    resolves every component of its path through resolve() first. Only five calls touch the host, each
+    resolves every component of its path through resolve() first. Only four calls touch the host, each
     at a path resolve() gave and _lstat found, so no tree link is left in its directory: _lstat, _list,
-    resolve's own readlink, readlink()'s os.readlink and data()'s os.open (O_NOFOLLOW) (#5703)."""
+    _readlink and data()'s os.open (O_NOFOLLOW) (#5703)."""
 
     def __init__(self, root, usr=None):
         self.root, self.usr = str(root), usr and str(usr)
@@ -124,10 +124,15 @@ class View:
         except (FileNotFoundError, NotADirectoryError):
             return []
 
+    def _readlink(self, q):
+        """The target of Q, a link at a path resolve() gave."""
+        return os.readlink(self.host(q))
+
     def resolve(self, p, last=True):
         """(p resolved in the tree, [each link followed]). A link's target, absolute or not, is read in
         the tree, and .. stops at its root; from the first missing component on, p is kept as given.
-        With last False, p's own last component is not followed."""
+        With last False, p's own last component is not followed. Every component the walk steps on goes
+        through _lstat first, so a subclass that refuses a path there refuses every walk onto it."""
         links, done, rest = [], "/", [c for c in p.split("/") if c]
         while rest:
             c = rest.pop(0)
@@ -146,7 +151,7 @@ class View:
             links.append(nxt)
             if len(links) > 40:
                 raise SystemExit("unit rules: %s: more than 40 links" % p)
-            t = os.readlink(self.host(nxt))
+            t = self._readlink(nxt)
             if t.startswith("/"):
                 done = "/"
             rest = [x for x in t.split("/") if x] + rest
@@ -166,7 +171,7 @@ class View:
         """P's own link target, None when P is not a link (its directory resolved in the tree)."""
         q = self.resolve(p, last=False)[0]
         st = self._lstat(q)
-        return os.readlink(self.host(q)) if st and st.st_mode & 0o170000 == 0o120000 else None
+        return self._readlink(q) if st and st.st_mode & 0o170000 == 0o120000 else None
 
     def data(self, p):
         """P's bytes, P's directory resolved in the tree; a link at P itself is refused (O_NOFOLLOW)."""
@@ -186,7 +191,7 @@ class View:
 # system at or under /proc, /sys, /dev or /run; tmp.mount mounts /tmp (its 50-agentos-noexec.conf
 # drop-in). Nothing rests on the list being whole (package .mount units may add more): a mount it
 # misses leaves a tree link that is not there at boot in the records, or fails the run (tmpfiles_lines,
-# tmpfiles_links), never drops a link. The link readers (tree_links, tmpfiles_links) read through BootView.
+# tmpfiles_links), never drops a link. boot_links resolves every link at a MountView over BootView.
 BOOT_MOUNTS = ("/dev", "/proc", "/sys", "/run", "/tmp")
 
 
@@ -431,13 +436,11 @@ def unread(view, shown, dirs, packaged):
 
 
 def tree_links(view, usr_view=None):
-    """{link: its target resolved in the tree} for every link of the tree (/proc and /sys aside) that does
-    not resolve to a file other than a directory: one an endpoint path's directory may pass through, a
-    dangling one included (#5620 R-c, R-i). A loop, or a link the reader cannot follow (into /proc), maps to
-    itself. With USR_VIEW (a fixture's own tree), /usr is listed there, not in the view's /usr, which is
-    the fixture over the runner's whole /usr: walking that took the privfile tests past 10 minutes (#5652 L3).
-    Each link is still resolved in the view."""
-    out, todo = {}, ["/"]
+    """Every link the tree holds (/proc and /sys aside), sorted: its own path, which boot_links resolves. The
+    tree is listed, never walked through a link, so each listed path's directories are real ones. With USR_VIEW
+    (a fixture's own tree), /usr is listed there, not in the view's /usr, which is the fixture over the runner's
+    whole /usr: walking that took the privfile tests past 10 minutes (#5652 L3)."""
+    out, todo = [], ["/"]
     while todo:
         d = todo.pop()
         lister = usr_view if usr_view and (d == "/usr" or d.startswith("/usr/")) else view
@@ -449,13 +452,8 @@ def tree_links(view, usr_view=None):
             if kind == 0o040000:
                 todo.append(p)
             elif kind == 0o120000:
-                try:
-                    final, _ = view.resolve(p)
-                except (SystemExit, OSError):  # a loop, or a link into /proc (/dev/fd)
-                    final = p
-                if view.kind(final) in (None, 0o040000) or final == p:
-                    out[p] = final
-    return out
+                out.append(p)
+    return sorted(out)
 
 
 # Where systemd-tmpfiles reads its files, highest first: a name in a higher one hides it in a lower one.
@@ -495,32 +493,19 @@ def tmpfiles_lines(view, usr_view=None):
     return out
 
 
-def through(p, links):
-    """P with each directory component, and its last one, read through LINKS, until none is a link."""
-    for _ in range(41):
-        cur, comps = "/", [c for c in p.split("/") if c]
-        for i, c in enumerate(comps):
-            cur = os.path.join(cur, c)
-            if cur in links and links[cur] != cur:
-                p = os.path.join(links[cur], *comps[i + 1:])
-                break
-        else:
-            return p
-    raise SystemExit("unit rules: %s: more than 40 links" % p)
-
-
-def tmpfiles_links(view, links, usr_view=None):
-    """LINKS (tree_links) with each link a tmpfiles.d L line makes at boot (#5651, KRN-2): tmpfiles.allow
-    gates these lines by review alone. VIEW is a BootView (boot_links). #5703 re-plan: nothing here rests
-    on knowing what is mounted at boot, which package .mount units leave open. Every L line counts, with
-    any modifier; a tree entry at a plain L line's path fails the run but a link resolving where the
-    line's does, since that L leaves the entry (L+ removes it). Its path's
-    directory and its target (the factory copy when it gives none) are resolved in the tree, and a tree
-    link on either way fails the run, since it may sit under a mount the tree does not show; the target
-    is then read through the other L lines' links, and every value again through them. An L line
-    holding a specifier, quote or escape, an encoded (~) or credential (^) target, a path not absolute
-    and normal, a path another tmpfiles.d line also names (which one applies is systemd-tmpfiles' to
-    decide), or one whose directory passes through another L line's link fails the run too."""
+def tmpfiles_links(view, usr_view=None, mounts=()):
+    """{path: (file, line, target)} for each link a tmpfiles.d L line makes at boot (#5651, KRN-2), its target
+    absolute (the factory copy when it gives none): tmpfiles.allow gates these lines by review alone. VIEW is
+    a BootView (boot_links), which resolves the targets with the tree's links and the other lines' (MountView).
+    Every L line counts, with any modifier; a tree entry at a plain L line's path fails the run, unless it is
+    a link resolving to the line's target, since that L leaves the entry (L+ removes it). An L line, any
+    modifier, whose path is at, under or above one of MOUNTS (mount_points) fails the run: at boot the mounted
+    file system, not the tree, holds what is there, and L+ cannot replace a mount point, remove a directory
+    holding one, or write to a read-only mount (#5725). Its path's directory and its target are resolved in
+    the tree, and a tree link on either way fails the run, since it may sit under a mount the tree does not
+    show. An L line holding a specifier, quote or escape, an encoded (~) or credential (^) target, a path not
+    absolute and normal, or a path another tmpfiles.d line also names (which one applies is
+    systemd-tmpfiles' to decide) fails the run too."""
     lines, named = tmpfiles_lines(view, usr_view), {}
     for f, line in lines:
         w = line.split()
@@ -533,16 +518,21 @@ def tmpfiles_links(view, links, usr_view=None):
             continue
         if any(ch in line for ch in "%\"\'\\"):
             raise SystemExit("unit rules: %s: L line %r holds a specifier, a quote or an escape, which the "
-                             "reader does not read" % (f, line))
+                             "unit lint does not read" % (f, line))
         if "~" in w[0] or "^" in w[0]:
             raise SystemExit("unit rules: %s: L line %r: its target is encoded or a credential, which the "
-                             "reader does not read" % (f, line))
+                             "unit lint does not read" % (f, line))
         p = w[1] if len(w) > 1 else ""
         if not p.startswith("/") or p.startswith("//") or os.path.normpath(p) != p:  # normpath keeps a leading //
             raise SystemExit("unit rules: %s: L line %r: its path is not absolute and normal" % (f, line))
         if len(named[p]) > 1:
             raise SystemExit("unit rules: %s: a tmpfiles.d L line and another line name it, and which "
                              "applies is not read" % p)
+        m = covering(p, mounts)
+        if m:
+            raise SystemExit("unit rules: %s: L line %r: its path is at, under or above %s, where a mount puts a "
+                             "file system the unit lint does not see, and no L line, L+ included, can replace "
+                             "what it holds; move the line off the mount" % (f, line, m))
         _, via = view.resolve(os.path.dirname(p))
         if via:
             raise SystemExit("unit rules: %s: L line %r: its path's directory passes through a link in the "
@@ -550,9 +540,6 @@ def tmpfiles_links(view, links, usr_view=None):
         arg = w[6].strip() if len(w) > 6 else "-"
         target = "/usr/share/factory" + p if arg in ("", "-") else os.path.join(os.path.dirname(p), arg)
         found[p], found_mod[p] = (f, line, target), w[0]
-    if not found:
-        return links
-    out = dict(links)
     for key, (f, line, target) in found.items():
         final, via = view.resolve(target)
         if via:
@@ -563,27 +550,21 @@ def tmpfiles_links(view, links, usr_view=None):
         # L+ removes the entry first. Which of the two is there at boot rests on mounts; neither is picked.
         if "+" not in found_mod[key] and view.lstat(key) is not None and (
                 view.readlink(key) is None or view.resolve(key)[0] != final):
-            raise SystemExit("unit rules: %s: L line %r: the tree already holds %s there, which a plain L "
-                             "leaves in place" % (f, line, key))
-        if view.kind(final) in (None, 0o040000) or final == key:
-            out[key] = final
-        else:
-            out.pop(key, None)  # a link to a file no endpoint's directory passes through
-    for key in found:
-        if through(os.path.dirname(key), out) != os.path.dirname(key):
-            raise SystemExit("unit rules: %s: a tmpfiles.d L line's path passes through another link, "
-                             "which the reader does not read" % key)
-    return {k: (v if v == k else through(v, {a: b for a, b in out.items() if a != k})) for k, v in out.items()}
+            raise SystemExit("unit rules: %s: L line %r: the tree already has an entry there, which a plain L "
+                             "leaves in place; use L+, remove the entry, or make it a link to the same target"
+                             % (f, line))
+    return found
 
 
-def tmpfiles_copies(view, links, usr_view=None):
+def tmpfiles_copies(view, links, usr_view=None, mounts=()):
     """#5707 (KRN-2): systemd-tmpfiles copies a link as a link for a C line (copy_tree_at), so a C line
     whose source is a link, or a directory holding one anywhere below it, would make a link at boot that
     LINKS (boot_links) do not hold: the run fails. VIEW is a BootView. Its source (the factory copy when it
     names none) is read like an L line's target: a specifier, quote or escape, an encoded (~) or credential
     (^) source, one not absolute and normal, one under a boot mount (empty in VIEW, filled at boot), or one
     passing through a link, the tree's or one in LINKS, fails the run too, as does one at, under or above
-    any L line's path, or one outside /usr (#5715: no exception; the image drops systemd's /.extra lines)."""
+    any L line's path or one of MOUNTS (mount_points: its file system, not the tree, is the source at boot),
+    or one outside /usr (#5715: no exception; the image drops systemd's /.extra lines)."""
     lines = tmpfiles_lines(view, usr_view)
     ls = [w[1] for w in (line.split() for _, line in lines) if w[0].startswith("L") and len(w) > 1]
     for f, line in lines:
@@ -592,17 +573,22 @@ def tmpfiles_copies(view, links, usr_view=None):
             continue
         if any(ch in line for ch in "%\"\'\\"):
             raise SystemExit("unit rules: %s: C line %r holds a specifier, a quote or an escape, which the "
-                             "reader does not read" % (f, line))
+                             "unit lint does not read" % (f, line))
         if "~" in w[0] or "^" in w[0]:
             raise SystemExit("unit rules: %s: C line %r: its source is encoded or a credential, which the "
-                             "reader does not read" % (f, line))
+                             "unit lint does not read" % (f, line))
         arg = w[6].strip() if len(w) > 6 else "-"
         src = "/usr/share/factory" + (w[1] if len(w) > 1 else "") if arg in ("", "-") else arg
         if not src.startswith("/") or src.startswith("//") or os.path.normpath(src) != src:
             raise SystemExit("unit rules: %s: C line %r: its source is not absolute and normal" % (f, line))
         if any(src == m or src.startswith(m + "/") for m in BOOT_MOUNTS):
             raise SystemExit("unit rules: %s: C line %r: its source is under %s, whose content at boot the "
-                             "reader does not see" % (f, line, "/" + src.split("/")[1]))
+                             "unit lint does not see; copy from /usr" % (f, line, "/" + src.split("/")[1]))
+        m = covering(src, mounts)
+        if m:
+            raise SystemExit("unit rules: %s: C line %r: its source is at, under or above %s, where a mount puts "
+                             "a file system the unit lint does not see; copy from a path under /usr that no "
+                             "mount covers" % (f, line, m))
         todo = [src]
         while todo:
             p = todo.pop()
@@ -613,25 +599,58 @@ def tmpfiles_copies(view, links, usr_view=None):
             if kind == 0o040000:
                 todo += [os.path.join(p, e) for e in view.entries(p)]
         _, via = view.resolve(src)
-        via += [k for k, v in links.items() if v != k and (src == k or src.startswith(k + "/"))]
+        via += [k for k in links if (src == k or src.startswith(k + "/"))]
         if via:
             raise SystemExit("unit rules: %s: C line %r: its source passes through a link (%s), which the "
-                             "reader does not read" % (f, line, via[0]))
+                             "unit lint does not read" % (f, line, via[0]))
         # #5715 L3 6874735402, Security 6874738412: an L line's link at or under the source is made at boot
-        # (and stays in a persistent /etc or /var), not in the tree the walk reads, and tmpfiles_links drops
-        # some L keys (a link to a file, a loop), so every L line counts, at, under or above the source.
+        # (and stays in a persistent /etc or /var), not in the tree the walk reads, and boot_links drops an
+        # L key whose link resolves to a file, so every L line counts, at, under or above the source.
         under = src.rstrip("/") + "/"
         for k in ls:
             if k == src or k.startswith(under) or src.startswith(k.rstrip("/") + "/"):
                 raise SystemExit("unit rules: %s: C line %r: an L line makes a link at, under or above its "
-                                 "source, %s, which systemd-tmpfiles may copy as a link" % (f, line, k))
+                                 "source, %s, which systemd-tmpfiles may copy as a link; drop the L line or "
+                                 "move the source" % (f, line, k))
         # A source in persistent writable state copies what a running service left there between boots,
         # which no lint of the tree sees: only read-only /usr (verity, I4) is a source. #5715 L3 6874919503,
         # Security 6874914212: a /.extra exception compared path text, which //, /./ or a link on the way
         # bypassed; the image drops systemd's /.extra lines (mkosi.conf RemoveFiles), so none is kept.
         if not (src == "/usr" or src.startswith("/usr/")):
-            raise SystemExit("unit rules: %s: C line %r: its source is not under /usr, so a service may "
-                             "leave a link there between boots" % (f, line))
+            raise SystemExit("unit rules: %s: C line %r: its source is not under /usr, the one tree no service "
+                             "writes between boots and the image holds whole (a /.extra source is neither); "
+                             "copy from /usr" % (f, line))
+
+
+# #5725 Security 6876826072: systemd-gpt-auto-generator mounts the ESP at /boot or /efi from the boot disk, and
+# exits in the lint's container, so no unit name shows it. finish_image.py (REPART_TYPES, #5289) holds the
+# disk to the ESP, /usr, its verity and root, so these are the only points gpt-auto mounts.
+GPT_AUTO_MOUNTS = ("/boot", "/efi")
+
+
+def mount_points(view):
+    """#5708: the Where= of every .mount and .automount unit name in the tree's unit directories, generators'
+    included (systemd loads such a unit only under the name its Where= escapes to), and GPT_AUTO_MOUNTS,
+    but / and BOOT_MOUNTS, which BootView already reads as the tree or as empty. Ours count with a
+    package's: what a mounted file system holds at a path is not in the tree, whoever ships the unit."""
+    out = set(GPT_AUTO_MOUNTS)
+    for n in names(view, unit_dirs(view)):
+        base, ext = os.path.splitext(n)
+        if ext not in (".mount", ".automount") or "@" in base or base == "-":
+            continue
+        w = os.path.normpath("/" + re.sub(r"\\x([0-9a-fA-F]{2})", lambda x: chr(int(x.group(1), 16)),
+                                          base.replace("-", "/")))
+        if w != "/" and w not in BOOT_MOUNTS:
+            out.add(w)
+    return sorted(out)
+
+
+def covering(p, mounts):
+    """The first of MOUNTS at, under or above P (a mount below P puts its directories on P's way), or None."""
+    for m in mounts:
+        if p == m or p.startswith(m + "/") or m.startswith(p.rstrip("/") + "/"):
+            return m
+    return None
 
 
 # #5703 L3 6872796820: the kernel's own links under /proc, /sys and /dev (/proc/self/root, /proc/<pid>/root,
@@ -643,26 +662,169 @@ API_MOUNTS = ("/proc", "/sys", "/dev")
 API_TARGETS = ("/dev/null", "/dev/shm", "/proc/self/mounts")
 
 
+class OnMount(Exception):
+    """A walk stepped past MOUNT, a mount point, or (LINKED) onto one the tree holds as a link (MountView)."""
+
+    def __init__(self, mount, linked=False):
+        super().__init__(mount)
+        self.mount, self.linked = mount, linked
+
+
+class Dotted(Exception):
+    """A walk kept PATH as given past a path the tree does not hold, with a . or .. still in it (MountView)."""
+
+    def __init__(self, path):
+        super().__init__(path)
+        self.path = path
+
+
+class MountView(BootView):
+    """VIEW (a BootView) with LINES ({path: target}, the tmpfiles.d L lines' links) made, where no walk may step
+    past one of MOUNTS (mount_points). #5725 re-plan: at boot a mounted file system, not the tree, holds
+    what is under its Where=, so where a walk goes once it steps past one (a link, a .. after a directory, a
+    nested mount) is not the tree's to say; the Where= itself is a directory, which a walk may end at or leave
+    again by ... The refusal sits in the host primitive _lstat, which resolve() calls on every component it
+    steps on, a link's target, a chain's next link and a .. included, so every walk past a mount point, or onto
+    one the tree holds as a link, raises OnMount, by construction, and none is read on. A path kept as given past a missing
+    component is held to the same: each of its own components is checked against MOUNTS, and one keeping a .
+    or .. raises Dotted, since a directory made there at boot may be a link the kernel follows first. An L
+    line's missing directories read as directories, as systemd-tmpfiles makes them."""
+
+    def __init__(self, view, mounts, lines):
+        super().__init__(view)
+        self.mounts, self.lines = tuple(mounts), dict(lines)
+        self.parents = {os.path.dirname(k) for k in self.lines}  # systemd-tmpfiles makes an L path's directories
+        for q in list(self.parents):
+            while q != "/":
+                q = os.path.dirname(q)
+                self.parents.add(q)
+
+    # #5735 L3 6878105739, Security 6878175777: a mount point is a directory at boot, whatever file system is
+    # mounted there, so a walk may end at one or step back out of it with .. (the kernel's .. at a mount's root
+    # goes to the mount point's parent); only a step past it, into what is mounted, is refused. So debian's
+    # `L /var/lock - - - - ../run/lock` over run-lock.mount passes, and /var/lock/x is still refused.
+    def _refuse(self, q):
+        for m in self.mounts:
+            if q.startswith(m + "/"):
+                raise OnMount(m)
+
+    def _lstat(self, q):
+        self._refuse(q)
+        if q in self.mounts:
+            # systemd mounts nothing over a link (a non-canonical Where=), so the tree's link stays there at boot
+            # and is refused.
+            st = super()._lstat(q)
+            if st is not None and st.st_mode & 0o170000 == 0o120000:
+                raise OnMount(q, linked=True)
+            return os.stat_result((0o040755,) + (0,) * 9)
+        if q in self.lines:
+            return os.stat_result((0o120777,) + (0,) * 9)  # the link the L line makes at boot
+        st = super()._lstat(q)
+        if st is None and q in self.parents:
+            return os.stat_result((0o040755,) + (0,) * 9)
+        return st
+
+    def _readlink(self, q):
+        return self.lines[q] if q in self.lines else super()._readlink(q)
+
+    def resolve(self, p, last=True):
+        final, links = super().resolve(p, last)
+        cur = ""
+        for c in final.split("/")[1:]:
+            if c in (".", ".."):
+                raise Dotted(final)
+            cur += "/" + c
+            self._refuse(cur)
+        return final, links
+
+
 def boot_links(view, usr_view=None):
-    """The links a path may pass through at boot: the tree's and tmpfiles.d's, read at BootView. A link
-    into an API mount but API_TARGETS, or one whose resolved target keeps a . or .. component, fails the run,
-    and so does a tmpfiles.d C line that may copy a link (tmpfiles_copies)."""
-    boot = BootView(view)
-    out = tmpfiles_links(boot, tree_links(boot, usr_view), usr_view)
-    tmpfiles_copies(boot, out, usr_view)
+    """The links a path may pass through at boot, {link: its target resolved}: the tree's and tmpfiles.d's L
+    lines', each one that does not resolve to a file other than a directory (one an endpoint path's directory
+    may pass through, a dangling one included, #5620 R-c, R-i), read at a MountView. The mount points are read
+    from VIEW, not the BootView, since generators write their units under /run. Every link, one to a file
+    included, is resolved there, and the run fails (#5725 re-plan) on one that steps past a mount point, or is
+    or passes through a link at one: at its own path (move it off the mount), or on the way to its target, through a link, an L line's link, a .. or
+    a chain of them (point it at a path no mount covers); on one the walk cannot follow (a loop or more than 40
+    links: no mount is on its way, since the walk stops at the first); on one that keeps a . or .. past a path
+    the tree does not hold; and on an L line whose path's directory passes through another L line's link. A
+    link into an API mount but API_TARGETS fails the run too, and so does a tmpfiles.d C line that may copy a
+    link (tmpfiles_copies)."""
+    boot, mounts = BootView(view), mount_points(view)
+    lines = tmpfiles_links(boot, usr_view, mounts)
+    # #5731 Security 6877511165: a plain L leaves a tree entry at its path (tmpfiles_links lets only a link
+    # through there), so at boot that path is the tree's link, not the line's: the MountView keeps it, and
+    # every walk through it reads the tree's link.
+    kept = {k for k, (_, l, _) in lines.items() if "+" not in l.split()[0] and boot.lstat(k) is not None}
+    mv = MountView(boot, mounts, {k: t for k, (_, _, t) in lines.items() if k not in kept})
+    drop = ", or drop it (mkosi.conf RemoveFiles=) if a package makes it"
+
+    def walk(k, line, p):
+        what = "%s: L line %r" % lines[k][:2] if line else "the tree's"
+        thing, fix = ("line", "remove the line") if line else ("link", "remove the loop or shorten the chain" + drop)
+        to = ""
+        try:
+            if not line:
+                # #5731 L3 6877540425: an L line's path above a tree link replaces the directory holding it.
+                over = [l for l in lines if k.startswith(l + "/")]
+                if over:
+                    raise SystemExit("unit rules: a link %s (the tree's) sits under %s, which %s: L line %r "
+                                     "replaces at boot; remove the link or the line"
+                                     % ((k, over[0]) + lines[over[0]][:2]))
+                to = " to " + mv.readlink(k)
+            if line and mv.resolve(os.path.dirname(k))[1]:
+                raise SystemExit("unit rules: %s: a tmpfiles.d L line's path passes through another link, "
+                                 "which the unit lint does not read" % k)
+            return mv.resolve(p)[0]
+        except OnMount as e:
+            if e.linked:  # #5735 UX 6878301805 1
+                if k == e.mount:
+                    raise SystemExit("unit rules: a link %s (%s) is the Where= of a mount unit, and systemd mounts "
+                                     "nothing over a link (a non-canonical Where=); remove the link or the mount "
+                                     "unit%s" % (k, what, "" if line else drop))
+                raise SystemExit("unit rules: a link %s (%s)%s passes through %s, a link at a mount unit's Where=; "
+                                 "remove that link or the mount unit" % (k, what, to, e.mount))
+            if k == e.mount or k.startswith(e.mount + "/"):
+                raise SystemExit("unit rules: a link %s (%s) sits at or under %s, where a mount puts a file system "
+                                 "the unit lint does not see; move the %s off the mount%s"
+                                 % (k, what, e.mount, thing, "" if line else drop))
+            raise SystemExit("unit rules: a link %s (%s)%s steps on the mount point %s on its way, where a "
+                             "mount puts a file system the unit lint does not see; point the %s at a path no "
+                             "mount covers%s" % (k, what, to, e.mount, thing, "" if line else drop))
+        except Dotted as e:
+            raise SystemExit("unit rules: %s: a link (%s) resolving to %s, which keeps a . or .. component the "
+                             "unit lint does not follow; write the target without . or .." % (k, what, e.path))
+        except OSError as e:
+            raise SystemExit("unit rules: a link %s (%s) the unit lint cannot read (%s); %s"
+                             % (k, what, e, "remove the line" if line else
+                                "drop the link (mkosi.conf RemoveFiles=) if a package makes it"))
+        except SystemExit as e:
+            if not str(e).endswith("more than 40 links"):
+                raise
+            raise SystemExit("unit rules: a link %s (%s)%s is on a loop or a chain of more than 40 links, which "
+                             "the unit lint cannot follow; %s" % (k, what, to, fix))
+
+    out = {}
+    for k in sorted(set(tree_links(boot, usr_view)) | set(lines)):
+        # A kept path records the tree's link, which is what is there at boot; its line's target is walked
+        # too, so a refusal of either fails the run (tmpfiles_links held both to one path at the BootView).
+        if k in lines:
+            final = walk(k, True, lines[k][2] if k in kept else k)
+        if k not in lines or k in kept:
+            final = walk(k, False, k)
+        if mv.kind(final) in (None, 0o040000):
+            out[k] = final
+    tmpfiles_copies(boot, out, usr_view, mounts)
     for k, v in sorted(out.items()):
-        if v != k and os.path.normpath(v) != v:  # #5703 Security 6872976172: resolve keeps .. past a missing
-            raise SystemExit("unit rules: %s: a link to %s, a target with . or .. the reader does not "
-                             "follow" % (k, v))  # component, and the kernel follows links before ..
-        if v != k and v not in API_TARGETS and any(v == m or v.startswith(m + "/") for m in API_MOUNTS):
-            raise SystemExit("unit rules: %s: a link to %s, under %s, whose own links the reader does not "
+        if v not in API_TARGETS and any(v == m or v.startswith(m + "/") for m in API_MOUNTS):
+            raise SystemExit("unit rules: %s: a link to %s, under %s, whose own links the unit lint does not "
                              "follow" % (k, v, "/" + v.split("/")[1]))
     return out
 
 
 def records(view, shown, dirs, prov, usr_view=None):
     """The records of one run: {"units": [{"unit", "alone", "package", "fed", "files": [{"path", "ours",
-    "text"}]}], "fstab": {"path", "text"} or None, "masks": [{"path", "hides"}], "links": tree_links()}, from SHOWN, systemctl's
+    "text"}]}], "fstab": {"path", "text"} or None, "masks": [{"path", "hides"}], "links": boot_links()}, from SHOWN, systemctl's
     reply for every name names() found. package marks a socket whose endpoint is a package's
     (package_sockets), fed a service such a socket hands its connections to (fed_services); a mask is a
     file of ours that hides a package's drop-in."""
