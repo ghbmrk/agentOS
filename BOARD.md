@@ -418,7 +418,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KRN-forget-c-notice-words | KRN-forget-c-notice-words: the after-erase Forget notice names kinds in the kernel's household words, as the ask does, not raw class names. From #5163. | #5163, #5125 | queued (release; tier A) |
 | KRN-clock-second-source | KRN-clock-second-source: give the kernel's sandbox a second time source and pass the TIM-1 guard's reading as KernelConfig.Clock. Release; from #5387. | #5147, #5387 | building (release; tier A) |
 | KRN-clock-hold-gap | KRN-clock-hold-gap: a hold started while Latest-Earliest is wide is not lengthened by the gap (unit after time-sync, window from Earliest while monotonic, or bound via #5391); STATUS can say why. Release; from #5387. | #5147, #5387, #5391, #5279 | queued (release; tier A) |
-| IMG-keeper-reach-gen-doc | IMG-keeper-reach-gen-doc: image/ASSUMPTIONS.md records the partition-type pin and the extra-unit/fstab.extra firmware routes (I21, I22). Release; from #5289. | #5289 | building (release; tier A) |
 | CTL-owner-text-lost | CTL-owner-text-lost: an owner text that arrives while the agent has no open services is dropped, and the reply says it was lost and to resend. Release; from #5427. | #5425, #5427 | queued (release; tier A; sub B) |
 | VM-snap-unread-notice-fu | VM-snap-unread-notice-fu: the unread-snapshot deletion notice is held and retried until the owner channel delivers it. Release; from #5499 (UX). | #5481, #5499 | queued (release; tier B) |
 | IMG-initrd-global-ext-dirs | IMG-initrd-global-ext-dirs: INITRD_IMAGE_DIRS adds /.extra/global_sysext and /.extra/global_confext when the image's systemd moves past v257. Release; blocked on that bump; from #5501 (Security). | #5488, #5501 | queued (release; tier A; blocked on the systemd bump) |
@@ -427,7 +426,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | OWN-resume-says-cancelled-fu | OWN-resume-says-cancelled-fu: RESUME's cancel note only when the STOP cancelled something. | #5664 | building (release; tier A) |
 | CLK-run-mut-mail-fu | CLK-run-mut-mail-fu: StartTLS setting delivers nothing, gmailtest.Waiting matches any goroutine, a replaced warm-up notice can go unshown. Release; from #5662. | #5324 | building (release; tier A) |
 | CLK-run-open-wipe-senders | CLK-run-open-wipe-senders: a senders plaintext handed back with an Open error is wiped too. Release; from #5666. | #5666 | building (release; tier A) |
-| GUEST-mut-store | GUEST-mut-store: kill or waive the old mutgate deletion survivors in the guest store (26). Release; from #5621. | #5621 | building (release; tier A) |
 | GUEST-mut-plane | GUEST-mut-plane: kill or waive the old mutgate deletion survivors in the guest plane (42). Release; from #5621. | #5621 | building (release; tier A) |
 | GUEST-mut-owner | GUEST-mut-owner: kill or waive the old mutgate deletion survivors in the guest owner channel (33). Release; from #5621. | #5621 | queued (release; tier A) |
 | GUEST-mut-dispatch | GUEST-mut-dispatch: kill or waive the old mutgate deletion survivors in guest mcp, goal, plan and compact (27). Release; from #5621. | #5621 | queued (release; tier A) |
@@ -435,13 +433,14 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | TIM-1-interval-fu-d | TIM-1-interval-fu-d: a lost clock state file widens the interval until carrier time is read. Release; from #5216. | #5216 | queued (release; tier A) |
 | TIM-1-interval-fu-e | TIM-1-interval-fu-e: losing NTS during an outlier re-alerts the owner, and the outlier bound outlives the NTS sync. Release; from #5754. | #5216, #5754 | queued (release; tier A) |
 | KRN-clock-fresh-rise | KRN-clock-fresh-rise: a kernel started behind the log catches up on a fresh chronyd sample (TIM-1). Release; from #5757. | #5391, #5757 | queued (release; tier A) |
-| MUT-deleted-test-own-lines | MUT-deleted-test-own-lines: mutgate unions a diff's own lines with its deleted tests' coverage. Release; from #5761. | #5761 | building (release; tier A) |
 | VULN-debian-r9 | VULN-debian-r9: accept expat's and dbus's new Debian 13 advisories DEBIAN-CVE-2026-128241, -128885, -128886 so image-vulncheck passes again. Release; fifth no-fix Debian round. | #2919, #5660 | building (release; tier A) |
 | VULN-debian-r9-f1 | VULN-debian-r9-f1: name the flaw class and local reachability of dbus DEBIAN-CVE-2026-128885/-128886 and expat -128241 in their records. | #5764, #5765 | queued (release; tier A) |
 | UI-inbox-fail-race | UI-inbox-fail-race: the Inbox mutants test sets its failing store's flag while the owner channel's goroutine saves through it, a data race that reddens broker-race. Release; flake, seen on #5743. | #5743 | building (release; tier B) |
 | CLK-run-waiting-scope | CLK-run-waiting-scope: world_test's step-in-flight wait uses the unscoped gmailtest.Waiting; move it to G.Waiting and drop the unscoped one. Release; from #5694. | #5694 | queued (release; tier A) |
 | LINT-dial-configured | LINT-dial-configured: the inference lint's configured() refuses a local bound to a literal (NET-2). Release; from #5757. | #5757 | queued (release) |
-| MUT-waiver-store | MUT-waiver-store: keep accepted Mutant-equivalent proofs in a statement-keyed record per package, so a widened mutgate target does not re-surface them. Release; from #5743. | #5743 | queued (release; tier A) |
+| MUT-waiver-store | MUT-waiver-store: keep accepted Mutant-equivalent proofs in a statement-keyed record per package, so a widened mutgate target does not re-surface them. Release; from #5743. | #5743 | building (release; tier A) |
+| CLK-run-mut-mail-fu2 | CLK-run-mut-mail-fu2: a mail account stored with starttls is refused as unreadable instead of losing its password slot; the sign-in overlap test pins the refresh path. Release; from #5774. | #5774, #5694 | queued (release; tier A) |
+| MUT-deleted-test-own-lines-fu | MUT-deleted-test-own-lines-fu: #5770's release items: NOT COVERED rule scope, testdata as a test change, Mutant-uncovered alias, archive error text. Release; after #5776. | #5770 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -486,6 +485,5 @@ issue #5216: body has no board-row block
 issue #5708: body has no board-row block
 issue #5709: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5736: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #5753: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5756: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 ```
