@@ -68,6 +68,30 @@ class NextIdTest(unittest.TestCase):
             self.assertEqual(lookup.tree_ids(d, head), {1, 2, 300, 301, 302})
 
 
+class NextIdFetchOrderTest(unittest.TestCase):
+    def test_a_fetch_that_advances_main_is_read_before_ids_are_chosen(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            origin, work, other = (pathlib.Path(d, n) for n in ("origin.git", "work", "other"))
+            git(d, "init", "-q", "--bare", "-b", "main", str(origin))
+            git(d, "clone", "-q", str(origin), str(work))
+            commit(work, {"DECISIONS.md": TABLE}, "base")
+            git(work, "push", "-q", "origin", "HEAD:main")
+            git(d, "clone", "-q", str(origin), str(other))
+            commit(other, {"DECISIONS.md": TABLE + "| D-301 | y |\n"}, "advance")
+            git(other, "push", "-q", "origin", "HEAD:main")
+            # `work` still has the old origin/main; next-id must fetch before it reads.
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                lookup.next_id(str(work), "D", [], (300, None))
+            self.assertIn("next: D-302", out.getvalue())
+            # A failed fetch is an error, never a guess from the stale ref.
+            git(work, "remote", "set-url", "origin", str(pathlib.Path(d, "missing.git")))
+            with self.assertRaises(lookup.Failed):
+                lookup.next_id(str(work), "D", [], (300, None))
+
+
 GO_LOG = """\
 2026-10-31T10:00:00.1234567Z === RUN   TestOK
 2026-10-31T10:00:00.1234567Z --- PASS: TestOK (0.00s)

@@ -28,7 +28,7 @@ def changed_lines(base, head, path):
     status = _git("diff", "--no-color", "--no-ext-diff", "--no-renames", "--name-status", onto, head, "--", path)
     if status.startswith("D"):
         return None
-    out = _git("diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "-U0", onto, head, "--", path)
+    out = _git("diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "-U0", "--inter-hunk-context=0", onto, head, "--", path)
     lines = set()
     for m in HUNK.finditer(out):
         start, count = int(m.group(1)), int(m.group(2) or 1)
