@@ -18,10 +18,10 @@
 # unit's state, MOR, the directories the clear refuses on while they hold files) and the clear's
 # journal, this boot's and the last one's, so a phase that finds MOR set says why on the console.
 if [ "$1" != journaled ]; then
-	exec 3>&1
+	command exec 3>&1
 	exec systemd-cat -t hostcheck-responder /bin/sh "$0" journaled
 fi
-exec 4>&1 1>&3 2>&3 3>&-
+command exec 4>&1 1>&3 2>&3 3>&-
 MOR=/sys/firmware/efi/efivars/MemoryOverwriteRequestControl-e20939be-32d4-41be-a150-897f85d49829
 diag() {
 	echo "HOSTCHECK-DIAG $1 agentos-mor.service $(systemctl show -p ActiveState -p SubState -p Result --value agentos-mor.service | tr '\n' ' ')"
