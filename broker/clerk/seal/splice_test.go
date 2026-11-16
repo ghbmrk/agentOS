@@ -1,13 +1,16 @@
 package seal
 
-// REQ: STO-2, A8
+// REQ: STO-2, A8, CLK-1
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/tpmseal"
@@ -244,6 +247,77 @@ func TestARefusedEntrySetIsWiped(t *testing.T) {
 				if l, _ := os.Readlink(filepath.Join("/proc/self/fd", fd.Name())); l == path {
 					t.Fatalf("Unlock left %s open", path)
 				}
+			}
+		})
+	}
+}
+
+// An authenticated entry set encode never writes (#5897; CLK-1, STO-2): a
+// name given twice opens with its last value, and the value it displaced is
+// never decoded, so a displaced value that is no base64 does not refuse the
+// set; a value that is no base64 has its part-decoded buffer wiped once; a
+// value that is no string, and a set of null, are ErrCorrupt.
+func TestAnEntrySetEncodeNeverWrites(t *testing.T) {
+	r, key, id := Recovery{Key: make([]byte, RecoveryLen)}, slices.Repeat([]byte{0x3c}, keyLen), make([]byte, idLen)
+	sl, err := makeSlot(id, key, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := func(plain string) string {
+		return refusalWrite(t, refusalStore(t, key, sl, func(id []byte) []byte {
+			b, err := seal(derive(key, id, "entries", keyLen), []byte(plain), entriesAAD(id))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return b
+		}))
+	}
+	kept, part := []byte("kept-entry-canary"), "QUJDREVG" // part decodes to ABCDEF before the bad quantum
+	held := refusalWipes(t)
+	s, err := Unlock(raw(`{"x/a":"`+base64.StdEncoding.EncodeToString([]byte("displaced"))+`","x/a":"!!!!","x/a":"`+base64.StdEncoding.EncodeToString(kept)+`"}`), r)
+	if err != nil {
+		t.Fatalf("a repeated name: %v", err)
+	}
+	if v, _, _ := s.Get("x/a"); !bytes.Equal(v, kept) || len(Entries(s)) != 1 {
+		t.Fatalf("a repeated name opened as %q, %d entries; want its last value only", v, len(Entries(s)))
+	}
+	// The derived keys' buffers are wiped once each, and Delete drops only its entry.
+	s.LogKey()
+	s.ClerkRoot()
+	for _, purpose := range []string{"log", "clerks"} {
+		if n := refusalCount(*held, derive(key, id, purpose, keyLen)); n != 1 {
+			t.Errorf("wiped the %s key's buffer %d times, want once", purpose, n)
+		}
+	}
+	if err := s.Put("x/b", kept); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete("x/b"); err != nil || !slices.Equal(s.Entries(), []string{"x/a"}) {
+		t.Fatalf("Delete: %v, entries %q", err, s.Entries())
+	}
+	s.Close()
+	if n := refusalCount(*held, kept); n != 1 {
+		t.Errorf("wiped the kept value %d times, want once", n)
+	}
+	for name, plain := range map[string]string{
+		"no base64": `{"x/a":"` + base64.StdEncoding.EncodeToString(kept) + `","x/b":"` + part + `!!!!"}`,
+		"a number":  `{"x/a":"` + base64.StdEncoding.EncodeToString(kept) + `","x/b":1234}`,
+		"null":      `{"x/a":"` + base64.StdEncoding.EncodeToString(kept) + `","x/b":null}`,
+		"null set":  `null`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			held := refusalWipes(t)
+			if _, err := Unlock(raw(plain), r); !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("got %v, want ErrCorrupt", err)
+			}
+			partial := 0
+			for _, h := range *held {
+				if strings.HasPrefix(h, "ABCDEF") {
+					partial++
+				}
+			}
+			if partial != strings.Count(plain, part) || refusalCount(*held, kept) != strings.Count(plain, "x/a") {
+				t.Errorf("wiped the part-decoded value %d times and the decoded canary %d", partial, refusalCount(*held, kept))
 			}
 		})
 	}

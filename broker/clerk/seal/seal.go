@@ -37,6 +37,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -528,8 +529,19 @@ func Unlock(path string, f Factor) (*Store, error) {
 		if err != nil {
 			return nil, ErrTampered
 		}
+		var set map[string]inPlain
+		err = json.Unmarshal(plain, &set)
 		s := &Store{path: path, key: secret.Hide(slices.Clone(key)), f: *fl, entries: secret.Hide(map[string][]byte{})}
-		if err := json.Unmarshal(plain, s.entries.Ref()); err != nil || !validEntries(s.entries.Get()) {
+		for name, v := range set {
+			b := make([]byte, base64.StdEncoding.DecodedLen(len(v)))
+			s.entries.Get()[name] = b // the store's before Decode fills it, so Close wipes a part-decoded one
+			if n, e := base64.StdEncoding.Decode(b, bytes.Trim(v, `"`)); e == nil && v[0] == '"' {
+				s.entries.Get()[name] = b[:n]
+			} else {
+				err = ErrCorrupt
+			}
+		}
+		if err != nil || set == nil || !validEntries(s.entries.Get()) {
 			s.Close() // the values decoded before the refusal are secrets too (CLK-1)
 			return nil, ErrCorrupt
 		}
@@ -541,6 +553,12 @@ func Unlock(path string, f Factor) (*Store, error) {
 	// A TPM refusal (a modified boot path, a wrong PIN, lockout) says why.
 	return nil, errors.Join(append([]error{ErrWrongFactor}, errs...)...)
 }
+
+// inPlain is an entry's JSON value left in Unlock's plaintext, whose wipe covers it: Unlock decodes
+// a value only once the set parses, so one a repeated name displaces never is (CLK-1).
+type inPlain []byte
+
+func (v *inPlain) UnmarshalJSON(b []byte) error { *v = b; return nil }
 
 func sealedUnder(s *tpmseal.Sealed, key *ecdsa.PublicKey) bool {
 	pub, err := s.PolicyPublicKey()
@@ -615,11 +633,7 @@ func readFile(path string) ([]byte, error) {
 		return nil, err
 	}
 	defer fh.Close()
-	b, err := io.ReadAll(io.LimitReader(fh, MaxFile+1))
-	if err != nil {
-		return nil, err
-	}
-	return b, nil
+	return io.ReadAll(io.LimitReader(fh, MaxFile+1))
 }
 
 // encode is the file's bytes with nf's slots and entries e, MAC'd.
@@ -867,8 +881,7 @@ func (s *Store) withEntry(name string, value []byte) (map[string][]byte, error) 
 	if !entryName.MatchString(name) || len(value) > MaxEntry {
 		return nil, errors.New("seal: bad entry name or value too long")
 	}
-	e := make(map[string][]byte)
-	maps.Copy(e, s.entries.Get())
+	e := maps.Clone(s.entries.Get())
 	e[name] = slices.Clone(value)
 	if len(e) > MaxEntries {
 		return nil, fmt.Errorf("seal: a store holds at most %d entries", MaxEntries)
@@ -897,12 +910,8 @@ func (s *Store) Delete(name string) error {
 	if _, ok := s.entries.Get()[name]; !ok {
 		return nil
 	}
-	e := make(map[string][]byte, len(s.entries.Get()))
-	for k, v := range s.entries.Get() {
-		if k != name {
-			e[k] = v
-		}
-	}
+	e := maps.Clone(s.entries.Get())
+	delete(e, name)
 	return s.commit(s.f.Slots, e)
 }
 
@@ -927,17 +936,16 @@ func (s *Store) derived(purpose string) ([]byte, error) {
 	return derive(s.key.Get(), s.f.ID, purpose, keyLen), nil
 }
 
-// LogKey is the log's AES-256-GCM key (STO-1, run.KernelConfig.Key).
-func (s *Store) LogKey() ([32]byte, error) {
-	var k [32]byte
-	b, err := s.derived("log")
-	if err != nil {
-		return k, err
-	}
+// derived32 is derived as an array, its buffer wiped.
+func (s *Store) derived32(purpose string) (k [32]byte, err error) {
+	b, err := s.derived(purpose)
 	copy(k[:], b)
 	wipe(b)
-	return k, nil
+	return k, err
 }
+
+// LogKey is the log's AES-256-GCM key (STO-1, run.KernelConfig.Key).
+func (s *Store) LogKey() ([32]byte, error) { return s.derived32("log") }
 
 // HeadKey is the kernel's head-signing key (KEY-3's head domain,
 // run.KernelConfig.Sign). Its public half is HeadKey().Public().
@@ -953,16 +961,7 @@ func (s *Store) HeadKey() (ed25519.PrivateKey, error) {
 // ClerkRoot is the root of every clerk's key (MAIL-keys, CLK-1): the unlock
 // step hands it to the kernel, which derives each clerk's key from it
 // (clerkkey.Derive) and hands that key to that clerk alone.
-func (s *Store) ClerkRoot() ([32]byte, error) {
-	var k [32]byte
-	b, err := s.derived("clerks")
-	if err != nil {
-		return k, err
-	}
-	copy(k[:], b)
-	wipe(b)
-	return k, nil
-}
+func (s *Store) ClerkRoot() ([32]byte, error) { return s.derived32("clerks") }
 
 // Close wipes the store key. Keys already handed out are the caller's.
 func (s *Store) Close() {
