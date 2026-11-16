@@ -1,6 +1,7 @@
 package run
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/sha256"
@@ -300,7 +301,11 @@ func removeFiles(dir string, names ...string) error {
 }
 
 // readMail loads dir's settings file under the same custody checks as the
-// Secrets file.
+// Secrets file. The file must be exactly what setup writes for the settings
+// it holds, so slotOf names the slot setup put its secret in: a field this
+// clerk does not have, such as the "starttls" of an account stored before
+// #5694, is refused as unreadable, and the owner is told to set the account
+// up again, rather than read under settings whose slot holds nothing (#5777).
 func readMail(dir string) (MailSettings, error) {
 	var r MailSettings
 	if err := privfile.Check(dir, true); err != nil {
@@ -323,6 +328,9 @@ func readMail(dir string) (MailSettings, error) {
 	}
 	if len(b) > maxSettings || json.Unmarshal(b, &r) != nil || r.check() != nil {
 		return r, fmt.Errorf("run: %s does not load", mailSettings)
+	}
+	if w, _ := json.Marshal(r); !bytes.Equal(w, b) {
+		return r, fmt.Errorf("run: %s is not in setup's form", mailSettings)
 	}
 	return r, nil
 }

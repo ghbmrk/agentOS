@@ -101,16 +101,16 @@ func TestTIM1AuthenticatedTimeBoundsAnOutlierCarrier(t *testing.T) {
 func TestTIM1IntervalLine(t *testing.T) {
 	zone := time.FixedZone("x", 2*3600)
 	plain := Status{State: Disagree, Skew: 3 * time.Hour, Since: time.Date(2026, 10, 5, 4, 0, 0, 0, time.UTC), Verified: true}
-	if got := plain.IntervalLine(zone); got != "Time check: box and phone network differ by about 3 hours since 06:00, so holds and timeouts end by both clocks and expiries by either, until they agree." {
+	if got := plain.IntervalLine(zone); got != "Time check: box and phone network differ by about 3 hours since 06:00, so holds and timeouts end by both clocks and expiries by either, until they agree. Nothing to do." {
 		t.Fatalf("line = %q", got)
 	}
 	auth := plain
 	auth.Authenticated = true
-	if got := auth.IntervalLine(zone); got != "Time check: phone network differs from authenticated network time by about 3 hours since 06:00; network time stands." {
+	if got := auth.IntervalLine(zone); got != "Time check: phone network differs from authenticated network time by about 3 hours since 06:00, so network time stands (a fake phone mast can do this). Nothing to do." {
 		t.Fatalf("line = %q", got)
 	}
 	lost := Status{State: Disagree, Since: plain.Since}
-	if got := lost.IntervalLine(zone); got != "Time check: saved check unreadable since 06:00, so holds and timeouts wait until phone-network time confirms the clock." {
+	if got := lost.IntervalLine(zone); got != "Time check: saved check unreadable since 06:00, so holds and timeouts wait until phone-network time or authenticated network time confirms the clock. Nothing to do." {
 		t.Fatalf("line = %q", got)
 	}
 	for _, st := range []Status{{State: Agreed, Verified: true}, {State: Held, Skew: time.Hour, Verified: true}, {Start: plain.Since}} {
@@ -118,9 +118,37 @@ func TestTIM1IntervalLine(t *testing.T) {
 			t.Fatalf("%v: line = %q, want %q", st.State, got, old)
 		}
 	}
-	for _, st := range []Status{plain, auth, lost} {
+	lostAuth := lost
+	lostAuth.Authenticated = true
+	for _, st := range []Status{plain, auth, lost, lostAuth} {
 		if strings.Contains(st.IntervalLine(zone), "restricted") {
 			t.Fatalf("line names the removed mode: %q", st.IntervalLine(zone))
+		}
+		// UX 1-4 on #5810: every disagreement line ends on its next step.
+		if !strings.HasSuffix(st.IntervalLine(zone), " Nothing to do.") {
+			t.Errorf("line names no next step: %q", st.IntervalLine(zone))
+		}
+	}
+	// The skew is told in the largest whole unit, from each unit's start.
+	for skew, want := range map[time.Duration]string{
+		48 * time.Hour: "about 2 days", 2 * time.Hour: "about 2 hours", time.Hour: "about 1 hour",
+		-time.Hour: "about 1 hour", 30 * time.Minute: "about 30 minutes",
+	} {
+		st := plain
+		st.Skew = skew
+		if got := st.IntervalLine(zone); !strings.Contains(got, "differ by "+want+" since") {
+			t.Errorf("skew %v: line = %q, want %q", skew, got, want)
+		}
+	}
+	// A skew of exactly the tolerance agrees, on either sign; a second past
+	// it is a disagreement line.
+	for _, skew := range []time.Duration{DefaultTolerance, -DefaultTolerance, DefaultTolerance + time.Second, -DefaultTolerance - time.Second} {
+		r := newRig()
+		r.carrier = r.wall.Add(-skew)
+		s := r.guard(t, nil).Check(bg)
+		agree := skew == DefaultTolerance || skew == -DefaultTolerance
+		if got := s.IntervalLine(zone); (got == "Time check: box and phone network agree.") != agree {
+			t.Errorf("skew %v: line = %q", skew, got)
 		}
 	}
 }

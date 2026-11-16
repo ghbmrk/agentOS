@@ -37,6 +37,15 @@ run      govulncheck on each Go target of assurance/vulncheck.json, an OSV scan 
              not in the shipped image, so the inlined scan does not read them; the build
              (guest/openclaw/prune.js) deletes exactly that list or fails, and an entry that
              matches no file in its holder's tarball fails the scan.
+           - Bundled: any vulnerability in a library copy a guest's pinned binary links
+             statically (the config's "bundled", #5853), which no lockfile or Debian scan reads
+             (#5873). Each copy is queried in OSV's GIT ecosystem by its upstream repository and
+             release tag (BUNDLED_SOURCES; a library with none fails), with a canary release that
+             must match an advisory, and its upstream release notes are read too: every CVE in a
+             section newer than the copy's release is an advisory of the copy (OSV's GIT data
+             misses some), and a notes file with no section for the release fails the scan. A
+             finding fails unless its entry's "ids" names it or an alias; an id that neither
+             source lists is reported as info (a reviewed fix that is a branch commit only).
          A record names the vulnerability (its ID or any alias), the package and version it
          accepts (a Debian image record names only its source package), the issue that records
          why it is accepted, and the reason; a record accepts no other package or version. With --check-issues each cited issue must be an open
@@ -136,6 +145,28 @@ RECORD_KEYS = {"id", "issue", "why", "where", "package", "version"}
 INLINED_KEYS = {"holder", "copy", "files", "why"}
 INLINED_BUNDLE_KEYS = {"holder", "bundle", "files", "why"}
 PRUNED_KEYS = {"where", "holder", "path", "why"}
+# Bundled copies (#5873): the `where` of their findings, an entry's keys, and the upstream
+# repository and release tag of each library a copy may name. OSV's GIT ecosystem matches a tag
+# against the tags an advisory's git ranges enumerate (its affected "versions"), so the copy is
+# queried as the release it was built from. OSV's GIT data misses some fixed CVEs (5 of the 13
+# OpenSSL 3.6.5 fixed, #5888), so the release branch's notes are a second source: "notes" is their
+# URL for a release branch, and "release" the version form a copy must have to name its branch. A
+# library missing here fails the shape check, so a new kind of copy is not scanned against nothing.
+BUNDLED = "bundled"
+BUNDLED_KEYS = {"holder", "copy", "build", "issue", "ids", "why"}
+BUNDLED_SOURCES = {"openssl": {
+    "repo": "https://github.com/openssl/openssl", "tag": "openssl-{}",
+    "notes": "https://raw.githubusercontent.com/openssl/openssl/openssl-{}/CHANGES.md",
+    "release": re.compile(r"^(\d+\.\d+)\.\d+$")}}
+# A notes section header ("### Changes between 3.6.4 and 3.6.5 [29 Sep 2026]"; newest first) and a
+# CVE id. The control reads a fixture's notes from NOTES_DIR under its root, as <lib>-<branch>.md.
+NOTES_SECTION = re.compile(r"^### Changes between \S+ and (\S+) \[", re.M)
+CVE_ID = re.compile(r"\bCVE-\d{4}-\d{4,}\b")
+NOTES_DIR = "changelog"
+# A release with advisories that will not all be withdrawn (Heartbleed's among them): each query
+# asks for it, and an answer with none for it read nothing, which fails the scan.
+BUNDLED_CANARY = ("openssl", "1.0.1f")
+NAME_AT = re.compile(r"^(@?[^@\s/]+(?:/[^@\s/]+)?)@([^@\s]+)$")
 # The lockfiles whose guest build may prune installed files (D-308). OpenClaw only: a plan CLI
 # guest (Codex) runs as its provider ships it (CLK-7).
 PRUNABLE = {"guest/openclaw/package-lock.json"}
@@ -170,6 +201,19 @@ CONTROL_FAILS = {("gomod", "GO-0000-0001"), ("gomod", "GO-0000-0002"),
                  ("npm/package-lock.json", "AGENTOS-VULNCHECK-CONTROL-1"),
                  ("ignored/package-lock.json", "AGENTOS-VULNCHECK-CONTROL-1")}
 CONTROL_FAILS |= {("npm/package-lock.json", f"AGENTOS-VULNCHECK-INLINED-{n}") for n in (1, 2, 3, 4)}
+# The bundled plants (#5873; FIXTURE/osvdb/GIT): two advisories at the planted OpenSSL release fail
+# with no ids; one at another release, one at the same tag of another repository and a withdrawn
+# one must not be reported. The release notes (FIXTURE/changelog/openssl-0.0.md) add two CVEs from
+# sections newer than 0.0.1, one of them unreleased; the 0.0.1 section's own CVE and CVE-0000-0202,
+# which BUNDLED-2 holds as an alias, add none. CONTROL_CONFIG's entry accepts the first by ID, the
+# second by alias and the notes' two by ID, and its unlisted id is info.
+CONTROL_FAILS |= {(BUNDLED, "AGENTOS-VULNCHECK-BUNDLED-1"), (BUNDLED, "AGENTOS-VULNCHECK-BUNDLED-2"),
+                  (BUNDLED, "CVE-0000-0301"), (BUNDLED, "CVE-0000-0302")}
+CONTROL_BUNDLED = {"holder": "agentos-pinned@1.0.0", "copy": "openssl@0.0.1", "build": "npm/package-lock.json",
+                   "issue": 1, "ids": ["AGENTOS-VULNCHECK-BUNDLED-1", "CVE-0000-0202", "CVE-0000-0301",
+                                       "CVE-0000-0302", "CVE-0000-0399"],
+                   "why": "control: a copy accepted by ID and by alias, with an id no source lists"}
+CONTROL_BUNDLED_INFO = {(BUNDLED, "CVE-0000-0399")}
 CONTROL_INFO = {("gomod", "GO-0000-0003")}
 # The inlined plants in agentos-bundle's tarball (#4153), as (ID, package, version): a copy a pnpm
 # store path marks, one its license sidecar lists, one the config's inlined entry names, one an
@@ -218,6 +262,7 @@ CONTROL_CONFIG = {
     "go_targets": ["gomod"],
     "osv_sources": ["npm/package-lock.json"],
     "skip_paths": [],
+    "bundled": [CONTROL_BUNDLED],
     "inlined": [{"holder": "agentos-bundle@1.0.0", "copy": "agentos-unmarked@3.0.0", "files": ["dist/min.js"],
                  "why": "control: a minified copy with no mark"},
                 {"holder": "agentos-bundle@1.0.0", "bundle": "agentos-bundle@1.0.0:dist/bare.js",
@@ -316,6 +361,194 @@ def go_findings(where, objs, vendored_mods):
             "fails": lv == "symbol" or (mod != STDLIB and mod in vendored_mods),
         }
     return sorted(best.values(), key=lambda x: x["id"])
+
+
+def bundled_problems(entries, root=ROOT):
+    """Shape problems in the config's "bundled" entries (#5873)."""
+    problems, seen = [], set()
+    if not isinstance(entries, list):
+        return ["bundled: not a list"]
+    for n, e in enumerate(entries):
+        tag = f"bundled[{n}]"
+        if not isinstance(e, dict):
+            problems.append(f"{tag}: not an object")
+            continue
+        if set(e) != BUNDLED_KEYS:
+            problems.append(f"{tag}: keys must be exactly {sorted(BUNDLED_KEYS)}, got {sorted(e)}")
+        for key in ("holder", "copy"):
+            if not isinstance(e.get(key), str) or not NAME_AT.match(e[key]):
+                problems.append(f"{tag}: {key} must be name@version")
+        if isinstance(e.get("copy"), str) and NAME_AT.match(e["copy"]):
+            lib = NAME_AT.match(e["copy"]).group(1)
+            if lib not in BUNDLED_SOURCES:
+                problems.append(f"{tag}: no upstream is known for {lib}, so its copy cannot be queried; "
+                                "add its repository and tag form to BUNDLED_SOURCES in tools/vulncheck.py")
+            elif not BUNDLED_SOURCES[lib]["release"].match(NAME_AT.match(e["copy"]).group(2)):
+                problems.append(f"{tag}: {e['copy']} names no release whose notes branch is known")
+        build = e.get("build")
+        if (not isinstance(build, str) or not build or build.startswith("/") or ".." in build.split("/")
+                or not (pathlib.Path(root) / build).is_file()):
+            problems.append(f"{tag}: build must name the script in this tree that pins the holder")
+        if not isinstance(e.get("issue"), int) or isinstance(e.get("issue"), bool) or e["issue"] < 1:
+            problems.append(f"{tag}: issue must be an issue number")
+        ids = e.get("ids")
+        if (not isinstance(ids, list) or not all(isinstance(i, str) and i.strip() == i and i for i in ids)
+                or len(set(ids)) != len(ids)):
+            problems.append(f"{tag}: ids must be a list of distinct advisory IDs")
+        if not isinstance(e.get("why"), str) or not e["why"].strip():
+            problems.append(f"{tag}: no reason")
+        key = (e.get("holder"), e.get("copy"))
+        if key in seen:
+            problems.append(f"{tag}: a second entry for {key[1]} in {key[0]}")
+        seen.add(key)
+    return problems
+
+
+def git_query(lib, version):
+    src = BUNDLED_SOURCES[lib]
+    return {"package": {"name": src["repo"], "ecosystem": "GIT"}, "version": src["tag"].format(version)}
+
+
+def osv_json(req, opener, what):
+    try:
+        with opener(req, timeout=120) as resp:
+            return json.load(resp)
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise ScanError(f"{req.full_url}: {what} failed ({e})")
+
+
+def bundled_advisories(copies, env=None, offline=False, opener=urllib.request.urlopen):
+    """{(lib, version): [{"id", "aliases"}]} for each COPY, a (lib, version) pair: the advisories
+    OSV holds for that release of the library's upstream repository, withdrawn ones left out. From
+    the offline database osv-scanner reads when OFFLINE (the control's), else from OSV's batch
+    query, following each answer's page token. The canary release must match one."""
+    copies = sorted(set(copies))
+    want = copies + [BUNDLED_CANARY]
+    found = {}
+    if offline:
+        path = pathlib.Path((env or {}).get("OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY", "")) / "osv-scalibr" / "GIT" / "all.zip"
+        try:
+            with zipfile.ZipFile(path) as z:
+                vulns = [json.loads(z.read(f)) for f in z.namelist()]
+        except (OSError, ValueError, zipfile.BadZipFile) as e:
+            raise ScanError(f"{path}: unreadable OSV database ({e})")
+        for lib, version in want:
+            q = git_query(lib, version)
+            found[(lib, version)] = sorted(v["id"] for v in vulns if not v.get("withdrawn") and any(
+                q["version"] in (a.get("versions") or []) and any(
+                    r.get("type") == "GIT" and r.get("repo") == q["package"]["name"] for r in a.get("ranges") or [])
+                for a in v.get("affected") or []))
+        details = {v["id"]: v for v in vulns}
+    else:
+        queries = [git_query(*c) for c in want]
+        req = urllib.request.Request(OSV_QUERYBATCH, data=json.dumps({"queries": queries}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        results = osv_json(req, opener, "the bundled-copy query").get("results")
+        if not isinstance(results, list) or len(results) != len(queries) or not all(isinstance(r, dict) for r in results):
+            raise ScanError(f"{OSV_QUERYBATCH}: the bundled-copy query answered {len(results or [])} of {len(queries)} copies")
+        details = {}
+        for c, q, r in zip(want, queries, results):
+            ids = [v["id"] for v in r.get("vulns") or []]
+            token, pages = r.get("next_page_token"), 0
+            while token:
+                pages += 1
+                if pages > 100:
+                    raise ScanError(f"{OSV_QUERY}: more than 100 pages for {q['version']}")
+                page = osv_json(urllib.request.Request(
+                    OSV_QUERY, data=json.dumps({**q, "page_token": token}).encode(),
+                    headers={"Content-Type": "application/json"}), opener, "a bundled-copy page")
+                ids += [v["id"] for v in page.get("vulns") or []]
+                token = page.get("next_page_token")
+            found[c] = sorted(set(ids))
+        for vid in sorted({i for c in copies for i in found[c]}):
+            details[vid] = osv_json(urllib.request.Request(OSV_VULN.format(urllib.parse.quote(vid, safe=""))),
+                                    opener, f"reading {vid}")
+            if details[vid].get("id") != vid:
+                raise ScanError(f"{OSV_VULN.format(vid)}: answered for {details[vid].get('id')!r}")
+    if not found[BUNDLED_CANARY]:
+        raise ScanError("the bundled-copy query found nothing for %s %s, so its answers are not read"
+                        % BUNDLED_CANARY)
+    return {c: [{"id": i, "aliases": [a for a in details.get(i, {}).get("aliases") or [] if a != i]}
+                for i in found[c] if not details.get(i, {}).get("withdrawn")] for c in copies}
+
+
+def notes_ids(text, version, what):
+    """The CVE ids in each section of release notes TEXT newer than VERSION's (sections run newest
+    first, unreleased ones included). A file with no section for VERSION fails the scan."""
+    heads = list(NOTES_SECTION.finditer(text))
+    at = next((h for h in heads if h.group(1) == version), None)
+    if at is None:
+        raise ScanError(f"{what}: no section for the {version} release, so the fixes after it are not read")
+    return sorted(set(CVE_ID.findall(text[heads[0].start():at.start()])))
+
+
+def release_notes(copies, root=ROOT, offline=False, opener=urllib.request.urlopen):
+    """{(lib, version): [CVE id]} for each COPY: the fixes its upstream release branch's notes list
+    after its release. From NOTES_DIR under ROOT when OFFLINE (the control's), else fetched."""
+    texts, out = {}, {}
+    for lib, version in sorted(set(copies)):
+        branch = BUNDLED_SOURCES[lib]["release"].match(version).group(1)
+        if (lib, branch) not in texts:
+            if offline:
+                path = pathlib.Path(root) / NOTES_DIR / f"{lib}-{branch}.md"
+                try:
+                    texts[(lib, branch)] = (str(path), path.read_text(encoding="utf-8"))
+                except (OSError, ValueError) as e:
+                    raise ScanError(f"{path}: unreadable release notes ({e})")
+            else:
+                url = BUNDLED_SOURCES[lib]["notes"].format(branch)
+                try:
+                    with opener(urllib.request.Request(url), timeout=120) as resp:
+                        texts[(lib, branch)] = (url, resp.read().decode("utf-8"))
+                except (urllib.error.URLError, OSError, ValueError) as e:
+                    raise ScanError(f"{url}: reading the release notes failed ({e})")
+        what, text = texts[(lib, branch)]
+        out[(lib, version)] = notes_ids(text, version, what)
+    return out
+
+
+def union_advisories(osv, notes):
+    """OSV's advisories of each copy, with an advisory per CVE id its release notes list that no
+    OSV advisory names as its ID or an alias."""
+    out = {}
+    for c, advs in osv.items():
+        named = {n for a in advs for n in (a["id"], *a["aliases"])}
+        out[c] = advs + [{"id": i, "aliases": []} for i in notes.get(c, []) if i not in named]
+    return out
+
+
+def bundled_copy(e):
+    return NAME_AT.match(e["copy"]).groups()
+
+
+def bundled_findings(entries, advisories):
+    """A failing finding per advisory of each entry's copy, accepted when the entry's ids name it
+    or an alias; and an info finding per id that names no advisory of the copy (a reviewed fix no
+    source lists yet, such as a branch commit with no release; it accepts that id when one does)."""
+    findings = []
+    for e in entries:
+        lib, version = bundled_copy(e)
+        names = set()
+        for adv in advisories[(lib, version)]:
+            f = {"where": BUNDLED, "id": adv["id"], "aliases": adv["aliases"], "level": BUNDLED,
+                 "module": lib, "version": version, "package": f"{lib} in {e['holder']}",
+                 "function": "", "fixed": "", "fails": True}
+            if {adv["id"], *adv["aliases"]} & set(e["ids"]):
+                f["accepted_by"] = e["issue"]
+            names |= {adv["id"], *adv["aliases"]}
+            findings.append(f)
+        for i in e["ids"]:
+            if i not in names:
+                findings.append({"where": BUNDLED, "id": i, "aliases": [], "level": "unlisted", "module": lib,
+                                 "version": version, "package": f"{lib} in {e['holder']}", "function": "",
+                                 "fixed": "", "fails": False})
+    return sorted(findings, key=lambda x: (x["package"], x["id"]))
+
+
+def citing(config):
+    """Everything in the config that cites an issue, for `cited` and `reopen`: the records and the
+    bundled entries, whose acceptances a closed issue withdraws alike."""
+    return config.get("accepted", []) + [e for e in config.get("bundled", []) if isinstance(e, dict)]
 
 
 def under(rel, dirs):
@@ -451,7 +684,7 @@ def issue_problems(records, repo, token, opener=urllib.request.urlopen):
 
 
 REOPEN_NOTE = ("Reopened by `tools/vulncheck.py reopen`: `assurance/vulncheck.json` cites this issue for "
-               "{n} accepted record(s), and a closed issue withdraws their acceptance, which fails "
+               "{n} accepted or bundled record(s), and a closed issue withdraws their acceptance, which fails "
                "every vulncheck scan that applies them. Close it only after its last record is "
                "removed or moved to another open issue. The state label is unchanged: a "
                "`state:merged` issue stays off BOARD.md and the build queue while open.")
@@ -618,6 +851,8 @@ FP_MIN = 5
 MINIFIED_LINE = 1000
 REGISTRY = "https://registry.npmjs.org"
 OSV_QUERYBATCH = "https://api.osv.dev/v1/querybatch"
+OSV_QUERY = "https://api.osv.dev/v1/query"
+OSV_VULN = "https://api.osv.dev/v1/vulns/{}"
 # A package with advisories that will not be withdrawn: each batch asks for it, and a batch that
 # finds none for it answered nothing, which fails the scan (as the image scan's curl canary).
 ADVISORY_CANARY = "lodash"
@@ -1407,7 +1642,7 @@ def scan(config, root, go_db=None, osv_env=None, offline=False, mirror=None):
     """Findings and problems for one tree; records applied, issues not checked. MIRROR holds
     the control's offline copies of the tarballs its lockfiles name."""
     problems = (record_problems(config.get("accepted", [])) + inlined_problems(config.get("inlined", []))
-                + pruned_problems(config.get("pruned", [])))
+                + pruned_problems(config.get("pruned", [])) + bundled_problems(config.get("bundled", []), root))
     records = [r for r in config.get("accepted", []) if r.get("where") not in IMAGE_TREES]
     for key in ("go_targets", "osv_sources"):
         if not config.get(key):
@@ -1430,6 +1665,12 @@ def scan(config, root, go_db=None, osv_env=None, offline=False, mirror=None):
                                          osv_env, offline, mirror, config.get("pruned", []))
     findings += inlined
     problems += inlined_probs
+    bundled = config.get("bundled", [])
+    if bundled:
+        copies = [bundled_copy(e) for e in bundled]
+        advisories = union_advisories(bundled_advisories(copies, osv_env, offline),
+                                      release_notes(copies, root, offline))
+        findings += bundled_findings(bundled, advisories)
     unused = apply_records([f for f in findings if f["fails"]], records)
     return findings, problems, unused
 
@@ -1463,8 +1704,11 @@ def scan_image(config, src, osv_env=None, offline=False):
 
 def issue_records(config, cmd):
     """The records whose issues `cmd --check-issues` checks: the image's and its initrd's for
-    `image`, the rest for `run`."""
-    return [r for r in config.get("accepted", []) if (r.get("where") in IMAGE_TREES) == (cmd == "image")]
+    `image`, the rest for `run`, with one per id of each bundled entry (#5873)."""
+    records = [r for r in config.get("accepted", []) if (r.get("where") in IMAGE_TREES) == (cmd == "image")]
+    if cmd == "image":
+        return records
+    return records + [{"id": i, "issue": e["issue"]} for e in config.get("bundled", []) for i in e["ids"]]
 
 
 TREE_NAMES = {IMAGE: "Image", INITRD: "Initrd", GUEST: "Guest"}
@@ -1578,7 +1822,11 @@ def summary(findings, problems, unused, out=None, config="assurance/vulncheck.js
     if any(f["where"] in IMAGE_TREES and f["fixed"] for f in failing):
         print("fix: rebuild the image; Debian has fixed each image finding that names a fixed "
               "version, and no record can accept those", file=out)
-    if any(not (f["where"] in IMAGE_TREES and f["fixed"]) for f in failing):
+    if any(f["where"] == BUNDLED for f in failing):
+        print(f"fix: pin a release of the holder whose copy has the fix, or add the id to its "
+              f"\"bundled\" entry's ids in {config}, with the advisory's reach in its why, citing an open "
+              "issue that names the id", file=out)
+    if any(not (f["where"] in IMAGE_TREES and f["fixed"]) and f["where"] != BUNDLED for f in failing):
         print(f"fix: upgrade to the fixed version, or add a record to {config} "
               "naming an open issue that names the vulnerability and says why it is accepted", file=out)
     if unused and problems:
@@ -1636,8 +1884,8 @@ def control():
     problems = []
     with tempfile.TemporaryDirectory() as tmp:
         # osv-scanner 2.5's offline layout. Go holds only the fork plant: govulncheck owns
-        # the rest of Go. Debian holds the image plants.
-        for name in ("npm", "Go", "Debian"):
+        # the rest of Go. Debian holds the image plants, GIT the bundled ones (read by this file).
+        for name in ("npm", "Go", "Debian", "GIT"):
             eco = pathlib.Path(tmp) / "osv-scalibr" / name
             eco.mkdir(parents=True)
             with zipfile.ZipFile(eco / "all.zip", "w") as z:
@@ -1645,7 +1893,7 @@ def control():
                     z.write(f, f.name)
         kw = dict(go_db=(FIXTURE / "godb").as_uri(), offline=True, mirror=FIXTURE / "tarballs",
                   osv_env={"OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY": tmp})
-        bare = {**CONTROL_CONFIG, "accepted": []}
+        bare = {**CONTROL_CONFIG, "accepted": [], "bundled": [{**CONTROL_BUNDLED, "ids": []}]}
         findings, probs, _ = scan(bare, FIXTURE, **kw)
         summary(findings, probs, [])
         problems += [f"no records: {p}" for p in control_unversioned(probs)]
@@ -1664,6 +1912,9 @@ def control():
         summary(findings, probs, unused)
         problems += [f"with records: {p}" for p in control_unversioned(probs)]
         failing = {(f["id"], f["module"], f["version"]) for f in findings if verdict(f) == "FAIL"}
+        info = {(f["where"], f["id"]) for f in findings if f["where"] == BUNDLED and not f["fails"]}
+        if info != CONTROL_BUNDLED_INFO:
+            problems.append(f"bundled ids no source lists: want {sorted(CONTROL_BUNDLED_INFO)}, got {sorted(info)}")
         if failing != CONTROL_STILL_FAILS or unused:
             problems.append(f"the fixture's records must clear every planted failure but "
                             f"{sorted(CONTROL_STILL_FAILS)}: still failing {sorted(failing)}, "
@@ -1716,7 +1967,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.cmd == "cited":
         try:
-            n = cited(json.loads(pathlib.Path(a.config).read_text()).get("accepted", []), a.issue)
+            n = cited(citing(json.loads(pathlib.Path(a.config).read_text())), a.issue)
         except (OSError, ValueError, AttributeError) as e:
             print(f"vulncheck: cannot read {a.config}: {e}", file=sys.stderr)
             return 2
@@ -1728,7 +1979,7 @@ def main(argv=None):
             print("vulncheck: reopen needs GITHUB_REPOSITORY and GITHUB_TOKEN", file=sys.stderr)
             return 2
         config = json.loads(pathlib.Path(a.config).read_text())
-        n = reopen_cited(config.get("accepted", []), a.issue, repo, token)
+        n = reopen_cited(citing(config), a.issue, repo, token)
         print(f"issue #{a.issue}: " + (f"cited by {n} record(s); reopened" if n else "not cited; left closed"))
         return 0
     if a.cmd == "propose":
@@ -1754,7 +2005,8 @@ def main(argv=None):
     except ScanError as e:
         print(f"vulncheck: {e}", file=sys.stderr)
         return 2
-    if a.check_issues and not record_problems(config.get("accepted", [])):
+    if a.check_issues and not record_problems(config.get("accepted", [])) and not (
+            a.cmd == "run" and bundled_problems(config.get("bundled", []), a.root)):
         repo, token = os.environ.get("GITHUB_REPOSITORY"), os.environ.get("GITHUB_TOKEN")
         if not repo or not token:
             problems.append("--check-issues needs GITHUB_REPOSITORY and GITHUB_TOKEN")

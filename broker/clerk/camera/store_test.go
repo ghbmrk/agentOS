@@ -457,6 +457,271 @@ func TestSegmentWriteRateCapped(t *testing.T) {
 	}
 }
 
+func TestSegmentFailingPartwayCopiesNoPayload(t *testing.T) {
+	// REQ: CLK-1
+	// a segment whose first record
+	// parses and whose later bytes do not is refused before any payload is
+	// copied, so no copy of the first record's frame outlives the caller's
+	// wipe of the plaintext (#5799). No allocation at all means no clone.
+	rec := func(typ camwire.Type, n int, payload []byte) []byte {
+		// type, time 7 (big-endian), length n (big-endian), payload
+		b := []byte{byte(typ), 0, 0, 0, 0, 0, 0, 0, 7, byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
+		return append(b[:recHead], payload...)
+	}
+	good := rec(camwire.TypeVideo, 4, []byte("left"))
+	cases := map[string][]byte{
+		"a short header":        append(append([]byte(nil), good...), 0x01, 0x02),
+		"an unknown type":       append(append([]byte(nil), good...), rec(0x7f, 1, []byte("x"))...),
+		"a length past the end": append(append([]byte(nil), good...), rec(camwire.TypeThermal, 9, []byte("short"))...),
+	}
+	// A last record of no payload is exactly a header: whole, not short.
+	whole := append(append([]byte(nil), good...), rec(camwire.TypeThermal, 0, nil)...)
+	if recs, err := segRecords(whole); err != nil || len(recs) != 2 || string(recs[0].Frame.Payload) != "left" || len(recs[1].Frame.Payload) != 0 {
+		t.Fatalf("a whole segment parses to %v, %v", recs, err)
+	}
+	for name, seg := range cases {
+		var err error
+		if allocs := testing.AllocsPerRun(10, func() { _, err = segRecords(seg) }); allocs != 0 || !errors.Is(err, ErrSegment) {
+			t.Errorf("%s: %v allocations and %v; want none and ErrSegment", name, allocs, err)
+		}
+	}
+}
+
+func TestSealWipesItsPlaintextAndKey(t *testing.T) {
+	// REQ: CLK-1
+	// seal zeroes the open segment's bytes
+	// and the segment key it derived, whether or not the write succeeds,
+	// empties the buffer and resets the dropped count; two segments of one
+	// span get distinct names and salts, and a lent key of the wrong length
+	// derives nothing and writes nothing (#5808).
+	k := make([]byte, 32)
+	rand.Read(k)
+	sealer, err := clerk.NewAESSealer(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secrets := clerk.NewSecrets(sealer, nil)
+	keys := SecretsKeys(secrets)
+	if err := keys.Make("cam1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := secrets.Put(SegmentSlots+"cam2", clerk.KindStatic, []byte("sixteen byte key")); err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	var derived [][]byte
+	dir := t.TempDir()
+	s := &Store{
+		cfg:        StoreConfig{Dir: dir, Keys: keys, Log: func(l string) { logged = append(logged, l) }},
+		keyDerived: func(k []byte) { derived = append(derived, k) },
+	}
+	seal := func(camera string) error {
+		plain := []byte("synthetic frame bytes")
+		h := &held{pend: plain, pendFrom: time.Unix(100, 0), pendTo: time.Unix(200, 0), dropped: 3}
+		err := s.seal(camera, h)
+		if h.pend != nil || h.dropped != 0 || !bytes.Equal(plain, make([]byte, len(plain))) {
+			t.Errorf("%s: after seal the buffer is %q, the dropped count %d and the plaintext %q; want nil, 0 and zeros", camera, h.pend, h.dropped, plain)
+		}
+		return err
+	}
+	for range 2 {
+		if err := seal("cam1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(derived) != 2 {
+		t.Fatalf("two seals derived %d segment keys", len(derived))
+	}
+	for i, k := range derived {
+		if len(k) != 32 || !bytes.Equal(k, make([]byte, 32)) {
+			t.Errorf("segment key %d is %d bytes and not wiped after its seal", i, len(k))
+		}
+	}
+	des, err := os.ReadDir(filepath.Join(dir, "cam1"))
+	if err != nil || len(des) != 2 {
+		t.Fatalf("two seals of one span left %d segments (%v); want 2 distinct names", len(des), err)
+	}
+	var salts [][]byte
+	for _, de := range des {
+		file, err := os.ReadFile(filepath.Join(dir, "cam1", de.Name()))
+		if err != nil || len(file) < len(segMagic)+saltLen {
+			t.Fatalf("%s: %d bytes, %v", de.Name(), len(file), err)
+		}
+		salts = append(salts, file[len(segMagic):len(segMagic)+saltLen])
+	}
+	if bytes.Equal(salts[0], salts[1]) || bytes.Equal(salts[0], make([]byte, saltLen)) {
+		t.Errorf("two segments share the salt %x", salts[0])
+	}
+	if len(logged) != 2 || !strings.Contains(logged[1], "; 3 frames over the write rate kept in memory only") {
+		t.Errorf("seal logged %q; want each segment and its 3 dropped frames", logged)
+	}
+	if err := seal("cam2"); !errors.Is(err, ErrWrite) || len(derived) != 2 {
+		t.Errorf("a 16-byte segment key sealed with %v and derived %d keys; want ErrWrite and none", err, len(derived)-2)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cam2")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a 16-byte segment key left the camera's directory: %v", err)
+	}
+}
+
+func TestStoreRefusesBadInput(t *testing.T) {
+	// REQ: DEV-7
+	// NewStore refuses a config with no directory and a directory open to
+	// other uids; Add refuses a malformed id and a taken camera;
+	// SetRetention refuses a camera never added and one marked gone;
+	// Frame refuses an unknown type, an oversized frame and a camera
+	// marked gone; a store opened with no clock reads the wall clock.
+	keys := SecretsKeys(clerk.NewSecrets(nil, nil))
+	if _, err := NewStore(StoreConfig{Keys: keys}); !errors.Is(err, ErrStoreConfig) {
+		t.Errorf("a store with no directory opened: %v", err)
+	}
+	open := filepath.Join(t.TempDir(), "open")
+	if err := os.Mkdir(open, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(open, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(StoreConfig{Dir: open, Keys: keys}); err == nil {
+		t.Error("a store opened on a directory open to other uids")
+	}
+	r := newStoreRig(t, func(c *StoreConfig) { c.Now = nil })
+	if err := r.s.Add("Bad id", 0); !errors.Is(err, ErrNode) {
+		t.Errorf("Add of a malformed id: %v", err)
+	}
+	if err := r.s.SetRetention("garden", time.Hour); !errors.Is(err, ErrUnknown) {
+		t.Errorf("SetRetention of a camera never added: %v", err)
+	}
+	if err := r.s.Add(testID, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.s.Add(testID, time.Hour); !errors.Is(err, ErrNode) {
+		t.Errorf("a second Add of one camera: %v", err)
+	}
+	if err := r.s.Frame(testID, camwire.Frame{Type: 0x7f}); !errors.Is(err, ErrFrame) {
+		t.Errorf("a frame of an unknown type: %v", err)
+	}
+	if err := r.s.Frame(testID, camwire.Frame{Type: camwire.TypeVideo, Payload: make([]byte, MaxFramePayload+1)}); !errors.Is(err, ErrFrame) {
+		t.Errorf("a frame over MaxFramePayload: %v", err)
+	}
+	if err := r.s.Frame(testID, video()); err != nil {
+		t.Errorf("a frame with the wall clock: %v", err)
+	}
+	r.s.cams[testID].gone = true // as an Erase landing between held and the lock
+	if err := r.s.Frame(testID, video()); !errors.Is(err, ErrUnknown) {
+		t.Errorf("a frame for a camera marked gone: %v", err)
+	}
+	if err := r.s.SetRetention(testID, 2*time.Hour); !errors.Is(err, ErrUnknown) {
+		t.Errorf("SetRetention of a camera marked gone: %v", err)
+	}
+}
+
+func TestSegmentSealedWhenFull(t *testing.T) {
+	// REQ: DEV-7
+	// A frame that fills the open segment past SegmentBytes seals it at
+	// once, before any Flush; Flush seals the cameras in id order.
+	r := newStoreRig(t, func(c *StoreConfig) { c.SegmentBytes = 1 })
+	if err := r.s.Add(testID, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	r.feed(t, testID, 1, time.Second)
+	if des, err := os.ReadDir(filepath.Join(r.dir, testID)); err != nil || len(des) != 1 {
+		t.Fatalf("a full segment left %d segments before Flush (%v); want 1", len(des), err)
+	}
+	r = newStoreRig(t, nil)
+	ids := []string{"cam-h", "cam-c", "cam-f", "cam-a", "cam-g", "cam-b", "cam-e", "cam-d"}
+	for _, id := range ids {
+		if err := r.s.Add(id, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+		r.feed(t, id, 1, time.Second)
+	}
+	if err := r.s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, l := range strings.Split(r.log.all(), "\n") {
+		if f := strings.Fields(l); len(f) > 2 && f[0] == "camera" && f[2] == "segment" {
+			got = append(got, strings.TrimSuffix(f[1], ":"))
+		}
+	}
+	sorted := len(got) == len(ids)
+	for i := 1; sorted && i < len(got); i++ {
+		sorted = got[i-1] < got[i]
+	}
+	if !sorted {
+		t.Errorf("Flush sealed %v; want all %d in id order", got, len(ids))
+	}
+}
+
+func TestAddHoldsTheKeptLock(t *testing.T) {
+	// REQ: DEV-7
+	// A second Keep ends the first one's hold; Add of a kept camera holds
+	// its kept lock until the Add ends, so no sweep under the kept
+	// retention runs beside it (#4065), then ends and unlists the hold.
+	entered, release := make(chan struct{}), make(chan struct{})
+	r := newStoreRig(t, func(c *StoreConfig) { c.Keys = slowKeys{c.Keys, entered, release} })
+	if err := r.s.Keep(testID, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	k := r.s.kept[testID]
+	if err := r.s.Keep(testID, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if !k.gone || !k.mu.TryLock() {
+		t.Fatal("a second Keep left the first one's hold live or locked")
+	}
+	k.mu.Unlock()
+	k = r.s.kept[testID]
+	added := make(chan error, 1)
+	go func() { added <- r.s.Add(testID, time.Hour) }()
+	<-entered
+	if k.mu.TryLock() {
+		k.mu.Unlock()
+		t.Error("the kept lock is free while Add sets the retention")
+	}
+	close(release)
+	if err := <-added; err != nil {
+		t.Fatal(err)
+	}
+	if !k.gone || r.s.kept[testID] != nil || !k.mu.TryLock() {
+		t.Errorf("after Add the kept hold is gone %v, still listed %v, or still locked", k.gone, r.s.kept[testID] != nil)
+	}
+}
+
+func TestFlushSkipsACameraErasedMidway(t *testing.T) {
+	// REQ: DEV-7
+	// An Erase that lands while Flush seals an earlier camera, after
+	// Flush listed the ids, leaves Flush skipping the erased camera, not
+	// crashing on it (#5808 Security, comment 6898637143). The test
+	// unlists the camera as Erase's first step does (store.go, Erase:
+	// delete from s.cams under s.mu), so it reaches no more of Erase.
+	r := newStoreRig(t, nil)
+	for _, id := range []string{"a-cam", "b-cam"} {
+		if err := r.s.Add(id, 24*time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.feed(t, "a-cam", 2, time.Second)
+	writing, release := make(chan struct{}), make(chan struct{})
+	r.s.writeStop = func(i int) bool {
+		if i == 0 {
+			close(writing)
+			<-release
+		}
+		return false
+	}
+	flushed := make(chan error, 1)
+	go func() { flushed <- r.s.Flush() }()
+	<-writing
+	r.s.mu.Lock()
+	delete(r.s.cams, "b-cam")
+	r.s.mu.Unlock()
+	close(release)
+	if err := <-flushed; err != nil {
+		t.Fatalf("Flush beside an Erase: %v", err)
+	}
+}
+
 // REQ: CLK-1
 // TestSegmentKeyInSealedStore: each camera's segment key is a static
 // device slot of the sealed store, made once, lent only per call, and

@@ -2825,10 +2825,12 @@ class Record(unittest.TestCase):
         self.assertEqual(len(sites), 33, r.stdout)
         # Two kinds of mutant on one line (mail.go:103, :144, mailhost.go:272) are two entries on one site.
         self.assertEqual(len(set(sites)), 30, r.stdout)
-        # The two loadSenders proofs were re-read on #5780 after #5733 edited that func.
+        # The two loadSenders proofs were re-read on #5780 after #5733 edited that func, and readMail's
+        # ReadAll proof on #5804 after it gained the setup-form check.
         self.assertEqual(sorted(" ".join(l.split(" ")[1:3]) for l in r.stdout.strip().split("\n")),
                          ["CONDITIONALS_BOUNDARY #5774"] * 3 + ["CONDITIONALS_NEGATION #5774"] * 6
-                         + ["STATEMENT_DELETION #5743"] * 22 + ["STATEMENT_DELETION #5780"] * 2)
+                         + ["STATEMENT_DELETION #5743"] * 21 + ["STATEMENT_DELETION #5780"] * 2
+                         + ["STATEMENT_DELETION #5804"])
 
 
 
@@ -2971,16 +2973,16 @@ class MutantScope(unittest.TestCase):
                 self.assertIsNone(mutgate.record_entries(json.dumps(bad))[0])
 
     def test_the_clerk_run_entries_on_two_comparison_lines_name_their_column(self):
-        # The #5774 proofs for mail.go:103's `>= 0` and :144's `< 0` sit on lines of several comparisons.
+        # The #5774 proofs for mail.go:104's `>= 0` and :145's `< 0` sit on lines of several comparisons.
         r = subprocess.run([sys.executable, "-I", str(ROOT / "tools" / "mutgate.py"), "records", "clerk/run"],
                            capture_output=True, text=True, cwd=ROOT)
         self.assertEqual(r.returncode, 0, r.stderr)
         sites = {" ".join(l.split(" ")[:2]) for l in r.stdout.split("\n") if "mail.go:1" in l.split(" ")[0]}
-        self.assertTrue({"broker/clerk/run/mail.go:103:102 CONDITIONALS_BOUNDARY", "broker/clerk/run/mail.go:103:102 CONDITIONALS_NEGATION",
-                         "broker/clerk/run/mail.go:144:113 CONDITIONALS_BOUNDARY",
-                         "broker/clerk/run/mail.go:144:113 CONDITIONALS_NEGATION"} <= sites, sites)
+        self.assertTrue({"broker/clerk/run/mail.go:104:102 CONDITIONALS_BOUNDARY", "broker/clerk/run/mail.go:104:102 CONDITIONALS_NEGATION",
+                         "broker/clerk/run/mail.go:145:113 CONDITIONALS_BOUNDARY",
+                         "broker/clerk/run/mail.go:145:113 CONDITIONALS_NEGATION"} <= sites, sites)
         src = (ROOT / "broker" / "clerk" / "run" / "mail.go").read_bytes().split(b"\n")
-        self.assertEqual((src[102][101:103], src[143][112:114]), (b">=", b"< "))
+        self.assertEqual((src[103][101:103], src[144][112:114]), (b">=", b"< "))
 
 class Misread(unittest.TestCase):
     """MUT-notcovered-misread (#5864, Security on #5863): gremlins v0.6.0 reads some mutants on a

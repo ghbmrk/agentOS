@@ -19,16 +19,17 @@ package wipelint_test
 // error) (cipher.AEAD's, CLK-aead-open-wipe #5788) appears only as `v, err := x.Open(a, b)` (or =)
 // with v a named variable, and the very next statement is
 // `defer clear(v)` with the builtin clear, so the wipe covers every return
-// path, the error path included. The one exception is a function listed
-// by name in wipeWrappers: a sealer wrapper that must hand its plaintext to
-// its caller, which this rule then holds, or a function whose plaintext
-// another wipe covers or is no secret, the reason given. Every Open in a
-// listed function is exempt, so the entry's reason and the wrapper's body are held by review;
-// a new wrapper fails until a reviewed PR lists it, and a listed wrapper
-// that is gone fails too (stale). Any other use fails: the plaintext
-// discarded to _, opened in an if or switch header, returned from a
-// function that is not a listed wrapper, passed straight to another
-// call, or the method taken as a value.
+// path, the error path included. A function listed in wipeWrappers hands
+// its plaintext to its caller: its own Opens are exempt, and every call of
+// it is held as an Open is (#5799), so a caller that drops the wipe fails
+// as a direct Open's would. A function listed in wipeExempt has its Opens
+// exempt and its callers unheld, the reason given (no secret, or a wipe
+// the rule cannot see): that entry, and each listed function's body, are
+// held by review. A new wrapper fails until a reviewed PR lists it, and a
+// listed function that is gone fails too (stale). Any other use fails:
+// the plaintext discarded to _, opened in an if or switch header,
+// returned from a function that is not listed, passed straight to
+// another call, or the Open or wrapper taken as a value.
 //
 // Bound: what the code does with v between the Open and its return (a copy
 // kept, a string(v), an append that moves the bytes elsewhere) is held by
@@ -51,25 +52,32 @@ import (
 	"github.com/ghbmrk/agentos/broker/internal/lintload"
 )
 
-// wipeWrappers names, by types.Func.FullName, each function whose Open
-// hands its plaintext on unwiped, with the reason.
+// wipeWrappers names, by types.Func.FullName, each function that hands
+// an opened plaintext to its caller, with the reason. Its own Opens are
+// exempt, and each call of it is held as an Open is (#5799), so the wipe
+// moves to its callers rather than out of the rule.
 var wipeWrappers = map[string]string{
 	// The test sealer records each plaintext so a test can check its
 	// caller wiped it (Wiped); it returns the plaintext beside OpenErr.
 	"(*github.com/ghbmrk/agentos/broker/clerk/inbox/gmailtest.Kept).Open": "test sealer: hands back and records the plaintext",
-	// The clerk's sealer: its plaintext goes to the callers of its Open,
-	// which this rule holds.
+	// The clerk's sealer: its plaintext goes to the callers of its Open.
 	"(github.com/ghbmrk/agentos/broker/clerk.aesSealer).Open": "the sealer itself: its Open's callers are held here",
-	// The store's unwrap: Unlock wipes each plaintext by hand on every
-	// path, and keeps the store key only inside its secret.Secret.
-	"github.com/ghbmrk/agentos/broker/clerk/seal.open": "Unlock wipes each opened key and entry set by hand",
+	// The store's unwrap: Unlock's two calls defer the wipe.
+	"github.com/ghbmrk/agentos/broker/clerk/seal.open": "Unlock's calls are held here",
+}
+
+// wipeExempt names, by types.Func.FullName, each function whose Opens are
+// exempt and whose callers are not held, with the reason: its plaintext
+// is no secret, or a wipe the rule cannot see covers it. Nothing but
+// review holds an entry, so each reason names what keeps it true.
+var wipeExempt = map[string]string{
 	// A driver's key: opened through a closure, once at start and once
 	// per Lend, each plaintext wiped on success (clear at start, defer
 	// clear in the Lend); stdlib GCM returns a nil plaintext with every
-	// error, so the error paths hold nothing. The shape is held by review:
-	// reshaping it moves devslot/proc under the mutation gate, whose
-	// driver tests fail under coverage (#5788's Findings line).
-	"github.com/ghbmrk/agentos/broker/clerk/devslot/proc.lendFrom": "each open wiped at the start check and in the Lend",
+	// error, so the error paths hold nothing. Reshaping it so the rule
+	// holds it moves devslot/proc under the mutation gate, which waits on
+	// #5800 (#5799's hand-off).
+	"github.com/ghbmrk/agentos/broker/clerk/devslot/proc.lendFrom": "callers unchecked: keep the clear at the start check and the defer clear in the Lend",
 	// A session frame is an accessory's HTTP response (characteristic
 	// values, no key): Read copies it into the session's bufio.Reader and
 	// the HTTP parser keeps more copies, so a wipe here would erase one
@@ -113,7 +121,7 @@ func TestEveryOpenedPlaintextIsWipedOnEveryPath(t *testing.T) {
 			if err != nil {
 				rel = name
 			}
-			n, ps := wipeProblems(l.Fset, f, p.Info, wipeWrappers, seen)
+			n, ps := wipeProblems(l.Fset, f, p.Info, wipeWrappers, wipeExempt, seen)
 			opens += n
 			for _, s := range ps {
 				problems = append(problems, filepath.ToSlash(rel)+":"+s)
@@ -122,13 +130,15 @@ func TestEveryOpenedPlaintextIsWipedOnEveryPath(t *testing.T) {
 	}
 	// A loader that read nothing would pass every tree: the clerk's own
 	// stores alone call the sealer's Open more than this, and the five
-	// direct AEAD Opens of #5788 add to them.
+	// direct AEAD Opens of #5788 and the seal.open calls add to them.
 	if opens < 10 {
-		t.Fatalf("the lint saw %d sealer Open calls; want the clerk's stores among them", opens)
+		t.Fatalf("the lint saw %d Open and wrapper calls; want the clerk's stores among them", opens)
 	}
-	for w := range wipeWrappers {
-		if !seen[w] {
-			problems = append(problems, "wipeWrappers: "+w+" is no method in broker/clerk any more; remove the stale entry")
+	for name, list := range map[string]map[string]string{"wipeWrappers": wipeWrappers, "wipeExempt": wipeExempt} {
+		for w := range list {
+			if !seen[w] {
+				problems = append(problems, name+": "+w+" is no function in broker/clerk any more; remove the stale entry")
+			}
 		}
 	}
 	sort.Strings(problems)
@@ -137,32 +147,45 @@ func TestEveryOpenedPlaintextIsWipedOnEveryPath(t *testing.T) {
 	}
 }
 
-// wipeProblems returns how many sealer Open uses the file holds and, for
-// each one the rule refuses, its line and why. A method listed in wrappers
-// is marked in seen, and its Opens are exempt.
-func wipeProblems(fset *token.FileSet, f *ast.File, info *types.Info, wrappers map[string]string, seen map[string]bool) (int, []string) {
-	ok := map[*ast.Ident]bool{}     // Open selectors in an allowed shape
-	called := map[*ast.Ident]bool{} // Open selectors that are a call's callee
+// wipeProblems returns how many held uses (an Open, or a function listed
+// in wrappers) the file holds and, for each one the rule refuses, its line
+// and why. A function listed in wrappers or exempt is marked in seen, and
+// its own held uses are exempt.
+func wipeProblems(fset *token.FileSet, f *ast.File, info *types.Info, wrappers, exempt map[string]string, seen map[string]bool) (int, []string) {
+	ok := map[*ast.Ident]bool{}     // held callees in an allowed shape
+	called := map[*ast.Ident]bool{} // held identifiers that are a call's callee
 	var problems []string
 	line := func(n ast.Node) string { return strconv.Itoa(fset.PositionFor(n.Pos(), false).Line) }
+	held := func(obj types.Object) bool {
+		if isSealerOpen(obj) {
+			return true
+		}
+		fn, isFunc := obj.(*types.Func)
+		if !isFunc {
+			return false
+		}
+		_, listed := wrappers[fn.FullName()]
+		return listed
+	}
 
 	for _, decl := range f.Decls {
 		fd, isFn := decl.(*ast.FuncDecl)
-		wrapper := false
+		listed := false
 		if isFn {
 			if fn, isFunc := info.Defs[fd.Name].(*types.Func); isFunc {
-				_, wrapper = wrappers[fn.FullName()]
-				if wrapper {
+				_, w := wrappers[fn.FullName()]
+				_, e := exempt[fn.FullName()]
+				if listed = w || e; listed {
 					seen[fn.FullName()] = true
 				}
 			}
 		}
 		ast.Inspect(decl, func(n ast.Node) bool {
 			if c, isCall := n.(*ast.CallExpr); isCall {
-				if sel, isSel := ast.Unparen(c.Fun).(*ast.SelectorExpr); isSel && isSealerOpen(info.Uses[sel.Sel]) {
-					called[sel.Sel] = true
-					if wrapper {
-						ok[sel.Sel] = true
+				if id := callee(c); id != nil && held(info.Uses[id]) {
+					called[id] = true
+					if listed {
+						ok[id] = true
 					}
 				}
 			}
@@ -176,7 +199,7 @@ func wipeProblems(fset *token.FileSet, f *ast.File, info *types.Info, wrappers m
 				list = b.Body
 			}
 			for i, s := range list {
-				id := openAssign(s, info)
+				id := openAssign(s, info, held)
 				if id == nil {
 					continue
 				}
@@ -190,25 +213,25 @@ func wipeProblems(fset *token.FileSet, f *ast.File, info *types.Info, wrappers m
 	uses := 0
 	ast.Inspect(f, func(n ast.Node) bool {
 		id, isID := n.(*ast.Ident)
-		if !isID || !isSealerOpen(info.Uses[id]) {
+		if !isID || !held(info.Uses[id]) {
 			return true
 		}
 		uses++
 		switch {
 		case ok[id]:
 		case !called[id]:
-			problems = append(problems, line(id)+": an Open taken as a value; call it and defer clear on its plaintext")
+			problems = append(problems, line(id)+": "+id.Name+" taken as a value; call it and defer clear on its plaintext")
 		default:
-			problems = append(problems, line(id)+": an Open's plaintext is not wiped on every path; write `v, err := x.Open(...)` then `defer clear(v)` as the next statement")
+			problems = append(problems, line(id)+": "+id.Name+"'s plaintext is not wiped on every path; write `v, err := "+id.Name+"(...)` then `defer clear(v)` as the next statement")
 		}
 		return true
 	})
 	return uses, problems
 }
 
-// openAssign returns the Open selector of s when s is `v, err := x.Open(a,
-// b)` (or =) with v a named variable.
-func openAssign(s ast.Stmt, info *types.Info) *ast.Ident {
+// openAssign returns the held callee of s when s is `v, err := x.Open(a,
+// b)` or `v, err := wrapper(...)` (or =) with v a named variable.
+func openAssign(s ast.Stmt, info *types.Info, held func(types.Object) bool) *ast.Ident {
 	a, isAssign := s.(*ast.AssignStmt)
 	if !isAssign || len(a.Lhs) != 2 || len(a.Rhs) != 1 {
 		return nil
@@ -220,11 +243,23 @@ func openAssign(s ast.Stmt, info *types.Info) *ast.Ident {
 	if !isCall {
 		return nil
 	}
-	sel, isSel := ast.Unparen(c.Fun).(*ast.SelectorExpr)
-	if !isSel || !isSealerOpen(info.Uses[sel.Sel]) {
+	id := callee(c)
+	if id == nil || !held(info.Uses[id]) {
 		return nil
 	}
-	return sel.Sel
+	return id
+}
+
+// callee returns the identifier a call names: f in f(...), Sel in
+// x.Sel(...), or nil for any other callee expression.
+func callee(c *ast.CallExpr) *ast.Ident {
+	switch fn := ast.Unparen(c.Fun).(type) {
+	case *ast.Ident:
+		return fn
+	case *ast.SelectorExpr:
+		return fn.Sel
+	}
+	return nil
 }
 
 // defersClear reports whether s is `defer clear(v)`, with the builtin
@@ -484,6 +519,67 @@ func (x w) Open(b, a []byte) ([]byte, error) {
 		{"an AEAD Open in a listed function that is no method", `func openListed(g AEAD, b []byte) ([]byte, error) {
 	return g.Open(nil, b[:12], b[12:], nil)
 }`, 0},
+		{"a listed helper's caller that defers the wipe", `func openListed(g AEAD, b []byte) ([]byte, error) {
+	return g.Open(nil, b[:12], b[12:], nil)
+}
+
+func caller(g AEAD, b []byte) error {
+	p, err := openListed(g, b)
+	defer clear(p)
+	return err
+}`, 0},
+		{"a listed helper's caller that wipes by hand (seal.Unlock before #5799)", `func openListed(g AEAD, b []byte) ([]byte, error) {
+	return g.Open(nil, b[:12], b[12:], nil)
+}
+
+func caller(g AEAD, b []byte) error {
+	p, err := openListed(g, b)
+	if err != nil {
+		return err
+	}
+	clear(p)
+	return nil
+}`, 1},
+		{"a listed helper's caller that drops the wipe", `func openListed(g AEAD, b []byte) ([]byte, error) {
+	return g.Open(nil, b[:12], b[12:], nil)
+}
+
+func caller(g AEAD, b []byte) error {
+	p, err := openListed(g, b)
+	sink = p
+	return err
+}`, 1},
+		{"a listed helper taken as a value", `func openListed(g AEAD, b []byte) ([]byte, error) {
+	return g.Open(nil, b[:12], b[12:], nil)
+}
+
+func caller(g AEAD, b []byte) error {
+	o := openListed
+	p, err := o(g, b)
+	defer clear(p)
+	return err
+}`, 1},
+		{"a listed wrapper method's caller that drops the wipe", `type listed struct{ Sealer }
+
+func (k *listed) Open(blob, aad []byte) ([]byte, error) {
+	plain, err := k.Sealer.Open(blob, aad)
+	return plain, err
+}
+
+func caller(k *listed, b []byte) error {
+	p, err := k.Open(b, nil)
+	sink = p
+	return err
+}`, 1},
+		{"an exempt function's Opens and callers are not held", `func openPublic(g AEAD, b []byte) ([]byte, error) {
+	return g.Open(nil, b[:12], b[12:], nil)
+}
+
+func caller(g AEAD, b []byte) error {
+	p, err := openPublic(g, b)
+	sink = p
+	return err
+}`, 0},
 		{"an AEAD Open in an unlisted function returned on", `func openOther(g AEAD, b []byte) ([]byte, error) {
 	p, err := g.Open(nil, b[:12], b[12:], nil)
 	if err != nil {
@@ -584,8 +680,9 @@ func f(s Sealer, b []byte) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			listed := map[string]string{"(*example.test/p.listed).Open": "case", "example.test/p.openListed": "case"}
-			if _, got := wipeProblems(l.Fset, f, info, listed, map[string]bool{}); len(got) != c.want {
+			wrappers := map[string]string{"(*example.test/p.listed).Open": "case", "example.test/p.openListed": "case"}
+			exempt := map[string]string{"example.test/p.openPublic": "case"}
+			if _, got := wipeProblems(l.Fset, f, info, wrappers, exempt, map[string]bool{}); len(got) != c.want {
 				t.Fatalf("got %d problems %q; want %d", len(got), got, c.want)
 			}
 		})
