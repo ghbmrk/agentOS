@@ -122,34 +122,57 @@ func TestHW8NoAdjtimexNoRTCWrite(t *testing.T) {
 	}
 }
 
-// The shipped chrony configuration (installed by P2-1 as
-// /etc/chrony/chrony.conf): NTS sources first, the Debian pool as
-// fallback, and nothing that makes chronyd or the kernel write the
-// hardware clock or take sources from DHCP (security T1, T4).
-func TestHW8ChronyConfig(t *testing.T) {
-	f, err := os.Open("chrony/chrony.conf")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	var servers []string
-	keys, values := map[string]bool{}, map[string]string{}
-	sc := bufio.NewScanner(f)
+// chronyKeys are the only directives chrony.conf may use. Any other could
+// write the hardware clock (rtcsync, rtcfile, hwclockfile), take sources
+// from DHCP or other files (sourcedir, confdir, include), serve or set time
+// (allow, local, manual, settime), or move the frequency outside maxdrift's
+// clamp (tempcomp), so the list is closed (security T1, T4; #5929).
+var chronyKeys = map[string]bool{"server": true, "pool": true, "ntsdumpdir": true, "driftfile": true, "makestep": true,
+	"maxslewrate": true, "maxdrift": true, "authselectmode": true, "port": true, "cmdport": true}
+
+// chronyConf reads a chrony configuration: its directives' values, its
+// sources in order, and every directive outside chronyKeys.
+func chronyConf(t *testing.T, text string) (values map[string]string, servers, bad []string) {
+	t.Helper()
+	values = map[string]string{}
+	sc := bufio.NewScanner(strings.NewReader(text))
 	for sc.Scan() {
 		l := strings.TrimSpace(sc.Text())
 		if l == "" || strings.HasPrefix(l, "#") || strings.HasPrefix(l, "!") || strings.HasPrefix(l, ";") {
 			continue
 		}
 		fs := strings.Fields(l)
-		keys[fs[0]] = true
+		if !chronyKeys[fs[0]] {
+			bad = append(bad, fs[0])
+		}
 		values[fs[0]] = strings.Join(fs[1:], " ")
 		if fs[0] == "server" || fs[0] == "pool" {
 			servers = append(servers, l)
 		}
 	}
-	for _, bad := range []string{"rtcsync", "rtcfile", "hwclockfile", "rtconutc", "rtcdevice", "rtcautotrim", "sourcedir", "confdir", "include", "allow", "local", "manual", "settime"} {
-		if keys[bad] {
-			t.Errorf("chrony.conf has %s", bad)
+	if err := sc.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return values, servers, bad
+}
+
+// The shipped chrony configuration (installed by P2-1 as
+// /etc/chrony/chrony.conf): NTS sources first, the Debian pool as
+// fallback, and no directive outside chronyKeys.
+func TestHW8ChronyConfig(t *testing.T) {
+	b, err := os.ReadFile("chrony/chrony.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	values, servers, bad := chronyConf(t, string(b))
+	if len(bad) != 0 {
+		t.Errorf("chrony.conf has %q", bad)
+	}
+	// tempcomp's correction is applied after clamp_freq, so it would break
+	// the 1000 ppm that ntsDrift rests on (ASSUMPTIONS TIM-1-interval-fu-h).
+	for _, extra := range []string{"tempcomp /sys/class/hwmon/hwmon0/temp1_input 30 26000 0.0 0.000183 0.0", "rtcsync", "include /etc/chrony/conf.d/*.conf"} {
+		if _, _, bad := chronyConf(t, string(b)+extra+"\n"); len(bad) != 1 || bad[0] != strings.Fields(extra)[0] {
+			t.Errorf("%q: refused %q", extra, bad)
 		}
 	}
 	want := []string{"server time.cloudflare.com", "server nts.netnod.se", "server ptbtime1.ptb.de", "pool 2.debian.pool.ntp.org"}
