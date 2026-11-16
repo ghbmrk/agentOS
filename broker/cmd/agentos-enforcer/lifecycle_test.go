@@ -345,6 +345,12 @@ type fakeAP struct {
 	held    map[string][]ap.File
 	syncs   int
 	failing error
+	// failAt fails the pushes to one address; silent leaves one address's
+	// Watch reporting nothing, as an access point that never answers.
+	failAt map[string]error
+	silent map[string]bool
+	// history is every Wi-Fi configuration any access point was pushed.
+	history []string
 }
 
 type fakePusher struct {
@@ -376,6 +382,11 @@ func (p *fakePusher) Watch(ctx context.Context, every time.Duration, cfg func() 
 	for {
 		files, err := cfg()
 		p.ap.mu.Lock()
+		if p.ap.silent[p.addr] {
+			p.ap.mu.Unlock()
+			<-ctx.Done()
+			return
+		}
 		p.every = append(p.every, every)
 		res := push.Result{Abandoned: p.left}
 		switch {
@@ -384,9 +395,16 @@ func (p *fakePusher) Watch(ctx context.Context, every time.Duration, cfg func() 
 			err = push.ErrStalled
 		case p.ap.failing != nil:
 			err = p.ap.failing
+		case p.ap.failAt[p.addr] != nil:
+			err = p.ap.failAt[p.addr]
 		default:
 			p.ap.held[p.addr] = files
 			p.ap.syncs++
+			for _, f := range files {
+				if f.Path == ap.PathWireless {
+					p.ap.history = append(p.ap.history, string(f.Data))
+				}
+			}
 		}
 		p.ap.mu.Unlock()
 		report(res, err)
@@ -1077,7 +1095,7 @@ func TestLifecycle(t *testing.T) {
 		x.d.ap.nudge()
 		stalled := "The access point at " + apAddr + " is stalled: 16 of the enforcer's connections"
 		waitFor(t, func() bool { return strings.Contains(x.home(), stalled) })
-		if h := x.home(); !strings.Contains(h, "a Wi-Fi password you removed since may still work there") || !strings.Contains(h, "Then restart the enforcer, which clears this") {
+		if h := x.home(); !strings.Contains(h, "a device you removed since may still be able to join") || !strings.Contains(h, "Then restart the enforcer, which clears this") {
 			t.Fatalf("home's stall card:\n%s", h)
 		}
 		if !x.logContains("access point " + apAddr + ": stalled, 16 session opens waiting") {
@@ -1455,7 +1473,6 @@ func TestLifecycle(t *testing.T) {
 	})
 }
 
-// home is the page's home screen.
 // apKeys is the Wi-Fi passwords as the state directory holds them.
 func (x *box) apKeys() ap.Keys {
 	x.t.Helper()
@@ -1486,6 +1503,7 @@ func (x *box) logContains(s string) bool {
 	return slices.ContainsFunc(x.log, func(l string) bool { return strings.Contains(l, s) })
 }
 
+// home is the page's home screen.
 func (x *box) home() string {
 	x.t.Helper()
 	w := x.b.do(http.MethodGet, "/", nil)

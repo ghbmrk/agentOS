@@ -781,7 +781,7 @@ func TestHomeShowsAccessPoints(t *testing.T) {
 	for _, want := range []string{
 		"<h2>Wi-Fi access point</h2>",
 		"The access point at 10.70.0.3:22 is stalled: 16 of the enforcer's connections",
-		"a Wi-Fi password you removed since may still work there",
+		"a device you removed since may still be able to join",
 		"Then restart the enforcer, which clears this",
 		"Owner network: network <span class=\"code\">Home</span><br>Password: <span class=\"code\">CANA RYOW NERA AAAA</span>",
 		"Device &#34;tv &lt;b&gt;&#34;: network <span class=\"code\">Home devices</span><br>Password: <span class=\"code\">CANA RYDE VICE AAAA</span>",

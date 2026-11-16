@@ -87,16 +87,24 @@ func provisionAP(dir fileStore, setup string) error {
 	if b, err := dir.Load(); err != nil || b != nil {
 		return errors.Join(err, errors.New("access point: already provisioned"))
 	}
-	k := ap.Keys{Setup: setup}
-	// Config checks the password as the access point will take it.
-	if _, err := ap.Config(policy.Document{}, placeholderLayout(), k); err != nil {
-		return fmt.Errorf("access point: setup password: %w", err)
+	if err := checkSetup(setup); err != nil {
+		return err
 	}
-	b, err := json.Marshal(apState{Keys: k})
+	b, err := json.Marshal(apState{Keys: ap.Keys{Setup: setup}})
 	if err != nil {
 		return err
 	}
 	return dir.Save(b)
+}
+
+// checkSetup refuses a setup password the access point would not take,
+// checked as ap.Config checks it. First boot checks it before anything is
+// provisioned, so a refused one leaves the state directory untouched.
+func checkSetup(setup string) error {
+	if _, err := ap.Config(policy.Document{}, placeholderLayout(), ap.Keys{Setup: setup}); err != nil {
+		return fmt.Errorf("access point: setup password: %w", err)
+	}
+	return nil
 }
 
 // placeholderLayout is a layout that passes ap.Layout.Check, for checking

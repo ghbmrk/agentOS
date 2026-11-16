@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"strings"
 	"testing"
@@ -127,21 +128,163 @@ func TestEnrolmentWaitsForEveryAccessPoint(t *testing.T) {
 	}
 }
 
-// NET-4: a hand-over no access point reports in time enrols nothing and
-// pushes the setup network again.
+// finishEnrol runs the page's two enrolment steps for a with the case
+// code and returns the finish's answer, failing the test if it takes more
+// than bound.
+func finishEnrol(x *box, a *authenticator, bound time.Duration) *httptest.ResponseRecorder {
+	x.t.Helper()
+	r := x.b.json(http.MethodPost, "/enrol/begin", map[string]string{"code": caseCode, "public_key": a.spki()}, http.StatusOK)
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- x.b.do(http.MethodPost, "/enrol/finish", a.assertion(r["id"].(string), r["challenge"].(string)))
+	}()
+	select {
+	case w := <-done:
+		return w
+	case <-time.After(bound):
+		x.t.Fatalf("enrolment did not answer within %v", bound)
+		return nil
+	}
+}
+
+// NET-4, HW-10, ENF-l-ap-5: a hand-over one access point never reports
+// ends at the deadline: nothing enrols, and the access point that took
+// the four networks is pushed the setup network back, sticker password
+// and all. A wait with no deadline would hold the book, and so its Tick,
+// for good.
 func TestEnrolmentHandOverTimesOut(t *testing.T) {
-	x := newBox(t, false)
+	x, second := twoAPs(t)
 	x.d.Close()
-	x.waits.APWait = 50 * time.Millisecond
+	x.waits.APWait = 100 * time.Millisecond
 	x.ap = &fakeAP{}
 	x.start()
-	waitFor(t, func() bool { return strings.Contains(x.ap.wireless(apAddr), setupPW) })
-	x.ap.stall(apAddr)
+	waitFor(t, func() bool {
+		return strings.Contains(x.ap.wireless(apAddr), setupPW) && strings.Contains(x.ap.wireless(second), setupPW)
+	})
+	x.ap.mu.Lock()
+	x.ap.silent = map[string]bool{second: true}
+	x.ap.mu.Unlock()
 	a := newAuthenticator(t)
-	r := x.b.json(http.MethodPost, "/enrol/begin", map[string]string{"code": caseCode, "public_key": a.spki()}, http.StatusOK)
-	if w := x.b.do(http.MethodPost, "/enrol/finish", a.assertion(r["id"].(string), r["challenge"].(string))); w.Code == http.StatusOK || x.d.ap.Replaced() {
-		t.Fatalf("a stalled access point enrolled: %d %s", w.Code, w.Body)
+	w := finishEnrol(x, a, 5*time.Second)
+	if w.Code == http.StatusOK || x.d.book.Owner() == a.Public() || x.d.ap.Replaced() {
+		t.Fatalf("enrolled with an access point that never answered: %d %s", w.Code, w.Body)
 	}
+	if !strings.Contains(w.Body.String(), "did not take the new networks within") {
+		t.Fatalf("not the deadline's refusal: %s", w.Body)
+	}
+	owner := x.apKeys().Owner
+	waitFor(t, func() bool {
+		h := x.ap.wireless(apAddr)
+		return strings.Contains(h, setupPW) && !strings.Contains(h, owner)
+	})
+}
+
+// ENF-l-ap-5 (rollback): one access point takes the four networks and
+// another refuses them; the first is pushed the setup network back, so
+// the sticker is not the only way in on one and dead on the other.
+func TestEnrolmentFailureRollsBackEveryAccessPoint(t *testing.T) {
+	x, second := twoAPs(t)
+	waitFor(t, func() bool { return strings.Contains(x.ap.wireless(second), setupPW) })
+	x.ap.mu.Lock()
+	x.ap.failAt = map[string]error{second: errors.New("push: ssh: handshake failed")}
+	x.ap.mu.Unlock()
+	a := newAuthenticator(t)
+	if w := finishEnrol(x, a, 5*time.Second); w.Code == http.StatusOK || x.d.ap.Replaced() {
+		t.Fatalf("enrolled with one access point refusing: %d %s", w.Code, w.Body)
+	}
+	owner := x.apKeys().Owner
+	waitFor(t, func() bool {
+		h := x.ap.wireless(apAddr)
+		return strings.Contains(h, setupPW) && !strings.Contains(h, owner)
+	})
+}
+
+// HW-10, ENF-l-ap-5: the hand-over is saved before enrolment goes on. A
+// failed save of it enrols nothing, pushes the setup network back, and a
+// restart still pushes the setup network: the saved state never says
+// replaced when it is not, nor the reverse.
+func TestEnrolmentReplacedSaveFails(t *testing.T) {
+	x := newBox(t, false)
+	waitFor(t, func() bool { return strings.Contains(x.ap.wireless(apAddr), setupPW) })
+	x.failOn(fileAPKeys, 2) // the first save is the four passwords, the second the hand-over
+	a := newAuthenticator(t)
+	if w := finishEnrol(x, a, 5*time.Second); w.Code == http.StatusOK || x.d.ap.Replaced() || x.d.book.Owner() == a.Public() {
+		t.Fatalf("enrolled with the hand-over unsaved: %d %s", w.Code, w.Body)
+	}
+	owner := x.apKeys().Owner
+	if owner == "" {
+		t.Fatal("the four passwords were not kept for the retry")
+	}
+	waitFor(t, func() bool { return strings.Contains(x.ap.wireless(apAddr), setupPW) })
+	x.restart()
+	if x.d.ap.Replaced() {
+		t.Fatal("a restart reads an unsaved hand-over as done")
+	}
+	x.d.ap.nudge()
+	waitFor(t, func() bool {
+		x.ap.mu.Lock()
+		n := len(x.ap.made[apAddr])
+		x.ap.mu.Unlock()
+		h := x.ap.wireless(apAddr)
+		return n == 2 && strings.Contains(h, setupPW) && !strings.Contains(h, owner)
+	})
+}
+
+// HW-10, ENF-l-ap-4: the four passwords are saved before any access point
+// is pushed them. A failed save pushes none and enrols nothing.
+func TestEnrolmentPasswordSaveFails(t *testing.T) {
+	x := newBox(t, false)
+	waitFor(t, func() bool { return strings.Contains(x.ap.wireless(apAddr), setupPW) })
+	x.fail(fileAPKeys, true)
+	a := newAuthenticator(t)
+	if w := finishEnrol(x, a, 5*time.Second); w.Code == http.StatusOK || x.d.ap.Replaced() {
+		t.Fatalf("enrolled with the passwords unsaved: %d %s", w.Code, w.Body)
+	}
+	if x.apKeys().Owner != "" {
+		t.Fatal("the passwords' save failed, yet the file holds them")
+	}
+	x.ap.mu.Lock()
+	defer x.ap.mu.Unlock()
+	for _, h := range x.ap.history {
+		if !strings.Contains(h, setupPW) || strings.Contains(h, "'Home family'") {
+			t.Fatalf("the access point was pushed passwords no file holds:\n%s", h)
+		}
+	}
+}
+
+// NET-3, ENF-l-ap-4: a device's own password is saved before any access
+// point is pushed it. While its save fails, the access point gets no
+// password for the device and the log says why; once it saves, the
+// password the access point holds is the one on disk.
+func TestDevicePasswordSavedBeforePush(t *testing.T) {
+	x, a := enrolled(t, false)
+	waitFor(t, func() bool {
+		tv := x.apKeys().Device["tv"].Password
+		return tv != "" && strings.Contains(x.ap.wireless(apAddr), tv)
+	})
+	next := x.current()
+	next.Version++
+	next.Devices = append(next.Devices, policy.Device{ID: "speaker", Network: policy.NetDevices, WiFi: "vlan102", Everyday: true})
+	if w := x.b.approve(a, next); w.Code != http.StatusOK {
+		t.Fatalf("approve: %d %s", w.Code, w.Body)
+	}
+	x.fail(fileAPKeys, true)
+	x.advance(time.Duration(policy.Wait) * time.Millisecond)
+	if x.current().Device("speaker") == nil {
+		t.Fatal("the speaker is not in force")
+	}
+	waitFor(t, func() bool { return x.logContains("device Wi-Fi passwords not saved, so not pushed") })
+	x.d.ap.nudge()
+	time.Sleep(20 * time.Millisecond)
+	if strings.Count(x.ap.wireless(apAddr), "config wifi-station") != 1 {
+		t.Fatalf("the access point holds a device password no file holds:\n%s", x.ap.wireless(apAddr))
+	}
+	x.fail(fileAPKeys, false)
+	x.d.ap.nudge()
+	waitFor(t, func() bool {
+		sp := x.apKeys().Device["speaker"].Password
+		return sp != "" && strings.Contains(x.ap.wireless(apAddr), sp)
+	})
 }
 
 // The configuration refuses an access point the daemon could not reach

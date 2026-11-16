@@ -98,6 +98,9 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
+		if err := checkSetup(strings.TrimSpace(string(sb))); err != nil {
+			return err
+		}
 		if err := provisionState(*state, strings.TrimSpace(string(b))); err != nil {
 			return err
 		}
