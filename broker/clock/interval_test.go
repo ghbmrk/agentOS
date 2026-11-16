@@ -567,3 +567,54 @@ func TestTIM1NTSBoundSurvivesARestartNotAReboot(t *testing.T) {
 		t.Fatalf("texts = %q", got)
 	}
 }
+
+func TestTIM1OutlierAtTheToleranceEdges(t *testing.T) {
+	// Under NTS a carrier exactly the tolerance off agrees; one second
+	// further, on either side, is an outlier the NTS bound clamps.
+	for _, off := range []time.Duration{DefaultTolerance, -DefaultTolerance, DefaultTolerance + time.Second, -DefaultTolerance - time.Second} {
+		r := newRig()
+		r.carrier = r.carrier.Add(off)
+		g := r.guard(t, nts)
+		s := g.Check(bg)
+		past := off > DefaultTolerance || off < -DefaultTolerance
+		if s.State == Disagree != past || !s.Authenticated {
+			t.Fatalf("carrier %v off: status = %+v", off, s)
+		}
+		g.Flush()
+		if got := r.sent(); past != (len(got) == 1 && got[0] == OutlierText(s.Skew)) || !past && len(got) != 0 {
+			t.Fatalf("carrier %v off: texts = %q", off, got)
+		}
+	}
+}
+
+func TestTIM1OutlierTextNamesTheSkew(t *testing.T) {
+	// OutlierText rounds the skew to its unit at each unit's start.
+	for skew, want := range map[time.Duration]string{
+		30 * time.Minute:  "by about 30 minutes,",
+		-90 * time.Minute: "by about 1 hour,",
+		2 * time.Hour:     "by about 2 hours,",
+		-5 * time.Hour:    "by about 5 hours,",
+	} {
+		if got := OutlierText(skew); !strings.Contains(got, want) {
+			t.Fatalf("skew %v: %q, want %q", skew, got, want)
+		}
+	}
+}
+
+func TestTIM1NoStatePathWritesNothing(t *testing.T) {
+	// With no StatePath the guard keeps its state in memory only: no save
+	// is tried, so none fails.
+	r := newRig()
+	r.carrier = r.carrier.Add(5 * time.Hour)
+	var logs []string
+	g := r.guard(t, func(c *Config) {
+		nts(c)
+		c.Logf = func(f string, a ...any) { logs = append(logs, f) }
+	})
+	g.Check(bg)
+	r.advance(time.Hour)
+	g.Check(bg)
+	if len(logs) != 0 {
+		t.Fatalf("logs = %q", logs)
+	}
+}

@@ -617,10 +617,9 @@ func (g *Guard) check(ctx context.Context) Status {
 	if nts {
 		g.ntsWall, g.ntsMono = now, mono
 	}
-	if ref, allow, ok := g.ntsRefLocked(mono); ok {
-		d := now.Sub(ref)
-		s.Authenticated = d <= allow && -d <= allow
-	}
+	ref, allow := g.ntsRefLocked(mono)
+	d := now.Sub(ref)
+	s.Authenticated = d <= allow && -d <= allow
 	switch {
 	case have:
 		g.carrier, g.carrierMono = carrier, mono
@@ -850,14 +849,12 @@ func (g *Guard) carrierForwardLocked(mono time.Duration) time.Time {
 
 // ntsRefLocked is this boot's last converged NTS sync carried forward to
 // mono, and how far true time may be from it: the tolerance plus ntsDrift of
-// the boot clock's time since (TIM-1-interval-fu-e, #5758). ok is false with
-// no such sync this boot.
-func (g *Guard) ntsRefLocked(mono time.Duration) (ref time.Time, allow time.Duration, ok bool) {
-	if g.ntsWall.IsZero() {
-		return time.Time{}, 0, false
-	}
+// the boot clock's time since (TIM-1-interval-fu-e, #5758). With no such
+// sync this boot it is near the year 1, which no box clock is within the
+// allowance of (time.Time.Sub saturates), so nothing is authenticated.
+func (g *Guard) ntsRefLocked(mono time.Duration) (ref time.Time, allow time.Duration) {
 	since := mono - g.ntsMono
-	return g.ntsWall.Add(since), g.cfg.Tolerance + since/ntsDrift, true
+	return g.ntsWall.Add(since), g.cfg.Tolerance + since/ntsDrift
 }
 
 // intervalLocked widens now by the carrier reading carried forward to mono,
@@ -869,7 +866,8 @@ func (g *Guard) intervalLocked(now time.Time, mono time.Duration) (lo, hi time.T
 	if c.IsZero() {
 		return lo, hi
 	}
-	if ref, allow, ok := g.ntsRefLocked(mono); ok && g.status.Authenticated {
+	if g.status.Authenticated {
+		ref, allow := g.ntsRefLocked(mono)
 		if top := ref.Add(allow); c.After(top) {
 			c = top
 		} else if bottom := ref.Add(-allow); c.Before(bottom) {
