@@ -92,7 +92,7 @@ def main(argv=None, fetch=board.github):
         found = stale_queued(items, fetch(f"/repos/{args.repo}/pulls?state=all"),
                              lambda pr: [f["filename"] for f in fetch(f"/repos/{args.repo}/pulls/{pr['number']}/files")],
                              lambda i: max((e["created_at"] for e in fetch(
-                                 f"/repos/{args.repo}/issues/{i['number']}/events?per_page=100")
+                                 f"/repos/{args.repo}/issues/{i['number']}/events")
                                  if e.get("event") == "reopened"), default=None))
     except ValueError as e:
         print(f"stalequeued: {e}", file=sys.stderr)
