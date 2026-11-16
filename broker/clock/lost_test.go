@@ -80,8 +80,8 @@ func TestTIM1LostStateEndsWhenCarrierAgrees(t *testing.T) {
 func TestTIM1LostStateUnderNTSKeepsNetworkTime(t *testing.T) {
 	// Converged NTS outranks carrier time (TIM-1-interval-fu-1), so the
 	// lost disagreement widens nothing while it holds; it stays a
-	// disagreement until carrier time agrees, and once NTS lapses the
-	// unknown width returns.
+	// disagreement until carrier time agrees, and once the NTS bound lapses
+	// (#5758) the unknown width returns.
 	r := noCarrier()
 	kind := SyncedNTS
 	g, _ := lostGuard(t, r, syncAs(&kind))
@@ -91,6 +91,10 @@ func TestTIM1LostStateUnderNTSKeepsNetworkTime(t *testing.T) {
 	}
 	kind = SyncedPlain
 	r.advance(20 * time.Minute)
+	if s = g.Check(bg); !s.Authenticated {
+		t.Fatalf("NTS lapsed: %+v, want the NTS bound kept", s)
+	}
+	r.step(10 * time.Minute)
 	s = g.Check(bg)
 	if lo, _, _ := g.Interval(bg); s.State != Disagree || !lo.IsZero() {
 		t.Fatalf("NTS lapsed: %+v, Earliest %v", s, lo)

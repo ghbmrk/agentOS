@@ -232,8 +232,9 @@ func syncAs(k *SyncKind) func(*Config) {
 
 func TestTIM1AuthenticatedOutlierLosingItsCarrierStaysDisagree(t *testing.T) {
 	// L3 blocker 1 on #5754: a forged +5h carrier under NTS, then the
-	// carrier goes quiet and NTS drops. The disagreement stays in force and
-	// STATUS names the wide interval, never "not checked".
+	// carrier goes quiet and NTS drops. The disagreement stays in force,
+	// still bounded by the last NTS sync (#5758); once the box clock steps
+	// away from it, STATUS names the wide interval, never "not checked".
 	r := newRig()
 	r.carrier = r.carrier.Add(5 * time.Hour)
 	kind := SyncedNTS
@@ -250,10 +251,14 @@ func TestTIM1AuthenticatedOutlierLosingItsCarrierStaysDisagree(t *testing.T) {
 	}
 	kind = NotSynced
 	r.advance(20 * time.Minute)
+	if s := g.Check(bg); s.State != Disagree || !s.Authenticated {
+		t.Fatalf("NTS lost: status = %+v, want the NTS bound kept", s)
+	}
+	r.step(-10 * time.Minute)
 	s := g.Check(bg)
 	lo, hi, _ := g.Interval(bg)
-	if s.State != Disagree || s.Authenticated || hi.Sub(lo) != 5*time.Hour {
-		t.Fatalf("NTS lost: status = %+v, width %v", s, hi.Sub(lo))
+	if s.State != Disagree || s.Authenticated || hi.Sub(lo) != 5*time.Hour+10*time.Minute {
+		t.Fatalf("bound lost: status = %+v, width %v", s, hi.Sub(lo))
 	}
 	if l := s.IntervalLine(time.UTC); !strings.Contains(l, "differ by about 5 hours") {
 		t.Fatalf("line = %q, want the wide interval named", l)
@@ -265,7 +270,11 @@ func TestTIM1AuthenticatedDisagreementSurvivesRestart(t *testing.T) {
 	r := newRig()
 	r.carrier = r.carrier.Add(5 * time.Hour)
 	kind := SyncedNTS
-	edit := func(c *Config) { syncAs(&kind)(c); c.StatePath = path }
+	edit := func(c *Config) {
+		syncAs(&kind)(c)
+		c.StatePath = path
+		c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
+	}
 	g := r.guard(t, edit)
 	if s := g.Check(bg); s.State != Disagree {
 		t.Fatalf("status = %+v", s)
@@ -312,10 +321,10 @@ func TestTIM1LineNamesAnAuthenticatedOutlier(t *testing.T) {
 }
 
 func TestTIM1NTSChangingDuringADisagreementRealerts(t *testing.T) {
-	// UX blocker 2 on #5754 (L3 R1): NTS lapsing while the carrier still
-	// disagrees widens the interval to the full skew and holds questions,
-	// so the owner told "Nothing to do" hears DisagreeText; NTS returning
-	// is told under the cap.
+	// UX blocker 2 on #5754 (L3 R1, #5758 R1): the NTS bound lapsing (the
+	// box clock steps away from it) while the carrier still disagrees widens
+	// the interval to the full skew and holds questions, so the owner told
+	// "Nothing to do" hears DisagreeText; NTS returning is told under the cap.
 	r := newRig()
 	r.carrier = r.carrier.Add(5 * time.Hour)
 	kind := SyncedNTS
@@ -323,11 +332,12 @@ func TestTIM1NTSChangingDuringADisagreementRealerts(t *testing.T) {
 	g.Check(bg)
 	kind = SyncedPlain
 	r.advance(10 * time.Minute)
+	r.step(-10 * time.Minute)
 	s := g.Check(bg)
-	if lo, hi, _ := g.Interval(bg); s.State != Disagree || s.Authenticated || hi.Sub(lo) != 5*time.Hour {
+	if lo, hi, _ := g.Interval(bg); s.State != Disagree || s.Authenticated || hi.Sub(lo) != 5*time.Hour+10*time.Minute {
 		t.Fatalf("status = %+v, width %v", s, hi.Sub(lo))
 	}
-	want := []string{OutlierText(-5 * time.Hour), DisagreeText(-5 * time.Hour)}
+	want := []string{OutlierText(-5 * time.Hour), DisagreeText(s.Skew)}
 	if got := r.sent(); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("texts = %q, want %q", got, want)
 	}
@@ -338,6 +348,7 @@ func TestTIM1NTSChangingDuringADisagreementRealerts(t *testing.T) {
 	g.Check(bg)
 	kind = SyncedPlain
 	r.advance(10 * time.Minute)
+	r.step(10 * time.Minute)
 	g.Check(bg)
 	if got := r.sent(); len(got) != 2 {
 		t.Fatalf("flapping NTS at the cap: texts = %q", got)
@@ -378,8 +389,8 @@ func (r *rig) setCarrier(t time.Time) { r.mu.Lock(); r.carrier = t; r.mu.Unlock(
 
 func TestTIM1NTSLapseEscalatesEvenAtTheCap(t *testing.T) {
 	// UX delta 1 on #5754: an OutlierText that used the day's last alert,
-	// then NTS lapses: the owner still hears DisagreeText, since questions
-	// are now held.
+	// then the NTS bound lapses: the owner still hears DisagreeText, since
+	// questions are now held.
 	r := newRig()
 	kind := SyncedNTS
 	g := r.guard(t, syncAs(&kind))
@@ -393,9 +404,10 @@ func TestTIM1NTSLapseEscalatesEvenAtTheCap(t *testing.T) {
 	g.Check(bg) // OutlierText: alert 2, the cap
 	kind = SyncedPlain
 	r.advance(10 * time.Minute)
+	r.step(-10 * time.Minute)
 	g.Check(bg)
 	got := r.sent()
-	if len(got) != 4 || got[3] != DisagreeText(-5*time.Hour) {
+	if len(got) != 4 || got[3] != DisagreeText(-5*time.Hour-10*time.Minute) {
 		t.Fatalf("texts = %q, want DisagreeText fourth", got)
 	}
 	if _, err := g.Now(bg); err != ErrRestricted {
@@ -444,5 +456,249 @@ func TestTIM1AuthenticatedOutlierIsToldOnce(t *testing.T) {
 	}
 	if got := r.sent(); len(got) != 1 || got[0] != OutlierText(s.Skew) {
 		t.Fatalf("texts = %q, want only %q", got, OutlierText(s.Skew))
+	}
+}
+
+// wantSpan fails unless [lo, hi] is [a, b].
+func wantSpan(t *testing.T, what string, lo, hi, a, b time.Time) {
+	t.Helper()
+	if !lo.Equal(a) || !hi.Equal(b) {
+		t.Fatalf("%s: interval [%v, %v], want [%v, %v]", what, lo, hi, a, b)
+	}
+}
+
+func TestTIM1NTSBoundOutlivesTheSync(t *testing.T) {
+	// #5758 R2: NTS blocked, then a forged carrier 5 h off. The last
+	// converged NTS sync, carried forward on the boot clock, still bounds it:
+	// the interval reaches the tolerance plus ntsDrift of the time since, so
+	// no expiry fires hours early and no hold waits hours longer.
+	for _, skew := range []time.Duration{5 * time.Hour, -5 * time.Hour} {
+		r := newRig()
+		kind := SyncedNTS
+		g := r.guard(t, syncAs(&kind))
+		if s := g.Check(bg); s.State != Agreed || !s.Authenticated {
+			t.Fatalf("skew %v: status = %+v", skew, s)
+		}
+		kind = NotSynced
+		r.advance(time.Hour)
+		r.setCarrier(r.wall.Add(skew))
+		lo, hi, s := g.Interval(bg)
+		if s.State != Disagree || !s.Authenticated || s.Restricted() {
+			t.Fatalf("skew %v: status = %+v", skew, s)
+		}
+		allow := DefaultTolerance + time.Hour/ntsDrift // 5 min 7.2 s
+		if skew > 0 {
+			wantSpan(t, "ahead", lo, hi, r.wall, r.wall.Add(allow))
+		} else {
+			wantSpan(t, "behind", lo, hi, r.wall.Add(-allow), r.wall)
+		}
+		if got := r.sent(); len(got) != 1 || got[0] != OutlierText(s.Skew) {
+			t.Fatalf("skew %v: texts = %q", skew, got)
+		}
+		// The allowance grows with the boot clock's time since the sync:
+		// after 50 days it is 5 min plus 2.4 h, and a carrier inside it
+		// widens the interval fully.
+		r.advance(50 * 24 * time.Hour)
+		lo, hi, _ = g.Interval(bg)
+		allow = DefaultTolerance + (50*24*time.Hour+time.Hour)/ntsDrift
+		if skew > 0 {
+			wantSpan(t, "50 days on", lo, hi, r.wall, r.wall.Add(allow))
+		} else {
+			wantSpan(t, "50 days on", lo, hi, r.wall.Add(-allow), r.wall)
+		}
+	}
+}
+
+func TestTIM1NTSBoundIsCentredOnAuthenticatedTime(t *testing.T) {
+	// The bound is the NTS sync carried forward, not the box clock: a box
+	// clock stepped within the allowance moves one end, never the bound, on
+	// either side (a carrier ahead fires expiries early, one behind holds
+	// waits; Lens B1 on #5893).
+	for _, skew := range []time.Duration{5 * time.Hour, -5 * time.Hour} {
+		r := newRig()
+		kind := SyncedNTS
+		g := r.guard(t, syncAs(&kind))
+		g.Check(bg)
+		kind = SyncedPlain
+		r.advance(20 * time.Minute)
+		truth := r.wall
+		step := 4 * time.Minute
+		if skew < 0 {
+			step = -step
+		}
+		r.step(step)
+		r.setCarrier(truth.Add(skew))
+		lo, hi, s := g.Interval(bg)
+		if !s.Authenticated {
+			t.Fatalf("skew %v: status = %+v", skew, s)
+		}
+		allow := DefaultTolerance + 20*time.Minute/ntsDrift
+		if skew > 0 {
+			wantSpan(t, "carrier ahead", lo, hi, r.wall, truth.Add(allow))
+		} else {
+			wantSpan(t, "carrier behind", lo, hi, truth.Add(-allow), r.wall)
+		}
+	}
+}
+
+func TestTIM1NTSBoundDiesWithItsBoot(t *testing.T) {
+	// Lens B2 on #5893: a saved NTS sync read against a later boot's clock
+	// falls short of true time by the earlier boot's uptime and the
+	// downtime. A box clock set back to agree with that stale reference (the
+	// hardware clock across a power cut) is not authenticated, and an honest
+	// carrier widens the interval fully.
+	path := filepath.Join(t.TempDir(), "clock.json")
+	r := newRig()
+	kind := SyncedNTS
+	edit := func(c *Config) {
+		syncAs(&kind)(c)
+		c.StatePath = path
+		c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
+	}
+	g := r.guard(t, edit)
+	stale := r.wall
+	if s := g.Check(bg); !s.Authenticated {
+		t.Fatalf("status = %+v", s)
+	}
+	kind = NotSynced
+	r.advance(2 * time.Hour)
+	g.Check(bg)
+	truth := r.wall.Add(time.Hour) // an hour powered off
+	r.reboot(stale)
+	r.setCarrier(truth)
+	g = r.guard(t, edit)
+	lo, hi, s := g.Interval(bg)
+	if s.State != Disagree || s.Authenticated {
+		t.Fatalf("after reboot: status = %+v", s)
+	}
+	wantSpan(t, "after reboot", lo, hi, stale, truth)
+}
+
+func TestTIM1NTSBoundEndsWhenTheBoxClockLeavesIt(t *testing.T) {
+	// A box clock stepped past the allowance from the NTS sync carried
+	// forward is no longer authenticated time: the bound lapses, the carrier
+	// widens the interval fully and the owner hears DisagreeText (R1).
+	allow := DefaultTolerance + 20*time.Minute/ntsDrift
+	for _, d := range []time.Duration{allow, -allow, allow + 1, -allow - 1} {
+		r := newRig()
+		kind := SyncedNTS
+		g := r.guard(t, syncAs(&kind))
+		g.Check(bg)
+		kind = SyncedPlain
+		r.advance(20 * time.Minute)
+		truth := r.wall
+		r.step(d)
+		r.setCarrier(truth.Add(5 * time.Hour))
+		s := g.Check(bg)
+		inside := d == allow || d == -allow
+		if s.State != Disagree || s.Authenticated != inside {
+			t.Fatalf("step %v: status = %+v", d, s)
+		}
+		g.Flush()
+		want := OutlierText(s.Skew)
+		if !inside {
+			want = DisagreeText(s.Skew)
+			if _, hi, _ := g.Interval(bg); !hi.Equal(truth.Add(5 * time.Hour)) {
+				t.Fatalf("step %v: Latest %v, want the carrier's", d, hi)
+			}
+		}
+		if got := r.sent(); len(got) != 1 || got[0] != want {
+			t.Fatalf("step %v: texts = %q, want %q", d, got, want)
+		}
+	}
+}
+
+func TestTIM1NTSBoundSurvivesARestartNotAReboot(t *testing.T) {
+	// The sync is kept in StatePath for the boot that made it, like the
+	// anchor: a broker restart keeps the bound; a reboot, whose boot clock
+	// starts again, drops it, so the forged carrier widens fully and the
+	// owner told "Nothing to do" hears DisagreeText (R1).
+	path := filepath.Join(t.TempDir(), "clock.json")
+	r := newRig()
+	kind := SyncedNTS
+	edit := func(c *Config) {
+		syncAs(&kind)(c)
+		c.StatePath = path
+		c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
+	}
+	g := r.guard(t, edit)
+	floor := r.wall // the last verified time, which bounds the next boot's Earliest (HW-8)
+	g.Check(bg)
+	kind = NotSynced
+	r.advance(time.Hour)
+	r.setCarrier(r.wall.Add(5 * time.Hour))
+	if s := g.Check(bg); !s.Authenticated {
+		t.Fatalf("status = %+v", s)
+	}
+	r.advance(time.Minute)
+	g = r.guard(t, edit)
+	lo, hi, s := g.Interval(bg)
+	if !s.Authenticated {
+		t.Fatalf("after restart: status = %+v", s)
+	}
+	wantSpan(t, "after restart", lo, hi, r.wall, r.wall.Add(DefaultTolerance+61*time.Minute/ntsDrift))
+	r.reboot(r.wall)
+	r.setCarrier(r.wall.Add(5 * time.Hour))
+	g = r.guard(t, edit)
+	lo, hi, s = g.Interval(bg)
+	if s.State != Disagree || s.Authenticated {
+		t.Fatalf("after reboot: status = %+v", s)
+	}
+	wantSpan(t, "after reboot", lo, hi, floor, r.wall.Add(5*time.Hour))
+	g.Flush()
+	if got := r.sent(); len(got) != 2 || got[1] != DisagreeText(s.Skew) {
+		t.Fatalf("texts = %q", got)
+	}
+}
+
+func TestTIM1OutlierAtTheToleranceEdges(t *testing.T) {
+	// Under NTS a carrier exactly the tolerance off agrees; one second
+	// further, on either side, is an outlier the NTS bound clamps.
+	for _, off := range []time.Duration{DefaultTolerance, -DefaultTolerance, DefaultTolerance + time.Second, -DefaultTolerance - time.Second} {
+		r := newRig()
+		r.carrier = r.carrier.Add(off)
+		g := r.guard(t, nts)
+		s := g.Check(bg)
+		past := off > DefaultTolerance || off < -DefaultTolerance
+		if s.State == Disagree != past || !s.Authenticated {
+			t.Fatalf("carrier %v off: status = %+v", off, s)
+		}
+		g.Flush()
+		if got := r.sent(); past != (len(got) == 1 && got[0] == OutlierText(s.Skew)) || !past && len(got) != 0 {
+			t.Fatalf("carrier %v off: texts = %q", off, got)
+		}
+	}
+}
+
+func TestTIM1OutlierTextNamesTheSkew(t *testing.T) {
+	// OutlierText rounds the skew to its unit at each unit's start.
+	for skew, want := range map[time.Duration]string{
+		30 * time.Minute:  "by about 30 minutes,",
+		-90 * time.Minute: "by about 1 hour,",
+		time.Hour:         "by about 1 hour,",
+		2 * time.Hour:     "by about 2 hours,",
+		-5 * time.Hour:    "by about 5 hours,",
+	} {
+		if got := OutlierText(skew); !strings.Contains(got, want) {
+			t.Fatalf("skew %v: %q, want %q", skew, got, want)
+		}
+	}
+}
+
+func TestTIM1NoStatePathWritesNothing(t *testing.T) {
+	// With no StatePath the guard keeps its state in memory only: no save
+	// is tried, so none fails.
+	r := newRig()
+	r.carrier = r.carrier.Add(5 * time.Hour)
+	var logs []string
+	g := r.guard(t, func(c *Config) {
+		nts(c)
+		c.Logf = func(f string, a ...any) { logs = append(logs, f) }
+	})
+	g.Check(bg)
+	r.advance(time.Hour)
+	g.Check(bg)
+	if len(logs) != 0 {
+		t.Fatalf("logs = %q", logs)
 	}
 }

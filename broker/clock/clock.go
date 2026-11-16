@@ -7,9 +7,11 @@
 // the interval instead of stopping time: a move that widens authority (a
 // hold's end, a default on timeout) waits until the interval's start,
 // Guard.Earliest, passes it, and one that narrows (an expiry) fires at its
-// end, Guard.Latest. While the NTP sync is NTS-authenticated, unauthenticated
-// carrier time widens the interval by at most the tolerance, so a fake base
-// station cannot expire every key (#5216). A disagreement is texted to the
+// end, Guard.Latest. Authenticated network time bounds unauthenticated
+// carrier time: from a converged NTS sync, carried forward on the boot clock
+// with a drift allowance, the carrier widens the interval by at most the
+// tolerance plus that allowance, so a fake base station cannot expire every
+// key, even with NTS blocked (#5216, #5758). A disagreement is texted to the
 // owner and survives a restart (StatePath).
 //
 // The box clock is also held to an anchor: the last check carrier time
@@ -108,8 +110,11 @@ type Status struct {
 	Verified bool
 	// Start is the box clock's reading of when this boot began.
 	Start time.Time
-	// Authenticated reports that the check's NTP sync was NTS-authenticated,
-	// so a disagreeing carrier widens the interval by at most the tolerance.
+	// Authenticated reports that authenticated network time bounds the
+	// interval: this boot had a converged NTS sync, and the box clock is
+	// within the drift allowance of it carried forward on the boot clock
+	// (ntsAllowance), so a disagreeing carrier widens the interval by at most
+	// that allowance. It outlives the NTS sync (TIM-1-interval-fu-e, #5758).
 	Authenticated bool
 }
 
@@ -165,6 +170,13 @@ const (
 	// top of the tolerance. NTP slewing moves the wall and boot clocks
 	// together, so only steps open a gap (L3 F6 on #68).
 	anchorSlack = 5 * time.Second
+	// ntsDrift is how fast the boot clock may run from true time with no
+	// NTS sync, as a fraction: one part in ntsDrift (2000 ppm). chronyd moves
+	// it by at most its frequency correction (maxdrift 500 ppm) plus its slew
+	// (maxslewrate 500 ppm), whatever plain NTP it follows once NTS is
+	// blocked (chrony/chrony.conf), and the crystal's own error is tens of
+	// ppm, so this covers both with room.
+	ntsDrift = 500
 )
 
 // AgreeText tells the owner a disagreement or hold has ended.
@@ -401,6 +413,11 @@ type Guard struct {
 	carrier     time.Time
 	carrierMono time.Duration
 
+	// The box clock and Elapsed at this boot's last converged NTS sync:
+	// authenticated time, carried forward on the boot clock (ntsAllowance).
+	ntsWall time.Time
+	ntsMono time.Duration
+
 	// verified: this boot has had verified time. floor: the latest
 	// verified time ever seen, which true time cannot be before; it bounds
 	// Latest and Earliest while unverified and only advances (security T3).
@@ -593,10 +610,16 @@ func (g *Guard) check(ctx context.Context) Status {
 	// Read the box clock after the modem answers, so the modem's latency
 	// does not count as skew.
 	now, mono := g.cfg.Now(), g.cfg.Elapsed()
-	s := Status{At: now, Start: now.Add(-mono), Authenticated: nts}
+	s := Status{At: now, Start: now.Add(-mono)}
 
 	g.mu.Lock()
 	prev, wasChecked := g.status, g.checked
+	if nts {
+		g.ntsWall, g.ntsMono = now, mono
+	}
+	ref, allow := g.ntsRefLocked(mono)
+	d := now.Sub(ref)
+	s.Authenticated = d <= allow && -d <= allow
 	switch {
 	case have:
 		g.carrier, g.carrierMono = carrier, mono
@@ -824,11 +847,21 @@ func (g *Guard) carrierForwardLocked(mono time.Duration) time.Time {
 	return g.carrier.Add(mono - g.carrierMono)
 }
 
+// ntsRefLocked is this boot's last converged NTS sync carried forward to
+// mono, and how far true time may be from it: the tolerance plus ntsDrift of
+// the boot clock's time since (TIM-1-interval-fu-e, #5758). With no such
+// sync this boot it is near the year 1, which no box clock is within the
+// allowance of (time.Time.Sub saturates), so nothing is authenticated.
+func (g *Guard) ntsRefLocked(mono time.Duration) (ref time.Time, allow time.Duration) {
+	since := mono - g.ntsMono
+	return g.ntsWall.Add(since), g.cfg.Tolerance + since/ntsDrift
+}
+
 // intervalLocked widens now by the carrier reading carried forward to mono,
-// by at most the tolerance while the last check was authenticated. A
-// disagreement with no reading this boot (one saved by an earlier boot)
-// widens by its saved skew instead, so it keeps its width across a reboot
-// (#5811); the floor still bounds it while unverified.
+// by at most the NTS allowance around authenticated time while the last
+// check was authenticated. A disagreement with no reading this boot (one
+// saved by an earlier boot) widens by its saved skew instead, so it keeps its
+// width across a reboot (#5811); the floor still bounds it while unverified.
 func (g *Guard) intervalLocked(now time.Time, mono time.Duration) (lo, hi time.Time) {
 	lo, hi = now, now
 	c := g.carrierForwardLocked(mono)
@@ -839,9 +872,10 @@ func (g *Guard) intervalLocked(now time.Time, mono time.Duration) (lo, hi time.T
 		return lo, hi
 	}
 	if g.status.Authenticated {
-		if top := now.Add(g.cfg.Tolerance); c.After(top) {
+		ref, allow := g.ntsRefLocked(mono)
+		if top := ref.Add(allow); c.After(top) {
 			c = top
-		} else if bottom := now.Add(-g.cfg.Tolerance); c.Before(bottom) {
+		} else if bottom := ref.Add(-allow); c.Before(bottom) {
 			c = bottom
 		}
 	}
@@ -924,6 +958,10 @@ type saved struct {
 	Anchored   bool          `json:"anchored"`
 	AnchorWall time.Time     `json:"anchor_wall"`
 	AnchorMono time.Duration `json:"anchor_mono"`
+	// This boot's last converged NTS sync (ntsRefLocked), usable only
+	// within the boot that recorded it, like the anchor.
+	NTSWall time.Time     `json:"nts_wall"`
+	NTSMono time.Duration `json:"nts_mono"`
 	// Alerts sent in the last day, counted toward MaxAlertsPerDay, and the
 	// boot clock and latest credible time when the file was written, so a
 	// later boot trusts the ages measured within this one.
@@ -974,6 +1012,9 @@ func (g *Guard) load() {
 	if v.Anchored && sameBoot {
 		g.anchored, g.anchorWall, g.anchorMono = true, v.AnchorWall, v.AnchorMono
 	}
+	if sameBoot {
+		g.ntsWall, g.ntsMono = v.NTSWall, v.NTSMono
+	}
 	mono, wall := g.cfg.Elapsed(), g.cfg.Now()
 	// The carrier reading keeps a known disagreement's width across a
 	// restart, robust to a later wall-clock step, as within one process
@@ -1012,6 +1053,7 @@ func (g *Guard) saveLocked() {
 	v := saved{
 		Restricted: g.status.State == Disagree, Told: g.told,
 		Boot: g.cfg.BootID(), Anchored: g.anchored, AnchorWall: g.anchorWall, AnchorMono: g.anchorMono,
+		NTSWall: g.ntsWall, NTSMono: g.ntsMono,
 		Alerts: g.alerts, SavedMono: g.cfg.Elapsed(),
 	}
 	v.SavedWall = g.latestLocked(g.cfg.Now(), v.SavedMono)
