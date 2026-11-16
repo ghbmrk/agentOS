@@ -197,15 +197,16 @@ func refusalCount(held []string, v []byte) int {
 
 // An entry set the store refuses (a bad name, a value past MaxEntry, a value
 // that is no byte string, one entry too many) had its values decoded before
-// the refusal; Unlock wipes each of them, and the slot, MAC and entries keys,
-// before it returns ErrCorrupt, and leaves the file closed (CLK-1, STO-2).
+// the refusal; Unlock wipes each of them, the slot, MAC and entries keys and
+// the store key's clone before it returns ErrCorrupt, and leaves the file
+// closed (CLK-1, STO-2).
 func TestARefusedEntrySetIsWiped(t *testing.T) {
 	canary := []byte("refused-entry-canary")
 	many := map[string]any{"x/a": canary}
 	for i := range MaxEntries {
 		many[string([]byte{'y', '/', byte('a' + i%26), byte('a' + i/26)})] = []byte{}
 	}
-	r, key, id := Recovery{Key: make([]byte, RecoveryLen)}, make([]byte, keyLen), make([]byte, idLen)
+	r, key, id := Recovery{Key: make([]byte, RecoveryLen)}, slices.Repeat([]byte{0x5a}, keyLen), make([]byte, idLen)
 	sl, err := makeSlot(id, key, r)
 	if err != nil {
 		t.Fatal(err)
@@ -229,6 +230,7 @@ func TestARefusedEntrySetIsWiped(t *testing.T) {
 			for what, v := range map[string][]byte{
 				"the decoded canary": canary, "the slot key": k,
 				"the MAC key": derive(key, id, "mac", 32), "the entries key": derive(key, id, "entries", keyLen),
+				"the store key's clone": key, // Close drops it; a refusal that skips Close keeps it (#5898)
 			} {
 				if n := refusalCount(*held, v); n != 1 {
 					t.Errorf("wiped %s %d times, want once", what, n)
