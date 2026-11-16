@@ -205,7 +205,7 @@ const LastSuffix = " If it happens again today I won't text; send STATUS to chec
 
 // StateLostText is the alert when the saved clock check could not be read
 // at start, so a disagreement it may have held is kept.
-const StateLostText = "I couldn't read my saved clock check. Until the phone network's time confirms my clock, anything waiting for time to pass waits whenever my authenticated network time is unavailable. Codes and STOP work as usual."
+const StateLostText = "I couldn't read my saved clock check, so anything waiting for time to pass waits while neither the phone network's time nor my authenticated network time confirms my clock. Codes and STOP work as usual. Nothing to do."
 
 // HeldText is the owner text when the box clock jumps with no phone-network
 // time to confirm it.
@@ -236,13 +236,13 @@ func (s Status) IntervalLine(loc *time.Location) string {
 	since := s.Since.In(loc).Format("15:04")
 	switch {
 	case s.Skew == 0 && s.Authenticated:
-		return fmt.Sprintf("Time check: saved check unreadable since %s; authenticated network time stands until phone-network time confirms it.", since)
+		return fmt.Sprintf("Time check: authenticated network time stands (the saved check was unreadable at %s, and phone-network time has not confirmed the clock since). Nothing to do.", since)
 	case s.Skew == 0:
-		return fmt.Sprintf("Time check: saved check unreadable since %s, so holds and timeouts wait until phone-network time confirms the clock.", since)
+		return fmt.Sprintf("Time check: saved check unreadable since %s, so holds and timeouts wait until phone-network time or authenticated network time confirms the clock. Nothing to do.", since)
 	case s.Authenticated:
-		return fmt.Sprintf("Time check: phone network differs from authenticated network time by %s since %s; network time stands.", about(s.Skew), since)
+		return fmt.Sprintf("Time check: phone network differs from authenticated network time by %s since %s, so network time stands (a fake phone mast can do this). Nothing to do.", about(s.Skew), since)
 	}
-	return fmt.Sprintf("Time check: box and phone network differ by %s since %s, so holds and timeouts end by both clocks and expiries by either, until they agree.", about(s.Skew), since)
+	return fmt.Sprintf("Time check: box and phone network differ by %s since %s, so holds and timeouts end by both clocks and expiries by either, until they agree. Nothing to do.", about(s.Skew), since)
 }
 
 // Line is the restricted mode's STATUS line, kept only until agentosd's
@@ -825,10 +825,16 @@ func (g *Guard) carrierForwardLocked(mono time.Duration) time.Time {
 }
 
 // intervalLocked widens now by the carrier reading carried forward to mono,
-// by at most the tolerance while the last check was authenticated.
+// by at most the tolerance while the last check was authenticated. A
+// disagreement with no reading this boot (one saved by an earlier boot)
+// widens by its saved skew instead, so it keeps its width across a reboot
+// (#5811); the floor still bounds it while unverified.
 func (g *Guard) intervalLocked(now time.Time, mono time.Duration) (lo, hi time.Time) {
 	lo, hi = now, now
 	c := g.carrierForwardLocked(mono)
+	if c.IsZero() && g.status.State == Disagree {
+		c = now.Add(-g.status.Skew)
+	}
 	if c.IsZero() {
 		return lo, hi
 	}
@@ -931,6 +937,10 @@ type saved struct {
 	Offset       time.Duration `json:"offset"`
 	HaveOffset   bool          `json:"have_offset"`
 	OffsetHost   string        `json:"offset_host,omitempty"` // HostKey of the PC it was learned on
+	// The last carrier reading and the boot clock when it was taken, carried
+	// forward only within the boot that took it (#5811).
+	Carrier     time.Time     `json:"carrier,omitzero"`
+	CarrierMono time.Duration `json:"carrier_mono,omitempty"`
 }
 
 func (g *Guard) load() {
@@ -964,6 +974,13 @@ func (g *Guard) load() {
 	if v.Anchored && sameBoot {
 		g.anchored, g.anchorWall, g.anchorMono = true, v.AnchorWall, v.AnchorMono
 	}
+	mono, wall := g.cfg.Elapsed(), g.cfg.Now()
+	// The carrier reading keeps a known disagreement's width across a
+	// restart, robust to a later wall-clock step, as within one process
+	// (#5811); a reading the boot clock has not reached yet is corrupt.
+	if sameBoot && v.CarrierMono <= mono {
+		g.carrier, g.carrierMono = v.Carrier, v.CarrierMono
+	}
 	// Alerts from an earlier boot are placed on this boot's clock by their
 	// age: the part within that boot comes from its boot clock and is
 	// trusted; only the downtime since, which the box clock gives at both
@@ -971,7 +988,6 @@ func (g *Guard) load() {
 	// setting frees the cap early (L3 F1 on #68). Alerts a day old are
 	// pruned before every save, so an in-boot age outside zero to a day
 	// means a corrupt file: that alert counts as just sent (security R1).
-	mono, wall := g.cfg.Elapsed(), g.cfg.Now()
 	down := min(max(wall.Sub(v.SavedWall), 0), mono)
 	for _, a := range v.Alerts {
 		if !sameBoot {
@@ -1000,6 +1016,7 @@ func (g *Guard) saveLocked() {
 	}
 	v.SavedWall = g.latestLocked(g.cfg.Now(), v.SavedMono)
 	v.Floor, v.Offset, v.HaveOffset, v.OffsetHost = g.floor, g.offset, g.haveOffset, g.offsetHost
+	v.Carrier, v.CarrierMono = g.carrier, g.carrierMono
 	if g.verified {
 		v.VerifiedBoot = g.cfg.BootID()
 	}
