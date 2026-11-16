@@ -6,6 +6,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +29,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
 )
 
@@ -1233,6 +1236,97 @@ func TestUnreadableSettingsAreToldAtTheNextReread(t *testing.T) {
 	}
 }
 
+// An account stored before #5774 with "starttls" set keeps its password in
+// the slot named for the settings with that field. The clerk no longer has
+// the setting, so it refuses the file as unreadable: the owner is told to set
+// the account up again, which works, rather than that a server answer was
+// unusable, which waiting never fixes; and the setup page shows no account
+// (#5777 item 1).
+func TestAStoredStartTLSAccountIsToldToBeSetUpAgain(t *testing.T) {
+	r := newHostRig(t, imaptest.Password)
+	cur, err := readMail(r.h.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The pre-#5774 form: its fields in their order then, and its slot the
+	// hash of those bytes, holding the password alone.
+	old, err := json.Marshal(struct {
+		Address  string `json:"address"`
+		IMAP     string `json:"imap,omitempty"`
+		SMTP     string `json:"smtp,omitempty"`
+		StartTLS bool   `json:"starttls,omitempty"`
+	}{cur.Address, cur.IMAP, cur.SMTP, true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.Sum256(old)
+	slot := clerk.MailSlots + hex.EncodeToString(h[:16])
+	if err := r.h.sec.Put(slot, clerk.KindStatic, []byte(imaptest.Password)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.h.sec.RemovePrefix(clerk.MailSlots, slot); err != nil {
+		t.Fatal(err)
+	}
+	if err := privfile.WriteAtomic(r.h.dir, mailSettings, old, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.owner.Account(); err == nil || err.Error() != errMailUnreadable.Error() {
+		t.Fatalf("a stored starttls account: %v", err)
+	}
+	r.moved()
+	before := r.dials.Load()
+	if _, err := r.planner.Reread(); err != nil {
+		t.Fatal(err)
+	}
+	if n := r.dials.Load() - before; n != 0 {
+		t.Fatalf("a re-read of a stored starttls account made %d connections", n)
+	}
+	want := "I could not read your mailbox: I could not read my own settings for your mail account. Set up the mail account again on my Wi-Fi page."
+	st, _ := r.owner.Status()
+	if !slices.Contains(st.Lines, want) {
+		t.Fatalf("status of a stored starttls account: %q", st.Lines)
+	}
+	// The step named works: setup again reads the mailbox.
+	if err := r.owner.SetMail(cur, imaptest.Password); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.planner.Reread(); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := r.owner.Status(); has(st.Lines, "I could not read your mailbox: ") {
+		t.Fatalf("status after setting the account up again: %q", st.Lines)
+	}
+}
+
+// Settings in setup's exact form that fail the settings check do not load:
+// the form check alone passes them, since json.Marshal of what they decode
+// to is the same bytes (#5804, the mutgate survivor of deleting readMail's
+// first refusal).
+func TestSettingsInSetupsFormThatFailTheCheckDoNotLoad(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		s     MailSettings
+		loads bool
+	}{
+		{MailSettings{Address: "owner@example.com", API: APIGmail}, true},
+		{MailSettings{Address: "not an address", API: APIGmail}, false},
+	} {
+		b, err := json.Marshal(c.s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := privfile.WriteAtomic(dir, mailSettings, b, nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readMail(dir); (err == nil) != c.loads {
+			t.Fatalf("settings %+v in setup's form: loads %v, want %v (%v)", c.s, err == nil, c.loads, err)
+		}
+	}
+}
+
 // failReads makes every read attempt fail while its Mark still works: from
 // the next re-read on, each re-read's first connection (its change check,
 // or the read's own Mark on a new day) reaches the server, and every later
@@ -1384,5 +1478,31 @@ func TestRemoveMailDeletesTheSendersRecord(t *testing.T) {
 	defer mu.Unlock()
 	if len(fulls) <= n || fulls[n] {
 		t.Fatalf("steps after the new setup %v: want the first without history", fulls[n:])
+	}
+}
+
+// The senders one read found are kept for the unchanged mailbox, so a
+// second plan reads nothing; a read that failed is never kept, so the next
+// plan reads again and fails again (world.go's `case err == nil`, #5804).
+func TestAnUnchangedMailboxKeepsItsSendersAndAFailedReadDoesNot(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	srv.Deliver(googleMail("mx.google.com"))
+	h := NewMailHost(context.Background(), dir, sec, planConfig(srv))
+	first, err := h.accountPlan()
+	if err != nil || len(first.Items) == 0 {
+		t.Fatalf("first plan: %+v %v", first, err)
+	}
+	srv.Fail("/messages", 500)
+	if p, err := h.accountPlan(); err != nil || !slices.Equal(planIDs(p), planIDs(first)) {
+		t.Fatalf("a plan of the unchanged mailbox read it again: %+v %v, want %v", p, err, planIDs(first))
+	}
+	srv2, dir2, sec2 := newGmailAccount(t)
+	srv2.Deliver(googleMail("mx.google.com"))
+	srv2.Fail("/messages", 500)
+	h2 := NewMailHost(context.Background(), dir2, sec2, planConfig(srv2))
+	for i := range 2 {
+		if p, err := h2.accountPlan(); err == nil {
+			t.Fatalf("plan %d after a failed read: %+v, want the read's error", i, p)
+		}
 	}
 }
