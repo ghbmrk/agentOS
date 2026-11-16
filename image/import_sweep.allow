@@ -97,18 +97,20 @@
 # crypt_storage_init, for LUKS1 and LUKS2 keyslots and reencryption; tcrypt.c from its fixed table). The
 # name always ends in "-<digits>-<a part with no '-'>", which no AES-GCM-SIV name does ("-GCM-SIV"), so no
 # header, LUKS1's raw cipher field included, can select it. FileVault2 and BitLocker use fixed ciphers.
-/usr/lib/x86_64-linux-gnu/libcryptsetup.so.12.* sha256=0000000000000000000000000000000000000000000000000000000000000000 EVP_CIPHER_fetch=1
+/usr/lib/x86_64-linux-gnu/libcryptsetup.so.12.* sha256=3fdc2e4c8c0e05bb85a446d96b7407a4ba2eda2d25e3ab24379d2ca2e063e2d3 EVP_CIPHER_fetch=1
 
 # libsystemd-shared's openssl_cipher_many formats "%s-%zu-%s" from its caller; its one caller
 # (tpm2-util.c tpm2_calculate_seal's import path, v257) maps a TPM parent key's algorithm and mode ids
 # to "aes" and one of ctr, ofb, cbc, cfb or ecb, none of which names GCM-SIV.
-/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so sha256=0000000000000000000000000000000000000000000000000000000000000000 EVP_CIPHER_fetch=1 openssl_cipher_many=1
+/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so sha256=9f6f06ff4883d23eee5e628c625878e8bc7f60613e945e04ead7793ae969f37c EVP_CIPHER_fetch=1 openssl_cipher_many=1
 
 # OpenSSL itself. libcrypto's internal fetches take the name from an OID (none names AES-GCM-SIV) or from
 # its API caller. A caller handing it to a selector holds the selector's name, so its own entry here covers
 # it. A caller passing it as an OSSL_PARAM "cipher" to a MAC, KDF or DRBG holds no selector name, so its
 # entry does not: CMAC, GMAC, KBKDF and CTR-DRBG refuse GCM-SIV by mode, and of the rest only KRB5KDF takes
-# a cipher, so its callers spell "KRB5KDF" and are counted (SPELT; #5861). libssl fetches only its cipher
+# a cipher, so its callers spell "KRB5KDF" and are counted (SPELT; #5861). The image build of #5861 found
+# it spelt only by OpenSSL copies' own provider tables (libcrypto here, the guests' node and codex below),
+# so KRB5KDF has no caller in the image. libssl fetches only its cipher
 # suites' fixed names, and no TLS suite uses AES-GCM-SIV; the openssl CLI takes a name from its command
 # line, which nothing on the box runs (the records' QUIC and CMS reasoning). Their sites are not counted.
 /usr/lib/x86_64-linux-gnu/libcrypto.so.3 *
@@ -117,17 +119,17 @@
 
 # OpenSSL's loader_attic engine: both fetches are of the fixed name "RC4" (crypto/pem/pvkfmt.c, built
 # into it); nothing on the box loads engines.
-/usr/lib/x86_64-linux-gnu/engines-3/loader_attic.so sha256=0000000000000000000000000000000000000000000000000000000000000000 EVP_CIPHER_fetch=2
+/usr/lib/x86_64-linux-gnu/engines-3/loader_attic.so sha256=2c99266b31bfc02d011955db1600bd36146554cd6970d3cbfe46011e11014c83 EVP_CIPHER_fetch=2
 # The legacy provider: its one fetch and one EVP_get_cipherbyname are providers/common/provider_util.c
 # ossl_prov_cipher_load_from_params, for an algorithm's "cipher" parameter; none of legacy's algorithms
 # (old digests and ciphers, PBKDF1, PVKKDF) takes one.
-/usr/lib/x86_64-linux-gnu/ossl-modules/legacy.so sha256=0000000000000000000000000000000000000000000000000000000000000000 EVP_CIPHER_fetch=1 EVP_get_cipherbyname=1
+/usr/lib/x86_64-linux-gnu/ossl-modules/legacy.so sha256=533bb6758a00a87a2d7835bcd3ebca58e0def2c1096ec582dea180adceeb7404 EVP_CIPHER_fetch=1 EVP_get_cipherbyname=1
 
 # The openclaw guest's node (nodejs.org v24.22.2) links its own OpenSSL statically. That copy is not
 # libssl3t64 and is outside these records; #5853 checks it against the same advisories.
 /usr/lib/agentos/images/openclaw/usr/local/bin/node *
 # The codex guest's two static (musl) Rust binaries hold no OpenSSL selector name but spell GCM-SIV three
-# times, as OpenSSL's default provider does (AES-128/192/256-GCM-SIV): they may carry a stripped static
-# copy of OpenSSL or another crypto library. Either way not libssl3t64; #5853 identifies it.
-/usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex sha256=0000000000000000000000000000000000000000000000000000000000000000 GCM-SIV=3
-/usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host sha256=0000000000000000000000000000000000000000000000000000000000000000 GCM-SIV=3
+# times, as OpenSSL's default provider does (AES-128/192/256-GCM-SIV), and KRB5KDF six times, as
+# libcrypto's provider tables do: they may carry a stripped static copy of OpenSSL or another crypto library. Either way not libssl3t64; #5853 identifies it.
+/usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex sha256=628e35487d888a28f0427fc37501da529dd3d81fcbad7a2c3421c1e8670d92e1 GCM-SIV=3 KRB5KDF=6
+/usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host sha256=ec71830690a7c0024916ee0c99fbdc635bc6e747ff665ea4f03a8389bbcb6b30 GCM-SIV=3 KRB5KDF=6
