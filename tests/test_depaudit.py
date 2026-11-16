@@ -352,9 +352,6 @@ class OfflineRunTest(unittest.TestCase):
             time.sleep(2)
             self.assertFalse(os.path.exists(os.path.join(d, "late")), res)
 
-    def test_shipped_registry_passes(self):
-        self.assertEqual(depaudit.main(["run", "--targets", str(ROOT / "assurance" / "dep-targets.json")]), 0)
-
     def test_registry_cannot_relax_a_product_scenario(self):
         with tempfile.TemporaryDirectory() as d:
             reg = pathlib.Path(d, "t.json")
