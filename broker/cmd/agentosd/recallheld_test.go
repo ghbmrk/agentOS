@@ -15,7 +15,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
-// REQ: LOG-4
+// REQ: LOG-4, OWN-6
 
 // recallBox is a box upgraded with a recall directory at rest.
 type recallBox struct {
