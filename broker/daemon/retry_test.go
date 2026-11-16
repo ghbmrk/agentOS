@@ -968,7 +968,9 @@ func TestEachRetryEndIsToldInItsOwnWords(t *testing.T) {
 		{"", journal.ErrState, refused("it is no longer waiting for a retry")},
 		{"", errors.New("unreachable"), refused("it could not be started")},
 	} {
-		r.send = func(context.Context, retryAsk, bool) (journal.Status, error) { return journal.Status{State: c.st}, c.err }
+		r.send = func(context.Context, retryAsk, bool) (journal.Status, error) {
+			return journal.Status{State: c.st}, c.err
+		}
 		told = nil
 		r.run("R1", a, false)
 		if len(told) != 1 || told[0] != c.want {
