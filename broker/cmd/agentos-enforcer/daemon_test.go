@@ -1,5 +1,7 @@
 package main
 
+// REQ: NET-2, KRN-12
+
 import (
 	"bytes"
 	"encoding/json"

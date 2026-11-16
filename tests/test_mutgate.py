@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "mutgate.yml"
@@ -1705,11 +1706,7 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertEqual(json.loads(r.stdout), [{"pkg": "hint", "shard": 0, "of": 1}])
             up = {"tests": ["TestUp"], "lines": {"hint.go": [3, 4, 5, 6, 7]}}
-            rec = json.loads(plan.read_text())
-            # The head part also keeps the cover blocks on its lines (#5864), each on a line it covers.
-            blocks = rec["hint"].pop("blocks")["hint.go"]
-            self.assertTrue(blocks and all(b[0] in up["lines"]["hint.go"] or b[2] in up["lines"]["hint.go"] for b in blocks), blocks)
-            self.assertEqual(rec, {"hint": {**up, "base": up}})
+            self.assertEqual(json.loads(plan.read_text()), {"hint": {**up, "base": up}})
             got = {}
             for of in (1, 2, 3):
                 res = pathlib.Path(d) / f"res-{of}"
@@ -2069,9 +2066,7 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             r = self.mutgate(d, "plan", "--git", "HEAD~1", "--targets-out", str(plan), env=off)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             down = {"tests": ["TestDown", "TestUp"], "lines": {"hint.go": [10, 11, 12]}}
-            rec = json.loads(plan.read_text())
-            self.assertEqual(rec["hint"].pop("blocks"), {"hint.go": [[10, 22, 12, 2, 1]]})  # the head part's alone (#5864)
-            self.assertEqual(rec, {"hint": {**down, "base": down}})
+            self.assertEqual(json.loads(plan.read_text()), {"hint": {**down, "base": down}})
 
             def shards(res, flips, *extra):
                 for i, flip in enumerate(flips):
@@ -2093,7 +2088,7 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             for i in (0, 1):
                 data = json.loads((pathlib.Path(d) / "planned" / f"mutants-{i}" / "hint.json").read_text())
-                self.assertEqual(data["targets"], {**down, "blocks": {"hint.go": [[10, 22, 12, 2, 1]]}, "base": down})
+                self.assertEqual(data["targets"], {**down, "base": down})
             # A plan that names no record for the package, or one verify would refuse, is refused before
             # gremlins runs; the shard never falls back to a coverage run of its own.
             for bad, want in (({}, "the plan names no target lines for broker/hint/"),
@@ -2276,7 +2271,7 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             out = pathlib.Path(d) / "res" / "mutants-0"
             r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(out), env={"PATH": "/usr/bin:/bin:" + str(pathlib.Path(sys.executable).parent) + ":" + os.path.dirname(shutil.which("go"))})
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-            self.assertEqual(json.loads((out / "hint.json").read_text())["targets"], {"tests": ["TestDown"], "lines": {}, "blocks": {}, "base": {"tests": ["TestDown"], "lines": {}}})
+            self.assertEqual(json.loads((out / "hint.json").read_text())["targets"], {"tests": ["TestDown"], "lines": {}, "base": {"tests": ["TestDown"], "lines": {}}})
             self.assertFalse((pathlib.Path(d) / "seen").exists())
             self.assertEqual(self.mutgate(d, "delete", "hint", "--git", "HEAD~1", "--out", str(out)).returncode, 0)
             r = self.mutgate(d, "verify", str(out.parent), "--git", "HEAD~1")
@@ -2984,211 +2979,191 @@ class MutantScope(unittest.TestCase):
         src = (ROOT / "broker" / "clerk" / "run" / "mail.go").read_bytes().split(b"\n")
         self.assertEqual((src[103][101:103], src[144][112:114]), (b">=", b"< "))
 
-class Misread(unittest.TestCase):
-    """MUT-notcovered-misread (#5864, Security on #5863): gremlins v0.6.0 reads some mutants on a
-    multi-clause `case` as NOT COVERED although a test runs the line and kills them. A `Mutant-misread:`
-    body line passes such a mutant only where the head record's cover blocks, from the changed tests' own
-    `go test -cover` run, show they ran its position, and only naming one of them; it never passes a
-    LIVED mutant, and `waive` never records it."""
-    # REQ: MUT-notcovered-misread
+class CaseClauseCover(unittest.TestCase):
+    """MUT-case-clause-cover (#5822): Go's cover blocks hold no `case` expression, so gremlins read every
+    mutant in one as NOT COVERED and never ran it. The profile gremlins and covered_by read gains a ran
+    block for each clause expression the counts show evaluated, and gremlins then runs its mutants."""
+    # REQ: MUT-case-clause-cover
 
-    # Security's repro on #5870 (an `} else if` condition after a ran if-body) and #5863's shape (a
-    # one-line `case` expression, which no cover block holds), with the profile `go test -cover` gives
-    # TestCase on it (Go 1.22+): one block a line, [line, col, line, col, ran].
-    SRC = ("package p\n\nfunc F(a bool, n int) int {\n\tif a {\n\t\treturn 1\n\t} else if n > 0 {\n\t\treturn 2\n\t}\n"
-           "\treturn 3\n}\n\nfunc G(x, y int) int {\n\tswitch {\n\tcase x > 0 && y > 0:\n\t\treturn 1\n\tcase x < 0:\n"
-           "\t\treturn 2\n\tcase y == 7:\n\t}\n\treturn 0\n}\n")
-    TEST = ("package p\n\nimport \"testing\"\n\nfunc TestCase(t *testing.T) {\n\tif F(true, 0) != 1 || G(1, 1) != 1 {\n"
-            "\t\tt.Fatal()\n\t}\n}\n")
-    BLOCKS = [[3, 27, 4, 7, 1], [4, 7, 6, 3, 1], [6, 8, 6, 18, 0], [6, 18, 8, 3, 0], [9, 2, 9, 10, 0],
-              [12, 22, 13, 9, 1], [14, 22, 15, 11, 1], [16, 13, 17, 11, 0], [18, 14, 18, 14, 0], [20, 2, 20, 10, 0]]
-    CASE = ("broker/p/a.go", 14, "CONDITIONALS_BOUNDARY", 9)    # `x > 0`: its clause's body ran
-    ELSE = ("broker/p/a.go", 6, "CONDITIONALS_BOUNDARY", 14)    # `n > 0`: never evaluated
-    LATER = ("broker/p/a.go", 16, "CONDITIONALS_BOUNDARY", 9)   # `x < 0`: the case after a ran clause
-    REASON = "TestCase fails when the comparison changes"
+    SRC = ("package p\n\nfunc G(x, y int) int {\n\tswitch {\n\tcase x > 0 && y > 0:\n\t\treturn 1\n\tcase x < 0:\n"
+           "\t\treturn 2\n\tcase y == 7:\n\t}\n\treturn 0\n}\n\nfunc S(c chan int) int {\n\tselect {\n\tcase v := <-c:\n"
+           "\t\treturn v\n\tdefault:\n\t\treturn -1\n\t}\n}\n")
+    TEST = ("package p\n\nimport \"testing\"\n\nfunc TestFirst(t *testing.T) {\n\tif G(1, 1) != 1 {\n\t\tt.Fatal()\n\t}\n}\n\n"
+            "func TestNone(t *testing.T) {\n\tif G(0, 0) != 0 {\n\t\tt.Fatal()\n\t}\n}\n\n"
+            "func TestSelect(t *testing.T) {\n\tif S(nil) != -1 {\n\t\tt.Fatal()\n\t}\n}\n")
+    # The three case expressions of G (lines 5, 7, 9) and S's one (line 16), each to just past its colon.
+    FIRST, SECOND, THIRD, COMM = ((5, 2), (5, 22)), ((7, 2), (7, 13)), ((9, 2), (9, 14)), ((16, 2), (16, 16))
 
-    def line(self, site, reason=REASON):
-        return f"Mutant-misread: {mutgate.site_text(site)} {reason}\n"
+    # L3's repro on #5902: F(9) matches nothing, but the fallthrough's entry into `x == 2`'s body makes
+    # the bodies' entries (1, 1, 0) add up to the switch's two runs, as if every run had matched.
+    FALL_SRC = ("package p\n\nfunc F(x int) int {\n\tr := 0\n\tswitch {\n\tcase x == 1:\n\t\tr += 1\n\t\tfallthrough\n"
+                "\tcase x == 2:\n\t\tr += 2\n\tcase x == 3:\n\t\tr += 3\n\t}\n\treturn r\n}\n")
+    FALL_TEST = ("package p\n\nimport \"testing\"\n\nfunc TestFall(t *testing.T) {\n\tif F(1) != 3 {\n\t\tt.Fatal()\n\t}\n"
+                 "\tF(9)\n}\n")
 
-    def decide(self, site=CASE, status="NOT COVERED", body="", blocks=BLOCKS, tests=("TestCase",)):
-        """(decide's exit code, its stdout, the summary) for one mutant at site in package p (SRC), whose
-        tests the diff changes; the head record names tests and holds blocks."""
-        import contextlib
-        import io
-        import types
-        from unittest import mock
-        lines = sorted({n for b in self.BLOCKS if b[4] for n in range(b[0], b[2] + 1)})
-        muts = [{"type": site[2], "status": status, "line": site[1], "column": site[3]}]
-        data = {"files": [{"file_name": "a.go", "mutations": muts}],
-                "targets": {"tests": None if tests is None else list(tests), "lines": {"a.go": lines},
-                            **({} if blocks is None else {"blocks": {"a.go": blocks}}),
-                            "base": {"tests": list(tests or ()), "lines": {}}}}
-        targets = {"broker/p/a.go": set(lines) | {site[1]}}
-        with tempfile.TemporaryDirectory() as d, mock.patch.object(mutgate, "BROKER", pathlib.Path(d) / "broker"):
-            (pathlib.Path(d) / "broker" / "p").mkdir(parents=True)
-            (pathlib.Path(d) / "broker" / "p" / "a.go").write_text(self.SRC)
-            b, s = pathlib.Path(d) / "body", pathlib.Path(d) / "summary"
-            b.write_text(body)
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                code = mutgate.decide({"p": (data, targets)}, {}, {"broker/p/a_test.go": {9}},
-                                      types.SimpleNamespace(body=str(b), summary=str(s)))
-            return code, out.getvalue(), s.read_text()
+    def package(self, d, src=None, test=None):
+        broker = pathlib.Path(d) / "broker"
+        (broker / "p").mkdir(parents=True)
+        (broker / "go.mod").write_text(GO_MOD)
+        (broker / "p" / "a.go").write_text(src or self.SRC)
+        (broker / "p" / "a_test.go").write_text(test or self.TEST)
+        return broker
 
-    def test_the_body_line_parses_as_its_own_kind(self):
-        text = self.line(self.CASE) + "Mutant-equivalent: broker/p/a.go:5 a real proof\n"
-        self.assertEqual(mutgate.waivers(text, mutgate.MISREAD), {self.CASE: self.REASON})
-        # The equivalence reader never sees it, so `waive` cannot move it into MUTANTS-EQUIVALENT.
-        self.assertEqual(mutgate.waivers(text), {("broker/p/a.go", 5, None, None): "a real proof"})
-
-    def test_the_head_record_holds_the_changed_tests_cover_blocks(self):
-        # The blocks above are what covered_by records from a real `go test -coverprofile` run.
+    def test_the_lister_names_each_clause(self):
         with tempfile.TemporaryDirectory() as d:
-            broker = pathlib.Path(d) / "broker"
-            (broker / "p").mkdir(parents=True)
-            (broker / "go.mod").write_text(GO_MOD)
+            broker = self.package(d)
+            got = json.loads(subprocess.run([str(mutgate.build_lister(d)), "-cases", str(broker / "p" / "a.go")],
+                                            capture_output=True, text=True, check=True).stdout)
+        self.assertEqual([(s["line"], s["col"], s["select"], len(s["clauses"])) for s in got], [(4, 2, False, 3), (15, 2, True, 2)])
+        self.assertEqual(got[0]["clauses"][2], {"line": 9, "col": 2, "colon_line": 9, "colon_col": 13,
+                                                 "end_line": 10, "end_col": 2, "default": False})
+        self.assertTrue(got[1]["clauses"][1]["default"])
+
+    def blocks(self, *tests, src=None, test=None):
+        """with_cases' added blocks for a.go, after a `-covermode=count` run of tests."""
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}):
+            broker, profile = self.package(d, src, test), pathlib.Path(d) / "c.out"
+            subprocess.run(["go", "test", "-count=1", "-covermode=count", f"-coverprofile={profile}", "-run",
+                            "^(" + "|".join(tests) + ")$", "."], cwd=broker / "p", check=True, capture_output=True)
+            text = profile.read_text()
+            got = mutgate.with_cases(text, mutgate.build_lister(d), broker / "p")
+        self.assertTrue(got.startswith(text.rstrip("\n")))
+        return {((int(m[0]), int(m[1])), (int(m[2]), int(m[3]))) for m in
+                re.findall(r"^example\.invalid/broker/p/a\.go:(\d+)\.(\d+),(\d+)\.(\d+) 0 1$", got[len(text.rstrip()):], re.M)}
+
+    def test_a_matched_clause_is_evaluated_and_the_ones_after_it_are_not(self):
+        self.assertEqual(self.blocks("TestFirst"), {self.FIRST})
+
+    def test_a_run_that_matches_no_clause_evaluates_every_one(self):
+        # No body ran, yet the switch ran more often than its bodies were entered.
+        self.assertEqual(self.blocks("TestNone"), {self.FIRST, self.SECOND, self.THIRD})
+
+    def test_a_switch_holding_a_fallthrough_evaluates_every_clause_once_it_ran(self):
+        # Without the fallthrough rule `x == 3` (line 11) read NOT COVERED, and its negation lives.
+        self.assertEqual(self.blocks("TestFall", src=self.FALL_SRC, test=self.FALL_TEST),
+                         {((6, 2), (6, 14)), ((9, 2), (9, 14)), ((11, 2), (11, 14))})
+
+    def test_the_lister_marks_a_switch_that_falls_through(self):
+        with tempfile.TemporaryDirectory() as d:
+            broker = self.package(d, self.FALL_SRC)
+            lister = mutgate.build_lister(d)
+            fall = json.loads(subprocess.run([str(lister), "-cases", str(broker / "p" / "a.go")],
+                                             capture_output=True, text=True, check=True).stdout)
             (broker / "p" / "a.go").write_text(self.SRC)
-            (broker / "p" / "a_test.go").write_text(self.TEST)
-            from unittest import mock
-            with mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}):
-                got, problem = mutgate.covered_by("p", ["TestCase"], d, broker)
-        self.assertIsNone(problem)
-        lines, blocks = got
-        self.assertEqual(lines, {"broker/p/a.go": {3, 4, 5, 6, 12, 13, 14, 15}})
-        # Blocks on a covered line, run or not: 6.8 and 6.18 never ran, 16.13 is on no covered line.
-        self.assertEqual(blocks, {"broker/p/a.go": [b for b in self.BLOCKS if b[0] in (3, 4, 6, 12, 14)]})
-        rec = mutgate.coverage_record(["TestCase"], lines, blocks)
-        self.assertEqual(rec["blocks"], {"a.go": blocks["broker/p/a.go"]})
-        self.assertNotIn("blocks", mutgate.coverage_record(["TestCase"], lines))  # the base part holds none
+            plain = json.loads(subprocess.run([str(lister), "-cases", str(broker / "p" / "a.go")],
+                                              capture_output=True, text=True, check=True).stdout)
+        self.assertEqual([sw["fallthrough"] for sw in fall], [True])
+        self.assertEqual([sw["fallthrough"] for sw in plain], [False, False])
 
-    def test_a_misread_in_a_ran_case_clause_passes(self):
-        code, out, summary = self.decide()
-        self.assertEqual(code, 1, out)  # #5863's gate: the killed mutant fails as NOT COVERED
-        self.assertIn("broker/p/a.go:14 is a target line no test of package p runs at the head", out)
-        self.assertIn("Mutant-misread", out)  # the remedy names the new line kind
-        code, out, summary = self.decide(body=self.line(self.CASE))
-        self.assertEqual(code, 0, out)
-        self.assertIn("| broker/p/a.go:14:9 | CONDITIONALS\\_BOUNDARY | misread as not covered: TestCase fails when the "
-                      "comparison changes (its case clause's body, which the changed tests ran) |", summary)
-        self.assertNotIn("Mutant-misread lines naming no", summary)
-        # A position a ran block holds passes too.
-        code, out, summary = self.decide(site=("broker/p/a.go", 5, "STATEMENT_DELETION", 3), body=self.line(
-            ("broker/p/a.go", 5, "STATEMENT_DELETION", 3)))
-        self.assertEqual(code, 0, out)
-        self.assertIn("(a block the changed tests ran holds it)", summary)
+    # Security's repro on #5902: the clause's last statement is a goto; its labeled `fallthrough` still
+    # enters `x == 2`'s body without a match.
+    GOTO_SRC = FALL_SRC.replace("\t\tr += 1\n\t\tfallthrough\n", "\t\tr += 1\n\t\tgoto L\n\tL:\n\t\tfallthrough\n")
 
-    def test_a_misread_whose_position_never_ran_is_refused(self):
-        # Security on #5870: the line counted as run because the if-body's block ends on it, but `n > 0`
-        # was never evaluated; nor was `x < 0`, the case after a ran clause.
-        for site in (self.ELSE, self.LATER):
-            with self.subTest(site):
-                code, out, _ = self.decide(site=site, body=self.line(site))
-                self.assertEqual(code, 1, out)
-                self.assertIn(f"broker/p/a.go:{site[1]} is a target line no test of package p runs at the head", out)
-                self.assertIn(f"the Mutant-misread line {mutgate.site_text(site)} passes nothing: the changed tests' "
-                              "cover blocks (the head record) show no run of that mutant's position", out)
-        # A record without blocks (an older plan) or with malformed ones passes nothing.
-        for blocks in (None, [[14, 22, 15, 11, 2]]):
-            with self.subTest(blocks):
-                code, out, _ = self.decide(body=self.line(self.CASE), blocks=blocks)
-                self.assertEqual(code, 1, out)
-                self.assertIn("(the record holds no readable blocks)", out)
-        # The case rule needs a `case` line whose ran body block starts just past the colon on it.
-        self.assertIsNone(mutgate.misread_evidence([((14, 22), (15, 11), True)], [b""] * 13 + [b"\tif x > 0 && y > 0:"], 14, 9))
-        self.assertIsNone(mutgate.misread_evidence([((15, 3), (15, 11), True)], [b""] * 13 + [b"\tcase x > 0 &&"], 14, 9))
-        self.assertIsNone(mutgate.misread_evidence([((14, 22), (15, 11), True)], [b""] * 13 + [b"\tcase x > 0 && y > 0:"], 14, 3))
+    def test_a_labeled_fallthrough_reached_by_goto_marks_the_switch(self):
+        self.assertIn("goto L", self.GOTO_SRC)
+        # `x == 3` moves to line 13 with the two added lines.
+        self.assertEqual(self.blocks("TestFall", src=self.GOTO_SRC, test=self.FALL_TEST),
+                         {((6, 2), (6, 14)), ((11, 2), (11, 14)), ((13, 2), (13, 14))})
 
-    def test_a_misread_in_a_closure_that_never_ran_is_refused(self):
-        # L3 on #5870: `sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })` with a one-element s
-        # runs the call's block but never the closure's (6.36,6.58 count 0), so `<` is truly not covered.
-        blocks = [((5, 30), (6, 36), True), ((6, 36), (6, 58), False), ((6, 58), (7, 2), True)]
-        src = [b""] * 5 + [b"\tsort.Slice(s, func(i, j int) bool { return s[i] < s[j] })"]
-        self.assertIsNone(mutgate.misread_evidence(blocks, src, 6, 49))
-        self.assertEqual(mutgate.misread_evidence(blocks, src, 6, 3), "a block the changed tests ran holds it")
+    def test_a_select_evaluates_every_clause_on_entry(self):
+        self.assertEqual(self.blocks("TestSelect"), {self.COMM})
 
-    def test_refused_and_ambiguous_lines_say_what_to_do(self):
-        # Base-only and never-run lines get no Mutant-misread remedy; a ran line gets it (L3 on #5870).
-        code, out, summary = self.decide(site=self.LATER, body=self.line(self.LATER))
-        self.assertIn("broker/p/a.go:16 is a target line no test of package p runs at the head", out)
-        self.assertIn("no changed test runs this line at the head any longer", out)
-        self.assertNotIn("a `Mutant-misread: broker/p/a.go:16", out)
-        self.assertIn("cover it, or prove it equivalent with a Mutant-equivalent line", out)
-        self.assertIn("Mutant-misread lines that pass nothing:\n- broker/p/a.go:16:9:CONDITIONALS\\_BOUNDARY: ", summary)
-        self.assertNotIn("Mutant-misread lines naming no", summary)
-        # A misread line in a package whose tests the diff leaves alone: drop it.
-        self.assertIn("drop the line", mutgate.misread_lines({self.CASE: "r"}, {}, {}, {})[1][0][1])
-        # A misread line matching two mutants is told to name its column and kind as a misread line, never
-        # rewritten into an equivalence proof that `waive` would store.
-        import contextlib
-        import io
-        import types
-        from unittest import mock
-        muts = [{"type": "CONDITIONALS_BOUNDARY", "status": "NOT COVERED", "line": 14, "column": c} for c in (9, 18)]
-        data = {"files": [{"file_name": "a.go", "mutations": muts}],
-                "targets": {"tests": ["TestCase"], "lines": {"a.go": [14, 15]}, "blocks": {"a.go": [[14, 22, 15, 11, 1]]},
-                            "base": {"tests": ["TestCase"], "lines": {}}}}
-        with tempfile.TemporaryDirectory() as d, mock.patch.object(mutgate, "BROKER", pathlib.Path(d) / "broker"):
-            (pathlib.Path(d) / "broker" / "p").mkdir(parents=True)
-            (pathlib.Path(d) / "broker" / "p" / "a.go").write_text(self.SRC)
-            b, sm = pathlib.Path(d) / "body", pathlib.Path(d) / "summary"
-            b.write_text("Mutant-misread: broker/p/a.go:14 TestCase kills both\n")
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                code = mutgate.decide({"p": (data, {"broker/p/a.go": {14, 15}})}, {}, {"broker/p/a_test.go": {9}},
-                                      types.SimpleNamespace(body=str(b), summary=str(sm)))
-            text = sm.read_text()
-        self.assertEqual(code, 1)
-        self.assertIn("so it waives none: name the one it means by its column and kind, "
-                      "`Mutant-misread: <path>:<line>:<col>:<KIND> <reason>`", out.getvalue())
-        self.assertNotIn("`Mutant-equivalent: <path>:<line>:<col>", out.getvalue())
-        self.assertIn("Waivers matching more than one mutant", text)
-        self.assertNotIn("Mutant-misread lines naming no", text)  # listed once, as ambiguous
+    def test_clause_rules(self):
+        def sw(*clauses, select=False, falls=False):
+            return {"file": "a.go", "line": 1, "col": 2, "select": select, "fallthrough": falls,
+                    "clauses": [{"line": 2 * i + 2, "col": 2, "colon_line": 2 * i + 2, "colon_col": 9,
+                                 "end_line": 2 * i + 4, "end_col": 2, "default": dflt} for i, dflt in enumerate(clauses)]}
+        header = (1, 1, 2, 2)
 
-    def test_a_case_entered_by_fallthrough_is_refused(self):
-        # Security delta on #5870: `case x > 0:` ran and fell through into `case y > 5:`, whose body ran
-        # with `y > 5` never evaluated; the profile is real `go test -covermode=set` output for F(1, 0).
-        src = b"package p\n\nfunc F(x, y int) int {\n\tswitch {\n\tcase x > 0:\n\t\tfallthrough\n\tcase y > 5:\n" \
-              b"\t\treturn 1\n\t}\n\treturn 0\n}\n"
-        blocks = [((3, 22), (4, 9), True), ((5, 13), (6, 14), True), ((7, 13), (8, 11), True), ((10, 2), (10, 10), False)]
-        lines = src.split(b"\n")
-        self.assertIsNone(mutgate.misread_evidence(blocks, lines, 7, 9))
-        self.assertEqual(mutgate.misread_evidence(blocks, lines, 5, 9), "its case clause's body, which the changed tests ran")
-        # A comment between, a trailing comment on it, or a block comment still refuses; a plain statement does not.
-        for before, refused in ((b"\t\tfallthrough\n\t\t// next\n", True), (b"\t\tfallthrough // into y\n", True),
-                                (b"\t\t/* x */\n", True), (b"\t\treturn 2\n", False),
-                                # Security delta at de22f59b: a block comment closed on a `//` line.
-                                (b"\t\tfallthrough\n\t\t/* note\n\t\t// end */\n", True),
-                                (b"\t\treturn 2\n\t\t// end */\n", True)):
-            with self.subTest(before):
-                text = (b"\tswitch {\n\tcase x > 0:\n" + before + b"\tcase y > 5:\n").split(b"\n")
-                at = len(text) - 1
-                ran = [((at, 13), (at + 1, 11), True)]
-                self.assertEqual(mutgate.misread_evidence(ran, text, at, 9) is None, refused)
+        def run(s, runs, entered):
+            bs = {header: runs, **{(2 * i + 2, 10, 2 * i + 3, 9): n for i, n in enumerate(entered)}}
+            return [at[0] for _, at, _ in mutgate.evaluated_clauses([s], {"a.go": bs})]
+        self.assertEqual(run(sw(False, False, False), 0, [0, 0, 0]), [])         # never ran
+        self.assertEqual(run(sw(False, False, False), 2, [0, 2, 0]), [2, 4])     # the second always matched
+        self.assertEqual(run(sw(False, False, False), 3, [0, 2, 0]), [2, 4, 6])  # once none matched
+        self.assertEqual(run(sw(False, True, False), 1, [0, 1, 0]), [2, 6])      # the default (mid-source) ran
+        self.assertEqual(run(sw(False, False, True), 4, [4, 0, 0]), [2])         # the first always matched
+        self.assertEqual(run(sw(False, False, select=True), 1, [0, 0]), [2, 4])  # a select, entered
+        self.assertEqual(run(sw(False, False, select=True), 0, [0, 0]), [])
+        self.assertEqual(run(sw(False, False, False, falls=True), 2, [1, 1, 0]), [2, 4, 6])  # #5902's repro
+        self.assertEqual(run(sw(False, False, True, falls=True), 0, [0, 0, 0]), [])
 
-    def test_a_misread_names_a_changed_test(self):
-        code, out, _ = self.decide(body=self.line(self.CASE, "it is killed, trust me"))
-        self.assertEqual(code, 1, out)
-        self.assertIn("its reason starts with 'it', not the name of a test the record names (TestCase)", out)
-        code, out, _ = self.decide(body=self.line(self.CASE, "TestOther kills it"))
-        self.assertEqual(code, 1, out)
-        # Where the record is every test's, any test name will do.
-        self.assertEqual(self.decide(body=self.line(self.CASE, "TestOther: kills it"), tests=None)[0], 0)
+    def test_covered_by_counts_an_evaluated_case_line(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}):
+            broker = self.package(d)
+            first, problem = mutgate.covered_by("p", ["TestFirst"], d, broker)
+            self.assertIsNone(problem)
+            none, problem = mutgate.covered_by("p", ["TestNone"], d, broker)
+        self.assertEqual(first, {"broker/p/a.go": {3, 4, 5, 6}})
+        self.assertEqual(none, {"broker/p/a.go": {3, 4, 5, 7, 9, 11}})
 
-    def test_a_misread_never_passes_a_live_mutant_or_an_unchanged_package(self):
-        code, out, summary = self.decide(status="LIVED", body=self.line(self.CASE))
-        self.assertEqual(code, 1, out)
-        self.assertIn("broker/p/a.go:14 CONDITIONALS_BOUNDARY survives", out)
-        self.assertIn("| broker/p/a.go:14:9 | CONDITIONALS\\_BOUNDARY | **LIVED**: no test fails |", summary)
-        self.assertIn("Mutant-misread lines naming no NOT COVERED mutant on a target line: "
-                      "broker/p/a.go:14:9:CONDITIONALS\\_BOUNDARY", summary)
-        self.assertEqual(mutgate.misread_lines({self.CASE: "r"}, {}, {}, {})[1][0][0], self.CASE)
+    def test_a_file_the_lister_refuses_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}):
+            broker = self.package(d)
+            (broker / "p" / "a.go").write_text(self.SRC.replace("func S", "//line x.go:1\nfunc S"))
+            got, problem = mutgate.covered_by("p", ["TestFirst"], d, broker)
+        self.assertIsNone(got)
+        self.assertIn("//line directive", problem)
 
-    def test_waive_writes_no_misread_line(self):
-        import types
+    def test_gremlins_go_rewrites_only_its_cover_run(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}):
+            broker = self.package(d)
+            shim = mutgate.go_shim(d) / "go"
+            r = subprocess.run([str(shim), "env", "GOWORK"], capture_output=True, text=True)
+            self.assertEqual((r.returncode, r.stdout.strip()), (0, "off"))  # every other call: the real go
+            self.assertFalse((pathlib.Path(d) / "stmts").exists())
+            # Gremlins' own form (internal/coverage, v0.6.0): `-cover -coverprofile FILE ./...`, mode unnamed.
+            out = pathlib.Path(d) / "coverage"
+            r = subprocess.run([str(shim), "test", "-cover", "-coverprofile", str(out), "-run", "^TestNone$", "./..."],
+                               cwd=broker / "p", capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = out.read_text()
+        self.assertTrue(text.startswith("mode: count\n"), text[:40])
+        self.assertIn("example.invalid/broker/p/a.go:7.2,7.13 0 1\n", text)
+
+    def test_run_puts_the_shim_first_on_gremlins_path(self):
+        # The wiring the end-to-end test below cannot show where gremlins is absent (Potency on #5902):
+        # the `go` the gremlins that `run` starts finds is the shim, and the shim reaches the real go.
         with tempfile.TemporaryDirectory() as d:
-            w = pathlib.Path(d) / "w.txt"
-            w.write_text(self.line(self.CASE))
-            self.assertEqual(mutgate.cmd_waive(types.SimpleNamespace(lines=str(w), accepted="#5864", mutant=None)), 1)
+            stub = pathlib.Path(d) / "bin"
+            stub.mkdir()
+            (stub / "gremlins").write_text(
+                "#!/bin/sh\ncommand -v go > \"%s/seen\"\ngo env GOROOT >> \"%s/seen\"\n"
+                "while [ \"$1\" != -o ]; do shift; done\nprintf '%%s' '{\"files\": [], \"mutants_lived\": 0}' > \"$2\"\n" % (d, d))
+            (stub / "gremlins").chmod(0o755)
+            real = shutil.which("go")
+            env = {"PATH": f"{stub}:/usr/bin:/bin:{os.path.dirname(real)}", "HOME": os.environ.get("HOME", d)}
+            r = subprocess.run([sys.executable, str(ROOT / "tools" / "mutgate.py"), "run", "hint", "--out",
+                                str(pathlib.Path(d) / "out")], capture_output=True, text=True, env=env)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            found, goroot = (pathlib.Path(d) / "seen").read_text().split("\n")[:2]
+        self.assertTrue(found.endswith("/gobin/go"), found)
+        self.assertNotEqual(found, real)
+        self.assertTrue(goroot, "the shim did not reach the real go")
+
+    def test_gremlins_go_passes_a_failing_test_run_on(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}):
+            broker = self.package(d)
+            (broker / "p" / "a_test.go").write_text(self.TEST.replace("G(1, 1) != 1", "G(1, 1) != 2"))
+            r = subprocess.run([str(mutgate.go_shim(d) / "go"), "test", "-cover", "-coverprofile", str(pathlib.Path(d) / "c"), "."],
+                               cwd=broker / "p", capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+
+    @unittest.skipUnless(shutil.which("gremlins"), "gremlins v0.6.0 is not installed")
+    def test_gremlins_runs_a_case_expression_mutant(self):
+        # #5822's shape: before, every mutant on lines 5, 7 and 9 was NOT COVERED.
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}):
+            broker = self.package(d)
+            (pathlib.Path(d) / "cfg.yaml").write_text("{}\n")
+            out = pathlib.Path(d) / "out.json"
+            env = {**os.environ, "PATH": f"{mutgate.go_shim(d)}{os.pathsep}{os.environ['PATH']}"}
+            r = subprocess.run(["gremlins", "unleash", "--config", str(pathlib.Path(d) / "cfg.yaml"), "-o", str(out), str(broker / "p")],
+                           cwd=broker / "p", env=env, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            got = {(m["line"], m["status"]) for f in json.loads(out.read_text())["files"] for m in f["mutations"]}
+        # `y == 7` negated lives (no test calls G with y == 7 and x == 0): a survivor NOT COVERED hid.
+        self.assertTrue({(5, "KILLED"), (7, "KILLED"), (9, "LIVED")} <= got, got)
+        self.assertFalse({s for line, s in got if line in (5, 7, 9)} & {"NOT COVERED"}, got)
 
 
 def job(text, name):
