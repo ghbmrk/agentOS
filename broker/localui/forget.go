@@ -226,9 +226,6 @@ func (s *Server) forgetPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func init() {
-	// passkeyjs is passkeys.go's too; files init in name order, so each
-	// page that runs the tap adds it.
-	tmpl.Funcs(template.FuncMap{"passkeyjs": func() template.JS { return template.JS(passkeyJS) }})
 	template.Must(tmpl.Parse(`{{define "forget"}}{{template "head" ""}}
 <h1>Forget</h1>
 {{with .Err}}<p class="err">{{.}}</p>{{end}}{{with .Done}}<p class="{{if $.Kept}}err{{else}}ok{{end}}">{{.}}</p>{{end}}

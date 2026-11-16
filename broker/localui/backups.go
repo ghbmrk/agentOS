@@ -80,7 +80,7 @@ func backupText(err error) string {
 	case localapi.ErrBackupBadAssertion:
 		return "That tap didn't match. Start again, and tap one of your hardware keys when asked."
 	case localapi.ErrBackupPlace:
-		return "I can't use that folder. It must be a folder on a drive plugged into me, outside my own data, with no folder in its path starting or ending with a space. The name you give the place must be only letters, digits, dots, dashes or underscores, and not start with a dot."
+		return "I can't use that folder. It must be a folder on a drive plugged into me, outside my own data, given as its full path starting with /, at most 1024 characters, with no hidden or control characters and no folder in its path starting or ending with a space. The name you give the place must be 1 to 64 characters, only letters, digits, dots, dashes or underscores, and not start with a dot."
 	case localapi.ErrBackupNameTaken:
 		return "A place for backups already has that name, or had it. Choose another name."
 	case localapi.ErrBackupStale:
@@ -241,8 +241,7 @@ func (s *Server) backupsPage(w http.ResponseWriter, r *http.Request) {
 func backupDay(ms int64) string { return time.UnixMilli(ms).Format("2 Jan 2006") }
 
 func init() {
-	// passkeyjs is passkeys.go's too; files init in name order, so both add it.
-	tmpl.Funcs(template.FuncMap{"backupday": backupDay, "passkeyjs": func() template.JS { return template.JS(passkeyJS) }})
+	tmpl.Funcs(template.FuncMap{"backupday": backupDay})
 	template.Must(tmpl.Parse(`{{define "backups"}}{{template "head" ""}}
 <h1>Backups</h1>
 {{with .Err}}<p class="err">{{.}}</p>{{end}}{{with .Done}}<p class="ok">{{.}}</p>{{end}}
