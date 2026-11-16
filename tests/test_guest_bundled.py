@@ -70,6 +70,10 @@ class Bundled(unittest.TestCase):
         self.assertEqual(ok.returncode, 0, ok.stderr)
         # A node whose OpenSSL differs from the record, or a node with no record, fails the build.
         self.assertNotEqual(self.run_check("3.5.10", version).returncode, 0)
+        # A prefix of the recorded version matches only if the pattern lost a closing quote.
+        copy = rec["copy"].split("@", 1)[1]
+        self.assertNotEqual(self.run_check(copy.rsplit(".", 1)[0], version).returncode, 0)
+        self.assertNotEqual(self.run_check(copy[:-1], version).returncode, 0)
         bad = self.run_check(rec["copy"].split("@", 1)[1], "v99.0.0")
         self.assertNotEqual(bad.returncode, 0)
         self.assertIn("record it in assurance/vulncheck.json", bad.stderr)
