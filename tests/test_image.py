@@ -101,7 +101,12 @@ def noexec(root):
 # units nodump() writes without them.
 MAIN_SIDE_FILES = ("usr/lib/systemd/system/agentos-.service.d/50-main-side.conf",
                    "usr/lib/systemd/system/agentos-keeper-.service.d/90-keeper.conf",
-                   "usr/lib/systemd/system/agentos-mor.service.d/50-main-side.conf")
+                   "usr/lib/systemd/system/agentos-mor.service.d/50-main-side.conf",
+                   # #5818: the system bus's mask, lifted for the units whose reboot asks logind, "-" early.
+                   "usr/lib/systemd/system/agentos-fallback.service.d/90-bus.conf",
+                   "usr/lib/systemd/system/agentos-reboot.service.d/90-bus.conf",
+                   "usr/lib/systemd/system/agentos-kernel-reboot.service.d/90-bus.conf",
+                   "usr/lib/systemd/system/agentos-inbound.service.d/90-early-bus.conf")
 
 
 BT_BLOCK = "usr/lib/modprobe.d/agentos-no-bluetooth.conf"

@@ -2,7 +2,8 @@
 # (#1556, #2176): udev rules, system and environment generators, modules-load.d, modprobe.d,
 # sysctl.d, binfmt.d, and systemd's system-shutdown and system-sleep hooks, in etc, usr/local/lib,
 # usr/lib and lib; and (#2622) every polkit rules.d and actions file, everything under etc/dbus-1, and the
-# D-Bus system.conf, system.d and system-services files. One per line: the file's path in the image tree, a tab, and "sha256:" with the
+# D-Bus system.conf, system.d and system-services files; and (#5818) every file systemd merges into
+# dbus.service and dbus.socket, drop-ins included, so dbus-daemon's ExecStart is the reviewed one. One per line: the file's path in the image tree, a tab, and "sha256:" with the
 # SHA-256 of what the box reads, or "mask" for an empty file or a link to /dev/null. Every file is
 # listed, not only the one that wins its name. mkosi.finalize fails the build on any file not here
 # with that value, and on anything under the same directories in /run.

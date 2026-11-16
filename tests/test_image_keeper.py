@@ -32,7 +32,10 @@ UNITS = MK / "mkosi.extra/usr/lib/systemd/system"
 # The keeper's files beside its units, which shipped_units (agentos* regular files) leaves out.
 KEEPER_FILES = tuple("usr/lib/systemd/system/" + n for n in (
     "agentos-keeper.slice", "agentos-.service.d/50-main-side.conf", "agentos-keeper-.service.d/90-keeper.conf",
-    "agentos-mor.service.d/50-main-side.conf", "agentos-camdecode@.service.d/90-empty-run.conf"))
+    "agentos-mor.service.d/50-main-side.conf", "agentos-camdecode@.service.d/90-empty-run.conf",
+    "agentos-fallback.service.d/90-bus.conf", "agentos-reboot.service.d/90-bus.conf",
+    "agentos-kernel-reboot.service.d/90-bus.conf",
+    "agentos-inbound.service.d/90-early-bus.conf"))
 # #4392: the decoder unit's empty /run, and its lift of the main side's mask there.
 EMPTY_RUN = "agentos-camdecode@.service"
 EMPTY_RUN_DROPIN = EMPTY_RUN + ".d/90-empty-run.conf"
