@@ -324,7 +324,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | HOST-1e2b | HOST-1e2b: host-untouched check on an S1 PC: the third-system snapshot procedure, RTC offset, the pcrlock index if P2-1 pins one, HOST-1d's opted-in disk excluded by the owner's flag. | #5746 | queued (tier A) |
 | MOR-setup-factors | MOR-setup-factors: an orderly shutdown after the confirm and before a successful enrollment leaves MOR set, because the factors hold /run/agentos-setup. Release; from MOR-setup-hold. | #5836, #4794 | queued (release; tier A) |
 | MOR-setup-isolate | MOR-setup-isolate: an isolate before enrollment re-mints the page authority under a printed card; the pageca unit's crash-rerun comment is stale. Release; from MOR-setup-hold. | #5844, #5836 | queued (release; tier A) |
-| VULN-cipher-sweep-tidy | VULN-cipher-sweep-tidy: key import_sweep's [cipher] entries to package versions; refuse malformed, empty, duplicate and overlapping entries; point refusals at the reach notes. Release; from #5842. | #5842, #5341 | building (release; tier A; lane primary) |
 
 ## Model routes and the Codex lane
 
@@ -430,9 +429,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | LINT-dial-configured | LINT-dial-configured: the inference lint's configured() refuses a local bound to a literal (NET-2). Release; from #5757. | #5757 | queued (release) |
 | CLK-run-mut-mail-fu2 | CLK-run-mut-mail-fu2: a mail account stored with starttls is refused as unreadable instead of losing its password slot; the sign-in overlap test pins the refresh path. Release; from #5774. | #5774, #5694 | building (release; tier A) |
 | MUT-deleted-test-own-lines-fu | MUT-deleted-test-own-lines-fu: #5770's release items: NOT COVERED rule scope, testdata as a test change, Mutant-uncovered alias, archive error text. Release; after #5776. | #5770 | queued (release; tier A) |
-| CLK-wipe-lint-callsites | CLK-wipe-lint-callsites: hold a listed wipe helper's call sites, not exempt the whole function. Release; from #5797. | #5797 | building (release; tier A) |
-| CLK-seal-entries-wipe | CLK-seal-entries-wipe: wipe decoded entry values when Unlock refuses them. Release; from #5799. | #5799 | queued (release; tier A) |
-| TIM-1-interval-fu-f | TIM-1-interval-fu-f: a saved clock disagreement keeps its width across a restart; clock text next steps. Release; from #5810. | #5810 | queued (release; tier A) |
+| CLK-seal-entries-wipe | CLK-seal-entries-wipe: wipe decoded entry values when Unlock refuses them. Release; from #5799. | #5799 | building (release; tier A) |
+| TIM-1-interval-fu-f | TIM-1-interval-fu-f: a saved clock disagreement keeps its width across a restart; clock text next steps. Release; from #5810. | #5810 | building (release; tier A) |
 | MUT-waiver-store-claim-fu | MUT-waiver-store-claim-fu: name the record in mutgate's no-claim message and workflow comment, mark cut reasons and cap the new-entry list, local gate reads record-only packages. Release; from #5802. | #5802 | queued (release; tier A) |
 | IMG-dbus-reach | IMG-dbus-reach: hide /run/dbus from the agentOS units that make no bus call, and pin dbus-daemon's start-up command line. | #5766, #5794 | queued (release; tier A) |
 | MUT-case-clause-cover | MUT-case-clause-cover: mutgate reads every mutant in a switch case's expression as NOT COVERED. Release; from #5810. | #5810 | queued (release) |
@@ -447,6 +445,13 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | OWN-page-session-mut2d | OWN-page-session mutants part 2d: forget.go kernel-fault survivors via a fakeKernel seam (3 + widening) | #5862 | queued (release; tier A) |
 | VULN-static-elf | VULN-static-elf: an image-build check that finds static ELFs (llama-server) and makes image-vulncheck scan their toolchain packages. Release; split from #5873. | #5873, #5871, #2919 | queued (release; needs brief; after #5816) |
 | KRN-forget-wide | KRN-forget-wide: a FORGET ask that a wide clock reading has already lapsed says so instead of asking. Release; from #5811. | #5391, #5811 | queued (release; tier A) |
+| MUT-equivalent-not-equivalent | MUT-equivalent-not-equivalent: refuse a Mutant-equivalent line that says it is not equivalent | #5883 | queued (release; tier A) |
+| OWN-recall-holdline | OWN-recall-holdline: STATUS hold line names agents as the forget texts do | #5883 | queued (release; tier A) |
+| VULN-codex-openssl | VULN-codex-openssl: bump the codex pin once a release links OpenSSL 3.6.5 or later; until then the bundled entry records each fix's reach. Release; from #5888. | #5873, #5888 | queued (release; tier A; waits on a codex release) |
+| MUT-swtpm-runner | MUT-swtpm-runner: install swtpm on mutgate's runner so TPM-path mutants can be killed. Release; from #5806. | #5806 | building (release; tier A) |
+| CLK-seal-decode-wipe-fu | CLK-seal-decode-wipe-fu: Unlock wipes a value a duplicate JSON key overwrites and a partly decoded bad-base64 buffer, and refuses a null entries blob. Release; from #5895. | #5806, #5895 | queued (release; tier A) |
+| CLK-seal-keyclone-test-fu | CLK-seal-keyclone-test-fu: the refused-entry-set test asserts the store-key clone was dropped. Release; from #5895. | #5806, #5895 | queued (release; tier A) |
+| TIM-1-interval-fu-g | TIM-1-interval-fu-g: guard Authenticated against an overflowing tampered reference, and confirm chrony's maxdrift 500 cap on the first image. Release; from #5893. | #5758, #5893 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -490,4 +495,5 @@ issue #5736: needs exactly one state label of queued, building, in review, merge
 issue #5756: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5848: title 'OWN-page-session mutants part 3: kill the other old cmd/agentosd survivors (agent, backups, passkeys, lostcard and 21 more files)' does not start with '<ID>: '
 issue #5876: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #5889: body has no board-row block
 ```
