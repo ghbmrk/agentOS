@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -255,5 +256,47 @@ func TestHW8ReadFileClosesTheFile(t *testing.T) {
 	}
 	if after := fds(); after != before {
 		t.Fatalf("%d descriptors open after 20 reads, want %d", after, before)
+	}
+}
+
+func TestTIM1AHoldRestartsTheAllClearWait(t *testing.T) {
+	// The all-clear needs AgreeAfter of agreement since the last hold, not
+	// since agreement first began.
+	r := noCarrier()
+	g := r.guard(t, nil)
+	g.Check(bg)
+	hold := func() {
+		r.step(time.Hour)
+		if s := g.Check(bg); s.State != Held {
+			t.Fatalf("stepped: %+v", s)
+		}
+		r.step(-time.Hour)
+		g.Check(bg)
+	}
+	hold()
+	r.advance(AgreeAfter / 2)
+	g.Check(bg)
+	hold()
+	r.advance(AgreeAfter/2 + time.Minute)
+	g.Check(bg)
+	for _, s := range r.sent() {
+		if strings.HasPrefix(s, HoldEndText) {
+			t.Fatalf("all-clear %q after %v of agreement since the last hold", s, AgreeAfter/2+time.Minute)
+		}
+	}
+	r.advance(AgreeAfter / 2)
+	g.Check(bg)
+	if got := r.sent(); !strings.HasPrefix(got[len(got)-1], HoldEndText) {
+		t.Fatalf("texts %q, want the all-clear last", got)
+	}
+}
+
+func TestTIM1NowAnswersACancelledContextWithItsError(t *testing.T) {
+	r := newRig()
+	g := r.guard(t, nil)
+	ctx, cancel := context.WithCancel(bg)
+	cancel()
+	if now, err := g.Now(ctx); !errors.Is(err, context.Canceled) || !now.IsZero() {
+		t.Fatalf("Now = %v, %v; want the zero time and context.Canceled", now, err)
 	}
 }
