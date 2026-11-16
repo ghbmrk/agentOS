@@ -2463,6 +2463,11 @@ class DataFiles(unittest.TestCase):
                 ("by fs.WalkDir", 'var _ = fs.WalkDir(os.DirFS(root), ".", nil)', True),
                 ("by fs.ReadDir", 'var _, _ = fs.ReadDir(F, ".")', True),
                 ("by a glob in a join", 'var _, _ = filepath.Glob(filepath.Join(dir, "*.md"))', True),
+                # Security on #5943 (38364f58): a glob behind a directory part matches by its last part.
+                ("by a glob after a directory", 'var _, _ = filepath.Glob(dir + "/*.md")', True),
+                ("by a glob in a format", 'var _, _ = filepath.Glob(fmt.Sprintf("%s/*.md", dir))', True),
+                ("by a recursive glob", 'var _ = match("**/*.md")', True),
+                ("a directory glob of another name", 'var _, _ = fs.Glob(F, "templates/*.html")', False),
                 ("by a climb in a join", 'var _ = os.ReadFile(filepath.Join("..", x))', True),
                 ("past a rune", "var _ = os.ReadDir(string(')') + \".\")", True),
                 ("in a comment", "// see ASSUMPTIONS.md", False),

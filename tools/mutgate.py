@@ -365,7 +365,8 @@ def names_file(pkg_dir, rel):
     """Whether a .go file of pkg_dir can name rel (a path below it) as text: a string literal or
     //go:embed pattern holding its base name or first directory, a literal or pattern holding a glob
     (`*?[`) that matches its base name, rel or a leading directory of it (`//go:embed *`,
-    fs.Glob(fsys, "*.md"), filepath.Join(d, "*.md")), or a literal anywhere in a path call's
+    fs.Glob(fsys, "*.md"), filepath.Join(d, "*.md")), or whose last path part matches its base name
+    (dir + "/*.md", "%s/*.md", "**/*.md"), or a literal anywhere in a path call's
     arguments (PATH_CALL) that lists `.`, `..` or `/` or starts `./` or `../`. A link or an
     unreadable file can name anything. A path built in a variable from parts holding none of these
     is not seen (MUT-deleted-test-own-lines-1). Over-matching costs only a whole-suite run."""
@@ -378,7 +379,8 @@ def names_file(pkg_dir, rel):
         for lit in _literals(text):
             if parts[-1] in lit or parts[0] in lit:
                 return True
-            if re.search(r"[*?\[]", lit) and any(fnmatch.fnmatchcase(n, lit) for n in names):
+            if re.search(r"[*?\[]", lit) and (any(fnmatch.fnmatchcase(n, lit) for n in names)
+                                               or fnmatch.fnmatchcase(parts[-1], lit.rstrip("/").rsplit("/", 1)[-1])):
                 return True
         for lit in _call_literals(_uncommented(text)):
             if (lit and lit.rstrip("/") in ("", ".", "..")) or lit.startswith(("./", "../")):
