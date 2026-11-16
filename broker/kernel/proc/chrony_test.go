@@ -5,6 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"math"
 	"net"
 	"os"
@@ -410,4 +413,50 @@ func closeChrony(s *Chrony) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.drop()
+}
+
+// RunKernel reads chronyd at the sockets its config names (#5391, #5757 L3
+// round 2): kernelSource reads a synced chronyd at cfg.Chrony, answered at
+// cfg.ChronyReply, and the box clock alone without them; RunKernel hands
+// OpenKernel that source. Killed by hand: kernelSource's arguments empty or
+// swapped, and RunKernel's Clock set to anything else.
+//
+// REQ: TIM-1
+func TestTIM1ARunKernelReadsChronydAtItsConfiguredSocket(t *testing.T) {
+	dir := t.TempDir()
+	cfg := MainConfig{Chrony: fakeChronyd(t, dir, func(seq uint32) []byte { return tracking(seq, corrTwoDays) }), ChronyReply: filepath.Join(dir, "reply.sock")}
+	box := time.Now().UnixMilli()
+	if r := kernelSource(cfg)(); r.Earliest == 0 || r.Earliest > box-2*key.DayMS+1000 || r.Latest < box {
+		t.Fatalf("the configured chronyd read %+v: want two days behind the box's %d", r, box)
+	}
+	if r := kernelSource(MainConfig{})(); r.Earliest != 0 || r.Latest < box {
+		t.Fatalf("no chronyd read %+v: want the box clock alone", r)
+	}
+	f, err := parser.ParseFile(token.NewFileSet(), "kernelmain.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var clocks []string
+	for _, d := range f.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == "RunKernel" {
+			ast.Inspect(fn, func(n ast.Node) bool {
+				if kv, ok := n.(*ast.KeyValueExpr); ok {
+					if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Clock" {
+						if c, ok := kv.Value.(*ast.CallExpr); ok && len(c.Args) == 1 {
+							fun, ok1 := c.Fun.(*ast.Ident)
+							if a, ok2 := c.Args[0].(*ast.Ident); ok1 && ok2 {
+								clocks = append(clocks, fun.Name+"("+a.Name+")")
+								return true
+							}
+						}
+						clocks = append(clocks, "other")
+					}
+				}
+				return true
+			})
+		}
+	}
+	if len(clocks) != 1 || clocks[0] != "kernelSource(cfg)" {
+		t.Fatalf("RunKernel hands OpenKernel the clocks %q: want kernelSource(cfg) alone", clocks)
+	}
 }
