@@ -65,6 +65,8 @@ func TestHoldAboveTheMaximumIsRefused(t *testing.T) {
 // runs it to the agent (CH-18). The digits are synthetic.
 func TestHeldCodeMidMessageNeverReachesTheAgent(t *testing.T) {
 	r := newRig(t, nil)
+	r.edit = func(c *Config) { c.HoldSegments = 2 * DefaultHoldSegments }
+	r.ch = r.open()
 	code := r.totp()
 	cases := []struct{ say, held string }{
 		{"pay 123456 now", "pay now"},
@@ -74,6 +76,10 @@ func TestHeldCodeMidMessageNeverReachesTheAgent(t *testing.T) {
 		{"pay ١٢٣٤٥٦ now", "pay now"}, // Arabic-Indic digits
 		{"pay １２３４５６ now", "pay now"}, // full-width digits
 		{"123456 pay now " + code, "pay now"},
+		{"pay 123\u200d456 now", "pay now"}, // zero-width joiner inside
+		{"pay 123\u0301456 now", "pay now"}, // combining mark inside
+		{"pay 1\ufe0f23456 now", "pay now"}, // variation selector inside
+		{"pay 123\u200e456 now", "pay now"}, // bidi mark inside
 	}
 	for _, c := range cases {
 		r.say(c.say)
