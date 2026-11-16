@@ -835,11 +835,14 @@ func (c *Channel) lockedLocked(rest, code string, now time.Time) route {
 // to a neighbouring word ("pay<ZWSP>123456"), and go with the code they
 // touch. A code is a word that reads, as written or through fold, as 6
 // digits, or a chain of all-number words joined only by transparent
-// characters that reads so once they are dropped. "AB482913", "room 12"
-// and "7654321" are not code-shaped and stay.
+// characters that reads so once they are dropped, judged as a whole
+// chain. "AB482913", "room 12", "7654321" and "123<ZWJ>4567" are not
+// code-shaped and stay.
 func stripHeldCodes(text string) string {
-	word := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsNumber(r) }
 	clear := func(r rune) bool { return unicode.IsMark(r) || unicode.Is(unicode.Cf, r) || skelIgnorable(r) }
+	// A default ignorable that is also a letter (the Hangul fillers) is
+	// transparent, not part of a word (L3 on #5974).
+	word := func(r rune) bool { return (unicode.IsLetter(r) || unicode.IsNumber(r)) && !clear(r) }
 	digits := func(w string) bool {
 		return !strings.ContainsFunc(w, func(r rune) bool { return !unicode.IsNumber(r) })
 	}
@@ -866,28 +869,30 @@ func stripHeldCodes(text string) string {
 	}
 	var cut []span
 	for i := 0; i < len(words); i++ {
-		w := text[words[i].s:words[i].e]
-		if isCodeText(w) {
-			cut = append(cut, words[i])
-			continue
+		// The maximal chain of number words joined only by transparent
+		// characters is judged whole, with them dropped; failing that,
+		// each word is judged alone, as fold's spaced reading sees it.
+		j := i
+		for j+1 < len(words) && digits(text[words[i].s:words[i].e]) && digits(text[words[j+1].s:words[j+1].e]) && joined(words[j], words[j+1]) {
+			j++
 		}
-		if !digits(w) {
-			continue
-		}
-		// A chain of number words joined by transparent characters.
-		var b strings.Builder
-		n := 0
-		for j := i; j < len(words) && digits(text[words[j].s:words[j].e]) && (j == i || joined(words[j-1], words[j])); j++ {
-			b.WriteString(text[words[j].s:words[j].e])
-			if n += utf8.RuneCountInString(text[words[j].s:words[j].e]); n > codeDigits {
-				break
+		if j > i {
+			var b strings.Builder
+			for k := i; k <= j; k++ {
+				b.WriteString(text[words[k].s:words[k].e])
 			}
-			if j > i && isCodeText(b.String()) {
+			if utf8.RuneCountInString(b.String()) <= codeDigits && isCodeText(b.String()) {
 				cut = append(cut, span{words[i].s, words[j].e})
 				i = j
-				break
+				continue
 			}
 		}
+		for k := i; k <= j; k++ {
+			if isCodeText(text[words[k].s:words[k].e]) {
+				cut = append(cut, words[k])
+			}
+		}
+		i = j
 	}
 	if len(cut) == 0 {
 		return text
@@ -911,16 +916,22 @@ func stripHeldCodes(text string) string {
 			e += n
 		}
 		// Drop one space beside the code, unless that would join the
-		// words on either side.
+		// words on either side; with none, put one between them.
 		before, _ := utf8.DecodeLastRuneInString(text[:s])
 		after, _ := utf8.DecodeRuneInString(text[e:])
+		gap := ""
 		switch {
 		case s > at && before == ' ' && !word(after):
 			s--
 		case after == ' ' && !word(before):
 			e++
+		case word(before) && word(after):
+			// Keep the words apart, so the cut never joins them into a
+			// new word, code-shaped or not (Security on #5974).
+			gap = " "
 		}
 		out.WriteString(text[at:s])
+		out.WriteString(gap)
 		at = e
 	}
 	out.WriteString(text[at:])

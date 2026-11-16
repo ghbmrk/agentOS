@@ -65,7 +65,7 @@ func TestHoldAboveTheMaximumIsRefused(t *testing.T) {
 // runs it to the agent (CH-18). The digits are synthetic.
 func TestHeldCodeMidMessageNeverReachesTheAgent(t *testing.T) {
 	r := newRig(t, nil)
-	r.edit = func(c *Config) { c.HoldSegments = 4 * DefaultHoldSegments }
+	r.edit = func(c *Config) { c.HoldSegments = MaxHoldSegments }
 	r.ch = r.open()
 	code := r.totp()
 	cases := []struct{ say, held string }{
@@ -90,12 +90,23 @@ func TestHeldCodeMidMessageNeverReachesTheAgent(t *testing.T) {
 		{"pay\ufeff123456 now", "pay now"},
 		{"pay\u200e123456 now", "pay now"},
 		{"pay 123456\u2060now", "pay now"},
+		// A Hangul filler is a letter and a default ignorable: it is
+		// transparent too, on either side or inside (L3 on #5974).
+		{"pay\u3164123456 now", "pay now"},
+		{"pay\u115f123456 now", "pay now"},
+		{"pay 123456\uffa0now", "pay now"},
+		{"pay 123\u3164456 now", "pay now"},
+		{"pay 123\u1160456 now", "pay now"},
+		// A cut never joins its neighbours into a new word (Security on
+		// #5974).
+		{"x\u200b\u200b123456\u200b\u200by", "x y"},
+		{"pay 123\u200b654321\u200b456", "pay 123 456"},
 	}
 	for _, c := range cases {
 		r.say(c.say)
 	}
 	// A number that is not code-shaped is kept as written.
-	r.say("room 12, flight AB482913, ref 7654321, 123\u200d4567")
+	r.say("room 12, flight AB482913, ref 7654321, 123\u200d4567, 1\u200d2\u200d3\u200d4\u200d5\u200d6\u200d7")
 	msgs, _, _ := r.ch.LocalHeld()
 	if len(msgs) != len(cases)+1 {
 		t.Fatalf("held %+v", msgs)
@@ -106,10 +117,14 @@ func TestHeldCodeMidMessageNeverReachesTheAgent(t *testing.T) {
 		if msgs[i].Text != c.held {
 			t.Errorf("%q held as %q, want %q", c.say, msgs[i].Text, c.held)
 		}
+		// The strip is a fixed point: held text has no code left to cut.
+		if again := stripHeldCodes(msgs[i].Text); again != msgs[i].Text {
+			t.Errorf("%q held as %q, which strips again to %q", c.say, msgs[i].Text, again)
+		}
 	}
 	last := msgs[len(cases)]
 	ids = append(ids, last.ID)
-	if last.Text != "room 12, flight AB482913, ref 7654321, 123\u200d4567" {
+	if last.Text != "room 12, flight AB482913, ref 7654321, 123\u200d4567, 1\u200d2\u200d3\u200d4\u200d5\u200d6\u200d7" {
 		t.Errorf("non-code number changed: %q", last.Text)
 	}
 	if _, _, err := r.ch.LocalSignIn(r.totp()); err != nil {
@@ -128,7 +143,7 @@ func TestHeldCodeMidMessageNeverReachesTheAgent(t *testing.T) {
 			t.Fatalf("a code reached the agent: %q", g)
 		}
 	}
-	if !slices.Contains(got, "room 12, flight AB482913, ref 7654321, 123\u200d4567") {
+	if !slices.Contains(got, "room 12, flight AB482913, ref 7654321, 123\u200d4567, 1\u200d2\u200d3\u200d4\u200d5\u200d6\u200d7") {
 		t.Fatalf("agent got %q", got)
 	}
 }
