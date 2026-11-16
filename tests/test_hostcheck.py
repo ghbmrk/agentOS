@@ -1318,7 +1318,7 @@ class HostcheckJobTest(unittest.TestCase):
         self.assertEqual(len(uris), 1, got)
         self.assertRegex(uris[0], r"\AURIs: https://snapshot\.debian\.org/archive/debian/\d{8}T\d{6}Z/\Z")  # one, dated
         self.assertFalse([ln for ln in fields if "security" in ln], got)
-        self.assertIn("Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg", fields)
+        self.assertIn("Signed-By: /usr/share/keyrings/debian-archive-bookworm-automatic.gpg", fields)
         # A second stanza on the snapshot (its security archive, say) joins the selection: the guard stops it.
         two = sources.replace("URIs: http://security.debian.org/debian-security",
                               "URIs: https://snapshot.debian.org/archive/debian-security/20261001T000000Z/")
