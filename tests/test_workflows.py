@@ -1413,6 +1413,12 @@ class WorkflowTest(unittest.TestCase):
         self.assertNotIn("write", transition)
         self.assertIn('python3 -I tools/board.py transition --repo "$GITHUB_REPOSITORY" --issue "$ISSUE" --label "$LABEL" --action "$ACTION"', transition)
         self.assertNotRegex(transition.split("run:", 1)[1], r"\$\{\{")  # event values reach the shell only through env
+        # Each label event of a swap is judged on its own: remove-then-add (unlabeled merged, then
+        # labeled queued) is illegal only in the first run, so no issues run may cancel or replace
+        # another, pending ones included (L3 on #5972). Renders still supersede each other.
+        conc = text.split("\nconcurrency:\n", 1)[1].split("\njobs:", 1)[0]
+        self.assertEqual(conc, "  group: board${{ github.event_name == 'issues' && format('-issue-run-{0}', github.run_id) || '' }}\n"
+                               "  cancel-in-progress: ${{ github.event_name != 'issues' }}")
 
     def test_fuzz_runs_go_through_fuzzrun_and_never_by_duration(self):
         # P1-4-flake-ci (REQ: LOOP-7): a duration -fuzztime can end in the fuzz coordinator's

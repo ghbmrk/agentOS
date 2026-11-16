@@ -388,7 +388,10 @@ def report_transition(fetch, repo, number, label, action):
     item = fetch(f"/repos/{repo}/issues/{number}")
     event = label[len("state:"):]
     others = [x[len("state:"):] for x in _names(item["labels"]) if x.startswith("state:") and x != label]
-    merged = bool(event == "merged" and action == "labeled"
+    # The merged-PR fact matters for any edge into merged: adding it, or removing the old label after
+    # merged was added first (`gh issue edit --add-label --remove-label` order).
+    into_merged = event == "merged" if action == "labeled" else "merged" in others
+    merged = bool(into_merged
                   and [p for p in named_prs(issue_id(item), fetch(f"/repos/{repo}/pulls?state=all")) if p.get("merged_at")])
     for other in others or [None]:
         prev, new = (other, event) if action == "labeled" else (event, other)

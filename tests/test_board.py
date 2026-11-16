@@ -328,6 +328,10 @@ class TransitionTest(unittest.TestCase):
         self.assertIn("final", self.judge("state:merged", "unlabeled", ["state:queued"], self.MERGED))
         self.assertIn("final", self.judge("state:merged", "unlabeled", [], self.MERGED))
         self.assertIsNone(self.judge("state:queued", "unlabeled", ["state:building"], []))
+        # Add merged, then remove the old label (the order `gh issue edit --add-label --remove-label`
+        # emits): the removal reads old -> merged and needs the merged-PR fact too (L3 on #5972).
+        self.assertIsNone(self.judge("state:in review", "unlabeled", ["state:merged"], self.MERGED))
+        self.assertIn("merged PR", self.judge("state:in review", "unlabeled", ["state:merged"], self.OPEN))
         self.assertIsNone(self.judge("class:release", "labeled", ["state:merged"], []))
 
     def test_cli_exit_code(self):

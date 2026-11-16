@@ -26,10 +26,12 @@ on:
     types: [labeled, unlabeled]
 permissions:
   contents: read
-# Each run renders the latest issues, so a newer run supersedes an older one.
+# Each render reads the latest issues, so a newer render supersedes an older one. Each label event
+# is judged on its own (a remove-then-add swap is illegal only in its first run), so an issues run
+# gets a group of its own and never cancels or replaces another, pending ones included.
 concurrency:
-  group: board${{ github.event_name == 'issues' && format('-issue-{0}', github.event.issue.number) || '' }}
-  cancel-in-progress: true
+  group: board${{ github.event_name == 'issues' && format('-issue-run-{0}', github.run_id) || '' }}
+  cancel-in-progress: ${{ github.event_name != 'issues' }}
 jobs:
   transition:
     # Label events carry the label changed, not the previous one: the label plus the issue's other
