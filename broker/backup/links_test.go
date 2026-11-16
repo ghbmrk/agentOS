@@ -4,12 +4,15 @@ package backup
 // (REV-CHK-links, #3945).
 
 import (
+	"bytes"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // plantLink makes p a link to a real file holding b, as another uid that could
@@ -104,5 +107,126 @@ func TestDirTargetReportsEachFailure(t *testing.T) {
 	}
 	if after := fds(); after-before > 16 {
 		t.Errorf("%d files left open after 64 put, get and delete rounds", after-before)
+	}
+}
+
+// BACKUP-table-fifo (#3998): the target directory is the owner's choice and
+// the read runs as root, so a name there may be a FIFO, a socket, a device or
+// an oversized file planted by another uid. Each is refused, promptly.
+
+// getTableWithin runs GetTable and fails the test if it does not return in d.
+func getTableWithin(t *testing.T, tg DirTarget, id string, gen uint64, d time.Duration) ([]byte, error) {
+	t.Helper()
+	type res struct {
+		b   []byte
+		err error
+	}
+	c := make(chan res, 1)
+	go func() {
+		b, err := tg.GetTable(id, gen)
+		c <- res{b, err}
+	}()
+	select {
+	case r := <-c:
+		return r.b, r.err
+	case <-time.After(d):
+		t.Fatalf("GetTable did not return within %v", d)
+		return nil, nil
+	}
+}
+
+// REQ: STO-1
+func TestGetTableRefusesFIFO(t *testing.T) {
+	d := DirTarget{Dir: t.TempDir()}
+	id := strings.Repeat("ab", idLen)
+	p, err := d.path(id, 1)
+	must(t, err)
+	must(t, syscall.Mkfifo(p, 0o600))
+	_, err = getTableWithin(t, d, id, 1, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "named pipe") {
+		t.Fatalf("GetTable of a FIFO: %v, want refused naming a named pipe", err)
+	}
+}
+
+// REQ: STO-1
+func TestGetTableRefusesDeviceAndSocket(t *testing.T) {
+	d := DirTarget{Dir: t.TempDir()}
+	id := strings.Repeat("ab", idLen)
+	p, err := d.path(id, 1)
+	must(t, err)
+	l, err := net.Listen("unix", p)
+	must(t, err)
+	defer l.Close()
+	if _, err := getTableWithin(t, d, id, 1, time.Second); err == nil || !strings.Contains(err.Error(), "socket") {
+		t.Errorf("GetTable of a socket: %v, want refused naming a socket", err)
+	}
+
+	must(t, os.Mkdir(filepath.Join(d.Dir, id+tableExt+"2"), 0o700))
+	if _, err := getTableWithin(t, d, id, 2, time.Second); err == nil || !strings.Contains(err.Error(), "directory") {
+		t.Errorf("GetTable of a directory: %v, want refused naming a directory", err)
+	}
+
+	if os.Geteuid() != 0 {
+		t.Skip("mknod of a character device needs root; the device case is skipped")
+	}
+	dev, err := d.path(id, 3)
+	must(t, err)
+	if err := syscall.Mknod(dev, syscall.S_IFCHR|0o600, 1<<8|3); err != nil {
+		t.Skipf("mknod of a character device (/dev/null's 1,3) refused here: %v", err)
+	}
+	if _, err := getTableWithin(t, d, id, 3, time.Second); err == nil || !strings.Contains(err.Error(), "device") {
+		t.Errorf("GetTable of a character device: %v, want refused naming a device", err)
+	}
+}
+
+// countWriter counts bytes and keeps none.
+type countWriter int64
+
+func (c *countWriter) Write(p []byte) (int, error) { *c += countWriter(len(p)); return len(p), nil }
+
+// REQ: STO-1
+func TestGetTableBoundsRead(t *testing.T) {
+	// The bound is the largest table UnwrapTable accepts, sealed.
+	var n countWriter
+	w, err := sealTo(&n, recipient(t, bytes.Repeat([]byte{7}, minRK)), header{kind: KindKeyTable})
+	must(t, err)
+	_, err = w.Write(make([]byte, maxTable))
+	must(t, err)
+	must(t, w.Close())
+	if int64(n) != maxSealedTable {
+		t.Fatalf("a %d-byte table seals to %d bytes, maxSealedTable is %d", maxTable, n, maxSealedTable)
+	}
+
+	d := DirTarget{Dir: t.TempDir()}
+	id := strings.Repeat("ab", idLen)
+	for gen, size := range map[uint64]int64{1: maxSealedTable + 1, 2: 1 << 40} {
+		p, err := d.path(id, gen)
+		must(t, err)
+		f, err := os.Create(p)
+		must(t, err)
+		must(t, f.Truncate(size)) // sparse: reading it whole would allocate size bytes
+		must(t, f.Close())
+		if _, err := getTableWithin(t, d, id, gen, 5*time.Second); err == nil || !strings.Contains(err.Error(), "over") {
+			t.Errorf("GetTable of a %d-byte file: %v, want refused as over the bound", size, err)
+		}
+	}
+
+	// A file at the bound is read whole; one that grows past it after the
+	// size check is still cut at the bound (readBounded).
+	p, err := d.path(id, 3)
+	must(t, err)
+	f, err := os.Create(p)
+	must(t, err)
+	must(t, f.Truncate(maxSealedTable))
+	must(t, f.Close())
+	b, err := getTableWithin(t, d, id, 3, 5*time.Second)
+	if err != nil || int64(len(b)) != maxSealedTable {
+		t.Errorf("GetTable of a file at the bound: %d bytes, %v; want it read whole", len(b), err)
+	}
+	if _, err := readBounded(strings.NewReader(strings.Repeat("x", 11)), 10); err == nil {
+		t.Error("readBounded returned a reader one byte over its bound")
+	}
+	if b, err := readBounded(strings.NewReader(strings.Repeat("x", 10)), 10); err != nil || len(b) != 10 {
+		t.Errorf("readBounded at its bound: %d bytes, %v", len(b), err)
 	}
 }
