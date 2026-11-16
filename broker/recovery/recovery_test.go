@@ -54,6 +54,46 @@ func TestRecoveryKeyUsesTheCardFormat(t *testing.T) {
 	}
 }
 
+func otherSym(c byte) string {
+	if c == 'A' {
+		return "B"
+	}
+	return "A"
+}
+
+// Every one-symbol typo and every swap of two neighbouring symbols is
+// caught, and the owner is told which group to look at.
+func TestARecoveryKeyTypoNamesItsGroup(t *testing.T) {
+	for n := 0; n < 20; n++ {
+		clean := strings.ReplaceAll(mustKey(t).Text(), "-", "")
+		for i := 0; i < len(clean); i++ {
+			for _, c := range Alphabet {
+				if byte(c) == clean[i] {
+					continue
+				}
+				typo := clean[:i] + string(c) + clean[i+1:]
+				var g *MistypedError
+				if _, err := ParseRecoveryKey(typo); !errors.As(err, &g) || g.Group != i/5+1 {
+					t.Fatalf("typo at %d: %v", i, err)
+				}
+			}
+			if i+1 < len(clean) && i/5 == (i+1)/5 && clean[i] != clean[i+1] {
+				swap := clean[:i] + clean[i+1:i+2] + clean[i:i+1] + clean[i+2:]
+				var g *MistypedError
+				if _, err := ParseRecoveryKey(swap); !errors.As(err, &g) || g.Group != i/5+1 {
+					t.Fatalf("swap at %d: %v", i, err)
+				}
+			}
+		}
+	}
+	var g *MistypedError
+	clean := strings.ReplaceAll(mustKey(t).Text(), "-", "")
+	_, err := ParseRecoveryKey(clean[:20] + otherSym(clean[20]) + clean[21:])
+	if !errors.As(err, &g) || err.Error() != "recovery: group 5 of the recovery key looks mistyped; check it against the card" {
+		t.Fatalf("message: %v", err)
+	}
+}
+
 func TestAWrongRecoveryKeyIsRefusedEvenWithACodeAndTheLocalPage(t *testing.T) {
 	x := newBox(t)
 	a := Auth{Code: true, Local: true, Recovery: mustKey(t)}
@@ -273,46 +313,6 @@ func TestARecoveryKeyPrintsItsLastSymbol(t *testing.T) {
 // succeed. No test in this package is parallel, so the failure lands on
 
 // the first draw the code under test makes.
-
-func otherSym(c byte) string {
-	if c == 'A' {
-		return "B"
-	}
-	return "A"
-}
-
-// Every one-symbol typo and every swap of two neighbouring symbols is
-// caught, and the owner is told which group to look at.
-func TestARecoveryKeyTypoNamesItsGroup(t *testing.T) {
-	for n := 0; n < 20; n++ {
-		clean := strings.ReplaceAll(mustKey(t).Text(), "-", "")
-		for i := 0; i < len(clean); i++ {
-			for _, c := range Alphabet {
-				if byte(c) == clean[i] {
-					continue
-				}
-				typo := clean[:i] + string(c) + clean[i+1:]
-				var g *MistypedError
-				if _, err := ParseRecoveryKey(typo); !errors.As(err, &g) || g.Group != i/5+1 {
-					t.Fatalf("typo at %d: %v", i, err)
-				}
-			}
-			if i+1 < len(clean) && i/5 == (i+1)/5 && clean[i] != clean[i+1] {
-				swap := clean[:i] + clean[i+1:i+2] + clean[i:i+1] + clean[i+2:]
-				var g *MistypedError
-				if _, err := ParseRecoveryKey(swap); !errors.As(err, &g) || g.Group != i/5+1 {
-					t.Fatalf("swap at %d: %v", i, err)
-				}
-			}
-		}
-	}
-	var g *MistypedError
-	clean := strings.ReplaceAll(mustKey(t).Text(), "-", "")
-	_, err := ParseRecoveryKey(clean[:20] + otherSym(clean[20]) + clean[21:])
-	if !errors.As(err, &g) || err.Error() != "recovery: group 5 of the recovery key looks mistyped; check it against the card" {
-		t.Fatalf("message: %v", err)
-	}
-}
 
 // REQ: CRED-8
 // Acceptance: A8 (key-slot header contents)
