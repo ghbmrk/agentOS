@@ -11,8 +11,9 @@ name: mutgate
 # test-only package's covered lines once for every shard to read (#4970). Every mutant
 # runs alone with the whole suite, so a shard gives each of its mutants the verdict one job would. Gremlins has no mutator that deletes a
 # statement, so `delete` deletes each statement holding one of those lines alone, on parallel
-# workers, and adds its verdict to gremlins' JSON (#4573, #4603, #4633). A PR that changes no such
-# package runs no gremlins and passes. The `mutgate` job is the one result to read, and its step
+# workers, and adds its verdict to gremlins' JSON (#4573, #4603, #4633). A package is also claimed
+# when the PR changes its MUTANTS-EQUIVALENT record, which `verify` resolves and whose new entries the
+# summary lists for review (#5786, #5812). A PR that changes no such package runs no gremlins and passes. The `mutgate` job is the one result to read, and its step
 # summary holds one table of every mutant on a target line and its verdict.
 # The `plan` and `mutants` jobs run the PR's own Go tests, which can write anything in that job (the
 # JSON, tools/, $GITHUB_ENV), so they only hand on data: plan the matrix, mutants gremlins' JSON as an

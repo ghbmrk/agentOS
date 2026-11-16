@@ -2249,7 +2249,8 @@ def cmd_verify(args):
     added, tests = added_lines(diff)
     pkgs = claimed(diff)
     if not pkgs:
-        write_summary(args.summary, "### mutgate\n\nThis diff changes no .go line in a tier-A or tier-B package.\n")
+        write_summary(args.summary, "### mutgate\n\nThis diff changes no .go line in a tier-A or tier-B package, and no "
+                      f"{RECORD} record of one (a changed record claims its package too).\n")
         return 0
     with tempfile.TemporaryDirectory() as tmp:
         # The base's lister reads the PR's files as data (go/parser) and runs none of their code (#4602).
@@ -2304,14 +2305,33 @@ def write_summary(path, text):
             f.write(text)
 
 
+CELL = 300
+
+
 def cell(text):
-    """Text from a result or the PR body as one Markdown table cell, never markup."""
-    text = re.sub(r"\s+", " ", str(text))[:300]
+    """Text from a result or the PR body as one Markdown table cell, never markup, cut at CELL characters."""
+    text = re.sub(r"\s+", " ", str(text))[:CELL]
     return re.sub(r"([\\`*_\[\]<>|#!~&])", r"\\\1", text)
+
+
+def record_of(path):
+    """broker/<pkg>/MUTANTS-EQUIVALENT, the record holding an entry for a site in path."""
+    return f"broker/{package_of(path)}/{RECORD}"
+
+
+def proof_cell(reason, path):
+    """cell(reason), ending with a mark naming the record when it is cut, since a new entry's proof is
+    read in full (#5812): a clause past the cut would otherwise be accepted unseen."""
+    cut = len(re.sub(r"\s+", " ", str(reason))) > CELL
+    return cell(reason) + (f" … (cut; see {cell(record_of(path))})" if cut else "")
 
 
 VERDICTS = {"TIMED OUT": "killed (timed out)", "NOT COVERED": "not covered", "NOT VIABLE": "not viable (does not build)"}
 ROWS = 2000
+# New record entries listed in full (#5812). Each line holds four cells of at most 300 characters
+# (1200 bytes in UTF-8, or 600 escaped ASCII) plus the cut mark, so the list stays under 500 KiB,
+# inside GitHub's 1 MiB step-summary limit, past which the whole summary is dropped.
+FRESH = 100
 
 
 def summary(results, tested, waived, own=(), body=None, stale=(), fresh=()):
@@ -2369,8 +2389,11 @@ def summary(results, tested, waived, own=(), body=None, stale=(), fresh=()):
                   *(f"- {cell(site_text(w))}: " + ", ".join(cell(site_text(m)) for m in hit) for w, hit in ambiguous)]
     if fresh:
         lines += ["", f"New {RECORD} entries in this PR (read each proof as a Mutant-equivalent body line is read):",
-                  *(f"- {cell(site_text((p, n, None, col)))} {cell(kind)} ({cell(accepted)}): {cell(reason)}"
-                    for (p, n, kind, col), reason, accepted in fresh)]
+                  *(f"- {cell(site_text((p, n, None, col)))} {cell(kind)} ({cell(accepted)}): {proof_cell(reason, p)}"
+                    for (p, n, kind, col), reason, accepted in fresh[:FRESH])]
+        if len(fresh) > FRESH:
+            lines.append(f"- {len(fresh) - FRESH} more new entries not shown: read them in "
+                         + ", ".join(cell(r) for r in sorted({record_of(p) for (p, *_), *_ in fresh[FRESH:]})))
     if stale:
         lines += ["", f"Stale {RECORD} entries (each fails the gate):", *(f"- {cell(p)}" for p in stale)]
     return "\n".join(lines) + "\n"
@@ -2479,9 +2502,11 @@ def cmd_gate(args):
     """`verify` without its checks, on DIR/<pkg>.json as `run` and `delete` write them (local use)."""
     diff = broker_diff(args.git, args.head)
     added, tests = added_lines(diff)
-    bases = bases_for(diff, args.git, args.head, tests, touched(added, tests))
+    # The claim verify makes, less its tier filter: a record-only package's record is read too (#5812).
+    pkgs = touched(added, tests) | records_changed(diff)
+    bases = bases_for(diff, args.git, args.head, tests, pkgs)
     results, bad = {}, 0
-    for pkg in sorted(touched(added, tests)):
+    for pkg in sorted(pkgs):
         try:
             data = json.loads((pathlib.Path(args.dir) / result_name(pkg)).read_text())
         except (OSError, ValueError):
