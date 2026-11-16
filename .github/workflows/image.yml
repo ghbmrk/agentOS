@@ -269,8 +269,9 @@ jobs:
           sudo python3 -I image/unlock_graph.py "$RUNNER_TEMP/out" "$v"
       # #5697: which files of this tree and its initrds import glibc's regex or wide scanf functions,
       # directly or through a library, as notices: the glibc records' reachability (assurance/vulncheck.json)
-      # is read from here, not from another distribution's builds. Fails only if the scan read nothing.
-      - name: Glibc regex and wide scanf importers (image/import_sweep.py)
+      # is read from here, not from another distribution's builds. #5341: and which can fetch an OpenSSL
+      # cipher by name, with their call sites, for the AES-GCM-SIV records. Fails on an unreviewed change.
+      - name: Glibc regex and wide scanf importers, OpenSSL by-name cipher fetches (image/import_sweep.py)
         if: matrix.run == 'a'
         run: |
           v=$(jq -r .version "$RUNNER_TEMP"/out/*.release.json)
