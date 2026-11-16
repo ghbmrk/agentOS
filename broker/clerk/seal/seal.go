@@ -287,7 +287,8 @@ func open(key, blob, aad []byte) ([]byte, error) {
 	return g.Open(nil, blob[:g.NonceSize()], blob[g.NonceSize():], aad)
 }
 
-var wipe = func(b []byte) { clear(b) } // a var so a test can watch a wipe
+var wipe = func(b []byte) { clear(b) }                       // a var so a test can watch a wipe
+var clone = func(b []byte) []byte { return slices.Clone(b) } // a var so a test can count clones
 
 func random(n int) ([]byte, error) {
 	b := make([]byte, n)
@@ -667,8 +668,8 @@ func entriesJSON(e map[string][]byte) []byte {
 // rename leaves both the file and the store as they were. Once the rename is done the file holds
 // the new slots, so the store takes them even if the directory sync then fails, and returns that
 // error: otherwise the next commit would write the old slots back, and a failed ReplaceAndPut of a
-// compromised factor would revive it (REC-4). Of the set the store does not keep, e or its own, each
-// value the kept set does not share is wiped (CLK-1).
+// compromised factor would revive it (REC-4). After the rename the old set's displaced values are
+// wiped; before it, only e's own clone (CLK-1).
 func (s *Store) commit(slots []slot, e map[string][]byte) error {
 	nf := s.f
 	nf.Slots = slots
@@ -820,17 +821,15 @@ func validEntries(e map[string][]byte) bool {
 	return true
 }
 
-// Put stores an entry (an approval-code verifier, the policy key), durably.
+// Put stores an entry (a code verifier, the policy key) durably; Unlock reads nil back as []byte{}.
 func (s *Store) Put(name string, value []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.live(); err != nil {
-		return err
-	}
 	e, err := s.withEntry(name, value)
 	if err != nil {
 		return err
 	}
+	e[name] = clone(value)
 	return s.commit(s.f.Slots, e)
 }
 
@@ -850,7 +849,8 @@ type Swap struct {
 func (s *Store) ReplaceAndPut(name string, value []byte, swaps ...Swap) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.live(); err != nil {
+	e, err := s.withEntry(name, value) // before the swaps, so a bad name costs no Argon2
+	if err != nil {
 		return nil, err
 	}
 	if len(swaps) == 0 {
@@ -871,10 +871,7 @@ func (s *Store) ReplaceAndPut(name string, value []byte, swaps ...Swap) ([]strin
 		}
 		slots[i], ids[j] = sl, sl.ID
 	}
-	e, err := s.withEntry(name, value) // after the slots, so a refused swap leaves no clone of value
-	if err != nil {
-		return nil, err
-	}
+	e[name] = clone(value) // after the slots, so a refused swap leaves no clone of value
 	err = s.commit(slots, e)
 	if err != nil && s.find(ids[0]) < 0 {
 		return nil, err
@@ -882,16 +879,19 @@ func (s *Store) ReplaceAndPut(name string, value []byte, swaps ...Swap) ([]strin
 	return ids, err
 }
 
-// withEntry is the store's entries with name set to a copy of value.
+// withEntry checks the store is open and takes name and value, and returns its entries with name
+// held but unset: the caller sets clone(value) once nothing can refuse the write (CLK-1).
 func (s *Store) withEntry(name string, value []byte) (map[string][]byte, error) {
+	if err := s.live(); err != nil {
+		return nil, err
+	}
 	if !entryName.MatchString(name) || len(value) > MaxEntry {
 		return nil, errors.New("seal: bad entry name or value too long")
 	}
 	e := maps.Clone(s.entries.Get())
-	if e[name] = nil; len(e) > MaxEntries { // counted before the clone, so a refusal leaves none
+	if e[name] = nil; len(e) > MaxEntries {
 		return nil, fmt.Errorf("seal: a store holds at most %d entries", MaxEntries)
 	}
-	e[name] = slices.Clone(value)
 	return e, nil
 }
 

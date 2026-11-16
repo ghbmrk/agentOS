@@ -141,3 +141,72 @@ func TestEntriesDecodeCopiesNoValue(t *testing.T) {
 		}
 	}
 }
+
+// Unlock stores each value as the buffer it decoded into, which Close
+// wipes: no clone of it is left behind (#5948 item 1). A one-byte value's
+// base64 is four bytes, which decode into a buffer of three.
+func TestUnlockStoresTheDecodedBuffer(t *testing.T) {
+	r, path := Recovery{Key: make([]byte, RecoveryLen)}, filepath.Join(t.TempDir(), "store")
+	s, err := Create(path, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = s.Put("x/a", []byte{1})
+	s.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := Unlock(path, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer u.Close()
+	if v := Entries(u)["x/a"]; string(v) != "\x01" || cap(v) != 3 {
+		t.Errorf("Unlock stored %q with cap %d, want the decoded buffer of cap 3", v, cap(v))
+	}
+}
+
+// A write clones value only once nothing can refuse it, and checks the
+// name before any swap's slot is made (#5948 items 2, 3).
+func TestARefusedWriteClonesNothing(t *testing.T) {
+	r := Recovery{Key: make([]byte, RecoveryLen)}
+	s, err := Create(filepath.Join(t.TempDir(), "store"), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	id := s.Slots()[0].ID
+	n, c := 0, clone
+	t.Cleanup(func() { clone = c })
+	clone = func(b []byte) []byte { n++; return c(b) }
+	v := []byte("refused-canary")
+	for i := 0; len(s.Entries()) < MaxEntries; i++ {
+		if err := s.Put(string([]byte{'y', '/', byte('a' + i%26), byte('a' + i/26)}), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n != MaxEntries {
+		t.Fatalf("%d Puts cloned %d times", MaxEntries, n)
+	}
+	n = 0
+	_, err1 := s.ReplaceAndPut("y/aa", v)
+	_, err2 := s.ReplaceAndPut("y/aa", v, Swap{ID: "none", F: r})
+	_, err3 := s.ReplaceAndPut("y/aa", v, Swap{ID: id, F: Recovery{Key: []byte("short")}})
+	_, err4 := s.ReplaceAndPut("x/new", v, Swap{ID: id, F: r})
+	_, err5 := s.ReplaceAndPut("Bad Name", v, Swap{ID: "none", F: r})
+	err6, err7 := s.Put("x/new", v), s.Put("Bad Name", v)
+	for i, err := range []error{err1, err2, err3, err4, err5, err6, err7} {
+		if err == nil {
+			t.Errorf("refusal %d wrote", i+1)
+		}
+	}
+	if !errors.Is(err1, ErrNoSlot) || !errors.Is(err2, ErrNoSlot) || errors.Is(err4, ErrNoSlot) || errors.Is(err5, ErrNoSlot) {
+		t.Errorf("no swaps: %v; an unknown slot: %v; a full store, a bad name before the swaps: %v, %v", err1, err2, err4, err5)
+	}
+	if n != 0 {
+		t.Errorf("refused writes cloned the value %d times, want none", n)
+	}
+	if _, err := s.ReplaceAndPut("y/aa", v, Swap{ID: id, F: r}); err != nil || n != 1 {
+		t.Errorf("a ReplaceAndPut: %v, cloned %d times; want once", err, n)
+	}
+}
