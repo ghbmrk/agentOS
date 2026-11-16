@@ -3,6 +3,7 @@ package peers
 import (
 	"errors"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -120,9 +121,13 @@ func TestListenFailures(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(full, "x"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if ln, err := Listen(full, os.Getuid()); err == nil {
+	ln, err := Listen(full, os.Getuid())
+	var pe *fs.PathError
+	if err == nil {
 		ln.Close()
 		t.Fatal("Listen replaced a directory")
+	} else if !errors.As(err, &pe) || pe.Op != "remove" {
+		t.Fatalf("Listen on a full directory = %v; want the error that kept the old file", err)
 	}
 	if _, err := os.Stat(filepath.Join(full, "x")); err != nil {
 		t.Fatalf("Listen touched the directory: %v", err)
@@ -140,6 +145,9 @@ func TestUIDOfANonUnixConn(t *testing.T) {
 	defer b.Close()
 	if uid, ok := UID(a); ok || uid != 0 {
 		t.Fatalf("UID of a pipe = %d, %v; want 0, false", uid, ok)
+	}
+	if uid, ok := UID(new(net.UnixConn)); ok || uid != 0 {
+		t.Fatalf("UID of a unix conn with no socket = %d, %v; want 0, false", uid, ok)
 	}
 	// A closed unix conn has no peer to read.
 	p := filepath.Join(t.TempDir(), "s.sock")
