@@ -13,19 +13,27 @@ initrd of the boot entry (OUT/initrd/, every cpio member).
                                   the JSON the two forms print, as lines and as ::notice annotations,
                                   held to ALLOW (default image/import_sweep.allow)
 
+It also reads, for the openssl records (#5341), which files hold the name of a by-name OpenSSL cipher
+selector or spell GCM-SIV, as selecting AES-GCM-SIV takes one of its names (see CIPHER_NAMES), and
+counts their references to each selector and their spellings.
+
 The JSON maps each place ("tree", and "initrd:<path>" for each initrd) to: "scanned", the ELF files
 read; "imports", each file importing an affected glibc symbol and those symbols; and "via", each other
 ELF file whose NEEDED closure (by SONAME or file name, within that place) holds an importing library, and those
-libraries; "unread", each ELF file objdump failed on; and, for an initrd, "others", its executable
+libraries; "cipher", each file whose bytes hold a CIPHER_NAMES name and its references to each
+(cipher_sites); "unread", each ELF file objdump failed on; and, for an initrd, "others", its executable
 members that are not ELF files. Only symbols bound to a GLIBC_ version count, so a library's own re_*
 names do not.
 
 --summary exits 1 when a claim the glibc records rest on stops holding: any file, in any place, imports
 or reaches a wide scanf function, or imports or reaches a regex function and matches no glob in ALLOW
 (each a file the image -100290 record names); a glob that matches nothing also fails, so the list
-stays the record's. The control is the scan itself: it also exits 1 when objdump failed on a file,
-the main tree or an initrd with executable members read no ELF file, or the main tree has no importer
-of regcomp (bash and grep always import it), so a clean result is not a scan that read nothing.
+stays the record's. It also exits 1 when a file holding a selector name or spelling GCM-SIV matches no [cipher]
+entry of ALLOW, or holds other sites than the entry it matches, or an entry matches nothing. The
+control is the scan itself: it also exits 1 when objdump failed on a file,
+the main tree or an initrd with executable members read no ELF file, the main tree has no importer
+of regcomp (bash and grep always import it), or no call site of EVP_CIPHER_fetch (libcryptsetup and
+libcrypto always hold one), so a clean result is not a scan that read nothing.
 """
 import fnmatch
 import json
@@ -49,6 +57,28 @@ GROUPS = {
     "regex": re.compile(r"(regcomp|regexec|re_\w+|rpmatch|step|advance)$"),
     "wscanf": re.compile(r"(__isoc(99|23)_)?v?(sw|fw|w)scanf$"),
 }
+# #5341: the openssl records (DEBIAN-CVE-2026-88823 and -95692 among them, AES-GCM-SIV) rest on no file
+# passing a name read from data to an OpenSSL cipher fetch. AES-GCM-SIV has no OID or NID
+# (crypto/objects/objects.txt, 3.5.7), so only a selector given one of its names picks it: EVP_CIPHER_fetch,
+# or systemd's openssl_cipher_many (src/shared/openssl-util.c, v257), which formats "%s-%zu-%s" from its
+# caller's arguments and fetches that. EVP_get_cipherbyname cannot return it (crypto/evp/names.c reads only
+# the legacy table) but is counted, as it hands a name to the same table. Every ELF file whose bytes hold one of these
+# names (an importer, the library defining it, or a dlsym caller's string) is disassembled and its
+# references to each counted, for image/import_sweep.allow's [cipher] section.
+# Security 6899468190: a provider cipher can also be picked by name through EVP_CIPHER_do_all_provided
+# with EVP_CIPHER_is_a, or OSSL_ENCODER_CTX_set_cipher, so those count too.
+CIPHER_NAMES = ("EVP_CIPHER_fetch", "EVP_get_cipherbyname", "openssl_cipher_many", "EVP_CIPHER_do_all_provided",
+                "EVP_CIPHER_is_a", "OSSL_ENCODER_CTX_set_cipher")
+# And a file whose bytes spell the cipher itself, in any case, is held under this key with the number of
+# times it does: a name passed some other way (an OSSL_PARAM "cipher" to a MAC or KDF) still has to be spelt.
+GCM_SIV = "GCM-SIV"
+# A reference: any instruction naming the start of a function, <name>, <name@plt>, <name@@VERSION> or
+# a GOT slot (# <name@VERSION>), so a call, a jump and an instruction taking its address all count
+# (L3 6899461135). <name+0x..> is a place inside it, and "addr <name>:" a label, neither a reference.
+SITE = re.compile(r"^\s*[0-9a-f]+:\s.*<([A-Za-z_]\w*)(?:@[\w.@]*)?>\s*$")
+# A dynamic relocation against the name: one in data (a function-pointer table, R_X86_64_64) or a GOT
+# slot (GLOB_DAT) is a reference no instruction shows; JUMP_SLOT is the PLT's, already counted at its calls.
+RELOC = re.compile(r"^[0-9a-f]+\s+(R_\w+)\s+([A-Za-z_]\w*)(?:@[\w.@]*)?(?:[+-]0x[0-9a-f]+)?\s*$")
 UND = re.compile(r"\*UND\*\s+\S+\s+(?:Base\s+)?\((GLIBC_[^)]*)\)\s+(\S+)$")
 DYNAMIC = re.compile(r"^\s+(NEEDED|SONAME)\s+(\S+)$")
 
@@ -78,6 +108,40 @@ def read_elf(path):
     return sorted(syms), needed, soname, read
 
 
+def cipher_sites(path):
+    """({name: references} in the ELF file at PATH for each CIPHER_NAMES name its bytes hold, or None when
+    they hold none; read). A reference is an instruction outside the PLT naming the function (SITE) or a
+    dynamic relocation against it other than the PLT's JUMP_SLOT (RELOC), so a pointer to the fetch, in
+    code or in a table, changes the count as a call does. A name held with no reference (a dlsym caller's
+    string) maps to 0. READ is False when objdump fails, so a file it cannot read is never counted clean."""
+    with open(path, "rb") as f:
+        data = f.read()
+    held = [n for n in CIPHER_NAMES if n.encode() in data]
+    spelt = data.lower().count(GCM_SIV.lower().encode())
+    if not held and not spelt:
+        return None, True
+    r = subprocess.run(["objdump", "-d", "--no-show-raw-insn", str(path)], stdout=subprocess.PIPE,
+                       stderr=subprocess.DEVNULL, text=True, errors="replace")
+    sites, plt = dict.fromkeys(held, 0), False
+    if spelt:
+        sites[GCM_SIV] = spelt
+    for line in r.stdout.splitlines():
+        if line.startswith("Disassembly of section "):
+            plt = line.split()[-1].startswith(".plt")  # a PLT stub's own jump through the GOT is no call site
+        m = not plt and SITE.search(line)
+        if m and m.group(1) in sites:
+            sites[m.group(1)] += 1
+    rel = subprocess.run(["objdump", "-R", str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         text=True, errors="replace")
+    for line in rel.stdout.splitlines():
+        m = RELOC.match(line)
+        if m and m.group(1) != "R_X86_64_JUMP_SLOT" and m.group(2) in sites:
+            sites[m.group(2)] += 1
+    # A static or relocatable file has no dynamic relocations; any other failure is a file not read.
+    rel_ok = rel.returncode == 0 or "not a dynamic object" in rel.stderr
+    return sites, r.returncode == 0 and rel_ok
+
+
 def is_elf(path):
     try:
         with open(path, "rb") as f:
@@ -88,10 +152,13 @@ def is_elf(path):
 
 def sweep(files):
     """FILES maps a shown path to a readable path. Returns the place's record (module docstring)."""
-    imports, needed, by_name, unread = {}, {}, {}, []
+    imports, needed, by_name, unread, cipher = {}, {}, {}, [], {}
     for shown, real in files.items():
         syms, needed[shown], soname, read = read_elf(real)
-        if not read:
+        sites, disassembled = cipher_sites(real)
+        if sites is not None:
+            cipher[shown] = sites
+        if not (read and disassembled):
             unread.append(shown)
         if syms:
             imports[shown] = syms
@@ -114,7 +181,7 @@ def sweep(files):
         if hits and shown not in importers:
             via[shown] = sorted(hits)
     return {"scanned": len(files), "imports": dict(sorted(imports.items())), "via": dict(sorted(via.items())),
-            "unread": sorted(unread)}
+            "unread": sorted(unread), "cipher": dict(sorted(cipher.items()))}
 
 
 def tree_files(top, prefix="/", skip=()):
@@ -177,6 +244,9 @@ def problems(places):
     errs += ["%s: objdump could not read %s" % (k, p) for k, v in places.items() for p in v.get("unread", [])]
     if "regcomp" not in {s for syms in places.get("tree", {}).get("imports", {}).values() for s in syms}:
         errs.append("tree: no file imports regcomp, so the scan read nothing it should have (control)")
+    # libcryptsetup and libcrypto always call EVP_CIPHER_fetch: none found is a disassembly that read nothing.
+    if not any(v.get("EVP_CIPHER_fetch") for v in places.get("tree", {}).get("cipher", {}).values()):
+        errs.append("tree: no call site of EVP_CIPHER_fetch, so the cipher scan read nothing it should have (control)")
     return errs
 
 
@@ -194,9 +264,45 @@ def reach(places):
 
 
 def load_allow(path):
-    """The globs of ALLOW: one per line, after any '#' comment."""
-    return [l.split("#", 1)[0].strip() for l in pathlib.Path(path).read_text().splitlines()
-            if l.split("#", 1)[0].strip()]
+    """The regex globs of ALLOW: one per line, after any '#' comment, up to a [cipher] line."""
+    return read_allow(path)[0]
+
+
+def read_allow(path):
+    """(the regex globs, the [cipher] entries) of ALLOW. A [cipher] entry is a glob, then either the
+    sites the file must hold exactly (NAME=COUNT each, from CIPHER_NAMES) or "*" (not counted)."""
+    regex, cipher, section = [], {}, None
+    for l in pathlib.Path(path).read_text().splitlines():
+        l = l.split("#", 1)[0].strip()
+        if l == "[cipher]":
+            section = "cipher"
+        elif l and section is None:
+            regex.append(l)
+        elif l:
+            glob, *want = l.split()
+            cipher[glob] = "*" if want == ["*"] else {k: int(v) for k, v in (w.split("=", 1) for w in want)}
+    return regex, cipher
+
+
+def cipher_refusals(places, entries):
+    """Each file of PLACES holding a selector name or spelling GCM-SIV whose counts match no [cipher] entry."""
+    errs, used = [], set()
+    for place, v in places.items():
+        for p, sites in v.get("cipher", {}).items():
+            hit = [g for g in entries if fnmatch.fnmatchcase(p, g)]
+            used.update(hit)
+            got = " ".join("%s=%d" % kv for kv in sorted(sites.items()))
+            if not hit:
+                errs.append("%s: %s holds a by-name cipher selector or spells GCM-SIV (%s) and is not in import_sweep.allow "
+                            "[cipher]; review where its names come from, then add the entry: %s %s"
+                            % (place, p, got, p, got))
+            elif all(entries[g] != "*" and entries[g] != sites for g in hit):
+                errs.append("%s: %s holds cipher references %s, not the %s its [cipher] entry reviewed; review "
+                            "the new sites, then update the entry" % (place, p, got, " / ".join(
+                                " ".join("%s=%d" % kv for kv in sorted(entries[g].items())) for g in hit)))
+    errs += ["import_sweep.allow: [cipher] %s matches no file holding a selector name or spelling GCM-SIV; remove it" % g
+             for g in entries if g not in used]
+    return errs
 
 
 def refusals(places, allow):
@@ -230,6 +336,9 @@ def summary(places):
                          % (place, g, len(imp), len(via)))
             lines += ["  imports %s: %s" % (p, " ".join(s)) for p, s in imp.items()]
             lines += ["  via %s: %s" % (p, " ".join(libs)) for p, libs in via.items()]
+        cipher = v.get("cipher", {})
+        lines.append("%s cipher: %d files hold a by-name cipher selector or spell GCM-SIV" % (place, len(cipher)))
+        lines += ["  sites %s: %s" % (p, " ".join("%s=%d" % kv for kv in sorted(s.items()))) for p, s in cipher.items()]
     return lines
 
 
@@ -255,7 +364,8 @@ def main(argv):
         places = json.loads(pathlib.Path(argv[1]).read_text())
         lines = summary(places)
         print("\n".join(lines + annotations(lines)))
-        errs = problems(places) + refusals(places, load_allow(argv[2] if len(argv) == 3 else ALLOW))
+        regex, cipher = read_allow(argv[2] if len(argv) == 3 else ALLOW)
+        errs = problems(places) + refusals(places, regex) + cipher_refusals(places, cipher)
         for e in errs[:10]:
             print("::error title=import sweep::" + e.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
     elif len(argv) == 2 and argv[0] == "--tree":
