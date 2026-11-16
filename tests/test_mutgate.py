@@ -870,6 +870,8 @@ class Verify(unittest.TestCase):
         r = self.verify({}, test=None, src="package netguard\n", summary=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("changes no .go line", r.summary)
+        # MUT-waiver-store-claim-fu R1 (#5812): the message also names the record, which claims a package too.
+        self.assertIn("and no MUTANTS-EQUIVALENT record of one", r.summary)
 
 
 GO_MOD = "module example.invalid/broker\n\ngo 1.22\n"
@@ -3090,6 +3092,49 @@ class Record(unittest.TestCase):
             run = self.repo(d, self.VAR, self.VAR, base_record=rec, record=rec)
             r = run("claimed", "--git", "HEAD~1", "--json")
             self.assertEqual((r.returncode, json.loads(r.stdout)), (0, []), r.stderr)
+
+    def test_a_cut_new_entry_reason_is_marked_and_names_its_record(self):
+        # MUT-waiver-store-claim-fu R2 (#5812): the heading says to read each proof, so a cut one says so.
+        site = ("broker/netguard/a.go", 4, "ARITHMETIC_BASE", None)
+        for n, cut in ((300, False), (301, True), (400, True)):
+            with self.subTest(n):
+                out = mutgate.summary({}, {}, {}, fresh=[(site, "b" * n, "#5743")])
+                line = next(l for l in out.split("\n") if l.startswith("- broker/netguard/a.go:4 "))
+                self.assertEqual(line.endswith(" … (cut; see broker/netguard/MUTANTS-EQUIVALENT)"), cut, line)
+                self.assertIn("b" * 300, line)
+                self.assertNotIn("b" * 301, line)
+
+    def test_the_new_entry_list_is_capped_with_a_count_naming_the_records(self):
+        # MUT-waiver-store-claim-fu R3 (#5812): a 1 MiB record's new entries cannot push the step summary
+        # past GitHub's 1 MiB limit, which would drop the summary and show no entry at all.
+        fresh = [(("broker/netguard/a.go" if i % 2 else "broker/clerk/run/b.go", i + 1, "ARITHMETIC_BASE", None),
+                  "r" * 1000, "#5743") for i in range(mutgate.FRESH + 7)]
+        out = mutgate.summary({}, {}, {}, fresh=fresh)
+        listed = out.split("New MUTANTS-EQUIVALENT entries in this PR", 1)[1].split("\n\n", 1)[0].rstrip("\n").split("\n")[1:]
+        self.assertEqual(len(listed), mutgate.FRESH + 1, listed[-2:])
+        self.assertEqual(listed[-1], "- 7 more new entries not shown: read them in broker/clerk/run/MUTANTS-EQUIVALENT, "
+                                     "broker/netguard/MUTANTS-EQUIVALENT")
+        self.assertLess(len(out.encode()), 1 << 19)
+        out = mutgate.summary({}, {}, {}, fresh=fresh[:mutgate.FRESH])
+        self.assertNotIn("more new entries", out)
+
+    def test_local_gate_reads_a_record_only_package(self):
+        # MUT-waiver-store-claim-fu R4 (#5812): `gate` claims as `verify` does, so a record-only diff with a
+        # stale entry fails locally, not first in CI; a package with no result file is still skipped.
+        head = self.VAR + "var b = 2 + 2\n"
+        rec = json.dumps({"file": "a.go", "mutant": "ARITHMETIC_BASE", "func": "b", "decl": Record.digest("var b = 2 + 2"),
+                          "stmt": ["var b = 2 + 3"], "at": 0, "after": "var a = 1 + 1", "occurrence": [1, 1],
+                          "reason": "b is never read", "accepted": "#5743"}) + "\n"
+        with tempfile.TemporaryDirectory() as d:
+            run = self.repo(d, head, head, record=rec)
+            res = pathlib.Path(d) / "res"
+            res.mkdir()
+            r = run("gate", str(res), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)  # no result file: skipped
+            (res / mutgate.result_name("netguard")).write_text(json.dumps(self.result()))
+            r = run("gate", str(res), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("names no statement at the head", r.stdout)
 
     def test_every_record_in_the_repository_resolves(self):
         # A record-only PR, or an edit to a proven statement in any package, fails here as well as in mutgate.
