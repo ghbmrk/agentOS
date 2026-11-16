@@ -3,6 +3,8 @@ package driver
 // REQ: PLN-4, EVL-3
 
 import (
+	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -58,9 +60,20 @@ func TestTheStepCheckPinCatchesDrift(t *testing.T) {
 		if mutant == src {
 			t.Fatalf("the %s mutant did not apply", name)
 		}
-		if got := stepCodesWith(t, map[string]string{filepath.Join(keyDir, "authorize.go"): mutant}); slices.Equal(got, kernelStepCodes(t)) {
+		if got, err := stepCodesWith(t, map[string]string{filepath.Join(keyDir, "authorize.go"): mutant}); err == nil && slices.Equal(got, kernelStepCodes(t)) {
 			t.Fatalf("a check %s in key.Authorize was not read", name)
 		}
+	}
+	// A code held in a local variable is no constant: the read fails rather
+	// than skip it (L3 6923594464 on #5997).
+	ksrc := readFile(t, filepath.Join(kernelDir, "kernel.go"))
+	local := strings.Replace(ksrc, "\t\tif c.Irreversible() {",
+		"\t\tif st.Amount > 1<<40 {\n\t\t\tnc := \"new-check\"\n\t\t\treturn key.ID{}, nil, on(&key.Refusal{Code: nc, Detail: \"x\"}, &i)\n\t\t}\n\t\tif c.Irreversible() {", 1)
+	if local == ksrc {
+		t.Fatal("the local-variable mutant did not apply")
+	}
+	if got, err := stepCodesWith(t, map[string]string{filepath.Join(kernelDir, "kernel.go"): local}); err == nil {
+		t.Fatalf("a code in a local variable was skipped: read %v", got)
 	}
 }
 
@@ -101,7 +114,14 @@ func sortedSet(s []string) []string {
 	return slices.Compact(s)
 }
 
-func kernelStepCodes(t *testing.T) []string { return stepCodesWith(t, nil) }
+func kernelStepCodes(t *testing.T) []string {
+	t.Helper()
+	codes, err := stepCodesWith(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return codes
+}
 
 // pkgSrc is one parsed package: its functions and methods by name, and its
 // string constants.
@@ -195,17 +215,12 @@ func returnsRefusal(d *ast.FuncDecl) bool {
 // field, or -1 (key's refuse takes its code this way).
 func codeParam(d *ast.FuncDecl) int {
 	idx := -1
-	var params []string
-	for _, f := range d.Type.Params.List {
-		for _, n := range f.Names {
-			params = append(params, n.Name)
-		}
-	}
+	params := paramIdents(d)
 	ast.Inspect(d.Body, func(n ast.Node) bool {
 		if kv, ok := n.(*ast.KeyValueExpr); ok {
 			if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Code" {
 				if v, ok := kv.Value.(*ast.Ident); ok {
-					if i := slices.Index(params, v.Name); i >= 0 {
+					if i := slices.IndexFunc(params, func(p *ast.Ident) bool { return p.Obj != nil && p.Obj == v.Obj }); i >= 0 {
 						idx = i
 					}
 				}
@@ -216,11 +231,22 @@ func codeParam(d *ast.FuncDecl) int {
 	return idx
 }
 
+// paramIdents is d's parameters in order.
+func paramIdents(d *ast.FuncDecl) []*ast.Ident {
+	var ps []*ast.Ident
+	for _, f := range d.Type.Params.List {
+		ps = append(ps, f.Names...)
+	}
+	return ps
+}
+
 // stepCodesWith reads the step-level refusal codes from the kernel's sources,
 // with override's files in place of the ones on disk: every code in admit's
 // loop over the plan's steps, following each call into the kernel or key
-// package that returns a refusal, key.Authorize among them.
-func stepCodesWith(t *testing.T, override map[string]string) []string {
+// package that returns a refusal, key.Authorize among them. A code it cannot
+// read as a string constant is an error, never skipped: the only identifier
+// it leaves to the callers is the parameter codeParam names.
+func stepCodesWith(t *testing.T, override map[string]string) ([]string, error) {
 	t.Helper()
 	kern := parsePkg(t, kernelDir, override)
 	keyp := parsePkg(t, keyDir, override)
@@ -245,6 +271,7 @@ func stepCodesWith(t *testing.T, override map[string]string) []string {
 
 	codes := map[string]bool{}
 	seen := map[*ast.FuncDecl]bool{}
+	var bad []error
 	// resolve is the constant e names in p, failing on anything else.
 	resolve := func(p *pkgSrc, e ast.Expr) string {
 		switch e := e.(type) {
@@ -265,64 +292,81 @@ func stepCodesWith(t *testing.T, override map[string]string) []string {
 				return v
 			}
 		}
-		t.Fatalf("refusal code %T at %v is no string constant", e, e.Pos())
+		bad = append(bad, fmt.Errorf("refusal code %T %v at %v is no string constant", e, e, e.Pos()))
 		return ""
 	}
-	// callee is the refusal-returning function or method a call names.
-	callee := func(p *pkgSrc, c *ast.CallExpr) (*pkgSrc, *ast.FuncDecl) {
-		var cands []*ast.FuncDecl
+	type fn struct {
+		p *pkgSrc
+		d *ast.FuncDecl
+	}
+	// callees is every refusal-returning function or method a call may name:
+	// a method call names each method of that name in either package, since
+	// the receiver's type is not read.
+	callees := func(p *pkgSrc, c *ast.CallExpr) []fn {
+		var out []fn
 		switch f := c.Fun.(type) {
 		case *ast.Ident:
-			cands = append(cands, p.funcs[f.Name])
+			if d := p.funcs[f.Name]; d != nil && returnsRefusal(d) {
+				out = append(out, fn{p, d})
+			}
 		case *ast.SelectorExpr:
 			if x, ok := f.X.(*ast.Ident); ok && pkgs[x.Name] != nil && x.Obj == nil {
-				return pkgs[x.Name], pkgs[x.Name].funcs[f.Sel.Name]
+				if d := pkgs[x.Name].funcs[f.Sel.Name]; d != nil && returnsRefusal(d) {
+					out = append(out, fn{pkgs[x.Name], d})
+				}
+				return out
 			}
-			for _, q := range []*pkgSrc{p, kern, keyp} {
+			for _, q := range []*pkgSrc{kern, keyp} {
 				for k, d := range q.funcs {
 					if strings.HasSuffix(k, "."+f.Sel.Name) && returnsRefusal(d) {
-						return q, d
+						out = append(out, fn{q, d})
 					}
 				}
 			}
 		}
-		if len(cands) == 1 && cands[0] != nil {
-			return p, cands[0]
-		}
-		return nil, nil
+		return out
 	}
-	var walk func(p *pkgSrc, body ast.Node)
-	walk = func(p *pkgSrc, body ast.Node) {
+	// walk reads the codes in body; param is the parameter of the function
+	// walked that codeParam names (nil for none), whose callers name its code.
+	var walk func(p *pkgSrc, body ast.Node, param *ast.Ident)
+	walk = func(p *pkgSrc, body ast.Node, param *ast.Ident) {
 		ast.Inspect(body, func(n ast.Node) bool {
 			switch n := n.(type) {
 			case *ast.CompositeLit:
 				for _, el := range n.Elts {
 					if kv, ok := el.(*ast.KeyValueExpr); ok {
 						if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Code" {
-							if v, ok := kv.Value.(*ast.Ident); ok && p.consts[v.Name] == "" && v.Obj != nil && v.Obj.Kind == ast.Var {
-								continue // a parameter: its callers name the code
+							if v, ok := kv.Value.(*ast.Ident); ok && param != nil && v.Obj != nil && v.Obj == param.Obj {
+								continue // the code parameter: its callers name the code
 							}
 							codes[resolve(p, kv.Value)] = true
 						}
 					}
 				}
 			case *ast.CallExpr:
-				q, d := callee(p, n)
-				if d == nil || !returnsRefusal(d) {
-					return true
-				}
-				if i := codeParam(d); i >= 0 && i < len(n.Args) {
-					codes[resolve(p, n.Args[i])] = true
-				}
-				if !seen[d] {
-					seen[d] = true
-					walk(q, d.Body)
+				for _, c := range callees(p, n) {
+					var cp *ast.Ident
+					if i := codeParam(c.d); i >= 0 {
+						cp = paramIdents(c.d)[i]
+						if i >= len(n.Args) {
+							bad = append(bad, fmt.Errorf("call at %v passes no code", n.Pos()))
+						} else {
+							codes[resolve(p, n.Args[i])] = true
+						}
+					}
+					if !seen[c.d] {
+						seen[c.d] = true
+						walk(c.p, c.d.Body, cp)
+					}
 				}
 			}
 			return true
 		})
 	}
-	walk(kern, loop.Body)
+	walk(kern, loop.Body, nil)
+	if err := errors.Join(bad...); err != nil {
+		return nil, err
+	}
 	if len(codes) == 0 {
 		t.Fatal("no step-level refusal codes read")
 	}
@@ -330,5 +374,5 @@ func stepCodesWith(t *testing.T, override map[string]string) []string {
 	for c := range codes {
 		out = append(out, c)
 	}
-	return sortedSet(out)
+	return sortedSet(out), nil
 }
