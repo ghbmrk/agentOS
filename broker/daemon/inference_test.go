@@ -599,32 +599,84 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 // expression, a package-level variable, or a name this file does not
 // declare (L3 S1 on #90).
 func configured(e ast.Expr, f *ast.File) bool {
+	fields := map[string]bool{}
 	for {
 		se, ok := e.(*ast.SelectorExpr)
 		if !ok {
 			break
 		}
+		fields[se.Sel.Name] = true
 		e = se.X
 	}
 	id, ok := e.(*ast.Ident)
 	if !ok || id.Obj == nil || id.Obj.Kind != ast.Var {
 		return false
 	}
-	return (param(id.Obj, f) || inTempDir(id.Obj, f)) && !written(id.Obj, f)
+	return (param(id.Obj, f) || inTempDir(id.Obj, f)) && !written(id.Obj, f) && (len(fields) == 0 || !fieldWritten(fields, f))
 }
 
-// param reports that obj is a parameter or receiver of a function in f.
+// fieldWritten reports a statement of f that may write one of fields
+// through any name: an assignment, `= range`, `++`/`--` or `&` whose
+// target is a selector naming one of them (c.path in one method while
+// another dials its own receiver's c.path, an alias d.path, a
+// pointer-method's x.path), a whole value stored through a pointer
+// (*c = client{...}), which may be the dialed struct, or the address of
+// an element (&s[0]), whose later store s[0] = client{...} would be
+// (#6030 B1).
+func fieldWritten(fields map[string]bool, f *ast.File) bool {
+	w := false
+	hit := func(e ast.Expr, addr bool) {
+		for {
+			p, ok := e.(*ast.ParenExpr)
+			if !ok {
+				break
+			}
+			e = p.X
+		}
+		switch x := e.(type) {
+		case *ast.SelectorExpr:
+			w = w || fields[x.Sel.Name]
+		case *ast.StarExpr:
+			w = true
+		case *ast.IndexExpr:
+			w = w || addr
+		}
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			for _, l := range n.Lhs {
+				hit(l, false)
+			}
+		case *ast.RangeStmt:
+			if n.Tok == token.ASSIGN {
+				for _, e := range []ast.Expr{n.Key, n.Value} {
+					hit(e, false)
+				}
+			}
+		case *ast.IncDecStmt:
+			hit(n.X, false)
+		case *ast.UnaryExpr:
+			if n.Op == token.AND {
+				hit(n.X, true)
+			}
+		}
+		return true
+	})
+	return w
+}
+
+// param reports that obj is a parameter or receiver of a function
+// declared in f. A func literal's parameter is not: the literal is called
+// here, where its caller may pass a literal (Lens R1 on #6030).
 func param(obj *ast.Object, f *ast.File) bool {
 	is := false
-	ast.Inspect(f, func(n ast.Node) bool {
-		var fls []*ast.FieldList
-		switch n := n.(type) {
-		case *ast.FuncDecl:
-			fls = []*ast.FieldList{n.Recv, n.Type.Params}
-		case *ast.FuncLit:
-			fls = []*ast.FieldList{n.Type.Params}
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok {
+			continue
 		}
-		for _, fl := range fls {
+		for _, fl := range []*ast.FieldList{fd.Recv, fd.Type.Params} {
 			if fl == nil {
 				continue
 			}
@@ -634,8 +686,7 @@ func param(obj *ast.Object, f *ast.File) bool {
 				}
 			}
 		}
-		return true
-	})
+	}
 	return is
 }
 
@@ -856,6 +907,16 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		src(`"net"`, `func g(sock string) { p := &sock; *p = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", sock) }`),
 		src(`"net"`, `func g(n int) { n++; (&net.Dialer{}).Dial("unix", n) }`),
 		src(`"net"; "path/filepath"`, `func g(dir string) { sock := filepath.Join(dir, "s.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
+		// A field written through another name, and a func literal's
+		// parameter given a literal (#6030 B1, Lens R1).
+		src(`"net"`, `type client struct{ path string }; func (c *client) setup() { c.path = "/run/proxy.sock" }; func (c *client) dial() { (&net.Dialer{}).Dial("unix", c.path) }`),
+		src(`"net"`, `type cfg struct{ s string }; func g(c *cfg) { d := c; d.s = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", c.s) }`),
+		src(`"net"`, `type cfg struct{ s string }; func (x *cfg) set() { x.s = "/run/proxy.sock" }; func g(c cfg) { c.set(); (&net.Dialer{}).Dial("unix", c.s) }`),
+		src(`"net"`, `type cfg struct{ s string }; func (x *cfg) set() { *x = cfg{"/run/proxy.sock"} }; func g(c *cfg) { c.set(); (&net.Dialer{}).Dial("unix", c.s) }`),
+		src(`"net"`, `type cfg struct{ s string }; func h(c *cfg) { (&net.Dialer{}).Dial("unix", c.s) }; func g(l []cfg) { l[0] = cfg{"/run/proxy.sock"}; h(&l[0]) }`),
+		src(`"net"`, `type cfg struct{ s string }; func g(c *cfg) { p := &c.s; *p = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", c.s) }`),
+		src(`"net"`, `type in struct{ s string }; type cfg struct{ in in }; func g(c *cfg) { c.in = in{"/run/proxy.sock"}; (&net.Dialer{}).Dial("unix", c.in.s) }`),
+		src(`"net"`, `func g() { func(s string) { (&net.Dialer{}).Dial("unix", s) }("/run/proxy.sock") }`),
 		src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); dir = "/run"; sock := filepath.Join(dir, "proxy.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
 		src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); sock := filepath.Join(dir, "s.sock"); sock = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", sock) }`),
 		src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); sock := filepath.Join(dir, "..", "proxy.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
