@@ -110,7 +110,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-unmarked-gaps | VULN-unmarked-gaps: unmarked copies the string-fingerprint check cannot see (small packages, minified-only packages, copies inside the holder's own unminified scripts, a second copy in a file that already names the package) | VULN-inlined-minified (#4234) | queued (later; tier A) |
 | MET-owner-export | MET-owner-export: the box writes its weekly owner-outcome counts to records/owner/ (needs brief; after G1) | #4935; G1 | queued (release; needs brief; after G1) |
 | VULN-prune-requalify | VULN-prune-requalify: requalify the pruned OpenClaw image (PLN-5, HLD-3) | VULN-controlui-drop (#4436) | queued (release) |
-| REV-LOW-tools-c | REV-LOW-tools-c: srclint GO_CMD anchoring and continuation lines | follow-up of #5846 | building(release; tier C; brief to write) |
 
 ## Owner channel and approvals (SPEC §10)
 
@@ -445,6 +444,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | OWN-page-session-mut6 | OWN-page-session mutants part 6: NewScanner(nil) panics on 1 MiB | #5857 | building (release; tier A) |
 | CLK-seal-entry-swap-wipe-fu | CLK-seal-entry-swap-wipe-fu: seal wipes an entry value Put, ReplaceAndPut or Delete drops, and encode leaves no pooled JSON copy. Release; from #5897. | #5897 | queued (release; tier A) |
 | CLK-seal-decode-nocopy-pin-fu | CLK-seal-decode-nocopy-pin-fu: a test pins that the seal entries decode copies no value out of the plaintext buffer. Release; from #5914. | #5897, #5914 | queued (release; tier A) |
+| OWN-page-session-mut6-fu | OWN-page-session-mut6-fu: the a8scan copy of the A8 scanner refuses an empty needle list and drops its dead found map. Release; from #5923. | #5923 | building (release; tier A) |
+| TIM-1-interval-fu-h | TIM-1-interval-fu-h: a refresh test kills a revert of neg at the anchor-drift and jump sites, or record them as defence in depth. Release; from #5922. | #5899, #5922 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -490,4 +491,5 @@ issue #5848: title 'OWN-page-session mutants part 3: kill the other old cmd/agen
 issue #5876: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5889: body has no board-row block
 issue #5920: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #5928: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 ```
