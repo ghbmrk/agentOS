@@ -18,6 +18,7 @@ import (
 // side texts it unchanged, and ForgetReply hands the subjects out only for
 // "YES <code>" from it. One ask waits at a time, unlogged: a newer ask,
 // STOP, any other reply, ForgetAskFor or a restart ends it, erasing nothing.
+// A reading too wide for any reply to arrive in time asks nothing.
 
 const ForgetAskFor int64 = 600_000 // ms
 
@@ -25,6 +26,9 @@ var (
 	ErrForgetName  = errors.New("kernel: a Forget needs a name in plain letters that something live is under, so nothing is erased")
 	ErrForgetReply = errors.New("kernel: no Forget waits for that reply, so nothing was erased")
 	ErrForgetStop  = errors.New("kernel: STOP holds, so no Forget is asked")
+	// ErrForgetClock is the owner's text as it stands: a reading at least
+	// ForgetAskFor wide has lapsed the ask before it is sent (TIM-1, CH-12).
+	ErrForgetClock = errors.New("My clock isn't sure of the time right now, so I can't take a FORGET reply. Try again later; send STATUS to see the time check.")
 )
 
 // kindWords names a kind as the household says it, for one and for more; the
@@ -55,6 +59,9 @@ func (k *Kernel) AskForget(at int64, label string) (string, error) {
 		return !unicode.In(r, unicode.L, unicode.M, unicode.N) && !strings.ContainsRune(" -_.,()'’/+&@", r)
 	}) {
 		return "", errors.Join(ErrForgetName, err)
+	}
+	if now.Latest >= now.Earliest+ForgetAskFor { // ForgetReply would refuse every YES
+		return "", ErrForgetClock
 	}
 	all := "everything"
 	if len(unread) > 0 {

@@ -955,7 +955,7 @@ func TestTIM1AForgetAskLapsesOnLatest(t *testing.T) {
 		return err
 	}
 	const f = kernel.ForgetAskFor
-	if err := reply(10+f, 10+f, ask(10, 10+hour)); !errors.Is(err, kernel.ErrForgetReply) {
+	if err := reply(10+f, 10+f, ask(10, 10+f-1)); !errors.Is(err, kernel.ErrForgetReply) {
 		t.Fatalf("a YES ForgetAskFor after an ask's Earliest: %v", err)
 	}
 	e := 20 + f
@@ -965,6 +965,48 @@ func TestTIM1AForgetAskLapsesOnLatest(t *testing.T) {
 	e = 30 + 3*f
 	if err := reply(e+f-1, e+f-1, ask(e, e)); err != nil {
 		t.Fatalf("a YES inside the ask: %v", err)
+	}
+}
+
+// A reading as wide as ForgetAskFor has lapsed an ask before it is sent, so
+// AskForget refuses with a text naming the cause and the step, and no ask
+// waits: the newer ask still ends the one before (TIM-1, CH-12).
+func TestTIM1AWideReadingRefusesAForgetAsk(t *testing.T) {
+	// REQ: TIM-1, CH-12
+	r := newErig(t)
+	code := func(text string) string {
+		f := strings.Fields(text)
+		return f[slices.Index(f, "YES")+1]
+	}
+	r.seal(r.open(), "mail", kernel.ClassLabel, "Alice")
+	at := func(e, l int64) {
+		r.k.UseClock(func() kernel.Reading { return kernel.Reading{Earliest: e, Latest: l} })
+	}
+	const f = kernel.ForgetAskFor
+	at(10, 10)
+	text, err := r.k.AskForget(0, "Alice")
+	must(t, err)
+	before := "YES " + code(text)
+	for _, w := range []int64{f, 5 * hour} {
+		at(20, 20+w)
+		text, err := r.k.AskForget(0, "Alice")
+		if !errors.Is(err, kernel.ErrForgetClock) || text != "" {
+			t.Fatalf("an ask at a reading %d ms wide: %q, %v", w, text, err)
+		}
+		if !strings.Contains(err.Error(), "Try again later; send STATUS to see the time check.") {
+			t.Fatalf("the refusal names no step: %q", err)
+		}
+	}
+	at(20, 20)
+	if _, err := r.k.ForgetReply(0, before); !errors.Is(err, kernel.ErrForgetReply) {
+		t.Fatalf("a YES to the ask before a refused one: %v", err)
+	}
+	at(30, 30+f-1)
+	text, err = r.k.AskForget(0, "Alice")
+	must(t, err)
+	at(30+f-1, 30+f-1)
+	if _, err := r.k.ForgetReply(0, "YES "+code(text)); err != nil {
+		t.Fatalf("a YES to an ask at a reading just under ForgetAskFor wide: %v", err)
 	}
 }
 
