@@ -98,6 +98,10 @@ func TestADisplacedValueIsWipedOnce(t *testing.T) {
 	if s.Put("x/c", c) != nil || s.Put("x/new", nil) == nil {
 		t.Fatal("a full store refused a held name, or took a new one")
 	}
+	// encode refuses a file past MaxFile, which readFile and parse would refuse to open.
+	if _, err := s.encode(s.f, map[string][]byte{"x/big": make([]byte, MaxFile)}); err == nil {
+		t.Error("encode wrote a file past MaxFile")
+	}
 	s.Close()
 	_, err = s.ReplaceAndPut("x/a", a, Swap{ID: sl.ID, F: r})
 	for _, err := range []error{err, s.Put("x/a", a), s.Delete("x/c")} {
