@@ -156,7 +156,9 @@ NOT_EQUIVALENT = re.compile(r"\bnot[\s-]+equivalent", re.IGNORECASE)
 KINDS = frozenset({"ARITHMETIC_BASE", "CONDITIONALS_BOUNDARY", "CONDITIONALS_NEGATION", "INCREMENT_DECREMENT",
                    "INVERT_ASSIGNMENTS", "INVERT_BITWISE", "INVERT_BWASSIGN", "INVERT_LOGICAL", "INVERT_LOOPCTRL",
                    "INVERT_NEGATIVES", "REMOVE_SELF_ASSIGNMENTS", "STATEMENT_DELETION"})
-WAIVER_START = re.compile(r"^\s*Mutant-(?:equivalent|uncovered):", re.IGNORECASE)
+# A line that starts like a waiver behind an indent or the Markdown a PR body wraps lines in (a backtick, a
+# list bullet, a blockquote), which waivers does not read (L3 on #5976); prose that names one mid-line is not.
+WAIVER_START = re.compile(r"^(?:\s|`|>|[-*+]\s|\d{1,9}[.)]\s)*Mutant-(?:equivalent|uncovered):", re.IGNORECASE)
 
 
 # A package name that reaches the workflow's matrix: path segments of plain characters only.
@@ -829,14 +831,20 @@ def waivers(body):
     out = {}
     for row in (body or "").replace("\r\n", "\n").split("\n"):
         m = EQUIVALENT.match(row)
-        if m and re.search(r"[A-Za-z]{2}", m.group(5)):
+        if m and re.search(r"[A-Za-z]{2}", m.group(5)) and not placeholder(m.group(5)):
             out[(m.group(1), int(m.group(2)), m.group(4), int(m.group(3)) if m.group(3) else None)] = m.group(5)
     return out
 
 
+def placeholder(reason):
+    """Whether a waiver's reason is the <reason> the gate's messages print, left unfilled (L3 on #5976)."""
+    return reason.strip("<>` ").lower() == "reason"
+
+
 def malformed_waivers(body):
-    """A warning for each body line that starts like a waiver but waivers does not read, and for each it
-    reads whose kind no mutant has (#5828). Either waives nothing, so its mutant still fails (fail closed);
+    """A warning for each body line that starts like a waiver (behind any indent, backtick, bullet or quote
+    mark) but waivers does not read, holding the <reason> placeholder, or naming a kind no mutant has
+    (#5828, L3 on #5976). Each waives nothing, so its mutant still fails (fail closed);
     the warning says why, rather than leaving the line unread or listed only as unused."""
     out = []
     for row in (body or "").replace("\r\n", "\n").split("\n"):
@@ -845,8 +853,13 @@ def malformed_waivers(body):
         m = EQUIVALENT.match(row)
         if not m or not re.search(r"[A-Za-z]{2}", m.group(5)):
             out.append(f"the line {row.strip()[:200]!r} is not read as a waiver, so it waives nothing: write it "
-                       "`Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>` (line and column from 1, the "
-                       "kind in capitals as the summary's Mutant cell gives it, a reason in words)")
+                       "Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason> at the start of its own line, with "
+                       "no indent, bullet, quote mark or backtick (line and column from 1, the kind in capitals as the "
+                       "summary's Mutant cell gives it, a reason in words)")
+        elif placeholder(m.group(5)):
+            out.append(f"the waiver {site_text((m.group(1), int(m.group(2)), m.group(4), int(m.group(3)) if m.group(3) else None))} "
+                       "still holds the <reason> placeholder, so it waives nothing: replace it with why no test can tell the "
+                       "mutant apart")
         elif m.group(4) and m.group(4) not in KINDS:
             out.append(f"the waiver {site_text((m.group(1), int(m.group(2)), m.group(4), int(m.group(3)) if m.group(3) else None))} "
                        f"names the kind {m.group(4)}, which no mutant has, so it waives nothing: use the kind the "
@@ -2535,17 +2548,17 @@ def cmd_gate(args):
 
 
 def report_violations(found, lost=()):
-    # Each line ends with the mutant's own site, path:line:col:KIND, so two of one kind on a line read
-    # apart and the waiver line can be pasted as printed (#5828).
+    # Each line ends with the mutant's own waiver line, path:line:col:KIND, so two of one kind on a line
+    # read apart, and the line pastes as printed with no backtick or bracket around it (#5828).
     for pkg, path, line, kind, col in found:
         # A deletion's line is the first added line of its statement, which may start earlier (#4603).
         what = f"deleting the whole statement holding line {line}" if kind == DELETION else kind
         print(f"mutgate: {path}:{line} {what} survives, on a line of package {pkg} that this PR changes or tests "
-              f"(its waiver: `Mutant-equivalent: {site_text((path, line, kind, col))} <reason>`)")
+              f"; its waiver line: Mutant-equivalent: {site_text((path, line, kind, col))} <reason>")
     for pkg, path, line, kind, col in sorted(set(lost), key=lambda v: (v[:4], v[4] or 0)):
         print(f"mutgate: {path}:{line} is a target line no test of package {pkg} runs at the head ({kind} not "
               f"covered): cover it, or, if no test can reach it, name it in a Mutant-uncovered line "
-              f"(its waiver: `Mutant-uncovered: {site_text((path, line, kind, col))} <reason>`)")
+              f"; its waiver line: Mutant-uncovered: {site_text((path, line, kind, col))} <reason>")
     found = [*found, *lost]
     if found:
         print("mutgate: add a test that fails when the line changes; if no test can tell, add a line "
