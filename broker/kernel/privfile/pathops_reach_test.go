@@ -104,32 +104,69 @@ func TestRootSideLintReach(t *testing.T) {
 	})
 	// Item 3: the scan does not descend a link; systemd and the image
 	// build do.
-	// A link is read only when it resolves inside the repository to a
-	// regular file; the runner's own tree never decides (#6003 L3).
-	for name, c := range map[string]struct{ target, want string }{
-		"a linked drop-in directory":                   {"../elsewhere", "a link to a directory"},
-		"an absolute target":                           {"/usr/lib/agentos-l3/dropins", "absolute"},
-		"an absolute target that exists on the runner": {"/etc", "absolute"},
-		"a dangling target":                            {"../nowhere", "dangling"},
-		"a link loop":                                  {"agentos-side.service.d", "loop"},
-		"a target outside the repo":                    {"../../../outside", "outside the repository"},
+	// A link is resolved lexically, never on the runner: its target is a
+	// file beside it or beside its directory, in its own overlay, and in
+	// rootTrees in the image (#6003 L3 and Security).
+	const etc = ext + "etc/systemd/system/"
+	for name, c := range map[string]struct{ link, target, want string }{
+		"a linked drop-in directory":                   {"image/mkosi/agentos-side.service.d", "../elsewhere", "a link to a directory"},
+		"an absolute target":                           {"image/mkosi/agentos-side.service.d", "/usr/lib/agentos-l3/dropins", "not a file beside it"},
+		"an absolute target that exists on the runner": {"image/mkosi/agentos-side.service.d", "/etc", "not a file beside it"},
+		"a dangling target":                            {"image/mkosi/agentos-side.service.d", "../nowhere", "no file"},
+		"a link loop":                                  {"image/mkosi/agentos-side.service.d", "agentos-side.service.d", "another link"},
+		"a chain of links":                             {"image/mkosi/agentos-q.service", "agentos-r.service", "another link"},
+		"a target outside the repo":                    {"image/mkosi/agentos-side.service.d", "../../../outside", "not a file beside it"},
+		"a climb through the runner's root":            {etc + "agentos-z.service", strings.Repeat("../", 15) + "ROOT/image/mkosi/agentos-z.service", "not a file beside it"},
+		"a climb through /proc/self/root":              {etc + "agentos-z.service", strings.Repeat("../", 15) + "proc/self/root/ROOT/image/mkosi/agentos-z.service", "not a file beside it"},
+		"a nested target":                              {etc + "agentos-z.service", "../../../run/agentos-x/agentos-z.service", "not a file beside it"},
+		"a target in a grant":                          {ext + "var/lib/agentos-x/l.service", "agentos-z.service", "/var/lib/agentos-x/l.service in the image, outside rootTrees"},
+		"a link out of its overlay":                    {ext + "l.service", "../agentos-z.service", "leaves its overlay image/mkosi/mkosi.extra"},
+		"a link into an overlay":                       {"image/mkosi/sub/l.service", "../mkosi.extra", "a link to a directory"},
+		"a build link out of image/":                   {"image/l.service", "../go.mod", "outside every overlay that lands in one or outside image/"},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := reachBase()
 			files["image/elsewhere/z.conf"] = "[Service]\nEnvironment=LD_PRELOAD=/tmp/x.so\n"
 			files["image/mkosi/mkosi.extra/usr/lib/agentos-l3/dropins/z.conf"] = "[Service]\nEnvironment=LD_PRELOAD=/tmp/x.so\n"
+			files["image/mkosi/agentos-z.service"] = "[Service]\nUser=agentos-z\nExecStart=/bin/true\n"
+			files[ext+"var/lib/agentos-x/agentos-z.service"] = "[Service]\nUser=agentos-z\nExecStart=/bin/true\n"
+			files[ext+"run/agentos-x/agentos-z.service"] = "[Service]\nUser=agentos-z\nExecStart=/bin/true\n"
+			files["image/mkosi/mkosi.extra/x"] = ""
+			files["go.mod"] = "module x\n"
 			root := fakeRepo(t, files)
 			if err := os.MkdirAll(filepath.Join(filepath.Dir(root), "outside"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Symlink(c.target, filepath.Join(root, "image/mkosi/agentos-side.service.d")); err != nil {
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(root, c.link)), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := rootBinaries(root); err == nil || !strings.Contains(err.Error(), "image/mkosi/agentos-side.service.d: ") || !strings.Contains(err.Error(), c.want) {
-				t.Fatalf("got %v, want a refusal of the link with %q", err, c.want)
+			// A valid link, which a chain may pass through.
+			if err := os.Symlink("agentos-side.service", filepath.Join(root, "image/mkosi/agentos-r.service")); err != nil {
+				t.Fatal(err)
+			}
+			target := strings.ReplaceAll(c.target, "ROOT/", strings.TrimPrefix(root, "/")+"/")
+			if err := os.Symlink(target, filepath.Join(root, c.link)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := rootBinaries(root); err == nil || !strings.Contains(err.Error(), c.link+": ") || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("got %v, want a refusal of %s with %q", err, c.link, c.want)
 			}
 		})
 	}
+	t.Run("passes a linked unit in an overlay", func(t *testing.T) {
+		files := reachBase()
+		files[etc+"agentos-y.service"] = "[Service]\nExecStart=/bin/true\n"
+		root := fakeRepo(t, files)
+		if err := os.MkdirAll(filepath.Join(root, etc, "multi-user.target.wants"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("../agentos-y.service", filepath.Join(root, etc, "multi-user.target.wants/agentos-y.service")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := rootBinaries(root); err != nil {
+			t.Fatal(err)
+		}
+	})
 	t.Run("passes a linked unit file", func(t *testing.T) {
 		root := fakeRepo(t, reachBase())
 		if err := os.MkdirAll(filepath.Join(root, "image/mkosi/multi-user.target.wants"), 0o755); err != nil {
@@ -232,6 +269,33 @@ func TestBuiltUnitsEndpointsInGrants(t *testing.T) {
 // TestRootEnvFiles: what a root unit's EnvironmentFile= holds is held to
 // the same rootEnv and PATH rules as its Environment= (#4699). A file the
 // lint cannot find under image/ is refused, unless envFileReasons lists it.
+// TestImageOverlaysAreListed: every overlay directory under image/ is one
+// imageOverlays lists, so a new image or board cannot ship files the env
+// lookup and the link rule do not place (#6003).
+func TestImageOverlaysAreListed(t *testing.T) {
+	root := repoRoot(t)
+	listed := map[string]bool{}
+	for _, r := range allOverlays() {
+		listed[r] = true
+		if st, err := os.Stat(filepath.Join(root, r)); err != nil || !st.IsDir() {
+			t.Errorf("listed overlay %s is not a directory: %v", r, err)
+		}
+	}
+	err := filepath.WalkDir(filepath.Join(root, "image"), func(p string, d os.DirEntry, err error) error {
+		if err != nil || !d.IsDir() || (d.Name() != "overlay" && d.Name() != "mkosi.extra" && d.Name() != "mkosi.skeleton" && d.Name() != "rootfs-overlay") {
+			return err
+		}
+		rel, _ := filepath.Rel(root, p)
+		if !listed[filepath.ToSlash(rel)] {
+			t.Errorf("%s is an overlay imageOverlays does not list", filepath.ToSlash(rel))
+		}
+		return filepath.SkipDir
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRootEnvFiles(t *testing.T) {
 	const env = "image/mkosi/mkosi.extra/etc/agentos/y.env"
 	const unit = "image/mkosi/agentos-e.service"
@@ -271,22 +335,40 @@ func TestRootEnvFiles(t *testing.T) {
 	})
 	// Only an overlay's copy is shipped: one elsewhere under image/ (an
 	// example, a doc) is not read as the file (#6003 Security 2).
-	t.Run("refuses a copy outside an overlay", func(t *testing.T) {
+	// Only a copy in an overlay root of the unit's own image is shipped:
+	// one elsewhere under image/ (an example, a doc, a directory merely
+	// named overlay, another image's overlay) is not (#6003 Security 2).
+	for _, copy := range []string{
+		"image/docs/examples/etc/agentos/q.env",
+		"image/docs/overlay/etc/agentos/q.env",
+		"image/docs/mkosi.extra/etc/agentos/q.env",
+		"image/enforcer/mkosi/mkosi.extra/etc/agentos/q.env",
+		"image/mkosi/mkosi.extra/x/etc/agentos/q.env",
+		"image/camnode/external/board/common/overlay/etc/agentos/q.env",
+	} {
+		t.Run("refuses a copy at "+copy, func(t *testing.T) {
+			files := reachBase()
+			files[unit] = "[Service]\nExecStart=/bin/true\nEnvironmentFile=/etc/agentos/q.env\n"
+			files[copy] = "GOMEMLIMIT=1\n"
+			if _, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), "/etc/agentos/q.env, which no file under image/ ships") {
+				t.Fatalf("got %v, want the file unshipped", err)
+			}
+		})
+	}
+	t.Run("reads a camnode unit's copy from its own overlay", func(t *testing.T) {
 		files := reachBase()
-		files[unit] = "[Service]\nExecStart=/bin/true\nEnvironmentFile=/etc/agentos/q.env\n"
-		files["image/docs/examples/etc/agentos/q.env"] = "GOMEMLIMIT=1\n"
-		if _, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), "/etc/agentos/q.env, which no file under image/ ships") {
-			t.Fatalf("got %v, want the file unshipped", err)
+		files["image/camnode/external/board/common/overlay/etc/systemd/system/agentos-cam.service"] = "[Service]\nExecStart=/bin/true\nEnvironmentFile=/etc/agentos/q.env\n"
+		files["image/camnode/external/board/qemu/overlay/etc/agentos/q.env"] = "LD_PRELOAD=/tmp/x.so\n"
+		if _, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), `variable "LD_PRELOAD"`) {
+			t.Fatalf("got %v, want the board overlay's copy read", err)
 		}
 	})
 	t.Run("refuses a linked env file", func(t *testing.T) {
 		files := reachBase()
 		files[unit] = root
+		files[filepath.Dir(env)+"/z.env"] = "GOMEMLIMIT=1\n"
 		r := fakeRepo(t, files)
-		if err := os.MkdirAll(filepath.Join(r, filepath.Dir(env)), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink("../../../agentos-e.service", filepath.Join(r, env)); err != nil {
+		if err := os.Symlink("z.env", filepath.Join(r, env)); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := rootBinaries(r); err == nil || !strings.Contains(err.Error(), "not a regular file") {
@@ -300,13 +382,13 @@ func TestRootEnvFiles(t *testing.T) {
 		if err := builtUnits(recs, t.TempDir()); err == nil || !strings.Contains(err.Error(), "which no file under image/ ships") {
 			t.Fatalf("no env file: got %v", err)
 		}
-		bad := func(string) (map[string]string, error) {
+		bad := func(string, string) (map[string]string, error) {
 			return map[string]string{"image/x/etc/agentos/y.env": "LD_PRELOAD=/tmp/x.so\n"}, nil
 		}
 		if err := builtUnitsWith(recs, t.TempDir(), bad); err == nil || !strings.Contains(err.Error(), `variable "LD_PRELOAD"`) {
 			t.Fatalf("a preload: got %v", err)
 		}
-		good := func(string) (map[string]string, error) {
+		good := func(string, string) (map[string]string, error) {
 			return map[string]string{"image/x/etc/agentos/y.env": "GOMEMLIMIT=1\n"}, nil
 		}
 		if err := builtUnitsWith(recs, t.TempDir(), good); err != nil {

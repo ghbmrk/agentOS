@@ -1141,7 +1141,7 @@ func underSystemdListed(t *testing.T, files map[string]string, ours func(string)
 		t.Fatal("unit_rules.py printed no links")
 	}
 	// A root unit of ours reads its env file from the fixture's tree.
-	env := func(p string) (map[string]string, error) {
+	env := func(_, p string) (map[string]string, error) {
 		b, err := os.ReadFile(filepath.Join(fs, filepath.FromSlash(p)))
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -2473,21 +2473,30 @@ func isManagerConf(p string) bool {
 		strings.HasSuffix(base, ".conf") && (dir == "system.conf.d" || dir == "user.conf.d")
 }
 
-// shippedEnv finds the env file p among files, the paths under image/: each
-// that is an overlay's copy at p (the overlay directory is one of
-// overlayDirs), named relative to root and read only when it is a regular
-// file, not a link. A copy elsewhere under image/ (an example, a doc) is
-// not shipped (#6003 Security 2).
+// shippedEnv finds the env file p among files, the paths under image/: the
+// copy at p in each overlay root (imageOverlays) of the image whose unit
+// names it (from), named relative to root and read only when it is a
+// regular file, not a link. A unit outside root (a built tree's) reads every
+// image's copy; a unit under image/ in no listed image reads none. A copy
+// anywhere else under image/ (an example, a doc, another image) is not
+// shipped (#6003 Security 2).
 func shippedEnv(root string, files []string) envLookup {
-	return func(p string) (map[string]string, error) {
+	have := map[string]bool{}
+	for _, f := range files {
+		have[filepath.ToSlash(f)] = true
+	}
+	return func(from, p string) (map[string]string, error) {
+		roots := allOverlays()
+		if rel, err := filepath.Rel(root, from); err == nil && !strings.HasPrefix(filepath.ToSlash(rel), "../") {
+			roots = overlaysOf(filepath.ToSlash(rel))
+		}
 		out := map[string]string{}
-		for _, f := range files {
-			f := filepath.ToSlash(f)
-			if !strings.HasSuffix(f, p) || !overlayDirs[path.Base(strings.TrimSuffix(f, p))] {
+		for _, r := range roots {
+			f := filepath.ToSlash(filepath.Join(root, r, path.Clean("/"+p)))
+			if !have[f] {
 				continue
 			}
-			rel, _ := filepath.Rel(root, f)
-			rel = filepath.ToSlash(rel)
+			rel := path.Join(r, path.Clean("/"+p))
 			st, err := os.Lstat(f)
 			if err != nil {
 				return nil, err
@@ -2505,9 +2514,48 @@ func shippedEnv(root string, files []string) envLookup {
 	}
 }
 
-// overlayDirs are the directories under image/ whose tree the image build
-// copies to / (mkosi's extra trees, the camnode board overlay).
-var overlayDirs = map[string]bool{"mkosi.extra": true, "overlay": true}
+// imageOverlays are image/'s images, by the directory that holds each, and
+// the overlay roots whose trees that image's build copies to /: mkosi's
+// extra trees and the camnode boards' overlays. TestImageOverlaysAreListed
+// fails on an overlay directory under image/ that is not listed here.
+var imageOverlays = []struct {
+	image string
+	roots []string
+}{
+	{"image/enforcer/", []string{"image/enforcer/mkosi/mkosi.extra"}},
+	{"image/camnode/", []string{"image/camnode/external/board/common/overlay", "image/camnode/external/board/cm4/overlay", "image/camnode/external/board/qemu/overlay"}},
+	{"image/mkosi/", []string{"image/mkosi/mkosi.extra"}},
+}
+
+// overlaysOf is the overlay roots of the image holding rel (a path relative
+// to the repository), or none.
+func overlaysOf(rel string) []string {
+	for _, im := range imageOverlays {
+		if strings.HasPrefix(rel, im.image) {
+			return im.roots
+		}
+	}
+	return nil
+}
+
+// allOverlays is every listed overlay root.
+func allOverlays() []string {
+	var out []string
+	for _, im := range imageOverlays {
+		out = append(out, im.roots...)
+	}
+	return out
+}
+
+// overlayRoot is the listed overlay root that holds rel, or "".
+func overlayRoot(rel string) string {
+	for _, r := range allOverlays() {
+		if strings.HasPrefix(rel, r+"/") {
+			return r
+		}
+	}
+	return ""
+}
 
 // imageFiles lists every file and link under root/image.
 func imageFiles(root string) ([]string, error) {
@@ -2606,7 +2654,7 @@ func rootBinaries(root string) ([]string, error) {
 			return err
 		case d.IsDir():
 			return nil
-		case d.Type()&os.ModeSymlink != 0 && linkOutside(root, p) != "":
+		case d.Type()&os.ModeSymlink != 0 && linkWhy(root, p) != "":
 			// WalkDir does not descend a link; systemd and the image
 			// build do (#4718 item 3). A link is read only when it
 			// resolves, inside the repository, to a regular file: one
@@ -2614,7 +2662,7 @@ func rootBinaries(root string) ([]string, error) {
 			// image build may make real) or a loop is refused, so the
 			// result never depends on the runner's tree (#6003 L3).
 			rel, _ := filepath.Rel(root, p)
-			return fmt.Errorf("%s: %s; ship the file or directory itself", filepath.ToSlash(rel), linkOutside(root, p))
+			return fmt.Errorf("%s: %s; ship the file itself", filepath.ToSlash(rel), linkWhy(root, p))
 		case isManagerConf(p):
 			confs = append(confs, p)
 		case unitTypes[filepath.Ext(p)]:
@@ -3065,7 +3113,7 @@ func (c *unitCheck) rootSetting(l envLine) error {
 	var docs map[string]string
 	var err error
 	if c.env != nil {
-		docs, err = c.env(p)
+		docs, err = c.env(l.file, p)
 	}
 	switch {
 	case err != nil:
@@ -3151,25 +3199,47 @@ func endpointsHeld(endpoints, grants []grant) error {
 	return errors.Join(errs...)
 }
 
-// linkOutside is why the link p under root is not read as a file, or "":
-// its target must be relative and resolve, inside root, to a regular file.
-func linkOutside(root, p string) string {
-	if t, err := os.Readlink(p); err != nil || filepath.IsAbs(t) {
-		return "a link with an absolute or unreadable target, which the image build may make real"
+// linkTarget is the only target form a link under image/ may have: a file
+// beside it or beside its directory. It is resolved lexically in the
+// repository, never through the runner's tree, so where it lands there is
+// where it lands in the image.
+var linkTarget = regexp.MustCompile(`^(\.\./)?[^/]+$`)
+
+// linkWhy is why the link p under root is not read as a file, or "". The
+// target must have linkTarget's form and name a regular file, not a
+// directory or another link. A link in an overlay must land in the same
+// overlay, and both the link and its target must lie in rootTrees in the
+// image, so no tree another uid or a tmpfs supplies at runtime (a grant in
+// /var/lib, /run, /tmp) holds what root then reads. A link outside every
+// overlay is a build input and must land under image/ outside every
+// overlay (#4718 item 3, #6003 L3 and Security).
+func linkWhy(root, p string) string {
+	t, err := os.Readlink(p)
+	if err != nil || !linkTarget.MatchString(t) || t == ".." || t == "." || path.Base(t) == ".." || path.Base(t) == "." {
+		return "a link whose target is not a file beside it or beside its directory (an absolute, climbing or nested target resolves differently on the runner and in the image)"
 	}
-	q, err := filepath.EvalSymlinks(p)
+	from, err := filepath.Rel(root, p)
 	if err != nil {
-		return "a dangling link or a link loop"
+		return "a link the scan cannot place"
 	}
-	rr, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		return "a link the scan cannot resolve"
+	from = filepath.ToSlash(from)
+	to := path.Join(path.Dir(from), t)
+	if st, err := os.Lstat(filepath.Join(root, filepath.FromSlash(to))); err != nil || !st.Mode().IsRegular() {
+		return "a link to a directory, another link or no file, which this scan does not read"
 	}
-	if rel, err := filepath.Rel(rr, q); err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
-		return "a link that resolves outside the repository"
+	r := overlayRoot(from)
+	switch {
+	case r == "" && (!strings.HasPrefix(to, "image/") || overlayRoot(to) != ""):
+		return "a link outside every overlay that lands in one or outside image/"
+	case r == "":
+		return ""
+	case !strings.HasPrefix(to, r+"/"):
+		return "a link that leaves its overlay " + r
 	}
-	if st, err := os.Stat(q); err != nil || !st.Mode().IsRegular() {
-		return "a link to a directory or other non-file, which this scan does not walk"
+	for _, q := range []string{from, to} {
+		if ip := strings.TrimPrefix(q, r); !rootOwned(ip) {
+			return "a link at or to " + ip + " in the image, outside rootTrees, where another uid or a tmpfs may supply the file at runtime"
+		}
 	}
 	return ""
 }
@@ -3554,9 +3624,10 @@ func builtUnits(recs unitRecords, dir string) error {
 	return builtUnitsWith(recs, dir, nil)
 }
 
-// envLookup returns the text of each file that may be the env file p, by a
-// name a message gives it; none when it finds none.
-type envLookup func(p string) (map[string]string, error)
+// envLookup returns the text of each file that may be the env file p that
+// the unit file from names, by a name a message gives it; none when it
+// finds none.
+type envLookup func(from, p string) (map[string]string, error)
 
 // builtUnitsWith is builtUnits with env, where a root unit of ours finds
 // the env files it names (envLookup); nil finds none.
