@@ -429,6 +429,7 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -yq tpm2-tools busybox-static ntfs-3g dosfstools cpio fdisk zstd \
             python3-virt-firmware mmdebstrap debian-archive-keyring
+          sh image/debian-archive-keyring.sh  # exactly the pinned keys (#5578)
       - name: QEMU, OVMF and swtpm, from the image's Debian snapshot
         run: |
           # ci.yml's hostcheck job's step, line for line (tests/test_hostcheck.py ROOT_STEP).

@@ -26,6 +26,8 @@ set -eu
 # A go.work in the repo would override broker/go.mod, go.sum and vendor/ (#4007 Security).
 export GOWORK=off
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/.." && pwd)
+# The Debian archive keyring mkosi and guest-base.sh verify the snapshot with: exactly the pinned keys (#5578).
+sh "$HERE/debian-archive-keyring.sh"
 OUT=$(realpath -m "${1:-$HERE/out}"); MKOSI=${MKOSI:-mkosi}; DRIVERS=${3:+$(realpath "$3")}
 SOURCE_DATE_EPOCH=$(git -c safe.directory="$REPO" -C "$REPO" log -1 --format=%ct); export SOURCE_DATE_EPOCH
 VERSION=${2:-$(TZ=UTC git -c safe.directory="$REPO" -C "$REPO" log -1 --date=format-local:%Y%m%d.%H%M%S --format=%cd)}

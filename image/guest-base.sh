@@ -19,6 +19,8 @@
 set -eu
 [ $# -eq 2 ] || [ $# -eq 3 ] || { echo "usage: guest-base.sh ROOT MANIFEST [SOURCES]" >&2; exit 2; }
 root=$1 manifest=$2
+# The keyring the sources' Signed-By names holds exactly the pinned Debian keys (#5578).
+sh "$(dirname "$0")/debian-archive-keyring.sh"
 sources=${3:-$(cd "$(dirname "$0")" && pwd)/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources}
 # snapshot.debian.org answers 503/504 for minutes at a time (#4518). Each attempt starts from an
 # empty root and reads the same signed sources, as ci.yml's image-tools step does; --one-file-system
