@@ -65,7 +65,7 @@ func TestHoldAboveTheMaximumIsRefused(t *testing.T) {
 // runs it to the agent (CH-18). The digits are synthetic.
 func TestHeldCodeMidMessageNeverReachesTheAgent(t *testing.T) {
 	r := newRig(t, nil)
-	r.edit = func(c *Config) { c.HoldSegments = 2 * DefaultHoldSegments }
+	r.edit = func(c *Config) { c.HoldSegments = 4 * DefaultHoldSegments }
 	r.ch = r.open()
 	code := r.totp()
 	cases := []struct{ say, held string }{
@@ -80,12 +80,22 @@ func TestHeldCodeMidMessageNeverReachesTheAgent(t *testing.T) {
 		{"pay 123\u0301456 now", "pay now"}, // combining mark inside
 		{"pay 1\ufe0f23456 now", "pay now"}, // variation selector inside
 		{"pay 123\u200e456 now", "pay now"}, // bidi mark inside
+		{"pay 123\u0903456 now", "pay now"}, // spacing mark (Mc) inside
+		{"pay 123\u20dd456 now", "pay now"}, // enclosing mark (Me) inside
+		// A transparent character between a word and a code neither keeps
+		// the code nor glues it to the word (Security on #5974).
+		{"pay\u200b123456 now", "pay now"},
+		{"pay 123456\u200bnow", "pay now"},
+		{"pay\u2060123456 now", "pay now"},
+		{"pay\ufeff123456 now", "pay now"},
+		{"pay\u200e123456 now", "pay now"},
+		{"pay 123456\u2060now", "pay now"},
 	}
 	for _, c := range cases {
 		r.say(c.say)
 	}
 	// A number that is not code-shaped is kept as written.
-	r.say("room 12, flight AB482913, ref 7654321")
+	r.say("room 12, flight AB482913, ref 7654321, 123\u200d4567")
 	msgs, _, _ := r.ch.LocalHeld()
 	if len(msgs) != len(cases)+1 {
 		t.Fatalf("held %+v", msgs)
@@ -99,7 +109,7 @@ func TestHeldCodeMidMessageNeverReachesTheAgent(t *testing.T) {
 	}
 	last := msgs[len(cases)]
 	ids = append(ids, last.ID)
-	if last.Text != "room 12, flight AB482913, ref 7654321" {
+	if last.Text != "room 12, flight AB482913, ref 7654321, 123\u200d4567" {
 		t.Errorf("non-code number changed: %q", last.Text)
 	}
 	if _, _, err := r.ch.LocalSignIn(r.totp()); err != nil {
@@ -118,7 +128,7 @@ func TestHeldCodeMidMessageNeverReachesTheAgent(t *testing.T) {
 			t.Fatalf("a code reached the agent: %q", g)
 		}
 	}
-	if !slices.Contains(got, "room 12, flight AB482913, ref 7654321") {
+	if !slices.Contains(got, "room 12, flight AB482913, ref 7654321, 123\u200d4567") {
 		t.Fatalf("agent got %q", got)
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/modem"
@@ -825,24 +826,29 @@ func (c *Channel) lockedLocked(rest, code string, now time.Time) route {
 	return c.waitLocked(rest, false, now)
 }
 
-// stripHeldCodes removes every word of text that is, as written or read
-// through fold, a code of exactly codeDigits digits, wherever it stands,
-// with one space beside it (CH-18, #5187). A word is a run of letters,
-// numbers, combining marks, format characters and default ignorables, the
-// characters fold drops or keeps inside a word, so a joiner or a mark
-// cannot split a code into two words that each pass: "pay 123456 now" is
-// held as "pay now" and the code never reaches a model when the page runs
-// it; "AB482913", "room 12" and "7654321" are not code-shaped and stay.
+// stripHeldCodes removes every code of exactly codeDigits digits from
+// text, wherever it stands, with one space beside it (CH-18, #5187), so
+// "pay 123456 now" is held as "pay now" and the code never reaches a model
+// when the page runs it. A word is a run of letters and numbers, as the
+// reply parser reads one. Marks, format characters and default ignorables
+// are transparent: they neither split a code ("123<ZWJ>456") nor glue it
+// to a neighbouring word ("pay<ZWSP>123456"), and go with the code they
+// touch. A code is a word that reads, as written or through fold, as 6
+// digits, or a chain of all-number words joined only by transparent
+// characters that reads so once they are dropped. "AB482913", "room 12"
+// and "7654321" are not code-shaped and stay.
 func stripHeldCodes(text string) string {
-	word := func(r rune) bool {
-		return unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r) || unicode.Is(unicode.Cf, r) || skelIgnorable(r)
+	word := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsNumber(r) }
+	clear := func(r rune) bool { return unicode.IsMark(r) || unicode.Is(unicode.Cf, r) || skelIgnorable(r) }
+	digits := func(w string) bool {
+		return !strings.ContainsFunc(w, func(r rune) bool { return !unicode.IsNumber(r) })
 	}
-	var b strings.Builder
-	changed := false
+	isCodeText := func(w string) bool { return isTrailingCode(w) || isTrailingCode(fold(w)) }
+	type span struct{ s, e int }
+	var words []span
 	for i := 0; i < len(text); {
 		s := strings.IndexFunc(text[i:], word)
 		if s < 0 {
-			b.WriteString(text[i:])
 			break
 		}
 		s += i
@@ -850,27 +856,75 @@ func stripHeldCodes(text string) string {
 		if n := strings.IndexFunc(text[s:], func(r rune) bool { return !word(r) }); n >= 0 {
 			e = s + n
 		}
-		w := text[s:e]
-		if !isTrailingCode(w) && !isTrailingCode(fold(w)) {
-			b.WriteString(text[i:e])
-			i = e
-			continue
-		}
-		changed = true
-		gap := text[i:s]
-		switch {
-		case strings.HasSuffix(gap, " "):
-			gap = gap[:len(gap)-1]
-		case e < len(text) && text[e] == ' ':
-			e++
-		}
-		b.WriteString(gap)
+		words = append(words, span{s, e})
 		i = e
 	}
-	if !changed {
+	// joined reports whether only transparent characters lie between
+	// words a and b.
+	joined := func(a, b span) bool {
+		return !strings.ContainsFunc(text[a.e:b.s], func(r rune) bool { return !clear(r) })
+	}
+	var cut []span
+	for i := 0; i < len(words); i++ {
+		w := text[words[i].s:words[i].e]
+		if isCodeText(w) {
+			cut = append(cut, words[i])
+			continue
+		}
+		if !digits(w) {
+			continue
+		}
+		// A chain of number words joined by transparent characters.
+		var b strings.Builder
+		n := 0
+		for j := i; j < len(words) && digits(text[words[j].s:words[j].e]) && (j == i || joined(words[j-1], words[j])); j++ {
+			b.WriteString(text[words[j].s:words[j].e])
+			if n += utf8.RuneCountInString(text[words[j].s:words[j].e]); n > codeDigits {
+				break
+			}
+			if j > i && isCodeText(b.String()) {
+				cut = append(cut, span{words[i].s, words[j].e})
+				i = j
+				break
+			}
+		}
+	}
+	if len(cut) == 0 {
 		return text
 	}
-	return strings.TrimSpace(b.String())
+	var out strings.Builder
+	at := 0
+	for _, c := range cut {
+		s, e := c.s, c.e
+		for s > at {
+			r, n := utf8.DecodeLastRuneInString(text[at:s])
+			if !clear(r) {
+				break
+			}
+			s -= n
+		}
+		for e < len(text) {
+			r, n := utf8.DecodeRuneInString(text[e:])
+			if !clear(r) {
+				break
+			}
+			e += n
+		}
+		// Drop one space beside the code, unless that would join the
+		// words on either side.
+		before, _ := utf8.DecodeLastRuneInString(text[:s])
+		after, _ := utf8.DecodeRuneInString(text[e:])
+		switch {
+		case s > at && before == ' ' && !word(after):
+			s--
+		case after == ' ' && !word(before):
+			e++
+		}
+		out.WriteString(text[at:s])
+		at = e
+	}
+	out.WriteString(text[at:])
+	return strings.TrimSpace(out.String())
 }
 
 // AlertEvery is the least time between two challenge-mode alerts by text;
