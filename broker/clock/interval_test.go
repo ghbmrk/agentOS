@@ -242,7 +242,7 @@ func TestTIM1AuthenticatedDisagreementSurvivesRestart(t *testing.T) {
 	r := newRig()
 	r.carrier = r.carrier.Add(5 * time.Hour)
 	kind := SyncedNTS
-	edit := func(c *Config) { syncAs(&kind)(c); c.StatePath = path }
+	edit := func(c *Config) { syncAs(&kind)(c); c.StatePath = path; c.BootID = r.bootID }
 	g := r.guard(t, edit)
 	if s := g.Check(bg); s.State != Disagree {
 		t.Fatalf("status = %+v", s)
@@ -427,6 +427,9 @@ func TestTIM1AuthenticatedOutlierIsToldOnce(t *testing.T) {
 	}
 }
 
+// bootID is the rig's boot, which reboot changes.
+func (r *rig) bootID() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
+
 // wantSpan fails unless [lo, hi] is [a, b].
 func wantSpan(t *testing.T, what string, lo, hi, a, b time.Time) {
 	t.Helper()
@@ -479,21 +482,63 @@ func TestTIM1NTSBoundOutlivesTheSync(t *testing.T) {
 
 func TestTIM1NTSBoundIsCentredOnAuthenticatedTime(t *testing.T) {
 	// The bound is the NTS sync carried forward, not the box clock: a box
-	// clock stepped within the allowance moves one end, never the bound.
+	// clock stepped within the allowance moves one end, never the bound, on
+	// either side (a carrier ahead fires expiries early, one behind holds
+	// waits; Lens B1 on #5893).
+	for _, skew := range []time.Duration{5 * time.Hour, -5 * time.Hour} {
+		r := newRig()
+		kind := SyncedNTS
+		g := r.guard(t, syncAs(&kind))
+		g.Check(bg)
+		kind = SyncedPlain
+		r.advance(20 * time.Minute)
+		truth := r.wall
+		step := 4 * time.Minute
+		if skew < 0 {
+			step = -step
+		}
+		r.step(step)
+		r.setCarrier(truth.Add(skew))
+		lo, hi, s := g.Interval(bg)
+		if !s.Authenticated {
+			t.Fatalf("skew %v: status = %+v", skew, s)
+		}
+		allow := DefaultTolerance + 20*time.Minute/ntsDrift
+		if skew > 0 {
+			wantSpan(t, "carrier ahead", lo, hi, r.wall, truth.Add(allow))
+		} else {
+			wantSpan(t, "carrier behind", lo, hi, truth.Add(-allow), r.wall)
+		}
+	}
+}
+
+func TestTIM1NTSBoundDiesWithItsBoot(t *testing.T) {
+	// Lens B2 on #5893: a saved NTS sync read against a later boot's clock
+	// falls short of true time by the earlier boot's uptime and the
+	// downtime. A box clock set back to agree with that stale reference (the
+	// hardware clock across a power cut) is not authenticated, and an honest
+	// carrier widens the interval fully.
+	path := filepath.Join(t.TempDir(), "clock.json")
 	r := newRig()
 	kind := SyncedNTS
-	g := r.guard(t, syncAs(&kind))
-	g.Check(bg)
-	kind = SyncedPlain
-	r.advance(20 * time.Minute)
-	truth := r.wall
-	r.step(4 * time.Minute)
-	r.setCarrier(truth.Add(5 * time.Hour))
-	lo, hi, s := g.Interval(bg)
-	if !s.Authenticated {
+	edit := func(c *Config) { syncAs(&kind)(c); c.StatePath = path; c.BootID = r.bootID }
+	g := r.guard(t, edit)
+	stale := r.wall
+	if s := g.Check(bg); !s.Authenticated {
 		t.Fatalf("status = %+v", s)
 	}
-	wantSpan(t, "stepped box clock", lo, hi, r.wall, truth.Add(DefaultTolerance+20*time.Minute/ntsDrift))
+	kind = NotSynced
+	r.advance(2 * time.Hour)
+	g.Check(bg)
+	truth := r.wall.Add(time.Hour) // an hour powered off
+	r.reboot(stale)
+	r.setCarrier(truth)
+	g = r.guard(t, edit)
+	lo, hi, s := g.Interval(bg)
+	if s.State != Disagree || s.Authenticated {
+		t.Fatalf("after reboot: status = %+v", s)
+	}
+	wantSpan(t, "after reboot", lo, hi, stale, truth)
 }
 
 func TestTIM1NTSBoundEndsWhenTheBoxClockLeavesIt(t *testing.T) {
@@ -538,8 +583,9 @@ func TestTIM1NTSBoundSurvivesARestartNotAReboot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "clock.json")
 	r := newRig()
 	kind := SyncedNTS
-	edit := func(c *Config) { syncAs(&kind)(c); c.StatePath = path }
+	edit := func(c *Config) { syncAs(&kind)(c); c.StatePath = path; c.BootID = r.bootID }
 	g := r.guard(t, edit)
+	floor := r.wall // the last verified time, which bounds the next boot's Earliest (HW-8)
 	g.Check(bg)
 	kind = NotSynced
 	r.advance(time.Hour)
@@ -561,7 +607,7 @@ func TestTIM1NTSBoundSurvivesARestartNotAReboot(t *testing.T) {
 	if s.State != Disagree || s.Authenticated {
 		t.Fatalf("after reboot: status = %+v", s)
 	}
-	wantSpan(t, "after reboot", lo, hi, r.wall, r.wall.Add(5*time.Hour))
+	wantSpan(t, "after reboot", lo, hi, floor, r.wall.Add(5*time.Hour))
 	g.Flush()
 	if got := r.sent(); len(got) != 2 || got[1] != DisagreeText(s.Skew) {
 		t.Fatalf("texts = %q", got)
