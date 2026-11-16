@@ -504,9 +504,8 @@ func Unlock(path string, f Factor) (*Store, error) {
 			errs = append(errs, err)
 			continue
 		}
-		// Each opened key and the entry set are wiped by a defer on every
-		// path (wipe lint, #5799); the store keeps a copy of the key, so a
-		// slot failing later in the loop is wiped at Unlock's return.
+		// Each opened key and the entry set are wiped by a defer on every path (wipe lint, #5799); the
+		// store keeps a clone of the key, so a slot failing later in the loop is wiped at Unlock's return.
 		key, err := open(k, sl.Wrap, slotAAD(fl.ID, *sl))
 		defer clear(key)
 		wipe(k)
@@ -969,6 +968,7 @@ func (s *Store) ClerkRoot() ([32]byte, error) {
 func (s *Store) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	wipe(*s.key.Ref()) // through the one wipe, so a test sees the clone go (#5898); Drop empties the holder
 	secret.Drop(s.key)
 	for _, v := range s.entries.Get() {
 		wipe(v)
