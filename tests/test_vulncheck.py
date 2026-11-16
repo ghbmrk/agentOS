@@ -1861,12 +1861,12 @@ class BundledTest(unittest.TestCase):
     def scan(self, entries, answers, details=None):
         osv = OSV({**CANARY, **answers}, details)
         copies = map(vulncheck.bundled_copy, entries)
-        return vulncheck.bundled_findings(entries, vulncheck.bundled_advisories(copies, opener=osv)), osv
+        return vulncheck.bundled_findings(entries, vulncheck.bundled_advisories(copies, opener=osv)), [], osv
 
     def test_an_advisory_fails_unless_the_entry_names_it_or_an_alias(self):
         answers = {"openssl-3.5.9": [["CVE-1", "OSV-2"]]}
         details = {"OSV-2": {"aliases": ["CVE-2"]}}
-        (found, probs), osv = self.scan([entry()], answers, details)
+        found, probs, osv = self.scan([entry()], answers, details)
         self.assertEqual(probs, [])
         self.assertEqual([(f["where"], f["id"], f["aliases"], vulncheck.verdict(f)) for f in found],
                          [("bundled", "CVE-1", [], "FAIL"), ("bundled", "OSV-2", ["CVE-2"], "FAIL")])
@@ -1875,7 +1875,7 @@ class BundledTest(unittest.TestCase):
         # The query is the copy's upstream at its release tag, with the canary beside it.
         batch = next(b for u, b in osv.seen if u == vulncheck.OSV_QUERYBATCH)
         self.assertEqual([q["version"] for q in batch["queries"]], ["openssl-3.5.9", "openssl-1.0.1f"])
-        (found, probs), _ = self.scan([entry(ids=["CVE-1", "CVE-2"])], answers, details)
+        found, probs, _ = self.scan([entry(ids=["CVE-1", "CVE-2"])], answers, details)
         self.assertEqual(probs, [])
         self.assertEqual([vulncheck.verdict(f) for f in found], ["accepted #2919", "accepted #2919"])
 
@@ -1883,24 +1883,27 @@ class BundledTest(unittest.TestCase):
         # Two holders of different releases: an id on one does not accept the other's advisory.
         entries = [entry(ids=["CVE-1"]), entry(holder="@openai/codex@0.162.1-linux-x64", copy="openssl@3.6.4",
                                                build="guest/codex/build-rootfs.sh")]
-        (found, probs), _ = self.scan(entries, {"openssl-3.5.9": [["CVE-1"]], "openssl-3.6.4": [["CVE-1"]]})
+        found, probs, _ = self.scan(entries, {"openssl-3.5.9": [["CVE-1"]], "openssl-3.6.4": [["CVE-1"]]})
         self.assertEqual(probs, [])
         self.assertEqual(sorted((f["package"], vulncheck.verdict(f)) for f in found),
                          [("openssl in @openai/codex@0.162.1-linux-x64", "FAIL"),
                           ("openssl in node@v24.22.3", "accepted #2919")])
 
-    def test_an_id_that_matches_no_advisory_fails(self):
-        (found, probs), _ = self.scan([entry(ids=["CVE-1", "CVE-9"])], {"openssl-3.5.9": [["CVE-1"]]})
-        self.assertEqual(len(probs), 1)
-        self.assertIn("CVE-9 matches no advisory OSV holds for openssl 3.5.9; remove it", probs[0])
-        # A withdrawn advisory is not reported, so an id naming it is stale too.
-        (found, probs), _ = self.scan([entry(ids=["CVE-1"])], {"openssl-3.5.9": [["CVE-1"]]},
-                                      {"CVE-1": {"withdrawn": "2026-01-01T00:00:00Z"}})
-        self.assertEqual(found, [])
-        self.assertEqual(len(probs), 1)
+    def test_an_id_that_no_source_lists_is_info(self):
+        # A reviewed fix that is a branch commit only stays in the entry: reported, not failing.
+        found, _, _ = self.scan([entry(ids=["CVE-1", "CVE-9"])], {"openssl-3.5.9": [["CVE-1"]]})
+        self.assertEqual([(f["id"], f["level"], vulncheck.verdict(f)) for f in found],
+                         [("CVE-1", "bundled", "accepted #2919"), ("CVE-9", "unlisted", "info")])
+        out = io.StringIO()
+        self.assertTrue(vulncheck.summary(found, [], [], out))
+        self.assertIn("info         bundled: CVE-9 unlisted openssl in node@v24.22.3 3.5.9", out.getvalue())
+        # A withdrawn advisory is not reported, so an id naming it is info too.
+        found, _, _ = self.scan([entry(ids=["CVE-1"])], {"openssl-3.5.9": [["CVE-1"]]},
+                                {"CVE-1": {"withdrawn": "2026-01-01T00:00:00Z"}})
+        self.assertEqual([(f["id"], vulncheck.verdict(f)) for f in found], [("CVE-1", "info")])
 
     def test_every_page_is_read(self):
-        (found, probs), osv = self.scan([entry(ids=["CVE-3"])], {"openssl-3.5.9": [["CVE-1"], ["CVE-2"], ["CVE-3"]]})
+        found, probs, osv = self.scan([entry(ids=["CVE-3"])], {"openssl-3.5.9": [["CVE-1"], ["CVE-2"], ["CVE-3"]]})
         self.assertEqual([f["id"] for f in found], ["CVE-1", "CVE-2", "CVE-3"])
         self.assertEqual([b["page_token"] for u, b in osv.seen if u == vulncheck.OSV_QUERY], ["1", "2"])
 
@@ -1944,6 +1947,58 @@ class BundledTest(unittest.TestCase):
         with self.assertRaisesRegex(vulncheck.ScanError, "unreadable OSV database"):
             vulncheck.bundled_advisories([("openssl", "0.0.1")], {"OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY": "/nonexistent"}, True)
 
+    NOTES = ("# OpenSSL\n\n### Changes between 3.6.5 and 3.6.6 [xx XXX xxxx]\n\n * none yet ([CVE-2026-0009])\n\n"
+             "### Changes between 3.6.4 and 3.6.5 [29 Sep 2026]\n\n * fix ([CVE-2026-0001]) ([CVE-2026-0002])\n"
+             " * fix ([CVE-2026-0001])\n\n### Changes between 3.6.3 and 3.6.4 [25 Aug 2026]\n\n * old ([CVE-2026-0003])\n\n"
+             "### Changes between 3.6.2 and 3.6.3 [9 Jun 2026]\n\n * older ([CVE-2026-0008])\n\n"
+             "[CVE-2026-0004]: https://example.invalid\n")
+
+    def notes(self, text=None, fail=None):
+        seen = []
+
+        def opener(req, timeout):
+            seen.append(req.full_url)
+            if fail:
+                raise fail
+            return io.BytesIO((self.NOTES if text is None else text).encode())
+        return opener, seen
+
+    def test_release_notes_list_the_fixes_after_the_copy(self):
+        # REQ: EVL-5 (#5888): OSV's GIT data misses fixed CVEs, so the release branch's notes count.
+        opener, seen = self.notes()
+        got = vulncheck.release_notes([("openssl", "3.6.4"), ("openssl", "3.6.3"), ("openssl", "3.6.4")], opener=opener)
+        self.assertEqual(got, {("openssl", "3.6.3"): ["CVE-2026-0001", "CVE-2026-0002", "CVE-2026-0003", "CVE-2026-0009"],
+                               ("openssl", "3.6.4"): ["CVE-2026-0001", "CVE-2026-0002", "CVE-2026-0009"]})
+        # One fetch per release branch, from the upstream branch's CHANGES.md.
+        self.assertEqual(seen, ["https://raw.githubusercontent.com/openssl/openssl/openssl-3.6/CHANGES.md"])
+        self.assertEqual(vulncheck.release_notes([("openssl", "3.6.5")], opener=self.notes()[0]),
+                         {("openssl", "3.6.5"): ["CVE-2026-0009"]})
+
+    def test_release_notes_fail_closed(self):
+        # No section for the copy's release: the fixes after it are not read.
+        with self.assertRaisesRegex(vulncheck.ScanError, "no section for the 3.6.7 release"):
+            vulncheck.release_notes([("openssl", "3.6.7")], opener=self.notes()[0])
+        with self.assertRaisesRegex(vulncheck.ScanError, "no section for the 3.6.4 release"):
+            vulncheck.release_notes([("openssl", "3.6.4")], opener=self.notes("404: Not Found")[0])
+        with self.assertRaisesRegex(vulncheck.ScanError, "reading the release notes failed"):
+            vulncheck.release_notes([("openssl", "3.6.4")], opener=self.notes(fail=urllib.error.URLError("x"))[0])
+        with self.assertRaisesRegex(vulncheck.ScanError, "reading the release notes failed"):
+            vulncheck.release_notes([("openssl", "3.6.4")], opener=lambda req, timeout: io.BytesIO(b"\xff\xfe"))
+        with self.assertRaisesRegex(vulncheck.ScanError, "unreadable release notes"):
+            vulncheck.release_notes([("openssl", "3.6.4")], root="/nonexistent", offline=True)
+
+    def test_the_sources_are_unioned(self):
+        osv = {("openssl", "3.6.4"): [{"id": "OSV-1", "aliases": ["CVE-2026-0001"]}, {"id": "CVE-2026-0005", "aliases": []}]}
+        notes = {("openssl", "3.6.4"): ["CVE-2026-0001", "CVE-2026-0002", "CVE-2026-0005"]}
+        got = vulncheck.union_advisories(osv, notes)
+        self.assertEqual(got, {("openssl", "3.6.4"): [{"id": "OSV-1", "aliases": ["CVE-2026-0001"]},
+                                                      {"id": "CVE-2026-0005", "aliases": []},
+                                                      {"id": "CVE-2026-0002", "aliases": []}]})
+        e = entry(holder="@openai/codex@0.162.1-linux-x64", copy="openssl@3.6.4", build="guest/codex/build-rootfs.sh",
+                  ids=["CVE-2026-0001"])
+        self.assertEqual([(f["id"], vulncheck.verdict(f)) for f in vulncheck.bundled_findings([e], got)],
+                         [("CVE-2026-0002", "FAIL"), ("CVE-2026-0005", "FAIL"), ("OSV-1", "accepted #2919")])
+
     def test_shape_problems(self):
         good = entry()
         self.assertEqual(vulncheck.bundled_problems([good]), [])
@@ -1953,6 +2008,8 @@ class BundledTest(unittest.TestCase):
             (entry(holder="node"), "holder must be name@version"),
             (entry(copy="openssl"), "copy must be name@version"),
             (entry(copy="libressl@4.0.0"), "no upstream is known for libressl"),
+            (entry(copy="openssl@3.6"), "names no release whose notes branch is known"),
+            (entry(copy="openssl@1.1.1w"), "names no release whose notes branch is known"),
             (entry(build="guest/none.sh"), "build must name the script"),
             (entry(build="/etc/passwd"), "build must name the script"),
             (entry(build="guest/../guest/openclaw/build-rootfs.sh"), "build must name the script"),
@@ -1990,8 +2047,9 @@ class BundledTest(unittest.TestCase):
     def test_live_entries_are_valid_and_cite_the_issue_the_ids_are_in(self):
         cfg = json.loads(vulncheck.CONFIG.read_text())
         self.assertEqual(vulncheck.bundled_problems(cfg["bundled"]), [])
-        self.assertEqual(vulncheck.cited(vulncheck.citing(cfg), 2919),
-                         vulncheck.cited(cfg["accepted"], 2919) + len(cfg["bundled"]))
+        for n in {e["issue"] for e in cfg["bundled"]}:
+            self.assertEqual(vulncheck.cited(vulncheck.citing(cfg), n),
+                             vulncheck.cited(cfg["accepted"], n) + sum(e["issue"] == n for e in cfg["bundled"]))
 
     def test_summary_names_the_bundled_fix(self):
         out = io.StringIO()
