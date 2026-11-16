@@ -126,17 +126,17 @@ func TestTIM1LostStateLinesSayWhatWaits(t *testing.T) {
 	since := time.Date(2026, 10, 5, 4, 0, 0, 0, time.UTC)
 	zone := time.FixedZone("x", 2*3600)
 	plain := Status{State: Disagree, Since: since}
-	if got := plain.IntervalLine(zone); got != "Time check: saved check unreadable since 06:00, so holds and timeouts wait until phone-network time confirms the clock." {
+	if got := plain.IntervalLine(zone); got != "Time check: saved check unreadable since 06:00, so holds and timeouts wait until phone-network time or authenticated network time confirms the clock. Nothing to do." {
 		t.Fatalf("plain line = %q", got)
 	}
 	auth := Status{State: Disagree, Since: since, Authenticated: true, Verified: true}
-	if got := auth.IntervalLine(zone); got != "Time check: saved check unreadable since 06:00; authenticated network time stands until phone-network time confirms it." {
+	if got := auth.IntervalLine(zone); got != "Time check: authenticated network time stands (the saved check was unreadable at 06:00, and phone-network time has not confirmed the clock since). Nothing to do." {
 		t.Fatalf("authenticated line = %q", got)
 	}
 	if got := auth.Line(zone); got != auth.IntervalLine(zone) {
 		t.Fatalf("Line = %q, want the interval line beside an answering Now", got)
 	}
-	for _, want := range []string{"waiting for time to pass", "authenticated network time", "phone network's time", "Codes and STOP work as usual."} {
+	for _, want := range []string{"waiting for time to pass", "authenticated network time", "phone network's time", "Codes and STOP work as usual.", "Nothing to do."} {
 		if !strings.Contains(StateLostText, want) {
 			t.Errorf("StateLostText lacks %q: %q", want, StateLostText)
 		}
@@ -161,5 +161,104 @@ func TestTIM1PartlyDecodedStateFileLoadsAsLost(t *testing.T) {
 	}
 	if _, hi, _ := g.Interval(bg); hi.Equal(future) {
 		t.Fatalf("Latest = %v: the partly decoded floor was applied", hi)
+	}
+}
+
+// onPath keeps the guard's state at path, on the rig's boot.
+func onPath(r *rig, path string) func(*Config) {
+	return func(c *Config) {
+		c.StatePath = path
+		c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
+	}
+}
+
+// knownSkewThenRestart is #5811 item 1's repro: verified this boot, the box
+// clock steps by d, the carrier disagrees, the broker restarts with the
+// modem gone.
+func knownSkewThenRestart(t *testing.T, d time.Duration) (*rig, *Guard, time.Time) {
+	t.Helper()
+	r := newRig()
+	path := filepath.Join(t.TempDir(), "clock.json")
+	g := r.guard(t, onPath(r, path))
+	g.Check(bg)
+	r.step(d)
+	if s := g.Check(bg); s.State != Disagree || s.Skew != d {
+		t.Fatalf("status = %+v, want a %v disagreement", s, d)
+	}
+	g.Flush()
+	r.mu.Lock()
+	r.carrier = time.Time{}
+	r.mu.Unlock()
+	r.advance(time.Minute)
+	truth := r.wall.Add(-d)
+	return r, r.guard(t, onPath(r, path)), truth
+}
+
+func TestTIM1KnownSkewKeepsItsWidthAcrossARestart(t *testing.T) {
+	// #5811 item 1 (Potency 1 on #5810): the box clock runs 5 h fast; after a
+	// same-boot restart with no modem the interval still starts at the
+	// carrier's time carried forward, so no widening ends hours early.
+	r, g, truth := knownSkewThenRestart(t, 5*time.Hour)
+	lo, hi, s := g.Interval(bg)
+	if s.State != Disagree || !lo.Equal(truth) || !hi.Equal(r.wall) {
+		t.Fatalf("restart: %+v, interval [%v, %v], want [%v, %v]", s, lo, hi, truth, r.wall)
+	}
+	// A further step after the restart moves neither end of the carrier's
+	// side: it is carried forward on the boot clock, not the wall clock.
+	r.step(2 * time.Hour)
+	r.advance(time.Minute)
+	if lo, _ := g.Earliest(bg); !lo.Equal(truth.Add(time.Minute)) {
+		t.Fatalf("stepped again: Earliest = %v, want %v", lo, truth.Add(time.Minute))
+	}
+}
+
+func TestTIM1KnownSkewKeepsLatestAcrossARestart(t *testing.T) {
+	// The matching side: a box clock 5 h slow keeps no authority alive past
+	// the carrier's time after a restart.
+	r, g, truth := knownSkewThenRestart(t, -5*time.Hour)
+	if lo, hi, s := g.Interval(bg); s.State != Disagree || !lo.Equal(r.wall) || !hi.Equal(truth) {
+		t.Fatalf("restart: %+v, interval [%v, %v], want [%v, %v]", s, lo, hi, r.wall, truth)
+	}
+}
+
+func TestTIM1KnownSkewWidensFromTheSavedSkewAfterAReboot(t *testing.T) {
+	// Across a reboot the boot clock restarts, so the carrier reading cannot
+	// be carried forward: the saved skew widens the interval instead, and
+	// the floor still bounds it while unverified (K11).
+	r, g, _ := knownSkewThenRestart(t, -5*time.Hour)
+	g.Check(bg)
+	g.Flush()
+	r.reboot(r.wall.Add(10 * time.Minute))
+	g2 := r.guard(t, onPath(r, g.cfg.StatePath))
+	lo, hi, s := g2.Interval(bg)
+	if want := r.wall.Add(5 * time.Hour); s.State != Disagree || !hi.Equal(want) || lo.After(r.wall) {
+		t.Fatalf("reboot: %+v, interval [%v, %v], want Latest %v", s, lo, hi, want)
+	}
+}
+
+func TestTIM1SavedCarrierFromAnotherBootOrTheFutureIsNotCarried(t *testing.T) {
+	// A saved carrier reading is carried forward only within the boot that
+	// took it and only from a boot-clock reading not after now.
+	r := newRig()
+	path := filepath.Join(t.TempDir(), "clock.json")
+	g := r.guard(t, onPath(r, path))
+	r.advance(time.Hour)
+	g.Check(bg)
+	g.Flush()
+	// At the same boot-clock reading it is carried.
+	if g1 := r.guard(t, onPath(r, path)); !g1.carrier.Equal(r.carrier) || g1.carrierMono != r.mono {
+		t.Fatalf("same boot: carrier %v at %v, want %v at %v", g1.carrier, g1.carrierMono, r.carrier, r.mono)
+	}
+	r.mu.Lock()
+	r.mono -= time.Second // a boot clock earlier than the saved reading's
+	r.mu.Unlock()
+	g2 := r.guard(t, onPath(r, path))
+	if !g2.carrier.IsZero() {
+		t.Fatalf("carrier %v carried from a boot-clock reading in the future", g2.carrier)
+	}
+	r.reboot(r.wall)
+	g3 := r.guard(t, onPath(r, path))
+	if !g3.carrier.IsZero() {
+		t.Fatalf("carrier %v carried across a reboot", g3.carrier)
 	}
 }
