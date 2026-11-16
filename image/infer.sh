@@ -5,7 +5,7 @@
 # -infer off until a retrieve row consumes the service (D-230). Its own script, so image/build.sh
 # keeps no build tag: infer_llamacpp applies to this binary alone.
 #
-# Usage: infer.sh STAGE WORK
+# Usage: infer.sh STAGE WORK    (as root, with GUEST_BASE and LINKED_SHIPPED set for llamaserver.sh)
 # Writes, under STAGE (the image tree):
 #   usr/lib/agentos/agentos-infer                      the service (static, CGO_ENABLED=0)
 #   usr/lib/agentos/infer/llama-server                 its runtime (static), agentos-infer's -runtime default
@@ -28,7 +28,7 @@ rm -rf "$WORK"; mkdir -p "$WORK"
 
 (cd "$REPO/broker" && CGO_ENABLED=0 go build -tags infer_llamacpp -trimpath -ldflags=-buildid= \
 	-o "$STAGE/usr/lib/agentos/agentos-infer" ./cmd/agentos-infer)
-sh "$HERE/llamaserver.sh" "$WORK/server" "$WORK/llama"
+sh "$HERE/llamaserver.sh" "$WORK/server"
 
 if [ -n "${INFER_MODEL:-}" ]; then
 	cp "$INFER_MODEL" "$WORK/model.gguf"
