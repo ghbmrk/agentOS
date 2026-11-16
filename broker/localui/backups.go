@@ -80,7 +80,7 @@ func backupText(err error) string {
 	case localapi.ErrBackupBadAssertion:
 		return "That tap didn't match. Start again, and tap one of your hardware keys when asked."
 	case localapi.ErrBackupPlace:
-		return "I can't use that folder. It must be a folder on a drive plugged into me, outside my own data, and the name only letters, digits, dots, dashes or underscores."
+		return "I can't use that folder. It must be a folder on a drive plugged into me, outside my own data, and no folder name starting or ending with a space. The name you give the place must be only letters, digits, dots, dashes or underscores."
 	case localapi.ErrBackupNameTaken:
 		return "A place for backups already has that name, or had it. Choose another name."
 	case localapi.ErrBackupStale:

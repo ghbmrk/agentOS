@@ -248,6 +248,18 @@ func TestBackupPageCleansTheTypedFolder(t *testing.T) {
 	}
 }
 
+// A folder refused for a path element led or trailed by a space names
+// that rule, so the owner knows which part to change (BAK-1, #4969).
+func TestBackupPageNamesTheSpacePaddedFolderRule(t *testing.T) {
+	r, fb := backupRig(t)
+	r.signIn()
+	fb.err = Refused(localapi.ErrBackupPlace)
+	p := html.UnescapeString(r.post("/backups/", url.Values{"step": {"begin"}, "name": {"drive3"}, "locator": {"/media/drive3/ agentos"}}).Body.String())
+	if !strings.Contains(p, "no folder name starting or ending with a space") {
+		t.Fatalf("space-padded folder refusal lacks the rule:\n%s", p)
+	}
+}
+
 // A refused begin or add keeps the typed name, folder and old-copies box
 // in the add form, so the owner fixes one field rather than retyping all.
 func TestBackupPageKeepsTypedFieldsOnARefusal(t *testing.T) {
