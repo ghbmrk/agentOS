@@ -2502,6 +2502,7 @@ class Equivalent(unittest.TestCase):
                 self.assertIn("broker/netguard/a.go:3 ARITHMETIC_BASE survives", r.stdout)
                 self.assertIn("mutgate: the Mutant-equivalent line broker/netguard/a.go:3 says its mutant is not "
                               "equivalent", r.stdout)
+                self.assertIn("delete the line, or reword it only if the mutant is in fact equivalent", r.stdout)
                 self.assertNotIn("a.go:2 ", r.stdout)
                 # Only line 2 survives: the refused line still fails the gate, naming no survivor.
                 r = self.v.verify({"netguard.json": self.result(2)}, src=self.SRC, body=ok + bad)
@@ -2664,6 +2665,7 @@ class Record(unittest.TestCase):
             r = run("waive", str(pathlib.Path(d) / "w.txt"), "--accepted", "#5891")
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("broker/netguard/a.go:11 says its mutant is not equivalent", r.stderr)
+            self.assertIn("delete the line, or reword it only if the mutant is in fact equivalent", r.stderr)
             self.assertNotIn("a.go:8", r.stderr)
             self.assertEqual(path.read_text(), rec)  # nothing written, the good line included
 

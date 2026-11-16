@@ -708,8 +708,9 @@ def refuse_not_equivalent(sites, out=None):
     """Print why each `Mutant-equivalent:` line of sites is refused; True when sites holds one."""
     for site in sites:
         print(f"mutgate: the Mutant-equivalent line {site} says its mutant is not equivalent, so it proves "
-              "nothing: kill a real survivor with a test, or open a work-item row for it (a row does not pass "
-              "the gate); a mutant gremlins misreads is a tools/mutgate.py defect for its own row", file=out)
+              "nothing: delete the line, or reword it only if the mutant is in fact equivalent; kill a real "
+              "survivor with a test, or open a work-item row for it (a row does not pass the gate); a mutant "
+              "gremlins misreads is a tools/mutgate.py defect for its own row", file=out)
     return bool(sites)
 
 
