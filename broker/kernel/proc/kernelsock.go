@@ -558,7 +558,7 @@ func ContentSide(store string) Side {
 // ListenKernel opens one side's socket on the kernel process, admitting only
 // that side's uid.
 func ListenKernel(path string, uid int) (net.Listener, error) {
-	return peers.Listen(path, uid)
+	return peers.ListenUnix(path, uid)
 }
 
 // ServeKernel answers side's calls to h on ln until ln closes, each on its

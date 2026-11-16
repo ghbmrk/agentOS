@@ -80,10 +80,14 @@ type allowance struct {
 // syscall, or golang.org/x/sys/unix directly, the names they may use from
 // them, and why. Every net.Listen and dial must name "unix" (sourceUse).
 var netOK = map[string]allowance{
-	"sockets": {"unix listeners, SO_PEERCRED peer checks, and flock on the socket lock, opened O_NOFOLLOW",
-		[]string{"net.Conn", "net.ErrClosed", "net.Listen", "net.Listener", "net.UnixConn", "net.UnixListener",
-			"syscall.EWOULDBLOCK", "syscall.Flock", "syscall.GetsockoptUcred", "syscall.LOCK_EX", "syscall.LOCK_NB",
-			"syscall.O_NOFOLLOW", "syscall.SOL_SOCKET", "syscall.SO_PEERCRED", "syscall.Stat_t", "syscall.Ucred"}},
+	"sockets": {"unix listeners, and flock on the socket lock, opened O_NOFOLLOW; its peer checks are sockets/peers'",
+		[]string{"net.Conn", "net.ErrClosed", "net.Listen", "net.Listener", "net.UnixListener",
+			"syscall.EWOULDBLOCK", "syscall.Flock", "syscall.LOCK_EX", "syscall.LOCK_NB",
+			"syscall.O_NOFOLLOW", "syscall.Stat_t"}},
+	// The peer rule the kernel's process links without the rest of sockets (#6039).
+	"sockets/peers": {"unix listeners that admit only given uids, and SO_PEERCRED peer checks",
+		[]string{"net.Conn", "net.Listen", "net.Listener", "net.UnixConn",
+			"syscall.GetsockoptUcred", "syscall.SOL_SOCKET", "syscall.SO_PEERCRED", "syscall.Ucred"}},
 	"guest":      {"the guest plane's unix listeners; O_NOFOLLOW to read its inbox file", []string{"net.Conn", "net.ErrClosed", "net.Listen", "net.Listener", "syscall.O_NOFOLLOW"}},
 	"modelroute": {"dials only the vault process's unix socket", []string{"net.Conn", "net.Dialer", "net.OpError"}},
 	// The owner's mail account's client (SR3-mail-w2), as modelroute.

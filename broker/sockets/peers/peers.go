@@ -11,13 +11,13 @@ import (
 	"os"
 )
 
-// Listen opens a unix socket at path that admits only the peer uids given;
+// ListenUnix opens a unix socket at path that admits only the peer uids given;
 // every other connection is closed unread. A stale socket file is replaced,
 // and the file goes when the listener closes (net.Listen's own unix
 // listener unlinks it). It serves listeners outside sockets.Server that
 // speak HTTP or the kernel's frames (the key holders, the CH-4 checker,
 // SIM-split) under the same peer rule.
-func Listen(path string, uids ...int) (net.Listener, error) {
+func ListenUnix(path string, uids ...int) (net.Listener, error) {
 	if len(uids) == 0 {
 		return nil, errors.New("sockets: a socket needs at least one peer uid")
 	}

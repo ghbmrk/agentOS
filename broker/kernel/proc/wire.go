@@ -325,7 +325,7 @@ func detail(s string) string {
 
 // ListenClerk opens a clerk's socket, admitting only the kernel's uid.
 func ListenClerk(path string, kernelUID int) (net.Listener, error) {
-	return peers.Listen(path, kernelUID)
+	return peers.ListenUnix(path, kernelUID)
 }
 
 // ServeClerk answers the kernel's calls to c on ln, one at a time, until ln

@@ -14,12 +14,12 @@ import (
 
 func TestListenNeedsAPeer(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "s.sock")
-	ln, err := Listen(p)
+	ln, err := ListenUnix(p)
 	if err == nil || ln != nil || !strings.Contains(err.Error(), "at least one peer uid") {
-		t.Fatalf("Listen with no uid = %v, %v; want the no-peer error", ln, err)
+		t.Fatalf("ListenUnix with no uid = %v, %v; want the no-peer error", ln, err)
 	}
 	if _, err := os.Lstat(p); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("Listen with no uid made %s: %v", p, err)
+		t.Fatalf("ListenUnix with no uid made %s: %v", p, err)
 	}
 }
 
@@ -43,7 +43,7 @@ func TestListenAdmitsOnlyItsUIDs(t *testing.T) {
 	if err := os.WriteFile(p, []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ln, err := Listen(p, os.Getuid()+1, os.Getuid())
+	ln, err := ListenUnix(p, os.Getuid()+1, os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestListenAdmitsOnlyItsUIDs(t *testing.T) {
 
 func TestListenClosesOtherUIDsUnread(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "s.sock")
-	ln, err := Listen(p, os.Getuid()+1)
+	ln, err := ListenUnix(p, os.Getuid()+1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestListenFailures(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(full, "x"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ln, err := Listen(full, os.Getuid())
+	ln, err := ListenUnix(full, os.Getuid())
 	var pe *fs.PathError
 	if err == nil {
 		ln.Close()
@@ -133,7 +133,7 @@ func TestListenFailures(t *testing.T) {
 		t.Fatalf("Listen touched the directory: %v", err)
 	}
 	// A path whose directory does not exist: Remove reads it as absent, Listen fails.
-	if ln, err := Listen(filepath.Join(dir, "none", "s.sock"), os.Getuid()); err == nil {
+	if ln, err := ListenUnix(filepath.Join(dir, "none", "s.sock"), os.Getuid()); err == nil {
 		ln.Close()
 		t.Fatal("Listen made a socket in a missing directory")
 	}
@@ -151,7 +151,7 @@ func TestUIDOfANonUnixConn(t *testing.T) {
 	}
 	// A closed unix conn has no peer to read.
 	p := filepath.Join(t.TempDir(), "s.sock")
-	ln, err := Listen(p, os.Getuid())
+	ln, err := ListenUnix(p, os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
