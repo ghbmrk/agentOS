@@ -2178,9 +2178,14 @@ var rootTrees = []string{
 }
 
 // consoleTTY are the only terminals under /dev a root unit's TTYPath= may
-// name: the console and the virtual terminals, which no other uid makes
-// (/dev/shm and /dev/mqueue are writable by any, #4718 item 6).
-var consoleTTY = regexp.MustCompile(`^/dev/(console|tty[0-9]+)$`)
+// name: the console, the virtual terminals and the on-board serial ports
+// (8250 ttyS, the PL011 ttyAMA of a cm4), whose nodes only the kernel makes
+// (/dev/shm and /dev/mqueue are writable by any, a pts is any uid's, and a
+// USB serial port or a /dev/serial link is whatever device or rule supplies
+// it, #4718 item 6, #6022 item 2). consoleTTYs names them in the refusal.
+var consoleTTY = regexp.MustCompile(`^/dev/(console|tty[0-9]+|ttyS[0-9]+|ttyAMA[0-9]+)$`)
+
+const consoleTTYs = "/dev/console, /dev/ttyN, /dev/ttySN or /dev/ttyAMAN"
 
 // pathAliases are the links every image has between trees: /var/run is
 // /run (systemd-tmpfiles also rewrites a /var/run/ path to /run/) and
@@ -2398,6 +2403,9 @@ func rootPathSetting(k, v string) error {
 		if k == "TTYPath" && consoleTTY.MatchString(p) {
 			continue
 		}
+		if k == "TTYPath" && strings.HasPrefix(p, "/dev/") {
+			return fmt.Errorf("path %q; of /dev, a root unit's terminal is only %s", p, consoleTTYs)
+		}
 		if !rootOwned(p) {
 			return fmt.Errorf("path %q; a unit with a root command reads, runs and searches only absolute paths, with no .., in the trees root owns (rootTrees)", p)
 		}
@@ -2527,6 +2535,26 @@ var imageOverlays = []struct {
 	{"image/mkosi/", []string{"image/mkosi/mkosi.extra"}},
 }
 
+// imageOf is the directory of the listed image holding rel, or "".
+func imageOf(rel string) string {
+	for _, im := range imageOverlays {
+		if strings.HasPrefix(rel, im.image) {
+			return im.image
+		}
+	}
+	return ""
+}
+
+// instanceLink is an overlay link (rel) of an instance (name) to its
+// template.
+type instanceLink struct{ rel, name, template string }
+
+// relTo is p relative to root, with forward slashes.
+func relTo(root, p string) string {
+	rel, _ := filepath.Rel(root, p)
+	return filepath.ToSlash(rel)
+}
+
 // overlaysOf is the overlay roots of the image holding rel (a path relative
 // to the repository), or none.
 func overlaysOf(rel string) []string {
@@ -2643,6 +2671,7 @@ var nameToken = regexp.MustCompile(`[A-Za-z0-9_./@+-]+`)
 func rootBinaries(root string) ([]string, error) {
 	units := map[string]string{}     // unit file path -> name
 	dropins := map[string][]string{} // drop-in directory name -> its .conf paths
+	var instances []instanceLink     // overlay links of an instance to its template
 	var fstabs, confs, files []string
 	err := filepath.WalkDir(filepath.Join(root, "image"), func(p string, d os.DirEntry, err error) error {
 		dir := filepath.Base(filepath.Dir(p))
@@ -2660,6 +2689,15 @@ func rootBinaries(root string) ([]string, error) {
 			// read as the file they name; every other link is refused.
 			rel, _ := filepath.Rel(root, p)
 			return fmt.Errorf("%s: %s; ship the file itself", filepath.ToSlash(rel), linkWhy(root, p))
+		case d.Type()&os.ModeSymlink != 0 && overlayRoot(relTo(root, p)) != "":
+			// An overlay link is read through every overlay's copy at its
+			// target's path (linkWhy): a copy of its own name is read as a
+			// file, and a template's under each instance linked to it.
+			rel := relTo(root, p)
+			if t, _ := os.Readlink(p); t != "../"+d.Name() {
+				instances = append(instances, instanceLink{rel, d.Name(), path.Base(t)})
+			}
+			return nil
 		case isManagerConf(p):
 			confs = append(confs, p)
 		case unitTypes[filepath.Ext(p)]:
@@ -2728,6 +2766,24 @@ func rootBinaries(root string) ([]string, error) {
 		}
 		if err := c.unit(name, paths, false, nil); err != nil {
 			return nil, err
+		}
+	}
+	// Each overlay copy of a template, in the image of a link to it, is
+	// also read as each instance linked to it, with that instance's
+	// drop-ins (#6022 item 1).
+	for _, l := range instances {
+		for p, name := range units {
+			rel := relTo(root, p)
+			if name != l.template || overlayRoot(rel) == "" || imageOf(rel) != imageOf(l.rel) {
+				continue
+			}
+			paths := []string{p}
+			for _, dir := range dropinDirs(l.name) {
+				paths = append(paths, dropins[dir]...)
+			}
+			if err := c.unit(l.name, paths, false, nil); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if err := endpointsHeld(c.endpoints, c.grants); err != nil {
@@ -2899,7 +2955,11 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 				}
 			}
 			if line.section == section && !trusted[f] && managerPaths[k] && v != "" && (!pathSetting.MatchString(v) || !rootOwned(v)) {
-				errs = append(errs, fmt.Errorf("%s: %s=%s: the manager opens this path as root whatever the unit's User=, so it is an absolute path in rootTrees with no .., quote, escape or %% specifier (#4718)", filepath.ToSlash(rel), k, v))
+				fix := ""
+				if k == "PIDFile" {
+					fix = "; drop PIDFile= and use Type=notify or Type=simple, which need no PID file"
+				}
+				errs = append(errs, fmt.Errorf("%s: %s=%s: the manager opens this path as root whatever the unit's User=, so it is an absolute path in rootTrees with no .., quote, escape or %% specifier (#4718)%s", filepath.ToSlash(rel), k, v, fix))
 			}
 			if section == "Socket" && line.section == section && !trusted[f] && k == "DirectoryMode" && openMode(v) {
 				errs = append(errs, fmt.Errorf("%s: %s=%s: a directory mode of ours lets another uid write, or is not a plain octal mode; PID 1 makes a listen path's missing parents with it, and another uid could plant a package's path below them (#5620 R-a)", filepath.ToSlash(rel), k, v))
@@ -3201,17 +3261,38 @@ func endpointsHeld(endpoints, grants []grant) error {
 // in the repository, never through the runner's tree.
 var linkTarget = regexp.MustCompile(`^(\.\./)?[^/]+$`)
 
+// linkTypes are the unit types an overlay link may name: unitTypes, whose
+// every file the scan reads, and the types it reads none of, which name a
+// unit or a path but run nothing (#6022 item 1). A .path's MakeDirectory=
+// or a .timer's Unit= is as unread in a file as through a link.
+var linkTypes = map[string]bool{".service": true, ".socket": true, ".mount": true, ".swap": true, ".timer": true, ".target": true, ".path": true}
+
+// templateOf is the template an instance name (pre@inst.type) is made
+// from (pre@.type), or "" for any other name.
+func templateOf(name string) string {
+	ext := path.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	if at := strings.Index(base, "@"); at > 0 && at < len(base)-1 {
+		return base[:at+1] + ext
+	}
+	return ""
+}
+
 // linkWhy is why the link p under root is not read as a file, or "".
 //
-// In an overlay, the only link allowed is a unit of a unitTypes type
-// linked to ../<its own name> in the same overlay (the .wants form),
+// In an overlay, the only links allowed are the two systemctl enable
+// makes (the .wants form): a unit of a linkTypes type linked to ../<its
+// own name>, and an instance linked to ../<its template> (#6022 item 1),
 // with both ends in rootTrees in the image. An image merges several
 // overlays and a later one's copy wins (camnode: common, then the
 // board's), so the file the link lands on in the image may come from
-// another overlay than the link's. Because the target has the link's own
-// name and a unit type, the scan reads every overlay's copy of it as the
-// same unit, whichever wins, and a copy that is itself a link meets this
-// rule in turn (#6003 L3 round 3, option one).
+// another overlay than the link's, and need be in only one of them. The
+// scan never reads the link itself: it reads every overlay's copy at the
+// target's path, as the unit of the link's name, whichever wins. A copy of
+// the link's own name is read under that name already, and rootBinaries
+// reads each copy of a template under every instance name linked to it.
+// A copy that is itself a link meets this rule in turn, and no copy may be
+// a directory (#6003 L3 round 3, option one).
 //
 // Outside every overlay a link is a build input: its target has
 // linkTarget's form, is a regular file, and lies under image/ outside
@@ -3230,19 +3311,37 @@ func linkWhy(root, p string) string {
 	to := path.Join(path.Dir(from), t)
 	r := overlayRoot(from)
 	name := path.Base(from)
+	tmpl := templateOf(name)
 	switch {
-	case r != "" && (t != "../"+name || !unitTypes[path.Ext(name)]):
-		return "a link in an overlay other than a unit linked to ../" + name + " (the image may take the target from another overlay, and the scan reads every copy only of a unit of the link's own name)"
+	case r != "" && (t != "../"+name && (tmpl == "" || t != "../"+tmpl) || !linkTypes[path.Ext(name)]):
+		return "a link in an overlay other than a unit linked to ../" + name + " or an instance to ../<its template> (the image may take the target from another overlay, and the scan reads every copy only of a unit of the link's own name or template)"
 	case r != "" && !strings.HasPrefix(to, r+"/"):
 		return "a link that leaves its overlay " + r
 	case r == "" && (!strings.HasPrefix(to, "image/") || overlayRoot(to) != ""):
 		return "a link outside every overlay that lands in one or outside image/"
 	}
-	if st, err := os.Lstat(filepath.Join(root, filepath.FromSlash(to))); err != nil || !st.Mode().IsRegular() {
-		return "a link to a directory, another link or no file, which this scan does not read"
-	}
+	why := "a link to a directory, another link or no file, which this scan does not read"
 	if r == "" {
+		if st, err := os.Lstat(filepath.Join(root, filepath.FromSlash(to))); err != nil || !st.Mode().IsRegular() {
+			return why
+		}
 		return ""
+	}
+	// In the image the target is whichever overlay's copy wins: one must
+	// be a regular file, and none a directory.
+	found := false
+	for _, o := range overlaysOf(from) {
+		st, err := os.Lstat(filepath.Join(root, filepath.FromSlash(o+strings.TrimPrefix(to, r))))
+		switch {
+		case err != nil:
+		case st.IsDir():
+			return why
+		case st.Mode().IsRegular():
+			found = true
+		}
+	}
+	if !found {
+		return why
 	}
 	for _, q := range []string{from, to} {
 		if ip := strings.TrimPrefix(q, r); !rootOwned(ip) {

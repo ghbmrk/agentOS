@@ -71,15 +71,19 @@ func TestRootSideLintReach(t *testing.T) {
 		"a stream below a grant":        {"image/mkosi/agentos-s.socket", "[Socket]\nListenStream=/run/agentos-x/a/s.sock\n", `/run/agentos-x/a/s.sock, below /run/agentos-x`},
 		"a packet socket below a grant": {"image/mkosi/agentos-s.socket", "[Socket]\nListenSequentialPacket=/run/agentos-x/a/s.sock\n", `below /run/agentos-x`},
 		"a link below a grant":          {"image/mkosi/agentos-s.socket", "[Socket]\nListenStream=/run/agentos-s/s.sock\nSymlinks=/run/agentos-x/a/l\n", `/run/agentos-x/a/l, below /run/agentos-x`},
-		"a PID file another uid writes": {"image/mkosi/agentos-p.service", "[Service]\nUser=agentos-p\nExecStart=/bin/true\nPIDFile=/run/agentos-x/pid\n", `PIDFile=/run/agentos-x/pid`},
+		"a PID file another uid writes": {"image/mkosi/agentos-p.service", "[Service]\nUser=agentos-p\nExecStart=/bin/true\nPIDFile=/run/agentos-x/pid\n", `PIDFile=/run/agentos-x/pid: the manager opens this path as root`},
+		"a PID file names the fix":      {"image/mkosi/agentos-p.service", "[Service]\nUser=agentos-p\nExecStart=/bin/true\nPIDFile=/run/agentos-x/pid\n", `drop PIDFile= and use Type=notify or Type=simple`},
 		"a relative PID file":           {"image/mkosi/agentos-p.service", "[Service]\nUser=agentos-p\nExecStart=/bin/true\nPIDFile=agentos-x/pid\n", `PIDFile=agentos-x/pid`},
 		"USB descriptors":               {"image/mkosi/agentos-p.service", "[Service]\nUser=agentos-p\nExecStart=/bin/true\nUSBFunctionDescriptors=/var/lib/agentos-x/d\n", `USBFunctionDescriptors=/var/lib/agentos-x/d`},
 		"USB strings":                   {"image/mkosi/agentos-p.service", "[Service]\nUser=agentos-p\nExecStart=/bin/true\nUSBFunctionStrings=/tmp/s\n", `USBFunctionStrings=/tmp/s`},
-		// Item 6: of /dev, only the console and the virtual terminals.
-		"a terminal in /dev/shm": {"image/mkosi/agentos-t.service", "[Service]\nExecStart=/bin/true\nTTYPath=/dev/shm/x\n", `path "/dev/shm/x"`},
-		"a pseudo terminal":      {"image/mkosi/agentos-t.service", "[Service]\nExecStart=/bin/true\nTTYPath=/dev/pts/0\n", `path "/dev/pts/0"`},
-		"a serial terminal":      {"image/mkosi/agentos-t.service", "[Service]\nExecStart=/bin/true\nTTYPath=/dev/ttyS0\n", `path "/dev/ttyS0"`},
-		"a console with a ..":    {"image/mkosi/agentos-t.service", "[Service]\nExecStart=/bin/true\nTTYPath=/dev/../tmp/console\n", `path "/dev/../tmp/console"`},
+		// Item 6: of /dev, only the console, the virtual terminals and the
+		// on-board serial ports (#6022 item 2), and the refusal names them.
+		"a terminal in /dev/shm":  {"image/mkosi/agentos-t.service", "[Service]\nExecStart=/bin/true\nTTYPath=/dev/shm/x\n", `path "/dev/shm/x"; of /dev, a root unit's terminal is only /dev/console`},
+		"a pseudo terminal":       {"image/mkosi/agentos-t.service", "[Service]\nExecStart=/bin/true\nTTYPath=/dev/pts/0\n", `path "/dev/pts/0"; of /dev, a root unit's terminal is only /dev/console, /dev/ttyN, /dev/ttySN or /dev/ttyAMAN`},
+		"a USB serial terminal":   {"image/mkosi/agentos-t.service", "[Service]\nExecStart=/bin/true\nTTYPath=/dev/ttyUSB0\n", `path "/dev/ttyUSB0"; of /dev`},
+		"a serial port's link":    {"image/mkosi/agentos-t.service", "[Service]\nExecStart=/bin/true\nTTYPath=/dev/serial0\n", `path "/dev/serial0"; of /dev`},
+		"a serial port with a ..": {"image/mkosi/agentos-t.service", "[Service]\nExecStart=/bin/true\nTTYPath=/dev/ttyS0/../../tmp/x\n", `path "/dev/ttyS0/../../tmp/x"`},
+		"a console with a ..":     {"image/mkosi/agentos-t.service", "[Service]\nExecStart=/bin/true\nTTYPath=/dev/../tmp/console\n", `path "/dev/../tmp/console"`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := reachBase()
@@ -96,6 +100,8 @@ func TestRootSideLintReach(t *testing.T) {
 		files[ext+"usr/lib/systemd/system.conf.d/z.conf"] = "[Manager]\nDefaultLimitCORE=0\nDefaultEnvironment=PATH=/usr/bin:/usr/sbin\n"
 		files["image/mkosi/agentos-t.service"] = "[Service]\nExecStart=/bin/true\nTTYPath=/dev/console\n"
 		files["image/mkosi/agentos-t2.service"] = "[Service]\nExecStart=/bin/true\nTTYPath=/dev/tty1\n"
+		files["image/mkosi/agentos-t3.service"] = "[Service]\nExecStart=/bin/true\nTTYPath=/dev/ttyS0\n"
+		files["image/mkosi/agentos-t4.service"] = "[Service]\nExecStart=/bin/true\nTTYPath=/dev/ttyAMA0\n"
 		files["image/mkosi/agentos-s.socket"] = "[Socket]\nListenStream=/run/agentos-x/s.sock\nSymlinks=/run/agentos-x/l\n"
 		files["image/mkosi/agentos-p.service"] = "[Service]\nUser=agentos-p\nExecStart=/bin/true\nPIDFile=/run/systemd/agentos-p.pid\n"
 		if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
@@ -106,31 +112,44 @@ func TestRootSideLintReach(t *testing.T) {
 	// build do.
 	// A link is resolved lexically, never on the runner. Outside every
 	// overlay its target is a file beside it or beside its directory; in an
-	// overlay it is only a unit linked to ../<its own name>, in its own
-	// overlay and in rootTrees in the image (#6003 L3 and Security).
+	// overlay it is only a unit linked to ../<its own name> or an instance
+	// to ../<its template>, in its own overlay, answered by a file in one of
+	// the image's overlays and by no directory, and in rootTrees in the
+	// image (#6003 L3 and Security, #6022 item 1).
 	const etc = ext + "etc/systemd/system/"
 	const camCommon = "image/camnode/external/board/common/overlay/"
 	const camQemu = "image/camnode/external/board/qemu/overlay/"
+	const camCm4 = "image/camnode/external/board/cm4/overlay/"
 	for name, c := range map[string]struct{ link, target, want string }{
-		"a linked drop-in directory":                   {"image/mkosi/agentos-side.service.d", "../elsewhere", "a link to a directory"},
-		"an absolute target":                           {"image/mkosi/agentos-side.service.d", "/usr/lib/agentos-l3/dropins", "not a file beside it"},
-		"an absolute target that exists on the runner": {"image/mkosi/agentos-side.service.d", "/etc", "not a file beside it"},
-		"a dangling target":                            {"image/mkosi/agentos-side.service.d", "../nowhere", "no file"},
-		"a link loop":                                  {"image/mkosi/agentos-side.service.d", "agentos-side.service.d", "another link"},
-		"a chain of links":                             {"image/mkosi/agentos-q.service", "agentos-r.service", "another link"},
-		"a target outside the repo":                    {"image/mkosi/agentos-side.service.d", "../../../outside", "not a file beside it"},
-		"a climb through the runner's root":            {etc + "agentos-z.service", strings.Repeat("../", 15) + "ROOT/image/mkosi/agentos-z.service", "not a file beside it"},
-		"a climb through /proc/self/root":              {etc + "agentos-z.service", strings.Repeat("../", 15) + "proc/self/root/ROOT/image/mkosi/agentos-z.service", "not a file beside it"},
-		"a nested target":                              {etc + "agentos-z.service", "../../../run/agentos-x/agentos-z.service", "not a file beside it"},
-		"a target in a grant":                          {ext + "var/lib/agentos-x/l.service", "../l.service", "/var/lib/agentos-x/l.service in the image, outside rootTrees"},
-		"a link out of its overlay":                    {ext + "l.service", "../l.service", "leaves its overlay image/mkosi/mkosi.extra"},
-		"an overlay link to another name":              {etc + "multi-user.target.wants/agentos-y.service", "../agentos-z.service", "other than a unit linked to ../agentos-y.service"},
-		"an overlay unit linked to a non-unit":         {camCommon + "etc/systemd/system/agentos-z.service", "../agentos-z.txt", "other than a unit linked to ../agentos-z.service"},
-		"an overlay link beside it":                    {etc + "agentos-y.service", "agentos-z.service", "other than a unit linked to ../agentos-y.service"},
-		"a linked drop-in in an overlay":               {etc + "agentos-y.service.d/a.conf", "../a.conf", "other than a unit linked to ../a.conf"},
-		"a linked overlay file of no unit type":        {etc + "x.target.wants/agentos-y.timer", "../agentos-y.timer", "other than a unit linked to ../agentos-y.timer"},
-		"a link into an overlay":                       {"image/mkosi/sub/l.service", "../mkosi.extra", "a link to a directory"},
-		"a build link out of image/":                   {"image/l.service", "../go.mod", "outside every overlay that lands in one or outside image/"},
+		"a linked drop-in directory":                    {"image/mkosi/agentos-side.service.d", "../elsewhere", "a link to a directory"},
+		"an absolute target":                            {"image/mkosi/agentos-side.service.d", "/usr/lib/agentos-l3/dropins", "not a file beside it"},
+		"an absolute target that exists on the runner":  {"image/mkosi/agentos-side.service.d", "/etc", "not a file beside it"},
+		"a dangling target":                             {"image/mkosi/agentos-side.service.d", "../nowhere", "no file"},
+		"a link loop":                                   {"image/mkosi/agentos-side.service.d", "agentos-side.service.d", "another link"},
+		"a chain of links":                              {"image/mkosi/agentos-q.service", "agentos-r.service", "another link"},
+		"a target outside the repo":                     {"image/mkosi/agentos-side.service.d", "../../../outside", "not a file beside it"},
+		"a climb through the runner's root":             {etc + "agentos-z.service", strings.Repeat("../", 15) + "ROOT/image/mkosi/agentos-z.service", "not a file beside it"},
+		"a climb through /proc/self/root":               {etc + "agentos-z.service", strings.Repeat("../", 15) + "proc/self/root/ROOT/image/mkosi/agentos-z.service", "not a file beside it"},
+		"a nested target":                               {etc + "agentos-z.service", "../../../run/agentos-x/agentos-z.service", "not a file beside it"},
+		"a target in a grant":                           {ext + "var/lib/agentos-x/l.service", "../l.service", "/var/lib/agentos-x/l.service in the image, outside rootTrees"},
+		"a link out of its overlay":                     {ext + "l.service", "../l.service", "leaves its overlay image/mkosi/mkosi.extra"},
+		"an overlay link to another name":               {etc + "multi-user.target.wants/agentos-y.service", "../agentos-z.service", "other than a unit linked to ../agentos-y.service"},
+		"an overlay unit linked to a non-unit":          {camCommon + "etc/systemd/system/agentos-z.service", "../agentos-z.txt", "other than a unit linked to ../agentos-z.service"},
+		"an overlay link beside it":                     {etc + "agentos-y.service", "agentos-z.service", "other than a unit linked to ../agentos-y.service"},
+		"a linked drop-in in an overlay":                {etc + "agentos-y.service.d/a.conf", "../a.conf", "other than a unit linked to ../a.conf"},
+		"a linked overlay file of no unit type":         {etc + "x.target.wants/agentos-y.env", "../agentos-y.env", "other than a unit linked to ../agentos-y.env"},
+		"an instance linked to another template":        {etc + "multi-user.target.wants/agentos-y@1.service", "../agentos-z@.service", "other than a unit linked to ../agentos-y@1.service"},
+		"an instance linked to another instance":        {etc + "multi-user.target.wants/agentos-y@1.service", "../agentos-y@2.service", "other than a unit linked to ../agentos-y@1.service"},
+		"a template linked to an instance":              {etc + "agentos-y@.service", "../agentos-y@1.service", "other than a unit linked to ../agentos-y@.service"},
+		"an instance of no template linked":             {etc + "multi-user.target.wants/agentos-y.service", "../agentos-y@.service", "other than a unit linked to ../agentos-y.service"},
+		"a timer linked to another name":                {etc + "timers.target.wants/agentos-y.timer", "../agentos-z.timer", "other than a unit linked to ../agentos-y.timer"},
+		"a target linked out of its overlay":            {ext + "x.target", "../x.target", "leaves its overlay image/mkosi/mkosi.extra"},
+		"a board link no overlay's file answers":        {camQemu + "etc/systemd/system/multi-user.target.wants/agentos-q.service", "../agentos-q.service", "no file"},
+		"a board link another image answers":            {camQemu + "etc/systemd/system/multi-user.target.wants/agentos-m.service", "../agentos-m.service", "no file"},
+		"a board link a directory answers":              {camQemu + "etc/systemd/system/multi-user.target.wants/agentos-d.service", "../agentos-d.service", "a link to a directory"},
+		"a board link one copy of which is a directory": {camQemu + "etc/systemd/system/multi-user.target.wants/agentos-e.service", "../agentos-e.service", "a link to a directory"},
+		"a link into an overlay":                        {"image/mkosi/sub/l.service", "../mkosi.extra", "a link to a directory"},
+		"a build link out of image/":                    {"image/l.service", "../go.mod", "outside every overlay that lands in one or outside image/"},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := reachBase()
@@ -141,6 +160,12 @@ func TestRootSideLintReach(t *testing.T) {
 			files[ext+"run/agentos-x/agentos-z.service"] = "[Service]\nUser=agentos-z\nExecStart=/bin/true\n"
 			files[ext+"var/lib/l.service"] = "[Service]\nUser=agentos-z\nExecStart=/bin/true\n"
 			files[camCommon+"etc/systemd/agentos-z.txt"] = "[Service]\nExecStart=/bin/true\n"
+			files[etc+"agentos-z@.service"] = "[Service]\nExecStart=/bin/true\n"
+			files[etc+"agentos-z.timer"] = "[Timer]\nOnBootSec=1\n"
+			files[ext+"etc/systemd/system/agentos-m.service"] = "[Service]\nExecStart=/bin/true\n"
+			files[camCommon+"etc/systemd/system/agentos-d.service/x"] = ""
+			files[camCommon+"etc/systemd/system/agentos-e.service/x"] = ""
+			files[camCm4+"etc/systemd/system/agentos-e.service"] = "[Service]\nExecStart=/bin/true\n"
 			files["image/mkosi/mkosi.extra/x"] = ""
 			files["go.mod"] = "module x\n"
 			root := fakeRepo(t, files)
@@ -169,6 +194,9 @@ func TestRootSideLintReach(t *testing.T) {
 	for name, c := range map[string]struct{ links [][2]string }{
 		"a board's copy of a linked unit": {[][2]string{{camCommon + "etc/systemd/system/multi-user.target.wants/agentos-z.service", "../agentos-z.service"}}},
 		"a board's link onward":           {[][2]string{{camCommon + "etc/systemd/system/multi-user.target.wants/agentos-z.service", "../agentos-z.service"}, {camQemu + "etc/systemd/system/agentos-z.service", "../agentos-z.service"}}},
+		// A board's link may land on a copy only another overlay ships
+		// (#6022 item 1); every copy of that name is still read.
+		"a board link to another overlay's copy": {[][2]string{{camCm4 + "etc/systemd/system/multi-user.target.wants/agentos-z.service", "../agentos-z.service"}}},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := reachBase()
@@ -193,6 +221,64 @@ func TestRootSideLintReach(t *testing.T) {
 			}
 		})
 	}
+	// An instance linked to its template is read as the instance: each
+	// overlay's copy of the template, with the instance's drop-ins (#6022
+	// item 1).
+	const tmplDropin = "[Service]\nExecStartPre=/var/lib/agentos-x/evil\n"
+	for name, c := range map[string]struct {
+		files map[string]string
+		links [][2]string
+	}{
+		"an instance's drop-in": {
+			map[string]string{camCommon + "etc/systemd/system/agentos-z@.service": "[Service]\nExecStart=/bin/true\n", camCommon + "etc/systemd/system/agentos-z@1.service.d/z.conf": tmplDropin},
+			[][2]string{{camCommon + "etc/systemd/system/multi-user.target.wants/agentos-z@1.service", "../agentos-z@.service"}},
+		},
+		"a board's instance of a common template": {
+			map[string]string{camCommon + "etc/systemd/system/agentos-z@.service": "[Service]\nExecStart=/bin/true\n", camQemu + "etc/systemd/system/agentos-z@1.service.d/z.conf": tmplDropin},
+			[][2]string{{camQemu + "etc/systemd/system/multi-user.target.wants/agentos-z@1.service", "../agentos-z@.service"}},
+		},
+		"a board's copy of a linked template": {
+			// The common copy runs as a user; the qemu copy, which wins
+			// there, as root, so only the instance read of that copy
+			// meets the drop-in as root's.
+			map[string]string{camCommon + "etc/systemd/system/agentos-z@.service": "[Service]\nUser=agentos-z\nExecStart=/bin/true\n", camQemu + "etc/systemd/system/agentos-z@.service": "[Service]\nExecStart=/bin/true\n", camCommon + "etc/systemd/system/agentos-z@1.service.d/z.conf": tmplDropin},
+			[][2]string{{camCommon + "etc/systemd/system/multi-user.target.wants/agentos-z@1.service", "../agentos-z@.service"}},
+		},
+	} {
+		t.Run("refuses "+name, func(t *testing.T) {
+			files := reachBase()
+			files["image/mkosi/agentos-x.service"] = "[Service]\nUser=agentos-x\nExecStart=/bin/true\nStateDirectory=agentos-x\n"
+			for p, text := range c.files {
+				files[p] = text
+			}
+			if _, err := linkedRepo(t, files, c.links); err == nil || !strings.Contains(err.Error(), "/var/lib/agentos-x/evil") {
+				t.Fatalf("got %v, want the instance's drop-in refused for running from /var/lib/agentos-x", err)
+			}
+		})
+	}
+	t.Run("passes the links systemctl enable makes", func(t *testing.T) {
+		files := reachBase()
+		files[etc+"agentos-y.service"] = "[Service]\nExecStart=/bin/true\n"
+		files[etc+"agentos-y@.service"] = "[Service]\nExecStart=/bin/true\n"
+		files[etc+"agentos-y.timer"] = "[Timer]\nOnBootSec=1\n"
+		files[etc+"agentos-y.path"] = "[Path]\nPathExists=/run/agentos-y\n"
+		files[etc+"agentos-y.target"] = "[Unit]\nDescription=y\n"
+		files[camCommon+"etc/systemd/system/agentos-z.service"] = "[Service]\nExecStart=/bin/true\n"
+		files[camCommon+"etc/systemd/system/agentos-z@.service"] = "[Service]\nExecStart=/bin/true\n"
+		links := [][2]string{
+			{etc + "multi-user.target.wants/agentos-y@1.service", "../agentos-y@.service"},
+			{etc + "multi-user.target.wants/agentos-y@two.service", "../agentos-y@.service"},
+			{etc + "timers.target.wants/agentos-y.timer", "../agentos-y.timer"},
+			{etc + "paths.target.wants/agentos-y.path", "../agentos-y.path"},
+			{etc + "multi-user.target.wants/agentos-y.target", "../agentos-y.target"},
+			{etc + "agentos-y.target.wants/agentos-y.service", "../agentos-y.service"},
+			{camQemu + "etc/systemd/system/multi-user.target.wants/agentos-z.service", "../agentos-z.service"},
+			{camCm4 + "etc/systemd/system/multi-user.target.wants/agentos-z@1.service", "../agentos-z@.service"},
+		}
+		if _, err := linkedRepo(t, files, links); err != nil {
+			t.Fatal(err)
+		}
+	})
 	t.Run("passes a linked unit in an overlay", func(t *testing.T) {
 		files := reachBase()
 		files[etc+"agentos-y.service"] = "[Service]\nExecStart=/bin/true\n"
@@ -219,6 +305,22 @@ func TestRootSideLintReach(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+// linkedRepo runs rootBinaries on a fake repository of files with each
+// link (path, target) added.
+func linkedRepo(t *testing.T, files map[string]string, links [][2]string) ([]string, error) {
+	t.Helper()
+	root := fakeRepo(t, files)
+	for _, l := range links {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, l[0])), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(l[1], filepath.Join(root, l[0])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return rootBinaries(root)
 }
 
 // builtRecs is the records of one unit read from a package's fragment and
