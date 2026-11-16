@@ -377,9 +377,17 @@ class CmdQemuTest(unittest.TestCase):
            "data": {"guest": False, "reason": "host-qmp-quit"}}
 
     def test_flags_reach_each_phase_and_unclean_end_the_unclean_phase_alone(self):
+        sizes = []
+
+        def blank_size(args, label):
+            if label.startswith("firmware-"):
+                sizes.append(os.path.getsize(pathlib.Path(args.work) / "blank-usb.img"))
+
         rc, seen, judged, report = self.run_qemu("task,unclean,task", self.PHASES, {"unclean": [self.CUT]},
-                                                 flags=["owner-boot-order"])
+                                                 flags=["owner-boot-order"], on_boot=blank_size)
         self.assertEqual(rc, 0, report)
+        self.assertEqual(len(sizes), 2)
+        self.assertTrue(all(sizes), sizes)  # a drive the firmware can see: a zero-byte one may get no option
         self.assertEqual([s[0] for s in seen], ["firmware-1", "firmware-2", "task", "unclean", "task"])
         # The firmware-only boots have a blank USB drive at the image's slot, so the boot option the
         # firmware adds for a plugged drive is in the baseline (HOST-1e2); the image is never attached.
@@ -418,6 +426,34 @@ class CmdQemuTest(unittest.TestCase):
                     rc, seen, _, report = self.run_qemu("task", self.PHASES, {}, extra=("--credential", bad))
                     self.assertEqual((rc, report), (2, None))
                     self.assertEqual(seen, [])  # refused before any boot
+
+    def test_the_memory_reaches_qemus_command(self):
+        # --memory reaches QEMU itself, not only the args each boot gets (Potency on #5816).
+        class Built(Exception):
+            pass
+
+        for memory in (1536, 8192):
+            with self.subTest(memory), tempfile.TemporaryDirectory() as d:
+                # main hands each boot its parsed --memory (test_credentials_and_memory_reach_the_os_boots_alone).
+                args = argparse.Namespace(memory=memory, tools_root=None, ovmf_code="code.fd", host_disks_bus=[])
+                popened = []
+
+                def popen(args_, name, argv, seen=popened, **kw):
+                    seen.append((name, argv))
+                    return unittest.mock.Mock()
+
+                def connect(path, proc):
+                    raise Built
+
+                with unittest.mock.patch.multiple(hostcheck, stack_popen=popen, _wait_path=lambda p: None,
+                                                  _connect=connect, qemu_data_args=lambda root: []), \
+                        unittest.mock.patch.object(hostcheck.tempfile, "mkdtemp", lambda **kw: d), \
+                        self.assertRaises(Built):
+                    hostcheck.Qemu(args, pathlib.Path(d), "task")
+                (_, cmd), = [x for x in popened if x[0] == "qemu-system-x86_64"]
+                i = cmd.index("-m")
+                self.assertEqual(cmd[i + 1], str(memory))
+                self.assertNotIn("-m", cmd[i + 1:])
 
     def test_a_phases_file_replaces_the_stand_ins_phases(self):
         # The halting-guest QEMU test boots the stand-in with its own unclean phase (#5256).
@@ -1116,6 +1152,13 @@ def responder_unit_problems(text):
     return out
 
 
+def stub_journal(d):
+    """A systemd-cat in D that runs the responder with its stdout into D/journal, as journald would store it."""
+    stub = pathlib.Path(d, "systemd-cat")
+    stub.write_text(f'#!/bin/sh\n[ "$1 $2" = "-t hostcheck-responder" ] || exit 64\nshift 2\nexec "$@" > {d}/journal\n')
+    stub.chmod(0o755)
+
+
 class ResponderTest(unittest.TestCase):
     """The image's responder (HOST-1e2, HOST-1h part 2) answers until systemd stops it, and its unit is
     ordered so that stop comes before agentos-mor.service's MOR clear."""
@@ -1154,6 +1197,7 @@ class ResponderTest(unittest.TestCase):
             stub = pathlib.Path(d, "systemctl")
             stub.write_text(f'#!/bin/sh\necho "$*" >> {d}/calls\n')
             stub.chmod(0o755)
+            stub_journal(d)
             path = pathlib.Path(d, "responder.sh")
             path.write_text(script or (IMAGE_DIR / "responder.sh").read_text())
             p = subprocess.run(["/bin/sh", str(path)], input=cmds, capture_output=True, text=True, timeout=30,
@@ -1161,6 +1205,9 @@ class ResponderTest(unittest.TestCase):
             calls = pathlib.Path(d, "calls")
             out = [ln for ln in p.stdout.splitlines() if not ln.startswith("HOSTCHECK-DIAG ")]
             calls = calls.read_text().splitlines() if calls.exists() else []
+            # Every answer reaches the journal too, and nothing else does (HOST-1h part 2).
+            self.assertEqual(pathlib.Path(d, "journal").read_text().splitlines(),
+                             [x for x in out if x.startswith("HOSTCHECK-ALIVE ")])
             return out, [c for c in calls if not c.startswith("show ")]  # the diagnosis's reads
 
     def test_the_responder_answers_and_keeps_answering_after_an_exit(self):
@@ -1182,6 +1229,7 @@ class ResponderTest(unittest.TestCase):
             for tool in ("systemctl", "journalctl"):
                 pathlib.Path(d, tool).write_text(f'#!/bin/sh\necho "{tool} $*"\n')
                 pathlib.Path(d, tool).chmod(0o755)
+            stub_journal(d)
             p = subprocess.Popen(["/bin/sh", str(IMAGE_DIR / "responder.sh")], stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, text=True, env={"PATH": f"{d}:/usr/bin:/bin"})
             try:
@@ -1213,6 +1261,7 @@ class ResponderTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             pathlib.Path(d, "systemctl").write_text("#!/bin/sh\nexit 1\n")
             pathlib.Path(d, "systemctl").chmod(0o755)
+            stub_journal(d)
             p = subprocess.run(["/bin/sh", str(IMAGE_DIR / "responder.sh")], input="poweroff\n", capture_output=True,
                                text=True, timeout=30, env={"PATH": f"{d}:/usr/bin:/bin"})
         self.assertEqual(hostcheck.guest_errors(p.stdout.encode()), ["HOSTCHECK-EXIT-FAILED poweroff"])
@@ -1852,6 +1901,10 @@ class ImageTest(unittest.TestCase):
         alive = [float(t) for t, who, text in lines if who == b"hostcheck-responder"]
         self.assertTrue(clear, f"no MOR clear in the last boot's journal: {lines}")
         self.assertTrue(alive, f"no answer in the last boot's journal: {lines}")
+        # The journal's last answer is the console's last one (responder.sh writes the journal's copy
+        # after the console's), so no answer printed after the clear could have lost its journal line.
+        last = [text for t, who, text in lines if who == b"hostcheck-responder"][-1]
+        self.assertEqual(last, b"HOSTCHECK-ALIVE s%d" % max(answers), lines)
         self.assertLess(max(alive), clear[-1][0], f"an answer came after the MOR clear: {lines}")
         self.assertEqual(clear[-1][1], b"agentos-mor: mor=cleared", lines)
         report = self.report("shutdown")
