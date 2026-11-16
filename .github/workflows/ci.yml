@@ -390,8 +390,19 @@ jobs:
       - name: Vendored code equals the modules go.sum pins (KRN-2cap-harden, #2945)
         # `go mod vendor` rewrites vendor/ from the checksum-verified modules (and the local
         # replace directories), so an edited, added or deleted vendored file shows as a change.
+        # A Go proxy read can fail mid-stream (#3977, as #3768), so `go mod vendor` is tried three
+        # times; the third failure fails the step. The comparison runs once, outside the retry.
         run: |
-          go mod vendor
+          retry() {
+            for t in 1 2 3; do
+              "$@" && return
+              echo "try $t of 3 failed: $*" >&2
+              [ "$t" = 3 ] || sleep $((t * 15))
+            done
+            echo "::error::$* failed 3 times; the vendor check cannot run (#3977)"
+            return 1
+          }
+          retry go mod vendor
           s=$(git status --porcelain --untracked-files=all -- vendor)
           test -z "$s" || { echo "$s"; echo "broker/vendor differs from go mod vendor" >&2; exit 1; }
       - name: OP-2 same-effect model at its full bounds, without -race (journal A19)
