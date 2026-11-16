@@ -64,16 +64,68 @@ func TestTheStepCheckPinCatchesDrift(t *testing.T) {
 			t.Fatalf("a check %s in key.Authorize was not read", name)
 		}
 	}
-	// A code held in a local variable is no constant: the read fails rather
-	// than skip it (L3 6923594464 on #5997).
-	ksrc := readFile(t, filepath.Join(kernelDir, "kernel.go"))
-	local := strings.Replace(ksrc, "\t\tif c.Irreversible() {",
-		"\t\tif st.Amount > 1<<40 {\n\t\t\tnc := \"new-check\"\n\t\t\treturn key.ID{}, nil, on(&key.Refusal{Code: nc, Detail: \"x\"}, &i)\n\t\t}\n\t\tif c.Irreversible() {", 1)
-	if local == ksrc {
-		t.Fatal("the local-variable mutant did not apply")
+	// Every way to write a step refusal's code either is read (the set
+	// changes) or fails the read; none is skipped (L3 6923594464 and
+	// 6923997232 on #5997). Each mutant is a step refusal added before the
+	// irreversibility check in admit's loop, or an edit to key's refuse.
+	const at = "\t\tif c.Irreversible() {"
+	step := func(body string) map[string]string {
+		return map[string]string{filepath.Join(kernelDir, "kernel.go"): "\t\tif st.Amount > 1<<40 {\n" + body + "\n\t\t}\n" + at}
 	}
-	if got, err := stepCodesWith(t, map[string]string{filepath.Join(kernelDir, "kernel.go"): local}); err == nil {
-		t.Fatalf("a code in a local variable was skipped: read %v", got)
+	ksrc := readFile(t, filepath.Join(kernelDir, "kernel.go"))
+	const refuseBody = "\treturn &Refusal{Code: code, Detail: fmt.Sprintf(f, a...)}"
+	base := kernelStepCodes(t)
+	for name, c := range map[string]struct {
+		edit   map[string]string // file -> replacement for its anchor
+		anchor string
+		tail   string // appended to the file, for a new function
+		read   bool   // read as a new code, rather than an error
+	}{
+		"a local variable":              {edit: step(`			nc := "new-check"; return key.ID{}, nil, on(&key.Refusal{Code: nc, Detail: "x"}, &i)`), anchor: at},
+		"an assigned Code field":        {edit: step(`			r := &key.Refusal{Detail: "x"}; r.Code = "new-check"; return key.ID{}, nil, on(r, &i)`), anchor: at, read: true},
+		"a Code field set from a local": {edit: step(`			r := &key.Refusal{Detail: "x"}; nc := "new-check"; r.Code = nc; return key.ID{}, nil, on(r, &i)`), anchor: at},
+		"a Code field appended to":      {edit: step(`			r := &key.Refusal{Code: key.RRate}; r.Code += "x"; return key.ID{}, nil, on(r, &i)`), anchor: at},
+		"an unkeyed literal":            {edit: step(`			return key.ID{}, nil, on(&key.Refusal{"new-check", "x"}, &i)`), anchor: at},
+		"a local shadowing a constant":  {edit: map[string]string{filepath.Join(keyDir, "authorize.go"): "\tif len(a) > 99 {\n\t\tRRate := \"new-check\"\n\t\treturn &Refusal{Code: RRate}\n\t}\n" + refuseBody}, anchor: refuseBody},
+		"a local shadowing the package": {edit: step(`			key := struct{ RRate string }{"new-check"}; var r Refusal; r.Code = key.RRate; _ = r`), anchor: at},
+		"a helper returning a value": {edit: step(`			r := newCheck(); return key.ID{}, nil, on(&r, &i)`), anchor: at,
+			tail: "\nfunc newCheck() key.Refusal { return key.Refusal{Code: \"new-check\", Detail: \"x\"} }\n", read: true},
+		"a helper assigning the field": {edit: step(`			var r key.Refusal; setCheck(&r); return key.ID{}, nil, on(&r, &i)`), anchor: at,
+			tail: "\nfunc setCheck(r *key.Refusal) { r.Code = \"new-check\" }\n", read: true},
+		"a closure bound in reach": {edit: step(`			mk := func() *key.Refusal { return &key.Refusal{Code: "new-check"} }; return key.ID{}, nil, on(mk(), &i)`), anchor: at, read: true},
+		"a closure bound before the loop": {edit: map[string]string{filepath.Join(kernelDir, "kernel.go"): "on := func(r *key.Refusal, step *int) *Refusal {\n\t\tif step == nil {\n\t\t\tr = &key.Refusal{Code: \"new-check\"}\n\t\t}\n\t\treturn &Refusal{*r, step, v.Limits.Task}\n\t}"},
+			anchor: "on := func(r *key.Refusal, step *int) *Refusal { return &Refusal{*r, step, v.Limits.Task} }", read: true},
+		"a rebound closure":               {edit: step(`			on = func(r *key.Refusal, step *int) *Refusal { return &Refusal{key.Refusal{Code: "new-check"}, step, 0} }; return key.ID{}, nil, on(&key.Refusal{Code: key.RRate}, &i)`), anchor: at},
+		"a func value of unknown binding": {edit: step(`			var mk func() *key.Refusal; return key.ID{}, nil, on(mk(), &i)`), anchor: at},
+		"a reassigned code parameter":     {edit: map[string]string{filepath.Join(keyDir, "authorize.go"): "\tif code == RRate && len(a) > 99 {\n\t\tcode = \"new-check\"\n\t}\n" + refuseBody}, anchor: refuseBody},
+		"a code parameter by address":     {edit: map[string]string{filepath.Join(keyDir, "authorize.go"): "\tsetCode(&code)\n" + refuseBody}, anchor: refuseBody},
+	} {
+		t.Run(name, func(t *testing.T) {
+			over := map[string]string{}
+			for f, rep := range c.edit {
+				src := readFile(t, f)
+				if f == filepath.Join(kernelDir, "kernel.go") {
+					src = ksrc
+				}
+				m := strings.Replace(src, c.anchor, rep, 1)
+				if m == src {
+					t.Fatalf("the mutant did not apply to %s", f)
+				}
+				if f == filepath.Join(kernelDir, "kernel.go") {
+					m += c.tail
+				}
+				over[f] = m
+			}
+			got, err := stepCodesWith(t, over)
+			switch {
+			case c.read && err != nil:
+				t.Fatalf("want the new code read, got %v", err)
+			case c.read && !slices.Contains(got, "new-check"):
+				t.Fatalf("the new code was not read: %v", got)
+			case !c.read && err == nil:
+				t.Fatalf("want the read to fail; it read %v (base %v)", got, base)
+			}
+		})
 	}
 }
 
@@ -129,6 +181,7 @@ type pkgSrc struct {
 	name   string
 	funcs  map[string]*ast.FuncDecl // "Name" or "Recv.Name"
 	consts map[string]string
+	files  []*ast.File
 }
 
 func parsePkg(t *testing.T, dir string, override map[string]string) *pkgSrc {
@@ -152,6 +205,7 @@ func parsePkg(t *testing.T, dir string, override map[string]string) *pkgSrc {
 			t.Fatal(err)
 		}
 		p.name = af.Name.Name
+		p.files = append(p.files, af)
 		for _, d := range af.Decls {
 			switch d := d.(type) {
 			case *ast.FuncDecl:
@@ -211,6 +265,54 @@ func returnsRefusal(d *ast.FuncDecl) bool {
 	return false
 }
 
+// isRefusalType says whether e names the Refusal type, here or as key's.
+func isRefusalType(e ast.Expr) bool {
+	switch x := e.(type) {
+	case *ast.Ident:
+		return x.Name == "Refusal"
+	case *ast.SelectorExpr:
+		return x.Sel.Name == "Refusal"
+	}
+	return false
+}
+
+// isCodeRefusal says whether e, in p, names key's Refusal, the struct that
+// holds a Code (kernel's Refusal wraps one).
+func isCodeRefusal(p *pkgSrc, e ast.Expr) bool {
+	switch x := e.(type) {
+	case *ast.Ident:
+		return x.Name == "Refusal" && p.name == "key"
+	case *ast.SelectorExpr:
+		k, ok := x.X.(*ast.Ident)
+		return ok && k.Name == "key" && x.Sel.Name == "Refusal"
+	}
+	return false
+}
+
+// buildsRefusal says whether d returns a refusal or builds one (a Refusal
+// literal, or an assignment to a Code field): only such a call can carry a
+// refusal code to the step, whatever it returns it as.
+func buildsRefusal(d *ast.FuncDecl) bool {
+	if returnsRefusal(d) {
+		return true
+	}
+	found := false
+	ast.Inspect(d.Body, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.CompositeLit:
+			found = found || isRefusalType(n.Type)
+		case *ast.AssignStmt:
+			for _, l := range n.Lhs {
+				if s, ok := l.(*ast.SelectorExpr); ok && s.Sel.Name == "Code" {
+					found = true
+				}
+			}
+		}
+		return !found
+	})
+	return found
+}
+
 // codeParam is the index of d's parameter that d puts in a refusal's Code
 // field, or -1 (key's refuse takes its code this way).
 func codeParam(d *ast.FuncDecl) int {
@@ -231,6 +333,43 @@ func codeParam(d *ast.FuncDecl) int {
 	return idx
 }
 
+// boundFuncLit is the func literal f was bound to by := or =, or nil; nil
+// too when any other statement in p rebinds f, so the call may run another.
+func boundFuncLit(p *pkgSrc, f *ast.Ident) *ast.FuncLit {
+	a, ok := f.Obj.Decl.(*ast.AssignStmt)
+	if !ok || len(a.Lhs) != len(a.Rhs) {
+		return nil
+	}
+	rebound := false
+	for _, af := range p.files {
+		ast.Inspect(af, func(n ast.Node) bool {
+			if b, ok := n.(*ast.AssignStmt); ok && b != a {
+				for _, l := range b.Lhs {
+					if id, ok := l.(*ast.Ident); ok && id.Obj == f.Obj {
+						rebound = true
+					}
+				}
+			}
+			if u, ok := n.(*ast.UnaryExpr); ok && u.Op == token.AND {
+				if id, ok := u.X.(*ast.Ident); ok && id.Obj == f.Obj {
+					rebound = true // its address lets a callee rebind it
+				}
+			}
+			return !rebound
+		})
+	}
+	if rebound {
+		return nil
+	}
+	for i, l := range a.Lhs {
+		if id, ok := l.(*ast.Ident); ok && id.Name == f.Name {
+			lit, _ := a.Rhs[i].(*ast.FuncLit)
+			return lit
+		}
+	}
+	return nil
+}
+
 // paramIdents is d's parameters in order.
 func paramIdents(d *ast.FuncDecl) []*ast.Ident {
 	var ps []*ast.Ident
@@ -243,9 +382,13 @@ func paramIdents(d *ast.FuncDecl) []*ast.Ident {
 // stepCodesWith reads the step-level refusal codes from the kernel's sources,
 // with override's files in place of the ones on disk: every code in admit's
 // loop over the plan's steps, following each call into the kernel or key
-// package that returns a refusal, key.Authorize among them. A code it cannot
-// read as a string constant is an error, never skipped: the only identifier
-// it leaves to the callers is the parameter codeParam names.
+// package that builds a refusal, key.Authorize among them, and each closure
+// bound in reach. A code is read from a Code: key or a Code field
+// assignment; one it cannot read as a package-level string constant is an
+// error, never skipped, as are an unkeyed key.Refusal literal, a reassigned
+// or addressed code parameter and a call of a func value it cannot follow.
+// The only identifier it leaves to the callers is the parameter codeParam
+// names.
 func stepCodesWith(t *testing.T, override map[string]string) ([]string, error) {
 	t.Helper()
 	kern := parsePkg(t, kernelDir, override)
@@ -271,16 +414,20 @@ func stepCodesWith(t *testing.T, override map[string]string) ([]string, error) {
 
 	codes := map[string]bool{}
 	seen := map[*ast.FuncDecl]bool{}
+	seenLit := map[*ast.FuncLit]bool{}
 	var bad []error
-	// resolve is the constant e names in p, failing on anything else.
+	// resolve is the constant e names in p, failing on anything else. A
+	// name is read by its binding: a package-level constant (declared in
+	// this file, an ast.Con, or in another, left unresolved), never a local
+	// that shadows one.
 	resolve := func(p *pkgSrc, e ast.Expr) string {
 		switch e := e.(type) {
 		case *ast.Ident:
-			if v, ok := p.consts[e.Name]; ok {
+			if v, ok := p.consts[e.Name]; ok && (e.Obj == nil || e.Obj.Kind == ast.Con) {
 				return v
 			}
 		case *ast.SelectorExpr:
-			if x, ok := e.X.(*ast.Ident); ok {
+			if x, ok := e.X.(*ast.Ident); ok && x.Obj == nil {
 				if q := pkgs[x.Name]; q != nil {
 					if v, ok := q.consts[e.Sel.Name]; ok {
 						return v
@@ -299,26 +446,27 @@ func stepCodesWith(t *testing.T, override map[string]string) ([]string, error) {
 		p *pkgSrc
 		d *ast.FuncDecl
 	}
-	// callees is every refusal-returning function or method a call may name:
+	// callees is every function or method that builds a refusal a call may
+	// name:
 	// a method call names each method of that name in either package, since
 	// the receiver's type is not read.
 	callees := func(p *pkgSrc, c *ast.CallExpr) []fn {
 		var out []fn
 		switch f := c.Fun.(type) {
 		case *ast.Ident:
-			if d := p.funcs[f.Name]; d != nil && returnsRefusal(d) {
+			if d := p.funcs[f.Name]; d != nil && buildsRefusal(d) {
 				out = append(out, fn{p, d})
 			}
 		case *ast.SelectorExpr:
 			if x, ok := f.X.(*ast.Ident); ok && pkgs[x.Name] != nil && x.Obj == nil {
-				if d := pkgs[x.Name].funcs[f.Sel.Name]; d != nil && returnsRefusal(d) {
+				if d := pkgs[x.Name].funcs[f.Sel.Name]; d != nil && buildsRefusal(d) {
 					out = append(out, fn{pkgs[x.Name], d})
 				}
 				return out
 			}
 			for _, q := range []*pkgSrc{kern, keyp} {
 				for k, d := range q.funcs {
-					if strings.HasSuffix(k, "."+f.Sel.Name) && returnsRefusal(d) {
+					if strings.HasSuffix(k, "."+f.Sel.Name) && buildsRefusal(d) {
 						out = append(out, fn{q, d})
 					}
 				}
@@ -332,7 +480,40 @@ func stepCodesWith(t *testing.T, override map[string]string) ([]string, error) {
 	walk = func(p *pkgSrc, body ast.Node, param *ast.Ident) {
 		ast.Inspect(body, func(n ast.Node) bool {
 			switch n := n.(type) {
+			case *ast.AssignStmt:
+				// A code set by assignment is read like a Code: key; the
+				// code parameter is never reassigned.
+				for i, l := range n.Lhs {
+					switch l := l.(type) {
+					case *ast.SelectorExpr:
+						if l.Sel.Name != "Code" {
+							continue
+						}
+						if n.Tok != token.ASSIGN || len(n.Rhs) != len(n.Lhs) {
+							bad = append(bad, fmt.Errorf("a Code field set by %s at %v", n.Tok, n.Pos()))
+							continue
+						}
+						codes[resolve(p, n.Rhs[i])] = true
+					case *ast.Ident:
+						if param != nil && l.Obj != nil && l.Obj == param.Obj {
+							bad = append(bad, fmt.Errorf("the code parameter %s is reassigned at %v", l.Name, n.Pos()))
+						}
+					}
+				}
+			case *ast.UnaryExpr:
+				// The code parameter's address lets a callee rewrite it.
+				if v, ok := n.X.(*ast.Ident); ok && n.Op == token.AND && param != nil && v.Obj != nil && v.Obj == param.Obj {
+					bad = append(bad, fmt.Errorf("the code parameter %s escapes by address at %v", v.Name, n.Pos()))
+				}
 			case *ast.CompositeLit:
+				if isCodeRefusal(p, n.Type) {
+					for _, el := range n.Elts {
+						if _, ok := el.(*ast.KeyValueExpr); !ok {
+							bad = append(bad, fmt.Errorf("an unkeyed Refusal literal at %v", n.Pos()))
+							break
+						}
+					}
+				}
 				for _, el := range n.Elts {
 					if kv, ok := el.(*ast.KeyValueExpr); ok {
 						if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Code" {
@@ -344,6 +525,19 @@ func stepCodesWith(t *testing.T, override map[string]string) ([]string, error) {
 					}
 				}
 			case *ast.CallExpr:
+				// A call of a func value: a closure bound in reach is
+				// walked; any other (a parameter, a field, a result) is
+				// no code the read can follow, so it fails.
+				if f, ok := n.Fun.(*ast.Ident); ok && f.Obj != nil && f.Obj.Kind == ast.Var {
+					lit := boundFuncLit(p, f)
+					switch {
+					case lit == nil:
+						bad = append(bad, fmt.Errorf("a call of the func value %s at %v, which the read cannot follow", f.Name, n.Pos()))
+					case !seenLit[lit]:
+						seenLit[lit] = true
+						walk(p, lit.Body, nil)
+					}
+				}
 				for _, c := range callees(p, n) {
 					var cp *ast.Ident
 					if i := codeParam(c.d); i >= 0 {
