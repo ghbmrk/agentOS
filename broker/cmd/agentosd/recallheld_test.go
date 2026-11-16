@@ -706,7 +706,8 @@ func TestLOG4RecallFilesReadExactly(t *testing.T) {
 	if _, err := readRecallHeld(b.recall); err != nil {
 		t.Fatalf("no tombs, a segment read: %v", err)
 	}
-	ids := []string{"i9", "i3", "i7", "i1", "i5", "i8", "i2", "i6", "i4", "i0"}
+	// 26 items, so a map's iteration order is never sorted by chance.
+	ids := strings.Split("qwertyuiopasdfghjklzxcvbnm", "")
 	var tombs []string
 	for _, id := range ids {
 		tombs = append(tombs, tomb(id))
@@ -714,10 +715,10 @@ func TestLOG4RecallFilesReadExactly(t *testing.T) {
 	b = newRecallBox(t)
 	b.write("recall/meta.jsonl", tombs...)
 	must(t, os.MkdirAll(filepath.Join(b.recall, "recall", "seg-new.jsonl"), 0o700))
-	b.write("backs.jsonl", read(b.M, at, "i0"))
+	b.write("backs.jsonl", read(b.M, at, "a"))
 	b.write("provenance.jsonl", read(b.L, at, ids...))
 	held, err := readRecallHeld(b.recall)
-	if err != nil || len(held) != 1 || strings.Join(held[b.L].IDs, ",") != "i0,i1,i2,i3,i4,i5,i6,i7,i8,i9" {
+	if err != nil || len(held) != 1 || strings.Join(held[b.L].IDs, "") != "abcdefghijklmnopqrstuvwxyz" {
 		t.Fatalf("held %v %v", held, err)
 	}
 	b = &recallBox{t: t, recall: filepath.Join(t.TempDir(), "x[", "recall"), L: "lamp.1"}
@@ -763,7 +764,9 @@ func TestLOG4SettleOrdersAndLogs(t *testing.T) {
 		t.Fatalf("unknown: %q", logs)
 	}
 	at := time.Date(2026, 3, 4, 5, 6, 0, 0, time.Local)
-	names := []string{"g", "c", "h", "a", "e", "b", "f", "d"}
+	// 26 lineages: a map of 8 or fewer can iterate in sorted order by
+	// chance (one group, a random rotation), so an unsorted pass could pass.
+	names := strings.Split("qwertyuiopasdfghjklzxcvbnm", "")
 	var tombs, reads []string
 	for _, n := range names {
 		tombs = append(tombs, tomb(n+"1"), tomb(n+"2"))
@@ -795,10 +798,11 @@ func TestLOG4SettleOrdersAndLogs(t *testing.T) {
 	m := &rewindMachines{}
 	var told []string
 	h.settle(context.Background(), m, func() ([]recallNo, error) { return nil, nil }, func(s string) error { told = append(told, s); return nil })
-	if strings.Join(m.calls, " ") != "a.1 b.1 c.1 d.1 e.1 f.1 g.1 h.1" || len(told) != 8 {
+	sorted := strings.Split("abcdefghijklmnopqrstuvwxyz", "")
+	if strings.Join(m.calls, " ") != strings.Join(sorted, ".1 ")+".1" || len(told) != len(sorted) {
 		t.Fatalf("rollbacks %v, told %d", m.calls, len(told))
 	}
-	for i, n := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+	for i, n := range sorted {
 		if want := "Agent " + n + " had read a record you deleted, so it went back to Mar 4 05:06;"; !strings.HasPrefix(told[i], want) {
 			t.Fatalf("notice %d: %q", i, told[i])
 		}
