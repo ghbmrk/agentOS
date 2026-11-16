@@ -1193,6 +1193,24 @@ func TestDayZeroLiftWithinCap(t *testing.T) {
 	}
 }
 
+// TestLiftUncutEdge (#4814): a lift of an edge that is not cut, as a
+// second tap or a stale page sends, changes nothing. Past its cap, it
+// would otherwise record the day as lifted, and the day's overrun would
+// not cut the edge.
+func TestLiftUncutEdge(t *testing.T) {
+	x, _, _ := capped(t)
+	day := traffic.Day(x.d.dp.Now())
+	if cut, _ := x.d.edge.Cut(); cut {
+		t.Fatal("fixture: the edge is cut")
+	}
+	if err := x.d.edge.Lift(day, true); err != nil {
+		t.Fatal(err)
+	}
+	if cut, lifted := x.d.edge.held(day); cut || lifted {
+		t.Fatalf("a lift of an uncut edge past its cap: cut %v, held for the day %v", cut, lifted)
+	}
+}
+
 // TestEdgeCutSavedAtClose (#5014): a trip whose write the disk refused is
 // saved at a clean stop, so the restart finds the edge cut; and the cut
 // is never written to the firewall before its first load.
@@ -1553,6 +1571,14 @@ func TestFirewallContextsEnd(t *testing.T) {
 	x.fire.mu.Unlock()
 	if lctx == nil || lctx.Err() == nil {
 		t.Fatal("a reading's context outlived the reading")
+	}
+	// The edge cut's own write (loadCutLocked), as a trip or a lift makes.
+	x.d.loadCut()
+	x.fire.mu.Lock()
+	cctx := x.fire.listCtx
+	x.fire.mu.Unlock()
+	if cctx == lctx || cctx.Err() == nil {
+		t.Fatal("the edge cut's firewall write left its context running")
 	}
 }
 
