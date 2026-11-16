@@ -48,6 +48,9 @@ type edgeCutState struct {
 	// day leaves it 0: the new day's count starts from nothing, and its
 	// overrun cuts.
 	Lifted uint32 `json:"lifted,omitempty"`
+	// Through is the highest alert ID at the owner's lift (alert.Last):
+	// the alerts that lift covers, as the core's cutState.Through (#4305).
+	Through uint64 `json:"through,omitempty"`
 }
 
 // tamperAdvice ends the reason of a cut whose record is missing or does
@@ -78,8 +81,9 @@ func openEdgeCut(store fileStore, alerts *alert.Alerts, logf func(string)) (*edg
 		logf("edge cut: " + fileEdgeCut + " unreadable, the edge stays cut until you lift it on the page: " + err.Error())
 		recordMissing(alerts, edgeDevice, logf)
 	} else if !c.st.Cut {
-		// An open edge whose alerts are still open: a lift saved before
-		// a failed append or a crash closed them (#4305 item 2).
+		// An open edge whose lift's alerts are still open: the lift was
+		// saved before a failed append or a crash closed them (#4305
+		// item 2); a trip after it stays open.
 		if err := c.liftedLocked(); err != nil {
 			logf("edge cut: the edge is not cut but its alerts did not close, retried each tick: " + err.Error())
 		}
@@ -166,7 +170,7 @@ func (c *edgeCut) Lift(day uint32, past bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.st.Cut {
-		next := edgeCutState{}
+		next := edgeCutState{Through: c.alerts.Last()}
 		if c.st.Day == day || c.st.Day == 0 && past {
 			next.Lifted = day
 		}
@@ -179,11 +183,11 @@ func (c *edgeCut) Lift(day uint32, past bool) error {
 	return c.liftedLocked()
 }
 
-// liftedLocked closes the open edge's trips and missing record; c.mu is
-// held, so no trip lands between the cut's read and the close. Alerts
+// liftedLocked closes the open edge's trips and missing record its last
+// lift covers (Through); c.mu is held, so no trip lands between the cut's read and the close. Alerts
 // takes no lock of the edge cut's. A failure leaves it owed.
 func (c *edgeCut) liftedLocked() error {
-	err := c.alerts.Lifted(edgeDevice)
+	err := c.alerts.LiftedThrough(edgeDevice, c.st.Through)
 	c.unlifted = err != nil
 	return err
 }

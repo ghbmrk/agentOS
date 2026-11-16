@@ -35,11 +35,18 @@ type cut struct {
 	// Lifted) failed, so the light may be red with no cut standing.
 	// Persist retries it each tick (#4305 item 2).
 	unlifted bool
+	// through is the last lift's alert watermark (cutState.Through).
+	through uint64
 }
 
 type cutState struct {
 	Tripped bool   `json:"tripped"`
 	Reason  string `json:"reason,omitempty"`
+	// Through is the highest alert ID when the owner lifted the cut
+	// (alert.Last): the alerts that lift covers. A trip raised after it
+	// whose record write never landed is not one, so a restart that finds
+	// the core open leaves it red (#4305).
+	Through uint64 `json:"through,omitempty"`
 }
 
 func openCut(store fileStore, alerts *alert.Alerts, logf func(string)) (*cut, error) {
@@ -64,8 +71,9 @@ func openCut(store fileStore, alerts *alert.Alerts, logf func(string)) (*cut, er
 		c.stage, c.reason = channel.Tripped, st.Reason
 		return c, nil
 	}
-	// An open core whose alerts are still open: a lift saved before a
-	// failed append or a crash closed them (#4305 item 2).
+	// An open core whose lift's alerts are still open: the lift was
+	// saved before a failed append or a crash closed them (#4305 item 2).
+	c.through = st.Through
 	if err := c.liftedLocked(); err != nil {
 		logf("cut: the core is not cut but its alerts did not close, retried each tick: " + err.Error())
 	}
@@ -157,21 +165,22 @@ func (c *cut) Resume() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.stage != channel.Open {
-		b, _ := json.Marshal(cutState{})
+		through := c.alerts.Last()
+		b, _ := json.Marshal(cutState{Through: through})
 		if err := c.store.Save(b); err != nil {
 			return err // still cut: a lift that is not saved does not happen
 		}
-		c.stage, c.reason, c.unsaved = channel.Open, "", false
+		c.stage, c.reason, c.unsaved, c.through = channel.Open, "", false, through
 	}
 	return c.liftedLocked()
 }
 
-// liftedLocked closes the open core's paused-channel alert and its trips
-// and missing record; c.mu is held, so no trip lands between the stage
+// liftedLocked closes the open core's paused-channel alert and the trips
+// and missing record its last lift covers (through); c.mu is held, so no trip lands between the stage
 // read and the close, where a late Lifted would close a trip whose cut
 // stands. Alerts takes no lock of the cut's. A failure leaves it owed.
 func (c *cut) liftedLocked() error {
-	err := errors.Join(c.alerts.Resumed(), c.alerts.Lifted(coreDevice))
+	err := errors.Join(c.alerts.Resumed(), c.alerts.LiftedThrough(coreDevice, c.through))
 	c.unlifted = err != nil
 	return err
 }

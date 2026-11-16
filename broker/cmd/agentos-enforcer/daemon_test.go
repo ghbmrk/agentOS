@@ -471,7 +471,7 @@ func TestTripDeviceNamesAreTheBoxConstants(t *testing.T) {
 					}
 				case *ast.SelectorExpr:
 					switch {
-					case fun.Sel.Name == "Lifted" && len(call.Args) == 1:
+					case (fun.Sel.Name == "Lifted" || fun.Sel.Name == "LiftedThrough") && len(call.Args) >= 1:
 						site, dev = "Lifted", call.Args[0]
 					case fun.Sel.Name == "Raise" && len(call.Args) == 2 && isAlertKind(call.Args[0], "Trip", "RecordMissing"):
 						// recordMissing's own body passes its parameter on:
@@ -512,4 +512,52 @@ func isAlertKind(e ast.Expr, names ...string) bool {
 	}
 	pkg, ok := s.X.(*ast.Ident)
 	return ok && pkg.Name == "alert" && slices.Contains(names, s.Sel.Name)
+}
+
+// TestUnsavedTripStaysRedAfterRestart (KRN-12 Response, NET-2 Texts and
+// calls, #4305 item 2, L3 point 1 on #6012): a trip whose cut record write
+// was refused, then a restart, finds the box open, but its trip stays open
+// and the light red: the start-up close covers only the alerts the last
+// saved lift recorded (Through), so it cannot tell the owner all is clear
+// when they never lifted anything. Checked with no lift before and after
+// a lift. Catches a start-up close that resolves every open trip.
+func TestUnsavedTripStaysRedAfterRestart(t *testing.T) {
+	x, _ := enrolled(t, true)
+	day := uint32(4)
+	for _, b := range []struct {
+		name, device, file string
+		trip               func()
+		lift               func() error
+	}{
+		{"core", coreDevice, fileCut, func() { x.d.cut.Trip("test trip") }, func() error { return x.d.cut.Resume() }},
+		{"edge", edgeDevice, fileEdgeCut, func() { day++; x.d.edge.Trip(day, "test trip") }, func() error { return x.d.edge.Lift(day, false) }},
+	} {
+		for _, lifted := range []bool{false, true} {
+			if lifted {
+				b.trip()
+				if err := b.lift(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			x.fail(b.file, true)
+			b.trip()
+			x.advance(time.Second)
+			x.d.Close()
+			x.fail(b.file, false)
+			x.start()
+			if x.colour() != alert.Red || x.openTrips(b.device) != 1 {
+				t.Fatalf("%s (lifted before %v): an unsaved trip closed at the restart: light %v, %d open", b.name, lifted, x.colour(), x.openTrips(b.device))
+			}
+			// The owner's lift of the open box closes it.
+			if b.name == "core" {
+				x.d.cut.Trip("again") // the page offers a resume only on a cut core
+			} else {
+				day++
+				x.d.edge.Trip(day, "again")
+			}
+			if err := b.lift(); err != nil || x.colour() != alert.Off || x.openTrips(b.device) != 0 {
+				t.Fatalf("%s: the lift after: %v, light %v", b.name, err, x.colour())
+			}
+		}
+	}
 }

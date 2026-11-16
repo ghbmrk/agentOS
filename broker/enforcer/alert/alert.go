@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sync"
 	"time"
@@ -503,21 +504,35 @@ func (a *Alerts) resolve(i int) error {
 }
 
 // Lifted resolves every open trip and missing record from device, the
-// only way they close (Resolve refuses them). The daemon calls it once the
+// only way they close (Resolve refuses them). The light goes off when none
+// is left open.
+func (a *Alerts) Lifted(device string) error { return a.LiftedThrough(device, math.MaxUint64) }
+
+// LiftedThrough is Lifted for the alerts with an ID up to through: those a
+// lift saved with through = Last covers. The daemon calls it once the
 // owner's passkey has lifted that cut in full (NET-4), and again for a box
-// it finds open with these still open (a failed append, or a crash before
-// one), so a retry closes them. The light goes off when none is left open.
-func (a *Alerts) Lifted(device string) error {
+// it finds open with them still open (a failed append, or a crash before
+// one), so a retry closes them; a trip raised after the lift, whose cut
+// was never saved, stays open and red (#4305).
+func (a *Alerts) LiftedThrough(device string, through uint64) error {
 	a.mu.Lock()
 	var err error
 	for i := range a.log {
-		if r := a.log[i]; r.Open && r.Kind.Lights() && r.Device == device {
+		if r := a.log[i]; r.Open && r.Kind.Lights() && r.Device == device && r.ID <= through {
 			err = errors.Join(err, a.resolve(i))
 		}
 	}
 	a.mu.Unlock()
 	a.show()
 	return err
+}
+
+// Last is the highest alert ID so far: a lift saves it, so a later
+// LiftedThrough closes only what was open at the lift.
+func (a *Alerts) Last() uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.next
 }
 
 // Core sets whether the core is up (slice l, from the channel and the

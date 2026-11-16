@@ -1137,3 +1137,33 @@ func TestLightingKindsNameTheLiftStep(t *testing.T) {
 		}
 	}
 }
+
+// TestLiftedThroughKeepsLaterTrips (KRN-12 Response, #4305 item 2): a lift
+// bounded by the watermark it saved closes the trips and missing records
+// at or below it on its box only, and leaves a later one open and red.
+// Catches a bounded lift that closes a trip it never covered.
+func TestLiftedThroughKeepsLaterTrips(t *testing.T) {
+	r := newRig(t, &journal{})
+	first, err := r.a.Raise(Trip, "core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	through := r.a.Last()
+	if through != first.ID {
+		t.Fatalf("Last %d, want %d", through, first.ID)
+	}
+	later, err := r.a.Raise(RecordMissing, "core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.a.LiftedThrough("core", through); err != nil {
+		t.Fatal(err)
+	}
+	log := r.a.Log()
+	if log[r.a.byID[first.ID]].Open || !log[r.a.byID[later.ID]].Open || r.bulb.now() != Red {
+		t.Fatalf("bounded lift: %+v, light %v", log, r.bulb.now())
+	}
+	if err := r.a.LiftedThrough("core", r.a.Last()); err != nil || r.bulb.now() != Off {
+		t.Fatalf("full lift: %v, light %v", err, r.bulb.now())
+	}
+}
