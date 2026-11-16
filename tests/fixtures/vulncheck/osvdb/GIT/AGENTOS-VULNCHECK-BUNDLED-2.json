@@ -1,0 +1,29 @@
+{
+ "schema_version": "1.6.0",
+ "id": "AGENTOS-VULNCHECK-BUNDLED-2",
+ "modified": "2026-01-01T00:00:00Z",
+ "published": "2026-01-01T00:00:00Z",
+ "aliases": [
+  "CVE-0000-0202"
+ ],
+ "summary": "Synthetic control entry for tools/vulncheck.py's bundled scan (an advisory at the planted release, accepted by alias); not a real vulnerability.",
+ "affected": [
+  {
+   "ranges": [
+    {
+     "type": "GIT",
+     "repo": "https://github.com/openssl/openssl",
+     "events": [
+      {
+       "introduced": "0"
+      }
+     ]
+    }
+   ],
+   "versions": [
+    "openssl-0.0.1",
+    "openssl-0.0.2"
+   ]
+  }
+ ]
+}

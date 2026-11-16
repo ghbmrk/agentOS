@@ -298,7 +298,7 @@ class RecordsTest(unittest.TestCase):
         self.assertEqual(vulncheck.reopen_cited(recs, 7, "o/r", "tok", opener), 2)
         self.assertEqual(seen[0], ("PATCH", "https://api.github.com/repos/o/r/issues/7", {"state": "open"}))
         self.assertEqual(seen[1][:2], ("POST", "https://api.github.com/repos/o/r/issues/7/comments"))
-        self.assertIn("cites this issue for 2 accepted record(s)", seen[1][2]["body"])
+        self.assertIn("cites this issue for 2 accepted or bundled record(s)", seen[1][2]["body"])
 
     def test_cited_exit_code(self):
         # REQ: EVL-5. #5692: a close step runs `cited N` first: 1 keeps a cited issue
@@ -1806,6 +1806,202 @@ class WorkflowTest(unittest.TestCase):
                         self.assertEqual(slept, ["15", "30"][:min(fails, 2)])
                         for t in range(1, min(fails, 3) + 1):
                             self.assertIn(f"try {t} of 3 failed: go {flaky}", r.stderr)
+
+
+
+OPENSSL = "https://github.com/openssl/openssl"
+
+
+def entry(**kw):
+    e = {"holder": "node@v24.22.3", "copy": "openssl@3.5.9", "build": "guest/openclaw/build-rootfs.sh",
+         "issue": 2919, "ids": [], "why": "test"}
+    return {**e, **kw}
+
+
+class OSV:
+    """A stub of OSV's API: ANSWERS maps a tag to its advisory IDs (a list per page), DETAILS an ID to
+    its aliases (and "withdrawn"). It records every request."""
+
+    def __init__(self, answers, details=None, results=None):
+        self.answers, self.details, self.results, self.seen = answers, details or {}, results, []
+
+    def __call__(self, req, timeout):
+        self.seen.append((req.full_url, json.loads(req.data) if req.data else None))
+        body = self.seen[-1][1]
+        if req.full_url == vulncheck.OSV_QUERYBATCH:
+            out = []
+            for q in body["queries"]:
+                self.check(q)
+                pages = self.answers.get(q["version"], [[]])
+                r = {"vulns": [{"id": i, "modified": "x"} for i in pages[0]]} if pages[0] else {}
+                if len(pages) > 1:
+                    r["next_page_token"] = "1"
+                out.append(r)
+            return io.BytesIO(json.dumps({"results": out if self.results is None else self.results}).encode())
+        if req.full_url == vulncheck.OSV_QUERY:
+            self.check(body)
+            pages, n = self.answers[body["version"]], int(body["page_token"])
+            r = {"vulns": [{"id": i} for i in pages[n]]}
+            if n + 1 < len(pages):
+                r["next_page_token"] = str(n + 1)
+            return io.BytesIO(json.dumps(r).encode())
+        vid = req.full_url.rsplit("/", 1)[1]
+        return io.BytesIO(json.dumps({"id": vid, **self.details.get(vid, {})}).encode())
+
+    @staticmethod
+    def check(q):
+        assert q["package"] == {"name": OPENSSL, "ecosystem": "GIT"}, q
+
+
+CANARY = {"openssl-1.0.1f": [["CVE-2014-0160"]]}
+
+
+class BundledTest(unittest.TestCase):
+    # REQ: EVL-5 (brief VULN-static-check BUN-1 to BUN-5, #5873)
+    def scan(self, entries, answers, details=None):
+        osv = OSV({**CANARY, **answers}, details)
+        copies = map(vulncheck.bundled_copy, entries)
+        return vulncheck.bundled_findings(entries, vulncheck.bundled_advisories(copies, opener=osv)), osv
+
+    def test_an_advisory_fails_unless_the_entry_names_it_or_an_alias(self):
+        answers = {"openssl-3.5.9": [["CVE-1", "OSV-2"]]}
+        details = {"OSV-2": {"aliases": ["CVE-2"]}}
+        (found, probs), osv = self.scan([entry()], answers, details)
+        self.assertEqual(probs, [])
+        self.assertEqual([(f["where"], f["id"], f["aliases"], vulncheck.verdict(f)) for f in found],
+                         [("bundled", "CVE-1", [], "FAIL"), ("bundled", "OSV-2", ["CVE-2"], "FAIL")])
+        self.assertEqual(found[0]["package"], "openssl in node@v24.22.3")
+        self.assertEqual(found[0]["version"], "3.5.9")
+        # The query is the copy's upstream at its release tag, with the canary beside it.
+        batch = next(b for u, b in osv.seen if u == vulncheck.OSV_QUERYBATCH)
+        self.assertEqual([q["version"] for q in batch["queries"]], ["openssl-3.5.9", "openssl-1.0.1f"])
+        (found, probs), _ = self.scan([entry(ids=["CVE-1", "CVE-2"])], answers, details)
+        self.assertEqual(probs, [])
+        self.assertEqual([vulncheck.verdict(f) for f in found], ["accepted #2919", "accepted #2919"])
+
+    def test_ids_accept_only_their_own_copy(self):
+        # Two holders of different releases: an id on one does not accept the other's advisory.
+        entries = [entry(ids=["CVE-1"]), entry(holder="@openai/codex@0.162.1-linux-x64", copy="openssl@3.6.4",
+                                               build="guest/codex/build-rootfs.sh")]
+        (found, probs), _ = self.scan(entries, {"openssl-3.5.9": [["CVE-1"]], "openssl-3.6.4": [["CVE-1"]]})
+        self.assertEqual(probs, [])
+        self.assertEqual(sorted((f["package"], vulncheck.verdict(f)) for f in found),
+                         [("openssl in @openai/codex@0.162.1-linux-x64", "FAIL"),
+                          ("openssl in node@v24.22.3", "accepted #2919")])
+
+    def test_an_id_that_matches_no_advisory_fails(self):
+        (found, probs), _ = self.scan([entry(ids=["CVE-1", "CVE-9"])], {"openssl-3.5.9": [["CVE-1"]]})
+        self.assertEqual(len(probs), 1)
+        self.assertIn("CVE-9 matches no advisory OSV holds for openssl 3.5.9; remove it", probs[0])
+        # A withdrawn advisory is not reported, so an id naming it is stale too.
+        (found, probs), _ = self.scan([entry(ids=["CVE-1"])], {"openssl-3.5.9": [["CVE-1"]]},
+                                      {"CVE-1": {"withdrawn": "2026-01-01T00:00:00Z"}})
+        self.assertEqual(found, [])
+        self.assertEqual(len(probs), 1)
+
+    def test_every_page_is_read(self):
+        (found, probs), osv = self.scan([entry(ids=["CVE-3"])], {"openssl-3.5.9": [["CVE-1"], ["CVE-2"], ["CVE-3"]]})
+        self.assertEqual([f["id"] for f in found], ["CVE-1", "CVE-2", "CVE-3"])
+        self.assertEqual([b["page_token"] for u, b in osv.seen if u == vulncheck.OSV_QUERY], ["1", "2"])
+
+    def test_the_query_fails_closed(self):
+        e = [("openssl", "3.5.9")]
+        # The canary has no advisory: the answers were not read.
+        with self.assertRaisesRegex(vulncheck.ScanError, "nothing for openssl 1.0.1f"):
+            vulncheck.bundled_advisories(e, opener=OSV({"openssl-3.5.9": [["CVE-1"]]}))
+        # An answer per query, or none at all.
+        for results in ([], [{}], [{}, {}, {}], None, [{}, []]):
+            osv = OSV(CANARY, results=results)
+            if results is None:
+                osv.results = "x"
+            with self.assertRaisesRegex(vulncheck.ScanError, "answered"):
+                vulncheck.bundled_advisories(e, opener=osv)
+
+        def down(req, timeout):
+            raise urllib.error.URLError("no route")
+        with self.assertRaisesRegex(vulncheck.ScanError, "bundled-copy query failed"):
+            vulncheck.bundled_advisories(e, opener=down)
+        # A detail answered for another ID.
+        osv = OSV({**CANARY, "openssl-3.5.9": [["CVE-1"]]})
+        real = osv.__call__
+
+        def swapped(req, timeout):
+            r = real(req, timeout)
+            return io.BytesIO(b'{"id": "CVE-2"}') if "/vulns/" in req.full_url else r
+        with self.assertRaisesRegex(vulncheck.ScanError, "answered for 'CVE-2'"):
+            vulncheck.bundled_advisories(e, opener=swapped)
+
+    def test_offline_database_matches_repository_and_tag(self):
+        with tempfile.TemporaryDirectory() as d:
+            eco = pathlib.Path(d) / "osv-scalibr" / "GIT"
+            eco.mkdir(parents=True)
+            with zipfile.ZipFile(eco / "all.zip", "w") as z:
+                for f in (vulncheck.FIXTURE / "osvdb" / "GIT").glob("*.json"):
+                    z.write(f, f.name)
+            got = vulncheck.bundled_advisories([("openssl", "0.0.1")], {"OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY": d}, True)
+        self.assertEqual(got, {("openssl", "0.0.1"): [{"id": "AGENTOS-VULNCHECK-BUNDLED-1", "aliases": []},
+                                                     {"id": "AGENTOS-VULNCHECK-BUNDLED-2", "aliases": ["CVE-0000-0202"]}]})
+        with self.assertRaisesRegex(vulncheck.ScanError, "unreadable OSV database"):
+            vulncheck.bundled_advisories([("openssl", "0.0.1")], {"OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY": "/nonexistent"}, True)
+
+    def test_shape_problems(self):
+        good = entry()
+        self.assertEqual(vulncheck.bundled_problems([good]), [])
+        cases = [
+            ({**good, "extra": 1}, "keys must be exactly"),
+            ({k: v for k, v in good.items() if k != "why"}, "keys must be exactly"),
+            (entry(holder="node"), "holder must be name@version"),
+            (entry(copy="openssl"), "copy must be name@version"),
+            (entry(copy="libressl@4.0.0"), "no upstream is known for libressl"),
+            (entry(build="guest/none.sh"), "build must name the script"),
+            (entry(build="/etc/passwd"), "build must name the script"),
+            (entry(build="guest/../guest/openclaw/build-rootfs.sh"), "build must name the script"),
+            (entry(issue=0), "issue must be an issue number"),
+            (entry(issue=True), "issue must be an issue number"),
+            (entry(issue="2919"), "issue must be an issue number"),
+            (entry(ids="CVE-1"), "ids must be a list"),
+            (entry(ids=["CVE-1", "CVE-1"]), "ids must be a list"),
+            (entry(ids=[""]), "ids must be a list"),
+            (entry(ids=[" CVE-1"]), "ids must be a list"),
+            (entry(why=" "), "no reason"),
+            ("x", "not an object"),
+        ]
+        for bad, want in cases:
+            probs = vulncheck.bundled_problems([bad])
+            self.assertTrue(any(want in p for p in probs), (bad, probs))
+        self.assertIn("a second entry", vulncheck.bundled_problems([good, entry(ids=["X"])])[0])
+        self.assertEqual(vulncheck.bundled_problems({}), ["bundled: not a list"])
+        # The scan stops on a bad entry before it queries anything.
+        cfg = {"go_targets": ["x"], "osv_sources": ["y"], "bundled": [entry(copy="libressl@4.0.0")]}
+        findings, probs, _ = vulncheck.scan(cfg, ROOT)
+        self.assertEqual(findings, [])
+        self.assertIn("no upstream is known for libressl", probs[0])
+
+    def test_issue_records_include_bundled_ids(self):
+        cfg = {"accepted": [{"id": "A", "issue": 1, "where": "image"}, {"id": "B", "issue": 2}],
+               "bundled": [entry(ids=["C", "D"], issue=3)]}
+        self.assertEqual(vulncheck.issue_records(cfg, "run"),
+                         [{"id": "B", "issue": 2}, {"id": "C", "issue": 3}, {"id": "D", "issue": 3}])
+        self.assertEqual(vulncheck.issue_records(cfg, "image"), [{"id": "A", "issue": 1, "where": "image"}])
+        # A closed issue withdraws a bundled entry's ids too, so `cited` and `reopen` count it.
+        self.assertEqual(vulncheck.cited(vulncheck.citing(cfg), 3), 1)
+        self.assertEqual(vulncheck.cited(vulncheck.citing({"bundled": [entry(ids=[])]}), 2919), 1)
+
+    def test_live_entries_are_valid_and_cite_the_issue_the_ids_are_in(self):
+        cfg = json.loads(vulncheck.CONFIG.read_text())
+        self.assertEqual(vulncheck.bundled_problems(cfg["bundled"]), [])
+        self.assertEqual(vulncheck.cited(vulncheck.citing(cfg), 2919),
+                         vulncheck.cited(cfg["accepted"], 2919) + len(cfg["bundled"]))
+
+    def test_summary_names_the_bundled_fix(self):
+        out = io.StringIO()
+        f = {"where": "bundled", "id": "CVE-1", "aliases": [], "level": "bundled", "module": "openssl",
+             "version": "3.5.9", "package": "openssl in node@v24.22.3", "function": "", "fixed": "", "fails": True}
+        self.assertFalse(vulncheck.summary([f], [], [], out))
+        text = out.getvalue()
+        self.assertIn("FAIL         bundled: CVE-1 bundled openssl in node@v24.22.3 3.5.9", text)
+        self.assertIn("\"bundled\" entry's ids", text)
+        self.assertNotIn("upgrade to the fixed version", text)
 
 
 @unittest.skipUnless(shutil.which("govulncheck") and shutil.which("osv-scanner"),
