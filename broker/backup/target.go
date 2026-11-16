@@ -145,9 +145,11 @@ const maxSealedTable = int64(headerLen + maxTable + (maxTable+chunkSize-1)/chunk
 // is refused by O_NOFOLLOW; a FIFO, socket, device or directory by the
 // type of the open descriptor, O_NONBLOCK keeping the open of a FIFO from
 // waiting for a writer; and a file over maxSealedTable unread. A regular
-// file's reads never block, so O_NONBLOCK stays set.
+// file's reads never block, so O_NONBLOCK stays set. O_NOCTTY keeps a
+// planted terminal from becoming the daemon's controlling terminal; os.OpenFile
+// sets O_CLOEXEC itself.
 func readFile(p string) ([]byte, error) {
-	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0)
 	if errors.Is(err, syscall.ENXIO) {
 		return nil, fmt.Errorf("backup: %s is a socket or a device with no driver, not a regular file: %w", p, err)
 	}

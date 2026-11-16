@@ -229,4 +229,23 @@ func TestGetTableBoundsRead(t *testing.T) {
 	if b, err := readBounded(strings.NewReader(strings.Repeat("x", 10)), 10); err != nil || len(b) != 10 {
 		t.Errorf("readBounded at its bound: %d bytes, %v", len(b), err)
 	}
+	// A file that keeps growing after its fstat: reading stops at n+1 bytes.
+	r := &endless{t: t, limit: 11}
+	if _, err := readBounded(r, 10); err == nil || r.n != 11 {
+		t.Errorf("readBounded of an endless reader: %v after %d bytes, want refused after 11", err, r.n)
+	}
+}
+
+// endless is a reader that never ends and fails the test once read past limit.
+type endless struct {
+	t        *testing.T
+	n, limit int
+}
+
+func (e *endless) Read(p []byte) (int, error) {
+	if e.n+len(p) > e.limit {
+		e.t.Fatalf("read past %d bytes: the bound is not applied while reading", e.limit)
+	}
+	e.n += len(p)
+	return len(p), nil
 }
