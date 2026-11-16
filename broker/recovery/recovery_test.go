@@ -94,6 +94,332 @@ func TestARecoveryKeyTypoNamesItsGroup(t *testing.T) {
 	}
 }
 
+func TestAWrongRecoveryKeyIsRefusedEvenWithACodeAndTheLocalPage(t *testing.T) {
+	x := newBox(t)
+	a := Auth{Code: true, Local: true, Recovery: mustKey(t)}
+	if err := a.check(x.b); !errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("a wrong recovery key beside a code and the local page: %v", err)
+	}
+	if err := (Auth{Code: true, Local: true}).check(x.b); err != nil {
+		t.Fatalf("code and local page: %v", err)
+	}
+}
+
+func TestNoBackupKeyDerivesFromAnEmptyRecoveryKey(t *testing.T) {
+	if _, err := backupPrivate(RecoveryKey{}); err == nil {
+		t.Fatal("backupPrivate of no key")
+	}
+	if _, err := backupPublic(RecoveryKey{}); err == nil {
+		t.Fatal("backupPublic of no key")
+	}
+}
+
+func TestAnEmptyRecoveryKeyEnrollsNoSlot(t *testing.T) {
+	s, kek, err := Factor(RecoveryKey{}).Enroll()
+	if err == nil || kek != nil || s.Kind != "" || s.Sealed != nil {
+		t.Fatalf("Enroll of no key: %+v, %x, %v", s, kek, err)
+	}
+}
+
+func TestTheRecoverySlotKEKNeedsABareThirtyTwoByteSalt(t *testing.T) {
+	rk := mustKey(t)
+	salt := bytes.Repeat([]byte{5}, 32)
+	if _, err := Factor(rk).KEK(vault.Slot{Kind: vault.SlotRecovery, Sealed: salt}); err != nil {
+		t.Fatal(err)
+	}
+	for name, s := range map[string]vault.Slot{
+		"kdf":     {Kind: vault.SlotRecovery, Sealed: salt, KDF: &vault.KDF{}},
+		"short":   {Kind: vault.SlotRecovery, Sealed: salt[:31]},
+		"long":    {Kind: vault.SlotRecovery, Sealed: append(salt, 0)},
+		"no-salt": {Kind: vault.SlotRecovery},
+	} {
+		if _, err := Factor(rk).KEK(s); !errors.Is(err, vault.ErrNoSlotOpens) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if _, err := Factor(RecoveryKey{}).KEK(vault.Slot{Kind: vault.SlotRecovery, Sealed: salt}); !errors.Is(err, vault.ErrNoSlotOpens) {
+		t.Errorf("no key: %v", err)
+	}
+}
+
+func TestStoreBackupKeyNeedsAKeyASlotFileAndItsOwnKind(t *testing.T) {
+	x := newBox(t)
+	before, _, err := reserved(x.b.V, BackupKeyName, KindBackupKey)
+	must(t, err)
+	if err := storeBackupKey(x.b, RecoveryKey{}); err == nil {
+		t.Fatal("stored a backup key for no recovery key")
+	}
+	gone := &Box{VaultPath: x.b.VaultPath, KeysPath: filepath.Join(t.TempDir(), "missing.keys"), V: x.b.V}
+	if err := storeBackupKey(gone, x.rk); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing slot file: %v", err)
+	}
+	after, _, err := reserved(x.b.V, BackupKeyName, KindBackupKey)
+	must(t, err)
+	if !bytes.Equal(before, after) {
+		t.Fatal("a failed storeBackupKey changed the backup key")
+	}
+	must(t, x.b.V.Put(BackupKeyName, vault.KindAPIKey, []byte("sk-synthetic-not-a-backup-key")))
+	if err := storeBackupKey(x.b, x.rk); !errors.Is(err, ErrWrongKind) {
+		t.Fatalf("wrong-kind entry: %v", err)
+	}
+	if k, _ := entryKind(x.b.V, BackupKeyName); k != vault.KindAPIKey {
+		t.Fatalf("the entry of another kind was overwritten: %q", k)
+	}
+}
+
+func TestEnsureMACKeyKeepsTheKeyItHasAndRefusesAnotherKind(t *testing.T) {
+	x := newBox(t)
+	k1, err := macKey(x.b.V)
+	must(t, err)
+	must(t, ensureMACKey(x.b.V))
+	k2, err := macKey(x.b.V)
+	must(t, err)
+	if !bytes.Equal(k1, k2) {
+		t.Fatal("ensureMACKey replaced an existing MAC key")
+	}
+	must(t, x.b.V.Put(MACKeyName, vault.KindAPIKey, []byte("sk-synthetic-not-a-mac-key")))
+	if err := ensureMACKey(x.b.V); !errors.Is(err, ErrWrongKind) {
+		t.Fatalf("ensureMACKey over another kind: %v", err)
+	}
+	if err := rotateMACKey(x.b.V); !errors.Is(err, ErrWrongKind) {
+		t.Fatalf("rotateMACKey over another kind: %v", err)
+	}
+	if k, _ := entryKind(x.b.V, MACKeyName); k != vault.KindAPIKey {
+		t.Fatalf("the entry of another kind was overwritten: %q", k)
+	}
+	// A MAC key of the wrong length is no key.
+	must(t, x.b.V.Put(MACKeyName, KindMACKey, bytes.Repeat([]byte{3}, 16)))
+	if k, err := macKey(x.b.V); err == nil || k != nil {
+		t.Fatalf("a 16-byte MAC key: %x, %v", k, err)
+	}
+}
+
+func TestAnEmptyRecoveryKeyPrintsNothing(t *testing.T) {
+	if s := (RecoveryKey{}).Text(); s != "" {
+		t.Fatalf("Text of no key = %q", s)
+	}
+}
+
+// RFC 5869 appendix A.1 (SHA-256, 42 bytes: two blocks).
+
+func TestKeySlotsNeedATwelveByteNonceAndAWrappedKey(t *testing.T) {
+	readKeys := func(path string) keysFile {
+		raw, err := os.ReadFile(path)
+		must(t, err)
+		var kf keysFile
+		must(t, json.Unmarshal(raw, &kf))
+		return kf
+	}
+	x := newBox(t)
+	for name, bad := range map[string]func(*keysSlot){
+		"nonce":   func(s *keysSlot) { s.Nonce = s.Nonce[:11] },
+		"wrapped": func(s *keysSlot) { s.Wrapped = s.Wrapped[:vault.KeySize+15] },
+		"tpm-sealed": func(s *keysSlot) {
+			if s.Kind == vault.SlotTPM {
+				s.Sealed = nil
+			}
+		},
+		"passphrase-kdf": func(s *keysSlot) {
+			if s.Kind == vault.SlotRecovery {
+				s.Kind, s.Sealed = vault.SlotPassphrase, nil
+			}
+		},
+	} {
+		kf := readKeys(x.b.KeysPath)
+		for i := range kf.Slots {
+			if name == "nonce" || name == "wrapped" {
+				bad(&kf.Slots[0])
+				break
+			}
+			bad(&kf.Slots[i])
+		}
+		raw, err := json.Marshal(kf)
+		must(t, err)
+		if err := CheckKeys(raw); err == nil {
+			t.Errorf("%s: a malformed slot passed", name)
+		}
+	}
+}
+
+func TestRecoverySlotIDIsTheDomainSeparatedSaltHash(t *testing.T) {
+	readKeys := func(path string) keysFile {
+		raw, err := os.ReadFile(path)
+		must(t, err)
+		var kf keysFile
+		must(t, json.Unmarshal(raw, &kf))
+		return kf
+	}
+	x := newBox(t)
+	var salt []byte
+	for _, s := range readKeys(x.b.KeysPath).Slots {
+		if s.Kind == vault.SlotRecovery {
+			salt = s.Sealed
+		}
+	}
+	want := sha256.Sum256(append([]byte("agentos-recovery-slot-id/v2\x00"), salt...))
+	got, err := recoverySlotID(x.b.KeysPath)
+	must(t, err)
+	if !bytes.Equal(got, want[:]) {
+		t.Fatalf("slot id %x, want %x", got, want)
+	}
+	if _, err := recoverySlotID(filepath.Join(t.TempDir(), "none")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing file: %v", err)
+	}
+	bad := filepath.Join(t.TempDir(), "bad.keys")
+	must(t, os.WriteFile(bad, []byte(`{"magic":"agentos-vault-keys","version":2,"slots":[]}`), 0o600))
+	if _, err := recoverySlotID(bad); err == nil || !strings.Contains(err.Error(), "version") {
+		t.Fatalf("unreadable file: %v", err)
+	}
+}
+
+// The forget log's header and chain start are MACs of a fixed layout, so a
+
+// log a later build reads verifies; each field is bound into the header.
+
+func TestProvisionStopsAtABadKeyOrAFactorThatOpensNothing(t *testing.T) {
+	x := newBox(t)
+	bad := x.card
+	bad.RecoveryKey = "not a recovery key"
+	_, perr := ParseRecoveryKey(bad.RecoveryKey)
+	if err := Provision(x.b, bad, Factor(x.rk)); err == nil || err.Error() != perr.Error() {
+		t.Fatalf("Provision with an unreadable key: %v, want %v", err, perr)
+	}
+	if err := Provision(x.b, x.card, Factor(mustKey(t))); !errors.Is(err, vault.ErrNoSlotOpens) {
+		t.Fatalf("Provision with a factor that opens nothing: %v", err)
+	}
+}
+
+func TestStoreCardChecksEachEntryKindAndTheSecretLength(t *testing.T) {
+	x := newBox(t)
+	c := x.card
+	c.SetupSecret = strings.Repeat("S", vault.MinValueLen)
+	must(t, storeCard(x.b, c))
+	c.SetupSecret = c.SetupSecret[1:]
+	if err := storeCard(x.b, c); err == nil || !strings.Contains(err.Error(), "card setup too short") {
+		t.Fatalf("short setup secret: %v", err)
+	}
+	for _, name := range []string{CardName, CardName + "-setup"} {
+		y := newBox(t)
+		must(t, y.b.V.Put(name, vault.KindAPIKey, []byte("sk-synthetic-not-a-card")))
+		if err := storeCard(y.b, y.card); !errors.Is(err, ErrWrongKind) {
+			t.Errorf("%s of another kind: %v", name, err)
+		}
+		if k, _ := entryKind(y.b.V, name); k != vault.KindAPIKey {
+			t.Errorf("%s: the entry of another kind was overwritten: %q", name, k)
+		}
+	}
+}
+
+// A key whose last symbol is not zero prints and reads back whole: the
+
+// last five bits are a symbol of their own.
+
+func TestARecoveryKeyPrintsItsLastSymbol(t *testing.T) {
+	k, err := NewRecoveryKey(bytes.NewReader(bytes.Repeat([]byte{0xff}, 64)))
+	must(t, err)
+	txt := k.Text()
+	groups := strings.Split(txt, "-")
+	if last := groups[len(groups)-1]; last[:4] != strings.Repeat(string(Alphabet[31]), 4) {
+		t.Fatalf("last group %q of %q", last, txt)
+	}
+	back, err := ParseRecoveryKey(txt)
+	must(t, err)
+	if !bytes.Equal(back.b[:], k.b[:]) {
+		t.Fatalf("read back %x, printed %x", back.b[:], k.b[:])
+	}
+}
+
+// RFC 5869 appendix A.1 (SHA-256, 42 bytes: two blocks).
+func TestHKDFMatchesRFC5869(t *testing.T) {
+	ikm := bytes.Repeat([]byte{0x0b}, 22)
+	var salt, info []byte
+	for i := byte(0); i <= 0x0c; i++ {
+		salt = append(salt, i)
+	}
+	for i := byte(0xf0); i <= 0xf9; i++ {
+		info = append(info, i)
+	}
+	want := "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
+	var got []byte
+	for _, c := range hkdf(ikm, salt, string(info), 42) {
+		got = append(got, "0123456789abcdef"[c>>4], "0123456789abcdef"[c&15])
+	}
+	if string(got) != want {
+		t.Fatalf("hkdf = %s\nwant   %s", got, want)
+	}
+}
+
+// The header and chain-start MACs are a fixed layout, so a log written by
+// an earlier build verifies: these values are HMAC-SHA256 under 32 bytes of
+// 0x09 of "agentos-forget-header-v1\x00" + format + "\x00" + ID + "\x00" +
+// host + "\x00" + base and anchor seq (big-endian uint64 each), and of
+// "agentos-forget-chain-v1\x00" + ID. Each header field is bound in.
+func TestForgetLogHeaderAndChainStartLayout(t *testing.T) {
+	key := bytes.Repeat([]byte{9}, 32)
+	l := forgetLog{Format: forgetLogFmt, ID: bytes.Repeat([]byte{1}, 16), Host: "pc-a", Base: 7, AnchorSeq: 3}
+	if got := l.headerMAC(key); got != "cbba32d906ba4ad9ba37ccd463c7b2d19cf8f85bde8c3fe9481b4b2477d88563" {
+		t.Fatalf("header MAC %s", got)
+	}
+	if got := chainStart(key, l.ID); got != "6c06fc530d0a526cdf89b793181ff5a10cc3ed5a93e009a13eac228cf2b2c83c" {
+		t.Fatalf("chain start %s", got)
+	}
+	base := l.headerMAC(key)
+	for name, edit := range map[string]func(*forgetLog){
+		"format": func(m *forgetLog) { m.Format += "x" },
+		"id":     func(m *forgetLog) { m.ID = bytes.Repeat([]byte{2}, 16) },
+		"host":   func(m *forgetLog) { m.Host = "pc-b" },
+		"base":   func(m *forgetLog) { m.Base = 8 },
+		"anchor": func(m *forgetLog) { m.AnchorSeq = 4 },
+	} {
+		m := l
+		edit(&m)
+		if m.headerMAC(key) == base {
+			t.Errorf("the header MAC does not bind %s", name)
+		}
+	}
+}
+
+func TestEnsureForgetLogStopsOnAMalformedKeyOrLog(t *testing.T) {
+	for name, kind := range map[string]string{ForgetKeyName: KindForgetKey, ForgetLogName: KindForgetLog} {
+		x := newBox(t)
+		junk := []byte(`{"format":"not-this-one"}`)
+		must(t, x.b.V.Put(name, kind, junk))
+		if err := ensureForgetLog(x.b.V, x.rk, nil); err == nil {
+			t.Errorf("%s: a malformed entry was replaced", name)
+		}
+		got, _, err := reserved(x.b.V, name, kind)
+		must(t, err)
+		if !bytes.Equal(got, junk) {
+			t.Errorf("%s: the malformed entry changed", name)
+		}
+	}
+	// Each decoder refuses a field it does not know, even beside valid ones.
+	if _, err := decodeForgetLog([]byte(`{"format":"` + forgetLogFmt + `","id":"AQEBAQEBAQEBAQEBAQEBAQ==","mac":"","entries":null,"extra":1}`)); err == nil {
+		t.Error("a forget log with an unknown field decoded")
+	}
+	y := newBox(t)
+	key := `{"format":"` + forgetKeyFmt + `","key":"CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=","auth":"YQ==","extra":1}`
+	must(t, y.b.V.Put(ForgetKeyName, KindForgetKey, []byte(key)))
+	if _, _, err := loadForgetKey(y.b.V); err == nil {
+		t.Error("a forget key with an unknown field loaded")
+	}
+	must(t, y.b.V.Put(ForgetKeyName, KindForgetKey, []byte(strings.Replace(key, `,"extra":1`, "", 1))))
+	if _, _, err := loadForgetKey(y.b.V); err != nil {
+		t.Errorf("the same key without the field: %v", err)
+	}
+
+}
+
+func TestSaveForgetLogReportsAnEntryItCannotEncode(t *testing.T) {
+	x := newBox(t)
+	l := forgetLog{Format: forgetLogFmt, ID: bytes.Repeat([]byte{1}, 16),
+		Entries: []ForgetEntry{{Seq: 1, Goal: "g", At: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)}}}
+	var me *json.MarshalerError
+	if err := saveForgetLog(x.b.V, l); !errors.As(err, &me) {
+		t.Fatalf("err = %v, want the encoding error", err)
+	}
+}
+
 // REQ: CRED-8
 // Acceptance: A8 (key-slot header contents)
 
