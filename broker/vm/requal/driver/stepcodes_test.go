@@ -11,6 +11,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -36,11 +37,14 @@ const (
 // never refuses a step with them: they refuse a plan before the loop, a send,
 // a dispatch, a fold or a call outside Admit. A code the kernel gains is in
 // neither this list nor the row, so the pin fails until someone classes it.
+// The limit: which codes are step codes is classed by hand. stepBodies fails
+// a listed code named in the loop or in key.Authorize, but a listed code that
+// a callee of the loop starts to write would stay green.
 var notStepCodes = []string{
 	"needs-cosign", // CCosign: a co-signed send's total (cosign.go)
-	"cut-off",      // CCutOff: a key narrowed by a cut-off passkey, at dispatch
+	"cut-off",      // CCutOff: a key narrowed by a cut-off passkey: Live, before the loop with no step, and at dispatch
 	"extension",    // CExtension: a held key's extension
-	"grant-held",   // CGrantHeld: a grant not yet live, at dispatch
+	"grant-held",   // CGrantHeld: a grant not yet live: Live, before the loop with no step, and at dispatch
 	"held",         // CHeld: a held task, at dispatch
 	"in-flight",    // CInFlight: a step already in flight, at dispatch
 	"key",          // CKey: a plan whose key does not verify, before the loop
@@ -49,7 +53,7 @@ var notStepCodes = []string{
 	"pool",         // CPool: a pool call
 	"trip",         // CTrip: a tripped plan, before the loop
 	"tripped",      // CTripped: planning stopped after a trip, before the loop
-	"not-granted",  // CUngranted: a step with no grant, at dispatch
+	"not-granted",  // CUngranted: a key with no grant: Live, before the loop with no step, and at dispatch
 }
 
 // externalWriters are the calls out of kernel and key that are handed
@@ -60,14 +64,17 @@ var externalWriters = map[string]string{
 	"fmt.Errorf":            "formats only",
 	"fmt.Sprintf":           "formats only",
 	"fmt.Sprint":            "formats only",
-	"errors.As":             "sets the target pointer to an error value, never a field",
 	"errors.Is":             "compares only",
 	"errors.Join":           "wraps only",
 	"reflect.DeepEqual":     "compares only",
 	"encoding/json.Marshal": "reads only",
-	"encoding/json.Unmarshal in kernel.body": "decodes a log entry the kernel wrote (LOG-1, LOG-2); " +
-		"each code in it was written from a field or constant this scan checks",
-	"encoding/json.Unmarshal in kernel.asLogged": "round-trips a value the kernel is about to log, so out holds v's codes",
+	"encoding/json.Unmarshal in kernel.body": "decodes an Entry's Body, which only the log's append and decode write " +
+		"(guardedFields), from values this scan checks; an Entry another package builds is a log it read, data and not kernel code",
+	"slices.EqualFunc": "compares only",
+	"encoding/json.Unmarshal in kernel.Open": "decodes a log frame the log's AEAD opened, so an Entry append sealed; " +
+		"Entry's Body is guarded (guardedFields)",
+	"encoding/json.Unmarshal in kernel.LoggedAnchors": "decodes the setup frame the log's AEAD opened, as kernel.Open does",
+	"encoding/json.Unmarshal in kernel.asLogged":      "round-trips a value the kernel is about to log, so out holds v's codes",
 	// The scan's boundary: code outside kernel and key that the kernel hands
 	// its state. A clerk sees it as the read-only View (CLK-2); a Backups is
 	// handed *State. A code such code writes is not one kernel or key declares.
@@ -81,7 +88,10 @@ var externalWriters = map[string]string{
 // Every write of a refusal code anywhere in kernel and key must be a declared
 // package-level string constant, or a copy from another code-carrying field or
 // a code parameter whose own writes and callers obey the same rule; any other
-// form fails, so no helper shape or sentinel variable can hide a code. The
+// form fails, so no helper shape or sentinel variable can hide a code; nor can a
+// struct of the same shape, a generic literal, the log decoder, a type
+// assertion out of an interface, or a value returned from a package that
+// imports key. The
 // constants so used must then equal the row's codes plus notStepCodes.
 func TestTheAssumptionNamesTheKernelsStepChecks(t *testing.T) {
 	row := rowStepCodes(t, readFile(t, assumptionsMD))
@@ -154,8 +164,10 @@ func TestTheStepCheckPinCatchesDrift(t *testing.T) {
 	inAuth := func(body string) (string, string, string) { return authGo, authAt, body + "\n" + authAt }
 	type mutant struct {
 		file, anchor, rep string
-		tail              string // appended to the file
-		read              bool   // adds new-check to the codes, rather than failing the scan
+		tail              string            // appended to the file
+		read              bool              // adds new-check to the codes, rather than failing the scan
+		imp               string            // an import added to the file
+		files             map[string]string // new files
 	}
 	m := func(file, anchor, rep string) mutant { return mutant{file: file, anchor: anchor, rep: rep} }
 	withTail := func(mu mutant, tail string, read bool) mutant { mu.tail, mu.read = tail, read; return mu }
@@ -184,9 +196,9 @@ func TestTheStepCheckPinCatchesDrift(t *testing.T) {
 		// Round 3 (6924376062): a helper returning error, and a sentinel.
 		"a helper returning error (key)": withTail(m(authGo, authAt,
 			"\tif err := v.extra(s); err != nil {\n\t\treturn err.(*Refusal)\n\t}\n"+authAt),
-			"\nfunc (v *Verified) extra(s Step) error {\n\tif s.Amount > 1<<40 {\n\t\treturn refuse(RNewCheck, \"x\")\n\t}\n\treturn nil\n}\n"+newKeyConst, true),
+			"\nfunc (v *Verified) extra(s Step) error {\n\tif s.Amount > 1<<40 {\n\t\treturn refuse(RNewCheck, \"x\")\n\t}\n\treturn nil\n}\n"+newKeyConst, false),
 		"a helper returning error (kernel)": withTail(m(inLoop(`			if e := chkNew(); e != nil { return key.ID{}, nil, on(e.(*key.Refusal), &i) }`)),
-			"\nfunc mkNew() *key.Refusal { return &key.Refusal{Code: CNewCheck, Detail: \"x\"} }\nfunc chkNew() error { return mkNew() }\n"+newConst, true),
+			"\nfunc mkNew() *key.Refusal { return &key.Refusal{Code: CNewCheck, Detail: \"x\"} }\nfunc chkNew() error { return mkNew() }\n"+newConst, false),
 		"a sentinel variable":         withTail(m(inLoop(`			return key.ID{}, nil, on(errNew, &i)`)), "\nvar errNew = &key.Refusal{Code: \"new-check\", Detail: \"x\"}\n", false),
 		"a sentinel of a constant":    withTail(m(inLoop(`			return key.ID{}, nil, on(errNew, &i)`)), "\nvar errNew = &key.Refusal{Code: CNewCheck, Detail: \"x\"}\n"+newConst, true),
 		"a sentinel copied":           withTail(m(inLoop(`			r := &key.Refusal{Detail: "x"}; *r = *errNew; return key.ID{}, nil, on(r, &i)`)), "\nvar errNew = &key.Refusal{Code: CNewCheck, Detail: \"x\"}\n"+newConst, true),
@@ -201,7 +213,23 @@ func TestTheStepCheckPinCatchesDrift(t *testing.T) {
 		"a tuple from a call":       m(inLoop(`			r := &key.Refusal{}; r.Code, r.Detail = fmt.Sprint("new-check"), "x"; return key.ID{}, nil, on(r, &i)`)),
 		"a copied field written":    withTail(m(inLoop(`			h := holder{c: "new-check"}; return key.ID{}, nil, on(&key.Refusal{Code: h.c}, &i)`)), "\ntype holder struct{ c string }\n", false),
 		"a copied field from const": withTail(m(inLoop(`			h := holder{c: CNewCheck}; return key.ID{}, nil, on(&key.Refusal{Code: h.c}, &i)`)), "\ntype holder struct{ c string }\n"+newConst, true),
-		"a new constant code":       withTail(m(inLoop(`			return key.ID{}, nil, on(&key.Refusal{Code: CNewCheck}, &i)`)), newConst, true),
+		// Round 2 of #6021 (L3 6924923773, Security 6924966358).
+		"an identical unnamed struct": m(inLoop(`			var r key.Refusal = struct{ Code, Detail string }{"new-check", "x"}; return key.ID{}, nil, on(&r, &i)`)),
+		"an identical struct written": m(inLoop(`			var u struct{ Code, Detail string }; u.Code = "new-check"; var r key.Refusal = u; return key.ID{}, nil, on(&r, &i)`)),
+		"an identical struct sent":    m(inLoop(`			ch := make(chan key.Refusal, 1); ch <- struct{ Code, Detail string }{Code: "new-check"}; r := <-ch; return key.ID{}, nil, on(&r, &i)`)),
+		"an identical struct returned": withTail(m(inLoop(`			r := mkU(); return key.ID{}, nil, on(&r, &i)`)),
+			"\nfunc mkU() key.Refusal { return struct{ Code, Detail string }{\"new-check\", \"x\"} }\n", false),
+		"a generic literal": withTail(m(inLoop(`			r := mkR[key.Refusal](); return key.ID{}, nil, on(&r, &i)`)),
+			"\nfunc mkR[T ~struct{ Code, Detail string }]() T { return T{Code: CPlan} }\n", false),
+		"the log decoder on a built entry": m(inLoop("\t\t\tr, _ := body[key.Refusal](Entry{Body: []byte(`{\"Code\":\"new-check\"}`)}); return key.ID{}, nil, on(&r, &i)")),
+		"the log decoder on a set body":    m(inLoop("\t\t\tvar e Entry; e.Body = []byte(`{\"Code\":\"new-check\"}`); r, _ := body[key.Refusal](e); return key.ID{}, nil, on(&r, &i)")),
+		"a refusal from an imported package": {file: kernelGo, anchor: loopAt,
+			rep: "\t\tif r := ipform.CheckNew(st.Amount); r != nil {\n\t\t\treturn key.ID{}, nil, on(r, &i)\n\t\t}\n" + loopAt,
+			imp: modulePath + "/kernel/ipform",
+			files: map[string]string{filepath.Join(kernelDir, "ipform", "checknew.go"): "package ipform\n\nimport \"" + modulePath + "/kernel/key\"\n\n" +
+				"func CheckNew(a int64) *key.Refusal {\n\tif a > 1<<40 {\n\t\treturn &key.Refusal{Code: \"new-check\", Detail: \"x\"}\n\t}\n\treturn nil\n}\n"}},
+		"a step refusal with a non-step code": m(inLoop(`			return key.ID{}, nil, on(&key.Refusal{Code: CCutOff, Detail: "x"}, &i)`)),
+		"a new constant code":                 withTail(m(inLoop(`			return key.ID{}, nil, on(&key.Refusal{Code: CNewCheck}, &i)`)), newConst, true),
 	} {
 		t.Run(name, func(t *testing.T) {
 			src := readFile(t, c.file)
@@ -210,7 +238,12 @@ func TestTheStepCheckPinCatchesDrift(t *testing.T) {
 				t.Fatalf("the mutant did not apply to %s", c.file)
 			}
 			mut += c.tail
-			got, errs := scanCodes(t, map[string]string{c.file: mut})
+			if c.imp != "" {
+				mut = strings.Replace(mut, "import (", "import (\n\t\""+c.imp+"\"", 1)
+			}
+			over := map[string]string{c.file: mut}
+			maps.Copy(over, c.files)
+			got, errs := scanCodes(t, over)
 			switch {
 			case c.read && len(errs) > 0:
 				t.Fatalf("want new-check read, got scan errors:\n%s", strings.Join(errs, "\n"))
@@ -301,10 +334,11 @@ func (l *loader) load(dir, path string) (*loaded, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A file left out for its build constraints, or a cgo file, is code the
-	// scan would not read.
+	// A file left out for its build constraints, a cgo file, or an assembly
+	// or object file (a bodyless function's body) is code the scan would not
+	// read.
 	var skipped []string
-	for _, f := range append(append(slices.Clone(bp.IgnoredGoFiles), bp.InvalidGoFiles...), bp.CgoFiles...) {
+	for _, f := range slices.Concat(bp.IgnoredGoFiles, bp.InvalidGoFiles, bp.CgoFiles, bp.SFiles, bp.SysoFiles) {
 		if !strings.HasSuffix(f, "_test.go") {
 			skipped = append(skipped, f)
 		}
@@ -312,8 +346,15 @@ func (l *loader) load(dir, path string) (*loaded, error) {
 	if len(skipped) > 0 && l.scan[path] {
 		return nil, fmt.Errorf("%s has files the scan cannot read: %v", path, skipped)
 	}
+	names := slices.Clone(bp.GoFiles)
+	for f := range l.override { // a mutant's new file
+		absDir, _ := filepath.Abs(dir)
+		if filepath.Dir(f) == absDir && !slices.Contains(names, filepath.Base(f)) {
+			names = append(names, filepath.Base(f))
+		}
+	}
 	var files []*ast.File
-	for _, name := range bp.GoFiles {
+	for _, name := range names {
 		f := filepath.Join(dir, name)
 		abs, _ := filepath.Abs(f)
 		var src any
@@ -370,28 +411,30 @@ func scanCodes(t *testing.T, override map[string]string) ([]string, []string) {
 		}
 		pkgs = append(pkgs, p)
 	}
-	var codeField *types.Var
-	if obj, ok := pkgs[0].pkg.Scope().Lookup("Refusal").(*types.TypeName); ok {
-		if s, ok := obj.Type().Underlying().(*types.Struct); ok {
-			for i := range s.NumFields() {
-				if s.Field(i).Name() == "Code" {
-					codeField = s.Field(i)
-				}
-			}
-		}
-	}
+	codeField := fieldNamed(pkgs[0].pkg, "Refusal", "Code")
 	if codeField == nil {
 		t.Fatal("key.Refusal has no Code field")
 	}
-	s := &scanner{fset: fset, pkgs: pkgs, fields: map[*types.Var]bool{codeField: true}, params: map[*types.Var]bool{}}
+	s := &scanner{fset: fset, pkgs: pkgs, fields: map[*types.Var]bool{codeField: true}, params: map[*types.Var]bool{}, guarded: map[*types.Var]map[string]bool{}}
+	for typ, g := range guardedFields {
+		v := fieldNamed(pkgs[1].pkg, typ, g.field)
+		if v == nil {
+			t.Fatalf("kernel.%s has no field %s", typ, g.field)
+		}
+		s.guarded[v] = map[string]bool{}
+		for _, w := range g.writers {
+			s.guarded[v][w] = true
+		}
+	}
 	for {
-		nf, np := len(s.fields), len(s.params)
+		nf, np, ng := len(s.fields), len(s.params), len(s.guarded)
 		s.used, s.errs, s.sites = map[string]bool{}, map[string]bool{}, map[string]bool{}
 		s.run()
-		if len(s.fields) == nf && len(s.params) == np {
+		if len(s.fields) == nf && len(s.params) == np && len(s.guarded) == ng {
 			break
 		}
 	}
+	s.stepBodies()
 	for k := range externalWriters {
 		if strings.Contains(k, " in ") && !s.sites[k] {
 			s.errs["externalWriters: "+k+" is no longer called; drop it"] = true
@@ -409,6 +452,80 @@ func scanCodes(t *testing.T, override map[string]string) ([]string, []string) {
 	return used, errs
 }
 
+// stepBodies fails a code in notStepCodes named in admit's loop over the
+// steps or in key's (*Verified).Authorize, where a code is a step code by
+// definition. It is a partial check: a code a callee of either writes is
+// classed by hand (L3 6924923773 R1, Security 6924966358 R1).
+func (s *scanner) stepBodies() {
+	var loop, auth ast.Node
+	for _, l := range s.pkgs {
+		for _, f := range l.files {
+			for _, d := range f.Decls {
+				fd, ok := d.(*ast.FuncDecl)
+				if !ok || fd.Body == nil {
+					continue
+				}
+				switch fn, _ := l.info.Defs[fd.Name].(*types.Func); {
+				case fn == nil:
+				case shortName(fn) == "kernel.admit":
+					for _, st := range fd.Body.List {
+						if r, ok := st.(*ast.RangeStmt); ok && loop == nil {
+							loop = r.Body
+						}
+					}
+				case shortName(fn) == "(*kernel/key.Verified).Authorize":
+					auth = fd.Body
+				}
+			}
+		}
+	}
+	if loop == nil || auth == nil {
+		s.errs["admit's loop over the steps or key's (*Verified).Authorize was not found"] = true
+		return
+	}
+	for _, body := range []ast.Node{loop, auth} {
+		ast.Inspect(body, func(n ast.Node) bool {
+			id, ok := n.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			for _, l := range s.pkgs {
+				if c, ok := l.info.Uses[id].(*types.Const); ok && c.Val().Kind() == constant.String && slices.Contains(notStepCodes, constant.StringVal(c.Val())) {
+					s.fail(id, "%s, a code in notStepCodes, is named where a step is refused", c.Name())
+				}
+			}
+			return true
+		})
+	}
+}
+
+// guardedFields are kernel's fields a code could enter through without a
+// checked write, and the only functions that may write them. kernel.Entry's
+// Body is what the exempt json.Unmarshal in kernel.body decodes (L3
+// 6924923773 point 2): written only by the log's append, from a body the
+// kernel marshals from values this scan checks, and by the log's own decode
+// of what append sealed, it holds no code the scan has not read.
+var guardedFields = map[string]struct {
+	field   string
+	writers []string
+}{
+	"Entry": {"Body", []string{"(*kernel.Log).append"}},
+}
+
+// fieldNamed is the field of package p's struct type typ named name.
+func fieldNamed(p *types.Package, typ, name string) *types.Var {
+	if obj, ok := p.Scope().Lookup(typ).(*types.TypeName); ok {
+		if st, ok := obj.Type().Underlying().(*types.Struct); ok {
+			for i := range st.NumFields() {
+				if st.Field(i).Name() == name {
+					return st.Field(i)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // scanner checks every write of a code-carrying field in kernel and key. A
 // code-carrying field is key.Refusal's Code, or any field a code is copied
 // from; a code parameter is a function parameter a code is copied from. The
@@ -420,9 +537,13 @@ type scanner struct {
 	pkgs   []*loaded
 	fields map[*types.Var]bool // code-carrying fields
 	params map[*types.Var]bool // code parameters
-	used   map[string]bool
-	errs   map[string]bool
-	sites  map[string]bool // externalWriters sites the scan met
+	// guarded are fields a code can enter through unchecked (kernel.Entry's
+	// Body, which the exempt json.Unmarshal in kernel.body decodes), with
+	// the only functions that may write them.
+	guarded map[*types.Var]map[string]bool
+	used    map[string]bool
+	errs    map[string]bool
+	sites   map[string]bool // externalWriters sites the scan met
 }
 
 func (s *scanner) scanned(p *types.Package) bool {
@@ -435,6 +556,7 @@ func (s *scanner) fail(n ast.Node, f string, a ...any) {
 }
 
 func (s *scanner) run() {
+	s.identical()
 	for _, p := range s.pkgs {
 		for _, imp := range p.pkg.Imports() {
 			if imp.Path() == "unsafe" {
@@ -468,46 +590,177 @@ func fieldOf(p *loaded, e ast.Expr) *types.Var {
 func (s *scanner) node(p *loaded, fl map[*types.Var]bool, fn *types.Func, n ast.Node) {
 	switch n := n.(type) {
 	case *ast.CompositeLit:
-		st, ok := p.info.TypeOf(n).Underlying().(*types.Struct)
+		t := p.info.TypeOf(n)
+		if _, ok := t.(*types.TypeParam); ok {
+			s.fail(n, "a composite literal of a type parameter, whose fields the scan cannot tell")
+			return
+		}
+		st, ok := t.Underlying().(*types.Struct)
 		if !ok {
 			return
 		}
 		for i, el := range n.Elts {
 			if kv, ok := el.(*ast.KeyValueExpr); ok {
 				if k, ok := kv.Key.(*ast.Ident); ok {
-					if v, ok := p.info.Uses[k].(*types.Var); ok && s.fields[v] {
-						s.code(p, fn, kv.Value)
+					if v, ok := p.info.Uses[k].(*types.Var); ok {
+						s.write(p, fn, el, v, kv.Value)
 					}
 				}
-			} else if i < st.NumFields() && s.fields[st.Field(i)] {
-				s.code(p, fn, el)
+			} else if i < st.NumFields() {
+				s.write(p, fn, el, st.Field(i), el)
 			}
 		}
 	case *ast.AssignStmt:
 		for i, lhs := range n.Lhs {
-			if v := fieldOf(p, lhs); v != nil && s.fields[v] {
-				switch {
-				case n.Tok != token.ASSIGN:
-					s.fail(n, "a code written with %s", n.Tok)
-				case len(n.Lhs) != len(n.Rhs):
-					s.fail(n, "a code written from a multi-value call")
-				default:
-					s.code(p, fn, n.Rhs[i])
-				}
+			v := fieldOf(p, lhs)
+			if v == nil || !s.fields[v] && s.guarded[v] == nil {
+				continue
+			}
+			switch {
+			case s.guarded[v] != nil:
+				s.write(p, fn, n, v, nil)
+			case n.Tok != token.ASSIGN:
+				s.fail(n, "a code written with %s", n.Tok)
+			case len(n.Lhs) != len(n.Rhs):
+				s.fail(n, "a code written from a multi-value call")
+			default:
+				s.code(p, fn, n.Rhs[i])
 			}
 		}
 	case *ast.UnaryExpr:
-		if v := fieldOf(p, n.X); n.Op == token.AND && v != nil && s.fields[v] {
-			s.fail(n, "a code field's address is taken")
+		if v := fieldOf(p, n.X); n.Op == token.AND && v != nil {
+			s.write(p, fn, n, v, nil)
 		}
 	case *ast.RangeStmt:
 		for _, e := range []ast.Expr{n.Key, n.Value} {
-			if v := fieldOf(p, e); e != nil && v != nil && s.fields[v] {
-				s.fail(n, "a code field is a range variable")
+			if v := fieldOf(p, e); e != nil && v != nil && n.Tok == token.ASSIGN {
+				s.write(p, fn, n, v, nil)
 			}
 		}
 	case *ast.CallExpr:
 		s.call(p, fl, fn, n)
+	case *ast.TypeAssertExpr:
+		if n.Type != nil && s.holds(p.info.TypeOf(n.Type)) {
+			s.fail(n, "a type assertion to %s takes a code out of an interface, where it could have come from anywhere", p.info.TypeOf(n.Type))
+		}
+	case *ast.CaseClause:
+		for _, e := range n.List {
+			if tv := p.info.Types[e]; tv.IsType() && s.holds(tv.Type) {
+				s.fail(e, "a type switch case %s takes a code out of an interface, where it could have come from anywhere", tv.Type)
+			}
+		}
+	}
+}
+
+// write checks a write of field v at n, in fn: a code-carrying field takes
+// only a code (value, or nil for a write whose value the scan cannot read);
+// a guarded field is written only in its own writers.
+func (s *scanner) write(p *loaded, fn *types.Func, n ast.Node, v *types.Var, value ast.Expr) {
+	if w := s.guarded[v]; w != nil {
+		if fn == nil || !w[shortName(fn)] {
+			s.fail(n, "guarded field %s written outside its writers", v.Name())
+		}
+		return
+	}
+	if !s.fields[v] {
+		return
+	}
+	if value == nil {
+		s.fail(n, "a code field written by address or as a range variable")
+		return
+	}
+	s.code(p, fn, value)
+}
+
+// identical makes a field code-carrying, or guarded, when its struct type is
+// identical, tags aside, to the struct of one that is: Go assigns a value of
+// an unnamed struct type to a named type of the same underlying struct with
+// no conversion, so such a literal's fields are the code fields by another
+// name (L3 6924923773 and Security 6924966358, point 1).
+func (s *scanner) identical() {
+	var structs []*types.Struct
+	seen := map[types.Type]bool{}
+	var walk func(t types.Type)
+	walk = func(t types.Type) {
+		if t == nil || seen[t] {
+			return
+		}
+		seen[t] = true
+		switch u := t.(type) {
+		case *types.Named:
+			walk(u.Underlying())
+			for i := range u.TypeArgs().Len() {
+				walk(u.TypeArgs().At(i))
+			}
+		case *types.Alias:
+			walk(types.Unalias(u))
+		case *types.Pointer:
+			walk(u.Elem())
+		case *types.Slice:
+			walk(u.Elem())
+		case *types.Array:
+			walk(u.Elem())
+		case *types.Map:
+			walk(u.Key())
+			walk(u.Elem())
+		case *types.Chan:
+			walk(u.Elem())
+		case *types.Signature:
+			for _, tup := range []*types.Tuple{u.Params(), u.Results()} {
+				for i := range tup.Len() {
+					walk(tup.At(i).Type())
+				}
+			}
+		case *types.TypeParam:
+			walk(u.Constraint())
+		case *types.Interface:
+			for i := range u.NumEmbeddeds() {
+				walk(u.EmbeddedType(i))
+			}
+		case *types.Union:
+			for i := range u.Len() {
+				walk(u.Term(i).Type())
+			}
+		case *types.Struct:
+			structs = append(structs, u)
+			for i := range u.NumFields() {
+				walk(u.Field(i).Type())
+			}
+		}
+	}
+	for _, l := range s.pkgs {
+		for _, tv := range l.info.Types {
+			walk(tv.Type)
+		}
+		for _, o := range l.info.Defs {
+			if o != nil {
+				walk(o.Type())
+			}
+		}
+	}
+	var marked []*types.Struct
+	for _, st := range structs {
+		for i := range st.NumFields() {
+			if s.fields[st.Field(i)] || s.guarded[st.Field(i)] != nil {
+				marked = append(marked, st)
+				break
+			}
+		}
+	}
+	for _, st := range structs {
+		for _, m := range marked {
+			if st == m || st.NumFields() != m.NumFields() || !types.IdenticalIgnoreTags(st, m) {
+				continue
+			}
+			for i := range m.NumFields() {
+				if s.fields[m.Field(i)] {
+					s.fields[st.Field(i)] = true
+				}
+				if w := s.guarded[m.Field(i)]; w != nil && s.guarded[st.Field(i)] == nil {
+					s.guarded[st.Field(i)] = w
+				}
+			}
+		}
 	}
 }
 
@@ -654,38 +907,87 @@ func (s *scanner) call(p *loaded, fl map[*types.Var]bool, encl *types.Func, c *a
 			s.fail(a, "%s is handed %s, which reaches a code it could write", site, types.ExprString(a))
 		}
 	}
+	// What such a call returns was built where the scan cannot read: a
+	// result that holds or reaches a code fails, unless the callee is in a
+	// package that cannot name key's types (the standard library, or a
+	// module package that does not import key), so its result holds only
+	// codes it was handed (L3 6924923773 point 3, Security 6924966358 point 2).
+	if fn != nil && !dynamic && !s.namesKey(fn.Pkg()) {
+		return
+	}
+	if res, ok := p.info.TypeOf(c).(*types.Tuple); ok {
+		for i := range res.Len() {
+			if s.holds(res.At(i).Type()) {
+				s.fail(c, "%s returns %s, which holds a code built where the scan cannot read", site, res.At(i).Type())
+			}
+		}
+	} else if t := p.info.TypeOf(c); t != nil && s.holds(t) {
+		s.fail(c, "%s returns %s, which holds a code built where the scan cannot read", site, t)
+	}
+}
+
+// namesKey says whether package p can name key's types: it is a module
+// package that imports key, directly or through others.
+func (s *scanner) namesKey(p *types.Package) bool {
+	if p == nil || !strings.HasPrefix(p.Path(), modulePath+"/") {
+		return false
+	}
+	seen := map[*types.Package]bool{}
+	var imports func(q *types.Package) bool
+	imports = func(q *types.Package) bool {
+		if seen[q] {
+			return false
+		}
+		seen[q] = true
+		if q == s.pkgs[0].pkg {
+			return true
+		}
+		return slices.ContainsFunc(q.Imports(), imports)
+	}
+	return imports(p)
 }
 
 // reaches says whether a value of type t lets its holder write a code: t
 // reaches a code-carrying field through a pointer, slice or map, or is an
 // interface such a pointer could be held in.
 func (s *scanner) reaches(t types.Type, indirect bool) bool {
-	return s.reach(t, indirect, map[types.Type]bool{})
+	return s.reach(t, indirect, true, map[types.Type]bool{})
 }
 
-func (s *scanner) reach(t types.Type, indirect bool, seen map[types.Type]bool) bool {
+// holds says whether a value of type t holds or reaches a code other than
+// through an interface: a code inside an interface value is of no use to
+// kernel or key until a type assertion takes it out, and the scan fails
+// every such assertion.
+func (s *scanner) holds(t types.Type) bool {
+	return s.reach(t, true, false, map[types.Type]bool{})
+}
+
+func (s *scanner) reach(t types.Type, indirect, iface bool, seen map[types.Type]bool) bool {
 	if t == nil || seen[t] {
 		return false
 	}
 	seen[t] = true
 	switch u := t.Underlying().(type) {
 	case *types.Pointer:
-		return s.reach(u.Elem(), true, seen)
+		return s.reach(u.Elem(), true, iface, seen)
 	case *types.Slice:
-		return s.reach(u.Elem(), true, seen)
+		return s.reach(u.Elem(), true, iface, seen)
 	case *types.Map:
-		return s.reach(u.Key(), true, seen) || s.reach(u.Elem(), true, seen)
+		return s.reach(u.Key(), true, iface, seen) || s.reach(u.Elem(), true, iface, seen)
 	case *types.Array:
-		return s.reach(u.Elem(), indirect, seen)
+		return s.reach(u.Elem(), indirect, iface, seen)
 	case *types.Chan:
-		return s.reach(u.Elem(), true, seen)
+		return s.reach(u.Elem(), true, iface, seen)
 	case *types.Struct:
 		for i := range u.NumFields() {
-			if indirect && s.fields[u.Field(i)] || s.reach(u.Field(i).Type(), indirect, seen) {
+			if indirect && (s.fields[u.Field(i)] || s.guarded[u.Field(i)] != nil) || s.reach(u.Field(i).Type(), indirect, iface, seen) {
 				return true
 			}
 		}
 	case *types.Interface:
+		if !iface {
+			return false
+		}
 		if u.Empty() {
 			return true
 		}
