@@ -30,8 +30,13 @@ import (
 
 // Defaults (CH-10, CH-14, CH-15, REV-3).
 const (
-	DefaultUnlockFor  = 7 * 24 * time.Hour
-	DefaultCodeTTL    = 15 * time.Minute
+	DefaultUnlockFor = 7 * 24 * time.Hour
+	DefaultCodeTTL   = 15 * time.Minute
+	// MaxHoldSegments is the largest hold the owner may set (CH-14). Every
+	// held message takes at least one segment, so the hold never has more
+	// messages than this, and the page's run lists (localapi.MaxInbox) are
+	// sized from it, so one tap can always carry a full hold (#5187).
+	MaxHoldSegments   = 128
 	DefaultUndoWindow = 10 * time.Minute
 	// DefaultReplyLimit caps, per hour, the replies to messages that prove
 	// only the owner's number (CH-15): unlock prompts, wrong-code and
@@ -71,6 +76,7 @@ type Config struct {
 	CodeTTL time.Duration
 	// HoldSegments bounds the text held for the page while the session
 	// is locked, in SMS segments (CH-14; DefaultHoldSegments when zero).
+	// The owner sets it, at most MaxHoldSegments; New refuses more.
 	HoldSegments int
 	// UndoWindow delays queued auto-replies (default 10 min).
 	UndoWindow time.Duration
@@ -285,6 +291,9 @@ func New(cfg Config) (*Channel, error) {
 	}
 	if cfg.HoldSegments == 0 {
 		cfg.HoldSegments = DefaultHoldSegments
+	}
+	if cfg.HoldSegments < 0 || cfg.HoldSegments > MaxHoldSegments {
+		return nil, fmt.Errorf("owner: hold of %d segments: the bound is 1 to %d", cfg.HoldSegments, MaxHoldSegments)
 	}
 	if cfg.UndoWindow == 0 {
 		cfg.UndoWindow = DefaultUndoWindow
@@ -809,7 +818,55 @@ func (c *Channel) lockedLocked(rest, code string, now time.Time) route {
 		}
 		return route{replies: []string{"That code is right, but no code by text opens a session. Sign in on my Wi-Fi page at home to open one."}}
 	}
+	rest = stripHeldCodes(rest)
+	if rest == "" {
+		return route{replies: []string{"Locked. That message held only codes, so nothing was kept. No code by text opens a session: sign in on my Wi-Fi page at home."}, limited: true}
+	}
 	return c.waitLocked(rest, false, now)
+}
+
+// stripHeldCodes removes every word of text that is, as written or read
+// through fold, a code of exactly codeDigits digits, wherever it stands,
+// with one space beside it (CH-18, #5187). A word is a run of letters and
+// numbers, as the reply parser reads one, so "pay 123456 now" is held as
+// "pay now" and the code never reaches a model when the page runs it;
+// "AB482913", "room 12" and "7654321" are not code-shaped and stay.
+func stripHeldCodes(text string) string {
+	word := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsNumber(r) }
+	var b strings.Builder
+	changed := false
+	for i := 0; i < len(text); {
+		s := strings.IndexFunc(text[i:], word)
+		if s < 0 {
+			b.WriteString(text[i:])
+			break
+		}
+		s += i
+		e := len(text)
+		if n := strings.IndexFunc(text[s:], func(r rune) bool { return !word(r) }); n >= 0 {
+			e = s + n
+		}
+		w := text[s:e]
+		if !isTrailingCode(w) && !isTrailingCode(fold(w)) {
+			b.WriteString(text[i:e])
+			i = e
+			continue
+		}
+		changed = true
+		gap := text[i:s]
+		switch {
+		case strings.HasSuffix(gap, " "):
+			gap = gap[:len(gap)-1]
+		case e < len(text) && text[e] == ' ':
+			e++
+		}
+		b.WriteString(gap)
+		i = e
+	}
+	if !changed {
+		return text
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // AlertEvery is the least time between two challenge-mode alerts by text;
