@@ -13,7 +13,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
-	"github.com/ghbmrk/agentos/broker/sockets"
+	"github.com/ghbmrk/agentos/broker/sockets/peers"
 )
 
 // The wire between the kernel process and a clerk process: one connection per
@@ -290,7 +290,7 @@ func (c remote) call(op string, r kernel.Request, s snapshot) (a *answer, sent, 
 		return nil, false, false
 	}
 	defer conn.Close()
-	if uid, ok := sockets.PeerUID(conn); !ok || uid != c.UID {
+	if uid, ok := peers.UID(conn); !ok || uid != c.UID {
 		return nil, false, false
 	}
 	conn.SetDeadline(time.Now().Add(d))
@@ -325,7 +325,7 @@ func detail(s string) string {
 
 // ListenClerk opens a clerk's socket, admitting only the kernel's uid.
 func ListenClerk(path string, kernelUID int) (net.Listener, error) {
-	return sockets.ListenPeers(path, kernelUID)
+	return peers.Listen(path, kernelUID)
 }
 
 // ServeClerk answers the kernel's calls to c on ln, one at a time, until ln
