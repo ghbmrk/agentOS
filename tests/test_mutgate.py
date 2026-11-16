@@ -2783,6 +2783,34 @@ class Record(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertNotIn("new in this PR", r.summary)
 
+    def test_a_record_entry_saying_not_equivalent_fails_records_and_the_gate(self):
+        # REQ: MUT-legacy-not-equivalent-records
+        # #5909: an entry whose reason says its mutant is not equivalent waives nothing, fails `records`
+        # and the gate even where no mutant survives, and waive writes nothing to its record.
+        head = self.VAR + "var b = 2 + 2\n"
+        entry = {"file": "a.go", "mutant": "ARITHMETIC_BASE", "func": "b", "decl": Record.digest("var b = 2 + 2"),
+                 "stmt": ["var b = 2 + 2"], "at": 0, "after": "var a = 1 + 1", "occurrence": [1, 1], "accepted": "#5774"}
+        for reason in ("not equivalent but unseen by gremlins", "Not-Equivalent: a real survivor", "b is never read"):
+            rec = json.dumps({**entry, "reason": reason}) + "\n"
+            # On the base too: an entry already merged is refused, not only a new one.
+            with self.subTest(reason), tempfile.TemporaryDirectory() as d:
+                run = self.repo(d, self.VAR, head, base_record=rec, record=rec)
+                refused = reason != "b is never read"
+                r = run("records", "netguard")
+                self.assertEqual(r.returncode, int(refused), r.stdout + r.stderr)
+                self.assertEqual("says its mutant is not equivalent" in r.stderr, refused, r.stderr)
+                self.assertEqual("broker/netguard/a.go:4 " in r.stdout, not refused, r.stdout)
+                for lines in ((4,), ()):
+                    r = self.verify(d, run, *lines)
+                    self.assertEqual(r.returncode, int(refused), r.stdout + r.stderr)
+                    self.assertEqual("whose reason says its mutant is not equivalent" in r.stdout + r.stderr, refused)
+                    self.assertEqual("equivalent: " in r.summary.rsplit("### mutgate", 1)[-1], not refused and bool(lines), r.summary)  # appended
+                path = pathlib.Path(d) / "broker" / "netguard" / mutgate.RECORD
+                (pathlib.Path(d) / "w.txt").write_text("Mutant-equivalent: broker/netguard/a.go:3 a is never read\n")
+                r = run("waive", str(pathlib.Path(d) / "w.txt"), "--accepted", "#5909")
+                self.assertEqual(r.returncode, int(refused), r.stdout + r.stderr)
+                self.assertEqual(path.read_text() == rec, refused)
+
     def test_an_entry_waives_only_its_mutant_kind(self):
         # Security on #5780: a deletion proof carried forward must not waive a gremlins mutant on its line.
         rec = json.dumps({"file": "a.go", "mutant": "STATEMENT_DELETION", "func": "b", "decl": Record.digest("var b = 2 + 2"), "stmt": ["var b = 2 + 2"],
@@ -2856,15 +2884,14 @@ class Record(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         sites = sorted(l.split(" ")[0] for l in r.stdout.strip().split("\n"))
         # #5774 dropped three of them (boxFor's StartTLS branch is gone; readMail's open-error branch and
-        # its return are now killed by the ELOOP check) and added nine for gremlins' cover-gap lines.
-        self.assertEqual(len(sites), 33, r.stdout)
-        # Two kinds of mutant on one line (mail.go:103, :144, mailhost.go:272) are two entries on one site.
-        self.assertEqual(len(set(sites)), 30, r.stdout)
+        # its return are now killed by the ELOOP check). The nine it added for gremlins' cover-gap lines
+        # said their mutants were not equivalent; #5909 deleted them once gremlins ran and killed each.
+        self.assertEqual(len(sites), 24, r.stdout)
+        self.assertEqual(len(set(sites)), 24, r.stdout)
         # The two loadSenders proofs were re-read on #5780 after #5733 edited that func, and readMail's
         # ReadAll proof on #5804 after it gained the setup-form check.
         self.assertEqual(sorted(" ".join(l.split(" ")[1:3]) for l in r.stdout.strip().split("\n")),
-                         ["CONDITIONALS_BOUNDARY #5774"] * 3 + ["CONDITIONALS_NEGATION #5774"] * 6
-                         + ["STATEMENT_DELETION #5743"] * 21 + ["STATEMENT_DELETION #5780"] * 2
+                         ["STATEMENT_DELETION #5743"] * 21 + ["STATEMENT_DELETION #5780"] * 2
                          + ["STATEMENT_DELETION #5804"])
 
 
@@ -3008,16 +3035,21 @@ class MutantScope(unittest.TestCase):
                 self.assertIsNone(mutgate.record_entries(json.dumps(bad))[0])
 
     def test_the_clerk_run_entries_on_two_comparison_lines_name_their_column(self):
-        # The #5774 proofs for mail.go:104's `>= 0` and :145's `< 0` sit on lines of several comparisons.
-        r = subprocess.run([sys.executable, "-I", str(ROOT / "tools" / "mutgate.py"), "records", "clerk/run"],
+        # #5792's follow-up pinned the #5774 entries on mail.go:104 and :145; #5909 deleted those (gremlins now
+        # runs and kills their mutants), so the rule is pinned on every record: a comparison entry on a line
+        # holding several comparisons names its column.
+        r = subprocess.run([sys.executable, "-I", str(ROOT / "tools" / "mutgate.py"), "records"],
                            capture_output=True, text=True, cwd=ROOT)
         self.assertEqual(r.returncode, 0, r.stderr)
-        sites = {" ".join(l.split(" ")[:2]) for l in r.stdout.split("\n") if "mail.go:1" in l.split(" ")[0]}
-        self.assertTrue({"broker/clerk/run/mail.go:104:102 CONDITIONALS_BOUNDARY", "broker/clerk/run/mail.go:104:102 CONDITIONALS_NEGATION",
-                         "broker/clerk/run/mail.go:145:113 CONDITIONALS_BOUNDARY",
-                         "broker/clerk/run/mail.go:145:113 CONDITIONALS_NEGATION"} <= sites, sites)
-        src = (ROOT / "broker" / "clerk" / "run" / "mail.go").read_bytes().split(b"\n")
-        self.assertEqual((src[103][101:103], src[144][112:114]), (b">=", b"< "))
+        for row in r.stdout.strip().split("\n"):
+            site, kind = row.split(" ")[:2]
+            path, line, *col = site.split(":")
+            text = (ROOT / path).read_text().split("\n")[int(line) - 1]
+            if kind.startswith("CONDITIONALS_") and len(re.findall(r"[<>!=]=|[<>]", text)) > 1:
+                self.assertTrue(col, row)
+        self.assertNotIn("broker/clerk/run/mail.go:104", r.stdout)
+        self.assertNotIn("broker/clerk/run/mail.go:145", r.stdout)
+
 
 class CaseClauseCover(unittest.TestCase):
     """MUT-case-clause-cover (#5822): Go's cover blocks hold no `case` expression, so gremlins read every
@@ -3204,6 +3236,73 @@ class CaseClauseCover(unittest.TestCase):
         # `y == 7` negated lives (no test calls G with y == 7 and x == 0): a survivor NOT COVERED hid.
         self.assertTrue({(5, "KILLED"), (7, "KILLED"), (9, "LIVED")} <= got, got)
         self.assertFalse({s for line, s in got if line in (5, 7, 9)} & {"NOT COVERED"}, got)
+
+
+class LiteralTailCover(unittest.TestCase):
+    """MUT-legacy-not-equivalent-records (#5909): Go's cover ends a statement's block at a func literal it
+    holds, so the code after the literal on its line was in no block and gremlins read its mutants NOT
+    COVERED. The profile gains a ran block for that code wherever the statement's block ran."""
+    # REQ: MUT-legacy-not-equivalent-records
+
+    SRC = ("package p\n\nimport \"strings\"\n\nfunc H(s string) bool {\n"
+           "\tif len(s) > 3 || strings.IndexFunc(s, func(r rune) bool { return r == 'x' }) >= 0 {\n\t\treturn true\n\t}\n"
+           "\treturn false\n}\n\nfunc B(s string) bool {\n\treturn strings.IndexFunc(s, func(r rune) bool { return r == 'y' }) < 0\n}\n\n"
+           "func N(s string) int {\n\treturn strings.IndexFunc(s, func(r rune) bool { return r == 'z' }) + 1\n}\n")
+    TEST = ("package p\n\nimport \"testing\"\n\nfunc TestH(t *testing.T) {\n\tif !H(\"x\") || H(\"a\") || B(\"y\") || !B(\"a\") {\n"
+            "\t\tt.Fatal()\n\t}\n}\n")
+
+    def tail(self, line, end=None):
+        """The code after line's func literal: from its `})`'s `)` to the last character of the line's last end (default: the line's end)."""
+        text = self.SRC.split("\n")[line - 1]
+        start = text.index("})") + 2
+        return (line, start), (line, text.rindex(end) + len(end) if end else len(text) + 1)
+
+    def package(self, d):
+        broker = pathlib.Path(d) / "broker"
+        (broker / "p").mkdir(parents=True)
+        (broker / "go.mod").write_text(GO_MOD)
+        (broker / "p" / "a.go").write_text(self.SRC)
+        (broker / "p" / "a_test.go").write_text(self.TEST)
+        return broker
+
+    def test_the_code_after_a_ran_literal_gains_a_ran_block(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}):
+            broker, profile = self.package(d), pathlib.Path(d) / "c.out"
+            subprocess.run(["go", "test", "-count=1", "-covermode=count", f"-coverprofile={profile}", "."],
+                           cwd=broker / "p", check=True, capture_output=True)
+            text = profile.read_text()
+            got = mutgate.with_cases(text, mutgate.build_lister(d), broker / "p")
+        added = {((int(m[0]), int(m[1])), (int(m[2]), int(m[3]))) for m in
+                 re.findall(r"^example\.invalid/broker/p/a\.go:(\d+)\.(\d+),(\d+)\.(\d+) 0 1$", got[len(text.rstrip()):], re.M)}
+        # H's `>= 0` up to its body's `{`, and B's `< 0` to its line's end; N never ran, so its `+ 1` gains none.
+        self.assertEqual(added, {self.tail(6, " {"), self.tail(13)})
+
+    def test_tail_rules(self):
+        lines = [b"\tif f(func() { g() }) > 0 {", b"\t\tx()", b"\t}"]
+        lit, after = (1, 15, 1, 22), (1, 28, 3, 3)
+        # The statement's block ran: the tail runs to the next block's start; it never ran: no tail.
+        self.assertEqual(mutgate.literal_tails({(1, 2, 1, 15): 1, lit: 1, after: 1}, lines), [((1, 22), (1, 28))])
+        self.assertEqual(mutgate.literal_tails({(1, 2, 1, 15): 0, lit: 0, after: 0}, lines), [])
+        # A nested body closing its line, or a literal ending its statement, leaves no code after it.
+        self.assertEqual(mutgate.literal_tails({(1, 2, 1, 28): 1, (1, 28, 3, 3): 1}, lines), [])
+        self.assertEqual(mutgate.literal_tails({(1, 2, 1, 14): 1, (1, 14, 1, 21): 1}, [b"\tf := func() { g() }"]), [])
+
+    @unittest.skipUnless(shutil.which("gremlins"), "gremlins v0.6.0 is not installed")
+    def test_gremlins_runs_a_mutant_after_a_literal(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}):
+            broker = self.package(d)
+            (pathlib.Path(d) / "cfg.yaml").write_text("{}\n")
+            out = pathlib.Path(d) / "out.json"
+            env = {**os.environ, "PATH": f"{mutgate.go_shim(d)}{os.pathsep}{os.environ['PATH']}"}
+            r = subprocess.run(["gremlins", "unleash", "--config", str(pathlib.Path(d) / "cfg.yaml"), "-o", str(out), str(broker / "p")],
+                               cwd=broker / "p", env=env, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            got = {(m["line"], m["column"], m["type"], m["status"]) for f in json.loads(out.read_text())["files"] for m in f["mutations"]}
+        tails = {(line, c, t, s) for line, c, t, s in got if line in (6, 13) and c >= self.tail(line)[0][1]}
+        # Both kinds on H's `>= 0` and on B's `< 0`, each run and killed; before, each was NOT COVERED.
+        self.assertEqual({(line, t, s) for line, _, t, s in tails},
+                         {(n, t, "KILLED") for n in (6, 13) for t in ("CONDITIONALS_BOUNDARY", "CONDITIONALS_NEGATION")}, got)
+        self.assertFalse({s for line, *_, s in got if line == 17} - {"NOT COVERED"}, got)  # N: no test runs it
 
 
 def job(text, name):

@@ -74,7 +74,9 @@ body line and a moved line keeps it; an entry whose statement changed is stale a
 Not covered mutants are not failures here; gremlins' coverage run is the only judge of "covered".
 Go's cover blocks hold no `case` expression, so that run's profile, and covered_by's, gains a ran block
 for each clause expression a ran clause body shows evaluated (with_cases, #5822): gremlins runs those
-mutants rather than reading them NOT COVERED.
+mutants rather than reading them NOT COVERED. Nor do they hold a statement's code after a func literal
+(`IndexFunc(s, func(r rune) bool {...}) >= 0`), so the profile also gains a ran block for that code
+wherever the statement's block ran (literal_tails, #5909).
 The gate reads no other line, and gremlins tests each mutant alone, so `run --git` mutates only
 target lines (60-minute timeouts on #4014) and the gate decides the same; `run` fails if gremlins
 skipped a mutant on a target line, so a diff gremlins reads differently cannot pass the gate empty.
@@ -140,7 +142,8 @@ EQUIVALENT = re.compile(r"^Mutant-equivalent: (broker/[^\s:*?\[\]]+\.go):([1-9]\
                         r" +(\S.*?)\s*$")
 # A reason that says its mutant is not equivalent is no proof (#5891, from #5863 and #5883): a body line
 # holding one waives nothing and fails the gate, and waive refuses it, so a real survivor never becomes a
-# record entry that later gates read as proved. Case and the space or hyphen between the words are ignored.
+# record entry that later gates read as proved. A record entry holding one fails `records` and the gate,
+# and waive writes nothing to its record (#5909). Case and the space or hyphen between the words are ignored.
 NOT_EQUIVALENT = re.compile(r"\bnot[\s-]+equivalent", re.IGNORECASE)
 
 
@@ -927,13 +930,22 @@ def record_waivers(pkgs, lister, base=None, head="HEAD"):
             problems.append(problem)
             continue
         found, bad = resolve_record(pkg, entries, keys)
-        problems += bad
+        problems += bad + [refused_entry(pkg, e) for e in entries if NOT_EQUIVALENT.search(e["reason"])]
+        # An entry whose reason says not equivalent is no proof (#5909): it waives nothing and fails.
+        found = {site: e for site, e in found.items() if not NOT_EQUIVALENT.search(e["reason"])}
         old = set()
         if mb and (prior := base_text(mb, f"broker/{pkg}/{RECORD}")) is not None:
             old = {json.dumps(e, sort_keys=True) for e in (record_entries(prior)[0] or [])}
         for site, e in found.items():
             out[site] = (e["reason"], e["accepted"], json.dumps(e, sort_keys=True) not in old)
     return out, problems
+
+
+def refused_entry(pkg, e):
+    """Why record entry e of broker/<pkg>/ is refused: its reason says its mutant is not equivalent (#5909)."""
+    return (f"broker/{pkg}/{RECORD} holds an entry for {e['file']} {e['func'] or '(top level)'} {e['stmt'][e['at']]!r} "
+            f"({e['mutant']}) whose reason says its mutant is not equivalent, so it proves nothing: delete its "
+            "line, or reword it only if the mutant is in fact equivalent")
 
 
 def record_entry(pkg, fname, line, reason, accepted, keys, mutant=None, col=None):
@@ -978,6 +990,11 @@ def cmd_waive(args):
             entries, bad = record_entries(text or "")
             if problem or bad:
                 print(f"mutgate: {problem or bad}", file=sys.stderr)
+                return 1
+            # Nor does it rewrite a record that holds an entry no gate reads as proved (#5909).
+            if refused := [refused_entry(pkg, e) for e in entries if NOT_EQUIVALENT.search(e["reason"])]:
+                for r in refused:
+                    print(f"mutgate: {r}, then run waive again", file=sys.stderr)
                 return 1
             new = [record_entry(pkg, f, n, reason, args.accepted, keys, kind, col) for f, n, reason, kind, col in sites]
             # Every line of a parsed declaration has its digest; a line outside any has nothing to prove.
@@ -1518,9 +1535,37 @@ def evaluated_clauses(switches, blocks):
     return out
 
 
+# MUT-legacy-not-equivalent-records (#5909). Go's cover ends the block of a statement holding a func
+# literal at the literal (its body is a block of its own) and starts the next at the next statement or
+# nested body, so the statement's code after the literal (`IndexFunc(s, func(r rune) bool {...}) >= 0`)
+# is in no block and gremlins read its mutants NOT COVERED. literal_tails adds a ran block for that code
+# up to the next block's start or its line's end, wherever a ran block ends at a block's start (how
+# cover splits at a literal). It may mark code ran that a short circuit skipped: that runs a mutant
+# that may then live (a false fail), never skips one; a tail past the literal's last line stays unread.
+def literal_tails(blocks, lines):
+    """[((line, col), (line, col))]: the code after each func literal whose statement's block ran, for one
+    file's blocks ({(line, col, line, col): count}) and its source lines (bytes, from 1 at lines[0])."""
+    starts = collections.defaultdict(list)
+    for b in blocks:
+        starts[b[:2]].append(b)
+    out = []
+    for b, n in sorted(blocks.items()):
+        if not n or b[:2] == b[2:]:
+            continue
+        for f in starts.get(b[2:], []):
+            line, col = f[2:]
+            if f == b or not 0 < line <= len(lines):
+                continue
+            end = min([s for s in starts if s[0] == line and s[1] >= col] + [(line, len(lines[line - 1]) + 1)])
+            if end > (line, col) and lines[line - 1][col - 1:end[1] - 1].strip():
+                out.append(((line, col), end))
+    return sorted(set(out))
+
+
 def with_cases(text, lister, cwd):
     """text, a `-covermode=count` -coverprofile, with a ran block (`<file>:<line>.<col>,<line>.<col> 0 1`) appended for each
-    clause expression evaluated_clauses finds in the files it names of the module holding cwd. Raises
+    clause expression evaluated_clauses finds in the files it names of the module holding cwd, and for the
+    code after each func literal literal_tails finds there (#5909). Raises
     RuntimeError where the lister cannot read a file (a //line directive), so no run reads it as is."""
     cwd = pathlib.Path(cwd).resolve()
     root = next((d for d in (cwd, *cwd.parents) if (d / "go.mod").is_file()), None)
@@ -1539,7 +1584,11 @@ def with_cases(text, lister, cwd):
         r = subprocess.run([str(lister), "-cases", *paths], capture_output=True, text=True) if paths else None
         if r is not None and r.returncode:
             raise RuntimeError(f"cannot list the switch clauses of {d or '.'}/: {r.stderr.strip()[:500]}")
-        for name, (line, col), (eline, ecol) in evaluated_clauses(json.loads(r.stdout) if r else [], named):
+        found = evaluated_clauses(json.loads(r.stdout) if r else [], named)
+        for n in sorted(named):
+            if (f := root / d / n).is_file() and not f.is_symlink():
+                found += [(n, *t) for t in literal_tails(named[n], f.read_bytes().split(b"\n"))]
+        for name, (line, col), (eline, ecol) in found:
             rows.append(f"{module}/{d + '/' if d else ''}{name}:{line}.{col},{eline}.{ecol} 0 1\n")
     return text if not rows else text.rstrip("\n") + "\n" + "".join(rows)
 
