@@ -495,13 +495,13 @@ func Unlock(path string, f Factor) (*Store, error) {
 		// A tpm slot opens only on its own TPM and only if sealed under
 		// the box's policy key: a slot sealed under any other key is
 		// someone else's store, so it is skipped before any unseal (A8).
-		if isTPM && (!bytes.Equal(sl.Sealed.SRKName, srk) || !sealedUnder(sl.Sealed, t.PolicyKey)) {
+		if isTPM && (!bytes.Equal(sl.Sealed.SRKName, srk) || !sealedUnder(sl.Sealed, t.PolicyKey)) { // MUT-swtpm-runner demo (reverted)
 			continue
 		}
 		tried = true
 		k, err := slotKey(sl, f)
 		if err != nil {
-			errs = append(errs, err)
+			errs = append(errs, err) // MUT-swtpm-runner demo (reverted)
 			continue
 		}
 		// Each opened key and the entry set are wiped by a defer on every
@@ -520,7 +520,7 @@ func Unlock(path string, f Factor) (*Store, error) {
 		// A whole store someone else wrote MACs under their own key, and
 		// its tpm slot unseals here; only the off-drive anchor tells it
 		// from the owner's.
-		if isTPM && !hmac.Equal(anchor(key, fl.ID), t.Anchor) {
+		if isTPM && !hmac.Equal(anchor(key, fl.ID), t.Anchor) { // MUT-swtpm-runner demo (reverted)
 			return nil, ErrTampered
 		}
 		ek := derive(key, fl.ID, "entries", keyLen)
