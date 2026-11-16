@@ -4053,8 +4053,9 @@ def bus_daemon_files(root, name):
 
 def bus_daemon_violations(root):
     """#5818: the system bus listens only on dbus.socket. Across every file systemd merges into dbus.service,
-    each ExecStart= runs dbus-daemon with BUS_ADDRESS as its one --address (no --config-file, which could
-    name another config); across dbus.socket's, every Listen* entry is ListenStream=BUS_SOCKET, and there
+    one ExecStart= runs dbus-daemon with BUS_ADDRESS as its one --address (no --config-file, which could
+    name another config), and no other Exec*= line runs a command but ExecReload='s dbus-send; across
+    dbus.socket's, no Exec*= line at all, and every Listen* entry is ListenStream=BUS_SOCKET, and there
     is one. A unit the image does not ship is not weighed: no bus runs without dbus.service, and
     dbus.service with BUS_ADDRESS fails without its socket."""
     out = []
@@ -4065,9 +4066,26 @@ def bus_daemon_violations(root):
         if any(f.error for f in files):
             out.append("%s: %s; the tree check never passes it (#5818)" % (name, files[0].error))
             continue
+        # systemd reads the first unit directory's file of the name and every drop-in; exec.allow hashes
+        # the shadowed files too.
+        tops = [f for f in files if f.name == name and not f.rel.endswith(".d/" + name)]
+        files = tops[:1] + [f for f in files if f not in tops]
         try:
+            # Every other command line either unit runs: dbus.service's ExecReload= may only ask the bus to
+            # reload (dbus-send, as stock), and nothing else may start a process beside the daemon.
+            for k in sorted(ini_keys(files, key)):
+                if not k.startswith("Exec") or k in ("ExecStart", "ExecSearchPath"):
+                    continue
+                for v in ini_entries(files, key, k):
+                    w = v.lstrip("-@:+!|").split()
+                    if not (key == "Service" and k == "ExecReload" and w and w[0].endswith("/dbus-send")
+                            and "dbus-daemon" not in v):
+                        out.append("%s: %s=%s; the bus units run dbus-daemon from ExecStart= alone, and reload only "
+                                   "through dbus-send (#5818)" % (name, k, v))
             if key == "Service":
                 cmds = ini_entries(files, key, "ExecStart")
+                if len(cmds) > 1:
+                    out.append("%s: %d ExecStart= lines; the system bus is one dbus-daemon (#5818)" % (name, len(cmds)))
                 for v in cmds or [""]:
                     w = v.lstrip("-@:+!|").split()
                     addr = [x for x in w if x.startswith("--address")]

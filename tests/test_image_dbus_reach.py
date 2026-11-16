@@ -231,6 +231,13 @@ class BusDaemonTest(unittest.TestCase):
                                  "--address=tcp:host=0.0.0.0\n"),
                 ("dbus.service", "[Service]\nExecStart=\nExecStart=/usr/bin/dbus-broker-launch --scope system\n"),
                 ("dbus.service", "[Service]\nExecStart=\n"),
+                ("dbus.service", "[Service]\nExecStartPost=/usr/bin/dbus-daemon --system "
+                                 "--address=nonce-tcp:host=127.0.0.1 --fork\n"),
+                ("dbus.service", "[Service]\nExecStartPre=/bin/sh -c 'true'\n"),
+                ("dbus.service", "[Service]\nExecStopPost=/usr/bin/socat TCP-LISTEN:1 -\n"),
+                ("dbus.service", "[Service]\nExecReload=\nExecReload=/usr/bin/dbus-daemon --system\n"),
+                ("dbus.service", "[Service]\nExecStart=/usr/bin/dbus-daemon --system --address=systemd:\n"),
+                ("dbus.socket", "[Socket]\nExecStartPre=/usr/bin/true\n"),
                 ("dbus.socket", "[Socket]\nListenStream=127.0.0.1:5555\n"),
                 ("dbus.socket", "[Socket]\nListenStream=\nListenStream=/run/dbus/other\n"),
                 ("dbus.socket", "[Socket]\nListenSequentialPacket=/run/x\n")):
