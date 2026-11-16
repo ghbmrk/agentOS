@@ -304,6 +304,9 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 		return taskRead{}
 	}),
 	"untarget": act(func(k *kernel.Kernel, now int64, a untargetArgs) error { return k.Untarget(now, a.Name) }),
+	// The owner graph's declarations (KEY-9): unsigned, they only raise prices.
+	"declreach": act(func(k *kernel.Kernel, now int64, d kernel.DeclReach) error { return k.DeclareReach(now, d) }),
+	"declared":  read(func(s *kernel.State, _ int64, _ none) kernel.DeclReach { return s.DeclReach() }),
 
 	// The edge (HW-15): the page step enrols the candidate the link port
 	// logged, on a hardware key's signature, and the owner cuts an edge.
@@ -723,7 +726,7 @@ func init() {
 		kernel.ErrBroken, kernel.ErrNotAdmitted, key.ErrMalformed, key.ErrWrongOwner, key.ErrBadSig, key.ErrLoosens, key.ErrNotHolder,
 		key.ErrUnknownKind, key.ErrUncaveated, ErrArgs, kernel.ErrSetupClosed, kernel.ErrSetupKeys, ErrSetupOnly,
 		kernel.ErrReserveSig, kernel.ErrTargetSig, kernel.ErrTarget, kernel.ErrTargetExists, kernel.ErrNoTarget,
-		kernel.ErrContentClosed, kernel.ErrSubject, kernel.ErrErased, kernel.ErrLabel, kernel.ErrForgetName, kernel.ErrForgetReply, kernel.ErrForgetStop, kernel.ErrForgetClock,
+		kernel.ErrContentClosed, kernel.ErrSubject, kernel.ErrErased, kernel.ErrLabel, kernel.ErrForgetName, kernel.ErrForgetReply, kernel.ErrForgetStop, kernel.ErrForgetClock, kernel.ErrDeclReach,
 		kernel.ErrStore, kernel.ErrSubjectKey, kernel.ErrItem, kernel.ErrLineage,
 		kernel.ErrRotateSig, kernel.ErrRotate, ErrApprovalStale, ErrNotApproved, handoff.ErrApproval, handoff.ErrApprovalExpired, ErrNoRecoveryCard,
 		kernel.ErrEdgeKey, kernel.ErrEdgeSig, kernel.ErrEdgeRevoked, kernel.ErrEdgeCandidate, kernel.ErrEdgeHello, kernel.ErrEdgeBusy, kernel.ErrEdgeLive,
@@ -973,6 +976,10 @@ func (o Owner) EdgeRevoke(edge ed25519.PublicKey) error {
 // Untarget stops new backups to a destination; its backups keep their
 // erase reach.
 func (o Owner) Untarget(name string) error { return o.Call("untarget", untargetArgs{name}, nil) }
+
+// DeclareReach and DeclReach write and read the log's decl.reach (KEY-9).
+func (o Owner) DeclareReach(d kernel.DeclReach) error      { return o.Call("declreach", d, nil) }
+func (o Owner) DeclReach() (d kernel.DeclReach, err error) { err = o.Call("declared", nil, &d); return }
 
 // Backup takes one backup now to every current destination.
 func (o Owner) Backup() (t []Taken, err error) { err = o.Call("backup", nil, &t); return }

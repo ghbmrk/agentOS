@@ -496,6 +496,9 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 	now := func() int64 { return clk.Load() }
 
 	var admitted kernel.Admitted // the socket's admission, settled by both kernels' meter
+	decl := kernel.DeclReach{Nodes: []kernel.ReachNode{{ID: "mbox", Clerk: "mail", Classes: []key.Asset{key.AssetData}}},
+		Edges: []kernel.ReachEdge{{Kind: "reset", From: []string{"mbox"}, To: "bank"}}}
+	moved := kernel.DeclReach{Nodes: []kernel.ReachNode{{ID: "empty", Clerk: "mail"}}}
 	cases := []twin{
 		{name: "submit", op: "submit", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Submit(p1) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Submit(now(), p1) }},
 		{name: "issue", op: "issue", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Issue(ocos, other) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Issue(now(), ocos, other) }},
@@ -615,6 +618,17 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 		{name: "revoke", op: "revoke", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Revoke(ver.ID()) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Revoke(now(), ver.ID()) }},
 		{name: "cancel", op: "cancel", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Cancel("p1") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Cancel(now(), "p1") }},
 		{name: "untarget", op: "untarget", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Untarget("none") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Untarget(now(), "none") }},
+		// One node, so the read's order is fixed; the second moves mail's
+		// clerk, which would lower a price, so both kernels refuse it whole.
+		{name: "declreach", op: "declreach", sock: func(o Owner, _ Meter) (any, error) { return nil, o.DeclareReach(decl) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.DeclareReach(now(), decl) }},
+		{name: "declreach moved", op: "declreach", sock: func(o Owner, _ Meter) (any, error) {
+			err := o.DeclareReach(moved)
+			if !errors.Is(err, kernel.ErrDeclReach) {
+				t.Errorf("a clerk moved over the socket: %v, want %v", err, kernel.ErrDeclReach)
+			}
+			return nil, err
+		}, call: func(k *kernel.Kernel) (any, error) { return nil, k.DeclareReach(now(), moved) }},
+		{name: "declared", op: "declared", read: func(v any) bool { return len(v.(kernel.DeclReach).Nodes) == 1 }, sock: func(o Owner, _ Meter) (any, error) { return o.DeclReach() }, call: func(k *kernel.Kernel) (any, error) { return k.State().DeclReach(), nil }},
 		{name: "edgeenroll", op: "edgeenroll", sock: func(o Owner, _ Meter) (any, error) { return nil, o.EdgeEnroll(edge, edgeEnrollSig(sock, edge)) }, call: func(k *kernel.Kernel) (any, error) {
 			return nil, k.EdgeEnroll(now(), edge, key.Approve(key.Ed25519Signer(ownerPriv), kernel.EdgeEnrollHash(k.State().EdgeChanges(), k.Box(), edge, k.EdgeReplaces(edge))))
 		}},
@@ -630,7 +644,7 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 	// pool at its reserve, setup on a box that has its anchors (the
 	// setup-only tests take it on a fresh one), and a code approval on a box
 	// with no checker pinned (kernel TestCodeApproval*). Every other action succeeds.
-	refused := map[string]bool{"admitspend": true, "admitpool": true, "meter again": true, "reserve unsigned": true, "reserve one passkey": true, "setup": true, "untarget": true, "retry moved": true, "approvecode": true}
+	refused := map[string]bool{"admitspend": true, "admitpool": true, "meter again": true, "reserve unsigned": true, "reserve one passkey": true, "setup": true, "untarget": true, "declreach moved": true, "retry moved": true, "approvecode": true}
 	served := map[string]bool{}
 	for _, c := range cases {
 		if c.name == "stop" {
