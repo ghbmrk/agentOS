@@ -8,9 +8,20 @@
 # It never stops itself, and it outlives SIGTERM, so it answers into a shutdown until the unit's stop
 # timeout kills it: only that stop ends the answers, and the unit is ordered so that the stop comes
 # before agentos-mor.service's ExecStop clears MOR. The image-in-shutdown test holds that.
+# Each answer goes to the console, then to the journal through fd 4, a journald stream that
+# systemd-cat opens and the script re-runs under: a line written there is stored even if the stop's
+# SIGKILL comes next, and journald stamps it when it reads it, after the console's copy was written.
+# So the journal's last answer is the console's last one, on a clock no earlier than it, and the
+# image-in-shutdown test holds both; only a SIGKILL between the two writes would split them, and that
+# fails the test.
 # At its start and at SIGTERM it prints HOSTCHECK-DIAG lines: what the MOR clear will find (its
 # unit's state, MOR, the directories the clear refuses on while they hold files) and the clear's
 # journal, this boot's and the last one's, so a phase that finds MOR set says why on the console.
+if [ "$1" != journaled ]; then
+	command exec 3>&1
+	exec systemd-cat -t hostcheck-responder /bin/sh "$0" journaled
+fi
+command exec 4>&1 1>&3 2>&3 3>&-
 MOR=/sys/firmware/efi/efivars/MemoryOverwriteRequestControl-e20939be-32d4-41be-a150-897f85d49829
 diag() {
 	echo "HOSTCHECK-DIAG $1 agentos-mor.service $(systemctl show -p ActiveState -p SubState -p Result --value agentos-mor.service | tr '\n' ' ')"
@@ -38,7 +49,7 @@ while :; do
 		case $cmd in
 		alive)
 			echo "HOSTCHECK-ALIVE $arg"
-			echo "HOSTCHECK-ALIVE $arg" | systemd-cat -t hostcheck-responder 2>/dev/null ;;
+			echo "HOSTCHECK-ALIVE $arg" >&4 ;;
 		poweroff | reboot) systemctl --no-block "$cmd" || echo "HOSTCHECK-EXIT-FAILED $cmd" ;;
 		esac
 	done

@@ -3,3 +3,8 @@
 # testdata), then the reason. Another kind in the file still fails; a kind no longer found is stale.
 # Every boundary lint is blind to what these files do in C or assembly, so each needs review.
 broker/cmd/agentos-camdecode/camdecode/h264.go cgo the H.264 decoder (CAM-clerk part b2, #3514): cgo into a statically linked libavcodec built with its H.264 decoder alone (image/libavcodec.sh), only in agentos-camdecode, which runs read-only in a gVisor sandbox per camera (image/camdecode.sh); what it links is pinned by TestDecoderCgoIsPinned (NET-2), and the libavcodec tag keeps it out of every other build
+broker/recovery/bundle.go wipe:sealTo:np the backup stream's 7-byte nonce prefix, written in the clear into the bundle header (prefix.NoncePrefix), so it is no secret
+broker/recovery/owner.go wipe:BeginNumberChange:x the 8 random bytes behind the pairing code, which the function returns as text in NumberChange.Code and which expires after PairingTTL
+broker/recovery/rotate.go wipe:GridCheck:k the 4 bytes behind the four-symbol check the card prints under the grid; printed on paper, so it is no secret (the seed it derives from is wiped by the caller)
+broker/recovery/forgetlog.go wipe:ensureForgetLog:a,wipe:ensureForgetLog:id the forget key's 16-byte auth value (a) is stored hex-encoded in kv.Auth and written to the vault, so wiping this copy keeps nothing out of memory; the forget log's 16-byte ID (id) is stored in the log and public in the vault entry
+broker/recovery/confirm.go wipe:newQuestion:b 8 random bytes that pick a decoy date for the restore question; reduced to a small integer at once, and the question is shown to the owner, so the bytes guard nothing
