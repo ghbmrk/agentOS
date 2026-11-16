@@ -407,7 +407,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-keys-print | ENF-keys-print: enforcer/channel.Key and the page RootKey print no key (DECOY-b-8, CLK-1) | #4833 | queued (tier A; sub B directories; split from #4833) |
 | MIG-4-recovery-r4j | MIG-4-recovery-r4j: the Recovery key page says it cannot tell the shown card when the recipient read fails | MIG-4-recovery-r4g (#4883) | queued (release; tier A; from #4883 L3) |
 | MIG-4-recovery-r4k | MIG-4-recovery-r4k: a route-A replacement leaves a superseded lost-card request's and ready card's prompts | MIG-4-recovery-r4i (#4883) | queued (release; tier A; from #4883 L3) |
-| REV-CHK-names-2-ux | REV-CHK-names-2-ux: the backup folder refusal names a space-padded folder name | #3953 | queued |
+| REV-CHK-names-2-ux | REV-CHK-names-2-ux: the backup folder refusal names a space-padded folder name | #3953 | building |
 | KRN-forget-c-confirm-owner | KRN-forget-c-confirm-owner: the owner side routes the YES reply to the kernel's pending erase and the page shows the waiting state. Sub B half; from #5092 Security finding 1. | #5124 | queued (release; tier A) |
 | ENF-restart-unit | ENF-restart-unit: the real agentos-enforcer.service sets Restart= with a start limit one fresh-day exit cannot hit, and its acceptance test covers the restart. Release; from #5133 (R1). | #5133, ENF-m (#3671) | queued (release; tier A) |
 | KRN-forget-c-confirm-close | KRN-forget-c-confirm-close: drop the bare erase op from the owner socket once agentosd erases only through forgetreply, so the kernel alone enforces D-314. From #5124. | #5124, #5125 | queued (release; tier A) |
@@ -421,7 +421,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VM-snap-unread-notice-fu | VM-snap-unread-notice-fu: the unread-snapshot deletion notice is held and retried until the owner channel delivers it. Release; from #5499 (UX). | #5481, #5499 | queued (release; tier B) |
 | IMG-initrd-global-ext-dirs | IMG-initrd-global-ext-dirs: INITRD_IMAGE_DIRS adds /.extra/global_sysext and /.extra/global_confext when the image's systemd moves past v257. Release; blocked on that bump; from #5501 (Security). | #5488, #5501 | queued (release; tier A; blocked on the systemd bump) |
 | IMG-keyring-pin | IMG-keyring-pin: the Debian archive keyring is checked against committed fingerprints before any image or guest build uses it. Release; from #5573. | #5573 | queued (release; tier A; gate files) |
-| GUEST-bridge-tree-dead-fu | GUEST-bridge-tree-dead-fu: retire the stale TREE rows and B16, bound the idle-bridge test, drop the guest-plane tree exemption (#5611 reviews) | - | queued (release; tier B) |
+| GUEST-bridge-tree-dead-fu | GUEST-bridge-tree-dead-fu: retire the stale TREE rows and B16, bound the idle-bridge test, drop the guest-plane tree exemption (#5611 reviews) | - | building (release; tier B) |
 | TIM-1-interval-fu-c | TIM-1-interval-fu-c: the question book moves off Guard.Now to the interval, and the clock drops the restricted mode's last API. Release; from #5216. | #5216, #5279 | queued (release; tier A) |
 | KRN-clock-fresh-rise | KRN-clock-fresh-rise: a kernel started behind the log catches up on a fresh chronyd sample (TIM-1). Release; from #5757. | #5391, #5757 | queued (release; tier A) |
 | LINT-dial-configured | LINT-dial-configured: the inference lint's configured() refuses a local bound to a literal (NET-2). Release; from #5757. | #5757 | queued (release) |
@@ -431,24 +431,20 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MUT-import-widen | MUT-import-widen: an added import should not widen mutgate's targets to the whole package. Release; from #5808. | #5808 | queued (release; tier B) |
 | MUT-waiver-messages | MUT-waiver-messages: mutgate failures name the mutant as path:line:col:KIND, ambiguous waivers are not listed as unused, malformed waiver lines are warned about, and the workflow header shows the new syntax. Release; from #5824. | #5824 | queued (release; tier A) |
 | MUT-failed-test-bounded | MUT-failed-test-bounded: mutgate's failed_test reads a mutant's output unbounded; a flooding mutant crashes the deletion step. Release; from #5796. | #5796 | queued (release; tier C) |
-| OWN-page-session-mut4 | OWN-page-session mutants part 4: old broker/recovery survivors (69) | #5202 | building (release; tier A) |
-| MUT-wipe-lint | MUT-wipe-lint: lint that derived key buffers are wiped | #5857 | queued (release; tier B) |
+| MUT-wipe-lint | MUT-wipe-lint: lint that derived key buffers are wiped | #5857 | building (release; tier B) |
 | OWN-page-session-mut2c | OWN-page-session mutants part 2c: old cmd/agentosd survivors in evidence, main, held, signinhost (76) | #5862 | queued (release; tier A) |
-| OWN-page-session-mut2d | OWN-page-session mutants part 2d: forget.go kernel-fault survivors via a fakeKernel seam (3 + widening) | #5862 | building (release; tier A) |
 | VULN-static-elf | VULN-static-elf: an image-build check that finds static ELFs (llama-server) and makes image-vulncheck scan their toolchain packages. Release; split from #5873. | #5873, #5871, #2919 | queued (release; needs brief; after #5816) |
 | KRN-forget-wide | KRN-forget-wide: a FORGET ask that a wide clock reading has already lapsed says so instead of asking. Release; from #5811. | #5391, #5811 | queued (release; tier A) |
-| MUT-equivalent-not-equivalent | MUT-equivalent-not-equivalent: refuse a Mutant-equivalent line that says it is not equivalent | #5883 | building (release; tier A) |
 | OWN-recall-holdline | OWN-recall-holdline: STATUS hold line names agents as the forget texts do | #5883 | queued (release; tier A) |
 | VULN-codex-openssl | VULN-codex-openssl: bump the codex pin once a release links OpenSSL 3.6.5 or later; until then the bundled entry records each fix's reach. Release; from #5888. | #5873, #5888 | queued (release; tier A; waits on a codex release) |
 | CLK-seal-decode-wipe-fu | CLK-seal-decode-wipe-fu: Unlock wipes a value a duplicate JSON key overwrites and a partly decoded bad-base64 buffer, and refuses a null entries blob. Release; from #5895. | #5806, #5895 | building (release; tier A) |
 | TIM-1-interval-fu-g | TIM-1-interval-fu-g: guard Authenticated against an overflowing tampered reference, and confirm chrony's maxdrift 500 cap on the first image. Release; from #5893. | #5758, #5893 | building (release; tier A) |
 | MUT-misread-migrate | MUT-misread-migrate: open PRs carrying dead Mutant-misread lines rerun mutgate after #5902. Release; from #5902. | #5902 | queued (release) |
-| MUT-legacy-not-equivalent-records | MUT-legacy-not-equivalent-records: clear the #5774 not-equivalent record entries, then check record reasons | #5908 | queued (release; tier A) |
-| OWN-page-session-mut5 | OWN-page-session mutants part 5: delete the scanner's dead found map | #5857 | queued (release; tier A) |
-| OWN-page-session-mut6 | OWN-page-session mutants part 6: NewScanner(nil) panics on 1 MiB | #5857 | queued (release; tier A) |
+| MUT-legacy-not-equivalent-records | MUT-legacy-not-equivalent-records: clear the #5774 not-equivalent record entries, then check record reasons | #5908 | building (release; tier A) |
+| OWN-page-session-mut5 | OWN-page-session mutants part 5: delete the scanner's dead found map | #5857 | building (release; tier A) |
+| OWN-page-session-mut6 | OWN-page-session mutants part 6: NewScanner(nil) panics on 1 MiB | #5857 | building (release; tier A) |
 | CLK-seal-entry-swap-wipe-fu | CLK-seal-entry-swap-wipe-fu: seal wipes an entry value Put, ReplaceAndPut or Delete drops, and encode leaves no pooled JSON copy. Release; from #5897. | #5897 | queued (release; tier A) |
 | CLK-seal-decode-nocopy-pin-fu | CLK-seal-decode-nocopy-pin-fu: a test pins that the seal entries decode copies no value out of the plaintext buffer. Release; from #5914. | #5897, #5914 | queued (release; tier A) |
-| KRN-clock-chrony-wiring-pin-fu | KRN-clock-chrony-wiring-pin-fu: a hostcheck or machines pin that the running kernel is connected to chronyd's socket. Release; from #5757. | #5391, #5757 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -493,4 +489,5 @@ issue #5756: needs exactly one state label of queued, building, in review, merge
 issue #5848: title 'OWN-page-session mutants part 3: kill the other old cmd/agentosd survivors (agent, backups, passkeys, lostcard and 21 more files)' does not start with '<ID>: '
 issue #5876: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5889: body has no board-row block
+issue #5920: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 ```
