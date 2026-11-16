@@ -12,10 +12,11 @@ import (
 
 func TestTIM1AboutRoundsAtEachUnitsStart(t *testing.T) {
 	for d, want := range map[time.Duration]string{
-		48 * time.Hour: "about 2 days",
-		2 * time.Hour:  "about 2 hours",
-		time.Hour:      "about 1 hour",
-		-time.Hour:     "about 1 hour",
+		48 * time.Hour:   "about 2 days",
+		2 * time.Hour:    "about 2 hours",
+		30 * time.Minute: "about 30 minutes",
+		time.Hour:        "about 1 hour",
+		-time.Hour:       "about 1 hour",
 	} {
 		if got := about(d); got != want {
 			t.Errorf("about(%v) = %q, want %q", d, got, want)
@@ -29,6 +30,14 @@ func TestTIM1SkewOfExactlyTheToleranceAgrees(t *testing.T) {
 		r.carrier = r.wall.Add(-skew)
 		if s := r.guard(t, nil).Check(bg); s.State != Agreed {
 			t.Errorf("skew %v: status = %+v, want agreed", skew, s)
+		}
+	}
+	// One second past the tolerance disagrees on either sign.
+	for _, skew := range []time.Duration{DefaultTolerance + time.Second, -DefaultTolerance - time.Second} {
+		r := newRig()
+		r.carrier = r.wall.Add(-skew)
+		if s := r.guard(t, nil).Check(bg); s.State != Disagree {
+			t.Errorf("skew %v: status = %+v, want disagree", skew, s)
 		}
 	}
 }
