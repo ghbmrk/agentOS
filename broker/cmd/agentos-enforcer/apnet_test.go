@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -185,12 +187,31 @@ func TestEnrolmentHandOverTimesOut(t *testing.T) {
 func TestEnrolmentFailureRollsBackEveryAccessPoint(t *testing.T) {
 	x, second := twoAPs(t)
 	waitFor(t, func() bool { return strings.Contains(x.ap.wireless(second), setupPW) })
+	// The second access point refuses only once the first holds the four
+	// networks, so the rollback has something to undo.
 	x.ap.mu.Lock()
 	x.ap.failAt = map[string]error{second: errors.New("push: ssh: handshake failed")}
+	x.ap.silent = map[string]bool{second: true}
 	x.ap.mu.Unlock()
 	a := newAuthenticator(t)
+	go func() {
+		waitFor(t, func() bool { return strings.Contains(x.ap.wireless(apAddr), "'Home family'") })
+		x.ap.mu.Lock()
+		delete(x.ap.silent, second)
+		x.ap.mu.Unlock()
+		// Only the second pushes again: the first keeps the four networks
+		// until the rollback's own nudge.
+		for _, p := range x.d.ap.points {
+			if p.addr == second {
+				p.kick <- struct{}{}
+			}
+		}
+	}()
 	if w := finishEnrol(x, a, 5*time.Second); w.Code == http.StatusOK || x.d.ap.Replaced() {
 		t.Fatalf("enrolled with one access point refusing: %d %s", w.Code, w.Body)
+	}
+	if !strings.Contains(x.ap.wireless(apAddr), "'Home family'") && !strings.Contains(strings.Join(x.ap.history, ""), "'Home family'") {
+		t.Fatal("the first access point never held the four networks, so no rollback was tested")
 	}
 	owner := x.apKeys().Owner
 	waitFor(t, func() bool {
@@ -305,5 +326,33 @@ func TestAPConfigRefuses(t *testing.T) {
 		if err := c.check(); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// HW-10, ENF-l-ap-4: first boot checks the setup password before it
+// provisions anything, so a password the access point would refuse leaves
+// the state directory empty and a corrected re-run can provision it.
+func TestProvisionChecksSetupFirst(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	files := t.TempDir()
+	write := func(name, s string) string {
+		p := filepath.Join(files, name)
+		if err := os.WriteFile(p, []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	code, bad, good := write("case", caseCode), write("bad", "short"), write("good", setupPW)
+	if err := provisionFiles(dir, code, bad); err == nil {
+		t.Fatal("a setup password the access point refuses was provisioned")
+	}
+	if left, _ := os.ReadDir(dir); len(left) != 0 {
+		t.Fatalf("a refused setup password left %d files in the state directory", len(left))
+	}
+	if err := provisionFiles(dir, code, good); err != nil {
+		t.Fatalf("the corrected re-run: %v", err)
 	}
 }

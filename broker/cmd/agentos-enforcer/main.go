@@ -87,24 +87,7 @@ func run(args []string) error {
 	}
 	switch {
 	case *provision != "":
-		b, err := os.ReadFile(*provision)
-		if err != nil {
-			return err
-		}
-		if *apSetup == "" {
-			return errors.New("-provision needs -ap-setup")
-		}
-		sb, err := os.ReadFile(*apSetup)
-		if err != nil {
-			return err
-		}
-		if err := checkSetup(strings.TrimSpace(string(sb))); err != nil {
-			return err
-		}
-		if err := provisionState(*state, strings.TrimSpace(string(b))); err != nil {
-			return err
-		}
-		return provisionAP(fileStore{path: filepath.Join(*state, fileAPKeys)}, strings.TrimSpace(string(sb)))
+		return provisionFiles(*state, *provision, *apSetup)
 	case *apPub:
 		s, err := apSSHKey(fileStore{path: filepath.Join(*state, fileAPSSH)}, nil)
 		if err != nil {
@@ -232,4 +215,30 @@ func (l logLight) Show(c alert.Colour) error {
 	l.st.shown, l.st.last = true, c
 	l.l.Printf("light: %d", c)
 	return nil
+}
+
+// provisionFiles is first boot: the case code from caseFile and the setup
+// network's password from setupFile. The password is checked before
+// anything is written, so a refused one leaves the state directory as it
+// was and a corrected re-run can provision it (ENF-l-ap-4).
+func provisionFiles(state, caseFile, setupFile string) error {
+	b, err := os.ReadFile(caseFile)
+	if err != nil {
+		return err
+	}
+	if setupFile == "" {
+		return errors.New("-provision needs -ap-setup")
+	}
+	sb, err := os.ReadFile(setupFile)
+	if err != nil {
+		return err
+	}
+	setup := strings.TrimSpace(string(sb))
+	if err := checkSetup(setup); err != nil {
+		return err
+	}
+	if err := provisionState(state, strings.TrimSpace(string(b))); err != nil {
+		return err
+	}
+	return provisionAP(fileStore{path: filepath.Join(state, fileAPKeys)}, setup)
 }

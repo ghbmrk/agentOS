@@ -39,7 +39,7 @@
 {{with .APStalled}}<h2>Wi-Fi access point</h2>
 <div class="pending warn">
 {{range .}}<p>The access point at {{.Addr}} is stalled: {{.Abandoned}} of the enforcer's connections to it were cut off part way and are still waiting, so the enforcer sends it nothing more. It keeps the Wi-Fi settings it had, so a device you removed since may still be able to join.</p>
-{{end}}<p>Check the access point first: that its cable runs only to the enforcer's admin port and nothing else is plugged into it. A factory reset gives the access point a new key, so the enforcer refuses it until its new key is set up on the enforcer as at installation. Then restart the enforcer, which clears this and sends your settings again.</p>
+{{end}}<p>Check the access point first: that its cable runs only between the access point and the enforcer's access-point port, with nothing else plugged into the access point. A factory reset gives the access point a new key, which the enforcer refuses until it is set up again: see "If the enforcer was compromised", step 4, in the owner's guide. Then restart the enforcer, which clears this and sends your settings again.</p>
 </div>
 {{end}}
 {{with .Resolver}}<h2>Names and addresses</h2>
