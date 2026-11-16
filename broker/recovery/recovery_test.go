@@ -187,6 +187,11 @@ func TestEnsureMACKeyKeepsTheKeyItHasAndRefusesAnotherKind(t *testing.T) {
 	if k, _ := entryKind(x.b.V, MACKeyName); k != vault.KindAPIKey {
 		t.Fatalf("the entry of another kind was overwritten: %q", k)
 	}
+	// A MAC key of the wrong length is no key.
+	must(t, x.b.V.Put(MACKeyName, KindMACKey, bytes.Repeat([]byte{3}, 16)))
+	if k, err := macKey(x.b.V); err == nil || k != nil {
+		t.Fatalf("a 16-byte MAC key: %x, %v", k, err)
+	}
 }
 
 func TestAnEmptyRecoveryKeyPrintsNothing(t *testing.T) {
@@ -209,9 +214,25 @@ func TestKeySlotsNeedATwelveByteNonceAndAWrappedKey(t *testing.T) {
 	for name, bad := range map[string]func(*keysSlot){
 		"nonce":   func(s *keysSlot) { s.Nonce = s.Nonce[:11] },
 		"wrapped": func(s *keysSlot) { s.Wrapped = s.Wrapped[:vault.KeySize+15] },
+		"tpm-sealed": func(s *keysSlot) {
+			if s.Kind == vault.SlotTPM {
+				s.Sealed = nil
+			}
+		},
+		"passphrase-kdf": func(s *keysSlot) {
+			if s.Kind == vault.SlotRecovery {
+				s.Kind, s.Sealed = vault.SlotPassphrase, nil
+			}
+		},
 	} {
 		kf := readKeys(x.b.KeysPath)
-		bad(&kf.Slots[0])
+		for i := range kf.Slots {
+			if name == "nonce" || name == "wrapped" {
+				bad(&kf.Slots[0])
+				break
+			}
+			bad(&kf.Slots[i])
+		}
 		raw, err := json.Marshal(kf)
 		must(t, err)
 		if err := CheckKeys(raw); err == nil {
@@ -381,6 +402,21 @@ func TestEnsureForgetLogStopsOnAMalformedKeyOrLog(t *testing.T) {
 			t.Errorf("%s: the malformed entry changed", name)
 		}
 	}
+	// Each decoder refuses a field it does not know, even beside valid ones.
+	if _, err := decodeForgetLog([]byte(`{"format":"` + forgetLogFmt + `","id":"AQEBAQEBAQEBAQEBAQEBAQ==","mac":"","entries":null,"extra":1}`)); err == nil {
+		t.Error("a forget log with an unknown field decoded")
+	}
+	y := newBox(t)
+	key := `{"format":"` + forgetKeyFmt + `","key":"CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=","auth":"YQ==","extra":1}`
+	must(t, y.b.V.Put(ForgetKeyName, KindForgetKey, []byte(key)))
+	if _, _, err := loadForgetKey(y.b.V); err == nil {
+		t.Error("a forget key with an unknown field loaded")
+	}
+	must(t, y.b.V.Put(ForgetKeyName, KindForgetKey, []byte(strings.Replace(key, `,"extra":1`, "", 1))))
+	if _, _, err := loadForgetKey(y.b.V); err != nil {
+		t.Errorf("the same key without the field: %v", err)
+	}
+
 }
 
 func TestSaveForgetLogReportsAnEntryItCannotEncode(t *testing.T) {
