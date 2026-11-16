@@ -592,6 +592,7 @@ func TestTIM1OutlierTextNamesTheSkew(t *testing.T) {
 	for skew, want := range map[time.Duration]string{
 		30 * time.Minute:  "by about 30 minutes,",
 		-90 * time.Minute: "by about 1 hour,",
+		time.Hour:         "by about 1 hour,",
 		2 * time.Hour:     "by about 2 hours,",
 		-5 * time.Hour:    "by about 5 hours,",
 	} {
