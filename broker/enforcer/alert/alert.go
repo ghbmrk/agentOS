@@ -24,7 +24,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"slices"
 	"sync"
 	"time"
@@ -506,33 +505,76 @@ func (a *Alerts) resolve(i int) error {
 // Lifted resolves every open trip and missing record from device, the
 // only way they close (Resolve refuses them). The light goes off when none
 // is left open.
-func (a *Alerts) Lifted(device string) error { return a.LiftedThrough(device, math.MaxUint64) }
+func (a *Alerts) Lifted(device string) error { return a.lifted(device, nil) }
 
-// LiftedThrough is Lifted for the alerts with an ID up to through: those a
-// lift saved with through = Last covers. The daemon calls it once the
+// Cover is one trip or missing record a lift covers: its ID and its count
+// when the cut lifted. A box's cut record saves its lift's covers, so the
+// daemon can close exactly those again after a failed append or a crash.
+type Cover struct {
+	ID    uint64 `json:"id"`
+	Count int    `json:"count"`
+}
+
+// Covers is every open trip and missing record from device as it stands
+// now: what a lift saved at this moment covers.
+func (a *Alerts) Covers(device string) []Cover {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var cs []Cover
+	for _, r := range a.log {
+		if r.Open && r.Kind.Lights() && r.Device == device {
+			cs = append(cs, Cover{r.ID, r.Count})
+		}
+	}
+	return cs
+}
+
+// LiftedCovered is Lifted for the alerts covers names, each only while
+// its count is no more than the cover's. The daemon calls it once the
 // owner's passkey has lifted that cut in full (NET-4), and again for a box
-// it finds open with them still open (a failed append, or a crash before
-// one), so a retry closes them; a trip raised after the lift, whose cut
-// was never saved, stays open and red (#4305).
-func (a *Alerts) LiftedThrough(device string, through uint64) error {
+// it finds open (a failed append, or a crash before one), so a retry
+// closes them. A trip after the lift is never closed by it, so it stays
+// red (#4305): a new alert has an ID no cover names (Floor keeps IDs from
+// being reused across a restart), and a trip that counts on a covered
+// alert still open raises its count past the cover's. A count below the
+// cover's is a count whose append was lost, which the lift saw.
+func (a *Alerts) LiftedCovered(device string, covers []Cover) error {
+	if len(covers) == 0 {
+		a.show()
+		return nil
+	}
+	return a.lifted(device, covers)
+}
+
+func (a *Alerts) lifted(device string, covers []Cover) error {
 	a.mu.Lock()
 	var err error
 	for i := range a.log {
-		if r := a.log[i]; r.Open && r.Kind.Lights() && r.Device == device && r.ID <= through {
-			err = errors.Join(err, a.resolve(i))
+		r := a.log[i]
+		if !r.Open || !r.Kind.Lights() || r.Device != device {
+			continue
 		}
+		if covers != nil && !slices.ContainsFunc(covers, func(c Cover) bool { return c.ID == r.ID && r.Count <= c.Count }) {
+			continue
+		}
+		err = errors.Join(err, a.resolve(i))
 	}
 	a.mu.Unlock()
 	a.show()
 	return err
 }
 
-// Last is the highest alert ID so far: a lift saves it, so a later
-// LiftedThrough closes only what was open at the lift.
-func (a *Alerts) Last() uint64 {
+// Floor makes every later alert's ID above every ID in covers. An alert
+// whose append was lost leaves its ID unused in the journal, so New would
+// hand it out again; a saved lift that covers it must not cover the
+// alert that reuses it. The daemon calls it with each saved lift's covers
+// at start-up, before any close.
+func (a *Alerts) Floor(covers []Cover) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.next
+	for _, c := range covers {
+		a.next = max(a.next, c.ID)
+	}
 }
 
 // Core sets whether the core is up (slice l, from the channel and the

@@ -48,9 +48,9 @@ type edgeCutState struct {
 	// day leaves it 0: the new day's count starts from nothing, and its
 	// overrun cuts.
 	Lifted uint32 `json:"lifted,omitempty"`
-	// Through is the highest alert ID at the owner's lift (alert.Last):
-	// the alerts that lift covers, as the core's cutState.Through (#4305).
-	Through uint64 `json:"through,omitempty"`
+	// Covers is the trips and missing records open at the owner's lift
+	// (alert.Covers): all it closes, as the core's cutState.Covers (#4305).
+	Covers []alert.Cover `json:"covers,omitempty"`
 }
 
 // tamperAdvice ends the reason of a cut whose record is missing or does
@@ -83,7 +83,8 @@ func openEdgeCut(store fileStore, alerts *alert.Alerts, logf func(string)) (*edg
 	} else if !c.st.Cut {
 		// An open edge whose lift's alerts are still open: the lift was
 		// saved before a failed append or a crash closed them (#4305
-		// item 2); a trip after it stays open.
+		// item 2); a trip after it stays open, and none reuses a covered ID.
+		alerts.Floor(c.st.Covers)
 		if err := c.liftedLocked(); err != nil {
 			logf("edge cut: the edge is not cut but its alerts did not close, retried each tick: " + err.Error())
 		}
@@ -170,7 +171,7 @@ func (c *edgeCut) Lift(day uint32, past bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.st.Cut {
-		next := edgeCutState{Through: c.alerts.Last()}
+		next := edgeCutState{Covers: c.alerts.Covers(edgeDevice)}
 		if c.st.Day == day || c.st.Day == 0 && past {
 			next.Lifted = day
 		}
@@ -184,10 +185,10 @@ func (c *edgeCut) Lift(day uint32, past bool) error {
 }
 
 // liftedLocked closes the open edge's trips and missing record its last
-// lift covers (Through); c.mu is held, so no trip lands between the cut's read and the close. Alerts
+// lift covers (Covers); c.mu is held, so no trip lands between the cut's read and the close. Alerts
 // takes no lock of the edge cut's. A failure leaves it owed.
 func (c *edgeCut) liftedLocked() error {
-	err := c.alerts.LiftedThrough(edgeDevice, c.st.Through)
+	err := c.alerts.LiftedCovered(edgeDevice, c.st.Covers)
 	c.unlifted = err != nil
 	return err
 }

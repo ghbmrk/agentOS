@@ -471,7 +471,7 @@ func TestTripDeviceNamesAreTheBoxConstants(t *testing.T) {
 					}
 				case *ast.SelectorExpr:
 					switch {
-					case (fun.Sel.Name == "Lifted" || fun.Sel.Name == "LiftedThrough") && len(call.Args) >= 1:
+					case (fun.Sel.Name == "Lifted" || fun.Sel.Name == "LiftedCovered" || fun.Sel.Name == "Covers") && len(call.Args) >= 1:
 						site, dev = "Lifted", call.Args[0]
 					case fun.Sel.Name == "Raise" && len(call.Args) == 2 && isAlertKind(call.Args[0], "Trip", "RecordMissing"):
 						// recordMissing's own body passes its parameter on:
@@ -518,7 +518,7 @@ func isAlertKind(e ast.Expr, names ...string) bool {
 // calls, #4305 item 2, L3 point 1 on #6012): a trip whose cut record write
 // was refused, then a restart, finds the box open, but its trip stays open
 // and the light red: the start-up close covers only the alerts the last
-// saved lift recorded (Through), so it cannot tell the owner all is clear
+// saved lift recorded (Covers), so it cannot tell the owner all is clear
 // when they never lifted anything. Checked with no lift before and after
 // a lift. Catches a start-up close that resolves every open trip.
 func TestUnsavedTripStaysRedAfterRestart(t *testing.T) {
@@ -558,6 +558,89 @@ func TestUnsavedTripStaysRedAfterRestart(t *testing.T) {
 			if err := b.lift(); err != nil || x.colour() != alert.Off || x.openTrips(b.device) != 0 {
 				t.Fatalf("%s: the lift after: %v, light %v", b.name, err, x.colour())
 			}
+		}
+	}
+}
+
+// liftBoxes is the core and the edge as the lift tests trip and lift them;
+// each edge trip is on a new day, since a lift holds the rest of its own.
+func liftBoxes(x *box) []struct {
+	name, device, file string
+	trip               func()
+	lift               func() error
+} {
+	day := uint32(40)
+	return []struct {
+		name, device, file string
+		trip               func()
+		lift               func() error
+	}{
+		{"core", coreDevice, fileCut, func() { x.d.cut.Trip("test trip") }, func() error { return x.d.cut.Resume() }},
+		{"edge", edgeDevice, fileEdgeCut, func() { day++; x.d.edge.Trip(day, "test trip") }, func() error { return x.d.edge.Lift(day, false) }},
+	}
+}
+
+// TestTripCountedOnOwedCloseStaysRed (KRN-12 Response, NET-2, #4305 item
+// 2; L3 and Security repro on #6012 at c2026dc): a lift is saved but its
+// close is refused, the journal heals, and a new trip counts on the trip
+// alert still open, while its own cut write is refused. A restart finds
+// the box open: the saved lift covered that alert at its earlier count, so
+// it stays open and the light red. Catches a lift's cover that closes a
+// trip counted on it after the lift.
+func TestTripCountedOnOwedCloseStaysRed(t *testing.T) {
+	fail := failAlertSync(t)
+	x, _ := enrolled(t, true)
+	for _, b := range liftBoxes(x) {
+		b.trip()
+		fail.Store(true)
+		if err := b.lift(); err == nil {
+			t.Fatalf("%s: a lift whose close was refused answered nil", b.name)
+		}
+		fail.Store(false)
+		x.fail(b.file, true)
+		b.trip() // counts on the covered alert, still open
+		x.advance(time.Second)
+		x.d.Close()
+		x.fail(b.file, false)
+		x.start()
+		if x.colour() != alert.Red || x.openTrips(b.device) != 1 {
+			t.Fatalf("%s: a trip after the lift closed at the restart: light %v, %d open", b.name, x.colour(), x.openTrips(b.device))
+		}
+		b.trip()
+		if err := b.lift(); err != nil || x.colour() != alert.Off {
+			t.Fatalf("%s: the next lift: %v, light %v", b.name, err, x.colour())
+		}
+	}
+}
+
+// TestReusedTripIDStaysRed (KRN-12 Response, NET-2, #4305 item 2; L3 and
+// Security repro on #6012 at c2026dc): a trip whose alert append is lost
+// is lifted, so the saved lift covers an ID the journal never held. After
+// a restart a new trip, whose cut write is refused, must not take that ID,
+// so the next restart leaves it open and red. Catches a cover matched by
+// a reused ID.
+func TestReusedTripIDStaysRed(t *testing.T) {
+	fail := failAlertSync(t)
+	x, _ := enrolled(t, true)
+	for _, b := range liftBoxes(x) {
+		fail.Store(true)
+		b.trip() // the cut is saved, its alert is not
+		_ = b.lift()
+		x.d.Close()
+		fail.Store(false)
+		x.start()
+		x.fail(b.file, true)
+		b.trip()
+		x.advance(time.Second)
+		x.d.Close()
+		x.fail(b.file, false)
+		x.start()
+		if x.colour() != alert.Red || x.openTrips(b.device) != 1 {
+			t.Fatalf("%s: a trip with a reused ID closed at the restart: light %v, %d open", b.name, x.colour(), x.openTrips(b.device))
+		}
+		b.trip()
+		if err := b.lift(); err != nil || x.colour() != alert.Off {
+			t.Fatalf("%s: the next lift: %v, light %v", b.name, err, x.colour())
 		}
 	}
 }
