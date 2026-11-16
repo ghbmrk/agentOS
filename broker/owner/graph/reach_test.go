@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -130,7 +131,7 @@ func TestReachWriterSendsOnlyAdditions(t *testing.T) {
 		t.Fatalf("decl.reach entries %+v, want the second to be %+v", bodies, want)
 	}
 	all, _ := mailbank(t, true).Decl(clerks)
-	if add := Additions(k.State().DeclReach(), all); len(add.Nodes)+len(add.Edges) != 0 {
+	if add, held := Additions(k.State().DeclReach(), all); len(add.Nodes)+len(add.Edges)+len(held) != 0 {
 		t.Fatalf("the log lacks %+v of the graph", add)
 	}
 }
@@ -174,23 +175,31 @@ func TestDeclMapsClassesAndControlEdges(t *testing.T) {
 	if _, err := g.Decl(map[string]string{"": "d.hub"}); err == nil {
 		t.Fatal("an unnamed clerk maps")
 	}
+	// Two clerks on one node: a node roots one clerk, so the kernel would
+	// bind only one and the other's keys would price on direct reach.
+	for range 20 {
+		if _, err := mailbank(t, true).Decl(map[string]string{"mail": "a.mail", "cal": "a.mail"}); err == nil {
+			t.Fatal("two clerks rooted on one node map")
+		}
+	}
 }
 
 // A binding the log holds is kept: the writer never sends a clerk moved to
-// another node or a node rebound to another clerk, which the kernel would
-// refuse whole along with every other addition.
+// another node, a node rebound to another clerk or a first declaration of a
+// node an earlier edge named, which the kernel would refuse whole along with
+// every other addition; it names each one it holds back.
 func TestAdditionsKeepTheLogsBindings(t *testing.T) {
 	have := kernel.DeclReach{
 		Nodes: []kernel.ReachNode{{ID: "mbox", Clerk: "mail", Classes: []key.Asset{key.AssetData}}, {ID: "bank"}},
-		Edges: []kernel.ReachEdge{{Kind: "reset", From: []string{"mbox", "bank"}, To: "bank"}},
+		Edges: []kernel.ReachEdge{{Kind: "reset", From: []string{"mbox", "bank"}, To: "bank"}, {Kind: "act", From: []string{"mbox"}, To: "shop"}},
 	}
 	want := kernel.DeclReach{
 		Nodes: []kernel.ReachNode{{ID: "mbox", Clerk: "cal", Classes: []key.Asset{key.AssetData, key.AssetMoney, key.AssetMoney}},
-			{ID: "bank", Clerk: "bank"}, {ID: "new", Clerk: "mail"}},
+			{ID: "bank", Clerk: "bank"}, {ID: "new", Clerk: "mail"}, {ID: "shop", Classes: []key.Asset{key.AssetData}}},
 		Edges: []kernel.ReachEdge{{Kind: "reset", From: []string{"bank", "mbox"}, To: "bank"}, {Kind: "act", From: []string{"new"}, To: "bank"},
 			{Kind: "act", From: []string{"new"}, To: "bank"}},
 	}
-	got := Additions(have, want)
+	got, held := Additions(have, want)
 	exp := kernel.DeclReach{
 		Nodes: []kernel.ReachNode{{ID: "mbox", Classes: []key.Asset{key.AssetMoney}}, {ID: "bank", Clerk: "bank"}, {ID: "new"}},
 		Edges: []kernel.ReachEdge{{Kind: "act", From: []string{"new"}, To: "bank"}},
@@ -198,12 +207,32 @@ func TestAdditionsKeepTheLogsBindings(t *testing.T) {
 	if !reflect.DeepEqual(got, exp) {
 		t.Fatalf("additions %+v, want %+v", got, exp)
 	}
+	if want := []string{`node "mbox" keeps clerk "mail", not "cal"`, `clerk "mail" stays on node "mbox", not "new"`, `node "shop" stays undeclared: an earlier edge named it`}; !slices.Equal(held, want) {
+		t.Fatalf("held %q, want %q", held, want)
+	}
 	k, _, _ := bootKernel(t)
 	if err := k.DeclareReach(0, have); err != nil {
 		t.Fatal(err)
 	}
 	if err := k.DeclareReach(0, got); err != nil {
 		t.Fatalf("the kernel refuses the writer's additions: %v", err)
+	}
+}
+
+// A write that holds a binding back still sends the rest, then says what it
+// held, so the caller can alert on a clerk priced on a stale root.
+func TestWriteReachSaysWhatItHeld(t *testing.T) {
+	k, _, _ := bootKernel(t)
+	if err := WriteReach(inProc{k, 0}, mailbank(t, false), map[string]string{"mail": "a.mail"}); err != nil {
+		t.Fatal(err)
+	}
+	err := WriteReach(inProc{k, 0}, mailbank(t, true), map[string]string{"mail": "a.bank"})
+	if !errors.Is(err, ErrHeld) || !strings.Contains(err.Error(), `clerk "mail" stays on node "a.mail", not "a.bank"`) {
+		t.Fatalf("a moved clerk: %v, want %v naming it", err, ErrHeld)
+	}
+	reset := kernel.ReachEdge{Kind: "reset", From: []string{"a.mail"}, To: "a.bank"}
+	if got := k.State().DeclReach().Edges; !slices.ContainsFunc(got, func(e kernel.ReachEdge) bool { return reflect.DeepEqual(e, reset) }) {
+		t.Fatalf("the reset edge was not sent with the held move: edges %+v", got)
 	}
 }
 

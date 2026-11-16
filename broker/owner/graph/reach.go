@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -26,13 +27,16 @@ var assetOf = map[Class]key.Asset{Data: key.AssetData, Money: key.AssetMoney, Id
 // Decl is g as the kernel declares it: each node with its classes and the
 // clerk rooted on it (clerks maps a clerk to its node's ID), and each reset,
 // copy or act edge. A device's safety class is its mark as safety or access;
-// nothing else makes a device safety. A clerk on a node g lacks is an error,
-// since its keys would price on their direct reach alone.
+// nothing else makes a device safety. A clerk on a node g lacks, or two on
+// one node, is an error: one clerk's keys would price on direct reach alone.
 func (g *Graph) Decl(clerks map[string]string) (kernel.DeclReach, error) {
 	rooted := map[string]string{}
 	for c, id := range clerks {
 		if _, ok := g.index[id]; !ok || c == "" {
 			return kernel.DeclReach{}, fmt.Errorf("graph: clerk %q is rooted on unknown node %q", c, id)
+		}
+		if other, ok := rooted[id]; ok {
+			return kernel.DeclReach{}, fmt.Errorf("graph: clerks %q and %q are both rooted on node %q", other, c, id)
 		}
 		rooted[id] = c
 	}
@@ -53,32 +57,47 @@ func (g *Graph) Decl(clerks map[string]string) (kernel.DeclReach, error) {
 }
 
 // Additions is what want declares that have lacks: new nodes, new classes
-// and clerk bindings on known nodes, and new edges. A binding have already
-// gives a clerk or a node is kept: moving it could lower a price, which the
-// kernel refuses whole, and would hold back every other addition with it.
-func Additions(have, want kernel.DeclReach) kernel.DeclReach {
-	nodes, bound, edges := map[string]kernel.ReachNode{}, map[string]bool{}, map[string]bool{}
+// and clerk bindings on known nodes, and new edges. It leaves out, and names
+// in held, what the kernel would refuse whole with every other addition: a
+// binding have gives a clerk or a node otherwise (a move could lower a
+// price), and a new node an edge in have already named (priced as every
+// class until declared, so declaring it could lower that price).
+func Additions(have, want kernel.DeclReach) (add kernel.DeclReach, held []string) {
+	nodes, bound, named, edges := map[string]kernel.ReachNode{}, map[string]string{}, map[string]bool{}, map[string]bool{}
 	for _, n := range have.Nodes {
 		old := nodes[n.ID]
 		old.ID, old.Classes = n.ID, append(old.Classes, n.Classes...)
 		if n.Clerk != "" {
-			old.Clerk, bound[n.Clerk] = n.Clerk, true
+			old.Clerk, bound[n.Clerk] = n.Clerk, n.ID
 		}
 		nodes[n.ID] = old
 	}
 	for _, e := range have.Edges {
-		edges[edgeKey(e)] = true
+		edges[edgeKey(e)], named[e.To] = true, true
+		for _, f := range e.From {
+			named[f] = true
+		}
 	}
-	var add kernel.DeclReach
 	for _, n := range want.Nodes {
 		h, had := nodes[n.ID]
+		if !had && named[n.ID] {
+			held = append(held, fmt.Sprintf("node %q stays undeclared: an earlier edge named it", n.ID))
+			continue
+		}
 		r := kernel.ReachNode{ID: n.ID}
 		for _, c := range n.Classes {
 			if !slices.Contains(h.Classes, c) && !slices.Contains(r.Classes, c) {
 				r.Classes = append(r.Classes, c)
 			}
 		}
-		if n.Clerk != "" && h.Clerk == "" && !bound[n.Clerk] {
+		at, isBound := bound[n.Clerk]
+		switch {
+		case n.Clerk == "" || h.Clerk == n.Clerk:
+		case h.Clerk != "":
+			held = append(held, fmt.Sprintf("node %q keeps clerk %q, not %q", n.ID, h.Clerk, n.Clerk))
+		case isBound:
+			held = append(held, fmt.Sprintf("clerk %q stays on node %q, not %q", n.Clerk, at, n.ID))
+		default:
 			r.Clerk = n.Clerk
 		}
 		if !had || r.Clerk != "" || len(r.Classes) > 0 {
@@ -91,8 +110,12 @@ func Additions(have, want kernel.DeclReach) kernel.DeclReach {
 			add.Edges = append(add.Edges, e)
 		}
 	}
-	return add
+	return add, held
 }
+
+// ErrHeld is a write that sent what it could but left some of the graph
+// undeclared, so a clerk may price on a stale root: the caller alerts.
+var ErrHeld = errors.New("graph: the log keeps declarations the graph changed")
 
 // edgeKey names an edge whatever the order of its From.
 func edgeKey(e kernel.ReachEdge) string {
@@ -101,7 +124,8 @@ func edgeKey(e kernel.ReachEdge) string {
 }
 
 // WriteReach sends, as one entry, what g declares that the log lacks, and
-// nothing when the log already holds it all.
+// nothing when the log already holds it all; then ErrHeld names what
+// Additions held back.
 func WriteReach(k Declarer, g *Graph, clerks map[string]string) error {
 	want, err := g.Decl(clerks)
 	if err != nil {
@@ -111,8 +135,14 @@ func WriteReach(k Declarer, g *Graph, clerks map[string]string) error {
 	if err != nil {
 		return err
 	}
-	if add := Additions(have, want); len(add.Nodes)+len(add.Edges) > 0 {
-		return k.DeclareReach(add)
+	add, held := Additions(have, want)
+	if len(add.Nodes)+len(add.Edges) > 0 {
+		if err := k.DeclareReach(add); err != nil {
+			return err
+		}
+	}
+	if len(held) > 0 {
+		return fmt.Errorf("%w: %s", ErrHeld, strings.Join(held, "; "))
 	}
 	return nil
 }
