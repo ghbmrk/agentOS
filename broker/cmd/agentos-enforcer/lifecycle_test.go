@@ -1397,6 +1397,10 @@ func TestCutCoreReconnectGetsUnsentAlert(t *testing.T) {
 func TestCoreSeenOnEachRequest(t *testing.T) {
 	x, _ := enrolled(t, true)
 	c, _ := x.dial(x.serve(), x.core)
+	// The session's start counts the core seen (connected) on the
+	// daemon's side, possibly after dial returns: wait for it, so it is
+	// counted at the connect and not after the clock moves.
+	waitFor(t, func() bool { x.d.upMu.Lock(); defer x.d.upMu.Unlock(); return x.d.toldUp })
 	x.advance(Silence - 10*time.Second)
 	if code := c.read(); code != wire.OK {
 		t.Fatalf("a read on the open session: %v", code)
