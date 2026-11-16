@@ -17,6 +17,8 @@
 # .usr-verity.raw, the boot entry, .release.json, .usr.list), and SHA256SUMS.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
+# The Debian archive keyring mkosi verifies the snapshot with: exactly the pinned keys (#5578, #5933).
+sh "$HERE/../debian-archive-keyring.sh"
 OUT=$(realpath -m "${1:-$HERE/out}"); MKOSI=${MKOSI:-mkosi}
 : "${ENFORCER_RELEASE_ROOT:?the enforcer feed root.json (ENFORCER_RELEASE_ROOT) is required}"
 : "${AGENTOS_RELEASE_KEYS:?the agentOS release keys to refuse (AGENTOS_RELEASE_KEYS) are required}"

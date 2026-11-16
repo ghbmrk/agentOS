@@ -84,6 +84,7 @@ jobs:
         if: steps.scope.outputs.records != 'true'
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
+          sh image/debian-archive-keyring.sh  # exactly the pinned keys (#5578)
           # snapshot.debian.org answers 503/504 for minutes at a time (#4518; #5011's run 42120504082
           # died on a 504 after the runner apt's 3 tries). Each attempt starts from an empty root and
           # reads the same pinned, signed snapshot, so a retry fetches the same hashed packages. Four
@@ -101,6 +102,24 @@ jobs:
             sleep "$wait"
           done
           sudo chroot "$RUNNER_TEMP/image-tools" dpkg-query -W systemd kmod
+      - name: The keyring check refuses an altered, a missing and an extra key (IMG-keyring-pin, #5578)
+        if: steps.scope.outputs.records != 'true'
+        # The committed list passes on the runner's keyring; three copies of the check, each with
+        # its list changed, must fail on it: a pinned fingerprint altered, a pinned key dropped (the
+        # keyring then holds a key not pinned), and a key added (a pinned key is then missing).
+        run: |
+          k=image/debian-archive-keyring.sh d=$RUNNER_TEMP/keyring-check
+          sh "$k"
+          f=$(awk '/^[0-9A-F]{40}  /{ print $1; exit }' "$k"); g=$(echo "$f" | rev)
+          [ ${#f} = 40 ] && [ "$f" != "$g" ] || { echo "no pinned fingerprint found in $k" >&2; exit 1; }
+          mkdir -p "$d"
+          sed "s/^$f/$g/" "$k" > "$d/altered.sh"
+          sed "/^$f/d" "$k" > "$d/dropped.sh"
+          sed "/^$f/p" "$k" | sed "0,/^$f/s//$g/" > "$d/added.sh"
+          for c in altered dropped added; do
+            ! cmp -s "$k" "$d/$c.sh" || { echo "$c: the copy is unchanged" >&2; exit 1; }
+            if sh "$d/$c.sh"; then echo "$c: the check passed" >&2; exit 1; fi
+          done
       - name: Unit tests
         if: steps.scope.outputs.records != 'true'
         # The differential tests (systemd-analyze, systemd-tmpfiles, modprobe) fail rather than skip
@@ -390,8 +409,19 @@ jobs:
       - name: Vendored code equals the modules go.sum pins (KRN-2cap-harden, #2945)
         # `go mod vendor` rewrites vendor/ from the checksum-verified modules (and the local
         # replace directories), so an edited, added or deleted vendored file shows as a change.
+        # A Go proxy read can fail mid-stream (#3977, as #3768), so `go mod vendor` is tried three
+        # times; the third failure fails the step. The comparison runs once, outside the retry.
         run: |
-          go mod vendor
+          retry() {
+            for t in 1 2 3; do
+              "$@" && return
+              echo "try $t of 3 failed: $*" >&2
+              [ "$t" = 3 ] || sleep $((t * 15))
+            done
+            echo "::error::$* failed 3 times; the vendor check cannot run (#3977)"
+            return 1
+          }
+          retry go mod vendor
           s=$(git status --porcelain --untracked-files=all -- vendor)
           test -z "$s" || { echo "$s"; echo "broker/vendor differs from go mod vendor" >&2; exit 1; }
       - name: OP-2 same-effect model at its full bounds, without -race (journal A19)
@@ -557,6 +587,7 @@ jobs:
           trap 'sudo sysctl -qw kernel.apparmor_restrict_unprivileged_userns=$was' EXIT
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
+          sh ../image/debian-archive-keyring.sh  # exactly the pinned keys (#5578)
           T=$RUNNER_TEMP/camdecode-tree
           # snapshot.debian.org has outages (#4518): four attempts, as the checks job's image tools.
           for wait in 15 30 60 last; do
@@ -675,6 +706,22 @@ jobs:
             [ "$rc" -eq 0 ] || fail=1
           done 3< "$RUNNER_TEMP/root-plan"
           [ "$fail" -eq 0 ]
+      - name: OpenClaw guest lockfile, from the guest's own npm (#2914)
+        # npm 10 once wrote the lockfile without the libc constraint on 10 platform packages, so the
+        # glibc guest also installed the musl binaries. The pinned Node's bundled npm re-resolves
+        # package.json; any change to the committed lockfile (another npm major, or a package.json
+        # edit with no lockfile edit) fails the step. The pins are read from build-rootfs.sh.
+        run: |
+          sh=guest/openclaw/build-rootfs.sh
+          ver=$(sed -n 's/^NODE_VERSION=//p' "$sh")
+          sum=$(sed -n 's/^NODE_SHA256=//p' "$sh")
+          [ -n "$ver" ] && [ -n "$sum" ] || { echo "$sh names no NODE_VERSION or NODE_SHA256" >&2; exit 1; }
+          node_dir=$(mktemp -d)
+          curl -fsSLo "$node_dir/node.tar.xz" "https://nodejs.org/dist/$ver/node-$ver-linux-x64.tar.xz"
+          echo "$sum  $node_dir/node.tar.xz" | sha256sum -c -
+          tar -xJf "$node_dir/node.tar.xz" --strip-components=1 -C "$node_dir"
+          (cd guest/openclaw && PATH="$node_dir/bin:$PATH" npm install --package-lock-only --ignore-scripts --no-audit --no-fund)
+          git diff --exit-code -- guest/openclaw/package-lock.json
       - name: The guests' Debian userland, from the image's apt sources (#5570)
         # Both guest roots below copy their shell, tools and libraries from it, never from the runner.
         run: |
@@ -750,6 +797,7 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -yq qemu-utils tpm2-tools busybox-static ntfs-3g dosfstools cpio fdisk \
             python3-virt-firmware mmdebstrap debian-archive-keyring
+          sh image/debian-archive-keyring.sh  # exactly the pinned keys (#5578)
       # CI-hostcheck-image-tools (#4906): the VM stack hostcheck boots (qemu, swtpm, OVMF) comes from
       # the image's pinned Debian snapshot, the snapshot entry of the image's own apt sources, never
       # the runner's archive, which updates within the release about weekly. Live trixie-security is

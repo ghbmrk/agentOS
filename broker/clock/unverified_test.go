@@ -539,3 +539,40 @@ func TestTIM1FarAnchorHolds(t *testing.T) {
 		}
 	}
 }
+
+func TestTIM1SavedNTSSyncAheadOfTheBootClockIsRefused(t *testing.T) {
+	// #5929: a saved NTS sync the boot clock has not reached yet is a
+	// corrupt or tampered file: a restart drops it, as it does such a
+	// carrier reading, so it authenticates nothing. The same sync at the
+	// boot clock's own reading still does.
+	for _, ahead := range []time.Duration{0, time.Minute} {
+		path := filepath.Join(t.TempDir(), "clock.json")
+		r := newRig()
+		r.carrier = time.Time{}
+		kind := SyncedNTS
+		edit := func(c *Config) {
+			syncAs(&kind)(c)
+			c.StatePath = path
+			c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
+		}
+		g := r.guard(t, edit)
+		if s := g.Check(bg); !s.Authenticated {
+			t.Fatalf("ahead %v: status = %+v", ahead, s)
+		}
+		g.Flush()
+		v := readSaved(t, path)
+		v.NTSWall, v.NTSMono = v.NTSWall.Add(ahead), v.NTSMono+ahead
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		kind = NotSynced
+		g = r.guard(t, edit)
+		if s := g.Check(bg); s.Authenticated != (ahead == 0) {
+			t.Fatalf("ahead %v: status = %+v", ahead, s)
+		}
+	}
+}
