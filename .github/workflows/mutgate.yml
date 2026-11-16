@@ -3,9 +3,9 @@ name: mutgate
 # #1814) on every pull request. A PR fails when a mutant lives on one of a tier-A or tier-B broker
 # package's target lines: the lines it adds or changes in the package's non-test .go files, or, when
 # it changes only the package's tests, the lines its changed test functions run. The tests run that
-# line but do not check it. The one exception is a `Mutant-equivalent: <path>:<line> <reason>` line
-# in the PR body for that site, which the reviewer checks; the body reaches the gate through env as
-# text, read by the base's tool. Gremlins runs only on those packages (`mutgate.py claimed`), and
+# line but do not check it. The one exception is a `Mutant-equivalent: <path>:<line>[:<col>][:<KIND>]
+# <reason>` line in the PR body for that mutant (#5792, #5828), which the reviewer checks; the body
+# reaches the gate through env as text, read by the base's tool. Gremlins runs only on those packages (`mutgate.py claimed`), and
 # only on their target lines (`run --git`), split into K shards a package, one job each (#4961): the
 # `plan` job counts each package's targets, times its suite (#5069) and picks K, so no job runs past its timeout, and measures a
 # test-only package's covered lines once for every shard to read (#4970). Every mutant
