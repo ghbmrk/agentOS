@@ -68,7 +68,11 @@ image    An OSV scan of the Debian packages in a built image: DIR holds the dpkg
          tree, "image/guest" (#5572): DIR/guest holds the dpkg status and os-release of the
          packages whose files the guests carry (image/guest-shipped.sh) beside the manifest of
          the whole root they are copied from (image/guest-base.sh), and each scanned package
-         must be in that manifest at its version. --propose ISSUE also prints, and adds to the
+         must be in that manifest at its version. The main tree's static binaries' link
+         inputs are scanned as part of the main tree (#5885): DIR/linked holds the dpkg status
+         and os-release of the base root's packages whose archives llama-server's static link
+         read (image/llamaserver.sh), each also in that manifest at its version; a missing or
+         empty status fails (exit 2). --propose ISSUE also prints, and adds to the
          report as "proposed", the record each failing no-fix finding needs, citing ISSUE, with
          the template why the image records use (#5628); it accepts nothing itself.
 propose  The same records from REPORT, an `image --report` file such as the
@@ -183,6 +187,9 @@ INITRDS, INITRD_STATUS = "initrd", "usr/share/agentos/initrd.dpkg-status"
 # Where image/build.sh puts the guests' package lists (image/guest-base.sh's manifest of the whole
 # base root, and image/guest-shipped.sh's status and os-release of the packages the guests carry).
 GUESTS = "guest"
+# Where image/build.sh puts the status and os-release of the base root's packages the main tree's
+# static binaries link (image/llamaserver.sh, #5885), scanned as part of the main tree.
+LINKED = "linked"
 # A package the image scan adds to every query: source curl at version 0, which every Debian
 # advisory against curl affects. osv-scanner's image scan reports packages with no
 # vulnerabilities when its OSV query fails, and exits 0; a canary with no advisory is that.
@@ -247,13 +254,17 @@ CONTROL_BARE_FILES = ("AGENTOS-VULNCHECK-INLINED-4", "npm:agentos-bare inlined i
 # (#4000; CONTROL_INITRD) holds agentos-nofix too, and agentos-early, which the main tree lacks.
 # The guests (#5572; FIXTURE/image/guest) carry agentos-nofix and libguest1 (source
 # agentos-guestonly); their base root's manifest also lists agentos-toolchain, which they do not
-# carry, so its advisory (DEB-7) must not be reported.
+# carry, so its advisory (DEB-7) must not be reported. The main tree's static link inputs (#5885;
+# FIXTURE/image/linked) hold libstatic-dev (source agentos-linkedonly), in no other status file, so
+# its advisory (DEB-8) is the main tree's.
 CONTROL_IMAGE_FAILS = {(IMAGE, "AGENTOS-VULNCHECK-DEB-1"), (IMAGE, "AGENTOS-VULNCHECK-DEB-4"),
+                       (IMAGE, "AGENTOS-VULNCHECK-DEB-8"),
                        (INITRD, "AGENTOS-VULNCHECK-DEB-4"), (INITRD, "AGENTOS-VULNCHECK-DEB-5"),
                        (GUEST, "AGENTOS-VULNCHECK-DEB-4"), (GUEST, "AGENTOS-VULNCHECK-DEB-6")}
 # With the fixture's records: the fixed advisory still fails and its record goes unused, and the
 # main tree's record for agentos-nofix does not accept the same advisory in the initrd or the guests.
 CONTROL_IMAGE_VERDICTS = {(IMAGE, "AGENTOS-VULNCHECK-DEB-1", "FAIL"), (IMAGE, "AGENTOS-VULNCHECK-DEB-4", "accepted #1"),
+                          (IMAGE, "AGENTOS-VULNCHECK-DEB-8", "accepted #1"),
                           (INITRD, "AGENTOS-VULNCHECK-DEB-4", "FAIL"), (INITRD, "AGENTOS-VULNCHECK-DEB-5", "accepted #1"),
                           (GUEST, "AGENTOS-VULNCHECK-DEB-4", "FAIL"), (GUEST, "AGENTOS-VULNCHECK-DEB-6", "accepted #1")}
 # The initrd's status file in the fixture, which the control packs into an initrd (control_image).
@@ -294,6 +305,8 @@ CONTROL_CONFIG = {
          "where": INITRD, "package": "agentos-early"},
         {"id": "CVE-0000-0107", "issue": 1, "why": "control: only the guests carry it; accepted by alias",
          "where": GUEST, "package": "agentos-guestonly"},
+        {"id": "CVE-0000-0108", "issue": 1, "why": "control: only the main tree's static link reads it; "
+         "accepted by alias", "where": IMAGE, "package": "agentos-linkedonly"},
     ],
 }
 
@@ -1546,6 +1559,32 @@ def guest_problems(src):
     return []
 
 
+def linked_problems(src):
+    """The main tree's linked inputs (LINKED) must be a non-empty status and os-release, else the
+    scan stops (ScanError): llama-server ships whatever its link read, so an image without them
+    would pass its static libraries unscanned. Each listed package must be in the base root's
+    manifest (GUESTS) at its version, the root the link ran in, which the reproduce job compares;
+    a guests' directory problem is guest_problems' to report."""
+    d = pathlib.Path(src) / LINKED
+    for name in (DPKG_STATUS, OS_RELEASE):
+        f = d / name
+        if not f.is_file() or not f.read_text().strip():
+            raise ScanError(f"{f}: missing or empty; image/build.sh writes it (image/guest-shipped.sh --status, #5885)")
+    status = dpkg_installed((d / DPKG_STATUS).read_text())
+    if not status:
+        raise ScanError(f"{d / DPKG_STATUS}: lists no installed package, so llama-server's link inputs are not scanned")
+    found = sorted((pathlib.Path(src) / GUESTS).glob("*.manifest"))
+    try:
+        manifest = {(p["name"], p["version"]) for p in json.loads(found[0].read_text())["packages"]}
+    except (IndexError, OSError, ValueError, KeyError, TypeError):
+        return []
+    extra = [f"{n} {v}" for n, v in sorted(status - manifest)]
+    if extra:
+        return [f"{d / DPKG_STATUS} lists packages the base root's manifest does not: "
+                f"{'; '.join(extra[:5])}{'...' if len(extra) > 5 else ''}"]
+    return []
+
+
 def debian_fix(pkg, ids, name, eco):
     """The version that fixes one of IDS in source package NAME in ECO, from the advisory
     entries in one package of an osv-scanner report; "" when Debian has no fix there."""
@@ -1676,8 +1715,8 @@ def scan(config, root, go_db=None, osv_env=None, offline=False, mirror=None):
 
 
 def scan_image(config, src, osv_env=None, offline=False):
-    """Findings and problems for one image's packages, its main tree's, its initrd's and its
-    guests'; each tree's records applied to it alone.
+    """Findings and problems for one image's packages, its main tree's (with its static
+    binaries' link inputs), its initrd's and its guests'; each tree's records applied to it alone.
 
     A record accepts only an advisory Debian has not fixed in the image's release: once a fix
     ships, the finding fails until the image is rebuilt with it, and the record goes unused."""
@@ -1687,6 +1726,10 @@ def scan_image(config, src, osv_env=None, offline=False):
     records = [r for r in config.get("accepted", []) if r.get("where") in IMAGE_TREES]
     findings, problems = run_image(src, osv_env, offline)
     problems += manifest_problems(src)
+    problems += linked_problems(src)
+    found, probs = run_image(pathlib.Path(src) / LINKED, osv_env, offline)
+    findings += found
+    problems += [f"linked: {p}" for p in probs]
     status, probs = initrd_status(src)
     problems += probs
     if status is not None:

@@ -409,8 +409,19 @@ jobs:
       - name: Vendored code equals the modules go.sum pins (KRN-2cap-harden, #2945)
         # `go mod vendor` rewrites vendor/ from the checksum-verified modules (and the local
         # replace directories), so an edited, added or deleted vendored file shows as a change.
+        # A Go proxy read can fail mid-stream (#3977, as #3768), so `go mod vendor` is tried three
+        # times; the third failure fails the step. The comparison runs once, outside the retry.
         run: |
-          go mod vendor
+          retry() {
+            for t in 1 2 3; do
+              "$@" && return
+              echo "try $t of 3 failed: $*" >&2
+              [ "$t" = 3 ] || sleep $((t * 15))
+            done
+            echo "::error::$* failed 3 times; the vendor check cannot run (#3977)"
+            return 1
+          }
+          retry go mod vendor
           s=$(git status --porcelain --untracked-files=all -- vendor)
           test -z "$s" || { echo "$s"; echo "broker/vendor differs from go mod vendor" >&2; exit 1; }
       - name: OP-2 same-effect model at its full bounds, without -race (journal A19)
@@ -695,6 +706,22 @@ jobs:
             [ "$rc" -eq 0 ] || fail=1
           done 3< "$RUNNER_TEMP/root-plan"
           [ "$fail" -eq 0 ]
+      - name: OpenClaw guest lockfile, from the guest's own npm (#2914)
+        # npm 10 once wrote the lockfile without the libc constraint on 10 platform packages, so the
+        # glibc guest also installed the musl binaries. The pinned Node's bundled npm re-resolves
+        # package.json; any change to the committed lockfile (another npm major, or a package.json
+        # edit with no lockfile edit) fails the step. The pins are read from build-rootfs.sh.
+        run: |
+          sh=guest/openclaw/build-rootfs.sh
+          ver=$(sed -n 's/^NODE_VERSION=//p' "$sh")
+          sum=$(sed -n 's/^NODE_SHA256=//p' "$sh")
+          [ -n "$ver" ] && [ -n "$sum" ] || { echo "$sh names no NODE_VERSION or NODE_SHA256" >&2; exit 1; }
+          node_dir=$(mktemp -d)
+          curl -fsSLo "$node_dir/node.tar.xz" "https://nodejs.org/dist/$ver/node-$ver-linux-x64.tar.xz"
+          echo "$sum  $node_dir/node.tar.xz" | sha256sum -c -
+          tar -xJf "$node_dir/node.tar.xz" --strip-components=1 -C "$node_dir"
+          (cd guest/openclaw && PATH="$node_dir/bin:$PATH" npm install --package-lock-only --ignore-scripts --no-audit --no-fund)
+          git diff --exit-code -- guest/openclaw/package-lock.json
       - name: The guests' Debian userland, from the image's apt sources (#5570)
         # Both guest roots below copy their shell, tools and libraries from it, never from the runner.
         run: |

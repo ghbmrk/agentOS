@@ -249,6 +249,79 @@ func TestARefusedEntrySetIsWiped(t *testing.T) {
 	}
 }
 
+// An authenticated entry set encode never writes (#5897; CLK-1, STO-2): a
+// name given twice opens with its last value, and the value it displaced is
+// never decoded, so a displaced value that is no base64 does not refuse the
+// set; a value that is no base64 has its part-decoded buffer wiped once; a
+// value that is no string, and a set of null, are ErrCorrupt.
+func TestAnEntrySetEncodeNeverWrites(t *testing.T) {
+	r, key, id := Recovery{Key: make([]byte, RecoveryLen)}, slices.Repeat([]byte{0x3c}, keyLen), make([]byte, idLen)
+	sl, err := makeSlot(id, key, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := func(plain string) string {
+		return refusalWrite(t, refusalStore(t, key, sl, func(id []byte) []byte {
+			b, err := seal(derive(key, id, "entries", keyLen), []byte(plain), entriesAAD(id))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return b
+		}))
+	}
+	kept := []byte("kept-entry-canary")
+	q, err := json.Marshal(kept) // the quoted base64 encode writes
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := refusalWipes(t)
+	s, err := Unlock(raw(`{"x/a":"ZGlzcGxhY2Vk","x/a":"!!!!","x/a":`+string(q)+`}`), r)
+	if err != nil {
+		t.Fatalf("a repeated name: %v", err)
+	}
+	if v, _, _ := s.Get("x/a"); string(v) != string(kept) || len(Entries(s)) != 1 {
+		t.Fatalf("a repeated name opened as %q, %d entries; want its last value only", v, len(Entries(s)))
+	}
+	// The derived keys' buffers are wiped once each.
+	s.LogKey()
+	s.ClerkRoot()
+	for _, purpose := range []string{"log", "clerks"} {
+		if n := refusalCount(*held, derive(key, id, purpose, keyLen)); n != 1 {
+			t.Errorf("wiped the %s key's buffer %d times, want once", purpose, n)
+		}
+	}
+	s.Close()
+	if n := refusalCount(*held, kept); n != 1 {
+		t.Errorf("wiped the kept value %d times, want once", n)
+	}
+	if _, _, err := s.Get("x/a"); !errors.Is(err, ErrClosed) {
+		t.Errorf("Get after Close: got %v, want ErrClosed", err)
+	}
+	// "QUJDREVG!!!!" decodes to ABCDEF before its bad quantum; the buffer is
+	// DecodedLen(len of the quoted value) = 9 bytes long.
+	part := []byte("ABCDEF\x00\x00\x00")
+	for name, plain := range map[string]string{
+		"no base64": `{"x/a":` + string(q) + `,"x/b":"QUJDREVG!!!!"}`,
+		"a number":  `{"x/a":` + string(q) + `,"x/b":1234}`,
+		"null":      `{"x/a":` + string(q) + `,"x/b":null}`,
+		"null set":  `null`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			held := refusalWipes(t)
+			if _, err := Unlock(raw(plain), r); !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("got %v, want ErrCorrupt", err)
+			}
+			want := map[bool]int{true: 1}
+			if n := refusalCount(*held, part); n != want[name == "no base64"] {
+				t.Errorf("wiped the part-decoded value %d times", n)
+			}
+			if n := refusalCount(*held, kept); n != want[name != "null set"] {
+				t.Errorf("wiped the decoded canary %d times", n)
+			}
+		})
+	}
+}
+
 // refusalTPM is a TPM no command reaches: Unlock must refuse before it.
 type refusalTPM struct{}
 
