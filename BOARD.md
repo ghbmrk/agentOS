@@ -423,7 +423,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-keyring-pin | IMG-keyring-pin: the Debian archive keyring is checked against committed fingerprints before any image or guest build uses it. Release; from #5573. | #5573 | queued (release; tier A; gate files) |
 | GUEST-bridge-tree-dead-fu | GUEST-bridge-tree-dead-fu: retire the stale TREE rows and B16, bound the idle-bridge test, drop the guest-plane tree exemption (#5611 reviews) | - | queued (release; tier B) |
 | TIM-1-interval-fu-c | TIM-1-interval-fu-c: the question book moves off Guard.Now to the interval, and the clock drops the restricted mode's last API. Release; from #5216. | #5216, #5279 | queued (release; tier A) |
-| TIM-1-interval-fu-e | TIM-1-interval-fu-e: losing NTS during an outlier re-alerts the owner, and the outlier bound outlives the NTS sync. Release; from #5754. | #5216, #5754 | building (release; tier A) |
 | KRN-clock-fresh-rise | KRN-clock-fresh-rise: a kernel started behind the log catches up on a fresh chronyd sample (TIM-1). Release; from #5757. | #5391, #5757 | queued (release; tier A) |
 | LINT-dial-configured | LINT-dial-configured: the inference lint's configured() refuses a local bound to a literal (NET-2). Release; from #5757. | #5757 | queued (release) |
 | MUT-deleted-test-own-lines-fu | MUT-deleted-test-own-lines-fu: #5770's release items: NOT COVERED rule scope, testdata as a test change, Mutant-uncovered alias, archive error text. Release; after #5776. | #5770 | queued (release; tier A) |
@@ -442,11 +441,14 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | OWN-recall-holdline | OWN-recall-holdline: STATUS hold line names agents as the forget texts do | #5883 | queued (release; tier A) |
 | VULN-codex-openssl | VULN-codex-openssl: bump the codex pin once a release links OpenSSL 3.6.5 or later; until then the bundled entry records each fix's reach. Release; from #5888. | #5873, #5888 | queued (release; tier A; waits on a codex release) |
 | CLK-seal-decode-wipe-fu | CLK-seal-decode-wipe-fu: Unlock wipes a value a duplicate JSON key overwrites and a partly decoded bad-base64 buffer, and refuses a null entries blob. Release; from #5895. | #5806, #5895 | building (release; tier A) |
-| TIM-1-interval-fu-g | TIM-1-interval-fu-g: guard Authenticated against an overflowing tampered reference, and confirm chrony's maxdrift 500 cap on the first image. Release; from #5893. | #5758, #5893 | queued (release; tier A) |
+| TIM-1-interval-fu-g | TIM-1-interval-fu-g: guard Authenticated against an overflowing tampered reference, and confirm chrony's maxdrift 500 cap on the first image. Release; from #5893. | #5758, #5893 | building (release; tier A) |
 | MUT-misread-migrate | MUT-misread-migrate: open PRs carrying dead Mutant-misread lines rerun mutgate after #5902. Release; from #5902. | #5902 | queued (release) |
 | MUT-legacy-not-equivalent-records | MUT-legacy-not-equivalent-records: clear the #5774 not-equivalent record entries, then check record reasons | #5908 | queued (release; tier A) |
 | OWN-page-session-mut5 | OWN-page-session mutants part 5: delete the scanner's dead found map | #5857 | queued (release; tier A) |
 | OWN-page-session-mut6 | OWN-page-session mutants part 6: NewScanner(nil) panics on 1 MiB | #5857 | queued (release; tier A) |
+| CLK-seal-entry-swap-wipe-fu | CLK-seal-entry-swap-wipe-fu: seal wipes an entry value Put, ReplaceAndPut or Delete drops, and encode leaves no pooled JSON copy. Release; from #5897. | #5897 | queued (release; tier A) |
+| CLK-seal-decode-nocopy-pin-fu | CLK-seal-decode-nocopy-pin-fu: a test pins that the seal entries decode copies no value out of the plaintext buffer. Release; from #5914. | #5897, #5914 | queued (release; tier A) |
+| KRN-clock-chrony-wiring-pin-fu | KRN-clock-chrony-wiring-pin-fu: a hostcheck or machines pin that the running kernel is connected to chronyd's socket. Release; from #5757. | #5391, #5757 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
