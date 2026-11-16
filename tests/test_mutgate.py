@@ -1583,6 +1583,9 @@ func Down(n int) int {
 	return n - 1
 }
 """
+# The plan's failure (#5942) for hint.go's `return 10`, run by the base's TestUp and by no head test.
+UNRUN_5 = (r"mutgate: broker/hint/hint\.go: (\d+, )*5(, \d+)* ran under the base's version of the tests this diff "
+           r"changes, and no test of package hint runs them at the head")
 TWO_TEST = """package hint
 
 import "testing"
@@ -1819,7 +1822,16 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
         # deleted test ran at the base and its neighbour runs at the head (D-319), and the clamp's
         # survivor fails the gate.
         # REQ: MUT-deleted-test-own-lines
-        base = TWO_TEST.replace("if Down(3) != 2 {", "if Down(Up(2)) != 2 {")
+        # Here TestDown also runs the clamp's `return 10` (line 5), so every line the base ran still runs
+        # at the head; where it does not, the plan fails first (#5942).
+        alone = TWO_TEST.replace("if Down(3) != 2 {", "if Down(Up(2)) != 2 {")
+        with tempfile.TemporaryDirectory() as d:
+            self.repo(d, alone[:alone.index("func TestUp")] + alone[alone.index("func TestDown"):], test_base=alone,
+                      src_pr=TWO_SRC + "// Down is Up's inverse below the clamp.\n")
+            r = self.mutgate(d, "plan", "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertRegex(r.stderr, UNRUN_5)
+        base = TWO_TEST.replace("if Down(3) != 2 {", "if Down(Up(2)) != 2 || Down(Up(20)) != 9 {")
         pr = base[:base.index("func TestUp")] + base[base.index("func TestDown"):]
         with tempfile.TemporaryDirectory() as d:
             git = self.repo(d, pr, test_base=base, src_pr=TWO_SRC + "// Down is Up's inverse below the clamp.\n")
@@ -1843,8 +1855,6 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             r = self.mutgate(d, "verify", str(out.parent), "--git", "HEAD~1", "--summary", str(summary))
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("broker/hint/hint.go:4 CONDITIONALS_NEGATION survives", r.stdout)
-            # `return 10` only TestUp ran: no test runs it now.
-            self.assertIn("broker/hint/hint.go:5 is a target line no test of package hint runs at the head", r.stdout)
             self.assertIn("the lines the diff changes and the lines TestDown cover", summary.read_text())
             # The record is still required beside the added line: without it verify refuses.
             data = json.loads((out / "hint.json").read_text())
@@ -1855,10 +1865,11 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             self.assertIn("holds no record of the lines that ['TestDown'] covers", r.stderr)
             self.assertEqual(git("status", "--porcelain", "--", "broker").stdout, "")
 
-    def gate_run(self, d, pr_test, base_test, src_pr=None, extra=None, move=None, base_extra=None):
+    def gate_run(self, d, pr_test, base_test, src_pr=None, extra=None, move=None, base_extra=None, plan_fails=False):
         """(verify's result, the lines gremlins was given) for a PR of pr_test (and src_pr, extra
         {name: text} new or changed files in broker/hint/ (None: deleted) over base_extra's, and hint.go
-        renamed to move), through plan, run, delete and verify."""
+        renamed to move), through plan, run, delete and verify; or, with plan_fails, (plan's failed
+        result, None)."""
         git = self.repo(d, pr_test, test_base=base_test, src_pr=src_pr, base_extra=base_extra)
         for name, text in (extra or {}).items():
             f = pathlib.Path(d) / "broker" / "hint" / name
@@ -1874,7 +1885,9 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "--amend", "--no-edit")
         env, plan = self.line_stub(d), pathlib.Path(d) / "targets.json"
         r = self.mutgate(d, "plan", "--git", "HEAD~1", "--targets-out", str(plan))
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.returncode, 1 if plan_fails else 0, r.stdout + r.stderr)
+        if plan_fails:
+            return r, None
         out = pathlib.Path(d) / "res" / "mutants-0"
         r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(out), "--targets", str(plan), env=env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -1918,11 +1931,20 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
         }
         for name, (pr, was, src, extra, move) in cases.items():
             with self.subTest(name), tempfile.TemporaryDirectory() as d:
-                r, seen = self.gate_run(d, pr, was, src, extra, move)
+                # Since #5942 the plan fails a line the base ran that the head's whole suite runs nowhere,
+                # before any mutant runs. A moved file's base lines map to no head line, so there the
+                # NOT COVERED rule fails it.
+                r, seen = self.gate_run(d, pr, was, src, extra, move, plan_fails=not move)
                 self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-                self.assertIn(5, seen)
-                self.assertIn(f"broker/hint/{move or 'hint.go'}:5 is a target line no test of package hint runs at the head",
-                              r.stdout)
+                if move:
+                    self.assertIn(5, seen)
+                    self.assertIn(f"broker/hint/{move}:5 is a target line no test of package hint runs at the head", r.stdout)
+                elif "edited" in name:
+                    # The edit drops lines 4, 5 and 7 from the base's mapping; the if's closing brace (line
+                    # 6), which no mutant names, is still one the base ran and the head runs nowhere.
+                    self.assertIn("mutgate: broker/hint/hint.go: 6 ran under the base's version", r.stderr)
+                else:
+                    self.assertRegex(r.stderr, UNRUN_5)
 
     def test_a_helper_edit_beside_an_added_line_targets_the_tests_that_reach_it(self):
         # #5753: a helper change plus an added comment line used to narrow the targets to that
@@ -1968,10 +1990,35 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
         for name, (path, pr, src) in cases.items():
             with self.subTest(name), tempfile.TemporaryDirectory() as d:
                 test = reader(path)
-                r, seen = self.gate_run(d, test, test, src, extra={path: pr}, base_extra={path: table})
-                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-                self.assertIn(5, seen)
-                self.assertIn("broker/hint/hint.go:5 is a target line no test of package hint runs at the head", r.stdout)
+                r, _ = self.gate_run(d, test, test, src, extra={path: pr}, base_extra={path: table}, plan_fails=True)
+                self.assertRegex(r.stderr, UNRUN_5)  # #5942: the plan fails it before any mutant runs
+
+    def test_a_line_no_mutant_names_fails_where_the_base_ran_it_and_the_head_runs_it_nowhere(self):
+        # L1 on #5770 (#5942): every target line runs was checked only through NOT COVERED mutants, so
+        # a line no mutant and no statement deletion names (here mark's empty body, lines 14 and 15)
+        # that a weakened test stopped running passed. The plan now runs the head's whole suite and
+        # fails each line the base's version of the changed tests ran that no head test runs.
+        # REQ: MUT-own-lines-no-mutant
+        src = TWO_SRC + "\nfunc mark() {\n}\n"
+        base = TWO_TEST.replace("func TestUp(t *testing.T) {\n", "func TestUp(t *testing.T) {\n\tmark()\n")
+        down = base.replace("func TestDown(t *testing.T) {\n", "func TestDown(t *testing.T) {\n\tmark()\n")
+        cases = {
+            "the only call dropped": (TWO_TEST, base, None, 1),
+            "a comment line beside it": (TWO_TEST, base, src + "// a comment\n", 1),
+            # TestDown still runs mark at the head: the line runs, so the plan passes.
+            "another test still runs it": (down.replace("\tmark()\n\tif Up", "\tif Up"), down, None, 0),
+        }
+        for name, (pr, was, src_pr, code) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                self.repo(d, pr, src=src, test_base=was, src_pr=src_pr)
+                r = self.mutgate(d, "plan", "--git", "HEAD~1")
+                self.assertEqual(r.returncode, code, r.stdout + r.stderr)
+                gone = "broker/hint/hint.go: 14, 15 ran under the base's version of the tests this diff changes"
+                if code:
+                    self.assertIn(gone + ", and no test of package hint runs them at the head", r.stderr)
+                    self.assertNotIn(", 3,", r.stderr)  # Up's lines still run under TestUp
+                else:
+                    self.assertNotIn(gone, r.stderr)
 
     def test_an_archive_that_fails_prints_the_problem(self):
         # L3 R3 on #5770 (#5779): a failed `git archive` wrote no tar, and tarfile's ReadError came

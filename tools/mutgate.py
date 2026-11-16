@@ -1496,7 +1496,29 @@ def record_for(pkg, tests, bases, diff_text, base, tmp):
     was, problem = base_covered(pkg, merge_base(base, "HEAD"), bases[pkg], tmp, diff_text)
     if problem:
         return None, problem
+    # Every target line runs (L1 on #5770, #5942): a line no mutant and no deletion names (a brace, a
+    # bare `return g()`) has no NOT COVERED verdict, so a weakened test that stops running it was unseen.
+    # One whole-suite run at the head (none more when the changed tests are every test) names it.
+    every, problem = (covered, None) if names is None else covered_by(pkg, None, tmp)
+    if problem:
+        return None, problem
+    if gone := unrun(was, every):
+        return None, ("; ".join(f"{p}: {', '.join(map(str, ls))}" for p, ls in gone.items())
+                      + f" ran under the base's version of the tests this diff changes, and no test of package {pkg} "
+                      "runs them at the head: keep a test that runs each, or delete the code")
     return {**coverage_record(names, covered), "base": coverage_record(bases[pkg], was)}, None
+
+
+def unrun(was, every):
+    """{path: sorted lines} of was ({path: head lines} the base's tests ran) that every ({path: lines}
+    the head's whole suite runs) leaves out, holding code at the head: a blank or comment line between
+    two cover blocks, which an edit beside it can open, is no code a test runs."""
+    out = {}
+    for p, ls in sorted(was.items()):
+        rows = _uncommented((BROKER / p.split("/", 1)[1]).read_bytes().decode("utf-8", "replace"), False).split("\n")
+        if left := sorted(n for n in ls - every.get(p, set()) if n <= len(rows) and rows[n - 1].strip()):
+            out[p] = left
+    return out
 
 
 def planned_targets(planned, pkg, added, tests, bases):
