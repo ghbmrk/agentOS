@@ -305,6 +305,29 @@ func TestTIM1AChronyAheadOfTheBoxReachesPastItByTheBound(t *testing.T) {
 	}
 }
 
+// With the box clock ahead, the reading's Earliest is the box clock less
+// the correction and the bound, so a wider bound reaches further back
+// (TIM-1). Revert mutant: chrony.go:55's corr-err as corr+err.
+//
+// REQ: TIM-1
+func TestTIM1AChronyBehindTheBoxReachesBeforeItByTheBound(t *testing.T) {
+	dir := t.TempDir()
+	s := NewChrony(fakeChronyd(t, dir, func(seq uint32) []byte {
+		p := tracking(seq, corrTwoDays)
+		binary.BigEndian.PutUint32(p[92:], 0)          // root delay none
+		binary.BigEndian.PutUint32(p[96:], 0x04800000) // root dispersion 1 s
+		return p
+	}), filepath.Join(dir, "reply.sock"))
+	defer s.Close()
+	b0 := time.Now().UnixMilli()
+	r := s.Read()
+	b1 := time.Now().UnixMilli()
+	reach := 2*key.DayMS + 1000 // the correction, then the bound's 1 s
+	if r.Earliest < b0-reach || r.Earliest > b1-reach || r.Latest < b0 || r.Latest > b1 {
+		t.Fatalf("a box two days fast read %+v around the box's [%d, %d], want Earliest %d before it", r, b0, b1, reach)
+	}
+}
+
 // Each request carries a new sequence number from 1, so an answer to an
 // earlier request, replayed, vouches for nothing (TIM-1).
 //
