@@ -28,10 +28,13 @@ var (
 	ErrForgetStop  = errors.New("kernel: STOP holds, so no Forget is asked")
 	// ErrForgetClock is the owner's text as it stands: a reading at least
 	// ForgetAskFor wide has lapsed the ask before it is sent (TIM-1, CH-12).
-	// The step is a restart: the kernel process's clock (proc's onLog) keeps
-	// a forward step of the box clock as width until it starts again, so
-	// waiting alone may never clear it, and STATUS shows no kernel width yet.
-	ErrForgetClock = errors.New("I can't ask to forget anything right now, because my clock isn't sure of the time. Restart me, then send FORGET again.")
+	// The kernel process's clock (proc's onLog) keeps a forward step of the
+	// box clock as width until it starts again, and a start commits the step,
+	// ending KEY-8 and KEY-4 holds early if the box clock is wrong-ahead. A
+	// wrong clock may only make the box more cautious (TIM-1's interval
+	// rule), so the text names no restart for the owner to make: it names
+	// the weekly restart (UPD-10), which commits the step anyway (KRN-clock-a).
+	ErrForgetClock = errors.New("I can't ask to forget anything right now, because my two clocks disagree by 10 minutes or more, so nothing is erased. Send FORGET again after my weekly restart.")
 )
 
 // kindWords names a kind as the household says it, for one and for more; the

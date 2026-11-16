@@ -507,12 +507,13 @@ func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
 }
 
 // A forward step of the box clock while the kernel runs keeps its reading
-// wide until a restart, so a Forget ask is refused until then, and the
-// refusal names the restart as the step; after it the ask is taken (TIM-1,
-// CH-12; blocker on #5937).
+// wide until the next start, so a Forget ask is refused until then. The
+// refusal names the weekly restart, never a restart for the owner to make,
+// since a start commits the step (TIM-1, KEY-8; Security on #5937); after a
+// start the ask is taken (CH-12).
 //
 // REQ: TIM-1, CH-12
-func TestCH12AWideForgetClockClearsOnRestartAsItsTextSays(t *testing.T) {
+func TestCH12AWideForgetClockClearsAtTheNextStart(t *testing.T) {
 	b := newBBox(t, recipientWire(t, testRK))
 	box := b.now
 	b.cfg.Clock = func() kernel.Reading { return kernel.At(box) }
@@ -538,17 +539,17 @@ func TestCH12AWideForgetClockClearsOnRestartAsItsTextSays(t *testing.T) {
 	if _, err := ask(); err != nil {
 		t.Fatalf("an ask at the start: %v", err)
 	}
-	box += 11 * 60_000 // network time corrects a stale boot clock
+	box += 11 * 60_000 // a forward step of the box clock
 	for range 2 {
 		_, err := ask()
-		if !errors.Is(err, kernel.ErrForgetClock) || !strings.Contains(err.Error(), "Restart me") {
+		if !errors.Is(err, kernel.ErrForgetClock) || !strings.Contains(err.Error(), "weekly restart") || strings.Contains(err.Error(), "Restart me") {
 			t.Fatalf("an ask after a forward step: %v", err)
 		}
 		time.Sleep(20 * time.Millisecond) // waiting does not clear it
 	}
 	b.restart()
 	if text, err := ask(); err != nil || !strings.Contains(text, "YES ") {
-		t.Fatalf("an ask after the restart the text names: %q, %v", text, err)
+		t.Fatalf("an ask after the next start: %q, %v", text, err)
 	}
 }
 

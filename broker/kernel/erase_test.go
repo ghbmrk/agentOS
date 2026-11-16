@@ -993,8 +993,8 @@ func TestTIM1AWideReadingRefusesAForgetAsk(t *testing.T) {
 		if !errors.Is(err, kernel.ErrForgetClock) || text != "" {
 			t.Fatalf("an ask at a reading %d ms wide: %q, %v", w, text, err)
 		}
-		if !strings.Contains(err.Error(), "Restart me, then send FORGET again.") {
-			t.Fatalf("the refusal names no step: %q", err)
+		if !strings.Contains(err.Error(), "Send FORGET again after my weekly restart.") || strings.Contains(err.Error(), "Restart me") {
+			t.Fatalf("the refusal names no step, or one that commits the clock: %q", err)
 		}
 	}
 	at(20, 20)
