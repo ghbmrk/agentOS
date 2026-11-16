@@ -151,9 +151,7 @@ type Passphrase struct {
 	Argon  Argon
 }
 
-// Recovery is the recovery key, RecoveryLen random bytes. Each factor holds
-// its passphrase, key or PIN in a secret.Secret, so a print of a factor, or
-// of a Swap, shows none of them (DECOY-b-8, CLK-1, #4860).
+// Recovery is the recovery key, RecoveryLen random bytes.
 type Recovery struct{ Key secret.Secret[[]byte] }
 
 func (TPM) kind() Kind        { return KindTPM }
