@@ -316,12 +316,11 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-offline-verity | IMG-offline-verity: the offline manager mounts /usr through dm-verity (#4767 Security 6) | UNLOCK-unit-deps (#4667) | queued (release; tier A) |
 | UNLOCK-allow-wording | UNLOCK-allow-wording: one direction for unlock.allow lines (#4894 L3 4, 5) | UNLOCK-unit-deps (#4667) | queued (release; tier B) |
 | NET-2-cap-basis-required | NET-2-cap-basis-required: every signed byte cap names its basis (D-248) | #4578, #5165 | queued (release; tier A) |
-| HOST-1h | HOST-1h: an image's hostcheck liveness answer must stop before its MOR clear, or a shutdown in progress could answer and then halt. Release; from #5266. | #5266, #5256 | queued (release; tier A) |
 | ENF-shared-quota-b | ENF-shared-quota-b: a host cannot fill its shared segment's records (ct timeout plus per-MAC count and meter). Release; split from #4701; waits for Mark's card. | #4701 | queued (release; tier A; lane primary) |
-| HOST-1e2 | HOST-1e2: host-untouched check on the P2-1 image: phases file, image responder ordered to stop before the MOR clear (HOST-1h part 2), image-in-shutdown test, S1 PC procedure. | #326, #5267, #5744 | queued (tier A) |
 | HOST-1e2b | HOST-1e2b: host-untouched check on an S1 PC: the third-system snapshot procedure, RTC offset, the pcrlock index if P2-1 pins one, HOST-1d's opted-in disk excluded by the owner's flag. | #5746 | queued (tier A) |
 | MOR-setup-factors | MOR-setup-factors: an orderly shutdown after the confirm and before a successful enrollment leaves MOR set, because the factors hold /run/agentos-setup. Release; from MOR-setup-hold. | #5836, #4794 | queued (release; tier A) |
-| MOR-setup-isolate | MOR-setup-isolate: an isolate before enrollment re-mints the page authority under a printed card; the pageca unit's crash-rerun comment is stale. Release; from MOR-setup-hold. | #5844, #5836 | queued (release; tier A) |
+| MOR-setup-isolate | MOR-setup-isolate: an isolate before enrollment re-mints the page authority under a printed card; the pageca unit's crash-rerun comment is stale. Release; from MOR-setup-hold. | #5844, #5836 | building (release; tier A) |
+| HOST-1e2a-r1 | HOST-1e2a-r1: tighten the image host-check tests: the in-shutdown oracle requires the console's last answer in the journal, --memory reaches QEMU, the blank baseline drive is non-empty. Release; Potency on #5816. | #5816 | building (release; tier A) |
 
 ## Model routes and the Codex lane
 
@@ -419,12 +418,12 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CTL-owner-text-lost | CTL-owner-text-lost: an owner text that arrives while the agent has no open services is dropped, and the reply says it was lost and to resend. Release; from #5427. | #5425, #5427 | queued (release; tier A; sub B) |
 | VM-snap-unread-notice-fu | VM-snap-unread-notice-fu: the unread-snapshot deletion notice is held and retried until the owner channel delivers it. Release; from #5499 (UX). | #5481, #5499 | queued (release; tier B) |
 | IMG-initrd-global-ext-dirs | IMG-initrd-global-ext-dirs: INITRD_IMAGE_DIRS adds /.extra/global_sysext and /.extra/global_confext when the image's systemd moves past v257. Release; blocked on that bump; from #5501 (Security). | #5488, #5501 | queued (release; tier A; blocked on the systemd bump) |
-| IMG-keyring-pin | IMG-keyring-pin: the Debian archive keyring is checked against committed fingerprints before any image or guest build uses it. Release; from #5573. | #5573 | queued (release; tier A; gate files) |
+| IMG-keyring-pin | IMG-keyring-pin: the Debian archive keyring is checked against committed fingerprints before any image or guest build uses it. Release; from #5573. | #5573 | building (release; tier A; gate files) |
 | GUEST-bridge-tree-dead-fu | GUEST-bridge-tree-dead-fu: retire the stale TREE rows and B16, bound the idle-bridge test, drop the guest-plane tree exemption (#5611 reviews) | - | building (release; tier B) |
 | TIM-1-interval-fu-c | TIM-1-interval-fu-c: the question book moves off Guard.Now to the interval, and the clock drops the restricted mode's last API. Release; from #5216. | #5216, #5279 | queued (release; tier A) |
 | KRN-clock-fresh-rise | KRN-clock-fresh-rise: a kernel started behind the log catches up on a fresh chronyd sample (TIM-1). Release; from #5757. | #5391, #5757 | queued (release; tier A) |
 | LINT-dial-configured | LINT-dial-configured: the inference lint's configured() refuses a local bound to a literal (NET-2). Release; from #5757. | #5757 | queued (release) |
-| MUT-deleted-test-own-lines-fu | MUT-deleted-test-own-lines-fu: #5770's release items: NOT COVERED rule scope, testdata as a test change, Mutant-uncovered alias, archive error text. Release; after #5776. | #5770 | queued (release; tier A) |
+| MUT-deleted-test-own-lines-fu | MUT-deleted-test-own-lines-fu: #5770's release items: NOT COVERED rule scope, testdata as a test change, Mutant-uncovered alias, archive error text. Release; after #5776. | #5770 | building (release; tier A) |
 | MUT-waiver-store-claim-fu | MUT-waiver-store-claim-fu: name the record in mutgate's no-claim message and workflow comment, mark cut reasons and cap the new-entry list, local gate reads record-only packages. Release; from #5802. | #5802 | queued (release; tier A) |
 | IMG-dbus-reach | IMG-dbus-reach: hide /run/dbus from the agentOS units that make no bus call, and pin dbus-daemon's start-up command line. | #5766, #5794 | queued (release; tier A) |
 | MUT-import-widen | MUT-import-widen: an added import should not widen mutgate's targets to the whole package. Release; from #5808. | #5808 | queued (release; tier B) |
@@ -432,20 +431,15 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MUT-failed-test-bounded | MUT-failed-test-bounded: mutgate's failed_test reads a mutant's output unbounded; a flooding mutant crashes the deletion step. Release; from #5796. | #5796 | queued (release; tier C) |
 | MUT-wipe-lint | MUT-wipe-lint: lint that derived key buffers are wiped | #5857 | building (release; tier B) |
 | OWN-page-session-mut2c | OWN-page-session mutants part 2c: old cmd/agentosd survivors in evidence, main, held, signinhost (76) | #5862 | queued (release; tier A) |
-| VULN-static-elf | VULN-static-elf: an image-build check that finds static ELFs (llama-server) and makes image-vulncheck scan their toolchain packages. Release; split from #5873. | #5873, #5871, #2919 | queued (release; needs brief; after #5816) |
-| KRN-forget-wide | KRN-forget-wide: a FORGET ask that a wide clock reading has already lapsed says so instead of asking. Release; from #5811. | #5391, #5811 | queued (release; tier A) |
-| OWN-recall-holdline | OWN-recall-holdline: STATUS hold line names agents as the forget texts do | #5883 | queued (release; tier A) |
+| VULN-static-elf | VULN-static-elf: an image-build check that finds static ELFs (llama-server) and makes image-vulncheck scan their toolchain packages. Release; split from #5873. | #5873, #5871, #2919 | queued (release; tier A; gate files; brief briefs/VULN-static-elf.md, PR #5940; parts a, b; after #5932, serial with #5889 on image.yml) |
+| KRN-forget-wide | KRN-forget-wide: a FORGET ask that a wide clock reading has already lapsed says so instead of asking. Release; from #5811. | #5391, #5811 | building (release; tier A) |
+| OWN-recall-holdline | OWN-recall-holdline: STATUS hold line names agents as the forget texts do | #5883 | building (release; tier A) |
 | VULN-codex-openssl | VULN-codex-openssl: bump the codex pin once a release links OpenSSL 3.6.5 or later; until then the bundled entry records each fix's reach. Release; from #5888. | #5873, #5888 | queued (release; tier A; waits on a codex release) |
-| CLK-seal-decode-wipe-fu | CLK-seal-decode-wipe-fu: Unlock wipes a value a duplicate JSON key overwrites and a partly decoded bad-base64 buffer, and refuses a null entries blob. Release; from #5895. | #5806, #5895 | building (release; tier A) |
-| TIM-1-interval-fu-g | TIM-1-interval-fu-g: guard Authenticated against an overflowing tampered reference, and confirm chrony's maxdrift 500 cap on the first image. Release; from #5893. | #5758, #5893 | building (release; tier A) |
-| MUT-misread-migrate | MUT-misread-migrate: open PRs carrying dead Mutant-misread lines rerun mutgate after #5902. Release; from #5902. | #5902 | queued (release) |
-| MUT-legacy-not-equivalent-records | MUT-legacy-not-equivalent-records: clear the #5774 not-equivalent record entries, then check record reasons | #5908 | building (release; tier A) |
-| OWN-page-session-mut5 | OWN-page-session mutants part 5: delete the scanner's dead found map | #5857 | building (release; tier A) |
-| OWN-page-session-mut6 | OWN-page-session mutants part 6: NewScanner(nil) panics on 1 MiB | #5857 | building (release; tier A) |
-| CLK-seal-entry-swap-wipe-fu | CLK-seal-entry-swap-wipe-fu: seal wipes an entry value Put, ReplaceAndPut or Delete drops, and encode leaves no pooled JSON copy. Release; from #5897. | #5897 | queued (release; tier A) |
-| CLK-seal-decode-nocopy-pin-fu | CLK-seal-decode-nocopy-pin-fu: a test pins that the seal entries decode copies no value out of the plaintext buffer. Release; from #5914. | #5897, #5914 | queued (release; tier A) |
+| CLK-seal-entry-swap-wipe-fu | CLK-seal-entry-swap-wipe-fu: seal wipes an entry value Put, ReplaceAndPut or Delete drops, and encode leaves no pooled JSON copy. Release; from #5897. | #5897 | building (release; tier A) |
 | OWN-page-session-mut6-fu | OWN-page-session-mut6-fu: the a8scan copy of the A8 scanner refuses an empty needle list and drops its dead found map. Release; from #5923. | #5923 | building (release; tier A) |
-| TIM-1-interval-fu-h | TIM-1-interval-fu-h: a refresh test kills a revert of neg at the anchor-drift and jump sites, or record them as defence in depth. Release; from #5922. | #5899, #5922 | queued (release; tier A) |
+| TIM-1-interval-fu-h | TIM-1-interval-fu-h: a refresh test kills a revert of neg at the anchor-drift and jump sites, or record them as defence in depth. Release; from #5922. | #5899, #5922 | building (release; tier A) |
+| IMG-keyring-pin-b | IMG-keyring-pin-b: the enforcer image and test-kit builds check the Debian archive keyring too. Release; from #5932. | #5932 | queued (release; tier A; gate files) |
+| TIM-1-interval-fu-i | TIM-1-interval-fu-i: load refuses a negative saved NTSMono or CarrierMono. Release; from #5931. | #5929, #5931 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -491,5 +485,5 @@ issue #5848: title 'OWN-page-session mutants part 3: kill the other old cmd/agen
 issue #5876: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5889: body has no board-row block
 issue #5920: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #5928: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #5938: body has no board-row block
 ```
