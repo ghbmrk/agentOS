@@ -857,16 +857,41 @@ func (o Owner) Submit(p kernel.Plan) error { return o.Call("submit", p, nil) }
 func (o Owner) Retry(plan string, index, attempt int) error {
 	return o.Call("retry", retryArgs{plan, index, attempt}, nil)
 }
+func (o Owner) Cancel(plan string) error { return o.Call("cancel", stepArgs{Plan: plan}, nil) }
+func (o Owner) Undo(plan string, index int) error {
+	return o.Call("undo", stepArgs{plan, index}, nil)
+}
 func (o Owner) Enroll(e key.Enrollment) error { return o.Call("enroll", e, nil) }
+func (o Owner) Unenroll(u key.Unenrollment) error {
+	return o.Call("unenroll", u, nil)
+}
+func (o Owner) Extend(ext key.Key, plan string) error {
+	return o.Call("extend", extendArgs{ext, plan}, nil)
+}
 func (o Owner) SetLine(percent int64, cos ...key.Cosign) error {
 	return o.Call("setline", lineArgs{percent, cos}, nil)
 }
 
+// Reserve sets what is kept of pool for the owner. A lowering needs a live
+// passkey's cosign over kernel.ReserveHash, else kernel.ErrReserveSig, and a
+// big one a second, one an anchor, else kernel.ErrNeedsCosign (RES-5a).
+func (o Owner) Reserve(pool string, reserve int64, cos ...key.Cosign) error {
+	return o.Call("reserve", poolArgs{Pool: pool, Reserve: reserve, Cosigns: cos}, nil)
+}
 func (o Owner) Issue(cos []key.Cosign, keys ...key.Key) error {
 	return o.Call("issue", issueArgs{cos, keys}, nil)
 }
+func (o Owner) ApproveTask(id string, a kernel.TaskApproval) error {
+	return o.Call("approvetask", approveArgs{id, a}, nil)
+}
 func (o Owner) ApproveCode(a kernel.CodeApproval) error { return o.Call("approvecode", a, nil) }
+func (o Owner) Revoke(id key.ID) error                  { return o.Call("revoke", id, nil) }
+func (o Owner) Pause(id key.ID) error                   { return o.Call("pause", id, nil) }
+func (o Owner) Unpause(id key.ID) error                 { return o.Call("unpause", id, nil) }
 func (o Owner) Stop() error                             { return o.Call("stop", nil, nil) }
+
+// Resume lifts the STOP whose count it names (Changes's stops).
+func (o Owner) Resume(stops uint64) error { return o.Call("resume", resumeArgs{stops}, nil) }
 
 // Setup logs the owner's first hardware keys on a setup-only kernel.
 func (o Owner) Setup(f kernel.FirstAnchors) error { return o.Call("setup", f, nil) }
@@ -876,6 +901,25 @@ func (o Owner) SetupInfo() (i SetupInfo, err error) { err = o.Call("setupinfo", 
 
 func (o Owner) Status() (u []kernel.Unsettled, err error) { err = o.Call("status", nil, &u); return }
 func (o Owner) LineChanges() (n int, err error)           { err = o.Call("linechanges", nil, &n); return }
+func (o Owner) SpendHeld() (m map[string]kernel.SpendHold, err error) {
+	err = o.Call("spendheld", nil, &m)
+	return
+}
+
+// Pools is every pool as it stands now: its windows, the live reserve, a
+// lowering still in its hold and when it goes live, and the change count a
+// lowering signs.
+func (o Owner) Pools() (m map[string]kernel.Pool, err error) { err = o.Call("pools", nil, &m); return }
+
+// Spent is metered spend per route since a time, for the last two days only.
+func (o Owner) Spent(since int64) (m map[string]int64, err error) {
+	err = o.Call("spent", spentArgs{since}, &m)
+	return
+}
+
+// Anchors is the owner's hardware keys as setup logged them, in order: the
+// owner side lists them and finds which one signed an enrollment (#2779a).
+func (o Owner) Anchors() (a []key.PublicKey, err error) { err = o.Call("anchors", nil, &a); return }
 
 func (o Owner) Enrollments() ([]key.Enrollment, []key.PublicKey, error) {
 	var e enrolled
@@ -913,6 +957,17 @@ func (o Owner) Task(id string) (kernel.Task, bool, error) {
 // kernel.BackupTargetHash.
 func (o Owner) BackupTarget(t kernel.BackupTarget, c key.Cosign) error {
 	return o.Call("backuptarget", targetArgs{t, c}, nil)
+}
+
+// EdgeEnroll makes edge, the candidate the link port logged, the live edge
+// on a hardware key's signature c over kernel.EdgeEnrollHash.
+func (o Owner) EdgeEnroll(edge ed25519.PublicKey, c key.Cosign) error {
+	return o.Call("edgeenroll", edgeEnrollArgs{edge, c}, nil)
+}
+
+// EdgeRevoke cuts edge for good, with no replacement.
+func (o Owner) EdgeRevoke(edge ed25519.PublicKey) error {
+	return o.Call("edgerevoke", edgeArgs{edge}, nil)
 }
 
 // Untarget stops new backups to a destination; its backups keep their
@@ -968,6 +1023,12 @@ func (o Owner) RecoveryCard(c key.Cosign) ([]byte, error) {
 
 // RecoveryCardDone wipes it, once the owner has confirmed the card.
 func (o Owner) RecoveryCardDone() error { return o.Call("recoverycarddone", nil, nil) }
+
+// Certify signs the page's serving key, PKIX DER (Kernel.Certify).
+func (o Owner) Certify(pub []byte) (c Certified, err error) {
+	err = o.Call("certify", certifyArgs{pub}, &c)
+	return
+}
 
 // Named is the live subjects a label reads as (kernel.Named): those found,
 // and those whose labels could not be read. A blank label is
