@@ -2656,11 +2656,8 @@ func rootBinaries(root string) ([]string, error) {
 			return nil
 		case d.Type()&os.ModeSymlink != 0 && linkWhy(root, p) != "":
 			// WalkDir does not descend a link; systemd and the image
-			// build do (#4718 item 3). A link is read only when it
-			// resolves, inside the repository, to a regular file: one
-			// to a directory, a dangling or absolute target (which the
-			// image build may make real) or a loop is refused, so the
-			// result never depends on the runner's tree (#6003 L3).
+			// build do (#4718 item 3). linkWhy says which links are
+			// read as the file they name; every other link is refused.
 			rel, _ := filepath.Rel(root, p)
 			return fmt.Errorf("%s: %s; ship the file itself", filepath.ToSlash(rel), linkWhy(root, p))
 		case isManagerConf(p):
@@ -3199,20 +3196,27 @@ func endpointsHeld(endpoints, grants []grant) error {
 	return errors.Join(errs...)
 }
 
-// linkTarget is the only target form a link under image/ may have: a file
-// beside it or beside its directory. It is resolved lexically in the
-// repository, never through the runner's tree, so where it lands there is
-// where it lands in the image.
+// linkTarget is the only target form a build-input link under image/ may
+// have: a file beside it or beside its directory. It is resolved lexically
+// in the repository, never through the runner's tree.
 var linkTarget = regexp.MustCompile(`^(\.\./)?[^/]+$`)
 
-// linkWhy is why the link p under root is not read as a file, or "". The
-// target must have linkTarget's form and name a regular file, not a
-// directory or another link. A link in an overlay must land in the same
-// overlay, and both the link and its target must lie in rootTrees in the
-// image, so no tree another uid or a tmpfs supplies at runtime (a grant in
-// /var/lib, /run, /tmp) holds what root then reads. A link outside every
-// overlay is a build input and must land under image/ outside every
-// overlay (#4718 item 3, #6003 L3 and Security).
+// linkWhy is why the link p under root is not read as a file, or "".
+//
+// In an overlay, the only link allowed is a unit of a unitTypes type
+// linked to ../<its own name> in the same overlay (the .wants form),
+// with both ends in rootTrees in the image. An image merges several
+// overlays and a later one's copy wins (camnode: common, then the
+// board's), so the file the link lands on in the image may come from
+// another overlay than the link's. Because the target has the link's own
+// name and a unit type, the scan reads every overlay's copy of it as the
+// same unit, whichever wins, and a copy that is itself a link meets this
+// rule in turn (#6003 L3 round 3, option one).
+//
+// Outside every overlay a link is a build input: its target has
+// linkTarget's form, is a regular file, and lies under image/ outside
+// every overlay. Neither kind may name a directory, another link or no
+// file, so the result never depends on the runner's tree.
 func linkWhy(root, p string) string {
 	t, err := os.Readlink(p)
 	if err != nil || !linkTarget.MatchString(t) || t == ".." || t == "." || path.Base(t) == ".." || path.Base(t) == "." {
@@ -3224,17 +3228,21 @@ func linkWhy(root, p string) string {
 	}
 	from = filepath.ToSlash(from)
 	to := path.Join(path.Dir(from), t)
+	r := overlayRoot(from)
+	name := path.Base(from)
+	switch {
+	case r != "" && (t != "../"+name || !unitTypes[path.Ext(name)]):
+		return "a link in an overlay other than a unit linked to ../" + name + " (the image may take the target from another overlay, and the scan reads every copy only of a unit of the link's own name)"
+	case r != "" && !strings.HasPrefix(to, r+"/"):
+		return "a link that leaves its overlay " + r
+	case r == "" && (!strings.HasPrefix(to, "image/") || overlayRoot(to) != ""):
+		return "a link outside every overlay that lands in one or outside image/"
+	}
 	if st, err := os.Lstat(filepath.Join(root, filepath.FromSlash(to))); err != nil || !st.Mode().IsRegular() {
 		return "a link to a directory, another link or no file, which this scan does not read"
 	}
-	r := overlayRoot(from)
-	switch {
-	case r == "" && (!strings.HasPrefix(to, "image/") || overlayRoot(to) != ""):
-		return "a link outside every overlay that lands in one or outside image/"
-	case r == "":
+	if r == "" {
 		return ""
-	case !strings.HasPrefix(to, r+"/"):
-		return "a link that leaves its overlay " + r
 	}
 	for _, q := range []string{from, to} {
 		if ip := strings.TrimPrefix(q, r); !rootOwned(ip) {

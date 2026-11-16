@@ -104,10 +104,13 @@ func TestRootSideLintReach(t *testing.T) {
 	})
 	// Item 3: the scan does not descend a link; systemd and the image
 	// build do.
-	// A link is resolved lexically, never on the runner: its target is a
-	// file beside it or beside its directory, in its own overlay, and in
-	// rootTrees in the image (#6003 L3 and Security).
+	// A link is resolved lexically, never on the runner. Outside every
+	// overlay its target is a file beside it or beside its directory; in an
+	// overlay it is only a unit linked to ../<its own name>, in its own
+	// overlay and in rootTrees in the image (#6003 L3 and Security).
 	const etc = ext + "etc/systemd/system/"
+	const camCommon = "image/camnode/external/board/common/overlay/"
+	const camQemu = "image/camnode/external/board/qemu/overlay/"
 	for name, c := range map[string]struct{ link, target, want string }{
 		"a linked drop-in directory":                   {"image/mkosi/agentos-side.service.d", "../elsewhere", "a link to a directory"},
 		"an absolute target":                           {"image/mkosi/agentos-side.service.d", "/usr/lib/agentos-l3/dropins", "not a file beside it"},
@@ -119,8 +122,13 @@ func TestRootSideLintReach(t *testing.T) {
 		"a climb through the runner's root":            {etc + "agentos-z.service", strings.Repeat("../", 15) + "ROOT/image/mkosi/agentos-z.service", "not a file beside it"},
 		"a climb through /proc/self/root":              {etc + "agentos-z.service", strings.Repeat("../", 15) + "proc/self/root/ROOT/image/mkosi/agentos-z.service", "not a file beside it"},
 		"a nested target":                              {etc + "agentos-z.service", "../../../run/agentos-x/agentos-z.service", "not a file beside it"},
-		"a target in a grant":                          {ext + "var/lib/agentos-x/l.service", "agentos-z.service", "/var/lib/agentos-x/l.service in the image, outside rootTrees"},
-		"a link out of its overlay":                    {ext + "l.service", "../agentos-z.service", "leaves its overlay image/mkosi/mkosi.extra"},
+		"a target in a grant":                          {ext + "var/lib/agentos-x/l.service", "../l.service", "/var/lib/agentos-x/l.service in the image, outside rootTrees"},
+		"a link out of its overlay":                    {ext + "l.service", "../l.service", "leaves its overlay image/mkosi/mkosi.extra"},
+		"an overlay link to another name":              {etc + "multi-user.target.wants/agentos-y.service", "../agentos-z.service", "other than a unit linked to ../agentos-y.service"},
+		"an overlay unit linked to a non-unit":         {camCommon + "etc/systemd/system/agentos-z.service", "../agentos-z.txt", "other than a unit linked to ../agentos-z.service"},
+		"an overlay link beside it":                    {etc + "agentos-y.service", "agentos-z.service", "other than a unit linked to ../agentos-y.service"},
+		"a linked drop-in in an overlay":               {etc + "agentos-y.service.d/a.conf", "../a.conf", "other than a unit linked to ../a.conf"},
+		"a linked overlay file of no unit type":        {etc + "x.target.wants/agentos-y.timer", "../agentos-y.timer", "other than a unit linked to ../agentos-y.timer"},
 		"a link into an overlay":                       {"image/mkosi/sub/l.service", "../mkosi.extra", "a link to a directory"},
 		"a build link out of image/":                   {"image/l.service", "../go.mod", "outside every overlay that lands in one or outside image/"},
 	} {
@@ -131,6 +139,8 @@ func TestRootSideLintReach(t *testing.T) {
 			files["image/mkosi/agentos-z.service"] = "[Service]\nUser=agentos-z\nExecStart=/bin/true\n"
 			files[ext+"var/lib/agentos-x/agentos-z.service"] = "[Service]\nUser=agentos-z\nExecStart=/bin/true\n"
 			files[ext+"run/agentos-x/agentos-z.service"] = "[Service]\nUser=agentos-z\nExecStart=/bin/true\n"
+			files[ext+"var/lib/l.service"] = "[Service]\nUser=agentos-z\nExecStart=/bin/true\n"
+			files[camCommon+"etc/systemd/agentos-z.txt"] = "[Service]\nExecStart=/bin/true\n"
 			files["image/mkosi/mkosi.extra/x"] = ""
 			files["go.mod"] = "module x\n"
 			root := fakeRepo(t, files)
@@ -150,6 +160,36 @@ func TestRootSideLintReach(t *testing.T) {
 			}
 			if _, err := rootBinaries(root); err == nil || !strings.Contains(err.Error(), c.link+": ") || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("got %v, want a refusal of %s with %q", err, c.link, c.want)
+			}
+		})
+	}
+	// An image merges its overlays, and a later one's copy wins (camnode:
+	// common, then the board's). A link in one overlay may land on another
+	// overlay's copy, so that copy must be read too (#6003 L3 round 3).
+	for name, c := range map[string]struct{ links [][2]string }{
+		"a board's copy of a linked unit": {[][2]string{{camCommon + "etc/systemd/system/multi-user.target.wants/agentos-z.service", "../agentos-z.service"}}},
+		"a board's link onward":           {[][2]string{{camCommon + "etc/systemd/system/multi-user.target.wants/agentos-z.service", "../agentos-z.service"}, {camQemu + "etc/systemd/system/agentos-z.service", "../agentos-z.service"}}},
+	} {
+		t.Run("refuses "+name, func(t *testing.T) {
+			files := reachBase()
+			files["image/mkosi/agentos-x.service"] = "[Service]\nUser=agentos-x\nExecStart=/bin/true\nStateDirectory=agentos-x\n"
+			files[camCommon+"etc/systemd/system/agentos-z.service"] = "[Service]\nExecStart=/bin/true\n"
+			evil := camQemu + "etc/systemd/system/agentos-z.service"
+			if len(c.links) > 1 {
+				evil = camQemu + "etc/systemd/agentos-z.service"
+			}
+			files[evil] = "[Service]\nExecStart=/var/lib/agentos-x/evil\n"
+			root := fakeRepo(t, files)
+			for _, l := range c.links {
+				if err := os.MkdirAll(filepath.Dir(filepath.Join(root, l[0])), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(l[1], filepath.Join(root, l[0])); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := rootBinaries(root); err == nil || !strings.Contains(err.Error(), "/var/lib/agentos-x") {
+				t.Fatalf("got %v, want the board's copy refused for running from /var/lib/agentos-x", err)
 			}
 		})
 	}
@@ -266,9 +306,6 @@ func TestBuiltUnitsEndpointsInGrants(t *testing.T) {
 	}
 }
 
-// TestRootEnvFiles: what a root unit's EnvironmentFile= holds is held to
-// the same rootEnv and PATH rules as its Environment= (#4699). A file the
-// lint cannot find under image/ is refused, unless envFileReasons lists it.
 // TestImageOverlaysAreListed: every overlay directory under image/ is one
 // imageOverlays lists, so a new image or board cannot ship files the env
 // lookup and the link rule do not place (#6003).
@@ -296,6 +333,9 @@ func TestImageOverlaysAreListed(t *testing.T) {
 	}
 }
 
+// TestRootEnvFiles: what a root unit's EnvironmentFile= holds is held to
+// the same rootEnv and PATH rules as its Environment= (#4699). A file the
+// lint cannot find under image/ is refused, unless envFileReasons lists it.
 func TestRootEnvFiles(t *testing.T) {
 	const env = "image/mkosi/mkosi.extra/etc/agentos/y.env"
 	const unit = "image/mkosi/agentos-e.service"
@@ -371,7 +411,8 @@ func TestRootEnvFiles(t *testing.T) {
 		if err := os.Symlink("z.env", filepath.Join(r, env)); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := rootBinaries(r); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		// The link rule refuses it before the env lookup would read it.
+		if _, err := rootBinaries(r); err == nil || !strings.Contains(err.Error(), env+": a link in an overlay") {
 			t.Fatalf("got %v, want a refusal of the link", err)
 		}
 	})
