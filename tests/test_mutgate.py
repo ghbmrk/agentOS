@@ -1031,7 +1031,9 @@ class Deletion(unittest.TestCase):
                     ("memory cap", flood + b"\n--- FAIL: memory_cap\n", "memory_cap"),
                     ("in the middle only", flood + b"--- FAIL: TestMid\n" + flood, None),
                     ("short", b"--- FAIL: TestShort\n", "TestShort"),
-                    ("cut at the head's end", b"x" * 980 + b"\n--- FAIL: TestLongName\n" + flood, None)):
+                    ("cut at the head's end", b"x" * 980 + b"\n--- FAIL: TestLongName\n" + flood, None),
+                    # L3 on #5943: a tail with no newline is all one cut line, so it names nothing.
+                    ("a tail with no newline", flood + b"--- FAIL: TestCut" + b"z" * 983, None)):
                 with self.subTest(name):
                     out.write_bytes(text)
                     reads.clear()
@@ -2452,7 +2454,20 @@ class DataFiles(unittest.TestCase):
                 ("by a listing", 'var _, _ = os.ReadDir(".")', True),
                 ("by climbing out", 'var _ = filepath.WalkDir("..", nil)', True),
                 ("by a relative path", 'var _ = os.ReadFile("../hint/ASSUMPTIONS.md")', True),
+                # Security and L3 on #5943: a glob in any literal or embed pattern, and a listing in
+                # any argument of a path call, name it too.
+                ("by an embed glob", '//go:embed *.md\nvar docs embed.FS', True),
+                ("by an embed of everything", '//go:embed *\nvar docs embed.FS', True),
+                ("by an all: embed glob", '//go:embed all:*.md\nvar docs embed.FS', True),
+                ("by fs.Glob", 'var _, _ = fs.Glob(F, "*.md")', True),
+                ("by fs.WalkDir", 'var _ = fs.WalkDir(os.DirFS(root), ".", nil)', True),
+                ("by fs.ReadDir", 'var _, _ = fs.ReadDir(F, ".")', True),
+                ("by a glob in a join", 'var _, _ = filepath.Glob(filepath.Join(dir, "*.md"))', True),
+                ("by a climb in a join", 'var _ = os.ReadFile(filepath.Join("..", x))', True),
+                ("past a rune", "var _ = os.ReadDir(string(')') + \".\")", True),
                 ("in a comment", "// see ASSUMPTIONS.md", False),
+                ("a glob of another name", '//go:embed *.html\nvar docs embed.FS', False),
+                ("a join of words", 'var _ = strings.Join(words, "")', False),
                 ("another glob", 'var _, _ = filepath.Glob("*.go")', False),
                 ("a dot elsewhere", 'var _ = strings.Split(h, ".")', False),
                 ("an absolute listing", 'var _, _ = os.ReadDir("/proc/self/fd")', False)):

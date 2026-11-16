@@ -326,37 +326,62 @@ def package_of(path):
     return "/".join(parts[1:-1])
 
 
+LITERAL = re.compile(r'"(?:[^"\\\n]|\\.)*"|`[^`]*`')
+RUNE = re.compile(r"'(?:[^'\\\n]|\\.)*'")
+
+
 def _literals(text):
     """The contents of a Go file's string literals, comments left out, and the patterns of its
-    //go:embed directives, as text: what a test can name a file by."""
-    out = [m[0][1:-1] for m in re.finditer(r'"(?:[^"\\\n]|\\.)*"|`[^`]*`', _uncommented(text))]
+    //go:embed directives (an `all:` prefix dropped), as text: what a test can name a file by."""
+    out = [m[0][1:-1] for m in LITERAL.finditer(_uncommented(text))]
     for m in re.finditer(r"^[ \t]*//go:embed[ \t]+(.*)$", text, re.M):
-        out += [w.strip('"`') for w in m[1].split()]
+        out += [w.strip('"`').removeprefix("all:") for w in m[1].split()]
     return out
 
 
-# A call that reads or lists a path given as a literal: its argument shows a listing (".", "..",
-# "../x") or a glob, which name a file without spelling it.
-PATH_CALL = re.compile(r'\b(?:ReadDir|ReadFile|Glob|WalkDir|Walk|DirFS|Open|Stat|Lstat)\(\s*"((?:[^"\\\n]|\\.)*)"')
+# A call that reads, lists or builds a path: a literal anywhere in its arguments that lists a
+# directory (".", "..", "/") or starts "./" or "../" names a file without spelling it.
+PATH_CALL = re.compile(r"\b(?:ReadDir|ReadFile|Glob|WalkDir|Walk|DirFS|Sub|Open|OpenFile|Stat|Lstat|Join|Abs)\(")
+
+
+def _call_literals(code):
+    """The string literals inside the parentheses of each PATH_CALL of code (comments blanked), in
+    any argument and at any depth: fs.WalkDir(os.DirFS(root), ".", fn) gives "."."""
+    out = []
+    for m in PATH_CALL.finditer(code):
+        i, depth = m.end(), 1
+        while i < len(code) and depth:
+            lit = RUNE.match(code, i) if code[i] == "'" else LITERAL.match(code, i)
+            if lit:  # a rune such as ')' moves no depth; a string's contents are an argument
+                out += [] if code[i] == "'" else [lit[0][1:-1]]
+                i = lit.end()
+                continue
+            depth += {"(": 1, ")": -1}.get(code[i], 0)
+            i += 1
+    return out
 
 
 def names_file(pkg_dir, rel):
     """Whether a .go file of pkg_dir can name rel (a path below it) as text: a string literal or
-    //go:embed pattern holding its base name or first directory, or a path call (PATH_CALL) whose
-    literal climbs out (`..`), lists the directory (`.`) or is a glob matching its base name. A link
-    or an unreadable file can name anything. A path built in a variable from other parts is not seen
-    (MUT-deleted-test-own-lines-1)."""
+    //go:embed pattern holding its base name or first directory, a literal or pattern holding a glob
+    (`*?[`) that matches its base name, rel or a leading directory of it (`//go:embed *`,
+    fs.Glob(fsys, "*.md"), filepath.Join(d, "*.md")), or a literal anywhere in a path call's
+    arguments (PATH_CALL) that lists `.`, `..` or `/` or starts `./` or `../`. A link or an
+    unreadable file can name anything. A path built in a variable from parts holding none of these
+    is not seen (MUT-deleted-test-own-lines-1). Over-matching costs only a whole-suite run."""
     parts = rel.split("/")
+    names = [parts[-1]] + ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]
     for f in sorted(pkg_dir.glob("*.go")):
         if f.is_symlink() or not f.is_file():
             return True
         text = f.read_bytes().decode("utf-8", "replace")
-        if any(parts[-1] in lit or parts[0] in lit for lit in _literals(text)):
-            return True
-        for arg in PATH_CALL.findall(_uncommented(text)):
-            last = arg.rstrip("/").rsplit("/", 1)[-1]
-            if (arg.rstrip("/") in ("", ".", "..") or arg.startswith(("../", "./"))
-                    or (re.search(r"[*?\[]", last) and fnmatch.fnmatchcase(parts[-1], last))):
+        for lit in _literals(text):
+            if parts[-1] in lit or parts[0] in lit:
+                return True
+            if re.search(r"[*?\[]", lit) and any(fnmatch.fnmatchcase(n, lit) for n in names):
+                return True
+        for lit in _call_literals(_uncommented(text)):
+            if (lit and lit.rstrip("/") in ("", ".", "..")) or lit.startswith(("./", "../")):
                 return True
     return False
 
@@ -1929,7 +1954,7 @@ def failed_test(binary):
                 head = f.read(OUTPUT_READ)
                 f.seek(size - OUTPUT_READ)
                 tail = f.read()
-                parts = [head[:head.rfind(b"\n") + 1], tail[tail.find(b"\n") + 1:]]
+                parts = [head[:head.rfind(b"\n") + 1], tail[tail.find(b"\n") + 1:] if b"\n" in tail else b""]
     except OSError:
         return None
     m = next(filter(None, map(FAILED.search, parts)), None)
