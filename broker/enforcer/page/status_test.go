@@ -742,3 +742,57 @@ func TestLiftEdgeCut(t *testing.T) {
 		t.Fatal("home still shows a lifted cut")
 	}
 }
+
+type fakeAPs struct {
+	points []APState
+	cards  []WiFiCard
+}
+
+func (f *fakeAPs) Points() []APState { return f.points }
+func (f *fakeAPs) Cards() []WiFiCard { return f.cards }
+
+// #4569 (NET-3, ENF-g-9): a stalled access point push shows on home with
+// the access point, the count of waiting opens, that it keeps its old
+// settings, and that a restart after a check clears it; a push that is
+// not stalled shows nothing. ENF-g-6 (NET-3, HW-10): the Wi-Fi cards show
+// each password grouped, a device card's note and a QR code drawn without
+// script, and a device id the core may have proposed is quoted.
+func TestHomeShowsAccessPoints(t *testing.T) {
+	g := newRig(t)
+	if h := g.homeHTML(); strings.Contains(h, "<h2>Wi-Fi") {
+		t.Fatal("home shows access points with none wired")
+	}
+	aps := &fakeAPs{points: []APState{{Addr: "10.70.0.2:22", Abandoned: 3}}}
+	cfg := g.s.cfg
+	cfg.AccessPoints, cfg.Lock = aps, nil
+	var err error
+	if g.s, err = New(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if h := g.homeHTML(); strings.Contains(h, "stalled") || strings.Contains(h, "<h2>Wi-Fi") {
+		t.Fatalf("home shows a push that is not stalled, or cards there are none of:\n%s", h)
+	}
+	aps.points = append(aps.points, APState{Addr: "10.70.0.3:22", Stalled: true, Abandoned: 16})
+	aps.cards = []WiFiCard{
+		{Network: "owner", SSID: "Home", Shown: "CANA RYOW NERA AAAA", QR: "WIFI:T:WPA;S:Home;P:CANARYOWNERAAAA;;"},
+		{Device: "tv <b>", SSID: "Home devices", Shown: "CANA RYDE VICE AAAA", Note: "Devices join on 2.4 GHz Wi-Fi only: a device without 2.4 GHz cannot join.", QR: "WIFI:T:WPA;S:Home devices;P:CANARYDEVICEAAAA;;"},
+	}
+	h := g.homeHTML()
+	for _, want := range []string{
+		"<h2>Wi-Fi access point</h2>",
+		"The access point at 10.70.0.3:22 is stalled: 16 of the enforcer's connections",
+		"a Wi-Fi password you removed since may still work there",
+		"Then restart the enforcer, which clears this",
+		"Owner network: network <span class=\"code\">Home</span><br>Password: <span class=\"code\">CANA RYOW NERA AAAA</span>",
+		"Device &#34;tv &lt;b&gt;&#34;: network <span class=\"code\">Home devices</span><br>Password: <span class=\"code\">CANA RYDE VICE AAAA</span>",
+		"<p>Devices join on 2.4 GHz Wi-Fi only: a device without 2.4 GHz cannot join.</p>",
+		`<svg class="qr" viewBox="0 0 `,
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("home lacks %q", want)
+		}
+	}
+	if strings.Contains(h, "10.70.0.2:22 is stalled") {
+		t.Error("home shows the access point that is not stalled as stalled")
+	}
+}

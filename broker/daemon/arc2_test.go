@@ -355,8 +355,9 @@ var coreEnforcer = map[string]struct {
 
 // enforcerMain is the enforcer's daemon (slice l, #3670): the one
 // composition root that links the page, the nft loader and the rest
-// together. It imports only enforcer packages, kernel/key and x/sys/unix
-// for CLOCK_BOOTTIME (#4507), starts no process itself and serves no
+// together. It imports only enforcer packages, kernel/key, x/sys/unix
+// for CLOCK_BOOTTIME (#4507) and the access point pusher's SSH package for
+// its key types (ENF-l-b2 part a), starts no process itself and serves no
 // HTTP of its own; TestEnforcerImportsNothingFromAgentOS holds its
 // dependencies to the enforcer's.
 const enforcerMain = "cmd/agentos-enforcer"
@@ -367,7 +368,7 @@ var enforcerMainRule = struct {
 }{
 	[]string{"kernel/key", "enforcer/alert", "enforcer/channel", "enforcer/dns", "enforcer/dns/run", "enforcer/enrol", "enforcer/heads",
 		"enforcer/mdns", "enforcer/nft", "enforcer/nft/load", "enforcer/offload", "enforcer/page", "enforcer/policy", "enforcer/traffic",
-		"enforcer/wire", "enforcer/wol", "golang.org/x/sys/unix"},
+		"enforcer/wire", "enforcer/wol", "golang.org/x/sys/unix", "enforcer/ap", "enforcer/ap/push", "golang.org/x/crypto/ssh"},
 	[]string{"net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"},
 }
 
@@ -571,10 +572,11 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 	check([]string{module + enforcerWeb}, slices.DeleteFunc(slices.Clone(forbiddenDeps), func(s string) bool { return s == "net/http" || s == "crypto/tls" }), enforcerWebDeps...)
 	check([]string{module + enforcerSSH}, forbiddenDeps, enforcerSSHDeps...)
 	// The daemon links every enforcer package; nothing else of agentOS,
-	// no third party but the page's QR encoder and x/sys/unix, and no RPC,
+	// no third party but the page's QR encoder, the pusher's SSH client and
+	// x/sys/unix, and no RPC,
 	// mail or plugin loader.
 	check([]string{module + enforcerMain}, []string{"net/rpc", "net/smtp", "plugin"},
-		append(slices.Clone(enforcerWebDeps), "golang.org/x/sys/unix")...)
+		append(append(slices.Clone(enforcerWebDeps), enforcerSSHDeps...), "golang.org/x/sys/unix")...)
 	if len(own) < len(enforcer) {
 		t.Errorf("go list found %d enforcer packages, the rule map names %d", len(own), len(enforcer))
 	}

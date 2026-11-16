@@ -33,6 +33,8 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/alert"
+	"github.com/ghbmrk/agentos/broker/enforcer/ap"
+	"github.com/ghbmrk/agentos/broker/enforcer/ap/push"
 	"github.com/ghbmrk/agentos/broker/enforcer/channel"
 	"github.com/ghbmrk/agentos/broker/enforcer/dns"
 	dnsrun "github.com/ghbmrk/agentos/broker/enforcer/dns/run"
@@ -44,6 +46,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/wire"
 	"github.com/ghbmrk/agentos/broker/enforcer/wol"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"golang.org/x/crypto/ssh"
 )
 
 const (
@@ -77,6 +80,7 @@ func testConfig(t *testing.T) Config {
 		Nft:       "/usr/sbin/nft",
 		Dnsmasq:   "/usr/sbin/dnsmasq",
 		DNS:       testDNS(),
+		AP:        testAP(t),
 	}
 	if err := c.check(); err != nil {
 		t.Fatal(err)
@@ -330,26 +334,127 @@ func (f *fakeFire) last() string {
 	return f.loads[len(f.loads)-1]
 }
 
-// fakeNetwork is the access point's side of enrolment: the setup
-// network until Replace, then the Owner network's card.
-type fakeNetwork struct {
-	mu       sync.Mutex
-	setup    bool
-	replaced int
+// fakeAP is the box's access points. deps.AP makes a fakePusher per
+// call, as push.Pusher is made: each holds its own count of session opens
+// left waiting (left), so a daemon that made a fresh pusher would reset
+// it, as a fresh push.Pusher resets its own (ENF-g-8, #4569). A push
+// stores the files the access point now holds.
+type fakeAP struct {
+	mu      sync.Mutex
+	made    map[string][]*fakePusher // every pusher made, by address
+	held    map[string][]ap.File
+	syncs   int
+	failing error
 }
 
-func (n *fakeNetwork) Replaced() bool {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	return n.replaced > 0
+type fakePusher struct {
+	ap    *fakeAP
+	addr  string
+	left  int // session opens left waiting, as push.Pusher counts them
+	every []time.Duration
 }
 
-func (n *fakeNetwork) Replace() (enrol.Card, error) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	n.setup = false
-	n.replaced++
-	return enrol.Card{SSID: "Home", Shown: "CANA RYOW NERA AAAA", QR: "WIFI:T:WPA;S:Home;P:CANARYOWNERAAAA;;"}, nil
+func (f *fakeAP) pusher(addr string, host ssh.PublicKey, signer ssh.Signer) watcher {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if host == nil || signer == nil {
+		panic("pusher made with no host key or enforcer key")
+	}
+	if f.made == nil {
+		f.made, f.held = map[string][]*fakePusher{}, map[string][]ap.File{}
+	}
+	p := &fakePusher{ap: f, addr: addr}
+	f.made[addr] = append(f.made[addr], p)
+	return p
+}
+
+// Watch is push.Pusher.Watch's loop over the fake access point: refused
+// with push.ErrStalled from push.MaxAbandoned opens left on.
+func (p *fakePusher) Watch(ctx context.Context, every time.Duration, cfg func() ([]ap.File, error), report func(push.Result, error)) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		files, err := cfg()
+		p.ap.mu.Lock()
+		p.every = append(p.every, every)
+		res := push.Result{Abandoned: p.left}
+		switch {
+		case err != nil:
+		case p.left >= push.MaxAbandoned:
+			err = push.ErrStalled
+		case p.ap.failing != nil:
+			err = p.ap.failing
+		default:
+			p.ap.held[p.addr] = files
+			p.ap.syncs++
+		}
+		p.ap.mu.Unlock()
+		report(res, err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// wireless is the Wi-Fi configuration the access point at addr holds.
+func (f *fakeAP) wireless(addr string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, file := range f.held[addr] {
+		if file.Path == ap.PathWireless {
+			return string(file.Data)
+		}
+	}
+	return ""
+}
+
+// last is the pusher made last for addr.
+func (f *fakeAP) last(addr string) *fakePusher {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ps := f.made[addr]
+	return ps[len(ps)-1]
+}
+
+// stall leaves addr's current pusher with push.MaxAbandoned opens waiting.
+func (f *fakeAP) stall(addr string) {
+	p := f.last(addr)
+	f.mu.Lock()
+	p.left = push.MaxAbandoned
+	f.mu.Unlock()
+}
+
+// apAddr is the test configuration's access point; setupPW the sticker's
+// password, a synthetic canary.
+const (
+	apAddr  = "10.70.0.2:22"
+	setupPW = "CANARYSETUPAAAA1"
+)
+
+// testAP is the test configuration's access points: one, with a pinned
+// host key made for the test.
+func testAP(t *testing.T) APConfig {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return APConfig{
+		Layout: ap.Layout{Uplink: "lan1", DeviceUplink: "lan2", Owner: 10, Household: 20, Guests: 30, Admin: 70,
+			Addr: netip.MustParsePrefix("10.70.0.2/24"),
+			Radios: []ap.Radio{
+				{Name: "radio0", Path: "platform/soc/18000000.wifi", Band: "2g", HTMode: "HE20", Channel: "auto", Country: "US"},
+				{Name: "radio1", Path: "platform/soc/18000000.wifi+1", Band: "5g", HTMode: "HE80", Channel: "auto", Country: "US"},
+			},
+			SSID: ap.SSIDs{Setup: "Setup-1234", Owner: "Home", Household: "Home family", Guests: "Home guests", Devices: "Home devices"}},
+		Points: []APPoint{{Addr: netip.MustParseAddrPort(apAddr), HostKey: string(ssh.MarshalAuthorizedKey(host))}},
+	}
 }
 
 type fakeLight struct {
@@ -367,7 +472,7 @@ type box struct {
 	fire  *fakeFire
 	dns   *fakeDNS
 	mdns  *fakeMDNS
-	net   *fakeNetwork
+	ap    *fakeAP
 	light *fakeLight
 	core  ed25519.PrivateKey
 
@@ -403,12 +508,15 @@ type box struct {
 // and, with a core, pinned the kernel's channel sub-key.
 func newBox(t *testing.T, withCore bool) *box {
 	t.Helper()
-	x := &box{t: t, dir: t.TempDir(), cfg: testConfig(t), fire: &fakeFire{}, dns: &fakeDNS{}, mdns: &fakeMDNS{}, net: &fakeNetwork{setup: true},
+	x := &box{t: t, dir: t.TempDir(), cfg: testConfig(t), fire: &fakeFire{}, dns: &fakeDNS{}, mdns: &fakeMDNS{}, ap: &fakeAP{},
 		light: &fakeLight{}, now: time.UnixMilli(1_800_000_000_000), el: time.Hour}
 	if err := os.Chmod(x.dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := provisionState(x.dir, caseCode); err != nil {
+		t.Fatal(err)
+	}
+	if err := provisionAP(fileStore{path: filepath.Join(x.dir, fileAPKeys)}, setupPW); err != nil {
 		t.Fatal(err)
 	}
 	if withCore {
@@ -459,7 +567,7 @@ func (x *box) open() (*Enforcer, error) {
 		}
 		return f(path)
 	}
-	dp.HelloWait, dp.IdleWait, dp.FireWait = x.waits.HelloWait, x.waits.IdleWait, x.waits.FireWait
+	dp.HelloWait, dp.IdleWait, dp.FireWait, dp.APWait = x.waits.HelloWait, x.waits.IdleWait, x.waits.FireWait, x.waits.APWait
 	return open(x.cfg, x.dir, dp)
 }
 
@@ -468,7 +576,7 @@ func (x *box) deps() deps {
 	return deps{
 		Now:     func() time.Time { x.mu.Lock(); defer x.mu.Unlock(); return x.now },
 		Elapsed: func() time.Duration { x.mu.Lock(); defer x.mu.Unlock(); return x.el },
-		Fire:    x.fire, Network: x.net, Light: x.light, Radio: noRadio{},
+		Fire:    x.fire, AP: x.ap.pusher, Light: x.light, Radio: noRadio{},
 		Logf: func(string) {},
 		DNS:  x.dns, MDNS: x.mdns.serve, Boot: func() (string, error) { return "boot-1", nil },
 		Wake:    func(ctx context.Context, _ *wol.Relay) error { <-ctx.Done(); return nil },
@@ -854,7 +962,13 @@ func TestLifecycle(t *testing.T) {
 		if x.fire.last() != x.fullLoad(policy.Document{}) {
 			t.Fatal("first boot did not load the empty policy's ruleset (default deny)")
 		}
-		if !x.net.setup {
+		// The access point is pushed the setup network alone, with the
+		// sticker's password (HW-10).
+		waitFor(t, func() bool { return strings.Contains(x.ap.wireless(apAddr), "option key '"+setupPW+"'") })
+		if w := x.ap.wireless(apAddr); strings.Contains(w, "'Home family'") || strings.Contains(w, "'Home devices'") {
+			t.Fatalf("the access point holds more than the setup network before enrolment:\n%s", w)
+		}
+		if x.d.ap.Replaced() {
 			t.Fatal("the setup network went before any enrolment")
 		}
 		if w := x.b.do(http.MethodGet, "/enrol", nil); w.Code != http.StatusOK {
@@ -893,8 +1007,17 @@ func TestLifecycle(t *testing.T) {
 		if res["recovery"] == "" || res["network"] == nil {
 			t.Fatalf("enrolment answer: %v", res)
 		}
-		if x.net.setup || x.net.replaced != 1 {
-			t.Fatal("the setup network was not replaced at enrolment")
+		// The setup network is replaced first: the access point holds the
+		// four networks before the passkey enrols, and the card shown is
+		// the Owner network's, its password grouped for typing (NET-4,
+		// HW-10, ap ASSUMPTIONS ENF-g-6).
+		owner := x.apKeys().Owner
+		card := res["network"].(map[string]any)
+		if card["ssid"] != "Home" || card["password"] != grouped4(owner) || card["qr"] == nil {
+			t.Fatalf("enrolment's Wi-Fi card: %v", card)
+		}
+		if w := x.ap.wireless(apAddr); !x.d.ap.Replaced() || strings.Contains(w, setupPW) || !strings.Contains(w, "option key '"+owner+"'") {
+			t.Fatalf("the setup network was not replaced at enrolment:\n%s", w)
 		}
 		if x.d.book.Phase() != enrol.Enrolled || x.d.book.Owner() != a.Public() {
 			t.Fatal("the passkey is not in force")
@@ -913,6 +1036,65 @@ func TestLifecycle(t *testing.T) {
 		if x.d.book.Owner() != a.Public() || len(x.pending()) != 1 {
 			t.Fatal("enrolment or its first proposal did not survive a restart")
 		}
+		// Home shows the Wi-Fi cards: each network's password grouped, and
+		// once the tv is in force its own card with the band devices join
+		// on (ENF-g-7), which the access point now holds too.
+		x.advance(time.Duration(policy.Wait) * time.Millisecond)
+		waitFor(t, func() bool { return strings.Contains(x.home(), "Device tv: network") })
+		h := x.home()
+		k := x.apKeys()
+		for _, want := range []string{
+			"Owner network: network <span class=\"code\">Home</span><br>Password: <span class=\"code\">" + grouped4(owner) + "</span>",
+			"Household network: network <span class=\"code\">Home family</span><br>Password: <span class=\"code\">" + grouped4(k.Household) + "</span>",
+			"Device tv: network <span class=\"code\">Home devices</span><br>Password: <span class=\"code\">" + grouped4(k.Device["tv"].Password) + "</span>",
+			"<p>Devices join on 2.4 GHz Wi-Fi only: a device without 2.4 GHz cannot join.</p>",
+			`<svg class="qr" viewBox=`,
+		} {
+			if !strings.Contains(h, want) {
+				t.Errorf("home lacks %q", want)
+			}
+		}
+		waitFor(t, func() bool {
+			return strings.Contains(x.ap.wireless(apAddr), "option key '"+k.Device["tv"].Password+"'")
+		})
+		if owner != k.Owner {
+			t.Fatal("the Owner network's password changed after enrolment")
+		}
+	})
+
+	// A stalled access point push (#4569, NET-3, ENF-g-9): the pusher
+	// refuses with push.ErrStalled once push.MaxAbandoned opens wait, and
+	// home says so with the count, that the access point keeps its old
+	// settings, and that a restart after a check clears it. Pushes the
+	// daemon starts later, on a policy change or a tick, keep the same
+	// pusher, so the stall stays shown; a restart's new pusher clears it.
+	t.Run("stalled access point push", func(t *testing.T) {
+		x, _ := enrolled(t, false)
+		if strings.Contains(x.home(), "is stalled") {
+			t.Fatal("home shows a stall before any")
+		}
+		x.ap.stall(apAddr)
+		x.d.ap.nudge()
+		stalled := "The access point at " + apAddr + " is stalled: 16 of the enforcer's connections"
+		waitFor(t, func() bool { return strings.Contains(x.home(), stalled) })
+		if h := x.home(); !strings.Contains(h, "a Wi-Fi password you removed since may still work there") || !strings.Contains(h, "Then restart the enforcer, which clears this") {
+			t.Fatalf("home's stall card:\n%s", h)
+		}
+		if !x.logContains("access point " + apAddr + ": stalled, 16 session opens waiting") {
+			t.Fatal("the stall is not in the enforcer's log")
+		}
+		for i := 0; i < 5; i++ {
+			x.advance(10 * time.Second)
+			x.d.ap.nudge()
+		}
+		time.Sleep(20 * time.Millisecond)
+		if !strings.Contains(x.home(), stalled) {
+			t.Fatal("the stall went from home with no restart")
+		}
+		x.restart()
+		waitFor(t, func() bool { x.ap.mu.Lock(); defer x.ap.mu.Unlock(); return len(x.ap.made[apAddr]) == 2 })
+		x.d.ap.nudge()
+		waitFor(t, func() bool { return !strings.Contains(x.home(), "is stalled") })
 	})
 
 	// Normal: version N is enforced and the channel is open. A loosening
@@ -1274,6 +1456,36 @@ func TestLifecycle(t *testing.T) {
 }
 
 // home is the page's home screen.
+// apKeys is the Wi-Fi passwords as the state directory holds them.
+func (x *box) apKeys() ap.Keys {
+	x.t.Helper()
+	b, err := os.ReadFile(filepath.Join(x.dir, fileAPKeys))
+	if err != nil {
+		x.t.Fatal(err)
+	}
+	var st apState
+	if err := json.Unmarshal(b, &st); err != nil {
+		x.t.Fatal(err)
+	}
+	return st.Keys
+}
+
+// grouped4 is pw in groups of four, as ap.Card.Shown prints it.
+func grouped4(pw string) string {
+	var parts []string
+	for len(pw) > 4 {
+		parts, pw = append(parts, pw[:4]), pw[4:]
+	}
+	return strings.Join(append(parts, pw), " ")
+}
+
+// logContains reports whether a line of the enforcer's log holds s.
+func (x *box) logContains(s string) bool {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	return slices.ContainsFunc(x.log, func(l string) bool { return strings.Contains(l, s) })
+}
+
 func (x *box) home() string {
 	x.t.Helper()
 	w := x.b.do(http.MethodGet, "/", nil)

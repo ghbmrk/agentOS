@@ -263,6 +263,95 @@ type Edge interface {
 	LiftEdge() error
 }
 
+// AccessPoints is the Wi-Fi access points as home shows them: each one's
+// last push (#4569) and the Wi-Fi cards the owner joins and pairs with
+// (ap ASSUMPTIONS ENF-g-6). The enforcer's page is the only place a Wi-Fi
+// password is shown (NET-3).
+type AccessPoints interface {
+	Points() []APState
+	Cards() []WiFiCard
+}
+
+// APState is one access point's last push, as the daemon's push.Watch
+// reported it.
+type APState struct {
+	Addr string // its admin address
+	// Stalled is a push refused with push.ErrStalled: Abandoned session
+	// opens wait on connections the access point ended, and the pusher
+	// opens no more until the enforcer restarts. The access point keeps
+	// the settings it had, a revoked Wi-Fi password included.
+	Stalled   bool
+	Abandoned int
+}
+
+// WiFiCard is one network's or one device's Wi-Fi card (ap.Card): Shown
+// is the password in groups of four, QR the Wi-Fi QR code's text, and
+// Note a sentence printed under it.
+type WiFiCard struct {
+	Network               string // ap.NetSetup, policy.NetOwner, NetHousehold or NetGuests; "" for a device
+	Device                string // the device's id, for a device's card
+	SSID, Shown, Note, QR string
+}
+
+// plainCard is a Wi-Fi card as home draws it: a device's id in printable
+// ASCII and the QR code as an SVG path.
+type plainCard struct {
+	Title, SSID, Shown, Note string
+	QR                       *qrPath
+}
+
+// qrPath is a QR code's dark modules as one SVG path in a Size-square
+// view box, so home draws it with no script.
+type qrPath struct {
+	Size int
+	Path string
+}
+
+func plainCards(cs []WiFiCard) []plainCard {
+	out := make([]plainCard, 0, len(cs))
+	for _, c := range cs {
+		title := "Device " + ascii(clip(c.Device))
+		switch c.Network {
+		case "":
+		case "setup":
+			title = "Setup network"
+		default:
+			title = labelNet(c.Network) + " network"
+		}
+		// The SSIDs come from the enforcer's setup and the password and
+		// note from ap, so only a device's id, which the core may have
+		// proposed, is quoted; the template escapes them all.
+		pc := plainCard{Title: title, SSID: c.SSID, Shown: c.Shown, Note: c.Note}
+		if code, err := qrOf(c.QR); err == nil {
+			// One rectangle per run of dark modules in a row.
+			var b strings.Builder
+			for y := 0; y < code.Size; y++ {
+				row := code.Modules[y*code.Size : (y+1)*code.Size]
+				for x := 0; x < code.Size; {
+					n := len(row[x:]) - len(strings.TrimLeft(row[x:], "1"))
+					if n == 0 {
+						x++
+						continue
+					}
+					b.WriteString("M" + strconv.Itoa(x) + " " + strconv.Itoa(y) + "h" + strconv.Itoa(n) + "v1h-" + strconv.Itoa(n) + "z")
+					x += n
+				}
+			}
+			pc.QR = &qrPath{Size: code.Size, Path: b.String()}
+		}
+		out = append(out, pc)
+	}
+	return out
+}
+
+// labelNet is a network's name as the owner reads it.
+func labelNet(n string) string {
+	if n == "" {
+		return n
+	}
+	return strings.ToUpper(n[:1]) + n[1:]
+}
+
 // Page actions on the enforcer's own state, each after a tap of the
 // passkey in force.
 const (
@@ -392,6 +481,16 @@ func (s *Server) status() map[string]any {
 				out["FreshDue"] = s.when(day.DueMS)
 			}
 		}
+	}
+	if s.cfg.AccessPoints != nil {
+		var stalled []APState
+		for _, p := range s.cfg.AccessPoints.Points() {
+			if p.Stalled {
+				p.Addr = ascii(p.Addr)
+				stalled = append(stalled, p)
+			}
+		}
+		out["APStalled"], out["Cards"] = stalled, plainCards(s.cfg.AccessPoints.Cards())
 	}
 	if s.cfg.Resolver != nil {
 		r := s.cfg.Resolver.Stopped()
