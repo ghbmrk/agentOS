@@ -156,9 +156,10 @@ NOT_EQUIVALENT = re.compile(r"\bnot[\s-]+equivalent", re.IGNORECASE)
 KINDS = frozenset({"ARITHMETIC_BASE", "CONDITIONALS_BOUNDARY", "CONDITIONALS_NEGATION", "INCREMENT_DECREMENT",
                    "INVERT_ASSIGNMENTS", "INVERT_BITWISE", "INVERT_BWASSIGN", "INVERT_LOGICAL", "INVERT_LOOPCTRL",
                    "INVERT_NEGATIVES", "REMOVE_SELF_ASSIGNMENTS", "STATEMENT_DELETION"})
-# A line that starts like a waiver behind an indent or the Markdown a PR body wraps lines in (a backtick, a
-# list bullet, a blockquote), which waivers does not read (L3 on #5976); prose that names one mid-line is not.
-WAIVER_START = re.compile(r"^(?:\s|`|>|[-*+]\s|\d{1,9}[.)]\s)*Mutant-(?:equivalent|uncovered):", re.IGNORECASE)
+# A line where no letter precedes a waiver's start (a checked task-list box aside): an indent or any Markdown
+# a PR body wraps lines in, a backtick, bullet, task box, quote, heading, bold or table cell, which waivers
+# does not read (L3 on #5976). Prose that names one after a word is not a waiver line.
+WAIVER_START = re.compile(r"^(?:[^A-Za-z]|\[[xX]\])*Mutant-(?:equivalent|uncovered):", re.IGNORECASE)
 
 
 # A package name that reaches the workflow's matrix: path segments of plain characters only.
@@ -837,8 +838,9 @@ def waivers(body):
 
 
 def placeholder(reason):
-    """Whether a waiver's reason is the <reason> the gate's messages print, left unfilled (L3 on #5976)."""
-    return reason.strip("<>` ").lower() == "reason"
+    """Whether a waiver's reason still holds the <reason> the gate's messages print, unfilled: no proof
+    holds that text (L3 on #5976)."""
+    return "<reason>" in reason.lower()
 
 
 def malformed_waivers(body):
@@ -854,7 +856,7 @@ def malformed_waivers(body):
         if not m or not re.search(r"[A-Za-z]{2}", m.group(5)):
             out.append(f"the line {row.strip()[:200]!r} is not read as a waiver, so it waives nothing: write it "
                        "Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason> at the start of its own line, with "
-                       "no indent, bullet, quote mark or backtick (line and column from 1, the kind in capitals as the "
+                       "nothing before it (no indent, bullet, box, quote mark, heading, bold, table bar or backtick; line and column from 1, the kind in capitals as the "
                        "summary's Mutant cell gives it, a reason in words)")
         elif placeholder(m.group(5)):
             out.append(f"the waiver {site_text((m.group(1), int(m.group(2)), m.group(4), int(m.group(3)) if m.group(3) else None))} "

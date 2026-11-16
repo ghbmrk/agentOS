@@ -3329,13 +3329,20 @@ class WaiverMessages(unittest.TestCase):
                f"3) Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}": "is not read as a waiver",
                "Mutant-equivalent: broker/netguard/a.go:2:11:ARITHMETIC_BASE <reason>": "still holds the <reason> placeholder",
                "Mutant-equivalent: broker/netguard/a.go:2:11 `<Reason>`": "still holds the <reason> placeholder",
+               "Mutant-equivalent: broker/netguard/a.go:2:11 <reason> here.": "still holds the <reason> placeholder",
+               # L3 round 2 on #5976: any Markdown before the waiver, not a listed few.
+               f"- [ ] Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}": "is not read as a waiver",
+               f"- [x] Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}": "is not read as a waiver",
+               f"**Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}**": "is not read as a waiver",
+               f"## Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}": "is not read as a waiver",
+               f"| Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON} |": "is not read as a waiver",
                "Mutant-equivalent: broker/netguard/a.go:2:11:BOGUS a kind no mutant has":
                    "the waiver broker/netguard/a.go:2:11:BOGUS names the kind BOGUS, which no mutant has"}
         good = [f"Mutant-equivalent: broker/netguard/a.go:2:15:ARITHMETIC_BASE {self.REASON}",
                 f"Mutant-uncovered: broker/netguard/a.go:3:STATEMENT_DELETION {self.REASON}",
                 "A Mutant-equivalent: line quoted mid-sentence is no waiver line.",
                 "- the syntax is `Mutant-equivalent: <path>:<line>` in a bullet of prose",
-                f"Mutant-equivalent: broker/netguard/a.go:4 the reason names <reason> among other words"]
+                f"Mutant-equivalent: broker/netguard/a.go:4 the reason names reason among other words"]
         got = mutgate.malformed_waivers("\r\n".join([*bad, *good]))
         self.assertEqual(len(got), len(bad), got)
         for (line, want), warning in zip(bad.items(), got):
@@ -3344,12 +3351,12 @@ class WaiverMessages(unittest.TestCase):
         # The gate prints each warning, and the mutant the bad line meant to waive still fails (fail closed).
         r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, body="\n".join([*bad, good[0]]) + "\n")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertEqual(r.stdout.count("mutgate: the line "), len(bad) - 3, r.stdout)
-        self.assertEqual(r.stdout.count("still holds the <reason> placeholder, so it waives nothing"), 2, r.stdout)
-        # A placeholder reason waives nothing, as the warning says; a reason that only mentions it still does.
+        self.assertEqual(r.stdout.count("mutgate: the line "), len(bad) - 4, r.stdout)
+        self.assertEqual(r.stdout.count("still holds the <reason> placeholder, so it waives nothing"), 3, r.stdout)
+        # A reason holding the placeholder waives nothing, as the warning says.
         self.assertEqual(mutgate.waivers("\n".join(good)), {("broker/netguard/a.go", 2, "ARITHMETIC_BASE", 15): self.REASON,
                          ("broker/netguard/a.go", 3, "STATEMENT_DELETION", None): self.REASON,
-                         ("broker/netguard/a.go", 4, None, None): "the reason names <reason> among other words"})
+                         ("broker/netguard/a.go", 4, None, None): "the reason names reason among other words"})
         self.assertIn("names the kind BOGUS, which no mutant has, so it waives nothing", r.stdout)
         self.assertIn("broker/netguard/a.go:2 ARITHMETIC_BASE survives", r.stdout)
         self.assertNotIn("a.go:2:15:ARITHMETIC_BASE <reason>", r.stdout)
