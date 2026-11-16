@@ -1139,46 +1139,50 @@ func TestLightingKindsNameTheLiftStep(t *testing.T) {
 }
 
 // TestLiftedCoveredKeepsLaterTrips (KRN-12 Response, #4305 item 2, L3
-// and Security round 2 on #6012): a lift bounded by the covers it saved
-// closes those alerts on its box only, never a trip after it: neither a
-// new alert, nor a trip that counted on a covered alert still open (its
-// count passed the cover's), nor, after a restart, an alert that reuses
-// the ID of a covered alert whose append was lost (Floor). Catches a
-// bounded lift that closes a trip it never covered.
+// and Security rounds 2 and 3 on #6012): a lift's Cover seals the open
+// trips and missing records of its box, so a later trip opens a new alert
+// instead of counting on one, and LiftedCovered closes only the covered
+// IDs, on that box only. After a restart Reseal restores the seal and
+// keeps a lost covered alert's ID from being reused, so neither a fold
+// rebuilt from the journal nor a reused ID makes a later trip covered.
+// Catches a bounded lift that closes a trip it never covered.
 func TestLiftedCoveredKeepsLaterTrips(t *testing.T) {
 	r := newRig(t, &journal{})
 	first, err := r.a.Raise(Trip, "core")
 	if err != nil {
 		t.Fatal(err)
 	}
-	covers := r.a.Covers("core")
-	if len(covers) != 1 || covers[0] != (Cover{first.ID, 1}) || len(r.a.Covers("edge")) != 0 {
+	covers := r.a.Cover("core")
+	if len(covers) != 1 || covers[0] != first.ID || len(r.a.Cover("edge")) != 0 {
 		t.Fatalf("covers %+v", covers)
 	}
-	later, err := r.a.Raise(RecordMissing, "core")
+	after, err := r.a.Raise(Trip, "core") // the same kind after the lift
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.a.Raise(Trip, "core"); err != nil { // counts on first
-		t.Fatal(err)
+	if after.ID == first.ID || after.Count != 1 {
+		t.Fatalf("a trip after the lift counted on the covered alert: %+v", after)
+	}
+	if again, _ := r.a.Raise(Trip, "core"); again.ID != after.ID || again.Count != 2 {
+		t.Fatalf("an unsealed alert no longer counts repeats: %+v", again)
+	}
+	if err := r.a.LiftedCovered("edge", covers); err != nil || r.bulb.now() != Red {
+		t.Fatalf("another box's lift: %v, light %v", err, r.bulb.now())
 	}
 	if err := r.a.LiftedCovered("core", covers); err != nil {
 		t.Fatal(err)
 	}
 	log := r.a.Log()
-	if !log[r.a.byID[first.ID]].Open || !log[r.a.byID[later.ID]].Open || r.bulb.now() != Red {
-		t.Fatalf("a covered alert counted on since, and a new one, closed: %+v", log)
+	if log[r.a.byID[first.ID]].Open || !log[r.a.byID[after.ID]].Open || r.bulb.now() != Red {
+		t.Fatalf("the covered lift: %+v, light %v", log, r.bulb.now())
 	}
-	if err := r.a.LiftedCovered("edge", r.a.Covers("core")); err != nil || r.bulb.now() != Red {
-		t.Fatalf("another box's lift: %v, light %v", err, r.bulb.now())
-	}
-	if err := r.a.LiftedCovered("core", r.a.Covers("core")); err != nil || r.bulb.now() != Off {
+	if err := r.a.LiftedCovered("core", r.a.Cover("core")); err != nil || r.bulb.now() != Off {
 		t.Fatalf("full lift: %v, light %v", err, r.bulb.now())
 	}
 
-	// A covered trip whose append was lost: after a restart its ID is
-	// free, and the floor keeps a new trip from taking it.
-	rj := &refusing{refuse: 1}
+	// Across a restart: a covered alert whose count append was lost, and
+	// one whose own append was lost.
+	rj := &refusing{}
 	open := func() *Alerts {
 		a, err := New(Config{Send: (&core{refuse: true}).Send, Light: &bulb{}, Journal: rj})
 		if err != nil {
@@ -1187,22 +1191,33 @@ func TestLiftedCoveredKeepsLaterTrips(t *testing.T) {
 		return a
 	}
 	a1 := open()
-	lost, err := a1.Raise(Trip, "edge")
-	if err == nil {
-		t.Fatal("the refused append answered nil")
-	}
-	saved := a1.Covers("edge")
-	if len(saved) != 1 || saved[0].ID != lost.ID {
-		t.Fatalf("covers of the unjournalled trip: %+v", saved)
-	}
-	a2 := open()
-	a2.Floor(saved)
-	again, err := a2.Raise(Trip, "edge")
+	kept, err := a1.Raise(Trip, "edge") // journalled, count 1
 	if err != nil {
 		t.Fatal(err)
 	}
-	if again.ID <= lost.ID {
-		t.Fatalf("a new trip reused ID %d of a covered alert (%d)", again.ID, lost.ID)
+	rj.refuse, rj.n = 1, 0
+	if _, err := a1.Raise(Trip, "edge"); err == nil { // count 2, refused
+		t.Fatal("the refused count answered nil")
+	}
+	rj.refuse, rj.n = 0, 0
+	saved := a1.Cover("edge")
+	rj.refuse, rj.n = 1, 0
+	lost, err := a1.Raise(Trip, "edge") // sealed: a new alert, refused
+	if err == nil || lost.ID == kept.ID {
+		t.Fatalf("a trip after the cover: %+v, %v", lost, err)
+	}
+	saved = append(saved, a1.Cover("edge")...)
+	rj.refuse, rj.n = 0, 0
+	a2 := open()
+	a2.Reseal(saved)
+	for range 2 { // one counts back to the lost count, one past it
+		r, err := a2.Raise(Trip, "edge")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(saved, r.ID) {
+			t.Fatalf("a trip after the restart took covered ID %d (covers %v)", r.ID, saved)
+		}
 	}
 	if err := a2.LiftedCovered("edge", saved); err != nil || a2.Status().Colour != Red {
 		t.Fatalf("the saved lift closed a trip after it: %v, light %v", err, a2.Status().Colour)

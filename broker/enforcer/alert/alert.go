@@ -261,6 +261,9 @@ type Alerts struct {
 	byID     map[uint64]int
 	next     uint64
 	coreDown bool
+	// sealed is the alerts a lift covers (Cover, Reseal): a repeat of
+	// their kind opens a new alert instead of counting on them.
+	sealed map[uint64]bool
 
 	// size is the journal's length after its last good append, so a
 	// failed append is cut back and leaves no fragment. dirty is set
@@ -290,7 +293,7 @@ func New(cfg Config) (*Alerts, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	a := &Alerts{cfg: cfg, byID: map[uint64]int{}, coreDown: true}
+	a := &Alerts{cfg: cfg, byID: map[uint64]int{}, sealed: map[uint64]bool{}, coreDown: true}
 	raw, err := cfg.Journal.Load()
 	if err != nil {
 		return nil, err
@@ -357,7 +360,9 @@ func (a *Alerts) write(r Record) error {
 // one text or call, and sends again after it, so a later event is never
 // silenced by an earlier one left open. A kind that ends another resolves
 // that kind's open alert for the same device once its own record is
-// journalled, so the page keeps one alert for the incident.
+// journalled, so the page keeps one alert for the incident. An open
+// alert a lift sealed (Cover, Reseal) takes no counts: the repeat opens a
+// new alert, which no lift saved before it covers.
 func (a *Alerts) Raise(k Kind, device string) (Record, error) {
 	text, err := Words(k, device)
 	if err != nil {
@@ -367,7 +372,7 @@ func (a *Alerts) Raise(k Kind, device string) (Record, error) {
 	now := a.cfg.Now().UTC()
 	a.mu.Lock()
 	r, tell := Record{}, d != LogOnly
-	if i := a.open(k, device); d != LogOnly && i >= 0 {
+	if i := a.open(k, device); d != LogOnly && i >= 0 && !a.sealed[a.log[i].ID] {
 		r = a.log[i]
 		r.Count++
 		r.Last = now
@@ -507,54 +512,59 @@ func (a *Alerts) resolve(i int) error {
 // is left open.
 func (a *Alerts) Lifted(device string) error { return a.lifted(device, nil) }
 
-// Cover is one trip or missing record a lift covers: its ID and its count
-// when the cut lifted. A box's cut record saves its lift's covers, so the
-// daemon can close exactly those again after a failed append or a crash.
-type Cover struct {
-	ID    uint64 `json:"id"`
-	Count int    `json:"count"`
-}
-
-// Covers is every open trip and missing record from device as it stands
-// now: what a lift saved at this moment covers.
-func (a *Alerts) Covers(device string) []Cover {
+// Cover seals every open trip and missing record from device and returns
+// their IDs: what a lift saved at this moment covers. A sealed alert takes
+// no more counts: a later trip on the box opens a new alert with a new ID,
+// so it is never one the lift covers (#4305). A box's cut record saves the
+// IDs, so the daemon can close exactly those again after a failed append
+// or a crash, and Reseal restores the seal at start-up.
+func (a *Alerts) Cover(device string) []uint64 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	var cs []Cover
+	var ids []uint64
 	for _, r := range a.log {
 		if r.Open && r.Kind.Lights() && r.Device == device {
-			cs = append(cs, Cover{r.ID, r.Count})
+			ids = append(ids, r.ID)
+			a.sealed[r.ID] = true
 		}
 	}
-	return cs
+	return ids
 }
 
-// LiftedCovered is Lifted for the alerts covers names, each only while
-// its count is no more than the cover's. The daemon calls it once the
-// owner's passkey has lifted that cut in full (NET-4), and again for a box
-// it finds open (a failed append, or a crash before one), so a retry
-// closes them. A trip after the lift is never closed by it, so it stays
-// red (#4305): a new alert has an ID no cover names (Floor keeps IDs from
-// being reused across a restart), and a trip that counts on a covered
-// alert still open raises its count past the cover's. A count below the
-// cover's is a count whose append was lost, which the lift saw.
-func (a *Alerts) LiftedCovered(device string, covers []Cover) error {
-	if len(covers) == 0 {
+// Reseal seals the alerts a saved lift covers again after a restart, and
+// puts the next ID above every one of them, so no later alert reuses the
+// ID of a covered alert whose append was lost. The daemon calls it with a
+// saved lift's IDs at start-up, before anything is raised on that box.
+func (a *Alerts) Reseal(ids []uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, id := range ids {
+		a.sealed[id] = true
+		a.next = max(a.next, id)
+	}
+}
+
+// LiftedCovered is Lifted for the alerts ids names. The daemon calls it
+// once the owner's passkey has lifted that cut in full (NET-4), and again
+// for a box it finds open (a failed append, or a crash before one), so a
+// retry closes them. It never closes a trip after the lift, which stays
+// red: every alert ids names is sealed (Cover, Reseal), so a later trip
+// has an ID no cover names, whatever the journal kept of the covered
+// alerts' counts.
+func (a *Alerts) LiftedCovered(device string, ids []uint64) error {
+	if len(ids) == 0 {
 		a.show()
 		return nil
 	}
-	return a.lifted(device, covers)
+	return a.lifted(device, ids)
 }
 
-func (a *Alerts) lifted(device string, covers []Cover) error {
+func (a *Alerts) lifted(device string, ids []uint64) error {
 	a.mu.Lock()
 	var err error
 	for i := range a.log {
 		r := a.log[i]
-		if !r.Open || !r.Kind.Lights() || r.Device != device {
-			continue
-		}
-		if covers != nil && !slices.ContainsFunc(covers, func(c Cover) bool { return c.ID == r.ID && r.Count <= c.Count }) {
+		if !r.Open || !r.Kind.Lights() || r.Device != device || ids != nil && !slices.Contains(ids, r.ID) {
 			continue
 		}
 		err = errors.Join(err, a.resolve(i))
@@ -562,19 +572,6 @@ func (a *Alerts) lifted(device string, covers []Cover) error {
 	a.mu.Unlock()
 	a.show()
 	return err
-}
-
-// Floor makes every later alert's ID above every ID in covers. An alert
-// whose append was lost leaves its ID unused in the journal, so New would
-// hand it out again; a saved lift that covers it must not cover the
-// alert that reuses it. The daemon calls it with each saved lift's covers
-// at start-up, before any close.
-func (a *Alerts) Floor(covers []Cover) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for _, c := range covers {
-		a.next = max(a.next, c.ID)
-	}
 }
 
 // Core sets whether the core is up (slice l, from the channel and the

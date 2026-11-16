@@ -48,9 +48,10 @@ type edgeCutState struct {
 	// day leaves it 0: the new day's count starts from nothing, and its
 	// overrun cuts.
 	Lifted uint32 `json:"lifted,omitempty"`
-	// Covers is the trips and missing records open at the owner's lift
-	// (alert.Covers): all it closes, as the core's cutState.Covers (#4305).
-	Covers []alert.Cover `json:"covers,omitempty"`
+	// Covers is the IDs of the trips and missing records open at the
+	// owner's lift (alert.Cover, which seals them): all it closes, as the
+	// core's cutState.Covers (#4305).
+	Covers []uint64 `json:"covers,omitempty"`
 }
 
 // tamperAdvice ends the reason of a cut whose record is missing or does
@@ -83,8 +84,9 @@ func openEdgeCut(store fileStore, alerts *alert.Alerts, logf func(string)) (*edg
 	} else if !c.st.Cut {
 		// An open edge whose lift's alerts are still open: the lift was
 		// saved before a failed append or a crash closed them (#4305
-		// item 2); a trip after it stays open, and none reuses a covered ID.
-		alerts.Floor(c.st.Covers)
+		// item 2). The covered alerts are sealed again before anything is
+		// raised, so a trip after the lift opens a new alert and stays.
+		alerts.Reseal(c.st.Covers)
 		if err := c.liftedLocked(); err != nil {
 			logf("edge cut: the edge is not cut but its alerts did not close, retried each tick: " + err.Error())
 		}
@@ -171,7 +173,7 @@ func (c *edgeCut) Lift(day uint32, past bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.st.Cut {
-		next := edgeCutState{Covers: c.alerts.Covers(edgeDevice)}
+		next := edgeCutState{Covers: c.alerts.Cover(edgeDevice)}
 		if c.st.Day == day || c.st.Day == 0 && past {
 			next.Lifted = day
 		}

@@ -36,17 +36,18 @@ type cut struct {
 	// Persist retries it each tick (#4305 item 2).
 	unlifted bool
 	// covers is what the last lift covers (cutState.Covers).
-	covers []alert.Cover
+	covers []uint64
 }
 
 type cutState struct {
 	Tripped bool   `json:"tripped"`
 	Reason  string `json:"reason,omitempty"`
-	// Covers is the trips and missing records open when the owner lifted
-	// the cut, with their counts (alert.Covers): all the lift closes, then
-	// or on a retry. A trip after it whose record write never landed is
-	// not one, so a restart that finds the core open leaves it red (#4305).
-	Covers []alert.Cover `json:"covers,omitempty"`
+	// Covers is the IDs of the trips and missing records open when the
+	// owner lifted the cut (alert.Cover, which seals them): all the lift
+	// closes, then or on a retry. A trip after it opens a new alert, so
+	// one whose record write never landed is not covered, and a restart
+	// that finds the core open leaves it red (#4305).
+	Covers []uint64 `json:"covers,omitempty"`
 }
 
 func openCut(store fileStore, alerts *alert.Alerts, logf func(string)) (*cut, error) {
@@ -73,9 +74,9 @@ func openCut(store fileStore, alerts *alert.Alerts, logf func(string)) (*cut, er
 	}
 	// An open core whose lift's alerts are still open: the lift was
 	// saved before a failed append or a crash closed them (#4305 item 2).
-	// No later alert may reuse a covered ID.
+	// The covered alerts are sealed again before anything is raised.
 	c.covers = st.Covers
-	alerts.Floor(c.covers)
+	alerts.Reseal(c.covers)
 	if err := c.liftedLocked(); err != nil {
 		logf("cut: the core is not cut but its alerts did not close, retried each tick: " + err.Error())
 	}
@@ -167,7 +168,7 @@ func (c *cut) Resume() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.stage != channel.Open {
-		covers := c.alerts.Covers(coreDevice)
+		covers := c.alerts.Cover(coreDevice)
 		b, _ := json.Marshal(cutState{Covers: covers})
 		if err := c.store.Save(b); err != nil {
 			return err // still cut: a lift that is not saved does not happen
