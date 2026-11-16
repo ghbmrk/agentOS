@@ -73,7 +73,7 @@ WIPE_SOURCES = frozenset({"hkdf", "random"})
 GO_KEYWORDS = frozenset("break case chan const continue default defer else fallthrough for func go goto if "
                         "import interface map package range return select struct switch type var".split())
 # What may come just before the first word of an assignment's left-hand side.
-LHS_AFTER = frozenset({("nl", "\n"), ("punct", "{"), ("punct", "}"), ("punct", ";"),
+LHS_AFTER = frozenset({("nl", "\n"), ("punct", "{"), ("punct", "}"), ("punct", ";"), ("punct", ":"),
                        ("word", "if"), ("word", "for"), ("word", "switch"), ("word", "var")})
 SKIP_TOP = ("broker/vendor/", "broker/third_party/")
 
@@ -373,8 +373,8 @@ def wipe_problems(text):
             k += 1
         body = toks[j:k]
         for a in range(len(body)):
-            # LHS words from a statement start (a line, `{`, `}`, `;` or a keyword that opens a
-            # simple statement), then `:=` or `=`, then the call's name and `(`.
+            # LHS words from a statement start (a line, `{`, `}`, `;`, a case or label `:` or a
+            # keyword that opens a simple statement), then `:=` or `=`, then the call's name and `(`.
             if (body[a][0] != "word" or body[a][1] in GO_KEYWORDS
                     or (a and body[a - 1] not in LHS_AFTER)
                     or (a > 1 and body[a - 1][0] == "nl" and body[a - 2] == ("punct", ","))):

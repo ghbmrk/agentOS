@@ -296,6 +296,8 @@ class SrcLintTest(unittest.TestCase):
         self.assertEqual(ids("func f() {\n\tswitch k := s.decryptSlot(x); {\n\t}\n}\n"), ["wipe:f:k"])
         self.assertEqual(ids("func f() {\n\tk,\n\t\tj := random(8)\n\twipe(k)\n}\n"), ["wipe:f:j"])
         self.assertEqual(ids("func f() {\n\tx := y; k := hkdf(a) // k\n\tz := k\n}\n"), ["wipe:f:k"])
+        self.assertEqual(ids("func f(n int) {\n\tswitch n {\n\tcase 1: k := random(8)\n\t\t_ = k\n\t}\n}\n"),
+                         ["wipe:f:k"])
         self.assertEqual(ids("func f() ([]byte, error) {\n\tk := hkdf(a)\n\treturn nil,\n\t\tk\n}\n"), [])
 
     def test_main_is_clean(self):
