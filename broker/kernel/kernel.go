@@ -10,21 +10,22 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
-// Kernel refusal codes, beside the key package's.
-const (
-	CKey       = "key"         // the chain does not verify
-	CUngranted = "not-granted" // the passkey never granted the key's root or first link into the log
-	CGrantHeld = "grant-held"  // the grant is still in its hold (D-146)
-	CCutOff    = "cut-off"     // a passkey cut off since narrowed the key (key.Narrow)
-	CPlan      = "plan"        // the plan is malformed
-	CDuplicate = "duplicate"   // the same effect within 24 hours needs a fresh owner key (KRN-8)
-	CClerk     = "no-clerk"
-	CPool      = "pool"       // the pool is at the owner's reserve until it resets (RES-5)
-	CNotHeld   = "not-held"   // no hold on that task
-	CExtension = "extension"  // the key cannot extend this hold
-	CHeld      = "held"       // the task is held until the owner extends it (LOG-7)
-	CBroken    = "log-broken" // a write failed: no spend until the log is reopened (KRN-5)
-	CErased    = "erased"     // the owner erased a subject the plan's lineage read before submitting it (LOG-4)
+// Kernel refusal codes, beside the key package's: aliases of codes key
+// declares (key/codes.go), since only key makes a key.Code.
+var (
+	CKey       = key.CKey
+	CUngranted = key.CUngranted
+	CGrantHeld = key.CGrantHeld
+	CCutOff    = key.CCutOff
+	CPlan      = key.CPlan
+	CDuplicate = key.CDuplicate
+	CClerk     = key.CClerk
+	CPool      = key.CPool
+	CNotHeld   = key.CNotHeld
+	CExtension = key.CExtension
+	CHeld      = key.CHeld
+	CBroken    = key.CBroken
+	CErased    = key.CErased
 )
 
 // Refusal is Admit's: the check, its step and a verified key's task (PLN-4).
@@ -43,17 +44,17 @@ func Admit(s *State, p Plan, now int64) (key.ID, []key.ID, *Refusal) { return ad
 // or task must not have ended by Latest.
 func admit(s *State, p Plan, now Reading) (key.ID, []key.ID, *Refusal) {
 	if p.ID == "" || len(p.Steps) == 0 || len(p.Steps) > MaxSteps {
-		return key.ID{}, nil, &Refusal{Refusal: key.Refusal{Code: CPlan, Detail: "empty, unnamed or over the step limit"}}
+		return key.ID{}, nil, &Refusal{Refusal: *key.Refuse(CPlan, "empty, unnamed or over the step limit")}
 	}
 	if t := s.tripOf(p); t != nil {
-		return key.ID{}, nil, &Refusal{Refusal: key.Refusal{Code: CTrip, Detail: t.Cause}}
+		return key.ID{}, nil, &Refusal{Refusal: *key.Refuse(CTrip, t.Cause)}
 	}
 	if s.decoys.stopped {
-		return key.ID{}, nil, &Refusal{Refusal: key.Refusal{Code: CTripped, Detail: "planning is stopped after a trip"}}
+		return key.ID{}, nil, &Refusal{Refusal: *key.Refuse(CTripped, "planning is stopped after a trip")}
 	}
 	v, err := VerifyPlan(p, s.owners(p.Key))
 	if err != nil {
-		return key.ID{}, nil, &Refusal{Refusal: key.Refusal{Code: CKey, Detail: err.Error()}}
+		return key.ID{}, nil, &Refusal{Refusal: *key.Refuse(CKey, err.Error())}
 	}
 	on := func(r *key.Refusal, step *int) *Refusal { return &Refusal{*r, step, v.Limits.Task} }
 	if r := Live(s, v, now.Earliest); r != nil {
@@ -64,7 +65,7 @@ func admit(s *State, p Plan, now Reading) (key.ID, []key.ID, *Refusal) {
 	}
 	if t := v.Limits.Task; t != "" {
 		if _, ok := s.Task(t, now.Latest); !ok {
-			return key.ID{}, nil, on(&key.Refusal{Code: CTask, Detail: "the key's task is not live"}, nil)
+			return key.ID{}, nil, on(key.Refuse(CTask, "the key's task is not live"), nil)
 		}
 	}
 	ov := overlay{base: s.Ledger(), extra: map[key.ID][]key.Use{}}
@@ -73,7 +74,7 @@ func admit(s *State, p Plan, now Reading) (key.ID, []key.ID, *Refusal) {
 	for i := range p.Steps {
 		st := p.Step(i)
 		if !key.Valid(st.Verb) {
-			return key.ID{}, nil, on(&key.Refusal{Code: CPlan, Detail: "unknown verb " + string(st.Verb)}, &i)
+			return key.ID{}, nil, on(key.Refuse(CPlan, "unknown verb "+string(st.Verb)), &i)
 		}
 		c, _ := key.ClassOf(st.Verb)
 		st.Rung = s.Rung(v.Limits.Task, c.Irreversible() && max(v.Window(st.Verb, false), v.Window(st.Verb, true)) > 0)
@@ -83,7 +84,7 @@ func admit(s *State, p Plan, now Reading) (key.ID, []key.ID, *Refusal) {
 		if c.Irreversible() {
 			fp := Fingerprint(st)
 			if fresh[fp] || repeats(s, v.Root(), st, p.ID, now) {
-				return key.ID{}, nil, on(&key.Refusal{Code: CDuplicate, Detail: string(st.Verb)}, &i)
+				return key.ID{}, nil, on(key.Refuse(CDuplicate, string(st.Verb)), &i)
 			}
 			fresh[fp] = true
 		}
@@ -191,7 +192,7 @@ func next(s *State, id string, now Reading) Act {
 	}
 	v, err := VerifyPlan(p.Plan, s.owners(p.Plan.Key))
 	if err != nil {
-		a.Kind, a.Refusal = ActCancel, &key.Refusal{Code: CKey, Detail: err.Error()}
+		a.Kind, a.Refusal = ActCancel, key.Refuse(CKey, err.Error())
 		return a
 	}
 	if r := s.ended(p, &st, v.Limits.Task, now.Latest); r != nil {
@@ -207,14 +208,14 @@ func next(s *State, id string, now Reading) Act {
 	due := v.Due(sp.Verb, st.HeldAt, st.Novel)
 	sp.Rung = s.Rung(v.Limits.Task, st.Approved || holds && (st.Phase == PQueued || st.Phase == PHeld && now.Earliest < due))
 	if r := v.Authorize(sp, s.context(now, led)); r != nil {
-		if r.Code == key.RPaused {
+		if r.Code() == key.RPaused {
 			return a // waits for key.resumed
 		}
 		a.Kind, a.Refusal = ActCancel, r
 		return a
 	}
 	if class.Irreversible() && st.Attempt == 0 && repeats(s, p.Root, sp, id, now) {
-		a.Kind, a.Refusal = ActCancel, &key.Refusal{Code: CDuplicate, Detail: string(sp.Verb)}
+		a.Kind, a.Refusal = ActCancel, key.Refuse(CDuplicate, string(sp.Verb))
 		return a
 	}
 	if holds && st.Phase == PQueued {
@@ -292,15 +293,15 @@ type View interface {
 func Live(v View, ver *key.Verified, now int64) *key.Refusal {
 	_, cut := v.Enrollments()
 	if slices.ContainsFunc(ver.Narrowers, func(p key.PublicKey) bool { return key.In(cut, p) }) {
-		return &key.Refusal{Code: CCutOff, Detail: "narrowed by a cut-off passkey"}
+		return key.Refuse(CCutOff, "narrowed by a cut-off passkey")
 	}
 	for _, id := range ver.IDs[:min(2, len(ver.IDs))] {
 		from, ok := v.Granted(id)
 		if !ok {
-			return &key.Refusal{Code: CUngranted, Detail: id.String()}
+			return key.Refuse(CUngranted, id.String())
 		}
 		if now < from {
-			return &key.Refusal{Code: CGrantHeld, Detail: fmt.Sprintf("live at %d", from)}
+			return key.Refuse(CGrantHeld, fmt.Sprintf("live at %d", from))
 		}
 	}
 	return nil
@@ -463,7 +464,7 @@ var ErrAnchor = errors.New("kernel: an anchor is cut off only by recovery")
 func (k *Kernel) owned(now Reading, ky key.Key) (*key.Verified, *key.Refusal) {
 	v, err := key.Chain(ky, k.s.owners(ky))
 	if err != nil {
-		return nil, &key.Refusal{Code: CKey, Detail: err.Error()}
+		return nil, key.Refuse(CKey, err.Error())
 	}
 	if r := Live(k.s, v, now.Earliest); r != nil {
 		return nil, r
@@ -478,10 +479,10 @@ func (k *Kernel) owned(now Reading, ky key.Key) (*key.Verified, *key.Refusal) {
 func (k *Kernel) funding(now Reading, plan string) (*PlanState, *key.Verified, *key.Refusal) {
 	ps := k.s.Plans[plan]
 	if ps == nil {
-		return nil, nil, &key.Refusal{Code: CPlan, Detail: "unknown plan"}
+		return nil, nil, key.Refuse(CPlan, "unknown plan")
 	}
 	if ps.Status != SActive { // a pending or finished plan has no scope to fund
-		return nil, nil, &key.Refusal{Code: CPlan, Detail: "plan is " + ps.Status}
+		return nil, nil, key.Refuse(CPlan, "plan is "+ps.Status)
 	}
 	ky := ps.Plan.Key
 	if e, ok := k.s.Extended[plan]; ok {
@@ -520,7 +521,7 @@ func (k *Kernel) AdmitSpend(at int64, plan string, amount int64) (Admitted, *key
 	if (*k.log.p).broken {
 		// A call admitted now could not be metered, and may follow a
 		// widening whose anchor failed (KRN-5).
-		return Admitted{}, &key.Refusal{Code: CBroken, Detail: ErrBroken.Error()}
+		return Admitted{}, key.Refuse(CBroken, ErrBroken.Error())
 	}
 	ps, v, r := k.funding(now, plan)
 	if r != nil {
@@ -530,7 +531,7 @@ func (k *Kernel) AdmitSpend(at int64, plan string, amount int64) (Admitted, *key
 		return Admitted{}, r
 	}
 	if h, held := k.s.SpendHeld[plan]; held {
-		return Admitted{}, &key.Refusal{Code: CHeld, Detail: h.Code}
+		return Admitted{}, key.Refuse(CHeld, h.Code.String())
 	}
 	task := ps.Plan.Task()
 	if r := v.Spend(task, amount, k.s.context(now, k.s.Ledger())); r != nil {
@@ -541,16 +542,16 @@ func (k *Kernel) AdmitSpend(at int64, plan string, amount int64) (Admitted, *key
 			// names, even when open admissions push another over first.
 			return Admitted{}, sr
 		}
-		if r.Code == key.RSpendTask || r.Code == key.RSpendDay {
+		if r.Code() == key.RSpendTask || r.Code() == key.RSpendDay {
 			// Only calls still in flight fill the cap: this one waits for
 			// them, and nothing holds the plan.
-			return Admitted{}, &key.Refusal{Code: CInFlight, Detail: r.Code}
+			return Admitted{}, key.Refuse(CInFlight, r.Code().String())
 		}
 		return Admitted{}, r
 	}
 	e, err := k.emit(now, TSpendReserved, spendReserved{v.Root(), v.Scopes(), plan, amount})
 	if err != nil {
-		return Admitted{}, &key.Refusal{Code: CBroken, Detail: err.Error()}
+		return Admitted{}, key.Refuse(CBroken, err.Error())
 	}
 	return Admitted{plan, e.Seq}, nil
 }
@@ -558,7 +559,7 @@ func (k *Kernel) AdmitSpend(at int64, plan string, amount int64) (Admitted, *key
 // CInFlight refuses a metered call whose worst case fits the caps once the
 // calls still in flight settle: the caller may ask again later, and it never
 // holds the plan.
-const CInFlight = "in-flight"
+var CInFlight = key.CInFlight
 
 // ErrNotAdmitted refuses a Meter that cites no open admission.
 var ErrNotAdmitted = errors.New("kernel: usage is metered against its own open admission")
@@ -587,7 +588,7 @@ func (k *Kernel) Meter(at int64, a Admitted, route string, amount int64, source 
 // the owner extends it (LOG-7).
 func (k *Kernel) Hold(at int64, plan string, rf *key.Refusal) error {
 	now := k.read(at)
-	if rf == nil || (rf.Code != key.RSpendTask && rf.Code != key.RSpendDay) {
+	if rf == nil || (rf.Code() != key.RSpendTask && rf.Code() != key.RSpendDay) {
 		return errors.New("kernel: only a refused spend cap holds a plan")
 	}
 	ps, v, r := k.funding(now, plan)
@@ -596,7 +597,7 @@ func (k *Kernel) Hold(at int64, plan string, rf *key.Refusal) error {
 	}
 	// The cited key was verified when its plan was admitted; its root is all
 	// the hold names.
-	_, err := k.emit(now, TSpendHeld, spendHeld{plan, rf.Code, rf.Detail, rootOf(ps.Plan.Key), v.ID()})
+	_, err := k.emit(now, TSpendHeld, spendHeld{plan, rf.Code(), rf.Detail, rootOf(ps.Plan.Key), v.ID()})
 	return err
 }
 
@@ -616,7 +617,7 @@ func (k *Kernel) Extend(at int64, ext key.Key, plan string) error {
 	ext = logged[0]
 	h, ok := k.s.SpendHeld[plan]
 	if !ok || k.s.Plans[plan].Status != SActive { // an ended plan's hold releases nothing
-		return &key.Refusal{Code: CNotHeld, Detail: plan}
+		return key.Refuse(CNotHeld, plan)
 	}
 	if r := k.citedLive(now, k.s.Plans[plan]); r != nil {
 		return r
@@ -626,10 +627,10 @@ func (k *Kernel) Extend(at int64, ext key.Key, plan string) error {
 		return r
 	}
 	if v.Root() == h.Root || slices.Contains(v.IDs, h.Funding) {
-		return &key.Refusal{Code: CExtension, Detail: "a held key cannot release itself"}
+		return key.Refuse(CExtension, "a held key cannot release itself")
 	}
 	if !slices.ContainsFunc(v.Limits.Caps, func(c key.Cap) bool { return c.Kind == key.KSpendTask }) {
-		return &key.Refusal{Code: CExtension, Detail: "no per-task cap"}
+		return key.Refuse(CExtension, "no per-task cap")
 	}
 	if r := v.Spend(k.s.Plans[plan].Plan.Task(), 1, k.s.context(now, k.s.Ledger())); r != nil {
 		return r
@@ -684,7 +685,7 @@ func (k *Kernel) owner(now Reading, typ string, body any) error {
 
 // Cancel ends an active plan at the owner's word.
 func (k *Kernel) Cancel(at int64, plan string) error {
-	_, err := k.emit(k.read(at), TPlanCancel, planCancel{Plan: plan, Code: "owner"})
+	_, err := k.emit(k.read(at), TPlanCancel, planCancel{Plan: plan, Code: key.COwner})
 	return err
 }
 
@@ -730,8 +731,8 @@ func (k *Kernel) Retry(at int64, plan string, index, attempt int) error {
 	// task (KRN-5).
 	redo := *st
 	redo.Retried = true
-	if r := sendCheck(k.s, p, &redo, index, now); r != nil && r.Code != key.RPaused {
-		return fmt.Errorf("%w: %s: %s", ErrRetryRefused, r.Code, r.Detail)
+	if r := sendCheck(k.s, p, &redo, index, now); r != nil && r.Code() != key.RPaused {
+		return fmt.Errorf("%w: %s: %s", ErrRetryRefused, r.Code(), r.Detail)
 	}
 	if c := p.Plan.Steps[index].Clerk; k.clerks[c] == nil {
 		// The redo could reach no clerk and would cancel the plan.
@@ -857,7 +858,7 @@ func (k *Kernel) Send(at int64, c Call) (bool, error) {
 		delete(k.asked, ref)
 		return false, nil
 	}
-	r := &key.Refusal{Code: CPlan, Detail: "plan is " + p.Status}
+	r := key.Refuse(CPlan, "plan is "+p.Status)
 	if p.Status == SActive {
 		r = sendCheck(k.s, p, st, c.Req.Index, now)
 	}
@@ -867,10 +868,10 @@ func (k *Kernel) Send(at int64, c Call) (bool, error) {
 	if err := k.answerCall(now, c, Result{Outcome: OUnsent}); err != nil {
 		return false, err
 	}
-	if p.Status != SActive || r.Code == key.RPaused {
+	if p.Status != SActive || r.Code() == key.RPaused {
 		return false, nil
 	}
-	_, err := k.emit(now, TPlanCancel, planCancel{Plan: ref.Plan, Code: r.Code, Detail: r.Detail})
+	_, err := k.emit(now, TPlanCancel, planCancel{Plan: ref.Plan, Code: r.Code(), Detail: r.Detail})
 	return false, err
 }
 
@@ -880,7 +881,7 @@ func (k *Kernel) Send(at int64, c Call) (bool, error) {
 func sendCheck(s *State, p *PlanState, st *StepState, i int, now Reading) *key.Refusal {
 	v, err := VerifyPlan(p.Plan, s.owners(p.Plan.Key))
 	if err != nil {
-		return &key.Refusal{Code: CKey, Detail: err.Error()}
+		return key.Refuse(CKey, err.Error())
 	}
 	if r := s.ended(p, st, v.Limits.Task, now.Latest); r != nil {
 		return r
@@ -936,7 +937,7 @@ func (k *Kernel) act(now Reading, a Act) (*Call, error) {
 	p := k.s.Plans[a.Plan]
 	switch a.Kind {
 	case ActCancel:
-		_, err := k.emit(now, TPlanCancel, planCancel{Plan: a.Plan, Code: a.Refusal.Code, Detail: a.Refusal.Detail})
+		_, err := k.emit(now, TPlanCancel, planCancel{Plan: a.Plan, Code: a.Refusal.Code(), Detail: a.Refusal.Detail})
 		return nil, err
 	case ActHold:
 		_, err := k.emit(now, TStepHeld, stepHeld{ref, 0, a.Novel})

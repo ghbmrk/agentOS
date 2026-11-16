@@ -43,7 +43,7 @@ func TestExhaustedPlanIsHeldUntilExtended(t *testing.T) {
 	if !ok || h.Code != key.RSpendTask {
 		t.Fatalf("plan not held: %+v", h)
 	}
-	if rf := r.admit(2, "t1", 1); rf == nil || rf.Code != kernel.CHeld {
+	if rf := r.admit(2, "t1", 1); rf == nil || rf.Code() != kernel.CHeld {
 		t.Fatalf("a held plan admits nothing: %v", rf)
 	}
 	must(t, r.k.Extend(3, extension(r, env, key.LimitSpendTask(300)), "t1"))
@@ -53,7 +53,7 @@ func TestExhaustedPlanIsHeldUntilExtended(t *testing.T) {
 	if rf := r.admit(4, "t1", 300); rf != nil {
 		t.Fatal(rf)
 	}
-	if rf := r.admit(4, "t1", 301); rf == nil || rf.Code != key.RSpendTask {
+	if rf := r.admit(4, "t1", 301); rf == nil || rf.Code() != key.RSpendTask {
 		t.Fatalf("extension cap: %v", rf)
 	}
 }
@@ -72,7 +72,7 @@ func TestTaskIsThePlanNotAString(t *testing.T) {
 	if rf := r.admit(3, "p2", 5); rf != nil {
 		t.Fatalf("another plan has its own task cap: %v", rf)
 	}
-	if rf := r.admit(3, "p2", 6); rf == nil || rf.Code != key.RSpendDay {
+	if rf := r.admit(3, "p2", 6); rf == nil || rf.Code() != key.RSpendDay {
 		t.Fatalf("the day cap is the key's: %v", rf)
 	}
 }
@@ -88,13 +88,13 @@ func TestExtensionsShareTheEnvelopeCeilings(t *testing.T) {
 	must(t, r.k.Extend(3, extension(r, env, key.LimitSpendTask(300)), "t1"))
 	must(t, r.meter(4, "t1", "api", 300, "provider"))
 	rf := r.admit(5, "t1", 1)
-	if rf == nil || rf.Code != key.RSpendTask {
+	if rf == nil || rf.Code() != key.RSpendTask {
 		t.Fatalf("the extension is used up: %v", rf)
 	}
 	must(t, r.k.Hold(5, "t1", rf))
 	// a distinct key: equal caveats derive the same key
 	must(t, r.k.Extend(6, extension(r, env, key.LimitSpendTask(350)), "t1"))
-	if rf := r.admit(7, "t1", 201); rf == nil || rf.Code != key.RSpendTask {
+	if rf := r.admit(7, "t1", 201); rf == nil || rf.Code() != key.RSpendTask {
 		t.Fatalf("two extensions must not pass the per-task ceiling: %v", rf)
 	}
 	if rf := r.admit(7, "t1", 200); rf != nil {
@@ -105,7 +105,7 @@ func TestExtensionsShareTheEnvelopeCeilings(t *testing.T) {
 	must(t, r.meter(9, "t2", "api", 300, "provider"))
 	exhaust(r, "t3", 10)
 	must(t, r.k.Extend(10, extension(r, env, key.LimitSpendTask(400)), "t3"))
-	if rf := r.admit(11, "t3", 201); rf == nil || rf.Code != key.RSpendDay {
+	if rf := r.admit(11, "t3", 201); rf == nil || rf.Code() != key.RSpendDay {
 		t.Fatalf("extensions must not pass the per-day ceiling: %v", rf)
 	}
 }
@@ -149,13 +149,13 @@ func TestExtendRefusals(t *testing.T) {
 func TestHoldOnlyForSpendRefusals(t *testing.T) {
 	r := newRig(t)
 	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(10)))
-	if err := r.k.Hold(1, "t1", &key.Refusal{Code: key.RExpired}); err == nil {
+	if err := r.k.Hold(1, "t1", key.Refuse(key.RExpired, "")); err == nil {
 		t.Fatal("only an exhausted spend cap holds a plan")
 	}
 	if err := r.k.Hold(1, "t1", nil); err == nil {
 		t.Fatal("a hold needs the refusal that caused it")
 	}
-	if err := r.k.Hold(1, "nope", &key.Refusal{Code: key.RSpendTask}); err == nil {
+	if err := r.k.Hold(1, "nope", key.Refuse(key.RSpendTask, "")); err == nil {
 		t.Fatal("an unknown plan cannot be held")
 	}
 }
@@ -226,7 +226,7 @@ func TestPausingTheCitedKeyStopsAnExtendedPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	must(t, r.k.Pause(5, v.ID()))
-	if rf := r.admit(6, "t1", 1); rf == nil || rf.Code != key.RPaused {
+	if rf := r.admit(6, "t1", 1); rf == nil || rf.Code() != key.RPaused {
 		t.Fatalf("a paused cited key stops its plan's spend: %v", rf)
 	}
 }
@@ -254,7 +254,7 @@ func TestPoolRefusesAtTheReserveUntilReset(t *testing.T) {
 		t.Fatal(rf)
 	}
 	must(t, read(r, 4, "codex-5h", 900, 10_000))
-	if rf := r.k.AdmitPool(5, "codex-5h"); rf == nil || rf.Code != kernel.CPool {
+	if rf := r.k.AdmitPool(5, "codex-5h"); rf == nil || rf.Code() != kernel.CPool {
 		t.Fatalf("pool at the reserve: %v", rf)
 	}
 	if rf := r.k.AdmitPool(5, "other"); rf != nil {
@@ -488,10 +488,10 @@ func TestAnUnanchoredReserveDropBreaksTheLogAndAdmitsNoSpend(t *testing.T) {
 	if err := r.k.Reserve(2, "p", 100, lower(r, "p", 100, r.owner)); err == nil {
 		t.Fatal("a lowered reserve whose anchor failed must be refused")
 	}
-	if rf := r.admit(3, "t1", 1); rf == nil || rf.Code != kernel.CBroken {
+	if rf := r.admit(3, "t1", 1); rf == nil || rf.Code() != kernel.CBroken {
 		t.Fatalf("a call admitted on a broken log: %v", rf)
 	}
-	if rf := r.k.AdmitPool(3, "p"); rf == nil || rf.Code != kernel.CBroken {
+	if rf := r.k.AdmitPool(3, "p"); rf == nil || rf.Code() != kernel.CBroken {
 		t.Fatalf("a pool admitted on a broken log: %v", rf)
 	}
 	r.anchor.down = false
@@ -516,7 +516,7 @@ func TestARevokedEnvelopeFundsNothingAndAPausedKeysPlanIsNotExtended(t *testing.
 	exhaust(r, "t1", 10)
 	must(t, r.k.Extend(3, extension(r, env, key.LimitSpendTask(100)), "t1"))
 	must(t, r.k.Revoke(4, key.Key{Root: env.Root}.Tip()))
-	if rf := r.admit(5, "t1", 1); rf == nil || rf.Code != key.RRevoked {
+	if rf := r.admit(5, "t1", 1); rf == nil || rf.Code() != key.RRevoked {
 		t.Fatalf("a revoked envelope still funds the plan: %v", rf)
 	}
 	r = newRig(t)
@@ -556,7 +556,7 @@ func TestEachWindowNarrowsAndResetsOnItsOwn(t *testing.T) {
 	if rf := r.k.AdmitPool(500, "p"); rf == nil {
 		t.Fatal("both windows are at the reserve")
 	}
-	if rf := r.k.AdmitPool(1_000, "p"); rf == nil || rf.Code != kernel.CPool {
+	if rf := r.k.AdmitPool(1_000, "p"); rf == nil || rf.Code() != kernel.CPool {
 		t.Fatalf("the 5-hour window reset, but the week is still at the reserve: %v", rf)
 	}
 	es := r.k.Log().Entries()

@@ -1105,7 +1105,7 @@ func (a *Applier) answeredLocked(id string) {
 // (UPD-6). It returns the refusal's detail, or "".
 func (a *Applier) authorize(r kernel.Request, v kernel.View) string {
 	if rf := check.Check([]key.PublicKey{a.cfg.Pinned}, Name, a.Facts, a.cfg.Now().UnixMilli(), r, v); rf != nil {
-		return rf.Code
+		return rf.Code().String()
 	}
 	if !pinnedKey(r.Plan.Key, a.cfg.Pinned) {
 		return RKey

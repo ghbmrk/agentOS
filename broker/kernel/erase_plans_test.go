@@ -63,7 +63,7 @@ func TestEraseCancelsTheReadersLaterPlans(t *testing.T) {
 		}
 	}
 	var rf *key.Refusal
-	if err := r.k.Extend(4, extension(r, env, key.LimitSpendTask(300)), "agent/spend"); !errors.As(err, &rf) || rf.Code != kernel.CNotHeld {
+	if err := r.k.Extend(4, extension(r, env, key.LimitSpendTask(300)), "agent/spend"); !errors.As(err, &rf) || rf.Code() != kernel.CNotHeld {
 		t.Fatalf("an extension of a cancelled plan: %v", err)
 	}
 	if a, rf := r.k.AdmitSpend(4, "agent/spend", 1); rf == nil {

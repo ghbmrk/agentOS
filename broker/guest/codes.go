@@ -64,10 +64,17 @@ var codes = set(
 	"unapproved", "verb", "owner", "malformed",
 )
 
-func set(cs ...string) map[string]bool {
+func set(cs ...any) map[string]bool {
 	m := make(map[string]bool, len(cs))
 	for _, c := range cs {
-		m[c] = true
+		switch c := c.(type) {
+		case string:
+			m[c] = true
+		case key.Code:
+			m[c.String()] = true
+		default:
+			panic("guest: a code is a string or a key.Code")
+		}
 	}
 	return m
 }

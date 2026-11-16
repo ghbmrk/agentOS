@@ -130,7 +130,7 @@ func (h *ExitHost) Do(r kernel.Request, v kernel.View) kernel.Result {
 	now := h.clock.Now()
 	vk, rf := check.Verify(h.anchors, h.name, h.facts, now, r, v)
 	if rf != nil {
-		return kernel.Result{Outcome: "failed", Detail: rf.Code}
+		return kernel.Result{Outcome: "failed", Detail: rf.Code().String()}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()

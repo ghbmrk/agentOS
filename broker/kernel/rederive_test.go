@@ -63,15 +63,15 @@ func TestRederiveReproducesEveryDecision(t *testing.T) {
 			t.Errorf("no %s re-derived: %+v", typ, got)
 		}
 	}
-	codes := map[string]bool{}
+	codes := map[key.Code]bool{}
 	for _, e := range r.k.Log().Entries() {
 		if e.Type == kernel.TPlanCancel {
-			var b struct{ Code string }
+			var b struct{ Code key.Code }
 			must(t, json.Unmarshal(e.Body, &b))
 			codes[b.Code] = true
 		}
 	}
-	for _, c := range []string{key.RRevoked, kernel.CClerk, key.RStopped} {
+	for _, c := range []key.Code{key.RRevoked, kernel.CClerk, key.RStopped} {
 		if !codes[c] {
 			t.Errorf("the run logged no %q cancel: %v", c, codes)
 		}

@@ -25,7 +25,7 @@ import (
 const DefaultLine = 200
 
 // CCosign refuses a very large one-off that lacks its second passkey.
-const CCosign = "needs-cosign"
+var CCosign = key.CCosign
 
 // ErrNeedsCosign refuses a big grant or a raised line without its second passkey.
 var ErrNeedsCosign = errors.New("kernel: a big change needs a second passkey, one a hardware key")
@@ -245,7 +245,7 @@ func oneOff(line int64, owners, anchors []key.PublicKey, p Plan) *key.Refusal {
 	}
 	signer := key.UseSigner(p.Key, owners, p.use(), p.Sig)
 	if !key.Approved(owners, anchors, PlanHash(p), []key.PublicKey{signer}, p.Cosigns) {
-		return &key.Refusal{Code: CCosign, Detail: strconv.FormatInt(total, 10)}
+		return key.Refuse(CCosign, strconv.FormatInt(total, 10))
 	}
 	return nil
 }

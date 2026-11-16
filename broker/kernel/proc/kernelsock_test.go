@@ -66,7 +66,7 @@ func TestOwnerSocketServesTheSeam(t *testing.T) {
 		t.Fatalf("a second submit: %v, want %v", err, kernel.ErrDuplicatePlan)
 	}
 	var rf *key.Refusal
-	if err := o.Extend(b.key, "o1"); !errors.As(err, &rf) || rf.Code != kernel.CNotHeld {
+	if err := o.Extend(b.key, "o1"); !errors.As(err, &rf) || rf.Code() != kernel.CNotHeld {
 		t.Fatalf("extend of an unheld plan: %v, want refusal %s", err, kernel.CNotHeld)
 	}
 	if err := o.Retry("o1", 0, 1); !errors.Is(err, kernel.ErrNotParked) {
@@ -461,7 +461,7 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 		return []kernel.WindowReading{{Window: "5h", Used: used, ResetAt: resetAt}}
 	}
 	hi := edgeHello(edgePriv, 1)
-	spend := &key.Refusal{Code: key.RSpendTask, Detail: "used up"}
+	spend := key.Refuse(key.RSpendTask, "used up")
 	code := kernel.SignCode(phonePriv, []kernel.CodeStep{kernel.CodeStepOf(p1, 0)}) // no checker is pinned: refused alike
 	approval := kernel.TaskApproval{Site: "shop.test", First: "r", By: key.Approve(key.Ed25519Signer(phonePriv), kernel.TaskHash("t1", 0, "shop.test", "r"))}
 	for _, b := range []*box{direct, sock} {

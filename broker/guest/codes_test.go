@@ -19,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
 // clerkDirs hold every clerk and the kernel's clerk wire: each package under
@@ -49,8 +51,11 @@ func TestCodesAreTheClerksCodes(t *testing.T) {
 			src[c] = where
 		}
 	}
-	add(scanFiles(t, goFiles(t, "../kernel", false), `^C[A-Z]`))
-	add(scanFiles(t, goFiles(t, "../kernel/key", false), `^R[A-Z]`))
+	// The kernel's, the key's and the clerks' refusal codes are key's
+	// declared table (key.Codes, #6023): no other package makes one.
+	for c := range key.Codes() {
+		src[c] = "kernel/key/codes.go"
+	}
 	for _, d := range clerkDirs {
 		add(scanFiles(t, goFiles(t, d, true), ""))
 	}

@@ -990,7 +990,7 @@ func TestAPoolWhoseReadingIsDroppedIsClosedUntilItResets(t *testing.T) {
 		calls := f.calls
 		var rf *key.Refusal
 		for _, now := range []int64{3, 10_000, 49_999} {
-			if _, err := c.Call(now, "t", "plan", "hi", 10); !errors.As(err, &rf) || rf.Code != kernel.CPool || f.calls != calls {
+			if _, err := c.Call(now, "t", "plan", "hi", 10); !errors.As(err, &rf) || rf.Code() != kernel.CPool || f.calls != calls {
 				t.Fatalf("%s: at %d the pool is closed until the 7d reset: %v, %d calls", name, now, err, f.calls)
 			}
 		}

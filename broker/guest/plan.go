@@ -229,7 +229,7 @@ func (p *Plane) read(ctx context.Context, id string) (planState, bool, error) {
 	if v.Status == kernel.SCancelled {
 		c = v.Cancel
 	}
-	st := planState{State: v.Status, Code: code(c)}
+	st := planState{State: v.Status, Code: code(c.String())}
 	for _, s := range v.Steps {
 		st.Steps = append(st.Steps, stepResult{s.Phase, code(s.Result), s.Undone})
 	}
@@ -244,7 +244,7 @@ func (p *Plane) read(ctx context.Context, id string) (planState, bool, error) {
 // rolling day's rate or spend cap, the pool at its reserve), a repeated
 // irreversible effect, which only the owner can confirm and never a wait
 // (KRN-8), or what the key itself does not allow (PLN-4).
-func rejectReason(c string) string {
+func rejectReason(c key.Code) string {
 	switch c {
 	case key.RStopped:
 		return reasonStopped

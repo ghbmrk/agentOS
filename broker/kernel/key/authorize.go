@@ -1,6 +1,7 @@
 package key
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 )
@@ -66,37 +67,48 @@ type Context struct {
 	Ledger  Ledger
 }
 
-// Refusal codes.
-const (
-	RMalformed = "malformed"
-	RStopped   = "stopped"
-	RRevoked   = "revoked"
-	RPaused    = "paused"
-	RExpired   = "expired"
-	RClerk     = "clerk"
-	RVerb      = "verb"
-	RArg       = "arg"
-	RContent   = "content"
-	RLabels    = "labels"
-	RSpendTask = "spend-task"
-	RSpendDay  = "spend-day"
-	RRate      = "rate"
-	RUses      = "uses"
-	RTask      = "task" // a step or a metered call for another task than the key's (KRN-5)
-	RRung      = "rung" // the step's owner events reached a lower rung than the key asks (CH-3)
-)
-
-// Refusal is a closed reason code plus detail for the log.
+// Refusal is a closed reason code plus detail for the log. Its code is
+// unexported, so a Refusal is made only by Refuse or Refusef, and its code is
+// one key declares (codes.go).
 type Refusal struct {
-	Code   string
+	code   Code
 	Detail string
 }
 
-func (r *Refusal) Error() string { return r.Code + ": " + r.Detail }
+// Refuse is a refusal for code c with detail.
+func Refuse(c Code, detail string) *Refusal { return &Refusal{code: c, Detail: detail} }
 
-func refuse(code, f string, a ...any) *Refusal {
-	return &Refusal{Code: code, Detail: fmt.Sprintf(f, a...)}
+// Refusef is Refuse with a formatted detail.
+func Refusef(c Code, f string, a ...any) *Refusal { return Refuse(c, fmt.Sprintf(f, a...)) }
+
+// Code is the refusal's code.
+func (r *Refusal) Code() Code { return r.code }
+
+func (r *Refusal) Error() string { return r.code.name + ": " + r.Detail }
+
+// refusalJSON is a Refusal's wire form: the field names an exported Code
+// field gave it, so encodings are unchanged.
+type refusalJSON struct {
+	Code   Code
+	Detail string
 }
+
+// MarshalJSON writes {"Code":…,"Detail":…}.
+func (r Refusal) MarshalJSON() ([]byte, error) {
+	return json.Marshal(refusalJSON{r.code, r.Detail})
+}
+
+// UnmarshalJSON reads a Refusal; an undeclared code fails.
+func (r *Refusal) UnmarshalJSON(b []byte) error {
+	var w refusalJSON
+	if err := json.Unmarshal(b, &w); err != nil {
+		return err
+	}
+	*r = Refusal{w.Code, w.Detail}
+	return nil
+}
+
+func refuse(code Code, f string, a ...any) *Refusal { return Refusef(code, f, a...) }
 
 func in(s []string, v string) bool {
 	for _, x := range s {

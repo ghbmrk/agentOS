@@ -41,7 +41,7 @@ const (
 const TaskTimeout = key.DayMS
 
 // CTask refuses a plan whose key's task is not live.
-const CTask = "task"
+var CTask = key.CTask
 
 // TaskApproval is the owner's approval of a task's requests on one site: the
 // site, the held request it was given over, its place N among the task's

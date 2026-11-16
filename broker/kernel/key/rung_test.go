@@ -78,7 +78,7 @@ func TestCH3RowsAreTheFloor(t *testing.T) {
 			st := step(Trash)
 			st.Rung = r
 			got := v.Authorize(st, ctx(1, nil))
-			if r >= want && got != nil || r < want && (got == nil || got.Code != RRung) {
+			if r >= want && got != nil || r < want && (got == nil || got.Code() != RRung) {
 				t.Errorf("%q at %v: %v", action, r, got)
 			}
 		}

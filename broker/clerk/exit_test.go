@@ -851,7 +851,7 @@ func TestExitRefusesARecipientClaimOtherThanTheObject(t *testing.T) {
 		t.Fatalf("recipient %q is not the object argument", got)
 	}
 	q.Plan.Steps[0].Args["to"] = "bob"
-	if r := f.x.Do(q, f.view()); r.Outcome != "failed" || r.Detail != kernel.CKey || f.hits.Load() != 0 {
+	if r := f.x.Do(q, f.view()); r.Outcome != "failed" || r.Detail != kernel.CKey.String() || f.hits.Load() != 0 {
 		t.Fatalf("a plan signed for one object reached another recipient: %+v", r)
 	}
 }

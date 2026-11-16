@@ -404,17 +404,20 @@ func ownerTaps(k *kernel.Kernel, standing bool, renewals map[uint64]bool) []stri
 	return taps
 }
 
-func rejectionCode(k *kernel.Kernel, plan string) string {
+func rejectionCode(k *kernel.Kernel, plan string) key.Code {
 	for _, e := range k.Log().Entries() {
 		if e.Type != kernel.TPlanRejected {
 			continue
 		}
-		var b struct{ Plan, Code string }
+		var b struct {
+			Plan string
+			Code key.Code
+		}
 		if json.Unmarshal(e.Body, &b) == nil && b.Plan == plan {
 			return b.Code
 		}
 	}
-	return ""
+	return key.Code{}
 }
 
 // holds reports the hold each unsubscribe step waited behind, read from the log.

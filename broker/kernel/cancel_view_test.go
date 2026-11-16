@@ -55,7 +55,7 @@ func TestACancelledPlanLeavesHeldAndItsViewNamesTheCode(t *testing.T) {
 	if len(s.SpendHeld) != 3 {
 		t.Fatalf("an ended plan's hold left SpendHeld: %v", s.SpendHeld)
 	}
-	for id, code := range map[string]string{"agent/erased": kernel.CErased, "owner": "owner"} {
+	for id, code := range map[string]key.Code{"agent/erased": kernel.CErased, "owner": key.COwner} {
 		v := s.PlanView(id)
 		if v.Status != kernel.SCancelled || v.Cancel != code {
 			t.Errorf("%s: view %+v, want cancelled with code %q", id, v, code)
@@ -68,7 +68,7 @@ func TestACancelledPlanLeavesHeldAndItsViewNamesTheCode(t *testing.T) {
 			t.Errorf("the erased plan's view %s names %q", b, leak)
 		}
 	}
-	if v := s.PlanView("live"); v.Status != kernel.SActive || v.Cancel != "" {
+	if v := s.PlanView("live"); v.Status != kernel.SActive || !v.Cancel.IsZero() {
 		t.Errorf("a live plan's view %+v", v)
 	}
 	r.replays()

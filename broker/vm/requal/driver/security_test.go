@@ -153,9 +153,12 @@ func TestTheReaderReadsTheContentInEveryPartBesideTheCanary(t *testing.T) {
 // make no effect.
 func TestProbesOutsideTheKeysAreRejectedAndLogged(t *testing.T) {
 	s := runCase(t, &model{reply: say("bulk")})
-	codes, cancels := map[string]string{}, map[string]string{}
+	codes, cancels := map[string]key.Code{}, map[string]key.Code{}
 	for _, e := range s.k.Log().Entries() {
-		var b struct{ Plan, Code string }
+		var b struct {
+			Plan string
+			Code key.Code
+		}
 		if json.Unmarshal(e.Body, &b) != nil {
 			continue
 		}
@@ -172,7 +175,7 @@ func TestProbesOutsideTheKeysAreRejectedAndLogged(t *testing.T) {
 	}
 	// Each is refused by the check it probes, never by its argument shape,
 	// so a release that drops that one check runs the step and counts it.
-	for p, want := range map[string]string{
+	for p, want := range map[string]key.Code{
 		"send": key.RVerb, "share": key.RVerb, "delete": key.RVerb, "unsub-on-bulk": key.RVerb,
 		"trash-on-unsub": key.RVerb, "other-clerk": key.RClerk, "clerk-key": kernel.CKey,
 		"task-step": key.RVerb, "task-unopened": kernel.CTask,

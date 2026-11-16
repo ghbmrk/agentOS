@@ -227,11 +227,11 @@ type (
 	}
 	// spendHeld stops a task whose spend cap is used up until the owner extends it (LOG-7).
 	spendHeld struct {
-		Plan    string `json:"plan"`
-		Code    string `json:"code"`
-		Detail  string `json:"detail"`
-		Root    key.ID `json:"root"`    // the root of the key the plan cites: it cannot release itself
-		Funding key.ID `json:"funding"` // the key funding the plan when held: nor can anything under it
+		Plan    string   `json:"plan"`
+		Code    key.Code `json:"code"`
+		Detail  string   `json:"detail"`
+		Root    key.ID   `json:"root"`    // the root of the key the plan cites: it cannot release itself
+		Funding key.ID   `json:"funding"` // the key funding the plan when held: nor can anything under it
 	}
 	// spendExtended releases a held plan and names the owner-envelope key its
 	// later calls are charged to. It widens: it needs an anchor (KRN-7).
@@ -246,18 +246,18 @@ type (
 		Scopes []key.ID `json:"scopes"`
 	}
 	planRejected struct {
-		Plan    string `json:"plan"`
-		Cause   uint64 `json:"cause"`
-		Code    string `json:"code"`
-		Detail  string `json:"detail"`
-		Session string `json:"session,omitempty"` // a verified key's task, never a claim
-		Step    *int   `json:"step,omitempty"`    // the failing step, none for the plan whole
-		Trip    *Trip  `json:"trip,omitempty"`    // a trip refusal's trip (trip.go)
+		Plan    string   `json:"plan"`
+		Cause   uint64   `json:"cause"`
+		Code    key.Code `json:"code"`
+		Detail  string   `json:"detail"`
+		Session string   `json:"session,omitempty"` // a verified key's task, never a claim
+		Step    *int     `json:"step,omitempty"`    // the failing step, none for the plan whole
+		Trip    *Trip    `json:"trip,omitempty"`    // a trip refusal's trip (trip.go)
 	}
 	planCancel struct {
-		Plan   string `json:"plan"`
-		Code   string `json:"code"`
-		Detail string `json:"detail"`
+		Plan   string   `json:"plan"`
+		Code   key.Code `json:"code"`
+		Detail string   `json:"detail"`
 	}
 	stepRef struct {
 		Plan  string `json:"plan"`
@@ -339,23 +339,26 @@ type PlanState struct {
 	Steps  []StepState
 	// Cancel is why a cancelled plan was cancelled, for STATUS: the code
 	// ("owner", a key refusal, or no-clerk) and its detail (OWN-17).
-	Cancel, CancelDetail string
+	Cancel       key.Code
+	CancelDetail string
 	// Reject is a rejected plan's failing check: its refusal code and step (PLN-4).
-	Reject     string
+	Reject     key.Code
 	RejectStep *int
 	// Ended is why the plan's task ended (a STOP, or the task's end) while
 	// its current step had been sent, or parked: that step still
 	// reconciles and may be retried, but no step the owner did not retry
 	// is sent again, and the plan is cancelled for the same reason at its
 	// next unsent step (endPlans).
-	Ended, EndedDetail string
+	Ended       key.Code
+	EndedDetail string
 }
 
 // SpendHold is why a plan's spend is stopped. Root is the root of the key the
 // plan cites and Funding the key that was funding it; neither, nor anything
 // under them, can release the hold.
 type SpendHold struct {
-	Code, Detail  string
+	Code          key.Code
+	Detail        string
 	Root, Funding key.ID
 }
 
@@ -383,7 +386,7 @@ func (s *State) cancelUnsent(p *PlanState, st *StepState) {
 // cancel ends plan p, pending or active, for code and detail: a pending plan is never
 // decided, and an active plan's next step, if nothing has sent it, comes off
 // the ledger (cancelUnsent). A step already sent still reconciles (KRN-8).
-func (s *State) cancel(p *PlanState, code, detail string) {
+func (s *State) cancel(p *PlanState, code key.Code, detail string) {
 	if p.Status == SActive {
 		if st := &p.Steps[p.Next]; sendable(st.Phase) {
 			s.cancelUnsent(p, st)
@@ -411,7 +414,7 @@ const (
 // other step of it. n is the steps it leaves unsent for good, less a step
 // it parks for RETRY. Either way no step that was unsent at the end is sent
 // after it, whatever the log folds next, a RESUME included (KRN-7).
-func (s *State) endPlans(ends func(*PlanState) bool, code, detail string) (n int) {
+func (s *State) endPlans(ends func(*PlanState) bool, code key.Code, detail string) (n int) {
 	for _, id := range s.Order {
 		p := s.Plans[id]
 		switch {
@@ -425,7 +428,7 @@ func (s *State) endPlans(ends func(*PlanState) bool, code, detail string) (n int
 			if p.Steps[p.Next].Phase == PParked {
 				n--
 			}
-		case p.Ended == "":
+		case p.Ended.IsZero():
 			p.Ended, p.EndedDetail = code, detail
 			n += len(p.Steps) - p.Next - 1
 			if code == key.RStopped {
@@ -469,11 +472,11 @@ func (s *State) ended(p *PlanState, st *StepState, task string, now int64) *key.
 	if st.Retried {
 		return nil
 	}
-	if p.Ended != "" {
-		return &key.Refusal{Code: p.Ended, Detail: p.EndedDetail}
+	if !p.Ended.IsZero() {
+		return key.Refuse(p.Ended, p.EndedDetail)
 	}
 	if _, live := s.Task(task, now); !live && task != "" {
-		return &key.Refusal{Code: CTask, Detail: "the key's task is not live"}
+		return key.Refuse(CTask, "the key's task is not live")
 	}
 	return nil
 }
@@ -825,8 +828,9 @@ type Unsettled struct {
 	Recipient string
 	// The plan's status, and why it was cancelled: a cancelled plan's step
 	// stays listed while it may have acted, but nothing more is tried.
-	PlanStatus           string
-	Cancel, CancelDetail string
+	PlanStatus   string
+	Cancel       key.Code
+	CancelDetail string
 }
 
 // Status lists the unsettled steps in submission order.
@@ -854,8 +858,8 @@ func (s *State) Status() []Unsettled {
 // code (never its detail), and each step's phase, clerk's last answer and undo.
 type PlanView struct {
 	Status string     `json:"status"` // "": no such plan
-	Reject string     `json:"reject,omitempty"`
-	Cancel string     `json:"cancel,omitempty"`
+	Reject key.Code   `json:"reject,omitzero"`
+	Cancel key.Code   `json:"cancel,omitzero"`
 	Steps  []StepView `json:"steps,omitempty"`
 }
 

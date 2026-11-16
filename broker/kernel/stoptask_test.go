@@ -177,9 +177,9 @@ func TestARetryOfAParkedStepOutlivesItsTask(t *testing.T) {
 // stopCancel is the cancel Next logged after a STOP before the fix.
 func stopCancel(plan string) any {
 	return struct {
-		Plan   string `json:"plan"`
-		Code   string `json:"code"`
-		Detail string `json:"detail"`
+		Plan   string   `json:"plan"`
+		Code   key.Code `json:"code"`
+		Detail string   `json:"detail"`
 	}{plan, key.RStopped, "stop is in force"}
 }
 

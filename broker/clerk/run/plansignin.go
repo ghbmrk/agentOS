@@ -106,8 +106,11 @@ const (
 	DSignInStopped  = "signin-stopped"   // planremove ended the sign-in
 	DSignedIn       = "signedin"         // this sign-in committed the login
 	DRequalify      = "requalify"        // only a release reopens the route
-	DPlanUnknown    = "plan-unknown"     // the call names no plan this clerk serves; nothing done
 )
+
+// DPlanUnknown refuses a call that names no plan this clerk serves; nothing
+// is done. It is key's code (key.DPlanUnknown), since only key makes one.
+var DPlanUnknown = key.DPlanUnknown
 
 // signInCode is a device code as the provider prints it.
 var signInCode = regexp.MustCompile(`\A[A-Z0-9-]{4,16}\z`)
@@ -429,7 +432,7 @@ type planArgs struct {
 
 // errPlanUnknown is an owner call naming no plan this clerk serves, or
 // none: nothing is done, and no call falls through to another plan.
-var errPlanUnknown = &key.Refusal{Code: DPlanUnknown, Detail: "the call names no plan this clerk serves"}
+var errPlanUnknown = key.Refuse(DPlanUnknown, "the call names no plan this clerk serves")
 
 // ServePlanOwner answers the owner side's calls on ln until ln closes: each
 // plan call to the PlanHost it names, and the API-key calls to apis (nil

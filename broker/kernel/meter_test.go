@@ -43,10 +43,10 @@ func TestMeteredUsageCountsAgainstTaskAndDayCaps(t *testing.T) {
 		t.Fatal(rf)
 	}
 	must(t, r.meter(1, "t1", "api", 60, "provider"))
-	if rf := r.admit(2, "t1", 41); rf == nil || rf.Code != key.RSpendTask {
+	if rf := r.admit(2, "t1", 41); rf == nil || rf.Code() != key.RSpendTask {
 		t.Fatalf("task cap: %v", rf)
 	}
-	if rf := r.admit(2, "t2", 91); rf == nil || rf.Code != key.RSpendDay {
+	if rf := r.admit(2, "t2", 91); rf == nil || rf.Code() != key.RSpendDay {
 		t.Fatalf("day cap: %v", rf)
 	}
 	if rf := r.admit(2, "t2", 90); rf != nil {
@@ -92,7 +92,7 @@ func TestSpendThatOverflowsIsRefused(t *testing.T) {
 }
 
 func spendRefused(rf *key.Refusal) bool {
-	return rf != nil && (rf.Code == key.RSpendTask || rf.Code == key.RSpendDay)
+	return rf != nil && (rf.Code() == key.RSpendTask || rf.Code() == key.RSpendDay)
 }
 
 // Spend never refunds: a negative amount is refused at both the check and the record.
@@ -111,10 +111,10 @@ func TestNegativeAmountsAreRefused(t *testing.T) {
 	if len(r.k.Log().Entries()) != n {
 		t.Fatal("a refused meter must leave no entry")
 	}
-	if rf := r.admit(2, "t1", -1); rf == nil || rf.Code != key.RMalformed {
+	if rf := r.admit(2, "t1", -1); rf == nil || rf.Code() != key.RMalformed {
 		t.Fatalf("a negative admission: %v", rf)
 	}
-	if rf := r.admit(2, "t1", 11); rf == nil || rf.Code != key.RSpendTask {
+	if rf := r.admit(2, "t1", 11); rf == nil || rf.Code() != key.RSpendTask {
 		t.Fatalf("the 90 stays spent: %v", rf)
 	}
 }
@@ -133,14 +133,14 @@ func TestSpendNeedsAnActivePlanOfAnIssuedKey(t *testing.T) {
 	r := newRig(t)
 	k := modelKey(r, "m1", key.LimitSpendDay(100))
 	modelPlan(r, "t1", k)
-	if rf := r.admit(1, "nope", 1); rf == nil || rf.Code != kernel.CPlan {
+	if rf := r.admit(1, "nope", 1); rf == nil || rf.Code() != kernel.CPlan {
 		t.Fatalf("unknown plan: %v", rf)
 	}
 	if r.meter(1, "nope", "api", 1, "clerk") == nil {
 		t.Fatal("an unknown plan must not be metered")
 	}
 	must(t, r.k.Cancel(2, "t1"))
-	if rf := r.admit(3, "t1", 1); rf == nil || rf.Code != kernel.CPlan {
+	if rf := r.admit(3, "t1", 1); rf == nil || rf.Code() != kernel.CPlan {
 		t.Fatalf("an ended plan spends nothing: %v", rf)
 	}
 	foreign := key.Issue(gen(9).pass, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "x"})
@@ -151,7 +151,7 @@ func TestSpendNeedsAnActivePlanOfAnIssuedKey(t *testing.T) {
 	}
 	modelPlan(r, "t3", k)
 	must(t, r.k.Stop(6)) // the STOP cancels the plan in its fold (KRN-7)
-	if rf := r.admit(7, "t3", 1); rf == nil || rf.Code != kernel.CPlan {
+	if rf := r.admit(7, "t3", 1); rf == nil || rf.Code() != kernel.CPlan {
 		t.Fatalf("stop: %v", rf)
 	}
 }
@@ -161,7 +161,7 @@ func TestMeteredUsageSurvivesReplay(t *testing.T) {
 	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(100)))
 	must(t, r.meter(1, "t1", "api", 70, "provider"))
 	r.boot(2)
-	if rf := r.admit(3, "t1", 31); rf == nil || rf.Code != key.RSpendTask {
+	if rf := r.admit(3, "t1", 31); rf == nil || rf.Code() != key.RSpendTask {
 		t.Fatalf("replayed ledger lost the usage: %v", rf)
 	}
 }
@@ -182,10 +182,10 @@ func TestSpendFollowsTheFundingKeysCaveatWhateverItsClerk(t *testing.T) {
 	if rf := r.admit(1, "capped", 100); rf != nil {
 		t.Fatalf("a mail key's spend cap funds a model call: %v", rf)
 	}
-	if rf := r.admit(1, "capped", 101); rf == nil || rf.Code != key.RSpendTask {
+	if rf := r.admit(1, "capped", 101); rf == nil || rf.Code() != key.RSpendTask {
 		t.Fatalf("its cap holds: %v", rf)
 	}
-	if rf := r.admit(1, "bare", 1); rf == nil || rf.Code != key.RMalformed {
+	if rf := r.admit(1, "bare", 1); rf == nil || rf.Code() != key.RMalformed {
 		t.Fatalf("a key with no spend cap funds nothing: %v", rf)
 	}
 }
@@ -226,10 +226,10 @@ func TestAdmissionsReserveTheirWorstCase(t *testing.T) {
 	if rf != nil {
 		t.Fatal(rf)
 	}
-	if _, rf := r.k.AdmitSpend(1, "t1", 41); rf == nil || rf.Code != kernel.CInFlight {
+	if _, rf := r.k.AdmitSpend(1, "t1", 41); rf == nil || rf.Code() != kernel.CInFlight {
 		t.Fatalf("a second call shared the first one's budget: %v", rf)
 	}
-	if _, rf := r.k.AdmitSpend(1, "t1", 101); rf == nil || rf.Code != key.RSpendTask {
+	if _, rf := r.k.AdmitSpend(1, "t1", 101); rf == nil || rf.Code() != key.RSpendTask {
 		t.Fatalf("a call that cannot fit once the first settles: %v", rf)
 	}
 	modelPlan(r, "d1", day)
@@ -237,7 +237,7 @@ func TestAdmissionsReserveTheirWorstCase(t *testing.T) {
 	if _, rf := r.k.AdmitSpend(1, "d1", 60); rf != nil {
 		t.Fatal(rf)
 	}
-	if _, rf := r.k.AdmitSpend(1, "d2", 41); rf == nil || rf.Code != kernel.CInFlight {
+	if _, rf := r.k.AdmitSpend(1, "d2", 41); rf == nil || rf.Code() != kernel.CInFlight {
 		t.Fatalf("another plan's call shared the day's budget: %v", rf)
 	}
 	must(t, r.k.Meter(2, a, "api", 20, "provider"))
@@ -256,7 +256,7 @@ func TestAdmissionsReserveTheirWorstCase(t *testing.T) {
 		t.Fatalf("one plan's admission settled under another: %v", err)
 	}
 	r.boot(4)
-	if _, rf := r.k.AdmitSpend(4, "t1", 1); rf == nil || rf.Code != kernel.CInFlight {
+	if _, rf := r.k.AdmitSpend(4, "t1", 1); rf == nil || rf.Code() != kernel.CInFlight {
 		t.Fatalf("an unsettled admission was lost at restart: %v", rf)
 	}
 	must(t, r.k.Meter(5, b, "api", 0, "clerk"))
@@ -281,7 +281,7 @@ func TestASettlementChargesTheKeyItWasAdmittedUnder(t *testing.T) {
 	}
 	must(t, r.meter(1, "t1", "api", 60, "provider"))
 	rf = r.admit(2, "t1", 50)
-	if rf == nil || rf.Code != key.RSpendTask {
+	if rf == nil || rf.Code() != key.RSpendTask {
 		t.Fatalf("the cap is used up: %v", rf)
 	}
 	must(t, r.k.Hold(2, "t1", rf))
@@ -308,7 +308,7 @@ func TestARefusalNamesTheCapSettledUsageExhausts(t *testing.T) {
 	if _, rf := r.k.AdmitSpend(1, "t1", 40); rf != nil {
 		t.Fatal(rf)
 	}
-	if rf := r.admit(1, "t1", 70); rf == nil || rf.Code != key.RSpendDay {
+	if rf := r.admit(1, "t1", 70); rf == nil || rf.Code() != key.RSpendDay {
 		t.Fatalf("refused %v, want the day cap", rf)
 	}
 }

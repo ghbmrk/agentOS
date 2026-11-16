@@ -13,11 +13,11 @@ import (
 )
 
 // admits reports the refusal code Admit gives p at now, "" when it admits it.
-func admits(r *rig, p kernel.Plan, now int64) string {
+func admits(r *rig, p kernel.Plan, now int64) key.Code {
 	if _, _, rf := kernel.Admit(r.k.State(), p, now); rf != nil {
-		return rf.Code
+		return rf.Code()
 	}
-	return ""
+	return key.Code{}
 }
 
 func trashRoot(r *rig, serial string, by pair) key.Key {
@@ -39,7 +39,7 @@ func TestGrantWaitsItsHoldAndARevokeCancelsIt(t *testing.T) {
 	if got := r.k.State().Pending(1); len(got) != 2 {
 		t.Fatalf("pending grants for the owner's notice: %d", len(got))
 	}
-	if c := admits(r, p, kernel.GrantHold); c != "" {
+	if c := admits(r, p, kernel.GrantHold); !c.IsZero() {
 		t.Fatalf("a plan once the hold has run: %q", c)
 	}
 	other := trashRoot(r, "r3", r.owner)
@@ -133,7 +133,7 @@ func TestBareRootIsUsedOnlyByThePasskey(t *testing.T) {
 	if c := admits(r, kernel.SignPlan(kernel.Plan{ID: "p1", Key: bare, Steps: steps}, r.holder.priv), 0); c != kernel.CKey {
 		t.Fatalf("the home clerk under the bare root: %q", c)
 	}
-	if c := admits(r, kernel.SignPlan(kernel.Plan{ID: "p1", Key: bare, Steps: steps}, r.owner.priv), 0); c != "" {
+	if c := admits(r, kernel.SignPlan(kernel.Plan{ID: "p1", Key: bare, Steps: steps}, r.owner.priv), 0); !c.IsZero() {
 		t.Fatalf("the passkey's one-off under the bare root: %q", c)
 	}
 	forged := key.Extend(bare, r.holder.priv, key.Link{Caveats: []key.Caveat{key.LimitExpires(1 << 40), key.LimitSpendDay(1)}, Holder: r.holder.pub})
@@ -162,11 +162,11 @@ func TestAnAnchorEnrollsAPhoneAndARevokeCutsItOff(t *testing.T) {
 	p := r.sign(kernel.Plan{ID: "p1", Key: ck, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})
 	oneOff := kernel.SignPlan(kernel.Plan{ID: "p2", Key: root, Steps: p.Steps}, phone.priv)
 	at := kernel.GrantHold
-	if c, d := admits(r, p, at), admits(r, oneOff, at); c != "" || d != "" {
+	if c, d := admits(r, p, at), admits(r, oneOff, at); !c.IsZero() || !d.IsZero() {
 		t.Fatalf("the enrolled phone's grant %q and one-off %q", c, d)
 	}
 	must(t, r.k.Unenroll(at, key.Unenroll(r.owner.pass, phone.pk))) // the phone is lost
-	if c := admits(r, p, at); c != "" {
+	if c := admits(r, p, at); !c.IsZero() {
 		t.Fatalf("a key under the lost phone's earlier grant runs until it lapses: %q", c)
 	}
 	if c := admits(r, oneOff, at); c != kernel.CKey {
@@ -216,7 +216,7 @@ func TestClerkKeepsTheGrantHoldWhenTheKernelClockRunsAhead(t *testing.T) {
 	if len(r.mail.Effects()) != 0 || r.status("p1") != kernel.SFailed {
 		t.Fatalf("status %s, %d effects: the clerk let a grant go live on the kernel's clock", r.status("p1"), len(r.mail.Effects()))
 	}
-	if d := r.k.State().Plans["p1"].Steps[0].Detail; d != kernel.CGrantHeld {
+	if d := r.k.State().Plans["p1"].Steps[0].Detail; d != kernel.CGrantHeld.String() {
 		t.Fatalf("detail %q, want %q", d, kernel.CGrantHeld)
 	}
 }
@@ -345,7 +345,7 @@ func TestAPhoneRenewsTheClerkKeyWithinOneBudget(t *testing.T) {
 	if rf := r.admit(at, "p2", 5); rf != nil {
 		t.Fatalf("within the day cap: %v", rf)
 	}
-	if rf := r.admit(at, "p2", 6); rf == nil || rf.Code != key.RSpendDay {
+	if rf := r.admit(at, "p2", 6); rf == nil || rf.Code() != key.RSpendDay {
 		t.Fatalf("the renewal's cap stacked on the old key's: %v", rf)
 	}
 }
@@ -365,7 +365,7 @@ func TestUnenrollCancelsThePasskeysPendingGrants(t *testing.T) {
 		t.Fatalf("a cut-off passkey's grants still pending: %d", len(got))
 	}
 	p := r.sign(kernel.Plan{ID: "p1", Key: ck, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})
-	if c := admits(r, p, 3*kernel.GrantHold); c == "" {
+	if c := admits(r, p, 3*kernel.GrantHold); c.IsZero() {
 		t.Fatal("a cut-off passkey's pending grant came live")
 	}
 }

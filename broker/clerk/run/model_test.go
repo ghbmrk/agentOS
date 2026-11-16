@@ -96,7 +96,7 @@ func TestModelClerkMetersThroughTheKernelSocket(t *testing.T) {
 
 	_, err = m.Call("t", "api", "hi", 1000)
 	var rf *key.Refusal
-	if !errors.As(err, &rf) || rf.Code != key.RSpendTask {
+	if !errors.As(err, &rf) || rf.Code() != key.RSpendTask {
 		t.Fatalf("a call past the cap: %v, want refusal %s", err, key.RSpendTask)
 	}
 	if pr.calls != 1 {
@@ -118,7 +118,7 @@ func TestModelClerkWithoutTheKernelCallsNothing(t *testing.T) {
 		Ledger: proc.Meter{Conn: proc.Conn{Socket: filepath.Join(shortDir(t), "none.sock"), UID: os.Getuid()}}}
 	_, err := c.Call(0, "t", "api", "hi", 10)
 	var rf *key.Refusal
-	if !errors.As(err, &rf) || rf.Code != kernel.CBroken || pr.calls != 0 {
+	if !errors.As(err, &rf) || rf.Code() != kernel.CBroken || pr.calls != 0 {
 		t.Fatalf("no kernel: %v with %d provider calls, want refusal %s and none", err, pr.calls, kernel.CBroken)
 	}
 }

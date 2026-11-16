@@ -86,7 +86,7 @@ func TestARevokedES256GrantReencodedStaysRefused(t *testing.T) {
 		}
 		p := kernel.Plan{ID: "p-" + name, Key: replay, Steps: steps}
 		p.Sig = phone.Sign(kernel.PlanMsg(p))
-		if code := admits(r, p, at); code == "" {
+		if code := admits(r, p, at); code.IsZero() {
 			t.Errorf("%s: a plan under the re-encoded grant was admitted", name)
 		}
 	}
@@ -95,7 +95,7 @@ func TestARevokedES256GrantReencodedStaysRefused(t *testing.T) {
 	must(t, r.issue(2, live))
 	p := kernel.Plan{ID: "p-live", Key: live, Steps: steps}
 	p.Sig = phone.Sign(kernel.PlanMsg(p))
-	if code := admits(r, p, at); code != "" {
+	if code := admits(r, p, at); !code.IsZero() {
 		t.Fatalf("a live ES256 grant's plan: %q", code)
 	}
 	if _, ok := r.k.State().Granted(root.Tip()); !ok {
