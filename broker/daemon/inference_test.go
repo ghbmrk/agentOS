@@ -591,10 +591,13 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 }
 
 // configured reports a dial address that comes from configuration: a
-// parameter or local variable of this file, or a field of one (cfg.Socket).
-// A constant, a literal, an expression, a package-qualified name, or an
-// identifier this file does not declare (a package-level const or var in
-// another file) is not (L3 S1 on #90).
+// parameter or receiver of a function in this file, or a field of one
+// (cfg.Socket, c.path), that no statement in this file writes. A local
+// is not, since `sock := "/run/proxy.sock"` binds it to a literal
+// (#5775), unless it names a socket in a directory the function made
+// (inTempDir); nor is a named result, a constant, a literal, an
+// expression, a package-level variable, or a name this file does not
+// declare (L3 S1 on #90).
 func configured(e ast.Expr, f *ast.File) bool {
 	for {
 		se, ok := e.(*ast.SelectorExpr)
@@ -607,20 +610,133 @@ func configured(e ast.Expr, f *ast.File) bool {
 	if !ok || id.Obj == nil || id.Obj.Kind != ast.Var {
 		return false
 	}
-	// A package-level variable can be set at link time or by any file;
-	// only function parameters and locals count.
-	for _, d := range f.Decls {
-		if g, ok := d.(*ast.GenDecl); ok && g.Tok == token.VAR {
-			for _, sp := range g.Specs {
-				for _, n := range sp.(*ast.ValueSpec).Names {
-					if n.Obj == id.Obj {
-						return false
-					}
+	return (param(id.Obj, f) || inTempDir(id.Obj, f)) && !written(id.Obj, f)
+}
+
+// param reports that obj is a parameter or receiver of a function in f.
+func param(obj *ast.Object, f *ast.File) bool {
+	is := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		var fls []*ast.FieldList
+		switch n := n.(type) {
+		case *ast.FuncDecl:
+			fls = []*ast.FieldList{n.Recv, n.Type.Params}
+		case *ast.FuncLit:
+			fls = []*ast.FieldList{n.Type.Params}
+		}
+		for _, fl := range fls {
+			if fl == nil {
+				continue
+			}
+			for _, fd := range fl.List {
+				for _, nm := range fd.Names {
+					is = is || nm.Obj == obj
 				}
 			}
 		}
+		return true
+	})
+	return is
+}
+
+// inTempDir reports a local bound by `sock := filepath.Join(dir, "s.sock")`
+// to a literal file name in dir (no "/", not "." or ".."), itself bound by `dir, err := os.MkdirTemp(...)`:
+// a socket in a fresh directory this process made, which nothing listened
+// on before it (agentos-infer's llama-server socket). Neither may be
+// written again (written).
+func inTempDir(obj *ast.Object, f *ast.File) bool {
+	call, ok := definedBy(obj, f, "path/filepath.Join")
+	if !ok || len(call.Args) != 2 {
+		return false
 	}
-	return true
+	dir, ok := call.Args[0].(*ast.Ident)
+	name, lit := call.Args[1].(*ast.BasicLit)
+	if !ok || !lit || dir.Obj == nil || written(dir.Obj, f) {
+		return false
+	}
+	if n, err := strconv.Unquote(name.Value); err != nil || n == "" || n == "." || n == ".." || strings.Contains(n, "/") {
+		return false
+	}
+	_, ok = definedBy(dir.Obj, f, "os.MkdirTemp")
+	return ok
+}
+
+// definedBy returns the call to fn (an import path and name) that obj's
+// := statement binds it to, as the first name of the statement.
+func definedBy(obj *ast.Object, f *ast.File, fn string) (*ast.CallExpr, bool) {
+	as, ok := obj.Decl.(*ast.AssignStmt)
+	if !ok || as.Tok != token.DEFINE || len(as.Rhs) != 1 || len(as.Lhs) == 0 {
+		return nil, false
+	}
+	if id, ok := as.Lhs[0].(*ast.Ident); !ok || id.Obj != obj {
+		return nil, false
+	}
+	call, ok := as.Rhs[0].(*ast.CallExpr)
+	if !ok {
+		return nil, false
+	}
+	se, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return nil, false
+	}
+	x, ok := se.X.(*ast.Ident)
+	if !ok || x.Obj != nil {
+		return nil, false
+	}
+	for _, im := range f.Imports {
+		p, _ := strconv.Unquote(im.Path.Value)
+		n := p[strings.LastIndex(p, "/")+1:]
+		if im.Name != nil {
+			n = im.Name.Name
+		}
+		if n == x.Name && p+"."+se.Sel.Name == fn {
+			return call, true
+		}
+	}
+	return nil, false
+}
+
+// written reports a statement of f, other than the := that declares obj,
+// that writes obj or a part of it, or takes its address.
+func written(obj *ast.Object, f *ast.File) bool {
+	w := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			for _, l := range n.Lhs {
+				w = w || n != obj.Decl && writes(l, obj)
+			}
+		case *ast.RangeStmt:
+			w = w || n.Tok == token.ASSIGN && (writes(n.Key, obj) || writes(n.Value, obj))
+		case *ast.IncDecStmt:
+			w = w || writes(n.X, obj)
+		case *ast.UnaryExpr:
+			w = w || n.Op == token.AND && writes(n.X, obj)
+		}
+		return true
+	})
+	return w
+}
+
+// writes reports that e, as an assignment's target or an operand of &,
+// is obj or a part of it (obj.f, obj[i], *obj).
+func writes(e ast.Expr, obj *ast.Object) bool {
+	for {
+		switch x := e.(type) {
+		case *ast.SelectorExpr:
+			e = x.X
+		case *ast.IndexExpr:
+			e = x.X
+		case *ast.StarExpr:
+			e = x.X
+		case *ast.ParenExpr:
+			e = x.X
+		case *ast.Ident:
+			return x.Obj == obj
+		default:
+			return false
+		}
+	}
 }
 
 // setsChecked reports that a client literal sets field key to a value the
@@ -714,6 +830,9 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		{"mail/mailsock", src(`"net"`, `func g() { (&net.Dialer{}).DialContext(nil, "tcp", "imap.example.com:993") }`)},
 		{"mail/mailsock", src(`"net"`, `func g() { (&net.Dialer{}).DialContext(nil, "unix", "/run/agentos-egress/mail.sock") }`)},
 		{"mail/mailsock", src(`"net"`, `var c, _ = net.Dial("tcp", "smtp.example.com:465")`)},
+		// A local bound to a literal is not configuration, whichever dial
+		// names it (#5775).
+		{"kernel/proc", src(`"net"`, `func g() { sock := "/run/proxy.sock"; net.DialUnix("unixgram", nil, &net.UnixAddr{Name: sock, Net: "unixgram"}) }`)},
 	} {
 		path := filepath.Join(t.TempDir(), "p.go")
 		if err := os.WriteFile(path, []byte(c.src), 0o600); err != nil {
@@ -723,12 +842,46 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 			t.Errorf("missed in %s:\n%s", c.rel, c.src)
 		}
 	}
-	ok := src(`"net"; "net/http"; "net/http/httputil"`, `type config struct{ Socket string }
+	// A local, a named result, or a parameter written here is not
+	// configuration, nor is a name built in a directory this function did
+	// not make, and each is reported for its address (#5775).
+	for _, c := range []string{
+		src(`"net"`, `func g() { sock := "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"`, `func g() { sock := "/run/proxy.sock"; net.Dial("unix", sock) }`),
+		src(`"net"`, `func g() { var sock string; sock = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"`, `func g() (sock string) { sock = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", sock); return }`),
+		src(`"net"`, `func g(sock string) { sock = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"`, `type cfg struct{ s string }; func g(c cfg) { c.s = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", c.s) }`),
+		src(`"net"`, `func g(sock string) { for sock = range map[string]int{"/run/proxy.sock": 0} {}; (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"`, `func g(sock string) { p := &sock; *p = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"`, `func g(n int) { n++; (&net.Dialer{}).Dial("unix", n) }`),
+		src(`"net"; "path/filepath"`, `func g(dir string) { sock := filepath.Join(dir, "s.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); dir = "/run"; sock := filepath.Join(dir, "proxy.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); sock := filepath.Join(dir, "s.sock"); sock = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); sock := filepath.Join(dir, "..", "proxy.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); sock := filepath.Join(dir, "../../run/proxy.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); sock := filepath.Join(dir, ".."); (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"; "path/filepath"`, `func g(s string) { dir, _ := os.MkdirTemp("", "x"); sock := filepath.Join(dir, s); (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); sock := filepath.Join(dir, "s.sock"); p := &sock; *p = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); _, sock := filepath.Split(dir); (&net.Dialer{}).Dial("unix", sock) }`),
+	} {
+		path := filepath.Join(t.TempDir(), "p.go")
+		if err := os.WriteFile(path, []byte(c), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(sourceUse(t, path, "p.go", "modelroute"), "\n"); !strings.Contains(got, "not taken from configuration") {
+			t.Errorf("an unconfigured address passed: %q\n%s", got, c)
+		}
+	}
+	ok := src(`"net"; "net/http"; "net/http/httputil"; "os"; "path/filepath"`, `type config struct{ Socket string }
 func g(sock string, cfg config) {
 	_, _ = (&net.Dialer{}).Dial("unix", cfg.Socket)
 	tr := &http.Transport{DialContext: func() { (&net.Dialer{}).DialContext(nil, "unix", sock) }}
 	_ = &httputil.ReverseProxy{Transport: tr}
 	_ = &http.Client{Transport: &http.Transport{DialContext: func() {}}}
+	dir, _ := os.MkdirTemp("", "x")
+	s := filepath.Join(dir, "s.sock")
+	_ = &http.Client{Transport: &http.Transport{DialContext: func() { (&net.Dialer{}).DialContext(nil, "unix", s) }}}
 }`)
 	path := filepath.Join(t.TempDir(), "ok.go")
 	if err := os.WriteFile(path, []byte(ok), 0o600); err != nil {
