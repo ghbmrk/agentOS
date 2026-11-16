@@ -62,6 +62,20 @@ RELEASE = re.compile(r"go1\.\d+\Z")
 SKIP_TOP = ("broker/vendor/", "broker/third_party/")
 
 TAGS = re.compile(r"""(?<![\w-])-tags(?:=|\s+)(?:"([^"]*)"|'([^']*)'|([^\s"']+))""")
+# A shell word that may stand before a command: an env assignment or a wrapper (`jail` is
+# image/camdecode.sh's chroot wrapper). An unknown wrapper fails closed: its tags are not counted.
+ASSIGN = r"""[A-Za-z_]\w*=(?:"[^"]*"|'[^']*'|[^\s"';&|()`]*)"""
+WRAPPER = r"(?:env|exec|command|time|nice|nohup|sudo|jail|export|if|then|do|else|elif|while|until|!|\{)"
+# A command segment that builds: optional YAML `- ` / `run:`, assignments and wrappers, then a go
+# verb, or a GOFLAGS assignment.
+GO_CMD = re.compile(rf"""\s*(?:-\s+)?(?:run:\s*)?(?:(?:{ASSIGN}|{WRAPPER})\s+)*"""
+                    rf"""(?:go\s+(?:build|test|vet|run|install|list|generate)\b|GOFLAGS=)""")
+# A segment that only assigns variables, whose `-tags` values a later build may expand.
+ASSIGN_ONLY = re.compile(rf"""\s*(?:export\s+)?((?:{ASSIGN}\s*)+)\Z""")
+ASSIGN_ONE = re.compile(rf"""([A-Za-z_]\w*)=("[^"]*"|'[^']*'|[^\s"';&|()`]*)""")
+# Unquoted shell separators; a quoted string is skipped whole.
+SEP = re.compile(r"""("(?:[^"\\]|\\.)*"|'[^']*')|(&&|\|\||\$\(|[;|()`])""")
+VAR = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
 RACE = re.compile(r"(?<![\w-])-race\b")
 GOENV = re.compile(r"""\b(GOOS|GOARCH)\s*[=:]\s*["']?([A-Za-z0-9_]+)""")
 CGO_ON = re.compile(r"""\bCGO_ENABLED\s*[=:]\s*["']?1\b""")
@@ -85,13 +99,26 @@ def build_tags(root):
             text = f.read_bytes().decode("utf-8")
         except UnicodeDecodeError:
             continue  # a binary under image/ names no build
-        for line in text.split("\n"):
+        held = {}  # variable -> value holding `-tags`, for a later build's `$NAME`
+        for line in _logical_lines(text):
             if line.lstrip().startswith("#"):
                 continue
-            for m in TAGS.finditer(line):
-                for t in re.split(r"[,\s]+", next(g for g in m.groups() if g is not None)):
-                    if TAG.match(t):
-                        tags.add(t)
+            # `-tags` counts only inside a command segment that runs go or sets GOFLAGS: a stale
+            # string in an echo, a message or a doc is not a build.
+            for seg in _segments(line):
+                a = ASSIGN_ONLY.match(seg)
+                if a and not GO_CMD.match(seg):
+                    for name, val in ASSIGN_ONE.findall(a.group(1)):
+                        if TAGS.search(val.strip("\"'")):
+                            held[name] = val.strip("\"'")
+                    continue
+                if not GO_CMD.match(seg):
+                    continue
+                seg = VAR.sub(lambda v: held.get(v.group(1) or v.group(2), v.group(0)), seg)
+                for m in TAGS.finditer(seg):
+                    for t in re.split(r"[,\s]+", next(g for g in m.groups() if g is not None)):
+                        if TAG.match(t):
+                            tags.add(t)
             if RACE.search(line):
                 tags.add("race")
             if CGO_ON.search(line):
@@ -104,6 +131,34 @@ def build_tags(root):
     if "linux" in tags:
         tags.add("unix")
     return tags
+
+
+def _logical_lines(text):
+    """Physical lines with backslash continuations joined; a comment line is never continued."""
+    out, cur = [], ""
+    for line in text.split("\n"):
+        if not cur and line.lstrip().startswith("#"):
+            out.append(line)
+            continue
+        if line.endswith("\\"):
+            cur += line[:-1] + " "
+            continue
+        out.append(cur + line)
+        cur = ""
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _segments(line):
+    """The command segments of a shell line, split at unquoted separators."""
+    segs, start = [], 0
+    for m in SEP.finditer(line):
+        if m.group(2):
+            segs.append(line[start:m.start()])
+            start = m.end()
+    segs.append(line[start:])
+    return segs
 
 
 class Unreadable(Exception):

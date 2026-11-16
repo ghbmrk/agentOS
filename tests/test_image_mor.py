@@ -14,7 +14,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from test_image import ENTRY, H, MK, ROOT, check, finish, ini, settings  # noqa: E402
+from test_image import ENTRY, H, MK, ROOT, check, exec_args, finish, ini, settings  # noqa: E402
 
 UNITS = MK / "mkosi.extra/usr/lib/systemd/system"
 UNIT = UNITS / "agentos-mor.service"
@@ -83,6 +83,22 @@ class MorUnitTest(unittest.TestCase):
                 if "DefaultDependencies" in settings(f):
                     found.add(d.name[:-2])
         self.assertEqual(found, set(NO_DEFAULT_DEPS))
+
+    def test_the_staged_page_authority_goes_at_stop(self):
+        # MOR-setup-hold (#5836): before enrollment the page authority's sealed pair sits in
+        # /run/agentos-setup, a holdDirs entry, so the clear refused on every orderly shutdown. The
+        # staging unit's stop removes exactly the pair and certificate its start made; it keeps default
+        # dependencies (test_every_other_unit_stops_first), so it stops before this unit's clear. A
+        # manual stop is refused, so a card printed this boot keeps its fingerprint until shutdown.
+        unit = UNITS / "agentos-keeper-pageca.service"
+        p, s = exec_args(unit), settings(unit)
+        made = [p[p.index("-page-ca-file") + 1], p[p.index("-page-ca-cert") + 1]]
+        self.assertEqual(s["ExecStopPost"], ["/usr/bin/rm -f " + " ".join(made)])
+        self.assertEqual(made[0].rsplit("/", 1)[0], check.MOR_LISTED[0])
+        self.assertEqual(s["RefuseManualStop"], ["yes"])
+        self.assertNotIn("DefaultDependencies", s)
+        for key in ("ExecStop", "ExecStopPre"):
+            self.assertNotIn(key, s)
 
     def test_build_installs_the_program(self):
         build = (ROOT / "image/build.sh").read_text()

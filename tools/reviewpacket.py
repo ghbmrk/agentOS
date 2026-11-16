@@ -58,15 +58,15 @@ def ensure_commits(root, shas, pr):
 
 
 def find_brief(root, head, pkg):
-    """Return (path, text) of briefs/<pkg>.md at head, else the working tree, else None."""
+    """Return (path, text, source) of briefs/<pkg>.md at head, else the working tree (labelled), else None."""
     if not pkg:
         return None
     rel = f"briefs/{pkg}.md"
     shown = sh(root, "git", "show", f"{head}:{rel}", check=False)
     if shown.returncode == 0:
-        return rel, shown.stdout
+        return rel, shown.stdout, f"at head {head[:10]}"
     f = pathlib.Path(root) / rel
-    return (rel, f.read_text()) if f.is_file() else None
+    return (rel, f.read_text(), "the checkout's working tree, not at head") if f.is_file() else None
 
 
 def cited_ids(brief_text, diff, body, defined):
@@ -117,7 +117,7 @@ def build(root, base, head, label, title, body, pkg):
         "",
         "## Brief",
         "",
-        f"`{brief[0]}`\n\n{brief[1].rstrip()}" if brief else f"no brief found for `{pkg}` (briefs/{pkg}.md)",
+        f"`{brief[0]}` (from {brief[2]})\n\n{brief[1].rstrip()}" if brief else f"no brief found for `{pkg}` (briefs/{pkg}.md)",
         "",
         "## Cited SPEC requirements",
         "",
