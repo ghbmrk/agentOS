@@ -1477,8 +1477,9 @@ def evaluated_clauses(switches, blocks):
     body or a later non-default clause's body ran, or the default's, or the switch ran more often than
     its bodies were entered (some run matched none; the block holding the switch's start counts its
     runs). A select evaluates every clause's operands on entry, so all are when it ran. A body entered
-    by `fallthrough` counts as its expression evaluated, and as a match: the first runs a mutant that
-    may then live (a false fail), the second may miss a run that matched none (MUT-case-cover-1)."""
+    by `fallthrough` is not a match, and the counts cannot tell it from one, so in a switch holding a
+    `fallthrough` every non-default clause counts as evaluated once the switch ran (L3 on #5902): that
+    runs a mutant which may then live (a false fail), never skips one (MUT-case-cover-1)."""
     out = []
     for sw in switches:
         bs = blocks.get(sw["file"], {})
@@ -1491,7 +1492,7 @@ def evaluated_clauses(switches, blocks):
         unmatched = runs > sum(entered) or any(n for c, n in zip(sw["clauses"], entered) if c["default"])
         for i, c in enumerate(sw["clauses"]):
             later = any(n for d, n in zip(sw["clauses"][i:], entered[i:]) if not d["default"])
-            if not c["default"] and (runs > 0 or any(entered) if sw["select"] else unmatched or later):
+            if not c["default"] and (runs > 0 or any(entered) if sw["select"] or sw["fallthrough"] else unmatched or later):
                 out.append((sw["file"], (c["line"], c["col"]), (c["colon_line"], c["colon_col"] + 1)))
     return out
 

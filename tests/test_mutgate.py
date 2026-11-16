@@ -2994,12 +2994,19 @@ class CaseClauseCover(unittest.TestCase):
     # The three case expressions of G (lines 5, 7, 9) and S's one (line 16), each to just past its colon.
     FIRST, SECOND, THIRD, COMM = ((5, 2), (5, 22)), ((7, 2), (7, 13)), ((9, 2), (9, 14)), ((16, 2), (16, 16))
 
-    def package(self, d):
+    # L3's repro on #5902: F(9) matches nothing, but the fallthrough's entry into `x == 2`'s body makes
+    # the bodies' entries (1, 1, 0) add up to the switch's two runs, as if every run had matched.
+    FALL_SRC = ("package p\n\nfunc F(x int) int {\n\tr := 0\n\tswitch {\n\tcase x == 1:\n\t\tr += 1\n\t\tfallthrough\n"
+                "\tcase x == 2:\n\t\tr += 2\n\tcase x == 3:\n\t\tr += 3\n\t}\n\treturn r\n}\n")
+    FALL_TEST = ("package p\n\nimport \"testing\"\n\nfunc TestFall(t *testing.T) {\n\tif F(1) != 3 {\n\t\tt.Fatal()\n\t}\n"
+                 "\tF(9)\n}\n")
+
+    def package(self, d, src=None, test=None):
         broker = pathlib.Path(d) / "broker"
         (broker / "p").mkdir(parents=True)
         (broker / "go.mod").write_text(GO_MOD)
-        (broker / "p" / "a.go").write_text(self.SRC)
-        (broker / "p" / "a_test.go").write_text(self.TEST)
+        (broker / "p" / "a.go").write_text(src or self.SRC)
+        (broker / "p" / "a_test.go").write_text(test or self.TEST)
         return broker
 
     def test_the_lister_names_each_clause(self):
@@ -3012,10 +3019,10 @@ class CaseClauseCover(unittest.TestCase):
                                                  "end_line": 10, "end_col": 2, "default": False})
         self.assertTrue(got[1]["clauses"][1]["default"])
 
-    def blocks(self, *tests):
+    def blocks(self, *tests, src=None, test=None):
         """with_cases' added blocks for a.go, after a `-covermode=count` run of tests."""
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}):
-            broker, profile = self.package(d), pathlib.Path(d) / "c.out"
+            broker, profile = self.package(d, src, test), pathlib.Path(d) / "c.out"
             subprocess.run(["go", "test", "-count=1", "-covermode=count", f"-coverprofile={profile}", "-run",
                             "^(" + "|".join(tests) + ")$", "."], cwd=broker / "p", check=True, capture_output=True)
             text = profile.read_text()
@@ -3031,12 +3038,29 @@ class CaseClauseCover(unittest.TestCase):
         # No body ran, yet the switch ran more often than its bodies were entered.
         self.assertEqual(self.blocks("TestNone"), {self.FIRST, self.SECOND, self.THIRD})
 
+    def test_a_switch_holding_a_fallthrough_evaluates_every_clause_once_it_ran(self):
+        # Without the fallthrough rule `x == 3` (line 11) read NOT COVERED, and its negation lives.
+        self.assertEqual(self.blocks("TestFall", src=self.FALL_SRC, test=self.FALL_TEST),
+                         {((6, 2), (6, 14)), ((9, 2), (9, 14)), ((11, 2), (11, 14))})
+
+    def test_the_lister_marks_a_switch_that_falls_through(self):
+        with tempfile.TemporaryDirectory() as d:
+            broker = self.package(d, self.FALL_SRC)
+            lister = mutgate.build_lister(d)
+            fall = json.loads(subprocess.run([str(lister), "-cases", str(broker / "p" / "a.go")],
+                                             capture_output=True, text=True, check=True).stdout)
+            (broker / "p" / "a.go").write_text(self.SRC)
+            plain = json.loads(subprocess.run([str(lister), "-cases", str(broker / "p" / "a.go")],
+                                              capture_output=True, text=True, check=True).stdout)
+        self.assertEqual([sw["fallthrough"] for sw in fall], [True])
+        self.assertEqual([sw["fallthrough"] for sw in plain], [False, False])
+
     def test_a_select_evaluates_every_clause_on_entry(self):
         self.assertEqual(self.blocks("TestSelect"), {self.COMM})
 
     def test_clause_rules(self):
-        def sw(*clauses, select=False):
-            return {"file": "a.go", "line": 1, "col": 2, "select": select,
+        def sw(*clauses, select=False, falls=False):
+            return {"file": "a.go", "line": 1, "col": 2, "select": select, "fallthrough": falls,
                     "clauses": [{"line": 2 * i + 2, "col": 2, "colon_line": 2 * i + 2, "colon_col": 9,
                                  "end_line": 2 * i + 4, "end_col": 2, "default": dflt} for i, dflt in enumerate(clauses)]}
         header = (1, 1, 2, 2)
@@ -3051,6 +3075,8 @@ class CaseClauseCover(unittest.TestCase):
         self.assertEqual(run(sw(False, False, True), 4, [4, 0, 0]), [2])         # the first always matched
         self.assertEqual(run(sw(False, False, select=True), 1, [0, 0]), [2, 4])  # a select, entered
         self.assertEqual(run(sw(False, False, select=True), 0, [0, 0]), [])
+        self.assertEqual(run(sw(False, False, False, falls=True), 2, [1, 1, 0]), [2, 4, 6])  # #5902's repro
+        self.assertEqual(run(sw(False, False, True, falls=True), 0, [0, 0, 0]), [])
 
     def test_covered_by_counts_an_evaluated_case_line(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}):
@@ -3084,6 +3110,26 @@ class CaseClauseCover(unittest.TestCase):
             text = out.read_text()
         self.assertTrue(text.startswith("mode: count\n"), text[:40])
         self.assertIn("example.invalid/broker/p/a.go:7.2,7.13 0 1\n", text)
+
+    def test_run_puts_the_shim_first_on_gremlins_path(self):
+        # The wiring the end-to-end test below cannot show where gremlins is absent (Potency on #5902):
+        # the `go` the gremlins that `run` starts finds is the shim, and the shim reaches the real go.
+        with tempfile.TemporaryDirectory() as d:
+            stub = pathlib.Path(d) / "bin"
+            stub.mkdir()
+            (stub / "gremlins").write_text(
+                "#!/bin/sh\ncommand -v go > \"%s/seen\"\ngo env GOROOT >> \"%s/seen\"\n"
+                "while [ \"$1\" != -o ]; do shift; done\nprintf '%%s' '{\"files\": [], \"mutants_lived\": 0}' > \"$2\"\n" % (d, d))
+            (stub / "gremlins").chmod(0o755)
+            real = shutil.which("go")
+            env = {"PATH": f"{stub}:/usr/bin:/bin:{os.path.dirname(real)}", "HOME": os.environ.get("HOME", d)}
+            r = subprocess.run([sys.executable, str(ROOT / "tools" / "mutgate.py"), "run", "hint", "--out",
+                                str(pathlib.Path(d) / "out")], capture_output=True, text=True, env=env)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            found, goroot = (pathlib.Path(d) / "seen").read_text().split("\n")[:2]
+        self.assertTrue(found.endswith("/gobin/go"), found)
+        self.assertNotEqual(found, real)
+        self.assertTrue(goroot, "the shim did not reach the real go")
 
     def test_gremlins_go_passes_a_failing_test_run_on(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}):

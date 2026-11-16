@@ -16,7 +16,7 @@
 // (`Recv.Name` for a method, a func's name, the first name a var or const declares, else ""), and the
 // first and last lines of its own text, which tools/mutgate.py's waiver record digests (#5776).
 // With -cases it prints one JSON array of each switch and select (MUT-case-clause-cover, #5822):
-// file, where it starts, whether it is a select, and its clauses in source order, each with where its `case` (or
+// file, where it starts, whether it is a select, whether a clause of it falls through, and its clauses in source order, each with where its `case` (or
 // `default`) starts, where its colon is, and where its body's region ends (the next clause's start,
 // or the closing brace), since Go's cover blocks hold no clause expression.
 // It reads the files as data with go/parser and runs nothing in them.
@@ -123,11 +123,13 @@ type clause struct {
 }
 
 type cases struct {
-	File    string   `json:"file"`
-	Line    int      `json:"line"`
-	Col     int      `json:"col"`
-	Select  bool     `json:"select"`
-	Clauses []clause `json:"clauses"`
+	File   string `json:"file"`
+	Line   int    `json:"line"`
+	Col    int    `json:"col"`
+	Select bool   `json:"select"`
+	// Whether a clause's body ends in `fallthrough`, entering the next body without a match.
+	Fallthrough bool     `json:"fallthrough"`
+	Clauses     []clause `json:"clauses"`
 }
 
 type decl struct {
@@ -240,8 +242,15 @@ func main() {
 				}
 				if body != nil {
 					_, sel := n.(*ast.SelectStmt)
+					falls := false
+					for _, s := range body.List {
+						if c, ok := s.(*ast.CaseClause); ok && len(c.Body) > 0 {
+							b, ok := c.Body[len(c.Body)-1].(*ast.BranchStmt)
+							falls = falls || ok && b.Tok == token.FALLTHROUGH
+						}
+					}
 					p := pos(n.Pos())
-					switches = append(switches, cases{filepath.Base(path), p.Line, p.Column, sel, clauses(body)})
+					switches = append(switches, cases{filepath.Base(path), p.Line, p.Column, sel, falls, clauses(body)})
 				}
 				return true
 			})
