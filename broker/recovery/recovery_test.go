@@ -329,15 +329,6 @@ func TestARecoveryKeyPrintsItsLastSymbol(t *testing.T) {
 	}
 }
 
-// withFailingDraw makes the next crypto/rand draw fail and later ones
-
-// succeed. No test in this package is parallel, so the failure lands on
-
-// the first draw the code under test makes.
-
-// REQ: CRED-8
-// Acceptance: A8 (key-slot header contents)
-
 // RFC 5869 appendix A.1 (SHA-256, 42 bytes: two blocks).
 func TestHKDFMatchesRFC5869(t *testing.T) {
 	ikm := bytes.Repeat([]byte{0x0b}, 22)
@@ -428,6 +419,9 @@ func TestSaveForgetLogReportsAnEntryItCannotEncode(t *testing.T) {
 		t.Fatalf("err = %v, want the encoding error", err)
 	}
 }
+
+// REQ: CRED-8
+// Acceptance: A8 (key-slot header contents)
 
 func TestKeySlotsHoldOnlyTPMPassphraseAndRecoverySlots(t *testing.T) {
 	x := newBox(t)
