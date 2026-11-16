@@ -1122,16 +1122,29 @@ sys.exit(status[n] if n < len(status) else 0)
     def test_guest_base_reads_the_sources_it_is_given(self):
         # Both guest roots come from guest-base.sh's one root, so the sources it is handed decide
         # their security packages; with two arguments (ci.yml's test roots) it reads the image's file.
-        for extra in ((), ("/given/agentos.sources",)):
-            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as d:
+        # It runs from a copy beside a stand-in keyring check (IMG-keyring-pin, #5578), which must run
+        # first and stop it when it fails.
+        for extra, check in (((), 0), (("/given/agentos.sources",), 0), ((), 1)):
+            with self.subTest(extra=extra, check=check), tempfile.TemporaryDirectory() as d:
                 log = pathlib.Path(d, "mm")
-                path = fake_tools(d, mmdebstrap='printf "%%s\\n" "$@" > %s\n' % log, timeout='shift; exec "$@"\n',
+                img = pathlib.Path(d, "image")
+                img.mkdir()
+                shutil.copy(IMG / "guest-base.sh", img)
+                (img / "debian-archive-keyring.sh").write_text("echo keyring-check >> %s\nexit %d\n" % (log, check))
+                path = fake_tools(d, mmdebstrap='printf "%%s\\n" "$@" >> %s\n' % log, timeout='shift; exec "$@"\n',
                                   dpkg_query="exit 0\n")
-                p = subprocess.run(["sh", str(IMG / "guest-base.sh"), str(pathlib.Path(d, "root")),
+                p = subprocess.run(["sh", str(img / "guest-base.sh"), str(pathlib.Path(d, "root")),
                                     str(pathlib.Path(d, "m.json")), *extra], capture_output=True, text=True,
                                    env={"PATH": path})
+                lines = log.read_text().splitlines()
+                self.assertEqual(lines[0], "keyring-check")
+                if check:
+                    self.assertNotEqual(p.returncode, 0)
+                    self.assertEqual(lines, ["keyring-check"])
+                    continue
                 self.assertEqual(p.returncode, 0, p.stderr)
-                self.assertEqual(log.read_text().splitlines()[-1], extra[0] if extra else str(SOURCES))
+                default = img / SOURCES.relative_to(IMG)
+                self.assertEqual(lines[-1], extra[0] if extra else str(default))
         p = subprocess.run(["sh", str(IMG / "guest-base.sh"), "r", "m", "s", "x"], capture_output=True, text=True)
         self.assertEqual(p.returncode, 2)
 
@@ -1270,6 +1283,46 @@ class SecuritySnapshotEdgeTest(unittest.TestCase):
         self.assertNotIn("security.debian.org", b)
         wf = (ROOT / ".github/workflows/enforcer-image.yml").read_text()
         self.assertEqual(wf.count('      - "image/security-snapshot.sh"\n'), 2)
+
+
+
+class KeyringCheckOtherBuildsTest(unittest.TestCase):
+    """IMG-keyring-pin-b (#5933): the enforcer image and the test kit check the Debian archive keyring
+    before mkosi, as image/build.sh does (#5578), and stop when the check fails."""
+
+    BUILDS = (("image/enforcer/build.sh", "enforcer-image.yml"), ("spikes/S1S2-testkit/build.sh", "testkit.yml"))
+
+    def test_check_runs_first_and_stops_the_build(self):
+        for rel, _ in self.BUILDS:
+            for check in (1, 0):
+                with self.subTest(build=rel, check=check), tempfile.TemporaryDirectory() as d:
+                    log = pathlib.Path(d, "log")
+                    script = pathlib.Path(d, rel)
+                    script.parent.mkdir(parents=True)
+                    shutil.copy(ROOT / rel, script)
+                    pathlib.Path(d, "image").mkdir(exist_ok=True)
+                    pathlib.Path(d, "image/debian-archive-keyring.sh").write_text(
+                        "echo keyring-check >> %s\nexit %d\n" % (log, check))
+                    mkosi = pathlib.Path(d, "mkosi")
+                    mkosi.write_text("#!/bin/sh\necho mkosi >> %s\n" % log)
+                    mkosi.chmod(0o755)
+                    p = subprocess.run(["sh", str(script), str(pathlib.Path(d, "out"))], capture_output=True, text=True,
+                                       env={"PATH": os.environ["PATH"], "MKOSI": str(mkosi),
+                                            "ENFORCER_RELEASE_ROOT": "r.json", "AGENTOS_RELEASE_KEYS": "k.pem"})
+                    lines = log.read_text().splitlines()
+                    self.assertEqual(lines[0], "keyring-check")
+                    if check:
+                        self.assertNotEqual(p.returncode, 0)
+                        self.assertEqual(lines, ["keyring-check"])
+
+    def test_check_precedes_mkosi_and_its_change_runs_the_workflow(self):
+        for rel, wf in self.BUILDS:
+            with self.subTest(build=rel):
+                b = (ROOT / rel).read_text()
+                self.assertEqual(b.count("debian-archive-keyring.sh\"\n"), 1)
+                self.assertLess(b.index("debian-archive-keyring.sh\"\n"), b.index("$MKOSI "))
+                w = (ROOT / ".github/workflows" / wf).read_text()
+                self.assertEqual(w.count('      - "image/debian-archive-keyring.sh"\n'), 2)
 
 
 if __name__ == "__main__":
