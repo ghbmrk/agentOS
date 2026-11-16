@@ -22,6 +22,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 // REQ: A8, STO-2, CRED-8, CLK-1, ARC-2
@@ -48,7 +49,7 @@ func newDrive(t *testing.T) drive {
 	}
 	d.store = filepath.Join(d.dir, "state", "store")
 	os.Mkdir(filepath.Dir(d.store), 0o700)
-	st, err := seal.Create(d.store, seal.Recovery{Key: d.rk})
+	st, err := seal.Create(d.store, seal.Recovery{Key: secret.Hide(d.rk)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +74,7 @@ func (d drive) storeKey(t *testing.T) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := seal.Unlock(d.store, seal.Recovery{Key: d.rk})
+	st, err := seal.Unlock(d.store, seal.Recovery{Key: secret.Hide(d.rk)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +118,7 @@ func TestFindsSealedStoreKeyInEveryEncoding(t *testing.T) {
 			t.Errorf("%s: the output carries the key", name)
 		}
 	}
-	st, _ := seal.Unlock(d.store, seal.Recovery{Key: d.rk})
+	st, _ := seal.Unlock(d.store, seal.Recovery{Key: secret.Hide(d.rk)})
 	lk, _ := st.LogKey()
 	st.Close()
 	for want, leak := range map[string][]byte{"log key": lk[:], "store entry canary/secret": d.secret} {
@@ -376,7 +377,7 @@ func TestFindsClerkKeys(t *testing.T) {
 	key := d.storeKey(t)
 	raw, _ := os.ReadFile(d.store)
 	_, id, _ := unwrapRecovery(raw, d.rk)
-	st, err := seal.Unlock(d.store, seal.Recovery{Key: d.rk})
+	st, err := seal.Unlock(d.store, seal.Recovery{Key: secret.Hide(d.rk)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,7 +428,7 @@ func TestFindsClerkKeys(t *testing.T) {
 
 func mustUnlock(t *testing.T, d drive) *seal.Store {
 	t.Helper()
-	st, err := seal.Unlock(d.store, seal.Recovery{Key: d.rk})
+	st, err := seal.Unlock(d.store, seal.Recovery{Key: secret.Hide(d.rk)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,7 +576,7 @@ func TestBinaryEntryFragmentsAndShortPassphrase(t *testing.T) {
 	bin := make([]byte, 32)
 	rand.Read(bin)
 	bin[0] = 0 // not text
-	st, err := seal.Unlock(d.store, seal.Recovery{Key: d.rk})
+	st, err := seal.Unlock(d.store, seal.Recovery{Key: secret.Hide(d.rk)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -600,11 +601,11 @@ func TestBinaryEntryFragmentsAndShortPassphrase(t *testing.T) {
 func TestPassphraseFormsAndSlotKeys(t *testing.T) {
 	d := newDrive(t)
 	pass := "Synthetic  Passphrase words HERE"
-	st, err := seal.Unlock(d.store, seal.Recovery{Key: d.rk})
+	st, err := seal.Unlock(d.store, seal.Recovery{Key: secret.Hide(d.rk)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.AddSlot(seal.Passphrase{Phrase: []byte(pass)}); err != nil {
+	if _, err := st.AddSlot(seal.Passphrase{Phrase: secret.Hide([]byte(pass))}); err != nil {
 		t.Fatal(err)
 	}
 	st.Close()

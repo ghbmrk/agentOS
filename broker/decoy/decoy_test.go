@@ -30,6 +30,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 	"github.com/ghbmrk/agentos/broker/decoy/match"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 // rangeAddrs stands in for the enforcer's decoy range (decision 4, DECOY-d).
@@ -348,7 +349,7 @@ func TestTableSealedAndReplayed(t *testing.T) {
 	path := filepath.Join(dir, "store")
 	rk := make([]byte, seal.RecoveryLen)
 	rand.Read(rk)
-	st, err := seal.Create(path, seal.Recovery{Key: rk})
+	st, err := seal.Create(path, seal.Recovery{Key: secret.Hide(rk)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,10 +419,10 @@ func TestTableSealedAndReplayed(t *testing.T) {
 		}
 	}
 	// Only the store key reads it back.
-	if _, err := seal.Unlock(path, seal.Recovery{Key: make([]byte, seal.RecoveryLen)}); err == nil {
+	if _, err := seal.Unlock(path, seal.Recovery{Key: secret.Hide(make([]byte, seal.RecoveryLen))}); err == nil {
 		t.Fatal("a wrong key opened the store")
 	}
-	st2, err := seal.Unlock(path, seal.Recovery{Key: rk})
+	st2, err := seal.Unlock(path, seal.Recovery{Key: secret.Hide(rk)})
 	if err != nil {
 		t.Fatal(err)
 	}

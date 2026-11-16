@@ -137,7 +137,7 @@ type Factor interface{ kind() Kind }
 // Anchor; Host names the PC for the owner.
 type TPM struct {
 	TPM       transport.TPM
-	PIN       string
+	PIN       secret.Secret[string]
 	PolicyKey *ecdsa.PublicKey
 	Anchor    []byte
 	Policies  []tpmseal.Policy
@@ -147,12 +147,14 @@ type TPM struct {
 // Passphrase is the Owner Card's store passphrase. Argon is used only when
 // a slot is made; the zero value means DefaultArgon.
 type Passphrase struct {
-	Phrase []byte
+	Phrase secret.Secret[[]byte]
 	Argon  Argon
 }
 
-// Recovery is the recovery key, RecoveryLen random bytes.
-type Recovery struct{ Key []byte }
+// Recovery is the recovery key, RecoveryLen random bytes. Each factor holds
+// its passphrase, key or PIN in a secret.Secret, so a print of a factor, or
+// of a Swap, shows none of them (DECOY-b-8, CLK-1, #4860).
+type Recovery struct{ Key secret.Secret[[]byte] }
 
 func (TPM) kind() Kind        { return KindTPM }
 func (Passphrase) kind() Kind { return KindPassphrase }
@@ -337,14 +339,14 @@ func slotKey(s *slot, f Factor) ([]byte, error) {
 	switch f := f.(type) {
 	case Passphrase:
 		a := s.Argon
-		return argon2.IDKey(f.Phrase, s.Salt, a.Time, a.MemKiB, a.Threads, keyLen), nil
+		return argon2.IDKey(f.Phrase.Get(), s.Salt, a.Time, a.MemKiB, a.Threads, keyLen), nil
 	case Recovery:
-		if len(f.Key) != RecoveryLen {
+		if len(f.Key.Get()) != RecoveryLen {
 			return nil, ErrWrongFactor
 		}
-		return hkdf.Key(sha256.New, f.Key, s.Salt, label+"recovery-slot", keyLen)
+		return hkdf.Key(sha256.New, f.Key.Get(), s.Salt, label+"recovery-slot", keyLen)
 	case TPM:
-		k, err := tpmseal.Unseal(f.TPM, s.Sealed, s.Policies, f.PIN)
+		k, err := tpmseal.Unseal(f.TPM, s.Sealed, s.Policies, f.PIN.Get())
 		if err != nil {
 			return nil, err
 		}
@@ -369,7 +371,7 @@ func makeSlot(id, key []byte, f Factor) (slot, error) {
 	var k []byte
 	switch f := f.(type) {
 	case Passphrase:
-		if len(f.Phrase) < MinPassphrase {
+		if len(f.Phrase.Get()) < MinPassphrase {
 			return slot{}, fmt.Errorf("seal: a passphrase needs at least %d bytes", MinPassphrase)
 		}
 		a := f.Argon
@@ -384,7 +386,7 @@ func makeSlot(id, key []byte, f Factor) (slot, error) {
 		}
 		s.Argon = &a
 	case Recovery:
-		if len(f.Key) != RecoveryLen {
+		if len(f.Key.Get()) != RecoveryLen {
 			return slot{}, fmt.Errorf("seal: a recovery key is %d bytes", RecoveryLen)
 		}
 		if s.Salt, err = random(saltLen); err != nil {
@@ -403,7 +405,7 @@ func makeSlot(id, key []byte, f Factor) (slot, error) {
 			return slot{}, err
 		}
 		defer wipe(k)
-		if s.Sealed, err = tpmseal.Seal(f.TPM, k, f.PolicyKey, f.PIN, f.Host); err != nil {
+		if s.Sealed, err = tpmseal.Seal(f.TPM, k, f.PolicyKey, f.PIN.Get(), f.Host); err != nil {
 			return slot{}, err
 		}
 		s.Policies = slices.Clone(f.Policies)

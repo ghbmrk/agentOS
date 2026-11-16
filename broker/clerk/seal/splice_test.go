@@ -10,6 +10,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
 )
@@ -39,13 +40,13 @@ func rewrite(t *testing.T, path string, edit func(f *file)) {
 // than open a store they chose; dropping a slot is refused the same way.
 func TestSlotsChangedWithoutTheKeyAreRefused(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store")
-	mine, theirs := Recovery{Key: make([]byte, RecoveryLen)}, Recovery{Key: make([]byte, RecoveryLen)}
-	mine.Key[0], theirs.Key[0] = 1, 2
+	mine, theirs := Recovery{Key: secret.Hide(make([]byte, RecoveryLen))}, Recovery{Key: secret.Hide(make([]byte, RecoveryLen))}
+	mine.Key.Get()[0], theirs.Key.Get()[0] = 1, 2
 	s, err := Create(path, mine)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AddSlot(Recovery{Key: make([]byte, RecoveryLen)}); err != nil {
+	if _, err := s.AddSlot(Recovery{Key: secret.Hide(make([]byte, RecoveryLen))}); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
@@ -75,13 +76,13 @@ func TestSlotsChangedWithoutTheKeyAreRefused(t *testing.T) {
 // every wrap's associated data.
 func TestAWrapIsBoundToItsStore(t *testing.T) {
 	dir := t.TempDir()
-	r := Recovery{Key: make([]byte, RecoveryLen)}
+	r := Recovery{Key: secret.Hide(make([]byte, RecoveryLen))}
 	a, err := Create(filepath.Join(dir, "a"), r)
 	if err != nil {
 		t.Fatal(err)
 	}
 	a.Close()
-	b, err := Create(filepath.Join(dir, "b"), Recovery{Key: append([]byte{9}, make([]byte, RecoveryLen-1)...)})
+	b, err := Create(filepath.Join(dir, "b"), Recovery{Key: secret.Hide(append([]byte{9}, make([]byte, RecoveryLen-1)...))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +207,7 @@ func TestARefusedEntrySetIsWiped(t *testing.T) {
 	for i := range MaxEntries {
 		many[string([]byte{'y', '/', byte('a' + i%26), byte('a' + i/26)})] = []byte{}
 	}
-	r, key, id := Recovery{Key: make([]byte, RecoveryLen)}, slices.Repeat([]byte{0x5a}, keyLen), make([]byte, idLen)
+	r, key, id := Recovery{Key: secret.Hide(make([]byte, RecoveryLen))}, slices.Repeat([]byte{0x5a}, keyLen), make([]byte, idLen)
 	sl, err := makeSlot(id, key, r)
 	if err != nil {
 		t.Fatal(err)
@@ -255,7 +256,7 @@ func TestARefusedEntrySetIsWiped(t *testing.T) {
 // set; a value that is no base64 has its part-decoded buffer wiped once; a
 // value that is no string, and a set of null, are ErrCorrupt.
 func TestAnEntrySetEncodeNeverWrites(t *testing.T) {
-	r, key, id := Recovery{Key: make([]byte, RecoveryLen)}, slices.Repeat([]byte{0x3c}, keyLen), make([]byte, idLen)
+	r, key, id := Recovery{Key: secret.Hide(make([]byte, RecoveryLen))}, slices.Repeat([]byte{0x3c}, keyLen), make([]byte, idLen)
 	sl, err := makeSlot(id, key, r)
 	if err != nil {
 		t.Fatal(err)
@@ -330,8 +331,8 @@ func (refusalTPM) Send([]byte) ([]byte, error) { return nil, errors.New("no TPM 
 // Each bound of the store file and each refusal on the way to its entries,
 // and a set at the bounds that opens.
 func TestEachBoundOfTheStoreFile(t *testing.T) {
-	r, key, id := Recovery{Key: make([]byte, RecoveryLen)}, make([]byte, keyLen), make([]byte, idLen)
-	if _, err := makeSlot(id, key, Recovery{Key: r.Key[1:]}); err == nil || errors.Is(err, ErrWrongFactor) {
+	r, key, id := Recovery{Key: secret.Hide(make([]byte, RecoveryLen))}, make([]byte, keyLen), make([]byte, idLen)
+	if _, err := makeSlot(id, key, Recovery{Key: secret.Hide(r.Key.Get()[1:])}); err == nil || errors.Is(err, ErrWrongFactor) {
 		t.Fatalf("a short recovery key's slot: got %v, want refused before any unwrap", err)
 	}
 	held := refusalWipes(t)
@@ -347,7 +348,7 @@ func TestEachBoundOfTheStoreFile(t *testing.T) {
 	if _, err := Unlock(path, r); !errors.Is(err, ErrTampered) {
 		t.Errorf("entries that do not open under a key that MACs the file: got %v, want ErrTampered", err)
 	}
-	if _, err := Unlock(path, Recovery{Key: r.Key[1:]}); !errors.Is(err, ErrWrongFactor) {
+	if _, err := Unlock(path, Recovery{Key: secret.Hide(r.Key.Get()[1:])}); !errors.Is(err, ErrWrongFactor) {
 		t.Errorf("a short recovery key: got %v, want ErrWrongFactor", err)
 	}
 	if _, err := Unlock(path, TPM{}); !errors.Is(err, ErrNoSlot) {

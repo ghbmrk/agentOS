@@ -1,11 +1,12 @@
 package seal_test
 
-// REQ: CLK-1
+// REQ: CLK-1, DECOY-b-8
 
 import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/kernel/secret/secrettest"
 )
 
@@ -22,4 +23,27 @@ func TestStorePrintsNoKey(t *testing.T) {
 	}
 	again := unlock(t, path, rec)
 	secrettest.NoKey(t, [][]byte{seal.StoreKey(s), entry}, append(secrettest.Holders(s), secrettest.Holders(again)...)...)
+}
+
+// No factor prints its passphrase, recovery key or boot PIN, bare, in a
+// Swap or in holders, in sixteen verbs (DECOY-b-8, CLK-1, #4860): a line
+// that formats a factor, or a ReplaceAndPut swap, would otherwise put the
+// key that opens the store in a log.
+func TestFactorsPrintNoKey(t *testing.T) {
+	phrase := []byte("passphrase-canary-0123456789")
+	key := []byte("recovery-key-canary-0123456789ab")
+	pin := "boot-pin-canary-0123456789"
+	factors := []seal.Factor{
+		seal.Passphrase{Phrase: secret.Hide(phrase)},
+		seal.Recovery{Key: secret.Hide(key)},
+		seal.TPM{PIN: secret.Hide(pin), Host: "host"},
+	}
+	var vs []any
+	for _, f := range factors {
+		vs = append(vs, secrettest.Holders(f)...)
+		vs = append(vs, secrettest.Holders(seal.Swap{ID: "slot", F: f})...)
+	}
+	swaps := []seal.Swap{{ID: "a", F: factors[0]}, {ID: "b", F: factors[1]}, {ID: "c", F: factors[2]}}
+	vs = append(vs, secrettest.Holders(swaps)...)
+	secrettest.NoKey(t, [][]byte{phrase, key, []byte(pin)}, vs...)
 }

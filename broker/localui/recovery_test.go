@@ -18,6 +18,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 	"github.com/ghbmrk/agentos/broker/firstboot"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/modem"
 )
@@ -234,7 +235,7 @@ func TestRecoveryKeyWithCRLFOpensTheSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "store")
-	st, err := seal.Create(path, seal.Recovery{Key: clean})
+	st, err := seal.Create(path, seal.Recovery{Key: secret.Hide(clean)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +246,7 @@ func TestRecoveryKeyWithCRLFOpensTheSlot(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%q: %v", typed, err)
 		}
-		st, err := seal.Unlock(path, seal.Recovery{Key: k})
+		st, err := seal.Unlock(path, seal.Recovery{Key: secret.Hide(k)})
 		if err != nil {
 			t.Fatalf("%q does not open the slot: %v", typed, err)
 		}
