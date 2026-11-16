@@ -129,6 +129,28 @@ func TestTIM1IntervalLine(t *testing.T) {
 			t.Errorf("line names no next step: %q", st.IntervalLine(zone))
 		}
 	}
+	// The skew is told in the largest whole unit, from each unit's start.
+	for skew, want := range map[time.Duration]string{
+		48 * time.Hour: "about 2 days", 2 * time.Hour: "about 2 hours", time.Hour: "about 1 hour",
+		-time.Hour: "about 1 hour", 30 * time.Minute: "about 30 minutes",
+	} {
+		st := plain
+		st.Skew = skew
+		if got := st.IntervalLine(zone); !strings.Contains(got, "differ by "+want+" since") {
+			t.Errorf("skew %v: line = %q, want %q", skew, got, want)
+		}
+	}
+	// A skew of exactly the tolerance agrees, on either sign; a second past
+	// it is a disagreement line.
+	for _, skew := range []time.Duration{DefaultTolerance, -DefaultTolerance, DefaultTolerance + time.Second, -DefaultTolerance - time.Second} {
+		r := newRig()
+		r.carrier = r.wall.Add(-skew)
+		s := r.guard(t, nil).Check(bg)
+		agree := skew == DefaultTolerance || skew == -DefaultTolerance
+		if got := s.IntervalLine(zone); (got == "Time check: box and phone network agree.") != agree {
+			t.Errorf("skew %v: line = %q", skew, got)
+		}
+	}
 }
 
 func TestTIM1OwnerTextsDescribeTheInterval(t *testing.T) {
