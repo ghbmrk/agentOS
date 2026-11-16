@@ -3,9 +3,7 @@
     "025f0d748646ef25b4ae996f5cb2df6bffcef744b537a6384c44faae48bb0847": 1
   },
   "BOARD.md": {
-    "06828cf82381cd4a098956f6bfb487a66712aff6dd0e8b27aeac1c7c9d032082": 1,
-    "8a9da9e77c9f58d3c7683dc8fc30d643acf15be7ad11a1d257bb15b803bd173b": 1,
-    "ca4024e528af5c42d038c565599f2d4c076457e3397357ea9cf0ec0ff5269215": 1
+    "06828cf82381cd4a098956f6bfb487a66712aff6dd0e8b27aeac1c7c9d032082": 1
   },
   "DECISIONS.md": {
     "3e86765653c8c0146c5e02d552f5431773506c23592f49df31ae5bfc7b269f13": 1,
@@ -16,44 +14,6 @@
     "afd31a5efde47bea0ec2d0f2ec307dee56643b53b126b9ef1087e76fbf25f422": 1,
     "c435e6f048b8f2f51e2d1425a86bd1f98676dcb34f46fb62251ba4a5bfc4597c": 1,
     "ea9f7bb8f449c37ab876067b87f6c2504c2b72feaa778acfad6e7e4024910049": 1
-  },
-  "SPEC.md": {
-    "0d4d08c66c59c4280876d4a9f3bf196830486cebe3104a13e44672bb1de49d18": 1,
-    "1c44bafd28e2cbfc82e6cebff7d9a8148f1d97364cf24ca3f0cf1cb3861a940c": 1,
-    "21962f795db3b0ebbab20a28793e466bb6a048e53de11cafe29051c3eac0ae7a": 1,
-    "2a1febd52bb34ac8831058a65f2c175d859afa9e476c8381a35146f22fb03570": 1,
-    "2de4cebb843dec4b4723b57c69063097eaa6f6a7b26902b6bc316f68ff73dc12": 1,
-    "320444a08333a9556cb40558e0239da070ddcf5a04244acd1fba51e1799a41f5": 1,
-    "409e0f8f52e6ed788a985377294aa57350c567f18519ec4eeb8c0bba6792eb8f": 1,
-    "485e49fa4e7833575dcc5661e7f7113c72a0c11d034a8bf595b34c87ce10d96d": 1,
-    "528bc45e642fb7777ee160288a605b9932d41afd0edbbfbe3a03689758405501": 1,
-    "54f290038397d285b4296422f3fd30671dd213cb9b3e44f0f02fd6af0892f08e": 1,
-    "7518cd5a049820c3f206ad43a744375d6ba5ba59a2f14c09cf65b7a685ead318": 1,
-    "754e84aa969b81af02d8d8be69e52bf967dc9c10141ede46ec145afdfc9ccc37": 1,
-    "7d2cf3633c2efc52efebf6999e381be7767515485449a744e1b8d2a47915bb5c": 1,
-    "7ed7e898eb2c186f474717b38b81ede5f0e738a1f549b70c1a3c798556481245": 1,
-    "84e8334e803ac116821b7fdeaf4da2f8228333cbe5b8f3bad40c06d2c3108f50": 1,
-    "897fa77e16df42625214aca7c624bc3bfcbbd9851e24220105d14e13cb81c74a": 1,
-    "923e8fb645a6469a492a9e1bdcf550282e70925ee99c5eeb9a45cf3eeaa41779": 1,
-    "93ed9450312b2bb8ed82c925d891d7dc59d2c8210d09c3911ec8907fac803b4b": 1,
-    "9bb2abda427835e04a85b3ea7cff199ce50b7befaeec3a7a5a9356064502c267": 1,
-    "9e1390345e47a7ea85523fa34000d251f0950be088800e90731417e580ed163a": 1,
-    "a64b95eea5b2faf9617d6b47723520d1dde22dbda73ac0bbc44b63f9dfa9ee05": 1,
-    "a96ecf64d9b97e5b3ba8f6b8c753f38c5ece8764c75f6b2331c8878a8700994b": 1,
-    "ababcf48d69a2260d38d1843c9a1f556d29ec1773a5b7e2076d014b9e5685f59": 1,
-    "b99b7f3e8a11bf6619a1e8ac7977342b3d06571400c09d0e91496982c07d6f4c": 1,
-    "ba9cad84e15e24481b4c018ba93a2b8a927fadc0d4b2261f643d685941522ed6": 1,
-    "bbf8341dd51e380e3596a5f11ee5130c4899a93fefdabbc0fabc05565f38a24e": 1,
-    "c7fa826b63e423ea3782f2acbba5d555ba0fbcdf60340cacedf6519ebf1c1a50": 1,
-    "cb44474e7f8bda5248cab6af2ce495ef600fa44b30fb4e3093285470680b8aef": 1,
-    "e319c8a4e44dd0afb93464acfaa90bfa2fb33c132d329674cc00679e901da9e1": 1,
-    "e563a788a94e6b0fd630606f6d13b535e5c92dfe21b8f9c38e9437c7d8729fb7": 1,
-    "f278d71e27d9a975c5677f0186338d5e68bb63ffc9ea81c3eaf9afcb3592f289": 1,
-    "f3a047441171a200d2e399151fe6657b83bceb6a989b46e78dffb8110bb09d67": 1,
-    "f43ab38a01f3f0cf266e89dbbfdc82ba81fc5df9cf7d1bb92e3f904df3afec61": 1,
-    "f72021f4bfec3cc47a576011b7aba5ddeace52a9021b736b2185f61ca9a41184": 1,
-    "f9c826cb516543e8634c5d151596ce460b0bbaf1d920bc73e773f15f5d9de5dc": 1,
-    "fe2286cf7ed84020887b21b128715604732988d8640a4b89e0d0cdc9e9fe7355": 1
   },
   "assurance/README.md": {
     "51e1954bcbd339e891f9968fa7c6612d78f484adfc32a992e0e31a71bf8fe19b": 1
@@ -99,19 +59,8 @@
     "bcdaabeca58f7f3eaedcbb06cb33e052a8894e97e3b96278745b2d914abbb32f": 1,
     "d626a8aa4893a7d2f417932ffb3c45b276ea3785e0bdabc06d63c57d0834c0bd": 1
   },
-  "broker/card/card.go": {
-    "3bce66a3ebe13b0d557f7ead415a5cd30770954936d10ad33b31559324672359": 1,
-    "df91b82f5e4f0543e5db850a877ce1dbc0107fc2defe3e06b0b9e5bb208c5026": 1
-  },
-  "broker/card/render.go": {
-    "166718029310109ab8051a9299fe91dbaa5e3d5f1e397af3a39187dd9ac7f1ac": 1,
-    "28223434c9c7fb72f7b09b6e755703c67a46f712f025584cf33f238e0127b115": 1,
-    "878d0b65b1a39938c14052bd523d11bad650fdd4c8bb9ee24eb4848459cc2922": 1,
-    "e84006b61ecb1227d10207ceef507cebe12e3c7b9d1b7fb6f3dc3b078a8aacaa": 1
-  },
   "broker/claim/ASSUMPTIONS.md": {
-    "56ca987efc666ff4fe1992947dc379ea450abc02f529f8dcd83e92092c2ba6cc": 1,
-    "64a6461a37dee0f1d113e2fefd4cfc6ca9a0fb6ef7a13fa51dd566758666ef61": 1
+    "56ca987efc666ff4fe1992947dc379ea450abc02f529f8dcd83e92092c2ba6cc": 1
   },
   "broker/claim/setupnet.go": {
     "5c7758c0da38c9de0b0da9e0dedfc4210a780c2c93af3a9b53c5712e8a5b2789": 1,
@@ -135,14 +84,6 @@
   "broker/cmd/agentos-egress/main.go": {
     "3dc03c766c54a0b7cc0ded2051deb05b39f837413024db28cf83d06381442405": 1
   },
-  "broker/cmd/agentos-egress/rotation_test.go": {
-    "f4d5bd87fd15e4281918b06f532565f8737623a0ef52dc0b31f9626846aa5e7d": 1
-  },
-  "broker/cmd/agentos-localui/agentos-localui.service": {
-    "81756edc5a96dd294ffb3d49114fd80911211dbcbfc1cd4d59d42d4654bb7ffc": 1,
-    "a937f957c0725677755eca677236446b3a643433a73bb7cb1a37910d0439a487": 1,
-    "d36a22ff4ec2620edc6ff9f795a82f316d0a5a74ee7fe0b23276ff279a764abd": 1
-  },
   "broker/cmd/agentos-modem/agentos-modem.service": {
     "02b244be3afb6e4ced029183c329d1307a9166636f1bab5c2fa7aaf2235edf4e": 1,
     "06246dc9e972699e6498679dbe9a405a4a17a67a6318520d1a39b08875296784": 1,
@@ -151,35 +92,13 @@
   "broker/cmd/agentos-release/main_test.go": {
     "af653ab828602894089d10a5b1f227dd6d69e485dd36b1aa55b833572e24023a": 1
   },
-  "broker/cmd/agentos-seller/seller_test.go": {
-    "799bb0a252acf42a18ec7ca08f4b6e15ba691d0dfc0ccbbe0dd3b01c64a8ef35": 1
-  },
-  "broker/cmd/agentos-seller/sticker.go": {
-    "404d3d978e58859ac54132227a0eda05375c99deb0ae65dd7b08f5737f0387d8": 1,
-    "6eb792335661e8c9b70319d86aa51a1fc77b2598a9275772ff8942cd40365a29": 1,
-    "bafb81a4b5b391a0d5e5c3933d593721d43b289ed2abf59250c75c611c9e5382": 1
-  },
   "broker/cmd/agentosd/main.go": {
     "5ac3b5f51f8129b747f7c47a0a5ba2a84cc6eb03ca2d81974b6d7dfcf69f043d": 1
   },
   "broker/cmd/agentosd/setup_test.go": {
     "225adf0602b61c0d8d7576464b48307d33219a046c991c00ab875a236c3c4133": 1
   },
-  "broker/cmd/agentosd/setupclaim_test.go": {
-    "6a2a448934800fdc6a93ff4b7ec994896291841aa7a53fa36786a8dba1c7fe54": 1
-  },
-  "broker/cmd/agentosd/setupsock_test.go": {
-    "4157233d9e0b3a5082e66b15fd8ee02279097f6df435874f73445ec9aebddfb2": 1,
-    "6b93ea4d589101999c65f31dfb33c61c6a5becd5f0de9f488c312c5dfc15d900": 1,
-    "6fa28b6cc1dcf56c5a73184ff8f0bbbe2e48677381a8d444378d198fe3d3f361": 1,
-    "beb40b40e982ec2d514b1598e338f1b13aa2e38f49a2e5d5d0538b70ac8129f9": 1,
-    "c5000511072ac8a2ef59cb08a091799ec7946bc591a84c00a976d02703521dfc": 1,
-    "cc9d42d313b2eb5d7260492ad36c62986f0f85502fcc4b5c47bb614861e0b18e": 1,
-    "cdc4875600d2bc44d3cc24af4b756a6159ef0410bc14a5b0020065540c738ac2": 1
-  },
   "broker/e2e/boxe2e/parse_test.go": {
-    "164058efa518723aca917a8db0a6261c0064a680d47cf18e73c05b535aa60001": 1,
-    "88c8b41cbdfd3d4f03ed17153aeeae29bab08027b55beb640b7b167b1ea48588": 1,
     "ef2e3aafd8b3a38590b54e65166d6537485d1908bb7df716ef9e3aa80323543c": 1
   },
   "broker/e2e/dep2_test.go": {
@@ -191,12 +110,8 @@
   "broker/follow/follow.go": {
     "0b2e893983009d474a57f9192b1571972c0e351ecbc19ed02f18d39544f5b770": 1
   },
-  "broker/follow/rotation_test.go": {
-    "e10fd6cfc0f4f044f269e5840b9b98c1f7ee9637a178bee13a1d4542cbc3ceee": 1
-  },
   "broker/grants/ASSUMPTIONS.md": {
-    "57c400cdb812545ab2ff69ecb9c92bda5ce88200912ff9e6958f0e0c6e52db24": 1,
-    "f6dd09c26b40391f91086f14d3cb3db5d49223237952bfaecad6d12f51c53d6a": 1
+    "57c400cdb812545ab2ff69ecb9c92bda5ce88200912ff9e6958f0e0c6e52db24": 1
   },
   "broker/grants/follow_test.go": {
     "3bd444bd10b074f8d5b8460a4ccaff90b4f016177936180ec874368e4be6c706": 1,
@@ -244,9 +159,6 @@
     "682e3a5dc7f04c9fdcd5dc0a0c2c117cc0f8cd936d31e41e2e9e1239fc9bb69d": 1,
     "df971f28a6536bfd9558ac82b14dd8c1f19742e8b1efc5eb546a0efeb22c98b1": 1
   },
-  "broker/localui/cardsock_test.go": {
-    "01b43960af5680120897266c59a01007b9fdeeb843ea505ec450f918030ca32a": 1
-  },
   "broker/localui/follow.go": {
     "47abfca79ee02c27aed5a313fe0b8d579f63aac1bfeb45987167134d3f555954": 1
   },
@@ -256,10 +168,6 @@
     "e8d38092e52fbafbee6a0107eb98c56650f44f68284a9f7218981fa718a1270e": 1
   },
   "broker/localui/localui_test.go": {
-    "1573d6dffa95afa6359883c0b943ace369d0cdb31536616c006579aacc2073f2": 1,
-    "19ad7c7694ecfbc01de9dd0fbe68e01bea83ed0cffe668efd5d55ac06169dd6a": 1,
-    "b3598c52040e9fbf30ae7b867824ce22beea947e09c9d2da7e7f5ec875dc4524": 1,
-    "d0e36aa762aa9e7567ee61d8bb456f838cf16f384adef93b9843f96563444fcd": 1,
     "e88cf170a6a8cce3bef54f6a439af0a58c44ae8db1916db8fee2b213bb5fd3a2": 1,
     "e9770e292003d869ca7ad09f28e5d6622e9befd832b3aef9c740b0eab0808ab4": 1
   },
@@ -280,39 +188,18 @@
     "838fd90d5b4b8e22dca1eb573df9ae2063c74e19a476bf2c42644dd49f79102a": 1,
     "8b11e067574805561a6fb550254f263cbbf2401b55534efded137b0daef3d592": 1,
     "9de83d9196b0ad07a339859c8f9bc478250aeea541f56d9e7da6dce13fc2401e": 1,
-    "9eb2116dea475200e93e473bf9f281489c86b3fc92aa57dea6a5bd1b65f6ac43": 1,
-    "f49bb96c94336b8a4b2d7c3f6d8ae69ac7634dbde6fb3cec33b75f0cde3f644f": 1,
     "f8fa7c9b03431f6b286efd692c4df51a858df81394ed0bee03e398a216dcf7f5": 1
   },
   "broker/localui/server.go": {
-    "ae1a9a1c0c473dec5287809288dc43db495e33a4b75a88b0f467f17cd0fa8055": 1,
-    "fea2889676337cfcc8fcf88948b73c118d59e639604ee5ac8f3cce097da95ca2": 1
-  },
-  "broker/localui/setup.go": {
-    "8925c1c06b6e61369cc7dab7e7fd9d86f716f2445cc4956c84c557373c29d785": 1,
-    "a2e643dca49ea6331e9e3c80d9581772fec7b9430d5239c94a1a411c7e3985eb": 1,
-    "ca16bec164b8e3135759ca83996e36a81cc3fc741803891ae53af41cb9cc53e6": 1,
-    "f6e5d6d66f16b67ba390119f25de4fee0f8802ce8da6cf3d220c121a287c4392": 1
+    "ae1a9a1c0c473dec5287809288dc43db495e33a4b75a88b0f467f17cd0fa8055": 1
   },
   "broker/localui/setuphooks_test.go": {
     "c54c01d641d8411049ff496a5d49b2cdaab9494173c37b3aeb29945803aae82c": 1
   },
-  "broker/localui/setuptext_test.go": {
-    "56023439dceaea97fafabb46812f4ee35d2c8533a4204fafd66970e2eafc1628": 1,
-    "5bd49eca3d8506e06979ce1971a8bf95d5396479d78b0a08e03b738047f7ffd9": 1,
-    "ccd573364e3d663aeb39b1c5517938cc6eadb047306c197de423a7e3ab25b6e9": 1
-  },
   "broker/localui/vault_test.go": {
     "223363810b05ef7141dcbdb3aadcb25373f6b1686519b19f5e8f588bd5cb80e8": 1
   },
-  "broker/maintain/ASSUMPTIONS.md": {
-    "5edd2aaecdff7e3343d9dc95d47623127f32ecfa378681ef664183aa2655114e": 1,
-    "bc137fea904ff2eb67fedf548d0f5824ba52133d979aede39344cfa367fe1aab": 1,
-    "ef00cd5bf7ac1d10135a4c43e1a3a4f2e7b79f2512e364182d2b8840bf0c07dd": 1
-  },
   "broker/maintain/follow_test.go": {
-    "7130e3b3e54296e2e53c07e7009fb64ab4a64ac70a1780ef45e753244d3af8e0": 1,
-    "781260a57de0bf3f1b95de330379791bd080f2c054f11a85fdafbd5bd6aaa736": 1,
     "ad3dba140509cb2d0ee94f069f747903617f83698ed408dc2fd952c22eab797d": 1
   },
   "broker/modem/at/udev/71-agentos-modem.rules": {
@@ -326,18 +213,11 @@
     "72a65e1336ca80e2a7604b9b4a375824600f970028d738344abf864384b5b4cc": 1
   },
   "broker/recovery/owner.go": {
-    "3183ea4610ead6afea27e7fffb80f54b6ae0605fb43201c168ec73264832af2e": 1,
     "5080ecb45322f9ad9ce93736c6e7b58cd018202e7538da28f7d0077a7efb7a20": 1,
-    "9941069e28b2b419c2705902800e2503ba894759a322c69660583fea27f5126f": 1,
-    "e69339276cead289375892f78ae1f76569836ab7b0f7f8cde8b8b4cc35e8c911": 1,
-    "ee50a13f33bbb144b05591998859b4abd704a89b68c80ad7500410d2b387d765": 1,
-    "fed4c4e82e0aef0b74ade038962e20ed77ccb36ea4b4103b4f0fdc2715e0f945": 1
+    "ee50a13f33bbb144b05591998859b4abd704a89b68c80ad7500410d2b387d765": 1
   },
   "broker/recovery/reencrypt_test.go": {
     "3a72f1eeac5b75b8182dbfc20e2b49414bfa340f595577db5f7e1011491c96e5": 1
-  },
-  "broker/recovery/rig_test.go": {
-    "5282598152de43e42df69505340ce7359da9d65888dde7426810c69ea8be925c": 1
   },
   "broker/recovery/rotate.go": {
     "3f118ef32c3810b9b99e0041698b1338ec30f77489d505318b12f978722c2504": 1
@@ -355,11 +235,6 @@
   },
   "decisions/D-114.md": {
     "6badbfabb6d82334b54dec3dfc80393377451c15a182aae9411c5c3caeefd73d": 1
-  },
-  "docs/LANES.md": {
-    "306f23e7cbf2e13ba7f60b95c7242cb6ebd2851a33f1dbe1816301a714b49456": 1,
-    "4e30ebce30c04e17444c396509eaab0dd03878dad139433bb2641e6bcf4f7634": 1,
-    "8784817fa7a898111f84f7ca4b431f3d8f33f8ebd7ff2709c75871e48ff4b5da": 1
   },
   "docs/LATER-HISTORY.md": {
     "46d564530f781ef942766d98df2f5b95b89dc028572f8de54aaf682922bffe87": 1,
@@ -399,9 +274,6 @@
   "image/mkosi/mkosi.extra/usr/lib/systemd/system/agentosd.path": {
     "568c036be7655fe6269d7811b871a55e5dbf4215c542175d963ba53e099cb15a": 1
   },
-  "image/mkosi/mkosi.extra/usr/lib/systemd/system/agentosd.service": {
-    "bdad58aa3ad2f1e78b4c2a33c6cca7a5fe7156668efe7b4f59fbebb0448139be": 1
-  },
   "reviews/combined/2026-10-13-pr1381.md": {
     "dbafc1633fd9f1c566008fe5fde293f2e852867c08558ce6a965be3b5d76bb80": 1,
     "dd1739e2a5431edaa27232759ab1d2d012b82157928a00921661ebc1951fc6df": 1
@@ -431,13 +303,10 @@
     "5921d7bab3edb9bddf0bef1e1b5badb9062dcd2742706085e2dc2b526564319f": 1
   },
   "reviews/ux/2026-10-08-lens-bundle-b.md": {
-    "a4db145c246b69cf9b6dfebb15253bd31b9b87c80733e15d4b86d757c1553e71": 1,
     "a54e745a177a524c5fe8dc65e0225dc9d14888747bb2628e912de60466089fe7": 1
   },
   "reviews/ux/2026-10-08-onboarding-review.md": {
-    "3eec881ed0c3544535d308d0b6b8778b76bf02d5e0f487fbdc3b724473ccb320": 1,
-    "90ba4d68c759cc82b59f270651a36b7cc0635cc10af78048d943893448933074": 1,
-    "e2c28161863afebc537ca853162e5ccc5da2de6612965504da80a792404d903f": 1
+    "3eec881ed0c3544535d308d0b6b8778b76bf02d5e0f487fbdc3b724473ccb320": 1
   },
   "reviews/ux/2026-10-09-pr462.md": {
     "373ad806570f0aab56f9bd9ec4807bebe1577b024594ddebf1ee862b2be927a6": 1
@@ -467,8 +336,7 @@
     "a0499cb7cc1d4e6d2292e6afab932af16e1c81610be012fcaa5b1dd162d4882d": 1
   },
   "reviews/ux/evidence/2026-10-08-onboarding/README.md": {
-    "5d32a3c776d1ed5da840d048c89d3b9dac588064f2d2e11cccab5a38b7b23a2e": 1,
-    "bdf475a50b5a5033d2d8ea2ba8dce9e0b1b409e07ba39edaef9dfd4f375433f0": 1
+    "5d32a3c776d1ed5da840d048c89d3b9dac588064f2d2e11cccab5a38b7b23a2e": 1
   },
   "reviews/ux/evidence/2026-10-08-onboarding/api-error.html": {
     "1a09211bd84d3f345e15766caaeafb38d9a611438a7c1817c51433185dc454a7": 1,
@@ -520,43 +388,11 @@
     "1a09211bd84d3f345e15766caaeafb38d9a611438a7c1817c51433185dc454a7": 1,
     "1df439ce11853c8a15fe4ac4fd8fca6593889dbd1edf0f8d59c5d96a06faba0d": 1
   },
-  "spikes/S1S2-testkit/CHECKLIST.md": {
-    "374d5da8fc3b68bd729392a5877578cb01cb0bc09c8d9db268e754a03d542e37": 1
-  },
-  "spikes/S1S2-testkit/finish_image.py": {
-    "a48b04e9b851c353cfebbebc7e0ba70b784ce67de336f5f2f86dcbcc862d6dec": 1,
-    "e302ba8950331a8b40810a4293e495ab5ae7de6f59fdafcd5aef95d2f10b3280": 1
-  },
-  "spikes/S1S2-testkit/mkosi/mkosi.extra/usr/lib/systemd/system/testkit.service": {
-    "50b75748096ba21f978e39f9d30b5d39573fc49b5d6c2d2d2f40c3241651d262": 1
-  },
-  "spikes/S1S2-testkit/mkosi/mkosi.extra/usr/lib/testkit/s2.py": {
-    "c1561af7ede517cb69abf815ccddf9ade88d19d988f88d254b92054e80a18b66": 1
-  },
-  "spikes/S1S2-testkit/mkosi/mkosi.extra/usr/lib/testkit/testkit.py": {
-    "b7d9570f7a9f1c69de9f95ac30c42122ed9cf23b2154233238a1adf2e743a153": 1
-  },
-  "spikes/S1S2-testkit/mkosi/mkosi.extra/usr/share/testkit/stick/README.txt": {
-    "40ef216642a25bd97421197385496305cb0272b8676fdc0c2c4fad6fcfd70d55": 1
-  },
-  "spikes/S7-host-image/QUESTION.md": {
-    "89e06522db615f308602715f6179813372dda2c2b5e0dd501091c1651553b57e": 1
-  },
-  "spikes/S7-host-image/RESULT.md": {
-    "27440c5b62b5ddb9b59e9c6cb780844aede567a394187ba68ff6e855257d668a": 1,
-    "3a5a3f4dc9c86f80339066824bd09a9f11cf7f05d1dc0312cd6926b99d6d06ff": 1,
-    "852db0927c341b3796ae949fc68575f44d1d88ac17961a7c18267d9f12a7cc21": 1,
-    "e80a3fd2c57a3d8f6b3f572acb3ea01559a51705686b574052edd6e05291a91e": 1,
-    "faaa0132f466b4cb36dc253360454b38fb39597b3e395016498a48f6545836c5": 1
-  },
   "tests/test_image.py": {
     "8574ea1ffd5fe2d6d76759f56c5d3212cfc88a94e22faf83bdb7b42d0c228d31": 1,
     "91adad16bdcbb235fc97011236390d85864cd3f54abca4ef3f09055d8eeb5e86": 1
   },
   "tools/depaudit.py": {
     "2c137db16aeb5438ced4cc59c15dcb06bea589864bb86f87f63a429265180d92": 1
-  },
-  "tools/hostcheck.py": {
-    "6ad9bed4d35b0a57bc86d3ff5421332eb3f9a59aa62cba1dda4acf214661fca2": 1
   }
 }
