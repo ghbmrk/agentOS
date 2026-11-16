@@ -28,7 +28,10 @@ var (
 	ErrForgetStop  = errors.New("kernel: STOP holds, so no Forget is asked")
 	// ErrForgetClock is the owner's text as it stands: a reading at least
 	// ForgetAskFor wide has lapsed the ask before it is sent (TIM-1, CH-12).
-	ErrForgetClock = errors.New("My clock isn't sure of the time right now, so I can't take a FORGET reply. Try again later; send STATUS to see the time check.")
+	// The step is a restart: the kernel process's clock (proc's onLog) keeps
+	// a forward step of the box clock as width until it starts again, so
+	// waiting alone may never clear it, and STATUS shows no kernel width yet.
+	ErrForgetClock = errors.New("I can't ask to forget anything right now, because my clock isn't sure of the time. Restart me, then send FORGET again.")
 )
 
 // kindWords names a kind as the household says it, for one and for more; the
@@ -60,7 +63,10 @@ func (k *Kernel) AskForget(at int64, label string) (string, error) {
 	}) {
 		return "", errors.Join(ErrForgetName, err)
 	}
-	if now.Latest >= now.Earliest+ForgetAskFor { // ForgetReply would refuse every YES
+	// ForgetReply refuses a YES once Latest reaches the lapse, so it would
+	// refuse every YES while Latest does not narrow; were it to narrow, the
+	// refusal costs one retry and never an unwanted erase.
+	if now.Latest >= now.Earliest+ForgetAskFor {
 		return "", ErrForgetClock
 	}
 	all := "everything"

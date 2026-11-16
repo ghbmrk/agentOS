@@ -993,7 +993,7 @@ func TestTIM1AWideReadingRefusesAForgetAsk(t *testing.T) {
 		if !errors.Is(err, kernel.ErrForgetClock) || text != "" {
 			t.Fatalf("an ask at a reading %d ms wide: %q, %v", w, text, err)
 		}
-		if !strings.Contains(err.Error(), "Try again later; send STATUS to see the time check.") {
+		if !strings.Contains(err.Error(), "Restart me, then send FORGET again.") {
 			t.Fatalf("the refusal names no step: %q", err)
 		}
 	}
@@ -1007,6 +1007,16 @@ func TestTIM1AWideReadingRefusesAForgetAsk(t *testing.T) {
 	at(30+f-1, 30+f-1)
 	if _, err := r.k.ForgetReply(0, "YES "+code(text)); err != nil {
 		t.Fatalf("a YES to an ask at a reading just under ForgetAskFor wide: %v", err)
+	}
+	// The clock check runs after STOP and the name check: a wide reading
+	// does not hide a name that matches nothing, or STOP (R4 on #5937).
+	at(40+f, 40+2*f)
+	if _, err := r.k.AskForget(0, "Nobody"); !errors.Is(err, kernel.ErrForgetName) {
+		t.Fatalf("an unknown name at a wide reading: %v", err)
+	}
+	must(t, r.k.Stop(0))
+	if _, err := r.k.AskForget(0, "Alice"); !errors.Is(err, kernel.ErrForgetStop) {
+		t.Fatalf("an ask under STOP at a wide reading: %v", err)
 	}
 }
 

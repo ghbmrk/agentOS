@@ -10,7 +10,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/secret"
@@ -501,6 +503,52 @@ func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
 	src = kernel.Reading{Earliest: 7 * last, Latest: 8 * last}
 	if r := w(); r.Latest != 8*last {
 		t.Fatalf("a wide source while running read %+v: Latest is not its Latest", r)
+	}
+}
+
+// A forward step of the box clock while the kernel runs keeps its reading
+// wide until a restart, so a Forget ask is refused until then, and the
+// refusal names the restart as the step; after it the ask is taken (TIM-1,
+// CH-12; blocker on #5937).
+//
+// REQ: TIM-1, CH-12
+func TestCH12AWideForgetClockClearsOnRestartAsItsTextSays(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	box := b.now
+	b.cfg.Clock = func() kernel.Reading { return kernel.At(box) }
+	b.restart()
+	ask := func() (string, error) {
+		var text string
+		err := b.h.With(func(k *kernel.Kernel) error {
+			var err error
+			text, err = k.AskForget(b.now, "Alice")
+			return err
+		})
+		return text, err
+	}
+	if err := b.h.With(func(k *kernel.Kernel) error {
+		sub, err := k.OpenSubject(b.now)
+		if err == nil {
+			_, err = k.Seal(b.now, sub, "vision", kernel.ClassLabel, []byte("Alice"))
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ask(); err != nil {
+		t.Fatalf("an ask at the start: %v", err)
+	}
+	box += 11 * 60_000 // network time corrects a stale boot clock
+	for range 2 {
+		_, err := ask()
+		if !errors.Is(err, kernel.ErrForgetClock) || !strings.Contains(err.Error(), "Restart me") {
+			t.Fatalf("an ask after a forward step: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond) // waiting does not clear it
+	}
+	b.restart()
+	if text, err := ask(); err != nil || !strings.Contains(text, "YES ") {
+		t.Fatalf("an ask after the restart the text names: %q, %v", text, err)
 	}
 }
 
