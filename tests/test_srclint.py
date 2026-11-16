@@ -284,6 +284,20 @@ class SrcLintTest(unittest.TestCase):
         self.t.allow.write_text("broker/recovery/bad.go wipe:a:k public value\n")
         self.assertIn("allow-listed for wipe:a:k but has none (stale entry)", self.t.check()[0])
 
+    # MUT-wipe-lint-b (#5920): an LHS starts at a statement boundary, never on the line before or a keyword.
+    def test_wipe_lint_lhs_starts_at_a_statement(self):
+        ids = lambda src: [v for v, _ in srclint.wipe_problems(src)]
+        self.assertEqual(ids("func f() {\n\tx := y\n\tk := hkdf(a)\n\tdefer wipe(k)\n}\n"), [])
+        self.assertEqual(ids("func f() {\n\tx := y\n\tk := hkdf(a)\n\tuse(k)\n}\n"), ["wipe:f:k"])
+        bad_if = "func f() error {\n\tif k, err := hkdf(a,b); err != nil {\n\t\treturn err\n\t}\n\treturn nil\n}\n"
+        self.assertEqual(ids(bad_if), ["wipe:f:k"])
+        self.assertEqual(ids(bad_if.replace("err != nil {", "err != nil {\n\t\tdefer wipe(k)")), [])
+        self.assertEqual(ids("func f() {\n\tfor {\n\t\tvar k = random(8)\n\t\t_ = k\n\t}\n}\n"), ["wipe:f:k"])
+        self.assertEqual(ids("func f() {\n\tswitch k := s.decryptSlot(x); {\n\t}\n}\n"), ["wipe:f:k"])
+        self.assertEqual(ids("func f() {\n\tk,\n\t\tj := random(8)\n\twipe(k)\n}\n"), ["wipe:f:j"])
+        self.assertEqual(ids("func f() {\n\tx := y; k := hkdf(a) // k\n\tz := k\n}\n"), ["wipe:f:k"])
+        self.assertEqual(ids("func f() ([]byte, error) {\n\tk := hkdf(a)\n\treturn nil,\n\t\tk\n}\n"), [])
+
     def test_main_is_clean(self):
         self.assertEqual(srclint.check(ROOT, ROOT / "tools" / "srclint_allow.txt"), [])
         r = subprocess.run([sys.executable, str(ROOT / "tools" / "srclint.py")], capture_output=True, text=True)
