@@ -242,7 +242,11 @@ func TestTIM1AuthenticatedDisagreementSurvivesRestart(t *testing.T) {
 	r := newRig()
 	r.carrier = r.carrier.Add(5 * time.Hour)
 	kind := SyncedNTS
-	edit := func(c *Config) { syncAs(&kind)(c); c.StatePath = path; c.BootID = r.bootID }
+	edit := func(c *Config) {
+		syncAs(&kind)(c)
+		c.StatePath = path
+		c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
+	}
 	g := r.guard(t, edit)
 	if s := g.Check(bg); s.State != Disagree {
 		t.Fatalf("status = %+v", s)
@@ -427,9 +431,6 @@ func TestTIM1AuthenticatedOutlierIsToldOnce(t *testing.T) {
 	}
 }
 
-// bootID is the rig's boot, which reboot changes.
-func (r *rig) bootID() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
-
 // wantSpan fails unless [lo, hi] is [a, b].
 func wantSpan(t *testing.T, what string, lo, hi, a, b time.Time) {
 	t.Helper()
@@ -521,7 +522,11 @@ func TestTIM1NTSBoundDiesWithItsBoot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "clock.json")
 	r := newRig()
 	kind := SyncedNTS
-	edit := func(c *Config) { syncAs(&kind)(c); c.StatePath = path; c.BootID = r.bootID }
+	edit := func(c *Config) {
+		syncAs(&kind)(c)
+		c.StatePath = path
+		c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
+	}
 	g := r.guard(t, edit)
 	stale := r.wall
 	if s := g.Check(bg); !s.Authenticated {
@@ -583,7 +588,11 @@ func TestTIM1NTSBoundSurvivesARestartNotAReboot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "clock.json")
 	r := newRig()
 	kind := SyncedNTS
-	edit := func(c *Config) { syncAs(&kind)(c); c.StatePath = path; c.BootID = r.bootID }
+	edit := func(c *Config) {
+		syncAs(&kind)(c)
+		c.StatePath = path
+		c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
+	}
 	g := r.guard(t, edit)
 	floor := r.wall // the last verified time, which bounds the next boot's Earliest (HW-8)
 	g.Check(bg)
