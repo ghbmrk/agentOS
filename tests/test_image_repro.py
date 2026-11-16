@@ -1169,5 +1169,108 @@ sys.exit(status[n] if n < len(status) else 0)
         self.assertIn("cmp rec/release-a/agentos.sources rec/release-b/agentos.sources || ok=0", compare_step())
 
 
+ENF = IMG / "enforcer"
+ENF_SOURCES = ENF / "mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources"
+
+
+class SecuritySnapshotEdgeTest(unittest.TestCase):
+    """IMG-security-pin-fu (#5825): the resolver's edge cases, the hand-run build's error, and the enforcer's pin."""
+    # REQ: UPD-1a
+    run_snap = SecuritySnapshotTest.run_snap
+    MIRROR = SecuritySnapshotTest.MIRROR
+
+    def frozen(self, now, runs, status=()):
+        """resolve with `date` frozen at NOW (date -d still computes); returns the run and the calls."""
+        with tempfile.TemporaryDirectory() as d:
+            real = shutil.which("date")
+            path = fake_tools(d, curl='exec python3 -I "$(dirname "$0")/mirror.py" "$@"\n',
+                              date='case " $* " in *" -d "*) exec %s "$@" ;; esac\necho %s\n' % (real, now))
+            pathlib.Path(d, "bin/mirror.py").write_text(self.MIRROR)
+            pathlib.Path(d, "bin/mirror.json").write_text(json.dumps([list(runs), [], list(status), []]))
+            p = self.run_snap("resolve", path=path)
+            calls = pathlib.Path(d, "bin/calls")
+            return p, [c[-1] for c in (json.loads(calls.read_text()) if calls.exists() else [])]
+
+    def test_a_frozen_clock_gives_one_answer(self):
+        # With the clock fixed, the choice is a function of the mirror's runs alone: the newest run at
+        # or before now, then the run before it. A run after now is never taken.
+        base = "https://snapshot.debian.org/archive/debian-security/"
+        runs = ("20201112T000000Z", "20201112T060000Z", "20201112T120000Z", "20201112T180000Z")
+        for now, before, want in (("20201112T130000Z", "20201112T115959Z", "20201112T060000Z"),
+                                  ("20201112T180000Z", "20201112T175959Z", "20201112T120000Z"),
+                                  ("20201112T060001Z", "20201112T055959Z", "20201112T000000Z")):
+            with self.subTest(now=now):
+                p, calls = self.frozen(now, runs)
+                self.assertEqual((p.returncode, p.stdout), (0, want + "\n"), p.stderr)
+                self.assertEqual(calls[:2], [base + now + "/", base + before + "/"])
+                self.assertEqual(calls[2], base + want + "/dists/trixie-security/main/binary-amd64/Packages.xz")
+                self.assertEqual(len(calls), 3)
+                again, calls2 = self.frozen(now, runs)
+                self.assertEqual((again.stdout, calls2), (p.stdout, calls))
+
+    def test_with_no_retries_left_it_refuses_at_once(self):
+        # curl does the retrying (--retry); the script itself never loops. A mirror that keeps failing
+        # (curl's retries spent, exit 22) ends resolve after that one call per step, with no stdout.
+        for status, ncalls in (((22,), 1), ((0, 22), 2), ((7,), 1)):
+            with self.subTest(status=status):
+                p, calls = self.frozen("20201112T130000Z", ("20201112T060000Z", "20201112T120000Z"), status=status)
+                self.assertNotEqual(p.returncode, 0)
+                self.assertEqual(p.stdout, "")
+                self.assertEqual(len(calls), ncalls)
+
+    def test_the_live_stanza_is_counted_as_fixed_text(self):
+        # grep -cxF: the live URI is matched as a whole line of fixed text. Read as a regex, its dots
+        # would match any byte, and without -x a longer line would count; both must be refused.
+        with tempfile.TemporaryDirectory() as d:
+            src = pathlib.Path(d, "s.sources")
+            for line in ("URIs: http://securityXdebianXorg/debian-security",
+                         "URIs: http://security.debian.org/debian-security/x",
+                         "#URIs: http://security.debian.org/debian-security"):
+                with self.subTest(line=line):
+                    src.write_text(SOURCES.read_text().replace(LIVE, line))
+                    p = self.run_snap("sources", "20261112T180512Z", str(src))
+                    self.assertNotEqual(p.returncode, 0)
+                    self.assertEqual(p.stdout, "")
+                    self.assertIn("no single live security stanza", p.stderr)
+
+    def test_a_bad_timestamp_says_what_was_wrong_and_how_to_get_one(self):
+        for bad, shown in (("2026-11-12T18:05:12Z", "2026?11?12T18?05?12Z"), ("20261112T180512", "20261112T180512"),
+                           ("x\n::error::forged", "x???error??forged"), ("", ""),
+                           ("9" * 60, "9" * 40)):
+            with self.subTest(bad=bad):
+                p = self.run_snap("sources", bad)
+                self.assertEqual(p.returncode, 2)
+                self.assertEqual(p.stdout, "")
+                self.assertIn('"%s" is not a debian-security snapshot timestamp' % shown, p.stderr)
+                self.assertIn("YYYYMMDDTHHMMSSZ", p.stderr)
+                self.assertIn("security-snapshot.sh resolve", p.stderr)
+                self.assertIn("CI run", p.stderr)
+                self.assertNotIn("::error", p.stderr)
+                self.assertEqual(len(p.stderr.splitlines()), 5)
+
+    def test_the_enforcer_build_reads_the_pinned_snapshot(self):
+        # The enforcer's committed sources still name the live host as the stanza to pin, and build.sh
+        # always hands mkosi the pinned copy, so no enforcer build reads security.debian.org.
+        self.assertEqual(ENF_SOURCES.read_text().count(LIVE + "\n"), 1)
+        p = self.run_snap("sources", "20261112T180512Z", str(ENF_SOURCES))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout, ENF_SOURCES.read_text().replace(
+            LIVE, "URIs: https://snapshot.debian.org/archive/debian-security/20261112T180512Z/"))
+        self.assertNotIn("security.debian.org", p.stdout.replace("snapshot.debian.org/archive/debian-security", ""))
+        b = (ENF / "build.sh").read_text()
+        self.assertIn('SECURITY_SNAPSHOT=${AGENTOS_SECURITY_SNAPSHOT-}', b)
+        self.assertIn('[ -n "$SECURITY_SNAPSHOT" ] || SECURITY_SNAPSHOT=$(sh "$HERE/../security-snapshot.sh" resolve)', b)
+        write = b.index('sh "$HERE/../security-snapshot.sh" sources "$SECURITY_SNAPSHOT" \\\n'
+                        '\t"$HERE/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources" >"$OUT/enforcer.sources"\n')
+        tree = b.index('install -D -m 0644 "$OUT/enforcer.sources" "$OUT/pkgmngr/etc/apt/sources.list.d/mkosi.sources"')
+        mk = b.index('$MKOSI -C "$HERE/mkosi" -f --package-manager-tree="$OUT/pkgmngr" ')
+        self.assertLess(write, tree)
+        self.assertLess(tree, mk)
+        self.assertEqual(b.count("$MKOSI "), 1)
+        self.assertNotIn("security.debian.org", b)
+        wf = (ROOT / ".github/workflows/enforcer-image.yml").read_text()
+        self.assertEqual(wf.count('      - "image/security-snapshot.sh"\n'), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

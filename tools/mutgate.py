@@ -7,8 +7,9 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
   tools/mutgate.py packages                  list the tier-A and tier-B broker packages
   tools/mutgate.py claimed --git BASE [HEAD] [--json]
                                              the listed packages where the diff BASE...HEAD adds or
-                                             changes a line of a .go file: the only ones the gate
-                                             can fail, so the only ones CI runs gremlins on
+                                             changes a line of a .go file or changes the package's
+                                             MUTANTS-EQUIVALENT record: the only ones the gate can
+                                             fail, so the only ones CI runs gremlins on
   tools/mutgate.py plan --git BASE [--targets-out FILE]
                                              the `mutants` matrix as JSON: K shards for each claimed
                                              package, K from its target lines, deletion sites and
@@ -46,13 +47,14 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
 
 Target lines. A package's target lines are the lines the diff adds or changes in its non-test .go
 files (no `REQ:` marker is needed, #4908). When the diff also changes or deletes the package's
-_test.go files, they include the lines of its non-test files that the changed test functions run,
-even beside an added line, which would otherwise hide a deleted test's lines (#5762): `run` names them
-with one `go test -run '^(T1|T2)$' -coverprofile` run and records them in the result, and a change
-no single test function holds (a helper, TestMain, an import, a deleted declaration or file) runs
-every test, so the set is at most the package's covered lines. A weakened test (a t.Skip, an early
-return, a build tag, a deletion) runs nothing at the head, so the base's version of the changed
-tests (every base test when the head's change reaches every test) also runs, on a `git archive` of
+_test.go files, they include the lines of its non-test files that the test functions reaching the
+changed lines run, even beside an added line, which would otherwise hide a deleted test's lines (#5762):
+`run` names them with one `go test -run '^(T1|T2)$' -coverprofile` run and records them in the result.
+A changed helper, type or import reaches the tests that name it, transitively, read as text
+(reaching_tests, D-319); a change every test may run (TestMain, init, a package var's initializer)
+runs every test, so the set is at most the package's covered lines. A weakened test (a t.Skip, an early
+return, a build tag, a deletion) runs nothing at the head, so the base's version of the tests reaching
+the changed base lines (every base test when either side reaches every test) also runs, on a `git archive` of
 the base, its lines moved to the head's; the record holds both. In a package whose tests change, a
 mutant NOT COVERED on any target line fails the gate (#5762): a weakened test plus an edit to the
 lines it ran, or a moved file, drops those lines from the base record's mapping. Coverage can differ from run to run
@@ -62,11 +64,20 @@ lines only: its `-D` reads `git diff --merge-base`, so for a package whose tests
 that one call at a commit whose parent differs from the tree on exactly those lines.
 A LIVED mutant on a target line is code the package's tests run (gremlins mutates only covered
 code) but do not check, and fails the gate, unless the PR body holds the line
-`Mutant-equivalent: broker/<pkg>/<file>.go:<line> <reason>` for its site: one site, one reason
-the reviewer checks, never a range or pattern. The body is read as text by this file, never run.
+`Mutant-equivalent: broker/<pkg>/<file>.go:<line>[:<col>][:<KIND>] <reason>` for it: one mutant, one
+reason the reviewer checks, never a range or pattern. A waiver that matches more than one mutant of
+the result on its line (two comparisons of one kind, or a deletion and a comparison, with no column
+or kind to tell them apart) waives none of them (#5792). The body is read as text by this file, never run.
 A proof accepted once moves into the package's record, broker/<pkg>/MUTANTS-EQUIVALENT (`waive`;
 see RECORD below), keyed by statement, so a later run that widens the targets reads it without the
 body line and a moved line keeps it; an entry whose statement changed is stale and fails (#5776).
+Gremlins v0.6.0 reads some mutants on a multi-clause `case` as NOT COVERED although a test runs and kills
+them (#5863). Such a mutant passes on the body line `Mutant-misread: <path>:<line>[:<col>][:<KIND>] <test
+that kills it>`, matched as a waiver is, only where the head part of the package's coverage record (the
+changed tests' own `go test -cover` run) names that test and holds a ran cover block at the mutant's
+position, or, for a one-line `case` expression, which no block holds, that clause's ran body block
+(misread_evidence); it never passes a LIVED mutant, and `waive` never moves it into the record, which
+holds equivalence proofs only (#5864, Security on #5870).
 Not covered mutants are not failures here; gremlins' coverage run is the only judge of "covered".
 The gate reads no other line, and gremlins tests each mutant alone, so `run --git` mutates only
 target lines (60-minute timeouts on #4014) and the gate decides the same; `run` fails if gremlins
@@ -126,8 +137,15 @@ GATED_TIERS = ("A", "B")
 # into declarations; a test function is one of them whose name `go test -run` selects.
 DECL = re.compile(r"^(?:func|type|var|const|import|package)\b")
 TEST_FUNC = re.compile(r"^func ((?:Test|Fuzz|Example)(?![a-z])\w*)\(")
-# The PR body's waiver for one site: an exact repo path and line, then a reason.
-EQUIVALENT = re.compile(r"^Mutant-equivalent: (broker/[^\s:*?\[\]]+\.go):([1-9]\d*) +(\S.*?)\s*$")
+TEST_NAME = re.compile(r"(?:Test|Fuzz|Example)(?![a-z])\w*")
+# The PR body's waiver for one mutant: an exact repo path and line, optionally the mutant's column and
+# kind, then a reason. A waiver that matches more than one mutant of the result waives none (#5792).
+EQUIVALENT = re.compile(r"^Mutant-equivalent: (broker/[^\s:*?\[\]]+\.go):([1-9]\d*)(?::([1-9]\d*))?(?::([A-Z][A-Z_]{0,63}))?"
+                        r" +(\S.*?)\s*$")
+# A killed mutant gremlins v0.6.0 reads as NOT COVERED (a multi-clause `case`, #5863): the same site
+# shape, a separate kind that passes only a NOT COVERED mutant on a line the changed tests' own
+# coverage record runs at the head, and that `waive` never records as an equivalence proof (#5864).
+MISREAD = re.compile(EQUIVALENT.pattern.replace("Mutant-equivalent", "Mutant-misread", 1))
 
 
 # A package name that reaches the workflow's matrix: path segments of plain characters only.
@@ -160,7 +178,7 @@ def result_name(pkg):
 
 
 def survivors(results_dir):
-    """{package: [(file, line, type)]} of LIVED mutants in the per-package JSON files."""
+    """{package: [(file, line, type, column)]} of LIVED mutants in the per-package JSON files."""
     out = {}
     for f in sorted(pathlib.Path(results_dir).glob("*.json")):
         pkg = f.stem.replace("+", "/")
@@ -169,24 +187,14 @@ def survivors(results_dir):
 
 
 def uncovered_of(data):
-    """[(file, line, type)] of NOT COVERED mutants in one package's JSON, sorted: on a target line of a
-    package whose tests change, no test runs it at the head (#5762), which no LIVED mutant shows."""
-    return sorted(
-        (m_file["file_name"], m["line"], m["type"])
-        for m_file in data.get("files") or []
-        for m in m_file.get("mutations") or []
-        if m.get("status") == "NOT COVERED"
-    )
+    """[(file, line, type, column)] of NOT COVERED mutants in one package's JSON, sorted: on a target line
+    of a package whose tests change, no test runs it at the head (#5762), which no LIVED mutant shows."""
+    return mutants_of(data, "NOT COVERED")
 
 
 def survivors_of(data):
-    """[(file, line, type)] of LIVED mutants in one package's gremlins JSON, sorted."""
-    return sorted(
-        (m_file["file_name"], m["line"], m["type"])
-        for m_file in data.get("files") or []
-        for m in m_file.get("mutations") or []
-        if m.get("status") == "LIVED"
-    )
+    """[(file, line, type, column)] of LIVED mutants in one package's gremlins JSON, sorted."""
+    return mutants_of(data, "LIVED")
 
 
 _ESC = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
@@ -229,8 +237,8 @@ def is_test(path):
 def added_lines(diff_text):
     """({path: set(line)} of the lines the diff adds, {path: set(line) or None} of the broker/
     _test.go files it changes). A test file's set holds the lines it adds and, for a hunk that only
-    deletes, the line either side; it is None when the diff deletes the file or a line that starts
-    a top-level declaration, so no test function left in it holds the change."""
+    deletes, the line either side; it is None when the diff deletes the file. What a deleted line
+    reached is read at the base (base_test_lines)."""
     added, tests, path, old, line, in_hunk = {}, {}, None, None, 0, False
 
     def touch(p, lines):
@@ -266,10 +274,7 @@ def added_lines(diff_text):
             if is_test(path):
                 touch(path, {line})
             line += 1
-        elif raw.startswith("-"):
-            if is_test(path) and DECL.match(raw[1:]):
-                tests[path] = None
-        else:
+        elif not raw.startswith("-"):
             line += 1
     return added, tests
 
@@ -287,10 +292,28 @@ def touched(added, tests):
     return ({package_of(p) for p in added if is_source(p)} | {package_of(p) for p in tests}) - {None}
 
 
+def records_changed(diff_text):
+    """The broker/ packages whose MUTANTS-EQUIVALENT record the diff adds, changes or deletes (#5786)."""
+    out, in_hunk = set(), False
+    for raw in diff_text.split("\n"):
+        if raw.startswith("diff "):
+            in_hunk = False
+        elif HUNK.match(raw):
+            in_hunk = True
+        elif not in_hunk and raw.startswith(("--- ", "+++ ")):
+            path = _header_path(raw, "a/" if raw.startswith("-") else "b/")
+            if path and path.rsplit("/", 1)[-1] == RECORD:
+                out.add(package_of(path))
+    return out - {None}
+
+
 def claimed(diff_text, packages=None):
-    """Tier-A and tier-B packages where the diff adds or changes a .go line, sorted (#4908). A
-    `REQ:` marker is no longer needed; violations() reads no other package."""
-    return sorted(touched(*added_lines(diff_text)) & set(gated_packages() if packages is None else packages))
+    """Tier-A and tier-B packages where the diff adds or changes a .go line, or changes the package's
+    MUTANTS-EQUIVALENT record, sorted (#4908). A record-only claim has no target line; it is claimed so
+    verify resolves the record and lists its new entries in the summary for review (#5786). A `REQ:`
+    marker is no longer needed; violations() reads no other package."""
+    return sorted((touched(*added_lines(diff_text)) | records_changed(diff_text))
+                  & set(gated_packages() if packages is None else packages))
 
 
 def diff_targets(added, pkg):
@@ -314,9 +337,10 @@ def union(*parts):
 
 def base_test_lines(diff_text):
     """{path: set(base line) or None} of the broker/ _test.go files the base has and a -U0 diff
-    changes: the base lines it deletes or changes and, for a hunk that only adds, the base line
-    either side; None when the diff deletes the file. The base side of added_lines' tests (#5762)."""
-    out, old, path, in_hunk, line = {}, None, None, False, 0
+    changes: the base lines it deletes or changes; None when the diff deletes the file. The base
+    side of added_lines' tests (#5762). Returns (that, gaps): gaps is {path: set(base line)} of
+    where a hunk only adds, after that base line, for base_changed_tests to place by the file's text."""
+    out, gaps, old, path, in_hunk, line = {}, {}, None, None, False, 0
 
     def touch(lines):
         if out.get(old, ()) is not None:
@@ -333,7 +357,7 @@ def base_test_lines(diff_text):
                 if path is None:
                     out[old] = None  # the file is deleted
                 elif m[2] == "0":
-                    touch({line, line + 1})  # the hunk adds after base line `line`
+                    gaps.setdefault(old, set()).add(line)  # the hunk adds after base line `line`
             continue
         if not in_hunk:
             if raw.startswith("--- "):
@@ -345,7 +369,7 @@ def base_test_lines(diff_text):
             if old is not None and is_test(old):
                 touch({line})
             line += 1
-    return out
+    return out, gaps
 
 
 def head_line_of(diff_text):
@@ -393,66 +417,245 @@ def base_text(mb, path):
     return blob.stdout.decode("utf-8", "replace")
 
 
-def base_changed_tests(btests, pkg, mb, head_names):
-    """Sorted names of the base's test functions holding the base lines btests names in
-    broker/<pkg>/, or None for every test. head_names None (a change every head test may run, such as
-    a new file's init or a helper) is every base test too, so no head-wide change hides a base test."""
-    if head_names is None:
-        return None
-    names = set()
-    for path, lines in sorted(btests.items()):
-        if package_of(path) != pkg:
+def _body(bare, d):
+    """(head line, closing brace line or None) of the func or method declaration d, read from the
+    text with comments blanked, so `} // note` is `}` plus spaces. None: no closing brace found."""
+    head = next(i for i in range(d[6], d[7] + 1) if DECL.match(bare[i - 1]))
+    return head, max((i for i in range(head, d[7] + 1) if bare[i - 1].rstrip() == "}"), default=None)
+
+
+def _gap_lines(text, after):
+    """The base lines a hunk adding after line `after` of a test file's text touches: the line
+    either side, except that a function's doc comment, closing brace and the blank lines after it
+    belong to no function body, so an addition between functions touches none (#5832). An addition
+    inside a body, even right after its head or before its closing brace, still touches it."""
+    bare, out = _uncommented(text, False).split("\n"), set()
+    spans = [(d[6], d[7], *_body(bare, d)) for d in _decls("", text) if d[1] in ("func", "method")]
+    for n, inside in ((after, lambda h, c: h <= n < c), (after + 1, lambda h, c: h < n <= c)):
+        span = next(((h, c) for a, b, h, c in spans if a <= n <= b), None)
+        if span is None or span[1] is None or inside(*span):
+            out.add(n)
+    return out
+
+
+def base_changed_tests(btests, pkg, mb):
+    """Sorted names of the base's test functions that reach the base lines btests names in
+    broker/<pkg>/ (every line of a deleted file), or None for every test (reaching_tests).
+    btests is base_test_lines' pair."""
+    touched_lines, gaps = btests
+    changed = {p: ls for p, ls in touched_lines.items() if package_of(p) == pkg}
+    files = {}
+    listing = subprocess.run(["git", "ls-tree", "-z", mb, "--", f"broker/{pkg}/"], cwd=ROOT,
+                             capture_output=True, text=True, check=True).stdout
+    for entry in filter(None, listing.split("\0")):
+        meta, path = entry.split("\t", 1)
+        if not path.endswith("_test.go") or meta.split()[1] != "blob":
             continue
-        text = None if lines is None else base_text(mb, path)
-        found = None if text is None else test_functions(text, lines)
-        if found is None:
-            return None
-        names |= found
-    return sorted(names)
+        text = base_text(mb, path)
+        if text is None:
+            return None  # a link: its tests are unread, so any of them may reach the change
+        files[path] = text
+    for path, lines in changed.items():
+        if lines is None:
+            if path not in files:
+                return None
+            changed[path] = set(range(1, files[path].count("\n") + 2))
+    for path, afters in gaps.items():
+        if package_of(path) == pkg and changed.get(path, ()) is not None and path in files:
+            for after in afters:
+                changed.setdefault(path, set()).update(_gap_lines(files[path], after))
+    changed = {p: ls for p, ls in changed.items() if ls}
+    return reaching_tests(files, changed)
 
 
 def bases_for(diff_text, base, head, tests, pkgs):
-    """{pkg: base_changed_tests} for each of pkgs whose tests the diff changes."""
+    """{pkg: base_changed_tests} for each of pkgs whose tests the diff changes; None (every test)
+    when either side's change reaches every test, so neither side hides what the other runs.
+    changed_tests reads the same None for its head side."""
     pkgs = [pkg for pkg in pkgs if tests_changed(tests, pkg)]
     if not pkgs:
         return {}
-    mb, btests = merge_base(base, head), base_test_lines(diff_text)
-    return {pkg: base_changed_tests(btests, pkg, mb, changed_tests(tests, pkg)) for pkg in pkgs}
+    mb, btests = merge_base(base, head), base_test_lines(diff_text)  # (lines, gaps)
+    return {pkg: None if head_tests(tests, pkg) is None else base_changed_tests(btests, pkg, mb) for pkg in pkgs}
 
 
-def test_functions(text, lines):
-    """The names of the test functions holding lines (1-based) of a _test.go file's text, or None
-    when one is outside every test function: a helper, TestMain, a method, a declaration or the
-    file's header, which any test may run."""
-    rows = text.split("\n")
-    starts = [i + 1 for i, row in enumerate(rows) if DECL.match(row)]
-    names = set()
-    for line in lines:
-        k = bisect.bisect_right(starts, line)
-        if k == 0:
-            return None
-        m = TEST_FUNC.match(rows[starts[k - 1] - 1])
-        if not m or m.group(1) == "TestMain":
-            return None
-        names.add(m.group(1))
-    return names
+# Lexical reach over a package's _test.go files (D-319, #5826). A declaration (_decls) reaches every
+# declaration whose name is a word of its code (string literals too: more is safe), and a type
+# reaches its methods. A test reaches what it reaches, transitively; what every test may run
+# (TestMain, init, a package var with an initializer, a blank or dot import, a method on a type no
+# test file of its package clause declares, which package code may call through an interface, a
+# file with a linkname) reaches all of them, as does a line no test reaches (fail closed). A named
+# import reaches its file's declarations' tests (D-319).
+WORD = re.compile(r"[A-Za-z_]\w*")
+FUNC_HEAD = re.compile(r"^func\s*(?:\(\s*(?:\w+\s+)?\*?\s*(\w+)[^)]*\)\s*)?(\w+)")
+NAMED = re.compile(r"^(?:var|const|type)\s+(\w+(?:\s*,\s*\w+)*)")
+GROUPED = re.compile(r"^(?:var|const|type)\s*\(")
+GROUP_NAMES = re.compile(r"(\w+(?:\s*,\s*\w+)*)")
+SIDE_IMPORT = re.compile(r'(?:^|[\s(;])[_.]\s*["`]', re.M)
+EVERY = None
 
 
-def changed_tests(tests, pkg):
-    """Sorted names of the test functions the diff changes in broker/<pkg>/, or None for every test.
-    The files are read as text from the tree, never run; a link is not followed (L3 on #4643)."""
-    names = set()
-    for path, lines in sorted(tests.items()):
-        if package_of(path) != pkg:
+def _uncommented(text, literals=True):
+    """Go source with its comments blanked (newlines kept, so lines keep their numbers); string and
+    rune literals stay, since a name in one can reach code (reflect's MethodByName), or with
+    literals False have their contents blanked too, so a column-0 line inside a raw string is no
+    declaration (Security on #5838)."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            out.append(" " * (j - i))
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            out.append("".join(ch if ch == "\n" else " " for ch in text[i:j]))
+        elif c in "\"'`":
+            j = i + 1
+            while j < n and text[j] != c and not (c != "`" and text[j] == "\n"):
+                j += 2 if c != "`" and text[j] == "\\" else 1
+            j = min(j + 1, n)
+            out.append(text[i:j] if literals else
+                       c + "".join(ch if ch == "\n" else " " for ch in text[i + 1:j - 1]) + text[j - 1:j])
+        else:
+            j = i + 1
+            out.append(c)
+        i = j
+    return "".join(out)
+
+
+def _decls(path, text):
+    """[(path, kind, names, receiver, words, every, first, last, package clause)] of one test file's declarations,
+    each from its doc comment (the `//` lines right above it, directives such as go:embed too) to
+    the next one's; words are its code's, comments left out. The lines before the first declaration,
+    the package clause and the imports are kind 'header'. A group's names are read from gofmt's
+    layout; a shape not read so names every word of it, which reaches more, never less."""
+    # Declarations are split and read on a copy without comments or literal contents; words come
+    # from one with literals (code), line for line the same.
+    rows, code, bare = text.split("\n"), _uncommented(text).split("\n"), _uncommented(text, False).split("\n")
+    starts, prev = [], 0  # (first line, declaration line)
+    for i, row in enumerate(bare):
+        if DECL.match(row):
+            k = i
+            while k > prev and rows[k - 1].startswith("//"):
+                k -= 1
+            starts.append((k + 1, i + 1))
+            prev = i + 1
+    if not starts or starts[0][0] > 1:
+        starts.insert(0, (1, None))
+    linked = "go:linkname" in text
+    # x and x_test share a directory: a type is the test type of its own package clause only.
+    clause = (m := re.search(r"^package\s+(\w+)", "\n".join(bare), re.M)) and m.group(1)
+    out = []
+    for n, (first, at) in enumerate(starts):
+        last = starts[n + 1][0] - 1 if n + 1 < len(starts) else len(rows)
+        if last < first:
             continue
-        f = BROKER / path.split("/", 1)[1]
-        if lines is None or f.is_symlink() or not f.is_file():
+        body, plain = "\n".join(code[first - 1:last]), "\n".join(bare[first - 1:last])
+        head = bare[at - 1] if at else ""
+        kind, names, recv, every = "header", set(), None, linked
+        if head.startswith("import"):
+            every = every or bool(SIDE_IMPORT.search(body[body.index("import") + len("import"):]))
+        elif head.startswith("func"):
+            m = FUNC_HEAD.match(head)
+            recv, name = (m.group(1), m.group(2)) if m else (None, None)
+            kind = "method" if recv else "func"
+            names = {name} if name and not recv else set()
+            if m is None or (not recv and name in ("TestMain", "init")):
+                every = True
+        elif head.startswith(("var", "const", "type")):
+            kind = head.split()[0].split("(")[0]
+            every = every or (kind == "var" and "=" in plain)
+            names = set(re.split(r"\s*,\s*", NAMED.match(head).group(1))) if NAMED.match(head) else set()
+            inner = [r for r in bare[at:last] if r.strip()]
+            if GROUPED.match(head) and head.rstrip().endswith("(") and inner and inner[-1] == ")":
+                # gofmt's group: one name list per line at the group's indent, `)` alone at column 0.
+                indent = min(len(r) - len(r.lstrip()) for r in inner[:-1]) if inner[:-1] else 0
+                names = {n for r in inner[:-1] if len(r) - len(r.lstrip()) == indent
+                         if (g := GROUP_NAMES.match(r.lstrip())) for n in re.split(r"\s*,\s*", g.group(1))}
+            elif not names:
+                names = set(WORD.findall(body))  # a shape not read here: every word stands in (more is safe)
+        out.append((path, kind, names, recv, set(WORD.findall(body)), every, first, last, clause))
+    return out
+
+
+def reaching_tests(files, changed):
+    """Sorted names of the test functions in files ({path: text}, every _test.go file of one
+    package) that reach the lines changed names ({path: set(line)}), or None when one of those lines
+    is in a declaration every test may run (see WORD above) or that no test reaches. A line of a file's header (before its
+    first declaration, the package clause, an import) reaches what that file's declarations reach."""
+    decls = [d for path, text in sorted(files.items()) for d in _decls(path, text)]
+    by_name, types = collections.defaultdict(list), {(d[8], n) for d in decls if d[1] == "type" for n in d[2]}
+    methods = collections.defaultdict(list)
+    for i, (_, kind, names, recv, *_rest) in enumerate(decls):
+        for n in names:
+            by_name[n].append(i)
+        if kind == "method":
+            methods[recv].append(i)
+    edges = [{j for w in d[4] for j in by_name.get(w, ())}
+             | {j for n in (d[2] if d[1] == "type" else ()) for j in methods.get(n, ())} for d in decls]
+    reach = [set() for _ in decls]
+    for i, (_, kind, names, recv, _w, every, *_rest) in enumerate(decls):
+        test = kind == "func" and not every and TEST_FUNC.match(f"func {next(iter(names), '')}(")
+        if kind == "method" and (decls[i][8] is None or (decls[i][8], recv) not in types):
+            every = True
+        if not (test or every):
+            continue
+        mark = EVERY if every else next(iter(names))
+        seen, todo = {i}, [i]
+        while todo:
+            for j in edges[todo.pop()] - seen:
+                seen.add(j)
+                todo.append(j)
+        for j in seen:
+            reach[j].add(mark)
+    out = set()
+    for path, lines in changed.items():
+        mine = [i for i, d in enumerate(decls) if d[0] == path]
+        if path not in files:
             return None
-        found = test_functions(f.read_bytes().decode("utf-8", "replace"), lines)
-        if found is None:
+        bare = _uncommented(files[path], False).split("\n")
+        for line in lines:
+            hit = [i for i in mine if decls[i][6] <= line <= decls[i][7]]
+            if len(hit) == 1 and decls[hit[0]][1] in ("func", "method") and (
+                    (close := _body(bare, decls[hit[0]])[1]) is not None and line > close):
+                continue  # the blank lines after a function's closing brace are no code of it
+            if not hit or decls[hit[0]][1] == "header":
+                hit = mine if not hit or not decls[hit[0]][5] else hit
+            got = set().union(*(reach[i] for i in hit))
+            # No test reaches it (dead code, a benchmark, or a shape this reading missed): fail closed.
+            if not got or EVERY in got or any(decls[i][1] == "header" and decls[i][5] for i in hit):
+                return None
+            out |= got
+    return sorted(out)
+
+
+def head_tests(tests, pkg):
+    """Sorted names of the head's test functions that reach the lines the diff changes in
+    broker/<pkg>/'s _test.go files, or None for every test (reaching_tests). Every _test.go file of
+    the package is read as text from the tree, never run; a link is not followed, so one in the
+    package is every test (L3 on #4643). A deleted file has no head lines: its base side runs."""
+    d = BROKER / pkg
+    if not any(package_of(p) == pkg for p in tests):
+        return []
+    if d.is_symlink():
+        return None
+    files = {}
+    for f in sorted(d.glob("*_test.go")) if d.is_dir() else ():
+        if f.is_symlink():
             return None
-        names |= found
-    return sorted(names)
+        if f.is_file():
+            files[f"broker/{pkg}/{f.name}"] = f.read_bytes().decode("utf-8", "replace")
+    changed = {p: ls for p, ls in tests.items() if package_of(p) == pkg and p in files}
+    if any(ls is None for ls in changed.values()):
+        return None
+    return reaching_tests(files, changed)
+
+
+def changed_tests(tests, pkg, bases):
+    """head_tests, or None when the base side's change reaches every test (bases_for)."""
+    return None if pkg in bases and bases[pkg] is None else head_tests(tests, pkg)
 
 
 def _recorded_lines(pkg, lines):
@@ -480,7 +683,7 @@ def targets_for(pkg, added, tests, data, bases):
         return own, None
     rec = data.get("targets") if isinstance(data, dict) else None
     base = rec.get("base") if isinstance(rec, dict) else None
-    for part, want, where in ((rec, changed_tests(tests, pkg), ""), (base, bases.get(pkg, ()), " at the base")):
+    for part, want, where in ((rec, changed_tests(tests, pkg, bases), ""), (base, bases.get(pkg, ()), " at the base")):
         if not isinstance(part, dict) or part.get("tests") != want or not isinstance(part.get("lines"), dict):
             return None, (f"holds no record of the lines that {'every test' if want is None else want} covers{where}, "
                           f"the tests this diff changes in broker/{pkg}/ (`mutgate.py run --git` writes it)")
@@ -489,14 +692,147 @@ def targets_for(pkg, added, tests, data, bases):
     return (None, problem) if problem else (union(own, out, was), None)
 
 
-def waivers(body):
-    """{(path, line): reason} of the PR body's `Mutant-equivalent:` lines. The body is text only."""
+def waivers(body, pattern=EQUIVALENT):
+    """{(path, line, kind, col): reason} of the PR body's `Mutant-equivalent:` lines (pattern's, such as
+    MISREAD's), kind and col None where the line names none. The body is text only."""
     out = {}
     for row in (body or "").replace("\r\n", "\n").split("\n"):
-        m = EQUIVALENT.match(row)
-        if m and re.search(r"[A-Za-z]{2}", m.group(3)):
-            out[(m.group(1), int(m.group(2)))] = m.group(3)
+        m = pattern.match(row)
+        if m and re.search(r"[A-Za-z]{2}", m.group(5)):
+            out[(m.group(1), int(m.group(2)), m.group(4), int(m.group(3)) if m.group(3) else None)] = m.group(5)
     return out
+
+
+def record_blocks(rec, name):
+    """[((line, col), (line, col), ran)] of the head record's cover blocks of file name in broker/<pkg>/
+    (none where it holds none), or None where the record's blocks are not that shape: data from the
+    untrusted plan job, as the record's lines are (D33)."""
+    raw = rec.get("blocks") if isinstance(rec, dict) else None
+    bs = raw.get(name, []) if isinstance(raw, dict) else None
+    if not isinstance(bs, list) or not all(isinstance(b, list) and len(b) == 5 and all(type(v) is int and v >= 0 for v in b)
+                                           and b[4] in (0, 1) for b in bs):
+        return None
+    return [((b[0], b[1]), (b[2], b[3]), bool(b[4])) for b in bs]
+
+
+def misread_evidence(blocks, src, line, col):
+    """Why the changed tests ran the mutant at (line, col), or None: a block they ran holds its
+    position; or it sits in no block, on a one-line `case` whose body block, the next block after it,
+    starts on that line just past the clause's colon and ran. Go's cover blocks hold no `case`
+    expression (#5822): the switch header's ends at `switch {`, the body's starts after the colon.
+    A position in a block that never ran (an `} else if` condition after a ran if-body, a later
+    `case` after a ran clause) is never evidence (Security on #5870), nor is a clause the one before
+    it may enter by `fallthrough` without evaluating its expression (Security delta on #5870)."""
+    pos = (line, col)
+    inside = [ran for start, end, ran in blocks if start <= pos < end]
+    if any(inside):
+        return "a block the changed tests ran holds it"
+    later = sorted((start, end, ran) for start, end, ran in blocks if start > pos)
+    if inside or not later:
+        return None
+    (bl, bc), _, ran = later[0]
+    text = src[line - 1] if 0 < line <= len(src) else b""
+    lead = len(text) - len(text.lstrip(b" \t"))
+    if ran and bl == line and text[lead:lead + 5] in (b"case ", b"case\t") and col > lead + 5 and bc >= 2 \
+            and text[bc - 2:bc - 1] == b":" and not falls_into(src, line):
+        return "its case clause's body, which the changed tests ran"
+    return None
+
+
+def falls_into(src, line):
+    """Whether the clause before the `case` on line may end in `fallthrough`, read as text, failing
+    closed: the last code line before it (blank and `//` lines skipped) names `fallthrough` anywhere,
+    or a block comment mark (on any line, a `//` one included) or the file's start comes first. `fallthrough` is a clause's last statement."""
+    for n in range(line - 2, -1, -1):
+        row = src[n].strip()
+        # A block comment's marks first, even on a `//` line: `// end */` may close a comment hiding code.
+        if b"*/" in row or b"/*" in row:
+            return True
+        if not row or row.startswith(b"//"):
+            continue
+        return re.search(rb"\bfallthrough\b", row) is not None
+    return True
+
+
+def misread_lines(misread, results, tested, every):
+    """({site: text} of the `Mutant-misread:` lines that may pass a NOT COVERED mutant, [(site, why)]
+    of the refused rest, which pass nothing (#5864). Only in a package whose tests the diff changes is
+    a NOT COVERED verdict gated. There a line passes the one mutant it names only when its reason
+    starts with the name of a changed test the head record names (any test name, where that record
+    is every test's), and misread_evidence finds, in that record's cover blocks of the changed tests'
+    own `go test -cover` run, that they ran the mutant's position. A line naming no single NOT COVERED
+    mutant is kept: covering waives nothing by it, and the summary names it."""
+    ok, refused = {}, []
+    for w, reason in sorted(misread.items(), key=lambda r: site_text(r[0])):
+        pkg = package_of(w[0])
+        if pkg not in tested:
+            refused.append((w, f"the diff changes no test of package {pkg}, where a NOT COVERED mutant is not gated: "
+                               "drop the line"))
+            continue
+        data = results[pkg][0]
+        hit = [m for m in covering({w: reason}, every)[0] if m in
+               {(f"broker/{pkg}/{f}", n, k, c) for f, n, k, c in uncovered_of(data)}]
+        if not hit:
+            ok[w] = reason
+            continue
+        path, line, _, col = hit[0]
+        name = reason.split()[0].rstrip(":,;.")
+        if not (TEST_NAME.fullmatch(name) if tested[pkg] is None else name in tested[pkg]):
+            refused.append((w, f"its reason starts with {name[:80]!r}, not the name of a test the record names "
+                               f"({'every test' if tested[pkg] is None else ', '.join(tested[pkg])}): start it with the "
+                               "changed test that kills the mutant"))
+            continue
+        blocks, src = record_blocks(data.get("targets"), path.rsplit("/", 1)[1]), b""
+        f = BROKER / pkg / path.rsplit("/", 1)[1]
+        if f.is_file() and not f.is_symlink():
+            src = f.read_bytes().split(b"\n")
+        why = None if blocks is None or col is None else misread_evidence(blocks, src, line, col)
+        if why is None:
+            refused.append((w, "the changed tests' cover blocks (the head record) show no run of that mutant's position"
+                            + (" (the record holds no readable blocks)" if blocks is None else "")
+                            + ", so gremlins' NOT COVERED stands: cover it, or prove it equivalent with a "
+                              "Mutant-equivalent line"))
+            continue
+        ok[w] = f"{reason} ({why})"
+    return ok, refused
+
+
+def site_text(w):
+    """A waiver key (path, line, kind, col) as a body line spells it: `<path>:<line>[:<col>][:<KIND>]`."""
+    path, line, kind, col = w
+    return f"{path}:{line}" + (f":{col}" if col else "") + (f":{kind}" if kind else "")
+
+
+def mutants_of(data, status=None):
+    """[(file, line, type, column)] of one package's mutants in its result (those of status only, when
+    given), sorted; column is None where the result gives none."""
+    return sorted(
+        (m_file["file_name"], m["line"], m["type"], m["column"] if type(m.get("column")) is int else None)
+        for m_file in data.get("files") or []
+        for m in m_file.get("mutations") or []
+        if status is None or m.get("status") == status
+    )
+
+
+def covering(waived, mutants):
+    """({(path, line, kind, col): waiver} of each mutant some waiver names alone, [(waiver, [mutant])] of
+    each waiver that matches more than one). A waiver (path, line, kind, col) matches each mutant of
+    mutants ({pkg: [(file, line, type, column)]}) on its line whose kind and column it names or leaves
+    None. One waiver is one proof, so it waives a mutant only when that mutant is the one it matches:
+    one naming a line of several mutants waives none of them (#5792, Security on #5774)."""
+    by_line = collections.defaultdict(list)
+    for pkg, items in mutants.items():
+        for fname, line, kind, col in items:
+            by_line[(f"broker/{pkg}/{fname}", line)].append((kind, col))
+    cover, ambiguous = {}, []
+    for w in waived:
+        path, line, kind, col = w
+        hit = [(path, line, k, c) for k, c in by_line.get((path, line), []) if kind in (None, k) and col in (None, c)]
+        if len(hit) > 1:
+            ambiguous.append((w, sorted(hit, key=lambda m: (m[3] or 0, m[2]))))
+        elif hit:
+            cover[hit[0]] = w  # later waivers win: decide puts body lines last
+    return cover, ambiguous
 
 
 # The waiver record (MUT-waiver-store, #5776). A reviewed `Mutant-equivalent:` proof lives on in
@@ -511,7 +847,10 @@ def waivers(body):
 # of each line of the statement's own syntax, as `mutgate_stmts.go` lists them, or the line alone
 # when it is in no listed statement, whitespace runs as one space), at (which of stmt's lines),
 # after (the code line before the statement's first), occurrence ([i, n]: the i-th of the n lines
-# of the file with that same key), reason, and accepted (`#<PR>` whose review accepted the proof).
+# of the file with that same key), reason, accepted (`#<PR>` whose review accepted the proof), and
+# optionally col (the mutant's column on its line, as the result gives it, #5792): an entry waives a
+# mutant only when no other mutant of its kind on its line (at its col, when it names one) is in the
+# result, so a line of several such mutants needs col.
 # The head's statements are resolved to lines each run; an entry whose key is now on no line, or
 # whose count n differs, is stale and fails the gate, so any edit inside the enclosing declaration
 # (the statement, the code after it that a proof cites, a twin of it) needs the proof read again,
@@ -519,6 +858,7 @@ def waivers(body):
 # text, read as data: a new or changed entry shows as such in the summary, for review as a body line is.
 RECORD = "MUTANTS-EQUIVALENT"
 RECORD_KEYS = {"file", "mutant", "func", "decl", "stmt", "at", "after", "occurrence", "reason", "accepted"}
+RECORD_OPTIONAL = {"col"}
 MUTANT_KIND = re.compile(r"[A-Z][A-Z_]{0,63}")
 RECORD_MAX = 1 << 20
 RECORD_FILE = re.compile(r"[A-Za-z0-9_.-]+\.go")
@@ -569,7 +909,8 @@ def record_entries(text):
             e = json.loads(row)
         except ValueError:
             return None, f"line {i} is not one JSON object"
-        ok = (isinstance(e, dict) and set(e) == RECORD_KEYS
+        ok = (isinstance(e, dict) and RECORD_KEYS <= set(e) <= RECORD_KEYS | RECORD_OPTIONAL
+              and ("col" not in e or (type(e["col"]) is int and e["col"] >= 1))
               and isinstance(e["file"], str) and RECORD_FILE.fullmatch(e["file"]) and not e["file"].endswith("_test.go")
               and isinstance(e["mutant"], str) and MUTANT_KIND.fullmatch(e["mutant"])
               and isinstance(e["func"], str)
@@ -582,7 +923,8 @@ def record_entries(text):
               and isinstance(e["reason"], str) and re.search(r"[A-Za-z]{2}", e["reason"])
               and isinstance(e["accepted"], str) and re.fullmatch(r"#[1-9]\d*", e["accepted"]))
         if not ok:
-            return None, f"line {i} is not an entry of {sorted(RECORD_KEYS)} as tools/mutgate.py's RECORD says"
+            return None, (f"line {i} is not an entry of {sorted(RECORD_KEYS)} (and optionally "
+                          f"{sorted(RECORD_OPTIONAL)}) as tools/mutgate.py's RECORD says")
         out.append(e)
     return out, None
 
@@ -627,7 +969,7 @@ def read_record(pkg, pkg_dir=None):
 
 
 def resolve_record(pkg, entries, keys):
-    """({(path, line, mutant): entry}, [problem]): each entry's line at the head, or why it names none."""
+    """({(path, line, mutant, col): entry}, [problem]): each entry's line at the head, or why it names none."""
     found, problems = {}, []
     for e in entries:
         lines = sorted(n for n, k in keys.get(e["file"], {}).items() if k == _entry_key(e))
@@ -641,15 +983,15 @@ def resolve_record(pkg, entries, keys):
             problems.append(f"{where} was written for occurrence {i} of {n}, and the head has {len(lines)}: "
                             "delete its line from the record, read the proof again, and if it holds add it back with "
                             "`mutgate.py waive` at its current line")
-        elif (f"broker/{pkg}/{e['file']}", lines[i - 1], e["mutant"]) in found:
-            problems.append(f"{where} names the same line and mutant as another entry")
+        elif (site := (f"broker/{pkg}/{e['file']}", lines[i - 1], e["mutant"], e.get("col"))) in found:
+            problems.append(f"{where} names the same line, column and mutant as another entry")
         else:
-            found[(f"broker/{pkg}/{e['file']}", lines[i - 1], e["mutant"])] = e
+            found[site] = e
     return found, problems
 
 
 def record_waivers(pkgs, lister, base=None, head="HEAD"):
-    """({(path, line, mutant): (reason, accepted, new)}, [problem]) of the records of pkgs at the working
+    """({(path, line, mutant, col): (reason, accepted, new)}, [problem]) of the records of pkgs at the working
     tree; new is True for an entry that the merge base's record does not hold word for word."""
     mb = merge_base(base, head) if base else None
     out, problems = {}, []
@@ -677,31 +1019,39 @@ def record_waivers(pkgs, lister, base=None, head="HEAD"):
     return out, problems
 
 
-def record_entry(pkg, fname, line, reason, accepted, keys, mutant=None):
-    """The record entry for mutant (default: a statement deletion) at broker/<pkg>/<fname>:<line> at
-    the working tree, keys being file_keys'."""
+def record_entry(pkg, fname, line, reason, accepted, keys, mutant=None, col=None):
+    """The record entry for mutant (default: a statement deletion) at broker/<pkg>/<fname>:<line> (at
+    column col, when given) at the working tree, keys being file_keys'."""
     mutant = mutant or DELETION
     k = keys[fname][line]
     same = sorted(n for n, o in keys[fname].items() if o == k)
     return {"file": fname, "mutant": mutant, "func": k[0], "decl": k[1], "stmt": list(k[2]), "at": k[3], "after": k[4],
-            "occurrence": [same.index(line) + 1, len(same)], "reason": reason, "accepted": accepted}
+            "occurrence": [same.index(line) + 1, len(same)], "reason": reason, "accepted": accepted,
+            **({"col": col} if col else {})}
 
 
 def cmd_waive(args):
     """Append an entry to each named site's package record, from `Mutant-equivalent:` lines in FILE."""
     rows = waivers(pathlib.Path(args.lines).read_text(encoding="utf-8", errors="replace"))
     if not rows:
-        print(f"mutgate: {args.lines} holds no `Mutant-equivalent: <path>:<line> <reason>` line", file=sys.stderr)
+        print(f"mutgate: {args.lines} holds no `Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>` line",
+              file=sys.stderr)
+        return 1
+    if clash := [site_text(w) for w in rows if w[2] and args.mutant and w[2] != args.mutant]:
+        print(f"mutgate: {', '.join(clash)} names another mutant kind than --mutant {args.mutant}", file=sys.stderr)
         return 1
     by_pkg = collections.defaultdict(list)
-    for (path, line), reason in sorted(rows.items()):
-        by_pkg[package_of(path)].append((path.rsplit("/", 1)[1], line, reason))
+    for (path, line, kind, col), reason in sorted(rows.items(), key=lambda r: site_text(r[0])):
+        by_pkg[package_of(path)].append((path.rsplit("/", 1)[1], line, reason, kind or args.mutant, col))
     with tempfile.TemporaryDirectory() as tmp:
         if (lister := build_lister(tmp)) is None:
             return 1
         for pkg, sites in sorted(by_pkg.items()):
-            keys, problem = file_keys(pkg, [f for f, _, _ in sites], lister)
-            missing = [f"broker/{pkg}/{f}:{n}" for f, n, _ in sites if n not in (keys or {}).get(f, {})]
+            keys, problem = file_keys(pkg, [f for f, *_ in sites], lister)
+            missing = [f"broker/{pkg}/{f}:{n}" for f, n, *_ in sites if n not in (keys or {}).get(f, {})]
+            # A column names a byte of its line (gremlins' and go/token's columns count bytes from 1).
+            missing += [f"broker/{pkg}/{f}:{n}:{c}" for f, n, _, _, c in sites if not problem and n in keys.get(f, {})
+                        and c and c > len((BROKER / pkg / f).read_bytes().split(b"\n")[n - 1])]
             if problem or missing:
                 print(f"mutgate: {problem or 'no such line: ' + ', '.join(missing)}", file=sys.stderr)
                 return 1
@@ -710,7 +1060,7 @@ def cmd_waive(args):
             if problem or bad:
                 print(f"mutgate: {problem or bad}", file=sys.stderr)
                 return 1
-            new = [record_entry(pkg, f, n, reason, args.accepted, keys, args.mutant) for f, n, reason in sites]
+            new = [record_entry(pkg, f, n, reason, args.accepted, keys, kind, col) for f, n, reason, kind, col in sites]
             # Every line of a parsed declaration has its digest; a line outside any has nothing to prove.
             if nodigest := [f"broker/{pkg}/{e['file']}: {e['stmt'][e['at']]!r}" for e in new if not e["decl"]]:
                 print(f"mutgate: {', '.join(nodigest)} is in no top-level declaration, so no entry can key on one",
@@ -725,11 +1075,13 @@ def cmd_waive(args):
                           f"{e['occurrence'][1]}): delete its line, then run waive again", file=sys.stderr)
                 return 1
             # The same site and mutant written again is rewritten, not doubled.
-            have = {(e["file"], e["mutant"], _entry_key(e), tuple(e["occurrence"])) for e in new}
-            kept = [e for e in entries if (e["file"], e["mutant"], _entry_key(e), tuple(e["occurrence"])) not in have]
+            have = {(e["file"], e["mutant"], e.get("col"), _entry_key(e), tuple(e["occurrence"])) for e in new}
+            kept = [e for e in entries
+                    if (e["file"], e["mutant"], e.get("col"), _entry_key(e), tuple(e["occurrence"])) not in have]
             head = [r for r in (text or "").split("\n") if r.lstrip().startswith("#")] or [
                 f"# Mutant-equivalent proofs for broker/{pkg}, keyed by statement: see RECORD in tools/mutgate.py."]
-            body = sorted(kept + new, key=lambda e: (e["file"], e["func"], e["stmt"], e["at"], e["occurrence"], e["mutant"]))
+            body = sorted(kept + new, key=lambda e: (e["file"], e["func"], e["stmt"], e["at"], e["occurrence"], e["mutant"],
+                                                     e.get("col") or 0))
             (BROKER / pkg / RECORD).write_text("\n".join(head + [json.dumps(e, ensure_ascii=False) for e in body]) + "\n")
             print(f"broker/{pkg}/{RECORD}: {len(new)} entries written, {len(body)} in all")
     return 0
@@ -742,22 +1094,24 @@ def cmd_records(args):
         if (lister := build_lister(tmp)) is None:
             return 1
         found, problems = record_waivers(pkgs, lister)
-    for (path, line, mutant), (reason, accepted, _) in sorted(found.items()):
-        print(f"{path}:{line} {mutant} {accepted} {reason}")
+    for (path, line, mutant, col), (reason, accepted, _) in sorted(found.items(), key=lambda f: site_text(f[0])):
+        print(f"{site_text((path, line, None, col))} {mutant} {accepted} {reason}")
     for problem in problems:
         print(f"mutgate: {problem}", file=sys.stderr)
     return 1 if problems else 0
 
 
-def violations(targets, live, waived=None):
-    """(pkg, path, line, kind) of each LIVED mutant on a package's target line that waived (a
-    {(path, line): reason} for a body line, any kind; {(path, line, kind): reason} for a record
-    entry, that kind only) does not name; targets is {pkg: {path: lines}}."""
+def violations(targets, live, waived=None, mutants=None):
+    """(pkg, path, line, kind) of each mutant of live ({pkg: [(file, line, type[, column])]}) on a
+    package's target line that no waiver ({(path, line, kind, col): reason}) names alone among mutants
+    (the package's every mutant, default live; see covering); targets is {pkg: {path: lines}}."""
+    live = {pkg: [(*m, None)[:4] for m in items] for pkg, items in live.items()}
+    cover, _ = covering(waived or {}, live if mutants is None else mutants)
     found = []
     for pkg in sorted(targets):
-        for fname, line, kind in live.get(pkg, []):
+        for fname, line, kind, col in live.get(pkg, []):
             path = f"broker/{pkg}/{fname}"
-            if line in targets[pkg].get(path, ()) and not {(path, line), (path, line, kind)} & set(waived or {}):
+            if line in targets[pkg].get(path, ()) and (path, line, kind, col) not in cover:
                 found.append((pkg, path, line, kind))
     return found
 
@@ -883,7 +1237,8 @@ def result_problem(data, pkg, pkg_dir, added, sites=None):
 def covered_by(pkg, names, tmp, broker=None):
     """({path: lines}, None) of the non-test .go files directly in broker/<pkg>/ that the named
     test functions (every test, for None) run, from one -coverprofile run of the PR's tests (so in
-    the untrusted job only); or (None, problem). A block's lines from its start to its end count."""
+    the untrusted job only), with {path: [[line, col, line, col, ran]]} of every block on those lines
+    (#5864), as ((lines, blocks), None); or (None, problem). A block's lines from its start to its end count."""
     broker = BROKER if broker is None else broker
     profile = pathlib.Path(tmp) / "tests.cover"
     profile.unlink(missing_ok=True)
@@ -893,13 +1248,22 @@ def covered_by(pkg, names, tmp, broker=None):
     # Its output goes to stderr: `plan` prints the matrix on stdout (#4961).
     if subprocess.run([*cmd, "."], cwd=broker / pkg, stdout=sys.stderr).returncode or not profile.exists():
         return None, f"broker/{pkg}/'s tests {'(all)' if names is None else names} fail under -coverprofile"
-    out = {}
-    for name, blocks in covered_blocks(profile.read_text()).items():
+    out, text = {}, profile.read_text()
+    for name, blocks in covered_blocks(text).items():
         f = broker / pkg / name
         if is_source(name) and f.is_file() and not f.is_symlink():
             for (first, _), (last, _) in blocks:
                 out.setdefault(f"broker/{pkg}/{name}", set()).update(range(first, last + 1))
-    return out, None
+    # Every block, run or not, on a covered line, for misread_evidence (#5864): one test binary's
+    # profile can name a block twice (#5803), and it ran if any copy ran.
+    every = collections.defaultdict(dict)
+    for row in text.split("\n")[1:]:
+        if (m := COVER.match(row)) and (p := f"broker/{pkg}/{m.group(1).rsplit('/', 1)[-1]}") in out:
+            b = tuple(int(m.group(i)) for i in range(2, 6))
+            if out[p] & set(range(b[0], b[2] + 1)):
+                every[p][b] = every[p].get(b, 0) | (int(m.group(6)) > 0)
+    blocks = {p: sorted([*b, int(ran)] for b, ran in bs.items()) for p, bs in every.items()}
+    return (out, blocks), None
 
 
 HUNKS = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -1007,9 +1371,13 @@ def outside_lines(data, pkg, mine):
     return data
 
 
-def coverage_record(names, targets):
-    """The record of the lines a package's changed tests cover that `run` writes and targets_for reads."""
-    return {"tests": names, "lines": {p.rsplit("/", 1)[1]: sorted(ls) for p, ls in sorted(targets.items())}}
+def coverage_record(names, targets, blocks=None):
+    """The record of the lines a package's changed tests cover that `run` writes and targets_for reads;
+    at the head also their cover blocks on those lines, [line, col, line, col, ran] each (#5864)."""
+    rec = {"tests": names, "lines": {p.rsplit("/", 1)[1]: sorted(ls) for p, ls in sorted(targets.items())}}
+    if blocks is not None:
+        rec["blocks"] = {p.rsplit("/", 1)[1]: bs for p, bs in sorted(blocks.items())}
+    return rec
 
 
 def base_member(member, dest):
@@ -1041,6 +1409,7 @@ def base_covered(pkg, mb, names, tmp, diff_text):
     got, problem = covered_by(pkg, names, tmp, tree / "broker")
     if problem:
         return None, f"at the base ({mb[:12]}), {problem}"
+    got = got[0]
     move, out = head_line_of(diff_text), {}
     for p, ls in got.items():
         f = BROKER / p.split("/", 1)[1]
@@ -1052,14 +1421,15 @@ def base_covered(pkg, mb, names, tmp, diff_text):
 def record_for(pkg, tests, bases, diff_text, base, tmp):
     """(record, None) of the lines the changed tests of broker/<pkg>/ cover at the head and, as its
     `base` part, at the base (#5762); or (None, problem). Runs the PR's tests: untrusted jobs only."""
-    names = changed_tests(tests, pkg)
+    names = changed_tests(tests, pkg, bases)
     covered, problem = covered_by(pkg, names, tmp)
     if problem:
         return None, problem
+    covered, blocks = covered
     was, problem = base_covered(pkg, merge_base(base, "HEAD"), bases[pkg], tmp, diff_text)
     if problem:
         return None, problem
-    return {**coverage_record(names, covered), "base": coverage_record(bases[pkg], was)}, None
+    return {**coverage_record(names, covered, blocks), "base": coverage_record(bases[pkg], was)}, None
 
 
 def planned_targets(planned, pkg, added, tests, bases):
@@ -1441,8 +1811,16 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
     # fewer workers run when their share would leave a run less than that headroom.
     free = available_memory()
     alone_mem = free // 2 if free else None
+    # A child the tests re-execute from the binary (proc.Main's driver) writes its counters only
+    # into GOCOVERDIR, which it inherits; given that directory as -test.gocoverdir too, the binary
+    # merges them into its profile, as `go test -cover` does (#5803). Else child-only lines read NOT COVERED.
+    counters = tmp / "gocoverdir"
+    shutil.rmtree(counters, ignore_errors=True)
+    counters.mkdir()
     began = time.monotonic()
-    end, peak = watch(subprocess.Popen([str(base), "-test.failfast", f"-test.coverprofile={profile}"], cwd=pkg_dir,
+    end, peak = watch(subprocess.Popen([str(base), "-test.failfast", f"-test.gocoverdir={counters}",
+                                        f"-test.coverprofile={profile}"], cwd=pkg_dir,
+                                       env={**os.environ, "GOCOVERDIR": str(counters)},
                                        start_new_session=True), mem=alone_mem)
     if alone_mem and (end == "over" or 2 * peak > alone_mem):
         return None, (f"broker/{pkg}/'s tests hold {peak >> 20} MB before any statement is deleted, more than "
@@ -1598,7 +1976,7 @@ def join_shards(pkg, shards, added, tests, lister, bases):
             sites, problem = deletion_sites(pkg, targets, lister)
             if problem:
                 return None, f"{f} {problem}"
-        elif mine != targets:
+        elif mine != targets or data.get("targets") != shards[0][1].get("targets"):
             return None, f"{f} records other target lines than {shards[0][0]}: the shards of {pkg} disagree; rerun the mutgate workflow"
     counts = {of for _, of in seen}
     if len(counts) != 1:
@@ -1664,22 +2042,40 @@ def cmd_verify(args):
 def decide(results, added, tests, args, records=({}, [])):
     """Gate the read results against the PR body's waivers and the packages' records (record_waivers'
     pair; a stale entry fails), and write the summary table. A body line wins over a record entry."""
-    body = waivers(pathlib.Path(args.body).read_text(encoding="utf-8", errors="replace") if args.body else "")
+    text = pathlib.Path(args.body).read_text(encoding="utf-8", errors="replace") if args.body else ""
+    body = waivers(text)
     kept, stale = records
     waived = {**{site: f"{reason} (record, {accepted}{', new in this PR' if new else ''})"
                  for site, (reason, accepted, new) in kept.items()}, **body}
     targets = {pkg: t for pkg, (_, t) in results.items()}
-    found = violations(targets, {pkg: survivors_of(d) for pkg, (d, _) in results.items()}, waived)
+    every = {pkg: mutants_of(d) for pkg, (d, _) in results.items()}
+    found = violations(targets, {pkg: survivors_of(d) for pkg, (d, _) in results.items()}, waived, every)
     # A package whose tests change must run every target line (#5762, Security on #5770): a weakened
     # test plus an edit to the lines it ran (or a moved file) would otherwise leave them unrun unseen.
+    # targets_for checked each record's tests against changed_tests and its lines, so the record names them.
+    tested = {pkg: d["targets"]["tests"] for pkg, (d, _) in results.items() if tests_changed(tests, pkg)}
+    # A `Mutant-misread:` line passes a NOT COVERED mutant only (never a LIVED one, in found above) on
+    # a line the changed tests run at the head (#5864).
+    misread, refused = misread_lines(waivers(text, MISREAD), results, tested, every)
     lost = violations({pkg: t for pkg, t in targets.items() if tests_changed(tests, pkg)},
-                      {pkg: uncovered_of(d) for pkg, (d, _) in results.items()}, waived)
-    tested = {pkg: changed_tests(tests, pkg) for pkg in results if tests_changed(tests, pkg)}
+                      {pkg: uncovered_of(d) for pkg, (d, _) in results.items()}, {**waived, **misread}, every)
+    fresh = sorted(((site, reason, accepted) for site, (reason, accepted, new) in kept.items() if new),
+                   key=lambda f: (site_text(f[0]), f[1]))
     write_summary(args.summary, summary(results, tested, waived, {pkg for pkg in results if diff_targets(added, pkg)},
-                                        set(body), stale))
+                                        set(body), stale, fresh, misread, refused))
     for problem in stale:
         print(f"mutgate: {problem}")
-    return report_violations(found, lost) or (1 if stale else 0)
+    for w, why in refused:
+        print(f"mutgate: the Mutant-misread line {site_text(w)} passes nothing: {why}")
+    for w, hit in covering({**waived, **misread}, every)[1]:
+        # Name the kind the builder wrote: a kill claim is never advised into an equivalence proof (L3 on #5870).
+        kind = "Mutant-misread" if w in misread and w not in waived else "Mutant-equivalent"
+        print(f"mutgate: the waiver {site_text(w)} matches {len(hit)} mutants ("
+              + ", ".join(site_text((p, n, k, c)) for p, n, k, c in hit) + "), so it waives none: name the one it "
+              f"{'means' if kind == 'Mutant-misread' else 'proves'} by its column and kind, "
+              f"`{kind}: <path>:<line>:<col>:<KIND> <reason>`")
+    head = {pkg: {f"broker/{pkg}/{n}": set(ls) for n, ls in results[pkg][0]["targets"]["lines"].items()} for pkg in tested}
+    return report_violations(found, lost, head) or (1 if stale else 0)
 
 
 def write_summary(path, text):
@@ -1698,18 +2094,25 @@ VERDICTS = {"TIMED OUT": "killed (timed out)", "NOT COVERED": "not covered", "NO
 ROWS = 2000
 
 
-def summary(results, tested, waived, own=(), body=None, stale=()):
+def summary(results, tested, waived, own=(), body=None, stale=(), fresh=(), misread=None, refused=()):
     """One Markdown table of every mutant on a target line, survivors first, and its verdict.
     tested names the changed tests of each package whose tests changed (None: every test); own
-    names the packages where the diff also adds non-test lines."""
+    names the packages where the diff also adds non-test lines; fresh lists ((path, line, mutant),
+    reason, accepted) of each record entry the base does not hold, whether or not a mutant uses it;
+    misread holds the accepted `Mutant-misread:` lines, read for NOT COVERED mutants only, and refused
+    [(site, why)] the refused ones."""
     lines = ["### mutgate", ""]
     rows, used = [], set()
+    misread = misread or {}
+    cover, ambiguous = covering(waived, {pkg: mutants_of(d) for pkg, (d, _) in results.items()})
+    mcover, mambiguous = covering(misread, {pkg: mutants_of(d) for pkg, (d, _) in results.items()})
+    mused = set()
     for pkg, (data, targets) in sorted(results.items()):
         n = sum(len(v) for v in targets.values())
         lines.append(f"- {cell(pkg)}: {n} target lines, " + (
             "the lines the diff changes" if pkg not in tested
             else ("the lines the diff changes and " if pkg in own else "") + (
-                "the lines every test covers (a change outside one test function)" if tested[pkg] is None
+                "the lines every test covers (a change every test may run)" if tested[pkg] is None
                 else "the lines " + cell(", ".join(tested[pkg])) + " cover")))
         for f in data["files"]:
             path = f"broker/{pkg}/{f['file_name']}"
@@ -1719,14 +2122,19 @@ def summary(results, tested, waived, own=(), body=None, stale=()):
                 col = m.get("column")
                 site = f"{path}:{m['line']}" + (f":{col}" if type(col) is int else "")
                 status = m["status"]
-                reason = waived.get((path, m["line"])) or waived.get((path, m["line"], m.get("type")))
+                w = cover.get((path, m["line"], m.get("type"), col if type(col) is int else None))
+                reason = waived[w] if w else None
+                mw = mcover.get((path, m["line"], m.get("type"), col if type(col) is int else None))
                 if status == "LIVED" and reason:
-                    used.add((path, m["line"]))
+                    used.add(w)
                     rank, verdict = 1, "equivalent: " + cell(reason)
                 elif status == "LIVED":
                     rank, verdict = 0, "**LIVED**: no test fails"
+                elif status == "NOT COVERED" and pkg in tested and mw:
+                    mused.add(mw)
+                    rank, verdict = 1, "misread as not covered: " + cell(misread[mw])
                 elif status == "NOT COVERED" and pkg in tested and reason:
-                    used.add((path, m["line"]))
+                    used.add(w)
                     rank, verdict = 1, "equivalent: " + cell(reason)
                 elif status == "NOT COVERED" and pkg in tested:
                     rank, verdict = 0, "**NOT COVERED**: the PR changes this package's tests, and none runs it"
@@ -1744,7 +2152,20 @@ def summary(results, tested, waived, own=(), body=None, stale=()):
         lines.append(f"| {len(rows) - ROWS} more rows | | not shown |")
     if unused := sorted((set(waived) if body is None else body) - used):
         lines += ["", "Mutant-equivalent lines naming no surviving mutant on a target line: "
-                  + ", ".join(cell(f"{p}:{n}") for p, n in unused)]
+                  + ", ".join(cell(site_text(w)) for w in sorted(unused, key=site_text))]
+    if unread := sorted(set(misread) - mused - {w for w, _ in mambiguous}, key=site_text):
+        lines += ["", "Mutant-misread lines naming no NOT COVERED mutant on a target line: "
+                  + ", ".join(cell(site_text(w)) for w in unread)]
+    if refused:
+        lines += ["", "Mutant-misread lines that pass nothing:", *(f"- {cell(site_text(w))}: {cell(why)}" for w, why in refused)]
+    if ambiguous or mambiguous:
+        lines += ["", "Waivers matching more than one mutant, which waive none of them (#5792):",
+                  *(f"- {cell(site_text(w))}: " + ", ".join(cell(site_text(m)) for m in hit)
+                    for w, hit in ambiguous + mambiguous)]
+    if fresh:
+        lines += ["", f"New {RECORD} entries in this PR (read each proof as a Mutant-equivalent body line is read):",
+                  *(f"- {cell(site_text((p, n, None, col)))} {cell(kind)} ({cell(accepted)}): {cell(reason)}"
+                    for (p, n, kind, col), reason, accepted in fresh)]
     if stale:
         lines += ["", f"Stale {RECORD} entries (each fails the gate):", *(f"- {cell(p)}" for p in stale)]
     return "\n".join(lines) + "\n"
@@ -1779,8 +2200,8 @@ def cmd_report(args):
     live = survivors(args.dir)
     for pkg, items in live.items():
         print(f"{pkg}: {len(items)} surviving")
-        for fname, line, kind in items:
-            print(f"  {fname}:{line} {kind}")
+        for fname, line, kind, col in items:
+            print(f"  {fname}:{line}" + (f":{col}" if col else "") + f" {kind}")
     return 0
 
 
@@ -1875,18 +2296,25 @@ def cmd_gate(args):
     return decide(results, added, tests, args, records) or (1 if bad else 0)
 
 
-def report_violations(found, lost=()):
+def report_violations(found, lost=(), head=None):
+    """Print each violation and its remedy; head ({pkg: {path: lines}}, the head record's lines) is where
+    a changed test still runs a lost line, so only there may gremlins' NOT COVERED be a misread."""
     for pkg, path, line, kind in found:
         # A deletion's line is the first added line of its statement, which may start earlier (#4603).
         what = f"deleting the whole statement holding line {line}" if kind == DELETION else kind
         print(f"mutgate: {path}:{line} {what} survives, on a line of package {pkg} that this PR changes or tests")
     for pkg, path, line, kind in sorted(set(lost)):
+        ran = line in (head or {}).get(pkg, {}).get(path, ())
         print(f"mutgate: {path}:{line} is a target line no test of package {pkg} runs at the head ({kind} not "
-              f"covered), and this PR changes that package's tests: cover it, or name it in a Mutant-equivalent line")
+              f"covered), and this PR changes that package's tests: cover it, or name it in a Mutant-equivalent line"
+              + (f", or, where a changed test runs and kills it (its cover record holds the line), a `Mutant-misread: "
+                 f"{path}:{line}[:<col>][:<KIND>] <test that kills it>` line" if ran
+                 else "; no changed test runs this line at the head any longer"))
     found = [*found, *lost]
     if found:
         print("mutgate: add a test that fails when the line changes; if no test can tell, add a line "
-              "`Mutant-equivalent: <path>:<line> <reason>` to the PR body for that site")
+              "`Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>` to the PR body for that mutant "
+              "(its column and kind as the summary's Site and Mutant cells give them, where its line holds another)")
     return 1 if found else 0
 
 
@@ -1937,10 +2365,12 @@ def main(argv=None):
     p = sub.add_parser("report")
     p.add_argument("dir")
     p = sub.add_parser("waive")
-    p.add_argument("lines", metavar="FILE", help="`Mutant-equivalent: <path>:<line> <reason>` lines, as a PR body holds them")
+    p.add_argument("lines", metavar="FILE",
+                   help="`Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>` lines, as a PR body holds them")
     p.add_argument("--accepted", required=True, metavar="#PR", type=pr_ref, help="the PR whose review accepted these proofs")
-    p.add_argument("--mutant", default=DELETION, type=mutant_kind,
-                   help=f"the one mutant kind the proofs are for (default {DELETION}; or a gremlins type)")
+    p.add_argument("--mutant", type=mutant_kind,
+                   help=f"the one mutant kind the proofs are for, where a line names none (default {DELETION}; "
+                        "or a gremlins type)")
     p = sub.add_parser("records")
     p.add_argument("pkg", nargs="*")
     for name in ("gate", "verify"):

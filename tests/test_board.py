@@ -195,7 +195,7 @@ class PullRequestTest(unittest.TestCase):
 
 
 class StaleLabelTest(unittest.TestCase):
-    """REQ: STALE-1-1, STALE-1-2, STALE-1-3"""
+    """REQ: STALE-1-1, STALE-1-2, STALE-1-3, STALE-1-4"""
 
     PRS = [{"number": 22, "title": "W-3: fix", "state": "closed", "merged_at": "2026-10-10T00:00:00Z"},
            {"number": 23, "title": "A-3: spec", "state": "closed", "merged_at": "2026-10-11T00:00:00Z"},
@@ -260,6 +260,28 @@ class StaleLabelTest(unittest.TestCase):
         # A later merged PR on the same row is a new fact and is flagged again.
         later = self.PRS + [{"number": 30, "title": "W-3: more", "state": "closed", "merged_at": "2026-10-12T00:00:00Z"}]
         self.assertEqual(len(self.run_stale("--comment", comments=[{"body": body}], prs=later)[2]), 1)
+
+    def test_a_named_follow_up_clears_the_flag_until_a_newer_pr_merges(self):
+        note = {"body": board.FOLLOWUP_MARK.format(22) + "\nStill owed: part b, #40.",
+                "author_association": "OWNER", "user": {"login": "ghbmrk"}}
+        code, out, posted = self.run_stale("--comment", comments=[note])
+        self.assertEqual((code, out, posted), (0, "", []))
+        # The marker names one PR: a later merged PR is a new fact and is flagged again.
+        later = self.PRS + [{"number": 30, "title": "W-3: more", "state": "closed", "merged_at": "2026-10-12T00:00:00Z"}]
+        _, out, posted = self.run_stale("--comment", comments=[note], prs=later)
+        self.assertIn("PR #30 merged", out)
+        self.assertEqual(len(posted), 1)
+        self.assertIn(board.FOLLOWUP_MARK.format(30), posted[0][1])
+
+    def test_only_a_collaborator_clears_the_flag(self):
+        mark = board.FOLLOWUP_MARK.format(22)
+        for who in ({"author_association": "NONE", "user": {"login": "outsider"}},
+                    {"author_association": "CONTRIBUTOR", "user": {"login": "outsider"}},
+                    # the bot's own notice quotes the marker
+                    {"author_association": "MEMBER", "user": {"login": board.BOT}},
+                    {}):
+            _, out, _ = self.run_stale(comments=[dict(who, body=mark)])
+            self.assertIn("PR #22 merged", out, who)
 
     def test_workflow_comments_with_the_issue_token_only(self):
         wf = (ROOT / ".github" / "workflows" / "stale-labels.yml").read_text()
