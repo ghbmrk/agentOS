@@ -110,8 +110,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-unmarked-gaps | VULN-unmarked-gaps: unmarked copies the string-fingerprint check cannot see (small packages, minified-only packages, copies inside the holder's own unminified scripts, a second copy in a file that already names the package) | VULN-inlined-minified (#4234) | queued (later; tier A) |
 | MET-owner-export | MET-owner-export: the box writes its weekly owner-outcome counts to records/owner/ (needs brief; after G1) | #4935; G1 | queued (release; needs brief; after G1) |
 | VULN-prune-requalify | VULN-prune-requalify: requalify the pruned OpenClaw image (PLN-5, HLD-3) | VULN-controlui-drop (#4436) | queued (release) |
-| REV-LOW-tools-c | REV-LOW-tools-c: srclint GO_CMD anchoring and continuation lines | follow-up of #5846 | queued(release; tier C; brief to write) |
-| REV-LOW-tools-assume | REV-LOW-tools-assume: record #5850's assumptions in tools/ASSUMPTIONS.md | release finding of #4400 | building(release; tier C; after #5838) |
+| REV-LOW-tools-c | REV-LOW-tools-c: srclint GO_CMD anchoring and continuation lines | follow-up of #5846 | building(release; tier C; brief to write) |
 
 ## Owner channel and approvals (SPEC §10)
 
@@ -152,7 +151,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VOICE-ro-b2 | VOICE-ro-b2: the speech process's recognizer and synthesizer engines (public weights, pinned, tuned on telephone audio), turn timing on the M6 Ultra, and the barge-in cancel cost (R2 from #5182); part b2 of [VOICE-ro](briefs/VOICE-ro.md) | #5171 | queued (tier A; Opus; held on M6 Ultra) |
 | OWN-page-session-checks | OWN-page-session-checks: held owner text failing CH-19 or CH-21 shows as a pointer and cannot be run (CH-14; release of #4941) | #4941 | queued (tier A) |
 | OWN-page-session-hold | OWN-page-session-hold: owner-set hold size (MaxInbox to match) and mid-message code hygiene on held text (CH-14, CH-18; release of #4941) | #4941 | queued (tier A) |
-| KEY-9-reach-b2a | KEY-9-reach-b2a: graph reach over declarations, a decl.reach log entry and its fold (KEY-9, D-307) | #5060 | building (release; tier A; lane primary) |
 | KEY-9-reach-b2b | KEY-9-reach-b2b: grows-then-narrows, the kernel narrows a grown key to its old worth and logs the offer (KEY-9, D-307) | #5060 | queued (release; tier A; lane primary) |
 | KEY-9-reach-inbound-offset | KEY-9-reach-inbound-offset: move kernel/proc's unreached client types out of the trusted core (KRN-2, D-310) | #5678 | queued (release; tier A; lane primary; after #5678's PR) |
 | KEY-9-reach-writer | KEY-9-reach-writer: write decl.reach entries from the owner graph's declarations (KEY-9, CLK-10) | #5672 | queued (release; lane primary) |
@@ -322,13 +320,12 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | NET-2-cap-basis-required | NET-2-cap-basis-required: every signed byte cap names its basis (D-248) | #4578, #5165 | queued (release; tier A) |
 | HOST-1h | HOST-1h: an image's hostcheck liveness answer must stop before its MOR clear, or a shutdown in progress could answer and then halt. Release; from #5266. | #5266, #5256 | queued (release; tier A) |
 | ENF-shared-quota-b | ENF-shared-quota-b: a host cannot fill its shared segment's records (ct timeout plus per-MAC count and meter). Release; split from #4701; waits for Mark's card. | #4701 | queued (release; tier A; lane primary) |
-| VULN-debian-r5-reach | VULN-debian-r5-reach: on a built image, check whether cryptsetup or systemd can reach libssl3t64's AES-GCM-SIV through a cipher name read from a disk header; constrain it or record the reach in the #2919 records. Release; from #5338. | #5338, #2919 | building (release; tier A; lane primary) |
 | HOST-1e2 | HOST-1e2: host-untouched check on the P2-1 image: phases file, image responder ordered to stop before the MOR clear (HOST-1h part 2), image-in-shutdown test, S1 PC procedure. | #326, #5267, #5744 | queued (tier A) |
 | HOST-1e2b | HOST-1e2b: host-untouched check on an S1 PC: the third-system snapshot procedure, RTC offset, the pcrlock index if P2-1 pins one, HOST-1d's opted-in disk excluded by the owner's flag. | #5746 | queued (tier A) |
 | MOR-setup-factors | MOR-setup-factors: an orderly shutdown after the confirm and before a successful enrollment leaves MOR set, because the factors hold /run/agentos-setup. Release; from MOR-setup-hold. | #5836, #4794 | queued (release; tier A) |
-| VULN-guest-node-openssl | VULN-guest-node-openssl: check the openclaw guest's node-bundled OpenSSL against the 2026-11-10 OpenSSL advisories; pin a fixed node or record the acceptance with reach. Release; from #5842. | #5842, #5341 | queued (release; tier A; lane primary) |
+| VULN-guest-node-openssl | VULN-guest-node-openssl: check the openclaw guest's node-bundled OpenSSL against the 2026-11-10 OpenSSL advisories; pin a fixed node or record the acceptance with reach. Release; from #5842. | #5842, #5341 | building (release; tier A; lane primary) |
 | MOR-setup-isolate | MOR-setup-isolate: an isolate before enrollment re-mints the page authority under a printed card; the pageca unit's crash-rerun comment is stale. Release; from MOR-setup-hold. | #5844, #5836 | queued (release; tier A) |
-| VULN-cipher-sweep-tidy | VULN-cipher-sweep-tidy: key import_sweep's [cipher] entries to package versions; refuse malformed, empty, duplicate and overlapping entries; point refusals at the reach notes. Release; from #5842. | #5842, #5341 | queued (release; tier A; lane primary) |
+| VULN-cipher-sweep-tidy | VULN-cipher-sweep-tidy: key import_sweep's [cipher] entries to package versions; refuse malformed, empty, duplicate and overlapping entries; point refusals at the reach notes. Release; from #5842. | #5842, #5341 | building (release; tier A; lane primary) |
 
 ## Model routes and the Codex lane
 
@@ -443,12 +440,10 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MUT-import-widen | MUT-import-widen: an added import should not widen mutgate's targets to the whole package. Release; from #5808. | #5808 | queued (release; tier B) |
 | MUT-waiver-messages | MUT-waiver-messages: mutgate failures name the mutant as path:line:col:KIND, ambiguous waivers are not listed as unused, malformed waiver lines are warned about, and the workflow header shows the new syntax. Release; from #5824. | #5824 | queued (release; tier A) |
 | MUT-failed-test-bounded | MUT-failed-test-bounded: mutgate's failed_test reads a mutant's output unbounded; a flooding mutant crashes the deletion step. Release; from #5796. | #5796 | queued (release; tier C) |
-| OWN-page-session-mut2 | OWN-page-session mutants part 2: old cmd/agentosd survivors in forget, signinhost, recallheld, main, evidence, held, modemenv (198) | #5202 | building (release; tier A) |
 | OWN-page-session-mut4 | OWN-page-session mutants part 4: old broker/recovery survivors (69) | #5202 | building (release; tier A) |
-| OWN-page-session-mut2b | OWN-page-session mutants part 2b: remaining old cmd/agentosd survivors in evidence, forget, recallheld, main, held, signinhost (152) | #5847 | queued (release; tier A) |
-| MUT-notcovered-misread | MUT-notcovered-misread: mutgate record kind for killed mutants gremlins reads as NOT COVERED | #5863 | building (release; tier B) |
+| OWN-page-session-mut2b | OWN-page-session mutants part 2b: remaining old cmd/agentosd survivors in evidence, forget, recallheld, main, held, signinhost (152) | #5847 | building (release; tier A) |
 | MUT-wipe-lint | MUT-wipe-lint: lint that derived key buffers are wiped | #5857 | queued (release; tier B) |
-| VULN-debian-r10 | VULN-debian-r10: accept gcc-14's new Debian 13 advisory DEBIAN-CVE-2026-125709 so image-vulncheck passes again. Release; sixth no-fix Debian round. | #2919, #5764 | building (release; tier A) |
+| VULN-static-check | VULN-static-check: a CI check that finds statically linked libraries in shipped binaries (llama-server, bwrap) and makes image-vulncheck scan their toolchain packages. Release; second sighting, from #5872's reviews. | #5871, #5697, #2919 | queued (release; needs brief) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -487,10 +482,10 @@ issue #4954: body has no board-row block
 issue #4982: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5062: body has no board-row block
 issue #5177: body has no board-row block
-issue #5202: title 'OWN-page-session mutants part 1: kill the survivors mutgate lists at #5194 on its new lines' does not start with '<ID>: '
 issue #5709: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5736: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5756: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5811: a second issue for TIM-1-interval-fu-e (first is #5758)
 issue #5848: title 'OWN-page-session mutants part 3: kill the other old cmd/agentosd survivors (agent, backups, passkeys, lostcard and 21 more files)' does not start with '<ID>: '
+issue #5876: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 ```

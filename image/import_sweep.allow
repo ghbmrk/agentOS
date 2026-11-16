@@ -74,3 +74,54 @@
 
 # libformw (ncurses forms); nothing in the image needs it.
 /usr/lib/x86_64-linux-gnu/libformw.so.6.*
+
+[cipher]
+# The files of the built image (main tree and initrds) whose bytes name an OpenSSL by-name cipher
+# selector (import_sweep.py CIPHER_NAMES: EVP_CIPHER_fetch, EVP_get_cipherbyname, systemd's
+# openssl_cipher_many, EVP_CIPHER_do_all_provided, EVP_CIPHER_is_a, OSSL_ENCODER_CTX_set_cipher) or spell
+# GCM-SIV, each with the references to them that were reviewed (instructions naming them and data
+# relocations against them, and GCM-SIV the times it is spelt), or "*" where they are not counted (#5341).
+# AES-GCM-SIV has no OID or NID in OpenSSL 3.5.7, so it is selected only by one of the names
+# AES-128-GCM-SIV, AES-192-GCM-SIV or AES-256-GCM-SIV (or a MAC or KDF "cipher" parameter, which has to
+# spell one; CMAC and GMAC refuse it by mode). EVP_get_cipherbyname cannot return it at all: it
+# returns only the legacy method table's ciphers (crypto/evp/names.c), and crypto/evp/c_allc.c adds no
+# GCM-SIV; its references are counted so that a change to the file is still seen. A new file or a
+# changed count fails the step: review where its names come from, then update the entry and the
+# openssl records' reach note.
+
+# libcryptsetup's one fetch (crypto_openssl.c _cipher_init, 2.7.5) asks for "<cipher>-<key bits>-<mode>",
+# the mode cut at its first '-' by every caller that takes it from a header (crypto_storage.c
+# crypt_storage_init, for LUKS1 and LUKS2 keyslots and reencryption; tcrypt.c from its fixed table). The
+# name always ends in "-<digits>-<a part with no '-'>", which no AES-GCM-SIV name does ("-GCM-SIV"), so no
+# header, LUKS1's raw cipher field included, can select it. FileVault2 and BitLocker use fixed ciphers.
+/usr/lib/x86_64-linux-gnu/libcryptsetup.so.12.* EVP_CIPHER_fetch=1
+
+# libsystemd-shared's openssl_cipher_many formats "%s-%zu-%s" from its caller; its one caller
+# (tpm2-util.c tpm2_calculate_seal's import path, v257) maps a TPM parent key's algorithm and mode ids
+# to "aes" and one of ctr, ofb, cbc, cfb or ecb, none of which names GCM-SIV.
+/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so EVP_CIPHER_fetch=1 openssl_cipher_many=1
+
+# OpenSSL itself. libcrypto's internal fetches take the name from an OID (none names AES-GCM-SIV) or from
+# its API caller, whose own entry here covers it; libssl fetches only its cipher suites' fixed names, and no
+# TLS suite uses AES-GCM-SIV; the openssl CLI takes a name from its command line, which nothing on the
+# box runs (the records' QUIC and CMS reasoning). Their sites are not counted.
+/usr/lib/x86_64-linux-gnu/libcrypto.so.3 *
+/usr/lib/x86_64-linux-gnu/libssl.so.3 *
+/usr/bin/openssl *
+
+# OpenSSL's loader_attic engine: both fetches are of the fixed name "RC4" (crypto/pem/pvkfmt.c, built
+# into it); nothing on the box loads engines.
+/usr/lib/x86_64-linux-gnu/engines-3/loader_attic.so EVP_CIPHER_fetch=2
+# The legacy provider: its one fetch and one EVP_get_cipherbyname are providers/common/provider_util.c
+# ossl_prov_cipher_load_from_params, for an algorithm's "cipher" parameter; none of legacy's algorithms
+# (old digests and ciphers, PBKDF1, PVKKDF) takes one.
+/usr/lib/x86_64-linux-gnu/ossl-modules/legacy.so EVP_CIPHER_fetch=1 EVP_get_cipherbyname=1
+
+# The openclaw guest's node (nodejs.org v24.22.2) links its own OpenSSL statically. That copy is not
+# libssl3t64 and is outside these records; #5853 checks it against the same advisories.
+/usr/lib/agentos/images/openclaw/usr/local/bin/node *
+# The codex guest's two static (musl) Rust binaries hold no OpenSSL selector name but spell GCM-SIV three
+# times, as OpenSSL's default provider does (AES-128/192/256-GCM-SIV): they may carry a stripped static
+# copy of OpenSSL or another crypto library. Either way not libssl3t64; #5853 identifies it.
+/usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex GCM-SIV=3
+/usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host GCM-SIV=3
