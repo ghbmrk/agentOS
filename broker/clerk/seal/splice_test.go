@@ -294,6 +294,9 @@ func TestAnEntrySetEncodeNeverWrites(t *testing.T) {
 	if n := refusalCount(*held, kept); n != 1 {
 		t.Errorf("wiped the kept value %d times, want once", n)
 	}
+	if _, _, err := s.Get("x/a"); !errors.Is(err, ErrClosed) {
+		t.Errorf("Get after Close: got %v, want ErrClosed", err)
+	}
 	// "QUJDREVG!!!!" decodes to ABCDEF before its bad quantum; the buffer is
 	// DecodedLen(len of the quoted value) = 9 bytes long.
 	part := []byte("ABCDEF\x00\x00\x00")
