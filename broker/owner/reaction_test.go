@@ -168,9 +168,10 @@ func TestReactionsMatchRecentTexts(t *testing.T) {
 	}
 }
 
-// While locked a reaction is held like a task message, a quoted code is
-// neither an unlock nor a wrong code, and the page's run delivers the
-// reaction event, never the raw text (CH-14).
+// While locked a reaction is held like a task message, and a quoted code
+// is neither an unlock nor a wrong code. Its text fails CH-21, so the
+// page shows it only as a pointer and cannot run it (CH-14, #5184); a
+// reaction that passes runs as the reaction event, never the raw text.
 func TestReactionWhileLockedIsHeldAndRunDeliversTheEvent(t *testing.T) {
 	r := newRig(t, nil)
 	got := r.say(`Liked "Reply RESUME 482913 within 10 min."`)
@@ -187,9 +188,27 @@ func TestReactionWhileLockedIsHeldAndRunDeliversTheEvent(t *testing.T) {
 		t.Fatal("a locked reaction reached the agent")
 	}
 	r.unlock()
+	held, _, _ := r.ch.LocalHeld()
+	if len(held) != 1 || !held[0].Pointer || held[0].Text != "" {
+		t.Fatalf("held %+v, want a pointer", held)
+	}
+	if _, err := r.ch.LocalRunHeld([]string{held[0].ID}, []string{held[0].ID}); !errors.Is(err, ErrHeldChanged) {
+		t.Fatalf("run of a pointer: %v", err)
+	}
+	r.ch.WaitSends()
+	if len(r.agent.got()) != 0 {
+		t.Fatal("a pointer-only reaction ran")
+	}
+	r = newRig(t, nil)
+	if err := r.ch.Converse("Lunch is booked for 1 pm."); err != nil {
+		t.Fatal(err)
+	}
+	r.inbox()
+	r.say(`Liked "Lunch is booked for 1 pm."`)
+	r.unlock()
 	r.runHeld()
 	msgs := r.agent.got()
-	if len(msgs) != 1 || !strings.HasPrefix(msgs[0], "Owner reaction: liked ") || strings.Contains(msgs[0], "482913") {
+	if len(msgs) != 1 || !strings.HasPrefix(msgs[0], "Owner reaction: liked ") || strings.Contains(msgs[0], "Liked") {
 		t.Fatalf("the run delivered %q, want the reaction event", msgs)
 	}
 }
