@@ -741,7 +741,15 @@ RERUN_PIN = [
     '            printf \'\\n%s\\n\' "No path the check reads changed since $last; nothing rerun." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0',
     '          fi',
     '          failed=0 reran=0 missed=""',
-    '          pending="$prs"',
+    '          pending="" skipped=0',
+    '          while read -r pr sha; do',
+    '            [ -n "$pr" ] || continue',
+    '            if files=$(gh api --paginate "repos/$REPO/pulls/$pr/files?per_page=100" --jq \'.[] | .filename, (.previous_filename // empty)\') && [ "$(grep -c . <<< "$files")" -lt 3000 ] && { grep -Eq "$measured" <<< "$files"; [ $? = 1 ]; }; then',
+    '              echo "#$pr: changes no path the check reads, so its merged measure is main\'s; not rerun"; skipped=$((skipped + 1))',
+    '            else',
+    '              pending="$pending$pr $sha"$\'\\n\'',
+    '            fi',
+    '          done <<< "$prs"',
     '          for round in $(seq 1 "$ROUNDS"); do',
     '            [ -n "$pending" ] || break',
     '            left=""',
@@ -767,6 +775,7 @@ RERUN_PIN = [
     '          done <<< "$pending"',
     '          total=$(printf \'%s\' "$prs" | grep -c . || true)',
     '          msg="Reran $reran of $total open PRs\' trusted-base runs."',
+    '          [ "$skipped" = 0 ] || msg="$msg $skipped change no path the check reads."',
     '          [ -z "$missed" ] || msg="$msg Not rerun:$missed (rerun their trusted-base check by hand; tools/ASSUMPTIONS.md CI-ceiling-fall)."',
     '          printf \'\\n%s\\n\' "$msg" | tee -a "$GITHUB_STEP_SUMMARY"',
     '          exit "$failed"',
@@ -842,6 +851,10 @@ class Workflow(unittest.TestCase):
                          ("(.files | length) < 300", "(.files | length) < 3000"),
                          (", (.previous_filename // empty)", ""),
                          ("    branches: [main]\n", "    branches: [main]\n    paths: [broker/**]\n"),
+                         # CI-rerun-touch: only a listed PR whose files match no measured path is skipped.
+                         ('[ "$(grep -c . <<< "$files")" -lt 3000 ] && ', ""),
+                         ('{ grep -Eq "$measured" <<< "$files"; [ $? = 1 ]; }', '! grep -Eq "$measured" <<< "$files"'),
+                         ("files=$(gh api --paginate", "files=$(gh api --paginate \"repos/$REPO/pulls/$pr/files\" || gh api --paginate"),
                          ("    runs-on: ubuntu-24.04", "    continue-on-error: true\n    runs-on: ubuntu-24.04")]:
             self.assertIn(old, text)
             self.assertTrue(pin_problems(text.replace(old, new, 1), RERUN_PIN), old)
@@ -875,6 +888,10 @@ case "$1" in
   */compare/*) [ "$1" = "repos/o/r/compare/$(jq -r '.workflow_runs[0].head_sha' "$STUB/last")...$GITHUB_SHA" ] || exit 8
     [ -e "$STUB/compare" ] && exec jq -r "$3" "$STUB/compare"; exit 1 ;;
 esac
+# A PR's files are JSON in $STUB/files/<number>, read with the script's --jq; none: the listing fails.
+case "$1 $2" in
+  "--paginate "*/pulls/*/files*) n=${2#*/pulls/}; f="$STUB/files/${n%%/*}"; [ -e "$f" ] && exec jq -r "$4" "$f"; exit 1 ;;
+esac
 [ "$1" = --paginate ] && { [ -e "$STUB/prs" ] || exit 1; cat "$STUB/prs"; exit 0; }
 sha=${1#*head_sha=}; sha=${sha%%&*}
 f="$STUB/runs/$sha"
@@ -894,13 +911,14 @@ class RerunScript(unittest.TestCase):
         os.makedirs(os.path.join(self.tmp, "bin"))
         os.makedirs(os.path.join(self.tmp, "runs"))
         os.makedirs(os.path.join(self.tmp, "jobs"))
+        os.makedirs(os.path.join(self.tmp, "files"))
         write(self.tmp, "bin/gh", STUB_GH)
         os.chmod(os.path.join(self.tmp, "bin/gh"), 0o755)
 
     PUSH = "2026-11-10T03:05:49Z"  # this rerun run's created_at, no earlier than the push
 
     def run_script(self, prs, runs, refuse=(), rounds=3, started=None, push=PUSH, last={"workflow_runs": []},
-                   compare=None):
+                   compare=None, files=None):
         # last: this workflow's runs listing (None: it cannot be read); compare: the compare JSON
         # from its newest successful run to this push, or a list of changed paths (None: it fails).
         # started: {run id: [job started_at or (started_at, conclusion), ...]}, a job passing unless its
@@ -926,6 +944,10 @@ class RerunScript(unittest.TestCase):
                 write(self.tmp, f"jobs/{i}", json.dumps({"total_count": len(jobs), "jobs": jobs}))
         for i in refuse:
             write(self.tmp, f"refuse-{i}", "")
+        # files: {PR number: [path or (path, previous path), ...]}; a PR left out cannot be listed.
+        for n, paths in (files or {}).items():
+            write(self.tmp, f"files/{n}", json.dumps([{"filename": f[0], "previous_filename": f[1]} if isinstance(f, tuple)
+                                                       else {"filename": f} for f in paths]))
         if last is not None:
             write(self.tmp, "last", json.dumps(last))
         if compare is not None:
@@ -1069,6 +1091,25 @@ class RerunScript(unittest.TestCase):
         rc, out, reran = self.run_script(prs, runs, last=None, compare=[])
         self.assertEqual((rc, reran), (1, []), out)
         self.assertIn("cannot list this workflow's runs", out)
+
+    # REQ: CI-ceiling-fall
+    def test_skips_a_pr_whose_files_the_check_does_not_read(self):
+        # CI-rerun-touch: a PR whose files match no measured path merges to main's measure, so it is
+        # not rerun; a measured file, a rename away from one, a failed listing or 3000 files reruns.
+        prs = [(n, f"s{n}") for n in range(1, 8)]
+        runs = {sha: [f"{n}{n} completed"] for n, sha in prs}
+        rc, out, reran = self.run_script(prs, runs, files={
+            1: ["image/build.sh", "tests/test_x.py", "briefs/broker.md"], 2: [], 3: ["docs/a.md", "broker/x/y.go"],
+            4: [("docs/b.md", "DECISIONS.md")], 6: [f"docs/{i}.md" for i in range(3000)],
+            7: ["tools/ceilings.txt"]})
+        self.assertEqual((rc, sorted(reran)), (0, ["33", "44", "55", "66", "77"]), out)
+        self.assertIn("#1: changes no path the check reads, so its merged measure is main's; not rerun", out)
+        self.assertIn("#2: changes no path the check reads", out)
+        self.assertEqual(pathlib.Path(self.tmp, "summary").read_text(),
+                         "\nReran 5 of 7 open PRs' trusted-base runs. 2 change no path the check reads.\n")
+        # A skipped PR is never listed for runs, so it cannot be waited on or rerun.
+        rc, out, reran = self.run_script([(1, "a1")], {"a1": ["11 in_progress"]}, rounds=1, files={1: ["README.md"]})
+        self.assertEqual((rc, reran), (0, []), out)
 
     # REQ: CI-rerun-fresh-fu
     def test_measured_paths_hold_every_path_the_check_reads(self):

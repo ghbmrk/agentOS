@@ -23,6 +23,13 @@ name: trusted-base-rerun
 # so no push is lost. It checks out nothing and runs no repository or PR code; its token may
 # rerun workflow runs and read PRs, nothing else. PRs that merge within one rerun's latency can
 # still land together; main is then over the ceiling and the check stops further growth.
+# CI-rerun-touch: a PR whose own files (its PR file list, renames' old names too) match no
+# `measured` path is not rerun. A clean merge differs from main only in the PR's files, so every
+# path the check reads is main's on both sides: base and merged head measure the same, so no
+# growth check (parsers, core lines, ceilings) can fire, and a check on the head alone reads
+# main's own state, which this PR neither adds to nor fixes. A conflict fails the check, as above,
+# and GitHub's merge refuses that anyway. A listing that fails or reaches GitHub's 3000-file cap
+# reruns as before. 8 of 18 open PRs on 2026-11-16 changed no such path.
 # tests/test_trusted_base.py pins every line below and runs the script.
 on:
   push:
@@ -58,7 +65,15 @@ jobs:
             printf '\n%s\n' "No path the check reads changed since $last; nothing rerun." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0
           fi
           failed=0 reran=0 missed=""
-          pending="$prs"
+          pending="" skipped=0
+          while read -r pr sha; do
+            [ -n "$pr" ] || continue
+            if files=$(gh api --paginate "repos/$REPO/pulls/$pr/files?per_page=100" --jq '.[] | .filename, (.previous_filename // empty)') && [ "$(grep -c . <<< "$files")" -lt 3000 ] && { grep -Eq "$measured" <<< "$files"; [ $? = 1 ]; }; then
+              echo "#$pr: changes no path the check reads, so its merged measure is main's; not rerun"; skipped=$((skipped + 1))
+            else
+              pending="$pending$pr $sha"$'\n'
+            fi
+          done <<< "$prs"
           for round in $(seq 1 "$ROUNDS"); do
             [ -n "$pending" ] || break
             left=""
@@ -84,6 +99,7 @@ jobs:
           done <<< "$pending"
           total=$(printf '%s' "$prs" | grep -c . || true)
           msg="Reran $reran of $total open PRs' trusted-base runs."
+          [ "$skipped" = 0 ] || msg="$msg $skipped change no path the check reads."
           [ -z "$missed" ] || msg="$msg Not rerun:$missed (rerun their trusted-base check by hand; tools/ASSUMPTIONS.md CI-ceiling-fall)."
           printf '\n%s\n' "$msg" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$failed"
