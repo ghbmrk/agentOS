@@ -3,6 +3,7 @@ package clock
 // REQ: TIM-1, KEY-4, CLK-2
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -798,5 +799,54 @@ func TestTIM1NTSSyncDuringAHoldIsSaved(t *testing.T) {
 	g = r.guard(t, edit)
 	if s := g.Check(bg); s.Authenticated {
 		t.Fatalf("after restart: status = %+v", s)
+	}
+}
+
+func TestTIM1SavedNTSSyncAtANegativeBootClockIsRefused(t *testing.T) {
+	// #5934: a saved NTS sync at a negative boot-clock reading, with its
+	// wall reading moved back alike so it carries forward to the same
+	// time, lengthens the time since the sync and so widens the allowance
+	// (500 hours more is an hour more). load drops it: after a restart
+	// with the box clock stepped 30 minutes, nothing is authenticated, as
+	// with the honest file. Unstepped, the honest file still authenticates.
+	for _, c := range []struct {
+		shift, step time.Duration
+		want        bool
+	}{{0, 0, true}, {0, 30 * time.Minute, false}, {-500 * time.Hour, 0, false}, {-500 * time.Hour, 30 * time.Minute, false}} {
+		path := filepath.Join(t.TempDir(), "clock.json")
+		r := newRig()
+		r.carrier = time.Time{}
+		kind := SyncedNTS
+		edit := func(cf *Config) {
+			syncAs(&kind)(cf)
+			onPath(r, path)(cf)
+		}
+		g := r.guard(t, edit)
+		if s := g.Check(bg); !s.Authenticated {
+			t.Fatalf("%+v: status = %+v", c, s)
+		}
+		g.Flush()
+		v := readSaved(t, path)
+		v.NTSWall, v.NTSMono = v.NTSWall.Add(c.shift), v.NTSMono+c.shift
+		writeSaved(t, path, v)
+		kind = NotSynced
+		r.mu.Lock()
+		r.wall = r.wall.Add(c.step)
+		r.mu.Unlock()
+		g = r.guard(t, edit)
+		if s := g.Check(bg); s.Authenticated != c.want {
+			t.Fatalf("%+v: status = %+v", c, s)
+		}
+	}
+}
+
+func writeSaved(t *testing.T, path string, v saved) {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -1026,14 +1026,17 @@ func (g *Guard) load() {
 	if v.Anchored && sameBoot {
 		g.anchored, g.anchorWall, g.anchorMono = true, v.AnchorWall, v.AnchorMono
 	}
-	if sameBoot {
+	// The boot clock starts at zero, so a saved reading before it is
+	// corrupt: a negative NTS sync would lengthen the time since it and so
+	// widen the allowance (#5934).
+	if sameBoot && v.NTSMono >= 0 {
 		g.ntsWall, g.ntsMono = v.NTSWall, v.NTSMono
 	}
 	mono, wall := g.cfg.Elapsed(), g.cfg.Now()
 	// The carrier reading keeps a known disagreement's width across a
 	// restart, robust to a later wall-clock step, as within one process
 	// (#5811); a reading the boot clock has not reached yet is corrupt.
-	if sameBoot && v.CarrierMono <= mono {
+	if sameBoot && v.CarrierMono >= 0 && v.CarrierMono <= mono {
 		g.carrier, g.carrierMono = v.Carrier, v.CarrierMono
 	}
 	// Alerts from an earlier boot are placed on this boot's clock by their

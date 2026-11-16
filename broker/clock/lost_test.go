@@ -266,3 +266,26 @@ func TestTIM1SavedCarrierFromAnotherBootOrTheFutureIsNotCarried(t *testing.T) {
 		t.Fatalf("carrier %v carried across a reboot", g3.carrier)
 	}
 }
+
+func TestTIM1SavedCarrierAtANegativeBootClockIsNotCarried(t *testing.T) {
+	// #5934: a saved carrier reading at a negative boot-clock reading is a
+	// corrupt or tampered file, so a restart drops it; the same reading at
+	// zero, the boot clock's start, is carried.
+	for _, at := range []time.Duration{0, -time.Hour} {
+		r := newRig()
+		path := filepath.Join(t.TempDir(), "clock.json")
+		g := r.guard(t, onPath(r, path))
+		g.Check(bg)
+		g.Flush()
+		v := readSaved(t, path)
+		if v.CarrierMono != 0 || v.Carrier.IsZero() {
+			t.Fatalf("saved carrier %v at %v", v.Carrier, v.CarrierMono)
+		}
+		v.Carrier, v.CarrierMono = v.Carrier.Add(at), at
+		writeSaved(t, path, v)
+		g1 := r.guard(t, onPath(r, path))
+		if carried := !g1.carrier.IsZero(); carried != (at == 0) || carried && g1.carrierMono != at {
+			t.Fatalf("at %v: carrier %v at %v", at, g1.carrier, g1.carrierMono)
+		}
+	}
+}
