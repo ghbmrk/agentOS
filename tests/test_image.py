@@ -5677,7 +5677,10 @@ class ExecAllowTest(unittest.TestCase):
                                       # #2622: bus and polkit policy.
                                       r"(etc|usr/share)/polkit-1/rules\.d/[^/]+|usr/share/polkit-1/actions/[^/]+|"
                                       r"etc/dbus-1/.+|usr/share/dbus-1/(system\.d/[^/]+|system-services/[^/]+|"
-                                      r"system\.conf))$")
+                                      r"system\.conf)|"
+                                      # #5818: every file systemd merges into the bus daemon's units.
+                                      r"(etc|usr/local/lib|usr/lib)/systemd/system/(dbus\.(service|socket)|"
+                                      r"(dbus\.(service|socket)|service|socket)\.d/[^/]+\.conf))$")
                 self.assertRegex(value, r"^(sha256:[0-9a-f]{64}|mask)$")
         # The image's own rules file is on it by its hash, so an edit to it fails here first.
         tpm = (MK / "mkosi.extra" / self.TPM).read_text()

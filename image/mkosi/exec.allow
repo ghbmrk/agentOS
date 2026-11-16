@@ -103,3 +103,5 @@ usr/share/dbus-1/system-services/org.freedesktop.resolve1.service	sha256:5fc8808
 usr/share/dbus-1/system-services/org.freedesktop.systemd1.service	sha256:eac6205bbfde5563ebdd74f9d420db2d19b1fd2fadc7bc47ae8d55845a8bb82d
 usr/share/dbus-1/system-services/org.freedesktop.timedate1.service	sha256:0f3891c48db89bfaff72f50ab239b0a500a651a14998ce25d50373bd33d17ec9
 usr/share/dbus-1/system.conf	sha256:c0a02340950ce376ccee26d58df2c77466c534dcd368b3486b4b6a60d3741f6b
+usr/lib/systemd/system/dbus.service	sha256:dd0c15ee9b45ee75295d0d44e81052dbd20302db600ae80ebd6ede076eefad0f
+usr/lib/systemd/system/dbus.socket	sha256:e05359bbdc083b8db2b49542b26429166b5e13367a63668a4e8ff8a1b496f7ae
