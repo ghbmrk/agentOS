@@ -3,7 +3,9 @@
 
 Gremlins itself is not run: the gate reads its JSON, so fixtures stand in for it.
 """
+import contextlib
 import fnmatch
+import io
 import json
 import os
 import pathlib
@@ -300,9 +302,10 @@ class Claimed(unittest.TestCase):
         self.assertEqual(mutgate.claimed(DIFF, packages=["hint", "mail"]), ["hint"])
         self.assertEqual(mutgate.claimed(DIFF, packages=["mail"]), [])
         self.assertEqual(mutgate.claimed(DOCS_ONLY, packages=["hint"]), [])
-        # A non-Go file in the package is no claim; a test file alone is (#4908).
+        # A non-Go file of no package is no claim; a test file alone is (#4908). A data file of a
+        # package is (#5779): see DataFiles.
         other = DIFF.replace("hint/hint.go", "hint/notes.md").replace("hint/hint_test.go", "hint/x.json")
-        self.assertEqual(mutgate.claimed(other, packages=["hint"]), [])
+        self.assertEqual(mutgate.claimed(other, packages=["hint"]), [])  # no broker/hint/ here
         tests_only = DIFF.split("diff --git a/broker/hint/hint_test.go")[1]
         self.assertEqual(mutgate.claimed("diff --git a/broker/hint/hint_test.go" + tests_only, packages=["hint"]), ["hint"])
 
@@ -669,6 +672,27 @@ class Verify(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("broker/netguard/a.go:2 ARITHMETIC_BASE survives", r.stdout)
 
+    def test_not_covered_on_an_added_line_fails_where_tests_are_unchanged(self):
+        # L3 R1 and Security S2 on #5770 (#5779): NOT COVERED failed only where the diff changed the
+        # package's tests, so new code with no test (or moved in with its test deleted) passed. It
+        # fails in every gated package; `Mutant-uncovered:`, the same waiver as `Mutant-equivalent:`,
+        # names one no test can reach.
+        # REQ: MUT-deleted-test-own-lines-fu
+        r = self.verify({"netguard.json": self.result("NOT COVERED")}, summary=True)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("broker/netguard/a.go:2 is a target line no test of package netguard runs at the head", r.stdout)
+        self.assertIn("name it in a Mutant-uncovered line", r.stdout)
+        self.assertIn("**NOT COVERED**: no test of the package runs it", r.summary)
+        for word in ("uncovered", "equivalent"):
+            with self.subTest(word):
+                r = self.verify({"netguard.json": self.result("NOT COVERED")}, summary=True,
+                                body=f"Mutant-{word}: broker/netguard/a.go:2 a has no reader, so no test can run it\n")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertIn("waived as uncovered (no test can run it): a has no reader", r.summary)
+        r = self.verify({"netguard.json": self.result("LIVED")},
+                        body="Mutant-uncovered: broker/netguard/a.go:2 a has no reader, so no test can tell\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)  # one waiver, two spellings
+
     def test_a_claimed_package_without_a_result_fails(self):
         # A deleted or never-written result must not read as "nothing survived".
         for results in ({}, {"other.json": self.result("KILLED")}, {"netguard.json": "{"}):
@@ -984,6 +1008,36 @@ class Deletion(unittest.TestCase):
             self.assertEqual(mutgate.run_tests(stub, d, 5), "LIVED")
             (stub).write_text("#!/bin/sh\nexit 1\n")
             self.assertEqual(mutgate.run_tests(stub, d, 5), "KILLED")
+
+    def test_failed_test_reads_a_flooded_output_bounded(self):
+        # MUT-failed-test-bounded (#5834, from #5796): a deletion that loops logging filled BINARY.out
+        # with gigabytes, and a whole read raised MemoryError and lost the shard's verdict. Only each
+        # end is read, in whole lines; the test that failed is still named from either end.
+        # REQ: MUT-failed-test-bounded
+        flood = b"http: superfluous response.WriteHeader call\n" * 400
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(mutgate, "OUTPUT_READ", 1000):
+            binary, out = pathlib.Path(d) / "t.test", pathlib.Path(d) / "t.out"
+            reads = []
+            real = open
+
+            def counted(*a, **kw):
+                f = real(*a, **kw)
+                orig = f.read
+                f.read = lambda n=-1: reads.append(len(b := orig(n))) or b
+                return f
+            for name, text, want in (
+                    ("before the flood", b"--- FAIL: TestHead (0.01s)\n" + flood, "TestHead"),
+                    ("after it", flood + b"--- FAIL: TestTail (9.00s)\n", "TestTail"),
+                    ("memory cap", flood + b"\n--- FAIL: memory_cap\n", "memory_cap"),
+                    ("in the middle only", flood + b"--- FAIL: TestMid\n" + flood, None),
+                    ("short", b"--- FAIL: TestShort\n", "TestShort"),
+                    ("cut at the head's end", b"x" * 980 + b"\n--- FAIL: TestLongName\n" + flood, None)):
+                with self.subTest(name):
+                    out.write_bytes(text)
+                    reads.clear()
+                    with mock.patch("builtins.open", counted):
+                        self.assertEqual(mutgate.failed_test(binary), want)
+                    self.assertLessEqual(sum(reads), max(len(text), 0) if len(text) <= 2000 else 2000)
 
     @unittest.skipUnless(os.path.isdir("/proc/self"), "the memory cap reads /proc")
     def test_a_test_run_past_its_memory_cap_is_killed_with_its_children(self):
@@ -1544,9 +1598,10 @@ func TestDown(t *testing.T) {
 
 
 class TestOnly(unittest.TestCase):
-    def repo(self, d, test_pr, src=TWO_SRC, test_base=TWO_TEST, src_pr=None):
+    def repo(self, d, test_pr, src=TWO_SRC, test_base=TWO_TEST, src_pr=None, base_extra=None):
         """A temp repo whose last commit changes broker/hint/hint_test.go to test_pr, and
-        broker/hint/hint.go to src_pr when given."""
+        broker/hint/hint.go to src_pr when given; base_extra {name: text} are files of broker/hint/
+        in the base commit."""
         git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
         shutil.copytree(ROOT / "tools", pathlib.Path(d) / "tools")
         shutil.copytree(ROOT / "broker" / "core", pathlib.Path(d) / "broker" / "core")
@@ -1555,6 +1610,9 @@ class TestOnly(unittest.TestCase):
         pkg.mkdir()
         (pkg / "hint.go").write_text(src)
         (pkg / "hint_test.go").write_text(test_base)
+        for name, text in (base_extra or {}).items():
+            (pkg / name).parent.mkdir(parents=True, exist_ok=True)
+            (pkg / name).write_text(text)
         git("init", "-q")
         git("add", "-A")
         git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "base")
@@ -1793,13 +1851,18 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             self.assertIn("holds no record of the lines that ['TestDown'] covers", r.stderr)
             self.assertEqual(git("status", "--porcelain", "--", "broker").stdout, "")
 
-    def gate_run(self, d, pr_test, base_test, src_pr=None, extra=None, move=None):
+    def gate_run(self, d, pr_test, base_test, src_pr=None, extra=None, move=None, base_extra=None):
         """(verify's result, the lines gremlins was given) for a PR of pr_test (and src_pr, extra
-        {name: text} new files in broker/hint/, and hint.go renamed to move), through plan, run,
-        delete and verify."""
-        git = self.repo(d, pr_test, test_base=base_test, src_pr=src_pr)
+        {name: text} new or changed files in broker/hint/ (None: deleted) over base_extra's, and hint.go
+        renamed to move), through plan, run, delete and verify."""
+        git = self.repo(d, pr_test, test_base=base_test, src_pr=src_pr, base_extra=base_extra)
         for name, text in (extra or {}).items():
-            (pathlib.Path(d) / "broker" / "hint" / name).write_text(text)
+            f = pathlib.Path(d) / "broker" / "hint" / name
+            if text is None:
+                f.unlink()
+            else:
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(text)
         if move:
             git("mv", "broker/hint/hint.go", f"broker/hint/{move}")
         if extra or move:
@@ -1876,6 +1939,51 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
                 self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
                 self.assertIn("broker/hint/hint.go:4 CONDITIONALS_NEGATION survives", r.stdout)
 
+    def test_a_weakened_test_table_fails_on_the_lines_its_base_version_ran(self):
+        # Security S1 on #5770 (#5779): the trigger read only _test.go changes, so dropping a case row
+        # from a test's testdata/ table, or emptying it, plus a comment line passed: TestUp no longer
+        # reaches the clamp, and nothing ran it. A changed data file now changes its package's tests,
+        # every one, so the base's run of them names `return 10` (line 5) and the head runs it nowhere.
+        # The same holds for a file the package's code names outside testdata/.
+        # REQ: MUT-deleted-test-own-lines-fu
+        def reader(path):
+            return TWO_TEST.replace('import "testing"', 'import (\n\t"os"\n\t"strconv"\n\t"strings"\n\t"testing"\n)').replace(
+                'if Up(1) != 2 || Up(20) != 10 {\n\t\tt.Fatal("up")\n\t}',
+                f'b, err := os.ReadFile("{path}")\n\tif err != nil {{\n\t\tt.Fatal(err)\n\t}}\n'
+                '\tf := strings.Fields(string(b))\n\tfor i := 0; i+1 < len(f); i += 2 {\n'
+                '\t\tin, _ := strconv.Atoi(f[i])\n\t\twant, _ := strconv.Atoi(f[i+1])\n'
+                '\t\tif Up(in) != want {\n\t\t\tt.Fatal("up", in)\n\t\t}\n\t}')
+        comment = TWO_SRC + "// Down is Up's inverse below the clamp.\n"
+        table = "1 2\n20 10\n"
+        cases = {
+            "a row dropped, beside an added line": ("testdata/up.txt", "1 2\n", comment),
+            "the table emptied, data only": ("testdata/up.txt", "", None),
+            "a nested testdata file emptied": ("testdata/cases/up.txt", "", None),
+            "a named file beside the code emptied": ("up.txt", "", None),
+        }
+        for name, (path, pr, src) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                test = reader(path)
+                r, seen = self.gate_run(d, test, test, src, extra={path: pr}, base_extra={path: table})
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn(5, seen)
+                self.assertIn("broker/hint/hint.go:5 is a target line no test of package hint runs at the head", r.stdout)
+
+    def test_an_archive_that_fails_prints_the_problem(self):
+        # L3 R3 on #5770 (#5779): a failed `git archive` wrote no tar, and tarfile's ReadError came
+        # before the exit code was read, so plan stopped with a traceback. It is the formatted problem.
+        # REQ: MUT-deleted-test-own-lines-fu
+        with tempfile.TemporaryDirectory() as d:
+            git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+            (pathlib.Path(d) / "f").write_text("x\n")
+            git("init", "-q")
+            git("add", "-A")
+            git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "base")
+            with mock.patch.object(mutgate, "ROOT", pathlib.Path(d)):
+                got, problem = mutgate.base_covered("hint", "0" * 40, None, d, "")
+            self.assertIsNone(got)
+            self.assertRegex(problem, r"^`git archive 000000000000` failed \(exit \d+\)$")
+
     def test_base_tree_skips_a_link_the_data_filter_refuses(self):
         from unittest import mock
         # #5523 put an absolute symlink on main, and the data filter's AbsoluteLinkError failed every
@@ -1891,8 +1999,12 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             git("init", "-q")
             git("add", "-A")
             git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "base")
-            with mock.patch.object(mutgate, "ROOT", pathlib.Path(d)):
+            err = io.StringIO()
+            with mock.patch.object(mutgate, "ROOT", pathlib.Path(d)), contextlib.redirect_stderr(err):
                 self.assertEqual(mutgate.base_covered("absent", "HEAD", None, d, ""), ({}, None))
+            # L3 on #5781 (#5779): plan names each member it leaves out.
+            self.assertEqual(sorted(err.getvalue().splitlines()), [
+                f"mutgate: the base tree leaves out spikes/{n}, a link tar's data filter refuses" for n in ("abs", "up")])
             tree = pathlib.Path(d) / "base-tree" / "spikes"
             self.assertEqual((tree / "unit").read_text(), "x\n")
             self.assertEqual(os.readlink(tree / "rel"), "unit")
@@ -2278,6 +2390,81 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
+def data_diff(path, kind="change"):
+    """A -U0 diff of one file: a changed line, an added empty file (no hunk), or a deleted one."""
+    head = f"diff --git a/{path} b/{path}\n"
+    if kind == "empty":
+        return head + "new file mode 100644\nindex 0000000..e69de29\n"
+    if kind == "delete":
+        return head + f"deleted file mode 100644\n--- a/{path}\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
+    return head + f"--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-x\n+y\n"
+
+
+class DataFiles(unittest.TestCase):
+    """MUT-deleted-test-own-lines-fu (#5779, Security S1 on #5770): a changed data file of a package
+    changes its tests, every one of them."""
+
+    def tree(self, d, files):
+        broker = pathlib.Path(d) / "broker"
+        for name, text in files.items():
+            (broker / name).parent.mkdir(parents=True, exist_ok=True)
+            (broker / name).write_text(text)
+        return mock.patch.object(mutgate, "BROKER", broker)
+
+    def test_a_data_file_changes_its_owners_tests(self):
+        # REQ: MUT-deleted-test-own-lines-fu
+        code = {"hint/hint.go": "package hint\n", "hint/hint_test.go": 'package hint\n// reads "cases.json"\nvar _ = "cases.json"\n',
+                "hint/static/x.go": "package static\n", "hint/tmpl/a.html": ""}
+        with tempfile.TemporaryDirectory() as d, self.tree(d, code):
+            for path, owner in (("broker/hint/testdata/a.txt", "hint"),
+                                ("broker/hint/testdata/deep/b.go", "hint"),     # a Go fixture is data too
+                                ("broker/hint/testdata/c_test.go", "hint"),
+                                ("broker/hint/cases.json", "hint"),
+                                ("broker/hint/tmpl/a.html", "hint"),            # no .go there: its parent's
+                                ("broker/hint/static/s.css", "hint/static"),
+                                ("broker/hint/notes.txt", "hint"),              # any non-Markdown file counts
+                                ("broker/hint/ASSUMPTIONS.md", None),           # no .go file names it
+                                ("broker/hint/MUTANTS-EQUIVALENT", None),       # records_changed reads it
+                                ("broker/go.sum", None),
+                                ("broker/gone/testdata/a.txt", None)):
+                for kind in ("change", "empty", "delete"):
+                    with self.subTest(path=path, kind=kind):
+                        added, tests = mutgate.added_lines(data_diff(path, kind))
+                        self.assertEqual(mutgate.touched(added, tests), {owner} - {None})
+                        if owner:
+                            self.assertTrue(mutgate.tests_changed(tests, owner))
+                            self.assertIsNone(mutgate.head_tests(tests, owner))  # every test
+                            self.assertEqual(mutgate.diff_targets(added, owner), {})
+                            self.assertEqual(mutgate.claimed(data_diff(path, kind), packages=[owner]), [owner])
+            # A quoted name is read from its header too.
+            q = 'diff --git "a/broker/hint/testdata/\\303\\251.txt" "b/broker/hint/testdata/\\303\\251.txt"\nnew file mode 100644\n'
+            self.assertEqual(mutgate.touched(*mutgate.added_lines(q)), {"hint"})
+
+    def test_a_markdown_file_counts_where_code_can_name_it(self):
+        # ASSUMPTIONS.md changes in about a third of broker merges, and most packages' code never reads
+        # it, so it counts only where a .go file can name it: by name, by a glob, by listing `.` or
+        # climbing out with `..`, or through a link. Comments name nothing.
+        # REQ: MUT-deleted-test-own-lines-fu
+        for name, src, counts in (
+                ("by name", 'var _ = os.ReadFile("ASSUMPTIONS.md")', True),
+                ("by embed", "//go:embed ASSUMPTIONS.md\nvar s string", True),
+                ("by a glob", 'var _, _ = filepath.Glob("*.md")', True),
+                ("by a listing", 'var _, _ = os.ReadDir(".")', True),
+                ("by climbing out", 'var _ = filepath.WalkDir("..", nil)', True),
+                ("by a relative path", 'var _ = os.ReadFile("../hint/ASSUMPTIONS.md")', True),
+                ("in a comment", "// see ASSUMPTIONS.md", False),
+                ("another glob", 'var _, _ = filepath.Glob("*.go")', False),
+                ("a dot elsewhere", 'var _ = strings.Split(h, ".")', False),
+                ("an absolute listing", 'var _, _ = os.ReadDir("/proc/self/fd")', False)):
+            with self.subTest(name), tempfile.TemporaryDirectory() as d, \
+                    self.tree(d, {"hint/hint.go": "package hint\n", "hint/hint_test.go": f"package hint\n\n{src}\n"}):
+                got = mutgate.touched(*mutgate.added_lines(data_diff("broker/hint/ASSUMPTIONS.md")))
+                self.assertEqual(got, {"hint"} if counts else set())
+        with tempfile.TemporaryDirectory() as d, self.tree(d, {"hint/hint.go": "package hint\n"}):
+            os.symlink("hint.go", pathlib.Path(d) / "broker" / "hint" / "link.go")
+            self.assertEqual(mutgate.data_owner("broker/hint/ASSUMPTIONS.md"), "hint")
+
+
 class Plan(unittest.TestCase):
     def test_a_plan_past_the_matrix_limit_names_a_remedy(self):
         # #4983: a refused plan says what to do next. Each claimed package plans 100 shards here.
@@ -2373,8 +2560,8 @@ class Summary(unittest.TestCase):
         body = [l for l in text.split("\n") if l.startswith("| broker/")]
         self.assertEqual(body, [
             "| broker/p/a.go:2:1 | B | **LIVED**: no test fails |",
-            # The package's tests change ({"p": None}), so a target line no test runs fails (#5762).
-            "| broker/p/a.go:4:1 | D | **NOT COVERED**: the PR changes this package's tests, and none runs it |",
+            # A target line no test runs fails (#5762; in every package since #5779).
+            "| broker/p/a.go:4:1 | D | **NOT COVERED**: no test of the package runs it |",
             "| broker/p/a.go:3:2 | STATEMENT\\_DELETION | killed by TestX |",
             "| broker/p/a.go:3:4 | STATEMENT\\_DELETION | killed |",
             "| broker/p/a.go:3:5 | C | killed (gremlins names no test) |",
