@@ -328,3 +328,22 @@ func hasNeedle(fs []Finding, name string) bool {
 	}
 	return false
 }
+
+// An empty needle list is refused rather than built into a scanner that
+// passes every scan (#5911): before the refusal, NewScanner(nil) left
+// maxLen at 0 and Reader panicked on a stream of 1 MiB or more. A scanner
+// with a needle reads 2 MiB of zeros, two full blocks, with no finding.
+func TestNewScannerRefusesNoNeedlesAndScansAStreamOfTwoBlocks(t *testing.T) {
+	for _, ns := range [][]Needle{nil, {}} {
+		if s, err := NewScanner(ns); err == nil || s != nil {
+			t.Errorf("NewScanner(%#v) = %v, %v; want a refusal", ns, s, err)
+		}
+	}
+	s, err := NewScanner([]Needle{{Name: "short", Value: []byte("needle-8")}})
+	must(t, err)
+	got, err := s.Reader("zeros", bytes.NewReader(make([]byte, 2<<20)))
+	must(t, err)
+	if len(got) != 0 {
+		t.Errorf("2 MiB of zeros: %v, want no finding", got)
+	}
+}
