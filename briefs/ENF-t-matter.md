@@ -9,11 +9,13 @@ Board section: Devices, hardware and image (SPEC §13-14). Work item #3702 (ENF-
 ## Part a: build pin, launcher and confinement
 
 1. Add `broker/enforcer/radio/matter/connectedhomeip.pin`, holding one commit of project-chip/connectedhomeip. Add `tools/build-matter.sh OUTDIR`, which builds one static, position-independent controller binary (`-static-pie`, as ot-daemon is) with only the clusters the adapter needs: On/Off, Level Control, Door Lock and Boolean State. It has no Python, no chip-tool shell and no BlueZ (D-253). Its BLE layer is the custom transport built in part b. Until then it is built without BLE.
-2. Add a CI job in `.github/workflows/ci.yml`, keyed on the script and the pin as the ot-bin cache is, that builds the binary and runs the Matter tests as root.
+2. In CI, follow the OpenThread pattern in `ci.yml`'s `machines` job (the `otcache` steps), as steps of that job and not a new job. `tests/test_ci_scope.py` pins the job set, and branch protection matches required checks by job id (CIMG-c), so a new job would fail those tests and its failure would not block a merge. Add four steps: a cache restore keyed on `tools/build-matter.sh` and the pin, a build if the cache misses, a cache save on main only, and the root test step through `tools/require_ran.py`.
+   **Timeout.** `machines` has `timeout-minutes: 60`, and its existing steps use part of that. The cache is saved only on main, so every push of the building PR builds cold. A cold connectedhomeip bootstrap and build on a hosted 4-core runner is estimated (not measured) at 30 to 60 minutes. Raise `machines` to `timeout-minutes: 120` in the same PR, and record the cold and warm step times from the PR's first CI run in its body. If the cold build alone is over 90 minutes, stop and report on #3702 instead of raising the limit again. Two fallbacks need their own decision: a smaller GN target, or a pinned prebuilt binary checked by hash.
+   **Build shape.** connectedhomeip's Linux platform uses GLib by default. If build arguments cannot produce a `-static-pie` controller with no GLib and no BlueZ, stop and report on #3702, as for the network case. Do not ship a dynamic binary into a view that has no loader.
 3. Add the launcher, which runs under `confine.Matter` and joins Thread's network namespace and nothing else (radio ASSUMPTIONS ENF-t-2). It sees only its storage directory.
 4. Carry two release findings from the ENF-j delta L3 (#3703 comment 6471438160, listed on #3702). First, add `open_tree_attr` to the mount deny list, and build the namespace and mount class from one table that a test checks against the kernel's syscall list. Second, each refusal check must tell the filter apart from the kernel, by running where the call would otherwise succeed or by expecting the filter's own errno. A mutant with each deny line removed must fail it. The same goes for #4125's finding on `probeNet` (#3702 comment of 2026-10-31 07:05Z).
 
-**Scope:** `broker/enforcer/radio/matter/connectedhomeip.pin` (new), `broker/enforcer/radio/matter/matter.go` (new), `broker/enforcer/radio/matter/matter_test.go` (new), `broker/enforcer/radio/matter/ASSUMPTIONS.md` (new), `tools/build-matter.sh` (new), `.github/workflows/ci.yml` (one job), `broker/enforcer/radio/confine/confine.go`, `broker/enforcer/radio/confine/filter.go`, `broker/enforcer/radio/confine/filter_test.go`, `broker/enforcer/radio/stacks_test.go`, `broker/enforcer/radio/ASSUMPTIONS.md`.
+**Scope:** `broker/enforcer/radio/matter/connectedhomeip.pin` (new), `broker/enforcer/radio/matter/matter.go` (new), `broker/enforcer/radio/matter/matter_test.go` (new), `broker/enforcer/radio/matter/ASSUMPTIONS.md` (new), `tools/build-matter.sh` (new), `.github/workflows/ci.yml` (four steps in `machines`, and its `timeout-minutes` line), `broker/enforcer/radio/confine/confine.go`, `broker/enforcer/radio/confine/filter.go`, `broker/enforcer/radio/confine/filter_test.go`, `broker/enforcer/radio/stacks_test.go`, `broker/enforcer/radio/ASSUMPTIONS.md`.
 
 **Acceptance tests:**
 - NET-2: `radio::TestStacksConfined`, extended to Matter. The process sees only `lo`, `wpan0` and `infra0`, cannot read the policy store, cannot enter a new namespace or mount, and holds the profile's seccomp filter. Catches a controller run unconfined.
@@ -38,7 +40,7 @@ Board section: Devices, hardware and image (SPEC §13-14). Work item #3702 (ENF-
 
 ## Both parts
 
-**Guard files:** `.github/workflows/ci.yml` (part a, one job).
+**Guard files:** `.github/workflows/ci.yml` (part a: four steps in `machines`, and its timeout line).
 
 **Dependencies:** ENF-k (#3669) is closed, #3906 (the BLE process) is merged, and Thread (#4125) is merged. Order: part a, then part b. ENF-l-b2 part b starts Matter once part a merges. KERNEL-trim part b (#4094) runs after this row.
 

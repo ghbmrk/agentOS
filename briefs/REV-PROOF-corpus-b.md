@@ -15,7 +15,7 @@ Board section: Process and tooling. Work item #4916, split from #4910 (REV-PROOF
 2. Where the reference systemd cannot answer a case offline, skip it with a named reason. The class inherits `MustRun`, so under `AGENTOS_REQUIRE_REFERENCE_TOOLS=1` a skip fails, as the other reference diffs do.
 3. Add the class to `ReferenceDiffsRanTest`'s tuple.
 
-**Scope:** `tests/test_image_unit_diff.py` (new: corpus, oracle calls, tests), `tests/test_image.py` (only the `ReferenceDiffsRanTest` tuple line), this brief. No edit to `image/mkosi/mkosi.finalize`. If the differential finds that a rule disagrees with systemd on main, that is a finding. Class it as a blocker if it is an exploit path, and otherwise as a release row. The fix does not go in this PR.
+**Scope:** `tests/test_image_unit_diff.py` (new: corpus, oracle calls, tests), `tests/test_image.py` (only the import of the new class and the `ReferenceDiffsRanTest` tuple line), this brief. No edit to `image/mkosi/mkosi.finalize`. If the differential finds that a rule disagrees with systemd on main, that is a finding. Class it as a blocker if it is an exploit path, and otherwise as a release row. The fix does not go in this PR.
 
 **Acceptance tests:**
 - DEV-2: `tests/test_image_unit_diff.py::UnitDiffTest::test_rules_agree_with_systemd`, one subtest per tree, passes on main. Catches a rule whose model of systemd drifts.
@@ -24,7 +24,7 @@ Board section: Process and tooling. Work item #4916, split from #4910 (REV-PROOF
 
 **Guard files:** none.
 
-**Dependencies:** none open. Open PRs #5980, #5985 and #5991 edit `tests/test_image.py`. Under D-320 (#5956, open) that does not block the build: this PR changes one line there and rebases if needed.
+**Dependencies:** none open. Open PRs #5980, #5985 and #5991 edit `tests/test_image.py`. Under D-320 (#5956, open) that does not block the build: this PR changes two lines there and rebases if needed.
 
 **Tier / gate:** `tools/risk_tier.py` prints C, because the PR touches only `tests/`. The row is labelled tier A because what it proves are `image/` rules, so L3 runs on the strongest model, as #4916 asks. `premerge.py --needs-mark` decides whether a Security accept is owed.
 
