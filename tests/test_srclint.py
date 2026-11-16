@@ -1,7 +1,7 @@
 """Tests for tools/srclint.py: every file under broker/ that a build could compile is plain Go,
 so each boundary lint holds for the files it parses (REV-CHK-src).
 
-REQ: KRN-2
+REQ: KRN-2, CRED-1
 All paths and code are synthetic.
 """
 import pathlib
@@ -233,6 +233,56 @@ class SrcLintTest(unittest.TestCase):
         self.assertNotIn("arm64", tags)
         self.t.put("image/arm.sh", b"CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build\n")
         self.assertTrue({"arm64", "cgo"} <= srclint.build_tags(self.t.root))
+
+    # MUT-wipe-lint (#5865): a derived or random buffer in broker/recovery is wiped or returned.
+    WIPE_OK = (b"package recovery\n\nfunc a(rk []byte) error {\n\tk := hkdf(rk, nil, \"x\", 32)\n"
+               b"\tdefer wipe(k)\n\tuse(k)\n\treturn nil\n}\n")
+    WIPE_DROPPED = WIPE_OK.replace(b"\tdefer wipe(k)\n", b"")
+
+    def test_wipe_lint_passes_a_wiped_or_returned_buffer(self):
+        self.t.put("broker/recovery/ok.go", self.WIPE_OK)
+        self.t.put("broker/recovery/ret.go",
+                   b"package recovery\n\nfunc r() []byte {\n\tk := hkdf(nil, nil, \"x\", 8)\n\treturn k\n}\n"
+                   b"\nfunc q() ([]byte, error) {\n\tk, err := random(nil, 8)\n\tif err != nil {\n"
+                   b"\t\treturn nil, err\n\t}\n\treturn k, nil\n}\n")
+        self.assertEqual(self.t.check(), [])
+
+    def test_wipe_lint_a_buffer_inside_a_returned_call_is_not_returned(self):
+        self.t.put("broker/recovery/bad.go",
+                   b"package recovery\n\nfunc a() error {\n\tk := hkdf(nil, nil, \"x\", 8)\n\treturn use(k)\n}\n")
+        self.assertEqual(len(self.t.check()), 1)
+
+    def test_wipe_lint_fails_a_dropped_defer_wipe(self):
+        self.t.put("broker/recovery/bad.go", self.WIPE_DROPPED)
+        self.assertEqual(self.t.check(), [
+            "broker/recovery/bad.go: a: k comes from hkdf(...) and is never passed to wipe(k) or returned"])
+
+    def test_wipe_lint_sees_random_and_decrypt_and_other_names_only(self):
+        for call in ("random(nil, 8)", "s.decryptSlot(x)"):
+            with self.subTest(call=call):
+                t = Tree()
+                self.addCleanup(t.cleanup)
+                t.put("broker/recovery/bad.go",
+                      f"package recovery\n\nfunc f() {{\n\tk, err := {call}\n\t_, _ = k, err\n}}\n".encode())
+                self.assertTrue(any("wipe(k)" in p for p in t.check()))
+        self.t.put("broker/recovery/other.go", b"package recovery\n\nfunc f() {\n\tk := compute(1)\n\t_ = k\n}\n")
+        self.t.put("broker/recovery/bad_test.go", self.WIPE_DROPPED)
+        self.t.put("broker/elsewhere/bad.go", self.WIPE_DROPPED)
+        self.assertEqual(self.t.check(), [])
+
+    def test_wipe_lint_wipe_in_another_function_does_not_count(self):
+        self.t.put("broker/recovery/bad.go", self.WIPE_DROPPED + b"\nfunc b(k []byte) {\n\twipe(k)\n}\n")
+        self.assertEqual(len(self.t.check()), 1)
+
+    def test_wipe_allow_line_names_function_and_variable(self):
+        self.t.put("broker/recovery/bad.go", self.WIPE_DROPPED)
+        self.t.allow.write_text("broker/recovery/bad.go wipe:a:k public value\n")
+        self.assertEqual(self.t.check(), [])
+        self.t.allow.write_text("broker/recovery/bad.go wipe:a:z public value\n")
+        self.assertEqual(len(self.t.check()), 2)  # the finding stays, and the entry is stale
+        self.t.put("broker/recovery/bad.go", self.WIPE_OK)
+        self.t.allow.write_text("broker/recovery/bad.go wipe:a:k public value\n")
+        self.assertIn("allow-listed for wipe:a:k but has none (stale entry)", self.t.check()[0])
 
     def test_main_is_clean(self):
         self.assertEqual(srclint.check(ROOT, ROOT / "tools" / "srclint_allow.txt"), [])
