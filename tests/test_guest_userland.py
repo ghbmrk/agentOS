@@ -315,6 +315,21 @@ class WiringTest(unittest.TestCase):
         self.assertIn("GUEST_BASE=/tmp/guest-base \\\n            GUEST_SHIPPED=/tmp/guest-shipped-codex sh guest/codex/build-rootfs.sh /tmp/cxroot", ci)
         self.assertLess(ci.index("sudo sh image/guest-base.sh"), ci.index("sh guest/openclaw/build-rootfs.sh"))
 
+    def test_ci_checks_the_guest_lockfile_with_the_guests_npm(self):
+        # #2914: npm 10 wrote a lockfile that dropped libc constraints; the guest's own npm must reproduce it.
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        step = ci[ci.index("- name: OpenClaw guest lockfile"):]
+        step = step[:step.index("      - name: The guests' Debian userland")]
+        for want in ("s/^NODE_VERSION=//p", "s/^NODE_SHA256=//p", "sha256sum -c -",
+                     "npm install --package-lock-only --ignore-scripts",
+                     "git diff --exit-code -- guest/openclaw/package-lock.json"):
+            self.assertIn(want, step)
+        self.assertLess(step.index("sha256sum -c -"), step.index("npm install"))
+        self.assertLess(step.index("npm install"), step.index("git diff --exit-code"))
+        sh = (ROOT / "guest/openclaw/build-rootfs.sh").read_text()
+        self.assertRegex(sh, r"(?m)^NODE_VERSION=v\d")
+        self.assertRegex(sh, r"(?m)^NODE_SHA256=[0-9a-f]{64}$")
+
 
 if __name__ == "__main__":
     unittest.main()
