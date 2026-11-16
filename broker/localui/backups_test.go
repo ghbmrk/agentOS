@@ -255,8 +255,21 @@ func TestBackupPageNamesTheSpacePaddedFolderRule(t *testing.T) {
 	r.signIn()
 	fb.err = Refused(localapi.ErrBackupPlace)
 	p := html.UnescapeString(r.post("/backups/", url.Values{"step": {"begin"}, "name": {"drive3"}, "locator": {"/media/drive3/ agentos"}}).Body.String())
-	if !strings.Contains(p, "no folder name starting or ending with a space") {
+	if !strings.Contains(p, "no folder in its path starting or ending with a space") {
 		t.Fatalf("space-padded folder refusal lacks the rule:\n%s", p)
+	}
+}
+
+// A place name led by a dot, which the kernel's BackupTarget shape refuses,
+// gets refusal text naming that rule, so following it clears the refusal
+// (BAK-1, #4969, UX blocker on #5919).
+func TestBackupPageNamesTheLeadingDotNameRule(t *testing.T) {
+	r, fb := backupRig(t)
+	r.signIn()
+	fb.err = Refused(localapi.ErrBackupPlace)
+	p := html.UnescapeString(r.post("/backups/", url.Values{"step": {"begin"}, "name": {".drive3"}, "locator": {"/media/drive3/agentos"}}).Body.String())
+	if !strings.Contains(p, "and not start with a dot") {
+		t.Fatalf("leading-dot name refusal lacks the rule:\n%s", p)
 	}
 }
 
