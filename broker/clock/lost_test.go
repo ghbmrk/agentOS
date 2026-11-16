@@ -3,6 +3,7 @@ package clock
 // REQ: TIM-1, KEY-8
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -139,5 +140,26 @@ func TestTIM1LostStateLinesSayWhatWaits(t *testing.T) {
 		if !strings.Contains(StateLostText, want) {
 			t.Errorf("StateLostText lacks %q: %q", want, StateLostText)
 		}
+	}
+}
+
+func TestTIM1PartlyDecodedStateFileLoadsAsLost(t *testing.T) {
+	// json.Unmarshal fills the fields before a mistyped one and still fails:
+	// none of them is trusted. The file loads as the lost disagreement, not
+	// its skew, start or floor (Security F1 on #5810).
+	r := noCarrier()
+	path := filepath.Join(t.TempDir(), "clock.json")
+	future := r.wall.Add(48 * time.Hour)
+	raw := fmt.Sprintf(`{"restricted":true,"skew":%d,"since":%q,"floor":%q,"anchored":"yes"}`,
+		int64(2*time.Hour), r.wall.Add(-time.Hour).Format(time.RFC3339), future.Format(time.RFC3339))
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g := r.guard(t, func(c *Config) { c.StatePath = path })
+	if s := g.Status(); s.State != Disagree || s.Skew != 0 || !s.Since.IsZero() {
+		t.Fatalf("status = %+v, want the lost disagreement (skew 0, no start)", s)
+	}
+	if _, hi, _ := g.Interval(bg); hi.Equal(future) {
+		t.Fatalf("Latest = %v: the partly decoded floor was applied", hi)
 	}
 }
