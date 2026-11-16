@@ -1088,8 +1088,9 @@ func TestLifecycle(t *testing.T) {
 			t.Fatalf("the trip does not show: %+v light %d", x.d.alerts.Status(), x.light.c)
 		}
 		for _, r := range x.d.alerts.Status().Open {
-			// A paused channel's alert clears only by resuming (#4750).
-			if clear := strings.Contains(x.home(), fmt.Sprintf(`data-action="clear" data-target="%d"`, r.ID)); clear == (r.Kind == alert.ChannelPaused) {
+			// A paused channel's alert clears only by resuming (#4750),
+			// and a trip only by lifting its cut (#4305).
+			if clear := strings.Contains(x.home(), fmt.Sprintf(`data-action="clear" data-target="%d"`, r.ID)); clear == (r.Kind == alert.ChannelPaused || r.Kind.Lights()) {
 				t.Fatalf("alert %d (kind %d): clear offered %v", r.ID, r.Kind, clear)
 			}
 		}

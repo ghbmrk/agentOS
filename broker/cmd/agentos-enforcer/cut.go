@@ -31,6 +31,10 @@ type cut struct {
 	// retries it each tick and at Close, and the channel listener takes
 	// no connection meanwhile (#4755 item 1).
 	unsaved bool
+	// unlifted: the core is open but closing its alerts (Resumed,
+	// Lifted) failed, so the light may be red with no cut standing.
+	// Persist retries it each tick (#4305 item 2).
+	unlifted bool
 }
 
 type cutState struct {
@@ -58,6 +62,12 @@ func openCut(store fileStore, alerts *alert.Alerts, logf func(string)) (*cut, er
 	}
 	if st.Tripped {
 		c.stage, c.reason = channel.Tripped, st.Reason
+		return c, nil
+	}
+	// An open core whose alerts are still open: a lift saved before a
+	// failed append or a crash closed them (#4305 item 2).
+	if err := c.liftedLocked(); err != nil {
+		logf("cut: the core is not cut but its alerts did not close, retried each tick: " + err.Error())
 	}
 	return c, nil
 }
@@ -80,7 +90,7 @@ func (c *cut) Trip(reason string) {
 		c.mu.Unlock()
 		return
 	}
-	c.stage, c.reason = channel.Tripped, reason
+	c.stage, c.reason, c.unlifted = channel.Tripped, reason, false
 	err := c.saveLocked()
 	c.mu.Unlock()
 	if err != nil {
@@ -105,9 +115,18 @@ func (c *cut) saveLocked() error {
 // tick and Close once more, so a trip outlives a disk that failed for a
 // while; only a power loss before any write lands loses it (ASSUMPTIONS
 // ENF-l-5).
+// It also retries closing an open core's alerts, logging a failure, so a
+// light left red by a failed lift goes off once the journal takes it.
 func (c *cut) Persist() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.unlifted && c.stage == channel.Open {
+		if err := c.liftedLocked(); err != nil {
+			c.logf("cut: the core is not cut but its alerts did not close, retried each tick: " + err.Error())
+		} else {
+			c.logf("cut: the core's alerts closed")
+		}
+	}
 	if !c.unsaved {
 		return nil
 	}
@@ -131,21 +150,30 @@ func (c *cut) Paused() bool { return c.Stage() != channel.Open }
 
 // Resume lifts the cut. The page calls it only after the owner's passkey
 // assertion on the page's own resume challenge (page ActResume); nothing
-// on the channel reaches it.
+// on the channel reaches it. The alerts close only once the lift is
+// saved, so the light stays red while the cut stands; on a core already
+// open they close too, so a resume retries a close that failed (#4305).
 func (c *cut) Resume() error {
 	c.mu.Lock()
-	if c.stage == channel.Open {
-		c.mu.Unlock()
-		return nil
+	defer c.mu.Unlock()
+	if c.stage != channel.Open {
+		b, _ := json.Marshal(cutState{})
+		if err := c.store.Save(b); err != nil {
+			return err // still cut: a lift that is not saved does not happen
+		}
+		c.stage, c.reason, c.unsaved = channel.Open, "", false
 	}
-	b, _ := json.Marshal(cutState{})
-	if err := c.store.Save(b); err != nil {
-		c.mu.Unlock()
-		return err // still cut: a lift that is not saved does not happen
-	}
-	c.stage, c.reason, c.unsaved = channel.Open, "", false
-	c.mu.Unlock()
-	return errors.Join(c.alerts.Resumed(), c.alerts.Lifted(coreDevice))
+	return c.liftedLocked()
+}
+
+// liftedLocked closes the open core's paused-channel alert and its trips
+// and missing record; c.mu is held, so no trip lands between the stage
+// read and the close, where a late Lifted would close a trip whose cut
+// stands. Alerts takes no lock of the cut's. A failure leaves it owed.
+func (c *cut) liftedLocked() error {
+	err := errors.Join(c.alerts.Resumed(), c.alerts.Lifted(coreDevice))
+	c.unlifted = err != nil
+	return err
 }
 
 // recordMissing raises the alert for a box whose cut record is missing or

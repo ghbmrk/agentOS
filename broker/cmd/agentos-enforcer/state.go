@@ -32,7 +32,7 @@ func (p pageAlerts) Status() page.Status {
 	out := page.Status{CoreDown: st.CoreDown, Red: st.Colour == alert.Red}
 	for _, r := range st.Open {
 		out.Open = append(out.Open, page.Alert{ID: r.ID, Text: r.Text, At: r.At, Count: r.Count, Sent: r.Sent,
-			Fixed: r.Kind == alert.ChannelPaused, Revoke: r.Kind == alert.HeadFork})
+			Fixed: r.Kind == alert.ChannelPaused || r.Kind.Lights(), Revoke: r.Kind == alert.HeadFork})
 	}
 	return out
 }

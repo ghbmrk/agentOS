@@ -31,6 +31,9 @@ type edgeCut struct {
 	// unsaved: a trip decided here whose write failed. Persist retries it
 	// each tick and at Close; the cut is in force meanwhile.
 	unsaved bool
+	// unlifted: the edge is open but closing its alerts (Lifted) failed;
+	// Persist retries it each tick (#4305 item 2).
+	unlifted bool
 }
 
 type edgeCutState struct {
@@ -74,6 +77,12 @@ func openEdgeCut(store fileStore, alerts *alert.Alerts, logf func(string)) (*edg
 		c.st = edgeCutState{Cut: true, Reason: "the record of the edge's cut does not read back" + tamperAdvice}
 		logf("edge cut: " + fileEdgeCut + " unreadable, the edge stays cut until you lift it on the page: " + err.Error())
 		recordMissing(alerts, edgeDevice, logf)
+	} else if !c.st.Cut {
+		// An open edge whose alerts are still open: a lift saved before
+		// a failed append or a crash closed them (#4305 item 2).
+		if err := c.liftedLocked(); err != nil {
+			logf("edge cut: the edge is not cut but its alerts did not close, retried each tick: " + err.Error())
+		}
 	}
 	return c, nil
 }
@@ -103,7 +112,7 @@ func (c *edgeCut) Trip(day uint32, reason string) bool {
 		c.mu.Unlock()
 		return false
 	}
-	c.st = edgeCutState{Cut: true, Reason: reason, Day: day}
+	c.st, c.unlifted = edgeCutState{Cut: true, Reason: reason, Day: day}, false
 	err := c.saveLocked()
 	c.mu.Unlock()
 	if err != nil {
@@ -122,10 +131,18 @@ func (c *edgeCut) saveLocked() error {
 	return err
 }
 
-// Persist retries an unsaved trip's write.
+// Persist retries an unsaved trip's write, and closing an open edge's
+// alerts, logging a failure.
 func (c *edgeCut) Persist() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.unlifted && !c.st.Cut {
+		if err := c.liftedLocked(); err != nil {
+			c.logf("edge cut: the edge is not cut but its alerts did not close, retried each tick: " + err.Error())
+		} else {
+			c.logf("edge cut: the edge's alerts closed")
+		}
+	}
 	if !c.unsaved {
 		return nil
 	}
@@ -142,25 +159,33 @@ func (c *edgeCut) Persist() error {
 // a cut on its overrun's day holds for the rest of day, as does one of a
 // cut with no day (a record missing or unreadable) when the edge is past
 // its cap at the lift, so it is not cut again at the next reading (#5399
-// item 4). Within its cap, it is not held: its next overrun cuts.
+// item 4). Within its cap, it is not held: its next overrun cuts. The
+// alerts close only once the lift is saved; on an edge already open they
+// close too, so a lift retries a close that failed (#4305).
 func (c *edgeCut) Lift(day uint32, past bool) error {
 	c.mu.Lock()
-	if !c.st.Cut {
-		c.mu.Unlock()
-		return nil
+	defer c.mu.Unlock()
+	if c.st.Cut {
+		next := edgeCutState{}
+		if c.st.Day == day || c.st.Day == 0 && past {
+			next.Lifted = day
+		}
+		b, _ := json.Marshal(next)
+		if err := c.store.Save(b); err != nil {
+			return err
+		}
+		c.st, c.unsaved = next, false
 	}
-	next := edgeCutState{}
-	if c.st.Day == day || c.st.Day == 0 && past {
-		next.Lifted = day
-	}
-	b, _ := json.Marshal(next)
-	if err := c.store.Save(b); err != nil {
-		c.mu.Unlock()
-		return err
-	}
-	c.st, c.unsaved = next, false
-	c.mu.Unlock()
-	return c.alerts.Lifted(edgeDevice)
+	return c.liftedLocked()
+}
+
+// liftedLocked closes the open edge's trips and missing record; c.mu is
+// held, so no trip lands between the cut's read and the close. Alerts
+// takes no lock of the edge cut's. A failure leaves it owed.
+func (c *edgeCut) liftedLocked() error {
+	err := c.alerts.Lifted(edgeDevice)
+	c.unlifted = err != nil
+	return err
 }
 
 // tripEdge cuts the edge for why, a cause of its own bytes, and puts the

@@ -5,20 +5,30 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"go/types"
 	"log"
+	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/alert"
+	"github.com/ghbmrk/agentos/broker/enforcer/channel"
+	"github.com/ghbmrk/agentos/broker/enforcer/page"
 )
 
 func boot(t *testing.T) time.Duration {
@@ -239,4 +249,267 @@ func TestIdleTickQuiet(t *testing.T) {
 	if n := strings.Count(buf.String(), "light:"); n != 1 {
 		t.Fatalf("a change of colour logged %d lines, want 1", n)
 	}
+}
+
+// colour is the light as the bulb and the alert log both show it; a
+// mismatch fails the test.
+func (x *box) colour() alert.Colour {
+	x.t.Helper()
+	x.light.mu.Lock()
+	c := x.light.c
+	x.light.mu.Unlock()
+	if s := x.d.alerts.Status().Colour; s != c {
+		x.t.Fatalf("the bulb shows %v, the alert log %v", c, s)
+	}
+	return c
+}
+
+// openTrips counts the open trips and missing records from device.
+func (x *box) openTrips(device string) int {
+	n := 0
+	for _, r := range x.d.alerts.Status().Open {
+		if r.Kind.Lights() && r.Device == device {
+			n++
+		}
+	}
+	return n
+}
+
+// failAlertSync makes every fsync of the alert journal fail while fail is
+// set, so its appends fail; it is called before the box opens so the
+// seam is in place before any goroutine reads it.
+func failAlertSync(t *testing.T) *atomic.Bool {
+	var fail atomic.Bool
+	saved := syncFile
+	syncFile = func(f *os.File) error {
+		if fail.Load() && filepath.Base(f.Name()) == fileAlerts {
+			return errors.New("disk: no space left")
+		}
+		return saved(f)
+	}
+	t.Cleanup(func() { syncFile = saved })
+	return &fail
+}
+
+// TestTripCardOffersNoClear (KRN-12 Response, #4305 item 1): a core trip's
+// open alert is Fixed on the page, so it shows no clear, and a clear drawn
+// on it anyway is refused with errFixed before any passkey; the light
+// stays red. Catches the page path that turned the light off while the
+// cut stood.
+func TestTripCardOffersNoClear(t *testing.T) {
+	x, _ := enrolled(t, true)
+	x.d.cut.Trip("test trip")
+	var trip *page.Alert
+	for _, r := range (pageAlerts{x.d.alerts}).Status().Open {
+		if r.Text != "" && strings.Contains(r.Text, "touched a decoy") {
+			trip = &r
+		}
+	}
+	if trip == nil || !trip.Fixed {
+		t.Fatalf("the trip's card: %+v", trip)
+	}
+	w := x.b.do(http.MethodPost, "/challenge", map[string]string{"action": page.ActClear, "target": strconv.FormatUint(trip.ID, 10)})
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "this alert clears when") {
+		t.Fatalf("a clear drawn on the trip: %d %s", w.Code, w.Body)
+	}
+	if err := (pageAlerts{x.d.alerts}).Resolve(trip.ID); !errors.Is(err, alert.ErrResolved) {
+		t.Fatalf("the trip resolved past the page: %v", err)
+	}
+	if x.colour() != alert.Red || x.openTrips(coreDevice) != 1 {
+		t.Fatal("the trip's light went off with the core cut")
+	}
+	home := x.b.do(http.MethodGet, "/", nil).Body.String()
+	if strings.Contains(home, `data-action="clear" data-target="`+strconv.FormatUint(trip.ID, 10)+`"`) {
+		t.Fatal("home offers a clear on the trip")
+	}
+}
+
+// TestLiftedOnlyOnFullLift (KRN-12 Response, #4305 items 2 and 4): a core
+// trip keeps the light red through every step short of the full lift: the
+// ticks, a refused clear, a resume whose save fails, and a restart; only a
+// resume whose lift is saved turns it off. DECOY-d's two-step lift must
+// keep this: Lifted runs only once the cut has lifted in full. Catches an
+// early Lifted.
+func TestLiftedOnlyOnFullLift(t *testing.T) {
+	x, a := enrolled(t, true)
+	x.d.cut.Trip("test trip")
+	red := func(what string) {
+		t.Helper()
+		if x.colour() != alert.Red || x.openTrips(coreDevice) != 1 || x.d.cut.Stage() != channel.Tripped {
+			t.Fatalf("%s: light %v, %d trips open, stage %v", what, x.colour(), x.openTrips(coreDevice), x.d.cut.Stage())
+		}
+	}
+	red("tripped")
+	x.advance(time.Second)
+	red("a tick")
+	x.fail(fileCut, true)
+	if w := x.b.act(a, page.ActResume, ""); w.Code == http.StatusOK {
+		t.Fatalf("a resume whose lift was not saved answered %d %s", w.Code, w.Body)
+	}
+	red("a resume whose save failed")
+	x.advance(time.Second)
+	red("a tick after the failed resume")
+	x.d.Close()
+	x.fail(fileCut, false)
+	x.start()
+	red("a restart")
+	if w := x.b.act(a, page.ActResume, ""); w.Code != http.StatusOK {
+		t.Fatalf("resume: %d %s", w.Code, w.Body)
+	}
+	if x.colour() != alert.Off || x.openTrips(coreDevice) != 0 || x.d.cut.Stage() != channel.Open {
+		t.Fatal("the full lift left the light red")
+	}
+}
+
+// TestFailedLiftAlertRetried (KRN-12 Response, #4305 item 2): a lift
+// whose cut is saved but whose alerts the journal refuses returns the
+// error and leaves the box open with the light red; a second Resume or
+// Lift on the open box closes them, and so do the next tick and the next
+// start. For the core and the edge alike. Catches a light that stays red
+// for good once Lifted is the only close (the L3 repro on #5999).
+func TestFailedLiftAlertRetried(t *testing.T) {
+	fail := failAlertSync(t)
+	x, _ := enrolled(t, true)
+	type box struct {
+		name   string
+		device string
+		trip   func()
+		lift   func() error
+		open   func() bool
+	}
+	day := uint32(1)
+	for _, b := range []box{
+		{"core", coreDevice, func() { x.d.cut.Trip("test trip") }, func() error { return x.d.cut.Resume() },
+			func() bool { return x.d.cut.Stage() == channel.Open }},
+		// Each edge trip is on a new day: a lift holds the rest of its own.
+		{"edge", edgeDevice, func() { day++; x.d.edge.Trip(day, "test trip") }, func() error { return x.d.edge.Lift(day, false) },
+			func() bool { cut, _ := x.d.edge.Cut(); return !cut }},
+	} {
+		// failed reports a lift whose alerts the journal refused.
+		failed := func(what string) {
+			t.Helper()
+			b.trip()
+			if x.colour() != alert.Red {
+				t.Fatalf("%s %s: the trip left the light off", b.name, what)
+			}
+			fail.Store(true)
+			if err := b.lift(); err == nil {
+				t.Fatalf("%s %s: a lift whose alerts were not saved answered nil", b.name, what)
+			}
+			if !b.open() || x.colour() != alert.Red || x.openTrips(b.device) != 1 {
+				t.Fatalf("%s %s: open %v, light %v, %d trips open", b.name, what, b.open(), x.colour(), x.openTrips(b.device))
+			}
+		}
+		closed := func(what string) {
+			t.Helper()
+			if !b.open() || x.colour() != alert.Off || x.openTrips(b.device) != 0 {
+				t.Fatalf("%s %s: open %v, light %v, %d trips open", b.name, what, b.open(), x.colour(), x.openTrips(b.device))
+			}
+		}
+
+		failed("lift")
+		fail.Store(false)
+		if err := b.lift(); err != nil {
+			t.Fatalf("%s: a second lift on the open box: %v", b.name, err)
+		}
+		closed("second lift")
+
+		failed("lift before a tick")
+		fail.Store(false)
+		x.advance(time.Second)
+		closed("tick")
+
+		// The tick and Close retry too, so the journal keeps failing
+		// until the box is shut, and the next start closes them.
+		failed("lift before a restart")
+		x.d.Close()
+		fail.Store(false)
+		x.start()
+		closed("restart")
+	}
+}
+
+// TestTripDeviceNamesAreTheBoxConstants (KRN-12 Response, #4305 item 3):
+// every trip, missing record and lift in the daemon names its box by
+// coreDevice or edgeDevice, never a literal or a computed name, so Lifted
+// always matches what Raise used. Catches a trip or missing record raised
+// under a name Lifted never matches, which would keep the light red.
+func TestTripDeviceNamesAreTheBoxConstants(t *testing.T) {
+	if coreDevice != "core" || edgeDevice != "edge" {
+		t.Fatalf("box names %q %q: alert.Words names the boxes by these", coreDevice, edgeDevice)
+	}
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	counts := map[string]int{}
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				var site string
+				var dev ast.Expr
+				switch fun := call.Fun.(type) {
+				case *ast.Ident:
+					if fun.Name == "recordMissing" && len(call.Args) == 3 {
+						site, dev = "recordMissing", call.Args[1]
+					}
+				case *ast.SelectorExpr:
+					switch {
+					case fun.Sel.Name == "Lifted" && len(call.Args) == 1:
+						site, dev = "Lifted", call.Args[0]
+					case fun.Sel.Name == "Raise" && len(call.Args) == 2 && isAlertKind(call.Args[0], "Trip", "RecordMissing"):
+						// recordMissing's own body passes its parameter on:
+						// its callers are the sites checked.
+						if fn.Name.Name == "recordMissing" {
+							return true
+						}
+						site, dev = "Raise "+call.Args[0].(*ast.SelectorExpr).Sel.Name, call.Args[1]
+					}
+				}
+				if site == "" {
+					return true
+				}
+				counts[site]++
+				if id, ok := dev.(*ast.Ident); !ok || id.Name != "coreDevice" && id.Name != "edgeDevice" {
+					t.Errorf("%s: %s names its box by %s, not coreDevice or edgeDevice", fset.Position(call.Pos()), site, types.ExprString(dev))
+				}
+				return true
+			})
+		}
+	}
+	// At least the sites there are today, so the check cannot pass on none.
+	for site, n := range map[string]int{"Raise Trip": 2, "recordMissing": 3, "Lifted": 2} {
+		if counts[site] < n {
+			t.Errorf("%d %s sites found, want at least %d: %v", counts[site], site, n, counts)
+		}
+	}
+	if counts["Raise RecordMissing"] != 0 {
+		t.Errorf("RecordMissing raised outside recordMissing: %v", counts)
+	}
+}
+
+// isAlertKind reports whether e is alert.<one of names>.
+func isAlertKind(e ast.Expr, names ...string) bool {
+	s, ok := e.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkg, ok := s.X.(*ast.Ident)
+	return ok && pkg.Name == "alert" && slices.Contains(names, s.Sel.Name)
 }

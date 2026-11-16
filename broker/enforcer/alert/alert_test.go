@@ -145,11 +145,14 @@ func TestDroppedTripStillOnLight(t *testing.T) {
 	if c := r2.bulb.now(); c != Red {
 		t.Fatalf("light %v with the trip still open", c)
 	}
-	if err := r2.a.Resolve(refused.ID); err != nil {
+	if err := r2.a.Resolve(refused.ID); !errors.Is(err, ErrResolved) {
+		t.Fatalf("the trip cleared on the page: %v", err)
+	}
+	if err := r2.a.Lifted("edge"); err != nil {
 		t.Fatal(err)
 	}
 	if c := r2.bulb.now(); c != Off {
-		t.Fatalf("light %v once the owner resolved the trip", c)
+		t.Fatalf("light %v once the trip's cut lifted", c)
 	}
 	if err := r2.a.Resolve(dropped.ID); !errors.Is(err, ErrUnknown) {
 		t.Fatalf("resolving twice: %v", err)
@@ -290,7 +293,7 @@ func TestWordsFixed(t *testing.T) {
 		if s.delivery == Text && !strings.Contains(w, "enforcer's page at home") {
 			t.Fatalf("kind %d's text does not send the owner to the page: %q", k, w)
 		}
-		if strings.Contains(w, "light") != k.lights() {
+		if strings.Contains(w, "light") != k.Lights() {
 			t.Fatalf("kind %d's text and the light: %q", k, w)
 		}
 		want := Text
@@ -318,7 +321,7 @@ func TestWordsFixed(t *testing.T) {
 // unusual-time unlock, a recovery-code use, a new recovery code, an enrolment, a factory reset, a paused
 // channel, a pending recovery and a silent core each leave the light off
 // and show on the page; a trip at the enforcer, from any box or device,
-// turns it red until its cut lifts or the owner resolves it on the page.
+// turns it red until its cut lifts (Lifted); the page cannot clear it.
 // Catches routine alerts keeping the light red, so a real trip is read as
 // routine.
 func TestOnlyTripsLight(t *testing.T) {
@@ -393,7 +396,11 @@ func TestOnlyTripsLight(t *testing.T) {
 	if got := r.a.Log()[r.a.byID[edge.ID]]; got.Open || got.Resolved.IsZero() {
 		t.Fatalf("lifted trip still open: %+v", got)
 	}
-	if err := r.a.Resolve(cam.ID); err != nil {
+	if err := r.a.Resolve(cam.ID); !errors.Is(err, ErrResolved) {
+		t.Fatalf("a trip cleared on the page: %v", err)
+	}
+	red("device trip refused a clear")
+	if err := r.a.Lifted("camera-3"); err != nil {
 		t.Fatal(err)
 	}
 	off("both trips resolved")
@@ -419,12 +426,12 @@ func TestOnlyTripsLight(t *testing.T) {
 		t.Fatal(err)
 	}
 	red("edge record missing")
-	if w := r.core.got[len(r.core.got)-1].Text; w != "Enforcer: its record of the edge box's cut is missing or unreadable, so the edge box stays cut. Someone may have tampered with the enforcer: check it before you let the edge box back on the enforcer's page at home. Its light stays red until you do or you clear this there." {
+	if w := r.core.got[len(r.core.got)-1].Text; w != "Enforcer: its record of the edge box's cut is missing or unreadable, so the edge box stays cut. Someone may have tampered with the enforcer: check it before you let the edge box back on the enforcer's page at home. Its light stays red until you let the edge box back there with your passkey." {
 		t.Fatalf("missing record text: %q", w)
 	}
 	// The core reads as the page names it, not by its device ID (#5445
 	// item 5).
-	if w, err := Words(RecordMissing, "core"); err != nil || w != "Enforcer: its record of the core's cut is missing or unreadable, so the core stays cut. Someone may have tampered with the enforcer: check it before you let the core back on the enforcer's page at home. Its light stays red until you do or you clear this there." {
+	if w, err := Words(RecordMissing, "core"); err != nil || w != "Enforcer: its record of the core's cut is missing or unreadable, so the core stays cut. Someone may have tampered with the enforcer: check it before you let the core back on the enforcer's page at home. Its light stays red until you let the core back there with your passkey." {
 		t.Fatalf("missing record text for the core: %q, %v", w, err)
 	}
 	if err := r.a.Lifted("core"); err != nil {
@@ -1066,5 +1073,67 @@ func TestRefusedCancelKeepsRecoveryUsed(t *testing.T) {
 	st := r2.a.Status()
 	if len(st.Open) != 1 || st.Open[0].ID != used.ID || st.Open[0].Kind != RecoveryCodeUsed {
 		t.Fatalf("after a restart: open %+v, want RecoveryCodeUsed %d", st.Open, used.ID)
+	}
+}
+
+// TestResolveRefusesLightingKinds (KRN-12 Response, #4305 item 1): the
+// page's clear on an open trip or missing cut record is refused with
+// ErrResolved and leaves it open and the light red; only Lifted for its
+// box closes it. Every other text still clears. Catches a light cleared
+// while a cut stands.
+func TestResolveRefusesLightingKinds(t *testing.T) {
+	r := newRig(t, &journal{})
+	for _, k := range []Kind{Trip, RecordMissing} {
+		if !k.Lights() {
+			t.Fatalf("%v does not light the bulb", k)
+		}
+		rec, err := r.a.Raise(k, "core")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := r.a.Resolve(rec.ID); !errors.Is(err, ErrResolved) {
+			t.Fatalf("%v cleared on the page: %v", k, err)
+		}
+		if got := r.a.Log()[r.a.byID[rec.ID]]; !got.Open || !got.Resolved.IsZero() {
+			t.Fatalf("%v refused but closed: %+v", k, got)
+		}
+		if c, st := r.bulb.now(), r.a.Status(); c != Red || st.Colour != Red {
+			t.Fatalf("%v refused: light %v, status %v", k, c, st.Colour)
+		}
+		if err := r.a.Lifted("core"); err != nil {
+			t.Fatal(err)
+		}
+		if c := r.bulb.now(); c != Off {
+			t.Fatalf("%v lifted: light %v", k, c)
+		}
+	}
+	// A kind that does not light still clears on the page.
+	u, err := r.a.Raise(UnusualUnlock, "front-door")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.a.Resolve(u.ID); err != nil {
+		t.Fatalf("an unusual unlock refused a clear: %v", err)
+	}
+}
+
+// TestLightingKindsNameTheLiftStep (KRN-12 Response, NET-2 Texts and
+// calls, #4305 item 1): the texts of the kinds the page cannot clear send
+// the owner to the passkey step that lifts the cut, never to a clear.
+// Catches a text that sends the owner to a button that no longer exists.
+func TestLightingKindsNameTheLiftStep(t *testing.T) {
+	for _, k := range []Kind{Trip, RecordMissing} {
+		for _, dev := range []string{"core", "edge"} {
+			w, err := Words(k, dev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(strings.ToLower(w), "clear") {
+				t.Fatalf("%v about %s offers a clear: %q", k, dev, w)
+			}
+			if !strings.Contains(w, "with your passkey") || !strings.Contains(w, "light stays red until") {
+				t.Fatalf("%v about %s names no lift step: %q", k, dev, w)
+			}
+		}
 	}
 }
