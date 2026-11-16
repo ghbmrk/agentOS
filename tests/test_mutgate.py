@@ -3055,6 +3055,16 @@ class CaseClauseCover(unittest.TestCase):
         self.assertEqual([sw["fallthrough"] for sw in fall], [True])
         self.assertEqual([sw["fallthrough"] for sw in plain], [False, False])
 
+    # Security's repro on #5902: the clause's last statement is a goto; its labeled `fallthrough` still
+    # enters `x == 2`'s body without a match.
+    GOTO_SRC = FALL_SRC.replace("\t\tr += 1\n\t\tfallthrough\n", "\t\tr += 1\n\t\tgoto L\n\tL:\n\t\tfallthrough\n")
+
+    def test_a_labeled_fallthrough_reached_by_goto_marks_the_switch(self):
+        self.assertIn("goto L", self.GOTO_SRC)
+        # `x == 3` moves to line 13 with the two added lines.
+        self.assertEqual(self.blocks("TestFall", src=self.GOTO_SRC, test=self.FALL_TEST),
+                         {((6, 2), (6, 14)), ((11, 2), (11, 14)), ((13, 2), (13, 14))})
+
     def test_a_select_evaluates_every_clause_on_entry(self):
         self.assertEqual(self.blocks("TestSelect"), {self.COMM})
 

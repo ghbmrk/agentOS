@@ -127,7 +127,7 @@ type cases struct {
 	Line   int    `json:"line"`
 	Col    int    `json:"col"`
 	Select bool   `json:"select"`
-	// Whether a clause's body ends in `fallthrough`, entering the next body without a match.
+	// Whether a `fallthrough` stands anywhere in its clauses, entering a next body without a match.
 	Fallthrough bool     `json:"fallthrough"`
 	Clauses     []clause `json:"clauses"`
 }
@@ -243,12 +243,14 @@ func main() {
 				if body != nil {
 					_, sel := n.(*ast.SelectStmt)
 					falls := false
-					for _, s := range body.List {
-						if c, ok := s.(*ast.CaseClause); ok && len(c.Body) > 0 {
-							b, ok := c.Body[len(c.Body)-1].(*ast.BranchStmt)
-							falls = falls || ok && b.Tok == token.FALLTHROUGH
+					// Any `fallthrough` token in its clauses, labeled or reached by goto, or a nested
+					// switch's: marking more switches only counts more clauses evaluated (Security on #5902).
+					ast.Inspect(body, func(m ast.Node) bool {
+						if b, ok := m.(*ast.BranchStmt); ok && b.Tok == token.FALLTHROUGH {
+							falls = true
 						}
-					}
+						return !falls
+					})
 					p := pos(n.Pos())
 					switches = append(switches, cases{filepath.Base(path), p.Line, p.Column, sel, falls, clauses(body)})
 				}
