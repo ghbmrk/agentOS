@@ -769,14 +769,15 @@ func lapse(cs []key.Caveat) *int64 {
 
 func rootOf(k key.Key) key.ID { return key.Key{Root: k.Root}.Tip() }
 
-// derived is the rung of the owner event that derived k's grants, its root
-// and first link: a standing key's stamp, P0 for any other grant or none.
+// derived is the rung of the owner event that derived k: the stamp on k's
+// own deriving grant, its first link, or its root for a bare root; P0 for
+// any other grant or none. A root's stamp never passes to a clerk key issued
+// under it later, whose own grant says how it was derived.
 func (s *State) derived(k key.Key) key.Proof {
-	r := s.Grants[rootOf(k)].Rung
-	if len(k.Links) > 0 {
-		r = max(r, s.Grants[key.Key{Root: k.Root, Links: k.Links[:1]}.Tip()].Rung)
+	if len(k.Links) == 0 {
+		return s.Grants[rootOf(k)].Rung
 	}
-	return r
+	return s.Grants[key.Key{Root: k.Root, Links: k.Links[:1]}.Tip()].Rung
 }
 
 // standingOK reports whether rung r is one the signatures behind keys reach:

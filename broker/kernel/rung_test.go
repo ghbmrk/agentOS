@@ -112,13 +112,13 @@ func TestTIM1AHeldStepWaitsForItsApprovalUntilEarliest(t *testing.T) {
 
 // standing issues a mail root and its clerk key as standing keys stamped at
 // rung, the clerk key asking for P3 (KEY-5's first-approval key), a hold
-// before the test so both are live.
-func (r *rig) standing(serial string, rung key.Proof) (key.Key, error) {
+// before the test so both are live. It returns the root too.
+func (r *rig) standing(serial string, rung key.Proof) (key.Key, key.Key, error) {
 	r.t.Helper()
 	root := key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: serial})
 	ck, err := key.ClerkKey(root, r.owner.pass, r.holder.pub, 0, 1<<40, key.LimitRung(key.P3))
 	must(r.t, err)
-	return ck, r.k.IssueStanding(-kernel.GrantHold, rung, approve([]key.Key{root, ck}, r.owner, r.spare), root, ck)
+	return ck, root, r.k.IssueStanding(-kernel.GrantHold, rung, approve([]key.Key{root, ck}, r.owner, r.spare), root, ck)
 }
 
 // A step under a standing key is checked at the rung of the owner event that
@@ -128,8 +128,16 @@ func (r *rig) standing(serial string, rung key.Proof) (key.Key, error) {
 // signature behind the key reaches is refused.
 func TestStandingKeyStepRunsAtItsDerivingRung(t *testing.T) {
 	r := newRig(t)
-	sk, err := r.standing("s1", key.P3)
+	sk, sroot, err := r.standing("s1", key.P3)
 	must(t, err)
+	// A clerk key issued later by plain Issue under the standing root takes
+	// its own grant's P0, not the root's stamp.
+	later, err := key.ClerkKey(sroot, r.owner.pass, r.holder.pub, 0, 1<<39, key.LimitRung(key.P3))
+	must(t, err)
+	must(t, r.issue(-kernel.GrantHold, later))
+	if got := r.k.State().Rung("", later, false); got != key.P0 {
+		t.Fatalf("a plain clerk key under a standing root at %v, want P0", got)
+	}
 	root := key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "o1"})
 	plain, err := key.ClerkKey(root, r.owner.pass, r.holder.pub, 0, 1<<40, key.LimitRung(key.P3))
 	must(t, err)
@@ -143,6 +151,10 @@ func TestStandingKeyStepRunsAtItsDerivingRung(t *testing.T) {
 	must(t, err)
 	r.plan("run", run, st(key.Trash, "m2"))
 
+	r.plan("inherited", later, st(key.Trash, "m9"))
+	if p := r.k.State().Plans["inherited"]; p.Status != kernel.SRejected || p.Reject != key.RRung {
+		t.Fatalf("a plain clerk key under a standing root: %s %s", p.Status, p.Reject)
+	}
 	r.plan("plain", plain, st(key.Trash, "m3"))
 	if p := r.k.State().Plans["plain"]; p.Status != kernel.SRejected || p.Reject != key.RRung {
 		t.Fatalf("an ordinary grant's step under a P3 key: %s %s", p.Status, p.Reject)
@@ -162,7 +174,7 @@ func TestStandingKeyStepRunsAtItsDerivingRung(t *testing.T) {
 	}
 
 	for _, bad := range []key.Proof{key.PRecovery, 255} {
-		if _, err := r.standing("bad", bad); !errors.Is(err, kernel.ErrStandingRung) {
+		if _, _, err := r.standing("bad", bad); !errors.Is(err, kernel.ErrStandingRung) {
 			t.Fatalf("a standing key stamped %v: %v", bad, err)
 		}
 	}
