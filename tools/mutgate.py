@@ -2328,9 +2328,10 @@ def proof_cell(reason, path):
 
 VERDICTS = {"TIMED OUT": "killed (timed out)", "NOT COVERED": "not covered", "NOT VIABLE": "not viable (does not build)"}
 ROWS = 2000
-# New record entries listed in full (#5812). Each line is at most about 2.5 KiB once escaped, so the list
-# stays far under GitHub's 1 MiB step-summary limit, past which the whole summary is dropped.
-FRESH = 200
+# New record entries listed in full (#5812). Each line holds four cells of at most 300 characters
+# (1200 bytes in UTF-8, or 600 escaped ASCII) plus the cut mark, so the list stays under 500 KiB,
+# inside GitHub's 1 MiB step-summary limit, past which the whole summary is dropped.
+FRESH = 100
 
 
 def summary(results, tested, waived, own=(), body=None, stale=(), fresh=()):
