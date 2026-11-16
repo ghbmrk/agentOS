@@ -3,6 +3,7 @@
 //
 //	go run mutgate_stmts.go FILE.go...
 //	go run mutgate_stmts.go -decls FILE.go...
+//	go run mutgate_stmts.go -cases FILE.go...
 //
 // It prints one JSON array of sites, one for every statement in a statement list (a block, a
 // case or select clause body, and the clauses of a switch or select): file is the base name, line
@@ -14,6 +15,10 @@
 // With -decls it prints instead one JSON array of each file's top-level declarations: file, name
 // (`Recv.Name` for a method, a func's name, the first name a var or const declares, else ""), and the
 // first and last lines of its own text, which tools/mutgate.py's waiver record digests (#5776).
+// With -cases it prints one JSON array of each switch and select (MUT-case-clause-cover, #5822):
+// file, where it starts, whether it is a select, and its clauses in source order, each with where its `case` (or
+// `default`) starts, where its colon is, and where its body's region ends (the next clause's start,
+// or the closing brace), since Go's cover blocks hold no clause expression.
 // It reads the files as data with go/parser and runs nothing in them.
 package main
 
@@ -107,6 +112,24 @@ func deletable(s ast.Stmt) bool {
 	return true
 }
 
+type clause struct {
+	Line      int  `json:"line"`
+	Col       int  `json:"col"`
+	ColonLine int  `json:"colon_line"`
+	ColonCol  int  `json:"colon_col"`
+	EndLine   int  `json:"end_line"`
+	EndCol    int  `json:"end_col"`
+	Default   bool `json:"default"`
+}
+
+type cases struct {
+	File    string   `json:"file"`
+	Line    int      `json:"line"`
+	Col     int      `json:"col"`
+	Select  bool     `json:"select"`
+	Clauses []clause `json:"clauses"`
+}
+
 type decl struct {
 	File  string `json:"file"`
 	Name  string `json:"name"`
@@ -149,10 +172,12 @@ func declName(d ast.Decl) string {
 func main() {
 	sites := []site{}
 	decls := []decl{}
+	switches := []cases{}
 	fset := token.NewFileSet()
 	args := os.Args[1:]
 	listDecls := len(args) > 0 && args[0] == "-decls"
-	if listDecls {
+	listCases := len(args) > 0 && args[0] == "-cases"
+	if listDecls || listCases {
 		args = args[1:]
 	}
 	for _, path := range args {
@@ -178,6 +203,48 @@ func main() {
 			for _, d := range f.Decls {
 				decls = append(decls, decl{filepath.Base(path), declName(d), pos(d.Pos()).Line, pos(d.End()).Line})
 			}
+			continue
+		}
+		if listCases {
+			// A clause's position, colon and the end of its body's region: the next clause's start or the
+			// closing brace, so an empty body's cover block (just past its colon) falls inside it.
+			clauses := func(body *ast.BlockStmt) []clause {
+				out := []clause{}
+				for i, s := range body.List {
+					end := body.Rbrace
+					if i+1 < len(body.List) {
+						end = body.List[i+1].Pos()
+					}
+					var colon token.Pos
+					isDefault := false
+					switch c := s.(type) {
+					case *ast.CaseClause:
+						colon, isDefault = c.Colon, c.List == nil
+					case *ast.CommClause:
+						colon, isDefault = c.Colon, c.Comm == nil
+					}
+					p, c, e := pos(s.Pos()), pos(colon), pos(end)
+					out = append(out, clause{p.Line, p.Column, c.Line, c.Column, e.Line, e.Column, isDefault})
+				}
+				return out
+			}
+			ast.Inspect(f, func(n ast.Node) bool {
+				var body *ast.BlockStmt
+				switch n := n.(type) {
+				case *ast.SwitchStmt:
+					body = n.Body
+				case *ast.TypeSwitchStmt:
+					body = n.Body
+				case *ast.SelectStmt:
+					body = n.Body
+				}
+				if body != nil {
+					_, sel := n.(*ast.SelectStmt)
+					p := pos(n.Pos())
+					switches = append(switches, cases{filepath.Base(path), p.Line, p.Column, sel, clauses(body)})
+				}
+				return true
+			})
 			continue
 		}
 		add := func(s ast.Stmt, cover token.Pos, keepAt int, keepDefault bool) {
@@ -244,6 +311,8 @@ func main() {
 	var out any = sites
 	if listDecls {
 		out = decls
+	} else if listCases {
+		out = switches
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
 		fmt.Fprintln(os.Stderr, err)
