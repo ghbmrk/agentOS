@@ -294,7 +294,7 @@ func open(key, blob, aad []byte) ([]byte, error) {
 	return g.Open(nil, blob[:g.NonceSize()], blob[g.NonceSize():], aad)
 }
 
-func wipe(b []byte) { clear(b) }
+var wipe = func(b []byte) { clear(b) } // a var so a test can watch a wipe
 
 func random(n int) ([]byte, error) {
 	b := make([]byte, n)
@@ -505,9 +505,8 @@ func Unlock(path string, f Factor) (*Store, error) {
 			continue
 		}
 		// Each opened key and the entry set are wiped by a defer on every
-		// path (the wipe lint holds it, #5799); the store keeps a copy of
-		// the key, so a slot that fails later in the loop is wiped at
-		// Unlock's return, not at once.
+		// path (wipe lint, #5799); the store keeps a copy of the key, so a
+		// slot failing later in the loop is wiped at Unlock's return.
 		key, err := open(k, sl.Wrap, slotAAD(fl.ID, *sl))
 		defer clear(key)
 		wipe(k)
@@ -530,11 +529,12 @@ func Unlock(path string, f Factor) (*Store, error) {
 		if err != nil {
 			return nil, ErrTampered
 		}
-		entries := map[string][]byte{}
-		if err := json.Unmarshal(plain, &entries); err != nil || !validEntries(entries) {
+		s := &Store{path: path, key: secret.Hide(slices.Clone(key)), f: *fl, entries: secret.Hide(map[string][]byte{})}
+		if err := json.Unmarshal(plain, s.entries.Ref()); err != nil || !validEntries(s.entries.Get()) {
+			s.Close() // the values decoded before the refusal are secrets too (CLK-1)
 			return nil, ErrCorrupt
 		}
-		return &Store{path: path, key: secret.Hide(slices.Clone(key)), f: *fl, entries: secret.Hide(entries)}, nil
+		return s, nil
 	}
 	if !tried {
 		return nil, ErrNoSlot
