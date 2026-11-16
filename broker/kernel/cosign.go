@@ -167,7 +167,7 @@ func (s *State) big(keys []key.Key, at Reading) bool {
 // grant already in the log or a same-limit renewal widens nothing.
 func (s *State) priced(keys []key.Key, at Reading) bool {
 	return slices.ContainsFunc(keys, func(k key.Key) bool {
-		w, _ := key.Worth(k) // a malformed key is worth the most
+		w, _ := key.Worth(k, s.graphReach(k.Root.Clerk)...) // graph reach included; a malformed key is worth the most
 		_, had := s.Grants[k.Tip()]
 		return key.Price(key.ActGrant, w) > key.P3Local && !had && (len(k.Links) != 1 || !s.renews(k, at))
 	})

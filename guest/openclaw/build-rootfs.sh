@@ -7,8 +7,8 @@
 # Needs: curl, xz, sha256sum, go, and GUEST_BASE, a root from image/guest-base.sh,
 # whose /bin/sh and coreutils are copied in with their libraries for OpenClaw's exec tool.
 set -eu
-NODE_VERSION=v24.22.2
-NODE_SHA256=48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75
+NODE_VERSION=v24.22.3
+NODE_SHA256=4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb
 OPENCLAW_VERSION=2026.10.9
 OPENCLAW_INTEGRITY=sha512-KbIl0/7an0/nKBo92FnJg7LFcEpFVQyOgSRfHNE9yxELg1Ebql7BmBsdLL+1dDOLZnQtuwjt6Hy45CCrmYdJNA==
 MODEL=${MODEL:-broker-default}
@@ -27,6 +27,12 @@ curl -fsSLo "$work/node.tar.xz" "https://nodejs.org/dist/$NODE_VERSION/node-$NOD
 echo "$NODE_SHA256  $work/node.tar.xz" | sha256sum -c -
 n=node-$NODE_VERSION-linux-x64
 tar -xJf "$work/node.tar.xz" --strip-components=1 -C usr/local "$n/bin/node" "$n/bin/npm" "$n/bin/npx" "$n/lib/node_modules/npm"
+# Node links its own OpenSSL statically, apart from Debian's libssl3t64, so no Debian scan reads it
+# (#5853). The vulnerability gate's config records that copy and the advisories accepted against it
+# ("bundled"); the build fails unless it records the OpenSSL this node reports.
+ossl=$(usr/local/bin/node -p process.versions.openssl)
+grep -qF "\"holder\": \"node@$NODE_VERSION\", \"copy\": \"openssl@$ossl\"" "$repo/assurance/vulncheck.json" ||
+	{ echo "node $NODE_VERSION bundles OpenSSL $ossl; record it in assurance/vulncheck.json \"bundled\"" >&2; exit 1; }
 
 # OpenClaw, unmodified but for pruning (PLN-5, D-308), with every transitive dependency pinned by
 # the committed lockfile (npm ci checks each package's integrity). Install

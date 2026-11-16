@@ -82,6 +82,18 @@ linked=$(sed -n 's/(.*$//; /^\/tmp\//d; /^\//p' "$src/bwrap/link.trace" | sort -
 [ -n "$linked" ] || { echo "bwrap: the linker listed no input outside /tmp" >&2; exit 1; }
 # shellcheck disable=SC2086  # one path per word
 sh "$here/../../image/guest-shipped.sh" "$base" $linked
+# Each CLI binary links OpenSSL statically (#5853), and tools/vulncheck.py queries advisories for
+# the copy its "bundled" record names (#5873): each must hold exactly one OpenSSL version string,
+# and the record must name that copy for this CLI.
+for b in codex codex-code-mode-host; do
+	ossl=$(LC_ALL=C grep -aoE 'OpenSSL [0-9]+[.][0-9]+[.][0-9]+[a-z]* [0-9]{1,2} [A-Z][a-z]{2} [0-9]{4}' "$src/codex/${VENDOR#package/}/bin/$b" | sort -u)
+	[ -n "$ossl" ] && [ "$(printf '%s\n' "$ossl" | wc -l)" -eq 1 ] ||
+		{ echo "codex: bin/$b holds $(printf '%s' "$ossl" | grep -c .) OpenSSL version strings, not one; find the copies it links and record each in assurance/vulncheck.json \"bundled\"" >&2; exit 1; }
+	v=${ossl#OpenSSL }
+	v=${v%% *}
+	grep -qF "\"holder\": \"@openai/codex@$CODEX_VERSION-linux-x64\", \"copy\": \"openssl@$v\"" "$here/../../assurance/vulncheck.json" ||
+		{ echo "codex $CODEX_VERSION bin/$b links OpenSSL $v; record it in assurance/vulncheck.json \"bundled\"" >&2; exit 1; }
+done
 
 cd "$out"
 mkdir -p usr/local/bin usr/bin bin lib64 etc/codex opt/codex usr/lib/agentos/codex \

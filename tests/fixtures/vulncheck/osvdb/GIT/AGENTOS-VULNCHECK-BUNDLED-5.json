@@ -1,0 +1,27 @@
+{
+ "schema_version": "1.6.0",
+ "id": "AGENTOS-VULNCHECK-BUNDLED-5",
+ "modified": "2026-01-01T00:00:00Z",
+ "published": "2026-01-01T00:00:00Z",
+ "withdrawn": "2026-01-02T00:00:00Z",
+ "aliases": [],
+ "summary": "Synthetic control entry for tools/vulncheck.py's bundled scan (withdrawn; must not be reported); not a real vulnerability.",
+ "affected": [
+  {
+   "ranges": [
+    {
+     "type": "GIT",
+     "repo": "https://github.com/openssl/openssl",
+     "events": [
+      {
+       "introduced": "0"
+      }
+     ]
+    }
+   ],
+   "versions": [
+    "openssl-0.0.1"
+   ]
+  }
+ ]
+}

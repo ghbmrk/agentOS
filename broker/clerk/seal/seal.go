@@ -294,7 +294,7 @@ func open(key, blob, aad []byte) ([]byte, error) {
 	return g.Open(nil, blob[:g.NonceSize()], blob[g.NonceSize():], aad)
 }
 
-func wipe(b []byte) { clear(b) }
+var wipe = func(b []byte) { clear(b) } // a var so a test can watch a wipe
 
 func random(n int) ([]byte, error) {
 	b := make([]byte, n)
@@ -504,37 +504,36 @@ func Unlock(path string, f Factor) (*Store, error) {
 			errs = append(errs, err)
 			continue
 		}
+		// Each opened key and the entry set are wiped by a defer on every path (wipe lint, #5799); the
+		// store keeps a clone of the key, so a slot failing later in the loop is wiped at Unlock's return.
 		key, err := open(k, sl.Wrap, slotAAD(fl.ID, *sl))
+		defer clear(key)
 		wipe(k)
 		if err != nil {
 			continue
 		}
 		if !hmac.Equal(mac(key, *fl), fl.MAC) {
-			wipe(key)
 			return nil, ErrTampered
 		}
 		// A whole store someone else wrote MACs under their own key, and
 		// its tpm slot unseals here; only the off-drive anchor tells it
 		// from the owner's.
 		if isTPM && !hmac.Equal(anchor(key, fl.ID), t.Anchor) {
-			wipe(key)
 			return nil, ErrTampered
 		}
 		ek := derive(key, fl.ID, "entries", keyLen)
 		plain, err := open(ek, fl.Entries, entriesAAD(fl.ID))
+		defer clear(plain)
 		wipe(ek)
 		if err != nil {
-			wipe(key)
 			return nil, ErrTampered
 		}
-		entries := map[string][]byte{}
-		err = json.Unmarshal(plain, &entries)
-		wipe(plain)
-		if err != nil || !validEntries(entries) {
-			wipe(key)
+		s := &Store{path: path, key: secret.Hide(slices.Clone(key)), f: *fl, entries: secret.Hide(map[string][]byte{})}
+		if err := json.Unmarshal(plain, s.entries.Ref()); err != nil || !validEntries(s.entries.Get()) {
+			s.Close() // the values decoded before the refusal are secrets too (CLK-1)
 			return nil, ErrCorrupt
 		}
-		return &Store{path: path, key: secret.Hide(key), f: *fl, entries: secret.Hide(entries)}, nil
+		return s, nil
 	}
 	if !tried {
 		return nil, ErrNoSlot
@@ -969,6 +968,7 @@ func (s *Store) ClerkRoot() ([32]byte, error) {
 func (s *Store) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	wipe(*s.key.Ref()) // through the one wipe, so a test sees the clone go (#5898); Drop empties the holder
 	secret.Drop(s.key)
 	for _, v := range s.entries.Get() {
 		wipe(v)

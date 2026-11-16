@@ -1048,38 +1048,40 @@ func (d *driver) phoneControl() error {
 	}
 	// A right code alone is checked but opens no session (CH-14): only
 	// the page does. STATUS after it is still held as a locked message.
-	if err := phone.Send(boxNum, d.freshCode()); err != nil {
-		return fmt.Errorf("phone send: %w", err)
+	// Then the stranger texts a code and the phone HELP, whose reply is
+	// the barrier. Each stage must pass before the next sends, all through
+	// one check, so a lost check on one stage is lost on all (#5202).
+	send := func(text string) error {
+		if err := phone.Send(boxNum, text); err != nil {
+			return fmt.Errorf("phone send: %w", err)
+		}
+		return nil
 	}
-	r := d.await(start, time.Minute, func(r phoneRun) bool { return r.codeRight })
-	if err := r.failed(); err != nil {
-		return err
-	}
-	if !r.codeRight {
-		return fmt.Errorf("%w; %s", controlErr(d.carrier.Log(), start), modemDiag())
-	}
-	if err := phone.Send(boxNum, "STATUS"); err != nil {
-		return fmt.Errorf("phone send: %w", err)
-	}
-	r = d.await(start, time.Minute, func(r phoneRun) bool { return r.locked })
-	if err := r.failed(); err != nil {
-		return err
-	}
-	if !r.locked {
-		return fmt.Errorf("%w; %s", controlErr(d.carrier.Log(), start), modemDiag())
-	}
-	if err := d.carrier.Line(strangerNum).Send(boxNum, d.freshCode()); err != nil {
-		return fmt.Errorf("stranger send: %w", err)
-	}
-	if err := phone.Send(boxNum, "HELP"); err != nil {
-		return fmt.Errorf("phone send: %w", err)
-	}
-	r = d.await(start, time.Minute, func(r phoneRun) bool { return r.barrier })
-	if err := r.failed(); err != nil {
-		return err
-	}
-	if !r.barrier {
-		return fmt.Errorf("%w; %s", controlErr(d.carrier.Log(), start), modemDiag())
+	for _, s := range []struct {
+		send func() error
+		done func(phoneRun) bool
+	}{
+		{func() error { return send(d.freshCode()) },
+			func(r phoneRun) bool { return r.codeRight }},
+		{func() error { return send("STATUS") },
+			func(r phoneRun) bool { return r.locked }},
+		{func() error {
+			if err := d.carrier.Line(strangerNum).Send(boxNum, d.freshCode()); err != nil {
+				return fmt.Errorf("stranger send: %w", err)
+			}
+			return send("HELP")
+		}, func(r phoneRun) bool { return r.barrier }},
+	} {
+		if err := s.send(); err != nil {
+			return err
+		}
+		r := d.await(start, time.Minute, s.done)
+		if err := r.failed(); err != nil {
+			return err
+		}
+		if !s.done(r) {
+			return fmt.Errorf("%w; %s", controlErr(d.carrier.Log(), start), modemDiag())
+		}
 	}
 	// A reply drawn by the stranger's text may still be on its way: the
 	// box gives no point after which its run routes have all replied, so

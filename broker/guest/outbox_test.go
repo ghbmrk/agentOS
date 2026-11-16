@@ -412,3 +412,324 @@ func TestDEL1f1ForgetAfterFailedReplyDone(t *testing.T) {
 		t.Fatalf("after reopen: %+v", got)
 	}
 }
+
+func TestOwnerMutStoredMessagesRaiseTheLabelOnce(t *testing.T) {
+	// The TestOwnerMut tests each fail when one owner.go statement that
+	// mutgate found unchecked is deleted (GUEST-mut-owner, #5749). Here:
+	// messages loaded from the store raise the label before the first
+	// fetch, and only then (owner.go:127, 302).
+	shortPoll(t)
+	path := filepath.Join(t.TempDir(), "inbox.json")
+	var wakes atomic.Int64
+	r := outboxRig(t, path, "", &wakes)
+	r.client("m1")
+	id, err := r.p.DeliverOwner("m1", "book the dentist", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.p.Shutdown()
+	r2 := outboxRig(t, path, r.p.cfg.Dir, &wakes)
+	r2.client("m1")
+	if code, body := r2.do("m1", "GET", "/owner/next", ""); code != 200 || !strings.Contains(body, id) {
+		t.Fatalf("stored message: %d %s", code, body)
+	}
+	if code, _ := r2.do("m1", "GET", "/owner/next", ""); code != 204 {
+		t.Fatalf("second fetch: %d", code)
+	}
+	r2.ms.mu.Lock()
+	defer r2.ms.mu.Unlock()
+	raised := 0
+	for _, e := range r2.ms.events {
+		if e == "private m1" {
+			raised++
+		}
+	}
+	if raised != 1 {
+		t.Fatalf("the label was raised %d times for one stored message; want 1 (%v)", raised, r2.ms.events)
+	}
+}
+
+func TestOwnerMutClosedInboxTakesAndHandsOutNothing(t *testing.T) {
+	// owner.go:143, 164, 308: a closed inbox refuses a new message, hands
+	// out none it holds, and its fetch is a 503 at once, not a 204 after
+	// the poll.
+	pollWait = 5 * time.Second
+	t.Cleanup(func() { pollWait = 25 * time.Second })
+	r := newRig(t, nil)
+	r.client("m1")
+	if _, err := r.p.DeliverOwner("m1", "book the dentist", true); err != nil {
+		t.Fatal(err)
+	}
+	box := r.p.get("m1").box
+	box.close(false)
+	if err := box.put(&ownerMsg{ID: "late", Text: "one more"}); err == nil {
+		t.Fatal("a closed inbox took a message")
+	}
+	start := time.Now()
+	if code, body := r.do("m1", "GET", "/owner/next", ""); code != 503 || !strings.Contains(body, "machine closed") {
+		t.Fatalf("fetch from a closed inbox: %d %s", code, body)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("a closed inbox's fetch waited %v", d)
+	}
+	if m, wait := box.next(); m != nil || wait != nil {
+		t.Fatalf("a closed inbox handed out %+v, wait %v", m, wait)
+	}
+}
+
+func TestOwnerMutFullInboxRefuses(t *testing.T) {
+	// owner.go:146: the inbox holds inboxSize unanswered messages, no more.
+	r := newRig(t, nil)
+	r.client("m1")
+	for i := 0; i < inboxSize; i++ {
+		if _, err := r.p.DeliverOwner("m1", fmt.Sprint("task ", i), true); err != nil {
+			t.Fatalf("message %d: %v", i, err)
+		}
+	}
+	if _, err := r.p.DeliverOwner("m1", "one too many", true); err == nil {
+		t.Fatal("a full inbox took a message")
+	}
+	box := r.p.get("m1").box
+	if err := box.put(&ownerMsg{ID: "late", Text: "one too many"}); err != ErrInboxFull {
+		t.Fatalf("full inbox: %v; want ErrInboxFull", err)
+	}
+	box.mu.Lock()
+	n := len(box.msgs)
+	box.mu.Unlock()
+	if n != inboxSize {
+		t.Fatalf("inbox holds %d; want %d", n, inboxSize)
+	}
+}
+
+func TestOwnerMutAnswerTakesOnlyItsMessage(t *testing.T) {
+	// owner.go:203, 208, 209: a reply removes its own message, and the
+	// others stay stored with their IDs and texts.
+	shortPoll(t)
+	path := filepath.Join(t.TempDir(), "inbox.json")
+	var wakes atomic.Int64
+	r := outboxRig(t, path, "", &wakes)
+	r.client("m1")
+	a := r.hand("m1", "book the dentist")
+	b := r.hand("m1", "renew the passport")
+	if code, _ := r.do("m1", "POST", "/owner/reply", reply(b, "renewed")); code != 204 {
+		t.Fatalf("reply: %d", code)
+	}
+	if got := r.p.get("m1").box.handed(); len(got) != 1 || got[0] != a {
+		t.Fatalf("handed after answering %s: %v; want [%s]", b, got, a)
+	}
+	r.p.Shutdown()
+	r2 := outboxRig(t, path, r.p.cfg.Dir, &wakes)
+	r2.client("m1")
+	code, body := r2.do("m1", "GET", "/owner/next", "")
+	var got ownerMsg
+	if code != 200 || json.Unmarshal([]byte(body), &got) != nil || got.ID != a || got.Text != "book the dentist" {
+		t.Fatalf("after reopen: %d %s; want %s with its text", code, body, a)
+	}
+	if code, body := r2.do("m1", "GET", "/owner/next", ""); code != 204 {
+		t.Fatalf("after reopen, a second message: %d %s", code, body)
+	}
+}
+
+func TestOwnerMutStoreErrorsAreLogged(t *testing.T) {
+	// owner.go:266, 363: a failed inbox write is logged with its cause,
+	// on delivery and on a reply.
+	path := filepath.Join(t.TempDir(), "inbox.json")
+	logs := make(chan string, 64)
+	r := newRig(t, func(c *Config) {
+		c.InboxPath = path
+		c.Logf = func(f string, a ...any) {
+			select {
+			case logs <- fmt.Sprintf(f, a...):
+			default:
+			}
+		}
+	})
+	r.client("m1")
+	id := r.hand("m1", "book the dentist")
+	// A directory at the store's path fails the rename, even for root.
+	os.Remove(path)
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	logged := func(want string) bool {
+		for {
+			select {
+			case l := <-logs:
+				if strings.Contains(l, want) {
+					return true
+				}
+			default:
+				return false
+			}
+		}
+	}
+	if _, err := r.p.DeliverOwner("m1", "renew the passport", true); err == nil {
+		t.Fatal("a failed store took a message")
+	}
+	if !logged("guest m1: inbox store: ") {
+		t.Fatal("a failed delivery write was not logged")
+	}
+	code, body := r.do("m1", "POST", "/owner/reply", reply(id, "booked"))
+	if code != 503 || !strings.Contains(body, "reply not stored; retry") {
+		t.Fatalf("failed reply write: %d %s", code, body)
+	}
+	if !logged("guest m1: inbox store: ") {
+		t.Fatal("a failed reply write was not logged")
+	}
+}
+
+func TestOwnerMutRoutesTakeOneMethod(t *testing.T) {
+	// owner.go:291, 293, 314, 328: a fetch is a GET whose message is JSON,
+	// a reply a POST; a refused fetch hands nothing out.
+	shortPoll(t)
+	r := newRig(t, nil)
+	r.client("m1")
+	id, err := r.p.DeliverOwner("m1", "book the dentist", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := r.do("m1", "POST", "/owner/next", ""); code != 405 {
+		t.Fatalf("POST /owner/next: %d; want 405", code)
+	}
+	if got := r.p.get("m1").box.handed(); len(got) != 0 {
+		t.Fatalf("a refused fetch handed out %v", got)
+	}
+	if code, _ := r.do("m1", "GET", "/owner/reply", reply(id, "booked")); code != 405 {
+		t.Fatalf("GET /owner/reply: %d; want 405", code)
+	}
+	resp, err := r.client("m1").Get("http://broker/owner/next")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "application/json" {
+		t.Fatalf("fetch: %d, Content-Type %q", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+}
+
+func TestOwnerMutSummaryCutsAtARuneStart(t *testing.T) {
+	// owner.go:341: a summary cut at MaxSummary bytes keeps whole runes.
+	r := newRig(t, nil)
+	r.client("m1")
+	id := r.hand("m1", "book the dentist")
+	long := strings.Repeat("a", MaxSummary-1) + "é and more"
+	if code, _ := r.do("m1", "POST", "/owner/reply", fmt.Sprintf(`{"id":%q,"text":"booked","summary":%q}`, id, long)); code != 204 {
+		t.Fatalf("reply: %d", code)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	want := "m1 " + id + " booked|" + strings.Repeat("a", MaxSummary-1)
+	if len(r.reps) != 1 || r.reps[0] != want {
+		t.Fatalf("replies %q; want [%q]", r.reps, want)
+	}
+}
+
+func TestOwnerMutOutboxKeepsThePublicLabel(t *testing.T) {
+	// owner.go:351, 352: a reply from a machine labelled public is kept as
+	// not private; one from a private machine as private.
+	r := newRig(t, func(c *Config) {
+		c.Label = func(id string) string {
+			if id == "pub" {
+				return "public"
+			}
+			return "private"
+		}
+		c.Replies = func() {}
+	})
+	for _, m := range []string{"pub", "priv"} {
+		r.client(m)
+		id, err := r.p.DeliverOwner(m, "book the dentist", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.do(m, "GET", "/owner/next", "")
+		if code, _ := r.do(m, "POST", "/owner/reply", reply(id, "booked")); code != 204 {
+			t.Fatalf("%s reply: %d", m, code)
+		}
+	}
+	got := r.p.PendingReplies()
+	if len(got) != 2 || got[0].Machine != "pub" || got[0].Private || got[1].Machine != "priv" || !got[1].Private {
+		t.Fatalf("outbox %+v; want pub not private, then priv private", got)
+	}
+}
+
+func TestOwnerMutFullOutboxSaysSo(t *testing.T) {
+	// owner.go:358, 359: a reply refused because the outbox is full is
+	// logged and answered as such, not as a failed write.
+	logs := make(chan string, 4*MaxOutbox)
+	var wakes atomic.Int64
+	r := newRig(t, func(c *Config) {
+		c.Label = func(string) string { return "private" }
+		c.Replies = func() { wakes.Add(1) }
+		// Each rig request dials anew; room for them all keeps the test fast.
+		c.MaxOpenConns = 4 * MaxOutbox
+		c.Logf = func(f string, a ...any) {
+			select {
+			case logs <- fmt.Sprintf(f, a...):
+			default:
+			}
+		}
+	})
+	for i := 0; i < MaxOutbox; i++ {
+		m := fmt.Sprintf("m%d", i/inboxSize)
+		r.client(m)
+		id := r.hand(m, fmt.Sprint("task ", i))
+		if code, _ := r.do(m, "POST", "/owner/reply", reply(id, fmt.Sprint("done ", i))); code != 204 {
+			t.Fatalf("reply %d: %d", i, code)
+		}
+	}
+	r.client("late")
+	id := r.hand("late", "one more")
+	code, body := r.do("late", "POST", "/owner/reply", reply(id, "done late"))
+	if code != 503 || !strings.Contains(body, "replies waiting; retry") {
+		t.Fatalf("full outbox: %d %s", code, body)
+	}
+	want := fmt.Sprintf("guest late: reply outbox full (%d waiting); the guest will retry", MaxOutbox)
+	for {
+		select {
+		case l := <-logs:
+			if l == want {
+				return
+			}
+		default:
+			t.Fatalf("no log line %q", want)
+		}
+	}
+}
+
+func TestOwnerMutNilCheckRefusesNothing(t *testing.T) {
+	// owner.go:390: CheckReplies(nil) removes the check set before it.
+	r := newRig(t, nil)
+	r.client("m1")
+	r.p.CheckReplies(func(string) string { return "refused" })
+	r.p.CheckReplies(nil)
+	id := r.hand("m1", "book the dentist")
+	if code, body := r.do("m1", "POST", "/owner/reply", reply(id, "booked")); code != 204 {
+		t.Fatalf("reply after the check was removed: %d %s", code, body)
+	}
+}
+
+func TestOwnerMutLineageIsCachedOnlyWhenKnown(t *testing.T) {
+	// goal.go:25, 26, 29, which an owner delivery runs (taken here off
+	// GUEST-mut-dispatch, #5750): a known lineage is cached, so the manager
+	// is asked once; an unknown one is not, so it is asked again.
+	r := newRig(t, nil)
+	r.client("m1")
+	r.client("m2")
+	set := func(f func()) { r.ms.mu.Lock(); f(); r.ms.mu.Unlock() }
+	set(func() { r.ms.lineage["m1"] = "first"; r.ms.gone["m2"] = true })
+	m1, m2 := r.p.get("m1"), r.p.get("m2")
+	if l := r.p.lineageOf(m1); l != "first" {
+		t.Fatalf("lineage %q; want first", l)
+	}
+	if l := r.p.lineageOf(m2); l != "" {
+		t.Fatalf("an unknown machine's lineage %q; want none", l)
+	}
+	set(func() { r.ms.lineage["m1"] = "second"; r.ms.lineage["m2"] = "later"; delete(r.ms.gone, "m2") })
+	if l := r.p.lineageOf(m1); l != "first" {
+		t.Fatalf("a cached lineage became %q; want first", l)
+	}
+	if l := r.p.lineageOf(m2); l != "later" {
+		t.Fatalf("a lineage the manager now knows is %q; want later", l)
+	}
+}

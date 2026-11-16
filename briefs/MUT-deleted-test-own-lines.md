@@ -17,6 +17,6 @@ Board section: Defects and later findings on surviving packages. Work item #5762
 **Out of scope:** none beyond the scope list.
 
 **Acceptance tests:**
-- MUT-deleted-test-own-lines: `tests/test_mutgate.py::TestOnly::test_a_deleted_test_widens_the_targets_beside_an_added_line`, `::test_a_weakened_test_fails_on_the_lines_its_base_version_ran`, `::test_a_helper_edit_beside_an_added_line_widens_to_every_covered_line`, `::test_base_side_lines_of_a_diff`, `::test_targets_for_unions_own_lines_with_changed_tests_coverage`
+- MUT-deleted-test-own-lines: `tests/test_mutgate.py::TestOnly::test_a_deleted_test_widens_the_targets_beside_an_added_line`, `::test_a_weakened_test_fails_on_the_lines_its_base_version_ran`, `::test_a_helper_edit_beside_an_added_line_targets_the_tests_that_reach_it`, `::test_base_side_lines_of_a_diff`, `::test_targets_for_unions_own_lines_with_changed_tests_coverage`
 
 **Done:** CI green; both tests pass and fail on the base's `mutgate.py`.

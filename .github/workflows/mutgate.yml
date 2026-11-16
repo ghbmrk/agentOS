@@ -36,6 +36,9 @@ concurrency:
 env:
   GOTOOLCHAIN: local
   GOWORK: "off"
+  # MUT-swtpm-runner (#5896): the TPM tests fail rather than skip if swtpm is missing, as in
+  # broker-race, so a mutant only they kill (seal.Unlock's TPM paths) cannot live in the gate.
+  AGENTOS_REQUIRE_SWTPM: "1"
 jobs:
   # CI-mutgate-head-guard (#5409): a rerun keeps its event, so it can test a head the PR has left.
   # This job reads the PR's head from the API and, when the run's head is older, ends with a notice
@@ -152,6 +155,9 @@ jobs:
           grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
       - name: dnsmasq for the enforcer's resolver tests (ENF-f, #3664)
         run: sudo apt-get update -q && sudo apt-get install -yq dnsmasq-base
+      # The seal TPM tests run on swtpm; broker-race's step, kept equal by tests/test_workflows.py.
+      - name: Software TPM for the trusted-host slot (P2-4b)
+        run: sudo apt-get update -q && sudo apt-get install -yq swtpm
       - name: Shards for each package (#4961)
         id: plan
         run: |
@@ -177,6 +183,11 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      # CI-mutgate-cap: the runner pool ran 6 to 9 jobs at once while jobs stayed queued
+      # (2026-11-15, 13:40-14:27Z), and one plan can ask for 32 shards (#5817). 3 is half the
+      # floor of 6, so one run's shards leave the other half to the rest of CI. A held shard is
+      # queued only when another ends, so later runs' short jobs reach runners in between.
+      max-parallel: 3
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.shards) }}
     permissions:
@@ -240,6 +251,9 @@ jobs:
           grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
       - name: dnsmasq for the enforcer's resolver tests (ENF-f, #3664)
         run: sudo apt-get update -q && sudo apt-get install -yq dnsmasq-base
+      # The seal TPM tests run on swtpm; broker-race's step, kept equal by tests/test_workflows.py.
+      - name: Software TPM for the trusted-host slot (P2-4b)
+        run: sudo apt-get update -q && sudo apt-get install -yq swtpm
       # Outside the workspace, so the result directory and the PR tree hold no copy (#4970).
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:

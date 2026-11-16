@@ -149,11 +149,18 @@ def briefs(root):
             yield f"briefs/{path.name}: ~{tokens} tokens, over the {BRIEF_TOKENS} cap; split the package"
 
 
+def _tracked(root, pathspec):
+    """Tracked paths matching pathspec, NUL-delimited: without -z git quotes a name holding a non-ASCII
+    byte, quote or backslash, and splitting on whitespace breaks one with a space, so either file went
+    unchecked (REV-LOW-tools finding 21). A name that is not UTF-8 raises rather than being dropped."""
+    out = subprocess.run(["git", "ls-files", "-z", pathspec], cwd=root, capture_output=True, check=True).stdout
+    return [f for f in out.decode("utf-8").split("\0") if f]
+
+
 def lens_files(root):
     """Markdown files in reviews/<lens>/, tracked ones when root is a git checkout."""
     try:
-        out = subprocess.run(["git", "ls-files", "reviews/*/*.md"], cwd=root, capture_output=True, text=True,
-                             check=True).stdout.split()
+        out = _tracked(root, "reviews/*/*.md")
         return sorted(root / f for f in out if (root / f).is_file())
     except (OSError, subprocess.CalledProcessError):
         pass
@@ -220,8 +227,7 @@ def assumption_ids(root, files):
 
 def markdown_files(root):
     try:
-        out = subprocess.run(["git", "ls-files", "*.md"], cwd=root, capture_output=True, text=True, check=True).stdout
-        return [f for f in out.splitlines() if (root / f).is_file()]
+        return [f for f in _tracked(root, "*.md") if (root / f).is_file()]
     except (OSError, subprocess.CalledProcessError):
         return [str(p.relative_to(root)) for p in root.rglob("*.md")]
 

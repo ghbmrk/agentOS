@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build the enforcer's image (ENF-m, NET-2 Hardening; D-229). Run as root on Linux with network
-# access to snapshot.debian.org and security.debian.org. CI does this: .github/workflows/enforcer-image.yml
+# access to snapshot.debian.org. CI does this: .github/workflows/enforcer-image.yml
 # Needs mkosi v24.3 (MKOSI=/path/to/mkosi), mtools, erofs-utils, dosfstools, cryptsetup-bin,
 # debian-archive-keyring, python3.
 #
@@ -10,6 +10,9 @@
 # are checked against. AGENTOS_RELEASE_KEYS names every agentOS release key (PEM public keys or
 # agentOS root.json files); finish_image.py refuses the image if the root or any byte of the disk
 # holds one (NET-2 Channel). Both are required: an image without them is not an enforcer release.
+# AGENTOS_SECURITY_SNAPSHOT, optional: the debian-security snapshot timestamp (YYYYMMDDTHHMMSSZ) the
+# image and its initrd install security packages from (#5825, as the core's build.sh, #5021). Unset,
+# the build resolves one itself (../security-snapshot.sh resolve).
 # Output in OUT: enforcer_VERSION.raw (the drive), the release (enforcer_VERSION.usr.raw,
 # .usr-verity.raw, the boot entry, .release.json, .usr.list), and SHA256SUMS.
 set -eu
@@ -24,6 +27,16 @@ for k in $AGENTOS_RELEASE_KEYS; do KEYS="$KEYS --agentos-key $(realpath "$k")"; 
 ROOT=$(realpath "$ENFORCER_RELEASE_ROOT")
 
 mkdir -p "$OUT"
+# One debian-security snapshot for the build (#5825): the enforcer's apt sources with their security
+# stanza on it go to mkosi as a package manager tree, which mkosi v24.3 copies after mkosi.pkgmngr, so
+# it replaces the committed file for the image and its initrd; the file stays in OUT as the record.
+SECURITY_SNAPSHOT=${AGENTOS_SECURITY_SNAPSHOT-}
+[ -n "$SECURITY_SNAPSHOT" ] || SECURITY_SNAPSHOT=$(sh "$HERE/../security-snapshot.sh" resolve)
+sh "$HERE/../security-snapshot.sh" sources "$SECURITY_SNAPSHOT" \
+	"$HERE/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources" >"$OUT/enforcer.sources"
+rm -rf "$OUT/pkgmngr"
+install -D -m 0644 "$OUT/enforcer.sources" "$OUT/pkgmngr/etc/apt/sources.list.d/mkosi.sources"
+echo "debian-security snapshot $SECURITY_SNAPSHOT"
 # Refuse a root that holds an agentOS key before spending a build on it.
 # shellcheck disable=SC2086 # $KEYS is a list of arguments without spaces.
 python3 "$HERE/finish_image.py" --check-root --root "$ROOT" $KEYS
@@ -31,8 +44,9 @@ STAGE=$OUT/stage; rm -rf "$STAGE"
 install -D -m 0644 "$ROOT" "$STAGE/usr/share/agentos-enforcer/release-root.json"
 chmod -R u+w,go-w "$STAGE"
 
-$MKOSI -C "$HERE/mkosi" -f --image-version="$VERSION" --extra-tree="$STAGE:/" --output-dir "$OUT" build
-rm -rf "$STAGE"
+$MKOSI -C "$HERE/mkosi" -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" --extra-tree="$STAGE:/" \
+	--output-dir "$OUT" build
+rm -rf "$STAGE" "$OUT/pkgmngr"
 # shellcheck disable=SC2086
 python3 "$HERE/finish_image.py" "$OUT" "$VERSION" --root "$ROOT" $KEYS
 ( cd "$OUT" && sha256sum "enforcer_$VERSION.raw" "enforcer_$VERSION.usr.raw" "enforcer_$VERSION.usr-verity.raw" \

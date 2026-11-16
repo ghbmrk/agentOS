@@ -96,8 +96,9 @@ def parse_range(text):
 
 
 def next_id(cwd, prefix, prs, rng=(1, None)):
+    refs = fetch_heads(cwd, prs)  # fetch first: origin/main must be read after the fetch advances it
     main = tree_ids(cwd, "origin/main", prefix)
-    heads = {n: tree_ids(cwd, ref, prefix) for n, ref in fetch_heads(cwd, prs).items()}
+    heads = {n: tree_ids(cwd, ref, prefix) for n, ref in refs.items()}
     added, dup = claims(main, heads)
     for pr, ids in sorted(added.items()):
         if ids:

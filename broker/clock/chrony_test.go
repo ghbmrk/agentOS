@@ -170,9 +170,10 @@ func TestHW8ChronyConfig(t *testing.T) {
 	}
 	// No NTP server or UDP command port (chronyc uses the root-only unix
 	// socket); a start-up step only; slewing no faster than 500 ppm (about
-	// 43 s a day, K9); unauthenticated sources only when no NTS one is
+	// 43 s a day, K9) and a frequency correction of at most 500 ppm, which
+	// ntsDrift covers; unauthenticated sources only when no NTS one is
 	// selectable (L3 on #177).
-	for k, v := range map[string]string{"port": "0", "cmdport": "0", "makestep": "1 3", "maxslewrate": "500",
+	for k, v := range map[string]string{"port": "0", "cmdport": "0", "makestep": "1 3", "maxslewrate": "500", "maxdrift": "500",
 		"authselectmode": "prefer", "ntsdumpdir": "/var/lib/chrony"} {
 		if got := values[k]; got != v {
 			t.Errorf("%s %q, want %q", k, got, v)
