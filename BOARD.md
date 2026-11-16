@@ -110,8 +110,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-unmarked-gaps | VULN-unmarked-gaps: unmarked copies the string-fingerprint check cannot see (small packages, minified-only packages, copies inside the holder's own unminified scripts, a second copy in a file that already names the package) | VULN-inlined-minified (#4234) | queued (later; tier A) |
 | MET-owner-export | MET-owner-export: the box writes its weekly owner-outcome counts to records/owner/ (needs brief; after G1) | #4935; G1 | queued (release; needs brief; after G1) |
 | VULN-prune-requalify | VULN-prune-requalify: requalify the pruned OpenClaw image (PLN-5, HLD-3) | VULN-controlui-drop (#4436) | queued (release) |
-| REV-LOW-tools-c | REV-LOW-tools-c: srclint GO_CMD anchoring and continuation lines | follow-up of #5846 | queued(release; tier C; brief to write) |
-| REV-LOW-tools-assume | REV-LOW-tools-assume: record #5850's assumptions in tools/ASSUMPTIONS.md | release finding of #4400 | building(release; tier C; after #5838) |
+| REV-LOW-tools-c | REV-LOW-tools-c: srclint GO_CMD anchoring and continuation lines | follow-up of #5846 | building(release; tier C; brief to write) |
 
 ## Owner channel and approvals (SPEC §10)
 
@@ -152,7 +151,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VOICE-ro-b2 | VOICE-ro-b2: the speech process's recognizer and synthesizer engines (public weights, pinned, tuned on telephone audio), turn timing on the M6 Ultra, and the barge-in cancel cost (R2 from #5182); part b2 of [VOICE-ro](briefs/VOICE-ro.md) | #5171 | queued (tier A; Opus; held on M6 Ultra) |
 | OWN-page-session-checks | OWN-page-session-checks: held owner text failing CH-19 or CH-21 shows as a pointer and cannot be run (CH-14; release of #4941) | #4941 | queued (tier A) |
 | OWN-page-session-hold | OWN-page-session-hold: owner-set hold size (MaxInbox to match) and mid-message code hygiene on held text (CH-14, CH-18; release of #4941) | #4941 | queued (tier A) |
-| KEY-9-reach-b2a | KEY-9-reach-b2a: graph reach over declarations, a decl.reach log entry and its fold (KEY-9, D-307) | #5060 | building (release; tier A; lane primary) |
 | KEY-9-reach-b2b | KEY-9-reach-b2b: grows-then-narrows, the kernel narrows a grown key to its old worth and logs the offer (KEY-9, D-307) | #5060 | queued (release; tier A; lane primary) |
 | KEY-9-reach-inbound-offset | KEY-9-reach-inbound-offset: move kernel/proc's unreached client types out of the trusted core (KRN-2, D-310) | #5678 | queued (release; tier A; lane primary; after #5678's PR) |
 | KEY-9-reach-writer | KEY-9-reach-writer: write decl.reach entries from the owner graph's declarations (KEY-9, CLK-10) | #5672 | queued (release; lane primary) |
@@ -443,12 +441,11 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MUT-import-widen | MUT-import-widen: an added import should not widen mutgate's targets to the whole package. Release; from #5808. | #5808 | queued (release; tier B) |
 | MUT-waiver-messages | MUT-waiver-messages: mutgate failures name the mutant as path:line:col:KIND, ambiguous waivers are not listed as unused, malformed waiver lines are warned about, and the workflow header shows the new syntax. Release; from #5824. | #5824 | queued (release; tier A) |
 | MUT-failed-test-bounded | MUT-failed-test-bounded: mutgate's failed_test reads a mutant's output unbounded; a flooding mutant crashes the deletion step. Release; from #5796. | #5796 | queued (release; tier C) |
-| OWN-page-session-mut2 | OWN-page-session mutants part 2: old cmd/agentosd survivors in forget, signinhost, recallheld, main, evidence, held, modemenv (198) | #5202 | building (release; tier A) |
 | OWN-page-session-mut4 | OWN-page-session mutants part 4: old broker/recovery survivors (69) | #5202 | building (release; tier A) |
 | OWN-page-session-mut2b | OWN-page-session mutants part 2b: remaining old cmd/agentosd survivors in evidence, forget, recallheld, main, held, signinhost (152) | #5847 | queued (release; tier A) |
 | MUT-notcovered-misread | MUT-notcovered-misread: mutgate record kind for killed mutants gremlins reads as NOT COVERED | #5863 | building (release; tier B) |
 | MUT-wipe-lint | MUT-wipe-lint: lint that derived key buffers are wiped | #5857 | queued (release; tier B) |
-| VULN-debian-r10 | VULN-debian-r10: accept gcc-14's new Debian 13 advisory DEBIAN-CVE-2026-125709 so image-vulncheck passes again. Release; sixth no-fix Debian round. | #2919, #5764 | building (release; tier A) |
+| VULN-static-check | VULN-static-check: a CI check that finds statically linked libraries in shipped binaries (llama-server, bwrap) and makes image-vulncheck scan their toolchain packages. Release; second sighting, from #5872's reviews. | #5871, #5697, #2919 | queued (release; needs brief) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -487,7 +484,6 @@ issue #4954: body has no board-row block
 issue #4982: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5062: body has no board-row block
 issue #5177: body has no board-row block
-issue #5202: title 'OWN-page-session mutants part 1: kill the survivors mutgate lists at #5194 on its new lines' does not start with '<ID>: '
 issue #5709: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5736: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5756: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
