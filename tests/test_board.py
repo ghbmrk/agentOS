@@ -824,6 +824,19 @@ class RateLimitTest(unittest.TestCase):
         self.assertEqual(json.loads(sent[0].data), {"name": "decision"})
         self.assertIsNone(sent[1].data)  # a DELETE sends no body
 
+    def test_a_get_of_one_object_returns_it_through_the_real_github(self):
+        # report_transition loads one issue; paging must not turn its JSON object into a list of keys
+        # (Security on #5972). A state-label event then runs end to end through board.github.
+        import os
+        from unittest import mock
+        issue = {"number": 7, "title": "X-1: a row", "labels": [{"name": "state:merged"}, {"name": "state:queued"}]}
+        def call(req):
+            return issue if "/issues/7?" in req.full_url else []
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "canary-not-a-token"}), \
+                mock.patch.object(board, "call", call):
+            self.assertEqual(board.github("/repos/o/r/issues/7"), issue)
+            self.assertIn("issue #7", board.report_transition(board.github, "o/r", 7, "state:queued", "labeled"))
+
 
 if __name__ == "__main__":
     unittest.main()

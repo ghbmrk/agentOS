@@ -508,7 +508,8 @@ def call(req, sleep=time.sleep, now=time.time, tries=6):
 
 
 def github(path, method="GET", payload=None):
-    """One GitHub REST call with GITHUB_TOKEN; GET follows pagination and returns the full list."""
+    """One GitHub REST call with GITHUB_TOKEN; a GET of a list follows pagination and returns the full list,
+    a GET of one object returns it unchanged."""
     token = os.environ.get("GITHUB_TOKEN") or sys.exit("GITHUB_TOKEN is not set")
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
                "X-GitHub-Api-Version": "2022-11-28"}
@@ -521,6 +522,8 @@ def github(path, method="GET", payload=None):
         sep = "&" if "?" in path else "?"
         batch = call(urllib.request.Request(f"https://api.github.com{path}{sep}per_page=100&page={page}",
                                             headers=headers))
+        if not isinstance(batch, list):
+            return batch  # one object (an issue, a PR): nothing to page
         out += batch
         if len(batch) < 100:
             return out
