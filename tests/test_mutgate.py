@@ -2484,6 +2484,19 @@ class DataFiles(unittest.TestCase):
             os.symlink("hint.go", pathlib.Path(d) / "broker" / "hint" / "link.go")
             self.assertEqual(mutgate.data_owner("broker/hint/ASSUMPTIONS.md"), "hint")
 
+    def test_a_glob_matches_by_its_last_part_against_the_files_base_name(self):
+        # Potency on #5943 (d92c2e23): the last-part clause survived `rsplit`→`split` (needs a glob
+        # with two directory parts) and `parts[-1]`→`parts[0]` (needs a file below a subdirectory).
+        # REQ: MUT-deleted-test-own-lines-fu
+        for name, path, src in (
+                ("a glob behind two directories", "broker/hint/ASSUMPTIONS.md",
+                 'var _, _ = filepath.Glob(root + "/a/b/*.md")'),
+                ("a Markdown file in a subdirectory", "broker/hint/sub/notes.md",
+                 'var _, _ = filepath.Glob(fmt.Sprintf("%s/*.md", dir))')):
+            with self.subTest(name), tempfile.TemporaryDirectory() as d, \
+                    self.tree(d, {"hint/hint.go": "package hint\n", "hint/hint_test.go": f"package hint\n\n{src}\n"}):
+                self.assertEqual(mutgate.touched(*mutgate.added_lines(data_diff(path))), {"hint"})
+
 
 class Plan(unittest.TestCase):
     def test_a_plan_past_the_matrix_limit_names_a_remedy(self):
