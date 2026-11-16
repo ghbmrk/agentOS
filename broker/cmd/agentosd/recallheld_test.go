@@ -733,8 +733,15 @@ func TestLOG4RecallFilesReadExactly(t *testing.T) {
 // deleted items leaves it contained; each failure is logged; rollbacks
 // and notices go in lineage order, each notice naming its time.
 func TestLOG4SettleOrdersAndLogs(t *testing.T) {
-	var logs []string
-	logf := func(f string, _ ...any) { logs = append(logs, f) }
+	var logs, errs []string
+	logf := func(f string, a ...any) {
+		logs = append(logs, f)
+		for _, x := range a {
+			if e, ok := x.(error); ok {
+				errs = append(errs, e.Error())
+			}
+		}
+	}
 	has := func(f string) bool {
 		for _, l := range logs {
 			if l == f {
@@ -765,9 +772,11 @@ func TestLOG4SettleOrdersAndLogs(t *testing.T) {
 	b = newRecallBox(t)
 	b.write("recall/meta.jsonl", tombs...)
 	b.write("provenance.jsonl", reads...)
-	logs = nil
-	if h := openRecallHeld(b.recall, filepath.Join(state, recallSettledFile), logf); !h.Contained("anyone") || !has("%s unreadable, every agent contained: %v") {
-		t.Fatalf("record unreadable: %q", logs)
+	logs, errs = nil, nil
+	// The read's own error is logged, not a decode of nothing.
+	if h := openRecallHeld(b.recall, filepath.Join(state, recallSettledFile), logf); !h.Contained("anyone") || !has("%s unreadable, every agent contained: %v") ||
+		len(errs) != 1 || !strings.Contains(errs[0], "is a directory") {
+		t.Fatalf("record unreadable: %q %q", logs, errs)
 	}
 	sp := filepath.Join(t.TempDir(), recallSettledFile)
 	must(t, os.WriteFile(sp, []byte(`{"a.1":{"ids":["a1"],"since":"2026-03-04T05:06:00Z","told":true}}`), 0o600))
