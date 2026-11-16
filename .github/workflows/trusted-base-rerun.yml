@@ -24,12 +24,16 @@ name: trusted-base-rerun
 # rerun workflow runs and read PRs, nothing else. PRs that merge within one rerun's latency can
 # still land together; main is then over the ceiling and the check stops further growth.
 # CI-rerun-touch: a PR whose own files (its PR file list, renames' old names too) match no
-# `measured` path is not rerun. A clean merge differs from main only in the PR's files, so every
-# path the check reads is main's on both sides: base and merged head measure the same, so no
-# growth check (parsers, core lines, ceilings) can fire, and a check on the head alone reads
-# main's own state, which this PR neither adds to nor fixes. A conflict fails the check, as above,
-# and GitHub's merge refuses that anyway. A listing that fails or reaches GitHub's 3000-file cap
-# reruns as before. 8 of 18 open PRs on 2026-11-16 changed no such path.
+# `measured` path, and none of whose files main has removed or renamed since the PR's merge base,
+# is not rerun once its newest run passed. A clean merge then differs from main only in the PR's
+# files (a path main moved could carry the PR's edit into a measured path, so it reruns; L3 on
+# #5960), every path the check reads is main's on both sides, base and merged head measure the
+# same, so no growth check (parsers, core lines, ceilings) can fire, and a check on the head alone
+# reads main's own state, which the PR neither adds to nor fixes. A run that failed, timed out or
+# was cancelled is rerun as before. A conflict fails the check, as above, and GitHub's merge
+# refuses that anyway. A listing that fails, a PR list of 3000 lines or more, or a compare that
+# fails or lists 300 files or more reruns as before. 8 of 18 open PRs on 2026-11-16 changed no
+# measured path.
 # tests/test_trusted_base.py pins every line below and runs the script.
 on:
   push:
@@ -65,13 +69,13 @@ jobs:
             printf '\n%s\n' "No path the check reads changed since $last; nothing rerun." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0
           fi
           failed=0 reran=0 missed=""
-          pending="" skipped=0
+          pending="$prs" quiet=" " skipped=0
           while read -r pr sha; do
             [ -n "$pr" ] || continue
-            if files=$(gh api --paginate "repos/$REPO/pulls/$pr/files?per_page=100" --jq '.[] | .filename, (.previous_filename // empty)') && [ "$(grep -c . <<< "$files")" -lt 3000 ] && { grep -Eq "$measured" <<< "$files"; [ $? = 1 ]; }; then
-              echo "#$pr: changes no path the check reads, so its merged measure is main's; not rerun"; skipped=$((skipped + 1))
+            if files=$(gh api --paginate "repos/$REPO/pulls/$pr/files?per_page=100" --jq '.[] | .filename, (.previous_filename // empty)') && [ "$(grep -c . <<< "$files")" -lt 3000 ] && { grep -Eq "$measured" <<< "$files"; [ $? = 1 ]; } && moved=$(gh api "repos/$REPO/compare/$sha...$GITHUB_SHA" --jq 'if (.files | length) < 300 then (.files[] | if .status == "removed" then .filename else (.previous_filename // empty) end) else error("300 files or more") end') && { [ -z "$moved" ] || { grep -Fxq -f <(printf '%s\n' "$moved") <<< "$files"; [ $? = 1 ]; }; }; then
+              quiet="$quiet$pr "
             else
-              pending="$pending$pr $sha"$'\n'
+              echo "#$pr: its files may reach a path the check reads (or could not be listed); rerun as usual"
             fi
           done <<< "$prs"
           for round in $(seq 1 "$ROUNDS"); do
@@ -85,6 +89,7 @@ jobs:
               elif [ "${run#* }" = completed ]; then
                 fresh=$(gh api "repos/$REPO/actions/runs/${run% *}/jobs" --jq "if ([.jobs[] | if .conclusion == \"success\" then .started_at else null end] | min) > \"$since\" then \"fresh\" else \"\" end") || { echo "::warning::#$pr: cannot list the jobs of ${run% *}"; failed=1; missed="$missed #$pr"; continue; }
                 if [ -n "$fresh" ]; then echo "#$pr: ${run% *} started after this push and passed, so it measured the new main"
+                elif [[ $quiet == *" $pr "* ]] && passed=$(gh api "repos/$REPO/actions/runs/${run% *}/jobs" --jq 'if (.jobs | length) > 0 and all(.jobs[]; .conclusion == "success") then "passed" else "" end') && [ -n "$passed" ]; then echo "#$pr: changes no path the check reads and ${run% *} passed, so its merged measure is main's; not rerun"; skipped=$((skipped + 1))
                 elif gh api -X POST "repos/$REPO/actions/runs/${run% *}/rerun" > /dev/null; then echo "#$pr: reran ${run% *}"; reran=$((reran + 1)); else echo "::warning::#$pr: rerun of ${run% *} refused"; failed=1; missed="$missed #$pr"; fi
               else
                 left="$left$pr $sha"$'\n'
@@ -99,7 +104,7 @@ jobs:
           done <<< "$pending"
           total=$(printf '%s' "$prs" | grep -c . || true)
           msg="Reran $reran of $total open PRs' trusted-base runs."
-          [ "$skipped" = 0 ] || msg="$msg $skipped change no path the check reads."
+          [ "$skipped" = 0 ] || msg="$msg $skipped change no path the check reads and passed, so they were not rerun."
           [ -z "$missed" ] || msg="$msg Not rerun:$missed (rerun their trusted-base check by hand; tools/ASSUMPTIONS.md CI-ceiling-fall)."
           printf '\n%s\n' "$msg" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$failed"
