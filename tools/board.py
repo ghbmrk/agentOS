@@ -44,6 +44,10 @@ the GENERATED line and its rows come from the live issues, never from hand edits
                                  judge issue N with render's checks among the live work items and
                                  keep one comment on it naming every problem (INTAKE_MARK): posted,
                                  edited in place, or deleted once the issue is well formed
+  board.py transition --repo o/r --issue N --label L --action labeled|unlabeled
+                                 fail when a state-label event is illegal: merged is final, and
+                                 state:merged needs a merged PR naming the row (the event's label
+                                 plus the issue's other state labels give previous and new state)
   board.py archive --base FILE --changed PATH...
                                  once the base's BOARD.md carries the GENERATED line: fail if a
                                  changed path is an archive (ARCHIVED) or a retired file (RETIRED)
@@ -353,11 +357,45 @@ def stale(items, prs):
         row = readable_row(item)
         if row is None or row["state"] not in OPEN_STATES:
             continue
-        mine = [p for p in prs if re.match(rf"{re.escape(row['id'])}(?![A-Za-z0-9-])", p["title"])]
+        mine = named_prs(row["id"], prs)
         merged = [p for p in mine if p.get("merged_at")]
         if merged and not any(p["state"] == "open" for p in mine):
             out.append((item, max(merged, key=lambda p: p["merged_at"])))
     return out
+
+
+def named_prs(row_id, prs):
+    """The PRs whose title starts with the row ID: the match stale and transition both use."""
+    return [p for p in prs if re.match(rf"{re.escape(row_id)}(?![A-Za-z0-9-])", p["title"])]
+
+
+def transition_problem(prev, new, merged_pr):
+    """None when a state-label change prev -> new is legal, else why not (BOARD-transition-relation).
+    merged is terminal: nothing leaves it (new None is a bare removal), and nothing enters it
+    without a merged PR naming the row. prev and new are state names or None."""
+    if prev == "merged" and new != "merged":
+        return f"state:merged is final; it cannot change to {('state:' + new) if new else 'no state'}"
+    if new == "merged" and prev != "merged" and not merged_pr:
+        return "state:merged needs a merged PR whose title starts with the row ID, and none is merged"
+    return None
+
+
+def report_transition(fetch, repo, number, label, action):
+    """Judge one state-label event on issue `number` (action labeled or unlabeled) against the
+    labels the issue holds now; returns the problem or None. Other labels are legal."""
+    if not label.startswith("state:"):
+        return None
+    item = fetch(f"/repos/{repo}/issues/{number}")
+    event = label[len("state:"):]
+    others = [x[len("state:"):] for x in _names(item["labels"]) if x.startswith("state:") and x != label]
+    merged = bool(event == "merged" and action == "labeled"
+                  and [p for p in named_prs(issue_id(item), fetch(f"/repos/{repo}/pulls?state=all")) if p.get("merged_at")])
+    for other in others or [None]:
+        prev, new = (other, event) if action == "labeled" else (event, other)
+        problem = transition_problem(prev, new, merged)
+        if problem:
+            return f"issue #{number}: {problem}"
+    return None
 
 
 def stale_comment(row_id, state, pr):
@@ -506,12 +544,14 @@ def work_items(fetch, repo):
 
 def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, root=ROOT):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("command", choices=("check", "render", "archive", "stale", "intake"))
+    ap.add_argument("command", choices=("check", "render", "archive", "stale", "intake", "transition"))
     ap.add_argument("--repo", help="owner/name: render from its issues and PRs instead of the plan")
     ap.add_argument("--base", metavar="FILE", help="the base branch's BOARD.md: once it carries the GENERATED line, so must this one")
     ap.add_argument("--changed", nargs="*", default=[], metavar="PATH", help="archive: the paths the PR changes")
     ap.add_argument("--comment", action="store_true", help="stale: comment once on each flagged issue")
-    ap.add_argument("--issue", type=int, metavar="N", help="intake: the issue to judge")
+    ap.add_argument("--issue", type=int, metavar="N", help="intake, transition: the issue to judge")
+    ap.add_argument("--label", help="transition: the label the event added or removed")
+    ap.add_argument("--action", choices=("labeled", "unlabeled"), help="transition: the event")
     args = ap.parse_args(argv)
     if args.command == "intake":
         if not (args.repo and args.issue):
@@ -519,6 +559,13 @@ def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, 
         problems = report_intake(fetch, args.repo, args.issue, read())
         print(*(f"board: {p}" for p in problems or [f"issue #{args.issue}: well formed"]), sep="\n")
         return 0
+    if args.command == "transition":
+        if not (args.repo and args.issue and args.label and args.action):
+            ap.error("transition needs --repo, --issue, --label and --action")
+        problem = report_transition(fetch, args.repo, args.issue, args.label, args.action)
+        if problem:
+            print(f"board: {problem}", file=sys.stderr)
+        return 1 if problem else 0
     if args.command == "stale":
         if not args.repo:
             ap.error("stale needs --repo")

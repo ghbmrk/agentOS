@@ -291,6 +291,62 @@ class StaleLabelTest(unittest.TestCase):
         self.assertNotIn("pull_request_target", wf)
 
 
+class TransitionTest(unittest.TestCase):
+    """BOARD-transition-relation: merged is final, and merged needs a merged PR."""
+
+    MERGED = [{"number": 22, "title": "W-3: fix", "state": "closed", "merged_at": "2026-10-10T00:00:00Z"}]
+    OPEN = [{"number": 24, "title": "W-3: fix", "state": "open", "merged_at": None}]
+
+    def test_relation(self):
+        legal = [("queued", "building", False), ("building", "in review", False), ("escalated", "queued", False),
+                 ("in review", "dropped", False), (None, "queued", False), ("merged", "merged", False),
+                 ("in review", "merged", True), (None, "merged", True)]
+        illegal = [("merged", "queued", True), ("merged", "dropped", False), ("merged", None, True),
+                   ("in review", "merged", False), (None, "merged", False)]
+        for prev, new, pr in legal:
+            self.assertIsNone(board.transition_problem(prev, new, pr), (prev, new, pr))
+        for prev, new, pr in illegal:
+            self.assertIsNotNone(board.transition_problem(prev, new, pr), (prev, new, pr))
+
+    def judge(self, label, action, held, prs):
+        item = {"number": 7, "title": "W-3: fix", "labels": [{"name": n} for n in ["work-item", *held]]}
+
+        def fetch(path, method="GET", payload=None):
+            if path == "/repos/o/r/issues/7":
+                return item
+            if path.startswith("/repos/o/r/pulls"):
+                return prs
+            raise AssertionError(path)
+        return board.report_transition(fetch, "o/r", 7, label, action)
+
+    def test_events(self):
+        # Adding merged beside the old label, or removing merged, are the two shapes a relabel takes.
+        self.assertIsNone(self.judge("state:merged", "labeled", ["state:in review", "state:merged"], self.MERGED))
+        self.assertIn("merged PR", self.judge("state:merged", "labeled", ["state:in review", "state:merged"], self.OPEN))
+        self.assertIn("merged PR", self.judge("state:merged", "labeled", ["state:merged"], []))
+        self.assertIn("final", self.judge("state:queued", "labeled", ["state:merged", "state:queued"], self.MERGED))
+        self.assertIn("final", self.judge("state:merged", "unlabeled", ["state:queued"], self.MERGED))
+        self.assertIn("final", self.judge("state:merged", "unlabeled", [], self.MERGED))
+        self.assertIsNone(self.judge("state:queued", "unlabeled", ["state:building"], []))
+        self.assertIsNone(self.judge("class:release", "labeled", ["state:merged"], []))
+
+    def test_cli_exit_code(self):
+        def run(prs):
+            def fetch(path, method="GET", payload=None):
+                if path == "/repos/o/r/issues/7":
+                    return {"number": 7, "title": "W-3: fix", "labels": [{"name": "state:merged"}]}
+                return prs
+            err = io.StringIO()
+            with redirect_stderr(err):
+                code = board.main(["transition", "--repo", "o/r", "--issue", "7", "--label", "state:merged",
+                                   "--action", "labeled"], read=lambda: BOARD, fetch=fetch)
+            return code, err.getvalue()
+        self.assertEqual(run(self.MERGED), (0, ""))
+        code, err = run([])
+        self.assertEqual(code, 1)
+        self.assertIn("issue #7: state:merged needs a merged PR", err)
+
+
 class IntakeProblemsTest(unittest.TestCase):
     """CX-BOARD-INTAKE: one run names every malformed work-item issue; render --repo lists them on the board."""
 
