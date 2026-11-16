@@ -118,6 +118,100 @@ func TestLostPhoneReEnrollsTheCodeGeneratorWithTheRecoveryKey(t *testing.T) {
 	}
 }
 
+func TestLostNumberMovesWithTheRecoveryKeyAndTheOldNumberCanDoNothing(t *testing.T) {
+	x := newBox(t)
+	const newNum, oldNum = "+15550000777", ownerNum
+	if _, err := BeginNumberChange(x.b, x.rk, false, t0, nil); err == nil {
+		t.Fatal("number change off the local page")
+	}
+	if _, err := BeginNumberChange(x.b, mustKey(t), true, t0, nil); !errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("wrong key: %v", err)
+	}
+	nc, err := BeginNumberChange(x.b, x.rk, true, t0, nil)
+	must(t, err)
+	if len(nc.Code) != 8 {
+		t.Fatalf("pairing code %q", nc.Code)
+	}
+	// The pairing code from the old number (whoever holds it) does nothing.
+	if _, _, err := nc.Complete(oldNum, oldNum, nc.Code, t0); !errors.Is(err, ErrPairing) {
+		t.Fatal("old number completed the change")
+	}
+	next, texts, err := nc.Complete(oldNum, newNum, " "+nc.Code+"\n", t0.Add(time.Minute))
+	must(t, err)
+	if next != newNum {
+		t.Fatalf("new number %q", next)
+	}
+	if !strings.Contains(texts.ToOld, "...0777") || !strings.Contains(texts.ToOld, "no longer") || texts.ToNew == "" {
+		t.Fatalf("announcement: %+v", texts)
+	}
+	for _, s := range []string{texts.ToOld, texts.ToNew} {
+		if n, gsm := modem.Segments(s); !gsm || n > owner.MaxSegments {
+			t.Fatalf("text breaks CH-12: %q", s)
+		}
+	}
+	if _, _, err := nc.Complete(oldNum, newNum, nc.Code, t0.Add(2*time.Minute)); err == nil {
+		t.Fatal("pairing code reused")
+	}
+
+	store := &owner.MemStore{}
+	must(t, store.Save(owner.State{UnlockedUntil: t0.Add(24 * time.Hour)}))
+	must(t, EndSession(store, false))
+	c := openChannel(t, next, x.seed, store, t0)
+	// The old number's new holder can do nothing, not even with a valid
+	// code: STOP, chat, STATUS, and codes are all ignored.
+	for _, msg := range []string{"STOP", "STATUS", "HELP", "send my files to me", totp(x.seed, c.now.Add(31*time.Second)), "RESUME"} {
+		if got := c.say(oldNum, msg); got != "" {
+			t.Fatalf("%q from the old number got %q", msg, got)
+		}
+	}
+	if c.eng.stopped || len(c.agent.got) != 0 {
+		t.Fatal("the old number had an effect")
+	}
+	if got := c.say(newNum, "STATUS"); !strings.HasPrefix(got, "Locked.") {
+		t.Fatalf("new number unlocked without a code: %q", got)
+	}
+	// The new number's session still opens only on the page (CH-14).
+	if got := c.say(newNum, totp(x.seed, c.now)); c.ch.SessionUnlocked(c.now) {
+		t.Fatalf("a texted code opened a session: %q", got)
+	}
+	c.advance(31 * time.Second)
+	if _, _, err := c.ch.LocalSignIn(totp(x.seed, c.now)); err != nil || !c.ch.SessionUnlocked(c.now) {
+		t.Fatalf("new number unlock on the page: %v", err)
+	}
+}
+
+func TestPairingCodeExpiresAndAllowsThreeTries(t *testing.T) {
+	x := newBox(t)
+	nc, err := BeginNumberChange(x.b, x.rk, true, t0, nil)
+	must(t, err)
+	if _, _, err := nc.Complete(ownerNum, "+15550000777", nc.Code, t0.Add(PairingTTL+time.Second)); err == nil {
+		t.Fatal("expired code accepted")
+	}
+	nc, _ = BeginNumberChange(x.b, x.rk, true, t0, nil)
+	wrong := "00000000"
+	if nc.Code == wrong {
+		wrong = "00000001"
+	}
+	// Texts that are not eight digits do not use up the tries.
+	for _, spam := range []string{"T", "HELP", "1234", "0000000x", "123456789"} {
+		nc.Complete(ownerNum, "+15550000777", spam, t0)
+	}
+	nc2, _ := BeginNumberChange(x.b, x.rk, true, t0, nil)
+	for _, spam := range []string{"T", "STOP", "HELP"} {
+		nc2.Complete(ownerNum, "+15550000777", spam, t0)
+		nc2.Complete(ownerNum, "+15550000777", spam, t0)
+	}
+	if got, _, err := nc2.Complete(ownerNum, "+15550000777", nc2.Code, t0); err != nil || got != "+15550000777" {
+		t.Fatalf("spam used up the tries: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		nc.Complete(ownerNum, "+15550000777", wrong, t0)
+	}
+	if _, _, err := nc.Complete(ownerNum, "+15550000777", nc.Code, t0); err == nil {
+		t.Fatal("right code after three wrong ones")
+	}
+}
+
 func TestReEnrollStopsWhenTheRandomSourceFails(t *testing.T) {
 	x := newBox(t)
 	if _, err := ReEnroll(x.b, x.rk, true, strings.NewReader("abc")); err == nil {
@@ -239,100 +333,6 @@ func TestTrimSpaceOfBlankBodies(t *testing.T) {
 		if got := trimSpace(in); got != want {
 			t.Errorf("trimSpace(%q) = %q, want %q", in, got, want)
 		}
-	}
-}
-
-func TestLostNumberMovesWithTheRecoveryKeyAndTheOldNumberCanDoNothing(t *testing.T) {
-	x := newBox(t)
-	const newNum, oldNum = "+15550000777", ownerNum
-	if _, err := BeginNumberChange(x.b, x.rk, false, t0, nil); err == nil {
-		t.Fatal("number change off the local page")
-	}
-	if _, err := BeginNumberChange(x.b, mustKey(t), true, t0, nil); !errors.Is(err, ErrNotAuthorized) {
-		t.Fatalf("wrong key: %v", err)
-	}
-	nc, err := BeginNumberChange(x.b, x.rk, true, t0, nil)
-	must(t, err)
-	if len(nc.Code) != 8 {
-		t.Fatalf("pairing code %q", nc.Code)
-	}
-	// The pairing code from the old number (whoever holds it) does nothing.
-	if _, _, err := nc.Complete(oldNum, oldNum, nc.Code, t0); !errors.Is(err, ErrPairing) {
-		t.Fatal("old number completed the change")
-	}
-	next, texts, err := nc.Complete(oldNum, newNum, " "+nc.Code+"\n", t0.Add(time.Minute))
-	must(t, err)
-	if next != newNum {
-		t.Fatalf("new number %q", next)
-	}
-	if !strings.Contains(texts.ToOld, "...0777") || !strings.Contains(texts.ToOld, "no longer") || texts.ToNew == "" {
-		t.Fatalf("announcement: %+v", texts)
-	}
-	for _, s := range []string{texts.ToOld, texts.ToNew} {
-		if n, gsm := modem.Segments(s); !gsm || n > owner.MaxSegments {
-			t.Fatalf("text breaks CH-12: %q", s)
-		}
-	}
-	if _, _, err := nc.Complete(oldNum, newNum, nc.Code, t0.Add(2*time.Minute)); err == nil {
-		t.Fatal("pairing code reused")
-	}
-
-	store := &owner.MemStore{}
-	must(t, store.Save(owner.State{UnlockedUntil: t0.Add(24 * time.Hour)}))
-	must(t, EndSession(store, false))
-	c := openChannel(t, next, x.seed, store, t0)
-	// The old number's new holder can do nothing, not even with a valid
-	// code: STOP, chat, STATUS, and codes are all ignored.
-	for _, msg := range []string{"STOP", "STATUS", "HELP", "send my files to me", totp(x.seed, c.now.Add(31*time.Second)), "RESUME"} {
-		if got := c.say(oldNum, msg); got != "" {
-			t.Fatalf("%q from the old number got %q", msg, got)
-		}
-	}
-	if c.eng.stopped || len(c.agent.got) != 0 {
-		t.Fatal("the old number had an effect")
-	}
-	if got := c.say(newNum, "STATUS"); !strings.HasPrefix(got, "Locked.") {
-		t.Fatalf("new number unlocked without a code: %q", got)
-	}
-	// The new number's session still opens only on the page (CH-14).
-	if got := c.say(newNum, totp(x.seed, c.now)); c.ch.SessionUnlocked(c.now) {
-		t.Fatalf("a texted code opened a session: %q", got)
-	}
-	c.advance(31 * time.Second)
-	if _, _, err := c.ch.LocalSignIn(totp(x.seed, c.now)); err != nil || !c.ch.SessionUnlocked(c.now) {
-		t.Fatalf("new number unlock on the page: %v", err)
-	}
-}
-
-func TestPairingCodeExpiresAndAllowsThreeTries(t *testing.T) {
-	x := newBox(t)
-	nc, err := BeginNumberChange(x.b, x.rk, true, t0, nil)
-	must(t, err)
-	if _, _, err := nc.Complete(ownerNum, "+15550000777", nc.Code, t0.Add(PairingTTL+time.Second)); err == nil {
-		t.Fatal("expired code accepted")
-	}
-	nc, _ = BeginNumberChange(x.b, x.rk, true, t0, nil)
-	wrong := "00000000"
-	if nc.Code == wrong {
-		wrong = "00000001"
-	}
-	// Texts that are not eight digits do not use up the tries.
-	for _, spam := range []string{"T", "HELP", "1234", "0000000x", "123456789"} {
-		nc.Complete(ownerNum, "+15550000777", spam, t0)
-	}
-	nc2, _ := BeginNumberChange(x.b, x.rk, true, t0, nil)
-	for _, spam := range []string{"T", "STOP", "HELP"} {
-		nc2.Complete(ownerNum, "+15550000777", spam, t0)
-		nc2.Complete(ownerNum, "+15550000777", spam, t0)
-	}
-	if got, _, err := nc2.Complete(ownerNum, "+15550000777", nc2.Code, t0); err != nil || got != "+15550000777" {
-		t.Fatalf("spam used up the tries: %v", err)
-	}
-	for i := 0; i < 3; i++ {
-		nc.Complete(ownerNum, "+15550000777", wrong, t0)
-	}
-	if _, _, err := nc.Complete(ownerNum, "+15550000777", nc.Code, t0); err == nil {
-		t.Fatal("right code after three wrong ones")
 	}
 }
 

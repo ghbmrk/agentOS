@@ -317,6 +317,82 @@ func TestARecoveryKeyPrintsItsLastSymbol(t *testing.T) {
 // REQ: CRED-8
 // Acceptance: A8 (key-slot header contents)
 
+// RFC 5869 appendix A.1 (SHA-256, 42 bytes: two blocks).
+func TestHKDFMatchesRFC5869(t *testing.T) {
+	ikm := bytes.Repeat([]byte{0x0b}, 22)
+	var salt, info []byte
+	for i := byte(0); i <= 0x0c; i++ {
+		salt = append(salt, i)
+	}
+	for i := byte(0xf0); i <= 0xf9; i++ {
+		info = append(info, i)
+	}
+	want := "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
+	var got []byte
+	for _, c := range hkdf(ikm, salt, string(info), 42) {
+		got = append(got, "0123456789abcdef"[c>>4], "0123456789abcdef"[c&15])
+	}
+	if string(got) != want {
+		t.Fatalf("hkdf = %s\nwant   %s", got, want)
+	}
+}
+
+// The header and chain-start MACs are a fixed layout, so a log written by
+// an earlier build verifies: these values are HMAC-SHA256 under 32 bytes of
+// 0x09 of "agentos-forget-header-v1\x00" + format + "\x00" + ID + "\x00" +
+// host + "\x00" + base and anchor seq (big-endian uint64 each), and of
+// "agentos-forget-chain-v1\x00" + ID. Each header field is bound in.
+func TestForgetLogHeaderAndChainStartLayout(t *testing.T) {
+	key := bytes.Repeat([]byte{9}, 32)
+	l := forgetLog{Format: forgetLogFmt, ID: bytes.Repeat([]byte{1}, 16), Host: "pc-a", Base: 7, AnchorSeq: 3}
+	if got := l.headerMAC(key); got != "cbba32d906ba4ad9ba37ccd463c7b2d19cf8f85bde8c3fe9481b4b2477d88563" {
+		t.Fatalf("header MAC %s", got)
+	}
+	if got := chainStart(key, l.ID); got != "6c06fc530d0a526cdf89b793181ff5a10cc3ed5a93e009a13eac228cf2b2c83c" {
+		t.Fatalf("chain start %s", got)
+	}
+	base := l.headerMAC(key)
+	for name, edit := range map[string]func(*forgetLog){
+		"format": func(m *forgetLog) { m.Format += "x" },
+		"id":     func(m *forgetLog) { m.ID = bytes.Repeat([]byte{2}, 16) },
+		"host":   func(m *forgetLog) { m.Host = "pc-b" },
+		"base":   func(m *forgetLog) { m.Base = 8 },
+		"anchor": func(m *forgetLog) { m.AnchorSeq = 4 },
+	} {
+		m := l
+		edit(&m)
+		if m.headerMAC(key) == base {
+			t.Errorf("the header MAC does not bind %s", name)
+		}
+	}
+}
+
+func TestEnsureForgetLogStopsOnAMalformedKeyOrLog(t *testing.T) {
+	for name, kind := range map[string]string{ForgetKeyName: KindForgetKey, ForgetLogName: KindForgetLog} {
+		x := newBox(t)
+		junk := []byte(`{"format":"not-this-one"}`)
+		must(t, x.b.V.Put(name, kind, junk))
+		if err := ensureForgetLog(x.b.V, x.rk, nil); err == nil {
+			t.Errorf("%s: a malformed entry was replaced", name)
+		}
+		got, _, err := reserved(x.b.V, name, kind)
+		must(t, err)
+		if !bytes.Equal(got, junk) {
+			t.Errorf("%s: the malformed entry changed", name)
+		}
+	}
+}
+
+func TestSaveForgetLogReportsAnEntryItCannotEncode(t *testing.T) {
+	x := newBox(t)
+	l := forgetLog{Format: forgetLogFmt, ID: bytes.Repeat([]byte{1}, 16),
+		Entries: []ForgetEntry{{Seq: 1, Goal: "g", At: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)}}}
+	var me *json.MarshalerError
+	if err := saveForgetLog(x.b.V, l); !errors.As(err, &me) {
+		t.Fatalf("err = %v, want the encoding error", err)
+	}
+}
+
 func TestKeySlotsHoldOnlyTPMPassphraseAndRecoverySlots(t *testing.T) {
 	x := newBox(t)
 	x.withPassphrase()
