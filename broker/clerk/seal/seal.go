@@ -554,8 +554,7 @@ func Unlock(path string, f Factor) (*Store, error) {
 	return nil, errors.Join(append([]error{ErrWrongFactor}, errs...)...)
 }
 
-// inPlain is an entry's JSON value left in Unlock's plaintext, whose wipe covers it: Unlock decodes
-// a value only once the set parses, so one a repeated name displaces never is (CLK-1).
+// inPlain is an entry's JSON left in Unlock's wiped plaintext, so a displaced one is never decoded (CLK-1).
 type inPlain []byte
 
 func (v *inPlain) UnmarshalJSON(b []byte) error { *v = b; return nil }
@@ -692,8 +691,7 @@ type SlotInfo struct {
 	ID   string
 	Kind Kind
 	Host string // a tpm slot's PC, if named
-	// PolicyKey is the key a tpm slot was sealed under, so a rotation can
-	// tell the old key's slots from the new one's.
+	// PolicyKey is the key a tpm slot was sealed under, so a rotation tells old slots from new.
 	PolicyKey *ecdsa.PublicKey
 	// Policies is a tpm slot's signed boot paths, in order, so a rotation
 	// re-signs what enrollment measured (HW-5a) without reading the PCRs,
@@ -738,9 +736,8 @@ func (s *Store) AddSlot(f Factor) (string, error) {
 	return s.committed(sl.ID, s.commit(append(slices.Clone(s.f.Slots), sl), s.entries.Get()))
 }
 
-// committed returns the new slot's id with err when the slot is in place, which
-// it is after a rename even if the directory sync failed: the caller must
-// still learn its ID.
+// committed returns the new slot's id with err when the slot is in place, which it is
+// after a rename even if the directory sync failed: the caller must still learn its ID.
 func (s *Store) committed(id string, err error) (string, error) {
 	if err != nil && s.find(id) < 0 {
 		return "", err
@@ -881,7 +878,8 @@ func (s *Store) withEntry(name string, value []byte) (map[string][]byte, error) 
 	if !entryName.MatchString(name) || len(value) > MaxEntry {
 		return nil, errors.New("seal: bad entry name or value too long")
 	}
-	e := maps.Clone(s.entries.Get())
+	e := make(map[string][]byte)
+	maps.Copy(e, s.entries.Get())
 	e[name] = slices.Clone(value)
 	if len(e) > MaxEntries {
 		return nil, fmt.Errorf("seal: a store holds at most %d entries", MaxEntries)
@@ -910,8 +908,12 @@ func (s *Store) Delete(name string) error {
 	if _, ok := s.entries.Get()[name]; !ok {
 		return nil
 	}
-	e := maps.Clone(s.entries.Get())
-	delete(e, name)
+	e := make(map[string][]byte, len(s.entries.Get()))
+	for k, v := range s.entries.Get() {
+		if k != name {
+			e[k] = v
+		}
+	}
 	return s.commit(s.f.Slots, e)
 }
 
