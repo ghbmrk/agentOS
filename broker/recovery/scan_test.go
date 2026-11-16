@@ -215,6 +215,22 @@ func TestScannerFindsEachLeakOnceAtItsOffsetUpToTheStreamsEdges(t *testing.T) {
 		t.Errorf("raw findings at %v, want [5 %d]", raw, 2*step+5)
 	}
 
+	// Patterns sharing a first 8 bytes at the block edge, where only the
+	// shorter fits in this block, both come from the next block, in the
+	// order NewScanner added them: the whole hex before its first fragment.
+	edge := append(append(make([]byte, step), hex.EncodeToString(v)...), make([]byte, 4096)...)
+	got, err = s.Reader("t", bytes.NewReader(edge))
+	must(t, err)
+	var at []string
+	for _, f := range got {
+		if f.Offset == step {
+			at = append(at, f.Encoding)
+		}
+	}
+	if strings.Join(at, ",") != "hex,hex fragment" {
+		t.Errorf("findings at the block edge: %v, want [hex hex fragment]", at)
+	}
+
 	// A needle longer than a block is carried whole into the next one.
 	huge := Needle{Name: "huge", Value: make([]byte, 1<<20+16), Text: true}
 	_, err = rand.Read(huge.Value)
