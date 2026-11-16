@@ -524,7 +524,7 @@ func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
 func TestTIM1AnOpenedKernelReadsItsClockOnTheLog(t *testing.T) {
 	b := newBBox(t, recipientWire(t, testRK))
 	box := b.now
-	b.cfg.Clock = func() kernel.Reading { return kernel.Reading{Latest: box} }
+	b.cfg.Clock = func() kernel.Reading { return kernel.At(box) }
 	b.restart()
 	box = 1 << 50 // a forward step while running
 	err := b.h.With(func(k *kernel.Kernel) error {

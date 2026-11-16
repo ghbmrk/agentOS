@@ -35,7 +35,9 @@ type Chrony struct {
 	next        time.Time // no try before this after a failure
 }
 
-// NewChrony is a source reading chronyd at sock, answered at reply.
+// NewChrony is a source reading chronyd at sock, answered at reply; with
+// sock "" it reads the box clock alone. A reply socket left at exit is
+// removed at the next start's first ask.
 func NewChrony(sock, reply string) *Chrony { return &Chrony{sock: sock, reply: reply} }
 
 // Read is the kernel process's TIM-1 source (onLog). With chronyd synced,
@@ -57,13 +59,6 @@ func (s *Chrony) Read() kernel.Reading {
 	return kernel.Reading{Earliest: min(b0, lo), Latest: max(b1, hi)}
 }
 
-// Close closes the reply socket and removes its file.
-func (s *Chrony) Close() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.drop()
-}
-
 func (s *Chrony) drop() {
 	if s.c != nil {
 		s.c.Close()
@@ -77,7 +72,7 @@ func (s *Chrony) drop() {
 // source or does not answer well. A failure closes the socket and waits
 // chronyRetry, so a hung chronyd delays a decision at most once in that.
 func (s *Chrony) track() (corr, bound float64, ok bool) {
-	if time.Now().Before(s.next) {
+	if s.sock == "" || time.Now().Before(s.next) {
 		return 0, 0, false
 	}
 	if corr, bound, ok = s.ask(); !ok {

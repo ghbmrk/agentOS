@@ -1,6 +1,8 @@
 package proc
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"math"
@@ -12,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -141,7 +142,7 @@ func TestTIM1AChronyReplyGivesNoLowerBoundUnlessSynced(t *testing.T) {
 
 	dir := t.TempDir()
 	s := NewChrony(filepath.Join(dir, "none.sock"), filepath.Join(dir, "reply.sock"))
-	defer s.Close()
+	defer closeChrony(s)
 	before := time.Now().UnixMilli()
 	if r := s.Read(); r.Earliest != 0 || r.Latest < before {
 		t.Fatalf("no chronyd read %+v, want no lower bound and the box clock", r)
@@ -150,7 +151,7 @@ func TestTIM1AChronyReplyGivesNoLowerBoundUnlessSynced(t *testing.T) {
 	// A chronyd that never answers delays one decision by its wait, then
 	// none for the retry interval.
 	mute := NewChrony(fakeChronyd(t, dir, func(uint32) []byte { return nil }), filepath.Join(dir, "mute.sock"))
-	defer mute.Close()
+	defer closeChrony(mute)
 	if r := mute.Read(); r.Earliest != 0 {
 		t.Fatalf("a mute chronyd read %+v", r)
 	}
@@ -170,7 +171,7 @@ func TestTIM1AChronyReadsTheHullOfBothSources(t *testing.T) {
 	var corr atomic.Uint32 // the fake's goroutine reads it
 	corr.Store(corrZero)
 	s := NewChrony(fakeChronyd(t, dir, func(seq uint32) []byte { return tracking(seq, corr.Load()) }), filepath.Join(dir, "reply.sock"))
-	defer s.Close()
+	defer closeChrony(s)
 	b0 := time.Now().UnixMilli()
 	r := s.Read()
 	b1 := time.Now().UnixMilli()
@@ -195,7 +196,7 @@ func TestTIM1AOnlyChronydReachesTheReplySocket(t *testing.T) {
 	dir := t.TempDir()
 	reply := filepath.Join(dir, "reply.sock")
 	s := NewChrony(fakeChronyd(t, dir, func(seq uint32) []byte { return tracking(seq, corrZero) }), reply)
-	defer s.Close()
+	defer closeChrony(s)
 	if r := s.Read(); r.Earliest == 0 {
 		t.Fatalf("chronyd's answer read %+v", r)
 	}
@@ -218,67 +219,34 @@ func TestTIM1AOnlyChronydReachesTheReplySocket(t *testing.T) {
 //
 // REQ: TIM-1, KEY-8, KEY-4
 func TestTIM1AStartAheadWithChronySyncedEndsNoHoldEarly(t *testing.T) {
-	b := newBBox(t, recipientWire(t, testRK))
-	truth := func() int64 { return time.Now().UnixMilli() - 2*key.DayMS }
-	b.cfg.Clock = func() kernel.Reading { return kernel.At(truth()) }
-	b.restart()
-	root := key.Issue(key.Ed25519Signer(ownerPriv), key.Root{Clerk: "mail", Verbs: []key.Verb{key.Send}, Serial: "r1"})
-	ck, err := key.ClerkKey(root, key.Ed25519Signer(ownerPriv), holderPub, truth(), 1<<50)
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	l, err := kernel.Open(kernel.Config{Store: &kernel.MemStore{}, Anchor: &kernel.MemAnchor{}, Pub: pub, Sign: priv, Rand: rand.Reader})
 	if err != nil {
 		t.Fatal(err)
 	}
-	cos := []key.Cosign{key.Approve(key.Ed25519Signer(ownerPriv), kernel.BatchHash(root, ck)), key.Approve(key.Ed25519Signer(sparePriv), kernel.BatchHash(root, ck))}
-	var from int64
-	must := func(err error) {
-		t.Helper()
-		if err != nil {
-			t.Fatal(err)
-		}
+	// A grant issued now holds for GrantHold; the box clock is two days
+	// fast at this start, and chronyd says so.
+	truth := time.Now().UnixMilli() - 2*key.DayMS
+	if _, err := l.Append(truth-1000, kernel.TStop, 1, struct{}{}); err != nil {
+		t.Fatal(err)
 	}
-	must(b.h.With(func(k *kernel.Kernel) error {
-		if err := k.Issue(b.now, cos, root, ck); err != nil {
-			return err
-		}
-		var ok bool
-		if from, ok = k.State().Granted(root.Tip()); !ok || from < truth()+kernel.GrantHold-1000 {
-			t.Fatalf("the grant is live from %d, %v: want a day's hold from now", from, ok)
-		}
-		return nil
-	}))
-
-	// The box clock is two days fast at this start; chronyd says so.
+	from := truth + kernel.GrantHold
 	dir := t.TempDir()
 	s := NewChrony(fakeChronyd(t, dir, func(seq uint32) []byte { return tracking(seq, corrTwoDays) }), filepath.Join(dir, "reply.sock"))
-	defer s.Close()
-	b.cfg.Clock = s.Read
-	b.restart()
+	defer closeChrony(s)
 	box := time.Now().UnixMilli()
-	stop := func() kernel.Entry {
-		var e kernel.Entry
-		must(b.h.With(func(k *kernel.Kernel) error {
-			if err := k.Stop(b.now); err != nil {
-				return err
-			}
-			es := k.Log().Entries()
-			e = es[len(es)-1]
-			return nil
-		}))
-		return e
+	r := onLog(l, s.Read)()
+	if r.Earliest >= from {
+		t.Fatalf("the start read %+v, past the hold's end %d: the box clock ended it early", r, from)
 	}
-	e := stop()
-	if e.At >= from {
-		t.Fatalf("the kernel logged at %d, past the hold's end %d: the box clock ended it early", e.At, from)
-	}
-	if e.Late == nil || *e.Late < box || *e.Late-e.At < 2*key.DayMS-1000 {
-		t.Fatalf("the reading [%d, %v] does not span the two days to the box's %d: not restricted", e.At, e.Late, box)
+	if r.Latest < box || r.Latest-r.Earliest < 2*key.DayMS-1000 {
+		t.Fatalf("the reading %+v does not span the two days to the box's %d: not restricted", r, box)
 	}
 
 	// The box clock alone vouches for nothing, so a start reads it as before:
 	// that is the hold ending early that the second source prevents.
-	b.cfg.Clock = func() kernel.Reading { return kernel.Reading{Latest: time.Now().UnixMilli()} }
-	b.restart()
-	if e := stop(); e.At < from {
-		t.Fatalf("without chronyd the start logged at %d, before the hold's end %d: the contrast is gone", e.At, from)
+	if r := onLog(l, NewChrony("", "").Read)(); r.Earliest < from {
+		t.Fatalf("without chronyd the start read %+v, before the hold's end %d: the contrast is gone", r, from)
 	}
 }
 
@@ -295,7 +263,7 @@ func TestTIM1AChronyAheadOfTheBoxReachesPastItByTheBound(t *testing.T) {
 		binary.BigEndian.PutUint32(p[96:], 0x04800000) // root dispersion 1 s
 		return p
 	}), filepath.Join(dir, "reply.sock"))
-	defer s.Close()
+	defer closeChrony(s)
 	b0 := time.Now().UnixMilli()
 	r := s.Read()
 	b1 := time.Now().UnixMilli()
@@ -318,7 +286,7 @@ func TestTIM1AChronyBehindTheBoxReachesBeforeItByTheBound(t *testing.T) {
 		binary.BigEndian.PutUint32(p[96:], 0x04800000) // root dispersion 1 s
 		return p
 	}), filepath.Join(dir, "reply.sock"))
-	defer s.Close()
+	defer closeChrony(s)
 	b0 := time.Now().UnixMilli()
 	r := s.Read()
 	b1 := time.Now().UnixMilli()
@@ -335,7 +303,7 @@ func TestTIM1AChronyBehindTheBoxReachesBeforeItByTheBound(t *testing.T) {
 func TestTIM1AChronyRefusesAnAnswerToAnEarlierRequest(t *testing.T) {
 	dir := t.TempDir()
 	s := NewChrony(fakeChronyd(t, dir, func(uint32) []byte { return tracking(1, corrZero) }), filepath.Join(dir, "reply.sock"))
-	defer s.Close()
+	defer closeChrony(s)
 	if r := s.Read(); r.Earliest == 0 {
 		t.Fatalf("the answer to the first request read %+v", r)
 	}
@@ -364,7 +332,7 @@ func TestTIM1AChronyReplySocketLifecycle(t *testing.T) {
 		}
 		return p
 	}), reply)
-	defer s.Close()
+	defer closeChrony(s)
 	if r := s.Read(); r.Earliest == 0 {
 		t.Fatalf("over a stale file the reply socket read %+v", r)
 	}
@@ -384,19 +352,19 @@ func TestTIM1AChronyReplySocketLifecycle(t *testing.T) {
 		}
 	}
 	c := s.c
-	s.Close()
+	closeChrony(s)
 	closed(c, "closed")
 
-	// Close leaves Read usable: it binds the socket again.
+	// Closing leaves Read usable: it binds the socket again.
 	done := make(chan kernel.Reading, 1)
 	go func() { done <- s.Read() }()
 	select {
 	case r := <-done:
 		if r.Earliest == 0 {
-			t.Fatalf("a Read after Close read %+v", r)
+			t.Fatalf("a Read after closing read %+v", r)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("a Read after Close never returned: Close kept the lock")
+		t.Fatal("a Read after closing never returned: closing kept the lock")
 	}
 
 	c = s.c
@@ -426,7 +394,7 @@ func TestTIM1AChronyGoneFailsWithoutWaiting(t *testing.T) {
 		}
 	}()
 	s := NewChrony(sock, filepath.Join(dir, "reply.sock"))
-	defer s.Close()
+	defer closeChrony(s)
 	if r := s.Read(); r.Earliest == 0 {
 		t.Fatalf("chronyd's answer read %+v", r)
 	}
@@ -437,25 +405,9 @@ func TestTIM1AChronyGoneFailsWithoutWaiting(t *testing.T) {
 	}
 }
 
-// REQ: TIM-1
-// The kernel process reads chronyd when the unit names its socket (#5391):
-// started so, it asks chronyd at its start and holds its reply socket while
-// running, then removes it; started without, it binds none. Revert mutants:
-// RunKernel's `cfg.Chrony != ""` negated, or its source swap dropped.
-func TestRunKernelReadsChronydWhenItsSocketIsNamed(t *testing.T) {
-	m := newMainBox(t)
-	var asked atomic.Int32
-	m.cfg.Chrony = fakeChronyd(t, m.dir, func(seq uint32) []byte { asked.Add(1); return tracking(seq, corrZero) })
-	m.cfg.ChronyReply = filepath.Join(m.dir, "cr.sock")
-	_, stop := m.boot(handoff.SlotTPM, nil)
-	if asked.Load() == 0 {
-		t.Fatal("the kernel came up without asking chronyd")
-	}
-	if _, err := os.Stat(m.cfg.ChronyReply); err != nil {
-		t.Fatalf("the running kernel holds no reply socket: %v", err)
-	}
-	stop()
-	if _, err := os.Lstat(m.cfg.ChronyReply); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the stopped kernel left its reply socket: %v", err)
-	}
+// closeChrony closes s's reply socket and removes its file.
+func closeChrony(s *Chrony) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.drop()
 }

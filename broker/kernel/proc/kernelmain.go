@@ -349,16 +349,11 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	if err != nil {
 		return err
 	}
-	// The kernel reads its source (chronyd when the unit binds its socket in,
+	// The kernel reads its source (chronyd when the unit names its socket,
 	// #5391, else the box clock, which vouches for no lower bound) at each
 	// decision, not the clock handed below; OpenKernel floors it at the log and
 	// carries it on the monotonic clock (onLog), so it never goes back (TIM-1, #5147).
-	read := func() kernel.Reading { return kernel.Reading{Latest: time.Now().UnixMilli()} }
-	if cfg.Chrony != "" {
-		s := NewChrony(cfg.Chrony, cfg.ChronyReply)
-		defer s.Close()
-		read = s.Read
-	}
+	src := NewChrony(cfg.Chrony, cfg.ChronyReply)
 	clock := func() int64 { return time.Now().UnixMilli() }
 	h, err := OpenKernel(KernelConfig{
 		Log: cfg.Log, Anchor: anchor, Key: keys.Log.Get(),
@@ -366,7 +361,7 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 		Anchors: keys.Anchors, Clerks: cfg.Clerks, KeyDir: cfg.KeyDir,
 		ContentDir: cfg.ContentDir, Stores: slices.Sorted(maps.Keys(cfg.Content)),
 		BackupDir: cfg.BackupDir, Recipient: keys.Recipient, PageCA: keys.PageCA.Get(),
-		FirstEdge: first, LinkKey: keys.LinkKey.Get(), Checker: checker, Clock: read,
+		FirstEdge: first, LinkKey: keys.LinkKey.Get(), Checker: checker, Clock: src.Read,
 	}, clock())
 	if err != nil {
 		return err
