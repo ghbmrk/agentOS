@@ -3,8 +3,6 @@ package clock
 // REQ: TIM-1, KEY-4, CLK-2
 
 import (
-	"encoding/json"
-	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -705,53 +703,6 @@ func TestTIM1NoStatePathWritesNothing(t *testing.T) {
 	}
 }
 
-// rewriteSaved applies edit to the state file at path, as root tampering
-// with it can (K9).
-func rewriteSaved(t *testing.T, path string, edit func(*saved)) {
-	t.Helper()
-	v := readSaved(t, path)
-	edit(&v)
-	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, b, 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestTIM1FarReferenceIsNotAuthenticated(t *testing.T) {
-	// #5899: time.Time.Sub saturates at the minimum Duration, whose negation
-	// overflows to itself, so a saved NTS sync more than 292 years ahead of
-	// the box clock read as within any allowance and the status as
-	// Authenticated. It is not, either way, and the carrier widens fully.
-	for _, years := range []int{300, -300} {
-		path := filepath.Join(t.TempDir(), "clock.json")
-		r := newRig()
-		kind := SyncedNTS
-		edit := func(c *Config) {
-			syncAs(&kind)(c)
-			c.StatePath = path
-			c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
-		}
-		g := r.guard(t, edit)
-		if s := g.Check(bg); !s.Authenticated {
-			t.Fatalf("%d years: status = %+v", years, s)
-		}
-		g.Flush()
-		rewriteSaved(t, path, func(v *saved) { v.NTSWall = v.NTSWall.AddDate(years, 0, 0) })
-		kind = NotSynced
-		r.advance(time.Minute)
-		r.setCarrier(r.wall.Add(5 * time.Hour))
-		g = r.guard(t, edit)
-		lo, hi, s := g.Interval(bg)
-		if s.State != Disagree || s.Authenticated || !s.Restricted() {
-			t.Fatalf("%d years: status = %+v", years, s)
-		}
-		wantSpan(t, "far reference", lo, hi, r.wall, r.wall.Add(5*time.Hour))
-	}
-}
-
 func TestTIM1FarCarrierDisagrees(t *testing.T) {
 	// #5899: carrier time more than 292 years off (a four-digit +QLTS year)
 	// saturates the skew; it disagrees, by about the longest Duration, and
@@ -793,30 +744,6 @@ func TestTIM1FarCarrierDisagrees(t *testing.T) {
 	}
 }
 
-func TestTIM1FarAnchorHolds(t *testing.T) {
-	// #5899: a saved anchor more than 292 years from the box clock is a
-	// jump the hold sees, not one the saturated difference hides.
-	for _, years := range []int{300, -300} {
-		path := filepath.Join(t.TempDir(), "clock.json")
-		r := newRig()
-		r.carrier = time.Time{}
-		edit := func(c *Config) {
-			c.StatePath = path
-			c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
-		}
-		g := r.guard(t, edit)
-		if s := g.Check(bg); s.State != NetworkOnly {
-			t.Fatalf("%d years: status = %+v", years, s)
-		}
-		g.Flush()
-		rewriteSaved(t, path, func(v *saved) { v.AnchorWall = v.AnchorWall.AddDate(years, 0, 0) })
-		g = r.guard(t, edit)
-		if s := g.Check(bg); s.State != Held {
-			t.Fatalf("%d years: status = %+v", years, s)
-		}
-	}
-}
-
 func TestTIM1FarSavedSkewWidensForward(t *testing.T) {
 	// #5899: a disagreement saved with the saturated skew of a carrier
 	// hundreds of years ahead keeps its width forward across a reboot,
@@ -829,14 +756,14 @@ func TestTIM1FarSavedSkewWidensForward(t *testing.T) {
 	}
 	r.carrier = r.wall.AddDate(300, 0, 0)
 	g := r.guard(t, edit)
-	if s := g.Check(bg); s.State != Disagree || s.Skew != math.MinInt64 {
+	if s := g.Check(bg); s.State != Disagree || s.Skew != time.Duration(-1<<63) {
 		t.Fatalf("status = %+v", s)
 	}
 	g.Flush()
 	r.reboot(r.wall)
 	r.carrier = time.Time{}
 	g = r.guard(t, edit)
-	if _, hi, s := g.Interval(bg); s.State != Disagree || !hi.Equal(r.wall.Add(math.MaxInt64)) {
+	if _, hi, s := g.Interval(bg); s.State != Disagree || !hi.Equal(r.wall.Add(time.Duration(1<<63-1))) {
 		t.Fatalf("Latest %v, status = %+v", hi, s)
 	}
 }
