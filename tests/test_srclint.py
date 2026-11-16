@@ -1,7 +1,7 @@
 """Tests for tools/srclint.py: every file under broker/ that a build could compile is plain Go,
 so each boundary lint holds for the files it parses (REV-CHK-src).
 
-REQ: KRN-2, CRED-1
+REQ: KRN-2
 All paths and code are synthetic.
 """
 import pathlib
