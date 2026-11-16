@@ -459,3 +459,120 @@ func TestHW8StatusLineWhileUnverified(t *testing.T) {
 		t.Fatalf("restricted: %q", got)
 	}
 }
+
+func TestTIM1FarReferenceIsNotAuthenticated(t *testing.T) {
+	// #5899: time.Time.Sub saturates at the minimum Duration, whose negation
+	// overflows to itself, so a saved NTS sync more than 292 years ahead of
+	// the box clock read as within any allowance and the status as
+	// Authenticated. It is not, either way, and the carrier widens fully.
+	rewrite := func(t *testing.T, path string, edit func(*saved)) {
+		t.Helper()
+		v := readSaved(t, path)
+		edit(&v)
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, years := range []int{300, -300} {
+		path := filepath.Join(t.TempDir(), "clock.json")
+		r := newRig()
+		kind := SyncedNTS
+		edit := func(c *Config) {
+			syncAs(&kind)(c)
+			c.StatePath = path
+			c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
+		}
+		g := r.guard(t, edit)
+		if s := g.Check(bg); !s.Authenticated {
+			t.Fatalf("%d years: status = %+v", years, s)
+		}
+		g.Flush()
+		rewrite(t, path, func(v *saved) { v.NTSWall = v.NTSWall.AddDate(years, 0, 0) })
+		kind = NotSynced
+		r.advance(time.Minute)
+		r.setCarrier(r.wall.Add(5 * time.Hour))
+		g = r.guard(t, edit)
+		lo, hi, s := g.Interval(bg)
+		if s.State != Disagree || s.Authenticated || !s.Restricted() {
+			t.Fatalf("%d years: status = %+v", years, s)
+		}
+		wantSpan(t, "far reference", lo, hi, r.wall, r.wall.Add(5*time.Hour))
+	}
+}
+
+func TestTIM1FarAnchorHolds(t *testing.T) {
+	// #5899: a saved anchor more than 292 years from the box clock is a
+	// jump the hold sees, not one the saturated difference hides.
+	rewrite := func(t *testing.T, path string, edit func(*saved)) {
+		t.Helper()
+		v := readSaved(t, path)
+		edit(&v)
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, years := range []int{300, -300} {
+		path := filepath.Join(t.TempDir(), "clock.json")
+		r := newRig()
+		r.carrier = time.Time{}
+		edit := func(c *Config) {
+			c.StatePath = path
+			c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
+		}
+		g := r.guard(t, edit)
+		if s := g.Check(bg); s.State != NetworkOnly {
+			t.Fatalf("%d years: status = %+v", years, s)
+		}
+		g.Flush()
+		rewrite(t, path, func(v *saved) { v.AnchorWall = v.AnchorWall.AddDate(years, 0, 0) })
+		g = r.guard(t, edit)
+		if s := g.Check(bg); s.State != Held {
+			t.Fatalf("%d years: status = %+v", years, s)
+		}
+	}
+}
+
+func TestTIM1SavedNTSSyncAheadOfTheBootClockIsRefused(t *testing.T) {
+	// #5929: a saved NTS sync the boot clock has not reached yet is a
+	// corrupt or tampered file: a restart drops it, as it does such a
+	// carrier reading, so it authenticates nothing. The same sync at the
+	// boot clock's own reading still does.
+	for _, ahead := range []time.Duration{0, time.Minute} {
+		path := filepath.Join(t.TempDir(), "clock.json")
+		r := newRig()
+		r.carrier = time.Time{}
+		kind := SyncedNTS
+		edit := func(c *Config) {
+			syncAs(&kind)(c)
+			c.StatePath = path
+			c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
+		}
+		g := r.guard(t, edit)
+		if s := g.Check(bg); !s.Authenticated {
+			t.Fatalf("ahead %v: status = %+v", ahead, s)
+		}
+		g.Flush()
+		v := readSaved(t, path)
+		v.NTSWall, v.NTSMono = v.NTSWall.Add(ahead), v.NTSMono+ahead
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		kind = NotSynced
+		g = r.guard(t, edit)
+		if s := g.Check(bg); s.Authenticated != (ahead == 0) {
+			t.Fatalf("ahead %v: status = %+v", ahead, s)
+		}
+	}
+}

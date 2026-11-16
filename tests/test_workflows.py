@@ -1657,6 +1657,26 @@ class WorkflowTest(unittest.TestCase):
             # broker-race's copy also skips on a records-only change (CI-par-4); the rest is the same.
             self.assertEqual(dict(mut)[want], race[want].replace(guard, "", 1))
 
+    def test_mutgate_runs_the_tpm_tests_as_broker_race_does(self):
+        # MUT-swtpm-runner (#5896): without swtpm the seal TPM tests skip in the gate, so a
+        # deletion only they kill (seal.go's TPM skip, anchor check, TPM reason) lived there.
+        # `plan` and `mutants` install it with broker-race's own step before they run tests,
+        # and a missing swtpm fails the run, as in broker-race, instead of skipping.
+        want = "Software TPM for the trusted-host slot (P2-4b)"
+        race = dict(job_steps((WORKFLOWS / "ci.yml").read_text(), "broker-race"))
+        guard = "        if: steps.scope.outputs.records != 'true'\n"
+        self.assertIn(guard, race[want])
+        text = (WORKFLOWS / "mutgate.yml").read_text()
+        for job, first in (("mutants", "Gremlins on the package"), ("plan", "Shards for each package (#4961)")):
+            mut = job_steps(text, job)
+            names = [n for n, _ in mut]
+            self.assertIn(want, names, job)
+            self.assertLess(names.index(want), names.index(first), job)
+            code = lambda step: [l for l in step.splitlines() if not l.lstrip().startswith("#")]
+            self.assertEqual(code(dict(mut)[want]), code(race[want].replace(guard, "", 1)), job)
+        top = text[text.index("\nenv:\n"):text.index("\njobs:\n") + 1]
+        self.assertIn('\n  AGENTOS_REQUIRE_SWTPM: "1"\n', top)
+
     def test_mutants_matrix_holds_at_most_half_the_runner_floor(self):
         # CI-mutgate-cap: a 32-shard plan (#5817) must not queue every shard at once ahead of the
         # 5-minute gate jobs; 3 is half the 6-runner floor measured on 2026-11-15 (see mutgate.yml).

@@ -11,8 +11,10 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -157,12 +159,23 @@ func failSafeRows(t *testing.T) {
 		x.waits.HelloWait, x.waits.IdleWait = 200*time.Millisecond, time.Hour
 		x.restart()
 		addr := x.serve()
+		var silent []*tls.Conn
 		for range MaxCoreConns {
-			if _, err := x.silent(addr); err != nil {
+			s, err := x.silent(addr)
+			if err != nil {
 				t.Fatal(err)
 			}
+			silent = append(silent, s)
 		}
 		waitFor(t, func() bool { return x.d.conns.Load() == 0 })
+		// Freed means closed, not only uncounted: each connection's end
+		// reaches its peer.
+		for _, s := range silent {
+			s.SetReadDeadline(time.Now().Add(5 * time.Second))
+			if _, err := io.Copy(io.Discard, s); isTimeout(err) {
+				t.Fatal("a silent connection past the hello's deadline was left open")
+			}
+		}
 		c, _ := x.dial(addr, x.core)
 		if code := c.read(); code != wire.OK {
 			t.Fatalf("the core after silent connections: %v", code)
@@ -520,8 +533,21 @@ func TestSilenceIsTwoHeartbeats(t *testing.T) {
 // parking the main one, for good, in the stack's namespace. Its main
 // goroutine holds the main thread from init on (main.go), in this test
 // binary too. Catches an init that no longer locks the main thread: the
-// runtime then hands it to such a goroutine within the first few.
+// runtime then hands it to such a goroutine within the first few. TestMain
+// probes before any test runs: once an earlier test's goroutine has
+// parked the main thread that way, no later probe can reach it, and the
+// check would pass by luck (#4814).
 func TestNoStackStepRunsOnTheMainThread(t *testing.T) {
+	if mainThreadStep >= 0 {
+		t.Fatalf("step %d ran on the main thread (%d)", mainThreadStep, syscall.Getpid())
+	}
+}
+
+// mainThreadStep is the first of TestMain's probe steps that ran on the
+// main thread, or -1.
+var mainThreadStep = -1
+
+func TestMain(m *testing.M) {
 	pid := syscall.Getpid()
 	for i := range 200 {
 		tid := make(chan int)
@@ -529,8 +555,10 @@ func TestNoStackStepRunsOnTheMainThread(t *testing.T) {
 			runtime.LockOSThread() // never unlocked, as confine's inNetns
 			tid <- syscall.Gettid()
 		}()
-		if got := <-tid; got == pid {
-			t.Fatalf("step %d ran on the main thread (%d)", i, pid)
+		if <-tid == pid {
+			mainThreadStep = i
+			break
 		}
 	}
+	os.Exit(m.Run())
 }

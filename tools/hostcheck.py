@@ -21,7 +21,8 @@ Subcommands:
   qemu      the whole run on a QEMU/OVMF/swtpm host: two firmware-only boots
             (baseline and firmware noise), then each phase in its own QEMU
             process, a snapshot after each. The image is an input: the
-            stand-in guest (tools/hostcheck_standin.sh) today, P2-1's later.
+            stand-in guest (tools/hostcheck_standin.sh), or P2-1's drive image
+            with tools/hostcheck_image/'s phases file and responder (HOST-1e2).
             The phase named `unclean` is one boot cut off by a power cut (QMP
             quit as soon as the guest answers a fresh liveness check on its
             console) with no orderly shutdown or reboot in it, and is the only
@@ -33,6 +34,7 @@ Exit status: 0 the host is as it was, 1 a difference HW-8 does not allow,
 """
 import argparse
 import atexit
+import base64
 import functools
 import hashlib
 import json
@@ -389,7 +391,7 @@ class Qemu:
         _wait_path(tpm_sock)
         accel = "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
         cmd = qemu_data_args(args.tools_root) + ["-machine", "q35,smm=on", "-accel", accel, "-cpu", "max",
-               "-smp", "2", "-m", "1024", "-nodefaults", "-display", "none", "-nic", "none",
+               "-smp", "2", "-m", str(args.memory), "-nodefaults", "-display", "none", "-nic", "none",
                "-rtc", "base=utc,clock=host",
                "-global", "driver=cfi.pflash01,property=secure,value=on",
                "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={args.ovmf_code}",
@@ -659,6 +661,27 @@ def standin_phases(plant):
     }
 
 
+# HOST-1e2: what the image needs only on this host (its responder, tools/hostcheck_image/) rides as
+# systemd credentials in SMBIOS type 11 strings, which systemd honours only in a VM, so the image under
+# test is the shipped one. They go to the OS boots alone: the firmware-only boots have no OS to read them.
+CREDENTIAL_NAME = re.compile(r"[A-Za-z0-9_.@-]+")
+
+
+def smbios_credentials(specs):
+    """QEMU arguments passing each NAME=FILE in SPECS as a binary systemd credential."""
+    out = []
+    for spec in specs:
+        name, sep, path = spec.partition("=")
+        if not sep or not CREDENTIAL_NAME.fullmatch(name):
+            raise HostcheckError(f"bad --credential {spec!r}: want NAME=FILE, NAME of [A-Za-z0-9_.@-]")
+        try:
+            data = pathlib.Path(path).read_bytes()
+        except OSError as e:
+            raise HostcheckError(f"--credential {name}: {e}")
+        out += ["-smbios", f"type=11,value=io.systemd.credential.binary:{name}={base64.b64encode(data).decode()}"]
+    return out
+
+
 def seed_tpm(args, work):
     """A host TPM that already holds an owner NV index, like a used PC's."""
     gen = qemu_tpm(args, work)
@@ -713,18 +736,29 @@ def cmd_qemu(args):
         args.host_disks_bus.append((m.group(1), m.group(3) or "nvme"))
     shutil.copyfile(args.ovmf_vars, work / "vars.fd")
     seed_tpm(args, work)
+    usb = lambda path: ["-drive", f"if=none,id=agentos,format=raw,file={path}",
+                        "-device", "qemu-xhci", "-device", "usb-storage,drive=agentos"]
+    firmware_boot = None
     if args.kernel:
         boot = ["-kernel", args.kernel, "-initrd", args.initrd, "-append", "console=ttyS0 rdinit=/init"]
     else:
-        boot = ["-drive", f"if=none,id=agentos,format=raw,file={args.image}",
-                "-device", "qemu-xhci", "-device", "usb-storage,drive=agentos"]
+        boot = usb(args.image)
+        # HOST-1e2: OVMF, like a PC's firmware, adds a boot option (Boot####, BootOrder) for a USB drive
+        # it finds plugged in, before anything on the drive runs. That is the owner plugging the drive in,
+        # not the image, so the firmware-only boots have a blank drive at the same slot: the option the
+        # firmware makes for that slot is in the baseline, and the image's boots are judged against it.
+        blank = work / "blank-usb.img"
+        with open(blank, "wb") as f:
+            f.truncate(64 << 20)
+        firmware_boot = usb(blank)
+    boot += smbios_credentials(args.credential)
     if args.phases_file:
         phases = {k: [tuple(s) for s in v] for k, v in json.loads(pathlib.Path(args.phases_file).read_text()).items()}
     else:
         phases = standin_phases(args.plant)
     snaps = {}
     for label in ("firmware-1", "firmware-2"):
-        boot_once(args, work, label, FIRMWARE_ONLY, None)
+        boot_once(args, work, label, FIRMWARE_ONLY, firmware_boot)
         snaps[label] = qemu_snapshot(args, work)
     noise = {(f["kind"], f["key"]) for f in diff(snaps["firmware-1"], snaps["firmware-2"])}
     unstable = sorted(k for k in noise if k[0] != "uefi")
@@ -810,6 +844,9 @@ def main(argv=None):
                    "on the ESP (default: OVMF_CODE_4M.secboot.fd in the tools root, else /usr/share/OVMF)")
     q.add_argument("--ovmf-vars", help="default: OVMF_VARS_4M.fd beside it")
     q.add_argument("--timeout", type=int, default=600, help="seconds per QEMU process")
+    q.add_argument("--memory", type=int, default=1024, metavar="MIB", help="guest memory (the image: 8192)")
+    q.add_argument("--credential", action="append", default=[], metavar="NAME=FILE",
+                   help="a systemd credential for the OS boots, as an SMBIOS string (the image's responder)")
     args = ap.parse_args(argv)
     if args.cmd == "qemu" and bool(args.kernel) != bool(args.initrd):
         ap.error("--kernel needs --initrd")

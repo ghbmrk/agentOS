@@ -1122,16 +1122,29 @@ sys.exit(status[n] if n < len(status) else 0)
     def test_guest_base_reads_the_sources_it_is_given(self):
         # Both guest roots come from guest-base.sh's one root, so the sources it is handed decide
         # their security packages; with two arguments (ci.yml's test roots) it reads the image's file.
-        for extra in ((), ("/given/agentos.sources",)):
-            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as d:
+        # It runs from a copy beside a stand-in keyring check (IMG-keyring-pin, #5578), which must run
+        # first and stop it when it fails.
+        for extra, check in (((), 0), (("/given/agentos.sources",), 0), ((), 1)):
+            with self.subTest(extra=extra, check=check), tempfile.TemporaryDirectory() as d:
                 log = pathlib.Path(d, "mm")
-                path = fake_tools(d, mmdebstrap='printf "%%s\\n" "$@" > %s\n' % log, timeout='shift; exec "$@"\n',
+                img = pathlib.Path(d, "image")
+                img.mkdir()
+                shutil.copy(IMG / "guest-base.sh", img)
+                (img / "debian-archive-keyring.sh").write_text("echo keyring-check >> %s\nexit %d\n" % (log, check))
+                path = fake_tools(d, mmdebstrap='printf "%%s\\n" "$@" >> %s\n' % log, timeout='shift; exec "$@"\n',
                                   dpkg_query="exit 0\n")
-                p = subprocess.run(["sh", str(IMG / "guest-base.sh"), str(pathlib.Path(d, "root")),
+                p = subprocess.run(["sh", str(img / "guest-base.sh"), str(pathlib.Path(d, "root")),
                                     str(pathlib.Path(d, "m.json")), *extra], capture_output=True, text=True,
                                    env={"PATH": path})
+                lines = log.read_text().splitlines()
+                self.assertEqual(lines[0], "keyring-check")
+                if check:
+                    self.assertNotEqual(p.returncode, 0)
+                    self.assertEqual(lines, ["keyring-check"])
+                    continue
                 self.assertEqual(p.returncode, 0, p.stderr)
-                self.assertEqual(log.read_text().splitlines()[-1], extra[0] if extra else str(SOURCES))
+                default = img / SOURCES.relative_to(IMG)
+                self.assertEqual(lines[-1], extra[0] if extra else str(default))
         p = subprocess.run(["sh", str(IMG / "guest-base.sh"), "r", "m", "s", "x"], capture_output=True, text=True)
         self.assertEqual(p.returncode, 2)
 

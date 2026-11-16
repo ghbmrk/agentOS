@@ -37,6 +37,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -294,7 +295,7 @@ func open(key, blob, aad []byte) ([]byte, error) {
 	return g.Open(nil, blob[:g.NonceSize()], blob[g.NonceSize():], aad)
 }
 
-func wipe(b []byte) { clear(b) }
+var wipe = func(b []byte) { clear(b) } // a var so a test can watch a wipe
 
 func random(n int) ([]byte, error) {
 	b := make([]byte, n)
@@ -504,10 +505,8 @@ func Unlock(path string, f Factor) (*Store, error) {
 			errs = append(errs, err)
 			continue
 		}
-		// Each opened key and the entry set are wiped by a defer on every
-		// path (the wipe lint holds it, #5799); the store keeps a copy of
-		// the key, so a slot that fails later in the loop is wiped at
-		// Unlock's return, not at once.
+		// Each opened key and the entry set are wiped by a defer on every path (wipe lint, #5799); the
+		// store keeps a clone of the key, so a slot failing later in the loop is wiped at Unlock's return.
 		key, err := open(k, sl.Wrap, slotAAD(fl.ID, *sl))
 		defer clear(key)
 		wipe(k)
@@ -530,11 +529,23 @@ func Unlock(path string, f Factor) (*Store, error) {
 		if err != nil {
 			return nil, ErrTampered
 		}
-		entries := map[string][]byte{}
-		if err := json.Unmarshal(plain, &entries); err != nil || !validEntries(entries) {
+		var set map[string]inPlain
+		err = json.Unmarshal(plain, &set)
+		s := &Store{path: path, key: secret.Hide(slices.Clone(key)), f: *fl, entries: secret.Hide(map[string][]byte{})}
+		for name, v := range set {
+			b := make([]byte, base64.StdEncoding.DecodedLen(len(v)))
+			s.entries.Get()[name] = b // the store's before Decode fills it, so Close wipes a part-decoded one
+			if n, e := base64.StdEncoding.Decode(b, bytes.Trim(v, `"`)); e == nil && v[0] == '"' {
+				s.entries.Get()[name] = b[:n]
+			} else {
+				err = ErrCorrupt
+			}
+		}
+		if err != nil || set == nil || !validEntries(s.entries.Get()) {
+			s.Close() // the values decoded before the refusal are secrets too (CLK-1)
 			return nil, ErrCorrupt
 		}
-		return &Store{path: path, key: secret.Hide(slices.Clone(key)), f: *fl, entries: secret.Hide(entries)}, nil
+		return s, nil
 	}
 	if !tried {
 		return nil, ErrNoSlot
@@ -542,6 +553,11 @@ func Unlock(path string, f Factor) (*Store, error) {
 	// A TPM refusal (a modified boot path, a wrong PIN, lockout) says why.
 	return nil, errors.Join(append([]error{ErrWrongFactor}, errs...)...)
 }
+
+// inPlain is an entry's JSON left in Unlock's wiped plaintext, so a displaced one is never decoded (CLK-1).
+type inPlain []byte
+
+func (v *inPlain) UnmarshalJSON(b []byte) error { *v = b; return nil }
 
 func sealedUnder(s *tpmseal.Sealed, key *ecdsa.PublicKey) bool {
 	pub, err := s.PolicyPublicKey()
@@ -616,11 +632,7 @@ func readFile(path string) ([]byte, error) {
 		return nil, err
 	}
 	defer fh.Close()
-	b, err := io.ReadAll(io.LimitReader(fh, MaxFile+1))
-	if err != nil {
-		return nil, err
-	}
-	return b, nil
+	return io.ReadAll(io.LimitReader(fh, MaxFile+1))
 }
 
 // encode is the file's bytes with nf's slots and entries e, MAC'd.
@@ -679,8 +691,7 @@ type SlotInfo struct {
 	ID   string
 	Kind Kind
 	Host string // a tpm slot's PC, if named
-	// PolicyKey is the key a tpm slot was sealed under, so a rotation can
-	// tell the old key's slots from the new one's.
+	// PolicyKey is the key a tpm slot was sealed under, so a rotation tells old slots from new.
 	PolicyKey *ecdsa.PublicKey
 	// Policies is a tpm slot's signed boot paths, in order, so a rotation
 	// re-signs what enrollment measured (HW-5a) without reading the PCRs,
@@ -725,9 +736,8 @@ func (s *Store) AddSlot(f Factor) (string, error) {
 	return s.committed(sl.ID, s.commit(append(slices.Clone(s.f.Slots), sl), s.entries.Get()))
 }
 
-// committed returns the new slot's id with err when the slot is in place, which
-// it is after a rename even if the directory sync failed: the caller must
-// still learn its ID.
+// committed returns the new slot's id with err when the slot is in place, which it is
+// after a rename even if the directory sync failed: the caller must still learn its ID.
 func (s *Store) committed(id string, err error) (string, error) {
 	if err != nil && s.find(id) < 0 {
 		return "", err
@@ -928,17 +938,15 @@ func (s *Store) derived(purpose string) ([]byte, error) {
 	return derive(s.key.Get(), s.f.ID, purpose, keyLen), nil
 }
 
-// LogKey is the log's AES-256-GCM key (STO-1, run.KernelConfig.Key).
-func (s *Store) LogKey() ([32]byte, error) {
-	var k [32]byte
-	b, err := s.derived("log")
-	if err != nil {
-		return k, err
-	}
+// array32 is a derived key as an array, its buffer wiped.
+func array32(b []byte, err error) (k [32]byte, _ error) {
 	copy(k[:], b)
 	wipe(b)
-	return k, nil
+	return k, err
 }
+
+// LogKey is the log's AES-256-GCM key (STO-1, run.KernelConfig.Key).
+func (s *Store) LogKey() ([32]byte, error) { return array32(s.derived("log")) }
 
 // HeadKey is the kernel's head-signing key (KEY-3's head domain,
 // run.KernelConfig.Sign). Its public half is HeadKey().Public().
@@ -954,21 +962,13 @@ func (s *Store) HeadKey() (ed25519.PrivateKey, error) {
 // ClerkRoot is the root of every clerk's key (MAIL-keys, CLK-1): the unlock
 // step hands it to the kernel, which derives each clerk's key from it
 // (clerkkey.Derive) and hands that key to that clerk alone.
-func (s *Store) ClerkRoot() ([32]byte, error) {
-	var k [32]byte
-	b, err := s.derived("clerks")
-	if err != nil {
-		return k, err
-	}
-	copy(k[:], b)
-	wipe(b)
-	return k, nil
-}
+func (s *Store) ClerkRoot() ([32]byte, error) { return array32(s.derived("clerks")) }
 
 // Close wipes the store key. Keys already handed out are the caller's.
 func (s *Store) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	wipe(*s.key.Ref()) // through the one wipe, so a test sees the clone go (#5898); Drop empties the holder
 	secret.Drop(s.key)
 	for _, v := range s.entries.Get() {
 		wipe(v)

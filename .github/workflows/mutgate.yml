@@ -11,8 +11,9 @@ name: mutgate
 # test-only package's covered lines once for every shard to read (#4970). Every mutant
 # runs alone with the whole suite, so a shard gives each of its mutants the verdict one job would. Gremlins has no mutator that deletes a
 # statement, so `delete` deletes each statement holding one of those lines alone, on parallel
-# workers, and adds its verdict to gremlins' JSON (#4573, #4603, #4633). A PR that changes no such
-# package runs no gremlins and passes. The `mutgate` job is the one result to read, and its step
+# workers, and adds its verdict to gremlins' JSON (#4573, #4603, #4633). A package is also claimed
+# when the PR changes its MUTANTS-EQUIVALENT record, which `verify` resolves and whose new entries the
+# summary lists for review (#5786, #5812). A PR that changes no such package runs no gremlins and passes. The `mutgate` job is the one result to read, and its step
 # summary holds one table of every mutant on a target line and its verdict.
 # The `plan` and `mutants` jobs run the PR's own Go tests, which can write anything in that job (the
 # JSON, tools/, $GITHUB_ENV), so they only hand on data: plan the matrix, mutants gremlins' JSON as an
@@ -36,6 +37,9 @@ concurrency:
 env:
   GOTOOLCHAIN: local
   GOWORK: "off"
+  # MUT-swtpm-runner (#5896): the TPM tests fail rather than skip if swtpm is missing, as in
+  # broker-race, so a mutant only they kill (seal.Unlock's TPM paths) cannot live in the gate.
+  AGENTOS_REQUIRE_SWTPM: "1"
 jobs:
   # CI-mutgate-head-guard (#5409): a rerun keeps its event, so it can test a head the PR has left.
   # This job reads the PR's head from the API and, when the run's head is older, ends with a notice
@@ -152,6 +156,9 @@ jobs:
           grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
       - name: dnsmasq for the enforcer's resolver tests (ENF-f, #3664)
         run: sudo apt-get update -q && sudo apt-get install -yq dnsmasq-base
+      # The seal TPM tests run on swtpm; broker-race's step, kept equal by tests/test_workflows.py.
+      - name: Software TPM for the trusted-host slot (P2-4b)
+        run: sudo apt-get update -q && sudo apt-get install -yq swtpm
       - name: Shards for each package (#4961)
         id: plan
         run: |
@@ -245,6 +252,9 @@ jobs:
           grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
       - name: dnsmasq for the enforcer's resolver tests (ENF-f, #3664)
         run: sudo apt-get update -q && sudo apt-get install -yq dnsmasq-base
+      # The seal TPM tests run on swtpm; broker-race's step, kept equal by tests/test_workflows.py.
+      - name: Software TPM for the trusted-host slot (P2-4b)
+        run: sudo apt-get update -q && sudo apt-get install -yq swtpm
       # Outside the workspace, so the result directory and the PR tree hold no copy (#4970).
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
