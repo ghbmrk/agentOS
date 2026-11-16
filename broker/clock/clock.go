@@ -42,6 +42,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -229,7 +230,7 @@ func HeldText(jump time.Duration) string {
 // hours, the shape of a wrong time zone rather than a moved clock.
 func zoneLike(skew time.Duration) bool {
 	if skew < 0 {
-		skew = -skew
+		skew = neg(skew)
 	}
 	if skew < 14*time.Minute {
 		return false
@@ -284,9 +285,20 @@ func (s Status) Line(loc *time.Location) string {
 	return "Time check: not checked."
 }
 
+// neg is -d, saturating: time.Time.Sub saturates at the minimum Duration,
+// whose negation overflows to itself, so -d would read a time more than
+// 292 years away as within any bound (#5899). Every difference of times
+// this package negates goes through it.
+func neg(d time.Duration) time.Duration {
+	if d == math.MinInt64 {
+		return math.MaxInt64
+	}
+	return -d
+}
+
 func about(d time.Duration) string {
 	if d < 0 {
-		d = -d
+		d = neg(d)
 	}
 	n, unit := int64(d/time.Minute), "minute"
 	switch {
@@ -619,13 +631,13 @@ func (g *Guard) check(ctx context.Context) Status {
 	}
 	ref, allow := g.ntsRefLocked(mono)
 	d := now.Sub(ref)
-	s.Authenticated = d <= allow && -d <= allow
+	s.Authenticated = d <= allow && neg(d) <= allow
 	switch {
 	case have:
 		g.carrier, g.carrierMono = carrier, mono
 		s.Skew = now.Sub(carrier)
 		switch {
-		case s.Skew > g.cfg.Tolerance || -s.Skew > g.cfg.Tolerance:
+		case s.Skew > g.cfg.Tolerance || neg(s.Skew) > g.cfg.Tolerance:
 			s.State = Disagree
 		default:
 			s.State = CarrierOnly
@@ -641,7 +653,7 @@ func (g *Guard) check(ctx context.Context) Status {
 		s.State, s.Skew = Disagree, prev.Skew
 	case g.anchored:
 		held := g.anchorWall.Add(mono - g.anchorMono)
-		if d := now.Sub(held); d > g.allowedLocked(mono) || -d > g.allowedLocked(mono) {
+		if d := now.Sub(held); d > g.allowedLocked(mono) || neg(d) > g.allowedLocked(mono) {
 			s.State, s.Skew, s.Held = Held, d, held
 		} else if synced {
 			s.State = NetworkOnly
@@ -693,7 +705,9 @@ func (g *Guard) check(ctx context.Context) Status {
 	text := g.noticeLocked(s, mono)
 	// While alerts count toward the cap, every check saves, so a reboot
 	// finds this boot's uptime no older than the last check (L3 F1, round 4).
-	if !wasChecked || prev.State != s.State || prev.Since != s.Since || text != "" || have || len(g.alerts) > 0 || verifiedNow {
+	// Every NTS check saves its sync, so a broker restart keeps the bound
+	// the running guard had, even through a long hold (#5899).
+	if !wasChecked || prev.State != s.State || prev.Since != s.Since || text != "" || have || len(g.alerts) > 0 || verifiedNow || nts {
 		g.saveLocked()
 	}
 	if changed := !wasChecked || prev.State != s.State; text != "" || changed {
@@ -866,7 +880,7 @@ func (g *Guard) intervalLocked(now time.Time, mono time.Duration) (lo, hi time.T
 	lo, hi = now, now
 	c := g.carrierForwardLocked(mono)
 	if c.IsZero() && g.status.State == Disagree {
-		c = now.Add(-g.status.Skew)
+		c = now.Add(neg(g.status.Skew))
 	}
 	if c.IsZero() {
 		return lo, hi
@@ -907,12 +921,12 @@ func (g *Guard) refresh(ctx context.Context) (time.Time, Status) {
 	drifted := false
 	if g.anchored && s.State != Held && s.State != Disagree {
 		d := now.Sub(g.anchorWall.Add(mono - g.anchorMono))
-		drifted = d > g.allowedLocked(mono) || -d > g.allowedLocked(mono)
+		drifted = d > g.allowedLocked(mono) || neg(d) > g.allowedLocked(mono)
 	}
 	g.mu.Unlock()
 	jump := now.Sub(s.At) - (mono - last)
 	stale := mono-last >= g.cfg.Interval && g.running.Load() == 0
-	if !checked || stale || drifted || jump > g.cfg.Tolerance || -jump > g.cfg.Tolerance {
+	if !checked || stale || drifted || jump > g.cfg.Tolerance || neg(jump) > g.cfg.Tolerance {
 		s = g.Check(ctx)
 		now, mono = g.cfg.Now(), g.cfg.Elapsed()
 	}
