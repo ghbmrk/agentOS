@@ -183,6 +183,15 @@ class CloseGuardTest(unittest.TestCase):
         self.assertEqual(json.loads(out.stdout)["hookSpecificOutput"]["permissionDecision"], "ask")
         self.assertEqual(run(bash("git status"), broken).stdout, "")
 
+    def test_bundled_entries_also_guard(self):
+        # A "bundled" entry's ids are accepted by its issue as a record's are (#5873).
+        d = pathlib.Path(tempfile.mkdtemp())
+        (d / "assurance").mkdir()
+        (d / "assurance/vulncheck.json").write_text(json.dumps(
+            {"accepted": [], "bundled": [{"holder": "h@1", "copy": "openssl@1", "issue": 88, "ids": ["V"]}]}))
+        self.assertEqual(close_guard.decide(mcp(88), d)[0], "deny")
+        self.assertIsNone(close_guard.decide(mcp(89), d))
+
     def test_cited_matches_vulncheck(self):
         sys.path.insert(0, str(ROOT / "tools"))
         import vulncheck

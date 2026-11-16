@@ -110,7 +110,7 @@ func TestTIM1IntervalLine(t *testing.T) {
 		t.Fatalf("line = %q", got)
 	}
 	lost := Status{State: Disagree, Since: plain.Since}
-	if got := lost.IntervalLine(zone); got != "Time check: playing safe since 06:00 (saved check unreadable; waiting for phone-network time)." {
+	if got := lost.IntervalLine(zone); got != "Time check: saved check unreadable since 06:00, so holds and timeouts wait until phone-network time confirms the clock." {
 		t.Fatalf("line = %q", got)
 	}
 	for _, st := range []Status{{State: Agreed, Verified: true}, {State: Held, Skew: time.Hour, Verified: true}, {Start: plain.Since}} {

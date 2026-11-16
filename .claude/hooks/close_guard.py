@@ -95,14 +95,15 @@ def mcp_closes(tool_input):
 
 
 def records(root=ROOT):
-    """Acceptance records from the working tree and from origin/main, if it is there; a record in
-    both counts once."""
+    """Acceptance records and bundled entries (#5873; a closed issue withdraws both) from the
+    working tree and from origin/main, if it is there; one in both counts once."""
     texts = [(root / CONFIG).read_text()]
     shown = subprocess.run(["git", "-C", str(root), "show", f"origin/main:{CONFIG}"],
                            capture_output=True, text=True, timeout=10)
     if shown.returncode == 0:
         texts.append(shown.stdout)
-    unique = {json.dumps(r, sort_keys=True): r for t in texts for r in json.loads(t).get("accepted", [])}
+    unique = {json.dumps(r, sort_keys=True): r for t in texts for d in [json.loads(t)]
+              for r in d.get("accepted", []) + d.get("bundled", [])}
     return list(unique.values())
 
 

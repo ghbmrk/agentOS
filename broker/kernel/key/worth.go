@@ -12,10 +12,10 @@ import (
 // the table's column for the act at the key's worth. worth_test.go checks the
 // table's own rules: no rank, price or hold falls as worth rises.
 //
-// Reach here is a key's own verbs; the closure over the declarations' edges
-// (CLK-10, CLK-14) and grows-then-narrows are #4999's second part. A grant is
-// priced at its key's worth (kernel cosign.go), a held step at what its own
-// verb reaches (Window; Mark, 2026-11-07, #4999 comment 6705669120).
+// Reach is a key's own verbs and, for a grant, the declarations' closure
+// (CLK-10; kernel reach.go). A grant is priced at its key's worth (kernel
+// cosign.go), a held step at what its own verb reaches (Window; Mark,
+// 2026-11-07, #4999 comment 6705669120), as control verbs are already top.
 
 // Proof is a rung of the CH-3 ladder, ordered by what an attacker must hold.
 type Proof uint8
@@ -142,16 +142,21 @@ func (l Limits) Capped() bool {
 	return false
 }
 
-// Worth is k's worth from its own verbs and caps; a malformed key is worth
-// the most, with its error. It checks no signature.
-func Worth(k Key) (Rank, error) {
+// Worth is k's worth from its own verbs and caps, plus graph (its clerk's
+// declared reach, from the kernel) for a verb reaching data or more; a
+// malformed key is worth the most, with its error. It checks no signature.
+func Worth(k Key, graph ...Asset) (Rank, error) {
 	v, err := verifyChain(k, nil)
 	if err != nil {
 		return MaxRank, err
 	}
 	var reach []Asset
 	for _, vb := range v.Limits.Verbs {
-		reach = append(reach, AssetsOf(Verb(vb))...)
+		as := AssetsOf(Verb(vb))
+		if slices.ContainsFunc(as, func(a Asset) bool { return a >= AssetData }) {
+			as = append(as, graph...)
+		}
+		reach = append(reach, as...)
 	}
 	return WorthOf(reach, v.Limits.Capped()), nil
 }

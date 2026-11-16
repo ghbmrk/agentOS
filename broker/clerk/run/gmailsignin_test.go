@@ -467,11 +467,22 @@ func TestAGiveBackWaitsForTheHostsLock(t *testing.T) {
 // ends; and the overlap makes only the connections one read makes. The
 // timeouts are named backstops for a hang; the file imports no time, so
 // they are contexts.
+//
+// Only refresh can be in the host's wait here: the rig's host runs no
+// worker (its World is given), and the other waits (idle, planSenders) are
+// the owner's calls or the worker's, none made while the read is held, so
+// the test refuses a rig with a worker (#5777 item 2). It does not match
+// on refresh instead: the held read is itself in refresh, on a channel
+// receive, so a re-read that did not wait would pass whenever it had not
+// yet returned.
 func TestAnOverlappingRereadWaitsForTheReadInFlight(t *testing.T) {
 	const parkTimeout, returnTimeout = 30e9, 30e9 // 30 s each
 	// The planner socket's handlers are goroutines this test started.
 	self := gmailtest.Self()
 	r := newHostRig(t, imaptest.Password)
+	if r.h.own {
+		t.Fatal("the rig's host runs a worker, whose steps also wait: a parked step could pass for the overlapping re-read")
+	}
 	// One re-read alone, of a moved mailbox: the connections one read makes.
 	r.moved()
 	dials := r.dials.Load()

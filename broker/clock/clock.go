@@ -119,6 +119,14 @@ type Status struct {
 // is an outlier carrier and restricts nothing.
 func (s Status) Restricted() bool { return s.State == Disagree && !s.Authenticated }
 
+// widthUnknown: the disagreement came from an unreadable state file and no
+// carrier time has been read since (a carrier disagreement always has a skew
+// past the tolerance), and this check has no converged NTS to outrank it.
+// Its interval has no known start (TIM-1-interval-fu-d, #5752).
+func (s Status) widthUnknown() bool {
+	return s.State == Disagree && s.Skew == 0 && !s.Authenticated
+}
+
 var (
 	// ErrRestricted is returned by Now while plain sources disagree.
 	ErrRestricted = errors.New("clock: box time and carrier time disagree; time-sensitive checks are held")
@@ -197,7 +205,7 @@ const LastSuffix = " If it happens again today I won't text; send STATUS to chec
 
 // StateLostText is the alert when the saved clock check could not be read
 // at start, so a disagreement it may have held is kept.
-const StateLostText = "I couldn't read my saved clock check, so I am playing safe until the phone network's time confirms the clock. Codes and STOP work as usual."
+const StateLostText = "I couldn't read my saved clock check. Until the phone network's time confirms my clock, anything waiting for time to pass waits whenever my authenticated network time is unavailable. Codes and STOP work as usual."
 
 // HeldText is the owner text when the box clock jumps with no phone-network
 // time to confirm it.
@@ -227,8 +235,10 @@ func (s Status) IntervalLine(loc *time.Location) string {
 	}
 	since := s.Since.In(loc).Format("15:04")
 	switch {
+	case s.Skew == 0 && s.Authenticated:
+		return fmt.Sprintf("Time check: saved check unreadable since %s; authenticated network time stands until phone-network time confirms it.", since)
 	case s.Skew == 0:
-		return fmt.Sprintf("Time check: playing safe since %s (saved check unreadable; waiting for phone-network time).", since)
+		return fmt.Sprintf("Time check: saved check unreadable since %s, so holds and timeouts wait until phone-network time confirms the clock.", since)
 	case s.Authenticated:
 		return fmt.Sprintf("Time check: phone network differs from authenticated network time by %s since %s; network time stands.", about(s.Skew), since)
 	}
@@ -243,8 +253,8 @@ func (s Status) Line(loc *time.Location) string {
 	}
 	switch s.State {
 	case Disagree:
-		if s.Authenticated && s.Skew != 0 {
-			return s.IntervalLine(loc) // never "restricted" beside OutlierText (UX 1 on #5754)
+		if s.Authenticated {
+			return s.IntervalLine(loc) // never "restricted" while Now answers (UX 1 on #5754)
 		}
 		if s.Skew == 0 {
 			return fmt.Sprintf("Time check: restricted since %s (saved check unreadable; waiting for phone-network time).", s.Since.In(loc).Format("15:04"))
@@ -769,14 +779,20 @@ func (g *Guard) Now(ctx context.Context) (time.Time, error) {
 // authority (a hold's end, a soak, a quiet window, a default on timeout)
 // waits until earliest passes it; one that narrows (an expiry) fires once
 // latest does, so a clock moved either way neither ends a wait early nor
-// keeps authority alive (L3 C4, potency PT1 on #68). It answers in every
-// state; the caller reads the Status.
+// keeps authority alive (L3 C4, potency PT1 on #68). A lost state file's
+// disagreement, until carrier time is read and while no converged NTS
+// outranks it, has no known start: earliest is the zero time, so every
+// widening waits (#5752). It answers in every state; the caller reads the
+// Status.
 func (g *Guard) Interval(ctx context.Context) (earliest, latest time.Time, s Status) {
 	now, s := g.refresh(ctx)
 	mono := g.cfg.Elapsed()
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	earliest, latest = g.intervalLocked(now, mono)
+	if s.widthUnknown() {
+		earliest = time.Time{}
+	}
 	if !g.verified && !g.floor.IsZero() {
 		if g.floor.After(latest) {
 			latest = g.floor // a clock behind keeps nothing alive past the floor
