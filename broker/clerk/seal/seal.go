@@ -936,16 +936,15 @@ func (s *Store) derived(purpose string) ([]byte, error) {
 	return derive(s.key.Get(), s.f.ID, purpose, keyLen), nil
 }
 
-// derived32 is derived as an array, its buffer wiped.
-func (s *Store) derived32(purpose string) (k [32]byte, err error) {
-	b, err := s.derived(purpose)
+// array32 is a derived key as an array, its buffer wiped.
+func array32(b []byte, err error) (k [32]byte, _ error) {
 	copy(k[:], b)
 	wipe(b)
 	return k, err
 }
 
 // LogKey is the log's AES-256-GCM key (STO-1, run.KernelConfig.Key).
-func (s *Store) LogKey() ([32]byte, error) { return s.derived32("log") }
+func (s *Store) LogKey() ([32]byte, error) { return array32(s.derived("log")) }
 
 // HeadKey is the kernel's head-signing key (KEY-3's head domain,
 // run.KernelConfig.Sign). Its public half is HeadKey().Public().
@@ -961,7 +960,7 @@ func (s *Store) HeadKey() (ed25519.PrivateKey, error) {
 // ClerkRoot is the root of every clerk's key (MAIL-keys, CLK-1): the unlock
 // step hands it to the kernel, which derives each clerk's key from it
 // (clerkkey.Derive) and hands that key to that clerk alone.
-func (s *Store) ClerkRoot() ([32]byte, error) { return s.derived32("clerks") }
+func (s *Store) ClerkRoot() ([32]byte, error) { return array32(s.derived("clerks")) }
 
 // Close wipes the store key. Keys already handed out are the caller's.
 func (s *Store) Close() {
