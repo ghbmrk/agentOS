@@ -92,7 +92,7 @@ var schema = map[string]int{
 	TSubjectOpened: 1, TContentStored: 1, TSubjectErased: 1, TEraseConfirmed: 1, TContentRead: 1,
 	TBackupTarget: 1, TBackupUntarget: 1, TBackupTaken: 1, TRecoveryRotate: 1,
 	TEdgeEnrolled: 1, TEdgeCandidate: 1, TEdgeRevoked: 1, TEdgeCut: 1, TCodeApproved: 1,
-	TDecoyTable: 1, TTrip: 1, TTripOwner: 1, TTripResumed: 1, TSecurityCase: 1, TSecurityDrop: 1, TSecurityKept: 1,
+	TDecoyTable: 1, TTrip: 1, TTripOwner: 1, TTripResumed: 1, TSecurityCase: 1, TSecurityDrop: 1, TSecurityKept: 1, TDeclReach: 1,
 }
 
 // Known reports whether the log may hold this type at this version.
@@ -520,6 +520,7 @@ type State struct {
 	edge     edgeState       // edge keys (edge.go)
 	decoys   trips           // the decoy table and its trips (trip.go)
 	sec      security        // the security suite (suite.go)
+	decl     declState       // graph reach (reach.go)
 	Order    []string
 	uses     map[key.ID][]usedRec
 	reserved map[uint64]*spendReserved   // open reservations by entry
@@ -1256,6 +1257,8 @@ func (s *State) Apply(e Entry) error {
 		return s.applyTrip(e)
 	case TSecurityCase, TSecurityDrop, TSecurityKept:
 		return s.applySecurity(e)
+	case TDeclReach:
+		return s.applyDecl(e)
 	default:
 		return ErrUnknown
 	}

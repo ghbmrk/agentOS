@@ -832,6 +832,194 @@ func TestPlaneMutInboxWakesOnRequeueAndClose(t *testing.T) {
 // TestPLN5NoKeyNoPlan: a machine with no key, or a plane with no kernel,
 // has every plan refused in fixed words, and nothing reaches the kernel.
 // Malformed calls are refused before anything is signed.
+func TestDispatchMutMCPRefusesGetWithAllow(t *testing.T) {
+	// GUEST-mut-dispatch (#5750): a GET names the one method the MCP route
+	// takes, and the refusal is the whole answer.
+	r := newRig(t, nil)
+	resp, err := r.client("m1").Get("http://broker/mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed || resp.Header.Get("Allow") != "POST" || string(b) != "this server sends no stream; POST only\n" {
+		t.Fatalf("GET /mcp: %d Allow=%q %q", resp.StatusCode, resp.Header.Get("Allow"), b)
+	}
+}
+
+func TestDispatchMutMCPBodyBound(t *testing.T) {
+	// A request of exactly maxMCPBody bytes is answered; one byte more is
+	// refused before it is decoded: its answer is the refusal alone.
+	r := newRig(t, nil)
+	ping := `{"jsonrpc":"2.0","id":1,"method":"ping"}`
+	for _, c := range []struct {
+		n, code int
+		want    string
+	}{{maxMCPBody, http.StatusOK, `{"id":1,"jsonrpc":"2.0","result":{}}` + "\n"}, {maxMCPBody + 1, http.StatusRequestEntityTooLarge, "body too large or unreadable\n"}} {
+		if code, out := r.do("m1", "POST", "/mcp", ping+strings.Repeat(" ", c.n-len(ping))); code != c.code || out != c.want {
+			t.Fatalf("%d-byte body: %d %.80q", c.n, code, out)
+		}
+	}
+}
+
+func TestDispatchMutMCPAnswersAreJSON(t *testing.T) {
+	// Every JSON-RPC answer says it is JSON, and an invalid request is
+	// answered with a null id.
+	r := newRig(t, nil)
+	for _, c := range []struct{ body, want string }{
+		{`{"jsonrpc":"2.0","id":7,"method":"ping"}`, `{"id":7,"jsonrpc":"2.0","result":{}}` + "\n"},
+		{`{"jsonrpc":"1.0","id":7,"method":"ping"}`, `{"error":{"code":-32600,"message":"invalid request (batches are not supported)"},"id":null,"jsonrpc":"2.0"}` + "\n"},
+	} {
+		resp, err := r.client("m1").Post("http://broker/mcp", "application/json", strings.NewReader(c.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if ct := resp.Header.Get("Content-Type"); ct != "application/json" || string(b) != c.want {
+			t.Fatalf("%s: Content-Type %q, %q", c.body, ct, b)
+		}
+	}
+}
+
+func TestDispatchMutFurtherToolNeedsAKnownMachine(t *testing.T) {
+	// A further tool is never called for a machine the manager no longer
+	// knows: it would get no lineage.
+	ft := &fakeTools{}
+	r := newRig(t, func(c *Config) { c.Tools = ft })
+	r.client("m1")
+	r.ms.mu.Lock()
+	r.ms.gone["m1"] = true
+	r.ms.mu.Unlock()
+	res := r.rpc("m1", "tools/call", map[string]any{"name": "recall_search", "arguments": map[string]any{"query": "x"}})
+	if text := res["content"].([]any)[0].(map[string]any)["text"]; res["isError"] != true || text != "broker: unknown machine" || len(ft.calls) != 0 {
+		t.Fatalf("%v, calls %v", res, ft.calls)
+	}
+}
+
+func TestDispatchMutPlanAnswersCarryTheRequestID(t *testing.T) {
+	// The first answer and every repeat name the guest's request_id; a
+	// repeat with steps says only that it is a repeat when the plan has no
+	// reason of its own.
+	r := newRig(t, nil)
+	if st, e := r.tool("m1", "plan", send("r1")); e != "" || st.RequestID != "r1" || st.State != "done" {
+		t.Fatalf("first: %+v %q", st, e)
+	}
+	if st, e := r.tool("m1", "plan", map[string]any{"request_id": "r1"}); e != "" || st.RequestID != "r1" || st.State != "done" || st.Reason != "" {
+		t.Fatalf("read: %+v %q", st, e)
+	}
+	if st, e := r.tool("m1", "plan", send("r1")); e != "" || st.RequestID != "r1" || st.Reason != reasonRepeat {
+		t.Fatalf("repeat: %+v %q", st, e)
+	}
+}
+
+func TestDispatchMutStepWithoutArgsSendsAnEmptyMap(t *testing.T) {
+	// A step the guest gave no args reaches the kernel with an empty map,
+	// never a nil one.
+	r := newRig(t, nil)
+	r.tool("m1", "plan", map[string]any{"request_id": "na", "steps": []map[string]any{{"verb": "organize", "clerk": "mail"}}})
+	r.kern.mu.Lock()
+	p := r.kern.k.State().Plans["m1/na"]
+	r.kern.mu.Unlock()
+	if p == nil || len(p.Plan.Steps) != 1 || p.Plan.Steps[0].Args == nil {
+		t.Fatalf("plan %+v", p)
+	}
+}
+
+func TestDispatchMutPlanFaultsAreLogged(t *testing.T) {
+	// A short holder key, a plan the kernel did not log, and a lost answer
+	// after the kernel logged it are each logged once; a plain success
+	// logs nothing.
+	var mu sync.Mutex
+	var logged []string
+	r := newRig(t, func(c *Config) {
+		c.Logf = func(f string, a ...any) {
+			mu.Lock()
+			logged = append(logged, fmt.Sprintf(f, a...))
+			mu.Unlock()
+		}
+		keys := c.Keys
+		c.Keys = func(m string) (key.Key, ed25519.PrivateKey, bool) {
+			k, h, ok := keys(m)
+			if m == "m3" {
+				h = h[:3]
+			}
+			return k, h, ok
+		}
+	})
+	take := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		out := logged
+		logged = nil
+		return out
+	}
+	if st, e := r.tool("m1", "plan", send("ok")); e != "" || st.State != "done" {
+		t.Fatalf("ok: %+v %q", st, e)
+	}
+	if l := take(); len(l) != 0 {
+		t.Fatalf("a success logged %q", l)
+	}
+	if st, _ := r.tool("m3", "plan", send("short")); st.Reason != reasonNoKey {
+		t.Fatalf("short holder: %+v", st)
+	}
+	if l := take(); len(l) != 1 || l[0] != "guest m3: plan short: holder key of 3 bytes" {
+		t.Fatalf("short holder logged %q", l)
+	}
+	r.kern.mu.Lock()
+	r.kern.refuse = true
+	r.kern.mu.Unlock()
+	if st, _ := r.tool("m1", "plan", send("refused")); st.State != "refused" {
+		t.Fatalf("refused: %+v", st)
+	}
+	if l := take(); len(l) != 1 || l[0] != "guest m1: plan m1/refused: submit: kernel: malformed plan" {
+		t.Fatalf("refusal logged %q", l)
+	}
+	r.kern.mu.Lock()
+	r.kern.refuse, r.kern.lose = false, true
+	r.kern.mu.Unlock()
+	if st, _ := r.tool("m1", "plan", send("lost")); st.State != "done" || st.RequestID != "lost" {
+		t.Fatalf("lost answer: %+v", st)
+	}
+	if l := take(); len(l) != 1 || !strings.HasSuffix(l[0], ": submit: context deadline exceeded (the log holds it)") {
+		t.Fatalf("lost answer logged %q", l)
+	}
+}
+
+func TestDispatchMutLineageIsCachedOnlyWhenKnown(t *testing.T) {
+	// A lineage the manager could not give is asked again next time; one
+	// it gave is never asked again, and lineageOpen and goal read only that
+	// cache.
+	r := newRig(t, nil)
+	r.client("m1")
+	m := r.p.get("m1")
+	gone := func(g bool) {
+		r.ms.mu.Lock()
+		r.ms.gone["m1"] = g
+		r.ms.lineage["m1"] = "root-1"
+		r.ms.mu.Unlock()
+	}
+	gone(true)
+	if l := r.p.lineageOf(m); l != "" || r.p.lineageOpen("") {
+		t.Fatalf("unknown machine: %q", l)
+	}
+	gone(false)
+	if l := r.p.lineageOf(m); l != "root-1" {
+		t.Fatalf("a failed lookup was kept: %q", l)
+	}
+	gone(true)
+	if l := r.p.lineageOf(m); l != "root-1" {
+		t.Fatalf("a known lineage was asked again: %q", l)
+	}
+	if !r.p.lineageOpen("root-1") || r.p.lineageOpen("root-2") {
+		t.Fatal("lineageOpen does not read the cache")
+	}
+	r.p.store.setGoal("", "msg-1", r.p.cfg.Now())
+	if g := r.p.goal(""); g != "" {
+		t.Fatalf("no lineage served %q", g)
+	}
+}
+
 func TestPLN5NoKeyNoPlan(t *testing.T) {
 	r := newRig(t, func(c *Config) {
 		keys := c.Keys
