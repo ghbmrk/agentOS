@@ -741,7 +741,15 @@ RERUN_PIN = [
     '            printf \'\\n%s\\n\' "No path the check reads changed since $last; nothing rerun." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0',
     '          fi',
     '          failed=0 reran=0 missed=""',
-    '          pending="$prs"',
+    '          pending="$prs" quiet=" " skipped=0',
+    '          while read -r pr sha; do',
+    '            [ -n "$pr" ] || continue',
+    '            if files=$(gh api --paginate "repos/$REPO/pulls/$pr/files?per_page=100" --jq \'.[] | .filename, (.previous_filename // empty)\') && [ "$(grep -c . <<< "$files")" -lt 3000 ] && { grep -Eq "$measured" <<< "$files"; [ $? = 1 ]; } && moved=$(gh api "repos/$REPO/compare/$sha...$GITHUB_SHA" --jq \'if (.files | length) < 300 then (.files[] | if .status == "removed" then .filename else (.previous_filename // empty) end) else error("300 files or more") end\') && { [ -z "$moved" ] || { grep -Fxq -f <(printf \'%s\\n\' "$moved") <<< "$files"; [ $? = 1 ]; }; }; then',
+    '              quiet="$quiet$pr "',
+    '            else',
+    '              echo "#$pr: its files may reach a path the check reads (or could not be listed); rerun as usual"',
+    '            fi',
+    '          done <<< "$prs"',
     '          for round in $(seq 1 "$ROUNDS"); do',
     '            [ -n "$pending" ] || break',
     '            left=""',
@@ -753,6 +761,7 @@ RERUN_PIN = [
     '              elif [ "${run#* }" = completed ]; then',
     '                fresh=$(gh api "repos/$REPO/actions/runs/${run% *}/jobs" --jq "if ([.jobs[] | if .conclusion == \\"success\\" then .started_at else null end] | min) > \\"$since\\" then \\"fresh\\" else \\"\\" end") || { echo "::warning::#$pr: cannot list the jobs of ${run% *}"; failed=1; missed="$missed #$pr"; continue; }',
     '                if [ -n "$fresh" ]; then echo "#$pr: ${run% *} started after this push and passed, so it measured the new main"',
+    '                elif [[ $quiet == *" $pr "* ]] && passed=$(gh api "repos/$REPO/actions/runs/${run% *}/jobs" --jq \'if (.jobs | length) > 0 and all(.jobs[]; .conclusion == "success") then "passed" else "" end\') && [ -n "$passed" ]; then echo "#$pr: changes no path the check reads and ${run% *} passed, so its merged measure is main\'s; not rerun"; skipped=$((skipped + 1))',
     '                elif gh api -X POST "repos/$REPO/actions/runs/${run% *}/rerun" > /dev/null; then echo "#$pr: reran ${run% *}"; reran=$((reran + 1)); else echo "::warning::#$pr: rerun of ${run% *} refused"; failed=1; missed="$missed #$pr"; fi',
     '              else',
     '                left="$left$pr $sha"$\'\\n\'',
@@ -767,6 +776,7 @@ RERUN_PIN = [
     '          done <<< "$pending"',
     '          total=$(printf \'%s\' "$prs" | grep -c . || true)',
     '          msg="Reran $reran of $total open PRs\' trusted-base runs."',
+    '          [ "$skipped" = 0 ] || msg="$msg $skipped change no path the check reads and passed, so they were not rerun."',
     '          [ -z "$missed" ] || msg="$msg Not rerun:$missed (rerun their trusted-base check by hand; tools/ASSUMPTIONS.md CI-ceiling-fall)."',
     '          printf \'\\n%s\\n\' "$msg" | tee -a "$GITHUB_STEP_SUMMARY"',
     '          exit "$failed"',
@@ -842,6 +852,16 @@ class Workflow(unittest.TestCase):
                          ("(.files | length) < 300", "(.files | length) < 3000"),
                          (", (.previous_filename // empty)", ""),
                          ("    branches: [main]\n", "    branches: [main]\n    paths: [broker/**]\n"),
+                         # CI-rerun-touch: only a listed PR whose files match no measured path is skipped.
+                         ('[ "$(grep -c . <<< "$files")" -lt 3000 ] && ', ""),
+                         ('{ grep -Eq "$measured" <<< "$files"; [ $? = 1 ]; }', '! grep -Eq "$measured" <<< "$files"'),
+                         ("files=$(gh api --paginate", "files=$(gh api --paginate \"repos/$REPO/pulls/$pr/files\" || gh api --paginate"),
+                         # L3 on #5960: a path main moved reruns, and only a run whose every job passed skips.
+                         ('if .status == "removed" then .filename else (.previous_filename // empty) end', ".previous_filename // empty"),
+                         ('else error("300 files or more") end', 'else empty end'),
+                         ('[ $? = 1 ]; }; }; then', '[ $? != 0 ]; }; }; then'),
+                         ('all(.jobs[]; .conclusion == "success")', 'any(.jobs[]; .conclusion == "success")'),
+                         ('&& [ -n "$passed" ]; then', '; then'),
                          ("    runs-on: ubuntu-24.04", "    continue-on-error: true\n    runs-on: ubuntu-24.04")]:
             self.assertIn(old, text)
             self.assertTrue(pin_problems(text.replace(old, new, 1), RERUN_PIN), old)
@@ -872,8 +892,14 @@ case "$1" in
   */actions/runs/"$GITHUB_RUN_ID") [ -e "$STUB/run" ] && exec jq -r "$3" "$STUB/run"; exit 1 ;;
   */workflows/trusted-base-rerun.yml/runs?branch=main\&event=push\&status=success\&per_page=1)
     [ -e "$STUB/last" ] && exec jq -r "$3" "$STUB/last"; exit 1 ;;
-  */compare/*) [ "$1" = "repos/o/r/compare/$(jq -r '.workflow_runs[0].head_sha' "$STUB/last")...$GITHUB_SHA" ] || exit 8
+  # A PR head's compare to this push is JSON in $STUB/moved/<sha>; none: it fails.
+  */compare/*) m=${1#*/compare/}; m="$STUB/moved/${m%%...*}"; [ -e "$m" ] && exec jq -r "$3" "$m"
+    [ "$1" = "repos/o/r/compare/$(jq -r '.workflow_runs[0].head_sha' "$STUB/last")...$GITHUB_SHA" ] || exit 8
     [ -e "$STUB/compare" ] && exec jq -r "$3" "$STUB/compare"; exit 1 ;;
+esac
+# A PR's files are JSON in $STUB/files/<number>, read with the script's --jq; none: the listing fails.
+case "$1 $2" in
+  "--paginate "*/pulls/*/files*) n=${2#*/pulls/}; f="$STUB/files/${n%%/*}"; [ -e "$f" ] && exec jq -r "$4" "$f"; exit 1 ;;
 esac
 [ "$1" = --paginate ] && { [ -e "$STUB/prs" ] || exit 1; cat "$STUB/prs"; exit 0; }
 sha=${1#*head_sha=}; sha=${sha%%&*}
@@ -894,13 +920,15 @@ class RerunScript(unittest.TestCase):
         os.makedirs(os.path.join(self.tmp, "bin"))
         os.makedirs(os.path.join(self.tmp, "runs"))
         os.makedirs(os.path.join(self.tmp, "jobs"))
+        os.makedirs(os.path.join(self.tmp, "files"))
+        os.makedirs(os.path.join(self.tmp, "moved"))
         write(self.tmp, "bin/gh", STUB_GH)
         os.chmod(os.path.join(self.tmp, "bin/gh"), 0o755)
 
     PUSH = "2026-11-10T03:05:49Z"  # this rerun run's created_at, no earlier than the push
 
     def run_script(self, prs, runs, refuse=(), rounds=3, started=None, push=PUSH, last={"workflow_runs": []},
-                   compare=None):
+                   compare=None, files=None, moved=None):
         # last: this workflow's runs listing (None: it cannot be read); compare: the compare JSON
         # from its newest successful run to this push, or a list of changed paths (None: it fails).
         # started: {run id: [job started_at or (started_at, conclusion), ...]}, a job passing unless its
@@ -926,6 +954,15 @@ class RerunScript(unittest.TestCase):
                 write(self.tmp, f"jobs/{i}", json.dumps({"total_count": len(jobs), "jobs": jobs}))
         for i in refuse:
             write(self.tmp, f"refuse-{i}", "")
+        # moved: {PR head: compare JSON from it to this push, or a list of (status, path, previous
+        # path)}; a head left out cannot be compared. files: {PR number: [path or (path, previous
+        # path), ...]}; a PR left out cannot be listed.
+        for sha, rows in (moved or {}).items():
+            write(self.tmp, f"moved/{sha}", json.dumps(rows if isinstance(rows, dict) else {"status": "diverged", "files": [
+                {"status": st, "filename": f, **({"previous_filename": pf} if pf else {})} for st, f, pf in rows]}))
+        for n, paths in (files or {}).items():
+            write(self.tmp, f"files/{n}", json.dumps([{"filename": f[0], "previous_filename": f[1]} if isinstance(f, tuple)
+                                                       else {"filename": f} for f in paths]))
         if last is not None:
             write(self.tmp, "last", json.dumps(last))
         if compare is not None:
@@ -1069,6 +1106,61 @@ class RerunScript(unittest.TestCase):
         rc, out, reran = self.run_script(prs, runs, last=None, compare=[])
         self.assertEqual((rc, reran), (1, []), out)
         self.assertIn("cannot list this workflow's runs", out)
+
+    # REQ: CI-ceiling-fall
+    def test_skips_a_pr_whose_files_the_check_does_not_read(self):
+        # CI-rerun-touch: a PR whose files match no measured path, none of them moved on main since
+        # its merge base, merges to main's measure, so once its newest run passed it is not rerun. A
+        # measured file, a rename away from one, a failed listing or 3000 lines reruns.
+        prs = [(n, f"s{n}") for n in range(1, 8)]
+        runs = {sha: [f"{n}{n} completed"] for n, sha in prs}
+        rc, out, reran = self.run_script(prs, runs, moved={sha: [] for _, sha in prs}, files={
+            1: ["image/build.sh", "tests/test_x.py", "briefs/broker.md"], 2: [], 3: ["docs/a.md", "broker/x/y.go"],
+            4: [("docs/b.md", "DECISIONS.md")], 6: [f"docs/{i}.md" for i in range(3000)],
+            7: ["tools/ceilings.txt"]})
+        self.assertEqual((rc, sorted(reran)), (0, ["33", "44", "55", "66", "77"]), out)
+        self.assertIn("#1: changes no path the check reads and 11 passed, so its merged measure is main's; not rerun", out)
+        self.assertIn("#2: changes no path the check reads", out)
+        self.assertIn("#5: its files may reach a path the check reads (or could not be listed); rerun as usual", out)
+        self.assertEqual(pathlib.Path(self.tmp, "summary").read_text(), "\nReran 5 of 7 open PRs' trusted-base runs."
+                         " 2 change no path the check reads and passed, so they were not rerun.\n")
+
+    # REQ: CI-ceiling-fall
+    def test_reruns_a_quiet_pr_whose_file_main_moved(self):
+        # L3 1 on #5960: main renaming docs/a.go (which the PR edits) to broker/a.go carries the
+        # PR's edit into broker/ although its own list names only docs/a.go; a file main removed
+        # can pair as a rename too. Either reruns, as does a compare that fails or lists 300 files;
+        # a rename or removal of a file the PR does not touch still skips.
+        prs, runs, files = [(1, "a1")], {"a1": ["11 completed"]}, {1: ["docs/a.go", "docs/n.md"]}
+        for rows in ([("renamed", "broker/a.go", "docs/a.go")], [("removed", "docs/a.go", None)],
+                     [("renamed", "broker/b.go", "x/docs/a.go"), ("removed", "docs/n.md", None)],
+                     {"status": "diverged", "files": [{"status": "modified", "filename": f"z/{i}"} for i in range(300)]},
+                     None):
+            rc, out, reran = self.run_script(prs, runs, files=files, moved=None if rows is None else {"a1": rows})
+            self.assertEqual((rc, reran), (0, ["11"]), (rows, out))
+        for rows in ([], [("renamed", "broker/b.go", "docs/b.go"), ("removed", "docs/c.go", None),
+                          ("modified", "docs/a.go", None)]):
+            rc, out, reran = self.run_script(prs, runs, files=files, moved={"a1": rows})
+            self.assertEqual((rc, reran), (0, []), (rows, out))
+
+    # REQ: CI-ceiling-fall
+    def test_reruns_a_quiet_pr_whose_run_did_not_pass(self):
+        # L3 2 on #5960: a quiet PR whose newest run failed, timed out, was cancelled or has a job
+        # with no conclusion is still rerun once per push; one still going is waited on and then
+        # skipped when it passes. A jobs listing that fails reruns.
+        late = "2026-11-10T02:55:35Z"
+        prs = [(n, f"q{n}") for n in range(1, 6)]
+        runs = {sha: [f"{n}{n} completed"] for n, sha in prs}
+        rc, out, reran = self.run_script(prs, runs, files={n: ["docs/x.md"] for n, _ in prs},
+                                         moved={sha: [] for _, sha in prs},
+                                         started={"11": [(late, "failure")], "22": [(late, "cancelled")],
+                                                  "33": [(late, "timed_out")], "44": [(late, None)],
+                                                  "55": [late, (late, "failure")]})
+        self.assertEqual((rc, sorted(reran)), (0, ["11", "22", "33", "44", "55"]), out)
+        rc, out, reran = self.run_script([(1, "a1")], {"a1": ["11 in_progress", "11 completed"]},
+                                         files={1: ["README.md"]}, moved={"a1": []})
+        self.assertEqual((rc, reran), (0, []), out)
+        self.assertIn("#1: changes no path the check reads and 11 passed", out)
 
     # REQ: CI-rerun-fresh-fu
     def test_measured_paths_hold_every_path_the_check_reads(self):
