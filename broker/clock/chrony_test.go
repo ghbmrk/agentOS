@@ -122,18 +122,17 @@ func TestHW8NoAdjtimexNoRTCWrite(t *testing.T) {
 	}
 }
 
-// chronyKeys are the only directives chrony.conf may use. Any other could
-// write the hardware clock (rtcsync, rtcfile, hwclockfile), take sources
-// from DHCP or other files (sourcedir, confdir, include), serve or set time
-// (allow, local, manual, settime), or move the frequency outside maxdrift's
-// clamp (tempcomp), so the list is closed (security T1, T4; #5929).
-var chronyKeys = map[string]bool{"server": true, "pool": true, "ntsdumpdir": true, "driftfile": true, "makestep": true,
-	"maxslewrate": true, "maxdrift": true, "authselectmode": true, "port": true, "cmdport": true}
-
 // chronyConf reads a chrony configuration: its directives' values, its
-// sources in order, and every directive outside chronyKeys.
+// sources in order, and every directive outside keys, the only ones
+// chrony.conf may use. Any other could write the hardware clock (rtcsync,
+// rtcfile, hwclockfile), take sources from DHCP or other files (sourcedir,
+// confdir, include), serve or set time (allow, local, manual, settime), or
+// move the frequency outside maxdrift's clamp (tempcomp), so the list is
+// closed (security T1, T4; #5929).
 func chronyConf(t *testing.T, text string) (values map[string]string, servers, bad []string) {
 	t.Helper()
+	keys := map[string]bool{"server": true, "pool": true, "ntsdumpdir": true, "driftfile": true, "makestep": true,
+		"maxslewrate": true, "maxdrift": true, "authselectmode": true, "port": true, "cmdport": true}
 	values = map[string]string{}
 	sc := bufio.NewScanner(strings.NewReader(text))
 	for sc.Scan() {
@@ -142,7 +141,7 @@ func chronyConf(t *testing.T, text string) (values map[string]string, servers, b
 			continue
 		}
 		fs := strings.Fields(l)
-		if !chronyKeys[fs[0]] {
+		if !keys[fs[0]] {
 			bad = append(bad, fs[0])
 		}
 		values[fs[0]] = strings.Join(fs[1:], " ")
@@ -158,7 +157,7 @@ func chronyConf(t *testing.T, text string) (values map[string]string, servers, b
 
 // The shipped chrony configuration (installed by P2-1 as
 // /etc/chrony/chrony.conf): NTS sources first, the Debian pool as
-// fallback, and no directive outside chronyKeys.
+// fallback, and no directive outside chronyConf's closed list.
 func TestHW8ChronyConfig(t *testing.T) {
 	b, err := os.ReadFile("chrony/chrony.conf")
 	if err != nil {
