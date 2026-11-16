@@ -58,9 +58,16 @@ func TestRootSideLintReach(t *testing.T) {
 		"an encrypted credential store grant": {"image/mkosi/agentos-c.service", "[Service]\nUser=agentos-c\nExecStart=/bin/true\nRuntimeDirectory=credstore.encrypted\n", `/run/credstore.encrypted, in or above /run/credstore.encrypted`},
 		// Item 5: paths the manager opens or creates as root, whatever the
 		// unit's User=.
-		"a special file of ours":        {"image/mkosi/agentos-s.socket", "[Socket]\nListenSpecial=/run/agentos-x/f\n", `ListenSpecial=/run/agentos-x/f: a listen path of ours lies outside rootTrees`},
-		"a FIFO of ours":                {"image/mkosi/agentos-s.socket", "[Socket]\nListenFIFO=/run/agentos-x/fifo\n", `ListenFIFO=/run/agentos-x/fifo: a listen path of ours lies outside rootTrees`},
-		"a USB function of ours":        {"image/mkosi/agentos-s.socket", "[Socket]\nListenUSBFunction=/run/agentos-x/usb\n", `lies outside rootTrees`},
+		"a special file in a grant": {"image/mkosi/agentos-s.socket", "[Socket]\nListenSpecial=/run/agentos-x/f\n", `/run/agentos-x/f, below /run/agentos-x`},
+		"a FIFO in a grant":         {"image/mkosi/agentos-s.socket", "[Socket]\nListenFIFO=/run/agentos-x/fifo\n", `/run/agentos-x/fifo, below /run/agentos-x`},
+		"a USB function in a grant": {"image/mkosi/agentos-s.socket", "[Socket]\nListenUSBFunction=/run/agentos-x/usb\n", `/run/agentos-x/usb, below /run/agentos-x`},
+		// An opened path stays under /run/agentos*: PID 1 hands the
+		// service a root-only file's descriptor whatever its User=, or
+		// makes a FIFO in /etc (#6003 Security 1).
+		"a special file in /etc":        {"image/mkosi/agentos-s.socket", "[Socket]\nListenSpecial=/etc/shadow\n", `ListenSpecial=/etc/shadow: a listen path of ours lies outside /run/agentos*`},
+		"a special file in credstore":   {"image/mkosi/agentos-s.socket", "[Socket]\nListenSpecial=/run/credstore/x\n", `ListenSpecial=/run/credstore/x: a listen path of ours lies outside /run/agentos*`},
+		"a FIFO in /etc":                {"image/mkosi/agentos-s.socket", "[Socket]\nListenFIFO=/etc/agentos/fifo\n", `ListenFIFO=/etc/agentos/fifo: a listen path of ours lies outside /run/agentos*`},
+		"a USB function in /root":       {"image/mkosi/agentos-s.socket", "[Socket]\nListenUSBFunction=/root/usb\n", `lies outside /run/agentos*`},
 		"a stream below a grant":        {"image/mkosi/agentos-s.socket", "[Socket]\nListenStream=/run/agentos-x/a/s.sock\n", `/run/agentos-x/a/s.sock, below /run/agentos-x`},
 		"a packet socket below a grant": {"image/mkosi/agentos-s.socket", "[Socket]\nListenSequentialPacket=/run/agentos-x/a/s.sock\n", `below /run/agentos-x`},
 		"a link below a grant":          {"image/mkosi/agentos-s.socket", "[Socket]\nListenStream=/run/agentos-s/s.sock\nSymlinks=/run/agentos-x/a/l\n", `/run/agentos-x/a/l, below /run/agentos-x`},
@@ -97,17 +104,32 @@ func TestRootSideLintReach(t *testing.T) {
 	})
 	// Item 3: the scan does not descend a link; systemd and the image
 	// build do.
-	t.Run("refuses a linked drop-in directory", func(t *testing.T) {
-		files := reachBase()
-		files["image/elsewhere/z.conf"] = "[Service]\nEnvironment=LD_PRELOAD=/tmp/x.so\n"
-		root := fakeRepo(t, files)
-		if err := os.Symlink("../elsewhere", filepath.Join(root, "image/mkosi/agentos-side.service.d")); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := rootBinaries(root); err == nil || !strings.Contains(err.Error(), "image/mkosi/agentos-side.service.d: a link to a directory") {
-			t.Fatalf("got %v, want a refusal of the link", err)
-		}
-	})
+	// A link is read only when it resolves inside the repository to a
+	// regular file; the runner's own tree never decides (#6003 L3).
+	for name, c := range map[string]struct{ target, want string }{
+		"a linked drop-in directory":                   {"../elsewhere", "a link to a directory"},
+		"an absolute target":                           {"/usr/lib/agentos-l3/dropins", "absolute"},
+		"an absolute target that exists on the runner": {"/etc", "absolute"},
+		"a dangling target":                            {"../nowhere", "dangling"},
+		"a link loop":                                  {"agentos-side.service.d", "loop"},
+		"a target outside the repo":                    {"../../../outside", "outside the repository"},
+	} {
+		t.Run("refuses "+name, func(t *testing.T) {
+			files := reachBase()
+			files["image/elsewhere/z.conf"] = "[Service]\nEnvironment=LD_PRELOAD=/tmp/x.so\n"
+			files["image/mkosi/mkosi.extra/usr/lib/agentos-l3/dropins/z.conf"] = "[Service]\nEnvironment=LD_PRELOAD=/tmp/x.so\n"
+			root := fakeRepo(t, files)
+			if err := os.MkdirAll(filepath.Join(filepath.Dir(root), "outside"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(c.target, filepath.Join(root, "image/mkosi/agentos-side.service.d")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := rootBinaries(root); err == nil || !strings.Contains(err.Error(), "image/mkosi/agentos-side.service.d: ") || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("got %v, want a refusal of the link with %q", err, c.want)
+			}
+		})
+	}
 	t.Run("passes a linked unit file", func(t *testing.T) {
 		root := fakeRepo(t, reachBase())
 		if err := os.MkdirAll(filepath.Join(root, "image/mkosi/multi-user.target.wants"), 0o755); err != nil {
@@ -181,7 +203,8 @@ func TestBuiltUnitsEndpointsInGrants(t *testing.T) {
 	pkg := map[string]any{"unit": "pkg-g.service", "files": []any{map[string]any{"path": "/usr/lib/systemd/system/pkg-g.service", "ours": false,
 		"text": "[Service]\nUser=pkg\nExecStart=/usr/bin/pkg\nRuntimeDirectory=systemd/pkg-g agentos-g\n"}}}
 	for name, c := range map[string]struct{ socket, want string }{
-		"a FIFO in a package's grant":   {"[Socket]\nListenFIFO=/run/systemd/pkg-g/f\n", `/run/systemd/pkg-g/f, below /run/systemd/pkg-g`},
+		"a FIFO in a package's grant":   {"[Socket]\nListenFIFO=/run/agentos-g/f\n", `/run/agentos-g/f, below /run/agentos-g`},
+		"a FIFO in a package's tree":    {"[Socket]\nListenFIFO=/run/systemd/pkg-g/f\n", `ListenFIFO=/run/systemd/pkg-g/f: a listen path of ours lies outside /run/agentos*`},
 		"a stream below a package's":    {"[Socket]\nListenStream=/run/agentos-g/a/s.sock\n", `/run/agentos-g/a/s.sock, below /run/agentos-g`},
 		"a stream in a package's grant": {"[Socket]\nListenStream=/run/agentos-g/s.sock\n", ""},
 	} {
@@ -246,6 +269,16 @@ func TestRootEnvFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	// Only an overlay's copy is shipped: one elsewhere under image/ (an
+	// example, a doc) is not read as the file (#6003 Security 2).
+	t.Run("refuses a copy outside an overlay", func(t *testing.T) {
+		files := reachBase()
+		files[unit] = "[Service]\nExecStart=/bin/true\nEnvironmentFile=/etc/agentos/q.env\n"
+		files["image/docs/examples/etc/agentos/q.env"] = "GOMEMLIMIT=1\n"
+		if _, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), "/etc/agentos/q.env, which no file under image/ ships") {
+			t.Fatalf("got %v, want the file unshipped", err)
+		}
+	})
 	t.Run("refuses a linked env file", func(t *testing.T) {
 		files := reachBase()
 		files[unit] = root
@@ -253,7 +286,7 @@ func TestRootEnvFiles(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(r, filepath.Dir(env)), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink("/etc/passwd", filepath.Join(r, env)); err != nil {
+		if err := os.Symlink("../../../agentos-e.service", filepath.Join(r, env)); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := rootBinaries(r); err == nil || !strings.Contains(err.Error(), "not a regular file") {

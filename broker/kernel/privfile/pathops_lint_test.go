@@ -2474,13 +2474,16 @@ func isManagerConf(p string) bool {
 }
 
 // shippedEnv finds the env file p among files, the paths under image/: each
-// whose path ends in p (an overlay's copy at that path), named relative to
-// root and read only when it is a regular file, not a link.
+// that is an overlay's copy at p (the overlay directory is one of
+// overlayDirs), named relative to root and read only when it is a regular
+// file, not a link. A copy elsewhere under image/ (an example, a doc) is
+// not shipped (#6003 Security 2).
 func shippedEnv(root string, files []string) envLookup {
 	return func(p string) (map[string]string, error) {
 		out := map[string]string{}
 		for _, f := range files {
-			if !strings.HasSuffix(filepath.ToSlash(f), p) {
+			f := filepath.ToSlash(f)
+			if !strings.HasSuffix(f, p) || !overlayDirs[path.Base(strings.TrimSuffix(f, p))] {
 				continue
 			}
 			rel, _ := filepath.Rel(root, f)
@@ -2501,6 +2504,10 @@ func shippedEnv(root string, files []string) envLookup {
 		return out, nil
 	}
 }
+
+// overlayDirs are the directories under image/ whose tree the image build
+// copies to / (mkosi's extra trees, the camnode board overlay).
+var overlayDirs = map[string]bool{"mkosi.extra": true, "overlay": true}
 
 // imageFiles lists every file and link under root/image.
 func imageFiles(root string) ([]string, error) {
@@ -2599,11 +2606,15 @@ func rootBinaries(root string) ([]string, error) {
 			return err
 		case d.IsDir():
 			return nil
-		case d.Type()&os.ModeSymlink != 0 && isDirLink(p):
+		case d.Type()&os.ModeSymlink != 0 && linkOutside(root, p) != "":
 			// WalkDir does not descend a link; systemd and the image
-			// build do (#4718 item 3).
+			// build do (#4718 item 3). A link is read only when it
+			// resolves, inside the repository, to a regular file: one
+			// to a directory, a dangling or absolute target (which the
+			// image build may make real) or a loop is refused, so the
+			// result never depends on the runner's tree (#6003 L3).
 			rel, _ := filepath.Rel(root, p)
-			return fmt.Errorf("%s: a link to a directory, which this scan does not walk; ship the directory itself", filepath.ToSlash(rel))
+			return fmt.Errorf("%s: %s; ship the file or directory itself", filepath.ToSlash(rel), linkOutside(root, p))
 		case isManagerConf(p):
 			confs = append(confs, p)
 		case unitTypes[filepath.Ext(p)]:
@@ -3140,10 +3151,27 @@ func endpointsHeld(endpoints, grants []grant) error {
 	return errors.Join(errs...)
 }
 
-// isDirLink reports whether the link p resolves to a directory.
-func isDirLink(p string) bool {
-	st, err := os.Stat(p)
-	return err == nil && st.IsDir()
+// linkOutside is why the link p under root is not read as a file, or "":
+// its target must be relative and resolve, inside root, to a regular file.
+func linkOutside(root, p string) string {
+	if t, err := os.Readlink(p); err != nil || filepath.IsAbs(t) {
+		return "a link with an absolute or unreadable target, which the image build may make real"
+	}
+	q, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return "a dangling link or a link loop"
+	}
+	rr, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "a link the scan cannot resolve"
+	}
+	if rel, err := filepath.Rel(rr, q); err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		return "a link that resolves outside the repository"
+	}
+	if st, err := os.Stat(q); err != nil || !st.Mode().IsRegular() {
+		return "a link to a directory or other non-file, which this scan does not walk"
+	}
+	return ""
 }
 
 // sharedRuns are trees many units' sockets sit in, so a package socket's
@@ -3412,8 +3440,10 @@ func pkgListenPat(w, p string, links map[string]string) listenPat {
 // directory (unless one of sharedRuns), and lie under /run/agentos*
 // (inOurRuns), so it names no alias link, shared tree or ancestor of a
 // package's path, which PID 1 would unlink or replace. A path PID 1 opens
-// as root rather than binds or links (openedListen) lies in rootTrees
-// instead (#4718 item 5). p is the word as read, for endpointsHeld.
+// as root rather than binds or links (openedListen) is held the same, so
+// it names no root-only file such as /etc/shadow (#6003 Security 1); one in
+// or below a grant is endpointsHeld's (#4718 item 5). p is the word as
+// read, for endpointsHeld.
 func (c *unitCheck) onPkgListen(k, v string) (p, why string) {
 	var b strings.Builder
 	for i := 0; i < len(v); i++ {
@@ -3448,9 +3478,7 @@ func (c *unitCheck) onPkgListen(k, v string) (p, why string) {
 	switch {
 	case via != "":
 		return p, "passes through a link in the tree, " + via + "; every directory on a listen path of ours must be a real one (#5620 R-c)"
-	case openedListen[k] && !rootOwned(p):
-		return p, "lies outside rootTrees: PID 1 opens a ListenSpecial=, ListenFIFO= or ListenUSBFunction= path as root, following a link to a special file or a function's files"
-	case !openedListen[k] && !inOurRuns(p):
+	case !inOurRuns(p):
 		return p, "lies outside /run/agentos*, the only tree the reader holds as ours"
 	}
 	return p, ""
