@@ -1480,3 +1480,29 @@ func TestRemoveMailDeletesTheSendersRecord(t *testing.T) {
 		t.Fatalf("steps after the new setup %v: want the first without history", fulls[n:])
 	}
 }
+
+// The senders one read found are kept for the unchanged mailbox, so a
+// second plan reads nothing; a read that failed is never kept, so the next
+// plan reads again and fails again (world.go's `case err == nil`, #5804).
+func TestAnUnchangedMailboxKeepsItsSendersAndAFailedReadDoesNot(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	srv.Deliver(googleMail("mx.google.com"))
+	h := NewMailHost(context.Background(), dir, sec, planConfig(srv))
+	first, err := h.accountPlan()
+	if err != nil || len(first.Items) == 0 {
+		t.Fatalf("first plan: %+v %v", first, err)
+	}
+	srv.Fail("/messages", 500)
+	if p, err := h.accountPlan(); err != nil || !slices.Equal(planIDs(p), planIDs(first)) {
+		t.Fatalf("a plan of the unchanged mailbox read it again: %+v %v, want %v", p, err, planIDs(first))
+	}
+	srv2, dir2, sec2 := newGmailAccount(t)
+	srv2.Deliver(googleMail("mx.google.com"))
+	srv2.Fail("/messages", 500)
+	h2 := NewMailHost(context.Background(), dir2, sec2, planConfig(srv2))
+	for i := range 2 {
+		if p, err := h2.accountPlan(); err == nil {
+			t.Fatalf("plan %d after a failed read: %+v, want the read's error", i, p)
+		}
+	}
+}
