@@ -39,7 +39,10 @@ while :; do
 		alive)
 			echo "HOSTCHECK-ALIVE $arg"
 			echo "HOSTCHECK-ALIVE $arg" | systemd-cat -t hostcheck-responder 2>/dev/null ;;
-		poweroff | reboot) systemctl --no-block "$cmd" || echo "HOSTCHECK-EXIT-FAILED $cmd" ;;
+		# The request starts the stop of this unit, whose SIGTERM reaches the whole cgroup, so it can
+		# kill systemctl before it reads systemd's answer: systemctl runs with SIGTERM ignored, and
+		# fails only on a refusal (HOST-restart-flake, #5992). The trap above would reset it.
+		poweroff | reboot) (trap '' TERM; exec systemctl --no-block "$cmd") || echo "HOSTCHECK-EXIT-FAILED $cmd" ;;
 		esac
 	done
 	[ -n "$stopping" ] || exit 0
