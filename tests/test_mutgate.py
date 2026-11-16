@@ -2488,6 +2488,28 @@ class Equivalent(unittest.TestCase):
             "| broker/netguard/a.go:2:9 | ARITHMETIC\\_BASE | equivalent: a and b are never read, so no value tells the mutants apart |",
         ])
 
+    def test_a_reason_saying_not_equivalent_fails_the_gate(self):
+        # REQ: MUT-equivalent-not-equivalent
+        # #5891 (from #5863, #5883): a line whose reason says its mutant is not equivalent waives nothing,
+        # and fails the gate even where its mutant is killed, so it never reaches a record through waive.
+        ok = "Mutant-equivalent: broker/netguard/a.go:2 a and b are never read, so no value tells the mutants apart\n"
+        for reason in ("not equivalent: gremlins misreads it, follow-up #1", "NOT  Equivalent, a real survivor",
+                       "the guard is not-equivalent here"):
+            bad = f"Mutant-equivalent: broker/netguard/a.go:3 {reason}\n"
+            with self.subTest(reason):
+                r = self.v.verify({"netguard.json": self.result(2, 3)}, src=self.SRC, body=ok + bad, summary=True)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("broker/netguard/a.go:3 ARITHMETIC_BASE survives", r.stdout)
+                self.assertIn("mutgate: the Mutant-equivalent line broker/netguard/a.go:3 says its mutant is not "
+                              "equivalent", r.stdout)
+                self.assertNotIn("a.go:2 ", r.stdout)
+                # Only line 2 survives: the refused line still fails the gate, naming no survivor.
+                r = self.v.verify({"netguard.json": self.result(2)}, src=self.SRC, body=ok + bad)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("says its mutant is not equivalent", r.stdout)
+        self.assertEqual(mutgate.not_equivalent(mutgate.waivers(ok + "Mutant-equivalent: broker/netguard/a.go:3 "
+                                                                       "equivalent: every caller passes x > 0\n")), [])
+
     def test_untrusted_body_cannot_change_the_gate(self):
         # The body is the PR author's text: parsed for waiver lines only, never run or read as options.
         hostile = ("$(touch pwned) `touch pwned` \"; exit 0; '\n--git HEAD\n--summary /etc/x\n"
@@ -2628,6 +2650,22 @@ class Record(unittest.TestCase):
                     self.waive(d, run, n, reason=f"proof number {n} for this site, read again")
                 r = run("records", "netguard")
                 self.assertEqual((r.returncode, len(r.stdout.strip().split("\n"))), (0, 2), r.stdout + r.stderr)
+
+    def test_waive_refuses_a_reason_saying_not_equivalent(self):
+        # REQ: MUT-equivalent-not-equivalent
+        # #5891: waive run on a whole PR body writes nothing while one line says its mutant is not equivalent.
+        with tempfile.TemporaryDirectory() as d:
+            run = self.repo(d, self.SRC, self.SRC)
+            path = pathlib.Path(d) / "broker" / "netguard" / mutgate.RECORD
+            rec = self.waive(d, run, 5)
+            (pathlib.Path(d) / "w.txt").write_text(
+                "Mutant-equivalent: broker/netguard/a.go:8 the two branches return the same value for every input\n"
+                "Mutant-equivalent: broker/netguard/a.go:11 Not Equivalent: a real survivor, left to a follow-up\n")
+            r = run("waive", str(pathlib.Path(d) / "w.txt"), "--accepted", "#5891")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("broker/netguard/a.go:11 says its mutant is not equivalent", r.stderr)
+            self.assertNotIn("a.go:8", r.stderr)
+            self.assertEqual(path.read_text(), rec)  # nothing written, the good line included
 
     def test_a_method_is_named_by_its_receiver_type(self):
         # Potency on #5780: generic receivers (IndexExpr, IndexListExpr) name the type, not its parameters.

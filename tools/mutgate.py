@@ -138,6 +138,10 @@ TEST_FUNC = re.compile(r"^func ((?:Test|Fuzz|Example)(?![a-z])\w*)\(")
 # kind, then a reason. A waiver that matches more than one mutant of the result waives none (#5792).
 EQUIVALENT = re.compile(r"^Mutant-equivalent: (broker/[^\s:*?\[\]]+\.go):([1-9]\d*)(?::([1-9]\d*))?(?::([A-Z][A-Z_]{0,63}))?"
                         r" +(\S.*?)\s*$")
+# A reason that says its mutant is not equivalent is no proof (#5891, from #5863 and #5883): a body line
+# holding one waives nothing and fails the gate, and waive refuses it, so a real survivor never becomes a
+# record entry that later gates read as proved. Case and the space or hyphen between the words are ignored.
+NOT_EQUIVALENT = re.compile(r"\bnot[\s-]+equivalent", re.IGNORECASE)
 
 
 # A package name that reaches the workflow's matrix: path segments of plain characters only.
@@ -695,6 +699,20 @@ def waivers(body):
     return out
 
 
+def not_equivalent(rows):
+    """The sites, as site_text spells them and sorted, of waivers' rows whose reason says not equivalent."""
+    return sorted(site_text(w) for w, reason in rows.items() if NOT_EQUIVALENT.search(reason))
+
+
+def refuse_not_equivalent(sites, out=None):
+    """Print why each `Mutant-equivalent:` line of sites is refused; True when sites holds one."""
+    for site in sites:
+        print(f"mutgate: the Mutant-equivalent line {site} says its mutant is not equivalent, so it proves "
+              "nothing: kill a real survivor with a test, or open a work-item row for it (a row does not pass "
+              "the gate); a mutant gremlins misreads is a tools/mutgate.py defect for its own row", file=out)
+    return bool(sites)
+
+
 def site_text(w):
     """A waiver key (path, line, kind, col) as a body line spells it: `<path>:<line>[:<col>][:<KIND>]`."""
     path, line, kind, col = w
@@ -934,6 +952,8 @@ def cmd_waive(args):
     if not rows:
         print(f"mutgate: {args.lines} holds no `Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>` line",
               file=sys.stderr)
+        return 1
+    if refuse_not_equivalent(not_equivalent(rows), sys.stderr):
         return 1
     if clash := [site_text(w) for w in rows if w[2] and args.mutant and w[2] != args.mutant]:
         print(f"mutgate: {', '.join(clash)} names another mutant kind than --mutant {args.mutant}", file=sys.stderr)
@@ -2043,6 +2063,8 @@ def decide(results, added, tests, args, records=({}, [])):
     """Gate the read results against the PR body's waivers and the packages' records (record_waivers'
     pair; a stale entry fails), and write the summary table. A body line wins over a record entry."""
     body = waivers(pathlib.Path(args.body).read_text(encoding="utf-8", errors="replace") if args.body else "")
+    refused = not_equivalent(body)
+    body = {w: reason for w, reason in body.items() if site_text(w) not in refused}
     kept, stale = records
     waived = {**{site: f"{reason} (record, {accepted}{', new in this PR' if new else ''})"
                  for site, (reason, accepted, new) in kept.items()}, **body}
@@ -2065,7 +2087,8 @@ def decide(results, added, tests, args, records=({}, [])):
         print(f"mutgate: the waiver {site_text(w)} matches {len(hit)} mutants ("
               + ", ".join(site_text((p, n, k, c)) for p, n, k, c in hit) + "), so it waives none: name the one it "
               "proves by its column and kind, `Mutant-equivalent: <path>:<line>:<col>:<KIND> <reason>`")
-    return report_violations(found, lost) or (1 if stale else 0)
+    refuse_not_equivalent(refused)
+    return report_violations(found, lost) or (1 if stale or refused else 0)
 
 
 def write_summary(path, text):
