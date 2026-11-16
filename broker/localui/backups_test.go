@@ -248,28 +248,22 @@ func TestBackupPageCleansTheTypedFolder(t *testing.T) {
 	}
 }
 
-// A folder refused for a path element led or trailed by a space names
-// that rule, so the owner knows which part to change (BAK-1, #4969).
-func TestBackupPageNamesTheSpacePaddedFolderRule(t *testing.T) {
-	r, fb := backupRig(t)
-	r.signIn()
-	fb.err = Refused(localapi.ErrBackupPlace)
-	p := html.UnescapeString(r.post("/backups/", url.Values{"step": {"begin"}, "name": {"drive3"}, "locator": {"/media/drive3/ agentos"}}).Body.String())
-	if !strings.Contains(p, "no folder in its path starting or ending with a space") {
-		t.Fatalf("space-padded folder refusal lacks the rule:\n%s", p)
+// A folder refused for a path element led or trailed by a space gets
+// refusal text naming that rule, so the owner knows which part to change
+// (BAK-1, #4969). It reads backupText alone; the stop-flow test above
+// already checks the page shows backupText's text for every refusal code.
+func TestBackupTextNamesTheSpacePaddedFolderRule(t *testing.T) {
+	if got := backupText(Refused(localapi.ErrBackupPlace)); !strings.Contains(got, "no folder in its path starting or ending with a space") {
+		t.Fatalf("place refusal lacks the space-padded folder rule: %q", got)
 	}
 }
 
 // A place name led by a dot, which the kernel's BackupTarget shape refuses,
 // gets refusal text naming that rule, so following it clears the refusal
 // (BAK-1, #4969, UX blocker on #5919).
-func TestBackupPageNamesTheLeadingDotNameRule(t *testing.T) {
-	r, fb := backupRig(t)
-	r.signIn()
-	fb.err = Refused(localapi.ErrBackupPlace)
-	p := html.UnescapeString(r.post("/backups/", url.Values{"step": {"begin"}, "name": {".drive3"}, "locator": {"/media/drive3/agentos"}}).Body.String())
-	if !strings.Contains(p, "and not start with a dot") {
-		t.Fatalf("leading-dot name refusal lacks the rule:\n%s", p)
+func TestBackupTextNamesTheLeadingDotNameRule(t *testing.T) {
+	if got := backupText(Refused(localapi.ErrBackupPlace)); !strings.Contains(got, "and not start with a dot") {
+		t.Fatalf("place refusal lacks the leading-dot name rule: %q", got)
 	}
 }
 
