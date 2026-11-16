@@ -15,7 +15,7 @@ Board section: Devices, hardware and image (SPEC §13-14). Work item #3702 (ENF-
 3. Add the launcher, which runs under `confine.Matter` and joins Thread's network namespace and nothing else (radio ASSUMPTIONS ENF-t-2). It sees only its storage directory.
 4. Carry two release findings from the ENF-j delta L3 (#3703 comment 6471438160, listed on #3702). First, add `open_tree_attr` to the mount deny list, and build the namespace and mount class from one table that a test checks against the kernel's syscall list. Second, each refusal check must tell the filter apart from the kernel, by running where the call would otherwise succeed or by expecting the filter's own errno. A mutant with each deny line removed must fail it. The same goes for #4125's finding on `probeNet` (#3702 comment of 2026-10-31 07:05Z).
 
-**Scope:** `broker/enforcer/radio/matter/connectedhomeip.pin` (new), `broker/enforcer/radio/matter/matter.go` (new), `broker/enforcer/radio/matter/matter_test.go` (new), `broker/enforcer/radio/matter/ASSUMPTIONS.md` (new), `tools/build-matter.sh` (new), `.github/workflows/ci.yml` (four steps in `machines`, and its `timeout-minutes` line), `broker/enforcer/radio/confine/confine.go`, `broker/enforcer/radio/confine/filter.go`, `broker/enforcer/radio/confine/filter_test.go`, `broker/enforcer/radio/stacks_test.go`, `broker/enforcer/radio/ASSUMPTIONS.md`.
+**Scope:** `broker/enforcer/radio/matter/connectedhomeip.pin` (new), `broker/enforcer/radio/matter/matter.go` (new), `broker/enforcer/radio/matter/matter_test.go` (new), `broker/enforcer/radio/matter/ASSUMPTIONS.md` (new), `tools/build-matter.sh` (new), `.github/workflows/ci.yml` (four steps in `machines`, and its `timeout-minutes` line), `tests/test_ci_scope.py` (the `timeout-minutes: 60` entry in `MACHINES_LINES`, which pins the job's timeout, set to the new value), `broker/enforcer/radio/confine/confine.go`, `broker/enforcer/radio/confine/filter.go`, `broker/enforcer/radio/confine/filter_test.go`, `broker/enforcer/radio/stacks_test.go`, `broker/enforcer/radio/ASSUMPTIONS.md`.
 
 **Acceptance tests:**
 - NET-2: `radio::TestStacksConfined`, extended to Matter. The process sees only `lo`, `wpan0` and `infra0`, cannot read the policy store, cannot enter a new namespace or mount, and holds the profile's seccomp filter. Catches a controller run unconfined.
@@ -40,7 +40,7 @@ Board section: Devices, hardware and image (SPEC §13-14). Work item #3702 (ENF-
 
 ## Both parts
 
-**Guard files:** `.github/workflows/ci.yml` (part a: four steps in `machines`, and its timeout line).
+**Guard files:** `.github/workflows/ci.yml` (part a: four steps in `machines`, and its timeout line) and `tests/test_ci_scope.py` (part a: the timeout entry in `MACHINES_LINES`).
 
 **Dependencies:** ENF-k (#3669) is closed, #3906 (the BLE process) is merged, and Thread (#4125) is merged. Order: part a, then part b. ENF-l-b2 part b starts Matter once part a merges. KERNEL-trim part b (#4094) runs after this row.
 
