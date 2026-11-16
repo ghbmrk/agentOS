@@ -674,3 +674,139 @@ func TestLOG4NullRecordContainsEveryLineage(t *testing.T) {
 		}
 	}
 }
+
+// LOG-4 at rest: no directory holds nothing; a log that cannot be read
+// is an error; a backs line that is not a back is not replayed; reads with
+// no meta log are an error; segments are read only when something was
+// deleted and only by their numbered names; held items are sorted.
+func TestLOG4RecallFilesReadExactly(t *testing.T) {
+	if held, err := readRecallHeld(filepath.Join(t.TempDir(), "none")); held != nil || err != nil {
+		t.Fatalf("absent: %v %v", held, err)
+	}
+	at := time.Now().UTC().Add(-time.Hour)
+	for _, c := range []struct{ name, dir string }{{"meta", "recall/meta.jsonl"}, {"provenance", "provenance.jsonl"}} {
+		b := newRecallBox(t)
+		b.write("recall/meta.jsonl", tomb("x"))
+		b.write("provenance.jsonl", read(b.L, at, "x"))
+		must(t, os.Remove(filepath.Join(b.recall, c.dir)))
+		must(t, os.MkdirAll(filepath.Join(b.recall, c.dir), 0o700))
+		if _, err := readRecallHeld(b.recall); err == nil {
+			t.Fatalf("%s unreadable: no error", c.name)
+		}
+	}
+	b := newRecallBox(t)
+	b.write("provenance.jsonl", read(b.L, at, "x"))
+	if _, err := readRecallHeld(b.recall); err == nil || !strings.Contains(err.Error(), "meta.jsonl is missing") {
+		t.Fatalf("no meta: %v", err)
+	}
+	b = newRecallBox(t)
+	b.write("recall/meta.jsonl")
+	must(t, os.MkdirAll(filepath.Join(b.recall, "recall", "seg-1.jsonl"), 0o700))
+	b.write("provenance.jsonl", read(b.L, at, "x"))
+	if _, err := readRecallHeld(b.recall); err != nil {
+		t.Fatalf("no tombs, a segment read: %v", err)
+	}
+	ids := []string{"i9", "i3", "i7", "i1", "i5", "i8", "i2", "i6", "i4", "i0"}
+	var tombs []string
+	for _, id := range ids {
+		tombs = append(tombs, tomb(id))
+	}
+	b = newRecallBox(t)
+	b.write("recall/meta.jsonl", tombs...)
+	must(t, os.MkdirAll(filepath.Join(b.recall, "recall", "seg-new.jsonl"), 0o700))
+	b.write("backs.jsonl", read(b.M, at, "i0"))
+	b.write("provenance.jsonl", read(b.L, at, ids...))
+	held, err := readRecallHeld(b.recall)
+	if err != nil || len(held) != 1 || strings.Join(held[b.L].IDs, ",") != "i0,i1,i2,i3,i4,i5,i6,i7,i8,i9" {
+		t.Fatalf("held %v %v", held, err)
+	}
+	b = &recallBox{t: t, recall: filepath.Join(t.TempDir(), "x[", "recall"), L: "lamp.1"}
+	b.write("recall/meta.jsonl", tomb("x"))
+	b.write("provenance.jsonl", read(b.L, at, "x"))
+	if _, err := readRecallHeld(b.recall); err == nil {
+		t.Fatal("segments unlisted: no error")
+	}
+}
+
+// LOG-4 at start: the settled record is read only when something is held
+// or the files are unknown; a record covering only some of a lineage's
+// deleted items leaves it contained; each failure is logged; rollbacks
+// and notices go in lineage order, each notice naming its time.
+func TestLOG4SettleOrdersAndLogs(t *testing.T) {
+	var logs []string
+	logf := func(f string, _ ...any) { logs = append(logs, f) }
+	has := func(f string) bool {
+		for _, l := range logs {
+			if l == f {
+				return true
+			}
+		}
+		return false
+	}
+	state := t.TempDir()
+	must(t, os.MkdirAll(filepath.Join(state, recallSettledFile), 0o700))
+	if h := openRecallHeld(filepath.Join(t.TempDir(), "none"), filepath.Join(state, recallSettledFile), logf); h.Contained("lamp.1") || h.Note() != "" {
+		t.Fatalf("nothing held, the record read: %q", h.Note())
+	}
+	b := newRecallBox(t)
+	b.write("recall/meta.jsonl")
+	must(t, os.MkdirAll(filepath.Join(b.recall, "provenance.jsonl"), 0o700))
+	if h := openRecallHeld(b.recall, filepath.Join(state, recallSettledFile), logf); !h.Contained("lamp.1") ||
+		!has("recall directory at rest unreadable, every agent contained: %v") || !has("%s unreadable, every agent contained: %v") {
+		t.Fatalf("unknown: %q", logs)
+	}
+	at := time.Date(2026, 3, 4, 5, 6, 0, 0, time.Local)
+	names := []string{"g", "c", "h", "a", "e", "b", "f", "d"}
+	var tombs, reads []string
+	for _, n := range names {
+		tombs = append(tombs, tomb(n+"1"), tomb(n+"2"))
+		reads = append(reads, read(n+".1", at, n+"1", n+"2"))
+	}
+	b = newRecallBox(t)
+	b.write("recall/meta.jsonl", tombs...)
+	b.write("provenance.jsonl", reads...)
+	logs = nil
+	if h := openRecallHeld(b.recall, filepath.Join(state, recallSettledFile), logf); !h.Contained("anyone") || !has("%s unreadable, every agent contained: %v") {
+		t.Fatalf("record unreadable: %q", logs)
+	}
+	sp := filepath.Join(t.TempDir(), recallSettledFile)
+	must(t, os.WriteFile(sp, []byte(`{"a.1":{"ids":["a1"],"since":"2026-03-04T05:06:00Z","told":true}}`), 0o600))
+	h := openRecallHeld(b.recall, sp, logf)
+	if !h.Contained("a.1") {
+		t.Fatal("a.1 settled over one of its two items")
+	}
+	h.settle(context.Background(), &rewindMachines{fail: errors.New("disk failed")}, func() ([]recallNo, error) { return nil, errors.New("journal gone") }, nil)
+	if !has("journal unreadable, agents holding a record the owner deleted stay contained: %v") {
+		t.Fatalf("logs %q", logs)
+	}
+	h.settle(context.Background(), &rewindMachines{fail: errors.New("disk failed")}, func() ([]recallNo, error) { return nil, nil }, nil)
+	if !has("agent %s holds a record the owner deleted and could not go back: %v") {
+		t.Fatalf("logs %q", logs)
+	}
+	m := &rewindMachines{}
+	var told []string
+	h.settle(context.Background(), m, func() ([]recallNo, error) { return nil, nil }, func(s string) error { told = append(told, s); return nil })
+	if strings.Join(m.calls, " ") != "a.1 b.1 c.1 d.1 e.1 f.1 g.1 h.1" || len(told) != 8 {
+		t.Fatalf("rollbacks %v, told %d", m.calls, len(told))
+	}
+	for i, n := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+		if want := "Agent " + n + " had read a record you deleted, so it went back to Mar 4 05:06;"; !strings.HasPrefix(told[i], want) {
+			t.Fatalf("notice %d: %q", i, told[i])
+		}
+	}
+	b.write("provenance.jsonl", append(reads, read("z.1", at, "a1"))...)
+	h = openRecallHeld(b.recall, filepath.Join(t.TempDir(), recallSettledFile), logf)
+	h.settle(context.Background(), &rewindMachines{}, func() ([]recallNo, error) { return nil, nil }, func(string) error { return errors.New("owner channel down") })
+	if !has("rollback notice for agent %s not sent: %v") {
+		t.Fatalf("logs %q", logs)
+	}
+	if got := holdLine([]string{"moss", "lamp"}); got != "lamp, moss still hold a record you deleted" {
+		t.Fatalf("hold line: %q", got)
+	}
+	if got := holdLine([]string{"lamp"}); got != "lamp still holds a record you deleted" {
+		t.Fatalf("hold line: %q", got)
+	}
+	if got := recallBackNotice("lamp.1", time.Time{}); !strings.Contains(got, "went back to its start;") {
+		t.Fatalf("notice: %q", got)
+	}
+}
