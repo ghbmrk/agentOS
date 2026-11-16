@@ -14,28 +14,30 @@ initrd of the boot entry (OUT/initrd/, every cpio member).
                                   held to ALLOW (default image/import_sweep.allow)
 
 It also reads, for the openssl records (#5341), which files hold the name of a by-name OpenSSL cipher
-selector or spell GCM-SIV, as selecting AES-GCM-SIV takes one of its names (see CIPHER_NAMES), and
-counts their references to each selector and their spellings.
+selector or spell GCM-SIV or KRB5KDF, as selecting AES-GCM-SIV takes one of its names (see CIPHER_NAMES
+and SPELT), and counts their references to each selector and their spellings.
 
 The JSON maps each place ("tree", and "initrd:<path>" for each initrd) to: "scanned", the ELF files
 read; "imports", each file importing an affected glibc symbol and those symbols; and "via", each other
 ELF file whose NEEDED closure (by SONAME or file name, within that place) holds an importing library, and those
-libraries; "cipher", each file whose bytes hold a CIPHER_NAMES name and its references to each
-(cipher_sites); "unread", each ELF file objdump failed on; and, for an initrd, "others", its executable
+libraries; "cipher", each file whose bytes hold a CIPHER_NAMES or SPELT name and its references to each
+(cipher_sites); "sha256", each of those files' SHA-256; "unread", each ELF file objdump failed on; and, for an initrd, "others", its executable
 members that are not ELF files. Only symbols bound to a GLIBC_ version count, so a library's own re_*
 names do not.
 
 --summary exits 1 when a claim the glibc records rest on stops holding: any file, in any place, imports
 or reaches a wide scanf function, or imports or reaches a regex function and matches no glob in ALLOW
 (each a file the image -100290 record names); a glob that matches nothing also fails, so the list
-stays the record's. It also exits 1 when a file holding a selector name or spelling GCM-SIV matches no [cipher]
-entry of ALLOW, or holds other sites than the entry it matches, or an entry matches nothing. The
+stays the record's. It also exits 1 when a file holding a selector name or a SPELT name matches no [cipher]
+entry of ALLOW or more than one, or holds other sites or other bytes (SHA-256) than the counted entry it
+matches, or an entry matches nothing; and on an ALLOW it cannot read (read_allow). The
 control is the scan itself: it also exits 1 when objdump failed on a file,
 the main tree or an initrd with executable members read no ELF file, the main tree has no importer
 of regcomp (bash and grep always import it), or no call site of EVP_CIPHER_fetch (libcryptsetup and
 libcrypto always hold one), so a clean result is not a scan that read nothing.
 """
 import fnmatch
+import hashlib
 import json
 import os
 import pathlib
@@ -69,9 +71,12 @@ GROUPS = {
 # with EVP_CIPHER_is_a, or OSSL_ENCODER_CTX_set_cipher, so those count too.
 CIPHER_NAMES = ("EVP_CIPHER_fetch", "EVP_get_cipherbyname", "openssl_cipher_many", "EVP_CIPHER_do_all_provided",
                 "EVP_CIPHER_is_a", "OSSL_ENCODER_CTX_set_cipher")
-# And a file whose bytes spell the cipher itself, in any case, is held under this key with the number of
-# times it does: a name passed some other way (an OSSL_PARAM "cipher" to a MAC or KDF) still has to be spelt.
-GCM_SIV = "GCM-SIV"
+# And a file whose bytes spell one of these, in any case, is held under it with the number of times it
+# does. The cipher: a name passed some other way (an OSSL_PARAM "cipher" to a MAC, KDF or DRBG) still has
+# to be spelt. KRB5KDF: of the algorithms taking a "cipher" parameter, CMAC, GMAC, KBKDF (through CMAC) and
+# CTR-DRBG refuse GCM-SIV by its mode, and KRB5KDF does not check the mode (#5861), so its callers are
+# recorded too: a caller selects it by spelling its name.
+SPELT = ("GCM-SIV", "KRB5KDF")
 # A reference: any instruction naming the start of a function, <name>, <name@plt>, <name@@VERSION> or
 # a GOT slot (# <name@VERSION>), so a call, a jump and an instruction taking its address all count
 # (L3 6899461135). <name+0x..> is a place inside it, and "addr <name>:" a label, neither a reference.
@@ -117,14 +122,15 @@ def cipher_sites(path):
     with open(path, "rb") as f:
         data = f.read()
     held = [n for n in CIPHER_NAMES if n.encode() in data]
-    spelt = data.lower().count(GCM_SIV.lower().encode())
+    low = data.lower()
+    spelt = {n: low.count(n.lower().encode()) for n in SPELT}
+    spelt = {n: c for n, c in spelt.items() if c}
     if not held and not spelt:
         return None, True
     r = subprocess.run(["objdump", "-d", "--no-show-raw-insn", str(path)], stdout=subprocess.PIPE,
                        stderr=subprocess.DEVNULL, text=True, errors="replace")
     sites, plt = dict.fromkeys(held, 0), False
-    if spelt:
-        sites[GCM_SIV] = spelt
+    sites.update(spelt)
     for line in r.stdout.splitlines():
         if line.startswith("Disassembly of section "):
             plt = line.split()[-1].startswith(".plt")  # a PLT stub's own jump through the GOT is no call site
@@ -152,12 +158,14 @@ def is_elf(path):
 
 def sweep(files):
     """FILES maps a shown path to a readable path. Returns the place's record (module docstring)."""
-    imports, needed, by_name, unread, cipher = {}, {}, {}, [], {}
+    imports, needed, by_name, unread, cipher, digest = {}, {}, {}, [], {}, {}
     for shown, real in files.items():
         syms, needed[shown], soname, read = read_elf(real)
         sites, disassembled = cipher_sites(real)
         if sites is not None:
             cipher[shown] = sites
+            with open(real, "rb") as f:
+                digest[shown] = hashlib.sha256(f.read()).hexdigest()
         if not (read and disassembled):
             unread.append(shown)
         if syms:
@@ -181,7 +189,8 @@ def sweep(files):
         if hits and shown not in importers:
             via[shown] = sorted(hits)
     return {"scanned": len(files), "imports": dict(sorted(imports.items())), "via": dict(sorted(via.items())),
-            "unread": sorted(unread), "cipher": dict(sorted(cipher.items()))}
+            "unread": sorted(unread), "cipher": dict(sorted(cipher.items())),
+            "sha256": dict(sorted(digest.items()))}
 
 
 def tree_files(top, prefix="/", skip=()):
@@ -268,40 +277,90 @@ def load_allow(path):
     return read_allow(path)[0]
 
 
+# A [cipher] entry's tokens: the SHA-256 of the file reviewed, and each site count.
+DIGEST = re.compile(r"^sha256=([0-9a-f]{64})$")
+COUNT = re.compile(r"^([A-Za-z_][\w-]*)=([0-9]+)$")
+FORMAT = "GLOB sha256=HEX NAME=COUNT ... (NAME from CIPHER_NAMES or SPELT) or GLOB *"
+# What every [cipher] refusal asks for, as the allow file's header does.
+REVIEW = ("review where its names come from, then update the [cipher] entry and the openssl records' "
+          "reach note in assurance/vulncheck.json")
+
+
 def read_allow(path):
-    """(the regex globs, the [cipher] entries) of ALLOW. A [cipher] entry is a glob, then either the
-    sites the file must hold exactly (NAME=COUNT each, from CIPHER_NAMES) or "*" (not counted)."""
+    """(the regex globs, the [cipher] entries) of ALLOW. A [cipher] entry is a glob, then either "*" (not
+    counted) or the SHA-256 of the file reviewed and the sites it holds exactly (FORMAT), read as
+    {"sha256": hex, "sites": {name: count}}: a new package version changes the bytes, so the source is
+    read again even when the counts hold (#5861). Exits naming the line on any other entry, a glob given
+    twice, or a name or the digest given twice in one entry."""
     regex, cipher, section = [], {}, None
-    for l in pathlib.Path(path).read_text().splitlines():
+    for n, l in enumerate(pathlib.Path(path).read_text().splitlines(), 1):
         l = l.split("#", 1)[0].strip()
+
+        def bad(why):
+            sys.exit("import sweep: %s:%d: %s; a [cipher] entry is %s" % (path, n, why, FORMAT))
         if l == "[cipher]":
             section = "cipher"
         elif l and section is None:
             regex.append(l)
         elif l:
             glob, *want = l.split()
-            cipher[glob] = "*" if want == ["*"] else {k: int(v) for k, v in (w.split("=", 1) for w in want)}
+            if glob in cipher:
+                bad("%s has an entry already" % glob)
+            if want == ["*"]:
+                cipher[glob] = "*"
+                continue
+            if not want or "*" in want:
+                bad("%s names %s" % (glob, "nothing" if not want else "'*' with other tokens"))
+            digests = [w[len("sha256="):] for w in want if DIGEST.match(w)]
+            if len(digests) != 1:
+                bad("%s gives %d sha256=HEX tokens, not one" % (glob, len(digests)))
+            sites = {}
+            for w in want:
+                m = COUNT.match(w)
+                if DIGEST.match(w):
+                    continue
+                if not m or m.group(1) not in CIPHER_NAMES + SPELT:
+                    bad("%s: %s is not NAME=COUNT with a NAME from CIPHER_NAMES or SPELT" % (glob, w))
+                if m.group(1) in sites:
+                    bad("%s gives %s twice" % (glob, m.group(1)))
+                sites[m.group(1)] = int(m.group(2))
+            if not sites:
+                bad("%s counts no site" % glob)
+            cipher[glob] = {"sha256": digests[0], "sites": sites}
     return regex, cipher
 
 
+def entry_line(p, sha, sites):
+    return " ".join([p, "sha256=" + (sha or "?")] + ["%s=%d" % kv for kv in sorted(sites.items())])
+
+
 def cipher_refusals(places, entries):
-    """Each file of PLACES holding a selector name or spelling GCM-SIV whose counts match no [cipher] entry."""
+    """Each file of PLACES holding a selector name or a SPELT name that matches no [cipher] entry or more
+    than one, or whose sites or SHA-256 differ from the counted entry it matches; and each entry matching
+    no such file."""
     errs, used = [], set()
     for place, v in places.items():
         for p, sites in v.get("cipher", {}).items():
             hit = [g for g in entries if fnmatch.fnmatchcase(p, g)]
             used.update(hit)
+            sha = v.get("sha256", {}).get(p)
             got = " ".join("%s=%d" % kv for kv in sorted(sites.items()))
             if not hit:
-                errs.append("%s: %s holds a by-name cipher selector or spells GCM-SIV (%s) and is not in import_sweep.allow "
-                            "[cipher]; review where its names come from, then add the entry: %s %s"
-                            % (place, p, got, p, got))
-            elif all(entries[g] != "*" and entries[g] != sites for g in hit):
-                errs.append("%s: %s holds cipher references %s, not the %s its [cipher] entry reviewed; review "
-                            "the new sites, then update the entry" % (place, p, got, " / ".join(
-                                " ".join("%s=%d" % kv for kv in sorted(entries[g].items())) for g in hit)))
-    errs += ["import_sweep.allow: [cipher] %s matches no file holding a selector name or spelling GCM-SIV; remove it" % g
-             for g in entries if g not in used]
+                errs.append("%s: %s holds a by-name cipher selector or spells %s (%s) and is not in "
+                            "import_sweep.allow [cipher]; %s, adding: %s"
+                            % (place, p, " or ".join(SPELT), got, REVIEW, entry_line(p, sha, sites)))
+            elif len(hit) > 1:
+                errs.append("%s: %s matches %d [cipher] entries (%s); keep one, so no entry hides another's "
+                            "review" % (place, p, len(hit), " ".join(hit)))
+            elif entries[hit[0]] != "*" and entries[hit[0]] != {"sha256": sha, "sites": sites}:
+                want = entries[hit[0]]
+                what = ["cipher references %s, not the %s reviewed" % (got, " ".join(
+                    "%s=%d" % kv for kv in sorted(want["sites"].items())))] if want["sites"] != sites else []
+                what += ["other bytes (a new version?) than the ones reviewed"] if want["sha256"] != sha else []
+                errs.append("%s: %s holds %s; %s, as: %s" % (place, p, " and ".join(what), REVIEW,
+                                                             entry_line(hit[0], sha, sites)))
+    errs += ["import_sweep.allow: [cipher] %s matches no file holding a selector name or spelling %s; remove it"
+             % (g, " or ".join(SPELT)) for g in entries if g not in used]
     return errs
 
 
@@ -337,8 +396,9 @@ def summary(places):
             lines += ["  imports %s: %s" % (p, " ".join(s)) for p, s in imp.items()]
             lines += ["  via %s: %s" % (p, " ".join(libs)) for p, libs in via.items()]
         cipher = v.get("cipher", {})
-        lines.append("%s cipher: %d files hold a by-name cipher selector or spell GCM-SIV" % (place, len(cipher)))
-        lines += ["  sites %s: %s" % (p, " ".join("%s=%d" % kv for kv in sorted(s.items()))) for p, s in cipher.items()]
+        lines.append("%s cipher: %d files hold a by-name cipher selector or spell %s"
+                     % (place, len(cipher), " or ".join(SPELT)))
+        lines += ["  sites %s" % entry_line(p, v.get("sha256", {}).get(p), s) for p, s in cipher.items()]
     return lines
 
 
