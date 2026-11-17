@@ -32,6 +32,14 @@ excuses (comma-separated, from KINDS), then the reason, separated by spaces. A f
 another kind in that file still fails, and so does a line naming a kind the file no longer
 has, or a file that is gone (stale entry).
 
+Wipe lint (CRED-1, MUT-wipe-lint #5865): in the non-test .go files of each WIPE_DIRS package,
+a local assigned from `hkdf(...)`, `random(...)` or a `decrypt` call must be passed to `wipe(name)`
+(or `defer wipe(name)`) later in the same function, or be returned as a bare operand (`return v, nil`; the caller then owns
+it). Mutation testing cannot see a dropped wipe (#5857). A site that cannot be wiped there is an
+allow line whose kind is `wipe:FUNC:VAR` (FUNC is the function's name, VAR the local), with the reason.
+Bound: a buffer held in a field, a composite literal or a call argument is not seen; nor is a wipe
+of the wrong buffer or one behind a branch.
+
 Bound: reflection, `unsafe` and raw syscalls in plain Go stay held by review (childproc
 r8 l1, l2), as do what an allowed file does, the skipped vendor/ and third_party/ code, and
 code reached from outside broker/ by a go.mod `replace` or a go.work `use`.
@@ -59,6 +67,14 @@ ALWAYS = frozenset({"gc", "ignore"})
 # Finding kinds, as an allow line names them.
 KINDS = frozenset({"nongo", "cgo", "linkname", "tag", "parse", "symlink", "testdata"})
 RELEASE = re.compile(r"go1\.\d+\Z")
+# Vault-side packages whose derived and decrypted key buffers must be wiped.
+WIPE_DIRS = ("broker/recovery/",)
+WIPE_SOURCES = frozenset({"hkdf", "random"})
+GO_KEYWORDS = frozenset("break case chan const continue default defer else fallthrough for func go goto if "
+                        "import interface map package range return select struct switch type var".split())
+# What may come just before the first word of an assignment's left-hand side.
+LHS_AFTER = frozenset({("nl", "\n"), ("punct", "{"), ("punct", "}"), ("punct", ";"), ("punct", ":"),
+                       ("word", "if"), ("word", "for"), ("word", "switch"), ("word", "var")})
 SKIP_TOP = ("broker/vendor/", "broker/third_party/")
 
 TAGS = re.compile(r"""(?<![\w-])-tags(?:=|\s+)(?:"([^"]*)"|'([^']*)'|([^\s"']+))""")
@@ -194,12 +210,16 @@ def _unquote(body):
     return "".join(out)
 
 
-def tokens(src):
-    """Go tokens: ("comment", text), ("string", value), ("word", text) or ("punct", char)."""
+def tokens(src, newlines=False):
+    """Go tokens: ("comment", text), ("string", value), ("word", text) or ("punct", char), and
+    ("nl", "\n") for each line break when newlines is set."""
     i, n = 0, len(src)
     while i < n:
         c = src[i]
-        if c in " \t\r\n":
+        if c == "\n" and newlines:
+            yield "nl", c
+            i += 1
+        elif c in " \t\r\n":
             i += 1
         elif src.startswith("//", i):
             j = src.find("\n", i)
@@ -325,6 +345,74 @@ def go_problems(text, name, tags):
     return out
 
 
+def wipe_problems(text):
+    """[("wipe:FUNC:VAR", message)] for each local from hkdf/random/decrypt with no later wipe(VAR) or
+    return of VAR in its function. Unreadable source is left to go_problems."""
+    try:
+        toks = [t for t in tokens(text, newlines=True) if t[0] != "comment"]
+    except Unreadable:
+        return []
+    out, i, n = [], 0, len(toks)
+    while i < n:
+        if toks[i] != ("word", "func"):
+            i += 1
+            continue
+        j, name = i + 1, "?"
+        while j < n and toks[j] != ("punct", "{"):
+            if toks[j][0] == "word" and name == "?" and toks[j - 1] in (("word", "func"), ("punct", ")")):
+                name = toks[j][1]
+            j += 1
+        depth, k = 0, j
+        while k < n:
+            if toks[k] == ("punct", "{"):
+                depth += 1
+            elif toks[k] == ("punct", "}"):
+                depth -= 1
+                if depth == 0:
+                    break
+            k += 1
+        body = toks[j:k]
+        for a in range(len(body)):
+            # LHS words from a statement start (a line, `{`, `}`, `;`, a case or label `:` or a
+            # keyword that opens a simple statement), then `:=` or `=`, then the call's name and `(`.
+            if (body[a][0] != "word" or body[a][1] in GO_KEYWORDS
+                    or (a and body[a - 1] not in LHS_AFTER)
+                    or (a > 1 and body[a - 1][0] == "nl" and body[a - 2] == ("punct", ","))):
+                continue
+            b = a
+            while b < len(body) and (body[b][0] == "word" or body[b] == ("punct", ",")
+                                     or (body[b][0] == "nl" and body[b - 1] == ("punct", ","))):
+                b += 1
+            if body[b:b + 2] == [("punct", ":"), ("punct", "=")]:
+                b += 2
+            elif body[b:b + 1] == [("punct", "=")] and body[b + 1:b + 2] != [("punct", "=")]:
+                b += 1
+            else:
+                continue
+            if b + 1 >= len(body) or body[b][0] != "word" or body[b + 1] != ("punct", "("):
+                continue
+            callee = body[b][1].rsplit(".", 1)[-1]
+            if callee not in WIPE_SOURCES and "decrypt" not in callee.lower():
+                continue
+            rest = body[b:]
+            for v in [w for kind, w in body[a:b] if kind == "word" and w not in ("_", "err", "var")]:
+                wiped = any(rest[x:x + 3] == [("word", "wipe"), ("punct", "("), ("word", v)]
+                            for x in range(len(rest)))
+                returned = False
+                for x in range(len(rest)):
+                    if rest[x] == ("word", "return"):
+                        y = x + 1
+                        while y < len(rest) and (rest[y][0] == "word" or rest[y] == ("punct", ",")
+                                                 or (rest[y][0] == "nl" and rest[y - 1] == ("punct", ","))):
+                            returned = returned or rest[y] == ("word", v)
+                            y += 1
+                if not (wiped or returned):
+                    out.append((f"wipe:{name}:{v}", f"{name}: {v} comes from {callee}(...) and is never "
+                                f"passed to wipe({v}) or returned"))
+        i = k + 1
+    return out
+
+
 def _skipped(rel):
     parts = rel.split("/")
     return (rel.startswith(SKIP_TOP) or "testdata" in parts
@@ -353,6 +441,8 @@ def scan(root, tags):
                 found[rel] = [("parse", "cannot parse (not UTF-8)")]
                 continue
             p = go_problems(text, f.name, tags)
+            if rel.startswith(WIPE_DIRS):
+                p += wipe_problems(text)
             if p:
                 found[rel] = p
     return found
@@ -376,7 +466,7 @@ def load_allow(path):
             continue
         rel, kinds, why = (line.split(None, 2) + ["", ""])[:3]
         kinds = frozenset(kinds.split(","))
-        if not kinds <= KINDS:
+        if not {k for k in kinds if not k.startswith("wipe:")} <= KINDS:
             raise SystemExit(f"srclint: {path}:{n}: {rel}: kinds must be from {', '.join(sorted(KINDS))}")
         if not why.strip():
             raise SystemExit(f"srclint: {path}:{n}: {rel} needs a reason")

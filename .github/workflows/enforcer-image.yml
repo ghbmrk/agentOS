@@ -2,8 +2,9 @@ name: enforcer-image
 # The enforcer's image (image/enforcer/, ENF-m, NET-2 Hardening): finish_image.py's key separation
 # on throwaway TUF feeds made with agentos-release, then a build with a throwaway enforcer root, and
 # a QEMU boot under Secure Boot (image/enforcer/ci_boot.sh). On changes to the profile, the core
-# image steps it imports (image/finish_image.py, image/mkosi/initrd/, image/security-snapshot.sh), the
-# release tool, this file, on main, and nightly. The keys are throwaway: nothing this builds is a release.
+# image steps it imports (image/finish_image.py, image/mkosi/initrd/, image/security-snapshot.sh,
+# image/debian-archive-keyring.sh), the release tool, this file, on main, and nightly. The keys are
+# throwaway: nothing this builds is a release.
 on:
   workflow_dispatch:
   schedule:
@@ -13,6 +14,7 @@ on:
       - "image/enforcer/**"
       - "image/finish_image.py"
       - "image/security-snapshot.sh"
+      - "image/debian-archive-keyring.sh"
       - "image/slot_a_scan.allow"
       - "image/mkosi/initrd/**"
       - "broker/cmd/agentos-release/**"
@@ -24,6 +26,7 @@ on:
       - "image/enforcer/**"
       - "image/finish_image.py"
       - "image/security-snapshot.sh"
+      - "image/debian-archive-keyring.sh"
       - "image/slot_a_scan.allow"
       - "image/mkosi/initrd/**"
       - "broker/cmd/agentos-release/**"

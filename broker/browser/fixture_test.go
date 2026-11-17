@@ -35,7 +35,7 @@ assert "mode" in inspect.signature(Locator.aria_snapshot).parameters`).Run() != 
 	}
 	chrome := os.Getenv("S5_CHROME")
 	if chrome == "" {
-		m, _ := filepath.Glob("/opt/pw-browsers/chromium_headless_shell-*/chrome-linux/headless_shell")
+		m := headlessShells("/opt/pw-browsers")
 		if len(m) == 0 {
 			t.Skip("Chromium headless shell not installed")
 		}
@@ -76,16 +76,20 @@ sys.stdin.read()`)
 func TestFixtureThroughTheGate(t *testing.T) {
 	const canaryURLToken = "s5CanaryUrlTokenR2d2C3po4BB8Kx9" // planted by the fixture
 	const canaryShown = "sk-ant-s5canaryDisplayedKey0123456789abcdef"
-	g, site, evil := fixture(t, fakeScrubber{canaryShown})
+	const canarySession = "s5CanarySessionQ7xZ2pL9mW4vR8tY3nB6" // the owner login's cookie
+	g, origin, evil := fixture(t, fakeScrubber{canaryShown})
 	var transcript []string
-	do := func(req string) Result {
-		r, _, _ := g.do(context.Background(), []byte(req), nil)
+	doAs := func(tasks covers, req string) Result {
+		r, _, _ := g.do(context.Background(), []byte(req), tasks)
 		b, _ := json.Marshal(r)
 		transcript = append(transcript, string(b))
 		return r
 	}
+	do := func(req string) Result { return doAs(nil, req) }
 
-	if r := do(`{"v":0,"verb":"navigate","url":"` + site + `/app.html"}`); !r.OK {
+	// /app.html redirects to /login.html without the session cookie, so sign
+	// in through the fixture's owner login, which sets it and lands there.
+	if r := do(`{"v":0,"verb":"navigate","url":"` + origin + `/owner-login"}`); !r.OK {
 		t.Fatalf("navigate: %+v", r)
 	}
 	snap := do(`{"v":0,"verb":"snapshot"}`)
@@ -97,11 +101,31 @@ func TestFixtureThroughTheGate(t *testing.T) {
 	if ref == nil {
 		t.Fatalf("no search box in snapshot")
 	}
-	if r := do(`{"v":0,"verb":"type","ref":"` + ref[1] + `","text":"kettle","submit":true}`); !r.OK {
+	// A submit may change state at the site: without the owner's approval
+	// the gate asks for it and the driver is sent nothing.
+	typeKettle := `{"v":0,"verb":"type","ref":"` + ref[1] + `","text":"kettle","submit":true}`
+	if r := do(typeKettle); r.OK || r.Error != "approval_required" {
+		t.Fatalf("unapproved submit: %+v", r)
+	}
+	if r := do(`{"v":0,"verb":"snapshot"}`); !r.OK || !strings.Contains(r.Snapshot, "echo:") || strings.Contains(r.Snapshot, "kettle") {
+		t.Fatalf("unapproved submit reached the page: %.400s", r.Snapshot)
+	}
+	// The page shows a key, so it may reveal a secret: a task approval for
+	// the site does not cover the submit either, only the owner's approval
+	// of this exact request would.
+	if r := doAs(fixed(cover{site(origin)}), typeKettle); r.OK || r.Error != "approval_required" || !strings.Contains(r.Detail, "secret") {
+		t.Fatalf("submit under a task approval: %+v", r)
+	}
+	// Typing alone changes nothing at the site and is sent. The page echoes
+	// it outside the field while it holds a password field, so the next
+	// snapshot is withheld: an echo of agent text could confirm a guess at
+	// the password (G10). The withholding is the sign the text reached the
+	// page.
+	if r := do(`{"v":0,"verb":"type","ref":"` + ref[1] + `","text":"kettle"}`); !r.OK {
 		t.Fatalf("type: %+v", r)
 	}
-	if r := do(`{"v":0,"verb":"snapshot"}`); !strings.Contains(r.Snapshot, "echo:kettle [submitted]") {
-		t.Fatalf("typed text not seen: %.400s", r.Snapshot)
+	if r := do(`{"v":0,"verb":"snapshot"}`); r.Snapshot != withheldMark {
+		t.Fatalf("snapshot after typing beside a password field: %.400s", r.Snapshot)
 	}
 	// Off-origin navigation is refused at the gate.
 	if r := do(`{"v":0,"verb":"navigate","url":"` + evil + `/stolen"}`); r.OK || r.Error != "off_origin" {
@@ -117,7 +141,7 @@ func TestFixtureThroughTheGate(t *testing.T) {
 	}
 
 	all := strings.Join(transcript, "\n")
-	for _, c := range []string{canaryURLToken, canaryShown} {
+	for _, c := range []string{canaryURLToken, canaryShown, canarySession} {
 		if strings.Contains(all, c) {
 			t.Errorf("canary %q reached the agent", c)
 		}
@@ -177,6 +201,20 @@ func TestFixtureRefsFollowTheDriversDocument(t *testing.T) {
 	if r := do(`{"v":0,"verb":"click","ref":"` + ref + `"}`); r.Error != "unknown_ref" {
 		t.Fatalf("click with a ref from another page: %+v", r)
 	}
+}
+
+// headlessShells lists Chromium headless shells under a Playwright browsers
+// directory, in the layout before Playwright 1.63 and in 1.63's.
+func headlessShells(dir string) []string {
+	var m []string
+	for _, p := range []string{
+		"chromium_headless_shell-*/chrome-linux/headless_shell",
+		"chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell",
+	} {
+		found, _ := filepath.Glob(filepath.Join(dir, p))
+		m = append(m, found...)
+	}
+	return m
 }
 
 func mustLine(t *testing.T, r interface{ Read([]byte) (int, error) }) string {
