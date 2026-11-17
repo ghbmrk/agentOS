@@ -384,29 +384,26 @@ def transition_problem(prev, new, merged_pr):
     return None
 
 
-def merged_pr_named(fetch, repo, row_id, sleep=time.sleep):
-    """True when a merged PR's title starts with row_id. One search by the ID, not a page through
-    every PR (~60 calls, #5989); a miss is searched once more after 30 s, since the search index
-    can trail a merge that the label change follows within seconds."""
+def merged_pr_named(fetch, repo, row_id):
+    """True when a merged PR's title starts with row_id. One search by the ID (#5989); on a miss, the
+    paged PR list, which a search capped at 100 best-match hits or an index trailing the merge can
+    miss (#6060). A legal edge into merged costs one call; only a miss pages every PR."""
     q = urllib.parse.quote(f'repo:{repo} is:pr is:merged in:title "{row_id}"', safe="")
-    for wait in (0, 30):
-        if wait:
-            sleep(wait)
-        hits = fetch(f"/search/issues?q={q}")["items"]
-        prs = [{"title": i["title"], "merged_at": (i.get("pull_request") or {}).get("merged_at")} for i in hits]
-        if any(p["merged_at"] for p in named_prs(row_id, prs)):
-            return True
-    return False
+    hits = [{"title": i["title"], "merged_at": (i.get("pull_request") or {}).get("merged_at")}
+            for i in fetch(f"/search/issues?q={q}")["items"]]
+    return any(p.get("merged_at") for p in named_prs(row_id, hits)) or \
+        any(p.get("merged_at") for p in named_prs(row_id, fetch(f"/repos/{repo}/pulls?state=all")))
 
 
-def restore(held, prev):
-    """The label edits that put an issue holding the state labels `held` back at state prev."""
-    want = {prev} - {None}
-    steps = [f"remove `state:{s}`" for s in sorted(held - want)] + [f"add `state:{s}`" for s in sorted(want - held)]
+def restore(held, prev, new):
+    """The label edits that undo one illegal edge prev -> new on an issue holding the state labels
+    `held`: remove new, add prev back. Any other state label stays, so an issue that held two keeps
+    both (#6060)."""
+    steps = ([f"remove `state:{new}`"] if new in held else []) + ([f"add `state:{prev}`"] if prev and prev not in held else [])
     return "To fix, restore the prior label: " + ", ".join(steps) + "." if steps else ""
 
 
-def report_transition(fetch, repo, number, label, action, sleep=time.sleep):
+def report_transition(fetch, repo, number, label, action):
     """Judge one state-label event on issue `number` (action labeled or unlabeled) against the
     labels the issue holds now; returns the problem, with the fix, or None. Other labels are legal.
     Raises ValueError for a title with no row ID when the edge needs the merged-PR search."""
@@ -420,14 +417,14 @@ def report_transition(fetch, repo, number, label, action, sleep=time.sleep):
     # merged was added first (`gh issue edit --add-label --remove-label` order).
     into_merged = event == "merged" if action == "labeled" else "merged" in others
     row_id = issue_id(item) if into_merged else None
-    merged = bool(into_merged and merged_pr_named(fetch, repo, row_id, sleep))
+    merged = bool(into_merged and merged_pr_named(fetch, repo, row_id))
     for other in others or [None]:
         prev, new = (other, event) if action == "labeled" else (event, other)
         problem = transition_problem(prev, new, merged)
         if problem:
             if new == "merged" and not merged:
                 problem += f" (searched for row ID `{row_id}`)"
-            return " ".join(filter(None, (f"issue #{number}: {problem}.", restore(held, prev))))
+            return " ".join(filter(None, (f"issue #{number}: {problem}.", restore(held, prev, new))))
     return None
 
 
@@ -440,14 +437,23 @@ def transition_comment(problem):
 
 def post_transition(fetch, repo, number, problem):
     """Keep one transition comment on issue `number`, naming the latest problem. Only the bot's own
-    marked comments count, so a marker someone else writes steers nothing."""
-    mine = [c for c in fetch(f"/repos/{repo}/issues/{number}/comments")
-            if (c.get("user") or {}).get("login") == BOT and TRANSITION_MARK in (c.get("body") or "")]
+    marked comments count, so a marker someone else writes steers nothing. Each label event runs on
+    its own, so two runs can both find none and post (#6060): after its post, a run that sees an
+    older marked comment deletes its own and edits that one, so one comment stays."""
+    def mine():
+        return sorted((c for c in fetch(f"/repos/{repo}/issues/{number}/comments")
+                       if (c.get("user") or {}).get("login") == BOT and TRANSITION_MARK in (c.get("body") or "")),
+                      key=lambda c: c["id"])
     body = transition_comment(problem)
-    if not mine:
-        fetch(f"/repos/{repo}/issues/{number}/comments", "POST", {"body": body})
-    elif mine[0].get("body") != body:
-        fetch(f"/repos/{repo}/issues/comments/{mine[0]['id']}", "PATCH", {"body": body})
+    found = mine()
+    if not found:
+        own = fetch(f"/repos/{repo}/issues/{number}/comments", "POST", {"body": body})["id"]
+        found = [c for c in mine() if c["id"] < own]
+        if not found:
+            return
+        fetch(f"/repos/{repo}/issues/comments/{own}", "DELETE")
+    if found[0].get("body") != body:
+        fetch(f"/repos/{repo}/issues/comments/{found[0]['id']}", "PATCH", {"body": body})
 
 
 def stale_comment(row_id, state, pr):
@@ -597,7 +603,7 @@ def work_items(fetch, repo):
     return sorted(items, key=lambda i: i["number"])
 
 
-def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, root=ROOT, sleep=time.sleep):
+def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, root=ROOT):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("command", choices=("check", "render", "archive", "stale", "intake", "transition"))
     ap.add_argument("--repo", help="owner/name: render from its issues and PRs instead of the plan")
@@ -619,7 +625,7 @@ def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, 
         if not (args.repo and args.issue and args.label and args.action):
             ap.error("transition needs --repo, --issue, --label and --action")
         try:
-            problem = report_transition(fetch, args.repo, args.issue, args.label, args.action, sleep)
+            problem = report_transition(fetch, args.repo, args.issue, args.label, args.action)
         except ValueError as e:  # a title with no row ID: intake comments on that issue
             print(f"board: {e}", file=sys.stderr)
             return 1
