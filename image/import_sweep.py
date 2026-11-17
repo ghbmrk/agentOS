@@ -293,12 +293,13 @@ def load_allow(path):
     return read_allow(path)[0]
 
 
-# A [cipher] entry's tokens: the SHA-256 of the file reviewed, and each site count.
-DIGEST = re.compile(r"^sha256=([0-9a-f]{64})$")
+# A [cipher] entry's tokens: the SHA-256 of the file reviewed (hex in either case, kept lowercased), and
+# each site count.
+DIGEST = re.compile(r"^sha256=([0-9a-fA-F]{64})$")
 COUNT = re.compile(r"^([A-Za-z_][\w-]*)=([0-9]+)$")
 FORMAT = "GLOB sha256=HEX NAME=COUNT ... (NAME from CIPHER_NAMES or SPELT) or GLOB *"
-# What every [cipher] refusal asks for, as the allow file's header does.
-REVIEW = ("review where its names come from, then update the [cipher] entry and the openssl records' "
+# What every [cipher] refusal asks for, as the allow file's header does: % "add" or "update".
+REVIEW = ("review where its names come from, then %s the [cipher] entry and the openssl records' "
           "reach note in assurance/vulncheck.json")
 
 
@@ -327,7 +328,7 @@ def read_allow(path):
                 continue
             if not want or "*" in want:
                 bad("%s names %s" % (glob, "nothing" if not want else "'*' with other tokens"))
-            digests = [w[len("sha256="):] for w in want if DIGEST.match(w)]
+            digests = [w[len("sha256="):].lower() for w in want if DIGEST.match(w)]
             if len(digests) != 1:
                 bad("%s gives %d sha256=HEX tokens, not one" % (glob, len(digests)))
             sites = {}
@@ -347,12 +348,13 @@ def read_allow(path):
 
 
 def entry_line(p, sha, sites):
-    return " ".join([p, "sha256=" + (sha or "?")] + ["%s=%d" % kv for kv in sorted(sites.items())])
+    return " ".join([p, "sha256=" + (sha or "MISSING")] + ["%s=%d" % kv for kv in sorted(sites.items())])
 
 
 def cipher_refusals(places, entries):
     """Each file of PLACES holding a selector name or a SPELT name that matches no [cipher] entry or more
-    than one, or whose sites or SHA-256 differ from the counted entry it matches; and each entry matching
+    than one, or whose sites or SHA-256 differ from the counted entry it matches; each such file the
+    scan gives no SHA-256 for (a broken scan: sweep digests every file it counts); and each entry matching
     no such file."""
     errs, used = [], set()
     for place, v in places.items():
@@ -361,10 +363,13 @@ def cipher_refusals(places, entries):
             used.update(hit)
             sha = v.get("sha256", {}).get(p)
             got = " ".join("%s=%d" % kv for kv in sorted(sites.items()))
-            if not hit:
+            if not sha:
+                errs.append("%s: %s holds cipher sites (%s) but the scan gives no SHA-256 for it; the scan "
+                            "is broken: run the sweep again, not an allow edit" % (place, p, got))
+            elif not hit:
                 errs.append("%s: %s holds a by-name cipher selector or spells %s (%s) and is not in "
                             "import_sweep.allow [cipher]; %s, adding: %s"
-                            % (place, p, " or ".join(SPELT), got, REVIEW, entry_line(p, sha, sites)))
+                            % (place, p, " or ".join(SPELT), got, REVIEW % "add", entry_line(p, sha, sites)))
             elif len(hit) > 1:
                 errs.append("%s: %s matches %d [cipher] entries (%s); keep one, so no entry hides another's "
                             "review" % (place, p, len(hit), " ".join(hit)))
@@ -373,7 +378,7 @@ def cipher_refusals(places, entries):
                 what = ["cipher references %s, not the %s reviewed" % (got, " ".join(
                     "%s=%d" % kv for kv in sorted(want["sites"].items())))] if want["sites"] != sites else []
                 what += ["other bytes (a new version?) than the ones reviewed"] if want["sha256"] != sha else []
-                errs.append("%s: %s holds %s; %s, as: %s" % (place, p, " and ".join(what), REVIEW,
+                errs.append("%s: %s holds %s; %s, as: %s" % (place, p, " and ".join(what), REVIEW % "update",
                                                              entry_line(hit[0], sha, sites)))
     errs += ["import_sweep.allow: [cipher] %s matches no file holding a selector name or spelling %s; remove it"
              % (g, " or ".join(SPELT)) for g in entries if g not in used]
