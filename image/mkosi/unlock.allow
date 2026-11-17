@@ -51,10 +51,14 @@ start agentos-keeper-kernel.service
 start agentos-keeper-kernel.service Wants from agentos-keeper-enroll.service
 start agentos-keeper-link-capture.service Wants from sys-subsystem-net-devices-agentos\x2dlink.device
 start agentos-keeper-pageca.service Wants from agentos-keeper-enroll.service
+start agentos-keeper-wipe.service Wants from agentos-keeper-enroll.service
+start agentos-keeper-wipe.service Wants from agentos-keeper-link-capture.service
+start agentos-keeper-wipe.service Wants from agentos-keeper-pageca.service
 start agentos-keeper.slice Requires from agentos-keeper-enroll.service
 start agentos-keeper.slice Requires from agentos-keeper-kernel.service
 start agentos-keeper.slice Requires from agentos-keeper-link-capture.service
 start agentos-keeper.slice Requires from agentos-keeper-pageca.service
+start agentos-keeper.slice Requires from agentos-keeper-wipe.service
 start agentos-link.service Wants from agentos-keeper-kernel.service
 start agentos-link.service Wants from sys-subsystem-net-devices-agentos\x2dlink.device
 start agentos-mor.service Wants from sysinit.target
@@ -102,6 +106,7 @@ start sysinit.target Requires from agentos-keeper-enroll.service
 start sysinit.target Requires from agentos-keeper-kernel.service
 start sysinit.target Requires from agentos-keeper-link-capture.service
 start sysinit.target Requires from agentos-keeper-pageca.service
+start sysinit.target Requires from agentos-keeper-wipe.service
 start sysinit.target Requires from agentos-link.service
 start sysinit.target Requires from agentos-modem-env.service
 start sysinit.target Requires from agentos-reboot.service
@@ -278,6 +283,7 @@ stop agentos-keeper.slice RequiredBy agentos-keeper-kernel.service
 stop agentos-keeper.slice RequiredBy agentos-keeper-link-capture.service
 stop agentos-keeper.slice RequiredBy agentos-keeper-mail.service
 stop agentos-keeper.slice RequiredBy agentos-keeper-pageca.service
+stop agentos-keeper.slice RequiredBy agentos-keeper-wipe.service
 stop agentos-localui-claim.service RequiredBy agentos-localui.service
 stop agentos.slice RequiredBy agentos-keeper.slice
 stop agentos.slice RequiredBy agentosd.service
@@ -327,6 +333,7 @@ stop sysinit.target RequiredBy agentos-keeper-mail.service
 stop sysinit.target RequiredBy agentos-keeper-pageca.service
 stop sysinit.target RequiredBy agentos-keeper-rotate.socket
 stop sysinit.target RequiredBy agentos-keeper-setup.socket
+stop sysinit.target RequiredBy agentos-keeper-wipe.service
 stop sysinit.target RequiredBy agentos-link.service
 stop sysinit.target RequiredBy agentos-localui-claim.service
 stop sysinit.target RequiredBy agentos-localui.service
