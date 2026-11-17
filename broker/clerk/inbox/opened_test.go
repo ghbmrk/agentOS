@@ -630,3 +630,34 @@ func TestTheTooMuchReadMailStepWorks(t *testing.T) {
 		}
 	}
 }
+
+// A failing read hands back each old entry it did not find again beside the
+// read mail it logged, and an old entry it found once only, under this read's
+// entry. Driven on the state directly, so no server's folder order decides
+// whether the old entries reach partial.
+func TestAPartialLogKeepsTheOldEntriesTheReadDidNotFind(t *testing.T) {
+	found, missed, fresh := [16]byte{1}, [16]byte{2}, [16]byte{3}
+	log := SeenLog{Since: "2026-01-02", Seen: []Seen{
+		{From: "old@shop.test", ID: hex.EncodeToString(found[:]), Date: "2026-01-02"},
+		{From: "gone@shop.test", ID: hex.EncodeToString(missed[:]), Date: "2026-01-02"},
+	}}
+	o, err := newOpened("2026-10-19", log)
+	if err != nil || len(o.old) != 2 {
+		t.Fatalf("newOpened: old %d, err %v; want both entries old", len(o.old), err)
+	}
+	if err := o.add(found, "old@shop.test", "2026-10-19", true, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.add(fresh, "new@x.test", "2026-10-19", true, 1); err != nil {
+		t.Fatal(err)
+	}
+	got := o.partial()
+	want := []Seen{
+		{From: "gone@shop.test", ID: hex.EncodeToString(missed[:]), Date: "2026-01-02"},
+		{From: "new@x.test", ID: hex.EncodeToString(fresh[:]), Date: "2026-10-19"},
+		{From: "old@shop.test", ID: hex.EncodeToString(found[:]), Date: "2026-01-02"},
+	}
+	if got.Since != "2026-01-02" || !slices.Equal(got.Seen, want) {
+		t.Fatalf("partial: %+v; want since 2026-01-02 and %+v", got, want)
+	}
+}
