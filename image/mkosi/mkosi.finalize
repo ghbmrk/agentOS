@@ -398,7 +398,8 @@ MASK = "/dev/null"
 TOP_LINKS = {"lib": ("usr/lib", "/usr/lib")}
 READ_CONF = ("sysctl.d", "tmpfiles.d", "systemd/network", "systemd/system", "systemd/system.control",
              "systemd/system.attached") + tuple("systemd/%s%s" % (n, d) for n in
-                                                ("coredump.conf", "system.conf", "networkd.conf", "resolved.conf")
+                                                ("coredump.conf", "system.conf", "networkd.conf", "resolved.conf",
+                                                 "journald.conf")
                                                 for d in ("", ".d"))
 
 # #1556, #2176: the channels that run code as root at boot outside unit Exec lines, each held to
@@ -533,7 +534,7 @@ def _violations(root):
             # absent (stock trixie has 2775 var/mail and var/local); a link's steps and the directories
             # holding it are held to one (#1829, step_refusal).
             out.append("%s: mode %04o is writable by anyone on the box (#1702)" % (rel, st.st_mode & 0o7777))
-    return (out + dump_violations(root) + swap_violations(root) + wifi_violations(root)
+    return (out + dump_violations(root) + journal_violations(root) + swap_violations(root) + wifi_violations(root)
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
             + exec_allow_violations(root) + bus_daemon_violations(root) + made_allow_violations(root) + credstore_violations(root) + stray_violations(root)
@@ -1324,6 +1325,24 @@ def dump_violations(root):
         out.append("%s: fs.suid_dumpable is %s; must be 0" % (NODUMP_SYSCTL.rsplit("/", 1)[-1], suid))
     return out
 
+
+
+# systemd 257.13's log levels by name (log_level_from_string also takes the number).
+LOG_LEVELS = ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug")
+
+
+def journal_violations(root):
+    """MOR-wipe-journal (#6078): a failed wipe's error (info, to the journal only) is still on disk
+    at the next boot. Storage=auto would rest on Debian's postinst having made /var/log/journal."""
+    out = []
+    files = main_conf(root, "journald.conf")
+    storage = ini_last(files, "Journal", "Storage")
+    if storage != "persistent":
+        out.append("50-agentos-persist.conf: journald Storage is %s; must be persistent" % storage)
+    level = ini_last(files, "Journal", "MaxLevelStore")
+    if level is not None and level not in LOG_LEVELS[6:] and level not in ("6", "7"):
+        out.append("50-agentos-persist.conf: journald MaxLevelStore is %s; must keep info" % level)
+    return out
 
 def unit_dropin_names(name):
     """The names whose .d directories hold drop-ins for unit NAME (dropin.c's unit_file_find_dirs):

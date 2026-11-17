@@ -14,7 +14,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from test_image import ENTRY, H, MK, ROOT, check, exec_args, finish, ini, settings  # noqa: E402
+from test_image import ENTRY, H, MK, ROOT, check, exec_args, finish, ini, nodump, settings, write  # noqa: E402
 
 UNITS = MK / "mkosi.extra/usr/lib/systemd/system"
 UNIT = UNITS / "agentos-mor.service"
@@ -292,6 +292,56 @@ class WipeOnTest(unittest.TestCase):
             v = finish.cmdline_violations((ENTRY % H).replace("rw quiet", "rw quiet init_on_free=0"), other)
             self.assertEqual(len(v), 1, v)
             self.assertIn("not in mkosi.conf", v[0])
+
+
+class WipeJournalTest(unittest.TestCase):
+    """MOR-wipe-journal (#6078): the wipe's error goes to the journal only (#6042), and a failed wipe is
+    a shutdown, so the journal keeps it only on disk. Debian's postinst makes /var/log/journal, which
+    Storage=auto needs; the image's drop-in sets persistent instead, and the tree check holds it."""
+    # REQ: HW-8
+    DROPIN = "usr/lib/systemd/journald.conf.d/50-agentos-persist.conf"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        write(self.root, "etc/machine-id", "uninitialized\n")
+        nodump(self.root)
+
+    def v(self):
+        return " | ".join(check.violations(self.root))
+
+    def test_the_image_keeps_the_journal_on_disk(self):
+        self.assertEqual(dict(ini(MK / "mkosi.extra" / self.DROPIN)["Journal"]), {"Storage": "persistent"})
+        self.assertEqual(sorted(p.name for p in MK.glob("mkosi.extra/**/journald.conf*")), ["journald.conf.d"])
+        self.assertNotIn("journald", ini(MK / "mkosi.conf")["Content"]["KernelCommandLine"])
+        self.assertNotIn("journald", self.v())
+
+    def test_the_tree_check_refuses_a_journal_that_forgets(self):
+        for rel, text, needle in (
+                (self.DROPIN, None, "Storage is None"),
+                ("etc/systemd/journald.conf.d/zz.conf", "[Journal]\nStorage=volatile\n", "Storage is volatile"),
+                ("etc/systemd/journald.conf.d/zz.conf", "[Journal]\nStorage=auto\n", "Storage is auto"),
+                ("etc/systemd/journald.conf.d/zz.conf", "[Journal]\nStorage=\n", "Storage is None"),
+                ("usr/lib/systemd/journald.conf.d/zz.conf", "[Journal]\nMaxLevelStore=notice\n", "MaxLevelStore is notice"),
+                ("usr/lib/systemd/journald.conf.d/zz.conf", "[Journal]\nMaxLevelStore=5\n", "MaxLevelStore is 5"),
+                ("usr/lib/systemd/journald.conf.d/zz.conf", "[Journal]\nMaxLevelStore=x\n", "MaxLevelStore is x"),
+                ("run/systemd/journald.conf.d/a.conf", "[Journal]\nStorage=persistent\n", "/run is a tmpfs")):
+            with self.subTest(rel=rel, text=text):
+                saved = (self.root / self.DROPIN).read_text()
+                if text is None:
+                    (self.root / rel).unlink()
+                else:
+                    write(self.root, rel, text)
+                self.assertIn(needle, self.v())
+                if text is not None:
+                    (self.root / rel).unlink()
+                write(self.root, self.DROPIN, saved)
+                self.assertNotIn("journald", self.v())
+        for level in ("info", "debug", "6", "7"):
+            with self.subTest(level=level):
+                write(self.root, "etc/systemd/journald.conf.d/zz.conf", "[Journal]\nMaxLevelStore=%s\n" % level)
+                self.assertNotIn("journald", self.v())
 
 
 if __name__ == "__main__":
