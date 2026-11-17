@@ -1293,27 +1293,54 @@ class KeyringCheckOtherBuildsTest(unittest.TestCase):
     BUILDS = (("image/enforcer/build.sh", "enforcer-image.yml"), ("spikes/S1S2-testkit/build.sh", "testkit.yml"))
 
     def test_check_runs_first_and_stops_the_build(self):
+        # Each build runs from a copy in a git repository with every later step stubbed, so with a
+        # passing check it reaches mkosi; with a failing one, the check is the only thing that runs.
+        # (A copy outside a git repository dies at git log whatever the check does: #6055's fix-list.)
         for rel, _ in self.BUILDS:
             for check in (1, 0):
                 with self.subTest(build=rel, check=check), tempfile.TemporaryDirectory() as d:
-                    log = pathlib.Path(d, "log")
-                    script = pathlib.Path(d, rel)
-                    script.parent.mkdir(parents=True)
-                    shutil.copy(ROOT / rel, script)
-                    pathlib.Path(d, "image").mkdir(exist_ok=True)
-                    pathlib.Path(d, "image/debian-archive-keyring.sh").write_text(
-                        "echo keyring-check >> %s\nexit %d\n" % (log, check))
-                    mkosi = pathlib.Path(d, "mkosi")
-                    mkosi.write_text("#!/bin/sh\necho mkosi >> %s\n" % log)
-                    mkosi.chmod(0o755)
-                    p = subprocess.run(["sh", str(script), str(pathlib.Path(d, "out"))], capture_output=True, text=True,
-                                       env={"PATH": os.environ["PATH"], "MKOSI": str(mkosi),
-                                            "ENFORCER_RELEASE_ROOT": "r.json", "AGENTOS_RELEASE_KEYS": "k.pem"})
+                    log = self.stage(d, rel, check)
+                    p = self.run_build(d, rel)
                     lines = log.read_text().splitlines()
                     self.assertEqual(lines[0], "keyring-check")
                     if check:
                         self.assertNotEqual(p.returncode, 0)
                         self.assertEqual(lines, ["keyring-check"])
+                    else:
+                        self.assertIn("mkosi", lines, p.stderr)
+
+    def test_the_core_build_stops_at_a_failing_check(self):
+        # image/build.sh's next step after the check is git log: it runs only when the check passes.
+        for check in (1, 0):
+            with self.subTest(check=check), tempfile.TemporaryDirectory() as d:
+                log = self.stage(d, "image/build.sh", check)
+                p = self.run_build(d, "image/build.sh")
+                self.assertNotEqual(p.returncode, 0)
+                self.assertEqual(log.read_text().splitlines(), ["keyring-check"] + ["git"] * (1 - check))
+
+    def stage(self, d, rel, check):
+        """A copy of REL under D beside a stand-in keyring check that exits CHECK; mkosi, git,
+        python3 and security-snapshot.sh are stubs, and mkosi and git log their name."""
+        log = pathlib.Path(d, "log")
+        script = pathlib.Path(d, rel)
+        script.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(ROOT / rel, script)
+        img = pathlib.Path(d, "image")
+        img.mkdir(exist_ok=True)
+        (img / "debian-archive-keyring.sh").write_text("echo keyring-check >> %s\nexit %d\n" % (log, check))
+        (img / "security-snapshot.sh").write_text("echo 20260101T000000Z\n")
+        pathlib.Path(d, "r.json").write_text("{}")
+        self.path = fake_tools(d, mkosi="echo mkosi >> %s\n" % log, python3="exit 0\n",
+                               git="echo git >> %s\n[ -d %s/.git ] || exit 1\necho 1700000000\n" % (log, d))
+        if rel != "image/build.sh":
+            pathlib.Path(d, ".git").mkdir()
+        return log
+
+    def run_build(self, d, rel):
+        return subprocess.run(["sh", str(pathlib.Path(d, rel)), str(pathlib.Path(d, "out"))], capture_output=True,
+                              text=True, cwd=d, env={"PATH": self.path, "MKOSI": str(pathlib.Path(d, "bin/mkosi")),
+                                                     "ENFORCER_RELEASE_ROOT": str(pathlib.Path(d, "r.json")),
+                                                     "AGENTOS_RELEASE_KEYS": "k.pem"})
 
     def test_check_precedes_mkosi_and_its_change_runs_the_workflow(self):
         for rel, wf in self.BUILDS:
@@ -1448,21 +1475,63 @@ class KeyringSpikesTest(unittest.TestCase):
     the whole keyring is named nowhere), and every script that runs mkosi runs the check first."""
 
     ARCHIVE, SECURITY = KeyringMinimalTest.ARCHIVE, KeyringMinimalTest.SECURITY
-    MKOSI_RUN = re.compile(r"\$\{?MKOSI\}?\s|(^|[\s;&|(])mkosi\s+(-C|-f|build)\b", re.M)
+    # Any call of mkosi: the variable (bare, braced or quoted), the name or any path ending /mkosi,
+    # python3 -m mkosi, or a Python argument list, then an option or a verb ending the command. An
+    # option -c is git's (git -C /opt/mkosi -c ...), and a path after -C is a tree, not a call.
+    VERBS = ("build|clean|summary|cat-config|shell|boot|qemu|vm|ssh|journalctl|coredumpctl|burn|bump|"
+             "genkey|serve|sandbox|init|documentation|dependencies|help")
+    MKOSI_RUN = re.compile(r"""(?<![^\s;&|(`])(?:"?\$\{?MKOSI\}?"?|"?(?:[^\s;&|()=`'"]*/)?mkosi"?"""
+                           r"""|python3?(?:\s+-[^\s-]+)*\s+-m\s*mkosi)"""
+                           r"""\s+["']?(?:-[^c\s]|(?:%s)(?=$|[\s"';&|)]*(?:$|[;&|)\\]|\s-)))"""
+                           r"""|\[\s*["'](?:[^"'\s]*/)?mkosi["']\s*(?:\]|,\s*["'](?:-|(?:%s)["']))""" % (VERBS, VERBS), re.M)
 
     def tracked(self):
         out = subprocess.run(["git", "-C", str(ROOT), "ls-files"], capture_output=True, text=True, check=True).stdout
         return [ROOT / f for f in out.split()]
 
+    def mkosi_runs(self):
+        """{path: offset of its first mkosi call} for every tracked file but prose (.md), comment
+        lines blanked."""
+        out = subprocess.run(["git", "-C", str(ROOT), "grep", "-lIi", "mkosi"], capture_output=True, text=True,
+                             check=True).stdout
+        runs = {}
+        for rel in out.split():
+            if rel.endswith(".md"):
+                continue
+            text = "\n".join("" if ln.lstrip().startswith(("#", "//")) else ln
+                             for ln in (ROOT / rel).read_text().splitlines())
+            for m in self.MKOSI_RUN.finditer(text):
+                if not re.search(r"(-C|--directory)[\s=]*$", text[:m.start()].rsplit("\n", 1)[-1]):
+                    runs[rel] = (text, m.start())
+                    break
+        return runs
+
     def mkosi_trees(self):
-        """{tree directory: Distribution=} for every committed top-level mkosi.conf."""
-        trees = {}
-        for f in self.tracked():
-            if f.name == "mkosi.conf":
-                m = re.search(r"^Distribution=(\S+)$", f.read_text(), re.M)
-                if m:
-                    trees[f.parent] = m[1]
-        return trees
+        """{tree directory: Distribution=} for every committed mkosi tree (a directory holding
+        mkosi.conf or mkosi.conf.d/), read as mkosi does: mkosi.conf, then mkosi.conf.d/*.conf in
+        order, the last [Distribution] Distribution= winning; None when none sets it. A directory
+        another tree includes (InitrdInclude=, Include=) is part of that tree."""
+        files = [f for f in self.tracked() if f.name == "mkosi.conf" or f.parent.name == "mkosi.conf.d"]
+        trees = {f.parent.parent if f.parent.name == "mkosi.conf.d" else f.parent for f in files}
+        included = set()
+        for t in trees:
+            conf = t / "mkosi.conf"
+            for m in re.finditer(r"^(?:Initrd)?Include=(.+)$", conf.read_text() if conf.exists() else "", re.M):
+                included |= {(t / v).resolve() for v in m[1].split()}
+        found = {}
+        for t in sorted(trees):
+            if t.resolve() in included:
+                continue
+            dist = None
+            for f in [t / "mkosi.conf"] + sorted(f for f in files if f.parent == t / "mkosi.conf.d"):
+                section = None
+                for ln in (f.read_text() if f.exists() else "").splitlines():
+                    if ln.startswith("["):
+                        section = ln.strip()
+                    elif section == "[Distribution]" and ln.startswith("Distribution="):
+                        dist = ln.split("=", 1)[1].strip()
+            found[t] = dist
+        return found
 
     def test_each_debian_tree_commits_sources_naming_only_the_minimal_keyrings(self):
         # REQ: IMG-keyring-spikes. The test kit, as the core and the enforcer, reads the archive
@@ -1493,23 +1562,35 @@ class KeyringSpikesTest(unittest.TestCase):
         self.assertFalse(KeyringMinimalTest.OLD & set(re.findall(r"^([0-9A-F]{40})  ", text, re.M)))
 
     def test_every_mkosi_run_checks_the_keyring_first(self):
-        # REQ: IMG-keyring-spikes. Every committed script that runs mkosi runs the keyring check
-        # before it; the S7 spike's run.sh, which built Ubuntu packages the check cannot pin, is
-        # retired (failure path 2 on #5983), so no script builds a non-Debian tree.
-        runs = {}
-        for f in self.tracked():
-            if f.suffix == ".sh" and f.is_file():
-                m = self.MKOSI_RUN.search(f.read_text())
-                if m:
-                    runs[str(f.relative_to(ROOT))] = (f.read_text(), m.start())
+        # REQ: IMG-keyring-spikes. Every tracked file that runs mkosi (script, workflow run: step or
+        # program) runs the keyring check before it, and every mkosi tree names its distribution;
+        # the S7 spike's run.sh, which built Ubuntu packages the check cannot pin, is retired
+        # (failure path 2 on #5983), so nothing builds the one non-Debian tree.
+        runs = self.mkosi_runs()
         self.assertEqual(sorted(runs), ["image/build.sh", "image/enforcer/build.sh", "spikes/S1S2-testkit/build.sh"])
         for rel, (text, at) in runs.items():
             with self.subTest(script=rel):
                 self.assertIn("debian-archive-keyring.sh\"", text[:at])
         self.assertFalse((ROOT / "spikes/S7-host-image/run.sh").exists())
-        others = [t for t, d in self.mkosi_trees().items() if d != "debian"]
-        self.assertEqual([str(t.relative_to(ROOT)) for t in others], ["spikes/S7-host-image/mkosi"])
+        others = {str(t.relative_to(ROOT)): d for t, d in self.mkosi_trees().items() if d != "debian"}
+        self.assertEqual(others, {"spikes/S7-host-image/mkosi": "ubuntu"})
         self.assertNotIn("run.sh](run.sh)", (ROOT / "spikes/S7-host-image/RESULT.md").read_text())
+
+    def test_the_inventory_sees_every_way_to_call_mkosi(self):
+        # #6055's fix-list: the quoted variable, a path to mkosi and python3 -m mkosi are calls too;
+        # prose, a tree after -C and git's -C /opt/mkosi -c are not. (@ stands for mkosi and % for
+        # its variable, so this file holds no call itself.)
+        calls = ('$% -C t build', '"$%" -C t -f build', 'sudo ${%} build', '"${%}" summary',
+                 '/opt/mkosi/bin/@ -C t build', '  run: sudo /opt/@/bin/@ --directory t',
+                 'x && @ build', '(@ build)', '@ build \\', 'python3 -m @ -f build',
+                 'subprocess.run(["@", "-C", t])', "run(['/usr/bin/@', 'build'])")
+        for c in calls:
+            with self.subTest(call=c):
+                self.assertTrue(self.MKOSI_RUN.search(c.replace("@", "mkosi").replace("%", "MKOSI")))
+        for c in ('git -C /opt/@ -c advice.detachedHead=false', 'the @ boot entry', 'a @ build of',
+                  '%=/opt/@/bin/@ image/build.sh', 'echo @ >> log', '["image/@", "image/enforcer/@"]'):
+            with self.subTest(prose=c):
+                self.assertFalse(self.MKOSI_RUN.search(c.replace("@", "mkosi").replace("%", "MKOSI")))
 
     def test_the_enforcer_reports_every_missing_input_at_once(self):
         # UX 3 on #5961: with both required variables unset and the keyring check failing, one run
