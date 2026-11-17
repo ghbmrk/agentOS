@@ -10,8 +10,11 @@ import (
 
 // RTC reads the host's hardware clock as the kernel does (as if UTC),
 // read-only from sysfs. It is never written (HW-8).
-func RTC() (time.Time, error) {
-	b, err := readFile("/sys/class/rtc/rtc0/since_epoch")
+func RTC() (time.Time, error) { return rtcAt("/sys/class/rtc/rtc0/since_epoch") }
+
+// rtcAt reads a since_epoch file at p: whole seconds since 1970, as UTC.
+func rtcAt(p string) (time.Time, error) {
+	b, err := readFile(p)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -44,9 +47,8 @@ func bootElapsed() time.Duration {
 
 // bootID names this boot; an anchor recorded in another boot is dropped.
 func bootID() string {
-	b, err := readFile("/proc/sys/kernel/random/boot_id")
-	if err != nil {
-		return ""
+	if b, err := readFile("/proc/sys/kernel/random/boot_id"); err == nil {
+		return strings.TrimSpace(string(b))
 	}
-	return strings.TrimSpace(string(b))
+	return ""
 }
