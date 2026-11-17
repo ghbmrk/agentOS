@@ -49,12 +49,18 @@ KEEP_SCRIPT = r"""c=${CACHE/#\~/$HOME}
 mark="$RUNNER_TEMP/gocache.mark"
 [ -e "$mark" ] || { echo "::error title=build cache::no $mark: the runner-disk step did not run, so which entries this run used is unknown"; exit 1; }
 [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
-entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" -type f "$@"; }
-mb() { entries "$@" -printf '%s\n' | awk '{s += $1} END {printf "%d", s / 1048576}'; }
+# An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
+entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
+# Sizes are find's own numbers, one per line, so no entry name is read as text.
+mb() { { entries "$@" -printf '%s\n'; entries "$@" -type d -exec find {} -mindepth 1 -printf '%s\n' \;; } |
+  awk '{s += $1} END {printf "%d", s / 1048576}'; }
 all=$(mb); used=$(mb -newer "$mark")
 echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
 if [ "$DROP" = true ]; then
-  entries ! -newer "$mark" -delete
+  # find walks without following a link, and removes each entry by its name in the directory it
+  # holds open: -delete for a file, rm -rf ./<id>-d run from that directory for an executable's.
+  entries ! -newer "$mark" -type f -delete
+  entries ! -newer "$mark" -type d -execdir rm -rf {} +
   echo "dropped the stale entries; $(mb) MB left to save"
 fi
 """
@@ -65,6 +71,10 @@ echo "$(cat "$(dirname "$0")/avail")M"
 """
 
 MB = 1 << 20
+# The actions/cache commit whose restore was read for CI-disk-cause-1's mtime premise: its bundled
+# extract runs `tar -xf <archive> -P -C <dir>` (dist/restore-only/index.js), with no -m or --touch,
+# so GNU tar sets each file and directory back to its archived mtime.
+CACHE_ACTION = "d4323d4df104b026a6aa633fdb11d772146be0bf"
 
 
 def job_steps():
@@ -107,6 +117,17 @@ class StepsTest(unittest.TestCase):
                 self.assertEqual(guard.get("if"), keep.get("if"))
                 self.assertNotIn("refs/heads/main", str(keep.get("if")))
                 self.assertIn(guard.get("if"), (None, "steps.scope.outputs.records != 'true'"))
+
+    def test_the_restore_is_the_one_read_for_the_mtime_premise(self):
+        # #6031 item 2: if a restore set mtimes to extraction time, every entry would look used and
+        # the cache would grow again with nothing red. A bump of the action fails here until its
+        # extract is read again and CACHE_ACTION moves with it.
+        steps = job_steps()
+        for job in JOBS:
+            with self.subTest(job):
+                uses = {str(s.get("uses", "")).split("#")[0].strip() for s in steps[job]
+                        if str(s.get("uses", "")).startswith("actions/cache/")}
+                self.assertEqual(uses, {"actions/cache/restore@" + CACHE_ACTION, "actions/cache/save@" + CACHE_ACTION})
 
     def test_the_copy_check_catches_an_edit(self):
         guard = [s for s in job_steps()["machines"] if s.get("name") == GUARD][0]
@@ -201,6 +222,86 @@ class ScriptsTest(unittest.TestCase):
         # Only entries go: go's own files and the fuzz corpus (its own step) stay.
         self.assertTrue(trim.exists() and fuzz.exists())
 
+    def exe(self, name, size, age):
+        # go run and go tool (Go 1.24 on) cache an executable as <id>-d/<name>; go marks the directory.
+        d = self.cache / name[:2] / name
+        d.mkdir(parents=True)
+        (d / "tool").write_bytes(b"\0" * size)
+        t = time.time() - age
+        os.utime(d / "tool", (0, 0))
+        os.utime(d, (t, t))
+        return d
+
+    def test_keep_counts_and_drops_executable_directories(self):
+        # #6031 item 1: a -type f walk skipped these, so they were never counted or dropped.
+        self.mark()
+        used = self.exe("1b" + "3" * 62 + "-d", 3 * MB, 60)
+        stale = self.exe("2c" + "4" * 62 + "-d", 4 * MB, 2 * 86400)
+        other = self.cache / "3d" / "notanentry"
+        other.mkdir(parents=True)
+        os.utime(other, (0, 0))
+        rc, out = self.run_copy(KEEP_SCRIPT)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("::notice title=build cache::7 MB of Go build cache, 3 MB of it used by this run, 4 MB stale", out)
+        rc, out = self.run_copy(KEEP_SCRIPT, DROP="true")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("dropped the stale entries; 3 MB left to save", out)
+        self.assertTrue((used / "tool").exists())
+        self.assertFalse(stale.exists())
+        self.assertTrue(other.exists(), "a directory go does not name as an entry was dropped")
+
+    def test_keep_never_follows_a_link_out_of_the_cache(self):
+        # #6059 item 1: go never writes a link into its cache, so a link there is not go's; neither
+        # its target nor anything under it is counted or dropped. Fails if the walk follows links
+        # (find -L), which deleted <outside>/<entry> through the linked hex directory.
+        self.mark()
+        outside = self.t / "outside"
+        old = time.time() - 2 * 86400
+        files = {}
+        for name in ("ef" + "5" * 62 + "-a", "file"):
+            files[name] = outside / name
+        files["exe"] = outside / ("ab" + "6" * 62 + "-d") / "tool"
+        for f in files.values():
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(b"\0" * MB)
+        self.entry("0a" + "1" * 62 + "-a", 2 * MB, 60)
+        links = {self.cache / "ef": outside,
+                 self.cache / "ab" / ("ab" + "7" * 62 + "-a"): files["file"],
+                 self.cache / "ab" / ("ab" + "8" * 62 + "-d"): files["exe"].parent}
+        for link, target in links.items():
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(target)
+        # A real stale executable directory whose file is a link out: the drop removes the link only.
+        held = self.cache / "cd" / ("cd" + "9" * 62 + "-d")
+        held.mkdir(parents=True)
+        (held / "tool").symlink_to(files["exe"])
+        for p in [outside, *outside.rglob("*"), *links, held / "tool", held]:
+            os.utime(p, (old, old), follow_symlinks=False)
+        before = sorted(str(p) for p in outside.rglob("*"))
+        for drop in ("false", "true"):
+            with self.subTest(drop):
+                rc, out = self.run_copy(KEEP_SCRIPT, DROP=drop)
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(sorted(str(p) for p in outside.rglob("*")), before, "the step reached outside the cache")
+                self.assertIn("::notice title=build cache::2 MB of Go build cache, 2 MB of it used by this run, 0 MB stale", out)
+                self.assertTrue(all(link.is_symlink() for link in links))
+                self.assertEqual(held.exists(), drop == "false")
+
+    def test_keep_counts_sizes_whatever_an_entry_is_named(self):
+        # #6059 item 3: the count once read du's text, so a newline in a name added the next line's
+        # number. The sizes now come from find, one number a line, with no name in them.
+        self.mark()
+        odd = self.entry("ab\n10000000000 x", MB, 2 * 86400)
+        self.exe("cd\n20000000000 " + "9" * 62 + "-d", 2 * MB, 2 * 86400)
+        rc, out = self.run_copy(KEEP_SCRIPT)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("::notice title=build cache::3 MB of Go build cache, 0 MB of it used by this run, 3 MB stale", out)
+        rc, out = self.run_copy(KEEP_SCRIPT, DROP="true")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("dropped the stale entries; 0 MB left to save", out)
+        self.assertFalse(odd.exists())
+        self.assertEqual([p for p in self.cache.rglob("*") if not p.is_dir()], [])
+
     def test_keep_fails_without_the_mark_and_passes_with_no_cache(self):
         rc, out = self.run_copy(KEEP_SCRIPT, DROP="true")
         self.assertEqual(rc, 1, out)
@@ -220,6 +321,9 @@ class ScriptsTest(unittest.TestCase):
         for pkg in ("used", "unused"):
             (mod / pkg).mkdir(parents=True)
             (mod / pkg / "p.go").write_text("package %s\n\nfunc F() int { return %d }\n" % (pkg, len(pkg)))
+        for tool in ("usedtool", "unusedtool"):
+            (mod / tool).mkdir(parents=True)
+            (mod / tool / "main.go").write_text("package main\n\nfunc main() { println(%d) }\n" % len(tool))
         (mod / "go.mod").write_text("module m\n\ngo 1.21\n")
         env = dict(os.environ, GOCACHE=str(self.cache), GOPATH=str(self.t / "gopath"), HOME=str(self.t / "home"),
                    GOTOOLCHAIN="local", GOFLAGS="", GOENV="off", GOWORK="off", GO111MODULE="on", GOTELEMETRY="off")
@@ -230,17 +334,31 @@ class ScriptsTest(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             return "/compile " in r.stderr
 
+        def run(tool):
+            # go run caches the linked executable (Go 1.24 on) in a <id>-d directory; a hit links nothing.
+            r = subprocess.run([go, "run", "-x", "./" + tool], cwd=mod, env=env, capture_output=True, text=True,
+                               timeout=300)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return "/link " in r.stderr
+
         self.assertTrue(build("used") and build("unused"))
+        self.assertTrue(run("usedtool") and run("unusedtool"))
+        self.assertFalse(run("usedtool"), "go run did not cache the executable")
+        exe_dirs = [p for p in self.cache.glob("*/*-d") if p.is_dir()]
+        self.assertEqual(len(exe_dirs), 2, "go run left no executable cache directories")
         old = time.time() - 2 * 86400
         for p in self.cache.rglob("*"):
-            if p.is_file():
-                os.utime(p, (old, old))
+            os.utime(p, (old, old))
         self.mark()
         self.assertFalse(build("used"), "a cached package compiled again before the drop")
+        self.assertFalse(run("usedtool"), "a cached executable linked again before the drop")
         rc, out = self.run_copy(KEEP_SCRIPT, DROP="true")
         self.assertEqual(rc, 0, out)
+        self.assertEqual(sum(p.exists() for p in exe_dirs), 1, "the drop kept a stale executable or removed a used one")
         self.assertFalse(build("used"), "the drop removed an entry this run used")
+        self.assertFalse(run("usedtool"), "the drop removed an executable this run used")
         self.assertTrue(build("unused"), "the drop kept an entry this run did not use")
+        self.assertTrue(run("unusedtool"), "the drop kept an executable this run did not use")
 
 
 if __name__ == "__main__":
