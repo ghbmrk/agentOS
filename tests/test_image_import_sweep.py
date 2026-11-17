@@ -14,6 +14,7 @@ import importlib.util
 import io
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -299,6 +300,9 @@ class CipherSitesTest(Tree):
         self.assertEqual(len(errs), 2)
         self.assertTrue(errs[0].endswith("adding: /usr/bin/dlsymmer sha256=%s EVP_get_cipherbyname=0"
                                          % places["tree"]["sha256"]["/usr/bin/dlsymmer"]), errs[0])
+        # #5889 item 3: no entry exists, so the refusal asks for one to be added, not updated.
+        self.assertIn("then add the [cipher] entry", errs[0])
+        self.assertNotIn("update", errs[0])
         self.assertIn("[cipher] /usr/sbin/gone matches no file", errs[1])
 
     def test_new_version_with_the_same_counts_fails(self):
@@ -310,6 +314,7 @@ class CipherSitesTest(Tree):
         self.assertEqual(len(errs), 1)
         self.assertIn("/usr/bin/spells holds other bytes (a new version?) than the ones reviewed", errs[0])
         self.assertNotIn("cipher references", errs[0])
+        self.assertIn("then update the [cipher] entry", errs[0])
         self.assertTrue(errs[0].endswith("as: /usr/bin/spells sha256=%s GCM-SIV=1"
                                          % places["tree"]["sha256"]["/usr/bin/spells"]), errs[0])
 
@@ -334,6 +339,21 @@ class CipherSitesTest(Tree):
                 errs = sweep.cipher_refusals(places, dict(ok, **{"/usr/lib/libfetch*": extra}))
                 self.assertEqual(len(errs), 1)
                 self.assertIn("/usr/lib/libfetcher.so.1 matches 2 [cipher] entries", errs[0])
+
+    def test_held_file_without_a_digest_is_a_broken_scan(self):
+        # #5889 item 3: a held file with no SHA-256 was offered "sha256=?", which read_allow refuses.
+        places = sweep.run_tree(str(self.tree))
+        ok = self.entries(places)
+        for entries in (ok, {k: v for k, v in ok.items() if k != "/usr/bin/spells"}):
+            broken = {"tree": dict(places["tree"], sha256={k: v for k, v in places["tree"]["sha256"].items()
+                                                           if k != "/usr/bin/spells"})}
+            errs = sweep.cipher_refusals(broken, entries)
+            with self.subTest(errs=errs):
+                self.assertEqual(len(errs), 1)
+                self.assertIn("/usr/bin/spells holds cipher sites (GCM-SIV=1) but the scan gives no SHA-256",
+                              errs[0])
+                self.assertIn("the scan is broken", errs[0])
+                self.assertNotIn("sha256=", errs[0])
 
     def test_summary_lists_sites(self):
         places = sweep.run_tree(str(self.tree))
@@ -448,6 +468,36 @@ class RefusalsTest(unittest.TestCase):
                 self.assertIn("%s:%d: " % (a, line), str(cm.exception))
                 self.assertIn(want, str(cm.exception))
                 self.assertIn("GLOB sha256=HEX NAME=COUNT", str(cm.exception))
+
+    def test_digest_in_either_case_is_kept_lowercased(self):
+        # #5889 item 2: an uppercase digest was refused as "gives 0 sha256=HEX tokens".
+        with tempfile.TemporaryDirectory() as d:
+            a = pathlib.Path(d) / "allow"
+            for hexd in ("0F" * 32, "0f" * 32, "0F0f" * 16):
+                a.write_text("/usr/bin/bash\n[cipher]\n/usr/bin/x sha256=%s GCM-SIV=1\n" % hexd)
+                with self.subTest(hexd=hexd):
+                    self.assertEqual(sweep.read_allow(a)[1]["/usr/bin/x"],
+                                     {"sha256": "0f" * 32, "sites": {"GCM-SIV": 1}})
+
+    def test_shipped_allow_comments_keep_the_wrap(self):
+        # #5889 item 4: comment lines wrap near 105 columns; only entry lines (a glob and its tokens) run on.
+        long = [(n, len(l)) for n, l in enumerate(pathlib.Path(sweep.ALLOW).read_text().splitlines(), 1)
+                if l.startswith("#") and len(l) > 107]
+        self.assertEqual(long, [])
+
+    def test_image_workflow_runs_on_every_guest_root_build_sh_builds(self):
+        # #5889 item 1: import_sweep.allow pins guest binaries by SHA-256, so a change to a guest root's
+        # inputs (a codex version bump) must run image.yml, on its pull request and on main.
+        guests = re.findall(r'"\$REPO/guest/([\w-]+)/build-rootfs\.sh"',
+                            (ROOT / "image/build.sh").read_text())
+        self.assertIn("codex", guests)
+        wf = (ROOT / ".github/workflows/image.yml").read_text()
+        on = wf.split("\njobs:\n", 1)[0]
+        pr, push = on.split("\n  pull_request:\n", 1)[1].split("\n  push:\n", 1)
+        for g in guests:
+            for name, part in (("pull_request", pr), ("push", push)):
+                with self.subTest(guest=g, on=name):
+                    self.assertIn('      - "guest/%s/**"\n' % g, part)
 
 
 if __name__ == "__main__":
