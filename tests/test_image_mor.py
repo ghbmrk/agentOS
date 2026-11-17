@@ -113,6 +113,8 @@ class MorUnitTest(unittest.TestCase):
         self.assertEqual(s["ExecStop"], ["/usr/bin/find %s -xdev -mindepth 1 -delete" % " ".join(check.MOR_LISTED)])
         self.assertEqual((s["Type"], s["RemainAfterExit"]), (["oneshot"], ["yes"]))
         self.assertEqual((s["IgnoreOnIsolate"], s["RefuseManualStop"]), (["yes"], ["yes"]))
+        # MOR-wipe-console (#6042): a failed find leaves MOR set; its error goes to the journal only.
+        self.assertEqual((s["StandardError"], s.get("StandardOutput")), (["journal"], None))
         for key in ("DefaultDependencies", "ExecStart", "ExecStopPost", "Conflicts", "BindsTo", "PartOf",
                     "Requires", "Requisite", "StopPropagatedFrom", "After"):
             self.assertNotIn(key, s)
