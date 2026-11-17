@@ -151,6 +151,15 @@ EQUIVALENT = re.compile(r"^Mutant-(?:equivalent|uncovered): (broker/[^\s:*?\[\]]
 # record entry that later gates read as proved. A record entry holding one fails `records` and the gate,
 # and waive writes nothing to its record (#5909). Case and the space or hyphen between the words are ignored.
 NOT_EQUIVALENT = re.compile(r"\bnot[\s-]+equivalent", re.IGNORECASE)
+# The kinds a waiver can name (#5828): gremlins v0.6.0's mutator types (internal/mutator/mutator.go, the
+# version the workflow installs) and delete's STATEMENT_DELETION. A body line naming another proves nothing.
+KINDS = frozenset({"ARITHMETIC_BASE", "CONDITIONALS_BOUNDARY", "CONDITIONALS_NEGATION", "INCREMENT_DECREMENT",
+                   "INVERT_ASSIGNMENTS", "INVERT_BITWISE", "INVERT_BWASSIGN", "INVERT_LOGICAL", "INVERT_LOOPCTRL",
+                   "INVERT_NEGATIVES", "REMOVE_SELF_ASSIGNMENTS", "STATEMENT_DELETION"})
+# A line where no letter precedes a waiver's start (a checked task-list box aside): an indent or any Markdown
+# a PR body wraps lines in, a backtick, bullet, task box, quote, heading, bold or table cell, which waivers
+# does not read (L3 on #5976). Prose that names one after a word is not a waiver line.
+WAIVER_START = re.compile(r"^(?:[^A-Za-z]|\[[xX]\])*Mutant-(?:equivalent|uncovered):", re.IGNORECASE)
 
 
 # A package name that reaches the workflow's matrix: path segments of plain characters only.
@@ -823,8 +832,40 @@ def waivers(body):
     out = {}
     for row in (body or "").replace("\r\n", "\n").split("\n"):
         m = EQUIVALENT.match(row)
-        if m and re.search(r"[A-Za-z]{2}", m.group(5)):
+        if m and re.search(r"[A-Za-z]{2}", m.group(5)) and not placeholder(m.group(5)):
             out[(m.group(1), int(m.group(2)), m.group(4), int(m.group(3)) if m.group(3) else None)] = m.group(5)
+    return out
+
+
+def placeholder(reason):
+    """Whether a waiver's reason still holds the <reason> the gate's messages print, unfilled: no proof
+    holds that text (L3 on #5976)."""
+    return "<reason>" in reason.lower()
+
+
+def malformed_waivers(body):
+    """A warning for each body line that starts like a waiver (behind any indent, backtick, bullet or quote
+    mark) but waivers does not read, holding the <reason> placeholder, or naming a kind no mutant has
+    (#5828, L3 on #5976). Each waives nothing, so its mutant still fails (fail closed);
+    the warning says why, rather than leaving the line unread or listed only as unused."""
+    out = []
+    for row in (body or "").replace("\r\n", "\n").split("\n"):
+        if not WAIVER_START.match(row):
+            continue
+        m = EQUIVALENT.match(row)
+        if not m or not re.search(r"[A-Za-z]{2}", m.group(5)):
+            out.append(f"the line {row.strip()[:200]!r} is not read as a waiver, so it waives nothing: write it "
+                       "Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason> at the start of its own line, with "
+                       "nothing before it (no indent, bullet, box, quote mark, heading, bold, table bar or backtick; line and column from 1, the kind in capitals as the "
+                       "summary's Mutant cell gives it, a reason in words)")
+        elif placeholder(m.group(5)):
+            out.append(f"the waiver {site_text((m.group(1), int(m.group(2)), m.group(4), int(m.group(3)) if m.group(3) else None))} "
+                       "still holds the <reason> placeholder, so it waives nothing: replace it with why no test can tell the "
+                       "mutant apart")
+        elif m.group(4) and m.group(4) not in KINDS:
+            out.append(f"the waiver {site_text((m.group(1), int(m.group(2)), m.group(4), int(m.group(3)) if m.group(3) else None))} "
+                       f"names the kind {m.group(4)}, which no mutant has, so it waives nothing: use the kind the "
+                       "summary's Mutant cell gives")
     return out
 
 
@@ -1087,7 +1128,10 @@ def record_entry(pkg, fname, line, reason, accepted, keys, mutant=None, col=None
 
 def cmd_waive(args):
     """Append an entry to each named site's package record, from `Mutant-equivalent:` lines in FILE."""
-    rows = waivers(pathlib.Path(args.lines).read_text(encoding="utf-8", errors="replace"))
+    text = pathlib.Path(args.lines).read_text(encoding="utf-8", errors="replace")
+    for problem in malformed_waivers(text):
+        print(f"mutgate: {problem}", file=sys.stderr)
+    rows = waivers(text)
     if not rows:
         print(f"mutgate: {args.lines} holds no `Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>` line",
               file=sys.stderr)
@@ -1164,7 +1208,7 @@ def cmd_records(args):
 
 
 def violations(targets, live, waived=None, mutants=None):
-    """(pkg, path, line, kind) of each mutant of live ({pkg: [(file, line, type[, column])]}) on a
+    """(pkg, path, line, kind, col) of each mutant of live ({pkg: [(file, line, type[, column])]}) on a
     package's target line that no waiver ({(path, line, kind, col): reason}) names alone among mutants
     (the package's every mutant, default live; see covering); targets is {pkg: {path: lines}}."""
     live = {pkg: [(*m, None)[:4] for m in items] for pkg, items in live.items()}
@@ -1174,7 +1218,7 @@ def violations(targets, live, waived=None, mutants=None):
         for fname, line, kind, col in live.get(pkg, []):
             path = f"broker/{pkg}/{fname}"
             if line in targets[pkg].get(path, ()) and (path, line, kind, col) not in cover:
-                found.append((pkg, path, line, kind))
+                found.append((pkg, path, line, kind, col))
     return found
 
 
@@ -1496,7 +1540,29 @@ def record_for(pkg, tests, bases, diff_text, base, tmp):
     was, problem = base_covered(pkg, merge_base(base, "HEAD"), bases[pkg], tmp, diff_text)
     if problem:
         return None, problem
+    # Every target line runs (L1 on #5770, #5942): a line no mutant and no deletion names (a brace, a
+    # bare `return g()`) has no NOT COVERED verdict, so a weakened test that stops running it was unseen.
+    # One whole-suite run at the head (none more when the changed tests are every test) names it.
+    every, problem = (covered, None) if names is None else covered_by(pkg, None, tmp)
+    if problem:
+        return None, problem
+    if gone := unrun(was, every):
+        return None, ("; ".join(f"{p}: {', '.join(map(str, ls))}" for p, ls in gone.items())
+                      + f" ran under the base's version of the tests this diff changes, and no test of package {pkg} "
+                      "runs them at the head: keep a test that runs each, or delete the code")
     return {**coverage_record(names, covered), "base": coverage_record(bases[pkg], was)}, None
+
+
+def unrun(was, every):
+    """{path: sorted lines} of was ({path: head lines} the base's tests ran) that every ({path: lines}
+    the head's whole suite runs) leaves out, holding code at the head: a blank or comment line between
+    two cover blocks, which an edit beside it can open, is no code a test runs."""
+    out = {}
+    for p, ls in sorted(was.items()):
+        rows = _uncommented((BROKER / p.split("/", 1)[1]).read_bytes().decode("utf-8", "replace"), False).split("\n")
+        if left := sorted(n for n in ls - every.get(p, set()) if n <= len(rows) and rows[n - 1].strip()):
+            out[p] = left
+    return out
 
 
 def planned_targets(planned, pkg, added, tests, bases):
@@ -2269,7 +2335,10 @@ def cmd_verify(args):
 def decide(results, added, tests, args, records=({}, [])):
     """Gate the read results against the PR body's waivers and the packages' records (record_waivers'
     pair; a stale entry fails), and write the summary table. A body line wins over a record entry."""
-    body = waivers(pathlib.Path(args.body).read_text(encoding="utf-8", errors="replace") if args.body else "")
+    text = pathlib.Path(args.body).read_text(encoding="utf-8", errors="replace") if args.body else ""
+    for problem in malformed_waivers(text):
+        print(f"mutgate: {problem}")
+    body = waivers(text)
     refused = not_equivalent(body)
     body = {w: reason for w, reason in body.items() if site_text(w) not in refused}
     kept, stale = records
@@ -2381,7 +2450,8 @@ def summary(results, tested, waived, own=(), body=None, stale=(), fresh=()):
     lines += ["", "| Site | Mutant | Verdict |", "| --- | --- | --- |", *(r[2] for r in rows[:ROWS])]
     if len(rows) > ROWS:
         lines.append(f"| {len(rows) - ROWS} more rows | | not shown |")
-    if unused := sorted((set(waived) if body is None else body) - used):
+    # A waiver matching several mutants is listed below with them, not as naming none (#5828).
+    if unused := sorted((set(waived) if body is None else body) - used - {w for w, _ in ambiguous}):
         lines += ["", "Mutant-equivalent lines naming no surviving mutant on a target line: "
                   + ", ".join(cell(site_text(w)) for w in sorted(unused, key=site_text))]
     if ambiguous:
@@ -2527,13 +2597,17 @@ def cmd_gate(args):
 
 
 def report_violations(found, lost=()):
-    for pkg, path, line, kind in found:
+    # Each line ends with the mutant's own waiver line, path:line:col:KIND, so two of one kind on a line
+    # read apart, and the line pastes as printed with no backtick or bracket around it (#5828).
+    for pkg, path, line, kind, col in found:
         # A deletion's line is the first added line of its statement, which may start earlier (#4603).
         what = f"deleting the whole statement holding line {line}" if kind == DELETION else kind
-        print(f"mutgate: {path}:{line} {what} survives, on a line of package {pkg} that this PR changes or tests")
-    for pkg, path, line, kind in sorted(set(lost)):
+        print(f"mutgate: {path}:{line} {what} survives, on a line of package {pkg} that this PR changes or tests "
+              f"; its waiver line: Mutant-equivalent: {site_text((path, line, kind, col))} <reason>")
+    for pkg, path, line, kind, col in sorted(set(lost), key=lambda v: (v[:4], v[4] or 0)):
         print(f"mutgate: {path}:{line} is a target line no test of package {pkg} runs at the head ({kind} not "
-              f"covered): cover it, or, if no test can reach it, name it in a Mutant-uncovered line")
+              f"covered): cover it, or, if no test can reach it, name it in a Mutant-uncovered line "
+              f"; its waiver line: Mutant-uncovered: {site_text((path, line, kind, col))} <reason>")
     found = [*found, *lost]
     if found:
         print("mutgate: add a test that fails when the line changes; if no test can tell, add a line "

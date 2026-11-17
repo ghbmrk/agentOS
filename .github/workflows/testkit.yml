@@ -7,11 +7,13 @@ on:
   pull_request:
     paths:
       - "spikes/S1S2-testkit/**"
+      - "image/debian-archive-keyring.sh"
       - ".github/workflows/testkit.yml"
   push:
     branches: [main]
     paths:
       - "spikes/S1S2-testkit/**"
+      - "image/debian-archive-keyring.sh"
       - ".github/workflows/testkit.yml"
 permissions:
   contents: read
