@@ -22,6 +22,8 @@ core journal
 core grants
 core vault
 core sockets
+# The peer rule sockets and the kernel's process share (CORE-trim-headroom, #6039).
+core sockets/peers
 core egress
 core holder
 core checker

@@ -19,7 +19,7 @@ import (
 // SIM-split) under the same peer rule.
 func ListenUnix(path string, uids ...int) (net.Listener, error) {
 	if len(uids) == 0 {
-		return nil, errors.New("sockets: a socket needs at least one peer uid")
+		return nil, errors.New("peers: a socket needs at least one peer uid")
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
