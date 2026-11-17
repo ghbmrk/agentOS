@@ -2,18 +2,21 @@
 # -stage-page-ca): before the Owner Card is shown, the keeper makes the page authority whose
 # fingerprint the card prints. Its sealed pair stays root's in /run/agentos-setup, where enrollment
 # reads and stores it; its certificate alone goes to /run/agentos-page-ca, public, for the owner page
-# to print. A rerun publishes a pair a crash left, and refuses a certificate without its pair. Only
-# while no store exists; a reboot before the confirm starts over on an empty tmpfs.
+# to print. A failed start's stop removes what it made, so a rerun stages a fresh pair. Only while no
+# store exists; a reboot before the confirm starts over on an empty tmpfs.
 # MOR-setup-hold (#5836, HW-8): the stop removes the pair and its certificate, so an orderly shutdown
 # before enrollment leaves /run/agentos-setup empty and agentos-mor clears MOR; nothing is lost that the
 # next boot's empty tmpfs had kept (brief OWN-card-flow: a reboot before the confirm prints a new card).
-# A manual stop is refused, so the fingerprint on a card printed this boot stays the staged one.
+# A manual stop is refused and an isolate (rescue, emergency) leaves the unit active, so the fingerprint
+# on a card printed this boot stays the staged one (MOR-setup-isolate, #5858); shutdown still stops it
+# through its default Conflicts=shutdown.target, which isolation does not decide.
 [Unit]
 Description=agentOS page authority staging
 ConditionPathExists=!/var/lib/agentos-store/store
 After=local-fs.target
 Before=agentos-keeper-enroll.service agentos-localui.service
 RefuseManualStop=yes
+IgnoreOnIsolate=yes
 
 [Service]
 Type=oneshot
