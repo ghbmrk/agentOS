@@ -51,8 +51,9 @@ mark="$RUNNER_TEMP/gocache.mark"
 [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
 # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
 entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
-# Sizes are find's own numbers, one per line, so no entry name is read as text.
-mb() { { entries "$@" -printf '%s\n'; entries "$@" -type d -exec find {} -mindepth 1 -printf '%s\n' \;; } |
+# Sizes are find's own numbers, one per line, so no entry name is read as text; a -d directory's
+# files are counted from the directory find holds open, as the drop removes them.
+mb() { { entries "$@" -printf '%s\n'; entries "$@" -type d -execdir find {} -mindepth 1 -printf '%s\n' \;; } |
   awk '{s += $1} END {printf "%d", s / 1048576}'; }
 all=$(mb); used=$(mb -newer "$mark")
 echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
@@ -250,6 +251,23 @@ class ScriptsTest(unittest.TestCase):
         self.assertFalse(stale.exists())
         self.assertTrue(other.exists(), "a directory go does not name as an entry was dropped")
 
+    def test_keep_counts_a_stale_executable_directory_without_its_siblings(self):
+        # #6103: the count inside a -d directory walks that directory alone, not the hex directory
+        # around it. Fails if `-execdir find {}` becomes `-execdir find .`, which counts the stale
+        # entry's siblings (a file and a used -d directory) once for each -d directory.
+        self.mark()
+        stale = self.exe("ab" + "1" * 62 + "-d", MB, 2 * 86400)
+        self.entry("ab" + "2" * 62 + "-a", 4 * MB, 60)
+        used = self.exe("ab" + "3" * 62 + "-d", 2 * MB, 60)
+        rc, out = self.run_copy(KEEP_SCRIPT)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("::notice title=build cache::7 MB of Go build cache, 6 MB of it used by this run, 1 MB stale", out)
+        rc, out = self.run_copy(KEEP_SCRIPT, DROP="true")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("dropped the stale entries; 6 MB left to save", out)
+        self.assertFalse(stale.exists())
+        self.assertTrue((used / "tool").exists())
+
     def test_keep_never_follows_a_link_out_of_the_cache(self):
         # #6059 item 1: go never writes a link into its cache, so a link there is not go's; neither
         # its target nor anything under it is counted or dropped. Fails if the walk follows links
@@ -286,6 +304,55 @@ class ScriptsTest(unittest.TestCase):
                 self.assertIn("::notice title=build cache::2 MB of Go build cache, 2 MB of it used by this run, 0 MB stale", out)
                 self.assertTrue(all(link.is_symlink() for link in links))
                 self.assertEqual(held.exists(), drop == "false")
+
+    def swap_at(self, tool, hexdir, target):
+        # A stub <tool> first on PATH that, on its first matching call, renames the hex directory find
+        # is walking and puts a link to <target> in its place, then runs the real <tool>: the swap lands
+        # between find's walk and the command it starts. Of find's calls, only the inner size count's matches.
+        stub = self.t / "bin" / tool
+        stub.write_text(r"""#!/bin/sh
+real=$(PATH=${PATH#*:}; command -v "$(basename "$0")")
+if [ ! -e "$SWAP_DONE" ] && { [ "$(basename "$0")" = rm ] || [ "$2 $3" = "-mindepth 1" ]; }; then
+  touch "$SWAP_DONE"; mv "$SWAP_FROM" "$SWAP_FROM.held"; ln -s "$SWAP_TO" "$SWAP_FROM"
+fi
+exec "$real" "$@"
+""")
+        stub.chmod(0o755)
+        return {"SWAP_FROM": str(hexdir), "SWAP_TO": str(target), "SWAP_DONE": str(self.t / "temp" / "swapped")}
+
+    def test_keep_drops_through_the_directory_find_holds_when_a_hex_dir_is_swapped(self):
+        # #6084 item 1: a hex directory swapped for a link out of the cache after find's walk, just as
+        # rm starts. -execdir runs `rm -rf ./<id>-d` from the directory find holds open, so the stale
+        # entry goes and the link's target stays; `-exec rm` would remove <outside>/<id>-d by its path.
+        self.mark()
+        name = "ab" + "6" * 62 + "-d"
+        stale = self.exe(name, MB, 2 * 86400)
+        outside = self.t / "outside"
+        (outside / name).mkdir(parents=True)
+        (outside / name / "tool").write_bytes(b"\0" * MB)
+        env = self.swap_at("rm", stale.parent, outside)
+        rc, out = self.run_copy(KEEP_SCRIPT, DROP="true", **env)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue((self.cache / "ab").is_symlink(), "the stub did not swap the directory")
+        self.assertTrue((outside / name / "tool").exists(), "the drop removed an entry outside the cache")
+        self.assertFalse((self.cache / "ab.held" / name).exists(), "the drop kept the stale entry")
+
+    def test_keep_counts_through_the_directory_find_holds_when_a_hex_dir_is_swapped(self):
+        # #6084 item 2: the same swap as the size count inside a -d directory starts. The count runs
+        # `find ./<id>-d` from the directory find holds open, so it reads the real entry's 1 MB, not
+        # the 64 MB behind the link (`-exec find {}` would, by its path).
+        self.mark()
+        name = "ab" + "6" * 62 + "-d"
+        stale = self.exe(name, MB, 2 * 86400)
+        outside = self.t / "outside"
+        (outside / name).mkdir(parents=True)
+        (outside / name / "tool").touch()
+        os.truncate(outside / name / "tool", 64 * MB)
+        env = self.swap_at("find", stale.parent, outside)
+        rc, out = self.run_copy(KEEP_SCRIPT, **env)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue((self.cache / "ab").is_symlink(), "the stub did not swap the directory")
+        self.assertIn("::notice title=build cache::1 MB of Go build cache, 0 MB of it used by this run, 1 MB stale", out)
 
     def test_keep_counts_sizes_whatever_an_entry_is_named(self):
         # #6059 item 3: the count once read du's text, so a newline in a name added the next line's

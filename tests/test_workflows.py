@@ -1410,6 +1410,8 @@ class WorkflowTest(unittest.TestCase):
         render = text.split("\n  render:\n", 1)[1].split("\n  commit:\n", 1)[0]
         self.assertRegex(render, r"(?m)^    if: github\.event_name != 'issues' && github\.ref == 'refs/heads/main'$")
         transition = text.split("\n  transition:\n", 1)[1].split("\n  render:\n", 1)[0]
+        # It writes, so only collaborator-opened work items reach it, as in intake.yml (#6060).
+        self.assertIn("\n      && contains(fromJSON('[\"OWNER\", \"MEMBER\", \"COLLABORATOR\"]'), github.event.issue.author_association)\n", transition)
         # The one write is the issue comment naming the problem (#5989).
         self.assertEqual(re.findall(r"(?m)^      ([a-z-]+): write\b", transition), ["issues"])
         self.assertIn('python3 -I tools/board.py transition --repo "$GITHUB_REPOSITORY" --issue "$ISSUE" --label "$LABEL" --action "$ACTION" --comment', transition)
