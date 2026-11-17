@@ -9,7 +9,7 @@ Board section: Defects and later findings on surviving packages. Work item #5952
 2. That job runs both Go fixture tests and `tests/test_s5_executor.py`, and fails, never skips, when either cannot run.
 3. Without the requirement switch the tests still skip, so `go test ./...` and the unit-test job are unchanged.
 
-**Scope:** `.github/workflows/ci.yml` (one step in `broker-checks`, a required job, so no ruleset or premerge change), `tests/requirements-browser.txt` (new), `tests/test_s5_executor.py`, `tests/test_ci_scope.py` (its machines-step mutations anchor on that step's own `require_ran.py` call), `broker/browser/ASSUMPTIONS.md`, this brief. No production code.
+**Scope:** `.github/workflows/ci.yml` (one step in `broker-checks`, a required job, so no ruleset or premerge change), `tests/requirements-browser.txt` (new), `tests/test_s5_executor.py`, `tests/test_ci_scope.py` (its machines-step mutations anchor on that step's own `require_ran.py` call), this brief. No production code. `broker/browser/ASSUMPTIONS.md` K4 is not edited here: any edit there makes mutgate target every line of `broker/browser` (`names_file` reads the tests' `../..` path literals as naming it), and 73 statement deletions there survive on main, so its K4 update waits on a release row.
 
 **Acceptance tests:** the new broker-checks step passes on the PR with `require_ran.py` reporting both Go tests passed and the executor's 17 fixture tests run; `tests/test_s5_executor.py::RequireBrowser` shows a missing browser fails under `AGENTOS_REQUIRE_BROWSER=1` and skips otherwise, and that the script run the step uses exits 1 on any skip.
 
