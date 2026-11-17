@@ -907,3 +907,46 @@ func TestTIM1NotifierPanicIsContained(t *testing.T) {
 		t.Fatalf("calls %d, logged %q", calls, logged)
 	}
 }
+
+func TestTIM1RefreshSeesAFarAnchor(t *testing.T) {
+	// #5929: an anchor more than 292 years ahead of the box clock, with the
+	// last check fresh and the wall clock unmoved, makes Now check again and
+	// hold at once: the saturated drift is not read as within the allowance.
+	for _, years := range []int{300, -300} {
+		r := newRig()
+		r.carrier = time.Time{}
+		g := r.guard(t, nil)
+		if s := g.Check(bg); s.State != NetworkOnly {
+			t.Fatalf("%d years: status = %+v", years, s)
+		}
+		g.mu.Lock()
+		g.anchorWall = g.anchorWall.AddDate(years, 0, 0)
+		g.mu.Unlock()
+		if _, err := g.Now(bg); err != nil {
+			t.Fatal(err)
+		}
+		if s := g.Status(); s.State != Held {
+			t.Fatalf("%d years: status = %+v", years, s)
+		}
+	}
+}
+
+func TestTIM1RefreshSeesAFarJump(t *testing.T) {
+	// #5929: a box clock stepped more than 292 years back since a fresh
+	// check, with no boot-clock time between, makes Interval check again at
+	// once: here the carrier now agrees with the stepped clock, which ends
+	// the disagreement only if refresh reads it.
+	r := newRig()
+	r.carrier = r.wall.Add(time.Hour)
+	g := r.guard(t, nil)
+	if s := g.Check(bg); s.State != Disagree {
+		t.Fatalf("status = %+v", s)
+	}
+	r.mu.Lock()
+	r.wall = r.wall.AddDate(-300, 0, 0)
+	r.carrier = r.wall
+	r.mu.Unlock()
+	if _, _, s := g.Interval(bg); s.State != Agreed {
+		t.Fatalf("status = %+v", s)
+	}
+}

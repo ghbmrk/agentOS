@@ -392,17 +392,20 @@ class ImageTest(unittest.TestCase):
 
     def scan(self, records, found, src="x"):
         """scan_image with each tree's findings FOUND (by where) and no file problems."""
-        saved = vulncheck.run_image, vulncheck.manifest_problems, vulncheck.initrd_status, vulncheck.guest_problems
+        saved = (vulncheck.run_image, vulncheck.manifest_problems, vulncheck.initrd_status, vulncheck.guest_problems,
+                 vulncheck.linked_problems)
+        # The main tree's findings come once, from its own status, not again from its linked inputs.
         vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None: (
-            [dict(f) for f in found if f["where"] == where], [])
+            [] if pathlib.Path(src).name == vulncheck.LINKED else [dict(f) for f in found if f["where"] == where], [])
         vulncheck.manifest_problems = lambda src: []
         vulncheck.initrd_status = lambda src: (b"Package: x\n", [])
         vulncheck.guest_problems = lambda src: []
+        vulncheck.linked_problems = lambda src: []
         try:
             return vulncheck.scan_image({"accepted": records}, src)
         finally:
             (vulncheck.run_image, vulncheck.manifest_problems, vulncheck.initrd_status,
-             vulncheck.guest_problems) = saved
+             vulncheck.guest_problems, vulncheck.linked_problems) = saved
 
     def image_dir(self):
         tmp = tempfile.TemporaryDirectory()
@@ -501,6 +504,7 @@ class ImageTest(unittest.TestCase):
         d = self.manifest_dir(lambda pkgs: pkgs.pop(0))
         shutil.copytree(self.image_dir() / vulncheck.INITRDS, d / vulncheck.INITRDS)
         shutil.copytree(self.image_dir() / vulncheck.GUESTS, d / vulncheck.GUESTS)
+        shutil.copytree(self.image_dir() / vulncheck.LINKED, d / vulncheck.LINKED)
         saved = vulncheck.run_image
         vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None: ([], [])
         try:
@@ -527,10 +531,10 @@ class ImageTest(unittest.TestCase):
         finally:
             vulncheck.run_image = saved
         self.assertEqual(probs, [])
-        self.assertEqual(calls, [("image", None), ("image/initrd", vulncheck.CONTROL_INITRD.read_bytes()),
+        self.assertEqual(calls, [("image", None), ("image", None), ("image/initrd", vulncheck.CONTROL_INITRD.read_bytes()),
                                  ("image/guest", None)])
         self.assertEqual([(f["where"], vulncheck.verdict(f)) for f in fs],
-                         [("image", "FAIL"), ("image/initrd", "FAIL"), ("image/guest", "FAIL")])
+                         [("image", "FAIL"), ("image", "FAIL"), ("image/initrd", "FAIL"), ("image/guest", "FAIL")])
 
     def test_the_guests_packages_are_scanned_as_their_own_tree(self):
         # REQ: EVL-5. #5572: the guests' Debian packages, from their own status file beside the base
@@ -602,6 +606,87 @@ class ImageTest(unittest.TestCase):
         self.assertIn('"$dir/%s"' % vulncheck.DPKG_STATUS, shipped)
         self.assertIn('"$dir/%s"' % vulncheck.OS_RELEASE, shipped)
         self.assertIn('cp -R "$RUNNER_TEMP"/out/%s "$RUNNER_TEMP/rec/"' % vulncheck.GUESTS, IMAGE_WORKFLOW.read_text())
+
+    def test_the_main_trees_linked_inputs_are_scanned_as_the_main_tree(self):
+        # REQ: EVL-5. #5885 SEL-2: llama-server's static link inputs (DIR/linked, image/llamaserver.sh)
+        # are queried like the main tree's status, and their findings are the main tree's, so an
+        # image record accepts them and no guest or initrd record does.
+        d, srcs = self.image_dir(), []
+
+        def run(src, env=None, offline=False, where="image", status=None):
+            srcs.append((where, pathlib.Path(src)))
+            if pathlib.Path(src).name != vulncheck.LINKED:
+                return [], []
+            return [{**fail("DEBIAN-CVE-1"), "where": where, "module": "agentos-linkedonly"}], []
+        saved = vulncheck.run_image
+        vulncheck.run_image = run
+        try:
+            fs, probs, unused = vulncheck.scan_image({"accepted": []}, d)
+            self.assertEqual(probs, [])
+            self.assertIn(("image", d / vulncheck.LINKED), srcs)
+            self.assertEqual([(f["where"], vulncheck.verdict(f)) for f in fs], [("image", "FAIL")])
+            for where, verdict in (("image", "accepted #1"), ("image/guest", "FAIL"), ("image/initrd", "FAIL")):
+                with self.subTest(where=where):
+                    rec = {"id": "DEBIAN-CVE-1", "issue": 1, "why": "w", "where": where, "package": "agentos-linkedonly"}
+                    fs, probs, _ = vulncheck.scan_image({"accepted": [rec]}, d)
+                    self.assertEqual(probs, [])
+                    self.assertEqual([vulncheck.verdict(f) for f in fs], [verdict])
+        finally:
+            vulncheck.run_image = saved
+
+    def test_a_missing_or_empty_linked_status_stops_the_scan(self):
+        # #5885 SEL-2: an image whose llama-server links unscanned archives never passes; the scan
+        # stops (exit 2), as a missing main-tree status does, rather than reporting nothing.
+        cases = {"no status": lambda d: (d / vulncheck.DPKG_STATUS).unlink(),
+                 "no os-release": lambda d: (d / vulncheck.OS_RELEASE).unlink(),
+                 "empty status": lambda d: (d / vulncheck.DPKG_STATUS).write_text("\n"),
+                 "nothing installed": lambda d: (d / vulncheck.DPKG_STATUS).write_text(
+                     "Package: x\nStatus: deinstall ok config-files\n"),
+                 "no directory": lambda d: shutil.rmtree(d)}
+        saved = vulncheck.run_image
+        vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None: ([], [])
+        try:
+            for name, spoil in cases.items():
+                with self.subTest(name):
+                    d = self.image_dir()
+                    spoil(d / vulncheck.LINKED)
+                    with self.assertRaises(vulncheck.ScanError) as e:
+                        vulncheck.scan_image({"accepted": []}, d)
+                    self.assertIn("linked", str(e.exception))
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                        self.assertEqual(vulncheck.main(["image", str(d), "--config", str(self.empty_config())]), 2)
+        finally:
+            vulncheck.run_image = saved
+
+    def empty_config(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        c = pathlib.Path(tmp.name) / "vulncheck.json"
+        c.write_text(json.dumps({"accepted": []}))
+        return c
+
+    def test_the_linked_status_lists_only_base_packages_at_their_versions(self):
+        # #5885: the link ran in the base root, whose manifest the reproduce job compares.
+        self.assertEqual(vulncheck.linked_problems(vulncheck.FIXTURE / "image"), [])
+        st = (vulncheck.FIXTURE / "image" / vulncheck.LINKED / vulncheck.DPKG_STATUS).read_text()
+        self.assertEqual(vulncheck.dpkg_installed(st), {("libstatic-dev", "1.0-1")})
+        d = self.guest_dir(edit=lambda pkgs: [p.update(version="9.9-9") for p in pkgs if p["name"] == "libstatic-dev"])
+        probs = vulncheck.linked_problems(d)
+        self.assertEqual(len(probs), 1, probs)
+        self.assertIn("libstatic-dev 1.0-1", probs[0])
+
+    def test_the_build_writes_the_linked_status_where_the_scan_reads(self):
+        # #5885 SEL-1, SEL-2: llamaserver.sh records into LINKED_SHIPPED, build.sh writes its status
+        # into OUT/LINKED before the base goes, and the release record copies it whole.
+        build = (ROOT / "image" / "build.sh").read_text()
+        status = build.index('GUEST_SHIPPED=$LINKED_SHIPPED sh "$HERE/guest-shipped.sh" --status "$GUEST_BASE" "$OUT/%s"\n'
+                             % vulncheck.LINKED)
+        self.assertLess(build.index('export LINKED_SHIPPED="$OUT/linked.shipped"\n'), build.index('sh "$HERE/infer.sh"'))
+        self.assertLess(build.index('sh "$HERE/infer.sh"'), status)
+        self.assertLess(status, build.index('rm -rf --one-file-system "$GUEST_BASE"'))
+        server = (ROOT / "image" / "llamaserver.sh").read_text()
+        self.assertIn('GUEST_SHIPPED=$linked sh "$HERE/guest-shipped.sh" "$base" $loaded', server)
+        self.assertIn('cp -R "$RUNNER_TEMP"/out/%s "$RUNNER_TEMP/rec/"' % vulncheck.LINKED, IMAGE_WORKFLOW.read_text())
 
     def test_a_record_accepts_an_image_advisory_only_in_its_own_tree(self):
         # #4000, #5572: an acceptance in one tree (main, initrd, guests) must not hide the same
