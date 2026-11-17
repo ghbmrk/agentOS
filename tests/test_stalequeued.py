@@ -105,6 +105,43 @@ class StaleQueuedTest(unittest.TestCase):
                 [issue(1, "AB-1")] if path.startswith("/repos/o/r/issues") else [pr(2, "Unrelated", "Closes #1")]))
         self.assertEqual(out.getvalue().strip(), "AB-1 (#1): closed by PR #2")
 
+    def test_closing_pr_merged_before_the_last_reopen_is_only_maybe(self):
+        reopened = dict(issue(1, "AB-1"), state_reason="reopened")
+        merged = pr(2, "Unrelated", "Closes #1", merged="2026-10-17T00:00:00Z")
+        asked = []
+
+        def when(item):
+            asked.append(item["number"])
+            return "2026-10-20T00:00:00Z"
+        found = stalequeued.stale_queued([reopened], [merged], reopened_at=when)
+        self.assertEqual([(p["number"], how) for _, p, how in found], [(2, "reopened")])
+        self.assertEqual(asked, [1])
+        later = pr(3, "Unrelated", "Closes #1", merged="2026-10-21T00:00:00Z")
+        found = stalequeued.stale_queued([reopened], [merged, later], reopened_at=when)
+        self.assertEqual([(p["number"], how) for _, p, how in found], [(3, "closes")])
+        # no events call for a row that was never reopened
+        stalequeued.stale_queued([issue(1, "AB-1")], [merged], reopened_at=lambda i: self.fail("fetched"))
+
+    def test_main_prints_maybe_for_reopened_row_and_fetches_events_only_then(self):
+        paths = []
+
+        def fetch(path, **k):
+            paths.append(path)
+            if path.endswith("/files"):
+                return [{"filename": "docs/x.md"}]
+            if path.startswith("/repos/o/r/issues/1/events"):
+                return [{"event": "closed", "created_at": "2026-10-18T00:00:00Z"},
+                        {"event": "reopened", "created_at": "2026-10-19T00:00:00Z"}]
+            if path.startswith("/repos/o/r/issues"):
+                return [dict(issue(1, "AB-1"), state_reason="reopened"), issue(3, "CD-2")]
+            return [pr(2, "Unrelated", "Closes #1"), pr(4, "Unrelated", "Closes #3")]
+        out = io.StringIO()
+        with redirect_stdout(out):
+            stalequeued.main(["--repo", "o/r"], fetch=fetch)
+        self.assertEqual(out.getvalue().splitlines(),
+                         ["AB-1 (#1): maybe: reopened after PR #2", "CD-2 (#3): closed by PR #4"])
+        self.assertEqual(len([x for x in paths if "/events" in x]), 1)
+
     def test_closing_reference_is_for_this_issue_only(self):
         for body in ("Closes #12", "Closes #2", "see #1", "Closes ghbmrk/other#1"):
             self.assertEqual(stalequeued.stale_queued([issue(1, "AB-1")], [pr(2, "Unrelated", body)]), [], body)
