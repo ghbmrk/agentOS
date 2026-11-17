@@ -30,4 +30,4 @@ the extra reading to take while S2 runs, and the change if it fails.
 Recordings stay in the kit's `private/` folder and never leave the drive;
 C10 is run on the drive or by Mark, not uploaded.
 
-The #33 review suggests folding the manual readings (C3, C7, C9, C10, C12, C13) into the S2 kit so Mark only inserts the SIM, makes the one call and sends the one text. That changes the kit image (`spikes/S1S2-testkit`), which is outside this package; it is listed for the kit's owner.
+The S2 kit (`spikes/S1S2-testkit`, `s2.py`) takes the readings for C3, C7, C9, C10 and C11 to C15 in the same run, so Mark only inserts the SIM, makes the one call and sends the one text. C16, C17 and C18 stay separate runs.

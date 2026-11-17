@@ -343,15 +343,25 @@ def parse_block(block, props, name):
 
 
 def built_tree(out, version):
-    """Mount build OUT's root partition and its verified /usr (finish_image checked it against the entry's
-    usrhash=) read-only. Returns (root, usr, the boot entry's command line, cleanup)."""
+    """Mount build OUT's root partition read-only, and its /usr through dm-verity against the boot entry's
+    usrhash= (#4825), so every /usr block a check reads is one the box would boot: a block rewritten after
+    finish_image verified it reads as an I/O error, not as content. Returns (root, usr, the boot entry's
+    command line, cleanup)."""
     out = pathlib.Path(out)
     img = out / ("agentos_%s.raw" % version)
     usr = out / ("agentos_%s.usr.raw" % version)
+    tree = out / ("agentos_%s.usr-verity.raw" % version)
     entries = sorted(out.glob("agentos_%s*.conf" % version))
     if len(entries) != 1:
         sys.exit("offline systemd: expected one boot entry in %s, found %s" % (out, [e.name for e in entries]))
-    cmdline = finish_image.options_line(entries[0].read_text())
+    entry = entries[0].read_text()
+    try:
+        roothash = finish_image.usrhash(entry)
+    except ValueError as e:
+        sys.exit("offline systemd: %s: %s" % (entries[0], e))
+    cmdline = finish_image.options_line(entry)
+    if not tree.is_file():
+        sys.exit("offline systemd: no /usr hash tree %s" % tree)
     table = finish_image.partition_table(str(img))
     roots = [p for p in table["partitions"] if p["type"].lower() == finish_image.ROOT_GUID]
     if len(roots) != 1:
@@ -360,12 +370,23 @@ def built_tree(out, version):
     d = pathlib.Path(tempfile.mkdtemp(prefix="offline-systemd-"))
     (d / "root").mkdir()
     (d / "usr").mkdir()
-    subprocess.run(["mount", "-o", "ro,noload,loop,offset=%d,sizelimit=%d" % (roots[0]["start"] * sector,
-                                                                             roots[0]["size"] * sector),
-                    str(img), str(d / "root")], check=True)
-    subprocess.run(["mount", "-t", "erofs", "-o", "ro,loop", str(usr), str(d / "usr")], check=True)
+    name = d.name  # a device-mapper name as unique as the mount directory
+    done = []
 
     def cleanup():
-        for m in ("usr", "root"):
-            subprocess.run(["umount", str(d / m)], check=False)
+        for undo in reversed(done):
+            subprocess.run(undo, check=False)
+        done.clear()
+    try:
+        subprocess.run(["mount", "-o", "ro,noload,loop,offset=%d,sizelimit=%d" % (roots[0]["start"] * sector,
+                                                                                 roots[0]["size"] * sector),
+                        str(img), str(d / "root")], check=True)
+        done.append(["umount", str(d / "root")])
+        subprocess.run(["veritysetup", "open", str(usr), name, str(tree), roothash], check=True)
+        done.append(["veritysetup", "close", name])
+        subprocess.run(["mount", "-t", "erofs", "-o", "ro", "/dev/mapper/" + name, str(d / "usr")], check=True)
+        done.append(["umount", str(d / "usr")])
+    except BaseException:
+        cleanup()
+        raise
     return d / "root", d / "usr", cmdline, cleanup
