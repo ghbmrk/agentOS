@@ -37,6 +37,31 @@ def missing_libc(lock):
     return sorted(bad)
 
 
+DEP_FIELDS = ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies")
+
+
+def root_mismatch(pkg, lock):
+    """Dependency fields where package.json and the lockfile's root entry differ (#6061 item 1)."""
+    root = lock["packages"][""]
+    return [f for f in DEP_FIELDS if pkg.get(f, {}) != root.get(f, {})]
+
+
+def override_names(overrides):
+    """Every package an `overrides` map names, nested ones included; "." is the parent itself."""
+    for key, value in overrides.items():
+        if key == ".":
+            continue
+        yield re.sub(r"(?<=.)@.*$", "", key)
+        if isinstance(value, dict):
+            yield from override_names(value)
+
+
+def stale_overrides(pkg, lock):
+    """Override names no lockfile entry installs, so the override does nothing (#6061 item 3)."""
+    installed = {k.rsplit("node_modules/", 1)[1] for k in lock["packages"] if "node_modules/" in k}
+    return sorted(set(override_names(pkg.get("overrides", {}))) - installed)
+
+
 def host_libs(prog):
     """PROG's libraries as the host loader resolves them (only to stage a fake base)."""
     out = subprocess.run(["ldd", prog], capture_output=True, text=True, check=True).stdout
@@ -356,6 +381,31 @@ class WiringTest(unittest.TestCase):
         self.assertIn("sh guest/openclaw/build-rootfs.sh /tmp/ocroot", ci)
         self.assertNotIn("package-lock-only", ci)
 
+
+    def test_package_json_and_the_lockfile_root_name_the_same_dependencies(self):
+        # #6061 item 1: `npm ci` accepts a package.json whose only dependency was removed while the
+        # lockfile root still names it (exit 0 with npm 10.9), so the two are compared here.
+        pkg = json.loads((ROOT / "guest/openclaw/package.json").read_text())
+        lock = json.loads((ROOT / "guest/openclaw/package-lock.json").read_text())
+        self.assertEqual(root_mismatch(pkg, lock), [])
+        self.assertTrue(pkg["dependencies"], "package.json names no dependency")
+        dropped = dict(pkg, dependencies={})
+        self.assertEqual(root_mismatch(dropped, lock), ["dependencies"])
+        bare = {"packages": dict(lock["packages"], **{"": {"name": lock["name"]}})}
+        self.assertEqual(root_mismatch(pkg, bare), ["dependencies"])
+        self.assertEqual(root_mismatch(dict(pkg, devDependencies={"x": "1"}), lock), ["devDependencies"])
+
+    def test_every_override_names_a_package_the_lockfile_installs(self):
+        # #6061 item 3: an override for a package nothing depends on passes `npm ci` and does nothing.
+        pkg = json.loads((ROOT / "guest/openclaw/package.json").read_text())
+        lock = json.loads((ROOT / "guest/openclaw/package-lock.json").read_text())
+        self.assertTrue(pkg["overrides"], "no override left to check")
+        self.assertEqual(stale_overrides(pkg, lock), [])
+        planted = dict(pkg, overrides=dict(pkg["overrides"], **{"left-pad": "1.3.0"}))
+        self.assertEqual(stale_overrides(planted, lock), ["left-pad"])
+        nested = {"overrides": {"@hono/node-server@^2": {".": "2.1.8", "@x/absent": "1"}, "zod": "4.6.7"}}
+        self.assertEqual(stale_overrides(nested, lock), ["@x/absent"])
+        self.assertEqual(list(override_names({"@a/b@^1": "1", "c@2": {"d": "3"}})), ["@a/b", "c", "d"])
 
 if __name__ == "__main__":
     unittest.main()
