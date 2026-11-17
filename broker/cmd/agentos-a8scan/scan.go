@@ -69,8 +69,12 @@ const minPattern = 8
 // consecutive bytes of a value contain one.
 const fragment = 12
 
-// NewScanner prepares the patterns for needles.
+// NewScanner prepares the patterns for needles. An empty list is
+// refused: a scanner with nothing to look for would pass every scan.
 func NewScanner(needles []Needle) (*Scanner, error) {
+	if len(needles) == 0 {
+		return nil, fmt.Errorf("a8scan: no needles to scan for")
+	}
 	s := &Scanner{byKey: map[uint64][]int{}}
 	seen := map[string]bool{}
 	add := func(b []byte, n, enc string) {
@@ -151,7 +155,6 @@ func utf16le(s string) []byte {
 // Reader scans one stream (a file, a partition, a raw device).
 func (s *Scanner) Reader(source string, r io.Reader) ([]Finding, error) {
 	var out []Finding
-	found := map[[2]int64]bool{}
 	const block = 1 << 20
 	buf := make([]byte, 0, block+s.maxLen)
 	var base int64 // offset of buf[0] in the stream
@@ -170,15 +173,10 @@ func (s *Scanner) Reader(source string, r io.Reader) ([]Finding, error) {
 		}
 		for i := 0; i < limit; i++ {
 			f := uint16(buf[i]) | uint16(buf[i+1])<<8
-			if s.first2[f/64]&(1<<(f%64)) == 0 {
-				continue
-			}
-			for _, pi := range s.byKey[binary.LittleEndian.Uint64(buf[i:i+8])] {
-				p := s.pats[pi]
-				if i+len(p.b) <= len(buf) && bytes.Equal(buf[i:i+len(p.b)], p.b) {
-					key := [2]int64{base + int64(i), int64(pi)}
-					if !found[key] {
-						found[key] = true
+			if s.first2[f/64]&(1<<(f%64)) != 0 {
+				for _, pi := range s.byKey[binary.LittleEndian.Uint64(buf[i:i+8])] {
+					p := s.pats[pi]
+					if i+len(p.b) <= len(buf) && bytes.Equal(buf[i:i+len(p.b)], p.b) {
 						out = append(out, Finding{source, base + int64(i), p.needle, p.encoding})
 					}
 				}
