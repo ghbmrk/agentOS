@@ -46,8 +46,11 @@ func bootElapsed() time.Duration {
 }
 
 // bootID names this boot; an anchor recorded in another boot is dropped.
-func bootID() string {
-	if b, err := readFile("/proc/sys/kernel/random/boot_id"); err == nil {
+func bootID() string { return bootIDAt("/proc/sys/kernel/random/boot_id") }
+
+// bootIDAt reads a boot_id file at p; an unreadable one names no boot.
+func bootIDAt(p string) string {
+	if b, err := readFile(p); err == nil {
 		return strings.TrimSpace(string(b))
 	}
 	return ""

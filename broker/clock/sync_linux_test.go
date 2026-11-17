@@ -33,6 +33,22 @@ func TestTIM1BootClock(t *testing.T) {
 	}
 }
 
+// An unreadable boot_id names no boot, so a saved anchor never matches it;
+// a readable one is its trimmed contents.
+func TestTIM1BootIDUnreadableIsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "boot_id")
+	if err := os.WriteFile(p, []byte(" 0f0e0d0c-0000-4000-8000-000000000001\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if id := bootIDAt(p); id != "0f0e0d0c-0000-4000-8000-000000000001" {
+		t.Fatalf("bootIDAt = %q", id)
+	}
+	if id := bootIDAt(filepath.Join(dir, "missing")); id != "" {
+		t.Fatalf("bootIDAt of a missing file = %q, want empty", id)
+	}
+}
+
 // A missing since_epoch file is its read's error, and one that holds no
 // whole number of seconds is an error, never the epoch; a number is that
 // many seconds after it, as UTC.
