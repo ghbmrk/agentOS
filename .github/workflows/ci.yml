@@ -567,7 +567,7 @@ jobs:
           status=0
           go test -count=1 -json -run '^TestFixture' ./browser > "$RUNNER_TEMP/browser.json" || status=$?
           p=github.com/ghbmrk/agentos/broker/browser
-          python3 -I ../tools/require_ran.py $p.TestFixtureThroughTheGate $p.TestFixtureRefsFollowTheDriversDocument \
+          python3 -I "$GITHUB_WORKSPACE/tools/require_ran.py" $p.TestFixtureThroughTheGate $p.TestFixtureRefsFollowTheDriversDocument \
             < "$RUNNER_TEMP/browser.json" || exit 1
           [ "$status" -eq 0 ]
           (cd .. && python3 -m unittest tests.test_s5_executor -v)
