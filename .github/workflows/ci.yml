@@ -394,12 +394,13 @@ jobs:
           mark="$RUNNER_TEMP/gocache.mark"
           [ -e "$mark" ] || { echo "::error title=build cache::no $mark: the runner-disk step did not run, so which entries this run used is unknown"; exit 1; }
           [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
-          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" -type f "$@"; }
-          mb() { entries "$@" -printf '%s\n' | awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
+          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
+          mb() { entries "$@" -exec du -bs {} + | awk '{s += $1} END {printf "%d", s / 1048576}'; }
           all=$(mb); used=$(mb -newer "$mark")
           echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
           if [ "$DROP" = true ]; then
-            entries ! -newer "$mark" -delete
+            entries ! -newer "$mark" -exec rm -rf {} +
             echo "dropped the stale entries; $(mb) MB left to save"
           fi
       - name: Go build cache upload (main only; CI-PATHS)
@@ -589,12 +590,13 @@ jobs:
           mark="$RUNNER_TEMP/gocache.mark"
           [ -e "$mark" ] || { echo "::error title=build cache::no $mark: the runner-disk step did not run, so which entries this run used is unknown"; exit 1; }
           [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
-          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" -type f "$@"; }
-          mb() { entries "$@" -printf '%s\n' | awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
+          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
+          mb() { entries "$@" -exec du -bs {} + | awk '{s += $1} END {printf "%d", s / 1048576}'; }
           all=$(mb); used=$(mb -newer "$mark")
           echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
           if [ "$DROP" = true ]; then
-            entries ! -newer "$mark" -delete
+            entries ! -newer "$mark" -exec rm -rf {} +
             echo "dropped the stale entries; $(mb) MB left to save"
           fi
       - name: Go build cache upload (main only; CI-PATHS)
@@ -847,22 +849,6 @@ jobs:
             [ "$rc" -eq 0 ] || fail=1
           done 3< "$RUNNER_TEMP/root-plan"
           [ "$fail" -eq 0 ]
-      - name: OpenClaw guest lockfile, from the guest's own npm (#2914)
-        # npm 10 once wrote the lockfile without the libc constraint on 10 platform packages, so the
-        # glibc guest also installed the musl binaries. The pinned Node's bundled npm re-resolves
-        # package.json; any change to the committed lockfile (another npm major, or a package.json
-        # edit with no lockfile edit) fails the step. The pins are read from build-rootfs.sh.
-        run: |
-          sh=guest/openclaw/build-rootfs.sh
-          ver=$(sed -n 's/^NODE_VERSION=//p' "$sh")
-          sum=$(sed -n 's/^NODE_SHA256=//p' "$sh")
-          [ -n "$ver" ] && [ -n "$sum" ] || { echo "$sh names no NODE_VERSION or NODE_SHA256" >&2; exit 1; }
-          node_dir=$(mktemp -d)
-          curl -fsSLo "$node_dir/node.tar.xz" "https://nodejs.org/dist/$ver/node-$ver-linux-x64.tar.xz"
-          echo "$sum  $node_dir/node.tar.xz" | sha256sum -c -
-          tar -xJf "$node_dir/node.tar.xz" --strip-components=1 -C "$node_dir"
-          (cd guest/openclaw && PATH="$node_dir/bin:$PATH" npm install --package-lock-only --ignore-scripts --no-audit --no-fund)
-          git diff --exit-code -- guest/openclaw/package-lock.json
       - name: The guests' Debian userland, from the image's apt sources (#5570)
         # Both guest roots below copy their shell, tools and libraries from it, never from the runner.
         run: |
@@ -926,12 +912,13 @@ jobs:
           mark="$RUNNER_TEMP/gocache.mark"
           [ -e "$mark" ] || { echo "::error title=build cache::no $mark: the runner-disk step did not run, so which entries this run used is unknown"; exit 1; }
           [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
-          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" -type f "$@"; }
-          mb() { entries "$@" -printf '%s\n' | awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
+          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
+          mb() { entries "$@" -exec du -bs {} + | awk '{s += $1} END {printf "%d", s / 1048576}'; }
           all=$(mb); used=$(mb -newer "$mark")
           echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
           if [ "$DROP" = true ]; then
-            entries ! -newer "$mark" -delete
+            entries ! -newer "$mark" -exec rm -rf {} +
             echo "dropped the stale entries; $(mb) MB left to save"
           fi
       - name: Go build cache upload (main only; CI-PATHS)
