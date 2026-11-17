@@ -294,7 +294,7 @@ func TestEveryPagePartAgentosdIsGivenReachesThePage(t *testing.T) {
 
 // The page lists every paused grant the gate holds (W5a-resume).
 func TestThePageListsEveryPausedGrant(t *testing.T) {
-	_, _, d := startPage(t)
+	sock, tok, d := startPage(t)
 	g, ctx := d.Gate(), context.Background()
 	var ids []string
 	for i, acct := range []string{"mail", "bank"} {
@@ -335,13 +335,22 @@ func TestThePageListsEveryPausedGrant(t *testing.T) {
 		}
 		ids = append(ids, gid)
 	}
+	var listed localapi.Paused
+	if r := send(t, sock, localapi.OpPaused, localapi.Auth{Token: tok}); !r.OK || json.Unmarshal(r.Result, &listed) != nil {
+		t.Fatalf("paused: %+v", r)
+	}
 	var got []string
-	for _, p := range pausedGrants(g) {
+	for _, p := range listed.Grants {
 		got = append(got, p.ID)
 	}
 	slices.Sort(got)
 	slices.Sort(ids)
 	if !slices.Equal(got, ids) {
 		t.Fatalf("the page lists %q paused, want %q", got, ids)
+	}
+	// An ask for a grant paused as the page shows it is asked (#5757).
+	p := listed.Grants[0]
+	if txt, err := askResume(ctx, g, p.ID, p.Pause); err != nil || !strings.HasPrefix(txt, "Asked to resume "+p.ID+".") {
+		t.Fatalf("an ask for a listed pause: %q %v", txt, err)
 	}
 }
