@@ -173,13 +173,12 @@ func (s *Scanner) Reader(source string, r io.Reader) ([]Finding, error) {
 		}
 		for i := 0; i < limit; i++ {
 			f := uint16(buf[i]) | uint16(buf[i+1])<<8
-			if s.first2[f/64]&(1<<(f%64)) == 0 {
-				continue
-			}
-			for _, pi := range s.byKey[binary.LittleEndian.Uint64(buf[i:i+8])] {
-				p := s.pats[pi]
-				if i+len(p.b) <= len(buf) && bytes.Equal(buf[i:i+len(p.b)], p.b) {
-					out = append(out, Finding{source, base + int64(i), p.needle, p.encoding})
+			if s.first2[f/64]&(1<<(f%64)) != 0 {
+				for _, pi := range s.byKey[binary.LittleEndian.Uint64(buf[i:i+8])] {
+					p := s.pats[pi]
+					if i+len(p.b) <= len(buf) && bytes.Equal(buf[i:i+len(p.b)], p.b) {
+						out = append(out, Finding{source, base + int64(i), p.needle, p.encoding})
+					}
 				}
 			}
 		}
