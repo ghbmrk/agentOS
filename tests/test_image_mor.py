@@ -30,6 +30,47 @@ def words(s, key):
     return " ".join(s.get(key, [])).split()
 
 
+# Where systemd puts a system unit's directory settings, and the specifiers that name those bases.
+DIR_BASES = {"RuntimeDirectory": "/run", "StateDirectory": "/var/lib", "CacheDirectory": "/var/cache",
+             "LogsDirectory": "/var/log", "ConfigurationDirectory": "/etc"}
+SPECIFIERS = {"%t": "/run", "%S": "/var/lib", "%C": "/var/cache", "%L": "/var/log", "%E": "/etc"}
+
+
+def unit_specifiers(unit):
+    """A unit's name specifiers as regexes: %n, %N, %p, %j and %J literal; %i and %I any instance
+    when the unit is a template (no instance in its name), so a template's directory may be any."""
+    n = re.escape(unit)
+    stem = unit.rsplit(".", 1)[0]
+    prefix, at, inst = stem.partition("@")
+    j = prefix.rsplit("-", 1)[-1]
+    wild = at and not inst
+    return {"%n": n, "%N": re.escape(stem), "%p": re.escape(prefix), "%j": re.escape(j),
+            "%J": re.escape(j), "%i": "[^/]*" if wild else re.escape(inst),
+            "%I": ".*" if wild else re.escape(inst)}
+
+
+def names_held_dir(text, dirs, unit=""):
+    """Whether a unit file's text names one of dirs, or a path under it: the path not followed by a
+    character that continues a name, through a base specifier, or as a directory setting (continued
+    lines joined, the unit's name specifiers resolved). An InaccessiblePaths= line masks the paths it
+    lists, so it names none: the main side's drop-ins (#5818) list every hold dir there."""
+    text = re.sub(r"^[ \t]*InaccessiblePaths[ \t]*=.*$", "", text.replace("\\\n", " "), flags=re.M)
+    for spec, base in SPECIFIERS.items():
+        text = text.replace(spec, base)
+    if any(re.search(re.escape(d) + r"(?![\w.@+~-])", text) for d in dirs):
+        return True
+    names = unit_specifiers(unit) if unit else {}
+    keys = "|".join(DIR_BASES)
+    for key, value in re.findall(r"^[ \t]*(%s)[ \t]*=(.*)$" % keys, text, re.M):
+        for name in value.replace(":", " ").split():
+            parts = (DIR_BASES[key] + "/" + name.strip("\"'").strip("/")).split("/")
+            for k in range(2, len(parts) + 1):
+                pat = "".join(names.get(w, re.escape(w)) for w in re.split(r"(%[a-zA-Z])", "/".join(parts[:k])))
+                if any(re.fullmatch(pat, d) for d in dirs):
+                    return True
+    return False
+
+
 class MorUnitTest(unittest.TestCase):
     def test_clear_runs_at_stop_after_the_secret_holders(self):
         s = settings(UNIT)
@@ -129,22 +170,85 @@ class MorUnitTest(unittest.TestCase):
         for f in files:
             t = f.read_text()
             self.assertNotIn("/dev/shm", t, f.name)
-            if f.name != name and any(d + "/" in t or d + " " in t for d in check.MOR_LISTED):
+            unit = f.parent.name[:-2] if f.parent.name.endswith(".d") else f.name
+            if unit not in (name, "agentos-mor.service") and names_held_dir(t, check.MOR_LISTED, unit):
                 writers.add(f.name)
             for key in ("Conflicts", "PropagatesStopTo"):
                 self.assertNotIn(name, words(settings(f), key), f.name)
-        # The writers, each found by its own text: the mor unit's drop-in names the dirs only to leave
-        # them unmasked, the main side's only to mask them.
-        self.assertEqual(writers - {"50-main-side.conf"}, {
+        # The writers, each found by its own text. The clear's own unit and drop-in name the dirs only
+        # to leave them unmasked, and a mask names none.
+        self.assertEqual(writers, {
             "agentos-keeper-pageca.service", "agentos-keeper-enroll.service", "agentos-keeper-enroll.path",
             "agentos-keeper-setup@.service", "agentos-keeper-link-capture.service"})
-        for w in writers - {"50-main-side.conf"}:
+        for w in writers:
             with self.subTest(w):
                 if w.endswith(".path"):
                     continue  # writes nothing; it starts enrollment, which is listed
                 ordered = w in before or name in words(settings(UNITS / w), "After")
                 self.assertTrue(ordered, w)
                 self.assertNotIn("DefaultDependencies", settings(UNITS / w))
+
+    def test_every_writer_spelling_is_counted(self):
+        # MOR-writer-match (#6043): test_every_held_file_goes_at_stop finds a writer by its text, so
+        # each way a unit can name a holdDirs path counts, and a sibling path does not.
+        dirs = check.MOR_LISTED
+        named = [
+            "ExecStart=/usr/bin/x /run/agentos-setup/passphrase\n",
+            "ExecStart=/usr/bin/x /run/agentos-setup -y\n",
+            "ReadWritePaths=/run/agentos-link-capture\n",
+            "ReadWritePaths=/run/agentos-link-capture",
+            "ReadWritePaths=-/run/agentos-setup\n",
+            'Environment="DIR=/run/agentos-setup"\n',
+            "Environment='DIR=/run/agentos-link-capture'\n",
+            "BindPaths=/run/agentos-setup:/mnt\n",
+            "ExecStart=/usr/bin/x %t/agentos-setup\n",
+            "RuntimeDirectory=agentos-setup\n",
+            "RuntimeDirectory=agentos-x agentos-link-capture/first\n",
+            "  RuntimeDirectory = agentos-setup\n",
+            "ExecStart=/usr/bin/x /run/agentos-setup\\\n  -y\n",
+            'ExecStart=/bin/sh -c "test -d /run/agentos-setup&&touch x"\n',
+            "ExecStart=/bin/sh -c 'ls /run/agentos-setup|wc'\n",
+            "Environment=DIRS=/run/agentos-setup,/tmp\n",
+            'ExecStart=/bin/sh -c "x=$(ls /run/agentos-setup)"\n',
+            "ExecStart=/bin/sh -c 'echo /run/agentos-setup>/dev/null'\n",
+            "ExecStart=/bin/sh -c 'cat /run/agentos-setup*'\n",
+            'ExecStart=/bin/sh -c "d=${D:-/run/agentos-setup}"\n',
+            "RuntimeDirectory=agentos-x \\\n  agentos-setup\n",
+            "InaccessiblePaths=/var/lib/x\nReadWritePaths=/run/agentos-setup\n",
+        ]
+        for t in named:
+            with self.subTest(t):
+                self.assertTrue(names_held_dir(t, dirs))
+        # A directory setting through the unit's own name: the template's instance may be any name.
+        for t, unit in [("RuntimeDirectory=%p\n", "agentos-setup.service"),
+                        ("RuntimeDirectory=%N/x\n", "agentos-link-capture.service"),
+                        ("RuntimeDirectory=%n\n", "agentos-setup"),
+                        ("RuntimeDirectory=agentos-%j\n", "x-setup.service"),
+                        ("RuntimeDirectory=agentos-%i\n", "agentos-keeper-setup@.service"),
+                        ("RuntimeDirectory=%I\n", "agentos-keeper-setup@.service"),
+                        ("RuntimeDirectory=agentos-%i\n", "agentos-keeper-setup@setup.service")]:
+            with self.subTest(t, unit=unit):
+                self.assertTrue(names_held_dir(t, dirs, unit))
+        for t, unit in [("RuntimeDirectory=%p\n", "agentos-setupx.service"),
+                        ("RuntimeDirectory=agentos-%i\n", "agentos-keeper-setup@other.service"),
+                        ("RuntimeDirectory=%i-x\n", "agentos-keeper-setup@.service")]:
+            with self.subTest(t, unit=unit):
+                self.assertFalse(names_held_dir(t, dirs, unit))
+        apart = [
+            "ExecStart=/usr/bin/x /run/agentos-setupx\n",
+            "ReadWritePaths=/run/agentos-link-capture-old\n",
+            "ExecStart=/usr/bin/x /run/agentos-setup.bak/f\n",
+            "RuntimeDirectory=agentos-setupx\n",
+            "StateDirectory=agentos-setup\n",
+            "CacheDirectory=agentos-link-capture\n",
+            "# Not RuntimeDirectory=agentos-setup: a comment writes nothing\n",
+            "InaccessiblePaths=/run/agentos-setup\n",
+            "InaccessiblePaths=-/var/lib/x /run/agentos-setup /run/agentos-link-capture\n",
+            "  InaccessiblePaths = /var/lib/x \\\n  /run/agentos-setup\n",
+        ]
+        for t in apart:
+            with self.subTest(t):
+                self.assertFalse(names_held_dir(t, dirs))
 
     def test_an_isolate_keeps_the_staged_page_authority(self):
         # MOR-setup-isolate (#5858, HW-1, CH-9): RefuseManualStop= does not cover an isolate, so
