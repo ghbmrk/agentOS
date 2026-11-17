@@ -133,72 +133,44 @@ func (d DirTarget) Tables(id string) ([]uint64, error) {
 
 func (DirTarget) AppendOnly() bool { return false }
 
-// maxSealedTable is the longest key table a target may hold: the largest
-// table UnwrapTable accepts (maxTable bytes of plaintext), sealed. Sealing
-// adds the header and one tag per chunk, and a full last chunk is still one
-// chunk, so it is headerLen + maxTable + ceil(maxTable/chunkSize)*tagSize.
+// maxSealedTable is the largest table UnwrapTable accepts, sealed: header,
+// maxTable bytes and one tag per chunk (a full last chunk is one chunk).
 const maxSealedTable = int64(headerLen + maxTable + (maxTable+chunkSize-1)/chunkSize*tagSize)
 
-// readFile reads a key table at p, refusing what a table is never
-// (REV-CHK-links, #3945, #3998). The directory is the owner's choice and
-// the read runs as root, so another uid may have planted the name: a link
-// is refused by O_NOFOLLOW; a FIFO, socket, device or directory by the
-// type of the open descriptor, O_NONBLOCK keeping the open of a FIFO from
-// waiting for a writer; and a file over maxSealedTable unread. A regular
-// file's reads never block, so O_NONBLOCK stays set. O_NOCTTY keeps a
-// planted terminal from becoming the daemon's controlling terminal; os.OpenFile
-// sets O_CLOEXEC itself.
+var fileKinds = map[fs.FileMode]string{fs.ModeNamedPipe: "named pipe", fs.ModeSocket: "socket", fs.ModeDevice: "device", fs.ModeDir: "directory"}
+
+// readFile reads a key table at p as root, refusing what a planted name may be
+// (REV-CHK-links, #3945, #3998): a link (O_NOFOLLOW); a FIFO, socket, device or
+// directory, by the descriptor's type (O_NONBLOCK keeps a FIFO's open from
+// waiting, O_NOCTTY a terminal from becoming the daemon's); a file over
+// maxSealedTable, unread.
 func readFile(p string) ([]byte, error) {
 	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0)
 	if errors.Is(err, syscall.ENXIO) {
-		return nil, fmt.Errorf("backup: %s is a socket or a device with no driver, not a regular file: %w", p, err)
+		err = fmt.Errorf("backup: %s is a socket or a device with no driver: %w", p, err)
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	st, err := f.Stat() // fstat of the descriptor opened, not of the name
+	st, err := f.Stat()
+	if err == nil && !st.Mode().IsRegular() {
+		err = fmt.Errorf("backup: %s is a %s, not a regular file", p, fileKinds[st.Mode().Type()&^fs.ModeCharDevice])
+	} else if err == nil && st.Size() > maxSealedTable {
+		err = fmt.Errorf("backup: %s is %d bytes, over the %d a key table can be", p, st.Size(), maxSealedTable)
+	}
 	if err != nil {
 		return nil, err
 	}
-	if m := st.Mode(); !m.IsRegular() {
-		return nil, fmt.Errorf("backup: %s is a %s, not a regular file", p, typeName(m))
-	}
-	if st.Size() > maxSealedTable {
-		return nil, fmt.Errorf("backup: %s is %d bytes, over the %d a key table can be", p, st.Size(), maxSealedTable)
-	}
-	b, err := readBounded(f, maxSealedTable)
-	if err != nil {
-		return nil, fmt.Errorf("backup: %s: %w", p, err)
-	}
-	return b, nil
+	return readBounded(f, maxSealedTable)
 }
 
-// readBounded reads r to its end, refusing more than n bytes: a file can
-// grow between its fstat and its read.
+// readBounded reads r to its end, refusing over n bytes: a file can grow
+// between its fstat and its read.
 func readBounded(r io.Reader, n int64) ([]byte, error) {
 	b, err := io.ReadAll(io.LimitReader(r, n+1))
-	if err != nil {
-		return nil, err
+	if err == nil && int64(len(b)) > n {
+		return nil, fmt.Errorf("backup: over the %d bytes a key table can be", n)
 	}
-	if int64(len(b)) > n {
-		return nil, fmt.Errorf("over the %d bytes a key table can be", n)
-	}
-	return b, nil
-}
-
-func typeName(m fs.FileMode) string {
-	switch {
-	case m&fs.ModeNamedPipe != 0:
-		return "named pipe"
-	case m&fs.ModeSocket != 0:
-		return "socket"
-	case m&fs.ModeCharDevice != 0:
-		return "character device"
-	case m&fs.ModeDevice != 0:
-		return "block device"
-	case m.IsDir():
-		return "directory"
-	}
-	return "non-regular file"
+	return b, err
 }
