@@ -1271,6 +1271,16 @@ func TestLOG4EraseConfirmsEachStoreForItsOwnItems(t *testing.T) {
 	if _, ok := r.keys.M[s]; !ok {
 		t.Fatal("an erase the log did not take deleted the key")
 	}
+	// A store that fails a delete is asked for no more of the subject's
+	// items until its retry.
+	r = newErig(t)
+	s = r.open()
+	r.seal(s, "notes", "message", "a")
+	r.seal(s, "notes", "message", "b")
+	r.notes.failDelete = true
+	if _, err := r.k.Erase(3, s); err != nil || r.notes.deletes != 1 {
+		t.Fatalf("an erase at a failing store: %v after %d deletes", err, r.notes.deletes)
+	}
 }
 
 // toggleRand draws from r until fail is set.
@@ -1299,8 +1309,14 @@ func TestLOG4ADeleteThatWorkedResetsItsBackoff(t *testing.T) {
 	must(t, err)
 	r.k, err = kernel.Boot(l, nil, nil, 0)
 	must(t, err)
-	_, err = r.k.OpenContent(r.keys, map[string]kernel.ContentStore{"mail": r.mail, "notes": r.notes}, 0)
+	stores := map[string]kernel.ContentStore{"mail": r.mail, "notes": r.notes}
+	_, err = r.k.OpenContent(r.keys, stores, 0)
 	must(t, err)
+	// OpenContent retries every erase not confirmed, as Tick does.
+	retry := func(at int64) error {
+		_, err := r.k.OpenContent(r.keys, stores, at)
+		return err
+	}
 	s := r.open()
 	r.seal(s, "notes", "message", "a")
 	r.notes.failDelete = true
@@ -1308,13 +1324,13 @@ func TestLOG4ADeleteThatWorkedResetsItsBackoff(t *testing.T) {
 	// The retry deletes, then its confirmation's nonce draw fails.
 	r.notes.failDelete, tr.fail = false, true
 	t1 := 10 + kernel.RetryMin
-	if err := r.k.Tick(t1); err == nil {
+	if err := retry(t1); err == nil {
 		t.Fatal("a confirmation the log did not take")
 	}
 	tr.fail, r.notes.failDelete = false, true
-	must(t, r.k.Tick(t1+1))
+	must(t, retry(t1+1))
 	r.notes.failDelete = false
-	must(t, r.k.Tick(t1+1+kernel.RetryMin))
+	must(t, retry(t1+1+kernel.RetryMin))
 	if u := r.k.State().Unerased(); u != nil {
 		t.Fatalf("a retry held past a fresh RetryMin: %+v", u)
 	}
