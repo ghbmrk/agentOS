@@ -104,9 +104,11 @@ jobs:
           sudo chroot "$RUNNER_TEMP/image-tools" dpkg-query -W systemd kmod
       - name: The keyring check refuses an altered, a missing and an extra key (IMG-keyring-pin, #5578)
         if: steps.scope.outputs.records != 'true'
-        # The committed list passes on the runner's keyring; three copies of the check, each with
-        # its list changed, must fail on it: a pinned fingerprint altered, a pinned key dropped (the
-        # keyring then holds a key not pinned), and a key added (a pinned key is then missing).
+        # The committed list passes on the runner's keyrings; three copies of the check, each with
+        # its list changed, must fail on them: a pinned fingerprint altered, a pinned key dropped (the
+        # keyring then holds a key not pinned), and a key added (a pinned key is then missing). The
+        # first fingerprint is the 12/bookworm archive key, pinned in its own keyring (which the
+        # sources name, #5954) and in the whole one.
         run: |
           k=image/debian-archive-keyring.sh d=$RUNNER_TEMP/keyring-check
           sh "$k"
