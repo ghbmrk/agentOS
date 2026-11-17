@@ -1127,12 +1127,14 @@ func TestLOG4ContentRefusesEachCauseByName(t *testing.T) {
 		t.Fatalf("a read from a failing store: %v", err)
 	}
 	keys.failGet = true
+	if _, err := open(map[string]kernel.ContentStore{"mail": mail}); !errors.Is(err, errDown) {
+		t.Fatalf("content opened under a failing key table: %v", err)
+	}
 	if _, err := r.k.Read(h); !errors.Is(err, errDown) {
 		t.Fatalf("a read under a failing key table: %v", err)
 	}
-	// A subject.opened or content.stored entry whose body does not decode
-	// fails the boot.
-	for _, typ := range []string{kernel.TSubjectOpened, kernel.TContentStored} {
+	// A content or erase entry whose body does not decode fails the boot.
+	for _, typ := range []string{kernel.TSubjectOpened, kernel.TContentStored, kernel.TSubjectErased, kernel.TEraseConfirmed} {
 		r := newErig(t)
 		_, err := r.k.Log().Append(1, typ, 1, map[string]any{"subject": 5})
 		must(t, err)
@@ -1154,6 +1156,9 @@ func TestLOG4OpenSubjectNeedsContentAndAWholeDraw(t *testing.T) {
 		must(t, err)
 		if _, err := k.OpenSubject(1); !errors.Is(err, kernel.ErrContentClosed) {
 			t.Fatalf("a subject opened before content: %v", err)
+		}
+		if _, err := k.Read(kernel.Hash{}); !errors.Is(err, kernel.ErrContentClosed) {
+			t.Fatalf("a read before content: %v", err)
 		}
 		keys := kernel.NewMemKeys()
 		_, err = k.OpenContent(keys, map[string]kernel.ContentStore{}, 0)
@@ -1205,6 +1210,7 @@ func TestLOG4RestoredItemOfAnErasedSubjectIsDeletedAgain(t *testing.T) {
 	hs := []kernel.Hash{r.seal(s, "mail", "message", "x"), r.seal(s, "mail", "message", "y")}
 	kept := r.seal(live, "mail", "message", "z")
 	cts := [][]byte{slices.Clone(r.mail.M[hs[0]]), slices.Clone(r.mail.M[hs[1]])}
+	key := r.keys.M[s]
 	_, err := r.k.Erase(3, s)
 	must(t, err)
 	for _, h := range hs {
@@ -1213,7 +1219,7 @@ func TestLOG4RestoredItemOfAnErasedSubjectIsDeletedAgain(t *testing.T) {
 		}
 	}
 	// a restore from a backup taken before the erase, then a start
-	r.mail.M[hs[0]], r.mail.M[hs[1]] = cts[0], cts[1]
+	r.mail.M[hs[0]], r.mail.M[hs[1]], r.keys.M[s] = cts[0], cts[1], key
 	r.k, err = kernel.Boot(r.k.Log(), nil, nil, 0)
 	must(t, err)
 	_, err = r.k.OpenContent(r.keys, map[string]kernel.ContentStore{"mail": r.mail}, 0)
@@ -1223,8 +1229,47 @@ func TestLOG4RestoredItemOfAnErasedSubjectIsDeletedAgain(t *testing.T) {
 			t.Fatal("a restored item of an erased subject outlived the start")
 		}
 	}
+	if _, ok := r.keys.M[s]; ok {
+		t.Fatal("a restored key of an erased subject outlived the start")
+	}
 	if pt, err := r.k.Read(kept); err != nil || string(pt) != "z" {
 		t.Fatalf("a live item after the start: %q, %v", pt, err)
+	}
+}
+
+// An erase refuses an unknown subject, deletes nothing it did not log,
+// asks each store for its own items only, and confirms the stores in order
+// (LOG-4).
+func TestLOG4EraseConfirmsEachStoreForItsOwnItems(t *testing.T) {
+	// REQ: LOG-4
+	r := newErig(t)
+	if _, err := r.k.Erase(3, "nosuch"); !errors.Is(err, kernel.ErrSubject) {
+		t.Fatalf("an erase of an unknown subject: %v", err)
+	}
+	if c := r.k.Confirm(kernel.Confirmation{Subject: "nosuch"}); !reflect.DeepEqual(c, kernel.Confirmation{Subject: "nosuch"}) {
+		t.Fatalf("a confirmation of an unknown subject: %+v", c)
+	}
+	s := r.open()
+	r.seal(s, "notes", "message", "a")
+	r.seal(s, "mail", "message", "b")
+	c, err := r.k.Erase(3, s)
+	must(t, err)
+	if !slices.Equal(c.Confirmed, []string{kernel.KeyTable, "mail", "notes"}) || r.mail.deletes != 1 || r.notes.deletes != 1 {
+		t.Fatalf("confirmed %v after %d mail and %d notes deletes", c.Confirmed, r.mail.deletes, r.notes.deletes)
+	}
+	held := r.k.Confirm(kernel.Confirmation{Subject: s, StillHeld: []kernel.BackupHold{{Backup: "b1"}}})
+	if !held.BackupsUnknown || held.StillHeld != nil {
+		t.Fatalf("a confirmation with no backups open: %+v", held)
+	}
+	r = newErig(t)
+	s = r.open()
+	r.k.OpenBackups(newFakeBackups(map[string][]string{"b1": {s}}))
+	r.log.down = true
+	if c, err := r.k.Erase(3, s); err == nil || !reflect.DeepEqual(c, kernel.Confirmation{}) {
+		t.Fatalf("an erase the log did not take: %+v, %v", c, err)
+	}
+	if _, ok := r.keys.M[s]; !ok {
+		t.Fatal("an erase the log did not take deleted the key")
 	}
 }
 
