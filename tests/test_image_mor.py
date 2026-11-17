@@ -327,16 +327,22 @@ class WipeJournalTest(unittest.TestCase):
         zz, lib = "etc/systemd/journald.conf.d/zz.conf", "usr/lib/systemd/journald.conf.d/zz.conf"
         must = "; must be persistent (change or remove that line)"
         level = "; must store info, a unit's stderr (set info or debug, or remove that line)"
+        ignored = ", keeping the one before it (set a valid one or remove that line)"
         for rel, text, want in (
                 (self.DROPIN, None, "journald Storage is not set (auto); must be persistent "
                                     "(usr/lib/systemd/journald.conf.d/50-agentos-persist.conf is missing)"),
                 (zz, "[Journal]\nStorage=volatile\n", zz + ": journald Storage is volatile" + must),
                 (zz, "[Journal]\nStorage=auto\n", zz + ": journald Storage is auto" + must),
-                (zz, "[Journal]\nStorage=\n", zz + ": journald Storage is reset to auto" + must),
+                (zz, "[Journal]\nStorage=\n", zz + ": journald Storage= is a value journald ignores" + ignored),
+                (zz, "[Journal]\nStorage=Persistent\n", zz + ": journald Storage=Persistent is a value journald ignores"
+                 + ignored),
                 (self.DROPIN, "[Journal]\nStorage=none\n", self.DROPIN + ": journald Storage is none" + must),
                 (lib, "[Journal]\nMaxLevelStore=notice\n", lib + ": journald MaxLevelStore is notice" + level),
                 (lib, "[Journal]\nMaxLevelStore=5\n", lib + ": journald MaxLevelStore is 5" + level),
-                (lib, "[Journal]\nMaxLevelStore=x\n", lib + ": journald MaxLevelStore is x" + level),
+                (lib, "[Journal]\nMaxLevelStore=x\n", lib + ": journald MaxLevelStore=x is a value journald ignores"
+                 + ignored),
+                (lib, "[Journal]\nMaxLevelStore=8\n", lib + ": journald MaxLevelStore=8 is a value journald ignores"
+                 + ignored),
                 (zz, b"[Journal]\nX=\xff\n", zz + ": unreadable ("),
                 ("run/systemd/journald.conf.d/a.conf", "[Journal]\nStorage=persistent\n", "/run is a tmpfs")):
             with self.subTest(rel=rel, text=text):
@@ -352,18 +358,28 @@ class WipeJournalTest(unittest.TestCase):
                     (self.root / rel).unlink()
                 write(self.root, self.DROPIN, saved)
                 self.assertNotIn("journald", self.v())
-        # The later file decides, and is the one named.
-        write(self.root, lib, "[Journal]\nStorage=volatile\n")
-        write(self.root, zz, "[Journal]\nStorage=persistent\n")
-        self.assertNotIn("journald", self.v())
-        (self.root / zz).unlink()
+        # The later file decides (drop-ins in name order, whatever their directory), and is the one named.
+        early = "usr/lib/systemd/journald.conf.d/40-a.conf"
+        write(self.root, early, "[Journal]\nStorage=volatile\n")
+        self.assertNotIn("journald", self.v())  # the shipped 50- drop-in is read after it
+        write(self.root, zz, "[Journal]\nStorage=volatile\n")
         self.assertEqual([v for v in check.violations(self.root) if "journald" in v],
-                         [lib + ": journald Storage is volatile" + must])
-        (self.root / lib).unlink()
-        for level in ("info", "debug", "6", "7"):
-            with self.subTest(level=level):
-                write(self.root, zz, "[Journal]\nMaxLevelStore=%s\n" % level)
+                         [zz + ": journald Storage is volatile" + must])
+        (self.root / zz).unlink()
+        (self.root / early).unlink()
+        # Security on #6086: an empty value is ignored, not a reset, so notice still holds after it.
+        write(self.root, early, "[Journal]\nMaxLevelStore=notice\n")
+        write(self.root, zz, "[Journal]\nMaxLevelStore=\n")
+        self.assertEqual([v for v in check.violations(self.root) if "journald" in v],
+                         [zz + ": journald MaxLevelStore= is a value journald ignores" + ignored,
+                          early + ": journald MaxLevelStore is notice" + level])
+        (self.root / zz).unlink()
+        (self.root / early).unlink()
+        for kept in ("info", "debug", "6", "7"):
+            with self.subTest(kept=kept):
+                write(self.root, zz, "[Journal]\nMaxLevelStore=%s\n" % kept)
                 self.assertNotIn("journald", self.v())
+
 
 if __name__ == "__main__":
     unittest.main()

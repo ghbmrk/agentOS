@@ -1331,35 +1331,40 @@ def dump_violations(root):
 LOG_LEVELS = ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug")
 
 
-def journal_last(files, key):
-    """journald's final [Journal] KEY across readable FILES, as ini_last reads it, and the file that set
-    it: (None, file) when an empty assignment reset it, (None, None) when nothing set it."""
-    val, where = None, None
-    for f in files:
-        for s, k, v in config_lines(f.content()):
-            if (s, k) == ("Journal", key):
-                val, where = v or None, f.rel
-    return val, where
+# journald's Storage= values (v257 storage_from_string).
+STORAGES = ("auto", "volatile", "persistent", "none")
 
 
 def journal_violations(root):
     """MOR-wipe-journal (#6078): a failed wipe's error (info, to the journal only) is still on disk
-    at the next boot. Storage=auto would rest on Debian's postinst having made /var/log/journal."""
-    out, files = [], main_conf(root, "journald.conf")
+    at the next boot. Storage=auto would rest on Debian's postinst having made /var/log/journal.
+    journald (v257 config_parse_storage, config_parse_log_level) ignores a value it cannot parse,
+    an empty one included, and keeps the one before it, so such a value is refused, never read as a
+    reset (Security on #6086). Each refusal names the file whose line decides."""
+    out, last, files = [], {}, main_conf(root, "journald.conf")
     for f in files:
         try:
-            config_lines(f.content())
+            lines = config_lines(f.content())
         except (OSError, Unparsable) as e:
             return ["%s: unreadable (%s); journald may not read it whole"
                     % (f.rel, e.strerror if isinstance(e, OSError) else e)]
-    storage, where = journal_last(files, "Storage")
-    if storage != "persistent":
-        out.append("%s: journald Storage is %s; must be persistent (change or remove that line)"
-                   % (where, storage or "reset to auto") if where else
-                   "journald Storage is not set (auto); must be persistent "
+        for sec, key, val in lines:
+            valid = {"Storage": STORAGES, "MaxLevelStore": LOG_LEVELS + tuple("01234567")}.get(key)
+            if sec != "Journal" or valid is None:
+                continue
+            if val not in valid:
+                out.append("%s: journald %s=%s is a value journald ignores, keeping the one before it "
+                           "(set a valid one or remove that line)" % (f.rel, key, val))
+            else:
+                last[key] = (val, f.rel)
+    storage, where = last.get("Storage", (None, None))
+    if not where:
+        out.append("journald Storage is not set (auto); must be persistent "
                    "(usr/lib/systemd/journald.conf.d/50-agentos-persist.conf is missing)")
-    level, where = journal_last(files, "MaxLevelStore")
-    if level is not None and level not in LOG_LEVELS[6:] and level not in ("6", "7"):
+    elif storage != "persistent":
+        out.append("%s: journald Storage is %s; must be persistent (change or remove that line)" % (where, storage))
+    level, where = last.get("MaxLevelStore", ("debug", None))
+    if level not in ("info", "debug", "6", "7"):
         out.append("%s: journald MaxLevelStore is %s; must store info, a unit's stderr (set info or debug, "
                    "or remove that line)" % (where, level))
     return out
