@@ -15,6 +15,10 @@ on:
     paths:
       - "image/**"
       - ".github/workflows/image.yml"
+      # The guest roots build.sh builds into the image (#5889): import_sweep.allow pins the codex
+      # binaries by SHA-256, so a version bump in build-rootfs.sh must meet the sweep in its own PR.
+      - "guest/codex/**"
+      - "guest/openclaw/**"
       - "tools/hostcheck.py"
       - "tools/hostcheck_image/**"
       - "tests/test_hostcheck.py"
@@ -55,6 +59,10 @@ on:
     paths:
       - "image/**"
       - ".github/workflows/image.yml"
+      # The guest roots build.sh builds into the image (#5889): import_sweep.allow pins the codex
+      # binaries by SHA-256, so a version bump in build-rootfs.sh must meet the sweep in its own PR.
+      - "guest/codex/**"
+      - "guest/openclaw/**"
       - "tools/hostcheck.py"
       - "tools/hostcheck_image/**"
       - "tests/test_hostcheck.py"
