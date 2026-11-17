@@ -343,20 +343,18 @@ class WiringTest(unittest.TestCase):
                             "node_modules/@x/y-darwin-x64": {}}}
         self.assertEqual(missing_libc(bad), ["node_modules/@x/y-linux-x64-gnu", "node_modules/@x/y-linux-x64-musl"])
 
-    def test_ci_checks_the_guest_lockfile_with_the_guests_npm(self):
-        # #2914: npm 10 wrote a lockfile that dropped libc constraints; the guest's own npm must reproduce it.
-        ci = (ROOT / ".github/workflows/ci.yml").read_text()
-        step = ci[ci.index("- name: OpenClaw guest lockfile"):]
-        step = step[:step.index("      - name: The guests' Debian userland")]
-        for want in ("s/^NODE_VERSION=//p", "s/^NODE_SHA256=//p", "sha256sum -c -",
-                     "npm install --package-lock-only --ignore-scripts",
-                     "git diff --exit-code -- guest/openclaw/package-lock.json"):
-            self.assertIn(want, step)
-        self.assertLess(step.index("sha256sum -c -"), step.index("npm install"))
-        self.assertLess(step.index("npm install"), step.index("git diff --exit-code"))
+    def test_the_guest_lockfile_is_held_by_npm_ci_and_the_libc_test(self):
+        # #2914 / #5990: CI once re-resolved the lockfile with a second copy of the pinned Node. That
+        # step is gone: a lock-only re-resolve keeps a libc-less entry as it is (so the libc test
+        # above checks the field itself), and the rootfs build's `npm ci` refuses a package.json
+        # whose dependencies the lockfile does not hold. This pins both premises.
         sh = (ROOT / "guest/openclaw/build-rootfs.sh").read_text()
-        self.assertRegex(sh, r"(?m)^NODE_VERSION=v\d")
-        self.assertRegex(sh, r"(?m)^NODE_SHA256=[0-9a-f]{64}$")
+        self.assertIn('cp "$here/package.json" "$here/package-lock.json" opt/openclaw/', sh)
+        self.assertRegex(sh, r"\(cd opt/openclaw && PATH=\"\$out/usr/local/bin:\$PATH\" npm ci ")
+        self.assertNotRegex(sh, r"npm (?:i|install)\b")
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn("sh guest/openclaw/build-rootfs.sh /tmp/ocroot", ci)
+        self.assertNotIn("package-lock-only", ci)
 
 
 if __name__ == "__main__":
