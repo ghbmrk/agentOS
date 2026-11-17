@@ -40,7 +40,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | STO-2c-setup-f1 | Where a clerk main reads the owner's anchors on a box set up through the log (D-146), for the STO-2b clerk-main row (from #2996). | #2996; STO-2b clerk main | queued (later, recheck) |
 | KRN-2-msgparse | Move RFC 5322 header and Gmail JSON parsing out of the mail clerk's process; fix netguard_allow.txt's stale Store.sessionB (from TB-parsers-2). | #3018 | queued (later) |
 | MIG-4-exit-3-later | OAuth exit clerk: real no-token-in-log test, token timeout tests, transient-fault retry, error-code reading, provider tolerances (later items from #2638). | #2642 | queued (later) |
-| CORE-fixture-mark | Name test fixtures in core.txt rather than by package-name rule (from #3040). | #3040 | building (later) |
 | MIG-4-guest-keys | agentosd gives each guest machine a key narrowed from the owner's clerk-key grant: holder key in agentosd's state dir (Mark, A), `Keys` per machine, then the owner's KEY-4 passkey grant and a clerk. | MIG-4-untrusted-guest (2784a); the passkey signer seam (#2779 comment 6396976126) | queued (tier A) |
 | A21-image | A21 through the image's own units: the slice boot drives each case through agentosd's kernel, the hosted mail clerk and the plan command, the owner's ask over the SMS fake (MIG-3-1 remainder) | #3117, #2682, MIG-4-run | queued (release; tier A; after #2682) |
 | MIG-4-plan-credits | Read the Codex credits headers on the plan endpoint, so a credit draw before a window's limit closes the pool (RES-5; from MIG-4-plan-login-b). | MIG-4-plan-credits | queued (tier A; later; recheck; needs a measurement) |
@@ -93,7 +92,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ID | Package | Needs | State |
 |---|---|---|---|
 | RT-2 | Risk-tier follow-ups from PR #705's reviews (brief to write): CI and reviewers compute the tier with the base branch's `tools/risk_tier.py`, not the PR's own copy (invariant: a PR cannot edit the rules that set its review depth; failure: a PR drops `image/` from the A list and edits a unit, and both runs print B); `tools/hostcheck*` to A (HOST-1e; failure: a C PR allow-lists a real host change and the HW-8 check reports it as disclosed) | RT-1 | queued |
-| STALEQ-closes-f1 | `tools/stalequeued.py` only sees open issues (`board.work_items` uses `state=open`), and GitHub auto-closes an issue when a PR with `Closes #N` merges to main. So the `closed by PR #N` line fires mostly when the row was reopened after that PR merged (more owed), or the keyword was added after merge, and a dispatcher then skips a live row. Option: report `closes` only when the PR merged after the issue's last reopen (issue events), else `maybe: reopened after PR #M` (later, recheck; L3 on #2255). | STALEQ-closes | building |
 | OPS-budget-pointer | Budget skill pointer gets the Read fallback; docs citing CLAUDE.md §Budget point at the skill | MIG-1 | queued (C; gate files; after #2523) |
 | TN-graph-ci | agentOS's own inventory as a graph on TN-graph's engine, checked against KRN-11 in CI. Gate file: Security accept. | A21 passed; TN-graph, TN-mailreset | queued (release; sub A; tier A; gate file, Security accept; after A21) |
 | VULN-openclaw | Bump the npm override in the openclaw guest once npm bundles ip-address >= 10.7.4 (GHSA-rxp7-6hxx-x8q5, left from #2895). | #2855 | queued (later; tier A) |
@@ -105,8 +103,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-unmarked-gaps | VULN-unmarked-gaps: unmarked copies the string-fingerprint check cannot see (small packages, minified-only packages, copies inside the holder's own unminified scripts, a second copy in a file that already names the package) | VULN-inlined-minified (#4234) | queued (later; tier A) |
 | MET-owner-export | MET-owner-export: the box writes its weekly owner-outcome counts to records/owner/ (needs brief; after G1) | #4935; G1 | queued (release; needs brief; after G1) |
 | VULN-prune-requalify | VULN-prune-requalify: requalify the pruned OpenClaw image (PLN-5, HLD-3) | VULN-controlui-drop (#4436) | queued (release) |
-| BOARD-transition-relation-fu | BOARD-transition-relation-fu: the transition job comments on the issue, names the fix, prints a board: line for a malformed title, and searches by row ID instead of paging every PR (from the #5972 L3). | #1934 | queued (later) |
-| CI-lockguard-fu | CI-lockguard-fu: the guest lockfile step reuses the rootfs build's Node (or is deleted if the libc test makes it redundant) and its failure names the command to run (from the #5973 L3). | #2914 | queued (later) |
 
 ## Owner channel and approvals (SPEC §10)
 
@@ -307,14 +303,11 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-m-d | ENF-m-d: enforcer state partition sealed to the V1410's TPM | #3671; the device | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-core-pair | ENF-core-pair: pin the core's and the enforcer's channel keys at set-up on the page | ENF-l-a | queued(tier A; lane primary; brief briefs/ENF.md) |
 | UNLOCK-closure-exec | UNLOCK-closure-exec: the commands of every unit the unlock step can start are on a closed list, not a word list (#4696 Security R1) | UNLOCK-unit-deps (#4667) | queued (release; tier A) |
-| UNLOCK-allow-wording | UNLOCK-allow-wording: one direction for unlock.allow lines (#4894 L3 4, 5) | UNLOCK-unit-deps (#4667) | building (release; tier B) |
 | NET-2-cap-basis-required | NET-2-cap-basis-required: every signed byte cap names its basis (D-248) | #4578, #5165 | queued (release; tier A) |
 | ENF-shared-quota-b | ENF-shared-quota-b: a host cannot fill its shared segment's records (ct timeout plus per-MAC count and meter). Release; split from #4701; waits for Mark's card. | #4701 | queued (release; tier A; lane primary) |
 | HOST-1e2b | HOST-1e2b: host-untouched check on an S1 PC: the third-system snapshot procedure, RTC offset, the pcrlock index if P2-1 pins one, HOST-1d's opted-in disk excluded by the owner's flag. | #5746 | queued (tier A) |
-| MOR-setup-factors | MOR-setup-factors: an orderly shutdown after the confirm and before a successful enrollment leaves MOR set, because the factors hold /run/agentos-setup. Release; from MOR-setup-hold. | #5836, #4794 | building (release; tier A) |
-| MOR-setup-isolate | MOR-setup-isolate: an isolate before enrollment re-mints the page authority under a printed card; the pageca unit's crash-rerun comment is stale. Release; from MOR-setup-hold. | #5844, #5836 | building (release; tier A) |
 | MOR-emergency-isolate | MOR-emergency-isolate: an isolate to emergency.target stops agentos-mor and clears MOR while secrets stay live. Release; from #5941. | #5941 | queued (release; tier A; gate file) |
-| IMG-offline-verity-follow | IMG-offline-verity-follow: verity row cells and scope; import_sweep fails on EIO (#5945 L3/Potency) | IMG-offline-verity (#4825) | queued (release; tier A) |
+| IMG-offline-verity-follow | IMG-offline-verity-follow: verity row cells and scope; import_sweep fails on EIO (#5945 L3/Potency) | IMG-offline-verity (#4825) | building (release; tier A) |
 | ENF-light-f2 | ENF-light-f2: page words for trips the owner cannot clear name the lift step; (KRN-12, NET-2) | #4305 | queued (release; tier A) |
 | ENF-light-f3 | ENF-light-f3: trip light restart, lift race and bulb latency follow-ups; (KRN-12, NET-2) | #4305 | queued (release; tier A) |
 | ENF-l-ap-fail-shown | ENF-l-ap-fail-shown: home shows an access point whose push keeps failing | #6013 UX 3 | queued(tier A; lane primary; brief briefs/ENF-l-b2.md) |
@@ -416,31 +409,42 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | TIM-1-interval-fu-c | TIM-1-interval-fu-c: the question book moves off Guard.Now to the interval, and the clock drops the restricted mode's last API. Release; from #5216. | #5216, #5279 | queued (release; tier A) |
 | KRN-clock-fresh-rise | KRN-clock-fresh-rise: a kernel started behind the log catches up on a fresh chronyd sample (TIM-1). Release; from #5757. | #5391, #5757 | queued (release; tier A) |
 | LINT-dial-configured | LINT-dial-configured: the inference lint's configured() refuses a local bound to a literal (NET-2). Release; from #5757. | #5757 | building (release) |
-| IMG-dbus-reach | IMG-dbus-reach: hide /run/dbus from the agentOS units that make no bus call, and pin dbus-daemon's start-up command line. | #5766, #5794 | building (release; tier A) |
 | OWN-page-session-mut2c | OWN-page-session mutants part 2c: old cmd/agentosd survivors in evidence, main, held, signinhost (76) | #5862 | queued (release; tier A) |
 | VULN-static-elf | VULN-static-elf: an image-build check that finds static ELFs (llama-server) and makes image-vulncheck scan their toolchain packages. Release; split from #5873. | #5873, #5871, #2919 | building (release; tier A; gate files; brief briefs/VULN-static-elf.md, PR #5940; parts a, b; after #5932, serial with #5889 on image.yml) |
 | KRN-forget-wide | KRN-forget-wide: a FORGET ask that a wide clock reading has already lapsed says so instead of asking. Release; from #5811. | #5391, #5811 | building (release; tier A) |
 | VULN-cipher-sweep-tidy-2 | VULN-cipher-sweep-tidy-2: image.yml paths for the codex digest pins; sweep refusal wording. Release; from #5878. | #5878 | building (release; tier A; gate file .github/workflows/image.yml) |
 | OWN-recall-holdline | OWN-recall-holdline: STATUS hold line names agents as the forget texts do | #5883 | building (release; tier A) |
 | VULN-codex-openssl | VULN-codex-openssl: bump the codex pin once a release links OpenSSL 3.6.5 or later; until then the bundled entry records each fix's reach. Release; from #5888. | #5873, #5888 | queued (release; tier A; waits on a codex release) |
-| CLK-seal-entry-swap-wipe-fu | CLK-seal-entry-swap-wipe-fu: seal wipes an entry value Put, ReplaceAndPut or Delete drops, and encode leaves no pooled JSON copy. Release; from #5897. | #5897 | building (release; tier A) |
-| OWN-page-session-mut6-fu | OWN-page-session-mut6-fu: the a8scan copy of the A8 scanner refuses an empty needle list and drops its dead found map. Release; from #5923. | #5923 | building (release; tier A) |
 | IMG-keyring-pin-b | IMG-keyring-pin-b: the enforcer image and test-kit builds check the Debian archive keyring too. Release; from #5932. | #5932 | building (release; tier A; gate files) |
-| TIM-1-interval-fu-i | TIM-1-interval-fu-i: load refuses a negative saved NTSMono or CarrierMono. Release; from #5931. | #5929, #5931 | building (release; tier A) |
 | KRN-forget-minutes | KRN-forget-minutes: a Forget ask at a reading narrower than 10 minutes promises the true time left. Release; from #5937. | #5937, #5391 | building (release; tier A) |
 | CLK-seal-swap-wipe-fu-b | CLK-seal-swap-wipe-fu-b: pin Unlock's no-clone decode, test the clone-after-refusal claims, name-check before swaps. Release; from #5939. | #5939 | building (release; tier A) |
-| BROWSER-fixture-ci | BROWSER-fixture-ci: the broker CI job runs the real-driver fixture tests instead of skipping them. Release; from #4409. | #4409 | queued (release; tier A; needs brief; startable) |
+| BROWSER-fixture-ci | BROWSER-fixture-ci: the broker CI job runs the real-driver fixture tests instead of skipping them. Release; from #4409. | #4409 | building (release; tier A; brief briefs/BROWSER-fixture-ci.md, PR #6056; startable) |
 | IMG-keyring-minimal | IMG-keyring-minimal: the image builds trust a keyring of only the keys the pinned snapshot is signed with. Release; from #5932. | #5578, #5932 | building (release; tier A; gate files) |
-| METRICS-rebase-delta | METRICS-rebase-delta: METRICS counts weekly the rebases that needed a delta review (D-320 rule 5). Release; from the D-320 PR. | D-320 | queued (release; tier B) |
-| IMG-keyring-spikes | IMG-keyring-spikes: the test kit and the S7 host-image spike trust only the minimal Debian keyrings. Release; from #5961, #5954. | #5954, #5961 | queued (release; tier A; gate files) |
+| IMG-keyring-spikes | IMG-keyring-spikes: the test kit and the S7 host-image spike trust only the minimal Debian keyrings. Release; from #5961, #5954. | #5954, #5961 | building (release; tier A; gate files) |
 | REV-CHK-links-ns5 | REV-CHK-links-ns5: built trees' root user manager units, manager config and env files reach the unit lint | #4718 build | queued (release; tier A; kernel lane) |
 | REV-CHK-links-ns6 | REV-CHK-links-ns6: unit lint false refusals (template-instance and non-service .wants links, serial TTYPath) and the PIDFile= message | #6020 review | building (release; tier A; kernel lane) |
 | KEY-refusal-code | KEY-refusal-code: key.Refusal's code is a closed key.Code set only through key constructors (PLN-4, KRN-5) | #6021 review | building (release; tier A; blocks #4736) |
-| TIM-1-interval-fu-j | TIM-1-interval-fu-j: kill broker/clock's 16 package-wide mutant survivors, then record #5934 in ASSUMPTIONS. Release; from #5934. | #5934 | queued (release; tier A) |
+| TIM-1-interval-fu-j | TIM-1-interval-fu-j: kill broker/clock's 16 package-wide mutant survivors, then record #5934 in ASSUMPTIONS. Release; from #5934. | #5934 | building (release; tier A) |
+| TIM-1-interval-fu-k | TIM-1-interval-fu-k: load bounds a saved AnchorMono on both sides; NTSWall and Carrier trust is stated in ASSUMPTIONS. Release; from #6025. | #5934, #6025 | building (release; tier A) |
 | LINT-dial-caller | LINT-dial-caller: the inference lint checks what a dialing function's callers pass (NET-2). Release; from #5775. | #5775 | queued (release) |
 | KEY-refusal-code-r1 | KEY-refusal-code-r1: #6032 release items (kernel.Refusal encoding, code-var reassignment lint, requal named set, skew note, guest.set types) | #6032 review | queued (release; tier A; after #6032) |
 | IMG-dbus-tight | IMG-dbus-tight: weigh the bus units' commands as systemd runs them, and pin dbus.service's reviewed bytes in the test. | #5980 | queued (release; tier A) |
 | CORE-trim-headroom | CORE-trim-headroom: cut lines from the trusted core that do no work (test-only code, dead code, duplicates) to free headroom under the D-310 ceiling. Release. | D-310, #5732, #5757 | building (release; tier A) |
+| MOR-wipe-console | MOR-wipe-console: agentos-keeper-wipe's errors go to the journal only, not the box console. Release; from #5991. | #5991 | building (release; tier A) |
+| MOR-writer-match | MOR-writer-match: the wipe test counts every hold-dir writer, whatever the spelling. Release; from #5991. | #5991 | building (release; tier B) |
+| CLK-seal-entry-swap-wipe-fu-c | CLK-seal-entry-swap-wipe-fu-c: ReplaceAndPut checks the entry name before the swaps (no 256 MiB Argon2 on a bad name), the commit comment reads plainly, Put doc line. Release; from #5939. | #5913, #5939, #5948 | building (release; tier A) |
+| TIM-1-interval-fu-l | TIM-1-interval-fu-l: clock load checks the state file's owner and mode on read, and bounds saved same-boot alert times. Release; from #6057. | #6026, #6057 | queued (release; tier A) |
+| CI-disk-cause-3 | CI-disk-cause-3: the cache keep step's test pins no-follow of symlinks (the find -L mutant), deletes through find's own directory handle, and drops the du-text parse. Release; from #6047. | #6031, #6047 | building (release; tier A) |
+| BOARD-transition-relation-fu-b | BOARD-transition-relation-fu-b: the transition job reads every merged PR (not 100 hits), keeps both state labels on a restore, posts once per issue, and tests its author_association gate. Release; from #6054. | #5989, #6054 | building (release; tier A) |
+| CI-lockguard-fu-b | CI-lockguard-fu-b: a test pins package.json and the guest lockfile together (no dependency-free package.json, no override for an absent package), and the npm lockfile-format drift is decided. Release; from #6053. | #5990, #6053 | building (release; tier A) |
+| BROWSER-fixture-ci-fu | BROWSER-fixture-ci-fu: a test ties the headless-shell pin to Playwright's browsers.json, and the shell download is cached (restore on PRs, save on main, hash checked). Release; from #6056 and #6063. | #5952, #6056, #6063 | queued (release; tier A) |
+| IMG-keyring-spikes-fu | IMG-keyring-spikes-fu: the retired S7 spike says it is unpinned, and the bookworm key fingerprints are checked against Debian's keys page. Release; from #6055. | #5983, #6055 | queued (release; tier A) |
+| CLK-seal-entry-swap-wipe-fu-d | CLK-seal-entry-swap-wipe-fu-d: the entry-count refusal runs before any slot or swap, withEntry checks its own entry again, and four comment lines are re-wrapped. Release; from #6049. | #6048, #6049 | queued (release; tier A) |
+| IMG-offline-verity-follow-fu | IMG-offline-verity-follow-fu: the import sweep's initrd loop fails the run on a stat error instead of skipping the entry. Release; from #6052. | #5988, #6052 | queued (release; tier A) |
+| VULN-node-openssl-2 | VULN-node-openssl-2: the node bundled entry covers CVE-2026-124709 and CVE-2026-35190 (a fixed node pin if one exists, else reach notes), so vulncheck is green again. | #2919 | building (tier A) |
+| VULN-node-openssl-pin | VULN-node-openssl-pin: bump the openclaw guest's node pin once a release bundles OpenSSL 3.5.10; until then the bundled entry records each fix's reach. Release; from #6074. | #5853, #6074 | queued (release; tier A; waits on a node release) |
+| MOR-wipe-journal | MOR-wipe-journal: the wipe unit's journal-only errors are known to persist across reboot (or the volatility is recorded). Release; from #6067. | #6042, #6067 | queued (release; tier A) |
+| IMG-keyring-spikes-r | IMG-keyring-spikes-r: S7's mkosi tree says it is unpinned; the mkosi inventory skips untracked files. Release; from #6055. | #6055 | queued (release; tier C) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -468,7 +472,6 @@ issue #4021: needs exactly one state label of queued, building, in review, merge
 issue #4023: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4339: body has no board-row block
 issue #4382: no section 'Tooling and CI' in BOARD.md
-issue #4422: no section 'Tooling and CI' in BOARD.md
 issue #4795: body has no board-row block
 issue #4902: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4916: body has no board-row block
@@ -487,7 +490,7 @@ issue #6005: needs exactly one state label of queued, building, in review, merge
 issue #6006: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #6007: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #6008: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #6026: a second issue for TIM-1-interval-fu-j (first is #6024)
-issue #6031: body has no board-row block
 issue #6033: body has no board-row block
+issue #6069: body has no board-row block
+issue #6077: body has no board-row block
 ```
