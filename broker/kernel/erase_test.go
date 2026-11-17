@@ -993,8 +993,11 @@ func TestTIM1AWideReadingRefusesAForgetAsk(t *testing.T) {
 		if !errors.Is(err, kernel.ErrForgetClock) || text != "" {
 			t.Fatalf("an ask at a reading %d ms wide: %q, %v", w, text, err)
 		}
-		if !strings.Contains(err.Error(), "Send FORGET again after my weekly restart.") || strings.Contains(err.Error(), "Restart me") {
-			t.Fatalf("the refusal names no step, or one that commits the clock: %q", err)
+		// The step named is the page's Forget (D-284: a FORGET text starts
+		// none), never a restart that commits the clock, in one segment.
+		if m := err.Error(); !strings.Contains(m, "Try Forget on my Wi-Fi page after my weekly restart.") ||
+			strings.Contains(m, "Restart me") || strings.Contains(m, "FORGET") || len(m) > 160 {
+			t.Fatalf("the refusal names no step, one that cannot work, or one that commits the clock: %q", err)
 		}
 	}
 	at(20, 20)
