@@ -100,6 +100,26 @@ class MorUnitTest(unittest.TestCase):
         for key in ("ExecStop", "ExecStopPre"):
             self.assertNotIn(key, s)
 
+    def test_an_isolate_keeps_the_staged_page_authority(self):
+        # MOR-setup-isolate (#5858, HW-1, CH-9): RefuseManualStop= does not cover an isolate, so
+        # "systemctl isolate rescue.target" stopped the staging unit, its stop removed the pair, and
+        # the next confirm staged a new authority under a card already printed. An isolate now leaves
+        # the unit active. Shutdown still stops it through Conflicts=shutdown.target (default
+        # dependencies kept), so the pair goes before the clear. No other unit may stop it through a
+        # dependency: the staging names none that would, and no image unit names it in one that would.
+        name = "agentos-keeper-pageca.service"
+        unit = UNITS / name
+        self.assertEqual(ini(unit)["Unit"]["IgnoreOnIsolate"], "yes")
+        s = settings(unit)
+        self.assertNotIn("DefaultDependencies", s)
+        for key in ("Conflicts", "BindsTo", "PartOf", "Requires", "Requisite", "StopPropagatedFrom"):
+            self.assertNotIn(key, s)
+        self.assertEqual(sorted(UNITS.glob(name + ".d/*")), [])
+        for f in [u for u in UNITS.iterdir() if u.is_file()] + list(UNITS.glob("*.d/*.conf")):
+            for key in ("Conflicts", "PropagatesStopTo"):
+                with self.subTest(f.name, key=key):
+                    self.assertNotIn(name, words(settings(f), key))
+
     def test_build_installs_the_program(self):
         build = (ROOT / "image/build.sh").read_text()
         loop = re.search(r"for cmd in ([^;]+); do", build, re.S).group(1).split()
