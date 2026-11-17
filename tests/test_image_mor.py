@@ -323,31 +323,47 @@ class WipeJournalTest(unittest.TestCase):
         self.assertNotIn("journald", self.v())
 
     def test_the_tree_check_refuses_a_journal_that_forgets(self):
-        for rel, text, needle in (
-                (self.DROPIN, None, "Storage is None"),
-                ("etc/systemd/journald.conf.d/zz.conf", "[Journal]\nStorage=volatile\n", "Storage is volatile"),
-                ("etc/systemd/journald.conf.d/zz.conf", "[Journal]\nStorage=auto\n", "Storage is auto"),
-                ("etc/systemd/journald.conf.d/zz.conf", "[Journal]\nStorage=\n", "Storage is None"),
-                ("usr/lib/systemd/journald.conf.d/zz.conf", "[Journal]\nMaxLevelStore=notice\n", "MaxLevelStore is notice"),
-                ("usr/lib/systemd/journald.conf.d/zz.conf", "[Journal]\nMaxLevelStore=5\n", "MaxLevelStore is 5"),
-                ("usr/lib/systemd/journald.conf.d/zz.conf", "[Journal]\nMaxLevelStore=x\n", "MaxLevelStore is x"),
+        # UX on #6086: each refusal names the file whose line decides, or says the shipped drop-in is missing.
+        zz, lib = "etc/systemd/journald.conf.d/zz.conf", "usr/lib/systemd/journald.conf.d/zz.conf"
+        must = "; must be persistent (change or remove that line)"
+        level = "; must store info, a unit's stderr (set info or debug, or remove that line)"
+        for rel, text, want in (
+                (self.DROPIN, None, "journald Storage is not set (auto); must be persistent "
+                                    "(usr/lib/systemd/journald.conf.d/50-agentos-persist.conf is missing)"),
+                (zz, "[Journal]\nStorage=volatile\n", zz + ": journald Storage is volatile" + must),
+                (zz, "[Journal]\nStorage=auto\n", zz + ": journald Storage is auto" + must),
+                (zz, "[Journal]\nStorage=\n", zz + ": journald Storage is reset to auto" + must),
+                (self.DROPIN, "[Journal]\nStorage=none\n", self.DROPIN + ": journald Storage is none" + must),
+                (lib, "[Journal]\nMaxLevelStore=notice\n", lib + ": journald MaxLevelStore is notice" + level),
+                (lib, "[Journal]\nMaxLevelStore=5\n", lib + ": journald MaxLevelStore is 5" + level),
+                (lib, "[Journal]\nMaxLevelStore=x\n", lib + ": journald MaxLevelStore is x" + level),
+                (zz, b"[Journal]\nX=\xff\n", zz + ": unreadable ("),
                 ("run/systemd/journald.conf.d/a.conf", "[Journal]\nStorage=persistent\n", "/run is a tmpfs")):
             with self.subTest(rel=rel, text=text):
                 saved = (self.root / self.DROPIN).read_text()
                 if text is None:
                     (self.root / rel).unlink()
+                elif isinstance(text, bytes):
+                    (self.root / rel).write_bytes(text)
                 else:
                     write(self.root, rel, text)
-                self.assertIn(needle, self.v())
-                if text is not None:
+                self.assertIn(want, self.v())
+                if rel != self.DROPIN:
                     (self.root / rel).unlink()
                 write(self.root, self.DROPIN, saved)
                 self.assertNotIn("journald", self.v())
+        # The later file decides, and is the one named.
+        write(self.root, lib, "[Journal]\nStorage=volatile\n")
+        write(self.root, zz, "[Journal]\nStorage=persistent\n")
+        self.assertNotIn("journald", self.v())
+        (self.root / zz).unlink()
+        self.assertEqual([v for v in check.violations(self.root) if "journald" in v],
+                         [lib + ": journald Storage is volatile" + must])
+        (self.root / lib).unlink()
         for level in ("info", "debug", "6", "7"):
             with self.subTest(level=level):
-                write(self.root, "etc/systemd/journald.conf.d/zz.conf", "[Journal]\nMaxLevelStore=%s\n" % level)
+                write(self.root, zz, "[Journal]\nMaxLevelStore=%s\n" % level)
                 self.assertNotIn("journald", self.v())
-
 
 if __name__ == "__main__":
     unittest.main()

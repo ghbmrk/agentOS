@@ -1331,18 +1331,39 @@ def dump_violations(root):
 LOG_LEVELS = ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug")
 
 
+def journal_last(files, key):
+    """journald's final [Journal] KEY across readable FILES, as ini_last reads it, and the file that set
+    it: (None, file) when an empty assignment reset it, (None, None) when nothing set it."""
+    val, where = None, None
+    for f in files:
+        for s, k, v in config_lines(f.content()):
+            if (s, k) == ("Journal", key):
+                val, where = v or None, f.rel
+    return val, where
+
+
 def journal_violations(root):
     """MOR-wipe-journal (#6078): a failed wipe's error (info, to the journal only) is still on disk
     at the next boot. Storage=auto would rest on Debian's postinst having made /var/log/journal."""
-    out = []
-    files = main_conf(root, "journald.conf")
-    storage = ini_last(files, "Journal", "Storage")
+    out, files = [], main_conf(root, "journald.conf")
+    for f in files:
+        try:
+            config_lines(f.content())
+        except (OSError, Unparsable) as e:
+            return ["%s: unreadable (%s); journald may not read it whole"
+                    % (f.rel, e.strerror if isinstance(e, OSError) else e)]
+    storage, where = journal_last(files, "Storage")
     if storage != "persistent":
-        out.append("50-agentos-persist.conf: journald Storage is %s; must be persistent" % storage)
-    level = ini_last(files, "Journal", "MaxLevelStore")
+        out.append("%s: journald Storage is %s; must be persistent (change or remove that line)"
+                   % (where, storage or "reset to auto") if where else
+                   "journald Storage is not set (auto); must be persistent "
+                   "(usr/lib/systemd/journald.conf.d/50-agentos-persist.conf is missing)")
+    level, where = journal_last(files, "MaxLevelStore")
     if level is not None and level not in LOG_LEVELS[6:] and level not in ("6", "7"):
-        out.append("50-agentos-persist.conf: journald MaxLevelStore is %s; must keep info" % level)
+        out.append("%s: journald MaxLevelStore is %s; must store info, a unit's stderr (set info or debug, "
+                   "or remove that line)" % (where, level))
     return out
+
 
 def unit_dropin_names(name):
     """The names whose .d directories hold drop-ins for unit NAME (dropin.c's unit_file_find_dirs):
