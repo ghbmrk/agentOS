@@ -1470,91 +1470,82 @@ class KeyringMinimalTest(unittest.TestCase):
 
 
 class KeyringSpikesTest(unittest.TestCase):
-    """IMG-keyring-spikes (#5983): every mkosi run in the repository trusts only the minimal Debian
-    keyrings. Each Debian mkosi tree commits its apt sources (mkosi v24.3 then generates none, so
-    the whole keyring is named nowhere), and every script that runs mkosi runs the check first."""
+    """IMG-keyring-spikes (#5983): every mkosi build in the repository trusts only the minimal Debian
+    keyrings. The keyring check is each mkosi tree's configure script, which mkosi v24.3 runs for every
+    build of the tree before it reads any archive, whoever calls mkosi and however; each tree that is
+    not part of another commits its apt sources (mkosi then generates none, so the whole keyring is
+    named nowhere)."""
 
     ARCHIVE, SECURITY = KeyringMinimalTest.ARCHIVE, KeyringMinimalTest.SECURITY
-    # Any call of mkosi: the variable (bare, braced or quoted), the name or any path ending /mkosi,
-    # python3 -m mkosi, or a Python argument list, then an option or a verb ending the command. An
-    # option -c is git's (git -C /opt/mkosi -c ...), and a path after -C is a tree, not a call.
-    VERBS = ("build|clean|summary|cat-config|shell|boot|qemu|vm|ssh|journalctl|coredumpctl|burn|bump|"
-             "genkey|serve|sandbox|init|documentation|dependencies|help")
-    MKOSI_RUN = re.compile(r"""(?<![^\s;&|(`])(?:"?\$\{?MKOSI\}?"?|"?(?:[^\s;&|()=`'"]*/)?mkosi"?"""
-                           r"""|python3?(?:\s+-[^\s-]+)*\s+-m\s*mkosi)"""
-                           r"""\s+["']?(?:-[^c\s]|(?:%s)(?=$|[\s"';&|)]*(?:$|[;&|)\\]|\s-)))"""
-                           r"""|\[\s*["'](?:[^"'\s]*/)?mkosi["']\s*(?:\]|,\s*["'](?:-|(?:%s)["']))""" % (VERBS, VERBS), re.M)
+    CHECK = KeyringMinimalTest.CHECK
+    TREES = ["image/enforcer/mkosi", "image/mkosi", "image/mkosi/initrd", "spikes/S1S2-testkit/mkosi"]
 
-    def files(self):
-        """Every file in the checkout but records. The walk opens no record (ci_scope: a record
-        file or directory, or .git), as test_image.scanned_files: tests/records_audit.py counts any
-        open of one as a read, and CI's records-only step does not run this module."""
+    @staticmethod
+    def trees(root):
+        """{tree directory: directories it includes} for every directory under ROOT that mkosi reads
+        as configuration: one holding mkosi.conf, mkosi.conf.d or mkosi.local.conf, of any file type,
+        links included; one inside a mkosi.conf.d belongs to the tree above it. The walk opens no
+        record (ci_scope: a record file or directory, or .git), as test_image.scanned_files:
+        tests/records_audit.py counts any open of one as a read."""
         spec = importlib.util.spec_from_file_location("repro_ci_scope", ROOT / "tools/ci_scope.py")
         scope = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(scope)
-        out = []
-        for top, dirs, names in os.walk(ROOT):
-            rel = pathlib.Path(top).relative_to(ROOT).as_posix()
+        found = {}
+        for top, dirs, names in os.walk(root):
+            rel = pathlib.Path(top).relative_to(root).as_posix()
             rel = "" if rel == "." else rel + "/"
             dirs[:] = sorted(d for d in dirs if not (rel + d == ".git" or (rel + d + "/").startswith(scope.RECORD_DIRS)))
-            out += [ROOT / (rel + n) for n in sorted(names) if not scope.is_record(rel + n)
-                    and (ROOT / (rel + n)).is_file() and not (ROOT / (rel + n)).is_symlink()]
-        return out
-
-    def mkosi_runs(self):
-        """{path: offset of its first mkosi call} for every file but records and prose (.md),
-        comment lines blanked."""
-        runs = {}
-        for f in self.files():
-            if f.suffix == ".md":
+            if "mkosi.conf.d" in pathlib.Path(top).relative_to(root).parts:
                 continue
-            raw = f.read_bytes()
-            if b"mkosi" not in raw.lower():
-                continue
-            rel = str(f.relative_to(ROOT))
-            text = "\n".join("" if ln.lstrip().startswith(("#", "//")) else ln
-                             for ln in raw.decode("utf-8", "replace").splitlines())
-            for m in self.MKOSI_RUN.finditer(text):
-                if not re.search(r"(-C|--directory)[\s=]*$", text[:m.start()].rsplit("\n", 1)[-1]):
-                    runs[rel] = (text, m.start())
-                    break
-        return runs
-
-    def mkosi_trees(self):
-        """{tree directory: Distribution=} for every committed mkosi tree (a directory holding
-        mkosi.conf or mkosi.conf.d/), read as mkosi does: mkosi.conf, then mkosi.conf.d/*.conf in
-        order, the last [Distribution] Distribution= winning; None when none sets it. A directory
-        another tree includes (InitrdInclude=, Include=) is part of that tree."""
-        files = [f for f in self.files() if f.name == "mkosi.conf" or f.parent.name == "mkosi.conf.d"]
-        trees = {f.parent.parent if f.parent.name == "mkosi.conf.d" else f.parent for f in files}
-        included = set()
-        for t in trees:
-            conf = t / "mkosi.conf"
-            for m in re.finditer(r"^(?:Initrd)?Include=(.+)$", conf.read_text() if conf.exists() else "", re.M):
-                included |= {(t / v).resolve() for v in m[1].split()}
-        found = {}
-        for t in sorted(trees):
-            if t.resolve() in included:
-                continue
-            dist = None
-            for f in [t / "mkosi.conf"] + sorted(f for f in files if f.parent == t / "mkosi.conf.d"):
-                section = None
-                for ln in (f.read_text() if f.exists() else "").splitlines():
-                    if ln.startswith("["):
-                        section = ln.strip()
-                    elif section == "[Distribution]" and ln.startswith("Distribution="):
-                        dist = ln.split("=", 1)[1].strip()
-            found[t] = dist
+            if {"mkosi.conf", "mkosi.conf.d", "mkosi.local.conf"} & set(dirs + names):
+                conf = pathlib.Path(top, "mkosi.conf")
+                text = conf.read_text() if conf.is_file() else ""
+                found[pathlib.Path(top)] = {(pathlib.Path(top) / v).resolve() for m in re.finditer(
+                    r"^(?:Initrd)?Include=(.+)$", text, re.M) for v in m[1].split()}
         return found
 
-    def test_each_debian_tree_commits_sources_naming_only_the_minimal_keyrings(self):
+    def test_every_tree_runs_the_check_as_its_configure_script(self):
+        # REQ: IMG-keyring-spikes. Each tree's mkosi.configure is the check itself, so every build of
+        # the tree runs it first (failure path 2 on #5983; the call inventories of #6055 and #6068
+        # missed call forms, a fix-list each). S7's Ubuntu tree and run.sh, which the check cannot
+        # pin, are retired.
+        trees = self.trees(ROOT)
+        self.assertEqual(sorted(str(t.relative_to(ROOT)) for t in trees), self.TREES)
+        for tree in trees:
+            with self.subTest(tree=str(tree.relative_to(ROOT))):
+                link = tree / "mkosi.configure"
+                self.assertTrue(link.is_symlink())
+                self.assertFalse(os.path.isabs(os.readlink(link)))
+                self.assertEqual(link.resolve(), self.CHECK)
+        self.assertTrue(os.access(self.CHECK, os.X_OK))
+        self.assertFalse((ROOT / "spikes/S7-host-image/run.sh").exists())
+        self.assertFalse((ROOT / "spikes/S7-host-image/mkosi").exists())
+
+    def test_every_form_of_tree_is_found(self):
+        # Security on #6068: a linked mkosi.conf and a tree configured only by mkosi.local.conf are
+        # trees; a drop-in directory belongs to its tree; a directory with none of the three is not.
+        with tempfile.TemporaryDirectory() as d:
+            r = pathlib.Path(d)
+            for rel in ("plain/mkosi.conf", "debian.conf", "local/mkosi.local.conf",
+                        "dropin/mkosi.conf.d/10.conf", "dropin/mkosi.conf.d/sub/mkosi.conf", "none/mkosi.extra/x"):
+                (r / rel).parent.mkdir(parents=True, exist_ok=True)
+                (r / rel).write_text("[Config]\nInitrdInclude=../none/\n" if rel.startswith("plain") else "")
+            (r / "linked").mkdir()
+            (r / "linked/mkosi.conf").symlink_to("../debian.conf")
+            found = self.trees(r)
+            self.assertEqual(sorted(str(t.relative_to(r)) for t in found), ["dropin", "linked", "local", "plain"])
+            self.assertEqual(found[r / "plain"], {(r / "none").resolve()})
+
+    def test_each_tree_commits_sources_naming_only_the_minimal_keyrings(self):
         # REQ: IMG-keyring-spikes. The test kit, as the core and the enforcer, reads the archive
         # (trixie, trixie-updates) with the archive key's keyring and the security archive with the
-        # security key's; no stanza names the whole keyring (failure path 1 on #5983).
-        trees = self.mkosi_trees()
-        debian = sorted(str(t.relative_to(ROOT)) for t, d in trees.items() if d == "debian")
-        self.assertEqual(debian, ["image/enforcer/mkosi", "image/mkosi", "spikes/S1S2-testkit/mkosi"])
-        for tree in debian:
+        # security key's; no stanza names the whole keyring (failure path 1 on #5983). A tree another
+        # includes (the initrd) is built with its includer's package manager trees.
+        trees = self.trees(ROOT)
+        included = set().union(*trees.values())
+        own = sorted(str(t.relative_to(ROOT)) for t in trees if t.resolve() not in included)
+        self.assertEqual(own, ["image/enforcer/mkosi", "image/mkosi", "spikes/S1S2-testkit/mkosi"])
+        for tree in own:
             with self.subTest(tree=tree):
                 src = ROOT / tree / "mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources"
                 stanzas = [dict(ln.split(": ", 1) for ln in st.splitlines() if ln and not ln.startswith("#"))
@@ -1571,40 +1562,57 @@ class KeyringSpikesTest(unittest.TestCase):
     def test_the_check_pins_no_keyring_that_no_build_names(self):
         # REQ: IMG-keyring-spikes. With the test kit's sources committed, the check lists only the two
         # files the sources name; the whole keyring's buster and bullseye keys are pinned nowhere.
-        text = KeyringMinimalTest.CHECK.read_text()
+        text = self.CHECK.read_text()
         self.assertNotIn("\n%s\n" % KeyringMinimalTest.WHOLE, text)
         self.assertFalse(KeyringMinimalTest.OLD & set(re.findall(r"^([0-9A-F]{40})  ", text, re.M)))
 
-    def test_every_mkosi_run_checks_the_keyring_first(self):
-        # REQ: IMG-keyring-spikes. Every tracked file that runs mkosi (script, workflow run: step or
-        # program) runs the keyring check before it, and every mkosi tree names its distribution;
-        # the S7 spike's run.sh, which built Ubuntu packages the check cannot pin, is retired
-        # (failure path 2 on #5983), so nothing builds the one non-Debian tree.
-        runs = self.mkosi_runs()
-        self.assertEqual(sorted(runs), ["image/build.sh", "image/enforcer/build.sh", "spikes/S1S2-testkit/build.sh"])
-        for rel, (text, at) in runs.items():
-            with self.subTest(script=rel):
-                self.assertIn("debian-archive-keyring.sh\"", text[:at])
-        self.assertFalse((ROOT / "spikes/S7-host-image/run.sh").exists())
-        others = {str(t.relative_to(ROOT)): d for t, d in self.mkosi_trees().items() if d != "debian"}
-        self.assertEqual(others, {"spikes/S7-host-image/mkosi": "ubuntu"})
-        self.assertNotIn("run.sh](run.sh)", (ROOT / "spikes/S7-host-image/RESULT.md").read_text())
+    def configure(self, config, keyrings):
+        """The check run as mkosi v24.3 runs a configure script: as /work/configure (here a link
+        named configure), no arguments but the keyring directory, the config JSON on stdin."""
+        with tempfile.TemporaryDirectory() as d:
+            link = pathlib.Path(d, "configure")
+            link.symlink_to(self.CHECK)
+            return subprocess.run([str(link), str(keyrings)], input=config, capture_output=True, text=True)
 
-    def test_the_inventory_sees_every_way_to_call_mkosi(self):
-        # #6055's fix-list: the quoted variable, a path to mkosi and python3 -m mkosi are calls too;
-        # prose, a tree after -C and git's -C /opt/mkosi -c are not. (@ stands for mkosi and % for
-        # its variable, so this file holds no call itself.)
-        calls = ('$% -C t build', '"$%" -C t -f build', 'sudo ${%} build', '"${%}" summary',
-                 '/opt/mkosi/bin/@ -C t build', '  run: sudo /opt/@/bin/@ --directory t',
-                 'x && @ build', '(@ build)', '@ build \\', 'python3 -m @ -f build',
-                 'subprocess.run(["@", "-C", t])', "run(['/usr/bin/@', 'build'])")
-        for c in calls:
-            with self.subTest(call=c):
-                self.assertTrue(self.MKOSI_RUN.search(c.replace("@", "mkosi").replace("%", "MKOSI")))
-        for c in ('git -C /opt/@ -c advice.detachedHead=false', 'the @ boot entry', 'a @ build of',
-                  '%=/opt/@/bin/@ image/build.sh', 'echo @ >> log', '["image/@", "image/enforcer/@"]'):
-            with self.subTest(prose=c):
-                self.assertFalse(self.MKOSI_RUN.search(c.replace("@", "mkosi").replace("%", "MKOSI")))
+    CONFIG = {"Distribution": "debian", "Release": "trixie", "RepositoryKeyCheck": True,
+              "PackageManagerTrees": [{"Source": "/src/image/mkosi/mkosi.pkgmngr", "Target": None}]}
+
+    def test_as_configure_script_it_passes_the_config_through(self):
+        # REQ: IMG-keyring-spikes. On the runner's keyrings a Debian build passes: the config goes back
+        # on stdout byte for byte (mkosi reads its config from there), the report goes to stderr.
+        keyrings = KeyringMinimalTest().keyrings()
+        config = json.dumps(self.CONFIG)
+        p = self.configure(config, keyrings)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout, config + "\n")
+        self.assertEqual(p.stderr.count("holds exactly the"), 2)
+
+    def test_as_configure_script_it_refuses_what_the_check_cannot_vouch_for(self):
+        # REQ: IMG-keyring-spikes. However the tree, the command line or mkosi.local.conf set them, a
+        # build that is not Debian, turns off apt's signature check, or has no package manager tree
+        # (the standalone initrd tree: mkosi would generate sources naming the whole keyring) stops,
+        # each reason named and no config passed on; so does a wider keyring, and input not JSON.
+        keyrings = KeyringMinimalTest().keyrings()
+        bad = {"Distribution": "ubuntu", "RepositoryKeyCheck": False, "PackageManagerTrees": []}
+        reasons = {"Distribution": "its distribution is ubuntu, not debian",
+                   "RepositoryKeyCheck": "it sets RepositoryKeyCheck=no",
+                   "PackageManagerTrees": "it names no package manager tree"}
+        for key in bad:
+            with self.subTest(key=key):
+                p = self.configure(json.dumps(dict(self.CONFIG, **{key: bad[key]})), keyrings)
+                self.assertEqual((p.returncode, p.stdout), (1, ""))
+                self.assertIn("this mkosi build is refused: " + reasons[key], p.stderr)
+                self.assertEqual(p.stderr.count("is refused"), 1)
+        p = self.configure(json.dumps(dict(self.CONFIG, **bad)), keyrings)
+        self.assertEqual((p.returncode, p.stdout, p.stderr.count("is refused")), (1, "", 3))
+        p = self.configure("not json", keyrings)
+        self.assertEqual((p.returncode, p.stdout), (1, ""))
+        with tempfile.TemporaryDirectory() as d:
+            for n in KeyringMinimalTest().pinned():
+                shutil.copy(keyrings / KeyringMinimalTest.WHOLE, pathlib.Path(d, n))
+            p = self.configure(json.dumps(self.CONFIG), d)
+            self.assertEqual((p.returncode, p.stdout), (1, ""))
+            self.assertIn("does not hold exactly the pinned keys", p.stderr)
 
     def test_the_enforcer_reports_every_missing_input_at_once(self):
         # UX 3 on #5961: with both required variables unset and the keyring check failing, one run

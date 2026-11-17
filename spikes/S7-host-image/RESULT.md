@@ -8,7 +8,7 @@ Labels: **[M]** measured here, **[D]** primary documentation, **[I]** inference.
 
 ## Measurements (candidate A, Ubuntu 24.04 packages)
 
-Setup: a 4-vCPU, 15 GB cloud VM without KVM. Images were built with mkosi 24.3 and booted in QEMU 8.2 (TCG) under OVMF with **Microsoft keys enrolled and Secure Boot on**, with swtpm as TPM 2.0. Excerpts are in [evidence.md](evidence.md); its reproduction script `run.sh` is retired (IMG-keyring-spikes, #5983): it built Ubuntu packages, which the Debian keyring check cannot pin, and the Debian 13 test kit (`spikes/S1S2-testkit/build.sh`) now reproduces the recommendation with that check.
+Setup: a 4-vCPU, 15 GB cloud VM without KVM. Images were built with mkosi 24.3 and booted in QEMU 8.2 (TCG) under OVMF with **Microsoft keys enrolled and Secure Boot on**, with swtpm as TPM 2.0. Excerpts are in [evidence.md](evidence.md); its reproduction script `run.sh` and mkosi tree are retired (IMG-keyring-spikes, #5983): it built Ubuntu packages, which the Debian keyring check cannot pin, and the Debian 13 test kit (`spikes/S1S2-testkit/build.sh`) now reproduces the recommendation with that check.
 
 | Property | Result | |
 |---|---|---|
