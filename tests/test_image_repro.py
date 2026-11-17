@@ -9,6 +9,7 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import ast
+import collections
 import contextlib
 import io
 import json
@@ -1483,16 +1484,28 @@ class KeyringSpikesTest(unittest.TestCase):
     keyrings. Each Debian mkosi tree commits its apt sources (mkosi v24.3 then generates none, so
     the whole keyring is named nowhere), and every program that runs mkosi runs the check first.
 
-    The inventory is fail-closed: every mention of mkosi in a build-host program (shell scripts by
-    suffix or shebang, workflows and other YAML, Makefiles, Dockerfiles; a string literal in Python,
-    Go and the other languages) is either one of BUILDS' single run, after the check, or a line in
-    NOT_RUNS. Tests are not inventoried: they run stand-ins, and no test job installs mkosi."""
+    The inventory is fail-closed, an allowlist by whole text: every mention of mkosi in a text file
+    on the build host (a shell logical line, or the source lines of a program's string literal that
+    has a word naming mkosi) is one of BUILDS' single run, after the check, or a reviewed line in
+    NOT_RUNS, each by its whole text, once. Tests are not inventoried: they run stand-ins, and no
+    test job installs mkosi. Not seen: a name built at run time ("mk" + "osi"), and docstrings."""
 
     ARCHIVE, SECURITY = KeyringMinimalTest.ARCHIVE, KeyringMinimalTest.SECURITY
     BUILDS = ("image/build.sh", "image/enforcer/build.sh", "spikes/S1S2-testkit/build.sh")
-    # The lines that name mkosi on the build host without running it: its install (clone and pin)
-    # in the three image workflows, each build's default, and each workflow's hand-off of the path
-    # to the build that runs it (the hand-off's command must name one of BUILDS).
+    # Each build's one mkosi run, as its whole logical line: the words in it that name mkosi are
+    # the leading $MKOSI and the build's own tree.
+    RUNS = {
+        "image/build.sh": '$MKOSI -C "$HERE/mkosi" -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" '
+                          '--extra-tree="$STAGE:/" --output-dir "$OUT" build',
+        "image/enforcer/build.sh": '$MKOSI -C "$HERE/mkosi" -f --package-manager-tree="$OUT/pkgmngr" '
+                                   '--image-version="$VERSION" --extra-tree="$STAGE:/" --output-dir "$OUT" build',
+        "spikes/S1S2-testkit/build.sh": '$MKOSI -C "$HERE/mkosi" -f --output-dir "$OUT" build',
+    }
+    # The reviewed texts (a shell logical line, or the source lines of a program's literal) that name
+    # mkosi on the build host without running it: its install (clone and pin) in the three image
+    # workflows, each build's default, each workflow's hand-off of the path to the build that runs
+    # it (the hand-off must name exactly one of BUILDS), the pathlib joins that name a tree, and
+    # messages. Each must still exist, once, with its whole text unchanged.
     NOT_RUNS = frozenset(_MKOSI_INSTALL + [
         ("image/build.sh", 'OUT=$(realpath -m "${1:-$HERE/out}"); MKOSI=${MKOSI:-mkosi}; DRIVERS=${3:+$(realpath "$3")}'),
         ("image/enforcer/build.sh", 'OUT=$(realpath -m "${1:-$HERE/out}"); MKOSI=${MKOSI:-mkosi}'),
@@ -1501,14 +1514,32 @@ class KeyringSpikesTest(unittest.TestCase):
         (".github/workflows/image.yml",
          'run: sudo env "PATH=$PATH" "AGENTOS_SECURITY_SNAPSHOT=$AGENTOS_SECURITY_SNAPSHOT" HOME=/root '
          'GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log"'),
-        (".github/workflows/enforcer-image.yml", 'sudo env "PATH=$PATH" HOME=/root MKOSI=/opt/mkosi/bin/mkosi \\'),
+        (".github/workflows/enforcer-image.yml",
+         'sudo env "PATH=$PATH" HOME=/root MKOSI=/opt/mkosi/bin/mkosi '
+         'ENFORCER_RELEASE_ROOT="$RUNNER_TEMP/feeds/enforcer/repo/metadata/1.root.json" '
+         'AGENTOS_RELEASE_KEYS="$RUNNER_TEMP/feeds/core/root.json" '
+         'image/enforcer/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log" | tail -n 80'),
         (".github/workflows/testkit.yml", 'run: sudo MKOSI=/opt/mkosi/bin/mkosi spikes/S1S2-testkit/build.sh "$RUNNER_TEMP/out"'),
+        ("image/unlock_graph.py", 'ALLOW = HERE / "mkosi" / "unlock.allow"'),
+        ("image/finish_image.py", 'MKOSI_CONF = pathlib.Path(__file__).resolve().parent / "mkosi" / "mkosi.conf"'),
+        ("image/finish_image.py", 'path = pathlib.Path(__file__).resolve().parent / "mkosi" / "mkosi.finalize"'),
+        ("image/enforcer/finish_image.py", 'MKOSI_CONF = HERE / "mkosi" / "mkosi.conf"'),
+        *((rel, 'sys.exit("expected one mkosi boot entry, found %s" % names)')
+          for rel in ("image/finish_image.py", "image/enforcer/finish_image.py", "spikes/S1S2-testkit/finish_image.py")),
+        ("image/mkosi/drop.py", '"initramfs-tools": ("initramfs-tools", "mkosi builds the initrd itself (InitrdInclude=); '
+                                'the kernel package depends on it"),'),
+        ("image/mkosi/drop.py", '"tar": ("tar", "Essential, but nothing on the box runs it: build.sh and mkosi unpack on '
+                                'the build host"),'),
+        ("image/mkosi/drop.py", '"p11-kit": ("p11-kit", "mkosi-initrd adds it for PKCS#11 unlocking, and no crypttab or '
+                                'unit here names a token"),'),
+        ("tools/vulncheck.py", 'return [f"{src}: expected one mkosi *.manifest beside {DPKG_STATUS}, found {len(found)}"]'),
     ])
-    SHELLS = re.compile(r"#!\s*(/usr)?/bin/(env\s+)?(sh|bash|dash|ksh|zsh)\b")
+    PYTHON = re.compile(r"#!\s*(/usr)?/bin/(env\s+)?python")
+    PROGRAMS = (".go", ".js", ".ts", ".rs", ".c", ".h", ".rb", ".pl")
     WORD = re.compile(r"\$\{[^}]*\}|[^\s;&|()<>`,\[\]]+")
-    # A string literal naming mkosi (bare, a path to it, mkosi-initrd) or the MKOSI variable,
-    # unless it is a pathlib join's path part (HERE / "mkosi" / ...).
-    LITERAL = re.compile(r"""(?<!/ )(?<!/)(["'`])(?:[^"'`\s]*/)?(?:mkosi(?:-initrd)?|MKOSI\w*)\1(?!\s*/)""")
+    # A string literal in a program other than Python (Go, C and the rest): "…", '…' or `…` (Go's raw
+    # strings may span lines).
+    LITERAL = re.compile(r'"(?:[^"\\\n]|\\.)*"|\'(?:[^\'\\\n]|\\.)*\'|`[^`]*`')
 
     @staticmethod
     def names_mkosi(word):
@@ -1521,6 +1552,11 @@ class KeyringSpikesTest(unittest.TestCase):
         value = re.sub(r"\A[A-Za-z_]\w*=", "", word).strip("\"'")
         return bool(re.fullmatch(r"(\S*/)?mkosi(-initrd)?", value))
 
+    def names_mkosi_in(self, text):
+        """Whether any word of TEXT (a shell logical line, or a string literal's contents read as a
+        command) names mkosi."""
+        return any(self.names_mkosi(w) for w in self.WORD.findall(text))
+
     def tracked(self):
         # A walk of the worktree outside git's files and the record directories, which hold no
         # build and which this test may not open (tests/records_audit.py, tools/ci_scope.py).
@@ -1532,43 +1568,67 @@ class KeyringSpikesTest(unittest.TestCase):
             files += [pathlib.Path(d, n) for n in names]
         return files
 
+    @staticmethod
+    def python_literals(text):
+        """[(source lines, contents)] for every str or bytes constant in a Python program (adjacent
+        literals already joined, f-string parts included) except docstrings, which no code runs. The
+        source lines are the literal's physical lines, stripped and joined, so a reviewed line stays
+        reviewed only while its whole text is unchanged. None when the program does not parse."""
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError):
+            return None
+        docs = set()
+        for node in ast.walk(tree):
+            body = getattr(node, "body", None)
+            if (isinstance(body, list) and body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str)):
+                docs.add(id(body[0].value))
+        lines = text.splitlines()
+        return [(" ".join(ln.strip() for ln in lines[n.lineno - 1:n.end_lineno]),
+                 n.value.decode("utf-8", "replace") if isinstance(n.value, bytes) else n.value)
+                for n in ast.walk(tree)
+                if isinstance(n, ast.Constant) and isinstance(n.value, (str, bytes)) and id(n) not in docs]
+
     def mkosi_mentions(self):
-        """[(file, first line of the logical line, logical line)] for every mention of mkosi in a
-        build-host program outside the tests."""
+        """[(file, text)] for every mention of mkosi in a program on the build host outside the tests.
+        Every text file is read. Python (by suffix or shebang) and the other programming languages
+        are read by string literal: TEXT is the literal's contents, a mention when any word in it
+        names mkosi. Every other file (shell by suffix or shebang, workflows and other YAML, Makefiles,
+        Dockerfiles, files with no suffix) is read as shell: TEXT is the whole logical line, physical
+        lines joined across a trailing \\, a mention when any word in it names mkosi."""
         out = []
         for f in self.tracked():
             rel = str(f.relative_to(ROOT))
             if (rel.startswith("tests/") or f.suffix == ".md" or re.fullmatch(r"test_.*\.py|.*_test\.(py|go)", f.name)
                     or f.is_symlink() or not f.is_file()):
                 continue
-            if f.suffix in (".sh", ".bash", ".yml", ".yaml", ".mk") or f.name.startswith(("Makefile", "Dockerfile", "Containerfile")):
-                shell = True
-            elif f.suffix in (".py", ".go", ".js", ".ts", ".rs", ".c", ".h", ".rb", ".pl"):
-                shell = False
-            else:
-                with open(f, "rb") as fh:
-                    head = fh.readline(200)
-                if not head.startswith(b"#!"):
-                    continue
-                shell = bool(self.SHELLS.match(head.decode("utf-8", "replace")))
             try:
                 text = f.read_text()
             except UnicodeDecodeError:
                 continue
+            literals = (self.python_literals(text) if f.suffix == ".py" or self.PYTHON.match(text)
+                        else None if f.suffix in self.PROGRAMS else False)
+            if literals is None:
+                lines = text.splitlines()
+                spans = [(text.count("\n", 0, m.start()), text.count("\n", 0, m.end()), m.group()[1:-1])
+                         for m in self.LITERAL.finditer(text)]
+                literals = [(" ".join(ln.strip() for ln in lines[a:b + 1]), lit) for a, b, lit in spans]
+            if literals is not False:
+                out += [(rel, line) for line in dict.fromkeys(line for line, lit in literals if self.names_mkosi_in(lit))]
+                continue
             lines, i = text.splitlines(), 0
             while i < len(lines):
-                first = lines[i].strip()
                 logical = [lines[i]]
-                while shell and logical[-1].endswith("\\") and i + 1 < len(lines):
+                while logical[-1].endswith("\\") and i + 1 < len(lines):
                     i += 1
                     logical.append(lines[i])
                 i += 1
-                if first.startswith(("#", "//")):
+                if logical[0].strip().startswith("#"):
                     continue
                 joined = " ".join(ln.strip().rstrip("\\").rstrip() for ln in logical)
-                if (any(self.names_mkosi(w) for w in self.WORD.findall(joined)) if shell
-                        else self.LITERAL.search(joined)):
-                    out.append((rel, first, joined))
+                if self.names_mkosi_in(joined):
+                    out.append((rel, joined))
         return out
 
     def mkosi_trees(self):
@@ -1641,22 +1701,21 @@ class KeyringSpikesTest(unittest.TestCase):
         # spike's run.sh, which built Ubuntu packages the check cannot pin, is retired (failure path
         # 2 on #5983), so nothing builds the one non-Debian tree.
         mentions = self.mkosi_mentions()
-        seen = {(rel, first) for rel, first, _ in mentions}
-        self.assertEqual(sorted(self.NOT_RUNS - seen), [])
-        runs = [(rel, first, line) for rel, first, line in mentions if (rel, first) not in self.NOT_RUNS]
-        self.assertEqual(sorted(rel for rel, _, _ in runs), sorted(self.BUILDS), runs)
+        runs = {(rel, line) for rel, line in self.RUNS.items()}
+        # Every mention is a build's run or a reviewed line, by its whole text, and each of those
+        # occurs exactly once: a second command joined to one of them changes its text.
+        self.assertEqual(sorted(collections.Counter(mentions).items()), sorted((m, 1) for m in runs | self.NOT_RUNS))
         trees = self.mkosi_trees()
-        for rel, first, line in runs:
+        for rel, line in runs:
             with self.subTest(script=rel):
-                text = (ROOT / rel).read_text()
-                self.assertEqual(text.count(first), 1)
-                self.assertLess(text.index('debian-archive-keyring.sh"'), text.index(first))
-                words = line.split()
-                self.assertEqual(words[:3], ["$MKOSI", "-C", '"$HERE/mkosi"'])
+                # The words naming mkosi are the leading $MKOSI and the build's own tree after -C.
+                self.assertEqual([w for w in self.WORD.findall(line) if self.names_mkosi(w)], ["$MKOSI", '"$HERE/mkosi"'])
+                self.assertEqual(line.split()[:3], ["$MKOSI", "-C", '"$HERE/mkosi"'])
                 self.assertEqual(trees[(ROOT / rel).parent / "mkosi"], "debian")
-                self.assertFalse([w for w in words if re.match(r"(-d|-r|-I|--distribution|--release|--include)(=|\Z)", w)])
-        for rel, first, line in mentions:
-            if (rel, first) in self.NOT_RUNS and "MKOSI=" in line and rel.startswith(".github/"):
+                text = (ROOT / rel).read_text()
+                self.assertLess(text.index('debian-archive-keyring.sh"'), text.index(line.split(" --")[0]))
+        for rel, line in self.NOT_RUNS:
+            if "MKOSI=" in line and rel.startswith(".github/"):
                 with self.subTest(handoff=rel):
                     self.assertEqual(len([b for b in self.BUILDS if " %s " % b in line]), 1, line)
         self.assertFalse((ROOT / "spikes/S7-host-image/run.sh").exists())
@@ -1667,7 +1726,8 @@ class KeyringSpikesTest(unittest.TestCase):
     def test_the_inventory_sees_every_way_to_run_mkosi(self):
         # REQ: IMG-keyring-spikes. The matchers above, on the forms the reviews of #6055 showed they
         # missed (quoted and braced variables, a path to mkosi, python3 -m, a workflow run: line, a
-        # string literal in a program) and on lines that only name it.
+        # string literal in a program, a second run joined by \\, a command string with arguments in
+        # Python or Go) and on lines that only name it.
         for word in ('"$MKOSI"', "${MKOSI}", '"${MKOSI}"', "$MKOSI_BIN", "mkosi", "/opt/mkosi/bin/mkosi",
                      '"/opt/mkosi/bin/mkosi"', "./mkosi", "M=/opt/mkosi/bin/mkosi", 'M="mkosi"', "mkosi-initrd"):
             with self.subTest(word=word):
@@ -1676,21 +1736,30 @@ class KeyringSpikesTest(unittest.TestCase):
                      "mkosi-chroot"):
             with self.subTest(word=word):
                 self.assertFalse(self.names_mkosi(word))
-        for code in ('subprocess.run(["mkosi", "build"])', 'run(["/opt/mkosi/bin/mkosi", "-f"])',
-                     'run([sys.executable, "-m", "mkosi"])', 'exec.Command("mkosi", "build")', 'os.environ["MKOSI"]'):
-            with self.subTest(code=code):
-                self.assertTrue(self.LITERAL.search(code))
-        for code in ('HERE / "mkosi" / "mkosi.conf"', 'ROOT / "image" / "mkosi"', 'MKOSI_CONF = HERE / "mkosi.conf"'):
-            with self.subTest(code=code):
-                self.assertFalse(self.LITERAL.search(code))
         with tempfile.TemporaryDirectory() as d, unittest.mock.patch(__name__ + ".ROOT", pathlib.Path(d)):
             files = {
                 "a/build.sh": 'sh "$HERE/../image/debian-archive-keyring.sh"\n"$MKOSI" -C x build\n',
                 "b/run": "#!/bin/bash\n# mkosi build (a comment)\n/opt/mkosi/bin/mkosi \\\n  -C x build\n",
                 "c/wf.yml": "    steps:\n      - run: python3 -m mkosi -C x build\n",
                 "d/tool.py": 'import subprocess\nsubprocess.run(["mkosi", "build"])\n',
-                "e/data.conf": "mkosi build\n",
+                "e/data.conf": "ExecStart=mkosi build\n",
+                "e/notes.txt": "the build runs mkosi.conf\n",
                 "tests/test_x.py": 'run(["mkosi"])\n',
+                # A second run joined by \\ to a first: one mention, its whole logical line.
+                "h/build.sh": '$MKOSI -C "$HERE/mkosi" \\\n\t--output-dir "$OUT" build && /opt/mkosi/bin/mkosi -C s7 build\n',
+                # Command strings with arguments, in Python and Go (L3 2 on b769ed08).
+                "i/a.py": 'import os\nos.system("mkosi -C spikes/S7-host-image/mkosi build")\n',
+                "i/b.py": 'import subprocess\nsubprocess.run("/opt/mkosi/bin/mkosi -C x build", shell=True)\n',
+                "i/c.go": 'package x\nfunc f() { exec.Command("sh", "-c", "mkosi build") }\n',
+                "i/d.go": 'package x\nconst s = `set -e\nmkosi -C x build`\n',
+                "i/e.py": 'S = """set -e\nsudo mkosi -C x build\n"""\nT = "mk" "osi"\n',
+                "i/f.py": 'x = f"{sudo} mkosi -C {tree} build"\ny = b"mkosi build"\n',
+                "i/g": "#!/usr/bin/env python3\nimport os\nos.execvp('mkosi', ['mkosi'])\n",
+                "i/h.py": 'print "not python 3"; os.system("mkosi build")\n',
+                "i/p.py": 'TREE = HERE / "mkosi" / "mkosi.conf"\n',
+                # Not mentions: a docstring, a comment, a file name, a path inside a tree.
+                "j/doc.py": '"""mkosi builds the image."""\ndef f():\n    """Run by mkosi."""\n# mkosi build\nC = "mkosi.conf"\n',
+                "j/k.go": '// mkosi build\npackage x\nconst c = "image/mkosi/mkosi.conf"\n',
                 "f/tree/mkosi.conf": "[Output]\nFormat=disk\n",
                 "f/tree/mkosi.conf.d/10-d.conf": "[Distribution]\nDistribution=debian\n",
                 "g/mkosi.conf": "[Output]\nFormat=disk\n",
@@ -1698,9 +1767,25 @@ class KeyringSpikesTest(unittest.TestCase):
             for rel, body in files.items():
                 pathlib.Path(d, rel).parent.mkdir(parents=True, exist_ok=True)
                 pathlib.Path(d, rel).write_text(body)
-            self.assertEqual(sorted(r for r, _, _ in self.mkosi_mentions()), ["a/build.sh", "b/run", "c/wf.yml", "d/tool.py"])
-            self.assertIn(("b/run", "/opt/mkosi/bin/mkosi \\", "/opt/mkosi/bin/mkosi -C x build"),
-                          self.mkosi_mentions())
+            self.assertEqual(sorted(self.mkosi_mentions()), sorted([
+                ("a/build.sh", '"$MKOSI" -C x build'),
+                ("b/run", "/opt/mkosi/bin/mkosi -C x build"),
+                ("c/wf.yml", "- run: python3 -m mkosi -C x build"),
+                ("d/tool.py", 'subprocess.run(["mkosi", "build"])'),
+                ("e/data.conf", "ExecStart=mkosi build"),
+                ("h/build.sh", '$MKOSI -C "$HERE/mkosi" --output-dir "$OUT" build && /opt/mkosi/bin/mkosi -C s7 build'),
+                ("i/a.py", 'os.system("mkosi -C spikes/S7-host-image/mkosi build")'),
+                ("i/b.py", 'subprocess.run("/opt/mkosi/bin/mkosi -C x build", shell=True)'),
+                ("i/c.go", 'func f() { exec.Command("sh", "-c", "mkosi build") }'),
+                ("i/d.go", "const s = `set -e mkosi -C x build`"),
+                ("i/e.py", 'S = """set -e sudo mkosi -C x build """'),
+                ("i/e.py", 'T = "mk" "osi"'),
+                ("i/f.py", 'x = f"{sudo} mkosi -C {tree} build"'),
+                ("i/f.py", 'y = b"mkosi build"'),
+                ("i/g", "os.execvp('mkosi', ['mkosi'])"),
+                ("i/h.py", 'print "not python 3"; os.system("mkosi build")'),
+                ("i/p.py", 'TREE = HERE / "mkosi" / "mkosi.conf"'),
+            ]))
             # g sets no Distribution= (mkosi would build the host's); f sets it in mkosi.conf.d.
             with self.assertRaises(AssertionError):
                 self.mkosi_trees()
