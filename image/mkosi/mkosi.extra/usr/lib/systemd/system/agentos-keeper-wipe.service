@@ -19,7 +19,8 @@ RefuseManualStop=yes
 Type=oneshot
 RemainAfterExit=yes
 ExecStop=/usr/bin/find /run/agentos-setup /run/agentos-link-capture -xdev -mindepth 1 -delete
-StandardError=journal+console
+# Journal only (MOR-wipe-console, #6042): a failed find leaves MOR set (fail-safe); the owner cannot act on a console line.
+StandardError=journal
 UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=full
