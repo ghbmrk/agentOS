@@ -215,6 +215,7 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 2. NET-2, A18 (#4709): `agentos-enforcer::TestChannelLogKeepsEveryField`: the daemon's channel-log sink passes `channel.CheckSink`, storing each line and reading it back from its own storage. Catches a sink that loses `Event.Dropped` or a field added later.
 **Byte-cap drop updates (#4614, #4867):** each update is `nft.Drops(d, l, running, counter.Drop())` after `counter.Add(traffic.ReadingOf(..., listing))`, with `running` listed (`load.Loader.List`) right before the `Update` and no other update since that reading. `Counter.Drop` fills `Drop.Read` with the reading's listing itself, so a merged, recapped or new-day quota carries every byte its replaced quotas charged since the reading; only the bytes between `running` and the commit pass uncharged once, and the counting set trips on them (nft ASSUMPTIONS ENF-cap-trip-c-2).
 **Size:** about 130k. **Depends on:** ENF-a to ENF-i, ENF-k, ENF-r, ENF-s.
+**Remaining (2026-11-16):** ENF-l-a (#4754) and ENF-l-b1 (#5020) merged; the device side is `briefs/ENF-l-b2.md`, which names its files.
 
 ### ENF-m (#3671): the signed image (NET-2 Hardening, decision 7)
 
@@ -291,6 +292,7 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 2. NET-2: `radio::TestStackOnlyDeclaredOps` for each of the three. Catches a wide adapter.
 3. NET-2: `radio::TestSrpReachesController`: a simulated Thread node's SRP registration is resolvable by the Matter process inside the namespace, with no LAN interface. Catches the spike's one unverified inference.
 **Size:** about 130k; split per stack if larger. **Depends on:** ENF-k, question 3.
+**Remaining (2026-11-16):** Thread merged (#4125); Zigbee moved to #3741 (D-231); Matter is `briefs/ENF-t-matter.md`.
 
 ### NET-2-cap-sizing (#4578): caps sized at signing (NET-2 Byte caps, CLK-14, KRN-12)
 

@@ -28,13 +28,13 @@ sources=${3:-$(cd "$(dirname "$0")" && pwd)/mkosi/mkosi.pkgmngr/etc/apt/sources.
 for wait in 15 30 60 last; do
 	rm -rf --one-file-system "$root"
 	err=0
-	timeout 240 mmdebstrap --mode=root --variant=essential --include=libstdc++6,gcc,libc6-dev,libcap-dev,make,pkgconf,xz-utils,patch trixie "$root" "$sources" || err=$?
+	timeout 240 mmdebstrap --mode=root --variant=essential --include=libstdc++6,gcc,g++,cmake,libc6-dev,libcap-dev,make,pkgconf,xz-utils,patch trixie "$root" "$sources" || err=$?
 	[ "$err" -ne 0 ] || break
 	[ "$wait" != last ] || exit "$err"
 	echo "guest-base.sh: mmdebstrap exited $err (snapshot.debian.org outage?); retrying in ${wait}s" >&2
 	sleep "$wait"
 done
-dpkg-query --admindir="$root/var/lib/dpkg" -W libpcre2-8-0 libc6 libstdc++6 bash coreutils dash gcc libc6-dev libcap-dev make pkgconf xz-utils patch
+dpkg-query --admindir="$root/var/lib/dpkg" -W libpcre2-8-0 libc6 libstdc++6 bash coreutils dash gcc g++ cmake libc6-dev libcap-dev make pkgconf xz-utils patch
 mkdir -p "$(dirname "$manifest")"
 dpkg-query --admindir="$root/var/lib/dpkg" -W -f '${Package}\t${Version}\t${Architecture}\n' |
 	python3 -I -c 'import json, sys
