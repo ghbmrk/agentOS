@@ -85,8 +85,8 @@ func TestADisplacedValueIsWipedOnce(t *testing.T) {
 	if got := s.Entries(); !slices.Equal(got, []string{"x/c"}) {
 		t.Errorf("Entries = %v", got)
 	}
-	// The bounds withEntry checks before it clones: a value of MaxEntry
-	// bytes, and a name already held when the store is full, are taken.
+	// The bounds a write checks before it clones (entryErr, then withEntry's cap): a value of
+	// MaxEntry bytes, and a name already held when the store is full, are taken.
 	if s.Put("x/m", make([]byte, MaxEntry)) != nil || s.Put("x/m", make([]byte, MaxEntry+1)) == nil || s.Put("Bad Name", nil) == nil {
 		t.Fatal("the MaxEntry bound or the name pattern is off")
 	}
@@ -97,6 +97,9 @@ func TestADisplacedValueIsWipedOnce(t *testing.T) {
 	}
 	if s.Put("x/c", c) != nil || s.Put("x/new", nil) == nil {
 		t.Fatal("a full store refused a held name, or took a new one")
+	}
+	if _, err := s.ReplaceAndPut("x/new", nil, Swap{ID: s.f.Slots[0].ID, F: r}); err == nil || errors.Is(err, ErrNoSlot) {
+		t.Fatalf("ReplaceAndPut of a new name into a full store: %v, want the cap's refusal", err)
 	}
 	// encode refuses a file past MaxFile, which readFile and parse would refuse to open.
 	if _, err := s.encode(s.f, map[string][]byte{"x/big": make([]byte, MaxFile)}); err == nil {
