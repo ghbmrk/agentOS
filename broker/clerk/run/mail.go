@@ -374,7 +374,7 @@ type MailConfig struct {
 	wrote   func()
 	stepMax int           // sendersStepMax when 0
 	pause   time.Duration // sendersPause when 0
-	every   time.Duration // sendersEvery when 0
+	every   time.Duration // a day when 0 (sendersEvery)
 	// saveStop is each save of the records of read mail and senders'
 	// privfile.WriteAtomic stop; nil runs every step. Tests only.
 	saveStop func(i int) bool

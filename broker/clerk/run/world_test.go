@@ -229,6 +229,17 @@ func TestTheSendersReadRunsAgainEachTick(t *testing.T) {
 	eventually(t, "a senders read on a tick, after the one at setup", func() bool { return reads.Load() >= 3 })
 }
 
+// With no test interval the worker reads the senders again once a day; a
+// test's MailConfig.every replaces it.
+func TestTheSendersReadRunsDailyByDefault(t *testing.T) {
+	if got := (MailConfig{}).sendersEvery(); got != 24*time.Hour {
+		t.Fatalf("default senders interval %v, want 24h", got)
+	}
+	if got := (MailConfig{every: time.Second}).sendersEvery(); got != time.Second {
+		t.Fatalf("test senders interval %v, want 1s", got)
+	}
+}
+
 // guardRig is a host over a loopback account whose reader calls every mail
 // spam, served to a kernel that may trash.
 type guardRig struct {
