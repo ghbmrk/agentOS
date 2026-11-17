@@ -1698,7 +1698,8 @@ KEEPER_PREFIX = "agentos-keeper-"
 KEEPER_SLICE = "agentos-keeper.slice"
 KEEPER_UNITS = ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service", "agentos-keeper-rotate@.service",
                 "agentos-keeper-pageca.service", "agentos-keeper-setup@.service", "agentos-keeper-mail.service",
-                "agentos-keeper-link-capture.service", "agentos-keeper-camera.service", "agentos-keeper-homekit.service")
+                "agentos-keeper-link-capture.service", "agentos-keeper-camera.service", "agentos-keeper-homekit.service",
+                "agentos-keeper-wipe.service")
 # The keeper's state: the sealed store, the kernel's log and anchor, the Owner Card's factors that
 # setup leaves for enrollment, the mail clerk's sealed Secrets (MAIL-unit) and the first edge's capture
 # that enrollment takes (EDGE-link-core c2c), the camera clerk's sealed store and retained capture
