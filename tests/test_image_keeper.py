@@ -2698,7 +2698,7 @@ class KeeperUnitsTest(unittest.TestCase):
         self.assertIn("agentos-keeper-kernel.service", after)
         # The CI unit whose mounts outlive one command lifts the main-side mask in a drop-in that
         # sorts after it.
-        for unit in ("agentos-e2e-seal.service",):
+        for unit in ("agentos-e2e-seal.service", "agentos-noexec-check.service"):
             self.assertIn("'systemd.unit-dropin.%s~99-ci-unmask' '[Service]\\nInaccessiblePaths=\\n'" % unit, ci)
         self.assertLess("50-main-side.conf", "99-ci-unmask.conf")
         preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text().splitlines()
