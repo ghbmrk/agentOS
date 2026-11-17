@@ -1094,7 +1094,10 @@ func TestLOG4ContentRefusesEachCauseByName(t *testing.T) {
 	r.mail.M[hb] = bad
 	_, err := r.k.Log().Append(4, kernel.TContentStored, 1, map[string]any{"subject": sub, "store": "mail", "hash": hb, "class": "message"})
 	must(t, err)
-	r.boot()
+	r.k, err = kernel.Boot(r.k.Log(), nil, nil, 0)
+	must(t, err)
+	_, err = r.k.OpenContent(r.keys, map[string]kernel.ContentStore{"mail": r.mail}, 0)
+	must(t, err)
 	if pt, err := r.k.Read(hb); !errors.Is(err, kernel.ErrItem) {
 		t.Fatalf("a read of bytes that do not open: %q, %v", pt, err)
 	}
@@ -1133,9 +1136,7 @@ func TestLOG4ContentRefusesEachCauseByName(t *testing.T) {
 		r := newErig(t)
 		_, err := r.k.Log().Append(1, typ, 1, map[string]any{"subject": 5})
 		must(t, err)
-		l, err := kernel.Open(kernel.Config{Store: r.log, Anchor: r.anchor, Pub: r.head.pub, Sign: r.head.priv, Rand: r.rnd})
-		must(t, err)
-		if _, err := kernel.Boot(l, nil, nil, 0); !errors.Is(err, kernel.ErrCorrupt) {
+		if _, err := kernel.Boot(r.k.Log(), nil, nil, 0); !errors.Is(err, kernel.ErrCorrupt) {
 			t.Fatalf("a %s entry that does not decode: %v", typ, err)
 		}
 	}
@@ -1200,18 +1201,30 @@ func TestLOG4NamedReadsLabelsOnceEach(t *testing.T) {
 func TestLOG4RestoredItemOfAnErasedSubjectIsDeletedAgain(t *testing.T) {
 	// REQ: LOG-4
 	r := newErig(t)
-	s := r.open()
-	h := r.seal(s, "mail", "message", "x")
-	ct := slices.Clone(r.mail.M[h])
+	s, live := r.open(), r.open()
+	hs := []kernel.Hash{r.seal(s, "mail", "message", "x"), r.seal(s, "mail", "message", "y")}
+	kept := r.seal(live, "mail", "message", "z")
+	cts := [][]byte{slices.Clone(r.mail.M[hs[0]]), slices.Clone(r.mail.M[hs[1]])}
 	_, err := r.k.Erase(3, s)
 	must(t, err)
-	if _, ok := r.mail.M[h]; ok {
-		t.Fatal("the erase left the item")
+	for _, h := range hs {
+		if _, ok := r.mail.M[h]; ok {
+			t.Fatal("the erase left an item")
+		}
 	}
-	r.mail.M[h] = ct // a restore from a backup taken before the erase
-	r.boot()
-	if _, ok := r.mail.M[h]; ok {
-		t.Fatal("a restored item of an erased subject outlived the start")
+	// a restore from a backup taken before the erase, then a start
+	r.mail.M[hs[0]], r.mail.M[hs[1]] = cts[0], cts[1]
+	r.k, err = kernel.Boot(r.k.Log(), nil, nil, 0)
+	must(t, err)
+	_, err = r.k.OpenContent(r.keys, map[string]kernel.ContentStore{"mail": r.mail}, 0)
+	must(t, err)
+	for _, h := range hs {
+		if _, ok := r.mail.M[h]; ok {
+			t.Fatal("a restored item of an erased subject outlived the start")
+		}
+	}
+	if pt, err := r.k.Read(kept); err != nil || string(pt) != "z" {
+		t.Fatalf("a live item after the start: %q, %v", pt, err)
 	}
 }
 
