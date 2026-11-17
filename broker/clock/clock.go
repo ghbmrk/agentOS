@@ -1029,11 +1029,11 @@ func (g *Guard) load() {
 	mono, wall := g.cfg.Elapsed(), g.cfg.Now()
 	// The NTS sync and the carrier reading keep their bounds across a
 	// restart, robust to a later wall-clock step, as within one process
-	// (#5758, #5811); one the boot clock has not reached yet is corrupt.
-	if sameBoot && v.NTSMono <= mono {
+	// (#5758, #5811); one before the boot or not reached yet is corrupt.
+	if sameBoot && 0 <= v.NTSMono && v.NTSMono <= mono {
 		g.ntsWall, g.ntsMono = v.NTSWall, v.NTSMono
 	}
-	if sameBoot && v.CarrierMono <= mono {
+	if sameBoot && 0 <= v.CarrierMono && v.CarrierMono <= mono {
 		g.carrier, g.carrierMono = v.Carrier, v.CarrierMono
 	}
 	// Alerts from an earlier boot are placed on this boot's clock by their

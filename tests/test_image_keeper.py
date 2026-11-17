@@ -115,7 +115,7 @@ class KeeperTreeTest(unittest.TestCase):
                                               "agentos-keeper-rotate@.service", "agentos-keeper-pageca.service",
                                               "agentos-keeper-setup@.service", "agentos-keeper-mail.service",
                                               "agentos-keeper-link-capture.service", "agentos-keeper-camera.service",
-                                              "agentos-keeper-homekit.service"))
+                                              "agentos-keeper-homekit.service", "agentos-keeper-wipe.service"))
         self.assertEqual(check.UNLOCK_UNITS, ("agentos-keeper-kernel.service",))
         # The recovery-key rotation, the page authority's staging and the card's hand-off are the
         # keeper's but open no TPM (MIG-4-recovery-r2, OWN-card-flow).

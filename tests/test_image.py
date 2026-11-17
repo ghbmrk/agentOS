@@ -7455,6 +7455,7 @@ UNIT_DEVICES = {
     "agentos-keeper-camera.service": ("agentos-camera", "private"),
     "agentos-keeper-homekit.service": ("agentos-homekit", "private"),
     "agentos-keeper-link-capture.service": ("root", "private"),
+    "agentos-keeper-wipe.service": ("root", "closed"),
     "agentos-link.service": ("agentos-link", "private"),
     "agentos-modem-env.service": ("root", "private"),
     "agentos-mor.service": ("root", "closed"),
