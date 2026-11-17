@@ -406,10 +406,14 @@ func TestHW8LearnsTheRTCOffset(t *testing.T) {
 		t.Fatal("carrier time taught an offset")
 	}
 	rtc = r.wall.Add(15 * time.Hour)
-	g = rtcGuard(t, r, path, &rtc)
+	var logs []string
+	g = rtcGuard(t, r, path, &rtc, func(c *Config) { c.Logf = func(f string, a ...any) { logs = append(logs, f) } })
 	g.Check(bg)
 	if v := readSaved(t, path); v.Offset != 2*time.Hour {
 		t.Fatalf("15-hour offset replaced the old: %v", v.Offset)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "outside ±14h; not learned") {
+		t.Fatalf("15-hour offset logged %q, want it not learned", logs)
 	}
 	// A restarted guard keeps the host the offset was learned on.
 	if v := readSaved(t, path); v.OffsetHost != HostKey(testHost) {
@@ -427,6 +431,23 @@ func TestHW8LearnsTheRTCOffset(t *testing.T) {
 	os.WriteFile(bad, []byte(`{"have_offset":true,"offset":3600000000001}`), 0o600)
 	if _, ok := BootEstimate(bad, later, testHost); ok {
 		t.Fatal("estimate from an offset not on a 15-minute step")
+	}
+	// This PC's host does not make an unusable offset usable: one never
+	// learned, or one off the 15-minute step or past ±14 hours.
+	for _, v := range []saved{
+		{HaveOffset: false, Offset: 2 * time.Hour},
+		{HaveOffset: true, Offset: 2*time.Hour + time.Minute},
+		{HaveOffset: true, Offset: 15 * time.Hour},
+	} {
+		v.OffsetHost = HostKey(testHost)
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.WriteFile(bad, b, 0o600)
+		if est, ok := BootEstimate(bad, later, testHost); ok {
+			t.Fatalf("estimate %v from offset %v (have %v) on this PC", est, v.Offset, v.HaveOffset)
+		}
 	}
 	// A file from before offsets were keyed to a PC names no host.
 	old := filepath.Join(t.TempDir(), "old")
