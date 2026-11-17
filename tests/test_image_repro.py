@@ -1338,7 +1338,7 @@ class KeyringCheckOtherBuildsTest(unittest.TestCase):
 
     def run_build(self, d, rel):
         return subprocess.run(["sh", str(pathlib.Path(d, rel)), str(pathlib.Path(d, "out"))], capture_output=True,
-                              text=True, cwd=d, env={"PATH": self.path, "MKOSI": str(pathlib.Path(d, "bin/mkosi")),
+                              text=True, cwd=d, stdin=subprocess.DEVNULL, env={"PATH": self.path, "MKOSI": str(pathlib.Path(d, "bin/mkosi")),
                                                      "ENFORCER_RELEASE_ROOT": str(pathlib.Path(d, "r.json")),
                                                      "AGENTOS_RELEASE_KEYS": "k.pem"})
 
@@ -1430,7 +1430,7 @@ class KeyringMinimalTest(unittest.TestCase):
         return d
 
     def run_check(self, d):
-        return subprocess.run(["sh", str(self.CHECK), str(d)], capture_output=True, text=True)
+        return subprocess.run(["sh", str(self.CHECK), str(d)], capture_output=True, text=True, stdin=subprocess.DEVNULL)
 
     def test_the_check_refuses_a_wider_or_missing_keyring(self):
         # REQ: IMG-keyring-minimal. The runner's files pass; the whole keyring in place of the
@@ -1558,6 +1558,113 @@ class KeyringSpikesTest(unittest.TestCase):
                 self.assertNotIn(KeyringMinimalTest.WHOLE, src.read_text().replace("whole " + KeyringMinimalTest.WHOLE, ""))
         kit = ROOT / "spikes/S1S2-testkit/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources"
         self.assertTrue(kit.read_text().split("\nTypes:")[1].startswith(" deb\nURIs: http://deb.debian.org/debian\n"))
+
+    # What each tree may hold beside its config, and the keys its mkosi.conf may set (mkosi v24.3).
+    # None of these names a config, script, tree, mirror or keyring apt reads, except InitrdInclude=
+    # and Environment=, whose values are pinned below: so a second package manager tree, a drop-in
+    # (mkosi.conf.d, mkosi.local.conf), a skeleton or tools tree, an Include= or a sources tarball
+    # needs a deliberate edit here (Security 1 on #6082).
+    NAMES = {
+        "image/mkosi": {"mkosi.conf", "mkosi.configure", "mkosi.extra", "mkosi.finalize", "mkosi.pkgmngr",
+                        "mkosi.postinst", "mkosi.repart"},
+        "image/mkosi/initrd": {"mkosi.conf", "mkosi.configure", "mkosi.finalize", "mkosi.postinst"},
+        "image/enforcer/mkosi": {"mkosi.conf", "mkosi.configure", "mkosi.extra", "mkosi.finalize", "mkosi.pkgmngr",
+                                 "mkosi.repart"},
+        "spikes/S1S2-testkit/mkosi": {"mkosi.conf", "mkosi.configure", "mkosi.extra", "mkosi.pkgmngr", "mkosi.repart"},
+    }
+    KEYS = {"BiosBootloader", "Bootable", "Bootloader", "Distribution", "Environment", "Format", "Hostname",
+            "ImageId", "ImageVersion", "InitrdInclude", "KernelCommandLine", "KernelModulesExclude",
+            "KernelModulesInitrdExclude", "Keymap", "Locale", "ManifestFormat", "Mirror", "Packages", "Release",
+            "RemoveFiles", "RepartDirectories", "Repositories", "RootPassword", "Seed", "ShimBootloader",
+            "SplitArtifacts", "Timezone", "UnifiedKernelImages", "WithDocs"}
+    PINNED = {"InitrdInclude": {"image/mkosi": ["initrd/"], "image/enforcer/mkosi": ["../../mkosi/initrd/"]},
+              "Environment": {"image/mkosi": ["SYSTEMD_REPART_MKFS_OPTIONS_EXT4=-Oquota,project"]}}
+    PKGMNGR = {"etc/apt/sources.list.d/mkosi.sources", "etc/apt/apt.conf.d/80-agentos-retries"}
+
+    @staticmethod
+    def settings(conf):
+        """[(key, [value lines])] of a mkosi.conf in the strict form test_image.ConfigTest holds the
+        core to (column-0 comments, sections and Key=value, indented continuations); None if any
+        line is in another form."""
+        out, cur = [], None
+        for line in conf.read_text().splitlines():
+            if not line.strip() or re.fullmatch(r"\[[A-Za-z]+\]", line):
+                cur = None
+            elif line.startswith("#"):
+                pass
+            elif m := re.fullmatch(r"([A-Z][A-Za-z0-9]*)=(.*)", line):
+                cur = (m[1], [m[2].strip()])
+                out.append(cur)
+            elif line[0] in " \t" and cur is not None:
+                cur[1].append(line.strip())
+            else:
+                return None
+        return out
+
+    def apt_input_problems(self, d, tree):
+        """Why tree directory D (named TREE) may feed apt something the check cannot see: a mkosi.*
+        name, a mkosi.conf key or value, or a mkosi.pkgmngr file not on the lists above."""
+        why = []
+        names = {n for n in os.listdir(d) if n.startswith("mkosi")}
+        if names != self.NAMES[tree]:
+            why.append("mkosi.* names %s, not %s" % (sorted(names), sorted(self.NAMES[tree])))
+        settings = self.settings(d / "mkosi.conf")
+        if settings is None:
+            why.append("mkosi.conf is not in the strict form")
+        for k, v in settings or []:
+            if k not in self.KEYS:
+                why.append("mkosi.conf sets %s=, not on the list" % k)
+            elif k in self.PINNED and v != self.PINNED[k].get(tree):
+                why.append("mkosi.conf sets %s=%s" % (k, v))
+        pm = d / "mkosi.pkgmngr"
+        if pm.exists():
+            retries = (MK / "mkosi.pkgmngr/etc/apt/apt.conf.d/80-agentos-retries").read_bytes()
+            for p in sorted(pm.rglob("*")):
+                r = p.relative_to(pm).as_posix()
+                if p.is_symlink() or (p.is_file() and r not in self.PKGMNGR):
+                    why.append("mkosi.pkgmngr holds %s" % r)
+                elif p.is_file() and r != "etc/apt/sources.list.d/mkosi.sources" and p.read_bytes() != retries:
+                    why.append("mkosi.pkgmngr/%s is not the core's retry settings" % r)
+            if not (pm / "etc/apt/sources.list.d/mkosi.sources").is_file():
+                why.append("mkosi.pkgmngr has no mkosi.sources")
+        return why
+
+    def test_no_tree_adds_apt_input_the_check_cannot_see(self):
+        # REQ: IMG-keyring-spikes. The guard sees only that a package manager tree is named; mkosi merges
+        # every one into apt's configuration, so each tree's own inputs are pinned: its mkosi.* names, the
+        # keys of its mkosi.conf, and its mkosi.pkgmngr's files (the sources, checked above, and the core's
+        # retry settings byte for byte, which test_image pins).
+        trees = sorted(str(t.relative_to(ROOT)) for t in self.trees(ROOT))
+        self.assertEqual(trees, sorted(self.NAMES))
+        for tree in trees:
+            with self.subTest(tree=tree):
+                self.assertEqual(self.apt_input_problems(ROOT / tree, tree), [])
+
+    def test_every_way_to_add_apt_input_fails(self):
+        # The repro on #6082 (a second package manager tree with a Trusted: yes stanza, named in the
+        # test kit's mkosi.conf) and its siblings, each in a copy of the test kit's and the enforcer's tree.
+        cases = {"key": ("mkosi.conf", "\n[Content]\nPackageManagerTrees=evil/\n"),
+                 "include": ("mkosi.conf", "\n[Config]\nInclude=evil/\n"),
+                 "tools": ("mkosi.conf", "\n[Host]\nToolsTree=default\n"),
+                 "dropin": ("mkosi.conf.d/10.conf", "[Content]\nPackageManagerTrees=evil/\n"),
+                 "local": ("mkosi.local.conf", ""),
+                 "skeleton": ("mkosi.skeleton/etc/apt/sources.list.d/evil.sources", "Trusted: yes\n"),
+                 "tar": ("mkosi.pkgmngr.tar", ""),
+                 "extra-file": ("mkosi.pkgmngr/etc/apt/sources.list.d/evil.sources", "Trusted: yes\n"),
+                 "apt-conf": ("mkosi.pkgmngr/etc/apt/apt.conf.d/80-agentos-retries",
+                              'Acquire::AllowInsecureRepositories "true";\n'),
+                 "loose": ("mkosi.conf", "\n  [Content]\n")}
+        for tree in ("spikes/S1S2-testkit/mkosi", "image/enforcer/mkosi"):
+            for name, (rel, text) in cases.items():
+                with self.subTest(tree=tree, case=name), tempfile.TemporaryDirectory() as d:
+                    copy = pathlib.Path(d, "t")
+                    shutil.copytree(ROOT / tree, copy, symlinks=True)
+                    f = copy / rel
+                    f.parent.mkdir(parents=True, exist_ok=True)
+                    with open(f, "a") as out:
+                        out.write(text)
+                    self.assertTrue(self.apt_input_problems(copy, tree))
+        self.assertEqual(self.apt_input_problems(ROOT / "image/mkosi/initrd", "image/mkosi/initrd"), [])
 
     def test_the_check_pins_no_keyring_that_no_build_names(self):
         # REQ: IMG-keyring-spikes. With the test kit's sources committed, the check lists only the two
