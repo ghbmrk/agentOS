@@ -1442,6 +1442,16 @@ class KeyringMinimalTest(unittest.TestCase):
                 self.assertIn("`%s`" % rel, row)
 
 
+
+def _record_dirs():
+    spec = importlib.util.spec_from_file_location("_ci_scope", ROOT / "tools" / "ci_scope.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.RECORD_DIRS
+
+
+RECORD_DIRS = _record_dirs()
+
 class KeyringSpikesTest(unittest.TestCase):
     """IMG-keyring-spikes (#5983): every mkosi run in the repository trusts only the minimal Debian
     keyrings. Each Debian mkosi tree commits its apt sources (mkosi v24.3 then generates none, so
@@ -1451,11 +1461,13 @@ class KeyringSpikesTest(unittest.TestCase):
     MKOSI_RUN = re.compile(r"\$\{?MKOSI\}?\s|(^|[\s;&|(])mkosi\s+(-C|-f|build)\b", re.M)
 
     def tracked(self):
-        # A walk of the worktree, not git ls-files: git's own files are not records this test may
-        # read (tests/records_audit.py).
+        # A walk of the worktree outside git's files and the record directories, which hold no
+        # build and which this test may not open (tests/records_audit.py, tools/ci_scope.py).
+        skip = {".git", *(d.rstrip("/") for d in RECORD_DIRS)}
         files = []
         for d, dirs, names in os.walk(ROOT):
-            dirs[:] = [n for n in dirs if n != ".git"]
+            rel = pathlib.Path(d).relative_to(ROOT)
+            dirs[:] = [n for n in dirs if str(rel / n) not in skip]
             files += [pathlib.Path(d, n) for n in names]
         return files
 
