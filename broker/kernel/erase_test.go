@@ -1020,6 +1020,201 @@ func TestTIM1AWideReadingRefusesAForgetAsk(t *testing.T) {
 	}
 }
 
+// oddKeys is a key table that lists its subjects backwards and whose List
+// or Get can be made to fail.
+type oddKeys struct {
+	*kernel.MemKeys
+	failList, failGet bool
+}
+
+func (o *oddKeys) List() ([]string, error) {
+	l, err := o.MemKeys.List()
+	slices.Reverse(l)
+	if o.failList {
+		return nil, errDown
+	}
+	return l, err
+}
+
+func (o *oddKeys) Get(s string) (kernel.SubjectKey, bool, error) {
+	if o.failGet {
+		return kernel.SubjectKey{}, false, errDown
+	}
+	return o.MemKeys.Get(s)
+}
+
+// oddContent is a content store whose Get can be made to fail.
+type oddContent struct {
+	*kernel.MemContent
+	failGet bool
+}
+
+func (o *oddContent) Get(h kernel.Hash) ([]byte, error) {
+	if o.failGet {
+		return nil, errDown
+	}
+	return o.MemContent.Get(h)
+}
+
+// Each refusal on the content path, the one the Forget asks above reach,
+// names its own cause, and a failing table or store is never read as an
+// empty one (LOG-4, LOG-1).
+func TestLOG4ContentRefusesEachCauseByName(t *testing.T) {
+	// REQ: LOG-4, LOG-1
+	if _, err := kernel.NewMemContent().Get(kernel.Hash{}); !errors.Is(err, kernel.ErrItem) {
+		t.Fatalf("an absent item: %v", err)
+	}
+	for _, s := range []string{"zz", "00"} {
+		var h kernel.Hash
+		if err := h.UnmarshalText([]byte(s)); !errors.Is(err, kernel.ErrCorrupt) {
+			t.Fatalf("a hash %q: %v", s, err)
+		}
+	}
+	r := newErig(t)
+	sub := r.open()
+	h := r.seal(sub, "mail", "message", "one")
+	h2 := r.seal(sub, "mail", "message", "two")
+	if _, err := r.k.Seal(3, "nosuch", "mail", "message", []byte("x")); !errors.Is(err, kernel.ErrSubject) {
+		t.Fatalf("a seal under an unknown subject: %v", err)
+	}
+	if _, err := r.k.Read(kernel.Hash{1}); !errors.Is(err, kernel.ErrItem) {
+		t.Fatalf("a read of an unknown item: %v", err)
+	}
+	// An item's bytes swapped for another item's of the same subject and
+	// class would open; the hash check refuses them.
+	ct := r.mail.M[h]
+	r.mail.M[h] = r.mail.M[h2]
+	if pt, err := r.k.Read(h); !errors.Is(err, kernel.ErrItem) {
+		t.Fatalf("a read of swapped bytes: %q, %v", pt, err)
+	}
+	r.mail.M[h] = ct
+	// A logged item whose bytes hash right but do not open is refused.
+	bad := bytes.Repeat([]byte{7}, 40)
+	hb := kernel.Hash(sha256.Sum256(bad))
+	r.mail.M[hb] = bad
+	_, err := r.k.Log().Append(4, kernel.TContentStored, 1, map[string]any{"subject": sub, "store": "mail", "hash": hb, "class": "message"})
+	must(t, err)
+	r.boot()
+	if pt, err := r.k.Read(hb); !errors.Is(err, kernel.ErrItem) {
+		t.Fatalf("a read of bytes that do not open: %q, %v", pt, err)
+	}
+	keys := &oddKeys{MemKeys: r.keys.MemKeys}
+	mail := &oddContent{MemContent: r.mail.MemContent}
+	open := func(stores map[string]kernel.ContentStore) (kernel.ContentReport, error) {
+		return r.k.OpenContent(keys, stores, 5)
+	}
+	keys.failList = true
+	if _, err := open(nil); !errors.Is(err, errDown) {
+		t.Fatalf("a key table that cannot list: %v", err)
+	}
+	keys.failList = false
+	keys.M["zz"], keys.M["aa"] = kernel.SubjectKey{}, kernel.SubjectKey{}
+	rep, err := open(map[string]kernel.ContentStore{})
+	must(t, err)
+	if !slices.Equal(rep.Unnamed, []string{"aa", "zz"}) {
+		t.Fatalf("unnamed keys %v, not in order", rep.Unnamed)
+	}
+	if _, err := r.k.Read(h); !errors.Is(err, kernel.ErrStore) {
+		t.Fatalf("a read from a store not opened: %v", err)
+	}
+	_, err = open(map[string]kernel.ContentStore{"mail": mail})
+	must(t, err)
+	mail.failGet = true
+	if _, err := r.k.Read(h); !errors.Is(err, errDown) {
+		t.Fatalf("a read from a failing store: %v", err)
+	}
+	keys.failGet = true
+	if _, err := r.k.Read(h); !errors.Is(err, errDown) {
+		t.Fatalf("a read under a failing key table: %v", err)
+	}
+	// A subject.opened or content.stored entry whose body does not decode
+	// fails the boot.
+	for _, typ := range []string{kernel.TSubjectOpened, kernel.TContentStored} {
+		r := newErig(t)
+		_, err := r.k.Log().Append(1, typ, 1, map[string]any{"subject": 5})
+		must(t, err)
+		l, err := kernel.Open(kernel.Config{Store: r.log, Anchor: r.anchor, Pub: r.head.pub, Sign: r.head.priv, Rand: r.rnd})
+		must(t, err)
+		if _, err := kernel.Boot(l, nil, nil, 0); !errors.Is(err, kernel.ErrCorrupt) {
+			t.Fatalf("a %s entry that does not decode: %v", typ, err)
+		}
+	}
+}
+
+// A subject is opened only once content is, under a key drawn whole, and
+// an ID drawn twice is refused (LOG-4).
+func TestLOG4OpenSubjectNeedsContentAndAWholeDraw(t *testing.T) {
+	// REQ: LOG-4
+	boot := func(rnd *bytes.Reader) (*kernel.Kernel, *kernel.MemKeys) {
+		h := gen(3)
+		l, err := kernel.Open(kernel.Config{Store: &kernel.MemStore{}, Anchor: &kernel.MemAnchor{}, Pub: h.pub, Sign: h.priv, Rand: rnd})
+		must(t, err)
+		k, err := kernel.Boot(l, nil, nil, 0)
+		must(t, err)
+		if _, err := k.OpenSubject(1); !errors.Is(err, kernel.ErrContentClosed) {
+			t.Fatalf("a subject opened before content: %v", err)
+		}
+		keys := kernel.NewMemKeys()
+		_, err = k.OpenContent(keys, map[string]kernel.ContentStore{}, 0)
+		must(t, err)
+		return k, keys
+	}
+	rnd := bytes.NewReader(make([]byte, 1<<16))
+	k, _ := boot(rnd)
+	used := 1<<16 - rnd.Len()
+	_, err := k.OpenSubject(1)
+	must(t, err)
+	if _, err := k.OpenSubject(1); !errors.Is(err, kernel.ErrSubject) {
+		t.Fatalf("an ID drawn twice: %v", err)
+	}
+	k, keys := boot(bytes.NewReader(make([]byte, used+16)))
+	if _, err := k.OpenSubject(1); err == nil || len(keys.M) != 0 {
+		t.Fatalf("a key drawn short: %v, %d keys put", err, len(keys.M))
+	}
+}
+
+// Named reads only label items and names a subject once, however many of
+// its labels match (LOG-4); a STOP is counted (#3078).
+func TestLOG4NamedReadsLabelsOnceEach(t *testing.T) {
+	// REQ: LOG-4
+	r := newErig(t)
+	a, b := r.open(), r.open()
+	r.seal(a, "mail", "message", "Alice")
+	r.seal(b, "mail", kernel.ClassLabel, "Alice")
+	r.seal(b, "mail", kernel.ClassLabel, "Alice")
+	gone := r.seal(b, "mail", kernel.ClassLabel, "Bob")
+	delete(r.mail.M, gone)
+	found, unread, err := r.k.Named("Alice")
+	must(t, err)
+	if !slices.Equal(found, []string{b}) || len(unread) != 0 {
+		t.Fatalf("Named found %v, unread %v", found, unread)
+	}
+	must(t, r.k.Stop(3))
+	if n := r.k.State().Stops; n != 1 {
+		t.Fatalf("%d STOPs counted", n)
+	}
+}
+
+// A restore that brings back an item whose erase was confirmed deletes it
+// again at the next start, before any read (LOG-4).
+func TestLOG4RestoredItemOfAnErasedSubjectIsDeletedAgain(t *testing.T) {
+	// REQ: LOG-4
+	r := newErig(t)
+	s := r.open()
+	h := r.seal(s, "mail", "message", "x")
+	ct := slices.Clone(r.mail.M[h])
+	_, err := r.k.Erase(3, s)
+	must(t, err)
+	if _, ok := r.mail.M[h]; ok {
+		t.Fatal("the erase left the item")
+	}
+	r.mail.M[h] = ct // a restore from a backup taken before the erase
+	r.boot()
+	if _, ok := r.mail.M[h]; ok {
+		t.Fatal("a restored item of an erased subject outlived the start")
+	}
+}
+
 // A backoff from a try at a later Earliest than now's holds nothing, however
 // late now's Latest: a clock stepped back retries at once (TIM-1, LOG-4).
 func TestTIM1AnEraseBackoffFromAStepBackHoldsNothing(t *testing.T) {
