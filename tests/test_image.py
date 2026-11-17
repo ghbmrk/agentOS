@@ -101,7 +101,12 @@ def noexec(root):
 # units nodump() writes without them.
 MAIN_SIDE_FILES = ("usr/lib/systemd/system/agentos-.service.d/50-main-side.conf",
                    "usr/lib/systemd/system/agentos-keeper-.service.d/90-keeper.conf",
-                   "usr/lib/systemd/system/agentos-mor.service.d/50-main-side.conf")
+                   "usr/lib/systemd/system/agentos-mor.service.d/50-main-side.conf",
+                   # #5818: the system bus's mask, lifted for the units whose reboot asks logind, "-" early.
+                   "usr/lib/systemd/system/agentos-fallback.service.d/90-bus.conf",
+                   "usr/lib/systemd/system/agentos-reboot.service.d/90-bus.conf",
+                   "usr/lib/systemd/system/agentos-kernel-reboot.service.d/90-bus.conf",
+                   "usr/lib/systemd/system/agentos-inbound.service.d/90-early-bus.conf")
 
 
 BT_BLOCK = "usr/lib/modprobe.d/agentos-no-bluetooth.conf"
@@ -5674,7 +5679,10 @@ class ExecAllowTest(unittest.TestCase):
                                       # #2622: bus and polkit policy.
                                       r"(etc|usr/share)/polkit-1/rules\.d/[^/]+|usr/share/polkit-1/actions/[^/]+|"
                                       r"etc/dbus-1/.+|usr/share/dbus-1/(system\.d/[^/]+|system-services/[^/]+|"
-                                      r"system\.conf))$")
+                                      r"system\.conf)|"
+                                      # #5818: every file systemd merges into the bus daemon's units.
+                                      r"(etc|usr/local/lib|usr/lib)/systemd/system/(dbus\.(service|socket)|"
+                                      r"(dbus\.(service|socket)|service|socket)\.d/[^/]+\.conf))$")
                 self.assertRegex(value, r"^(sha256:[0-9a-f]{64}|mask)$")
         # The image's own rules file is on it by its hash, so an edit to it fails here first.
         tpm = (MK / "mkosi.extra" / self.TPM).read_text()
@@ -7457,6 +7465,7 @@ UNIT_DEVICES = {
     "agentos-keeper-camera.service": ("agentos-camera", "private"),
     "agentos-keeper-homekit.service": ("agentos-homekit", "private"),
     "agentos-keeper-link-capture.service": ("root", "private"),
+    "agentos-keeper-wipe.service": ("root", "closed"),
     "agentos-link.service": ("agentos-link", "private"),
     "agentos-modem-env.service": ("root", "private"),
     "agentos-mor.service": ("root", "closed"),

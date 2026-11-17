@@ -225,7 +225,9 @@ say done
 EOS
 }
 NX_UNIT="[Unit]\nDescription=agentOS noexec check (CI only)\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=120\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/sh -c 'echo $(noexec_check | base64 -w0) | base64 -d | sh'\n"
-NX_EXTRA="$(smbios_cred systemd.extra-unit.agentos-noexec-check.service "$NX_UNIT")"
+# systemd-run --wait --pipe talks to PID 1 over the system bus, not /run/systemd/private, so this unit
+# lifts the main-side mask (which hides /run/dbus, #5818) in a drop-in that sorts after it.
+NX_EXTRA="$(smbios_cred systemd.extra-unit.agentos-noexec-check.service "$NX_UNIT")$(smbios_cred 'systemd.unit-dropin.agentos-noexec-check.service~99-ci-unmask' '[Service]\nInaccessiblePaths=\n')"
 # The host disks stay hidden (HW-8, HOST-1a; hostdisk ASSUMPTIONS H8, H11): the rules classed the
 # root's disk as the drive and every other disk, the USB one included, as a host disk; no host node
 # is ready for a mount unit or open to any uid but root, and udev recorded no label, UUID or
