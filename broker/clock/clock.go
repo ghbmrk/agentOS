@@ -1023,13 +1023,13 @@ func (g *Guard) load() {
 		g.offset, g.haveOffset, g.offsetHost = v.Offset, v.HaveOffset, v.OffsetHost
 	}
 	g.verified = v.VerifiedBoot != "" && v.VerifiedBoot == g.cfg.BootID()
-	if v.Anchored && sameBoot {
+	mono, wall := g.cfg.Elapsed(), g.cfg.Now()
+	// The anchor, the NTS sync and the carrier reading keep their bounds across
+	// a restart, robust to a later wall-clock step, as within one process
+	// (#5758, #5811); one before the boot or not reached yet is corrupt (#6026).
+	if v.Anchored && sameBoot && 0 <= v.AnchorMono && v.AnchorMono <= mono {
 		g.anchored, g.anchorWall, g.anchorMono = true, v.AnchorWall, v.AnchorMono
 	}
-	mono, wall := g.cfg.Elapsed(), g.cfg.Now()
-	// The NTS sync and the carrier reading keep their bounds across a
-	// restart, robust to a later wall-clock step, as within one process
-	// (#5758, #5811); one before the boot or not reached yet is corrupt.
 	if sameBoot && 0 <= v.NTSMono && v.NTSMono <= mono {
 		g.ntsWall, g.ntsMono = v.NTSWall, v.NTSMono
 	}
