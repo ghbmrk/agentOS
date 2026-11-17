@@ -680,7 +680,8 @@ class WiringTest(unittest.TestCase):
         step = "      - name: Machine tests as root\n        working-directory: broker\n        run: |\n"
         rc0 = "          rc=0\n"
         go = "          sudo setpriv --no-new-privs env \"PATH=$PATH\" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \\\n            AGENTOS_CGROUP_PARENT"
-        run = "          python3 -I ../tools/require_ran.py"
+        # The machines step's own call: a bare require_ran.py line also opens broker-checks' browser step.
+        run = "          python3 -I ../tools/require_ran.py --named-skips-only --gated"
         rc = '          [ "$rc" -eq 0 ]\n'
         nxt = "      - name: Camera decoder sessions in their own unit"
         job = "\n  machines:\n"
@@ -716,7 +717,7 @@ class WiringTest(unittest.TestCase):
             "top-level defaults after PS": (ci, ci.rstrip("\n") + "\u2029" + "defaults:\n  run:\n    shell: bash {0}\n"),
             "quoted duplicate machines key": ("\n  hostcheck:", "\n  'machines':\n    runs-on: ubuntu-24.04\n  hostcheck:"),
             "a second machines job": ("\n  hostcheck:", "\n  machines:\n    runs-on: ubuntu-24.04\n  hostcheck:"),
-            "isolation flag dropped": (run, "          python3 ../tools/require_ran.py"),
+            "isolation flag dropped": (run, run.replace(" -I", "")),
             "exit on failure dropped": ("StaysInLeaf || exit 1\n", "StaysInLeaf\n"),
             "infer run moved off the infer tests": (" -json ./infer/... ", " -json ./cleanroom "),
             "vision run dropped": (" ./infer/... ./vision/... > ", " ./infer/... > "),
