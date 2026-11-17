@@ -1664,7 +1664,26 @@ class KeyringSpikesTest(unittest.TestCase):
                     with open(f, "a") as out:
                         out.write(text)
                     self.assertTrue(self.apt_input_problems(copy, tree))
-        self.assertEqual(self.apt_input_problems(ROOT / "image/mkosi/initrd", "image/mkosi/initrd"), [])
+        # Each pinned value, a linked directory under mkosi.pkgmngr, and a drop-in on the included initrd tree
+        # (Security delta on #6082: these branches had no case).
+        more = [("image/enforcer/mkosi", "value", lambda c: open(c / "mkosi.conf", "a").write("\n[Config]\nInitrdInclude=evil/\n")),
+                ("spikes/S1S2-testkit/mkosi", "value", lambda c: open(c / "mkosi.conf", "a").write(
+                    "\n[Content]\nEnvironment=APT_CONFIG=/work/src/evil.conf\n")),
+                ("image/enforcer/mkosi", "link", lambda c: (c / "mkosi.pkgmngr/etc/apt/trusted.gpg.d").symlink_to(c / "evil")),
+                ("spikes/S1S2-testkit/mkosi", "link", lambda c: (c / "mkosi.pkgmngr/etc/apt/trusted.gpg.d").symlink_to(c / "evil")),
+                ("image/mkosi/initrd", "dropin", lambda c: (c / "mkosi.conf.d").mkdir())]
+        for tree, name, change in more:
+            with self.subTest(tree=tree, case=name), tempfile.TemporaryDirectory() as d:
+                copy = pathlib.Path(d, "t")
+                shutil.copytree(ROOT / tree, copy, symlinks=True)
+                (copy / "evil").mkdir()
+                change(copy)
+                self.assertTrue(self.apt_input_problems(copy, tree))
+        for tree in self.NAMES:
+            with self.subTest(tree=tree, case="none"), tempfile.TemporaryDirectory() as d:
+                copy = pathlib.Path(d, "t")
+                shutil.copytree(ROOT / tree, copy, symlinks=True)
+                self.assertEqual(self.apt_input_problems(copy, tree), [])
 
     def test_the_check_pins_no_keyring_that_no_build_names(self):
         # REQ: IMG-keyring-spikes. With the test kit's sources committed, the check lists only the two
