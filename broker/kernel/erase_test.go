@@ -1273,6 +1273,53 @@ func TestLOG4EraseConfirmsEachStoreForItsOwnItems(t *testing.T) {
 	}
 }
 
+// toggleRand draws from r until fail is set.
+type toggleRand struct {
+	r    *rand.ChaCha8
+	fail bool
+}
+
+func (t *toggleRand) Read(b []byte) (int, error) {
+	if t.fail {
+		return 0, errDown
+	}
+	return t.r.Read(b)
+}
+
+// A store delete that succeeds but whose confirmation is not logged starts
+// the next failure's backoff at RetryMin again, not at double the old wait
+// (LOG-4; L3 on #6046).
+func TestLOG4ADeleteThatWorkedResetsItsBackoff(t *testing.T) {
+	// REQ: LOG-4
+	r := &erig{t: t, head: gen(3), log: &downLog{}, anchor: &flakyAnchor{MemAnchor: &kernel.MemAnchor{}},
+		rnd: rand.NewChaCha8([32]byte{9}), keys: &flakyKeys{MemKeys: kernel.NewMemKeys()},
+		mail: &flakyContent{MemContent: kernel.NewMemContent()}, notes: &flakyContent{MemContent: kernel.NewMemContent()}}
+	tr := &toggleRand{r: r.rnd}
+	l, err := kernel.Open(kernel.Config{Store: r.log, Anchor: r.anchor, Pub: r.head.pub, Sign: r.head.priv, Rand: tr})
+	must(t, err)
+	r.k, err = kernel.Boot(l, nil, nil, 0)
+	must(t, err)
+	_, err = r.k.OpenContent(r.keys, map[string]kernel.ContentStore{"mail": r.mail, "notes": r.notes}, 0)
+	must(t, err)
+	s := r.open()
+	r.seal(s, "notes", "message", "a")
+	r.notes.failDelete = true
+	r.k.Erase(10, s)
+	// The retry deletes, then its confirmation's nonce draw fails.
+	r.notes.failDelete, tr.fail = false, true
+	t1 := 10 + kernel.RetryMin
+	if err := r.k.Tick(t1); err == nil {
+		t.Fatal("a confirmation the log did not take")
+	}
+	tr.fail, r.notes.failDelete = false, true
+	must(t, r.k.Tick(t1+1))
+	r.notes.failDelete = false
+	must(t, r.k.Tick(t1+1+kernel.RetryMin))
+	if u := r.k.State().Unerased(); u != nil {
+		t.Fatalf("a retry held past a fresh RetryMin: %+v", u)
+	}
+}
+
 // A backoff from a try at a later Earliest than now's holds nothing, however
 // late now's Latest: a clock stepped back retries at once (TIM-1, LOG-4).
 func TestTIM1AnEraseBackoffFromAStepBackHoldsNothing(t *testing.T) {
