@@ -4,6 +4,7 @@
 # ldd. image/guest-base.sh installs the root from the image's apt sources; image/guest-userland.sh
 # copies from it with the root's own loader and fails on anything that resolves outside it.
 # REQ: UPD-1a
+import json
 import os
 import pathlib
 import platform
@@ -20,6 +21,20 @@ BASE_SH = ROOT / "image/guest-base.sh"
 GUESTS = ("openclaw", "codex")
 MULTIARCH = "usr/lib/x86_64-linux-gnu"
 HOST_LD = pathlib.Path("/lib64/ld-linux-x86-64.so.2")
+
+
+# A platform package built for one libc ends in -gnu or -musl (an ABI suffix such as -gnueabihf
+# included); its lockfile entry must carry that libc, or npm installs it on the other one.
+LIBC_SUFFIX = r"-(gnu|musl)[a-z0-9]*$"
+
+
+def missing_libc(lock):
+    bad = []
+    for name, entry in lock["packages"].items():
+        m = re.search(LIBC_SUFFIX, name)
+        if m and entry.get("libc") != [{"gnu": "glibc", "musl": "musl"}[m.group(1)]]:
+            bad.append(name)
+    return sorted(bad)
 
 
 def host_libs(prog):
@@ -314,6 +329,32 @@ class WiringTest(unittest.TestCase):
         self.assertIn("GUEST_BASE=/tmp/guest-base GUEST_SHIPPED=/tmp/guest-shipped sh guest/openclaw/build-rootfs.sh /tmp/ocroot", ci)
         self.assertIn("GUEST_BASE=/tmp/guest-base \\\n            GUEST_SHIPPED=/tmp/guest-shipped-codex sh guest/codex/build-rootfs.sh /tmp/cxroot", ci)
         self.assertLess(ci.index("sudo sh image/guest-base.sh"), ci.index("sh guest/openclaw/build-rootfs.sh"))
+
+    def test_every_libc_build_in_the_guest_lockfile_names_its_libc(self):
+        # #2914 / #2909: npm 10 dropped `libc` from the -gnu/-musl platform packages, so the glibc
+        # guest's `npm ci` also installed the musl binaries; a lock-only re-resolve keeps such
+        # entries as they are, so the field itself is checked.
+        lock = json.loads((ROOT / "guest/openclaw/package-lock.json").read_text())
+        self.assertEqual(missing_libc(lock), [])
+        self.assertTrue(any(re.search(LIBC_SUFFIX, k) for k in lock["packages"]), "no -gnu/-musl entry left to check")
+        bad = {"packages": {"node_modules/@x/y-linux-x64-musl": {"os": ["linux"]},
+                            "node_modules/@x/y-linux-x64-gnu": {"libc": ["musl"]},
+                            "node_modules/@x/y-linux-arm64-gnueabihf": {"libc": ["glibc"]},
+                            "node_modules/@x/y-darwin-x64": {}}}
+        self.assertEqual(missing_libc(bad), ["node_modules/@x/y-linux-x64-gnu", "node_modules/@x/y-linux-x64-musl"])
+
+    def test_the_guest_lockfile_is_held_by_npm_ci_and_the_libc_test(self):
+        # #2914 / #5990: CI once re-resolved the lockfile with a second copy of the pinned Node. That
+        # step is gone: a lock-only re-resolve keeps a libc-less entry as it is (so the libc test
+        # above checks the field itself), and the rootfs build's `npm ci` refuses a package.json
+        # whose dependencies the lockfile does not hold. This pins both premises.
+        sh = (ROOT / "guest/openclaw/build-rootfs.sh").read_text()
+        self.assertIn('cp "$here/package.json" "$here/package-lock.json" opt/openclaw/', sh)
+        self.assertRegex(sh, r"\(cd opt/openclaw && PATH=\"\$out/usr/local/bin:\$PATH\" npm ci ")
+        self.assertNotRegex(sh, r"npm (?:i|install)\b")
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn("sh guest/openclaw/build-rootfs.sh /tmp/ocroot", ci)
+        self.assertNotIn("package-lock-only", ci)
 
 
 if __name__ == "__main__":

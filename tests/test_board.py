@@ -291,6 +291,142 @@ class StaleLabelTest(unittest.TestCase):
         self.assertNotIn("pull_request_target", wf)
 
 
+class TransitionTest(unittest.TestCase):
+    """BOARD-transition-relation: merged is final, and merged needs a merged PR."""
+
+    MERGED = [{"number": 22, "title": "W-3: fix", "state": "closed", "merged_at": "2026-10-10T00:00:00Z"}]
+    OPEN = [{"number": 24, "title": "W-3: fix", "state": "open", "merged_at": None}]
+
+    def test_relation(self):
+        legal = [("queued", "building", False), ("building", "in review", False), ("escalated", "queued", False),
+                 ("in review", "dropped", False), (None, "queued", False), ("merged", "merged", False),
+                 ("in review", "merged", True), (None, "merged", True)]
+        illegal = [("merged", "queued", True), ("merged", "dropped", False), ("merged", None, True),
+                   ("in review", "merged", False), (None, "merged", False)]
+        for prev, new, pr in legal:
+            self.assertIsNone(board.transition_problem(prev, new, pr), (prev, new, pr))
+        for prev, new, pr in illegal:
+            self.assertIsNotNone(board.transition_problem(prev, new, pr), (prev, new, pr))
+
+    def fetcher(self, held, prs, title="W-3: fix", comments=(), calls=None):
+        item = {"number": 7, "title": title, "labels": [{"name": n} for n in ["work-item", *held]]}
+        calls = [] if calls is None else calls
+
+        def fetch(path, method="GET", payload=None):
+            calls.append((method, path, payload))
+            if path == "/repos/o/r/issues/7":
+                return item
+            if path.startswith("/search/issues?q="):
+                # The search answers merged PRs only (is:merged), as GitHub's does.
+                return {"items": [{"number": p["number"], "title": p["title"],
+                                   "pull_request": {"merged_at": p["merged_at"]}} for p in prs if p["merged_at"]]}
+            if path == "/repos/o/r/issues/7/comments" and method == "GET":
+                return list(comments)
+            if method in ("POST", "PATCH"):
+                return {}
+            raise AssertionError(path)
+        return fetch
+
+    def judge(self, label, action, held, prs, sleep=lambda s: None):
+        return board.report_transition(self.fetcher(held, prs), "o/r", 7, label, action, sleep)
+
+    def test_events(self):
+        # Adding merged beside the old label, or removing merged, are the two shapes a relabel takes.
+        self.assertIsNone(self.judge("state:merged", "labeled", ["state:in review", "state:merged"], self.MERGED))
+        self.assertIn("merged PR", self.judge("state:merged", "labeled", ["state:in review", "state:merged"], self.OPEN))
+        self.assertIn("merged PR", self.judge("state:merged", "labeled", ["state:merged"], []))
+        self.assertIn("final", self.judge("state:queued", "labeled", ["state:merged", "state:queued"], self.MERGED))
+        self.assertIn("final", self.judge("state:merged", "unlabeled", ["state:queued"], self.MERGED))
+        self.assertIn("final", self.judge("state:merged", "unlabeled", [], self.MERGED))
+        self.assertIsNone(self.judge("state:queued", "unlabeled", ["state:building"], []))
+        # Add merged, then remove the old label (the order `gh issue edit --add-label --remove-label`
+        # emits): the removal reads old -> merged and needs the merged-PR fact too (L3 on #5972).
+        self.assertIsNone(self.judge("state:in review", "unlabeled", ["state:merged"], self.MERGED))
+        self.assertIn("merged PR", self.judge("state:in review", "unlabeled", ["state:merged"], self.OPEN))
+        self.assertIsNone(self.judge("class:release", "labeled", ["state:merged"], []))
+
+    def test_each_problem_names_the_labels_that_restore_the_prior_state(self):
+        # #5989 item 2: the message says the fix, and the row ID the merged-PR search used.
+        fix = "To fix, restore the prior label: "
+        self.assertEqual(self.judge("state:queued", "labeled", ["state:merged", "state:queued"], []),
+                         "issue #7: state:merged is final; it cannot change to state:queued. " + fix + "remove `state:queued`.")
+        self.assertTrue(self.judge("state:merged", "unlabeled", ["state:queued"], [])
+                        .endswith(fix + "remove `state:queued`, add `state:merged`."))
+        self.assertTrue(self.judge("state:merged", "unlabeled", [], []).endswith(fix + "add `state:merged`."))
+        self.assertEqual(self.judge("state:merged", "labeled", ["state:in review", "state:merged"], []),
+                         "issue #7: state:merged needs a merged PR whose title starts with the row ID, and none is"
+                         " merged (searched for row ID `W-3`). " + fix + "remove `state:merged`.")
+        self.assertTrue(self.judge("state:in review", "unlabeled", ["state:merged"], [])
+                        .endswith(fix + "remove `state:merged`, add `state:in review`."))
+        self.assertTrue(self.judge("state:merged", "labeled", ["state:merged"], []).endswith(fix + "remove `state:merged`."))
+
+    def test_the_merged_pr_is_found_by_one_search_for_the_row_id(self):
+        # #5989 item 4: no page through every PR; one search, retried once after 30 s on a miss.
+        calls, slept = [], []
+        fetch = self.fetcher(["state:in review", "state:merged"], self.MERGED, calls=calls)
+        self.assertIsNone(board.report_transition(fetch, "o/r", 7, "state:merged", "labeled", slept.append))
+        self.assertEqual([c[1] for c in calls], ["/repos/o/r/issues/7",
+                         "/search/issues?q=repo%3Ao%2Fr%20is%3Apr%20is%3Amerged%20in%3Atitle%20%22W-3%22"])
+        self.assertEqual(slept, [])
+        calls.clear()
+        fetch = self.fetcher(["state:merged"], [], calls=calls)
+        self.assertIsNotNone(board.report_transition(fetch, "o/r", 7, "state:merged", "labeled", slept.append))
+        self.assertEqual(slept, [30])
+        self.assertEqual(sum(c[1].startswith("/search/") for c in calls), 2)
+        self.assertFalse(any("/pulls" in c[1] for c in calls))
+        # A search hit only counts when its title starts with the row ID: W-30 and "Revert W-3" are other PRs.
+        others = [{"number": 30, "title": "W-30: other", "merged_at": "2026-10-10T00:00:00Z"},
+                  {"number": 31, "title": "Revert W-3: fix", "merged_at": "2026-10-10T00:00:00Z"}]
+        self.assertIn("merged PR", self.judge("state:merged", "labeled", ["state:merged"], others))
+        # The index caught up between the two searches.
+        answers = iter([{"items": []}, {"items": [{"title": "W-3: fix", "pull_request": {"merged_at": "x"}}]}])
+        def lagging(path, method="GET", payload=None):
+            return {"number": 7, "title": "W-3: fix", "labels": [{"name": "state:merged"}]} if "/issues/7" in path else next(answers)
+        self.assertIsNone(board.report_transition(lagging, "o/r", 7, "state:merged", "labeled", lambda s: None))
+
+    def run_cli(self, held, prs, title="W-3: fix", comments=(), comment=True, label="state:merged"):
+        calls, err = [], io.StringIO()
+        fetch = self.fetcher(held, prs, title, comments, calls)
+        argv = ["transition", "--repo", "o/r", "--issue", "7", "--label", label, "--action", "labeled"]
+        with redirect_stderr(err):
+            code = board.main(argv + (["--comment"] if comment else []), read=lambda: BOARD, fetch=fetch,
+                              sleep=lambda s: None)
+        return code, err.getvalue(), [c for c in calls if c[0] != "GET"]
+
+    def test_cli_exit_code(self):
+        self.assertEqual(self.run_cli(["state:merged"], self.MERGED, comment=False), (0, "", []))
+        code, err, writes = self.run_cli(["state:merged"], [], comment=False)
+        self.assertEqual((code, writes), (1, []))
+        self.assertIn("board: issue #7: state:merged needs a merged PR", err)
+
+    def test_a_malformed_title_prints_a_board_line(self):
+        # #5989 item 3: no traceback; intake already comments on the title, so no comment here.
+        code, err, writes = self.run_cli(["state:merged"], self.MERGED, title="no row id")
+        self.assertEqual((code, writes), (1, []))
+        self.assertEqual(err, "board: issue #7: title 'no row id' does not start with '<ID>: '\n")
+        # An edge that needs no search judges it anyway.
+        self.assertEqual(self.run_cli(["state:queued"], [], title="no row id", label="state:queued")[:2], (0, ""))
+
+    def test_an_illegal_edge_keeps_one_comment_on_the_issue(self):
+        # #5989 item 1: the issue, where agents read, carries the problem; a red run alone reached only the actor.
+        code, err, writes = self.run_cli(["state:merged"], [])
+        problem = err[len("board: "):].rstrip("\n")
+        self.assertEqual(code, 1)
+        self.assertEqual(writes, [("POST", "/repos/o/r/issues/7/comments", {"body": board.transition_comment(problem)})])
+        body = writes[0][2]["body"]
+        self.assertTrue(body.startswith(board.TRANSITION_MARK + "\n"))
+        self.assertIn("```text\n" + problem + "\n```", body)
+        mine = {"id": 5, "user": {"login": board.BOT}, "body": body}
+        self.assertEqual(self.run_cli(["state:merged"], [], comments=[mine])[2], [])  # same problem: no write
+        old = dict(mine, body=board.TRANSITION_MARK + "\nolder problem")
+        self.assertEqual(self.run_cli(["state:merged"], [], comments=[old])[2],
+                         [("PATCH", "/repos/o/r/issues/comments/5", {"body": body})])
+        # Someone else's marker steers nothing: the bot posts its own.
+        theirs = dict(mine, user={"login": "someone"})
+        self.assertEqual([w[0] for w in self.run_cli(["state:merged"], [], comments=[theirs])[2]], ["POST"])
+        self.assertEqual(self.run_cli(["state:merged"], self.MERGED)[2], [])  # legal: nothing posted
+
+
 class IntakeProblemsTest(unittest.TestCase):
     """CX-BOARD-INTAKE: one run names every malformed work-item issue; render --repo lists them on the board."""
 
@@ -767,6 +903,19 @@ class RateLimitTest(unittest.TestCase):
         self.assertEqual(sent[0].get_header("Content-type"), "application/json")
         self.assertEqual(json.loads(sent[0].data), {"name": "decision"})
         self.assertIsNone(sent[1].data)  # a DELETE sends no body
+
+    def test_a_get_of_one_object_returns_it_through_the_real_github(self):
+        # report_transition loads one issue; paging must not turn its JSON object into a list of keys
+        # (Security on #5972). A state-label event then runs end to end through board.github.
+        import os
+        from unittest import mock
+        issue = {"number": 7, "title": "X-1: a row", "labels": [{"name": "state:merged"}, {"name": "state:queued"}]}
+        def call(req):
+            return issue if "/issues/7?" in req.full_url else []
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "canary-not-a-token"}), \
+                mock.patch.object(board, "call", call):
+            self.assertEqual(board.github("/repos/o/r/issues/7"), issue)
+            self.assertIn("issue #7", board.report_transition(board.github, "o/r", 7, "state:queued", "labeled"))
 
 
 if __name__ == "__main__":

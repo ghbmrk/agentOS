@@ -104,9 +104,11 @@ jobs:
           sudo chroot "$RUNNER_TEMP/image-tools" dpkg-query -W systemd kmod
       - name: The keyring check refuses an altered, a missing and an extra key (IMG-keyring-pin, #5578)
         if: steps.scope.outputs.records != 'true'
-        # The committed list passes on the runner's keyring; three copies of the check, each with
-        # its list changed, must fail on it: a pinned fingerprint altered, a pinned key dropped (the
-        # keyring then holds a key not pinned), and a key added (a pinned key is then missing).
+        # The committed list passes on the runner's keyrings; three copies of the check, each with
+        # its list changed, must fail on them: a pinned fingerprint altered, a pinned key dropped (the
+        # keyring then holds a key not pinned), and a key added (a pinned key is then missing). The
+        # first fingerprint is the 12/bookworm archive key, pinned in its own keyring (which the
+        # sources name, #5954) and in the whole one.
         run: |
           k=image/debian-archive-keyring.sh d=$RUNNER_TEMP/keyring-check
           sh "$k"
@@ -305,6 +307,30 @@ jobs:
           restore-keys: |
             go-build-broker-race-${{ matrix.shard }}-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
             go-build-broker-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
+      - name: Runner disk after the cache restore (CI-disk-cause)
+        if: steps.scope.outputs.records != 'true'
+        # Supporting evidence, not the fix (that is the build cache step before the save): the cloud,
+        # / free after the restore and the restored cache's size, in one notice. A run under the floor
+        # stops here naming its figure instead of failing later as ENOSPC with no test output. It also
+        # marks the time from which the step before the save counts an entry as used by this run.
+        env:
+          CACHE: ~/.cache/go-build
+          AS_ROOT: ""
+          DISK_FLOOR_GB: "2" # a floor that no Go test step fits under, not a budget
+        run: |
+          vendor=$(cat "${DMI_ID:-/sys/class/dmi/id}/sys_vendor" 2>/dev/null || true)
+          case "$vendor" in
+            "Amazon EC2"*) cloud=AWS;; "Microsoft Corporation"*) cloud=Azure;; *) cloud="unknown-cloud (${vendor:-no DMI vendor})";;
+          esac
+          c=${CACHE/#\~/$HOME}
+          cache_mb=0
+          [ ! -d "$c" ] || cache_mb=$($AS_ROOT du -sm "$c" | awk '{print $1}')
+          free_gb=$(( $(df -BM --output=avail / | tail -n 1 | tr -dc 0-9) / 1024 ))
+          echo "::notice title=runner disk::$cloud runner: / has $free_gb GB free after restoring $cache_mb MB of Go build cache"
+          # go touches a cache entry it uses only when the entry's mtime is an hour old or more, so an
+          # entry is this run's if it is newer than an hour (and a minute) before now.
+          touch -d "@$(( $(date +%s) - 3660 ))" "$RUNNER_TEMP/gocache.mark"
+          [ "$free_gb" -ge "$DISK_FLOOR_GB" ] || { echo "::error title=runner disk::$cloud runner: / has $free_gb GB free after restoring $cache_mb MB of Go build cache, under the $DISK_FLOOR_GB GB floor; rerun the job, and if the cache is the bulk, see CI-disk-cause in tools/ASSUMPTIONS.md"; exit 1; }
       - name: Software TPM for the trusted-host slot (P2-4b)
         if: steps.scope.outputs.records != 'true'
         run: sudo apt-get update -q && sudo apt-get install -yq swtpm
@@ -355,6 +381,30 @@ jobs:
       - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: rm -rf "$(go env GOCACHE)/fuzz"
+      - name: Build cache keeps only what this run used (CI-disk-cause)
+        if: steps.scope.outputs.records != 'true'
+        # The cause of the full runner disk (#4422): each main push saved the restored cache plus its
+        # own builds, and go drops an entry only after five days unused, so broker-race (1)'s cache
+        # reached 5.1 GB compressed, restored on every run. Every run measures what it would drop;
+        # a push to main drops it, so the save holds one run's working set.
+        env:
+          CACHE: ~/.cache/go-build
+          AS_ROOT: ""
+          DROP: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: |
+          c=${CACHE/#\~/$HOME}
+          mark="$RUNNER_TEMP/gocache.mark"
+          [ -e "$mark" ] || { echo "::error title=build cache::no $mark: the runner-disk step did not run, so which entries this run used is unknown"; exit 1; }
+          [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
+          # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
+          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
+          mb() { entries "$@" -exec du -bs {} + | awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          all=$(mb); used=$(mb -newer "$mark")
+          echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
+          if [ "$DROP" = true ]; then
+            entries ! -newer "$mark" -exec rm -rf {} +
+            echo "dropped the stale entries; $(mb) MB left to save"
+          fi
       - name: Go build cache upload (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
@@ -395,6 +445,29 @@ jobs:
           path: ~/.cache/go-build
           key: go-build-broker-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
           restore-keys: go-build-broker-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
+      - name: Runner disk after the cache restore (CI-disk-cause)
+        # Supporting evidence, not the fix (that is the build cache step before the save): the cloud,
+        # / free after the restore and the restored cache's size, in one notice. A run under the floor
+        # stops here naming its figure instead of failing later as ENOSPC with no test output. It also
+        # marks the time from which the step before the save counts an entry as used by this run.
+        env:
+          CACHE: ~/.cache/go-build
+          AS_ROOT: ""
+          DISK_FLOOR_GB: "2" # a floor that no Go test step fits under, not a budget
+        run: |
+          vendor=$(cat "${DMI_ID:-/sys/class/dmi/id}/sys_vendor" 2>/dev/null || true)
+          case "$vendor" in
+            "Amazon EC2"*) cloud=AWS;; "Microsoft Corporation"*) cloud=Azure;; *) cloud="unknown-cloud (${vendor:-no DMI vendor})";;
+          esac
+          c=${CACHE/#\~/$HOME}
+          cache_mb=0
+          [ ! -d "$c" ] || cache_mb=$($AS_ROOT du -sm "$c" | awk '{print $1}')
+          free_gb=$(( $(df -BM --output=avail / | tail -n 1 | tr -dc 0-9) / 1024 ))
+          echo "::notice title=runner disk::$cloud runner: / has $free_gb GB free after restoring $cache_mb MB of Go build cache"
+          # go touches a cache entry it uses only when the entry's mtime is an hour old or more, so an
+          # entry is this run's if it is newer than an hour (and a minute) before now.
+          touch -d "@$(( $(date +%s) - 3660 ))" "$RUNNER_TEMP/gocache.mark"
+          [ "$free_gb" -ge "$DISK_FLOOR_GB" ] || { echo "::error title=runner disk::$cloud runner: / has $free_gb GB free after restoring $cache_mb MB of Go build cache, under the $DISK_FLOOR_GB GB floor; rerun the job, and if the cache is the bulk, see CI-disk-cause in tools/ASSUMPTIONS.md"; exit 1; }
       - name: Format
         # Vendored third-party code keeps its upstream formatting.
         run: f=$(find . -name '*.go' -not -path './vendor/*' -print0 | xargs -0 gofmt -l); test -z "$f" || { echo "$f"; exit 1; }
@@ -409,8 +482,19 @@ jobs:
       - name: Vendored code equals the modules go.sum pins (KRN-2cap-harden, #2945)
         # `go mod vendor` rewrites vendor/ from the checksum-verified modules (and the local
         # replace directories), so an edited, added or deleted vendored file shows as a change.
+        # A Go proxy read can fail mid-stream (#3977, as #3768), so `go mod vendor` is tried three
+        # times; the third failure fails the step. The comparison runs once, outside the retry.
         run: |
-          go mod vendor
+          retry() {
+            for t in 1 2 3; do
+              "$@" && return
+              echo "try $t of 3 failed: $*" >&2
+              [ "$t" = 3 ] || sleep $((t * 15))
+            done
+            echo "::error::$* failed 3 times; the vendor check cannot run (#3977)"
+            return 1
+          }
+          retry go mod vendor
           s=$(git status --porcelain --untracked-files=all -- vendor)
           test -z "$s" || { echo "$s"; echo "broker/vendor differs from go mod vendor" >&2; exit 1; }
       - name: OP-2 same-effect model at its full bounds, without -race (journal A19)
@@ -468,6 +552,29 @@ jobs:
       - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: rm -rf "$(go env GOCACHE)/fuzz"
+      - name: Build cache keeps only what this run used (CI-disk-cause)
+        # The cause of the full runner disk (#4422): each main push saved the restored cache plus its
+        # own builds, and go drops an entry only after five days unused, so broker-race (1)'s cache
+        # reached 5.1 GB compressed, restored on every run. Every run measures what it would drop;
+        # a push to main drops it, so the save holds one run's working set.
+        env:
+          CACHE: ~/.cache/go-build
+          AS_ROOT: ""
+          DROP: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: |
+          c=${CACHE/#\~/$HOME}
+          mark="$RUNNER_TEMP/gocache.mark"
+          [ -e "$mark" ] || { echo "::error title=build cache::no $mark: the runner-disk step did not run, so which entries this run used is unknown"; exit 1; }
+          [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
+          # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
+          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
+          mb() { entries "$@" -exec du -bs {} + | awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          all=$(mb); used=$(mb -newer "$mark")
+          echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
+          if [ "$DROP" = true ]; then
+            entries ! -newer "$mark" -exec rm -rf {} +
+            echo "dropped the stale entries; $(mb) MB left to save"
+          fi
       - name: Go build cache upload (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
@@ -504,6 +611,29 @@ jobs:
           path: /tmp/gocache
           key: go-build-machines-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
           restore-keys: go-build-machines-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
+      - name: Runner disk after the cache restore (CI-disk-cause)
+        # Supporting evidence, not the fix (that is the build cache step before the save): the cloud,
+        # / free after the restore and the restored cache's size, in one notice. A run under the floor
+        # stops here naming its figure instead of failing later as ENOSPC with no test output. It also
+        # marks the time from which the step before the save counts an entry as used by this run.
+        env:
+          CACHE: /tmp/gocache
+          AS_ROOT: "sudo"
+          DISK_FLOOR_GB: "2" # a floor that no Go test step fits under, not a budget
+        run: |
+          vendor=$(cat "${DMI_ID:-/sys/class/dmi/id}/sys_vendor" 2>/dev/null || true)
+          case "$vendor" in
+            "Amazon EC2"*) cloud=AWS;; "Microsoft Corporation"*) cloud=Azure;; *) cloud="unknown-cloud (${vendor:-no DMI vendor})";;
+          esac
+          c=${CACHE/#\~/$HOME}
+          cache_mb=0
+          [ ! -d "$c" ] || cache_mb=$($AS_ROOT du -sm "$c" | awk '{print $1}')
+          free_gb=$(( $(df -BM --output=avail / | tail -n 1 | tr -dc 0-9) / 1024 ))
+          echo "::notice title=runner disk::$cloud runner: / has $free_gb GB free after restoring $cache_mb MB of Go build cache"
+          # go touches a cache entry it uses only when the entry's mtime is an hour old or more, so an
+          # entry is this run's if it is newer than an hour (and a minute) before now.
+          touch -d "@$(( $(date +%s) - 3660 ))" "$RUNNER_TEMP/gocache.mark"
+          [ "$free_gb" -ge "$DISK_FLOOR_GB" ] || { echo "::error title=runner disk::$cloud runner: / has $free_gb GB free after restoring $cache_mb MB of Go build cache, under the $DISK_FLOOR_GB GB floor; rerun the job, and if the cache is the bulk, see CI-disk-cause in tools/ASSUMPTIONS.md"; exit 1; }
       - name: Install gVisor release-20260928.0 (checksum pinned)
         run: |
           B=https://storage.googleapis.com/gvisor/releases/release/20260928.0/x86_64
@@ -744,6 +874,29 @@ jobs:
       - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: sudo rm -rf /tmp/gocache/fuzz
+      - name: Build cache keeps only what this run used (CI-disk-cause)
+        # The cause of the full runner disk (#4422): each main push saved the restored cache plus its
+        # own builds, and go drops an entry only after five days unused, so broker-race (1)'s cache
+        # reached 5.1 GB compressed, restored on every run. Every run measures what it would drop;
+        # a push to main drops it, so the save holds one run's working set.
+        env:
+          CACHE: /tmp/gocache
+          AS_ROOT: "sudo"
+          DROP: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: |
+          c=${CACHE/#\~/$HOME}
+          mark="$RUNNER_TEMP/gocache.mark"
+          [ -e "$mark" ] || { echo "::error title=build cache::no $mark: the runner-disk step did not run, so which entries this run used is unknown"; exit 1; }
+          [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
+          # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
+          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
+          mb() { entries "$@" -exec du -bs {} + | awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          all=$(mb); used=$(mb -newer "$mark")
+          echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
+          if [ "$DROP" = true ]; then
+            entries ! -newer "$mark" -exec rm -rf {} +
+            echo "dropped the stale entries; $(mb) MB left to save"
+          fi
       - name: Go build cache upload (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2

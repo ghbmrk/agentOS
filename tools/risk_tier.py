@@ -60,8 +60,8 @@ def core_list(path=CORE_LIST):
             continue
         if w[0] in ("core", "wiring") and len(w) == 2:
             (core if w[0] == "core" else wiring).add(w[1])
-        elif w[0] == "open" and len(w) == 2:
-            pass
+        elif w[0] in ("open", "fixture") and len(w) == 2:
+            pass  # a fixture line marks an allow-line package; core_test.go checks it has one
         elif w[0] == "allow" and len(w) > 4 and w[3] == "--":
             # The same grammar broker/core/core_test.go reads.
             allowed.add(w[1])

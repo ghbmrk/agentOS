@@ -84,8 +84,7 @@ func (s *Chrony) track() (corr, bound float64, ok bool) {
 
 func (s *Chrony) ask() (float64, float64, bool) {
 	if s.c == nil {
-		os.Remove(s.reply)
-		c, err := net.DialUnix("unixgram", &net.UnixAddr{Name: s.reply, Net: "unixgram"}, &net.UnixAddr{Name: s.sock, Net: "unixgram"})
+		c, err := dialChrony(s.sock, s.reply)
 		if err != nil {
 			return 0, 0, false
 		}
@@ -148,4 +147,10 @@ func chronyFloat(x uint32) float64 {
 		coef -= 1 << 25
 	}
 	return math.Ldexp(float64(coef), exp-25)
+}
+
+// dialChrony binds reply, removing the one a last start left, and connects it to chronyd at sock.
+func dialChrony(sock, reply string) (*net.UnixConn, error) {
+	os.Remove(reply)
+	return net.DialUnix("unixgram", &net.UnixAddr{Name: reply, Net: "unixgram"}, &net.UnixAddr{Name: sock, Net: "unixgram"})
 }

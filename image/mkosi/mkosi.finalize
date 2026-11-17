@@ -425,6 +425,16 @@ POLICY_DIRS = ("etc/polkit-1/rules.d", "usr/local/share/polkit-1/rules.d", "usr/
                "usr/share/dbus-1/system-services", "lib/dbus-1/system-services")
 POLICY_FILES = ("usr/share/dbus-1/system.conf",)
 POLICY_RUN = ("run/polkit-1/rules.d",)
+# IMG-dbus-reach (#5818): the system bus daemon's units. Every file systemd 257 merges into each (each unit
+# directory's file of that name and every drop-in unit_with_dropins applies, the type-wide service.d and
+# socket.d included) is held to exec.allow by hash, so a drop-in or an override is refused until reviewed:
+# exec.allow's header skips no Exec line here, unlike made.allow's. bus_daemon_violations reads the merged
+# lines too, so a reviewed hash cannot carry a second listener: the daemon takes its one socket from
+# dbus.socket (--address=systemd:, which overrides system.conf's <listen>), and dbus.socket listens on
+# BUS_SOCKET alone. assurance/vulncheck.json's CVE-2026-128886 record rests on both.
+BUS_DAEMON_UNITS = ("dbus.service", "dbus.socket")
+BUS_SOCKET = "/run/dbus/system_bus_socket"
+BUS_ADDRESS = "--address=systemd:"
 
 _MAKERS = None  # #1829: tmpfiles_makers, tmpfiles_removers and unit_made_dirs by root inside once(), else None
 
@@ -526,7 +536,7 @@ def _violations(root):
     return (out + dump_violations(root) + swap_violations(root) + wifi_violations(root)
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
-            + exec_allow_violations(root) + made_allow_violations(root) + credstore_violations(root) + stray_violations(root)
+            + exec_allow_violations(root) + bus_daemon_violations(root) + made_allow_violations(root) + credstore_violations(root) + stray_violations(root)
             + manager_environment_violations(root)
             + cached(unit_made_dirs, root)[1] + cached(unit_made_paths, root)[2] + unit_made_refusals(root)
             + inside_refusals(root) + gpt_auto_violations(root)
@@ -1698,7 +1708,8 @@ KEEPER_PREFIX = "agentos-keeper-"
 KEEPER_SLICE = "agentos-keeper.slice"
 KEEPER_UNITS = ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service", "agentos-keeper-rotate@.service",
                 "agentos-keeper-pageca.service", "agentos-keeper-setup@.service", "agentos-keeper-mail.service",
-                "agentos-keeper-link-capture.service", "agentos-keeper-camera.service", "agentos-keeper-homekit.service")
+                "agentos-keeper-link-capture.service", "agentos-keeper-camera.service", "agentos-keeper-homekit.service",
+                "agentos-keeper-wipe.service")
 # The keeper's state: the sealed store, the kernel's log and anchor, the Owner Card's factors that
 # setup leaves for enrollment, the mail clerk's sealed Secrets (MAIL-unit) and the first edge's capture
 # that enrollment takes (EDGE-link-core c2c), the camera clerk's sealed store and retained capture
@@ -2728,7 +2739,7 @@ def keeper_violations(root):
     for name in sorted(names):
         files = unit_with_dropins(root, dirs, name)
         try:
-            out += keeper_unit_violations(name, files, root)
+            out += keeper_unit_violations(name, files, root) + bus_unit_violations(name, files)
         except ValueError as e:
             out.append("%s: %s; the tree check never passes what it cannot read (STO-2c)" % (name, e))
     for n in sorted(set(sockets)):
@@ -2745,6 +2756,27 @@ def keeper_violations(root):
         out += keeper_path_violations(n, unit_with_dropins(root, dirs, n))
     out += sysusers_tpm_violations(root)
     return out
+
+
+def bus_unit_violations(name, files):
+    """IMG-dbus-reach (#5818): agentos service NAME, read from FILES, masks BUS_DIR unless it is one of
+    BUS_UNITS or NOEXEC_EXEMPT, its root is a driver's empty one (driver_root), or its own empty tmpfs
+    leaves the directory out of view (tmpfs_hides; a mask there fails the unit, 226/NAMESPACE). The entry
+    takes "-" exactly when NAME is one of BUS_EARLY. ValueError as ini_paths."""
+    if name in BUS_UNITS + NOEXEC_EXEMPT or driver_root(name, files) or tmpfs_hides(files, BUS_DIR):
+        return []
+    hidden = ini_paths(files, "Service", "InaccessiblePaths")
+    words = [w for v in ini_entries(files, "Service", "InaccessiblePaths") for w in v.split()]
+    if BUS_DIR not in hidden:
+        return ["%s: InaccessiblePaths does not hold %s; a unit that makes no bus call never sees the system "
+                "bus (#5818)" % (name, BUS_DIR)]
+    if name in BUS_EARLY and "-" + BUS_DIR not in words:
+        return ["%s: InaccessiblePaths=%s fails the unit (226/NAMESPACE): it starts before dbus.socket makes "
+                "the directory, so the entry takes \"-\" (#5818)" % (name, BUS_DIR)]
+    if name not in BUS_EARLY and BUS_DIR not in words:
+        return ["%s: InaccessiblePaths=-%s gives no mask while the directory is missing; the unit starts after "
+                "dbus.socket makes it (#5818)" % (name, BUS_DIR)]
+    return []
 
 
 def keeper_path_violations(name, files):
@@ -2943,6 +2975,18 @@ EMPTY_ROOT_UNITS = ("agentos-imapconn@.service",)
 # with "-": its stop, at shutdown, is a command of its own, when every path exists.
 MOR_UNIT = "agentos-mor.service"
 MOR_LISTED = ("/run/agentos-setup", "/run/agentos-link-capture")
+# IMG-dbus-reach (#5818): the system bus's directory. dbus-daemon runs as root and stock system.conf lets
+# any local uid connect, so every agentos service masks it but BUS_UNITS, whose `systemctl reboot` asks
+# logind over the bus (--check-inhibitors=yes lists inhibitors; plain reboot goes through logind first).
+# agentos-kernel-reboot.service is the transient unit KERNEL_REBOOT starts; a drop-in lifts the mask for
+# it by name, as for the other two, and the tree check has no file of that name to weigh.
+# Root's other systemctl calls reach PID 1 on /run/systemd/private, not the bus. BUS_EARLY start before
+# sockets.target, so before dbus.socket makes the directory: their entry takes "-" (both are oneshots whose
+# command runs once; agentos-mor's stop gets a namespace of its own at shutdown). Every other service is
+# ordered after sockets.target (DefaultDependencies), so the directory is there and the entry takes no "-".
+BUS_DIR = "/run/dbus"
+BUS_UNITS = ("agentos-fallback.service", "agentos-kernel-reboot.service", "agentos-reboot.service")
+BUS_EARLY = ("agentos-inbound.service", MOR_UNIT)
 
 
 def driver_root(name, files):
@@ -3991,6 +4035,75 @@ def exec_files(root):
     for rel in POLICY_FILES:
         if entry_mode(root, rel):
             yield Conf(root, rel)
+    for name in BUS_DAEMON_UNITS:
+        yield from bus_daemon_files(root, name)
+
+
+def bus_daemon_files(root, name):
+    """#5818: the Confs systemd merges into BUS_DAEMON_UNITS unit NAME (unit_merged_files), none if no unit
+    directory holds it. A set the check cannot name (an alias, a link of the same name) is one Conf with
+    an error, so it is refused."""
+    dirs = unit_dirs(root)[0]
+    top = next((d + "/" + name for d in dirs if entry_mode(root, d + "/" + name)), None)
+    if top is None:
+        return []
+    files = unit_merged_files(root, top)
+    if files is None:
+        return [Conf(root, top, "a link, an alias or a name the check cannot weigh; its merged files are unknown")]
+    return files
+
+
+def bus_daemon_violations(root):
+    """#5818: the system bus listens only on dbus.socket. Across every file systemd merges into dbus.service,
+    one ExecStart= runs dbus-daemon with BUS_ADDRESS as its one --address (no --config-file, which could
+    name another config), and no other Exec*= line runs a command but ExecReload='s dbus-send; across
+    dbus.socket's, no Exec*= line at all, and every Listen* entry is ListenStream=BUS_SOCKET, and there
+    is one. A unit the image does not ship is not weighed: no bus runs without dbus.service, and
+    dbus.service with BUS_ADDRESS fails without its socket."""
+    out = []
+    for name, key in (("dbus.service", "Service"), ("dbus.socket", "Socket")):
+        files = bus_daemon_files(root, name)
+        if not files:
+            continue
+        if any(f.error for f in files):
+            out.append("%s: %s; the tree check never passes it (#5818)" % (name, files[0].error))
+            continue
+        # systemd reads the first unit directory's file of the name and every drop-in; exec.allow hashes
+        # the shadowed files too.
+        tops = [f for f in files if f.name == name and not f.rel.endswith(".d/" + name)]
+        files = tops[:1] + [f for f in files if f not in tops]
+        try:
+            # Every other command line either unit runs: dbus.service's ExecReload= may only ask the bus to
+            # reload (dbus-send, as stock), and nothing else may start a process beside the daemon.
+            for k in sorted(ini_keys(files, key)):
+                if not k.startswith("Exec") or k in ("ExecStart", "ExecSearchPath"):
+                    continue
+                for v in ini_entries(files, key, k):
+                    w = v.lstrip("-@:+!|").split()
+                    if not (key == "Service" and k == "ExecReload" and w and w[0].endswith("/dbus-send")
+                            and "dbus-daemon" not in v):
+                        out.append("%s: %s=%s; the bus units run dbus-daemon from ExecStart= alone, and reload only "
+                                   "through dbus-send (#5818)" % (name, k, v))
+            if key == "Service":
+                cmds = ini_entries(files, key, "ExecStart")
+                if len(cmds) > 1:
+                    out.append("%s: %d ExecStart= lines; the system bus is one dbus-daemon (#5818)" % (name, len(cmds)))
+                for v in cmds or [""]:
+                    w = v.lstrip("-@:+!|").split()
+                    addr = [x for x in w if x.startswith("--address")]
+                    if not w or not w[0].endswith("/dbus-daemon") or addr != [BUS_ADDRESS] or any(
+                            x.startswith("--config-file") for x in w):
+                        out.append("%s: ExecStart=%s; the system bus is dbus-daemon with %s alone, its one socket "
+                                   "from dbus.socket (#5818)" % (name, v, BUS_ADDRESS))
+            else:
+                listens = [(k, v) for k in sorted(ini_keys(files, key)) if k.startswith("Listen")
+                           for v in ini_entries(files, key, k)]
+                if listens != [("ListenStream", BUS_SOCKET)]:
+                    out.append("%s: listens on %s; the system bus listens on ListenStream=%s alone (#5818)"
+                               % (name, ", ".join("%s=%s" % x for x in listens) or "nothing", BUS_SOCKET))
+        except ValueError as e:
+            out.append("%s: %s; the tree check never passes what it cannot read (#5818)" % (name, e))
+    return out
 
 
 def exec_allowed(path=None):
@@ -4035,7 +4148,8 @@ EXEC_ALLOW_HEADER = """\
 # (#1556, #2176): udev rules, system and environment generators, modules-load.d, modprobe.d,
 # sysctl.d, binfmt.d, and systemd's system-shutdown and system-sleep hooks, in etc, usr/local/lib,
 # usr/lib and lib; and (#2622) every polkit rules.d and actions file, everything under etc/dbus-1, and the
-# D-Bus system.conf, system.d and system-services files. One per line: the file's path in the image tree, a tab, and "sha256:" with the
+# D-Bus system.conf, system.d and system-services files; and (#5818) every file systemd merges into
+# dbus.service and dbus.socket, drop-ins included, so dbus-daemon's ExecStart is the reviewed one. One per line: the file's path in the image tree, a tab, and "sha256:" with the
 # SHA-256 of what the box reads, or "mask" for an empty file or a link to /dev/null. Every file is
 # listed, not only the one that wins its name. mkosi.finalize fails the build on any file not here
 # with that value, and on anything under the same directories in /run.

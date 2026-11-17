@@ -100,6 +100,72 @@ class MorUnitTest(unittest.TestCase):
         for key in ("ExecStop", "ExecStopPre"):
             self.assertNotIn(key, s)
 
+    def test_every_held_file_goes_at_stop(self):
+        # MOR-setup-factors (#5843): the card's factors, and the first edge's capture, sit in holdDirs
+        # entries from the confirm until a successful enrollment, and on a failure for a retry, with no
+        # stop of their own, so an orderly shutdown then left MOR set. The wipe's stop empties every
+        # holdDirs entry on /run. It keeps default dependencies, so it stops before this unit's clear
+        # (test_every_other_unit_stops_first); it is ordered before every unit whose commands name a
+        # holdDirs path, so it stops after each; nothing but shutdown stops it. /dev/shm: no unit names it.
+        name = "agentos-keeper-wipe.service"
+        wipe = UNITS / name
+        s = settings(wipe)
+        self.assertEqual(s["ExecStop"], ["/usr/bin/find %s -xdev -mindepth 1 -delete" % " ".join(check.MOR_LISTED)])
+        self.assertEqual((s["Type"], s["RemainAfterExit"]), (["oneshot"], ["yes"]))
+        self.assertEqual((s["IgnoreOnIsolate"], s["RefuseManualStop"]), (["yes"], ["yes"]))
+        # MOR-wipe-console (#6042): a failed find leaves MOR set; its error goes to the journal only.
+        self.assertEqual((s["StandardError"], s.get("StandardOutput")), (["journal"], None))
+        for key in ("DefaultDependencies", "ExecStart", "ExecStopPost", "Conflicts", "BindsTo", "PartOf",
+                    "Requires", "Requisite", "StopPropagatedFrom", "After"):
+            self.assertNotIn(key, s)
+        self.assertFalse([k for k in s if k.startswith(("Condition", "Assert"))])
+        self.assertEqual(sorted(UNITS.glob(name + ".d/*")), [])
+        before, wanted = set(words(s, "Before")), set(ini(wipe)["Install"]["WantedBy"].split())
+        self.assertEqual(wanted, before | {"multi-user.target"})
+        preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text()
+        self.assertIn("\nenable %s\n" % name, preset)
+        files = [u for u in UNITS.iterdir() if u.is_file()] + list(UNITS.glob("*.d/*.conf"))
+        writers = set()
+        for f in files:
+            t = f.read_text()
+            self.assertNotIn("/dev/shm", t, f.name)
+            if f.name != name and any(d + "/" in t or d + " " in t for d in check.MOR_LISTED):
+                writers.add(f.name)
+            for key in ("Conflicts", "PropagatesStopTo"):
+                self.assertNotIn(name, words(settings(f), key), f.name)
+        # The writers, each found by its own text: the mor unit's drop-in names the dirs only to leave
+        # them unmasked, the main side's only to mask them.
+        self.assertEqual(writers - {"50-main-side.conf"}, {
+            "agentos-keeper-pageca.service", "agentos-keeper-enroll.service", "agentos-keeper-enroll.path",
+            "agentos-keeper-setup@.service", "agentos-keeper-link-capture.service"})
+        for w in writers - {"50-main-side.conf"}:
+            with self.subTest(w):
+                if w.endswith(".path"):
+                    continue  # writes nothing; it starts enrollment, which is listed
+                ordered = w in before or name in words(settings(UNITS / w), "After")
+                self.assertTrue(ordered, w)
+                self.assertNotIn("DefaultDependencies", settings(UNITS / w))
+
+    def test_an_isolate_keeps_the_staged_page_authority(self):
+        # MOR-setup-isolate (#5858, HW-1, CH-9): RefuseManualStop= does not cover an isolate, so
+        # "systemctl isolate rescue.target" stopped the staging unit, its stop removed the pair, and
+        # the next confirm staged a new authority under a card already printed. An isolate now leaves
+        # the unit active. Shutdown still stops it through Conflicts=shutdown.target (default
+        # dependencies kept), so the pair goes before the clear. No other unit may stop it through a
+        # dependency: the staging names none that would, and no image unit names it in one that would.
+        name = "agentos-keeper-pageca.service"
+        unit = UNITS / name
+        self.assertEqual(ini(unit)["Unit"]["IgnoreOnIsolate"], "yes")
+        s = settings(unit)
+        self.assertNotIn("DefaultDependencies", s)
+        for key in ("Conflicts", "BindsTo", "PartOf", "Requires", "Requisite", "StopPropagatedFrom"):
+            self.assertNotIn(key, s)
+        self.assertEqual(sorted(UNITS.glob(name + ".d/*")), [])
+        for f in [u for u in UNITS.iterdir() if u.is_file()] + list(UNITS.glob("*.d/*.conf")):
+            for key in ("Conflicts", "PropagatesStopTo"):
+                with self.subTest(f.name, key=key):
+                    self.assertNotIn(name, words(settings(f), key))
+
     def test_build_installs_the_program(self):
         build = (ROOT / "image/build.sh").read_text()
         loop = re.search(r"for cmd in ([^;]+); do", build, re.S).group(1).split()

@@ -45,7 +45,7 @@ LIVE = {"hint": [("hint.go", 11, "CONDITIONALS_BOUNDARY"), ("hint.go", 40, "COND
 def gate(diff, live, waived=None):
     """violations() on the target lines a diff that changes non-test files gives each package of live."""
     added = mutgate.added_lines(diff)[0]
-    return mutgate.violations({p: mutgate.diff_targets(added, p) for p in live}, live, waived)
+    return [v[:4] for v in mutgate.violations({p: mutgate.diff_targets(added, p) for p in live}, live, waived)]
 
 
 class Gate(unittest.TestCase):
@@ -1583,6 +1583,9 @@ func Down(n int) int {
 	return n - 1
 }
 """
+# The plan's failure (#5942) for hint.go's `return 10`, run by the base's TestUp and by no head test.
+UNRUN_5 = (r"mutgate: broker/hint/hint\.go: (\d+, )*5(, \d+)* ran under the base's version of the tests this diff "
+           r"changes, and no test of package hint runs them at the head")
 TWO_TEST = """package hint
 
 import "testing"
@@ -1819,7 +1822,16 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
         # deleted test ran at the base and its neighbour runs at the head (D-319), and the clamp's
         # survivor fails the gate.
         # REQ: MUT-deleted-test-own-lines
-        base = TWO_TEST.replace("if Down(3) != 2 {", "if Down(Up(2)) != 2 {")
+        # Here TestDown also runs the clamp's `return 10` (line 5), so every line the base ran still runs
+        # at the head; where it does not, the plan fails first (#5942).
+        alone = TWO_TEST.replace("if Down(3) != 2 {", "if Down(Up(2)) != 2 {")
+        with tempfile.TemporaryDirectory() as d:
+            self.repo(d, alone[:alone.index("func TestUp")] + alone[alone.index("func TestDown"):], test_base=alone,
+                      src_pr=TWO_SRC + "// Down is Up's inverse below the clamp.\n")
+            r = self.mutgate(d, "plan", "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertRegex(r.stderr, UNRUN_5)
+        base = TWO_TEST.replace("if Down(3) != 2 {", "if Down(Up(2)) != 2 || Down(Up(20)) != 9 {")
         pr = base[:base.index("func TestUp")] + base[base.index("func TestDown"):]
         with tempfile.TemporaryDirectory() as d:
             git = self.repo(d, pr, test_base=base, src_pr=TWO_SRC + "// Down is Up's inverse below the clamp.\n")
@@ -1843,8 +1855,6 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             r = self.mutgate(d, "verify", str(out.parent), "--git", "HEAD~1", "--summary", str(summary))
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("broker/hint/hint.go:4 CONDITIONALS_NEGATION survives", r.stdout)
-            # `return 10` only TestUp ran: no test runs it now.
-            self.assertIn("broker/hint/hint.go:5 is a target line no test of package hint runs at the head", r.stdout)
             self.assertIn("the lines the diff changes and the lines TestDown cover", summary.read_text())
             # The record is still required beside the added line: without it verify refuses.
             data = json.loads((out / "hint.json").read_text())
@@ -1855,10 +1865,11 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             self.assertIn("holds no record of the lines that ['TestDown'] covers", r.stderr)
             self.assertEqual(git("status", "--porcelain", "--", "broker").stdout, "")
 
-    def gate_run(self, d, pr_test, base_test, src_pr=None, extra=None, move=None, base_extra=None):
+    def gate_run(self, d, pr_test, base_test, src_pr=None, extra=None, move=None, base_extra=None, plan_fails=False):
         """(verify's result, the lines gremlins was given) for a PR of pr_test (and src_pr, extra
         {name: text} new or changed files in broker/hint/ (None: deleted) over base_extra's, and hint.go
-        renamed to move), through plan, run, delete and verify."""
+        renamed to move), through plan, run, delete and verify; or, with plan_fails, (plan's failed
+        result, None)."""
         git = self.repo(d, pr_test, test_base=base_test, src_pr=src_pr, base_extra=base_extra)
         for name, text in (extra or {}).items():
             f = pathlib.Path(d) / "broker" / "hint" / name
@@ -1874,7 +1885,9 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "--amend", "--no-edit")
         env, plan = self.line_stub(d), pathlib.Path(d) / "targets.json"
         r = self.mutgate(d, "plan", "--git", "HEAD~1", "--targets-out", str(plan))
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.returncode, 1 if plan_fails else 0, r.stdout + r.stderr)
+        if plan_fails:
+            return r, None
         out = pathlib.Path(d) / "res" / "mutants-0"
         r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(out), "--targets", str(plan), env=env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -1918,11 +1931,20 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
         }
         for name, (pr, was, src, extra, move) in cases.items():
             with self.subTest(name), tempfile.TemporaryDirectory() as d:
-                r, seen = self.gate_run(d, pr, was, src, extra, move)
+                # Since #5942 the plan fails a line the base ran that the head's whole suite runs nowhere,
+                # before any mutant runs. A moved file's base lines map to no head line, so there the
+                # NOT COVERED rule fails it.
+                r, seen = self.gate_run(d, pr, was, src, extra, move, plan_fails=not move)
                 self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-                self.assertIn(5, seen)
-                self.assertIn(f"broker/hint/{move or 'hint.go'}:5 is a target line no test of package hint runs at the head",
-                              r.stdout)
+                if move:
+                    self.assertIn(5, seen)
+                    self.assertIn(f"broker/hint/{move}:5 is a target line no test of package hint runs at the head", r.stdout)
+                elif "edited" in name:
+                    # The edit drops lines 4, 5 and 7 from the base's mapping; the if's closing brace (line
+                    # 6), which no mutant names, is still one the base ran and the head runs nowhere.
+                    self.assertIn("mutgate: broker/hint/hint.go: 6 ran under the base's version", r.stderr)
+                else:
+                    self.assertRegex(r.stderr, UNRUN_5)
 
     def test_a_helper_edit_beside_an_added_line_targets_the_tests_that_reach_it(self):
         # #5753: a helper change plus an added comment line used to narrow the targets to that
@@ -1968,10 +1990,35 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
         for name, (path, pr, src) in cases.items():
             with self.subTest(name), tempfile.TemporaryDirectory() as d:
                 test = reader(path)
-                r, seen = self.gate_run(d, test, test, src, extra={path: pr}, base_extra={path: table})
-                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-                self.assertIn(5, seen)
-                self.assertIn("broker/hint/hint.go:5 is a target line no test of package hint runs at the head", r.stdout)
+                r, _ = self.gate_run(d, test, test, src, extra={path: pr}, base_extra={path: table}, plan_fails=True)
+                self.assertRegex(r.stderr, UNRUN_5)  # #5942: the plan fails it before any mutant runs
+
+    def test_a_line_no_mutant_names_fails_where_the_base_ran_it_and_the_head_runs_it_nowhere(self):
+        # L1 on #5770 (#5942): every target line runs was checked only through NOT COVERED mutants, so
+        # a line no mutant and no statement deletion names (here mark's empty body, lines 14 and 15)
+        # that a weakened test stopped running passed. The plan now runs the head's whole suite and
+        # fails each line the base's version of the changed tests ran that no head test runs.
+        # REQ: MUT-own-lines-no-mutant
+        src = TWO_SRC + "\nfunc mark() {\n}\n"
+        base = TWO_TEST.replace("func TestUp(t *testing.T) {\n", "func TestUp(t *testing.T) {\n\tmark()\n")
+        down = base.replace("func TestDown(t *testing.T) {\n", "func TestDown(t *testing.T) {\n\tmark()\n")
+        cases = {
+            "the only call dropped": (TWO_TEST, base, None, 1),
+            "a comment line beside it": (TWO_TEST, base, src + "// a comment\n", 1),
+            # TestDown still runs mark at the head: the line runs, so the plan passes.
+            "another test still runs it": (down.replace("\tmark()\n\tif Up", "\tif Up"), down, None, 0),
+        }
+        for name, (pr, was, src_pr, code) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                self.repo(d, pr, src=src, test_base=was, src_pr=src_pr)
+                r = self.mutgate(d, "plan", "--git", "HEAD~1")
+                self.assertEqual(r.returncode, code, r.stdout + r.stderr)
+                gone = "broker/hint/hint.go: 14, 15 ran under the base's version of the tests this diff changes"
+                if code:
+                    self.assertIn(gone + ", and no test of package hint runs them at the head", r.stderr)
+                    self.assertNotIn(", 3,", r.stderr)  # Up's lines still run under TestUp
+                else:
+                    self.assertNotIn(gone, r.stderr)
 
     def test_an_archive_that_fails_prints_the_problem(self):
         # L3 R3 on #5770 (#5779): a failed `git archive` wrote no tar, and tarfile's ReadError came
@@ -3045,7 +3092,7 @@ class Record(unittest.TestCase):
             self.assertIn("broker/netguard/a.go:4 ARITHMETIC_BASE survives", r.stdout)
         self.assertEqual(mutgate.violations({"p": {"broker/p/a.go": {4}}}, {"p": [("a.go", 4, "STATEMENT_DELETION"),
                          ("a.go", 4, "CONDITIONALS_NEGATION")]}, {("broker/p/a.go", 4, "STATEMENT_DELETION", None): "r"}),
-                         [("p", "broker/p/a.go", 4, "CONDITIONALS_NEGATION")])
+                         [("p", "broker/p/a.go", 4, "CONDITIONALS_NEGATION", None)])
 
     def test_a_stale_entry_fails_the_gate(self):
         rec = json.dumps({"file": "a.go", "mutant": "ARITHMETIC_BASE", "func": "a", "decl": Record.digest("var a = 1 + 1"), "stmt": ["var a = 1 + 1"], "at": 0, "after": "package netguard",
@@ -3181,10 +3228,10 @@ class MutantScope(unittest.TestCase):
             with self.subTest(waived):
                 # #5774's gate passed this: the entry waived the live `>= 12` mutant with the proof for `< 0`.
                 self.assertEqual(mutgate.violations(self.TARGETS, live, waived, every),
-                                 [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY")])
+                                 [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", 16)])
                 # It names three mutants, so it waives none, the one it proves included.
                 self.assertEqual(mutgate.violations(self.TARGETS, gone, waived, every),
-                                 [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY")])
+                                 [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", 113)])
                 cover, ambiguous = mutgate.covering(waived, every)
                 self.assertEqual(cover, {})
                 self.assertEqual(len(ambiguous[0][1]), 3 if list(waived)[0][2] else 4)
@@ -3192,20 +3239,20 @@ class MutantScope(unittest.TestCase):
         exact = {("broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", 113): "the < 0 is killed by hand"}
         self.assertEqual(mutgate.violations(self.TARGETS, gone, exact, every), [])
         self.assertEqual(mutgate.violations(self.TARGETS, live, exact, every),
-                         [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY")])
+                         [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", 16)])
         # A column alone still matches both kinds there, so a body line needs the kind too.
         self.assertEqual(mutgate.violations(self.TARGETS, gone, {("broker/p/a.go", 4, None, 113): "r"}, every),
-                         [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY")])
+                         [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", 113)])
         self.assertEqual(mutgate.violations(self.TARGETS, gone, {("broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", 113): "r"},
                                             every), [])
         # A waiver whose line holds one mutant of its scope needs no column, as before.
         one = {"p": [("a.go", 4, "STATEMENT_DELETION", 2), ("a.go", 4, "CONDITIONALS_NEGATION", 9)]}
         self.assertEqual(mutgate.violations(self.TARGETS, one, {("broker/p/a.go", 4, "STATEMENT_DELETION", None): "r"}, one),
-                         [("p", "broker/p/a.go", 4, "CONDITIONALS_NEGATION")])
+                         [("p", "broker/p/a.go", 4, "CONDITIONALS_NEGATION", 9)])
         # A killed sibling still counts: the proof cannot say which one it is for, and a later run may not kill it.
         self.assertEqual(mutgate.violations(self.TARGETS, {"p": [self.LINE[3]]},
                                             {("broker/p/a.go", 4, None, None): "r"}, every),
-                         [("p", "broker/p/a.go", 4, "CONDITIONALS_NEGATION")])
+                         [("p", "broker/p/a.go", 4, "CONDITIONALS_NEGATION", 113)])
 
     def test_the_body_line_names_a_column_and_kind(self):
         self.assertEqual(mutgate.waivers("Mutant-equivalent: broker/p/a.go:4:113:CONDITIONALS_BOUNDARY the < 0 is dead\n"
@@ -3314,6 +3361,106 @@ class MutantScope(unittest.TestCase):
                 self.assertTrue(col, row)
         self.assertNotIn("broker/clerk/run/mail.go:104", r.stdout)
         self.assertNotIn("broker/clerk/run/mail.go:145", r.stdout)
+
+
+class WaiverMessages(unittest.TestCase):
+    """MUT-waiver-messages (#5828, from #5824): a builder can write the right waiver line from the gate's own
+    output, and a mistyped waiver line is named, never dropped without a word."""
+    # REQ: MUT-waiver-messages
+    SRC = "package netguard\nvar a = 1 + 1 + 1\n"
+    REASON = "a is never read, so no value tells the mutants apart"
+
+    @classmethod
+    def result(cls, status):
+        muts = [{"type": "ARITHMETIC_BASE", "status": status, "line": 2, "column": c} for c in (11, 15)]
+        return {"files": [{"file_name": "a.go", "mutations": muts}], "mutants_lived": 2 * (status == "LIVED"),
+                "statement_deletions": 0}
+
+    def test_a_failure_names_its_mutant_by_column_and_kind(self):
+        # Item 1: two survivors of one kind on one line printed the same text, so neither line could be pasted.
+        r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        for col in (11, 15):
+            self.assertIn(f"; its waiver line: Mutant-equivalent: broker/netguard/a.go:2:{col}:ARITHMETIC_BASE <reason>\n", r.stdout)
+        r = Verify().verify({"netguard.json": self.result("NOT COVERED")}, src=self.SRC)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        for col in (11, 15):
+            self.assertIn(f"; its waiver line: Mutant-uncovered: broker/netguard/a.go:2:{col}:ARITHMETIC_BASE <reason>\n", r.stdout)
+        # The printed line, pasted with a reason, waives exactly that mutant.
+        body = "".join(f"Mutant-equivalent: broker/netguard/a.go:2:{c}:ARITHMETIC_BASE {self.REASON}\n" for c in (11, 15))
+        self.assertEqual(Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, body=body).returncode, 0)
+        self.assertEqual(mutgate.violations({"p": {"broker/p/a.go": {4}}}, {"p": [("a.go", 4, "X", 7), ("a.go", 4, "X")]}),
+                         [("p", "broker/p/a.go", 4, "X", 7), ("p", "broker/p/a.go", 4, "X", None)])
+
+    def test_an_ambiguous_waiver_is_not_listed_as_naming_no_mutant(self):
+        # Item 2: a waiver matching both mutants was listed as ambiguous and also as naming no surviving mutant.
+        r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, summary=True,
+                            body=f"Mutant-equivalent: broker/netguard/a.go:2 {self.REASON}\n"
+                                 f"Mutant-equivalent: broker/netguard/a.go:9 {self.REASON}\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("Waivers matching more than one mutant, which waive none of them (#5792):\n"
+                      "- broker/netguard/a.go:2: ", r.summary)
+        unused = [l for l in r.summary.split("\n") if l.startswith("Mutant-equivalent lines naming no")]
+        self.assertEqual(unused, ["Mutant-equivalent lines naming no surviving mutant on a target line: broker/netguard/a.go:9"])
+
+    def test_a_malformed_waiver_line_is_warned_about(self):
+        # Item 3: these lines were dropped unread, or (an unknown kind) shown only as unused.
+        bad = {"Mutant-equivalent: broker/netguard/a.go:2:0 column zero": "is not read as a waiver",
+               "Mutant-equivalent: broker/netguard/a.go:2:11:arithmetic_base lower case": "is not read as a waiver",
+               "mutant-equivalent: broker/netguard/a.go:2:11:ARITHMETIC_BASE lower-case prefix": "is not read as a waiver",
+               "  Mutant-uncovered: broker/netguard/a.go:2:11 indented": "is not read as a waiver",
+               "Mutant-equivalent: broker/netguard/a.go:2:11 ?": "is not read as a waiver",
+               "Mutant-equivalent: broker/netguard/a.go 2 no line": "is not read as a waiver",
+               # L3 on #5976: behind the Markdown a PR body wraps lines in, the line was dropped unread and unwarned.
+               f"`Mutant-equivalent: broker/netguard/a.go:2:11:ARITHMETIC_BASE {self.REASON}`": "is not read as a waiver",
+               f"- Mutant-equivalent: broker/netguard/a.go:2:11:ARITHMETIC_BASE {self.REASON}": "is not read as a waiver",
+               f"* `Mutant-uncovered: broker/netguard/a.go:2:11 {self.REASON}`": "is not read as a waiver",
+               f"+ Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}": "is not read as a waiver",
+               f"> Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}": "is not read as a waiver",
+               f">> 12. Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}": "is not read as a waiver",
+               f"3) Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}": "is not read as a waiver",
+               "Mutant-equivalent: broker/netguard/a.go:2:11:ARITHMETIC_BASE <reason>": "still holds the <reason> placeholder",
+               "Mutant-equivalent: broker/netguard/a.go:2:11 `<Reason>`": "still holds the <reason> placeholder",
+               "Mutant-equivalent: broker/netguard/a.go:2:11 <reason> here.": "still holds the <reason> placeholder",
+               # L3 round 2 on #5976: any Markdown before the waiver, not a listed few.
+               f"- [ ] Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}": "is not read as a waiver",
+               f"- [x] Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}": "is not read as a waiver",
+               f"**Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}**": "is not read as a waiver",
+               f"## Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}": "is not read as a waiver",
+               f"| Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON} |": "is not read as a waiver",
+               "Mutant-equivalent: broker/netguard/a.go:2:11:BOGUS a kind no mutant has":
+                   "the waiver broker/netguard/a.go:2:11:BOGUS names the kind BOGUS, which no mutant has"}
+        good = [f"Mutant-equivalent: broker/netguard/a.go:2:15:ARITHMETIC_BASE {self.REASON}",
+                f"Mutant-uncovered: broker/netguard/a.go:3:STATEMENT_DELETION {self.REASON}",
+                "A Mutant-equivalent: line quoted mid-sentence is no waiver line.",
+                "- the syntax is `Mutant-equivalent: <path>:<line>` in a bullet of prose",
+                f"Mutant-equivalent: broker/netguard/a.go:4 the reason names reason among other words"]
+        got = mutgate.malformed_waivers("\r\n".join([*bad, *good]))
+        self.assertEqual(len(got), len(bad), got)
+        for (line, want), warning in zip(bad.items(), got):
+            with self.subTest(line):
+                self.assertIn(want, warning)
+        # The gate prints each warning, and the mutant the bad line meant to waive still fails (fail closed).
+        r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, body="\n".join([*bad, good[0]]) + "\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.count("mutgate: the line "), len(bad) - 4, r.stdout)
+        self.assertEqual(r.stdout.count("still holds the <reason> placeholder, so it waives nothing"), 3, r.stdout)
+        # A reason holding the placeholder waives nothing, as the warning says.
+        self.assertEqual(mutgate.waivers("\n".join(good)), {("broker/netguard/a.go", 2, "ARITHMETIC_BASE", 15): self.REASON,
+                         ("broker/netguard/a.go", 3, "STATEMENT_DELETION", None): self.REASON,
+                         ("broker/netguard/a.go", 4, None, None): "the reason names reason among other words"})
+        self.assertIn("names the kind BOGUS, which no mutant has, so it waives nothing", r.stdout)
+        self.assertIn("broker/netguard/a.go:2 ARITHMETIC_BASE survives", r.stdout)
+        self.assertNotIn("a.go:2:15:ARITHMETIC_BASE <reason>", r.stdout)
+        # KINDS is gremlins v0.6.0's list, so it moves with the version the workflow installs.
+        self.assertIn("gremlins/cmd/gremlins@v0.6.0", WORKFLOW.read_text())
+        self.assertIn(mutgate.DELETION, mutgate.KINDS)
+
+    def test_the_workflow_header_gives_the_waiver_syntax(self):
+        # Item 4: the header still gave `<path>:<line> <reason>`, which names no column or kind.
+        head = " ".join(l.lstrip("# ") for l in WORKFLOW.read_text().split("\n")[:12])
+        self.assertIn("`Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>`", head)
+        self.assertNotIn("<path>:<line> <reason>", head)
 
 
 class CaseClauseCover(unittest.TestCase):
