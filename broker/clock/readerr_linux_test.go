@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -23,18 +24,23 @@ import (
 // "<mode>:<pty slave path>".
 const ttyChildEnv = "AGENTOS_CLOCK_TTY_CHILD"
 
-// bootIDPath is the file bootID reads; the boot modes bind the pty over it.
-const bootIDPath = "/proc/sys/kernel/random/boot_id"
+// bootIDPath and rtcPath are the files bootID and RTC read; the boot and
+// rtc modes bind the pty (rtcparse: the file ttyChildEnv+"_SRC" names) over
+// them.
+const (
+	bootIDPath = "/proc/sys/kernel/random/boot_id"
+	rtcPath    = "/sys/class/rtc/rtc0/since_epoch"
+)
 
 // ttyReadErr makes a read return data and then fail, with no seam in
 // readFile (L3 on #6050): line waits in a pty, whose slave a child session
 // opens as its controlling tty and reads by path, ignoring SIGTTIN. Once the
 // first read has taken the line, the child hands the tty to another process
 // group, so its next read is a background read and fails with EIO. It
-// returns what the child's mode reports. With userns, the child runs in a
+// returns what the child's mode reports (src: the file rtcparse binds). With userns, the child runs in a
 // user and mount namespace of its own, where it may bind the slave over a
 // procfs path.
-func ttyReadErr(t *testing.T, mode string, line []byte, userns bool) string {
+func ttyReadErr(t *testing.T, mode string, line []byte, userns bool, src string) string {
 	t.Helper()
 	m, err := os.OpenFile("/dev/ptmx", os.O_RDWR|unix.O_NOCTTY, 0)
 	if err != nil {
@@ -66,7 +72,7 @@ func ttyReadErr(t *testing.T, mode string, line []byte, userns bool) string {
 	defer r.Close()
 	var out bytes.Buffer
 	c := exec.Command(os.Args[0], "-test.run=^TestHW8ReadErrorChild$")
-	c.Env = append(os.Environ(), ttyChildEnv+"="+mode+":"+slave)
+	c.Env = append(os.Environ(), ttyChildEnv+"="+mode+":"+slave, ttyChildEnv+"_SRC="+src)
 	c.Stdin, c.Stdout, c.Stderr = s, &out, &out
 	c.ExtraFiles = []*os.File{w}
 	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
@@ -113,19 +119,35 @@ func TestHW8ReadErrorChild(t *testing.T) {
 	ctl := os.NewFile(3, "ctl")
 	report := func(f string, a ...any) { fmt.Fprintf(ctl, f+"\n", a...) }
 	signal.Ignore(syscall.SIGTTIN)
-	if strings.HasPrefix(mode, "boot") {
-		if err := unix.Mount(slave, bootIDPath, "", unix.MS_BIND, ""); err != nil {
+	src, target := slave, ""
+	switch {
+	case strings.HasPrefix(mode, "boot"):
+		target = bootIDPath
+	case strings.HasPrefix(mode, "rtc"):
+		target = rtcPath
+	}
+	if mode == "rtcparse" {
+		src = os.Getenv(ttyChildEnv + "_SRC")
+	}
+	if target != "" {
+		if err := unix.Mount(src, target, "", unix.MS_BIND, ""); err != nil {
 			report("mount: %v", err)
 			return
 		}
 	}
+	if mode == "rtcparse" { // a clean read of what src holds: no pty involved
+		_, err := RTC()
+		report("background")
+		report("%v", err != nil)
+		return
+	}
 	res := make(chan string, 1)
 	go func() {
 		switch mode {
-		case "readfile", "bootfile":
+		case "readfile", "bootfile", "rtcfile":
 			p := slave
-			if mode == "bootfile" {
-				p = bootIDPath
+			if target != "" {
+				p = target
 			}
 			b, err := readFile(p)
 			res <- fmt.Sprintf("%d %v", len(b), errors.Is(err, syscall.EIO))
@@ -134,6 +156,9 @@ func TestHW8ReadErrorChild(t *testing.T) {
 			res <- fmt.Sprintf("%v %v", ok, est)
 		case "bootid":
 			res <- fmt.Sprintf("%q", bootID())
+		case "rtc":
+			rtc, err := RTC()
+			res <- fmt.Sprintf("%v %v", rtc.Unix(), err != nil)
 		}
 	}()
 	// The first read has taken the line once the input queue is empty.
@@ -181,10 +206,10 @@ func TestHW8BootEstimateRefusesAFailedRead(t *testing.T) {
 	}
 	line := append(b, '\n')
 	// The rig works: readFile returns the whole line and EIO.
-	if got, want := ttyReadErr(t, "readfile", line, false), fmt.Sprintf("%d true", len(line)); got != want {
+	if got, want := ttyReadErr(t, "readfile", line, false, ""), fmt.Sprintf("%d true", len(line)); got != want {
 		t.Fatalf("readFile on the pty: %s, want %s (bytes, EIO)", got, want)
 	}
-	if got := ttyReadErr(t, "estimate", line, false); !strings.HasPrefix(got, "false ") {
+	if got := ttyReadErr(t, "estimate", line, false, ""); !strings.HasPrefix(got, "false ") {
 		t.Fatalf("BootEstimate after a failed read: %s, want no estimate", got)
 	}
 }
@@ -194,10 +219,34 @@ func TestHW8BootEstimateRefusesAFailedRead(t *testing.T) {
 func TestTIM1BootIDRefusesAFailedRead(t *testing.T) {
 	line := []byte("0f0e0d0c-0000-4000-8000-000000000001\n")
 	// The rig works: boot_id's read returns the whole line and EIO.
-	if got, want := ttyReadErr(t, "bootfile", line, true), fmt.Sprintf("%d true", len(line)); got != want {
+	if got, want := ttyReadErr(t, "bootfile", line, true, ""), fmt.Sprintf("%d true", len(line)); got != want {
 		t.Fatalf("readFile of boot_id on the pty: %s, want %s (bytes, EIO)", got, want)
 	}
-	if got := ttyReadErr(t, "bootid", line, true); got != `""` {
+	if got := ttyReadErr(t, "bootid", line, true, ""); got != `""` {
 		t.Fatalf("bootID after a failed read: %s, want \"\"", got)
+	}
+}
+
+// The hardware clock's reading is refused when its read fails after data,
+// or when it does not parse: RTC returns the error, never a time (L3 on
+// #6050; the runners have /sys/class/rtc/rtc0, so these lines run there).
+func TestHW8RTCRefusesAFailedOrGarbledRead(t *testing.T) {
+	if _, err := os.Stat(rtcPath); err != nil {
+		t.Skip("no hardware clock here")
+	}
+	line := []byte("1700000000\n")
+	// The rig works: since_epoch's read returns the whole line and EIO.
+	if got, want := ttyReadErr(t, "rtcfile", line, true, ""), fmt.Sprintf("%d true", len(line)); got != want {
+		t.Fatalf("readFile of since_epoch on the pty: %s, want %s (bytes, EIO)", got, want)
+	}
+	if got := ttyReadErr(t, "rtc", line, true, ""); got != "-62135596800 true" {
+		t.Fatalf("RTC after a failed read: %s, want the zero time and an error", got)
+	}
+	garbled := filepath.Join(t.TempDir(), "since_epoch")
+	if err := os.WriteFile(garbled, []byte("not a number\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := ttyReadErr(t, "rtcparse", line, true, garbled); got != "true" {
+		t.Fatalf("RTC of a garbled reading: error %s, want one", got)
 	}
 }
