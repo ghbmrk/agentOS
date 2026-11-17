@@ -1485,21 +1485,35 @@ class KeyringSpikesTest(unittest.TestCase):
                            r"""\s+["']?(?:-[^c\s]|(?:%s)(?=$|[\s"';&|)]*(?:$|[;&|)\\]|\s-)))"""
                            r"""|\[\s*["'](?:[^"'\s]*/)?mkosi["']\s*(?:\]|,\s*["'](?:-|(?:%s)["']))""" % (VERBS, VERBS), re.M)
 
-    def tracked(self):
-        out = subprocess.run(["git", "-C", str(ROOT), "ls-files"], capture_output=True, text=True, check=True).stdout
-        return [ROOT / f for f in out.split()]
+    def files(self):
+        """Every file in the checkout but records. The walk opens no record (ci_scope: a record
+        file or directory, or .git), as test_image.scanned_files: tests/records_audit.py counts any
+        open of one as a read, and CI's records-only step does not run this module."""
+        spec = importlib.util.spec_from_file_location("repro_ci_scope", ROOT / "tools/ci_scope.py")
+        scope = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(scope)
+        out = []
+        for top, dirs, names in os.walk(ROOT):
+            rel = pathlib.Path(top).relative_to(ROOT).as_posix()
+            rel = "" if rel == "." else rel + "/"
+            dirs[:] = sorted(d for d in dirs if not (rel + d == ".git" or (rel + d + "/").startswith(scope.RECORD_DIRS)))
+            out += [ROOT / (rel + n) for n in sorted(names) if not scope.is_record(rel + n)
+                    and (ROOT / (rel + n)).is_file() and not (ROOT / (rel + n)).is_symlink()]
+        return out
 
     def mkosi_runs(self):
-        """{path: offset of its first mkosi call} for every tracked file but prose (.md), comment
-        lines blanked."""
-        out = subprocess.run(["git", "-C", str(ROOT), "grep", "-lIi", "mkosi"], capture_output=True, text=True,
-                             check=True).stdout
+        """{path: offset of its first mkosi call} for every file but records and prose (.md),
+        comment lines blanked."""
         runs = {}
-        for rel in out.split():
-            if rel.endswith(".md"):
+        for f in self.files():
+            if f.suffix == ".md":
                 continue
+            raw = f.read_bytes()
+            if b"mkosi" not in raw.lower():
+                continue
+            rel = str(f.relative_to(ROOT))
             text = "\n".join("" if ln.lstrip().startswith(("#", "//")) else ln
-                             for ln in (ROOT / rel).read_text().splitlines())
+                             for ln in raw.decode("utf-8", "replace").splitlines())
             for m in self.MKOSI_RUN.finditer(text):
                 if not re.search(r"(-C|--directory)[\s=]*$", text[:m.start()].rsplit("\n", 1)[-1]):
                     runs[rel] = (text, m.start())
@@ -1511,7 +1525,7 @@ class KeyringSpikesTest(unittest.TestCase):
         mkosi.conf or mkosi.conf.d/), read as mkosi does: mkosi.conf, then mkosi.conf.d/*.conf in
         order, the last [Distribution] Distribution= winning; None when none sets it. A directory
         another tree includes (InitrdInclude=, Include=) is part of that tree."""
-        files = [f for f in self.tracked() if f.name == "mkosi.conf" or f.parent.name == "mkosi.conf.d"]
+        files = [f for f in self.files() if f.name == "mkosi.conf" or f.parent.name == "mkosi.conf.d"]
         trees = {f.parent.parent if f.parent.name == "mkosi.conf.d" else f.parent for f in files}
         included = set()
         for t in trees:
