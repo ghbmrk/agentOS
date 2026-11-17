@@ -711,11 +711,11 @@ class RebaseDeltaTest(unittest.TestCase):
 
     def test_a_clean_main_merge_reads_same_and_does_not_count(self):
         root, old, new = self.timeline(False)
-        self.assertEqual(metrics.rebase_deltas(root, [old, new], "main"), 0)
+        self.assertEqual(metrics.rebase_deltas(root, [(old, True), (new, True)], "main"), 0)
 
     def test_a_rebase_that_changed_a_file_counts_once(self):
         root, old, new = self.timeline(True)
-        self.assertEqual(metrics.rebase_deltas(root, [old, new], "main"), 1)
+        self.assertEqual(metrics.rebase_deltas(root, [(old, True), (new, True)], "main"), 1)
 
     def test_a_fix_push_on_an_unmoved_base_does_not_count(self):
         root, git = self.repo()
@@ -725,17 +725,23 @@ class RebaseDeltaTest(unittest.TestCase):
         old = git("rev-parse", "HEAD")
         (root / "c").write_text("fix\n")
         git("commit", "-qam", "fix")
-        self.assertEqual(metrics.rebase_deltas(root, [old, git("rev-parse", "HEAD")], "main"), 0)
+        self.assertEqual(metrics.rebase_deltas(root, [(old, True), (git("rev-parse", "HEAD"), True)], "main"), 0)
 
     def test_unknown_sha_and_single_head_do_not_count(self):
         root, old, new = self.timeline(True)
-        self.assertEqual(metrics.rebase_deltas(root, [old], "main"), 0)
-        self.assertEqual(metrics.rebase_deltas(root, [old, "0" * 40], "main"), 0)
+        self.assertEqual(metrics.rebase_deltas(root, [(old, True)], "main"), 0)
+        self.assertEqual(metrics.rebase_deltas(root, [(old, True), ("0" * 40, True)], "main"), 0)
 
-    def test_collect_counts_only_the_changed_rebase_of_the_two_prs(self):
+    def test_a_change_after_a_fix_list_head_does_not_count(self):
+        # #5955: the comparison is against the last accepted head, so the delta review a fix-list owes
+        # is not counted even when the fix push also merged main and edited a file.
         root, old, new = self.timeline(True)
-        verdict = lambda h: {"body": f"L3. Verdict: accept.\nRecord: l3 head {h}", "author_association": "OWNER"}
-        reviews = [dict(verdict(old), submitted_at="2026-10-05T00:10:00Z"), dict(verdict(new), submitted_at="2026-10-05T00:20:00Z")]
+        self.assertEqual(metrics.rebase_deltas(root, [(old, False), (new, True)], "main"), 0)
+
+    def collect(self, root, l3):
+        """`collect_github` over one merged PR whose L3 verdicts are `l3` = [(verdict, head)], oldest first."""
+        reviews = [{"body": f"L3. Verdict: {v}.\nRecord: l3 head {h}", "author_association": "OWNER",
+                    "submitted_at": f"2026-10-05T00:{10 + i:02d}:00Z"} for i, (v, h) in enumerate(l3)]
 
         def api(repo, path, token):
             if path.startswith("pulls?"):
@@ -748,12 +754,22 @@ class RebaseDeltaTest(unittest.TestCase):
             raise AssertionError(path)
         orig, orig_rd = metrics._api, metrics.rebase_deltas
         metrics._api = api
-        metrics.rebase_deltas = lambda r, heads, base: orig_rd(r, heads, "main") if heads == [old, new] else -1
+        metrics.rebase_deltas = lambda r, heads, base: orig_rd(r, heads, "main") if base == "x^1" else -1
         try:
             pulls, _ = metrics.collect_github("o/r", None, root=root)
         finally:
             metrics._api, metrics.rebase_deltas = orig, orig_rd
-        self.assertEqual(pulls[0]["rebase_deltas"], 1)
+        return pulls[0]["rebase_deltas"]
+
+    def test_collect_counts_only_the_changed_rebase_of_the_two_prs(self):
+        root, old, new = self.timeline(True)
+        self.assertEqual(self.collect(root, [("accept", old), ("accept", new)]), 1)
+
+    def test_collect_does_not_count_a_fix_plus_main_merge_after_a_fix_list(self):
+        root, old, new = self.timeline(True)
+        self.assertEqual(self.collect(root, [("fix-list", old), ("accept", new)]), 0)
+        # An accept at the same head (short SHA) after its fix-list makes it an accepted head again.
+        self.assertEqual(self.collect(root, [("fix-list", old), ("accept", old[:8]), ("accept", new)]), 1)
 
     def test_weekly_column_sums_merged_prs_and_old_data_is_n_a(self):
         raw = raw_fixture()

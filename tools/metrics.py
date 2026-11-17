@@ -344,15 +344,18 @@ def _runs_window(repo, token, lo, hi):
 
 def rebase_deltas(root, heads, base):
     """D-320 rule 5: how many of a merged PR's head changes were a main-merge or rebase that
-    `premerge.py` reads as `changed`. `heads` are the heads its L3 verdicts name, oldest first, and
-    each head after the first is one a delta review followed. A pair counts when main moved into the
-    branch (the merge base with `base`, the commit main was at when the PR merged, differs) and
-    `premerge.compare(old, new)` lists files; a `same` reading, a plain fix push (same merge base) or
-    an unknown SHA does not."""
+    `premerge.py` reads as `changed`. `heads` are `(sha, accepted)` for the heads its L3 verdicts name,
+    oldest first; `accepted` is True when a verdict at that head was an accept. Only a change away from
+    an accepted head is compared (#5955: against the last accepted head), so the delta review a
+    fix-list owes is not counted even when the fix push also merged main. A pair counts when main
+    moved into the branch (the merge base with `base`, the commit main was at when the PR merged,
+    differs) and `premerge.compare(old, new)` lists files; a `same` reading, a plain fix push (same
+    merge base) or an unknown SHA does not."""
     n = 0
-    for old, new in zip(heads, heads[1:]):
+    for (old, accepted), (new, _) in zip(heads, heads[1:]):
         try:
-            if old == new or _git(root, "merge-base", old, base) == _git(root, "merge-base", new, base):
+            if not accepted or old == new or \
+                    _git(root, "merge-base", old, base) == _git(root, "merge-base", new, base):
                 continue
             n += bool(premerge.compare(str(root), old, new, base))
         except subprocess.CalledProcessError:
@@ -396,11 +399,15 @@ def collect_github(repo, token, since=None, root=None):
             rounds = count_rounds([b for b in l3 if verdict(b)])
             notes_noise = noise([r.get("body") for r in reviews if trusted_review(r)])
             if root is not None and p.get("merge_commit_sha"):
-                heads = []
+                heads = []  # [sha, accepted] per distinct verdict head, oldest first
                 for b in l3:
                     h = review_head(b) if verdict(b) else None
-                    if h and not any(x.startswith(h) or h.startswith(x) for x in heads):
-                        heads.append(h)
+                    if not h:
+                        continue
+                    hit = next((x for x in heads if x[0].startswith(h) or h.startswith(x[0])), None)
+                    if hit is None:
+                        heads.append(hit := [h, False])
+                    hit[1] = hit[1] or verdict(b) == "accept"
                 deltas = rebase_deltas(root, heads, p["merge_commit_sha"] + "^1")
             # A non-accept verdict without a Cause line counts as "none" so the gap shows.
             causes = [cause(b) or "none" for b in l3 if verdict(b) in ("fix-list", "reject")]
@@ -887,8 +894,9 @@ def render(weeks, raw, previous_md=None):
         "against a cap of about 10; current week only.",
         "- **Rebases needing a delta review** (D-320 rule 5): PRs merged that week with a head change after "
         "main moved into the branch (a rebase or main-merge) that `tools/premerge.py` reads as `changed` "
-        "against the previous head an L3 verdict named, which a later L3 delta-review verdict followed; "
-        "a `same` reading and a fix push on an unmoved base do not count. Counted once per such head change.",
+        "against the last accepted head, which a later L3 delta-review verdict followed; a head change "
+        "after a fix-list or reject, a `same` reading and a fix push on an unmoved base do not count. "
+        "Counted once per such head change.",
         "- **red** / **n/a**: red marks a week above the D-086 baseline; `n/a` means the data to compute a column is "
         "absent (never printed as 0).",
         "- **Closed weeks**: once a finished week is recorded, its L3, defect and flake cells are kept as "
