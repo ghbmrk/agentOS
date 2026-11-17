@@ -1122,16 +1122,29 @@ sys.exit(status[n] if n < len(status) else 0)
     def test_guest_base_reads_the_sources_it_is_given(self):
         # Both guest roots come from guest-base.sh's one root, so the sources it is handed decide
         # their security packages; with two arguments (ci.yml's test roots) it reads the image's file.
-        for extra in ((), ("/given/agentos.sources",)):
-            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as d:
+        # It runs from a copy beside a stand-in keyring check (IMG-keyring-pin, #5578), which must run
+        # first and stop it when it fails.
+        for extra, check in (((), 0), (("/given/agentos.sources",), 0), ((), 1)):
+            with self.subTest(extra=extra, check=check), tempfile.TemporaryDirectory() as d:
                 log = pathlib.Path(d, "mm")
-                path = fake_tools(d, mmdebstrap='printf "%%s\\n" "$@" > %s\n' % log, timeout='shift; exec "$@"\n',
+                img = pathlib.Path(d, "image")
+                img.mkdir()
+                shutil.copy(IMG / "guest-base.sh", img)
+                (img / "debian-archive-keyring.sh").write_text("echo keyring-check >> %s\nexit %d\n" % (log, check))
+                path = fake_tools(d, mmdebstrap='printf "%%s\\n" "$@" >> %s\n' % log, timeout='shift; exec "$@"\n',
                                   dpkg_query="exit 0\n")
-                p = subprocess.run(["sh", str(IMG / "guest-base.sh"), str(pathlib.Path(d, "root")),
+                p = subprocess.run(["sh", str(img / "guest-base.sh"), str(pathlib.Path(d, "root")),
                                     str(pathlib.Path(d, "m.json")), *extra], capture_output=True, text=True,
                                    env={"PATH": path})
+                lines = log.read_text().splitlines()
+                self.assertEqual(lines[0], "keyring-check")
+                if check:
+                    self.assertNotEqual(p.returncode, 0)
+                    self.assertEqual(lines, ["keyring-check"])
+                    continue
                 self.assertEqual(p.returncode, 0, p.stderr)
-                self.assertEqual(log.read_text().splitlines()[-1], extra[0] if extra else str(SOURCES))
+                default = img / SOURCES.relative_to(IMG)
+                self.assertEqual(lines[-1], extra[0] if extra else str(default))
         p = subprocess.run(["sh", str(IMG / "guest-base.sh"), "r", "m", "s", "x"], capture_output=True, text=True)
         self.assertEqual(p.returncode, 2)
 
@@ -1270,6 +1283,154 @@ class SecuritySnapshotEdgeTest(unittest.TestCase):
         self.assertNotIn("security.debian.org", b)
         wf = (ROOT / ".github/workflows/enforcer-image.yml").read_text()
         self.assertEqual(wf.count('      - "image/security-snapshot.sh"\n'), 2)
+
+
+
+class KeyringCheckOtherBuildsTest(unittest.TestCase):
+    """IMG-keyring-pin-b (#5933): the enforcer image and the test kit check the Debian archive keyring
+    before mkosi, as image/build.sh does (#5578), and stop when the check fails."""
+
+    BUILDS = (("image/enforcer/build.sh", "enforcer-image.yml"), ("spikes/S1S2-testkit/build.sh", "testkit.yml"))
+
+    def test_check_runs_first_and_stops_the_build(self):
+        for rel, _ in self.BUILDS:
+            for check in (1, 0):
+                with self.subTest(build=rel, check=check), tempfile.TemporaryDirectory() as d:
+                    log = pathlib.Path(d, "log")
+                    script = pathlib.Path(d, rel)
+                    script.parent.mkdir(parents=True)
+                    shutil.copy(ROOT / rel, script)
+                    pathlib.Path(d, "image").mkdir(exist_ok=True)
+                    pathlib.Path(d, "image/debian-archive-keyring.sh").write_text(
+                        "echo keyring-check >> %s\nexit %d\n" % (log, check))
+                    mkosi = pathlib.Path(d, "mkosi")
+                    mkosi.write_text("#!/bin/sh\necho mkosi >> %s\n" % log)
+                    mkosi.chmod(0o755)
+                    p = subprocess.run(["sh", str(script), str(pathlib.Path(d, "out"))], capture_output=True, text=True,
+                                       env={"PATH": os.environ["PATH"], "MKOSI": str(mkosi),
+                                            "ENFORCER_RELEASE_ROOT": "r.json", "AGENTOS_RELEASE_KEYS": "k.pem"})
+                    lines = log.read_text().splitlines()
+                    self.assertEqual(lines[0], "keyring-check")
+                    if check:
+                        self.assertNotEqual(p.returncode, 0)
+                        self.assertEqual(lines, ["keyring-check"])
+
+    def test_check_precedes_mkosi_and_its_change_runs_the_workflow(self):
+        for rel, wf in self.BUILDS:
+            with self.subTest(build=rel):
+                b = (ROOT / rel).read_text()
+                self.assertEqual(b.count("debian-archive-keyring.sh\"\n"), 1)
+                self.assertLess(b.index("debian-archive-keyring.sh\"\n"), b.index("$MKOSI "))
+                w = (ROOT / ".github/workflows" / wf).read_text()
+                self.assertEqual(w.count('      - "image/debian-archive-keyring.sh"\n'), 2)
+
+
+
+class KeyringMinimalTest(unittest.TestCase):
+    """IMG-keyring-minimal (#5954): each apt stanza of the image, guest and enforcer builds trusts a
+    keyring holding only the Debian key that signs it, and the check pins each such file exactly.
+    The runner's keyrings are read from AGENTOS_DEBIAN_KEYRINGS (default /usr/share/keyrings, which
+    CI's checks job fills by installing debian-archive-keyring before the unit tests)."""
+
+    CHECK = IMG / "debian-archive-keyring.sh"
+    ARCHIVE = "/usr/share/keyrings/debian-archive-bookworm-automatic.gpg"
+    SECURITY = "/usr/share/keyrings/debian-archive-bookworm-security-automatic.gpg"
+    SOURCES = (MK / "mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources",
+               IMG / "enforcer/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources")
+
+    def pinned(self):
+        """{file name: [(fingerprint, label)]} from the check's list."""
+        text = self.CHECK.read_text()
+        body = text[text.index("cat <<'EOF'\n") + len("cat <<'EOF'\n"):text.index("\nEOF\n")]
+        files, cur = {}, None
+        for line in body.splitlines():
+            m = re.fullmatch(r"([0-9A-F]{40})  (.+)", line)
+            if m:
+                files[cur].append((m[1], m[2]))
+            else:
+                self.assertRegex(line, r"\A[a-z0-9-]+\.gpg\Z")
+                cur = line
+                files[cur] = []
+        return files
+
+    def test_each_stanza_trusts_only_its_signing_key(self):
+        # REQ: IMG-keyring-minimal. The snapshot (trixie, trixie-updates) is read with the archive
+        # key's keyring, the security archive with the security key's, in the core and the enforcer
+        # (Potency 1 on #5961: a repointed enforcer Signed-By would bypass the check).
+        for src in self.SOURCES:
+            with self.subTest(sources=str(src.relative_to(ROOT))):
+                stanzas = [dict(ln.split(": ", 1) for ln in st.splitlines() if ln and not ln.startswith("#"))
+                           for st in src.read_text().split("\n\n")]
+                stanzas = [st for st in stanzas if st]
+                self.assertEqual([(st["URIs"].startswith("https://snapshot.debian.org/archive/debian/"),
+                                   st["Signed-By"]) for st in stanzas],
+                                 [(True, self.ARCHIVE), (False, self.SECURITY)])
+                self.assertEqual(stanzas[1]["URIs"], "http://security.debian.org/debian-security")
+
+    def test_the_minimal_keyrings_hold_no_older_release_key(self):
+        # REQ: IMG-keyring-minimal. The files the sources name are pinned to the 12/bookworm archive
+        # and security keys alone; no buster, bullseye or release key is trusted for the builds.
+        files = self.pinned()
+        names = {pathlib.Path(self.ARCHIVE).name, pathlib.Path(self.SECURITY).name}
+        self.assertEqual(list(files)[:2], [pathlib.Path(self.ARCHIVE).name, pathlib.Path(self.SECURITY).name])
+        old = {f for f, label in files["debian-archive-keyring.gpg"] if "10/buster" in label or "11/bullseye" in label}
+        self.assertEqual(len(old), 10)
+        for name in names:
+            with self.subTest(keyring=name):
+                fprs = {f for f, _ in files[name]}
+                self.assertEqual(len(fprs), 2)
+                self.assertFalse(fprs & old)
+                self.assertTrue(all("12/bookworm" in label and "Release" not in label for _, label in files[name]))
+        self.assertEqual(files[pathlib.Path(self.ARCHIVE).name][0][1], "Debian Archive Automatic Signing Key (12/bookworm)")
+        self.assertEqual(files[pathlib.Path(self.SECURITY).name][0][1],
+                         "Debian Security Archive Automatic Signing Key (12/bookworm)")
+
+    def keyrings(self):
+        d = pathlib.Path(os.environ.get("AGENTOS_DEBIAN_KEYRINGS", "/usr/share/keyrings"))
+        if not all((d / n).is_file() for n in self.pinned()):
+            if os.environ.get("AGENTOS_REQUIRE_REFERENCE_TOOLS") == "1":
+                self.fail("no Debian keyrings in %s (install debian-archive-keyring)" % d)
+            self.skipTest("no Debian keyrings in %s" % d)
+        return d
+
+    def run_check(self, d):
+        return subprocess.run(["sh", str(self.CHECK), str(d)], capture_output=True, text=True)
+
+    def test_the_check_refuses_a_wider_or_missing_keyring(self):
+        # REQ: IMG-keyring-minimal. The runner's files pass; the whole keyring in place of the
+        # archive key's file (trust for keys no build needs) fails, and so does a missing file,
+        # each with the fix named (UX 2 on #5961).
+        src = self.keyrings()
+        p = self.run_check(src)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout.count("holds exactly the"), len(self.pinned()))
+        with tempfile.TemporaryDirectory() as d:
+            for n in self.pinned():
+                shutil.copy(src / n, pathlib.Path(d, n))
+            shutil.copy(src / "debian-archive-keyring.gpg", pathlib.Path(d, pathlib.Path(self.ARCHIVE).name))
+            p = self.run_check(d)
+            self.assertEqual(p.returncode, 1, p.stderr)
+            self.assertIn("debian-archive-bookworm-automatic.gpg does not hold exactly the pinned keys", p.stderr)
+            self.assertIn("+ 80D15823B7FD1561F9F7BCDDDC30D7C23CBBABEE", p.stderr)  # buster, not pinned there
+            self.assertIn("edit the list in image/debian-archive-keyring.sh", p.stderr)
+            self.assertIn("https://ftp-master.debian.org/keys.html", p.stderr)
+            pathlib.Path(d, pathlib.Path(self.SECURITY).name).unlink()
+            p = self.run_check(d)
+            self.assertEqual(p.returncode, 1, p.stderr)
+            self.assertIn("no keyring at %s/%s; install the debian-archive-keyring package"
+                          % (d, pathlib.Path(self.SECURITY).name), p.stderr)
+
+    def test_the_header_names_every_caller(self):
+        # UX 1 on #5961: the check's header and IMG-keyring-pin-1 list every build that runs it.
+        callers = [rel for rel in ("image/build.sh", "image/guest-base.sh", "image/enforcer/build.sh",
+                                   "spikes/S1S2-testkit/build.sh") if "debian-archive-keyring.sh\"" in (ROOT / rel).read_text()]
+        self.assertEqual(len(callers), 4)
+        header = self.CHECK.read_text().split("\nset -eu\n")[0]
+        row = next(ln for ln in (IMG / "ASSUMPTIONS.md").read_text().splitlines() if ln.startswith("| IMG-keyring-pin-1 |"))
+        for rel in callers:
+            with self.subTest(caller=rel):
+                self.assertIn(rel, header.replace("\n# ", " "))
+                self.assertIn("`%s`" % rel, row)
 
 
 if __name__ == "__main__":

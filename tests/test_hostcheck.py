@@ -1218,11 +1218,42 @@ class ResponderTest(unittest.TestCase):
                 self.assertEqual(calls, [f"--no-block {exit_}"])
         # A responder that ends its own answers at an exit would hide the ordering from the image test.
         script = (IMAGE_DIR / "responder.sh").read_text()
-        quits = script.replace('"$cmd" || echo "HOSTCHECK-EXIT-FAILED $cmd" ;;', '"$cmd"; exit 0 ;;')
+        quits = script.replace('"$cmd") || echo "HOSTCHECK-EXIT-FAILED $cmd" ;;', '"$cmd"); exit 0 ;;')
         self.assertNotEqual(quits, script)
         self.assertNotIn("HOSTCHECK-ALIVE B", self.run_responder("poweroff\nalive B\n", quits)[0])
         # It outlives SIGTERM, so only the unit's stop timeout ends it.
         self.assertEqual(unit_values(self.unit)[("Service", "TimeoutStopSec")], ["2s"])
+
+    def test_an_exit_request_survives_the_stop_it_starts(self):
+        # HOST-restart-flake (#5992): the exit request stops this unit, whose SIGTERM reaches its whole
+        # cgroup, systemctl included, and can come before systemctl reads systemd's answer. The stub
+        # sends that SIGTERM to the responder's process group, so a systemctl it kills says EXIT-FAILED.
+        def run(script):
+            with tempfile.TemporaryDirectory() as d:
+                stub = pathlib.Path(d, "systemctl")
+                stub.write_text(f'#!/bin/sh\n[ "$1" = show ] && exit 0\nkill -TERM 0\necho "$*" >> {d}/calls\n')
+                stub.chmod(0o755)
+                stub_journal(d)
+                path = pathlib.Path(d, "responder.sh")
+                path.write_text(script)
+                p = subprocess.run(["/bin/sh", str(path)], input="reboot\nalive B\n", capture_output=True, text=True,
+                                   timeout=30, env={"PATH": f"{d}:/usr/bin:/bin"}, start_new_session=True)
+                calls = pathlib.Path(d, "calls")
+                return p, calls.read_text().splitlines() if calls.exists() else []
+
+        script = (IMAGE_DIR / "responder.sh").read_text()
+        p, calls = run(script)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(hostcheck.guest_errors(p.stdout.encode()), [], p.stdout)
+        self.assertIn("HOSTCHECK-DIAG stop ", p.stdout)  # the SIGTERM came, during the request
+        self.assertTrue(p.stdout.endswith("HOSTCHECK-ALIVE B\n"), p.stdout)
+        self.assertEqual(calls, ["--no-block reboot"])
+        # A systemctl that keeps the default SIGTERM dies of it and reports the stop it started as failed.
+        killed = script.replace("(trap '' TERM; exec systemctl --no-block \"$cmd\")", 'systemctl --no-block "$cmd"')
+        self.assertNotEqual(killed, script)
+        p, calls = run(killed)
+        self.assertEqual(hostcheck.guest_errors(p.stdout.encode()), ["HOSTCHECK-EXIT-FAILED reboot"], p.stdout)
+        self.assertEqual(calls, [])
 
     def test_the_responder_outlives_sigterm_and_says_what_the_clear_will_find(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1367,7 +1398,7 @@ class HostcheckJobTest(unittest.TestCase):
         self.assertEqual(len(uris), 1, got)
         self.assertRegex(uris[0], r"\AURIs: https://snapshot\.debian\.org/archive/debian/\d{8}T\d{6}Z/\Z")  # one, dated
         self.assertFalse([ln for ln in fields if "security" in ln], got)
-        self.assertIn("Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg", fields)
+        self.assertIn("Signed-By: /usr/share/keyrings/debian-archive-bookworm-automatic.gpg", fields)
         # A second stanza on the snapshot (its security archive, say) joins the selection: the guard stops it.
         two = sources.replace("URIs: http://security.debian.org/debian-security",
                               "URIs: https://snapshot.debian.org/archive/debian-security/20261001T000000Z/")

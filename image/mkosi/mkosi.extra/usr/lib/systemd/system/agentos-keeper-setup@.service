@@ -5,6 +5,9 @@
 # card's passphrase opens it, and writes nothing. It needs no TPM.
 [Unit]
 Description=agentOS Owner Card hand-off
+# Its factors stay in /run/agentos-setup past its exit: the wipe's stop removes them at shutdown, after
+# this unit's (MOR-setup-factors, HW-8).
+After=agentos-keeper-wipe.service
 
 [Service]
 Type=oneshot
