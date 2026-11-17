@@ -1026,13 +1026,13 @@ func (g *Guard) load() {
 	if v.Anchored && sameBoot {
 		g.anchored, g.anchorWall, g.anchorMono = true, v.AnchorWall, v.AnchorMono
 	}
-	if sameBoot {
+	mono, wall := g.cfg.Elapsed(), g.cfg.Now()
+	// The NTS sync and the carrier reading keep their bounds across a
+	// restart, robust to a later wall-clock step, as within one process
+	// (#5758, #5811); one the boot clock has not reached yet is corrupt.
+	if sameBoot && v.NTSMono <= mono {
 		g.ntsWall, g.ntsMono = v.NTSWall, v.NTSMono
 	}
-	mono, wall := g.cfg.Elapsed(), g.cfg.Now()
-	// The carrier reading keeps a known disagreement's width across a
-	// restart, robust to a later wall-clock step, as within one process
-	// (#5811); a reading the boot clock has not reached yet is corrupt.
 	if sameBoot && v.CarrierMono <= mono {
 		g.carrier, g.carrierMono = v.Carrier, v.CarrierMono
 	}
