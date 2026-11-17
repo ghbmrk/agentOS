@@ -1451,8 +1451,13 @@ class KeyringSpikesTest(unittest.TestCase):
     MKOSI_RUN = re.compile(r"\$\{?MKOSI\}?\s|(^|[\s;&|(])mkosi\s+(-C|-f|build)\b", re.M)
 
     def tracked(self):
-        out = subprocess.run(["git", "-C", str(ROOT), "ls-files"], capture_output=True, text=True, check=True).stdout
-        return [ROOT / f for f in out.split()]
+        # A walk of the worktree, not git ls-files: git's own files are not records this test may
+        # read (tests/records_audit.py).
+        files = []
+        for d, dirs, names in os.walk(ROOT):
+            dirs[:] = [n for n in dirs if n != ".git"]
+            files += [pathlib.Path(d, n) for n in names]
+        return files
 
     def mkosi_trees(self):
         """{tree directory: Distribution=} for every committed top-level mkosi.conf."""
