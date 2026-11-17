@@ -428,7 +428,9 @@ func TestHW8LearnsTheRTCOffset(t *testing.T) {
 		t.Fatal("estimate without a file")
 	}
 	bad := filepath.Join(t.TempDir(), "bad")
-	os.WriteFile(bad, []byte(`{"have_offset":true,"offset":3600000000001}`), 0o600)
+	if err := os.WriteFile(bad, []byte(`{"have_offset":true,"offset":3600000000001}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := BootEstimate(bad, later, testHost); ok {
 		t.Fatal("estimate from an offset not on a 15-minute step")
 	}
@@ -444,14 +446,18 @@ func TestHW8LearnsTheRTCOffset(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		os.WriteFile(bad, b, 0o600)
+		if err := os.WriteFile(bad, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
 		if est, ok := BootEstimate(bad, later, testHost); ok {
 			t.Fatalf("estimate %v from offset %v (have %v) on this PC", est, v.Offset, v.HaveOffset)
 		}
 	}
 	// A file from before offsets were keyed to a PC names no host.
 	old := filepath.Join(t.TempDir(), "old")
-	os.WriteFile(old, []byte(`{"have_offset":true,"offset":3600000000000}`), 0o600)
+	if err := os.WriteFile(old, []byte(`{"have_offset":true,"offset":3600000000000}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for _, id := range []string{testHost, "", "not-a-uuid"} {
 		if _, ok := BootEstimate(old, later, id); ok {
 			t.Fatalf("estimate from an offset with no host, for PC %q", id)
