@@ -30,6 +30,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"math"
 	"os"
 	"os/exec"
@@ -615,16 +616,21 @@ func configured(e ast.Expr, path string, f *ast.File) bool {
 
 // sealedField reports that p.field, for a parameter p of type T or *T,
 // holds only what a value handed to the package holds. Let D be the
-// struct type in p's package that declares field (T, or a type T embeds).
-// It judges every non-test file of the package by structure, not by
-// tracing writes (#6030 B1):
+// struct type in p's package that declares field (T, or a type T embeds),
+// and S its struct type. It type-checks every non-test file of the
+// package (go/types; imports stand in as empty packages, so an unknown
+// type can only make two types look identical and refuse) and judges by
+// type identity, not by names or write routes (#6030 B1, S1):
 //   - D is declared as a struct, not an alias or generic, with field as
 //     a named field of its own;
-//   - nothing builds a D: no composite literal or conversion names D
-//     (D{...}, []D{{...}}, (*D)(p)), no pointer conversion to any type
-//     ((*U)(p), which could reach a D's storage as another struct type),
-//     and no other type declaration names D except as a struct's field
-//     (type L []D would build one in L{{...}}, type A = T in A{...});
+//   - nothing builds a D: no composite literal or conversion has a type
+//     whose underlying type is identical to S (D{...}, an alias's, an
+//     elided []D{{...}}, an unnamed struct{...}{...} assigned, passed,
+//     returned or sent as a D, another struct type with S's fields), no
+//     composite literal has a type parameter's type (T{...} for T
+//     ~struct{...}), and no conversion is to a pointer type ((*U)(p));
+//   - the package imports neither reflect nor unsafe, which write a
+//     struct's storage with no composite literal;
 //   - no statement writes a selector named field (by any name, through
 //     any receiver, alias, element or embedding).
 //
@@ -637,13 +643,20 @@ func sealedField(obj *ast.Object, field, path string, f *ast.File) bool {
 	if !ok {
 		return false
 	}
-	files := []*ast.File{f}
-	others, _ := filepath.Glob(filepath.Join(filepath.Dir(path), "*.go"))
-	for _, o := range others {
-		if o == path || strings.HasSuffix(o, "_test.go") {
+	// One file set for the package; f is parsed again into it, since
+	// go/types needs every file's positions in one set.
+	fset := token.NewFileSet()
+	ents, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		return false
+	}
+	var files []*ast.File
+	for _, en := range ents {
+		o := filepath.Join(filepath.Dir(path), en.Name())
+		if en.IsDir() || !strings.HasSuffix(o, ".go") || strings.HasSuffix(o, "_test.go") && o != path {
 			continue
 		}
-		of, err := parser.ParseFile(token.NewFileSet(), o, nil, 0)
+		of, err := parser.ParseFile(fset, o, nil, 0)
 		if err != nil {
 			return false
 		}
@@ -653,6 +666,11 @@ func sealedField(obj *ast.Object, field, path string, f *ast.File) bool {
 	}
 	specs := map[string]*ast.TypeSpec{}
 	for _, file := range files {
+		for _, im := range file.Imports {
+			if p, _ := strconv.Unquote(im.Path.Value); p == "reflect" || p == "unsafe" {
+				return false
+			}
+		}
 		ast.Inspect(file, func(n ast.Node) bool {
 			if ts, ok := n.(*ast.TypeSpec); ok {
 				specs[ts.Name.Name] = ts
@@ -664,24 +682,29 @@ func sealedField(obj *ast.Object, field, path string, f *ast.File) bool {
 	if d == "" {
 		return false
 	}
-	// names reports that e mentions d other than as a selector's name
-	// (pkg.D is another package's).
-	names := func(e ast.Node) bool {
-		found := false
-		ast.Inspect(e, func(n ast.Node) bool {
-			if se, ok := n.(*ast.SelectorExpr); ok {
-				ast.Inspect(se.X, func(m ast.Node) bool {
-					id, ok := m.(*ast.Ident)
-					found = found || ok && id.Name == d
-					return true
-				})
-				return false
-			}
-			id, ok := n.(*ast.Ident)
-			found = found || ok && id.Name == d
+	info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}}
+	conf := types.Config{
+		Importer: importerFunc(func(p string) (*types.Package, error) {
+			pkg := types.NewPackage(p, p[strings.LastIndex(p, "/")+1:])
+			pkg.MarkComplete()
+			return pkg, nil
+		}),
+		Error: func(error) {}, // the empty imports' selectors do not resolve
+	}
+	pkg, _ := conf.Check(f.Name.Name, fset, files, info)
+	dt, ok := pkg.Scope().Lookup(d).(*types.TypeName)
+	if !ok || dt.IsAlias() {
+		return false
+	}
+	s, ok := dt.Type().Underlying().(*types.Struct)
+	if !ok {
+		return false
+	}
+	builds := func(t types.Type) bool {
+		if _, isParam := t.(*types.TypeParam); isParam {
 			return true
-		})
-		return found
+		}
+		return t != nil && types.Identical(t.Underlying(), s)
 	}
 	writes := func(e ast.Expr) bool {
 		for {
@@ -698,17 +721,13 @@ func sealedField(obj *ast.Object, field, path string, f *ast.File) bool {
 	for _, file := range files {
 		ast.Inspect(file, func(n ast.Node) bool {
 			switch n := n.(type) {
-			case *ast.TypeSpec:
-				_, isStruct := n.Type.(*ast.StructType)
-				sealed = sealed && (n.Name.Name == d || isStruct && !n.Assign.IsValid() || !names(n.Type))
 			case *ast.CompositeLit:
-				sealed = sealed && (n.Type == nil || !names(n.Type))
+				sealed = sealed && !builds(info.TypeOf(n))
 			case *ast.CallExpr:
-				pe, conv := n.Fun.(*ast.ParenExpr)
-				if conv {
-					_, conv = pe.X.(*ast.StarExpr)
+				if tv, ok := info.Types[n.Fun]; ok && tv.IsType() {
+					_, ptr := tv.Type.Underlying().(*types.Pointer)
+					sealed = sealed && !ptr && !builds(tv.Type)
 				}
-				sealed = sealed && !conv && !names(n.Fun)
 			case *ast.AssignStmt:
 				for _, l := range n.Lhs {
 					sealed = sealed && !writes(l)
@@ -725,6 +744,11 @@ func sealedField(obj *ast.Object, field, path string, f *ast.File) bool {
 	}
 	return sealed
 }
+
+// importerFunc adapts a function to types.Importer.
+type importerFunc func(path string) (*types.Package, error)
+
+func (f importerFunc) Import(path string) (*types.Package, error) { return f(path) }
 
 // declaring is the name of the struct type in specs that declares field
 // as a named field of its own: typ (a name or a pointer to one) or a type
@@ -1034,6 +1058,19 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		src(`"net"`, `type cfg struct{ s string }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func g(c *cfg) { c.s += "/../proxy.sock"; c.dial() }`),
 		src(`"net"; "fmt"`, `type cfg struct{ s string }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func g(c *cfg) { fmt.Sscan("/run/proxy.sock", &c.s); c.dial() }`),
 		src(`"net"`, `type in struct{ s string }; type cfg struct{ in }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func g() { (&cfg{in{"/run/proxy.sock"}}).dial() }`),
+		// A D built without naming D: an unnamed struct, a type parameter,
+		// an alias of an unnamed struct, reflect and unsafe (#6030 S1).
+		src(`"net"`, `type cfg struct{ s string }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func g(c *cfg) { *c = struct{ s string }{"/run/proxy.sock"}; c.dial() }`),
+		src(`"net"`, `type cfg struct{ s string }; func (c cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func mk() cfg { return struct{ s string }{"/run/proxy.sock"} }; func g() { mk().dial() }`),
+		src(`"net"`, `type cfg struct{ s string }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func set[T ~struct{ s string }](p *T) { *p = T{"/run/proxy.sock"} }; func g(c *cfg) { set(c); c.dial() }`),
+		src(`"net"`, `type cfg struct{ s string }; func (c cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func g() { var c cfg = struct{ s string }{"/run/proxy.sock"}; c.dial() }`),
+		src(`"net"`, `type cfg struct{ s string }; func (c cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func g(ch chan cfg) { ch <- struct{ s string }{"/run/proxy.sock"}; (<-ch).dial() }`),
+		src(`"net"; "reflect"`, `type cfg struct{ S string }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.S) }; func g(c *cfg) { reflect.ValueOf(c).Elem().Field(0).SetString("/run/proxy.sock"); c.dial() }`),
+		src(`"net"`, `type cfg struct{ s string }; func (c cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func use(c cfg) { c.dial() }; func g() { use(struct{ s string }{"/run/proxy.sock"}) }`),
+		src(`"net"`, `type cfg struct{ s string }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func mk[T any](v T) T { return v }; func g(c *cfg) { *c = mk(struct{ s string }{"/run/proxy.sock"}); c.dial() }`),
+		src(`"net"`, `type cfg struct{ s string }; type x = struct{ s string }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func g(c *cfg) { *c = x{"/run/proxy.sock"}; c.dial() }`),
+		src(`"net"`, `type cfg struct{ s string }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func g(c *cfg) { *c = []struct{ s string }{{"/run/proxy.sock"}}[0]; c.dial() }`),
+		src(`"net"; "unsafe"`, `type cfg struct{ s string }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func g(c *cfg, p *string) { *c = *(*cfg)(unsafe.Pointer(p)); c.dial() }`),
 		src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); dir = "/run"; sock := filepath.Join(dir, "proxy.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
 		src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); sock := filepath.Join(dir, "s.sock"); sock = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", sock) }`),
 		src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); sock := filepath.Join(dir, "..", "proxy.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
@@ -1100,6 +1137,22 @@ func keep(p *Remote, old Remote) { *p = old }`)
 	}
 	if got := strings.Join(sourceUse(t, path, "held.go", "kernel/proc"), "\n"); !strings.Contains(got, "not taken from configuration") {
 		t.Errorf("a write in another file of the package passed: %q", got)
+	}
+	// A package directory whose name globs (a[b) still has its other
+	// files read (#6030 R3).
+	dir = filepath.Join(t.TempDir(), "a[b")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path = filepath.Join(dir, "held.go")
+	if err := os.WriteFile(path, []byte(held), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "set.go"), []byte(src(``, `func (r *Remote) set() { r.Socket = "/run/proxy.sock" }`)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(sourceUse(t, path, "held.go", "kernel/proc"), "\n"); !strings.Contains(got, "not taken from configuration") {
+		t.Errorf("a write in another file of a globbing directory passed: %q", got)
 	}
 	// Imports: RPC, mail, raw sockets, and escape hatches.
 	reach := httpReach([]listed{{path: "net/rpc", imports: []string{"net/http"}}, {path: "net/http"}})
