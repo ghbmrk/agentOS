@@ -30,6 +30,28 @@ def words(s, key):
     return " ".join(s.get(key, [])).split()
 
 
+# Where systemd puts a system unit's directory settings, and the specifiers that name those bases.
+DIR_BASES = {"RuntimeDirectory": "/run", "StateDirectory": "/var/lib", "CacheDirectory": "/var/cache",
+             "LogsDirectory": "/var/log", "ConfigurationDirectory": "/etc"}
+SPECIFIERS = {"%t": "/run", "%S": "/var/lib", "%C": "/var/cache", "%L": "/var/log", "%E": "/etc"}
+
+
+def names_held_dir(text, dirs):
+    """Whether a unit file's text names one of dirs, or a path under it: the path ending at a
+    separator, a quote or the end of a line, through a specifier, or as a directory setting."""
+    for spec, base in SPECIFIERS.items():
+        text = text.replace(spec, base)
+    if any(re.search(re.escape(d) + r"""(?=[/\s"':;\\]|$)""", text) for d in dirs):
+        return True
+    keys = "|".join(DIR_BASES)
+    for key, value in re.findall(r"^[ \t]*(%s)[ \t]*=(.*)$" % keys, text, re.M):
+        for name in value.replace(":", " ").split():
+            path = DIR_BASES[key] + "/" + name.strip("\"'").strip("/")
+            if any(path == d or path.startswith(d + "/") for d in dirs):
+                return True
+    return False
+
+
 class MorUnitTest(unittest.TestCase):
     def test_clear_runs_at_stop_after_the_secret_holders(self):
         s = settings(UNIT)
@@ -127,7 +149,7 @@ class MorUnitTest(unittest.TestCase):
         for f in files:
             t = f.read_text()
             self.assertNotIn("/dev/shm", t, f.name)
-            if f.name != name and any(d + "/" in t or d + " " in t for d in check.MOR_LISTED):
+            if f.name != name and names_held_dir(t, check.MOR_LISTED):
                 writers.add(f.name)
             for key in ("Conflicts", "PropagatesStopTo"):
                 self.assertNotIn(name, words(settings(f), key), f.name)
@@ -143,6 +165,41 @@ class MorUnitTest(unittest.TestCase):
                 ordered = w in before or name in words(settings(UNITS / w), "After")
                 self.assertTrue(ordered, w)
                 self.assertNotIn("DefaultDependencies", settings(UNITS / w))
+
+    def test_every_writer_spelling_is_counted(self):
+        # MOR-writer-match (#6043): test_every_held_file_goes_at_stop finds a writer by its text, so
+        # each way a unit can name a holdDirs path counts, and a sibling path does not.
+        dirs = check.MOR_LISTED
+        named = [
+            "ExecStart=/usr/bin/x /run/agentos-setup/passphrase\n",
+            "ExecStart=/usr/bin/x /run/agentos-setup -y\n",
+            "ReadWritePaths=/run/agentos-link-capture\n",
+            "ReadWritePaths=/run/agentos-link-capture",
+            "ReadWritePaths=-/run/agentos-setup\n",
+            'Environment="DIR=/run/agentos-setup"\n',
+            "Environment='DIR=/run/agentos-link-capture'\n",
+            "BindPaths=/run/agentos-setup:/mnt\n",
+            "ExecStart=/usr/bin/x %t/agentos-setup\n",
+            "RuntimeDirectory=agentos-setup\n",
+            "RuntimeDirectory=agentos-x agentos-link-capture/first\n",
+            "  RuntimeDirectory = agentos-setup\n",
+            "ExecStart=/usr/bin/x /run/agentos-setup\\\n  -y\n",
+        ]
+        for t in named:
+            with self.subTest(t):
+                self.assertTrue(names_held_dir(t, dirs))
+        apart = [
+            "ExecStart=/usr/bin/x /run/agentos-setupx\n",
+            "ReadWritePaths=/run/agentos-link-capture-old\n",
+            "ExecStart=/usr/bin/x /run/agentos-setup.bak/f\n",
+            "RuntimeDirectory=agentos-setupx\n",
+            "StateDirectory=agentos-setup\n",
+            "CacheDirectory=agentos-link-capture\n",
+            "# Not RuntimeDirectory=agentos-setup: a comment writes nothing\n",
+        ]
+        for t in apart:
+            with self.subTest(t):
+                self.assertFalse(names_held_dir(t, dirs))
 
     def test_build_installs_the_program(self):
         build = (ROOT / "image/build.sh").read_text()
