@@ -9,6 +9,7 @@ package version fails until its source is read again; malformed, empty, repeated
 entries are refused, and every refusal points at the records' reach note."""
 # REQ: EVL-5
 import contextlib
+import errno
 import fnmatch
 import importlib.util
 import io
@@ -19,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "image"))
@@ -448,6 +450,48 @@ class RefusalsTest(unittest.TestCase):
                 self.assertIn("%s:%d: " % (a, line), str(cm.exception))
                 self.assertIn(want, str(cm.exception))
                 self.assertIn("GLOB sha256=HEX NAME=COUNT", str(cm.exception))
+
+
+class ReadErrorTest(unittest.TestCase):
+    """IMG-offline-verity-follow (#5988): a /usr block dm-verity refuses reads as EIO, and a file whose
+    first block reads so fails the run instead of being skipped as not ELF."""
+
+    def eio_on(self, target):
+        real = open
+
+        def fake(path, *a, **k):
+            if os.fspath(path) == target:
+                raise OSError(errno.EIO, os.strerror(errno.EIO), path)
+            return real(path, *a, **k)
+        return mock.patch.object(sweep, "open", fake, create=True)
+
+    def test_eio_fails_the_run_naming_the_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "bin")
+            pathlib.Path(f).write_bytes(b"\x7fELF" + b"\0" * 60)
+            with self.eio_on(f), self.assertRaises(SystemExit) as cm:
+                sweep.is_elf(f)
+        self.assertIn("cannot read %s" % f, str(cm.exception))
+        self.assertIn(os.strerror(errno.EIO), str(cm.exception))
+
+    def test_eio_in_the_walk_fails_the_tree(self):
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "usr/bin").mkdir(parents=True)
+            f = os.path.join(d, "usr/bin/tampered")
+            pathlib.Path(f).write_bytes(b"\x7fELF" + b"\0" * 60)
+            pathlib.Path(d, "usr/bin/text").write_text("not elf\n")
+            with self.eio_on(f), self.assertRaises(SystemExit):
+                sweep.run_tree(d)
+
+    def test_vanished_short_and_plain_files_are_not_elf(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertFalse(sweep.is_elf(os.path.join(d, "gone")))
+            pathlib.Path(d, "short").write_bytes(b"\x7fE")
+            self.assertFalse(sweep.is_elf(os.path.join(d, "short")))
+            pathlib.Path(d, "text").write_text("#!/bin/sh\n")
+            self.assertFalse(sweep.is_elf(os.path.join(d, "text")))
+            pathlib.Path(d, "elf").write_bytes(b"\x7fELF")
+            self.assertTrue(sweep.is_elf(os.path.join(d, "elf")))
 
 
 if __name__ == "__main__":

@@ -149,11 +149,16 @@ def cipher_sites(path):
 
 
 def is_elf(path):
+    """Whether PATH starts with the ELF magic. A file gone since the walk listed it is not one; any other
+    read error fails the run, so a /usr block that dm-verity refuses (EIO) is a failed check, not a file
+    skipped (#5988)."""
     try:
         with open(path, "rb") as f:
             return f.read(4) == b"\x7fELF"
-    except OSError:
+    except FileNotFoundError:
         return False
+    except OSError as e:
+        sys.exit("import sweep: cannot read %s: %s" % (path, e))
 
 
 def sweep(files):
