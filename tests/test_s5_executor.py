@@ -1,10 +1,12 @@
 """S5: the v0 action protocol drives the fixture site's hard widgets, and no planted
 canary (session cookie, storage, saved password, displayed key, URL token) leaves the
-executor. Needs Playwright + Chromium; skipped where absent (CI runs the pure tests).
+executor. Needs Playwright + Chromium; skipped where absent, and fails instead when
+AGENTOS_REQUIRE_BROWSER=1 (ci.yml's broker-checks job runs it that way, BROWSER-fixture-ci).
 
 REQ: CRED-4, CRED-10
 """
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -21,10 +23,18 @@ except ImportError:
     HAVE_BROWSER = False
 
 
-@unittest.skipUnless(HAVE_BROWSER, "Playwright/Chromium not installed")
+def need_browser():
+    """Skip without Playwright and Chromium, or fail when the job requires them (#5952)."""
+    if not HAVE_BROWSER:
+        if os.environ.get("AGENTOS_REQUIRE_BROWSER") == "1":
+            raise AssertionError("AGENTOS_REQUIRE_BROWSER=1 but Playwright/Chromium not installed")
+        raise unittest.SkipTest("Playwright/Chromium not installed")
+
+
 class FixtureSite(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        need_browser()
         import server
         from client import Session
         from playwright.sync_api import sync_playwright
@@ -181,6 +191,33 @@ class FixtureSite(unittest.TestCase):
             self.assertNotIn(canary, transcript, f"canary leaked: {canary[:8]}...")
         self.assertGreater(len(self.s.raw), 20)
         self.assertEqual(self.evil.hits, [])
+
+
+class RequireBrowser(unittest.TestCase):
+    """BROWSER-fixture-ci (#5952, K4): the job that sets AGENTOS_REQUIRE_BROWSER=1 cannot go green
+    with the fixture tests skipped; without it they still skip."""
+
+    def test_missing_browser_fails_only_when_required(self):
+        global HAVE_BROWSER
+        saved, env = HAVE_BROWSER, os.environ.pop("AGENTOS_REQUIRE_BROWSER", None)
+        try:
+            HAVE_BROWSER = False
+            with self.assertRaises(unittest.SkipTest):
+                need_browser()
+            os.environ["AGENTOS_REQUIRE_BROWSER"] = "1"
+            with self.assertRaises(AssertionError):
+                need_browser()
+            os.environ["AGENTOS_REQUIRE_BROWSER"] = "0"
+            with self.assertRaises(unittest.SkipTest):
+                need_browser()
+            HAVE_BROWSER = True
+            os.environ["AGENTOS_REQUIRE_BROWSER"] = "1"
+            need_browser()
+        finally:
+            HAVE_BROWSER = saved
+            os.environ.pop("AGENTOS_REQUIRE_BROWSER", None)
+            if env is not None:
+                os.environ["AGENTOS_REQUIRE_BROWSER"] = env
 
 
 if __name__ == "__main__":
