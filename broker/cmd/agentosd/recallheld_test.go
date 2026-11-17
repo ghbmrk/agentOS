@@ -15,7 +15,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
-// REQ: LOG-4, OWN-6
+// REQ: LOG-4
 
 // recallBox is a box upgraded with a recall directory at rest.
 type recallBox struct {
@@ -733,6 +733,7 @@ func TestLOG4RecallFilesReadExactly(t *testing.T) {
 // or the files are unknown; a record covering only some of a lineage's
 // deleted items leaves it contained; each failure is logged; rollbacks
 // and notices go in lineage order, each notice naming its time.
+// REQ: OWN-6 (the hold line names agents as the forget texts do).
 func TestLOG4SettleOrdersAndLogs(t *testing.T) {
 	var logs, errs []string
 	logf := func(f string, a ...any) {
