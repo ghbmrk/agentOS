@@ -565,6 +565,35 @@ class ReadErrorTest(unittest.TestCase):
                 sweep.run_build(d, "v")
         self.assertIn("cannot read %s" % os.path.join(d, "initrd"), str(cm.exception))
 
+    def initrd_build(self, d):
+        """run_build over D's initrd directory alone, with its places' records as {name: path}."""
+        built = mock.patch.dict(sys.modules, offline_systemd=mock.Mock(
+            built_tree=lambda out, v: (d, None, None, lambda: None)))
+        with built, mock.patch.object(sweep, "run_tree", lambda root, usr: {}), \
+                mock.patch.object(sweep, "initrd_place", lambda p, scratch: os.fspath(p)):
+            return sweep.run_build(d, "v")
+
+    def test_a_stat_error_on_an_initrd_entry_fails_the_build(self):
+        # #6073: Path.is_file() read a symlink loop (or EIO) as "not a file" and skipped the initrd.
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "initrd").mkdir()
+            loop = pathlib.Path(d, "initrd", "loop")
+            loop.symlink_to("loop")
+            with self.assertRaises(SystemExit) as cm:
+                self.initrd_build(d)
+        self.assertIn("cannot read %s: %s" % (loop, os.strerror(errno.ELOOP)), str(cm.exception))
+
+    def test_initrd_entries_read_only_regular_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            i = pathlib.Path(d) / "initrd"
+            (i / "sub").mkdir(parents=True)
+            (i / "sub" / "main.img").write_bytes(b"x")
+            (i / "link.img").symlink_to("sub/main.img")
+            (i / "gone.img").symlink_to("nowhere")
+            os.mkfifo(i / "fifo")
+            got = self.initrd_build(d)
+        self.assertEqual(got, {"initrd:link.img": str(i / "link.img"), "initrd:sub/main.img": str(i / "sub/main.img")})
+
     def test_vanished_short_and_plain_files_are_not_elf(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertFalse(sweep.is_elf(os.path.join(d, "gone")))
