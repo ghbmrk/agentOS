@@ -108,7 +108,7 @@ jobs:
         # its list changed, must fail on them: a pinned fingerprint altered, a pinned key dropped (the
         # keyring then holds a key not pinned), and a key added (a pinned key is then missing). The
         # first fingerprint is the 12/bookworm archive key, pinned in its own keyring (which the
-        # sources name, #5954) and in the whole one.
+        # sources name, #5954).
         run: |
           k=image/debian-archive-keyring.sh d=$RUNNER_TEMP/keyring-check
           sh "$k"

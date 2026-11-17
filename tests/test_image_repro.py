@@ -1319,8 +1319,8 @@ class KeyringCheckOtherBuildsTest(unittest.TestCase):
         for rel, wf in self.BUILDS:
             with self.subTest(build=rel):
                 b = (ROOT / rel).read_text()
-                self.assertEqual(b.count("debian-archive-keyring.sh\"\n"), 1)
-                self.assertLess(b.index("debian-archive-keyring.sh\"\n"), b.index("$MKOSI "))
+                self.assertEqual(b.count("debian-archive-keyring.sh\""), 1)
+                self.assertLess(b.index("debian-archive-keyring.sh\""), b.index("$MKOSI "))
                 w = (ROOT / ".github/workflows" / wf).read_text()
                 self.assertEqual(w.count('      - "image/debian-archive-keyring.sh"\n'), 2)
 
@@ -1337,6 +1337,15 @@ class KeyringMinimalTest(unittest.TestCase):
     SECURITY = "/usr/share/keyrings/debian-archive-bookworm-security-automatic.gpg"
     SOURCES = (MK / "mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources",
                IMG / "enforcer/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources")
+    # The runner's whole keyring, which no build names (#5983), and the Debian 10/buster and
+    # 11/bullseye archive, security and release keys and subkeys it holds (ftp-master.debian.org/keys.html).
+    WHOLE = "debian-archive-keyring.gpg"
+    OLD = frozenset("""
+        80D15823B7FD1561F9F7BCDDDC30D7C23CBBABEE 0146DC6D4A0B2914BDED34DB648ACFD622F3D138
+        5E61B217265DA9807A23C5FF4DFAB270CAA96DFA 5237CEEEF212F3D51C74ABE0112695A0E562B32A
+        6D33866EDD8FFA41C0143AEDDCC9EFBF77E11517 1F89983E0081FDE018F3CC9673A4F27B8DD47936
+        A7236886F3CCCAAD148A27F80E98404D386FA1D9 AC530D520F2F3269F5E98313A48449044AAD5C5D
+        ED541312A33F1128F10B1C6C54404762BBB6E853 A4285295FC7B1A81600062A9605C66F00D6C9793""".split())
 
     def pinned(self):
         """{file name: [(fingerprint, label)]} from the check's list."""
@@ -1372,8 +1381,8 @@ class KeyringMinimalTest(unittest.TestCase):
         # and security keys alone; no buster, bullseye or release key is trusted for the builds.
         files = self.pinned()
         names = {pathlib.Path(self.ARCHIVE).name, pathlib.Path(self.SECURITY).name}
-        self.assertEqual(list(files)[:2], [pathlib.Path(self.ARCHIVE).name, pathlib.Path(self.SECURITY).name])
-        old = {f for f, label in files["debian-archive-keyring.gpg"] if "10/buster" in label or "11/bullseye" in label}
+        self.assertEqual(list(files), [pathlib.Path(self.ARCHIVE).name, pathlib.Path(self.SECURITY).name])
+        old = self.OLD
         self.assertEqual(len(old), 10)
         for name in names:
             with self.subTest(keyring=name):
@@ -1387,7 +1396,7 @@ class KeyringMinimalTest(unittest.TestCase):
 
     def keyrings(self):
         d = pathlib.Path(os.environ.get("AGENTOS_DEBIAN_KEYRINGS", "/usr/share/keyrings"))
-        if not all((d / n).is_file() for n in self.pinned()):
+        if not all((d / n).is_file() for n in [*self.pinned(), self.WHOLE]):
             if os.environ.get("AGENTOS_REQUIRE_REFERENCE_TOOLS") == "1":
                 self.fail("no Debian keyrings in %s (install debian-archive-keyring)" % d)
             self.skipTest("no Debian keyrings in %s" % d)
@@ -1407,7 +1416,7 @@ class KeyringMinimalTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             for n in self.pinned():
                 shutil.copy(src / n, pathlib.Path(d, n))
-            shutil.copy(src / "debian-archive-keyring.gpg", pathlib.Path(d, pathlib.Path(self.ARCHIVE).name))
+            shutil.copy(src / self.WHOLE, pathlib.Path(d, pathlib.Path(self.ARCHIVE).name))
             p = self.run_check(d)
             self.assertEqual(p.returncode, 1, p.stderr)
             self.assertIn("debian-archive-bookworm-automatic.gpg does not hold exactly the pinned keys", p.stderr)
@@ -1431,6 +1440,96 @@ class KeyringMinimalTest(unittest.TestCase):
             with self.subTest(caller=rel):
                 self.assertIn(rel, header.replace("\n# ", " "))
                 self.assertIn("`%s`" % rel, row)
+
+
+class KeyringSpikesTest(unittest.TestCase):
+    """IMG-keyring-spikes (#5983): every mkosi run in the repository trusts only the minimal Debian
+    keyrings. Each Debian mkosi tree commits its apt sources (mkosi v24.3 then generates none, so
+    the whole keyring is named nowhere), and every script that runs mkosi runs the check first."""
+
+    ARCHIVE, SECURITY = KeyringMinimalTest.ARCHIVE, KeyringMinimalTest.SECURITY
+    MKOSI_RUN = re.compile(r"\$\{?MKOSI\}?\s|(^|[\s;&|(])mkosi\s+(-C|-f|build)\b", re.M)
+
+    def tracked(self):
+        out = subprocess.run(["git", "-C", str(ROOT), "ls-files"], capture_output=True, text=True, check=True).stdout
+        return [ROOT / f for f in out.split()]
+
+    def mkosi_trees(self):
+        """{tree directory: Distribution=} for every committed top-level mkosi.conf."""
+        trees = {}
+        for f in self.tracked():
+            if f.name == "mkosi.conf":
+                m = re.search(r"^Distribution=(\S+)$", f.read_text(), re.M)
+                if m:
+                    trees[f.parent] = m[1]
+        return trees
+
+    def test_each_debian_tree_commits_sources_naming_only_the_minimal_keyrings(self):
+        # REQ: IMG-keyring-spikes. The test kit, as the core and the enforcer, reads the archive
+        # (trixie, trixie-updates) with the archive key's keyring and the security archive with the
+        # security key's; no stanza names the whole keyring (failure path 1 on #5983).
+        trees = self.mkosi_trees()
+        debian = sorted(str(t.relative_to(ROOT)) for t, d in trees.items() if d == "debian")
+        self.assertEqual(debian, ["image/enforcer/mkosi", "image/mkosi", "spikes/S1S2-testkit/mkosi"])
+        for tree in debian:
+            with self.subTest(tree=tree):
+                src = ROOT / tree / "mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources"
+                stanzas = [dict(ln.split(": ", 1) for ln in st.splitlines() if ln and not ln.startswith("#"))
+                           for st in src.read_text().split("\n\n")]
+                stanzas = [st for st in stanzas if st]
+                self.assertEqual([(st["Suites"], st["Signed-By"]) for st in stanzas],
+                                 [("trixie trixie-updates", self.ARCHIVE), ("trixie-security", self.SECURITY)])
+                self.assertEqual(stanzas[1]["URIs"], "http://security.debian.org/debian-security")
+                self.assertTrue(all(st["Types"] == "deb" for st in stanzas))
+                self.assertNotIn(KeyringMinimalTest.WHOLE, src.read_text().replace("whole " + KeyringMinimalTest.WHOLE, ""))
+        kit = ROOT / "spikes/S1S2-testkit/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources"
+        self.assertTrue(kit.read_text().split("\nTypes:")[1].startswith(" deb\nURIs: http://deb.debian.org/debian\n"))
+
+    def test_the_check_pins_no_keyring_that_no_build_names(self):
+        # REQ: IMG-keyring-spikes. With the test kit's sources committed, the check lists only the two
+        # files the sources name; the whole keyring's buster and bullseye keys are pinned nowhere.
+        text = KeyringMinimalTest.CHECK.read_text()
+        self.assertNotIn("\n%s\n" % KeyringMinimalTest.WHOLE, text)
+        self.assertFalse(KeyringMinimalTest.OLD & set(re.findall(r"^([0-9A-F]{40})  ", text, re.M)))
+
+    def test_every_mkosi_run_checks_the_keyring_first(self):
+        # REQ: IMG-keyring-spikes. Every committed script that runs mkosi runs the keyring check
+        # before it; the S7 spike's run.sh, which built Ubuntu packages the check cannot pin, is
+        # retired (failure path 2 on #5983), so no script builds a non-Debian tree.
+        runs = {}
+        for f in self.tracked():
+            if f.suffix == ".sh" and f.is_file():
+                m = self.MKOSI_RUN.search(f.read_text())
+                if m:
+                    runs[str(f.relative_to(ROOT))] = (f.read_text(), m.start())
+        self.assertEqual(sorted(runs), ["image/build.sh", "image/enforcer/build.sh", "spikes/S1S2-testkit/build.sh"])
+        for rel, (text, at) in runs.items():
+            with self.subTest(script=rel):
+                self.assertIn("debian-archive-keyring.sh\"", text[:at])
+        self.assertFalse((ROOT / "spikes/S7-host-image/run.sh").exists())
+        others = [t for t, d in self.mkosi_trees().items() if d != "debian"]
+        self.assertEqual([str(t.relative_to(ROOT)) for t in others], ["spikes/S7-host-image/mkosi"])
+        self.assertNotIn("run.sh](run.sh)", (ROOT / "spikes/S7-host-image/RESULT.md").read_text())
+
+    def test_the_enforcer_reports_every_missing_input_at_once(self):
+        # UX 3 on #5961: with both required variables unset and the keyring check failing, one run
+        # names all three and runs no mkosi.
+        with tempfile.TemporaryDirectory() as d:
+            log = pathlib.Path(d, "log")
+            script = pathlib.Path(d, "image/enforcer/build.sh")
+            script.parent.mkdir(parents=True)
+            shutil.copy(IMG / "enforcer/build.sh", script)
+            pathlib.Path(d, "image/debian-archive-keyring.sh").write_text(
+                "echo keyring-check >> %s\necho keyring-refused >&2\nexit 1\n" % log)
+            mkosi = pathlib.Path(d, "mkosi")
+            mkosi.write_text("#!/bin/sh\necho mkosi >> %s\n" % log)
+            mkosi.chmod(0o755)
+            p = subprocess.run(["sh", str(script), str(pathlib.Path(d, "out"))], capture_output=True, text=True,
+                               env={"PATH": os.environ["PATH"], "MKOSI": str(mkosi)})
+            self.assertEqual(p.returncode, 1)
+            for want in ("ENFORCER_RELEASE_ROOT) is required", "AGENTOS_RELEASE_KEYS) are required", "keyring-refused"):
+                self.assertIn(want, p.stderr)
+            self.assertEqual(log.read_text().splitlines(), ["keyring-check"])
 
 
 if __name__ == "__main__":
