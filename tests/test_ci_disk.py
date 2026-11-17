@@ -251,6 +251,23 @@ class ScriptsTest(unittest.TestCase):
         self.assertFalse(stale.exists())
         self.assertTrue(other.exists(), "a directory go does not name as an entry was dropped")
 
+    def test_keep_counts_a_stale_executable_directory_without_its_siblings(self):
+        # #6103: the count inside a -d directory walks that directory alone, not the hex directory
+        # around it. Fails if `-execdir find {}` becomes `-execdir find .`, which counts the stale
+        # entry's siblings (a file and a used -d directory) once for each -d directory.
+        self.mark()
+        stale = self.exe("ab" + "1" * 62 + "-d", MB, 2 * 86400)
+        self.entry("ab" + "2" * 62 + "-a", 4 * MB, 60)
+        used = self.exe("ab" + "3" * 62 + "-d", 2 * MB, 60)
+        rc, out = self.run_copy(KEEP_SCRIPT)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("::notice title=build cache::7 MB of Go build cache, 6 MB of it used by this run, 1 MB stale", out)
+        rc, out = self.run_copy(KEEP_SCRIPT, DROP="true")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("dropped the stale entries; 6 MB left to save", out)
+        self.assertFalse(stale.exists())
+        self.assertTrue((used / "tool").exists())
+
     def test_keep_never_follows_a_link_out_of_the_cache(self):
         # #6059 item 1: go never writes a link into its cache, so a link there is not go's; neither
         # its target nor anything under it is counted or dropped. Fails if the walk follows links
