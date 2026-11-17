@@ -11,7 +11,7 @@ Board section: Defects and later findings on surviving packages. Work item #5952
 
 **Scope:** `.github/workflows/ci.yml` (one step in `broker-checks`, a required job, so no ruleset or premerge change), `tests/requirements-browser.txt` (new), `tests/test_s5_executor.py`, `broker/browser/ASSUMPTIONS.md`, this brief. No production code.
 
-**Acceptance tests:** the new broker-checks step passes on the PR with `require_ran.py` reporting both Go tests passed and the executor's 17 fixture tests run; `tests/test_s5_executor.py::RequireBrowser` shows a missing browser fails under `AGENTOS_REQUIRE_BROWSER=1` and skips otherwise.
+**Acceptance tests:** the new broker-checks step passes on the PR with `require_ran.py` reporting both Go tests passed and the executor's 17 fixture tests run; `tests/test_s5_executor.py::RequireBrowser` shows a missing browser fails under `AGENTOS_REQUIRE_BROWSER=1` and skips otherwise, and that the script run the step uses exits 1 on any skip.
 
 **Guard files:** `.github/workflows/ci.yml` (gate file: separate Security accept).
 

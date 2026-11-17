@@ -551,7 +551,8 @@ jobs:
         # they run here on the pinned Playwright (tests/requirements-browser.txt, by hash) and the
         # Chrome for Testing headless shell Playwright 1.63 names (browsers.json revision 1243,
         # 153.0.8010.12), downloaded from Google and refused unless it hashes to its pin. A skip fails:
-        # require_ran.py for the Go tests, AGENTOS_REQUIRE_BROWSER=1 for the Python ones.
+        # require_ran.py for the Go tests; for the Python ones, AGENTOS_REQUIRE_BROWSER=1 and the
+        # script run, which exits 1 on any skip.
         env:
           CFT_SHELL_URL: https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.12/linux64/chrome-headless-shell-linux64.zip
           CFT_SHELL_SHA256: a9da028861a0cf789ff25c2fed45f5f1aaf969ed9247835b6a7821a4f7af9d1d
@@ -570,7 +571,7 @@ jobs:
           python3 -I ../tools/require_ran.py $p.TestFixtureThroughTheGate $p.TestFixtureRefsFollowTheDriversDocument \
             < "$RUNNER_TEMP/browser.json" || exit 1
           [ "$status" -eq 0 ]
-          (cd .. && python3 -m unittest tests.test_s5_executor -v)
+          (cd .. && python3 tests/test_s5_executor.py -v)
       - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: rm -rf "$(go env GOCACHE)/fuzz"

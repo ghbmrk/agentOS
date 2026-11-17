@@ -1,10 +1,12 @@
 """S5: the v0 action protocol drives the fixture site's hard widgets, and no planted
 canary (session cookie, storage, saved password, displayed key, URL token) leaves the
 executor. Needs Playwright + Chromium; skipped where absent, and fails instead when
-AGENTOS_REQUIRE_BROWSER=1 (ci.yml's broker-checks job runs it that way, BROWSER-fixture-ci).
+AGENTOS_REQUIRE_BROWSER=1; run as a script it also fails on any skip (ci.yml's broker-checks job
+runs it both ways, BROWSER-fixture-ci).
 
 REQ: CRED-4, CRED-10
 """
+import io
 import json
 import os
 import pathlib
@@ -201,24 +203,57 @@ class RequireBrowser(unittest.TestCase):
         global HAVE_BROWSER
         saved, env = HAVE_BROWSER, os.environ.pop("AGENTOS_REQUIRE_BROWSER", None)
         try:
-            HAVE_BROWSER = False
-            with self.assertRaises(unittest.SkipTest):
-                need_browser()
-            os.environ["AGENTOS_REQUIRE_BROWSER"] = "1"
-            with self.assertRaises(AssertionError):
-                need_browser()
-            os.environ["AGENTOS_REQUIRE_BROWSER"] = "0"
-            with self.assertRaises(unittest.SkipTest):
-                need_browser()
-            HAVE_BROWSER = True
-            os.environ["AGENTOS_REQUIRE_BROWSER"] = "1"
-            need_browser()
+            # Each case reads need_browser()'s outcome instead of letting it raise here: a SkipTest
+            # escaping this test would record it skipped, so a dropped switch could pass green.
+            for have, switch, want in ((False, None, "skip"), (False, "1", "fail"), (False, "0", "skip"),
+                                       (True, "1", "run"), (True, None, "run")):
+                HAVE_BROWSER = have
+                os.environ.pop("AGENTOS_REQUIRE_BROWSER", None)
+                if switch is not None:
+                    os.environ["AGENTOS_REQUIRE_BROWSER"] = switch
+                self.assertEqual(outcome(), want, f"browser={have} switch={switch}")
         finally:
             HAVE_BROWSER = saved
             os.environ.pop("AGENTOS_REQUIRE_BROWSER", None)
             if env is not None:
                 os.environ["AGENTOS_REQUIRE_BROWSER"] = env
 
+    def test_strict_run_fails_on_a_skip(self):
+        """The CI step runs this file as a script, which exits nonzero on any skip (the Python
+        half of what require_ran.py does for Go), so a skipTest or @skip cannot pass green."""
+        class T(unittest.TestCase):
+            def test_ok(self):
+                pass
+
+            def test_skips(self):
+                self.skipTest("no browser")
+
+        def run(*names):
+            r = unittest.TestResult()
+            unittest.TestSuite(T(n) for n in names).run(r)
+            return strict_code(r, io.StringIO())
+
+        self.assertEqual(run("test_ok"), 0)
+        self.assertEqual(run("test_ok", "test_skips"), 1)
+        self.assertEqual(run(), 1)  # nothing ran
+
+
+def outcome():
+    try:
+        need_browser()
+    except unittest.SkipTest:
+        return "skip"
+    except AssertionError:
+        return "fail"
+    return "run"
+
+
+def strict_code(result, err=sys.stderr):
+    """0 only when tests ran, all passed, and none skipped; each skip is named on err."""
+    for test, why in result.skipped:
+        print(f"::error::{test.id()}: skipped ({why})", file=err)
+    return 0 if result.testsRun and result.wasSuccessful() and not result.skipped else 1
 
 if __name__ == "__main__":
-    unittest.main()
+    # Strict: any skip fails (ci.yml broker-checks, #5952). `python3 -m unittest` stays lenient.
+    sys.exit(strict_code(unittest.main(exit=False).result))
