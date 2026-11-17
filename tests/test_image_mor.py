@@ -36,19 +36,37 @@ DIR_BASES = {"RuntimeDirectory": "/run", "StateDirectory": "/var/lib", "CacheDir
 SPECIFIERS = {"%t": "/run", "%S": "/var/lib", "%C": "/var/cache", "%L": "/var/log", "%E": "/etc"}
 
 
-def names_held_dir(text, dirs):
-    """Whether a unit file's text names one of dirs, or a path under it: the path ending at a
-    separator, a quote or the end of a line, through a specifier, or as a directory setting."""
+def unit_specifiers(unit):
+    """A unit's name specifiers as regexes: %n, %N, %p, %j and %J literal; %i and %I any instance
+    when the unit is a template (no instance in its name), so a template's directory may be any."""
+    n = re.escape(unit)
+    stem = unit.rsplit(".", 1)[0]
+    prefix, at, inst = stem.partition("@")
+    j = prefix.rsplit("-", 1)[-1]
+    wild = at and not inst
+    return {"%n": n, "%N": re.escape(stem), "%p": re.escape(prefix), "%j": re.escape(j),
+            "%J": re.escape(j), "%i": "[^/]*" if wild else re.escape(inst),
+            "%I": ".*" if wild else re.escape(inst)}
+
+
+def names_held_dir(text, dirs, unit=""):
+    """Whether a unit file's text names one of dirs, or a path under it: the path not followed by a
+    character that continues a name, through a base specifier, or as a directory setting (continued
+    lines joined, the unit's name specifiers resolved)."""
+    text = text.replace("\\\n", " ")
     for spec, base in SPECIFIERS.items():
         text = text.replace(spec, base)
-    if any(re.search(re.escape(d) + r"""(?=[/\s"':;\\]|$)""", text) for d in dirs):
+    if any(re.search(re.escape(d) + r"(?![\w.@+~-])", text) for d in dirs):
         return True
+    names = unit_specifiers(unit) if unit else {}
     keys = "|".join(DIR_BASES)
     for key, value in re.findall(r"^[ \t]*(%s)[ \t]*=(.*)$" % keys, text, re.M):
         for name in value.replace(":", " ").split():
-            path = DIR_BASES[key] + "/" + name.strip("\"'").strip("/")
-            if any(path == d or path.startswith(d + "/") for d in dirs):
-                return True
+            parts = (DIR_BASES[key] + "/" + name.strip("\"'").strip("/")).split("/")
+            for k in range(2, len(parts) + 1):
+                pat = "".join(names.get(w, re.escape(w)) for w in re.split(r"(%[a-zA-Z])", "/".join(parts[:k])))
+                if any(re.fullmatch(pat, d) for d in dirs):
+                    return True
     return False
 
 
@@ -149,7 +167,8 @@ class MorUnitTest(unittest.TestCase):
         for f in files:
             t = f.read_text()
             self.assertNotIn("/dev/shm", t, f.name)
-            if f.name != name and names_held_dir(t, check.MOR_LISTED):
+            unit = f.parent.name[:-2] if f.parent.name.endswith(".d") else f.name
+            if f.name != name and names_held_dir(t, check.MOR_LISTED, unit):
                 writers.add(f.name)
             for key in ("Conflicts", "PropagatesStopTo"):
                 self.assertNotIn(name, words(settings(f), key), f.name)
@@ -184,10 +203,33 @@ class MorUnitTest(unittest.TestCase):
             "RuntimeDirectory=agentos-x agentos-link-capture/first\n",
             "  RuntimeDirectory = agentos-setup\n",
             "ExecStart=/usr/bin/x /run/agentos-setup\\\n  -y\n",
+            'ExecStart=/bin/sh -c "test -d /run/agentos-setup&&touch x"\n',
+            "ExecStart=/bin/sh -c 'ls /run/agentos-setup|wc'\n",
+            "Environment=DIRS=/run/agentos-setup,/tmp\n",
+            'ExecStart=/bin/sh -c "x=$(ls /run/agentos-setup)"\n',
+            "ExecStart=/bin/sh -c 'echo /run/agentos-setup>/dev/null'\n",
+            "ExecStart=/bin/sh -c 'cat /run/agentos-setup*'\n",
+            'ExecStart=/bin/sh -c "d=${D:-/run/agentos-setup}"\n',
+            "RuntimeDirectory=agentos-x \\\n  agentos-setup\n",
         ]
         for t in named:
             with self.subTest(t):
                 self.assertTrue(names_held_dir(t, dirs))
+        # A directory setting through the unit's own name: the template's instance may be any name.
+        for t, unit in [("RuntimeDirectory=%p\n", "agentos-setup.service"),
+                        ("RuntimeDirectory=%N/x\n", "agentos-link-capture.service"),
+                        ("RuntimeDirectory=%n\n", "agentos-setup"),
+                        ("RuntimeDirectory=agentos-%j\n", "x-setup.service"),
+                        ("RuntimeDirectory=agentos-%i\n", "agentos-keeper-setup@.service"),
+                        ("RuntimeDirectory=%I\n", "agentos-keeper-setup@.service"),
+                        ("RuntimeDirectory=agentos-%i\n", "agentos-keeper-setup@setup.service")]:
+            with self.subTest(t, unit=unit):
+                self.assertTrue(names_held_dir(t, dirs, unit))
+        for t, unit in [("RuntimeDirectory=%p\n", "agentos-setupx.service"),
+                        ("RuntimeDirectory=agentos-%i\n", "agentos-keeper-setup@other.service"),
+                        ("RuntimeDirectory=%i-x\n", "agentos-keeper-setup@.service")]:
+            with self.subTest(t, unit=unit):
+                self.assertFalse(names_held_dir(t, dirs, unit))
         apart = [
             "ExecStart=/usr/bin/x /run/agentos-setupx\n",
             "ReadWritePaths=/run/agentos-link-capture-old\n",
