@@ -564,7 +564,7 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 			// A unix socket can front a network proxy, so a dial's
 			// address must come from configuration (a field or a
 			// variable), never a literal or an expression built here.
-			if se.Sel.Name != "Listen" && len(n.Args) > i+1 && !configured(n.Args[i+1], f) {
+			if se.Sel.Name != "Listen" && len(n.Args) > i+1 && !configured(n.Args[i+1], rel, f) {
 				at(n, se.Sel.Name+" to an address not taken from configuration")
 			}
 		case *ast.SelectorExpr:
@@ -590,37 +590,181 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 	return bad
 }
 
-// configured reports a dial address that comes from configuration: a
-// parameter or local variable of this file, or a field of one (cfg.Socket).
-// A constant, a literal, an expression, a package-qualified name, or an
-// identifier this file does not declare (a package-level const or var in
-// another file) is not (L3 S1 on #90).
-func configured(e ast.Expr, f *ast.File) bool {
-	for {
-		se, ok := e.(*ast.SelectorExpr)
-		if !ok {
-			break
-		}
-		e = se.X
+// configured reports a dial address that comes from configuration, and
+// accepts exactly three shapes (#6030 re-plan):
+//   - a string parameter of a function declared in this file, by value,
+//     that no statement here writes;
+//   - a field read through such a function's parameter or receiver
+//     (p.field), when configuredFields lists the parameter's type and the
+//     field for package rel and nothing here writes p;
+//   - a socket in a directory the function made (inTempDir).
+//
+// Anything else is not: a local (`sock := "/run/proxy.sock"`, #5775), a
+// func literal's parameter, a named result, a constant, a literal, an
+// expression, a package-level variable, a longer chain (c.a.b), or a
+// name this file does not declare (L3 S1 on #90).
+func configured(e ast.Expr, rel string, f *ast.File) bool {
+	field := ""
+	if se, ok := e.(*ast.SelectorExpr); ok {
+		field, e = se.Sel.Name, se.X
 	}
 	id, ok := e.(*ast.Ident)
-	if !ok || id.Obj == nil || id.Obj.Kind != ast.Var {
+	if !ok || id.Obj == nil || id.Obj.Kind != ast.Var || written(id.Obj, f) {
 		return false
 	}
-	// A package-level variable can be set at link time or by any file;
-	// only function parameters and locals count.
+	typ := param(id.Obj, f)
+	if field != "" {
+		if st, ok := typ.(*ast.StarExpr); ok {
+			typ = st.X
+		}
+		t, ok := typ.(*ast.Ident)
+		return ok && configuredFields[rel][t.Name+"."+field] != ""
+	}
+	t, ok := typ.(*ast.Ident)
+	return ok && t.Name == "string" || inTempDir(id.Obj, f)
+}
+
+// configuredFields are the fields a dial may read through a parameter or
+// receiver, by package, as "Type.field" for a parameter of type Type or
+// *Type, and why each holds only configuration. Go lets a value reach a
+// struct without naming its type (assignability from an unnamed struct,
+// type parameters, reflect), so no rule over syntax shows that a field is
+// only ever handed in (#6030 rounds 1 to 3). Each entry is instead a claim
+// a reviewer accepts, as an entry here in the PR's diff: that no code of
+// the package stores into the field, so it holds what callers hand in
+// (what they hand in is #6028's).
+var configuredFields = map[string]map[string]string{
+	"infer":                {"Client.Path": "the inference service's socket, from agentosd's wiring"},
+	"kernel/proc":          {"Conn.Socket": "a kernel or clerk socket its caller names", "remote.Socket": "Remote.Socket, embedded; a Remote is handed to Clerk"},
+	"localsrv/accountsock": {"Gmail.Socket": "the mail process's owner socket, from agentosd's wiring"},
+	"modelroute":           {"Config.Socket": "the vault process's model socket, from Forward's caller"},
+	"owner/kernelsock":     {"Keeper.Socket": "the keeper's socket, from agentosd's wiring", "Owner.Socket": "the kernel's owner socket, from agentosd's wiring"},
+}
+
+// param is the declared type of obj when obj is a parameter or receiver
+// of a function declared in f, or nil. A func literal's parameter is not
+// one: the literal is called here, where its caller may pass a literal
+// (Lens R1 on #6030).
+func param(obj *ast.Object, f *ast.File) ast.Expr {
 	for _, d := range f.Decls {
-		if g, ok := d.(*ast.GenDecl); ok && g.Tok == token.VAR {
-			for _, sp := range g.Specs {
-				for _, n := range sp.(*ast.ValueSpec).Names {
-					if n.Obj == id.Obj {
-						return false
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		for _, fl := range []*ast.FieldList{fd.Recv, fd.Type.Params} {
+			if fl == nil {
+				continue
+			}
+			for _, p := range fl.List {
+				for _, nm := range p.Names {
+					if nm.Obj == obj {
+						return p.Type
 					}
 				}
 			}
 		}
 	}
-	return true
+	return nil
+}
+
+// inTempDir reports a local bound by `sock := filepath.Join(dir, "s.sock")`
+// to a literal file name in dir (no "/", not "." or ".."), itself bound by `dir, err := os.MkdirTemp(...)`:
+// a socket in a fresh directory this process made, which nothing listened
+// on before it (agentos-infer's llama-server socket). Neither may be
+// written again (written).
+func inTempDir(obj *ast.Object, f *ast.File) bool {
+	call, ok := definedBy(obj, f, "path/filepath.Join")
+	if !ok || len(call.Args) != 2 {
+		return false
+	}
+	dir, ok := call.Args[0].(*ast.Ident)
+	name, lit := call.Args[1].(*ast.BasicLit)
+	if !ok || !lit || dir.Obj == nil || written(dir.Obj, f) {
+		return false
+	}
+	if n, err := strconv.Unquote(name.Value); err != nil || n == "" || n == "." || n == ".." || strings.Contains(n, "/") {
+		return false
+	}
+	_, ok = definedBy(dir.Obj, f, "os.MkdirTemp")
+	return ok
+}
+
+// definedBy returns the call to fn (an import path and name) that obj's
+// := statement binds it to, as the first name of the statement.
+func definedBy(obj *ast.Object, f *ast.File, fn string) (*ast.CallExpr, bool) {
+	as, ok := obj.Decl.(*ast.AssignStmt)
+	if !ok || as.Tok != token.DEFINE || len(as.Rhs) != 1 || len(as.Lhs) == 0 {
+		return nil, false
+	}
+	if id, ok := as.Lhs[0].(*ast.Ident); !ok || id.Obj != obj {
+		return nil, false
+	}
+	call, ok := as.Rhs[0].(*ast.CallExpr)
+	if !ok {
+		return nil, false
+	}
+	se, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return nil, false
+	}
+	x, ok := se.X.(*ast.Ident)
+	if !ok || x.Obj != nil {
+		return nil, false
+	}
+	for _, im := range f.Imports {
+		p, _ := strconv.Unquote(im.Path.Value)
+		n := p[strings.LastIndex(p, "/")+1:]
+		if im.Name != nil {
+			n = im.Name.Name
+		}
+		if n == x.Name && p+"."+se.Sel.Name == fn {
+			return call, true
+		}
+	}
+	return nil, false
+}
+
+// written reports a statement of f, other than the := that declares obj,
+// that writes obj or a part of it, or takes its address.
+func written(obj *ast.Object, f *ast.File) bool {
+	w := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			for _, l := range n.Lhs {
+				w = w || n != obj.Decl && writes(l, obj)
+			}
+		case *ast.RangeStmt:
+			w = w || n.Tok == token.ASSIGN && (writes(n.Key, obj) || writes(n.Value, obj))
+		case *ast.IncDecStmt:
+			w = w || writes(n.X, obj)
+		case *ast.UnaryExpr:
+			w = w || n.Op == token.AND && writes(n.X, obj)
+		}
+		return true
+	})
+	return w
+}
+
+// writes reports that e, as an assignment's target or an operand of &,
+// is obj or a part of it (obj.f, obj[i], *obj).
+func writes(e ast.Expr, obj *ast.Object) bool {
+	for {
+		switch x := e.(type) {
+		case *ast.SelectorExpr:
+			e = x.X
+		case *ast.IndexExpr:
+			e = x.X
+		case *ast.StarExpr:
+			e = x.X
+		case *ast.ParenExpr:
+			e = x.X
+		case *ast.Ident:
+			return x.Obj == obj
+		default:
+			return false
+		}
+	}
 }
 
 // setsChecked reports that a client literal sets field key to a value the
@@ -714,6 +858,9 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		{"mail/mailsock", src(`"net"`, `func g() { (&net.Dialer{}).DialContext(nil, "tcp", "imap.example.com:993") }`)},
 		{"mail/mailsock", src(`"net"`, `func g() { (&net.Dialer{}).DialContext(nil, "unix", "/run/agentos-egress/mail.sock") }`)},
 		{"mail/mailsock", src(`"net"`, `var c, _ = net.Dial("tcp", "smtp.example.com:465")`)},
+		// A local bound to a literal is not configuration, whichever dial
+		// names it (#5775).
+		{"kernel/proc", src(`"net"`, `func g() { sock := "/run/proxy.sock"; net.DialUnix("unixgram", nil, &net.UnixAddr{Name: sock, Net: "unixgram"}) }`)},
 	} {
 		path := filepath.Join(t.TempDir(), "p.go")
 		if err := os.WriteFile(path, []byte(c.src), 0o600); err != nil {
@@ -723,12 +870,98 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 			t.Errorf("missed in %s:\n%s", c.rel, c.src)
 		}
 	}
-	ok := src(`"net"; "net/http"; "net/http/httputil"`, `type config struct{ Socket string }
-func g(sock string, cfg config) {
+	// A local, a named result, or a parameter written here is not
+	// configuration, nor is a name built in a directory this function did
+	// not make, and each is reported for its address (#5775).
+	for _, c := range []string{
+		src(`"net"`, `func g() { sock := "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"`, `func g() { sock := "/run/proxy.sock"; net.Dial("unix", sock) }`),
+		src(`"net"`, `func g() { var sock string; sock = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"`, `func g() (sock string) { sock = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", sock); return }`),
+		src(`"net"`, `func g(sock string) { sock = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"`, `type cfg struct{ s string }; func g(c cfg) { c.s = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", c.s) }`),
+		src(`"net"`, `func g(sock string) { for sock = range map[string]int{"/run/proxy.sock": 0} {}; (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"`, `func g(sock string) { p := &sock; *p = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"`, `func g(n int) { n++; (&net.Dialer{}).Dial("unix", n) }`),
+		src(`"net"; "path/filepath"`, `func g(dir string) { sock := filepath.Join(dir, "s.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
+		// A field written through another name, and a func literal's
+		// parameter given a literal (#6030 B1, Lens R1).
+		src(`"net"`, `type client struct{ path string }; func (c *client) setup() { c.path = "/run/proxy.sock" }; func (c *client) dial() { (&net.Dialer{}).Dial("unix", c.path) }`),
+		src(`"net"`, `type cfg struct{ s string }; func g(c *cfg) { d := c; d.s = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", c.s) }`),
+		src(`"net"`, `type cfg struct{ s string }; func (x *cfg) set() { x.s = "/run/proxy.sock" }; func g(c cfg) { c.set(); (&net.Dialer{}).Dial("unix", c.s) }`),
+		src(`"net"`, `type cfg struct{ s string }; func (x *cfg) set() { *x = cfg{"/run/proxy.sock"} }; func g(c *cfg) { c.set(); (&net.Dialer{}).Dial("unix", c.s) }`),
+		src(`"net"`, `type cfg struct{ s string }; func h(c *cfg) { (&net.Dialer{}).Dial("unix", c.s) }; func g(l []cfg) { l[0] = cfg{"/run/proxy.sock"}; h(&l[0]) }`),
+		src(`"net"`, `type cfg struct{ s string }; func g(c *cfg) { p := &c.s; *p = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", c.s) }`),
+		src(`"net"`, `type in struct{ s string }; type cfg struct{ in in }; func g(c *cfg) { c.in = in{"/run/proxy.sock"}; (&net.Dialer{}).Dial("unix", c.in.s) }`),
+		src(`"net"`, `func g() { func(s string) { (&net.Dialer{}).Dial("unix", s) }("/run/proxy.sock") }`),
+		// The field's struct built or written in the package, whatever the
+		// route (#6030 B1, second round).
+		src(`"net"`, `type in struct{ s string }; type cfg struct{ in }; func (x *cfg) set() { x.in = in{"/run/proxy.sock"} }; func g(c *cfg) { c.set(); (&net.Dialer{}).Dial("unix", c.s) }`),
+		src(`"net"`, `type cfg struct{ s string }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func g(l []cfg) { l[0] = cfg{"/run/proxy.sock"}; l[0].dial() }`),
+		src(`"net"`, `type cfg struct{ s string }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func g(a *[1]cfg) { a[0] = cfg{s: "/run/proxy.sock"}; a[0].dial() }`),
+		src(`"net"`, `type cfg struct{ s string }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func g(l []cfg) { copy(l, []cfg{{"/run/proxy.sock"}}); l[0].dial() }`),
+		src(`"net"`, `type cfg struct{ s string }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func g(l []cfg) { l = append(l[:0], cfg{"/run/proxy.sock"}); l[0].dial() }`),
+		src(`"net"`, `type cfg struct{ s string }; type list []cfg; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func g() { l := list{{"/run/proxy.sock"}}; l[0].dial() }`),
+		src(`"net"`, `type cfg struct{ s string }; type alias = cfg; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func g() { (&alias{"/run/proxy.sock"}).dial() }`),
+		src(`"net"`, `type cfg struct{ s string }; type u struct{ s string }; func g(c *cfg) { *(*u)(c) = u{"/run/proxy.sock"}; (&net.Dialer{}).Dial("unix", c.s) }`),
+		src(`"net"`, `type cfg struct{ s string }; type u struct{ s string }; func (c cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func g() { cfg(u{"/run/proxy.sock"}).dial() }`),
+		src(`"net"`, `type cfg struct{ s string }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func g(c *cfg) { c.s += "/../proxy.sock"; c.dial() }`),
+		src(`"net"; "fmt"`, `type cfg struct{ s string }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func g(c *cfg) { fmt.Sscan("/run/proxy.sock", &c.s); c.dial() }`),
+		src(`"net"`, `type in struct{ s string }; type cfg struct{ in }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func g() { (&cfg{in{"/run/proxy.sock"}}).dial() }`),
+		src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); dir = "/run"; sock := filepath.Join(dir, "proxy.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); sock := filepath.Join(dir, "s.sock"); sock = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); sock := filepath.Join(dir, "..", "proxy.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); sock := filepath.Join(dir, "../../run/proxy.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); sock := filepath.Join(dir, ".."); (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"; "path/filepath"`, `func g(s string) { dir, _ := os.MkdirTemp("", "x"); sock := filepath.Join(dir, s); (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); sock := filepath.Join(dir, "s.sock"); p := &sock; *p = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); _, sock := filepath.Split(dir); (&net.Dialer{}).Dial("unix", sock) }`),
+		// A field counts only when configuredFields lists its parameter's
+		// type and its name for the package, and it is read through a
+		// parameter or receiver nothing here writes (#6030 re-plan).
+		src(`"net"`, `type client struct{ path string }; func (c *client) dial() { (&net.Dialer{}).Dial("unix", c.path) }`),
+		src(`"net"`, `type Config struct{ Socket, Alt string }; func g(c Config) { (&net.Dialer{}).Dial("unix", c.Alt) }`),
+		src(`"net"`, `type Conn struct{ Socket string }; func g(c Conn) { (&net.Dialer{}).Dial("unix", c.Socket) }`),
+		src(`"net"`, `type Config struct{ In struct{ Socket string } }; func g(c Config) { (&net.Dialer{}).Dial("unix", c.In.Socket) }`),
+		src(`"net"`, `type Config struct{ Socket string }; func g() { c := Config{Socket: "/run/proxy.sock"}; (&net.Dialer{}).Dial("unix", c.Socket) }`),
+		src(`"net"`, `type Config struct{ Socket string }; func g() { var c Config = struct{ Socket string }{"/run/proxy.sock"}; (&net.Dialer{}).Dial("unix", c.Socket) }`),
+		src(`"net"`, `type Config struct{ Socket string }; var c = Config{"/run/proxy.sock"}; func g() { (&net.Dialer{}).Dial("unix", c.Socket) }`),
+		src(`"net"`, `type Config struct{ Socket string }; func g() (c Config) { (&net.Dialer{}).Dial("unix", c.Socket); return }`),
+		src(`"net"`, `type Config struct{ Socket string }; func g() { func(c Config) { (&net.Dialer{}).Dial("unix", c.Socket) }(Config{"/run/proxy.sock"}) }`),
+		src(`"net"`, `type Config struct{ Socket string }; func g(c Config) { c.Socket = "/run/proxy.sock"; (&net.Dialer{}).Dial("unix", c.Socket) }`),
+		src(`"net"`, `type Config struct{ Socket string }; func g(c *Config) { *c = struct{ Socket string }{"/run/proxy.sock"}; (&net.Dialer{}).Dial("unix", c.Socket) }`),
+		src(`"net"`, `type Config struct{ Socket string }; func set(p **Config) {}; func g(c *Config) { set(&c); (&net.Dialer{}).Dial("unix", c.Socket) }`),
+		// A string parameter counts only as itself, by value.
+		src(`"net"`, `type path string; func g(s path) { (&net.Dialer{}).Dial("unix", s) }`),
+		src(`"net"`, `func g(s *string) { (&net.Dialer{}).Dial("unix", *s) }`),
+		src(`"net"`, `func g(s ...string) { (&net.Dialer{}).Dial("unix", s[0]) }`),
+		src(`"net"`, `func g(s [1]string) { (&net.Dialer{}).Dial("unix", s[0]) }`),
+		// A D built without naming D, which round 3 got past a rule over
+		// syntax (#6030 S1).
+		src(`"net"`, `type cfg struct{ s string }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func g(p *cfg) { *p = struct{ s string }{"/run/proxy.sock"}; p.dial() }`),
+		src(`"net"`, `type cfg struct{ s string }; func (c cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func mk() cfg { return struct{ s string }{"/run/proxy.sock"} }; func g() { mk().dial() }`),
+		src(`"net"`, `type cfg struct{ s string }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.s) }; func set[T ~struct{ s string }](p *T) { *p = T{"/run/proxy.sock"} }; func g(c *cfg) { set(c); c.dial() }`),
+		src(`"net"`, `type cfg struct{ s string }; func use(c cfg) { (&net.Dialer{}).Dial("unix", c.s) }; func g() { use(struct{ s string }{"/run/proxy.sock"}) }`),
+		src(`"net"`, `type cfg struct{ s string }; type x = struct{ s string }; func use(c cfg) { (&net.Dialer{}).Dial("unix", c.s) }; func g() { use(x{"/run/proxy.sock"}) }`),
+		src(`"net"; "reflect"`, `type cfg struct{ S string }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.S) }; func g(c *cfg) { reflect.ValueOf(c).Elem().Field(0).SetString("/run/proxy.sock"); c.dial() }`),
+	} {
+		path := filepath.Join(t.TempDir(), "p.go")
+		if err := os.WriteFile(path, []byte(c), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(sourceUse(t, path, "p.go", "modelroute"), "\n"); !strings.Contains(got, "not taken from configuration") {
+			t.Errorf("an unconfigured address passed: %q\n%s", got, c)
+		}
+	}
+	ok := src(`"net"; "net/http"; "net/http/httputil"; "os"; "path/filepath"`, `type Config struct{ Socket string }
+func g(sock string, cfg Config) {
 	_, _ = (&net.Dialer{}).Dial("unix", cfg.Socket)
 	tr := &http.Transport{DialContext: func() { (&net.Dialer{}).DialContext(nil, "unix", sock) }}
 	_ = &httputil.ReverseProxy{Transport: tr}
 	_ = &http.Client{Transport: &http.Transport{DialContext: func() {}}}
+	dir, _ := os.MkdirTemp("", "x")
+	s := filepath.Join(dir, "s.sock")
+	_ = &http.Client{Transport: &http.Transport{DialContext: func() { (&net.Dialer{}).DialContext(nil, "unix", s) }}}
 }`)
 	path := filepath.Join(t.TempDir(), "ok.go")
 	if err := os.WriteFile(path, []byte(ok), 0o600); err != nil {
@@ -737,16 +970,23 @@ func g(sock string, cfg config) {
 	if got := sourceUse(t, path, "ok.go", "modelroute"); len(got) != 0 {
 		t.Errorf("modelroute's unix dial flagged: %q", got)
 	}
-	mailsock := src(`"context"; "net"`, `type client struct{ path string }
-func (c *client) do(ctx context.Context) (net.Conn, error) {
-	return (&net.Dialer{}).DialContext(ctx, "unix", c.path)
-}`)
-	path = filepath.Join(t.TempDir(), "mailsock.go")
-	if err := os.WriteFile(path, []byte(mailsock), 0o600); err != nil {
+	// kernel/proc's remote reads Socket through its embedded Remote, and
+	// keeps a Remote whole (*p = old): a listed field. The same source in
+	// a package without the entry is refused.
+	held := src(`"net"`, `type Remote struct{ Socket string }
+type remote struct{ Remote }
+func (r Remote) clerk() remote { return remote{r} }
+func (c remote) call() { net.Dial("unix", c.Socket) }
+func keep(p *Remote, old Remote) { *p = old }`)
+	path = filepath.Join(t.TempDir(), "held.go")
+	if err := os.WriteFile(path, []byte(held), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := sourceUse(t, path, "mailsock.go", "mail/mailsock"); len(got) != 0 {
-		t.Errorf("mailsock's unix dial flagged: %q", got)
+	if got := sourceUse(t, path, "held.go", "kernel/proc"); len(got) != 0 {
+		t.Errorf("a handed Remote's dial flagged: %q", got)
+	}
+	if got := strings.Join(sourceUse(t, path, "held.go", "modelroute"), "\n"); !strings.Contains(got, "not taken from configuration") {
+		t.Errorf("a field listed for another package passed: %q", got)
 	}
 	// Imports: RPC, mail, raw sockets, and escape hatches.
 	reach := httpReach([]listed{{path: "net/rpc", imports: []string{"net/http"}}, {path: "net/http"}})
