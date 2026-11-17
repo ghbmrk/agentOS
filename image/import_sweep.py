@@ -208,6 +208,17 @@ def walk(top):
     return os.walk(top, onerror=cannot_read)
 
 
+def is_file(path):
+    """Whether PATH, links followed, is a regular file. One gone since the walk listed it is not; any other
+    stat error (a link loop, EIO) fails the run instead of skipping the entry (#6073)."""
+    try:
+        return stat.S_ISREG(os.stat(path).st_mode)
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        cannot_read(e)
+
+
 def tree_files(top, prefix="/", skip=()):
     """Every regular ELF file under TOP (symbolic links not followed), as {prefix + relative path: path}."""
     files = {}
@@ -254,7 +265,7 @@ def run_build(out, version):
         cleanup()
     initrds = pathlib.Path(out) / "initrd"
     for p in sorted(pathlib.Path(d, n) for d, _, names in walk(initrds) for n in names
-                    if pathlib.Path(d, n).is_file()):
+                    if is_file(os.path.join(d, n))):
         with tempfile.TemporaryDirectory() as scratch:
             places["initrd:" + str(p.relative_to(initrds))] = initrd_place(p, scratch)
     return places
