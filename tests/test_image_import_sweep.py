@@ -483,6 +483,38 @@ class ReadErrorTest(unittest.TestCase):
             with self.eio_on(f), self.assertRaises(SystemExit):
                 sweep.run_tree(d)
 
+    def test_eio_on_a_directory_fails_the_run_naming_it(self):
+        # A directory block refused by dm-verity: os.walk would drop the subtree and the scan pass smaller.
+        real = os.scandir
+
+        def fake(path=".", *a, **k):
+            if os.fspath(path).endswith("/usr/bin"):
+                raise OSError(errno.EIO, os.strerror(errno.EIO), path)
+            return real(path, *a, **k)
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "usr/bin").mkdir(parents=True)
+            pathlib.Path(d, "usr/bin/tampered").write_bytes(b"\x7fELF" + b"\0" * 60)
+            with mock.patch.object(os, "scandir", fake), self.assertRaises(SystemExit) as cm:
+                sweep.run_tree(d)
+        self.assertIn("cannot read %s: %s" % (os.path.join(d, "usr/bin"), os.strerror(errno.EIO)),
+                      str(cm.exception))
+
+    def test_eio_on_an_initrd_directory_fails_the_build(self):
+        real = os.scandir
+
+        def fake(path=".", *a, **k):
+            if os.fspath(path).endswith("/initrd"):
+                raise OSError(errno.EIO, os.strerror(errno.EIO), path)
+            return real(path, *a, **k)
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "initrd").mkdir()
+            built = mock.patch.dict(sys.modules, offline_systemd=mock.Mock(
+                built_tree=lambda out, v: (d, None, None, lambda: None)))
+            with built, mock.patch.object(sweep, "run_tree", lambda root, usr: {}), \
+                    mock.patch.object(os, "scandir", fake), self.assertRaises(SystemExit) as cm:
+                sweep.run_build(d, "v")
+        self.assertIn("cannot read %s" % os.path.join(d, "initrd"), str(cm.exception))
+
     def test_vanished_short_and_plain_files_are_not_elf(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertFalse(sweep.is_elf(os.path.join(d, "gone")))

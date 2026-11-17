@@ -198,10 +198,20 @@ def sweep(files):
             "sha256": dict(sorted(digest.items()))}
 
 
+def cannot_read(e):
+    sys.exit("import sweep: cannot read %s: %s" % (e.filename, e.strerror or e))
+
+
+def walk(top):
+    """os.walk(TOP), except that a directory it cannot list (EIO from a verity-refused block, a missing
+    TOP) fails the run instead of dropping that subtree from the scan (#5988)."""
+    return os.walk(top, onerror=cannot_read)
+
+
 def tree_files(top, prefix="/", skip=()):
     """Every regular ELF file under TOP (symbolic links not followed), as {prefix + relative path: path}."""
     files = {}
-    for d, dirs, names in os.walk(top):
+    for d, dirs, names in walk(top):
         rel = os.path.relpath(d, top)
         if rel == ".":
             dirs[:] = [x for x in dirs if x not in skip]
@@ -243,7 +253,8 @@ def run_build(out, version):
     finally:
         cleanup()
     initrds = pathlib.Path(out) / "initrd"
-    for p in sorted(x for x in initrds.rglob("*") if x.is_file()):
+    for p in sorted(pathlib.Path(d, n) for d, _, names in walk(initrds) for n in names
+                    if pathlib.Path(d, n).is_file()):
         with tempfile.TemporaryDirectory() as scratch:
             places["initrd:" + str(p.relative_to(initrds))] = initrd_place(p, scratch)
     return places
