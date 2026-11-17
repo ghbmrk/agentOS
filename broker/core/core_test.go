@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -42,6 +43,7 @@ type list struct {
 	core, wiring map[string]bool
 	open         []string
 	allow        map[string][]string // non-core package -> symbols
+	fixture      []string            // packages marked fixture, in file order
 }
 
 func readList(t *testing.T) list {
@@ -51,8 +53,20 @@ func readList(t *testing.T) list {
 		t.Fatal(err)
 	}
 	defer f.Close()
+	l, err := parseList(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l
+}
+
+// parseList reads core.txt's grammar (its header). A fixture line names a
+// package that also has an allow line: it marks that package's grant as
+// made on the grounds that only tests link it, and grants nothing itself.
+func parseList(r io.Reader) (list, error) {
 	l := list{core: map[string]bool{}, wiring: map[string]bool{}, allow: map[string][]string{}}
-	sc := bufio.NewScanner(f)
+	fixtureAt := map[string]int{}
+	sc := bufio.NewScanner(r)
 	for n := 1; sc.Scan(); n++ {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -68,17 +82,30 @@ func readList(t *testing.T) list {
 			l.open = append(l.open, w[1])
 		case w[0] == "allow" && len(w) > 4 && w[3] == "--":
 			l.allow[w[1]] = append(l.allow[w[1]], w[2])
+		case w[0] == "fixture" && len(w) == 2:
+			if at, dup := fixtureAt[w[1]]; dup {
+				return l, fmt.Errorf("core.txt:%d: fixture %s repeats line %d", n, w[1], at)
+			}
+			fixtureAt[w[1]] = n
+			l.fixture = append(l.fixture, w[1])
 		default:
-			t.Fatalf("core.txt:%d: unreadable line %q", n, line)
+			return l, fmt.Errorf("core.txt:%d: unreadable line %q", n, line)
 		}
 	}
 	if err := sc.Err(); err != nil {
-		t.Fatal(err)
+		return l, err
 	}
 	if len(l.core) == 0 {
-		t.Fatal("core.txt names no core package")
+		return l, fmt.Errorf("core.txt names no core package")
 	}
-	return l
+	// TestEveryCoreListEntryExists loads every allow-line package, so a
+	// fixture with an allow line names a package that exists.
+	for _, p := range l.fixture {
+		if len(l.allow[p]) == 0 {
+			return l, fmt.Errorf("core.txt:%d: fixture %s has no allow line", fixtureAt[p], p)
+		}
+	}
+	return l, nil
 }
 
 // matches reports whether sym (pkg.Func or pkg.Type.Method) is covered by
@@ -523,21 +550,77 @@ func TestEveryCoreListEntryExists(t *testing.T) {
 	}
 }
 
-// fixtures are the allow-line packages core.txt grants on the grounds that
-// only tests link them: a name ending in test, and kernel/sim (CORE-fixture-imports-a).
+// fixtures are the packages core.txt marks with a fixture line: allow-line
+// packages granted on the grounds that only tests link them
+// (CORE-fixture-imports-a). A package's name decides nothing.
 func fixtures(t *testing.T, l list) []string {
 	t.Helper()
-	var fs []string
-	for p := range l.allow {
-		if strings.HasSuffix(p, "test") || p == "kernel/sim" {
-			fs = append(fs, p)
-		}
-	}
+	fs := append([]string{}, l.fixture...)
 	sort.Strings(fs)
 	if len(fs) == 0 {
-		t.Fatal("core.txt allows no test fixture; update fixtures() if they were renamed")
+		t.Fatal("core.txt marks no test fixture")
 	}
 	return fs
+}
+
+// The fixture set is exactly the fixture lines: an allow-line package named
+// *test, or kernel/sim, without one is not a fixture. A fixture line needs
+// an allow line for its package, which TestEveryCoreListEntryExists then
+// loads, so a line naming a missing package fails.
+func TestFixturesAreExactlyTheFixtureLines(t *testing.T) {
+	const head = "core kernel\n"
+	l, err := parseList(strings.NewReader(head +
+		"allow loops/loopstest kernel.* -- a\n" +
+		"allow kernel/sim kernel.* -- b\n" +
+		"fixture some/harness\n" +
+		"allow some/harness kernel.* -- c\n" +
+		"allow some/harness kernel.Kernel.Submit -- d\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fixtures(t, l); strings.Join(got, " ") != "some/harness" {
+		t.Errorf("fixtures: want [some/harness], got %q", got)
+	}
+	for _, c := range []struct{ name, text, want string }{
+		{"a fixture line for a missing package", "fixture no/such/pkgtest\n", "fixture no/such/pkgtest has no allow line"},
+		{"a fixture line for a core package", "fixture kernel\n", "fixture kernel has no allow line"},
+		{"a repeated fixture line", "allow a/b kernel.* -- r\nfixture a/b\nfixture a/b\n", "repeats line"},
+		{"a fixture line with a reason", "allow a/b kernel.* -- r\nfixture a/b -- r\n", "unreadable line"},
+		{"a bare fixture line", "fixture\n", "unreadable line"},
+	} {
+		if _, err := parseList(strings.NewReader(head + c.text)); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: want an error containing %q, got %v", c.name, c.want, err)
+		}
+	}
+}
+
+// A fixture's guard calls testing.Testing() from its non-test files, so an
+// allow-line package that links testing there keeps its fixture line:
+// deleting the line cannot quietly drop the package from the guards below.
+func TestAnAllowLinePackageLinkingTestingIsMarked(t *testing.T) {
+	l := readList(t)
+	marked := map[string]bool{}
+	for _, f := range l.fixture {
+		marked[f] = true
+	}
+	var pats []string
+	for p := range l.allow {
+		pats = append(pats, "./"+p)
+	}
+	sort.Strings(pats)
+	cmd := exec.Command("go", append([]string{"list", "-f", "{{.ImportPath}} {{.Imports}}"}, pats...)...)
+	cmd.Dir = moduleRoot
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go list: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		path, imports, _ := strings.Cut(line, " ")
+		p := strings.TrimPrefix(path, modPrefix)
+		if slices.Contains(strings.Fields(strings.Trim(imports, "[]")), "testing") && !marked[p] {
+			t.Errorf("core.txt: %s links testing outside its _test.go files but has no fixture line", p)
+		}
+	}
 }
 
 // overlay writes a go -overlay file that adds each module path file (whose
