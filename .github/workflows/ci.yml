@@ -394,12 +394,13 @@ jobs:
           mark="$RUNNER_TEMP/gocache.mark"
           [ -e "$mark" ] || { echo "::error title=build cache::no $mark: the runner-disk step did not run, so which entries this run used is unknown"; exit 1; }
           [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
-          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" -type f "$@"; }
-          mb() { entries "$@" -printf '%s\n' | awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
+          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
+          mb() { entries "$@" -exec du -bs {} + | awk '{s += $1} END {printf "%d", s / 1048576}'; }
           all=$(mb); used=$(mb -newer "$mark")
           echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
           if [ "$DROP" = true ]; then
-            entries ! -newer "$mark" -delete
+            entries ! -newer "$mark" -exec rm -rf {} +
             echo "dropped the stale entries; $(mb) MB left to save"
           fi
       - name: Go build cache upload (main only; CI-PATHS)
@@ -563,12 +564,13 @@ jobs:
           mark="$RUNNER_TEMP/gocache.mark"
           [ -e "$mark" ] || { echo "::error title=build cache::no $mark: the runner-disk step did not run, so which entries this run used is unknown"; exit 1; }
           [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
-          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" -type f "$@"; }
-          mb() { entries "$@" -printf '%s\n' | awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
+          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
+          mb() { entries "$@" -exec du -bs {} + | awk '{s += $1} END {printf "%d", s / 1048576}'; }
           all=$(mb); used=$(mb -newer "$mark")
           echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
           if [ "$DROP" = true ]; then
-            entries ! -newer "$mark" -delete
+            entries ! -newer "$mark" -exec rm -rf {} +
             echo "dropped the stale entries; $(mb) MB left to save"
           fi
       - name: Go build cache upload (main only; CI-PATHS)
@@ -900,12 +902,13 @@ jobs:
           mark="$RUNNER_TEMP/gocache.mark"
           [ -e "$mark" ] || { echo "::error title=build cache::no $mark: the runner-disk step did not run, so which entries this run used is unknown"; exit 1; }
           [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
-          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" -type f "$@"; }
-          mb() { entries "$@" -printf '%s\n' | awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
+          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
+          mb() { entries "$@" -exec du -bs {} + | awk '{s += $1} END {printf "%d", s / 1048576}'; }
           all=$(mb); used=$(mb -newer "$mark")
           echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
           if [ "$DROP" = true ]; then
-            entries ! -newer "$mark" -delete
+            entries ! -newer "$mark" -exec rm -rf {} +
             echo "dropped the stale entries; $(mb) MB left to save"
           fi
       - name: Go build cache upload (main only; CI-PATHS)
