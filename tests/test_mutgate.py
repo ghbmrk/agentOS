@@ -3108,11 +3108,12 @@ class Record(unittest.TestCase):
         # said their mutants were not equivalent; #5909 deleted them once gremlins ran and killed each.
         self.assertEqual(len(sites), 24, r.stdout)
         self.assertEqual(len(set(sites)), 24, r.stdout)
-        # The two loadSenders proofs were re-read on #5780 after #5733 edited that func, and readMail's
-        # ReadAll proof on #5804 after it gained the setup-form check.
+        # The two loadSenders proofs were re-read on #5780 after #5733 edited that func, readMail's
+        # ReadAll proof on #5804 after it gained the setup-form check, and work's tick.Stop proof on #5998
+        # after its ticker took MailConfig.every.
         self.assertEqual(sorted(" ".join(l.split(" ")[1:3]) for l in r.stdout.strip().split("\n")),
-                         ["STATEMENT_DELETION #5743"] * 21 + ["STATEMENT_DELETION #5780"] * 2
-                         + ["STATEMENT_DELETION #5804"])
+                         ["STATEMENT_DELETION #5743"] * 20 + ["STATEMENT_DELETION #5780"] * 2
+                         + ["STATEMENT_DELETION #5804", "STATEMENT_DELETION #5998"])
 
 
 
