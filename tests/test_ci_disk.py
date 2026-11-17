@@ -51,11 +51,16 @@ mark="$RUNNER_TEMP/gocache.mark"
 [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
 # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
 entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
-mb() { entries "$@" -exec du -bs {} + | awk '{s += $1} END {printf "%d", s / 1048576}'; }
+# Sizes are find's own numbers, one per line, so no entry name is read as text.
+mb() { { entries "$@" -printf '%s\n'; entries "$@" -type d -exec find {} -mindepth 1 -printf '%s\n' \;; } |
+  awk '{s += $1} END {printf "%d", s / 1048576}'; }
 all=$(mb); used=$(mb -newer "$mark")
 echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
 if [ "$DROP" = true ]; then
-  entries ! -newer "$mark" -exec rm -rf {} +
+  # find walks without following a link, and removes each entry by its name in the directory it
+  # holds open: -delete for a file, rm -rf ./<id>-d run from that directory for an executable's.
+  entries ! -newer "$mark" -type f -delete
+  entries ! -newer "$mark" -type d -execdir rm -rf {} +
   echo "dropped the stale entries; $(mb) MB left to save"
 fi
 """
@@ -244,6 +249,58 @@ class ScriptsTest(unittest.TestCase):
         self.assertTrue((used / "tool").exists())
         self.assertFalse(stale.exists())
         self.assertTrue(other.exists(), "a directory go does not name as an entry was dropped")
+
+    def test_keep_never_follows_a_link_out_of_the_cache(self):
+        # #6059 item 1: go never writes a link into its cache, so a link there is not go's; neither
+        # its target nor anything under it is counted or dropped. Fails if the walk follows links
+        # (find -L), which deleted <outside>/<entry> through the linked hex directory.
+        self.mark()
+        outside = self.t / "outside"
+        old = time.time() - 2 * 86400
+        files = {}
+        for name in ("ef" + "5" * 62 + "-a", "file"):
+            files[name] = outside / name
+        files["exe"] = outside / ("ab" + "6" * 62 + "-d") / "tool"
+        for f in files.values():
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(b"\0" * MB)
+        self.entry("0a" + "1" * 62 + "-a", 2 * MB, 60)
+        links = {self.cache / "ef": outside,
+                 self.cache / "ab" / ("ab" + "7" * 62 + "-a"): files["file"],
+                 self.cache / "ab" / ("ab" + "8" * 62 + "-d"): files["exe"].parent}
+        for link, target in links.items():
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(target)
+        # A real stale executable directory whose file is a link out: the drop removes the link only.
+        held = self.cache / "cd" / ("cd" + "9" * 62 + "-d")
+        held.mkdir(parents=True)
+        (held / "tool").symlink_to(files["exe"])
+        for p in [outside, *outside.rglob("*"), *links, held / "tool", held]:
+            os.utime(p, (old, old), follow_symlinks=False)
+        before = sorted(str(p) for p in outside.rglob("*"))
+        for drop in ("false", "true"):
+            with self.subTest(drop):
+                rc, out = self.run_copy(KEEP_SCRIPT, DROP=drop)
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(sorted(str(p) for p in outside.rglob("*")), before, "the step reached outside the cache")
+                self.assertIn("::notice title=build cache::2 MB of Go build cache, 2 MB of it used by this run, 0 MB stale", out)
+                self.assertTrue(all(link.is_symlink() for link in links))
+                self.assertEqual(held.exists(), drop == "false")
+
+    def test_keep_counts_sizes_whatever_an_entry_is_named(self):
+        # #6059 item 3: the count once read du's text, so a newline in a name added the next line's
+        # number. The sizes now come from find, one number a line, with no name in them.
+        self.mark()
+        odd = self.entry("ab\n10000000000 x", MB, 2 * 86400)
+        self.exe("cd\n20000000000 " + "9" * 62 + "-d", 2 * MB, 2 * 86400)
+        rc, out = self.run_copy(KEEP_SCRIPT)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("::notice title=build cache::3 MB of Go build cache, 0 MB of it used by this run, 3 MB stale", out)
+        rc, out = self.run_copy(KEEP_SCRIPT, DROP="true")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("dropped the stale entries; 0 MB left to save", out)
+        self.assertFalse(odd.exists())
+        self.assertEqual([p for p in self.cache.rglob("*") if not p.is_dir()], [])
 
     def test_keep_fails_without_the_mark_and_passes_with_no_cache(self):
         rc, out = self.run_copy(KEEP_SCRIPT, DROP="true")
