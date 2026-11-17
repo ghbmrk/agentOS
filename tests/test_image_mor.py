@@ -52,8 +52,9 @@ def unit_specifiers(unit):
 def names_held_dir(text, dirs, unit=""):
     """Whether a unit file's text names one of dirs, or a path under it: the path not followed by a
     character that continues a name, through a base specifier, or as a directory setting (continued
-    lines joined, the unit's name specifiers resolved)."""
-    text = text.replace("\\\n", " ")
+    lines joined, the unit's name specifiers resolved). An InaccessiblePaths= line masks the paths it
+    lists, so it names none: the main side's drop-ins (#5818) list every hold dir there."""
+    text = re.sub(r"^[ \t]*InaccessiblePaths[ \t]*=.*$", "", text.replace("\\\n", " "), flags=re.M)
     for spec, base in SPECIFIERS.items():
         text = text.replace(spec, base)
     if any(re.search(re.escape(d) + r"(?![\w.@+~-])", text) for d in dirs):
@@ -170,16 +171,16 @@ class MorUnitTest(unittest.TestCase):
             t = f.read_text()
             self.assertNotIn("/dev/shm", t, f.name)
             unit = f.parent.name[:-2] if f.parent.name.endswith(".d") else f.name
-            if f.name != name and names_held_dir(t, check.MOR_LISTED, unit):
+            if unit not in (name, "agentos-mor.service") and names_held_dir(t, check.MOR_LISTED, unit):
                 writers.add(f.name)
             for key in ("Conflicts", "PropagatesStopTo"):
                 self.assertNotIn(name, words(settings(f), key), f.name)
-        # The writers, each found by its own text: the mor unit's drop-in names the dirs only to leave
-        # them unmasked, the main side's only to mask them.
-        self.assertEqual(writers - {"50-main-side.conf"}, {
+        # The writers, each found by its own text. The clear's own unit and drop-in name the dirs only
+        # to leave them unmasked, and a mask names none.
+        self.assertEqual(writers, {
             "agentos-keeper-pageca.service", "agentos-keeper-enroll.service", "agentos-keeper-enroll.path",
             "agentos-keeper-setup@.service", "agentos-keeper-link-capture.service"})
-        for w in writers - {"50-main-side.conf"}:
+        for w in writers:
             with self.subTest(w):
                 if w.endswith(".path"):
                     continue  # writes nothing; it starts enrollment, which is listed
@@ -213,6 +214,7 @@ class MorUnitTest(unittest.TestCase):
             "ExecStart=/bin/sh -c 'cat /run/agentos-setup*'\n",
             'ExecStart=/bin/sh -c "d=${D:-/run/agentos-setup}"\n',
             "RuntimeDirectory=agentos-x \\\n  agentos-setup\n",
+            "InaccessiblePaths=/var/lib/x\nReadWritePaths=/run/agentos-setup\n",
         ]
         for t in named:
             with self.subTest(t):
@@ -240,6 +242,9 @@ class MorUnitTest(unittest.TestCase):
             "StateDirectory=agentos-setup\n",
             "CacheDirectory=agentos-link-capture\n",
             "# Not RuntimeDirectory=agentos-setup: a comment writes nothing\n",
+            "InaccessiblePaths=/run/agentos-setup\n",
+            "InaccessiblePaths=-/var/lib/x /run/agentos-setup /run/agentos-link-capture\n",
+            "  InaccessiblePaths = /var/lib/x \\\n  /run/agentos-setup\n",
         ]
         for t in apart:
             with self.subTest(t):
