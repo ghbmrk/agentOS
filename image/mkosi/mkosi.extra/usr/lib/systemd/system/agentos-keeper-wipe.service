@@ -1,0 +1,37 @@
+# MOR-setup-factors (#5843, HW-8): the stop empties the /run directories agentos-mor's clear refuses
+# on (holdDirs: /run/agentos-setup, /run/agentos-link-capture), so an orderly shutdown between the
+# Owner Card confirm and a successful enrollment, or after a failed one, still clears MOR. Their files
+# (the card's two factors from agentos-keeper-setup@.service, the staged page authority, the first
+# edge's capture, and any hidden temporary a writer killed mid-write left) have no stop of their own;
+# enrollment removes them only on success and keeps them for a retry. A reboot discards them anyway
+# (tmpfs) and starts the card over, so nothing is lost that the next boot had kept. The unit holds no
+# process. It keeps default dependencies, so it stops before agentos-mor.service's clear, and is ordered
+# before every unit that writes there, so it stops after each of them (setup@ names it in After=, since
+# Before= cannot name a template's instances); tests/test_image_mor.py holds both. An isolate leaves it
+# active and a manual stop is refused, so the staged authority a printed card names stays until shutdown.
+[Unit]
+Description=agentOS setup files' removal at shutdown
+Before=agentos-keeper-pageca.service agentos-keeper-enroll.service agentos-keeper-link-capture.service
+IgnoreOnIsolate=yes
+RefuseManualStop=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStop=/usr/bin/find /run/agentos-setup /run/agentos-link-capture -xdev -mindepth 1 -delete
+StandardError=journal+console
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+# No device but the standard pseudo-devices, and no TPM (#2889).
+DevicePolicy=closed
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr
+
+[Install]
+# Whenever a writer starts, in any target, and at every boot to multi-user.
+WantedBy=multi-user.target agentos-keeper-pageca.service agentos-keeper-enroll.service agentos-keeper-link-capture.service
