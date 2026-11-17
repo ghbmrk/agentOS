@@ -396,11 +396,16 @@ jobs:
           [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
           # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
           entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
-          mb() { entries "$@" -exec du -bs {} + | awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          # Sizes are find's own numbers, one per line, so no entry name is read as text.
+          mb() { { entries "$@" -printf '%s\n'; entries "$@" -type d -exec find {} -mindepth 1 -printf '%s\n' \;; } |
+            awk '{s += $1} END {printf "%d", s / 1048576}'; }
           all=$(mb); used=$(mb -newer "$mark")
           echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
           if [ "$DROP" = true ]; then
-            entries ! -newer "$mark" -exec rm -rf {} +
+            # find walks without following a link, and removes each entry by its name in the directory it
+            # holds open: -delete for a file, rm -rf ./<id>-d run from that directory for an executable's.
+            entries ! -newer "$mark" -type f -delete
+            entries ! -newer "$mark" -type d -execdir rm -rf {} +
             echo "dropped the stale entries; $(mb) MB left to save"
           fi
       - name: Go build cache upload (main only; CI-PATHS)
@@ -566,11 +571,16 @@ jobs:
           [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
           # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
           entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
-          mb() { entries "$@" -exec du -bs {} + | awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          # Sizes are find's own numbers, one per line, so no entry name is read as text.
+          mb() { { entries "$@" -printf '%s\n'; entries "$@" -type d -exec find {} -mindepth 1 -printf '%s\n' \;; } |
+            awk '{s += $1} END {printf "%d", s / 1048576}'; }
           all=$(mb); used=$(mb -newer "$mark")
           echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
           if [ "$DROP" = true ]; then
-            entries ! -newer "$mark" -exec rm -rf {} +
+            # find walks without following a link, and removes each entry by its name in the directory it
+            # holds open: -delete for a file, rm -rf ./<id>-d run from that directory for an executable's.
+            entries ! -newer "$mark" -type f -delete
+            entries ! -newer "$mark" -type d -execdir rm -rf {} +
             echo "dropped the stale entries; $(mb) MB left to save"
           fi
       - name: Go build cache upload (main only; CI-PATHS)
@@ -904,11 +914,16 @@ jobs:
           [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
           # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
           entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
-          mb() { entries "$@" -exec du -bs {} + | awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          # Sizes are find's own numbers, one per line, so no entry name is read as text.
+          mb() { { entries "$@" -printf '%s\n'; entries "$@" -type d -exec find {} -mindepth 1 -printf '%s\n' \;; } |
+            awk '{s += $1} END {printf "%d", s / 1048576}'; }
           all=$(mb); used=$(mb -newer "$mark")
           echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
           if [ "$DROP" = true ]; then
-            entries ! -newer "$mark" -exec rm -rf {} +
+            # find walks without following a link, and removes each entry by its name in the directory it
+            # holds open: -delete for a file, rm -rf ./<id>-d run from that directory for an executable's.
+            entries ! -newer "$mark" -type f -delete
+            entries ! -newer "$mark" -type d -execdir rm -rf {} +
             echo "dropped the stale entries; $(mb) MB left to save"
           fi
       - name: Go build cache upload (main only; CI-PATHS)
