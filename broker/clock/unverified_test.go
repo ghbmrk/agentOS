@@ -540,12 +540,13 @@ func TestTIM1FarAnchorHolds(t *testing.T) {
 	}
 }
 
-func TestTIM1SavedNTSSyncAheadOfTheBootClockIsRefused(t *testing.T) {
-	// #5929: a saved NTS sync the boot clock has not reached yet is a
-	// corrupt or tampered file: a restart drops it, as it does such a
-	// carrier reading, so it authenticates nothing. The same sync at the
-	// boot clock's own reading still does.
-	for _, ahead := range []time.Duration{0, time.Minute} {
+func TestTIM1SavedNTSSyncOutsideTheBootClockIsRefused(t *testing.T) {
+	// #5929, #5934: a saved NTS sync the boot clock has not reached yet, or
+	// one before the boot (which would lengthen the time since it and so
+	// widen the allowance), is a corrupt or tampered file: a restart drops
+	// it, as it does such a carrier reading, so it authenticates nothing.
+	// The same sync at the boot clock's own reading still does.
+	for _, ahead := range []time.Duration{0, time.Minute, -time.Nanosecond} {
 		path := filepath.Join(t.TempDir(), "clock.json")
 		r := newRig()
 		r.carrier = time.Time{}
@@ -573,6 +574,36 @@ func TestTIM1SavedNTSSyncAheadOfTheBootClockIsRefused(t *testing.T) {
 		g = r.guard(t, edit)
 		if s := g.Check(bg); s.Authenticated != (ahead == 0) {
 			t.Fatalf("ahead %v: status = %+v", ahead, s)
+		}
+	}
+}
+
+func TestTIM1SavedCarrierBeforeTheBootIsNotCarried(t *testing.T) {
+	// #5934: a saved carrier reading from a boot-clock reading before the
+	// boot would be carried forward later than it was taken, widening the
+	// interval, so a restart drops it; one taken at the boot is carried.
+	r := newRig()
+	path := filepath.Join(t.TempDir(), "clock.json")
+	edit := func(c *Config) {
+		c.StatePath = path
+		c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
+	}
+	g := r.guard(t, edit)
+	r.advance(time.Hour)
+	g.Check(bg)
+	g.Flush()
+	for _, at := range []time.Duration{0, -time.Nanosecond} {
+		v := readSaved(t, path)
+		v.CarrierMono = at
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if g := r.guard(t, edit); g.carrier.IsZero() != (at < 0) {
+			t.Fatalf("saved carrier at boot clock %v: carried %v at %v", at, g.carrier, g.carrierMono)
 		}
 	}
 }
