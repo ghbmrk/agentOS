@@ -634,3 +634,38 @@ func TestTIM1SavedCarrierBeforeTheBootIsNotCarried(t *testing.T) {
 		}
 	}
 }
+
+func TestTIM1SavedAnchorOutsideTheBootClockIsRefused(t *testing.T) {
+	// #6026: a saved anchor before the boot or one the boot clock has not
+	// reached yet is a corrupt or tampered file: a restart drops it, so it
+	// cannot move the hold decision; one at either end is kept.
+	r := newRig()
+	path := filepath.Join(t.TempDir(), "clock.json")
+	edit := func(c *Config) {
+		c.StatePath = path
+		c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
+	}
+	r.carrier = time.Time{}
+	g := r.guard(t, edit)
+	r.advance(time.Hour)
+	g.Check(bg)
+	g.Flush()
+	for _, at := range []time.Duration{0, -time.Nanosecond, time.Hour, time.Hour + time.Nanosecond, 2 * time.Hour} {
+		v := readSaved(t, path)
+		v.AnchorMono = at
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		g := r.guard(t, edit)
+		if g.anchored != (0 <= at && at <= time.Hour) {
+			t.Fatalf("saved anchor at boot clock %v: anchored %v", at, g.anchored)
+		}
+		if s := g.Check(bg); at > time.Hour && s.State != NetworkOnly {
+			t.Fatalf("saved anchor at boot clock %v: status = %+v", at, s)
+		}
+	}
+}
