@@ -9,6 +9,7 @@ package version fails until its source is read again; malformed, empty, repeated
 entries are refused, and every refusal points at the records' reach note."""
 # REQ: EVL-5
 import contextlib
+import errno
 import fnmatch
 import importlib.util
 import io
@@ -20,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "image"))
@@ -498,6 +500,109 @@ class RefusalsTest(unittest.TestCase):
             for name, part in (("pull_request", pr), ("push", push)):
                 with self.subTest(guest=g, on=name):
                     self.assertIn('      - "guest/%s/**"\n' % g, part)
+
+
+class ReadErrorTest(unittest.TestCase):
+    """IMG-offline-verity-follow (#5988): a /usr block dm-verity refuses reads as EIO, and a file whose
+    first block reads so fails the run instead of being skipped as not ELF."""
+
+    def eio_on(self, target):
+        real = open
+
+        def fake(path, *a, **k):
+            if os.fspath(path) == target:
+                raise OSError(errno.EIO, os.strerror(errno.EIO), path)
+            return real(path, *a, **k)
+        return mock.patch.object(sweep, "open", fake, create=True)
+
+    def test_eio_fails_the_run_naming_the_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "bin")
+            pathlib.Path(f).write_bytes(b"\x7fELF" + b"\0" * 60)
+            with self.eio_on(f), self.assertRaises(SystemExit) as cm:
+                sweep.is_elf(f)
+        self.assertIn("cannot read %s" % f, str(cm.exception))
+        self.assertIn(os.strerror(errno.EIO), str(cm.exception))
+
+    def test_eio_in_the_walk_fails_the_tree(self):
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "usr/bin").mkdir(parents=True)
+            f = os.path.join(d, "usr/bin/tampered")
+            pathlib.Path(f).write_bytes(b"\x7fELF" + b"\0" * 60)
+            pathlib.Path(d, "usr/bin/text").write_text("not elf\n")
+            with self.eio_on(f), self.assertRaises(SystemExit):
+                sweep.run_tree(d)
+
+    def test_eio_on_a_directory_fails_the_run_naming_it(self):
+        # A directory block refused by dm-verity: os.walk would drop the subtree and the scan pass smaller.
+        real = os.scandir
+
+        def fake(path=".", *a, **k):
+            if os.fspath(path).endswith("/usr/bin"):
+                raise OSError(errno.EIO, os.strerror(errno.EIO), path)
+            return real(path, *a, **k)
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "usr/bin").mkdir(parents=True)
+            pathlib.Path(d, "usr/bin/tampered").write_bytes(b"\x7fELF" + b"\0" * 60)
+            with mock.patch.object(os, "scandir", fake), self.assertRaises(SystemExit) as cm:
+                sweep.run_tree(d)
+        self.assertIn("cannot read %s: %s" % (os.path.join(d, "usr/bin"), os.strerror(errno.EIO)),
+                      str(cm.exception))
+
+    def test_eio_on_an_initrd_directory_fails_the_build(self):
+        real = os.scandir
+
+        def fake(path=".", *a, **k):
+            if os.fspath(path).endswith("/initrd"):
+                raise OSError(errno.EIO, os.strerror(errno.EIO), path)
+            return real(path, *a, **k)
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "initrd").mkdir()
+            built = mock.patch.dict(sys.modules, offline_systemd=mock.Mock(
+                built_tree=lambda out, v: (d, None, None, lambda: None)))
+            with built, mock.patch.object(sweep, "run_tree", lambda root, usr: {}), \
+                    mock.patch.object(os, "scandir", fake), self.assertRaises(SystemExit) as cm:
+                sweep.run_build(d, "v")
+        self.assertIn("cannot read %s" % os.path.join(d, "initrd"), str(cm.exception))
+
+    def initrd_build(self, d):
+        """run_build over D's initrd directory alone, with its places' records as {name: path}."""
+        built = mock.patch.dict(sys.modules, offline_systemd=mock.Mock(
+            built_tree=lambda out, v: (d, None, None, lambda: None)))
+        with built, mock.patch.object(sweep, "run_tree", lambda root, usr: {}), \
+                mock.patch.object(sweep, "initrd_place", lambda p, scratch: os.fspath(p)):
+            return sweep.run_build(d, "v")
+
+    def test_a_stat_error_on_an_initrd_entry_fails_the_build(self):
+        # #6073: Path.is_file() read a symlink loop (or EIO) as "not a file" and skipped the initrd.
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "initrd").mkdir()
+            loop = pathlib.Path(d, "initrd", "loop")
+            loop.symlink_to("loop")
+            with self.assertRaises(SystemExit) as cm:
+                self.initrd_build(d)
+        self.assertIn("cannot read %s: %s" % (loop, os.strerror(errno.ELOOP)), str(cm.exception))
+
+    def test_initrd_entries_read_only_regular_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            i = pathlib.Path(d) / "initrd"
+            (i / "sub").mkdir(parents=True)
+            (i / "sub" / "main.img").write_bytes(b"x")
+            (i / "link.img").symlink_to("sub/main.img")
+            (i / "gone.img").symlink_to("nowhere")
+            os.mkfifo(i / "fifo")
+            got = self.initrd_build(d)
+        self.assertEqual(got, {"initrd:link.img": str(i / "link.img"), "initrd:sub/main.img": str(i / "sub/main.img")})
+
+    def test_vanished_short_and_plain_files_are_not_elf(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertFalse(sweep.is_elf(os.path.join(d, "gone")))
+            pathlib.Path(d, "short").write_bytes(b"\x7fE")
+            self.assertFalse(sweep.is_elf(os.path.join(d, "short")))
+            pathlib.Path(d, "text").write_text("#!/bin/sh\n")
+            self.assertFalse(sweep.is_elf(os.path.join(d, "text")))
+            pathlib.Path(d, "elf").write_bytes(b"\x7fELF")
+            self.assertTrue(sweep.is_elf(os.path.join(d, "elf")))
 
 
 if __name__ == "__main__":

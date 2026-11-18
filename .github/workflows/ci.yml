@@ -104,9 +104,11 @@ jobs:
           sudo chroot "$RUNNER_TEMP/image-tools" dpkg-query -W systemd kmod
       - name: The keyring check refuses an altered, a missing and an extra key (IMG-keyring-pin, #5578)
         if: steps.scope.outputs.records != 'true'
-        # The committed list passes on the runner's keyring; three copies of the check, each with
-        # its list changed, must fail on it: a pinned fingerprint altered, a pinned key dropped (the
-        # keyring then holds a key not pinned), and a key added (a pinned key is then missing).
+        # The committed list passes on the runner's keyrings; three copies of the check, each with
+        # its list changed, must fail on them: a pinned fingerprint altered, a pinned key dropped (the
+        # keyring then holds a key not pinned), and a key added (a pinned key is then missing). The
+        # first fingerprint is the 12/bookworm archive key, pinned in its own keyring (which the
+        # sources name, #5954) and in the whole one.
         run: |
           k=image/debian-archive-keyring.sh d=$RUNNER_TEMP/keyring-check
           sh "$k"
@@ -396,11 +398,17 @@ jobs:
           [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
           # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
           entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
-          mb() { entries "$@" -exec du -bs {} + | awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          # Sizes are find's own numbers, one per line, so no entry name is read as text; a -d directory's
+          # files are counted from the directory find holds open, as the drop removes them.
+          mb() { { entries "$@" -printf '%s\n'; entries "$@" -type d -execdir find {} -mindepth 1 -printf '%s\n' \;; } |
+            awk '{s += $1} END {printf "%d", s / 1048576}'; }
           all=$(mb); used=$(mb -newer "$mark")
           echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
           if [ "$DROP" = true ]; then
-            entries ! -newer "$mark" -exec rm -rf {} +
+            # find walks without following a link, and removes each entry by its name in the directory it
+            # holds open: -delete for a file, rm -rf ./<id>-d run from that directory for an executable's.
+            entries ! -newer "$mark" -type f -delete
+            entries ! -newer "$mark" -type d -execdir rm -rf {} +
             echo "dropped the stale entries; $(mb) MB left to save"
           fi
       - name: Go build cache upload (main only; CI-PATHS)
@@ -566,11 +574,17 @@ jobs:
           [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
           # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
           entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
-          mb() { entries "$@" -exec du -bs {} + | awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          # Sizes are find's own numbers, one per line, so no entry name is read as text; a -d directory's
+          # files are counted from the directory find holds open, as the drop removes them.
+          mb() { { entries "$@" -printf '%s\n'; entries "$@" -type d -execdir find {} -mindepth 1 -printf '%s\n' \;; } |
+            awk '{s += $1} END {printf "%d", s / 1048576}'; }
           all=$(mb); used=$(mb -newer "$mark")
           echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
           if [ "$DROP" = true ]; then
-            entries ! -newer "$mark" -exec rm -rf {} +
+            # find walks without following a link, and removes each entry by its name in the directory it
+            # holds open: -delete for a file, rm -rf ./<id>-d run from that directory for an executable's.
+            entries ! -newer "$mark" -type f -delete
+            entries ! -newer "$mark" -type d -execdir rm -rf {} +
             echo "dropped the stale entries; $(mb) MB left to save"
           fi
       - name: Go build cache upload (main only; CI-PATHS)
@@ -888,11 +902,17 @@ jobs:
           [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
           # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
           entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
-          mb() { entries "$@" -exec du -bs {} + | awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          # Sizes are find's own numbers, one per line, so no entry name is read as text; a -d directory's
+          # files are counted from the directory find holds open, as the drop removes them.
+          mb() { { entries "$@" -printf '%s\n'; entries "$@" -type d -execdir find {} -mindepth 1 -printf '%s\n' \;; } |
+            awk '{s += $1} END {printf "%d", s / 1048576}'; }
           all=$(mb); used=$(mb -newer "$mark")
           echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
           if [ "$DROP" = true ]; then
-            entries ! -newer "$mark" -exec rm -rf {} +
+            # find walks without following a link, and removes each entry by its name in the directory it
+            # holds open: -delete for a file, rm -rf ./<id>-d run from that directory for an executable's.
+            entries ! -newer "$mark" -type f -delete
+            entries ! -newer "$mark" -type d -execdir rm -rf {} +
             echo "dropped the stale entries; $(mb) MB left to save"
           fi
       - name: Go build cache upload (main only; CI-PATHS)

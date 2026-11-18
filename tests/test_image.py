@@ -2506,12 +2506,14 @@ class ConfigTest(unittest.TestCase):
                 cur.append((m[1], m[2]))
         if cur:
             stanzas.append(cur)
-        keyring = ("Signed-By", "/usr/share/keyrings/debian-archive-keyring.gpg")
+        # Each stanza's keyring holds only the key that signs it (IMG-keyring-minimal, #5954).
+        archive = ("Signed-By", "/usr/share/keyrings/debian-archive-bookworm-automatic.gpg")
+        security = ("Signed-By", "/usr/share/keyrings/debian-archive-bookworm-security-automatic.gpg")
         self.assertEqual(stanzas, [
             [("Types", "deb"), ("URIs", mirror), ("Suites", "trixie trixie-updates"), ("Components", "main"),
-             keyring, ("Check-Valid-Until", "no")],
+             archive, ("Check-Valid-Until", "no")],
             [("Types", "deb"), ("URIs", "http://security.debian.org/debian-security"), ("Suites", "trixie-security"),
-             ("Components", "main"), keyring],
+             ("Components", "main"), security],
         ], why)
 
     def test_snapshot_fetch_retries_a_mirror_outage(self):
