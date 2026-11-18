@@ -337,6 +337,10 @@ class BusDaemonTest(unittest.TestCase):
                 ("dbus@.socket", "[Socket]\nListenStream=127.0.0.1:5555\nService=dbus${X}.service\n"),
                 ("socket.d/50-x.conf", "[Socket]\nService=dbus.service\n"),
                 ("foo-.socket.d/50-x.conf", "[Socket]\nService=dbus.service\n"),
+                # #6109: another unit's drop-in that names the bus unit is not the bus unit's own, so the
+                # exemption is the exact dbus.socket.d / dbus.service.d directory, not a "dbus" prefix.
+                ("dbusx.socket.d/50-x.conf", "[Socket]\nService=dbus.service\n"),
+                ("dbusx.service.d/50-x.conf", "[Service]\nSockets=dbus.socket\n"),
                 ("foo.service", "[Service]\nExecStart=/usr/bin/true\nSockets=dbus.socket\n"),
                 ("service.d/50-x.conf", "[Service]\nSockets=foo.socket %N.socket\n")):
             with self.subTest(rel):
