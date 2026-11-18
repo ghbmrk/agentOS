@@ -95,3 +95,23 @@ func TestStopNearMiss(t *testing.T) {
 		}
 	}
 }
+
+// REQ: CH-12. The request-ID grammar's edges: a bare YES is no answer,
+// UNDO takes the letters A-Z and digits 0-9 at both ends of each range,
+// and any other character, a non-ASCII letter included, makes it no
+// command (mutgate on #6136).
+func TestRequestIDGrammarEdges(t *testing.T) {
+	if c := Parse("YES"); c.Word == WordYes {
+		t.Fatalf("bare YES parsed as %s", c.Word)
+	}
+	for _, id := range []string{"A", "Z", "0", "9", "A9Z"} {
+		if c := Parse("UNDO " + id); c.Word != WordUndo || len(c.Args) != 1 || c.Args[0] != id {
+			t.Errorf("UNDO %s = %s %q", id, c.Word, c.Args)
+		}
+	}
+	for _, id := range []string{"A-1", "A@B", "1/2", "Z[A", "9:1", "É", "Ж1"} {
+		if c := Parse("UNDO " + id); c.Word == WordUndo {
+			t.Errorf("UNDO %s parsed as UNDO %q", id, c.Args)
+		}
+	}
+}
