@@ -89,10 +89,12 @@ def nodump(root):
 # The image's noexec mounts (UPD-10): its fstab and /tmp drop-in, copied from mkosi.extra into every
 # tree nodump() makes, since the tree check refuses a tree without them.
 NOEXEC_FILES = ("etc/fstab", "usr/lib/systemd/system/tmp.mount.d/50-agentos-noexec.conf")
+# The journal on disk (#6078), which the tree check also refuses a tree without.
+JOURNAL_FILES = ("usr/lib/systemd/journald.conf.d/50-agentos-persist.conf",)
 
 
 def noexec(root):
-    for rel in NOEXEC_FILES + MAIN_SIDE_FILES:
+    for rel in NOEXEC_FILES + MAIN_SIDE_FILES + JOURNAL_FILES:
         write(root, rel, (MK / "mkosi.extra" / rel).read_text())
 
 
@@ -2504,12 +2506,14 @@ class ConfigTest(unittest.TestCase):
                 cur.append((m[1], m[2]))
         if cur:
             stanzas.append(cur)
-        keyring = ("Signed-By", "/usr/share/keyrings/debian-archive-keyring.gpg")
+        # Each stanza's keyring holds only the key that signs it (IMG-keyring-minimal, #5954).
+        archive = ("Signed-By", "/usr/share/keyrings/debian-archive-bookworm-automatic.gpg")
+        security = ("Signed-By", "/usr/share/keyrings/debian-archive-bookworm-security-automatic.gpg")
         self.assertEqual(stanzas, [
             [("Types", "deb"), ("URIs", mirror), ("Suites", "trixie trixie-updates"), ("Components", "main"),
-             keyring, ("Check-Valid-Until", "no")],
+             archive, ("Check-Valid-Until", "no")],
             [("Types", "deb"), ("URIs", "http://security.debian.org/debian-security"), ("Suites", "trixie-security"),
-             ("Components", "main"), keyring],
+             ("Components", "main"), security],
         ], why)
 
     def test_snapshot_fetch_retries_a_mirror_outage(self):
@@ -2570,10 +2574,10 @@ class ConfigTest(unittest.TestCase):
         # config (mkosi.conf.d/, mkosi.local.conf, mkosi.images/, mkosi.packages/, mkosi.pkgmngr.tar),
         # so both config folders' mkosi.* names are pinned.
         self.assertEqual(sorted(n for n in os.listdir(MK) if n.startswith("mkosi.")), [
-            "mkosi.conf", "mkosi.extra", "mkosi.finalize", "mkosi.pkgmngr", "mkosi.postinst",
+            "mkosi.conf", "mkosi.configure", "mkosi.extra", "mkosi.finalize", "mkosi.pkgmngr", "mkosi.postinst",
             "mkosi.repart"], why)
         self.assertEqual(sorted(n for n in os.listdir(MK / "initrd") if n.startswith("mkosi.")),
-                         ["mkosi.conf", "mkosi.finalize", "mkosi.postinst"], why)
+                         ["mkosi.conf", "mkosi.configure", "mkosi.finalize", "mkosi.postinst"], why)
         # The two configs are held to one strict form, so this test never models mkosi's parser:
         # a non-blank line is a column-0 "#" comment, a column-0 [Section], a column-0 Key=value
         # (no "@", no space before "="), or an indented continuation while a setting is open (a
@@ -5111,11 +5115,11 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
             refused = check.unit_made_refusals(t)
         self.assertEqual(out, [])
         self.assertEqual(refused, [])
-        # Pinned: the eight agentos entries SERVICE_DIRS no longer lists, and the two root units' own.
+        # Pinned: the eight agentos entries SERVICE_DIRS no longer lists, the two root units' own, and the wipe's record (#6094).
         self.assertEqual(sorted(made), sorted((
             "var/lib/agentos-localui", "var/lib/agentos-egress", "run/agentos-egress", "run/agentos-localui",
             "run/agentos-mail", "run/agentos-link", "run/agentos-camera", "run/agentos-homekit",
-            "var/lib/agentos-store", "var/lib/agentos/modem")))
+            "var/lib/agentos-store", "var/lib/agentos/modem", "var/lib/agentos-wipe")))
 
 
 class ReferenceToolTest(unittest.TestCase):

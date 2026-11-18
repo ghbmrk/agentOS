@@ -1,4 +1,4 @@
-"""Assert S7 boot facts from a QEMU serial log (lines printed by mkosi.extra/usr/lib/s7/probe.sh)."""
+"""Assert S7 boot facts from a QEMU serial log (lines printed by the retired image's probe unit)."""
 import re
 import sys
 

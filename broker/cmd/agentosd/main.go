@@ -599,6 +599,8 @@ func main() {
 	// loop settings get fixed replies (#2781); FORGET's names the page's
 	// Forget step when the page serves it (-passkey-rp-id, D-284).
 	openLearnState(learnDir, &cfg, passkeyRPID != "")
+	// A failed shutdown wipe is told in STATUS (MOR-wipe-owner, #6094).
+	cfg.Notes = append(cfg.Notes, wipeNote(wipeFailed))
 	// Intents left open for the deleted change, loops, forget and recall
 	// executors settle as not applied (NL-8).
 	registerRetired(&cfg)

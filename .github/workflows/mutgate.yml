@@ -22,7 +22,8 @@ name: mutgate
 # broker/core/core.txt (the tier list risk_tier reads) with the base commit's before running
 # them, and `mutgate` reruns `run`'s checks on the artifact with `verify` (#4106), which builds the
 # base's statement lister (standard library only) to recount the deletion sites (#4602).
-# The body is the event's: a waiver added to the body later counts from the next push.
+# The body is the event's: a waiver added to the body later counts from the next push, as a failure says,
+# naming that push's head (#6077; the reasons the gate does not read the current body are in that PR).
 on:
   pull_request:
 permissions:
@@ -359,6 +360,8 @@ jobs:
         env:
           RESULTS: ${{ runner.temp }}/mutants
           PR_BODY: ${{ github.event.pull_request.body }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
-          python3 -I tools/mutgate.py verify "$RESULTS" --git "$BASE" --body "$RUNNER_TEMP/pr-body.md" --summary "$GITHUB_STEP_SUMMARY"
+          python3 -I tools/mutgate.py verify "$RESULTS" --git "$BASE" --body "$RUNNER_TEMP/pr-body.md" --body-from "$PR_HEAD" \
+            --summary "$GITHUB_STEP_SUMMARY"
