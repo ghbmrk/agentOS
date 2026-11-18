@@ -39,15 +39,19 @@ Exit status: 0 the host is as it was, 1 a difference HW-8 does not allow,
 import argparse
 import atexit
 import base64
+import ctypes
+import ctypes.util
 import functools
 import hashlib
 import json
+import math
 import os
 import pathlib
 import re
 import secrets
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -60,6 +64,7 @@ KINDS = ("disk", "uefi", "tpm-nv", "tpm-persistent", "tpm-setting")
 EFI_NON_VOLATILE = 0x1
 NV_OWNERREAD, NV_READLOCKED, NV_WRITTEN = 1 << 17, 1 << 28, 1 << 29
 RTC_DEVICE = "/sys/class/rtc/rtc0/since_epoch"
+RTC_BASELINE_FLOOR = 60.0  # seconds: the baseline RTC must be this far from true time (rtc_offset_findings)
 RTC_TOLERANCE = 2.0  # seconds: sysfs edge and SNTP error plus a session's drift at tens of ppm
 NTP_EPOCH = 2208988800  # 1900-01-01 to 1970-01-01, in seconds
 STA_UNSYNC = 0x40
@@ -308,29 +313,48 @@ def tpm_snapshot(tcti):
     return {"tpm-nv": nv, "tpm-persistent": persistent, "tpm-setting": settings}
 
 
-def to_ntp(t):
-    secs = int(t)
-    return ((secs + NTP_EPOCH) & 0xFFFFFFFF).to_bytes(4, "big") + int((t - secs) * (1 << 32)).to_bytes(4, "big")
-
-
 def from_ntp(b):
     return int.from_bytes(b[:4], "big") - NTP_EPOCH + int.from_bytes(b[4:8], "big") / (1 << 32)
+
+
+def parse_server(server):
+    """HOST, HOST:PORT, [IPV6] or [IPV6]:PORT; a bare IPv6 literal takes port 123."""
+    m = re.fullmatch(r"\[([^\]]+)\](?::(.*))?", server)
+    if m:
+        host, port = m.group(1), m.group(2)
+    elif server.count(":") == 1:
+        host, port = server.split(":")
+    else:
+        host, port = server, None
+    if not host or "[" in host or "]" in host:
+        raise HostcheckError(f"--rtc-reference {server!r} names no host")
+    if port is None:
+        return host, 123
+    if not port.isdigit() or not 0 < int(port) < 65536:
+        raise HostcheckError(f"--rtc-reference {server!r} has no valid port")
+    return host, int(port)
 
 
 def sntp_offset(server, port=123, timeout=5.0, tries=3):
     """The server's time less this system's, from one SNTP exchange (RFC 4330).
     Query only: this system's clock is never set. The reply must echo the
-    request's transmit time, so a stray or replayed packet is refused."""
+    request's random transmit field, which refuses an off-path forgery only:
+    the server, or anyone on the path, can echo it with any time
+    (tools/ASSUMPTIONS.md HOST-1e2b1-rtc-offset)."""
+    try:
+        family, _, _, _, addr = socket.getaddrinfo(server, port, type=socket.SOCK_DGRAM)[0]
+    except OSError as e:
+        raise HostcheckError(f"cannot resolve the SNTP server {server}: {e}")
     last = None
     for _ in range(tries):
-        with socket.socket(socket.AF_INET6 if ":" in server else socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        with socket.socket(family, socket.SOCK_DGRAM) as sock:
             sock.settimeout(timeout)
             t1 = time.time()
             req = bytearray(48)
             req[0] = (4 << 3) | 3  # version 4, client
             req[40:48] = secrets.token_bytes(8)  # a nonce in the transmit field, echoed back
             try:
-                sock.sendto(bytes(req), (server, port))
+                sock.sendto(bytes(req), addr)
                 data, _ = sock.recvfrom(512)
             except OSError as e:
                 last = e
@@ -342,6 +366,8 @@ def sntp_offset(server, port=123, timeout=5.0, tries=3):
             raise HostcheckError(f"SNTP reply from {server} does not echo the request (originate time)")
         if data[0] & 7 != 4:
             raise HostcheckError(f"SNTP reply from {server} has mode {data[0] & 7}, not 4 (server)")
+        if data[0] >> 6 == 3:
+            raise HostcheckError(f"SNTP reply from {server} has leap indicator 3 (alarm: the server is unsynchronised)")
         if not 1 <= data[1] <= 15:
             raise HostcheckError(f"SNTP reply from {server} has stratum {data[1]} (unsynchronised or kiss-o'-death)")
         t2, t3 = from_ntp(data[32:40]), from_ntp(data[40:48])
@@ -349,17 +375,41 @@ def sntp_offset(server, port=123, timeout=5.0, tries=3):
     raise HostcheckError(f"no SNTP reply from {server}:{port} after {tries} tries: {last}")
 
 
-def kernel_clock_synced():
+class Timex(ctypes.Structure):
+    """The head of Linux's struct timex (include/uapi/linux/timex.h), up to status."""
+    _fields_ = [("modes", ctypes.c_uint), ("offset", ctypes.c_long), ("freq", ctypes.c_long),
+                ("maxerror", ctypes.c_long), ("esterror", ctypes.c_long), ("status", ctypes.c_int)]
+
+
+TIME_ERROR = 5
+STA_CLOCKERR = 0x1000
+
+
+def timex_synced(raw, ret):
+    """Decode adjtimex's answer: RAW, the struct timex bytes, and RET, its return
+    value. Synchronised means STA_UNSYNC clear. The kernel returns TIME_ERROR
+    exactly when STA_UNSYNC or STA_CLOCKERR is set, so a status that disagrees
+    with RET means the bytes were not decoded as the kernel wrote them."""
+    if struct.calcsize("P") != 8 or Timex.status.offset != 40:
+        raise HostcheckError("the struct timex decode is checked only on a 64-bit Linux; "
+                             "use a 64-bit third system")
+    status = Timex.from_buffer_copy(raw[:ctypes.sizeof(Timex)]).status
+    if bool(status & (STA_UNSYNC | STA_CLOCKERR)) != (ret == TIME_ERROR):
+        raise HostcheckError(f"adjtimex returned {ret} with status {status:#x}: the decode does not match the kernel's")
+    return not status & STA_UNSYNC
+
+
+def kernel_clock_synced(adjtimex=None):
     """Whether this kernel counts its clock as synchronised (STA_UNSYNC clear).
     While it does, the kernel copies its clock into the RTC every 11 minutes."""
-    import ctypes
-    import ctypes.util
-    libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
-    buf = ctypes.create_string_buffer(512)  # struct timex, modes 0: read only
-    if libc.adjtimex(buf) < 0:
+    if adjtimex is None:
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+        adjtimex = libc.adjtimex
+    buf = ctypes.create_string_buffer(512)  # struct timex; modes 0: read only
+    ret = adjtimex(buf)
+    if ret < 0:
         raise HostcheckError(f"adjtimex failed: {os.strerror(ctypes.get_errno())}")
-    status = int.from_bytes(buf.raw[40:44], sys.byteorder)  # after modes (padded) and four longs
-    return not status & STA_UNSYNC
+    return timex_synced(buf.raw, ret)
 
 
 def rtc_at_edge(read, now, sleep=time.sleep, limit=2.5):
@@ -381,8 +431,7 @@ def rtc_snapshot(server, device=RTC_DEVICE):
     if kernel_clock_synced():
         raise HostcheckError("this system's kernel clock is synchronised, so it writes the RTC every 11 minutes; "
                              "stop its NTP client (timesyncd, chrony) and reboot it before snapshotting")
-    host, port = server.split(":") if server.count(":") == 1 else (server, "123")  # an IPv6 literal takes 123
-    ntp = sntp_offset(host, int(port))
+    ntp = sntp_offset(*parse_server(server))
     dev = pathlib.Path(device)
     value, at = rtc_at_edge(dev.read_text, time.time)
     reference = at + ntp
@@ -443,15 +492,26 @@ def _matches(rule, f, flags):
     return True
 
 
-def rtc_offset_change(before, after, tolerance):
+def rtc_offset_findings(before, after, tolerance):
+    """The RTC offset's findings. A write that sets the RTC to true time moves
+    the offset only if the RTC was away from true time at the baseline, so a
+    baseline within RTC_BASELINE_FLOOR of true time is itself flagged: the
+    operator sets the RTC wrong in firmware setup and takes the baseline again."""
+    if not (math.isfinite(tolerance) and tolerance >= 0):
+        raise HostcheckError(f"the RTC tolerance must be a finite number of seconds, at least 0, not {tolerance}")
     b, a = before.get("rtc"), after.get("rtc")
     if b is None and a is None:
-        return None
+        return []
     if b is None or a is None:
-        return {"kind": "rtc", "key": "offset", "change": "missing", "before": b, "after": a}
-    if abs(a["offset"] - b["offset"]) > tolerance:
-        return {"kind": "rtc", "key": "offset", "change": "changed", "before": b, "after": a}
-    return None
+        return [{"kind": "rtc", "key": "offset", "change": "missing", "before": b, "after": a}]
+    out = []
+    if not abs(b["offset"]) >= RTC_BASELINE_FLOOR:
+        out.append({"kind": "rtc", "key": "offset", "change": "baseline-near-true-time", "before": b, "after": a,
+                    "fix": f"set the PC's RTC at least {RTC_BASELINE_FLOOR:.0f} s wrong in firmware setup and "
+                           "take the baseline snapshot again"})
+    if not abs(a["offset"] - b["offset"]) <= tolerance:
+        out.append({"kind": "rtc", "key": "offset", "change": "changed", "before": b, "after": a})
+    return out
 
 
 def evaluate(before, after, allow, flags=(), noise=(), rtc_writes=(), rtc_tolerance=RTC_TOLERANCE,
@@ -472,8 +532,7 @@ def evaluate(before, after, allow, flags=(), noise=(), rtc_writes=(), rtc_tolera
             report["flagged"].append(f)
     for w in rtc_writes:
         report["flagged"].append({"kind": "rtc", "key": w["phase"], "change": "written", "before": None, "after": w})
-    if moved := rtc_offset_change(before, after, rtc_tolerance):
-        report["flagged"].append(moved)
+    report["flagged"].extend(rtc_offset_findings(before, after, rtc_tolerance))
     report["pass"] = not report["flagged"]
     return report
 
@@ -967,6 +1026,8 @@ def main(argv=None):
     q.add_argument("--credential", action="append", default=[], metavar="NAME=FILE",
                    help="a systemd credential for the OS boots, as an SMBIOS string (the image's responder)")
     args = ap.parse_args(argv)
+    if args.cmd == "snapshot" and args.efivarfs and not args.rtc_reference:
+        ap.error("--efivarfs is a PC, whose RTC only --rtc-reference checks: name an SNTP server")
     if args.cmd == "qemu" and bool(args.kernel) != bool(args.initrd):
         ap.error("--kernel needs --initrd")
     if args.cmd == "qemu" and args.image and not args.phases_file:

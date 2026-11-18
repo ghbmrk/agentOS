@@ -651,8 +651,24 @@ class RtcOffsetTest(unittest.TestCase):
         r = self.check(snap(rtc=rtc(600.2)), snap(rtc=rtc(0.1)))
         self.assertFalse(r["pass"])
         self.assertEqual(flagged(r), {("rtc", "offset", "changed")})
-        self.assertFalse(self.check(snap(rtc=rtc(0.0)), snap(rtc=rtc(-2.5)))["pass"])
-        self.assertTrue(self.check(snap(rtc=rtc(0.0)), snap(rtc=rtc(-2.5)), rtc_tolerance=3)["pass"])
+        self.assertFalse(self.check(snap(rtc=rtc(-100.0)), snap(rtc=rtc(-102.5)))["pass"])
+        self.assertTrue(self.check(snap(rtc=rtc(-100.0)), snap(rtc=rtc(-102.5)), rtc_tolerance=3)["pass"])
+        # A tolerance that is not a finite, non-negative number would switch the check off.
+        for bad in (float("nan"), float("inf"), -1.0):
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "tolerance"):
+                self.check(snap(rtc=rtc(600.0)), snap(rtc=rtc(0.0)), rtc_tolerance=bad)
+
+    def test_a_baseline_near_true_time_is_flagged(self):
+        # An image whose kernel writes true time into an RTC that was already near true time
+        # leaves the offset where it was, so the baseline must start well away from it.
+        r = self.check(snap(rtc=rtc(0.3)), snap(rtc=rtc(0.1)))
+        self.assertFalse(r["pass"])
+        self.assertEqual(flagged(r), {("rtc", "offset", "baseline-near-true-time")})
+        self.assertIn("firmware setup", r["flagged"][0]["fix"])
+        floor = hostcheck.RTC_BASELINE_FLOOR
+        self.assertTrue(self.check(snap(rtc=rtc(-floor)), snap(rtc=rtc(-floor)))["pass"])
+        self.assertFalse(self.check(snap(rtc=rtc(floor - 1)), snap(rtc=rtc(floor - 1)))["pass"])
+        self.assertFalse(self.check(snap(rtc=rtc(float("nan"))), snap(rtc=rtc(float("nan"))))["pass"])
 
     def test_offset_in_one_snapshot_only_is_flagged(self):
         # A run that forgot the RTC in one snapshot cannot pass as clean.
@@ -688,10 +704,12 @@ class RtcOffsetTest(unittest.TestCase):
         return sock.getsockname()[1]
 
     @staticmethod
-    def ntp_reply(request, offset, echo=True, mode=4, stratum=2):
-        now = hostcheck.to_ntp(time.time() + offset)
+    def ntp_reply(request, offset, echo=True, mode=4, stratum=2, leap=0):
+        t = time.time() + offset
+        secs = int(t)
+        now = (secs + hostcheck.NTP_EPOCH).to_bytes(4, "big") + int((t - secs) * (1 << 32)).to_bytes(4, "big")
         out = bytearray(48)
-        out[0] = (4 << 3) | mode
+        out[0] = (leap << 6) | (4 << 3) | mode
         out[1] = stratum
         out[24:32] = request[40:48] if echo else b"\1" * 8
         out[32:40] = now
@@ -701,15 +719,60 @@ class RtcOffsetTest(unittest.TestCase):
     def test_sntp_reference_checks_the_echo(self):
         port = self.sntp_server(lambda req: self.ntp_reply(req, 600))
         self.assertAlmostEqual(hostcheck.sntp_offset("127.0.0.1", port), 600, delta=0.5)
-        for bad, why in (({"echo": False}, "echo"), ({"mode": 3}, "mode"), ({"stratum": 0}, "stratum")):
+        for bad, why in (({"echo": False}, "echo"), ({"mode": 3}, "mode"), ({"stratum": 0}, "stratum"),
+                         ({"leap": 3}, "leap indicator")):
             port = self.sntp_server(lambda req, bad=bad: self.ntp_reply(req, 0, **bad))
             with self.assertRaisesRegex(hostcheck.HostcheckError, why):
                 hostcheck.sntp_offset("127.0.0.1", port)
 
+    def test_server_names_parse(self):
+        self.assertEqual(hostcheck.parse_server("ntp.test"), ("ntp.test", 123))
+        self.assertEqual(hostcheck.parse_server("ntp.test:1123"), ("ntp.test", 1123))
+        self.assertEqual(hostcheck.parse_server("fd00::1"), ("fd00::1", 123))
+        self.assertEqual(hostcheck.parse_server("[fd00::1]:1123"), ("fd00::1", 1123))
+        for bad in ("ntp.test:x", "ntp.test:0", "[fd00::1]:99999", ":123", "[]"):
+            with self.assertRaises(hostcheck.HostcheckError, msg=bad):
+                hostcheck.parse_server(bad)
+
+    @staticmethod
+    def timex(status, junk=0xA5):
+        # struct timex on LP64: modes, 4 bytes of padding, four longs, then status at byte 40.
+        raw = bytearray([junk]) * 512
+        raw[40:44] = status.to_bytes(4, sys.byteorder)
+        return bytes(raw)
+
+    def test_the_timex_decode_reads_status_and_its_polarity(self):
+        # The guard against a synchronised third system: a wrong offset or polarity fails open in silence,
+        # so the decode is tested on crafted bytes with junk around status, and against adjtimex's return.
+        self.assertTrue(hostcheck.timex_synced(self.timex(0), 0))
+        self.assertTrue(hostcheck.timex_synced(self.timex(0x2001), 1))  # PLL, INS: still synchronised
+        self.assertFalse(hostcheck.timex_synced(self.timex(hostcheck.STA_UNSYNC), hostcheck.TIME_ERROR))
+        self.assertFalse(hostcheck.timex_synced(self.timex(0x41, junk=0), hostcheck.TIME_ERROR))
+        self.assertTrue(hostcheck.timex_synced(self.timex(hostcheck.STA_CLOCKERR), hostcheck.TIME_ERROR))
+        # Status and return value disagree: the bytes were not read as the kernel wrote them.
+        for status, ret in ((hostcheck.STA_UNSYNC, 0), (0, hostcheck.TIME_ERROR)):
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "does not match"):
+                hostcheck.timex_synced(self.timex(status), ret)
+
+        def fake(status, ret):
+            def adjtimex(buf):
+                buf.raw = self.timex(status)
+                return ret
+            return adjtimex
+        self.assertFalse(hostcheck.kernel_clock_synced(fake(hostcheck.STA_UNSYNC, hostcheck.TIME_ERROR)))
+        self.assertTrue(hostcheck.kernel_clock_synced(fake(0, 0)))
+        # The live kernel's answer passes the same agreement check, so the layout is the kernel's.
+        self.assertIsInstance(hostcheck.kernel_clock_synced(), bool)
+
+    def test_a_pc_snapshot_needs_an_rtc_reference(self):
+        with tempfile.TemporaryDirectory() as d, \
+                unittest.mock.patch("sys.stderr"), self.assertRaises(SystemExit) as e:
+            hostcheck.main(["snapshot", "--efivarfs", d, "--tcti", "device:/dev/null", "-o", f"{d}/s.json"])
+        self.assertEqual(e.exception.code, 2)
+
     def test_snapshot_refuses_while_the_kernel_clock_is_synchronised(self):
         # A synchronised kernel copies its clock into the RTC every 11 minutes,
         # which would hide the image's write behind the third system's.
-        self.assertIsInstance(hostcheck.kernel_clock_synced(), bool)
         with tempfile.TemporaryDirectory() as d:
             dev = pathlib.Path(d, "since_epoch")
             dev.write_text("100\n")
