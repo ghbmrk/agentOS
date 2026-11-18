@@ -1410,8 +1410,11 @@ def alias_violations(root, dirs, names):
     return out
 
 
-# Debian's systemd 257 unit, the one place it may be, and every line it holds (units/systemd-journal-flush.service
-# in 257.7, as config_lines reads it; Security and L3 on #6130). A changed line is refused, not modelled.
+# Debian's unit, the one place it may be, and every line it holds as config_lines reads it (Security and L3 on
+# #6130): read from usr/lib/systemd/system/systemd-journal-flush.service in systemd_257.13-1~deb13u1_amd64.deb
+# (deb.debian.org pool, sha256 ee81302a1d5b7434762b6e784a572854d4b6cf6235e33e2d104ad4e1cae71ab4), the version the
+# image installs; equal to upstream 257.7's units/systemd-journal-flush.service. A changed line is refused, not
+# modelled, so a Debian systemd update that changes the unit fails the build until this table is read again.
 JOURNAL_FLUSH_DIR = "usr/lib/systemd/system"
 JOURNAL_FLUSH_LINES = (
     ("Unit", "Description", "Flush Journal to Persistent Storage"),
@@ -1460,8 +1463,9 @@ def journal_flush_violations(root):
             lines = ("unreadable (%s)" % (e.strerror if isinstance(e, OSError) else e),)
         if lines != JOURNAL_FLUSH_LINES:
             diff = [l for l in lines if l not in JOURNAL_FLUSH_LINES] + [l for l in JOURNAL_FLUSH_LINES if l not in lines]
-            out.append("%s: not systemd 257's unit (first difference: %s); the tree check does not model a change to "
-                       "it (restore it)" % (unit.rel, diff[0] if diff else "the order of its lines"))
+            out.append("%s: not Debian systemd 257.13's unit (first difference: %s); the tree check does not model a "
+                       "change to it (restore it, or after a Debian systemd update read the new unit into "
+                       "JOURNAL_FLUSH_LINES)" % (unit.rel, diff[0] if diff else "the order of its lines"))
     try:
         wanted = any(tree_lstat(root, "%s/sysinit.target.wants/%s" % (d, JOURNAL_FLUSH)) for d in dirs)
     except OSError:

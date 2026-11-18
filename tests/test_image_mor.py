@@ -513,11 +513,11 @@ class WipeJournalTest(unittest.TestCase):
                         write(self.root, str(other.relative_to(self.root)), body)
                     self.assertIn(replaced, self.journald())
                     other.unlink()
-        # Debian's own file: every line as systemd 257 ships it (Security on #6130).
+        # Debian's own file: every line as Debian's systemd 257.13 ships it (Security on #6130).
         saved = (self.root / unit).read_text()
         self.assertEqual(saved, flush_unit())
-        changed = "%s: not systemd 257's unit (first difference: %%s); the tree check does not model a change to it " \
-            "(restore it)" % unit
+        changed = "%s: not Debian systemd 257.13's unit (first difference: %%s); the tree check does not model a " \
+            "change to it (restore it, or after a Debian systemd update read the new unit into JOURNAL_FLUSH_LINES)" % unit
         for body, first in (
                 ("", None),
                 (flush_unit((("Unit", "ConditionPathExists", "/nonexistent"),)), ("Unit", "ConditionPathExists", "/nonexistent")),
