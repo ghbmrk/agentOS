@@ -681,7 +681,7 @@ func TestOpenVMWiresUnreadLineAndNotice(t *testing.T) {
 	}
 }
 
-// REQ: CAP-3. VM-snap-unread-notice-fu (#5500): a deletion notice the
+// REQ: LOG-4, CH-12. VM-snap-unread-notice-fu (#5500): a deletion notice the
 // owner channel did not take is held and retried until it goes, and goes
 // once: an Inform that fails once, then succeeds, tells the owner once.
 func TestOpenVMRetriesUnreadNoticeUntilDelivered(t *testing.T) {

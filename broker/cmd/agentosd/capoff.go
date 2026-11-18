@@ -156,7 +156,7 @@ func openVM(ctx context.Context, cfg vm.Config, caps *capState, inform func(stri
 var unreadRetry = 30 * time.Second
 
 // unreadNotices holds the unread-restore-point deletion notices the owner
-// channel has not taken and retries them until it does (CAP-3, #5500): a
+// channel has not taken and retries them until it does (LOG-4, #5500): a
 // forget or a disk-space prune of points nobody could read is never left
 // untold because the channel was down at that moment. What is owed is a
 // count per kind, so a long outage owes at most one forget and one
