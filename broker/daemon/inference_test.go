@@ -1099,11 +1099,13 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 		}
 	}
 	addSlots(pkg)
-	if typeErr != nil && (len(slots) > 0 || len(handed) > 0 || len(configuredFields[rel]) > 0) {
+	// Fails closed: an import that did not load may be the one with slots
+	// (L3 R1 on #6147).
+	if typeErr != nil {
 		report(fs[0], "does not type-check, so its configuredFields stores cannot be checked: "+typeErr.Error())
 		return nil
 	}
-	if len(slots) == 0 && len(handed) == 0 || typeErr != nil {
+	if len(slots) == 0 && len(handed) == 0 {
 		return nil
 	}
 	// listed is the slots st has, as field indices.
@@ -1476,7 +1478,11 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 			}
 		}
 		for id, inst := range info.Instances {
-			if fn, ok := info.Uses[id].(*types.Func); ok && handOKFunc(rel, fn) {
+			// A listed function outside the module may take a holding type
+			// argument; one of the module's would carry the holder into a
+			// package handedOn walks as a type parameter it does not hold
+			// (L3 on #6147), so it is reported as a generic type is.
+			if fn, ok := info.Uses[id].(*types.Func); ok && handOKFunc(rel, fn) && !strings.HasPrefix(fn.Pkg().Path(), module) {
 				continue
 			}
 			for i := range inst.TypeArgs.Len() {
@@ -1741,6 +1747,19 @@ func h(m *run.Model) { m.Socket = "z" }`)
 	}
 	if got := useOf(t, compositionRoot, stores); got != "" {
 		t.Errorf("the composition root's wiring reported: %q", got)
+	}
+	// A generic of a module package an entry names, instantiated with a
+	// holder, is reported in the owner (L3 on #6147), and an importer that
+	// does not type-check fails closed.
+	handOK["modelroute"] = map[string]string{module + "kernel/secret": "test"}
+	got = useOf(t, "modelroute", src(`"github.com/ghbmrk/agentos/broker/kernel/secret"`, `type Config struct{ Socket string }
+func g(c Config) { secret.Hide(c) }`))
+	delete(handOK, "modelroute")
+	if !strings.Contains(got, "instantiates Hide with Config, which reaches a configuredFields field") {
+		t.Errorf("a module generic instantiated with a holder passed: %q", got)
+	}
+	if got := useOf(t, "change", src(`"github.com/ghbmrk/agentos/broker/nosuch"`, `var _ = nosuch.Config{}`)); !strings.Contains(got, "does not type-check") {
+		t.Errorf("an importer's type error passed: %q", got)
 	}
 	// A handed package: kept and called is quiet; a decoder, gob, reflect
 	// or fmt is reported. What it hands on under its own entries is
