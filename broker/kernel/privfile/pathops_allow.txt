@@ -38,8 +38,8 @@ allow broker/infer/supervise/supervise.go Supervisor.listen os.Chmod that direct
 allow broker/infer/supervise/supervise.go Supervisor.listen os.Remove an old socket at the name in that 0700 root directory
 allow broker/loops/machine.go TamperProbe.removeSiblings os.Remove unlink of a name carrying the round's nonce beside a target the Lstat shows is no link; a parent a guest swapped can only lead it to a file of that nonce name, which only the guest made
 allow broker/loops/machine.go targetDigest os.ReadDir lists a target's parent and hashes the tamper-sibling names only; a parent a guest swapped for a link changes the digest, as the guest's write does, and opens no file
-allow broker/sockets/peers.go ListenPeers os.Remove a stale socket at the name in the caller's run directory (its unit's RuntimeDirectory= or a tmpfiles.d directory), which only its own uid or root can write
-allow broker/sockets/peers.go ListenPeers os.Chmod the socket bind(2) just made at that name, in that run directory, which only its own uid or root can write to swap it
+allow broker/sockets/peers/peers.go ListenUnix os.Remove a stale socket at the name in the caller's run directory (its unit's RuntimeDirectory= or a tmpfiles.d directory), which only its own uid or root can write
+allow broker/sockets/peers/peers.go ListenUnix os.Chmod the socket bind(2) just made at that name, in that run directory, which only its own uid or root can write to swap it
 allow broker/sockets/sockets.go secureDir os.MkdirAll the socket directory's parent: agentosd's -sockets parent, /run (root-owned), or a caller's root-owned run directory
 allow broker/sockets/sockets.go secureDir os.Mkdir the socket directory itself, in that root-owned parent; mkdir(2) follows no link
 allow broker/sockets/sockets.go secureDir os.Chmod the socket directory, which the Lstat just before shows is a directory, not a link, owned by this uid
