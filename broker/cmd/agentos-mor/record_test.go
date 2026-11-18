@@ -3,12 +3,15 @@ package main
 // REQ: HW-8, OWN-17
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // morUnit is the shipped unit whose stop runs clear and records its result.
@@ -100,6 +103,28 @@ func TestRefusalIsRecorded(t *testing.T) {
 		stopPost(rc)
 		if _, err := os.Lstat(record); !os.IsNotExist(err) {
 			t.Fatalf("%s: record after a good clear: %v", c.name, err)
+		}
+	}
+}
+
+// The box's flag calls, which the scratch host replaces, read and write
+// the file's own flags (a target since TestRefusalIsRecorded builds a sys).
+func TestBoxFlagCalls(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "flags")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	fd := int(f.Fd())
+	s := newSys("/")
+	got, err := s.getFlags(fd)
+	want, werr := unix.IoctlGetUint32(fd, unix.FS_IOC_GETFLAGS)
+	if got != want || !errors.Is(err, werr) {
+		t.Fatalf("getFlags %#x %v, want %#x %v", got, err, want, werr)
+	}
+	if werr == nil {
+		if err := s.setFlags(fd, got); err != nil {
+			t.Fatalf("setFlags of the same flags: %v", err)
 		}
 	}
 }
