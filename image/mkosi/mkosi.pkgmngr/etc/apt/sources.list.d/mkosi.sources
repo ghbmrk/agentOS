@@ -5,16 +5,17 @@
 # replayed, stale security metadata; image/build.sh points it at one debian-security snapshot per
 # build (image/security-snapshot.sh, #5021), and ci.yml's test roots read it live. mkosi's debug and
 # deb-src entries are dropped.
-# Components match Repositories= in mkosi.conf.
+# Components match Repositories= in mkosi.conf. Each Signed-By names a keyring of only the key that
+# signs that archive (IMG-keyring-minimal, #5954), pinned by image/debian-archive-keyring.sh.
 Types: deb
 URIs: https://snapshot.debian.org/archive/debian/20261001T000000Z/
 Suites: trixie trixie-updates
 Components: main
-Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+Signed-By: /usr/share/keyrings/debian-archive-bookworm-automatic.gpg
 Check-Valid-Until: no
 
 Types: deb
 URIs: http://security.debian.org/debian-security
 Suites: trixie-security
 Components: main
-Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+Signed-By: /usr/share/keyrings/debian-archive-bookworm-security-automatic.gpg

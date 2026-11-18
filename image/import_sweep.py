@@ -149,11 +149,16 @@ def cipher_sites(path):
 
 
 def is_elf(path):
+    """Whether PATH starts with the ELF magic. A file gone since the walk listed it is not one; any other
+    read error fails the run, so a /usr block that dm-verity refuses (EIO) is a failed check, not a file
+    skipped (#5988)."""
     try:
         with open(path, "rb") as f:
             return f.read(4) == b"\x7fELF"
-    except OSError:
+    except FileNotFoundError:
         return False
+    except OSError as e:
+        sys.exit("import sweep: cannot read %s: %s" % (path, e))
 
 
 def sweep(files):
@@ -193,16 +198,37 @@ def sweep(files):
             "sha256": dict(sorted(digest.items()))}
 
 
+def cannot_read(e):
+    sys.exit("import sweep: cannot read %s: %s" % (e.filename, e.strerror or e))
+
+
+def walk(top):
+    """os.walk(TOP), except that a directory it cannot list (EIO from a verity-refused block, a missing
+    TOP) fails the run instead of dropping that subtree from the scan (#5988)."""
+    return os.walk(top, onerror=cannot_read)
+
+
+def is_file(path, follow=True):
+    """Whether PATH (links followed unless FOLLOW is false) is a regular file. One gone since the walk listed
+    it is not; any other stat error (a link loop, EIO) fails the run instead of skipping the entry (#6073)."""
+    try:
+        return stat.S_ISREG(os.stat(path, follow_symlinks=follow).st_mode)
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        cannot_read(e)
+
+
 def tree_files(top, prefix="/", skip=()):
     """Every regular ELF file under TOP (symbolic links not followed), as {prefix + relative path: path}."""
     files = {}
-    for d, dirs, names in os.walk(top):
+    for d, dirs, names in walk(top):
         rel = os.path.relpath(d, top)
         if rel == ".":
             dirs[:] = [x for x in dirs if x not in skip]
         for n in names:
             p = os.path.join(d, n)
-            if stat.S_ISREG(os.lstat(p).st_mode) and is_elf(p):
+            if is_file(p, follow=False) and is_elf(p):
                 files[os.path.normpath(os.path.join(prefix, rel, n))] = p
     return files
 
@@ -238,7 +264,8 @@ def run_build(out, version):
     finally:
         cleanup()
     initrds = pathlib.Path(out) / "initrd"
-    for p in sorted(x for x in initrds.rglob("*") if x.is_file()):
+    for p in sorted(pathlib.Path(d, n) for d, _, names in walk(initrds) for n in names
+                    if is_file(os.path.join(d, n))):
         with tempfile.TemporaryDirectory() as scratch:
             places["initrd:" + str(p.relative_to(initrds))] = initrd_place(p, scratch)
     return places

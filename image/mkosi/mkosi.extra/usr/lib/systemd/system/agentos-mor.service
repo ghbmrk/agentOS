@@ -15,19 +15,30 @@ After=sys-firmware-efi-efivars.mount
 Before=sysinit.target shutdown.target tmp.mount
 Conflicts=shutdown.target
 ConditionPathExists=/sys/firmware/efi
-# Only the shutdown transaction stops it: a manual stop would clear MOR while the secret holders run.
+# Only the shutdown transaction stops it: a manual stop would clear MOR while the secret holders run,
+# and so would an isolate to emergency.target, which does not pull in sysinit.target: the holders would
+# restart on the way back to default.target with MOR clear (MOR-emergency-isolate, #5947).
 RefuseManualStop=yes
+IgnoreOnIsolate=yes
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/lib/agentos/agentos-mor status
 ExecStop=/usr/lib/agentos/agentos-mor clear
+# MOR-clear-owner (#6111): whatever the result, this records it for STATUS, as the wipe's record
+# (MOR-wipe-owner): it removes the file on success and writes it on any failure, a refused clear or
+# one that could not run, so agentosd's STATUS shows a line until a later clear succeeds
+# (broker/cmd/agentosd/wipenote.go). Not StateDirectory=: systemd would make the directory at this
+# unit's start, in early boot, and a failure there would stop the clear itself. /var/lib is on the
+# root partition, which is never unmounted, so the write reaches it after every other unit has
+# stopped (image/ASSUMPTIONS.md MOR-clear-owner).
+ExecStopPost=/usr/bin/sh -c 'if [ "$$SERVICE_RESULT" = success ]; then exec /usr/bin/rm -f -- /var/lib/agentos-mor/refused; fi; /usr/bin/mkdir -p -m 0700 /var/lib/agentos-mor && echo "$$SERVICE_RESULT $$EXIT_CODE $$EXIT_STATUS" >/var/lib/agentos-mor/refused && exec /usr/bin/sync -f /var/lib/agentos-mor/refused'
 StandardOutput=journal+console
 # No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
 NoExecPaths=/
 ExecPaths=/usr
-# No device: it writes only efivarfs and /proc/sys/vm/drop_caches.
+# No device: it writes only efivarfs, /proc/sys/vm/drop_caches and its record.
 DevicePolicy=closed
 
 [Install]
