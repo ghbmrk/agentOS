@@ -315,6 +315,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-l-ap-handover-words | ENF-l-ap-handover-words: a failed hand-over says what to do, not SSH internals | #6013 UX 5 | queued(tier A; lane primary; brief briefs/ENF-l-b2.md) |
 | ENF-l-ap-new-cards | ENF-l-ap-new-cards: home marks the device passwords still to enter and uses the owner's labels | #6013 UX 6 | queued(tier A; lane primary; brief briefs/ENF-l-b2.md) |
 | HOST-1e2b1 | HOST-1e2b1: host-untouched check, software half for the S1 PC run: RTC offset against an SNTP reference, HOST-1d's opted-in disk excluded by the owner's flag, the pcrlock NV index if P2-1 pins one. | #5746 | building (tier A) |
+| HOST-1e2b1-fu | HOST-1e2b1-fu: release items from #6140's reviews: tolerance and opted-in disk bounds, PC snapshots without an RTC offset flagged, stated adjtimex and offset bounds, operator messages and preflight order, two test fixes. | #6135 | queued (tier A) |
 
 ## Model routes and the Codex lane
 
@@ -434,23 +435,26 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-picomatch-bump | VULN-picomatch-bump: bump the guest's npm once a release bundles a picomatch fixed for GHSA-fc5q-39xc-vjpf; until then the accepted record states its reach. Release; from #6096. | #6096 | queued (release; tier A; waits on a picomatch release) |
 | MOR-clear-owner | MOR-clear-owner: a refused MOR clear is shown to the owner in STATUS, like a failed wipe. Release; from #6110. | #6094, #6110 | building (release; tier A) |
 | IMG-keyring-spikes-fu-d | IMG-keyring-spikes-fu-d: the record-directory check also catches a tracked symlink to a tree and a lone mkosi.configure. Release; from #6116. | #6088, #6116 | building (release; tier B) |
-| LINT-dial-types | LINT-dial-types: the inference lint reads exact types through go/types instead of its hand-built inferencer, keeping every existing negative case and measuring the cost. Re-plan; from #6119. | #6028, #6119 | queued (re-plan; tier A) |
+| LINT-dial-types | LINT-dial-types: the inference lint reads exact types through go/types instead of its hand-built inferencer, keeping every existing negative case and measuring the cost. Re-plan; from #6119. | #6028, #6119 | building (re-plan; tier A) |
 | TIM-1-interval-fu-m | TIM-1-interval-fu-m: agentos-clock-boot drops its own state-file stat check, now covered by BootEstimate's shared CheckFile. Simplicity; from #6121. | #6058, #6121 | building (release; tier B) |
-| LINT-dial-handok | LINT-dial-handok: the inference lint enforces each handOK entry's import claims and resolves whether clerk/run is a composition root. Release; from #6123. | #6028, #6123 | building (release; tier A) |
 | MOR-wipe-status-e2e | MOR-wipe-status-e2e: a failed wipe's STATUS line is shown by a test that runs agentosd's wiring, not only wipeNote. Release; from #6095. | #6094, #6095 | queued (release; tier B) |
 | MOR-clear-owner-fu | MOR-clear-owner-fu: the failed-shutdown STATUS line stops asking for a restart when the record outlives one, and a boot test holds the record's sync and mode. Release; from #6126. | #6111, #6126 | queued (release; tier B) |
 | LINT-dial-unix-addr | LINT-dial-unix-addr: the inference lint reads UnixAddr{Name} for DialUnix once #5757 adds it. Release; from #6123. | #6028, #5757 | queued (release; tier A) |
-| LINT-dial-root | LINT-dial-root: design check, is clerk/run a composition root, as the dial lint trusts it to be? Release; from #6123. | #6028, #6123 | queued (release; tier A) |
 | KRN-2-manager-opens | KRN-2-manager-opens: OpenFile= on a non-root unit held to grants, and the rest of #4641's list | #4641 | queued (release; tier A; from #4641's build) |
 | NET-2-decl-daily-bytes | NET-2-decl-daily-bytes: each CLK-14 account declaration states the daily bytes it sends, proposed by the plan and confirmed by the owner (D-248) | #5157 | queued (release; tier A) |
 | IMG-mkosi-run-bound-fu-initrd | IMG-mkosi-run-bound-fu-initrd: the default initrd's packages are held to the pinned, signature-checked indexes as the image's are. Release; from #6148. | #4690 | queued (release; tier A) |
 | IMG-mkosi-run-bound-fu-disk | IMG-mkosi-run-bound-fu-disk: image.yml's stage job keeps its own IMG-disk budget. Release; from #6148. | #4690 | queued (release; tier B) |
 | VULN-debian-r11 | VULN-debian-r11: accept openssl's and glibc's new no-fix Debian 13 advisories so image-vulncheck passes again. Release; seventh no-fix Debian round. | #2919, #5871 | building (release; tier A) |
-| MUT-plan-budget | MUT-plan-budget: mutgate's plan job fits a test-only change to a slow package (enforcer/nft) in its time limit | #6144 | building (release; tier A) |
 | MOR-wipe-journal-fu2 | MOR-wipe-journal-fu2: a Path.Unit= dot-less-first test and bus_unit_violations' DefaultDependencies read by the exact-forms rule. Release; from #6130. | #6095, #6130 | queued (release; tier A; gate file) |
 | IMG-mkosi-run-bound-fu-local | IMG-mkosi-run-bound-fu-local: a local-only wrapper makes a local image build one command, with the mkosi line pinned equal to CI's. Release; from #6148. | #4690, #6148 | queued (release; tier B) |
 | MUT-plan-timing-skew | MUT-plan-timing-skew: the plan's reused suite time matches what a shard runs | #6156 | queued (release; tier A) |
-| MUT-plan-timeout-wording | MUT-plan-timeout-wording: the plan-timeout error leads with the rerun and says "at most three" runs | #6156 | queued (release; tier A) |
+| MUT-plan-timeout-wording | MUT-plan-timeout-wording: the plan-timeout error leads with the rerun and says "at most three" runs | #6156 | building (release; tier A) |
+| MUT-plan-overflow | MUT-plan-overflow: mutgate runs a plan past GitHub's 256-job matrix limit (enforcer/nft's 296 shards on #6144) | #6144 | building (release; tier A) |
+| MUT-delete-covering | MUT-delete-covering: mutgate's `delete` runs only the tests that cover each deletion site | #6171 | queued (release; tier A) |
+| TEST-kernel-ctx-stop | TEST-kernel-ctx-stop: TestEveryKernelLegsContextEndsWithTheLeg covers freshStop and StopCancelled, killing the daemon.go:825 and :881 mutants that were waived as equivalent. Release; from #6041. | #6041, #6123, #6147 | queued (release; tier B) |
+| TEST-privfile-one-ns | TEST-privfile-one-ns: the OpenDir owner-refusal mutant is killed by one namespace test, not two. Release; from #6041. | #6041, #6146 | queued (release; tier B) |
+| BROWSER-shell-cache-heal | BROWSER-shell-cache-heal: a headless-shell cache entry that fails the hash falls back to a checked fresh download instead of failing every run until evicted. Release; from #6163. | #6064, #6163 | queued (release; tier A; gate file) |
+| CTL-agent-starting-status | CTL-agent-starting-status: STATUS during boot shows a starting line, not 'not set up' or 'waiting for memory'. Release; from #6136 (UX). | #5429, #6136 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -500,4 +504,6 @@ issue #6033: body has no board-row block
 issue #6069: body has no board-row block
 issue #6077: body has no board-row block
 issue #6157: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #6168: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #6178: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 ```
