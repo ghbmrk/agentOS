@@ -103,8 +103,10 @@ jobs:
     needs: claimed
     if: ${{ needs.claimed.outputs.packages != '[]' }}
     runs-on: ubuntu-24.04
-    # A test-only diff's targets are the lines its changed tests cover, so the plan runs them (#4961).
-    timeout-minutes: 15
+    # A test-only diff's targets are the lines its changed tests cover, so the plan runs them (#4961):
+    # three whole-suite coverage runs of each such package, one after another. enforcer/nft's took
+    # 374 s each on #6144, about 19 minutes alone; 35 holds that with headroom (#6155).
+    timeout-minutes: 35
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
     permissions:
@@ -312,8 +314,12 @@ jobs:
         run: |
           echo "claimed: $CLAIMED ($PACKAGES); plan: $PLAN; mutants: $MUTANTS"
           [ "$CLAIMED" = success ] || exit 1
-          # This job does not run in a cancelled run, so a cancelled shard is one GitHub stopped at its
-          # timeout-minutes: no verdict, not a survivor (#5069).
+          # This job does not run in a cancelled run, so a cancelled plan or shard is one GitHub stopped at its
+          # timeout-minutes: no verdict, not a survivor (#5069, #6155).
+          if [ "$PLAN" = cancelled ]; then
+            echo "::error::the plan job timed out at its 35-minute limit, so no package was planned and no mutant ran; nothing was shown to survive. A test-only change to a slow package runs its suite three times there (#6155): if a rerun times out again, raise the plan job's timeout-minutes in .github/workflows/mutgate.yml."
+            exit 1
+          fi
           if [ "$MUTANTS" = cancelled ]; then
             echo "::error::a mutants shard timed out at its 60-minute limit (the cancelled job in the checks list), so it gave no verdict; no mutant was shown to survive. Rerun the failed jobs; if the same shard times out again, the plan's per-shard budgets in tools/mutgate.py are too large for that package."
             exit 1
