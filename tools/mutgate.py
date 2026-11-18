@@ -96,8 +96,8 @@ workers (#4633). `verify --summary` writes one table of every mutant on a target
 verdict, so a reviewer reads it rather than re-running mutants.
 Shards (#4961). A package's mutants can take longer than one CI job may run, so its target lines
 and deletion sites are split round-robin into K shards (`shard_lines`, `deletion_sites`' order), one
-`mutants` job each, or past GitHub's 256 jobs a matrix, up to 6 a job one after another, each in its
-own result directory with its own 60 minutes (`pack`, #6170). Gremlins tests every mutant alone with the whole package suite, and `delete`
+`mutants` job each, or past GitHub's 256 jobs a matrix, up to 5 a job one after another, each in its
+own result directory and stopped at its own 60 minutes (`pack`, #6170). Gremlins tests every mutant alone with the whole package suite, and `delete`
 deletes every statement alone and runs the whole suite, so a mutant's verdict does not depend on
 which other mutants share its job: the joined shards give the verdicts one job would. K is only a
 schedule, so it may come from the untrusted `plan` job: `verify` refuses a package unless its
@@ -1227,15 +1227,18 @@ def violations(targets, live, waived=None, mutants=None):
 # Shards (#4961). The budgets size K so one shard's gremlins and deletion runs fit a job's 60 minutes:
 # localui's 1048 target lines (about 0.35 deletion sites a line) ran gremlins in 10 minutes and
 # deletion past 48 on #4945. GitHub runs at most 256 jobs from one matrix and stops a hosted job at
-# 360 minutes, so past 256 shards a job runs up to 6 shards of one package, one after another, with
-# 60 minutes for each (pack, MUT-plan-overflow #6170): at most 1536 shards in all, fewer when
-# several packages each leave a job part-filled.
+# 360 minutes, so past 256 shards a job runs up to 5 shards of one package, one after another, each
+# stopped at its own 60 minutes by the workflow (`timeout`), the job at 60 a shard plus 15 for its
+# setup (pack, MUT-plan-overflow #6170): at most 1280 shards in all, fewer when several packages
+# each leave a job part-filled.
 LINES_PER_SHARD = 250
 SITES_PER_SHARD = 100
 MATRIX_MAX = 256
 SHARD_MINUTES = 60
+SETUP_MINUTES = 15
 JOB_MINUTES_MAX = 360
-SHARDS_MAX = MATRIX_MAX * (JOB_MINUTES_MAX // SHARD_MINUTES)
+JOB_SHARDS_MAX = (JOB_MINUTES_MAX - SETUP_MINUTES) // SHARD_MINUTES
+SHARDS_MAX = MATRIX_MAX * JOB_SHARDS_MAX
 # Every gremlins mutant and every deletion runs the package's whole suite, so a shard's time is its
 # count times the suite's (#5069): kernel/sim's 48 s suite ran 6 shards of 89 sites past 60 minutes
 # on #5006 (run 42368800375), where browser's 7 s suite ran 9 shards of 92 in 6 to 14. Seen there, a
@@ -1259,14 +1262,15 @@ def shard_count(targets, sites, suite=0.0):
 def pack(counts):
     """The `mutants` matrix for [(pkg, K)], or None when it cannot fit: one job per shard while the
     shards fit MATRIX_MAX jobs, else the fewest shards a job that fit, each package's shards dealt
-    round-robin over ceil(K / per) jobs of its own (#6170). Each entry names its shards (space-separated
-    indices) and the minutes they need, so every shard of every package runs exactly once, alone, with
-    the 60 minutes a one-shard job gives it."""
-    for per in range(1, JOB_MINUTES_MAX // SHARD_MINUTES + 1):
+    round-robin over ceil(K / per) jobs of its own (#6170). Each entry names its shards (indices joined
+    by ", ", as the job's name shows them) and the job's minutes, 60 a shard plus its setup, so every
+    shard of every package runs exactly once, alone; the workflow stops each shard at its own 60."""
+    for per in range(1, JOB_SHARDS_MAX + 1):
         jobs = [(pkg, of, -(-of // per)) for pkg, of in counts]
         if sum(j for _, _, j in jobs) <= MATRIX_MAX:
-            return [{"pkg": pkg, "shards": " ".join(map(str, range(i, of, j))), "of": of,
-                     "minutes": SHARD_MINUTES * len(range(i, of, j))} for pkg, of, j in jobs for i in range(j)]
+            return [{"pkg": pkg, "shards": ", ".join(map(str, range(i, of, j))), "of": of,
+                     "minutes": SHARD_MINUTES * len(range(i, of, j)) + SETUP_MINUTES}
+                    for pkg, of, j in jobs for i in range(j)]
     return None
 
 
@@ -2600,18 +2604,19 @@ def cmd_plan(args):
             print(f"mutgate: {pkg}: {sum(map(len, targets.values()))} target lines, {len(sites)} deletion "
                   f"sites, a {suite:.0f} s suite, {of} shard(s)", file=sys.stderr)
             counts.append((pkg, of))
-    include = pack(counts) if counts else None
+    include = pack(counts)
+    if not counts:
+        print("mutgate: 0 shards: no claimed package was planned; rerun the mutgate workflow", file=sys.stderr)
+        return 1
     if not include:
-        total = sum(of for _, of in counts)
-        fix = ("split the PR so each part changes fewer tier-A or tier-B packages" if counts
-               else "rerun the mutgate workflow")
-        print(f"mutgate: {total} shards do not fit {MATRIX_MAX} jobs (GitHub's matrix limit) of at most "
-              f"{JOB_MINUTES_MAX // SHARD_MINUTES} shards of one package each (its {JOB_MINUTES_MAX}-minute job "
-              f"limit): {fix}", file=sys.stderr)
+        print(f"mutgate: {sum(of for _, of in counts)} shards do not fit {MATRIX_MAX} jobs (GitHub's matrix limit) "
+              f"of at most {JOB_SHARDS_MAX} shards of one package each (its {JOB_MINUTES_MAX}-minute job limit): "
+              "split the PR so each part changes fewer tier-A or tier-B packages", file=sys.stderr)
         return 1
     if len(include) < sum(of for _, of in counts):
-        print(f"mutgate: {sum(of for _, of in counts)} shards past {MATRIX_MAX} jobs: up to "
-              f"{max(e['minutes'] for e in include) // SHARD_MINUTES} shards a job, one after another", file=sys.stderr)
+        most = max(len(e["shards"].split(", ")) for e in include)
+        print(f"mutgate: {sum(of for _, of in counts)} shards past {MATRIX_MAX} jobs: up to {most} shards a job, "
+              "one after another", file=sys.stderr)
     if args.targets_out:
         pathlib.Path(args.targets_out).write_text(json.dumps(planned))
     print(json.dumps(include))
