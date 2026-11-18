@@ -802,8 +802,8 @@ func packageUse(t *testing.T, dir string, files []string, prefix, rel string) []
 		}
 	}
 	dialCallers(fs, rel, at)
-	fieldStores(fs, rel, at)
-	links(fs, rel, at)
+	fieldStores(fs, dir, rel, at)
+	links(fs, files, rel, at)
 	return bad
 }
 
@@ -1002,7 +1002,7 @@ func typeDecls(f *ast.File) map[string]*ast.TypeSpec {
 // reflect import; and a pointer to a type that holds a listed type, or a
 // field of that name, handed to a call (json.Unmarshal(b, c), var d D
 // then f(&d)), which may store through it.
-func fieldStores(fs []*ast.File, rel string, at func(ast.Node, string)) {
+func fieldStores(fs []*ast.File, dir, rel string, at func(ast.Node, string)) {
 	fields, listedTypes := map[string]bool{}, map[string]bool{}
 	for tf := range configuredFields[rel] {
 		typ, field, _ := strings.Cut(tf, ".")
@@ -1180,6 +1180,412 @@ func fieldStores(fs []*ast.File, rel string, at func(ast.Node, string)) {
 			elided(e, elt)
 		}
 	}
+	// The package's functions ("h", or "T.m" by receiver type name),
+	// package-level vars' types, and generic functions by name.
+	funcs, vars := map[string]*ast.FuncDecl{}, map[string]ast.Expr{}
+	for _, f := range fs {
+		for _, d := range f.Decls {
+			switch d := d.(type) {
+			case *ast.FuncDecl:
+				name := d.Name.Name
+				if d.Recv != nil && len(d.Recv.List) == 1 {
+					name = recvName(d.Recv.List[0].Type) + "." + name
+				}
+				funcs[name] = d
+			case *ast.GenDecl:
+				for _, sp := range d.Specs {
+					if vs, ok := sp.(*ast.ValueSpec); ok && vs.Type != nil {
+						for _, nm := range vs.Names {
+							vars[nm.Name] = vs.Type
+						}
+					}
+				}
+			}
+		}
+	}
+	strip := func(e ast.Expr) ast.Expr {
+		if st, ok := e.(*ast.StarExpr); ok {
+			return st.X
+		}
+		return e
+	}
+	// field is the type of field name of a value of type t, embedded
+	// structs followed.
+	var field func(t ast.Expr, name string, depth int) ast.Expr
+	field = func(t ast.Expr, name string, depth int) ast.Expr {
+		st, ok := resolve(strip(t)).(*ast.StructType)
+		if !ok || depth > 8 {
+			return nil
+		}
+		for _, fl := range st.Fields.List {
+			for _, nm := range fl.Names {
+				if nm.Name == name {
+					return fl.Type
+				}
+			}
+		}
+		for _, fl := range st.Fields.List {
+			if len(fl.Names) == 0 {
+				if ft := field(fl.Type, name, depth+1); ft != nil {
+					return ft
+				}
+			}
+		}
+		return nil
+	}
+	// typeOf is the type of e as syntax shows it, through the package's
+	// own declarations; nil when it does not (an imported call's result).
+	var typeOf func(e ast.Expr, imp map[string]bool, depth int) ast.Expr
+	results := func(c *ast.CallExpr, imp map[string]bool, depth int) []ast.Expr {
+		var fd *ast.FuncDecl
+		switch fn := c.Fun.(type) {
+		case *ast.Ident:
+			fd = funcs[fn.Name]
+		case *ast.SelectorExpr:
+			if id, ok := fn.X.(*ast.Ident); ok && id.Obj == nil && imp[id.Name] {
+				return nil
+			}
+			if rt := typeOf(fn.X, imp, depth+1); rt != nil {
+				if id, ok := strip(rt).(*ast.Ident); ok {
+					fd = funcs[id.Name+"."+fn.Sel.Name]
+				}
+			}
+		}
+		if fd == nil || fd.Type.Results == nil {
+			return nil
+		}
+		var rs []ast.Expr
+		for _, r := range fd.Type.Results.List {
+			for range max(1, len(r.Names)) {
+				rs = append(rs, r.Type)
+			}
+		}
+		return rs
+	}
+	typeOf = func(e ast.Expr, imp map[string]bool, depth int) ast.Expr {
+		if depth > 32 {
+			return nil
+		}
+		switch x := e.(type) {
+		case *ast.ParenExpr:
+			return typeOf(x.X, imp, depth+1)
+		case *ast.BasicLit:
+			return ast.NewIdent("string")
+		case *ast.FuncLit:
+			return x.Type
+		case *ast.CompositeLit:
+			return x.Type
+		case *ast.TypeAssertExpr:
+			return x.Type
+		case *ast.SliceExpr:
+			return typeOf(x.X, imp, depth+1)
+		case *ast.BinaryExpr:
+			return typeOf(x.X, imp, depth+1)
+		case *ast.UnaryExpr:
+			if t := typeOf(x.X, imp, depth+1); t != nil && x.Op == token.AND {
+				return &ast.StarExpr{X: t}
+			} else {
+				return t
+			}
+		case *ast.StarExpr:
+			if t, ok := typeOf(x.X, imp, depth+1).(*ast.StarExpr); ok {
+				return t.X
+			}
+			return nil
+		case *ast.SelectorExpr:
+			if id, ok := x.X.(*ast.Ident); ok && id.Obj == nil && imp[id.Name] {
+				return nil
+			}
+			if t := typeOf(x.X, imp, depth+1); t != nil {
+				return field(t, x.Sel.Name, 0)
+			}
+			return nil
+		case *ast.IndexExpr:
+			switch r := resolve(strip(typeOf(x.X, imp, depth+1))).(type) {
+			case *ast.ArrayType:
+				return r.Elt
+			case *ast.MapType:
+				return r.Value
+			case *ast.Ident:
+				if r.Name == "string" {
+					return ast.NewIdent("byte")
+				}
+			}
+			return nil
+		case *ast.CallExpr:
+			switch fn := x.Fun.(type) {
+			case *ast.Ident:
+				switch {
+				case fn.Name == "new" && len(x.Args) == 1:
+					return &ast.StarExpr{X: x.Args[0]}
+				case fn.Name == "append" && len(x.Args) > 0:
+					return typeOf(x.Args[0], imp, depth+1)
+				case fn.Name == "make" && len(x.Args) > 0:
+					return x.Args[0]
+				case fn.Name == "len" || fn.Name == "cap":
+					return ast.NewIdent("int")
+				case decls[fn.Name] != nil || fn.Obj == nil && funcs[fn.Name] == nil && predeclared[fn.Name]:
+					return fn // a conversion
+				}
+			case *ast.ArrayType, *ast.MapType, *ast.StarExpr, *ast.FuncType, *ast.InterfaceType, *ast.ChanType:
+				return fn // a conversion
+			case *ast.ParenExpr:
+				if _, ok := fn.X.(*ast.StarExpr); ok {
+					return fn.X
+				}
+			}
+			if rs := results(x, imp, depth); len(rs) == 1 {
+				return rs[0]
+			}
+			return nil
+		case *ast.Ident:
+			if x.Obj == nil {
+				if t := vars[x.Name]; t != nil {
+					return t
+				}
+				if x.Name == "nil" || x.Name == "true" || x.Name == "false" || x.Name == "iota" {
+					return ast.NewIdent("bool")
+				}
+				return nil
+			}
+			if t := declType(x.Obj); t != nil {
+				return t
+			}
+			// A name from a multi-value :=, var or range.
+			switch d := x.Obj.Decl.(type) {
+			case *ast.AssignStmt:
+				for i, l := range d.Lhs {
+					id, ok := l.(*ast.Ident)
+					if !ok || id.Obj != x.Obj {
+						continue
+					}
+					if len(d.Lhs) == len(d.Rhs) {
+						return typeOf(d.Rhs[i], imp, depth+1)
+					}
+					if len(d.Rhs) != 1 {
+						return nil
+					}
+					if u, ok := d.Rhs[0].(*ast.UnaryExpr); ok && u.Op == token.RANGE {
+						switch r := resolve(strip(typeOf(u.X, imp, depth+1))).(type) {
+						case *ast.ArrayType:
+							if i == 0 {
+								return ast.NewIdent("int")
+							}
+							return r.Elt
+						case *ast.MapType:
+							if i == 0 {
+								return r.Key
+							}
+							return r.Value
+						}
+						return nil
+					}
+					if c, ok := d.Rhs[0].(*ast.CallExpr); ok {
+						if rs := results(c, imp, depth); i < len(rs) {
+							return rs[i]
+						}
+					}
+					return nil
+				}
+			case *ast.ValueSpec:
+				for i, nm := range d.Names {
+					if nm.Obj != x.Obj {
+						continue
+					}
+					if len(d.Values) == len(d.Names) {
+						return typeOf(d.Values[i], imp, depth+1)
+					}
+					if len(d.Values) == 1 {
+						if c, ok := d.Values[0].(*ast.CallExpr); ok {
+							if rs := results(c, imp, depth); i < len(rs) {
+								return rs[i]
+							}
+						}
+					}
+				}
+			}
+			return nil
+		}
+		return nil
+	}
+	// opaque reports a type that may hold a listed field where syntax
+	// cannot see it: an interface, which may hold any value.
+	var opaque func(e ast.Expr) bool
+	opaque = func(e ast.Expr) bool {
+		switch x := resolve(strip(e)).(type) {
+		case *ast.InterfaceType:
+			return true
+		case *ast.Ident:
+			return x.Name == "any"
+		case *ast.ArrayType:
+			return opaque(x.Elt)
+		case *ast.MapType:
+			return opaque(x.Value)
+		}
+		return false
+	}
+	// typeParam is the generic function whose type parameter e names.
+	typeParam := func(e ast.Expr) (*ast.FuncDecl, string) {
+		id, ok := strip(e).(*ast.Ident)
+		if !ok || id.Obj == nil || !isTypeParam(id.Obj) {
+			return nil, ""
+		}
+		for _, fd := range funcs {
+			if fd.Type.TypeParams == nil {
+				continue
+			}
+			for _, fl := range fd.Type.TypeParams.List {
+				for _, nm := range fl.Names {
+					if nm.Obj == id.Obj {
+						return fd, nm.Name
+					}
+				}
+			}
+		}
+		return nil, ""
+	}
+	// Writers in the package's imports: a standard decoder (writerFuncs,
+	// or a writerMethods name on any value), or a function or method of
+	// another package of this module whose parameter is an interface or a
+	// type parameter, so it could hand the value to one. A third-party
+	// import, which this lint does not read, is refused instead.
+	modWriters := map[string]map[int]bool{} // "path.F" or ".M" -> parameter index
+	root, inTree := strings.CutSuffix(filepath.ToSlash(dir), "/"+rel)
+	readMod := func(imp string) {
+		if !inTree || modWriters[imp+"."] != nil {
+			return
+		}
+		modWriters[imp+"."] = map[int]bool{}
+		files, _ := filepath.Glob(filepath.Join(root, strings.TrimPrefix(imp, module), "*.go"))
+		for _, p := range files {
+			if strings.HasSuffix(p, "_test.go") {
+				continue
+			}
+			mf, err := parser.ParseFile(token.NewFileSet(), p, nil, 0)
+			if err != nil {
+				continue
+			}
+			for _, d := range mf.Decls {
+				fd, ok := d.(*ast.FuncDecl)
+				if !ok || !ast.IsExported(fd.Name.Name) {
+					continue
+				}
+				key := imp + "." + fd.Name.Name
+				if fd.Recv != nil {
+					key = "." + fd.Name.Name
+				}
+				i := 0
+				for _, fl := range fd.Type.Params.List {
+					t := fl.Type
+					el, variadic := t.(*ast.Ellipsis)
+					if variadic {
+						t = el.Elt
+					}
+					it := false
+					switch x := strip(t).(type) {
+					case *ast.InterfaceType:
+						it = true
+					case *ast.Ident:
+						it = x.Name == "any" || x.Obj != nil && isTypeParam(x.Obj)
+					}
+					for range max(1, len(fl.Names)) {
+						if it {
+							if modWriters[key] == nil {
+								modWriters[key] = map[int]bool{}
+							}
+							// -1 marks a variadic one: every argument
+							// from its index on.
+							modWriters[key][i], modWriters[key][-1] = true, modWriters[key][-1] || variadic
+						}
+						i++
+					}
+				}
+			}
+		}
+	}
+	decoders := map[*ast.FuncDecl]map[string]bool{} // generics that decode into a type parameter
+	// pkgWriters are this package's functions ("h", or any method ".m")
+	// that hand a parameter of interface type to a writer, by index; a
+	// call to one hands its argument to that writer (fixed point below).
+	pkgWriters := map[string]map[int]bool{}
+	// target checks a value a writer may store through, and reports
+	// whether it made its own function a writer.
+	target := func(c *ast.CallExpr, a ast.Expr, imp map[string]bool, what string) bool {
+		t := typeOf(a, imp, 0)
+		if fd, name := typeParam(t); fd != nil {
+			if decoders[fd] == nil {
+				decoders[fd] = map[string]bool{}
+			}
+			decoders[fd][name] = true
+			return false
+		}
+		if id, ok := a.(*ast.Ident); ok && id.Obj != nil && t != nil && opaque(t) {
+			for key, fd := range funcs {
+				for i, p := range flatNames(fd.Type.Params) {
+					if p != nil && p.Obj == id.Obj {
+						if fd.Recv != nil {
+							key = "." + fd.Name.Name
+						}
+						if pkgWriters[key] == nil {
+							pkgWriters[key] = map[int]bool{}
+						}
+						grew := !pkgWriters[key][i]
+						pkgWriters[key][i] = true
+						return grew
+					}
+				}
+			}
+		}
+		if t == nil || opaque(t) || holds(t, map[string]bool{}) {
+			at(c, what+" may store into a configuredFields field: the lint cannot show what it is handed holds none")
+		}
+		return false
+	}
+	// call checks one call's arguments, and reports whether pkgWriters
+	// grew.
+	call := func(n *ast.CallExpr, f *ast.File) bool {
+		imp, local := imports(f)
+		from, writes, what := 0, false, ""
+		var idx, own map[int]bool
+		switch fn := n.Fun.(type) {
+		case *ast.Ident:
+			if fn.Obj == nil || funcs[fn.Name] != nil && fn.Obj.Decl == funcs[fn.Name] {
+				own, what = pkgWriters[fn.Name], fn.Name
+			}
+		case *ast.SelectorExpr:
+			if id, ok := fn.X.(*ast.Ident); ok && id.Obj == nil && imp[id.Name] {
+				full := local[id.Name] + "." + fn.Sel.Name
+				from, writes = writerFuncs[full]
+				if strings.HasPrefix(local[id.Name], module) {
+					readMod(local[id.Name])
+					idx = modWriters[full]
+				}
+				what = full
+			} else {
+				from, writes = writerMethods[fn.Sel.Name]
+				idx, own, what = modWriters["."+fn.Sel.Name], pkgWriters["."+fn.Sel.Name], fn.Sel.Name
+			}
+		}
+		grew := false
+		for i, a := range n.Args {
+			if writes && i >= from || idx[i] || idx[-1] && i >= last(idx) || own[i] {
+				grew = target(n, a, imp, what) || grew
+			}
+		}
+		var targs []ast.Expr
+		switch x := n.Fun.(type) {
+		case *ast.IndexExpr:
+			targs = []ast.Expr{x.Index}
+		case *ast.IndexListExpr:
+			targs = x.Indices
+		}
+		for _, ta := range targs {
+			if holds(ta, map[string]bool{}) || opaque(ta) {
+				at(n, "instantiates a generic with a type that holds a configuredFields field")
+			}
+		}
+		return grew
+	}
 	for _, f := range fs {
 		for _, im := range f.Imports {
 			if im.Path.Value == `"reflect"` {
@@ -1203,36 +1609,6 @@ func fieldStores(fs []*ast.File, rel string, at func(ast.Node, string)) {
 				if n.Type != nil {
 					lit(n, n.Type)
 				}
-			case *ast.CallExpr:
-				for _, a := range n.Args {
-					ptr := false
-					if u, ok := a.(*ast.UnaryExpr); ok && u.Op == token.AND {
-						a, ptr = u.X, true
-					}
-					id, ok := a.(*ast.Ident)
-					if !ok || id.Obj == nil {
-						continue
-					}
-					typ := declType(id.Obj)
-					if st, ok := typ.(*ast.StarExpr); ok {
-						typ, ptr = st.X, true
-					}
-					if ptr && typ != nil && holds(typ, map[string]bool{}) {
-						at(n, "hands a pointer to "+id.Name+", which holds a configuredFields field, to a call that may store through it")
-					}
-				}
-				var targs []ast.Expr
-				switch x := n.Fun.(type) {
-				case *ast.IndexExpr:
-					targs = []ast.Expr{x.Index}
-				case *ast.IndexListExpr:
-					targs = x.Indices
-				}
-				for _, ta := range targs {
-					if holds(ta, map[string]bool{}) {
-						at(n, "instantiates a generic with a type that holds a configuredFields field")
-					}
-				}
 			}
 			for _, e := range targets {
 				if e == nil {
@@ -1245,6 +1621,223 @@ func fieldStores(fs []*ast.File, rel string, at func(ast.Node, string)) {
 			return true
 		})
 	}
+	for grew := true; grew; {
+		grew = false
+		for _, f := range fs {
+			ast.Inspect(f, func(n ast.Node) bool {
+				if c, ok := n.(*ast.CallExpr); ok && call(c, f) {
+					grew = true
+				}
+				return true
+			})
+		}
+	}
+	// A generic that decodes into its type parameter: each use must
+	// instantiate it, explicitly or through a function literal's
+	// parameter, with a type that holds no listed field.
+	for _, f := range fs {
+		imp, _ := imports(f)
+		called := map[ast.Node]bool{}
+		ast.Inspect(f, func(n ast.Node) bool {
+			c, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			fun := c.Fun
+			if ix, ok := fun.(*ast.IndexExpr); ok {
+				fun = ix.X
+			} else if ix, ok := fun.(*ast.IndexListExpr); ok {
+				fun = ix.X
+			}
+			called[fun] = true
+			id, ok := fun.(*ast.Ident)
+			if !ok || funcs[id.Name] == nil || decoders[funcs[id.Name]] == nil || fun != c.Fun || id.Obj != nil && id.Obj.Decl != funcs[id.Name] {
+				return true // explicit instantiations are checked in call
+			}
+			fd := funcs[id.Name]
+			bound := map[string]ast.Expr{}
+			var bind func(g, a ast.Expr)
+			bind = func(g, a ast.Expr) {
+				if a == nil {
+					return
+				}
+				switch g := g.(type) {
+				case *ast.Ident:
+					if decoders[fd][g.Name] && bound[g.Name] == nil {
+						bound[g.Name] = a
+					}
+				case *ast.StarExpr:
+					if a, ok := a.(*ast.StarExpr); ok {
+						bind(g.X, a.X)
+					}
+				case *ast.ArrayType:
+					if a, ok := resolve(a).(*ast.ArrayType); ok {
+						bind(g.Elt, a.Elt)
+					}
+				case *ast.MapType:
+					if a, ok := resolve(a).(*ast.MapType); ok {
+						bind(g.Key, a.Key)
+						bind(g.Value, a.Value)
+					}
+				case *ast.FuncType:
+					a, ok := a.(*ast.FuncType)
+					if !ok {
+						return
+					}
+					gp, ap := flatTypes(g.Params), flatTypes(a.Params)
+					for i := range min(len(gp), len(ap)) {
+						bind(gp[i], ap[i])
+					}
+					gr, ar := flatTypes(g.Results), flatTypes(a.Results)
+					for i := range min(len(gr), len(ar)) {
+						bind(gr[i], ar[i])
+					}
+				}
+			}
+			ps := flatTypes(fd.Type.Params)
+			for i, a := range c.Args {
+				if i < len(ps) {
+					bind(ps[i], typeOf(a, imp, 0))
+				}
+			}
+			for name := range decoders[fd] {
+				if b := bound[name]; b == nil || opaque(b) || holds(b, map[string]bool{}) {
+					at(c, fd.Name.Name+" decodes into its type parameter "+name+", which the lint cannot show holds no configuredFields field")
+				}
+			}
+			return true
+		})
+		// A decoding generic or a writer of the package taken as a value
+		// escapes both checks.
+		named := map[ast.Node]bool{}
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.FuncDecl:
+				named[n.Name] = true
+			case *ast.SelectorExpr:
+				named[n.Sel] = true
+				if id, ok := n.X.(*ast.Ident); ok && id.Obj == nil && imp[id.Name] {
+					return true
+				}
+				if len(pkgWriters["."+n.Sel.Name]) > 0 && !called[n] {
+					at(n, n.Sel.Name+", which hands its argument to a writer, used as a value")
+				}
+			case *ast.Ident:
+				fd := funcs[n.Name]
+				if named[n] || called[n] || fd == nil || n.Obj != nil && n.Obj.Decl != fd {
+					return true
+				}
+				if decoders[fd] != nil {
+					at(n, n.Name+", a generic that decodes into its type parameter, used as a value")
+				}
+				if len(pkgWriters[n.Name]) > 0 {
+					at(n, n.Name+", which hands its argument to a writer, used as a value")
+				}
+			}
+			return true
+		})
+		for _, im := range f.Imports {
+			p, _ := strconv.Unquote(im.Path.Value)
+			if strings.Contains(strings.SplitN(p, "/", 2)[0], ".") && !strings.HasPrefix(p, module) && p != "golang.org/x/sys/unix" {
+				at(im, "imports "+p+", a third-party package the lint does not read, which could store into a configuredFields field")
+			}
+		}
+	}
+}
+
+// writerFuncs are the standard functions that store, by reflection,
+// through the arguments from the given index on.
+var writerFuncs = map[string]int{
+	"encoding/json.Unmarshal": 1, "encoding/xml.Unmarshal": 1, "encoding/asn1.Unmarshal": 1, "encoding/asn1.UnmarshalWithParams": 1,
+	"encoding/binary.Read": 2, "encoding/binary.Decode": 2,
+	"fmt.Sscan": 1, "fmt.Sscanf": 2, "fmt.Sscanln": 1, "fmt.Fscan": 1, "fmt.Fscanf": 2, "fmt.Fscanln": 1, "fmt.Scan": 0, "fmt.Scanf": 1, "fmt.Scanln": 0,
+}
+
+// writerMethods are the method names of standard types that store, by
+// reflection, through their arguments (json, xml and gob decoders, sql
+// rows); a method of that name on any value counts.
+var writerMethods = map[string]int{"Decode": 0, "DecodeElement": 0, "DecodeValue": 0, "Scan": 0}
+
+// predeclared are Go's predeclared type names, for conversions.
+var predeclared = map[string]bool{
+	"bool": true, "byte": true, "rune": true, "string": true, "error": true, "any": true, "uintptr": true,
+	"int": true, "int8": true, "int16": true, "int32": true, "int64": true,
+	"uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true,
+	"float32": true, "float64": true, "complex64": true, "complex128": true,
+}
+
+// recvName is a receiver type's name, without its pointer or type
+// parameters.
+func recvName(e ast.Expr) string {
+	for {
+		switch x := e.(type) {
+		case *ast.StarExpr:
+			e = x.X
+		case *ast.IndexExpr:
+			e = x.X
+		case *ast.IndexListExpr:
+			e = x.X
+		case *ast.ParenExpr:
+			e = x.X
+		case *ast.Ident:
+			return x.Name
+		default:
+			return ""
+		}
+	}
+}
+
+// flatTypes is a field list's types, one per name.
+func flatTypes(fl *ast.FieldList) []ast.Expr {
+	if fl == nil {
+		return nil
+	}
+	var ts []ast.Expr
+	for _, f := range fl.List {
+		for range max(1, len(f.Names)) {
+			ts = append(ts, f.Type)
+		}
+	}
+	return ts
+}
+
+// last is the highest index in idx.
+func last(idx map[int]bool) int {
+	m := -1
+	for i := range idx {
+		m = max(m, i)
+	}
+	return m
+}
+
+// imports are f's import names, and the path each names.
+func imports(f *ast.File) (map[string]bool, map[string]string) {
+	imp, local := map[string]bool{}, map[string]string{}
+	for _, im := range f.Imports {
+		p, _ := strconv.Unquote(im.Path.Value)
+		nm := p[strings.LastIndex(p, "/")+1:]
+		if im.Name != nil {
+			nm = im.Name.Name
+		}
+		imp[nm], local[nm] = true, p
+	}
+	return imp, local
+}
+
+// flatNames is a field list's names, one per parameter (nil when
+// unnamed).
+func flatNames(fl *ast.FieldList) []*ast.Ident {
+	if fl == nil {
+		return nil
+	}
+	var ns []*ast.Ident
+	for _, f := range fl.List {
+		if len(f.Names) == 0 {
+			ns = append(ns, nil)
+		}
+		ns = append(ns, f.Names...)
+	}
+	return ns
 }
 
 // isTypeParam reports obj declared in a type parameter list.
@@ -1305,46 +1898,52 @@ var linkCalls = map[string]bool{
 	"golang.org/x/sys/unix.Renameat2": true,
 }
 
-// linkOK are the linkCalls a package that dials may make, outside the
-// files that dial, and why.
+// linkOK are the linkCalls (or linkMethods, as ".Name") each file of a
+// package that dials may make, called or taken as a value, and why; a
+// file that dials makes none. Any other file owes an entry by review.
 var linkOK = map[string]map[string]string{
-	"kernel/proc": {
-		"os.Link":   "links a backup's content file into its snapshot, under the kernel's backup dir (backup.go)",
-		"os.Rename": "moves a restore's staged content into the content dir (restore.go)",
-	},
+	"kernel/proc/backup.go":  {"os.Link": "links a backup's content file into its snapshot, under the kernel's backup dir; also held as backups.link, its only use"},
+	"kernel/proc/restore.go": {"os.Rename": "moves a restore's staged content into the content dir"},
 }
 
-// links refuses a linkCall, called or taken as a value, in a package that
-// dials a unix socket, except a linkOK use in a file that does not dial
-// (Security 4 on #6035).
-func links(fs []*ast.File, rel string, at func(ast.Node, string)) {
+// linkMethods are the method names that make, move or replace a directory
+// entry (os.Root's, and any wrapper's); a method of that name on any value
+// counts.
+var linkMethods = map[string]bool{"Symlink": true, "Link": true, "Rename": true}
+
+// links refuses a linkCall or linkMethods method, called or taken as a
+// value, and os.OpenRoot or os.OpenInRoot, in a package that dials a unix
+// socket, except a linkOK use in its own file, which does not dial
+// (Security 4 on #6035, B2 and B3 on #6119).
+func links(fs []*ast.File, names []string, rel string, at func(ast.Node, string)) {
 	if !unixDialers[rel] && unixDialCalls[rel] == nil {
 		return
 	}
-	for _, f := range fs {
-		local := map[string]string{}
-		for _, im := range f.Imports {
-			p, _ := strconv.Unquote(im.Path.Value)
-			n := p[strings.LastIndex(p, "/")+1:]
-			if im.Name != nil {
-				n = im.Name.Name
-			}
-			local[n] = p
-		}
+	for i, f := range fs {
+		_, local := imports(f)
 		dialsHere := false
 		dialAddrs(f, func(ast.Expr) { dialsHere = true })
+		ok := linkOK[rel+"/"+names[i]]
 		ast.Inspect(f, func(n ast.Node) bool {
-			se, ok := n.(*ast.SelectorExpr)
-			if !ok {
+			se, isSel := n.(*ast.SelectorExpr)
+			if !isSel {
 				return true
 			}
-			id, ok := se.X.(*ast.Ident)
-			if !ok || id.Obj != nil || local[id.Name] == "" {
+			full := "." + se.Sel.Name
+			if id, isID := se.X.(*ast.Ident); isID && id.Obj == nil && local[id.Name] != "" {
+				full = local[id.Name] + "." + se.Sel.Name
+				if full == "os.OpenRoot" || full == "os.OpenInRoot" {
+					at(se, "opens an os.Root ("+full+"), whose methods link and rename, in a package that dials a unix socket")
+					return true
+				}
+				if !linkCalls[full] {
+					return true
+				}
+			} else if !linkMethods[se.Sel.Name] {
 				return true
 			}
-			full := local[id.Name] + "." + se.Sel.Name
-			if linkCalls[full] && (dialsHere || linkOK[rel][full] == "") {
-				at(se, "links or renames ("+full+") in a package that dials a unix socket")
+			if dialsHere || ok[full] == "" {
+				at(se, "links or renames ("+strings.TrimPrefix(full, ".")+") in a package that dials a unix socket")
 			}
 			return true
 		})
@@ -1588,10 +2187,10 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		// type that holds it handed to a call, however the value was made
 		// (Lens on #6030), or a generic instantiated with such a type.
 		{"modelroute", "imports reflect", []string{src(`"net"; "reflect"`, cfgDial+`func g(c *Config) { reflect.ValueOf(c).Elem().Field(0).SetString("/run/proxy.sock"); c.dial() }`)}},
-		{"modelroute", "hands a pointer to c", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(c *Config) { json.Unmarshal([]byte(`+"`"+`{"Socket":"/run/proxy.sock"}`+"`"+`), c); c.dial() }`)}},
-		{"modelroute", "hands a pointer to d", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte) { var d Config; json.Unmarshal(b, &d); d.dial() }`)}},
-		{"modelroute", "hands a pointer to d", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte) { d := new(Config); json.Unmarshal(b, d); d.dial() }`)}},
-		{"modelroute", "hands a pointer to o", []string{src(`"net"; "encoding/json"`, cfgDial+`type outer struct{ In []Config }; func g(b []byte) { var o outer; json.Unmarshal(b, &o); o.In[0].dial() }`)}},
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(c *Config) { json.Unmarshal([]byte(`+"`"+`{"Socket":"/run/proxy.sock"}`+"`"+`), c); c.dial() }`)}},
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte) { var d Config; json.Unmarshal(b, &d); d.dial() }`)}},
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte) { d := new(Config); json.Unmarshal(b, d); d.dial() }`)}},
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type outer struct{ In []Config }; func g(b []byte) { var o outer; json.Unmarshal(b, &o); o.In[0].dial() }`)}},
 		{"modelroute", "instantiates a generic", []string{src(`"net"; "encoding/json"`, cfgDial+`func dec[T any](b []byte) (t T) { json.Unmarshal(b, &t); return }; func g(b []byte) { c := dec[Config](b); c.dial() }`)}},
 		// A link or rename that could put another socket at the dialed
 		// path or its directory, in a package that dials, called or taken
@@ -1605,6 +2204,28 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		{"modelroute", "links or renames (os.Symlink)", []string{src(`"net"; "os"`, dial+`var link = os.Symlink`)}},
 		{"kernel/proc", "links or renames (os.Rename)", []string{src(`"net"; "os"`, `type Conn struct{ Socket string }; func (c *Conn) dial() { net.Dial("unix", c.Socket); os.Rename("/run/proxy.sock", c.Socket) }`)}},
 		{"kernel/proc", "links or renames (os.Symlink)", []string{src(`"net"`, `type Conn struct{ Socket string }; func (c *Conn) dial() { net.Dial("unix", c.Socket) }`), src(`"os"`, `func g(s string) { os.Symlink("/run/proxy.sock", s) }`)}},
+		// A writer's target the lint cannot show holds no listed field,
+		// however it is reached (B1 on #6119).
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func get() *Config { return nil }; func g(b []byte) { c := get(); json.Unmarshal(b, c); c.dial() }`)}},
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ C Config }; func g(b []byte, w *W) { json.Unmarshal(b, &w.C); w.C.dial() }`)}},
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte, l []Config) { json.Unmarshal(b, &l[0]); l[0].dial() }`)}},
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func get() *Config { return nil }; func g(b []byte) { json.Unmarshal(b, get()) }`)}},
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte, c *Config) { var v any = c; json.Unmarshal(b, v); c.dial() }`)}},
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte, x interface{ Get() *Config }) { json.Unmarshal(b, x.Get()); x.Get().dial() }`)}},
+		{"modelroute", "Decode may store into a configuredFields field", []string{src(`"net"; "encoding/json"; "io"`, cfgDial+`func g(r io.Reader, c *Config) { json.NewDecoder(r).Decode(c); c.dial() }`)}},
+		{"modelroute", "fmt.Sscan may store into a configuredFields field", []string{src(`"net"; "fmt"`, cfgDial+`func g(c *Config) { fmt.Sscan("/run/proxy.sock", c); c.dial() }`)}},
+		{"modelroute", "load may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func load(b []byte, out any) { json.Unmarshal(b, out) }; func g(b []byte, c *Config) { load(b, c); c.dial() }`)}},
+		{"modelroute", "load may store into a configuredFields field", []string{src(`"net"`, cfgDial+`func g(b []byte, c *Config) { load(b, c); c.dial() }`), src(`"encoding/json"`, `func load(b []byte, out any) { json.Unmarshal(b, out) }`)}},
+		{"modelroute", "load, which hands its argument to a writer, used as a value", []string{src(`"net"; "encoding/json"`, cfgDial+`func load(b []byte, out any) { json.Unmarshal(b, out) }; var f = load`)}},
+		{"modelroute", "act decodes into its type parameter A", []string{src(`"net"; "encoding/json"`, cfgDial+`func act[A any](f func(a A)) func([]byte) { return func(b []byte) { var a A; json.Unmarshal(b, &a); f(a) } }; var h = act(func(c Config) { c.dial() })`)}},
+		{"modelroute", "act, a generic that decodes into its type parameter, used as a value", []string{src(`"net"; "encoding/json"`, cfgDial+`func act[A any](f func(a A)) func([]byte) { return func(b []byte) { var a A; json.Unmarshal(b, &a); f(a) } }; var h = act[Config]; var k = act`)}},
+		{"modelroute", "imports example.com/fill, a third-party package", []string{src(`"net"; "example.com/fill"`, cfgDial+`func g(c *Config) { fill.In(c); c.dial() }`)}},
+		// os.Root's methods, and opening one (B2 on #6119).
+		{"modelroute", "links or renames (Symlink)", []string{src(`"net"; "os"`, dial+`func g(s string) { r, _ := os.OpenRoot("/tmp"); r.Symlink("/run/proxy.sock", s) }`)}},
+		{"modelroute", "links or renames (Rename)", []string{src(`"net"; "os"`, dial+`func g(r *os.Root, s string) { r.Rename("/run/proxy.sock", s) }`)}},
+		{"modelroute", "opens an os.Root (os.OpenRoot)", []string{src(`"net"; "os"`, dial+`func g() { os.OpenRoot("/tmp") }`)}},
+		// kernel/proc's allowance is per file and per call (B3 on #6119).
+		{"kernel/proc", "links or renames (os.Link)", []string{src(`"net"`, `type Conn struct{ Socket string }; func (c *Conn) dial() { net.Dial("unix", c.Socket) }`), src(`"os"`, `func g(a, b string) { os.Link(a, b) }`)}},
 	} {
 		if got := useOf(t, c.rel, c.srcs...); !strings.Contains(got, c.want) {
 			t.Errorf("in %s, not reported: %s; got %q\n%s", c.rel, c.want, got, strings.Join(c.srcs, "\n"))
@@ -1618,7 +2239,7 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		srcs []string
 	}{
 		{"modelroute", []string{src(`"net"`, `type Config struct{ Socket string }; `+dial+`func k(s string) { h(s) }; func g(c Config) { h(c.Socket); k(c.Socket) }`)}},
-		{"kernel/proc", []string{src(`"net"`, `type Conn struct{ Socket string }; func (c *Conn) dial() { net.Dial("unix", c.Socket) }`), src(`"os"`, `func g(a, b string) { os.Link(a, b); os.Rename(a, b) }`)}},
+		{"modelroute", []string{src(`"net"; "encoding/json"`, `type Config struct{ Socket string }; type resp struct{ N int }; func load(b []byte, out any) { json.Unmarshal(b, out) }; func g(b []byte) { var r resp; load(b, &r); var n struct{ N int }; json.Unmarshal(b, &n) }`)}},
 	} {
 		if got := useOf(t, c.rel, c.srcs...); got != "" {
 			t.Errorf("in %s, flagged: %q\n%s", c.rel, got, strings.Join(c.srcs, "\n"))
@@ -1659,6 +2280,19 @@ func keep(p *Remote, old Remote) { *p = old }`)
 	if got := strings.Join(sourceUse(t, path, "held.go", "modelroute"), "\n"); !strings.Contains(got, "not taken from configuration") {
 		t.Errorf("a field listed for another package passed: %q", got)
 	}
+	// kernel/proc's reviewed link and rename stand in their own files.
+	files := map[string]string{
+		"conn.go":    src(`"net"`, `type Conn struct{ Socket string }; func (c *Conn) dial() { net.Dial("unix", c.Socket) }`),
+		"backup.go":  src(`"os"`, `type backups struct{ link func(a, b string) error }; var bk = backups{link: os.Link}; func g(a, b string) { os.Link(a, b) }`),
+		"restore.go": src(`"os"`, `func h(a, b string) { os.Rename(a, b) }`),
+	}
+	if got := useFiles(t, "kernel/proc", files); got != "" {
+		t.Errorf("kernel/proc's reviewed link and rename flagged: %q", got)
+	}
+	files["backup.go"] = src(`"os"`, `func g(a, b string) { os.Symlink(a, b) }`)
+	if got := useFiles(t, "kernel/proc", files); !strings.Contains(got, "links or renames (os.Symlink)") {
+		t.Errorf("a symlink in backup.go passed: %q", got)
+	}
 	// Imports: RPC, mail, raw sockets, and escape hatches.
 	reach := httpReach([]listed{{path: "net/rpc", imports: []string{"net/http"}}, {path: "net/http"}})
 	if !reach["net/rpc"] || !socketPkgs["net/smtp"] || !socketPkgs["syscall"] || !socketPkgs["golang.org/x/sys/unix"] {
@@ -1675,16 +2309,26 @@ func keep(p *Remote, old Remote) { *p = old }`)
 // packageUse reports for it as package rel.
 func useOf(t *testing.T, rel string, srcs ...string) string {
 	t.Helper()
-	dir := t.TempDir()
-	var files []string
+	files := map[string]string{}
 	for i, s := range srcs {
-		name := fmt.Sprintf("p%d.go", i)
+		files[fmt.Sprintf("p%d.go", i)] = s
+	}
+	return useFiles(t, rel, files)
+}
+
+// useFiles is useOf with the files named.
+func useFiles(t *testing.T, rel string, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	var names []string
+	for name, s := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(s), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		files = append(files, name)
+		names = append(names, name)
 	}
-	return strings.Join(packageUse(t, dir, files, "p", rel), "\n")
+	sort.Strings(names)
+	return strings.Join(packageUse(t, dir, names, "p", rel), "\n")
 }
 
 // REQ: LOOP-7, LOOP-9
