@@ -499,3 +499,54 @@ func TestSTOPThatFailsToRecordIsNotReportedDoneWhenAlreadyStopped(t *testing.T) 
 		t.Fatalf("STOP on an engine that could not record it: %q", r)
 	}
 }
+
+// REQ: CH-12. CTL-owner-text-lost (#5429): an owner text that arrives while the agent's
+// machine has no open services is dropped, not queued, and the reply says
+// so in plain words and says to send it again.
+
+// windowAgent refuses delivery while down, as guest.OwnerAgent does when
+// the machine has no open services, and records what it was given once up.
+type windowAgent struct {
+	down bool
+	got  []string
+}
+
+func (w *windowAgent) Deliver(_ context.Context, text string, _ bool) error {
+	if w.down {
+		return errors.New("guest: machine has no open services")
+	}
+	w.got = append(w.got, text)
+	return nil
+}
+
+func TestOwnerTextLostReplySaysNotReceivedAndResend(t *testing.T) {
+	agent := &windowAgent{down: true}
+	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, agent)
+	r := one(t, h.Handle(context.Background(), owner, "book a table for two"))
+	for _, w := range []string{"not running", "not received", "Send it again", "STATUS", "STOP"} {
+		if !strings.Contains(r, w) {
+			t.Fatalf("reply lacks %q: %q", w, r)
+		}
+	}
+	// A reaction (Event) refused in the same window gets the same truth.
+	if got := one(t, h.Event(context.Background(), owner, "Owner reacted")); got != r {
+		t.Fatalf("Event reply %q, want %q", got, r)
+	}
+	// One SMS segment (CH-12), unchanged by Fit.
+	if n, _ := Units(r); n > 153 || Fit(r) != r {
+		t.Fatalf("reply is %d units or not GSM-7: %q", n, r)
+	}
+}
+
+func TestOwnerTextInWindowIsNeverDelivered(t *testing.T) {
+	agent := &windowAgent{down: true}
+	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, agent)
+	one(t, h.Handle(context.Background(), owner, "lost text"))
+	agent.down = false
+	if out := h.Handle(context.Background(), owner, "later text"); len(out) != 0 {
+		t.Fatalf("up reply = %q", out)
+	}
+	if len(agent.got) != 1 || agent.got[0] != "later text" {
+		t.Fatalf("agent got %q, want only the later text", agent.got)
+	}
+}
