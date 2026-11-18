@@ -1977,17 +1977,107 @@ def is_bool(v):
     return v.lower() in TRUE_WORDS + FALSE_WORDS
 
 
-# parse_sec's units (systemd 257.7 time-util.c), longest first so a regex alternation takes the whole word.
-SEC_UNITS = ("seconds", "minutes", "months", "second", "minute", "month", "hours", "years", "weeks",
-             "msec", "usec", "hour", "year", "week", "days", "sec", "min", "day", "hr", "ms", "us", "\u00b5s",
-             "\u03bcs", "s", "m", "h", "d", "w", "M", "y")
-SEC = re.compile(r"\s*(infinity|(\d+(\.\d*)?|\.\d+)\s*(%s)?(\s*(\d+(\.\d*)?|\.\d+)\s*(%s)?)*)\s*"
-                 % ("|".join(SEC_UNITS), "|".join(SEC_UNITS)))
+# parse_sec (systemd 257.7 time-util.c parse_time with USEC_PER_SEC), ported line for line so a value it
+# rejects is never read as the interval (Security and L3 on #6128). extract_multiplier's table, in its order:
+# the first suffix that matches wins.
+USEC_INFINITY = (1 << 64) - 1
+SEC_UNITS = tuple((u.encode(), n) for u, n in (
+    ("seconds", 10**6), ("second", 10**6), ("sec", 10**6), ("s", 10**6),
+    ("minutes", 60 * 10**6), ("minute", 60 * 10**6), ("min", 60 * 10**6),
+    ("months", 2629800 * 10**6), ("month", 2629800 * 10**6), ("M", 2629800 * 10**6),
+    ("msec", 1000), ("ms", 1000), ("m", 60 * 10**6),
+    ("hours", 3600 * 10**6), ("hour", 3600 * 10**6), ("hr", 3600 * 10**6), ("h", 3600 * 10**6),
+    ("days", 86400 * 10**6), ("day", 86400 * 10**6), ("d", 86400 * 10**6),
+    ("weeks", 604800 * 10**6), ("week", 604800 * 10**6), ("w", 604800 * 10**6),
+    ("years", 31557600 * 10**6), ("year", 31557600 * 10**6), ("y", 31557600 * 10**6),
+    ("usec", 1), ("us", 1), ("μs", 1), ("µs", 1)))
+DIGITS = b"0123456789"
+WS = b" \t\n\r"
+
+
+def parse_sec(v):
+    """parse_time(v, USEC_PER_SEC): the microseconds systemd reads, or None where it fails."""
+    t = v.encode()
+
+    def span(i, chars):
+        while i < len(t) and t[i] in chars:
+            i += 1
+        return i
+
+    p = span(0, WS)
+    if t.startswith(b"infinity", p):
+        return USEC_INFINITY if span(p + 8, WS) == len(t) else None
+    usec, something = 0, False
+    while True:
+        p = span(p, WS)
+        if p == len(t):
+            return usec if something else None
+        if t[p:p + 1] == b"-":
+            return None
+        d = p + 1 if t[p:p + 1] == b"+" else p  # strtoll: an optional sign, then base-10 digits
+        e = span(d, DIGITS)
+        if e == d:
+            e, l = p, 0  # no conversion: strtoll leaves the end at the start
+        else:
+            l = int(t[d:e])
+            if l > (1 << 63) - 1:
+                return None  # ERANGE
+        dot = t[e:e + 1] == b"."
+        if dot:
+            p = span(e + 1, DIGITS)
+        elif e == p:
+            return None
+        else:
+            p = e
+        q = span(p, WS)
+        mult, s_ = 10**6, q
+        for suffix, n in SEC_UNITS:
+            if t.startswith(suffix, q):
+                mult, s_ = n, q + len(suffix)
+                break
+        if s_ == p and s_ != len(t):
+            return None  # "12.34.56"
+        p = s_
+        if l >= USEC_INFINITY // mult:
+            return None
+        k = l * mult
+        if k >= USEC_INFINITY - usec:
+            return None
+        usec += k
+        something = True
+        if dot:
+            m, b = mult // 10, e + 1
+            while b < len(t) and t[b] in DIGITS:
+                k = (t[b] - 48) * m
+                if k >= USEC_INFINITY - usec:
+                    return None
+                usec += k
+                b, m = b + 1, m // 10
+            if b == e + 1:
+                return None  # "3.", "3.sec", "3. 1"
 
 
 def is_sec(v):
-    """parse_sec: "infinity", or numbers each with an optional unit."""
-    return bool(SEC.fullmatch(v))
+    return parse_sec(v) is not None
+
+
+def fdname_is_valid(n):
+    """fd-util.c: printable ASCII but ':', at most 255 bytes (empty allowed)."""
+    return len(n) <= 255 and all(" " <= c < "\x7f" and c != ":" for c in n)
+
+
+def std_path_valid(path):
+    """path_simplify_and_warn(PATH_CHECK_ABSOLUTE | PATH_CHECK_FATAL) after the specifiers: absolute; then, once
+    path_simplify drops "." and repeated "/", path_is_valid (each name at most 255 bytes, under PATH_MAX) and
+    path_is_normalized (no ".." name). A path with a specifier is kept: manager_paths' caller refuses it."""
+    if "%" in path:
+        return True
+    if not path.startswith("/"):
+        return False
+    names = [n for n in path.split("/") if n not in ("", ".")]
+    simple = "/" + "/".join(names)
+    return (all(len(n.encode()) <= 255 for n in names) and len(simple.encode()) < 4096
+            and ".." not in names)
 
 
 def private_tmp_valid(v):
@@ -1999,11 +2089,17 @@ def resolve_valid(v):
 
 
 def std_valid(key):
-    """config_parse_exec_input/_output's values for KEY (StandardError= as StandardOutput=): a word, "fd:" and
-    any name (an empty one included), or a file prefix and an absolute path, perhaps behind a specifier."""
+    """config_parse_exec_input/_output's values for KEY (StandardError= as StandardOutput=): a word; "fd:" and a
+    name fdname_is_valid takes (one with a specifier counts as ignored, so the earlier value and any path it set
+    are kept); or a file prefix and a path std_path_valid takes."""
     kind = "StandardInput" if key == "StandardInput" else "StandardOutput"
-    return lambda v: v in STD_WORDS[kind] or v.startswith("fd:") or any(
-        v.startswith(p) and v[len(p):][:1] in ("/", "%") for p in STD_PREFIXES[kind] if p != "fd:")
+
+    def valid(v):
+        if v.startswith("fd:"):
+            return "%" not in v and fdname_is_valid(v[3:])
+        return v in STD_WORDS[kind] or any(v.startswith(p) and std_path_valid(v[len(p):])
+                                           for p in STD_PREFIXES[kind] if p != "fd:")
+    return valid
 
 
 def unit_with_dropins(root, dirs, name):
@@ -3300,7 +3396,7 @@ def keeper_unit_violations(name, files, root):
             out.append("%s: StartLimitBurst is %s; must be 1 to %d, so a crash loop cannot wear the TPM counter (#2897)"
                        % (name, burst, START_LIMIT_MAX))
         interval = ini_last(files, "Unit", "StartLimitIntervalSec", is_sec)
-        if interval is None or re.fullmatch(r"0+(\.0*)?\s*[a-z]*", interval):
+        if interval is None or parse_sec(interval) == 0:
             out.append("%s: StartLimitIntervalSec is %s; a zero or unset interval does not bound restarts (#2897)"
                        % (name, interval))
         for key in EXEC_KEYS:

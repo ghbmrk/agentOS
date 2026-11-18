@@ -17,6 +17,7 @@ import importlib.machinery
 import importlib.util
 import inspect
 import os
+import random
 import re
 import pathlib
 import socket
@@ -7894,6 +7895,17 @@ class EdgeLinkUnitsTest(unittest.TestCase):
             self.assertIn(unit, jobs)
 
 
+# Security on #6128: parse_time's own cases (time-util.c comments and its test-time-util.c), as (value,
+# microseconds or None for rejected), read from systemd 257.7's source.
+PARSE_SEC_CASES = (
+    ("5", 5 * 10**6), ("5s", 5 * 10**6), (" 5 s ", 5 * 10**6), ("+0", 0), ("0", 0), (".5", 500000), ("1.5h", 5400 * 10**6),
+    ("1min 30s", 90 * 10**6), ("1m1s", 61 * 10**6), ("12.34s.56", 12900000), ("12.34 .56", 12900000), ("1 2", 3 * 10**6),
+    ("1M", 2629800 * 10**6), ("1ms", 1000), ("1\u00b5s", 1), ("1\u03bcs", 1), ("infinity", (1 << 64) - 1),
+    ("5.", None), ("3.sec", None), ("5. 1", None), ("12.34.56", None), ("0.-0", None), ("3.+1", None), ("3.hoge", None),
+    ("-0", None), ("+-1", None), ("5x", None), ("x", None), ("", None), (" ", None), ("infinity x", None),
+    ("9223372036854775807", None), ("18446744073709551", None))
+
+
 class IgnoredValueTest(unittest.TestCase):
     """#6095 (R4, Security on #6086): where systemd's parser ignores an empty value and keeps the one before
     it (systemd 257.7: config_parse_bool, _private_tmp, _service_type, _device_policy, _exec_output and
@@ -7932,7 +7944,7 @@ class IgnoredValueTest(unittest.TestCase):
                     got = " | ".join(run(self.files("[Service]\n%s=%s\n" % (key, val), "[Service]\n%s=%s\n" % (key, later))))
                     self.assertIn(want, got)
         for key in ("StandardInput", "StandardOutput", "StandardError"):
-            for later in ("", "garbage", "file:", "file:relative"):
+            for later in ("", "garbage", "file:", "file:relative", "fd:a:b", "fd:" + "x" * 300):
                 with self.subTest(key=key, later=later):
                     paths = check.manager_paths(self.files("[Service]\n%s=file:/var/lib/x\n" % key,
                                                            "[Service]\n%s=%s\n" % (key, later)))
@@ -7944,14 +7956,17 @@ class IgnoredValueTest(unittest.TestCase):
                     "[Service]\nSlice=agentos-keeper.slice\n", "[Service]\nSlice=%s\n" % later), str(self.root)))
                 self.assertIn("in agentos-keeper.slice but not one of the keeper's units", got)
         # A zero interval does not bound restarts; a later value parse_sec rejects keeps it.
-        for later in ("", "garbage", "1x2y", "abc", "1x"):
+        for later in ("", "garbage", "1x2y", "abc", "1x", "5.", "3.sec", "5. 1", "12.34.56"):
             with self.subTest(later=later):
                 got = " | ".join(check.keeper_unit_violations("agentos-keeper-kernel.service", self.files(
                     "[Unit]\nStartLimitIntervalSec=0\n", "[Unit]\nStartLimitIntervalSec=%s\n" % later), str(self.root)))
                 self.assertIn("StartLimitIntervalSec is 0; a zero or unset interval does not bound restarts", got)
-        for good in ("30", "1min 30s", "1.5h", "infinity"):
-            with self.subTest(good=good):
-                self.assertTrue(check.is_sec(good))
+        # L3 on #6128: the check reads the parsed value, so "+0" is the zero it is.
+        for later in ("+0", "0s", " 0 min", "0.0"):
+            with self.subTest(zero=later):
+                got = " | ".join(check.keeper_unit_violations("agentos-keeper-kernel.service", self.files(
+                    "[Unit]\nStartLimitIntervalSec=60\n", "[Unit]\nStartLimitIntervalSec=%s\n" % later), str(self.root)))
+                self.assertIn("StartLimitIntervalSec is %s; a zero or unset interval" % later.strip(), got)
         # A path unit starts the first unit it names; a later Unit=, empty or not, is ignored.
         for later in ("", "agentos-keeper-enroll.service"):
             with self.subTest(later=later):
@@ -7959,6 +7974,71 @@ class IgnoredValueTest(unittest.TestCase):
                     "[Path]\nUnit=agentos-x.service\nPathExists=/run/agentos-setup/x\n", "[Path]\nUnit=%s\n" % later))
                 self.assertEqual(got, ["agentos-keeper-enroll.path: starts agentos-x.service, not one of the keeper's "
                                        "units (D-154)"])
+
+    def test_parse_sec_is_systemds(self):
+        for v, want in PARSE_SEC_CASES:
+            with self.subTest(v=v):
+                self.assertEqual(check.parse_sec(v), want)
+
+    @unittest.skipUnless(shutil.which("systemd-analyze"), "differential against the host's systemd-analyze timespan")
+    def test_parse_sec_matches_systemd_analyze(self):
+        # Differential: random strings over the characters parse_time reads, against systemd's own parse_time
+        # (systemd-analyze timespan; the host's systemd, whose parse_time 257.7 keeps). Its value or failure.
+        rnd = random.Random(6128)
+        alpha = list("0123456789.+- \tsmhdwyMu\u00b5\u03bcinftx")
+        corpus = [v for v, _ in PARSE_SEC_CASES] + ["".join(rnd.choice(alpha) for _ in range(rnd.randint(1, 9)))
+                                                     for _ in range(1500)]
+        for v in corpus:
+            p = subprocess.run(["systemd-analyze", "timespan", "--", v], capture_output=True, text=True)
+            got = check.parse_sec(v)
+            with self.subTest(v=v):
+                if p.returncode:
+                    self.assertIsNone(got)
+                elif "infinity" in p.stdout.split("\u03bcs:", 1)[-1].split("\n", 1)[0]:
+                    self.assertEqual(got, (1 << 64) - 1)
+                else:
+                    self.assertEqual(got, int(re.search(r"\u03bcs: (\d+)", p.stdout).group(1)))
+
+    def test_each_predicate_takes_what_its_parser_takes(self):
+        # Security on #6128 (sweep): each VALID against its parser's table in systemd 257.7, over the table's words,
+        # their other spellings and near misses. A value the parser rejects is never taken.
+        def near(words):
+            out = set(words) | {"", " ", "x", "0x", "-1", "yess"}
+            for w in words:
+                out |= {w.upper(), w.capitalize(), w + "x", w[:-1], w + ":"}
+            return out
+        bools = ("1", "yes", "y", "true", "t", "on", "0", "no", "n", "false", "f", "off")
+        for name, valid, takes in (
+                ("parse_boolean", check.is_bool, lambda v: v.lower() in bools),
+                ("private_tmp", check.private_tmp_valid,
+                 lambda v: v in ("no", "connected", "disconnected") or v.lower() in bools),
+                ("resolve_support", check.resolve_valid, lambda v: v in ("no", "yes", "resolve") or v.lower() in bools),
+                ("coredump_storage", check.COREDUMP_STORAGES.__contains__, ("none", "external", "journal").__contains__),
+                ("service_type", check.SERVICE_TYPES.__contains__,
+                 ("simple", "forking", "oneshot", "dbus", "notify", "notify-reload", "idle", "exec").__contains__),
+                ("cgroup_device_policy", check.DEVICE_POLICIES.__contains__, ("auto", "closed", "strict").__contains__)):
+            for v in near(bools + ("no", "connected", "disconnected", "resolve", "none", "external", "journal", "simple",
+                                   "forking", "oneshot", "dbus", "notify", "notify-reload", "idle", "exec", "auto",
+                                   "closed", "strict")):
+                with self.subTest(parser=name, v=v):
+                    self.assertEqual(bool(valid(v)), takes(v))
+        # exec_output/_input: fdname_is_valid for fd:, an absolute path that is valid and normalized once simplified.
+        out = check.std_valid("StandardOutput")
+        for v, want in (("fd:", True), ("fd:x", True), ("fd:a:b", False), ("fd:" + "x" * 255, True),
+                        ("fd:" + "x" * 256, False), ("fd:\x7f", False), ("fd:\x01", False), ("fd:%n", False),
+                        ("file:/var/lib/x", True), ("file://var//lib/./x", True), ("file:relative", False),
+                        ("file:", False), ("file:/a/../b", False), ("file:/" + "x" * 256, False),
+                        ("append:/x", True), ("truncate:/x", True), ("file:%S/x", True),
+                        ("journal", True), ("syslog", True), ("syslog+console", True), ("tty-force", False),
+                        ("file", False), ("Journal", False)):
+            with self.subTest(v=v):
+                self.assertEqual(out(v), want)
+        self.assertTrue(check.std_valid("StandardInput")("tty-force"))
+        self.assertFalse(check.std_valid("StandardInput")("journal"))
+        for v, want in (("agentos-keeper.slice", True), ("a b.slice", False), ("x/y.slice", False), (".slice", False),
+                        ("a.service", False), ("x" * 249 + ".slice", True), ("x" * 250 + ".slice", False)):
+            with self.subTest(slice=v):
+                self.assertEqual(bool(check.SLICE_NAME.fullmatch(v)), want)
 
     def test_a_kept_safe_value_still_passes(self):
         # The safe value stays, so these pass rather than being refused as unset.
