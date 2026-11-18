@@ -187,24 +187,27 @@ class ScopeTest(unittest.TestCase):
         # #6088, #6118: test_image_repro.KeyringSpikesTest pins each mkosi tree's apt inputs, but its walk may
         # not open a record directory (records_audit); this module reads git, so it holds that none holds a
         # tree. Two classes, neither listed by name, so a new mkosi file name or link target cannot slip by:
-        # - a tracked symlink (mode 120000): a record is text read in place, so no symlink is one, and a link
-        #   reaches whatever it names (a tree, a mkosi.conf, a script) without a mkosi part of its own;
+        # - any tracked entry that is not a regular file (mode 100644 or 100755): a record is text read in
+        #   place, so no symlink (120000) or gitlink (160000) is one, and either reaches whatever it names (a
+        #   tree, a mkosi.conf, a script) without a mkosi part of its own;
         # - a path part mkosi can read: every name mkosi reads starts "mkosi." (conf, conf.d, local.conf,
         #   images, configure, extra, the scripts), and none is a Markdown file, so only an "mkosi.*.md"
-        #   file name is free of it. A lone mkosi.configure builds nothing yet, but is caught all the same.
+        #   file name is free of it (a directory so named is not). A lone mkosi.configure builds nothing yet,
+        #   but is caught all the same.
         def trees(entries):
             caught = []
             for mode, f in entries:
                 parts = f.split("/")
-                if f.startswith(ci_scope.RECORD_DIRS) and (mode == "120000" or any(
+                if f.startswith(ci_scope.RECORD_DIRS) and (mode not in ("100644", "100755") or any(
                         p.startswith("mkosi.") and not (i == len(parts) - 1 and p.endswith(".md"))
                         for i, p in enumerate(parts))):
                     caught.append(f)
             return caught
         caught = ["reviews/a/mkosi.conf", "handoff/b/mkosi.conf.d/10.conf", "docs/security/mkosi.local.conf",
                   "reviews/c/mkosi.configure", "briefs/d/mkosi.images/x/mkosi.conf", "decisions/mkosi.conf.d/a.md",
-                  "handoff/link", "reviews/e/mkosi.md"]
-        modes = {"handoff/link": "120000", "reviews/e/mkosi.md": "120000"}
+                  "reviews/mkosi.x.md/y", "handoff/link", "reviews/e/mkosi.md", "docs/security/sub"]
+        modes = {"handoff/link": "120000", "reviews/e/mkosi.md": "120000", "docs/security/sub": "160000",
+                 "reviews/run.sh": "100755"}
         clean = ["image/mkosi/mkosi.conf", "image/mkosi/mkosi.configure", "reviews/mkosi.md", "briefs/mkosi.conf.md",
                  "docs/learning/mkosi-notes.md", "reviews/run.sh"]
         self.assertEqual(trees([(modes.get(f, "100644"), f) for f in caught + clean]), caught)
