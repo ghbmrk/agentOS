@@ -1972,7 +1972,10 @@ class ImageTest(unittest.TestCase):
         journal = re.findall(rb"HOSTCHECK-WIPE journal: ([^\r\n]*)", after)
         self.assertTrue([j for j in journal if re.search(rb"find: .*/run/hostcheck-no-such-dir.*No such file", j)],
                         journal)
-        self.assertIn(b"HOSTCHECK-WIPE record: exit-code exited 1", after)
+        # The record is "$SERVICE_RESULT $EXIT_CODE $EXIT_STATUS". The unit has no main process (no ExecStart=), and
+        # systemd sets EXIT_CODE and EXIT_STATUS for the main process only, so on the first image run (#6130) the
+        # record held "exit-code" and two empty words. Any record other than success is what wipenote.go reads.
+        self.assertRegex(after, rb"HOSTCHECK-WIPE record: exit-code *\r?\n")
         # The clear rests not on the wipe's result but on the directories it empties, which no setup filled
         # here: MOR is cleared and the host is as it was.
         report = self.report("wipefail")
