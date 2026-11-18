@@ -3258,7 +3258,7 @@ MOR_LISTED = ("/run/agentos-setup", "/run/agentos-link-capture")
 # the wipe's remove the page authority a printed Owner Card names. Default dependencies add
 # Requires=sysinit.target, which conflicts with emergency.target, so an emergency isolate would stop such a
 # unit whatever its IgnoreOnIsolate=; so would any STOP_LINKS key on it, through the unit it names.
-ISOLATE_KEPT = (MOR_UNIT, "agentos-keeper-pageca.service", "agentos-keeper-wipe.service")
+ISOLATE_KEPT = ("agentos-keeper-pageca.service", "agentos-keeper-wipe.service")
 STOP_LINKS = ("Requires", "Requisite", "BindsTo", "PartOf", "StopPropagatedFrom", "StopWhenUnneeded",
               "RequiresMountsFor")
 # IMG-dbus-reach (#5818): the system bus's directory. dbus-daemon is long-lived and stock system.conf lets

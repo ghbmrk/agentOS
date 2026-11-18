@@ -19,7 +19,6 @@ ConditionPathExists=/sys/firmware/efi
 # and so would an isolate to emergency.target, which does not pull in sysinit.target: the holders would
 # restart on the way back to default.target with MOR clear (MOR-emergency-isolate, #5947).
 RefuseManualStop=yes
-IgnoreOnIsolate=yes
 
 [Service]
 Type=oneshot
