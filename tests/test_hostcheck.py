@@ -1982,5 +1982,62 @@ class ImageTest(unittest.TestCase):
         self.assertEqual(rc, 0, [dict(x, snapshot=None) for x in report["phases"]])
 
 
+    def test_an_isolate_keeps_mor_set(self):
+        # MOR-emergency-isolate (#5947, HW-8): one boot that isolates emergency.target and then rescue.target,
+        # each followed by "systemctl default", then powers off; then a fresh QEMU process on the same drive.
+        # A probe that an isolate leaves running waits for the page authority's staging, prints the staged
+        # certificate's hash and both units' states after each step, and whether the sealed pair is unchanged
+        # (its bytes stay in the guest). agentos-mor.service stays active through both, so its clear runs only
+        # at the shutdown, after the staging unit's stop has emptied /run/agentos-setup: the clear refuses
+        # while that holds a file, and the next boot's responder prints its last line from the journal.
+        d = self.dir / "isolate-in"
+        d.mkdir(exist_ok=True)
+        (d / "isolate.sh").write_text(
+            "pair() { sha256sum </run/agentos-setup/page-ca | cut -c1-64; }\n"
+            "say() { echo \"HOSTCHECK-ISOLATE $1 cert $(sha256sum </run/agentos-page-ca/authority.der | cut -c1-64)"
+            " pair $([ -n \"$first\" ] && [ \"$(pair)\" = \"$first\" ] && echo same || echo changed)"
+            " $(systemctl show -p Id -p ActiveState --value agentos-mor.service agentos-keeper-pageca.service | tr -s '\\n' ' ')\"; }\n"
+            "first=$(pair)\n"
+            "say before\n"
+            "for t in emergency rescue; do\n"
+            "\ttimeout 300 systemctl isolate \"$t.target\"; r=$?; say \"$t rc=$r\"\n"
+            "\ttimeout 300 systemctl default; r=$?; say \"default rc=$r\"\n"
+            "done\n"
+            "echo HOSTCHECK-ISOLATE done\n"
+            "exec systemctl --no-block poweroff\n")
+        (d / "probe.service").write_text(
+            "[Unit]\nDescription=hostcheck isolate probe (QEMU host check only)\n"
+            "After=agentos-keeper-pageca.service multi-user.target\nIgnoreOnIsolate=yes\n"
+            "[Service]\nType=exec\nImportCredential=hostcheck.isolate\n"
+            "StandardOutput=journal+console\nStandardError=journal+console\n"
+            "ExecStart=/bin/sh -c 'exec /bin/sh \"$$CREDENTIALS_DIRECTORY/hostcheck.isolate\"'\n")
+        (d / "responder.conf").write_text("[Unit]\nWants=hostcheck-isolate.service\n")
+        phases = d / "phases.json"
+        phases.write_text(json.dumps({"isolate": [[OS_START, "os"], ["HOSTCHECK-ISOLATE done", None]],
+                                      "after": [[OS_START, "os"], ["HOSTCHECK-READY", "serial:poweroff\n"]]}))
+        argv = self.argv("isolate", "isolate,after", phases) + [
+            "--credential", f"hostcheck.isolate={d / 'isolate.sh'}",
+            "--credential", f"systemd.extra-unit.hostcheck-isolate.service={d / 'probe.service'}",
+            "--credential", f"systemd.unit-dropin.{RESPONDER}={d / 'responder.conf'}"]
+        rc = hostcheck.main(argv)
+        console = (self.dir / "isolate" / "console-isolate.log").read_bytes()
+        steps = re.findall(rb"HOSTCHECK-ISOLATE (.*?) cert ([0-9a-f]{64}) pair (\S+) (.*?) *\r?\n", console)
+        print(*[b" ".join(x).decode(errors="replace") for x in steps], sep="\n", file=sys.stderr)
+        self.assertEqual([x[0] for x in steps], [b"before", b"emergency rc=0", b"default rc=0",
+                                                 b"rescue rc=0", b"default rc=0"], steps)
+        # The certificate a card printed this boot is the one staged at its start, and the pair is its own.
+        self.assertEqual({x[1] for x in steps}, {steps[0][1]}, steps)
+        self.assertEqual({x[2] for x in steps}, {b"same"}, steps)
+        for _, _, _, units in steps:
+            self.assertEqual(units.split(), [b"agentos-mor.service", b"active",
+                                             b"agentos-keeper-pageca.service", b"active"], steps)
+        after = (self.dir / "isolate" / "console-after.log").read_bytes()
+        last = re.findall(rb"HOSTCHECK-DIAG start journal -1: (agentos-mor: [^\r\n]*)", after)
+        self.assertEqual(last[-1:], [b"agentos-mor: mor=cleared"], last)
+        report = self.report("isolate")
+        self.assertEqual(rc, 0, [dict(x, snapshot=None) for x in report["phases"]])
+        self.assertFalse([x for x in report["phases"] if "mor" in [d["change_id"] for d in x["disclosed"]]])
+
+
 if __name__ == "__main__":
     unittest.main()
