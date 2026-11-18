@@ -4,15 +4,19 @@ package browser
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/clerk/check"
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"golang.org/x/net/publicsuffix"
 )
 
 // These tests pin rules whose deletion no other test noticed
@@ -352,5 +356,112 @@ func TestAReadClaimsNoPrint(t *testing.T) {
 	// The step is refused later (it was never dispatched), never for its claims.
 	if res.Detail == check.RClaim {
 		t.Fatalf("%+v", res)
+	}
+}
+
+// failingStdin is a request pipe whose writes fail; Close counts its calls
+// and runs onClose (Security on #6167).
+type failingStdin struct {
+	closes  int
+	onClose func()
+}
+
+func (s *failingStdin) Write([]byte) (int, error) { return 0, errors.New("synthetic write failure") }
+
+func (s *failingStdin) Close() error {
+	s.closes++
+	if s.onClose != nil {
+		s.onClose()
+	}
+	return nil
+}
+
+// quietGate is a gate over a driver that reads every request and answers none.
+func quietGate(t *testing.T) *Gate {
+	t.Helper()
+	g, err := Start(context.Background(), Config{
+		Driver: []string{"/bin/sh", "-c", "cat >/dev/null"}, Origins: []string{"https://shop.example.test"},
+		Workspace: t.TempDir(), Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { g.Close() })
+	return g
+}
+
+// judgeClosed and judgeLoggedOut refuse a click or download on a ref they
+// do not hold, on their own and not only behind judge: logged out, a zero
+// link has no target, so it would need no approval (D-147, K16).
+func TestJudgesRefuseAnUnknownRefOnTheirOwn(t *testing.T) {
+	g := &Gate{}
+	for _, v := range []string{"click", "download"} {
+		if _, _, r := g.judgeClosed(Request{Verb: v, Ref: "e9"}); r == nil || r.Error != "unknown_ref" {
+			t.Errorf("judgeClosed %s: %+v", v, r)
+		}
+		if _, _, r := g.judgeLoggedOut(Request{Verb: v, Ref: "e9"}); r == nil || r.Error != "unknown_ref" {
+			t.Errorf("judgeLoggedOut %s: %+v", v, r)
+		}
+	}
+}
+
+// A stop closes the request pipe once and signals the driver's group once:
+// a second stop signals nothing, whatever process group its command names
+// by then (a reused group ID).
+func TestASecondStopTouchesNothing(t *testing.T) {
+	g := quietGate(t)
+	s := &failingStdin{}
+	g.stdin = s
+	g.Close()
+	if s.closes != 1 {
+		t.Fatalf("closes %d", s.closes)
+	}
+	victim := childproc.Command(context.Background(), childproc.NewEnv("PATH=/usr/bin:/bin"),
+		childproc.Options{SysProcAttr: &syscall.SysProcAttr{Setpgid: true}}, "/bin/sleep", "30")
+	if err := victim.Start(); err != nil {
+		t.Fatal(err)
+	}
+	g.cmd = victim
+	g.Close()
+	if s.closes != 1 {
+		t.Fatalf("closes after a second stop %d", s.closes)
+	}
+	done := make(chan struct{})
+	go func() { _ = victim.Wait(); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("a second stop signalled a process group")
+	case <-time.After(500 * time.Millisecond):
+	}
+	_ = syscall.Kill(-victim.Pid(), syscall.SIGKILL)
+	<-done
+}
+
+// A failed write stops the executor and says it stopped, even when the stop
+// itself cancels the request (a pipe whose Close ends the context): the
+// reply select is never reached, so it cannot answer "cancelled" instead.
+func TestAFailedWriteSaysStopped(t *testing.T) {
+	for i := 0; i < 40; i++ {
+		g := quietGate(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		g.stdin = &failingStdin{onClose: cancel}
+		g.mu.Lock()
+		r, ok := g.roundtrip(ctx, Request{Verb: "snapshot"})
+		g.mu.Unlock()
+		cancel()
+		if ok || r.Error != stoppedResult.Error || r.Detail != stoppedResult.Detail {
+			t.Fatalf("run %d: %+v", i, r)
+		}
+	}
+}
+
+// site's IP and empty-host guard is proven redundant in MUTANTS-EQUIVALENT
+// (site.go:23, :24) on publicsuffix refusing an eTLD+1 for "" and for every
+// IP; a dependency bump that changes that fails here (#6193).
+func TestPublicSuffixGivesNoSiteForAnIPOrNoHost(t *testing.T) {
+	for _, h := range []string{"", "10.0.0.1", "192.168.1.1", "::1", "2001:db8::1", "::ffff:10.0.0.1"} {
+		if s, err := publicsuffix.EffectiveTLDPlusOne(h); err == nil {
+			t.Errorf("%q gave %q", h, s)
+		}
 	}
 }
