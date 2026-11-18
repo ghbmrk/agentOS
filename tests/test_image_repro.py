@@ -1293,34 +1293,61 @@ class KeyringCheckOtherBuildsTest(unittest.TestCase):
     BUILDS = (("image/enforcer/build.sh", "enforcer-image.yml"), ("spikes/S1S2-testkit/build.sh", "testkit.yml"))
 
     def test_check_runs_first_and_stops_the_build(self):
+        # Each build runs from a copy in a git repository with every later step stubbed, so with a
+        # passing check it reaches mkosi; with a failing one, the check is the only thing that runs.
+        # (A copy outside a git repository dies at git log whatever the check does: #6055's fix-list.)
         for rel, _ in self.BUILDS:
             for check in (1, 0):
                 with self.subTest(build=rel, check=check), tempfile.TemporaryDirectory() as d:
-                    log = pathlib.Path(d, "log")
-                    script = pathlib.Path(d, rel)
-                    script.parent.mkdir(parents=True)
-                    shutil.copy(ROOT / rel, script)
-                    pathlib.Path(d, "image").mkdir(exist_ok=True)
-                    pathlib.Path(d, "image/debian-archive-keyring.sh").write_text(
-                        "echo keyring-check >> %s\nexit %d\n" % (log, check))
-                    mkosi = pathlib.Path(d, "mkosi")
-                    mkosi.write_text("#!/bin/sh\necho mkosi >> %s\n" % log)
-                    mkosi.chmod(0o755)
-                    p = subprocess.run(["sh", str(script), str(pathlib.Path(d, "out"))], capture_output=True, text=True,
-                                       env={"PATH": os.environ["PATH"], "MKOSI": str(mkosi),
-                                            "ENFORCER_RELEASE_ROOT": "r.json", "AGENTOS_RELEASE_KEYS": "k.pem"})
+                    log = self.stage(d, rel, check)
+                    p = self.run_build(d, rel)
                     lines = log.read_text().splitlines()
                     self.assertEqual(lines[0], "keyring-check")
                     if check:
                         self.assertNotEqual(p.returncode, 0)
                         self.assertEqual(lines, ["keyring-check"])
+                    else:
+                        self.assertIn("mkosi", lines, p.stderr)
+
+    def test_the_core_build_stops_at_a_failing_check(self):
+        # image/build.sh's next step after the check is git log: it runs only when the check passes.
+        for check in (1, 0):
+            with self.subTest(check=check), tempfile.TemporaryDirectory() as d:
+                log = self.stage(d, "image/build.sh", check)
+                p = self.run_build(d, "image/build.sh")
+                self.assertNotEqual(p.returncode, 0)
+                self.assertEqual(log.read_text().splitlines(), ["keyring-check"] + ["git"] * (1 - check))
+
+    def stage(self, d, rel, check):
+        """A copy of REL under D beside a stand-in keyring check that exits CHECK; mkosi, git,
+        python3 and security-snapshot.sh are stubs, and mkosi and git log their name."""
+        log = pathlib.Path(d, "log")
+        script = pathlib.Path(d, rel)
+        script.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(ROOT / rel, script)
+        img = pathlib.Path(d, "image")
+        img.mkdir(exist_ok=True)
+        (img / "debian-archive-keyring.sh").write_text("echo keyring-check >> %s\nexit %d\n" % (log, check))
+        (img / "security-snapshot.sh").write_text("echo 20260101T000000Z\n")
+        pathlib.Path(d, "r.json").write_text("{}")
+        self.path = fake_tools(d, mkosi="echo mkosi >> %s\n" % log, python3="exit 0\n",
+                               git="echo git >> %s\n[ -d %s/.git ] || exit 1\necho 1700000000\n" % (log, d))
+        if rel != "image/build.sh":
+            pathlib.Path(d, ".git").mkdir()
+        return log
+
+    def run_build(self, d, rel):
+        return subprocess.run(["sh", str(pathlib.Path(d, rel)), str(pathlib.Path(d, "out"))], capture_output=True,
+                              text=True, cwd=d, stdin=subprocess.DEVNULL, env={"PATH": self.path, "MKOSI": str(pathlib.Path(d, "bin/mkosi")),
+                                                     "ENFORCER_RELEASE_ROOT": str(pathlib.Path(d, "r.json")),
+                                                     "AGENTOS_RELEASE_KEYS": "k.pem"})
 
     def test_check_precedes_mkosi_and_its_change_runs_the_workflow(self):
         for rel, wf in self.BUILDS:
             with self.subTest(build=rel):
                 b = (ROOT / rel).read_text()
-                self.assertEqual(b.count("debian-archive-keyring.sh\"\n"), 1)
-                self.assertLess(b.index("debian-archive-keyring.sh\"\n"), b.index("$MKOSI "))
+                self.assertEqual(b.count("debian-archive-keyring.sh\""), 1)
+                self.assertLess(b.index("debian-archive-keyring.sh\""), b.index("$MKOSI "))
                 w = (ROOT / ".github/workflows" / wf).read_text()
                 self.assertEqual(w.count('      - "image/debian-archive-keyring.sh"\n'), 2)
 
@@ -1337,6 +1364,15 @@ class KeyringMinimalTest(unittest.TestCase):
     SECURITY = "/usr/share/keyrings/debian-archive-bookworm-security-automatic.gpg"
     SOURCES = (MK / "mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources",
                IMG / "enforcer/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources")
+    # The runner's whole keyring, which no build names (#5983), and the Debian 10/buster and
+    # 11/bullseye archive, security and release keys and subkeys it holds (ftp-master.debian.org/keys.html).
+    WHOLE = "debian-archive-keyring.gpg"
+    OLD = frozenset("""
+        80D15823B7FD1561F9F7BCDDDC30D7C23CBBABEE 0146DC6D4A0B2914BDED34DB648ACFD622F3D138
+        5E61B217265DA9807A23C5FF4DFAB270CAA96DFA 5237CEEEF212F3D51C74ABE0112695A0E562B32A
+        6D33866EDD8FFA41C0143AEDDCC9EFBF77E11517 1F89983E0081FDE018F3CC9673A4F27B8DD47936
+        A7236886F3CCCAAD148A27F80E98404D386FA1D9 AC530D520F2F3269F5E98313A48449044AAD5C5D
+        ED541312A33F1128F10B1C6C54404762BBB6E853 A4285295FC7B1A81600062A9605C66F00D6C9793""".split())
 
     def pinned(self):
         """{file name: [(fingerprint, label)]} from the check's list."""
@@ -1372,8 +1408,8 @@ class KeyringMinimalTest(unittest.TestCase):
         # and security keys alone; no buster, bullseye or release key is trusted for the builds.
         files = self.pinned()
         names = {pathlib.Path(self.ARCHIVE).name, pathlib.Path(self.SECURITY).name}
-        self.assertEqual(list(files)[:2], [pathlib.Path(self.ARCHIVE).name, pathlib.Path(self.SECURITY).name])
-        old = {f for f, label in files["debian-archive-keyring.gpg"] if "10/buster" in label or "11/bullseye" in label}
+        self.assertEqual(list(files), [pathlib.Path(self.ARCHIVE).name, pathlib.Path(self.SECURITY).name])
+        old = self.OLD
         self.assertEqual(len(old), 10)
         for name in names:
             with self.subTest(keyring=name):
@@ -1387,14 +1423,14 @@ class KeyringMinimalTest(unittest.TestCase):
 
     def keyrings(self):
         d = pathlib.Path(os.environ.get("AGENTOS_DEBIAN_KEYRINGS", "/usr/share/keyrings"))
-        if not all((d / n).is_file() for n in self.pinned()):
+        if not all((d / n).is_file() for n in [*self.pinned(), self.WHOLE]):
             if os.environ.get("AGENTOS_REQUIRE_REFERENCE_TOOLS") == "1":
                 self.fail("no Debian keyrings in %s (install debian-archive-keyring)" % d)
             self.skipTest("no Debian keyrings in %s" % d)
         return d
 
     def run_check(self, d):
-        return subprocess.run(["sh", str(self.CHECK), str(d)], capture_output=True, text=True)
+        return subprocess.run(["sh", str(self.CHECK), str(d)], capture_output=True, text=True, stdin=subprocess.DEVNULL)
 
     def test_the_check_refuses_a_wider_or_missing_keyring(self):
         # REQ: IMG-keyring-minimal. The runner's files pass; the whole keyring in place of the
@@ -1407,7 +1443,7 @@ class KeyringMinimalTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             for n in self.pinned():
                 shutil.copy(src / n, pathlib.Path(d, n))
-            shutil.copy(src / "debian-archive-keyring.gpg", pathlib.Path(d, pathlib.Path(self.ARCHIVE).name))
+            shutil.copy(src / self.WHOLE, pathlib.Path(d, pathlib.Path(self.ARCHIVE).name))
             p = self.run_check(d)
             self.assertEqual(p.returncode, 1, p.stderr)
             self.assertIn("debian-archive-bookworm-automatic.gpg does not hold exactly the pinned keys", p.stderr)
@@ -1431,6 +1467,298 @@ class KeyringMinimalTest(unittest.TestCase):
             with self.subTest(caller=rel):
                 self.assertIn(rel, header.replace("\n# ", " "))
                 self.assertIn("`%s`" % rel, row)
+
+
+class KeyringSpikesTest(unittest.TestCase):
+    """IMG-keyring-spikes (#5983): every mkosi build in the repository trusts only the minimal Debian
+    keyrings. The keyring check is each mkosi tree's configure script, which mkosi v24.3 runs for every
+    build of the tree before it reads any archive, whoever calls mkosi and however; each tree that is
+    not part of another commits its apt sources (mkosi then generates none, so the whole keyring is
+    named nowhere)."""
+
+    ARCHIVE, SECURITY = KeyringMinimalTest.ARCHIVE, KeyringMinimalTest.SECURITY
+    CHECK = KeyringMinimalTest.CHECK
+    TREES = ["image/enforcer/mkosi", "image/mkosi", "image/mkosi/initrd", "spikes/S1S2-testkit/mkosi"]
+
+    @staticmethod
+    def trees(root):
+        """{tree directory: directories it includes} for every directory under ROOT that mkosi reads
+        as configuration: one holding mkosi.conf, mkosi.conf.d or mkosi.local.conf, of any file type,
+        links included; one inside a mkosi.conf.d belongs to the tree above it. The walk opens no
+        record (ci_scope: a record file or directory, or .git), as test_image.scanned_files:
+        tests/records_audit.py counts any open of one as a read."""
+        spec = importlib.util.spec_from_file_location("repro_ci_scope", ROOT / "tools/ci_scope.py")
+        scope = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(scope)
+        found = {}
+        for top, dirs, names in os.walk(root):
+            rel = pathlib.Path(top).relative_to(root).as_posix()
+            rel = "" if rel == "." else rel + "/"
+            dirs[:] = sorted(d for d in dirs if not (rel + d == ".git" or (rel + d + "/").startswith(scope.RECORD_DIRS)))
+            if "mkosi.conf.d" in pathlib.Path(top).relative_to(root).parts:
+                continue
+            if {"mkosi.conf", "mkosi.conf.d", "mkosi.local.conf"} & set(dirs + names):
+                conf = pathlib.Path(top, "mkosi.conf")
+                text = conf.read_text() if conf.is_file() else ""
+                found[pathlib.Path(top)] = {(pathlib.Path(top) / v).resolve() for m in re.finditer(
+                    r"^(?:Initrd)?Include=(.+)$", text, re.M) for v in m[1].split()}
+        return found
+
+    def test_every_tree_runs_the_check_as_its_configure_script(self):
+        # REQ: IMG-keyring-spikes. Each tree's mkosi.configure is the check itself, so every build of
+        # the tree runs it first (failure path 2 on #5983; the call inventories of #6055 and #6068
+        # missed call forms, a fix-list each). S7's Ubuntu tree and run.sh, which the check cannot
+        # pin, are retired.
+        trees = self.trees(ROOT)
+        self.assertEqual(sorted(str(t.relative_to(ROOT)) for t in trees), self.TREES)
+        for tree in trees:
+            with self.subTest(tree=str(tree.relative_to(ROOT))):
+                link = tree / "mkosi.configure"
+                self.assertTrue(link.is_symlink())
+                self.assertFalse(os.path.isabs(os.readlink(link)))
+                self.assertEqual(link.resolve(), self.CHECK)
+        self.assertTrue(os.access(self.CHECK, os.X_OK))
+        self.assertFalse((ROOT / "spikes/S7-host-image/run.sh").exists())
+        self.assertFalse((ROOT / "spikes/S7-host-image/mkosi").exists())
+
+    def test_every_form_of_tree_is_found(self):
+        # Security on #6068: a linked mkosi.conf and a tree configured only by mkosi.local.conf are
+        # trees; a drop-in directory belongs to its tree; a directory with none of the three is not.
+        with tempfile.TemporaryDirectory() as d:
+            r = pathlib.Path(d)
+            for rel in ("plain/mkosi.conf", "debian.conf", "local/mkosi.local.conf",
+                        "dropin/mkosi.conf.d/10.conf", "dropin/mkosi.conf.d/sub/mkosi.conf", "none/mkosi.extra/x"):
+                (r / rel).parent.mkdir(parents=True, exist_ok=True)
+                (r / rel).write_text("[Config]\nInitrdInclude=../none/\n" if rel.startswith("plain") else "")
+            (r / "linked").mkdir()
+            (r / "linked/mkosi.conf").symlink_to("../debian.conf")
+            found = self.trees(r)
+            self.assertEqual(sorted(str(t.relative_to(r)) for t in found), ["dropin", "linked", "local", "plain"])
+            self.assertEqual(found[r / "plain"], {(r / "none").resolve()})
+
+    def test_each_tree_commits_sources_naming_only_the_minimal_keyrings(self):
+        # REQ: IMG-keyring-spikes. The test kit, as the core and the enforcer, reads the archive
+        # (trixie, trixie-updates) with the archive key's keyring and the security archive with the
+        # security key's; no stanza names the whole keyring (failure path 1 on #5983). A tree another
+        # includes (the initrd) is built with its includer's package manager trees.
+        trees = self.trees(ROOT)
+        included = set().union(*trees.values())
+        own = sorted(str(t.relative_to(ROOT)) for t in trees if t.resolve() not in included)
+        self.assertEqual(own, ["image/enforcer/mkosi", "image/mkosi", "spikes/S1S2-testkit/mkosi"])
+        for tree in own:
+            with self.subTest(tree=tree):
+                src = ROOT / tree / "mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources"
+                stanzas = [dict(ln.split(": ", 1) for ln in st.splitlines() if ln and not ln.startswith("#"))
+                           for st in src.read_text().split("\n\n")]
+                stanzas = [st for st in stanzas if st]
+                self.assertEqual([(st["Suites"], st["Signed-By"]) for st in stanzas],
+                                 [("trixie trixie-updates", self.ARCHIVE), ("trixie-security", self.SECURITY)])
+                self.assertEqual(stanzas[1]["URIs"], "http://security.debian.org/debian-security")
+                self.assertTrue(all(st["Types"] == "deb" for st in stanzas))
+                self.assertNotIn(KeyringMinimalTest.WHOLE, src.read_text().replace("whole " + KeyringMinimalTest.WHOLE, ""))
+        kit = ROOT / "spikes/S1S2-testkit/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources"
+        self.assertTrue(kit.read_text().split("\nTypes:")[1].startswith(" deb\nURIs: http://deb.debian.org/debian\n"))
+
+    # What each tree may hold beside its config, and the keys its mkosi.conf may set (mkosi v24.3).
+    # None of these names a config, script, tree, mirror or keyring apt reads, except InitrdInclude=
+    # and Environment=, whose values are pinned below: so a second package manager tree, a drop-in
+    # (mkosi.conf.d, mkosi.local.conf), a skeleton or tools tree, an Include= or a sources tarball
+    # needs a deliberate edit here (Security 1 on #6082).
+    NAMES = {
+        "image/mkosi": {"mkosi.conf", "mkosi.configure", "mkosi.extra", "mkosi.finalize", "mkosi.pkgmngr",
+                        "mkosi.postinst", "mkosi.repart"},
+        "image/mkosi/initrd": {"mkosi.conf", "mkosi.configure", "mkosi.finalize", "mkosi.postinst"},
+        "image/enforcer/mkosi": {"mkosi.conf", "mkosi.configure", "mkosi.extra", "mkosi.finalize", "mkosi.pkgmngr",
+                                 "mkosi.repart"},
+        "spikes/S1S2-testkit/mkosi": {"mkosi.conf", "mkosi.configure", "mkosi.extra", "mkosi.pkgmngr", "mkosi.repart"},
+    }
+    KEYS = {"BiosBootloader", "Bootable", "Bootloader", "Distribution", "Environment", "Format", "Hostname",
+            "ImageId", "ImageVersion", "InitrdInclude", "KernelCommandLine", "KernelModulesExclude",
+            "KernelModulesInitrdExclude", "Keymap", "Locale", "ManifestFormat", "Mirror", "Packages", "Release",
+            "RemoveFiles", "RepartDirectories", "Repositories", "RootPassword", "Seed", "ShimBootloader",
+            "SplitArtifacts", "Timezone", "UnifiedKernelImages", "WithDocs"}
+    PINNED = {"InitrdInclude": {"image/mkosi": ["initrd/"], "image/enforcer/mkosi": ["../../mkosi/initrd/"]},
+              "Environment": {"image/mkosi": ["SYSTEMD_REPART_MKFS_OPTIONS_EXT4=-Oquota,project"]}}
+    PKGMNGR = {"etc/apt/sources.list.d/mkosi.sources", "etc/apt/apt.conf.d/80-agentos-retries"}
+
+    @staticmethod
+    def settings(conf):
+        """[(key, [value lines])] of a mkosi.conf in the strict form test_image.ConfigTest holds the
+        core to (column-0 comments, sections and Key=value, indented continuations); None if any
+        line is in another form."""
+        out, cur = [], None
+        for line in conf.read_text().splitlines():
+            if not line.strip() or re.fullmatch(r"\[[A-Za-z]+\]", line):
+                cur = None
+            elif line.startswith("#"):
+                pass
+            elif m := re.fullmatch(r"([A-Z][A-Za-z0-9]*)=(.*)", line):
+                cur = (m[1], [m[2].strip()])
+                out.append(cur)
+            elif line[0] in " \t" and cur is not None:
+                cur[1].append(line.strip())
+            else:
+                return None
+        return out
+
+    def apt_input_problems(self, d, tree):
+        """Why tree directory D (named TREE) may feed apt something the check cannot see: a mkosi.*
+        name, a mkosi.conf key or value, or a mkosi.pkgmngr file not on the lists above."""
+        why = []
+        names = {n for n in os.listdir(d) if n.startswith("mkosi")}
+        if names != self.NAMES[tree]:
+            why.append("mkosi.* names %s, not %s" % (sorted(names), sorted(self.NAMES[tree])))
+        settings = self.settings(d / "mkosi.conf")
+        if settings is None:
+            why.append("mkosi.conf is not in the strict form")
+        for k, v in settings or []:
+            if k not in self.KEYS:
+                why.append("mkosi.conf sets %s=, not on the list" % k)
+            elif k in self.PINNED and v != self.PINNED[k].get(tree):
+                why.append("mkosi.conf sets %s=%s" % (k, v))
+        pm = d / "mkosi.pkgmngr"
+        if pm.exists():
+            retries = (MK / "mkosi.pkgmngr/etc/apt/apt.conf.d/80-agentos-retries").read_bytes()
+            for p in sorted(pm.rglob("*")):
+                r = p.relative_to(pm).as_posix()
+                if p.is_symlink() or (p.is_file() and r not in self.PKGMNGR):
+                    why.append("mkosi.pkgmngr holds %s" % r)
+                elif p.is_file() and r != "etc/apt/sources.list.d/mkosi.sources" and p.read_bytes() != retries:
+                    why.append("mkosi.pkgmngr/%s is not the core's retry settings" % r)
+            if not (pm / "etc/apt/sources.list.d/mkosi.sources").is_file():
+                why.append("mkosi.pkgmngr has no mkosi.sources")
+        return why
+
+    def test_no_tree_adds_apt_input_the_check_cannot_see(self):
+        # REQ: IMG-keyring-spikes. The guard sees only that a package manager tree is named; mkosi merges
+        # every one into apt's configuration, so each tree's own inputs are pinned: its mkosi.* names, the
+        # keys of its mkosi.conf, and its mkosi.pkgmngr's files (the sources, checked above, and the core's
+        # retry settings byte for byte, which test_image pins).
+        trees = sorted(str(t.relative_to(ROOT)) for t in self.trees(ROOT))
+        self.assertEqual(trees, sorted(self.NAMES))
+        for tree in trees:
+            with self.subTest(tree=tree):
+                self.assertEqual(self.apt_input_problems(ROOT / tree, tree), [])
+
+    def test_every_way_to_add_apt_input_fails(self):
+        # The repro on #6082 (a second package manager tree with a Trusted: yes stanza, named in the
+        # test kit's mkosi.conf) and its siblings, each in a copy of the test kit's and the enforcer's tree.
+        cases = {"key": ("mkosi.conf", "\n[Content]\nPackageManagerTrees=evil/\n"),
+                 "include": ("mkosi.conf", "\n[Config]\nInclude=evil/\n"),
+                 "tools": ("mkosi.conf", "\n[Host]\nToolsTree=default\n"),
+                 "dropin": ("mkosi.conf.d/10.conf", "[Content]\nPackageManagerTrees=evil/\n"),
+                 "local": ("mkosi.local.conf", ""),
+                 "skeleton": ("mkosi.skeleton/etc/apt/sources.list.d/evil.sources", "Trusted: yes\n"),
+                 "tar": ("mkosi.pkgmngr.tar", ""),
+                 "extra-file": ("mkosi.pkgmngr/etc/apt/sources.list.d/evil.sources", "Trusted: yes\n"),
+                 "apt-conf": ("mkosi.pkgmngr/etc/apt/apt.conf.d/80-agentos-retries",
+                              'Acquire::AllowInsecureRepositories "true";\n'),
+                 "loose": ("mkosi.conf", "\n  [Content]\n")}
+        for tree in ("spikes/S1S2-testkit/mkosi", "image/enforcer/mkosi"):
+            for name, (rel, text) in cases.items():
+                with self.subTest(tree=tree, case=name), tempfile.TemporaryDirectory() as d:
+                    copy = pathlib.Path(d, "t")
+                    shutil.copytree(ROOT / tree, copy, symlinks=True)
+                    f = copy / rel
+                    f.parent.mkdir(parents=True, exist_ok=True)
+                    with open(f, "a") as out:
+                        out.write(text)
+                    self.assertTrue(self.apt_input_problems(copy, tree))
+        # Each pinned value, a linked directory under mkosi.pkgmngr, and a drop-in on the included initrd tree
+        # (Security delta on #6082: these branches had no case).
+        more = [("image/enforcer/mkosi", "value", lambda c: open(c / "mkosi.conf", "a").write("\n[Config]\nInitrdInclude=evil/\n")),
+                ("spikes/S1S2-testkit/mkosi", "value", lambda c: open(c / "mkosi.conf", "a").write(
+                    "\n[Content]\nEnvironment=APT_CONFIG=/work/src/evil.conf\n")),
+                ("image/enforcer/mkosi", "link", lambda c: (c / "mkosi.pkgmngr/etc/apt/trusted.gpg.d").symlink_to(c / "evil")),
+                ("spikes/S1S2-testkit/mkosi", "link", lambda c: (c / "mkosi.pkgmngr/etc/apt/trusted.gpg.d").symlink_to(c / "evil")),
+                ("image/mkosi/initrd", "dropin", lambda c: (c / "mkosi.conf.d").mkdir())]
+        for tree, name, change in more:
+            with self.subTest(tree=tree, case=name), tempfile.TemporaryDirectory() as d:
+                copy = pathlib.Path(d, "t")
+                shutil.copytree(ROOT / tree, copy, symlinks=True)
+                (copy / "evil").mkdir()
+                change(copy)
+                self.assertTrue(self.apt_input_problems(copy, tree))
+        for tree in self.NAMES:
+            with self.subTest(tree=tree, case="none"), tempfile.TemporaryDirectory() as d:
+                copy = pathlib.Path(d, "t")
+                shutil.copytree(ROOT / tree, copy, symlinks=True)
+                self.assertEqual(self.apt_input_problems(copy, tree), [])
+
+    def test_the_check_pins_no_keyring_that_no_build_names(self):
+        # REQ: IMG-keyring-spikes. With the test kit's sources committed, the check lists only the two
+        # files the sources name; the whole keyring's buster and bullseye keys are pinned nowhere.
+        text = self.CHECK.read_text()
+        self.assertNotIn("\n%s\n" % KeyringMinimalTest.WHOLE, text)
+        self.assertFalse(KeyringMinimalTest.OLD & set(re.findall(r"^([0-9A-F]{40})  ", text, re.M)))
+
+    def configure(self, config, keyrings):
+        """The check run as mkosi v24.3 runs a configure script: as /work/configure (here a link
+        named configure), no arguments but the keyring directory, the config JSON on stdin."""
+        with tempfile.TemporaryDirectory() as d:
+            link = pathlib.Path(d, "configure")
+            link.symlink_to(self.CHECK)
+            return subprocess.run([str(link), str(keyrings)], input=config, capture_output=True, text=True)
+
+    CONFIG = {"Distribution": "debian", "Release": "trixie", "RepositoryKeyCheck": True,
+              "PackageManagerTrees": [{"Source": "/src/image/mkosi/mkosi.pkgmngr", "Target": None}]}
+
+    def test_as_configure_script_it_passes_the_config_through(self):
+        # REQ: IMG-keyring-spikes. On the runner's keyrings a Debian build passes: the config goes back
+        # on stdout byte for byte (mkosi reads its config from there), the report goes to stderr.
+        keyrings = KeyringMinimalTest().keyrings()
+        config = json.dumps(self.CONFIG)
+        p = self.configure(config, keyrings)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout, config + "\n")
+        self.assertEqual(p.stderr.count("holds exactly the"), 2)
+
+    def test_as_configure_script_it_refuses_what_the_check_cannot_vouch_for(self):
+        # REQ: IMG-keyring-spikes. However the tree, the command line or mkosi.local.conf set them, a
+        # build that is not Debian, turns off apt's signature check, or has no package manager tree
+        # (the standalone initrd tree: mkosi would generate sources naming the whole keyring) stops,
+        # each reason named and no config passed on; so does a wider keyring, and input not JSON.
+        keyrings = KeyringMinimalTest().keyrings()
+        bad = {"Distribution": "ubuntu", "RepositoryKeyCheck": False, "PackageManagerTrees": []}
+        reasons = {"Distribution": "its distribution is ubuntu, not debian",
+                   "RepositoryKeyCheck": "it sets RepositoryKeyCheck=no",
+                   "PackageManagerTrees": "it names no package manager tree"}
+        for key in bad:
+            with self.subTest(key=key):
+                p = self.configure(json.dumps(dict(self.CONFIG, **{key: bad[key]})), keyrings)
+                self.assertEqual((p.returncode, p.stdout), (1, ""))
+                self.assertIn("this mkosi build is refused: " + reasons[key], p.stderr)
+                self.assertEqual(p.stderr.count("is refused"), 1)
+        p = self.configure(json.dumps(dict(self.CONFIG, **bad)), keyrings)
+        self.assertEqual((p.returncode, p.stdout, p.stderr.count("is refused")), (1, "", 3))
+        p = self.configure("not json", keyrings)
+        self.assertEqual((p.returncode, p.stdout), (1, ""))
+        with tempfile.TemporaryDirectory() as d:
+            for n in KeyringMinimalTest().pinned():
+                shutil.copy(keyrings / KeyringMinimalTest.WHOLE, pathlib.Path(d, n))
+            p = self.configure(json.dumps(self.CONFIG), d)
+            self.assertEqual((p.returncode, p.stdout), (1, ""))
+            self.assertIn("does not hold exactly the pinned keys", p.stderr)
+
+    def test_the_enforcer_reports_every_missing_input_at_once(self):
+        # UX 3 on #5961: with both required variables unset and the keyring check failing, one run
+        # names all three and runs no mkosi.
+        with tempfile.TemporaryDirectory() as d:
+            log = pathlib.Path(d, "log")
+            script = pathlib.Path(d, "image/enforcer/build.sh")
+            script.parent.mkdir(parents=True)
+            shutil.copy(IMG / "enforcer/build.sh", script)
+            pathlib.Path(d, "image/debian-archive-keyring.sh").write_text(
+                "echo keyring-check >> %s\necho keyring-refused >&2\nexit 1\n" % log)
+            mkosi = pathlib.Path(d, "mkosi")
+            mkosi.write_text("#!/bin/sh\necho mkosi >> %s\n" % log)
+            mkosi.chmod(0o755)
+            p = subprocess.run(["sh", str(script), str(pathlib.Path(d, "out"))], capture_output=True, text=True,
+                               env={"PATH": os.environ["PATH"], "MKOSI": str(mkosi)})
+            self.assertEqual(p.returncode, 1)
+            for want in ("ENFORCER_RELEASE_ROOT) is required", "AGENTOS_RELEASE_KEYS) are required", "keyring-refused"):
+                self.assertIn(want, p.stderr)
+            self.assertEqual(log.read_text().splitlines(), ["keyring-check"])
 
 
 if __name__ == "__main__":

@@ -1,0 +1,17 @@
+# Build-time apt sources for the test kit. mkosi v24 uses this file instead of generating its own,
+# whose stanzas would name the whole debian-archive-keyring.gpg (buster and bullseye keys included)
+# and add debug and deb-src entries. Each Signed-By names a keyring of only the key that signs that
+# archive, as the core's and the enforcer's sources do (IMG-keyring-spikes, #5983; #5954), pinned by
+# image/debian-archive-keyring.sh. The kit reads the live archive, so every Release file's
+# Valid-Until is checked. Components match Repositories= in mkosi.conf.
+Types: deb
+URIs: http://deb.debian.org/debian
+Suites: trixie trixie-updates
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-bookworm-automatic.gpg
+
+Types: deb
+URIs: http://security.debian.org/debian-security
+Suites: trixie-security
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-bookworm-security-automatic.gpg
