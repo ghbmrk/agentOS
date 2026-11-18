@@ -4,13 +4,19 @@ The image that goes on the drive: Debian 13 packages, `/usr` read-only on dm-ver
 booted by Microsoft-signed shim, Debian-signed systemd-boot and kernel (S7), with boot counting.
 It carries the broker (`agentosd`), gVisor's `runsc`, and the OpenClaw guest image.
 
-Build: `sudo MKOSI=/path/to/mkosi image/build.sh OUT [VERSION]` on a Linux host that can reach
-the Debian mirrors (cloud agent sessions cannot; CI can). CI: `.github/workflows/image.yml`
-builds on two runners, boots one build under Secure Boot in QEMU, and compares the releases.
+Build, on a Linux host that can reach the Debian mirrors (cloud agent sessions cannot; CI can), from
+the repository's top, in three steps (IMG-mkosi-run-bound, D-276): `sudo image/build.sh OUT VERSION`
+stages the tree; then the pinned mkosi v24.3 runs on the committed config with `OUT`, `VERSION` and
+`SOURCE_DATE_EPOCH` (the commit time) set, from the one line image.yml's "Build image" step runs:
+`sudo env "PATH=$PATH" HOME=/root "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" /opt/mkosi/bin/mkosi -C image/mkosi -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" --extra-tree="$OUT/stage/usr:/usr" --output-dir "$OUT" build`;
+then `sudo image/finish.sh OUT VERSION`. CI: `.github/workflows/image.yml` stages on two runners, builds
+each on a fresh runner that never runs `build.sh`, boots one build under Secure Boot in QEMU, and
+compares the releases.
 
 | Path | What |
 |---|---|
-| `build.sh` | Stages the broker, runsc and guest, runs mkosi, finishes the image, writes SHA256SUMS |
+| `build.sh` | Stages the broker, runsc and guests into `OUT/stage`; never runs mkosi |
+| `finish.sh` | After mkosi: finishes the release, copies out the initrds, writes SHA256SUMS |
 | `mkosi/mkosi.conf` | Packages, boot chain, pinned snapshot, seed |
 | `mkosi/mkosi.repart/` | Disk layout: ESP, `/usr` A and B with verity, root last |
 | `mkosi/mkosi.finalize` | Fails the build on per-install state or socket files (HW-1, V15), a tree that could dump the broker's memory, load Bluetooth, turn Wi-Fi on (D-178), forward, tell the LAN about the box, link configuration where the build cannot see it or let another user write it, link anything into a world-writable directory, any tmpfiles.d line not on `tmpfiles.allow` (#1543), and any udev rule, generator or modules-load.d file not on `exec.allow` (#1556), and an agentos unit, fstab line or mount unit that lets writable storage execute (UPD-10); each refusal is a line of the build log |

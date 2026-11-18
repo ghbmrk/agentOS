@@ -1,15 +1,18 @@
 #!/bin/sh
-# Build the AgentOS device image (PLAN P2-1). Run as root on Linux with network access to
+# Stage the AgentOS device image's tree (PLAN P2-1). Run as root on Linux with network access to
 # snapshot.debian.org, storage.googleapis.com (gVisor), nodejs.org and
 # registry.npmjs.org (OpenClaw guest), ffmpeg.org or archive.ubuntu.com (libavcodec), github.com
-# (llama.cpp) and huggingface.co (the embedding model), and the Go module proxy. CI does this:
-# .github/workflows/image.yml
-# Needs mkosi v24.3 (MKOSI=/path/to/mkosi), Go, cc with a static libc, make, pkg-config, mtools,
-# erofs-utils, dosfstools, cryptsetup-bin, debian-archive-keyring, mmdebstrap.
+# (llama.cpp) and huggingface.co (the embedding model), and the Go module proxy. CI does this in
+# .github/workflows/image.yml's stage job.
+# Needs Go, cc with a static libc, make, pkg-config, mtools, erofs-utils, dosfstools, cryptsetup-bin,
+# debian-archive-keyring, mmdebstrap.
 #
 # Usage: build.sh [OUT [VERSION [DRIVERS]]]
-# Output in OUT: agentos_VERSION.raw (the whole drive), the release (agentos_VERSION.usr.raw,
-# .usr-verity.raw, the boot entry, .release.json), the package manifest, and SHA256SUMS.
+# Output in OUT: the image tree (stage/, /usr alone), the apt sources (agentos.sources, and as mkosi's
+# package manager tree in pkgmngr/), and the guests' and linked package lists (guest/, linked/). This
+# script never runs mkosi (IMG-mkosi-run-bound, #4690, D-276): the image is then built by the pinned
+# mkosi v24.3 from image.yml's "Build image" line, run from the repository's top, and finished by
+# image/finish.sh OUT VERSION; image/README.md gives the local commands.
 # DRIVERS (DEVSLOT-image, D-189), optional: a directory of device drivers built in a private
 # repository, each <name>/ holding a static `driver` binary and its entry.json (repository, commit,
 # declaration, class row, measure). The public release build passes none and ships none.
@@ -28,7 +31,7 @@ export GOWORK=off
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/.." && pwd)
 # The Debian archive keyring mkosi and guest-base.sh verify the snapshot with: exactly the pinned keys (#5578).
 sh "$HERE/debian-archive-keyring.sh"
-OUT=$(realpath -m "${1:-$HERE/out}"); MKOSI=${MKOSI:-mkosi}; DRIVERS=${3:+$(realpath "$3")}
+OUT=$(realpath -m "${1:-$HERE/out}"); DRIVERS=${3:+$(realpath "$3")}
 SOURCE_DATE_EPOCH=$(git -c safe.directory="$REPO" -C "$REPO" log -1 --format=%ct); export SOURCE_DATE_EPOCH
 VERSION=${2:-$(TZ=UTC git -c safe.directory="$REPO" -C "$REPO" log -1 --date=format-local:%Y%m%d.%H%M%S --format=%cd)}
 GVISOR=release-20260928.0
@@ -145,23 +148,7 @@ python3 "$HERE/finish_image.py" --stage-drivers "$DRIVERS" "$STAGE" "$OUT/driver
 rm -f "$OUT/drivercheck"
 chmod -R u+w,go-w "$STAGE"
 
-$MKOSI -C "$HERE/mkosi" -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" --extra-tree="$STAGE:/" \
-	--output-dir "$OUT" build
-rm -rf "$OUT/pkgmngr"
-python3 "$HERE/finish_image.py" "$OUT" "$VERSION" "$STAGE/usr/lib/agentos/drivers.json"
-rm -rf "$STAGE"
-# The initrds the release's entry boots, copied out of the ESP to OUT/initrd/ under their ESP paths:
-# image.yml's reproduce job compares two runners' copies member by member (IMG-2).
-rm -rf "$OUT/initrd"
-python3 -I -c 'import json, pathlib, subprocess, sys
-sys.path.insert(0, sys.argv[1]); import finish_image
-out, version = pathlib.Path(sys.argv[2]), sys.argv[3]
-img = out / ("agentos_%s.raw" % version)
-fs = "%s@@%d" % (img, finish_image.esp_offset(str(img)))
-for p in json.loads((out / ("agentos_%s.release.json" % version)).read_text())["boot"]:
-    if p.endswith("initrd"):
-        dst = out / "initrd" / p
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_bytes(subprocess.check_output(["mtype", "-i", fs, "::/" + p]))' "$HERE" "$OUT" "$VERSION"
-( cd "$OUT" && sha256sum "agentos_$VERSION.raw" "agentos_$VERSION.usr.raw" "agentos_$VERSION.usr-verity.raw" \
-	"agentos_$VERSION+3.conf" "agentos_$VERSION.release.json" > SHA256SUMS && cat SHA256SUMS )
+# The tree is staged. The pinned mkosi runs on the committed config next, out of this script's reach
+# (IMG-mkosi-run-bound, #4690, D-276): image.yml's build job runs it, on a runner that never runs this
+# script, from the one line in its "Build image" step, and image/finish.sh finishes the image.
+echo "staged $STAGE (version $VERSION)"

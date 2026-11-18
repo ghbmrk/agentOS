@@ -128,8 +128,89 @@ jobs:
         run: |
           ts=$(sh image/security-snapshot.sh resolve)
           echo "timestamp=$ts" >> "$GITHUB_OUTPUT"
-  build:
+  # IMG-mkosi-run-bound (#4690, D-276): build.sh runs as root, so it could repoint mkosi's config, flags or
+  # binary on its own runner. It runs only here: it stages the image tree into OUT/stage, and the job
+  # uploads that tree (with the guests' and linked package lists) for the build job, which runs the pinned
+  # mkosi on the committed config on a fresh runner and never runs build.sh. The root tests that need no
+  # image run here too, so nothing from the repository runs as root before mkosi there.
+  stage:
     needs: security-snapshot
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [a, b]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      # IMG-disk (#4317): the runner's disk, not the image, ran out mid-build (systemd-repart ENOSPC).
+      # Preinstalled toolchains the job never uses go first; the guard below then checks the result.
+      - name: Free runner disk
+        run: |
+          gb() { echo $(( $(df -BM --output=avail / | tail -n 1 | tr -dc 0-9) / 1024 )); }
+          echo "::notice title=disk budget::/ had $(gb) GB free before freeing the runner disk"
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/local/share/chromium
+          sudo docker image prune -a -f >/dev/null 2>&1 || true
+          echo "::notice title=disk budget::/ has $(gb) GB free after freeing the runner disk"
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
+        with:
+          go-version-file: broker/go.mod
+          cache: false
+      - name: Install staging tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends debian-archive-keyring erofs-utils dosfstools mtools \
+            e2fsprogs cpio zstd kmod bubblewrap cryptsetup-bin mmdebstrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Disk adapter on a loop device (UPD-b3 (c1))
+        # As root: a GPT on a loop device, the booted slot held by dm-verity (broker/apply/bootab).
+        # A skipped test exits 0, so the step also requires the loop test's PASS line.
+        shell: bash  # with pipefail, so tee keeps the test's exit status
+        run: |
+          (cd broker && go test -c -o "$RUNNER_TEMP/bootab.test" ./apply/bootab)
+          sudo modprobe dm-verity
+          sudo env AGENTOS_BOOTAB_LOOP=1 "$RUNNER_TEMP/bootab.test" -test.run '^TestLinux' -test.v -test.count=1 | tee "$RUNNER_TEMP/bootab.log"
+          grep -q -- '^--- PASS: TestLinuxSlotsOnALoopDevice ' "$RUNNER_TEMP/bootab.log"
+      # #4677: the unit rules' fixtures, each a loading rule a #4737 review found, run through the reader
+      # CI runs on the built tree (image/unit_rules.py), with the runner's systemd deciding each unit's
+      # files, and every refusal row of the unit rules again through it. They need root and systemd,
+      # and AGENTOS_REQUIRE_SYSTEMD=1 makes a skip fail.
+      - name: Unit-rule fixtures under systemd (image/unit_rules.py)
+        if: matrix.run == 'a'
+        shell: bash  # with pipefail, so tee keeps the test's exit status
+        run: |
+          (cd broker && go test -c -o "$RUNNER_TEMP/privfile.test" ./kernel/privfile)
+          cd broker/kernel/privfile
+          sudo env "PATH=$PATH" AGENTOS_REQUIRE_SYSTEMD=1 "$RUNNER_TEMP/privfile.test" -test.run '^(TestUnitRulesUnderSystemd|TestRootSideUnitPathsAndGrants)$' -test.v -test.count=1 | tee "$RUNNER_TEMP/unit-fixtures.log"
+          grep -q -- '^--- PASS: TestUnitRulesUnderSystemd ' "$RUNNER_TEMP/unit-fixtures.log"
+          grep -q -- '^--- PASS: TestRootSideUnitPathsAndGrants ' "$RUNNER_TEMP/unit-fixtures.log"
+      - name: Stage the image tree (image/build.sh)
+        shell: bash  # with pipefail, so tee keeps the build's exit status
+        env:
+          AGENTOS_SECURITY_SNAPSHOT: ${{ needs.security-snapshot.outputs.timestamp }}  # the same for a and b (#5021)
+        run: sudo env "PATH=$PATH" "AGENTOS_SECURITY_SNAPSHOT=$AGENTOS_SECURITY_SNAPSHOT" HOME=/root GOCACHE=/tmp/gocache image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/stage.log"
+      # A tar keeps the tree's owners, modes and links, which the artifact store does not. The stage is
+      # /usr alone: the build job copies OUT/stage/usr to /usr and nowhere else.
+      - name: Pack the stage
+        run: |
+          [ "$(sudo ls -A "$RUNNER_TEMP/out/stage")" = usr ] || { echo "::error::OUT/stage holds more than usr/"; exit 1; }
+          sudo tar -C "$RUNNER_TEMP/out" --numeric-owner -cf "$RUNNER_TEMP/stage.tar" stage agentos.sources guest linked
+          echo "::notice title=stage size::$(du -m "$RUNNER_TEMP/stage.tar" | cut -f1) MB"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: stage-${{ matrix.run }}
+          path: ${{ runner.temp }}/stage.tar
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
+  # The pinned mkosi on the committed config (IMG-mkosi-run-bound, #4690, D-276): mkosi is installed before
+  # anything from the repository runs, and the one line "Build image" runs reads the config directory from
+  # this checkout and the extra tree from the stage job's upload; this job never runs image/build.sh.
+  build:
+    needs: [security-snapshot, stage]
     strategy:
       fail-fast: false
       matrix:
@@ -166,28 +247,6 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo git clone -q https://github.com/systemd/mkosi /opt/mkosi
           sudo git -C /opt/mkosi -c advice.detachedHead=false checkout -q 26673f65e17ae099bb0cf65928fe70c93b8a6a37  # v24.3
-      - name: Disk adapter on a loop device (UPD-b3 (c1))
-        # As root: a GPT on a loop device, the booted slot held by dm-verity (broker/apply/bootab).
-        # A skipped test exits 0, so the step also requires the loop test's PASS line.
-        shell: bash  # with pipefail, so tee keeps the test's exit status
-        run: |
-          (cd broker && go test -c -o "$RUNNER_TEMP/bootab.test" ./apply/bootab)
-          sudo modprobe dm-verity
-          sudo env AGENTOS_BOOTAB_LOOP=1 "$RUNNER_TEMP/bootab.test" -test.run '^TestLinux' -test.v -test.count=1 | tee "$RUNNER_TEMP/bootab.log"
-          grep -q -- '^--- PASS: TestLinuxSlotsOnALoopDevice ' "$RUNNER_TEMP/bootab.log"
-      # #4677: the unit rules' fixtures, each a loading rule a #4737 review found, run through the reader
-      # CI runs on the built tree (image/unit_rules.py), with the runner's systemd deciding each unit's
-      # files, and every refusal row of the unit rules again through it. They need root and systemd,
-      # and AGENTOS_REQUIRE_SYSTEMD=1 makes a skip fail.
-      - name: Unit-rule fixtures under systemd (image/unit_rules.py)
-        if: matrix.run == 'a'
-        shell: bash  # with pipefail, so tee keeps the test's exit status
-        run: |
-          (cd broker && go test -c -o "$RUNNER_TEMP/privfile.test" ./kernel/privfile)
-          cd broker/kernel/privfile
-          sudo env "PATH=$PATH" AGENTOS_REQUIRE_SYSTEMD=1 "$RUNNER_TEMP/privfile.test" -test.run '^(TestUnitRulesUnderSystemd|TestRootSideUnitPathsAndGrants)$' -test.v -test.count=1 | tee "$RUNNER_TEMP/unit-fixtures.log"
-          grep -q -- '^--- PASS: TestUnitRulesUnderSystemd ' "$RUNNER_TEMP/unit-fixtures.log"
-          grep -q -- '^--- PASS: TestRootSideUnitPathsAndGrants ' "$RUNNER_TEMP/unit-fixtures.log"
       # IMG-disk (#4317, #4366): each file system the job writes to (output and boot copies in
       # RUNNER_TEMP, mkosi's workspace in /var/tmp, GOCACHE in /tmp, mkosi's cache under /root) must
       # have DISK_NEED_GB free, or the job stops here with both numbers and the runner's cloud (from
@@ -217,11 +276,31 @@ jobs:
           chmod +x "$RUNNER_TEMP/disk-used"
           "$RUNNER_TEMP/disk-used" > "$RUNNER_TEMP/disk.base"
           nohup sh -c 'while :; do "$RUNNER_TEMP/disk-used" >> "$RUNNER_TEMP/disk.samples"; sleep 1; done' >/dev/null 2>&1 &
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: stage-${{ matrix.run }}
+          path: ${{ runner.temp }}/stage-in
+      - name: Unpack the stage
+        run: |
+          sudo mkdir "$RUNNER_TEMP/out"
+          sudo tar -C "$RUNNER_TEMP/out" --numeric-owner -xf "$RUNNER_TEMP/stage-in/stage.tar"
+          rm -rf "$RUNNER_TEMP/stage-in"
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+          echo "VERSION=$(TZ=UTC git log -1 --date=format-local:%Y%m%d.%H%M%S --format=%cd)" >> "$GITHUB_ENV"
+      # The run's one debian-security snapshot (#5021) as mkosi's package manager tree, made here from the
+      # committed sources; the guests' roots were installed from the same file (the stage's agentos.sources).
       - name: Build image
         shell: bash  # with pipefail, so tee keeps the build's exit status
         env:
           AGENTOS_SECURITY_SNAPSHOT: ${{ needs.security-snapshot.outputs.timestamp }}  # the same for a and b (#5021)
-        run: sudo env "PATH=$PATH" "AGENTOS_SECURITY_SNAPSHOT=$AGENTOS_SECURITY_SNAPSHOT" HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log"
+          OUT: ${{ runner.temp }}/out
+        run: |
+          sh image/security-snapshot.sh sources "$AGENTOS_SECURITY_SNAPSHOT" > "$RUNNER_TEMP/mkosi.sources"
+          cmp "$RUNNER_TEMP/mkosi.sources" "$OUT/agentos.sources"
+          sudo install -D -m 0644 "$RUNNER_TEMP/mkosi.sources" "$OUT/pkgmngr/etc/apt/sources.list.d/mkosi.sources"
+          sudo env "PATH=$PATH" HOME=/root "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" /opt/mkosi/bin/mkosi -C image/mkosi -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" --extra-tree="$OUT/stage/usr:/usr" --output-dir "$OUT" build 2>&1 | tee "$RUNNER_TEMP/build.log"
+      - name: Finish the image (image/finish.sh)
+        run: sudo env "PATH=$PATH" "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" image/finish.sh "$RUNNER_TEMP/out" "$VERSION"
       - name: Show the tree check's refusals
         # The tree check's refusals as annotations, so a tmpfiles.d line missing from
         # image/mkosi/tmpfiles.allow can be reviewed (and its entry copied) without the full log (#1543).

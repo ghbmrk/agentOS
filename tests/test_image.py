@@ -2621,15 +2621,11 @@ class ConfigTest(unittest.TestCase):
                 # its value is pinned whole: repart's mkfs options for project quotas, nothing else.
                 if k == "Environment":
                     self.assertEqual(v, ["SYSTEMD_REPART_MKFS_OPTIONS_EXT4=-Oquota,project"], "%s: %s" % (where, why))
-        # image.yml sets MKOSI only to the pinned v24.3 binary. What build.sh itself does before it
-        # runs mkosi (its config dir, flags and tree) is #4690's row (from #4647): a line pin of shell cannot hold.
-        # AGENTOS_SECURITY_SNAPSHOT is the run's one debian-security timestamp (#5021), which
-        # build.sh checks (image/security-snapshot.sh) before apt reads it.
+        # image.yml runs the pinned v24.3 binary on this config from one line, in a job that never runs
+        # build.sh (#4690, D-276; MkosiRunBoundTest pins the line), so no MKOSI= is handed to a script.
         wf = (ROOT / ".github/workflows/image.yml").read_text().splitlines()
-        self.assertEqual([l.strip() for l in wf if "MKOSI" in l], [
-            'run: sudo env "PATH=$PATH" "AGENTOS_SECURITY_SNAPSHOT=$AGENTOS_SECURITY_SNAPSHOT" '
-            'HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi '
-            'image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log"'], why)
+        self.assertEqual([l.strip() for l in wf if "MKOSI" in l], [], why)
+        self.assertEqual([l.strip() for l in wf if "bin/mkosi " in l], [MkosiRunBoundTest.MKOSI_LINE], why)
 
     # REQ: HW-10
     def test_packages_come_from_the_pinned_snapshot(self):
@@ -6139,12 +6135,14 @@ class TreeAccessTest(unittest.TestCase):
     through pathlib). mkosi.finalize may touch the file system only in the five tree primitives
     (tree_lstat, tree_listdir, tree_readlink, tree_read, and tree_xattrs, #1803), none of which follows
     a link on the build host, in the two functions that read the repository's allowlists (tmpfiles.allow,
-    exec.allow), not the tree, and in script_net_dev, which reads the script sandbox's /proc (#4647). Only
+    exec.allow), not the tree, in script_net_dev, which reads the script sandbox's /proc (#4647), and in
+    pinned_packages, which reads the apt lists mkosi mounts beside the tree (#4690). Only
     Conf.content (through conf_chase) and the key scan may read a file's bytes. Any other function that
     calls a file-reading or stat API fails here, however it names it."""
     # REQ: HW-1, DEV-2
     ALLOWED = frozenset(("tree_lstat", "tree_listdir", "tree_readlink", "tree_read", "tree_xattrs",
-                         "allow_path", "allow_entries", "script_net_dev", "repart_build", "build_definitions"))
+                         "allow_path", "allow_entries", "script_net_dev", "pinned_packages", "repart_build",
+                         "build_definitions"))
     READERS = {"tree_read": frozenset(("Conf.content", "has_key"))}
     SOURCE = (MK / "mkosi.finalize").read_text()
 
@@ -7879,6 +7877,148 @@ class EdgeLinkUnitsTest(unittest.TestCase):
         jobs = self.transaction("multi-user.target", device)
         for unit in (LINK_CAPTURE.name, LINK_SERVED.name, "agentos-inbound.service", "agentos-keeper-enroll.service"):
             self.assertIn(unit, jobs)
+
+
+def workflow_code(text):
+    """TEXT, a workflow's lines, without its comment lines."""
+    return "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+
+
+def workflow_job(name):
+    """The text of image.yml's job NAME, up to the next job."""
+    wf = (ROOT / ".github/workflows/image.yml").read_text()
+    start = wf.index("\n  %s:\n" % name)
+    nxt = re.search(r"\n  [a-z][a-z-]*:\n", wf[start + 1:])
+    return wf[start:start + 1 + nxt.start()] if nxt else wf[start:]
+
+
+class MkosiRunBoundTest(unittest.TestCase):
+    """IMG-mkosi-run-bound (#4690, D-276): the release's mkosi run reads only the committed config with
+    the pinned mkosi, out of build.sh's reach, and the image's packages come only from the pinned,
+    signature-checked sources."""
+    # REQ: HW-10
+
+    MKOSI_LINE = ('sudo env "PATH=$PATH" HOME=/root "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" /opt/mkosi/bin/mkosi '
+                  '-C image/mkosi -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" '
+                  '--extra-tree="$OUT/stage/usr:/usr" --output-dir "$OUT" build 2>&1 | tee "$RUNNER_TEMP/build.log"')
+    INDEX = "snapshot.debian.org_archive_debian_20261001T000000Z_dists_trixie_main_binary-amd64_Packages"
+    SEC = "snapshot.debian.org_archive_debian-security_20261112T180512Z_dists_trixie-security_main_binary-amd64_Packages"
+
+    def test_the_one_mkosi_line_is_pinned(self):
+        wf = (ROOT / ".github/workflows/image.yml").read_text().splitlines()
+        self.assertEqual([l.strip() for l in wf if "bin/mkosi " in l], [self.MKOSI_LINE])
+        # The local build calls the same line (image/README.md).
+        readme = (IMG / "README.md").read_text()
+        self.assertIn("`%s`" % self.MKOSI_LINE.split(" 2>&1")[0], readme)
+
+    def test_build_sh_only_stages(self):
+        b = (IMG / "build.sh").read_text()
+        code = "\n".join(l for l in b.splitlines() if not l.lstrip().startswith("#"))
+        self.assertNotIn("mkosi -C", code)
+        self.assertNotIn("MKOSI", code)
+        self.assertNotIn("finish_image.py\" \"$OUT\"", code)
+        self.assertNotIn("SHA256SUMS", code)
+
+    def test_the_build_job_never_runs_build_sh(self):
+        build = workflow_job("build")
+        self.assertFalse("build.sh" in workflow_code(build))
+        self.assertIn("    needs: [security-snapshot, stage]\n", build)
+        self.assertIn("name: stage-${{ matrix.run }}", build)
+
+    def test_mkosi_is_pinned_before_any_repository_code_runs(self):
+        # Before the mkosi line, the build job runs only image.yml's own shell, pinned actions and
+        # security-snapshot.sh's sources form: no repository script, test binary or Go build.
+        build = workflow_job("build")
+        before = workflow_code(build[:build.index(self.MKOSI_LINE)]).replace("go-version-file: broker/go.mod", "")
+        install = before.index("sudo git -C /opt/mkosi -c advice.detachedHead=false checkout -q "
+                               "26673f65e17ae099bb0cf65928fe70c93b8a6a37  # v24.3")
+        self.assertLess(install, before.index("actions/download-artifact@"))
+        for word in ("go test", "go build", "python3", "broker/", "./", "make "):
+            self.assertFalse(word in before, word)
+        self.assertEqual(re.findall(r"\bimage/[\w./-]+", before),
+                         ["image/security-snapshot.sh"])
+        self.assertIn('sh image/security-snapshot.sh sources "$AGENTOS_SECURITY_SNAPSHOT" > "$RUNNER_TEMP/mkosi.sources"', before)
+        self.assertIn('cmp "$RUNNER_TEMP/mkosi.sources" "$OUT/agentos.sources"', before)
+        after = build[build.index(self.MKOSI_LINE):]
+        self.assertIn('image/finish.sh "$RUNNER_TEMP/out" "$VERSION"', after)
+
+    def test_the_stage_job_runs_build_sh_and_no_mkosi(self):
+        stage = workflow_job("stage")
+        self.assertIn("    needs: security-snapshot\n", stage)
+        self.assertEqual(stage.count('image/build.sh "$RUNNER_TEMP/out"'), 1)
+        self.assertNotIn("bin/mkosi", stage)
+        self.assertNotIn("/opt/mkosi", stage)
+        self.assertIn('[ "$(sudo ls -A "$RUNNER_TEMP/out/stage")" = usr ]', stage)
+        self.assertIn("name: stage-${{ matrix.run }}", stage)
+        # The root tests that need no image moved here, out of the mkosi job.
+        self.assertIn("- name: Disk adapter on a loop device (UPD-b3 (c1))", stage)
+        self.assertIn("- name: Unit-rule fixtures under systemd (image/unit_rules.py)", stage)
+
+    def test_finish_runs_after_mkosi_as_build_sh_did(self):
+        f = (IMG / "finish.sh").read_text()
+        self.assertLess(f.index('finish_image.py" "$OUT" "$VERSION" "$STAGE/usr/lib/agentos/drivers.json"'),
+                        f.index('rm -rf "$OUT/initrd"'))
+        self.assertIn("> SHA256SUMS", f)
+
+    def status(self, *pkgs):
+        return "".join("Package: %s\nStatus: install ok %s\nArchitecture: %s\nVersion: %s\nDescription: x\n y\n\n"
+                       % p for p in pkgs).encode()
+
+    def lists(self, files):
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        for name, data in files.items():
+            (d / name).write_bytes(data)
+        return str(d)
+
+    def test_installed_packages_are_in_a_pinned_index(self):
+        idx = b"Package: bash\nVersion: 5.2.37-2\nArchitecture: amd64\n\nPackage: tzdata\nVersion: 2025b-4\nArchitecture: all\n"
+        sec = b"Package: openssl\nArchitecture: amd64\nVersion: 3.5.7-1~deb13u1\n"
+        lists = self.lists({self.INDEX: idx, self.SEC + ".xz": __import__("lzma").compress(sec),
+                            "_repository_Packages": b"Package: evil\nVersion: 1\nArchitecture: amd64\n",
+                            "lock": b""})
+        ok = self.status(("bash", "installed", "amd64", "5.2.37-2"), ("tzdata", "installed", "all", "2025b-4"),
+                         ("openssl", "installed", "amd64", "3.5.7-1~deb13u1"),
+                         ("gone", "config-files", "amd64", "9"))
+        self.assertEqual(check.package_source_violations(ok, lists), [])
+        why = "the image's packages come only from the pinned, signature-checked snapshot sources (#4690)"
+        for pkg in (("evil", "installed", "amd64", "1"), ("bash", "installed", "amd64", "5.2.37-3"),
+                    ("bash", "unpacked", "i386", "5.2.37-2")):
+            with self.subTest(pkg=pkg):
+                self.assertEqual(check.package_source_violations(ok + self.status(pkg), lists), [
+                    "var/lib/dpkg/status: %s %s (%s) is installed, but no pinned Packages index lists that version; %s"
+                    % (pkg[0], pkg[3], pkg[2], why)])
+        # No pinned index read (only the local repository's, or a live archive's): every build refuses.
+        bare = self.lists({"_repository_Packages": idx,
+                           "deb.debian.org_debian_dists_trixie_main_binary-amd64_Packages": idx})
+        self.assertEqual(check.package_source_violations(ok, bare), [
+            "%s holds no Packages index from the pinned snapshot sources (other indexes: _repository_Packages, "
+            "deb.debian.org_debian_dists_trixie_main_binary-amd64_Packages); %s" % (bare, why)])
+        self.assertEqual(check.package_source_violations(b"", lists),
+                         ["var/lib/dpkg/status: lists no installed package; " + why])
+        broken = self.lists({self.INDEX + ".gz": b"not gzip"})
+        [line] = check.package_source_violations(ok, broken)[:1]
+        self.assertIn(self.INDEX + ".gz: unreadable", line)
+
+    def test_tree_status_is_read_inside_the_tree(self):
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        lists = self.lists({self.INDEX: b"Package: bash\nVersion: 1\nArchitecture: amd64\n"})
+        self.assertEqual(check.tree_package_violations(str(root), lists),
+                         ["var/lib/dpkg/status: unreadable (No such file or directory); the image's packages come only "
+                          "from the pinned, signature-checked snapshot sources (#4690)"])
+        write(root, "var/lib/dpkg/status", self.status(("bash", "installed", "amd64", "1")).decode())
+        self.assertEqual(check.tree_package_violations(str(root), lists), [])
+
+    def test_a_package_file_in_the_tree_is_refused(self):
+        root = clean_tree(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        self.assertEqual(check.violations(root), [])
+        for name in ("usr/lib/agentos/x.deb", "var/cache/apt/archives/y.udeb", "opt/z.ddeb"):
+            write(root, name, "!<arch>\n")
+        self.assertEqual(check.violations(root), [
+            "%s: a Debian package file; the image's packages come only from mkosi's signature-checked apt run (#4690)"
+            % n for n in ("opt/z.ddeb", "usr/lib/agentos/x.deb", "var/cache/apt/archives/y.udeb")])
 
 
 if __name__ == "__main__":

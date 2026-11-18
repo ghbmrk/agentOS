@@ -26,13 +26,17 @@ its unlock unit gets no descriptor past 2 and a bounded restart count (#2899, #2
 (DEVSLOT-image) ships only as a binary drivers.json lists with its hash, under units rendered from
 DRIVER_TEMPLATE for its name, and nothing else names its user or the drivers' sockets.
 Run by mkosi, it also refuses a run whose scripts had the network (#4647), so neither mkosi.postinst nor
-this script can fetch a package outside mkosi's checked apt run.
+this script can fetch a package outside mkosi's checked apt run, and a tree with an installed package
+that no pinned, signature-checked Packages index lists at that version (#4690); any tree with a .deb.
 Usage outside mkosi: mkosi.finalize ROOT; mkosi.finalize --tmpfiles-allowlist ROOT and
 mkosi.finalize --exec-allowlist ROOT print those allowlists for a tree."""
+import bz2
 import errno
 import fnmatch
+import gzip
 import hashlib
 import json
+import lzma
 import os
 import re
 import stat
@@ -527,6 +531,8 @@ def _violations(root):
             out.append("%s: %s" % (rel, E2E_WHY))
         if stat.S_ISSOCK(st.st_mode):
             out.append("%s: socket file (V15)" % rel)
+        elif stat.S_ISREG(st.st_mode) and rel.endswith(PACKAGE_FILES):
+            out.append("%s: %s" % (rel, PACKAGE_FILE_WHY))
         elif (stat.S_ISREG(st.st_mode) and st.st_size <= SCAN_MAX
               and rel.split("/", 1)[0] in SCAN and has_key(root, rel)):
             out.append("%s: private key material" % rel)
@@ -4804,6 +4810,105 @@ def script_network_violations(with_network, net_dev):
     return out
 
 
+# IMG-mkosi-run-bound (#4690, D-276): the image's packages come only from the pinned, signature-checked
+# sources. mkosi v24.3 mounts its apt state at /var/lib/apt for this script, and apt writes an index into
+# lists/ only after its InRelease signature (Signed-By, the keyrings image/debian-archive-keyring.sh pins)
+# and hash checked. The pinned sources are snapshot.debian.org's: the trixie archive (mkosi.conf's Mirror=)
+# and one debian-security snapshot (image/security-snapshot.sh). Another index there (mkosi's local
+# /repository, a live archive) counts for nothing, so a package only it lists is refused.
+APT_LISTS = "/var/lib/apt/lists"
+PINNED_INDEX = re.compile(r"snapshot\.debian\.org_archive_(?:debian_\d{8}T\d{6}Z_dists_trixie(?:-updates)?"
+                          r"|debian-security_\d{8}T\d{6}Z_dists_trixie-security)_main_binary-(?:amd64|all)_Packages"
+                          r"(\.gz|\.xz|\.bz2)?")
+DPKG_STATUS = "var/lib/dpkg/status"
+# A Debian package file anywhere in the tree: a build step could install it outside apt's checked run.
+PACKAGE_FILES = (".deb", ".udeb", ".ddeb")
+PACKAGE_FILE_WHY = ("a Debian package file; the image's packages come only from mkosi's signature-checked apt run "
+                    "(#4690)")
+PACKAGE_WHY = "the image's packages come only from the pinned, signature-checked snapshot sources (#4690)"
+
+
+def deb822_fields(data, keys):
+    """(dict of KEYS) for each paragraph of DATA, a deb822 file (dpkg's status, an apt Packages index),
+    with each value stripped; continuation lines are not kept."""
+    para = {}
+    for line in data.split(b"\n"):
+        if not line.strip():
+            if para:
+                yield para
+            para = {}
+        elif line[:1] not in (b" ", b"\t") and b":" in line:
+            k, v = line.split(b":", 1)
+            if k in keys:
+                para[k] = v.strip()
+    if para:
+        yield para
+
+
+def pinned_packages(lists):
+    """((package, version, architecture) set, index names read, other Packages names seen, refusals) from
+    directory LISTS, apt's lists/."""
+    got, read, other, out = set(), [], [], []
+    try:
+        names = sorted(os.listdir(lists))
+    except OSError as e:
+        return got, read, other, ["%s: unreadable (%s); %s" % (lists, e.strerror, PACKAGE_WHY)]
+    for n in names:
+        m = PINNED_INDEX.fullmatch(n)
+        if not m:
+            if "Packages" in n:
+                other.append(n)
+            continue
+        path = os.path.join(lists, n)
+        try:
+            st = os.lstat(path)
+            if not stat.S_ISREG(st.st_mode):
+                out.append("%s: not a regular file; %s" % (path, PACKAGE_WHY))
+                continue
+            with open(path, "rb") as f:
+                data = f.read()
+            data = {".gz": gzip.decompress, ".xz": lzma.decompress, ".bz2": bz2.decompress}.get(m.group(1), bytes)(data)
+        except (OSError, EOFError, lzma.LZMAError) as e:
+            out.append("%s: unreadable (%s); %s" % (path, e.strerror if isinstance(e, OSError) else e, PACKAGE_WHY))
+            continue
+        read.append(n)
+        for p in deb822_fields(data, (b"Package", b"Version", b"Architecture")):
+            got.add((p.get(b"Package"), p.get(b"Version"), p.get(b"Architecture")))
+    return got, read, other, out
+
+
+def package_source_violations(status, lists):
+    """Every package dpkg's STATUS (bytes, the tree's var/lib/dpkg/status) has unpacked whose name, version
+    and architecture no pinned Packages index in directory LISTS lists, one line each."""
+    got, read, other, out = pinned_packages(lists)
+    if not read:
+        return out + ["%s holds no Packages index from the pinned snapshot sources (other indexes: %s); %s"
+                      % (lists, ", ".join(other) or "none", PACKAGE_WHY)]
+    n = 0
+    for p in deb822_fields(status, (b"Package", b"Version", b"Architecture", b"Status")):
+        words = p.get(b"Status", b"").split()
+        if len(words) == 3 and words[2] in (b"not-installed", b"config-files"):
+            continue
+        n += 1
+        key = (p.get(b"Package"), p.get(b"Version"), p.get(b"Architecture"))
+        if key not in got:
+            out.append("%s: %s %s (%s) is installed, but no pinned Packages index lists that version; %s"
+                       % (DPKG_STATUS, *(v.decode("utf-8", "replace") if v is not None else "(none)" for v in key),
+                          PACKAGE_WHY))
+    if not n:
+        out.append("%s: lists no installed package; %s" % (DPKG_STATUS, PACKAGE_WHY))
+    return out
+
+
+def tree_package_violations(root, lists=APT_LISTS):
+    """package_source_violations for the tree at ROOT, its dpkg status read inside the tree (Conf's rules)."""
+    try:
+        status = Conf(root, DPKG_STATUS).content()
+    except OSError as e:
+        return ["%s: unreadable (%s); %s" % (DPKG_STATUS, e.strerror, PACKAGE_WHY)]
+    return package_source_violations(status, lists)
+
+
 def main():
     if sys.argv[1:2] == ["--tmpfiles-allowlist"] and len(sys.argv) == 3:
         sys.stdout.write(tmpfiles_allowlist_text(sys.argv[2]))
@@ -4820,6 +4925,7 @@ def main():
     v = violations(root)
     if len(sys.argv) == 1:  # run by mkosi, in its script sandbox
         v += script_network_violations(os.environ.get("WITH_NETWORK"), script_net_dev())
+        v += tree_package_violations(root)
     for line in v:
         print("image check: " + line)
     if v:
