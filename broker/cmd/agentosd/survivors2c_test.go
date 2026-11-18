@@ -21,6 +21,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/bridgeclient"
@@ -42,13 +43,13 @@ type logLines struct {
 	l  []string
 }
 
-func (g *logLines) logf(format string, args ...any) {
+func (g *logLines) add2c(format string, args ...any) {
 	g.mu.Lock()
 	g.l = append(g.l, fmt.Sprintf(format, args...))
 	g.mu.Unlock()
 }
 
-func (g *logLines) has(sub string) bool {
+func (g *logLines) saw2c(sub string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return slices.ContainsFunc(g.l, func(s string) bool { return strings.Contains(s, sub) })
@@ -92,7 +93,7 @@ func TestEvidenceRunWaitsForTheOutboxAndEndsWithItsContext(t *testing.T) {
 func TestEvidenceAReplyThatStaysIsTextedOnce(t *testing.T) {
 	r := newEvRig(t)
 	var logs logLines
-	r.ev.logf = logs.logf
+	r.ev.logf = logs.add2c
 	r.ev.wake = make(chan struct{}, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -100,12 +101,15 @@ func TestEvidenceAReplyThatStaysIsTextedOnce(t *testing.T) {
 	src := &stuckOutbox{fakeOutbox{sent: r.texts}}
 	src.add("canary-mut2c-stays")
 	r.ev.serve(src)
-	for end := time.Now().Add(5 * time.Second); !logs.has("stays in the outbox"); time.Sleep(time.Millisecond) {
+	for end := time.Now().Add(5 * time.Second); !logs.saw2c("stays in the outbox"); time.Sleep(time.Millisecond) {
 		if time.Now().After(end) {
 			t.Fatalf("no stay logged; texted %d", len(r.texts()))
 		}
 	}
 	time.Sleep(20 * time.Millisecond)
+	if !logs.saw2c("left in the outbox store: outbox store unwritable") {
+		t.Fatalf("the failed retire was not logged: %q", logs.l)
+	}
 	if got := r.texts(); !slices.Equal(got, []string{"canary-mut2c-stays"}) {
 		t.Fatalf("texted %d times: %q", len(got), got)
 	}
@@ -117,7 +121,7 @@ func TestEvidenceAReplyThatStaysIsTextedOnce(t *testing.T) {
 func TestEvidenceUnsentTextIsLoggedAndNoInformIsNoNotice(t *testing.T) {
 	r := newEvRig(t)
 	var logs logLines
-	r.ev.logf = logs.logf
+	r.ev.logf = logs.add2c
 	r.ev.kept.store = failStore{}
 	n := 0
 	r.ev.notify = func(string) error {
@@ -127,7 +131,7 @@ func TestEvidenceUnsentTextIsLoggedAndNoInformIsNoNotice(t *testing.T) {
 		return nil
 	}
 	r.ev.sendSplit("agent", strings.Repeat("A reply in two texts. ", 30))
-	if !logs.has("reply from agent not sent (text 2 of 2)") {
+	if !logs.saw2c("reply from agent not sent (text 2 of 2)") {
 		t.Fatalf("logged %q", logs.l)
 	}
 }
@@ -208,12 +212,12 @@ func TestTellHeldDroppedWithNoChannel(t *testing.T) {
 func TestKeepLogsARefusal(t *testing.T) {
 	r := newEvRig(t)
 	var logs logLines
-	r.ev.kept.logf = logs.logf
+	r.ev.kept.logf = logs.add2c
 	r.store.Fail = errors.New("disk full")
 	if err := r.ev.kept.keep(localapi.HeldLong, "canary-mut2c-keep"); err == nil {
 		t.Fatal("kept on a failing store")
 	}
-	if !logs.has("a long reply was not kept: disk full") || logs.has("canary-mut2c-keep") {
+	if !logs.saw2c("a long reply was not kept: disk full") || logs.saw2c("canary-mut2c-keep") {
 		t.Fatalf("logged %q", logs.l)
 	}
 }
@@ -236,7 +240,7 @@ func TestKeepRefusesAnUnencodableList(t *testing.T) {
 func TestSweepLeavesAnEmptyStoreAndLogsABadOne(t *testing.T) {
 	r := newEvRig(t)
 	var logs logLines
-	r.ev.kept.logf = logs.logf
+	r.ev.kept.logf = logs.add2c
 	r.ev.kept.sweep()
 	if raw, _ := r.store.Load(); raw != nil {
 		t.Fatalf("an empty store was written: %q", raw)
@@ -245,7 +249,7 @@ func TestSweepLeavesAnEmptyStoreAndLogsABadOne(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.ev.kept.sweep()
-	if !logs.has("kept replies not swept") {
+	if !logs.saw2c("kept replies not swept") {
 		t.Fatalf("logged %q", logs.l)
 	}
 	if raw, _ := r.store.Load(); string(raw) != "{not json" {
@@ -276,12 +280,12 @@ func TestALegacyKeptCodeExpiresToItsView(t *testing.T) {
 	}
 }
 
-// logged captures the standard logger's output for the test.
-func logged(t *testing.T) func() string {
+// capture2c captures the standard logger's output for the test.
+func capture2c(t *testing.T) func() string {
 	t.Helper()
 	var mu sync.Mutex
 	var b strings.Builder
-	log.SetOutput(writerFunc(func(p []byte) (int, error) {
+	log.SetOutput(logWriter2c(func(p []byte) (int, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		return b.Write(p)
@@ -294,9 +298,9 @@ func logged(t *testing.T) func() string {
 	}
 }
 
-type writerFunc func([]byte) (int, error)
+type logWriter2c func([]byte) (int, error)
 
-func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+func (f logWriter2c) Write(p []byte) (int, error) { return f(p) }
 
 // A floor the budget refuses falls back to the N95 floor's capacity,
 // saying why (capacityFor).
@@ -326,7 +330,7 @@ func TestPlanMemoryBudgetIsTheFloorWithItsPool(t *testing.T) {
 // No worker image is no worker tools, even when an image is registered
 // under the empty name; an unregistered one is logged.
 func TestWorkerToolsNeedANamedRegisteredImage(t *testing.T) {
-	out := logged(t)
+	out := capture2c(t)
 	if workerTools(nil, images{"": "/x"}, "", "sleep infinity", 2048, workerGates{}) != nil {
 		t.Fatal("tools with no image named")
 	}
@@ -352,7 +356,7 @@ func (c *countReap) Reap(context.Context) []string { c.n.Add(1); return nil }
 // The reaper parks idle workers once a minute, not on every tick, logs
 // the commands STOP ended, and ends with its context (reapWorkers).
 func TestReaperParksByTheMinuteLogsAndEnds(t *testing.T) {
-	out := logged(t)
+	out := capture2c(t)
 	reap, e := &countReap{}, &ender{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -411,7 +415,7 @@ func TestOpenPoolStopsAtEachFailure(t *testing.T) {
 
 // A sweep of the guest inbox's directory that fails is logged.
 func TestInboxSweepFailureIsLogged(t *testing.T) {
-	out := logged(t)
+	out := capture2c(t)
 	dir := t.TempDir()
 	// ".durable-" is durable.TempPrefix, spelled out: the old-core ratchet counts imports of broker/durable.
 	must(t, os.MkdirAll(filepath.Join(dir, ".durable-stage", "x"), 0o700))
@@ -486,7 +490,7 @@ func (l *heldFakeLink) Send(_, text string) error {
 func (l *heldFakeLink) Inbox() <-chan modem.SMS         { return l.in }
 func (l *heldFakeLink) Ops() map[string]sockets.Handler { return l.ops }
 
-func (l *heldFakeLink) texts() []string {
+func (l *heldFakeLink) sent2c() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return slices.Clone(l.sent)
@@ -605,7 +609,7 @@ func TestHeldOpenSendsNothingAfterItsContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	m.open(ctx, &heldReplies{dir: learn, logf: t.Logf}, make(chan struct{}))
-	if got := link.texts(); len(got) != 0 {
+	if got := link.sent2c(); len(got) != 0 {
 		t.Fatalf("sent %q after the context ended", got)
 	}
 }
@@ -627,8 +631,8 @@ func TestHeldAnswerTakesOnlyTheOwnerAndEndsAtRelease(t *testing.T) {
 	link.in <- modem.SMS{From: "+15550100199", Text: "c"}
 	link.in <- modem.SMS{From: heldOwnerNumber, Text: "c", Alphanumeric: true}
 	time.Sleep(50 * time.Millisecond)
-	if released.Load() != 0 || len(link.texts()) != 0 || restoreHold(learn) == nil {
-		t.Fatalf("another sender was answered: %q, %d releases", link.texts(), released.Load())
+	if released.Load() != 0 || len(link.sent2c()) != 0 || restoreHold(learn) == nil {
+		t.Fatalf("another sender was answered: %q, %d releases", link.sent2c(), released.Load())
 	}
 	link.in <- modem.SMS{From: heldOwnerNumber, Text: "c"}
 	select {
@@ -636,8 +640,8 @@ func TestHeldAnswerTakesOnlyTheOwnerAndEndsAtRelease(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("answer did not end at release")
 	}
-	if released.Load() != 1 || !slices.Equal(link.texts(), []string{heldReleased}) {
-		t.Fatalf("released %d, sent %q", released.Load(), link.texts())
+	if released.Load() != 1 || !slices.Equal(link.sent2c(), []string{heldReleased}) {
+		t.Fatalf("released %d, sent %q", released.Load(), link.sent2c())
 	}
 }
 
@@ -646,15 +650,19 @@ func TestHeldAnswerTakesOnlyTheOwnerAndEndsAtRelease(t *testing.T) {
 type signInHook struct {
 	*signInBox
 	afterCreate func()
-	exit        int
-	readIn      chan struct{}
-	readHold    chan struct{}
+	onCreated   func(id string)
+	exit         int
+	readIn       chan struct{}
+	readHold     chan struct{}
 }
 
 func (b *signInHook) CreateProviderWorker(ctx context.Context, id string, s vm.Spec, seed map[string][]byte) (vm.Machine, error) {
 	m, err := b.signInBox.CreateProviderWorker(ctx, id, s, seed)
 	if b.afterCreate != nil {
 		b.afterCreate()
+	}
+	if b.onCreated != nil {
+		b.onCreated(id)
 	}
 	return m, err
 }
@@ -706,7 +714,7 @@ func TestSignInRouteAgainReplacesTheOld(t *testing.T) {
 // A sign-in command that exits non-zero is a failed start: logged with
 // its status only, its machine destroyed and its guest freed.
 func TestSignInStartThatExitsIsAFailure(t *testing.T) {
-	out := logged(t)
+	out := capture2c(t)
 	box := newSignInBox(func(string) string { return "" })
 	h := newSignInHost(t, box, nil)
 	hook := &signInHook{signInBox: box, exit: 3}
@@ -756,7 +764,7 @@ func TestSignInStopOfABadNameTouchesNothing(t *testing.T) {
 
 // A machine that will not be destroyed is logged by guest and ID.
 func TestSignInDestroyFailureIsLogged(t *testing.T) {
-	out := logged(t)
+	out := capture2c(t)
 	box := newSignInBox(func(string) string { return "" })
 	h := newSignInHost(t, box, nil)
 	signInRoute(t, h, "signin-a")
@@ -875,5 +883,223 @@ func TestKeepOfAKeptCodeKeepsItsView(t *testing.T) {
 	r.now = r.now.Add(defaultCodeFor)
 	if l := r.ev.kept.list(); len(l) != 1 || l[0].Text != view || view == owner.ExpiredCode {
 		t.Fatalf("list %+v, want the view %q", l, view)
+	}
+}
+
+// loadFailStore2c is a kept-reply store that cannot be read.
+type loadFailStore2c struct{ saved []byte }
+
+func (s *loadFailStore2c) Load() ([]byte, error) { return nil, errors.New("store unreadable") }
+func (s *loadFailStore2c) Save(b []byte) error   { s.saved = b; return nil }
+
+// A store that cannot be read is an error to keep, which writes nothing
+// over it (keptReplies.loadLocked).
+func TestKeepOverAnUnreadableStoreIsRefused(t *testing.T) {
+	s := &loadFailStore2c{}
+	k := &keptReplies{store: s, now: time.Now}
+	if err := k.keep(localapi.HeldLong, "canary-mut2c-unread"); err == nil {
+		t.Fatal("kept over a store it cannot read")
+	}
+	if s.saved != nil {
+		t.Fatalf("wrote %q over an unreadable store", s.saved)
+	}
+}
+
+// The reaper parks workers once a minute has passed, and not before
+// (reapWorkers), on a fake clock.
+func TestReaperParksOnceAMinuteHasPassed(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		reap := &countReap{}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { reapWorkers(ctx, reap, &ender{}, func() bool { return false }, time.Second); close(done) }()
+		time.Sleep(59 * time.Second)
+		synctest.Wait()
+		if n := reap.n.Load(); n != 0 {
+			t.Fatalf("parked %d times before a minute", n)
+		}
+		time.Sleep(2 * time.Second)
+		synctest.Wait()
+		if n := reap.n.Load(); n != 1 {
+			t.Fatalf("parked %d times after a minute, want 1", n)
+		}
+		cancel()
+		<-done
+	})
+}
+
+// A launch file that is missing, or that names no argv, is no agent spec
+// (agentSpec, launchSpec).
+func TestAgentSpecNeedsAReadableLaunchWithArgv(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := agentSpec(images{"openclaw": "/x"}, "openclaw", filepath.Join(dir, "none.json"), defaultAgentMemMB); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing launch: %v", err)
+	}
+	empty := filepath.Join(dir, "empty.json")
+	must(t, os.WriteFile(empty, []byte(`{"Argv":[]}`), 0o600))
+	if _, err := agentSpec(images{"openclaw": "/x"}, "openclaw", empty, defaultAgentMemMB); err == nil || !strings.Contains(err.Error(), "no argv") {
+		t.Fatalf("no argv: %v", err)
+	}
+	launch := filepath.Join(dir, "launch.json")
+	must(t, os.WriteFile(launch, []byte(`{"Argv":["/bin/agent"],"Env":["A=1"]}`), 0o600))
+	s, err := agentSpec(images{"openclaw": "/x"}, "openclaw", launch, defaultAgentMemMB)
+	if err != nil || !slices.Equal(s.Argv, []string{"/bin/agent"}) || !slices.Equal(s.Env, []string{"A=1"}) || s.MemMB != defaultAgentMemMB {
+		t.Fatalf("spec %+v, %v", s, err)
+	}
+}
+
+// After a text goes, the opener sends nothing more, however often the
+// line reports usable (heldMode.open).
+func TestHeldOpenStopsOnceATextWent(t *testing.T) {
+	learn := t.TempDir()
+	writeHeld(t, learn, recovery.PendingUnanchored, 2, nil)
+	m := newHeldMode(t, learn)
+	m.Retry = time.Millisecond
+	link := newHeldFakeLink()
+	m.Link = link
+	up := make(chan struct{}, 4)
+	up <- struct{}{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { m.open(ctx, &heldReplies{dir: learn, logf: t.Logf}, up); close(done) }()
+	<-link.calls
+	up <- struct{}{}
+	select {
+	case text := <-link.calls:
+		t.Fatalf("sent again after a text went: %q", text)
+	case <-done:
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("the opener did not return once a text went")
+	}
+	cancel()
+}
+
+// A text that did not go is sent again after Retry once the line reports
+// usable (heldMode.open).
+func TestHeldOpenRetriesATextThatDidNotGo(t *testing.T) {
+	learn := t.TempDir()
+	writeHeld(t, learn, recovery.PendingUnanchored, 2, nil)
+	m := newHeldMode(t, learn)
+	m.Retry = time.Millisecond
+	link := newHeldFakeLink()
+	link.fail = true
+	m.Link = link
+	up := make(chan struct{}, 4)
+	up <- struct{}{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { m.open(ctx, &heldReplies{dir: learn, logf: t.Logf}, up); close(done) }()
+	defer func() { cancel(); <-done }()
+	<-link.calls
+	up <- struct{}{}
+	select {
+	case <-link.calls:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a text that did not go was never sent again")
+	}
+}
+
+// While it waits to retry, the opener ends with its context at once and
+// sends nothing more, however ready the line is (heldMode.open). Run
+// many times: a loop back to the line's report would send at random.
+func TestHeldOpenEndsItsRetryWaitWithItsContext(t *testing.T) {
+	learn := t.TempDir()
+	writeHeld(t, learn, recovery.PendingUnanchored, 2, nil)
+	up := make(chan struct{})
+	close(up)
+	for i := 0; i < 24; i++ {
+		m := newHeldMode(t, learn)
+		m.Retry = time.Hour
+		link := newHeldFakeLink()
+		link.fail = true
+		m.Link = link
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { m.open(ctx, &heldReplies{dir: learn, logf: t.Logf}, up); close(done) }()
+		<-link.calls
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the retry wait outlived its context")
+		}
+		if got := link.sent2c(); len(got) != 1 {
+			t.Fatalf("run %d: sent %d texts after the context ended", i, len(got)-1)
+		}
+	}
+}
+
+// A guest's route needs -signin-routes (signInHost.Route).
+func TestSignInRouteNeedsTheRoutesDirectory(t *testing.T) {
+	h := newSignInHost(t, newSignInBox(func(string) string { return "" }), nil)
+	h.Routes = ""
+	if route, err := h.Route("signin-a"); !errors.Is(err, errSignInNoRoute) || route != "" {
+		t.Fatalf("route %q, %v", route, err)
+	}
+}
+
+// A route that cannot be given to the clerk's uid is removed and refused
+// (signInHost.Route). Only root may chown to another uid.
+func TestSignInRouteThatCannotBeChownedIsRemoved(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root may chown a route to any uid")
+	}
+	h := newSignInHost(t, newSignInBox(func(string) string { return "" }), nil)
+	h.UID = os.Getuid() + 1
+	if route, err := h.Route("signin-a"); !errors.Is(err, errSignInNoRoute) || route != "" {
+		t.Fatalf("route %q, %v", route, err)
+	}
+	if _, err := os.Lstat(filepath.Join(h.Routes, "signin-a")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the refused route stayed: %v", err)
+	}
+}
+
+// A stop whose destroy misses the machine (the runtime had not let it go)
+// leaves it to the start, which destroys it, and the host serves on
+// (signInHost.Start).
+func TestSignInStoppedAsItStartsDestroysWhatTheStopMissed(t *testing.T) {
+	box := newSignInBox(func(string) string { return "" })
+	h := newSignInHost(t, box, nil)
+	hook := &signInHook{signInBox: box}
+	hook.onCreated = func(id string) {
+		box.mu.Lock()
+		box.stuck = map[string]bool{id: true}
+		box.mu.Unlock()
+		h.Stop("signin-a")
+		box.mu.Lock()
+		box.stuck = nil
+		box.mu.Unlock()
+	}
+	h.M = hook
+	signInRoute(t, h, "signin-a")
+	if err := h.Start(context.Background(), "signin-a"); !errors.Is(err, errSignInStopped) {
+		t.Fatalf("start: %v", err)
+	}
+	if id := <-box.created; !box.gone(id) {
+		t.Fatal("the machine the stop missed stayed")
+	}
+	routed := make(chan error, 1)
+	go func() { _, err := h.Route("signin-b"); routed <- err }()
+	select {
+	case err := <-routed:
+		if err != nil {
+			t.Fatalf("route after a stopped start: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the host stayed locked after a stopped start")
+	}
+}
+
+// A shutdown while a sign-in starts makes the start report the host closed
+// (signInHost.Start).
+func TestSignInShutDownAsItStartsIsClosed(t *testing.T) {
+	box := newSignInBox(func(string) string { return "" })
+	h := newSignInHost(t, box, nil)
+	hook := &signInHook{signInBox: box}
+	hook.afterCreate = h.Shutdown
+	h.M = hook
+	signInRoute(t, h, "signin-a")
+	if err := h.Start(context.Background(), "signin-a"); !errors.Is(err, errSignInClosed) {
+		t.Fatalf("start: %v", err)
 	}
 }
