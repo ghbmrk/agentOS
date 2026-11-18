@@ -552,7 +552,7 @@ def _violations(root):
             + cached(unit_made_dirs, root)[1] + cached(unit_made_paths, root)[2] + unit_made_refusals(root)
             + inside_refusals(root) + gpt_auto_violations(root)
             + noexec_violations(root)
-            + keeper_violations(root) + clerk_key_violations(root)
+            + keeper_violations(root) + isolate_violations(root) + clerk_key_violations(root)
             + assembly_violations(root) + driver_violations(root) + e2e_violations(root))
 
 
@@ -2972,13 +2972,13 @@ def bus_unit_violations(name, files):
     """IMG-dbus-reach (#5818): agentos service NAME, read from FILES, masks BUS_DIR unless it is one of
     BUS_UNITS or NOEXEC_EXEMPT, its root is a driver's empty one (driver_root), or its own empty tmpfs
     leaves the directory out of view (tmpfs_hides; a mask there fails the unit, 226/NAMESPACE). The entry
-    takes "-" exactly when the unit sets DefaultDependencies=no (#6037): only such a unit may start before
-    sockets.target, so before dbus.socket makes the directory. ValueError as ini_paths."""
+    takes "-" exactly when the unit may start before sockets.target (starts_early), so before dbus.socket makes
+    the directory. ValueError as ini_paths."""
     if name in BUS_UNITS + NOEXEC_EXEMPT or driver_root(name, files) or tmpfs_hides(files, BUS_DIR):
         return []
     hidden = ini_paths(files, "Service", "InaccessiblePaths")
     words = [w for v in ini_entries(files, "Service", "InaccessiblePaths") for w in v.split()]
-    early = (ini_last(files, "Unit", "DefaultDependencies") or "yes").lower() in FALSE_WORDS
+    early = starts_early(files)
     if BUS_DIR not in hidden:
         return ["%s: InaccessiblePaths does not hold %s; a unit that makes no bus call never sees the system "
                 "bus (#5818)" % (name, BUS_DIR)]
@@ -2989,6 +2989,55 @@ def bus_unit_violations(name, files):
         return ["%s: InaccessiblePaths=-%s gives no mask while the directory is missing; with default dependencies "
                 "the unit starts after dbus.socket makes it (#5818)" % (name, BUS_DIR)]
     return []
+
+
+def starts_early(files):
+    """#6037: whether a unit read from FILES may start before sockets.target: it sets DefaultDependencies=no and
+    is not ordered after sockets.target or basic.target, which is after it (#6178: the page authority's staging
+    and the wipe drop the default dependencies but keep that order). ValueError as ini_words."""
+    return ((ini_last(files, "Unit", "DefaultDependencies") or "yes").lower() in FALSE_WORDS
+            and not {"sockets.target", "basic.target"} & set(ini_words(files, "Unit", "After")))
+
+
+def isolate_violations(root):
+    """MOR-pageca-emergency (#6178): each ISOLATE_KEPT unit the tree ships, read with every drop-in systemd
+    applies to it, sets IgnoreOnIsolate= once, to exactly yes, and DefaultDependencies= once, to exactly no;
+    conflicts with shutdown.target alone and is ordered before it; and takes no STOP_LINKS key. Each but
+    MOR_UNIT is ordered after sysinit.target, basic.target and MOR_UNIT, never before MOR_UNIT, so shutdown
+    stops it before the clear. A unit the tree does not ship, or masks, never runs (MOR then stays set, or no
+    card is staged), so it passes; any other link, or an alias, is refused rather than modelled."""
+    root = str(root)
+    dirs, out = unit_dirs(root)
+    out += alias_violations(root, dirs, ISOLATE_KEPT)
+    for name in ISOLATE_KEPT:
+        files = unit_with_dropins(root, dirs, name)
+        try:
+            if files is None or files[0].content().strip() == b"":
+                continue
+            every = {k: ini_every_in(files, "Unit", k) for k in
+                     ("IgnoreOnIsolate", "DefaultDependencies", "Conflicts", "Before", "After") + STOP_LINKS}
+        except (OSError, ValueError) as e:
+            out.append("%s: unreadable (%s); the tree check never passes a unit it cannot read" % (name, e))
+            continue
+        words = {k: [w for _, v in every[k] for w in v.split()] for k in every}
+        for key, want in (("IgnoreOnIsolate", "yes"), ("DefaultDependencies", "no")):
+            if [v for _, v in every[key]] != [want]:
+                out.append("%s: %s= is %s; must be set once, to exactly %s, so an isolate leaves it running (#6178)"
+                           % (name, key, ", ".join("%r in %s" % (v, f.rel) for f, v in every[key]) or "unset", want))
+        for key in STOP_LINKS:
+            for f, v in every[key]:
+                out.append("%s: %s=%s in %s; another unit's stop would stop it, whatever IgnoreOnIsolate= says "
+                           "(#6178)" % (name, key, v, f.rel))
+        if set(words["Conflicts"]) != {"shutdown.target"} or "shutdown.target" not in words["Before"]:
+            out.append("%s: Conflicts=%s Before=%s; must conflict with shutdown.target alone and be ordered before "
+                       "it, so only the shutdown transaction stops it (#6178)"
+                       % (name, " ".join(words["Conflicts"]), " ".join(words["Before"])))
+        if name != MOR_UNIT and ({"sysinit.target", "basic.target", MOR_UNIT} - set(words["After"])
+                                 or MOR_UNIT in words["Before"]):
+            out.append("%s: After=%s Before=%s; must be After=sysinit.target basic.target %s and not before it, so "
+                       "shutdown stops it before the MOR clear (#6178)"
+                       % (name, " ".join(words["After"]), " ".join(words["Before"]), MOR_UNIT))
+    return out
 
 
 def bus_keep_violations(root, dirs):
@@ -3207,6 +3256,14 @@ EMPTY_ROOT_UNITS = ("agentos-imapconn@.service",)
 # with "-": its stop, at shutdown, is a command of its own, when every path exists.
 MOR_UNIT = "agentos-mor.service"
 MOR_LISTED = ("/run/agentos-setup", "/run/agentos-link-capture")
+# MOR-pageca-emergency (#6178; HW-8, HW-1, CH-9): the units an isolate must leave running (isolate_violations).
+# MOR_UNIT's stop clears MOR, and the secret holders could come back with it clear (#5947); the staging's and
+# the wipe's remove the page authority a printed Owner Card names. Default dependencies add
+# Requires=sysinit.target, which conflicts with emergency.target, so an emergency isolate would stop such a
+# unit whatever its IgnoreOnIsolate=; so would any STOP_LINKS key on it, through the unit it names.
+ISOLATE_KEPT = (MOR_UNIT, "agentos-keeper-pageca.service", "agentos-keeper-wipe.service")
+STOP_LINKS = ("Requires", "Requisite", "BindsTo", "PartOf", "StopPropagatedFrom", "StopWhenUnneeded",
+              "RequiresMountsFor")
 # IMG-dbus-reach (#5818): the system bus's directory. dbus-daemon is long-lived and stock system.conf lets
 # any local uid connect, so every agentos service masks it but BUS_UNITS, whose `systemctl reboot` asks
 # logind over the bus (--check-inhibitors=yes lists inhibitors; plain reboot goes through logind first).
