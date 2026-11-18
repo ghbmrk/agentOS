@@ -1,6 +1,6 @@
 package browser
 
-// REQ: CLK-3, CRED-4, CRED-10, KRN-8
+// REQ: CLK-3, KRN-8
 
 import (
 	"context"
