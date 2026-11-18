@@ -91,6 +91,37 @@ class MorUnitTest(unittest.TestCase):
         preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text()
         self.assertIn("\nenable agentos-mor.service\n", preset)
 
+    def test_a_refused_clear_is_recorded_on_root(self):
+        # MOR-clear-owner (#6111): the stop's result is recorded for STATUS whatever it is
+        # (broker/cmd/agentos-mor/record_test.go drives each refusal through the step, and
+        # broker/cmd/agentosd/wipenote_test.go the record to the line). The directory is made by the
+        # step, not by StateDirectory=, which systemd makes at this unit's early-boot start.
+        s = settings(UNIT)
+        self.assertEqual(len(s["ExecStopPost"]), 1)
+        stop = s["ExecStopPost"][0]
+        self.assertTrue(stop.startswith("/usr/bin/sh -c "), stop)
+        self.assertIn("/var/lib/agentos-mor/refused", stop)
+        for key in list(DIR_BASES) + ["ProtectSystem", "ReadOnlyPaths", "ReadWritePaths", "TemporaryFileSystem",
+                                      "BindPaths", "BindReadOnlyPaths", "RootDirectory", "RootImage"]:
+            self.assertNotIn(key, s)
+        # It runs after every other unit has stopped and after tmp.mount, so the record must sit on a
+        # file system that is still mounted and writable then: the root partition, which systemd never
+        # unmounts (systemd-shutdown syncs and remounts it read-only after the last unit). Nothing the
+        # image ships mounts another file system at /var or below.
+        rec = pathlib.PurePosixPath("/var/lib/agentos-mor/refused")
+        repart = list((MK / "mkosi.repart").glob("*.conf")) + list((MK / "mkosi.extra/usr/lib/repart.d").glob("*.conf"))
+        self.assertEqual({t for f in repart for t in settings(f).get("Type", [])},
+                         {"esp", "usr", "usr-verity", "root"})
+        fstab = [l.split() for l in (MK / "mkosi.extra/etc/fstab").read_text().splitlines()
+                 if l.strip() and not l.startswith("#")]
+        self.assertEqual([m for _, m, *_ in fstab if rec.is_relative_to(m) and m != "/"], [])
+        self.assertEqual(sorted(u.name for u in UNITS.iterdir() if u.suffix in (".mount", ".automount")
+                                and u.name.startswith("var")), [])
+        hidden = [w.lstrip("-") for w in settings(UNITS / "agentos-mor.service.d/50-main-side.conf")["InaccessiblePaths"][0].split()]
+        self.assertFalse([h for h in hidden if rec.is_relative_to(h)], hidden)
+        # The root is mounted read-write from the start (the boot entry's rw), so the step can write it.
+        self.assertIn("rw", words(settings(MK / "mkosi.conf"), "KernelCommandLine"))
+
     def test_no_ordering_cycle_with_tmp_mount(self):
         # L3 on #5009: agentos-.service.d/50-main-side.conf orders every agentos unit after
         # systemd-tmpfiles-setup.service, which is after local-fs.target and so after tmp.mount; with
