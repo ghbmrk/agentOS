@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
-	"github.com/ghbmrk/agentos/broker/sockets"
+	"github.com/ghbmrk/agentos/broker/sockets/peers"
 )
 
 // A clerk's key hand-off (MAIL-keys, Mark's option A on #2682 comment
@@ -64,7 +64,7 @@ func ValidCgroup(c string) bool {
 var ErrKeyPeer = errors.New("run: a clerk's key goes only to the service manager starting that clerk's unit")
 
 // ListenClerkKey opens a clerk's key socket at path for uid 0 alone.
-func ListenClerkKey(path string) (net.Listener, error) { return sockets.ListenPeers(path, 0) }
+func ListenClerkKey(path string) (net.Listener, error) { return peers.ListenUnix(path, 0) }
 
 // keyWait bounds the hand-off's write, so a peer that never reads holds the
 // socket no longer.

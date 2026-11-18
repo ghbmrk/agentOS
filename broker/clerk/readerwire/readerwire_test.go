@@ -582,7 +582,8 @@ func TestADownReaderFailsFast(t *testing.T) {
 }
 
 // TestReaderwireLinksNoKeeperCode: D-154 rule 4, the reader links no keeper
-// code through the frame: only the standard library and sockets.
+// code through the frame: only the standard library, sockets and the peer
+// rule it uses (sockets/peers, standard library only).
 func TestReaderwireLinksNoKeeperCode(t *testing.T) {
 	out, err := exec.Command("go", "list", "-deps", ".").Output()
 	must(t, err)
@@ -590,7 +591,7 @@ func TestReaderwireLinksNoKeeperCode(t *testing.T) {
 	sc := bufio.NewScanner(bytes.NewReader(out))
 	for sc.Scan() {
 		dep := sc.Text()
-		if strings.Contains(dep, ".") && !strings.HasPrefix(dep, "vendor/") && dep != b+"clerk/readerwire" && dep != b+"sockets" {
+		if strings.Contains(dep, ".") && !strings.HasPrefix(dep, "vendor/") && dep != b+"clerk/readerwire" && dep != b+"sockets" && dep != b+"sockets/peers" {
 			t.Errorf("readerwire links %s", dep)
 		}
 		for _, no := range []string{"clerk/inbox", "kernel", "clerk/model", "infer", "localsrv"} {

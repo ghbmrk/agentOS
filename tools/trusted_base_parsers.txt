@@ -124,6 +124,7 @@ parser github.com/ghbmrk/agentos/broker/route -- model providers' replies
 parser github.com/ghbmrk/agentos/broker/sipsign -- digest challenges and the modem bridge's sign requests
 parser github.com/ghbmrk/agentos/broker/smsapi -- a texting provider's HTTP replies
 parser github.com/ghbmrk/agentos/broker/sockets -- framing on every peer socket, guests' included
+inert  github.com/ghbmrk/agentos/broker/sockets/peers -- reads only SO_PEERCRED; carries the bytes unread
 parser github.com/ghbmrk/agentos/broker/tpmseal -- TPM replies and sealed blobs
 parser github.com/ghbmrk/agentos/broker/update -- update metadata from mirrors
 parser github.com/ghbmrk/agentos/broker/vm -- agent machine state (uncertain; classed parser)
