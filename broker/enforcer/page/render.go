@@ -247,7 +247,9 @@ func capWords(n uint64) string {
 }
 
 // basisWords is the figure a cap was sized from as the owner reads it
-// (policy.Basis*); a cap with none was set by hand.
+// (policy.Basis*). Every signed cap names one (#5199), so a card never
+// reaches the last line: a document off the list is refused before its
+// root is drawn, and the line only quotes it.
 func basisWords(b string) string {
 	switch b {
 	case policy.BasisDeclared:
@@ -257,7 +259,7 @@ func basisWords(b string) string {
 	case policy.BasisBackup:
 		return "the next full backup's size"
 	}
-	return "a figure set by hand"
+	return strconv.QuoteToASCII(b)
 }
 
 func ascii(s string) string {

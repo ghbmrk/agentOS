@@ -74,6 +74,7 @@ func twoNames() policy.Document {
 	d := cutPolicy()
 	d.Destinations = []string{"core.example", "old.core.example"}
 	d.Caps = map[string]uint64{"core.example": 1 << 40, "old.core.example": 1 << 40}
+	d.Basis = map[string]string{"core.example": policy.BasisImage, "old.core.example": policy.BasisImage}
 	d.Devices = slices.Clone(d.Devices)
 	for i, dev := range d.Devices {
 		if dev.ID == "tv" {

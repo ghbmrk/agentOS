@@ -91,7 +91,8 @@ type Document struct {
 	// Basis is the figure each cap was sized from when the owner signed
 	// it (NET-2 Byte caps, #4578), by its name on Caps, from the closed
 	// list below, so the signed screen names it from the signed document,
-	// never from link text. A cap with none was set by hand.
+	// never from link text. Every cap has one (#5199): no cap is signed
+	// without the figure it was sized from.
 	Basis map[string]string `json:"basis,omitempty"`
 	// EdgeCap is the edge segment's one daily byte cap on what it sends
 	// to the internet (NET-2 Byte caps); 0 lets it send nothing.
@@ -518,8 +519,8 @@ func sorted(s []string) []string {
 // drone reference that is not a hash, a pair, rule or hold naming no device,
 // an empty window, an mDNS name that is not one, or a byte cap that is 0,
 // is for no destination, or makes the caps sum past 2^64-1 (so no group's
-// cap, a sum of some of them, overflows), or a cap basis off the closed
-// list or for no cap; with ErrNameHeld one mDNS name
+// cap, a sum of some of them, overflows), a cap with no basis, or a cap
+// basis off the closed list or for no cap; with ErrNameHeld one mDNS name
 // pinned twice; and with ErrTooManyNames a device with more than MaxMDNS.
 func (d Document) check() error {
 	bad := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrMalformed}, a...)...) }
@@ -605,6 +606,9 @@ func (d Document) check() error {
 		}
 		if n == 0 {
 			return bad("byte cap 0 for %q: leave it out", h)
+		}
+		if d.Basis[h] == "" {
+			return bad("byte cap for %q names no basis", h)
 		}
 		if total+n < total {
 			return bad("byte caps sum past 2^64-1")
