@@ -1410,8 +1410,11 @@ class WorkflowTest(unittest.TestCase):
         render = text.split("\n  render:\n", 1)[1].split("\n  commit:\n", 1)[0]
         self.assertRegex(render, r"(?m)^    if: github\.event_name != 'issues' && github\.ref == 'refs/heads/main'$")
         transition = text.split("\n  transition:\n", 1)[1].split("\n  render:\n", 1)[0]
-        self.assertNotIn("write", transition)
-        self.assertIn('python3 -I tools/board.py transition --repo "$GITHUB_REPOSITORY" --issue "$ISSUE" --label "$LABEL" --action "$ACTION"', transition)
+        # It writes, so only collaborator-opened work items reach it, as in intake.yml (#6060).
+        self.assertIn("\n      && contains(fromJSON('[\"OWNER\", \"MEMBER\", \"COLLABORATOR\"]'), github.event.issue.author_association)\n", transition)
+        # The one write is the issue comment naming the problem (#5989).
+        self.assertEqual(re.findall(r"(?m)^      ([a-z-]+): write\b", transition), ["issues"])
+        self.assertIn('python3 -I tools/board.py transition --repo "$GITHUB_REPOSITORY" --issue "$ISSUE" --label "$LABEL" --action "$ACTION" --comment', transition)
         self.assertNotRegex(transition.split("run:", 1)[1], r"\$\{\{")  # event values reach the shell only through env
         # Each label event of a swap is judged on its own: remove-then-add (unlabeled merged, then
         # labeled queued) is illegal only in the first run, so no issues run may cancel or replace
