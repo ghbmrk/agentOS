@@ -19,9 +19,10 @@ package daemon
 // transport, once built, is only as good as the code that builds it, which
 // this test reads); where a unix dial's address comes from past its
 // package (configured holds it to a parameter or a listed field,
-// dialCallers holds the package's own callers, and fieldStores the listed
-// fields, but callers in other packages are the composition root's
-// wiring of the operator's configuration); _test.go files, which are not linked; and code generated or
+// dialCallers holds the package's own callers, fieldStores the listed
+// fields in every linked package but the composition root, and handedOn
+// the module's packages a holder is handed to, but the root's wiring of
+// the operator's configuration is review's); _test.go files, which are not linked; and code generated or
 // loaded at run time (plugin, os/exec, and os.StartProcess are refused
 // outside their allow-lists, so none is expected).
 
@@ -35,6 +36,7 @@ import (
 	"go/token"
 	"go/types"
 	"io"
+	"maps"
 	"math"
 	"os"
 	"os/exec"
@@ -432,7 +434,7 @@ func inferenceUse(t *testing.T, ps []listed) []string {
 		if !ours {
 			continue
 		}
-		bad = append(bad, packageUse(t, p.dir, p.files, p.path, rel)...)
+		bad = append(bad, packageUse(t, p.dir, p.files, p.path, rel, ps)...)
 	}
 	sort.Strings(bad)
 	return bad
@@ -782,19 +784,30 @@ func writes(e ast.Expr, obj *ast.Object) bool {
 
 // packageUse runs sourceUse on each of a package's files, then the dial
 // rules that need the whole package (#6028): dialCallers, fieldStores and
-// links. They rest on: callers in other packages being the composition
-// root, which wires the operator's configuration; another package's code
-// reaching a listed field only through what fieldStores sees handed to it
-// (it cannot name the package's types); unsafe staying an escape; and a
-// link or rename going only through os, syscall or x/sys/unix.
-func packageUse(t *testing.T, dir string, files []string, prefix, rel string) []string {
+// links, and handedOn along what fieldStores saw handed on. They rest
+// on: the composition root alone wiring the operator's configuration
+// (every other linked package is held by fieldStores); a package that
+// cannot name a listed type reaching it only through what it is handed,
+// which handedOn checks; unsafe staying an escape, and no linked file
+// of the module using go:linkname (reported here); and a link or rename
+// going only through os, syscall or x/sys/unix.
+func packageUse(t *testing.T, dir string, files []string, prefix, rel string, ps []listed) []string {
 	t.Helper()
 	var bad []string
 	fset := token.NewFileSet()
 	var fs []*ast.File
 	for _, name := range files {
 		bad = append(bad, sourceUse(t, filepath.Join(dir, name), prefix+"/"+name, rel)...)
-		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// go:linkname reaches another package's variables past every rule
+		// here, unsafe or not (Security R2 on #6147).
+		if bytes.Contains(b, []byte("//go:linkname")) {
+			bad = append(bad, prefix+"/"+name+": uses go:linkname")
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), b, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -810,9 +823,12 @@ func packageUse(t *testing.T, dir string, files []string, prefix, rel string) []
 		}
 	}
 	dialCallers(fs, rel, at)
-	fieldStores(t, fset, fs, rel, at)
+	held := fieldStores(t, fset, fs, rel, nil, at)
 	links(fs, files, rel, at)
-	return bad
+	if held == nil || ps == nil {
+		return bad // nothing handed, or a fixture with no graph
+	}
+	return append(bad, handedOn(t, rel, held, ps)...)
 }
 
 // dialAddrs calls visit with each unix dial's address in f.
@@ -1006,7 +1022,10 @@ func typeDecls(f *ast.File) map[string]*ast.TypeSpec {
 // rounds on #6119). A listed field is a slot: a field index in a struct
 // shape, so any struct type identical to its owner's (tags aside), named
 // or not, has the same slot, and a conversion between them changes
-// nothing. In a listed package, it reports:
+// nothing. The slots are the package's own and, but in the composition
+// root, those of every package whose objects it can reach; a package
+// handed holders (handedOn) has the interfaces it was handed them in as
+// holders too. In such a package, it reports:
 //   - a write or & of a slot (assignment, op-assignment, ++, range);
 //   - a composite literal that sets a slot, by key or by position;
 //   - a value of a type that reaches a slot (holds), wherever it may end
@@ -1022,10 +1041,22 @@ func typeDecls(f *ast.File) map[string]*ast.TypeSpec {
 // The rule is about types, not order: where in the program a store would
 // run does not matter, so no flow is followed (Security B1 round 3 on
 // #6119).
-func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, report func(ast.Node, string)) {
+func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, handed map[string]bool, report func(ast.Node, string)) map[string]bool {
 	t.Helper()
-	if len(configuredFields[rel]) == 0 {
-		return
+	// Only a package that declares a listed field, imports one of the
+	// module's packages (which may declare one), or is handed a holder
+	// can hold a slot; the composition root, which wires the
+	// configuration, may store into the fields it imports (#6138:
+	// clerk/run is not linked into agentosd, and every linked package but
+	// the root is held).
+	inModule := false
+	for _, f := range fs {
+		for _, im := range f.Imports {
+			inModule = inModule || strings.HasPrefix(im.Path.Value, `"`+module)
+		}
+	}
+	if len(configuredFields[rel]) == 0 && len(handed) == 0 && (!inModule || rel == compositionRoot) {
+		return nil
 	}
 	info := &types.Info{
 		Types:      map[ast.Expr]types.TypeAndValue{},
@@ -1034,34 +1065,62 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 		Selections: map[*ast.SelectorExpr]*types.Selection{},
 		Instances:  map[*ast.Ident]types.Instance{},
 	}
-	conf := types.Config{Importer: importer.ForCompiler(fset, "gc", exportData(t, fs))}
-	pkg, err := conf.Check(module+rel, fset, fs, info)
-	if err != nil {
-		report(fs[0], "does not type-check, so its configuredFields stores cannot be checked: "+err.Error())
-		return
-	}
-	// The slots: each listed field's struct and index, through embedding.
+	var typeErr error
+	conf := types.Config{Importer: importer.ForCompiler(fset, "gc", exportData(t, fs)), Error: func(err error) {
+		if typeErr == nil {
+			typeErr = err
+		}
+	}}
+	pkg, _ := conf.Check(module+rel, fset, fs, info)
+	// The slots: each listed field's struct and index, through embedding,
+	// of the package and of every package whose objects it can reach, so
+	// a package that imports a listed one is held as its owner is.
 	type slot struct {
 		st *types.Struct
 		i  int
 	}
 	var slots []slot
-	for tf := range configuredFields[rel] {
-		typ, field, _ := strings.Cut(tf, ".")
-		tn, ok := pkg.Scope().Lookup(typ).(*types.TypeName)
-		if !ok {
-			continue // a type the package does not declare holds nothing
+	seenPkg := map[*types.Package]bool{}
+	var addSlots func(p *types.Package)
+	addSlots = func(p *types.Package) {
+		if seenPkg[p] {
+			return
 		}
-		obj, idx, _ := types.LookupFieldOrMethod(tn.Type(), true, pkg, field)
-		if _, ok := obj.(*types.Var); !ok {
-			report(fs[0], "configuredFields lists "+tf+", which is not a field")
-			continue
+		seenPkg[p] = true
+		for _, ip := range p.Imports() {
+			addSlots(ip)
 		}
-		st := structOf(tn.Type())
-		for _, i := range idx[:len(idx)-1] {
-			st = structOf(st.Field(i).Type())
+		prel, ours := strings.CutPrefix(p.Path(), module)
+		if !ours {
+			return
 		}
-		slots = append(slots, slot{st, idx[len(idx)-1]})
+		for tf := range configuredFields[prel] {
+			typ, field, _ := strings.Cut(tf, ".")
+			tn, ok := p.Scope().Lookup(typ).(*types.TypeName)
+			if !ok {
+				continue // a type the package does not declare holds nothing
+			}
+			obj, idx, _ := types.LookupFieldOrMethod(tn.Type(), true, p, field)
+			if _, ok := obj.(*types.Var); !ok {
+				report(fs[0], "configuredFields lists "+prel+" "+tf+", which is not a field")
+				continue
+			}
+			st := structOf(tn.Type())
+			for _, i := range idx[:len(idx)-1] {
+				st = structOf(st.Field(i).Type())
+			}
+			slots = append(slots, slot{st, idx[len(idx)-1]})
+		}
+	}
+	addSlots(pkg)
+	// Fails closed: an import that did not load may be the one with slots
+	// (L3 R1 on #6147).
+	if typeErr != nil {
+		report(fs[0], "does not type-check, so its configuredFields stores cannot be checked: "+typeErr.Error())
+		return nil
+	}
+	if len(slots) == 0 && len(handed) == 0 {
+		return nil
 	}
 	// listed is the slots st has, as field indices.
 	listed := func(st *types.Struct) map[int]bool {
@@ -1092,10 +1151,13 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 	// tainted are the interfaces outside the package a holder went into
 	// under a handOK entry (named in it, or by conversion or argument),
 	// so their values may be holders (Security B1 rounds 2 and 3 on
-	// #6123). Any other conversion of a holder into one is reported, so
-	// none of another package's interfaces holds one otherwise; callers
-	// in other packages are the composition root's.
-	tainted := map[string]bool{}
+	// #6123), and those a package handed holders was handed them in
+	// (handed). Any other conversion of a holder into one is reported, so
+	// none of another package's interfaces holds one otherwise.
+	tainted := maps.Clone(handed)
+	if tainted == nil {
+		tainted = map[string]bool{}
+	}
 	for key := range handOK[rel] {
 		tainted[key] = true
 	}
@@ -1258,7 +1320,7 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 		// reviewed reports an interface handOK lists, by name or package.
 		reviewed := func(t types.Type) bool {
 			n, ok := types.Unalias(t).(*types.Named)
-			return handOK[rel][types.TypeString(t, nil)] != "" || ok && n.Obj().Pkg() != nil && handOK[rel][n.Obj().Pkg().Path()] != ""
+			return handOK[rel][types.TypeString(t, nil)] != "" || handed[types.TypeString(t, nil)] || ok && n.Obj().Pkg() != nil && handOK[rel][n.Obj().Pkg().Path()] != ""
 		}
 		// into reports v, of a type that holds a slot, going to a place of
 		// type to: an interface or a type parameter could hand it on.
@@ -1430,7 +1492,11 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 			}
 		}
 		for id, inst := range info.Instances {
-			if fn, ok := info.Uses[id].(*types.Func); ok && handOKFunc(rel, fn) {
+			// A listed function outside the module may take a holding type
+			// argument; one of the module's would carry the holder into a
+			// package handedOn walks as a type parameter it does not hold
+			// (L3 on #6147), so it is reported as a generic type is.
+			if fn, ok := info.Uses[id].(*types.Func); ok && handOKFunc(rel, fn) && !strings.HasPrefix(fn.Pkg().Path(), module) {
 				continue
 			}
 			for i := range inst.TypeArgs.Len() {
@@ -1538,23 +1604,150 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 	}
 	quiet = false
 	check()
+	return tainted
+}
+
+// handedOn checks each package of the module that rel hands a holder to
+// under a handOK entry (the package of a listed function, interface or
+// package), and each linked package that can reach such a package's
+// objects but the composition root, as fieldStores checks rel, with the
+// interfaces rel's holders went into (held) as holders there, and so on
+// along each one's own entries (#6124). A package that is handed a
+// holder, or gets one from a package that was, reaches a slot only by
+// reflection, unsafe or a decoder, so only through an interface or a
+// call the rule sees, or an escape import; what it hands on is checked
+// in turn, so the packages it merely imports need no check of their own.
+// A package entry names one import path exactly: a subpackage is not
+// covered, and fails closed. The standard library's functions are
+// trusted (the header's residual), and no entry names any other code
+// (TestHandOKNamesNoThirdParty). ps is the linked graph.
+func handedOn(t *testing.T, rel string, held map[string]bool, ps []listed) []string {
+	t.Helper()
+	byPath := map[string]listed{}
+	users := map[string][]string{} // a package's direct importers
+	for _, p := range ps {
+		byPath[p.path] = p
+		for _, im := range p.imports {
+			users[im] = append(users[im], p.path)
+		}
+	}
+	var bad []string
+	done := map[string]map[string]bool{module + rel: maps.Clone(held)}
+	var walk func(rel string, held map[string]bool)
+	walk = func(rel string, held map[string]bool) {
+		var next []string
+		for key := range handOK[rel] {
+			path := key
+			if !handOKPackage(key) {
+				path = key[:strings.LastIndex(key, ".")]
+			}
+			if strings.HasPrefix(path, module) && !slices.Contains(next, path) {
+				next = append(next, path)
+			}
+		}
+		// What rel's entries name, and each package that imports rel, the
+		// root aside (so on, through each one's own importers).
+		for _, u := range users[module+rel] {
+			if u != module+compositionRoot && !slices.Contains(next, u) {
+				next = append(next, u)
+			}
+		}
+		sort.Strings(next)
+		for _, path := range next {
+			// Checked again only with what it holds grown.
+			all, grew := maps.Clone(done[path]), done[path] == nil
+			if all == nil {
+				all = map[string]bool{}
+			}
+			for k := range held {
+				grew = grew || !all[k]
+				all[k] = true
+			}
+			if !grew {
+				continue
+			}
+			done[path] = all
+			p, ok := byPath[path]
+			if !ok {
+				bad = append(bad, module+rel+": hands a holder to "+path+", which is not in the graph")
+				continue
+			}
+			fset := token.NewFileSet()
+			var fs []*ast.File
+			for _, name := range p.files {
+				f, err := parser.ParseFile(fset, filepath.Join(p.dir, name), nil, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fs = append(fs, f)
+			}
+			at := func(n ast.Node, what string) {
+				pos := fset.Position(n.Pos())
+				s := fmt.Sprintf("%s/%s:%d: %s (handed by %s)", path, filepath.Base(pos.Filename), pos.Line, what, rel)
+				if !slices.Contains(bad, s) {
+					bad = append(bad, s)
+				}
+			}
+			for _, f := range fs {
+				for _, im := range f.Imports {
+					if p, _ := strconv.Unquote(im.Path.Value); escapes[p] {
+						at(im, "imports "+p+", which reaches a handed value past the rule")
+					}
+				}
+			}
+			q := strings.TrimPrefix(path, module)
+			if more := fieldStores(t, fset, fs, q, all, at); more != nil {
+				walk(q, more)
+			}
+		}
+	}
+	walk(rel, held)
+	return bad
 }
 
 // handOK are the functions of other packages (by go/types full name)
-// that a listed package may hand a value reaching a configuredFields
-// field, or instantiate with its type, and the interfaces (by full type
-// name) it may convert one to, or a whole package (by path) for both,
-// by package, and why each neither stores into the field nor mints a
-// value of the type: a claim a reviewer accepts, as configuredFields'
-// entries are. An interface a holder goes into under an entry then holds
-// (fieldStores' tainted), and a package entry's claim is checked by
-// TestHandOKPackagesMintNoTypes.
+// that a package fieldStores checks may hand a value reaching a
+// configuredFields field, or instantiate with its type, and the
+// interfaces (by full type name) it may convert one to, or a whole
+// package (by exact import path) for both, by package, and why each
+// keeps what it is handed: a claim a reviewer accepts for the standard
+// library, as configuredFields' entries are. An interface a holder goes
+// into under an entry then holds (fieldStores' tainted), and a package
+// of the module an entry names is checked by the same rule, with those
+// interfaces as holders (handedOn), so its entry claims only that.
 var handOK = map[string]map[string]string{
+	"backup": {"maps.Keys": "ranges over the set's map keys, its backup ids; writes nothing (Set.List)"},
 	"kernel/proc": {
 		"maps.Keys":       "ranges over a map's keys; writes nothing (kernelmain.go, the clerk names)",
-		module + "backup": "the backup set and writer: it calls the methods of the Targets it is handed (*pendingPut, dirTarget, inFlight) and keeps them, nothing else; it imports no reflect, unsafe, gob or plugin (TestHandOKPackagesMintNoTypes), and its json decodes target only its own manifest and table types",
-		module + "kernel": "the kernel: it calls Do and Probe on the Clerks it is handed and keeps them, and the backup Set it opens; its one reflect use is DeepEqual of two Plans, it imports no unsafe, gob or plugin (TestHandOKPackagesMintNoTypes), and its json decodes target only its own log types",
+		module + "backup": "the backup set and writer: it calls the methods of the Targets it is handed (*pendingPut, dirTarget, inFlight) and keeps them (handedOn checks it)",
+		module + "kernel": "the kernel: it calls Do and Probe on the Clerks it is handed and keeps them (handedOn checks it)",
 	},
+}
+
+// REQ: ARC-2
+//
+// Every handOK key names the standard library or the module: handedOn
+// checks the module's, and only the standard library is trusted
+// unchecked (Security R1 on #6147).
+func TestHandOKNamesNoThirdParty(t *testing.T) {
+	for rel, keys := range handOK {
+		for key := range keys {
+			if thirdPartyKey(key) {
+				t.Errorf("handOK[%q] names %q, outside the standard library and the module", rel, key)
+			}
+		}
+	}
+	for key, want := range map[string]bool{"maps.Keys": false, "io.ReadCloser": false, module + "kernel": false, module + "backup.Write": false, "golang.org/x/sys/unix.Syscall": true, "example.com/p": true, "example.com/p.T": true} {
+		if thirdPartyKey(key) != want {
+			t.Errorf("thirdPartyKey(%q) = %v", key, !want)
+		}
+	}
+}
+
+// thirdPartyKey reports a handOK key outside the standard library and
+// the module: a dot in its first path element.
+func thirdPartyKey(key string) bool {
+	return !strings.HasPrefix(key, module) && strings.Contains(strings.SplitN(key, "/", 2)[0], ".") && strings.Contains(key, "/")
 }
 
 // handOKFunc reports fn listed in handOK for rel, by name or package
@@ -1569,92 +1762,113 @@ func handOKPackage(key string) bool {
 	return !strings.Contains(key[strings.LastIndex(key, "/")+1:], ".")
 }
 
-// typeMinting reports what in the package in dir could make a value of a
-// type it is handed (Security B2 on #6123): an unsafe, encoding/gob or
-// plugin import, and any reflect use but DeepEqual, in any of its
-// non-test Go files, whatever their build tags. A package handOK names
-// whole must have none, so a change to it owes a reviewed edit here.
-func typeMinting(t *testing.T, dir string) []string {
-	t.Helper()
-	names, err := filepath.Glob(filepath.Join(dir, "*.go"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var bad []string
-	for _, path := range names {
-		if strings.HasSuffix(path, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, local := imports(f)
-		for n, p := range local {
-			switch {
-			case p == "unsafe" || p == "encoding/gob" || p == "plugin":
-				bad = append(bad, filepath.Base(path)+": imports "+p)
-			case p == "reflect" && (n == "." || n == "_"):
-				bad = append(bad, filepath.Base(path)+": imports reflect as "+n)
-			}
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			if se, ok := n.(*ast.SelectorExpr); ok {
-				if id, ok := se.X.(*ast.Ident); ok && id.Obj == nil && local[id.Name] == "reflect" && se.Sel.Name != "DeepEqual" {
-					bad = append(bad, filepath.Base(path)+": uses reflect."+se.Sel.Name)
-				}
-			}
-			return true
-		})
-	}
-	return bad
-}
-
 // REQ: ARC-2
 //
-// A package handOK names whole stays one that cannot make a value of a
-// type it is handed (Security B2 on #6123), and the check catches one
-// that can.
-func TestHandOKPackagesMintNoTypes(t *testing.T) {
-	n := 0
-	for rel, keys := range handOK {
-		for key := range keys {
-			if !handOKPackage(key) {
-				continue
-			}
-			n++
-			out, err := exec.Command("go", "list", "-f", "{{.Dir}}", key).Output()
-			if err != nil {
-				t.Fatalf("go list %s: %v", key, err)
-			}
-			if bad := typeMinting(t, strings.TrimSpace(string(out))); len(bad) > 0 {
-				t.Errorf("handOK[%q][%q] names a package that can make a value of a type it is handed:\n%s", rel, key, strings.Join(bad, "\n"))
-			}
+// Every linked package but the composition root is held to the listed
+// fields of the packages whose objects it can reach (#6138: clerk/run is
+// not linked into agentosd, so it is no root; linked, it would be held),
+// and each package of the module a holder is handed to is checked as its
+// owner is, with what it was handed, along its own entries (#6124).
+func TestHandOffsAreHeld(t *testing.T) {
+	src := func(imports, body string) string { return "package p\nimport (" + imports + ")\n" + body + "\n" }
+	stores := src(`"encoding/json"; "github.com/ghbmrk/agentos/broker/modelroute"; "github.com/ghbmrk/agentos/broker/clerk/run"`,
+		`func f() modelroute.Config { return modelroute.Config{Socket: "/x"} }
+func g(c *modelroute.Config) { c.Socket = "y"; json.Unmarshal(nil, c) }
+func h(m *run.Model) { m.Socket = "z" }`)
+	got := useOf(t, "change", stores)
+	for _, want := range []string{
+		"p0.go:3: sets Socket, a configuredFields field, here",
+		"p0.go:4: stores into Socket, a configuredFields field",
+		"p0.go:4: hands *" + module + "modelroute.Config, which reaches a configuredFields field, to encoding/json.Unmarshal outside the package",
+		"p0.go:5: stores into Socket, a configuredFields field",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("a non-root importer's %q not reported; got %q", want, got)
 		}
 	}
-	if n == 0 {
-		t.Fatal("no package-level handOK entry checked")
+	if got := useOf(t, compositionRoot, stores); got != "" {
+		t.Errorf("the composition root's wiring reported: %q", got)
 	}
-	if !handOKPackage(module+"kernel") || handOKPackage(module+"backup.Write") || handOKPackage("maps.Keys") || handOKPackage("io.ReadCloser") {
-		t.Fatal("handOKPackage misreads a key")
+	// A generic of a module package an entry names, instantiated with a
+	// holder, is reported in the owner (L3 on #6147), and an importer that
+	// does not type-check fails closed.
+	handOK["modelroute"] = map[string]string{module + "kernel/secret": "test"}
+	got = useOf(t, "modelroute", src(`"github.com/ghbmrk/agentos/broker/kernel/secret"`, `type Config struct{ Socket string }
+func g(c Config) { secret.Hide(c) }`))
+	delete(handOK, "modelroute")
+	if !strings.Contains(got, "instantiates Hide with Config, which reaches a configuredFields field") {
+		t.Errorf("a module generic instantiated with a holder passed: %q", got)
 	}
-	for src, want := range map[string]string{
-		`package p; import "reflect"; func f(x any) bool { return reflect.DeepEqual(x, x) }`: "",
-		`package p; import "reflect"; func f(x any) any { return reflect.TypeOf(x) }`:        "uses reflect.TypeOf",
-		`package p; import r "reflect"; func f(x any) any { return r.New(r.TypeOf(x)) }`:     "uses reflect.New",
-		`package p; import "encoding/gob"; func f(x any) { gob.Register(x) }`:                "imports encoding/gob",
-		`package p; import "unsafe"; var _ = unsafe.Sizeof(0)`:                               "imports unsafe",
-		`package p; import "plugin"; var _ = plugin.Open`:                                    "imports plugin",
-		`package p; import . "reflect"; var _ = DeepEqual`:                                   "imports reflect as .",
-	} {
-		dir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(dir, "p.go"), []byte(src), 0o600); err != nil {
+	handOK["modelroute"] = map[string]string{module + "kernel/secret": "test"}
+	got = useOf(t, "modelroute", src(`"github.com/ghbmrk/agentos/broker/kernel/secret"`, `type Config struct{ Socket string }
+func g(c *Config) { secret.Hide[*Config](c) }`))
+	delete(handOK, "modelroute")
+	if !strings.Contains(got, "instantiates Hide with *Config, which reaches a configuredFields field") {
+		t.Errorf("an explicit module generic instantiation with a holder passed: %q", got)
+	}
+	if got := useOf(t, "change", src(`_ "unsafe"`, "//go:linkname x example.com/p.x\nvar x int")); !strings.Contains(got, "p0.go: uses go:linkname") {
+		t.Errorf("go:linkname passed: %q", got)
+	}
+	if got := useOf(t, "change", src(`"github.com/ghbmrk/agentos/broker/nosuch"`, `var _ = nosuch.Config{}`)); !strings.Contains(got, "does not type-check") {
+		t.Errorf("an importer's type error passed: %q", got)
+	}
+	// A handed package: kept and called is quiet; a decoder, gob, reflect
+	// or fmt is reported. What it hands on under its own entries is
+	// checked in turn, and so is a package that reaches its objects (by
+	// the graph's imports here: fixtures cannot import each other), an
+	// escape import included; the root and a subpackage are not walked.
+	srcs := map[string]string{
+		"fake": src(`"encoding/gob"; "encoding/json"; "fmt"; "reflect"`, `type Clerk interface{ Do() }
+type named struct{ c Clerk }
+func (named) String() string { return "" }
+var keep = map[string]Clerk{}
+func a(c Clerk) { c.Do(); keep["a"] = c }
+func b(p []byte, c Clerk) { json.Unmarshal(p, c) }
+func d(c Clerk) { gob.Register(c) }
+func e(c Clerk) any { return reflect.ValueOf(c) }
+func h(c Clerk) string { return fmt.Sprint(c) }
+func s(c Clerk) fmt.Stringer { return named{c} }`),
+		"fake2":         src(`"encoding/json"; "fmt"; _ "unsafe"`, `func F(s fmt.Stringer) { json.Unmarshal(nil, s) }`),
+		"user":          src(`"encoding/json"; "fmt"`, `func U(s fmt.Stringer) { json.Unmarshal(nil, s) }`),
+		"fake/sub":      src(`"encoding/json"; "fmt"`, `func U(s fmt.Stringer) { json.Unmarshal(nil, s) }`),
+		compositionRoot: src(`"encoding/json"; "fmt"`, `func U(s fmt.Stringer) { json.Unmarshal(nil, s) }`),
+	}
+	var ps []listed
+	for _, rel := range slices.Sorted(maps.Keys(srcs)) {
+		d := t.TempDir()
+		if err := os.WriteFile(filepath.Join(d, "p.go"), []byte(srcs[rel]), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		got := strings.Join(typeMinting(t, dir), "\n")
-		if want == "" && got != "" || !strings.Contains(got, want) {
-			t.Errorf("typeMinting(%s) = %q, want %q", src, got, want)
+		ps = append(ps, listed{path: module + rel, dir: d, files: []string{"p.go"}})
+	}
+	ps[slices.IndexFunc(ps, func(p listed) bool { return p.path == module+"fake2" })].imports = []string{module + "fake"}
+	ps[slices.IndexFunc(ps, func(p listed) bool { return p.path == module+"user" })].imports = []string{module + "fake2"}
+	ps[slices.IndexFunc(ps, func(p listed) bool { return p.path == module+compositionRoot })].imports = []string{module + "fake"}
+	handOK["zzowner"] = map[string]string{module + "fake": "test"}
+	handOK["fake"] = map[string]string{"fmt.Stringer": "test"}
+	defer delete(handOK, "zzowner")
+	defer delete(handOK, "fake")
+	got = strings.Join(handedOn(t, "zzowner", map[string]bool{module + "fake.Clerk": true}, ps), "\n")
+	for _, want := range []string{
+		"fake/p.go:8: hands Clerk, which reaches a configuredFields field, to encoding/json.Unmarshal outside the package (handed by zzowner)",
+		"fake/p.go:9: hands Clerk, which reaches a configuredFields field, to encoding/gob.Register outside the package (handed by zzowner)",
+		"fake/p.go:10: hands Clerk, which reaches a configuredFields field, to reflect.ValueOf outside the package (handed by zzowner)",
+		"fake/p.go:11: hands Clerk, which reaches a configuredFields field, to fmt.Sprint outside the package (handed by zzowner)",
+		"fake2/p.go:2: imports unsafe, which reaches a handed value past the rule (handed by fake)",
+		"fake2/p.go:3: hands fmt.Stringer, which reaches a configuredFields field, to encoding/json.Unmarshal outside the package (handed by fake)",
+		"user/p.go:3: hands fmt.Stringer, which reaches a configuredFields field, to encoding/json.Unmarshal outside the package (handed by fake2)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("not reported: %s\ngot %s", want, got)
 		}
+	}
+	if strings.Count(got, "\n") != 6 {
+		t.Errorf("want only those 7 reports (kept and called is quiet; root and subpackage unwalked); got\n%s", got)
+	}
+	// A package entry matches one import path exactly.
+	sub := types.NewFunc(token.NoPos, types.NewPackage(module+"kernel/ipform", "ipform"), "F", types.NewSignatureType(nil, nil, nil, nil, nil, false))
+	if handOKFunc("kernel/proc", sub) || !handOKFunc("kernel/proc", types.NewFunc(token.NoPos, types.NewPackage(module+"kernel", "kernel"), "F", sub.Signature())) {
+		t.Error("a package entry does not match its exact import path only")
 	}
 }
 
@@ -2333,7 +2547,7 @@ func useFiles(t *testing.T, rel string, files map[string]string) string {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	return strings.Join(packageUse(t, dir, names, "p", rel), "\n")
+	return strings.Join(packageUse(t, dir, names, "p", rel, nil), "\n")
 }
 
 // REQ: LOOP-7, LOOP-9
