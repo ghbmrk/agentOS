@@ -183,6 +183,41 @@ class ScopeTest(unittest.TestCase):
             self.assertTrue(f.endswith(".md"), f)
             self.assertFalse((ROOT / f).stat().st_mode & 0o111, f"{f} is executable")
 
+    def test_no_record_directory_holds_a_mkosi_tree(self):
+        # #6088, #6118: test_image_repro.KeyringSpikesTest pins each mkosi tree's apt inputs, but its walk may
+        # not open a record directory (records_audit); this module reads git, so it holds that none holds a
+        # tree. Two classes, neither listed by name, so a new mkosi file name or link target cannot slip by:
+        # - any tracked entry that is not a regular file (mode 100644 or 100755): a record is text read in
+        #   place, so no symlink (120000) or gitlink (160000) is one, and either reaches whatever it names (a
+        #   tree, a mkosi.conf, a script) without a mkosi part of its own;
+        # - a path part mkosi can read: every name mkosi reads starts "mkosi." (conf, conf.d, local.conf,
+        #   images, configure, extra, the scripts), and none is a Markdown file, so only an "mkosi.*.md"
+        #   file name is free of it (a directory so named is not). A lone mkosi.configure builds nothing yet,
+        #   but is caught all the same.
+        def trees(entries):
+            caught = []
+            for mode, f in entries:
+                parts = f.split("/")
+                if f.startswith(ci_scope.RECORD_DIRS) and (mode not in ("100644", "100755") or any(
+                        p.startswith("mkosi.") and not (i == len(parts) - 1 and p.endswith(".md"))
+                        for i, p in enumerate(parts))):
+                    caught.append(f)
+            return caught
+        caught = ["reviews/a/mkosi.conf", "handoff/b/mkosi.conf.d/10.conf", "docs/security/mkosi.local.conf",
+                  "reviews/c/mkosi.configure", "briefs/d/mkosi.images/x/mkosi.conf", "decisions/mkosi.conf.d/a.md",
+                  "reviews/mkosi.x.md/y", "handoff/link", "reviews/e/mkosi.md", "docs/security/sub"]
+        modes = {"handoff/link": "120000", "reviews/e/mkosi.md": "120000", "docs/security/sub": "160000",
+                 "reviews/run.sh": "100755"}
+        clean = ["image/mkosi/mkosi.conf", "image/mkosi/mkosi.configure", "reviews/mkosi.md", "briefs/mkosi.conf.md",
+                 "docs/learning/mkosi-notes.md", "reviews/run.sh"]
+        self.assertEqual(trees([(modes.get(f, "100644"), f) for f in caught + clean]), caught)
+        self.assertEqual(trees([("120000", "image/mkosi/mkosi.configure")]), [])
+        entries = [(meta.split()[0], f) for meta, f in
+                   (e.split("\t", 1) for e in git(ROOT, "ls-files", "-s", "-z").split("\0") if e)]
+        self.assertIn(("100644", "image/mkosi/mkosi.conf"), entries)
+        self.assertIn(("120000", "image/mkosi/mkosi.configure"), entries)
+        self.assertEqual(trees(entries), [])
+
     def test_git_diff_lists_a_moved_file_under_its_old_path(self):
         with tempfile.TemporaryDirectory() as d:
             git(d, "init", "-q", "-b", "main")
@@ -283,6 +318,23 @@ MACHINES_LINES = [
     '          path: /tmp/gocache',
     "          key: go-build-machines-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}",
     "          restore-keys: go-build-machines-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-",
+    '      - name: Runner disk after the cache restore (CI-disk-cause)',
+    '        env:',
+    '          CACHE: /tmp/gocache',
+    '          AS_ROOT: "sudo"',
+    '          DISK_FLOOR_GB: "2" # a floor that no Go test step fits under, not a budget',
+    '        run: |',
+    '          vendor=$(cat "${DMI_ID:-/sys/class/dmi/id}/sys_vendor" 2>/dev/null || true)',
+    '          case "$vendor" in',
+    '            "Amazon EC2"*) cloud=AWS;; "Microsoft Corporation"*) cloud=Azure;; *) cloud="unknown-cloud (${vendor:-no DMI vendor})";;',
+    '          esac',
+    '          c=${CACHE/#\\~/$HOME}',
+    '          cache_mb=0',
+    '          [ ! -d "$c" ] || cache_mb=$($AS_ROOT du -sm "$c" | awk \'{print $1}\')',
+    '          free_gb=$(( $(df -BM --output=avail / | tail -n 1 | tr -dc 0-9) / 1024 ))',
+    '          echo "::notice title=runner disk::$cloud runner: / has $free_gb GB free after restoring $cache_mb MB of Go build cache"',
+    '          touch -d "@$(( $(date +%s) - 3660 ))" "$RUNNER_TEMP/gocache.mark"',
+    '          [ "$free_gb" -ge "$DISK_FLOOR_GB" ] || { echo "::error title=runner disk::$cloud runner: / has $free_gb GB free after restoring $cache_mb MB of Go build cache, under the $DISK_FLOOR_GB GB floor; rerun the job, and if the cache is the bulk, see CI-disk-cause in tools/ASSUMPTIONS.md"; exit 1; }',
     '      - name: Install gVisor release-20260928.0 (checksum pinned)',
     '        run: |',
     '          B=https://storage.googleapis.com/gvisor/releases/release/20260928.0/x86_64',
