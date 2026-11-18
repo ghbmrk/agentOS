@@ -651,9 +651,9 @@ type signInHook struct {
 	*signInBox
 	afterCreate func()
 	onCreated   func(id string)
-	exit         int
-	readIn       chan struct{}
-	readHold     chan struct{}
+	exit        int
+	readIn      chan struct{}
+	readHold    chan struct{}
 }
 
 func (b *signInHook) CreateProviderWorker(ctx context.Context, id string, s vm.Spec, seed map[string][]byte) (vm.Machine, error) {
