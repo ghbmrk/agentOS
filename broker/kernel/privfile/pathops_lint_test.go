@@ -62,7 +62,9 @@ package privfile
 // rootOwned means in rootTrees, so a root unit's WorkingDirectory=
 // /var/lib/agentos is refused. What the manager opens as root for any unit,
 // a User= one too (managerOpens: a standard stream's file, an env file, a
-// credential, a terminal), is held the same way (#4641). builtUnits holds the units of the image's
+// credential, a terminal), is held the same way (#4641), and the paths it
+// opens, mounts or joins for one (userOpens) lie outside the world trees and
+// every grant (#6143). builtUnits holds the units of the image's
 // built root file system to the same rules, each with the files its own
 // systemd applies (image/unit_rules.py), a packaged unit's User= and
 // drop-ins and generated units included (#4677). The initrd's and the
@@ -598,8 +600,9 @@ func TestRootSideUnitPathsAndGrants(t *testing.T) {
 		// The shapes shipped units use.
 		unit: "[Service]\nExecStart=/usr/lib/agentos/agentos-side\nTemporaryFileSystem=/:ro,noexec /run/agentos-setup:ro /etc/agentos/t\nBindReadOnlyPaths=/usr/lib/agentos/agentos-side\n" +
 			"Environment=GOMEMLIMIT=1 PATH=/usr/bin:/usr/sbin\nEnvironmentFile=-/etc/agentos/x.env\nWorkingDirectory=-/etc/agentos\nExecSearchPath=/usr/bin\nStateDirectory=agentos/modem\nRuntimeDirectory=agentos-root\n",
-		// No root command: what it binds and searches is its user's.
-		"image/mkosi/agentos-user.service": "[Service]\nUser=agentos-user\nExecStart=/usr/lib/agentos/agentos-side\nBindPaths=/var/lib/agentos-user:/usr/lib/agentos\nWorkingDirectory=/tmp\nEnvironment=PATH=/tmp\n" +
+		// No root command: what it searches is its user's; what it binds
+		// lies outside every grant (#6143).
+		"image/mkosi/agentos-user.service": "[Service]\nUser=agentos-user\nExecStart=/usr/lib/agentos/agentos-side\nBindPaths=/var/lib/agentos/u:/usr/lib/agentos\nWorkingDirectory=/tmp\nEnvironment=PATH=/tmp\n" +
 			"RuntimeDirectory=agentos-user\nStateDirectory=agentos-user:agentos-u\nConfigurationDirectory=agentos-user\n",
 		// The env file the root unit names, which image/ ships (#4699).
 		"image/mkosi/mkosi.extra/etc/agentos/x.env": "GOMEMLIMIT=1\n",
@@ -2375,45 +2378,6 @@ func rootPathSetting(k, v string) error {
 		// A glob over the credential stores, /run/credstore among them,
 		// which the lint does not hold, as a LoadCredential= with no path.
 		return fmt.Errorf("ImportCredential= searches credential stores the lint does not hold; a unit with a root command loads a credential only by LoadCredential= with a rootOwned path")
-	case !pathSetting.MatchString(v):
-		return fmt.Errorf("byte %q, a byte other than a letter, digit, blank or one of _./@:,=+-, which the lint would have to expand", pathByte.FindString(v))
-	case v == "":
-		// An empty value resets the setting.
-	case wholePaths[k]:
-		paths = []string{strings.TrimPrefix(v, "-")}
-	case k == "ExtensionDirectories":
-		for _, w := range strings.Fields(v) {
-			paths = append(paths, strings.TrimPrefix(w, "-"))
-		}
-	case k == "ExecSearchPath":
-		paths = strings.Split(v, ":")
-	case k == "RootHash" && rootHash.MatchString(v), k == "RootHashSignature" && strings.HasPrefix(v, "base64:"):
-		// The hash or signature itself, not a file holding it.
-	case k == "RootHash" || k == "RootHashSignature":
-		paths = []string{v}
-	case strings.HasPrefix(k, "Standard"):
-		// file:, append: and truncate: name a path root opens; the
-		// others (journal, socket, null, tty, fd:x, data) name none.
-		kind, p, _ := strings.Cut(v, ":")
-		if kind == "file" || kind == "append" || kind == "truncate" {
-			paths = []string{p}
-		}
-	case strings.HasPrefix(k, "LoadCredential"):
-		// ID:PATH; with no path, or a relative one, systemd searches
-		// credential stores (/run/credstore among them) the lint does not
-		// hold, so the path is read as given and must be rootOwned.
-		_, p, _ := strings.Cut(v, ":")
-		paths = []string{p}
-	case k == "OpenFile":
-		// PATH[:NAME[:OPTIONS]]: the manager opens PATH, or connects to
-		// it, as root and hands the command the descriptor (#4698
-		// Security 1).
-		p, _, _ := strings.Cut(v, ":")
-		paths = []string{p}
-	case k == "BPFProgram":
-		// TYPE:PATH: the manager loads the pinned program at PATH.
-		_, p, _ := strings.Cut(v, ":")
-		paths = []string{p}
 	case k == "TemporaryFileSystem":
 		for _, w := range strings.Fields(v) {
 			p, opts, _ := strings.Cut(w, ":")
@@ -2427,10 +2391,9 @@ func rootPathSetting(k, v string) error {
 			}
 		}
 	default:
-		// Each word is [-]SOURCE[:DEST[:OPTIONS]]; - lets it be missing.
-		for _, w := range strings.Fields(v) {
-			p, _, _ := strings.Cut(strings.TrimPrefix(w, "-"), ":")
-			paths = append(paths, p)
+		var err error
+		if paths, err = settingPaths(k, v); err != nil {
+			return err
 		}
 	}
 	for _, p := range paths {
@@ -2445,6 +2408,66 @@ func rootPathSetting(k, v string) error {
 		}
 	}
 	return nil
+}
+
+// settingPaths returns the paths the manager opens, loads, mounts or joins
+// as root for one EnvironmentFile= or rootPathKeys setting k=v (but
+// Environment=, TemporaryFileSystem= and ImportCredential=, which
+// rootPathSetting reads itself), or an error for a byte the lint would have
+// to expand.
+func settingPaths(k, v string) ([]string, error) {
+	switch {
+	case !pathSetting.MatchString(v):
+		return nil, fmt.Errorf("byte %q, a byte other than a letter, digit, blank or one of _./@:,=+-, which the lint would have to expand", pathByte.FindString(v))
+	case v == "":
+		// An empty value resets the setting.
+	case wholePaths[k]:
+		return []string{strings.TrimPrefix(v, "-")}, nil
+	case k == "ExtensionDirectories":
+		var paths []string
+		for _, w := range strings.Fields(v) {
+			paths = append(paths, strings.TrimPrefix(w, "-"))
+		}
+		return paths, nil
+	case k == "ExecSearchPath":
+		return strings.Split(v, ":"), nil
+	case k == "RootHash" && rootHash.MatchString(v), k == "RootHashSignature" && strings.HasPrefix(v, "base64:"):
+		// The hash or signature itself, not a file holding it.
+	case k == "RootHash" || k == "RootHashSignature":
+		return []string{v}, nil
+	case strings.HasPrefix(k, "Standard"):
+		// file:, append: and truncate: name a path root opens; the
+		// others (journal, socket, null, tty, fd:x, data) name none.
+		kind, p, _ := strings.Cut(v, ":")
+		if kind == "file" || kind == "append" || kind == "truncate" {
+			return []string{p}, nil
+		}
+	case strings.HasPrefix(k, "LoadCredential"):
+		// ID:PATH; with no path, or a relative one, systemd searches
+		// credential stores (/run/credstore among them) the lint does not
+		// hold, so the path is read as given and must be rootOwned.
+		_, p, _ := strings.Cut(v, ":")
+		return []string{p}, nil
+	case k == "OpenFile":
+		// PATH[:NAME[:OPTIONS]]: the manager opens PATH, or connects to
+		// it, as root and hands the command the descriptor (#4698
+		// Security 1).
+		p, _, _ := strings.Cut(v, ":")
+		return []string{p}, nil
+	case k == "BPFProgram":
+		// TYPE:PATH: the manager loads the pinned program at PATH.
+		_, p, _ := strings.Cut(v, ":")
+		return []string{p}, nil
+	default:
+		// Each word is [-]SOURCE[:DEST[:OPTIONS]]; - lets it be missing.
+		var paths []string
+		for _, w := range strings.Fields(v) {
+			p, _, _ := strings.Cut(strings.TrimPrefix(w, "-"), ":")
+			paths = append(paths, p)
+		}
+		return paths, nil
+	}
+	return nil, nil
 }
 
 // envFileReasons are the env files a root unit may name that image/ does
@@ -2849,7 +2872,7 @@ func rootBinaries(root string) ([]string, error) {
 	if err := endpointsHeld(c.endpoints, c.grants); err != nil {
 		return nil, err
 	}
-	if err := runBinaries(root, pkgs, seen, c.progs, c.grants); err != nil {
+	if err := runBinaries(root, pkgs, seen, c.progs, c.grants, c.opens); err != nil {
 		return nil, err
 	}
 
@@ -2893,6 +2916,9 @@ type unitCheck struct {
 	// The paths of ours PID 1 binds, makes or opens for a socket
 	// (endpointsHeld, #4718 item 5).
 	endpoints []grant
+	// The paths of ours the manager opens, mounts or joins as root for a
+	// unit with no root command (userOpens, opensHeld, #6143).
+	opens []grant
 }
 
 // namesHeld returns the first word of a [Unit] line, key k, that names a
@@ -3039,7 +3065,7 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 			case line.section != section:
 				// systemd reads a unit's User= and Exec lines only in its
 				// type's own section.
-			case trusted[f] && k != "User" && k != "DynamicUser" && dirBases[strings.TrimSuffix(k, "Mode")] == "" && !strings.HasPrefix(k, "Exec"):
+			case trusted[f] && k != "User" && k != "DynamicUser" && k != "PermissionsStartOnly" && dirBases[strings.TrimSuffix(k, "Mode")] == "" && !strings.HasPrefix(k, "Exec"):
 				// A package's setting.
 			case k == "Environment" || k == "EnvironmentFile" || k == "PassEnvironment" || k == "PAMName":
 				env = append(env, envLine{f, k, v})
@@ -3052,6 +3078,15 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 			case k == "DynamicUser" && (v == "yes" || v == "true" || v == "1" || v == "on"):
 				asUser = true
 			case k == "DynamicUser":
+				asRoot = true
+			case k == "PermissionsStartOnly" && !falseWords[strings.ToLower(v)]:
+				// systemd's parse_boolean: any value but a false one (or
+				// one it refuses) runs every command but ExecStart= with
+				// full privileges (#4641 R-c).
+				asRoot = true
+			case k == "AmbientCapabilities" && !userCaps(v):
+				// A capability that reads, writes or runs as root
+				// makes the unit root in all but uid (#4641).
 				asRoot = true
 			case rootPathKeys[k] || dirBases[strings.TrimSuffix(k, "Mode")] != "":
 				settings = append(settings, envLine{f, k, v})
@@ -3206,11 +3241,27 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 		// opens these as root before the command drops to it, following
 		// a link, so they are held as a root unit's are.
 		for _, l := range append(settings, env...) {
+			rel, _ := filepath.Rel(c.root, l.file)
+			where := filepath.ToSlash(rel) + ": " + l.key + "=" + l.value
 			if managerOpens[l.key] {
 				if err := rootPathSetting(l.key, l.value); err != nil {
-					rel, _ := filepath.Rel(c.root, l.file)
-					errs = append(errs, fmt.Errorf("%s: %s=%s: the manager opens this path as root whatever the unit's User=: %v", filepath.ToSlash(rel), l.key, l.value, err))
+					errs = append(errs, fmt.Errorf("%s: the manager opens this path as root whatever the unit's User=: %v", where, err))
 				}
+			}
+			if !userOpens[l.key] {
+				continue
+			}
+			paths, err := settingPaths(l.key, l.value)
+			for _, p := range paths {
+				if err == nil && (!strings.HasPrefix(p, "/") || dotdot(p)) {
+					err = fmt.Errorf("path %q; want an absolute path with no ..", p)
+				}
+				if err == nil {
+					c.opens = append(c.opens, grant{where, l.key, path.Clean(p)})
+				}
+			}
+			if err != nil {
+				errs = append(errs, fmt.Errorf("%s: the manager opens, mounts or joins this path as root whatever the unit's User=: %v", where, err))
 			}
 		}
 		return errors.Join(errs...)
@@ -3225,11 +3276,69 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 // unit's commands as root, before they drop to its User= (StandardInput=,
 // StandardOutput= and StandardError= by file:, append: or truncate:, an env
 // file, a credential, a terminal): rootPathSetting holds them on every unit
-// (KRN-2-std-files, #4641). OpenFile= is #4641's follow-up.
+// (KRN-2-std-files, #4641); OpenFile= and the mount keys are userOpens'.
 var managerOpens = map[string]bool{
 	"StandardInput": true, "StandardOutput": true, "StandardError": true, "EnvironmentFile": true,
 	"LoadCredential": true, "LoadCredentialEncrypted": true, "TTYPath": true,
 }
+
+// userOpens are the settings of a unit with no root command naming a path
+// the manager opens, mounts or joins as root before the drop to its User=,
+// and hands the unit what it finds: a descriptor (OpenFile=, which the
+// keepers point at the kernel's sockets in /run/agentos-kernel, outside
+// rootTrees), a bind or image mount, a namespace or a BPF program. Each
+// path is plain and absolute, and opensHeld keeps it out of worldTrees and
+// out of every grant (#6143, Lens on #6146).
+var userOpens = map[string]bool{
+	"OpenFile": true, "BindPaths": true, "BindReadOnlyPaths": true, "RootDirectory": true, "RootImage": true,
+	"MountImages": true, "ExtensionDirectories": true, "ExtensionImages": true, "NetworkNamespacePath": true,
+	"IPCNamespacePath": true, "BPFProgram": true, "IPIngressFilterPath": true, "IPEgressFilterPath": true,
+}
+
+// worldTrees are the trees any uid may make a file in, or whose entries
+// link to another process's files (openDevs), with /run/lock, which is
+// world-writable like /tmp.
+var worldTrees = append([]string{"/tmp", "/var/tmp", "/run/lock"}, openDevs...)
+
+// opensHeld refuses a path the manager opens for a unit (opens) in a world
+// tree, or at or below a grant: that grant's uid could plant a link there,
+// which the manager follows as root (#6143).
+func opensHeld(opens, grants []grant) error {
+	var errs []error
+	for _, o := range opens {
+		if t, ok := inTree(o.path, worldTrees); ok {
+			errs = append(errs, fmt.Errorf("%s: path %q is in %s, where any uid may plant a link; the manager follows it as root", o.where, o.path, t))
+			continue
+		}
+		p := unalias(o.path)
+		for _, g := range grants {
+			if gp := unalias(g.path); p == gp || strings.HasPrefix(p, gp+"/") {
+				errs = append(errs, fmt.Errorf("%s: path %q is at or below %s, which %s (%s); that uid could plant a link there, which the manager follows as root", o.where, o.path, g.path, g.how, g.where))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// falseWords are the values systemd's parse_boolean reads as false.
+var falseWords = map[string]bool{"0": true, "no": true, "n": true, "false": true, "f": true, "off": true}
+
+// userCaps reports whether an AmbientCapabilities= value holds only
+// userCapNames, which leave a unit with a User= a non-root unit: none reads,
+// writes or changes a file another uid owns, sets an id or runs code as
+// root (CAP_SETUID, CAP_DAC_OVERRIDE and CAP_SYS_ADMIN make it root in all
+// but uid, #4641). A closed list: a number, an inverted ~ list or any other
+// name counts as root. systemd reads the names in any case.
+func userCaps(v string) bool {
+	for _, w := range strings.Fields(v) {
+		if !userCapNames[strings.ToUpper(w)] {
+			return false
+		}
+	}
+	return true
+}
+
+var userCapNames = map[string]bool{"CAP_NET_BIND_SERVICE": true, "CAP_NET_RAW": true, "CAP_SYS_BOOT": true, "CAP_WAKE_ALARM": true, "CAP_BLOCK_SUSPEND": true}
 
 // managerPaths are the [Service] settings naming a file PID 1 itself
 // reads as root, whatever the unit's User= (#4718 item 5).
@@ -3903,6 +4012,7 @@ func builtUnitsWith(recs unitRecords, dir string, env envLookup) error {
 	errs = append(errs, grantsHeld(c.grants, append(append(append([]string{}, rootTrees...), c.progs...), c.pkgProgs...)))
 	errs = append(errs, grantsHeld(c.pkgGrants, c.progs))
 	errs = append(errs, endpointsHeld(c.endpoints, append(append([]grant{}, c.grants...), c.pkgGrants...)))
+	errs = append(errs, opensHeld(c.opens, append(append([]grant{}, c.grants...), c.pkgGrants...)))
 	return errors.Join(errs...)
 }
 
@@ -4556,7 +4666,7 @@ func inRunDir(rel string) bool {
 // file; or an owner other than root), and each of grants (unitGrants'), fails
 // on a path in or above rootTrees, progs (the programs units run as root)
 // or a listed program (#4423, #4584).
-func runBinaries(root string, pkgs map[string]string, seen map[string]bool, progs []string, grants []grant) error {
+func runBinaries(root string, pkgs map[string]string, seen map[string]bool, progs []string, grants, opens []grant) error {
 	// A repository with no list lets a file run nothing.
 	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(programsFile)))
 	if err != nil && !os.IsNotExist(err) {
@@ -4631,6 +4741,9 @@ func runBinaries(root string, pkgs map[string]string, seen map[string]bool, prog
 		held = append(held, path)
 	}
 	if err := grantsHeld(grants, held); err != nil {
+		return err
+	}
+	if err := opensHeld(opens, grants); err != nil {
 		return err
 	}
 	for path, used := range listed {

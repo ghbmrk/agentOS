@@ -2176,6 +2176,33 @@ class KeeperTreeTest(unittest.TestCase):
         rules = (MK / "mkosi.extra/usr/lib/udev/rules.d/60-agentos-tpm.rules").read_text()
         self.assertIn('GROUP="agentos-egress"', rules)
 
+    def test_no_user_but_root_has_uid_0(self):
+        # #4641 R-g: a passwd line, a userdb record or a sysusers.d u line at uid 0.
+        write(self.root, "etc/passwd", "root:x:0:0:root:/root:/bin/sh\nagentos-x:x:900:900::/:/usr/sbin/nologin\n")
+        self.assertEqual(self.v(), [])
+        write(self.root, "etc/passwd", "root:x:0:0:root:/root:/bin/sh\ntoor:x:0:0::/:/bin/sh\n")
+        self.assertEqual(self.v(), ["etc/passwd:2: toor has uid 0; only root may (#4641)"])
+        (self.root / "etc/passwd").unlink()
+        rec = write(self.root, "usr/lib/userdb/toor.user", '{"userName": "toor", "uid": 0}')
+        self.assertEqual(self.v(), ["usr/lib/userdb/toor.user: a user record with uid 0 other than root's, or not a JSON "
+                                    "object (#4641)"])
+        rec.write_text('{"userName": "root", "uid": 0}')
+        self.assertEqual(self.v(), [])
+        rec.unlink()
+        sysusers = self.root / "usr/lib/sysusers.d/agentos-setup.conf"
+        good = sysusers.read_text()
+        n = len(good.splitlines()) + 1
+        for line in ("u toor 0", "u! toor 0:900", "u toor 0 - /"):
+            with self.subTest(line):
+                sysusers.write_text(good + line + "\n")
+                self.assertEqual(self.v(), ["usr/lib/sysusers.d/agentos-setup.conf:%d: gives toor uid 0; only root may "
+                                            "(#4641)" % n])
+        for line in ("u root 0", "u toor 900", "u toor -:0"):
+            with self.subTest(line):
+                sysusers.write_text(good + line + "\n")
+                self.assertEqual(self.v(), [])
+        sysusers.write_text(good)
+
     def test_a_full_privilege_command_is_refused(self):
         self.add("agentos-boot-report.service", "Service", "ExecStartPre=+/usr/bin/true")
         self.assertEqual(self.v(), ["agentos-boot-report.service: ExecStartPre=+/usr/bin/true runs with full privileges, "

@@ -5843,7 +5843,9 @@ class ExecAllowTest(unittest.TestCase):
               "usr/local/share/dbus-1/system-services/x.service", "lib/dbus-1/system-services/y.service",
               # Names a reader's own filter might skip are hashed all the same.
               "usr/share/polkit-1/rules.d/.x.rules", "usr/share/polkit-1/rules.d/x.rules~",
-              "etc/dbus-1/system.d/x.txt", "etc/dbus-1/system.d/sub/x.conf")
+              "etc/dbus-1/system.d/x.txt", "etc/dbus-1/system.d/sub/x.conf",
+              # #4641 R-b: the PAM stacks, whose modules run as root.
+              "etc/pam.d/login", "usr/lib/pam.d/su", "etc/pam.conf", "etc/pam.d/.x")
     YES = 'polkit.addRule(function(action, subject) { return polkit.Result.YES; });\n'
 
     def test_policy_files_are_held_by_hash(self):
