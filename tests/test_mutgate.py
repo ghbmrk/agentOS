@@ -1671,6 +1671,26 @@ class TestOnly(unittest.TestCase):
             (pkg / "hint_test.go").unlink()
             self.assertEqual(mutgate.suite_seconds("hint", tmp), (0.0, None))
 
+    def test_timed_cover_times_its_run(self):
+        # MUT-plan-budget (#6155): a test-changing package's whole-suite coverage run is timed, so the
+        # plan sizes its shards from that run and needs no other suite run.
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}), \
+                mock.patch.object(mutgate, "BROKER", pathlib.Path(d) / "broker"):
+            self.repo(d, TWO_TEST + "\n// changed\n")
+            pkg, tmp = mutgate.BROKER / "hint", pathlib.Path(d) / "tmp"
+            tmp.mkdir()
+            (pkg / "slow_test.go").write_text(
+                'package hint\n\nimport (\n\t"testing"\n\t"time"\n)\n\nfunc TestSlow(t *testing.T) { time.Sleep(time.Second) }\n')
+            got, secs, problem = mutgate.timed_cover("hint", None, tmp)
+            self.assertIsNone(problem)
+            self.assertGreaterEqual(secs, 1.0)
+            self.assertEqual(mutgate.covered_by("hint", None, tmp), (got, None))
+            # A run that leaves TestSlow out does not take its second.
+            _, quick, problem = mutgate.timed_cover("hint", ["TestUp"], tmp)
+            self.assertIsNone(problem)
+            self.assertLess(quick, secs)
+
     def test_test_only_diff_mutates_covered_lines(self):
         # #3607: a test-only diff passed every gate. TestUp still runs Up(20) but no longer checks
         # the clamp, so its guard survives; TestDown is untouched, so Down's line is no target.
@@ -2617,6 +2637,42 @@ class Plan(unittest.TestCase):
         code, out, err = self.plan({"kernel/sim": sim}, (None, "broker/kernel/sim/'s tests fail"))
         self.assertEqual((code, out), (1, ""))
         self.assertIn("mutgate: broker/kernel/sim/'s tests fail", err)
+
+
+    def test_a_test_changing_package_is_sized_by_its_record_run_with_no_other_suite_run(self):
+        # MUT-plan-budget (#6155): on #6144 enforcer/nft's 374 s suite ran four times in the plan and
+        # passed its time limit; the record's whole-suite run sizes the shards, and suite_seconds
+        # runs only for a package whose tests the diff leaves alone.
+        from unittest import mock
+        import contextlib, io, types
+        sim = {"broker/kernel/sim/a.go": set(range(1, 824))}
+        timed = []
+        with contextlib.ExitStack() as st:
+            for name, value in (("broker_diff", lambda *a: ""), ("added_lines", lambda d: ({}, {})),
+                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: ["kernel/sim", "other"]),
+                                ("bases_for", lambda *a: {}), ("diff_targets", lambda added, pkg: sim),
+                                ("tests_changed", lambda tests, pkg: pkg == "kernel/sim"),
+                                ("record_for", lambda *a: ({"rec": 1}, 48.0, None)),
+                                ("targets_for", lambda pkg, added, tests, data, bases: (sim, None)),
+                                ("deletion_sites", lambda pkg, t, lister: ([{}] * 534, None)),
+                                ("suite_seconds", lambda pkg, tmp: timed.append(pkg) or (1.0, None))):
+                st.enter_context(mock.patch.object(mutgate, name, value))
+            err = st.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            out = st.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            code = mutgate.cmd_plan(types.SimpleNamespace(git="HEAD~1", targets_out=None))
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual(timed, ["other"])
+        self.assertIn("kernel/sim: 823 target lines, 534 deletion sites, a 48 s suite, 20 shard(s)", err.getvalue())
+        self.assertEqual(len(json.loads(out.getvalue())), 20 + mutgate.shard_count(sim, [{}] * 534, 1.0))
+
+    def test_the_plan_job_fits_three_runs_of_the_slowest_suite(self):
+        # #6155: enforcer/nft's coverage run took 374 s on #6144 (run 44265885820). A test-only change
+        # to it runs the suite three times in the plan: the head's changed tests, the base's, the
+        # head's whole suite. The plan job's limit holds that with half again as headroom.
+        plan = job(WORKFLOW.read_text(), "plan")
+        limit = int(re.search(r"(?m)^    timeout-minutes: (\d+)$", plan).group(1))
+        self.assertGreaterEqual(limit * 60, 1.5 * 3 * 374)
+        self.assertIn(f"the plan job timed out at its {limit}-minute limit", job(WORKFLOW.read_text(), "mutgate"))
 
 
 class Summary(unittest.TestCase):
@@ -3786,6 +3842,7 @@ class Workflow(unittest.TestCase):
             ("success", '["kernel"]', "success", "cancelled", 1),  # #5069: a shard timed out
             ("success", '["kernel"]', "success", "skipped", 1),
             ("success", '["kernel"]', "failure", "skipped", 1),  # #4961: no plan, no shards
+            ("success", '["kernel"]', "cancelled", "skipped", 1),  # #6155: the plan timed out
             ("success", '["kernel"]', "skipped", "success", 1),
             ("success", "[]", "skipped", "failure", 1),
             ("success", "[]", "success", "skipped", 1),
@@ -3798,6 +3855,8 @@ class Workflow(unittest.TestCase):
             # #5069: a timed-out shard says so, not a bare "cancelled"; nothing else claims a timeout.
             self.assertEqual("::error::a mutants shard timed out at its 60-minute limit" in r.stdout,
                              mutants == "cancelled" and claimed == "success", r.stdout)
+            self.assertEqual("::error::the plan job timed out" in r.stdout,
+                             plan == "cancelled" and claimed == "success", r.stdout)
         self.assertIn("if: ${{ !cancelled() }}", job(self.text, "mutgate"))
         self.assertIn("needs: [claimed, plan, mutants]", job(self.text, "mutgate"))
 
