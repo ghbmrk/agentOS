@@ -357,14 +357,27 @@ func TestFileGateChecksBeforeTheOpenActs(t *testing.T) {
 	}
 }
 
-// openFDs counts this process's open descriptors.
-func openFDs(t *testing.T) int {
+// openFDs counts this process's open descriptors on dir or a name under
+// it, by /proc/self/fd's link text, so a descriptor the runtime or another
+// test opens or a finalizer closes meanwhile is not counted (#6157).
+func openFDs(t *testing.T, dir string) int {
 	t.Helper()
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	es, err := os.ReadDir("/proc/self/fd")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return len(es)
+	n := 0
+	for _, e := range es {
+		// A descriptor closed since the listing has no link left.
+		if l, err := os.Readlink("/proc/self/fd/" + e.Name()); err == nil && (l == real || strings.HasPrefix(l, real+"/")) {
+			n++
+		}
+	}
+	return n
 }
 
 // REQ: HW-10, ONB-3. The gate's own steps hold: a missing name is the
@@ -457,11 +470,11 @@ func TestFileGateStepsLeaveNothingOpen(t *testing.T) {
 		}
 	}
 	try() // the runtime's own descriptors settle on the first pass
-	before := openFDs(t)
+	before := openFDs(t, mine)
 	for range 10 {
 		try()
 	}
-	if after := openFDs(t); after != before {
+	if after := openFDs(t, mine); after != before {
 		t.Errorf("the gate left descriptors open: %d before, %d after", before, after)
 	}
 }
