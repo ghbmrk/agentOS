@@ -409,6 +409,9 @@ func TestFileGateStepsLeaveNothingOpen(t *testing.T) {
 	}{
 		{filepath.Join(mine, "missing"), unix.O_RDONLY},
 		{filepath.Join(mine, "missing"), unix.O_WRONLY | unix.O_TRUNC},
+		// A create's missing directory is the kernel's ENOENT at inDir's
+		// open, not a refusal of a directory never reached.
+		{filepath.Join(mine, "missing", "new"), unix.O_WRONLY | unix.O_CREAT},
 	} {
 		if fd, err := openRaw(c.path, c.flag, 0); !errors.Is(err, unix.ENOENT) {
 			if err == nil {
