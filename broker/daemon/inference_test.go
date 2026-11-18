@@ -30,8 +30,11 @@ import (
 	"bytes"
 	"fmt"
 	"go/ast"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	"go/types"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -638,7 +641,7 @@ func configured(e ast.Expr, rel string, f *ast.File) bool {
 // only ever handed in (#6030 rounds 1 to 3). Each entry is instead a claim
 // a reviewer accepts, as an entry here in the PR's diff: that no code of
 // the package stores into the field, so it holds what callers hand in.
-// fieldStores backs the claim with what syntax can see (#6028).
+// fieldStores backs the claim over the package's types (#6028).
 var configuredFields = map[string]map[string]string{
 	"infer":                {"Client.Path": "the inference service's socket, from agentosd's wiring"},
 	"kernel/proc":          {"Conn.Socket": "a kernel or clerk socket its caller names", "remote.Socket": "Remote.Socket, embedded; a Remote is handed to Clerk"},
@@ -776,8 +779,9 @@ func writes(e ast.Expr, obj *ast.Object) bool {
 // packageUse runs sourceUse on each of a package's files, then the dial
 // rules that need the whole package (#6028): dialCallers, fieldStores and
 // links. They rest on: callers in other packages being the composition
-// root, which wires the operator's configuration; an imported struct type
-// not being converted into a listed one; unsafe staying an escape; and a
+// root, which wires the operator's configuration; another package's code
+// reaching a listed field only through what fieldStores sees handed to it
+// (it cannot name the package's types); unsafe staying an escape; and a
 // link or rename going only through os, syscall or x/sys/unix.
 func packageUse(t *testing.T, dir string, files []string, prefix, rel string) []string {
 	t.Helper()
@@ -802,7 +806,7 @@ func packageUse(t *testing.T, dir string, files []string, prefix, rel string) []
 		}
 	}
 	dialCallers(fs, rel, at)
-	fieldStores(fs, dir, rel, at)
+	fieldStores(t, fset, fs, rel, at)
 	links(fs, files, rel, at)
 	return bad
 }
@@ -993,812 +997,542 @@ func typeDecls(f *ast.File) map[string]*ast.TypeSpec {
 }
 
 // fieldStores backs the configuredFields claim, that the package never
-// stores into a listed field, with what syntax can see in a listed package
-// (Lens R1 and Security 5 on #6035): a write or & of any selector naming a
-// listed field (whatever its type, so through a method, a method value or
-// another type of the same shape); a composite literal that sets the field
-// by key, or by position in a struct type with a field of that name (a
-// type parameter or an imported type counts, as either may be one); a
-// reflect import; and a pointer to a type that holds a listed type, or a
-// field of that name, handed to a call (json.Unmarshal(b, c), var d D
-// then f(&d)), which may store through it.
-func fieldStores(fs []*ast.File, dir, rel string, at func(ast.Node, string)) {
-	fields, listedTypes := map[string]bool{}, map[string]bool{}
-	for tf := range configuredFields[rel] {
-		typ, field, _ := strings.Cut(tf, ".")
-		listedTypes[typ], fields[field] = true, true
-	}
-	if len(fields) == 0 {
+// stores into a listed field, over the package's go/types types, so it
+// does not guess at any expression (#6028 re-plan after three Security
+// rounds on #6119). A listed field is a slot: a field index in a struct
+// shape, so any struct type identical to its owner's (tags aside), named
+// or not, has the same slot, and a conversion between them changes
+// nothing. In a listed package, it reports:
+//   - a write or & of a slot (assignment, op-assignment, ++, range);
+//   - a composite literal that sets a slot, by key or by position;
+//   - a value of a type that reaches a slot (holds), wherever it may end
+//     up in an interface or in code outside the package: converted to an
+//     interface (assignment, call argument, return, literal element, send,
+//     map key, range), handed to a function or method of another package,
+//     or a type argument of any generic. Only those reach it by
+//     reflection (decoders, fmt, reflect itself), since another package
+//     cannot name the package's types, and unsafe stays an escape. Every
+//     place a value can go is listed in use; any other is reported, so a
+//     form it does not know fails closed.
+//
+// The rule is about types, not order: where in the program a store would
+// run does not matter, so no flow is followed (Security B1 round 3 on
+// #6119).
+func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, at func(ast.Node, string)) {
+	t.Helper()
+	if len(configuredFields[rel]) == 0 {
 		return
 	}
-	decls := map[string]*ast.TypeSpec{}
-	for _, f := range fs {
-		for name, ts := range typeDecls(f) {
-			decls[name] = ts
-		}
+	info := &types.Info{
+		Types:      map[ast.Expr]types.TypeAndValue{},
+		Defs:       map[*ast.Ident]types.Object{},
+		Uses:       map[*ast.Ident]types.Object{},
+		Selections: map[*ast.SelectorExpr]*types.Selection{},
+		Instances:  map[*ast.Ident]types.Instance{},
 	}
-	// resolve follows a local named type to its definition; nil is a type
-	// parameter's, or an elided type the lint could not follow.
-	resolve := func(e ast.Expr) ast.Expr {
-		for range len(decls) + 1 {
-			if ix, ok := e.(*ast.IndexExpr); ok {
-				e = ix.X
-			}
-			if ix, ok := e.(*ast.IndexListExpr); ok {
-				e = ix.X
-			}
-			if p, ok := e.(*ast.ParenExpr); ok {
-				e = p.X
-			}
-			id, ok := e.(*ast.Ident)
-			if !ok {
-				return e
-			}
-			ts := decls[id.Name]
-			if ts == nil {
-				if id.Obj != nil && isTypeParam(id.Obj) {
-					return nil
-				}
-				return id // predeclared
-			}
-			e = ts.Type
-		}
-		return nil
+	conf := types.Config{Importer: importer.ForCompiler(fset, "gc", exportData(t, fs))}
+	pkg, err := conf.Check(module+rel, fset, fs, info)
+	if err != nil {
+		at(fs[0], "does not type-check, so its configuredFields stores cannot be checked: "+err.Error())
+		return
 	}
-	// hasField reports a struct type with a field of a listed name, or a
-	// type resolve could not follow (a type parameter's).
-	hasField := func(e ast.Expr) bool {
-		st, ok := e.(*ast.StructType)
+	// The slots: each listed field's struct and index, through embedding.
+	type slot struct {
+		st *types.Struct
+		i  int
+	}
+	var slots []slot
+	for tf := range configuredFields[rel] {
+		typ, field, _ := strings.Cut(tf, ".")
+		tn, ok := pkg.Scope().Lookup(typ).(*types.TypeName)
 		if !ok {
-			return e == nil
+			continue // a type the package does not declare holds nothing
 		}
-		for _, fl := range st.Fields.List {
-			for _, nm := range fl.Names {
-				if fields[nm.Name] {
-					return true
-				}
+		obj, idx, _ := types.LookupFieldOrMethod(tn.Type(), true, pkg, field)
+		if _, ok := obj.(*types.Var); !ok {
+			at(fs[0], "configuredFields lists "+tf+", which is not a field")
+			continue
+		}
+		st := structOf(tn.Type())
+		for _, i := range idx[:len(idx)-1] {
+			st = structOf(st.Field(i).Type())
+		}
+		slots = append(slots, slot{st, idx[len(idx)-1]})
+	}
+	// listed is the slots st has, as field indices.
+	listed := func(st *types.Struct) map[int]bool {
+		m := map[int]bool{}
+		for _, s := range slots {
+			if st != nil && types.IdenticalIgnoreTags(st, s.st) {
+				m[s.i] = true
 			}
 		}
-		return false
+		return m
 	}
-	// holds reports a type through which code outside the package could
-	// store into a listed field: the listed type, or a struct with an
-	// exported field of a listed name, reached by value, pointer, slice,
-	// map or channel through exported fields (json, gob and reflect set
-	// only those). A type parameter's is its instantiation's, checked
-	// where a call names it.
-	var holds func(e ast.Expr, seen map[string]bool) bool
-	holds = func(e ast.Expr, seen map[string]bool) bool {
-		switch x := e.(type) {
-		case *ast.StarExpr:
-			return holds(x.X, seen)
-		case *ast.ArrayType:
-			return holds(x.Elt, seen)
-		case *ast.MapType:
-			return holds(x.Value, seen)
-		case *ast.ChanType:
-			return holds(x.Value, seen)
-		case *ast.ParenExpr:
-			return holds(x.X, seen)
-		case *ast.IndexExpr:
-			return holds(x.X, seen)
-		case *ast.IndexListExpr:
-			return holds(x.X, seen)
-		case *ast.Ident:
-			if listedTypes[x.Name] {
+	// reach reports a type from which a slot can be reached: through
+	// pointers, elements, keys, fields, a function's parameters or
+	// results, or an exported method of the type or any method of an
+	// interface. With exposed, only a reach that another package's code
+	// handed such a value could use: through a reference (pointer, slice,
+	// map or channel), where reflection can write, or a function or
+	// method, which can take a value it made or return a reference. A
+	// struct copied into an interface is not writable there.
+	type key struct {
+		t            types.Type
+		exposed, ref bool
+	}
+	memo := map[key]bool{}
+	var reach func(t types.Type, exposed, ref bool, seen map[key]bool) bool
+	reach = func(t types.Type, exposed, ref bool, seen map[key]bool) bool {
+		k := key{t, exposed, ref || !exposed}
+		if r, ok := memo[k]; ok {
+			return r
+		}
+		if t == nil || seen[k] {
+			return false
+		}
+		seen[k] = true
+		r := false
+		in := func(t types.Type, ref bool) { r = r || reach(t, exposed, ref, seen) }
+		switch x := t.(type) {
+		case *types.Alias:
+			in(types.Unalias(x), k.ref)
+		case *types.Named:
+			for _, ms := range []*types.MethodSet{types.NewMethodSet(x), types.NewMethodSet(types.NewPointer(x))} {
+				for i := range ms.Len() {
+					if ms.At(i).Obj().Exported() {
+						in(ms.At(i).Type(), true)
+					}
+				}
+			}
+			in(x.Underlying(), k.ref)
+		case *types.Pointer:
+			in(x.Elem(), true)
+		case *types.Slice:
+			in(x.Elem(), true)
+		case *types.Chan:
+			in(x.Elem(), true)
+		case *types.Map:
+			in(x.Key(), true)
+			in(x.Elem(), true)
+		case *types.Array:
+			in(x.Elem(), k.ref)
+		case *types.Struct:
+			r = len(listed(x)) > 0 && k.ref
+			for i := range x.NumFields() {
+				in(x.Field(i).Type(), k.ref)
+			}
+		case *types.Signature:
+			in(x.Params(), true)
+			in(x.Results(), true)
+		case *types.Tuple:
+			for i := range x.Len() {
+				in(x.At(i).Type(), k.ref)
+			}
+		case *types.Interface:
+			for i := range x.NumMethods() {
+				in(x.Method(i).Type(), true)
+			}
+		}
+		if len(seen) == 1 || r {
+			memo[k] = r // a false inside a cycle may be a partial answer
+		}
+		return r
+	}
+	holds := func(t types.Type) bool { return reach(t, false, true, map[key]bool{}) }
+	exposed := func(t types.Type) bool { return reach(t, true, false, map[key]bool{}) }
+	name := func(t types.Type) string { return types.TypeString(t, types.RelativeTo(pkg)) }
+	// Each node's parent, and each return's function signature.
+	parent := map[ast.Node]ast.Node{}
+	sigOf := map[*ast.ReturnStmt]*types.Signature{}
+	for _, f := range fs {
+		var stack []ast.Node
+		var sigs []*types.Signature
+		ast.Inspect(f, func(n ast.Node) bool {
+			if n == nil {
+				switch stack[len(stack)-1].(type) {
+				case *ast.FuncDecl, *ast.FuncLit:
+					sigs = sigs[:len(sigs)-1]
+				}
+				stack = stack[:len(stack)-1]
 				return true
 			}
-			ts := decls[x.Name]
-			if ts == nil || seen[x.Name] {
-				return false
+			if len(stack) > 0 {
+				parent[n] = stack[len(stack)-1]
 			}
-			seen[x.Name] = true
-			return holds(ts.Type, seen)
-		case *ast.StructType:
-			for _, fl := range x.Fields.List {
-				if len(fl.Names) == 0 {
-					t := fl.Type
-					if st, ok := t.(*ast.StarExpr); ok {
-						t = st.X
-					}
-					// json promotes an embedded struct's exported
-					// fields whether or not its type is exported.
-					if id, ok := t.(*ast.Ident); ok && holds(id, seen) {
-						return true
-					}
-				}
-				for _, nm := range fl.Names {
-					if ast.IsExported(nm.Name) && (fields[nm.Name] || holds(fl.Type, seen)) {
-						return true
-					}
-				}
-			}
-		}
-		return false
-	}
-	stores := func(e ast.Expr) (string, bool) {
-		for {
-			switch x := e.(type) {
-			case *ast.SelectorExpr:
-				if fields[x.Sel.Name] {
-					return x.Sel.Name, true
-				}
-				e = x.X
-			case *ast.IndexExpr:
-				e = x.X
-			case *ast.StarExpr:
-				e = x.X
-			case *ast.ParenExpr:
-				e = x.X
-			default:
-				return "", false
-			}
-		}
-	}
-	// lit checks a composite literal of type typ, and its elided ones.
-	var lit func(c *ast.CompositeLit, typ ast.Expr)
-	lit = func(c *ast.CompositeLit, typ ast.Expr) {
-		r := resolve(typ)
-		keyed := false
-		for _, e := range c.Elts {
-			if kv, ok := e.(*ast.KeyValueExpr); ok {
-				keyed = true
-				if id, ok := kv.Key.(*ast.Ident); ok && fields[id.Name] {
-					at(kv, "sets "+id.Name+", a configuredFields field, here")
-				}
-			}
-		}
-		if !keyed && len(c.Elts) > 0 && hasField(r) {
-			at(c, "sets a configuredFields field by position here")
-		}
-		var elt, key ast.Expr
-		switch x := r.(type) {
-		case *ast.ArrayType:
-			elt = x.Elt
-		case *ast.MapType:
-			elt, key = x.Value, x.Key
-		case nil:
-		default:
-			return // a struct's elements, or an imported type's, name their types
-		}
-		elided := func(e, t ast.Expr) {
-			if u, ok := e.(*ast.UnaryExpr); ok && u.Op == token.AND {
-				e = u.X
-			}
-			if st, ok := t.(*ast.StarExpr); ok {
-				t = st.X
-			}
-			if cl, ok := e.(*ast.CompositeLit); ok && cl.Type == nil {
-				lit(cl, t)
-			}
-		}
-		for _, e := range c.Elts {
-			if kv, ok := e.(*ast.KeyValueExpr); ok {
-				elided(kv.Key, key)
-				e = kv.Value
-			}
-			elided(e, elt)
-		}
-	}
-	// The package's functions ("h", or "T.m" by receiver type name),
-	// package-level vars' types, and generic functions by name.
-	funcs := map[string]*ast.FuncDecl{}
-	for _, f := range fs {
-		for _, d := range f.Decls {
-			switch d := d.(type) {
+			switch x := n.(type) {
 			case *ast.FuncDecl:
-				name := d.Name.Name
-				if d.Recv != nil && len(d.Recv.List) == 1 {
-					name = recvName(d.Recv.List[0].Type) + "." + name
-				}
-				funcs[name] = d
+				sigs = append(sigs, info.Defs[x.Name].Type().(*types.Signature))
+			case *ast.FuncLit:
+				sigs = append(sigs, info.Types[x].Type.(*types.Signature))
+			case *ast.ReturnStmt:
+				sigOf[x] = sigs[len(sigs)-1]
 			}
-		}
-	}
-	strip := func(e ast.Expr) ast.Expr {
-		if st, ok := e.(*ast.StarExpr); ok {
-			return st.X
-		}
-		return e
-	}
-	// opaque reports a type that may hold a listed field where syntax
-	// cannot see it: an interface, which may hold any value, a type
-	// parameter's, an imported type's, or one holding any of those.
-	var opaque func(e ast.Expr, seen map[string]bool) bool
-	opaque = func(e ast.Expr, seen map[string]bool) bool {
-		if id, ok := e.(*ast.Ident); ok {
-			if seen[id.Name] {
-				return false
-			}
-			seen[id.Name] = true
-		}
-		switch x := resolve(e).(type) {
-		case nil, *ast.InterfaceType, *ast.SelectorExpr, *ast.FuncType:
-			return true
-		case *ast.Ident:
-			return x.Name == "any" || x.Name == "error"
-		case *ast.StarExpr:
-			return opaque(x.X, seen)
-		case *ast.ArrayType:
-			return opaque(x.Elt, seen)
-		case *ast.MapType:
-			return opaque(x.Key, seen) || opaque(x.Value, seen)
-		case *ast.ChanType:
-			return opaque(x.Value, seen)
-		case *ast.StructType:
-			for _, fl := range x.Fields.List {
-				if opaque(fl.Type, seen) {
-					return true
-				}
-			}
-		}
-		return false
-	}
-	// typeParam is the generic function whose type parameter e names.
-	typeParam := func(e ast.Expr) (*ast.FuncDecl, string) {
-		id, ok := e.(*ast.Ident)
-		if !ok || id.Obj == nil || !isTypeParam(id.Obj) {
-			return nil, ""
-		}
-		for _, fd := range funcs {
-			if fd.Type.TypeParams == nil {
-				continue
-			}
-			for _, fl := range fd.Type.TypeParams.List {
-				for _, nm := range fl.Names {
-					if nm.Obj == id.Obj {
-						return fd, nm.Name
-					}
-				}
-			}
-		}
-		return nil, ""
-	}
-	// Writers in the package's imports: a standard decoder (writerFuncs,
-	// or a writerMethods name on any value), or a function or method of
-	// another package of this module whose parameter is an interface or a
-	// type parameter, so it could hand the value to one. A third-party
-	// import, which this lint does not read, is refused instead.
-	modWriters := map[string]map[int]bool{} // "path.F" or ".M" -> parameter index
-	root, inTree := strings.CutSuffix(filepath.ToSlash(dir), "/"+rel)
-	readMod := func(imp string) {
-		if !inTree || modWriters[imp+"."] != nil {
-			return
-		}
-		modWriters[imp+"."] = map[int]bool{}
-		files, _ := filepath.Glob(filepath.Join(root, strings.TrimPrefix(imp, module), "*.go"))
-		for _, p := range files {
-			if strings.HasSuffix(p, "_test.go") {
-				continue
-			}
-			mf, err := parser.ParseFile(token.NewFileSet(), p, nil, 0)
-			if err != nil {
-				continue
-			}
-			for _, d := range mf.Decls {
-				fd, ok := d.(*ast.FuncDecl)
-				if !ok || !ast.IsExported(fd.Name.Name) {
-					continue
-				}
-				key := imp + "." + fd.Name.Name
-				if fd.Recv != nil {
-					key = "." + fd.Name.Name
-				}
-				i := 0
-				for _, fl := range fd.Type.Params.List {
-					t := fl.Type
-					el, variadic := t.(*ast.Ellipsis)
-					if variadic {
-						t = el.Elt
-					}
-					it := false
-					switch x := strip(t).(type) {
-					case *ast.InterfaceType:
-						it = true
-					case *ast.Ident:
-						it = x.Name == "any" || x.Obj != nil && isTypeParam(x.Obj)
-					}
-					for range max(1, len(fl.Names)) {
-						if it {
-							if modWriters[key] == nil {
-								modWriters[key] = map[int]bool{}
-							}
-							// -1 marks a variadic one: every argument
-							// from its index on.
-							modWriters[key][i], modWriters[key][-1] = true, modWriters[key][-1] || variadic
-						}
-						i++
-					}
-				}
-			}
-		}
-	}
-	decoders := map[*ast.FuncDecl]map[string]bool{} // generics that decode into a type parameter
-	// pkgWriters are this package's functions ("h", or any method ".m")
-	// that hand a parameter of interface type to a writer, by index; a
-	// call to one hands its argument to that writer (fixed point below).
-	pkgWriters := map[string]map[int]bool{}
-	// fresh is the type T of a writer's target a, in call c, that is a
-	// fresh zero value: new(T), &T{}, &x for `var x T`, `x := T{}` or a
-	// named result x of type T, or x for `x := new(T)` or `x := &T{}`.
-	// Nothing may write x, take its address, call a method on it or (for
-	// a pointer x) hand it on before the decode: every such use comes
-	// after c, outside any loop that holds c but not x's declaration, in
-	// a file with no goto. A zero value's interfaces are nil, so a decoder
-	// can fill it only with values it makes.
-	fresh := func(a ast.Expr, c *ast.CallExpr, f *ast.File) ast.Expr {
-		for {
-			p, ok := a.(*ast.ParenExpr)
-			if !ok {
-				break
-			}
-			a = p.X
-		}
-		empty := func(e ast.Expr, ptr bool) ast.Expr {
-			if ptr {
-				if c, ok := e.(*ast.CallExpr); ok && len(c.Args) == 1 {
-					if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "new" && id.Obj == nil {
-						return c.Args[0]
-					}
-				}
-				u, ok := e.(*ast.UnaryExpr)
-				if !ok || u.Op != token.AND {
-					return nil
-				}
-				e = u.X
-			}
-			if c, ok := e.(*ast.CompositeLit); ok && len(c.Elts) == 0 {
-				return c.Type
-			}
-			return nil
-		}
-		if t := empty(a, true); t != nil {
-			return t
-		}
-		var x *ast.Ident
-		ptr := false
-		if u, ok := a.(*ast.UnaryExpr); ok && u.Op == token.AND {
-			x, _ = u.X.(*ast.Ident)
-		} else {
-			x, _ = a.(*ast.Ident)
-			ptr = true
-		}
-		if x == nil || x.Obj == nil || x.Obj.Kind != ast.Var {
-			return nil
-		}
-		var typ ast.Expr
-		var declAt ast.Node
-		switch d := x.Obj.Decl.(type) {
-		case *ast.ValueSpec:
-			declAt = d
-			if len(d.Names) != 1 {
-				return nil
-			}
-			if len(d.Values) == 0 && !ptr {
-				typ = d.Type
-			} else if len(d.Values) == 1 && d.Type == nil {
-				typ = empty(d.Values[0], ptr)
-			}
-		case *ast.AssignStmt:
-			declAt = d
-			if d.Tok == token.DEFINE && len(d.Lhs) == 1 && len(d.Rhs) == 1 {
-				typ = empty(d.Rhs[0], ptr)
-			}
-		case *ast.Field:
-			// A named result, zero when its function starts.
-			ast.Inspect(f, func(n ast.Node) bool {
-				if ft, ok := n.(*ast.FuncType); ok && ft.Results != nil && slices.Contains(ft.Results.List, d) && len(d.Names) == 1 && !ptr {
-					typ, declAt = d.Type, d
-				}
-				return true
-			})
-		}
-		if typ == nil {
-			return nil
-		}
-		risky := map[ast.Node]bool{}
-		var loops []ast.Node
-		ok := true
-		ast.Inspect(f, func(n ast.Node) bool {
-			switch n := n.(type) {
-			case *ast.BranchStmt:
-				ok = ok && n.Tok != token.GOTO
-			case *ast.ForStmt, *ast.RangeStmt:
-				loops = append(loops, n)
-			}
-			switch n := n.(type) {
-			case *ast.AssignStmt:
-				for _, l := range n.Lhs {
-					risky[baseIdent(l)] = true
-				}
-			case *ast.IncDecStmt:
-				risky[baseIdent(n.X)] = true
-			case *ast.RangeStmt:
-				if n.Tok == token.ASSIGN {
-					risky[baseIdent(n.Key)], risky[baseIdent(n.Value)] = true, true
-				}
-			case *ast.CallExpr:
-				if se, isSel := n.Fun.(*ast.SelectorExpr); isSel {
-					risky[baseIdent(se.X)] = true // a method may store through x
-				}
-			case *ast.UnaryExpr:
-				if n.Op == token.AND {
-					risky[baseIdent(n.X)] = true
-				}
-			case *ast.SelectorExpr:
-				if _, seen := risky[n.X]; !seen {
-					risky[n.X] = false
-				}
-			}
+			stack = append(stack, n)
 			return true
 		})
-		within := func(outer, n ast.Node) bool { return outer.Pos() <= n.Pos() && n.End() <= outer.End() }
-		ast.Inspect(f, func(n ast.Node) bool {
-			id, isID := n.(*ast.Ident)
-			if !isID || id.Obj != x.Obj || id == x {
-				return true
-			}
-			if within(declAt, id) {
-				return true
-			}
-			// A read: a field through x, or (for a value x) x whole.
-			if r, isSel := risky[id]; !r && (isSel || !ptr) {
-				return true
-			}
-			if id.Pos() < c.End() {
-				ok = false
-			}
-			for _, l := range loops {
-				if within(l, c) && within(l, id) && !within(l, declAt) {
-					ok = false
-				}
-			}
-			return true
-		})
-		if !ok {
-			return nil
-		}
-		return typ
 	}
-	// target checks a value a writer may store through, and reports
-	// whether it made its own function a writer. It passes only nil, a
-	// fresh zero value of a type that holds no listed field, or a parameter of
-	// interface type that nothing here writes (its function becomes a
-	// writer, whose callers are checked the same way); anything else is
-	// reported.
-	target := func(c *ast.CallExpr, a ast.Expr, f *ast.File, what string) bool {
-		if id, ok := a.(*ast.Ident); ok && id.Name == "nil" && id.Obj == nil {
-			return false // a decoder stores nothing through nil
+	// into reports v, of a type that holds a slot, going to a place of
+	// type to: an interface or a type parameter could hand it on.
+	into := func(v ast.Node, from, to types.Type) {
+		if to != nil && types.IsInterface(to) && exposed(from) {
+			at(v, "hands "+name(from)+", which reaches a configuredFields field, to "+name(to))
 		}
-		if t := fresh(a, c, f); t != nil {
-			if fd, name := typeParam(t); fd != nil {
-				if decoders[fd] == nil {
-					decoders[fd] = map[string]bool{}
-				}
-				decoders[fd][name] = true
-				return false
-			}
-			if !holds(t, map[string]bool{}) {
-				return false
-			}
-		}
-		if id, ok := a.(*ast.Ident); ok && id.Obj != nil && !written(id.Obj, f) {
-			for key, fd := range funcs {
-				for i, p := range flatNames(fd.Type.Params) {
-					if p == nil || p.Obj != id.Obj {
-						continue
-					}
-					switch pt := flatTypes(fd.Type.Params)[i].(type) {
-					case *ast.InterfaceType:
-					case *ast.Ident:
-						if pt.Name != "any" {
-							continue
-						}
-					default:
-						continue
-					}
-					if fd.Recv != nil {
-						key = "." + fd.Name.Name
-					}
-					if pkgWriters[key] == nil {
-						pkgWriters[key] = map[int]bool{}
-					}
-					grew := !pkgWriters[key][i]
-					pkgWriters[key][i] = true
-					return grew
-				}
-			}
-		}
-		at(c, what+" may store into a configuredFields field: its target is not a fresh zero value of a type holding none")
-		return false
 	}
-	// call checks one call's arguments, and reports whether pkgWriters
-	// grew.
-	call := func(n *ast.CallExpr, f *ast.File) bool {
-		imp, local := imports(f)
-		from, writes, what := 0, false, ""
-		var idx, own map[int]bool
-		switch fn := n.Fun.(type) {
-		case *ast.Ident:
-			if fn.Obj == nil || funcs[fn.Name] != nil && fn.Obj.Decl == funcs[fn.Name] {
-				own, what = pkgWriters[fn.Name], fn.Name
-			}
-		case *ast.SelectorExpr:
-			if id, ok := fn.X.(*ast.Ident); ok && id.Obj == nil && imp[id.Name] {
-				full := local[id.Name] + "." + fn.Sel.Name
-				from, writes = writerFuncs[full]
-				if strings.HasPrefix(local[id.Name], module) {
-					readMod(local[id.Name])
-					idx = modWriters[full]
+	// spread checks a value list against the places it goes, a single
+	// multi-value call included.
+	spread := func(vals []ast.Expr, to func(int) types.Type) {
+		if len(vals) == 1 {
+			if tu, ok := info.TypeOf(vals[0]).(*types.Tuple); ok {
+				for i := range tu.Len() {
+					into(vals[0], tu.At(i).Type(), to(i))
 				}
-				what = full
-			} else {
-				from, writes = writerMethods[fn.Sel.Name]
-				idx, own, what = modWriters["."+fn.Sel.Name], pkgWriters["."+fn.Sel.Name], fn.Sel.Name
+				return
 			}
 		}
-		grew := false
-		for i, a := range n.Args {
-			if writes && i >= from || idx[i] || idx[-1] && i >= last(idx) || own[i] {
-				grew = target(n, a, f, what) || grew
-			}
+		for i, v := range vals {
+			into(v, info.TypeOf(v), to(i))
 		}
-		var targs []ast.Expr
-		switch x := n.Fun.(type) {
+	}
+	// use checks where e, whose type holds a slot, goes.
+	use := func(e ast.Expr) {
+		p := parent[e]
+		for pe, ok := p.(*ast.ParenExpr); ok; pe, ok = p.(*ast.ParenExpr) {
+			e, p = pe, parent[pe]
+		}
+		switch p := p.(type) {
+		case *ast.SelectorExpr, *ast.StarExpr, *ast.UnaryExpr, *ast.BinaryExpr, *ast.SliceExpr, *ast.TypeAssertExpr,
+			*ast.ExprStmt, *ast.IncDecStmt, *ast.SwitchStmt, *ast.CaseClause, *ast.IndexListExpr:
+			return // read in place, compared, or written whole
 		case *ast.IndexExpr:
-			targs = []ast.Expr{x.Index}
-		case *ast.IndexListExpr:
-			targs = x.Indices
-		}
-		for _, ta := range targs {
-			if holds(ta, map[string]bool{}) {
-				at(n, "instantiates a generic with a type that holds a configuredFields field")
-			}
-		}
-		return grew
-	}
-	for _, f := range fs {
-		for _, im := range f.Imports {
-			if im.Path.Value == `"reflect"` {
-				at(im, "imports reflect, which can store into a configuredFields field")
-			}
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			var targets []ast.Expr
-			switch n := n.(type) {
-			case *ast.AssignStmt:
-				targets = n.Lhs
-			case *ast.RangeStmt:
-				targets = []ast.Expr{n.Key, n.Value}
-			case *ast.IncDecStmt:
-				targets = []ast.Expr{n.X}
-			case *ast.UnaryExpr:
-				if n.Op == token.AND {
-					targets = []ast.Expr{n.X}
-				}
-			case *ast.CompositeLit:
-				if n.Type != nil {
-					lit(n, n.Type)
+			if e == p.Index {
+				if m, ok := info.TypeOf(p.X).Underlying().(*types.Map); ok {
+					into(e, info.TypeOf(e), m.Key())
 				}
 			}
-			for _, e := range targets {
-				if e == nil {
-					continue
-				}
-				if name, ok := stores(e); ok {
-					at(e, "stores into "+name+", a configuredFields field")
-				}
+			return
+		case *ast.CallExpr:
+			if e == p.Fun {
+				return
 			}
-			return true
-		})
-	}
-	for grew := true; grew; {
-		grew = false
-		for _, f := range fs {
-			ast.Inspect(f, func(n ast.Node) bool {
-				if c, ok := n.(*ast.CallExpr); ok && call(c, f) {
-					grew = true
-				}
-				return true
-			})
-		}
-	}
-	// A generic that decodes into its type parameter: each use must
-	// instantiate it, explicitly or through a function literal's
-	// parameter, with a type that holds no listed field.
-	for _, f := range fs {
-		imp, local := imports(f)
-		called := map[ast.Node]bool{}
-		ast.Inspect(f, func(n ast.Node) bool {
-			c, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
+			fun := ast.Unparen(p.Fun)
+			if tv := info.Types[fun]; tv.IsType() {
+				into(e, info.TypeOf(e), tv.Type)
+				return
 			}
-			fun := c.Fun
 			if ix, ok := fun.(*ast.IndexExpr); ok {
 				fun = ix.X
 			} else if ix, ok := fun.(*ast.IndexListExpr); ok {
 				fun = ix.X
 			}
-			called[fun] = true
-			id, ok := fun.(*ast.Ident)
-			if !ok || funcs[id.Name] == nil || decoders[funcs[id.Name]] == nil || fun != c.Fun || id.Obj != nil && id.Obj.Decl != funcs[id.Name] {
-				return true // explicit instantiations are checked in call
+			var obj types.Object
+			switch f := fun.(type) {
+			case *ast.Ident:
+				obj = info.Uses[f]
+			case *ast.SelectorExpr:
+				obj = info.Uses[f.Sel]
 			}
-			fd := funcs[id.Name]
-			bound := map[string]ast.Expr{}
-			var bind func(g, a ast.Expr)
-			bind = func(g, a ast.Expr) {
-				if a == nil {
+			if fn, ok := obj.(*types.Func); ok && fn.Pkg() != pkg {
+				if !exposed(info.TypeOf(e)) || handOK[rel][fn.FullName()] != "" {
 					return
 				}
-				switch g := g.(type) {
-				case *ast.Ident:
-					if decoders[fd][g.Name] && bound[g.Name] == nil {
-						bound[g.Name] = a
+				at(e, "hands "+name(info.TypeOf(e))+", which reaches a configuredFields field, to "+fn.FullName()+" outside the package")
+				return
+			}
+			sig := info.TypeOf(p.Fun).Underlying().(*types.Signature)
+			spread(p.Args, func(i int) types.Type {
+				n := sig.Params().Len()
+				if sig.Variadic() && i >= n-1 {
+					if p.Ellipsis.IsValid() {
+						return sig.Params().At(n - 1).Type()
 					}
-				case *ast.StarExpr:
-					if a, ok := a.(*ast.StarExpr); ok {
-						bind(g.X, a.X)
+					return sig.Params().At(n - 1).Type().(*types.Slice).Elem()
+				}
+				if i < n {
+					return sig.Params().At(i).Type()
+				}
+				return nil
+			})
+			return
+		case *ast.AssignStmt:
+			if slices.Contains(p.Lhs, e) {
+				return
+			}
+			spread(p.Rhs, func(i int) types.Type { return info.TypeOf(p.Lhs[i]) })
+			return
+		case *ast.ValueSpec:
+			spread(p.Values, func(i int) types.Type { return info.Defs[p.Names[i]].Type() })
+			return
+		case *ast.ReturnStmt:
+			sig := sigOf[p]
+			spread(p.Results, func(i int) types.Type { return sig.Results().At(i).Type() })
+			return
+		case *ast.CompositeLit:
+			i := slices.Index(p.Elts, e)
+			switch u := litType(info.TypeOf(p)).(type) {
+			case *types.Struct:
+				into(e, info.TypeOf(e), u.Field(i).Type())
+			case *types.Slice:
+				into(e, info.TypeOf(e), u.Elem())
+			case *types.Array:
+				into(e, info.TypeOf(e), u.Elem())
+			}
+			return
+		case *ast.KeyValueExpr:
+			switch u := litType(info.TypeOf(parent[p].(*ast.CompositeLit))).(type) {
+			case *types.Struct:
+				for i := range u.NumFields() {
+					if k, ok := p.Key.(*ast.Ident); ok && e == p.Value && u.Field(i).Name() == k.Name {
+						into(e, info.TypeOf(e), u.Field(i).Type())
 					}
-				case *ast.ArrayType:
-					if a, ok := resolve(a).(*ast.ArrayType); ok {
-						bind(g.Elt, a.Elt)
-					}
-				case *ast.MapType:
-					if a, ok := resolve(a).(*ast.MapType); ok {
-						bind(g.Key, a.Key)
-						bind(g.Value, a.Value)
-					}
-				case *ast.FuncType:
-					a, ok := a.(*ast.FuncType)
-					if !ok {
-						return
-					}
-					gp, ap := flatTypes(g.Params), flatTypes(a.Params)
-					for i := range min(len(gp), len(ap)) {
-						bind(gp[i], ap[i])
-					}
-					gr, ar := flatTypes(g.Results), flatTypes(a.Results)
-					for i := range min(len(gr), len(ar)) {
-						bind(gr[i], ar[i])
+				}
+			case *types.Slice:
+				into(e, info.TypeOf(e), u.Elem())
+			case *types.Array:
+				into(e, info.TypeOf(e), u.Elem())
+			case *types.Map:
+				if e == p.Key {
+					into(e, info.TypeOf(e), u.Key())
+				} else {
+					into(e, info.TypeOf(e), u.Elem())
+				}
+			}
+			return
+		case *ast.SendStmt:
+			if e == p.Value {
+				into(e, info.TypeOf(e), coreType(info.TypeOf(p.Chan)).(*types.Chan).Elem())
+			}
+			return
+		case *ast.RangeStmt:
+			if e == p.X && p.Tok == token.ASSIGN {
+				k, v := rangeTypes(info.TypeOf(e))
+				for _, x := range [][2]any{{p.Key, k}, {p.Value, v}} {
+					if l, _ := x[0].(ast.Expr); l != nil && x[1] != nil {
+						into(e, x[1].(types.Type), info.TypeOf(l))
 					}
 				}
 			}
-			// Only a function literal's or a package function's
-			// signature binds a type parameter here.
-			ps := flatTypes(fd.Type.Params)
-			for i, a := range c.Args {
-				if i >= len(ps) {
-					break
-				}
-				switch a := a.(type) {
-				case *ast.FuncLit:
-					bind(ps[i], a.Type)
-				case *ast.Ident:
-					if g := funcs[a.Name]; g != nil && (a.Obj == nil || a.Obj.Decl == g) {
-						bind(ps[i], g.Type)
-					}
-				}
+			return
+		case *ast.GoStmt, *ast.DeferStmt:
+			return
+		}
+		at(e, "a "+name(info.TypeOf(e))+", which reaches a configuredFields field, goes where the lint cannot check")
+	}
+	for e, tv := range info.Types {
+		if tv.IsValue() && exposed(tv.Type) {
+			use(e)
+		}
+	}
+	for id, inst := range info.Instances {
+		if fn, ok := info.Uses[id].(*types.Func); ok && handOK[rel][fn.FullName()] != "" {
+			continue
+		}
+		for i := range inst.TypeArgs.Len() {
+			if ta := inst.TypeArgs.At(i); holds(ta) {
+				at(id, "instantiates "+id.Name+" with "+name(ta)+", which reaches a configuredFields field")
 			}
-			for name := range decoders[fd] {
-				if b := bound[name]; b == nil || holds(b, map[string]bool{}) {
-					at(c, fd.Name.Name+" decodes into its type parameter "+name+", which the lint cannot show holds no configuredFields field")
-				}
-			}
-			return true
-		})
-		// A decoding generic or a writer of the package taken as a value
-		// escapes both checks.
-		named := map[ast.Node]bool{}
+		}
+	}
+	// Stores into a slot, literals that set one, and values taken out of
+	// an interface as a type that reaches one: another package's code may
+	// have made them, from a copy it was handed (#6028).
+	for _, f := range fs {
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch n := n.(type) {
-			case *ast.FuncDecl:
-				named[n.Name] = true
-			case *ast.SelectorExpr:
-				named[n.Sel] = true
-				if called[n] {
-					return true
+			case *ast.TypeAssertExpr:
+				if n.Type != nil && holds(info.TypeOf(n.Type)) {
+					at(n, "takes a "+name(info.TypeOf(n.Type))+", which reaches a configuredFields field, out of an interface")
 				}
-				if id, ok := n.X.(*ast.Ident); ok && id.Obj == nil && imp[id.Name] {
-					full := local[id.Name] + "." + n.Sel.Name
-					if _, w := writerFuncs[full]; w || len(modWriters[full]) > 0 {
-						at(n, full+", a writer, used as a value")
+			case *ast.TypeSwitchStmt:
+				for _, cc := range n.Body.List {
+					for _, e := range cc.(*ast.CaseClause).List {
+						if holds(info.TypeOf(e)) {
+							at(e, "takes a "+name(info.TypeOf(e))+", which reaches a configuredFields field, out of an interface")
+						}
 					}
+				}
+			case *ast.SelectorExpr:
+				sel := info.Selections[n]
+				if sel == nil || sel.Kind() != types.FieldVal {
 					return true
 				}
-				if _, w := writerMethods[n.Sel.Name]; w || len(modWriters["."+n.Sel.Name]) > 0 || len(pkgWriters["."+n.Sel.Name]) > 0 {
-					at(n, n.Sel.Name+", a writer, used as a value")
+				st, idx := structOf(sel.Recv()), sel.Index()
+				for _, i := range idx[:len(idx)-1] {
+					st = structOf(st.Field(i).Type())
 				}
-			case *ast.Ident:
-				fd := funcs[n.Name]
-				if named[n] || called[n] || fd == nil || n.Obj != nil && n.Obj.Decl != fd {
+				if !listed(st)[idx[len(idx)-1]] {
 					return true
 				}
-				if decoders[fd] != nil {
-					at(n, n.Name+", a generic that decodes into its type parameter, used as a value")
+				var e ast.Node = n
+				p := parent[e]
+				for pe, ok := p.(*ast.ParenExpr); ok; pe, ok = p.(*ast.ParenExpr) {
+					e, p = pe, parent[pe]
 				}
-				if len(pkgWriters[n.Name]) > 0 {
-					at(n, n.Name+", which hands its argument to a writer, used as a value")
+				write := false
+				switch p := p.(type) {
+				case *ast.AssignStmt:
+					write = slices.Contains(p.Lhs, e.(ast.Expr))
+				case *ast.UnaryExpr:
+					write = p.Op == token.AND
+				case *ast.IncDecStmt:
+					write = true
+				case *ast.RangeStmt:
+					write = e == p.Key || e == p.Value
+				}
+				if write {
+					at(n, "stores into "+n.Sel.Name+", a configuredFields field")
+				}
+			case *ast.CompositeLit:
+				st, _ := litType(info.TypeOf(n)).(*types.Struct)
+				slotsHere := listed(st)
+				for i, el := range n.Elts {
+					kv, ok := el.(*ast.KeyValueExpr)
+					if !ok {
+						if slotsHere[i] {
+							at(n, "sets a configuredFields field by position here")
+						}
+						continue
+					}
+					if k, isID := kv.Key.(*ast.Ident); isID {
+						for j := range slotsHere {
+							if st.Field(j).Name() == k.Name {
+								at(n, "sets "+k.Name+", a configuredFields field, here")
+							}
+						}
+					}
 				}
 			}
 			return true
 		})
+	}
+}
+
+// handOK are the functions of other packages (by go/types full name)
+// that a listed package may hand a value reaching a configuredFields
+// field, or instantiate with its type, by package, and why each stores
+// nothing into it: a claim a reviewer accepts, as configuredFields'
+// entries are.
+var handOK = map[string]map[string]string{
+	"kernel/proc": {
+		"maps.Keys":             "ranges over a map's keys; writes nothing (kernelmain.go, the clerk names)",
+		module + "backup.Write": "only calls its Target's methods (*pendingPut's PutTable and the rest); backup imports no reflect or unsafe, and decodes only into its own manifest and table types",
+	},
+}
+
+// structOf is the struct a field selection steps through: t's, or its
+// pointee's, or its type parameter's core type's.
+func structOf(t types.Type) *types.Struct {
+	if p, ok := types.Unalias(t).Underlying().(*types.Pointer); ok {
+		t = p.Elem()
+	}
+	st, _ := coreType(t).(*types.Struct)
+	return st
+}
+
+// litType is a composite literal's core type; go/types gives an elided
+// &T{} element the type *T.
+func litType(t types.Type) types.Type {
+	if p, ok := coreType(t).(*types.Pointer); ok {
+		return coreType(p.Elem())
+	}
+	return coreType(t)
+}
+
+// coreType is t's underlying type, or a type parameter's single one.
+func coreType(t types.Type) types.Type {
+	tp, ok := types.Unalias(t).(*types.TypeParam)
+	if !ok {
+		return types.Unalias(t).Underlying()
+	}
+	var core types.Type
+	iface := tp.Constraint().Underlying().(*types.Interface)
+	for i := range iface.NumEmbeddeds() {
+		var terms []*types.Term
+		switch e := iface.EmbeddedType(i).(type) {
+		case *types.Union:
+			for j := range e.Len() {
+				terms = append(terms, e.Term(j))
+			}
+		default:
+			terms = append(terms, types.NewTerm(false, e))
+		}
+		for _, term := range terms {
+			if u := term.Type().Underlying(); core == nil {
+				core = u
+			} else if !types.Identical(core, u) {
+				return nil
+			}
+		}
+	}
+	return core
+}
+
+// rangeTypes are a range clause's key and value types over t.
+func rangeTypes(t types.Type) (k, v types.Type) {
+	switch u := coreType(t).(type) {
+	case *types.Slice:
+		return types.Typ[types.Int], u.Elem()
+	case *types.Array:
+		return types.Typ[types.Int], u.Elem()
+	case *types.Pointer:
+		if a, ok := u.Elem().Underlying().(*types.Array); ok {
+			return types.Typ[types.Int], a.Elem()
+		}
+	case *types.Map:
+		return u.Key(), u.Elem()
+	case *types.Chan:
+		return u.Elem(), nil
+	case *types.Signature:
+		if u.Params().Len() == 1 {
+			yield := u.Params().At(0).Type().Underlying().(*types.Signature)
+			if yield.Params().Len() > 0 {
+				k = yield.Params().At(0).Type()
+			}
+			if yield.Params().Len() > 1 {
+				v = yield.Params().At(1).Type()
+			}
+		}
+	}
+	return k, v
+}
+
+// exports maps an import path to its export data file, from go list.
+var exports sync.Map
+
+// exportData is the lookup go/importer's gc importer reads fs's imports
+// (and theirs) through: the export data go list -export builds for them.
+func exportData(t *testing.T, fs []*ast.File) func(string) (io.ReadCloser, error) {
+	t.Helper()
+	var need []string
+	for _, f := range fs {
 		for _, im := range f.Imports {
 			p, _ := strconv.Unquote(im.Path.Value)
-			if im.Name != nil && im.Name.Name == "." {
-				at(im, "dot-imports "+p+", whose writers the lint would not see")
-			}
-			if strings.Contains(strings.SplitN(p, "/", 2)[0], ".") && !strings.HasPrefix(p, module) && p != "golang.org/x/sys/unix" {
-				at(im, "imports "+p+", a third-party package the lint does not read, which could store into a configuredFields field")
+			if _, ok := exports.Load(p); !ok && p != "unsafe" && !slices.Contains(need, p) {
+				need = append(need, p)
 			}
 		}
 	}
-}
-
-// writerFuncs are the standard functions that store, by reflection,
-// through the arguments from the given index on.
-var writerFuncs = map[string]int{
-	"encoding/json.Unmarshal": 1, "encoding/xml.Unmarshal": 1, "encoding/asn1.Unmarshal": 1, "encoding/asn1.UnmarshalWithParams": 1,
-	"encoding/binary.Read": 2, "encoding/binary.Decode": 2,
-	"fmt.Sscan": 1, "fmt.Sscanf": 2, "fmt.Sscanln": 1, "fmt.Fscan": 1, "fmt.Fscanf": 2, "fmt.Fscanln": 1, "fmt.Scan": 0, "fmt.Scanf": 1, "fmt.Scanln": 0,
-}
-
-// writerMethods are the method names of standard types that store, by
-// reflection, through their arguments (json, xml and gob decoders, sql
-// rows); a method of that name on any value counts.
-var writerMethods = map[string]int{"Decode": 0, "DecodeElement": 0, "DecodeValue": 0, "Scan": 0}
-
-// predeclared are Go's predeclared type names, for conversions.
-var predeclared = map[string]bool{
-	"bool": true, "byte": true, "rune": true, "string": true, "error": true, "any": true, "uintptr": true,
-	"int": true, "int8": true, "int16": true, "int32": true, "int64": true,
-	"uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true,
-	"float32": true, "float64": true, "complex64": true, "complex128": true,
-}
-
-// recvName is a receiver type's name, without its pointer or type
-// parameters.
-func recvName(e ast.Expr) string {
-	for {
-		switch x := e.(type) {
-		case *ast.StarExpr:
-			e = x.X
-		case *ast.IndexExpr:
-			e = x.X
-		case *ast.IndexListExpr:
-			e = x.X
-		case *ast.ParenExpr:
-			e = x.X
-		case *ast.Ident:
-			return x.Name
-		default:
-			return ""
+	if len(need) > 0 {
+		cmd := exec.Command("go", append([]string{"list", "-e", "-export", "-deps", "-f", "{{.ImportPath}}\t{{.Export}}"}, need...)...)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("go list -export: %v\n%s", err, stderr.String())
+		}
+		for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if p, file, ok := strings.Cut(l, "\t"); ok && file != "" {
+				exports.Store(p, file)
+			}
 		}
 	}
-}
-
-// flatTypes is a field list's types, one per name.
-func flatTypes(fl *ast.FieldList) []ast.Expr {
-	if fl == nil {
-		return nil
-	}
-	var ts []ast.Expr
-	for _, f := range fl.List {
-		for range max(1, len(f.Names)) {
-			ts = append(ts, f.Type)
+	return func(path string) (io.ReadCloser, error) {
+		file, ok := exports.Load(path)
+		if !ok {
+			return nil, fmt.Errorf("no export data for %s", path)
 		}
+		return os.Open(file.(string))
 	}
-	return ts
-}
-
-// last is the highest index in idx.
-func last(idx map[int]bool) int {
-	m := -1
-	for i := range idx {
-		m = max(m, i)
-	}
-	return m
 }
 
 // imports are f's import names, and the path each names.
@@ -1813,91 +1547,6 @@ func imports(f *ast.File) (map[string]bool, map[string]string) {
 		imp[nm], local[nm] = true, p
 	}
 	return imp, local
-}
-
-// flatNames is a field list's names, one per parameter (nil when
-// unnamed).
-func flatNames(fl *ast.FieldList) []*ast.Ident {
-	if fl == nil {
-		return nil
-	}
-	var ns []*ast.Ident
-	for _, f := range fl.List {
-		if len(f.Names) == 0 {
-			ns = append(ns, nil)
-		}
-		ns = append(ns, f.Names...)
-	}
-	return ns
-}
-
-// baseIdent is the variable an expression such as x.f[i] or *x starts
-// from, or nil.
-func baseIdent(e ast.Expr) ast.Node {
-	for {
-		switch x := e.(type) {
-		case *ast.SelectorExpr:
-			e = x.X
-		case *ast.IndexExpr:
-			e = x.X
-		case *ast.StarExpr:
-			e = x.X
-		case *ast.ParenExpr:
-			e = x.X
-		case *ast.SliceExpr:
-			e = x.X
-		case *ast.Ident:
-			return x
-		default:
-			return nil
-		}
-	}
-}
-
-// isTypeParam reports obj declared in a type parameter list.
-func isTypeParam(obj *ast.Object) bool {
-	_, ok := obj.Decl.(*ast.Field)
-	return ok
-}
-
-// declType is the type obj is declared with, or that its := or var
-// initializer makes plain (T{}, &T{}, new(T)); nil when neither shows it.
-func declType(obj *ast.Object) ast.Expr {
-	of := func(e ast.Expr) ast.Expr {
-		switch x := e.(type) {
-		case *ast.CompositeLit:
-			return x.Type
-		case *ast.UnaryExpr:
-			if c, ok := x.X.(*ast.CompositeLit); ok && x.Op == token.AND && c.Type != nil {
-				return &ast.StarExpr{X: c.Type}
-			}
-		case *ast.CallExpr:
-			if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "new" && len(x.Args) == 1 {
-				return &ast.StarExpr{X: x.Args[0]}
-			}
-		}
-		return nil
-	}
-	switch d := obj.Decl.(type) {
-	case *ast.Field:
-		return d.Type
-	case *ast.ValueSpec:
-		if d.Type != nil {
-			return d.Type
-		}
-		for i, nm := range d.Names {
-			if nm.Obj == obj && i < len(d.Values) && len(d.Values) == len(d.Names) {
-				return of(d.Values[i])
-			}
-		}
-	case *ast.AssignStmt:
-		for i, l := range d.Lhs {
-			if id, ok := l.(*ast.Ident); ok && id.Obj == obj && len(d.Lhs) == len(d.Rhs) {
-				return of(d.Rhs[i])
-			}
-		}
-	}
-	return nil
 }
 
 // linkCalls are the calls that make, move or replace a directory entry,
@@ -2200,12 +1849,12 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		// A decoder or reflect filling the listed field: a pointer to a
 		// type that holds it handed to a call, however the value was made
 		// (Lens on #6030), or a generic instantiated with such a type.
-		{"modelroute", "imports reflect", []string{src(`"net"; "reflect"`, cfgDial+`func g(c *Config) { reflect.ValueOf(c).Elem().Field(0).SetString("/run/proxy.sock"); c.dial() }`)}},
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(c *Config) { json.Unmarshal([]byte(`+"`"+`{"Socket":"/run/proxy.sock"}`+"`"+`), c); c.dial() }`)}},
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte) { var d Config; json.Unmarshal(b, &d); d.dial() }`)}},
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte) { d := new(Config); json.Unmarshal(b, d); d.dial() }`)}},
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type outer struct{ In []Config }; func g(b []byte) { var o outer; json.Unmarshal(b, &o); o.In[0].dial() }`)}},
-		{"modelroute", "instantiates a generic", []string{src(`"net"; "encoding/json"`, cfgDial+`func dec[T any](b []byte) (t T) { json.Unmarshal(b, &t); return }; func g(b []byte) { c := dec[Config](b); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "reflect"`, cfgDial+`func g(c *Config) { reflect.ValueOf(c).Elem().Field(0).SetString("/run/proxy.sock"); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(c *Config) { json.Unmarshal([]byte(`+"`"+`{"Socket":"/run/proxy.sock"}`+"`"+`), c); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte) { var d Config; json.Unmarshal(b, &d); d.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte) { d := new(Config); json.Unmarshal(b, d); d.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type outer struct{ In []Config }; func g(b []byte) { var o outer; json.Unmarshal(b, &o); o.In[0].dial() }`)}},
+		{"modelroute", "instantiates dec with Config", []string{src(`"net"; "encoding/json"`, cfgDial+`func dec[T any](b []byte) (t T) { json.Unmarshal(b, &t); return }; func g(b []byte) { c := dec[Config](b); c.dial() }`)}},
 		// A link or rename that could put another socket at the dialed
 		// path or its directory, in a package that dials, called or taken
 		// as a value (Security 4 on #6035).
@@ -2220,38 +1869,65 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		{"kernel/proc", "links or renames (os.Symlink)", []string{src(`"net"`, `type Conn struct{ Socket string }; func (c *Conn) dial() { net.Dial("unix", c.Socket) }`), src(`"os"`, `func g(s string) { os.Symlink("/run/proxy.sock", s) }`)}},
 		// A writer's target the lint cannot show holds no listed field,
 		// however it is reached (B1 on #6119).
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func get() *Config { return nil }; func g(b []byte) { c := get(); json.Unmarshal(b, c); c.dial() }`)}},
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ C Config }; func g(b []byte, w *W) { json.Unmarshal(b, &w.C); w.C.dial() }`)}},
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte, l []Config) { json.Unmarshal(b, &l[0]); l[0].dial() }`)}},
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func get() *Config { return nil }; func g(b []byte) { json.Unmarshal(b, get()) }`)}},
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte, c *Config) { var v any = c; json.Unmarshal(b, v); c.dial() }`)}},
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte, x interface{ Get() *Config }) { json.Unmarshal(b, x.Get()); x.Get().dial() }`)}},
-		{"modelroute", "Decode may store into a configuredFields field", []string{src(`"net"; "encoding/json"; "io"`, cfgDial+`func g(r io.Reader, c *Config) { json.NewDecoder(r).Decode(c); c.dial() }`)}},
-		{"modelroute", "fmt.Sscan may store into a configuredFields field", []string{src(`"net"; "fmt"`, cfgDial+`func g(c *Config) { fmt.Sscan("/run/proxy.sock", c); c.dial() }`)}},
-		{"modelroute", "load may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func load(b []byte, out any) { json.Unmarshal(b, out) }; func g(b []byte, c *Config) { load(b, c); c.dial() }`)}},
-		{"modelroute", "load may store into a configuredFields field", []string{src(`"net"`, cfgDial+`func g(b []byte, c *Config) { load(b, c); c.dial() }`), src(`"encoding/json"`, `func load(b []byte, out any) { json.Unmarshal(b, out) }`)}},
-		{"modelroute", "load, which hands its argument to a writer, used as a value", []string{src(`"net"; "encoding/json"`, cfgDial+`func load(b []byte, out any) { json.Unmarshal(b, out) }; var f = load`)}},
-		{"modelroute", "act decodes into its type parameter A", []string{src(`"net"; "encoding/json"`, cfgDial+`func act[A any](f func(a A)) func([]byte) { return func(b []byte) { var a A; json.Unmarshal(b, &a); f(a) } }; var h = act(func(c Config) { c.dial() })`)}},
-		{"modelroute", "act, a generic that decodes into its type parameter, used as a value", []string{src(`"net"; "encoding/json"`, cfgDial+`func act[A any](f func(a A)) func([]byte) { return func(b []byte) { var a A; json.Unmarshal(b, &a); f(a) } }; var h = act[Config]; var k = act`)}},
-		{"modelroute", "imports example.com/fill, a third-party package", []string{src(`"net"; "example.com/fill"`, cfgDial+`func g(c *Config) { fill.In(c); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func get() *Config { return nil }; func g(b []byte) { c := get(); json.Unmarshal(b, c); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ C Config }; func g(b []byte, w *W) { json.Unmarshal(b, &w.C); w.C.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte, l []Config) { json.Unmarshal(b, &l[0]); l[0].dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func get() *Config { return nil }; func g(b []byte) { json.Unmarshal(b, get()) }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte, c *Config) { var v any = c; json.Unmarshal(b, v); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte, x interface{ Get() *Config }) { json.Unmarshal(b, x.Get()); x.Get().dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"; "io"`, cfgDial+`func g(r io.Reader, c *Config) { json.NewDecoder(r).Decode(c); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "fmt"`, cfgDial+`func g(c *Config) { fmt.Sscan("/run/proxy.sock", c); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func load(b []byte, out any) { json.Unmarshal(b, out) }; func g(b []byte, c *Config) { load(b, c); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(b []byte, c *Config) { load(b, c); c.dial() }`), src(`"encoding/json"`, `func load(b []byte, out any) { json.Unmarshal(b, out) }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func load(b []byte, out any) { json.Unmarshal(b, out) }; var f = load; func g(b []byte, c *Config) { f(b, c) }`)}},
+		{"modelroute", "instantiates act with Config", []string{src(`"net"; "encoding/json"`, cfgDial+`func act[A any](f func(a A)) func([]byte) { return func(b []byte) { var a A; json.Unmarshal(b, &a); f(a) } }; var h = act(func(c Config) { c.dial() })`)}},
+		{"modelroute", "instantiates act with Config", []string{src(`"net"; "encoding/json"`, cfgDial+`func act[A any](f func(a A)) func([]byte) { return func(b []byte) { var a A; json.Unmarshal(b, &a); f(a) } }; var h = act[Config]`)}},
+		{"modelroute", "does not type-check", []string{src(`"net"; "example.com/fill"`, cfgDial+`func g(c *Config) { fill.In(c); c.dial() }`)}},
 		// A writer's target passes only as a fresh zero value of a type
 		// holding no listed field, and a writer taken as a value is
 		// reported (B1 round 2 on #6119).
-		{"modelroute", "encoding/json.Unmarshal, a writer, used as a value", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte, c *Config) { f := json.Unmarshal; f(b, c); c.dial() }`)}},
-		{"modelroute", "encoding/json.Unmarshal, a writer, used as a value", []string{src(`"net"; "encoding/json"`, cfgDial+`var dec = json.Unmarshal`)}},
-		{"modelroute", "Decode, a writer, used as a value", []string{src(`"net"; "encoding/json"; "io"`, cfgDial+`func g(r io.Reader, c *Config) { d := json.NewDecoder(r); f := d.Decode; f(c); c.dial() }`)}},
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func get() int { return 0 }; func g(b []byte, c *Config) { get := func() any { return c }; json.Unmarshal(b, get()); c.dial() }`)}},
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type resp struct{ N int }; func g(b []byte, c *Config) { resp := func() any { return c }; json.Unmarshal(b, resp()); c.dial() }`)}},
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte, c *Config) { w := W{V: c}; json.Unmarshal(b, &w); c.dial() }`)}},
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte, c *Config) { var w W; w.V = c; json.Unmarshal(b, &w); c.dial() }`)}},
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func (w *W) set(v any) { w.V = v }; func g(b []byte, c *Config) { var w W; w.set(c); json.Unmarshal(b, &w); c.dial() }`)}},
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte, c *Config) { var w W; for i := 0; i < 2; i++ { json.Unmarshal(b, &w); w.V = c }; c.dial() }`)}},
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte, c *Config) { w := new(W); keep(w); json.Unmarshal(b, w); c.dial() }; func keep(*W) {}`)}},
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type S interface{ X() }; type W struct{ V S }; func g(b []byte, w *W) { json.Unmarshal(b, w) }`)}},
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte, ch chan any) { json.Unmarshal(b, <-ch) }`)}},
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte) (c Config) { json.Unmarshal(b, &c); c.dial(); return }`)}},
-		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`var c0 = new(Config); func load(b []byte, out any) { out = c0; json.Unmarshal(b, out) }`)}},
-		{"modelroute", "dot-imports encoding/json", []string{src(`"net"; . "encoding/json"`, cfgDial+`func g(b []byte, c *Config) { Unmarshal(b, c); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte, c *Config) { f := json.Unmarshal; f(b, c); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"; "io"`, cfgDial+`func g(r io.Reader, c *Config) { d := json.NewDecoder(r); f := d.Decode; f(c); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func get() int { return 0 }; func g(b []byte, c *Config) { get := func() any { return c }; json.Unmarshal(b, get()); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type resp struct{ N int }; func g(b []byte, c *Config) { resp := func() any { return c }; json.Unmarshal(b, resp()); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte, c *Config) { w := W{V: c}; json.Unmarshal(b, &w); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte, c *Config) { var w W; w.V = c; json.Unmarshal(b, &w); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func (w *W) set(v any) { w.V = v }; func g(b []byte, c *Config) { var w W; w.set(c); json.Unmarshal(b, &w); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte, c *Config) { var w W; for i := 0; i < 2; i++ { json.Unmarshal(b, &w); w.V = c }; c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte) (c Config) { json.Unmarshal(b, &c); c.dial(); return }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`var c0 = new(Config); func load(b []byte, out any) { out = c0; json.Unmarshal(b, out) }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; . "encoding/json"`, cfgDial+`func g(b []byte, c *Config) { Unmarshal(b, c); c.dial() }`)}},
+		// The re-plan (#6028 after #6119): types, not order. A value whose
+		// type reaches the listed field goes into an interface, another
+		// package's code or a generic only by review, wherever and
+		// whenever the store would run (Security B1 round 3 on #6119).
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte, c *Config) { var w W; dec := func() { json.Unmarshal(b, &w) }; dec(); w.V = c; dec(); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; var gw W; func decode(b []byte) { json.Unmarshal(b, &gw) }; func setup(c *Config) { gw.V = c }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte, c *Config) { var w W; defer func() { json.Unmarshal(b, &w) }(); w.V = c }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte, c *Config, ch chan bool) { var w W; go func() { <-ch; json.Unmarshal(b, &w) }(); w.V = c; ch <- true }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte) (func(), func(v *Config)) { var w W; return func() { json.Unmarshal(b, &w) }, func(v *Config) { w.V = v } }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config) any { return c }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config) { var v any; v = any(c); _ = v }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(l []*Config) { var v any; for _, v = range l {}; _ = v }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config, m map[any]int) { m[c] = 1 }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config, ch chan any) { ch <- c }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config) { _ = append([]any{}, c) }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config) { panic(c) }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "fmt"`, cfgDial+`func g(c *Config) { fmt.Println(c) }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "fmt"`, cfgDial+`func g(l []Config) { fmt.Println(l) }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "slices"`, cfgDial+`func g(l []Config) { slices.Reverse(l) }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "reflect"`, cfgDial+`func g() { reflect.New(reflect.TypeFor[Config]()).Interface().(*Config).dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`type I interface{ Get() *Config }; type h struct{ c *Config }; func (x h) Get() *Config { return x.c }; func g(c *Config) any { return h{c} }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config) any { return func() *Config { return c } }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config) { var v struct{ V any }; v.V = c; _ = v }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config) { _ = []any{c}; _ = map[string]any{"a": c}; _ = struct{ V any }{c} }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`type W struct{ V any }; func g(c *Config) { _ = []*W{{V: c}} }`)}},
+		{"modelroute", "takes a *Config, which reaches a configuredFields field, out of an interface", []string{src(`"net"`, cfgDial+`func g(v any) { v.(*Config).dial() }`)}},
+		{"modelroute", "takes a Config, which reaches a configuredFields field, out of an interface", []string{src(`"net"`, cfgDial+`func g(v any, c *Config) { switch x := v.(type) { case Config: *c = x }; c.dial() }`)}},
+		{"modelroute", "stores into Socket, a configuredFields field", []string{src(`"net"`, cfgDial+`type u struct{ Socket string }; func g(c *Config) { (*u)(c).Socket = "/run/proxy.sock"; c.dial() }`)}},
+		{"modelroute", "stores into Socket, a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config) { c.Socket += ".x"; c.dial() }`)}},
+		{"modelroute", "stores into Socket, a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config, l []string) { for _, c.Socket = range l {}; c.dial() }`)}},
+		{"modelroute", "sets a configuredFields field by position here", []string{src(`"net"`, cfgDial+`type E struct{ Config }; func g() { (&E{Config{"/run/proxy.sock"}}).dial() }`)}},
 		// os.Root's methods, and opening one (B2 on #6119).
 		{"modelroute", "links or renames (Symlink)", []string{src(`"net"; "os"`, dial+`func g(s string) { r, _ := os.OpenRoot("/tmp"); r.Symlink("/run/proxy.sock", s) }`)}},
 		{"modelroute", "links or renames (Rename)", []string{src(`"net"; "os"`, dial+`func g(r *os.Root, s string) { r.Rename("/run/proxy.sock", s) }`)}},
@@ -2271,8 +1947,14 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		srcs []string
 	}{
 		{"modelroute", []string{src(`"net"`, `type Config struct{ Socket string }; `+dial+`func k(s string) { h(s) }; func g(c Config) { h(c.Socket); k(c.Socket) }`)}},
-		{"modelroute", []string{src(`"net"; "encoding/json"`, `type Config struct{ Socket string }; type resp struct{ N int }; func load(b []byte, out any) { json.Unmarshal(b, out) }; func g(b []byte) { var r resp; load(b, &r); var n struct{ N int }; json.Unmarshal(b, &n) }`)}},
-		{"modelroute", []string{src(`"net"; "encoding/json"; "io"`, `type Config struct{ Socket string }; type W struct{ V any; N int }; func load(b []byte, out any) error { return json.Unmarshal(b, out) }; func g(b []byte) (w W, err error) { err = load(b, &w); return }; func h(r io.Reader) W { var st W; if json.NewDecoder(r).Decode(&st) != nil { return W{} }; st.N = 1; return st }; func k(b []byte) { load(b, nil); p := new(W); json.Unmarshal(b, p); _ = p.N }`)}},
+		{"modelroute", []string{src(`"encoding/json"`, `type Config struct{ Socket string }; type resp struct{ N int }; func load(b []byte, out any) { json.Unmarshal(b, out) }; func g(b []byte) { var r resp; load(b, &r); var n struct{ N int }; json.Unmarshal(b, &n) }`)}},
+		{"modelroute", []string{src(`"encoding/json"; "io"`, `type Config struct{ Socket string }; type W struct{ V any; N int }; func load(b []byte, out any) error { return json.Unmarshal(b, out) }; func g(b []byte) (w W, err error) { err = load(b, &w); return }; func h(r io.Reader) W { var st W; if json.NewDecoder(r).Decode(&st) != nil { return W{} }; st.N = 1; return st }; func k(b []byte) { load(b, nil); p := new(W); json.Unmarshal(b, p); _ = p.N }`)}},
+		{"modelroute", []string{src(`"encoding/json"`, `type Config struct{ Socket string }; var dec = json.Unmarshal`)}},
+		{"modelroute", []string{src(`"encoding/json"`, `type Config struct{ Socket string }; type W struct{ V any }; func g(b []byte) { w := new(W); keep(w); json.Unmarshal(b, w) }; func keep(*W) {}`)}},
+		{"modelroute", []string{src(`"encoding/json"`, `type Config struct{ Socket string }; type S interface{ X() }; type W struct{ V S }; func g(b []byte, w *W) { json.Unmarshal(b, w) }`)}},
+		{"modelroute", []string{src(`"encoding/json"`, `type Config struct{ Socket string }; func g(b []byte, ch chan any) { json.Unmarshal(b, <-ch) }`)}},
+		{"modelroute", []string{src(`"fmt"`, `type Config struct{ Socket string }; func g(c Config) string { return fmt.Sprint(c, c.Socket) }`)}},
+		{"modelroute", []string{src(`"encoding/json"`, `type Config struct{ Socket string }; type W struct{ V any }; func g(b []byte, c *Config) (*Config, W) { var w W; json.Unmarshal(b, &w); keep := *c; return &keep, w }`)}},
 	} {
 		if got := useOf(t, c.rel, c.srcs...); got != "" {
 			t.Errorf("in %s, flagged: %q\n%s", c.rel, got, strings.Join(c.srcs, "\n"))
