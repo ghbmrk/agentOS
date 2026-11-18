@@ -496,14 +496,40 @@ class WipeJournalTest(unittest.TestCase):
         why = "journald keeps the journal in /run until it runs, so a reboot loses it"
         masked = "systemd-journal-flush.service: missing or masked; " + why
         self.assertEqual(self.journald(), [])
-        etc = self.root / "etc/systemd/system/systemd-journal-flush.service"
-        etc.parent.mkdir(parents=True, exist_ok=True)
-        etc.symlink_to("/dev/null")
-        self.assertEqual(self.journald(), [masked])
-        etc.unlink()
-        write(self.root, "etc/systemd/system/systemd-journal-flush.service", "")
-        self.assertEqual(self.journald(), [masked])
-        etc.unlink()
+        # L3 and Security on #6130: a mask, an empty file or a whole copy in any other unit directory replaces
+        # Debian's unit, so it is refused, whatever it holds.
+        for d in ("etc/systemd/system.control", "etc/systemd/system", "etc/systemd/system.attached",
+                  "usr/local/lib/systemd/system"):
+            other = self.root / d / "systemd-journal-flush.service"
+            replaced = ("%s/systemd-journal-flush.service: replaces %s; the tree check does not model a change to "
+                        "it (remove it)" % (d, unit))
+            for body in (None, "", "[Unit]\nDescription=x\n[Service]\nType=oneshot\nExecStart=/bin/true\n",
+                         (self.root / unit).read_text()):
+                with self.subTest(d=d, body=body):
+                    other.parent.mkdir(parents=True, exist_ok=True)
+                    if body is None:
+                        other.symlink_to("/dev/null")
+                    else:
+                        write(self.root, str(other.relative_to(self.root)), body)
+                    self.assertIn(replaced, self.journald())
+                    other.unlink()
+        # Debian's own file: its one command is the flush.
+        saved = (self.root / unit).read_text()
+        for body, starts in (("", None), ("[Service]\nType=oneshot\nExecStart=/bin/true\n", "/bin/true"),
+                             (saved + "ExecStart=/bin/true\n", "journalctl --flush then /bin/true"),
+                             ("[Service]\nType=oneshot\n", "unset")):
+            with self.subTest(body=body):
+                write(self.root, unit, body)
+                self.assertIn(masked if starts is None else "systemd-journal-flush.service: ExecStart= is %s; must be "
+                              "journalctl --flush alone; %s" % (starts, why), self.journald())
+        write(self.root, unit, saved)
+        # An alias's drop-ins apply to the unit too, so the alias is refused.
+        alias = self.root / "usr/lib/systemd/system/foo.service"
+        alias.symlink_to("systemd-journal-flush.service")
+        self.assertIn("usr/lib/systemd/system/foo.service: an alias of systemd-journal-flush.service; the tree "
+                      "check does not model unit aliases", self.journald())
+        alias.unlink()
+        self.assertEqual(self.journald(), [])
         saved = (self.root / unit).read_text()
         (self.root / unit).unlink()
         self.assertIn(masked, self.journald())  # and #5167 refuses the link it leaves dangling

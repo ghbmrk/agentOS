@@ -1392,21 +1392,59 @@ def journal_violations(root):
     return out + journal_flush_violations(root)
 
 
+def alias_violations(root, dirs, names):
+    """A link in a unit directory, under another name, that resolves to one of NAMES: it makes that name an
+    alias, whose drop-ins systemd applies too (unit_find_dropin_paths reads u->aliases), so it is refused
+    rather than modelled."""
+    out = []
+    for d in dirs:
+        for n in sorted(tree_listdir(root, d)):
+            if n in names or not stat.S_ISLNK(tree_lstat(root, d + "/" + n).st_mode):
+                continue
+            try:
+                target = tree_chase(root, d + "/" + n)[0].rsplit("/", 1)[-1]
+            except OSError:
+                continue
+            if target in names:
+                out.append("%s/%s: an alias of %s; the tree check does not model unit aliases" % (d, n, target))
+    return out
+
+
+# Debian's systemd 257 unit, the one place it may be, and its one command (units/systemd-journal-flush.service
+# in 257.7; Security and L3 on #6130).
+JOURNAL_FLUSH_DIR = "usr/lib/systemd/system"
+JOURNAL_FLUSH_START = "journalctl --flush"
+
+
 def journal_flush_violations(root):
     """#6095 (R1): journald writes to /var/log/journal only once systemd-journal-flush.service has asked it
     to (server_system_journal_open, systemd 257.7); until then, Storage=persistent or not, the journal is in
-    /run and a reboot loses it. So the unit is there, not masked (a link or an empty file), started by
-    sysinit.target (the link systemd installs), and changed by no drop-in systemd applies to it."""
+    /run and a reboot loses it. So the unit is Debian's file in JOURNAL_FLUSH_DIR, with no file or link of its
+    name in any other unit directory (a copy or a mask there would win), not masked (a link or an empty file),
+    its one ExecStart= JOURNAL_FLUSH_START; started by sysinit.target (the link systemd installs); and
+    changed by no drop-in systemd applies to it, under its own name or an alias's."""
     root = str(root)
     dirs, out = unit_dirs(root)
-    unit = next((Conf(root, d + "/" + JOURNAL_FLUSH) for d in dirs if tree_lstat(root, d + "/" + JOURNAL_FLUSH)), None)
     why = "journald keeps the journal in /run until it runs, so a reboot loses it"
+    for d in dirs:
+        if d != JOURNAL_FLUSH_DIR and tree_lstat(root, d + "/" + JOURNAL_FLUSH):
+            out.append("%s/%s: replaces %s/%s; the tree check does not model a change to it (remove it)"
+                       % (d, JOURNAL_FLUSH, JOURNAL_FLUSH_DIR, JOURNAL_FLUSH))
+    unit = Conf(root, JOURNAL_FLUSH_DIR + "/" + JOURNAL_FLUSH) if JOURNAL_FLUSH_DIR in dirs else None
     try:
-        masked = unit is None or unit.is_link() or unit.content().strip() == b""
+        masked = unit is None or not tree_lstat(root, unit.rel) or unit.is_link() or unit.content().strip() == b""
     except OSError:
         masked = True
     if masked:
         out.append("%s: missing or masked; %s" % (JOURNAL_FLUSH, why))
+    else:
+        try:
+            starts = [v for _, v in ini_every_in([unit], "Service", "ExecStart")]
+        except ValueError as e:
+            starts = [str(e)]
+        if starts != [JOURNAL_FLUSH_START]:
+            out.append("%s: ExecStart= is %s; must be %s alone; %s"
+                       % (JOURNAL_FLUSH, " then ".join(starts) or "unset", JOURNAL_FLUSH_START, why))
     try:
         wanted = any(tree_lstat(root, "%s/sysinit.target.wants/%s" % (d, JOURNAL_FLUSH)) for d in dirs)
     except OSError:
@@ -1415,7 +1453,7 @@ def journal_flush_violations(root):
         out.append("%s: not in sysinit.target.wants; %s" % (JOURNAL_FLUSH, why))
     for f in unit_dropins(root, JOURNAL_FLUSH):  # its name's, each "-" prefix's and service.d (Security on #6128)
         out.append("%s: a drop-in for %s; the tree check does not model a change to it (remove it)" % (f.rel, JOURNAL_FLUSH))
-    return out
+    return out + alias_violations(root, dirs, (JOURNAL_FLUSH,))
 
 
 def unit_dropin_names(name):
@@ -1462,16 +1500,7 @@ def card_unit_violations(root):
     modelled."""
     root = str(root)
     dirs, out = unit_dirs(root)
-    for d in dirs:
-        for n in sorted(tree_listdir(root, d)):
-            if n in CARD_UNITS or not stat.S_ISLNK(tree_lstat(root, d + "/" + n).st_mode):
-                continue
-            try:
-                target = tree_chase(root, d + "/" + n)[0].rsplit("/", 1)[-1]
-            except OSError:
-                continue
-            if target in CARD_UNITS:
-                out.append("%s/%s: an alias of %s; the tree check does not model unit aliases" % (d, n, target))
+    out += alias_violations(root, dirs, CARD_UNITS)
     for name in CARD_UNITS:
         unit = next((Conf(root, d + "/" + name) for d in dirs if tree_lstat(root, d + "/" + name)), None)
         if unit is None:
