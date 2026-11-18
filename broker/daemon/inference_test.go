@@ -784,7 +784,8 @@ func writes(e ast.Expr, obj *ast.Object) bool {
 // on: the composition root alone wiring the operator's configuration
 // (every other linked package is held by fieldStores); a package that
 // cannot name a listed type reaching it only through what it is handed,
-// which handedOn checks; unsafe staying an escape; and a link or rename
+// which handedOn checks; unsafe staying an escape, and no linked file
+// of the module using go:linkname (reported here); and a link or rename
 // going only through os, syscall or x/sys/unix.
 func packageUse(t *testing.T, dir string, files []string, prefix, rel string, ps []listed) []string {
 	t.Helper()
@@ -793,7 +794,16 @@ func packageUse(t *testing.T, dir string, files []string, prefix, rel string, ps
 	var fs []*ast.File
 	for _, name := range files {
 		bad = append(bad, sourceUse(t, filepath.Join(dir, name), prefix+"/"+name, rel)...)
-		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// go:linkname reaches another package's variables past every rule
+		// here, unsafe or not (Security R2 on #6147).
+		if bytes.Contains(b, []byte("//go:linkname")) {
+			bad = append(bad, prefix+"/"+name+": uses go:linkname")
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), b, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1605,7 +1615,8 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 // in turn, so the packages it merely imports need no check of their own.
 // A package entry names one import path exactly: a subpackage is not
 // covered, and fails closed. The standard library's functions are
-// trusted (the header's residual). ps is the linked graph.
+// trusted (the header's residual), and no entry names any other code
+// (TestHandOKNamesNoThirdParty). ps is the linked graph.
 func handedOn(t *testing.T, rel string, held map[string]bool, ps []listed) []string {
 	t.Helper()
 	byPath := map[string]listed{}
@@ -1709,6 +1720,32 @@ var handOK = map[string]map[string]string{
 	},
 }
 
+// REQ: ARC-2
+//
+// Every handOK key names the standard library or the module: handedOn
+// checks the module's, and only the standard library is trusted
+// unchecked (Security R1 on #6147).
+func TestHandOKNamesNoThirdParty(t *testing.T) {
+	for rel, keys := range handOK {
+		for key := range keys {
+			if thirdPartyKey(key) {
+				t.Errorf("handOK[%q] names %q, outside the standard library and the module", rel, key)
+			}
+		}
+	}
+	for key, want := range map[string]bool{"maps.Keys": false, "io.ReadCloser": false, module + "kernel": false, module + "backup.Write": false, "golang.org/x/sys/unix.Syscall": true, "example.com/p": true, "example.com/p.T": true} {
+		if thirdPartyKey(key) != want {
+			t.Errorf("thirdPartyKey(%q) = %v", key, !want)
+		}
+	}
+}
+
+// thirdPartyKey reports a handOK key outside the standard library and
+// the module: a dot in its first path element.
+func thirdPartyKey(key string) bool {
+	return !strings.HasPrefix(key, module) && strings.Contains(strings.SplitN(key, "/", 2)[0], ".") && strings.Contains(key, "/")
+}
+
 // handOKFunc reports fn listed in handOK for rel, by name or package
 // (a method of the universe's error has none).
 func handOKFunc(rel string, fn *types.Func) bool {
@@ -1757,6 +1794,16 @@ func g(c Config) { secret.Hide(c) }`))
 	delete(handOK, "modelroute")
 	if !strings.Contains(got, "instantiates Hide with Config, which reaches a configuredFields field") {
 		t.Errorf("a module generic instantiated with a holder passed: %q", got)
+	}
+	handOK["modelroute"] = map[string]string{module + "kernel/secret": "test"}
+	got = useOf(t, "modelroute", src(`"github.com/ghbmrk/agentos/broker/kernel/secret"`, `type Config struct{ Socket string }
+func g(c *Config) { secret.Hide[*Config](c) }`))
+	delete(handOK, "modelroute")
+	if !strings.Contains(got, "instantiates Hide with *Config, which reaches a configuredFields field") {
+		t.Errorf("an explicit module generic instantiation with a holder passed: %q", got)
+	}
+	if got := useOf(t, "change", src(`_ "unsafe"`, "//go:linkname x example.com/p.x\nvar x int")); !strings.Contains(got, "p0.go: uses go:linkname") {
+		t.Errorf("go:linkname passed: %q", got)
 	}
 	if got := useOf(t, "change", src(`"github.com/ghbmrk/agentos/broker/nosuch"`, `var _ = nosuch.Config{}`)); !strings.Contains(got, "does not type-check") {
 		t.Errorf("an importer's type error passed: %q", got)
