@@ -247,15 +247,16 @@ func (h *Handler) Event(ctx context.Context, from, text string) []string {
 	return nil
 }
 
-// agentDown answers owner text the agent could not take, as when its
-// machine has no open services at boot or restart. The text is dropped,
-// never queued (CTL-owner-text-lost, #5429): holding it would need a bound,
-// a labelled store across restarts (REV-5) and a rule for a late message
-// the owner has since changed their mind about. So the reply says it was
-// not received and to send it again; STATUS names why the agent is down
-// and says nothing once it runs (UX-56-1).
-const agentDown = "Your agent is not running, so this message was not received. " +
-	"Send it again once it is back; STATUS says why it is down. STOP, RESUME and HELP still work."
+// agentDown answers owner text the agent could not take: its machine has
+// no open services at boot or restart, or it runs but refused the text (a
+// full inbox, a failed store). The text is dropped, never queued
+// (CTL-owner-text-lost, #5429): holding it would need a bound, a labelled
+// store across restarts (REV-5) and a rule for a late message the owner
+// has since changed their mind about. So the reply says it was not
+// received and to send it again, and claims no cause, since one reply
+// covers every Deliver error; STATUS names the cause only when the agent
+// is down, and says nothing once it runs (UX-56-1; UX lens on #6136).
+const agentDown = "Your agent could not take this message, so it was not received. Send it again later; STATUS says if your agent is down. STOP, RESUME and HELP still work."
 
 func (h *Handler) deliver(ctx context.Context, cmd Command) bool {
 	if h.Agent == nil {

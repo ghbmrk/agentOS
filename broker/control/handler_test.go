@@ -511,6 +511,12 @@ type windowAgent struct {
 	got  []string
 }
 
+// errAgent refuses every text with err, as a running agent does when its
+// inbox is full or a store fails.
+type errAgent struct{ err error }
+
+func (e *errAgent) Deliver(context.Context, string, bool) error { return e.err }
+
 func (w *windowAgent) Deliver(_ context.Context, text string, _ bool) error {
 	if w.down {
 		return errors.New("guest: machine has no open services")
@@ -523,10 +529,21 @@ func TestOwnerTextLostReplySaysNotReceivedAndResend(t *testing.T) {
 	agent := &windowAgent{down: true}
 	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, agent)
 	r := one(t, h.Handle(context.Background(), owner, "book a table for two"))
-	for _, w := range []string{"not running", "not received", "Send it again", "STATUS", "STOP"} {
+	for _, w := range []string{"not received", "Send it again", "STATUS", "STOP"} {
 		if !strings.Contains(r, w) {
 			t.Fatalf("reply lacks %q: %q", w, r)
 		}
+	}
+	// One reply covers every Deliver error, so it names no cause: a
+	// running agent that refuses the text (a full inbox, a failed store;
+	// UX lens on #6136) gets the same words, which must hold there too.
+	if strings.Contains(r, "not running") || strings.Contains(r, "is back") {
+		t.Fatalf("reply claims the agent is down: %q", r)
+	}
+	full := &errAgent{err: errors.New("guest: the message was not stored")}
+	h2, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, full)
+	if got := one(t, h2.Handle(context.Background(), owner, "book a table for two")); got != r {
+		t.Fatalf("refused while running: %q, want %q", got, r)
 	}
 	// A reaction (Event) refused in the same window gets the same truth.
 	if got := one(t, h.Event(context.Background(), owner, "Owner reacted")); got != r {
