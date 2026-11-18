@@ -575,14 +575,19 @@ jobs:
         # Chrome for Testing headless shell Playwright 1.63 names (browsers.json revision 1243,
         # 153.0.8010.12), downloaded from Google and refused unless it hashes to its pin. A skip fails:
         # require_ran.py for the Go tests; for the Python ones, AGENTOS_REQUIRE_BROWSER=1 and the
-        # script run, which exits 1 on any skip. The zip may come from the cache step before; the
-        # hash check runs on it either way, so a cache cannot supply another binary.
+        # script run, which exits 1 on any skip. The zip may come from the cache step before; one
+        # that fails the hash is fetched afresh and checked again (#6175), so a bad cache entry can
+        # neither supply another binary nor fail every run; a second mismatch still fails.
         run: |
           python3 -m venv "$RUNNER_TEMP/pw"
           "$RUNNER_TEMP/pw/bin/python" -m pip install -q --no-deps --only-binary=:all: --require-hashes \
             -r ../tests/requirements-browser.txt
           zip="$HOME/.cache/agentos-cft/shell.zip"
-          [ -f "$zip" ] || { mkdir -p "${zip%/*}" && curl -fsSL --retry 3 -o "$zip" "$CFT_SHELL_URL"; }
+          if ! { [ -f "$zip" ] && echo "$CFT_SHELL_SHA256  $zip" | sha256sum -c -; }; then
+            [ ! -f "$zip" ] || echo "::warning::The cached headless shell fails its pin; fetching it afresh. Delete the cft-headless-shell cache entry so main saves a good one (#6175)."
+            mkdir -p "${zip%/*}"
+            curl -fsSL --retry 3 -o "$zip" "$CFT_SHELL_URL"
+          fi
           echo "$CFT_SHELL_SHA256  $zip" | sha256sum -c -
           unzip -q "$zip" -d "$RUNNER_TEMP/shell"
           export PATH="$RUNNER_TEMP/pw/bin:$PATH" AGENTOS_REQUIRE_BROWSER=1 \
