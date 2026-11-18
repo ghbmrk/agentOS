@@ -1182,7 +1182,7 @@ func fieldStores(fs []*ast.File, dir, rel string, at func(ast.Node, string)) {
 	}
 	// The package's functions ("h", or "T.m" by receiver type name),
 	// package-level vars' types, and generic functions by name.
-	funcs, vars := map[string]*ast.FuncDecl{}, map[string]ast.Expr{}
+	funcs := map[string]*ast.FuncDecl{}
 	for _, f := range fs {
 		for _, d := range f.Decls {
 			switch d := d.(type) {
@@ -1192,14 +1192,6 @@ func fieldStores(fs []*ast.File, dir, rel string, at func(ast.Node, string)) {
 					name = recvName(d.Recv.List[0].Type) + "." + name
 				}
 				funcs[name] = d
-			case *ast.GenDecl:
-				for _, sp := range d.Specs {
-					if vs, ok := sp.(*ast.ValueSpec); ok && vs.Type != nil {
-						for _, nm := range vs.Names {
-							vars[nm.Name] = vs.Type
-						}
-					}
-				}
 			}
 		}
 	}
@@ -1209,224 +1201,42 @@ func fieldStores(fs []*ast.File, dir, rel string, at func(ast.Node, string)) {
 		}
 		return e
 	}
-	// field is the type of field name of a value of type t, embedded
-	// structs followed.
-	var field func(t ast.Expr, name string, depth int) ast.Expr
-	field = func(t ast.Expr, name string, depth int) ast.Expr {
-		st, ok := resolve(strip(t)).(*ast.StructType)
-		if !ok || depth > 8 {
-			return nil
-		}
-		for _, fl := range st.Fields.List {
-			for _, nm := range fl.Names {
-				if nm.Name == name {
-					return fl.Type
-				}
-			}
-		}
-		for _, fl := range st.Fields.List {
-			if len(fl.Names) == 0 {
-				if ft := field(fl.Type, name, depth+1); ft != nil {
-					return ft
-				}
-			}
-		}
-		return nil
-	}
-	// typeOf is the type of e as syntax shows it, through the package's
-	// own declarations; nil when it does not (an imported call's result).
-	var typeOf func(e ast.Expr, imp map[string]bool, depth int) ast.Expr
-	results := func(c *ast.CallExpr, imp map[string]bool, depth int) []ast.Expr {
-		var fd *ast.FuncDecl
-		switch fn := c.Fun.(type) {
-		case *ast.Ident:
-			fd = funcs[fn.Name]
-		case *ast.SelectorExpr:
-			if id, ok := fn.X.(*ast.Ident); ok && id.Obj == nil && imp[id.Name] {
-				return nil
-			}
-			if rt := typeOf(fn.X, imp, depth+1); rt != nil {
-				if id, ok := strip(rt).(*ast.Ident); ok {
-					fd = funcs[id.Name+"."+fn.Sel.Name]
-				}
-			}
-		}
-		if fd == nil || fd.Type.Results == nil {
-			return nil
-		}
-		var rs []ast.Expr
-		for _, r := range fd.Type.Results.List {
-			for range max(1, len(r.Names)) {
-				rs = append(rs, r.Type)
-			}
-		}
-		return rs
-	}
-	typeOf = func(e ast.Expr, imp map[string]bool, depth int) ast.Expr {
-		if depth > 32 {
-			return nil
-		}
-		switch x := e.(type) {
-		case *ast.ParenExpr:
-			return typeOf(x.X, imp, depth+1)
-		case *ast.BasicLit:
-			return ast.NewIdent("string")
-		case *ast.FuncLit:
-			return x.Type
-		case *ast.CompositeLit:
-			return x.Type
-		case *ast.TypeAssertExpr:
-			return x.Type
-		case *ast.SliceExpr:
-			return typeOf(x.X, imp, depth+1)
-		case *ast.BinaryExpr:
-			return typeOf(x.X, imp, depth+1)
-		case *ast.UnaryExpr:
-			if t := typeOf(x.X, imp, depth+1); t != nil && x.Op == token.AND {
-				return &ast.StarExpr{X: t}
-			} else {
-				return t
-			}
-		case *ast.StarExpr:
-			if t, ok := typeOf(x.X, imp, depth+1).(*ast.StarExpr); ok {
-				return t.X
-			}
-			return nil
-		case *ast.SelectorExpr:
-			if id, ok := x.X.(*ast.Ident); ok && id.Obj == nil && imp[id.Name] {
-				return nil
-			}
-			if t := typeOf(x.X, imp, depth+1); t != nil {
-				return field(t, x.Sel.Name, 0)
-			}
-			return nil
-		case *ast.IndexExpr:
-			switch r := resolve(strip(typeOf(x.X, imp, depth+1))).(type) {
-			case *ast.ArrayType:
-				return r.Elt
-			case *ast.MapType:
-				return r.Value
-			case *ast.Ident:
-				if r.Name == "string" {
-					return ast.NewIdent("byte")
-				}
-			}
-			return nil
-		case *ast.CallExpr:
-			switch fn := x.Fun.(type) {
-			case *ast.Ident:
-				switch {
-				case fn.Name == "new" && len(x.Args) == 1:
-					return &ast.StarExpr{X: x.Args[0]}
-				case fn.Name == "append" && len(x.Args) > 0:
-					return typeOf(x.Args[0], imp, depth+1)
-				case fn.Name == "make" && len(x.Args) > 0:
-					return x.Args[0]
-				case fn.Name == "len" || fn.Name == "cap":
-					return ast.NewIdent("int")
-				case decls[fn.Name] != nil || fn.Obj == nil && funcs[fn.Name] == nil && predeclared[fn.Name]:
-					return fn // a conversion
-				}
-			case *ast.ArrayType, *ast.MapType, *ast.StarExpr, *ast.FuncType, *ast.InterfaceType, *ast.ChanType:
-				return fn // a conversion
-			case *ast.ParenExpr:
-				if _, ok := fn.X.(*ast.StarExpr); ok {
-					return fn.X
-				}
-			}
-			if rs := results(x, imp, depth); len(rs) == 1 {
-				return rs[0]
-			}
-			return nil
-		case *ast.Ident:
-			if x.Obj == nil {
-				if t := vars[x.Name]; t != nil {
-					return t
-				}
-				if x.Name == "nil" || x.Name == "true" || x.Name == "false" || x.Name == "iota" {
-					return ast.NewIdent("bool")
-				}
-				return nil
-			}
-			if t := declType(x.Obj); t != nil {
-				return t
-			}
-			// A name from a multi-value :=, var or range.
-			switch d := x.Obj.Decl.(type) {
-			case *ast.AssignStmt:
-				for i, l := range d.Lhs {
-					id, ok := l.(*ast.Ident)
-					if !ok || id.Obj != x.Obj {
-						continue
-					}
-					if len(d.Lhs) == len(d.Rhs) {
-						return typeOf(d.Rhs[i], imp, depth+1)
-					}
-					if len(d.Rhs) != 1 {
-						return nil
-					}
-					if u, ok := d.Rhs[0].(*ast.UnaryExpr); ok && u.Op == token.RANGE {
-						switch r := resolve(strip(typeOf(u.X, imp, depth+1))).(type) {
-						case *ast.ArrayType:
-							if i == 0 {
-								return ast.NewIdent("int")
-							}
-							return r.Elt
-						case *ast.MapType:
-							if i == 0 {
-								return r.Key
-							}
-							return r.Value
-						}
-						return nil
-					}
-					if c, ok := d.Rhs[0].(*ast.CallExpr); ok {
-						if rs := results(c, imp, depth); i < len(rs) {
-							return rs[i]
-						}
-					}
-					return nil
-				}
-			case *ast.ValueSpec:
-				for i, nm := range d.Names {
-					if nm.Obj != x.Obj {
-						continue
-					}
-					if len(d.Values) == len(d.Names) {
-						return typeOf(d.Values[i], imp, depth+1)
-					}
-					if len(d.Values) == 1 {
-						if c, ok := d.Values[0].(*ast.CallExpr); ok {
-							if rs := results(c, imp, depth); i < len(rs) {
-								return rs[i]
-							}
-						}
-					}
-				}
-			}
-			return nil
-		}
-		return nil
-	}
 	// opaque reports a type that may hold a listed field where syntax
-	// cannot see it: an interface, which may hold any value.
-	var opaque func(e ast.Expr) bool
-	opaque = func(e ast.Expr) bool {
-		switch x := resolve(strip(e)).(type) {
-		case *ast.InterfaceType:
+	// cannot see it: an interface, which may hold any value, a type
+	// parameter's, an imported type's, or one holding any of those.
+	var opaque func(e ast.Expr, seen map[string]bool) bool
+	opaque = func(e ast.Expr, seen map[string]bool) bool {
+		if id, ok := e.(*ast.Ident); ok {
+			if seen[id.Name] {
+				return false
+			}
+			seen[id.Name] = true
+		}
+		switch x := resolve(e).(type) {
+		case nil, *ast.InterfaceType, *ast.SelectorExpr, *ast.FuncType:
 			return true
 		case *ast.Ident:
-			return x.Name == "any"
+			return x.Name == "any" || x.Name == "error"
+		case *ast.StarExpr:
+			return opaque(x.X, seen)
 		case *ast.ArrayType:
-			return opaque(x.Elt)
+			return opaque(x.Elt, seen)
 		case *ast.MapType:
-			return opaque(x.Value)
+			return opaque(x.Key, seen) || opaque(x.Value, seen)
+		case *ast.ChanType:
+			return opaque(x.Value, seen)
+		case *ast.StructType:
+			for _, fl := range x.Fields.List {
+				if opaque(fl.Type, seen) {
+					return true
+				}
+			}
 		}
 		return false
 	}
 	// typeParam is the generic function whose type parameter e names.
 	typeParam := func(e ast.Expr) (*ast.FuncDecl, string) {
-		id, ok := strip(e).(*ast.Ident)
+		id, ok := e.(*ast.Ident)
 		if !ok || id.Obj == nil || !isTypeParam(id.Obj) {
 			return nil, ""
 		}
@@ -1508,37 +1318,198 @@ func fieldStores(fs []*ast.File, dir, rel string, at func(ast.Node, string)) {
 	// that hand a parameter of interface type to a writer, by index; a
 	// call to one hands its argument to that writer (fixed point below).
 	pkgWriters := map[string]map[int]bool{}
-	// target checks a value a writer may store through, and reports
-	// whether it made its own function a writer.
-	target := func(c *ast.CallExpr, a ast.Expr, imp map[string]bool, what string) bool {
-		t := typeOf(a, imp, 0)
-		if fd, name := typeParam(t); fd != nil {
-			if decoders[fd] == nil {
-				decoders[fd] = map[string]bool{}
+	// fresh is the type T of a writer's target a, in call c, that is a
+	// fresh zero value: new(T), &T{}, &x for `var x T`, `x := T{}` or a
+	// named result x of type T, or x for `x := new(T)` or `x := &T{}`.
+	// Nothing may write x, take its address, call a method on it or (for
+	// a pointer x) hand it on before the decode: every such use comes
+	// after c, outside any loop that holds c but not x's declaration, in
+	// a file with no goto. A zero value's interfaces are nil, so a decoder
+	// can fill it only with values it makes.
+	fresh := func(a ast.Expr, c *ast.CallExpr, f *ast.File) ast.Expr {
+		for {
+			p, ok := a.(*ast.ParenExpr)
+			if !ok {
+				break
 			}
-			decoders[fd][name] = true
-			return false
+			a = p.X
 		}
-		if id, ok := a.(*ast.Ident); ok && id.Obj != nil && t != nil && opaque(t) {
+		empty := func(e ast.Expr, ptr bool) ast.Expr {
+			if ptr {
+				if c, ok := e.(*ast.CallExpr); ok && len(c.Args) == 1 {
+					if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "new" && id.Obj == nil {
+						return c.Args[0]
+					}
+				}
+				u, ok := e.(*ast.UnaryExpr)
+				if !ok || u.Op != token.AND {
+					return nil
+				}
+				e = u.X
+			}
+			if c, ok := e.(*ast.CompositeLit); ok && len(c.Elts) == 0 {
+				return c.Type
+			}
+			return nil
+		}
+		if t := empty(a, true); t != nil {
+			return t
+		}
+		var x *ast.Ident
+		ptr := false
+		if u, ok := a.(*ast.UnaryExpr); ok && u.Op == token.AND {
+			x, _ = u.X.(*ast.Ident)
+		} else {
+			x, _ = a.(*ast.Ident)
+			ptr = true
+		}
+		if x == nil || x.Obj == nil || x.Obj.Kind != ast.Var {
+			return nil
+		}
+		var typ ast.Expr
+		var declAt ast.Node
+		switch d := x.Obj.Decl.(type) {
+		case *ast.ValueSpec:
+			declAt = d
+			if len(d.Names) != 1 {
+				return nil
+			}
+			if len(d.Values) == 0 && !ptr {
+				typ = d.Type
+			} else if len(d.Values) == 1 && d.Type == nil {
+				typ = empty(d.Values[0], ptr)
+			}
+		case *ast.AssignStmt:
+			declAt = d
+			if d.Tok == token.DEFINE && len(d.Lhs) == 1 && len(d.Rhs) == 1 {
+				typ = empty(d.Rhs[0], ptr)
+			}
+		case *ast.Field:
+			// A named result, zero when its function starts.
+			ast.Inspect(f, func(n ast.Node) bool {
+				if ft, ok := n.(*ast.FuncType); ok && ft.Results != nil && slices.Contains(ft.Results.List, d) && len(d.Names) == 1 && !ptr {
+					typ, declAt = d.Type, d
+				}
+				return true
+			})
+		}
+		if typ == nil {
+			return nil
+		}
+		risky := map[ast.Node]bool{}
+		var loops []ast.Node
+		ok := true
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.BranchStmt:
+				ok = ok && n.Tok != token.GOTO
+			case *ast.ForStmt, *ast.RangeStmt:
+				loops = append(loops, n)
+			}
+			switch n := n.(type) {
+			case *ast.AssignStmt:
+				for _, l := range n.Lhs {
+					risky[baseIdent(l)] = true
+				}
+			case *ast.IncDecStmt:
+				risky[baseIdent(n.X)] = true
+			case *ast.RangeStmt:
+				if n.Tok == token.ASSIGN {
+					risky[baseIdent(n.Key)], risky[baseIdent(n.Value)] = true, true
+				}
+			case *ast.CallExpr:
+				if se, isSel := n.Fun.(*ast.SelectorExpr); isSel {
+					risky[baseIdent(se.X)] = true // a method may store through x
+				}
+			case *ast.UnaryExpr:
+				if n.Op == token.AND {
+					risky[baseIdent(n.X)] = true
+				}
+			case *ast.SelectorExpr:
+				if _, seen := risky[n.X]; !seen {
+					risky[n.X] = false
+				}
+			}
+			return true
+		})
+		within := func(outer, n ast.Node) bool { return outer.Pos() <= n.Pos() && n.End() <= outer.End() }
+		ast.Inspect(f, func(n ast.Node) bool {
+			id, isID := n.(*ast.Ident)
+			if !isID || id.Obj != x.Obj || id == x {
+				return true
+			}
+			if within(declAt, id) {
+				return true
+			}
+			// A read: a field through x, or (for a value x) x whole.
+			if r, isSel := risky[id]; !r && (isSel || !ptr) {
+				return true
+			}
+			if id.Pos() < c.End() {
+				ok = false
+			}
+			for _, l := range loops {
+				if within(l, c) && within(l, id) && !within(l, declAt) {
+					ok = false
+				}
+			}
+			return true
+		})
+		if !ok {
+			return nil
+		}
+		return typ
+	}
+	// target checks a value a writer may store through, and reports
+	// whether it made its own function a writer. It passes only nil, a
+	// fresh zero value of a type that holds no listed field, or a parameter of
+	// interface type that nothing here writes (its function becomes a
+	// writer, whose callers are checked the same way); anything else is
+	// reported.
+	target := func(c *ast.CallExpr, a ast.Expr, f *ast.File, what string) bool {
+		if id, ok := a.(*ast.Ident); ok && id.Name == "nil" && id.Obj == nil {
+			return false // a decoder stores nothing through nil
+		}
+		if t := fresh(a, c, f); t != nil {
+			if fd, name := typeParam(t); fd != nil {
+				if decoders[fd] == nil {
+					decoders[fd] = map[string]bool{}
+				}
+				decoders[fd][name] = true
+				return false
+			}
+			if !holds(t, map[string]bool{}) {
+				return false
+			}
+		}
+		if id, ok := a.(*ast.Ident); ok && id.Obj != nil && !written(id.Obj, f) {
 			for key, fd := range funcs {
 				for i, p := range flatNames(fd.Type.Params) {
-					if p != nil && p.Obj == id.Obj {
-						if fd.Recv != nil {
-							key = "." + fd.Name.Name
-						}
-						if pkgWriters[key] == nil {
-							pkgWriters[key] = map[int]bool{}
-						}
-						grew := !pkgWriters[key][i]
-						pkgWriters[key][i] = true
-						return grew
+					if p == nil || p.Obj != id.Obj {
+						continue
 					}
+					switch pt := flatTypes(fd.Type.Params)[i].(type) {
+					case *ast.InterfaceType:
+					case *ast.Ident:
+						if pt.Name != "any" {
+							continue
+						}
+					default:
+						continue
+					}
+					if fd.Recv != nil {
+						key = "." + fd.Name.Name
+					}
+					if pkgWriters[key] == nil {
+						pkgWriters[key] = map[int]bool{}
+					}
+					grew := !pkgWriters[key][i]
+					pkgWriters[key][i] = true
+					return grew
 				}
 			}
 		}
-		if t == nil || opaque(t) || holds(t, map[string]bool{}) {
-			at(c, what+" may store into a configuredFields field: the lint cannot show what it is handed holds none")
-		}
+		at(c, what+" may store into a configuredFields field: its target is not a fresh zero value of a type holding none")
 		return false
 	}
 	// call checks one call's arguments, and reports whether pkgWriters
@@ -1569,7 +1540,7 @@ func fieldStores(fs []*ast.File, dir, rel string, at func(ast.Node, string)) {
 		grew := false
 		for i, a := range n.Args {
 			if writes && i >= from || idx[i] || idx[-1] && i >= last(idx) || own[i] {
-				grew = target(n, a, imp, what) || grew
+				grew = target(n, a, f, what) || grew
 			}
 		}
 		var targs []ast.Expr
@@ -1580,7 +1551,7 @@ func fieldStores(fs []*ast.File, dir, rel string, at func(ast.Node, string)) {
 			targs = x.Indices
 		}
 		for _, ta := range targs {
-			if holds(ta, map[string]bool{}) || opaque(ta) {
+			if holds(ta, map[string]bool{}) {
 				at(n, "instantiates a generic with a type that holds a configuredFields field")
 			}
 		}
@@ -1636,7 +1607,7 @@ func fieldStores(fs []*ast.File, dir, rel string, at func(ast.Node, string)) {
 	// instantiate it, explicitly or through a function literal's
 	// parameter, with a type that holds no listed field.
 	for _, f := range fs {
-		imp, _ := imports(f)
+		imp, local := imports(f)
 		called := map[ast.Node]bool{}
 		ast.Inspect(f, func(n ast.Node) bool {
 			c, ok := n.(*ast.CallExpr)
@@ -1694,14 +1665,24 @@ func fieldStores(fs []*ast.File, dir, rel string, at func(ast.Node, string)) {
 					}
 				}
 			}
+			// Only a function literal's or a package function's
+			// signature binds a type parameter here.
 			ps := flatTypes(fd.Type.Params)
 			for i, a := range c.Args {
-				if i < len(ps) {
-					bind(ps[i], typeOf(a, imp, 0))
+				if i >= len(ps) {
+					break
+				}
+				switch a := a.(type) {
+				case *ast.FuncLit:
+					bind(ps[i], a.Type)
+				case *ast.Ident:
+					if g := funcs[a.Name]; g != nil && (a.Obj == nil || a.Obj.Decl == g) {
+						bind(ps[i], g.Type)
+					}
 				}
 			}
 			for name := range decoders[fd] {
-				if b := bound[name]; b == nil || opaque(b) || holds(b, map[string]bool{}) {
+				if b := bound[name]; b == nil || holds(b, map[string]bool{}) {
 					at(c, fd.Name.Name+" decodes into its type parameter "+name+", which the lint cannot show holds no configuredFields field")
 				}
 			}
@@ -1716,11 +1697,18 @@ func fieldStores(fs []*ast.File, dir, rel string, at func(ast.Node, string)) {
 				named[n.Name] = true
 			case *ast.SelectorExpr:
 				named[n.Sel] = true
-				if id, ok := n.X.(*ast.Ident); ok && id.Obj == nil && imp[id.Name] {
+				if called[n] {
 					return true
 				}
-				if len(pkgWriters["."+n.Sel.Name]) > 0 && !called[n] {
-					at(n, n.Sel.Name+", which hands its argument to a writer, used as a value")
+				if id, ok := n.X.(*ast.Ident); ok && id.Obj == nil && imp[id.Name] {
+					full := local[id.Name] + "." + n.Sel.Name
+					if _, w := writerFuncs[full]; w || len(modWriters[full]) > 0 {
+						at(n, full+", a writer, used as a value")
+					}
+					return true
+				}
+				if _, w := writerMethods[n.Sel.Name]; w || len(modWriters["."+n.Sel.Name]) > 0 || len(pkgWriters["."+n.Sel.Name]) > 0 {
+					at(n, n.Sel.Name+", a writer, used as a value")
 				}
 			case *ast.Ident:
 				fd := funcs[n.Name]
@@ -1738,6 +1726,9 @@ func fieldStores(fs []*ast.File, dir, rel string, at func(ast.Node, string)) {
 		})
 		for _, im := range f.Imports {
 			p, _ := strconv.Unquote(im.Path.Value)
+			if im.Name != nil && im.Name.Name == "." {
+				at(im, "dot-imports "+p+", whose writers the lint would not see")
+			}
 			if strings.Contains(strings.SplitN(p, "/", 2)[0], ".") && !strings.HasPrefix(p, module) && p != "golang.org/x/sys/unix" {
 				at(im, "imports "+p+", a third-party package the lint does not read, which could store into a configuredFields field")
 			}
@@ -1838,6 +1829,29 @@ func flatNames(fl *ast.FieldList) []*ast.Ident {
 		ns = append(ns, f.Names...)
 	}
 	return ns
+}
+
+// baseIdent is the variable an expression such as x.f[i] or *x starts
+// from, or nil.
+func baseIdent(e ast.Expr) ast.Node {
+	for {
+		switch x := e.(type) {
+		case *ast.SelectorExpr:
+			e = x.X
+		case *ast.IndexExpr:
+			e = x.X
+		case *ast.StarExpr:
+			e = x.X
+		case *ast.ParenExpr:
+			e = x.X
+		case *ast.SliceExpr:
+			e = x.X
+		case *ast.Ident:
+			return x
+		default:
+			return nil
+		}
+	}
 }
 
 // isTypeParam reports obj declared in a type parameter list.
@@ -2220,6 +2234,24 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		{"modelroute", "act decodes into its type parameter A", []string{src(`"net"; "encoding/json"`, cfgDial+`func act[A any](f func(a A)) func([]byte) { return func(b []byte) { var a A; json.Unmarshal(b, &a); f(a) } }; var h = act(func(c Config) { c.dial() })`)}},
 		{"modelroute", "act, a generic that decodes into its type parameter, used as a value", []string{src(`"net"; "encoding/json"`, cfgDial+`func act[A any](f func(a A)) func([]byte) { return func(b []byte) { var a A; json.Unmarshal(b, &a); f(a) } }; var h = act[Config]; var k = act`)}},
 		{"modelroute", "imports example.com/fill, a third-party package", []string{src(`"net"; "example.com/fill"`, cfgDial+`func g(c *Config) { fill.In(c); c.dial() }`)}},
+		// A writer's target passes only as a fresh zero value of a type
+		// holding no listed field, and a writer taken as a value is
+		// reported (B1 round 2 on #6119).
+		{"modelroute", "encoding/json.Unmarshal, a writer, used as a value", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte, c *Config) { f := json.Unmarshal; f(b, c); c.dial() }`)}},
+		{"modelroute", "encoding/json.Unmarshal, a writer, used as a value", []string{src(`"net"; "encoding/json"`, cfgDial+`var dec = json.Unmarshal`)}},
+		{"modelroute", "Decode, a writer, used as a value", []string{src(`"net"; "encoding/json"; "io"`, cfgDial+`func g(r io.Reader, c *Config) { d := json.NewDecoder(r); f := d.Decode; f(c); c.dial() }`)}},
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func get() int { return 0 }; func g(b []byte, c *Config) { get := func() any { return c }; json.Unmarshal(b, get()); c.dial() }`)}},
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type resp struct{ N int }; func g(b []byte, c *Config) { resp := func() any { return c }; json.Unmarshal(b, resp()); c.dial() }`)}},
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte, c *Config) { w := W{V: c}; json.Unmarshal(b, &w); c.dial() }`)}},
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte, c *Config) { var w W; w.V = c; json.Unmarshal(b, &w); c.dial() }`)}},
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func (w *W) set(v any) { w.V = v }; func g(b []byte, c *Config) { var w W; w.set(c); json.Unmarshal(b, &w); c.dial() }`)}},
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte, c *Config) { var w W; for i := 0; i < 2; i++ { json.Unmarshal(b, &w); w.V = c }; c.dial() }`)}},
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte, c *Config) { w := new(W); keep(w); json.Unmarshal(b, w); c.dial() }; func keep(*W) {}`)}},
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type S interface{ X() }; type W struct{ V S }; func g(b []byte, w *W) { json.Unmarshal(b, w) }`)}},
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte, ch chan any) { json.Unmarshal(b, <-ch) }`)}},
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte) (c Config) { json.Unmarshal(b, &c); c.dial(); return }`)}},
+		{"modelroute", "encoding/json.Unmarshal may store into a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`var c0 = new(Config); func load(b []byte, out any) { out = c0; json.Unmarshal(b, out) }`)}},
+		{"modelroute", "dot-imports encoding/json", []string{src(`"net"; . "encoding/json"`, cfgDial+`func g(b []byte, c *Config) { Unmarshal(b, c); c.dial() }`)}},
 		// os.Root's methods, and opening one (B2 on #6119).
 		{"modelroute", "links or renames (Symlink)", []string{src(`"net"; "os"`, dial+`func g(s string) { r, _ := os.OpenRoot("/tmp"); r.Symlink("/run/proxy.sock", s) }`)}},
 		{"modelroute", "links or renames (Rename)", []string{src(`"net"; "os"`, dial+`func g(r *os.Root, s string) { r.Rename("/run/proxy.sock", s) }`)}},
@@ -2240,6 +2272,7 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 	}{
 		{"modelroute", []string{src(`"net"`, `type Config struct{ Socket string }; `+dial+`func k(s string) { h(s) }; func g(c Config) { h(c.Socket); k(c.Socket) }`)}},
 		{"modelroute", []string{src(`"net"; "encoding/json"`, `type Config struct{ Socket string }; type resp struct{ N int }; func load(b []byte, out any) { json.Unmarshal(b, out) }; func g(b []byte) { var r resp; load(b, &r); var n struct{ N int }; json.Unmarshal(b, &n) }`)}},
+		{"modelroute", []string{src(`"net"; "encoding/json"; "io"`, `type Config struct{ Socket string }; type W struct{ V any; N int }; func load(b []byte, out any) error { return json.Unmarshal(b, out) }; func g(b []byte) (w W, err error) { err = load(b, &w); return }; func h(r io.Reader) W { var st W; if json.NewDecoder(r).Decode(&st) != nil { return W{} }; st.N = 1; return st }; func k(b []byte) { load(b, nil); p := new(W); json.Unmarshal(b, p); _ = p.N }`)}},
 	} {
 		if got := useOf(t, c.rel, c.srcs...); got != "" {
 			t.Errorf("in %s, flagged: %q\n%s", c.rel, got, strings.Join(c.srcs, "\n"))
