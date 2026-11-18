@@ -139,11 +139,7 @@ func machinesOffLine(err error) string {
 // reads of their unread restore points: the STATUS line, and the notice
 // when any are deleted (main's seam, as openMachineDisk).
 func openVM(ctx context.Context, cfg vm.Config, caps *capState, inform func(string) error) (*vm.Manager, error) {
-	cfg.UnreadGone = func(n int, forgotten bool) {
-		if err := inform(unreadGoneNotice(n, forgotten)); err != nil {
-			log.Printf("vm: telling the owner of deleted unread snapshots: %v", err)
-		}
-	}
+	cfg.UnreadGone = newUnreadNotices(ctx, unreadRetry, inform).gone
 	m, err := vm.Open(ctx, cfg)
 	if err != nil {
 		return nil, err
@@ -151,6 +147,79 @@ func openVM(ctx context.Context, cfg vm.Config, caps *capState, inform func(stri
 	caps.snapsUnread(m.Unread)
 	caps.machinesWedged(m.Wedged)
 	return m, nil
+}
+
+// unreadRetry is how long a deletion notice the owner channel did not
+// take waits before it is sent again (a var for tests).
+var unreadRetry = 30 * time.Second
+
+// unreadNotices holds the unread-restore-point deletion notices the owner
+// channel has not taken and retries them until it does (CAP-3, #5500): a
+// forget or a disk-space prune of points nobody could read is never left
+// untold because the channel was down at that moment. What is owed is a
+// count per kind, so a long outage owes at most one forget and one
+// disk-space notice, each with the true total, and a delivered notice is
+// never sent again. It is held in memory only: a restart forgets it (the
+// points are gone either way, and STATUS no longer lists them).
+type unreadNotices struct {
+	ctx    context.Context
+	retry  time.Duration
+	inform func(string) error
+
+	mu    sync.Mutex
+	owed  [2]int // by kind: [0] disk space, [1] forget
+	timer *time.Timer
+}
+
+func newUnreadNotices(ctx context.Context, retry time.Duration, inform func(string) error) *unreadNotices {
+	return &unreadNotices{ctx: ctx, retry: retry, inform: inform}
+}
+
+// gone is vm.Config.UnreadGone: it owes the notice, then tries to send.
+func (u *unreadNotices) gone(n int, forgotten bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if forgotten {
+		u.owed[1] += n
+	} else {
+		u.owed[0] += n
+	}
+	u.flushLocked()
+}
+
+// flush sends what is owed, if anything, while ctx lasts.
+func (u *unreadNotices) flush() {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.flushLocked()
+}
+
+// flushLocked sends each owed notice, forget first, and stops at the first
+// the channel refuses, arming one retry. The lock is held across Inform so
+// that a notice is never sent twice.
+func (u *unreadNotices) flushLocked() {
+	if u.ctx.Err() != nil {
+		return
+	}
+	for _, kind := range []int{1, 0} {
+		n := u.owed[kind]
+		if n == 0 {
+			continue
+		}
+		if err := u.inform(unreadGoneNotice(n, kind == 1)); err != nil {
+			log.Printf("vm: telling the owner of deleted unread snapshots: %v; trying again in %v", err, u.retry)
+			if u.timer == nil {
+				u.timer = time.AfterFunc(u.retry, func() {
+					u.mu.Lock()
+					defer u.mu.Unlock()
+					u.timer = nil
+					u.flushLocked()
+				})
+			}
+			return
+		}
+		u.owed[kind] = 0
+	}
 }
 
 // capLineTexts are every line the registry can show, for the wording test.

@@ -679,6 +679,88 @@ func TestOpenVMWiresUnreadLineAndNotice(t *testing.T) {
 	}
 }
 
+// REQ: CAP-3. VM-snap-unread-notice-fu (#5500): a deletion notice the
+// owner channel did not take is held and retried until it goes, and goes
+// once: an Inform that fails once, then succeeds, tells the owner once.
+func TestOpenVMRetriesUnreadNoticeUntilDelivered(t *testing.T) {
+	defer func(d time.Duration) { unreadRetry = d }(unreadRetry)
+	unreadRetry = 10 * time.Millisecond
+	state := t.TempDir()
+	must(t, os.MkdirAll(filepath.Join(state, "snapshots", "s0000000007", "meta.json"), 0o700))
+	var m *vm.Manager
+	adm, err := admission.New(admission.Config{CapacityMB: 8000}, lateManager{&m})
+	must(t, err)
+	var tries atomic.Int32
+	told := make(chan string, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m, err = openVM(ctx, vm.Config{
+		StateDir: state, Images: map[string]string{"base": t.TempDir()},
+		Runtime: &sleepRuntime{running: map[string]bool{}}, Admit: adm, NoCgroups: true, NoQuota: true,
+		FreeBytes: func(string) (int64, error) { return 1 << 50, nil },
+	}, &capState{}, func(text string) error {
+		if tries.Add(1) == 1 {
+			return errors.New("no owner channel")
+		}
+		told <- text
+		return nil
+	})
+	must(t, err)
+	must(t, m.ForgetSince(context.Background(), "x.0", time.Now()))
+	select {
+	case got := <-told:
+		if got != unreadGoneNotice(1, true) {
+			t.Fatalf("owner told %q, want the forget notice", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the held notice was never retried")
+	}
+	time.Sleep(10 * unreadRetry)
+	if n := tries.Load(); n != 2 || len(told) != 0 {
+		t.Fatalf("%d tries, %d more told: want one failure, then one delivery", n, len(told))
+	}
+}
+
+// Notices held while the channel is down are summed by kind, so a long
+// outage owes at most one forget and one disk-space notice, each with the
+// true count; a cancelled context stops the retries.
+func TestUnreadNoticesSumWhileHeldAndStopWithContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	down := true
+	var told []string
+	u := newUnreadNotices(ctx, time.Hour, func(text string) error {
+		if down {
+			return errors.New("no owner channel")
+		}
+		told = append(told, text)
+		return nil
+	})
+	u.gone(1, true)
+	u.gone(2, false)
+	u.gone(2, true)
+	if len(told) != 0 {
+		t.Fatalf("told while down: %q", told)
+	}
+	down = false
+	u.flush()
+	want := []string{unreadGoneNotice(3, true), unreadGoneNotice(2, false)}
+	if !slices.Equal(told, want) {
+		t.Fatalf("told %q, want %q", told, want)
+	}
+	u.flush()
+	if len(told) != 2 {
+		t.Fatalf("a delivered notice was sent again: %q", told)
+	}
+	down = true
+	cancel()
+	u.gone(1, false)
+	down = false
+	u.flush()
+	if len(told) != 2 {
+		t.Fatalf("retried after the context ended: %q", told)
+	}
+}
+
 // CAP-3 (#5481): a machines open that fails returns the error and wires
 // nothing: no manager, no restore-point line.
 func TestOpenVMFailureWiresNothing(t *testing.T) {
