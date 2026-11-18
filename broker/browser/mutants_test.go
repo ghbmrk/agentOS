@@ -228,32 +228,40 @@ func TestScreenshotSaysWhyItStopped(t *testing.T) {
 }
 
 // A cancelled request stops the executor at once, whether the driver has
-// not read the request or has not answered it (K8).
+// not read the request or has not answered it (K8). The unread case runs
+// twelve times: once stopped, the reply select's closed g.lines and done
+// ctx are both ready, so a write select that fell through to it would give
+// the stopped result about half the time.
 func TestACancelledRequestStopsTheExecutor(t *testing.T) {
-	for _, c := range []struct{ name, driver string }{{"unread", "exec sleep 3600"}, {"unanswered", "cat >/dev/null"}} {
+	for _, c := range []struct {
+		name, driver string
+		runs         int
+	}{{"unread", "exec sleep 3600", 12}, {"unanswered", "cat >/dev/null", 1}} {
 		t.Run(c.name, func(t *testing.T) {
-			g, err := Start(context.Background(), Config{
-				Driver: []string{"/bin/sh", "-c", c.driver}, Origins: []string{"https://shop.example.test"},
-				Workspace: t.TempDir(), Timeout: 5 * time.Second,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { g.Close() })
-			if c.name == "unread" {
-				// Fill the request pipe so the request's write blocks.
-				filled := make(chan struct{})
-				go func() { _, _ = g.stdin.Write(make([]byte, 64<<10)); close(filled) }()
-				select {
-				case <-filled:
-				case <-time.After(2 * time.Second): // a smaller pipe is full already
+			for range c.runs {
+				g, err := Start(context.Background(), Config{
+					Driver: []string{"/bin/sh", "-c", c.driver}, Origins: []string{"https://shop.example.test"},
+					Workspace: t.TempDir(), Timeout: 5 * time.Second,
+				})
+				if err != nil {
+					t.Fatal(err)
 				}
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-			defer cancel()
-			r, _, _ := g.do(ctx, []byte(`{"v":0,"verb":"snapshot"}`), nil)
-			if r.Detail != "request cancelled; executor stopped" || !g.stopped {
-				t.Fatalf("%+v", r)
+				t.Cleanup(func() { g.Close() })
+				if c.name == "unread" {
+					// Fill the request pipe so the request's write blocks.
+					filled := make(chan struct{})
+					go func() { _, _ = g.stdin.Write(make([]byte, 64<<10)); close(filled) }()
+					select {
+					case <-filled:
+					case <-time.After(2 * time.Second): // a smaller pipe is full already
+					}
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+				r, _, _ := g.do(ctx, []byte(`{"v":0,"verb":"snapshot"}`), nil)
+				cancel()
+				if r.Detail != "request cancelled; executor stopped" || !g.stopped {
+					t.Fatalf("%+v", r)
+				}
 			}
 		})
 	}
