@@ -14,7 +14,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from test_image import ENTRY, H, MK, ROOT, check, exec_args, finish, ini, settings  # noqa: E402
+from test_image import ENTRY, H, MK, ROOT, check, exec_args, finish, ini, nodump, settings, write  # noqa: E402
 
 UNITS = MK / "mkosi.extra/usr/lib/systemd/system"
 UNIT = UNITS / "agentos-mor.service"
@@ -297,6 +297,88 @@ class WipeOnTest(unittest.TestCase):
             v = finish.cmdline_violations((ENTRY % H).replace("rw quiet", "rw quiet init_on_free=0"), other)
             self.assertEqual(len(v), 1, v)
             self.assertIn("not in mkosi.conf", v[0])
+
+
+class WipeJournalTest(unittest.TestCase):
+    """MOR-wipe-journal (#6078): the wipe's error goes to the journal only (#6042), and a failed wipe is
+    a shutdown, so the journal keeps it only on disk. Debian's postinst makes /var/log/journal, which
+    Storage=auto needs; the image's drop-in sets persistent instead, and the tree check holds it."""
+    # REQ: HW-8
+    DROPIN = "usr/lib/systemd/journald.conf.d/50-agentos-persist.conf"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        write(self.root, "etc/machine-id", "uninitialized\n")
+        nodump(self.root)
+
+    def v(self):
+        return " | ".join(check.violations(self.root))
+
+    def test_the_image_keeps_the_journal_on_disk(self):
+        self.assertEqual(dict(ini(MK / "mkosi.extra" / self.DROPIN)["Journal"]), {"Storage": "persistent"})
+        self.assertEqual(sorted(p.name for p in MK.glob("mkosi.extra/**/journald.conf*")), ["journald.conf.d"])
+        self.assertNotIn("journald", ini(MK / "mkosi.conf")["Content"]["KernelCommandLine"])
+        self.assertNotIn("journald", self.v())
+
+    def test_the_tree_check_refuses_a_journal_that_forgets(self):
+        # UX on #6086: each refusal names the file whose line decides, or says the shipped drop-in is missing.
+        zz, lib = "etc/systemd/journald.conf.d/zz.conf", "usr/lib/systemd/journald.conf.d/zz.conf"
+        must = "; must be persistent (change or remove that line)"
+        level = "; must store info, a unit's stderr (set info or debug, or remove that line)"
+        ignored = ", keeping the one before it (set a valid one or remove that line)"
+        for rel, text, want in (
+                (self.DROPIN, None, "journald Storage is not set (auto); must be persistent "
+                                    "(usr/lib/systemd/journald.conf.d/50-agentos-persist.conf is missing)"),
+                (zz, "[Journal]\nStorage=volatile\n", zz + ": journald Storage is volatile" + must),
+                (zz, "[Journal]\nStorage=auto\n", zz + ": journald Storage is auto" + must),
+                (zz, "[Journal]\nStorage=\n", zz + ": journald Storage= is a value journald ignores" + ignored),
+                (zz, "[Journal]\nStorage=Persistent\n", zz + ": journald Storage=Persistent is a value journald ignores"
+                 + ignored),
+                (self.DROPIN, "[Journal]\nStorage=none\n", self.DROPIN + ": journald Storage is none" + must),
+                (lib, "[Journal]\nMaxLevelStore=notice\n", lib + ": journald MaxLevelStore is notice" + level),
+                (lib, "[Journal]\nMaxLevelStore=5\n", lib + ": journald MaxLevelStore is 5" + level),
+                (lib, "[Journal]\nMaxLevelStore=x\n", lib + ": journald MaxLevelStore=x is a value journald ignores"
+                 + ignored),
+                (lib, "[Journal]\nMaxLevelStore=8\n", lib + ": journald MaxLevelStore=8 is a value journald ignores"
+                 + ignored),
+                (zz, b"[Journal]\nX=\xff\n", zz + ": unreadable ("),
+                ("run/systemd/journald.conf.d/a.conf", "[Journal]\nStorage=persistent\n", "/run is a tmpfs")):
+            with self.subTest(rel=rel, text=text):
+                saved = (self.root / self.DROPIN).read_text()
+                if text is None:
+                    (self.root / rel).unlink()
+                elif isinstance(text, bytes):
+                    (self.root / rel).write_bytes(text)
+                else:
+                    write(self.root, rel, text)
+                self.assertIn(want, self.v())
+                if rel != self.DROPIN:
+                    (self.root / rel).unlink()
+                write(self.root, self.DROPIN, saved)
+                self.assertNotIn("journald", self.v())
+        # The later file decides (drop-ins in name order, whatever their directory), and is the one named.
+        early = "usr/lib/systemd/journald.conf.d/40-a.conf"
+        write(self.root, early, "[Journal]\nStorage=volatile\n")
+        self.assertNotIn("journald", self.v())  # the shipped 50- drop-in is read after it
+        write(self.root, zz, "[Journal]\nStorage=volatile\n")
+        self.assertEqual([v for v in check.violations(self.root) if "journald" in v],
+                         [zz + ": journald Storage is volatile" + must])
+        (self.root / zz).unlink()
+        (self.root / early).unlink()
+        # Security on #6086: an empty value is ignored, not a reset, so notice still holds after it.
+        write(self.root, early, "[Journal]\nMaxLevelStore=notice\n")
+        write(self.root, zz, "[Journal]\nMaxLevelStore=\n")
+        self.assertEqual([v for v in check.violations(self.root) if "journald" in v],
+                         [zz + ": journald MaxLevelStore= is a value journald ignores" + ignored,
+                          early + ": journald MaxLevelStore is notice" + level])
+        (self.root / zz).unlink()
+        (self.root / early).unlink()
+        for kept in ("info", "debug", "6", "7"):
+            with self.subTest(kept=kept):
+                write(self.root, zz, "[Journal]\nMaxLevelStore=%s\n" % kept)
+                self.assertNotIn("journald", self.v())
 
 
 if __name__ == "__main__":

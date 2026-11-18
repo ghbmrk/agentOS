@@ -398,7 +398,8 @@ MASK = "/dev/null"
 TOP_LINKS = {"lib": ("usr/lib", "/usr/lib")}
 READ_CONF = ("sysctl.d", "tmpfiles.d", "systemd/network", "systemd/system", "systemd/system.control",
              "systemd/system.attached") + tuple("systemd/%s%s" % (n, d) for n in
-                                                ("coredump.conf", "system.conf", "networkd.conf", "resolved.conf")
+                                                ("coredump.conf", "system.conf", "networkd.conf", "resolved.conf",
+                                                 "journald.conf")
                                                 for d in ("", ".d"))
 
 # #1556, #2176: the channels that run code as root at boot outside unit Exec lines, each held to
@@ -533,7 +534,7 @@ def _violations(root):
             # absent (stock trixie has 2775 var/mail and var/local); a link's steps and the directories
             # holding it are held to one (#1829, step_refusal).
             out.append("%s: mode %04o is writable by anyone on the box (#1702)" % (rel, st.st_mode & 0o7777))
-    return (out + dump_violations(root) + swap_violations(root) + wifi_violations(root)
+    return (out + dump_violations(root) + journal_violations(root) + swap_violations(root) + wifi_violations(root)
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
             + exec_allow_violations(root) + bus_daemon_violations(root) + made_allow_violations(root) + credstore_violations(root) + stray_violations(root)
@@ -1322,6 +1323,50 @@ def dump_violations(root):
     suid = sysctl(root, "fs.suid_dumpable")
     if suid != "0":
         out.append("%s: fs.suid_dumpable is %s; must be 0" % (NODUMP_SYSCTL.rsplit("/", 1)[-1], suid))
+    return out
+
+
+
+# systemd 257.13's log levels by name (log_level_from_string also takes the number).
+LOG_LEVELS = ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug")
+
+
+# journald's Storage= values (v257 storage_from_string).
+STORAGES = ("auto", "volatile", "persistent", "none")
+
+
+def journal_violations(root):
+    """MOR-wipe-journal (#6078): a failed wipe's error (info, to the journal only) is still on disk
+    at the next boot. Storage=auto would rest on Debian's postinst having made /var/log/journal.
+    journald (v257 config_parse_storage, config_parse_log_level) ignores a value it cannot parse,
+    an empty one included, and keeps the one before it, so such a value is refused, never read as a
+    reset (Security on #6086). Each refusal names the file whose line decides."""
+    out, last, files = [], {}, main_conf(root, "journald.conf")
+    for f in files:
+        try:
+            lines = config_lines(f.content())
+        except (OSError, Unparsable) as e:
+            return ["%s: unreadable (%s); journald may not read it whole"
+                    % (f.rel, e.strerror if isinstance(e, OSError) else e)]
+        for sec, key, val in lines:
+            valid = {"Storage": STORAGES, "MaxLevelStore": LOG_LEVELS + tuple("01234567")}.get(key)
+            if sec != "Journal" or valid is None:
+                continue
+            if val not in valid:
+                out.append("%s: journald %s=%s is a value journald ignores, keeping the one before it "
+                           "(set a valid one or remove that line)" % (f.rel, key, val))
+            else:
+                last[key] = (val, f.rel)
+    storage, where = last.get("Storage", (None, None))
+    if not where:
+        out.append("journald Storage is not set (auto); must be persistent "
+                   "(usr/lib/systemd/journald.conf.d/50-agentos-persist.conf is missing)")
+    elif storage != "persistent":
+        out.append("%s: journald Storage is %s; must be persistent (change or remove that line)" % (where, storage))
+    level, where = last.get("MaxLevelStore", ("debug", None))
+    if level not in ("info", "debug", "6", "7"):
+        out.append("%s: journald MaxLevelStore is %s; must store info, a unit's stderr (set info or debug, "
+                   "or remove that line)" % (where, level))
     return out
 
 
