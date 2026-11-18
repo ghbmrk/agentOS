@@ -3399,17 +3399,37 @@ class WaiverMessages(unittest.TestCase):
         sha = "1adcc9bd" + "0" * 32
         r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, body="", extra=["--body-from", sha])
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn(f"mutgate: the body read is the PR body as it stood at the push of {sha}, the event that started "
-                      "this run; a line added to the body after that push is not read by this run or a rerun of it, "
-                      "so it counts only from the next push\n", r.stdout)
+        # The run can start on the PR's opening or reopening too (#6151, L3), so the line names the head, not a push.
+        self.assertIn(f"mutgate: the body read is the PR body as it stood at head {sha}, when the event that started "
+                      "this run fired (the PR's opening, a push or a reopening); a line added to the body after that "
+                      "is not read by this run or a rerun of it, so it counts only from the next push\n", r.stdout)
         # Nothing to name when nothing fails, and no claim about a push the gate was not told of.
         body = "".join(f"Mutant-equivalent: broker/netguard/a.go:2:{c}:ARITHMETIC_BASE {self.REASON}\n" for c in (11, 15))
         r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, body=body, extra=["--body-from", sha])
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertNotIn("the push of", r.stdout)
+        self.assertNotIn("the body read is", r.stdout)
         r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, body="")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertNotIn("the push of", r.stdout)
+        self.assertNotIn("the body read is", r.stdout)
+        # A failure with no survivor still names the push: a refused line on a killed mutant (#6151, Lens), and an
+        # ambiguous waiver, are cured by a body edit too.
+        hint = f"the body read is the PR body as it stood at head {sha}"
+        refused = "Mutant-equivalent: broker/netguard/a.go:2:11:ARITHMETIC_BASE not equivalent, a real survivor\n"
+        r = Verify().verify({"netguard.json": self.result("KILLED")}, src=self.SRC, body=refused,
+                            extra=["--body-from", sha])
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("says its mutant is not equivalent", r.stdout)
+        self.assertNotIn("survives", r.stdout)
+        self.assertIn(hint, r.stdout)
+        r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, extra=["--body-from", sha],
+                            body=f"Mutant-equivalent: broker/netguard/a.go:2 {self.REASON}\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("matches 2 mutants", r.stdout)
+        self.assertIn(hint, r.stdout)
+        # --body-from without --body names a push whose body the gate never read (#6151, Security): refused.
+        r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, extra=["--body-from", sha])
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("give --body too", r.stderr)
         # Only a full commit sha is a push: anything else is refused before the gate reads a result.
         for bad in ("1adcc9bd", "HEAD", sha.upper(), sha + "0", "-x"):
             r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, body="",

@@ -2365,7 +2365,15 @@ def decide(results, added, tests, args, records=({}, [])):
               + ", ".join(site_text((p, n, k, c)) for p, n, k, c in hit) + "), so it waives none: name the one it "
               "proves by its column and kind, `Mutant-equivalent: <path>:<line>:<col>:<KIND> <reason>`")
     refuse_not_equivalent(refused)
-    return report_violations(found, lost, getattr(args, "body_from", None)) or (1 if stale or refused else 0)
+    rc = report_violations(found, lost) or (1 if stale or refused else 0)
+    # MUT-stale-body (#6077): the workflow passes the event's body, which "Re-run failed jobs" reuses, so a
+    # line added or reworded after the push is unread here although the current body holds it. Every failure
+    # can call for a body edit (a new, refused or ambiguous line), so each says which body this was.
+    if rc and getattr(args, "body_from", None):
+        print(f"mutgate: the body read is the PR body as it stood at head {args.body_from}, when the event that "
+              "started this run fired (the PR's opening, a push or a reopening); a line added to the body after "
+              "that is not read by this run or a rerun of it, so it counts only from the next push")
+    return rc
 
 
 def write_summary(path, text):
@@ -2596,7 +2604,7 @@ def cmd_gate(args):
     return decide(results, added, tests, args, records) or (1 if bad else 0)
 
 
-def report_violations(found, lost=(), body_from=None):
+def report_violations(found, lost=()):
     # Each line ends with the mutant's own waiver line, path:line:col:KIND, so two of one kind on a line
     # read apart, and the line pastes as printed with no backtick or bracket around it (#5828).
     for pkg, path, line, kind, col in found:
@@ -2614,12 +2622,6 @@ def report_violations(found, lost=(), body_from=None):
               "`Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>` (`Mutant-uncovered:` for one no test "
               "can reach) to the PR body for that mutant "
               "(its column and kind as the summary's Site and Mutant cells give them, where its line holds another)")
-        # MUT-stale-body (#6077): the workflow passes the event's body, which "Re-run failed jobs" reuses, so a
-        # line added after the push is unread here although the current body holds it. Say which body this was.
-        if body_from:
-            print(f"mutgate: the body read is the PR body as it stood at the push of {body_from}, the event that "
-                  "started this run; a line added to the body after that push is not read by this run or a rerun "
-                  "of it, so it counts only from the next push")
     return 1 if found else 0
 
 
@@ -2694,11 +2696,13 @@ def main(argv=None):
         p.add_argument("head", nargs="?", default="HEAD")
         p.add_argument("--body", metavar="FILE", help="the PR body, read as text for Mutant-equivalent lines")
         p.add_argument("--body-from", metavar="SHA", type=commit_sha,
-                       help="the PR head of the push event whose body FILE is; a failure names it (#6077)")
+                       help="the PR head of the event whose body FILE is; a failure names it (#6077)")
         p.add_argument("--summary", metavar="FILE", help="append the table of verdicts here")
     args = ap.parse_args(argv)
     if args.cmd == "run" and (not 0 <= args.shard < args.of <= MATRIX_MAX or (args.of > 1 and not args.git)):
         ap.error(f"--shard I --of K needs 0 <= I < K <= {MATRIX_MAX}, and --git when K > 1")
+    if getattr(args, "body_from", None) and not args.body:
+        ap.error("--body-from names the event whose body --body holds: give --body too")
     if args.cmd == "packages":
         print("\n".join(gated_packages()))
         return 0
