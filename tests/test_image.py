@@ -7998,6 +7998,9 @@ class IgnoredValueTest(unittest.TestCase):
         nodump(self.root)
         write(self.root, "etc/machine-id", "uninitialized\n")
         self.assertEqual(check.dump_violations(self.root), [])
+        # Debian's own drop-in, before the image's.
+        write(self.root, "usr/lib/systemd/system.conf.d/10-coredump-debian.conf", "[Manager]\nDefaultLimitCORE=0:infinity\n")
+        self.assertEqual(check.dump_violations(self.root), [])
         for rel, text, want in (
                 ("etc/systemd/coredump.conf.d/zz.conf", "[Coredump]\nStorage=\n",
                  "50-agentos-nodump.conf: coredump Storage is Storage= in etc/systemd/coredump.conf.d/zz.conf is a "

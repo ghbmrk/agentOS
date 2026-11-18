@@ -1988,7 +1988,8 @@ SERVICE_TYPES = ("simple", "exec", "forking", "oneshot", "dbus", "notify", "noti
 DEVICE_POLICIES = ("auto", "closed", "strict")
 COREDUMP_STORAGES = ("none", "external", "journal")
 LIMIT_ZERO = ("0", "0:0")
-LIMIT_FORMS = LIMIT_ZERO + ("infinity",)
+# Debian ships DefaultLimitCORE=0:infinity (systemd.conf.d/10-coredump-debian.conf), which the image overrides.
+LIMIT_FORMS = LIMIT_ZERO + ("infinity", "0:infinity")
 
 
 class Form:
