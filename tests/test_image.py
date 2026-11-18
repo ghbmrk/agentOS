@@ -7926,13 +7926,32 @@ class IgnoredValueTest(unittest.TestCase):
                 ("Type", "oneshot", lambda f: check.keeper_unit_violations(
                     unit, f + self.files("[Service]\nRuntimeMaxSec=9\n"), str(self.root)),
                  "RuntimeMaxSec= has no effect on a Type=oneshot unit")):
-            with self.subTest(key=key):
-                got = " | ".join(run(self.files("[Service]\n%s=%s\n" % (key, val), "[Service]\n%s=\n" % key)))
-                self.assertIn(want, got)
+            # L3 on #6128: a non-empty value the parser rejects is ignored the same way.
+            for later in ("", "garbage"):
+                with self.subTest(key=key, later=later):
+                    got = " | ".join(run(self.files("[Service]\n%s=%s\n" % (key, val), "[Service]\n%s=%s\n" % (key, later))))
+                    self.assertIn(want, got)
         for key in ("StandardInput", "StandardOutput", "StandardError"):
-            with self.subTest(key=key):
-                paths = check.manager_paths(self.files("[Service]\n%s=file:/var/lib/x\n" % key, "[Service]\n%s=\n" % key))
-                self.assertIn((key, "file:/var/lib/x", "/var/lib/x"), paths)
+            for later in ("", "garbage", "file:", "file:relative"):
+                with self.subTest(key=key, later=later):
+                    paths = check.manager_paths(self.files("[Service]\n%s=file:/var/lib/x\n" % key,
+                                                           "[Service]\n%s=%s\n" % (key, later)))
+                    self.assertIn((key, "file:/var/lib/x", "/var/lib/x"), paths)
+        # Security on #6128: a slice name systemd cannot load is ignored, so the keeper slice stays.
+        for later in ("a b.slice", "x/y.slice", ".slice"):
+            with self.subTest(slice=later):
+                got = " | ".join(check.keeper_unit_violations(unit, self.files(
+                    "[Service]\nSlice=agentos-keeper.slice\n", "[Service]\nSlice=%s\n" % later), str(self.root)))
+                self.assertIn("in agentos-keeper.slice but not one of the keeper's units", got)
+        # A zero interval does not bound restarts; a later value parse_sec rejects keeps it.
+        for later in ("", "garbage", "1x2y", "abc", "1x"):
+            with self.subTest(later=later):
+                got = " | ".join(check.keeper_unit_violations("agentos-keeper-kernel.service", self.files(
+                    "[Unit]\nStartLimitIntervalSec=0\n", "[Unit]\nStartLimitIntervalSec=%s\n" % later), str(self.root)))
+                self.assertIn("StartLimitIntervalSec is 0; a zero or unset interval does not bound restarts", got)
+        for good in ("30", "1min 30s", "1.5h", "infinity"):
+            with self.subTest(good=good):
+                self.assertTrue(check.is_sec(good))
         # A path unit starts the first unit it names; a later Unit=, empty or not, is ignored.
         for later in ("", "agentos-keeper-enroll.service"):
             with self.subTest(later=later):

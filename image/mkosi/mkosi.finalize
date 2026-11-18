@@ -1396,7 +1396,7 @@ def journal_flush_violations(root):
     """#6095 (R1): journald writes to /var/log/journal only once systemd-journal-flush.service has asked it
     to (server_system_journal_open, systemd 257.7); until then, Storage=persistent or not, the journal is in
     /run and a reboot loses it. So the unit is there, not masked (a link or an empty file), started by
-    sysinit.target (the link systemd installs), and changed by no drop-in of its own name."""
+    sysinit.target (the link systemd installs), and changed by no drop-in systemd applies to it."""
     root = str(root)
     dirs, out = unit_dirs(root)
     unit = next((Conf(root, d + "/" + JOURNAL_FLUSH) for d in dirs if tree_lstat(root, d + "/" + JOURNAL_FLUSH)), None)
@@ -1413,7 +1413,7 @@ def journal_flush_violations(root):
         wanted = False
     if not wanted:
         out.append("%s: not in sysinit.target.wants; %s" % (JOURNAL_FLUSH, why))
-    for f in conf_files(root, ["%s/%s.d" % (d, JOURNAL_FLUSH) for d in UNIT_PATHS]):
+    for f in unit_dropins(root, JOURNAL_FLUSH):  # its name's, each "-" prefix's and service.d (Security on #6128)
         out.append("%s: a drop-in for %s; the tree check does not model a change to it (remove it)" % (f.rel, JOURNAL_FLUSH))
     return out
 
@@ -1954,19 +1954,40 @@ TRUE_WORDS = ("1", "yes", "y", "true", "t", "on")
 FALSE_WORDS = ("0", "no", "n", "false", "f", "off")
 # #6095 (R4): the values a parser takes where systemd ignores any other, the empty one included, and
 # keeps the one before it (ini_last's VALID; read from systemd 257.7's source). Where VALID is bool (any
-# non-empty value), the check refuses every value it does not pass, so only the empty one needs skipping.
+# non-empty value), the check refuses every value it does not pass (any non-empty garbage included), so only
+# the empty one needs skipping; a check that refuses only some values gets the parser's own predicate.
 SERVICE_TYPES = ("simple", "exec", "forking", "oneshot", "dbus", "notify", "notify-reload", "idle")
 DEVICE_POLICIES = ("auto", "closed", "strict")
 COREDUMP_STORAGES = ("none", "external", "journal")
+# The bare words file, append and truncate are left out: systemd may keep the path an earlier value set, so
+# the check keeps that value and its path (Security on #6128: this can only refuse more).
 STD_WORDS = {"StandardInput": ("null", "tty", "tty-force", "tty-fail", "socket", "fd", "data"),
              "StandardOutput": ("inherit", "null", "tty", "kmsg", "kmsg+console", "journal", "journal+console",
-                                "socket", "fd")}
+                                "socket", "fd", "syslog", "syslog+console")}
 STD_PREFIXES = {"StandardInput": ("fd:", "file:"), "StandardOutput": ("fd:", "file:", "append:", "truncate:")}
+
+
+# unit_name_is_valid for a plain slice (unit-name.c's VALID_CHARS, at most 255 bytes); manager_load_unit
+# refuses any other name, so config_parse_unit_slice ignores it.
+SLICE_NAME = re.compile(r"[A-Za-z0-9:_.\\-]{1,249}\.slice")
 
 
 def is_bool(v):
     """parse_boolean."""
     return v.lower() in TRUE_WORDS + FALSE_WORDS
+
+
+# parse_sec's units (systemd 257.7 time-util.c), longest first so a regex alternation takes the whole word.
+SEC_UNITS = ("seconds", "minutes", "months", "second", "minute", "month", "hours", "years", "weeks",
+             "msec", "usec", "hour", "year", "week", "days", "sec", "min", "day", "hr", "ms", "us", "\u00b5s",
+             "\u03bcs", "s", "m", "h", "d", "w", "M", "y")
+SEC = re.compile(r"\s*(infinity|(\d+(\.\d*)?|\.\d+)\s*(%s)?(\s*(\d+(\.\d*)?|\.\d+)\s*(%s)?)*)\s*"
+                 % ("|".join(SEC_UNITS), "|".join(SEC_UNITS)))
+
+
+def is_sec(v):
+    """parse_sec: "infinity", or numbers each with an optional unit."""
+    return bool(SEC.fullmatch(v))
 
 
 def private_tmp_valid(v):
@@ -1978,10 +1999,11 @@ def resolve_valid(v):
 
 
 def std_valid(key):
-    """config_parse_exec_input/_output's values for KEY (StandardError= as StandardOutput=): a word, or a
-    prefix with something after it."""
+    """config_parse_exec_input/_output's values for KEY (StandardError= as StandardOutput=): a word, "fd:" and
+    any name (an empty one included), or a file prefix and an absolute path, perhaps behind a specifier."""
     kind = "StandardInput" if key == "StandardInput" else "StandardOutput"
-    return lambda v: v in STD_WORDS[kind] or any(v.startswith(p) and v != p for p in STD_PREFIXES[kind])
+    return lambda v: v in STD_WORDS[kind] or v.startswith("fd:") or any(
+        v.startswith(p) and v[len(p):][:1] in ("/", "%") for p in STD_PREFIXES[kind] if p != "fd:")
 
 
 def unit_with_dropins(root, dirs, name):
@@ -3176,7 +3198,7 @@ def keeper_unit_violations(name, files, root):
     keeper = name in KEEPER_UNITS
     if name.startswith(KEEPER_PREFIX) and not keeper:
         out.append("%s: an agentos-keeper unit not in KEEPER_UNITS; the keeper group is listed in one place (D-154)" % name)
-    slice_ = ini_last(files, "Service", "Slice", lambda v: v.endswith(".slice"))
+    slice_ = ini_last(files, "Service", "Slice", SLICE_NAME.fullmatch)
     if keeper and slice_ != KEEPER_SLICE:
         out.append("%s: Slice is %s; the keeper's units run in %s (D-154)" % (name, slice_, KEEPER_SLICE))
     if not keeper and slice_ == KEEPER_SLICE:
@@ -3277,7 +3299,7 @@ def keeper_unit_violations(name, files, root):
         if burst is None or not burst.isdigit() or not 1 <= int(burst) <= START_LIMIT_MAX:
             out.append("%s: StartLimitBurst is %s; must be 1 to %d, so a crash loop cannot wear the TPM counter (#2897)"
                        % (name, burst, START_LIMIT_MAX))
-        interval = ini_last(files, "Unit", "StartLimitIntervalSec", bool)
+        interval = ini_last(files, "Unit", "StartLimitIntervalSec", is_sec)
         if interval is None or re.fullmatch(r"0+(\.0*)?\s*[a-z]*", interval):
             out.append("%s: StartLimitIntervalSec is %s; a zero or unset interval does not bound restarts (#2897)"
                        % (name, interval))

@@ -511,10 +511,14 @@ class WipeJournalTest(unittest.TestCase):
         link.unlink()
         self.assertEqual(self.journald(), ["systemd-journal-flush.service: not in sysinit.target.wants; " + why])
         link.symlink_to("../systemd-journal-flush.service")
-        dropin = "etc/systemd/system/systemd-journal-flush.service.d/x.conf"
-        write(self.root, dropin, "[Service]\nExecStart=\n")
-        self.assertEqual(self.journald(), [dropin + ": a drop-in for systemd-journal-flush.service; the tree check "
-                                           "does not model a change to it (remove it)"])
+        # Security on #6128: every directory whose drop-ins systemd applies to the unit, prefixes and service.d too.
+        for d in ("systemd-journal-flush.service.d", "systemd-journal-.service.d", "systemd-.service.d", "service.d"):
+            with self.subTest(d=d):
+                dropin = "etc/systemd/system/%s/x.conf" % d
+                write(self.root, dropin, "[Service]\nExecStart=\nExecStart=/bin/true\n")
+                self.assertIn(dropin + ": a drop-in for systemd-journal-flush.service; the tree check "
+                              "does not model a change to it (remove it)", self.journald())
+                (self.root / dropin).unlink()
 
 
 if __name__ == "__main__":
