@@ -436,6 +436,13 @@ POLICY_RUN = ("run/polkit-1/rules.d",)
 BUS_DAEMON_UNITS = ("dbus.service", "dbus.socket")
 BUS_SOCKET = "/run/dbus/system_bus_socket"
 BUS_ADDRESS = "--address=systemd:"
+# #6037: the two commands dbus.service may run, each exactly this program, and the words its lines may
+# hold: none that systemd rewrites ($ and % expand, \ unescapes, quotes join words, a leading -@:+!|
+# changes how or as whom it runs, and ";" was once a command separator).
+BUS_DAEMON = "/usr/bin/dbus-daemon"
+BUS_RELOAD = "/usr/bin/dbus-send"
+BUS_COMMANDS = {("Service", "ExecStart"): BUS_DAEMON, ("Service", "ExecReload"): BUS_RELOAD}
+BUS_WORD = re.compile(r"[\w/.,:=-]+")
 
 _MAKERS = None  # #1829: tmpfiles_makers, tmpfiles_removers and unit_made_dirs by root inside once(), else None
 
@@ -1912,9 +1919,15 @@ def unit_with_dropins(root, dirs, name):
     unit = next((Conf(root, d + "/" + name) for d in dirs if tree_lstat(root, d + "/" + name)), None)
     if unit is None:
         return None
+    return [unit] + unit_dropins(root, name)
+
+
+def unit_dropins(root, name):
+    """Every drop-in systemd 257.13 applies to unit NAME, in its order, whether or not a file holds the unit
+    (a transient unit has drop-ins alone)."""
     typ = name.rsplit(".", 1)[1]
-    return [unit] + conf_files(root, ["%s/%s.d" % (d, n) for d in UNIT_PATHS for n in unit_dropin_names(name)]
-                               + ["%s/%s.d" % (d, typ) for d in UNIT_PATHS])
+    return conf_files(root, ["%s/%s.d" % (d, n) for d in UNIT_PATHS for n in unit_dropin_names(name)]
+                      + ["%s/%s.d" % (d, typ) for d in UNIT_PATHS])
 
 
 def service_dir(root, d):
@@ -2798,7 +2811,7 @@ def keeper_violations(root):
                            % (n, svc))
     for n in sorted(set(paths)):
         out += keeper_path_violations(n, unit_with_dropins(root, dirs, n))
-    out += sysusers_tpm_violations(root)
+    out += sysusers_tpm_violations(root) + bus_keep_violations(root, dirs)
     return out
 
 
@@ -2806,21 +2819,40 @@ def bus_unit_violations(name, files):
     """IMG-dbus-reach (#5818): agentos service NAME, read from FILES, masks BUS_DIR unless it is one of
     BUS_UNITS or NOEXEC_EXEMPT, its root is a driver's empty one (driver_root), or its own empty tmpfs
     leaves the directory out of view (tmpfs_hides; a mask there fails the unit, 226/NAMESPACE). The entry
-    takes "-" exactly when NAME is one of BUS_EARLY. ValueError as ini_paths."""
+    takes "-" exactly when the unit sets DefaultDependencies=no (#6037): only such a unit may start before
+    sockets.target, so before dbus.socket makes the directory. ValueError as ini_paths."""
     if name in BUS_UNITS + NOEXEC_EXEMPT or driver_root(name, files) or tmpfs_hides(files, BUS_DIR):
         return []
     hidden = ini_paths(files, "Service", "InaccessiblePaths")
     words = [w for v in ini_entries(files, "Service", "InaccessiblePaths") for w in v.split()]
+    early = (ini_last(files, "Unit", "DefaultDependencies") or "yes").lower() in FALSE_WORDS
     if BUS_DIR not in hidden:
         return ["%s: InaccessiblePaths does not hold %s; a unit that makes no bus call never sees the system "
                 "bus (#5818)" % (name, BUS_DIR)]
-    if name in BUS_EARLY and "-" + BUS_DIR not in words:
-        return ["%s: InaccessiblePaths=%s fails the unit (226/NAMESPACE): it starts before dbus.socket makes "
-                "the directory, so the entry takes \"-\" (#5818)" % (name, BUS_DIR)]
-    if name not in BUS_EARLY and BUS_DIR not in words:
-        return ["%s: InaccessiblePaths=-%s gives no mask while the directory is missing; the unit starts after "
-                "dbus.socket makes it (#5818)" % (name, BUS_DIR)]
+    if early and "-" + BUS_DIR not in words:
+        return ["%s: InaccessiblePaths=%s fails the unit (226/NAMESPACE): with DefaultDependencies=no it may start "
+                "before dbus.socket makes the directory, so the entry takes \"-\" (#5818)" % (name, BUS_DIR)]
+    if not early and BUS_DIR not in words:
+        return ["%s: InaccessiblePaths=-%s gives no mask while the directory is missing; with default dependencies "
+                "the unit starts after dbus.socket makes it (#5818)" % (name, BUS_DIR)]
     return []
+
+
+def bus_keep_violations(root, dirs):
+    """#6037: each BUS_UNITS unit, its file (none for the transient agentos-kernel-reboot.service) and every
+    drop-in systemd applies to it, lifts only BUS_DIR from the main side's mask: its InaccessiblePaths= is
+    KEEPER_PATHS exactly."""
+    out = []
+    for name in BUS_UNITS:
+        files = unit_with_dropins(root, dirs, name) or unit_dropins(root, name)
+        try:
+            got = sorted(ini_paths(files, "Service", "InaccessiblePaths"))
+        except ValueError as e:
+            got = [str(e)]
+        if got != sorted(KEEPER_PATHS):
+            out.append("%s: InaccessiblePaths=%s; a unit that keeps the bus masks the rest of the keeper's state, "
+                       "%s (#6037)" % (name, " ".join(got), " ".join(KEEPER_PATHS)))
+    return out
 
 
 def keeper_path_violations(name, files):
@@ -3019,18 +3051,19 @@ EMPTY_ROOT_UNITS = ("agentos-imapconn@.service",)
 # with "-": its stop, at shutdown, is a command of its own, when every path exists.
 MOR_UNIT = "agentos-mor.service"
 MOR_LISTED = ("/run/agentos-setup", "/run/agentos-link-capture")
-# IMG-dbus-reach (#5818): the system bus's directory. dbus-daemon runs as root and stock system.conf lets
+# IMG-dbus-reach (#5818): the system bus's directory. dbus-daemon is long-lived and stock system.conf lets
 # any local uid connect, so every agentos service masks it but BUS_UNITS, whose `systemctl reboot` asks
 # logind over the bus (--check-inhibitors=yes lists inhibitors; plain reboot goes through logind first).
 # agentos-kernel-reboot.service is the transient unit KERNEL_REBOOT starts; a drop-in lifts the mask for
-# it by name, as for the other two, and the tree check has no file of that name to weigh.
-# Root's other systemctl calls reach PID 1 on /run/systemd/private, not the bus. BUS_EARLY start before
-# sockets.target, so before dbus.socket makes the directory: their entry takes "-" (both are oneshots whose
-# command runs once; agentos-mor's stop gets a namespace of its own at shutdown). Every other service is
-# ordered after sockets.target (DefaultDependencies), so the directory is there and the entry takes no "-".
+# it by name, as for the other two, and bus_keep_violations weighs its drop-ins alone. A package that makes
+# another unit take a logind inhibitor adds it here (image/ASSUMPTIONS.md, UPD-10). Root's other systemctl
+# calls reach PID 1 on /run/systemd/private, not the bus. A unit with DefaultDependencies=no may start before
+# sockets.target, so before dbus.socket makes the directory: its entry takes "-" (agentos-inbound and
+# agentos-mor are oneshots whose command runs once; agentos-mor's stop gets a namespace of its own at
+# shutdown). Every other service is ordered after sockets.target, so the directory is there and the entry
+# takes no "-".
 BUS_DIR = "/run/dbus"
 BUS_UNITS = ("agentos-fallback.service", "agentos-kernel-reboot.service", "agentos-reboot.service")
-BUS_EARLY = ("agentos-inbound.service", MOR_UNIT)
 
 
 def driver_root(name, files):
@@ -4098,12 +4131,15 @@ def bus_daemon_files(root, name):
 
 
 def bus_daemon_violations(root):
-    """#5818: the system bus listens only on dbus.socket. Across every file systemd merges into dbus.service,
-    one ExecStart= runs dbus-daemon with BUS_ADDRESS as its one --address (no --config-file, which could
-    name another config), and no other Exec*= line runs a command but ExecReload='s dbus-send; across
-    dbus.socket's, no Exec*= line at all, and every Listen* entry is ListenStream=BUS_SOCKET, and there
-    is one. A unit the image does not ship is not weighed: no bus runs without dbus.service, and
-    dbus.service with BUS_ADDRESS fails without its socket."""
+    """#5818, #6037: the system bus listens only on dbus.socket, read as systemd runs the units' commands.
+    Across every file systemd merges into dbus.service, one ExecStart= runs exactly BUS_DAEMON with
+    BUS_ADDRESS as its one --address (no --config-file, which could name another config), every ExecReload=
+    runs exactly BUS_RELOAD, and no other Exec*= or Sockets= line is set; each word of those lines is a
+    BUS_WORD, so no prefix, specifier, variable, escape, quote or ";" makes systemd run other than the words
+    read here. Across dbus.socket's, no Exec*= line at all, every Listen* entry is ListenStream=BUS_SOCKET,
+    there is one, and Service= may only be dbus.service. No other socket may start dbus.service and no
+    other service may take dbus.socket. A unit the image does not ship is not weighed: no bus runs without
+    dbus.service, and dbus.service with BUS_ADDRESS fails without its socket."""
     out = []
     for name, key in (("dbus.service", "Service"), ("dbus.socket", "Socket")):
         files = bus_daemon_files(root, name)
@@ -4117,36 +4153,63 @@ def bus_daemon_violations(root):
         tops = [f for f in files if f.name == name and not f.rel.endswith(".d/" + name)]
         files = tops[:1] + [f for f in files if f not in tops]
         try:
-            # Every other command line either unit runs: dbus.service's ExecReload= may only ask the bus to
-            # reload (dbus-send, as stock), and nothing else may start a process beside the daemon.
             for k in sorted(ini_keys(files, key)):
-                if not k.startswith("Exec") or k in ("ExecStart", "ExecSearchPath"):
-                    continue
-                for v in ini_entries(files, key, k):
-                    w = v.lstrip("-@:+!|").split()
-                    if not (key == "Service" and k == "ExecReload" and w and w[0].endswith("/dbus-send")
-                            and "dbus-daemon" not in v):
-                        out.append("%s: %s=%s; the bus units run dbus-daemon from ExecStart= alone, and reload only "
-                                   "through dbus-send (#5818)" % (name, k, v))
+                if k == "Sockets" or (k.startswith("Exec") and (key, k) not in BUS_COMMANDS):
+                    out.append("%s: %s= is set; the bus units run dbus-daemon from ExecStart= alone, reload only "
+                               "through dbus-send, and take no socket but dbus.socket (#5818)" % (name, k))
             if key == "Service":
                 cmds = ini_entries(files, key, "ExecStart")
                 if len(cmds) > 1:
                     out.append("%s: %d ExecStart= lines; the system bus is one dbus-daemon (#5818)" % (name, len(cmds)))
-                for v in cmds or [""]:
-                    w = v.lstrip("-@:+!|").split()
-                    addr = [x for x in w if x.startswith("--address")]
-                    if not w or not w[0].endswith("/dbus-daemon") or addr != [BUS_ADDRESS] or any(
-                            x.startswith("--config-file") for x in w):
-                        out.append("%s: ExecStart=%s; the system bus is dbus-daemon with %s alone, its one socket "
-                                   "from dbus.socket (#5818)" % (name, v, BUS_ADDRESS))
+                for k, prog in BUS_COMMANDS.items():
+                    for v in ini_entries(files, key, k[1]) or ([""] if k[1] == "ExecStart" else []):
+                        w = v.split()
+                        bad = [x for x in w if not BUS_WORD.fullmatch(x)]
+                        if bad:
+                            out.append("%s: %s=%s; %s is a word systemd rewrites or splits (a prefix, specifier, "
+                                       "variable, escape, quote or \";\"), so the command it runs is not the one "
+                                       "read here (#6037)" % (name, k[1], v, bad[0]))
+                        elif not w or w[0] != prog or (k[1] == "ExecStart" and (
+                                [x for x in w if x.startswith("--address")] != [BUS_ADDRESS]
+                                or any(x.startswith("--config-file") for x in w))):
+                            out.append("%s: %s=%s; the system bus runs %s with %s alone, its one socket from "
+                                       "dbus.socket, and reloads through %s (#5818)"
+                                       % (name, k[1], v, BUS_DAEMON, BUS_ADDRESS, BUS_RELOAD))
             else:
                 listens = [(k, v) for k in sorted(ini_keys(files, key)) if k.startswith("Listen")
                            for v in ini_entries(files, key, k)]
                 if listens != [("ListenStream", BUS_SOCKET)]:
                     out.append("%s: listens on %s; the system bus listens on ListenStream=%s alone (#5818)"
                                % (name, ", ".join("%s=%s" % x for x in listens) or "nothing", BUS_SOCKET))
+                for v in ini_all(files, key, "Service"):
+                    if v != "dbus.service":
+                        out.append("%s: Service=%s; the bus socket starts dbus.service alone (#6037)" % (name, v))
         except ValueError as e:
             out.append("%s: %s; the tree check never passes what it cannot read (#5818)" % (name, e))
+    return out + bus_reach_violations(root)
+
+
+def bus_reach_violations(root):
+    """#6037: no file under the unit directories (unit_files: any unit, drop-in or link target, in any
+    section's sense) but dbus.socket's own sets a [Socket] Service= that may name dbus.service (may_name: a
+    specifier or variable stands for any text), and none but dbus.service's own a [Service] Sockets= that
+    may name dbus.socket: either would put a second listener on the bus, or hand its socket to another
+    process. A generic socket.d or service.d drop-in is no unit's own."""
+    out = []
+    for rel in sorted(unit_files(root)[0]):
+        for section, key, own, other in (("Socket", "Service", "dbus.socket", "dbus.service"),
+                                         ("Service", "Sockets", "dbus.service", "dbus.socket")):
+            parts = rel.split("/")
+            if parts[-1] == own or parts[-2] == own + ".d":
+                continue
+            try:
+                vals = [w for v in ini_all([Conf(root, rel)], section, key) for w in v.split()]
+            except ValueError as e:
+                vals = [str(e)]
+            for v in vals:
+                if v.startswith("unreadable ") or may_name(v, other):
+                    out.append("%s: [%s] %s=%s; only %s is the system bus's %s (#6037)"
+                               % (rel, section, key, v, own, section.lower()))
     return out
 
 

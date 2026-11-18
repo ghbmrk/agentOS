@@ -594,6 +594,35 @@ class ReadErrorTest(unittest.TestCase):
             got = self.initrd_build(d)
         self.assertEqual(got, {"initrd:link.img": str(i / "link.img"), "initrd:sub/main.img": str(i / "sub/main.img")})
 
+    def tree_with_stat_error(self, err):
+        """run_tree over a tree whose one ELF file's lstat (either spelling) raises ERR."""
+        real = os.stat
+
+        def fake(path, *a, **k):
+            if os.fspath(path).endswith("/usr/bin/tampered") and k.get("follow_symlinks") is False:
+                raise OSError(err, os.strerror(err), path)
+            return real(path, *a, **k)
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "usr/bin").mkdir(parents=True)
+            pathlib.Path(d, "usr/bin/tampered").write_bytes(b"\x7fELF" + b"\0" * 60)
+            with mock.patch.object(os, "stat", fake), \
+                    mock.patch.object(os, "lstat", lambda path: fake(path, follow_symlinks=False)):
+                return sweep.run_tree(d)
+
+    def test_a_stat_error_in_the_tree_fails_the_run_naming_the_file(self):
+        # #6098: the tree walk's lstat raised a bare traceback; it now gives the initrd loop's message.
+        for err in (errno.EIO, errno.EACCES):
+            with self.subTest(err=errno.errorcode[err]):
+                with self.assertRaises(SystemExit) as cm:
+                    self.tree_with_stat_error(err)
+                self.assertRegex(str(cm.exception), r"^import sweep: cannot read /\S+/usr/bin/tampered: %s$"
+                                 % re.escape(os.strerror(err)))
+
+    def test_a_file_gone_from_the_tree_is_not_scanned(self):
+        # Gone between the walk and its stat: not a file, as is_elf and the initrd loop read it.
+        got = self.tree_with_stat_error(errno.ENOENT)
+        self.assertEqual(got["tree"]["scanned"], 0)
+
     def test_vanished_short_and_plain_files_are_not_elf(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertFalse(sweep.is_elf(os.path.join(d, "gone")))

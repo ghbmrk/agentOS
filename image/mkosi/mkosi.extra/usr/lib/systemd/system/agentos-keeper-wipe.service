@@ -21,6 +21,13 @@ RemainAfterExit=yes
 ExecStop=/usr/bin/find /run/agentos-setup /run/agentos-link-capture -xdev -mindepth 1 -delete
 # Journal only (MOR-wipe-console, #6042): a failed find leaves MOR set (fail-safe); the owner cannot act on a console line.
 StandardError=journal
+# The error is kept on disk (image/ASSUMPTIONS.md MOR-wipe-journal, #6078), and the owner is told in
+# STATUS (MOR-wipe-owner, #6094): whatever the stop's result, this records it, removing the file on
+# success and writing it on any failure; agentosd's STATUS shows a line while it exists
+# (broker/cmd/agentosd/wipenote.go), so until a later shutdown's wipe succeeds.
+StateDirectory=agentos-wipe
+StateDirectoryMode=0700
+ExecStopPost=/usr/bin/sh -c 'if [ "$$SERVICE_RESULT" = success ]; then exec /usr/bin/rm -f -- "$$STATE_DIRECTORY/failed"; fi; echo "$$SERVICE_RESULT $$EXIT_CODE $$EXIT_STATUS" >"$$STATE_DIRECTORY/failed"'
 UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=full

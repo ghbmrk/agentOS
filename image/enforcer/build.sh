@@ -17,11 +17,15 @@
 # .usr-verity.raw, the boot entry, .release.json, .usr.list), and SHA256SUMS.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
-# The Debian archive keyring mkosi verifies the snapshot with: exactly the pinned keys (#5578, #5933).
-sh "$HERE/../debian-archive-keyring.sh"
 OUT=$(realpath -m "${1:-$HERE/out}"); MKOSI=${MKOSI:-mkosi}
-: "${ENFORCER_RELEASE_ROOT:?the enforcer feed root.json (ENFORCER_RELEASE_ROOT) is required}"
-: "${AGENTOS_RELEASE_KEYS:?the agentOS release keys to refuse (AGENTOS_RELEASE_KEYS) are required}"
+# The required inputs and the Debian archive keyring mkosi verifies the snapshot with (exactly the
+# pinned keys, #5578, #5933) are all checked before the build stops, so one attempt reports every
+# missing input (UX 3 on #5961).
+bad=0
+[ -n "${ENFORCER_RELEASE_ROOT-}" ] || { echo "build.sh: the enforcer feed root.json (ENFORCER_RELEASE_ROOT) is required" >&2; bad=1; }
+[ -n "${AGENTOS_RELEASE_KEYS-}" ] || { echo "build.sh: the agentOS release keys to refuse (AGENTOS_RELEASE_KEYS) are required" >&2; bad=1; }
+sh "$HERE/../debian-archive-keyring.sh" || bad=1
+[ "$bad" = 0 ] || exit 1
 SOURCE_DATE_EPOCH=$(git -c safe.directory="$REPO" -C "$REPO" log -1 --format=%ct); export SOURCE_DATE_EPOCH
 VERSION=${2:-$(TZ=UTC git -c safe.directory="$REPO" -C "$REPO" log -1 --date=format-local:%Y%m%d.%H%M%S --format=%cd)}
 KEYS=
