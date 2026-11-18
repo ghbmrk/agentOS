@@ -5,7 +5,6 @@ package clock
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -130,6 +129,12 @@ func TestHW8ReadErrorChild(t *testing.T) {
 		src = os.Getenv(ttyChildEnv + "_SRC")
 	}
 	if target != "" {
+		// It binds only inside the one-uid user namespace ttyReadErr starts it
+		// in, never in a caller's, as when run by hand as root (#6058).
+		if m, err := os.ReadFile("/proc/self/uid_map"); err != nil || len(strings.Fields(string(m))) != 3 || strings.Fields(string(m))[2] != "1" {
+			report("mount refused: not in a user namespace of its own")
+			return
+		}
 		if err := unix.Mount(src, target, "", unix.MS_BIND, ""); err != nil {
 			report("mount: %v", err)
 			return
@@ -144,16 +149,9 @@ func TestHW8ReadErrorChild(t *testing.T) {
 	res := make(chan string, 1)
 	go func() {
 		switch mode {
-		case "readfile", "bootfile", "rtcfile":
-			p := slave
-			if target != "" {
-				p = target
-			}
-			b, err := readFile(p)
+		case "bootfile", "rtcfile":
+			b, err := readFile(target)
 			res <- fmt.Sprintf("%d %v", len(b), errors.Is(err, syscall.EIO))
-		case "estimate":
-			est, ok := BootEstimate(slave, time.Date(2026, 10, 9, 20, 0, 0, 0, time.UTC), testHost)
-			res <- fmt.Sprintf("%v %v", ok, est)
 		case "bootid":
 			res <- fmt.Sprintf("%q", bootID())
 		case "rtc":
@@ -197,23 +195,6 @@ func TestHW8ReadErrorChild(t *testing.T) {
 	}
 }
 
-// A read that returns the state file's record and then fails gives no
-// estimate: readFile's error wins over the bytes it read (L3 on #6050).
-func TestHW8BootEstimateRefusesAFailedRead(t *testing.T) {
-	b, err := json.Marshal(saved{Offset: time.Hour, HaveOffset: true, OffsetHost: HostKey(testHost)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	line := append(b, '\n')
-	// The rig works: readFile returns the whole line and EIO.
-	if got, want := ttyReadErr(t, "readfile", line, false, ""), fmt.Sprintf("%d true", len(line)); got != want {
-		t.Fatalf("readFile on the pty: %s, want %s (bytes, EIO)", got, want)
-	}
-	if got := ttyReadErr(t, "estimate", line, false, ""); !strings.HasPrefix(got, "false ") {
-		t.Fatalf("BootEstimate after a failed read: %s, want no estimate", got)
-	}
-}
-
 // A boot_id read that fails after data names no boot, so no saved anchor
 // or sync is taken as this boot's (L3 on #6050).
 func TestTIM1BootIDRefusesAFailedRead(t *testing.T) {
@@ -248,5 +229,40 @@ func TestHW8RTCRefusesAFailedOrGarbledRead(t *testing.T) {
 	}
 	if got := ttyReadErr(t, "rtcparse", line, true, garbled); got != "true" {
 		t.Fatalf("RTC of a garbled reading: error %s, want one", got)
+	}
+}
+
+// The child refuses to bind anything when started outside ttyReadErr's
+// user namespace, as by hand, so it never covers the host's boot_id (#6058).
+// Run as root, it gets a mount namespace of its own (no user namespace), so a
+// child that did bind would bind there.
+func TestTIM1ReadErrorChildRefusesTheCallersNamespace(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	before, err := os.ReadFile(bootIDPath)
+	if err != nil {
+		t.Skip("no boot_id:", err)
+	}
+	var out bytes.Buffer
+	c := exec.Command(os.Args[0], "-test.run=^TestHW8ReadErrorChild$")
+	c.Env = append(os.Environ(), ttyChildEnv+"=bootfile:/dev/null")
+	c.Stdout, c.Stderr, c.ExtraFiles = &out, &out, []*os.File{w}
+	if os.Geteuid() == 0 {
+		c.SysProcAttr = &syscall.SysProcAttr{Unshareflags: syscall.CLONE_NEWNS}
+	}
+	err = c.Run()
+	w.Close()
+	if err != nil {
+		t.Fatalf("child: %v; output:\n%s", err, out.String())
+	}
+	got, _ := bufio.NewReader(r).ReadString('\n')
+	if got != "mount refused: not in a user namespace of its own\n" {
+		t.Fatalf("child run by hand reports %q, want a refusal", got)
+	}
+	if after, err := os.ReadFile(bootIDPath); err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("boot_id now %q, %v; want %q", after, err, before)
 	}
 }

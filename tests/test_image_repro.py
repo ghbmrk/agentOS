@@ -1560,10 +1560,12 @@ class KeyringSpikesTest(unittest.TestCase):
         self.assertTrue(kit.read_text().split("\nTypes:")[1].startswith(" deb\nURIs: http://deb.debian.org/debian\n"))
 
     # What each tree may hold beside its config, and the keys its mkosi.conf may set (mkosi v24.3).
-    # None of these names a config, script, tree, mirror or keyring apt reads, except InitrdInclude=
-    # and Environment=, whose values are pinned below: so a second package manager tree, a drop-in
-    # (mkosi.conf.d, mkosi.local.conf), a skeleton or tools tree, an Include= or a sources tarball
-    # needs a deliberate edit here (Security 1 on #6082).
+    # None of these names a config, script, tree, mirror or keyring apt reads, except the PINNED keys,
+    # whose values each tree must set exactly as its own row says: so a second package manager tree, a
+    # drop-in (mkosi.conf.d, mkosi.local.conf), a skeleton or tools tree, an Include= or a sources
+    # tarball needs a deliberate edit here (Security 1 on #6082), and so does one tree taking another's
+    # pinned value, or dropping or repeating one (#6088). The walk opens no record directory; that none
+    # holds a tree is test_ci_scope's check, which may read git (#6088).
     NAMES = {
         "image/mkosi": {"mkosi.conf", "mkosi.configure", "mkosi.extra", "mkosi.finalize", "mkosi.pkgmngr",
                         "mkosi.postinst", "mkosi.repart"},
@@ -1577,8 +1579,16 @@ class KeyringSpikesTest(unittest.TestCase):
             "KernelModulesInitrdExclude", "Keymap", "Locale", "ManifestFormat", "Mirror", "Packages", "Release",
             "RemoveFiles", "RepartDirectories", "Repositories", "RootPassword", "Seed", "ShimBootloader",
             "SplitArtifacts", "Timezone", "UnifiedKernelImages", "WithDocs"}
-    PINNED = {"InitrdInclude": {"image/mkosi": ["initrd/"], "image/enforcer/mkosi": ["../../mkosi/initrd/"]},
-              "Environment": {"image/mkosi": ["SYSTEMD_REPART_MKFS_OPTIONS_EXT4=-Oquota,project"]}}
+    SNAPSHOT = "https://snapshot.debian.org/archive/debian/20261001T000000Z/"
+    PINNED = {
+        "image/mkosi": {"InitrdInclude": ["initrd/"], "Mirror": [SNAPSHOT], "Repositories": ["main"],
+                        "Environment": ["SYSTEMD_REPART_MKFS_OPTIONS_EXT4=-Oquota,project"]},
+        "image/mkosi/initrd": {},
+        "image/enforcer/mkosi": {"InitrdInclude": ["../../mkosi/initrd/"], "Mirror": [SNAPSHOT],
+                                 "Repositories": ["main"]},
+        "spikes/S1S2-testkit/mkosi": {"Repositories": ["main"]},
+    }
+    PINNED_KEYS = {"InitrdInclude", "Environment", "Mirror", "Repositories"}
     PKGMNGR = {"etc/apt/sources.list.d/mkosi.sources", "etc/apt/apt.conf.d/80-agentos-retries"}
 
     @staticmethod
@@ -1611,11 +1621,15 @@ class KeyringSpikesTest(unittest.TestCase):
         settings = self.settings(d / "mkosi.conf")
         if settings is None:
             why.append("mkosi.conf is not in the strict form")
+        pinned = {}
         for k, v in settings or []:
             if k not in self.KEYS:
                 why.append("mkosi.conf sets %s=, not on the list" % k)
-            elif k in self.PINNED and v != self.PINNED[k].get(tree):
-                why.append("mkosi.conf sets %s=%s" % (k, v))
+            elif k in self.PINNED_KEYS:
+                pinned.setdefault(k, []).append(v)
+        want = {k: [v] for k, v in self.PINNED[tree].items()}
+        if settings is not None and pinned != want:
+            why.append("mkosi.conf pins %s, not %s's own %s" % (pinned, tree, want))
         pm = d / "mkosi.pkgmngr"
         if pm.exists():
             retries = (MK / "mkosi.pkgmngr/etc/apt/apt.conf.d/80-agentos-retries").read_bytes()
@@ -1683,6 +1697,55 @@ class KeyringSpikesTest(unittest.TestCase):
             with self.subTest(tree=tree, case="none"), tempfile.TemporaryDirectory() as d:
                 copy = pathlib.Path(d, "t")
                 shutil.copytree(ROOT / tree, copy, symlinks=True)
+                self.assertEqual(self.apt_input_problems(copy, tree), [])
+
+    @staticmethod
+    def set_pinned(conf, key, values):
+        """Rewrite mkosi.conf CONF with every KEY= setting (and its continuation lines) removed, then
+        one KEY=v appended per v in VALUES."""
+        out, skip = [], False
+        for line in conf.read_text().splitlines():
+            if line.startswith(key + "="):
+                skip = True
+                continue
+            if skip and line[:1] in (" ", "\t") and line.strip():
+                continue
+            skip = False
+            out.append(line)
+        conf.write_text("\n".join(out + ["", "[Config]"] + ["%s=%s" % (key, v) for v in values]) + "\n")
+
+    def test_each_tree_is_held_to_its_own_pinned_values(self):
+        # REQ: IMG-keyring-spikes. #6088 failure paths 1 and 2: every pinned value is looked up by tree,
+        # so a tree that takes another tree's InitrdInclude=, Environment=, Mirror= or Repositories=
+        # (or drops its own) fails, and so does a changed, dropped, added or repeated Mirror= or Repositories=.
+        cases = []
+        for a in self.NAMES:
+            for b in self.NAMES:
+                for k in sorted(self.PINNED_KEYS):
+                    theirs = self.PINNED[b].get(k)
+                    if a != b and theirs != self.PINNED[a].get(k):
+                        cases.append((a, "%s from %s" % (k, b), k, [theirs[0]] if theirs else []))
+        for a in self.NAMES:
+            for k in ("Mirror", "Repositories"):
+                own = self.PINNED[a].get(k, [])
+                cases += [(a, k + " changed", k, ["https://deb.debian.org/debian/" if k == "Mirror" else "main,contrib"]),
+                          (a, k + " repeated", k, own * 2 or ["main"])]
+                if own:
+                    cases.append((a, k + " dropped", k, []))
+        swaps = {k for _, name, k, _ in cases if " from " in name}
+        self.assertEqual(swaps, self.PINNED_KEYS)  # each pinned key differs between some two trees
+        for tree, name, key, values in cases:
+            with self.subTest(tree=tree, case=name), tempfile.TemporaryDirectory() as d:
+                copy = pathlib.Path(d, "t")
+                shutil.copytree(ROOT / tree, copy, symlinks=True)
+                self.set_pinned(copy / "mkosi.conf", key, values)
+                self.assertTrue(self.apt_input_problems(copy, tree))
+        for tree in self.NAMES:  # the rewrite alone, with each tree's own values, changes nothing
+            with self.subTest(tree=tree, case="own values"), tempfile.TemporaryDirectory() as d:
+                copy = pathlib.Path(d, "t")
+                shutil.copytree(ROOT / tree, copy, symlinks=True)
+                for k, v in self.PINNED[tree].items():
+                    self.set_pinned(copy / "mkosi.conf", k, v)
                 self.assertEqual(self.apt_input_problems(copy, tree), [])
 
     def test_the_check_pins_no_keyring_that_no_build_names(self):
