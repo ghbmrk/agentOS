@@ -12,12 +12,16 @@ each phase of a session, and fails on any difference HW-8's disclosed list
                   failure, a hash of its data
   tpm-persistent  each persistent TPM object's name
   tpm-setting     hierarchy authorization flags and dictionary-attack settings
-  rtc             hardware-clock writes (QEMU's RTC_CHANGE events)
+  rtc             hardware-clock writes (QEMU's RTC_CHANGE events); on a PC,
+                  the RTC's offset from an SNTP reference, read from a third
+                  system (HOST-1e2b1)
 
 Subcommands:
   snapshot  record one host state: disks by path, UEFI variables from an
-            OVMF varstore or efivarfs, the TPM through a tpm2-tools TCTI
-  diff      compare two snapshots against the HW-8 list
+            OVMF varstore or efivarfs, the TPM through a tpm2-tools TCTI,
+            and with --rtc-reference the RTC's offset from that SNTP server
+  diff      compare two snapshots against the HW-8 list; --opted-in-disk
+            names the disk the owner gave agentOS (HW-8a)
   qemu      the whole run on a QEMU/OVMF/swtpm host: two firmware-only boots
             (baseline and firmware noise), then each phase in its own QEMU
             process, a snapshot after each. The image is an input: the
@@ -55,6 +59,10 @@ ALLOW = pathlib.Path(__file__).with_name("hostcheck_hw8.json")
 KINDS = ("disk", "uefi", "tpm-nv", "tpm-persistent", "tpm-setting")
 EFI_NON_VOLATILE = 0x1
 NV_OWNERREAD, NV_READLOCKED, NV_WRITTEN = 1 << 17, 1 << 28, 1 << 29
+RTC_DEVICE = "/sys/class/rtc/rtc0/since_epoch"
+RTC_TOLERANCE = 2.0  # seconds: sysfs edge and SNTP error plus a session's drift at tens of ppm
+NTP_EPOCH = 2208988800  # 1900-01-01 to 1970-01-01, in seconds
+STA_UNSYNC = 0x40
 TPM_SETTINGS = ("ownerAuthSet", "endorsementAuthSet", "lockoutAuthSet", "disableClear",
                 "TPM2_PT_MAX_AUTH_FAIL", "TPM2_PT_LOCKOUT_INTERVAL", "TPM2_PT_LOCKOUT_RECOVERY")
 
@@ -300,8 +308,91 @@ def tpm_snapshot(tcti):
     return {"tpm-nv": nv, "tpm-persistent": persistent, "tpm-setting": settings}
 
 
-def snapshot(disks, varstore=None, efivarfs=None, tcti=None):
+def to_ntp(t):
+    secs = int(t)
+    return ((secs + NTP_EPOCH) & 0xFFFFFFFF).to_bytes(4, "big") + int((t - secs) * (1 << 32)).to_bytes(4, "big")
+
+
+def from_ntp(b):
+    return int.from_bytes(b[:4], "big") - NTP_EPOCH + int.from_bytes(b[4:8], "big") / (1 << 32)
+
+
+def sntp_offset(server, port=123, timeout=5.0, tries=3):
+    """The server's time less this system's, from one SNTP exchange (RFC 4330).
+    Query only: this system's clock is never set. The reply must echo the
+    request's transmit time, so a stray or replayed packet is refused."""
+    last = None
+    for _ in range(tries):
+        with socket.socket(socket.AF_INET6 if ":" in server else socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(timeout)
+            t1 = time.time()
+            req = bytearray(48)
+            req[0] = (4 << 3) | 3  # version 4, client
+            req[40:48] = secrets.token_bytes(8)  # a nonce in the transmit field, echoed back
+            try:
+                sock.sendto(bytes(req), (server, port))
+                data, _ = sock.recvfrom(512)
+            except OSError as e:
+                last = e
+                continue
+            t4 = time.time()
+        if len(data) < 48:
+            raise HostcheckError(f"SNTP reply from {server} is {len(data)} bytes")
+        if data[24:32] != req[40:48]:
+            raise HostcheckError(f"SNTP reply from {server} does not echo the request (originate time)")
+        if data[0] & 7 != 4:
+            raise HostcheckError(f"SNTP reply from {server} has mode {data[0] & 7}, not 4 (server)")
+        if not 1 <= data[1] <= 15:
+            raise HostcheckError(f"SNTP reply from {server} has stratum {data[1]} (unsynchronised or kiss-o'-death)")
+        t2, t3 = from_ntp(data[32:40]), from_ntp(data[40:48])
+        return ((t2 - t1) + (t3 - t4)) / 2
+    raise HostcheckError(f"no SNTP reply from {server}:{port} after {tries} tries: {last}")
+
+
+def kernel_clock_synced():
+    """Whether this kernel counts its clock as synchronised (STA_UNSYNC clear).
+    While it does, the kernel copies its clock into the RTC every 11 minutes."""
+    import ctypes
+    import ctypes.util
+    libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+    buf = ctypes.create_string_buffer(512)  # struct timex, modes 0: read only
+    if libc.adjtimex(buf) < 0:
+        raise HostcheckError(f"adjtimex failed: {os.strerror(ctypes.get_errno())}")
+    status = int.from_bytes(buf.raw[40:44], sys.byteorder)  # after modes (padded) and four longs
+    return not status & STA_UNSYNC
+
+
+def rtc_at_edge(read, now, sleep=time.sleep, limit=2.5):
+    """The RTC's whole-second value just after it ticks, and this system's time then."""
+    start = now()
+    first = read().strip()
+    while True:
+        t = now()
+        v = read().strip()
+        if v != first:
+            return int(v), t
+        if t - start > limit:
+            raise HostcheckError(f"the RTC did not tick within {limit} s")
+        sleep(0.001)
+
+
+def rtc_snapshot(server, device=RTC_DEVICE):
+    """The PC's RTC less the reference time at the same instant (HOST-1e2b1)."""
+    if kernel_clock_synced():
+        raise HostcheckError("this system's kernel clock is synchronised, so it writes the RTC every 11 minutes; "
+                             "stop its NTP client (timesyncd, chrony) and reboot it before snapshotting")
+    host, port = server.split(":") if server.count(":") == 1 else (server, "123")  # an IPv6 literal takes 123
+    ntp = sntp_offset(host, int(port))
+    dev = pathlib.Path(device)
+    value, at = rtc_at_edge(dev.read_text, time.time)
+    reference = at + ntp
+    return {"rtc": value, "reference": reference, "offset": value - reference, "server": server}
+
+
+def snapshot(disks, varstore=None, efivarfs=None, tcti=None, rtc_reference=None, rtc_device=RTC_DEVICE):
     s = {"disk": {name: hash_disk(p) for name, p in disks.items()}}
+    if rtc_reference:
+        s["rtc"] = rtc_snapshot(rtc_reference, rtc_device)
     if varstore:
         s["uefi"] = uefi_from_varstore(varstore)
     elif efivarfs:
@@ -352,13 +443,28 @@ def _matches(rule, f, flags):
     return True
 
 
-def evaluate(before, after, allow, flags=(), noise=(), rtc_writes=()):
-    """Sort every difference into flagged, disclosed (an HW-8 rule allows it)
-    or noise (a UEFI variable the firmware changes on its own boots)."""
-    report = {"flagged": [], "disclosed": [], "noise": []}
+def rtc_offset_change(before, after, tolerance):
+    b, a = before.get("rtc"), after.get("rtc")
+    if b is None and a is None:
+        return None
+    if b is None or a is None:
+        return {"kind": "rtc", "key": "offset", "change": "missing", "before": b, "after": a}
+    if abs(a["offset"] - b["offset"]) > tolerance:
+        return {"kind": "rtc", "key": "offset", "change": "changed", "before": b, "after": a}
+    return None
+
+
+def evaluate(before, after, allow, flags=(), noise=(), rtc_writes=(), rtc_tolerance=RTC_TOLERANCE,
+             opted_in_disks=()):
+    """Sort every difference into flagged, disclosed (an HW-8 rule allows it),
+    noise (a UEFI variable the firmware changes on its own boots) or excluded
+    (a write to the internal disk the owner gave agentOS, HW-8a)."""
+    report = {"flagged": [], "disclosed": [], "noise": [], "excluded": []}
     for f in diff(before, after):
         rule = next((r for r in allow if _matches(r, f, set(flags))), None)
-        if rule:
+        if f["kind"] == "disk" and f["change"] == "changed" and f["key"] in opted_in_disks:
+            report["excluded"].append(dict(f, requirement="HW-8a"))
+        elif rule:
             report["disclosed"].append(dict(f, change_id=rule["change"]))
         elif f["kind"] == "uefi" and (f["kind"], f["key"]) in noise:
             report["noise"].append(f)
@@ -366,6 +472,8 @@ def evaluate(before, after, allow, flags=(), noise=(), rtc_writes=()):
             report["flagged"].append(f)
     for w in rtc_writes:
         report["flagged"].append({"kind": "rtc", "key": w["phase"], "change": "written", "before": None, "after": w})
+    if moved := rtc_offset_change(before, after, rtc_tolerance):
+        report["flagged"].append(moved)
     report["pass"] = not report["flagged"]
     return report
 
@@ -796,15 +904,20 @@ def cmd_qemu(args):
 
 def cmd_snapshot(args):
     disks = dict(d.split("=", 1) for d in args.disk)
-    s = snapshot(disks, varstore=args.varstore, efivarfs=args.efivarfs, tcti=args.tcti)
+    s = snapshot(disks, varstore=args.varstore, efivarfs=args.efivarfs, tcti=args.tcti,
+                 rtc_reference=args.rtc_reference, rtc_device=args.rtc_device)
     pathlib.Path(args.output).write_text(json.dumps(s, indent=1, sort_keys=True))
     return 0
 
 
 def cmd_diff(args):
     before, after = (json.loads(pathlib.Path(p).read_text()) for p in (args.before, args.after))
+    unknown = [n for n in args.opted_in_disk if n not in before.get("disk", {}) or n not in after.get("disk", {})]
+    if unknown:
+        raise HostcheckError(f"--opted-in-disk names no disk in both snapshots: {unknown}")
     r = evaluate(before, after, load_allow(), flags=args.flag,
-                 rtc_writes=[{"phase": "session", "offset": None}] if args.rtc_written else ())
+                 rtc_writes=[{"phase": "session", "offset": None}] if args.rtc_written else (),
+                 rtc_tolerance=args.rtc_tolerance, opted_in_disks=set(args.opted_in_disk))
     print(json.dumps(r, indent=1, sort_keys=True))
     return 0 if r["pass"] else 1
 
@@ -818,6 +931,9 @@ def main(argv=None):
     g.add_argument("--varstore")
     g.add_argument("--efivarfs")
     s.add_argument("--tcti", required=True, help="e.g. device:/dev/tpmrm0")
+    s.add_argument("--rtc-reference", metavar="HOST[:PORT]",
+                   help="record the RTC's offset from this SNTP server (a PC, from a third system)")
+    s.add_argument("--rtc-device", default=RTC_DEVICE)
     s.add_argument("-o", "--output", required=True)
     d = sub.add_parser("diff")
     d.add_argument("before")
@@ -825,6 +941,9 @@ def main(argv=None):
     d.add_argument("--flag", action="append", default=[], choices=["owner-boot-order", UNCLEAN_FLAG],
                    help=f"{UNCLEAN_FLAG}: the session ended in a power cut or forced reset")
     d.add_argument("--rtc-written", action="store_true", help="the operator saw the hardware clock written")
+    d.add_argument("--rtc-tolerance", type=float, default=RTC_TOLERANCE, metavar="SECONDS")
+    d.add_argument("--opted-in-disk", action="append", default=[], metavar="NAME",
+                   help="the internal disk the owner gave agentOS (HW-8a): its writes are excluded, not flagged")
     q = sub.add_parser("qemu")
     q.add_argument("--work", required=True, help="new directory for state, logs and report.json")
     src = q.add_mutually_exclusive_group(required=True)
