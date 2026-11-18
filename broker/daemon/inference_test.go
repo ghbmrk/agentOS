@@ -1069,78 +1069,78 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 		}
 		return m
 	}
-	// reach reports a type from which a slot can be reached: through
+	// holds reports a type from which a slot can be reached: through
 	// pointers, elements, keys, fields, a function's parameters or
 	// results, or an exported method of the type or any method of an
-	// interface. With exposed, only a reach that another package's code
-	// handed such a value could use: through a reference (pointer, slice,
-	// map or channel), where reflection can write, or a function or
-	// method, which can take a value it made or return a reference. A
-	// struct copied into an interface is not writable there.
-	type key struct {
-		t            types.Type
-		exposed, ref bool
-	}
-	memo := map[key]bool{}
-	var reach func(t types.Type, exposed, ref bool, seen map[key]bool) bool
-	reach = func(t types.Type, exposed, ref bool, seen map[key]bool) bool {
-		k := key{t, exposed, ref || !exposed}
-		if r, ok := memo[k]; ok {
+	// interface. A copy counts as much as a reference: a copy hands over
+	// the type, from which other code can mint a value (reflect.New,
+	// gob.Register) that dials (Security B1 on #6123).
+	memo := map[types.Type]bool{}
+	var reach func(t types.Type, seen map[types.Type]bool) bool
+	reach = func(t types.Type, seen map[types.Type]bool) bool {
+		if r, ok := memo[t]; ok {
 			return r
 		}
-		if t == nil || seen[k] {
+		if t == nil || seen[t] {
 			return false
 		}
-		seen[k] = true
+		seen[t] = true
 		r := false
-		in := func(t types.Type, ref bool) { r = r || reach(t, exposed, ref, seen) }
+		in := func(t types.Type) { r = r || reach(t, seen) }
 		switch x := t.(type) {
 		case *types.Alias:
-			in(types.Unalias(x), k.ref)
+			in(types.Unalias(x))
 		case *types.Named:
 			for _, ms := range []*types.MethodSet{types.NewMethodSet(x), types.NewMethodSet(types.NewPointer(x))} {
 				for i := range ms.Len() {
 					if ms.At(i).Obj().Exported() {
-						in(ms.At(i).Type(), true)
+						in(ms.At(i).Type())
 					}
 				}
 			}
-			in(x.Underlying(), k.ref)
+			in(x.Underlying())
 		case *types.Pointer:
-			in(x.Elem(), true)
+			in(x.Elem())
 		case *types.Slice:
-			in(x.Elem(), true)
+			in(x.Elem())
 		case *types.Chan:
-			in(x.Elem(), true)
+			in(x.Elem())
 		case *types.Map:
-			in(x.Key(), true)
-			in(x.Elem(), true)
+			in(x.Key())
+			in(x.Elem())
 		case *types.Array:
-			in(x.Elem(), k.ref)
+			in(x.Elem())
 		case *types.Struct:
-			r = len(listed(x)) > 0 && k.ref
+			r = len(listed(x)) > 0
 			for i := range x.NumFields() {
-				in(x.Field(i).Type(), k.ref)
+				in(x.Field(i).Type())
 			}
 		case *types.Signature:
-			in(x.Params(), true)
-			in(x.Results(), true)
+			in(x.Params())
+			in(x.Results())
 		case *types.Tuple:
 			for i := range x.Len() {
-				in(x.At(i).Type(), k.ref)
+				in(x.At(i).Type())
 			}
 		case *types.Interface:
 			for i := range x.NumMethods() {
-				in(x.Method(i).Type(), true)
+				in(x.Method(i).Type())
 			}
 		}
 		if len(seen) == 1 || r {
-			memo[k] = r // a false inside a cycle may be a partial answer
+			memo[t] = r // a false inside a cycle may be a partial answer
 		}
 		return r
 	}
-	holds := func(t types.Type) bool { return reach(t, false, true, map[key]bool{}) }
-	exposed := func(t types.Type) bool { return reach(t, true, false, map[key]bool{}) }
+	holds := func(t types.Type) bool { return reach(t, map[types.Type]bool{}) }
+	// holders are the package's named types that hold a slot, for
+	// interfaces they may sit behind.
+	var holders []types.Type
+	for _, n := range pkg.Scope().Names() {
+		if tn, ok := pkg.Scope().Lookup(n).(*types.TypeName); ok && !tn.IsAlias() && holds(tn.Type()) {
+			holders = append(holders, tn.Type(), types.NewPointer(tn.Type()))
+		}
+	}
 	name := func(t types.Type) string { return types.TypeString(t, types.RelativeTo(pkg)) }
 	// Each node's parent, and each return's function signature.
 	parent := map[ast.Node]ast.Node{}
@@ -1175,7 +1175,7 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 	// into reports v, of a type that holds a slot, going to a place of
 	// type to: an interface or a type parameter could hand it on.
 	into := func(v ast.Node, from, to types.Type) {
-		if to != nil && types.IsInterface(to) && exposed(from) {
+		if to != nil && types.IsInterface(to) && holds(from) && handOK[rel][types.TypeString(to, nil)] == "" {
 			at(v, "hands "+name(from)+", which reaches a configuredFields field, to "+name(to))
 		}
 	}
@@ -1233,7 +1233,7 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 				obj = info.Uses[f.Sel]
 			}
 			if fn, ok := obj.(*types.Func); ok && fn.Pkg() != pkg {
-				if !exposed(info.TypeOf(e)) || handOK[rel][fn.FullName()] != "" {
+				if !holds(info.TypeOf(e)) || handOK[rel][fn.FullName()] != "" {
 					return
 				}
 				at(e, "hands "+name(info.TypeOf(e))+", which reaches a configuredFields field, to "+fn.FullName()+" outside the package")
@@ -1319,7 +1319,7 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 		at(e, "a "+name(info.TypeOf(e))+", which reaches a configuredFields field, goes where the lint cannot check")
 	}
 	for e, tv := range info.Types {
-		if tv.IsValue() && exposed(tv.Type) {
+		if tv.IsValue() && holds(tv.Type) {
 			use(e)
 		}
 	}
@@ -1333,6 +1333,27 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 			}
 		}
 	}
+	// outOf reports a value taken out of an interface as a type that
+	// reaches a slot, or as an interface a type that does implements
+	// (method calls then reach it): another package's code may have made
+	// it (Security B1 on #6123).
+	outOf := func(n ast.Node, t types.Type) {
+		if t == nil || types.Identical(t, types.Typ[types.UntypedNil]) {
+			return
+		}
+		if holds(t) {
+			at(n, "takes a "+name(t)+", which reaches a configuredFields field, out of an interface")
+			return
+		}
+		if iface, ok := t.Underlying().(*types.Interface); ok && iface.NumMethods() > 0 {
+			for _, h := range holders {
+				if types.Implements(h, iface) {
+					at(n, "takes a "+name(t)+", which "+name(h)+" implements, out of an interface")
+					return
+				}
+			}
+		}
+	}
 	// Stores into a slot, literals that set one, and values taken out of
 	// an interface as a type that reaches one: another package's code may
 	// have made them, from a copy it was handed (#6028).
@@ -1340,15 +1361,13 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch n := n.(type) {
 			case *ast.TypeAssertExpr:
-				if n.Type != nil && holds(info.TypeOf(n.Type)) {
-					at(n, "takes a "+name(info.TypeOf(n.Type))+", which reaches a configuredFields field, out of an interface")
+				if n.Type != nil {
+					outOf(n, info.TypeOf(n.Type))
 				}
 			case *ast.TypeSwitchStmt:
 				for _, cc := range n.Body.List {
 					for _, e := range cc.(*ast.CaseClause).List {
-						if holds(info.TypeOf(e)) {
-							at(e, "takes a "+name(info.TypeOf(e))+", which reaches a configuredFields field, out of an interface")
-						}
+						outOf(e, info.TypeOf(e))
 					}
 				}
 			case *ast.SelectorExpr:
@@ -1409,13 +1428,15 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 
 // handOK are the functions of other packages (by go/types full name)
 // that a listed package may hand a value reaching a configuredFields
-// field, or instantiate with its type, by package, and why each stores
-// nothing into it: a claim a reviewer accepts, as configuredFields'
-// entries are.
+// field, or instantiate with its type, and the interfaces (by full type
+// name) it may convert one to, by package, and why each neither stores
+// into the field nor mints a value of the type: a claim a reviewer
+// accepts, as configuredFields' entries are.
 var handOK = map[string]map[string]string{
 	"kernel/proc": {
 		"maps.Keys":             "ranges over a map's keys; writes nothing (kernelmain.go, the clerk names)",
-		module + "backup.Write": "only calls its Target's methods (*pendingPut's PutTable and the rest); backup imports no reflect or unsafe, and decodes only into its own manifest and table types",
+		module + "backup.Write": "only calls its Target's methods (*pendingPut's PutTable and the rest); backup imports no reflect or unsafe, and its json decodes target only its own manifest and table types",
+		module + "kernel.Clerk": "Remote.Clerk and kernel.go hand the kernel a remote as its Clerk; kernel only calls Do and Probe on it; its one reflect use is DeepEqual of two Plans, it imports no unsafe or gob, and its json decodes target only its own log types",
 	},
 }
 
@@ -1928,6 +1949,14 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		{"modelroute", "stores into Socket, a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config) { c.Socket += ".x"; c.dial() }`)}},
 		{"modelroute", "stores into Socket, a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config, l []string) { for _, c.Socket = range l {}; c.dial() }`)}},
 		{"modelroute", "sets a configuredFields field by position here", []string{src(`"net"`, cfgDial+`type E struct{ Config }; func g() { (&E{Config{"/run/proxy.sock"}}).dial() }`)}},
+		// A copy hands over the type, from which a value can be minted
+		// that dials (Security B1 on #6123).
+		{"modelroute", "hands Config, which reaches a configuredFields field, to encoding/gob.Register", []string{src(`"net"; "encoding/gob"; "io"`, `type Config struct{ Socket string }; func (c Config) dial() { (&net.Dialer{}).Dial("unix", c.Socket) }; type dialer interface{ dial() }; func g(r io.Reader) { gob.Register(Config{}); var x any; gob.NewDecoder(r).Decode(&x); x.(dialer).dial() }`)}},
+		{"modelroute", "takes a dialer, which Config implements, out of an interface", []string{src(`"net"; "encoding/gob"; "io"`, `type Config struct{ Socket string }; func (c Config) dial() { (&net.Dialer{}).Dial("unix", c.Socket) }; type dialer interface{ dial() }; func g(r io.Reader) { gob.Register(Config{}); var x any; gob.NewDecoder(r).Decode(&x); x.(dialer).dial() }`)}},
+		{"modelroute", "hands Config, which reaches a configuredFields field, to reflect.TypeOf", []string{src(`"net"; "reflect"`, `type Config struct{ Socket string }; func (c Config) dial() { (&net.Dialer{}).Dial("unix", c.Socket) }; type dialer interface{ dial() }; func g() { v := reflect.New(reflect.TypeOf(Config{})).Elem(); v.Field(0).SetString("/e"); v.Interface().(dialer).dial() }`)}},
+		{"modelroute", "hands Config, which reaches a configuredFields field, to dialer", []string{src(`"net"; "reflect"`, `type Config struct{ Socket string }; func (c Config) dial() { (&net.Dialer{}).Dial("unix", c.Socket) }; type dialer interface{ dial() }; func g(c Config) { s := []dialer{c}; n := reflect.New(reflect.TypeOf(c)).Elem(); n.Field(0).SetString("/e"); reflect.ValueOf(s).Index(0).Set(n); s[0].dial() }`)}},
+		{"modelroute", "hands Config, which reaches a configuredFields field, to fmt.Sprint", []string{src(`"fmt"`, `type Config struct{ Socket string }; func g(c Config) string { return fmt.Sprint(c, c.Socket) }`)}},
+		{"modelroute", "takes a dialer, which Config implements, out of an interface", []string{src(`"net"`, `type Config struct{ Socket string }; func (c Config) dial() { (&net.Dialer{}).Dial("unix", c.Socket) }; type dialer interface{ dial() }; func g(v any) { switch x := v.(type) { case dialer: x.dial() } }`)}},
 		// os.Root's methods, and opening one (B2 on #6119).
 		{"modelroute", "links or renames (Symlink)", []string{src(`"net"; "os"`, dial+`func g(s string) { r, _ := os.OpenRoot("/tmp"); r.Symlink("/run/proxy.sock", s) }`)}},
 		{"modelroute", "links or renames (Rename)", []string{src(`"net"; "os"`, dial+`func g(r *os.Root, s string) { r.Rename("/run/proxy.sock", s) }`)}},
@@ -1953,12 +1982,19 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		{"modelroute", []string{src(`"encoding/json"`, `type Config struct{ Socket string }; type W struct{ V any }; func g(b []byte) { w := new(W); keep(w); json.Unmarshal(b, w) }; func keep(*W) {}`)}},
 		{"modelroute", []string{src(`"encoding/json"`, `type Config struct{ Socket string }; type S interface{ X() }; type W struct{ V S }; func g(b []byte, w *W) { json.Unmarshal(b, w) }`)}},
 		{"modelroute", []string{src(`"encoding/json"`, `type Config struct{ Socket string }; func g(b []byte, ch chan any) { json.Unmarshal(b, <-ch) }`)}},
-		{"modelroute", []string{src(`"fmt"`, `type Config struct{ Socket string }; func g(c Config) string { return fmt.Sprint(c, c.Socket) }`)}},
 		{"modelroute", []string{src(`"encoding/json"`, `type Config struct{ Socket string }; type W struct{ V any }; func g(b []byte, c *Config) (*Config, W) { var w W; json.Unmarshal(b, &w); keep := *c; return &keep, w }`)}},
 	} {
 		if got := useOf(t, c.rel, c.srcs...); got != "" {
 			t.Errorf("in %s, flagged: %q\n%s", c.rel, got, strings.Join(c.srcs, "\n"))
 		}
+	}
+	// A reviewed handOK entry lets a function or an interface take a
+	// holding value: fmt.Sprint and a Clerk-like interface here.
+	handOK["modelroute"] = map[string]string{"fmt.Sprint": "test", module + "modelroute.clerk": "test"}
+	got := useOf(t, "modelroute", src(`"fmt"`, `type Config struct{ Socket string }; type clerk interface{ Do() }; func (Config) Do() {}; func g(c Config) (string, clerk) { return fmt.Sprint(c, c.Socket), c }`))
+	delete(handOK, "modelroute")
+	if got != "" {
+		t.Errorf("handOK entries not honoured: %q", got)
 	}
 	ok := src(`"net"; "net/http"; "net/http/httputil"; "os"; "path/filepath"`, `type Config struct{ Socket string }
 func g(sock string, cfg Config) {
