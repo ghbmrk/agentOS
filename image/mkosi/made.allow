@@ -37,6 +37,7 @@ usr/lib/systemd/system/agentos-keeper-mail.service	[Service] OpenFile=/run/agent
 usr/lib/systemd/system/agentos-keeper-mail.service	[Service] RuntimeDirectory=agentos-mail
 usr/lib/systemd/system/agentos-keeper-rotate.socket	[Socket] ListenStream=/run/agentos-keeper/rotate.sock
 usr/lib/systemd/system/agentos-keeper-setup.socket	[Socket] ListenStream=/run/agentos-keeper/setup.sock
+usr/lib/systemd/system/agentos-keeper-wipe.service	[Service] StateDirectory=agentos-wipe
 usr/lib/systemd/system/agentos-link.service	[Service] RuntimeDirectory=agentos-link
 usr/lib/systemd/system/agentos-localui.service	[Service] RuntimeDirectory=agentos-localui
 usr/lib/systemd/system/agentos-localui.service	[Service] StateDirectory=agentos-localui

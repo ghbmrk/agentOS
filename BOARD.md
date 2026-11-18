@@ -427,25 +427,22 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | TIM-1-interval-fu-k | TIM-1-interval-fu-k: load bounds a saved AnchorMono on both sides; NTSWall and Carrier trust is stated in ASSUMPTIONS. Release; from #6025. | #5934, #6025 | building (release; tier A) |
 | LINT-dial-caller | LINT-dial-caller: the inference lint checks what a dialing function's callers pass (NET-2). Release; from #5775. | #5775 | queued (release) |
 | KEY-refusal-code-r1 | KEY-refusal-code-r1: #6032 release items (kernel.Refusal encoding, code-var reassignment lint, requal named set, skew note, guest.set types) | #6032 review | queued (release; tier A; after #6032) |
-| IMG-dbus-tight | IMG-dbus-tight: weigh the bus units' commands as systemd runs them, and pin dbus.service's reviewed bytes in the test. | #5980 | queued (release; tier A) |
 | CORE-trim-headroom | CORE-trim-headroom: cut lines from the trusted core that do no work (test-only code, dead code, duplicates) to free headroom under the D-310 ceiling. Release. | D-310, #5732, #5757 | building (release; tier A) |
 | TIM-1-interval-fu-l | TIM-1-interval-fu-l: clock load checks the state file's owner and mode on read, and bounds saved same-boot alert times. Release; from #6057. | #6026, #6057 | queued (release; tier A) |
 | BROWSER-fixture-ci-fu | BROWSER-fixture-ci-fu: a test ties the headless-shell pin to Playwright's browsers.json, and the shell download is cached (restore on PRs, save on main, hash checked). Release; from #6056 and #6063. | #5952, #6056, #6063 | queued (release; tier A) |
 | IMG-keyring-spikes-fu | IMG-keyring-spikes-fu: the retired S7 spike says it is unpinned, and the bookworm key fingerprints are checked against Debian's keys page. Release; from #6055. | #5983, #6055 | queued (release; tier A) |
 | CLK-seal-entry-swap-wipe-fu-d | CLK-seal-entry-swap-wipe-fu-d: the entry-count refusal runs before any slot or swap, withEntry checks its own entry again, and four comment lines are re-wrapped. Release; from #6049. | #6048, #6049 | queued (release; tier A) |
 | VULN-node-openssl-pin | VULN-node-openssl-pin: bump the openclaw guest's node pin once a release bundles OpenSSL 3.5.10; until then the bundled entry records each fix's reach. Release; from #6074. | #5853, #6074 | queued (release; tier A; waits on a node release) |
-| MOR-wipe-journal | MOR-wipe-journal: the wipe unit's journal-only errors are known to persist across reboot (or the volatility is recorded). Release; from #6067. | #6042, #6067 | building (release; tier A) |
 | IMG-keyring-spikes-r | IMG-keyring-spikes-r: S7's mkosi tree says it is unpinned; the mkosi inventory skips untracked files. Release; from #6055. | #6055 | queued (release; tier C) |
 | MOR-writer-match-fu | MOR-writer-match-fu: the wipe test counts the clear's own unit as a writer except for its known clear action, not by skipping it by name. Release; from #6066. | #6043, #6066 | building (release; tier B) |
 | BROWSER-mutants-kill | BROWSER-mutants-kill: broker/browser has no surviving mutant on a covered line, and K4 says CI runs the real-driver tests. From #6063. | #5952, #6063 | queued (tier A) |
 | IMG-keyring-spikes-fu-b | IMG-keyring-spikes-fu-b: each mkosi tree's keyring pins are looked up per tree, Mirror and Repositories are pinned, and record-directory trees are handled. Release; from #6082. | #5983, #6082 | queued (release; tier A) |
 | LINT-dial-spread | LINT-dial-spread: the inference lint refuses a dial whose arguments are a multi-value call spread (DialContext(t(ctx))). Release; from #6035. | #5775, #6035 | building (release; tier A) |
-| MOR-wipe-owner | MOR-wipe-owner: a failed shutdown wipe is shown to the owner, not only kept in the journal. Release; from #6086. | #6078, #6086 | queued (release; tier A) |
+| MOR-wipe-owner | MOR-wipe-owner: a failed shutdown wipe is shown to the owner, not only kept in the journal. Release; from #6086. | #6078, #6086 | building (release; tier A) |
 | MOR-wipe-journal-fu | MOR-wipe-journal-fu: the kept journal is held (flush unit, journal.storage credential), audited for secrets and for what wipe clears, and the other ini_last callers stop reading an empty value as a reset. Release; from #6086. | #6078, #6086 | queued (release; tier A) |
-| VULN-picomatch | VULN-picomatch: the guest lockfile's picomatch 4.0.5 (GHSA-fc5q-39xc-vjpf) is patched or accepted with its reach, so vulncheck is green. Urgent: premerge holds every PR. | #6074 | building (tier A) |
 | VULN-picomatch-bump | VULN-picomatch-bump: bump the guest's npm once a release bundles a picomatch fixed for GHSA-fc5q-39xc-vjpf; until then the accepted record states its reach. Release; from #6096. | #6096 | queued (release; tier A; waits on a picomatch release) |
-| IMG-offline-verity-follow-fu-b | IMG-offline-verity-follow-fu-b: tree_files reports an unreadable file by name instead of a traceback. Release; from #6089. | #6073, #6089 | building (release; tier B) |
-| CI-disk-cause-5 | CI-disk-cause-5: a test pins that the keep step's size count walks only the stale -d directory, not its sibling entries in the hex directory. Release; from #6101. | #6084, #6101 | building (release; tier A) |
+| IMG-dbus-tight-fu | IMG-dbus-tight-fu: the bus-reach test pins which drop-ins count as dbus.socket's and dbus.service's own (dbusx.socket.d, dbusx.service.d cases). Release; from #6107. | #6037, #6107 | building (release; tier A) |
+| MOR-clear-owner | MOR-clear-owner: a refused MOR clear is shown to the owner in STATUS, like a failed wipe. Release; from #6110. | #6094, #6110 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 

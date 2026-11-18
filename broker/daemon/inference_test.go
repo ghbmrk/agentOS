@@ -555,7 +555,13 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 				}
 			}
 			i, isDial := dials[se.Sel.Name]
-			if !isDial || len(n.Args) <= i {
+			if !isDial {
+				return true
+			}
+			// A multi-value call spread into the dial (DialContext(t(ctx)))
+			// hides its network and address, so it fails closed (#6090).
+			if len(n.Args) < i+2 {
+				at(n, se.Sel.Name+" with arguments the lint cannot check")
 				return true
 			}
 			if lit, ok := n.Args[i].(*ast.BasicLit); !ok || lit.Value != `"unix"` {
@@ -564,7 +570,7 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 			// A unix socket can front a network proxy, so a dial's
 			// address must come from configuration (a field or a
 			// variable), never a literal or an expression built here.
-			if se.Sel.Name != "Listen" && len(n.Args) > i+1 && !configured(n.Args[i+1], rel, f) {
+			if se.Sel.Name != "Listen" && !configured(n.Args[i+1], rel, f) {
 				at(n, se.Sel.Name+" to an address not taken from configuration")
 			}
 		case *ast.SelectorExpr:
@@ -861,6 +867,12 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		// A local bound to a literal is not configuration, whichever dial
 		// names it (#5775).
 		{"kernel/proc", src(`"net"`, `func g() { sock := "/run/proxy.sock"; net.DialUnix("unixgram", nil, &net.UnixAddr{Name: sock, Net: "unixgram"}) }`)},
+		// A multi-value call spread into a dial hides both its network and
+		// its address, so the lint refuses it (#6090).
+		{"modelroute", src(`"context"; "net"`, `func t(ctx context.Context) (context.Context, string, string) { return ctx, "tcp", "evil.example:443" }; func g(ctx context.Context) { (&net.Dialer{}).DialContext(t(ctx)) }`)},
+		{"modelroute", src(`"net"`, `func t() (string, string) { return "tcp", "evil.example:443" }; func g() { (&net.Dialer{}).Dial(t()) }`)},
+		{"modelroute", src(`"net"; "time"`, `func t() (string, string, time.Duration) { return "tcp", "evil.example:443", 0 }; func g() { net.DialTimeout(t()) }`)},
+		{"modelroute", src(`"net"`, `func t() (string, string) { return "tcp", ":0" }; func g() { net.Listen(t()) }`)},
 	} {
 		path := filepath.Join(t.TempDir(), "p.go")
 		if err := os.WriteFile(path, []byte(c.src), 0o600); err != nil {

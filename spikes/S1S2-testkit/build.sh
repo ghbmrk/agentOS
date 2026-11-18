@@ -4,7 +4,8 @@
 # Output: OUT/agentos-tk_1.raw and OUT/SHA256SUMS. CI does this for you: .github/workflows/testkit.yml
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd); OUT=$(realpath -m "${1:-$HERE/out}"); MKOSI=${MKOSI:-mkosi}
-# The Debian archive keyring mkosi verifies deb.debian.org with: exactly the pinned keys (#5578, #5933).
+# The Debian keyrings mkosi verifies deb.debian.org and security.debian.org with, as the committed
+# mkosi/mkosi.pkgmngr sources name them: exactly the pinned keys (#5578, #5933, #5983).
 sh "$HERE/../../image/debian-archive-keyring.sh"
 mkdir -p "$OUT"
 $MKOSI -C "$HERE/mkosi" -f --output-dir "$OUT" build

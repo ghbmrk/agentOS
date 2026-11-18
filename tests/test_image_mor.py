@@ -209,7 +209,13 @@ class MorUnitTest(unittest.TestCase):
         self.assertEqual((s["IgnoreOnIsolate"], s["RefuseManualStop"]), (["yes"], ["yes"]))
         # MOR-wipe-console (#6042): a failed find leaves MOR set; its error goes to the journal only.
         self.assertEqual((s["StandardError"], s.get("StandardOutput")), (["journal"], None))
-        for key in ("DefaultDependencies", "ExecStart", "ExecStopPost", "Conflicts", "BindsTo", "PartOf",
+        # MOR-wipe-owner (#6094): the stop's result is recorded for STATUS, in the unit's own directory
+        # (broker/cmd/agentosd/wipenote_test.go runs the step and reads the line it drives).
+        self.assertEqual((s["StateDirectory"], s["StateDirectoryMode"]), (["agentos-wipe"], ["0700"]))
+        self.assertEqual(len(s["ExecStopPost"]), 1)
+        self.assertTrue(s["ExecStopPost"][0].startswith("/usr/bin/sh -c "), s["ExecStopPost"])
+        self.assertIn("MOR-wipe-journal", wipe.read_text())
+        for key in ("DefaultDependencies", "ExecStart", "Conflicts", "BindsTo", "PartOf",
                     "Requires", "Requisite", "StopPropagatedFrom", "After"):
             self.assertNotIn(key, s)
         self.assertFalse([k for k in s if k.startswith(("Condition", "Assert"))])
