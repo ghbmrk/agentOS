@@ -21,6 +21,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/localui"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/modem"
+	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/owner/kernelsock"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
@@ -700,7 +702,7 @@ func TestOpenVMRetriesUnreadNoticeUntilDelivered(t *testing.T) {
 		FreeBytes: func(string) (int64, error) { return 1 << 50, nil },
 	}, &capState{}, func(text string) error {
 		if tries.Add(1) == 1 {
-			return errors.New("no owner channel")
+			return errNoOwnerChannel
 		}
 		told <- text
 		return nil
@@ -730,7 +732,7 @@ func TestUnreadNoticesSumWhileHeldAndStopWithContext(t *testing.T) {
 	var told []string
 	u := newUnreadNotices(ctx, time.Hour, func(text string) error {
 		if down {
-			return errors.New("no owner channel")
+			return modem.ErrNotSent
 		}
 		told = append(told, text)
 		return nil
@@ -758,6 +760,38 @@ func TestUnreadNoticesSumWhileHeldAndStopWithContext(t *testing.T) {
 	u.flush()
 	if len(told) != 2 {
 		t.Fatalf("retried after the context ended: %q", told)
+	}
+}
+
+// A send error that does not prove the text stayed (modem.ErrDown: a
+// silent bridge, an unknown receipt) may hide a text that reached the
+// owner, so the notice counts as told and is never sent twice (#1638,
+// #2363; L3 on #6139). Only proven refusals are retried.
+func TestUnreadNoticeMaybeSentIsNotSentTwice(t *testing.T) {
+	for _, c := range []struct {
+		err   error
+		tries int
+	}{
+		{modem.ErrDown, 1},
+		{errors.New("owner: save failed"), 1},
+		{modem.ErrNotSent, 2},
+		{errNoOwnerChannel, 2},
+		{owner.ErrNoModem, 2},
+	} {
+		tries := 0
+		u := newUnreadNotices(context.Background(), time.Hour, func(string) error {
+			tries++
+			if tries == 1 {
+				return c.err
+			}
+			return nil
+		})
+		u.gone(2, true)
+		u.flush()
+		u.flush()
+		if tries != c.tries {
+			t.Errorf("first error %v: %d sends, want %d", c.err, tries, c.tries)
+		}
 	}
 }
 
