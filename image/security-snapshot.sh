@@ -58,12 +58,14 @@ before() {
 	date -u -d "$iso - 1 second" +%Y%m%dT%H%M%SZ
 }
 # serves TS: snapshot TS answers for the files apt reads first, its InRelease and the main amd64
-# Packages.xz, so a build never starts on a snapshot apt would fail on. curl retries only the 5xx
-# answers; a 404 fails at once.
+# Packages.xz, so a build never starts on a snapshot apt would fail on. snapshot.debian.org answers a
+# dists/ path with a redirect to the file's stored copy, and that copy is what can be missing (#6198:
+# curl without -L passed on the redirect while apt, following it, got 404), so the redirect is
+# followed, over https only, as apt follows it. curl retries only the 5xx answers; a 404 fails at once.
 serves() {
 	for f in InRelease main/binary-amd64/Packages.xz; do
-		curl -q --proto '=https' -fsS -o /dev/null --retry 8 --retry-max-time 600 --max-time 120 \
-			"$archive/$1/dists/trixie-security/$f" || return 1
+		curl -q --proto '=https' --proto-redir '=https' -L --max-redirs 3 -fsS -o /dev/null --retry 8 \
+			--retry-max-time 600 --max-time 120 "$archive/$1/dists/trixie-security/$f" || return 1
 	done
 }
 case "${1-}" in

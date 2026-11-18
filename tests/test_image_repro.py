@@ -1099,9 +1099,17 @@ sys.exit(status[n] if n < len(status) else 0)
             self.assertEqual(args[0], "-q")
             self.assertIn("f", "".join(a for a in args if re.fullmatch(r"-[A-Za-z]+", a)))
             self.assertEqual(args[args.index("--proto") + 1], "=https")
-            self.assertNotIn("-L", args)
-            self.assertNotIn("--location", args)
             self.assertIn("--retry", args)
+            self.assertNotIn("--location", args)
+            if args[-1].endswith("/"):
+                # A redirect lookup reads where the redirect points and never follows it.
+                self.assertNotIn("-L", args)
+            else:
+                # An index check follows snapshot.debian.org's redirect to the stored file, as apt does,
+                # and only over https (#6198: the redirect answered, the file it named was 404).
+                self.assertIn("-L", args)
+                self.assertEqual(args[args.index("--proto-redir") + 1], "=https")
+                self.assertIn("--max-redirs", args)
         # A day's first run steps back across midnight.
         p, calls = self.resolve(runs=("20201111T120000Z", "20201111T235000Z", "20201112T000000Z"))
         self.assertEqual((p.returncode, p.stdout), (0, "20201111T235000Z 20201111T120000Z\n"), p.stderr)
