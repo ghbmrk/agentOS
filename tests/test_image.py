@@ -8132,6 +8132,51 @@ class MkosiRunBoundTest(unittest.TestCase):
         self.assertLess(build.index('sudo rm -rf "$OUT/pkgmngr"'),
                         build.index('sudo install -D -m 0644 "$RUNNER_TEMP/mkosi.sources" "$OUT/pkgmngr/'))
 
+    def run_main_as_mkosi(self, root, lists, conf, security):
+        """mkosi.finalize's main() as mkosi v24.3 runs it: no argument, BUILDROOT, WITH_NETWORK=0, the config
+        JSON at MKOSI_CONFIG, the security snapshot from the mkosi line's --environment, its apt lists at
+        APT_LISTS and a sandbox with only lo. Returns (exit code, stdout)."""
+        env = {"BUILDROOT": str(root), "WITH_NETWORK": "0", "MKOSI_CONFIG": str(conf),
+               "AGENTOS_SECURITY_SNAPSHOT": security}
+        out = io.StringIO()
+        code = 0
+        with unittest.mock.patch.dict(os.environ, env), unittest.mock.patch.object(sys, "argv", ["mkosi.finalize"]), \
+                unittest.mock.patch.object(check, "APT_LISTS", lists), \
+                unittest.mock.patch.object(check, "script_net_dev", lambda: TreeCheckTest.LO_ONLY), \
+                contextlib.redirect_stdout(out):
+            try:
+                check.main()
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue()
+
+    def test_mkosi_run_refuses_a_package_from_no_pinned_index(self):
+        # #6148 L3 round 2: the package-source check as wired into main(), not only as a function: dropping
+        # it from the mkosi run, or skipping the run's snapshots, fails here.
+        root = clean_tree(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        conf = d / "config.json"
+        conf.write_text(json.dumps({"Mirror": ini(MK / "mkosi.conf")["Distribution"]["Mirror"]}))
+        lists = self.lists({self.INDEX: b"Package: bash\nVersion: 1\nArchitecture: amd64\n",
+                            self.INDEX.replace(self.MIRROR, "20200101T000000Z"): b"Package: evil\nVersion: 1\nArchitecture: amd64\n"})
+        write(root, "var/lib/dpkg/status", self.status(("bash", "installed", "amd64", "1")).decode())
+        code, out = self.run_main_as_mkosi(root, lists, conf, self.SECURITY)
+        self.assertEqual((code, out), (0, "image check: clean\n"))
+        write(root, "var/lib/dpkg/status", self.status(("bash", "installed", "amd64", "1"),
+                                                       ("evil", "installed", "amd64", "1")).decode())
+        code, out = self.run_main_as_mkosi(root, lists, conf, self.SECURITY)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out.splitlines(), [
+            "image check: var/lib/dpkg/status: evil 1 (amd64) is installed, but no pinned Packages index lists that "
+            "version; the image's packages come only from the pinned, signature-checked snapshot sources (#4690)"])
+        # A run without its security snapshot refuses before reading any index.
+        write(root, "var/lib/dpkg/status", self.status(("bash", "installed", "amd64", "1")).decode())
+        code, out = self.run_main_as_mkosi(root, lists, conf, "")
+        self.assertNotEqual(code, 0)
+        self.assertIn("image check: AGENTOS_SECURITY_SNAPSHOT is ''", out)
+
     def test_tree_status_is_read_inside_the_tree(self):
         root = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root)

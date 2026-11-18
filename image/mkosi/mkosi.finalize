@@ -5086,8 +5086,10 @@ def package_source_violations(status, lists, mirror, security):
     return out
 
 
-def tree_package_violations(root, mirror, security, lists=APT_LISTS):
-    """package_source_violations for the tree at ROOT, its dpkg status read inside the tree (Conf's rules)."""
+def tree_package_violations(root, mirror, security, lists=None):
+    """package_source_violations for the tree at ROOT, its dpkg status read inside the tree (Conf's rules),
+    against LISTS (default APT_LISTS, read at the call)."""
+    lists = APT_LISTS if lists is None else lists
     try:
         status = Conf(root, DPKG_STATUS).content()
     except OSError as e:
