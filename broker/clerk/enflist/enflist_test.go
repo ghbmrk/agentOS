@@ -17,6 +17,7 @@ func cur() policy.Document {
 		Version:      7,
 		Destinations: []string{"old.example"},
 		Caps:         map[string]uint64{"old.example": 5},
+		Basis:        map[string]string{"old.example": policy.BasisDeclared},
 		EdgeCap:      9,
 		Devices:      []policy.Device{{ID: "tv", Network: policy.NetDevices, Allow: []string{"a.example"}, Everyday: true}},
 	}
