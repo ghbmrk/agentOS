@@ -8151,28 +8151,45 @@ class MkosiRunBoundTest(unittest.TestCase):
         return code, out.getvalue()
 
     def test_mkosi_run_refuses_a_package_from_no_pinned_index(self):
-        # #6148 L3 round 2: the package-source check as wired into main(), not only as a function: dropping
-        # it from the mkosi run, or skipping the run's snapshots, fails here.
+        # #6148 L3 round 2, Potency round 3: the package-source check as wired into main(), not only as a
+        # function. Each leg is held: dropping the check, or main() taking either snapshot date from anywhere
+        # but this run (the Mirror from MKOSI_CONFIG, not the committed mkosi.conf; the security date from
+        # AGENTOS_SECURITY_SNAPSHOT), fails here.
         root = clean_tree(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root)
         d = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, d)
         conf = d / "config.json"
-        conf.write_text(json.dumps({"Mirror": ini(MK / "mkosi.conf")["Distribution"]["Mirror"]}))
-        lists = self.lists({self.INDEX: b"Package: bash\nVersion: 1\nArchitecture: amd64\n",
-                            self.INDEX.replace(self.MIRROR, "20200101T000000Z"): b"Package: evil\nVersion: 1\nArchitecture: amd64\n"})
-        write(root, "var/lib/dpkg/status", self.status(("bash", "installed", "amd64", "1")).decode())
-        code, out = self.run_main_as_mkosi(root, lists, conf, self.SECURITY)
-        self.assertEqual((code, out), (0, "image check: clean\n"))
-        write(root, "var/lib/dpkg/status", self.status(("bash", "installed", "amd64", "1"),
-                                                       ("evil", "installed", "amd64", "1")).decode())
-        code, out = self.run_main_as_mkosi(root, lists, conf, self.SECURITY)
+        # A Mirror date unlike the committed one, so only the run's config JSON can name it.
+        mirror = "20251111T111111Z"
+        self.assertNotIn(mirror, (MK / "mkosi.conf").read_text())
+        conf.write_text(json.dumps({"Mirror": "https://snapshot.debian.org/archive/debian/%s/" % mirror}))
+        security = "20261113T030303Z"
+        pkg = lambda name: ("Package: %s\nVersion: 1\nArchitecture: amd64\n" % name).encode()
+        index = self.INDEX.replace(self.MIRROR, mirror)
+        sec = self.SEC.replace(self.SECURITY, security)
+        lists = self.lists({index: pkg("bash"), sec: pkg("openssl"),
+                            # The same names at the committed Mirror and at another security date count for nothing.
+                            self.INDEX: pkg("committed"), self.SEC.replace(self.SECURITY, "20200101T000000Z"): pkg("oldsec"),
+                            index.replace(mirror, "20200101T000000Z"): pkg("evil")})
+        why = "the image's packages come only from the pinned, signature-checked snapshot sources (#4690)"
+        installed = lambda *names: self.status(*((n, "installed", "amd64", "1") for n in names)).decode()
+        write(root, "var/lib/dpkg/status", installed("bash", "openssl"))
+        self.assertEqual(self.run_main_as_mkosi(root, lists, conf, security), (0, "image check: clean\n"))
+        for name in ("evil", "committed", "oldsec"):
+            with self.subTest(name=name):
+                write(root, "var/lib/dpkg/status", installed("bash", "openssl", name))
+                code, out = self.run_main_as_mkosi(root, lists, conf, security)
+                self.assertNotEqual(code, 0)
+                self.assertEqual(out.splitlines(), [
+                    "image check: var/lib/dpkg/status: %s 1 (amd64) is installed, but no pinned Packages index lists "
+                    "that version; %s" % (name, why)])
+        # The security package passes only at the run's own security date.
+        write(root, "var/lib/dpkg/status", installed("bash", "openssl"))
+        code, out = self.run_main_as_mkosi(root, lists, conf, "20261114T040404Z")
         self.assertNotEqual(code, 0)
-        self.assertEqual(out.splitlines(), [
-            "image check: var/lib/dpkg/status: evil 1 (amd64) is installed, but no pinned Packages index lists that "
-            "version; the image's packages come only from the pinned, signature-checked snapshot sources (#4690)"])
+        self.assertIn("image check: var/lib/dpkg/status: openssl 1 (amd64) is installed, but no pinned", out)
         # A run without its security snapshot refuses before reading any index.
-        write(root, "var/lib/dpkg/status", self.status(("bash", "installed", "amd64", "1")).decode())
         code, out = self.run_main_as_mkosi(root, lists, conf, "")
         self.assertNotEqual(code, 0)
         self.assertIn("image check: AGENTOS_SECURITY_SNAPSHOT is ''", out)
