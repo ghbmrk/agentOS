@@ -26,6 +26,7 @@ package seal
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
@@ -449,9 +450,8 @@ func Create(path string, f Factor) (*Store, error) {
 	return s, nil
 }
 
-// Unlock opens the store at path with f. It tries every slot of f's kind
-// (for a TPM, every slot sealed to that TPM) and returns the store once one
-// slot opens and the file's MAC checks under the key it gave.
+// Unlock opens the store at path with f. It tries every slot of f's kind (for a TPM, every slot
+// sealed to that TPM) and returns the store once one slot opens and the file's MAC checks under its key.
 func Unlock(path string, f Factor) (*Store, error) {
 	b, err := readFile(path)
 	if err != nil {
@@ -555,9 +555,8 @@ func sealedUnder(s *tpmseal.Sealed, key *ecdsa.PublicKey) bool {
 	return err == nil && pub.Equal(key)
 }
 
-// ReadID returns the ID of the store at path without unlocking it. It is
-// the drive's word, not authenticated: use it only to find what is keyed
-// by the ID off the drive (the TPM pins), which then checks it.
+// ReadID returns the ID of the store at path without unlocking it. It is the drive's word, not
+// authenticated: use it only to find what is keyed by the ID off the drive (the TPM pins), which checks it.
 func ReadID(path string) ([]byte, error) {
 	b, err := readFile(path)
 	if err != nil {
@@ -570,13 +569,11 @@ func ReadID(path string) ([]byte, error) {
 	return f.ID, nil
 }
 
-// Pinned is the TPM factor for the store at path on this PC: its policy key
-// and anchor come from the store's pins index on this TPM (tpmseal.ReadPins,
-// STO-2a-k), never from the drive. The ID that finds the index is the
-// drive's, but a changed ID finds no pins or another store's, whose anchor
-// this store's key does not derive, so Unlock still refuses. A TPM with no
-// pins for the store is tpmseal.ErrNoPins: the unlock fails closed, and the
-// owner's passphrase or recovery slot is the way in.
+// Pinned is the TPM factor for the store at path on this PC: its policy key and anchor come from
+// the store's pins index on this TPM (tpmseal.ReadPins, STO-2a-k), never from the drive. The ID that
+// finds the index is the drive's, but a changed ID finds no pins or another store's, whose anchor
+// this store's key does not derive, so Unlock still refuses. A TPM with no pins for the store is
+// tpmseal.ErrNoPins: the unlock fails closed, and the passphrase or recovery slot is the way in.
 func Pinned(t transport.TPM, path string) (TPM, error) {
 	id, err := ReadID(path)
 	if err != nil {
@@ -605,9 +602,8 @@ const AnchorLen = 32
 
 func anchor(key, id []byte) []byte { return derive(key, id, "anchor", AnchorLen) }
 
-// Anchor commits to the store key: a one-way value under its own HKDF
-// label, which a TPM unlock must be given (see TPM). It is not secret; it
-// never changes, since the store key is never rotated (STO-2a-d).
+// Anchor commits to the store key: a one-way value under its own HKDF label, which a TPM unlock
+// must be given (see TPM). It is not secret; it never changes, as the store key is never rotated (STO-2a-d).
 func (s *Store) Anchor() ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -667,8 +663,8 @@ func entriesJSON(e map[string][]byte) []byte {
 // rename leaves both the file and the store as they were. Once the rename is done the file holds
 // the new slots, so the store takes them even if the directory sync then fails, and returns that
 // error: otherwise the next commit would write the old slots back, and a failed ReplaceAndPut of a
-// compromised factor would revive it (REC-4). Of the set the store does not keep, e or its own, each
-// value the kept set does not share is wiped (CLK-1).
+// compromised factor would revive it (REC-4). It wipes what no one holds any more (CLK-1): after
+// the rename, the values e displaced or deleted; before it, only e's own clone of the new value.
 func (s *Store) commit(slots []slot, e map[string][]byte) error {
 	nf := s.f
 	nf.Slots = slots
@@ -813,18 +809,25 @@ func validEntries(e map[string][]byte) bool {
 		return false
 	}
 	for k, v := range e {
-		if !entryName.MatchString(k) || len(v) > MaxEntry {
+		if entryErr(k, v) != nil {
 			return false
 		}
 	}
 	return true
 }
 
-// Put stores an entry (an approval-code verifier, the policy key), durably.
+func entryErr(name string, value []byte) error {
+	if !entryName.MatchString(name) || len(value) > MaxEntry {
+		return errors.New("seal: bad entry name or value too long")
+	}
+	return nil
+}
+
+// Put stores an entry (an approval-code verifier, the policy key), durably. Nil reads back empty.
 func (s *Store) Put(name string, value []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.live(); err != nil {
+	if err := cmp.Or(s.live(), entryErr(name, value)); err != nil {
 		return err
 	}
 	e, err := s.withEntry(name, value)
@@ -846,11 +849,11 @@ type Swap struct {
 // on the lost-card route the new card's passphrase slot with them (MIG-4-recovery-r4d). A crash
 // leaves every old slot and the old entry, or every new slot and the new entry, never a mix. It
 // returns the new slots' IDs, in the swaps' order, once they are in place, even with the directory
-// sync's error.
+// sync's error. A bad name or value is refused before any slot is made, so it costs no Argon2.
 func (s *Store) ReplaceAndPut(name string, value []byte, swaps ...Swap) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.live(); err != nil {
+	if err := cmp.Or(s.live(), entryErr(name, value)); err != nil {
 		return nil, err
 	}
 	if len(swaps) == 0 {
@@ -882,11 +885,8 @@ func (s *Store) ReplaceAndPut(name string, value []byte, swaps ...Swap) ([]strin
 	return ids, err
 }
 
-// withEntry is the store's entries with name set to a copy of value.
+// withEntry is the store's entries with name set to a copy of value; the caller checked both.
 func (s *Store) withEntry(name string, value []byte) (map[string][]byte, error) {
-	if !entryName.MatchString(name) || len(value) > MaxEntry {
-		return nil, errors.New("seal: bad entry name or value too long")
-	}
 	e := maps.Clone(s.entries.Get())
 	if e[name] = nil; len(e) > MaxEntries { // counted before the clone, so a refusal leaves none
 		return nil, fmt.Errorf("seal: a store holds at most %d entries", MaxEntries)

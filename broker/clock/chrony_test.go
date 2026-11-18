@@ -38,6 +38,7 @@ const (
 	srcNTS         = "^,*,192.0.2.1,1,6,377,12,-0.000010,-0.000011,0.000400\n^,?,198.51.100.7,2,6,0,-,0,0,0\n"
 	srcThree       = "^,*,192.0.2.1,2,6,377,12,0,0,0\n^,+,192.0.2.2,2,6,377,12,0,0,0\n^,+,192.0.2.3,2,6,377,12,0,0,0\n^,-,192.0.2.4,2,6,377,12,0,0,0\n"
 	srcTwo         = "^,*,192.0.2.1,2,6,377,12,0,0,0\n^,+,192.0.2.2,2,6,377,12,0,0,0\n^,-,192.0.2.3,2,6,377,12,0,0,0\n"
+	srcNoneChosen  = "^,+,192.0.2.1,2,6,377,12,0,0,0\n^,+,192.0.2.2,2,6,377,12,0,0,0\n^,+,192.0.2.3,2,6,377,12,0,0,0\n"
 	authNTS        = "192.0.2.1,NTS,1,15,256,33m,0,0,8,100\n198.51.100.7,NTS,0,0,0,-,0,0,0,0\n"
 	trackLeapOff   = "C0000201,192.0.2.1,2,1791230000.123456789,-0.000001,0.000002,0.000003,-1.234,0.001,0.010,0.012,0.001,64.1,Not synchronised\n"
 	srcRefclock    = "#,*,PPS0,0,4,377,8,0,0,0\n=,+,192.0.2.9,2,6,377,12,0,0,0\n#,+,GPS,0,4,377,8,0,0,0\n^,+,192.0.2.2,2,6,377,12,0,0,0\n"
@@ -80,6 +81,12 @@ func TestHW8SyncedFromChrony(t *testing.T) {
 		{"leap status not synchronised", trackLeapOff, srcThree, authNTS, nil, NotSynced},
 		{"one plain NTP", trackOK, srcNTS, authNone, nil, NotSynced},
 		{"NTS listed but authdata refused", trackOK, srcNTS, "", errors.New("501 Not authorised"), NotSynced},
+		// chronyc's output comes back with its exit error (exec's Output): an
+		// NTS line printed before chronyc failed confirms nothing.
+		{"NTS printed, then authdata failed", trackOK, srcNTS, authNTS, errors.New("exit status 1"), NotSynced},
+		// Three sources combined with none selected is a sync in progress:
+		// chronyd follows no source yet.
+		{"three combined, none selected", trackOK, srcNoneChosen, authNone, nil, NotSynced},
 		{"not synchronised", trackUnsynced, srcThree, authNTS, nil, NotSynced},
 		{"stratum 0", trackStratum0, srcThree, authNone, nil, NotSynced},
 		{"stratum 16", trackStratum6, srcThree, authNone, nil, NotSynced},
@@ -95,6 +102,20 @@ func TestHW8SyncedFromChrony(t *testing.T) {
 	fail := func(context.Context, ...string) ([]byte, error) { return nil, errors.New("no chronyd") }
 	if got, err := chronySync(context.Background(), fail); got != NotSynced || err == nil {
 		t.Errorf("chronyc failing: %v, %v", got, err)
+	}
+	// A failing tracking or sources call reaches the caller as its own
+	// error, not as unexpected output or a quiet NotSynced.
+	errNoChronyd := errors.New("no chronyd")
+	for _, failing := range []string{"tracking", "sources"} {
+		run := func(ctx context.Context, args ...string) ([]byte, error) {
+			if args[len(args)-1] == failing {
+				return []byte(trackOK), errNoChronyd
+			}
+			return chronycOut(trackOK, srcThree, authNone, nil)(ctx, args...)
+		}
+		if got, err := chronySync(context.Background(), run); got != NotSynced || !errors.Is(err, errNoChronyd) {
+			t.Errorf("chronyc %s failing: %v, %v", failing, got, err)
+		}
 	}
 }
 
