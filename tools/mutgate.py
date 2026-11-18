@@ -28,12 +28,12 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
                                              add the verdicts to `run`'s JSON in DIR (#4573, #4603, #4633);
                                              only the sites of the result's own shard
   tools/mutgate.py report DIR                survivors per package, from the JSON in DIR
-  tools/mutgate.py gate DIR --git BASE [HEAD] [--body FILE] [--summary FILE]
+  tools/mutgate.py gate DIR --git BASE [HEAD] [--body FILE [--body-from SHA]] [--summary FILE]
                                              exit 1 if a LIVED mutant sits on a target line that no
                                              `Mutant-equivalent:` line in FILE (the PR body) and no
                                              entry of its package's record names, or a record
                                              entry is stale
-  tools/mutgate.py verify DIR --git BASE [HEAD] [--body FILE] [--summary FILE]
+  tools/mutgate.py verify DIR --git BASE [HEAD] [--body FILE [--body-from SHA]] [--summary FILE]
                                              `gate`, after checking that DIR/*/ holds exactly
                                              one readable result for each shard of every package
                                              `claimed` names, as `run` and `delete` check it, with
@@ -2365,7 +2365,7 @@ def decide(results, added, tests, args, records=({}, [])):
               + ", ".join(site_text((p, n, k, c)) for p, n, k, c in hit) + "), so it waives none: name the one it "
               "proves by its column and kind, `Mutant-equivalent: <path>:<line>:<col>:<KIND> <reason>`")
     refuse_not_equivalent(refused)
-    return report_violations(found, lost) or (1 if stale or refused else 0)
+    return report_violations(found, lost, getattr(args, "body_from", None)) or (1 if stale or refused else 0)
 
 
 def write_summary(path, text):
@@ -2596,7 +2596,7 @@ def cmd_gate(args):
     return decide(results, added, tests, args, records) or (1 if bad else 0)
 
 
-def report_violations(found, lost=()):
+def report_violations(found, lost=(), body_from=None):
     # Each line ends with the mutant's own waiver line, path:line:col:KIND, so two of one kind on a line
     # read apart, and the line pastes as printed with no backtick or bracket around it (#5828).
     for pkg, path, line, kind, col in found:
@@ -2614,6 +2614,12 @@ def report_violations(found, lost=()):
               "`Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>` (`Mutant-uncovered:` for one no test "
               "can reach) to the PR body for that mutant "
               "(its column and kind as the summary's Site and Mutant cells give them, where its line holds another)")
+        # MUT-stale-body (#6077): the workflow passes the event's body, which "Re-run failed jobs" reuses, so a
+        # line added after the push is unread here although the current body holds it. Say which body this was.
+        if body_from:
+            print(f"mutgate: the body read is the PR body as it stood at the push of {body_from}, the event that "
+                  "started this run; a line added to the body after that push is not read by this run or a rerun "
+                  "of it, so it counts only from the next push")
     return 1 if found else 0
 
 
@@ -2629,6 +2635,12 @@ def default_jobs():
 def mutant_kind(v):
     if not MUTANT_KIND.fullmatch(v):
         raise argparse.ArgumentTypeError("give a mutant type such as STATEMENT_DELETION or CONDITIONALS_NEGATION")
+    return v
+
+
+def commit_sha(v):
+    if not re.fullmatch(r"[0-9a-f]{40}", v):
+        raise argparse.ArgumentTypeError("give the full 40-character commit sha")
     return v
 
 
@@ -2681,6 +2693,8 @@ def main(argv=None):
         p.add_argument("--git", required=True, metavar="BASE")
         p.add_argument("head", nargs="?", default="HEAD")
         p.add_argument("--body", metavar="FILE", help="the PR body, read as text for Mutant-equivalent lines")
+        p.add_argument("--body-from", metavar="SHA", type=commit_sha,
+                       help="the PR head of the push event whose body FILE is; a failure names it (#6077)")
         p.add_argument("--summary", metavar="FILE", help="append the table of verdicts here")
     args = ap.parse_args(argv)
     if args.cmd == "run" and (not 0 <= args.shard < args.of <= MATRIX_MAX or (args.of > 1 and not args.git)):
