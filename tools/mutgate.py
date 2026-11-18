@@ -28,12 +28,12 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
                                              add the verdicts to `run`'s JSON in DIR (#4573, #4603, #4633);
                                              only the sites of the result's own shard
   tools/mutgate.py report DIR                survivors per package, from the JSON in DIR
-  tools/mutgate.py gate DIR --git BASE [HEAD] [--body FILE] [--summary FILE]
+  tools/mutgate.py gate DIR --git BASE [HEAD] [--body FILE [--body-from SHA]] [--summary FILE]
                                              exit 1 if a LIVED mutant sits on a target line that no
                                              `Mutant-equivalent:` line in FILE (the PR body) and no
                                              entry of its package's record names, or a record
                                              entry is stale
-  tools/mutgate.py verify DIR --git BASE [HEAD] [--body FILE] [--summary FILE]
+  tools/mutgate.py verify DIR --git BASE [HEAD] [--body FILE [--body-from SHA]] [--summary FILE]
                                              `gate`, after checking that DIR/*/ holds exactly
                                              one readable result for each shard of every package
                                              `claimed` names, as `run` and `delete` check it, with
@@ -1345,28 +1345,37 @@ def covered_by(pkg, names, tmp, broker=None):
     test functions (every test, for None) run, from one -coverprofile run of the PR's tests (so in
     the untrusted job only); or (None, problem). A block's lines from its start to its end count, an
     evaluated clause expression's among them (with_cases, #5822)."""
+    out, _, problem = timed_cover(pkg, names, tmp, broker)
+    return out, problem
+
+
+def timed_cover(pkg, names, tmp, broker=None):
+    """covered_by's (lines, seconds, problem): seconds is how long its `go test` took, so a plan
+    that ran the whole suite under coverage sizes the shards from that run, not a fourth (#6155)."""
     broker = BROKER if broker is None else broker
     profile = pathlib.Path(tmp) / "tests.cover"
     profile.unlink(missing_ok=True)
     cmd = ["go", "test", "-count=1", "-covermode=count", f"-coverprofile={profile}"]
     if names is not None:
         cmd += ["-run", "^(" + "|".join(names) + ")$"]
+    began = time.monotonic()
     # Its output goes to stderr: `plan` prints the matrix on stdout (#4961).
     if subprocess.run([*cmd, "."], cwd=broker / pkg, stdout=sys.stderr).returncode or not profile.exists():
-        return None, f"broker/{pkg}/'s tests {'(all)' if names is None else names} fail under -coverprofile"
+        return None, None, f"broker/{pkg}/'s tests {'(all)' if names is None else names} fail under -coverprofile"
+    seconds = time.monotonic() - began
     if (lister := lister_in(tmp)) is None:
-        return None, "cannot build tools/mutgate_stmts.go"
+        return None, None, "cannot build tools/mutgate_stmts.go"
     try:
         text = with_cases(profile.read_text(), lister, broker / pkg)
     except RuntimeError as e:
-        return None, f"broker/{pkg}/: {e}"
+        return None, None, f"broker/{pkg}/: {e}"
     out = {}
     for name, blocks in covered_blocks(text).items():
         f = broker / pkg / name
         if is_source(name) and f.is_file() and not f.is_symlink():
             for (first, _), (last, _) in blocks:
                 out.setdefault(f"broker/{pkg}/{name}", set()).update(range(first, last + 1))
-    return out, None
+    return out, seconds, None
 
 
 HUNKS = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -1531,26 +1540,27 @@ def base_covered(pkg, mb, names, tmp, diff_text):
 
 
 def record_for(pkg, tests, bases, diff_text, base, tmp):
-    """(record, None) of the lines the changed tests of broker/<pkg>/ cover at the head and, as its
-    `base` part, at the base (#5762); or (None, problem). Runs the PR's tests: untrusted jobs only."""
+    """(record, seconds, None) of the lines the changed tests of broker/<pkg>/ cover at the head and,
+    as its `base` part, at the base (#5762), with the seconds its whole-suite run at the head took;
+    or (None, None, problem). Runs the PR's tests: untrusted jobs only."""
     names = changed_tests(tests, pkg, bases)
-    covered, problem = covered_by(pkg, names, tmp)
+    covered, secs, problem = timed_cover(pkg, names, tmp)
     if problem:
-        return None, problem
+        return None, None, problem
     was, problem = base_covered(pkg, merge_base(base, "HEAD"), bases[pkg], tmp, diff_text)
     if problem:
-        return None, problem
+        return None, None, problem
     # Every target line runs (L1 on #5770, #5942): a line no mutant and no deletion names (a brace, a
     # bare `return g()`) has no NOT COVERED verdict, so a weakened test that stops running it was unseen.
     # One whole-suite run at the head (none more when the changed tests are every test) names it.
-    every, problem = (covered, None) if names is None else covered_by(pkg, None, tmp)
+    every, secs, problem = (covered, secs, None) if names is None else timed_cover(pkg, None, tmp)
     if problem:
-        return None, problem
+        return None, None, problem
     if gone := unrun(was, every):
-        return None, ("; ".join(f"{p}: {', '.join(map(str, ls))}" for p, ls in gone.items())
-                      + f" ran under the base's version of the tests this diff changes, and no test of package {pkg} "
-                      "runs them at the head: keep a test that runs each, or delete the code")
-    return {**coverage_record(names, covered), "base": coverage_record(bases[pkg], was)}, None
+        return None, None, ("; ".join(f"{p}: {', '.join(map(str, ls))}" for p, ls in gone.items())
+                            + f" ran under the base's version of the tests this diff changes, and no test of package {pkg} "
+                            "runs them at the head: keep a test that runs each, or delete the code")
+    return {**coverage_record(names, covered), "base": coverage_record(bases[pkg], was)}, secs, None
 
 
 def unrun(was, every):
@@ -1630,7 +1640,7 @@ def cmd_run(args):
                 full, problem = planned_targets(planned, pkg, added, tests, bases)
                 record = None if problem else planned[pkg]
             else:
-                record, problem = record_for(pkg, tests, bases, diff, args.git, cfgdir.name)
+                record, _, problem = record_for(pkg, tests, bases, diff, args.git, cfgdir.name)
                 full, problem = (None, problem) if problem else targets_for(pkg, added, tests, {"targets": record}, bases)
             if problem:
                 print(f"mutgate: {problem}", file=sys.stderr)
@@ -2365,7 +2375,15 @@ def decide(results, added, tests, args, records=({}, [])):
               + ", ".join(site_text((p, n, k, c)) for p, n, k, c in hit) + "), so it waives none: name the one it "
               "proves by its column and kind, `Mutant-equivalent: <path>:<line>:<col>:<KIND> <reason>`")
     refuse_not_equivalent(refused)
-    return report_violations(found, lost) or (1 if stale or refused else 0)
+    rc = report_violations(found, lost) or (1 if stale or refused else 0)
+    # MUT-stale-body (#6077): the workflow passes the event's body, which "Re-run failed jobs" reuses, so a
+    # line added or reworded after the push is unread here although the current body holds it. Every failure
+    # can call for a body edit (a new, refused or ambiguous line), so each says which body this was.
+    if rc and getattr(args, "body_from", None):
+        print(f"mutgate: the body read is the PR body as it stood at head {args.body_from}, when the event that "
+              "started this run fired (the PR's opening, a push or a reopening); a line added to the body after "
+              "that is not read by this run or a rerun of it, so it counts only from the next push")
+    return rc
 
 
 def write_summary(path, text):
@@ -2528,9 +2546,9 @@ def cmd_plan(args):
         if (lister := build_lister(tmp)) is None:
             return 1
         for pkg in claimed(diff):
-            targets = diff_targets(added, pkg)
+            targets, suite = diff_targets(added, pkg), None
             if tests_changed(tests, pkg):
-                record, problem = record_for(pkg, tests, bases, diff, args.git, tmp)
+                record, suite, problem = record_for(pkg, tests, bases, diff, args.git, tmp)
                 if not problem:
                     targets, problem = targets_for(pkg, added, tests, {"targets": record}, bases)
                 if problem:
@@ -2542,7 +2560,15 @@ def cmd_plan(args):
             if problem:
                 print(f"mutgate: {problem}", file=sys.stderr)
                 return 1
-            suite, problem = suite_seconds(pkg, tmp) if targets or sites else (0.0, None)
+            # A test-changing package's whole suite already ran under coverage in record_for: its time
+            # sizes the shards, so the slowest suite runs three times here, not four (#6155). The `go test`
+            # wall time holds the link too, so it can only add shards.
+            if not (targets or sites):
+                suite, problem = 0.0, None
+            elif suite is None:
+                suite, problem = suite_seconds(pkg, tmp)
+            else:
+                problem = None
             if problem:
                 print(f"mutgate: {problem}", file=sys.stderr)
                 return 1
@@ -2632,6 +2658,12 @@ def mutant_kind(v):
     return v
 
 
+def commit_sha(v):
+    if not re.fullmatch(r"[0-9a-f]{40}", v):
+        raise argparse.ArgumentTypeError("give the full 40-character commit sha")
+    return v
+
+
 def pr_ref(v):
     if not re.fullmatch(r"#[1-9]\d*", v):
         raise argparse.ArgumentTypeError("give the PR as #<number>")
@@ -2681,10 +2713,14 @@ def main(argv=None):
         p.add_argument("--git", required=True, metavar="BASE")
         p.add_argument("head", nargs="?", default="HEAD")
         p.add_argument("--body", metavar="FILE", help="the PR body, read as text for Mutant-equivalent lines")
+        p.add_argument("--body-from", metavar="SHA", type=commit_sha,
+                       help="the PR head of the event whose body FILE is; a failure names it (#6077)")
         p.add_argument("--summary", metavar="FILE", help="append the table of verdicts here")
     args = ap.parse_args(argv)
     if args.cmd == "run" and (not 0 <= args.shard < args.of <= MATRIX_MAX or (args.of > 1 and not args.git)):
         ap.error(f"--shard I --of K needs 0 <= I < K <= {MATRIX_MAX}, and --git when K > 1")
+    if getattr(args, "body_from", None) and not args.body:
+        ap.error("--body-from names the event whose body --body holds: give --body too")
     if args.cmd == "packages":
         print("\n".join(gated_packages()))
         return 0

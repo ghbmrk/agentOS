@@ -555,6 +555,32 @@ jobs:
             $p.FuzzH264Feed < "$RUNNER_TEMP/camdecode.json" || exit 1
           [ "$status" -eq 0 ]
           python3 ../tools/fuzzrun.py --pkg ./cmd/agentos-camdecode/camdecode --target FuzzH264Feed --budget 20s
+      - name: The browser gate through a real driver, and S5's executor on its fixture site (BROWSER-fixture-ci, #5952, K4)
+        # go test ./... skips both Go fixture tests without Python Playwright and a headless shell, so
+        # they run here on the pinned Playwright (tests/requirements-browser.txt, by hash) and the
+        # Chrome for Testing headless shell Playwright 1.63 names (browsers.json revision 1243,
+        # 153.0.8010.12), downloaded from Google and refused unless it hashes to its pin. A skip fails:
+        # require_ran.py for the Go tests; for the Python ones, AGENTOS_REQUIRE_BROWSER=1 and the
+        # script run, which exits 1 on any skip.
+        env:
+          CFT_SHELL_URL: https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.12/linux64/chrome-headless-shell-linux64.zip
+          CFT_SHELL_SHA256: a9da028861a0cf789ff25c2fed45f5f1aaf969ed9247835b6a7821a4f7af9d1d
+        run: |
+          python3 -m venv "$RUNNER_TEMP/pw"
+          "$RUNNER_TEMP/pw/bin/python" -m pip install -q --no-deps --only-binary=:all: --require-hashes \
+            -r ../tests/requirements-browser.txt
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/shell.zip" "$CFT_SHELL_URL"
+          echo "$CFT_SHELL_SHA256  $RUNNER_TEMP/shell.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/shell.zip" -d "$RUNNER_TEMP/shell"
+          export PATH="$RUNNER_TEMP/pw/bin:$PATH" AGENTOS_REQUIRE_BROWSER=1 \
+            S5_CHROME="$RUNNER_TEMP/shell/chrome-headless-shell-linux64/chrome-headless-shell"
+          status=0
+          go test -count=1 -json -run '^TestFixture' ./browser > "$RUNNER_TEMP/browser.json" || status=$?
+          p=github.com/ghbmrk/agentos/broker/browser
+          python3 -I ../tools/require_ran.py $p.TestFixtureThroughTheGate $p.TestFixtureRefsFollowTheDriversDocument \
+            < "$RUNNER_TEMP/browser.json" || exit 1
+          [ "$status" -eq 0 ]
+          (cd .. && python3 tests/test_s5_executor.py -v)
       - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: rm -rf "$(go env GOCACHE)/fuzz"
