@@ -5704,6 +5704,8 @@ class ExecAllowTest(unittest.TestCase):
                                       r"(etc|usr/share)/polkit-1/rules\.d/[^/]+|usr/share/polkit-1/actions/[^/]+|"
                                       r"etc/dbus-1/.+|usr/share/dbus-1/(system\.d/[^/]+|system-services/[^/]+|"
                                       r"system\.conf)|"
+                                      # #4641 R-b: the PAM stacks.
+                                      r"(etc|usr/lib)/pam\.d/[^/]+|etc/pam\.conf|"
                                       # #5818: every file systemd merges into the bus daemon's units.
                                       r"(etc|usr/local/lib|usr/lib)/systemd/system/(dbus\.(service|socket)|"
                                       r"(dbus\.(service|socket)|service|socket)\.d/[^/]+\.conf))$")
