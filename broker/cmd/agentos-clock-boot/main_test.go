@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,6 +114,47 @@ func TestForeignOwnedStateSetsNothing(t *testing.T) {
 		set = nil
 		if code := run(state, env); code != 0 || (uid == 0) != (len(set) == 1) {
 			t.Fatalf("owner %d: code %d, set %v", uid, code, set)
+		}
+	}
+}
+
+// Each outcome logs exactly its own one line and stops there: an unreadable
+// hardware clock or a refused or missing state file sets nothing, and a
+// failed set is not logged as a set.
+func TestEachOutcomeLogsItsLine(t *testing.T) {
+	dir := t.TempDir()
+	state := filepath.Join(dir, "clock.json")
+	b, _ := json.Marshal(map[string]any{"have_offset": true, "offset": int64(time.Hour), "offset_host": clock.HostKey(testHost)})
+	if err := os.WriteFile(state, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rtc := time.Date(2026, 10, 9, 22, 0, 0, 0, time.UTC)
+	ok := func(time.Time) error { return nil }
+	for _, c := range []struct {
+		name, path, want string
+		rtcErr, setErr   error
+		sets             int
+	}{
+		{"set", state, "clock set to 2026-10-09T21:00:00Z", nil, nil, 1},
+		{"no rtc", state, "hardware clock unreadable", errors.New("no rtc"), nil, 0},
+		{"no state", filepath.Join(dir, "none"), "no offset learned", nil, nil, 0},
+		{"set fails", state, "clock not set: EPERM", nil, errors.New("EPERM"), 1},
+	} {
+		var logged []string
+		sets := 0
+		set := ok
+		if c.setErr != nil {
+			set = func(time.Time) error { return c.setErr }
+		}
+		env := bootEnv{
+			rtc:    func() (time.Time, error) { return rtc, c.rtcErr },
+			hostID: func() string { return testHost },
+			now:    func() time.Time { return rtc },
+			set:    func(t time.Time) error { sets++; return set(t) },
+			logf:   func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) },
+		}
+		if code := run(c.path, env); code != 0 || sets != c.sets || len(logged) != 1 || !strings.Contains(logged[0], c.want) {
+			t.Errorf("%s: code %d, %d sets, logged %q", c.name, code, sets, logged)
 		}
 	}
 }
