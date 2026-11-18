@@ -84,6 +84,7 @@ jobs:
         if: steps.scope.outputs.records != 'true'
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
+          sh image/debian-archive-keyring.sh  # exactly the pinned keys (#5578)
           # snapshot.debian.org answers 503/504 for minutes at a time (#4518; #5011's run 42120504082
           # died on a 504 after the runner apt's 3 tries). Each attempt starts from an empty root and
           # reads the same pinned, signed snapshot, so a retry fetches the same hashed packages. Four
@@ -101,6 +102,26 @@ jobs:
             sleep "$wait"
           done
           sudo chroot "$RUNNER_TEMP/image-tools" dpkg-query -W systemd kmod
+      - name: The keyring check refuses an altered, a missing and an extra key (IMG-keyring-pin, #5578)
+        if: steps.scope.outputs.records != 'true'
+        # The committed list passes on the runner's keyrings; three copies of the check, each with
+        # its list changed, must fail on them: a pinned fingerprint altered, a pinned key dropped (the
+        # keyring then holds a key not pinned), and a key added (a pinned key is then missing). The
+        # first fingerprint is the 12/bookworm archive key, pinned in its own keyring (which the
+        # sources name, #5954).
+        run: |
+          k=image/debian-archive-keyring.sh d=$RUNNER_TEMP/keyring-check
+          sh "$k"
+          f=$(awk '/^[0-9A-F]{40}  /{ print $1; exit }' "$k"); g=$(echo "$f" | rev)
+          [ ${#f} = 40 ] && [ "$f" != "$g" ] || { echo "no pinned fingerprint found in $k" >&2; exit 1; }
+          mkdir -p "$d"
+          sed "s/^$f/$g/" "$k" > "$d/altered.sh"
+          sed "/^$f/d" "$k" > "$d/dropped.sh"
+          sed "/^$f/p" "$k" | sed "0,/^$f/s//$g/" > "$d/added.sh"
+          for c in altered dropped added; do
+            ! cmp -s "$k" "$d/$c.sh" || { echo "$c: the copy is unchanged" >&2; exit 1; }
+            if sh "$d/$c.sh"; then echo "$c: the check passed" >&2; exit 1; fi
+          done
       - name: Unit tests
         if: steps.scope.outputs.records != 'true'
         # The differential tests (systemd-analyze, systemd-tmpfiles, modprobe) fail rather than skip
@@ -286,6 +307,30 @@ jobs:
           restore-keys: |
             go-build-broker-race-${{ matrix.shard }}-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
             go-build-broker-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
+      - name: Runner disk after the cache restore (CI-disk-cause)
+        if: steps.scope.outputs.records != 'true'
+        # Supporting evidence, not the fix (that is the build cache step before the save): the cloud,
+        # / free after the restore and the restored cache's size, in one notice. A run under the floor
+        # stops here naming its figure instead of failing later as ENOSPC with no test output. It also
+        # marks the time from which the step before the save counts an entry as used by this run.
+        env:
+          CACHE: ~/.cache/go-build
+          AS_ROOT: ""
+          DISK_FLOOR_GB: "2" # a floor that no Go test step fits under, not a budget
+        run: |
+          vendor=$(cat "${DMI_ID:-/sys/class/dmi/id}/sys_vendor" 2>/dev/null || true)
+          case "$vendor" in
+            "Amazon EC2"*) cloud=AWS;; "Microsoft Corporation"*) cloud=Azure;; *) cloud="unknown-cloud (${vendor:-no DMI vendor})";;
+          esac
+          c=${CACHE/#\~/$HOME}
+          cache_mb=0
+          [ ! -d "$c" ] || cache_mb=$($AS_ROOT du -sm "$c" | awk '{print $1}')
+          free_gb=$(( $(df -BM --output=avail / | tail -n 1 | tr -dc 0-9) / 1024 ))
+          echo "::notice title=runner disk::$cloud runner: / has $free_gb GB free after restoring $cache_mb MB of Go build cache"
+          # go touches a cache entry it uses only when the entry's mtime is an hour old or more, so an
+          # entry is this run's if it is newer than an hour (and a minute) before now.
+          touch -d "@$(( $(date +%s) - 3660 ))" "$RUNNER_TEMP/gocache.mark"
+          [ "$free_gb" -ge "$DISK_FLOOR_GB" ] || { echo "::error title=runner disk::$cloud runner: / has $free_gb GB free after restoring $cache_mb MB of Go build cache, under the $DISK_FLOOR_GB GB floor; rerun the job, and if the cache is the bulk, see CI-disk-cause in tools/ASSUMPTIONS.md"; exit 1; }
       - name: Software TPM for the trusted-host slot (P2-4b)
         if: steps.scope.outputs.records != 'true'
         run: sudo apt-get update -q && sudo apt-get install -yq swtpm
@@ -336,6 +381,36 @@ jobs:
       - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: rm -rf "$(go env GOCACHE)/fuzz"
+      - name: Build cache keeps only what this run used (CI-disk-cause)
+        if: steps.scope.outputs.records != 'true'
+        # The cause of the full runner disk (#4422): each main push saved the restored cache plus its
+        # own builds, and go drops an entry only after five days unused, so broker-race (1)'s cache
+        # reached 5.1 GB compressed, restored on every run. Every run measures what it would drop;
+        # a push to main drops it, so the save holds one run's working set.
+        env:
+          CACHE: ~/.cache/go-build
+          AS_ROOT: ""
+          DROP: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: |
+          c=${CACHE/#\~/$HOME}
+          mark="$RUNNER_TEMP/gocache.mark"
+          [ -e "$mark" ] || { echo "::error title=build cache::no $mark: the runner-disk step did not run, so which entries this run used is unknown"; exit 1; }
+          [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
+          # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
+          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
+          # Sizes are find's own numbers, one per line, so no entry name is read as text; a -d directory's
+          # files are counted from the directory find holds open, as the drop removes them.
+          mb() { { entries "$@" -printf '%s\n'; entries "$@" -type d -execdir find {} -mindepth 1 -printf '%s\n' \;; } |
+            awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          all=$(mb); used=$(mb -newer "$mark")
+          echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
+          if [ "$DROP" = true ]; then
+            # find walks without following a link, and removes each entry by its name in the directory it
+            # holds open: -delete for a file, rm -rf ./<id>-d run from that directory for an executable's.
+            entries ! -newer "$mark" -type f -delete
+            entries ! -newer "$mark" -type d -execdir rm -rf {} +
+            echo "dropped the stale entries; $(mb) MB left to save"
+          fi
       - name: Go build cache upload (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
@@ -350,6 +425,11 @@ jobs:
     defaults:
       run:
         working-directory: broker
+    env:
+      # The headless shell the browser step runs: the one Playwright's pinned wheel names in its
+      # browsers.json (tests/test_s5_executor.py ShellPin fails when only one pin moves, #6064).
+      CFT_SHELL_URL: https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.12/linux64/chrome-headless-shell-linux64.zip
+      CFT_SHELL_SHA256: a9da028861a0cf789ff25c2fed45f5f1aaf969ed9247835b6a7821a4f7af9d1d
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -376,6 +456,29 @@ jobs:
           path: ~/.cache/go-build
           key: go-build-broker-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
           restore-keys: go-build-broker-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
+      - name: Runner disk after the cache restore (CI-disk-cause)
+        # Supporting evidence, not the fix (that is the build cache step before the save): the cloud,
+        # / free after the restore and the restored cache's size, in one notice. A run under the floor
+        # stops here naming its figure instead of failing later as ENOSPC with no test output. It also
+        # marks the time from which the step before the save counts an entry as used by this run.
+        env:
+          CACHE: ~/.cache/go-build
+          AS_ROOT: ""
+          DISK_FLOOR_GB: "2" # a floor that no Go test step fits under, not a budget
+        run: |
+          vendor=$(cat "${DMI_ID:-/sys/class/dmi/id}/sys_vendor" 2>/dev/null || true)
+          case "$vendor" in
+            "Amazon EC2"*) cloud=AWS;; "Microsoft Corporation"*) cloud=Azure;; *) cloud="unknown-cloud (${vendor:-no DMI vendor})";;
+          esac
+          c=${CACHE/#\~/$HOME}
+          cache_mb=0
+          [ ! -d "$c" ] || cache_mb=$($AS_ROOT du -sm "$c" | awk '{print $1}')
+          free_gb=$(( $(df -BM --output=avail / | tail -n 1 | tr -dc 0-9) / 1024 ))
+          echo "::notice title=runner disk::$cloud runner: / has $free_gb GB free after restoring $cache_mb MB of Go build cache"
+          # go touches a cache entry it uses only when the entry's mtime is an hour old or more, so an
+          # entry is this run's if it is newer than an hour (and a minute) before now.
+          touch -d "@$(( $(date +%s) - 3660 ))" "$RUNNER_TEMP/gocache.mark"
+          [ "$free_gb" -ge "$DISK_FLOOR_GB" ] || { echo "::error title=runner disk::$cloud runner: / has $free_gb GB free after restoring $cache_mb MB of Go build cache, under the $DISK_FLOOR_GB GB floor; rerun the job, and if the cache is the bulk, see CI-disk-cause in tools/ASSUMPTIONS.md"; exit 1; }
       - name: Format
         # Vendored third-party code keeps its upstream formatting.
         run: f=$(find . -name '*.go' -not -path './vendor/*' -print0 | xargs -0 gofmt -l); test -z "$f" || { echo "$f"; exit 1; }
@@ -390,8 +493,19 @@ jobs:
       - name: Vendored code equals the modules go.sum pins (KRN-2cap-harden, #2945)
         # `go mod vendor` rewrites vendor/ from the checksum-verified modules (and the local
         # replace directories), so an edited, added or deleted vendored file shows as a change.
+        # A Go proxy read can fail mid-stream (#3977, as #3768), so `go mod vendor` is tried three
+        # times; the third failure fails the step. The comparison runs once, outside the retry.
         run: |
-          go mod vendor
+          retry() {
+            for t in 1 2 3; do
+              "$@" && return
+              echo "try $t of 3 failed: $*" >&2
+              [ "$t" = 3 ] || sleep $((t * 15))
+            done
+            echo "::error::$* failed 3 times; the vendor check cannot run (#3977)"
+            return 1
+          }
+          retry go mod vendor
           s=$(git status --porcelain --untracked-files=all -- vendor)
           test -z "$s" || { echo "$s"; echo "broker/vendor differs from go mod vendor" >&2; exit 1; }
       - name: OP-2 same-effect model at its full bounds, without -race (journal A19)
@@ -446,9 +560,79 @@ jobs:
             $p.FuzzH264Feed < "$RUNNER_TEMP/camdecode.json" || exit 1
           [ "$status" -eq 0 ]
           python3 ../tools/fuzzrun.py --pkg ./cmd/agentos-camdecode/camdecode --target FuzzH264Feed --budget 20s
+      - name: Headless shell download cache (BROWSER-fixture-ci-fu, #6064)
+        # Keyed on the runner image and the shell's pin, so a new pin never restores an old zip.
+        # Restore only here: the upload after the browser step runs on a push to main alone (D29), so
+        # no PR writes what main restores, and the browser step hash-checks whatever this restores.
+        id: cft
+        uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: ~/.cache/agentos-cft/shell.zip
+          key: cft-headless-shell-${{ steps.image.outputs.os }}-${{ env.CFT_SHELL_SHA256 }}
+      - name: The browser gate through a real driver, and S5's executor on its fixture site (BROWSER-fixture-ci, #5952, K4)
+        # go test ./... skips both Go fixture tests without Python Playwright and a headless shell, so
+        # they run here on the pinned Playwright (tests/requirements-browser.txt, by hash) and the
+        # Chrome for Testing headless shell Playwright 1.63 names (browsers.json revision 1243,
+        # 153.0.8010.12), downloaded from Google and refused unless it hashes to its pin. A skip fails:
+        # require_ran.py for the Go tests; for the Python ones, AGENTOS_REQUIRE_BROWSER=1 and the
+        # script run, which exits 1 on any skip. The zip may come from the cache step before; the
+        # hash check runs on it either way, so a cache cannot supply another binary.
+        run: |
+          python3 -m venv "$RUNNER_TEMP/pw"
+          "$RUNNER_TEMP/pw/bin/python" -m pip install -q --no-deps --only-binary=:all: --require-hashes \
+            -r ../tests/requirements-browser.txt
+          zip="$HOME/.cache/agentos-cft/shell.zip"
+          [ -f "$zip" ] || { mkdir -p "${zip%/*}" && curl -fsSL --retry 3 -o "$zip" "$CFT_SHELL_URL"; }
+          echo "$CFT_SHELL_SHA256  $zip" | sha256sum -c -
+          unzip -q "$zip" -d "$RUNNER_TEMP/shell"
+          export PATH="$RUNNER_TEMP/pw/bin:$PATH" AGENTOS_REQUIRE_BROWSER=1 \
+            S5_CHROME="$RUNNER_TEMP/shell/chrome-headless-shell-linux64/chrome-headless-shell"
+          status=0
+          go test -count=1 -json -run '^TestFixture' ./browser > "$RUNNER_TEMP/browser.json" || status=$?
+          p=github.com/ghbmrk/agentos/broker/browser
+          python3 -I ../tools/require_ran.py $p.TestFixtureThroughTheGate $p.TestFixtureRefsFollowTheDriversDocument \
+            < "$RUNNER_TEMP/browser.json" || exit 1
+          [ "$status" -eq 0 ]
+          (cd .. && python3 tests/test_s5_executor.py -v)
+      - name: Headless shell cache upload (main only; #6064)
+        # Saves the zip the browser step just hash-checked, once per pin.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cft.outputs.cache-hit != 'true'
+        uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: ~/.cache/agentos-cft/shell.zip
+          key: cft-headless-shell-${{ steps.image.outputs.os }}-${{ env.CFT_SHELL_SHA256 }}
       - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: rm -rf "$(go env GOCACHE)/fuzz"
+      - name: Build cache keeps only what this run used (CI-disk-cause)
+        # The cause of the full runner disk (#4422): each main push saved the restored cache plus its
+        # own builds, and go drops an entry only after five days unused, so broker-race (1)'s cache
+        # reached 5.1 GB compressed, restored on every run. Every run measures what it would drop;
+        # a push to main drops it, so the save holds one run's working set.
+        env:
+          CACHE: ~/.cache/go-build
+          AS_ROOT: ""
+          DROP: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: |
+          c=${CACHE/#\~/$HOME}
+          mark="$RUNNER_TEMP/gocache.mark"
+          [ -e "$mark" ] || { echo "::error title=build cache::no $mark: the runner-disk step did not run, so which entries this run used is unknown"; exit 1; }
+          [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
+          # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
+          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
+          # Sizes are find's own numbers, one per line, so no entry name is read as text; a -d directory's
+          # files are counted from the directory find holds open, as the drop removes them.
+          mb() { { entries "$@" -printf '%s\n'; entries "$@" -type d -execdir find {} -mindepth 1 -printf '%s\n' \;; } |
+            awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          all=$(mb); used=$(mb -newer "$mark")
+          echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
+          if [ "$DROP" = true ]; then
+            # find walks without following a link, and removes each entry by its name in the directory it
+            # holds open: -delete for a file, rm -rf ./<id>-d run from that directory for an executable's.
+            entries ! -newer "$mark" -type f -delete
+            entries ! -newer "$mark" -type d -execdir rm -rf {} +
+            echo "dropped the stale entries; $(mb) MB left to save"
+          fi
       - name: Go build cache upload (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
@@ -485,6 +669,29 @@ jobs:
           path: /tmp/gocache
           key: go-build-machines-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
           restore-keys: go-build-machines-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
+      - name: Runner disk after the cache restore (CI-disk-cause)
+        # Supporting evidence, not the fix (that is the build cache step before the save): the cloud,
+        # / free after the restore and the restored cache's size, in one notice. A run under the floor
+        # stops here naming its figure instead of failing later as ENOSPC with no test output. It also
+        # marks the time from which the step before the save counts an entry as used by this run.
+        env:
+          CACHE: /tmp/gocache
+          AS_ROOT: "sudo"
+          DISK_FLOOR_GB: "2" # a floor that no Go test step fits under, not a budget
+        run: |
+          vendor=$(cat "${DMI_ID:-/sys/class/dmi/id}/sys_vendor" 2>/dev/null || true)
+          case "$vendor" in
+            "Amazon EC2"*) cloud=AWS;; "Microsoft Corporation"*) cloud=Azure;; *) cloud="unknown-cloud (${vendor:-no DMI vendor})";;
+          esac
+          c=${CACHE/#\~/$HOME}
+          cache_mb=0
+          [ ! -d "$c" ] || cache_mb=$($AS_ROOT du -sm "$c" | awk '{print $1}')
+          free_gb=$(( $(df -BM --output=avail / | tail -n 1 | tr -dc 0-9) / 1024 ))
+          echo "::notice title=runner disk::$cloud runner: / has $free_gb GB free after restoring $cache_mb MB of Go build cache"
+          # go touches a cache entry it uses only when the entry's mtime is an hour old or more, so an
+          # entry is this run's if it is newer than an hour (and a minute) before now.
+          touch -d "@$(( $(date +%s) - 3660 ))" "$RUNNER_TEMP/gocache.mark"
+          [ "$free_gb" -ge "$DISK_FLOOR_GB" ] || { echo "::error title=runner disk::$cloud runner: / has $free_gb GB free after restoring $cache_mb MB of Go build cache, under the $DISK_FLOOR_GB GB floor; rerun the job, and if the cache is the bulk, see CI-disk-cause in tools/ASSUMPTIONS.md"; exit 1; }
       - name: Install gVisor release-20260928.0 (checksum pinned)
         run: |
           B=https://storage.googleapis.com/gvisor/releases/release/20260928.0/x86_64
@@ -557,6 +764,7 @@ jobs:
           trap 'sudo sysctl -qw kernel.apparmor_restrict_unprivileged_userns=$was' EXIT
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
+          sh ../image/debian-archive-keyring.sh  # exactly the pinned keys (#5578)
           T=$RUNNER_TEMP/camdecode-tree
           # snapshot.debian.org has outages (#4518): four attempts, as the checks job's image tools.
           for wait in 15 30 60 last; do
@@ -724,6 +932,35 @@ jobs:
       - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: sudo rm -rf /tmp/gocache/fuzz
+      - name: Build cache keeps only what this run used (CI-disk-cause)
+        # The cause of the full runner disk (#4422): each main push saved the restored cache plus its
+        # own builds, and go drops an entry only after five days unused, so broker-race (1)'s cache
+        # reached 5.1 GB compressed, restored on every run. Every run measures what it would drop;
+        # a push to main drops it, so the save holds one run's working set.
+        env:
+          CACHE: /tmp/gocache
+          AS_ROOT: "sudo"
+          DROP: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: |
+          c=${CACHE/#\~/$HOME}
+          mark="$RUNNER_TEMP/gocache.mark"
+          [ -e "$mark" ] || { echo "::error title=build cache::no $mark: the runner-disk step did not run, so which entries this run used is unknown"; exit 1; }
+          [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
+          # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
+          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
+          # Sizes are find's own numbers, one per line, so no entry name is read as text; a -d directory's
+          # files are counted from the directory find holds open, as the drop removes them.
+          mb() { { entries "$@" -printf '%s\n'; entries "$@" -type d -execdir find {} -mindepth 1 -printf '%s\n' \;; } |
+            awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          all=$(mb); used=$(mb -newer "$mark")
+          echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
+          if [ "$DROP" = true ]; then
+            # find walks without following a link, and removes each entry by its name in the directory it
+            # holds open: -delete for a file, rm -rf ./<id>-d run from that directory for an executable's.
+            entries ! -newer "$mark" -type f -delete
+            entries ! -newer "$mark" -type d -execdir rm -rf {} +
+            echo "dropped the stale entries; $(mb) MB left to save"
+          fi
       - name: Go build cache upload (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
@@ -750,6 +987,7 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -yq qemu-utils tpm2-tools busybox-static ntfs-3g dosfstools cpio fdisk \
             python3-virt-firmware mmdebstrap debian-archive-keyring
+          sh image/debian-archive-keyring.sh  # exactly the pinned keys (#5578)
       # CI-hostcheck-image-tools (#4906): the VM stack hostcheck boots (qemu, swtpm, OVMF) comes from
       # the image's pinned Debian snapshot, the snapshot entry of the image's own apt sources, never
       # the runner's archive, which updates within the release about weekly. Live trixie-security is

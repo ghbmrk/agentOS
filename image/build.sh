@@ -4,8 +4,8 @@
 # registry.npmjs.org (OpenClaw guest), ffmpeg.org or archive.ubuntu.com (libavcodec), github.com
 # (llama.cpp) and huggingface.co (the embedding model), and the Go module proxy. CI does this:
 # .github/workflows/image.yml
-# Needs mkosi v24.3 (MKOSI=/path/to/mkosi), Go, cc and c++ with a static libc and libstdc++, make,
-# cmake, pkg-config, mtools, erofs-utils, dosfstools, cryptsetup-bin, debian-archive-keyring, mmdebstrap.
+# Needs mkosi v24.3 (MKOSI=/path/to/mkosi), Go, cc with a static libc, make, pkg-config, mtools,
+# erofs-utils, dosfstools, cryptsetup-bin, debian-archive-keyring, mmdebstrap.
 #
 # Usage: build.sh [OUT [VERSION [DRIVERS]]]
 # Output in OUT: agentos_VERSION.raw (the whole drive), the release (agentos_VERSION.usr.raw,
@@ -26,6 +26,8 @@ set -eu
 # A go.work in the repo would override broker/go.mod, go.sum and vendor/ (#4007 Security).
 export GOWORK=off
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/.." && pwd)
+# The Debian archive keyring mkosi and guest-base.sh verify the snapshot with: exactly the pinned keys (#5578).
+sh "$HERE/debian-archive-keyring.sh"
 OUT=$(realpath -m "${1:-$HERE/out}"); MKOSI=${MKOSI:-mkosi}; DRIVERS=${3:+$(realpath "$3")}
 SOURCE_DATE_EPOCH=$(git -c safe.directory="$REPO" -C "$REPO" log -1 --format=%ct); export SOURCE_DATE_EPOCH
 VERSION=${2:-$(TZ=UTC git -c safe.directory="$REPO" -C "$REPO" log -1 --date=format-local:%Y%m%d.%H%M%S --format=%cd)}
@@ -100,6 +102,10 @@ sh "$HERE/camdecode.sh" "$STAGE/usr/lib/agentos/images/camdecode" "$STAGE/usr/sh
 
 # The local inference service, its pinned llama-server and embedding model, and their licence texts
 # (INFER-image, D-230), built by its own script (image/infer.sh); agentosd leaves it off (-infer).
+# llama-server is linked statically in the base (image/llamaserver.sh, #5885), which records here
+# the Debian packages its link read: the main tree's, not the guests'.
+export LINKED_SHIPPED="$OUT/linked.shipped"
+true >"$LINKED_SHIPPED"
 sh "$HERE/infer.sh" "$STAGE" "$OUT/infer"
 
 # The OpenClaw guest's root file system (P1-7), as an agent-machine image.
@@ -111,8 +117,11 @@ sh "$HERE/check_codex_pin.sh" "$REPO" "$STAGE/usr/lib/agentos/images/codex"
 # The dpkg status of the packages whose files the guests carry, beside their manifest: the image
 # vulnerability check scans them as the "image/guest" tree (image/guest-shipped.sh, #5572).
 sh "$HERE/guest-shipped.sh" --status "$GUEST_BASE" "$OUT/guest"
-rm -rf --one-file-system "$GUEST_BASE" "$GUEST_SHIPPED"
-unset GUEST_BASE GUEST_SHIPPED
+# The dpkg status of the packages the main tree's static binaries link (#5885): the image
+# vulnerability check scans them as part of the main tree ("image").
+GUEST_SHIPPED=$LINKED_SHIPPED sh "$HERE/guest-shipped.sh" --status "$GUEST_BASE" "$OUT/linked"
+rm -rf --one-file-system "$GUEST_BASE" "$GUEST_SHIPPED" "$LINKED_SHIPPED"
+unset GUEST_BASE GUEST_SHIPPED LINKED_SHIPPED
 # How agentosd starts the agent machine (W1): its -agent-launch default.
 install -D -m 0644 "$REPO/guest/openclaw/launch.json" "$STAGE/usr/lib/agentos/guest/launch.json"
 # Each setup service's unit lives beside its command (localui ASSUMPTIONS L26).
