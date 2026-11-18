@@ -16,6 +16,7 @@ import pathlib
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -630,6 +631,209 @@ class AllowListTest(unittest.TestCase):
                                 a[rule["kind"]][k] = 1
                             r = hostcheck.evaluate(b, a, allow, flags=flags)
                             self.assertEqual([f["key"] for f in r[want]], [k], r)
+
+
+# HOST-1e2b1 (#6135): what the S1 PC run needs from the tool. A third system
+# reads the PC's RTC against an SNTP reference, the owner's opted-in disk
+# (HW-8a) is named rather than waved through, and pcrlock pins nothing.
+# REQ: HW-8, HW-8a
+def rtc(offset):
+    return {"rtc": 1_800_000_000, "reference": 1_800_000_000 - offset, "offset": offset, "server": "ntp.test"}
+
+
+class RtcOffsetTest(unittest.TestCase):
+    def check(self, before, after, **kw):
+        return hostcheck.evaluate(before, after, hostcheck.load_allow(), **kw)
+
+    def test_offset_moved_past_tolerance_is_flagged(self):
+        # Natural drift and read error stay inside the tolerance; a write that moves the clock does not.
+        self.assertTrue(self.check(snap(rtc=rtc(600.2)), snap(rtc=rtc(601.9)))["pass"])
+        r = self.check(snap(rtc=rtc(600.2)), snap(rtc=rtc(0.1)))
+        self.assertFalse(r["pass"])
+        self.assertEqual(flagged(r), {("rtc", "offset", "changed")})
+        self.assertFalse(self.check(snap(rtc=rtc(-100.0)), snap(rtc=rtc(-102.5)))["pass"])
+        self.assertTrue(self.check(snap(rtc=rtc(-100.0)), snap(rtc=rtc(-102.5)), rtc_tolerance=3)["pass"])
+        # A tolerance that is not a finite, non-negative number would switch the check off.
+        for bad in (float("nan"), float("inf"), -1.0):
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "tolerance"):
+                self.check(snap(rtc=rtc(600.0)), snap(rtc=rtc(0.0)), rtc_tolerance=bad)
+
+    def test_a_baseline_near_true_time_is_flagged(self):
+        # An image whose kernel writes true time into an RTC that was already near true time
+        # leaves the offset where it was, so the baseline must start well away from it.
+        r = self.check(snap(rtc=rtc(0.3)), snap(rtc=rtc(0.1)))
+        self.assertFalse(r["pass"])
+        self.assertEqual(flagged(r), {("rtc", "offset", "baseline-near-true-time")})
+        self.assertIn("firmware setup", r["flagged"][0]["fix"])
+        floor = hostcheck.RTC_BASELINE_FLOOR
+        self.assertTrue(self.check(snap(rtc=rtc(-floor)), snap(rtc=rtc(-floor)))["pass"])
+        self.assertFalse(self.check(snap(rtc=rtc(floor - 1)), snap(rtc=rtc(floor - 1)))["pass"])
+        self.assertFalse(self.check(snap(rtc=rtc(float("nan"))), snap(rtc=rtc(float("nan"))))["pass"])
+
+    def test_offset_in_one_snapshot_only_is_flagged(self):
+        # A run that forgot the RTC in one snapshot cannot pass as clean.
+        for before, after in ((snap(rtc=rtc(1)), snap()), (snap(), snap(rtc=rtc(1)))):
+            self.assertEqual(flagged(self.check(before, after)), {("rtc", "offset", "missing")})
+        self.assertTrue(self.check(snap(), snap())["pass"])  # the QEMU run records no offset
+
+    def test_rtc_is_read_at_its_second_edge(self):
+        # sysfs gives whole seconds; the edge where the value ticks gives the sub-second phase.
+        reads = iter(["100\n", "100\n", "100\n", "101\n"])
+        clock = iter([5.0, 5.1, 5.2, 5.3, 5.4, 5.5])
+        value, at = hostcheck.rtc_at_edge(lambda: next(reads), lambda: next(clock), sleep=lambda s: None)
+        self.assertEqual(value, 101)
+        self.assertGreaterEqual(at, 5.2)
+        self.assertLessEqual(at, 5.5)
+        with self.assertRaisesRegex(hostcheck.HostcheckError, "did not tick"):
+            t = iter(range(100))
+            hostcheck.rtc_at_edge(lambda: "100\n", lambda: float(next(t)), sleep=lambda s: None)
+
+    def sntp_server(self, reply):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.settimeout(5)
+
+        def serve():
+            try:
+                data, peer = sock.recvfrom(512)
+            except OSError:
+                return
+            sock.sendto(reply(data), peer)
+        threading.Thread(target=serve, daemon=True).start()
+        self.addCleanup(sock.close)
+        return sock.getsockname()[1]
+
+    @staticmethod
+    def ntp_reply(request, offset, echo=True, mode=4, stratum=2, leap=0):
+        t = time.time() + offset
+        secs = int(t)
+        now = (secs + hostcheck.NTP_EPOCH).to_bytes(4, "big") + int((t - secs) * (1 << 32)).to_bytes(4, "big")
+        out = bytearray(48)
+        out[0] = (leap << 6) | (4 << 3) | mode
+        out[1] = stratum
+        out[24:32] = request[40:48] if echo else b"\1" * 8
+        out[32:40] = now
+        out[40:48] = now
+        return bytes(out)
+
+    def test_sntp_reference_checks_the_echo(self):
+        port = self.sntp_server(lambda req: self.ntp_reply(req, 600))
+        self.assertAlmostEqual(hostcheck.sntp_offset("127.0.0.1", port), 600, delta=0.5)
+        for bad, why in (({"echo": False}, "echo"), ({"mode": 3}, "mode"), ({"stratum": 0}, "stratum"),
+                         ({"leap": 3}, "leap indicator")):
+            port = self.sntp_server(lambda req, bad=bad: self.ntp_reply(req, 0, **bad))
+            with self.assertRaisesRegex(hostcheck.HostcheckError, why):
+                hostcheck.sntp_offset("127.0.0.1", port)
+
+    def test_server_names_parse(self):
+        self.assertEqual(hostcheck.parse_server("ntp.test"), ("ntp.test", 123))
+        self.assertEqual(hostcheck.parse_server("ntp.test:1123"), ("ntp.test", 1123))
+        self.assertEqual(hostcheck.parse_server("fd00::1"), ("fd00::1", 123))
+        self.assertEqual(hostcheck.parse_server("[fd00::1]:1123"), ("fd00::1", 1123))
+        for bad in ("ntp.test:x", "ntp.test:0", "[fd00::1]:99999", ":123", "[]"):
+            with self.assertRaises(hostcheck.HostcheckError, msg=bad):
+                hostcheck.parse_server(bad)
+
+    @staticmethod
+    def timex(status, junk=0xA5):
+        # struct timex on LP64: modes, 4 bytes of padding, four longs, then status at byte 40.
+        raw = bytearray([junk]) * 512
+        raw[40:44] = status.to_bytes(4, sys.byteorder)
+        return bytes(raw)
+
+    def test_the_timex_decode_reads_status_and_its_polarity(self):
+        # The guard against a synchronised third system: a wrong offset or polarity fails open in silence,
+        # so the decode is tested on crafted bytes with junk around status, and against adjtimex's return.
+        self.assertTrue(hostcheck.timex_synced(self.timex(0), 0))
+        self.assertTrue(hostcheck.timex_synced(self.timex(0x2001), 1))  # PLL, INS: still synchronised
+        self.assertFalse(hostcheck.timex_synced(self.timex(hostcheck.STA_UNSYNC), hostcheck.TIME_ERROR))
+        self.assertFalse(hostcheck.timex_synced(self.timex(0x41, junk=0), hostcheck.TIME_ERROR))
+        self.assertTrue(hostcheck.timex_synced(self.timex(hostcheck.STA_CLOCKERR), hostcheck.TIME_ERROR))
+        # Status and return value disagree: the bytes were not read as the kernel wrote them.
+        for status, ret in ((hostcheck.STA_UNSYNC, 0), (0, hostcheck.TIME_ERROR)):
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "does not match"):
+                hostcheck.timex_synced(self.timex(status), ret)
+
+        def fake(status, ret):
+            def adjtimex(buf):
+                buf.raw = self.timex(status)
+                return ret
+            return adjtimex
+        self.assertFalse(hostcheck.kernel_clock_synced(fake(hostcheck.STA_UNSYNC, hostcheck.TIME_ERROR)))
+        self.assertTrue(hostcheck.kernel_clock_synced(fake(0, 0)))
+        # The live kernel's answer passes the same agreement check, so the layout is the kernel's.
+        self.assertIsInstance(hostcheck.kernel_clock_synced(), bool)
+
+    def test_a_pc_snapshot_needs_an_rtc_reference(self):
+        with tempfile.TemporaryDirectory() as d, \
+                unittest.mock.patch("sys.stderr"), self.assertRaises(SystemExit) as e:
+            hostcheck.main(["snapshot", "--efivarfs", d, "--tcti", "device:/dev/null", "-o", f"{d}/s.json"])
+        self.assertEqual(e.exception.code, 2)
+
+    def test_snapshot_refuses_while_the_kernel_clock_is_synchronised(self):
+        # A synchronised kernel copies its clock into the RTC every 11 minutes,
+        # which would hide the image's write behind the third system's.
+        with tempfile.TemporaryDirectory() as d:
+            dev = pathlib.Path(d, "since_epoch")
+            dev.write_text("100\n")
+            with unittest.mock.patch.object(hostcheck, "kernel_clock_synced", return_value=True), \
+                    unittest.mock.patch.object(hostcheck, "sntp_offset", return_value=0.0):
+                with self.assertRaisesRegex(hostcheck.HostcheckError, "synchronised"):
+                    hostcheck.rtc_snapshot("ntp.test", device=dev)
+            with unittest.mock.patch.object(hostcheck, "kernel_clock_synced", return_value=False), \
+                    unittest.mock.patch.object(hostcheck, "sntp_offset", return_value=10.0), \
+                    unittest.mock.patch.object(hostcheck, "rtc_at_edge", return_value=(1000, 1600.25)):
+                r = hostcheck.rtc_snapshot("ntp.test", device=dev)
+        self.assertEqual(r["rtc"], 1000)
+        self.assertAlmostEqual(r["offset"], 1000 - 1610.25)
+        self.assertEqual(r["server"], "ntp.test")
+
+
+class OptedInDiskTest(unittest.TestCase):
+    def check(self, before, after, **kw):
+        return hostcheck.evaluate(before, after, hostcheck.load_allow(), **kw)
+
+    def test_only_the_named_disk_change_is_excluded(self):
+        before = snap(disk={"win": "aa" * 32, "data": "cc" * 32})
+        written = snap(disk={"win": "aa" * 32, "data": "dd" * 32})
+        self.assertFalse(self.check(before, written)["pass"])
+        r = self.check(before, written, opted_in_disks={"data"})
+        self.assertTrue(r["pass"], r)
+        self.assertEqual([(e["key"], e["requirement"]) for e in r["excluded"]], [("data", "HW-8a")])
+        both = snap(disk={"win": "bb" * 32, "data": "dd" * 32})
+        self.assertEqual(flagged(self.check(before, both, opted_in_disks={"data"})), {("disk", "win", "changed")})
+        gone = snap(disk={"win": "aa" * 32})
+        self.assertEqual(flagged(self.check(before, gone, opted_in_disks={"data"})), {("disk", "data", "removed")})
+        # The flag names a disk, never another kind of key.
+        after = snap(disk=before["disk"])
+        after["uefi"][f"{GLOBAL}:BootOrder"] = {"attr": 7, "sha256": "99"}
+        self.assertFalse(self.check(before, after, opted_in_disks={f"{GLOBAL}:BootOrder"})["pass"])
+
+    def test_unknown_name_stops_the_diff(self):
+        with tempfile.TemporaryDirectory() as d:
+            b, a = pathlib.Path(d, "b.json"), pathlib.Path(d, "a.json")
+            b.write_text(json.dumps(snap()))
+            a.write_text(json.dumps(snap()))
+            self.assertEqual(hostcheck.main(["diff", str(b), str(a), "--opted-in-disk", "dta"]), 2)
+
+
+class PcrlockTest(unittest.TestCase):
+    def test_the_image_pins_no_pcrlock_index(self):
+        # Debian's systemd-pcrlock-make-policy.service carries ConditionSecurity=measured-uki, so
+        # it runs only after systemd-stub, which a non-UKI image never has (image I1). If the image
+        # moves to UKIs or names pcrlock itself, P2-1 pins an index and hostcheck_hw8.json needs a rule.
+        conf = (ROOT / "image" / "mkosi" / "mkosi.conf").read_text()
+        self.assertRegex(conf, r"(?m)^UnifiedKernelImages=no$")
+        named = [p for p in (ROOT / "image").rglob("*") if p.is_file() and p.suffix != ".allow"
+                 and "pcrlock" in p.read_text(errors="replace")]
+        self.assertEqual(named, [])
+        self.assertFalse([r for r in hostcheck.load_allow() if "pcrlock" in json.dumps(r)])
+        # With no rule, any index pcrlock would define fails the diff.
+        for handle in ("0x1000000", "0x1800000", "0x1d10000"):
+            after = snap()
+            after["tpm-nv"][handle] = {"name": "p", "attributes": 0x2004000a, "size": 8, "data": None}
+            self.assertEqual(flagged(hostcheck.evaluate(snap(), after, hostcheck.load_allow())),
+                             {("tpm-nv", handle, "added")})
 
 
 class SourcesTest(unittest.TestCase):

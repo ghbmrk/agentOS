@@ -12,12 +12,16 @@ each phase of a session, and fails on any difference HW-8's disclosed list
                   failure, a hash of its data
   tpm-persistent  each persistent TPM object's name
   tpm-setting     hierarchy authorization flags and dictionary-attack settings
-  rtc             hardware-clock writes (QEMU's RTC_CHANGE events)
+  rtc             hardware-clock writes (QEMU's RTC_CHANGE events); on a PC,
+                  the RTC's offset from an SNTP reference, read from a third
+                  system (HOST-1e2b1)
 
 Subcommands:
   snapshot  record one host state: disks by path, UEFI variables from an
-            OVMF varstore or efivarfs, the TPM through a tpm2-tools TCTI
-  diff      compare two snapshots against the HW-8 list
+            OVMF varstore or efivarfs, the TPM through a tpm2-tools TCTI,
+            and with --rtc-reference the RTC's offset from that SNTP server
+  diff      compare two snapshots against the HW-8 list; --opted-in-disk
+            names the disk the owner gave agentOS (HW-8a)
   qemu      the whole run on a QEMU/OVMF/swtpm host: two firmware-only boots
             (baseline and firmware noise), then each phase in its own QEMU
             process, a snapshot after each. The image is an input: the
@@ -35,15 +39,19 @@ Exit status: 0 the host is as it was, 1 a difference HW-8 does not allow,
 import argparse
 import atexit
 import base64
+import ctypes
+import ctypes.util
 import functools
 import hashlib
 import json
+import math
 import os
 import pathlib
 import re
 import secrets
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -55,6 +63,11 @@ ALLOW = pathlib.Path(__file__).with_name("hostcheck_hw8.json")
 KINDS = ("disk", "uefi", "tpm-nv", "tpm-persistent", "tpm-setting")
 EFI_NON_VOLATILE = 0x1
 NV_OWNERREAD, NV_READLOCKED, NV_WRITTEN = 1 << 17, 1 << 28, 1 << 29
+RTC_DEVICE = "/sys/class/rtc/rtc0/since_epoch"
+RTC_BASELINE_FLOOR = 60.0  # seconds: the baseline RTC must be this far from true time (rtc_offset_findings)
+RTC_TOLERANCE = 2.0  # seconds: sysfs edge and SNTP error plus a session's drift at tens of ppm
+NTP_EPOCH = 2208988800  # 1900-01-01 to 1970-01-01, in seconds
+STA_UNSYNC = 0x40
 TPM_SETTINGS = ("ownerAuthSet", "endorsementAuthSet", "lockoutAuthSet", "disableClear",
                 "TPM2_PT_MAX_AUTH_FAIL", "TPM2_PT_LOCKOUT_INTERVAL", "TPM2_PT_LOCKOUT_RECOVERY")
 
@@ -300,8 +313,135 @@ def tpm_snapshot(tcti):
     return {"tpm-nv": nv, "tpm-persistent": persistent, "tpm-setting": settings}
 
 
-def snapshot(disks, varstore=None, efivarfs=None, tcti=None):
+def from_ntp(b):
+    return int.from_bytes(b[:4], "big") - NTP_EPOCH + int.from_bytes(b[4:8], "big") / (1 << 32)
+
+
+def parse_server(server):
+    """HOST, HOST:PORT, [IPV6] or [IPV6]:PORT; a bare IPv6 literal takes port 123."""
+    m = re.fullmatch(r"\[([^\]]+)\](?::(.*))?", server)
+    if m:
+        host, port = m.group(1), m.group(2)
+    elif server.count(":") == 1:
+        host, port = server.split(":")
+    else:
+        host, port = server, None
+    if not host or "[" in host or "]" in host:
+        raise HostcheckError(f"--rtc-reference {server!r} names no host")
+    if port is None:
+        return host, 123
+    if not port.isdigit() or not 0 < int(port) < 65536:
+        raise HostcheckError(f"--rtc-reference {server!r} has no valid port")
+    return host, int(port)
+
+
+def sntp_offset(server, port=123, timeout=5.0, tries=3):
+    """The server's time less this system's, from one SNTP exchange (RFC 4330).
+    Query only: this system's clock is never set. The reply must echo the
+    request's random transmit field, which refuses an off-path forgery only:
+    the server, or anyone on the path, can echo it with any time
+    (tools/ASSUMPTIONS.md HOST-1e2b1-rtc-offset)."""
+    try:
+        family, _, _, _, addr = socket.getaddrinfo(server, port, type=socket.SOCK_DGRAM)[0]
+    except OSError as e:
+        raise HostcheckError(f"cannot resolve the SNTP server {server}: {e}")
+    last = None
+    for _ in range(tries):
+        with socket.socket(family, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(timeout)
+            t1 = time.time()
+            req = bytearray(48)
+            req[0] = (4 << 3) | 3  # version 4, client
+            req[40:48] = secrets.token_bytes(8)  # a nonce in the transmit field, echoed back
+            try:
+                sock.sendto(bytes(req), addr)
+                data, _ = sock.recvfrom(512)
+            except OSError as e:
+                last = e
+                continue
+            t4 = time.time()
+        if len(data) < 48:
+            raise HostcheckError(f"SNTP reply from {server} is {len(data)} bytes")
+        if data[24:32] != req[40:48]:
+            raise HostcheckError(f"SNTP reply from {server} does not echo the request (originate time)")
+        if data[0] & 7 != 4:
+            raise HostcheckError(f"SNTP reply from {server} has mode {data[0] & 7}, not 4 (server)")
+        if data[0] >> 6 == 3:
+            raise HostcheckError(f"SNTP reply from {server} has leap indicator 3 (alarm: the server is unsynchronised)")
+        if not 1 <= data[1] <= 15:
+            raise HostcheckError(f"SNTP reply from {server} has stratum {data[1]} (unsynchronised or kiss-o'-death)")
+        t2, t3 = from_ntp(data[32:40]), from_ntp(data[40:48])
+        return ((t2 - t1) + (t3 - t4)) / 2
+    raise HostcheckError(f"no SNTP reply from {server}:{port} after {tries} tries: {last}")
+
+
+class Timex(ctypes.Structure):
+    """The head of Linux's struct timex (include/uapi/linux/timex.h), up to status."""
+    _fields_ = [("modes", ctypes.c_uint), ("offset", ctypes.c_long), ("freq", ctypes.c_long),
+                ("maxerror", ctypes.c_long), ("esterror", ctypes.c_long), ("status", ctypes.c_int)]
+
+
+TIME_ERROR = 5
+STA_CLOCKERR = 0x1000
+
+
+def timex_synced(raw, ret):
+    """Decode adjtimex's answer: RAW, the struct timex bytes, and RET, its return
+    value. Synchronised means STA_UNSYNC clear. The kernel returns TIME_ERROR
+    exactly when STA_UNSYNC or STA_CLOCKERR is set, so a status that disagrees
+    with RET means the bytes were not decoded as the kernel wrote them."""
+    if struct.calcsize("P") != 8 or Timex.status.offset != 40:
+        raise HostcheckError("the struct timex decode is checked only on a 64-bit Linux; "
+                             "use a 64-bit third system")
+    status = Timex.from_buffer_copy(raw[:ctypes.sizeof(Timex)]).status
+    if bool(status & (STA_UNSYNC | STA_CLOCKERR)) != (ret == TIME_ERROR):
+        raise HostcheckError(f"adjtimex returned {ret} with status {status:#x}: the decode does not match the kernel's")
+    return not status & STA_UNSYNC
+
+
+def kernel_clock_synced(adjtimex=None):
+    """Whether this kernel counts its clock as synchronised (STA_UNSYNC clear).
+    While it does, the kernel copies its clock into the RTC every 11 minutes."""
+    if adjtimex is None:
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+        adjtimex = libc.adjtimex
+    buf = ctypes.create_string_buffer(512)  # struct timex; modes 0: read only
+    ret = adjtimex(buf)
+    if ret < 0:
+        raise HostcheckError(f"adjtimex failed: {os.strerror(ctypes.get_errno())}")
+    return timex_synced(buf.raw, ret)
+
+
+def rtc_at_edge(read, now, sleep=time.sleep, limit=2.5):
+    """The RTC's whole-second value just after it ticks, and this system's time then."""
+    start = now()
+    first = read().strip()
+    while True:
+        t = now()
+        v = read().strip()
+        if v != first:
+            return int(v), t
+        if t - start > limit:
+            raise HostcheckError(f"the RTC did not tick within {limit} s")
+        sleep(0.001)
+
+
+def rtc_snapshot(server, device=RTC_DEVICE):
+    """The PC's RTC less the reference time at the same instant (HOST-1e2b1)."""
+    if kernel_clock_synced():
+        raise HostcheckError("this system's kernel clock is synchronised, so it writes the RTC every 11 minutes; "
+                             "stop its NTP client (timesyncd, chrony) and reboot it before snapshotting")
+    ntp = sntp_offset(*parse_server(server))
+    dev = pathlib.Path(device)
+    value, at = rtc_at_edge(dev.read_text, time.time)
+    reference = at + ntp
+    return {"rtc": value, "reference": reference, "offset": value - reference, "server": server}
+
+
+def snapshot(disks, varstore=None, efivarfs=None, tcti=None, rtc_reference=None, rtc_device=RTC_DEVICE):
     s = {"disk": {name: hash_disk(p) for name, p in disks.items()}}
+    if rtc_reference:
+        s["rtc"] = rtc_snapshot(rtc_reference, rtc_device)
     if varstore:
         s["uefi"] = uefi_from_varstore(varstore)
     elif efivarfs:
@@ -352,13 +492,39 @@ def _matches(rule, f, flags):
     return True
 
 
-def evaluate(before, after, allow, flags=(), noise=(), rtc_writes=()):
-    """Sort every difference into flagged, disclosed (an HW-8 rule allows it)
-    or noise (a UEFI variable the firmware changes on its own boots)."""
-    report = {"flagged": [], "disclosed": [], "noise": []}
+def rtc_offset_findings(before, after, tolerance):
+    """The RTC offset's findings. A write that sets the RTC to true time moves
+    the offset only if the RTC was away from true time at the baseline, so a
+    baseline within RTC_BASELINE_FLOOR of true time is itself flagged: the
+    operator sets the RTC wrong in firmware setup and takes the baseline again."""
+    if not (math.isfinite(tolerance) and tolerance >= 0):
+        raise HostcheckError(f"the RTC tolerance must be a finite number of seconds, at least 0, not {tolerance}")
+    b, a = before.get("rtc"), after.get("rtc")
+    if b is None and a is None:
+        return []
+    if b is None or a is None:
+        return [{"kind": "rtc", "key": "offset", "change": "missing", "before": b, "after": a}]
+    out = []
+    if not abs(b["offset"]) >= RTC_BASELINE_FLOOR:
+        out.append({"kind": "rtc", "key": "offset", "change": "baseline-near-true-time", "before": b, "after": a,
+                    "fix": f"set the PC's RTC at least {RTC_BASELINE_FLOOR:.0f} s wrong in firmware setup and "
+                           "take the baseline snapshot again"})
+    if not abs(a["offset"] - b["offset"]) <= tolerance:
+        out.append({"kind": "rtc", "key": "offset", "change": "changed", "before": b, "after": a})
+    return out
+
+
+def evaluate(before, after, allow, flags=(), noise=(), rtc_writes=(), rtc_tolerance=RTC_TOLERANCE,
+             opted_in_disks=()):
+    """Sort every difference into flagged, disclosed (an HW-8 rule allows it),
+    noise (a UEFI variable the firmware changes on its own boots) or excluded
+    (a write to the internal disk the owner gave agentOS, HW-8a)."""
+    report = {"flagged": [], "disclosed": [], "noise": [], "excluded": []}
     for f in diff(before, after):
         rule = next((r for r in allow if _matches(r, f, set(flags))), None)
-        if rule:
+        if f["kind"] == "disk" and f["change"] == "changed" and f["key"] in opted_in_disks:
+            report["excluded"].append(dict(f, requirement="HW-8a"))
+        elif rule:
             report["disclosed"].append(dict(f, change_id=rule["change"]))
         elif f["kind"] == "uefi" and (f["kind"], f["key"]) in noise:
             report["noise"].append(f)
@@ -366,6 +532,7 @@ def evaluate(before, after, allow, flags=(), noise=(), rtc_writes=()):
             report["flagged"].append(f)
     for w in rtc_writes:
         report["flagged"].append({"kind": "rtc", "key": w["phase"], "change": "written", "before": None, "after": w})
+    report["flagged"].extend(rtc_offset_findings(before, after, rtc_tolerance))
     report["pass"] = not report["flagged"]
     return report
 
@@ -796,15 +963,20 @@ def cmd_qemu(args):
 
 def cmd_snapshot(args):
     disks = dict(d.split("=", 1) for d in args.disk)
-    s = snapshot(disks, varstore=args.varstore, efivarfs=args.efivarfs, tcti=args.tcti)
+    s = snapshot(disks, varstore=args.varstore, efivarfs=args.efivarfs, tcti=args.tcti,
+                 rtc_reference=args.rtc_reference, rtc_device=args.rtc_device)
     pathlib.Path(args.output).write_text(json.dumps(s, indent=1, sort_keys=True))
     return 0
 
 
 def cmd_diff(args):
     before, after = (json.loads(pathlib.Path(p).read_text()) for p in (args.before, args.after))
+    unknown = [n for n in args.opted_in_disk if n not in before.get("disk", {}) or n not in after.get("disk", {})]
+    if unknown:
+        raise HostcheckError(f"--opted-in-disk names no disk in both snapshots: {unknown}")
     r = evaluate(before, after, load_allow(), flags=args.flag,
-                 rtc_writes=[{"phase": "session", "offset": None}] if args.rtc_written else ())
+                 rtc_writes=[{"phase": "session", "offset": None}] if args.rtc_written else (),
+                 rtc_tolerance=args.rtc_tolerance, opted_in_disks=set(args.opted_in_disk))
     print(json.dumps(r, indent=1, sort_keys=True))
     return 0 if r["pass"] else 1
 
@@ -818,6 +990,9 @@ def main(argv=None):
     g.add_argument("--varstore")
     g.add_argument("--efivarfs")
     s.add_argument("--tcti", required=True, help="e.g. device:/dev/tpmrm0")
+    s.add_argument("--rtc-reference", metavar="HOST[:PORT]",
+                   help="record the RTC's offset from this SNTP server (a PC, from a third system)")
+    s.add_argument("--rtc-device", default=RTC_DEVICE)
     s.add_argument("-o", "--output", required=True)
     d = sub.add_parser("diff")
     d.add_argument("before")
@@ -825,6 +1000,9 @@ def main(argv=None):
     d.add_argument("--flag", action="append", default=[], choices=["owner-boot-order", UNCLEAN_FLAG],
                    help=f"{UNCLEAN_FLAG}: the session ended in a power cut or forced reset")
     d.add_argument("--rtc-written", action="store_true", help="the operator saw the hardware clock written")
+    d.add_argument("--rtc-tolerance", type=float, default=RTC_TOLERANCE, metavar="SECONDS")
+    d.add_argument("--opted-in-disk", action="append", default=[], metavar="NAME",
+                   help="the internal disk the owner gave agentOS (HW-8a): its writes are excluded, not flagged")
     q = sub.add_parser("qemu")
     q.add_argument("--work", required=True, help="new directory for state, logs and report.json")
     src = q.add_mutually_exclusive_group(required=True)
@@ -848,6 +1026,8 @@ def main(argv=None):
     q.add_argument("--credential", action="append", default=[], metavar="NAME=FILE",
                    help="a systemd credential for the OS boots, as an SMBIOS string (the image's responder)")
     args = ap.parse_args(argv)
+    if args.cmd == "snapshot" and args.efivarfs and not args.rtc_reference:
+        ap.error("--efivarfs is a PC, whose RTC only --rtc-reference checks: name an SNTP server")
     if args.cmd == "qemu" and bool(args.kernel) != bool(args.initrd):
         ap.error("--kernel needs --initrd")
     if args.cmd == "qemu" and args.image and not args.phases_file:
