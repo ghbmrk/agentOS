@@ -2083,5 +2083,45 @@ class ImageTest(unittest.TestCase):
         self.assertEqual(rc, 0, [dict(x, snapshot=None) for x in report["phases"]])
         self.assertFalse([x for x in report["phases"] if "mor" in [d["change_id"] for d in x["disclosed"]]])
 
+    def test_a_failed_wipe_is_on_disk_at_the_next_boot(self):
+        # #6095 (MOR-wipe-journal, MOR-wipe-owner): one boot whose shutdown wipe fails (a drop-in points its
+        # find at a missing directory), then a fresh QEMU process on the same drive. The second boot's journal
+        # still holds the first one's wipe error, which shows the journal is kept across a reboot (Storage=
+        # persistent and the flush), and the unit's ExecStopPost left the record agentosd's STATUS reads
+        # (broker/cmd/agentosd/wipenote.go). A probe unit prints both to the console before the responder starts.
+        d = self.dir / "wipefail-in"
+        d.mkdir(exist_ok=True)
+        (d / "wipe.conf").write_text("[Service]\nExecStop=\nExecStop=/usr/bin/find /run/hostcheck-no-such-dir -delete\n")
+        (d / "probe.service").write_text(
+            "[Unit]\nDescription=hostcheck wipe probe (QEMU host check only)\n"
+            "After=systemd-journal-flush.service local-fs.target\nBefore=serial-getty@ttyS0.service\n"
+            "[Service]\nType=oneshot\nStandardOutput=journal+console\nStandardError=journal+console\n"
+            "ExecStart=/bin/sh -c 'journalctl -q -b -1 -u agentos-keeper-wipe.service -o cat 2>&1 | "
+            "sed \"s/^/HOSTCHECK-WIPE journal: /\"; echo \"HOSTCHECK-WIPE record: $$(cat /var/lib/agentos-wipe/failed 2>&1)\"'\n")
+        (d / "responder.conf").write_text("[Unit]\nWants=hostcheck-wipe.service\nAfter=hostcheck-wipe.service\n")
+        phases = d / "phases.json"
+        boot = [[OS_START, "os"], ["HOSTCHECK-READY", "serial:poweroff\n"]]
+        phases.write_text(json.dumps({"fail": boot, "after": boot}))
+        argv = self.argv("wipefail", "fail,after", phases) + [
+            "--credential", f"systemd.unit-dropin.agentos-keeper-wipe.service={d / 'wipe.conf'}",
+            "--credential", f"systemd.extra-unit.hostcheck-wipe.service={d / 'probe.service'}",
+            "--credential", f"systemd.unit-dropin.{RESPONDER}={d / 'responder.conf'}"]
+        rc = hostcheck.main(argv)
+        after = (self.dir / "wipefail" / "console-after.log").read_bytes()
+        print(*[ln.decode(errors="replace") for ln in re.findall(rb"HOSTCHECK-WIPE [^\r\n]*", after)[:20]],
+              sep="\n", file=sys.stderr)
+        journal = re.findall(rb"HOSTCHECK-WIPE journal: ([^\r\n]*)", after)
+        self.assertTrue([j for j in journal if re.search(rb"find: .*/run/hostcheck-no-such-dir.*No such file", j)],
+                        journal)
+        # The record is "$SERVICE_RESULT $EXIT_CODE $EXIT_STATUS". The unit has no main process (no ExecStart=), and
+        # systemd sets EXIT_CODE and EXIT_STATUS for the main process only, so on the first image run (#6130) the
+        # record held "exit-code" and two empty words. Any record other than success is what wipenote.go reads.
+        self.assertRegex(after, rb"HOSTCHECK-WIPE record: exit-code *\r?\n")
+        # The clear rests not on the wipe's result but on the directories it empties, which no setup filled
+        # here: MOR is cleared and the host is as it was.
+        report = self.report("wipefail")
+        self.assertEqual(rc, 0, [dict(x, snapshot=None) for x in report["phases"]])
+
+
 if __name__ == "__main__":
     unittest.main()
