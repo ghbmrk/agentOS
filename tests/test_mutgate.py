@@ -2665,6 +2665,28 @@ class Plan(unittest.TestCase):
         self.assertIn("kernel/sim: 823 target lines, 534 deletion sites, a 48 s suite, 20 shard(s)", err.getvalue())
         self.assertEqual(len(json.loads(out.getvalue())), 20 + mutgate.shard_count(sim, [{}] * 534, 1.0))
 
+    def test_record_for_times_the_whole_suite_not_the_changed_tests(self):
+        # MUT-plan-budget (#6155), Potency on #6156: a PR that changes only some of a package's tests
+        # sizes its shards from the head's whole-suite run, not from the changed tests' shorter run;
+        # when the changed tests are every test, their one run is the whole suite's.
+        from unittest import mock
+        runs = []
+
+        def timed_cover(pkg, names, tmp):
+            runs.append(names)
+            return {"broker/p/a.go": {1}}, (2.0 if names is not None else 40.0), None
+        for names, want, ran in ((["TestFast"], 40.0, [["TestFast"], None]), (None, 40.0, [None])):
+            runs.clear()
+            with self.subTest(names), contextlib.ExitStack() as st:
+                for name, value in (("changed_tests", lambda tests, pkg, bases: names),
+                                    ("timed_cover", timed_cover), ("merge_base", lambda base, head: "b" * 40),
+                                    ("base_covered", lambda *a: ({}, None))):
+                    st.enter_context(mock.patch.object(mutgate, name, value))
+                record, secs, problem = mutgate.record_for("p", {}, {"p": names}, "", "HEAD~1", "tmp")
+            self.assertIsNone(problem)
+            self.assertEqual((secs, runs), (want, ran))
+            self.assertEqual(record["tests"], names)
+
     def test_the_plan_job_fits_three_runs_of_the_slowest_suite(self):
         # #6155: enforcer/nft's coverage run took 374 s on #6144 (run 44265885820). A test-only change
         # to it runs the suite three times in the plan: the head's changed tests, the base's, the
