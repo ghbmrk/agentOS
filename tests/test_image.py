@@ -97,10 +97,20 @@ JOURNAL_FILES = ("usr/lib/systemd/journald.conf.d/50-agentos-persist.conf",)
 JOURNAL_FLUSH = "usr/lib/systemd/system/systemd-journal-flush.service"
 
 
+def flush_unit(extra=()):
+    """systemd 257's systemd-journal-flush.service, as mkosi.finalize holds it, with EXTRA (section, key, value)."""
+    out, sec = "", None
+    for s, k, v in check.JOURNAL_FLUSH_LINES + tuple(extra):
+        if s != sec:
+            out, sec = out + "[%s]\n" % s, s
+        out += "%s=%s\n" % (k, v)
+    return out
+
+
 def noexec(root):
     for rel in NOEXEC_FILES + MAIN_SIDE_FILES + JOURNAL_FILES:
         write(root, rel, (MK / "mkosi.extra" / rel).read_text())
-    write(root, JOURNAL_FLUSH, "[Service]\nType=oneshot\nExecStart=journalctl --flush\n")
+    write(root, JOURNAL_FLUSH, flush_unit())
     wants = pathlib.Path(root) / "usr/lib/systemd/system/sysinit.target.wants"
     wants.mkdir(parents=True, exist_ok=True)
     if not (wants / "systemd-journal-flush.service").is_symlink():

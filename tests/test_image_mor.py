@@ -15,7 +15,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from test_image import ENTRY, H, MK, ROOT, check, exec_args, finish, ini, nodump, settings, write  # noqa: E402
+from test_image import ENTRY, H, MK, ROOT, check, exec_args, finish, flush_unit, ini, nodump, settings, write  # noqa: E402
 
 UNITS = MK / "mkosi.extra/usr/lib/systemd/system"
 UNIT = UNITS / "agentos-mor.service"
@@ -513,15 +513,21 @@ class WipeJournalTest(unittest.TestCase):
                         write(self.root, str(other.relative_to(self.root)), body)
                     self.assertIn(replaced, self.journald())
                     other.unlink()
-        # Debian's own file: its one command is the flush.
+        # Debian's own file: every line as systemd 257 ships it (Security on #6130).
         saved = (self.root / unit).read_text()
-        for body, starts in (("", None), ("[Service]\nType=oneshot\nExecStart=/bin/true\n", "/bin/true"),
-                             (saved + "ExecStart=/bin/true\n", "journalctl --flush then /bin/true"),
-                             ("[Service]\nType=oneshot\n", "unset")):
+        self.assertEqual(saved, flush_unit())
+        changed = "%s: not systemd 257's unit (first difference: %%s); the tree check does not model a change to it " \
+            "(restore it)" % unit
+        for body, first in (
+                ("", None),
+                (flush_unit((("Unit", "ConditionPathExists", "/nonexistent"),)), ("Unit", "ConditionPathExists", "/nonexistent")),
+                (flush_unit((("Service", "ExecStartPre", "/bin/false"),)), ("Service", "ExecStartPre", "/bin/false")),
+                (flush_unit((("Service", "ExecStart", "/bin/true"),)), ("Service", "ExecStart", "/bin/true")),
+                (saved.replace("ExecStart=journalctl --flush", "ExecStart=/bin/true"), ("Service", "ExecStart", "/bin/true")),
+                (saved.replace("TimeoutSec=90s\n", ""), ("Service", "TimeoutSec", "90s"))):
             with self.subTest(body=body):
                 write(self.root, unit, body)
-                self.assertIn(masked if starts is None else "systemd-journal-flush.service: ExecStart= is %s; must be "
-                              "journalctl --flush alone; %s" % (starts, why), self.journald())
+                self.assertIn(masked if first is None else changed % (first,), self.journald())
         write(self.root, unit, saved)
         # An alias's drop-ins apply to the unit too, so the alias is refused.
         alias = self.root / "usr/lib/systemd/system/foo.service"

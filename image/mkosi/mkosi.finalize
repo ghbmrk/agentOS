@@ -1410,10 +1410,26 @@ def alias_violations(root, dirs, names):
     return out
 
 
-# Debian's systemd 257 unit, the one place it may be, and its one command (units/systemd-journal-flush.service
-# in 257.7; Security and L3 on #6130).
+# Debian's systemd 257 unit, the one place it may be, and every line it holds (units/systemd-journal-flush.service
+# in 257.7, as config_lines reads it; Security and L3 on #6130). A changed line is refused, not modelled.
 JOURNAL_FLUSH_DIR = "usr/lib/systemd/system"
-JOURNAL_FLUSH_START = "journalctl --flush"
+JOURNAL_FLUSH_LINES = (
+    ("Unit", "Description", "Flush Journal to Persistent Storage"),
+    ("Unit", "Documentation", "man:systemd-journald.service(8) man:journald.conf(5)"),
+    ("Unit", "ConditionPathExists", "!/etc/initrd-release"),
+    ("Unit", "DefaultDependencies", "no"),
+    ("Unit", "After", "systemd-remount-fs.service systemd-quotacheck-root.service"),
+    ("Unit", "Before", "systemd-tmpfiles-setup.service"),
+    ("Unit", "Wants", "systemd-journald.service"),
+    ("Unit", "After", "systemd-journald.service"),
+    ("Unit", "RequiresMountsFor", "/var/log/journal"),
+    ("Unit", "Before", "soft-reboot.target systemd-soft-reboot.service"),
+    ("Unit", "Conflicts", "soft-reboot.target"),
+    ("Service", "ExecStart", "journalctl --flush"),
+    ("Service", "ExecStop", "journalctl --smart-relinquish-var"),
+    ("Service", "Type", "oneshot"),
+    ("Service", "RemainAfterExit", "yes"),
+    ("Service", "TimeoutSec", "90s"))
 
 
 def journal_flush_violations(root):
@@ -1421,7 +1437,7 @@ def journal_flush_violations(root):
     to (server_system_journal_open, systemd 257.7); until then, Storage=persistent or not, the journal is in
     /run and a reboot loses it. So the unit is Debian's file in JOURNAL_FLUSH_DIR, with no file or link of its
     name in any other unit directory (a copy or a mask there would win), not masked (a link or an empty file),
-    its one ExecStart= JOURNAL_FLUSH_START; started by sysinit.target (the link systemd installs); and
+    holding JOURNAL_FLUSH_LINES and nothing else; started by sysinit.target (the link systemd installs); and
     changed by no drop-in systemd applies to it, under its own name or an alias's."""
     root = str(root)
     dirs, out = unit_dirs(root)
@@ -1439,12 +1455,13 @@ def journal_flush_violations(root):
         out.append("%s: missing or masked; %s" % (JOURNAL_FLUSH, why))
     else:
         try:
-            starts = [v for _, v in ini_every_in([unit], "Service", "ExecStart")]
-        except ValueError as e:
-            starts = [str(e)]
-        if starts != [JOURNAL_FLUSH_START]:
-            out.append("%s: ExecStart= is %s; must be %s alone; %s"
-                       % (JOURNAL_FLUSH, " then ".join(starts) or "unset", JOURNAL_FLUSH_START, why))
+            lines = tuple(config_lines(unit.content()))
+        except (OSError, Unparsable) as e:
+            lines = ("unreadable (%s)" % (e.strerror if isinstance(e, OSError) else e),)
+        if lines != JOURNAL_FLUSH_LINES:
+            diff = [l for l in lines if l not in JOURNAL_FLUSH_LINES] + [l for l in JOURNAL_FLUSH_LINES if l not in lines]
+            out.append("%s: not systemd 257's unit (first difference: %s); the tree check does not model a change to "
+                       "it (restore it)" % (unit.rel, diff[0] if diff else "the order of its lines"))
     try:
         wanted = any(tree_lstat(root, "%s/sysinit.target.wants/%s" % (d, JOURNAL_FLUSH)) for d in dirs)
     except OSError:
