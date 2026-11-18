@@ -53,12 +53,12 @@ func ownOnly(path string, fi os.FileInfo, dir bool) error {
 // the write after step i as a crash would; nil runs every step.
 //
 // dir is opened once and refused unless it is a directory, not a link, that
-// no other uid can write (openDir); the removal, create, rename and directory
+// no other uid can write (OpenDir); the removal, create, rename and directory
 // sync then work on that open directory, so another uid can neither swap
 // name.tmp for a link that the rename installs at name nor swap dir itself
 // (#3954).
 func WriteAtomic(dir, name string, b []byte, stop func(i int) bool) error {
-	d, r, err := openDir(dir)
+	d, r, err := OpenDir(dir)
 	if err != nil {
 		return err
 	}
@@ -103,7 +103,7 @@ func WriteAtomic(dir, name string, b []byte, stop func(i int) bool) error {
 	return nil
 }
 
-// openDir opens dir and refuses it unless it is a directory, not a link,
+// OpenDir opens dir and refuses it unless it is a directory, not a link,
 // that no other uid can write: owned by this uid or root, with no group or
 // other write bit. The open uses O_DIRECTORY and O_NOFOLLOW, so a link, FIFO
 // or device node at dir fails at once; os.OpenRoot (which uses neither) then
@@ -111,7 +111,7 @@ func WriteAtomic(dir, name string, b []byte, stop func(i int) bool) error {
 // Check, which also refuses a readable directory, because some callers'
 // directories are legitimately 0755 (agentosd's StateDirectoryMode). ACLs
 // are not read.
-func openDir(dir string) (*os.File, *os.Root, error) {
+func OpenDir(dir string) (*os.File, *os.Root, error) {
 	d, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, nil, err
