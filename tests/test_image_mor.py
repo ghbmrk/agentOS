@@ -9,6 +9,7 @@ come from there."""
 # REQ: HW-8
 import pathlib
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -49,12 +50,29 @@ def unit_specifiers(unit):
             "%I": ".*" if wild else re.escape(inst)}
 
 
+def unit_lines(text):
+    """A unit file's text as systemd reads it: a comment line ("#" or ";" first) dropped, inside a
+    continued line too, and a line ending in a backslash joined to the next. A comment line never
+    continues here (systemd's would take the next line with it), so a write after one still counts."""
+    out, cont = [], ""
+    for line in text.split("\n"):
+        if line.lstrip()[:1] in ("#", ";"):
+            continue
+        if line.endswith("\\"):
+            cont += line[:-1] + " "
+            continue
+        out.append(cont + line)
+        cont = ""
+    return "\n".join(out + [cont])
+
+
 def names_held_dir(text, dirs, unit=""):
     """Whether a unit file's text names one of dirs, or a path under it: the path not followed by a
-    character that continues a name, through a base specifier, or as a directory setting (continued
-    lines joined, the unit's name specifiers resolved). An InaccessiblePaths= line masks the paths it
-    lists, so it names none: the main side's drop-ins (#5818) list every hold dir there."""
-    text = re.sub(r"^[ \t]*InaccessiblePaths[ \t]*=.*$", "", text.replace("\\\n", " "), flags=re.M)
+    character that continues a name, through a base specifier, or as a directory setting (comments
+    dropped, continued lines joined, the unit's name specifiers resolved). An InaccessiblePaths= line
+    masks the paths it lists, so it names none: the main side's drop-ins (#5818) list every hold dir
+    there."""
+    text = re.sub(r"^[ \t]*InaccessiblePaths[ \t]*=.*$", "", unit_lines(text), flags=re.M)
     for spec, base in SPECIFIERS.items():
         text = text.replace(spec, base)
     if any(re.search(re.escape(d) + r"(?![\w.@+~-])", text) for d in dirs):
@@ -69,6 +87,41 @@ def names_held_dir(text, dirs, unit=""):
                 if any(re.fullmatch(pat, d) for d in dirs):
                     return True
     return False
+
+
+WIPE = "agentos-keeper-wipe.service"
+# The clear's only commands (test_clear_runs_at_stop_after_the_secret_holders). It reaches the hold
+# dirs only through agentos-mor's holdDirs, which it lists and never writes in
+# (test_the_clear_sees_the_dirs_it_lists), so its unit names none and is counted like any other.
+CLEAR_EXEC = {"ExecStart": ["/usr/lib/agentos/agentos-mor status"],
+              "ExecStop": ["/usr/lib/agentos/agentos-mor clear"]}
+COMMANDS = ("ExecCondition", "ExecStartPre", "ExecStart", "ExecStartPost", "ExecReload", "ExecStop",
+            "ExecStopPost")
+
+
+def hold_writers(units):
+    """Every unit but the wipe whose file or drop-in names a holdDirs path, by unit name."""
+    writers = set()
+    for f in [u for u in units.iterdir() if u.is_file()] + list(units.glob("*.d/*.conf")):
+        unit = f.parent.name[:-2] if f.parent.name.endswith(".d") else f.name
+        if unit != WIPE and names_held_dir(f.read_text(), check.MOR_LISTED, unit):
+            writers.add(unit)
+    return writers
+
+
+def unordered_writers(units):
+    """The writers whose stop is not ordered before the wipe's: each must be in the wipe's Before= or
+    name it in After=, and keep default dependencies so it also stops before the clear. A .path unit
+    writes nothing; it starts enrollment, which is a writer of its own."""
+    before = set(words(settings(units / WIPE), "Before"))
+    bad = set()
+    for w in hold_writers(units):
+        if w.endswith(".path"):
+            continue
+        s = settings(units / w)
+        if not (w in before or WIPE in words(s, "After")) or "DefaultDependencies" in s:
+            bad.add(w)
+    return bad
 
 
 class MorUnitTest(unittest.TestCase):
@@ -203,27 +256,43 @@ class MorUnitTest(unittest.TestCase):
         preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text()
         self.assertIn("\nenable %s\n" % name, preset)
         files = [u for u in UNITS.iterdir() if u.is_file()] + list(UNITS.glob("*.d/*.conf"))
-        writers = set()
         for f in files:
-            t = f.read_text()
-            self.assertNotIn("/dev/shm", t, f.name)
-            unit = f.parent.name[:-2] if f.parent.name.endswith(".d") else f.name
-            if unit not in (name, "agentos-mor.service") and names_held_dir(t, check.MOR_LISTED, unit):
-                writers.add(f.name)
+            self.assertNotIn("/dev/shm", f.read_text(), f.name)
             for key in ("Conflicts", "PropagatesStopTo"):
                 self.assertNotIn(name, words(settings(f), key), f.name)
-        # The writers, each found by its own text. The clear's own unit and drop-in name the dirs only
-        # to leave them unmasked, and a mask names none.
-        self.assertEqual(writers, {
+        # The writers, each found by its own text; a mask or a comment names none. The clear's own unit
+        # is counted too (MOR-writer-match-fu, #6083): its commands are the clear's and nothing else.
+        clear = [UNIT] + sorted(UNITS.glob("agentos-mor.service.d/*.conf"))
+        cmds = {}
+        for f in clear:
+            for k, v in settings(f).items():
+                if k in COMMANDS:
+                    cmds.setdefault(k, []).extend(v)
+        self.assertEqual(cmds, CLEAR_EXEC)
+        self.assertEqual(hold_writers(UNITS), {
             "agentos-keeper-pageca.service", "agentos-keeper-enroll.service", "agentos-keeper-enroll.path",
             "agentos-keeper-setup@.service", "agentos-keeper-link-capture.service"})
-        for w in writers:
-            with self.subTest(w):
-                if w.endswith(".path"):
-                    continue  # writes nothing; it starts enrollment, which is listed
-                ordered = w in before or name in words(settings(UNITS / w), "After")
-                self.assertTrue(ordered, w)
-                self.assertNotIn("DefaultDependencies", settings(UNITS / w))
+        self.assertEqual(unordered_writers(UNITS), set())
+
+    def test_the_clear_counts_as_a_writer_beyond_its_clear(self):
+        # MOR-writer-match-fu (#6083): the clear's own unit is no longer skipped by name, so a write it
+        # gains beside the clear is counted and fails the ordering (it stops after the wipe), whether in
+        # the unit, in a drop-in, or folded into the clear's own command line.
+        exec_stop = "ExecStop=/usr/lib/agentos/agentos-mor clear\n"
+        self.assertIn(exec_stop, UNIT.read_text())
+        writes = {
+            "unit": ("agentos-mor.service", exec_stop, exec_stop + "ExecStopPost=/usr/bin/rm -f /run/agentos-setup/x\n"),
+            "drop-in": ("agentos-mor.service.d/60-x.conf", None, "[Service]\nExecStopPost=/usr/bin/touch %t/agentos-link-capture/x\n"),
+            "clear": ("agentos-mor.service", exec_stop, "ExecStop=/usr/lib/agentos/agentos-mor clear /run/agentos-setup\n"),
+        }
+        for case, (path, old, new) in writes.items():
+            with self.subTest(case), tempfile.TemporaryDirectory() as tmp:
+                units = pathlib.Path(tmp) / "system"
+                shutil.copytree(UNITS, units, symlinks=True)
+                f = units / path
+                f.write_text(new if old is None else f.read_text().replace(old, new, 1))
+                self.assertIn("agentos-mor.service", hold_writers(units))
+                self.assertIn("agentos-mor.service", unordered_writers(units))
 
     def test_every_writer_spelling_is_counted(self):
         # MOR-writer-match (#6043): test_every_held_file_goes_at_stop finds a writer by its text, so
@@ -252,6 +321,9 @@ class MorUnitTest(unittest.TestCase):
             'ExecStart=/bin/sh -c "d=${D:-/run/agentos-setup}"\n',
             "RuntimeDirectory=agentos-x \\\n  agentos-setup\n",
             "InaccessiblePaths=/var/lib/x\nReadWritePaths=/run/agentos-setup\n",
+            "# a comment ends here \\\nExecStart=/usr/bin/x /run/agentos-setup\n",
+            "RuntimeDirectory=agentos-x \\\n# a comment\n  agentos-setup\n",
+            "ExecStart=/usr/bin/x #/run/agentos-setup\n",
         ]
         for t in named:
             with self.subTest(t):
@@ -282,6 +354,9 @@ class MorUnitTest(unittest.TestCase):
             "InaccessiblePaths=/run/agentos-setup\n",
             "InaccessiblePaths=-/var/lib/x /run/agentos-setup /run/agentos-link-capture\n",
             "  InaccessiblePaths = /var/lib/x \\\n  /run/agentos-setup\n",
+            "# Leaves /run/agentos-setup unmasked\n",
+            "  ; ExecStart=/usr/bin/x /run/agentos-link-capture\n",
+            "ExecStart=/usr/bin/x \\\n# /run/agentos-setup\n  -y\n",
         ]
         for t in apart:
             with self.subTest(t):
