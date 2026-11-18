@@ -550,3 +550,30 @@ func TestOwnerTextInWindowIsNeverDelivered(t *testing.T) {
 		t.Fatalf("agent got %q, want only the later text", agent.got)
 	}
 }
+
+// REQ: CH-12. Every reply the default branch builds goes out through Fit:
+// a setting's reply with a character outside GSM-7, or longer than
+// MaxText, reaches the owner fitted (mutgate on #6136).
+func TestDefaultRepliesAreFitted(t *testing.T) {
+	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, &recAgent{})
+	reply := "Done ✓ " + strings.Repeat("x", MaxText)
+	h.Settings = func(context.Context, string, bool) (string, bool) { return reply, true }
+	got := one(t, h.Handle(context.Background(), owner, "LOOPS ON"))
+	if got != Fit(reply) || !strings.HasPrefix(got, "Done ? ") || len(got) != MaxText {
+		t.Fatalf("setting reply not fitted: %d bytes, %q", len(got), got[:12])
+	}
+}
+
+// REQ: CH-12. The fixed replies to a YES, NO, UNDO or MORE with nothing
+// open name what is missing.
+func TestNothingOpenReplies(t *testing.T) {
+	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, forbiddenAgent{t})
+	for msg, want := range map[string]string{
+		"YES 1 123456": "No open requests.", "NO 1": "No open requests.",
+		"UNDO 7": "No request 7.", "MORE 7": "No request 7.",
+	} {
+		if got := one(t, h.Handle(context.Background(), owner, msg)); got != want {
+			t.Errorf("%s = %q, want %q", msg, got, want)
+		}
+	}
+}
