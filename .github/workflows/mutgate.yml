@@ -104,7 +104,7 @@ jobs:
     if: ${{ needs.claimed.outputs.packages != '[]' }}
     runs-on: ubuntu-24.04
     # A test-only diff's targets are the lines its changed tests cover, so the plan runs them (#4961):
-    # three whole-suite coverage runs of each such package, one after another. enforcer/nft's took
+    # at most three whole-suite coverage runs of each such package, one after another. enforcer/nft's took
     # 374 s each on #6144, about 19 minutes alone; 35 holds that with headroom (#6155).
     timeout-minutes: 35
     outputs:
@@ -179,12 +179,14 @@ jobs:
           retention-days: 7
   mutants:
     # Names the failed shard in the checks list (#4983), counted from 0 as the gate's messages count shards.
-    name: mutants ${{ matrix.pkg }} shard ${{ matrix.shard }} of ${{ matrix.of }}
+    # Past 256 shards a job runs several (#6170): "shard 3 151 of 296".
+    name: mutants ${{ matrix.pkg }} shard ${{ matrix.shards }} of ${{ matrix.of }}
     needs: [claimed, plan]
     if: ${{ needs.claimed.outputs.packages != '[]' }}
     runs-on: ubuntu-24.04
-    # One shard of one package per job (#4961), so a slow package does not hold the others.
-    timeout-minutes: 60
+    # One shard of one package per job (#4961), so a slow package does not hold the others; past GitHub's
+    # 256 jobs a matrix, up to 6 shards of one package a job, 60 minutes for each (#6170, tools/mutgate.py pack).
+    timeout-minutes: ${{ matrix.minutes }}
     strategy:
       fail-fast: false
       # CI-mutgate-cap: the runner pool ran 6 to 9 jobs at once while jobs stayed queued
@@ -264,19 +266,32 @@ jobs:
           name: mutgate-plan
           path: ${{ runner.temp }}/plan
       - name: Gremlins on the package
+        # Each shard writes its own directory, mutants/<index>/, which the deciding job reads (#6170).
         env:
           PKG: ${{ matrix.pkg }}
-          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ matrix.shards }}
           OF: ${{ matrix.of }}
-        run: >-
-          python3 -I tools/mutgate.py run "$PKG" --out mutants --git "$BASE" --shard "$SHARD" --of "$OF"
-          --targets "$RUNNER_TEMP/plan/targets.json"
+        run: |
+          for s in $SHARDS; do
+            [[ "$s" =~ ^[0-9]+$ ]] || { echo "::error::shard $s is not an index"; exit 1; }
+            python3 -I tools/mutgate.py run "$PKG" --out "mutants/$s" --git "$BASE" --shard "$s" --of "$OF" \
+              --targets "$RUNNER_TEMP/plan/targets.json"
+          done
       - name: Statement deletions on the package (#4573)
         env:
           PKG: ${{ matrix.pkg }}
-        run: python3 -I tools/mutgate.py delete "$PKG" --out mutants --git "$BASE"
+          SHARDS: ${{ matrix.shards }}
+        run: |
+          for s in $SHARDS; do
+            python3 -I tools/mutgate.py delete "$PKG" --out "mutants/$s" --git "$BASE"
+          done
       - name: Survivors
-        run: python3 -I tools/mutgate.py report mutants
+        env:
+          SHARDS: ${{ matrix.shards }}
+        run: |
+          for s in $SHARDS; do
+            python3 -I tools/mutgate.py report "mutants/$s"
+          done
       # Data for the `mutgate` job, which decides; nothing here after the gremlins step is trusted.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
@@ -317,11 +332,11 @@ jobs:
           # This job does not run in a cancelled run, so a cancelled plan or shard is one GitHub stopped at its
           # timeout-minutes: no verdict, not a survivor (#5069, #6155).
           if [ "$PLAN" = cancelled ]; then
-            echo "::error::the plan job timed out at its 35-minute limit, so no package was planned and no mutant ran; nothing was shown to survive. A test-only change to a slow package runs its suite three times there (#6155): if a rerun times out again, raise the plan job's timeout-minutes in .github/workflows/mutgate.yml."
+            echo "::error::the plan job timed out at its 35-minute limit, so no package was planned and no mutant ran; nothing was shown to survive. Rerun the failed jobs; if the rerun times out again, raise the plan job's timeout-minutes in .github/workflows/mutgate.yml (a test-only change to a slow package runs its suite at most three times there, #6155)."
             exit 1
           fi
           if [ "$MUTANTS" = cancelled ]; then
-            echo "::error::a mutants shard timed out at its 60-minute limit (the cancelled job in the checks list), so it gave no verdict; no mutant was shown to survive. Rerun the failed jobs; if the same shard times out again, the plan's per-shard budgets in tools/mutgate.py are too large for that package."
+            echo "::error::a mutants shard timed out at its 60-minute limit (the cancelled job in the checks list; a job running several shards has 60 minutes for each), so it gave no verdict; no mutant was shown to survive. Rerun the failed jobs; if the same shard times out again, the plan's per-shard budgets in tools/mutgate.py are too large for that package."
             exit 1
           fi
           if [ "$PACKAGES" = "[]" ]; then [ "$PLAN$MUTANTS" = skippedskipped ]; else [ "$PLAN$MUTANTS" = successsuccess ]; fi

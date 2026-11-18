@@ -3,6 +3,7 @@
 
 Gremlins itself is not run: the gate reads its JSON, so fixtures stand in for it.
 """
+import collections
 import contextlib
 import fnmatch
 import io
@@ -643,7 +644,7 @@ class Verify(unittest.TestCase):
             for name, data in results.items():
                 # "mutants-0/netguard.json": one directory per artifact, as download-artifact lays them out.
                 name = name if "/" in name else f"mutants-0/{name}"
-                (res / name).parent.mkdir(exist_ok=True)
+                (res / name).parent.mkdir(parents=True, exist_ok=True)
                 (res / name).write_text(data if isinstance(data, str) else json.dumps(data))
             extra = list(extra)
             if body is not None:
@@ -826,6 +827,25 @@ class Verify(unittest.TestCase):
         r = self.verify(self.sharded(3, lived=None), src=self.SHARD_SRC)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_shards_one_job_ran_in_turn_join_from_their_own_directories(self):
+        # MUT-plan-overflow (#6170): a job running several shards writes each to mutants/<index>/, so
+        # its artifact holds one directory a shard. The join reads them as one-shard jobs' results, and
+        # a shard written both there and as another job's result is refused as an overlap.
+        one = self.verify(self.sharded(1), src=self.SHARD_SRC, summary=True)
+        flat = self.sharded(3)
+        nested = {f"mutants-{int(k.split('/')[0].split('-')[1]) % 2}/{k.split('/')[0].split('-')[1]}/netguard.json": v
+                  for k, v in flat.items()}
+        self.assertEqual(sorted(nested), ["mutants-0/0/netguard.json", "mutants-0/2/netguard.json",
+                                          "mutants-1/1/netguard.json"])
+        r = self.verify(nested, src=self.SHARD_SRC, summary=True)
+        self.assertEqual((r.returncode, r.stdout, r.summary), (one.returncode, one.stdout, one.summary), r.stderr)
+        twice = {**nested, "mutants-2/netguard.json": flat["mutants-0/netguard.json"]}
+        r = self.verify(twice, src=self.SHARD_SRC)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("shards overlap", r.stderr)
+        # K past the 256-job matrix is a schedule like any other.
+        self.assertEqual(mutgate.shard_of({"shard": {"index": 295, "of": 296}}), (295, 296))
+
     def test_a_missing_or_overlapping_shard_is_refused(self):
         good = self.sharded(2, lived=None)
         moved = json.loads(json.dumps(good))
@@ -858,7 +878,7 @@ class Verify(unittest.TestCase):
              "records a shard that is not"),
             ("bool", {**good, "mutants-1/netguard.json": {**good["mutants-1/netguard.json"], "shard": {"index": True, "of": 2}}},
              "records a shard that is not"),
-            ("over the matrix", {"mutants-0/netguard.json": {**good["mutants-0/netguard.json"], "shard": {"index": 0, "of": 257}}},
+            ("over the limit", {"mutants-0/netguard.json": {**good["mutants-0/netguard.json"], "shard": {"index": 0, "of": 1537}}},
              "records a shard that is not"),
         ):
             with self.subTest(name):
@@ -1789,7 +1809,7 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             plan = pathlib.Path(d) / "targets.json"
             r = self.mutgate(d, "plan", "--git", "HEAD~1", "--targets-out", str(plan))
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-            self.assertEqual(json.loads(r.stdout), [{"pkg": "hint", "shard": 0, "of": 1}])
+            self.assertEqual(json.loads(r.stdout), [{"pkg": "hint", "shards": "0", "of": 1, "minutes": 60}])
             up = {"tests": ["TestUp"], "lines": {"hint.go": [3, 4, 5, 6, 7]}}
             self.assertEqual(json.loads(plan.read_text()), {"hint": {**up, "base": up}})
             got = {}
@@ -2572,7 +2592,7 @@ class Plan(unittest.TestCase):
         # #4983: a refused plan says what to do next. Each claimed package plans 100 shards here.
         from unittest import mock
         import contextlib, io, types
-        for pkgs, fix in ((["a", "b", "c"], "split the PR so each part changes fewer tier-A or tier-B packages"),
+        for pkgs, fix in (([f"p{i}" for i in range(16)], "split the PR so each part changes fewer tier-A or tier-B packages"),
                           ([], "rerun the mutgate workflow")):
             with self.subTest(pkgs), contextlib.ExitStack() as st:
                 for name, value in (("broker_diff", lambda *a: ""), ("added_lines", lambda d: ({}, {})),
@@ -2584,8 +2604,8 @@ class Plan(unittest.TestCase):
                 err = st.enter_context(contextlib.redirect_stderr(io.StringIO()))
                 st.enter_context(contextlib.redirect_stdout(io.StringIO()))
                 self.assertEqual(mutgate.cmd_plan(types.SimpleNamespace(git="HEAD~1")), 1)
-                self.assertIn(f"{len(pkgs) * 100} shards, not 1 to {mutgate.MATRIX_MAX} (GitHub's matrix limit): {fix}",
-                              err.getvalue())
+                self.assertIn(f"{len(pkgs) * 100} shards do not fit 256 jobs (GitHub's matrix limit) of at most 6 shards "
+                              f"of one package each (its 360-minute job limit): {fix}", err.getvalue())
 
     def plan(self, pkg_targets, suite):
         """cmd_plan's (code, matrix, stderr) with each package's ({path: lines}, sites) given and
@@ -2604,6 +2624,43 @@ class Plan(unittest.TestCase):
             code = mutgate.cmd_plan(types.SimpleNamespace(git="HEAD~1", targets_out=None))
         return code, out.getvalue(), err.getvalue()
 
+    def test_a_plan_past_the_matrix_runs_every_shard_once_in_at_most_256_jobs(self):
+        # MUT-plan-overflow (#6170): #6144's plan (run 44309775605) asked for 320 shards, enforcer/nft's
+        # 296 among them, past GitHub's 256-job matrix. Each job then runs shards of one package in turn,
+        # 60 minutes for each, never past a hosted job's 360; at or under 256 it is one shard a job.
+        six = [("clerk/enflist", 1), ("cmd/agentos-enforcer", 7), ("enforcer/dns", 6), ("enforcer/nft", 296),
+               ("enforcer/page", 3), ("enforcer/policy", 5), ("enforcer/traffic", 2)]
+        for counts, jobs, most in ((six, 162, 2), ([("p", 256)], 256, 1), ([("p", 20), ("q", 1)], 21, 1),
+                                   ([("p", 1536)], 256, 6), ([("p", 1002), ("q", 534)], 256, 6)):
+            with self.subTest(counts=counts):
+                got = mutgate.pack(counts)
+                self.assertEqual(len(got), jobs)
+                ran = collections.Counter()
+                for e in got:
+                    self.assertEqual(set(e), {"pkg", "shards", "of", "minutes"})
+                    mine = [int(i) for i in e["shards"].split(" ")]
+                    self.assertEqual(e["minutes"], 60 * len(mine))
+                    self.assertLessEqual(len(mine), most)
+                    self.assertEqual(e["of"], dict(counts)[e["pkg"]])
+                    ran.update((e["pkg"], i) for i in mine)
+                # Every shard of every package exactly once.
+                self.assertEqual(ran, collections.Counter((pkg, i) for pkg, of in counts for i in range(of)))
+                self.assertEqual(max(e["minutes"] for e in got), 60 * most)
+        self.assertIsNone(mutgate.pack([("p", 1537)]))
+        # Each package fills its own jobs, so two that each leave one part-filled fit fewer shards in all.
+        self.assertIsNone(mutgate.pack([("p", 1000), ("q", 536)]))
+        self.assertEqual(mutgate.SHARDS_MAX, 1536)
+
+    def test_a_plan_past_the_matrix_names_its_packing(self):
+        code, out, err = self.plan({"enforcer/nft": ({"broker/enforcer/nft/a.go": set(range(1, 1767))}, [{}] * 1019)},
+                                   (364.0, None))
+        self.assertEqual(code, 0, err)
+        self.assertIn("enforcer/nft: 1766 target lines, 1019 deletion sites, a 364 s suite, 296 shard(s)", err)
+        self.assertIn("296 shards past 256 jobs: up to 2 shards a job, one after another", err)
+        got = json.loads(out)
+        self.assertEqual(len(got), 148)
+        self.assertEqual(got[0], {"pkg": "enforcer/nft", "shards": "0 148", "of": 296, "minutes": 120})
+
     def test_a_slow_suite_gets_more_shards(self):
         # MUT-kernel-sim-budget (#5069): on #5006 kernel/sim (823 target lines, 534 deletion sites, a
         # 48 s suite) planned 6 shards from its counts alone and 5 of them passed the 60-minute limit.
@@ -2614,7 +2671,8 @@ class Plan(unittest.TestCase):
         # Each shard's suite runs fit the budget, which is half the job's 60 minutes.
         self.assertLessEqual(48.0 * (mutgate.LINE_RUNS * 823 / k + mutgate.SITE_RUNS * 534 / k), mutgate.SHARD_SECONDS)
         self.assertLessEqual(2 * mutgate.SHARD_SECONDS, 60 * 60)
-        self.assertIn("    timeout-minutes: 60\n", job(WORKFLOW.read_text(), "mutants"))
+        self.assertIn("    timeout-minutes: ${{ matrix.minutes }}\n", job(WORKFLOW.read_text(), "mutants"))
+        self.assertEqual(mutgate.pack([("p", 1)])[0]["minutes"], 60)
         # browser's 7 s suite on #5006 (9 shards in 6 to 14 minutes) and a package with no tests keep
         # the count budgets: the time term only ever adds shards.
         self.assertEqual(mutgate.shard_count(lines(1364), [0] * 825, 7.0), 9)
@@ -2625,13 +2683,13 @@ class Plan(unittest.TestCase):
         # MUT-waiver-store-claim (#5786): a record-only claim runs one cheap shard, never its suite.
         code, out, err = self.plan({"netguard": ({}, [])}, (None, "the suite must not run"))
         self.assertEqual(code, 0, err)
-        self.assertEqual(json.loads(out), [{"pkg": "netguard", "shard": 0, "of": 1}])
+        self.assertEqual(json.loads(out), [{"pkg": "netguard", "shards": "0", "of": 1, "minutes": 60}])
 
     def test_plan_sizes_each_package_by_its_suite(self):
         sim = ({"broker/kernel/sim/a.go": set(range(1, 824))}, [{}] * 534)
         code, out, err = self.plan({"kernel/sim": sim}, (48.0, None))
         self.assertEqual(code, 0, err)
-        self.assertEqual(json.loads(out), [{"pkg": "kernel/sim", "shard": i, "of": 20} for i in range(20)])
+        self.assertEqual(json.loads(out), [{"pkg": "kernel/sim", "shards": str(i), "of": 20, "minutes": 60} for i in range(20)])
         self.assertIn("kernel/sim: 823 target lines, 534 deletion sites, a 48 s suite, 20 shard(s)", err)
         # A suite that does not build or pass cannot be timed: the plan fails and says why.
         code, out, err = self.plan({"kernel/sim": sim}, (None, "broker/kernel/sim/'s tests fail"))
@@ -3879,17 +3937,22 @@ class Workflow(unittest.TestCase):
         self.assertIn("shards: ${{ steps.plan.outputs.shards }}", plan)
         self.assertIn("include: ${{ fromJSON(needs.plan.outputs.shards) }}", mutants)
         self.assertIn("fail-fast: false", mutants)
-        for env in ("PKG: ${{ matrix.pkg }}", "SHARD: ${{ matrix.shard }}", "OF: ${{ matrix.of }}"):
+        for env in ("PKG: ${{ matrix.pkg }}", "SHARDS: ${{ matrix.shards }}", "OF: ${{ matrix.of }}"):
             self.assertIn(env, mutants)
-        self.assertIn('python3 -I tools/mutgate.py run "$PKG" --out mutants --git "$BASE" --shard "$SHARD" --of "$OF"\n'
-                      '          --targets "$RUNNER_TEMP/plan/targets.json"\n', mutants)
+        # #6170: each of the job's shards runs in turn into its own directory, which verify reads.
+        self.assertIn('          for s in $SHARDS; do\n'
+                      '            [[ "$s" =~ ^[0-9]+$ ]] || { echo "::error::shard $s is not an index"; exit 1; }\n'
+                      '            python3 -I tools/mutgate.py run "$PKG" --out "mutants/$s" --git "$BASE" --shard "$s" --of "$OF" \\\n'
+                      '              --targets "$RUNNER_TEMP/plan/targets.json"\n          done\n', mutants)
         # The job's name shows the shard in the checks list (#4983); a name is display text, never run.
-        name = "    name: mutants ${{ matrix.pkg }} shard ${{ matrix.shard }} of ${{ matrix.of }}\n"
+        name = "    name: mutants ${{ matrix.pkg }} shard ${{ matrix.shards }} of ${{ matrix.of }}\n"
         self.assertIn(name, mutants)
-        self.assertNotIn("matrix.", mutants.replace(name, "").replace("${{ matrix.pkg }}\n", "").replace("${{ matrix.shard }}\n", "")
-                         .replace("${{ matrix.of }}\n", ""))  # matrix values reach scripts through env only
+        self.assertNotIn("matrix.", mutants.replace(name, "").replace("${{ matrix.pkg }}\n", "").replace("${{ matrix.shards }}\n", "")
+                         .replace("${{ matrix.of }}\n", "").replace("    timeout-minutes: ${{ matrix.minutes }}\n", ""))
+        # matrix values reach scripts through env only
         # #4573: the deletion pass adds to the same result, after gremlins wrote it.
-        self.assertIn('python3 -I tools/mutgate.py delete "$PKG" --out mutants --git "$BASE"', mutants)
+        self.assertIn('          for s in $SHARDS; do\n'
+                      '            python3 -I tools/mutgate.py delete "$PKG" --out "mutants/$s" --git "$BASE"\n          done\n', mutants)
         self.assertLess(mutants.index("mutgate.py run"), mutants.index("mutgate.py delete"))
         self.assertNotIn("mutgate.py gate", self.text)  # the gate is `verify`, in the job no PR code reaches
         self.assertNotIn("${{ matrix.pkg }}\"", mutants)  # never interpolated into a script
