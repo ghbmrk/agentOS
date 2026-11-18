@@ -183,6 +183,20 @@ class ScopeTest(unittest.TestCase):
             self.assertTrue(f.endswith(".md"), f)
             self.assertFalse((ROOT / f).stat().st_mode & 0o111, f"{f} is executable")
 
+    def test_no_record_directory_holds_a_mkosi_tree(self):
+        # #6088: test_image_repro.KeyringSpikesTest pins each mkosi tree's apt inputs, but its walk may not
+        # open a record directory (records_audit); this module reads git, so it holds that none holds a
+        # tree: no tracked path below one has a part mkosi reads as configuration.
+        def trees(files):
+            return [f for f in files if f.startswith(ci_scope.RECORD_DIRS)
+                    and {"mkosi.conf", "mkosi.conf.d", "mkosi.local.conf"} & set(f.split("/"))]
+        self.assertEqual(trees(["reviews/a/mkosi.conf", "handoff/b/mkosi.conf.d/10.conf", "docs/security/mkosi.local.conf",
+                                "image/mkosi/mkosi.conf", "reviews/mkosi.md", "briefs/mkosi.conf.md"]),
+                         ["reviews/a/mkosi.conf", "handoff/b/mkosi.conf.d/10.conf", "docs/security/mkosi.local.conf"])
+        files = git(ROOT, "ls-files", "-z").split("\0")
+        self.assertIn("image/mkosi/mkosi.conf", files)
+        self.assertEqual(trees(files), [])
+
     def test_git_diff_lists_a_moved_file_under_its_old_path(self):
         with tempfile.TemporaryDirectory() as d:
             git(d, "init", "-q", "-b", "main")

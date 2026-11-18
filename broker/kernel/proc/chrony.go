@@ -28,17 +28,24 @@ const (
 // a datagram socket bound at reply and connected to sock, so the host
 // delivers it only chronyd's datagrams.
 type Chrony struct {
-	sock, reply string
-	mu          sync.Mutex
-	c           *net.UnixConn
-	seq         uint32
-	next        time.Time // no try before this after a failure
+	reply string
+	dial  func() (*net.UnixConn, error) // nil reads the box clock alone
+	mu    sync.Mutex
+	c     *net.UnixConn
+	seq   uint32
+	next  time.Time // no try before this after a failure
 }
 
 // NewChrony is a source reading chronyd at sock, answered at reply; with
 // sock "" it reads the box clock alone. A reply socket left at exit is
 // removed at the next start's first ask.
-func NewChrony(sock, reply string) *Chrony { return &Chrony{sock: sock, reply: reply} }
+func NewChrony(sock, reply string) *Chrony {
+	s := &Chrony{reply: reply}
+	if sock != "" {
+		s.dial = func() (*net.UnixConn, error) { return dialChrony(sock, reply) }
+	}
+	return s
+}
 
 // Read is the kernel process's TIM-1 source (onLog). With chronyd synced,
 // true time is the box clock plus chronyd's correction, within root delay /
@@ -72,7 +79,7 @@ func (s *Chrony) drop() {
 // source or does not answer well. A failure closes the socket and waits
 // chronyRetry, so a hung chronyd delays a decision at most once in that.
 func (s *Chrony) track() (corr, bound float64, ok bool) {
-	if s.sock == "" || time.Now().Before(s.next) {
+	if s.dial == nil || time.Now().Before(s.next) {
 		return 0, 0, false
 	}
 	if corr, bound, ok = s.ask(); !ok {
@@ -84,7 +91,7 @@ func (s *Chrony) track() (corr, bound float64, ok bool) {
 
 func (s *Chrony) ask() (float64, float64, bool) {
 	if s.c == nil {
-		c, err := dialChrony(s.sock, s.reply)
+		c, err := s.dial()
 		if err != nil {
 			return 0, 0, false
 		}
