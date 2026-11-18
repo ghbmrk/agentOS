@@ -2193,13 +2193,15 @@ class ImageTest(unittest.TestCase):
         # still counts tries (the first boot of a release; an orderly stop that clears MOR). So the probe
         # reboots once the first boot is blessed, and isolates on the blessed boot, where the fallback stays
         # up: the box the issue's failure path is about. The probe has no default dependencies: sysinit.target
-        # conflicts with emergency.target, so its stop stops every unit that requires it (the secret holders,
-        # the page authority's staging and the wipe too), whatever their IgnoreOnIsolate=. After each step it
-        # prints MOR's value, both units' states, the staged certificate's hash, and whether the sealed pair is
-        # the one before it (its bytes stay in the guest). agentos-mor.service stays active and MOR stays set
-        # throughout, so the holders that come back are covered; its clear runs only at the shutdown, after the
-        # staging unit's stop has emptied /run/agentos-setup (the clear refuses while that holds a file), and
-        # the next boot's responder prints its last line from the journal.
+        # conflicts with emergency.target, so its stop stops every unit that requires it (the secret holders),
+        # whatever their IgnoreOnIsolate=. MOR-pageca-emergency (#6178): the page authority's staging and the
+        # wipe have none either, so both stay active and the staged authority stays the one a card printed
+        # before the isolates names. After each step it prints MOR's value, the three units' states, the
+        # staged certificate's hash, and whether the sealed pair is the one before it (its bytes stay in the
+        # guest). agentos-mor.service stays active and MOR stays set throughout, so the holders that come back
+        # are covered; its clear runs only at the shutdown, after the staging unit's stop has emptied
+        # /run/agentos-setup (the clear refuses while that holds a file), and the next boot's responder prints
+        # its last line from the journal.
         d = self.dir / "isolate-in"
         d.mkdir(exist_ok=True)
         (d / "isolate.sh").write_text(
@@ -2210,7 +2212,8 @@ class ImageTest(unittest.TestCase):
             "say() { c=$(sha256sum 2>/dev/null </run/agentos-page-ca/authority.der | cut -c1-64); p=$(pair)\n"
             "\techo \"HOSTCHECK-ISOLATE $1 mor $(od -An -tu1 -j4 -v $MOR 2>&1 | tr -d ' \\n') cert ${c:-none}"
             " pair $([ -n \"$p\" ] && [ \"$p\" = \"$last\" ] && echo same || echo other)"
-            " $(systemctl show -p Id -p ActiveState --value agentos-mor.service agentos-keeper-pageca.service | tr -s '\\n' ' ')\"\n"
+            " $(systemctl show -p Id -p ActiveState --value agentos-mor.service agentos-keeper-pageca.service"
+            " agentos-keeper-wipe.service | tr -s '\\n' ' ')\"\n"
             "\tlast=$p; }\n"
             "say before\n"
             "for t in emergency rescue; do\n"
@@ -2246,13 +2249,13 @@ class ImageTest(unittest.TestCase):
         self.assertNotEqual(steps[0][1], b"0", steps)
         self.assertEqual({x[1] for x in steps}, {steps[0][1]}, steps)
         self.assertEqual([x[4].split()[:2] for x in steps], [[b"agentos-mor.service", b"active"]] * 5, steps)
-        # Emergency stops the staging through sysinit.target (its stop removes the pair and certificate) and
-        # default stages a new authority; rescue keeps sysinit.target, so it leaves that one in place.
-        self.assertEqual([x[4].split()[3] for x in steps], [b"active", b"inactive", b"active", b"active", b"active"], steps)
-        self.assertEqual(steps[1][2], b"none", steps)
-        self.assertRegex(steps[2][2], rb"^[0-9a-f]{64}$")
-        self.assertEqual((steps[3][2], steps[4][2]), (steps[2][2], steps[2][2]), steps)
-        self.assertEqual([x[3] for x in steps[3:]], [b"same", b"same"], steps)
+        # Neither isolate stops the staging or the wipe (#6178), so the authority staged before them, its
+        # certificate and its sealed pair, is the one after each step.
+        self.assertEqual([x[4].split()[2:] for x in steps], [[b"agentos-keeper-pageca.service", b"active",
+                                                             b"agentos-keeper-wipe.service", b"active"]] * 5, steps)
+        self.assertRegex(steps[0][2], rb"^[0-9a-f]{64}$")
+        self.assertEqual({x[2] for x in steps}, {steps[0][2]}, steps)
+        self.assertEqual([x[3] for x in steps[1:]], [b"same"] * 4, steps)
         after = (self.dir / "isolate" / "console-after.log").read_bytes()
         last = re.findall(rb"HOSTCHECK-DIAG start journal -1: (agentos-mor: [^\r\n]*)", after)
         self.assertEqual(last[-1:], [b"agentos-mor: mor=cleared"], last)
