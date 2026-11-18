@@ -28,12 +28,12 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
                                              add the verdicts to `run`'s JSON in DIR (#4573, #4603, #4633);
                                              only the sites of the result's own shard
   tools/mutgate.py report DIR                survivors per package, from the JSON in DIR
-  tools/mutgate.py gate DIR --git BASE [HEAD] [--body FILE] [--summary FILE]
+  tools/mutgate.py gate DIR --git BASE [HEAD] [--body FILE [--body-from SHA]] [--summary FILE]
                                              exit 1 if a LIVED mutant sits on a target line that no
                                              `Mutant-equivalent:` line in FILE (the PR body) and no
                                              entry of its package's record names, or a record
                                              entry is stale
-  tools/mutgate.py verify DIR --git BASE [HEAD] [--body FILE] [--summary FILE]
+  tools/mutgate.py verify DIR --git BASE [HEAD] [--body FILE [--body-from SHA]] [--summary FILE]
                                              `gate`, after checking that DIR/*/ holds exactly
                                              one readable result for each shard of every package
                                              `claimed` names, as `run` and `delete` check it, with
@@ -2365,7 +2365,15 @@ def decide(results, added, tests, args, records=({}, [])):
               + ", ".join(site_text((p, n, k, c)) for p, n, k, c in hit) + "), so it waives none: name the one it "
               "proves by its column and kind, `Mutant-equivalent: <path>:<line>:<col>:<KIND> <reason>`")
     refuse_not_equivalent(refused)
-    return report_violations(found, lost) or (1 if stale or refused else 0)
+    rc = report_violations(found, lost) or (1 if stale or refused else 0)
+    # MUT-stale-body (#6077): the workflow passes the event's body, which "Re-run failed jobs" reuses, so a
+    # line added or reworded after the push is unread here although the current body holds it. Every failure
+    # can call for a body edit (a new, refused or ambiguous line), so each says which body this was.
+    if rc and getattr(args, "body_from", None):
+        print(f"mutgate: the body read is the PR body as it stood at head {args.body_from}, when the event that "
+              "started this run fired (the PR's opening, a push or a reopening); a line added to the body after "
+              "that is not read by this run or a rerun of it, so it counts only from the next push")
+    return rc
 
 
 def write_summary(path, text):
@@ -2632,6 +2640,12 @@ def mutant_kind(v):
     return v
 
 
+def commit_sha(v):
+    if not re.fullmatch(r"[0-9a-f]{40}", v):
+        raise argparse.ArgumentTypeError("give the full 40-character commit sha")
+    return v
+
+
 def pr_ref(v):
     if not re.fullmatch(r"#[1-9]\d*", v):
         raise argparse.ArgumentTypeError("give the PR as #<number>")
@@ -2681,10 +2695,14 @@ def main(argv=None):
         p.add_argument("--git", required=True, metavar="BASE")
         p.add_argument("head", nargs="?", default="HEAD")
         p.add_argument("--body", metavar="FILE", help="the PR body, read as text for Mutant-equivalent lines")
+        p.add_argument("--body-from", metavar="SHA", type=commit_sha,
+                       help="the PR head of the event whose body FILE is; a failure names it (#6077)")
         p.add_argument("--summary", metavar="FILE", help="append the table of verdicts here")
     args = ap.parse_args(argv)
     if args.cmd == "run" and (not 0 <= args.shard < args.of <= MATRIX_MAX or (args.of > 1 and not args.git)):
         ap.error(f"--shard I --of K needs 0 <= I < K <= {MATRIX_MAX}, and --git when K > 1")
+    if getattr(args, "body_from", None) and not args.body:
+        ap.error("--body-from names the event whose body --body holds: give --body too")
     if args.cmd == "packages":
         print("\n".join(gated_packages()))
         return 0
