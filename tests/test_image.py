@@ -93,9 +93,18 @@ NOEXEC_FILES = ("etc/fstab", "usr/lib/systemd/system/tmp.mount.d/50-agentos-noex
 JOURNAL_FILES = ("usr/lib/systemd/journald.conf.d/50-agentos-persist.conf",)
 
 
+# Debian's unit that moves the journal from /run to /var/log/journal, and the link that starts it (#6095).
+JOURNAL_FLUSH = "usr/lib/systemd/system/systemd-journal-flush.service"
+
+
 def noexec(root):
     for rel in NOEXEC_FILES + MAIN_SIDE_FILES + JOURNAL_FILES:
         write(root, rel, (MK / "mkosi.extra" / rel).read_text())
+    write(root, JOURNAL_FLUSH, "[Service]\nType=oneshot\nExecStart=journalctl --flush\n")
+    wants = pathlib.Path(root) / "usr/lib/systemd/system/sysinit.target.wants"
+    wants.mkdir(parents=True, exist_ok=True)
+    if not (wants / "systemd-journal-flush.service").is_symlink():
+        (wants / "systemd-journal-flush.service").symlink_to("../systemd-journal-flush.service")
 
 
 # The main side's mask over the keeper's state and the keeper's lift of it (STO-2c, D-154), which
@@ -7879,6 +7888,83 @@ class EdgeLinkUnitsTest(unittest.TestCase):
         jobs = self.transaction("multi-user.target", device)
         for unit in (LINK_CAPTURE.name, LINK_SERVED.name, "agentos-inbound.service", "agentos-keeper-enroll.service"):
             self.assertIn(unit, jobs)
+
+
+class IgnoredValueTest(unittest.TestCase):
+    """#6095 (R4, Security on #6086): where systemd's parser ignores an empty value and keeps the one before
+    it (systemd 257.7: config_parse_bool, _private_tmp, _service_type, _device_policy, _exec_output and
+    _exec_input, _unit_slice, _trigger_unit, _rlimit, _unsigned, _sec, the coredump and resolved enums), no
+    check reads it as a reset. One case per caller: a value, then an empty one in a later file."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+
+    def files(self, *texts):
+        out = []
+        for t in texts:
+            self.n = getattr(self, "n", 0) + 1
+            rel = "u/%d.conf" % self.n
+            write(self.root, rel, t)
+            out.append(check.Conf(str(self.root), rel))
+        return out
+
+    def test_a_kept_value_that_opens_a_door_is_still_refused(self):
+        unit = "agentos-x.service"
+        for key, val, run, want in (
+                ("PrivateTmp", "disconnected", lambda f: check.namespace_mount_violations(unit, f),
+                 "PrivateTmp=disconnected mounts a tmpfs that executes"),
+                ("PermissionsStartOnly", "yes", lambda f: check.keeper_unit_violations(unit, f, str(self.root)),
+                 "PermissionsStartOnly=yes runs commands with full privileges"),
+                ("Slice", "agentos-keeper.slice", lambda f: check.keeper_unit_violations(unit, f, str(self.root)),
+                 "in agentos-keeper.slice but not one of the keeper's units"),
+                ("Type", "oneshot", lambda f: check.keeper_unit_violations(
+                    unit, f + self.files("[Service]\nRuntimeMaxSec=9\n"), str(self.root)),
+                 "RuntimeMaxSec= has no effect on a Type=oneshot unit")):
+            with self.subTest(key=key):
+                got = " | ".join(run(self.files("[Service]\n%s=%s\n" % (key, val), "[Service]\n%s=\n" % key)))
+                self.assertIn(want, got)
+        for key in ("StandardInput", "StandardOutput", "StandardError"):
+            with self.subTest(key=key):
+                paths = check.manager_paths(self.files("[Service]\n%s=file:/var/lib/x\n" % key, "[Service]\n%s=\n" % key))
+                self.assertIn((key, "file:/var/lib/x", "/var/lib/x"), paths)
+        # A path unit starts the first unit it names; a later Unit=, empty or not, is ignored.
+        for later in ("", "agentos-keeper-enroll.service"):
+            with self.subTest(later=later):
+                got = check.keeper_path_violations("agentos-keeper-enroll.path", self.files(
+                    "[Path]\nUnit=agentos-x.service\nPathExists=/run/agentos-setup/x\n", "[Path]\nUnit=%s\n" % later))
+                self.assertEqual(got, ["agentos-keeper-enroll.path: starts agentos-x.service, not one of the keeper's "
+                                       "units (D-154)"])
+
+    def test_a_kept_safe_value_still_passes(self):
+        # The safe value stays, so these pass rather than being refused as unset.
+        tpm = "neither PrivateDevices=yes nor DevicePolicy=closed"
+        for key, val in (("DevicePolicy", "closed"), ("PrivateDevices", "yes")):
+            with self.subTest(key=key):
+                got = check.keeper_unit_violations("agentos-x.service", self.files(
+                    "[Service]\n%s=%s\n" % (key, val), "[Service]\n%s=\n" % key), str(self.root))
+                self.assertFalse([v for v in got if tpm in v], got)
+        kernel = "agentos-keeper-kernel.service"
+        for key, sec, val, want in (("NoNewPrivileges", "Service", "yes", "NoNewPrivileges is not yes"),
+                                    ("StartLimitBurst", "Unit", "3", "StartLimitBurst is"),
+                                    ("StartLimitIntervalSec", "Unit", "60", "StartLimitIntervalSec is")):
+            with self.subTest(key=key):
+                got = check.keeper_unit_violations(kernel, self.files("[%s]\n%s=%s\n" % (sec, key, val),
+                                                                      "[%s]\n%s=\n" % (sec, key)), str(self.root))
+                self.assertFalse([v for v in got if want in v], got)
+        nodump(self.root)
+        write(self.root, "etc/machine-id", "uninitialized\n")
+        for rel, text, want in (("etc/systemd/coredump.conf.d/zz.conf", "[Coredump]\nStorage=\n", "coredump Storage"),
+                                ("etc/systemd/system.conf.d/zz.conf", "[Manager]\nDefaultLimitCORE=\n", "DefaultLimitCORE"),
+                                ("etc/systemd/system/agentosd.service.d/zz.conf", "[Service]\nLimitCORE=\n", "LimitCORE is")):
+            with self.subTest(rel=rel):
+                write(self.root, rel, text)
+                self.assertFalse([v for v in check.dump_violations(self.root) if want in v])
+                (self.root / rel).unlink()
+        write(self.root, "usr/lib/systemd/resolved.conf.d/40-a.conf", "[Resolve]\nLLMNR=no\nMulticastDNS=no\n")
+        write(self.root, "etc/systemd/resolved.conf.d/zz.conf", "[Resolve]\nLLMNR=\nMulticastDNS=\n")
+        self.assertEqual(check.resolved_violations(self.root), [])
 
 
 if __name__ == "__main__":

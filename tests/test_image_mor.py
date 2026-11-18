@@ -409,9 +409,10 @@ class WipeJournalTest(unittest.TestCase):
         must = "; must be persistent (change or remove that line)"
         level = "; must store info, a unit's stderr (set info or debug, or remove that line)"
         ignored = ", keeping the one before it (set a valid one or remove that line)"
+        alone = " (set a valid one or remove that line)"  # UX on #6086: no value before it to keep
         for rel, text, want in (
                 (self.DROPIN, None, "journald Storage is not set (auto); must be persistent "
-                                    "(usr/lib/systemd/journald.conf.d/50-agentos-persist.conf is missing)"),
+                                    "(usr/lib/systemd/journald.conf.d/50-agentos-persist.conf is missing or masked)"),
                 (zz, "[Journal]\nStorage=volatile\n", zz + ": journald Storage is volatile" + must),
                 (zz, "[Journal]\nStorage=auto\n", zz + ": journald Storage is auto" + must),
                 (zz, "[Journal]\nStorage=\n", zz + ": journald Storage= is a value journald ignores" + ignored),
@@ -421,9 +422,9 @@ class WipeJournalTest(unittest.TestCase):
                 (lib, "[Journal]\nMaxLevelStore=notice\n", lib + ": journald MaxLevelStore is notice" + level),
                 (lib, "[Journal]\nMaxLevelStore=5\n", lib + ": journald MaxLevelStore is 5" + level),
                 (lib, "[Journal]\nMaxLevelStore=x\n", lib + ": journald MaxLevelStore=x is a value journald ignores"
-                 + ignored),
+                 + alone),
                 (lib, "[Journal]\nMaxLevelStore=8\n", lib + ": journald MaxLevelStore=8 is a value journald ignores"
-                 + ignored),
+                 + alone),
                 (zz, b"[Journal]\nX=\xff\n", zz + ": unreadable ("),
                 ("run/systemd/journald.conf.d/a.conf", "[Journal]\nStorage=persistent\n", "/run is a tmpfs")):
             with self.subTest(rel=rel, text=text):
@@ -460,6 +461,60 @@ class WipeJournalTest(unittest.TestCase):
             with self.subTest(kept=kept):
                 write(self.root, zz, "[Journal]\nMaxLevelStore=%s\n" % kept)
                 self.assertNotIn("journald", self.v())
+
+    def journald(self):
+        return [v for v in check.violations(self.root) if "journal" in v]
+
+    def test_the_messages_point_at_the_fix(self):
+        # UX on #6086 (items 3 and 4), whole messages: an empty same-named file in /etc masks the shipped
+        # drop-in, and the shipped drop-in with an invalid Storage= is there but sets nothing.
+        write(self.root, "etc/systemd/journald.conf.d/50-agentos-persist.conf", "")
+        self.assertEqual(self.journald(), ["journald Storage is not set (auto); must be persistent "
+                                           "(usr/lib/systemd/journald.conf.d/50-agentos-persist.conf is missing or masked)"])
+        (self.root / "etc/systemd/journald.conf.d/50-agentos-persist.conf").unlink()
+        write(self.root, self.DROPIN, "[Journal]\nStorage=bogus\n")
+        self.assertEqual(self.journald(), [
+            self.DROPIN + ": journald Storage=bogus is a value journald ignores (set a valid one or remove that line)",
+            "journald has no valid Storage= in the chain, so it is auto; must be persistent"])
+
+    def test_the_tree_check_keeps_journald_defaults(self):
+        # #6095 (Potency on #6086): no setting that deletes or drops stored entries early.
+        zz = "etc/systemd/journald.conf.d/zz.conf"
+        for key in check.JOURNAL_DEFAULTS:
+            with self.subTest(key=key):
+                write(self.root, zz, "[Journal]\n%s=1\n" % key)
+                self.assertEqual(self.journald(), ["%s: journald %s=1; the image keeps journald's default, so no "
+                                                   "entry goes early (remove that line)" % (zz, key)])
+        self.assertEqual(sorted(check.JOURNAL_DEFAULTS), sorted(
+            ("SystemMaxUse", "SystemKeepFree", "SystemMaxFileSize", "SystemMaxFiles", "MaxRetentionSec",
+             "RateLimitIntervalSec", "RateLimitInterval", "RateLimitBurst")))
+
+    def test_the_tree_check_holds_the_flush(self):
+        # #6095 (R1): until systemd-journal-flush.service runs, journald writes to /run only.
+        unit, link = "usr/lib/systemd/system/systemd-journal-flush.service", \
+            self.root / "usr/lib/systemd/system/sysinit.target.wants/systemd-journal-flush.service"
+        why = "journald keeps the journal in /run until it runs, so a reboot loses it"
+        masked = "systemd-journal-flush.service: missing or masked; " + why
+        self.assertEqual(self.journald(), [])
+        etc = self.root / "etc/systemd/system/systemd-journal-flush.service"
+        etc.parent.mkdir(parents=True, exist_ok=True)
+        etc.symlink_to("/dev/null")
+        self.assertEqual(self.journald(), [masked])
+        etc.unlink()
+        write(self.root, "etc/systemd/system/systemd-journal-flush.service", "")
+        self.assertEqual(self.journald(), [masked])
+        etc.unlink()
+        saved = (self.root / unit).read_text()
+        (self.root / unit).unlink()
+        self.assertIn(masked, self.journald())  # and #5167 refuses the link it leaves dangling
+        write(self.root, unit, saved)
+        link.unlink()
+        self.assertEqual(self.journald(), ["systemd-journal-flush.service: not in sysinit.target.wants; " + why])
+        link.symlink_to("../systemd-journal-flush.service")
+        dropin = "etc/systemd/system/systemd-journal-flush.service.d/x.conf"
+        write(self.root, dropin, "[Service]\nExecStart=\n")
+        self.assertEqual(self.journald(), [dropin + ": a drop-in for systemd-journal-flush.service; the tree check "
+                                           "does not model a change to it (remove it)"])
 
 
 if __name__ == "__main__":

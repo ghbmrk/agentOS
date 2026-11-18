@@ -1196,9 +1196,10 @@ def config_lines(data):
     return out
 
 
-def ini_last(files, section, key):
+def ini_last(files, section, key, valid=None):
     """The value systemd ends up with for SECTION.KEY across FILES in order: the last assignment
-    wins, and an empty one resets it. None if never set."""
+    wins, and an empty one resets it. With VALID, the values its parser takes (systemd 257.7): any
+    other, the empty one included, is ignored and the one before it kept (#6095, R4). None if never set."""
     val = None
     for f in files:
         try:
@@ -1207,7 +1208,7 @@ def ini_last(files, section, key):
             # A file systemd may read only in part, or not at all: never pass on it.
             return "unreadable %s (%s)" % (f.name, e.strerror if isinstance(e, OSError) else e)
         for s, k, v in lines:
-            if (s, k) == (section, key):
+            if (s, k) == (section, key) and (valid is None or valid(v)):
                 val = v or None
     return val
 
@@ -1317,10 +1318,10 @@ def sysctl_byte_violations(root):
 def dump_violations(root):
     """IMG-nodump: core dumps are discarded, for every process and for the card's service."""
     out = []
-    storage = ini_last(main_conf(root, "coredump.conf"), "Coredump", "Storage")
+    storage = ini_last(main_conf(root, "coredump.conf"), "Coredump", "Storage", COREDUMP_STORAGES.__contains__)
     if storage != "none":
         out.append("50-agentos-nodump.conf: coredump Storage is %s; must be none" % storage)
-    limit = ini_last(main_conf(root, "system.conf"), "Manager", "DefaultLimitCORE")
+    limit = ini_last(main_conf(root, "system.conf"), "Manager", "DefaultLimitCORE", bool)
     if limit not in ("0", "0:0"):
         out.append("50-agentos-nodump.conf: DefaultLimitCORE is %s; must be 0" % limit)
     out += card_unit_violations(root)
@@ -1342,6 +1343,13 @@ LOG_LEVELS = ("emerg", "alert", "crit", "err", "warning", "notice", "info", "deb
 STORAGES = ("auto", "volatile", "persistent", "none")
 
 
+# #6095 (Potency on #6086): journald settings that delete or drop stored entries early. The image keeps
+# journald's defaults for them, so the check refuses any assignment.
+JOURNAL_DEFAULTS = ("SystemMaxUse", "SystemKeepFree", "SystemMaxFileSize", "SystemMaxFiles", "MaxRetentionSec",
+                    "RateLimitIntervalSec", "RateLimitInterval", "RateLimitBurst")
+JOURNAL_FLUSH = "systemd-journal-flush.service"
+
+
 def journal_violations(root):
     """MOR-wipe-journal (#6078): a failed wipe's error (info, to the journal only) is still on disk
     at the next boot. Storage=auto would rest on Debian's postinst having made /var/log/journal.
@@ -1356,24 +1364,57 @@ def journal_violations(root):
             return ["%s: unreadable (%s); journald may not read it whole"
                     % (f.rel, e.strerror if isinstance(e, OSError) else e)]
         for sec, key, val in lines:
+            if sec == "Journal" and key in JOURNAL_DEFAULTS:
+                out.append("%s: journald %s=%s; the image keeps journald's default, so no entry goes early "
+                           "(remove that line)" % (f.rel, key, val))
             valid = {"Storage": STORAGES, "MaxLevelStore": LOG_LEVELS + tuple("01234567")}.get(key)
             if sec != "Journal" or valid is None:
                 continue
             if val not in valid:
-                out.append("%s: journald %s=%s is a value journald ignores, keeping the one before it "
-                           "(set a valid one or remove that line)" % (f.rel, key, val))
+                # UX on #6086: "keeping the one before it" only when there is one.
+                out.append("%s: journald %s=%s is a value journald ignores%s (set a valid one or remove that line)"
+                           % (f.rel, key, val, ", keeping the one before it" if key in last else ""))
+                last.setdefault(key, (None, None))
             else:
                 last[key] = (val, f.rel)
     storage, where = last.get("Storage", (None, None))
-    if not where:
+    if "Storage" not in last:
         out.append("journald Storage is not set (auto); must be persistent "
-                   "(usr/lib/systemd/journald.conf.d/50-agentos-persist.conf is missing)")
+                   "(usr/lib/systemd/journald.conf.d/50-agentos-persist.conf is missing or masked)")
+    elif not where:
+        out.append("journald has no valid Storage= in the chain, so it is auto; must be persistent")
     elif storage != "persistent":
         out.append("%s: journald Storage is %s; must be persistent (change or remove that line)" % (where, storage))
     level, where = last.get("MaxLevelStore", ("debug", None))
-    if level not in ("info", "debug", "6", "7"):
+    if level is not None and level not in ("info", "debug", "6", "7"):
         out.append("%s: journald MaxLevelStore is %s; must store info, a unit's stderr (set info or debug, "
                    "or remove that line)" % (where, level))
+    return out + journal_flush_violations(root)
+
+
+def journal_flush_violations(root):
+    """#6095 (R1): journald writes to /var/log/journal only once systemd-journal-flush.service has asked it
+    to (server_system_journal_open, systemd 257.7); until then, Storage=persistent or not, the journal is in
+    /run and a reboot loses it. So the unit is there, not masked (a link or an empty file), started by
+    sysinit.target (the link systemd installs), and changed by no drop-in of its own name."""
+    root = str(root)
+    dirs, out = unit_dirs(root)
+    unit = next((Conf(root, d + "/" + JOURNAL_FLUSH) for d in dirs if tree_lstat(root, d + "/" + JOURNAL_FLUSH)), None)
+    why = "journald keeps the journal in /run until it runs, so a reboot loses it"
+    try:
+        masked = unit is None or unit.is_link() or unit.content().strip() == b""
+    except OSError:
+        masked = True
+    if masked:
+        out.append("%s: missing or masked; %s" % (JOURNAL_FLUSH, why))
+    try:
+        wanted = any(tree_lstat(root, "%s/sysinit.target.wants/%s" % (d, JOURNAL_FLUSH)) for d in dirs)
+    except OSError:
+        wanted = False
+    if not wanted:
+        out.append("%s: not in sysinit.target.wants; %s" % (JOURNAL_FLUSH, why))
+    for f in conf_files(root, ["%s/%s.d" % (d, JOURNAL_FLUSH) for d in UNIT_PATHS]):
+        out.append("%s: a drop-in for %s; the tree check does not model a change to it (remove it)" % (f.rel, JOURNAL_FLUSH))
     return out
 
 
@@ -1441,7 +1482,7 @@ def card_unit_violations(root):
             continue
         files = [unit] + conf_files(root, ["%s/%s.d" % (d, n) for d in UNIT_PATHS for n in unit_dropin_names(name)]
                                     + ["%s/service.d" % d for d in UNIT_PATHS])
-        limit = ini_last(files, "Service", "LimitCORE")
+        limit = ini_last(files, "Service", "LimitCORE", bool)
         if limit not in ("0", "0:0"):
             out.append("%s: LimitCORE is %s; must be 0" % (name, limit))
     return out
@@ -1540,7 +1581,7 @@ def namespace_mount_violations(name, files):
         for key in NAMESPACE_ROOTS:
             if ini_words(files, "Service", key):
                 out.append("%s: sets %s; only the image's own /usr may execute (UPD-10)" % (name, key))
-        if ini_last(files, "Service", "PrivateTmp") == "disconnected":
+        if ini_last(files, "Service", "PrivateTmp", private_tmp_valid) == "disconnected":
             out.append("%s: PrivateTmp=disconnected mounts a tmpfs that executes; use PrivateTmp=yes (UPD-10)" % name)
         for key in NAMESPACE_MOUNTS:
             for w in ini_words(files, "Service", key):
@@ -1911,6 +1952,36 @@ EXEC_KEYS = ("ExecCondition", "ExecStartPre", "ExecStart", "ExecStartPost", "Exe
              "ExecStopPost")
 TRUE_WORDS = ("1", "yes", "y", "true", "t", "on")
 FALSE_WORDS = ("0", "no", "n", "false", "f", "off")
+# #6095 (R4): the values a parser takes where systemd ignores any other, the empty one included, and
+# keeps the one before it (ini_last's VALID; read from systemd 257.7's source). Where VALID is bool (any
+# non-empty value), the check refuses every value it does not pass, so only the empty one needs skipping.
+SERVICE_TYPES = ("simple", "exec", "forking", "oneshot", "dbus", "notify", "notify-reload", "idle")
+DEVICE_POLICIES = ("auto", "closed", "strict")
+COREDUMP_STORAGES = ("none", "external", "journal")
+STD_WORDS = {"StandardInput": ("null", "tty", "tty-force", "tty-fail", "socket", "fd", "data"),
+             "StandardOutput": ("inherit", "null", "tty", "kmsg", "kmsg+console", "journal", "journal+console",
+                                "socket", "fd")}
+STD_PREFIXES = {"StandardInput": ("fd:", "file:"), "StandardOutput": ("fd:", "file:", "append:", "truncate:")}
+
+
+def is_bool(v):
+    """parse_boolean."""
+    return v.lower() in TRUE_WORDS + FALSE_WORDS
+
+
+def private_tmp_valid(v):
+    return v in ("no", "connected", "disconnected") or is_bool(v)
+
+
+def resolve_valid(v):
+    return v in ("no", "yes", "resolve") or is_bool(v)
+
+
+def std_valid(key):
+    """config_parse_exec_input/_output's values for KEY (StandardError= as StandardOutput=): a word, or a
+    prefix with something after it."""
+    kind = "StandardInput" if key == "StandardInput" else "StandardOutput"
+    return lambda v: v in STD_WORDS[kind] or any(v.startswith(p) and v != p for p in STD_PREFIXES[kind])
 
 
 def unit_with_dropins(root, dirs, name):
@@ -2739,7 +2810,7 @@ def manager_paths(files):
             p = v if field is None else (v.split(":") + [""] * field)[field]
             out.append((key, v, p.lstrip("-")))
     for key in ("StandardInput", "StandardOutput", "StandardError"):
-        v = ini_last(files, "Service", key) or ""
+        v = ini_last(files, "Service", key, std_valid(key)) or ""
         if v.startswith(STD_FILES):
             out.append((key, v, v.split(":", 1)[1]))
     for key, top in MANAGER_DIRS.items():
@@ -2859,14 +2930,17 @@ def keeper_path_violations(name, files):
     """OWN-card-flow decision 6: an agentos-keeper .path unit NAME starts only a KEEPER_UNITS unit and
     watches only at or under a KEEPER_PATHS entry, with no '..' step, so the keeper's own state is all
     that can start it."""
-    unit = ini_last(files, "Path", "Unit") or name[:-len(".path")] + ".service"
+    try:
+        units = ini_all(files, "Path", "Unit")
+        watches = [(k, v) for k in PATH_WATCHES for v in ini_entries(files, "Path", k)]
+    except ValueError as e:
+        return ["%s: %s; the tree check never passes what it cannot read (D-154)" % (name, e)]
+    # config_parse_trigger_unit (#6095, R4): the first value naming another unit wins; a later or an empty
+    # one is ignored.
+    unit = next((v for v in units if "." in v and v != name), name[:-len(".path")] + ".service")
     out = []
     if unit not in KEEPER_UNITS:
         out.append("%s: starts %s, not one of the keeper's units (D-154)" % (name, unit))
-    try:
-        watches = [(k, v) for k in PATH_WATCHES for v in ini_entries(files, "Path", k)]
-    except ValueError as e:
-        return out + ["%s: %s; the tree check never passes what it cannot read (D-154)" % (name, e)]
     if not watches:
         out.append("%s: watches nothing the tree check reads (D-154)" % name)
     for k, v in watches:
@@ -3102,7 +3176,7 @@ def keeper_unit_violations(name, files, root):
     keeper = name in KEEPER_UNITS
     if name.startswith(KEEPER_PREFIX) and not keeper:
         out.append("%s: an agentos-keeper unit not in KEEPER_UNITS; the keeper group is listed in one place (D-154)" % name)
-    slice_ = ini_last(files, "Service", "Slice")
+    slice_ = ini_last(files, "Service", "Slice", lambda v: v.endswith(".slice"))
     if keeper and slice_ != KEEPER_SLICE:
         out.append("%s: Slice is %s; the keeper's units run in %s (D-154)" % (name, slice_, KEEPER_SLICE))
     if not keeper and slice_ == KEEPER_SLICE:
@@ -3153,11 +3227,11 @@ def keeper_unit_violations(name, files, root):
                 out.append("%s: %s=%s%s (D-154)" % (name, key, v, why))
     # #3477: a oneshot is starting until it exits, so RuntimeMaxSec= bounds nothing there (systemd
     # ignores it); its bound is TimeoutStartSec=.
-    if (ini_last(files, "Service", "Type") or "") == "oneshot" and ini_entries(files, "Service", "RuntimeMaxSec"):
+    if (ini_last(files, "Service", "Type", SERVICE_TYPES.__contains__) or "") == "oneshot" and ini_entries(files, "Service", "RuntimeMaxSec"):
         out.append("%s: RuntimeMaxSec= has no effect on a Type=oneshot unit; bound it with TimeoutStartSec= (#3477)"
                    % name)
     # #2981 (Security 3): every command but ExecStart= then runs as "+" does.
-    start_only = (ini_last(files, "Service", "PermissionsStartOnly") or "").lower() in TRUE_WORDS
+    start_only = (ini_last(files, "Service", "PermissionsStartOnly", is_bool) or "").lower() in TRUE_WORDS
     if start_only and name not in FULL_PRIVILEGE_EXEMPT:
         out.append("%s: PermissionsStartOnly=yes runs commands with full privileges, outside its device policy and "
                    "namespace (STO-2c)" % name)
@@ -3169,7 +3243,7 @@ def keeper_unit_violations(name, files, root):
                 out.append("%s: %s=%s runs with full privileges, outside its device policy and namespace (STO-2c)"
                            % (name, key, v.split()[0]))
     allows = [v.split()[0] for v in ini_entries(files, "Service", "DeviceAllow")]
-    policy = ini_last(files, "Service", "DevicePolicy")
+    policy = ini_last(files, "Service", "DevicePolicy", DEVICE_POLICIES.__contains__)
     if name in TPM_UNITS:
         for spec in allows:
             if tpm_spec(spec) and spec != TPM_DEVICE:
@@ -3180,7 +3254,7 @@ def keeper_unit_violations(name, files, root):
         for spec in allows:
             if tpm_spec(spec):
                 out.append("%s: DeviceAllow=%s reaches the TPM; only %s may (#2889)" % (name, spec, ", ".join(TPM_UNITS)))
-        private = (ini_last(files, "Service", "PrivateDevices") or "").lower() in TRUE_WORDS
+        private = (ini_last(files, "Service", "PrivateDevices", is_bool) or "").lower() in TRUE_WORDS
         if name not in NOEXEC_EXEMPT and not private and policy not in ("closed", "strict"):
             out.append("%s: neither PrivateDevices=yes nor DevicePolicy=closed; only %s may reach the TPM (#2889)"
                        % (name, ", ".join(TPM_UNITS)))
@@ -3193,17 +3267,17 @@ def keeper_unit_violations(name, files, root):
             for f, v in ini_all_in(files, section, key):
                 if v not in allowed:
                     out.append("%s: %s=%s in %s; %s; allowed: %s" % (name, key, v, f.rel, why, unlock_allowed(key, allowed)))
-        if (ini_last(files, "Service", "NoNewPrivileges") or "").lower() not in TRUE_WORDS:
+        if (ini_last(files, "Service", "NoNewPrivileges", is_bool) or "").lower() not in TRUE_WORDS:
             out.append("%s: NoNewPrivileges is not yes (#2899)" % name)
         service_limits = ini_keys(files, "Service") & {"StartLimitBurst", "StartLimitIntervalSec", "StartLimitInterval"}
         if service_limits or "StartLimitInterval" in ini_keys(files, "Unit"):
             out.append("%s: a start limit outside [Unit]'s StartLimitBurst= and StartLimitIntervalSec=; the tree "
                        "check does not model it (#2897)" % name)
-        burst = ini_last(files, "Unit", "StartLimitBurst")
+        burst = ini_last(files, "Unit", "StartLimitBurst", bool)
         if burst is None or not burst.isdigit() or not 1 <= int(burst) <= START_LIMIT_MAX:
             out.append("%s: StartLimitBurst is %s; must be 1 to %d, so a crash loop cannot wear the TPM counter (#2897)"
                        % (name, burst, START_LIMIT_MAX))
-        interval = ini_last(files, "Unit", "StartLimitIntervalSec")
+        interval = ini_last(files, "Unit", "StartLimitIntervalSec", bool)
         if interval is None or re.fullmatch(r"0+(\.0*)?\s*[a-z]*", interval):
             out.append("%s: StartLimitIntervalSec is %s; a zero or unset interval does not bound restarts (#2897)"
                        % (name, interval))
@@ -4531,7 +4605,7 @@ def resolved_violations(root):
     conf = main_conf(root, "resolved.conf")
     return [m for f in conf for m in byte_violations(f)] + [
         "50-agentos-uplink.conf: resolved %s is %s; must be no" % (key, v)
-        for key in ("LLMNR", "MulticastDNS") for v in [ini_last(conf, "Resolve", key)] if v != "no"]
+        for key in ("LLMNR", "MulticastDNS") for v in [ini_last(conf, "Resolve", key, resolve_valid)] if v != "no"]
 
 
 # DEVSLOT-image (DEV-1, KRN-2, RES-2, D-189): a device driver is one vendor's protocol code built in a
