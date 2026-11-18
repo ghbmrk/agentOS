@@ -1196,10 +1196,10 @@ def config_lines(data):
     return out
 
 
-def ini_last(files, section, key, valid=None):
+def ini_last(files, section, key):
     """The value systemd ends up with for SECTION.KEY across FILES in order: the last assignment
-    wins, and an empty one resets it. With VALID, the values its parser takes (systemd 257.7): any
-    other, the empty one included, is ignored and the one before it kept (#6095, R4). None if never set."""
+    wins, and an empty one resets it. None if never set. For a key whose parser ignores a value it
+    rejects, see ini_canon."""
     val = None
     for f in files:
         try:
@@ -1208,7 +1208,7 @@ def ini_last(files, section, key, valid=None):
             # A file systemd may read only in part, or not at all: never pass on it.
             return "unreadable %s (%s)" % (f.name, e.strerror if isinstance(e, OSError) else e)
         for s, k, v in lines:
-            if (s, k) == (section, key) and (valid is None or valid(v)):
+            if (s, k) == (section, key):
                 val = v or None
     return val
 
@@ -1318,12 +1318,12 @@ def sysctl_byte_violations(root):
 def dump_violations(root):
     """IMG-nodump: core dumps are discarded, for every process and for the card's service."""
     out = []
-    storage = ini_last(main_conf(root, "coredump.conf"), "Coredump", "Storage", COREDUMP_STORAGES.__contains__)
-    if storage != "none":
-        out.append("50-agentos-nodump.conf: coredump Storage is %s; must be none" % storage)
-    limit = ini_last(main_conf(root, "system.conf"), "Manager", "DefaultLimitCORE", bool)
-    if limit not in ("0", "0:0"):
-        out.append("50-agentos-nodump.conf: DefaultLimitCORE is %s; must be 0" % limit)
+    for conf, sec, key, forms, want in (("coredump.conf", "Coredump", "Storage", COREDUMP_STORAGES, ("none",)),
+                                        ("system.conf", "Manager", "DefaultLimitCORE", LIMIT_FORMS, LIMIT_ZERO)):
+        v = ini_canon_or_why(main_conf(root, conf), sec, key, forms)
+        if v not in want:
+            out.append("50-agentos-nodump.conf: %s%s is %s; must be %s"
+                       % ("coredump " if conf == "coredump.conf" else "", key, v, want[0]))
     out += card_unit_violations(root)
     pattern = sysctl(root, "kernel.core_pattern")
     if pattern != CORE_PATTERN:
@@ -1482,8 +1482,8 @@ def card_unit_violations(root):
             continue
         files = [unit] + conf_files(root, ["%s/%s.d" % (d, n) for d in UNIT_PATHS for n in unit_dropin_names(name)]
                                     + ["%s/service.d" % d for d in UNIT_PATHS])
-        limit = ini_last(files, "Service", "LimitCORE", bool)
-        if limit not in ("0", "0:0"):
+        limit = ini_canon_or_why(files, "Service", "LimitCORE", LIMIT_FORMS)
+        if limit not in LIMIT_ZERO:
             out.append("%s: LimitCORE is %s; must be 0" % (name, limit))
     return out
 
@@ -1581,7 +1581,7 @@ def namespace_mount_violations(name, files):
         for key in NAMESPACE_ROOTS:
             if ini_words(files, "Service", key):
                 out.append("%s: sets %s; only the image's own /usr may execute (UPD-10)" % (name, key))
-        if ini_last(files, "Service", "PrivateTmp", private_tmp_valid) == "disconnected":
+        if ini_canon(files, "Service", "PrivateTmp", YES_NO + ("disconnected",)) == "disconnected":
             out.append("%s: PrivateTmp=disconnected mounts a tmpfs that executes; use PrivateTmp=yes (UPD-10)" % name)
         for key in NAMESPACE_MOUNTS:
             for w in ini_words(files, "Service", key):
@@ -1952,154 +1952,64 @@ EXEC_KEYS = ("ExecCondition", "ExecStartPre", "ExecStart", "ExecStartPost", "Exe
              "ExecStopPost")
 TRUE_WORDS = ("1", "yes", "y", "true", "t", "on")
 FALSE_WORDS = ("0", "no", "n", "false", "f", "off")
-# #6095 (R4): the values a parser takes where systemd ignores any other, the empty one included, and
-# keeps the one before it (ini_last's VALID; read from systemd 257.7's source). Where VALID is bool (any
-# non-empty value), the check refuses every value it does not pass (any non-empty garbage included), so only
-# the empty one needs skipping; a check that refuses only some values gets the parser's own predicate.
+# #6095 (R4): forms a guarded key's every assignment must take (ini_canon), byte for byte. Each is one that
+# systemd 257 parses as written, so no parser is ported: any other form is refused.
+YES_NO = ("yes", "no")
 SERVICE_TYPES = ("simple", "exec", "forking", "oneshot", "dbus", "notify", "notify-reload", "idle")
 DEVICE_POLICIES = ("auto", "closed", "strict")
 COREDUMP_STORAGES = ("none", "external", "journal")
-# The bare words file, append and truncate are left out: systemd may keep the path an earlier value set, so
-# the check keeps that value and its path (Security on #6128: this can only refuse more).
-STD_WORDS = {"StandardInput": ("null", "tty", "tty-force", "tty-fail", "socket", "fd", "data"),
-             "StandardOutput": ("inherit", "null", "tty", "kmsg", "kmsg+console", "journal", "journal+console",
-                                "socket", "fd", "syslog", "syslog+console")}
-STD_PREFIXES = {"StandardInput": ("fd:", "file:"), "StandardOutput": ("fd:", "file:", "append:", "truncate:")}
+LIMIT_ZERO = ("0", "0:0")
+LIMIT_FORMS = LIMIT_ZERO + ("infinity",)
 
 
-# unit_name_is_valid for a plain slice (unit-name.c's VALID_CHARS, at most 255 bytes); manager_load_unit
-# refuses any other name, so config_parse_unit_slice ignores it.
-SLICE_NAME = re.compile(r"[A-Za-z0-9:_.\\-]{1,249}\.slice")
+class Form:
+    """A canonical form given by a regex for the whole value, and how a refusal names it."""
+    def __init__(self, pattern, label):
+        self.regex, self.label = re.compile(pattern), label
+
+    def __contains__(self, v):
+        return self.regex.fullmatch(v) is not None
+
+    def __str__(self):
+        return self.label
 
 
-def is_bool(v):
-    """parse_boolean."""
-    return v.lower() in TRUE_WORDS + FALSE_WORDS
+# A plain absolute path: no specifier, escape, "." or ".." name, or repeated "/", so path_simplify_and_warn
+# takes it as written.
+CANON_PATH = r"(/[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}){1,16}"
+STD_FORMS = {
+    "StandardInput": Form(r"null|tty|socket|file:" + CANON_PATH, "null, tty, socket or file:/a/plain/path"),
+    "StandardOutput": Form(r"inherit|null|tty|kmsg|kmsg\+console|journal|journal\+console|socket|(file|append|truncate):"
+                           + CANON_PATH, "inherit, null, tty, kmsg, journal, socket (+console where it applies) or "
+                           "file:, append: or truncate: and a plain absolute path")}
+STD_FORMS["StandardError"] = STD_FORMS["StandardOutput"]
+SLICE_FORM = Form(r"[A-Za-z0-9_-]{1,64}\.slice", "a name of letters, digits, _ and - with .slice")
+BURST_FORM = Form(r"[1-9][0-9]{0,2}", "a number from 1")
+# No leading zero, so a zero interval is one that starts with "0".
+INTERVAL_FORM = Form(r"infinity|(0|[1-9][0-9]{0,8})(s|min|h)?", "infinity, or a number with no leading zero and s, min or h")
 
 
-# parse_sec (systemd 257.7 time-util.c parse_time with USEC_PER_SEC), ported line for line so a value it
-# rejects is never read as the interval (Security and L3 on #6128). extract_multiplier's table, in its order:
-# the first suffix that matches wins.
-USEC_INFINITY = (1 << 64) - 1
-SEC_UNITS = tuple((u.encode(), n) for u, n in (
-    ("seconds", 10**6), ("second", 10**6), ("sec", 10**6), ("s", 10**6),
-    ("minutes", 60 * 10**6), ("minute", 60 * 10**6), ("min", 60 * 10**6),
-    ("months", 2629800 * 10**6), ("month", 2629800 * 10**6), ("M", 2629800 * 10**6),
-    ("msec", 1000), ("ms", 1000), ("m", 60 * 10**6),
-    ("hours", 3600 * 10**6), ("hour", 3600 * 10**6), ("hr", 3600 * 10**6), ("h", 3600 * 10**6),
-    ("days", 86400 * 10**6), ("day", 86400 * 10**6), ("d", 86400 * 10**6),
-    ("weeks", 604800 * 10**6), ("week", 604800 * 10**6), ("w", 604800 * 10**6),
-    ("years", 31557600 * 10**6), ("year", 31557600 * 10**6), ("y", 31557600 * 10**6),
-    ("usec", 1), ("us", 1), ("μs", 1), ("µs", 1)))
-DIGITS = b"0123456789"
-WS = b" \t\n\r"
+def ini_canon(files, section, key, forms):
+    """#6095: the value systemd ends up with for SECTION.KEY across FILES, for a check that must not rest on how
+    systemd parses it. A parser that rejects a value ignores it and keeps the one before it, so a value read wrong
+    could hide an unsafe earlier one. So every assignment, the empty one included, must be one of FORMS (a tuple of
+    words or a Form), each read by systemd as written; then the last one wins. None if never set. ValueError for any
+    other assignment, naming its file, as journal_violations refuses Storage= (Lens and L3 on #6128)."""
+    val = None
+    for f, v in ini_every_in(files, section, key):
+        if v not in forms:
+            raise ValueError("%s=%s in %s is a form the tree check does not read (use %s)"
+                             % (key, v, f.rel, forms if isinstance(forms, Form) else " or ".join(forms)))
+        val = v
+    return val
 
 
-def parse_sec(v):
-    """parse_time(v, USEC_PER_SEC): the microseconds systemd reads, or None where it fails."""
-    t = v.encode()
-
-    def span(i, chars):
-        while i < len(t) and t[i] in chars:
-            i += 1
-        return i
-
-    p = span(0, WS)
-    if t.startswith(b"infinity", p):
-        return USEC_INFINITY if span(p + 8, WS) == len(t) else None
-    usec, something = 0, False
-    while True:
-        p = span(p, WS)
-        if p == len(t):
-            return usec if something else None
-        if t[p:p + 1] == b"-":
-            return None
-        d = p + 1 if t[p:p + 1] == b"+" else p  # strtoll: an optional sign, then base-10 digits
-        e = span(d, DIGITS)
-        if e == d:
-            e, l = p, 0  # no conversion: strtoll leaves the end at the start
-        else:
-            l = int(t[d:e])
-            if l > (1 << 63) - 1:
-                return None  # ERANGE
-        dot = t[e:e + 1] == b"."
-        if dot:
-            p = span(e + 1, DIGITS)
-        elif e == p:
-            return None
-        else:
-            p = e
-        q = span(p, WS)
-        mult, s_ = 10**6, q
-        for suffix, n in SEC_UNITS:
-            if t.startswith(suffix, q):
-                mult, s_ = n, q + len(suffix)
-                break
-        if s_ == p and s_ != len(t):
-            return None  # "12.34.56"
-        p = s_
-        if l >= USEC_INFINITY // mult:
-            return None
-        k = l * mult
-        if k >= USEC_INFINITY - usec:
-            return None
-        usec += k
-        something = True
-        if dot:
-            m, b = mult // 10, e + 1
-            while b < len(t) and t[b] in DIGITS:
-                k = (t[b] - 48) * m
-                if k >= USEC_INFINITY - usec:
-                    return None
-                usec += k
-                b, m = b + 1, m // 10
-            if b == e + 1:
-                return None  # "3.", "3.sec", "3. 1"
-
-
-def is_sec(v):
-    return parse_sec(v) is not None
-
-
-def fdname_is_valid(n):
-    """fd-util.c: printable ASCII but ':', at most 255 bytes (empty allowed)."""
-    return len(n) <= 255 and all(" " <= c < "\x7f" and c != ":" for c in n)
-
-
-def std_path_valid(path):
-    """path_simplify_and_warn(PATH_CHECK_ABSOLUTE | PATH_CHECK_FATAL) after the specifiers: absolute; then, once
-    path_simplify drops "." and repeated "/", path_is_valid (each name at most 255 bytes, under PATH_MAX) and
-    path_is_normalized (no ".." name). A path with a specifier is kept: manager_paths' caller refuses it."""
-    if "%" in path:
-        return True
-    if not path.startswith("/"):
-        return False
-    names = [n for n in path.split("/") if n not in ("", ".")]
-    simple = "/" + "/".join(names)
-    return (all(len(n.encode()) <= 255 for n in names) and len(simple.encode()) < 4096
-            and ".." not in names)
-
-
-def private_tmp_valid(v):
-    return v in ("no", "connected", "disconnected") or is_bool(v)
-
-
-def resolve_valid(v):
-    return v in ("no", "yes", "resolve") or is_bool(v)
-
-
-def std_valid(key):
-    """config_parse_exec_input/_output's values for KEY (StandardError= as StandardOutput=): a word; "fd:" and a
-    name fdname_is_valid takes (one with a specifier counts as ignored, so the earlier value and any path it set
-    are kept); or a file prefix and a path std_path_valid takes."""
-    kind = "StandardInput" if key == "StandardInput" else "StandardOutput"
-
-    def valid(v):
-        if v.startswith("fd:"):
-            return "%" not in v and fdname_is_valid(v[3:])
-        return v in STD_WORDS[kind] or any(v.startswith(p) and std_path_valid(v[len(p):])
-                                           for p in STD_PREFIXES[kind] if p != "fd:")
-    return valid
+def ini_canon_or_why(files, section, key, forms):
+    """ini_canon's value, or its refusal as the text a message shows in place of the value."""
+    try:
+        return ini_canon(files, section, key, forms)
+    except ValueError as e:
+        return str(e)
 
 
 def unit_with_dropins(root, dirs, name):
@@ -2928,7 +2838,7 @@ def manager_paths(files):
             p = v if field is None else (v.split(":") + [""] * field)[field]
             out.append((key, v, p.lstrip("-")))
     for key in ("StandardInput", "StandardOutput", "StandardError"):
-        v = ini_last(files, "Service", key, std_valid(key)) or ""
+        v = ini_canon(files, "Service", key, STD_FORMS[key]) or ""
         if v.startswith(STD_FILES):
             out.append((key, v, v.split(":", 1)[1]))
     for key, top in MANAGER_DIRS.items():
@@ -3294,7 +3204,7 @@ def keeper_unit_violations(name, files, root):
     keeper = name in KEEPER_UNITS
     if name.startswith(KEEPER_PREFIX) and not keeper:
         out.append("%s: an agentos-keeper unit not in KEEPER_UNITS; the keeper group is listed in one place (D-154)" % name)
-    slice_ = ini_last(files, "Service", "Slice", SLICE_NAME.fullmatch)
+    slice_ = ini_canon(files, "Service", "Slice", SLICE_FORM)
     if keeper and slice_ != KEEPER_SLICE:
         out.append("%s: Slice is %s; the keeper's units run in %s (D-154)" % (name, slice_, KEEPER_SLICE))
     if not keeper and slice_ == KEEPER_SLICE:
@@ -3345,11 +3255,11 @@ def keeper_unit_violations(name, files, root):
                 out.append("%s: %s=%s%s (D-154)" % (name, key, v, why))
     # #3477: a oneshot is starting until it exits, so RuntimeMaxSec= bounds nothing there (systemd
     # ignores it); its bound is TimeoutStartSec=.
-    if (ini_last(files, "Service", "Type", SERVICE_TYPES.__contains__) or "") == "oneshot" and ini_entries(files, "Service", "RuntimeMaxSec"):
+    if (ini_canon(files, "Service", "Type", SERVICE_TYPES) or "") == "oneshot" and ini_entries(files, "Service", "RuntimeMaxSec"):
         out.append("%s: RuntimeMaxSec= has no effect on a Type=oneshot unit; bound it with TimeoutStartSec= (#3477)"
                    % name)
     # #2981 (Security 3): every command but ExecStart= then runs as "+" does.
-    start_only = (ini_last(files, "Service", "PermissionsStartOnly", is_bool) or "").lower() in TRUE_WORDS
+    start_only = ini_canon(files, "Service", "PermissionsStartOnly", YES_NO) == "yes"
     if start_only and name not in FULL_PRIVILEGE_EXEMPT:
         out.append("%s: PermissionsStartOnly=yes runs commands with full privileges, outside its device policy and "
                    "namespace (STO-2c)" % name)
@@ -3361,7 +3271,7 @@ def keeper_unit_violations(name, files, root):
                 out.append("%s: %s=%s runs with full privileges, outside its device policy and namespace (STO-2c)"
                            % (name, key, v.split()[0]))
     allows = [v.split()[0] for v in ini_entries(files, "Service", "DeviceAllow")]
-    policy = ini_last(files, "Service", "DevicePolicy", DEVICE_POLICIES.__contains__)
+    policy = ini_canon(files, "Service", "DevicePolicy", DEVICE_POLICIES)
     if name in TPM_UNITS:
         for spec in allows:
             if tpm_spec(spec) and spec != TPM_DEVICE:
@@ -3372,7 +3282,7 @@ def keeper_unit_violations(name, files, root):
         for spec in allows:
             if tpm_spec(spec):
                 out.append("%s: DeviceAllow=%s reaches the TPM; only %s may (#2889)" % (name, spec, ", ".join(TPM_UNITS)))
-        private = (ini_last(files, "Service", "PrivateDevices", is_bool) or "").lower() in TRUE_WORDS
+        private = ini_canon(files, "Service", "PrivateDevices", YES_NO) == "yes"
         if name not in NOEXEC_EXEMPT and not private and policy not in ("closed", "strict"):
             out.append("%s: neither PrivateDevices=yes nor DevicePolicy=closed; only %s may reach the TPM (#2889)"
                        % (name, ", ".join(TPM_UNITS)))
@@ -3385,18 +3295,18 @@ def keeper_unit_violations(name, files, root):
             for f, v in ini_all_in(files, section, key):
                 if v not in allowed:
                     out.append("%s: %s=%s in %s; %s; allowed: %s" % (name, key, v, f.rel, why, unlock_allowed(key, allowed)))
-        if (ini_last(files, "Service", "NoNewPrivileges", is_bool) or "").lower() not in TRUE_WORDS:
+        if ini_canon(files, "Service", "NoNewPrivileges", YES_NO) != "yes":
             out.append("%s: NoNewPrivileges is not yes (#2899)" % name)
         service_limits = ini_keys(files, "Service") & {"StartLimitBurst", "StartLimitIntervalSec", "StartLimitInterval"}
         if service_limits or "StartLimitInterval" in ini_keys(files, "Unit"):
             out.append("%s: a start limit outside [Unit]'s StartLimitBurst= and StartLimitIntervalSec=; the tree "
                        "check does not model it (#2897)" % name)
-        burst = ini_last(files, "Unit", "StartLimitBurst", bool)
-        if burst is None or not burst.isdigit() or not 1 <= int(burst) <= START_LIMIT_MAX:
+        burst = ini_canon(files, "Unit", "StartLimitBurst", BURST_FORM)
+        if burst is None or int(burst) > START_LIMIT_MAX:
             out.append("%s: StartLimitBurst is %s; must be 1 to %d, so a crash loop cannot wear the TPM counter (#2897)"
                        % (name, burst, START_LIMIT_MAX))
-        interval = ini_last(files, "Unit", "StartLimitIntervalSec", is_sec)
-        if interval is None or parse_sec(interval) == 0:
+        interval = ini_canon(files, "Unit", "StartLimitIntervalSec", INTERVAL_FORM)
+        if interval is None or interval.startswith("0"):
             out.append("%s: StartLimitIntervalSec is %s; a zero or unset interval does not bound restarts (#2897)"
                        % (name, interval))
         for key in EXEC_KEYS:
@@ -4723,7 +4633,8 @@ def resolved_violations(root):
     conf = main_conf(root, "resolved.conf")
     return [m for f in conf for m in byte_violations(f)] + [
         "50-agentos-uplink.conf: resolved %s is %s; must be no" % (key, v)
-        for key in ("LLMNR", "MulticastDNS") for v in [ini_last(conf, "Resolve", key, resolve_valid)] if v != "no"]
+        for key in ("LLMNR", "MulticastDNS") for v in [ini_canon_or_why(conf, "Resolve", key, ("yes", "no", "resolve"))]
+        if v != "no"]
 
 
 # DEVSLOT-image (DEV-1, KRN-2, RES-2, D-189): a device driver is one vendor's protocol code built in a

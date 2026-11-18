@@ -17,7 +17,6 @@ import importlib.machinery
 import importlib.util
 import inspect
 import os
-import random
 import re
 import pathlib
 import socket
@@ -3936,14 +3935,13 @@ class ConfFilesTest(unittest.TestCase):
                 self.assertIn("bad characters in section header", self.coredump(("[Core%sdump]\n" % c).encode()))
         self.assertNotIn("section header", self.coredump(b"[Core dump x]\n"))
 
-    def test_empty_assignment_is_ignored(self):
-        # P4, corrected by #6095 (R4): resolved's config_parse_resolve_support (systemd 257.7) ignores an
-        # empty value and keeps the one before it, so LLMNR= after LLMNR=yes still answers on the LAN, and
-        # after LLMNR=no it does not.
-        write(self.root, "etc/systemd/resolved.conf.d/90-x.conf", "[Resolve]\nLLMNR=yes\nLLMNR=\n")
-        self.assertIn("resolved LLMNR is yes", self.v())
-        write(self.root, "etc/systemd/resolved.conf.d/90-x.conf", "[Resolve]\nLLMNR=no\nLLMNR=\n")
-        self.assertNotIn("LLMNR", self.v())
+    def test_empty_assignment_is_refused(self):
+        # P4, then #6095 (R4): resolved's parser ignores an empty LLMNR= and keeps the one before it, so the
+        # check refuses it (ini_canon) rather than read it as a reset or as ignored.
+        for first in ("yes", "no"):
+            write(self.root, "etc/systemd/resolved.conf.d/90-x.conf", "[Resolve]\nLLMNR=%s\nLLMNR=\n" % first)
+            self.assertIn("LLMNR= in etc/systemd/resolved.conf.d/90-x.conf is a form the tree check does not read",
+                          self.v())
 
     def test_kmod_reads_a_file_in_place_of_modprobe_d(self):
         # P5: kmod's conf_files_list reads a non-directory in its list as a file of its own (named
@@ -7895,22 +7893,14 @@ class EdgeLinkUnitsTest(unittest.TestCase):
             self.assertIn(unit, jobs)
 
 
-# Security on #6128: parse_time's own cases (time-util.c comments and its test-time-util.c), as (value,
-# microseconds or None for rejected), read from systemd 257.7's source.
-PARSE_SEC_CASES = (
-    ("5", 5 * 10**6), ("5s", 5 * 10**6), (" 5 s ", 5 * 10**6), ("+0", 0), ("0", 0), (".5", 500000), ("1.5h", 5400 * 10**6),
-    ("1min 30s", 90 * 10**6), ("1m1s", 61 * 10**6), ("12.34s.56", 12900000), ("12.34 .56", 12900000), ("1 2", 3 * 10**6),
-    ("1M", 2629800 * 10**6), ("1ms", 1000), ("1\u00b5s", 1), ("1\u03bcs", 1), ("infinity", (1 << 64) - 1),
-    ("5.", None), ("3.sec", None), ("5. 1", None), ("12.34.56", None), ("0.-0", None), ("3.+1", None), ("3.hoge", None),
-    ("-0", None), ("+-1", None), ("5x", None), ("x", None), ("", None), (" ", None), ("infinity x", None),
-    ("9223372036854775807", None), ("18446744073709551", None))
-
-
 class IgnoredValueTest(unittest.TestCase):
-    """#6095 (R4, Security on #6086): where systemd's parser ignores an empty value and keeps the one before
-    it (systemd 257.7: config_parse_bool, _private_tmp, _service_type, _device_policy, _exec_output and
-    _exec_input, _unit_slice, _trigger_unit, _rlimit, _unsigned, _sec, the coredump and resolved enums), no
-    check reads it as a reset. One case per caller: a value, then an empty one in a later file."""
+    """#6095 (R4; Lens, L3 and Security on #6128): systemd ignores a value its parser rejects and keeps the one
+    before it, so for the keys whose last value a check reads (ini_canon) every assignment must be one of a few
+    forms systemd reads as written. Any other, the empty one included, is refused, wherever it is in the chain:
+    no parser is ported, so no gap in a port can hide an earlier unsafe value."""
+
+    UNIT = "agentos-x.service"
+    KERNEL = "agentos-keeper-kernel.service"
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -7926,48 +7916,77 @@ class IgnoredValueTest(unittest.TestCase):
             out.append(check.Conf(str(self.root), rel))
         return out
 
-    def test_a_kept_value_that_opens_a_door_is_still_refused(self):
-        unit = "agentos-x.service"
-        for key, val, run, want in (
-                ("PrivateTmp", "disconnected", lambda f: check.namespace_mount_violations(unit, f),
-                 "PrivateTmp=disconnected mounts a tmpfs that executes"),
-                ("PermissionsStartOnly", "yes", lambda f: check.keeper_unit_violations(unit, f, str(self.root)),
-                 "PermissionsStartOnly=yes runs commands with full privileges"),
-                ("Slice", "agentos-keeper.slice", lambda f: check.keeper_unit_violations(unit, f, str(self.root)),
-                 "in agentos-keeper.slice but not one of the keeper's units"),
-                ("Type", "oneshot", lambda f: check.keeper_unit_violations(
-                    unit, f + self.files("[Service]\nRuntimeMaxSec=9\n"), str(self.root)),
-                 "RuntimeMaxSec= has no effect on a Type=oneshot unit")):
-            # L3 on #6128: a non-empty value the parser rejects is ignored the same way.
-            for later in ("", "garbage"):
-                with self.subTest(key=key, later=later):
-                    got = " | ".join(run(self.files("[Service]\n%s=%s\n" % (key, val), "[Service]\n%s=%s\n" % (key, later))))
-                    self.assertIn(want, got)
+    def keeper(self, name):
+        return lambda f: check.keeper_unit_violations(name, f, str(self.root))
+
+    # (key, section, a value the check reads, the run, near misses the parser may read otherwise or ignore)
+    def cases(self):
+        ns = lambda f: check.namespace_mount_violations(self.UNIT, f)
+        paths = lambda f: check.manager_paths(f)
+        bools = ("", "garbage", "Yes", "true", "1", "on", "\fyes")
+        return (
+            ("PrivateTmp", "Service", "disconnected", ns, bools + ("Disconnected", "connected")),
+            ("PermissionsStartOnly", "Service", "yes", self.keeper(self.UNIT), bools),
+            ("NoNewPrivileges", "Service", "yes", self.keeper(self.KERNEL), bools),
+            ("PrivateDevices", "Service", "yes", self.keeper(self.UNIT), bools),
+            ("DevicePolicy", "Service", "closed", self.keeper(self.UNIT), ("", "garbage", "Closed")),
+            ("Type", "Service", "oneshot", self.keeper(self.UNIT), ("", "garbage", "Oneshot")),
+            ("Slice", "Service", "agentos-keeper.slice", self.keeper(self.UNIT),
+             ("", "a b.slice", "x/y.slice", ".slice", "%p.slice", "a\\x2db.slice", "a.b.slice")),
+            ("StartLimitBurst", "Unit", "3", self.keeper(self.KERNEL), ("", "garbage", "+3", "03", "\f3", "3x")),
+            ("StartLimitIntervalSec", "Unit", "0", self.keeper(self.KERNEL),
+             ("", "garbage", "+0", "\f0", "\v0s", "0 \f0", "0 s", "00", "0.0", "5.", "3.sec", "12.34.56", "1min 30s",
+              "60sec", "1x")),
+            ("StandardOutput", "Service", "file:/var/lib/x", paths,
+             ("", "garbage", "file:", "file:relative", "file://x", "file:/a/../b", "file:/a/./b", "file:%S/x",
+              "fd:a:b", "fd:x", "syslog", "journal+Console")),
+            ("StandardInput", "Service", "file:/var/lib/x", paths, ("", "fd:x", "data", "tty-force", "file:/x/")),
+            ("StandardError", "Service", "file:/var/lib/x", paths, ("", "fd:a:b")))
+
+    def test_a_form_the_check_does_not_read_is_refused_wherever_it_is(self):
+        for key, sec, val, run, misses in self.cases():
+            for miss in misses:
+                for order in ((val, miss), (miss, val)):
+                    with self.subTest(key=key, order=order):
+                        f = self.files(*("[%s]\n%s=%s\n" % (sec, key, v) for v in order))
+                        try:
+                            got = " | ".join(map(str, run(f)))
+                        except ValueError as e:
+                            got = str(e)
+                        self.assertIn("%s=%s in %s is a form the tree check does not read" % (
+                            key, miss, f[order.index(miss)].rel), got)
+
+    def test_the_last_canonical_value_is_read(self):
+        # Each value is one systemd reads as written, so the last one wins, unsafe or safe.
+        refused = {"PrivateTmp": "PrivateTmp=disconnected mounts a tmpfs that executes",
+                   "PermissionsStartOnly": "PermissionsStartOnly=yes runs commands with full privileges",
+                   "Slice": "in agentos-keeper.slice but not one of the keeper's units"}
+        for key, safe in (("PrivateTmp", "yes"), ("PermissionsStartOnly", "no"), ("Slice", "agentos.slice")):
+            run = (lambda f: check.namespace_mount_violations(self.UNIT, f)) if key == "PrivateTmp" else self.keeper(self.UNIT)
+            unsafe = dict((k, v) for k, _, v, _, _ in self.cases())[key]
+            for order, bad in (((safe, unsafe), True), ((unsafe, safe), False)):
+                with self.subTest(key=key, order=order):
+                    got = " | ".join(run(self.files(*("[Service]\n%s=%s\n" % (key, v) for v in order))))
+                    self.assertEqual(refused[key] in got, bad, got)
+        got = " | ".join(self.keeper(self.UNIT)(self.files("[Service]\nType=oneshot\nRuntimeMaxSec=9\n")))
+        self.assertIn("RuntimeMaxSec= has no effect on a Type=oneshot unit", got)
+        for later, zero in (("0", True), ("0s", True), ("0min", True), ("60", False), ("1min", False), ("infinity", False)):
+            with self.subTest(interval=later):
+                got = " | ".join(self.keeper(self.KERNEL)(self.files(
+                    "[Unit]\nStartLimitIntervalSec=60\n", "[Unit]\nStartLimitIntervalSec=%s\n" % later)))
+                self.assertEqual("StartLimitIntervalSec is %s; a zero or unset interval" % later in got, zero, got)
+        for burst, bad in (("5", False), ("6", True), ("999", True)):
+            with self.subTest(burst=burst):
+                got = " | ".join(self.keeper(self.KERNEL)(self.files("[Unit]\nStartLimitBurst=%s\n" % burst)))
+                self.assertEqual("StartLimitBurst is %s; must be 1 to 5" % burst in got, bad, got)
         for key in ("StandardInput", "StandardOutput", "StandardError"):
-            for later in ("", "garbage", "file:", "file:relative", "fd:a:b", "fd:" + "x" * 300):
-                with self.subTest(key=key, later=later):
-                    paths = check.manager_paths(self.files("[Service]\n%s=file:/var/lib/x\n" % key,
-                                                           "[Service]\n%s=%s\n" % (key, later)))
-                    self.assertIn((key, "file:/var/lib/x", "/var/lib/x"), paths)
-        # Security on #6128: a slice name systemd cannot load is ignored, so the keeper slice stays.
-        for later in ("a b.slice", "x/y.slice", ".slice"):
-            with self.subTest(slice=later):
-                got = " | ".join(check.keeper_unit_violations(unit, self.files(
-                    "[Service]\nSlice=agentos-keeper.slice\n", "[Service]\nSlice=%s\n" % later), str(self.root)))
-                self.assertIn("in agentos-keeper.slice but not one of the keeper's units", got)
-        # A zero interval does not bound restarts; a later value parse_sec rejects keeps it.
-        for later in ("", "garbage", "1x2y", "abc", "1x", "5.", "3.sec", "5. 1", "12.34.56"):
-            with self.subTest(later=later):
-                got = " | ".join(check.keeper_unit_violations("agentos-keeper-kernel.service", self.files(
-                    "[Unit]\nStartLimitIntervalSec=0\n", "[Unit]\nStartLimitIntervalSec=%s\n" % later), str(self.root)))
-                self.assertIn("StartLimitIntervalSec is 0; a zero or unset interval does not bound restarts", got)
-        # L3 on #6128: the check reads the parsed value, so "+0" is the zero it is.
-        for later in ("+0", "0s", " 0 min", "0.0"):
-            with self.subTest(zero=later):
-                got = " | ".join(check.keeper_unit_violations("agentos-keeper-kernel.service", self.files(
-                    "[Unit]\nStartLimitIntervalSec=60\n", "[Unit]\nStartLimitIntervalSec=%s\n" % later), str(self.root)))
-                self.assertIn("StartLimitIntervalSec is %s; a zero or unset interval" % later.strip(), got)
-        # A path unit starts the first unit it names; a later Unit=, empty or not, is ignored.
+            with self.subTest(key=key):
+                paths = check.manager_paths(self.files("[Service]\n%s=null\n" % key,
+                                                       "[Service]\n%s=file:/var/lib/x\n" % key))
+                self.assertIn((key, "file:/var/lib/x", "/var/lib/x"), paths)
+
+    def test_a_path_unit_starts_the_first_unit_it_names(self):
+        # config_parse_trigger_unit: a later Unit=, empty or not, is ignored.
         for later in ("", "agentos-keeper-enroll.service"):
             with self.subTest(later=later):
                 got = check.keeper_path_violations("agentos-keeper-enroll.path", self.files(
@@ -7975,100 +7994,32 @@ class IgnoredValueTest(unittest.TestCase):
                 self.assertEqual(got, ["agentos-keeper-enroll.path: starts agentos-x.service, not one of the keeper's "
                                        "units (D-154)"])
 
-    def test_parse_sec_is_systemds(self):
-        for v, want in PARSE_SEC_CASES:
-            with self.subTest(v=v):
-                self.assertEqual(check.parse_sec(v), want)
-
-    @unittest.skipUnless(shutil.which("systemd-analyze"), "differential against the host's systemd-analyze timespan")
-    def test_parse_sec_matches_systemd_analyze(self):
-        # Differential: random strings over the characters parse_time reads, against systemd's own parse_time
-        # (systemd-analyze timespan; the host's systemd, whose parse_time 257.7 keeps). Its value or failure.
-        rnd = random.Random(6128)
-        alpha = list("0123456789.+- \tsmhdwyMu\u00b5\u03bcinftx")
-        corpus = [v for v, _ in PARSE_SEC_CASES] + ["".join(rnd.choice(alpha) for _ in range(rnd.randint(1, 9)))
-                                                     for _ in range(1500)]
-        for v in corpus:
-            p = subprocess.run(["systemd-analyze", "timespan", "--", v], capture_output=True, text=True)
-            got = check.parse_sec(v)
-            with self.subTest(v=v):
-                if p.returncode:
-                    self.assertIsNone(got)
-                elif "infinity" in p.stdout.split("\u03bcs:", 1)[-1].split("\n", 1)[0]:
-                    self.assertEqual(got, (1 << 64) - 1)
-                else:
-                    self.assertEqual(got, int(re.search(r"\u03bcs: (\d+)", p.stdout).group(1)))
-
-    def test_each_predicate_takes_what_its_parser_takes(self):
-        # Security on #6128 (sweep): each VALID against its parser's table in systemd 257.7, over the table's words,
-        # their other spellings and near misses. A value the parser rejects is never taken.
-        def near(words):
-            out = set(words) | {"", " ", "x", "0x", "-1", "yess"}
-            for w in words:
-                out |= {w.upper(), w.capitalize(), w + "x", w[:-1], w + ":"}
-            return out
-        bools = ("1", "yes", "y", "true", "t", "on", "0", "no", "n", "false", "f", "off")
-        for name, valid, takes in (
-                ("parse_boolean", check.is_bool, lambda v: v.lower() in bools),
-                ("private_tmp", check.private_tmp_valid,
-                 lambda v: v in ("no", "connected", "disconnected") or v.lower() in bools),
-                ("resolve_support", check.resolve_valid, lambda v: v in ("no", "yes", "resolve") or v.lower() in bools),
-                ("coredump_storage", check.COREDUMP_STORAGES.__contains__, ("none", "external", "journal").__contains__),
-                ("service_type", check.SERVICE_TYPES.__contains__,
-                 ("simple", "forking", "oneshot", "dbus", "notify", "notify-reload", "idle", "exec").__contains__),
-                ("cgroup_device_policy", check.DEVICE_POLICIES.__contains__, ("auto", "closed", "strict").__contains__)):
-            for v in near(bools + ("no", "connected", "disconnected", "resolve", "none", "external", "journal", "simple",
-                                   "forking", "oneshot", "dbus", "notify", "notify-reload", "idle", "exec", "auto",
-                                   "closed", "strict")):
-                with self.subTest(parser=name, v=v):
-                    self.assertEqual(bool(valid(v)), takes(v))
-        # exec_output/_input: fdname_is_valid for fd:, an absolute path that is valid and normalized once simplified.
-        out = check.std_valid("StandardOutput")
-        for v, want in (("fd:", True), ("fd:x", True), ("fd:a:b", False), ("fd:" + "x" * 255, True),
-                        ("fd:" + "x" * 256, False), ("fd:\x7f", False), ("fd:\x01", False), ("fd:%n", False),
-                        ("file:/var/lib/x", True), ("file://var//lib/./x", True), ("file:relative", False),
-                        ("file:", False), ("file:/a/../b", False), ("file:/" + "x" * 256, False),
-                        ("append:/x", True), ("truncate:/x", True), ("file:%S/x", True),
-                        ("journal", True), ("syslog", True), ("syslog+console", True), ("tty-force", False),
-                        ("file", False), ("Journal", False)):
-            with self.subTest(v=v):
-                self.assertEqual(out(v), want)
-        self.assertTrue(check.std_valid("StandardInput")("tty-force"))
-        self.assertFalse(check.std_valid("StandardInput")("journal"))
-        for v, want in (("agentos-keeper.slice", True), ("a b.slice", False), ("x/y.slice", False), (".slice", False),
-                        ("a.service", False), ("x" * 249 + ".slice", True), ("x" * 250 + ".slice", False)):
-            with self.subTest(slice=v):
-                self.assertEqual(bool(check.SLICE_NAME.fullmatch(v)), want)
-
-    def test_a_kept_safe_value_still_passes(self):
-        # The safe value stays, so these pass rather than being refused as unset.
-        tpm = "neither PrivateDevices=yes nor DevicePolicy=closed"
-        for key, val in (("DevicePolicy", "closed"), ("PrivateDevices", "yes")):
-            with self.subTest(key=key):
-                got = check.keeper_unit_violations("agentos-x.service", self.files(
-                    "[Service]\n%s=%s\n" % (key, val), "[Service]\n%s=\n" % key), str(self.root))
-                self.assertFalse([v for v in got if tpm in v], got)
-        kernel = "agentos-keeper-kernel.service"
-        for key, sec, val, want in (("NoNewPrivileges", "Service", "yes", "NoNewPrivileges is not yes"),
-                                    ("StartLimitBurst", "Unit", "3", "StartLimitBurst is"),
-                                    ("StartLimitIntervalSec", "Unit", "60", "StartLimitIntervalSec is")):
-            with self.subTest(key=key):
-                got = check.keeper_unit_violations(kernel, self.files("[%s]\n%s=%s\n" % (sec, key, val),
-                                                                      "[%s]\n%s=\n" % (sec, key)), str(self.root))
-                self.assertFalse([v for v in got if want in v], got)
+    def test_the_main_configs_take_only_their_forms(self):
         nodump(self.root)
         write(self.root, "etc/machine-id", "uninitialized\n")
-        for rel, text, want in (("etc/systemd/coredump.conf.d/zz.conf", "[Coredump]\nStorage=\n", "coredump Storage"),
-                                ("etc/systemd/system.conf.d/zz.conf", "[Manager]\nDefaultLimitCORE=\n", "DefaultLimitCORE"),
-                                ("etc/systemd/system/agentosd.service.d/zz.conf", "[Service]\nLimitCORE=\n", "LimitCORE is")):
-            with self.subTest(rel=rel):
+        self.assertEqual(check.dump_violations(self.root), [])
+        for rel, text, want in (
+                ("etc/systemd/coredump.conf.d/zz.conf", "[Coredump]\nStorage=\n",
+                 "50-agentos-nodump.conf: coredump Storage is Storage= in etc/systemd/coredump.conf.d/zz.conf is a "
+                 "form the tree check does not read (use none or external or journal); must be none"),
+                ("etc/systemd/system.conf.d/zz.conf", "[Manager]\nDefaultLimitCORE=0:1\n",
+                 "50-agentos-nodump.conf: DefaultLimitCORE is DefaultLimitCORE=0:1 in"),
+                ("etc/systemd/system.conf.d/zz.conf", "[Manager]\nDefaultLimitCORE=infinity\n",
+                 "50-agentos-nodump.conf: DefaultLimitCORE is infinity; must be 0"),
+                ("etc/systemd/system/agentosd.service.d/zz.conf", "[Service]\nLimitCORE=\n",
+                 "agentosd.service: LimitCORE is LimitCORE= in")):
+            with self.subTest(rel=rel, text=text):
                 write(self.root, rel, text)
-                self.assertFalse([v for v in check.dump_violations(self.root) if want in v])
+                self.assertIn(want, " | ".join(check.dump_violations(self.root)))
                 (self.root / rel).unlink()
         write(self.root, "usr/lib/systemd/resolved.conf.d/40-a.conf", "[Resolve]\nLLMNR=no\nMulticastDNS=no\n")
-        write(self.root, "etc/systemd/resolved.conf.d/zz.conf", "[Resolve]\nLLMNR=\nMulticastDNS=\n")
         self.assertEqual(check.resolved_violations(self.root), [])
-
+        for text in ("[Resolve]\nLLMNR=\n", "[Resolve]\nLLMNR=false\n", "[Resolve]\nLLMNR=No\n"):
+            with self.subTest(text=text):
+                write(self.root, "etc/systemd/resolved.conf.d/zz.conf", text)
+                got = " | ".join(check.resolved_violations(self.root))
+                self.assertIn("resolved LLMNR is LLMNR=%s in etc/systemd/resolved.conf.d/zz.conf is a form the tree "
+                              "check does not read (use yes or no or resolve); must be no" % text.split("=")[1].strip(), got)
 
 if __name__ == "__main__":
     unittest.main()
