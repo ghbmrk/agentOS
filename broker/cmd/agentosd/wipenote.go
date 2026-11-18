@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"slices"
 )
 
 // wipeFailed holds the files an orderly shutdown leaves when it ends with
@@ -24,11 +25,12 @@ const wipeFailedLine = "Shutdown: my last one could not finish erasing my memory
 // unknown result is told, never hidden.
 func wipeNote(paths []string) func() string {
 	return func() string {
-		for _, p := range paths {
-			if _, err := os.Lstat(p); !errors.Is(err, fs.ErrNotExist) {
-				return wipeFailedLine
-			}
-		}
-		return ""
+		return lineIf(slices.ContainsFunc(paths, recorded), wipeFailedLine)
 	}
+}
+
+// recorded is whether path is there or cannot be checked.
+func recorded(path string) bool {
+	_, err := os.Lstat(path)
+	return !errors.Is(err, fs.ErrNotExist)
 }
