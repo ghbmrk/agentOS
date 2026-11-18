@@ -6,7 +6,8 @@ package privfile
 // process makes by path follows any link on that path, so a guest, clerk or
 // other uid that can plant one in a directory on it redirects the write,
 // removal or read (#3282, #3382, #3624). The root side is derived, not
-// listed: every binary a shipped .service or .socket unit (#4330) starts
+// listed: every binary a shipped .service or .socket unit (#4330; one under
+// broker/ that image/build.sh installs counts too, #4636) starts
 // with no User= or DynamicUser= (or on an Exec line with a + or ! prefix),
 // each Exec program a plain absolute path, read across continued lines,
 // sections, quotes and ;, with no substitution in what a wrapper runs
@@ -59,7 +60,9 @@ package privfile
 // as does what its EnvironmentFile= holds (#4699), a mount's or swap's exec
 // settings and a manager's DefaultEnvironment= (#4718);
 // rootOwned means in rootTrees, so a root unit's WorkingDirectory=
-// /var/lib/agentos is refused. builtUnits holds the units of the image's
+// /var/lib/agentos is refused. What the manager opens as root for any unit,
+// a User= one too (managerOpens: a standard stream's file, an env file, a
+// credential, a terminal), is held the same way (#4641). builtUnits holds the units of the image's
 // built root file system to the same rules, each with the files its own
 // systemd applies (image/unit_rules.py), a packaged unit's User= and
 // drop-ins and generated units included (#4677). The initrd's and the
@@ -464,6 +467,37 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 			}
 		})
 	}
+	// #4636: a unit kept beside its command under broker/, which build.sh
+	// installs (agentos-localui.service's root agentos-port1 step), counts
+	// as an image/ unit does; one in testdata or node_modules ships nowhere.
+	t.Run("a + line in a unit under broker/", func(t *testing.T) {
+		files := clone(files)
+		files["broker/cmd/agentos-side/agentos-side.service"] = "[Service]\nUser=agentos-side\nExecStartPre=+/usr/lib/agentos/agentos-side -x\nExecStart=/bin/true\n"
+		if bins := set(t, files); len(bins) != 1 || bins[0] != "./cmd/agentos-side" {
+			t.Fatalf("got %q, want ./cmd/agentos-side", bins)
+		}
+		if problems := lintFiles(t, files, ""); len(problems) != 1 || !strings.Contains(problems[0], "broker/side/side.go") {
+			t.Fatalf("the broker unit's root step's linked package: got %q, want its os.Remove refused", problems)
+		}
+	})
+	for _, dir := range []string{"testdata", "node_modules"} {
+		t.Run("a root unit under broker/'s "+dir, func(t *testing.T) {
+			files := clone(files)
+			files["broker/cmd/agentos-side/"+dir+"/agentos-side.service"] = "[Service]\nExecStart=/usr/lib/agentos/agentos-side\n"
+			if bins := set(t, files); len(bins) != 0 {
+				t.Fatalf("got %q, want none", bins)
+			}
+		})
+	}
+	t.Run("refuses a linked unit under broker/", func(t *testing.T) {
+		root := fakeRepo(t, clone(files))
+		if err := os.Symlink("main.go", filepath.Join(root, "broker/cmd/agentos-side/agentos-side.service")); err != nil {
+			t.Fatal(err)
+		}
+		if bins, err := rootBinaries(root); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("got %q, %v, want the link refused", bins, err)
+		}
+	})
 	// #4494 L3 2: ExecPaths= and ExecSearchPath= are paths, not commands.
 	t.Run("a root unit whose paths name a binary it does not run", func(t *testing.T) {
 		files := clone(files)
@@ -2404,10 +2438,10 @@ func rootPathSetting(k, v string) error {
 			continue
 		}
 		if k == "TTYPath" && strings.HasPrefix(p, "/dev/") {
-			return fmt.Errorf("path %q; of /dev, a root unit's terminal is only %s", p, consoleTTYs)
+			return fmt.Errorf("path %q; of /dev, a terminal the manager opens is only %s", p, consoleTTYs)
 		}
 		if !rootOwned(p) {
-			return fmt.Errorf("path %q; a unit with a root command reads, runs and searches only absolute paths, with no .., in the trees root owns (rootTrees)", p)
+			return fmt.Errorf("path %q; root reads, runs, searches and opens for a unit only absolute paths, with no .., in the trees root owns (rootTrees)", p)
 		}
 	}
 	return nil
@@ -2665,9 +2699,29 @@ func unitGrants(root string, settings []envLine, asUser bool) ([]grant, error) {
 // any other ends a token (a quote, =, :, ;, $, a parenthesis or blank).
 var nameToken = regexp.MustCompile(`[A-Za-z0-9_./@+-]+`)
 
+// brokerUnits adds to units each unit file under broker/ outside testdata
+// and node_modules. A link there is refused: build.sh installs the file it
+// names, which the lint would not read as that unit.
+func brokerUnits(root string, units map[string]string) error {
+	return filepath.WalkDir(filepath.Join(root, "broker"), func(p string, d os.DirEntry, err error) error {
+		switch {
+		case err != nil:
+			return err
+		case d.IsDir() && (d.Name() == "testdata" || d.Name() == "node_modules"):
+			return filepath.SkipDir
+		case d.IsDir() || !unitTypes[filepath.Ext(p)]:
+			return nil
+		case !d.Type().IsRegular():
+			return fmt.Errorf("%s: a unit under broker/ is not a regular file; ship the file itself", relTo(root, p))
+		}
+		units[p] = d.Name()
+		return nil
+	})
+}
+
 // rootBinaries returns the broker packages (as ./path, relative to broker/)
-// of the binaries a unit under image/ starts as root or a runKinds file
-// names.
+// of the binaries a unit under image/ or broker/ starts as root or a runKinds
+// file names.
 func rootBinaries(root string) ([]string, error) {
 	units := map[string]string{}     // unit file path -> name
 	dropins := map[string][]string{} // drop-in directory name -> its .conf paths
@@ -2710,6 +2764,12 @@ func rootBinaries(root string) ([]string, error) {
 		return nil
 	})
 	if err != nil {
+		return nil, err
+	}
+	// A unit kept beside its command under broker/, which image/build.sh
+	// installs (agentos-localui.service and its root agentos-port1 step),
+	// starts its binaries as an image/ unit does (#4636).
+	if err := brokerUnits(root, units); err != nil {
 		return nil, err
 	}
 	pkgs, err := binaryPackages(root)
@@ -3142,12 +3202,33 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 		}
 	}
 	if !rootCmd && !alone {
+		// KRN-2-std-files (#4641): whatever the unit's User=, the manager
+		// opens these as root before the command drops to it, following
+		// a link, so they are held as a root unit's are.
+		for _, l := range append(settings, env...) {
+			if managerOpens[l.key] {
+				if err := rootPathSetting(l.key, l.value); err != nil {
+					rel, _ := filepath.Rel(c.root, l.file)
+					errs = append(errs, fmt.Errorf("%s: %s=%s: the manager opens this path as root whatever the unit's User=: %v", filepath.ToSlash(rel), l.key, l.value, err))
+				}
+			}
+		}
 		return errors.Join(errs...)
 	}
 	for _, l := range append(settings, env...) {
 		errs = append(errs, c.rootSetting(l))
 	}
 	return errors.Join(errs...)
+}
+
+// managerOpens are the settings naming a file the manager opens for a
+// unit's commands as root, before they drop to its User= (StandardInput=,
+// StandardOutput= and StandardError= by file:, append: or truncate:, an env
+// file, a credential, a terminal): rootPathSetting holds them on every unit
+// (KRN-2-std-files, #4641). OpenFile= is #4641's follow-up.
+var managerOpens = map[string]bool{
+	"StandardInput": true, "StandardOutput": true, "StandardError": true, "EnvironmentFile": true,
+	"LoadCredential": true, "LoadCredentialEncrypted": true, "TTYPath": true,
 }
 
 // managerPaths are the [Service] settings naming a file PID 1 itself
@@ -3261,6 +3342,26 @@ func endpointsHeld(endpoints, grants []grant) error {
 // in the repository, never through the runner's tree.
 var linkTarget = regexp.MustCompile(`^(\.\./)?[^/]+$`)
 
+// buildTarget reports whether t is the wider form a build-input link
+// (outside every overlay) may also have: climbs, then names, none of them
+// . or .., such as image/enforcer/mkosi/mkosi.configure's
+// ../../debian-archive-keyring.sh. It is never in the image, and its parents
+// and the names below are directories the walk reads, any link among them
+// refused, so the lexical resolution is the runner's; linkWhy then holds the
+// result under image/ outside every overlay.
+func buildTarget(t string) bool {
+	rest := t
+	for strings.HasPrefix(rest, "../") {
+		rest = rest[3:]
+	}
+	for _, c := range strings.Split(rest, "/") {
+		if c == "" || c == "." || c == ".." {
+			return false
+		}
+	}
+	return !strings.HasPrefix(t, "/")
+}
+
 // linkTypes are the unit types an overlay link may name: unitTypes, whose
 // every file the scan reads, and the types it reads none of, which name a
 // unit or a path but run nothing (#6022 item 1). A .path's MakeDirectory=
@@ -3295,21 +3396,21 @@ func templateOf(name string) string {
 // a directory (#6003 L3 round 3, option one).
 //
 // Outside every overlay a link is a build input: its target has
-// linkTarget's form, is a regular file, and lies under image/ outside
-// every overlay. Neither kind may name a directory, another link or no
+// linkTarget's or buildTarget's form, is a regular file, and lies under
+// image/ outside every overlay. Neither kind may name a directory, another link or no
 // file, so the result never depends on the runner's tree.
 func linkWhy(root, p string) string {
-	t, err := os.Readlink(p)
-	if err != nil || !linkTarget.MatchString(t) || t == ".." || t == "." || path.Base(t) == ".." || path.Base(t) == "." {
-		return "a link whose target is not a file beside it or beside its directory (an absolute, climbing or nested target resolves differently on the runner and in the image)"
-	}
 	from, err := filepath.Rel(root, p)
 	if err != nil {
 		return "a link the scan cannot place"
 	}
 	from = filepath.ToSlash(from)
-	to := path.Join(path.Dir(from), t)
 	r := overlayRoot(from)
+	t, err := os.Readlink(p)
+	if err != nil || !linkTarget.MatchString(t) && (r != "" || !buildTarget(t)) || t == ".." || t == "." || path.Base(t) == ".." || path.Base(t) == "." {
+		return "a link whose target is not a file beside it or beside its directory (an absolute, climbing or nested target resolves differently on the runner and in the image)"
+	}
+	to := path.Join(path.Dir(from), t)
 	name := path.Base(from)
 	tmpl := templateOf(name)
 	switch {

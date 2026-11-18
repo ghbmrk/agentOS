@@ -76,10 +76,24 @@ func TestRootSideLintReach(t *testing.T) {
 		"a relative PID file":           {"image/mkosi/agentos-p.service", "[Service]\nUser=agentos-p\nExecStart=/bin/true\nPIDFile=agentos-x/pid\n", `PIDFile=agentos-x/pid`},
 		"USB descriptors":               {"image/mkosi/agentos-p.service", "[Service]\nUser=agentos-p\nExecStart=/bin/true\nUSBFunctionDescriptors=/var/lib/agentos-x/d\n", `USBFunctionDescriptors=/var/lib/agentos-x/d`},
 		"USB strings":                   {"image/mkosi/agentos-p.service", "[Service]\nUser=agentos-p\nExecStart=/bin/true\nUSBFunctionStrings=/tmp/s\n", `USBFunctionStrings=/tmp/s`},
+		// KRN-2-std-files (#4641): a file the manager opens for a unit,
+		// as root before it drops to User=, is held on every unit, its
+		// drop-ins too.
+		"an appended output on a user unit": {"image/mkosi/agentos-p.service", "[Service]\nUser=agentos-p\nExecStart=/bin/true\nStandardOutput=append:/var/tmp/l\n", `StandardOutput=append:/var/tmp/l: the manager opens this path as root whatever the unit's User=`},
+		"an appended output in a drop-in":   {"image/mkosi/agentos-x.service.d/z.conf", "[Service]\nStandardOutput=append:/var/tmp/l\n", `path "/var/tmp/l"`},
+		"a user unit's error file in /run":  {"image/mkosi/agentos-p.service", "[Service]\nUser=agentos-p\nExecStart=/bin/true\nStandardError=file:/run/agentos-x/e\n", `path "/run/agentos-x/e"`},
+		"a user unit's truncated error":     {"image/mkosi/agentos-p.service", "[Service]\nUser=agentos-p\nExecStart=/bin/true\nStandardError=truncate:/dev/shm/e\n", `path "/dev/shm/e"`},
+		"a user unit's input file":          {"image/mkosi/agentos-p.service", "[Service]\nUser=agentos-p\nExecStart=/bin/true\nStandardInput=file:/tmp/i\n", `path "/tmp/i"`},
+		"a dynamic user's output":           {"image/mkosi/agentos-p.service", "[Service]\nDynamicUser=yes\nExecStart=/bin/true\nStandardOutput=file:/var/tmp/o\n", `path "/var/tmp/o"`},
+		"a user unit's env file":            {"image/mkosi/agentos-p.service", "[Service]\nUser=agentos-p\nExecStart=/bin/true\nEnvironmentFile=-/var/lib/agentos-x/e.env\n", `path "/var/lib/agentos-x/e.env"`},
+		"a user unit's credential":          {"image/mkosi/agentos-p.service", "[Service]\nUser=agentos-p\nExecStart=/bin/true\nLoadCredential=c:/tmp/c\n", `path "/tmp/c"`},
+		"a user unit's searched credential": {"image/mkosi/agentos-p.service", "[Service]\nUser=agentos-p\nExecStart=/bin/true\nLoadCredentialEncrypted=c\n", `LoadCredentialEncrypted=c: the manager opens`},
+		"a user unit's pseudo terminal":     {"image/mkosi/agentos-p.service", "[Service]\nUser=agentos-p\nExecStart=/bin/true\nTTYPath=/dev/pts/0\n", `path "/dev/pts/0"; of /dev, a terminal the manager opens`},
+		"a user unit's quoted output":       {"image/mkosi/agentos-p.service", "[Service]\nUser=agentos-p\nExecStart=/bin/true\nStandardOutput=\"file:/etc/x\"\n", `byte "\""`},
 		// Item 6: of /dev, only the console, the virtual terminals and the
 		// on-board serial ports (#6022 item 2), and the refusal names them.
-		"a terminal in /dev/shm":  {"image/mkosi/agentos-t.service", "[Service]\nExecStart=/bin/true\nTTYPath=/dev/shm/x\n", `path "/dev/shm/x"; of /dev, a root unit's terminal is only /dev/console`},
-		"a pseudo terminal":       {"image/mkosi/agentos-t.service", "[Service]\nExecStart=/bin/true\nTTYPath=/dev/pts/0\n", `path "/dev/pts/0"; of /dev, a root unit's terminal is only /dev/console, /dev/ttyN, /dev/ttySN or /dev/ttyAMAN`},
+		"a terminal in /dev/shm":  {"image/mkosi/agentos-t.service", "[Service]\nExecStart=/bin/true\nTTYPath=/dev/shm/x\n", `path "/dev/shm/x"; of /dev, a terminal the manager opens is only /dev/console`},
+		"a pseudo terminal":       {"image/mkosi/agentos-t.service", "[Service]\nExecStart=/bin/true\nTTYPath=/dev/pts/0\n", `path "/dev/pts/0"; of /dev, a terminal the manager opens is only /dev/console, /dev/ttyN, /dev/ttySN or /dev/ttyAMAN`},
 		"a USB serial terminal":   {"image/mkosi/agentos-t.service", "[Service]\nExecStart=/bin/true\nTTYPath=/dev/ttyUSB0\n", `path "/dev/ttyUSB0"; of /dev`},
 		"a serial port's link":    {"image/mkosi/agentos-t.service", "[Service]\nExecStart=/bin/true\nTTYPath=/dev/serial0\n", `path "/dev/serial0"; of /dev`},
 		"a serial port with a ..": {"image/mkosi/agentos-t.service", "[Service]\nExecStart=/bin/true\nTTYPath=/dev/ttyS0/../../tmp/x\n", `path "/dev/ttyS0/../../tmp/x"`},
@@ -103,7 +117,9 @@ func TestRootSideLintReach(t *testing.T) {
 		files["image/mkosi/agentos-t3.service"] = "[Service]\nExecStart=/bin/true\nTTYPath=/dev/ttyS0\n"
 		files["image/mkosi/agentos-t4.service"] = "[Service]\nExecStart=/bin/true\nTTYPath=/dev/ttyAMA0\n"
 		files["image/mkosi/agentos-s.socket"] = "[Socket]\nListenStream=/run/agentos-x/s.sock\nSymlinks=/run/agentos-x/l\n"
-		files["image/mkosi/agentos-p.service"] = "[Service]\nUser=agentos-p\nExecStart=/bin/true\nPIDFile=/run/systemd/agentos-p.pid\n"
+		files["image/mkosi/agentos-p.service"] = "[Service]\nUser=agentos-p\nExecStart=/bin/true\nPIDFile=/run/systemd/agentos-p.pid\n" +
+			"StandardInput=null\nStandardOutput=journal+console\nStandardError=file:/run/systemd/agentos-p.log\nEnvironmentFile=/usr/lib/agentos/p.env\nEnvironmentFile=-/etc/agentos/p.env\n" +
+			"LoadCredential=c:/etc/agentos/c\nTTYPath=/dev/tty1\n"
 		if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
 			t.Fatal(err)
 		}
@@ -127,7 +143,12 @@ func TestRootSideLintReach(t *testing.T) {
 		"a dangling target":                             {"image/mkosi/agentos-side.service.d", "../nowhere", "no file"},
 		"a link loop":                                   {"image/mkosi/agentos-side.service.d", "agentos-side.service.d", "another link"},
 		"a chain of links":                              {"image/mkosi/agentos-q.service", "agentos-r.service", "another link"},
-		"a target outside the repo":                     {"image/mkosi/agentos-side.service.d", "../../../outside", "not a file beside it"},
+		"a target outside the repo":                     {"image/mkosi/agentos-side.service.d", "../../../outside", "outside every overlay that lands in one or outside image/"},
+		"a climbing build link with a . step":           {"image/enforcer/mkosi/mkosi.configure", "../../mkosi/./agentos-z.service", "not a file beside it"},
+		"a climbing build link with a .. step":          {"image/enforcer/mkosi/mkosi.configure", "../../mkosi/../go.mod", "not a file beside it"},
+		"a climbing build link into an overlay":         {"image/enforcer/mkosi/mkosi.configure", "../../mkosi/mkosi.extra/x", "outside every overlay that lands in one"},
+		"a climbing build link to a directory":          {"image/enforcer/mkosi/mkosi.configure", "../../elsewhere", "a link to a directory"},
+		"a climbing link in an overlay":                 {etc + "agentos-y.service", "../../agentos-z.service", "not a file beside it"},
 		"a climb through the runner's root":             {etc + "agentos-z.service", strings.Repeat("../", 15) + "ROOT/image/mkosi/agentos-z.service", "not a file beside it"},
 		"a climb through /proc/self/root":               {etc + "agentos-z.service", strings.Repeat("../", 15) + "proc/self/root/ROOT/image/mkosi/agentos-z.service", "not a file beside it"},
 		"a nested target":                               {etc + "agentos-z.service", "../../../run/agentos-x/agentos-z.service", "not a file beside it"},
@@ -275,6 +296,16 @@ func TestRootSideLintReach(t *testing.T) {
 			{camQemu + "etc/systemd/system/multi-user.target.wants/agentos-z.service", "../agentos-z.service"},
 			{camCm4 + "etc/systemd/system/multi-user.target.wants/agentos-z@1.service", "../agentos-z@.service"},
 		}
+		if _, err := linkedRepo(t, files, links); err != nil {
+			t.Fatal(err)
+		}
+	})
+	// A build script linked up the tree (IMG-keyring-spikes: each mkosi
+	// tree's mkosi.configure names the one keyring check) is a build input.
+	t.Run("passes a build input linked up the tree", func(t *testing.T) {
+		files := reachBase()
+		files["image/debian-archive-keyring.sh"] = "#!/bin/sh\n"
+		links := [][2]string{{"image/enforcer/mkosi/mkosi.configure", "../../debian-archive-keyring.sh"}}
 		if _, err := linkedRepo(t, files, links); err != nil {
 			t.Fatal(err)
 		}
@@ -469,8 +500,9 @@ func TestRootEnvFiles(t *testing.T) {
 		files := reachBase()
 		files[unit] = root + "EnvironmentFile=/etc/agentos/agentosd.env\n"
 		files[env] = "# comment\n; comment\n\n  GOMEMLIMIT=1\nPATH=/usr/bin:/usr/sbin\nAGENTOS_OWNER=\n"
-		// A user unit's env file is its user's.
-		files["image/mkosi/agentos-x.service"] = "[Service]\nUser=agentos-x\nExecStart=/bin/true\nEnvironmentFile=/var/lib/agentos-x/e.env\n"
+		// A user unit's env file is read as root too, so it sits in a root
+		// tree (#4641), but what it holds is its user's.
+		files["image/mkosi/agentos-x.service"] = "[Service]\nUser=agentos-x\nExecStart=/bin/true\nEnvironmentFile=-/etc/agentos/x.env\n"
 		if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
 			t.Fatal(err)
 		}

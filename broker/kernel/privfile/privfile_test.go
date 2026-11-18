@@ -78,7 +78,7 @@ func TestWriteAtomicRefusesADirOfAnotherUid(t *testing.T) {
 	if uid == 0 || int(uid) == os.Geteuid() || fi.Mode().Perm()&0o022 != 0 {
 		t.Skipf("/ reads as uid %d, mode %v, here", uid, fi.Mode().Perm())
 	}
-	d, r, err := openDir("/")
+	d, r, err := OpenDir("/")
 	if err == nil {
 		r.Close()
 		d.Close()
