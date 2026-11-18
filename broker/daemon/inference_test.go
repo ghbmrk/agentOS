@@ -1018,7 +1018,7 @@ func typeDecls(f *ast.File) map[string]*ast.TypeSpec {
 // The rule is about types, not order: where in the program a store would
 // run does not matter, so no flow is followed (Security B1 round 3 on
 // #6119).
-func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, at func(ast.Node, string)) {
+func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, report func(ast.Node, string)) {
 	t.Helper()
 	if len(configuredFields[rel]) == 0 {
 		return
@@ -1033,7 +1033,7 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 	conf := types.Config{Importer: importer.ForCompiler(fset, "gc", exportData(t, fs))}
 	pkg, err := conf.Check(module+rel, fset, fs, info)
 	if err != nil {
-		at(fs[0], "does not type-check, so its configuredFields stores cannot be checked: "+err.Error())
+		report(fs[0], "does not type-check, so its configuredFields stores cannot be checked: "+err.Error())
 		return
 	}
 	// The slots: each listed field's struct and index, through embedding.
@@ -1050,7 +1050,7 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 		}
 		obj, idx, _ := types.LookupFieldOrMethod(tn.Type(), true, pkg, field)
 		if _, ok := obj.(*types.Var); !ok {
-			at(fs[0], "configuredFields lists "+tf+", which is not a field")
+			report(fs[0], "configuredFields lists "+tf+", which is not a field")
 			continue
 		}
 		st := structOf(tn.Type())
@@ -1075,8 +1075,40 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 	// interface. A copy counts as much as a reference: a copy hands over
 	// the type, from which other code can mint a value (reflect.New,
 	// gob.Register) that dials (Security B1 on #6123).
+	// Tainting grows what holds, so the checks run to a fixed point
+	// quietly, then once more reporting.
+	quiet := true
+	at := func(n ast.Node, what string) {
+		if !quiet {
+			report(n, what)
+		}
+	}
 	memo := map[types.Type]bool{}
 	var holders []types.Type
+	// tainted are the interfaces outside the package a holder went into
+	// under a handOK entry (named in it, or by conversion or argument),
+	// so their values may be holders (Security B1 rounds 2 and 3 on
+	// #6123). Any other conversion of a holder into one is reported, so
+	// none of another package's interfaces holds one otherwise; callers
+	// in other packages are the composition root's.
+	tainted := map[string]bool{}
+	for key := range handOK[rel] {
+		tainted[key] = true
+	}
+	taint := func(t types.Type) {
+		if k := types.TypeString(t, nil); t != nil && types.IsInterface(t) && !tainted[k] {
+			tainted[k] = true
+			clear(memo)
+		}
+	}
+	implemented := func(it *types.Interface) bool {
+		for _, h := range holders {
+			if it.NumMethods() > 0 && types.Implements(h, it) {
+				return true
+			}
+		}
+		return false
+	}
 	var reach func(t types.Type, seen map[types.Type]bool) bool
 	reach = func(t types.Type, seen map[types.Type]bool) bool {
 		if r, ok := memo[t]; ok {
@@ -1092,6 +1124,16 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 		case *types.Alias:
 			in(types.Unalias(x))
 		case *types.Named:
+			if it, ok := x.Underlying().(*types.Interface); ok {
+				// A named interface holds when a holder went into it
+				// under a handOK entry (tainted), or, declared here,
+				// when a holder implements it.
+				r = tainted[types.TypeString(x, nil)] || x.Obj().Pkg() == pkg && implemented(it)
+				for i := range it.NumMethods() {
+					in(it.Method(i).Type())
+				}
+				break
+			}
 			for _, ms := range []*types.MethodSet{types.NewMethodSet(x), types.NewMethodSet(types.NewPointer(x))} {
 				for i := range ms.Len() {
 					if ms.At(i).Obj().Exported() {
@@ -1127,11 +1169,10 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 			for i := range x.NumMethods() {
 				in(x.Method(i).Type())
 			}
-			// An interface a holder implements holds: its values' dynamic
-			// type is a holder's, which reflect.TypeOf hands out.
-			for _, h := range holders {
-				r = r || x.NumMethods() > 0 && types.Implements(h, x)
-			}
+			// An unnamed interface a holder implements holds: its values'
+			// dynamic type may be the holder's, which reflect.TypeOf
+			// hands out.
+			r = r || tainted[types.TypeString(x, nil)] || implemented(x)
 		}
 		if len(seen) == 1 || r {
 			memo[t] = r // a false inside a cycle may be a partial answer
@@ -1139,313 +1180,478 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 		return r
 	}
 	holds := func(t types.Type) bool { return reach(t, map[types.Type]bool{}) }
-	// holders are the package's named types, in any scope, that hold a
-	// slot, and their pointers, grown to a fixed point: a type that holds
-	// only through an interface a holder implements is a holder too.
-	for grew := true; grew; {
-		grew = false
+	check := func() {
+		holders = nil
+		clear(memo)
+		// holders are the types of the package's code that hold a slot and
+		// have methods, so an interface may sit in front of them: every type
+		// go/types gives an expression or declares (unnamed, instantiated and
+		// function-local ones included), and their pointers, grown to a fixed
+		// point, as a type that holds only through an interface a holder
+		// implements is a holder too (Security B1 rounds 2 and 3 on #6123).
+		var cands []types.Type
+		seenT := map[string]bool{}
+		cand := func(t types.Type) {
+			if t == nil {
+				return
+			}
+			for _, t := range []types.Type{t, types.NewPointer(t)} {
+				if k := types.TypeString(t, nil); !seenT[k] && types.NewMethodSet(t).Len() > 0 {
+					seenT[k] = true
+					cands = append(cands, t)
+				}
+			}
+		}
+		for _, tv := range info.Types {
+			cand(tv.Type)
+		}
 		for _, obj := range info.Defs {
-			tn, ok := obj.(*types.TypeName)
-			if ok && !tn.IsAlias() && !slices.Contains(holders, tn.Type()) && holds(tn.Type()) {
-				holders = append(holders, tn.Type(), types.NewPointer(tn.Type()))
-				clear(memo)
-				grew = true
+			if obj != nil {
+				cand(obj.Type())
 			}
 		}
-	}
-	name := func(t types.Type) string { return types.TypeString(t, types.RelativeTo(pkg)) }
-	// Each node's parent, and each return's function signature.
-	parent := map[ast.Node]ast.Node{}
-	sigOf := map[*ast.ReturnStmt]*types.Signature{}
-	for _, f := range fs {
-		var stack []ast.Node
-		var sigs []*types.Signature
-		ast.Inspect(f, func(n ast.Node) bool {
-			if n == nil {
-				switch stack[len(stack)-1].(type) {
-				case *ast.FuncDecl, *ast.FuncLit:
-					sigs = sigs[:len(sigs)-1]
+		for grew := true; grew; {
+			grew = false
+			for _, c := range cands {
+				if !slices.Contains(holders, c) && holds(c) {
+					holders = append(holders, c)
+					clear(memo)
+					grew = true
 				}
-				stack = stack[:len(stack)-1]
+			}
+		}
+		name := func(t types.Type) string { return types.TypeString(t, types.RelativeTo(pkg)) }
+		// Each node's parent, and each return's function signature.
+		parent := map[ast.Node]ast.Node{}
+		sigOf := map[*ast.ReturnStmt]*types.Signature{}
+		for _, f := range fs {
+			var stack []ast.Node
+			var sigs []*types.Signature
+			ast.Inspect(f, func(n ast.Node) bool {
+				if n == nil {
+					switch stack[len(stack)-1].(type) {
+					case *ast.FuncDecl, *ast.FuncLit:
+						sigs = sigs[:len(sigs)-1]
+					}
+					stack = stack[:len(stack)-1]
+					return true
+				}
+				if len(stack) > 0 {
+					parent[n] = stack[len(stack)-1]
+				}
+				switch x := n.(type) {
+				case *ast.FuncDecl:
+					sigs = append(sigs, info.Defs[x.Name].Type().(*types.Signature))
+				case *ast.FuncLit:
+					sigs = append(sigs, info.Types[x].Type.(*types.Signature))
+				case *ast.ReturnStmt:
+					sigOf[x] = sigs[len(sigs)-1]
+				}
+				stack = append(stack, n)
 				return true
-			}
-			if len(stack) > 0 {
-				parent[n] = stack[len(stack)-1]
-			}
-			switch x := n.(type) {
-			case *ast.FuncDecl:
-				sigs = append(sigs, info.Defs[x.Name].Type().(*types.Signature))
-			case *ast.FuncLit:
-				sigs = append(sigs, info.Types[x].Type.(*types.Signature))
-			case *ast.ReturnStmt:
-				sigOf[x] = sigs[len(sigs)-1]
-			}
-			stack = append(stack, n)
-			return true
-		})
-	}
-	// reviewed reports an interface handOK lists, by name or package.
-	reviewed := func(t types.Type) bool {
-		n, ok := types.Unalias(t).(*types.Named)
-		return handOK[rel][types.TypeString(t, nil)] != "" || ok && n.Obj().Pkg() != nil && handOK[rel][n.Obj().Pkg().Path()] != ""
-	}
-	// into reports v, of a type that holds a slot, going to a place of
-	// type to: an interface or a type parameter could hand it on.
-	into := func(v ast.Node, from, to types.Type) {
-		if to != nil && types.IsInterface(to) && holds(from) && !reviewed(to) {
-			at(v, "hands "+name(from)+", which reaches a configuredFields field, to "+name(to))
+			})
 		}
-	}
-	// spread checks a value list against the places it goes, a single
-	// multi-value call included.
-	spread := func(vals []ast.Expr, to func(int) types.Type) {
-		if len(vals) == 1 {
-			if tu, ok := info.TypeOf(vals[0]).(*types.Tuple); ok {
-				for i := range tu.Len() {
-					into(vals[0], tu.At(i).Type(), to(i))
-				}
-				return
+		// reviewed reports an interface handOK lists, by name or package.
+		reviewed := func(t types.Type) bool {
+			n, ok := types.Unalias(t).(*types.Named)
+			return handOK[rel][types.TypeString(t, nil)] != "" || ok && n.Obj().Pkg() != nil && handOK[rel][n.Obj().Pkg().Path()] != ""
+		}
+		// into reports v, of a type that holds a slot, going to a place of
+		// type to: an interface or a type parameter could hand it on.
+		into := func(v ast.Node, from, to types.Type) {
+			if to != nil && types.IsInterface(to) && holds(from) && reviewed(to) {
+				taint(to)
+			} else if to != nil && types.IsInterface(to) && holds(from) {
+				at(v, "hands "+name(from)+", which reaches a configuredFields field, to "+name(to))
 			}
 		}
-		for i, v := range vals {
-			into(v, info.TypeOf(v), to(i))
-		}
-	}
-	// use checks where e, whose type holds a slot, goes.
-	use := func(e ast.Expr) {
-		p := parent[e]
-		for pe, ok := p.(*ast.ParenExpr); ok; pe, ok = p.(*ast.ParenExpr) {
-			e, p = pe, parent[pe]
-		}
-		switch p := p.(type) {
-		case *ast.SelectorExpr, *ast.StarExpr, *ast.UnaryExpr, *ast.BinaryExpr, *ast.SliceExpr, *ast.TypeAssertExpr,
-			*ast.ExprStmt, *ast.IncDecStmt, *ast.SwitchStmt, *ast.CaseClause, *ast.IndexListExpr:
-			return // read in place, compared, or written whole
-		case *ast.IndexExpr:
-			if e == p.Index {
-				if m, ok := info.TypeOf(p.X).Underlying().(*types.Map); ok {
-					into(e, info.TypeOf(e), m.Key())
-				}
-			}
-			return
-		case *ast.CallExpr:
-			if e == p.Fun {
-				return
-			}
-			fun := ast.Unparen(p.Fun)
-			if tv := info.Types[fun]; tv.IsType() {
-				into(e, info.TypeOf(e), tv.Type)
-				return
-			}
-			if ix, ok := fun.(*ast.IndexExpr); ok {
-				fun = ix.X
-			} else if ix, ok := fun.(*ast.IndexListExpr); ok {
-				fun = ix.X
-			}
-			var obj types.Object
-			switch f := fun.(type) {
-			case *ast.Ident:
-				obj = info.Uses[f]
-			case *ast.SelectorExpr:
-				obj = info.Uses[f.Sel]
-			}
-			if fn, ok := obj.(*types.Func); ok && fn.Pkg() != pkg {
-				if !holds(info.TypeOf(e)) || handOK[rel][fn.FullName()] != "" || handOK[rel][fn.Pkg().Path()] != "" {
+		// spread checks a value list against the places it goes, a single
+		// multi-value call included.
+		spread := func(vals []ast.Expr, to func(int) types.Type) {
+			if len(vals) == 1 {
+				if tu, ok := info.TypeOf(vals[0]).(*types.Tuple); ok {
+					for i := range tu.Len() {
+						into(vals[0], tu.At(i).Type(), to(i))
+					}
 					return
 				}
-				at(e, "hands "+name(info.TypeOf(e))+", which reaches a configuredFields field, to "+fn.FullName()+" outside the package")
-				return
 			}
-			sig := info.TypeOf(p.Fun).Underlying().(*types.Signature)
-			spread(p.Args, func(i int) types.Type {
-				n := sig.Params().Len()
-				if sig.Variadic() && i >= n-1 {
-					if p.Ellipsis.IsValid() {
-						return sig.Params().At(n - 1).Type()
-					}
-					return sig.Params().At(n - 1).Type().(*types.Slice).Elem()
-				}
-				if i < n {
-					return sig.Params().At(i).Type()
-				}
-				return nil
-			})
-			return
-		case *ast.AssignStmt:
-			if slices.Contains(p.Lhs, e) {
-				return
+			for i, v := range vals {
+				into(v, info.TypeOf(v), to(i))
 			}
-			spread(p.Rhs, func(i int) types.Type { return info.TypeOf(p.Lhs[i]) })
-			return
-		case *ast.ValueSpec:
-			spread(p.Values, func(i int) types.Type { return info.Defs[p.Names[i]].Type() })
-			return
-		case *ast.ReturnStmt:
-			sig := sigOf[p]
-			spread(p.Results, func(i int) types.Type { return sig.Results().At(i).Type() })
-			return
-		case *ast.CompositeLit:
-			i := slices.Index(p.Elts, e)
-			switch u := litType(info.TypeOf(p)).(type) {
-			case *types.Struct:
-				into(e, info.TypeOf(e), u.Field(i).Type())
-			case *types.Slice:
-				into(e, info.TypeOf(e), u.Elem())
-			case *types.Array:
-				into(e, info.TypeOf(e), u.Elem())
+		}
+		// use checks where e, whose type holds a slot, goes.
+		use := func(e ast.Expr) {
+			p := parent[e]
+			for pe, ok := p.(*ast.ParenExpr); ok; pe, ok = p.(*ast.ParenExpr) {
+				e, p = pe, parent[pe]
 			}
-			return
-		case *ast.KeyValueExpr:
-			switch u := litType(info.TypeOf(parent[p].(*ast.CompositeLit))).(type) {
-			case *types.Struct:
-				for i := range u.NumFields() {
-					if k, ok := p.Key.(*ast.Ident); ok && e == p.Value && u.Field(i).Name() == k.Name {
-						into(e, info.TypeOf(e), u.Field(i).Type())
+			switch p := p.(type) {
+			case *ast.SelectorExpr, *ast.StarExpr, *ast.UnaryExpr, *ast.BinaryExpr, *ast.SliceExpr, *ast.TypeAssertExpr,
+				*ast.ExprStmt, *ast.IncDecStmt, *ast.SwitchStmt, *ast.CaseClause, *ast.IndexListExpr:
+				return // read in place, compared, or written whole
+			case *ast.IndexExpr:
+				if e == p.Index {
+					if m, ok := info.TypeOf(p.X).Underlying().(*types.Map); ok {
+						into(e, info.TypeOf(e), m.Key())
 					}
 				}
-			case *types.Slice:
-				into(e, info.TypeOf(e), u.Elem())
-			case *types.Array:
-				into(e, info.TypeOf(e), u.Elem())
-			case *types.Map:
-				if e == p.Key {
-					into(e, info.TypeOf(e), u.Key())
-				} else {
+				return
+			case *ast.CallExpr:
+				if e == p.Fun {
+					return
+				}
+				fun := ast.Unparen(p.Fun)
+				if tv := info.Types[fun]; tv.IsType() {
+					into(e, info.TypeOf(e), tv.Type)
+					return
+				}
+				if ix, ok := fun.(*ast.IndexExpr); ok {
+					fun = ix.X
+				} else if ix, ok := fun.(*ast.IndexListExpr); ok {
+					fun = ix.X
+				}
+				var obj types.Object
+				switch f := fun.(type) {
+				case *ast.Ident:
+					obj = info.Uses[f]
+				case *ast.SelectorExpr:
+					obj = info.Uses[f.Sel]
+				}
+				if fn, ok := obj.(*types.Func); ok && fn.Pkg() != pkg {
+					if !holds(info.TypeOf(e)) {
+						return
+					}
+					if handOKFunc(rel, fn) {
+						// What it takes the holder as may now hold one.
+						sig := info.TypeOf(p.Fun).Underlying().(*types.Signature)
+						i, n := slices.Index(p.Args, e), sig.Params().Len()
+						switch {
+						case len(p.Args) == 1 && n > 1: // f(g()): every parameter
+							for i := range n {
+								taint(sig.Params().At(i).Type())
+							}
+						case sig.Variadic() && i >= n-1 && !p.Ellipsis.IsValid():
+							taint(sig.Params().At(n - 1).Type().(*types.Slice).Elem())
+						case i < n:
+							taint(sig.Params().At(i).Type())
+						}
+						return
+					}
+					at(e, "hands "+name(info.TypeOf(e))+", which reaches a configuredFields field, to "+fn.FullName()+" outside the package")
+					return
+				}
+				sig := info.TypeOf(p.Fun).Underlying().(*types.Signature)
+				spread(p.Args, func(i int) types.Type {
+					n := sig.Params().Len()
+					if sig.Variadic() && i >= n-1 {
+						if p.Ellipsis.IsValid() {
+							return sig.Params().At(n - 1).Type()
+						}
+						return sig.Params().At(n - 1).Type().(*types.Slice).Elem()
+					}
+					if i < n {
+						return sig.Params().At(i).Type()
+					}
+					return nil
+				})
+				return
+			case *ast.AssignStmt:
+				if slices.Contains(p.Lhs, e) {
+					return
+				}
+				spread(p.Rhs, func(i int) types.Type { return info.TypeOf(p.Lhs[i]) })
+				return
+			case *ast.ValueSpec:
+				spread(p.Values, func(i int) types.Type { return info.Defs[p.Names[i]].Type() })
+				return
+			case *ast.ReturnStmt:
+				sig := sigOf[p]
+				spread(p.Results, func(i int) types.Type { return sig.Results().At(i).Type() })
+				return
+			case *ast.CompositeLit:
+				i := slices.Index(p.Elts, e)
+				switch u := litType(info.TypeOf(p)).(type) {
+				case *types.Struct:
+					into(e, info.TypeOf(e), u.Field(i).Type())
+				case *types.Slice:
+					into(e, info.TypeOf(e), u.Elem())
+				case *types.Array:
 					into(e, info.TypeOf(e), u.Elem())
 				}
-			}
-			return
-		case *ast.SendStmt:
-			if e == p.Value {
-				into(e, info.TypeOf(e), coreType(info.TypeOf(p.Chan)).(*types.Chan).Elem())
-			}
-			return
-		case *ast.RangeStmt:
-			if e == p.X && p.Tok == token.ASSIGN {
-				k, v := rangeTypes(info.TypeOf(e))
-				for _, x := range [][2]any{{p.Key, k}, {p.Value, v}} {
-					if l, _ := x[0].(ast.Expr); l != nil && x[1] != nil {
-						into(e, x[1].(types.Type), info.TypeOf(l))
-					}
-				}
-			}
-			return
-		case *ast.GoStmt, *ast.DeferStmt:
-			return
-		}
-		at(e, "a "+name(info.TypeOf(e))+", which reaches a configuredFields field, goes where the lint cannot check")
-	}
-	for e, tv := range info.Types {
-		if tv.IsValue() && holds(tv.Type) {
-			use(e)
-		}
-	}
-	for id, inst := range info.Instances {
-		if fn, ok := info.Uses[id].(*types.Func); ok && (handOK[rel][fn.FullName()] != "" || handOK[rel][fn.Pkg().Path()] != "") {
-			continue
-		}
-		for i := range inst.TypeArgs.Len() {
-			if ta := inst.TypeArgs.At(i); holds(ta) {
-				at(id, "instantiates "+id.Name+" with "+name(ta)+", which reaches a configuredFields field")
-			}
-		}
-	}
-	// outOf reports a value taken out of an interface as a type that
-	// reaches a slot (an interface a holder implements included): another
-	// package's code may have made it (Security B1 on #6123).
-	outOf := func(n ast.Node, t types.Type) {
-		if t == nil || types.Identical(t, types.Typ[types.UntypedNil]) {
-			return
-		}
-		if holds(t) {
-			at(n, "takes a "+name(t)+", which reaches a configuredFields field, out of an interface")
-		}
-	}
-	// Stores into a slot, literals that set one, and values taken out of
-	// an interface as a type that reaches one: another package's code may
-	// have made them, from a copy it was handed (#6028).
-	for _, f := range fs {
-		ast.Inspect(f, func(n ast.Node) bool {
-			switch n := n.(type) {
-			case *ast.TypeAssertExpr:
-				if n.Type != nil {
-					outOf(n, info.TypeOf(n.Type))
-				}
-			case *ast.TypeSwitchStmt:
-				for _, cc := range n.Body.List {
-					for _, e := range cc.(*ast.CaseClause).List {
-						outOf(e, info.TypeOf(e))
-					}
-				}
-			case *ast.SelectorExpr:
-				sel := info.Selections[n]
-				if sel == nil || sel.Kind() != types.FieldVal {
-					return true
-				}
-				st, idx := structOf(sel.Recv()), sel.Index()
-				for _, i := range idx[:len(idx)-1] {
-					st = structOf(st.Field(i).Type())
-				}
-				if !listed(st)[idx[len(idx)-1]] {
-					return true
-				}
-				var e ast.Node = n
-				p := parent[e]
-				for pe, ok := p.(*ast.ParenExpr); ok; pe, ok = p.(*ast.ParenExpr) {
-					e, p = pe, parent[pe]
-				}
-				write := false
-				switch p := p.(type) {
-				case *ast.AssignStmt:
-					write = slices.Contains(p.Lhs, e.(ast.Expr))
-				case *ast.UnaryExpr:
-					write = p.Op == token.AND
-				case *ast.IncDecStmt:
-					write = true
-				case *ast.RangeStmt:
-					write = e == p.Key || e == p.Value
-				}
-				if write {
-					at(n, "stores into "+n.Sel.Name+", a configuredFields field")
-				}
-			case *ast.CompositeLit:
-				st, _ := litType(info.TypeOf(n)).(*types.Struct)
-				slotsHere := listed(st)
-				for i, el := range n.Elts {
-					kv, ok := el.(*ast.KeyValueExpr)
-					if !ok {
-						if slotsHere[i] {
-							at(n, "sets a configuredFields field by position here")
+				return
+			case *ast.KeyValueExpr:
+				switch u := litType(info.TypeOf(parent[p].(*ast.CompositeLit))).(type) {
+				case *types.Struct:
+					for i := range u.NumFields() {
+						if k, ok := p.Key.(*ast.Ident); ok && e == p.Value && u.Field(i).Name() == k.Name {
+							into(e, info.TypeOf(e), u.Field(i).Type())
 						}
-						continue
 					}
-					if k, isID := kv.Key.(*ast.Ident); isID {
-						for j := range slotsHere {
-							if st.Field(j).Name() == k.Name {
-								at(n, "sets "+k.Name+", a configuredFields field, here")
+				case *types.Slice:
+					into(e, info.TypeOf(e), u.Elem())
+				case *types.Array:
+					into(e, info.TypeOf(e), u.Elem())
+				case *types.Map:
+					if e == p.Key {
+						into(e, info.TypeOf(e), u.Key())
+					} else {
+						into(e, info.TypeOf(e), u.Elem())
+					}
+				}
+				return
+			case *ast.SendStmt:
+				if e == p.Value {
+					into(e, info.TypeOf(e), coreType(info.TypeOf(p.Chan)).(*types.Chan).Elem())
+				}
+				return
+			case *ast.RangeStmt:
+				if e == p.X && p.Tok == token.ASSIGN {
+					k, v := rangeTypes(info.TypeOf(e))
+					for _, x := range [][2]any{{p.Key, k}, {p.Value, v}} {
+						if l, _ := x[0].(ast.Expr); l != nil && x[1] != nil {
+							into(e, x[1].(types.Type), info.TypeOf(l))
+						}
+					}
+				}
+				return
+			case *ast.GoStmt, *ast.DeferStmt:
+				return
+			}
+			at(e, "a "+name(info.TypeOf(e))+", which reaches a configuredFields field, goes where the lint cannot check")
+		}
+		for e, tv := range info.Types {
+			if tv.IsValue() && holds(tv.Type) {
+				use(e)
+			}
+		}
+		for id, inst := range info.Instances {
+			if fn, ok := info.Uses[id].(*types.Func); ok && handOKFunc(rel, fn) {
+				continue
+			}
+			for i := range inst.TypeArgs.Len() {
+				if ta := inst.TypeArgs.At(i); holds(ta) {
+					at(id, "instantiates "+id.Name+" with "+name(ta)+", which reaches a configuredFields field")
+				}
+			}
+		}
+		// outOf reports a value taken out of an interface as a type that
+		// reaches a slot (an interface a holder implements included): another
+		// package's code may have made it (Security B1 on #6123).
+		outOf := func(n ast.Node, from, t types.Type) {
+			if t == nil || types.Identical(t, types.Typ[types.UntypedNil]) {
+				return
+			}
+			switch {
+			case holds(t):
+				at(n, "takes a "+name(t)+", which reaches a configuredFields field, out of an interface")
+			case holds(from) && types.IsInterface(t):
+				// The holder would sit in an interface that holds nothing.
+				at(n, "takes a "+name(from)+", which reaches a configuredFields field, out as "+name(t))
+			}
+		}
+		// Stores into a slot, literals that set one, and values taken out of
+		// an interface as a type that reaches one: another package's code may
+		// have made them, from a copy it was handed (#6028).
+		for _, f := range fs {
+			ast.Inspect(f, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.TypeAssertExpr:
+					if n.Type != nil {
+						outOf(n, info.TypeOf(n.X), info.TypeOf(n.Type))
+					}
+				case *ast.TypeSwitchStmt:
+					var x ast.Expr
+					switch a := n.Assign.(type) {
+					case *ast.ExprStmt:
+						x = a.X.(*ast.TypeAssertExpr).X
+					case *ast.AssignStmt:
+						x = a.Rhs[0].(*ast.TypeAssertExpr).X
+					}
+					for _, cc := range n.Body.List {
+						for _, e := range cc.(*ast.CaseClause).List {
+							outOf(e, info.TypeOf(x), info.TypeOf(e))
+						}
+					}
+				case *ast.SelectorExpr:
+					sel := info.Selections[n]
+					if sel == nil || sel.Kind() != types.FieldVal {
+						return true
+					}
+					st, idx := structOf(sel.Recv()), sel.Index()
+					for _, i := range idx[:len(idx)-1] {
+						st = structOf(st.Field(i).Type())
+					}
+					if !listed(st)[idx[len(idx)-1]] {
+						return true
+					}
+					var e ast.Node = n
+					p := parent[e]
+					for pe, ok := p.(*ast.ParenExpr); ok; pe, ok = p.(*ast.ParenExpr) {
+						e, p = pe, parent[pe]
+					}
+					write := false
+					switch p := p.(type) {
+					case *ast.AssignStmt:
+						write = slices.Contains(p.Lhs, e.(ast.Expr))
+					case *ast.UnaryExpr:
+						write = p.Op == token.AND
+					case *ast.IncDecStmt:
+						write = true
+					case *ast.RangeStmt:
+						write = e == p.Key || e == p.Value
+					}
+					if write {
+						at(n, "stores into "+n.Sel.Name+", a configuredFields field")
+					}
+				case *ast.CompositeLit:
+					st, _ := litType(info.TypeOf(n)).(*types.Struct)
+					slotsHere := listed(st)
+					for i, el := range n.Elts {
+						kv, ok := el.(*ast.KeyValueExpr)
+						if !ok {
+							if slotsHere[i] {
+								at(n, "sets a configuredFields field by position here")
+							}
+							continue
+						}
+						if k, isID := kv.Key.(*ast.Ident); isID {
+							for j := range slotsHere {
+								if st.Field(j).Name() == k.Name {
+									at(n, "sets "+k.Name+", a configuredFields field, here")
+								}
 							}
 						}
 					}
 				}
-			}
-			return true
-		})
+				return true
+			})
+		}
 	}
+	for n := -1; n != len(tainted); {
+		n = len(tainted)
+		check()
+	}
+	quiet = false
+	check()
 }
 
 // handOK are the functions of other packages (by go/types full name)
 // that a listed package may hand a value reaching a configuredFields
 // field, or instantiate with its type, and the interfaces (by full type
-// name) it may convert one to, by package, and why each neither stores
-// into the field nor mints a value of the type: a claim a reviewer
-// accepts, as configuredFields' entries are.
+// name) it may convert one to, or a whole package (by path) for both,
+// by package, and why each neither stores into the field nor mints a
+// value of the type: a claim a reviewer accepts, as configuredFields'
+// entries are. An interface a holder goes into under an entry then holds
+// (fieldStores' tainted), and a package entry's claim is checked by
+// TestHandOKPackagesMintNoTypes.
 var handOK = map[string]map[string]string{
 	"kernel/proc": {
 		"maps.Keys":       "ranges over a map's keys; writes nothing (kernelmain.go, the clerk names)",
-		module + "backup": "the backup set and writer: it calls the methods of the Targets it is handed (*pendingPut, dirTarget, inFlight) and keeps them, nothing else; it imports no reflect, unsafe or gob, and its json decodes target only its own manifest and table types",
-		"io.ReadCloser":   "logSource (backup.go) returns the log file as a section reader and its *os.File closer; the type counts only because *Kernel is an io.Closer, and backup only reads and closes what Open returns",
-		module + "kernel": "the kernel: it calls Do and Probe on the Clerks it is handed and keeps them, and the backup Set it opens; its one reflect use is DeepEqual of two Plans, it imports no unsafe or gob, and its json decodes target only its own log types",
+		module + "backup": "the backup set and writer: it calls the methods of the Targets it is handed (*pendingPut, dirTarget, inFlight) and keeps them, nothing else; it imports no reflect, unsafe, gob or plugin (TestHandOKPackagesMintNoTypes), and its json decodes target only its own manifest and table types",
+		module + "kernel": "the kernel: it calls Do and Probe on the Clerks it is handed and keeps them, and the backup Set it opens; its one reflect use is DeepEqual of two Plans, it imports no unsafe, gob or plugin (TestHandOKPackagesMintNoTypes), and its json decodes target only its own log types",
 	},
+}
+
+// handOKFunc reports fn listed in handOK for rel, by name or package
+// (a method of the universe's error has none).
+func handOKFunc(rel string, fn *types.Func) bool {
+	return handOK[rel][fn.FullName()] != "" || fn.Pkg() != nil && handOK[rel][fn.Pkg().Path()] != ""
+}
+
+// handOKPackage reports a handOK key that names a package, not a
+// function or a type: no dot in its last path element.
+func handOKPackage(key string) bool {
+	return !strings.Contains(key[strings.LastIndex(key, "/")+1:], ".")
+}
+
+// typeMinting reports what in the package in dir could make a value of a
+// type it is handed (Security B2 on #6123): an unsafe, encoding/gob or
+// plugin import, and any reflect use but DeepEqual, in any of its
+// non-test Go files, whatever their build tags. A package handOK names
+// whole must have none, so a change to it owes a reviewed edit here.
+func typeMinting(t *testing.T, dir string) []string {
+	t.Helper()
+	names, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bad []string
+	for _, path := range names {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, local := imports(f)
+		for n, p := range local {
+			switch {
+			case p == "unsafe" || p == "encoding/gob" || p == "plugin":
+				bad = append(bad, filepath.Base(path)+": imports "+p)
+			case p == "reflect" && (n == "." || n == "_"):
+				bad = append(bad, filepath.Base(path)+": imports reflect as "+n)
+			}
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			if se, ok := n.(*ast.SelectorExpr); ok {
+				if id, ok := se.X.(*ast.Ident); ok && id.Obj == nil && local[id.Name] == "reflect" && se.Sel.Name != "DeepEqual" {
+					bad = append(bad, filepath.Base(path)+": uses reflect."+se.Sel.Name)
+				}
+			}
+			return true
+		})
+	}
+	return bad
+}
+
+// REQ: ARC-2
+//
+// A package handOK names whole stays one that cannot make a value of a
+// type it is handed (Security B2 on #6123), and the check catches one
+// that can.
+func TestHandOKPackagesMintNoTypes(t *testing.T) {
+	n := 0
+	for rel, keys := range handOK {
+		for key := range keys {
+			if !handOKPackage(key) {
+				continue
+			}
+			n++
+			out, err := exec.Command("go", "list", "-f", "{{.Dir}}", key).Output()
+			if err != nil {
+				t.Fatalf("go list %s: %v", key, err)
+			}
+			if bad := typeMinting(t, strings.TrimSpace(string(out))); len(bad) > 0 {
+				t.Errorf("handOK[%q][%q] names a package that can make a value of a type it is handed:\n%s", rel, key, strings.Join(bad, "\n"))
+			}
+		}
+	}
+	if n == 0 {
+		t.Fatal("no package-level handOK entry checked")
+	}
+	if !handOKPackage(module+"kernel") || handOKPackage(module+"backup.Write") || handOKPackage("maps.Keys") || handOKPackage("io.ReadCloser") {
+		t.Fatal("handOKPackage misreads a key")
+	}
+	for src, want := range map[string]string{
+		`package p; import "reflect"; func f(x any) bool { return reflect.DeepEqual(x, x) }`: "",
+		`package p; import "reflect"; func f(x any) any { return reflect.TypeOf(x) }`:        "uses reflect.TypeOf",
+		`package p; import r "reflect"; func f(x any) any { return r.New(r.TypeOf(x)) }`:     "uses reflect.New",
+		`package p; import "encoding/gob"; func f(x any) { gob.Register(x) }`:                "imports encoding/gob",
+		`package p; import "unsafe"; var _ = unsafe.Sizeof(0)`:                               "imports unsafe",
+		`package p; import "plugin"; var _ = plugin.Open`:                                    "imports plugin",
+		`package p; import . "reflect"; var _ = DeepEqual`:                                   "imports reflect as .",
+	} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "p.go"), []byte(src), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got := strings.Join(typeMinting(t, dir), "\n")
+		if want == "" && got != "" || !strings.Contains(got, want) {
+			t.Errorf("typeMinting(%s) = %q, want %q", src, got, want)
+		}
+	}
 }
 
 // structOf is the struct a field selection steps through: t's, or its
@@ -1970,7 +2176,11 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		// (Security B1 round 2 on #6123).
 		{"modelroute", "hands map[string]clerk, which reaches a configuredFields field, to reflect.ValueOf", []string{src(`"net"; "reflect"`, `type Config struct{ Socket string }; type clerk interface{ Do() }; func (c Config) Do() { (&net.Dialer{}).Dial("unix", c.Socket) }; func g(m map[string]clerk, k clerk) { v := reflect.New(reflect.TypeOf(k)).Elem(); v.Field(0).SetString("/e"); reflect.ValueOf(m).SetMapIndex(reflect.ValueOf("a"), v); m["a"].Do() }`)}},
 		{"modelroute", "instantiates get with clerk", []string{src(`"net"; "reflect"`, `type Config struct{ Socket string }; type clerk interface{ Do() }; func (c Config) Do() { (&net.Dialer{}).Dial("unix", c.Socket) }; func get[T any](x any) T { return x.(T) }; func g(k clerk) { v := reflect.New(reflect.TypeOf(k)).Elem(); get[clerk](v.Interface()).Do() }`)}},
-		{"modelroute", "hands io.Reader, which reaches a configuredFields field, to reflect.TypeOf", []string{src(`"net"; "reflect"; "io"`, cfgDial+`func g(r io.Reader) { type w struct{ Config; io.Reader }; _ = w{}; reflect.TypeOf(r) }`)}},
+		{"modelroute", "hands w, which reaches a configuredFields field, to io.Reader", []string{src(`"net"; "io"`, cfgDial+`func g(c Config) io.Reader { type w struct{ Config; io.Reader }; return w{c, nil} }`)}},
+		{"modelroute", "hands clerk, which reaches a configuredFields field, to reflect.TypeOf", []string{src(`"net"; "reflect"`, cfgDial+`type clerk interface{ Do() }; func (c *Config) Do() { c.dial() }; func g(k clerk) { reflect.TypeOf(k) }; func h(k clerk) any { return struct{ *Config; clerk }{nil, k} }`)}},
+		// An unnamed holder counts for the interfaces it implements, and an
+		// interface a holder went into holds (Security B1 round 3 on #6123).
+		{"modelroute", "hands clerk, which reaches a configuredFields field, to reflect.TypeOf", []string{src(`"net"; "reflect"`, cfgDial+`type clerk interface{ Do() }; func wrap(k clerk) clerk { return struct{ Config; clerk }{Config{}, k} }; func g(k clerk) { reflect.TypeOf(k) }`)}},
 		// os.Root's methods, and opening one (B2 on #6119).
 		{"modelroute", "links or renames (Symlink)", []string{src(`"net"; "os"`, dial+`func g(s string) { r, _ := os.OpenRoot("/tmp"); r.Symlink("/run/proxy.sock", s) }`)}},
 		{"modelroute", "links or renames (Rename)", []string{src(`"net"; "os"`, dial+`func g(r *os.Root, s string) { r.Rename("/run/proxy.sock", s) }`)}},
@@ -2009,6 +2219,32 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 	delete(handOK, "modelroute")
 	if got != "" {
 		t.Errorf("handOK entries not honoured: %q", got)
+	}
+	// A reviewed interface then holds: its values cannot reach reflect,
+	// nor leave it as an interface that holds nothing (#6123 round 3).
+	handOK["modelroute"] = map[string]string{module + "modelroute.clerk": "test"}
+	got = useOf(t, "modelroute", src(`"io"; "reflect"`, `type Config struct{ Socket string }; type clerk interface{ Do() }; func (Config) Do() {}; func g(c Config) clerk { return c }; func h(k clerk) (io.Reader, any) { return k.(io.Reader), reflect.TypeOf(k) }`))
+	delete(handOK, "modelroute")
+	for _, want := range []string{"takes a clerk, which reaches a configuredFields field, out as io.Reader", "hands clerk, which reaches a configuredFields field, to reflect.TypeOf"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("not reported: %s; got %q", want, got)
+		}
+	}
+	if strings.Contains(got, "to clerk") {
+		t.Errorf("the reviewed conversion to clerk reported: %q", got)
+	}
+	// Another package's interface holds once a holder goes into it under
+	// an entry: named, or as a listed function's parameter.
+	for entry, body := range map[string]string{
+		"io.Closer":    `func g(c Config) io.Closer { return c }; func h(k io.Closer) { reflect.TypeOf(k) }`,
+		"io.NopCloser": `func g(c Config) io.ReadCloser { return io.NopCloser(c) }; func h(k io.Reader) { reflect.TypeOf(k) }`,
+	} {
+		handOK["modelroute"] = map[string]string{entry: "test"}
+		got = useOf(t, "modelroute", src(`"io"; "reflect"`, `type Config struct{ Socket string }; func (Config) Close() error { return nil }; func (Config) Read([]byte) (int, error) { return 0, nil }; `+body))
+		delete(handOK, "modelroute")
+		if !strings.Contains(got, "which reaches a configuredFields field, to reflect.TypeOf") || strings.Count(got, "\n") != 0 {
+			t.Errorf("with handOK %s, want only the reflect.TypeOf report; got %q", entry, got)
+		}
 	}
 	ok := src(`"net"; "net/http"; "net/http/httputil"; "os"; "path/filepath"`, `type Config struct{ Socket string }
 func g(sock string, cfg Config) {
