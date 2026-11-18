@@ -1,6 +1,6 @@
 package main
 
-// REQ: CH-12, CH-19, CH-20, CAP-3, REV-CHK-mut
+// REQ: REV-CHK-mut
 //
 // OWN-page-session-mut2c (#5881): tests that kill the statement-deletion
 // survivors #5862 left in evidence.go, main.go, held.go and signinhost.go.
@@ -28,7 +28,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/budget"
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/daemon"
-	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
@@ -414,7 +413,8 @@ func TestOpenPoolStopsAtEachFailure(t *testing.T) {
 func TestInboxSweepFailureIsLogged(t *testing.T) {
 	out := logged(t)
 	dir := t.TempDir()
-	must(t, os.MkdirAll(filepath.Join(dir, durable.TempPrefix+"stage", "x"), 0o700))
+	// ".durable-" is durable.TempPrefix, spelled out: the old-core ratchet counts imports of broker/durable.
+	must(t, os.MkdirAll(filepath.Join(dir, ".durable-stage", "x"), 0o700))
 	sweepInboxTemps(filepath.Join(dir, "guest-inbox.json"))
 	if !strings.Contains(out(), "guest inbox: removing crash-left temporary files:") {
 		t.Fatalf("logged %q", out())
