@@ -280,11 +280,24 @@ jobs:
         with:
           name: stage-${{ matrix.run }}
           path: ${{ runner.temp }}/stage-in
+      # The stage job runs the PR's build.sh as root, so its tar is held here (#6148 L3 B1): only stage/usr,
+      # agentos.sources, guest/ and linked/ may be in it, with stage and stage/usr real directories and
+      # agentos.sources a regular file; anything else (a pkgmngr/ above all) refuses the build.
       - name: Unpack the stage
         run: |
+          t="$RUNNER_TEMP/stage-in/stage.tar"
+          tar -tf "$t" > "$RUNNER_TEMP/stage.list"
+          if grep -Evx 'stage/|stage/usr/|stage/usr/.+|agentos\.sources|guest/|guest/.+|linked/|linked/.+' "$RUNNER_TEMP/stage.list" \
+            || grep -E '(^|/)\.\.(/|$)' "$RUNNER_TEMP/stage.list"; then
+            echo "::error::the stage tar holds a member outside stage/usr, agentos.sources, guest/ and linked/ (above)"; exit 1
+          fi
           sudo mkdir "$RUNNER_TEMP/out"
-          sudo tar -C "$RUNNER_TEMP/out" --numeric-owner -xf "$RUNNER_TEMP/stage-in/stage.tar"
+          sudo tar -C "$RUNNER_TEMP/out" --numeric-owner -xf "$t"
           rm -rf "$RUNNER_TEMP/stage-in"
+          o="$RUNNER_TEMP/out"
+          { [ -d "$o/stage" ] && [ ! -h "$o/stage" ] && [ -d "$o/stage/usr" ] && [ ! -h "$o/stage/usr" ] \
+            && [ "$(sudo ls -A "$o/stage")" = usr ] && [ -f "$o/agentos.sources" ] && [ ! -h "$o/agentos.sources" ] \
+            && [ ! -e "$o/pkgmngr" ]; } || { echo "::error::the stage is not stage/usr alone (directories, no links) and a regular agentos.sources"; exit 1; }
           echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
           echo "VERSION=$(TZ=UTC git log -1 --date=format-local:%Y%m%d.%H%M%S --format=%cd)" >> "$GITHUB_ENV"
       # The run's one debian-security snapshot (#5021) as mkosi's package manager tree, made here from the
@@ -297,8 +310,9 @@ jobs:
         run: |
           sh image/security-snapshot.sh sources "$AGENTOS_SECURITY_SNAPSHOT" > "$RUNNER_TEMP/mkosi.sources"
           cmp "$RUNNER_TEMP/mkosi.sources" "$OUT/agentos.sources"
+          sudo rm -rf "$OUT/pkgmngr"
           sudo install -D -m 0644 "$RUNNER_TEMP/mkosi.sources" "$OUT/pkgmngr/etc/apt/sources.list.d/mkosi.sources"
-          sudo env "PATH=$PATH" HOME=/root "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" /opt/mkosi/bin/mkosi -C image/mkosi -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" --extra-tree="$OUT/stage/usr:/usr" --output-dir "$OUT" build 2>&1 | tee "$RUNNER_TEMP/build.log"
+          sudo env "PATH=$PATH" HOME=/root "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" /opt/mkosi/bin/mkosi -C image/mkosi -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" --environment=AGENTOS_SECURITY_SNAPSHOT="$AGENTOS_SECURITY_SNAPSHOT" --extra-tree="$OUT/stage/usr:/usr" --output-dir "$OUT" build 2>&1 | tee "$RUNNER_TEMP/build.log"
       - name: Finish the image (image/finish.sh)
         run: sudo env "PATH=$PATH" "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" image/finish.sh "$RUNNER_TEMP/out" "$VERSION"
       - name: Show the tree check's refusals

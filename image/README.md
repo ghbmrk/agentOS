@@ -6,9 +6,9 @@ It carries the broker (`agentosd`), gVisor's `runsc`, and the OpenClaw guest ima
 
 Build, on a Linux host that can reach the Debian mirrors (cloud agent sessions cannot; CI can), from
 the repository's top, in three steps (IMG-mkosi-run-bound, D-276): `sudo image/build.sh OUT VERSION`
-stages the tree; then the pinned mkosi v24.3 runs on the committed config with `OUT`, `VERSION` and
-`SOURCE_DATE_EPOCH` (the commit time) set, from the one line image.yml's "Build image" step runs:
-`sudo env "PATH=$PATH" HOME=/root "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" /opt/mkosi/bin/mkosi -C image/mkosi -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" --extra-tree="$OUT/stage/usr:/usr" --output-dir "$OUT" build`;
+stages the tree; then the pinned mkosi v24.3 runs on the committed config with `OUT`, `VERSION`,
+`SOURCE_DATE_EPOCH` (the commit time) and `AGENTOS_SECURITY_SNAPSHOT` (the timestamp in `OUT/agentos.sources`) set, from the one line image.yml's "Build image" step runs:
+`sudo env "PATH=$PATH" HOME=/root "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" /opt/mkosi/bin/mkosi -C image/mkosi -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" --environment=AGENTOS_SECURITY_SNAPSHOT="$AGENTOS_SECURITY_SNAPSHOT" --extra-tree="$OUT/stage/usr:/usr" --output-dir "$OUT" build`;
 then `sudo image/finish.sh OUT VERSION`. CI: `.github/workflows/image.yml` stages on two runners, builds
 each on a fresh runner that never runs `build.sh`, boots one build under Secure Boot in QEMU, and
 compares the releases.

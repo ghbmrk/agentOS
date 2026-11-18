@@ -26,6 +26,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import unittest
 import unittest.mock
@@ -93,9 +94,28 @@ NOEXEC_FILES = ("etc/fstab", "usr/lib/systemd/system/tmp.mount.d/50-agentos-noex
 JOURNAL_FILES = ("usr/lib/systemd/journald.conf.d/50-agentos-persist.conf",)
 
 
+# Debian's unit that moves the journal from /run to /var/log/journal, and the link that starts it (#6095).
+JOURNAL_FLUSH = "usr/lib/systemd/system/systemd-journal-flush.service"
+
+
+def flush_unit(extra=()):
+    """systemd 257's systemd-journal-flush.service, as mkosi.finalize holds it, with EXTRA (section, key, value)."""
+    out, sec = "", None
+    for s, k, v in check.JOURNAL_FLUSH_LINES + tuple(extra):
+        if s != sec:
+            out, sec = out + "[%s]\n" % s, s
+        out += "%s=%s\n" % (k, v)
+    return out
+
+
 def noexec(root):
     for rel in NOEXEC_FILES + MAIN_SIDE_FILES + JOURNAL_FILES:
         write(root, rel, (MK / "mkosi.extra" / rel).read_text())
+    write(root, JOURNAL_FLUSH, flush_unit())
+    wants = pathlib.Path(root) / "usr/lib/systemd/system/sysinit.target.wants"
+    wants.mkdir(parents=True, exist_ok=True)
+    if not (wants / "systemd-journal-flush.service").is_symlink():
+        (wants / "systemd-journal-flush.service").symlink_to("../systemd-journal-flush.service")
 
 
 # The main side's mask over the keeper's state and the keeper's lift of it (STO-2c, D-154), which
@@ -3922,10 +3942,13 @@ class ConfFilesTest(unittest.TestCase):
                 self.assertIn("bad characters in section header", self.coredump(("[Core%sdump]\n" % c).encode()))
         self.assertNotIn("section header", self.coredump(b"[Core dump x]\n"))
 
-    def test_empty_assignment_resets(self):
-        # P4: LLMNR= after LLMNR=no gives resolved's default, which answers on the LAN.
-        write(self.root, "etc/systemd/resolved.conf.d/90-x.conf", "[Resolve]\nLLMNR=no\nLLMNR=\n")
-        self.assertIn("LLMNR", self.v())
+    def test_empty_assignment_is_refused(self):
+        # P4, then #6095 (R4): resolved's parser ignores an empty LLMNR= and keeps the one before it, so the
+        # check refuses it (ini_canon) rather than read it as a reset or as ignored.
+        for first in ("yes", "no"):
+            write(self.root, "etc/systemd/resolved.conf.d/90-x.conf", "[Resolve]\nLLMNR=%s\nLLMNR=\n" % first)
+            self.assertIn("LLMNR= in etc/systemd/resolved.conf.d/90-x.conf is a form the tree check does not read",
+                          self.v())
 
     def test_kmod_reads_a_file_in_place_of_modprobe_d(self):
         # P5: kmod's conf_files_list reads a non-directory in its list as a file of its own (named
@@ -6136,12 +6159,13 @@ class TreeAccessTest(unittest.TestCase):
     (tree_lstat, tree_listdir, tree_readlink, tree_read, and tree_xattrs, #1803), none of which follows
     a link on the build host, in the two functions that read the repository's allowlists (tmpfiles.allow,
     exec.allow), not the tree, in script_net_dev, which reads the script sandbox's /proc (#4647), and in
-    pinned_packages, which reads the apt lists mkosi mounts beside the tree (#4690). Only
+    pinned_packages and run_snapshots, which read the apt lists and config JSON mkosi mounts beside the
+    tree (#4690). Only
     Conf.content (through conf_chase) and the key scan may read a file's bytes. Any other function that
     calls a file-reading or stat API fails here, however it names it."""
     # REQ: HW-1, DEV-2
     ALLOWED = frozenset(("tree_lstat", "tree_listdir", "tree_readlink", "tree_read", "tree_xattrs",
-                         "allow_path", "allow_entries", "script_net_dev", "pinned_packages", "repart_build",
+                         "allow_path", "allow_entries", "script_net_dev", "pinned_packages", "run_snapshots", "repart_build",
                          "build_definitions"))
     READERS = {"tree_read": frozenset(("Conf.content", "has_key"))}
     SOURCE = (MK / "mkosi.finalize").read_text()
@@ -7900,7 +7924,9 @@ class MkosiRunBoundTest(unittest.TestCase):
 
     MKOSI_LINE = ('sudo env "PATH=$PATH" HOME=/root "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" /opt/mkosi/bin/mkosi '
                   '-C image/mkosi -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" '
+                  '--environment=AGENTOS_SECURITY_SNAPSHOT="$AGENTOS_SECURITY_SNAPSHOT" '
                   '--extra-tree="$OUT/stage/usr:/usr" --output-dir "$OUT" build 2>&1 | tee "$RUNNER_TEMP/build.log"')
+    MIRROR, SECURITY = "20261001T000000Z", "20261112T180512Z"
     INDEX = "snapshot.debian.org_archive_debian_20261001T000000Z_dists_trixie_main_binary-amd64_Packages"
     SEC = "snapshot.debian.org_archive_debian-security_20261112T180512Z_dists_trixie-security_main_binary-amd64_Packages"
 
@@ -7980,35 +8006,141 @@ class MkosiRunBoundTest(unittest.TestCase):
         ok = self.status(("bash", "installed", "amd64", "5.2.37-2"), ("tzdata", "installed", "all", "2025b-4"),
                          ("openssl", "installed", "amd64", "3.5.7-1~deb13u1"),
                          ("gone", "config-files", "amd64", "9"))
-        self.assertEqual(check.package_source_violations(ok, lists), [])
+        self.assertEqual(check.package_source_violations(ok, lists, self.MIRROR, self.SECURITY), [])
         why = "the image's packages come only from the pinned, signature-checked snapshot sources (#4690)"
         for pkg in (("evil", "installed", "amd64", "1"), ("bash", "installed", "amd64", "5.2.37-3"),
                     ("bash", "unpacked", "i386", "5.2.37-2")):
             with self.subTest(pkg=pkg):
-                self.assertEqual(check.package_source_violations(ok + self.status(pkg), lists), [
+                self.assertEqual(check.package_source_violations(ok + self.status(pkg), lists, self.MIRROR, self.SECURITY), [
                     "var/lib/dpkg/status: %s %s (%s) is installed, but no pinned Packages index lists that version; %s"
                     % (pkg[0], pkg[3], pkg[2], why)])
         # No pinned index read (only the local repository's, or a live archive's): every build refuses.
         bare = self.lists({"_repository_Packages": idx,
                            "deb.debian.org_debian_dists_trixie_main_binary-amd64_Packages": idx})
-        self.assertEqual(check.package_source_violations(ok, bare), [
+        self.assertEqual(check.package_source_violations(ok, bare, self.MIRROR, self.SECURITY), [
             "%s holds no Packages index from the pinned snapshot sources (other indexes: _repository_Packages, "
             "deb.debian.org_debian_dists_trixie_main_binary-amd64_Packages); %s" % (bare, why)])
-        self.assertEqual(check.package_source_violations(b"", lists),
+        self.assertEqual(check.package_source_violations(b"", lists, self.MIRROR, self.SECURITY),
                          ["var/lib/dpkg/status: lists no installed package; " + why])
         broken = self.lists({self.INDEX + ".gz": b"not gzip"})
-        [line] = check.package_source_violations(ok, broken)[:1]
+        [line] = check.package_source_violations(ok, broken, self.MIRROR, self.SECURITY)[:1]
         self.assertIn(self.INDEX + ".gz: unreadable", line)
+
+    def test_an_index_from_another_snapshot_counts_for_nothing(self):
+        # #6148 L3 B2: a signed index from another date (an older, vulnerable snapshot) is not a pinned source.
+        evil = b"Package: evil\nVersion: 1\nArchitecture: amd64\n"
+        status = self.status(("evil", "installed", "amd64", "1"))
+        why = "the image's packages come only from the pinned, signature-checked snapshot sources (#4690)"
+        old = self.INDEX.replace(self.MIRROR, "20200101T000000Z")
+        oldsec = self.SEC.replace(self.SECURITY, "20200101T000000Z")
+        good = {self.INDEX: b"Package: bash\nVersion: 1\nArchitecture: amd64\n"}
+        for name in (old, oldsec, self.INDEX.replace("_debian_", "_debian-ports_"),
+                     self.SEC.replace("debian-security_", "debian-security_x")):
+            with self.subTest(name=name):
+                lists = self.lists(dict(good, **{name: evil}))
+                self.assertEqual(check.package_source_violations(status, lists, self.MIRROR, self.SECURITY), [
+                    "var/lib/dpkg/status: evil 1 (amd64) is installed, but no pinned Packages index lists that "
+                    "version; " + why])
+        # The same index at this run's own dates counts.
+        for name in (self.INDEX, self.SEC):
+            lists = self.lists(dict(good, **{name: evil}))
+            self.assertEqual(check.package_source_violations(status, lists, self.MIRROR, self.SECURITY), [])
+
+    def test_the_run_names_its_two_snapshots(self):
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        conf = d / "config.json"
+        why = "the image's packages come only from the pinned, signature-checked snapshot sources (#4690)"
+        mirror = ini(MK / "mkosi.conf")["Distribution"]["Mirror"]
+        for text, sec, want in (
+                (json.dumps({"Mirror": mirror}), self.SECURITY, (self.MIRROR, self.SECURITY, [])),
+                (json.dumps({"Mirror": "https://deb.debian.org/debian"}), self.SECURITY,
+                 (None, self.SECURITY, ["mkosi's Mirror= is not a snapshot.debian.org debian snapshot; " + why])),
+                (json.dumps({"Mirror": mirror}), "", (self.MIRROR, None, [
+                    "AGENTOS_SECURITY_SNAPSHOT is '', not one debian-security snapshot timestamp (image.yml's mkosi "
+                    "line sets it); " + why])),
+                (json.dumps({"Mirror": mirror}), "2026111T1", (self.MIRROR, None, [
+                    "AGENTOS_SECURITY_SNAPSHOT is '2026111T1', not one debian-security snapshot timestamp (image.yml's "
+                    "mkosi line sets it); " + why]))):
+            with self.subTest(text=text, sec=sec):
+                conf.write_text(text)
+                with unittest.mock.patch.dict(os.environ, {"MKOSI_CONFIG": str(conf), "AGENTOS_SECURITY_SNAPSHOT": sec}):
+                    self.assertEqual(check.run_snapshots(), want)
+        conf.write_text("{")
+        with unittest.mock.patch.dict(os.environ, {"MKOSI_CONFIG": str(conf), "AGENTOS_SECURITY_SNAPSHOT": self.SECURITY}):
+            m, s, out = check.run_snapshots()
+            self.assertIsNone(m)
+            self.assertIn("mkosi's config JSON: unreadable (", out[0])
+
+    def unpack(self, members):
+        """Run image.yml's "Unpack the stage" step on a tar of MEMBERS ({name: bytes, or None for a directory,
+        or ("link", target)}), with sudo a pass-through; returns (exit status, output, out dir)."""
+        build = workflow_job("build")
+        step = build[build.index("      - name: Unpack the stage\n"):]
+        step = step[:step.index("\n      - ", 10)]
+        script = textwrap.dedent(step[step.index("run: |\n") + len("run: |\n"):])
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        src = d / "src"
+        for name, data in members.items():
+            p = src / name
+            if data is None:
+                p.mkdir(parents=True, exist_ok=True)
+            elif isinstance(data, tuple):
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.symlink_to(data[1])
+            else:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(data)
+        (d / "stage-in").mkdir()
+        subprocess.run(["tar", "-C", str(src), "-cf", str(d / "stage-in/stage.tar")] + sorted(
+            n for n in os.listdir(src)), check=True)
+        (d / "bin").mkdir()
+        (d / "bin/sudo").write_text('#!/bin/sh\nexec "$@"\n')
+        (d / "bin/sudo").chmod(0o755)
+        env = dict(os.environ, RUNNER_TEMP=str(d), GITHUB_ENV=str(d / "env"), PATH="%s:%s" % (d / "bin", os.environ["PATH"]))
+        r = subprocess.run(["bash", "-e", "-c", script], cwd=ROOT, env=env, capture_output=True, text=True)
+        return r.returncode, r.stdout + r.stderr, d / "out"
+
+    GOOD_STAGE = {"stage/usr/lib/agentos/x": b"x", "agentos.sources": b"Types: deb\n", "guest/agentos-guest.manifest": b"",
+                  "linked/agentos.dpkg-status": b""}
+
+    def test_the_build_job_takes_only_the_stage_from_the_tar(self):
+        # #6148 L3 B1: the stage job runs the PR's build.sh as root, so the build job holds its tar to
+        # stage/usr, agentos.sources, guest/ and linked/: a staged pkgmngr/ (apt settings, a trusted source)
+        # never reaches mkosi's package manager tree.
+        rc, out, o = self.unpack(self.GOOD_STAGE)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue((o / "stage/usr/lib/agentos/x").is_file())
+        for extra in ({"pkgmngr/etc/apt/apt.conf.d/99evil": b'Acquire::AllowInsecureRepositories "true";\n'},
+                      {"stage/etc/x": b"x"}, {"stage/var/lib/dpkg/status": b""}, {"evil": b""}, {"agentos.sources2": b""}):
+            with self.subTest(extra=extra):
+                rc, out, o = self.unpack(dict(self.GOOD_STAGE, **extra))
+                self.assertNotEqual(rc, 0, out)
+                self.assertIn("::error::the stage tar holds a member outside stage/usr", out)
+                self.assertFalse(o.exists())
+        for bad in ({"stage/usr": ("link", "/etc")}, {"agentos.sources": ("link", "/etc/passwd")}):
+            with self.subTest(bad=bad):
+                members = dict(self.GOOD_STAGE)
+                members = {k: v for k, v in members.items() if not k.startswith(next(iter(bad)))}
+                rc, out, o = self.unpack(dict(members, **bad))
+                self.assertNotEqual(rc, 0, out)
+                # A link at stage/usr lists without the directory's slash, so the name check refuses it first.
+                self.assertRegex(out, r"::error::the stage (tar holds a member outside|is not stage/usr alone)")
+        # The package manager tree is made from nothing, after the unpack, from the committed sources.
+        build = workflow_job("build")
+        self.assertLess(build.index('sudo rm -rf "$OUT/pkgmngr"'),
+                        build.index('sudo install -D -m 0644 "$RUNNER_TEMP/mkosi.sources" "$OUT/pkgmngr/'))
 
     def test_tree_status_is_read_inside_the_tree(self):
         root = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root)
         lists = self.lists({self.INDEX: b"Package: bash\nVersion: 1\nArchitecture: amd64\n"})
-        self.assertEqual(check.tree_package_violations(str(root), lists),
+        self.assertEqual(check.tree_package_violations(str(root), self.MIRROR, self.SECURITY, lists),
                          ["var/lib/dpkg/status: unreadable (No such file or directory); the image's packages come only "
                           "from the pinned, signature-checked snapshot sources (#4690)"])
         write(root, "var/lib/dpkg/status", self.status(("bash", "installed", "amd64", "1")).decode())
-        self.assertEqual(check.tree_package_violations(str(root), lists), [])
+        self.assertEqual(check.tree_package_violations(str(root), self.MIRROR, self.SECURITY, lists), [])
 
     def test_a_package_file_in_the_tree_is_refused(self):
         root = clean_tree(tempfile.mkdtemp())
@@ -8019,6 +8151,138 @@ class MkosiRunBoundTest(unittest.TestCase):
         self.assertEqual(check.violations(root), [
             "%s: a Debian package file; the image's packages come only from mkosi's signature-checked apt run (#4690)"
             % n for n in ("opt/z.ddeb", "usr/lib/agentos/x.deb", "var/cache/apt/archives/y.udeb")])
+
+
+class IgnoredValueTest(unittest.TestCase):
+    """#6095 (R4; Lens, L3 and Security on #6128): systemd ignores a value its parser rejects and keeps the one
+    before it, so for the keys whose last value a check reads (ini_canon) every assignment must be one of a few
+    forms systemd reads as written. Any other, the empty one included, is refused, wherever it is in the chain:
+    no parser is ported, so no gap in a port can hide an earlier unsafe value."""
+
+    UNIT = "agentos-x.service"
+    KERNEL = "agentos-keeper-kernel.service"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+
+    def files(self, *texts):
+        out = []
+        for t in texts:
+            self.n = getattr(self, "n", 0) + 1
+            rel = "u/%d.conf" % self.n
+            write(self.root, rel, t)
+            out.append(check.Conf(str(self.root), rel))
+        return out
+
+    def keeper(self, name):
+        return lambda f: check.keeper_unit_violations(name, f, str(self.root))
+
+    # (key, section, a value the check reads, the run, near misses the parser may read otherwise or ignore)
+    def cases(self):
+        ns = lambda f: check.namespace_mount_violations(self.UNIT, f)
+        paths = lambda f: check.manager_paths(f)
+        bools = ("", "garbage", "Yes", "true", "1", "on", "\fyes")
+        return (
+            ("PrivateTmp", "Service", "disconnected", ns, bools + ("Disconnected", "connected")),
+            ("PermissionsStartOnly", "Service", "yes", self.keeper(self.UNIT), bools),
+            ("NoNewPrivileges", "Service", "yes", self.keeper(self.KERNEL), bools),
+            ("PrivateDevices", "Service", "yes", self.keeper(self.UNIT), bools),
+            ("DevicePolicy", "Service", "closed", self.keeper(self.UNIT), ("", "garbage", "Closed")),
+            ("Type", "Service", "oneshot", self.keeper(self.UNIT), ("", "garbage", "Oneshot")),
+            ("Slice", "Service", "agentos-keeper.slice", self.keeper(self.UNIT),
+             ("", "a b.slice", "x/y.slice", ".slice", "%p.slice", "a\\x2db.slice", "a.b.slice")),
+            ("StartLimitBurst", "Unit", "3", self.keeper(self.KERNEL), ("", "garbage", "+3", "03", "\f3", "3x")),
+            ("StartLimitIntervalSec", "Unit", "0", self.keeper(self.KERNEL),
+             ("", "garbage", "+0", "\f0", "\v0s", "0 \f0", "0 s", "00", "0.0", "5.", "3.sec", "12.34.56", "1min 30s",
+              "60sec", "1x")),
+            ("StandardOutput", "Service", "file:/var/lib/x", paths,
+             ("", "garbage", "file:", "file:relative", "file://x", "file:/a/../b", "file:/a/./b", "file:%S/x",
+              "fd:a:b", "fd:x", "syslog", "journal+Console")),
+            ("StandardInput", "Service", "file:/var/lib/x", paths, ("", "fd:x", "data", "tty-force", "file:/x/")),
+            ("StandardError", "Service", "file:/var/lib/x", paths, ("", "fd:a:b")))
+
+    def test_a_form_the_check_does_not_read_is_refused_wherever_it_is(self):
+        for key, sec, val, run, misses in self.cases():
+            for miss in misses:
+                for order in ((val, miss), (miss, val)):
+                    with self.subTest(key=key, order=order):
+                        f = self.files(*("[%s]\n%s=%s\n" % (sec, key, v) for v in order))
+                        try:
+                            got = " | ".join(map(str, run(f)))
+                        except ValueError as e:
+                            got = str(e)
+                        self.assertIn("%s=%s in %s is a form the tree check does not read" % (
+                            key, miss, f[order.index(miss)].rel), got)
+
+    def test_the_last_canonical_value_is_read(self):
+        # Each value is one systemd reads as written, so the last one wins, unsafe or safe.
+        refused = {"PrivateTmp": "PrivateTmp=disconnected mounts a tmpfs that executes",
+                   "PermissionsStartOnly": "PermissionsStartOnly=yes runs commands with full privileges",
+                   "Slice": "in agentos-keeper.slice but not one of the keeper's units"}
+        for key, safe in (("PrivateTmp", "yes"), ("PermissionsStartOnly", "no"), ("Slice", "agentos.slice")):
+            run = (lambda f: check.namespace_mount_violations(self.UNIT, f)) if key == "PrivateTmp" else self.keeper(self.UNIT)
+            unsafe = dict((k, v) for k, _, v, _, _ in self.cases())[key]
+            for order, bad in (((safe, unsafe), True), ((unsafe, safe), False)):
+                with self.subTest(key=key, order=order):
+                    got = " | ".join(run(self.files(*("[Service]\n%s=%s\n" % (key, v) for v in order))))
+                    self.assertEqual(refused[key] in got, bad, got)
+        got = " | ".join(self.keeper(self.UNIT)(self.files("[Service]\nType=oneshot\nRuntimeMaxSec=9\n")))
+        self.assertIn("RuntimeMaxSec= has no effect on a Type=oneshot unit", got)
+        for later, zero in (("0", True), ("0s", True), ("0min", True), ("60", False), ("1min", False), ("infinity", False)):
+            with self.subTest(interval=later):
+                got = " | ".join(self.keeper(self.KERNEL)(self.files(
+                    "[Unit]\nStartLimitIntervalSec=60\n", "[Unit]\nStartLimitIntervalSec=%s\n" % later)))
+                self.assertEqual("StartLimitIntervalSec is %s; a zero or unset interval" % later in got, zero, got)
+        for burst, bad in (("5", False), ("6", True), ("999", True)):
+            with self.subTest(burst=burst):
+                got = " | ".join(self.keeper(self.KERNEL)(self.files("[Unit]\nStartLimitBurst=%s\n" % burst)))
+                self.assertEqual("StartLimitBurst is %s; must be 1 to 5" % burst in got, bad, got)
+        for key in ("StandardInput", "StandardOutput", "StandardError"):
+            with self.subTest(key=key):
+                paths = check.manager_paths(self.files("[Service]\n%s=null\n" % key,
+                                                       "[Service]\n%s=file:/var/lib/x\n" % key))
+                self.assertIn((key, "file:/var/lib/x", "/var/lib/x"), paths)
+
+    def test_a_path_unit_starts_the_first_unit_it_names(self):
+        # config_parse_trigger_unit: a later Unit=, empty or not, is ignored.
+        for later in ("", "agentos-keeper-enroll.service"):
+            with self.subTest(later=later):
+                got = check.keeper_path_violations("agentos-keeper-enroll.path", self.files(
+                    "[Path]\nUnit=agentos-x.service\nPathExists=/run/agentos-setup/x\n", "[Path]\nUnit=%s\n" % later))
+                self.assertEqual(got, ["agentos-keeper-enroll.path: starts agentos-x.service, not one of the keeper's "
+                                       "units (D-154)"])
+
+    def test_the_main_configs_take_only_their_forms(self):
+        nodump(self.root)
+        write(self.root, "etc/machine-id", "uninitialized\n")
+        self.assertEqual(check.dump_violations(self.root), [])
+        # Debian's own drop-in, before the image's.
+        write(self.root, "usr/lib/systemd/system.conf.d/10-coredump-debian.conf", "[Manager]\nDefaultLimitCORE=0:infinity\n")
+        self.assertEqual(check.dump_violations(self.root), [])
+        for rel, text, want in (
+                ("etc/systemd/coredump.conf.d/zz.conf", "[Coredump]\nStorage=\n",
+                 "50-agentos-nodump.conf: coredump Storage is Storage= in etc/systemd/coredump.conf.d/zz.conf is a "
+                 "form the tree check does not read (use none or external or journal); must be none"),
+                ("etc/systemd/system.conf.d/zz.conf", "[Manager]\nDefaultLimitCORE=0:1\n",
+                 "50-agentos-nodump.conf: DefaultLimitCORE is DefaultLimitCORE=0:1 in"),
+                ("etc/systemd/system.conf.d/zz.conf", "[Manager]\nDefaultLimitCORE=infinity\n",
+                 "50-agentos-nodump.conf: DefaultLimitCORE is infinity; must be 0"),
+                ("etc/systemd/system/agentosd.service.d/zz.conf", "[Service]\nLimitCORE=\n",
+                 "agentosd.service: LimitCORE is LimitCORE= in")):
+            with self.subTest(rel=rel, text=text):
+                write(self.root, rel, text)
+                self.assertIn(want, " | ".join(check.dump_violations(self.root)))
+                (self.root / rel).unlink()
+        write(self.root, "usr/lib/systemd/resolved.conf.d/40-a.conf", "[Resolve]\nLLMNR=no\nMulticastDNS=no\n")
+        self.assertEqual(check.resolved_violations(self.root), [])
+        for text in ("[Resolve]\nLLMNR=\n", "[Resolve]\nLLMNR=false\n", "[Resolve]\nLLMNR=No\n"):
+            with self.subTest(text=text):
+                write(self.root, "etc/systemd/resolved.conf.d/zz.conf", text)
+                got = " | ".join(check.resolved_violations(self.root))
+                self.assertIn("resolved LLMNR is LLMNR=%s in etc/systemd/resolved.conf.d/zz.conf is a form the tree "
+                              "check does not read (use yes or no or resolve); must be no" % text.split("=")[1].strip(), got)
 
 
 if __name__ == "__main__":

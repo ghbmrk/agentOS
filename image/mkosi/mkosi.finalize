@@ -1204,7 +1204,8 @@ def config_lines(data):
 
 def ini_last(files, section, key):
     """The value systemd ends up with for SECTION.KEY across FILES in order: the last assignment
-    wins, and an empty one resets it. None if never set."""
+    wins, and an empty one resets it. None if never set. For a key whose parser ignores a value it
+    rejects, see ini_canon."""
     val = None
     for f in files:
         try:
@@ -1323,12 +1324,12 @@ def sysctl_byte_violations(root):
 def dump_violations(root):
     """IMG-nodump: core dumps are discarded, for every process and for the card's service."""
     out = []
-    storage = ini_last(main_conf(root, "coredump.conf"), "Coredump", "Storage")
-    if storage != "none":
-        out.append("50-agentos-nodump.conf: coredump Storage is %s; must be none" % storage)
-    limit = ini_last(main_conf(root, "system.conf"), "Manager", "DefaultLimitCORE")
-    if limit not in ("0", "0:0"):
-        out.append("50-agentos-nodump.conf: DefaultLimitCORE is %s; must be 0" % limit)
+    for conf, sec, key, forms, want in (("coredump.conf", "Coredump", "Storage", COREDUMP_STORAGES, ("none",)),
+                                        ("system.conf", "Manager", "DefaultLimitCORE", LIMIT_FORMS, LIMIT_ZERO)):
+        v = ini_canon_or_why(main_conf(root, conf), sec, key, forms)
+        if v not in want:
+            out.append("50-agentos-nodump.conf: %s%s is %s; must be %s"
+                       % ("coredump " if conf == "coredump.conf" else "", key, v, want[0]))
     out += card_unit_violations(root)
     pattern = sysctl(root, "kernel.core_pattern")
     if pattern != CORE_PATTERN:
@@ -1348,6 +1349,13 @@ LOG_LEVELS = ("emerg", "alert", "crit", "err", "warning", "notice", "info", "deb
 STORAGES = ("auto", "volatile", "persistent", "none")
 
 
+# #6095 (Potency on #6086): journald settings that delete or drop stored entries early. The image keeps
+# journald's defaults for them, so the check refuses any assignment.
+JOURNAL_DEFAULTS = ("SystemMaxUse", "SystemKeepFree", "SystemMaxFileSize", "SystemMaxFiles", "MaxRetentionSec",
+                    "RateLimitIntervalSec", "RateLimitInterval", "RateLimitBurst")
+JOURNAL_FLUSH = "systemd-journal-flush.service"
+
+
 def journal_violations(root):
     """MOR-wipe-journal (#6078): a failed wipe's error (info, to the journal only) is still on disk
     at the next boot. Storage=auto would rest on Debian's postinst having made /var/log/journal.
@@ -1362,25 +1370,117 @@ def journal_violations(root):
             return ["%s: unreadable (%s); journald may not read it whole"
                     % (f.rel, e.strerror if isinstance(e, OSError) else e)]
         for sec, key, val in lines:
+            if sec == "Journal" and key in JOURNAL_DEFAULTS:
+                out.append("%s: journald %s=%s; the image keeps journald's default, so no entry goes early "
+                           "(remove that line)" % (f.rel, key, val))
             valid = {"Storage": STORAGES, "MaxLevelStore": LOG_LEVELS + tuple("01234567")}.get(key)
             if sec != "Journal" or valid is None:
                 continue
             if val not in valid:
-                out.append("%s: journald %s=%s is a value journald ignores, keeping the one before it "
-                           "(set a valid one or remove that line)" % (f.rel, key, val))
+                # UX on #6086: "keeping the one before it" only when there is one.
+                out.append("%s: journald %s=%s is a value journald ignores%s (set a valid one or remove that line)"
+                           % (f.rel, key, val, ", keeping the one before it" if key in last else ""))
+                last.setdefault(key, (None, None))
             else:
                 last[key] = (val, f.rel)
     storage, where = last.get("Storage", (None, None))
-    if not where:
+    if "Storage" not in last:
         out.append("journald Storage is not set (auto); must be persistent "
-                   "(usr/lib/systemd/journald.conf.d/50-agentos-persist.conf is missing)")
+                   "(usr/lib/systemd/journald.conf.d/50-agentos-persist.conf is missing or masked)")
+    elif not where:
+        out.append("journald has no valid Storage= in the chain, so it is auto; must be persistent")
     elif storage != "persistent":
         out.append("%s: journald Storage is %s; must be persistent (change or remove that line)" % (where, storage))
     level, where = last.get("MaxLevelStore", ("debug", None))
-    if level not in ("info", "debug", "6", "7"):
+    if level is not None and level not in ("info", "debug", "6", "7"):
         out.append("%s: journald MaxLevelStore is %s; must store info, a unit's stderr (set info or debug, "
                    "or remove that line)" % (where, level))
+    return out + journal_flush_violations(root)
+
+
+def alias_violations(root, dirs, names):
+    """A link in a unit directory, under another name, that resolves to one of NAMES: it makes that name an
+    alias, whose drop-ins systemd applies too (unit_find_dropin_paths reads u->aliases), so it is refused
+    rather than modelled."""
+    out = []
+    for d in dirs:
+        for n in sorted(tree_listdir(root, d)):
+            if n in names or not stat.S_ISLNK(tree_lstat(root, d + "/" + n).st_mode):
+                continue
+            try:
+                target = tree_chase(root, d + "/" + n)[0].rsplit("/", 1)[-1]
+            except OSError:
+                continue
+            if target in names:
+                out.append("%s/%s: an alias of %s; the tree check does not model unit aliases" % (d, n, target))
     return out
+
+
+# Debian's unit, the one place it may be, and every line it holds as config_lines reads it (Security and L3 on
+# #6130): read from usr/lib/systemd/system/systemd-journal-flush.service in systemd_257.13-1~deb13u1_amd64.deb
+# (deb.debian.org pool, sha256 ee81302a1d5b7434762b6e784a572854d4b6cf6235e33e2d104ad4e1cae71ab4), the version the
+# image installs; equal to upstream 257.7's units/systemd-journal-flush.service. A changed line is refused, not
+# modelled, so a Debian systemd update that changes the unit fails the build until this table is read again.
+JOURNAL_FLUSH_DIR = "usr/lib/systemd/system"
+JOURNAL_FLUSH_LINES = (
+    ("Unit", "Description", "Flush Journal to Persistent Storage"),
+    ("Unit", "Documentation", "man:systemd-journald.service(8) man:journald.conf(5)"),
+    ("Unit", "ConditionPathExists", "!/etc/initrd-release"),
+    ("Unit", "DefaultDependencies", "no"),
+    ("Unit", "After", "systemd-remount-fs.service systemd-quotacheck-root.service"),
+    ("Unit", "Before", "systemd-tmpfiles-setup.service"),
+    ("Unit", "Wants", "systemd-journald.service"),
+    ("Unit", "After", "systemd-journald.service"),
+    ("Unit", "RequiresMountsFor", "/var/log/journal"),
+    ("Unit", "Before", "soft-reboot.target systemd-soft-reboot.service"),
+    ("Unit", "Conflicts", "soft-reboot.target"),
+    ("Service", "ExecStart", "journalctl --flush"),
+    ("Service", "ExecStop", "journalctl --smart-relinquish-var"),
+    ("Service", "Type", "oneshot"),
+    ("Service", "RemainAfterExit", "yes"),
+    ("Service", "TimeoutSec", "90s"))
+
+
+def journal_flush_violations(root):
+    """#6095 (R1): journald writes to /var/log/journal only once systemd-journal-flush.service has asked it
+    to (server_system_journal_open, systemd 257.7); until then, Storage=persistent or not, the journal is in
+    /run and a reboot loses it. So the unit is Debian's file in JOURNAL_FLUSH_DIR, with no file or link of its
+    name in any other unit directory (a copy or a mask there would win), not masked (a link or an empty file),
+    holding JOURNAL_FLUSH_LINES and nothing else; started by sysinit.target (the link systemd installs); and
+    changed by no drop-in systemd applies to it, under its own name or an alias's."""
+    root = str(root)
+    dirs, out = unit_dirs(root)
+    why = "journald keeps the journal in /run until it runs, so a reboot loses it"
+    for d in dirs:
+        if d != JOURNAL_FLUSH_DIR and tree_lstat(root, d + "/" + JOURNAL_FLUSH):
+            out.append("%s/%s: replaces %s/%s; the tree check does not model a change to it (remove it)"
+                       % (d, JOURNAL_FLUSH, JOURNAL_FLUSH_DIR, JOURNAL_FLUSH))
+    unit = Conf(root, JOURNAL_FLUSH_DIR + "/" + JOURNAL_FLUSH) if JOURNAL_FLUSH_DIR in dirs else None
+    try:
+        masked = unit is None or not tree_lstat(root, unit.rel) or unit.is_link() or unit.content().strip() == b""
+    except OSError:
+        masked = True
+    if masked:
+        out.append("%s: missing or masked; %s" % (JOURNAL_FLUSH, why))
+    else:
+        try:
+            lines = tuple(config_lines(unit.content()))
+        except (OSError, Unparsable) as e:
+            lines = ("unreadable (%s)" % (e.strerror if isinstance(e, OSError) else e),)
+        if lines != JOURNAL_FLUSH_LINES:
+            diff = [l for l in lines if l not in JOURNAL_FLUSH_LINES] + [l for l in JOURNAL_FLUSH_LINES if l not in lines]
+            out.append("%s: not Debian systemd 257.13's unit (first difference: %s); the tree check does not model a "
+                       "change to it (restore it, or after a Debian systemd update read the new unit into "
+                       "JOURNAL_FLUSH_LINES)" % (unit.rel, diff[0] if diff else "the order of its lines"))
+    try:
+        wanted = any(tree_lstat(root, "%s/sysinit.target.wants/%s" % (d, JOURNAL_FLUSH)) for d in dirs)
+    except OSError:
+        wanted = False
+    if not wanted:
+        out.append("%s: not in sysinit.target.wants; %s" % (JOURNAL_FLUSH, why))
+    for f in unit_dropins(root, JOURNAL_FLUSH):  # its name's, each "-" prefix's and service.d (Security on #6128)
+        out.append("%s: a drop-in for %s; the tree check does not model a change to it (remove it)" % (f.rel, JOURNAL_FLUSH))
+    return out + alias_violations(root, dirs, (JOURNAL_FLUSH,))
 
 
 def unit_dropin_names(name):
@@ -1427,16 +1527,7 @@ def card_unit_violations(root):
     modelled."""
     root = str(root)
     dirs, out = unit_dirs(root)
-    for d in dirs:
-        for n in sorted(tree_listdir(root, d)):
-            if n in CARD_UNITS or not stat.S_ISLNK(tree_lstat(root, d + "/" + n).st_mode):
-                continue
-            try:
-                target = tree_chase(root, d + "/" + n)[0].rsplit("/", 1)[-1]
-            except OSError:
-                continue
-            if target in CARD_UNITS:
-                out.append("%s/%s: an alias of %s; the tree check does not model unit aliases" % (d, n, target))
+    out += alias_violations(root, dirs, CARD_UNITS)
     for name in CARD_UNITS:
         unit = next((Conf(root, d + "/" + name) for d in dirs if tree_lstat(root, d + "/" + name)), None)
         if unit is None:
@@ -1447,8 +1538,8 @@ def card_unit_violations(root):
             continue
         files = [unit] + conf_files(root, ["%s/%s.d" % (d, n) for d in UNIT_PATHS for n in unit_dropin_names(name)]
                                     + ["%s/service.d" % d for d in UNIT_PATHS])
-        limit = ini_last(files, "Service", "LimitCORE")
-        if limit not in ("0", "0:0"):
+        limit = ini_canon_or_why(files, "Service", "LimitCORE", LIMIT_FORMS)
+        if limit not in LIMIT_ZERO:
             out.append("%s: LimitCORE is %s; must be 0" % (name, limit))
     return out
 
@@ -1546,7 +1637,7 @@ def namespace_mount_violations(name, files):
         for key in NAMESPACE_ROOTS:
             if ini_words(files, "Service", key):
                 out.append("%s: sets %s; only the image's own /usr may execute (UPD-10)" % (name, key))
-        if ini_last(files, "Service", "PrivateTmp") == "disconnected":
+        if ini_canon(files, "Service", "PrivateTmp", YES_NO + ("disconnected",)) == "disconnected":
             out.append("%s: PrivateTmp=disconnected mounts a tmpfs that executes; use PrivateTmp=yes (UPD-10)" % name)
         for key in NAMESPACE_MOUNTS:
             for w in ini_words(files, "Service", key):
@@ -1917,6 +2008,65 @@ EXEC_KEYS = ("ExecCondition", "ExecStartPre", "ExecStart", "ExecStartPost", "Exe
              "ExecStopPost")
 TRUE_WORDS = ("1", "yes", "y", "true", "t", "on")
 FALSE_WORDS = ("0", "no", "n", "false", "f", "off")
+# #6095 (R4): forms a guarded key's every assignment must take (ini_canon), byte for byte. Each is one that
+# systemd 257 parses as written, so no parser is ported: any other form is refused.
+YES_NO = ("yes", "no")
+SERVICE_TYPES = ("simple", "exec", "forking", "oneshot", "dbus", "notify", "notify-reload", "idle")
+DEVICE_POLICIES = ("auto", "closed", "strict")
+COREDUMP_STORAGES = ("none", "external", "journal")
+LIMIT_ZERO = ("0", "0:0")
+# Debian ships DefaultLimitCORE=0:infinity (systemd.conf.d/10-coredump-debian.conf), which the image overrides.
+LIMIT_FORMS = LIMIT_ZERO + ("infinity", "0:infinity")
+
+
+class Form:
+    """A canonical form given by a regex for the whole value, and how a refusal names it."""
+    def __init__(self, pattern, label):
+        self.regex, self.label = re.compile(pattern), label
+
+    def __contains__(self, v):
+        return self.regex.fullmatch(v) is not None
+
+    def __str__(self):
+        return self.label
+
+
+# A plain absolute path: no specifier, escape, "." or ".." name, or repeated "/", so path_simplify_and_warn
+# takes it as written.
+CANON_PATH = r"(/[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}){1,16}"
+STD_FORMS = {
+    "StandardInput": Form(r"null|tty|socket|file:" + CANON_PATH, "null, tty, socket or file:/a/plain/path"),
+    "StandardOutput": Form(r"inherit|null|tty|kmsg|kmsg\+console|journal|journal\+console|socket|(file|append|truncate):"
+                           + CANON_PATH, "inherit, null, tty, kmsg, journal, socket (+console where it applies) or "
+                           "file:, append: or truncate: and a plain absolute path")}
+STD_FORMS["StandardError"] = STD_FORMS["StandardOutput"]
+SLICE_FORM = Form(r"[A-Za-z0-9_-]{1,64}\.slice", "a name of letters, digits, _ and - with .slice")
+BURST_FORM = Form(r"[1-9][0-9]{0,2}", "a number from 1")
+# No leading zero, so a zero interval is one that starts with "0".
+INTERVAL_FORM = Form(r"infinity|(0|[1-9][0-9]{0,8})(s|min|h)?", "infinity, or a number with no leading zero and s, min or h")
+
+
+def ini_canon(files, section, key, forms):
+    """#6095: the value systemd ends up with for SECTION.KEY across FILES, for a check that must not rest on how
+    systemd parses it. A parser that rejects a value ignores it and keeps the one before it, so a value read wrong
+    could hide an unsafe earlier one. So every assignment, the empty one included, must be one of FORMS (a tuple of
+    words or a Form), each read by systemd as written; then the last one wins. None if never set. ValueError for any
+    other assignment, naming its file, as journal_violations refuses Storage= (Lens and L3 on #6128)."""
+    val = None
+    for f, v in ini_every_in(files, section, key):
+        if v not in forms:
+            raise ValueError("%s=%s in %s is a form the tree check does not read (use %s)"
+                             % (key, v, f.rel, forms if isinstance(forms, Form) else " or ".join(forms)))
+        val = v
+    return val
+
+
+def ini_canon_or_why(files, section, key, forms):
+    """ini_canon's value, or its refusal as the text a message shows in place of the value."""
+    try:
+        return ini_canon(files, section, key, forms)
+    except ValueError as e:
+        return str(e)
 
 
 def unit_with_dropins(root, dirs, name):
@@ -2745,7 +2895,7 @@ def manager_paths(files):
             p = v if field is None else (v.split(":") + [""] * field)[field]
             out.append((key, v, p.lstrip("-")))
     for key in ("StandardInput", "StandardOutput", "StandardError"):
-        v = ini_last(files, "Service", key) or ""
+        v = ini_canon(files, "Service", key, STD_FORMS[key]) or ""
         if v.startswith(STD_FILES):
             out.append((key, v, v.split(":", 1)[1]))
     for key, top in MANAGER_DIRS.items():
@@ -2865,14 +3015,17 @@ def keeper_path_violations(name, files):
     """OWN-card-flow decision 6: an agentos-keeper .path unit NAME starts only a KEEPER_UNITS unit and
     watches only at or under a KEEPER_PATHS entry, with no '..' step, so the keeper's own state is all
     that can start it."""
-    unit = ini_last(files, "Path", "Unit") or name[:-len(".path")] + ".service"
+    try:
+        units = ini_all(files, "Path", "Unit")
+        watches = [(k, v) for k in PATH_WATCHES for v in ini_entries(files, "Path", k)]
+    except ValueError as e:
+        return ["%s: %s; the tree check never passes what it cannot read (D-154)" % (name, e)]
+    # config_parse_trigger_unit (#6095, R4): the first value naming another unit wins; a later or an empty
+    # one is ignored.
+    unit = next((v for v in units if "." in v and v != name), name[:-len(".path")] + ".service")
     out = []
     if unit not in KEEPER_UNITS:
         out.append("%s: starts %s, not one of the keeper's units (D-154)" % (name, unit))
-    try:
-        watches = [(k, v) for k in PATH_WATCHES for v in ini_entries(files, "Path", k)]
-    except ValueError as e:
-        return out + ["%s: %s; the tree check never passes what it cannot read (D-154)" % (name, e)]
     if not watches:
         out.append("%s: watches nothing the tree check reads (D-154)" % name)
     for k, v in watches:
@@ -3108,7 +3261,7 @@ def keeper_unit_violations(name, files, root):
     keeper = name in KEEPER_UNITS
     if name.startswith(KEEPER_PREFIX) and not keeper:
         out.append("%s: an agentos-keeper unit not in KEEPER_UNITS; the keeper group is listed in one place (D-154)" % name)
-    slice_ = ini_last(files, "Service", "Slice")
+    slice_ = ini_canon(files, "Service", "Slice", SLICE_FORM)
     if keeper and slice_ != KEEPER_SLICE:
         out.append("%s: Slice is %s; the keeper's units run in %s (D-154)" % (name, slice_, KEEPER_SLICE))
     if not keeper and slice_ == KEEPER_SLICE:
@@ -3159,11 +3312,11 @@ def keeper_unit_violations(name, files, root):
                 out.append("%s: %s=%s%s (D-154)" % (name, key, v, why))
     # #3477: a oneshot is starting until it exits, so RuntimeMaxSec= bounds nothing there (systemd
     # ignores it); its bound is TimeoutStartSec=.
-    if (ini_last(files, "Service", "Type") or "") == "oneshot" and ini_entries(files, "Service", "RuntimeMaxSec"):
+    if (ini_canon(files, "Service", "Type", SERVICE_TYPES) or "") == "oneshot" and ini_entries(files, "Service", "RuntimeMaxSec"):
         out.append("%s: RuntimeMaxSec= has no effect on a Type=oneshot unit; bound it with TimeoutStartSec= (#3477)"
                    % name)
     # #2981 (Security 3): every command but ExecStart= then runs as "+" does.
-    start_only = (ini_last(files, "Service", "PermissionsStartOnly") or "").lower() in TRUE_WORDS
+    start_only = ini_canon(files, "Service", "PermissionsStartOnly", YES_NO) == "yes"
     if start_only and name not in FULL_PRIVILEGE_EXEMPT:
         out.append("%s: PermissionsStartOnly=yes runs commands with full privileges, outside its device policy and "
                    "namespace (STO-2c)" % name)
@@ -3175,7 +3328,7 @@ def keeper_unit_violations(name, files, root):
                 out.append("%s: %s=%s runs with full privileges, outside its device policy and namespace (STO-2c)"
                            % (name, key, v.split()[0]))
     allows = [v.split()[0] for v in ini_entries(files, "Service", "DeviceAllow")]
-    policy = ini_last(files, "Service", "DevicePolicy")
+    policy = ini_canon(files, "Service", "DevicePolicy", DEVICE_POLICIES)
     if name in TPM_UNITS:
         for spec in allows:
             if tpm_spec(spec) and spec != TPM_DEVICE:
@@ -3186,7 +3339,7 @@ def keeper_unit_violations(name, files, root):
         for spec in allows:
             if tpm_spec(spec):
                 out.append("%s: DeviceAllow=%s reaches the TPM; only %s may (#2889)" % (name, spec, ", ".join(TPM_UNITS)))
-        private = (ini_last(files, "Service", "PrivateDevices") or "").lower() in TRUE_WORDS
+        private = ini_canon(files, "Service", "PrivateDevices", YES_NO) == "yes"
         if name not in NOEXEC_EXEMPT and not private and policy not in ("closed", "strict"):
             out.append("%s: neither PrivateDevices=yes nor DevicePolicy=closed; only %s may reach the TPM (#2889)"
                        % (name, ", ".join(TPM_UNITS)))
@@ -3199,18 +3352,18 @@ def keeper_unit_violations(name, files, root):
             for f, v in ini_all_in(files, section, key):
                 if v not in allowed:
                     out.append("%s: %s=%s in %s; %s; allowed: %s" % (name, key, v, f.rel, why, unlock_allowed(key, allowed)))
-        if (ini_last(files, "Service", "NoNewPrivileges") or "").lower() not in TRUE_WORDS:
+        if ini_canon(files, "Service", "NoNewPrivileges", YES_NO) != "yes":
             out.append("%s: NoNewPrivileges is not yes (#2899)" % name)
         service_limits = ini_keys(files, "Service") & {"StartLimitBurst", "StartLimitIntervalSec", "StartLimitInterval"}
         if service_limits or "StartLimitInterval" in ini_keys(files, "Unit"):
             out.append("%s: a start limit outside [Unit]'s StartLimitBurst= and StartLimitIntervalSec=; the tree "
                        "check does not model it (#2897)" % name)
-        burst = ini_last(files, "Unit", "StartLimitBurst")
-        if burst is None or not burst.isdigit() or not 1 <= int(burst) <= START_LIMIT_MAX:
+        burst = ini_canon(files, "Unit", "StartLimitBurst", BURST_FORM)
+        if burst is None or int(burst) > START_LIMIT_MAX:
             out.append("%s: StartLimitBurst is %s; must be 1 to %d, so a crash loop cannot wear the TPM counter (#2897)"
                        % (name, burst, START_LIMIT_MAX))
-        interval = ini_last(files, "Unit", "StartLimitIntervalSec")
-        if interval is None or re.fullmatch(r"0+(\.0*)?\s*[a-z]*", interval):
+        interval = ini_canon(files, "Unit", "StartLimitIntervalSec", INTERVAL_FORM)
+        if interval is None or interval.startswith("0"):
             out.append("%s: StartLimitIntervalSec is %s; a zero or unset interval does not bound restarts (#2897)"
                        % (name, interval))
         for key in EXEC_KEYS:
@@ -4537,7 +4690,8 @@ def resolved_violations(root):
     conf = main_conf(root, "resolved.conf")
     return [m for f in conf for m in byte_violations(f)] + [
         "50-agentos-uplink.conf: resolved %s is %s; must be no" % (key, v)
-        for key in ("LLMNR", "MulticastDNS") for v in [ini_last(conf, "Resolve", key)] if v != "no"]
+        for key in ("LLMNR", "MulticastDNS") for v in [ini_canon_or_why(conf, "Resolve", key, ("yes", "no", "resolve"))]
+        if v != "no"]
 
 
 # DEVSLOT-image (DEV-1, KRN-2, RES-2, D-189): a device driver is one vendor's protocol code built in a
@@ -4813,13 +4967,44 @@ def script_network_violations(with_network, net_dev):
 # IMG-mkosi-run-bound (#4690, D-276): the image's packages come only from the pinned, signature-checked
 # sources. mkosi v24.3 mounts its apt state at /var/lib/apt for this script, and apt writes an index into
 # lists/ only after its InRelease signature (Signed-By, the keyrings image/debian-archive-keyring.sh pins)
-# and hash checked. The pinned sources are snapshot.debian.org's: the trixie archive (mkosi.conf's Mirror=)
-# and one debian-security snapshot (image/security-snapshot.sh). Another index there (mkosi's local
-# /repository, a live archive) counts for nothing, so a package only it lists is refused.
+# and hash checked. The pinned sources are two snapshot.debian.org timestamps: the trixie archive's,
+# mkosi.conf's Mirror= (read from mkosi's config JSON), and the run's one debian-security snapshot, which
+# image.yml's mkosi line hands in as AGENTOS_SECURITY_SNAPSHOT (image/security-snapshot.sh, #5021). An
+# index from any other date (#6148 L3 B2: a signed but older snapshot), mkosi's local /repository or a
+# live archive counts for nothing, so a package only it lists is refused.
 APT_LISTS = "/var/lib/apt/lists"
-PINNED_INDEX = re.compile(r"snapshot\.debian\.org_archive_(?:debian_\d{8}T\d{6}Z_dists_trixie(?:-updates)?"
-                          r"|debian-security_\d{8}T\d{6}Z_dists_trixie-security)_main_binary-(?:amd64|all)_Packages"
-                          r"(\.gz|\.xz|\.bz2)?")
+SNAPSHOT_TS = re.compile(r"\d{8}T\d{6}Z")
+MIRROR_URL = re.compile(r"https://snapshot\.debian\.org/archive/debian/(\d{8}T\d{6}Z)/?")
+
+
+def pinned_index(mirror, security):
+    """The Packages index names of the trixie archive at snapshot MIRROR and debian-security at SECURITY
+    (each YYYYMMDDTHHMMSSZ), plain or compressed; group 1 is the compression suffix."""
+    return re.compile(r"snapshot\.debian\.org_archive_(?:debian_%s_dists_trixie(?:-updates)?"
+                      r"|debian-security_%s_dists_trixie-security)_main_binary-(?:amd64|all)_Packages(\.gz|\.xz|\.bz2)?"
+                      % (re.escape(mirror), re.escape(security)))
+
+
+def run_snapshots():
+    """(mirror timestamp, security timestamp, refusals) of this mkosi run: Mirror= from mkosi's config JSON
+    ($MKOSI_CONFIG), the security one from $AGENTOS_SECURITY_SNAPSHOT."""
+    out, mirror = [], None
+    try:
+        with open(os.environ.get("MKOSI_CONFIG", "/work/config.json")) as f:
+            m = MIRROR_URL.fullmatch(str(json.load(f).get("Mirror")))
+        mirror = m.group(1) if m else None
+        if not mirror:
+            out.append("mkosi's Mirror= is not a snapshot.debian.org debian snapshot; %s" % PACKAGE_WHY)
+    except (OSError, ValueError, AttributeError) as e:
+        out.append("mkosi's config JSON: unreadable (%s); %s" % (e, PACKAGE_WHY))
+    security = os.environ.get("AGENTOS_SECURITY_SNAPSHOT", "")
+    if not SNAPSHOT_TS.fullmatch(security):
+        out.append("AGENTOS_SECURITY_SNAPSHOT is %r, not one debian-security snapshot timestamp (image.yml's mkosi "
+                   "line sets it); %s" % (security, PACKAGE_WHY))
+        security = None
+    return mirror, security, out
+
+
 DPKG_STATUS = "var/lib/dpkg/status"
 # A Debian package file anywhere in the tree: a build step could install it outside apt's checked run.
 PACKAGE_FILES = (".deb", ".udeb", ".ddeb")
@@ -4845,16 +5030,16 @@ def deb822_fields(data, keys):
         yield para
 
 
-def pinned_packages(lists):
+def pinned_packages(lists, index):
     """((package, version, architecture) set, index names read, other Packages names seen, refusals) from
-    directory LISTS, apt's lists/."""
+    directory LISTS, apt's lists/: the indexes whose name INDEX (pinned_index) matches."""
     got, read, other, out = set(), [], [], []
     try:
         names = sorted(os.listdir(lists))
     except OSError as e:
         return got, read, other, ["%s: unreadable (%s); %s" % (lists, e.strerror, PACKAGE_WHY)]
     for n in names:
-        m = PINNED_INDEX.fullmatch(n)
+        m = index.fullmatch(n)
         if not m:
             if "Packages" in n:
                 other.append(n)
@@ -4877,10 +5062,11 @@ def pinned_packages(lists):
     return got, read, other, out
 
 
-def package_source_violations(status, lists):
+def package_source_violations(status, lists, mirror, security):
     """Every package dpkg's STATUS (bytes, the tree's var/lib/dpkg/status) has unpacked whose name, version
-    and architecture no pinned Packages index in directory LISTS lists, one line each."""
-    got, read, other, out = pinned_packages(lists)
+    and architecture no Packages index in directory LISTS from snapshots MIRROR and SECURITY lists, one
+    line each."""
+    got, read, other, out = pinned_packages(lists, pinned_index(mirror, security))
     if not read:
         return out + ["%s holds no Packages index from the pinned snapshot sources (other indexes: %s); %s"
                       % (lists, ", ".join(other) or "none", PACKAGE_WHY)]
@@ -4900,13 +5086,13 @@ def package_source_violations(status, lists):
     return out
 
 
-def tree_package_violations(root, lists=APT_LISTS):
+def tree_package_violations(root, mirror, security, lists=APT_LISTS):
     """package_source_violations for the tree at ROOT, its dpkg status read inside the tree (Conf's rules)."""
     try:
         status = Conf(root, DPKG_STATUS).content()
     except OSError as e:
         return ["%s: unreadable (%s); %s" % (DPKG_STATUS, e.strerror, PACKAGE_WHY)]
-    return package_source_violations(status, lists)
+    return package_source_violations(status, lists, mirror, security)
 
 
 def main():
@@ -4925,7 +5111,8 @@ def main():
     v = violations(root)
     if len(sys.argv) == 1:  # run by mkosi, in its script sandbox
         v += script_network_violations(os.environ.get("WITH_NETWORK"), script_net_dev())
-        v += tree_package_violations(root)
+        mirror, security, bad = run_snapshots()
+        v += bad or tree_package_violations(root, mirror, security)
     for line in v:
         print("image check: " + line)
     if v:
