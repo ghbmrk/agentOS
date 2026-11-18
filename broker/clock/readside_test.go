@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -60,6 +61,43 @@ func TestTIM1StateFileOthersCouldWriteLoadsAsLost(t *testing.T) {
 		if _, ok := BootEstimate(p, time.Unix(1e9, 0), testHost); ok {
 			t.Errorf("BootEstimate read %s", p)
 		}
+	}
+}
+
+// readState leaves no descriptor open, for the directory, its root or the
+// file, whether it reads the file or refuses it (garbage collection off,
+// so no finalizer closes one for it).
+func TestTIM1ReadStateClosesWhatItOpens(t *testing.T) {
+	fds := func() int {
+		es, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			t.Skip("no /proc/self/fd:", err)
+		}
+		return len(es)
+	}
+	dir := t.TempDir()
+	own, open := filepath.Join(dir, "own"), filepath.Join(dir, "open")
+	if err := os.WriteFile(own, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(open, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(open, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	before := fds()
+	for range 20 {
+		if b, err := readState(own); err != nil || string(b) != "x" {
+			t.Fatalf("readState(own) = %q, %v", b, err)
+		}
+		if _, err := readState(open); err == nil {
+			t.Fatal("readState read a file open to other uids")
+		}
+	}
+	if after := fds(); after != before {
+		t.Fatalf("%d descriptors open after 40 reads, want %d", after, before)
 	}
 }
 
