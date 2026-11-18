@@ -5,6 +5,7 @@ package seal
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -149,9 +150,10 @@ func TestEntriesDecodeCopiesNoValue(t *testing.T) {
 	}
 }
 
-// ReplaceAndPut refuses a bad entry name or a value past MaxEntry before it makes any slot, so a
-// passphrase swap with a bad name pays no Argon2 (#6048; CLK-1). Each slot makeSlot makes wipes
-// its slot key, so a refusal that made one would show a wipe. The file write is stubbed to fail.
+// ReplaceAndPut refuses a bad entry name, a value past MaxEntry or a new name past MaxEntries
+// before it makes any slot, so a passphrase swap pays no Argon2 for one, and withEntry refuses
+// each itself (#6048, #6071; CLK-1). Each slot makeSlot makes wipes its slot key, so a refusal
+// that made one would show a wipe. The file write is stubbed to fail.
 func TestABadEntryMakesNoSlot(t *testing.T) {
 	r, key, id := Recovery{Key: make([]byte, RecoveryLen)}, slices.Repeat([]byte{0x6b}, keyLen), make([]byte, idLen)
 	sl, err := makeSlot(id, key, r)
@@ -167,11 +169,26 @@ func TestABadEntryMakesNoSlot(t *testing.T) {
 		if ids, err := s.ReplaceAndPut(name, v, Swap{ID: sl.ID, F: r}); err == nil || ids != nil {
 			t.Errorf("ReplaceAndPut(%q) = %v, %v; want a refusal", name, ids, err)
 		}
+		if e, err := s.withEntry(name, v); err == nil || e != nil { // its own check, whatever its caller did
+			t.Errorf("withEntry(%q) = %d entries, %v; want a refusal", name, len(e), err)
+		}
+	}
+	for i := range MaxEntries { // a full store refuses a new name, before any slot
+		s.entries.Get()[fmt.Sprintf("x/%d", i)] = nil
+	}
+	if e, err := s.withEntry("x/new", nil); err == nil || e != nil {
+		t.Errorf("withEntry of a new name into a full store = %d entries, %v; want a refusal", len(e), err)
+	}
+	if ids, err := s.ReplaceAndPut("x/new", nil, Swap{ID: sl.ID, F: r}); err == nil || ids != nil {
+		t.Errorf("ReplaceAndPut of a new name into a full store = %v, %v; want a refusal", ids, err)
 	}
 	if len(*held) != 0 || len(s.f.Slots) != 1 || s.f.Slots[0].ID != sl.ID {
 		t.Errorf("a refused entry made a slot: %d wipes, slots %v", len(*held), s.f.Slots)
 	}
-	if _, err := s.ReplaceAndPut("x/ok", nil, Swap{ID: sl.ID, F: r}); err == nil || len(*held) == 0 {
+	if e, err := s.withEntry("x/0", []byte("v")); err != nil || len(e) != MaxEntries || string(e["x/0"]) != "v" {
+		t.Errorf("withEntry over a name in a full store = %d entries, %v; want it set", len(e), err)
+	}
+	if _, err := s.ReplaceAndPut("x/0", nil, Swap{ID: sl.ID, F: r}); err == nil || len(*held) == 0 {
 		t.Fatalf("a good entry: %v, %d wipes; want the stubbed write's error after a slot was made", err, len(*held))
 	}
 	s.Close() // a closed store says so first, whatever the name
