@@ -15,8 +15,9 @@
 # declaration, class row, measure). The public release build passes none and ships none.
 #
 # AGENTOS_SECURITY_SNAPSHOT, optional: the debian-security snapshot timestamp (YYYYMMDDTHHMMSSZ) the
-# image, its initrd and the guest roots install security packages from; image.yml resolves one per run
-# for both its builds (#5021). Unset, the build resolves the latest one itself.
+# image, its initrd and the guest roots install security packages from, or two, space-separated, the
+# second the fallback (#6198); image.yml resolves them once per run for both its builds (#5021).
+# Unset, the build resolves them itself.
 #
 # Reproducibility: every input is pinned (Debian snapshots, gVisor and Node by hash, OpenClaw by
 # lockfile, Go with -trimpath), file times are clamped to the commit time, and partition and
@@ -41,6 +42,8 @@ mkdir -p "$OUT"
 # its initrd) and to guest-base.sh, and stay in OUT for the reproduce job to compare.
 SECURITY_SNAPSHOT=${AGENTOS_SECURITY_SNAPSHOT-}
 [ -n "$SECURITY_SNAPSHOT" ] || SECURITY_SNAPSHOT=$(sh "$HERE/security-snapshot.sh" resolve)
+# resolve's first candidate, or the run before it when the first no longer serves its index (#6198).
+SECURITY_SNAPSHOT=$(sh "$HERE/security-snapshot.sh" pick "$SECURITY_SNAPSHOT")
 sh "$HERE/security-snapshot.sh" sources "$SECURITY_SNAPSHOT" >"$OUT/agentos.sources"
 rm -rf "$OUT/pkgmngr"
 install -D -m 0644 "$OUT/agentos.sources" "$OUT/pkgmngr/etc/apt/sources.list.d/mkosi.sources"
