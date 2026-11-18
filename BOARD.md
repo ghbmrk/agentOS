@@ -384,13 +384,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | REV-LOW-recall | REV-LOW-recall: legacy recall rollback findings (partial listing rolls back, notice understates lost work) | 23-Low review (2026-11-01); drop if #3426 deletes recallheld.go first | queued(later; tier A; brief to write) |
 | BROWSER-fixture-gate | BROWSER-fixture-gate: TestFixtureThroughTheGate signs in first and finds Playwright 1.63's headless shell. Release; from #4406. | #4406 | building (release; tier A; brief briefs/BROWSER-fixture-gate.md, PR #5950; startable) |
 | REV-CHK-links-path | REV-CHK-links-path: a bare name a wrapper or shell resolves through PATH joins the root side | #4390 package build | escalated(tier A; kernel lane) |
-| REV-CHK-links-egress | REV-CHK-links-egress: agentos-egress, which egress-setup runs as root, joins the root side | #4493 | queued (release; tier A; from #4493) |
 | MIG-4-plan-labels | MIG-4-plan-labels: close the Codex turn-metadata labels to the CLI's word lists | #3133 live Codex capture; #4595 (#4630) | queued (release; tier A; waits on the live Codex capture, #3133) |
-| REV-CHK-links-localui | REV-CHK-links-localui: agentos-localui's root -admit-port1 step goes through privfile | #4493 package build | building(tier A; sub B directories) |
-| KRN-2-std-files | a manager-opened StandardOutput/StandardError file on a non-root unit cannot sit in a world tree (KRN-2), found by D-271's review | D-271 (#4493) | building (release; tier A; found by D-271's review) |
 | IMG-mkosi-run-bound | IMG-mkosi-run-bound: CI runs the pinned mkosi on the committed config in its own job, out of build.sh's reach; finalize checks installed packages against the signed apt lists. Release; split from #4647. | #4647 | building (release; tier A) |
-| REV-CHK-links-ns3 | REV-CHK-links-ns3: what a root unit's EnvironmentFile= holds | #4677 build | building (release; tier A; kernel lane) |
-| REV-CHK-links-ns4 | REV-CHK-links-ns4: the rest of the root-side lint's reach (mount/swap, manager env, symlinked drop-ins, credstore, socket paths, TTYPath) | #4698 reviews | building (release; tier A; kernel lane) |
 | UPD-5r-b7f-step-session-d | UPD-5r-b7f-step-session-d: pin the ASSUMPTIONS row's kernel step-check list to the code (PLN-4, EVL-3) | #4734, #6023 | queued (release; tier A; from #4734 Security review) |
 | ENF-keys-print | ENF-keys-print: enforcer/channel.Key and the page RootKey print no key (DECOY-b-8, CLK-1) | #4833 | queued (tier A; sub B directories; split from #4833) |
 | MIG-4-recovery-r4j | MIG-4-recovery-r4j: the Recovery key page says it cannot tell the shown card when the recipient read fails | MIG-4-recovery-r4g (#4883) | queued (release; tier A; from #4883 L3) |
@@ -421,7 +416,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CLK-seal-swap-wipe-fu-b | CLK-seal-swap-wipe-fu-b: pin Unlock's no-clone decode, test the clone-after-refusal claims, name-check before swaps. Release; from #5939. | #5939 | building (release; tier A) |
 | IMG-keyring-minimal | IMG-keyring-minimal: the image builds trust a keyring of only the keys the pinned snapshot is signed with. Release; from #5932. | #5578, #5932 | building (release; tier A; gate files) |
 | REV-CHK-links-ns5 | REV-CHK-links-ns5: built trees' root user manager units, manager config and env files reach the unit lint | #4718 build | queued (release; tier A; kernel lane) |
-| REV-CHK-links-ns6 | REV-CHK-links-ns6: unit lint false refusals (template-instance and non-service .wants links, serial TTYPath) and the PIDFile= message | #6020 review | building (release; tier A; kernel lane) |
 | KEY-refusal-code | KEY-refusal-code: key.Refusal's code is a closed key.Code set only through key constructors (PLN-4, KRN-5) | #6021 review | building (release; tier A; blocks #4736) |
 | KEY-refusal-code-r1 | KEY-refusal-code-r1: #6032 release items (kernel.Refusal encoding, code-var reassignment lint, requal named set, skew note, guest.set types) | #6032 review | queued (release; tier A; after #6032) |
 | CORE-trim-headroom | CORE-trim-headroom: cut lines from the trusted core that do no work (test-only code, dead code, duplicates) to free headroom under the D-310 ceiling. Release. | D-310, #5732, #5757 | building (release; tier A) |
@@ -431,7 +425,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MOR-writer-match-fu | MOR-writer-match-fu: the wipe test counts the clear's own unit as a writer except for its known clear action, not by skipping it by name. Release; from #6066. | #6043, #6066 | building (release; tier B) |
 | BROWSER-mutants-kill | BROWSER-mutants-kill: broker/browser has no surviving mutant on a covered line, and K4 says CI runs the real-driver tests. From #6063. | #5952, #6063 | building (tier A) |
 | IMG-keyring-spikes-fu-b | IMG-keyring-spikes-fu-b: each mkosi tree's keyring pins are looked up per tree, Mirror and Repositories are pinned, and record-directory trees are handled. Release; from #6082. | #5983, #6082 | building (release; tier A) |
-| VULN-picomatch-bump | VULN-picomatch-bump: bump the guest's npm once a release bundles a picomatch fixed for GHSA-fc5q-39xc-vjpf; until then the accepted record states its reach. Release; from #6096. | #6096 | building (release; tier A; waits on a picomatch release) |
 | MOR-clear-owner | MOR-clear-owner: a refused MOR clear is shown to the owner in STATUS, like a failed wipe. Release; from #6110. | #6094, #6110 | building (release; tier A) |
 | IMG-keyring-spikes-fu-d | IMG-keyring-spikes-fu-d: the record-directory check also catches a tracked symlink to a tree and a lone mkosi.configure. Release; from #6116. | #6088, #6116 | building (release; tier B) |
 | LINT-dial-types | LINT-dial-types: the inference lint reads exact types through go/types instead of its hand-built inferencer, keeping every existing negative case and measuring the cost. Re-plan; from #6119. | #6028, #6119 | building (re-plan; tier A) |
@@ -439,7 +432,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MOR-wipe-status-e2e | MOR-wipe-status-e2e: a failed wipe's STATUS line is shown by a test that runs agentosd's wiring, not only wipeNote. Release; from #6095. | #6094, #6095 | queued (release; tier B) |
 | MOR-clear-owner-fu | MOR-clear-owner-fu: the failed-shutdown STATUS line stops asking for a restart when the record outlives one, and a boot test holds the record's sync and mode. Release; from #6126. | #6111, #6126 | queued (release; tier B) |
 | LINT-dial-unix-addr | LINT-dial-unix-addr: the inference lint reads UnixAddr{Name} for DialUnix once #5757 adds it. Release; from #6123. | #6028, #5757 | queued (release; tier A) |
-| KRN-2-manager-opens | KRN-2-manager-opens: OpenFile= on a non-root unit held to grants, and the rest of #4641's list | #4641 | queued (release; tier A; from #4641's build) |
+| KRN-2-manager-opens | KRN-2-manager-opens: OpenFile= on a non-root unit held to grants, and the rest of #4641's list | #4641 | building (release; tier A; from #4641's build) |
 | NET-2-decl-daily-bytes | NET-2-decl-daily-bytes: each CLK-14 account declaration states the daily bytes it sends, proposed by the plan and confirmed by the owner (D-248) | #5157 | queued (release; tier A) |
 | IMG-mkosi-run-bound-fu-initrd | IMG-mkosi-run-bound-fu-initrd: the default initrd's packages are held to the pinned, signature-checked indexes as the image's are. Release; from #6148. | #4690 | queued (release; tier A) |
 | IMG-mkosi-run-bound-fu-disk | IMG-mkosi-run-bound-fu-disk: image.yml's stage job keeps its own IMG-disk budget. Release; from #6148. | #4690 | queued (release; tier B) |
@@ -447,13 +440,12 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MOR-wipe-journal-fu2 | MOR-wipe-journal-fu2: a Path.Unit= dot-less-first test and bus_unit_violations' DefaultDependencies read by the exact-forms rule. Release; from #6130. | #6095, #6130 | queued (release; tier A; gate file) |
 | IMG-mkosi-run-bound-fu-local | IMG-mkosi-run-bound-fu-local: a local-only wrapper makes a local image build one command, with the mkosi line pinned equal to CI's. Release; from #6148. | #4690, #6148 | queued (release; tier B) |
 | MUT-plan-timing-skew | MUT-plan-timing-skew: the plan's reused suite time matches what a shard runs | #6156 | queued (release; tier A) |
-| MUT-plan-timeout-wording | MUT-plan-timeout-wording: the plan-timeout error leads with the rerun and says "at most three" runs | #6156 | building (release; tier A) |
-| MUT-plan-overflow | MUT-plan-overflow: mutgate runs a plan past GitHub's 256-job matrix limit (enforcer/nft's 296 shards on #6144) | #6144 | building (release; tier A) |
 | MUT-delete-covering | MUT-delete-covering: mutgate's `delete` runs only the tests that cover each deletion site | #6171 | queued (release; tier A) |
 | TEST-kernel-ctx-stop | TEST-kernel-ctx-stop: TestEveryKernelLegsContextEndsWithTheLeg covers freshStop and StopCancelled, killing the daemon.go:825 and :881 mutants that were waived as equivalent. Release; from #6041. | #6041, #6123, #6147 | queued (release; tier B) |
 | TEST-privfile-one-ns | TEST-privfile-one-ns: the OpenDir owner-refusal mutant is killed by one namespace test, not two. Release; from #6041. | #6041, #6146 | queued (release; tier B) |
 | BROWSER-shell-cache-heal | BROWSER-shell-cache-heal: a headless-shell cache entry that fails the hash falls back to a checked fresh download instead of failing every run until evicted. Release; from #6163. | #6064, #6163 | building (release; tier A; gate file) |
 | CTL-agent-starting-status | CTL-agent-starting-status: STATUS during boot shows a starting line, not 'not set up' or 'waiting for memory'. Release; from #6136 (UX). | #5429, #6136 | queued (release; tier A) |
+| BROWSER-shell-cache-warning-cmd | BROWSER-shell-cache-warning-cmd: the headless-shell cache warning names the delete command for the bad entry. Release; rides the next ci.yml PR. | #6175, #6180 | queued (release; tier A; gate file) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -505,4 +497,6 @@ issue #6077: body has no board-row block
 issue #6157: body has no board-row block
 issue #6168: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #6184: no section 'Tooling and CI' in BOARD.md
+issue #6192: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #6193: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 ```
