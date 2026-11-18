@@ -3456,7 +3456,8 @@ def sysusers_tpm_violations(root):
 
 def uid0_violations(root):
     """#4641 R-g: no user record but root's has uid 0: an etc/passwd line, a userdb .user record (its "uid"
-    read as JSON) or a sysusers.d u line whose ID's uid part is 0. Anything at uid 0 is root under another name,
+    read as JSON) or a sysusers.d u line whose ID's uid part is 0, each compared as a number (00 is 0, as glibc's
+    strtoul and systemd's parse_uid read it), and a uid that does not read as a plain decimal is refused. Anything at uid 0 is root under another name,
     outside every check that reads User=root."""
     out = []
     try:
@@ -3467,7 +3468,9 @@ def uid0_violations(root):
         text, out = "", ["etc/passwd: unreadable (%s); the tree check never passes it (#4641)" % e.strerror]
     for n, ln in enumerate(text.splitlines(), 1):
         w = ln.split(":")
-        if len(w) > 2 and w[2].strip() == "0" and w[0] != "root":
+        if len(w) < 3 or not w[2].isdigit() or not w[2].isascii():
+            out.append("etc/passwd:%d: a line whose uid is not a plain decimal number (#4641)" % n)
+        elif int(w[2]) == 0 and w[0] != "root":
             out.append("etc/passwd:%d: %s has uid 0; only root may (#4641)" % (n, w[0]))
     for f in conf_files(root, ("etc/userdb", "usr/local/lib/userdb", "usr/lib/userdb"), ".user"):
         try:
@@ -3475,7 +3478,8 @@ def uid0_violations(root):
         except (OSError, ValueError) as e:
             out.append("%s: unreadable (%s); the tree check never passes it (#4641)" % (f.rel, e))
             continue
-        if not isinstance(rec, dict) or rec.get("uid") == 0 and rec.get("userName") != "root":
+        uid = rec.get("uid") if isinstance(rec, dict) else None
+        if not isinstance(rec, dict) or (uid is not None and (type(uid) is not int or uid == 0) and rec.get("userName") != "root"):
             out.append("%s: a user record with uid 0 other than root's, or not a JSON object (#4641)" % f.rel)
     for f in conf_files(root, conf_paths("sysusers.d")):
         try:
@@ -3485,8 +3489,15 @@ def uid0_violations(root):
             continue
         for n, ln in enumerate(lines, 1):
             w = ln.split()
-            if len(w) > 2 and w[0].rstrip("!") == "u" and w[2].split(":", 1)[0] == "0" and w[1] != "root":
+            if len(w) < 3 or w[0].rstrip("!") != "u" or w[1] == "root":
+                continue
+            uid = w[2].split(":", 1)[0]
+            if uid.isdigit() and uid.isascii() and int(uid) == 0:
                 out.append("%s:%d: gives %s uid 0; only root may (#4641)" % (f.rel, n, w[1]))
+            elif not (uid == "-" or uid.isdigit() and uid.isascii()):
+                # A path takes the uid of the file's owner (root's for most), and quotes or an escape are read
+                # by systemd's word splitter, which this does not model.
+                out.append("%s:%d: gives %s a uid that is not - or a plain decimal number (#4641)" % (f.rel, n, w[1]))
     return out
 
 def fstab_noexec_violations(root):

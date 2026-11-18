@@ -2180,24 +2180,36 @@ class KeeperTreeTest(unittest.TestCase):
         # #4641 R-g: a passwd line, a userdb record or a sysusers.d u line at uid 0.
         write(self.root, "etc/passwd", "root:x:0:0:root:/root:/bin/sh\nagentos-x:x:900:900::/:/usr/sbin/nologin\n")
         self.assertEqual(self.v(), [])
-        write(self.root, "etc/passwd", "root:x:0:0:root:/root:/bin/sh\ntoor:x:0:0::/:/bin/sh\n")
-        self.assertEqual(self.v(), ["etc/passwd:2: toor has uid 0; only root may (#4641)"])
+        for uid in ("0", "00", "000"):
+            write(self.root, "etc/passwd", "root:x:0:0:root:/root:/bin/sh\ntoor:x:%s:0::/:/bin/sh\n" % uid)
+            self.assertEqual(self.v(), ["etc/passwd:2: toor has uid 0; only root may (#4641)"])
+        for uid in (" 0", "+0", "0x0", ""):
+            write(self.root, "etc/passwd", "root:x:0:0:root:/root:/bin/sh\ntoor:x:%s:0::/:/bin/sh\n" % uid)
+            self.assertEqual(self.v(), ["etc/passwd:2: a line whose uid is not a plain decimal number (#4641)"])
         (self.root / "etc/passwd").unlink()
         rec = write(self.root, "usr/lib/userdb/toor.user", '{"userName": "toor", "uid": 0}')
         self.assertEqual(self.v(), ["usr/lib/userdb/toor.user: a user record with uid 0 other than root's, or not a JSON "
                                     "object (#4641)"])
+        for bad in ('{"userName": "toor", "uid": 0.0}', '{"userName": "toor", "uid": "0"}', '{"userName": "toor", "uid": false}'):
+            rec.write_text(bad)
+            self.assertEqual(len(self.v()), 1, bad)
         rec.write_text('{"userName": "root", "uid": 0}')
         self.assertEqual(self.v(), [])
         rec.unlink()
         sysusers = self.root / "usr/lib/sysusers.d/agentos-setup.conf"
         good = sysusers.read_text()
         n = len(good.splitlines()) + 1
-        for line in ("u toor 0", "u! toor 0:900", "u toor 0 - /"):
+        for line in ("u toor 0", "u! toor 0:900", "u toor 0 - /", "u toor 00", "u toor 000:900"):
             with self.subTest(line):
                 sysusers.write_text(good + line + "\n")
                 self.assertEqual(self.v(), ["usr/lib/sysusers.d/agentos-setup.conf:%d: gives toor uid 0; only root may "
                                             "(#4641)" % n])
-        for line in ("u root 0", "u toor 900", "u toor -:0"):
+        for line in ("u toor +0", "u toor 0x0", 'u toor "0"', "u toor /bin/sh", "u toor /etc/x:900"):
+            with self.subTest(line):
+                sysusers.write_text(good + line + "\n")
+                self.assertEqual(self.v(), ["usr/lib/sysusers.d/agentos-setup.conf:%d: gives toor a uid that is not - or a "
+                                            "plain decimal number (#4641)" % n])
+        for line in ("u root 0", "u toor 900", "u toor -:0", "u toor -"):
             with self.subTest(line):
                 sysusers.write_text(good + line + "\n")
                 self.assertEqual(self.v(), [])

@@ -3084,7 +3084,7 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 				// one it refuses) runs every command but ExecStart= with
 				// full privileges (#4641 R-c).
 				asRoot = true
-			case k == "AmbientCapabilities" && !userCaps(v):
+			case k == "AmbientCapabilities" && !userCaps(v, strings.HasPrefix(relTo(c.root, f), "image/camnode/")):
 				// A capability that reads, writes or runs as root
 				// makes the unit root in all but uid (#4641).
 				asRoot = true
@@ -3328,17 +3328,21 @@ var falseWords = map[string]bool{"0": true, "no": true, "n": true, "false": true
 // writes or changes a file another uid owns, sets an id or runs code as
 // root (CAP_SETUID, CAP_DAC_OVERRIDE and CAP_SYS_ADMIN make it root in all
 // but uid, #4641). A closed list: a number, an inverted ~ list or any other
-// name counts as root. systemd reads the names in any case.
-func userCaps(v string) bool {
+// name counts as root. systemd reads the names in any case. CAP_SYS_BOOT
+// counts only on the camera node (camnode, a line in a file under
+// image/camnode/), whose kernel has no kexec: elsewhere it grants
+// kexec_file_load, which boots the signed kernel with any initramfs as
+// PID 1, with no firmware wipe between (Lens on #6189).
+func userCaps(v string, camnode bool) bool {
 	for _, w := range strings.Fields(v) {
-		if !userCapNames[strings.ToUpper(w)] {
+		if w = strings.ToUpper(w); !userCapNames[w] && !(camnode && w == "CAP_SYS_BOOT") {
 			return false
 		}
 	}
 	return true
 }
 
-var userCapNames = map[string]bool{"CAP_NET_BIND_SERVICE": true, "CAP_NET_RAW": true, "CAP_SYS_BOOT": true, "CAP_WAKE_ALARM": true, "CAP_BLOCK_SUSPEND": true}
+var userCapNames = map[string]bool{"CAP_NET_BIND_SERVICE": true, "CAP_NET_RAW": true, "CAP_WAKE_ALARM": true, "CAP_BLOCK_SUSPEND": true}
 
 // managerPaths are the [Service] settings naming a file PID 1 itself
 // reads as root, whatever the unit's User= (#4718 item 5).

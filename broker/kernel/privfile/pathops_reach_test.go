@@ -618,6 +618,7 @@ func TestUserUnitOpens(t *testing.T) {
 		"an ambient setuid in lower case":     {unit, head + "AmbientCapabilities=cap_net_raw cap_setuid\nWorkingDirectory=/tmp\n", `path "/tmp"`},
 		"an ambient capability by number":     {unit, head + "AmbientCapabilities=7\nWorkingDirectory=/tmp\n", `path "/tmp"`},
 		"an inverted ambient list":            {unit, head + "AmbientCapabilities=~CAP_NET_RAW\nWorkingDirectory=/tmp\n", `path "/tmp"`},
+		"an ambient reboot on the core":       {unit, head + "AmbientCapabilities=CAP_SYS_BOOT\nWorkingDirectory=/tmp\n", `path "/tmp"`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(base)
@@ -636,7 +637,7 @@ func TestUserUnitOpens(t *testing.T) {
 		"a grant's own bind destination": head + "BindPaths=/var/lib/agentos/d:/run/agentos-x/d\n",
 		"an empty reset":                 head + "OpenFile=\nBindPaths=\n",
 		"start-only permissions off":     head + "PermissionsStartOnly=OFF\nPermissionsStartOnly=f\nPermissionsStartOnly=0\nWorkingDirectory=/tmp\n",
-		"network ambient capabilities":   head + "AmbientCapabilities=CAP_NET_BIND_SERVICE cap_net_raw\nAmbientCapabilities=CAP_SYS_BOOT CAP_WAKE_ALARM CAP_BLOCK_SUSPEND\nAmbientCapabilities=\nWorkingDirectory=/tmp\n",
+		"network ambient capabilities":   head + "AmbientCapabilities=CAP_NET_BIND_SERVICE cap_net_raw\nAmbientCapabilities=CAP_WAKE_ALARM CAP_BLOCK_SUSPEND\nAmbientCapabilities=\nWorkingDirectory=/tmp\n",
 	} {
 		t.Run("passes "+name, func(t *testing.T) {
 			files := clone(base)
@@ -646,6 +647,15 @@ func TestUserUnitOpens(t *testing.T) {
 			}
 		})
 	}
+	// The camera node's kernel has no kexec, so its reboot capability
+	// reads as non-root there alone (test_image_camnode pins both off).
+	t.Run("passes the camera node's ambient reboot", func(t *testing.T) {
+		files := clone(base)
+		files["image/camnode/external/board/common/overlay/etc/systemd/system/agentos-c.service"] = head + "AmbientCapabilities=cap_sys_boot\nWorkingDirectory=/tmp\n"
+		if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
+			t.Fatal(err)
+		}
+	})
 	// A built tree: our unit's opened file in a package's grant.
 	t.Run("refuses a built unit's opened file in a package's grant", func(t *testing.T) {
 		pkg := map[string]any{"unit": "pkg-g.service", "files": []any{map[string]any{"path": "/usr/lib/systemd/system/pkg-g.service", "ours": false,
