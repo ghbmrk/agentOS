@@ -1,5 +1,5 @@
 #!/bin/sh
-# Stage the AgentOS device image's tree (PLAN P2-1). Run as root on Linux with network access to
+# Stage the agentOS device image's tree (PLAN P2-1). Run as root on Linux with network access to
 # snapshot.debian.org, storage.googleapis.com (gVisor), nodejs.org and
 # registry.npmjs.org (OpenClaw guest), ffmpeg.org or archive.ubuntu.com (libavcodec), github.com
 # (llama.cpp) and huggingface.co (the embedding model), and the Go module proxy. CI does this in
