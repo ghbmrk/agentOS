@@ -1983,8 +1983,12 @@ class ImageTest(unittest.TestCase):
 
 
     def test_an_isolate_keeps_mor_set(self):
-        # MOR-emergency-isolate (#5947, HW-8): one boot that isolates emergency.target and then rescue.target,
+        # MOR-emergency-isolate (#5947, HW-8): a boot that isolates emergency.target and then rescue.target,
         # each followed by "systemctl default", then powers off; then a fresh QEMU process on the same drive.
+        # Both targets run agentos-fallback first (mkosi.conf's drop-ins), which reboots while the boot entry
+        # still counts tries (the first boot of a release: the first CI run of this test rebooted there, an
+        # orderly stop that clears MOR). So the probe reboots once the first boot is blessed, and isolates on
+        # the blessed boot, where the fallback stays up: the box the issue's failure path is about.
         # A probe that an isolate leaves running waits for the page authority's staging, prints the staged
         # certificate's hash and both units' states after each step, and whether the sealed pair is unchanged
         # (its bytes stay in the guest). agentos-mor.service stays active through both, so its clear runs only
@@ -1993,6 +1997,8 @@ class ImageTest(unittest.TestCase):
         d = self.dir / "isolate-in"
         d.mkdir(exist_ok=True)
         (d / "isolate.sh").write_text(
+            "if [ -e /sys/firmware/efi/efivars/LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f ]; then\n"
+            "\techo HOSTCHECK-ISOLATE counted; exec systemctl --no-block reboot\nfi\n"
             "pair() { sha256sum </run/agentos-setup/page-ca | cut -c1-64; }\n"
             "say() { echo \"HOSTCHECK-ISOLATE $1 cert $(sha256sum </run/agentos-page-ca/authority.der | cut -c1-64)"
             " pair $([ -n \"$first\" ] && [ \"$(pair)\" = \"$first\" ] && echo same || echo changed)"
@@ -2007,13 +2013,15 @@ class ImageTest(unittest.TestCase):
             "exec systemctl --no-block poweroff\n")
         (d / "probe.service").write_text(
             "[Unit]\nDescription=hostcheck isolate probe (QEMU host check only)\n"
-            "After=agentos-keeper-pageca.service multi-user.target\nIgnoreOnIsolate=yes\n"
+            "After=agentos-keeper-pageca.service multi-user.target boot-complete.target systemd-bless-boot.service\n"
+            "IgnoreOnIsolate=yes\n"
             "[Service]\nType=exec\nImportCredential=hostcheck.isolate\n"
             "StandardOutput=journal+console\nStandardError=journal+console\n"
             "ExecStart=/bin/sh -c 'exec /bin/sh \"$$CREDENTIALS_DIRECTORY/hostcheck.isolate\"'\n")
         (d / "responder.conf").write_text("[Unit]\nWants=hostcheck-isolate.service\n")
         phases = d / "phases.json"
-        phases.write_text(json.dumps({"isolate": [[OS_START, "os"], ["HOSTCHECK-ISOLATE done", None]],
+        phases.write_text(json.dumps({"isolate": [[OS_START, "os"], ["HOSTCHECK-ISOLATE counted", None],
+                                                  [OS_START, "os"], ["HOSTCHECK-ISOLATE done", None]],
                                       "after": [[OS_START, "os"], ["HOSTCHECK-READY", "serial:poweroff\n"]]}))
         argv = self.argv("isolate", "isolate,after", phases) + [
             "--credential", f"hostcheck.isolate={d / 'isolate.sh'}",
