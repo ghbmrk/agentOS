@@ -89,10 +89,12 @@ def nodump(root):
 # The image's noexec mounts (UPD-10): its fstab and /tmp drop-in, copied from mkosi.extra into every
 # tree nodump() makes, since the tree check refuses a tree without them.
 NOEXEC_FILES = ("etc/fstab", "usr/lib/systemd/system/tmp.mount.d/50-agentos-noexec.conf")
+# The journal on disk (#6078), which the tree check also refuses a tree without.
+JOURNAL_FILES = ("usr/lib/systemd/journald.conf.d/50-agentos-persist.conf",)
 
 
 def noexec(root):
-    for rel in NOEXEC_FILES + MAIN_SIDE_FILES:
+    for rel in NOEXEC_FILES + MAIN_SIDE_FILES + JOURNAL_FILES:
         write(root, rel, (MK / "mkosi.extra" / rel).read_text())
 
 
