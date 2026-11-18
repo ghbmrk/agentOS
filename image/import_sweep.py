@@ -208,11 +208,11 @@ def walk(top):
     return os.walk(top, onerror=cannot_read)
 
 
-def is_file(path):
-    """Whether PATH, links followed, is a regular file. One gone since the walk listed it is not; any other
-    stat error (a link loop, EIO) fails the run instead of skipping the entry (#6073)."""
+def is_file(path, follow=True):
+    """Whether PATH (links followed unless FOLLOW is false) is a regular file. One gone since the walk listed
+    it is not; any other stat error (a link loop, EIO) fails the run instead of skipping the entry (#6073)."""
     try:
-        return stat.S_ISREG(os.stat(path).st_mode)
+        return stat.S_ISREG(os.stat(path, follow_symlinks=follow).st_mode)
     except FileNotFoundError:
         return False
     except OSError as e:
@@ -228,7 +228,7 @@ def tree_files(top, prefix="/", skip=()):
             dirs[:] = [x for x in dirs if x not in skip]
         for n in names:
             p = os.path.join(d, n)
-            if stat.S_ISREG(os.lstat(p).st_mode) and is_elf(p):
+            if is_file(p, follow=False) and is_elf(p):
                 files[os.path.normpath(os.path.join(prefix, rel, n))] = p
     return files
 
