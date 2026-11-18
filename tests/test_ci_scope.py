@@ -418,6 +418,53 @@ def machines_problems(ci):
     return problems
 
 
+SHELL_ZIP = "~/.cache/agentos-cft/shell.zip"
+SHELL_KEY = "key: cft-headless-shell-${{ steps.image.outputs.os }}-${{ env.CFT_SHELL_SHA256 }}"
+MAIN_PUSH = "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+
+
+def shell_cache_problems(ci):
+    """Why broker-checks' headless-shell cache could let a PR write main's cache or run an
+    unchecked zip (#6064); empty when it restores first, hash-checks, then saves on main only."""
+    if ci.count("\n  broker-checks:\n") != 1:
+        return ["no single broker-checks job"]
+    body = ci[ci.index("\n  broker-checks:\n") + 1:]
+    nxt = re.search(r"^  [a-z][a-z-]*:\n", body[1:], re.M)
+    body = body[:nxt.start() + 1] if nxt else body
+    steps = re.split(r"(?m)^(?=      - )", body)[1:]
+    uses = [s for s in steps if SHELL_ZIP in s or "CFT_SHELL" in s or "agentos-cft" in s]
+    names = [s.split("\n", 1)[0] for s in uses]
+    if len(uses) != 3:
+        return ["want restore, browser step, save; got %r" % names]
+    restore, run, save = uses
+    problems = []
+    if "uses: actions/cache/restore@" not in restore or "        id: cft\n" not in restore:
+        problems.append("the first step is not the cft cache restore")
+    if re.search(r"^        if:", restore, re.M):
+        problems.append("the restore is conditional")
+    for name, step in (("restore", restore), ("save", save)):
+        if f"          path: {SHELL_ZIP}\n" not in step or f"          {SHELL_KEY}\n" not in step:
+            problems.append(f"the {name} is not keyed on the shell's pin at {SHELL_ZIP}")
+        if "restore-keys" in step:
+            problems.append(f"the {name} takes a fallback key")
+    if "uses: actions/cache/save@" not in save:
+        problems.append("the last step is not the cft cache save")
+    if f"        if: {MAIN_PUSH} && steps.cft.outputs.cache-hit != 'true'\n" not in save:
+        problems.append("the save runs outside a push to main")
+    zip_at = '          zip="$HOME/.cache/agentos-cft/shell.zip"\n'
+    check = '          echo "$CFT_SHELL_SHA256  $zip" | sha256sum -c -\n'
+    unzip = '          unzip -q "$zip" -d "$RUNNER_TEMP/shell"\n'
+    if not all(x in run for x in (zip_at, check, unzip)) or not run.index(zip_at) < run.index(check) < run.index(unzip):
+        problems.append("the browser step does not hash-check the zip before unzipping it")
+    elif run.count(".zip") != 1:
+        problems.append("the browser step reads a zip other than the checked one")
+    if "uses: actions/cache@" in body:
+        problems.append("a combined restore-and-save cache")
+    if ci.count("      CFT_SHELL_SHA256: ") != 1 or "\n    env:\n" not in body.split("\n    steps:\n", 1)[0]:
+        problems.append("the shell's hash is not pinned once, in broker-checks' job env")
+    return problems
+
+
 GO_STRING = re.compile(r'"((?:[^"\\\n]|\\.)*)"|`([^`]*)`')
 GO_JOIN = re.compile(r'filepath\.Join\(((?:\s*(?:"[^"\n]*"|`[^`]*`)\s*,?)+)\)')
 GO_EMBED = re.compile(r"^//go:embed (.+)$", re.M)
@@ -568,6 +615,34 @@ class WiringTest(unittest.TestCase):
             self.assertIn("go-build", save)
         for name in ("tests.test_risk_tier", "tests.test_product_name", "tests.test_specslice"):
             self.assertIn(name, records_audit.records_run_tests())
+
+    def test_the_headless_shell_cache_restores_on_prs_saves_on_main_and_is_hash_checked(self):
+        # BROWSER-fixture-ci-fu (#6064, K4): a PR restores the shell zip but never saves it, so no
+        # PR writes what main restores, and the zip is hash-checked after any restore.
+        ci = (WORKFLOWS / "ci.yml").read_text()
+        self.assertEqual(shell_cache_problems(ci), [])
+        save_if = f"        if: {MAIN_PUSH} && steps.cft.outputs.cache-hit != 'true'\n"
+        check = '          echo "$CFT_SHELL_SHA256  $zip" | sha256sum -c -\n'
+        for name, (old, new) in {
+            "save on every event": (save_if, "        if: steps.cft.outputs.cache-hit != 'true'\n"),
+            "save unconditional": (save_if, ""),
+            "hash check dropped": (check, ""),
+            "unzip before the check": (check, ""),
+            "a fallback restore key": (f"          {SHELL_KEY}\n      - name: The browser gate",
+                                       f"          {SHELL_KEY}\n          restore-keys: cft-\n      - name: The browser gate"),
+            "key off the pin": (f"          {SHELL_KEY}\n      - name: The browser gate",
+                                "          key: cft-headless-shell\n      - name: The browser gate"),
+            "unchecked second zip": ('          unzip -q "$zip"', '          unzip -q "$RUNNER_TEMP/shell.zip"'),
+            "combined cache action": ("uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2\n        with:\n          path: ~/.cache/agentos-cft",
+                                      "uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2\n        with:\n          path: ~/.cache/agentos-cft"),
+        }.items():
+            if name == "unzip before the check":
+                unzip = '          unzip -q "$zip" -d "$RUNNER_TEMP/shell"\n'
+                bad = ci.replace(check + unzip, unzip + check)
+            else:
+                bad = ci.replace(old, new)
+            self.assertNotEqual(bad, ci, name)
+            self.assertTrue(shell_cache_problems(bad), name)
 
     def test_a_spec_only_change_runs_full_ci(self):
         # REQ: CI-PATHS
