@@ -31,6 +31,7 @@ import (
 	"bytes"
 	"fmt"
 	"go/ast"
+	"go/constant"
 	"go/importer"
 	"go/parser"
 	"go/token"
@@ -224,7 +225,7 @@ var unixDialCalls = map[string]map[string]string{
 }
 
 // escapes are imports past the checks above: foreign code, unchecked
-// memory (and go:linkname, which needs it), loaded code, and processes.
+// memory (and the linkname directive, which needs it), loaded code, and processes.
 var escapes = map[string]bool{"C": true, "unsafe": true, "plugin": true, "os/exec": true}
 
 // thirdPartyNet are the third-party packages in the graph allowed a
@@ -463,66 +464,208 @@ func httpReach(ps []listed) map[string]bool {
 	return memo
 }
 
-// sourceUse reports, in one source file of broker package rel, by what its
-// imports are called there (renamed and dot imports included):
+// loaded is one package's files, parsed and type-checked once for every
+// rule below (#6120): each rule reads what a name denotes from go/types,
+// never from its spelling or a guess at its type.
+type loaded struct {
+	fset  *token.FileSet
+	files []*ast.File
+	src   [][]byte
+	pkg   *types.Package
+	info  *types.Info
+	err   error // the first type error
+	// params are the parameters and receivers of the functions declared
+	// here (a func literal's are not); wrote, each variable a statement
+	// assigns or a part of, or takes the address of, other than by its own
+	// := declaration; defs, a variable's := statement, as its first name.
+	params map[*types.Var]param
+	wrote  map[types.Object]bool
+	defs   map[*types.Var]*ast.AssignStmt
+}
+
+// param is a declared function's parameter: the function, as "h" or ".m"
+// for a method, and its index, or -1 for a receiver.
+type param struct {
+	fn string
+	i  int
+}
+
+// load parses and type-checks the named files of the package in dir as
+// package rel, reading its imports from the export data go list builds.
+func load(t *testing.T, dir string, names []string, rel string) *loaded {
+	t.Helper()
+	l := &loaded{fset: token.NewFileSet(), params: map[*types.Var]param{}, wrote: map[types.Object]bool{}, defs: map[*types.Var]*ast.AssignStmt{}}
+	for _, name := range names {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := parser.ParseFile(l.fset, filepath.Join(dir, name), b, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l.files, l.src = append(l.files, f), append(l.src, b)
+	}
+	l.info = &types.Info{
+		Types:      map[ast.Expr]types.TypeAndValue{},
+		Defs:       map[*ast.Ident]types.Object{},
+		Uses:       map[*ast.Ident]types.Object{},
+		Selections: map[*ast.SelectorExpr]*types.Selection{},
+		Instances:  map[*ast.Ident]types.Instance{},
+	}
+	conf := types.Config{Importer: importer.ForCompiler(l.fset, "gc", exportData(t, l.files)), Error: func(err error) {
+		if l.err == nil {
+			l.err = err
+		}
+	}}
+	l.pkg, _ = conf.Check(module+rel, l.fset, l.files, l.info)
+	// A write to x.f, x[i] or *x writes x; a := names its new variables in
+	// Defs and those it assigns again in Uses.
+	mark := func(e ast.Expr) {
+		for e != nil {
+			switch x := e.(type) {
+			case *ast.SelectorExpr:
+				e = x.X
+			case *ast.IndexExpr:
+				e = x.X
+			case *ast.StarExpr:
+				e = x.X
+			case *ast.ParenExpr:
+				e = x.X
+			case *ast.Ident:
+				if o := l.info.Uses[x]; o != nil {
+					l.wrote[o] = true
+				}
+				return
+			default:
+				return
+			}
+		}
+	}
+	for _, f := range l.files {
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			fn, i := fd.Name.Name, 0
+			if fd.Recv != nil {
+				fn = "." + fn
+				for _, nm := range fd.Recv.List[0].Names {
+					if v, ok := l.info.Defs[nm].(*types.Var); ok {
+						l.params[v] = param{fn, -1}
+					}
+				}
+			}
+			for _, p := range fd.Type.Params.List {
+				if len(p.Names) == 0 {
+					i++
+				}
+				for _, nm := range p.Names {
+					if v, ok := l.info.Defs[nm].(*types.Var); ok {
+						l.params[v] = param{fn, i}
+					}
+					i++
+				}
+			}
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.AssignStmt:
+				for _, e := range n.Lhs {
+					mark(e)
+				}
+				if v, ok := l.info.Defs[ident(n.Lhs[0])].(*types.Var); ok && n.Tok == token.DEFINE && len(n.Rhs) == 1 {
+					l.defs[v] = n
+				}
+			case *ast.RangeStmt:
+				if n.Tok == token.ASSIGN {
+					mark(n.Key)
+					mark(n.Value)
+				}
+			case *ast.IncDecStmt:
+				mark(n.X)
+			case *ast.UnaryExpr:
+				if n.Op == token.AND {
+					mark(n.X)
+				}
+			}
+			return true
+		})
+	}
+	return l
+}
+
+// ident is e as an identifier, or nil.
+func ident(e ast.Expr) *ast.Ident {
+	id, _ := e.(*ast.Ident)
+	return id
+}
+
+// qualified is "path.Name" for e naming another package's object through
+// its import (p.Name, renamed or not), or "".
+func qualified(info *types.Info, e ast.Expr) string {
+	se, ok := e.(*ast.SelectorExpr)
+	if !ok {
+		return ""
+	}
+	pn, ok := info.Uses[ident(se.X)].(*types.PkgName)
+	if !ok {
+		return ""
+	}
+	return pn.Imported().Path() + "." + se.Sel.Name
+}
+
+// sourceUse is fileUse over the one file at path, as package rel. Its type
+// errors are not reported here, so each fixture shows the rule that
+// catches it; packageUse, which the graph's walk runs, reports them.
+func sourceUse(t *testing.T, path, name, rel string) []string {
+	t.Helper()
+	return fileUse(load(t, filepath.Dir(path), []string{filepath.Base(path)}, rel), 0, name, rel)
+}
+
+// fileUse reports, in file i of broker package rel, by the object each
+// name denotes (renamed imports included; a dot import is reported):
 //   - any client name (clients), except in modelroute a client type used
 //     as a composite literal's type that sets its own non-nil transport or
 //     dialer (clientTypes), or as a pointer type;
 //   - any name from net, syscall, or x/sys/unix outside rel's netOK uses;
-//   - any dial or Listen not called directly, or not on "unix".
-func sourceUse(t *testing.T, path, name, rel string) []string {
-	t.Helper()
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, path, nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	local := map[string]string{} // local name -> import path
+//   - any dial or Listen (by name, on any value, so a wrapper or an
+//     interface of the same name counts) not called directly, or not on
+//     the constant "unix".
+func fileUse(l *loaded, i int, name, rel string) []string {
+	f, info := l.files[i], l.info
 	var bad []string
 	for _, im := range f.Imports {
 		p, _ := strconv.Unquote(im.Path.Value)
-		if clients[p] == nil && !socketPkgs[p] && p != "os" {
-			continue
-		}
-		n := p[strings.LastIndex(p, "/")+1:]
-		if im.Name != nil {
-			n = im.Name.Name
-		}
-		if n == "." {
+		if im.Name != nil && im.Name.Name == "." && (clients[p] != nil || socketPkgs[p] || p == "os") {
 			bad = append(bad, name+": dot-imports "+p)
 		}
-		local[n] = p
 	}
 	uses := map[string]bool{}
 	for _, u := range netOK[rel].uses {
 		uses[u] = true
 	}
-	sel := func(e ast.Expr) string {
-		if se, ok := e.(*ast.SelectorExpr); ok {
-			if id, ok := se.X.(*ast.Ident); ok && local[id.Name] != "" {
-				return local[id.Name] + "." + se.Sel.Name
-			}
-		}
-		return ""
-	}
+	sel := func(e ast.Expr) string { return qualified(info, e) }
 	at := func(n ast.Node, what string) {
-		bad = append(bad, fmt.Sprintf("%s:%d: %s", name, fset.Position(n.Pos()).Line, what))
+		bad = append(bad, fmt.Sprintf("%s:%d: %s", name, l.fset.Position(n.Pos()).Line, what))
 	}
 	literalType := map[ast.Expr]bool{} // client types built as checked literals
 	callee := map[ast.Expr]bool{}
-	// Identifiers bound by := to a checked &http.Transport{} literal, which
-	// a client's Transport may name.
-	transports := map[string]bool{}
+	// Variables bound by := to a checked &http.Transport{} literal, which a
+	// client's Transport may name.
+	transports := map[types.Object]bool{}
 	ast.Inspect(f, func(n ast.Node) bool {
 		if as, ok := n.(*ast.AssignStmt); ok && as.Tok == token.DEFINE && len(as.Lhs) == len(as.Rhs) {
-			for i, l := range as.Lhs {
-				if id, ok := l.(*ast.Ident); ok && transportLit(as.Rhs[i], sel) {
-					transports[id.Name] = true
+			for j, lhs := range as.Lhs {
+				if o := info.Defs[ident(lhs)]; o != nil && transportLit(as.Rhs[j], sel) {
+					transports[o] = true
 				}
 			}
 		}
 		return true
 	})
+	checkedTransport := func(id *ast.Ident) bool { return transports[info.Uses[id]] }
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.CompositeLit:
@@ -531,7 +674,7 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 			if !isClient {
 				return true
 			}
-			if key != "" && !setsChecked(n, key, sel, transports) {
+			if key != "" && !setsChecked(n, key, sel, checkedTransport) {
 				at(n, full+" without its own "+key)
 			}
 			if unixDialers[rel] {
@@ -569,13 +712,13 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 				at(n, se.Sel.Name+" with arguments the lint cannot check")
 				return true
 			}
-			if lit, ok := n.Args[i].(*ast.BasicLit); !ok || lit.Value != `"unix"` {
+			if v := info.Types[n.Args[i]].Value; v == nil || v.Kind() != constant.String || constant.StringVal(v) != "unix" {
 				at(n, se.Sel.Name+" on a network other than \"unix\"")
 			}
 			// A unix socket can front a network proxy, so a dial's
 			// address must come from configuration (a field or a
 			// variable), never a literal or an expression built here.
-			if se.Sel.Name != "Listen" && !configured(n.Args[i+1], rel, f) {
+			if se.Sel.Name != "Listen" && !configured(l, n.Args[i+1], rel) {
 				at(n, se.Sel.Name+" to an address not taken from configuration")
 			}
 		case *ast.SelectorExpr:
@@ -602,37 +745,41 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 }
 
 // configured reports a dial address that comes from configuration, and
-// accepts exactly three shapes (#6030 re-plan):
-//   - a string parameter of a function declared in this file, by value,
-//     that no statement here writes;
+// accepts exactly three shapes (#6030 re-plan), by the variable each
+// name denotes (#6120):
+//   - a string parameter of a function declared in the package, by value,
+//     that no statement writes;
 //   - a field read through such a function's parameter or receiver
-//     (p.field), when configuredFields lists the parameter's type and the
-//     field for package rel and nothing here writes p;
+//     (p.field), when configuredFields lists the parameter's type, declared
+//     in the package, and the field for package rel and nothing writes p;
 //   - a socket in a directory the function made (inTempDir).
 //
 // Anything else is not: a local (`sock := "/run/proxy.sock"`, #5775), a
 // func literal's parameter, a named result, a constant, a literal, an
 // expression, a package-level variable, a longer chain (c.a.b), or a
-// name this file does not declare (L3 S1 on #90).
-func configured(e ast.Expr, rel string, f *ast.File) bool {
+// name that does not type-check (L3 S1 on #90).
+func configured(l *loaded, e ast.Expr, rel string) bool {
 	field := ""
 	if se, ok := e.(*ast.SelectorExpr); ok {
 		field, e = se.Sel.Name, se.X
 	}
-	id, ok := e.(*ast.Ident)
-	if !ok || id.Obj == nil || id.Obj.Kind != ast.Var || written(id.Obj, f) {
+	v, ok := l.info.Uses[ident(e)].(*types.Var)
+	if !ok || l.wrote[v] {
 		return false
 	}
-	typ := param(id.Obj, f)
-	if field != "" {
-		if st, ok := typ.(*ast.StarExpr); ok {
-			typ = st.X
+	p, isParam := l.params[v]
+	switch {
+	case field != "":
+		t := v.Type()
+		if ptr, ok := t.(*types.Pointer); ok {
+			t = ptr.Elem()
 		}
-		t, ok := typ.(*ast.Ident)
-		return ok && configuredFields[rel][t.Name+"."+field] != ""
+		n, ok := t.(*types.Named)
+		return isParam && ok && n.Obj().Pkg() == l.pkg && configuredFields[rel][n.Obj().Name()+"."+field] != ""
+	case isParam:
+		return p.i >= 0 && types.Identical(v.Type(), types.Typ[types.String])
 	}
-	t, ok := typ.(*ast.Ident)
-	return ok && t.Name == "string" || inTempDir(id.Obj, f)
+	return inTempDir(l, v)
 }
 
 // configuredFields are the fields a dial may read through a parameter or
@@ -652,180 +799,88 @@ var configuredFields = map[string]map[string]string{
 	"owner/kernelsock":     {"Keeper.Socket": "the keeper's socket, from agentosd's wiring", "Owner.Socket": "the kernel's owner socket, from agentosd's wiring"},
 }
 
-// param is the declared type of obj when obj is a parameter or receiver
-// of a function declared in f, or nil. A func literal's parameter is not
-// one: the literal is called here, where its caller may pass a literal
-// (Lens R1 on #6030).
-func param(obj *ast.Object, f *ast.File) ast.Expr {
-	for _, d := range f.Decls {
-		fd, ok := d.(*ast.FuncDecl)
-		if !ok {
-			continue
-		}
-		for _, fl := range []*ast.FieldList{fd.Recv, fd.Type.Params} {
-			if fl == nil {
-				continue
-			}
-			for _, p := range fl.List {
-				for _, nm := range p.Names {
-					if nm.Obj == obj {
-						return p.Type
-					}
-				}
-			}
-		}
-	}
-	return nil
-}
-
 // inTempDir reports a local bound by `sock := filepath.Join(dir, "s.sock")`
-// to a literal file name in dir (no "/", not "." or ".."), itself bound by `dir, err := os.MkdirTemp(...)`:
-// a socket in a fresh directory this process made, which nothing listened
-// on before it (agentos-infer's llama-server socket). Neither may be
-// written again (written).
-func inTempDir(obj *ast.Object, f *ast.File) bool {
-	call, ok := definedBy(obj, f, "path/filepath.Join")
-	if !ok || len(call.Args) != 2 {
+// to a constant file name in dir (no "/", not "." or ".."), itself bound
+// by `dir, err := os.MkdirTemp(...)`: a socket in a fresh directory this
+// process made, which nothing listened on before it (agentos-infer's
+// llama-server socket). Neither may be written again.
+func inTempDir(l *loaded, v *types.Var) bool {
+	call := definedBy(l, v, "path/filepath.Join")
+	if call == nil || len(call.Args) != 2 {
 		return false
 	}
-	dir, ok := call.Args[0].(*ast.Ident)
-	name, lit := call.Args[1].(*ast.BasicLit)
-	if !ok || !lit || dir.Obj == nil || written(dir.Obj, f) {
+	dir, ok := l.info.Uses[ident(call.Args[0])].(*types.Var)
+	name := l.info.Types[call.Args[1]].Value
+	if !ok || l.wrote[dir] || name == nil || name.Kind() != constant.String {
 		return false
 	}
-	if n, err := strconv.Unquote(name.Value); err != nil || n == "" || n == "." || n == ".." || strings.Contains(n, "/") {
+	if n := constant.StringVal(name); n == "" || n == "." || n == ".." || strings.Contains(n, "/") {
 		return false
 	}
-	_, ok = definedBy(dir.Obj, f, "os.MkdirTemp")
-	return ok
+	return definedBy(l, dir, "os.MkdirTemp") != nil
 }
 
-// definedBy returns the call to fn (an import path and name) that obj's
-// := statement binds it to, as the first name of the statement.
-func definedBy(obj *ast.Object, f *ast.File, fn string) (*ast.CallExpr, bool) {
-	as, ok := obj.Decl.(*ast.AssignStmt)
-	if !ok || as.Tok != token.DEFINE || len(as.Rhs) != 1 || len(as.Lhs) == 0 {
-		return nil, false
-	}
-	if id, ok := as.Lhs[0].(*ast.Ident); !ok || id.Obj != obj {
-		return nil, false
+// definedBy returns the call to fn (an import path and name) that v's
+// := statement binds it to, as the statement's first name, or nil.
+func definedBy(l *loaded, v *types.Var, fn string) *ast.CallExpr {
+	as := l.defs[v]
+	if as == nil {
+		return nil
 	}
 	call, ok := as.Rhs[0].(*ast.CallExpr)
-	if !ok {
-		return nil, false
+	if !ok || qualified(l.info, call.Fun) != fn {
+		return nil
 	}
-	se, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return nil, false
-	}
-	x, ok := se.X.(*ast.Ident)
-	if !ok || x.Obj != nil {
-		return nil, false
-	}
-	for _, im := range f.Imports {
-		p, _ := strconv.Unquote(im.Path.Value)
-		n := p[strings.LastIndex(p, "/")+1:]
-		if im.Name != nil {
-			n = im.Name.Name
-		}
-		if n == x.Name && p+"."+se.Sel.Name == fn {
-			return call, true
-		}
-	}
-	return nil, false
+	return call
 }
 
-// written reports a statement of f, other than the := that declares obj,
-// that writes obj or a part of it, or takes its address.
-func written(obj *ast.Object, f *ast.File) bool {
-	w := false
-	ast.Inspect(f, func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.AssignStmt:
-			for _, l := range n.Lhs {
-				w = w || n != obj.Decl && writes(l, obj)
-			}
-		case *ast.RangeStmt:
-			w = w || n.Tok == token.ASSIGN && (writes(n.Key, obj) || writes(n.Value, obj))
-		case *ast.IncDecStmt:
-			w = w || writes(n.X, obj)
-		case *ast.UnaryExpr:
-			w = w || n.Op == token.AND && writes(n.X, obj)
-		}
-		return true
-	})
-	return w
-}
-
-// writes reports that e, as an assignment's target or an operand of &,
-// is obj or a part of it (obj.f, obj[i], *obj).
-func writes(e ast.Expr, obj *ast.Object) bool {
-	for {
-		switch x := e.(type) {
-		case *ast.SelectorExpr:
-			e = x.X
-		case *ast.IndexExpr:
-			e = x.X
-		case *ast.StarExpr:
-			e = x.X
-		case *ast.ParenExpr:
-			e = x.X
-		case *ast.Ident:
-			return x.Obj == obj
-		default:
-			return false
-		}
-	}
-}
-
-// packageUse runs sourceUse on each of a package's files, then the dial
-// rules that need the whole package (#6028): dialCallers, fieldStores and
-// links, and handedOn along what fieldStores saw handed on. They rest
-// on: the composition root alone wiring the operator's configuration
-// (every other linked package is held by fieldStores); a package that
-// cannot name a listed type reaching it only through what it is handed,
-// which handedOn checks; unsafe staying an escape, and no linked file
-// of the module using go:linkname (reported here); and a link or rename
+// packageUse loads a package's files (load), runs fileUse on each, then
+// the dial rules that need the whole package (#6028): dialCallers,
+// fieldStores and links, and handedOn along what fieldStores saw handed
+// on. A package that does not type-check fails closed. They rest on: the
+// composition root alone wiring the operator's configuration (every other
+// linked package is held by fieldStores); a package that cannot name a
+// listed type reaching it only through what it is handed, which handedOn
+// checks; unsafe staying an escape, and no linked file of the module
+// using the linkname directive (reported here); and a link or rename
 // going only through os, syscall or x/sys/unix.
 func packageUse(t *testing.T, dir string, files []string, prefix, rel string, ps []listed) []string {
 	t.Helper()
+	l := load(t, dir, files, rel)
 	var bad []string
-	fset := token.NewFileSet()
-	var fs []*ast.File
-	for _, name := range files {
-		bad = append(bad, sourceUse(t, filepath.Join(dir, name), prefix+"/"+name, rel)...)
-		b, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		// go:linkname reaches another package's variables past every rule
-		// here, unsafe or not (Security R2 on #6147).
-		if bytes.Contains(b, []byte("//go:linkname")) {
-			bad = append(bad, prefix+"/"+name+": uses go:linkname")
-		}
-		f, err := parser.ParseFile(fset, filepath.Join(dir, name), b, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		fs = append(fs, f)
-	}
 	seen := map[string]bool{}
 	at := func(n ast.Node, what string) {
-		p := fset.Position(n.Pos())
+		p := l.fset.Position(n.Pos())
 		s := fmt.Sprintf("%s/%s:%d: %s", prefix, filepath.Base(p.Filename), p.Line, what)
 		if !seen[s] {
 			seen[s] = true
 			bad = append(bad, s)
 		}
 	}
-	dialCallers(fs, rel, at)
-	held := fieldStores(t, fset, fs, rel, nil, at)
-	links(fs, files, rel, at)
+	if l.err != nil {
+		at(l.files[0], "does not type-check, so the lint cannot check it: "+l.err.Error())
+	}
+	for i, name := range files {
+		bad = append(bad, fileUse(l, i, prefix+"/"+name, rel)...)
+		// The directive reaches another package's variables past every
+		// rule here, unsafe or not (Security R2 on #6147).
+		if bytes.Contains(l.src[i], []byte(linkname)) {
+			bad = append(bad, prefix+"/"+name+": uses "+linkname[2:])
+		}
+	}
+	dialCallers(l, rel, at)
+	held := fieldStores(t, l, rel, nil, at)
+	links(l, files, rel, at)
 	if held == nil || ps == nil {
 		return bad // nothing handed, or a fixture with no graph
 	}
 	return append(bad, handedOn(t, rel, held, ps)...)
 }
+
+// linkname is the directive that binds a name to another package's
+// symbol, spelled in two parts so this file holds no such directive's
+// text (mutgate reads any as reaching every test).
+const linkname = "//go:" + "linkname"
 
 // dialAddrs calls visit with each unix dial's address in f.
 func dialAddrs(f *ast.File, visit func(ast.Expr)) {
@@ -844,60 +899,46 @@ func dialAddrs(f *ast.File, visit func(ast.Expr)) {
 // dialCallers holds each caller in the package to what configured holds a
 // dial to (#6028). configured takes a function's string parameter as
 // configuration, so the function is a dialing function: each call to it
-// in the package must pass, for that parameter, what configured accepts
-// in the caller's file, and a caller passing its own string parameter is
-// a dialing function too. Calls match by name (h, or any method m), so an
-// interface or another type's method of the same name is held too; a
-// dialing function taken as a value, called as a method expression, or
-// handed arguments the lint cannot count fails closed. Callers outside
-// the package are the composition root's wiring of its configuration.
-func dialCallers(fs []*ast.File, rel string, at func(ast.Node, string)) {
+// in the package must pass, for that parameter, what configured accepts,
+// and a caller passing its own string parameter is a dialing function
+// too. Calls match by name (h, or any method m), so an interface or
+// another type's method of the same name is held too; a dialing function
+// taken as a value, called as a method expression, or handed arguments
+// the lint cannot count fails closed. Callers outside the package are the
+// composition root's wiring of its configuration.
+func dialCallers(l *loaded, rel string, at func(ast.Node, string)) {
 	addr := map[string]map[int]bool{} // "h" or ".m" -> parameter index
-	add := func(e ast.Expr, f *ast.File) bool {
-		key, i, ok := stringParam(e, f)
-		if !ok || addr[key][i] {
+	add := func(e ast.Expr) bool {
+		v, _ := l.info.Uses[ident(e)].(*types.Var)
+		p, ok := l.params[v]
+		if !ok || p.i < 0 || !types.Identical(v.Type(), types.Typ[types.String]) || addr[p.fn][p.i] {
 			return false
 		}
-		if addr[key] == nil {
-			addr[key] = map[int]bool{}
+		if addr[p.fn] == nil {
+			addr[p.fn] = map[int]bool{}
 		}
-		addr[key][i] = true
+		addr[p.fn][p.i] = true
 		return true
 	}
-	for _, f := range fs {
-		dialAddrs(f, func(e ast.Expr) { add(e, f) })
+	for _, f := range l.files {
+		dialAddrs(f, func(e ast.Expr) { add(e) })
 	}
-	types := map[string]bool{}
-	for _, f := range fs {
-		for name := range typeDecls(f) {
-			types[name] = true
+	// key is the dialing function e names, or "".
+	key := func(e ast.Expr) string {
+		switch x := e.(type) {
+		case *ast.Ident:
+			return x.Name
+		case *ast.SelectorExpr:
+			if _, ok := l.info.Uses[ident(x.X)].(*types.PkgName); ok {
+				return ""
+			}
+			return "." + x.Sel.Name
 		}
+		return ""
 	}
 	for grew := true; grew; {
 		grew = false
-		for _, f := range fs {
-			imported := map[string]bool{}
-			for _, im := range f.Imports {
-				p, _ := strconv.Unquote(im.Path.Value)
-				n := p[strings.LastIndex(p, "/")+1:]
-				if im.Name != nil {
-					n = im.Name.Name
-				}
-				imported[n] = true
-			}
-			// key is the dialing function e names, or "".
-			key := func(e ast.Expr) string {
-				switch x := e.(type) {
-				case *ast.Ident:
-					return x.Name
-				case *ast.SelectorExpr:
-					if id, ok := x.X.(*ast.Ident); ok && id.Obj == nil && imported[id.Name] {
-						return ""
-					}
-					return "." + x.Sel.Name
-				}
-				return ""
-			}
+		for _, f := range l.files {
 			called, named := map[ast.Node]bool{}, map[ast.Node]bool{}
 			ast.Inspect(f, func(n ast.Node) bool {
 				switch n := n.(type) {
@@ -913,18 +954,22 @@ func dialCallers(fs []*ast.File, rel string, at func(ast.Node, string)) {
 					if len(addr[k]) == 0 {
 						return true
 					}
-					if se, ok := n.Fun.(*ast.SelectorExpr); ok && methodExpr(se.X, types) {
-						at(n, k[1:]+", a dialing function, called as a method expression")
-						return true
+					// A method expression's arguments start with the
+					// receiver; one go/types did not resolve counts too.
+					if se, ok := n.Fun.(*ast.SelectorExpr); ok {
+						if s, ok := l.info.Selections[se]; !ok || s.Kind() == types.MethodExpr {
+							at(n, k[1:]+", a dialing function, called as a method expression")
+							return true
+						}
 					}
 					for i := range addr[k] {
 						if n.Ellipsis.IsValid() || i >= len(n.Args) {
 							at(n, strings.TrimPrefix(k, ".")+", a dialing function, with arguments the lint cannot check")
 							continue
 						}
-						if !configured(n.Args[i], rel, f) {
+						if !configured(l, n.Args[i], rel) {
 							at(n, "passes "+strings.TrimPrefix(k, ".")+" an address not taken from configuration")
-						} else if add(n.Args[i], f) {
+						} else if add(n.Args[i]) {
 							grew = true
 						}
 					}
@@ -955,63 +1000,6 @@ func dialCallers(fs []*ast.File, rel string, at func(ast.Node, string)) {
 	}
 }
 
-// stringParam returns the function (as "h" or ".m") and index of the
-// by-value string parameter e names, which configured accepts.
-func stringParam(e ast.Expr, f *ast.File) (string, int, bool) {
-	id, ok := e.(*ast.Ident)
-	if !ok || id.Obj == nil {
-		return "", 0, false
-	}
-	for _, d := range f.Decls {
-		fd, ok := d.(*ast.FuncDecl)
-		if !ok {
-			continue
-		}
-		i := 0
-		for _, p := range fd.Type.Params.List {
-			for _, nm := range p.Names {
-				if t, ok := p.Type.(*ast.Ident); ok && t.Name == "string" && nm.Obj == id.Obj {
-					if fd.Recv != nil {
-						return "." + fd.Name.Name, i, true
-					}
-					return fd.Name.Name, i, true
-				}
-				i++
-			}
-			if len(p.Names) == 0 {
-				i++
-			}
-		}
-	}
-	return "", 0, false
-}
-
-// methodExpr reports x as a type (T.m or (*T).m), so a call's arguments
-// start with the receiver.
-func methodExpr(x ast.Expr, types map[string]bool) bool {
-	switch x := x.(type) {
-	case *ast.Ident:
-		return types[x.Name] || x.Obj != nil && x.Obj.Kind == ast.Typ
-	case *ast.ParenExpr, *ast.StarExpr, *ast.IndexExpr:
-		return true
-	}
-	return false
-}
-
-// typeDecls are f's type declarations, by name.
-func typeDecls(f *ast.File) map[string]*ast.TypeSpec {
-	m := map[string]*ast.TypeSpec{}
-	for _, d := range f.Decls {
-		if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.TYPE {
-			for _, s := range gd.Specs {
-				ts := s.(*ast.TypeSpec)
-				m[ts.Name.Name] = ts
-			}
-		}
-	}
-	return m
-}
-
 // fieldStores backs the configuredFields claim, that the package never
 // stores into a listed field, over the package's go/types types, so it
 // does not guess at any expression (#6028 re-plan after three Security
@@ -1037,37 +1025,26 @@ func typeDecls(f *ast.File) map[string]*ast.TypeSpec {
 // The rule is about types, not order: where in the program a store would
 // run does not matter, so no flow is followed (Security B1 round 3 on
 // #6119).
-func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, handed map[string]bool, report func(ast.Node, string)) map[string]bool {
+func fieldStores(t *testing.T, l *loaded, rel string, handed map[string]bool, report func(ast.Node, string)) map[string]bool {
 	t.Helper()
 	// Only a package that declares a listed field, imports one of the
 	// module's packages (which may declare one), or is handed a holder
 	// can hold a slot; the composition root, which wires the
 	// configuration, may store into the fields it imports (#6138:
 	// clerk/run is not linked into agentosd, and every linked package but
-	// the root is held).
+	// the root is held). One that does not type-check is reported by its
+	// caller, and fails closed: an import that did not load may be the one
+	// with slots (L3 R1 on #6147).
+	fs, pkg, info := l.files, l.pkg, l.info
 	inModule := false
 	for _, f := range fs {
 		for _, im := range f.Imports {
 			inModule = inModule || strings.HasPrefix(im.Path.Value, `"`+module)
 		}
 	}
-	if len(configuredFields[rel]) == 0 && len(handed) == 0 && (!inModule || rel == compositionRoot) {
+	if l.err != nil || len(configuredFields[rel]) == 0 && len(handed) == 0 && (!inModule || rel == compositionRoot) {
 		return nil
 	}
-	info := &types.Info{
-		Types:      map[ast.Expr]types.TypeAndValue{},
-		Defs:       map[*ast.Ident]types.Object{},
-		Uses:       map[*ast.Ident]types.Object{},
-		Selections: map[*ast.SelectorExpr]*types.Selection{},
-		Instances:  map[*ast.Ident]types.Instance{},
-	}
-	var typeErr error
-	conf := types.Config{Importer: importer.ForCompiler(fset, "gc", exportData(t, fs)), Error: func(err error) {
-		if typeErr == nil {
-			typeErr = err
-		}
-	}}
-	pkg, _ := conf.Check(module+rel, fset, fs, info)
 	// The slots: each listed field's struct and index, through embedding,
 	// of the package and of every package whose objects it can reach, so
 	// a package that imports a listed one is held as its owner is.
@@ -1109,12 +1086,6 @@ func fieldStores(t *testing.T, fset *token.FileSet, fs []*ast.File, rel string, 
 		}
 	}
 	addSlots(pkg)
-	// Fails closed: an import that did not load may be the one with slots
-	// (L3 R1 on #6147).
-	if typeErr != nil {
-		report(fs[0], "does not type-check, so its configuredFields stores cannot be checked: "+typeErr.Error())
-		return nil
-	}
 	if len(slots) == 0 && len(handed) == 0 {
 		return nil
 	}
@@ -1668,31 +1639,26 @@ func handedOn(t *testing.T, rel string, held map[string]bool, ps []listed) []str
 				bad = append(bad, module+rel+": hands a holder to "+path+", which is not in the graph")
 				continue
 			}
-			fset := token.NewFileSet()
-			var fs []*ast.File
-			for _, name := range p.files {
-				f, err := parser.ParseFile(fset, filepath.Join(p.dir, name), nil, 0)
-				if err != nil {
-					t.Fatal(err)
-				}
-				fs = append(fs, f)
-			}
+			q := strings.TrimPrefix(path, module)
+			l := load(t, p.dir, p.files, q)
 			at := func(n ast.Node, what string) {
-				pos := fset.Position(n.Pos())
+				pos := l.fset.Position(n.Pos())
 				s := fmt.Sprintf("%s/%s:%d: %s (handed by %s)", path, filepath.Base(pos.Filename), pos.Line, what, rel)
 				if !slices.Contains(bad, s) {
 					bad = append(bad, s)
 				}
 			}
-			for _, f := range fs {
+			if l.err != nil {
+				at(l.files[0], "does not type-check, so the lint cannot check it: "+l.err.Error())
+			}
+			for _, f := range l.files {
 				for _, im := range f.Imports {
 					if p, _ := strconv.Unquote(im.Path.Value); escapes[p] {
 						at(im, "imports "+p+", which reaches a handed value past the rule")
 					}
 				}
 			}
-			q := strings.TrimPrefix(path, module)
-			if more := fieldStores(t, fset, fs, q, all, at); more != nil {
+			if more := fieldStores(t, l, q, all, at); more != nil {
 				walk(q, more)
 			}
 		}
@@ -1802,8 +1768,8 @@ func g(c *Config) { secret.Hide[*Config](c) }`))
 	if !strings.Contains(got, "instantiates Hide with *Config, which reaches a configuredFields field") {
 		t.Errorf("an explicit module generic instantiation with a holder passed: %q", got)
 	}
-	if got := useOf(t, "change", src(`_ "unsafe"`, "//go:linkname x example.com/p.x\nvar x int")); !strings.Contains(got, "p0.go: uses go:linkname") {
-		t.Errorf("go:linkname passed: %q", got)
+	if got := useOf(t, "change", src(`_ "unsafe"`, linkname+" x example.com/p.x\nvar x int")); !strings.Contains(got, "p0.go: uses "+linkname[2:]) {
+		t.Errorf("the linkname directive passed: %q", got)
 	}
 	if got := useOf(t, "change", src(`"github.com/ghbmrk/agentos/broker/nosuch"`, `var _ = nosuch.Config{}`)); !strings.Contains(got, "does not type-check") {
 		t.Errorf("an importer's type error passed: %q", got)
@@ -1984,20 +1950,6 @@ func exportData(t *testing.T, fs []*ast.File) func(string) (io.ReadCloser, error
 	}
 }
 
-// imports are f's import names, and the path each names.
-func imports(f *ast.File) (map[string]bool, map[string]string) {
-	imp, local := map[string]bool{}, map[string]string{}
-	for _, im := range f.Imports {
-		p, _ := strconv.Unquote(im.Path.Value)
-		nm := p[strings.LastIndex(p, "/")+1:]
-		if im.Name != nil {
-			nm = im.Name.Name
-		}
-		imp[nm], local[nm] = true, p
-	}
-	return imp, local
-}
-
 // linkCalls are the calls that make, move or replace a directory entry,
 // so a configured socket path, or its directory, could come to name
 // another socket (Security 4 on #6035).
@@ -2027,12 +1979,11 @@ var linkMethods = map[string]bool{"Symlink": true, "Link": true, "Rename": true}
 // value, and os.OpenRoot or os.OpenInRoot, in a package that dials a unix
 // socket, except a linkOK use in its own file, which does not dial
 // (Security 4 on #6035, B2 and B3 on #6119).
-func links(fs []*ast.File, names []string, rel string, at func(ast.Node, string)) {
+func links(l *loaded, names []string, rel string, at func(ast.Node, string)) {
 	if !unixDialers[rel] && unixDialCalls[rel] == nil {
 		return
 	}
-	for i, f := range fs {
-		_, local := imports(f)
+	for i, f := range l.files {
 		dialsHere := false
 		dialAddrs(f, func(ast.Expr) { dialsHere = true })
 		ok := linkOK[rel+"/"+names[i]]
@@ -2042,8 +1993,8 @@ func links(fs []*ast.File, names []string, rel string, at func(ast.Node, string)
 				return true
 			}
 			full := "." + se.Sel.Name
-			if id, isID := se.X.(*ast.Ident); isID && id.Obj == nil && local[id.Name] != "" {
-				full = local[id.Name] + "." + se.Sel.Name
+			if q := qualified(l.info, se); q != "" {
+				full = q
 				if full == "os.OpenRoot" || full == "os.OpenInRoot" {
 					at(se, "opens an os.Root ("+full+"), whose methods link and rename, in a package that dials a unix socket")
 					return true
@@ -2065,7 +2016,7 @@ func links(fs []*ast.File, names []string, rel string, at func(ast.Node, string)
 // setsChecked reports that a client literal sets field key to a value the
 // test can see: DialContext to a function literal, and Transport to a
 // checked &http.Transport{} literal or an identifier bound to one.
-func setsChecked(c *ast.CompositeLit, key string, sel func(ast.Expr) string, transports map[string]bool) bool {
+func setsChecked(c *ast.CompositeLit, key string, sel func(ast.Expr) string, transport func(*ast.Ident) bool) bool {
 	for _, e := range c.Elts {
 		kv, ok := e.(*ast.KeyValueExpr)
 		if !ok {
@@ -2080,7 +2031,7 @@ func setsChecked(c *ast.CompositeLit, key string, sel func(ast.Expr) string, tra
 			return ok
 		case "Transport":
 			if id, ok := kv.Value.(*ast.Ident); ok {
-				return transports[id.Name]
+				return transport(id)
 			}
 			return transportLit(kv.Value, sel)
 		}
