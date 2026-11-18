@@ -380,13 +380,31 @@ class MorUnitTest(unittest.TestCase):
         self.assertEqual(ini(unit)["Unit"]["IgnoreOnIsolate"], "yes")
         s = settings(unit)
         self.assertNotIn("DefaultDependencies", s)
-        for key in ("Conflicts", "BindsTo", "PartOf", "Requires", "Requisite", "StopPropagatedFrom"):
+        for key in ("Conflicts", "BindsTo", "PartOf", "Requires", "Requisite", "StopPropagatedFrom", "StopWhenUnneeded"):
             self.assertNotIn(key, s)
         self.assertEqual(sorted(UNITS.glob(name + ".d/*")), [])
         for f in [u for u in UNITS.iterdir() if u.is_file()] + list(UNITS.glob("*.d/*.conf")):
             for key in ("Conflicts", "PropagatesStopTo"):
                 with self.subTest(f.name, key=key):
                     self.assertNotIn(name, words(settings(f), key))
+
+    def test_an_isolate_leaves_the_clear_alone(self):
+        # MOR-emergency-isolate (#5947): this unit is WantedBy=sysinit.target, which emergency.target does
+        # not pull in, so "systemctl isolate emergency.target" stopped it: its stop cleared MOR (or held on
+        # the staged pair), and "systemctl default" then restarted the secret holders with MOR clear, as
+        # its start only reads MOR. An isolate now leaves it active, so only the shutdown transaction stops
+        # it (Conflicts=shutdown.target). No other stop path: it needs no unit (test_no_ordering_cycle_with
+        # _tmp_mount), nothing stops it when unneeded, and no image unit names it in a stop dependency.
+        # tests/test_hostcheck.py's test_an_isolate_keeps_mor_set boots the image through both isolates.
+        self.assertEqual(ini(UNIT)["Unit"]["IgnoreOnIsolate"], "yes")
+        s = settings(UNIT)
+        self.assertEqual(s["IgnoreOnIsolate"], ["yes"])
+        for key in ("BindsTo", "PartOf", "Requires", "Requisite", "StopPropagatedFrom", "StopWhenUnneeded"):
+            self.assertNotIn(key, s)
+        for f in [u for u in UNITS.iterdir() if u.is_file()] + list(UNITS.glob("*.d/*.conf")):
+            for key in ("Conflicts", "PropagatesStopTo"):
+                with self.subTest(f.name, key=key):
+                    self.assertNotIn(UNIT.name, words(settings(f), key))
 
     def test_build_installs_the_program(self):
         build = (ROOT / "image/build.sh").read_text()
