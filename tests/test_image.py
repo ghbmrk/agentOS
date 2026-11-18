@@ -3935,10 +3935,14 @@ class ConfFilesTest(unittest.TestCase):
                 self.assertIn("bad characters in section header", self.coredump(("[Core%sdump]\n" % c).encode()))
         self.assertNotIn("section header", self.coredump(b"[Core dump x]\n"))
 
-    def test_empty_assignment_resets(self):
-        # P4: LLMNR= after LLMNR=no gives resolved's default, which answers on the LAN.
+    def test_empty_assignment_is_ignored(self):
+        # P4, corrected by #6095 (R4): resolved's config_parse_resolve_support (systemd 257.7) ignores an
+        # empty value and keeps the one before it, so LLMNR= after LLMNR=yes still answers on the LAN, and
+        # after LLMNR=no it does not.
+        write(self.root, "etc/systemd/resolved.conf.d/90-x.conf", "[Resolve]\nLLMNR=yes\nLLMNR=\n")
+        self.assertIn("resolved LLMNR is yes", self.v())
         write(self.root, "etc/systemd/resolved.conf.d/90-x.conf", "[Resolve]\nLLMNR=no\nLLMNR=\n")
-        self.assertIn("LLMNR", self.v())
+        self.assertNotIn("LLMNR", self.v())
 
     def test_kmod_reads_a_file_in_place_of_modprobe_d(self):
         # P5: kmod's conf_files_list reads a non-directory in its list as a file of its own (named
