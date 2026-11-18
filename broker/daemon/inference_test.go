@@ -1827,6 +1827,13 @@ func s(c Clerk) fmt.Stringer { return named{c} }`),
 	if strings.Count(got, "\n") != 6 {
 		t.Errorf("want only those 7 reports (kept and called is quiet; root and subpackage unwalked); got\n%s", got)
 	}
+	// A walked package that does not type-check fails closed.
+	if err := os.WriteFile(filepath.Join(ps[slices.IndexFunc(ps, func(p listed) bool { return p.path == module+"user" })].dir, "p.go"), []byte(src(`"fmt"`, `func U(s fmt.Stringer) { nosuch(s) }`)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(handedOn(t, "zzowner", map[string]bool{module + "fake.Clerk": true}, ps), "\n"); !strings.Contains(got, "user/p.go:1: does not type-check") {
+		t.Errorf("a walked package's type error passed: %q", got)
+	}
 	// A package entry matches one import path exactly.
 	sub := types.NewFunc(token.NoPos, types.NewPackage(module+"kernel/ipform", "ipform"), "F", types.NewSignatureType(nil, nil, nil, nil, nil, false))
 	if handOKFunc("kernel/proc", sub) || !handOKFunc("kernel/proc", types.NewFunc(token.NoPos, types.NewPackage(module+"kernel", "kernel"), "F", sub.Signature())) {
@@ -2093,6 +2100,7 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		{"modelroute", src(`"net/http"; "net/http/httputil"`, `var rt http.RoundTripper; var p = httputil.ReverseProxy{Transport: rt}`)},
 		{"modelroute", src(`"net/http"`, `var c = &http.Client{Transport: http.RoundTripper(nil)}`)},
 		{"modelroute", src(`"net/http"`, `var none func(); var tr = &http.Transport{DialContext: none}`)},
+		{"modelroute", src(`"context"; "net"; "net/http"`, `var none func(context.Context, string, string) (net.Conn, error); var tr = &http.Transport{DialContext: none}`)},
 		{"vm/overlay", src(`"syscall"`, `var a, b, e = syscall.Syscall(41, 2, 1, 0)`)},
 		{"loops", src(`"os"`, `var p, _ = os.StartProcess("/bin/sh", nil, nil)`)},
 		{"modelroute", src(`"net"`, `var c, _ = (&net.Dialer{}).Dial("unix", "/run/proxy.sock")`)},
@@ -2196,6 +2204,19 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		src(`"net"`, `type cfg struct{ s string }; func use(c cfg) { (&net.Dialer{}).Dial("unix", c.s) }; func g() { use(struct{ s string }{"/run/proxy.sock"}) }`),
 		src(`"net"`, `type cfg struct{ s string }; type x = struct{ s string }; func use(c cfg) { (&net.Dialer{}).Dial("unix", c.s) }; func g() { use(x{"/run/proxy.sock"}) }`),
 		src(`"net"; "reflect"`, `type cfg struct{ S string }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.S) }; func g(c *cfg) { reflect.ValueOf(c).Elem().Field(0).SetString("/run/proxy.sock"); c.dial() }`),
+		// The temp-dir socket only through the real os.MkdirTemp and
+		// path/filepath.Join, by the object each name resolves to, and with
+		// a constant name that stays in the directory (Security B1 on
+		// #6169).
+		src(`"net"; "os"`, `func j(a, b string) string { return "/run/proxy.sock" }; func g() { dir, _ := os.MkdirTemp("", "x"); sock := j(dir, "s.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "path/filepath"; "strings"`, `func g() { dir := strings.TrimSpace("/run"); sock := filepath.Join(dir, "proxy.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"; "path"`, `func g() { dir, _ := os.MkdirTemp("", "x"); sock := path.Join(dir, "s.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"`, `func g() { dir, _ := os.MkdirTemp("", "x"); filepath := struct{ Join func(a, b string) string }{func(a, b string) string { return "/run/proxy.sock" }}; sock := filepath.Join(dir, "s.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"; "path/filepath"`, `const name = "../proxy.sock"; func g() { dir, _ := os.MkdirTemp("", "x"); sock := filepath.Join(dir, name); (&net.Dialer{}).Dial("unix", sock) }`),
+		// Type-correct forms of the cases above that do not type-check
+		// (Security R2 on #6169).
+		src(`"net"`, `type path string; func g(s path) { (&net.Dialer{}).Dial("unix", string(s)) }`),
+		src(`"net"`, `func g(s string) { s += ".x"; (&net.Dialer{}).Dial("unix", s) }`),
 	} {
 		path := filepath.Join(t.TempDir(), "p.go")
 		if err := os.WriteFile(path, []byte(c), 0o600); err != nil {
@@ -2204,6 +2225,14 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		if got := strings.Join(sourceUse(t, path, "p.go", "modelroute"), "\n"); !strings.Contains(got, "not taken from configuration") {
 			t.Errorf("an unconfigured address passed: %q\n%s", got, c)
 		}
+	}
+	// A listed field counts only on a type the package declares, not on
+	// another package's type of the same name (Security B1 on #6169).
+	configuredFields["modelroute"]["Cmd.Path"] = "test"
+	got := useOf(t, "modelroute", src(`"net"; "os/exec"`, `func g(c *exec.Cmd) { (&net.Dialer{}).Dial("unix", c.Path) }`))
+	delete(configuredFields["modelroute"], "Cmd.Path")
+	if !strings.Contains(got, "not taken from configuration") {
+		t.Errorf("another package's Cmd.Path passed as a listed field: %q", got)
 	}
 	// What a dialing function's callers pass, what a listed package stores
 	// into a configuredFields field, and links or renames that could swap
@@ -2230,6 +2259,7 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		{"modelroute", "h, a dialing function, used as a value", []string{src(`"net"`, dial+`var f = h; func g() { f("/run/proxy.sock") }`)}},
 		{"modelroute", "d, a dialing function, used as a value", []string{src(`"net"`, `type c struct{}; func (c) d(s string) { (&net.Dialer{}).Dial("unix", s) }; func g(x c) { f := x.d; f("/run/proxy.sock") }`)}},
 		{"modelroute", "d, a dialing function, called as a method expression", []string{src(`"net"`, `type c struct{}; func (c) d(s string) { (&net.Dialer{}).Dial("unix", s) }; func g() { c.d(c{}, "/run/proxy.sock") }`)}},
+		{"modelroute", "d, a dialing function, called as a method expression", []string{src(`"net"`, `type c struct{}; func (c) d(s string) { (&net.Dialer{}).Dial("unix", s) }; func g(x nosuch) { x.d("/run/proxy.sock") }`)}},
 		{"modelroute", "h, a dialing function, with arguments the lint cannot check", []string{src(`"net"`, `func h(n int, s string) { (&net.Dialer{}).Dial("unix", s) }; func t() (int, string) { return 0, "/run/proxy.sock" }; func g() { h(t()) }`)}},
 		// A literal stored in the listed field it dials: by key, by
 		// position, through a method, a method value, another struct of
@@ -2372,6 +2402,7 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		{"modelroute", []string{src(`"encoding/json"`, `type Config struct{ Socket string }; type S interface{ X() }; type W struct{ V S }; func g(b []byte, w *W) { json.Unmarshal(b, w) }`)}},
 		{"modelroute", []string{src(`"encoding/json"`, `type Config struct{ Socket string }; func g(b []byte, ch chan any) { json.Unmarshal(b, <-ch) }`)}},
 		{"modelroute", []string{src(`"encoding/json"`, `type Config struct{ Socket string }; type W struct{ V any }; func g(b []byte, c *Config) (*Config, W) { var w W; json.Unmarshal(b, &w); keep := *c; return &keep, w }`)}},
+		{"modelroute", []string{src(`"net"; "os"; fp "path/filepath"`, `const name = "s.sock"; func g() { dir, _ := os.MkdirTemp("", "x"); sock := fp.Join(dir, name); (&net.Dialer{}).Dial("unix", sock) }`)}},
 	} {
 		if got := useOf(t, c.rel, c.srcs...); got != "" {
 			t.Errorf("in %s, flagged: %q\n%s", c.rel, got, strings.Join(c.srcs, "\n"))
@@ -2380,7 +2411,7 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 	// A reviewed handOK entry lets a function or an interface take a
 	// holding value: fmt.Sprint and a Clerk-like interface here.
 	handOK["modelroute"] = map[string]string{"fmt.Sprint": "test", module + "modelroute.clerk": "test"}
-	got := useOf(t, "modelroute", src(`"fmt"`, `type Config struct{ Socket string }; type clerk interface{ Do() }; func (Config) Do() {}; func g(c Config) (string, clerk) { return fmt.Sprint(c, c.Socket), c }`))
+	got = useOf(t, "modelroute", src(`"fmt"`, `type Config struct{ Socket string }; type clerk interface{ Do() }; func (Config) Do() {}; func g(c Config) (string, clerk) { return fmt.Sprint(c, c.Socket), c }`))
 	delete(handOK, "modelroute")
 	if got != "" {
 		t.Errorf("handOK entries not honoured: %q", got)
