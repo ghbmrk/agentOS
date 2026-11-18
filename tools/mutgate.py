@@ -1345,28 +1345,37 @@ def covered_by(pkg, names, tmp, broker=None):
     test functions (every test, for None) run, from one -coverprofile run of the PR's tests (so in
     the untrusted job only); or (None, problem). A block's lines from its start to its end count, an
     evaluated clause expression's among them (with_cases, #5822)."""
+    out, _, problem = timed_cover(pkg, names, tmp, broker)
+    return out, problem
+
+
+def timed_cover(pkg, names, tmp, broker=None):
+    """covered_by's (lines, seconds, problem): seconds is how long its `go test` took, so a plan
+    that ran the whole suite under coverage sizes the shards from that run, not a fourth (#6155)."""
     broker = BROKER if broker is None else broker
     profile = pathlib.Path(tmp) / "tests.cover"
     profile.unlink(missing_ok=True)
     cmd = ["go", "test", "-count=1", "-covermode=count", f"-coverprofile={profile}"]
     if names is not None:
         cmd += ["-run", "^(" + "|".join(names) + ")$"]
+    began = time.monotonic()
     # Its output goes to stderr: `plan` prints the matrix on stdout (#4961).
     if subprocess.run([*cmd, "."], cwd=broker / pkg, stdout=sys.stderr).returncode or not profile.exists():
-        return None, f"broker/{pkg}/'s tests {'(all)' if names is None else names} fail under -coverprofile"
+        return None, None, f"broker/{pkg}/'s tests {'(all)' if names is None else names} fail under -coverprofile"
+    seconds = time.monotonic() - began
     if (lister := lister_in(tmp)) is None:
-        return None, "cannot build tools/mutgate_stmts.go"
+        return None, None, "cannot build tools/mutgate_stmts.go"
     try:
         text = with_cases(profile.read_text(), lister, broker / pkg)
     except RuntimeError as e:
-        return None, f"broker/{pkg}/: {e}"
+        return None, None, f"broker/{pkg}/: {e}"
     out = {}
     for name, blocks in covered_blocks(text).items():
         f = broker / pkg / name
         if is_source(name) and f.is_file() and not f.is_symlink():
             for (first, _), (last, _) in blocks:
                 out.setdefault(f"broker/{pkg}/{name}", set()).update(range(first, last + 1))
-    return out, None
+    return out, seconds, None
 
 
 HUNKS = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -1531,26 +1540,27 @@ def base_covered(pkg, mb, names, tmp, diff_text):
 
 
 def record_for(pkg, tests, bases, diff_text, base, tmp):
-    """(record, None) of the lines the changed tests of broker/<pkg>/ cover at the head and, as its
-    `base` part, at the base (#5762); or (None, problem). Runs the PR's tests: untrusted jobs only."""
+    """(record, seconds, None) of the lines the changed tests of broker/<pkg>/ cover at the head and,
+    as its `base` part, at the base (#5762), with the seconds its whole-suite run at the head took;
+    or (None, None, problem). Runs the PR's tests: untrusted jobs only."""
     names = changed_tests(tests, pkg, bases)
-    covered, problem = covered_by(pkg, names, tmp)
+    covered, secs, problem = timed_cover(pkg, names, tmp)
     if problem:
-        return None, problem
+        return None, None, problem
     was, problem = base_covered(pkg, merge_base(base, "HEAD"), bases[pkg], tmp, diff_text)
     if problem:
-        return None, problem
+        return None, None, problem
     # Every target line runs (L1 on #5770, #5942): a line no mutant and no deletion names (a brace, a
     # bare `return g()`) has no NOT COVERED verdict, so a weakened test that stops running it was unseen.
     # One whole-suite run at the head (none more when the changed tests are every test) names it.
-    every, problem = (covered, None) if names is None else covered_by(pkg, None, tmp)
+    every, secs, problem = (covered, secs, None) if names is None else timed_cover(pkg, None, tmp)
     if problem:
-        return None, problem
+        return None, None, problem
     if gone := unrun(was, every):
-        return None, ("; ".join(f"{p}: {', '.join(map(str, ls))}" for p, ls in gone.items())
-                      + f" ran under the base's version of the tests this diff changes, and no test of package {pkg} "
-                      "runs them at the head: keep a test that runs each, or delete the code")
-    return {**coverage_record(names, covered), "base": coverage_record(bases[pkg], was)}, None
+        return None, None, ("; ".join(f"{p}: {', '.join(map(str, ls))}" for p, ls in gone.items())
+                            + f" ran under the base's version of the tests this diff changes, and no test of package {pkg} "
+                            "runs them at the head: keep a test that runs each, or delete the code")
+    return {**coverage_record(names, covered), "base": coverage_record(bases[pkg], was)}, secs, None
 
 
 def unrun(was, every):
@@ -1630,7 +1640,7 @@ def cmd_run(args):
                 full, problem = planned_targets(planned, pkg, added, tests, bases)
                 record = None if problem else planned[pkg]
             else:
-                record, problem = record_for(pkg, tests, bases, diff, args.git, cfgdir.name)
+                record, _, problem = record_for(pkg, tests, bases, diff, args.git, cfgdir.name)
                 full, problem = (None, problem) if problem else targets_for(pkg, added, tests, {"targets": record}, bases)
             if problem:
                 print(f"mutgate: {problem}", file=sys.stderr)
@@ -2536,9 +2546,9 @@ def cmd_plan(args):
         if (lister := build_lister(tmp)) is None:
             return 1
         for pkg in claimed(diff):
-            targets = diff_targets(added, pkg)
+            targets, suite = diff_targets(added, pkg), None
             if tests_changed(tests, pkg):
-                record, problem = record_for(pkg, tests, bases, diff, args.git, tmp)
+                record, suite, problem = record_for(pkg, tests, bases, diff, args.git, tmp)
                 if not problem:
                     targets, problem = targets_for(pkg, added, tests, {"targets": record}, bases)
                 if problem:
@@ -2550,7 +2560,15 @@ def cmd_plan(args):
             if problem:
                 print(f"mutgate: {problem}", file=sys.stderr)
                 return 1
-            suite, problem = suite_seconds(pkg, tmp) if targets or sites else (0.0, None)
+            # A test-changing package's whole suite already ran under coverage in record_for: its time
+            # sizes the shards, so the slowest suite runs three times here, not four (#6155). The `go test`
+            # wall time holds the link too, so it can only add shards.
+            if not (targets or sites):
+                suite, problem = 0.0, None
+            elif suite is None:
+                suite, problem = suite_seconds(pkg, tmp)
+            else:
+                problem = None
             if problem:
                 print(f"mutgate: {problem}", file=sys.stderr)
                 return 1
