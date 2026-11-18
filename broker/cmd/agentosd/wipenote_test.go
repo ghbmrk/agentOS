@@ -94,4 +94,9 @@ func TestWipeLineIsOwnerWorded(t *testing.T) {
 	if err := ownerWorded(wipeFailedLine); err != nil {
 		t.Fatal(err)
 	}
+	// Without its full stop the line is refused: the check reads the
+	// whole sentence, not only its head and fix.
+	if ownerWorded(strings.TrimSuffix(wipeFailedLine, ".")) == nil {
+		t.Fatal("a line with no full stop passed")
+	}
 }
