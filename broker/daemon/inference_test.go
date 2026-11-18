@@ -17,9 +17,11 @@ package daemon
 // (only their socket-capable imports are checked); reflection; values
 // built from the allowed types and handed across packages (modelroute's
 // transport, once built, is only as good as the code that builds it, which
-// this test reads); where a unix dial's address comes from (it must be a
-// field or variable, so from configuration, but the configuration itself
-// is the operator's); _test.go files, which are not linked; and code generated or
+// this test reads); where a unix dial's address comes from past its
+// package (configured holds it to a parameter or a listed field,
+// dialCallers holds the package's own callers, and fieldStores the listed
+// fields, but callers in other packages are the composition root's
+// wiring of the operator's configuration); _test.go files, which are not linked; and code generated or
 // loaded at run time (plugin, os/exec, and os.StartProcess are refused
 // outside their allow-lists, so none is expected).
 
@@ -423,9 +425,7 @@ func inferenceUse(t *testing.T, ps []listed) []string {
 		if !ours {
 			continue
 		}
-		for _, f := range p.files {
-			bad = append(bad, sourceUse(t, filepath.Join(p.dir, f), p.path+"/"+f, rel)...)
-		}
+		bad = append(bad, packageUse(t, p.dir, p.files, p.path, rel)...)
 	}
 	sort.Strings(bad)
 	return bad
@@ -637,8 +637,8 @@ func configured(e ast.Expr, rel string, f *ast.File) bool {
 // type parameters, reflect), so no rule over syntax shows that a field is
 // only ever handed in (#6030 rounds 1 to 3). Each entry is instead a claim
 // a reviewer accepts, as an entry here in the PR's diff: that no code of
-// the package stores into the field, so it holds what callers hand in
-// (what they hand in is #6028's).
+// the package stores into the field, so it holds what callers hand in.
+// fieldStores backs the claim with what syntax can see (#6028).
 var configuredFields = map[string]map[string]string{
 	"infer":                {"Client.Path": "the inference service's socket, from agentosd's wiring"},
 	"kernel/proc":          {"Conn.Socket": "a kernel or clerk socket its caller names", "remote.Socket": "Remote.Socket, embedded; a Remote is handed to Clerk"},
@@ -770,6 +770,584 @@ func writes(e ast.Expr, obj *ast.Object) bool {
 		default:
 			return false
 		}
+	}
+}
+
+// packageUse runs sourceUse on each of a package's files, then the dial
+// rules that need the whole package (#6028): dialCallers, fieldStores and
+// links. They rest on: callers in other packages being the composition
+// root, which wires the operator's configuration; an imported struct type
+// not being converted into a listed one; unsafe staying an escape; and a
+// link or rename going only through os, syscall or x/sys/unix.
+func packageUse(t *testing.T, dir string, files []string, prefix, rel string) []string {
+	t.Helper()
+	var bad []string
+	fset := token.NewFileSet()
+	var fs []*ast.File
+	for _, name := range files {
+		bad = append(bad, sourceUse(t, filepath.Join(dir, name), prefix+"/"+name, rel)...)
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs = append(fs, f)
+	}
+	seen := map[string]bool{}
+	at := func(n ast.Node, what string) {
+		p := fset.Position(n.Pos())
+		s := fmt.Sprintf("%s/%s:%d: %s", prefix, filepath.Base(p.Filename), p.Line, what)
+		if !seen[s] {
+			seen[s] = true
+			bad = append(bad, s)
+		}
+	}
+	dialCallers(fs, rel, at)
+	fieldStores(fs, rel, at)
+	links(fs, rel, at)
+	return bad
+}
+
+// dialAddrs calls visit with each unix dial's address in f.
+func dialAddrs(f *ast.File, visit func(ast.Expr)) {
+	ast.Inspect(f, func(n ast.Node) bool {
+		if c, ok := n.(*ast.CallExpr); ok {
+			if se, ok := c.Fun.(*ast.SelectorExpr); ok {
+				if i, ok := dials[se.Sel.Name]; ok && se.Sel.Name != "Listen" && len(c.Args) >= i+2 {
+					visit(c.Args[i+1])
+				}
+			}
+		}
+		return true
+	})
+}
+
+// dialCallers holds each caller in the package to what configured holds a
+// dial to (#6028). configured takes a function's string parameter as
+// configuration, so the function is a dialing function: each call to it
+// in the package must pass, for that parameter, what configured accepts
+// in the caller's file, and a caller passing its own string parameter is
+// a dialing function too. Calls match by name (h, or any method m), so an
+// interface or another type's method of the same name is held too; a
+// dialing function taken as a value, called as a method expression, or
+// handed arguments the lint cannot count fails closed. Callers outside
+// the package are the composition root's wiring of its configuration.
+func dialCallers(fs []*ast.File, rel string, at func(ast.Node, string)) {
+	addr := map[string]map[int]bool{} // "h" or ".m" -> parameter index
+	add := func(e ast.Expr, f *ast.File) bool {
+		key, i, ok := stringParam(e, f)
+		if !ok || addr[key][i] {
+			return false
+		}
+		if addr[key] == nil {
+			addr[key] = map[int]bool{}
+		}
+		addr[key][i] = true
+		return true
+	}
+	for _, f := range fs {
+		dialAddrs(f, func(e ast.Expr) { add(e, f) })
+	}
+	types := map[string]bool{}
+	for _, f := range fs {
+		for name := range typeDecls(f) {
+			types[name] = true
+		}
+	}
+	for grew := true; grew; {
+		grew = false
+		for _, f := range fs {
+			imported := map[string]bool{}
+			for _, im := range f.Imports {
+				p, _ := strconv.Unquote(im.Path.Value)
+				n := p[strings.LastIndex(p, "/")+1:]
+				if im.Name != nil {
+					n = im.Name.Name
+				}
+				imported[n] = true
+			}
+			// key is the dialing function e names, or "".
+			key := func(e ast.Expr) string {
+				switch x := e.(type) {
+				case *ast.Ident:
+					return x.Name
+				case *ast.SelectorExpr:
+					if id, ok := x.X.(*ast.Ident); ok && id.Obj == nil && imported[id.Name] {
+						return ""
+					}
+					return "." + x.Sel.Name
+				}
+				return ""
+			}
+			called, named := map[ast.Node]bool{}, map[ast.Node]bool{}
+			ast.Inspect(f, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.FuncDecl:
+					named[n.Name] = true
+				case *ast.SelectorExpr:
+					named[n.Sel] = true
+				case *ast.KeyValueExpr:
+					named[n.Key] = true
+				case *ast.CallExpr:
+					called[n.Fun] = true
+					k := key(n.Fun)
+					if len(addr[k]) == 0 {
+						return true
+					}
+					if se, ok := n.Fun.(*ast.SelectorExpr); ok && methodExpr(se.X, types) {
+						at(n, k[1:]+", a dialing function, called as a method expression")
+						return true
+					}
+					for i := range addr[k] {
+						if n.Ellipsis.IsValid() || i >= len(n.Args) {
+							at(n, strings.TrimPrefix(k, ".")+", a dialing function, with arguments the lint cannot check")
+							continue
+						}
+						if !configured(n.Args[i], rel, f) {
+							at(n, "passes "+strings.TrimPrefix(k, ".")+" an address not taken from configuration")
+						} else if add(n.Args[i], f) {
+							grew = true
+						}
+					}
+				}
+				return true
+			})
+			ast.Inspect(f, func(n ast.Node) bool {
+				var k string
+				switch x := n.(type) {
+				case *ast.Ident:
+					if named[x] {
+						return true
+					}
+					k = x.Name
+				case *ast.SelectorExpr:
+					if k = key(x); k == "" {
+						return true
+					}
+				default:
+					return true
+				}
+				if len(addr[k]) > 0 && !called[n] {
+					at(n, strings.TrimPrefix(k, ".")+", a dialing function, used as a value")
+				}
+				return true
+			})
+		}
+	}
+}
+
+// stringParam returns the function (as "h" or ".m") and index of the
+// by-value string parameter e names, which configured accepts.
+func stringParam(e ast.Expr, f *ast.File) (string, int, bool) {
+	id, ok := e.(*ast.Ident)
+	if !ok || id.Obj == nil {
+		return "", 0, false
+	}
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		i := 0
+		for _, p := range fd.Type.Params.List {
+			for _, nm := range p.Names {
+				if t, ok := p.Type.(*ast.Ident); ok && t.Name == "string" && nm.Obj == id.Obj {
+					if fd.Recv != nil {
+						return "." + fd.Name.Name, i, true
+					}
+					return fd.Name.Name, i, true
+				}
+				i++
+			}
+			if len(p.Names) == 0 {
+				i++
+			}
+		}
+	}
+	return "", 0, false
+}
+
+// methodExpr reports x as a type (T.m or (*T).m), so a call's arguments
+// start with the receiver.
+func methodExpr(x ast.Expr, types map[string]bool) bool {
+	switch x := x.(type) {
+	case *ast.Ident:
+		return types[x.Name] || x.Obj != nil && x.Obj.Kind == ast.Typ
+	case *ast.ParenExpr, *ast.StarExpr, *ast.IndexExpr:
+		return true
+	}
+	return false
+}
+
+// typeDecls are f's type declarations, by name.
+func typeDecls(f *ast.File) map[string]*ast.TypeSpec {
+	m := map[string]*ast.TypeSpec{}
+	for _, d := range f.Decls {
+		if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.TYPE {
+			for _, s := range gd.Specs {
+				ts := s.(*ast.TypeSpec)
+				m[ts.Name.Name] = ts
+			}
+		}
+	}
+	return m
+}
+
+// fieldStores backs the configuredFields claim, that the package never
+// stores into a listed field, with what syntax can see in a listed package
+// (Lens R1 and Security 5 on #6035): a write or & of any selector naming a
+// listed field (whatever its type, so through a method, a method value or
+// another type of the same shape); a composite literal that sets the field
+// by key, or by position in a struct type with a field of that name (a
+// type parameter or an imported type counts, as either may be one); a
+// reflect import; and a pointer to a type that holds a listed type, or a
+// field of that name, handed to a call (json.Unmarshal(b, c), var d D
+// then f(&d)), which may store through it.
+func fieldStores(fs []*ast.File, rel string, at func(ast.Node, string)) {
+	fields, listedTypes := map[string]bool{}, map[string]bool{}
+	for tf := range configuredFields[rel] {
+		typ, field, _ := strings.Cut(tf, ".")
+		listedTypes[typ], fields[field] = true, true
+	}
+	if len(fields) == 0 {
+		return
+	}
+	decls := map[string]*ast.TypeSpec{}
+	for _, f := range fs {
+		for name, ts := range typeDecls(f) {
+			decls[name] = ts
+		}
+	}
+	// resolve follows a local named type to its definition; nil is a type
+	// parameter's, or an elided type the lint could not follow.
+	resolve := func(e ast.Expr) ast.Expr {
+		for range len(decls) + 1 {
+			if ix, ok := e.(*ast.IndexExpr); ok {
+				e = ix.X
+			}
+			if ix, ok := e.(*ast.IndexListExpr); ok {
+				e = ix.X
+			}
+			if p, ok := e.(*ast.ParenExpr); ok {
+				e = p.X
+			}
+			id, ok := e.(*ast.Ident)
+			if !ok {
+				return e
+			}
+			ts := decls[id.Name]
+			if ts == nil {
+				if id.Obj != nil && isTypeParam(id.Obj) {
+					return nil
+				}
+				return id // predeclared
+			}
+			e = ts.Type
+		}
+		return nil
+	}
+	// hasField reports a struct type with a field of a listed name, or a
+	// type resolve could not follow (a type parameter's).
+	hasField := func(e ast.Expr) bool {
+		st, ok := e.(*ast.StructType)
+		if !ok {
+			return e == nil
+		}
+		for _, fl := range st.Fields.List {
+			for _, nm := range fl.Names {
+				if fields[nm.Name] {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	// holds reports a type through which code outside the package could
+	// store into a listed field: the listed type, or a struct with an
+	// exported field of a listed name, reached by value, pointer, slice,
+	// map or channel through exported fields (json, gob and reflect set
+	// only those). A type parameter's is its instantiation's, checked
+	// where a call names it.
+	var holds func(e ast.Expr, seen map[string]bool) bool
+	holds = func(e ast.Expr, seen map[string]bool) bool {
+		switch x := e.(type) {
+		case *ast.StarExpr:
+			return holds(x.X, seen)
+		case *ast.ArrayType:
+			return holds(x.Elt, seen)
+		case *ast.MapType:
+			return holds(x.Value, seen)
+		case *ast.ChanType:
+			return holds(x.Value, seen)
+		case *ast.ParenExpr:
+			return holds(x.X, seen)
+		case *ast.IndexExpr:
+			return holds(x.X, seen)
+		case *ast.IndexListExpr:
+			return holds(x.X, seen)
+		case *ast.Ident:
+			if listedTypes[x.Name] {
+				return true
+			}
+			ts := decls[x.Name]
+			if ts == nil || seen[x.Name] {
+				return false
+			}
+			seen[x.Name] = true
+			return holds(ts.Type, seen)
+		case *ast.StructType:
+			for _, fl := range x.Fields.List {
+				if len(fl.Names) == 0 {
+					t := fl.Type
+					if st, ok := t.(*ast.StarExpr); ok {
+						t = st.X
+					}
+					// json promotes an embedded struct's exported
+					// fields whether or not its type is exported.
+					if id, ok := t.(*ast.Ident); ok && holds(id, seen) {
+						return true
+					}
+				}
+				for _, nm := range fl.Names {
+					if ast.IsExported(nm.Name) && (fields[nm.Name] || holds(fl.Type, seen)) {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
+	stores := func(e ast.Expr) (string, bool) {
+		for {
+			switch x := e.(type) {
+			case *ast.SelectorExpr:
+				if fields[x.Sel.Name] {
+					return x.Sel.Name, true
+				}
+				e = x.X
+			case *ast.IndexExpr:
+				e = x.X
+			case *ast.StarExpr:
+				e = x.X
+			case *ast.ParenExpr:
+				e = x.X
+			default:
+				return "", false
+			}
+		}
+	}
+	// lit checks a composite literal of type typ, and its elided ones.
+	var lit func(c *ast.CompositeLit, typ ast.Expr)
+	lit = func(c *ast.CompositeLit, typ ast.Expr) {
+		r := resolve(typ)
+		keyed := false
+		for _, e := range c.Elts {
+			if kv, ok := e.(*ast.KeyValueExpr); ok {
+				keyed = true
+				if id, ok := kv.Key.(*ast.Ident); ok && fields[id.Name] {
+					at(kv, "sets "+id.Name+", a configuredFields field, here")
+				}
+			}
+		}
+		if !keyed && len(c.Elts) > 0 && hasField(r) {
+			at(c, "sets a configuredFields field by position here")
+		}
+		var elt, key ast.Expr
+		switch x := r.(type) {
+		case *ast.ArrayType:
+			elt = x.Elt
+		case *ast.MapType:
+			elt, key = x.Value, x.Key
+		case nil:
+		default:
+			return // a struct's elements, or an imported type's, name their types
+		}
+		elided := func(e, t ast.Expr) {
+			if u, ok := e.(*ast.UnaryExpr); ok && u.Op == token.AND {
+				e = u.X
+			}
+			if st, ok := t.(*ast.StarExpr); ok {
+				t = st.X
+			}
+			if cl, ok := e.(*ast.CompositeLit); ok && cl.Type == nil {
+				lit(cl, t)
+			}
+		}
+		for _, e := range c.Elts {
+			if kv, ok := e.(*ast.KeyValueExpr); ok {
+				elided(kv.Key, key)
+				e = kv.Value
+			}
+			elided(e, elt)
+		}
+	}
+	for _, f := range fs {
+		for _, im := range f.Imports {
+			if im.Path.Value == `"reflect"` {
+				at(im, "imports reflect, which can store into a configuredFields field")
+			}
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			var targets []ast.Expr
+			switch n := n.(type) {
+			case *ast.AssignStmt:
+				targets = n.Lhs
+			case *ast.RangeStmt:
+				targets = []ast.Expr{n.Key, n.Value}
+			case *ast.IncDecStmt:
+				targets = []ast.Expr{n.X}
+			case *ast.UnaryExpr:
+				if n.Op == token.AND {
+					targets = []ast.Expr{n.X}
+				}
+			case *ast.CompositeLit:
+				if n.Type != nil {
+					lit(n, n.Type)
+				}
+			case *ast.CallExpr:
+				for _, a := range n.Args {
+					ptr := false
+					if u, ok := a.(*ast.UnaryExpr); ok && u.Op == token.AND {
+						a, ptr = u.X, true
+					}
+					id, ok := a.(*ast.Ident)
+					if !ok || id.Obj == nil {
+						continue
+					}
+					typ := declType(id.Obj)
+					if st, ok := typ.(*ast.StarExpr); ok {
+						typ, ptr = st.X, true
+					}
+					if ptr && typ != nil && holds(typ, map[string]bool{}) {
+						at(n, "hands a pointer to "+id.Name+", which holds a configuredFields field, to a call that may store through it")
+					}
+				}
+				var targs []ast.Expr
+				switch x := n.Fun.(type) {
+				case *ast.IndexExpr:
+					targs = []ast.Expr{x.Index}
+				case *ast.IndexListExpr:
+					targs = x.Indices
+				}
+				for _, ta := range targs {
+					if holds(ta, map[string]bool{}) {
+						at(n, "instantiates a generic with a type that holds a configuredFields field")
+					}
+				}
+			}
+			for _, e := range targets {
+				if e == nil {
+					continue
+				}
+				if name, ok := stores(e); ok {
+					at(e, "stores into "+name+", a configuredFields field")
+				}
+			}
+			return true
+		})
+	}
+}
+
+// isTypeParam reports obj declared in a type parameter list.
+func isTypeParam(obj *ast.Object) bool {
+	_, ok := obj.Decl.(*ast.Field)
+	return ok
+}
+
+// declType is the type obj is declared with, or that its := or var
+// initializer makes plain (T{}, &T{}, new(T)); nil when neither shows it.
+func declType(obj *ast.Object) ast.Expr {
+	of := func(e ast.Expr) ast.Expr {
+		switch x := e.(type) {
+		case *ast.CompositeLit:
+			return x.Type
+		case *ast.UnaryExpr:
+			if c, ok := x.X.(*ast.CompositeLit); ok && x.Op == token.AND && c.Type != nil {
+				return &ast.StarExpr{X: c.Type}
+			}
+		case *ast.CallExpr:
+			if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "new" && len(x.Args) == 1 {
+				return &ast.StarExpr{X: x.Args[0]}
+			}
+		}
+		return nil
+	}
+	switch d := obj.Decl.(type) {
+	case *ast.Field:
+		return d.Type
+	case *ast.ValueSpec:
+		if d.Type != nil {
+			return d.Type
+		}
+		for i, nm := range d.Names {
+			if nm.Obj == obj && i < len(d.Values) && len(d.Values) == len(d.Names) {
+				return of(d.Values[i])
+			}
+		}
+	case *ast.AssignStmt:
+		for i, l := range d.Lhs {
+			if id, ok := l.(*ast.Ident); ok && id.Obj == obj && len(d.Lhs) == len(d.Rhs) {
+				return of(d.Rhs[i])
+			}
+		}
+	}
+	return nil
+}
+
+// linkCalls are the calls that make, move or replace a directory entry,
+// so a configured socket path, or its directory, could come to name
+// another socket (Security 4 on #6035).
+var linkCalls = map[string]bool{
+	"os.Symlink": true, "os.Link": true, "os.Rename": true,
+	"syscall.Symlink": true, "syscall.Link": true, "syscall.Rename": true,
+	"syscall.Symlinkat": true, "syscall.Linkat": true, "syscall.Renameat": true,
+	"golang.org/x/sys/unix.Symlink": true, "golang.org/x/sys/unix.Link": true, "golang.org/x/sys/unix.Rename": true,
+	"golang.org/x/sys/unix.Symlinkat": true, "golang.org/x/sys/unix.Linkat": true, "golang.org/x/sys/unix.Renameat": true,
+	"golang.org/x/sys/unix.Renameat2": true,
+}
+
+// linkOK are the linkCalls a package that dials may make, outside the
+// files that dial, and why.
+var linkOK = map[string]map[string]string{
+	"kernel/proc": {
+		"os.Link":   "links a backup's content file into its snapshot, under the kernel's backup dir (backup.go)",
+		"os.Rename": "moves a restore's staged content into the content dir (restore.go)",
+	},
+}
+
+// links refuses a linkCall, called or taken as a value, in a package that
+// dials a unix socket, except a linkOK use in a file that does not dial
+// (Security 4 on #6035).
+func links(fs []*ast.File, rel string, at func(ast.Node, string)) {
+	if !unixDialers[rel] && unixDialCalls[rel] == nil {
+		return
+	}
+	for _, f := range fs {
+		local := map[string]string{}
+		for _, im := range f.Imports {
+			p, _ := strconv.Unquote(im.Path.Value)
+			n := p[strings.LastIndex(p, "/")+1:]
+			if im.Name != nil {
+				n = im.Name.Name
+			}
+			local[n] = p
+		}
+		dialsHere := false
+		dialAddrs(f, func(ast.Expr) { dialsHere = true })
+		ast.Inspect(f, func(n ast.Node) bool {
+			se, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			id, ok := se.X.(*ast.Ident)
+			if !ok || id.Obj != nil || local[id.Name] == "" {
+				return true
+			}
+			full := local[id.Name] + "." + se.Sel.Name
+			if linkCalls[full] && (dialsHere || linkOK[rel][full] == "") {
+				at(se, "links or renames ("+full+") in a package that dials a unix socket")
+			}
+			return true
+		})
 	}
 }
 
@@ -965,6 +1543,87 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 			t.Errorf("an unconfigured address passed: %q\n%s", got, c)
 		}
 	}
+	// What a dialing function's callers pass, what a listed package stores
+	// into a configuredFields field, and links or renames that could swap
+	// the socket under a configured path, are package-wide (#6028). Each
+	// case is one package of modelroute (Config.Socket listed), or of the
+	// named package.
+	dial := `func h(s string) { (&net.Dialer{}).Dial("unix", s) }; `
+	cfgDial := `type Config struct{ Socket string }; func (c *Config) dial() { (&net.Dialer{}).Dial("unix", c.Socket) }; `
+	for _, c := range []struct {
+		rel, want string
+		srcs      []string
+	}{
+		// A literal passed to a dialing function's parameter, directly,
+		// through another dialing function, or from another file.
+		{"modelroute", "passes h an address not taken from configuration", []string{src(`"net"`, dial+`func g() { h("/run/proxy.sock") }`)}},
+		{"modelroute", "passes k an address not taken from configuration", []string{src(`"net"`, dial+`func k(s string) { h(s) }; func g() { k("/run/proxy.sock") }`)}},
+		{"modelroute", "passes h an address not taken from configuration", []string{src(`"net"`, dial), src(``, `func g() { h("/run/proxy.sock") }`)}},
+		{"modelroute", "passes h an address not taken from configuration", []string{src(`"net"`, dial+`func g() { s := "/run/proxy.sock"; h(s) }`)}},
+		{"modelroute", "passes d an address not taken from configuration", []string{src(`"net"`, `type c struct{}; func (c) d(s string) { (&net.Dialer{}).Dial("unix", s) }; func g(x c) { x.d("/run/proxy.sock") }`)}},
+		{"modelroute", "passes d an address not taken from configuration", []string{src(`"net"`, `type c struct{}; func (c) d(s string) { (&net.Dialer{}).Dial("unix", s) }; type i interface{ d(string) }; func g(x i) { x.d("/run/proxy.sock") }`)}},
+		{"modelroute", "passes h an address not taken from configuration", []string{src(`"net"`, `func h(n int, s string) { (&net.Dialer{}).Dial("unix", s) }; func g() { h(0, "/run/proxy.sock") }`)}},
+		// A dialing function taken as a value, or called so that the lint
+		// cannot match its arguments.
+		{"modelroute", "h, a dialing function, used as a value", []string{src(`"net"`, dial+`var f = h; func g() { f("/run/proxy.sock") }`)}},
+		{"modelroute", "d, a dialing function, used as a value", []string{src(`"net"`, `type c struct{}; func (c) d(s string) { (&net.Dialer{}).Dial("unix", s) }; func g(x c) { f := x.d; f("/run/proxy.sock") }`)}},
+		{"modelroute", "d, a dialing function, called as a method expression", []string{src(`"net"`, `type c struct{}; func (c) d(s string) { (&net.Dialer{}).Dial("unix", s) }; func g() { c.d(c{}, "/run/proxy.sock") }`)}},
+		{"modelroute", "h, a dialing function, with arguments the lint cannot check", []string{src(`"net"`, `func h(n int, s string) { (&net.Dialer{}).Dial("unix", s) }; func t() (int, string) { return 0, "/run/proxy.sock" }; func g() { h(t()) }`)}},
+		// A literal stored in the listed field it dials: by key, by
+		// position, through a method, a method value, another struct of
+		// the same shape, an elided literal or a type parameter (Lens R1,
+		// Security 5 on #6035).
+		{"modelroute", "sets Socket, a configuredFields field, here", []string{src(`"net"`, cfgDial+`func g() { (&Config{Socket: "/run/proxy.sock"}).dial() }`)}},
+		{"modelroute", "sets a configuredFields field by position here", []string{src(`"net"`, cfgDial+`func g() { (&Config{"/run/proxy.sock"}).dial() }`)}},
+		{"modelroute", "stores into Socket, a configuredFields field", []string{src(`"net"`, cfgDial+`func (c *Config) fix() { c.Socket = "/run/proxy.sock" }; func g(c *Config) { c.fix(); c.dial() }`)}},
+		{"modelroute", "stores into Socket, a configuredFields field", []string{src(`"net"`, cfgDial+`func (c *Config) fix() { c.Socket = "/run/proxy.sock" }; func g(c *Config) { f := c.fix; f(); c.dial() }`)}},
+		{"modelroute", "stores into Socket, a configuredFields field", []string{src(`"net"; "fmt"`, cfgDial+`func g(c *Config) { fmt.Sscan("/run/proxy.sock", &c.Socket); c.dial() }`)}},
+		{"modelroute", "sets a configuredFields field by position here", []string{src(`"net"`, cfgDial+`func g(c *Config) { *c = struct{ Socket string }{"/run/proxy.sock"}; c.dial() }`)}},
+		{"modelroute", "sets a configuredFields field by position here", []string{src(`"net"`, cfgDial+`type u struct{ Socket string }; func g(c *Config) { *c = Config(u{"/run/proxy.sock"}); c.dial() }`)}},
+		{"modelroute", "sets a configuredFields field by position here", []string{src(`"net"`, cfgDial+`func g() { l := []Config{{"/run/proxy.sock"}}; l[0].dial() }`)}},
+		{"modelroute", "sets a configuredFields field by position here", []string{src(`"net"`, cfgDial+`type list map[string]*Config; func g() { l := list{"a": {"/run/proxy.sock"}}; l["a"].dial() }`)}},
+		{"modelroute", "sets a configuredFields field by position here", []string{src(`"net"`, cfgDial+`func set[T ~struct{ Socket string }](p *T) { *p = T{"/run/proxy.sock"} }; func g(c *Config) { set(c); c.dial() }`)}},
+		{"modelroute", "sets Socket, a configuredFields field, here", []string{src(`"net"`, cfgDial), src(``, `func g() { (&Config{Socket: "/run/proxy.sock"}).dial() }`)}},
+		// A decoder or reflect filling the listed field: a pointer to a
+		// type that holds it handed to a call, however the value was made
+		// (Lens on #6030), or a generic instantiated with such a type.
+		{"modelroute", "imports reflect", []string{src(`"net"; "reflect"`, cfgDial+`func g(c *Config) { reflect.ValueOf(c).Elem().Field(0).SetString("/run/proxy.sock"); c.dial() }`)}},
+		{"modelroute", "hands a pointer to c", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(c *Config) { json.Unmarshal([]byte(`+"`"+`{"Socket":"/run/proxy.sock"}`+"`"+`), c); c.dial() }`)}},
+		{"modelroute", "hands a pointer to d", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte) { var d Config; json.Unmarshal(b, &d); d.dial() }`)}},
+		{"modelroute", "hands a pointer to d", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte) { d := new(Config); json.Unmarshal(b, d); d.dial() }`)}},
+		{"modelroute", "hands a pointer to o", []string{src(`"net"; "encoding/json"`, cfgDial+`type outer struct{ In []Config }; func g(b []byte) { var o outer; json.Unmarshal(b, &o); o.In[0].dial() }`)}},
+		{"modelroute", "instantiates a generic", []string{src(`"net"; "encoding/json"`, cfgDial+`func dec[T any](b []byte) (t T) { json.Unmarshal(b, &t); return }; func g(b []byte) { c := dec[Config](b); c.dial() }`)}},
+		// A link or rename that could put another socket at the dialed
+		// path or its directory, in a package that dials, called or taken
+		// as a value (Security 4 on #6035).
+		{"modelroute", "links or renames (os.Symlink)", []string{src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); os.Symlink("/run/proxy.sock", filepath.Join(dir, "s.sock")); sock := filepath.Join(dir, "s.sock"); (&net.Dialer{}).Dial("unix", sock) }`)}},
+		{"modelroute", "links or renames (os.Link)", []string{src(`"net"; "os"`, dial+`func g(s string) { os.Link("/run/proxy.sock", s) }`)}},
+		{"modelroute", "links or renames (os.Rename)", []string{src(`"net"`, dial), src(`"os"`, `func g(s string) { os.Rename("/run/proxy.sock", s) }`)}},
+		{"modelroute", "links or renames (syscall.Symlink)", []string{src(`"net"; "syscall"`, dial+`func g(s string) { syscall.Symlink("/run/proxy.sock", s) }`)}},
+		{"modelroute", "links or renames (golang.org/x/sys/unix.Renameat2)", []string{src(`"net"; "golang.org/x/sys/unix"`, dial+`func g(s string) { unix.Renameat2(0, "/run/proxy.sock", 0, s, 0) }`)}},
+		{"modelroute", "links or renames (golang.org/x/sys/unix.Linkat)", []string{src(`"net"; "golang.org/x/sys/unix"`, dial+`func g(s string) { unix.Linkat(0, "/run/proxy.sock", 0, s, 0) }`)}},
+		{"modelroute", "links or renames (os.Symlink)", []string{src(`"net"; "os"`, dial+`var link = os.Symlink`)}},
+		{"kernel/proc", "links or renames (os.Rename)", []string{src(`"net"; "os"`, `type Conn struct{ Socket string }; func (c *Conn) dial() { net.Dial("unix", c.Socket); os.Rename("/run/proxy.sock", c.Socket) }`)}},
+		{"kernel/proc", "links or renames (os.Symlink)", []string{src(`"net"`, `type Conn struct{ Socket string }; func (c *Conn) dial() { net.Dial("unix", c.Socket) }`), src(`"os"`, `func g(s string) { os.Symlink("/run/proxy.sock", s) }`)}},
+	} {
+		if got := useOf(t, c.rel, c.srcs...); !strings.Contains(got, c.want) {
+			t.Errorf("in %s, not reported: %s; got %q\n%s", c.rel, c.want, got, strings.Join(c.srcs, "\n"))
+		}
+	}
+	// Callers that pass configuration, a dialing function's own string
+	// parameter, and kernel/proc's reviewed link and rename outside the
+	// files that dial, pass.
+	for _, c := range []struct {
+		rel  string
+		srcs []string
+	}{
+		{"modelroute", []string{src(`"net"`, `type Config struct{ Socket string }; `+dial+`func k(s string) { h(s) }; func g(c Config) { h(c.Socket); k(c.Socket) }`)}},
+		{"kernel/proc", []string{src(`"net"`, `type Conn struct{ Socket string }; func (c *Conn) dial() { net.Dial("unix", c.Socket) }`), src(`"os"`, `func g(a, b string) { os.Link(a, b); os.Rename(a, b) }`)}},
+	} {
+		if got := useOf(t, c.rel, c.srcs...); got != "" {
+			t.Errorf("in %s, flagged: %q\n%s", c.rel, got, strings.Join(c.srcs, "\n"))
+		}
+	}
 	ok := src(`"net"; "net/http"; "net/http/httputil"; "os"; "path/filepath"`, `type Config struct{ Socket string }
 func g(sock string, cfg Config) {
 	_, _ = (&net.Dialer{}).Dial("unix", cfg.Socket)
@@ -1010,6 +1669,22 @@ func keep(p *Remote, old Remote) { *p = old }`)
 			t.Fatalf("%s is not an escape", e)
 		}
 	}
+}
+
+// useOf writes srcs as the files of one package and returns what
+// packageUse reports for it as package rel.
+func useOf(t *testing.T, rel string, srcs ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	var files []string
+	for i, s := range srcs {
+		name := fmt.Sprintf("p%d.go", i)
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, name)
+	}
+	return strings.Join(packageUse(t, dir, files, "p", rel), "\n")
 }
 
 // REQ: LOOP-7, LOOP-9
