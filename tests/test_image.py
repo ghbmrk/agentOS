@@ -5115,11 +5115,11 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
             refused = check.unit_made_refusals(t)
         self.assertEqual(out, [])
         self.assertEqual(refused, [])
-        # Pinned: the eight agentos entries SERVICE_DIRS no longer lists, and the two root units' own.
+        # Pinned: the eight agentos entries SERVICE_DIRS no longer lists, the two root units' own, and the wipe's record (#6094).
         self.assertEqual(sorted(made), sorted((
             "var/lib/agentos-localui", "var/lib/agentos-egress", "run/agentos-egress", "run/agentos-localui",
             "run/agentos-mail", "run/agentos-link", "run/agentos-camera", "run/agentos-homekit",
-            "var/lib/agentos-store", "var/lib/agentos/modem")))
+            "var/lib/agentos-store", "var/lib/agentos/modem", "var/lib/agentos-wipe")))
 
 
 class ReferenceToolTest(unittest.TestCase):
