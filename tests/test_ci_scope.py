@@ -184,18 +184,39 @@ class ScopeTest(unittest.TestCase):
             self.assertFalse((ROOT / f).stat().st_mode & 0o111, f"{f} is executable")
 
     def test_no_record_directory_holds_a_mkosi_tree(self):
-        # #6088: test_image_repro.KeyringSpikesTest pins each mkosi tree's apt inputs, but its walk may not
-        # open a record directory (records_audit); this module reads git, so it holds that none holds a
-        # tree: no tracked path below one has a part mkosi reads as configuration.
-        def trees(files):
-            return [f for f in files if f.startswith(ci_scope.RECORD_DIRS)
-                    and {"mkosi.conf", "mkosi.conf.d", "mkosi.local.conf"} & set(f.split("/"))]
-        self.assertEqual(trees(["reviews/a/mkosi.conf", "handoff/b/mkosi.conf.d/10.conf", "docs/security/mkosi.local.conf",
-                                "image/mkosi/mkosi.conf", "reviews/mkosi.md", "briefs/mkosi.conf.md"]),
-                         ["reviews/a/mkosi.conf", "handoff/b/mkosi.conf.d/10.conf", "docs/security/mkosi.local.conf"])
-        files = git(ROOT, "ls-files", "-z").split("\0")
-        self.assertIn("image/mkosi/mkosi.conf", files)
-        self.assertEqual(trees(files), [])
+        # #6088, #6118: test_image_repro.KeyringSpikesTest pins each mkosi tree's apt inputs, but its walk may
+        # not open a record directory (records_audit); this module reads git, so it holds that none holds a
+        # tree. Two classes, neither listed by name, so a new mkosi file name or link target cannot slip by:
+        # - any tracked entry that is not a regular file (mode 100644 or 100755): a record is text read in
+        #   place, so no symlink (120000) or gitlink (160000) is one, and either reaches whatever it names (a
+        #   tree, a mkosi.conf, a script) without a mkosi part of its own;
+        # - a path part mkosi can read: every name mkosi reads starts "mkosi." (conf, conf.d, local.conf,
+        #   images, configure, extra, the scripts), and none is a Markdown file, so only an "mkosi.*.md"
+        #   file name is free of it (a directory so named is not). A lone mkosi.configure builds nothing yet,
+        #   but is caught all the same.
+        def trees(entries):
+            caught = []
+            for mode, f in entries:
+                parts = f.split("/")
+                if f.startswith(ci_scope.RECORD_DIRS) and (mode not in ("100644", "100755") or any(
+                        p.startswith("mkosi.") and not (i == len(parts) - 1 and p.endswith(".md"))
+                        for i, p in enumerate(parts))):
+                    caught.append(f)
+            return caught
+        caught = ["reviews/a/mkosi.conf", "handoff/b/mkosi.conf.d/10.conf", "docs/security/mkosi.local.conf",
+                  "reviews/c/mkosi.configure", "briefs/d/mkosi.images/x/mkosi.conf", "decisions/mkosi.conf.d/a.md",
+                  "reviews/mkosi.x.md/y", "handoff/link", "reviews/e/mkosi.md", "docs/security/sub"]
+        modes = {"handoff/link": "120000", "reviews/e/mkosi.md": "120000", "docs/security/sub": "160000",
+                 "reviews/run.sh": "100755"}
+        clean = ["image/mkosi/mkosi.conf", "image/mkosi/mkosi.configure", "reviews/mkosi.md", "briefs/mkosi.conf.md",
+                 "docs/learning/mkosi-notes.md", "reviews/run.sh"]
+        self.assertEqual(trees([(modes.get(f, "100644"), f) for f in caught + clean]), caught)
+        self.assertEqual(trees([("120000", "image/mkosi/mkosi.configure")]), [])
+        entries = [(meta.split()[0], f) for meta, f in
+                   (e.split("\t", 1) for e in git(ROOT, "ls-files", "-s", "-z").split("\0") if e)]
+        self.assertIn(("100644", "image/mkosi/mkosi.conf"), entries)
+        self.assertIn(("120000", "image/mkosi/mkosi.configure"), entries)
+        self.assertEqual(trees(entries), [])
 
     def test_git_diff_lists_a_moved_file_under_its_old_path(self):
         with tempfile.TemporaryDirectory() as d:
@@ -694,7 +715,8 @@ class WiringTest(unittest.TestCase):
         step = "      - name: Machine tests as root\n        working-directory: broker\n        run: |\n"
         rc0 = "          rc=0\n"
         go = "          sudo setpriv --no-new-privs env \"PATH=$PATH\" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \\\n            AGENTOS_CGROUP_PARENT"
-        run = "          python3 -I ../tools/require_ran.py"
+        # The machines step's own call: a bare require_ran.py line also opens broker-checks' browser step.
+        run = "          python3 -I ../tools/require_ran.py --named-skips-only --gated"
         rc = '          [ "$rc" -eq 0 ]\n'
         nxt = "      - name: Camera decoder sessions in their own unit"
         job = "\n  machines:\n"
@@ -730,7 +752,7 @@ class WiringTest(unittest.TestCase):
             "top-level defaults after PS": (ci, ci.rstrip("\n") + "\u2029" + "defaults:\n  run:\n    shell: bash {0}\n"),
             "quoted duplicate machines key": ("\n  hostcheck:", "\n  'machines':\n    runs-on: ubuntu-24.04\n  hostcheck:"),
             "a second machines job": ("\n  hostcheck:", "\n  machines:\n    runs-on: ubuntu-24.04\n  hostcheck:"),
-            "isolation flag dropped": (run, "          python3 ../tools/require_ran.py"),
+            "isolation flag dropped": (run, run.replace(" -I", "")),
             "exit on failure dropped": ("StaysInLeaf || exit 1\n", "StaysInLeaf\n"),
             "infer run moved off the infer tests": (" -json ./infer/... ", " -json ./cleanroom "),
             "vision run dropped": (" ./infer/... ./vision/... > ", " ./infer/... > "),

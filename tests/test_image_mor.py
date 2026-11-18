@@ -9,12 +9,13 @@ come from there."""
 # REQ: HW-8
 import pathlib
 import re
+import shutil
 import sys
 import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from test_image import ENTRY, H, MK, ROOT, check, exec_args, finish, ini, nodump, settings, write  # noqa: E402
+from test_image import ENTRY, H, MK, ROOT, check, exec_args, finish, flush_unit, ini, nodump, settings, write  # noqa: E402
 
 UNITS = MK / "mkosi.extra/usr/lib/systemd/system"
 UNIT = UNITS / "agentos-mor.service"
@@ -49,12 +50,29 @@ def unit_specifiers(unit):
             "%I": ".*" if wild else re.escape(inst)}
 
 
+def unit_lines(text):
+    """A unit file's text as systemd reads it: a comment line ("#" or ";" first) dropped, inside a
+    continued line too, and a line ending in a backslash joined to the next. A comment line never
+    continues here (systemd's would take the next line with it), so a write after one still counts."""
+    out, cont = [], ""
+    for line in text.split("\n"):
+        if line.lstrip()[:1] in ("#", ";"):
+            continue
+        if line.endswith("\\"):
+            cont += line[:-1] + " "
+            continue
+        out.append(cont + line)
+        cont = ""
+    return "\n".join(out + [cont])
+
+
 def names_held_dir(text, dirs, unit=""):
     """Whether a unit file's text names one of dirs, or a path under it: the path not followed by a
-    character that continues a name, through a base specifier, or as a directory setting (continued
-    lines joined, the unit's name specifiers resolved). An InaccessiblePaths= line masks the paths it
-    lists, so it names none: the main side's drop-ins (#5818) list every hold dir there."""
-    text = re.sub(r"^[ \t]*InaccessiblePaths[ \t]*=.*$", "", text.replace("\\\n", " "), flags=re.M)
+    character that continues a name, through a base specifier, or as a directory setting (comments
+    dropped, continued lines joined, the unit's name specifiers resolved). An InaccessiblePaths= line
+    masks the paths it lists, so it names none: the main side's drop-ins (#5818) list every hold dir
+    there."""
+    text = re.sub(r"^[ \t]*InaccessiblePaths[ \t]*=.*$", "", unit_lines(text), flags=re.M)
     for spec, base in SPECIFIERS.items():
         text = text.replace(spec, base)
     if any(re.search(re.escape(d) + r"(?![\w.@+~-])", text) for d in dirs):
@@ -69,6 +87,47 @@ def names_held_dir(text, dirs, unit=""):
                 if any(re.fullmatch(pat, d) for d in dirs):
                     return True
     return False
+
+
+WIPE = "agentos-keeper-wipe.service"
+# The clear's only commands (test_clear_runs_at_stop_after_the_secret_holders). It reaches the hold
+# dirs only through agentos-mor's holdDirs, which it lists and never writes in
+# (test_the_clear_sees_the_dirs_it_lists), so its unit names none and is counted like any other. Its
+# record step (MOR-clear-owner, test_a_refused_clear_is_recorded_on_root) writes on root only.
+CLEAR_RECORD = ("/usr/bin/sh -c 'if [ \"$$SERVICE_RESULT\" = success ]; then exec /usr/bin/rm -f -- "
+                "/var/lib/agentos-mor/refused; fi; /usr/bin/mkdir -p -m 0700 /var/lib/agentos-mor && "
+                "echo \"$$SERVICE_RESULT $$EXIT_CODE $$EXIT_STATUS\" >/var/lib/agentos-mor/refused && "
+                "exec /usr/bin/sync -f /var/lib/agentos-mor/refused'")
+CLEAR_EXEC = {"ExecStart": ["/usr/lib/agentos/agentos-mor status"],
+              "ExecStop": ["/usr/lib/agentos/agentos-mor clear"],
+              "ExecStopPost": [CLEAR_RECORD]}
+COMMANDS = ("ExecCondition", "ExecStartPre", "ExecStart", "ExecStartPost", "ExecReload", "ExecStop",
+            "ExecStopPost")
+
+
+def hold_writers(units):
+    """Every unit but the wipe whose file or drop-in names a holdDirs path, by unit name."""
+    writers = set()
+    for f in [u for u in units.iterdir() if u.is_file()] + list(units.glob("*.d/*.conf")):
+        unit = f.parent.name[:-2] if f.parent.name.endswith(".d") else f.name
+        if unit != WIPE and names_held_dir(f.read_text(), check.MOR_LISTED, unit):
+            writers.add(unit)
+    return writers
+
+
+def unordered_writers(units):
+    """The writers whose stop is not ordered before the wipe's: each must be in the wipe's Before= or
+    name it in After=, and keep default dependencies so it also stops before the clear. A .path unit
+    writes nothing; it starts enrollment, which is a writer of its own."""
+    before = set(words(settings(units / WIPE), "Before"))
+    bad = set()
+    for w in hold_writers(units):
+        if w.endswith(".path"):
+            continue
+        s = settings(units / w)
+        if not (w in before or WIPE in words(s, "After")) or "DefaultDependencies" in s:
+            bad.add(w)
+    return bad
 
 
 class MorUnitTest(unittest.TestCase):
@@ -203,27 +262,43 @@ class MorUnitTest(unittest.TestCase):
         preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text()
         self.assertIn("\nenable %s\n" % name, preset)
         files = [u for u in UNITS.iterdir() if u.is_file()] + list(UNITS.glob("*.d/*.conf"))
-        writers = set()
         for f in files:
-            t = f.read_text()
-            self.assertNotIn("/dev/shm", t, f.name)
-            unit = f.parent.name[:-2] if f.parent.name.endswith(".d") else f.name
-            if unit not in (name, "agentos-mor.service") and names_held_dir(t, check.MOR_LISTED, unit):
-                writers.add(f.name)
+            self.assertNotIn("/dev/shm", f.read_text(), f.name)
             for key in ("Conflicts", "PropagatesStopTo"):
                 self.assertNotIn(name, words(settings(f), key), f.name)
-        # The writers, each found by its own text. The clear's own unit and drop-in name the dirs only
-        # to leave them unmasked, and a mask names none.
-        self.assertEqual(writers, {
+        # The writers, each found by its own text; a mask or a comment names none. The clear's own unit
+        # is counted too (MOR-writer-match-fu, #6083): its commands are the clear's and nothing else.
+        clear = [UNIT] + sorted(UNITS.glob("agentos-mor.service.d/*.conf"))
+        cmds = {}
+        for f in clear:
+            for k, v in settings(f).items():
+                if k in COMMANDS:
+                    cmds.setdefault(k, []).extend(v)
+        self.assertEqual(cmds, CLEAR_EXEC)
+        self.assertEqual(hold_writers(UNITS), {
             "agentos-keeper-pageca.service", "agentos-keeper-enroll.service", "agentos-keeper-enroll.path",
             "agentos-keeper-setup@.service", "agentos-keeper-link-capture.service"})
-        for w in writers:
-            with self.subTest(w):
-                if w.endswith(".path"):
-                    continue  # writes nothing; it starts enrollment, which is listed
-                ordered = w in before or name in words(settings(UNITS / w), "After")
-                self.assertTrue(ordered, w)
-                self.assertNotIn("DefaultDependencies", settings(UNITS / w))
+        self.assertEqual(unordered_writers(UNITS), set())
+
+    def test_the_clear_counts_as_a_writer_beyond_its_clear(self):
+        # MOR-writer-match-fu (#6083): the clear's own unit is no longer skipped by name, so a write it
+        # gains beside the clear is counted and fails the ordering (it stops after the wipe), whether in
+        # the unit, in a drop-in, or folded into the clear's own command line.
+        exec_stop = "ExecStop=/usr/lib/agentos/agentos-mor clear\n"
+        self.assertIn(exec_stop, UNIT.read_text())
+        writes = {
+            "unit": ("agentos-mor.service", exec_stop, exec_stop + "ExecStopPost=/usr/bin/rm -f /run/agentos-setup/x\n"),
+            "drop-in": ("agentos-mor.service.d/60-x.conf", None, "[Service]\nExecStopPost=/usr/bin/touch %t/agentos-link-capture/x\n"),
+            "clear": ("agentos-mor.service", exec_stop, "ExecStop=/usr/lib/agentos/agentos-mor clear /run/agentos-setup\n"),
+        }
+        for case, (path, old, new) in writes.items():
+            with self.subTest(case), tempfile.TemporaryDirectory() as tmp:
+                units = pathlib.Path(tmp) / "system"
+                shutil.copytree(UNITS, units, symlinks=True)
+                f = units / path
+                f.write_text(new if old is None else f.read_text().replace(old, new, 1))
+                self.assertIn("agentos-mor.service", hold_writers(units))
+                self.assertIn("agentos-mor.service", unordered_writers(units))
 
     def test_every_writer_spelling_is_counted(self):
         # MOR-writer-match (#6043): test_every_held_file_goes_at_stop finds a writer by its text, so
@@ -252,6 +327,9 @@ class MorUnitTest(unittest.TestCase):
             'ExecStart=/bin/sh -c "d=${D:-/run/agentos-setup}"\n',
             "RuntimeDirectory=agentos-x \\\n  agentos-setup\n",
             "InaccessiblePaths=/var/lib/x\nReadWritePaths=/run/agentos-setup\n",
+            "# a comment ends here \\\nExecStart=/usr/bin/x /run/agentos-setup\n",
+            "RuntimeDirectory=agentos-x \\\n# a comment\n  agentos-setup\n",
+            "ExecStart=/usr/bin/x #/run/agentos-setup\n",
         ]
         for t in named:
             with self.subTest(t):
@@ -282,6 +360,9 @@ class MorUnitTest(unittest.TestCase):
             "InaccessiblePaths=/run/agentos-setup\n",
             "InaccessiblePaths=-/var/lib/x /run/agentos-setup /run/agentos-link-capture\n",
             "  InaccessiblePaths = /var/lib/x \\\n  /run/agentos-setup\n",
+            "# Leaves /run/agentos-setup unmasked\n",
+            "  ; ExecStart=/usr/bin/x /run/agentos-link-capture\n",
+            "ExecStart=/usr/bin/x \\\n# /run/agentos-setup\n  -y\n",
         ]
         for t in apart:
             with self.subTest(t):
@@ -365,9 +446,10 @@ class WipeJournalTest(unittest.TestCase):
         must = "; must be persistent (change or remove that line)"
         level = "; must store info, a unit's stderr (set info or debug, or remove that line)"
         ignored = ", keeping the one before it (set a valid one or remove that line)"
+        alone = " (set a valid one or remove that line)"  # UX on #6086: no value before it to keep
         for rel, text, want in (
                 (self.DROPIN, None, "journald Storage is not set (auto); must be persistent "
-                                    "(usr/lib/systemd/journald.conf.d/50-agentos-persist.conf is missing)"),
+                                    "(usr/lib/systemd/journald.conf.d/50-agentos-persist.conf is missing or masked)"),
                 (zz, "[Journal]\nStorage=volatile\n", zz + ": journald Storage is volatile" + must),
                 (zz, "[Journal]\nStorage=auto\n", zz + ": journald Storage is auto" + must),
                 (zz, "[Journal]\nStorage=\n", zz + ": journald Storage= is a value journald ignores" + ignored),
@@ -377,9 +459,9 @@ class WipeJournalTest(unittest.TestCase):
                 (lib, "[Journal]\nMaxLevelStore=notice\n", lib + ": journald MaxLevelStore is notice" + level),
                 (lib, "[Journal]\nMaxLevelStore=5\n", lib + ": journald MaxLevelStore is 5" + level),
                 (lib, "[Journal]\nMaxLevelStore=x\n", lib + ": journald MaxLevelStore=x is a value journald ignores"
-                 + ignored),
+                 + alone),
                 (lib, "[Journal]\nMaxLevelStore=8\n", lib + ": journald MaxLevelStore=8 is a value journald ignores"
-                 + ignored),
+                 + alone),
                 (zz, b"[Journal]\nX=\xff\n", zz + ": unreadable ("),
                 ("run/systemd/journald.conf.d/a.conf", "[Journal]\nStorage=persistent\n", "/run is a tmpfs")):
             with self.subTest(rel=rel, text=text):
@@ -416,6 +498,96 @@ class WipeJournalTest(unittest.TestCase):
             with self.subTest(kept=kept):
                 write(self.root, zz, "[Journal]\nMaxLevelStore=%s\n" % kept)
                 self.assertNotIn("journald", self.v())
+
+    def journald(self):
+        return [v for v in check.violations(self.root) if "journal" in v]
+
+    def test_the_messages_point_at_the_fix(self):
+        # UX on #6086 (items 3 and 4), whole messages: an empty same-named file in /etc masks the shipped
+        # drop-in, and the shipped drop-in with an invalid Storage= is there but sets nothing.
+        write(self.root, "etc/systemd/journald.conf.d/50-agentos-persist.conf", "")
+        self.assertEqual(self.journald(), ["journald Storage is not set (auto); must be persistent "
+                                           "(usr/lib/systemd/journald.conf.d/50-agentos-persist.conf is missing or masked)"])
+        (self.root / "etc/systemd/journald.conf.d/50-agentos-persist.conf").unlink()
+        write(self.root, self.DROPIN, "[Journal]\nStorage=bogus\n")
+        self.assertEqual(self.journald(), [
+            self.DROPIN + ": journald Storage=bogus is a value journald ignores (set a valid one or remove that line)",
+            "journald has no valid Storage= in the chain, so it is auto; must be persistent"])
+
+    def test_the_tree_check_keeps_journald_defaults(self):
+        # #6095 (Potency on #6086): no setting that deletes or drops stored entries early.
+        zz = "etc/systemd/journald.conf.d/zz.conf"
+        for key in check.JOURNAL_DEFAULTS:
+            with self.subTest(key=key):
+                write(self.root, zz, "[Journal]\n%s=1\n" % key)
+                self.assertEqual(self.journald(), ["%s: journald %s=1; the image keeps journald's default, so no "
+                                                   "entry goes early (remove that line)" % (zz, key)])
+        self.assertEqual(sorted(check.JOURNAL_DEFAULTS), sorted(
+            ("SystemMaxUse", "SystemKeepFree", "SystemMaxFileSize", "SystemMaxFiles", "MaxRetentionSec",
+             "RateLimitIntervalSec", "RateLimitInterval", "RateLimitBurst")))
+
+    def test_the_tree_check_holds_the_flush(self):
+        # #6095 (R1): until systemd-journal-flush.service runs, journald writes to /run only.
+        unit, link = "usr/lib/systemd/system/systemd-journal-flush.service", \
+            self.root / "usr/lib/systemd/system/sysinit.target.wants/systemd-journal-flush.service"
+        why = "journald keeps the journal in /run until it runs, so a reboot loses it"
+        masked = "systemd-journal-flush.service: missing or masked; " + why
+        self.assertEqual(self.journald(), [])
+        # L3 and Security on #6130: a mask, an empty file or a whole copy in any other unit directory replaces
+        # Debian's unit, so it is refused, whatever it holds.
+        for d in ("etc/systemd/system.control", "etc/systemd/system", "etc/systemd/system.attached",
+                  "usr/local/lib/systemd/system"):
+            other = self.root / d / "systemd-journal-flush.service"
+            replaced = ("%s/systemd-journal-flush.service: replaces %s; the tree check does not model a change to "
+                        "it (remove it)" % (d, unit))
+            for body in (None, "", "[Unit]\nDescription=x\n[Service]\nType=oneshot\nExecStart=/bin/true\n",
+                         (self.root / unit).read_text()):
+                with self.subTest(d=d, body=body):
+                    other.parent.mkdir(parents=True, exist_ok=True)
+                    if body is None:
+                        other.symlink_to("/dev/null")
+                    else:
+                        write(self.root, str(other.relative_to(self.root)), body)
+                    self.assertIn(replaced, self.journald())
+                    other.unlink()
+        # Debian's own file: every line as Debian's systemd 257.13 ships it (Security on #6130).
+        saved = (self.root / unit).read_text()
+        self.assertEqual(saved, flush_unit())
+        changed = "%s: not Debian systemd 257.13's unit (first difference: %%s); the tree check does not model a " \
+            "change to it (restore it, or after a Debian systemd update read the new unit into JOURNAL_FLUSH_LINES)" % unit
+        for body, first in (
+                ("", None),
+                (flush_unit((("Unit", "ConditionPathExists", "/nonexistent"),)), ("Unit", "ConditionPathExists", "/nonexistent")),
+                (flush_unit((("Service", "ExecStartPre", "/bin/false"),)), ("Service", "ExecStartPre", "/bin/false")),
+                (flush_unit((("Service", "ExecStart", "/bin/true"),)), ("Service", "ExecStart", "/bin/true")),
+                (saved.replace("ExecStart=journalctl --flush", "ExecStart=/bin/true"), ("Service", "ExecStart", "/bin/true")),
+                (saved.replace("TimeoutSec=90s\n", ""), ("Service", "TimeoutSec", "90s"))):
+            with self.subTest(body=body):
+                write(self.root, unit, body)
+                self.assertIn(masked if first is None else changed % (first,), self.journald())
+        write(self.root, unit, saved)
+        # An alias's drop-ins apply to the unit too, so the alias is refused.
+        alias = self.root / "usr/lib/systemd/system/foo.service"
+        alias.symlink_to("systemd-journal-flush.service")
+        self.assertIn("usr/lib/systemd/system/foo.service: an alias of systemd-journal-flush.service; the tree "
+                      "check does not model unit aliases", self.journald())
+        alias.unlink()
+        self.assertEqual(self.journald(), [])
+        saved = (self.root / unit).read_text()
+        (self.root / unit).unlink()
+        self.assertIn(masked, self.journald())  # and #5167 refuses the link it leaves dangling
+        write(self.root, unit, saved)
+        link.unlink()
+        self.assertEqual(self.journald(), ["systemd-journal-flush.service: not in sysinit.target.wants; " + why])
+        link.symlink_to("../systemd-journal-flush.service")
+        # Security on #6128: every directory whose drop-ins systemd applies to the unit, prefixes and service.d too.
+        for d in ("systemd-journal-flush.service.d", "systemd-journal-.service.d", "systemd-.service.d", "service.d"):
+            with self.subTest(d=d):
+                dropin = "etc/systemd/system/%s/x.conf" % d
+                write(self.root, dropin, "[Service]\nExecStart=\nExecStart=/bin/true\n")
+                self.assertIn(dropin + ": a drop-in for systemd-journal-flush.service; the tree check "
+                              "does not model a change to it (remove it)", self.journald())
+                (self.root / dropin).unlink()
 
 
 if __name__ == "__main__":
