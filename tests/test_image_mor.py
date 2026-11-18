@@ -92,9 +92,15 @@ def names_held_dir(text, dirs, unit=""):
 WIPE = "agentos-keeper-wipe.service"
 # The clear's only commands (test_clear_runs_at_stop_after_the_secret_holders). It reaches the hold
 # dirs only through agentos-mor's holdDirs, which it lists and never writes in
-# (test_the_clear_sees_the_dirs_it_lists), so its unit names none and is counted like any other.
+# (test_the_clear_sees_the_dirs_it_lists), so its unit names none and is counted like any other. Its
+# record step (MOR-clear-owner, test_a_refused_clear_is_recorded_on_root) writes on root only.
+CLEAR_RECORD = ("/usr/bin/sh -c 'if [ \"$$SERVICE_RESULT\" = success ]; then exec /usr/bin/rm -f -- "
+                "/var/lib/agentos-mor/refused; fi; /usr/bin/mkdir -p -m 0700 /var/lib/agentos-mor && "
+                "echo \"$$SERVICE_RESULT $$EXIT_CODE $$EXIT_STATUS\" >/var/lib/agentos-mor/refused && "
+                "exec /usr/bin/sync -f /var/lib/agentos-mor/refused'")
 CLEAR_EXEC = {"ExecStart": ["/usr/lib/agentos/agentos-mor status"],
-              "ExecStop": ["/usr/lib/agentos/agentos-mor clear"]}
+              "ExecStop": ["/usr/lib/agentos/agentos-mor clear"],
+              "ExecStopPost": [CLEAR_RECORD]}
 COMMANDS = ("ExecCondition", "ExecStartPre", "ExecStart", "ExecStartPost", "ExecReload", "ExecStop",
             "ExecStopPost")
 
