@@ -945,15 +945,12 @@ func readBack(t backup.Target, dir string, rec backup.Record, size int64) bool {
 		return false
 	}
 	f, _, err := backup.OpenRegular(filepath.Join(dir, rec.BackupID+contentExt))
-	if err != nil {
-		return false
-	}
-	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, io.LimitReader(f, size+1)); err != nil {
-		return false
+	if err == nil {
+		defer f.Close()
+		_, err = io.Copy(h, io.LimitReader(f, size+1))
 	}
-	return hex.EncodeToString(h.Sum(nil)) == rec.ContentSum
+	return err == nil && hex.EncodeToString(h.Sum(nil)) == rec.ContentSum
 }
 
 func sumHex(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:]) }

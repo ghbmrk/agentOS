@@ -43,6 +43,16 @@ func TestReadBackRefusesPlantedContent(t *testing.T) {
 	if !within(int64(len(content))) {
 		t.Fatal("readBack of the content as written: unverified")
 	}
+	// It closes the content it read.
+	fds, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fd := range fds {
+		if l, _ := os.Readlink(filepath.Join("/proc/self/fd", fd.Name())); l == p {
+			t.Errorf("readBack left %s open (fd %s)", p, fd.Name())
+		}
+	}
 	// One byte more than was written: the sum read is not the content's.
 	if err := os.WriteFile(p, append(content, 'x'), 0o600); err != nil {
 		t.Fatal(err)
