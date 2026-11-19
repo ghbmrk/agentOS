@@ -1380,9 +1380,11 @@ def covered_by(pkg, names, tmp, broker=None):
     return out, problem
 
 
-def timed_cover(pkg, names, tmp, broker=None):
+def timed_cover(pkg, names, tmp, broker=None, code=None):
     """covered_by's (lines, seconds, problem): seconds is how long its `go test` took, so a plan
-    that ran the whole suite under coverage sizes the shards from that run, not a fourth (#6155)."""
+    that ran the whole suite under coverage sizes the shards from that run, not a fourth (#6155).
+    A code dict gains {path: lines} of every block the profile lists, ran or not (#6216): the lines
+    a test could run, whichever tests ran."""
     broker = BROKER if broker is None else broker
     profile = pathlib.Path(tmp) / "tests.cover"
     profile.unlink(missing_ok=True)
@@ -1401,11 +1403,12 @@ def timed_cover(pkg, names, tmp, broker=None):
     except RuntimeError as e:
         return None, None, f"broker/{pkg}/: {e}"
     out = {}
-    for name, blocks in covered_blocks(text).items():
-        f = broker / pkg / name
-        if is_source(name) and f.is_file() and not f.is_symlink():
-            for (first, _), (last, _) in blocks:
-                out.setdefault(f"broker/{pkg}/{name}", set()).update(range(first, last + 1))
+    for into, ran in ((out, True), *(((code, False),) if code is not None else ())):
+        for name, blocks in covered_blocks(text, ran).items():
+            f = broker / pkg / name
+            if is_source(name) and f.is_file() and not f.is_symlink():
+                for (first, _), (last, _) in blocks:
+                    into.setdefault(f"broker/{pkg}/{name}", set()).update(range(first, last + 1))
     return out, seconds, None
 
 
@@ -1575,7 +1578,8 @@ def record_for(pkg, tests, bases, diff_text, base, tmp):
     as its `base` part, at the base (#5762), with the seconds its whole-suite run at the head took;
     or (None, None, problem). Runs the PR's tests: untrusted jobs only."""
     names = changed_tests(tests, pkg, bases)
-    covered, secs, problem = timed_cover(pkg, names, tmp)
+    code = {}
+    covered, secs, problem = timed_cover(pkg, names, tmp, code=code)
     if problem:
         return None, None, problem
     was, problem = base_covered(pkg, merge_base(base, "HEAD"), bases[pkg], tmp, diff_text)
@@ -1587,21 +1591,32 @@ def record_for(pkg, tests, bases, diff_text, base, tmp):
     every, secs, problem = (covered, secs, None) if names is None else timed_cover(pkg, None, tmp)
     if problem:
         return None, None, problem
-    if gone := unrun(was, every):
+    if gone := unrun(was, every, code):
         return None, None, ("; ".join(f"{p}: {', '.join(map(str, ls))}" for p, ls in gone.items())
                             + f" ran under the base's version of the tests this diff changes, and no test of package {pkg} "
                             "runs them at the head: keep a test that runs each, or delete the code")
     return {**coverage_record(names, covered), "base": coverage_record(bases[pkg], was)}, secs, None
 
 
-def unrun(was, every):
+# A line that only closes blocks and the calls or literals around them: `}`, `})`, `},`, `}()`, `}}`.
+CLOSER = re.compile(r"\}(?:[})\],]|\(\))*")
+
+
+def unrun(was, every, code):
     """{path: sorted lines} of was ({path: head lines} the base's tests ran) that every ({path: lines}
-    the head's whole suite runs) leaves out, holding code at the head: a blank or comment line between
-    two cover blocks, which an edit beside it can open, is no code a test runs."""
+    the head's whole suite runs) leaves out, holding code at the head. A blank or comment line between
+    two cover blocks, which an edit beside it can open, is no code a test runs; nor is a CLOSER line
+    in no block of code ({path: lines} of every block the head's profile lists, ran or not): Go's
+    profile ends a block at its last statement or at a nested block ending it, so such a brace is in
+    none once its block ends in an `if`, `for` or func literal (#6216). An `if` body's own `}` is in
+    its block, so an unrun body still names it; a multi-line `case` expression is in no block until
+    evaluated, so text alone, not the profile, decides the other lines."""
     out = {}
     for p, ls in sorted(was.items()):
         rows = _uncommented((BROKER / p.split("/", 1)[1]).read_bytes().decode("utf-8", "replace"), False).split("\n")
-        if left := sorted(n for n in ls - every.get(p, set()) if n <= len(rows) and rows[n - 1].strip()):
+        held = code.get(p, set())
+        if left := sorted(n for n in ls - every.get(p, set()) if n <= len(rows) and rows[n - 1].strip()
+                          and (n in held or not CLOSER.fullmatch(rows[n - 1].strip()))):
             out[p] = left
     return out
 
@@ -1730,12 +1745,13 @@ COUNTERS = {"LIVED": "mutants_lived", "KILLED": "mutants_killed", "NOT VIABLE": 
 TOTALLED = ("LIVED", "KILLED", "NOT VIABLE")
 
 
-def covered_blocks(profile):
-    """{file base name: [((line, col), (line, col))]} of the blocks a `-coverprofile` ran."""
+def covered_blocks(profile, ran=True):
+    """{file base name: [((line, col), (line, col))]} of the blocks a `-coverprofile` ran (every
+    block it lists, when not ran)."""
     out = {}
     for row in profile.split("\n")[1:]:
         m = COVER.match(row)
-        if m and int(m.group(6)) > 0:
+        if m and (int(m.group(6)) > 0 or not ran):
             out.setdefault(m.group(1).rsplit("/", 1)[-1], []).append(
                 ((int(m.group(2)), int(m.group(3))), (int(m.group(4)), int(m.group(5)))))
     return out
