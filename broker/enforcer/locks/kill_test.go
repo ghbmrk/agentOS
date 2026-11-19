@@ -427,3 +427,27 @@ func TestUnlockDuringRelockWaitsItsInterval(t *testing.T) {
 		t.Errorf("not relocked at the second unlock's interval: %v", r.radio.did())
 	}
 }
+
+// A lock the last Tick did not hold relocks after policy.MinRelock seconds,
+// whatever its own interval, until a Tick reads it.
+func TestUnheldLockRelocksAtMinimum(t *testing.T) {
+	r := newRig(t, at(10, 0))
+	r.radio.locks["side"] = &fakeLock{}
+	r.doc.Devices = append(r.doc.Devices, policy.Device{ID: "side", Network: policy.NetDevices, Class: policy.ClassLock, Secure: "lock", RelockSeconds: 600})
+	if err := r.second("side", action.Unlock); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.gate.Act(context.Background(), "side", action.Unlock, ""); err != nil {
+		t.Fatal(err)
+	}
+	r.clock.add(policy.MinRelock*time.Second - time.Millisecond)
+	r.tick()
+	if n := count(r.radio.did(), "lock side"); n != 0 {
+		t.Fatalf("relocked before %d s: %v", policy.MinRelock, r.radio.did())
+	}
+	r.clock.add(time.Millisecond)
+	r.tick()
+	if n := count(r.radio.did(), "lock side"); n != 1 {
+		t.Errorf("not relocked at %d s: %v", policy.MinRelock, r.radio.did())
+	}
+}
