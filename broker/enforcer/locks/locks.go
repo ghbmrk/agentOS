@@ -10,7 +10,9 @@
 //     the owner's passkey signs one.
 //   - Every unlock it does or sees is logged; one at an unusual time is
 //     texted (alert.UnusualUnlock, alert.UnusualDisarm). A lock relocks
-//     RelockAfter after any unlock, whoever unlocked it.
+//     its signed interval (policy.Device.Relock) after any unlock, whoever
+//     unlocked it; unusual is outside its signed hours
+//     (policy.Device.Hours).
 //   - A visitor's keypad code is a signed standing rule (policy.StandingRule
 //     with Action ActionCode). The enforcer sets it on the lock's own
 //     PIN-code schedule, with the rule's window, only while the window is
@@ -50,13 +52,14 @@ import (
 const ActionCode = "code"
 
 const (
-	// RelockAfter is how long a lock stays unlocked before the enforcer
-	// relocks it (ASSUMPTIONS.md ENF-q-2).
-	RelockAfter = time.Minute
-	// UsualFrom and UsualTo bound the usual hours in the enforcer's zone,
-	// [07:00, 22:00): any other time is unusual (ENF-q-3).
-	UsualFrom = 7
-	UsualTo   = 22
+	// RelockAfter is how long a lock whose signed interval is unset
+	// stays unlocked before the enforcer relocks it (ASSUMPTIONS.md
+	// ENF-q-2). The usual hours' default is policy.DefaultHours (ENF-q-3).
+	RelockAfter = policy.DefaultRelock
+	// unknownRelock is the interval for a lock the last Tick's policy did
+	// not hold, whose own interval is not read yet: the shortest a policy
+	// may sign (ENF-q-2).
+	unknownRelock = policy.MinRelock * time.Second
 	// MaxRules bounds the distinct keypad rules kept for one device's
 	// unlock reports between ticks; past it the lock relocks at once
 	// (ENF-q-6).
@@ -218,33 +221,45 @@ func New(cfg Config) (*Gate, error) {
 // Close stops the teller. Alerts still waiting are dropped.
 func (g *Gate) Close() { close(g.done) }
 
-// Unusual reports whether t is an unusual time in zone: outside
-// [UsualFrom, UsualTo) by the zone's own clock.
-func Unusual(t time.Time, zone *time.Location) bool {
-	h := t.In(zone).Hour()
-	return h < UsualFrom || h >= UsualTo
+// Unusual reports whether t is an unusual time in zone: outside the usual
+// hours h by the zone's own clock.
+func Unusual(t time.Time, zone *time.Location, h policy.Hours) bool {
+	return !h.Usual(t.In(zone).Hour())
 }
 
-// Unusual reports whether now is an unusual time, so the page knows to ask
-// for a second tap.
-func (g *Gate) Unusual() bool { return Unusual(g.cfg.Now(), g.cfg.Zone) }
+// Unusual reports whether now is an unusual time for dev, from the policy
+// the page holds, so the page knows to ask for a second tap.
+func (g *Gate) Unusual(dev policy.Device) bool { return Unusual(g.cfg.Now(), g.cfg.Zone, dev.Hours()) }
+
+// timing is the relock interval and whether now is unusual for device, as
+// the last Tick's policy signs them. A device that policy did not hold is
+// unusual at any hour and relocks after unknownRelock, until a Tick reads
+// it (ENF-q-3). Under g.mu.
+func (g *Gate) timing(device string, now time.Time) (time.Duration, bool) {
+	dev, ok := g.known[device]
+	if !ok {
+		return unknownRelock, true
+	}
+	return dev.Relock(), Unusual(now, g.cfg.Zone, dev.Hours())
+}
 
 func gated(a action.Act) bool { return a == action.Unlock || a == action.Disarm }
 
 // Act carries out an unlock or a disarm the owner's tap on an action.Book
 // challenge approved. At an unusual time it also spends the second
 // assertion Confirm took for that device and act, and without one refuses
-// with ErrSecond before anything reaches the device. A lock is due to
-// relock RelockAfter from now before the unlock is sent, so even an unlock
-// whose answer never comes is relocked. The unlock or disarm is logged,
-// and texted at an unusual time.
+// with ErrSecond before anything reaches the device. Unusual and the
+// relock interval are the device's, as the last Tick's policy signs them
+// (timing). A lock is due to relock its interval from now before the
+// unlock is sent, so even an unlock whose answer never comes is relocked.
+// The unlock or disarm is logged, and texted at an unusual time.
 func (g *Gate) Act(ctx context.Context, device string, a action.Act, route string) error {
 	if !gated(a) || route != "" {
 		return ErrNotLock
 	}
 	now := g.cfg.Now()
-	unusual := Unusual(now, g.cfg.Zone)
 	g.mu.Lock()
+	relock, unusual := g.timing(device, now)
 	if unusual {
 		k := device + "\x00" + string(a)
 		until, ok := g.permits[k]
@@ -257,7 +272,7 @@ func (g *Gate) Act(ctx context.Context, device string, a action.Act, route strin
 	report := Disarmed
 	if a == action.Unlock {
 		report = Unlocked
-		g.unlockAt(device, now.Add(RelockAfter))
+		g.unlockAt(device, now.Add(relock))
 	}
 	g.expect[device+"\x00"+strconv.Itoa(int(report))] = now.Add(expectFor)
 	g.mu.Unlock()
@@ -271,7 +286,7 @@ func (g *Gate) Act(ctx context.Context, device string, a action.Act, route strin
 		// A relock that ran while the unlock was on its way may have
 		// landed first, so the unlock's own relock is due again from when
 		// the unlock returned, whatever the answer.
-		g.unlockAt(device, g.cfg.Now().Add(RelockAfter))
+		g.unlockAt(device, g.cfg.Now().Add(relock))
 	}
 	if err != nil {
 		// Nothing was sent, or the act may still have reached the device
@@ -510,11 +525,13 @@ func lock(dev policy.Device) bool { return !dev.Everyday && dev.Class == policy.
 
 // seen acts on one device's reports of one kind: one may be the enforcer's
 // own act, already told; the rest are logged, an unlock or disarm at an
-// unusual time texted. An unlock relocks after RelockAfter, or at once
+// unusual time texted, both by dev's signed hours. An unlock relocks after
+// dev's signed interval, or at once
 // when it named a keypad rule that is not an open code rule on that lock,
 // or more rules than MaxRules.
 func (g *Gate) seen(doc policy.Document, device string, r Report, p *seenReport, now time.Time) {
-	if dev := doc.Device(device); dev == nil || !fits(*dev, r) {
+	dev := doc.Device(device)
+	if dev == nil || !fits(*dev, r) {
 		return
 	}
 	g.mu.Lock()
@@ -532,7 +549,7 @@ func (g *Gate) seen(doc policy.Document, device string, r Report, p *seenReport,
 				refused = true
 			}
 		}
-		at := now.Add(RelockAfter)
+		at := now.Add(dev.Relock())
 		if refused {
 			at = now
 		}
@@ -543,7 +560,7 @@ func (g *Gate) seen(doc policy.Document, device string, r Report, p *seenReport,
 		g.cfg.Log("locks: " + device + " was unlocked with a keypad code outside its signed window; relocking it now")
 	}
 	if n > 0 {
-		g.told(device, r, Unusual(now, g.cfg.Zone))
+		g.told(device, r, Unusual(now, g.cfg.Zone, dev.Hours()))
 	}
 }
 

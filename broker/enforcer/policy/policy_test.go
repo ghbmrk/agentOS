@@ -1,6 +1,6 @@
 package policy
 
-// REQ: STO-4, NET-4, NET-2
+// REQ: STO-4, NET-4, NET-2, NET-6
 
 import (
 	"bytes"
@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -372,13 +373,14 @@ func TestClassifyClosedList(t *testing.T) {
 	// fails here.
 	covered := map[string][]string{
 		"Document":     {"Version", "Destinations", "Caps", "Basis", "EdgeCap", "Devices", "Pairs", "Standing", "Holds", "Drone"},
-		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Everyday", "Class", "Secure", "Safeguards", "Label", "Control", "Stream", "MDNS"},
+		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Everyday", "Class", "Secure", "Safeguards", "Label", "Control", "Stream", "MDNS", "RelockSeconds", "UsualHours"},
+		"Hours":        {"From", "To"},
 		"Port":         {"Proto", "Num"},
 		"Pair":         {"A", "B"},
 		"StandingRule": {"ID", "Device", "Action", "FromMS", "ToMS"},
 		"Hold":         {"Device", "Kind"},
 	}
-	for _, v := range []any{Document{}, Device{}, Port{}, Pair{}, StandingRule{}, Hold{}} {
+	for _, v := range []any{Document{}, Device{}, Port{}, Pair{}, StandingRule{}, Hold{}, Hours{}} {
 		ty := reflect.TypeOf(v)
 		var fields []string
 		for i := range ty.NumField() {
@@ -1455,5 +1457,159 @@ func TestPolicyHashPinned(t *testing.T) {
 	}
 	if len(golden) != 64 {
 		t.Fatal("golden is not a SHA-256 in hex")
+	}
+}
+
+// NET-4 Loosening, NET-6: the relock interval and usual hours are not on
+// the closed tightening list, so every change to either, in any direction,
+// on a lock or an alarm, waits as a loosening (briefs/ENF-q-owner.md
+// decision). Setting one beside a closed-list tightening makes the whole
+// change a loosening too.
+func TestRelockAndHoursChangesAreLoosenings(t *testing.T) {
+	alarm := Device{ID: "alarm", Network: NetDevices, Class: ClassAlarm}
+	base := edit(1, func(d *Document) {
+		dev(d, "lock").RelockSeconds = 60
+		dev(d, "lock").UsualHours = &Hours{From: 7, To: 22}
+		a := alarm
+		a.UsualHours = &Hours{From: 7, To: 22}
+		d.Devices = append(d.Devices, a)
+	})
+	hours := func(id string, f, to uint8) func(d *Document) {
+		return func(d *Document) { dev(d, id).UsualHours = &Hours{From: f, To: to} }
+	}
+	for name, f := range map[string]func(d *Document){
+		"shorten the relock":       func(d *Document) { dev(d, "lock").RelockSeconds = 10 },
+		"lengthen the relock":      func(d *Document) { dev(d, "lock").RelockSeconds = 600 },
+		"default the relock":       func(d *Document) { dev(d, "lock").RelockSeconds = 0 },
+		"narrow the lock's hours":  hours("lock", 8, 20),
+		"widen the lock's hours":   hours("lock", 6, 24),
+		"wrap the lock's hours":    hours("lock", 18, 3),
+		"default the lock's hours": func(d *Document) { dev(d, "lock").UsualHours = nil },
+		"narrow the alarm's hours": hours("alarm", 9, 17),
+		"widen the alarm's hours":  hours("alarm", 0, 23),
+		"relock and cut the cloud": func(d *Document) {
+			dev(d, "lock").RelockSeconds = 10
+			dev(d, "lock").VendorCloud = false
+		},
+	} {
+		next := base.normal()
+		f(&next)
+		if _, err := Encode(next); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if c := Classify(base, next); c.Tightening {
+			t.Errorf("%s: %+v, want a loosening", name, c)
+		}
+	}
+	// From the defaults (fields unset), setting either is a loosening too.
+	plain := edit(1, func(d *Document) { d.Devices = append(d.Devices, alarm) })
+	for name, f := range map[string]func(d *Document){
+		"set a relock": func(d *Document) { dev(d, "lock").RelockSeconds = 5 },
+		"set hours":    hours("alarm", 22, 6),
+	} {
+		next := plain.normal()
+		f(&next)
+		if c := Classify(plain, next); c.Tightening {
+			t.Errorf("%s from the defaults: %+v, want a loosening", name, c)
+		}
+	}
+}
+
+// STO-4, NET-6: check refuses a relock interval or usual hours on a device
+// whose class has no relock or second assertion, an interval outside 5 s
+// to 1 h, and hours that are empty, out of range, spelled two ways, or the
+// whole day (which would remove the second assertion). Zero keeps the
+// defaults, and a document that leaves both unset encodes as before.
+func TestRelockAndHoursBounds(t *testing.T) {
+	ok := func(name string, f func(d *Document)) {
+		t.Helper()
+		if _, err := Encode(edit(1, f)); err != nil {
+			t.Errorf("%s: refused: %v", name, err)
+		}
+	}
+	bad := func(name string, f func(d *Document)) {
+		t.Helper()
+		if _, err := Encode(edit(1, f)); !errors.Is(err, ErrMalformed) {
+			t.Errorf("%s: %v, want ErrMalformed", name, err)
+		}
+	}
+	h := func(f, to uint8) *Hours { return &Hours{From: f, To: to} }
+	alarm := func(d *Document) {
+		d.Devices = append(d.Devices, Device{ID: "alarm", Network: NetDevices, Class: ClassAlarm})
+	}
+	ok("relock 5 s", func(d *Document) { dev(d, "lock").RelockSeconds = 5 })
+	ok("relock 1 h", func(d *Document) { dev(d, "lock").RelockSeconds = 3600 })
+	ok("hours 06 to 24", func(d *Document) { dev(d, "lock").UsualHours = h(6, 24) })
+	ok("hours wrapping midnight", func(d *Document) { dev(d, "lock").UsualHours = h(22, 6) })
+	ok("hours 00 to 23", func(d *Document) { dev(d, "lock").UsualHours = h(0, 23) })
+	ok("hours on an alarm", func(d *Document) { alarm(d); dev(d, "alarm").UsualHours = h(6, 23) })
+
+	bad("relock 4 s", func(d *Document) { dev(d, "lock").RelockSeconds = 4 })
+	bad("relock 1 h 1 s", func(d *Document) { dev(d, "lock").RelockSeconds = 3601 })
+	bad("relock on an alarm", func(d *Document) { alarm(d); dev(d, "alarm").RelockSeconds = 10 })
+	bad("relock on a plug", func(d *Document) { dev(d, "plug").RelockSeconds = 10 })
+	bad("relock on an everyday device", func(d *Document) { dev(d, "tv").RelockSeconds = 10 })
+	bad("relock on an unknown device", func(d *Document) {
+		d.Devices = append(d.Devices, Device{ID: "thing", Network: NetDevices, RelockSeconds: 10})
+	})
+	bad("hours on a camera", func(d *Document) { dev(d, "cam").UsualHours = h(6, 22) })
+	bad("hours on an everyday device", func(d *Document) { dev(d, "tv").UsualHours = h(6, 22) })
+	bad("an empty window", func(d *Document) { dev(d, "lock").UsualHours = h(7, 7) })
+	bad("the whole day", func(d *Document) { dev(d, "lock").UsualHours = h(0, 24) })
+	bad("from 24", func(d *Document) { dev(d, "lock").UsualHours = h(24, 6) })
+	bad("to 0, spelled 24", func(d *Document) { dev(d, "lock").UsualHours = h(6, 0) })
+	bad("to 25", func(d *Document) { dev(d, "lock").UsualHours = h(6, 25) })
+
+	// Unset fields keep the defaults and stay out of the encoding, so a
+	// document signed before the fields existed keeps its bytes and hash.
+	b, err := Encode(home(1))
+	if err != nil || bytes.Contains(b, []byte("relock")) || bytes.Contains(b, []byte("usual")) {
+		t.Fatalf("home(1) encodes the new fields: %s %v", b, err)
+	}
+	var lock Device
+	if l := home(1).Device("lock"); l != nil {
+		lock = *l
+	}
+	if lock.Relock() != DefaultRelock || lock.Hours() != DefaultHours || DefaultRelock != time.Minute || DefaultHours != (Hours{From: 7, To: 22}) {
+		t.Errorf("defaults: %v %v", lock.Relock(), lock.Hours())
+	}
+	lock.RelockSeconds, lock.UsualHours = 10, h(6, 24)
+	if lock.Relock() != 10*time.Second || lock.Hours() != *h(6, 24) {
+		t.Errorf("set: %v %v", lock.Relock(), lock.Hours())
+	}
+	// A document carrying the fields round-trips through Decode.
+	set := edit(1, func(d *Document) { dev(d, "lock").RelockSeconds, dev(d, "lock").UsualHours = 10, h(22, 6) })
+	b, err = Encode(set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, err := Decode(b); err != nil || !reflect.DeepEqual(d, set.normal()) {
+		t.Errorf("round trip: %+v %v", d, err)
+	}
+}
+
+// NET-6: Usual is the hours [From, To) on the enforcer's clock, wrapping
+// midnight when From > To.
+func TestHoursUsual(t *testing.T) {
+	for _, c := range []struct {
+		h   Hours
+		in  []int
+		out []int
+	}{
+		{Hours{7, 22}, []int{7, 12, 21}, []int{0, 6, 22, 23}},
+		{Hours{6, 24}, []int{6, 23}, []int{0, 5}},
+		{Hours{22, 6}, []int{22, 23, 0, 5}, []int{6, 12, 21}},
+		{Hours{0, 23}, []int{0, 22}, []int{23}},
+	} {
+		for _, hr := range c.in {
+			if !c.h.Usual(hr) {
+				t.Errorf("%v: %02d:00 unusual", c.h, hr)
+			}
+		}
+		for _, hr := range c.out {
+			if c.h.Usual(hr) {
+				t.Errorf("%v: %02d:00 usual", c.h, hr)
+			}
+		}
 	}
 }

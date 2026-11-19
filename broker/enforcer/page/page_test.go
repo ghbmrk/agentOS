@@ -816,18 +816,20 @@ func template_escape(s string) string {
 // added to the document without a row here fails.
 func TestEveryFieldRendered(t *testing.T) {
 	devs := map[string]func(d *policy.Device){
-		"ID":          func(d *policy.Device) { d.ID = "other" },
-		"Network":     func(d *policy.Device) { d.Network = policy.NetHousehold },
-		"WiFi":        func(d *policy.Device) { d.WiFi = "vlan999" },
-		"Allow":       func(d *policy.Device) { d.Allow = []string{"z.example"} },
-		"VendorCloud": func(d *policy.Device) { d.VendorCloud = !d.VendorCloud },
-		"Isolated":    func(d *policy.Device) { d.Isolated = !d.Isolated },
-		"Everyday":    func(d *policy.Device) { d.Everyday = !d.Everyday; d.Class, d.Secure = "", "" },
-		"Class":       func(d *policy.Device) { d.Class, d.Secure = policy.ClassSensor, "" },
-		"Secure":      func(d *policy.Device) { d.Secure = map[string]string{"": "lock", "lock": ""}[d.Secure] },
-		"Label":       func(d *policy.Device) { d.Label = policy.LabelContained },
-		"Control":     func(d *policy.Device) { d.Control = append(d.Control, policy.Port{Proto: policy.ProtoUDP, Num: 80}) },
-		"MDNS":        func(d *policy.Device) { d.MDNS = append(d.MDNS, []string{"z", "local"}) },
+		"ID":            func(d *policy.Device) { d.ID = "other" },
+		"Network":       func(d *policy.Device) { d.Network = policy.NetHousehold },
+		"WiFi":          func(d *policy.Device) { d.WiFi = "vlan999" },
+		"Allow":         func(d *policy.Device) { d.Allow = []string{"z.example"} },
+		"VendorCloud":   func(d *policy.Device) { d.VendorCloud = !d.VendorCloud },
+		"Isolated":      func(d *policy.Device) { d.Isolated = !d.Isolated },
+		"Everyday":      func(d *policy.Device) { d.Everyday = !d.Everyday; d.Class, d.Secure = "", "" },
+		"Class":         func(d *policy.Device) { d.Class, d.Secure = policy.ClassSensor, "" },
+		"Secure":        func(d *policy.Device) { d.Secure = map[string]string{"": "lock", "lock": ""}[d.Secure] },
+		"Label":         func(d *policy.Device) { d.Label = policy.LabelContained },
+		"RelockSeconds": func(d *policy.Device) { d.RelockSeconds = 10 },
+		"UsualHours":    func(d *policy.Device) { d.UsualHours = &policy.Hours{From: 6, To: 24} },
+		"Control":       func(d *policy.Device) { d.Control = append(d.Control, policy.Port{Proto: policy.ProtoUDP, Num: 80}) },
+		"MDNS":          func(d *policy.Device) { d.MDNS = append(d.MDNS, []string{"z", "local"}) },
 	}
 	// A stream port only a camera or microphone carries, and a change
 	// from one of those classes to the other, so these rows run on one.
