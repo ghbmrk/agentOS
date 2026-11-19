@@ -13,6 +13,9 @@ import (
 	"errors"
 	"math/rand/v2"
 	"net/netip"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/decoy"
@@ -242,5 +245,38 @@ func TestStopSessionStopsOnlyItsActivePlans(t *testing.T) {
 	}
 	if p := s.Plans["a"]; p.Cancel != CTrip {
 		t.Errorf("plan a cancelled for %q", p.Cancel)
+	}
+}
+
+// Every string a plan's holder signs is checked as text: a step's verb,
+// clerk, content, argument names and values, and labels (VerifyPlan).
+func TestVerifyPlanChecksEveryStepString(t *testing.T) {
+	bad := "\xff"
+	for i, st := range []PlanStep{
+		{Verb: key.Verb(bad)}, {Clerk: bad}, {Content: bad},
+		{Args: map[string]string{bad: "v"}}, {Args: map[string]string{"n": bad}},
+		{Labels: []string{"ok", bad}},
+	} {
+		p := Plan{ID: "p", Steps: []PlanStep{{Verb: key.Trash, Clerk: "c"}, st}}
+		if _, err := VerifyPlan(p, nil); !errors.Is(err, ErrNotText) {
+			t.Errorf("step field %d not text: %v", i, err)
+		}
+	}
+	if _, err := VerifyPlan(Plan{ID: bad}, nil); !errors.Is(err, ErrNotText) {
+		t.Errorf("plan ID not text: %v", err)
+	}
+}
+
+// Where X25519 is refused (Go's FIPS 140-only mode), the kernel fails at
+// load rather than run with no order probe for edge points (edge.go).
+func TestNoX25519FailsAtLoad(t *testing.T) {
+	if os.Getenv("AGENTOS_TG_FIPS_CHILD") == "1" {
+		return // reached only if the package loaded
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestNoX25519FailsAtLoad$", "-test.count=1")
+	cmd.Env = append(os.Environ(), "AGENTOS_TG_FIPS_CHILD=1", "GODEBUG=fips140=only")
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "X25519 is not allowed") {
+		t.Fatalf("the package loaded without X25519: %v\n%s", err, out)
 	}
 }
