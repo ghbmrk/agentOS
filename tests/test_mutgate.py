@@ -1510,22 +1510,26 @@ func set(n, m int) {
     COVER_TEST = ("package hint\n\nimport \"testing\"\n\n// REQ: CRED-1\nfunc TestKeep(t *testing.T) {\n"
                   "\tif Keep(3) != 3 || count != 3 {\n\t\tt.Fatal(\"keep\")\n\t}\n}\n\n"
                   "func TestSide(t *testing.T) {\n\tif Side(1) != 2 {\n\t\tt.Fatal(\"side\")\n\t}\n}\n\n"
-                  "func TestNothing(t *testing.T) {}\n")
+                  "func TestNothing(t *testing.T) {}\n"
+                  + "".join(f"\nfunc TestPad{i}(t *testing.T) {{}}\n" for i in range(4)))
 
-    def spied_deletions(self, pr, test, whole=False, jobs=1):
+    def spied_deletions(self, pr, test, whole=False, jobs=1, patches=None):
         """({line: status}, [(site dir, names)]) of deletion_mutants on a repo of these sources, with
-        each run_tests call's tests recorded; whole runs every site with the whole suite (no per-test pass)."""
+        each run_tests call's tests recorded; whole runs every site with the whole suite (no per-test
+        pass); patches ({name: value}) replaces those mutgate names first, run_tests under the spy."""
         from unittest import mock
         with tempfile.TemporaryDirectory() as d:
             pkg = self.repo(d, "package hint\n", pr, test)
             added = mutgate.added_lines(subprocess.run(
                 ["git", "-C", d, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1", "--", "broker"],
                 capture_output=True, text=True, check=True).stdout)[0]
-            calls, real = [], mutgate.run_tests
+            calls, real = [], (patches or {}).get("run_tests", mutgate.run_tests)
             def spy(binary, cwd, timeout, mem=None, names=None):
                 calls.append((pathlib.Path(binary).parent.name, names))
                 return real(binary, cwd, timeout, mem=mem, names=names)
             with contextlib.ExitStack() as st:
+                for name, value in (patches or {}).items():
+                    st.enter_context(mock.patch.object(mutgate, name, value))
                 st.enter_context(mock.patch.object(mutgate, "BROKER", pkg.parent))
                 st.enter_context(mock.patch.object(mutgate, "run_tests", spy))
                 if whole:
@@ -1559,7 +1563,9 @@ func set(n, m int) {
         test = ("package hint\n\nimport \"testing\"\n\nvar ready = true\n\n// REQ: CRED-1\n"
                 "func TestBreak(t *testing.T) {\n\tready = false\n\tKeep(1)\n}\n\n"
                 "func TestFix(t *testing.T) {\n\tready = true\n}\n\n"
-                "func TestUse(t *testing.T) {\n\tif !ready || Keep(2) != 2 {\n\t\tt.Fatal(\"use\")\n\t}\n}\n")
+                "func TestUse(t *testing.T) {\n\tif !ready || Keep(2) != 2 {\n\t\tt.Fatal(\"use\")\n\t}\n}\n"
+                # Tests that reach nothing, so the set is under half the suite's runs alone (`selected`).
+                + "".join(f"\nfunc TestPad{i}(t *testing.T) {{}}\n" for i in range(4)))
         whole, _ = self.spied_deletions(pr, test, whole=True)
         self.assertEqual(whole, {6: "LIVED", 7: "NOT VIABLE"})
         for jobs in (1, 3):
@@ -1570,23 +1576,74 @@ func set(n, m int) {
                 self.assertEqual(six[0], ["TestBreak", "TestUse"])
                 self.assertIsNone(six[-1])  # the set failed unmutated: the whole suite's verdict stands
 
+    def test_a_set_past_half_the_memory_cap_unmutated_reruns_the_whole_suite(self):
+        # #6217 (Security on #6213): a set's kill stands only if the set, run unmutated, stays under
+        # half the memory cap, as the whole suite must (L3 on #5026); else a deletion that lives could
+        # read KILLED by the cap. TestKeep's unmutated run is made to report exactly half (it stands)
+        # or one byte more (the whole suite decides line 6).
+        # REQ: MUT-delete-covering
+        real = mutgate.run_alone
+        for over, last in ((0, ["TestKeep"]), (1, None)):
+            with self.subTest(over=over):
+                caps = []
+                def alone(binary, cwd, args, timeout, mem, counters=None):
+                    end, top, secs = real(binary, cwd, args, timeout, mem, counters)
+                    if pathlib.Path(binary).name == "plain.test":
+                        caps.append(mem)
+                        top = mem // 2 + over
+                    return end, top, secs
+                got, calls = self.spied_deletions(self.COVER_PR, self.COVER_TEST, patches={
+                    "run_alone": alone, "available_memory": lambda: 16 << 30})
+                self.assertEqual(got[6], "KILLED")
+                self.assertEqual(caps, [8 << 30])  # one unmutated run of the one detected set, under the cap
+                six = [names for site, names in calls if site == "site-0"]
+                self.assertEqual(six[0], ["TestKeep"])
+                self.assertEqual(six[-1], last)
+
+    def test_a_sets_runs_time_out_at_three_times_its_tests_runs_alone(self):
+        # #6217 (L3 and Security on #6213): a set's mutant run and its unmutated run time out at three
+        # times its tests' runs alone, summed, plus 10 s, not at the whole suite's timeout.
+        # REQ: MUT-delete-covering
+        seen, timed = [], []
+        per, runs, alone = mutgate.per_test, mutgate.run_tests, mutgate.run_alone
+        def per_test(*a, **k):
+            seen.append(per(*a, **k))
+            return seen[-1]
+        def run_tests(binary, cwd, timeout, mem=None, names=None):
+            timed.append((names, timeout))
+            return runs(binary, cwd, timeout, mem=mem, names=names)
+        def run_alone(binary, cwd, args, timeout, mem, counters=None):
+            if pathlib.Path(binary).name == "plain.test":
+                timed.append((re.fullmatch(r"-test\.run=\^\((.*)\)\$", args[-1])[1].split("|"), timeout))
+            return alone(binary, cwd, args, timeout, mem, counters)
+        self.spied_deletions(self.COVER_PR, self.COVER_TEST, patches={
+            "per_test": per_test, "run_tests": run_tests, "run_alone": run_alone})
+        sets = [(names, t) for names, t in timed if names is not None]
+        self.assertTrue(any(names == ["TestKeep"] for names, _ in sets), timed)
+        self.assertEqual(len(sets), len(timed) - sum(names is None for names, _ in timed))
+        for names, t in sets:
+            self.assertAlmostEqual(t, 3 * mutgate.set_seconds(names, seen[0]) + 10)
+
     def test_selected_reads_each_tests_own_coverage(self):
         # REQ: MUT-delete-covering
         site = {"file": "a.go", "cover_line": 5, "cover_col": 2}
         at = lambda line: {"a.go": [((line, 1), (line, 9))]}
-        tests = ({"TestA": (at(5), 1.0), "TestB": (at(9), 2.0), "TestC": (at(5), 4.0)}, [])
+        tests = ({"TestA": (at(5), 1.0), "TestB": (at(9), 6.0), "TestC": (at(5), 2.0)}, {})
         self.assertEqual(mutgate.selected(site, tests), ["TestA", "TestC"])
-        self.assertEqual(mutgate.set_seconds(["TestA", "TestC"], tests, 99.0), 5.0)
-        # No per-test result, no test covering the site alone, or every test covering it: the whole suite.
+        self.assertEqual(mutgate.set_seconds(["TestA", "TestC"], tests), 3.0)
+        # No per-test result, or no test covering the site alone: the whole suite.
         self.assertIsNone(mutgate.selected(site, None))
-        self.assertIsNone(mutgate.selected(site, ({"TestB": (at(9), 2.0)}, [])))
-        self.assertIsNone(mutgate.selected(site, ({"TestA": (at(5), 1.0)}, [])))
-        # A test that fails alone has no coverage of its own, so it joins every set, in the suite's order,
-        # and a set holding it is timed as the whole suite.
-        failing = ({"TestA": (at(5), 1.0), "TestB": (at(9), 2.0)}, ["TestF"])
+        self.assertIsNone(mutgate.selected(site, ({"TestB": (at(9), 2.0)}, {})))
+        # A set whose runs alone take half the sum of every test's or more costs no less than the
+        # whole suite (kernel/sim: each set of disk.go held its slow sweeps), so the whole suite runs.
+        self.assertIsNone(mutgate.selected(site, ({"TestA": (at(5), 1.0)}, {})))
+        self.assertIsNone(mutgate.selected(site, ({"TestA": (at(5), 3.0), "TestB": (at(9), 3.0)}, {})))
+        self.assertEqual(mutgate.selected(site, ({"TestA": (at(5), 2.9), "TestB": (at(9), 3.0)}, {})), ["TestA"])
+        # A test that fails alone has no coverage of its own, so it joins every set, timed by its failing run.
+        failing = ({"TestA": (at(5), 1.0), "TestB": (at(9), 6.0)}, {"TestF": 2.0})
         self.assertEqual(mutgate.selected(site, failing), ["TestA", "TestF"])
-        self.assertEqual(mutgate.set_seconds(["TestA", "TestF"], failing, 99.0), 99.0)
-        self.assertEqual(mutgate.set_seconds(None, failing, 99.0), 99.0)
+        self.assertEqual(mutgate.set_seconds(["TestA", "TestF"], failing), 3.0)
+        self.assertIsNone(mutgate.selected(site, ({"TestA": (at(5), 1.0), "TestB": (at(9), 6.0)}, {"TestF": 9.0})))
 
     def test_per_test_runs_each_test_alone_and_names_those_that_fail_alone(self):
         # REQ: MUT-delete-covering
@@ -1598,8 +1655,8 @@ func set(n, m int) {
             subprocess.run(["go", "test", "-c", "-cover", "-covermode=set", "-o", str(binary), "."], cwd=pkg, check=True,
                            env={**os.environ, "GOFLAGS": "", "GOWORK": "off"})
             ran, failing = mutgate.per_test(binary, pkg, d, 60, jobs=2)
-        self.assertEqual(list(ran), ["TestKeep", "TestSide", "TestNothing", "TestFirst"])
-        self.assertEqual(failing, ["TestAfterFirst"])
+        self.assertEqual(list(ran), ["TestKeep", "TestSide", "TestNothing", *(f"TestPad{i}" for i in range(4)), "TestFirst"])
+        self.assertEqual(list(failing), ["TestAfterFirst"])
         self.assertTrue(all(secs > 0 for _, secs in ran.values()))
         lines = lambda name: {n for (s, _), (e, _) in ran[name][0].get("hint.go", []) for n in range(s, e + 1)}
         self.assertTrue({6, 7} <= lines("TestKeep") and 14 not in lines("TestKeep"))
@@ -2173,12 +2230,40 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
                 self.repo(d, pr, src=src, test_base=was, src_pr=src_pr)
                 r = self.mutgate(d, "plan", "--git", "HEAD~1")
                 self.assertEqual(r.returncode, code, r.stdout + r.stderr)
+                # mark's `}` (line 15) is in its empty body's block, so it is code still (#6216).
                 gone = "broker/hint/hint.go: 14, 15 ran under the base's version of the tests this diff changes"
                 if code:
                     self.assertIn(gone + ", and no test of package hint runs them at the head", r.stderr)
                     self.assertNotIn(", 3,", r.stderr)  # Up's lines still run under TestUp
                 else:
                     self.assertNotIn(gone, r.stderr)
+
+    def test_a_closing_brace_the_base_ran_that_no_head_block_holds_is_not_unrun(self):
+        # #6216 (from #6012's cut.go:177): Go's cover profile ends a block at the start of a nested block
+        # that ends it, so the `}` closing Up's `if` (line 6), in the if's block at the base, is in no
+        # block once the head nests an `if` inside it. It is no code a test could run, so the plan passes.
+        # REQ: MUT-unrun-closing-brace
+        nested = TWO_SRC.replace("\t\treturn 10\n", "\t\tif n > 0 {\n\t\t\treturn 10\n\t\t}\n")
+        with tempfile.TemporaryDirectory() as d:
+            self.repo(d, TWO_TEST.replace('t.Fatal("up")', 't.Fatal("up!")'), src_pr=nested)
+            r = self.mutgate(d, "plan", "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertNotIn("ran under the base's version", r.stderr)
+
+    def test_unrun_skips_only_closing_lines_no_head_block_holds(self):
+        # #6216: the closing shapes Go's profile leaves out of every block (measured on go1.26: `}`,
+        # `})`, `},`, `}()`, `}}` after a nested block) are no code. The same line inside a head block (an
+        # `if` body's own `}`, an empty body's) is, and a line with any other token is named either way.
+        # REQ: MUT-unrun-closing-brace
+        rows = ["\t}", "\t})", "\t\t},", "\t}()", "\t}}", "} // end",
+                "\t} else {", "\t}, nil)", "\t}}.f", "\treturn 10", "\t)", "\t}(x)", "\tcase a,", "\t}"]
+        p = "broker/hint/hint.go"
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "hint").mkdir()
+            (pathlib.Path(d) / "hint" / "hint.go").write_text("\n".join(rows) + "\n")
+            with mock.patch.object(mutgate, "BROKER", pathlib.Path(d)):
+                got = mutgate.unrun({p: set(range(1, len(rows) + 1))}, {p: {10}}, {p: {14}})
+        self.assertEqual(got, {p: [7, 8, 9, 11, 12, 13, 14]})
 
     def test_an_archive_that_fails_prints_the_problem(self):
         # L3 R3 on #5770 (#5779): a failed `git archive` wrote no tar, and tarfile's ReadError came
@@ -2822,6 +2907,10 @@ class Plan(unittest.TestCase):
         self.assertEqual(mutgate.shard_count(lines(1364), [0] * 825, 7.0), 9)
         self.assertEqual(mutgate.shard_count(lines(1048), [0] * 367, 0.0), 5)
         self.assertEqual(mutgate.shard_count({}, [], 1000.0), 1)
+        # #6217 (L3 on #6213): a shard's budget is what its per-test pass leaves of SHARD_SECONDS, but
+        # never under half: a pass past 15 minutes plans shards past the 30-minute target.
+        self.assertEqual(mutgate.shard_count({}, [0], costs=[1300.0], overhead=600.0), 2)
+        self.assertEqual(mutgate.shard_count({}, [0], costs=[1800.0], overhead=1700.0), 2)
 
     def test_a_package_with_no_target_line_plans_one_shard_and_no_suite_run(self):
         # MUT-waiver-store-claim (#5786): a record-only claim runs one cheap shard, never its suite.
@@ -2875,7 +2964,7 @@ class Plan(unittest.TestCase):
         from unittest import mock
         runs = []
 
-        def timed_cover(pkg, names, tmp):
+        def timed_cover(pkg, names, tmp, code=None):
             runs.append(names)
             return {"broker/p/a.go": {1}}, (2.0 if names is not None else 40.0), None
         for names, want, ran in ((["TestFast"], 40.0, [["TestFast"], None]), (None, 40.0, [None])):
