@@ -53,7 +53,9 @@ func shipped(t *testing.T) []byte {
 // fixedClock is a clock guard that always reads one time.
 type fixedClock struct{}
 
-func (fixedClock) Latest(context.Context) (time.Time, clock.Status) { return time.Unix(1, 0), clock.Status{} }
+func (fixedClock) Latest(context.Context) (time.Time, clock.Status) {
+	return time.Unix(1, 0), clock.Status{}
+}
 
 // untouched is a store no test here reaches: a refused step switches nothing.
 type untouched struct{ follow.Store }
