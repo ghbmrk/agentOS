@@ -29,6 +29,10 @@ root backup
 # root step whose binary is not a root here.
 root netguard/port1
 root cmd/agentos-port1
+# The peer rule on the kernel process's sockets (CORE-trim-headroom, #6039): a listener that admits
+# only given uids, and SO_PEERCRED. Standard library only; the sockets package's JSON-line Server,
+# which only agentosd and its peers run, stays outside the core.
+root sockets/peers
 
 allow golang.org/x/sys/unix
 allow golang.org/x/sys/cpu
@@ -43,7 +47,6 @@ known github.com/ghbmrk/agentos/broker/netguard -- clerk/exit.go checks each dia
 known github.com/ghbmrk/agentos/broker/kernel/proc -- the kernel process: log file, anchors, owner socket
 known github.com/ghbmrk/agentos/broker/cmd/agentos-kernel/anchor -- the kernel main reads the log anchor's TPM counter
 known github.com/ghbmrk/agentos/broker/kernel/privfile -- kernel/proc checks its private files
-known github.com/ghbmrk/agentos/broker/sockets -- kernel/proc serves its frames on a sockets listener
 known github.com/ghbmrk/agentos/broker/procguard -- kernel/proc runs procguard.Isolate at start
 known github.com/ghbmrk/agentos/broker/clerk/handoff -- the unlock step hands the kernel its keys on descriptor 3
 known github.com/ghbmrk/agentos/broker/kernel/secret -- every core holder of a key keeps it where no print shows it (CLK-1, DECOY-b-8, #4833)

@@ -288,7 +288,8 @@ func open(key, blob, aad []byte) ([]byte, error) {
 	return g.Open(nil, blob[:g.NonceSize()], blob[g.NonceSize():], aad)
 }
 
-var wipe = func(b []byte) { clear(b) } // a var so a test can watch a wipe
+var wipe = func(b []byte) { clear(b) }                       // a var so a test can watch a wipe
+var clone = func(b []byte) []byte { return slices.Clone(b) } // a var so a test can count clones
 
 func random(n int) ([]byte, error) {
 	b := make([]byte, n)
@@ -890,7 +891,7 @@ func (s *Store) withEntry(name string, value []byte) (map[string][]byte, error) 
 		return nil, err
 	}
 	e := maps.Clone(s.entries.Get())
-	e[name] = slices.Clone(value)
+	e[name] = clone(value)
 	return e, nil
 }
 

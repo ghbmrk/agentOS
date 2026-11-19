@@ -768,6 +768,21 @@ func TestEveryKernelLegsContextEndsWithTheLeg(t *testing.T) {
 	if k.resumed != 0 {
 		t.Errorf("resumed %d times on a stop count never read", k.resumed)
 	}
+	// The STOP's fresh read and RESUME's count read take two legs each
+	// here (the read refused, then SetupOpen), each on its leg's context (#6173). The direct resumeKernel call above
+	// kept a background context, which never ends; forget it first.
+	k.live()
+	b.freshStop(context.Background())
+	if n := k.live(); n != 0 {
+		t.Errorf("freshStop: %d kernel contexts still live", n)
+	}
+	b.whole = true
+	if _, err := b.StopCancelled(); err == nil {
+		t.Error("StopCancelled with its read refused: no error")
+	}
+	if n := k.live(); n != 0 {
+		t.Errorf("StopCancelled: %d kernel contexts still live", n)
+	}
 }
 
 // nopEngine is a journal side with nothing in it.
