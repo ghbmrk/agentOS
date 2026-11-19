@@ -23,7 +23,7 @@ func TestEveryFoldRefusesABodyItCannotRead(t *testing.T) {
 	for _, typ := range []string{kernel.TKeyIssued, kernel.TEnrolled, kernel.TSpendReserved, kernel.TModelUsed,
 		kernel.TPlanSubmit, kernel.TPlanAccepted, kernel.TPlanRejected, kernel.TPlanCancel, kernel.TStepHeld,
 		kernel.TStepDispatch, kernel.TStepResult, kernel.TTaskOpened, kernel.TCodeApproved, kernel.TUnenrolled,
-		kernel.TKeyRevoked, kernel.TSpendHeld, kernel.TSpendExtend, kernel.TPoolRead, kernel.TPoolReset, kernel.TReserveUp} {
+		kernel.TKeyRevoked, kernel.TSpendHeld, kernel.TSpendExtend, kernel.TPoolRead, kernel.TPoolReset, kernel.TReserveUp, kernel.TStepProbed} {
 		_, err := kernel.Replay(nil, []kernel.Entry{{Seq: 1, Type: typ, Body: json.RawMessage(`"x"`)}})
 		if !errors.Is(err, kernel.ErrCorrupt) {
 			t.Errorf("%s with an unreadable body: %v", typ, err)
@@ -623,6 +623,17 @@ func TestOpenTrimsATornTailAndRefusesAShortFrame(t *testing.T) {
 	r.store.B = append(binary.BigEndian.AppendUint32(append([]byte(nil), good...), uint32(len(ct))), ct...)
 	if _, err := kernel.Open(cfg(r)); !errors.Is(err, kernel.ErrUnknown) {
 		t.Fatalf("an unknown entry type: %v", err)
+	}
+	// An entry sealed under its place's seq that names another is corrupt.
+	pt, err = json.Marshal(kernel.Entry{Seq: last.Seq + 2, Prev: last.Hash(), At: last.At, Type: kernel.TStop, V: 1, Body: json.RawMessage(`{}`)})
+	must(t, err)
+	ct = a.Seal(nonce, nonce, pt, binary.BigEndian.AppendUint64(nil, last.Seq+1))
+	r.store.B = append(binary.BigEndian.AppendUint32(append([]byte(nil), good...), uint32(len(ct))), ct...)
+	if _, err := kernel.Open(cfg(r)); !errors.Is(err, kernel.ErrCorrupt) {
+		t.Fatalf("an entry naming another seq: %v", err)
+	}
+	if err := (&kernel.MemStore{B: []byte{1, 2}}).Truncate(3); !errors.Is(err, kernel.ErrCorrupt) {
+		t.Fatalf("a truncate past the end: %v", err)
 	}
 	// A whole frame of nonce and tag alone seals no entry: corrupt, not torn.
 	empty := a.Seal(nonce, nonce, nil, binary.BigEndian.AppendUint64(nil, last.Seq+1))
