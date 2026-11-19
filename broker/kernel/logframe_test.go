@@ -16,13 +16,14 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel"
 )
 
-// frameKey is the log key these tests seal frames under by hand.
-var frameKey = [32]byte{7}
+// frameKey is the log key these tests seal frames under by hand; a func, not
+// a package var, so it widens no mutation targets.
+func frameKey() [32]byte { return [32]byte{7} }
 
 // frameCfg is a log config over st and a with frameKey and its own signer.
 func frameCfg(st kernel.Store, a kernel.Anchor) kernel.Config {
 	priv := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{5}, ed25519.SeedSize))
-	return kernel.Config{Store: st, Anchor: a, Key: frameKey, Pub: priv.Public().(ed25519.PublicKey), Sign: priv, Rand: rand.NewChaCha8([32]byte{4})}
+	return kernel.Config{Store: st, Anchor: a, Key: frameKey(), Pub: priv.Public().(ed25519.PublicKey), Sign: priv, Rand: rand.NewChaCha8([32]byte{4})}
 }
 
 // frameLog is the bytes of a log holding two task entries.
@@ -45,7 +46,8 @@ func frameLog(t *testing.T) []byte {
 // then a nonce and the AES-GCM sealing of e's JSON with seq as the aad.
 func sealFrame(t *testing.T, seq uint64, e kernel.Entry) []byte {
 	t.Helper()
-	b, err := aes.NewCipher(frameKey[:])
+	key := frameKey()
+	b, err := aes.NewCipher(key[:])
 	if err != nil {
 		t.Fatal(err)
 	}
