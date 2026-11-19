@@ -193,8 +193,9 @@ func TestGetTableBoundsRead(t *testing.T) {
 	_, err = w.Write(make([]byte, maxTable))
 	must(t, err)
 	must(t, w.Close())
+	maxSealedTable := sealedSize(maxTable)
 	if int64(n) != maxSealedTable {
-		t.Fatalf("a %d-byte table seals to %d bytes, maxSealedTable is %d", maxTable, n, maxSealedTable)
+		t.Fatalf("a %d-byte table seals to %d bytes, sealedSize(maxTable) is %d", maxTable, n, maxSealedTable)
 	}
 
 	d := DirTarget{Dir: t.TempDir()}

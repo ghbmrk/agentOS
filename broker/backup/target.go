@@ -133,18 +133,20 @@ func (d DirTarget) Tables(id string) ([]uint64, error) {
 
 func (DirTarget) AppendOnly() bool { return false }
 
-// maxSealedTable is the longest key table a target may hold: the largest
-// table UnwrapTable accepts (maxTable bytes of plaintext), sealed. Sealing
-// adds the header and one tag per chunk, and a full last chunk is still one
-// chunk, so it is headerLen + maxTable + ceil(maxTable/chunkSize)*tagSize.
-const maxSealedTable = int64(headerLen + maxTable + (maxTable+chunkSize-1)/chunkSize*tagSize)
+// sealedSize is the length n bytes of plaintext seal to: the header and
+// one tag per chunk, a full last chunk still one chunk, so it is
+// headerLen + n + ceil(n/chunkSize)*tagSize. A target holds no key table
+// longer than sealedSize(maxTable), the largest table UnwrapTable accepts.
+func sealedSize(n int64) int64 {
+	return int64(headerLen) + n + (n+chunkSize-1)/chunkSize*tagSize
+}
 
 // readFile reads a key table at p, refusing what a table is never
 // (REV-CHK-links, #3945, #3998). The directory is the owner's choice and
 // the read runs as root, so another uid may have planted the name: a link
 // is refused by O_NOFOLLOW; a FIFO, socket, device or directory by the
 // type of the open descriptor, O_NONBLOCK keeping the open of a FIFO from
-// waiting for a writer; and a file over maxSealedTable unread. A regular
+// waiting for a writer; and a file over sealedSize(maxTable) unread. A regular
 // file's reads never block, so O_NONBLOCK stays set. O_NOCTTY keeps a
 // planted terminal from becoming the daemon's controlling terminal; os.OpenFile
 // sets O_CLOEXEC itself.
@@ -157,6 +159,12 @@ func readFile(p string) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return readTable(f, p)
+}
+
+// readTable reads the key table open at f, named p in its errors: the
+// checks readFile makes on the descriptor it opened.
+func readTable(f *os.File, p string) ([]byte, error) {
 	st, err := f.Stat() // fstat of the descriptor opened, not of the name
 	if err != nil {
 		return nil, err
@@ -164,10 +172,11 @@ func readFile(p string) ([]byte, error) {
 	if m := st.Mode(); !m.IsRegular() {
 		return nil, fmt.Errorf("backup: %s is a %s, not a regular file", p, typeName(m))
 	}
-	if st.Size() > maxSealedTable {
-		return nil, fmt.Errorf("backup: %s is %d bytes, over the %d a key table can be", p, st.Size(), maxSealedTable)
+	limit := sealedSize(maxTable)
+	if st.Size() > limit {
+		return nil, fmt.Errorf("backup: %s is %d bytes, over the %d a key table can be", p, st.Size(), limit)
 	}
-	b, err := readBounded(f, maxSealedTable)
+	b, err := readBounded(f, limit)
 	if err != nil {
 		return nil, fmt.Errorf("backup: %s: %w", p, err)
 	}
