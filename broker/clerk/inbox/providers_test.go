@@ -73,3 +73,30 @@ func TestProviderTables(t *testing.T) {
 		t.Fatalf("table %q", p.Table())
 	}
 }
+
+// Indented and CR-ended lines are trimmed before they are read, a comment
+// is skipped, and a key that is no domain or a security sender that is no
+// address or domain fails the table; mustProviders panics on a bad table.
+func TestParseProvidersTrimsAndRefuses(t *testing.T) {
+	ok := "  # a comment\r\n\t\r\n authserv ex.test mx.ex.test -- s\r\n  security ex.test alerts@ex.test -- s \n"
+	if p, err := ParseProviders([]byte(ok)); err != nil {
+		t.Fatalf("%q: %v", ok, err)
+	} else if a, sec := p.For("", "imap.ex.test"); a != "mx.ex.test" || !slices.Equal(sec, []string{"alerts@ex.test"}) {
+		t.Fatalf("%q: authserv %q, security %v", ok, a, sec)
+	}
+	for _, bad := range []string{
+		"authserv . mx.ex.test -- s",
+		"authserv ex.test mx.ex.test -- s\nsecurity . alerts@ex.test -- s",
+		"authserv ex.test mx.ex.test -- s\nsecurity ex.test nodot -- s",
+	} {
+		if _, err := ParseProviders([]byte(bad)); err == nil {
+			t.Errorf("%q parsed, want an error", bad)
+		}
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("mustProviders took a bad table")
+		}
+	}()
+	mustProviders([]byte("nonsense"))
+}

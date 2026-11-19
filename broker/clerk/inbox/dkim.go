@@ -20,10 +20,8 @@ func (h header) key() string { return strings.ToLower(strings.TrimSpace(string(h
 
 // splitMessage returns a message's headers in order and its body.
 func splitMessage(raw []byte) ([]header, []byte) {
-	head, body, ok := bytes.Cut(raw, []byte("\r\n\r\n"))
-	if !ok {
-		head, body = raw, nil
-	}
+	// With no blank line, Cut gives the whole message as head and a nil body.
+	head, body, _ := bytes.Cut(raw, []byte("\r\n\r\n"))
 	var hs []header
 	for _, line := range bytes.Split(head, []byte("\r\n")) {
 		switch {

@@ -425,6 +425,11 @@ jobs:
     defaults:
       run:
         working-directory: broker
+    env:
+      # The headless shell the browser step runs: the one Playwright's pinned wheel names in its
+      # browsers.json (tests/test_s5_executor.py ShellPin fails when only one pin moves, #6064).
+      CFT_SHELL_URL: https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.12/linux64/chrome-headless-shell-linux64.zip
+      CFT_SHELL_SHA256: a9da028861a0cf789ff25c2fed45f5f1aaf969ed9247835b6a7821a4f7af9d1d
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -555,23 +560,36 @@ jobs:
             $p.FuzzH264Feed < "$RUNNER_TEMP/camdecode.json" || exit 1
           [ "$status" -eq 0 ]
           python3 ../tools/fuzzrun.py --pkg ./cmd/agentos-camdecode/camdecode --target FuzzH264Feed --budget 20s
+      - name: Headless shell download cache (BROWSER-fixture-ci-fu, #6064)
+        # Keyed on the runner image and the shell's pin, so a new pin never restores an old zip.
+        # Restore only here: the upload after the browser step runs on a push to main alone (D29), so
+        # no PR writes what main restores, and the browser step hash-checks whatever this restores.
+        id: cft
+        uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: ~/.cache/agentos-cft/shell.zip
+          key: cft-headless-shell-${{ steps.image.outputs.os }}-${{ env.CFT_SHELL_SHA256 }}
       - name: The browser gate through a real driver, and S5's executor on its fixture site (BROWSER-fixture-ci, #5952, K4)
         # go test ./... skips both Go fixture tests without Python Playwright and a headless shell, so
         # they run here on the pinned Playwright (tests/requirements-browser.txt, by hash) and the
         # Chrome for Testing headless shell Playwright 1.63 names (browsers.json revision 1243,
         # 153.0.8010.12), downloaded from Google and refused unless it hashes to its pin. A skip fails:
         # require_ran.py for the Go tests; for the Python ones, AGENTOS_REQUIRE_BROWSER=1 and the
-        # script run, which exits 1 on any skip.
-        env:
-          CFT_SHELL_URL: https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.12/linux64/chrome-headless-shell-linux64.zip
-          CFT_SHELL_SHA256: a9da028861a0cf789ff25c2fed45f5f1aaf969ed9247835b6a7821a4f7af9d1d
+        # script run, which exits 1 on any skip. The zip may come from the cache step before; one
+        # that fails the hash is fetched afresh and checked again (#6175), so a bad cache entry can
+        # neither supply another binary nor fail every run; a second mismatch still fails.
         run: |
           python3 -m venv "$RUNNER_TEMP/pw"
           "$RUNNER_TEMP/pw/bin/python" -m pip install -q --no-deps --only-binary=:all: --require-hashes \
             -r ../tests/requirements-browser.txt
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/shell.zip" "$CFT_SHELL_URL"
-          echo "$CFT_SHELL_SHA256  $RUNNER_TEMP/shell.zip" | sha256sum -c -
-          unzip -q "$RUNNER_TEMP/shell.zip" -d "$RUNNER_TEMP/shell"
+          zip="$HOME/.cache/agentos-cft/shell.zip"
+          if ! { [ -f "$zip" ] && echo "$CFT_SHELL_SHA256  $zip" | sha256sum -c -; }; then
+            [ ! -f "$zip" ] || echo "::warning::The cached headless shell fails its pin; fetching it afresh. Delete the cft-headless-shell cache entry so main saves a good one (#6175)."
+            mkdir -p "${zip%/*}"
+            curl -fsSL --retry 3 -o "$zip" "$CFT_SHELL_URL"
+          fi
+          echo "$CFT_SHELL_SHA256  $zip" | sha256sum -c -
+          unzip -q "$zip" -d "$RUNNER_TEMP/shell"
           export PATH="$RUNNER_TEMP/pw/bin:$PATH" AGENTOS_REQUIRE_BROWSER=1 \
             S5_CHROME="$RUNNER_TEMP/shell/chrome-headless-shell-linux64/chrome-headless-shell"
           status=0
@@ -581,6 +599,13 @@ jobs:
             < "$RUNNER_TEMP/browser.json" || exit 1
           [ "$status" -eq 0 ]
           (cd .. && python3 tests/test_s5_executor.py -v)
+      - name: Headless shell cache upload (main only; #6064)
+        # Saves the zip the browser step just hash-checked, once per pin.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cft.outputs.cache-hit != 'true'
+        uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: ~/.cache/agentos-cft/shell.zip
+          key: cft-headless-shell-${{ steps.image.outputs.os }}-${{ env.CFT_SHELL_SHA256 }}
       - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: rm -rf "$(go env GOCACHE)/fuzz"
