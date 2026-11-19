@@ -177,15 +177,21 @@ class SweepTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             pathlib.Path(d, "nested").mkdir()
             pathlib.Path(d, "nested", "cfg.json").write_text(json.dumps({"k": c.value}))
-            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
-                                     env={**os.environ, "LEAKED": c.value})
+            # Popen returns once the child's close-on-exec pipe closes, which the kernel
+            # does before it records the new image's environ bounds, so an immediate read
+            # of /proc/<pid>/environ can come back empty (#6196). The child's ready line
+            # is printed from the new image, so its environ is in place by then.
+            child = subprocess.Popen(
+                [sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(30)"],
+                env={**os.environ, "LEAKED": c.value}, stdout=subprocess.PIPE, text=True)
             try:
+                self.assertEqual(child.stdout.readline().strip(), "ready")
                 det = canary.Detector([c])
                 locs = {h.location for loc, chunks in canary.sweep(roots=[d], pids=[child.pid])
                         for h in det.scan_stream(chunks, loc)}
             finally:
                 child.kill()
-                child.wait()
+                child.communicate()
         self.assertTrue(any(l.endswith("cfg.json") for l in locs), locs)
         self.assertTrue(any(l.endswith("/environ") for l in locs), locs)
 
