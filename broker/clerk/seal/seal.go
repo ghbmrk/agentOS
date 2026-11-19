@@ -1,7 +1,7 @@
-// Package seal is the sealed store (STO-2): one file on the core's internal
-// SSD that holds the store key's slots and the store's few entries (the
-// approval-code verifiers, the box's policy key and the like). The store key
-// itself is never on the drive. Each slot wraps it under a key of its own:
+// Package seal is the sealed store (STO-2): one file on the core's internal SSD that holds the
+// store key's slots and the store's few entries (the approval-code verifiers, the box's policy key
+// and the like). The store key itself is never on the drive. Each slot wraps it under a key of its
+// own:
 //
 //   - tpm: a random key sealed to this PC's TPM under a signed PCR policy
 //     (broker/tpmseal, HW-5a), with an optional boot PIN;
@@ -9,26 +9,24 @@
 //     256 MiB, its parameters kept in the slot;
 //   - recovery: the recovery key (REC-1), through HKDF.
 //
-// So nothing stored on the SSD alone releases the key (STO-2, A8). Once a
-// slot opens, the store derives one key per purpose under its own HKDF label:
-// the log's AES-256-GCM key, the kernel's head-signing seed, and the clerk
-// root key, from which the kernel derives each clerk's key (ClerkRoot). The
-// store key stays with whoever unlocked the store (the unlock step, STO-2b),
-// and each process gets only the derived keys it needs (CLK-1).
+// So nothing stored on the SSD alone releases the key (STO-2, A8). Once a slot opens, the store
+// derives one key per purpose under its own HKDF label: the log's AES-256-GCM key, the kernel's
+// head-signing seed, and the clerk root key, from which the kernel derives each clerk's key
+// (ClerkRoot). The store key stays with whoever unlocked the store (the unlock step, STO-2b), and
+// each process gets only the derived keys it needs (CLK-1).
 //
-// The whole file is MAC'd under a key derived from the store key, so a slot
-// added, removed or altered on the drive by anyone without the key makes the
-// store refuse to open. Replacing the whole file with a store of someone
-// else's is a different attack: the MAC is then under their key. A
-// passphrase or recovery unlock refuses it because the owner's factor opens
-// no slot in it; a TPM unlock refuses it because it must be given the
-// store's anchor, a value derived from the store key and kept off the drive
-// (see TPM). Every change is written to a temporary file, synced and
-// renamed into place.
+// The whole file is MAC'd under a key derived from the store key, so a slot added, removed or
+// altered on the drive by anyone without the key makes the store refuse to open. Replacing the
+// whole file with a store of someone else's is a different attack: the MAC is then under their key.
+// A passphrase or recovery unlock refuses it because the owner's factor opens no slot in it; a TPM
+// unlock refuses it because it must be given the store's anchor, a value derived from the store key
+// and kept off the drive (see TPM). Every change is written to a temporary file, synced and renamed
+// into place.
 package seal
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
@@ -48,7 +46,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"sync"
 
 	"github.com/google/go-tpm/tpm2/transport"
@@ -123,18 +120,15 @@ const (
 // Factor opens a slot, or makes one.
 type Factor interface{ kind() Kind }
 
-// TPM is the trusted-host factor. Unlock needs TPM, PolicyKey, Anchor and,
-// if the slot has a boot PIN, PIN. PolicyKey is the box's policy key, whose
-// private half belongs in this store (HW-5a); Unlock tries only slots
-// sealed under it. That alone does not authenticate the store: sealing to
-// this TPM under the policy key needs only its public half, and the signed
-// boot paths are public, so anyone with the drive can write a whole store
-// of their own that unseals here. Anchor (Store.Anchor) commits to the
-// store key itself, and Unlock refuses a store whose key does not derive
-// it. Neither is secret, but both must come from somewhere the drive's
-// writer cannot change (STO-2b, STO-2c). Enrolling a slot (Create, AddSlot)
-// needs PolicyKey and the boot paths it signed, at least one, but no
-// Anchor; Host names the PC for the owner.
+// TPM is the trusted-host factor. Unlock needs TPM, PolicyKey, Anchor and, if the slot has a boot
+// PIN, PIN. PolicyKey is the box's policy key, whose private half belongs in this store (HW-5a);
+// Unlock tries only slots sealed under it. That alone does not authenticate the store: sealing to
+// this TPM under the policy key needs only its public half, and the signed boot paths are public,
+// so anyone with the drive can write a whole store of their own that unseals here. Anchor
+// (Store.Anchor) commits to the store key itself, and Unlock refuses a store whose key does not
+// derive it. Neither is secret, but both must come from somewhere the drive's writer cannot change
+// (STO-2b, STO-2c). Enrolling a slot (Create, AddSlot) needs PolicyKey and the boot paths it
+// signed, at least one, but no Anchor; Host names the PC for the owner.
 type TPM struct {
 	TPM       transport.TPM
 	PIN       string
@@ -247,9 +241,8 @@ func parse(b []byte) (*file, error) {
 	return &f, nil
 }
 
-// Store is an unlocked store. Its methods are safe for concurrent use. Its
-// key and entries are Secrets, so a line that formats a Store shows neither
-// (CLK-1, DECOY-b-8, #4833).
+// Store is an unlocked store. Its methods are safe for concurrent use. Its key and entries are
+// Secrets, so a line that formats a Store shows neither (CLK-1, DECOY-b-8, #4833).
 type Store struct {
 	mu      sync.Mutex
 	path    string
@@ -303,11 +296,10 @@ func random(n int) ([]byte, error) {
 	return b, err
 }
 
-// slotAAD binds a wrap to its store and to every other field of its slot,
-// so a wrap moved to another store or another slot does not open, and a
-// passphrase slot's Argon2 cost cannot be lowered in place. A tpm slot's
-// boot paths are left out, so an update can change them (SetPolicies): the
-// file's MAC covers them, and the TPM checks each one's signature.
+// slotAAD binds a wrap to its store and to every other field of its slot, so a wrap moved to
+// another store or another slot does not open, and a passphrase slot's Argon2 cost cannot be
+// lowered in place. A tpm slot's boot paths are left out, so an update can change them
+// (SetPolicies): the file's MAC covers them, and the TPM checks each one's signature.
 func slotAAD(id []byte, s slot) []byte {
 	s.Wrap, s.Policies = nil, nil
 	b, err := json.Marshal(s)
@@ -458,9 +450,8 @@ func Create(path string, f Factor) (*Store, error) {
 	return s, nil
 }
 
-// Unlock opens the store at path with f. It tries every slot of f's kind
-// (for a TPM, every slot sealed to that TPM) and returns the store once one
-// slot opens and the file's MAC checks under the key it gave.
+// Unlock opens the store at path with f. It tries every slot of f's kind (for a TPM, every slot
+// sealed to that TPM) and returns the store once one slot opens and the file's MAC checks under its key.
 func Unlock(path string, f Factor) (*Store, error) {
 	b, err := readFile(path)
 	if err != nil {
@@ -564,9 +555,8 @@ func sealedUnder(s *tpmseal.Sealed, key *ecdsa.PublicKey) bool {
 	return err == nil && pub.Equal(key)
 }
 
-// ReadID returns the ID of the store at path without unlocking it. It is
-// the drive's word, not authenticated: use it only to find what is keyed
-// by the ID off the drive (the TPM pins), which then checks it.
+// ReadID returns the ID of the store at path without unlocking it. It is the drive's word, not
+// authenticated: use it only to find what is keyed by the ID off the drive (the TPM pins), which checks it.
 func ReadID(path string) ([]byte, error) {
 	b, err := readFile(path)
 	if err != nil {
@@ -579,13 +569,11 @@ func ReadID(path string) ([]byte, error) {
 	return f.ID, nil
 }
 
-// Pinned is the TPM factor for the store at path on this PC: its policy key
-// and anchor come from the store's pins index on this TPM (tpmseal.ReadPins,
-// STO-2a-k), never from the drive. The ID that finds the index is the
-// drive's, but a changed ID finds no pins or another store's, whose anchor
-// this store's key does not derive, so Unlock still refuses. A TPM with no
-// pins for the store is tpmseal.ErrNoPins: the unlock fails closed, and the
-// owner's passphrase or recovery slot is the way in.
+// Pinned is the TPM factor for the store at path on this PC: its policy key and anchor come from
+// the store's pins index on this TPM (tpmseal.ReadPins, STO-2a-k), never from the drive. The ID that
+// finds the index is the drive's, but a changed ID finds no pins or another store's, whose anchor
+// this store's key does not derive, so Unlock still refuses. A TPM with no pins for the store is
+// tpmseal.ErrNoPins: the unlock fails closed, and the passphrase or recovery slot is the way in.
 func Pinned(t transport.TPM, path string) (TPM, error) {
 	id, err := ReadID(path)
 	if err != nil {
@@ -614,9 +602,8 @@ const AnchorLen = 32
 
 func anchor(key, id []byte) []byte { return derive(key, id, "anchor", AnchorLen) }
 
-// Anchor commits to the store key: a one-way value under its own HKDF
-// label, which a TPM unlock must be given (see TPM). It is not secret; it
-// never changes, since the store key is never rotated (STO-2a-d).
+// Anchor commits to the store key: a one-way value under its own HKDF label, which a TPM unlock
+// must be given (see TPM). It is not secret; it never changes, as the store key is never rotated (STO-2a-d).
 func (s *Store) Anchor() ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -637,11 +624,9 @@ func readFile(path string) ([]byte, error) {
 
 // encode is the file's bytes with nf's slots and entries e, MAC'd.
 func (s *Store) encode(nf file, e map[string][]byte) ([]byte, error) {
-	plain, err := json.Marshal(e)
-	if err != nil {
-		return nil, err
-	}
+	plain := entriesJSON(e)
 	ek := derive(s.key.Get(), nf.ID, "entries", keyLen)
+	var err error
 	nf.Entries, err = seal(ek, plain, entriesAAD(nf.ID))
 	wipe(ek)
 	wipe(plain)
@@ -659,22 +644,43 @@ func (s *Store) encode(nf file, e map[string][]byte) ([]byte, error) {
 	return b, nil
 }
 
-// commit writes the store with slots and entries e, then takes them. A
-// write that fails before the rename leaves both the file and the store as
-// they were. Once the rename is done the file holds the new slots, so the
-// store takes them even if the directory sync then fails, and returns that
-// error: otherwise the next commit would write the old slots back, and a
-// failed ReplaceAndPut of a compromised factor would revive it (REC-4).
+// entriesJSON is e as json.Marshal writes it, {"name":"base64",...} in name order, in one buffer
+// sized up front, so no copy of a value is left in a pooled or outgrown buffer (CLK-1).
+func entriesJSON(e map[string][]byte) []byte {
+	n := 1
+	for k, v := range e {
+		n += len(k) + 6 + base64.StdEncoding.EncodedLen(len(v))
+	}
+	b := append(make([]byte, 0, max(n, 2)), '{')
+	for _, k := range slices.Sorted(maps.Keys(e)) {
+		b = append(append(append(b, '"'), k...), `":"`...)
+		b = append(base64.StdEncoding.AppendEncode(b, e[k]), `",`...)
+	}
+	return append(b[:max(len(b)-1, 1)], '}') // the last comma becomes the brace
+}
+
+// commit writes the store with slots and entries e, then takes them. A write that fails before the
+// rename leaves both the file and the store as they were. Once the rename is done the file holds
+// the new slots, so the store takes them even if the directory sync then fails, and returns that
+// error: otherwise the next commit would write the old slots back, and a failed ReplaceAndPut of a
+// compromised factor would revive it (REC-4). It wipes what no one holds any more (CLK-1): after
+// the rename, the values e displaced or deleted; before it, only e's own clone of the new value.
 func (s *Store) commit(slots []slot, e map[string][]byte) error {
 	nf := s.f
 	nf.Slots = slots
 	b, err := s.encode(nf, e)
-	if err != nil {
-		return err
+	renamed := false
+	if err == nil {
+		renamed, err = writeAtomic(s.path, b)
 	}
-	renamed, err := writeAtomic(s.path, b)
+	keep, drop := s.entries.Get(), e
 	if renamed {
-		s.f, s.entries = nf, secret.Hide(e)
+		s.f, s.entries, keep, drop = nf, secret.Hide(e), e, keep
+	}
+	for k, v := range drop {
+		if w := keep[k]; len(v) > 0 && (len(w) == 0 || &w[0] != &v[0]) {
+			wipe(v)
+		}
 	}
 	return err
 }
@@ -736,8 +742,8 @@ func (s *Store) AddSlot(f Factor) (string, error) {
 	return s.committed(sl.ID, s.commit(append(slices.Clone(s.f.Slots), sl), s.entries.Get()))
 }
 
-// committed returns the new slot's id with err when the slot is in place, which it is
-// after a rename even if the directory sync failed: the caller must still learn its ID.
+// committed returns the new slot's id with err when the slot is in place, which it is after a
+// rename even if the directory sync failed: the caller must still learn its ID.
 func (s *Store) committed(id string, err error) (string, error) {
 	if err != nil && s.find(id) < 0 {
 		return "", err
@@ -803,18 +809,25 @@ func validEntries(e map[string][]byte) bool {
 		return false
 	}
 	for k, v := range e {
-		if !entryName.MatchString(k) || len(v) > MaxEntry {
+		if entryErr(k, v) != nil {
 			return false
 		}
 	}
 	return true
 }
 
-// Put stores an entry (an approval-code verifier, the policy key), durably.
+func entryErr(name string, value []byte) error {
+	if !entryName.MatchString(name) || len(value) > MaxEntry {
+		return errors.New("seal: bad entry name or value too long")
+	}
+	return nil
+}
+
+// Put stores an entry (an approval-code verifier, the policy key), durably. Nil reads back empty.
 func (s *Store) Put(name string, value []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.live(); err != nil {
+	if err := cmp.Or(s.live(), entryErr(name, value)); err != nil {
 		return err
 	}
 	e, err := s.withEntry(name, value)
@@ -831,21 +844,16 @@ type Swap struct {
 	F  Factor
 }
 
-// ReplaceAndPut puts a new slot for each swap's factor in place of its slot,
-// and entry name, in one write: a new recovery key's slot and its backup
-// recipient (REC-4, BAK-1, MIG-4-recovery-r2), and on the lost-card route
-// the new card's passphrase slot with them (MIG-4-recovery-r4d). A crash
-// leaves every old slot and the old entry, or every new slot and the new
-// entry, never a mix. It returns the new slots' IDs, in the swaps' order,
-// once they are in place, even with the directory sync's error.
+// ReplaceAndPut puts a new slot for each swap's factor in place of its slot, and entry name, in one
+// write: a new recovery key's slot and its backup recipient (REC-4, BAK-1, MIG-4-recovery-r2), and
+// on the lost-card route the new card's passphrase slot with them (MIG-4-recovery-r4d). A crash
+// leaves every old slot and the old entry, or every new slot and the new entry, never a mix. It
+// returns the new slots' IDs, in the swaps' order, once they are in place, even with the directory
+// sync's error. A bad name or value is refused before any slot is made, so it costs no Argon2.
 func (s *Store) ReplaceAndPut(name string, value []byte, swaps ...Swap) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.live(); err != nil {
-		return nil, err
-	}
-	e, err := s.withEntry(name, value)
-	if err != nil {
+	if err := cmp.Or(s.live(), entryErr(name, value)); err != nil {
 		return nil, err
 	}
 	if len(swaps) == 0 {
@@ -866,6 +874,10 @@ func (s *Store) ReplaceAndPut(name string, value []byte, swaps ...Swap) ([]strin
 		}
 		slots[i], ids[j] = sl, sl.ID
 	}
+	e, err := s.withEntry(name, value) // after the slots, so a refused swap leaves no clone of value
+	if err != nil {
+		return nil, err
+	}
 	err = s.commit(slots, e)
 	if err != nil && s.find(ids[0]) < 0 {
 		return nil, err
@@ -873,17 +885,13 @@ func (s *Store) ReplaceAndPut(name string, value []byte, swaps ...Swap) ([]strin
 	return ids, err
 }
 
-// withEntry is the store's entries with name set to a copy of value.
+// withEntry is the store's entries with name set to a copy of value; the caller checked both.
 func (s *Store) withEntry(name string, value []byte) (map[string][]byte, error) {
-	if !entryName.MatchString(name) || len(value) > MaxEntry {
-		return nil, errors.New("seal: bad entry name or value too long")
-	}
-	e := make(map[string][]byte)
-	maps.Copy(e, s.entries.Get())
-	e[name] = slices.Clone(value)
-	if len(e) > MaxEntries {
+	e := maps.Clone(s.entries.Get())
+	if e[name] = nil; len(e) > MaxEntries { // counted before the clone, so a refusal leaves none
 		return nil, fmt.Errorf("seal: a store holds at most %d entries", MaxEntries)
 	}
+	e[name] = slices.Clone(value)
 	return e, nil
 }
 
@@ -908,12 +916,8 @@ func (s *Store) Delete(name string) error {
 	if _, ok := s.entries.Get()[name]; !ok {
 		return nil
 	}
-	e := make(map[string][]byte, len(s.entries.Get()))
-	for k, v := range s.entries.Get() {
-		if k != name {
-			e[k] = v
-		}
-	}
+	e := maps.Clone(s.entries.Get())
+	delete(e, name)
 	return s.commit(s.f.Slots, e)
 }
 
@@ -921,12 +925,7 @@ func (s *Store) Delete(name string) error {
 func (s *Store) Entries() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]string, 0, len(s.entries.Get()))
-	for k := range s.entries.Get() {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
+	return slices.Sorted(maps.Keys(s.entries.Get()))
 }
 
 func (s *Store) derived(purpose string) ([]byte, error) {

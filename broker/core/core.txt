@@ -9,6 +9,10 @@
 #                          core package is a write path.
 #   allow <pkg> <symbol> -- <reason>
 #                          one named non-core caller of a write path, and why.
+#   fixture <pkg>          marks an allow-line package as a test fixture: its
+#                          allow lines rest on only tests linking it, which
+#                          core_test.go checks. It grants nothing, and a
+#                          fixture line with no allow line fails.
 #
 # <pkg> is a directory under broker/. <symbol> is pkg.Func, pkg.Type.Method,
 # pkg.Type.* or pkg.*. broker/core/core_test.go fails when a package outside
@@ -22,6 +26,8 @@ core journal
 core grants
 core vault
 core sockets
+# The peer rule sockets and the kernel's process share (CORE-trim-headroom, #6039).
+core sockets/peers
 core egress
 core holder
 core checker
@@ -178,6 +184,7 @@ open meter.Another
 allow recovery vault.* -- P2-8 restore rebuilds the vault from the recovery key (vault TestOnlyRecoveryCallsRebase)
 allow loops kernel.State.Ledger -- the scheduler reads the spend charged to its spare envelope (MIG-4-spend-m); a read of the folded log that records nothing
 allow loops/loopstest kernel.* -- the spare-envelope test fixture boots a kernel on an in-memory log and drives it as the owner and the model clerk would; only tests import it
+fixture loops/loopstest
 allow clerk/model kernel.Kernel.AdmitSpend -- the model clerk asks the kernel's own check before a call; it is a read of the log and records nothing
 allow clerk/model kernel.Kernel.AdmitPool -- the model clerk asks whether a pool is open; a past reset time logs the widening pool.reset, which the kernel alone decides
 allow clerk/model kernel.Kernel.Meter -- the model clerk records the spend of its own call, charged to the plan's key; the kernel refuses a negative amount and a plan it does not know
@@ -187,6 +194,7 @@ allow clerk/plan clerk.Sealer.* -- the plan login clerk seals its one login with
 allow clerk/model clerk.Sealer.* -- the model clerk seals its API key map with the sealing key its process is given and opens it at start and reseals it on each key change, bound to its slot's name, as clerk/plan does its login; it holds no plan's or account's secret
 allow kernel/sim kernel.* -- the seeded harness drives the kernel as the daemon and owner would, on a fake disk; no broker package imports sim
 allow kernel/sim clerk.* -- the harness's world builds the mail clerk it checks the kernel against
+fixture kernel/sim
 allow clerk/inbox/cmd/slice kernel.* -- the eval runner boots a kernel on a fake disk and drives it as the daemon and owner would; no broker package imports it
 allow clerk/inbox/cmd/slice clerk/inbox.* -- the eval runner builds the mail clerk it runs the kernel against
 

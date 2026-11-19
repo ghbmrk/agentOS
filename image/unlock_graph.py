@@ -138,7 +138,7 @@ def closure(units, start=UNIT):
     """(started, stopped, edges) for START in UNITS (graph()): the units the unlock step can start, START
     included; the units it can stop, START included (its stop is the reboot); and each edge taken, as an
     allowlist line. A started unit's START_KINDS start the other unit ("start T KIND from U"); its STOP_KINDS
-    are listed ("stop U KIND T") and its STOP_ON_START stop the other unit; a started service that restarts()
+    are listed ("stop T KIND from U") and its STOP_ON_START stop the other unit; a started service that restarts()
     is stopped too ("restart U Restart VALUE"). A stopped unit's PROPAGATE_STOP stop the other unit, its
     STOP_STARTS start it, and its RESTART_KINDS start it again ("restart U KIND T"). A shutdown unit is started
     but not walked past (it is refused where it is started), and stopping one is not followed or listed: every
@@ -160,7 +160,7 @@ def closure(units, start=UNIT):
                 edges.add("start %s %s from %s" % (t, k, u))
                 todo.append((True, t))
             elif k in (STOP_KINDS if up else PROPAGATE_STOP) and t not in SHUTDOWN:
-                edges.add("stop %s %s %s" % (u, k, t))
+                edges.add("stop %s %s from %s" % (t, k, u))
                 if k in (STOP_ON_START if up else PROPAGATE_STOP):
                     todo.append((False, t))
             elif not up and k in RESTART_KINDS:
@@ -176,7 +176,7 @@ def reached(units, start=UNIT):
 
 def facts(units, generators, start=UNIT):
     """The allowlist's lines for one run: "start START" as the root, each edge closure() takes ("start T
-    KIND from U", "stop U KIND T", "restart U KIND T") and "generator G failed" for each of GENERATORS."""
+    KIND from U", "stop T KIND from U", "restart U KIND T") and "generator G failed" for each of GENERATORS."""
     return closure(units, start)[2] | {"generator %s failed" % g for g in generators}
 
 
@@ -196,9 +196,8 @@ def violations(units, generators, allowed, version, fstab, start=UNIT, major=SYS
     started, stopped, _ = closure(units, start)
     for u in sorted(started | stopped):
         verb = "starts" if u in started else "stops"
-        if u in SHUTDOWN:
-            if u in started:
-                out.append("%s starts %s; %s" % (start, u, WHY))
+        if u in SHUTDOWN:  # closure() never stops one, so each here is started
+            out.append("%s starts %s; %s" % (start, u, WHY))
             continue
         if u not in units:
             continue
@@ -375,8 +374,10 @@ def main(argv):
 
 ALLOW_HEADER = """# What the unlock step (agentos-keeper-kernel.service starting, then stopping) can start or stop, as
 # the built image's own systemd computes it (image/unlock_graph.py, #4667). Each line is reviewed:
-# "start T KIND from U" is an edge by which a unit the step starts or stops starts T, "stop U KIND T" one
-# by which it stops T (#4822, #4823), "restart U KIND T" one by which a stopped U is started again
+# "start T KIND from U" is an edge by which a unit U the step starts or stops starts T, "stop T KIND from U"
+# one by which T stops when U starts (Conflicts, ConflictedBy) or when U stops (the other kinds; #4822,
+# #4823); a line of the second sort whose U the step only starts is listed one hop out, not walked, and
+# T stops only if U does. "restart U KIND T" is one by which a stopped U is started again
 # (TriggeredBy, UpheldBy) or a started service U stops on its way back (Restart, T its value; #4919),
 # "start agentos-keeper-kernel.service" the root, and "generator G failed" a generator that found nothing
 # to read in the build's tree. Regenerate with, as root, after an image build:

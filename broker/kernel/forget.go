@@ -18,6 +18,7 @@ import (
 // side texts it unchanged, and ForgetReply hands the subjects out only for
 // "YES <code>" from it. One ask waits at a time, unlogged: a newer ask,
 // STOP, any other reply, ForgetAskFor or a restart ends it, erasing nothing.
+// A reading too wide for any reply to arrive in time asks nothing.
 
 const ForgetAskFor int64 = 600_000 // ms
 
@@ -25,6 +26,16 @@ var (
 	ErrForgetName  = errors.New("kernel: a Forget needs a name in plain letters that something live is under, so nothing is erased")
 	ErrForgetReply = errors.New("kernel: no Forget waits for that reply, so nothing was erased")
 	ErrForgetStop  = errors.New("kernel: STOP holds, so no Forget is asked")
+	// ErrForgetClock is the owner's text as it stands: a reading at least
+	// ForgetAskFor wide has lapsed the ask before it is sent (TIM-1, CH-12).
+	// The kernel process's clock (proc's onLog) keeps a forward step of the
+	// box clock as width until it starts again, and a start commits the step,
+	// ending KEY-8 and KEY-4 holds early if the box clock is wrong-ahead. A
+	// wrong clock may only make the box more cautious (TIM-1's interval
+	// rule), so the text names no restart for the owner to make: it names
+	// the weekly restart (UPD-10), which commits the step anyway (KRN-clock-a),
+	// and the Wi-Fi page's Forget step, since a FORGET text starts none (D-284).
+	ErrForgetClock = errors.New("I can't ask to forget anything now: my two clocks disagree by 10 minutes or more, so nothing is erased. Try Forget on my Wi-Fi page after my weekly restart.")
 )
 
 // kindWords names a kind as the household says it, for one and for more; the
@@ -55,6 +66,12 @@ func (k *Kernel) AskForget(at int64, label string) (string, error) {
 		return !unicode.In(r, unicode.L, unicode.M, unicode.N) && !strings.ContainsRune(" -_.,()'’/+&@", r)
 	}) {
 		return "", errors.Join(ErrForgetName, err)
+	}
+	// ForgetReply refuses a YES once Latest reaches the lapse, so it would
+	// refuse every YES while Latest does not narrow; were it to narrow, the
+	// refusal costs one retry and never an unwanted erase.
+	if now.Latest >= now.Earliest+ForgetAskFor {
+		return "", ErrForgetClock
 	}
 	all := "everything"
 	if len(unread) > 0 {

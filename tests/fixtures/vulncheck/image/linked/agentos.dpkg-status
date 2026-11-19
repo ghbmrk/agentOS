@@ -1,0 +1,11 @@
+Package: libstatic-dev
+Status: install ok installed
+Priority: optional
+Section: libdevel
+Installed-Size: 1
+Maintainer: agentOS control <control@example.invalid>
+Architecture: amd64
+Source: agentos-linkedonly (1.0-1)
+Version: 1.0-1
+Description: planted package only the main tree's static link reads, whose advisory Debian has not fixed
+ tools/vulncheck.py control: the main tree's scan must report it from linked (#5885).
