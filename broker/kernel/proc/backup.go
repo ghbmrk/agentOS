@@ -903,6 +903,10 @@ func (h *Kernel) writeOne(t kernel.BackupTarget, snap backupSnap, now int64) (st
 	if err == nil {
 		err = f.Sync()
 	}
+	var st os.FileInfo
+	if err == nil {
+		st, err = f.Stat()
+	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -915,7 +919,7 @@ func (h *Kernel) writeOne(t kernel.BackupTarget, snap backupSnap, now int64) (st
 	if err := privfile.SyncDir(dt.Dir); err != nil {
 		return pp.id, err
 	}
-	verified := readBack(tg, dt.Dir, rec)
+	verified := readBack(tg, dt.Dir, rec, st.Size())
 	return pp.id, h.With(func(*kernel.Kernel) error {
 		i := bk.find(rec.BackupID)
 		if i < 0 {
@@ -936,20 +940,20 @@ func (h *Kernel) writeOne(t kernel.BackupTarget, snap backupSnap, now int64) (st
 	})
 }
 
-// readBack reports whether t, at dir, gives back rec's content object and key
-// table, byte for byte as their sums.
-func readBack(t backup.Target, dir string, rec backup.Record) bool {
+// readBack reports whether t, at dir, gives back rec's key table and its regular content
+// object of size bytes (reading one past it), byte for byte as their sums (#6014).
+func readBack(t backup.Target, dir string, rec backup.Record, size int64) bool {
 	tb, err := t.GetTable(rec.BackupID, rec.Generation)
 	if err != nil || sumHex(tb) != rec.TableSum {
 		return false
 	}
-	f, err := os.OpenFile(filepath.Join(dir, rec.BackupID+contentExt), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, _, err := backup.OpenRegular(filepath.Join(dir, rec.BackupID+contentExt))
 	if err != nil {
 		return false
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := io.Copy(h, io.LimitReader(f, size+1)); err != nil {
 		return false
 	}
 	return hex.EncodeToString(h.Sum(nil)) == rec.ContentSum
