@@ -408,6 +408,11 @@ func agentList(lineages []string) string {
 	for _, l := range lineages {
 		names = append(names, agentName(l))
 	}
+	return agentNames(names)
+}
+
+// agentNames lists agent names, sorted: "Agent a" or "Agents a, b and c".
+func agentNames(names []string) string {
 	sort.Strings(names)
 	if len(names) == 1 {
 		return "Agent " + names[0]

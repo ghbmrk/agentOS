@@ -38,8 +38,8 @@ allow broker/infer/supervise/supervise.go Supervisor.listen os.Chmod that direct
 allow broker/infer/supervise/supervise.go Supervisor.listen os.Remove an old socket at the name in that 0700 root directory
 allow broker/loops/machine.go TamperProbe.removeSiblings os.Remove unlink of a name carrying the round's nonce beside a target the Lstat shows is no link; a parent a guest swapped can only lead it to a file of that nonce name, which only the guest made
 allow broker/loops/machine.go targetDigest os.ReadDir lists a target's parent and hashes the tamper-sibling names only; a parent a guest swapped for a link changes the digest, as the guest's write does, and opens no file
-allow broker/sockets/peers.go ListenPeers os.Remove a stale socket at the name in the caller's run directory (its unit's RuntimeDirectory= or a tmpfiles.d directory), which only its own uid or root can write
-allow broker/sockets/peers.go ListenPeers os.Chmod the socket bind(2) just made at that name, in that run directory, which only its own uid or root can write to swap it
+allow broker/sockets/peers/peers.go ListenUnix os.Remove a stale socket at the name in the caller's run directory (its unit's RuntimeDirectory= or a tmpfiles.d directory), which only its own uid or root can write
+allow broker/sockets/peers/peers.go ListenUnix os.Chmod the socket bind(2) just made at that name, in that run directory, which only its own uid or root can write to swap it
 allow broker/sockets/sockets.go secureDir os.MkdirAll the socket directory's parent: agentosd's -sockets parent, /run (root-owned), or a caller's root-owned run directory
 allow broker/sockets/sockets.go secureDir os.Mkdir the socket directory itself, in that root-owned parent; mkdir(2) follows no link
 allow broker/sockets/sockets.go secureDir os.Chmod the socket directory, which the Lstat just before shows is a directory, not a link, owned by this uid
@@ -290,6 +290,14 @@ allow broker/backup/target.go DirTarget.Tables os.ReadDir lists that resolved ta
 allow broker/change/store.go DirContent.Put os.MkdirAll the bodies directory beside agentosd's state file in root-held /var/lib/agentos
 allow broker/change/store.go DirContent.Delete os.Remove unlink(2) removes a link at the body's name itself and never follows it
 allow broker/follow/follow.go Executor.setUnsent os.Remove unlink(2) removes a link at the pending-alert name itself and never follows it
+# broker/netguard/port1 (#4636): agentos-port1, agentos-localui.service's
+# root ExecStartPre=+ step, reads only sysfs at /sys (agentos-port1 passes
+# no other tree), which the kernel serves; no uid makes a link in sysfs, and
+# the class/net links Port1 follows are the kernel's own.
+allow broker/netguard/port1/port1.go Port1 os.ReadDir /sys/class/net, served by the kernel; no uid plants a link in sysfs
+allow broker/netguard/port1/port1.go Port1 os.ReadFile an interface's type under /sys/class/net, served by the kernel; no uid plants a link in sysfs
+allow broker/netguard/port1/port1.go Wired os.ReadFile the named interface's type under /sys/class/net, served by the kernel; no uid plants a link in sysfs
+allow broker/netguard/port1/port1.go removable os.ReadFile a device's removable attribute under /sys/devices, served by the kernel; no uid plants a link in sysfs
 allow broker/netguard/netlink.go routeGateway os.ReadFile /proc/net/route, served by the kernel; no uid plants a link in procfs
 allow broker/netguard/sources.go Sources.ReadLocal os.ReadFile its only root-side reader is the e2e/boxe2e harness (no root binary links netguard); procfs route, neighbour and ipv6_route tables are served by the kernel, and /etc/resolv.conf must follow its stock link into systemd-resolve's /run/systemd/resolve, image/ASSUMPTIONS.md I23's named exception: readers parse it as resolver configuration, and resolved already answers every DNS query
 allow broker/modem/at/serial_linux.go OpenSerial os.OpenFile the modem's tty, found by Discover under root-owned devtmpfs /dev, where udev's /dev/serial/by-id links are legitimate; the in-image e2e run reaches its pty through the sysroot's dev/ttyUSB2 link (boxe2e/sysroot.go), so the open must follow it; its only root-side caller, boxe2e, opens /dev/pts/N in kernel-served devpts

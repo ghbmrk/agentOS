@@ -89,11 +89,32 @@ def nodump(root):
 # The image's noexec mounts (UPD-10): its fstab and /tmp drop-in, copied from mkosi.extra into every
 # tree nodump() makes, since the tree check refuses a tree without them.
 NOEXEC_FILES = ("etc/fstab", "usr/lib/systemd/system/tmp.mount.d/50-agentos-noexec.conf")
+# The journal on disk (#6078), which the tree check also refuses a tree without.
+JOURNAL_FILES = ("usr/lib/systemd/journald.conf.d/50-agentos-persist.conf",)
+
+
+# Debian's unit that moves the journal from /run to /var/log/journal, and the link that starts it (#6095).
+JOURNAL_FLUSH = "usr/lib/systemd/system/systemd-journal-flush.service"
+
+
+def flush_unit(extra=()):
+    """systemd 257's systemd-journal-flush.service, as mkosi.finalize holds it, with EXTRA (section, key, value)."""
+    out, sec = "", None
+    for s, k, v in check.JOURNAL_FLUSH_LINES + tuple(extra):
+        if s != sec:
+            out, sec = out + "[%s]\n" % s, s
+        out += "%s=%s\n" % (k, v)
+    return out
 
 
 def noexec(root):
-    for rel in NOEXEC_FILES + MAIN_SIDE_FILES:
+    for rel in NOEXEC_FILES + MAIN_SIDE_FILES + JOURNAL_FILES:
         write(root, rel, (MK / "mkosi.extra" / rel).read_text())
+    write(root, JOURNAL_FLUSH, flush_unit())
+    wants = pathlib.Path(root) / "usr/lib/systemd/system/sysinit.target.wants"
+    wants.mkdir(parents=True, exist_ok=True)
+    if not (wants / "systemd-journal-flush.service").is_symlink():
+        (wants / "systemd-journal-flush.service").symlink_to("../systemd-journal-flush.service")
 
 
 # The main side's mask over the keeper's state and the keeper's lift of it (STO-2c, D-154), which
@@ -101,7 +122,12 @@ def noexec(root):
 # units nodump() writes without them.
 MAIN_SIDE_FILES = ("usr/lib/systemd/system/agentos-.service.d/50-main-side.conf",
                    "usr/lib/systemd/system/agentos-keeper-.service.d/90-keeper.conf",
-                   "usr/lib/systemd/system/agentos-mor.service.d/50-main-side.conf")
+                   "usr/lib/systemd/system/agentos-mor.service.d/50-main-side.conf",
+                   # #5818: the system bus's mask, lifted for the units whose reboot asks logind, "-" early.
+                   "usr/lib/systemd/system/agentos-fallback.service.d/90-bus.conf",
+                   "usr/lib/systemd/system/agentos-reboot.service.d/90-bus.conf",
+                   "usr/lib/systemd/system/agentos-kernel-reboot.service.d/90-bus.conf",
+                   "usr/lib/systemd/system/agentos-inbound.service.d/90-early-bus.conf")
 
 
 BT_BLOCK = "usr/lib/modprobe.d/agentos-no-bluetooth.conf"
@@ -2499,12 +2525,14 @@ class ConfigTest(unittest.TestCase):
                 cur.append((m[1], m[2]))
         if cur:
             stanzas.append(cur)
-        keyring = ("Signed-By", "/usr/share/keyrings/debian-archive-keyring.gpg")
+        # Each stanza's keyring holds only the key that signs it (IMG-keyring-minimal, #5954).
+        archive = ("Signed-By", "/usr/share/keyrings/debian-archive-bookworm-automatic.gpg")
+        security = ("Signed-By", "/usr/share/keyrings/debian-archive-bookworm-security-automatic.gpg")
         self.assertEqual(stanzas, [
             [("Types", "deb"), ("URIs", mirror), ("Suites", "trixie trixie-updates"), ("Components", "main"),
-             keyring, ("Check-Valid-Until", "no")],
+             archive, ("Check-Valid-Until", "no")],
             [("Types", "deb"), ("URIs", "http://security.debian.org/debian-security"), ("Suites", "trixie-security"),
-             ("Components", "main"), keyring],
+             ("Components", "main"), security],
         ], why)
 
     def test_snapshot_fetch_retries_a_mirror_outage(self):
@@ -2565,10 +2593,10 @@ class ConfigTest(unittest.TestCase):
         # config (mkosi.conf.d/, mkosi.local.conf, mkosi.images/, mkosi.packages/, mkosi.pkgmngr.tar),
         # so both config folders' mkosi.* names are pinned.
         self.assertEqual(sorted(n for n in os.listdir(MK) if n.startswith("mkosi.")), [
-            "mkosi.conf", "mkosi.extra", "mkosi.finalize", "mkosi.pkgmngr", "mkosi.postinst",
+            "mkosi.conf", "mkosi.configure", "mkosi.extra", "mkosi.finalize", "mkosi.pkgmngr", "mkosi.postinst",
             "mkosi.repart"], why)
         self.assertEqual(sorted(n for n in os.listdir(MK / "initrd") if n.startswith("mkosi.")),
-                         ["mkosi.conf", "mkosi.finalize", "mkosi.postinst"], why)
+                         ["mkosi.conf", "mkosi.configure", "mkosi.finalize", "mkosi.postinst"], why)
         # The two configs are held to one strict form, so this test never models mkosi's parser:
         # a non-blank line is a column-0 "#" comment, a column-0 [Section], a column-0 Key=value
         # (no "@", no space before "="), or an indented continuation while a setting is open (a
@@ -3917,10 +3945,13 @@ class ConfFilesTest(unittest.TestCase):
                 self.assertIn("bad characters in section header", self.coredump(("[Core%sdump]\n" % c).encode()))
         self.assertNotIn("section header", self.coredump(b"[Core dump x]\n"))
 
-    def test_empty_assignment_resets(self):
-        # P4: LLMNR= after LLMNR=no gives resolved's default, which answers on the LAN.
-        write(self.root, "etc/systemd/resolved.conf.d/90-x.conf", "[Resolve]\nLLMNR=no\nLLMNR=\n")
-        self.assertIn("LLMNR", self.v())
+    def test_empty_assignment_is_refused(self):
+        # P4, then #6095 (R4): resolved's parser ignores an empty LLMNR= and keeps the one before it, so the
+        # check refuses it (ini_canon) rather than read it as a reset or as ignored.
+        for first in ("yes", "no"):
+            write(self.root, "etc/systemd/resolved.conf.d/90-x.conf", "[Resolve]\nLLMNR=%s\nLLMNR=\n" % first)
+            self.assertIn("LLMNR= in etc/systemd/resolved.conf.d/90-x.conf is a form the tree check does not read",
+                          self.v())
 
     def test_kmod_reads_a_file_in_place_of_modprobe_d(self):
         # P5: kmod's conf_files_list reads a non-directory in its list as a file of its own (named
@@ -5106,11 +5137,11 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
             refused = check.unit_made_refusals(t)
         self.assertEqual(out, [])
         self.assertEqual(refused, [])
-        # Pinned: the eight agentos entries SERVICE_DIRS no longer lists, and the two root units' own.
+        # Pinned: the eight agentos entries SERVICE_DIRS no longer lists, the two root units' own, and the wipe's record (#6094).
         self.assertEqual(sorted(made), sorted((
             "var/lib/agentos-localui", "var/lib/agentos-egress", "run/agentos-egress", "run/agentos-localui",
             "run/agentos-mail", "run/agentos-link", "run/agentos-camera", "run/agentos-homekit",
-            "var/lib/agentos-store", "var/lib/agentos/modem")))
+            "var/lib/agentos-store", "var/lib/agentos/modem", "var/lib/agentos-wipe")))
 
 
 class ReferenceToolTest(unittest.TestCase):
@@ -5672,7 +5703,12 @@ class ExecAllowTest(unittest.TestCase):
                                       # #2622: bus and polkit policy.
                                       r"(etc|usr/share)/polkit-1/rules\.d/[^/]+|usr/share/polkit-1/actions/[^/]+|"
                                       r"etc/dbus-1/.+|usr/share/dbus-1/(system\.d/[^/]+|system-services/[^/]+|"
-                                      r"system\.conf))$")
+                                      r"system\.conf)|"
+                                      # #4641 R-b: the PAM stacks.
+                                      r"(etc|usr/lib)/pam\.d/[^/]+|etc/pam\.conf|"
+                                      # #5818: every file systemd merges into the bus daemon's units.
+                                      r"(etc|usr/local/lib|usr/lib)/systemd/system/(dbus\.(service|socket)|"
+                                      r"(dbus\.(service|socket)|service|socket)\.d/[^/]+\.conf))$")
                 self.assertRegex(value, r"^(sha256:[0-9a-f]{64}|mask)$")
         # The image's own rules file is on it by its hash, so an edit to it fails here first.
         tpm = (MK / "mkosi.extra" / self.TPM).read_text()
@@ -5809,7 +5845,9 @@ class ExecAllowTest(unittest.TestCase):
               "usr/local/share/dbus-1/system-services/x.service", "lib/dbus-1/system-services/y.service",
               # Names a reader's own filter might skip are hashed all the same.
               "usr/share/polkit-1/rules.d/.x.rules", "usr/share/polkit-1/rules.d/x.rules~",
-              "etc/dbus-1/system.d/x.txt", "etc/dbus-1/system.d/sub/x.conf")
+              "etc/dbus-1/system.d/x.txt", "etc/dbus-1/system.d/sub/x.conf",
+              # #4641 R-b: the PAM stacks, whose modules run as root.
+              "etc/pam.d/login", "usr/lib/pam.d/su", "etc/pam.conf", "etc/pam.d/.x")
     YES = 'polkit.addRule(function(action, subject) { return polkit.Result.YES; });\n'
 
     def test_policy_files_are_held_by_hash(self):
@@ -7455,6 +7493,7 @@ UNIT_DEVICES = {
     "agentos-keeper-camera.service": ("agentos-camera", "private"),
     "agentos-keeper-homekit.service": ("agentos-homekit", "private"),
     "agentos-keeper-link-capture.service": ("root", "private"),
+    "agentos-keeper-wipe.service": ("root", "closed"),
     "agentos-link.service": ("agentos-link", "private"),
     "agentos-modem-env.service": ("root", "private"),
     "agentos-mor.service": ("root", "closed"),
@@ -7867,6 +7906,137 @@ class EdgeLinkUnitsTest(unittest.TestCase):
         for unit in (LINK_CAPTURE.name, LINK_SERVED.name, "agentos-inbound.service", "agentos-keeper-enroll.service"):
             self.assertIn(unit, jobs)
 
+
+class IgnoredValueTest(unittest.TestCase):
+    """#6095 (R4; Lens, L3 and Security on #6128): systemd ignores a value its parser rejects and keeps the one
+    before it, so for the keys whose last value a check reads (ini_canon) every assignment must be one of a few
+    forms systemd reads as written. Any other, the empty one included, is refused, wherever it is in the chain:
+    no parser is ported, so no gap in a port can hide an earlier unsafe value."""
+
+    UNIT = "agentos-x.service"
+    KERNEL = "agentos-keeper-kernel.service"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+
+    def files(self, *texts):
+        out = []
+        for t in texts:
+            self.n = getattr(self, "n", 0) + 1
+            rel = "u/%d.conf" % self.n
+            write(self.root, rel, t)
+            out.append(check.Conf(str(self.root), rel))
+        return out
+
+    def keeper(self, name):
+        return lambda f: check.keeper_unit_violations(name, f, str(self.root))
+
+    # (key, section, a value the check reads, the run, near misses the parser may read otherwise or ignore)
+    def cases(self):
+        ns = lambda f: check.namespace_mount_violations(self.UNIT, f)
+        paths = lambda f: check.manager_paths(f)
+        bools = ("", "garbage", "Yes", "true", "1", "on", "\fyes")
+        return (
+            ("PrivateTmp", "Service", "disconnected", ns, bools + ("Disconnected", "connected")),
+            ("PermissionsStartOnly", "Service", "yes", self.keeper(self.UNIT), bools),
+            ("NoNewPrivileges", "Service", "yes", self.keeper(self.KERNEL), bools),
+            ("PrivateDevices", "Service", "yes", self.keeper(self.UNIT), bools),
+            ("DevicePolicy", "Service", "closed", self.keeper(self.UNIT), ("", "garbage", "Closed")),
+            ("Type", "Service", "oneshot", self.keeper(self.UNIT), ("", "garbage", "Oneshot")),
+            ("Slice", "Service", "agentos-keeper.slice", self.keeper(self.UNIT),
+             ("", "a b.slice", "x/y.slice", ".slice", "%p.slice", "a\\x2db.slice", "a.b.slice")),
+            ("StartLimitBurst", "Unit", "3", self.keeper(self.KERNEL), ("", "garbage", "+3", "03", "\f3", "3x")),
+            ("StartLimitIntervalSec", "Unit", "0", self.keeper(self.KERNEL),
+             ("", "garbage", "+0", "\f0", "\v0s", "0 \f0", "0 s", "00", "0.0", "5.", "3.sec", "12.34.56", "1min 30s",
+              "60sec", "1x")),
+            ("StandardOutput", "Service", "file:/var/lib/x", paths,
+             ("", "garbage", "file:", "file:relative", "file://x", "file:/a/../b", "file:/a/./b", "file:%S/x",
+              "fd:a:b", "fd:x", "syslog", "journal+Console")),
+            ("StandardInput", "Service", "file:/var/lib/x", paths, ("", "fd:x", "data", "tty-force", "file:/x/")),
+            ("StandardError", "Service", "file:/var/lib/x", paths, ("", "fd:a:b")))
+
+    def test_a_form_the_check_does_not_read_is_refused_wherever_it_is(self):
+        for key, sec, val, run, misses in self.cases():
+            for miss in misses:
+                for order in ((val, miss), (miss, val)):
+                    with self.subTest(key=key, order=order):
+                        f = self.files(*("[%s]\n%s=%s\n" % (sec, key, v) for v in order))
+                        try:
+                            got = " | ".join(map(str, run(f)))
+                        except ValueError as e:
+                            got = str(e)
+                        self.assertIn("%s=%s in %s is a form the tree check does not read" % (
+                            key, miss, f[order.index(miss)].rel), got)
+
+    def test_the_last_canonical_value_is_read(self):
+        # Each value is one systemd reads as written, so the last one wins, unsafe or safe.
+        refused = {"PrivateTmp": "PrivateTmp=disconnected mounts a tmpfs that executes",
+                   "PermissionsStartOnly": "PermissionsStartOnly=yes runs commands with full privileges",
+                   "Slice": "in agentos-keeper.slice but not one of the keeper's units"}
+        for key, safe in (("PrivateTmp", "yes"), ("PermissionsStartOnly", "no"), ("Slice", "agentos.slice")):
+            run = (lambda f: check.namespace_mount_violations(self.UNIT, f)) if key == "PrivateTmp" else self.keeper(self.UNIT)
+            unsafe = dict((k, v) for k, _, v, _, _ in self.cases())[key]
+            for order, bad in (((safe, unsafe), True), ((unsafe, safe), False)):
+                with self.subTest(key=key, order=order):
+                    got = " | ".join(run(self.files(*("[Service]\n%s=%s\n" % (key, v) for v in order))))
+                    self.assertEqual(refused[key] in got, bad, got)
+        got = " | ".join(self.keeper(self.UNIT)(self.files("[Service]\nType=oneshot\nRuntimeMaxSec=9\n")))
+        self.assertIn("RuntimeMaxSec= has no effect on a Type=oneshot unit", got)
+        for later, zero in (("0", True), ("0s", True), ("0min", True), ("60", False), ("1min", False), ("infinity", False)):
+            with self.subTest(interval=later):
+                got = " | ".join(self.keeper(self.KERNEL)(self.files(
+                    "[Unit]\nStartLimitIntervalSec=60\n", "[Unit]\nStartLimitIntervalSec=%s\n" % later)))
+                self.assertEqual("StartLimitIntervalSec is %s; a zero or unset interval" % later in got, zero, got)
+        for burst, bad in (("5", False), ("6", True), ("999", True)):
+            with self.subTest(burst=burst):
+                got = " | ".join(self.keeper(self.KERNEL)(self.files("[Unit]\nStartLimitBurst=%s\n" % burst)))
+                self.assertEqual("StartLimitBurst is %s; must be 1 to 5" % burst in got, bad, got)
+        for key in ("StandardInput", "StandardOutput", "StandardError"):
+            with self.subTest(key=key):
+                paths = check.manager_paths(self.files("[Service]\n%s=null\n" % key,
+                                                       "[Service]\n%s=file:/var/lib/x\n" % key))
+                self.assertIn((key, "file:/var/lib/x", "/var/lib/x"), paths)
+
+    def test_a_path_unit_starts_the_first_unit_it_names(self):
+        # config_parse_trigger_unit: a later Unit=, empty or not, is ignored.
+        for later in ("", "agentos-keeper-enroll.service"):
+            with self.subTest(later=later):
+                got = check.keeper_path_violations("agentos-keeper-enroll.path", self.files(
+                    "[Path]\nUnit=agentos-x.service\nPathExists=/run/agentos-setup/x\n", "[Path]\nUnit=%s\n" % later))
+                self.assertEqual(got, ["agentos-keeper-enroll.path: starts agentos-x.service, not one of the keeper's "
+                                       "units (D-154)"])
+
+    def test_the_main_configs_take_only_their_forms(self):
+        nodump(self.root)
+        write(self.root, "etc/machine-id", "uninitialized\n")
+        self.assertEqual(check.dump_violations(self.root), [])
+        # Debian's own drop-in, before the image's.
+        write(self.root, "usr/lib/systemd/system.conf.d/10-coredump-debian.conf", "[Manager]\nDefaultLimitCORE=0:infinity\n")
+        self.assertEqual(check.dump_violations(self.root), [])
+        for rel, text, want in (
+                ("etc/systemd/coredump.conf.d/zz.conf", "[Coredump]\nStorage=\n",
+                 "50-agentos-nodump.conf: coredump Storage is Storage= in etc/systemd/coredump.conf.d/zz.conf is a "
+                 "form the tree check does not read (use none or external or journal); must be none"),
+                ("etc/systemd/system.conf.d/zz.conf", "[Manager]\nDefaultLimitCORE=0:1\n",
+                 "50-agentos-nodump.conf: DefaultLimitCORE is DefaultLimitCORE=0:1 in"),
+                ("etc/systemd/system.conf.d/zz.conf", "[Manager]\nDefaultLimitCORE=infinity\n",
+                 "50-agentos-nodump.conf: DefaultLimitCORE is infinity; must be 0"),
+                ("etc/systemd/system/agentosd.service.d/zz.conf", "[Service]\nLimitCORE=\n",
+                 "agentosd.service: LimitCORE is LimitCORE= in")):
+            with self.subTest(rel=rel, text=text):
+                write(self.root, rel, text)
+                self.assertIn(want, " | ".join(check.dump_violations(self.root)))
+                (self.root / rel).unlink()
+        write(self.root, "usr/lib/systemd/resolved.conf.d/40-a.conf", "[Resolve]\nLLMNR=no\nMulticastDNS=no\n")
+        self.assertEqual(check.resolved_violations(self.root), [])
+        for text in ("[Resolve]\nLLMNR=\n", "[Resolve]\nLLMNR=false\n", "[Resolve]\nLLMNR=No\n"):
+            with self.subTest(text=text):
+                write(self.root, "etc/systemd/resolved.conf.d/zz.conf", text)
+                got = " | ".join(check.resolved_violations(self.root))
+                self.assertIn("resolved LLMNR is LLMNR=%s in etc/systemd/resolved.conf.d/zz.conf is a form the tree "
+                              "check does not read (use yes or no or resolve); must be no" % text.split("=")[1].strip(), got)
 
 if __name__ == "__main__":
     unittest.main()

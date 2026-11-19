@@ -163,6 +163,30 @@ func TestSelfCheckStopsOnMissedNeedle(t *testing.T) {
 	}
 }
 
+// An empty needle list is refused rather than built into a scanner that
+// passes every scan and every self-check (#5926, as recovery's copy in
+// #5923): before the refusal, NewScanner(nil) left maxLen at 0 and Reader
+// read past its buffer on a stream of 1 MiB or more. A scanner with a
+// needle reads 2 MiB of zeros, two full blocks, with no finding.
+func TestNewScannerRefusesNoNeedlesAndScansAStreamOfTwoBlocks(t *testing.T) {
+	for _, ns := range [][]Needle{nil, {}} {
+		if s, err := NewScanner(ns); err == nil || s != nil {
+			t.Errorf("NewScanner(%#v): %v; want a refusal", ns, err)
+		}
+	}
+	s, err := NewScanner([]Needle{{Name: "short", Value: []byte("needle-8")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Reader("zeros", bytes.NewReader(make([]byte, 2<<20)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("2 MiB of zeros: %v, want no finding", got)
+	}
+}
+
 // The scan reads the sealed store, not the old core's vault.
 func TestLinksNoVault(t *testing.T) {
 	out, err := exec.Command("go", "list", "-deps", ".").CombinedOutput()

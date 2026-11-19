@@ -6,7 +6,8 @@
 // phone-network time confirms it. The clock stays unverified: the broker's
 // floor still bounds it. With no offset learned on this PC (by its
 // firmware's system UUID), or a state file not root-owned 0600, it does
-// nothing.
+// nothing. clock.BootEstimate makes the state file check (privfile's
+// CheckFile, #6121); this command keeps no copy of it.
 //
 //	agentos-clock-boot -state /var/lib/agentos/clock.json
 //
@@ -30,7 +31,6 @@ import (
 type bootEnv struct {
 	rtc    func() (time.Time, error)
 	hostID func() string
-	owner  uint32 // the uid the state file must belong to: root
 	now    func() time.Time
 	set    func(time.Time) error
 	logf   func(string, ...any)
@@ -42,7 +42,6 @@ func main() {
 	os.Exit(run(*state, bootEnv{
 		rtc:    clock.RTC,
 		hostID: clock.HostID,
-		owner:  0,
 		now:    time.Now,
 		set: func(t time.Time) error {
 			tv := unix.NsecToTimeval(t.UnixNano())
@@ -58,14 +57,9 @@ func run(state string, e bootEnv) int {
 		e.logf("agentos-clock-boot: hardware clock unreadable, clock left as is: %v", err)
 		return 0
 	}
-	var st unix.Stat_t
-	if err := unix.Stat(state, &st); err == nil && (st.Uid != e.owner || st.Mode&0o077 != 0) {
-		e.logf("agentos-clock-boot: state file not owned by root with mode 0600, clock left as is")
-		return 0
-	}
 	est, ok := clock.BootEstimate(state, rtc, e.hostID())
 	if !ok {
-		e.logf("agentos-clock-boot: no offset learned yet, clock left as the hardware clock set it")
+		e.logf("agentos-clock-boot: no offset learned on this PC, or state file not root's own 0600 file; clock left as the hardware clock set it")
 		return 0
 	}
 	if d := est.Sub(e.now()); d < time.Second && d > -time.Second {

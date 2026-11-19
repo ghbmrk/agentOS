@@ -227,14 +227,14 @@ class RenderTest(unittest.TestCase):
     def test_rows_recorded_before_the_causes_column_keep_their_frozen_cells(self):
         raw = raw_fixture()
         first = metrics.render(metrics.compute(raw), raw)
-        # Drop the last two columns, as METRICS.md looked before they existed.
-        old = "\n".join(l.rsplit(" |", 3)[0] + " |" if l.startswith("| 2026-") else l for l in first.splitlines())
+        # Drop the last three columns, as METRICS.md looked before they existed.
+        old = "\n".join(l.rsplit(" |", 4)[0] + " |" if l.startswith("| 2026-") else l for l in first.splitlines())
         raw["runs"].append({"workflow": "ci", "sha": "e", "at": "2026-10-06T10:00:00Z", "conclusions": ["failure", "success"]})
         later = metrics.render(metrics.compute(raw), raw, old)
         row = next(l for l in later.splitlines() if l.startswith("| 2026-10-04 |"))
         self.assertIn("1/3", row)
         # A frozen API column pads as recorded; defects per merged PR is recomputed from PR bodies.
-        self.assertTrue(row.endswith("| — | 0.00 (0/3) |"))
+        self.assertTrue(row.endswith("| — | 0.00 (0/3) | — |"))
 
     def test_rows_recorded_with_fewer_columns_keep_their_frozen_cells(self):
         # METRICS.md on main predates the last three columns.
@@ -673,6 +673,115 @@ class ConvergenceColumnsTest(unittest.TestCase):
         self.assertEqual(cells[i("Open BOARD rows")], "3")
 
 
+class RebaseDeltaTest(unittest.TestCase):
+    """D-320 rule 5 (METRICS-rebase-delta): rebases that `premerge.py` reads as changed, with a delta review after."""
+
+    def repo(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        root = pathlib.Path(d.name)
+        env = git_env({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                       "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+                       "PATH": "/usr/bin:/bin"})
+        def git(*a):
+            return subprocess.run(["git", "-C", d.name, *a], check=True, capture_output=True, text=True, env=env).stdout.strip()
+        git("init", "-q", "-b", "main")
+        for f in ("a", "b", "c"):
+            (root / f).write_text("1\n2\n3\n")
+        git("add", ".")
+        git("commit", "-qm", "base")
+        return root, git
+
+    def timeline(self, extra_edit):
+        """One PR head `old`, then `new`: main moved on, merged into the PR (plus `extra_edit` to c)."""
+        root, git = self.repo()
+        git("checkout", "-qb", "pr")
+        (root / "a").write_text("1\nPR\n3\n")
+        git("commit", "-qam", "pr change")
+        old = git("rev-parse", "HEAD")
+        git("checkout", "-q", "main")
+        (root / "b").write_text("1\n2\nMAIN\n")
+        git("commit", "-qam", "main moves")
+        git("checkout", "-q", "pr")
+        git("merge", "-q", "--no-edit", "main")
+        if extra_edit:
+            (root / "c").write_text("changed in the rebase\n")
+            git("commit", "-qam", "edit while rebasing")
+        return root, old, git("rev-parse", "HEAD")
+
+    def test_a_clean_main_merge_reads_same_and_does_not_count(self):
+        root, old, new = self.timeline(False)
+        self.assertEqual(metrics.rebase_deltas(root, [(old, True), (new, True)], "main"), 0)
+
+    def test_a_rebase_that_changed_a_file_counts_once(self):
+        root, old, new = self.timeline(True)
+        self.assertEqual(metrics.rebase_deltas(root, [(old, True), (new, True)], "main"), 1)
+
+    def test_a_fix_push_on_an_unmoved_base_does_not_count(self):
+        root, git = self.repo()
+        git("checkout", "-qb", "pr")
+        (root / "a").write_text("1\nPR\n3\n")
+        git("commit", "-qam", "pr change")
+        old = git("rev-parse", "HEAD")
+        (root / "c").write_text("fix\n")
+        git("commit", "-qam", "fix")
+        self.assertEqual(metrics.rebase_deltas(root, [(old, True), (git("rev-parse", "HEAD"), True)], "main"), 0)
+
+    def test_unknown_sha_and_single_head_do_not_count(self):
+        root, old, new = self.timeline(True)
+        self.assertEqual(metrics.rebase_deltas(root, [(old, True)], "main"), 0)
+        self.assertEqual(metrics.rebase_deltas(root, [(old, True), ("0" * 40, True)], "main"), 0)
+
+    def test_a_change_after_a_fix_list_head_does_not_count(self):
+        # #5955: the comparison is against the last accepted head, so the delta review a fix-list owes
+        # is not counted even when the fix push also merged main and edited a file.
+        root, old, new = self.timeline(True)
+        self.assertEqual(metrics.rebase_deltas(root, [(old, False), (new, True)], "main"), 0)
+
+    def collect(self, root, l3):
+        """`collect_github` over one merged PR whose L3 verdicts are `l3` = [(verdict, head)], oldest first."""
+        reviews = [{"body": f"L3. Verdict: {v}.\nRecord: l3 head {h}", "author_association": "OWNER",
+                    "submitted_at": f"2026-10-05T00:{10 + i:02d}:00Z"} for i, (v, h) in enumerate(l3)]
+
+        def api(repo, path, token):
+            if path.startswith("pulls?"):
+                return [{"number": 7, "merged_at": "2026-10-05T01:00:00Z", "body": "", "merge_commit_sha": "x"}] \
+                    if "page=1&" in path + "&" else []
+            if path.startswith("pulls/7/reviews"):
+                return reviews if path.endswith("page=1") else []
+            if path.startswith("issues/7/comments") or path.startswith("actions/runs?"):
+                return {"workflow_runs": []} if path.startswith("actions") else []
+            raise AssertionError(path)
+        orig, orig_rd = metrics._api, metrics.rebase_deltas
+        metrics._api = api
+        metrics.rebase_deltas = lambda r, heads, base: orig_rd(r, heads, "main") if base == "x^1" else -1
+        try:
+            pulls, _ = metrics.collect_github("o/r", None, root=root)
+        finally:
+            metrics._api, metrics.rebase_deltas = orig, orig_rd
+        return pulls[0]["rebase_deltas"]
+
+    def test_collect_counts_only_the_changed_rebase_of_the_two_prs(self):
+        root, old, new = self.timeline(True)
+        self.assertEqual(self.collect(root, [("accept", old), ("accept", new)]), 1)
+
+    def test_collect_does_not_count_a_fix_plus_main_merge_after_a_fix_list(self):
+        root, old, new = self.timeline(True)
+        self.assertEqual(self.collect(root, [("fix-list", old), ("accept", new)]), 0)
+        # An accept at the same head (short SHA) after its fix-list makes it an accepted head again.
+        self.assertEqual(self.collect(root, [("fix-list", old), ("accept", old[:8]), ("accept", new)]), 1)
+
+    def test_weekly_column_sums_merged_prs_and_old_data_is_n_a(self):
+        raw = raw_fixture()
+        raw["pulls"][0]["rebase_deltas"] = 1  # the same-reading PR carries 0, the changed one 1
+        raw["pulls"][1]["rebase_deltas"] = 0
+        md = metrics.render(metrics.compute(raw), raw)
+        i = metrics.COLUMNS.index("Rebases needing a delta review")
+        cell = lambda start: [c.strip() for c in next(l for l in md.splitlines() if l.startswith("| " + start)).strip("|").split("|")][i]
+        self.assertEqual(cell("2026-10-04"), "1")
+        self.assertEqual(cell("2026-10-11"), "n/a")  # PR 4 merged there, collected before the count existed
+
+
 class BaselineAndGuardTest(unittest.TestCase):
     # REQ CONV-0-2
     def render(self, raw):
@@ -741,13 +850,13 @@ class BaselineAndGuardTest(unittest.TestCase):
         raw["pulls"][2]["body"] = "Defect: A"   # 1 line over 2 merges: at baseline, not above
         md = self.render(raw)
         row = next(l for l in md.splitlines() if l.startswith("| 2026-10-11"))
-        self.assertTrue(row.endswith("| 0.50 (1/2) |"))
+        self.assertTrue(row.endswith("| 0.50 (1/2) | n/a |"))
         self.assertIn("| Defects per merged PR | 0.50 |", md)
         for n in (3, 4):
             raw["pulls"][n - 1]["body"] = "Defect: A\nDefect: B"
         row = next(l for l in self.render(raw).splitlines() if l.startswith("| 2026-10-11"))
         self.assertIn("| 4 (A, A, B, B) |", row)   # the count cell carries no mark
-        self.assertTrue(row.endswith("| 2.00 (4/2) red |"))
+        self.assertTrue(row.endswith("| 2.00 (4/2) red | n/a |"))
 
     def test_more_merges_with_a_lower_defect_rate_are_not_red(self):
         raw = conv_raw()
@@ -755,7 +864,7 @@ class BaselineAndGuardTest(unittest.TestCase):
         raw["pulls"] += [{"number": 100 + n, "merged_at": "2026-10-15T10:00:00Z", "body": "Defect: X" if n < 4 else "",
                           "verdicts": ["accept"]} for n in range(8)]
         row = next(l for l in self.render(raw).splitlines() if l.startswith("| 2026-10-11"))
-        self.assertTrue(row.endswith("| 0.40 (4/10) |"))
+        self.assertTrue(row.endswith("| 0.40 (4/10) | n/a |"))
 
     def test_a_recorded_red_on_the_frozen_defect_count_is_dropped(self):
         raw = conv_raw()

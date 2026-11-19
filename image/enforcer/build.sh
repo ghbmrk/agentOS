@@ -11,15 +11,21 @@
 # agentOS root.json files); finish_image.py refuses the image if the root or any byte of the disk
 # holds one (NET-2 Channel). Both are required: an image without them is not an enforcer release.
 # AGENTOS_SECURITY_SNAPSHOT, optional: the debian-security snapshot timestamp (YYYYMMDDTHHMMSSZ) the
-# image and its initrd install security packages from (#5825, as the core's build.sh, #5021). Unset,
-# the build resolves one itself (../security-snapshot.sh resolve).
+# image and its initrd install security packages from, or two with a fallback (#5825, #6198, as the
+# core's build.sh). Unset, the build resolves them itself (../security-snapshot.sh resolve).
 # Output in OUT: enforcer_VERSION.raw (the drive), the release (enforcer_VERSION.usr.raw,
 # .usr-verity.raw, the boot entry, .release.json, .usr.list), and SHA256SUMS.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
 OUT=$(realpath -m "${1:-$HERE/out}"); MKOSI=${MKOSI:-mkosi}
-: "${ENFORCER_RELEASE_ROOT:?the enforcer feed root.json (ENFORCER_RELEASE_ROOT) is required}"
-: "${AGENTOS_RELEASE_KEYS:?the agentOS release keys to refuse (AGENTOS_RELEASE_KEYS) are required}"
+# The required inputs and the Debian archive keyring mkosi verifies the snapshot with (exactly the
+# pinned keys, #5578, #5933) are all checked before the build stops, so one attempt reports every
+# missing input (UX 3 on #5961).
+bad=0
+[ -n "${ENFORCER_RELEASE_ROOT-}" ] || { echo "build.sh: the enforcer feed root.json (ENFORCER_RELEASE_ROOT) is required" >&2; bad=1; }
+[ -n "${AGENTOS_RELEASE_KEYS-}" ] || { echo "build.sh: the agentOS release keys to refuse (AGENTOS_RELEASE_KEYS) are required" >&2; bad=1; }
+sh "$HERE/../debian-archive-keyring.sh" || bad=1
+[ "$bad" = 0 ] || exit 1
 SOURCE_DATE_EPOCH=$(git -c safe.directory="$REPO" -C "$REPO" log -1 --format=%ct); export SOURCE_DATE_EPOCH
 VERSION=${2:-$(TZ=UTC git -c safe.directory="$REPO" -C "$REPO" log -1 --date=format-local:%Y%m%d.%H%M%S --format=%cd)}
 KEYS=
@@ -32,6 +38,8 @@ mkdir -p "$OUT"
 # it replaces the committed file for the image and its initrd; the file stays in OUT as the record.
 SECURITY_SNAPSHOT=${AGENTOS_SECURITY_SNAPSHOT-}
 [ -n "$SECURITY_SNAPSHOT" ] || SECURITY_SNAPSHOT=$(sh "$HERE/../security-snapshot.sh" resolve)
+# resolve's first candidate, or the run before it when the first no longer serves its index (#6198).
+SECURITY_SNAPSHOT=$(sh "$HERE/../security-snapshot.sh" pick "$SECURITY_SNAPSHOT")
 sh "$HERE/../security-snapshot.sh" sources "$SECURITY_SNAPSHOT" \
 	"$HERE/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources" >"$OUT/enforcer.sources"
 rm -rf "$OUT/pkgmngr"
