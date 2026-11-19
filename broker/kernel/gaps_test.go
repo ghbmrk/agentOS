@@ -3,6 +3,9 @@ package kernel_test
 // REQ: KRN-1, KRN-5, KRN-8, LOG-7, CH-4
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,7 +22,8 @@ import (
 func TestEveryFoldRefusesABodyItCannotRead(t *testing.T) {
 	for _, typ := range []string{kernel.TKeyIssued, kernel.TEnrolled, kernel.TSpendReserved, kernel.TModelUsed,
 		kernel.TPlanSubmit, kernel.TPlanAccepted, kernel.TPlanRejected, kernel.TPlanCancel, kernel.TStepHeld,
-		kernel.TStepDispatch, kernel.TStepResult, kernel.TTaskOpened, kernel.TCodeApproved} {
+		kernel.TStepDispatch, kernel.TStepResult, kernel.TTaskOpened, kernel.TCodeApproved, kernel.TUnenrolled,
+		kernel.TKeyRevoked, kernel.TSpendHeld, kernel.TSpendExtend, kernel.TPoolRead, kernel.TPoolReset, kernel.TReserveUp} {
 		_, err := kernel.Replay(nil, []kernel.Entry{{Seq: 1, Type: typ, Body: json.RawMessage(`"x"`)}})
 		if !errors.Is(err, kernel.ErrCorrupt) {
 			t.Errorf("%s with an unreadable body: %v", typ, err)
@@ -106,6 +110,10 @@ func TestALineOfMaxShownIsListed(t *testing.T) {
 	must(t, r.k.Answer(1, cs[0], kernel.Result{Outcome: "ok", Covered: line}))
 	if got := r.k.State().Covered(1); len(got) != 1 || got[0].Line != line {
 		t.Fatalf("covered %d lines", len(got))
+	}
+	sent := r.k.State().Covered(1)[0].At
+	if n, m := len(r.k.State().Covered(sent+kernel.TaskTimeout-1)), len(r.k.State().Covered(sent+kernel.TaskTimeout)); n != 1 || m != 0 {
+		t.Fatalf("listed %d just inside a task approval's life and %d at its end", n, m)
 	}
 }
 
@@ -255,11 +263,14 @@ func TestTickSendsNothingItsSendCheckRefuses(t *testing.T) {
 		r.plan("first", r.ck, st(key.Organize, "a"))
 		r.plan("second", r.derive(key.LimitExpires(hour/2)), st(key.Organize, "b"))
 		err := r.k.Tick(0)
-		if down != (err != nil) {
+		if down != (err != nil) || errors.Is(err, kernel.ErrBroken) {
 			t.Fatalf("store down %v: tick %v", down, err)
 		}
 		if n := len(r.mail.Effects()); n != 1 || h.calls != 1 {
 			t.Fatalf("store down %v: %d effects from %d calls, want only the first plan's", down, n, h.calls)
+		}
+		if ph := r.k.State().Plans["second"].Steps[0].Phase; !down && ph == kernel.PInflight {
+			t.Fatal("a refused send left its step in flight")
 		}
 	}
 }
@@ -463,5 +474,166 @@ func TestAStepThatNeverSettlesBoundsTickAndCalls(t *testing.T) {
 	must(t, err)
 	if cs, err := k.Calls(now + kernel.ProbeEvery); err != nil || len(cs) != 0 {
 		t.Fatalf("a probe no clerk can make: %d calls, %v", len(cs), err)
+	}
+}
+
+// A probe's answer is logged and folded only for a step awaiting one: done
+// settles an unknown step, unreached waits ProbeEvery from the answer, and a
+// probe answer for a step in flight changes nothing (KRN-8).
+func TestAProbeAnswerSettlesOnlyAnUnknownStep(t *testing.T) {
+	r := newRig(t)
+	r.plan("p", r.ck, st(key.Organize, "m1"))
+	cs, err := r.k.Calls(0)
+	must(t, err)
+	must(t, r.k.Answer(0, kernel.Call{Kind: kernel.ActProbe, Clerk: "mail", Req: cs[0].Req}, kernel.Result{Outcome: "done"}))
+	if ph := r.k.State().Plans["p"].Steps[0].Phase; ph != kernel.PInflight {
+		t.Fatalf("a probe answer for a step in flight made it %s", ph)
+	}
+	must(t, r.k.Answer(0, cs[0], kernel.Result{Outcome: "unknown"}))
+	at := int64(kernel.ProbeEvery)
+	ps, err := r.k.Calls(at)
+	must(t, err)
+	if len(ps) != 1 || ps[0].Kind != kernel.ActProbe {
+		t.Fatalf("calls at the probe time: %+v", ps)
+	}
+	must(t, r.k.Answer(at+5, ps[0], kernel.Result{Outcome: kernel.OUnreached}))
+	if a := kernel.Next(r.k.State(), "p", at+5); a.WakeAt != at+5+kernel.ProbeEvery {
+		t.Fatalf("after an unreached probe: %+v", a)
+	}
+	ps, err = r.k.Calls(at + 5 + kernel.ProbeEvery)
+	must(t, err)
+	must(t, r.k.Answer(at+5+kernel.ProbeEvery, ps[0], kernel.Result{Outcome: "done"}))
+	if r.status("p") != kernel.SDone {
+		t.Fatalf("a done probe: %s", r.status("p"))
+	}
+}
+
+// Boot reconciles the steps in flight of every plan, a rejected plan with
+// no steps among them (KRN-8).
+func TestBootSkipsARejectedPlan(t *testing.T) {
+	r := newRig(t)
+	r.plan("gone", r.derive(key.LimitTask("nope")), st(key.Trash, "m1"))
+	r.plan("p", r.ck, st(key.Organize, "m1"))
+	_, err := r.k.Calls(0)
+	must(t, err)
+	r.boot(1)
+	if ph := r.k.State().Plans["p"].Steps[0].Phase; ph != kernel.PUnknown {
+		t.Fatalf("a step in flight at boot is %s", ph)
+	}
+}
+
+// An extension needs a per-task cap of its own: a day cap alone extends
+// nothing (LOG-7).
+func TestAnExtensionWithoutATaskCapIsRefused(t *testing.T) {
+	r := newRig(t)
+	day := modelKey(r, "day")
+	modelPlan(r, "p", modelKey(r, "m1", key.LimitSpendTask(10)))
+	exhaust(r, "p", 10)
+	if err := r.k.Extend(3, day, "p"); err == nil {
+		t.Fatal("an extension with no per-task cap")
+	}
+}
+
+// Rederive names what it derived in place of an entry it refuses.
+func TestADivergenceNamesTheDerivedEntry(t *testing.T) {
+	r := newRig(t)
+	r.plan("p", r.ck, st(key.Organize, "m1"))
+	_, err := r.k.Log().Append(0, kernel.TStepDispatch, 1, map[string]any{"plan": "p", "index": 0, "attempt": 7})
+	must(t, err)
+	_, err = kernel.Rederive(r.anchors(), r.k.Box(), r.k.Log().Entries())
+	var d *kernel.Divergence
+	if !errors.As(err, &d) || d.Derived == "nothing" || d.Derived == "" {
+		t.Fatalf("divergence %v", err)
+	}
+}
+
+// A reading the fold cannot take as a share of the pool is skipped, and
+// windows due together reset in their names' order (RES-5).
+func TestPoolReadingsOutOfRangeAndResetOrder(t *testing.T) {
+	r := newRig(t)
+	for _, used := range []int64{-1, kernel.PoolFull + 1} {
+		_, err := r.k.Log().Append(1, kernel.TPoolRead, 2, map[string]any{"pool": "x", "windows": []kernel.WindowReading{{Window: "5h", Used: used, ResetAt: 1_000}}})
+		must(t, err)
+	}
+	s, err := kernel.Replay(r.anchors(), r.k.Log().Entries())
+	must(t, err)
+	if w := s.Pools["x"].Windows; len(w) != 0 {
+		t.Fatalf("a reading out of range was folded: %+v", w)
+	}
+
+	r = newRig(t)
+	must(t, r.k.Reserve(1, "p", 100))
+	names := []string{"a", "b", "c", "d", "e", "f", "g", "h"}
+	var ws []kernel.WindowReading
+	for i := len(names) - 1; i >= 0; i-- {
+		ws = append(ws, kernel.WindowReading{Window: names[i], Used: 950, ResetAt: 1_000})
+	}
+	must(t, r.k.ReadPool(2, "p", ws))
+	if rf := r.k.AdmitPool(1_000, "p"); rf != nil {
+		t.Fatal(rf)
+	}
+	var got []string
+	for _, e := range r.k.Log().Entries() {
+		if e.Type == kernel.TPoolReset {
+			var b struct{ Window string }
+			must(t, json.Unmarshal(e.Body, &b))
+			got = append(got, b.Window)
+		}
+	}
+	if strings.Join(got, "") != strings.Join(names, "") {
+		t.Fatalf("resets logged in order %v", got)
+	}
+}
+
+// Open trims a torn tail (a length cut short, or a frame cut short) and
+// refuses a whole frame too short to be one, or an entry of a type it does
+// not know; an anchor at seq 0 checks nothing (LOG-2).
+func TestOpenTrimsATornTailAndRefusesAShortFrame(t *testing.T) {
+	r := newRig(t)
+	good := append([]byte(nil), r.store.B...)
+	n := len(r.k.Log().Entries())
+	for i, tail := range [][]byte{{0, 1}, {0, 0, 0, 100, 1, 2, 3}, {0, 0, 0, 28}} {
+		if i == 2 {
+			tail = append(tail, make([]byte, 28)...)
+		}
+		r.store.B = append(append([]byte(nil), good...), tail...)
+		l, err := kernel.Open(cfg(r))
+		if err != nil || len(l.Entries()) != n || len(r.store.B) != len(good) {
+			t.Fatalf("tail %d: %v, %d entries, %d bytes", i, err, len(l.Entries()), len(r.store.B))
+		}
+	}
+	for i, tail := range [][]byte{{0, 0, 0, 0}, {0, 0, 0, 10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}} {
+		r.store.B = append(append([]byte(nil), good...), tail...)
+		if _, err := kernel.Open(cfg(r)); !errors.Is(err, kernel.ErrCorrupt) {
+			t.Fatalf("short frame %d: %v", i, err)
+		}
+	}
+	// A frame a later kernel could write: a sealed entry of a type this one
+	// does not know.
+	es := r.k.Log().Entries()
+	last := es[len(es)-1]
+	pt, err := json.Marshal(kernel.Entry{Seq: last.Seq + 1, Prev: last.Hash(), At: last.At, Type: "no.such.type", V: 1, Body: json.RawMessage(`{}`)})
+	must(t, err)
+	b, err := aes.NewCipher(logKey[:])
+	must(t, err)
+	a, err := cipher.NewGCM(b)
+	must(t, err)
+	nonce := make([]byte, a.NonceSize())
+	ct := a.Seal(nonce, nonce, pt, binary.BigEndian.AppendUint64(nil, last.Seq+1))
+	r.store.B = append(binary.BigEndian.AppendUint32(append([]byte(nil), good...), uint32(len(ct))), ct...)
+	if _, err := kernel.Open(cfg(r)); !errors.Is(err, kernel.ErrUnknown) {
+		t.Fatalf("an unknown entry type: %v", err)
+	}
+	// A whole frame of nonce and tag alone seals no entry: corrupt, not torn.
+	empty := a.Seal(nonce, nonce, nil, binary.BigEndian.AppendUint64(nil, last.Seq+1))
+	r.store.B = append(binary.BigEndian.AppendUint32(append([]byte(nil), good...), uint32(len(empty))), empty...)
+	if _, err := kernel.Open(cfg(r)); !errors.Is(err, kernel.ErrCorrupt) {
+		t.Fatalf("a frame sealing nothing: %v", err)
+	}
+
+	c := kernel.Config{Store: &kernel.MemStore{}, Anchor: &kernel.MemAnchor{}, Pub: r.head.pub, Sign: r.head.priv, Key: logKey, Rand: cfg(r).Rand}
+	must(t, c.Anchor.Put(kernel.SignHead(r.head.priv, 0, kernel.Hash{})))
+	if _, err := kernel.Open(c); err != nil {
+		t.Fatalf("an empty log anchored at seq 0: %v", err)
 	}
 }
