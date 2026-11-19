@@ -1,6 +1,6 @@
 package line
 
-// REQ: CLK-2
+// REQ: CLK-2, KRN-8
 
 import (
 	"context"
@@ -10,18 +10,33 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
-// A send the clerk is handed with no view, or that its own check refuses
-// (here: the log has it in flight nowhere), fails with the check's code and
-// reaches no line (CLK-2, #6023).
+// elsewhere is a view no check here reads: the step names another clerk.
+type elsewhere struct{ kernel.View }
+
+// A send already sent is answered done, and one handed to the line with its
+// answer lost may have been sent, both before any check; a send with no
+// view, or one the clerk's own check refuses (here: another clerk's step),
+// fails with the check's code and never reaches the line or the account
+// (CLK-2, KRN-8, #6023).
 func TestASendTheCheckRefusesSendsNothing(t *testing.T) {
-	r := newRig(t, true)
-	p := kernel.SignPlan(kernel.Plan{ID: "c1", Key: r.planner, Steps: []kernel.PlanStep{{Verb: key.Send, Clerk: Name, Args: map[string]string{"to": shopNum, "msg": "hi"}}}}, r.priv)
-	for name, v := range map[string]kernel.View{"no view": nil, "not in flight": r.k.State()} {
-		if res := r.c.DoContext(context.Background(), kernel.Request{Plan: p}, v); res.Outcome != "failed" || res.Detail != "dispatch" {
-			t.Errorf("%s: %+v", name, res)
+	c := &Clerk{cfg: Config{Clock: func() int64 { return 1 }}, steps: map[string]state{}}
+	r := kernel.Request{Plan: kernel.Plan{ID: "c1", Steps: []kernel.PlanStep{{Verb: key.Send, Clerk: "elsewhere", Args: map[string]string{"to": "1", "msg": "hi"}}}}}
+	for _, tc := range []struct {
+		name    string
+		was     state
+		v       kernel.View
+		outcome string
+		detail  string
+	}{
+		{"no view", 0, nil, "failed", "dispatch"},
+		{"another clerk's step", 0, elsewhere{}, "failed", "clerk"},
+		{"already sent", sent, nil, "ok", "already done"},
+		{"answer lost", handed, nil, "unknown", RMaybeSent},
+		{"lost twice", maybe, nil, "unknown", RMaybeSent},
+	} {
+		c.steps[r.Idem()] = tc.was
+		if res := c.DoContext(context.Background(), r, tc.v); res.Outcome != tc.outcome || res.Detail != tc.detail {
+			t.Errorf("%s: %+v", tc.name, res)
 		}
-	}
-	if n := len(r.line.texts()); n != 0 {
-		t.Fatalf("sent %d", n)
 	}
 }

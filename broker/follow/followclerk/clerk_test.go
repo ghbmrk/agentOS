@@ -15,6 +15,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/follow"
 	"github.com/ghbmrk/agentos/broker/follow/followclerk"
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/update"
 )
 
@@ -65,8 +66,7 @@ func TestAStepTheCheckRefusesFailsWithItsCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st := followclerk.Step("d", "")
-	st.Clerk = "elsewhere"
+	st := kernel.PlanStep{Verb: key.ChangeAccount, Clerk: "elsewhere", Args: map[string]string{followclerk.ArgRoot: "d", followclerk.ArgName: "n"}}
 	res := followclerk.New(x, nil).Do(kernel.Request{Plan: kernel.Plan{ID: "p", Steps: []kernel.PlanStep{st}}}, nil)
 	if res.Outcome != "failed" || res.Detail != "clerk" {
 		t.Fatalf("%+v", res)
