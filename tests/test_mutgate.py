@@ -1930,6 +1930,41 @@ class TestOnly(unittest.TestCase):
             self.assertIsNone(problem)
             self.assertLess(quick, secs)
 
+    def test_timed_cover_times_the_test_binary_not_its_build(self):
+        # MUT-plan-timing-skew (#6162, Potency on #6156): suite_seconds times the built binary's run,
+        # so timed_cover's time must leave out what `go test` spends before it (build, link, vet),
+        # which a cold cache makes many times a fast suite. A `go` that sleeps 2 s first stands in for
+        # that; with no `ok` line to read, the wall time stands, which can only add shards.
+        from unittest import mock
+        real = shutil.which("go")
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(mutgate, "BROKER", pathlib.Path(d) / "broker"):
+            self.repo(d, TWO_TEST + "\n// changed\n")
+            pkg, tmp, shim = mutgate.BROKER / "hint", pathlib.Path(d) / "tmp", pathlib.Path(d) / "shim"
+            tmp.mkdir()
+            shim.mkdir()
+            (pkg / "slow_test.go").write_text(
+                'package hint\n\nimport (\n\t"testing"\n\t"time"\n)\n\nfunc TestSlow(t *testing.T) { time.Sleep(time.Second) }\n')
+            for tail, low, high in (("", 1.0, 2.0), (" >/dev/null", 3.0, None)):
+                with self.subTest(tail=tail):
+                    (shim / "go").write_text(f'#!/bin/sh\nsleep 2\nexec "{real}" "$@"{tail}\n')
+                    (shim / "go").chmod(0o755)
+                    with mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off",
+                                                      "PATH": f"{shim}:{os.environ['PATH']}"}):
+                        got, secs, problem = mutgate.timed_cover("hint", None, tmp)
+                    self.assertIsNone(problem)
+                    self.assertIn("broker/hint/hint.go", got)
+                    self.assertGreaterEqual(secs, low)
+                    if high is not None:
+                        self.assertLess(secs, high)
+
+    def test_go_ok_reads_go_tests_summary_line(self):
+        # MUT-plan-timing-skew (#6162): the last `ok` line's seconds, coverage suffix or not.
+        out = "ok  \tagentos/broker/x\t0.5s\n--- some log\nok  \tagentos/broker/hint\t12.034s\tcoverage: 50.0% of statements\n"
+        self.assertEqual(mutgate.GO_OK.findall(out), ["0.5", "12.034"])
+        self.assertEqual(mutgate.GO_OK.findall("ok  \tagentos/broker/hint\t3s\n"), ["3"])
+        for none in ("FAIL\tagentos/broker/hint\t1.0s\n", "ok  \tagentos/broker/hint\t(cached)\n", "  ok  \tp\t1s\n"):
+            self.assertEqual(mutgate.GO_OK.findall(none), [], none)
+
     def test_test_only_diff_mutates_covered_lines(self):
         # #3607: a test-only diff passed every gate. TestUp still runs Up(20) but no longer checks
         # the clamp, so its guard survives; TestDown is untouched, so Down's line is no target.

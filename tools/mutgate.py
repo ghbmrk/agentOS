@@ -1382,8 +1382,12 @@ def covered_by(pkg, names, tmp, broker=None):
     return out, problem
 
 
+# `go test`'s summary line for one package: `ok  <import path>  <seconds>s`, then its coverage.
+GO_OK = re.compile(r"(?m)^ok \s*\S+\s+(\d+(?:\.\d+)?)s(?:\s|$)")
+
+
 def timed_cover(pkg, names, tmp, broker=None, code=None):
-    """covered_by's (lines, seconds, problem): seconds is how long its `go test` took, so a plan
+    """covered_by's (lines, seconds, problem): seconds is how long its test binary ran, so a plan
     that ran the whole suite under coverage sizes the shards from that run, not a fourth (#6155).
     A code dict gains {path: lines} of every block the profile lists, ran or not (#6216): the lines
     a test could run, whichever tests ran."""
@@ -1394,10 +1398,16 @@ def timed_cover(pkg, names, tmp, broker=None, code=None):
     if names is not None:
         cmd += ["-run", "^(" + "|".join(names) + ")$"]
     began = time.monotonic()
+    run = subprocess.run([*cmd, "."], cwd=broker / pkg, stdout=subprocess.PIPE)
     # Its output goes to stderr: `plan` prints the matrix on stdout (#4961).
-    if subprocess.run([*cmd, "."], cwd=broker / pkg, stdout=sys.stderr).returncode or not profile.exists():
+    sys.stderr.write(out := run.stdout.decode("utf-8", "replace"))
+    sys.stderr.flush()
+    if run.returncode or not profile.exists():
         return None, None, f"broker/{pkg}/'s tests {'(all)' if names is None else names} fail under -coverprofile"
-    seconds = time.monotonic() - began
+    # `go test`'s own `ok` line times the test binary's run alone, as suite_seconds times it: the wall
+    # time adds the build and vet, which a cold cache makes many times a fast suite (#6162).
+    ran = GO_OK.findall(out)
+    seconds = float(ran[-1]) if ran else time.monotonic() - began
     if (lister := lister_in(tmp)) is None:
         return None, None, "cannot build tools/mutgate_stmts.go"
     try:
@@ -2731,8 +2741,8 @@ def cmd_plan(args):
                 print(f"mutgate: {problem}", file=sys.stderr)
                 return 1
             # A test-changing package's whole suite already ran under coverage in record_for: its time
-            # sizes the shards, so the slowest suite runs three times here, not four (#6155). The `go test`
-            # wall time holds the link too, so it can only add shards.
+            # sizes the shards, so the slowest suite runs three times here, not four (#6155). Both times
+            # are the test binary's run alone, so neither holds the build (#6162).
             if not (targets or sites):
                 suite, problem = 0.0, None
             elif suite is None:
