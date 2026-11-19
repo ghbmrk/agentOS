@@ -32,7 +32,13 @@ UNITS = MK / "mkosi.extra/usr/lib/systemd/system"
 # The keeper's files beside its units, which shipped_units (agentos* regular files) leaves out.
 KEEPER_FILES = tuple("usr/lib/systemd/system/" + n for n in (
     "agentos-keeper.slice", "agentos-.service.d/50-main-side.conf", "agentos-keeper-.service.d/90-keeper.conf",
-    "agentos-mor.service.d/50-main-side.conf", "agentos-camdecode@.service.d/90-empty-run.conf"))
+    "agentos-mor.service.d/50-main-side.conf", "agentos-camdecode@.service.d/90-empty-run.conf",
+    "agentos-fallback.service.d/90-bus.conf", "agentos-reboot.service.d/90-bus.conf",
+    "agentos-kernel-reboot.service.d/90-bus.conf",
+    "agentos-inbound.service.d/90-early-bus.conf"))
+# #5818: units whose own drop-in resets the main side's mask (to lift or "-" the system bus's entry) and
+# lists the keeper's paths again; the shared drop-in's edits do not reach them.
+OWN_MASK = ("agentos-fallback.service", "agentos-reboot.service", "agentos-inbound.service")
 # #4392: the decoder unit's empty /run, and its lift of the main side's mask there.
 EMPTY_RUN = "agentos-camdecode@.service"
 EMPTY_RUN_DROPIN = EMPTY_RUN + ".d/90-empty-run.conf"
@@ -115,7 +121,7 @@ class KeeperTreeTest(unittest.TestCase):
                                               "agentos-keeper-rotate@.service", "agentos-keeper-pageca.service",
                                               "agentos-keeper-setup@.service", "agentos-keeper-mail.service",
                                               "agentos-keeper-link-capture.service", "agentos-keeper-camera.service",
-                                              "agentos-keeper-homekit.service"))
+                                              "agentos-keeper-homekit.service", "agentos-keeper-wipe.service"))
         self.assertEqual(check.UNLOCK_UNITS, ("agentos-keeper-kernel.service",))
         # The recovery-key rotation, the page authority's staging and the card's hand-off are the
         # keeper's but open no TPM (MIG-4-recovery-r2, OWN-card-flow).
@@ -124,9 +130,10 @@ class KeeperTreeTest(unittest.TestCase):
             self.assertTrue((MK / "mkosi.extra" / rel).is_file(), rel)
         drop = ini(UNITS / "agentos-keeper-.service.d/90-keeper.conf")["Service"]
         self.assertEqual(drop["Slice"], check.KEEPER_SLICE)
-        self.assertEqual(drop["InaccessiblePaths"], "")
+        # The keeper's reset re-adds only the system bus's mask (#5818, tests/test_image_dbus_reach.py).
+        self.assertEqual(drop["InaccessiblePaths"], check.BUS_DIR)
         main = ini(UNITS / "agentos-.service.d/50-main-side.conf")["Service"]["InaccessiblePaths"].split()
-        self.assertEqual(main, list(check.KEEPER_PATHS))
+        self.assertEqual(main, list(check.KEEPER_PATHS) + [check.BUS_DIR])
         # The main side's mask sorts before the keeper's reset, so the reset wins for the keeper only.
         self.assertLess("50-main-side.conf", "90-keeper.conf")
 
@@ -135,18 +142,20 @@ class KeeperTreeTest(unittest.TestCase):
     def test_every_main_side_unit_is_masked_from_the_keeper(self):
         names = sorted(n for n in (p.name for p in (self.root / SYSTEM).iterdir())
                        if check.NOEXEC_UNITS.match(n) and n not in check.KEEPER_UNITS + check.NOEXEC_EXEMPT
-                       + check.EMPTY_ROOT_UNITS + (check.MOR_UNIT,))
+                       + check.EMPTY_ROOT_UNITS + (check.MOR_UNIT,) + OWN_MASK)
         self.assertIn("agentos-localui.service", names)
         (self.root / SYSTEM / "agentos-.service.d/50-main-side.conf").unlink()
         (self.root / SYSTEM / EMPTY_RUN_DROPIN).unlink()
         # #4392: the decoder unit's empty /run leaves the keeper's /run paths out of its view.
         want = ["%s: InaccessiblePaths does not hold %s; the main side never sees the keeper's state (D-154)" % (n, p)
                 for n in names for p in check.KEEPER_PATHS if n != EMPTY_RUN or not p.startswith("/run/")]
-        self.assertEqual(self.v(), want)
+        # The system bus's mask goes too; tests/test_image_dbus_reach.py weighs its lines (#5818).
+        self.assertEqual([l for l in self.v() if not l.endswith("(#5818)")], want)
 
     def test_a_unit_that_lifts_the_mask_is_refused(self):
         write(self.root, SYSTEM + "agentos-localui.service.d/99-x.conf", "[Service]\nInaccessiblePaths=\n")
-        self.assertEqual(len(self.v()), len(check.KEEPER_PATHS))
+        # The keeper's paths and the system bus's directory (#5818).
+        self.assertEqual(len(self.v()), len(check.KEEPER_PATHS) + 1)
         self.assertTrue(all(l.startswith("agentos-localui.service: InaccessiblePaths does not hold") for l in self.v()))
 
     def test_a_mount_from_the_keeper_s_state_is_refused(self):
@@ -1875,7 +1884,7 @@ class KeeperTreeTest(unittest.TestCase):
         # #2981 (Security 1): a "-" entry gives no mask to a unit started before the path exists, so
         # the image makes each keeper path at boot, before any main-side unit, and the mask has no "-".
         drop = UNITS / "agentos-.service.d/50-main-side.conf"
-        self.assertEqual(ini(drop)["Service"]["InaccessiblePaths"].split(), list(check.KEEPER_PATHS))
+        self.assertEqual(ini(drop)["Service"]["InaccessiblePaths"].split(), list(check.KEEPER_PATHS) + [check.BUS_DIR])
         self.assertIn("systemd-tmpfiles-setup.service", ini(drop)["Unit"]["After"].split())
         made = {w[1]: w for w in (l.split() for l in TMPFILES.read_text().splitlines()) if w and w[0] == "d"}
         for p in check.KEEPER_PATHS:
@@ -1883,7 +1892,7 @@ class KeeperTreeTest(unittest.TestCase):
         self.assertEqual(made["/var/lib/agentos-kernel"][3:5], ["agentos-kernel", "agentos-kernel"])
         names = sorted(n for n in (p.name for p in (self.root / SYSTEM).iterdir())
                        if check.NOEXEC_UNITS.match(n) and n not in check.KEEPER_UNITS + check.NOEXEC_EXEMPT
-                       + check.EMPTY_ROOT_UNITS + (check.MOR_UNIT,))
+                       + check.EMPTY_ROOT_UNITS + (check.MOR_UNIT,) + OWN_MASK)
         self.edit("agentos-.service.d/50-main-side.conf", " /var/lib/agentos-kernel", " -/var/lib/agentos-kernel")
         self.edit(EMPTY_RUN_DROPIN, " /var/lib/agentos-kernel", " -/var/lib/agentos-kernel")
         self.assertEqual(self.v(), ["%s: InaccessiblePaths=-/var/lib/agentos-kernel gives no mask while the path is "
@@ -1918,7 +1927,9 @@ class KeeperTreeTest(unittest.TestCase):
                 self.add(EMPTY_RUN, "Service", line)
                 got = self.v()
                 self.unit(EMPTY_RUN).write_text(good)
-                self.assertEqual(got, lacks)
+                # /run/dbus is then in view and unmasked too (#5818).
+                self.assertEqual(got, lacks + ["%s: InaccessiblePaths does not hold %s; a unit that makes no bus call "
+                                               "never sees the system bus (#5818)" % (EMPTY_RUN, check.BUS_DIR)])
         # The rest of the mask still holds.
         self.edit(EMPTY_RUN_DROPIN, " /var/lib/agentos-camera", "")
         self.assertEqual(self.v(), ["%s: InaccessiblePaths does not hold /var/lib/agentos-camera; the main side never "
@@ -1929,19 +1940,21 @@ class KeeperTreeTest(unittest.TestCase):
         # MOR while it holds the card's factors. The rest of the keeper's state stays masked, "-" allowed.
         mor = "agentos-mor.service.d/50-main-side.conf"
         hidden = ini(UNITS / mor)["Service"]["InaccessiblePaths"].split()
-        self.assertEqual([w.lstrip("-") for w in hidden], [p for p in check.KEEPER_PATHS if p not in check.MOR_LISTED])
+        self.assertEqual([w.lstrip("-") for w in hidden],
+                         [p for p in check.KEEPER_PATHS if p not in check.MOR_LISTED] + [check.BUS_DIR])
         self.assertNotIn("Unit", ini(UNITS / mor))
         self.edit(mor, "-/var/lib/agentos-homekit", "-/var/lib/agentos-homekit /run/agentos-setup")
         self.assertEqual(self.v(), ["agentos-mor.service: InaccessiblePaths holds /run/agentos-setup, which the MOR "
                                     "clear lists; masked, it reads as empty (HW-8)"])
         self.edit(mor, "-/var/lib/agentos-homekit /run/agentos-setup", "-/var/lib/agentos-homekit /run")
         self.assertEqual(len(self.v()), 2, self.v())
-        self.edit(mor, " -/var/lib/agentos-homekit /run\n", "\n")
+        self.edit(mor, " -/var/lib/agentos-homekit /run -/run/dbus\n", " -/run/dbus\n")
         self.assertEqual(self.v(), ["agentos-mor.service: InaccessiblePaths does not hold /var/lib/agentos-homekit; "
                                     "the main side never sees the keeper's state (D-154)"])
         # Without its own file, the shared mask hides what it lists.
         (self.root / SYSTEM / mor).unlink()
-        self.assertEqual(len(self.v()), len(check.MOR_LISTED), self.v())
+        # And its /run/dbus, with no "-", would fail the unit at early boot (#5818).
+        self.assertEqual(len(self.v()), len(check.MOR_LISTED) + 1, self.v())
 
     def test_the_setup_factors_are_masked_and_removed(self):
         # #2981 (Security 2): the Owner Card's factors are hidden from the main side, and enrollment
@@ -2162,6 +2175,45 @@ class KeeperTreeTest(unittest.TestCase):
         # The resource manager's group is the vault process's (udev), and is listed.
         rules = (MK / "mkosi.extra/usr/lib/udev/rules.d/60-agentos-tpm.rules").read_text()
         self.assertIn('GROUP="agentos-egress"', rules)
+
+    def test_no_user_but_root_has_uid_0(self):
+        # #4641 R-g: a passwd line, a userdb record or a sysusers.d u line at uid 0.
+        write(self.root, "etc/passwd", "root:x:0:0:root:/root:/bin/sh\nagentos-x:x:900:900::/:/usr/sbin/nologin\n")
+        self.assertEqual(self.v(), [])
+        for uid in ("0", "00", "000"):
+            write(self.root, "etc/passwd", "root:x:0:0:root:/root:/bin/sh\ntoor:x:%s:0::/:/bin/sh\n" % uid)
+            self.assertEqual(self.v(), ["etc/passwd:2: toor has uid 0; only root may (#4641)"])
+        for uid in (" 0", "+0", "0x0", ""):
+            write(self.root, "etc/passwd", "root:x:0:0:root:/root:/bin/sh\ntoor:x:%s:0::/:/bin/sh\n" % uid)
+            self.assertEqual(self.v(), ["etc/passwd:2: a line whose uid is not a plain decimal number (#4641)"])
+        (self.root / "etc/passwd").unlink()
+        rec = write(self.root, "usr/lib/userdb/toor.user", '{"userName": "toor", "uid": 0}')
+        self.assertEqual(self.v(), ["usr/lib/userdb/toor.user: a user record with uid 0 other than root's, or not a JSON "
+                                    "object (#4641)"])
+        for bad in ('{"userName": "toor", "uid": 0.0}', '{"userName": "toor", "uid": "0"}', '{"userName": "toor", "uid": false}'):
+            rec.write_text(bad)
+            self.assertEqual(len(self.v()), 1, bad)
+        rec.write_text('{"userName": "root", "uid": 0}')
+        self.assertEqual(self.v(), [])
+        rec.unlink()
+        sysusers = self.root / "usr/lib/sysusers.d/agentos-setup.conf"
+        good = sysusers.read_text()
+        n = len(good.splitlines()) + 1
+        for line in ("u toor 0", "u! toor 0:900", "u toor 0 - /", "u toor 00", "u toor 000:900"):
+            with self.subTest(line):
+                sysusers.write_text(good + line + "\n")
+                self.assertEqual(self.v(), ["usr/lib/sysusers.d/agentos-setup.conf:%d: gives toor uid 0; only root may "
+                                            "(#4641)" % n])
+        for line in ("u toor +0", "u toor 0x0", 'u toor "0"', "u toor /bin/sh", "u toor /etc/x:900"):
+            with self.subTest(line):
+                sysusers.write_text(good + line + "\n")
+                self.assertEqual(self.v(), ["usr/lib/sysusers.d/agentos-setup.conf:%d: gives toor a uid that is not - or a "
+                                            "plain decimal number (#4641)" % n])
+        for line in ("u root 0", "u toor 900", "u toor -:0", "u toor -"):
+            with self.subTest(line):
+                sysusers.write_text(good + line + "\n")
+                self.assertEqual(self.v(), [])
+        sysusers.write_text(good)
 
     def test_a_full_privilege_command_is_refused(self):
         self.add("agentos-boot-report.service", "Service", "ExecStartPre=+/usr/bin/true")
@@ -2685,7 +2737,7 @@ class KeeperUnitsTest(unittest.TestCase):
         self.assertIn("agentos-keeper-kernel.service", after)
         # The CI unit whose mounts outlive one command lifts the main-side mask in a drop-in that
         # sorts after it.
-        for unit in ("agentos-e2e-seal.service",):
+        for unit in ("agentos-e2e-seal.service", "agentos-noexec-check.service"):
             self.assertIn("'systemd.unit-dropin.%s~99-ci-unmask' '[Service]\\nInaccessiblePaths=\\n'" % unit, ci)
         self.assertLess("50-main-side.conf", "99-ci-unmask.conf")
         preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text().splitlines()

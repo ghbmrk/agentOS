@@ -38,6 +38,7 @@ const (
 	srcNTS         = "^,*,192.0.2.1,1,6,377,12,-0.000010,-0.000011,0.000400\n^,?,198.51.100.7,2,6,0,-,0,0,0\n"
 	srcThree       = "^,*,192.0.2.1,2,6,377,12,0,0,0\n^,+,192.0.2.2,2,6,377,12,0,0,0\n^,+,192.0.2.3,2,6,377,12,0,0,0\n^,-,192.0.2.4,2,6,377,12,0,0,0\n"
 	srcTwo         = "^,*,192.0.2.1,2,6,377,12,0,0,0\n^,+,192.0.2.2,2,6,377,12,0,0,0\n^,-,192.0.2.3,2,6,377,12,0,0,0\n"
+	srcNoneChosen  = "^,+,192.0.2.1,2,6,377,12,0,0,0\n^,+,192.0.2.2,2,6,377,12,0,0,0\n^,+,192.0.2.3,2,6,377,12,0,0,0\n"
 	authNTS        = "192.0.2.1,NTS,1,15,256,33m,0,0,8,100\n198.51.100.7,NTS,0,0,0,-,0,0,0,0\n"
 	trackLeapOff   = "C0000201,192.0.2.1,2,1791230000.123456789,-0.000001,0.000002,0.000003,-1.234,0.001,0.010,0.012,0.001,64.1,Not synchronised\n"
 	srcRefclock    = "#,*,PPS0,0,4,377,8,0,0,0\n=,+,192.0.2.9,2,6,377,12,0,0,0\n#,+,GPS,0,4,377,8,0,0,0\n^,+,192.0.2.2,2,6,377,12,0,0,0\n"
@@ -80,6 +81,12 @@ func TestHW8SyncedFromChrony(t *testing.T) {
 		{"leap status not synchronised", trackLeapOff, srcThree, authNTS, nil, NotSynced},
 		{"one plain NTP", trackOK, srcNTS, authNone, nil, NotSynced},
 		{"NTS listed but authdata refused", trackOK, srcNTS, "", errors.New("501 Not authorised"), NotSynced},
+		// chronyc's output comes back with its exit error (exec's Output): an
+		// NTS line printed before chronyc failed confirms nothing.
+		{"NTS printed, then authdata failed", trackOK, srcNTS, authNTS, errors.New("exit status 1"), NotSynced},
+		// Three sources combined with none selected is a sync in progress:
+		// chronyd follows no source yet.
+		{"three combined, none selected", trackOK, srcNoneChosen, authNone, nil, NotSynced},
 		{"not synchronised", trackUnsynced, srcThree, authNTS, nil, NotSynced},
 		{"stratum 0", trackStratum0, srcThree, authNone, nil, NotSynced},
 		{"stratum 16", trackStratum6, srcThree, authNone, nil, NotSynced},
@@ -95,6 +102,20 @@ func TestHW8SyncedFromChrony(t *testing.T) {
 	fail := func(context.Context, ...string) ([]byte, error) { return nil, errors.New("no chronyd") }
 	if got, err := chronySync(context.Background(), fail); got != NotSynced || err == nil {
 		t.Errorf("chronyc failing: %v, %v", got, err)
+	}
+	// A failing tracking or sources call reaches the caller as its own
+	// error, not as unexpected output or a quiet NotSynced.
+	errNoChronyd := errors.New("no chronyd")
+	for _, failing := range []string{"tracking", "sources"} {
+		run := func(ctx context.Context, args ...string) ([]byte, error) {
+			if args[len(args)-1] == failing {
+				return []byte(trackOK), errNoChronyd
+			}
+			return chronycOut(trackOK, srcThree, authNone, nil)(ctx, args...)
+		}
+		if got, err := chronySync(context.Background(), run); got != NotSynced || !errors.Is(err, errNoChronyd) {
+			t.Errorf("chronyc %s failing: %v, %v", failing, got, err)
+		}
 	}
 }
 
@@ -122,34 +143,56 @@ func TestHW8NoAdjtimexNoRTCWrite(t *testing.T) {
 	}
 }
 
-// The shipped chrony configuration (installed by P2-1 as
-// /etc/chrony/chrony.conf): NTS sources first, the Debian pool as
-// fallback, and nothing that makes chronyd or the kernel write the
-// hardware clock or take sources from DHCP (security T1, T4).
-func TestHW8ChronyConfig(t *testing.T) {
-	f, err := os.Open("chrony/chrony.conf")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	var servers []string
-	keys, values := map[string]bool{}, map[string]string{}
-	sc := bufio.NewScanner(f)
+// chronyConf reads a chrony configuration: its directives' values, its
+// sources in order, and every directive outside keys, the only ones
+// chrony.conf may use. Any other could write the hardware clock (rtcsync,
+// rtcfile, hwclockfile), take sources from DHCP or other files (sourcedir,
+// confdir, include), serve or set time (allow, local, manual, settime), or
+// move the frequency outside maxdrift's clamp (tempcomp), so the list is
+// closed (security T1, T4; #5929).
+func chronyConf(t *testing.T, text string) (values map[string]string, servers, bad []string) {
+	t.Helper()
+	keys := map[string]bool{"server": true, "pool": true, "ntsdumpdir": true, "driftfile": true, "makestep": true,
+		"maxslewrate": true, "maxdrift": true, "authselectmode": true, "port": true, "cmdport": true}
+	values = map[string]string{}
+	sc := bufio.NewScanner(strings.NewReader(text))
 	for sc.Scan() {
 		l := strings.TrimSpace(sc.Text())
 		if l == "" || strings.HasPrefix(l, "#") || strings.HasPrefix(l, "!") || strings.HasPrefix(l, ";") {
 			continue
 		}
 		fs := strings.Fields(l)
-		keys[fs[0]] = true
+		if !keys[fs[0]] {
+			bad = append(bad, fs[0])
+		}
 		values[fs[0]] = strings.Join(fs[1:], " ")
 		if fs[0] == "server" || fs[0] == "pool" {
 			servers = append(servers, l)
 		}
 	}
-	for _, bad := range []string{"rtcsync", "rtcfile", "hwclockfile", "rtconutc", "rtcdevice", "rtcautotrim", "sourcedir", "confdir", "include", "allow", "local", "manual", "settime"} {
-		if keys[bad] {
-			t.Errorf("chrony.conf has %s", bad)
+	if err := sc.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return values, servers, bad
+}
+
+// The shipped chrony configuration (installed by P2-1 as
+// /etc/chrony/chrony.conf): NTS sources first, the Debian pool as
+// fallback, and no directive outside chronyConf's closed list.
+func TestHW8ChronyConfig(t *testing.T) {
+	b, err := os.ReadFile("chrony/chrony.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	values, servers, bad := chronyConf(t, string(b))
+	if len(bad) != 0 {
+		t.Errorf("chrony.conf has %q", bad)
+	}
+	// tempcomp's correction is applied after clamp_freq, so it would break
+	// the 1000 ppm that ntsDrift rests on (ASSUMPTIONS TIM-1-interval-fu-h).
+	for _, extra := range []string{"tempcomp /sys/class/hwmon/hwmon0/temp1_input 30 26000 0.0 0.000183 0.0", "rtcsync", "include /etc/chrony/conf.d/*.conf"} {
+		if _, _, bad := chronyConf(t, string(b)+extra+"\n"); len(bad) != 1 || bad[0] != strings.Fields(extra)[0] {
+			t.Errorf("%q: refused %q", extra, bad)
 		}
 	}
 	want := []string{"server time.cloudflare.com", "server nts.netnod.se", "server ptbtime1.ptb.de", "pool 2.debian.pool.ntp.org"}

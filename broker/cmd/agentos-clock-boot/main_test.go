@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,7 +34,6 @@ func TestBootSetsRTCLessOffset(t *testing.T) {
 	env := bootEnv{
 		rtc:    func() (time.Time, error) { return rtc, nil },
 		hostID: func() string { return testHost },
-		owner:  uint32(os.Geteuid()),
 		// The kernel took the hardware clock as UTC, but the box clock has
 		// run on a little since (L3 M23 on #177).
 		now:  func() time.Time { return rtc.Add(40 * time.Second) },
@@ -44,18 +44,14 @@ func TestBootSetsRTCLessOffset(t *testing.T) {
 		t.Fatalf("code %d, set %v", code, set)
 	}
 
-	// Another PC, or a state file others can read or write or another uid
-	// owns: nothing is set (L3 on #177).
+	// Another PC, or a state file others can read or write: nothing is set
+	// (L3 on #177). BootEstimate's CheckFile is the only check (#6122); a
+	// file another uid owns is TestForeignOwnedStateSetsNothing.
 	set = nil
 	other := env
 	other.hostID = func() string { return "4a1b2c3d-0000-4000-8000-0000000c10c7" }
 	if run(state, other); len(set) != 0 {
 		t.Fatalf("another PC: set %v", set)
-	}
-	stranger := env
-	stranger.owner = uint32(os.Geteuid()) + 1
-	if run(state, stranger); len(set) != 0 {
-		t.Fatalf("foreign owner: set %v", set)
 	}
 	for _, mode := range []os.FileMode{0o644, 0o640, 0o660, 0o602} {
 		os.Chmod(state, mode)
@@ -76,8 +72,8 @@ func TestBootSetsRTCLessOffset(t *testing.T) {
 	// (or a failed one), exit 0.
 	env.now = func() time.Time { return rtc }
 	for name, e := range map[string]bootEnv{
-		"no rtc":    {rtc: func() (time.Time, error) { return time.Time{}, errors.New("no rtc") }, hostID: env.hostID, owner: env.owner, now: env.now, set: env.set, logf: env.logf},
-		"set fails": {rtc: env.rtc, hostID: env.hostID, owner: env.owner, now: env.now, set: func(time.Time) error { return errors.New("EPERM") }, logf: env.logf},
+		"no rtc":    {rtc: func() (time.Time, error) { return time.Time{}, errors.New("no rtc") }, hostID: env.hostID, now: env.now, set: env.set, logf: env.logf},
+		"set fails": {rtc: env.rtc, hostID: env.hostID, now: env.now, set: func(time.Time) error { return errors.New("EPERM") }, logf: env.logf},
 	} {
 		if code := run(state, e); code != 0 {
 			t.Errorf("%s: exit %d", name, code)
@@ -86,6 +82,80 @@ func TestBootSetsRTCLessOffset(t *testing.T) {
 	set = nil
 	if code := run(filepath.Join(dir, "none"), env); code != 0 || len(set) != 0 {
 		t.Fatalf("no state: code %d, set %v", code, set)
+	}
+}
+
+// A state file another uid owns gives no estimate and sets nothing, now
+// through BootEstimate's CheckFile alone (#6122). The same file set back to
+// this uid is applied, so only the owner refuses it. Owners need root to
+// set.
+func TestForeignOwnedStateSetsNothing(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("chown needs root")
+	}
+	state := filepath.Join(t.TempDir(), "clock.json")
+	b, _ := json.Marshal(map[string]any{"have_offset": true, "offset": int64(time.Hour), "offset_host": clock.HostKey(testHost)})
+	if err := os.WriteFile(state, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rtc := time.Date(2026, 10, 9, 22, 0, 0, 0, time.UTC)
+	var set []time.Time
+	env := bootEnv{
+		rtc:    func() (time.Time, error) { return rtc, nil },
+		hostID: func() string { return testHost },
+		now:    func() time.Time { return rtc },
+		set:    func(t time.Time) error { set = append(set, t); return nil },
+		logf:   func(string, ...any) {},
+	}
+	for _, uid := range []int{4242, 0} {
+		if err := os.Chown(state, uid, uid); err != nil {
+			t.Fatal(err)
+		}
+		set = nil
+		if code := run(state, env); code != 0 || (uid == 0) != (len(set) == 1) {
+			t.Fatalf("owner %d: code %d, set %v", uid, code, set)
+		}
+	}
+}
+
+// Each outcome logs exactly its own one line and stops there: an unreadable
+// hardware clock or a refused or missing state file sets nothing, and a
+// failed set is not logged as a set.
+func TestEachOutcomeLogsItsLine(t *testing.T) {
+	dir := t.TempDir()
+	state := filepath.Join(dir, "clock.json")
+	b, _ := json.Marshal(map[string]any{"have_offset": true, "offset": int64(time.Hour), "offset_host": clock.HostKey(testHost)})
+	if err := os.WriteFile(state, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rtc := time.Date(2026, 10, 9, 22, 0, 0, 0, time.UTC)
+	ok := func(time.Time) error { return nil }
+	for _, c := range []struct {
+		name, path, want string
+		rtcErr, setErr   error
+		sets             int
+	}{
+		{"set", state, "clock set to 2026-10-09T21:00:00Z", nil, nil, 1},
+		{"no rtc", state, "hardware clock unreadable", errors.New("no rtc"), nil, 0},
+		{"no state", filepath.Join(dir, "none"), "no offset learned", nil, nil, 0},
+		{"set fails", state, "clock not set: EPERM", nil, errors.New("EPERM"), 1},
+	} {
+		var logged []string
+		sets := 0
+		set := ok
+		if c.setErr != nil {
+			set = func(time.Time) error { return c.setErr }
+		}
+		env := bootEnv{
+			rtc:    func() (time.Time, error) { return rtc, c.rtcErr },
+			hostID: func() string { return testHost },
+			now:    func() time.Time { return rtc },
+			set:    func(t time.Time) error { sets++; return set(t) },
+			logf:   func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) },
+		}
+		if code := run(c.path, env); code != 0 || sets != c.sets || len(logged) != 1 || !strings.Contains(logged[0], c.want) {
+			t.Errorf("%s: code %d, %d sets, logged %q", c.name, code, sets, logged)
+		}
 	}
 }
 

@@ -42,7 +42,7 @@ Written by sub A at Mark's request. Sub B is already building here, so this snap
 
 **How to pick work, either sub**
 1. Reviews owed on open PRs come before new builds. Use the one-thread shape above, and each accept arms, whichever sub posts it.
-2. Before starting any row, check its issue for a claim and for merged work (`git log origin/main -- <dir>`), and check open PRs for overlapping files (D-111). Rows that read `queued` may already be merged or claimed.
+2. Before starting any row, check its issue for a claim and for merged work (`git log origin/main -- <dir>`), check open PRs for hot-list files in its scope, and branch from an armed PR it overlaps (D-320). Rows that read `queued` may already be merged or claimed.
 3. Then, in order: the UPD-5 requalification chain, deletion rows (D-245; kernel-lane rows one at a time across both subs), then the new-capability lanes in their own directories (enforcer, HomeKit, camera, vision, device slot, Withings, decoys, the CLK-8 line).
 4. Rows that share `image/` or `broker/core/core.txt` run one at a time.
 

@@ -5,15 +5,19 @@
 # same security packages, and each run still takes the security fixes published before it starts.
 #
 # Usage: security-snapshot.sh resolve
-#          print the timestamp of the debian-security mirror run before the newest (a snapshot that never
-#          changes, and whose import has finished)
+#          print the run's candidates: the debian-security mirror run before the newest (a snapshot that
+#          never changes, and whose import has finished), then the run before that, each only if it serves
+#          the files apt reads first; one or two timestamps, newest first, separated by a space
+#        security-snapshot.sh pick "CANDIDATES"
+#          print the first of resolve's one or two candidates that serves those files now; a build that
+#          has to fall back says so in a notice (IMG-security-snapshot-404, #6198)
 #        security-snapshot.sh sources TIMESTAMP [FILE]
 #          print FILE (default: the image's mkosi.pkgmngr mkosi.sources; image/enforcer/build.sh passes
 #          the enforcer's) with the security stanza on that snapshot; every other line is unchanged.
 #          Apt still checks the stanza's Valid-Until, so a snapshot older than the security archive's
 #          expiry window (a week) is refused.
 set -eu
-usage() { echo "usage: security-snapshot.sh resolve | sources TIMESTAMP [FILE]" >&2; exit 2; }
+usage() { echo "usage: security-snapshot.sh resolve | pick \"CANDIDATES\" | sources TIMESTAMP [FILE]" >&2; exit 2; }
 # bad_ts VALUE: a hand-run build's timestamp is not one resolve prints (#5825). The value is shown cut to
 # 40 bytes, every byte outside [0-9A-Za-z] as "?", so it cannot forge a log line.
 bad_ts() {
@@ -48,23 +52,61 @@ run_at() {
 	fi
 	echo "$at"
 }
+# before TS: the second before mirror run TS, so run_at answers the run before it.
+before() {
+	iso=$(echo "$1" | sed 's/^\(....\)\(..\)\(..\)T\(..\)\(..\)\(..\)Z$/\1-\2-\3 \4:\5:\6 UTC/')
+	date -u -d "$iso - 1 second" +%Y%m%dT%H%M%SZ
+}
+# serves TS: snapshot TS answers for the files apt reads first, its InRelease and the main amd64
+# Packages.xz, so a build never starts on a snapshot apt would fail on. snapshot.debian.org answers a
+# dists/ path with a redirect to the file's stored copy, and that copy is what can be missing (#6198:
+# curl without -L passed on the redirect while apt, following it, got 404), so the redirect is
+# followed, over https only, as apt follows it. curl retries only the 5xx answers; a 404 fails at once.
+serves() {
+	for f in InRelease main/binary-amd64/Packages.xz; do
+		curl -q --proto '=https' --proto-redir '=https' -L --max-redirs 3 -fsS -o /dev/null --retry 8 \
+			--retry-max-time 600 --max-time 120 "$archive/$1/dists/trixie-security/$f" || return 1
+	done
+}
 case "${1-}" in
 resolve)
 	[ $# -eq 1 ] || usage
 	# The mirror run before the newest: the newest may still be importing, its InRelease served before
 	# its Packages (#5606: a run resolved a minute after it started answered 404 for Packages).
 	# Imports into one archive run one after another, so the run before it is whole; the build still
-	# takes every security fix published up to that run, a few hours before it starts.
+	# takes every security fix published up to that run, a few hours before it starts. The run before
+	# that is the fallback: a snapshot that served its index here can answer 404 for it minutes later
+	# on a build's runner (#6198: InRelease and Packages both 404 from two mirror addresses).
 	newest=$(run_at "$(date -u +%Y%m%dT%H%M%SZ)")
-	iso=$(echo "$newest" | sed 's/^\(....\)\(..\)\(..\)T\(..\)\(..\)\(..\)Z$/\1-\2-\3 \4:\5:\6 UTC/')
-	ts=$(run_at "$(date -u -d "$iso - 1 second" +%Y%m%dT%H%M%SZ)")
-	# And it must serve the index apt reads first, or the build would fail later with less to go on.
-	curl -q --proto '=https' -fsS -o /dev/null --retry 8 --retry-max-time 600 --max-time 120 \
-		"$archive/$ts/dists/trixie-security/main/binary-amd64/Packages.xz" || {
-		echo "security-snapshot.sh: the debian-security snapshot $ts has no trixie-security Packages.xz" >&2
+	first=$(run_at "$(before "$newest")")
+	second=$(run_at "$(before "$first")")
+	list=
+	for ts in "$first" "$second"; do
+		if serves "$ts"; then list=$list${list:+ }$ts; fi
+	done
+	[ -n "$list" ] || {
+		echo "security-snapshot.sh: neither debian-security snapshot $first nor $second serves its trixie-security index" >&2
 		exit 1
 	}
-	echo "$ts"
+	echo "$list"
+	;;
+pick)
+	[ $# -eq 2 ] || usage
+	# One argument, split here, so no word of it is ever read as a file name.
+	set -f
+	# shellcheck disable=SC2086 # split on purpose: resolve's one or two timestamps
+	set -- $2
+	[ $# -ge 1 ] && [ $# -le 2 ] || bad_ts "$*"
+	for ts in "$@"; do is_ts "$ts" || bad_ts "$ts"; done
+	for ts in "$@"; do
+		if serves "$ts"; then
+			[ "$ts" = "$1" ] || echo "::notice title=debian-security snapshot::$1 does not serve its trixie-security index now; this build reads the previous mirror run, $ts" >&2
+			echo "$ts"
+			exit 0
+		fi
+	done
+	echo "security-snapshot.sh: no candidate debian-security snapshot ($*) serves its trixie-security index" >&2
+	exit 1
 	;;
 sources)
 	[ $# -eq 2 ] || [ $# -eq 3 ] || usage
