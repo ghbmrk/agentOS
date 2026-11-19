@@ -121,6 +121,13 @@ func TestAnUndeclaredCodeDoesNotDecode(t *testing.T) {
 	if _, err := key.ParseCode("new-check"); err == nil {
 		t.Error("ParseCode accepted an undeclared name")
 	}
+	// "" is the zero Code, no code, both alone and in a Refusal.
+	if c, err := key.ParseCode(""); err != nil || !c.IsZero() {
+		t.Errorf("ParseCode(\"\") = %v, %v", c, err)
+	}
+	if rb := (key.Refusal{}); json.Unmarshal([]byte(`{"Code":"","Detail":"d"}`), &rb) != nil || !rb.Code().IsZero() || rb.Detail != "d" {
+		t.Errorf("a refusal with no code decodes to %+v", rb)
+	}
 	// A declared name decodes in the same places.
 	var ps kernel.PlanState
 	if err := json.Unmarshal([]byte(`{"Reject":"plan","Cancel":"owner","Ended":"stopped"}`), &ps); err != nil ||

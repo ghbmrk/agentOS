@@ -73,9 +73,6 @@ var declared = func() map[string]Code {
 		CInFlight, COwner,
 		RClaim, RDispatch, RHold, DPlanUnknown,
 	} {
-		if _, dup := m[c.name]; dup {
-			panic("key: refusal code declared twice: " + c.name)
-		}
 		m[c.name] = c
 	}
 	return m
