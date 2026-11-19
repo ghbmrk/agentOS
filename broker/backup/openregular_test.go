@@ -5,6 +5,7 @@ package backup
 // device's driver never sees an open.
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,9 +52,17 @@ func TestOpenRegularOpensNothingPlanted(t *testing.T) {
 	}
 	r.Close()
 
-	// A regular file is read whole, through a new descriptor of its own, with its size.
 	q := filepath.Join(d.Dir, "regular")
 	must(t, os.WriteFile(q, []byte("table"), 0o600))
+	// A link is refused by its fstat, before any open of its target, with
+	// the ELOOP O_NOFOLLOW alone gives, naming the link.
+	l := filepath.Join(d.Dir, "link")
+	must(t, os.Symlink(q, l))
+	if _, _, err := OpenRegular(l); !errors.Is(err, syscall.ELOOP) || !strings.Contains(err.Error(), "open "+l+":") {
+		t.Errorf("OpenRegular of a link: %v, want ELOOP naming %s", err, l)
+	}
+
+	// A regular file is read whole, through a new descriptor of its own, with its size.
 	f, st, err := OpenRegular(q)
 	must(t, err)
 	b := make([]byte, 8)
