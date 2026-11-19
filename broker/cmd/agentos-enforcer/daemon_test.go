@@ -502,6 +502,30 @@ func TestTrippedRestartKeepsPause(t *testing.T) {
 	}
 }
 
+// TestTripFailuresLogged (KRN-12 Response, ENF-l-5): a trip whose alert
+// the journal refuses is logged, on the core and on the edge, and an edge
+// trip still unsaved at close is logged there. Catches a refusal that
+// leaves no trace but the light.
+func TestTripFailuresLogged(t *testing.T) {
+	fail := failAlertSync(t)
+	x, _ := enrolled(t, true)
+	fail.Store(true)
+	x.fail(fileEdgeCut, true)
+	x.d.cut.Trip("test trip")
+	x.d.edge.Trip(1, "test trip")
+	for _, line := range []string{"cut: " + alert.Trip.String() + " alert for core: ", "edge cut: " + alert.Trip.String() + " alert for edge: "} {
+		if n := x.logs(line); n != 1 {
+			t.Fatalf("%q logged %d times, want once", line, n)
+		}
+	}
+	fail.Store(false)
+	x.d.Close()
+	if n := x.logs("edge cut: trip not saved at close: "); n != 1 {
+		t.Fatalf("a close that could not save the edge's trip logged it %d times, want once", n)
+	}
+	x.fail(fileEdgeCut, false)
+}
+
 // TestTripDeviceNamesAreTheBoxConstants (KRN-12 Response, #4305 item 3):
 // every trip, missing record and lift in the daemon names its box by
 // coreDevice or edgeDevice, never a literal or a computed name, so Lifted
