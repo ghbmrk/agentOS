@@ -15,8 +15,11 @@ After=sys-firmware-efi-efivars.mount
 Before=sysinit.target shutdown.target tmp.mount
 Conflicts=shutdown.target
 ConditionPathExists=/sys/firmware/efi
-# Only the shutdown transaction stops it: a manual stop would clear MOR while the secret holders run.
+# Only the shutdown transaction stops it: a manual stop would clear MOR while the secret holders run,
+# and so would an isolate to emergency.target, which does not pull in sysinit.target: the holders would
+# restart on the way back to default.target with MOR clear (MOR-emergency-isolate, #5947).
 RefuseManualStop=yes
+IgnoreOnIsolate=yes
 
 [Service]
 Type=oneshot

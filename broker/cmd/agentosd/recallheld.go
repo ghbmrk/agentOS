@@ -410,13 +410,13 @@ func (h *recallHeld) Note() string {
 	return strings.Join(parts, "; ")
 }
 
+// holdLine names held agents as the forget texts do (agentNames).
 func holdLine(names []string) string {
-	sort.Strings(names)
 	verb := " still holds"
 	if len(names) > 1 {
 		verb = " still hold"
 	}
-	return strings.Join(names, ", ") + verb + " a record you deleted"
+	return agentNames(names) + verb + " a record you deleted"
 }
 
 // agentName is how STATUS names a lineage (recalltool's agentName).
