@@ -3468,7 +3468,9 @@ def uid0_violations(root):
         text, out = "", ["etc/passwd: unreadable (%s); the tree check never passes it (#4641)" % e.strerror]
     for n, ln in enumerate(text.splitlines(), 1):
         w = ln.split(":")
-        if len(w) < 3 or not w[2].isdigit() or not w[2].isascii():
+        if len(w) < 3:
+            continue  # no uid field: glibc's files NSS reads no user from it
+        if not w[2].isdigit() or not w[2].isascii():
             out.append("etc/passwd:%d: a line whose uid is not a plain decimal number (#4641)" % n)
         elif int(w[2]) == 0 and w[0] != "root":
             out.append("etc/passwd:%d: %s has uid 0; only root may (#4641)" % (n, w[0]))
