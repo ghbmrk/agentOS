@@ -187,7 +187,7 @@ var netOK = map[string]allowance{
 	// RES-5: wraps a machine socket's listener so each open connection holds budget; never listens or dials.
 	"inflight": {"wraps a caller's listener, budgeting its open connections", []string{"net.Conn", "net.ErrClosed", "net.Listener"}},
 	// Root-side reads that refuse a link planted at the path (REV-CHK-links, #3945).
-	"backup": {"O_NOFOLLOW on key-table reads and the target directory's sync open, with O_DIRECTORY; no network client", []string{"syscall.O_DIRECTORY", "syscall.O_NOFOLLOW"}},
+	"backup": {"O_NOFOLLOW on key-table reads and the target directory's sync open, with O_DIRECTORY; O_NONBLOCK so a key-table open never waits on a planted FIFO, O_NOCTTY so a planted terminal never becomes the controlling one, and ENXIO to name a planted socket or driverless device (#3998); no network client", []string{"syscall.ENXIO", "syscall.O_DIRECTORY", "syscall.O_NOCTTY", "syscall.O_NOFOLLOW", "syscall.O_NONBLOCK"}},
 	"follow": {"O_NOFOLLOW on the pending-alert read; no network client", []string{"syscall.O_NOFOLLOW"}},
 	"meter":  {"O_NOFOLLOW on the meter state's read; no network client", []string{"syscall.O_NOFOLLOW"}},
 }

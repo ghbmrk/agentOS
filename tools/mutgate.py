@@ -1255,7 +1255,9 @@ SHARD_SECONDS = 1800
 def shard_count(targets, sites, suite=0.0, costs=None, overhead=0.0):
     """K for a package with these target lines ({path: lines}) and deletion sites, whose whole test
     suite takes suite seconds: at least one. With costs (seconds per site, site_costs), a site costs
-    those, not a whole suite, and each shard first spends overhead on its per-test pass (#6172)."""
+    those, not a whole suite, and each shard first spends overhead on its per-test pass (#6172).
+    That pass leaves a shard's sites at least half of SHARD_SECONDS, so a pass past a quarter of the
+    job plans shards past the target, and one past 45 minutes past the job's 60 (#6217)."""
     lines = sum(len(v) for v in targets.values())
     if costs is None:
         work, budget = suite * (LINE_RUNS * lines + SITE_RUNS * len(sites)), SHARD_SECONDS
@@ -2147,10 +2149,10 @@ def run_alone(binary, cwd, args, timeout, mem, counters=None):
 
 
 def per_test(binary, cwd, tmp, timeout, mem=None, jobs=1):
-    """({test: (blocks, seconds)}, [tests that fail alone]) for each top-level test of a -cover test
-    binary, each run alone under -coverprofile in the suite's order; or None when it lists none. Runs
-    share `jobs` workers, and a run that fails there runs again alone, since tests can collide on a
-    fixed path or port; a test that still fails alone is in every site's set (`selected`)."""
+    """({test: (blocks, seconds)}, {test that fails alone: seconds}) for each top-level test of a
+    -cover test binary, each run alone under -coverprofile; or None when it lists none. Runs share
+    `jobs` workers, and a run that fails there runs again alone, since tests can collide on a fixed
+    path or port; a test that still fails alone has no coverage of its own, so it is in every set."""
     try:
         listed = subprocess.run([str(binary), "-test.list", "."], cwd=cwd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -2168,36 +2170,38 @@ def per_test(binary, cwd, tmp, timeout, mem=None, jobs=1):
         (d / "c").mkdir(parents=True)
         end, _, secs = run_alone(binary, cwd, [f"-test.run=^{names[i]}$", "-test.failfast", f"-test.gocoverdir={d / 'c'}",
                                                f"-test.coverprofile={d / 'p'}"], timeout, share, d / "c")
-        if end != 0 or not (d / "p").exists():
-            return None
-        return covered_blocks((d / "p").read_text()), secs
+        ok = end == 0 and (d / "p").exists()
+        return (covered_blocks((d / "p").read_text()) if ok else None), secs
     share = mem // max(1, jobs) if mem else None
     with concurrent.futures.ThreadPoolExecutor(max(1, jobs)) as pool:
         got = list(pool.map(lambda i: one(i, share), range(len(names))))
-    got = [g if g is not None else one(i, mem) for i, g in enumerate(got)]
+    got = [g if g[0] is not None else one(i, mem) for i, g in enumerate(got)]
     shutil.rmtree(root, ignore_errors=True)
-    return {n: g for n, g in zip(names, got) if g is not None}, [n for n, g in zip(names, got) if g is None]
+    return ({n: g for n, g in zip(names, got) if g[0] is not None},
+            {n: secs for n, (blocks, secs) in zip(names, got) if blocks is None})
 
 
 def selected(site, tests):
-    """The tests to run for a site with per_test's result: those whose run alone covers it, and those
-    that fail alone, in the suite's order; or None for the whole suite (no per-test result, no test
-    covers the site alone, or every test does)."""
+    """The tests to run for a site with per_test's result: those whose run alone covers it and those
+    that fail alone (`go test` runs them in the suite's order whatever their order here); or None
+    for the whole suite: no per-test result, no test covers the site alone, or the set's runs alone
+    take half the sum of every test's or more. A set costs its run and at most one unmutated run
+    (`passes`), so under half it costs less than the suite's tests run one by one; with parallel
+    tests (the whole suite's wall time below that sum) the bound is only an estimate."""
     if tests is None:
         return None
     ran, failing = tests
-    hit = [n for n, (blocks, _) in ran.items() if is_covered(blocks, site)]
-    if not hit or len(hit) == len(ran):
+    if not (hit := {n for n, (blocks, _) in ran.items() if is_covered(blocks, site)}):
         return None
-    return [n for n in [*ran, *failing] if n in hit or n in failing] if failing else hit
+    out = [n for n in [*ran, *failing] if n in hit or n in failing]
+    total = sum(secs for _, secs in ran.values()) + sum(failing.values())
+    return out if 2 * set_seconds(out, tests) < total else None
 
 
-def set_seconds(names, tests, suite):
-    """Seconds a run of these tests takes, the sum of their runs alone; suite's for the whole suite
-    or a set holding a test that fails alone, which has no time of its own."""
-    if names is None or any(n not in tests[0] for n in names):
-        return suite
-    return sum(tests[0][n][1] for n in names)
+def set_seconds(names, tests):
+    """The seconds these tests take run alone, summed."""
+    ran, failing = tests
+    return sum(ran[n][1] if n in ran else failing[n] for n in names)
 
 
 def site_costs(pkg, sites, suite, tmp):
@@ -2210,7 +2214,7 @@ def site_costs(pkg, sites, suite, tmp):
         return None, 0.0
     if not binary.exists() or (tests := per_test(binary, pkg_dir, tmp, 3 * suite + 10)) is None:
         return None, 0.0
-    costs = [suite if (names := selected(s, tests)) is None else 2 * set_seconds(names, tests, suite) for s in sites]
+    costs = [suite if (names := selected(s, tests)) is None else 2 * set_seconds(names, tests) for s in sites]
     return costs, sum(secs for _, secs in tests[0].values())
 
 
@@ -2290,7 +2294,7 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
         return checked[key]
 
     def limit(names):
-        return timeout if names is None else 3 * set_seconds(names, tests, suite) + 10
+        return timeout if names is None else 3 * set_seconds(names, tests) + 10
 
     def cap(alone):
         return alone_mem if alone or not alone_mem else alone_mem // max(1, jobs)
