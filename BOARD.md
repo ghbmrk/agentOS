@@ -84,7 +84,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ERASE-contain-first | ERASE-contain-first: contain the reader lineage before the erase is logged, the guest plane refuses a contained lineage's plans, and the erase confirmation lists the cancelled plans (LOG-4) | #3870 | queued(release; tier A; size M; from #4805 reviews) |
 | KRN-keys-print-factors | KRN-keys-print-factors: the sealed store's factors print no passphrase, recovery key or PIN (DECOY-b-8, CLK-1) | #4833 | building(release; tier A; size S; waits on #4833, #4845 and sub B's OK for localui/recovery_test.go) |
 | MIG-4-plan-login-texts | Owner texts for the plan sign-in's `signin-code` and the late-exchange end, once the home page runs on the plan host (#3180 item 2; CH-12, CLK-7). | MIG-4-plan-login-texts | queued (release; after #2780; sub B) |
-| BACKUP-table-fifo-f1 | BACKUP-table-fifo-f1: content read-back refuses FIFOs; table open refuses devices before opening; (STO-1, REC-1) | #3998 | queued (release; tier A) |
+| BACKUP-table-fifo-f1 | BACKUP-table-fifo-f1: content read-back refuses FIFOs; table open refuses devices before opening; (STO-1, REC-1) | #3998 | building (release; tier A) |
 
 ## Harness and operating model
 
@@ -429,9 +429,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MUT-plan-timing-skew | MUT-plan-timing-skew: the plan's reused suite time matches what a shard runs | #6156 | building (release; tier A) |
 | CTL-agent-starting-status | CTL-agent-starting-status: STATUS during boot shows a starting line, not 'not set up' or 'waiting for memory'. Release; from #6136 (UX). | #5429, #6136 | queued (release; tier A) |
 | BROWSER-shell-cache-warning-cmd | BROWSER-shell-cache-warning-cmd: the headless-shell cache warning names the delete command for the bad entry. Release; rides the next ci.yml PR. | #6175, #6180 | queued (release; tier A; gate file) |
-| LINT-childenv-types | LINT-childenv-types: the child-environment lint reads exact types through the one go/types load instead of ast.Object scopes. Re-plan follow-up; from #6169. | #6120, #6169 | building (tier A) |
-| MUT-delete-covering-fu | MUT-delete-covering-fu: a covering-test set never costs more than the whole suite; pin passes' headroom and set timeouts | #6213 | building (release; tier A) |
-| VULN-debian-r12 | VULN-debian-r12: accept openssl's two new no-fix Debian 13 advisories so image-vulncheck passes again. Release; eighth no-fix Debian round. | #2919, #6152 | building (release; tier A) |
+| MUT-delete-covering-fu2 | MUT-delete-covering-fu2: pin failing-alone seconds in the half rule and the per_test retry; site_costs counts failing-alone tests | #6225 | building (release; tier A) |
+| MUT-plan-timing-skew-fu | MUT-plan-timing-skew-fu: timed_cover streams and bounds the test output; pin the last-match rule and the stderr echo | #6228 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
