@@ -1,16 +1,23 @@
 """S5: the v0 action protocol drives the fixture site's hard widgets, and no planted
 canary (session cookie, storage, saved password, displayed key, URL token) leaves the
-executor. Needs Playwright + Chromium; skipped where absent (CI runs the pure tests).
+executor. Needs Playwright + Chromium; skipped where absent, and fails instead when
+AGENTOS_REQUIRE_BROWSER=1; run as a script it also fails on any skip (ci.yml's broker-checks job
+runs it both ways, BROWSER-fixture-ci).
 
 REQ: CRED-4, CRED-10
 """
+import importlib.metadata
+import io
 import json
+import os
 import pathlib
+import re
 import sys
 import tempfile
 import unittest
 
-HERE = pathlib.Path(__file__).resolve().parent.parent / "spikes" / "S5-browser-actions"
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+HERE = ROOT / "spikes" / "S5-browser-actions"
 sys.path[:0] = [str(HERE), str(HERE / "fixture")]
 
 try:
@@ -21,10 +28,18 @@ except ImportError:
     HAVE_BROWSER = False
 
 
-@unittest.skipUnless(HAVE_BROWSER, "Playwright/Chromium not installed")
+def need_browser():
+    """Skip without Playwright and Chromium, or fail when the job requires them (#5952)."""
+    if not HAVE_BROWSER:
+        if os.environ.get("AGENTOS_REQUIRE_BROWSER") == "1":
+            raise AssertionError("AGENTOS_REQUIRE_BROWSER=1 but Playwright/Chromium not installed")
+        raise unittest.SkipTest("Playwright/Chromium not installed")
+
+
 class FixtureSite(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        need_browser()
         import server
         from client import Session
         from playwright.sync_api import sync_playwright
@@ -183,5 +198,114 @@ class FixtureSite(unittest.TestCase):
         self.assertEqual(self.evil.hits, [])
 
 
+class RequireBrowser(unittest.TestCase):
+    """BROWSER-fixture-ci (#5952, K4): the job that sets AGENTOS_REQUIRE_BROWSER=1 cannot go green
+    with the fixture tests skipped; without it they still skip."""
+
+    def test_missing_browser_fails_only_when_required(self):
+        global HAVE_BROWSER
+        saved, env = HAVE_BROWSER, os.environ.pop("AGENTOS_REQUIRE_BROWSER", None)
+        try:
+            # Each case reads need_browser()'s outcome instead of letting it raise here: a SkipTest
+            # escaping this test would record it skipped, so a dropped switch could pass green.
+            for have, switch, want in ((False, None, "skip"), (False, "1", "fail"), (False, "0", "skip"),
+                                       (True, "1", "run"), (True, None, "run")):
+                HAVE_BROWSER = have
+                os.environ.pop("AGENTOS_REQUIRE_BROWSER", None)
+                if switch is not None:
+                    os.environ["AGENTOS_REQUIRE_BROWSER"] = switch
+                self.assertEqual(outcome(), want, f"browser={have} switch={switch}")
+        finally:
+            HAVE_BROWSER = saved
+            os.environ.pop("AGENTOS_REQUIRE_BROWSER", None)
+            if env is not None:
+                os.environ["AGENTOS_REQUIRE_BROWSER"] = env
+
+    def test_strict_run_fails_on_a_skip(self):
+        """The CI step runs this file as a script, which exits nonzero on any skip (the Python
+        half of what require_ran.py does for Go), so a skipTest or @skip cannot pass green."""
+        class T(unittest.TestCase):
+            def test_ok(self):
+                pass
+
+            def test_skips(self):
+                self.skipTest("no browser")
+
+        def run(*names):
+            r = unittest.TestResult()
+            unittest.TestSuite(T(n) for n in names).run(r)
+            return strict_code(r, io.StringIO())
+
+        self.assertEqual(run("test_ok"), 0)
+        self.assertEqual(run("test_ok", "test_skips"), 1)
+        self.assertEqual(run(), 1)  # nothing ran
+
+
+class ShellPin(unittest.TestCase):
+    """BROWSER-fixture-ci-fu (#6064, K4): the headless shell ci.yml downloads is the build the
+    pinned Playwright wheel names, so a bump of one pin without the other fails here."""
+
+    def test_the_pinned_wheel_names_the_pinned_shell(self):
+        need_browser()
+        reqs = (ROOT / "tests" / "requirements-browser.txt").read_text()
+        pinned = re.search(r"^playwright==(\S+)", reqs, re.M).group(1)
+        self.assertEqual(importlib.metadata.version("playwright"), pinned,
+                         "the installed Playwright is not tests/requirements-browser.txt's pin")
+        import playwright
+        names = pathlib.Path(playwright.__file__).parent / "driver" / "package" / "browsers.json"
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        self.assertIsNone(shell_pin_problem(names.read_text(), ci))
+
+    def test_one_pin_moving_alone_fails(self):
+        names = json.dumps({"browsers": [
+            {"name": "chromium", "revision": "1243", "browserVersion": "153.0.8010.12"},
+            {"name": "chromium-headless-shell", "revision": "1243", "browserVersion": "153.0.8010.12"}]})
+        url = ("CFT_SHELL_URL: https://storage.googleapis.com/chrome-for-testing-public/"
+               "{}/linux64/chrome-headless-shell-linux64.zip\n")
+        self.assertIsNone(shell_pin_problem(names, url.format("153.0.8010.12")))
+        self.assertIn("153.0.8010.12", shell_pin_problem(names, url.format("154.0.8100.3")))
+        self.assertIn("154.0.8100.3", shell_pin_problem(names.replace("153.0.8010.12", "154.0.8100.3"),
+                                                        url.format("153.0.8010.12")))
+        # No shell entry, two URLs, or a URL that is not a linux64 headless-shell zip: never a pass.
+        self.assertIsNotNone(shell_pin_problem(names.replace("chromium-headless-shell", "x"), url.format("153.0.8010.12")))
+        self.assertIsNotNone(shell_pin_problem(names, url.format("153.0.8010.12") * 2))
+        self.assertIsNotNone(shell_pin_problem(names, url.format("153.0.8010.12").replace("linux64/chrome-headless", "mac-arm64/chrome-headless")))
+
+
+def shell_pin_problem(browsers_json, ci_text):
+    """None when ci.yml's one CFT_SHELL_URL is the chromium-headless-shell build browsers.json names."""
+    want = [b.get("browserVersion") for b in json.loads(browsers_json)["browsers"]
+            if b.get("name") == "chromium-headless-shell"]
+    urls = re.findall(r"^\s*CFT_SHELL_URL:\s*(\S+)\s*$", ci_text, re.M)
+    if len(want) != 1 or not want[0]:
+        return f"browsers.json names {len(want)} chromium-headless-shell builds"
+    if len(urls) != 1:
+        return f"ci.yml sets CFT_SHELL_URL {len(urls)} times"
+    m = re.fullmatch(r"https://storage\.googleapis\.com/chrome-for-testing-public/([0-9.]+)/linux64/"
+                     r"chrome-headless-shell-linux64\.zip", urls[0])
+    if not m:
+        return f"CFT_SHELL_URL is not a Chrome for Testing linux64 headless shell: {urls[0]}"
+    if m.group(1) != want[0]:
+        return f"CFT_SHELL_URL is {m.group(1)}; the pinned Playwright names {want[0]}"
+    return None
+
+
+def outcome():
+    try:
+        need_browser()
+    except unittest.SkipTest:
+        return "skip"
+    except AssertionError:
+        return "fail"
+    return "run"
+
+
+def strict_code(result, err=sys.stderr):
+    """0 only when tests ran, all passed, and none skipped; each skip is named on err."""
+    for test, why in result.skipped:
+        print(f"::error::{test.id()}: skipped ({why})", file=err)
+    return 0 if result.testsRun and result.wasSuccessful() and not result.skipped else 1
+
 if __name__ == "__main__":
-    unittest.main()
+    # Strict: any skip fails (ci.yml broker-checks, #5952). `python3 -m unittest` stays lenient.
+    sys.exit(strict_code(unittest.main(exit=False).result))

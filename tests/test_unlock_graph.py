@@ -132,7 +132,7 @@ class ReachTest(unittest.TestCase):
             "start agentos-inbound.service Requires from agentos-link.service",
             "start agentos-keeper-link-capture.service Wants from link.device",
             "start -.slice Requires from agentos-keeper.slice",
-            "stop link.device BoundBy agentos-link.service",
+            "stop agentos-link.service BoundBy from link.device",
             "generator systemd-gpt-auto-generator failed"})
         self.assertEqual(g.reached(units), set(SHIPPED))
 
@@ -203,7 +203,8 @@ class ViolationsTest(unittest.TestCase):
         self.assertEqual(self.v(spec), [
             "start agentos-plant.service Upholds from agentos-link.service: not on unlock.allow; review it and add "
             "the line there",
-            "stop agentos-plant.service Conflicts agentosd.service: not on unlock.allow; review it and add the line there"])
+            "stop agentosd.service Conflicts from agentos-plant.service: not on unlock.allow; review it and add the "
+            "line there"])
         self.assertEqual(self.v(SHIPPED, g.facts(graph(SHIPPED), ()) | {"start gone.service Wants from " + U}),
                          ["start gone.service Wants from %s: on unlock.allow but no longer in the graph; remove the "
                           "line" % U])
@@ -233,10 +234,10 @@ class ViolationsTest(unittest.TestCase):
                 stopped = g.closure(graph(spec))[1]
                 self.assertEqual(stopped, {U, "initrd.target", "initrd-fs.target"})
                 self.assertEqual(self.v(spec), [
-                    "stop agentos-inbound.service Conflicts initrd.target: not on unlock.allow; review it and add the "
-                    "line there",
-                    "stop initrd.target %s initrd-fs.target: not on unlock.allow; review it and add the line there"
-                    % kind])
+                    "stop initrd-fs.target %s from initrd.target: not on unlock.allow; review it and add the line there"
+                    % kind,
+                    "stop initrd.target Conflicts from agentos-inbound.service: not on unlock.allow; review it and add "
+                    "the line there"])
         for kind in g.STOP_STARTS:
             with self.subTest(kind=kind):
                 spec = copy(SHIPPED)
@@ -250,8 +251,8 @@ class ViolationsTest(unittest.TestCase):
                     "there",
                     "start rescue.target %s from syslog.socket: not on unlock.allow; review it and add the line there"
                     % kind,
-                    "stop agentos-inbound.service Conflicts syslog.socket: not on unlock.allow; review it and add the "
-                    "line there"])
+                    "stop syslog.socket Conflicts from agentos-inbound.service: not on unlock.allow; review it and add "
+                    "the line there"])
                 spec["syslog.socket"] = ["%s: reboot.target" % kind]
                 spec["reboot.target"] = []
                 self.assertIn("%s starts reboot.target; %s" % (U, g.WHY), self.v(spec))
@@ -264,7 +265,7 @@ class ViolationsTest(unittest.TestCase):
         self.assertEqual(started, {U, "x.service", "bad.service"})
         self.assertEqual(stopped, {U, "x.service", "y.service"})
         self.assertIn("start bad.service Wants from x.service", edges)
-        self.assertIn("stop x.service RequiredBy y.service", edges)
+        self.assertIn("stop y.service RequiredBy from x.service", edges)
         # And in the other order: a unit started first is still walked as stopped.
         units[U]["edges"].reverse()
         self.assertEqual(g.closure(units)[:2], (started, stopped))
@@ -279,7 +280,7 @@ class ViolationsTest(unittest.TestCase):
                 spec["p.service"] = ["OnSuccess: rescue.target"]
                 spec["rescue.target"] = []
                 allowed = g.facts(graph(spec), ())
-                self.assertIn("stop %s %s p.service" % (U, kind), allowed)
+                self.assertIn("stop p.service %s from %s" % (kind, U), allowed)
                 self.assertIn("start rescue.target OnSuccess from p.service", allowed)
                 started, stopped, _ = g.closure(graph(spec))
                 self.assertIn(U, stopped)
@@ -324,7 +325,7 @@ class ViolationsTest(unittest.TestCase):
                 self.assertEqual("y.service" in stopped, walked)
                 self.assertIn("f.service", started)
                 self.assertEqual("restart agentos-inbound.service Restart %s" % restart in edges, walked)
-                self.assertIn("stop agentos-inbound.service RequiredBy y.service", edges)
+                self.assertIn("stop y.service RequiredBy from agentos-inbound.service", edges)
                 units["y.service"]["actions"] = [(a, "reboot" if a == "SuccessAction" else "none") for a in g.ACTIONS]
                 self.assertEqual("y.service, which %s stops, has SuccessAction=reboot; %s" % (U, g.WHY)
                                  in g.violations(units, set(), g.facts(units, ()), "257.13", FSTAB), walked)
@@ -369,13 +370,21 @@ class ViolationsTest(unittest.TestCase):
 
 
     def test_a_stop_of_a_shutdown_unit_is_not_listed(self):
-        self.assertNotIn("stop agentos-link.service Conflicts shutdown.target", g.facts(graph(SHIPPED), ()))
+        self.assertNotIn("stop shutdown.target Conflicts from agentos-link.service", g.facts(graph(SHIPPED), ()))
         for kind in g.STOP_KINDS:
             with self.subTest(kind=kind):
                 spec = copy(SHIPPED)
                 spec[U].append("%s: agentosd.service" % kind)
-                self.assertEqual(self.v(spec), ["stop %s %s agentosd.service: not on unlock.allow; review it and "
-                                                "add the line there" % (U, kind)])
+                self.assertEqual(self.v(spec), ["stop agentosd.service %s from %s: not on unlock.allow; review it "
+                                                "and add the line there" % (kind, U)])
+        # #4920: nor is a shutdown unit ever stopped, from the root or from a unit stopped on the way, so
+        # violations() refuses each one it meets as started.
+        for kind in g.STOP_KINDS:
+            with self.subTest(kind=kind, at="stopped"):
+                spec = copy(SHIPPED)
+                spec[U] = spec[U] + ["%s: shutdown.target" % kind, "BoundBy: x.service"]
+                spec["x.service"] = ["%s: reboot.target" % kind, "Restart: always"]
+                self.assertFalse(g.closure(graph(spec))[1] & g.SHUTDOWN)
 
     def test_another_systemd_major_is_refused(self):
         self.assertEqual(self.v(SHIPPED, version="258.1"), [
@@ -579,10 +588,16 @@ class AllowFileTest(unittest.TestCase):
     def test_the_shipped_list_reads_and_holds_the_unlock_unit(self):
         allowed = g.read_allow()
         self.assertTrue(g.ALLOW.read_text().startswith(g.ALLOW_HEADER))
+        # #4920: one direction for every edge line, the unit acted on first, and the header says which stop
+        # lines are walked and which are listed one hop out.
+        self.assertIn('"stop T KIND from U"', g.ALLOW_HEADER)
+        self.assertIn("one hop out", g.ALLOW_HEADER)
+        body = [l for l in g.ALLOW.read_text().splitlines() if l and not l.startswith("#")]
+        self.assertEqual(body, sorted(body))
         self.assertIn("start " + U, allowed)
         self.assertFalse({"start " + s for s in g.SHUTDOWN} & allowed)
         for line in allowed - {"start " + U}:
-            self.assertRegex(line, r"^(start \S+ (%s) from \S+|stop \S+ (%s) \S+|restart \S+ (%s) \S+|"
+            self.assertRegex(line, r"^(start \S+ (%s) from \S+|stop \S+ (%s) from \S+|restart \S+ (%s) \S+|"
                                    r"generator \S+ failed)$"
                              % ("|".join(g.START_KINDS), "|".join(g.STOP_KINDS), "|".join(g.RESTART_KINDS + ("Restart",))))
 

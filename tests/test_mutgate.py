@@ -3,6 +3,7 @@
 
 Gremlins itself is not run: the gate reads its JSON, so fixtures stand in for it.
 """
+import collections
 import contextlib
 import fnmatch
 import io
@@ -45,7 +46,7 @@ LIVE = {"hint": [("hint.go", 11, "CONDITIONALS_BOUNDARY"), ("hint.go", 40, "COND
 def gate(diff, live, waived=None):
     """violations() on the target lines a diff that changes non-test files gives each package of live."""
     added = mutgate.added_lines(diff)[0]
-    return mutgate.violations({p: mutgate.diff_targets(added, p) for p in live}, live, waived)
+    return [v[:4] for v in mutgate.violations({p: mutgate.diff_targets(added, p) for p in live}, live, waived)]
 
 
 class Gate(unittest.TestCase):
@@ -618,7 +619,7 @@ class Verify(unittest.TestCase):
     # REV-CHK-mut-selftest (#4106): the JSON comes from a job that ran the PR's tests, so the
     # deciding job reads it as data and rechecks everything `run` checks before it gates.
     def verify(self, results, test=None, src="package netguard\nvar a = 1 + 1\n", body=None,
-               summary=False):
+               summary=False, extra=()):
         """mutgate.py verify in a temp repo whose last commit adds broker/netguard/a.go line 2 (with src)
         and a_test.go (unless test is None), on a results dir holding {file name: JSON or raw text},
         with the PR body body; with summary, the summary file's text is set on the result."""
@@ -643,9 +644,9 @@ class Verify(unittest.TestCase):
             for name, data in results.items():
                 # "mutants-0/netguard.json": one directory per artifact, as download-artifact lays them out.
                 name = name if "/" in name else f"mutants-0/{name}"
-                (res / name).parent.mkdir(exist_ok=True)
+                (res / name).parent.mkdir(parents=True, exist_ok=True)
                 (res / name).write_text(data if isinstance(data, str) else json.dumps(data))
-            extra = []
+            extra = list(extra)
             if body is not None:
                 (pathlib.Path(d) / "body.md").write_bytes(body.encode())
                 extra += ["--body", str(pathlib.Path(d) / "body.md")]
@@ -826,6 +827,25 @@ class Verify(unittest.TestCase):
         r = self.verify(self.sharded(3, lived=None), src=self.SHARD_SRC)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_shards_one_job_ran_in_turn_join_from_their_own_directories(self):
+        # MUT-plan-overflow (#6170): a job running several shards writes each to mutants/<index>/, so
+        # its artifact holds one directory a shard. The join reads them as one-shard jobs' results, and
+        # a shard written both there and as another job's result is refused as an overlap.
+        one = self.verify(self.sharded(1), src=self.SHARD_SRC, summary=True)
+        flat = self.sharded(3)
+        nested = {f"mutants-{int(k.split('/')[0].split('-')[1]) % 2}/{k.split('/')[0].split('-')[1]}/netguard.json": v
+                  for k, v in flat.items()}
+        self.assertEqual(sorted(nested), ["mutants-0/0/netguard.json", "mutants-0/2/netguard.json",
+                                          "mutants-1/1/netguard.json"])
+        r = self.verify(nested, src=self.SHARD_SRC, summary=True)
+        self.assertEqual((r.returncode, r.stdout, r.summary), (one.returncode, one.stdout, one.summary), r.stderr)
+        twice = {**nested, "mutants-2/netguard.json": flat["mutants-0/netguard.json"]}
+        r = self.verify(twice, src=self.SHARD_SRC)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("shards overlap", r.stderr)
+        # K past the 256-job matrix is a schedule like any other.
+        self.assertEqual(mutgate.shard_of({"shard": {"index": 295, "of": 296}}), (295, 296))
+
     def test_a_missing_or_overlapping_shard_is_refused(self):
         good = self.sharded(2, lived=None)
         moved = json.loads(json.dumps(good))
@@ -858,7 +878,7 @@ class Verify(unittest.TestCase):
              "records a shard that is not"),
             ("bool", {**good, "mutants-1/netguard.json": {**good["mutants-1/netguard.json"], "shard": {"index": True, "of": 2}}},
              "records a shard that is not"),
-            ("over the matrix", {"mutants-0/netguard.json": {**good["mutants-0/netguard.json"], "shard": {"index": 0, "of": 257}}},
+            ("over the limit", {"mutants-0/netguard.json": {**good["mutants-0/netguard.json"], "shard": {"index": 0, "of": 1281}}},
              "records a shard that is not"),
         ):
             with self.subTest(name):
@@ -1583,6 +1603,9 @@ func Down(n int) int {
 	return n - 1
 }
 """
+# The plan's failure (#5942) for hint.go's `return 10`, run by the base's TestUp and by no head test.
+UNRUN_5 = (r"mutgate: broker/hint/hint\.go: (\d+, )*5(, \d+)* ran under the base's version of the tests this diff "
+           r"changes, and no test of package hint runs them at the head")
 TWO_TEST = """package hint
 
 import "testing"
@@ -1667,6 +1690,26 @@ class TestOnly(unittest.TestCase):
             (pkg / "slow_test.go").unlink()
             (pkg / "hint_test.go").unlink()
             self.assertEqual(mutgate.suite_seconds("hint", tmp), (0.0, None))
+
+    def test_timed_cover_times_its_run(self):
+        # MUT-plan-budget (#6155): a test-changing package's whole-suite coverage run is timed, so the
+        # plan sizes its shards from that run and needs no other suite run.
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}), \
+                mock.patch.object(mutgate, "BROKER", pathlib.Path(d) / "broker"):
+            self.repo(d, TWO_TEST + "\n// changed\n")
+            pkg, tmp = mutgate.BROKER / "hint", pathlib.Path(d) / "tmp"
+            tmp.mkdir()
+            (pkg / "slow_test.go").write_text(
+                'package hint\n\nimport (\n\t"testing"\n\t"time"\n)\n\nfunc TestSlow(t *testing.T) { time.Sleep(time.Second) }\n')
+            got, secs, problem = mutgate.timed_cover("hint", None, tmp)
+            self.assertIsNone(problem)
+            self.assertGreaterEqual(secs, 1.0)
+            self.assertEqual(mutgate.covered_by("hint", None, tmp), (got, None))
+            # A run that leaves TestSlow out does not take its second.
+            _, quick, problem = mutgate.timed_cover("hint", ["TestUp"], tmp)
+            self.assertIsNone(problem)
+            self.assertLess(quick, secs)
 
     def test_test_only_diff_mutates_covered_lines(self):
         # #3607: a test-only diff passed every gate. TestUp still runs Up(20) but no longer checks
@@ -1766,7 +1809,7 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             plan = pathlib.Path(d) / "targets.json"
             r = self.mutgate(d, "plan", "--git", "HEAD~1", "--targets-out", str(plan))
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-            self.assertEqual(json.loads(r.stdout), [{"pkg": "hint", "shard": 0, "of": 1}])
+            self.assertEqual(json.loads(r.stdout), [{"pkg": "hint", "shards": "0", "of": 1, "minutes": 75}])
             up = {"tests": ["TestUp"], "lines": {"hint.go": [3, 4, 5, 6, 7]}}
             self.assertEqual(json.loads(plan.read_text()), {"hint": {**up, "base": up}})
             got = {}
@@ -1819,7 +1862,16 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
         # deleted test ran at the base and its neighbour runs at the head (D-319), and the clamp's
         # survivor fails the gate.
         # REQ: MUT-deleted-test-own-lines
-        base = TWO_TEST.replace("if Down(3) != 2 {", "if Down(Up(2)) != 2 {")
+        # Here TestDown also runs the clamp's `return 10` (line 5), so every line the base ran still runs
+        # at the head; where it does not, the plan fails first (#5942).
+        alone = TWO_TEST.replace("if Down(3) != 2 {", "if Down(Up(2)) != 2 {")
+        with tempfile.TemporaryDirectory() as d:
+            self.repo(d, alone[:alone.index("func TestUp")] + alone[alone.index("func TestDown"):], test_base=alone,
+                      src_pr=TWO_SRC + "// Down is Up's inverse below the clamp.\n")
+            r = self.mutgate(d, "plan", "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertRegex(r.stderr, UNRUN_5)
+        base = TWO_TEST.replace("if Down(3) != 2 {", "if Down(Up(2)) != 2 || Down(Up(20)) != 9 {")
         pr = base[:base.index("func TestUp")] + base[base.index("func TestDown"):]
         with tempfile.TemporaryDirectory() as d:
             git = self.repo(d, pr, test_base=base, src_pr=TWO_SRC + "// Down is Up's inverse below the clamp.\n")
@@ -1843,8 +1895,6 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             r = self.mutgate(d, "verify", str(out.parent), "--git", "HEAD~1", "--summary", str(summary))
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("broker/hint/hint.go:4 CONDITIONALS_NEGATION survives", r.stdout)
-            # `return 10` only TestUp ran: no test runs it now.
-            self.assertIn("broker/hint/hint.go:5 is a target line no test of package hint runs at the head", r.stdout)
             self.assertIn("the lines the diff changes and the lines TestDown cover", summary.read_text())
             # The record is still required beside the added line: without it verify refuses.
             data = json.loads((out / "hint.json").read_text())
@@ -1855,10 +1905,11 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             self.assertIn("holds no record of the lines that ['TestDown'] covers", r.stderr)
             self.assertEqual(git("status", "--porcelain", "--", "broker").stdout, "")
 
-    def gate_run(self, d, pr_test, base_test, src_pr=None, extra=None, move=None, base_extra=None):
+    def gate_run(self, d, pr_test, base_test, src_pr=None, extra=None, move=None, base_extra=None, plan_fails=False):
         """(verify's result, the lines gremlins was given) for a PR of pr_test (and src_pr, extra
         {name: text} new or changed files in broker/hint/ (None: deleted) over base_extra's, and hint.go
-        renamed to move), through plan, run, delete and verify."""
+        renamed to move), through plan, run, delete and verify; or, with plan_fails, (plan's failed
+        result, None)."""
         git = self.repo(d, pr_test, test_base=base_test, src_pr=src_pr, base_extra=base_extra)
         for name, text in (extra or {}).items():
             f = pathlib.Path(d) / "broker" / "hint" / name
@@ -1874,7 +1925,9 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "--amend", "--no-edit")
         env, plan = self.line_stub(d), pathlib.Path(d) / "targets.json"
         r = self.mutgate(d, "plan", "--git", "HEAD~1", "--targets-out", str(plan))
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.returncode, 1 if plan_fails else 0, r.stdout + r.stderr)
+        if plan_fails:
+            return r, None
         out = pathlib.Path(d) / "res" / "mutants-0"
         r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(out), "--targets", str(plan), env=env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -1918,11 +1971,20 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
         }
         for name, (pr, was, src, extra, move) in cases.items():
             with self.subTest(name), tempfile.TemporaryDirectory() as d:
-                r, seen = self.gate_run(d, pr, was, src, extra, move)
+                # Since #5942 the plan fails a line the base ran that the head's whole suite runs nowhere,
+                # before any mutant runs. A moved file's base lines map to no head line, so there the
+                # NOT COVERED rule fails it.
+                r, seen = self.gate_run(d, pr, was, src, extra, move, plan_fails=not move)
                 self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-                self.assertIn(5, seen)
-                self.assertIn(f"broker/hint/{move or 'hint.go'}:5 is a target line no test of package hint runs at the head",
-                              r.stdout)
+                if move:
+                    self.assertIn(5, seen)
+                    self.assertIn(f"broker/hint/{move}:5 is a target line no test of package hint runs at the head", r.stdout)
+                elif "edited" in name:
+                    # The edit drops lines 4, 5 and 7 from the base's mapping; the if's closing brace (line
+                    # 6), which no mutant names, is still one the base ran and the head runs nowhere.
+                    self.assertIn("mutgate: broker/hint/hint.go: 6 ran under the base's version", r.stderr)
+                else:
+                    self.assertRegex(r.stderr, UNRUN_5)
 
     def test_a_helper_edit_beside_an_added_line_targets_the_tests_that_reach_it(self):
         # #5753: a helper change plus an added comment line used to narrow the targets to that
@@ -1968,10 +2030,35 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
         for name, (path, pr, src) in cases.items():
             with self.subTest(name), tempfile.TemporaryDirectory() as d:
                 test = reader(path)
-                r, seen = self.gate_run(d, test, test, src, extra={path: pr}, base_extra={path: table})
-                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-                self.assertIn(5, seen)
-                self.assertIn("broker/hint/hint.go:5 is a target line no test of package hint runs at the head", r.stdout)
+                r, _ = self.gate_run(d, test, test, src, extra={path: pr}, base_extra={path: table}, plan_fails=True)
+                self.assertRegex(r.stderr, UNRUN_5)  # #5942: the plan fails it before any mutant runs
+
+    def test_a_line_no_mutant_names_fails_where_the_base_ran_it_and_the_head_runs_it_nowhere(self):
+        # L1 on #5770 (#5942): every target line runs was checked only through NOT COVERED mutants, so
+        # a line no mutant and no statement deletion names (here mark's empty body, lines 14 and 15)
+        # that a weakened test stopped running passed. The plan now runs the head's whole suite and
+        # fails each line the base's version of the changed tests ran that no head test runs.
+        # REQ: MUT-own-lines-no-mutant
+        src = TWO_SRC + "\nfunc mark() {\n}\n"
+        base = TWO_TEST.replace("func TestUp(t *testing.T) {\n", "func TestUp(t *testing.T) {\n\tmark()\n")
+        down = base.replace("func TestDown(t *testing.T) {\n", "func TestDown(t *testing.T) {\n\tmark()\n")
+        cases = {
+            "the only call dropped": (TWO_TEST, base, None, 1),
+            "a comment line beside it": (TWO_TEST, base, src + "// a comment\n", 1),
+            # TestDown still runs mark at the head: the line runs, so the plan passes.
+            "another test still runs it": (down.replace("\tmark()\n\tif Up", "\tif Up"), down, None, 0),
+        }
+        for name, (pr, was, src_pr, code) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                self.repo(d, pr, src=src, test_base=was, src_pr=src_pr)
+                r = self.mutgate(d, "plan", "--git", "HEAD~1")
+                self.assertEqual(r.returncode, code, r.stdout + r.stderr)
+                gone = "broker/hint/hint.go: 14, 15 ran under the base's version of the tests this diff changes"
+                if code:
+                    self.assertIn(gone + ", and no test of package hint runs them at the head", r.stderr)
+                    self.assertNotIn(", 3,", r.stderr)  # Up's lines still run under TestUp
+                else:
+                    self.assertNotIn(gone, r.stderr)
 
     def test_an_archive_that_fails_prints_the_problem(self):
         # L3 R3 on #5770 (#5779): a failed `git archive` wrote no tar, and tarfile's ReadError came
@@ -2505,8 +2592,10 @@ class Plan(unittest.TestCase):
         # #4983: a refused plan says what to do next. Each claimed package plans 100 shards here.
         from unittest import mock
         import contextlib, io, types
-        for pkgs, fix in ((["a", "b", "c"], "split the PR so each part changes fewer tier-A or tier-B packages"),
-                          ([], "rerun the mutgate workflow")):
+        for pkgs, fix in (([f"p{i}" for i in range(13)], "1300 shards do not fit 256 jobs (GitHub's matrix limit) of at "
+                           "most 5 shards of one package each (its 360-minute job limit): split the PR so each part "
+                           "changes fewer tier-A or tier-B packages"),
+                          ([], "0 shards: no claimed package was planned; rerun the mutgate workflow")):
             with self.subTest(pkgs), contextlib.ExitStack() as st:
                 for name, value in (("broker_diff", lambda *a: ""), ("added_lines", lambda d: ({}, {})),
                                     ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: pkgs),
@@ -2517,8 +2606,7 @@ class Plan(unittest.TestCase):
                 err = st.enter_context(contextlib.redirect_stderr(io.StringIO()))
                 st.enter_context(contextlib.redirect_stdout(io.StringIO()))
                 self.assertEqual(mutgate.cmd_plan(types.SimpleNamespace(git="HEAD~1")), 1)
-                self.assertIn(f"{len(pkgs) * 100} shards, not 1 to {mutgate.MATRIX_MAX} (GitHub's matrix limit): {fix}",
-                              err.getvalue())
+                self.assertIn(f"mutgate: {fix}\n", err.getvalue())
 
     def plan(self, pkg_targets, suite):
         """cmd_plan's (code, matrix, stderr) with each package's ({path: lines}, sites) given and
@@ -2537,6 +2625,47 @@ class Plan(unittest.TestCase):
             code = mutgate.cmd_plan(types.SimpleNamespace(git="HEAD~1", targets_out=None))
         return code, out.getvalue(), err.getvalue()
 
+    def test_a_plan_past_the_matrix_runs_every_shard_once_in_at_most_256_jobs(self):
+        # MUT-plan-overflow (#6170): #6144's plan (run 44309775605) asked for 320 shards, enforcer/nft's
+        # 296 among them, past GitHub's 256-job matrix. Each job then runs shards of one package in turn,
+        # each stopped at its own 60 minutes, the job at 60 a shard plus 15 for setup, never past a hosted
+        # job's 360; at or under 256 it is one shard a job.
+        six = [("clerk/enflist", 1), ("cmd/agentos-enforcer", 7), ("enforcer/dns", 6), ("enforcer/nft", 296),
+               ("enforcer/page", 3), ("enforcer/policy", 5), ("enforcer/traffic", 2)]
+        for counts, jobs, most in ((six, 162, 2), ([("p", 256)], 256, 1), ([("p", 20), ("q", 1)], 21, 1),
+                                   ([("p", 1280)], 256, 5), ([("p", 1000), ("q", 280)], 256, 5)):
+            with self.subTest(counts=counts):
+                got = mutgate.pack(counts)
+                self.assertEqual(len(got), jobs)
+                ran = collections.Counter()
+                for e in got:
+                    self.assertEqual(set(e), {"pkg", "shards", "of", "minutes"})
+                    mine = [int(i) for i in e["shards"].split(", ")]
+                    self.assertEqual(e["minutes"], 60 * len(mine) + 15)
+                    self.assertLessEqual(len(mine), most)
+                    self.assertEqual(e["of"], dict(counts)[e["pkg"]])
+                    ran.update((e["pkg"], i) for i in mine)
+                # Every shard of every package exactly once.
+                self.assertEqual(ran, collections.Counter((pkg, i) for pkg, of in counts for i in range(of)))
+                self.assertLessEqual(max(e["minutes"] for e in got), 360)
+        self.assertIsNone(mutgate.pack([("p", 1281)]))
+        # Each package fills its own jobs, so two that each leave one part-filled fit fewer shards in all.
+        self.assertIsNone(mutgate.pack([("p", 1001), ("q", 279)]))
+        self.assertEqual(mutgate.SHARDS_MAX, 1280)
+        # The bounds verify reads a result's shard by (L3 4 on #6171): K up to SHARDS_MAX, never past it.
+        self.assertEqual(mutgate.shard_of({"shard": {"index": 1279, "of": 1280}}), (1279, 1280))
+        self.assertIsNone(mutgate.shard_of({"shard": {"index": 0, "of": 1281}}))
+
+    def test_a_plan_past_the_matrix_names_its_packing(self):
+        code, out, err = self.plan({"enforcer/nft": ({"broker/enforcer/nft/a.go": set(range(1, 1767))}, [{}] * 1019)},
+                                   (364.0, None))
+        self.assertEqual(code, 0, err)
+        self.assertIn("enforcer/nft: 1766 target lines, 1019 deletion sites, a 364 s suite, 296 shard(s)", err)
+        self.assertIn("296 shards past 256 jobs: up to 2 shards a job, one after another", err)
+        got = json.loads(out)
+        self.assertEqual(len(got), 148)
+        self.assertEqual(got[0], {"pkg": "enforcer/nft", "shards": "0, 148", "of": 296, "minutes": 135})
+
     def test_a_slow_suite_gets_more_shards(self):
         # MUT-kernel-sim-budget (#5069): on #5006 kernel/sim (823 target lines, 534 deletion sites, a
         # 48 s suite) planned 6 shards from its counts alone and 5 of them passed the 60-minute limit.
@@ -2547,7 +2676,8 @@ class Plan(unittest.TestCase):
         # Each shard's suite runs fit the budget, which is half the job's 60 minutes.
         self.assertLessEqual(48.0 * (mutgate.LINE_RUNS * 823 / k + mutgate.SITE_RUNS * 534 / k), mutgate.SHARD_SECONDS)
         self.assertLessEqual(2 * mutgate.SHARD_SECONDS, 60 * 60)
-        self.assertIn("    timeout-minutes: 60\n", job(WORKFLOW.read_text(), "mutants"))
+        self.assertIn("    timeout-minutes: ${{ matrix.minutes }}\n", job(WORKFLOW.read_text(), "mutants"))
+        self.assertEqual(mutgate.pack([("p", 1)])[0]["minutes"], 75)
         # browser's 7 s suite on #5006 (9 shards in 6 to 14 minutes) and a package with no tests keep
         # the count budgets: the time term only ever adds shards.
         self.assertEqual(mutgate.shard_count(lines(1364), [0] * 825, 7.0), 9)
@@ -2558,18 +2688,76 @@ class Plan(unittest.TestCase):
         # MUT-waiver-store-claim (#5786): a record-only claim runs one cheap shard, never its suite.
         code, out, err = self.plan({"netguard": ({}, [])}, (None, "the suite must not run"))
         self.assertEqual(code, 0, err)
-        self.assertEqual(json.loads(out), [{"pkg": "netguard", "shard": 0, "of": 1}])
+        self.assertEqual(json.loads(out), [{"pkg": "netguard", "shards": "0", "of": 1, "minutes": 75}])
 
     def test_plan_sizes_each_package_by_its_suite(self):
         sim = ({"broker/kernel/sim/a.go": set(range(1, 824))}, [{}] * 534)
         code, out, err = self.plan({"kernel/sim": sim}, (48.0, None))
         self.assertEqual(code, 0, err)
-        self.assertEqual(json.loads(out), [{"pkg": "kernel/sim", "shard": i, "of": 20} for i in range(20)])
+        self.assertEqual(json.loads(out), [{"pkg": "kernel/sim", "shards": str(i), "of": 20, "minutes": 75} for i in range(20)])
         self.assertIn("kernel/sim: 823 target lines, 534 deletion sites, a 48 s suite, 20 shard(s)", err)
         # A suite that does not build or pass cannot be timed: the plan fails and says why.
         code, out, err = self.plan({"kernel/sim": sim}, (None, "broker/kernel/sim/'s tests fail"))
         self.assertEqual((code, out), (1, ""))
         self.assertIn("mutgate: broker/kernel/sim/'s tests fail", err)
+
+
+    def test_a_test_changing_package_is_sized_by_its_record_run_with_no_other_suite_run(self):
+        # MUT-plan-budget (#6155): on #6144 enforcer/nft's 374 s suite ran four times in the plan and
+        # passed its time limit; the record's whole-suite run sizes the shards, and suite_seconds
+        # runs only for a package whose tests the diff leaves alone.
+        from unittest import mock
+        import contextlib, io, types
+        sim = {"broker/kernel/sim/a.go": set(range(1, 824))}
+        timed = []
+        with contextlib.ExitStack() as st:
+            for name, value in (("broker_diff", lambda *a: ""), ("added_lines", lambda d: ({}, {})),
+                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: ["kernel/sim", "other"]),
+                                ("bases_for", lambda *a: {}), ("diff_targets", lambda added, pkg: sim),
+                                ("tests_changed", lambda tests, pkg: pkg == "kernel/sim"),
+                                ("record_for", lambda *a: ({"rec": 1}, 48.0, None)),
+                                ("targets_for", lambda pkg, added, tests, data, bases: (sim, None)),
+                                ("deletion_sites", lambda pkg, t, lister: ([{}] * 534, None)),
+                                ("suite_seconds", lambda pkg, tmp: timed.append(pkg) or (1.0, None))):
+                st.enter_context(mock.patch.object(mutgate, name, value))
+            err = st.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            out = st.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            code = mutgate.cmd_plan(types.SimpleNamespace(git="HEAD~1", targets_out=None))
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual(timed, ["other"])
+        self.assertIn("kernel/sim: 823 target lines, 534 deletion sites, a 48 s suite, 20 shard(s)", err.getvalue())
+        self.assertEqual(len(json.loads(out.getvalue())), 20 + mutgate.shard_count(sim, [{}] * 534, 1.0))
+
+    def test_record_for_times_the_whole_suite_not_the_changed_tests(self):
+        # MUT-plan-budget (#6155), Potency on #6156: a PR that changes only some of a package's tests
+        # sizes its shards from the head's whole-suite run, not from the changed tests' shorter run;
+        # when the changed tests are every test, their one run is the whole suite's.
+        from unittest import mock
+        runs = []
+
+        def timed_cover(pkg, names, tmp):
+            runs.append(names)
+            return {"broker/p/a.go": {1}}, (2.0 if names is not None else 40.0), None
+        for names, want, ran in ((["TestFast"], 40.0, [["TestFast"], None]), (None, 40.0, [None])):
+            runs.clear()
+            with self.subTest(names), contextlib.ExitStack() as st:
+                for name, value in (("changed_tests", lambda tests, pkg, bases: names),
+                                    ("timed_cover", timed_cover), ("merge_base", lambda base, head: "b" * 40),
+                                    ("base_covered", lambda *a: ({}, None))):
+                    st.enter_context(mock.patch.object(mutgate, name, value))
+                record, secs, problem = mutgate.record_for("p", {}, {"p": names}, "", "HEAD~1", "tmp")
+            self.assertIsNone(problem)
+            self.assertEqual((secs, runs), (want, ran))
+            self.assertEqual(record["tests"], names)
+
+    def test_the_plan_job_fits_three_runs_of_the_slowest_suite(self):
+        # #6155: enforcer/nft's coverage run took 374 s on #6144 (run 44265885820). A test-only change
+        # to it runs the suite three times in the plan: the head's changed tests, the base's, the
+        # head's whole suite. The plan job's limit holds that with half again as headroom.
+        plan = job(WORKFLOW.read_text(), "plan")
+        limit = int(re.search(r"(?m)^    timeout-minutes: (\d+)$", plan).group(1))
+        self.assertGreaterEqual(limit * 60, 1.5 * 3 * 374)
+        self.assertIn(f"the plan job timed out at its {limit}-minute limit", job(WORKFLOW.read_text(), "mutgate"))
 
 
 class Summary(unittest.TestCase):
@@ -3045,7 +3233,7 @@ class Record(unittest.TestCase):
             self.assertIn("broker/netguard/a.go:4 ARITHMETIC_BASE survives", r.stdout)
         self.assertEqual(mutgate.violations({"p": {"broker/p/a.go": {4}}}, {"p": [("a.go", 4, "STATEMENT_DELETION"),
                          ("a.go", 4, "CONDITIONALS_NEGATION")]}, {("broker/p/a.go", 4, "STATEMENT_DELETION", None): "r"}),
-                         [("p", "broker/p/a.go", 4, "CONDITIONALS_NEGATION")])
+                         [("p", "broker/p/a.go", 4, "CONDITIONALS_NEGATION", None)])
 
     def test_a_stale_entry_fails_the_gate(self):
         rec = json.dumps({"file": "a.go", "mutant": "ARITHMETIC_BASE", "func": "a", "decl": Record.digest("var a = 1 + 1"), "stmt": ["var a = 1 + 1"], "at": 0, "after": "package netguard",
@@ -3181,10 +3369,10 @@ class MutantScope(unittest.TestCase):
             with self.subTest(waived):
                 # #5774's gate passed this: the entry waived the live `>= 12` mutant with the proof for `< 0`.
                 self.assertEqual(mutgate.violations(self.TARGETS, live, waived, every),
-                                 [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY")])
+                                 [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", 16)])
                 # It names three mutants, so it waives none, the one it proves included.
                 self.assertEqual(mutgate.violations(self.TARGETS, gone, waived, every),
-                                 [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY")])
+                                 [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", 113)])
                 cover, ambiguous = mutgate.covering(waived, every)
                 self.assertEqual(cover, {})
                 self.assertEqual(len(ambiguous[0][1]), 3 if list(waived)[0][2] else 4)
@@ -3192,20 +3380,20 @@ class MutantScope(unittest.TestCase):
         exact = {("broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", 113): "the < 0 is killed by hand"}
         self.assertEqual(mutgate.violations(self.TARGETS, gone, exact, every), [])
         self.assertEqual(mutgate.violations(self.TARGETS, live, exact, every),
-                         [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY")])
+                         [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", 16)])
         # A column alone still matches both kinds there, so a body line needs the kind too.
         self.assertEqual(mutgate.violations(self.TARGETS, gone, {("broker/p/a.go", 4, None, 113): "r"}, every),
-                         [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY")])
+                         [("p", "broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", 113)])
         self.assertEqual(mutgate.violations(self.TARGETS, gone, {("broker/p/a.go", 4, "CONDITIONALS_BOUNDARY", 113): "r"},
                                             every), [])
         # A waiver whose line holds one mutant of its scope needs no column, as before.
         one = {"p": [("a.go", 4, "STATEMENT_DELETION", 2), ("a.go", 4, "CONDITIONALS_NEGATION", 9)]}
         self.assertEqual(mutgate.violations(self.TARGETS, one, {("broker/p/a.go", 4, "STATEMENT_DELETION", None): "r"}, one),
-                         [("p", "broker/p/a.go", 4, "CONDITIONALS_NEGATION")])
+                         [("p", "broker/p/a.go", 4, "CONDITIONALS_NEGATION", 9)])
         # A killed sibling still counts: the proof cannot say which one it is for, and a later run may not kill it.
         self.assertEqual(mutgate.violations(self.TARGETS, {"p": [self.LINE[3]]},
                                             {("broker/p/a.go", 4, None, None): "r"}, every),
-                         [("p", "broker/p/a.go", 4, "CONDITIONALS_NEGATION")])
+                         [("p", "broker/p/a.go", 4, "CONDITIONALS_NEGATION", 113)])
 
     def test_the_body_line_names_a_column_and_kind(self):
         self.assertEqual(mutgate.waivers("Mutant-equivalent: broker/p/a.go:4:113:CONDITIONALS_BOUNDARY the < 0 is dead\n"
@@ -3314,6 +3502,150 @@ class MutantScope(unittest.TestCase):
                 self.assertTrue(col, row)
         self.assertNotIn("broker/clerk/run/mail.go:104", r.stdout)
         self.assertNotIn("broker/clerk/run/mail.go:145", r.stdout)
+
+
+class WaiverMessages(unittest.TestCase):
+    """MUT-waiver-messages (#5828, from #5824): a builder can write the right waiver line from the gate's own
+    output, and a mistyped waiver line is named, never dropped without a word."""
+    # REQ: MUT-waiver-messages
+    SRC = "package netguard\nvar a = 1 + 1 + 1\n"
+    REASON = "a is never read, so no value tells the mutants apart"
+
+    @classmethod
+    def result(cls, status):
+        muts = [{"type": "ARITHMETIC_BASE", "status": status, "line": 2, "column": c} for c in (11, 15)]
+        return {"files": [{"file_name": "a.go", "mutations": muts}], "mutants_lived": 2 * (status == "LIVED"),
+                "statement_deletions": 0}
+
+    def test_a_failure_names_its_mutant_by_column_and_kind(self):
+        # Item 1: two survivors of one kind on one line printed the same text, so neither line could be pasted.
+        r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        for col in (11, 15):
+            self.assertIn(f"; its waiver line: Mutant-equivalent: broker/netguard/a.go:2:{col}:ARITHMETIC_BASE <reason>\n", r.stdout)
+        r = Verify().verify({"netguard.json": self.result("NOT COVERED")}, src=self.SRC)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        for col in (11, 15):
+            self.assertIn(f"; its waiver line: Mutant-uncovered: broker/netguard/a.go:2:{col}:ARITHMETIC_BASE <reason>\n", r.stdout)
+        # The printed line, pasted with a reason, waives exactly that mutant.
+        body = "".join(f"Mutant-equivalent: broker/netguard/a.go:2:{c}:ARITHMETIC_BASE {self.REASON}\n" for c in (11, 15))
+        self.assertEqual(Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, body=body).returncode, 0)
+        self.assertEqual(mutgate.violations({"p": {"broker/p/a.go": {4}}}, {"p": [("a.go", 4, "X", 7), ("a.go", 4, "X")]}),
+                         [("p", "broker/p/a.go", 4, "X", 7), ("p", "broker/p/a.go", 4, "X", None)])
+
+    def test_a_failure_names_the_push_its_body_came_from(self):
+        # MUT-stale-body (#6077): the gate reads the body of the event that started the run, which a rerun
+        # reuses, so a proof added to the body after that push is not read. The failure says so, naming the head.
+        # REQ: MUT-stale-body
+        sha = "1adcc9bd" + "0" * 32
+        r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, body="", extra=["--body-from", sha])
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        # The run can start on the PR's opening or reopening too (#6151, L3), so the line names the head, not a push.
+        self.assertIn(f"mutgate: the body read is the PR body as it stood at head {sha}, when the event that started "
+                      "this run fired (the PR's opening, a push or a reopening); a line added to the body after that "
+                      "is not read by this run or a rerun of it, so it counts only from the next push\n", r.stdout)
+        # Nothing to name when nothing fails, and no claim about a push the gate was not told of.
+        body = "".join(f"Mutant-equivalent: broker/netguard/a.go:2:{c}:ARITHMETIC_BASE {self.REASON}\n" for c in (11, 15))
+        r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, body=body, extra=["--body-from", sha])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("the body read is", r.stdout)
+        r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, body="")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertNotIn("the body read is", r.stdout)
+        # A failure with no survivor still names the push: a refused line on a killed mutant (#6151, Lens), and an
+        # ambiguous waiver, are cured by a body edit too.
+        hint = f"the body read is the PR body as it stood at head {sha}"
+        refused = "Mutant-equivalent: broker/netguard/a.go:2:11:ARITHMETIC_BASE not equivalent, a real survivor\n"
+        r = Verify().verify({"netguard.json": self.result("KILLED")}, src=self.SRC, body=refused,
+                            extra=["--body-from", sha])
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("says its mutant is not equivalent", r.stdout)
+        self.assertNotIn("survives", r.stdout)
+        self.assertIn(hint, r.stdout)
+        r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, extra=["--body-from", sha],
+                            body=f"Mutant-equivalent: broker/netguard/a.go:2 {self.REASON}\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("matches 2 mutants", r.stdout)
+        self.assertIn(hint, r.stdout)
+        # --body-from without --body names a push whose body the gate never read (#6151, Security): refused.
+        r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, extra=["--body-from", sha])
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("give --body too", r.stderr)
+        # Only a full commit sha is a push: anything else is refused before the gate reads a result.
+        for bad in ("1adcc9bd", "HEAD", sha.upper(), sha + "0", "-x"):
+            r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, body="",
+                                extra=["--body-from=" + bad])
+            self.assertEqual(r.returncode, 2, bad + r.stdout + r.stderr)
+
+    def test_an_ambiguous_waiver_is_not_listed_as_naming_no_mutant(self):
+        # Item 2: a waiver matching both mutants was listed as ambiguous and also as naming no surviving mutant.
+        r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, summary=True,
+                            body=f"Mutant-equivalent: broker/netguard/a.go:2 {self.REASON}\n"
+                                 f"Mutant-equivalent: broker/netguard/a.go:9 {self.REASON}\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("Waivers matching more than one mutant, which waive none of them (#5792):\n"
+                      "- broker/netguard/a.go:2: ", r.summary)
+        unused = [l for l in r.summary.split("\n") if l.startswith("Mutant-equivalent lines naming no")]
+        self.assertEqual(unused, ["Mutant-equivalent lines naming no surviving mutant on a target line: broker/netguard/a.go:9"])
+
+    def test_a_malformed_waiver_line_is_warned_about(self):
+        # Item 3: these lines were dropped unread, or (an unknown kind) shown only as unused.
+        bad = {"Mutant-equivalent: broker/netguard/a.go:2:0 column zero": "is not read as a waiver",
+               "Mutant-equivalent: broker/netguard/a.go:2:11:arithmetic_base lower case": "is not read as a waiver",
+               "mutant-equivalent: broker/netguard/a.go:2:11:ARITHMETIC_BASE lower-case prefix": "is not read as a waiver",
+               "  Mutant-uncovered: broker/netguard/a.go:2:11 indented": "is not read as a waiver",
+               "Mutant-equivalent: broker/netguard/a.go:2:11 ?": "is not read as a waiver",
+               "Mutant-equivalent: broker/netguard/a.go 2 no line": "is not read as a waiver",
+               # L3 on #5976: behind the Markdown a PR body wraps lines in, the line was dropped unread and unwarned.
+               f"`Mutant-equivalent: broker/netguard/a.go:2:11:ARITHMETIC_BASE {self.REASON}`": "is not read as a waiver",
+               f"- Mutant-equivalent: broker/netguard/a.go:2:11:ARITHMETIC_BASE {self.REASON}": "is not read as a waiver",
+               f"* `Mutant-uncovered: broker/netguard/a.go:2:11 {self.REASON}`": "is not read as a waiver",
+               f"+ Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}": "is not read as a waiver",
+               f"> Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}": "is not read as a waiver",
+               f">> 12. Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}": "is not read as a waiver",
+               f"3) Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}": "is not read as a waiver",
+               "Mutant-equivalent: broker/netguard/a.go:2:11:ARITHMETIC_BASE <reason>": "still holds the <reason> placeholder",
+               "Mutant-equivalent: broker/netguard/a.go:2:11 `<Reason>`": "still holds the <reason> placeholder",
+               "Mutant-equivalent: broker/netguard/a.go:2:11 <reason> here.": "still holds the <reason> placeholder",
+               # L3 round 2 on #5976: any Markdown before the waiver, not a listed few.
+               f"- [ ] Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}": "is not read as a waiver",
+               f"- [x] Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}": "is not read as a waiver",
+               f"**Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}**": "is not read as a waiver",
+               f"## Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}": "is not read as a waiver",
+               f"| Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON} |": "is not read as a waiver",
+               "Mutant-equivalent: broker/netguard/a.go:2:11:BOGUS a kind no mutant has":
+                   "the waiver broker/netguard/a.go:2:11:BOGUS names the kind BOGUS, which no mutant has"}
+        good = [f"Mutant-equivalent: broker/netguard/a.go:2:15:ARITHMETIC_BASE {self.REASON}",
+                f"Mutant-uncovered: broker/netguard/a.go:3:STATEMENT_DELETION {self.REASON}",
+                "A Mutant-equivalent: line quoted mid-sentence is no waiver line.",
+                "- the syntax is `Mutant-equivalent: <path>:<line>` in a bullet of prose",
+                f"Mutant-equivalent: broker/netguard/a.go:4 the reason names reason among other words"]
+        got = mutgate.malformed_waivers("\r\n".join([*bad, *good]))
+        self.assertEqual(len(got), len(bad), got)
+        for (line, want), warning in zip(bad.items(), got):
+            with self.subTest(line):
+                self.assertIn(want, warning)
+        # The gate prints each warning, and the mutant the bad line meant to waive still fails (fail closed).
+        r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, body="\n".join([*bad, good[0]]) + "\n")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.count("mutgate: the line "), len(bad) - 4, r.stdout)
+        self.assertEqual(r.stdout.count("still holds the <reason> placeholder, so it waives nothing"), 3, r.stdout)
+        # A reason holding the placeholder waives nothing, as the warning says.
+        self.assertEqual(mutgate.waivers("\n".join(good)), {("broker/netguard/a.go", 2, "ARITHMETIC_BASE", 15): self.REASON,
+                         ("broker/netguard/a.go", 3, "STATEMENT_DELETION", None): self.REASON,
+                         ("broker/netguard/a.go", 4, None, None): "the reason names reason among other words"})
+        self.assertIn("names the kind BOGUS, which no mutant has, so it waives nothing", r.stdout)
+        self.assertIn("broker/netguard/a.go:2 ARITHMETIC_BASE survives", r.stdout)
+        self.assertNotIn("a.go:2:15:ARITHMETIC_BASE <reason>", r.stdout)
+        # KINDS is gremlins v0.6.0's list, so it moves with the version the workflow installs.
+        self.assertIn("gremlins/cmd/gremlins@v0.6.0", WORKFLOW.read_text())
+        self.assertIn(mutgate.DELETION, mutgate.KINDS)
+
+    def test_the_workflow_header_gives_the_waiver_syntax(self):
+        # Item 4: the header still gave `<path>:<line> <reason>`, which names no column or kind.
+        head = " ".join(l.lstrip("# ") for l in WORKFLOW.read_text().split("\n")[:12])
+        self.assertIn("`Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>`", head)
+        self.assertNotIn("<path>:<line> <reason>", head)
 
 
 class CaseClauseCover(unittest.TestCase):
@@ -3610,17 +3942,23 @@ class Workflow(unittest.TestCase):
         self.assertIn("shards: ${{ steps.plan.outputs.shards }}", plan)
         self.assertIn("include: ${{ fromJSON(needs.plan.outputs.shards) }}", mutants)
         self.assertIn("fail-fast: false", mutants)
-        for env in ("PKG: ${{ matrix.pkg }}", "SHARD: ${{ matrix.shard }}", "OF: ${{ matrix.of }}"):
+        for env in ("PKG: ${{ matrix.pkg }}", "SHARDS: ${{ matrix.shards }}", "OF: ${{ matrix.of }}"):
             self.assertIn(env, mutants)
-        self.assertIn('python3 -I tools/mutgate.py run "$PKG" --out mutants --git "$BASE" --shard "$SHARD" --of "$OF"\n'
-                      '          --targets "$RUNNER_TEMP/plan/targets.json"\n', mutants)
+        # #6170: each of the job's shards runs in turn into its own directory, which verify reads.
+        self.assertIn('          for s in ${SHARDS//,/ }; do\n'
+                      '            [[ "$s" =~ ^[0-9]+$ ]] || { echo "::error::shard $s is not an index"; exit 1; }\n', mutants)
+        self.assertIn('            timeout -k 30 3600 python3 -I tools/mutgate.py run "$PKG" --out "mutants/$s" --git "$BASE" --shard "$s" --of "$OF" \\\n'
+                      '              --targets "$RUNNER_TEMP/plan/targets.json" || rc=$?\n', mutants)
+        self.assertEqual(3600, 60 * mutgate.SHARD_MINUTES)
         # The job's name shows the shard in the checks list (#4983); a name is display text, never run.
-        name = "    name: mutants ${{ matrix.pkg }} shard ${{ matrix.shard }} of ${{ matrix.of }}\n"
+        name = "    name: mutants ${{ matrix.pkg }} shard ${{ matrix.shards }} of ${{ matrix.of }}\n"
         self.assertIn(name, mutants)
-        self.assertNotIn("matrix.", mutants.replace(name, "").replace("${{ matrix.pkg }}\n", "").replace("${{ matrix.shard }}\n", "")
-                         .replace("${{ matrix.of }}\n", ""))  # matrix values reach scripts through env only
+        self.assertNotIn("matrix.", mutants.replace(name, "").replace("${{ matrix.pkg }}\n", "").replace("${{ matrix.shards }}\n", "")
+                         .replace("${{ matrix.of }}\n", "").replace("    timeout-minutes: ${{ matrix.minutes }}\n", ""))
+        # matrix values reach scripts through env only
         # #4573: the deletion pass adds to the same result, after gremlins wrote it.
-        self.assertIn('python3 -I tools/mutgate.py delete "$PKG" --out mutants --git "$BASE"', mutants)
+        self.assertIn('                timeout -k 30 "$left" python3 -I tools/mutgate.py delete "$PKG" --out "mutants/$s" --git "$BASE" || rc=$?\n',
+                      mutants)
         self.assertLess(mutants.index("mutgate.py run"), mutants.index("mutgate.py delete"))
         self.assertNotIn("mutgate.py gate", self.text)  # the gate is `verify`, in the job no PR code reaches
         self.assertNotIn("${{ matrix.pkg }}\"", mutants)  # never interpolated into a script
@@ -3639,6 +3977,7 @@ class Workflow(unittest.TestCase):
             ("success", '["kernel"]', "success", "cancelled", 1),  # #5069: a shard timed out
             ("success", '["kernel"]', "success", "skipped", 1),
             ("success", '["kernel"]', "failure", "skipped", 1),  # #4961: no plan, no shards
+            ("success", '["kernel"]', "cancelled", "skipped", 1),  # #6155: the plan timed out
             ("success", '["kernel"]', "skipped", "success", 1),
             ("success", "[]", "skipped", "failure", 1),
             ("success", "[]", "success", "skipped", 1),
@@ -3649,10 +3988,51 @@ class Workflow(unittest.TestCase):
             r = subprocess.run(["sh", "-ec", script], env=env, capture_output=True, text=True)
             self.assertEqual(r.returncode != 0, bool(want), (claimed, pkgs, plan, mutants, r.stdout, r.stderr))
             # #5069: a timed-out shard says so, not a bare "cancelled"; nothing else claims a timeout.
-            self.assertEqual("::error::a mutants shard timed out at its 60-minute limit" in r.stdout,
+            self.assertEqual("::error::a mutants job timed out at its job limit (60 minutes for each shard it runs, plus 15 for setup" in r.stdout,
                              mutants == "cancelled" and claimed == "success", r.stdout)
+            self.assertEqual("::error::the plan job timed out" in r.stdout,
+                             plan == "cancelled" and claimed == "success", r.stdout)
         self.assertIn("if: ${{ !cancelled() }}", job(self.text, "mutgate"))
         self.assertIn("needs: [claimed, plan, mutants]", job(self.text, "mutgate"))
+
+    def test_each_shard_of_a_job_stops_at_its_own_60_minutes_and_is_named(self):
+        # L3 1 on #6171 (MUT-plan-overflow, #6170): a job of several shards gives each its own 60 minutes
+        # for gremlins and its deletions together, and a shard past them fails naming itself, not a job
+        # cancelled at its pooled limit. The step's script runs here with python3 and timeout stubbed.
+        step = next(st for st in job(self.text, "mutants").split("\n      - ")
+                    if st.startswith("name: Gremlins and statement deletions on the package (#4573)\n"))
+        script = "\n".join(l[10:] for l in step.split("run: |\n", 1)[1].split("\n"))
+        for slow, want in ((None, 0), ("run 148", 124), ("delete 148", 124), ("run 0", 124)):
+            with self.subTest(slow), tempfile.TemporaryDirectory() as d:
+                bin_, log = pathlib.Path(d) / "bin", pathlib.Path(d) / "log"
+                bin_.mkdir()
+                # timeout LIMIT CMD...: the stub logs the limit and the shard's command, then fails as a
+                # timed-out command does (124) for the one slow call.
+                (bin_ / "timeout").write_text(
+                    '#!/bin/bash\nshift 2\nlim=$1; shift\nwhat="$4 $(basename "$7")"\n'
+                    f'echo "$lim $what" >> {log}\n[ "$what" = "{slow}" ] && exit 124\nexit 0\n')
+                (bin_ / "timeout").chmod(0o755)
+                env = {"PATH": f"{bin_}:/usr/bin:/bin", "PKG": "enforcer/nft", "SHARDS": "0, 148", "OF": "296",
+                       "BASE": "b" * 40, "RUNNER_TEMP": d}
+                r = subprocess.run(["bash", "-ec", script], env=env, capture_output=True, text=True, cwd=d)
+                self.assertEqual(r.returncode, want, r.stdout + r.stderr)
+                calls = log.read_text().split("\n")[:-1]
+                ran = [c.split(" ", 1)[1] for c in calls]
+                stop = ran.index(slow) + 1 if slow else len(ran)
+                self.assertEqual(ran, ["run 0", "delete 0", "run 148", "delete 148"][:stop])
+                # Each shard's gremlins run gets the full 60 minutes, its deletions what is left of them.
+                for c in calls:
+                    self.assertLessEqual(int(c.split(" ")[0]), 3600)
+                    if c.split(" ")[1] == "run":
+                        self.assertEqual(c.split(" ")[0], "3600")
+                shard = slow.split(" ")[1] if slow else None
+                self.assertEqual(f"::error::shard {shard} of 296 of enforcer/nft passed its 60-minute limit" in r.stdout,
+                                 slow is not None, r.stdout)
+        # A non-index shard fails before anything runs.
+        r = subprocess.run(["bash", "-ec", script], env={"PATH": "/usr/bin:/bin", "SHARDS": "../x, 0"},
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("::error::shard ../x is not an index", r.stdout)
 
     def test_only_the_plan_and_mutants_jobs_run_pr_code_and_they_hand_on_data(self):
         # REV-CHK-mut-selftest (#4106): the PR's tests run in `mutants` and can write anything there,
@@ -3670,14 +4050,13 @@ class Workflow(unittest.TestCase):
         mutants = job(self.text, "mutants")
         steps = mutants.split("\n      - ")
         # The shard reads the plan's record from outside the workspace, just before gremlins.
-        self.assertTrue(steps[-5].startswith("uses: actions/download-artifact@"), steps[-5])
-        self.assertIn("name: mutgate-plan\n", steps[-5])
-        self.assertTrue(steps[-5].endswith("path: ${{ runner.temp }}/plan"), steps[-5])
+        self.assertTrue(steps[-4].startswith("uses: actions/download-artifact@"), steps[-4])
+        self.assertIn("name: mutgate-plan\n", steps[-4])
+        self.assertTrue(steps[-4].endswith("path: ${{ runner.temp }}/plan"), steps[-4])
         # The deciding job's download takes the shards' results only, never the plan's record.
         self.assertIn("pattern: mutants-*\n", job(self.text, "mutgate"))
         self.assertFalse(fnmatch.fnmatch("mutgate-plan", "mutants-*"))
-        self.assertIn("Gremlins on the package", steps[-4])
-        self.assertIn("Statement deletions on the package", steps[-3])
+        self.assertIn("name: Gremlins and statement deletions on the package (#4573)", steps[-3])
         self.assertTrue(steps[-1].startswith("uses: actions/upload-artifact@"), steps[-1])
         self.assertIn("name: mutants-${{ strategy.job-index }}", steps[-1])
         self.assertIn("path: mutants/", steps[-1])
@@ -3733,6 +4112,8 @@ class Workflow(unittest.TestCase):
         self.assertEqual(self.text.count("github.event.pull_request.body"), 1)
         gate = job(self.text, "mutgate").split("      - name: Gate (MUT-tierA)\n", 1)[1]
         self.assertIn("          PR_BODY: ${{ github.event.pull_request.body }}\n", gate)
+        # MUT-stale-body (#6077): the head of the event the body came from, so a failure can name that push.
+        self.assertIn("          PR_HEAD: ${{ github.event.pull_request.head.sha }}\n", gate)
         script = gate.split("        run: |\n", 1)[1]
         self.assertNotIn("${{", script)
         script = "\n".join(l[10:] for l in script.split("\n"))
@@ -3743,12 +4124,13 @@ class Workflow(unittest.TestCase):
             (stub / "python3").chmod(0o755)
             body = "$(touch pwned) `touch pwned` \"; exit 7; '\n-n\n%s %d\\n\nMutant-equivalent: broker/x/a.go:1 r\n"
             env = {"PATH": f"{stub}:/usr/bin:/bin", "OUT": d, "RUNNER_TEMP": d, "RESULTS": "R", "BASE": "B",
-                   "GITHUB_STEP_SUMMARY": "S", "PR_BODY": body}
+                   "GITHUB_STEP_SUMMARY": "S", "PR_BODY": body, "PR_HEAD": "H"}
             r = subprocess.run(["bash", "-e", "-c", script], cwd=d, env=env, capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertEqual((pathlib.Path(d) / "body").read_text(), body)
             self.assertEqual((pathlib.Path(d) / "argv").read_text().split("\n")[:-1], [
-                "-I", "tools/mutgate.py", "verify", "R", "--git", "B", "--body", f"{d}/pr-body.md", "--summary", "S"])
+                "-I", "tools/mutgate.py", "verify", "R", "--git", "B", "--body", f"{d}/pr-body.md", "--body-from", "H",
+                "--summary", "S"])
             self.assertFalse((pathlib.Path(d) / "pwned").exists())
 
     def test_base_copy_step_drops_files_the_pr_adds_under_tools(self):

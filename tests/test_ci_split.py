@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 
@@ -159,6 +160,47 @@ class WiringTest(unittest.TestCase):
         step = checks[checks.index("- name: OP-2 same-effect model"):]
         step = step[:step.index("- name: Fuzz the broker")]
         self.assertIn("go test -count=1 -timeout 20m -parallel 2 -run ", step)
+
+    def test_go_mod_vendor_is_retried_three_times_and_the_comparison_is_not(self):
+        # #3977, as #3768: a Go proxy stream error retries `go mod vendor`; its third failure
+        # fails the step. A real vendor mismatch fails at once, with no retry.
+        checks = job(self.ci, "broker-checks")
+        lines = checks[checks.index("- name: Vendored code equals the modules go.sum pins"):].splitlines()
+        lines = lines[next(i for i, l in enumerate(lines) if l.strip() == "run: |") + 1:]
+        script = "\n".join(l[10:] for l in lines[:lines.index(next(l for l in lines if not l.startswith(" " * 10)))])
+        for fails, drift in ((0, False), (2, False), (3, False), (0, True), (1, True)):
+            with self.subTest(fails=fails, drift=drift), tempfile.TemporaryDirectory() as tmp:
+                d = pathlib.Path(tmp)
+                # The go stub fails its first `fails` runs; the git stub reports a change when `drift`.
+                (d / "go").write_text(
+                    f"#!/bin/sh\necho \"go $*\" >> {d}/calls\n"
+                    f"[ $(grep -cx 'go mod vendor' {d}/calls) -le {fails} ] && "
+                    "{ echo 'stream error: INTERNAL_ERROR' >&2; exit 1; }\nexit 0\n")
+                (d / "git").write_text(f"#!/bin/sh\necho \"git $*\" >> {d}/calls\n"
+                                       + ("echo ' M vendor/x/y.go'\n" if drift else ""))
+                (d / "sleep").write_text(f"#!/bin/sh\necho $1 >> {d}/slept\n")
+                for stub in ("go", "git", "sleep"):
+                    (d / stub).chmod(0o755)
+                (d / "step.sh").write_text(script + "\n")
+                r = subprocess.run(["bash", "--noprofile", "--norc", "-e", str(d / "step.sh")],
+                                   env={"PATH": f"{d}:/usr/bin:/bin"}, capture_output=True, text=True)
+                calls = (d / "calls").read_text().splitlines()
+                slept = (d / "slept").read_text().split() if (d / "slept").exists() else []
+                status = "git status --porcelain --untracked-files=all -- vendor"
+                tries = min(fails + 1, 3)
+                if fails < 3:
+                    self.assertEqual(calls, ["go mod vendor"] * tries + [status])
+                    self.assertEqual(r.returncode != 0, drift, r.stdout + r.stderr)
+                    if drift:
+                        self.assertIn("broker/vendor differs from go mod vendor", r.stderr)
+                else:
+                    self.assertNotEqual(r.returncode, 0)
+                    self.assertEqual(calls, ["go mod vendor"] * 3)
+                    self.assertIn("go mod vendor failed 3 times", r.stdout)
+                    self.assertIn("stream error: INTERNAL_ERROR", r.stderr)
+                self.assertEqual(slept, ["15", "30"][:min(fails, 2)])
+                for t in range(1, min(fails, 3) + 1):
+                    self.assertIn(f"try {t} of 3 failed: go mod vendor", r.stderr)
 
 
 if __name__ == "__main__":
