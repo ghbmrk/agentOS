@@ -440,7 +440,8 @@ func TestRederiveChecksResetsAcceptsAndSendCancels(t *testing.T) {
 }
 
 // lostClerk answers every call unknown and every probe unreached, counting
-// the probes.
+// the probes; past a bound no Tick reaches it answers done, so a Tick that
+// would not stop ends there rather than growing the log without end.
 type lostClerk struct{ probes int }
 
 func (c *lostClerk) Do(kernel.Request, kernel.View) kernel.Result {
@@ -449,6 +450,9 @@ func (c *lostClerk) Do(kernel.Request, kernel.View) kernel.Result {
 
 func (c *lostClerk) Probe(kernel.Request, kernel.View) kernel.Result {
 	c.probes++
+	if c.probes > 8*kernel.MaxSteps {
+		return kernel.Result{Outcome: "done"}
+	}
 	return kernel.Result{Outcome: kernel.OUnreached}
 }
 
@@ -472,7 +476,14 @@ func TestAStepThatNeverSettlesBoundsTickAndCalls(t *testing.T) {
 	must(t, err)
 	k, err := kernel.Boot(l, r.anchors(), map[string]kernel.Clerk{}, 0)
 	must(t, err)
-	if cs, err := k.Calls(now + kernel.ProbeEvery); err != nil || len(cs) != 0 {
+	reads, at := 0, now+kernel.ProbeEvery
+	k.UseClock(func() kernel.Reading {
+		if reads++; reads > 8*kernel.MaxSteps {
+			panic("Calls did not stop") // fails the test at once, not at its timeout
+		}
+		return kernel.At(at)
+	})
+	if cs, err := k.Calls(at); err != nil || len(cs) != 0 {
 		t.Fatalf("a probe no clerk can make: %d calls, %v", len(cs), err)
 	}
 }
