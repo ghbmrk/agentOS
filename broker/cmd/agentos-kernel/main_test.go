@@ -312,3 +312,66 @@ func TestEachContentSocketIsItsClerksAlone(t *testing.T) {
 		}
 	}
 }
+
+// REQ: TIM-1
+// #5391: -chrony names chronyd's command socket, the kernel's second time
+// source, and -chrony-reply the socket chronyd answers on; they come
+// together, as absolute paths, and without them the kernel reads the box
+// clock alone.
+func TestChronyFlags(t *testing.T) {
+	c, err := parse(good, io.Discard)
+	if err != nil || c.Chrony != "" || c.ChronyReply != "" {
+		t.Fatalf("no chrony flags: %+v, %v", c.MainConfig, err)
+	}
+	ok := append(slices.Clone(good), "-chrony", "/run/agentos-kernel-time/chronyd.sock", "-chrony-reply", "/run/agentos-kernel/chrony.sock")
+	if c, err = parse(ok, io.Discard); err != nil || c.Chrony != "/run/agentos-kernel-time/chronyd.sock" || c.ChronyReply != "/run/agentos-kernel/chrony.sock" {
+		t.Fatalf("chrony flags: %+v, %v", c.MainConfig, err)
+	}
+	for _, bad := range [][]string{
+		append(slices.Clone(good), "-chrony", "/run/agentos-kernel-time/chronyd.sock"),
+		append(slices.Clone(good), "-chrony-reply", "/run/agentos-kernel/chrony.sock"),
+		append(slices.Clone(good), "-chrony", "chronyd.sock", "-chrony-reply", "/run/agentos-kernel/chrony.sock"),
+		append(slices.Clone(good), "-chrony", "/run/agentos-kernel-time/chronyd.sock", "-chrony-reply", "chrony.sock"),
+	} {
+		if _, err := parse(bad, io.Discard); err == nil {
+			t.Errorf("parse %q: accepted", bad[len(good):])
+		}
+	}
+}
+
+// REQ: TIM-1
+// #5195: agentosd is the only writer of the TIM-1 guard's state file
+// (clock.json), since privfile.WriteAtomic assumes one writer per path. The
+// kernel process reads chronyd itself and links no broker/clock, so it can
+// open no Guard on that file.
+func TestTheKernelProcessOpensNoClockGuard(t *testing.T) {
+	out, err := exec.Command("go", "list", "-deps", ".").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list: %v\n%s", err, out)
+	}
+	const clock = "github.com/ghbmrk/agentos/broker/clock"
+	for _, p := range strings.Fields(string(out)) {
+		if p == clock || strings.HasPrefix(p, clock+"/") {
+			t.Errorf("agentos-kernel links %s", p)
+		}
+	}
+}
+
+// REQ: KRN-2
+// parse writes its usage to the stderr it is handed, never the process's,
+// runs plans every second unless -tick says otherwise, and takes -up's path.
+// Revert mutants: SetOutput, the -tick or the -up flag dropped.
+func TestParseFlagsBesideTheSockets(t *testing.T) {
+	var usage strings.Builder
+	if _, err := parse(append(slices.Clone(good), "-none"), &usage); err == nil || !strings.Contains(usage.String(), "-tick") {
+		t.Fatalf("an unknown flag: %v, usage %q", err, usage.String())
+	}
+	c, err := parse(good, io.Discard)
+	if err != nil || c.Tick.String() != "1s" || c.Up != "" {
+		t.Fatalf("defaults: tick %v, up %q, %v", c.Tick, c.Up, err)
+	}
+	c, err = parse(append(slices.Clone(good), "-tick", "250ms", "-up", "/run/agentos-kernel/up"), io.Discard)
+	if err != nil || c.Tick.String() != "250ms" || c.Up != "/run/agentos-kernel/up" {
+		t.Fatalf("-tick and -up: tick %v, up %q, %v", c.Tick, c.Up, err)
+	}
+}

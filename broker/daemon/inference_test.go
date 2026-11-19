@@ -175,7 +175,7 @@ var netOK = map[string]allowance{
 	// they come in, which serves and dials only unix sockets (its dials are
 	// unixDialCalls), locks its own store and refuses to be dumpable.
 	"kernel/proc": {"unix listeners and dials with SO_PEERCRED peer checks, flock on its store and restore lock, O_NOFOLLOW opens, O_NONBLOCK so the restore lock's open never waits on a FIFO; no network client",
-		[]string{"net.Conn", "net.ErrClosed", "net.Listener", "net.UnixConn",
+		[]string{"net.Conn", "net.ErrClosed", "net.Listener", "net.UnixAddr", "net.UnixConn",
 			"syscall.EWOULDBLOCK", "syscall.Flock", "syscall.GetsockoptUcred", "syscall.LOCK_EX", "syscall.LOCK_NB",
 			"syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.SOL_SOCKET", "syscall.SO_PEERCRED", "syscall.Ucred"}},
 	"procguard": {"prctl to read and clear the process's dumpable flag (CLK-1); no network client",
@@ -223,9 +223,11 @@ var rawOK = map[string]map[string]string{
 
 // unixDialCalls are the dial functions a package may call directly, and
 // why; dials still checks each is on "unix" to a configured address.
-// kernel/proc dials its clerks' and its owner seam's sockets (#3430).
+// kernel/proc dials its clerks' and its owner seam's sockets (#3430), and
+// chronyd's command socket (#5391).
 var unixDialCalls = map[string]map[string]string{
-	"kernel/proc": {"net.Dial": "dials only a configured clerk's or kernel's unix socket, then checks the peer's uid"},
+	"kernel/proc": {"net.Dial": "dials only a configured clerk's or kernel's unix socket, then checks the peer's uid",
+		"net.DialUnix": "dials only chronyd's unixgram command socket (-chrony), from its own reply socket (#5391)"},
 }
 
 // escapes are imports past the checks above: foreign code, unchecked
@@ -275,8 +277,9 @@ var clientTypes = map[string]string{
 }
 
 // dials are method or function names that open a connection, and the
-// index of their network argument, which must be "unix".
-var dials = map[string]int{"Dial": 0, "DialTimeout": 0, "DialContext": 1, "Listen": 0}
+// index of their network argument, which must be "unix" (DialUnix's
+// may be any unix network).
+var dials = map[string]int{"Dial": 0, "DialTimeout": 0, "DialContext": 1, "Listen": 0, "DialUnix": 0}
 
 type listed struct {
 	path, dir string
@@ -710,6 +713,25 @@ func fileUse(l *loaded, i int, name, rel string) []string {
 			if !isDial {
 				return true
 			}
+			// DialUnix takes a unix network and its addresses as
+			// *net.UnixAddr: each must be nil or &net.UnixAddr{Name: x}
+			// with x from configuration, as Dial's address (#5757 S1).
+			if se.Sel.Name == "DialUnix" {
+				if len(n.Args) < 3 {
+					at(n, "DialUnix with arguments the lint cannot check")
+					return true
+				}
+				if v := info.Types[n.Args[0]].Value; v == nil || v.Kind() != constant.String || !unixNets[constant.StringVal(v)] {
+					at(n, "DialUnix on a network other than a unix one")
+				}
+				// The remote address may not be nil: an unconnected
+				// datagram socket sends anywhere through WriteToUnix
+				// (#5757 S2); only the local address may be.
+				if !configuredUnixAddr(l, n.Args[1], rel, sel, true) || !configuredUnixAddr(l, n.Args[2], rel, sel, false) {
+					at(n, "DialUnix to an address not taken from configuration")
+				}
+				return true
+			}
 			// A multi-value call spread into the dial (DialContext(t(ctx)))
 			// hides its network and address, so it fails closed (#6090).
 			if len(n.Args) < i+2 {
@@ -728,6 +750,12 @@ func fileUse(l *loaded, i int, name, rel string) []string {
 		case *ast.SelectorExpr:
 			if _, isDial := dials[n.Sel.Name]; isDial && !callee[n] {
 				at(n, n.Sel.Name+" used as a value, not called")
+			}
+			// A package that dials unix sockets itself sends only on
+			// its connected sockets: a send naming its own address
+			// would skip the dial's check (#5757 S2).
+			if unixDialCalls[rel] != nil && (n.Sel.Name == "WriteToUnix" || n.Sel.Name == "WriteMsgUnix" || n.Sel.Name == "WriteTo") {
+				at(n, "sends to an address of its own ("+n.Sel.Name+")")
 			}
 			full := sel(n)
 			if full == "" {
@@ -786,6 +814,45 @@ func configured(l *loaded, e ast.Expr, rel string) bool {
 	return inTempDir(l, v)
 }
 
+// unixNets are the networks DialUnix may name.
+var unixNets = map[string]bool{"unix": true, "unixgram": true, "unixpacket": true}
+
+// configuredUnixAddr reports a DialUnix address that is &net.UnixAddr{...}
+// whose Name is configured and whose other fields are constants, or nil
+// where orNil allows it; any other expression is not.
+func configuredUnixAddr(l *loaded, e ast.Expr, rel string, sel func(ast.Expr) string, orNil bool) bool {
+	if l.info.Types[e].IsNil() {
+		return orNil
+	}
+	u, ok := e.(*ast.UnaryExpr)
+	if !ok || u.Op != token.AND {
+		return false
+	}
+	c, ok := u.X.(*ast.CompositeLit)
+	if !ok || sel(c.Type) != "net.UnixAddr" {
+		return false
+	}
+	named := false
+	for _, el := range c.Elts {
+		kv, ok := el.(*ast.KeyValueExpr)
+		if !ok {
+			return false
+		}
+		k, _ := kv.Key.(*ast.Ident)
+		switch {
+		case k != nil && k.Name == "Name" && configured(l, kv.Value, rel):
+			named = true
+		case k != nil && k.Name == "Net":
+			if l.info.Types[kv.Value].Value == nil {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return named
+}
+
 // configuredFields are the fields a dial may read through a parameter or
 // receiver, by package, as "Type.field" for a parameter of type Type or
 // *Type, and why each holds only configuration. Go lets a value reach a
@@ -797,7 +864,7 @@ func configured(l *loaded, e ast.Expr, rel string) bool {
 // fieldStores backs the claim over the package's types (#6028).
 var configuredFields = map[string]map[string]string{
 	"infer":                {"Client.Path": "the inference service's socket, from agentosd's wiring"},
-	"kernel/proc":          {"Conn.Socket": "a kernel or clerk socket its caller names", "remote.Socket": "Remote.Socket, embedded; a Remote is handed to Clerk"},
+	"kernel/proc":          {"MainConfig.Chrony": "-chrony, chronyd's command socket, from agentos-kernel's flags", "MainConfig.ChronyReply": "-chrony-reply, the kernel's reply socket, from agentos-kernel's flags", "Conn.Socket": "a kernel or clerk socket its caller names", "remote.Socket": "Remote.Socket, embedded; a Remote is handed to Clerk"},
 	"localsrv/accountsock": {"Gmail.Socket": "the mail process's owner socket, from agentosd's wiring"},
 	"modelroute":           {"Config.Socket": "the vault process's model socket, from Forward's caller"},
 	"owner/kernelsock":     {"Keeper.Socket": "the keeper's socket, from agentosd's wiring", "Owner.Socket": "the kernel's owner socket, from agentosd's wiring"},
@@ -886,12 +953,27 @@ func packageUse(t *testing.T, dir string, files []string, prefix, rel string, ps
 // text (mutgate reads any as reaching every test).
 const linkname = "//go:" + "linkname"
 
-// dialAddrs calls visit with each unix dial's address in f.
+// dialAddrs calls visit with each unix dial's address in f: DialUnix's
+// are each &net.UnixAddr{...}'s Name.
 func dialAddrs(f *ast.File, visit func(ast.Expr)) {
 	ast.Inspect(f, func(n ast.Node) bool {
 		if c, ok := n.(*ast.CallExpr); ok {
 			if se, ok := c.Fun.(*ast.SelectorExpr); ok {
-				if i, ok := dials[se.Sel.Name]; ok && se.Sel.Name != "Listen" && len(c.Args) >= i+2 {
+				if i, ok := dials[se.Sel.Name]; ok && se.Sel.Name == "DialUnix" {
+					for _, a := range c.Args[min(1, len(c.Args)):] {
+						if u, ok := a.(*ast.UnaryExpr); ok {
+							if cl, ok := u.X.(*ast.CompositeLit); ok {
+								for _, el := range cl.Elts {
+									if kv, ok := el.(*ast.KeyValueExpr); ok {
+										if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Name" {
+											visit(kv.Value)
+										}
+									}
+								}
+							}
+						}
+					}
+				} else if ok && se.Sel.Name != "Listen" && len(c.Args) >= i+2 {
 					visit(c.Args[i+1])
 				}
 			}
@@ -2116,6 +2198,19 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		{"mail/mailsock", src(`"net"`, `func g() { (&net.Dialer{}).DialContext(nil, "tcp", "imap.example.com:993") }`)},
 		{"mail/mailsock", src(`"net"`, `func g() { (&net.Dialer{}).DialContext(nil, "unix", "/run/agentos-egress/mail.sock") }`)},
 		{"mail/mailsock", src(`"net"`, `var c, _ = net.Dial("tcp", "smtp.example.com:465")`)},
+		{"kernel/proc", src(`"net"`, `func g() { net.DialUnix("unixgram", nil, &net.UnixAddr{Name: "/run/proxy.sock", Net: "unixgram"}) }`)},
+		{"kernel/proc", src(`"net"`, `func g(sock string) { net.DialUnix("unixgram", &net.UnixAddr{Name: "/run/r.sock", Net: "unixgram"}, &net.UnixAddr{Name: sock, Net: "unixgram"}) }`)},
+		{"kernel/proc", src(`"net"`, `func g(a *net.UnixAddr) { net.DialUnix("unixgram", nil, a) }`)},
+		{"kernel/proc", src(`"net"`, `func g(sock string) { net.DialUnix("tcp", nil, &net.UnixAddr{Name: sock, Net: "unixgram"}) }`)},
+		{"kernel/proc", src(`"net"`, `var f = net.DialUnix`)},
+		{"kernel/proc", src(`"net"`, `func g(reply string) {
+	c, _ := net.DialUnix("unixgram", &net.UnixAddr{Name: reply, Net: "unixgram"}, nil)
+	c.WriteToUnix([]byte("x"), &net.UnixAddr{Name: "/run/proxy.sock", Net: "unixgram"})
+}`)},
+		{"kernel/proc", src(`"net"`, `func g(reply string) { net.DialUnix("unixgram", &net.UnixAddr{Name: reply, Net: "unixgram"}, nil) }`)},
+		{"kernel/proc", src(`"net"`, `func g(c *net.UnixConn) { c.WriteMsgUnix(nil, nil, &net.UnixAddr{Name: "/run/proxy.sock", Net: "unixgram"}) }`)},
+		{"kernel/proc", src(`"net"`, `func g(c *net.UnixConn) { c.WriteTo(nil, &net.UnixAddr{Name: "/run/proxy.sock", Net: "unixgram"}) }`)},
+		{"kernel/proc", src(`"net"`, `func g() { net.DialUnix("unixgram") }`)},
 		// A local bound to a literal is not configuration, whichever dial
 		// names it (#5775).
 		{"kernel/proc", src(`"net"`, `func g() { sock := "/run/proxy.sock"; net.DialUnix("unixgram", nil, &net.UnixAddr{Name: sock, Net: "unixgram"}) }`)},
@@ -2480,6 +2575,25 @@ func keep(p *Remote, old Remote) { *p = old }`)
 	}
 	if got := strings.Join(sourceUse(t, path, "held.go", "modelroute"), "\n"); !strings.Contains(got, "not taken from configuration") {
 		t.Errorf("a field listed for another package passed: %q", got)
+	}
+	// kernel/proc's chronyd source dials from NewChrony's parameters, so
+	// its callers are held to configuration (#5757).
+	chrony := src(`"net"`, `type Chrony struct{ dial func() (*net.UnixConn, error) }
+func NewChrony(sock, reply string) *Chrony {
+	s := &Chrony{}
+	if sock != "" {
+		s.dial = func() (*net.UnixConn, error) { return dialChrony(sock, reply) }
+	}
+	return s
+}
+func dialChrony(sock, reply string) (*net.UnixConn, error) {
+	return net.DialUnix("unixgram", &net.UnixAddr{Name: reply, Net: "unixgram"}, &net.UnixAddr{Name: sock, Net: "unixgram"})
+}`)
+	if got := useOf(t, "kernel/proc", chrony); got != "" {
+		t.Errorf("kernel/proc's configured DialUnix flagged: %q", got)
+	}
+	if got := useOf(t, "kernel/proc", chrony, src(``, `var c = NewChrony("/run/proxy.sock", "/run/r.sock")`)); !strings.Contains(got, "passes NewChrony an address not taken from configuration") {
+		t.Errorf("a literal handed to NewChrony passed: %q", got)
 	}
 	// kernel/proc's reviewed link and rename stand in their own files.
 	files := map[string]string{
