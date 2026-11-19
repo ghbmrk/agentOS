@@ -435,13 +435,12 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-mkosi-run-bound-fu-local | IMG-mkosi-run-bound-fu-local: a local-only wrapper makes a local image build one command, with the mkosi line pinned equal to CI's. Release; from #6148. | #4690, #6148 | queued (release; tier B) |
 | MUT-plan-timing-skew | MUT-plan-timing-skew: the plan's reused suite time matches what a shard runs | #6156 | building (release; tier A) |
 | MUT-delete-covering | MUT-delete-covering: mutgate's `delete` runs only the tests that cover each deletion site | #6171 | building (release; tier A) |
-| TEST-kernel-ctx-stop | TEST-kernel-ctx-stop: TestEveryKernelLegsContextEndsWithTheLeg covers freshStop and StopCancelled, killing the daemon.go:825 and :881 mutants that were waived as equivalent. Release; from #6041. | #6041, #6123, #6147 | building (release; tier B) |
 | TEST-privfile-one-ns | TEST-privfile-one-ns: the OpenDir owner-refusal mutant is killed by one namespace test, not two. Release; from #6041. | #6041, #6146 | building (release; tier B) |
 | CTL-agent-starting-status | CTL-agent-starting-status: STATUS during boot shows a starting line, not 'not set up' or 'waiting for memory'. Release; from #6136 (UX). | #5429, #6136 | queued (release; tier A) |
 | BROWSER-shell-cache-warning-cmd | BROWSER-shell-cache-warning-cmd: the headless-shell cache warning names the delete command for the bad entry. Release; rides the next ci.yml PR. | #6175, #6180 | queued (release; tier A; gate file) |
 | TEST-fdcount-before-guard | TEST-fdcount-before-guard: the boxe2e descriptor-count test fails when its before count is zero, so it cannot pass vacuously. Release; from #6186. | #6157, #6186 | building (release; tier A) |
-| BROWSER-valueforms-tiebreak | BROWSER-valueforms-tiebreak: valueForms orders equal-length scrub forms deterministically, and the equivalence reasons name what they lean on. Release; from #6167. | #6085, #6167 | building (release; tier A) |
 | LINT-childenv-types | LINT-childenv-types: the child-environment lint reads exact types through the one go/types load instead of ast.Object scopes. Re-plan follow-up; from #6169. | #6120, #6169 | building (tier A) |
+| MUT-unrun-closing-brace | MUT-unrun-closing-brace: mutgate's unrun check ignores a line holding only a closing brace, which Go coverage never marks. Defect from #5942; blocks #6012. | #5942, #6012 | queued (defect; tier A; gate file) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -495,4 +494,5 @@ issue #6184: no section 'Tooling and CI' in BOARD.md
 issue #6192: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #6193: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #6196: no section 'Tooling and CI' in BOARD.md
+issue #6217: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 ```
