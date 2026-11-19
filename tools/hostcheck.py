@@ -388,14 +388,17 @@ STA_CLOCKERR = 0x1000
 def timex_synced(raw, ret):
     """Decode adjtimex's answer: RAW, the struct timex bytes, and RET, its return
     value. Synchronised means STA_UNSYNC clear. The kernel returns TIME_ERROR
-    exactly when STA_UNSYNC or STA_CLOCKERR is set, so a status that disagrees
-    with RET means the bytes were not decoded as the kernel wrote them."""
+    at least when STA_UNSYNC or STA_CLOCKERR is set, and with CONFIG_NTP_PPS
+    also for a PPS fault, so a status that disagrees with RET is refused: the
+    bytes were misread, or a PPS source faulted on a clock counted synchronised."""
     if struct.calcsize("P") != 8 or Timex.status.offset != 40:
         raise HostcheckError("the struct timex decode is checked only on a 64-bit Linux; "
                              "use a 64-bit third system")
     status = Timex.from_buffer_copy(raw[:ctypes.sizeof(Timex)]).status
     if bool(status & (STA_UNSYNC | STA_CLOCKERR)) != (ret == TIME_ERROR):
-        raise HostcheckError(f"adjtimex returned {ret} with status {status:#x}: the decode does not match the kernel's")
+        raise HostcheckError(f"adjtimex returned {ret} with status {status:#x}: the decode does not match the kernel's, "
+                             "or a PPS source (CONFIG_NTP_PPS) faulted, which also returns TIME_ERROR; "
+                             "use a third system with no PPS source and its NTP client disabled")
     return not status & STA_UNSYNC
 
 
@@ -430,18 +433,23 @@ def rtc_snapshot(server, device=RTC_DEVICE):
     """The PC's RTC less the reference time at the same instant (HOST-1e2b1)."""
     if kernel_clock_synced():
         raise HostcheckError("this system's kernel clock is synchronised, so it writes the RTC every 11 minutes; "
-                             "stop its NTP client (timesyncd, chrony) and reboot it before snapshotting")
+                             "disable or mask its NTP client (systemctl disable --now systemd-timesyncd, or "
+                             "chrony's unit), then reboot it before snapshotting: a unit only stopped starts at boot")
     ntp = sntp_offset(*parse_server(server))
     dev = pathlib.Path(device)
-    value, at = rtc_at_edge(dev.read_text, time.time)
+    try:
+        value, at = rtc_at_edge(dev.read_text, time.time)
+    except (OSError, ValueError) as e:
+        raise HostcheckError(f"cannot read the RTC from --rtc-device {device}: {e}")
     reference = at + ntp
     return {"rtc": value, "reference": reference, "offset": value - reference, "server": server}
 
 
 def snapshot(disks, varstore=None, efivarfs=None, tcti=None, rtc_reference=None, rtc_device=RTC_DEVICE):
-    s = {"disk": {name: hash_disk(p) for name, p in disks.items()}}
-    if rtc_reference:
+    s = {"uefi-source": "varstore" if varstore else "efivarfs"}
+    if rtc_reference:  # first: a bad clock or server stops the run before a full disk hash
         s["rtc"] = rtc_snapshot(rtc_reference, rtc_device)
+    s["disk"] = {name: hash_disk(p) for name, p in disks.items()}
     if varstore:
         s["uefi"] = uefi_from_varstore(varstore)
     elif efivarfs:
@@ -496,33 +504,38 @@ def rtc_offset_findings(before, after, tolerance):
     """The RTC offset's findings. A write that sets the RTC to true time moves
     the offset only if the RTC was away from true time at the baseline, so a
     baseline within RTC_BASELINE_FLOOR of true time is itself flagged: the
-    operator sets the RTC wrong in firmware setup and takes the baseline again."""
-    if not (math.isfinite(tolerance) and tolerance >= 0):
-        raise HostcheckError(f"the RTC tolerance must be a finite number of seconds, at least 0, not {tolerance}")
+    operator sets the RTC wrong in firmware setup and takes the baseline again.
+    Only two snapshots from an OVMF varstore (the QEMU run) may both lack one."""
+    if not (math.isfinite(tolerance) and 0 <= tolerance < RTC_BASELINE_FLOOR):
+        raise HostcheckError(f"the RTC tolerance must be a finite number of seconds, at least 0 and under "
+                             f"{RTC_BASELINE_FLOOR:.0f} (the baseline floor, else a write to true time passes), "
+                             f"not {tolerance}")
     b, a = before.get("rtc"), after.get("rtc")
-    if b is None and a is None:
+    qemu = before.get("uefi-source") == after.get("uefi-source") == "varstore"
+    if b is None and a is None and qemu:
         return []
     if b is None or a is None:
-        return [{"kind": "rtc", "key": "offset", "change": "missing", "before": b, "after": a}]
+        return [{"kind": "rtc", "key": "offset", "change": "missing", "before": b, "after": a,
+                 "fix": "take both snapshots with --rtc-reference, from the same third system and server"}]
     out = []
     if not abs(b["offset"]) >= RTC_BASELINE_FLOOR:
         out.append({"kind": "rtc", "key": "offset", "change": "baseline-near-true-time", "before": b, "after": a,
-                    "fix": f"set the PC's RTC at least {RTC_BASELINE_FLOOR:.0f} s wrong in firmware setup and "
-                           "take the baseline snapshot again"})
+                    "fix": f"set the PC's RTC at least {RTC_BASELINE_FLOOR:.0f} s wrong in firmware setup, "
+                           "take the baseline snapshot again and rerun the session from it"})
     if not abs(a["offset"] - b["offset"]) <= tolerance:
         out.append({"kind": "rtc", "key": "offset", "change": "changed", "before": b, "after": a})
     return out
 
 
 def evaluate(before, after, allow, flags=(), noise=(), rtc_writes=(), rtc_tolerance=RTC_TOLERANCE,
-             opted_in_disks=()):
+             opted_in_disk=None):
     """Sort every difference into flagged, disclosed (an HW-8 rule allows it),
     noise (a UEFI variable the firmware changes on its own boots) or excluded
     (a write to the internal disk the owner gave agentOS, HW-8a)."""
     report = {"flagged": [], "disclosed": [], "noise": [], "excluded": []}
     for f in diff(before, after):
         rule = next((r for r in allow if _matches(r, f, set(flags))), None)
-        if f["kind"] == "disk" and f["change"] == "changed" and f["key"] in opted_in_disks:
+        if f["kind"] == "disk" and f["change"] == "changed" and f["key"] == opted_in_disk:
             report["excluded"].append(dict(f, requirement="HW-8a"))
         elif rule:
             report["disclosed"].append(dict(f, change_id=rule["change"]))
@@ -966,17 +979,23 @@ def cmd_snapshot(args):
     s = snapshot(disks, varstore=args.varstore, efivarfs=args.efivarfs, tcti=args.tcti,
                  rtc_reference=args.rtc_reference, rtc_device=args.rtc_device)
     pathlib.Path(args.output).write_text(json.dumps(s, indent=1, sort_keys=True))
+    if "rtc" in s and not abs(s["rtc"]["offset"]) >= RTC_BASELINE_FLOOR:
+        print(f"hostcheck: warning: the RTC is {s['rtc']['offset']:.1f} s from true time; as a baseline, set it at "
+              f"least {RTC_BASELINE_FLOOR:.0f} s wrong in firmware setup and snapshot again", file=sys.stderr)
     return 0
 
 
 def cmd_diff(args):
     before, after = (json.loads(pathlib.Path(p).read_text()) for p in (args.before, args.after))
-    unknown = [n for n in args.opted_in_disk if n not in before.get("disk", {}) or n not in after.get("disk", {})]
-    if unknown:
-        raise HostcheckError(f"--opted-in-disk names no disk in both snapshots: {unknown}")
+    if len(args.opted_in_disk) > 1:
+        raise HostcheckError(f"--opted-in-disk names {args.opted_in_disk}: HW-8a gives agentOS one disk")
+    name = args.opted_in_disk[0] if args.opted_in_disk else None
+    held = sorted(set(before.get("disk", {})) & set(after.get("disk", {})))
+    if name is not None and name not in held:
+        raise HostcheckError(f"--opted-in-disk {name!r} names no disk in both snapshots; they hold {held}")
     r = evaluate(before, after, load_allow(), flags=args.flag,
                  rtc_writes=[{"phase": "session", "offset": None}] if args.rtc_written else (),
-                 rtc_tolerance=args.rtc_tolerance, opted_in_disks=set(args.opted_in_disk))
+                 rtc_tolerance=args.rtc_tolerance, opted_in_disk=name)
     print(json.dumps(r, indent=1, sort_keys=True))
     return 0 if r["pass"] else 1
 

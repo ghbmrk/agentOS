@@ -13,6 +13,8 @@ Board section: Devices, hardware and image (SPEC §13-14). Work item #6135, spli
 
 **Enforced in the tool (L3 and Security on #6140):** an offset check sees a write that sets true time only if the baseline RTC was away from it, so `diff` flags a baseline offset under 60 s (`baseline-near-true-time`), telling the operator to set the RTC wrong in firmware setup and take the baseline again. The SNTP reference is unauthenticated, so the S1 run (#5815) takes it from a server the image never reached, such as the operator's own machine on a direct link. The `adjtimex` decode is a tested pure function that fails closed on a layout or return-value mismatch. A PC snapshot (`--efivarfs`) requires `--rtc-reference`.
 
+**Follow-up HOST-1e2b1-fu (#6166, release items from #6140's reviews):** `--rtc-tolerance` at or above `RTC_BASELINE_FLOOR` and a second `--opted-in-disk` are refused (exit 2), so no operator value switches a check off. Each snapshot records `uefi-source`; a missing offset is flagged unless both snapshots come from an OVMF varstore, and `rtc offset missing` carries a `fix`. The adjtimex bound reads "at least when" and the refusal names the PPS case. The synchronised-clock refusal says to disable the NTP client, then reboot; `baseline-near-true-time` says to rerun the session, and `snapshot` warns of it on stderr. The clock check and SNTP exchange run before the disk hash; a bad `--rtc-device` exits 2; the unknown-disk error lists the disks held.
+
 **Acceptance tests:**
 - `tests/test_hostcheck.py::RtcOffsetTest::test_offset_moved_past_tolerance_is_flagged`
 - `tests/test_hostcheck.py::RtcOffsetTest::test_offset_in_one_snapshot_only_is_flagged`
@@ -25,6 +27,12 @@ Board section: Devices, hardware and image (SPEC §13-14). Work item #6135, spli
 - `tests/test_hostcheck.py::OptedInDiskTest::test_only_the_named_disk_change_is_excluded`
 - `tests/test_hostcheck.py::OptedInDiskTest::test_unknown_name_stops_the_diff`
 - `tests/test_hostcheck.py::PcrlockTest::test_the_image_pins_no_pcrlock_index`
+- `tests/test_hostcheck.py::RtcOffsetTest::test_a_tolerance_at_the_baseline_floor_is_refused`
+- `tests/test_hostcheck.py::RtcOffsetTest::test_a_pc_snapshot_without_an_offset_is_flagged`
+- `tests/test_hostcheck.py::RtcOffsetTest::test_snapshot_warns_on_a_baseline_near_true_time`
+- `tests/test_hostcheck.py::RtcOffsetTest::test_a_bad_rtc_device_stops_the_snapshot`
+- `tests/test_hostcheck.py::RtcOffsetTest::test_the_clock_is_checked_before_the_disks_are_hashed`
+- `tests/test_hostcheck.py::OptedInDiskTest::test_a_second_opted_in_disk_is_refused`
 
 **Scope:** `tools/hostcheck.py`, `tests/test_hostcheck.py`, `tools/ASSUMPTIONS.md` (rows), this brief.
 

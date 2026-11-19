@@ -474,6 +474,9 @@ func TestFileGateStepsLeaveNothingOpen(t *testing.T) {
 	}
 	try() // the runtime's own descriptors settle on the first pass
 	before := openFDs(t, mine)
+	if before == 0 {
+		t.Fatal("no descriptor under the test's tree counted with r open: /proc link text differs from EvalSymlinks(dir), so the count cannot see a leak")
+	}
 	for range 10 {
 		try()
 	}
