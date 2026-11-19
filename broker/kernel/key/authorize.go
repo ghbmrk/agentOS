@@ -77,10 +77,6 @@ type Refusal struct {
 
 func (r *Refusal) Error() string { return r.code.name + ": " + r.Detail }
 
-func refuse(code Code, f string, a ...any) *Refusal {
-	return Refusef(code, f, a...)
-}
-
 // Refuse is a refusal for code c with detail.
 func Refuse(c Code, detail string) *Refusal { return &Refusal{code: c, Detail: detail} }
 
@@ -110,6 +106,10 @@ func (r *Refusal) UnmarshalJSON(b []byte) error {
 	}
 	*r = Refusal{w.Code, w.Detail}
 	return nil
+}
+
+func refuse(code Code, f string, a ...any) *Refusal {
+	return Refusef(code, f, a...)
 }
 
 func in(s []string, v string) bool {
