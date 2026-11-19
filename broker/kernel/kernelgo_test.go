@@ -538,3 +538,24 @@ func TestKernelGoAFirstAttemptIsChargedItsEarlierDispatch(t *testing.T) {
 		t.Fatalf("a first attempt under a key whose one use is spent: %+v", a)
 	}
 }
+
+// Send returns the error when the unsent answer for a step whose key was
+// paused since its dispatch cannot be logged, though a pause cancels
+// nothing (KRN-7).
+func TestKernelGoSendReturnsAnUnsentAnswerTheLogCannotTake(t *testing.T) {
+	r := newRig(t)
+	fs := &kgStore{MemStore: r.store, left: -1}
+	kgReboot(r, fs, r.mail)
+	k := r.derive()
+	r.plan("p", k, st(key.Organize, "m1"))
+	cs, err := r.k.Calls(0)
+	must(t, err)
+	if len(cs) != 1 {
+		t.Fatalf("%d calls", len(cs))
+	}
+	must(t, r.k.Pause(1, k.Tip()))
+	fs.left = 0
+	if ok, err := r.k.Send(1, cs[0]); ok || err == nil {
+		t.Fatalf("a paused step's unsent answer the store refused: %v %v", ok, err)
+	}
+}
