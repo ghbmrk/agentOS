@@ -191,7 +191,7 @@ class TestInferImage(unittest.TestCase):
 
     def test_the_server_is_static_cpu_only_and_fetches_nothing(self):
         s = (IMG / "llamaserver.sh").read_text()
-        for f in ("-DGGML_NATIVE=OFF", "-DCMAKE_EXE_LINKER_FLAGS=-static", "-DBUILD_SHARED_LIBS=OFF",
+        for f in ("-DGGML_NATIVE=OFF", "-DCMAKE_EXE_LINKER_FLAGS=\"-static -Wl,-Map=", "-DBUILD_SHARED_LIBS=OFF",
                   "-DGGML_BACKEND_DL=OFF", "-DLLAMA_CURL=OFF", "-DLLAMA_OPENSSL=OFF", "-DGGML_AVX2=ON",
                   # #4454: no web UI, so no build-time download from Hugging Face.
                   "-DLLAMA_BUILD_UI=OFF", "-DLLAMA_USE_PREBUILT_UI=OFF"):
@@ -200,12 +200,107 @@ class TestInferImage(unittest.TestCase):
         self.assertNotRegex(s, r"-DLLAMA_(BUILD|USE_PREBUILT)_UI=ON")
         for gpu in ("CUDA", "VULKAN", "METAL", "HIP", "SYCL", "OPENCL"):
             self.assertNotIn("-DGGML_%s=ON" % gpu, s)
-        self.assertIn('! readelf -l "$BIN" | grep -q INTERP ||', s)
+        self.assertIn('! jail readelf -l "${BIN#"$base"}" | grep -q INTERP ||', s)
+        self.assertIn('! jail readelf -d "${BIN#"$base"}" 2>/dev/null | grep -q NEEDED ||', s)
         # infer-real runs the real test on this same build (INFER-A13).
         wf = (ROOT / ".github/workflows/infer-real.yml").read_text()
         self.assertIn('sh image/llamaserver.sh "$RUNNER_TEMP/llama/server"', wf)
         self.assertIn('AGENTOS_LLAMA_SERVER=$d/server/llama-server', wf)
         self.assertIn("image/llamaserver.sh", wf.split("workflow_dispatch")[0])
+
+    def test_the_server_is_linked_in_the_base_and_records_its_inputs(self):
+        # #5885 SEL-1: the compiler, libstdc++.a, libc.a and cmake are the guest base's, run by chroot
+        # with a clean environment, never the build host's; the link writes a map, and each input it
+        # loads from the base is recorded with guest-shipped.sh into the main tree's list.
+        s = (IMG / "llamaserver.sh").read_text()
+        self.assertIn("base=${GUEST_BASE:?", s)
+        self.assertIn("linked=${LINKED_SHIPPED:?", s)
+        jail = s[s.index("\njail() {"):s.index("\n}\n", s.index("\njail() {"))]
+        self.assertIn('chroot "$base" /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C HOME=/nonexistent', jail)
+        self.assertIn("-Wl,-Map=$lib/llama-server.map", script_line(s, "-DCMAKE_C_FLAGS="))
+        code = [ln.strip() for ln in s.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+        # Every compiler, cmake, tar, readelf and strip call runs in the jail.
+        for ln in code:
+            for tool in ("cmake", "readelf", "strip", "tar", "make", "c++", "g++", "gcc"):
+                if re.match(r"(! )?%s\b" % re.escape(tool), ln):
+                    self.fail("%s runs on the build host: %s" % (tool, ln))
+        for call in ("jail tar -xzf", "jail cmake -S", "jail sh -c 'cmake --build", "jail readelf -l",
+                     "jail readelf -d", "jail strip -o"):
+            self.assertEqual(sum(re.match(r"(! |mkdir \S+ && )?%s" % re.escape(call), ln) is not None for ln in code), 1, call)
+        # The base carries the toolchain, and its version line names it.
+        base = (IMG / "guest-base.sh").read_text()
+        inc = re.search(r"--include=(\S+)", base).group(1).split(",")
+        q = script_line(base, 'dpkg-query --admindir="$root/var/lib/dpkg" -W libpcre2-8-0').split()
+        for pkg in ("g++", "cmake", "gcc", "make", "libc6-dev"):
+            self.assertIn(pkg, inc)
+            self.assertIn(pkg, q)
+
+    def map_run(self, loads, linkdirs=("tools/server",), owner=0):
+        """Run the script's link-map section on a fixture base: a map with LOADS, one CMakeFiles
+        directory per LINKDIRS, and a stand-in guest-shipped.sh that logs its arguments and exits OWNER."""
+        s = (IMG / "llamaserver.sh").read_text()
+        part = s[s.index("\nMAP=$WORK/llama-server.map"):s.index("\njail strip -o")]
+        with tempfile.TemporaryDirectory() as t:
+            t = pathlib.Path(t)
+            lib = "/tmp/agentos-llama"
+            work = t / "base" / lib.lstrip("/")
+            (work / "build").mkdir(parents=True)
+            for d in linkdirs:
+                (work / "build" / d / "CMakeFiles/llama-server.dir").mkdir(parents=True)
+            if loads is not None:
+                (work / "llama-server.map").write_text("Archive member included\n\n" + "".join(
+                    "LOAD %s\n" % f for f in loads) + "\nMemory map\n")
+            here = t / "here"
+            here.mkdir()
+            (here / "guest-shipped.sh").write_text('echo "$GUEST_SHIPPED $*" > %s/log\nexit %d\n' % (t, owner))
+            r = subprocess.run(["sh", "-eu", "-c", part], capture_output=True, text=True,
+                               env={"PATH": "/usr/bin:/bin", "WORK": str(work), "lib": lib, "base": str(t / "base"),
+                                    "HERE": str(here), "linked": "/rec/linked.shipped"})
+            log = (t / "log").read_text().split() if (t / "log").exists() else None
+            return r, log
+
+    def test_the_link_map_records_every_input_from_the_base(self):
+        # #5885 SEL-1: on fixture maps, the inputs under the build directory (relative to CMake's link
+        # directory, or absolute under $lib) are skipped, every other one is recorded by its path in
+        # the base, and the build stops on a map that loads nothing or lacks libstdc++.a or libc.a.
+        std = "/usr/lib/gcc/x86_64-linux-gnu/14/libstdc++.a"
+        libc = "/usr/lib/gcc/x86_64-linux-gnu/14/../../../x86_64-linux-gnu/libc.a"
+        own = ["CMakeFiles/llama-server.dir/server.cpp.o", "../../common/libcommon.a", "linker stubs",
+               "/tmp/agentos-llama/tmp/ccX.o", "/tmp/agentos-llama/build/bin/../ggml/src/libggml.a"]
+        r, log = self.map_run(own + [std, libc, "../../../../crtx.o"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(log[0], "/rec/linked.shipped")
+        self.assertEqual(log[2:], sorted([std, "/usr/lib/x86_64-linux-gnu/libc.a", "/tmp/crtx.o"]))
+        cases = ((own, "loads nothing from outside"), (own + [libc], "loads no libstdc++.a"),
+                 (own + [std], "loads no libc.a"), (None, "wrote no map"))
+        for loads, msg in cases:
+            with self.subTest(msg):
+                r, log = self.map_run(loads)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn(msg, r.stderr)
+                self.assertIsNone(log)
+        for dirs in ((), ("tools/server", "tools/other")):
+            with self.subTest(linkdirs=dirs):
+                r, log = self.map_run(own + [std, libc], linkdirs=dirs)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("not one link directory", r.stderr)
+        # An input no package owns stops the build (guest-shipped.sh fails, the script stops with it).
+        r, log = self.map_run(own + [std, libc], owner=1)
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_infer_real_builds_the_server_in_the_base(self):
+        # #5885 SEL-4: the real test runs on the build the image ships, from the same base.
+        step = infer_real_step("Build llama-server from the pinned source")
+        base = step.index("sudo sh image/guest-base.sh ")
+        server = step.index("sh image/llamaserver.sh ")
+        self.assertLess(base, server)
+        line = script_line(step, "sudo env ")
+        self.assertIn('GUEST_BASE="$RUNNER_TEMP/guest-base"', line)
+        self.assertIn('LINKED_SHIPPED="$RUNNER_TEMP/linked.shipped"', line)
+        self.assertIn('"$RUNNER_TEMP/guest-base"', script_line(step, "sudo sh image/guest-base.sh "))
+        wf = (ROOT / ".github/workflows/infer-real.yml").read_text().split("workflow_dispatch")[0]
+        for path in ("image/guest-base.sh", "image/guest-shipped.sh"):
+            self.assertIn("- " + path, wf)
 
     def test_the_build_info_comes_from_the_pins_never_from_git(self):
         # #5022: llama.cpp's cmake asks git for the commit and commit count from the source directory;
@@ -214,7 +309,7 @@ class TestInferImage(unittest.TestCase):
         # finds no repository during the build.
         s = (IMG / "llamaserver.sh").read_text()
         self.assertIn('-DLLAMA_BUILD_NUMBER="$TAG" -DLLAMA_BUILD_COMMIT="$(pin llama_src_commit)"', s)
-        cmake = s[s.index("\ncmake -S "):s.index("\nUI_H=")]
+        cmake = s[s.index("\njail cmake -S "):s.index("\nUI_H=")]
         self.assertEqual(cmake.count("-DLLAMA_BUILD_NUMBER="), 1)
         tag = script_line(s, "TAG=")
         check = script_line(s, '[ -n "$TAG" ]')
@@ -240,7 +335,11 @@ class TestInferImage(unittest.TestCase):
                                   "llama.cpp/archive/refs/tags/bNNNN.tar.gz URL: '%s'" % url, r.stderr)
         # The script's own GIT_DIR line stops the discovery cmake relies on, here inside a real repo.
         iso = script_line(s, "export GIT_DIR=")
-        self.assertLess(s.index(iso), s.index("\ncmake -S "))
+        self.assertLess(s.index(iso), s.index("\njail cmake -S "))
+        # #5885: the jail clears the environment, so it passes GIT_DIR through by name; it is defined
+        # before the export, so the span below holds no env call.
+        self.assertIn('GIT_DIR="$GIT_DIR" sh -c', script_line(s, 'GIT_DIR="$GIT_DIR"'))
+        self.assertLess(s.index("\njail() {"), s.index(iso))
         self.assertGreater(s.index(iso), s.index("git get-tar-commit-id"))
         # #5622, #5643: nothing between that line and the end of the cmake configure unsets or resets
         # GIT_DIR or runs cmake under env (env -i would clear GIT_DIR).
@@ -248,7 +347,7 @@ class TestInferImage(unittest.TestCase):
         for mutant in ("unset GIT_DIR\n", "GIT_DIR=$WORK/.git\n", "export GIT_DIR=$REPO/.git\n",
                        "env -u GIT_DIR ", 'env -i PATH="$PATH" \\\n', "/usr/bin/env -i "):
             with self.subTest(mutant=mutant):
-                at = s.index("\ncmake -S ") + 1
+                at = s.index("\njail cmake -S ") + 1
                 self.assertNotEqual(git_dir_changes(s[:at] + mutant + s[at:], iso), [], mutant)
         with tempfile.TemporaryDirectory() as t:
             sub = pathlib.Path(t) / "work" / "src"
@@ -336,9 +435,12 @@ class TestInferImage(unittest.TestCase):
         self.assertEqual(arg.get("-infer-uid"), "@uid:agentos-infer")
         self.assertEqual(arg.get("-infer-model"), MODEL)
         self.assertEqual(arg.get("-infer-model-sha256"), pins()["embed_sha256"])
-        # Off until a retrieve row consumes it (D-230): no spelling of -infer is passed.
+        # Off until a retrieve row consumes it (D-230): no spelling of -infer is passed. Turning it on
+        # makes llama-server's static libstdc++ reachable (#5885, Potency 6902429342).
         for x in w:
-            self.assertFalse(re.match(r"^--?infer(=|$)", x), x)
+            self.assertFalse(re.match(r"^--?infer(=|$)", x),
+                             "%s: -infer is on; redo the reachability in assurance/vulncheck.json's image record "
+                             "for DEBIAN-CVE-2026-125709 (llama-server's static libstdc++) before it ships" % x)
         users = [l.split()[1] for l in SYSUSERS.read_text().splitlines() if l.startswith("u ")]
         self.assertIn("agentos-infer", users)
 

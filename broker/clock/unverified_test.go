@@ -406,10 +406,14 @@ func TestHW8LearnsTheRTCOffset(t *testing.T) {
 		t.Fatal("carrier time taught an offset")
 	}
 	rtc = r.wall.Add(15 * time.Hour)
-	g = rtcGuard(t, r, path, &rtc)
+	var logs []string
+	g = rtcGuard(t, r, path, &rtc, func(c *Config) { c.Logf = func(f string, a ...any) { logs = append(logs, f) } })
 	g.Check(bg)
 	if v := readSaved(t, path); v.Offset != 2*time.Hour {
 		t.Fatalf("15-hour offset replaced the old: %v", v.Offset)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "outside ±14h; not learned") {
+		t.Fatalf("15-hour offset logged %q, want it not learned", logs)
 	}
 	// A restarted guard keeps the host the offset was learned on.
 	if v := readSaved(t, path); v.OffsetHost != HostKey(testHost) {
@@ -424,13 +428,36 @@ func TestHW8LearnsTheRTCOffset(t *testing.T) {
 		t.Fatal("estimate without a file")
 	}
 	bad := filepath.Join(t.TempDir(), "bad")
-	os.WriteFile(bad, []byte(`{"have_offset":true,"offset":3600000000001}`), 0o600)
+	if err := os.WriteFile(bad, []byte(`{"have_offset":true,"offset":3600000000001}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := BootEstimate(bad, later, testHost); ok {
 		t.Fatal("estimate from an offset not on a 15-minute step")
 	}
+	// This PC's host does not make an unusable offset usable: one never
+	// learned, or one off the 15-minute step or past ±14 hours.
+	for _, v := range []saved{
+		{HaveOffset: false, Offset: 2 * time.Hour},
+		{HaveOffset: true, Offset: 2*time.Hour + time.Minute},
+		{HaveOffset: true, Offset: 15 * time.Hour},
+	} {
+		v.OffsetHost = HostKey(testHost)
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(bad, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if est, ok := BootEstimate(bad, later, testHost); ok {
+			t.Fatalf("estimate %v from offset %v (have %v) on this PC", est, v.Offset, v.HaveOffset)
+		}
+	}
 	// A file from before offsets were keyed to a PC names no host.
 	old := filepath.Join(t.TempDir(), "old")
-	os.WriteFile(old, []byte(`{"have_offset":true,"offset":3600000000000}`), 0o600)
+	if err := os.WriteFile(old, []byte(`{"have_offset":true,"offset":3600000000000}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for _, id := range []string{testHost, "", "not-a-uuid"} {
 		if _, ok := BootEstimate(old, later, id); ok {
 			t.Fatalf("estimate from an offset with no host, for PC %q", id)
@@ -457,5 +484,188 @@ func TestHW8StatusLineWhileUnverified(t *testing.T) {
 	g.Check(bg)
 	if got := g.Status().Line(time.UTC); !strings.HasPrefix(got, "Time check: restricted since") {
 		t.Fatalf("restricted: %q", got)
+	}
+}
+
+func TestTIM1FarReferenceIsNotAuthenticated(t *testing.T) {
+	// #5899: time.Time.Sub saturates at the minimum Duration, whose negation
+	// overflows to itself, so a saved NTS sync more than 292 years ahead of
+	// the box clock read as within any allowance and the status as
+	// Authenticated. It is not, either way, and the carrier widens fully.
+	rewrite := func(t *testing.T, path string, edit func(*saved)) {
+		t.Helper()
+		v := readSaved(t, path)
+		edit(&v)
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, years := range []int{300, -300} {
+		path := filepath.Join(t.TempDir(), "clock.json")
+		r := newRig()
+		kind := SyncedNTS
+		edit := func(c *Config) {
+			syncAs(&kind)(c)
+			c.StatePath = path
+			c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
+		}
+		g := r.guard(t, edit)
+		if s := g.Check(bg); !s.Authenticated {
+			t.Fatalf("%d years: status = %+v", years, s)
+		}
+		g.Flush()
+		rewrite(t, path, func(v *saved) { v.NTSWall = v.NTSWall.AddDate(years, 0, 0) })
+		kind = NotSynced
+		r.advance(time.Minute)
+		r.setCarrier(r.wall.Add(5 * time.Hour))
+		g = r.guard(t, edit)
+		lo, hi, s := g.Interval(bg)
+		if s.State != Disagree || s.Authenticated || !s.Restricted() {
+			t.Fatalf("%d years: status = %+v", years, s)
+		}
+		wantSpan(t, "far reference", lo, hi, r.wall, r.wall.Add(5*time.Hour))
+	}
+}
+
+func TestTIM1FarAnchorHolds(t *testing.T) {
+	// #5899: a saved anchor more than 292 years from the box clock is a
+	// jump the hold sees, not one the saturated difference hides.
+	rewrite := func(t *testing.T, path string, edit func(*saved)) {
+		t.Helper()
+		v := readSaved(t, path)
+		edit(&v)
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, years := range []int{300, -300} {
+		path := filepath.Join(t.TempDir(), "clock.json")
+		r := newRig()
+		r.carrier = time.Time{}
+		edit := func(c *Config) {
+			c.StatePath = path
+			c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
+		}
+		g := r.guard(t, edit)
+		if s := g.Check(bg); s.State != NetworkOnly {
+			t.Fatalf("%d years: status = %+v", years, s)
+		}
+		g.Flush()
+		rewrite(t, path, func(v *saved) { v.AnchorWall = v.AnchorWall.AddDate(years, 0, 0) })
+		g = r.guard(t, edit)
+		if s := g.Check(bg); s.State != Held {
+			t.Fatalf("%d years: status = %+v", years, s)
+		}
+	}
+}
+
+func TestTIM1SavedNTSSyncOutsideTheBootClockIsRefused(t *testing.T) {
+	// #5929, #5934: a saved NTS sync the boot clock has not reached yet, or
+	// one before the boot (which would lengthen the time since it and so
+	// widen the allowance), is a corrupt or tampered file: a restart drops
+	// it, as it does such a carrier reading, so it authenticates nothing.
+	// The same sync at the boot clock's own reading still does.
+	for _, ahead := range []time.Duration{0, time.Minute, -time.Nanosecond} {
+		path := filepath.Join(t.TempDir(), "clock.json")
+		r := newRig()
+		r.carrier = time.Time{}
+		kind := SyncedNTS
+		edit := func(c *Config) {
+			syncAs(&kind)(c)
+			c.StatePath = path
+			c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
+		}
+		g := r.guard(t, edit)
+		if s := g.Check(bg); !s.Authenticated {
+			t.Fatalf("ahead %v: status = %+v", ahead, s)
+		}
+		g.Flush()
+		v := readSaved(t, path)
+		v.NTSWall, v.NTSMono = v.NTSWall.Add(ahead), v.NTSMono+ahead
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		kind = NotSynced
+		g = r.guard(t, edit)
+		if s := g.Check(bg); s.Authenticated != (ahead == 0) {
+			t.Fatalf("ahead %v: status = %+v", ahead, s)
+		}
+	}
+}
+
+func TestTIM1SavedCarrierBeforeTheBootIsNotCarried(t *testing.T) {
+	// #5934: a saved carrier reading from a boot-clock reading before the
+	// boot would be carried forward later than it was taken, widening the
+	// interval, so a restart drops it; one taken at the boot is carried.
+	r := newRig()
+	path := filepath.Join(t.TempDir(), "clock.json")
+	edit := func(c *Config) {
+		c.StatePath = path
+		c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
+	}
+	g := r.guard(t, edit)
+	r.advance(time.Hour)
+	g.Check(bg)
+	g.Flush()
+	for _, at := range []time.Duration{0, -time.Nanosecond} {
+		v := readSaved(t, path)
+		v.CarrierMono = at
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if g := r.guard(t, edit); g.carrier.IsZero() != (at < 0) {
+			t.Fatalf("saved carrier at boot clock %v: carried %v at %v", at, g.carrier, g.carrierMono)
+		}
+	}
+}
+
+func TestTIM1SavedAnchorOutsideTheBootClockIsRefused(t *testing.T) {
+	// #6026: a saved anchor before the boot or one the boot clock has not
+	// reached yet is a corrupt or tampered file: a restart drops it, so it
+	// cannot move the hold decision; one at either end is kept.
+	r := newRig()
+	path := filepath.Join(t.TempDir(), "clock.json")
+	edit := func(c *Config) {
+		c.StatePath = path
+		c.BootID = func() string { r.mu.Lock(); defer r.mu.Unlock(); return r.boot }
+	}
+	r.carrier = time.Time{}
+	g := r.guard(t, edit)
+	r.advance(time.Hour)
+	g.Check(bg)
+	g.Flush()
+	for _, at := range []time.Duration{0, -time.Nanosecond, time.Hour, time.Hour + time.Nanosecond, 2 * time.Hour} {
+		v := readSaved(t, path)
+		v.AnchorMono = at
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		g := r.guard(t, edit)
+		if g.anchored != (0 <= at && at <= time.Hour) {
+			t.Fatalf("saved anchor at boot clock %v: anchored %v", at, g.anchored)
+		}
+		if s := g.Check(bg); at > time.Hour && s.State != NetworkOnly {
+			t.Fatalf("saved anchor at boot clock %v: status = %+v", at, s)
+		}
 	}
 }

@@ -15,6 +15,8 @@ import os
 import pathlib
 import re
 import shutil
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -341,7 +343,8 @@ class PhaseFlagsTest(unittest.TestCase):
 class CmdQemuTest(unittest.TestCase):
     """cmd_qemu's own wiring, with QEMU and the snapshots stubbed (M9)."""
 
-    def run_qemu(self, phases, file_phases, events, flags=(), source=("--image", "/x/agentos.img"), on_boot=None, stubs=None):
+    def run_qemu(self, phases, file_phases, events, flags=(), source=("--image", "/x/agentos.img"), on_boot=None, stubs=None,
+                 extra=()):
         with tempfile.TemporaryDirectory() as d:
             d = pathlib.Path(d)
             (d / "vars.fd").write_bytes(b"")
@@ -362,7 +365,7 @@ class CmdQemuTest(unittest.TestCase):
 
             argv = ["qemu", "--work", str(d / "work"), *source, "--phases-file",
                     str(d / "phases.json"), "--host-disk", "w=/dev/null", "--ovmf-vars", str(d / "vars.fd"),
-                    "--phases", phases] + [a for f in flags for a in ("--flag", f)]
+                    "--phases", phases, *extra] + [a for f in flags for a in ("--flag", f)]
             with unittest.mock.patch.multiple(hostcheck, boot_once=boot_once, seed_tpm=lambda a, w: None,
                                               qemu_snapshot=lambda a, w: snap(), evaluate=spy, **(stubs or {})):
                 rc = hostcheck.main(argv)
@@ -375,16 +378,83 @@ class CmdQemuTest(unittest.TestCase):
            "data": {"guest": False, "reason": "host-qmp-quit"}}
 
     def test_flags_reach_each_phase_and_unclean_end_the_unclean_phase_alone(self):
+        sizes = []
+
+        def blank_size(args, label):
+            if label.startswith("firmware-"):
+                sizes.append(os.path.getsize(pathlib.Path(args.work) / "blank-usb.img"))
+
         rc, seen, judged, report = self.run_qemu("task,unclean,task", self.PHASES, {"unclean": [self.CUT]},
-                                                 flags=["owner-boot-order"])
+                                                 flags=["owner-boot-order"], on_boot=blank_size)
         self.assertEqual(rc, 0, report)
+        self.assertEqual(len(sizes), 2)
+        self.assertTrue(all(sizes), sizes)  # a drive the firmware can see: a zero-byte one may get no option
         self.assertEqual([s[0] for s in seen], ["firmware-1", "firmware-2", "task", "unclean", "task"])
-        self.assertEqual([s[2] for s in seen[:2]], [None, None])  # firmware-only boots have no drive
+        # The firmware-only boots have a blank USB drive at the image's slot, so the boot option the
+        # firmware adds for a plugged drive is in the baseline (HOST-1e2); the image is never attached.
+        blank = [s[2] for s in seen[:2]]
+        self.assertEqual(blank[0], blank[1])
+        self.assertEqual(blank[0][0], "-drive")
+        self.assertRegex(blank[0][1], r"\Aif=none,id=agentos,format=raw,file=.*/work/blank-usb\.img\Z")
+        self.assertEqual(blank[0][2:], seen[2][2][2:6])  # the same controller and slot as the image's
+        self.assertNotIn("/x/agentos.img", " ".join(blank[0]))
         self.assertTrue(all(s[2] for s in seen[2:]))
         self.assertEqual(seen[3][1], [tuple(x) for x in self.PHASES["unclean"]])
         self.assertEqual(judged, [["owner-boot-order"], ["owner-boot-order", "unclean-end"], ["owner-boot-order"]])
         rc, _, judged, _ = self.run_qemu("unclean", self.PHASES, {"unclean": [self.CUT]})
         self.assertEqual((rc, judged), (0, [["unclean-end"]]))
+
+    def test_credentials_and_memory_reach_the_os_boots_alone(self):
+        # HOST-1e2: the image's responder rides as SMBIOS credentials on its own boots; the firmware-only
+        # boots get none.
+        with tempfile.TemporaryDirectory() as d:
+            unit = pathlib.Path(d, "unit")
+            unit.write_bytes(b"[Unit]\nDescription=x\n")
+            memory = []
+            rc, seen, _, _ = self.run_qemu("task", self.PHASES, {}, on_boot=lambda a, label: memory.append(a.memory),
+                                           extra=("--credential", f"systemd.extra-unit.x@y.service={unit}",
+                                                  "--memory", "8192"))
+            self.assertEqual(rc, 0)
+            self.assertEqual(memory, [8192] * 3)
+            self.assertNotIn("-smbios", seen[0][2] + seen[1][2])
+            boot = seen[2][2]
+            want = "type=11,value=io.systemd.credential.binary:systemd.extra-unit.x@y.service=W1VuaXRdCkRlc2NyaXB0aW9uPXgK"
+            self.assertEqual(boot[-2:], ["-smbios", want])
+            rc, _, _, _ = self.run_qemu("task", self.PHASES, {}, on_boot=lambda a, label: memory.append(a.memory))
+            self.assertEqual(memory[-1], 1024)
+            for bad in ("noequals", f"a,b={unit}", f"a b={unit}", f"={unit}", "x=/nonexistent/file"):
+                with self.subTest(bad):
+                    rc, seen, _, report = self.run_qemu("task", self.PHASES, {}, extra=("--credential", bad))
+                    self.assertEqual((rc, report), (2, None))
+                    self.assertEqual(seen, [])  # refused before any boot
+
+    def test_the_memory_reaches_qemus_command(self):
+        # --memory reaches QEMU itself, not only the args each boot gets (Potency on #5816).
+        class Built(Exception):
+            pass
+
+        for memory in (1536, 8192):
+            with self.subTest(memory), tempfile.TemporaryDirectory() as d:
+                # main hands each boot its parsed --memory (test_credentials_and_memory_reach_the_os_boots_alone).
+                args = argparse.Namespace(memory=memory, tools_root=None, ovmf_code="code.fd", host_disks_bus=[])
+                popened = []
+
+                def popen(args_, name, argv, seen=popened, **kw):
+                    seen.append((name, argv))
+                    return unittest.mock.Mock()
+
+                def connect(path, proc):
+                    raise Built
+
+                with unittest.mock.patch.multiple(hostcheck, stack_popen=popen, _wait_path=lambda p: None,
+                                                  _connect=connect, qemu_data_args=lambda root: []), \
+                        unittest.mock.patch.object(hostcheck.tempfile, "mkdtemp", lambda **kw: d), \
+                        self.assertRaises(Built):
+                    hostcheck.Qemu(args, pathlib.Path(d), "task")
+                (_, cmd), = [x for x in popened if x[0] == "qemu-system-x86_64"]
+                i = cmd.index("-m")
+                self.assertEqual(cmd[i + 1], str(memory))
+                self.assertNotIn("-m", cmd[i + 1:])
 
     def test_a_phases_file_replaces_the_stand_ins_phases(self):
         # The halting-guest QEMU test boots the stand-in with its own unclean phase (#5256).
@@ -392,6 +462,7 @@ class CmdQemuTest(unittest.TestCase):
                                       source=("--kernel", "k", "--initrd", "i"))
         self.assertEqual(seen[2][1], [tuple(x) for x in self.PHASES["unclean"]])
         self.assertEqual(seen[2][2][:2], ["-kernel", "k"])
+        self.assertEqual([s[2] for s in seen[:2]], [None, None])  # the stand-in's firmware-only boots: no drive
 
     def test_an_unclean_phase_from_a_phases_file_with_an_orderly_end_is_refused(self):
         # The row's failure path: a phases file whose unclean phase powers off in order before the quit.
@@ -560,6 +631,209 @@ class AllowListTest(unittest.TestCase):
                                 a[rule["kind"]][k] = 1
                             r = hostcheck.evaluate(b, a, allow, flags=flags)
                             self.assertEqual([f["key"] for f in r[want]], [k], r)
+
+
+# HOST-1e2b1 (#6135): what the S1 PC run needs from the tool. A third system
+# reads the PC's RTC against an SNTP reference, the owner's opted-in disk
+# (HW-8a) is named rather than waved through, and pcrlock pins nothing.
+# REQ: HW-8, HW-8a
+def rtc(offset):
+    return {"rtc": 1_800_000_000, "reference": 1_800_000_000 - offset, "offset": offset, "server": "ntp.test"}
+
+
+class RtcOffsetTest(unittest.TestCase):
+    def check(self, before, after, **kw):
+        return hostcheck.evaluate(before, after, hostcheck.load_allow(), **kw)
+
+    def test_offset_moved_past_tolerance_is_flagged(self):
+        # Natural drift and read error stay inside the tolerance; a write that moves the clock does not.
+        self.assertTrue(self.check(snap(rtc=rtc(600.2)), snap(rtc=rtc(601.9)))["pass"])
+        r = self.check(snap(rtc=rtc(600.2)), snap(rtc=rtc(0.1)))
+        self.assertFalse(r["pass"])
+        self.assertEqual(flagged(r), {("rtc", "offset", "changed")})
+        self.assertFalse(self.check(snap(rtc=rtc(-100.0)), snap(rtc=rtc(-102.5)))["pass"])
+        self.assertTrue(self.check(snap(rtc=rtc(-100.0)), snap(rtc=rtc(-102.5)), rtc_tolerance=3)["pass"])
+        # A tolerance that is not a finite, non-negative number would switch the check off.
+        for bad in (float("nan"), float("inf"), -1.0):
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "tolerance"):
+                self.check(snap(rtc=rtc(600.0)), snap(rtc=rtc(0.0)), rtc_tolerance=bad)
+
+    def test_a_baseline_near_true_time_is_flagged(self):
+        # An image whose kernel writes true time into an RTC that was already near true time
+        # leaves the offset where it was, so the baseline must start well away from it.
+        r = self.check(snap(rtc=rtc(0.3)), snap(rtc=rtc(0.1)))
+        self.assertFalse(r["pass"])
+        self.assertEqual(flagged(r), {("rtc", "offset", "baseline-near-true-time")})
+        self.assertIn("firmware setup", r["flagged"][0]["fix"])
+        floor = hostcheck.RTC_BASELINE_FLOOR
+        self.assertTrue(self.check(snap(rtc=rtc(-floor)), snap(rtc=rtc(-floor)))["pass"])
+        self.assertFalse(self.check(snap(rtc=rtc(floor - 1)), snap(rtc=rtc(floor - 1)))["pass"])
+        self.assertFalse(self.check(snap(rtc=rtc(float("nan"))), snap(rtc=rtc(float("nan"))))["pass"])
+
+    def test_offset_in_one_snapshot_only_is_flagged(self):
+        # A run that forgot the RTC in one snapshot cannot pass as clean.
+        for before, after in ((snap(rtc=rtc(1)), snap()), (snap(), snap(rtc=rtc(1)))):
+            self.assertEqual(flagged(self.check(before, after)), {("rtc", "offset", "missing")})
+        self.assertTrue(self.check(snap(), snap())["pass"])  # the QEMU run records no offset
+
+    def test_rtc_is_read_at_its_second_edge(self):
+        # sysfs gives whole seconds; the edge where the value ticks gives the sub-second phase.
+        reads = iter(["100\n", "100\n", "100\n", "101\n"])
+        clock = iter([5.0, 5.1, 5.2, 5.3, 5.4, 5.5])
+        value, at = hostcheck.rtc_at_edge(lambda: next(reads), lambda: next(clock), sleep=lambda s: None)
+        self.assertEqual(value, 101)
+        self.assertGreaterEqual(at, 5.2)
+        self.assertLessEqual(at, 5.5)
+        with self.assertRaisesRegex(hostcheck.HostcheckError, "did not tick"):
+            t = iter(range(100))
+            hostcheck.rtc_at_edge(lambda: "100\n", lambda: float(next(t)), sleep=lambda s: None)
+
+    def sntp_server(self, reply):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.settimeout(5)
+
+        def serve():
+            try:
+                data, peer = sock.recvfrom(512)
+            except OSError:
+                return
+            sock.sendto(reply(data), peer)
+        threading.Thread(target=serve, daemon=True).start()
+        self.addCleanup(sock.close)
+        return sock.getsockname()[1]
+
+    @staticmethod
+    def ntp_reply(request, offset, echo=True, mode=4, stratum=2, leap=0):
+        t = time.time() + offset
+        secs = int(t)
+        now = (secs + hostcheck.NTP_EPOCH).to_bytes(4, "big") + int((t - secs) * (1 << 32)).to_bytes(4, "big")
+        out = bytearray(48)
+        out[0] = (leap << 6) | (4 << 3) | mode
+        out[1] = stratum
+        out[24:32] = request[40:48] if echo else b"\1" * 8
+        out[32:40] = now
+        out[40:48] = now
+        return bytes(out)
+
+    def test_sntp_reference_checks_the_echo(self):
+        port = self.sntp_server(lambda req: self.ntp_reply(req, 600))
+        self.assertAlmostEqual(hostcheck.sntp_offset("127.0.0.1", port), 600, delta=0.5)
+        for bad, why in (({"echo": False}, "echo"), ({"mode": 3}, "mode"), ({"stratum": 0}, "stratum"),
+                         ({"leap": 3}, "leap indicator")):
+            port = self.sntp_server(lambda req, bad=bad: self.ntp_reply(req, 0, **bad))
+            with self.assertRaisesRegex(hostcheck.HostcheckError, why):
+                hostcheck.sntp_offset("127.0.0.1", port)
+
+    def test_server_names_parse(self):
+        self.assertEqual(hostcheck.parse_server("ntp.test"), ("ntp.test", 123))
+        self.assertEqual(hostcheck.parse_server("ntp.test:1123"), ("ntp.test", 1123))
+        self.assertEqual(hostcheck.parse_server("fd00::1"), ("fd00::1", 123))
+        self.assertEqual(hostcheck.parse_server("[fd00::1]:1123"), ("fd00::1", 1123))
+        for bad in ("ntp.test:x", "ntp.test:0", "[fd00::1]:99999", ":123", "[]"):
+            with self.assertRaises(hostcheck.HostcheckError, msg=bad):
+                hostcheck.parse_server(bad)
+
+    @staticmethod
+    def timex(status, junk=0xA5):
+        # struct timex on LP64: modes, 4 bytes of padding, four longs, then status at byte 40.
+        raw = bytearray([junk]) * 512
+        raw[40:44] = status.to_bytes(4, sys.byteorder)
+        return bytes(raw)
+
+    def test_the_timex_decode_reads_status_and_its_polarity(self):
+        # The guard against a synchronised third system: a wrong offset or polarity fails open in silence,
+        # so the decode is tested on crafted bytes with junk around status, and against adjtimex's return.
+        self.assertTrue(hostcheck.timex_synced(self.timex(0), 0))
+        self.assertTrue(hostcheck.timex_synced(self.timex(0x2001), 1))  # PLL, INS: still synchronised
+        self.assertFalse(hostcheck.timex_synced(self.timex(hostcheck.STA_UNSYNC), hostcheck.TIME_ERROR))
+        self.assertFalse(hostcheck.timex_synced(self.timex(0x41, junk=0), hostcheck.TIME_ERROR))
+        self.assertTrue(hostcheck.timex_synced(self.timex(hostcheck.STA_CLOCKERR), hostcheck.TIME_ERROR))
+        # Status and return value disagree: the bytes were not read as the kernel wrote them.
+        for status, ret in ((hostcheck.STA_UNSYNC, 0), (0, hostcheck.TIME_ERROR)):
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "does not match"):
+                hostcheck.timex_synced(self.timex(status), ret)
+
+        def fake(status, ret):
+            def adjtimex(buf):
+                buf.raw = self.timex(status)
+                return ret
+            return adjtimex
+        self.assertFalse(hostcheck.kernel_clock_synced(fake(hostcheck.STA_UNSYNC, hostcheck.TIME_ERROR)))
+        self.assertTrue(hostcheck.kernel_clock_synced(fake(0, 0)))
+        # The live kernel's answer passes the same agreement check, so the layout is the kernel's.
+        self.assertIsInstance(hostcheck.kernel_clock_synced(), bool)
+
+    def test_a_pc_snapshot_needs_an_rtc_reference(self):
+        with tempfile.TemporaryDirectory() as d, \
+                unittest.mock.patch("sys.stderr"), self.assertRaises(SystemExit) as e:
+            hostcheck.main(["snapshot", "--efivarfs", d, "--tcti", "device:/dev/null", "-o", f"{d}/s.json"])
+        self.assertEqual(e.exception.code, 2)
+
+    def test_snapshot_refuses_while_the_kernel_clock_is_synchronised(self):
+        # A synchronised kernel copies its clock into the RTC every 11 minutes,
+        # which would hide the image's write behind the third system's.
+        with tempfile.TemporaryDirectory() as d:
+            dev = pathlib.Path(d, "since_epoch")
+            dev.write_text("100\n")
+            with unittest.mock.patch.object(hostcheck, "kernel_clock_synced", return_value=True), \
+                    unittest.mock.patch.object(hostcheck, "sntp_offset", return_value=0.0):
+                with self.assertRaisesRegex(hostcheck.HostcheckError, "synchronised"):
+                    hostcheck.rtc_snapshot("ntp.test", device=dev)
+            with unittest.mock.patch.object(hostcheck, "kernel_clock_synced", return_value=False), \
+                    unittest.mock.patch.object(hostcheck, "sntp_offset", return_value=10.0), \
+                    unittest.mock.patch.object(hostcheck, "rtc_at_edge", return_value=(1000, 1600.25)):
+                r = hostcheck.rtc_snapshot("ntp.test", device=dev)
+        self.assertEqual(r["rtc"], 1000)
+        self.assertAlmostEqual(r["offset"], 1000 - 1610.25)
+        self.assertEqual(r["server"], "ntp.test")
+
+
+class OptedInDiskTest(unittest.TestCase):
+    def check(self, before, after, **kw):
+        return hostcheck.evaluate(before, after, hostcheck.load_allow(), **kw)
+
+    def test_only_the_named_disk_change_is_excluded(self):
+        before = snap(disk={"win": "aa" * 32, "data": "cc" * 32})
+        written = snap(disk={"win": "aa" * 32, "data": "dd" * 32})
+        self.assertFalse(self.check(before, written)["pass"])
+        r = self.check(before, written, opted_in_disks={"data"})
+        self.assertTrue(r["pass"], r)
+        self.assertEqual([(e["key"], e["requirement"]) for e in r["excluded"]], [("data", "HW-8a")])
+        both = snap(disk={"win": "bb" * 32, "data": "dd" * 32})
+        self.assertEqual(flagged(self.check(before, both, opted_in_disks={"data"})), {("disk", "win", "changed")})
+        gone = snap(disk={"win": "aa" * 32})
+        self.assertEqual(flagged(self.check(before, gone, opted_in_disks={"data"})), {("disk", "data", "removed")})
+        # The flag names a disk, never another kind of key.
+        after = snap(disk=before["disk"])
+        after["uefi"][f"{GLOBAL}:BootOrder"] = {"attr": 7, "sha256": "99"}
+        self.assertFalse(self.check(before, after, opted_in_disks={f"{GLOBAL}:BootOrder"})["pass"])
+
+    def test_unknown_name_stops_the_diff(self):
+        with tempfile.TemporaryDirectory() as d:
+            b, a = pathlib.Path(d, "b.json"), pathlib.Path(d, "a.json")
+            b.write_text(json.dumps(snap()))
+            a.write_text(json.dumps(snap()))
+            self.assertEqual(hostcheck.main(["diff", str(b), str(a), "--opted-in-disk", "dta"]), 2)
+
+
+class PcrlockTest(unittest.TestCase):
+    def test_the_image_pins_no_pcrlock_index(self):
+        # Debian's systemd-pcrlock-make-policy.service carries ConditionSecurity=measured-uki, so
+        # it runs only after systemd-stub, which a non-UKI image never has (image I1). If the image
+        # moves to UKIs or names pcrlock itself, P2-1 pins an index and hostcheck_hw8.json needs a rule.
+        conf = (ROOT / "image" / "mkosi" / "mkosi.conf").read_text()
+        self.assertRegex(conf, r"(?m)^UnifiedKernelImages=no$")
+        named = [p for p in (ROOT / "image").rglob("*") if p.is_file() and p.suffix != ".allow"
+                 and "pcrlock" in p.read_text(errors="replace")]
+        self.assertEqual(named, [])
+        self.assertFalse([r for r in hostcheck.load_allow() if "pcrlock" in json.dumps(r)])
+        # With no rule, any index pcrlock would define fails the diff.
+        for handle in ("0x1000000", "0x1800000", "0x1d10000"):
+            after = snap()
+            after["tpm-nv"][handle] = {"name": "p", "attributes": 0x2004000a, "size": 8, "data": None}
+            self.assertEqual(flagged(hostcheck.evaluate(snap(), after, hostcheck.load_allow())),
+                             {("tpm-nv", handle, "added")})
 
 
 class SourcesTest(unittest.TestCase):
@@ -1031,6 +1305,203 @@ class StandinTest(unittest.TestCase):
         self.assertFalse(hostcheck.with_guest_errors({"pass": False}, [])["pass"])
 
 
+IMAGE_DIR = ROOT / "tools" / "hostcheck_image"
+RESPONDER = "hostcheck-responder.service"
+# HOST-1e2: what the image boots with on the QEMU host, as SMBIOS credentials: the responder unit and its
+# script, its start, and the serial login kept off its console.
+IMAGE_CREDENTIALS = {
+    f"systemd.extra-unit.{RESPONDER}": RESPONDER,
+    "hostcheck.responder": "responder.sh",
+    "systemd.unit-dropin.multi-user.target": "multi-user.conf",
+    "systemd.unit-dropin.serial-getty@ttyS0.service": "serial-getty.conf",
+}
+OS_START = "BdsDxe: starting Boot"  # OVMF's line as it hands over to the boot loader
+
+
+def unit_values(text):
+    """{(section, key): [values]} of a unit file, every assignment in order."""
+    out, section = {}, None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line[0] in "#;":
+            continue
+        if line.startswith("["):
+            section = line.strip("[]")
+            continue
+        key, _, value = line.partition("=")
+        out.setdefault((section, key.strip()), []).append(value.strip())
+    return out
+
+
+def responder_unit_problems(text):
+    """Why the responder unit's answers could outlast agentos-mor.service's MOR clear (HOST-1h)."""
+    v = unit_values(text)
+    words = lambda key: [w for x in v.get(("Unit", key), []) for w in x.split()]
+    out = []
+    if any(x.lower() in ("no", "false", "0", "off") for x in v.get(("Unit", "DefaultDependencies"), [])):
+        out.append("default dependencies off: nothing orders its stop before the clear")
+    if "agentos-mor.service" not in words("After"):
+        out.append("not After=agentos-mor.service, so its stop is not ordered before the clear")
+    if "agentos-mor.service" in words("Before"):
+        out.append("Before=agentos-mor.service stops it after the clear")
+    if "shutdown.target" not in words("Conflicts"):
+        out.append("no Conflicts=shutdown.target")
+    if v.get(("Unit", "Before")) or v.get(("Unit", "Wants")) or v.get(("Unit", "Requires")):
+        out.append("other ordering or dependencies than the pinned ones")
+    if v.get(("Service", "ImportCredential")) != ["hostcheck.responder"]:
+        out.append("does not import the responder script")
+    for key in ("ExecStop", "ExecStopPost", "ExecStartPost", "ExecReload"):
+        if v.get(("Service", key)):
+            out.append(f"{key}= runs more than the responder")
+    return out
+
+
+def stub_journal(d):
+    """A systemd-cat in D that runs the responder with its stdout into D/journal, as journald would store it."""
+    stub = pathlib.Path(d, "systemd-cat")
+    stub.write_text(f'#!/bin/sh\n[ "$1 $2" = "-t hostcheck-responder" ] || exit 64\nshift 2\nexec "$@" > {d}/journal\n')
+    stub.chmod(0o755)
+
+
+class ResponderTest(unittest.TestCase):
+    """The image's responder (HOST-1e2, HOST-1h part 2) answers until systemd stops it, and its unit is
+    ordered so that stop comes before agentos-mor.service's MOR clear."""
+
+    def setUp(self):
+        self.unit = (IMAGE_DIR / RESPONDER).read_text()
+
+    def test_the_unit_stops_before_the_mor_clear(self):
+        self.assertEqual(responder_unit_problems(self.unit), [])
+        for name, (old, new) in {
+            "default dependencies off": ("[Unit]\n", "[Unit]\nDefaultDependencies=no\n"),
+            "not after": ("After=agentos-mor.service\n", ""),
+            "before instead": ("After=agentos-mor.service\n", "Before=agentos-mor.service\n"),
+            "before too": ("After=agentos-mor.service\n", "After=agentos-mor.service\nBefore=agentos-mor.service\n"),
+            "no conflict": ("Conflicts=shutdown.target\n", ""),
+            "a stop command": ("[Service]\n", "[Service]\nExecStop=/bin/sleep 60\n"),
+        }.items():
+            with self.subTest(name):
+                self.assertIn(old, self.unit)
+                self.assertNotEqual(responder_unit_problems(self.unit.replace(old, new, 1)), [])
+
+    def test_the_credentials_name_what_the_image_reads(self):
+        for name, f in IMAGE_CREDENTIALS.items():
+            self.assertRegex(name, hostcheck.CREDENTIAL_NAME)
+            self.assertTrue((IMAGE_DIR / f).is_file(), f)
+        self.assertIn(f"Wants={RESPONDER}", (IMAGE_DIR / "multi-user.conf").read_text())
+        phases = json.loads((IMAGE_DIR / "phases.json").read_text())
+        self.assertEqual(sorted(phases), ["boot", "restart", "unclean"])
+        for name, steps in phases.items():
+            with self.subTest(name):
+                hostcheck.phase_flags(name, [tuple(s) for s in steps], [])  # the unclean phase's shape
+                self.assertEqual([s for s in steps if s[1] == "os"], [[OS_START, "os"]] * (2 if name == "restart" else 1))
+
+    def run_responder(self, cmds, script=None):
+        with tempfile.TemporaryDirectory() as d:
+            stub = pathlib.Path(d, "systemctl")
+            stub.write_text(f'#!/bin/sh\necho "$*" >> {d}/calls\n')
+            stub.chmod(0o755)
+            stub_journal(d)
+            path = pathlib.Path(d, "responder.sh")
+            path.write_text(script or (IMAGE_DIR / "responder.sh").read_text())
+            p = subprocess.run(["/bin/sh", str(path)], input=cmds, capture_output=True, text=True, timeout=30,
+                               env={"PATH": f"{d}:/usr/bin:/bin"})
+            calls = pathlib.Path(d, "calls")
+            out = [ln for ln in p.stdout.splitlines() if not ln.startswith("HOSTCHECK-DIAG ")]
+            calls = calls.read_text().splitlines() if calls.exists() else []
+            # Every answer reaches the journal too, and nothing else does (HOST-1h part 2).
+            self.assertEqual(pathlib.Path(d, "journal").read_text().splitlines(),
+                             [x for x in out if x.startswith("HOSTCHECK-ALIVE ")])
+            return out, [c for c in calls if not c.startswith("show ")]  # the diagnosis's reads
+
+    def test_the_responder_answers_and_keeps_answering_after_an_exit(self):
+        for exit_ in ("poweroff", "reboot"):
+            with self.subTest(exit_):
+                out, calls = self.run_responder(f"alive A\n{exit_}\nalive B\nbogus\n")
+                self.assertEqual(out, ["HOSTCHECK-READY", "HOSTCHECK-ALIVE A", "HOSTCHECK-ALIVE B"])
+                self.assertEqual(calls, [f"--no-block {exit_}"])
+        # A responder that ends its own answers at an exit would hide the ordering from the image test.
+        script = (IMAGE_DIR / "responder.sh").read_text()
+        quits = script.replace('"$cmd") || echo "HOSTCHECK-EXIT-FAILED $cmd" ;;', '"$cmd"); exit 0 ;;')
+        self.assertNotEqual(quits, script)
+        self.assertNotIn("HOSTCHECK-ALIVE B", self.run_responder("poweroff\nalive B\n", quits)[0])
+        # It outlives SIGTERM, so only the unit's stop timeout ends it.
+        self.assertEqual(unit_values(self.unit)[("Service", "TimeoutStopSec")], ["2s"])
+
+    def test_an_exit_request_survives_the_stop_it_starts(self):
+        # HOST-restart-flake (#5992): the exit request stops this unit, whose SIGTERM reaches its whole
+        # cgroup, systemctl included, and can come before systemctl reads systemd's answer. The stub
+        # sends that SIGTERM to the responder's process group, so a systemctl it kills says EXIT-FAILED.
+        def run(script):
+            with tempfile.TemporaryDirectory() as d:
+                stub = pathlib.Path(d, "systemctl")
+                stub.write_text(f'#!/bin/sh\n[ "$1" = show ] && exit 0\nkill -TERM 0\necho "$*" >> {d}/calls\n')
+                stub.chmod(0o755)
+                stub_journal(d)
+                path = pathlib.Path(d, "responder.sh")
+                path.write_text(script)
+                p = subprocess.run(["/bin/sh", str(path)], input="reboot\nalive B\n", capture_output=True, text=True,
+                                   timeout=30, env={"PATH": f"{d}:/usr/bin:/bin"}, start_new_session=True)
+                calls = pathlib.Path(d, "calls")
+                return p, calls.read_text().splitlines() if calls.exists() else []
+
+        script = (IMAGE_DIR / "responder.sh").read_text()
+        p, calls = run(script)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(hostcheck.guest_errors(p.stdout.encode()), [], p.stdout)
+        self.assertIn("HOSTCHECK-DIAG stop ", p.stdout)  # the SIGTERM came, during the request
+        self.assertTrue(p.stdout.endswith("HOSTCHECK-ALIVE B\n"), p.stdout)
+        self.assertEqual(calls, ["--no-block reboot"])
+        # A systemctl that keeps the default SIGTERM dies of it and reports the stop it started as failed.
+        killed = script.replace("(trap '' TERM; exec systemctl --no-block \"$cmd\")", 'systemctl --no-block "$cmd"')
+        self.assertNotEqual(killed, script)
+        p, calls = run(killed)
+        self.assertEqual(hostcheck.guest_errors(p.stdout.encode()), ["HOSTCHECK-EXIT-FAILED reboot"], p.stdout)
+        self.assertEqual(calls, [])
+
+    def test_the_responder_outlives_sigterm_and_says_what_the_clear_will_find(self):
+        with tempfile.TemporaryDirectory() as d:
+            for tool in ("systemctl", "journalctl"):
+                pathlib.Path(d, tool).write_text(f'#!/bin/sh\necho "{tool} $*"\n')
+                pathlib.Path(d, tool).chmod(0o755)
+            stub_journal(d)
+            p = subprocess.Popen(["/bin/sh", str(IMAGE_DIR / "responder.sh")], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, text=True, env={"PATH": f"{d}:/usr/bin:/bin"})
+            try:
+                lines = [p.stdout.readline()]  # the start's diagnosis, then READY
+                while lines[-1] not in ("HOSTCHECK-READY\n", ""):
+                    lines.append(p.stdout.readline())
+                self.assertEqual(lines[-1], "HOSTCHECK-READY\n", lines)
+                p.stdin.write("alive A\n")
+                p.stdin.flush()
+                self.assertEqual(p.stdout.readline(), "HOSTCHECK-ALIVE A\n")
+                p.send_signal(signal.SIGTERM)
+                stop = [p.stdout.readline() for _ in range(len(lines) - 1)]
+                p.stdin.write("alive B\n")
+                p.stdin.close()
+                rest = p.stdout.read()
+                self.assertEqual(p.wait(timeout=30), 0)  # end of input, with no SIGTERM since, ends it
+            finally:
+                p.kill()
+        self.assertTrue(all(x.startswith("HOSTCHECK-DIAG start ") for x in lines[:-1]), lines)
+        self.assertIn("HOSTCHECK-DIAG start agentos-mor.service systemctl show -p ActiveState -p SubState -p Result "
+                      "--value agentos-mor.service \n", lines)
+        self.assertIn("HOSTCHECK-DIAG start journal -1: journalctl -q -b -1 -u agentos-mor.service -o cat\n", lines)
+        self.assertIn("HOSTCHECK-DIAG start order: journalctl -q -b -1 -o short-monotonic -t hostcheck-responder "
+                      "-t agentos-mor\n", lines)
+        self.assertTrue(all(x.startswith("HOSTCHECK-DIAG stop ") for x in stop), stop)
+        self.assertEqual(rest, "HOSTCHECK-ALIVE B\n")  # still answering after the SIGTERM
+
+    def test_a_failed_exit_request_says_so(self):
+        with tempfile.TemporaryDirectory() as d:
+            pathlib.Path(d, "systemctl").write_text("#!/bin/sh\nexit 1\n")
+            pathlib.Path(d, "systemctl").chmod(0o755)
+            stub_journal(d)
+            p = subprocess.run(["/bin/sh", str(IMAGE_DIR / "responder.sh")], input="poweroff\n", capture_output=True,
+                               text=True, timeout=30, env={"PATH": f"{d}:/usr/bin:/bin"})
+        self.assertEqual(hostcheck.guest_errors(p.stdout.encode()), ["HOSTCHECK-EXIT-FAILED poweroff"])
+
+
 # The tools root step, line for line (blank and comment lines aside): the image's snapshot stanza
 # alone, selected by its snapshot URI, exactly one of it, and the four stack packages from it (#5055).
 ROOT_STEP = [
@@ -1131,7 +1602,7 @@ class HostcheckJobTest(unittest.TestCase):
         self.assertEqual(len(uris), 1, got)
         self.assertRegex(uris[0], r"\AURIs: https://snapshot\.debian\.org/archive/debian/\d{8}T\d{6}Z/\Z")  # one, dated
         self.assertFalse([ln for ln in fields if "security" in ln], got)
-        self.assertIn("Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg", fields)
+        self.assertIn("Signed-By: /usr/share/keyrings/debian-archive-bookworm-automatic.gpg", fields)
         # A second stanza on the snapshot (its security archive, say) joins the selection: the guard stops it.
         two = sources.replace("URIs: http://security.debian.org/debian-security",
                               "URIs: https://snapshot.debian.org/archive/debian-security/20261001T000000Z/")
@@ -1365,6 +1836,45 @@ class HostcheckJobTest(unittest.TestCase):
                 self.assertIn(old, self.ci)
                 self.assertNotEqual(self.problems(self.ci.replace(old, new, 1)), [])
 
+    def image_job_problems(self, text):
+        """HOST-1e2: image.yml's hostcheck-image job boots the built image on the same pinned stack."""
+        out = []
+        steps = job_steps(text, "hostcheck-image")
+        lines = [line for _, b in steps for line in b.replace("\\\n", " ").splitlines()
+                 if not line.strip().startswith("#")]
+        runner_apt = "\n".join(line for line in lines if APT.search(line))
+        for pkg in PINNED:
+            if re.search(rf"(?<![\w.+-]){re.escape(pkg)}(?![\w.+-])", runner_apt):
+                out.append(f"{pkg} installed from the runner's archive")
+        if any(DPKG.search(line) for line in lines):
+            out.append("the job installs a package file with dpkg")
+        root = [b for _, b in steps if re.search(r"(?m)^\s*(?:run:\s*)?(?:sudo\s+)?mmdebstrap\s", b)]
+        if len(root) != 1 or [ln.strip() for ln in root[0].splitlines()
+                              if ln.strip() and not ln.strip().startswith("#")] != ROOT_STEP:
+            out.append("the tools root step is not the pinned one")
+        run = [b for _, b in steps if "tests.test_hostcheck" in b]
+        if (len(run) != 1 or "python -m unittest tests.test_hostcheck.ImageTest -v" not in run[0]
+                or not re.search(r"HOSTCHECK_TOOLS_ROOT: \$\{\{ runner\.temp \}\}/hostcheck-tools", run[0])
+                or "HOSTCHECK_IMAGE: " not in run[0]):
+            out.append("the image run does not name the tools root and the image")
+        return out
+
+    def test_the_image_job_takes_the_pinned_stack(self):
+        image = (ROOT / ".github" / "workflows" / "image.yml").read_text()
+        self.assertEqual(self.image_job_problems(image), [])
+        for name, (old, new) in {
+            "runner qemu": ("tpm2-tools ", "tpm2-tools qemu-system-x86 "),
+            "runner ovmf": ("tpm2-tools ", "tpm2-tools ovmf "),
+            "root without ovmf": ("--include=qemu-system-x86,ovmf,", "--include=qemu-system-x86,"),
+            "no root env": ("HOSTCHECK_TOOLS_ROOT: ${{ runner.temp }}/hostcheck-tools", "HOSTCHECK_X: x"),
+            "no image": ("HOSTCHECK_IMAGE: ", "HOSTCHECK_X: "),
+            "other tests": ("tests.test_hostcheck.ImageTest -v", "tests.test_hostcheck.ResponderTest -v"),
+        }.items():
+            with self.subTest(name):
+                job = image[image.index("\n  hostcheck-image:\n"):]
+                self.assertIn(old, job)
+                self.assertNotEqual(self.image_job_problems(image.replace(job, job.replace(old, new, 1))), [])
+
     def test_curl_is_seen_by_any_path(self):
         # #5533 item 1: the lint's -q check reaches every curl command, and no URL or other word.
         for line in ("curl -fsSL x", "/usr/bin/curl -fsSL x", "./curl x", "bin/curl x", "~/bin/curl x",
@@ -1513,6 +2023,245 @@ class QemuTest(unittest.TestCase):
         self.assertTrue(any(k.endswith(":HostcheckCanary") for k in uefi), uefi)
         self.assertEqual([f for f in phase["flagged"] if f["kind"] not in ("disk", "uefi", "tpm-nv", "rtc")], [])
 
+
+IMAGE = os.environ.get("HOSTCHECK_IMAGE")
+
+
+@unittest.skipUnless(IMAGE, "set HOSTCHECK_IMAGE to a raw agentOS image to boot it")
+class ImageTest(unittest.TestCase):
+    """HOST-1e2: P2-1's image on the QEMU host leaves it untouched, and its responder's answers end
+    before its MOR clear (HOST-1h part 2)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tools_root = os.environ.get("HOSTCHECK_TOOLS_ROOT") or None
+        for tool in ("qemu-system-x86_64", "swtpm", "swtpm_ioctl"):
+            if cls.tools_root:
+                hostcheck.tool_argv(cls.tools_root, tool)
+            elif not shutil.which(tool):
+                raise AssertionError(f"{tool} missing")
+        for tool in ("tpm2_getcap", "virt-fw-vars", "busybox", "mkntfs", "sfdisk"):
+            if not shutil.which(tool):
+                raise AssertionError(f"{tool} missing")
+        if not os.path.isfile(IMAGE):
+            raise AssertionError(f"HOSTCHECK_IMAGE {IMAGE} is not a file")
+        # HOSTCHECK_WORK (CI): a directory kept after the run, so the job uploads its consoles and reports.
+        cls.tmp = None if os.environ.get("HOSTCHECK_WORK") else tempfile.TemporaryDirectory()
+        cls.dir = pathlib.Path(os.environ.get("HOSTCHECK_WORK") or cls.tmp.name)
+        cls.dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["sh", str(ROOT / "tools" / "hostcheck_standin.sh"), str(cls.dir / "standin")], check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        for drive in cls.dir.glob("*.raw"):
+            drive.unlink()
+        if cls.tmp:
+            cls.tmp.cleanup()
+
+    def argv(self, name, phases, phases_file=IMAGE_DIR / "phases.json"):
+        """hostcheck's arguments for a run on a fresh copy of the image (the run writes to its drive)."""
+        drive = self.dir / f"{name}.raw"
+        subprocess.run(["cp", "--sparse=always", IMAGE, str(drive)], check=True)
+        argv = ["qemu", "--work", str(self.dir / name), "--image", str(drive), "--phases-file", str(phases_file),
+                "--host-disk", f"windows={self.dir / 'standin' / 'windows.img'},bus=nvme", "--phases", phases,
+                "--memory", "8192", "--timeout", "900"]
+        for cred, f in IMAGE_CREDENTIALS.items():
+            argv += ["--credential", f"{cred}={IMAGE_DIR / f}"]
+        if self.tools_root:
+            argv += ["--tools-root", self.tools_root]
+        return argv
+
+    def report(self, name):
+        # The consoles' lines that explain a result, in the job's log beside the uploaded files.
+        for log in sorted((self.dir / name).glob("console-*.log")):
+            lines = [ln for ln in log.read_bytes().splitlines()
+                     if re.search(rb"agentos-mor|agentos-health|HOSTCHECK-(?:DIAG|[A-Z]+-FAILED)|fallback|Boot[0-9A-F]{4}", ln)]
+            print(f"--- {log.name}", *(ln.decode(errors="replace")[:300] for ln in lines[-40:]), sep="\n", file=sys.stderr)
+        report = self.dir / name / "report.json"
+        self.assertTrue(report.exists(), f"no report for {name}")
+        return json.loads(report.read_text())
+
+    def test_the_image_leaves_the_host_untouched(self):
+        p = subprocess.run([sys.executable, str(ROOT / "tools" / "hostcheck.py"), *self.argv("untouched", "boot,restart,unclean")],
+                           capture_output=True, text=True, timeout=5400)
+        print(p.stderr[-5000:], file=sys.stderr)
+        report = self.report("untouched")
+        self.assertEqual(p.returncode, 0, json.dumps([dict(x, snapshot=None) for x in report["phases"]], indent=1))
+        self.assertEqual([x["phase"] for x in report["phases"]], ["boot", "restart", "unclean"])
+        for x in report["phases"]:
+            self.assertEqual((x["phase"], x["guest_errors"], x["rtc_writes"]), (x["phase"], [], []))
+        mor = {x["phase"]: "mor" in [d["change_id"] for d in x["disclosed"]] for x in report["phases"]}
+        self.assertEqual(mor, {"boot": False, "restart": False, "unclean": True})
+
+    def test_the_image_in_shutdown_does_not_answer(self):
+        # HOST-1h part 2 (#5267): the host sends alive every 50 ms from before a poweroff until QEMU
+        # exits. The responder keeps answering into the shutdown until systemd stops it, so answers
+        # after the poweroff show the window was open; every one must come before the MOR clear. The
+        # clear's line reaches no console, so the next boot's responder prints the last boot's last
+        # answers and the clear from the journal, on its monotonic clock.
+        phases = self.dir / "shutdown.json"
+        phases.write_text(json.dumps({"shutdown": [[OS_START, "os"], ["HOSTCHECK-READY", None]],
+                                      "after": [[OS_START, "os"], ["HOSTCHECK-READY", "serial:poweroff\n"]]}))
+        sent = {}
+        drive = hostcheck.Qemu.drive
+
+        def flooding(q, steps, deadline):
+            drive(q, steps, deadline)
+            if q.label != "shutdown":
+                return
+            i = 0
+            try:
+                while q.proc.poll() is None and time.monotonic() < deadline:
+                    if i == 20:
+                        sent["poweroff"] = i
+                        q.serial.sendall(b"poweroff\n")
+                    q.serial.sendall(f"alive s{i}\n".encode())
+                    i += 1
+                    time.sleep(0.05)
+            except OSError:
+                pass  # QEMU closed the console as it exited
+            sent["last"] = i
+
+        with unittest.mock.patch.object(hostcheck.Qemu, "drive", flooding):
+            rc = hostcheck.main(self.argv("shutdown", "shutdown,after", phases))
+        console = (self.dir / "shutdown" / "console-shutdown.log").read_bytes()
+        answers = [int(n) for n in re.findall(rb"HOSTCHECK-ALIVE s(\d+)\r?\n", console)]
+        self.assertIn("poweroff", sent)
+        late = [n for n in answers if n >= sent["poweroff"]]
+        self.assertTrue(late, f"no answer after the poweroff (sent {sent}): the test saw no shutdown window")
+        self.assertLess(max(late), sent["last"], "the flood outlasted every answer")
+        after = (self.dir / "shutdown" / "console-after.log").read_bytes()
+        lines = re.findall(rb"HOSTCHECK-DIAG start order: \[\s*([0-9.]+)\] \S+ (\S+?)(?:\[\d+\])?: ([^\r\n]*)", after)
+        clear = [(float(t), text) for t, who, text in lines if who == b"agentos-mor"]
+        alive = [float(t) for t, who, text in lines if who == b"hostcheck-responder"]
+        self.assertTrue(clear, f"no MOR clear in the last boot's journal: {lines}")
+        self.assertTrue(alive, f"no answer in the last boot's journal: {lines}")
+        # The journal's last answer is the console's last one (responder.sh writes the journal's copy
+        # after the console's), so no answer printed after the clear could have lost its journal line.
+        last = [text for t, who, text in lines if who == b"hostcheck-responder"][-1]
+        self.assertEqual(last, b"HOSTCHECK-ALIVE s%d" % max(answers), lines)
+        self.assertLess(max(alive), clear[-1][0], f"an answer came after the MOR clear: {lines}")
+        self.assertEqual(clear[-1][1], b"agentos-mor: mor=cleared", lines)
+        report = self.report("shutdown")
+        self.assertEqual(rc, 0, [dict(x, snapshot=None) for x in report["phases"]])
+        self.assertFalse([x for x in report["phases"] if "mor" in [d["change_id"] for d in x["disclosed"]]])
+
+    def test_a_failed_wipe_is_on_disk_at_the_next_boot(self):
+        # #6095 (MOR-wipe-journal, MOR-wipe-owner): one boot whose shutdown wipe fails (a drop-in points its
+        # find at a missing directory), then a fresh QEMU process on the same drive. The second boot's journal
+        # still holds the first one's wipe error, which shows the journal is kept across a reboot (Storage=
+        # persistent and the flush), and the unit's ExecStopPost left the record agentosd's STATUS reads
+        # (broker/cmd/agentosd/wipenote.go). A probe unit prints both to the console before the responder starts.
+        d = self.dir / "wipefail-in"
+        d.mkdir(exist_ok=True)
+        (d / "wipe.conf").write_text("[Service]\nExecStop=\nExecStop=/usr/bin/find /run/hostcheck-no-such-dir -delete\n")
+        (d / "probe.service").write_text(
+            "[Unit]\nDescription=hostcheck wipe probe (QEMU host check only)\n"
+            "After=systemd-journal-flush.service local-fs.target\nBefore=serial-getty@ttyS0.service\n"
+            "[Service]\nType=oneshot\nStandardOutput=journal+console\nStandardError=journal+console\n"
+            "ExecStart=/bin/sh -c 'journalctl -q -b -1 -u agentos-keeper-wipe.service -o cat 2>&1 | "
+            "sed \"s/^/HOSTCHECK-WIPE journal: /\"; echo \"HOSTCHECK-WIPE record: $$(cat /var/lib/agentos-wipe/failed 2>&1)\"'\n")
+        (d / "responder.conf").write_text("[Unit]\nWants=hostcheck-wipe.service\nAfter=hostcheck-wipe.service\n")
+        phases = d / "phases.json"
+        boot = [[OS_START, "os"], ["HOSTCHECK-READY", "serial:poweroff\n"]]
+        phases.write_text(json.dumps({"fail": boot, "after": boot}))
+        argv = self.argv("wipefail", "fail,after", phases) + [
+            "--credential", f"systemd.unit-dropin.agentos-keeper-wipe.service={d / 'wipe.conf'}",
+            "--credential", f"systemd.extra-unit.hostcheck-wipe.service={d / 'probe.service'}",
+            "--credential", f"systemd.unit-dropin.{RESPONDER}={d / 'responder.conf'}"]
+        rc = hostcheck.main(argv)
+        after = (self.dir / "wipefail" / "console-after.log").read_bytes()
+        print(*[ln.decode(errors="replace") for ln in re.findall(rb"HOSTCHECK-WIPE [^\r\n]*", after)[:20]],
+              sep="\n", file=sys.stderr)
+        journal = re.findall(rb"HOSTCHECK-WIPE journal: ([^\r\n]*)", after)
+        self.assertTrue([j for j in journal if re.search(rb"find: .*/run/hostcheck-no-such-dir.*No such file", j)],
+                        journal)
+        # The record is "$SERVICE_RESULT $EXIT_CODE $EXIT_STATUS". The unit has no main process (no ExecStart=), and
+        # systemd sets EXIT_CODE and EXIT_STATUS for the main process only, so on the first image run (#6130) the
+        # record held "exit-code" and two empty words. Any record other than success is what wipenote.go reads.
+        self.assertRegex(after, rb"HOSTCHECK-WIPE record: exit-code *\r?\n")
+        # The clear rests not on the wipe's result but on the directories it empties, which no setup filled
+        # here: MOR is cleared and the host is as it was.
+        report = self.report("wipefail")
+        self.assertEqual(rc, 0, [dict(x, snapshot=None) for x in report["phases"]])
+
+
+    def test_an_isolate_keeps_mor_set(self):
+        # MOR-emergency-isolate (#5947, HW-8): a boot that isolates emergency.target and then rescue.target,
+        # each followed by "systemctl default", then powers off; then a fresh QEMU process on the same drive.
+        # Both targets run agentos-fallback first (mkosi.conf's drop-ins), which reboots while the boot entry
+        # still counts tries (the first boot of a release; an orderly stop that clears MOR). So the probe
+        # reboots once the first boot is blessed, and isolates on the blessed boot, where the fallback stays
+        # up: the box the issue's failure path is about. The probe has no default dependencies: sysinit.target
+        # conflicts with emergency.target, so its stop stops every unit that requires it (the secret holders),
+        # whatever their IgnoreOnIsolate=. MOR-pageca-emergency (#6178): the page authority's staging and the
+        # wipe have none either, so both stay active and the staged authority stays the one a card printed
+        # before the isolates names. After each step it prints MOR's value, the three units' states, the
+        # staged certificate's hash, and whether the sealed pair is the one before it (its bytes stay in the
+        # guest). agentos-mor.service stays active and MOR stays set throughout, so the holders that come back
+        # are covered; its clear runs only at the shutdown, after the staging unit's stop has emptied
+        # /run/agentos-setup (the clear refuses while that holds a file), and the next boot's responder prints
+        # its last line from the journal.
+        d = self.dir / "isolate-in"
+        d.mkdir(exist_ok=True)
+        (d / "isolate.sh").write_text(
+            "if [ -e /sys/firmware/efi/efivars/LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f ]; then\n"
+            "\techo HOSTCHECK-ISOLATE counted; exec systemctl --no-block reboot\nfi\n"
+            "MOR=/sys/firmware/efi/efivars/MemoryOverwriteRequestControl-e20939be-32d4-41be-a150-897f85d49829\n"
+            "pair() { sha256sum 2>/dev/null </run/agentos-setup/page-ca | cut -c1-64; }\n"
+            "say() { c=$(sha256sum 2>/dev/null </run/agentos-page-ca/authority.der | cut -c1-64); p=$(pair)\n"
+            "\techo \"HOSTCHECK-ISOLATE $1 mor $(od -An -tu1 -j4 -v $MOR 2>&1 | tr -d ' \\n') cert ${c:-none}"
+            " pair $([ -n \"$p\" ] && [ \"$p\" = \"$last\" ] && echo same || echo other)"
+            " $(systemctl show -p Id -p ActiveState --value agentos-mor.service agentos-keeper-pageca.service"
+            " agentos-keeper-wipe.service | tr -s '\\n' ' ')\"\n"
+            "\tlast=$p; }\n"
+            "say before\n"
+            "for t in emergency rescue; do\n"
+            "\ttimeout 300 systemctl isolate \"$t.target\"; r=$?; say \"$t rc=$r\"\n"
+            "\ttimeout 300 systemctl default; r=$?; say \"default rc=$r\"\n"
+            "done\n"
+            "echo HOSTCHECK-ISOLATE done\n"
+            "exec systemctl --no-block poweroff\n")
+        (d / "probe.service").write_text(
+            "[Unit]\nDescription=hostcheck isolate probe (QEMU host check only)\nDefaultDependencies=no\n"
+            "After=agentos-keeper-pageca.service multi-user.target boot-complete.target systemd-bless-boot.service\n"
+            "Conflicts=shutdown.target\nBefore=shutdown.target\nIgnoreOnIsolate=yes\n"
+            "[Service]\nType=exec\nImportCredential=hostcheck.isolate\n"
+            "StandardOutput=journal+console\nStandardError=journal+console\n"
+            "ExecStart=/bin/sh -c 'exec /bin/sh \"$$CREDENTIALS_DIRECTORY/hostcheck.isolate\"'\n")
+        (d / "responder.conf").write_text("[Unit]\nWants=hostcheck-isolate.service\n")
+        phases = d / "phases.json"
+        phases.write_text(json.dumps({"isolate": [[OS_START, "os"], ["HOSTCHECK-ISOLATE counted", None],
+                                                  [OS_START, "os"], ["HOSTCHECK-ISOLATE done", None]],
+                                      "after": [[OS_START, "os"], ["HOSTCHECK-READY", "serial:poweroff\n"]]}))
+        argv = self.argv("isolate", "isolate,after", phases) + [
+            "--credential", f"hostcheck.isolate={d / 'isolate.sh'}",
+            "--credential", f"systemd.extra-unit.hostcheck-isolate.service={d / 'probe.service'}",
+            "--credential", f"systemd.unit-dropin.{RESPONDER}={d / 'responder.conf'}"]
+        rc = hostcheck.main(argv)
+        console = (self.dir / "isolate" / "console-isolate.log").read_bytes()
+        seen = re.findall(rb"[^\r\n]*(?:HOSTCHECK|agentos-fallback|emergency|rescue|Reached target|sulogin)[^\r\n]*", console)
+        print(*[ln.decode(errors="replace")[:240] for ln in seen[-60:]], sep="\n", file=sys.stderr)
+        steps = re.findall(rb"HOSTCHECK-ISOLATE (.*?) mor (\S+) cert (\S+) pair (\S+) (.*?) *\r?\n", console)
+        self.assertEqual([x[0] for x in steps], [b"before", b"emergency rc=0", b"default rc=0",
+                                                 b"rescue rc=0", b"default rc=0"], steps)
+        # MOR is set before the isolates and stays set through every step: the clear's unit is never stopped.
+        self.assertNotEqual(steps[0][1], b"0", steps)
+        self.assertEqual({x[1] for x in steps}, {steps[0][1]}, steps)
+        self.assertEqual([x[4].split()[:2] for x in steps], [[b"agentos-mor.service", b"active"]] * 5, steps)
+        # Neither isolate stops the staging or the wipe (#6178), so the authority staged before them, its
+        # certificate and its sealed pair, is the one after each step.
+        self.assertEqual([x[4].split()[2:] for x in steps], [[b"agentos-keeper-pageca.service", b"active",
+                                                             b"agentos-keeper-wipe.service", b"active"]] * 5, steps)
+        self.assertRegex(steps[0][2], rb"^[0-9a-f]{64}$")
+        self.assertEqual({x[2] for x in steps}, {steps[0][2]}, steps)
+        self.assertEqual([x[3] for x in steps[1:]], [b"same"] * 4, steps)
+        after = (self.dir / "isolate" / "console-after.log").read_bytes()
+        last = re.findall(rb"HOSTCHECK-DIAG start journal -1: (agentos-mor: [^\r\n]*)", after)
+        self.assertEqual(last[-1:], [b"agentos-mor: mor=cleared"], last)
+        report = self.report("isolate")
+        self.assertEqual(rc, 0, [dict(x, snapshot=None) for x in report["phases"]])
+        self.assertFalse([x for x in report["phases"] if "mor" in [d["change_id"] for d in x["disclosed"]]])
 
 if __name__ == "__main__":
     unittest.main()

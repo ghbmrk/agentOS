@@ -1092,3 +1092,95 @@ func TestWatchBackoffResetsWhenNothingIsOwed(t *testing.T) {
 		t.Fatalf("writer's notice retried %d times in 450ms", tells-n0)
 	}
 }
+
+// recallFails is a kernel whose Recall answers err.
+type recallFails struct {
+	*fakeKernel
+	err error
+}
+
+func (r recallFails) Recall(context.Context, string) (kernelsock.Recall, bool, error) {
+	return kernelsock.Recall{}, false, r.err
+}
+
+// ghostNamed is a kernel whose look-up also names extra subjects, which
+// Recall does not know or reports erased.
+type ghostNamed struct {
+	*fakeKernel
+	extra []string
+}
+
+func (g ghostNamed) Named(ctx context.Context, label string) ([]string, []string, error) {
+	found, unread, err := g.fakeKernel.Named(ctx, label)
+	return append(found, g.extra...), unread, err
+}
+
+// eraseAlso is a kernel whose every logged erase also answers err, a later
+// step that failed.
+type eraseAlso struct {
+	*fakeKernel
+	err error
+}
+
+func (e eraseAlso) Erase(ctx context.Context, sub string) (kernelsock.Confirmation, error) {
+	c, err := e.fakeKernel.Erase(ctx, sub)
+	if err != nil {
+		return c, err
+	}
+	return c, e.err
+}
+
+// OWN-6: a find whose Recall fails is an error, not "nothing found", so a
+// subject is never silently left out of what the owner is shown.
+func TestAFindWhoseRecallFailsIsAnError(t *testing.T) {
+	k := newFakeKernel()
+	k.add("s1", "Alice", 1, nil)
+	b := newForgetBox(t, k, &rewindMachines{}, t.TempDir())
+	b.f = newForgetFlow(recallFails{k, errors.New("kernel: store busy")}, b.rw)
+	if found, err := b.f.find(context.Background(), "Alice"); err == nil || found.Handle != "" {
+		t.Fatalf("find: %+v %v", found, err)
+	}
+	if len(k.erases) != 0 {
+		t.Fatalf("erased %v", k.erases)
+	}
+}
+
+// OWN-6: a named subject Recall does not know, or reports erased, is
+// neither shown nor erased on confirm.
+func TestAFindSkipsUnknownAndErasedSubjects(t *testing.T) {
+	k := newFakeKernel()
+	k.add("s1", "Alice", 1, nil)
+	k.add("s2", "Alice", 3, nil)
+	k.erased["s2"] = true
+	b := newForgetBox(t, k, &rewindMachines{}, t.TempDir())
+	b.f = newForgetFlow(ghostNamed{k, []string{"s2", "ghost"}}, b.rw)
+	found, err := b.f.find(context.Background(), "Alice")
+	if err != nil || found.Handle == "" || found.Items != 1 {
+		t.Fatalf("find: %+v %v", found, err)
+	}
+	r, err := b.f.confirm(context.Background(), found.Handle)
+	if err != nil || r.Erased != 1 || r.Already != 0 || r.NotErased != 0 || !slices.Equal(k.erases, []string{"s1"}) {
+		t.Fatalf("confirm: %+v %v, erased %v", r, err, k.erases)
+	}
+	// Only unknown and erased subjects: nothing to confirm.
+	b.f = newForgetFlow(ghostNamed{k, []string{"s2", "ghost"}}, b.rw)
+	if found, err := b.f.find(context.Background(), "Nobody"); err != nil || found.Handle != "" || found.Items != 0 {
+		t.Fatalf("ghosts only: %+v %v", found, err)
+	}
+}
+
+// OWN-6: an erase that is logged but whose later step failed counts as
+// erased and is logged.
+func TestALoggedEraseWithAFailedStepIsLogged(t *testing.T) {
+	k := newFakeKernel()
+	k.add("s1", "Alice", 2, nil)
+	b := newForgetBox(t, k, &rewindMachines{}, t.TempDir())
+	b.f = newForgetFlow(eraseAlso{k, errors.New("kernel: backup note failed")}, b.rw)
+	r := b.forget(t, "Alice")
+	if r.Erased != 1 || r.NotErased != 0 || r.ErasedKinds["message"] != 2 {
+		t.Fatalf("result: %+v", r)
+	}
+	if !slices.Contains(b.logs, "forget: an erase is logged but a step after it failed: %v") {
+		t.Fatalf("logs: %q", b.logs)
+	}
+}

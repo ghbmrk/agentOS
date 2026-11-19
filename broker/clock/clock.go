@@ -42,6 +42,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -229,7 +230,7 @@ func HeldText(jump time.Duration) string {
 // hours, the shape of a wrong time zone rather than a moved clock.
 func zoneLike(skew time.Duration) bool {
 	if skew < 0 {
-		skew = -skew
+		skew = neg(skew)
 	}
 	if skew < 14*time.Minute {
 		return false
@@ -284,9 +285,20 @@ func (s Status) Line(loc *time.Location) string {
 	return "Time check: not checked."
 }
 
+// neg is -d, saturating: time.Time.Sub saturates at the minimum Duration,
+// whose negation overflows to itself, so -d would read a time more than
+// 292 years away as within any bound (#5899). Every difference of times
+// this package negates goes through it.
+func neg(d time.Duration) time.Duration {
+	if d == math.MinInt64 {
+		return math.MaxInt64
+	}
+	return -d
+}
+
 func about(d time.Duration) string {
 	if d < 0 {
-		d = -d
+		d = neg(d)
 	}
 	n, unit := int64(d/time.Minute), "minute"
 	switch {
@@ -619,13 +631,13 @@ func (g *Guard) check(ctx context.Context) Status {
 	}
 	ref, allow := g.ntsRefLocked(mono)
 	d := now.Sub(ref)
-	s.Authenticated = d <= allow && -d <= allow
+	s.Authenticated = d <= allow && neg(d) <= allow
 	switch {
 	case have:
 		g.carrier, g.carrierMono = carrier, mono
 		s.Skew = now.Sub(carrier)
 		switch {
-		case s.Skew > g.cfg.Tolerance || -s.Skew > g.cfg.Tolerance:
+		case s.Skew > g.cfg.Tolerance || neg(s.Skew) > g.cfg.Tolerance:
 			s.State = Disagree
 		default:
 			s.State = CarrierOnly
@@ -641,7 +653,7 @@ func (g *Guard) check(ctx context.Context) Status {
 		s.State, s.Skew = Disagree, prev.Skew
 	case g.anchored:
 		held := g.anchorWall.Add(mono - g.anchorMono)
-		if d := now.Sub(held); d > g.allowedLocked(mono) || -d > g.allowedLocked(mono) {
+		if d := now.Sub(held); d > g.allowedLocked(mono) || neg(d) > g.allowedLocked(mono) {
 			s.State, s.Skew, s.Held = Held, d, held
 		} else if synced {
 			s.State = NetworkOnly
@@ -693,7 +705,9 @@ func (g *Guard) check(ctx context.Context) Status {
 	text := g.noticeLocked(s, mono)
 	// While alerts count toward the cap, every check saves, so a reboot
 	// finds this boot's uptime no older than the last check (L3 F1, round 4).
-	if !wasChecked || prev.State != s.State || prev.Since != s.Since || text != "" || have || len(g.alerts) > 0 || verifiedNow {
+	// Every NTS check saves its sync, so a broker restart keeps the bound
+	// the running guard had, even through a long hold (#5899).
+	if !wasChecked || prev.State != s.State || prev.Since != s.Since || text != "" || have || len(g.alerts) > 0 || verifiedNow || nts {
 		g.saveLocked()
 	}
 	if changed := !wasChecked || prev.State != s.State; text != "" || changed {
@@ -866,7 +880,7 @@ func (g *Guard) intervalLocked(now time.Time, mono time.Duration) (lo, hi time.T
 	lo, hi = now, now
 	c := g.carrierForwardLocked(mono)
 	if c.IsZero() && g.status.State == Disagree {
-		c = now.Add(-g.status.Skew)
+		c = now.Add(neg(g.status.Skew))
 	}
 	if c.IsZero() {
 		return lo, hi
@@ -907,12 +921,12 @@ func (g *Guard) refresh(ctx context.Context) (time.Time, Status) {
 	drifted := false
 	if g.anchored && s.State != Held && s.State != Disagree {
 		d := now.Sub(g.anchorWall.Add(mono - g.anchorMono))
-		drifted = d > g.allowedLocked(mono) || -d > g.allowedLocked(mono)
+		drifted = d > g.allowedLocked(mono) || neg(d) > g.allowedLocked(mono)
 	}
 	g.mu.Unlock()
 	jump := now.Sub(s.At) - (mono - last)
 	stale := mono-last >= g.cfg.Interval && g.running.Load() == 0
-	if !checked || stale || drifted || jump > g.cfg.Tolerance || -jump > g.cfg.Tolerance {
+	if !checked || stale || drifted || jump > g.cfg.Tolerance || neg(jump) > g.cfg.Tolerance {
 		s = g.Check(ctx)
 		now, mono = g.cfg.Now(), g.cfg.Elapsed()
 	}
@@ -985,7 +999,7 @@ func (g *Guard) load() {
 	if g.cfg.StatePath == "" {
 		return
 	}
-	b, err := readFile(g.cfg.StatePath)
+	b, err := readState(g.cfg.StatePath)
 	if errors.Is(err, os.ErrNotExist) {
 		return
 	}
@@ -1009,36 +1023,38 @@ func (g *Guard) load() {
 		g.offset, g.haveOffset, g.offsetHost = v.Offset, v.HaveOffset, v.OffsetHost
 	}
 	g.verified = v.VerifiedBoot != "" && v.VerifiedBoot == g.cfg.BootID()
-	if v.Anchored && sameBoot {
+	mono, wall := g.cfg.Elapsed(), g.cfg.Now()
+	// The anchor, the NTS sync and the carrier reading keep their bounds across
+	// a restart, robust to a later wall-clock step, as within one process
+	// (#5758, #5811); one before the boot or not reached yet is corrupt (#6026).
+	if v.Anchored && sameBoot && 0 <= v.AnchorMono && v.AnchorMono <= mono {
 		g.anchored, g.anchorWall, g.anchorMono = true, v.AnchorWall, v.AnchorMono
 	}
-	if sameBoot {
+	if sameBoot && 0 <= v.NTSMono && v.NTSMono <= mono {
 		g.ntsWall, g.ntsMono = v.NTSWall, v.NTSMono
 	}
-	mono, wall := g.cfg.Elapsed(), g.cfg.Now()
-	// The carrier reading keeps a known disagreement's width across a
-	// restart, robust to a later wall-clock step, as within one process
-	// (#5811); a reading the boot clock has not reached yet is corrupt.
-	if sameBoot && v.CarrierMono <= mono {
+	if sameBoot && 0 <= v.CarrierMono && v.CarrierMono <= mono {
 		g.carrier, g.carrierMono = v.Carrier, v.CarrierMono
 	}
-	// Alerts from an earlier boot are placed on this boot's clock by their
-	// age: the part within that boot comes from its boot clock and is
-	// trusted; only the downtime since, which the box clock gives at both
-	// ends, is clamped to between zero and this boot's uptime, so no clock
-	// setting frees the cap early (L3 F1 on #68). Alerts a day old are
-	// pruned before every save, so an in-boot age outside zero to a day
-	// means a corrupt file: that alert counts as just sent (security R1).
+	// Alerts are placed on this boot's clock by their age at the save, from
+	// the saving boot's clock, plus the time since the save: within the same
+	// boot from the boot clock; after a reboot from the box clock at both
+	// ends, clamped to between zero and this boot's uptime, so no clock
+	// setting frees the cap early (L3 F1 on #68). Alerts a day old are pruned
+	// before every save, so an age outside zero to a day, or a same-boot save
+	// before the boot or not reached yet, means a corrupt file: that alert
+	// counts as just sent (security R1; #6058).
 	down := min(max(wall.Sub(v.SavedWall), 0), mono)
+	if sameBoot {
+		down = mono - v.SavedMono
+	}
 	for _, a := range v.Alerts {
-		if !sameBoot {
-			age, d := v.SavedMono-a.Mono, down
-			if age < 0 || age > alertWindow+time.Minute { // a minute for the save's own delay
-				g.cfg.Logf("clock: saved alert age %v implausible, counting it as new", age)
-				age, d = 0, 0
-			}
-			a.Mono = mono - (age + d)
+		age, d := v.SavedMono-a.Mono, down
+		if age < 0 || age > alertWindow+time.Minute || d < 0 || d > mono { // a minute for the save's own delay
+			g.cfg.Logf("clock: saved alert age %v (saved %v ago) implausible, counting it as new", age, d)
+			age, d = 0, 0
 		}
+		a.Mono = mono - (age + d)
 		g.alerts = append(g.alerts, a)
 	}
 }
@@ -1127,12 +1143,9 @@ func (g *Guard) startLocked() time.Time { return g.cfg.Now().Add(-g.cfg.Elapsed(
 // learned or no readable file; then the clock is left as the kernel set it.
 // The estimate stays unverified: the guard's floor still bounds it.
 func BootEstimate(statePath string, rtc time.Time, hostID string) (time.Time, bool) {
-	b, err := readFile(statePath)
-	if err != nil {
-		return time.Time{}, false
-	}
+	b, err := readState(statePath)
 	var v saved
-	if json.Unmarshal(b, &v) != nil || !v.HaveOffset || !validOffset(v.Offset) {
+	if err != nil || json.Unmarshal(b, &v) != nil || !v.HaveOffset || !validOffset(v.Offset) {
 		return time.Time{}, false
 	}
 	if h := HostKey(hostID); h == "" || h != v.OffsetHost {
@@ -1141,9 +1154,30 @@ func BootEstimate(statePath string, rtc time.Time, hostID string) (time.Time, bo
 	return rtc.Add(-v.Offset), true
 }
 
+// readState reads the state file under the rule saveLocked writes it by
+// (privfile.WriteAtomic, #6058): its directory as privfile.OpenDir checks
+// it, and the file opened without following a link and refused unless it
+// is this uid's own plain file, open to no other uid (privfile.CheckFile).
+func readState(p string) ([]byte, error) {
+	d, r, err := privfile.OpenDir(filepath.Dir(p))
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	defer r.Close()
+	f, err := r.OpenFile(filepath.Base(p), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err == nil {
+		defer f.Close()
+		err = privfile.CheckFile(f)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return io.ReadAll(f)
+}
+
 // readFile is os.ReadFile refusing a link at p (REV-CHK-links, #3945): the
-// state file is never a link, so one there was planted, and the sysfs and
-// procfs files RTC, HostID and bootID read are plain files.
+// sysfs and procfs files RTC, HostID and bootID read are plain files.
 func readFile(p string) ([]byte, error) {
 	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {

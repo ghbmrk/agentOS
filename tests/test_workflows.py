@@ -1401,8 +1401,27 @@ class WorkflowTest(unittest.TestCase):
         # and main's strict up-to-date rule put every open PR behind each one. Renders run on a
         # schedule, on dispatch, and on a push that touches BOARD.md, never on an issue event.
         triggers = (WORKFLOWS / "board.yml").read_text().split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
-        self.assertEqual(re.findall(r"(?m)^  ([a-z_]+):", triggers), ["schedule", "push", "workflow_dispatch"])
+        self.assertEqual(re.findall(r"(?m)^  ([a-z_]+):", triggers), ["schedule", "push", "workflow_dispatch", "issues"])
         self.assertRegex(triggers, r"(?m)^    - cron: '\d+ \*/\d+ \* \* \*'$")
+        # BOARD-transition-relation: the issues trigger is label events for the transition job only;
+        # the render job skips every issues event, so a label burst still renders nothing.
+        self.assertRegex(triggers, r"(?m)^  issues:\n    types: \[labeled, unlabeled\]$")
+        text = (WORKFLOWS / "board.yml").read_text()
+        render = text.split("\n  render:\n", 1)[1].split("\n  commit:\n", 1)[0]
+        self.assertRegex(render, r"(?m)^    if: github\.event_name != 'issues' && github\.ref == 'refs/heads/main'$")
+        transition = text.split("\n  transition:\n", 1)[1].split("\n  render:\n", 1)[0]
+        # It writes, so only collaborator-opened work items reach it, as in intake.yml (#6060).
+        self.assertIn("\n      && contains(fromJSON('[\"OWNER\", \"MEMBER\", \"COLLABORATOR\"]'), github.event.issue.author_association)\n", transition)
+        # The one write is the issue comment naming the problem (#5989).
+        self.assertEqual(re.findall(r"(?m)^      ([a-z-]+): write\b", transition), ["issues"])
+        self.assertIn('python3 -I tools/board.py transition --repo "$GITHUB_REPOSITORY" --issue "$ISSUE" --label "$LABEL" --action "$ACTION" --comment', transition)
+        self.assertNotRegex(transition.split("run:", 1)[1], r"\$\{\{")  # event values reach the shell only through env
+        # Each label event of a swap is judged on its own: remove-then-add (unlabeled merged, then
+        # labeled queued) is illegal only in the first run, so no issues run may cancel or replace
+        # another, pending ones included (L3 on #5972). Renders still supersede each other.
+        conc = text.split("\nconcurrency:\n", 1)[1].split("\njobs:", 1)[0]
+        self.assertEqual(conc, "  group: board${{ github.event_name == 'issues' && format('-issue-run-{0}', github.run_id) || '' }}\n"
+                               "  cancel-in-progress: ${{ github.event_name != 'issues' }}")
 
     def test_fuzz_runs_go_through_fuzzrun_and_never_by_duration(self):
         # P1-4-flake-ci (REQ: LOOP-7): a duration -fuzztime can end in the fuzz coordinator's
@@ -1649,7 +1668,7 @@ class WorkflowTest(unittest.TestCase):
         guard = "        if: steps.scope.outputs.records != 'true'\n"
         self.assertIn(guard, race[want])
         # #4961: `plan` runs a test-only diff's changed tests for their coverage, so it needs it too.
-        for job, first in (("mutants", "Gremlins on the package"), ("plan", "Shards for each package (#4961)")):
+        for job, first in (("mutants", "Gremlins and statement deletions on the package (#4573)"), ("plan", "Shards for each package (#4961)")):
             mut = job_steps((WORKFLOWS / "mutgate.yml").read_text(), job)
             names = [n for n, _ in mut]
             self.assertIn(want, names)
@@ -1667,7 +1686,7 @@ class WorkflowTest(unittest.TestCase):
         guard = "        if: steps.scope.outputs.records != 'true'\n"
         self.assertIn(guard, race[want])
         text = (WORKFLOWS / "mutgate.yml").read_text()
-        for job, first in (("mutants", "Gremlins on the package"), ("plan", "Shards for each package (#4961)")):
+        for job, first in (("mutants", "Gremlins and statement deletions on the package (#4573)"), ("plan", "Shards for each package (#4961)")):
             mut = job_steps(text, job)
             names = [n for n, _ in mut]
             self.assertIn(want, names, job)

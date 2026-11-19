@@ -4,6 +4,7 @@
 # ldd. image/guest-base.sh installs the root from the image's apt sources; image/guest-userland.sh
 # copies from it with the root's own loader and fails on anything that resolves outside it.
 # REQ: UPD-1a
+import json
 import os
 import pathlib
 import platform
@@ -20,6 +21,45 @@ BASE_SH = ROOT / "image/guest-base.sh"
 GUESTS = ("openclaw", "codex")
 MULTIARCH = "usr/lib/x86_64-linux-gnu"
 HOST_LD = pathlib.Path("/lib64/ld-linux-x86-64.so.2")
+
+
+# A platform package built for one libc ends in -gnu or -musl (an ABI suffix such as -gnueabihf
+# included); its lockfile entry must carry that libc, or npm installs it on the other one.
+LIBC_SUFFIX = r"-(gnu|musl)[a-z0-9]*$"
+
+
+def missing_libc(lock):
+    bad = []
+    for name, entry in lock["packages"].items():
+        m = re.search(LIBC_SUFFIX, name)
+        if m and entry.get("libc") != [{"gnu": "glibc", "musl": "musl"}[m.group(1)]]:
+            bad.append(name)
+    return sorted(bad)
+
+
+DEP_FIELDS = ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies")
+
+
+def root_mismatch(pkg, lock):
+    """Dependency fields where package.json and the lockfile's root entry differ (#6061 item 1)."""
+    root = lock["packages"][""]
+    return [f for f in DEP_FIELDS if pkg.get(f, {}) != root.get(f, {})]
+
+
+def override_names(overrides):
+    """Every package an `overrides` map names, nested ones included; "." is the parent itself."""
+    for key, value in overrides.items():
+        if key == ".":
+            continue
+        yield re.sub(r"(?<=.)@.*$", "", key)
+        if isinstance(value, dict):
+            yield from override_names(value)
+
+
+def stale_overrides(pkg, lock):
+    """Override names no lockfile entry installs, so the override does nothing (#6061 item 3)."""
+    installed = {k.rsplit("node_modules/", 1)[1] for k in lock["packages"] if "node_modules/" in k}
+    return sorted(set(override_names(pkg.get("overrides", {}))) - installed)
 
 
 def host_libs(prog):
@@ -251,7 +291,7 @@ class WiringTest(unittest.TestCase):
     def test_base_reads_the_image_s_own_apt_sources(self):
         text = BASE_SH.read_text()
         self.assertIn("/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources", text)
-        self.assertIn("mmdebstrap --mode=root --variant=essential --include=libstdc++6,gcc,libc6-dev,libcap-dev,make,pkgconf,xz-utils,patch trixie", text)
+        self.assertIn("mmdebstrap --mode=root --variant=essential --include=libstdc++6,gcc,g++,cmake,libc6-dev,libcap-dev,make,pkgconf,xz-utils,patch trixie", text)
         self.assertIn("libpcre2-8-0", text)
 
     def test_codex_bwrap_is_compiled_in_the_base_not_on_the_host(self):
@@ -315,6 +355,57 @@ class WiringTest(unittest.TestCase):
         self.assertIn("GUEST_BASE=/tmp/guest-base \\\n            GUEST_SHIPPED=/tmp/guest-shipped-codex sh guest/codex/build-rootfs.sh /tmp/cxroot", ci)
         self.assertLess(ci.index("sudo sh image/guest-base.sh"), ci.index("sh guest/openclaw/build-rootfs.sh"))
 
+    def test_every_libc_build_in_the_guest_lockfile_names_its_libc(self):
+        # #2914 / #2909: npm 10 dropped `libc` from the -gnu/-musl platform packages, so the glibc
+        # guest's `npm ci` also installed the musl binaries; a lock-only re-resolve keeps such
+        # entries as they are, so the field itself is checked.
+        lock = json.loads((ROOT / "guest/openclaw/package-lock.json").read_text())
+        self.assertEqual(missing_libc(lock), [])
+        self.assertTrue(any(re.search(LIBC_SUFFIX, k) for k in lock["packages"]), "no -gnu/-musl entry left to check")
+        bad = {"packages": {"node_modules/@x/y-linux-x64-musl": {"os": ["linux"]},
+                            "node_modules/@x/y-linux-x64-gnu": {"libc": ["musl"]},
+                            "node_modules/@x/y-linux-arm64-gnueabihf": {"libc": ["glibc"]},
+                            "node_modules/@x/y-darwin-x64": {}}}
+        self.assertEqual(missing_libc(bad), ["node_modules/@x/y-linux-x64-gnu", "node_modules/@x/y-linux-x64-musl"])
+
+    def test_the_guest_lockfile_is_held_by_npm_ci_and_the_libc_test(self):
+        # #2914 / #5990: CI once re-resolved the lockfile with a second copy of the pinned Node. That
+        # step is gone: a lock-only re-resolve keeps a libc-less entry as it is (so the libc test
+        # above checks the field itself), and the rootfs build's `npm ci` refuses a package.json
+        # whose dependencies the lockfile does not hold. This pins both premises.
+        sh = (ROOT / "guest/openclaw/build-rootfs.sh").read_text()
+        self.assertIn('cp "$here/package.json" "$here/package-lock.json" opt/openclaw/', sh)
+        self.assertRegex(sh, r"\(cd opt/openclaw && PATH=\"\$out/usr/local/bin:\$PATH\" npm ci ")
+        self.assertNotRegex(sh, r"npm (?:i|install)\b")
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn("sh guest/openclaw/build-rootfs.sh /tmp/ocroot", ci)
+        self.assertNotIn("package-lock-only", ci)
+
+
+    def test_package_json_and_the_lockfile_root_name_the_same_dependencies(self):
+        # #6061 item 1: `npm ci` accepts a package.json whose only dependency was removed while the
+        # lockfile root still names it (exit 0 with npm 10.9), so the two are compared here.
+        pkg = json.loads((ROOT / "guest/openclaw/package.json").read_text())
+        lock = json.loads((ROOT / "guest/openclaw/package-lock.json").read_text())
+        self.assertEqual(root_mismatch(pkg, lock), [])
+        self.assertTrue(pkg["dependencies"], "package.json names no dependency")
+        dropped = dict(pkg, dependencies={})
+        self.assertEqual(root_mismatch(dropped, lock), ["dependencies"])
+        bare = {"packages": dict(lock["packages"], **{"": {"name": lock["name"]}})}
+        self.assertEqual(root_mismatch(pkg, bare), ["dependencies"])
+        self.assertEqual(root_mismatch(dict(pkg, devDependencies={"x": "1"}), lock), ["devDependencies"])
+
+    def test_every_override_names_a_package_the_lockfile_installs(self):
+        # #6061 item 3: an override for a package nothing depends on passes `npm ci` and does nothing.
+        pkg = json.loads((ROOT / "guest/openclaw/package.json").read_text())
+        lock = json.loads((ROOT / "guest/openclaw/package-lock.json").read_text())
+        self.assertTrue(pkg["overrides"], "no override left to check")
+        self.assertEqual(stale_overrides(pkg, lock), [])
+        planted = dict(pkg, overrides=dict(pkg["overrides"], **{"left-pad": "1.3.0"}))
+        self.assertEqual(stale_overrides(planted, lock), ["left-pad"])
+        nested = {"overrides": {"@hono/node-server@^2": {".": "2.1.8", "@x/absent": "1"}, "zod": "4.6.7"}}
+        self.assertEqual(stale_overrides(nested, lock), ["@x/absent"])
+        self.assertEqual(list(override_names({"@a/b@^1": "1", "c@2": {"d": "3"}})), ["@a/b", "c", "d"])
 
 if __name__ == "__main__":
     unittest.main()
