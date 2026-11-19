@@ -8,14 +8,14 @@ Work item: #5886 (release item 2 of #5811, from the #5810 reviews). Tier A.
 
 ## Scope
 
-`broker/kernel/forget.go`, `broker/kernel/erase_test.go`, `broker/kernel/ASSUMPTIONS.md`, `broker/kernel/proc/kernelsock.go` (the new sentinel crosses the socket by its text), `broker/kernel/proc/anchor_test.go`, `briefs/KRN-forget-wide.md`.
+`broker/kernel/forget.go`, `broker/kernel/erase_test.go`, `broker/kernel/ASSUMPTIONS.md`, `broker/kernel/proc/kernelsock.go` (the new sentinel crosses the socket by its text), `briefs/KRN-forget-wide.md`.
 
 **Guard files:** none (no new package).
 
 ## Acceptance tests
 
 - TIM-1, CH-12: `broker/kernel/erase_test.go::TestTIM1AWideReadingRefusesAForgetAsk` (a reading `ForgetAskFor` wide or wider refuses with the text and no ask waits; just under it, the ask is taken; the check runs after STOP and the name check)
-- TIM-1, CH-12: `broker/kernel/proc/anchor_test.go::TestCH12AWideForgetClockClearsAtTheNextStart` (a forward step of the box clock while running refuses, naming the weekly restart and no owner restart; waiting does not clear it, and the next start does)
+- TIM-1, CH-12: that the width clears at the next start and not by waiting rests on `onLog`, already pinned by `broker/kernel/proc/anchor_test.go::TestTIM1AStartBehindTheLogCarriesItsTimeForward` (a forward step while running moves only `Latest`; a start rebases `Earliest` on the box clock) and `::TestTIM1AnOpenedKernelReadsItsClockOnTheLog` (`OpenKernel` reads its clock through `onLog`). An end-to-end proc test adds no kill over these and would put every pre-existing survivor its `OpenKernel` run reaches in proc's backup, content and key-table code into this package's mutation gate.
 - TIM-1, LOG-4: `broker/kernel/erase_test.go::TestTIM1AForgetAskLapsesOnLatest` still passes; its first case asks at a reading just under `ForgetAskFor` wide, since a wider one is now refused.
 
 ## Estimate

@@ -382,6 +382,66 @@ func TestTIM1RunChecksOnInterval(t *testing.T) {
 	}
 }
 
+// With no Tick, Run checks on its own ticker every Interval; once Run has
+// returned, a stale read checks inline again, as with no Run at all.
+func TestTIM1RunTicksWithoutATickChannel(t *testing.T) {
+	r := newRig()
+	g := r.guard(t, func(c *Config) { c.Interval = time.Millisecond })
+	ctx, cancel := context.WithCancel(bg)
+	done := make(chan struct{})
+	go func() { g.Run(ctx); close(done) }()
+	for deadline := time.Now().Add(10 * time.Second); r.readCount() < 3; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("Run with no Tick checked %d times in 10s, want a check each Interval", r.readCount())
+		}
+	}
+	cancel()
+	<-done
+	reads := r.readCount()
+	r.advance(time.Hour)
+	if _, err := g.Now(bg); err != nil {
+		t.Fatal(err)
+	}
+	if r.readCount() == reads {
+		t.Fatal("a stale read after Run returned answered from the last check")
+	}
+}
+
+// A caller that joins a check in flight stops waiting when its own context
+// ends, and starts no check of its own.
+func TestTIM1JoinedCheckEndsWithItsContext(t *testing.T) {
+	r := newRig()
+	entered, release := make(chan struct{}, 1), make(chan struct{})
+	g := r.guard(t, func(c *Config) {
+		c.Carrier = func(context.Context) (time.Time, error) {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+			return time.Time{}, ErrNoNetworkTime
+		}
+	})
+	first := make(chan struct{})
+	go func() { g.Check(bg); close(first) }()
+	<-entered
+	ctx, cancel := context.WithCancel(bg)
+	cancel()
+	joined := make(chan Status, 1)
+	go func() { joined <- g.Check(ctx) }()
+	select {
+	case s := <-joined:
+		if s != g.Status() {
+			t.Errorf("joined caller got %+v, want the guard's status %+v", s, g.Status())
+		}
+	case <-time.After(10 * time.Second):
+		t.Error("a joined caller whose context ended still waited on the check in flight")
+	}
+	close(release)
+	<-first
+}
+
 func TestTIM1ConfigRequired(t *testing.T) {
 	if _, err := New(Config{}); err == nil {
 		t.Fatal("New with no Synced accepted")

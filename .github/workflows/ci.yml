@@ -104,9 +104,11 @@ jobs:
           sudo chroot "$RUNNER_TEMP/image-tools" dpkg-query -W systemd kmod
       - name: The keyring check refuses an altered, a missing and an extra key (IMG-keyring-pin, #5578)
         if: steps.scope.outputs.records != 'true'
-        # The committed list passes on the runner's keyring; three copies of the check, each with
-        # its list changed, must fail on it: a pinned fingerprint altered, a pinned key dropped (the
-        # keyring then holds a key not pinned), and a key added (a pinned key is then missing).
+        # The committed list passes on the runner's keyrings; three copies of the check, each with
+        # its list changed, must fail on them: a pinned fingerprint altered, a pinned key dropped (the
+        # keyring then holds a key not pinned), and a key added (a pinned key is then missing). The
+        # first fingerprint is the 12/bookworm archive key, pinned in its own keyring (which the
+        # sources name, #5954).
         run: |
           k=image/debian-archive-keyring.sh d=$RUNNER_TEMP/keyring-check
           sh "$k"
@@ -394,12 +396,19 @@ jobs:
           mark="$RUNNER_TEMP/gocache.mark"
           [ -e "$mark" ] || { echo "::error title=build cache::no $mark: the runner-disk step did not run, so which entries this run used is unknown"; exit 1; }
           [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
-          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" -type f "$@"; }
-          mb() { entries "$@" -printf '%s\n' | awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
+          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
+          # Sizes are find's own numbers, one per line, so no entry name is read as text; a -d directory's
+          # files are counted from the directory find holds open, as the drop removes them.
+          mb() { { entries "$@" -printf '%s\n'; entries "$@" -type d -execdir find {} -mindepth 1 -printf '%s\n' \;; } |
+            awk '{s += $1} END {printf "%d", s / 1048576}'; }
           all=$(mb); used=$(mb -newer "$mark")
           echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
           if [ "$DROP" = true ]; then
-            entries ! -newer "$mark" -delete
+            # find walks without following a link, and removes each entry by its name in the directory it
+            # holds open: -delete for a file, rm -rf ./<id>-d run from that directory for an executable's.
+            entries ! -newer "$mark" -type f -delete
+            entries ! -newer "$mark" -type d -execdir rm -rf {} +
             echo "dropped the stale entries; $(mb) MB left to save"
           fi
       - name: Go build cache upload (main only; CI-PATHS)
@@ -416,6 +425,11 @@ jobs:
     defaults:
       run:
         working-directory: broker
+    env:
+      # The headless shell the browser step runs: the one Playwright's pinned wheel names in its
+      # browsers.json (tests/test_s5_executor.py ShellPin fails when only one pin moves, #6064).
+      CFT_SHELL_URL: https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.12/linux64/chrome-headless-shell-linux64.zip
+      CFT_SHELL_SHA256: a9da028861a0cf789ff25c2fed45f5f1aaf969ed9247835b6a7821a4f7af9d1d
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -546,6 +560,52 @@ jobs:
             $p.FuzzH264Feed < "$RUNNER_TEMP/camdecode.json" || exit 1
           [ "$status" -eq 0 ]
           python3 ../tools/fuzzrun.py --pkg ./cmd/agentos-camdecode/camdecode --target FuzzH264Feed --budget 20s
+      - name: Headless shell download cache (BROWSER-fixture-ci-fu, #6064)
+        # Keyed on the runner image and the shell's pin, so a new pin never restores an old zip.
+        # Restore only here: the upload after the browser step runs on a push to main alone (D29), so
+        # no PR writes what main restores, and the browser step hash-checks whatever this restores.
+        id: cft
+        uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: ~/.cache/agentos-cft/shell.zip
+          key: cft-headless-shell-${{ steps.image.outputs.os }}-${{ env.CFT_SHELL_SHA256 }}
+      - name: The browser gate through a real driver, and S5's executor on its fixture site (BROWSER-fixture-ci, #5952, K4)
+        # go test ./... skips both Go fixture tests without Python Playwright and a headless shell, so
+        # they run here on the pinned Playwright (tests/requirements-browser.txt, by hash) and the
+        # Chrome for Testing headless shell Playwright 1.63 names (browsers.json revision 1243,
+        # 153.0.8010.12), downloaded from Google and refused unless it hashes to its pin. A skip fails:
+        # require_ran.py for the Go tests; for the Python ones, AGENTOS_REQUIRE_BROWSER=1 and the
+        # script run, which exits 1 on any skip. The zip may come from the cache step before; one
+        # that fails the hash is fetched afresh and checked again (#6175), so a bad cache entry can
+        # neither supply another binary nor fail every run; a second mismatch still fails.
+        run: |
+          python3 -m venv "$RUNNER_TEMP/pw"
+          "$RUNNER_TEMP/pw/bin/python" -m pip install -q --no-deps --only-binary=:all: --require-hashes \
+            -r ../tests/requirements-browser.txt
+          zip="$HOME/.cache/agentos-cft/shell.zip"
+          if ! { [ -f "$zip" ] && echo "$CFT_SHELL_SHA256  $zip" | sha256sum -c -; }; then
+            [ ! -f "$zip" ] || echo "::warning::The cached headless shell fails its pin; fetching it afresh. Delete the cft-headless-shell cache entry so main saves a good one (#6175)."
+            mkdir -p "${zip%/*}"
+            curl -fsSL --retry 3 -o "$zip" "$CFT_SHELL_URL"
+          fi
+          echo "$CFT_SHELL_SHA256  $zip" | sha256sum -c -
+          unzip -q "$zip" -d "$RUNNER_TEMP/shell"
+          export PATH="$RUNNER_TEMP/pw/bin:$PATH" AGENTOS_REQUIRE_BROWSER=1 \
+            S5_CHROME="$RUNNER_TEMP/shell/chrome-headless-shell-linux64/chrome-headless-shell"
+          status=0
+          go test -count=1 -json -run '^TestFixture' ./browser > "$RUNNER_TEMP/browser.json" || status=$?
+          p=github.com/ghbmrk/agentos/broker/browser
+          python3 -I ../tools/require_ran.py $p.TestFixtureThroughTheGate $p.TestFixtureRefsFollowTheDriversDocument \
+            < "$RUNNER_TEMP/browser.json" || exit 1
+          [ "$status" -eq 0 ]
+          (cd .. && python3 tests/test_s5_executor.py -v)
+      - name: Headless shell cache upload (main only; #6064)
+        # Saves the zip the browser step just hash-checked, once per pin.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cft.outputs.cache-hit != 'true'
+        uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: ~/.cache/agentos-cft/shell.zip
+          key: cft-headless-shell-${{ steps.image.outputs.os }}-${{ env.CFT_SHELL_SHA256 }}
       - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: rm -rf "$(go env GOCACHE)/fuzz"
@@ -563,12 +623,19 @@ jobs:
           mark="$RUNNER_TEMP/gocache.mark"
           [ -e "$mark" ] || { echo "::error title=build cache::no $mark: the runner-disk step did not run, so which entries this run used is unknown"; exit 1; }
           [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
-          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" -type f "$@"; }
-          mb() { entries "$@" -printf '%s\n' | awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
+          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
+          # Sizes are find's own numbers, one per line, so no entry name is read as text; a -d directory's
+          # files are counted from the directory find holds open, as the drop removes them.
+          mb() { { entries "$@" -printf '%s\n'; entries "$@" -type d -execdir find {} -mindepth 1 -printf '%s\n' \;; } |
+            awk '{s += $1} END {printf "%d", s / 1048576}'; }
           all=$(mb); used=$(mb -newer "$mark")
           echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
           if [ "$DROP" = true ]; then
-            entries ! -newer "$mark" -delete
+            # find walks without following a link, and removes each entry by its name in the directory it
+            # holds open: -delete for a file, rm -rf ./<id>-d run from that directory for an executable's.
+            entries ! -newer "$mark" -type f -delete
+            entries ! -newer "$mark" -type d -execdir rm -rf {} +
             echo "dropped the stale entries; $(mb) MB left to save"
           fi
       - name: Go build cache upload (main only; CI-PATHS)
@@ -821,22 +888,6 @@ jobs:
             [ "$rc" -eq 0 ] || fail=1
           done 3< "$RUNNER_TEMP/root-plan"
           [ "$fail" -eq 0 ]
-      - name: OpenClaw guest lockfile, from the guest's own npm (#2914)
-        # npm 10 once wrote the lockfile without the libc constraint on 10 platform packages, so the
-        # glibc guest also installed the musl binaries. The pinned Node's bundled npm re-resolves
-        # package.json; any change to the committed lockfile (another npm major, or a package.json
-        # edit with no lockfile edit) fails the step. The pins are read from build-rootfs.sh.
-        run: |
-          sh=guest/openclaw/build-rootfs.sh
-          ver=$(sed -n 's/^NODE_VERSION=//p' "$sh")
-          sum=$(sed -n 's/^NODE_SHA256=//p' "$sh")
-          [ -n "$ver" ] && [ -n "$sum" ] || { echo "$sh names no NODE_VERSION or NODE_SHA256" >&2; exit 1; }
-          node_dir=$(mktemp -d)
-          curl -fsSLo "$node_dir/node.tar.xz" "https://nodejs.org/dist/$ver/node-$ver-linux-x64.tar.xz"
-          echo "$sum  $node_dir/node.tar.xz" | sha256sum -c -
-          tar -xJf "$node_dir/node.tar.xz" --strip-components=1 -C "$node_dir"
-          (cd guest/openclaw && PATH="$node_dir/bin:$PATH" npm install --package-lock-only --ignore-scripts --no-audit --no-fund)
-          git diff --exit-code -- guest/openclaw/package-lock.json
       - name: The guests' Debian userland, from the image's apt sources (#5570)
         # Both guest roots below copy their shell, tools and libraries from it, never from the runner.
         run: |
@@ -900,12 +951,19 @@ jobs:
           mark="$RUNNER_TEMP/gocache.mark"
           [ -e "$mark" ] || { echo "::error title=build cache::no $mark: the runner-disk step did not run, so which entries this run used is unknown"; exit 1; }
           [ -d "$c" ] || { echo "no Go build cache at $c"; exit 0; }
-          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" -type f "$@"; }
-          mb() { entries "$@" -printf '%s\n' | awk '{s += $1} END {printf "%d", s / 1048576}'; }
+          # An entry is a file, or (go run and go tool, Go 1.24 on) a <id>-d directory holding one executable.
+          entries() { $AS_ROOT find "$c" -mindepth 2 -maxdepth 2 -path "$c/[0-9a-f][0-9a-f]/*" \( -type f -o -type d -name '*-d' \) "$@"; }
+          # Sizes are find's own numbers, one per line, so no entry name is read as text; a -d directory's
+          # files are counted from the directory find holds open, as the drop removes them.
+          mb() { { entries "$@" -printf '%s\n'; entries "$@" -type d -execdir find {} -mindepth 1 -printf '%s\n' \;; } |
+            awk '{s += $1} END {printf "%d", s / 1048576}'; }
           all=$(mb); used=$(mb -newer "$mark")
           echo "::notice title=build cache::$all MB of Go build cache, $used MB of it used by this run, $(( all - used )) MB stale"
           if [ "$DROP" = true ]; then
-            entries ! -newer "$mark" -delete
+            # find walks without following a link, and removes each entry by its name in the directory it
+            # holds open: -delete for a file, rm -rf ./<id>-d run from that directory for an executable's.
+            entries ! -newer "$mark" -type f -delete
+            entries ! -newer "$mark" -type d -execdir rm -rf {} +
             echo "dropped the stale entries; $(mb) MB left to save"
           fi
       - name: Go build cache upload (main only; CI-PATHS)

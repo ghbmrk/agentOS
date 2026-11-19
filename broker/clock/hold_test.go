@@ -815,7 +815,16 @@ func TestTIM1ImplausibleSavedBootClockKeepsTheCap(t *testing.T) {
 	r.mu.Lock()
 	r.mono = 0
 	r.mu.Unlock()
-	g = r.guard(t, mod)
+	var logged []string
+	g = r.guard(t, func(c *Config) {
+		mod(c)
+		c.Logf = func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }
+	})
+	// The load says why the cap stays full: each alert's saved age is logged
+	// as implausible.
+	if len(logged) != 2 || !strings.Contains(logged[0], "saved alert age") || !strings.Contains(logged[0], "implausible") {
+		t.Fatalf("load logged %q, want each implausible alert age", logged)
+	}
 	g.Check(bg)
 	n := len(r.sent())
 	alarm()
