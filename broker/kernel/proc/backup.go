@@ -903,10 +903,7 @@ func (h *Kernel) writeOne(t kernel.BackupTarget, snap backupSnap, now int64) (st
 	if err == nil {
 		err = f.Sync()
 	}
-	var st os.FileInfo
-	if err == nil {
-		st, err = f.Stat()
-	}
+	size, _ := f.Seek(0, io.SeekCurrent) // the content's length: Write only writes, in order
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -919,7 +916,7 @@ func (h *Kernel) writeOne(t kernel.BackupTarget, snap backupSnap, now int64) (st
 	if err := privfile.SyncDir(dt.Dir); err != nil {
 		return pp.id, err
 	}
-	verified := readBack(tg, dt.Dir, rec, st.Size())
+	verified := readBack(tg, dt.Dir, rec, size)
 	return pp.id, h.With(func(*kernel.Kernel) error {
 		i := bk.find(rec.BackupID)
 		if i < 0 {

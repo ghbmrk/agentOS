@@ -34,8 +34,8 @@ func TestPlantedLinksAreRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	plantLink(t, p, []byte("table"))
-	if _, err := d.GetTable(id, 1); err == nil || !strings.Contains(err.Error(), "not a regular file") {
-		t.Fatalf("GetTable of a linked table: %v, want refused as not a regular file", err)
+	if _, err := d.GetTable(id, 1); !errors.Is(err, syscall.ELOOP) {
+		t.Fatalf("GetTable of a linked table: %v, want ELOOP", err)
 	}
 	if err := d.PutTable(id, 1, []byte("new")); !errors.Is(err, ErrExists) {
 		t.Fatalf("PutTable over a planted name: %v, want ErrExists", err)

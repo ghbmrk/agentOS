@@ -187,7 +187,7 @@ var netOK = map[string]allowance{
 	// RES-5: wraps a machine socket's listener so each open connection holds budget; never listens or dials.
 	"inflight": {"wraps a caller's listener, budgeting its open connections", []string{"net.Conn", "net.ErrClosed", "net.Listener"}},
 	// Root-side reads that refuse a link planted at the path (REV-CHK-links, #3945).
-	"backup": {"O_NOFOLLOW on OpenRegular's open and the target directory's sync open, with O_DIRECTORY; OpenRegular's open also carries O_PATH, as the raw const oPath (absent from syscall), so a planted FIFO or device is fstat'd, never opened (#6014); no network client", []string{"syscall.O_DIRECTORY", "syscall.O_NOFOLLOW"}},
+	"backup": {"O_NOFOLLOW on OpenRegular's open and the target directory's sync open, with O_DIRECTORY; OpenRegular's open also carries O_PATH, as the raw const oPath (absent from syscall), so a planted FIFO or device is fstat'd, never opened, and a link it opens is refused with ELOOP, as O_NOFOLLOW alone gives (#6014); no network client", []string{"syscall.ELOOP", "syscall.O_DIRECTORY", "syscall.O_NOFOLLOW"}},
 	"follow": {"O_NOFOLLOW on the pending-alert read; no network client", []string{"syscall.O_NOFOLLOW"}},
 	"meter":  {"O_NOFOLLOW on the meter state's read; no network client", []string{"syscall.O_NOFOLLOW"}},
 }

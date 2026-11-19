@@ -165,7 +165,9 @@ func OpenRegular(p string) (*os.File, fs.FileInfo, error) {
 	}
 	defer pf.Close()
 	st, err := pf.Stat()
-	if err == nil && !st.Mode().IsRegular() {
+	if err == nil && st.Mode()&fs.ModeSymlink != 0 {
+		err = &fs.PathError{Op: "open", Path: p, Err: syscall.ELOOP} // as O_NOFOLLOW alone gives
+	} else if err == nil && !st.Mode().IsRegular() {
 		err = fmt.Errorf("backup: %s is a %s, not a regular file", p, typeName(st.Mode()))
 	}
 	if err != nil {
