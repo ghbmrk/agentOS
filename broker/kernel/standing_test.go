@@ -4,6 +4,7 @@ package kernel_test
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -107,4 +108,85 @@ func TestSpendRefusesBelowTheKeyRung(t *testing.T) {
 		t.Fatalf("a P3 task's metered call: %v", rf)
 	}
 	r.replays()
+}
+
+// A standing stamp is refused above P4, and above P3Local unless an anchor
+// owns the root; P4 under an anchor's root and P3Local under a phone's are
+// taken (KEY-4). The fold refuses a logged stamp no signature reaches, as
+// IssueStanding does.
+func TestAStandingStampIsBoundedByItsRootsOwner(t *testing.T) {
+	r := newRig(t)
+	if _, _, err := standing(r, "top", key.P4); err != nil {
+		t.Fatalf("P4 under an anchor's root: %v", err)
+	}
+	phone := gen(8)
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
+	proot := key.Issue(phone.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "p2"})
+	if err := r.k.IssueStanding(0, key.P3Local, approve([]key.Key{proot}, r.owner, r.spare), proot); err != nil {
+		t.Fatalf("P3Local under a phone's root: %v", err)
+	}
+
+	var cks []key.Key
+	for i, rung := range []key.Proof{255, key.P3} {
+		root := key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: fmt.Sprint("logged", i)})
+		ck, err := key.ClerkKey(root, r.owner.pass, r.holder.pub, 0, 1<<40)
+		must(t, err)
+		keys := []key.Key{root, ck}
+		_, err = r.k.Log().Append(1, kernel.TKeyIssued, 2, map[string]any{"Keys": keys, "Cosigns": approve(keys, r.owner, r.spare), "Rung": rung})
+		must(t, err)
+		cks = append(cks, ck)
+	}
+	s, err := kernel.Replay(r.anchors(), r.k.Log().Entries())
+	must(t, err)
+	if _, ok := s.Grants[cks[0].Tip()]; ok {
+		t.Fatal("the fold granted a key stamped past P4")
+	}
+	if g, ok := s.Grants[cks[1].Tip()]; !ok || g.Rung != key.P3 {
+		t.Fatalf("a logged P3 stamp: %v %v", ok, g.Rung)
+	}
+}
+
+// A step's rung is raised for its hold only when it has one: an irreversible
+// step under a one-use key the owner made, which has no hold, runs at its
+// task's rung (CH-3, CH-10).
+func TestAStepWithNoHoldIsNotRaised(t *testing.T) {
+	r := newRig(t)
+	root := key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Unsubscribe}, Serial: "once"})
+	once, err := key.ClerkKey(root, r.owner.pass, r.holder.pub, 0, 1<<40, key.LimitUses(1), key.LimitRung(key.P3), key.LimitTask("t1"))
+	must(t, err)
+	must(t, r.issue(-kernel.GrantHold, root, once))
+	must(t, r.k.OpenTask(0, "t1", key.P1))
+	must(t, r.k.Submit(0, r.sign(kernel.Plan{ID: "p", Key: once, Steps: []kernel.PlanStep{st(key.Unsubscribe, "list-a")}})))
+	if p := r.k.State().Plans["p"]; p.Status != kernel.SRejected || p.Reject != key.RRung {
+		t.Fatalf("a P3 key's unheld step in a P1 task: %s %s", p.Status, p.Reject)
+	}
+}
+
+// A metered call is checked at its plan's rung both while calls are still
+// in flight and when the owner extends the held plan, and a plan whose own
+// key was revoked funds nothing through its extension (LOG-7, CH-3, KEY-6).
+func TestSpendInFlightAndExtensionKeepThePlansRung(t *testing.T) {
+	r := newRig(t)
+	env := envelope(r, 500, 800)
+	must(t, r.k.OpenTask(0, "t3", key.P3))
+	k := r.serve("t3", key.LimitRung(key.P3), key.LimitHold(hour, hour), key.LimitSpendTask(100))
+	r.plan("p", k, st(key.Unsubscribe, "list-a"))
+	a, rf := r.k.AdmitSpend(1, "p", 60)
+	if rf != nil {
+		t.Fatal(rf)
+	}
+	if _, rf := r.k.AdmitSpend(1, "p", 50); rf == nil || rf.Code != kernel.CInFlight {
+		t.Fatalf("a call over the cap only while one is in flight: %v", rf)
+	}
+	must(t, r.k.Meter(1, a, "api", 100, "provider"))
+	_, rf = r.k.AdmitSpend(2, "p", 1)
+	if rf == nil {
+		t.Fatal("the plan should be exhausted")
+	}
+	must(t, r.k.Hold(2, "p", rf))
+	must(t, r.k.Extend(3, extension(r, env, key.LimitSpendTask(300), key.LimitRung(key.P3)), "p"))
+	must(t, r.k.Revoke(4, k.Tip()))
+	if _, rf := r.k.AdmitSpend(5, "p", 1); rf == nil || rf.Code != key.RRevoked {
+		t.Fatalf("an extended plan whose own key was revoked: %v", rf)
+	}
 }
