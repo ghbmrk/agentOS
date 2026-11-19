@@ -6,6 +6,7 @@ package backup
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,17 +75,43 @@ func TestOpenRegularOpensNothingPlanted(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("mknod of a character device needs root; the device case is skipped")
 	}
-	// Major 240 is for local use and has no driver here: an open of it
-	// fails (ENXIO), so a refusal naming its type shows none was made.
+	// A character major with no driver (none listed in /proc/devices): an
+	// open of it fails (ENXIO), so a refusal naming its type shows none was made.
 	dev, err := d.path(id, 2)
 	must(t, err)
-	if err := syscall.Mknod(dev, syscall.S_IFCHR|0o600, 240<<8); err != nil {
+	major := freeCharMajor(t)
+	if err := syscall.Mknod(dev, syscall.S_IFCHR|0o600, major<<8); err != nil {
 		t.Skipf("mknod of a character device refused here: %v", err)
 	}
-	if _, err := os.OpenFile(dev, os.O_RDONLY|syscall.O_NONBLOCK, 0); err == nil {
-		t.Skip("character device 240,0 has a driver here")
+	if f, err := os.OpenFile(dev, os.O_RDONLY|syscall.O_NONBLOCK, 0); err == nil {
+		f.Close()
+		t.Fatalf("character device %d,0 opened: it has a driver", major)
 	}
 	if _, err := getTableWithin(t, d, id, 2, time.Second); err == nil || !strings.Contains(err.Error(), "character device") {
 		t.Errorf("GetTable of a driverless character device: %v, want refused by its type, unopened", err)
 	}
+}
+
+// freeCharMajor is a character major in the dynamic ranges (234-254,
+// 384-511) that /proc/devices lists no driver for.
+func freeCharMajor(t *testing.T) int {
+	t.Helper()
+	b, err := os.ReadFile("/proc/devices")
+	must(t, err)
+	chars, _, _ := strings.Cut(string(b), "Block devices:")
+	used := map[int]bool{}
+	for _, line := range strings.Split(chars, "\n") {
+		var m int
+		var name string
+		if n, _ := fmt.Sscan(line, &m, &name); n == 2 {
+			used[m] = true
+		}
+	}
+	for m := 234; m < 512; m++ {
+		if (m <= 254 || m >= 384) && !used[m] {
+			return m
+		}
+	}
+	t.Fatal("no free character major in /proc/devices")
+	return 0
 }
