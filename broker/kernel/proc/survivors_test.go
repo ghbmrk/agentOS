@@ -63,7 +63,11 @@ func TestClerkTakesTheViewAndAnswersOnlyKnownOps(t *testing.T) {
 	sock := serveFake(t, fakeClerk{do: func() kernel.Result { return kernel.Result{Outcome: "ok"} }})
 	b := newBox(t, sock)
 	id := b.submit("dave")
-	b.tick(b.now)
+	// The kernel's own Tick calls the clerk as the kernel.Clerk the process
+	// booted it with, its view verified against the state's anchors.
+	if err := b.h.With(func(k *kernel.Kernel) error { return k.Tick(b.now) }); err != nil {
+		t.Fatal(err)
+	}
 	if st := b.step(id); st.Phase != kernel.PDone {
 		t.Fatalf("step is %s, want done", st.Phase)
 	}
@@ -78,5 +82,18 @@ func TestClerkTakesTheViewAndAnswersOnlyKnownOps(t *testing.T) {
 	}
 	if got, err := io.ReadAll(conn); err != nil || len(got) != 0 {
 		t.Fatalf("an unknown op was answered %q (%v), want nothing", got, err)
+	}
+}
+
+// The process pins the configured checker into the kernel: an approval
+// then meets the checker's key check, not "no checker".
+func TestOpenPinsTheChecker(t *testing.T) {
+	b := newBox(t, filepath.Join(shortDir(t), "web.sock"))
+	b.h.Close()
+	b.cfg.Checker = headPub
+	b.open()
+	err := b.h.With(func(k *kernel.Kernel) error { return k.ApproveCode(b.now, kernel.CodeApproval{}) })
+	if !errors.Is(err, kernel.ErrCodeApproval) {
+		t.Fatalf("approval with a checker pinned: %v, want %v", err, kernel.ErrCodeApproval)
 	}
 }
