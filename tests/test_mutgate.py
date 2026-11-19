@@ -2028,7 +2028,7 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             self.assertIn("the shards of hint disagree; rerun the mutgate workflow", r.stderr)  # #4983: the remedy
             self.assertEqual(git("status", "--porcelain", "--", "broker").stdout, "")
             # A shard asked for outside 0 <= I < K is refused before anything runs.
-            for bad in (("--shard", "2", "--of", "2"), ("--shard", "-1", "--of", "2"), ("--of", "257", "--shard", "0")):
+            for bad in (("--shard", "2", "--of", "2"), ("--shard", "-1", "--of", "2"), ("--of", "1281", "--shard", "0")):
                 r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(pathlib.Path(d) / "x"), *bad, env=env)
                 self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
@@ -2860,6 +2860,20 @@ class Plan(unittest.TestCase):
         # The bounds verify reads a result's shard by (L3 4 on #6171): K up to SHARDS_MAX, never past it.
         self.assertEqual(mutgate.shard_of({"shard": {"index": 1279, "of": 1280}}), (1279, 1280))
         self.assertIsNone(mutgate.shard_of({"shard": {"index": 0, "of": 1281}}))
+
+    def test_run_takes_every_shard_a_plan_can_pack(self):
+        # MUT-plan-overflow-fu: `run` refused K past MATRIX_MAX after #6170 packed plans up to
+        # SHARDS_MAX, so all 294 of #6144's enforcer/nft shards exited 2 (run 44488046218). The K
+        # bound `run` takes is the largest one pack fits, whatever the constants become.
+        top = max(k for k in range(1, mutgate.SHARDS_MAX + 2) if mutgate.pack([("p", k)]))
+        with mock.patch.object(mutgate, "cmd_run", return_value=0) as ran:
+            for i in (0, top - 1):
+                self.assertEqual(mutgate.main(["run", "p", "--git", "HEAD~1", "--shard", str(i), "--of", str(top)]), 0)
+            self.assertEqual(ran.call_count, 2)
+            with self.assertRaises(SystemExit) as e, contextlib.redirect_stderr(io.StringIO()):
+                mutgate.main(["run", "p", "--git", "HEAD~1", "--shard", "0", "--of", str(top + 1)])
+            self.assertEqual(e.exception.code, 2)
+            self.assertEqual(ran.call_count, 2)
 
     def test_a_plan_past_the_matrix_names_its_packing(self):
         code, out, err = self.plan({"enforcer/nft": ({"broker/enforcer/nft/a.go": set(range(1, 1767))}, [{}] * 1019)},

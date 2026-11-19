@@ -2895,8 +2895,9 @@ def main(argv=None):
                        help="the PR head of the event whose body FILE is; a failure names it (#6077)")
         p.add_argument("--summary", metavar="FILE", help="append the table of verdicts here")
     args = ap.parse_args(argv)
-    if args.cmd == "run" and (not 0 <= args.shard < args.of <= MATRIX_MAX or (args.of > 1 and not args.git)):
-        ap.error(f"--shard I --of K needs 0 <= I < K <= {MATRIX_MAX}, and --git when K > 1")
+    # K is a package's shard count, which `plan` packs past MATRIX_MAX jobs up to SHARDS_MAX (#6170).
+    if args.cmd == "run" and (not 0 <= args.shard < args.of <= SHARDS_MAX or (args.of > 1 and not args.git)):
+        ap.error(f"--shard I --of K needs 0 <= I < K <= {SHARDS_MAX}, and --git when K > 1")
     if getattr(args, "body_from", None) and not args.body:
         ap.error("--body-from names the event whose body --body holds: give --body too")
     if args.cmd == "packages":
