@@ -603,10 +603,10 @@ func TestOpenTrimsATornTailAndRefusesAShortFrame(t *testing.T) {
 	r := newRig(t)
 	good := append([]byte(nil), r.store.B...)
 	n := len(r.k.Log().Entries())
-	for i, tail := range [][]byte{{0, 1}, {0, 0, 0, 100, 1, 2, 3}, {0, 0, 0, 28}} {
-		if i == 2 {
-			tail = append(tail, make([]byte, 28)...)
-		}
+	// A cut length; frames cut short by 97, 4 and 3 bytes (the last shorter
+	// than a nonce and tag); a whole frame that does not open, last.
+	for i, tail := range [][]byte{{0, 1}, {0, 0, 0, 100, 1, 2, 3}, {0, 0, 0, 40}, {0, 0, 0, 20}, {0, 0, 0, 28}} {
+		tail = append(tail, make([]byte, []int{0, 0, 36, 17, 28}[i])...)
 		r.store.B = append(append([]byte(nil), good...), tail...)
 		l, err := kernel.Open(cfg(r))
 		if err != nil || len(l.Entries()) != n || len(r.store.B) != len(good) {
@@ -645,6 +645,9 @@ func TestOpenTrimsATornTailAndRefusesAShortFrame(t *testing.T) {
 	}
 	if err := (&kernel.MemStore{B: []byte{1, 2}}).Truncate(3); !errors.Is(err, kernel.ErrCorrupt) {
 		t.Fatalf("a truncate past the end: %v", err)
+	}
+	if err := (&kernel.MemStore{B: []byte{1, 2}}).Truncate(2); err != nil {
+		t.Fatalf("a truncate to the end: %v", err)
 	}
 	// A whole frame of nonce and tag alone seals no entry: corrupt, not torn.
 	empty := a.Seal(nonce, nonce, nil, binary.BigEndian.AppendUint64(nil, last.Seq+1))
