@@ -68,7 +68,8 @@
 /usr/sbin/integritysetup
 /usr/sbin/veritysetup
 
-# libedit (line editing) and nft, which needs it for its interactive mode; nft itself is a one-shot ruleset load.
+# libedit (line editing) and nft, which needs it for its interactive mode; nft itself is a one-shot
+# ruleset load.
 /usr/lib/x86_64-linux-gnu/libedit.so.2.*
 /usr/sbin/nft
 
@@ -86,11 +87,11 @@
 # (#5861). Each file matches one entry; read_allow refuses a malformed, empty or repeated entry.
 # AES-GCM-SIV has no OID or NID in OpenSSL 3.5.7, so it is selected only by one of the names
 # AES-128-GCM-SIV, AES-192-GCM-SIV or AES-256-GCM-SIV (or a MAC or KDF "cipher" parameter, which has to
-# spell one; CMAC, GMAC, KBKDF and CTR-DRBG refuse it by mode, and KRB5KDF's callers are counted). EVP_get_cipherbyname cannot return it at all: it
-# returns only the legacy method table's ciphers (crypto/evp/names.c), and crypto/evp/c_allc.c adds no
-# GCM-SIV; its references are counted so that a change to the file is still seen. A new file, a
-# changed count or changed bytes fail the step: review where its names come from, then update the entry
-# and the openssl records' reach note.
+# spell one; CMAC, GMAC, KBKDF and CTR-DRBG refuse it by mode, and KRB5KDF's callers are counted).
+# EVP_get_cipherbyname cannot return it at all: it returns only the legacy method table's ciphers
+# (crypto/evp/names.c), and crypto/evp/c_allc.c adds no GCM-SIV; its references are counted so that a
+# change to the file is still seen. A new file, a changed count or changed bytes fail the step: review
+# where its names come from, then add or update the entry and the openssl records' reach note.
 
 # libcryptsetup's one fetch (crypto_openssl.c _cipher_init, 2.7.5) asks for "<cipher>-<key bits>-<mode>",
 # the mode cut at its first '-' by every caller that takes it from a header (crypto_storage.c
@@ -130,6 +131,8 @@
 /usr/lib/agentos/images/openclaw/usr/local/bin/node *
 # The codex guest's two static (musl) Rust binaries hold no OpenSSL selector name but spell GCM-SIV three
 # times, as OpenSSL's default provider does (AES-128/192/256-GCM-SIV), and KRB5KDF six times, as
-# libcrypto's provider tables do: they may carry a stripped static copy of OpenSSL or another crypto library. Either way not libssl3t64; #5853 identifies it.
+# libcrypto's provider tables do: they may carry a stripped static copy of OpenSSL or another crypto
+# library. Either way not libssl3t64; #5853 identifies it. guest/codex/build-rootfs.sh pins the codex
+# version, and image.yml runs on a change to it, so a version bump meets these digests in its own PR.
 /usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex sha256=628e35487d888a28f0427fc37501da529dd3d81fcbad7a2c3421c1e8670d92e1 GCM-SIV=3 KRB5KDF=6
 /usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host sha256=ec71830690a7c0024916ee0c99fbdc635bc6e747ff665ea4f03a8389bbcb6b30 GCM-SIV=3 KRB5KDF=6

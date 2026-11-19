@@ -13,7 +13,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/pageca"
-	"github.com/ghbmrk/agentos/broker/sockets"
+	"github.com/ghbmrk/agentos/broker/sockets/peers"
 )
 
 // The kernel process's sockets (MIG-4-run slice 3): the frozen seam
@@ -558,7 +558,7 @@ func ContentSide(store string) Side {
 // ListenKernel opens one side's socket on the kernel process, admitting only
 // that side's uid.
 func ListenKernel(path string, uid int) (net.Listener, error) {
-	return sockets.ListenPeers(path, uid)
+	return peers.ListenUnix(path, uid)
 }
 
 // ServeKernel answers side's calls to h on ln until ln closes, each on its
@@ -723,7 +723,7 @@ func init() {
 		kernel.ErrBroken, kernel.ErrNotAdmitted, key.ErrMalformed, key.ErrWrongOwner, key.ErrBadSig, key.ErrLoosens, key.ErrNotHolder,
 		key.ErrUnknownKind, key.ErrUncaveated, ErrArgs, kernel.ErrSetupClosed, kernel.ErrSetupKeys, ErrSetupOnly,
 		kernel.ErrReserveSig, kernel.ErrTargetSig, kernel.ErrTarget, kernel.ErrTargetExists, kernel.ErrNoTarget,
-		kernel.ErrContentClosed, kernel.ErrSubject, kernel.ErrErased, kernel.ErrLabel, kernel.ErrForgetName, kernel.ErrForgetReply, kernel.ErrForgetStop,
+		kernel.ErrContentClosed, kernel.ErrSubject, kernel.ErrErased, kernel.ErrLabel, kernel.ErrForgetName, kernel.ErrForgetReply, kernel.ErrForgetStop, kernel.ErrForgetClock,
 		kernel.ErrStore, kernel.ErrSubjectKey, kernel.ErrItem, kernel.ErrLineage,
 		kernel.ErrRotateSig, kernel.ErrRotate, ErrApprovalStale, ErrNotApproved, handoff.ErrApproval, handoff.ErrApprovalExpired, ErrNoRecoveryCard,
 		kernel.ErrEdgeKey, kernel.ErrEdgeSig, kernel.ErrEdgeRevoked, kernel.ErrEdgeCandidate, kernel.ErrEdgeHello, kernel.ErrEdgeBusy, kernel.ErrEdgeLive,
@@ -806,7 +806,7 @@ func (c Conn) Call(op string, args, out any) error {
 		return ErrUnreachable
 	}
 	defer conn.Close()
-	if uid, ok := sockets.PeerUID(conn); !ok || uid != c.UID {
+	if uid, ok := peers.UID(conn); !ok || uid != c.UID {
 		return ErrUnreachable
 	}
 	conn.SetDeadline(time.Now().Add(d))

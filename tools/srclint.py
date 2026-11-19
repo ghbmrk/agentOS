@@ -70,6 +70,11 @@ RELEASE = re.compile(r"go1\.\d+\Z")
 # Vault-side packages whose derived and decrypted key buffers must be wiped.
 WIPE_DIRS = ("broker/recovery/",)
 WIPE_SOURCES = frozenset({"hkdf", "random"})
+GO_KEYWORDS = frozenset("break case chan const continue default defer else fallthrough for func go goto if "
+                        "import interface map package range return select struct switch type var".split())
+# What may come just before the first word of an assignment's left-hand side.
+LHS_AFTER = frozenset({("nl", "\n"), ("punct", "{"), ("punct", "}"), ("punct", ";"), ("punct", ":"),
+                       ("word", "if"), ("word", "for"), ("word", "switch"), ("word", "var")})
 SKIP_TOP = ("broker/vendor/", "broker/third_party/")
 
 TAGS = re.compile(r"""(?<![\w-])-tags(?:=|\s+)(?:"([^"]*)"|'([^']*)'|([^\s"']+))""")
@@ -205,12 +210,16 @@ def _unquote(body):
     return "".join(out)
 
 
-def tokens(src):
-    """Go tokens: ("comment", text), ("string", value), ("word", text) or ("punct", char)."""
+def tokens(src, newlines=False):
+    """Go tokens: ("comment", text), ("string", value), ("word", text) or ("punct", char), and
+    ("nl", "\n") for each line break when newlines is set."""
     i, n = 0, len(src)
     while i < n:
         c = src[i]
-        if c in " \t\r\n":
+        if c == "\n" and newlines:
+            yield "nl", c
+            i += 1
+        elif c in " \t\r\n":
             i += 1
         elif src.startswith("//", i):
             j = src.find("\n", i)
@@ -340,7 +349,7 @@ def wipe_problems(text):
     """[("wipe:FUNC:VAR", message)] for each local from hkdf/random/decrypt with no later wipe(VAR) or
     return of VAR in its function. Unreadable source is left to go_problems."""
     try:
-        toks = [t for t in tokens(text) if t[0] != "comment"]
+        toks = [t for t in tokens(text, newlines=True) if t[0] != "comment"]
     except Unreadable:
         return []
     out, i, n = [], 0, len(toks)
@@ -364,12 +373,16 @@ def wipe_problems(text):
             k += 1
         body = toks[j:k]
         for a in range(len(body)):
-            # LHS words, then `:=` or `=`, then the call's name and `(`.
-            b = a
-            while b < len(body) and (body[b][0] == "word" or body[b] == ("punct", ",")):
-                b += 1
-            if b == a or body[a][0] != "word" or (a and body[a - 1][0] == "word"):
+            # LHS words from a statement start (a line, `{`, `}`, `;`, a case or label `:` or a
+            # keyword that opens a simple statement), then `:=` or `=`, then the call's name and `(`.
+            if (body[a][0] != "word" or body[a][1] in GO_KEYWORDS
+                    or (a and body[a - 1] not in LHS_AFTER)
+                    or (a > 1 and body[a - 1][0] == "nl" and body[a - 2] == ("punct", ","))):
                 continue
+            b = a
+            while b < len(body) and (body[b][0] == "word" or body[b] == ("punct", ",")
+                                     or (body[b][0] == "nl" and body[b - 1] == ("punct", ","))):
+                b += 1
             if body[b:b + 2] == [("punct", ":"), ("punct", "=")]:
                 b += 2
             elif body[b:b + 1] == [("punct", "=")] and body[b + 1:b + 2] != [("punct", "=")]:
@@ -389,7 +402,8 @@ def wipe_problems(text):
                 for x in range(len(rest)):
                     if rest[x] == ("word", "return"):
                         y = x + 1
-                        while y < len(rest) and (rest[y][0] == "word" or rest[y] == ("punct", ",")):
+                        while y < len(rest) and (rest[y][0] == "word" or rest[y] == ("punct", ",")
+                                                 or (rest[y][0] == "nl" and rest[y - 1] == ("punct", ","))):
                             returned = returned or rest[y] == ("word", v)
                             y += 1
                 if not (wiped or returned):

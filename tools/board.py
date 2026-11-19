@@ -44,6 +44,12 @@ the GENERATED line and its rows come from the live issues, never from hand edits
                                  judge issue N with render's checks among the live work items and
                                  keep one comment on it naming every problem (INTAKE_MARK): posted,
                                  edited in place, or deleted once the issue is well formed
+  board.py transition --repo o/r --issue N --label L --action labeled|unlabeled [--comment]
+                                 fail when a state-label event is illegal: merged is final, and
+                                 state:merged needs a merged PR naming the row (the event's label
+                                 plus the issue's other state labels give previous and new state);
+                                 the problem names the labels that restore the prior state, and
+                                 with --comment it goes on the issue too (TRANSITION_MARK)
   board.py archive --base FILE --changed PATH...
                                  once the base's BOARD.md carries the GENERATED line: fail if a
                                  changed path is an archive (ARCHIVED) or a retired file (RETIRED)
@@ -58,6 +64,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -76,6 +83,7 @@ FROZEN = re.compile(r"\bfrozen until G2\b")
 ARCHIVED = ("docs/BOARD-HISTORY.md", "docs/LATER-HISTORY.md")
 RETIRED = ("LATER.md", "docs/MARK-QUEUE.md")
 INTAKE_MARK = "<!-- board-intake -->"
+TRANSITION_MARK = "<!-- board-transition -->"
 BOT = "github-actions[bot]"  # the login GITHUB_TOKEN comments as
 UNRENDERED = "<!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->"
 GATE = re.compile(r"\bMark approves\b|\bowner to confirm\b|\bwithout Mark\b|\bMark's approval\b")
@@ -353,11 +361,99 @@ def stale(items, prs):
         row = readable_row(item)
         if row is None or row["state"] not in OPEN_STATES:
             continue
-        mine = [p for p in prs if re.match(rf"{re.escape(row['id'])}(?![A-Za-z0-9-])", p["title"])]
+        mine = named_prs(row["id"], prs)
         merged = [p for p in mine if p.get("merged_at")]
         if merged and not any(p["state"] == "open" for p in mine):
             out.append((item, max(merged, key=lambda p: p["merged_at"])))
     return out
+
+
+def named_prs(row_id, prs):
+    """The PRs whose title starts with the row ID: the match stale and transition both use."""
+    return [p for p in prs if re.match(rf"{re.escape(row_id)}(?![A-Za-z0-9-])", p["title"])]
+
+
+def transition_problem(prev, new, merged_pr):
+    """None when a state-label change prev -> new is legal, else why not (BOARD-transition-relation).
+    merged is terminal: nothing leaves it (new None is a bare removal), and nothing enters it
+    without a merged PR naming the row. prev and new are state names or None."""
+    if prev == "merged" and new != "merged":
+        return f"state:merged is final; it cannot change to {('state:' + new) if new else 'no state'}"
+    if new == "merged" and prev != "merged" and not merged_pr:
+        return "state:merged needs a merged PR whose title starts with the row ID, and none is merged"
+    return None
+
+
+def merged_pr_named(fetch, repo, row_id):
+    """True when a merged PR's title starts with row_id. One search by the ID (#5989); on a miss, the
+    paged PR list, which a search capped at 100 best-match hits or an index trailing the merge can
+    miss (#6060). A legal edge into merged costs one call; only a miss pages every PR."""
+    q = urllib.parse.quote(f'repo:{repo} is:pr is:merged in:title "{row_id}"', safe="")
+    hits = [{"title": i["title"], "merged_at": (i.get("pull_request") or {}).get("merged_at")}
+            for i in fetch(f"/search/issues?q={q}")["items"]]
+    return any(p.get("merged_at") for p in named_prs(row_id, hits)) or \
+        any(p.get("merged_at") for p in named_prs(row_id, fetch(f"/repos/{repo}/pulls?state=all")))
+
+
+def restore(held, prev, new):
+    """The label edits that undo one illegal edge prev -> new on an issue holding the state labels
+    `held`: remove new, add prev back. Any other state label stays, so an issue that held two keeps
+    both (#6060)."""
+    steps = ([f"remove `state:{new}`"] if new in held else []) + ([f"add `state:{prev}`"] if prev and prev not in held else [])
+    return "To fix, restore the prior label: " + ", ".join(steps) + "." if steps else ""
+
+
+def report_transition(fetch, repo, number, label, action):
+    """Judge one state-label event on issue `number` (action labeled or unlabeled) against the
+    labels the issue holds now; returns the problem, with the fix, or None. Other labels are legal.
+    Raises ValueError for a title with no row ID when the edge needs the merged-PR search."""
+    if not label.startswith("state:"):
+        return None
+    item = fetch(f"/repos/{repo}/issues/{number}")
+    event = label[len("state:"):]
+    others = [x[len("state:"):] for x in _names(item["labels"]) if x.startswith("state:") and x != label]
+    held = set(others) | ({event} if action == "labeled" else set())
+    # The merged-PR fact matters for any edge into merged: adding it, or removing the old label after
+    # merged was added first (`gh issue edit --add-label --remove-label` order).
+    into_merged = event == "merged" if action == "labeled" else "merged" in others
+    row_id = issue_id(item) if into_merged else None
+    merged = bool(into_merged and merged_pr_named(fetch, repo, row_id))
+    for other in others or [None]:
+        prev, new = (other, event) if action == "labeled" else (event, other)
+        problem = transition_problem(prev, new, merged)
+        if problem:
+            if new == "merged" and not merged:
+                problem += f" (searched for row ID `{row_id}`)"
+            return " ".join(filter(None, (f"issue #{number}: {problem}.", restore(held, prev, new))))
+    return None
+
+
+def transition_comment(problem):
+    # Fenced, as intake_comment is, so a label name in the problem renders as text.
+    return (f"{TRANSITION_MARK}\nThis state-label change is illegal (tools/board.py transition):\n\n```text\n"
+            f"{problem}\n```\nThe next illegal state change on this issue replaces this comment; "
+            "it is not removed once fixed.")
+
+
+def post_transition(fetch, repo, number, problem):
+    """Keep one transition comment on issue `number`, naming the latest problem. Only the bot's own
+    marked comments count, so a marker someone else writes steers nothing. Each label event runs on
+    its own, so two runs can both find none and post (#6060): after its post, a run that sees an
+    older marked comment deletes its own and edits that one, so one comment stays."""
+    def mine():
+        return sorted((c for c in fetch(f"/repos/{repo}/issues/{number}/comments")
+                       if (c.get("user") or {}).get("login") == BOT and TRANSITION_MARK in (c.get("body") or "")),
+                      key=lambda c: c["id"])
+    body = transition_comment(problem)
+    found = mine()
+    if not found:
+        own = fetch(f"/repos/{repo}/issues/{number}/comments", "POST", {"body": body})["id"]
+        found = [c for c in mine() if c["id"] < own]
+        if not found:
+            return
+        fetch(f"/repos/{repo}/issues/comments/{own}", "DELETE")
+    if found[0].get("body") != body:
+        fetch(f"/repos/{repo}/issues/comments/{found[0]['id']}", "PATCH", {"body": body})
 
 
 def stale_comment(row_id, state, pr):
@@ -470,7 +566,8 @@ def call(req, sleep=time.sleep, now=time.time, tries=6):
 
 
 def github(path, method="GET", payload=None):
-    """One GitHub REST call with GITHUB_TOKEN; GET follows pagination and returns the full list."""
+    """One GitHub REST call with GITHUB_TOKEN; a GET of a list follows pagination and returns the full list,
+    a GET of one object returns it unchanged."""
     token = os.environ.get("GITHUB_TOKEN") or sys.exit("GITHUB_TOKEN is not set")
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
                "X-GitHub-Api-Version": "2022-11-28"}
@@ -483,6 +580,8 @@ def github(path, method="GET", payload=None):
         sep = "&" if "?" in path else "?"
         batch = call(urllib.request.Request(f"https://api.github.com{path}{sep}per_page=100&page={page}",
                                             headers=headers))
+        if not isinstance(batch, list):
+            return batch  # one object (an issue, a PR): nothing to page
         out += batch
         if len(batch) < 100:
             return out
@@ -506,12 +605,15 @@ def work_items(fetch, repo):
 
 def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, root=ROOT):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("command", choices=("check", "render", "archive", "stale", "intake"))
+    ap.add_argument("command", choices=("check", "render", "archive", "stale", "intake", "transition"))
     ap.add_argument("--repo", help="owner/name: render from its issues and PRs instead of the plan")
     ap.add_argument("--base", metavar="FILE", help="the base branch's BOARD.md: once it carries the GENERATED line, so must this one")
     ap.add_argument("--changed", nargs="*", default=[], metavar="PATH", help="archive: the paths the PR changes")
-    ap.add_argument("--comment", action="store_true", help="stale: comment once on each flagged issue")
-    ap.add_argument("--issue", type=int, metavar="N", help="intake: the issue to judge")
+    ap.add_argument("--comment", action="store_true",
+                    help="stale: comment once on each flagged issue; transition: keep one comment naming the problem")
+    ap.add_argument("--issue", type=int, metavar="N", help="intake, transition: the issue to judge")
+    ap.add_argument("--label", help="transition: the label the event added or removed")
+    ap.add_argument("--action", choices=("labeled", "unlabeled"), help="transition: the event")
     args = ap.parse_args(argv)
     if args.command == "intake":
         if not (args.repo and args.issue):
@@ -519,6 +621,19 @@ def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, 
         problems = report_intake(fetch, args.repo, args.issue, read())
         print(*(f"board: {p}" for p in problems or [f"issue #{args.issue}: well formed"]), sep="\n")
         return 0
+    if args.command == "transition":
+        if not (args.repo and args.issue and args.label and args.action):
+            ap.error("transition needs --repo, --issue, --label and --action")
+        try:
+            problem = report_transition(fetch, args.repo, args.issue, args.label, args.action)
+        except ValueError as e:  # a title with no row ID: intake comments on that issue
+            print(f"board: {e}", file=sys.stderr)
+            return 1
+        if problem:
+            print(f"board: {problem}", file=sys.stderr)
+            if args.comment:
+                post_transition(fetch, args.repo, args.issue, problem)
+        return 1 if problem else 0
     if args.command == "stale":
         if not args.repo:
             ap.error("stale needs --repo")
