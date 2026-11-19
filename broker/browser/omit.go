@@ -1,8 +1,9 @@
 package browser
 
 import (
+	"cmp"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -315,8 +316,15 @@ func valueForms(values []string, min int) []string {
 			}
 		}
 	}
-	sort.Slice(forms, func(i, j int) bool { return len(forms[i]) > len(forms[j]) })
+	slices.SortFunc(forms, longestFirst)
 	return forms
+}
+
+// longestFirst orders scrub forms longest first and forms of one length by
+// their text: a total order, so which of two overlapping forms is scrubbed
+// first is this contract, not whatever the sort algorithm leaves (#6195).
+func longestFirst(a, b string) int {
+	return cmp.Or(cmp.Compare(len(b), len(a)), strings.Compare(a, b))
 }
 
 // containsForm reports whether s shows one of forms outside its
@@ -435,7 +443,7 @@ func omitValues(snapshot string, refs, keep map[string]bool, said []string) stri
 		}
 	}
 	for j, forms := range scrub {
-		sort.Slice(forms, func(a, b int) bool { return len(forms[a]) > len(forms[b]) })
+		slices.SortFunc(forms, longestFirst)
 		e := end(j)
 		from := min(len(roleRE.FindString(lines[j])), e)
 		lines[j] = lines[j][:from] + scrubForms(lines[j][from:e], forms) + lines[j][e:]

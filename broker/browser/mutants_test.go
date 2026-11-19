@@ -325,20 +325,20 @@ func TestUnapprovedPostProbesNotdone(t *testing.T) {
 }
 
 // An omitted field's ancestor is scrubbed of each distinct form once,
-// longest first, and equal lengths in the order each field's own forms
-// sort, also on a line that holds two fields. Overlapping forms of one
-// length leave different text in another order, so the output is pinned
-// and a change to that order is a reviewed one.
+// longest first and equal lengths in text order (longestFirst, #6195),
+// also on a line that holds two fields. Overlapping forms of one length
+// leave different text in another order, so the output is pinned to that
+// contract: in "bacaabacacab", aba goes before bac and ab before ca.
 func TestAncestorScrubsInAFixedOrder(t *testing.T) {
 	snap := "- group \"G bbababbbaaba\":\n  - textbox \"P\" [ref=e1]: hunter2Canary"
 	said := strings.Split("ccb,bc,ac,acb,ac,cca,ba,bba,bac,aca,aab", ",")
-	want := "- group \"G " + omittedMark + omittedMark + "b" + omittedMark + "a" + omittedMark + "\":\n  - textbox \"P\" [ref=e1]: " + omittedMark
+	want := "- group \"G " + omittedMark + omittedMark + "bbb" + omittedMark + "a\":\n  - textbox \"P\" [ref=e1]: " + omittedMark
 	if got := omitValues(snap, map[string]bool{"e1": true}, map[string]bool{}, said); got != want {
 		t.Fatalf("one field: got %q", got)
 	}
 	snap = "- group \"G bacaabacacab\":\n  - textbox \"P\" [ref=e1]: hunter2Canary\n  - textbox \"Q\" [ref=e2]: bb"
 	said = strings.Split("bb,bac,aba,bb,ba,cbb,ab,ca,aa,baa", ",")
-	want = "- group \"G " + omittedMark + "a" + omittedMark + omittedMark + omittedMark + "b\":\n  - textbox \"P\" [ref=e1]: " + omittedMark + "\n  - textbox \"Q\" [ref=e2]: " + omittedMark
+	want = "- group \"G " + omittedMark + "a" + omittedMark + omittedMark + "c" + omittedMark + "\":\n  - textbox \"P\" [ref=e1]: " + omittedMark + "\n  - textbox \"Q\" [ref=e2]: " + omittedMark
 	if got := omitValues(snap, map[string]bool{"e1": true, "e2": true}, map[string]bool{}, said); got != want {
 		t.Fatalf("two fields: got %q", got)
 	}
