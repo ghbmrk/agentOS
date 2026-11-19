@@ -21,7 +21,7 @@ import (
 // the file write stubbed, so the test reaches no more of the package than
 // the write.
 func TestADisplacedValueIsWipedOnce(t *testing.T) {
-	r, key, id := Recovery{Key: make([]byte, RecoveryLen)}, slices.Repeat([]byte{0x6b}, keyLen), make([]byte, idLen)
+	r, key, id := Recovery{Key: secret.Hide(make([]byte, RecoveryLen))}, slices.Repeat([]byte{0x6b}, keyLen), make([]byte, idLen)
 	sl, err := makeSlot(id, key, r)
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +61,7 @@ func TestADisplacedValueIsWipedOnce(t *testing.T) {
 	if v, _, _ := s.Get("x/a"); string(v) != string(b) || refusalCount(*held, b) != 0 || refusalCount(*held, dd) != 2 {
 		t.Fatalf("after failed writes x/a is %q, b wiped %d times, d %d; want %q, 0, 2", v, refusalCount(*held, b), refusalCount(*held, dd), b)
 	}
-	if _, err := s.ReplaceAndPut("x/a", dd, Swap{ID: sl.ID, F: Recovery{Key: []byte("short")}}); err == nil {
+	if _, err := s.ReplaceAndPut("x/a", dd, Swap{ID: sl.ID, F: Recovery{Key: secret.Hide([]byte("short"))}}); err == nil {
 		t.Fatal("ReplaceAndPut with a short recovery key wrote")
 	}
 	if _, err := s.ReplaceAndPut("Bad Name", dd, Swap{ID: sl.ID, F: r}); err == nil {
@@ -153,7 +153,7 @@ func TestEntriesDecodeCopiesNoValue(t *testing.T) {
 // passphrase swap with a bad name pays no Argon2 (#6048; CLK-1). Each slot makeSlot makes wipes
 // its slot key, so a refusal that made one would show a wipe. The file write is stubbed to fail.
 func TestABadEntryMakesNoSlot(t *testing.T) {
-	r, key, id := Recovery{Key: make([]byte, RecoveryLen)}, slices.Repeat([]byte{0x6b}, keyLen), make([]byte, idLen)
+	r, key, id := Recovery{Key: secret.Hide(make([]byte, RecoveryLen))}, slices.Repeat([]byte{0x6b}, keyLen), make([]byte, idLen)
 	sl, err := makeSlot(id, key, r)
 	if err != nil {
 		t.Fatal(err)
