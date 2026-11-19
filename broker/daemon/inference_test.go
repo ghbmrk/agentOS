@@ -2599,12 +2599,12 @@ type envBuild struct {
 
 // envFiles calls check with each non-test .go file under root (vendor/
 // and third_party/ included, testdata/ and dot directories not), loaded
-// with its package's files in the first linux build that compiles it
-// (#6201): amd64 with cgo, amd64 without, then arm64 without (camnode's),
-// with as few of the file's own build tags as it needs. A file no such
-// build compiles (a !linux file, another platform's vendored file) is in
-// no box binary and is not checked. It returns each package that does not
-// type-check.
+// with its package's files in every linux build that compiles it (#6201):
+// amd64 with cgo, amd64 without, arm64 without (camnode's), each with any
+// of its directory's build tags, once per distinct set of package files.
+// A file no such build compiles (a !linux file, another platform's
+// vendored file) is in no box binary and is not checked. It returns each
+// package that does not type-check.
 func envFiles(t *testing.T, root string, check func(rel string, l *loaded, i int)) (failed []string) {
 	t.Helper()
 	dirs := map[string][]string{}
@@ -2637,7 +2637,6 @@ func envFiles(t *testing.T, root string, check func(rel string, l *loaded, i int
 		dir, rel string
 		tg       envBuild
 		names    []string
-		own      map[string]bool
 	}
 	// Each file's head and the tags its constraint names; a box build sets
 	// only tags the module's own files name (srclint pins those to the
@@ -2671,48 +2670,55 @@ func envFiles(t *testing.T, root string, check func(rel string, l *loaded, i int
 			}
 		}
 	}
+	// Every build that some file of the directory needs (the three base
+	// builds, each with every subset of its files' tags), and in each,
+	// every package's files; a file set seen in an earlier build is not
+	// loaded again (#6203 Security: a value that differs by build).
 	var groups []*group
 	byKey, byBuild, skipped := map[string]*group{}, map[string][]*ast.File{}, 0
 	for _, dir := range slices.Sorted(maps.Keys(dirs)) {
 		rel, _ := filepath.Rel(root, dir)
-		for _, name := range slices.Sorted(slices.Values(dirs[dir])) {
-			// The first build with some of the file's own tags that
-			// compiles it.
-			try := slices.DeleteFunc(tags[filepath.Join(dir, name)], func(w string) bool { return !built[w] })
-			var tg envBuild
-			found := false
-			for bits := 0; bits < 1<<len(try) && !found; bits++ {
-				var on []string
-				for j, w := range try {
-					if bits>>j&1 == 1 {
-						on = append(on, w)
-					}
-				}
-				for _, tg = range []envBuild{{"amd64", true, on}, {"amd64", false, on}, {"arm64", false, on}} {
-					if found, _ = context(tg).MatchFile(dir, name); found {
-						break
-					}
+		var try []string
+		for _, name := range dirs[dir] {
+			for _, w := range tags[filepath.Join(dir, name)] {
+				if built[w] && !slices.Contains(try, w) {
+					try = append(try, w)
 				}
 			}
-			if !found {
-				skipped++
-				continue
+		}
+		slices.Sort(try)
+		checked := map[string]bool{}
+		for bits := 0; bits < 1<<len(try); bits++ {
+			var on []string
+			for j, w := range try {
+				if bits>>j&1 == 1 {
+					on = append(on, w)
+				}
 			}
-			pkg := heads[filepath.Join(dir, name)].Name.Name
-			key := fmt.Sprint(dir, tg, pkg)
-			if byKey[key] == nil {
-				g := &group{dir: dir, rel: filepath.ToSlash(rel), tg: tg, own: map[string]bool{}}
-				for _, n := range slices.Sorted(slices.Values(dirs[dir])) {
-					if ok, _ := context(tg).MatchFile(dir, n); ok && heads[filepath.Join(dir, n)].Name.Name == pkg {
-						g.names = append(g.names, n)
+			for _, tg := range []envBuild{{"amd64", true, on}, {"amd64", false, on}, {"arm64", false, on}} {
+				pkgs := map[string][]string{}
+				for _, name := range slices.Sorted(slices.Values(dirs[dir])) {
+					if ok, _ := context(tg).MatchFile(dir, name); ok {
+						pkg := heads[filepath.Join(dir, name)].Name.Name
+						pkgs[pkg] = append(pkgs[pkg], name)
+					}
+				}
+				for _, pkg := range slices.Sorted(maps.Keys(pkgs)) {
+					key := fmt.Sprint(dir, pkg, pkgs[pkg])
+					if byKey[key] != nil {
+						continue
+					}
+					g := &group{dir: dir, rel: filepath.ToSlash(rel), tg: tg, names: pkgs[pkg]}
+					for _, n := range g.names {
+						checked[n] = true
 						byBuild[fmt.Sprint(tg)] = append(byBuild[fmt.Sprint(tg)], heads[filepath.Join(dir, n)])
 					}
+					byKey[key] = g
+					groups = append(groups, g)
 				}
-				byKey[key] = g
-				groups = append(groups, g)
 			}
-			byKey[key].own[name] = true
 		}
+		skipped += len(dirs[dir]) - len(checked)
 	}
 	// One go list per build gives every package's imports their export data.
 	for _, g := range groups {
@@ -2728,9 +2734,7 @@ func envFiles(t *testing.T, root string, check func(rel string, l *loaded, i int
 			failed = append(failed, fmt.Sprintf("%s (%v): does not type-check, so the lint cannot check it: %v", g.rel, g.tg, l.err))
 		}
 		for i, name := range g.names {
-			if g.own[name] {
-				check(filepath.ToSlash(filepath.Join(g.rel, name)), l, i)
-			}
+			check(filepath.ToSlash(filepath.Join(g.rel, name)), l, i)
 		}
 	}
 	return failed
@@ -3558,12 +3562,14 @@ func TestEveryChildGetsAnExplicitEnvironment(t *testing.T) {
 	for _, f := range failed {
 		t.Error(f)
 	}
+	// A file checked in several builds is reported once.
+	sort.Strings(bad)
+	sort.Strings(inherit)
+	bad, inherit = slices.Compact(bad), slices.Compact(inherit)
 	if len(bad) > 0 {
-		sort.Strings(bad)
 		t.Errorf("child started without Env (it inherits the broker's environment); set Env to an explicit list (reviews/security/README.md, the row on a child inheriting the daemon's environment):\n%s", strings.Join(bad, "\n"))
 	}
 	if len(inherit) > 0 {
-		sort.Strings(inherit)
 		t.Errorf("os.Environ() in a child's Env (it inherits the broker's environment); name each variable the child needs instead (reviews/security/README.md, the row on a child inheriting the daemon's environment):\n%s", strings.Join(inherit, "\n"))
 	}
 	for k := range envExempt {
@@ -3967,10 +3973,10 @@ func TestEnvCheckReadsNamesByObject(t *testing.T) {
 
 // REQ: CRED-1, ARC-1
 //
-// #6201: the walk checks a file in a linux build that compiles it, its own
-// tags set, and reports a package that does not type-check; a file no box
-// build compiles (!linux, or behind a tag only vendored code names) is not
-// read.
+// #6201: the walk checks a file in every linux build that compiles it,
+// its own tags set (a value that differs by build is read in each), and
+// reports a package that does not type-check; a file no box build
+// compiles (!linux, or behind a tag only vendored code names) is not read.
 func TestEnvWalkChecksEveryBoxBuild(t *testing.T) {
 	root := t.TempDir()
 	for name, c := range map[string]string{
@@ -3980,6 +3986,11 @@ func TestEnvWalkChecksEveryBoxBuild(t *testing.T) {
 		"a/gen.go":      "//go:build ignore\n\npackage main\nimport \"os/exec\"\nfunc main() { exec.Command(\"x\").Run() }\n",
 		"b/b.go":        "package b\nfunc B() int { return \"x\" }\n",
 		"vendor/v/v.go": "//go:build purego\n\npackage v\nimport \"os/exec\"\nfunc V() { exec.Command(\"x\").Run() }\n",
+		// A value that is explicit in one build and the process's
+		// environment in another (#6203 Security).
+		"c/shared.go": "package c\nimport \"os/exec\"\nfunc S() { c := exec.Command(\"x\"); c.Env = envVal(); c.Run() }\n",
+		"c/cgo.go":    "//go:build cgo\n\npackage c\nfunc envVal() []string { return []string{\"A=1\"} }\n",
+		"c/nocgo.go":  "//go:build !cgo\n\npackage c\nimport \"os\"\nfunc envVal() []string { return os.Environ() }\n",
 	} {
 		if err := os.MkdirAll(filepath.Join(root, filepath.Dir(name)), 0o700); err != nil {
 			t.Fatal(err)
@@ -3988,14 +3999,22 @@ func TestEnvWalkChecksEveryBoxBuild(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	var got []string
+	visited, flagged := map[string]bool{}, map[string]bool{}
 	failed := envFiles(t, root, func(rel string, l *loaded, i int) {
-		noEnv, _ := childEnv(l, i)
-		got = append(got, fmt.Sprint(rel, noEnv))
+		visited[rel] = true
+		noEnv, inherits := childEnv(l, i)
+		for _, fn := range noEnv {
+			flagged[rel+" noEnv "+fn] = true
+		}
+		for _, fn := range inherits {
+			flagged[rel+" inherits "+fn] = true
+		}
 	})
-	slices.Sort(got)
-	if want := "a/a.go[] a/gen.go[main] a/tagged.go[T] b/b.go[]"; strings.Join(got, " ") != want {
-		t.Errorf("checked %q, want %q", got, want)
+	if got, want := strings.Join(slices.Sorted(maps.Keys(visited)), " "), "a/a.go a/gen.go a/tagged.go b/b.go c/cgo.go c/nocgo.go c/shared.go"; got != want {
+		t.Errorf("checked %s, want %s", got, want)
+	}
+	if got, want := strings.Join(slices.Sorted(maps.Keys(flagged)), ", "), "a/gen.go noEnv main, a/tagged.go noEnv T, c/shared.go inherits S"; got != want {
+		t.Errorf("flagged %s, want %s", got, want)
 	}
 	if len(failed) != 1 || !strings.HasPrefix(failed[0], "b (") {
 		t.Errorf("type errors %q, want b's alone", failed)
