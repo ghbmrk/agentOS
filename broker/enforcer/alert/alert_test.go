@@ -1262,3 +1262,121 @@ func TestResumedClosesFirstAlert(t *testing.T) {
 		t.Fatalf("the first record after a resume: %+v", log)
 	}
 }
+
+// unreadable is a journal whose Load fails.
+type unreadable struct{ journal }
+
+func (unreadable) Load() ([]byte, error) { return nil, errors.New("CANARY-JOURNAL-UNREADABLE") }
+
+// TestOpenReadsJournalWhole (NET-2 Texts and calls, P6): New returns a
+// journal it cannot read or cut back, shows the light the journal holds
+// before any Core call, leaves a whole journal untouched even when its
+// cut-back fails, and cuts a later failed append back to the end of what
+// it read, never before it. Catches an open that drops a read error, a
+// cut-back it needed, the light at boot, or the size of the journal read.
+func TestOpenReadsJournalWhole(t *testing.T) {
+	open := func(j Journal) (*Alerts, *bulb, error) {
+		b := &bulb{}
+		a, err := New(Config{Send: (&core{}).Send, Light: b, Journal: j})
+		return a, b, err
+	}
+	if _, _, err := open(&unreadable{}); err == nil || !strings.Contains(err.Error(), "CANARY-JOURNAL-UNREADABLE") {
+		t.Fatalf("an unreadable journal opened: %v", err)
+	}
+	if _, _, err := open(&torn{journal: journal{b: []byte(`{"ID":1`)}, noCut: true}); err == nil {
+		t.Fatal("a torn journal whose cut-back failed opened")
+	}
+
+	r := newRig(t, &journal{})
+	if _, err := r.a.Raise(Trip, "core"); err != nil {
+		t.Fatal(err)
+	}
+	saved := slices.Clone(r.j.b)
+	j := &torn{journal: journal{b: slices.Clone(saved)}, noCut: true}
+	a, b, err := open(j)
+	if err != nil {
+		t.Fatalf("a whole journal whose cut-back fails: %v", err)
+	}
+	b.mu.Lock()
+	shown := slices.Clone(b.shown)
+	b.mu.Unlock()
+	if !slices.Equal(shown, []Colour{Red}) {
+		t.Fatalf("the light at open, before any Core call: %v", shown)
+	}
+	j.noCut, j.short = false, true
+	if _, err := a.Raise(Enrolment, ""); err == nil {
+		t.Fatal("a torn record was reported saved")
+	}
+	if string(j.b) != string(saved) {
+		t.Fatalf("the cut-back did not stop at the journal read: %q, want %q", j.b, saved)
+	}
+}
+
+// TestRaiseStateKept (NET-2 Texts and calls): a record the journal
+// cannot encode is refused, a kind with no words is refused, a repeat
+// moves the alert's Last time on, and Core's state shows on the page.
+// Catches a dropped encode or words error, a stale Last, or a Core that
+// leaves the page reading the core down.
+func TestRaiseStateKept(t *testing.T) {
+	now := time.Date(2026, 10, 29, 3, 0, 0, 0, time.UTC)
+	a, err := New(Config{Send: (&core{}).Send, Light: &bulb{}, Journal: &journal{},
+		Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.Status().CoreDown {
+		t.Fatal("a new log reads the core up")
+	}
+	a.Core(true)
+	if a.Status().CoreDown {
+		t.Fatal("Core(true) left the core down")
+	}
+	if _, err := a.Raise(Kind(255), "core"); !errors.Is(err, ErrKind) || len(a.Log()) != 0 {
+		t.Fatalf("a kind with no words: %v, log %+v", err, a.Log())
+	}
+	first, err := a.Raise(Trip, "core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	again, err := a.Raise(Trip, "core")
+	if err != nil || again.ID != first.ID || !again.Last.Equal(now) {
+		t.Fatalf("a repeat: %+v, %v", again, err)
+	}
+	now = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC) // past what JSON can encode
+	if _, err := a.Raise(Enrolment, ""); err == nil {
+		t.Fatal("a record the journal cannot encode was reported saved")
+	}
+}
+
+// TestResolveAndResumeShowLight (KRN-12): Resolve and Resumed show the
+// light again, so a bulb that missed a change catches up on them.
+// Catches a close that leaves the light to the next timer.
+func TestResolveAndResumeShowLight(t *testing.T) {
+	r := newRig(t, &journal{})
+	if _, err := r.a.Raise(Trip, "core"); err != nil {
+		t.Fatal(err)
+	}
+	en, err := r.a.Raise(RecoveryCodeUsed, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.a.Paused()
+	for _, step := range []struct {
+		name string
+		do   func() error
+	}{
+		{"Resolve", func() error { return r.a.Resolve(en.ID) }},
+		{"Resumed", r.a.Resumed},
+	} {
+		r.bulb.mu.Lock()
+		r.bulb.shown = []Colour{Off} // a power-cycled bulb
+		r.bulb.mu.Unlock()
+		if err := step.do(); err != nil {
+			t.Fatalf("%s: %v", step.name, err)
+		}
+		if r.bulb.now() != Red {
+			t.Fatalf("%s left the bulb at %v with a trip open", step.name, r.bulb.now())
+		}
+	}
+}
