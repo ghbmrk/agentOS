@@ -314,7 +314,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-l-ap-handover-words | ENF-l-ap-handover-words: a failed hand-over says what to do, not SSH internals | #6013 UX 5 | queued(tier A; lane primary; brief briefs/ENF-l-b2.md) |
 | ENF-l-ap-new-cards | ENF-l-ap-new-cards: home marks the device passwords still to enter and uses the owner's labels | #6013 UX 6 | queued(tier A; lane primary; brief briefs/ENF-l-b2.md) |
 | HOST-1e2b1-fu | HOST-1e2b1-fu: release items from #6140's reviews: tolerance and opted-in disk bounds, PC snapshots without an RTC offset flagged, stated adjtimex and offset bounds, operator messages and preflight order, two test fixes. | #6135 | queued (tier A) |
-| MOR-pageca-emergency | MOR-pageca-emergency: an emergency isolate stops the page authority's staging, so a printed card's fingerprint no longer matches. Release; from #6159. | #5947 | building (release; tier A) |
 | MOR-soft-reboot | MOR-soft-reboot: an orderly soft reboot clears MOR while the kernel keeps its memory, so the holders after it run with MOR clear. Release; from #6178. | #5947 | queued (release; tier A) |
 
 ## Model routes and the Codex lane
@@ -407,7 +406,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KRN-clock-fresh-rise | KRN-clock-fresh-rise: a kernel started behind the log catches up on a fresh chronyd sample (TIM-1). Release; from #5757. | #5391, #5757 | queued (release; tier A) |
 | OWN-page-session-mut2c | OWN-page-session mutants part 2c: old cmd/agentosd survivors in evidence, main, held, signinhost (76) | #5862 | building (release; tier A) |
 | VULN-static-elf | VULN-static-elf: an image-build check that finds static ELFs (llama-server) and makes image-vulncheck scan their toolchain packages. Release; split from #5873. | #5873, #5871, #2919 | building (release; tier A; gate files; brief briefs/VULN-static-elf.md, PR #5940; parts a, b; after #5932, serial with #5889 on image.yml) |
-| KRN-forget-wide | KRN-forget-wide: a FORGET ask that a wide clock reading has already lapsed says so instead of asking. Release; from #5811. | #5391, #5811 | building (release; tier A) |
 | VULN-cipher-sweep-tidy-2 | VULN-cipher-sweep-tidy-2: image.yml paths for the codex digest pins; sweep refusal wording. Release; from #5878. | #5878 | building (release; tier A; gate file .github/workflows/image.yml) |
 | VULN-codex-openssl | VULN-codex-openssl: bump the codex pin once a release links OpenSSL 3.6.5 or later; until then the bundled entry records each fix's reach. Release; from #5888. | #5873, #5888 | queued (release; tier A; waits on a codex release) |
 | IMG-keyring-pin-b | IMG-keyring-pin-b: the enforcer image and test-kit builds check the Debian archive keyring too. Release; from #5932. | #5932 | building (release; tier A; gate files) |
@@ -446,6 +444,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | BROWSER-shell-cache-warning-cmd | BROWSER-shell-cache-warning-cmd: the headless-shell cache warning names the delete command for the bad entry. Release; rides the next ci.yml PR. | #6175, #6180 | queued (release; tier A; gate file) |
 | TEST-fdcount-before-guard | TEST-fdcount-before-guard: the boxe2e descriptor-count test fails when its before count is zero, so it cannot pass vacuously. Release; from #6186. | #6157, #6186 | queued (release; tier A) |
 | BROWSER-valueforms-tiebreak | BROWSER-valueforms-tiebreak: valueForms orders equal-length scrub forms deterministically, and the equivalence reasons name what they lean on. Release; from #6167. | #6085, #6167 | queued (release; tier A) |
+| IMG-security-snapshot-404 | IMG-security-snapshot-404: an image build falls back to the previous debian-security mirror run, for both builds, when apt cannot read the pinned snapshot's index. Second sighting; defect. | #5021, #5825 | building (defect; tier A; gate file) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -494,7 +493,6 @@ issue #6008: needs exactly one state label of queued, building, in review, merge
 issue #6033: body has no board-row block
 issue #6069: body has no board-row block
 issue #6077: body has no board-row block
-issue #6157: body has no board-row block
 issue #6168: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #6184: no section 'Tooling and CI' in BOARD.md
 issue #6192: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
