@@ -11,7 +11,9 @@ names the ID too means more is owed, so the row is not listed.
 Only a merged PR whose body closes the row's own issue (`Closes|Fixes|Resolves #N`) finishes it.
 A name-only match is printed as "maybe" with its reason: prep, partial and look-alike PRs match too.
 
-  stalequeued.py --repo o/r      print "<ID> (#issue): closed by PR #N" or
+  stalequeued.py --repo o/r      print "<ID> (#issue): closed by PR #N",
+                                 "<ID> (#issue): maybe: reopened after PR #M" (closing PR merged
+                                 before the row's last reopen: more is owed), or
                                  "<ID> (#issue): maybe: title match, does not close #issue (PR #N)"
                                  per row; exit 0 whether or not any is found. GETs only.
 """
@@ -53,9 +55,11 @@ def builds(files):
     return any(f.startswith(BUILD_DIRS) for f in files)
 
 
-def stale_queued(items, prs, files=lambda pr: ["tools/x"]):
+def stale_queued(items, prs, files=lambda pr: ["tools/x"], reopened_at=lambda item: None):
     """(issue, merged PR, how) for each queued row a merged PR names, with a build change
-    (files(pr) lists its changed paths), and no open PR names."""
+    (files(pr) lists its changed paths), and no open PR names. GitHub closes an issue when its
+    closing PR merges, so a still-open row whose closing PR merged before the issue's last reopen
+    (reopened_at(item), asked only for state_reason "reopened" rows) owes more: how is "reopened"."""
     out = []
     for item in items:
         if "pull_request" in item:
@@ -68,6 +72,11 @@ def stale_queued(items, prs, files=lambda pr: ["tools/x"]):
         if any(p["state"] == "open" for p, _ in hits):
             continue
         merged = [(p, how) for p, how in hits if p.get("merged_at") and (how == "closes" or builds(files(p)))]
+        if item.get("state_reason") == "reopened" and any(how == "closes" for _, how in merged):
+            since = reopened_at(item)
+            if since:
+                merged = [(p, "reopened" if how == "closes" and p["merged_at"] <= since else how)
+                          for p, how in merged]
         if merged:
             pr, how = max(merged, key=lambda h: (h[1] == "closes", h[0]["merged_at"]))
             out.append((item, pr, how))
@@ -81,7 +90,10 @@ def main(argv=None, fetch=board.github):
     try:
         items = board.work_items(fetch, args.repo)
         found = stale_queued(items, fetch(f"/repos/{args.repo}/pulls?state=all"),
-                             lambda pr: [f["filename"] for f in fetch(f"/repos/{args.repo}/pulls/{pr['number']}/files")])
+                             lambda pr: [f["filename"] for f in fetch(f"/repos/{args.repo}/pulls/{pr['number']}/files")],
+                             lambda i: max((e["created_at"] for e in fetch(
+                                 f"/repos/{args.repo}/issues/{i['number']}/events")
+                                 if e.get("event") == "reopened"), default=None))
     except ValueError as e:
         print(f"stalequeued: {e}", file=sys.stderr)
         return 1
@@ -89,6 +101,8 @@ def main(argv=None, fetch=board.github):
         rid, n = board.row_of(item)["id"], item["number"]
         if how == "closes":
             print(f"{rid} (#{n}): closed by PR #{pr['number']}")
+        elif how == "reopened":
+            print(f"{rid} (#{n}): maybe: reopened after PR #{pr['number']}")
         else:
             print(f"{rid} (#{n}): maybe: {how} match, does not close #{n} (PR #{pr['number']})")
     return 0

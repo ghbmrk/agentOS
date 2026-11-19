@@ -15,6 +15,10 @@ on:
     paths:
       - "image/**"
       - ".github/workflows/image.yml"
+      # The guest roots build.sh builds into the image (#5889): import_sweep.allow pins the codex
+      # binaries by SHA-256, so a version bump in build-rootfs.sh must meet the sweep in its own PR.
+      - "guest/codex/**"
+      - "guest/openclaw/**"
       - "tools/hostcheck.py"
       - "tools/hostcheck_image/**"
       - "tests/test_hostcheck.py"
@@ -55,6 +59,10 @@ on:
     paths:
       - "image/**"
       - ".github/workflows/image.yml"
+      # The guest roots build.sh builds into the image (#5889): import_sweep.allow pins the codex
+      # binaries by SHA-256, so a version bump in build-rootfs.sh must meet the sweep in its own PR.
+      - "guest/codex/**"
+      - "guest/openclaw/**"
       - "tools/hostcheck.py"
       - "tools/hostcheck_image/**"
       - "tests/test_hostcheck.py"
@@ -109,17 +117,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
-      timestamp: ${{ steps.resolve.outputs.timestamp }}
+      snapshots: ${{ steps.resolve.outputs.snapshots }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
       - name: Resolve the debian-security snapshot
         id: resolve
-        # The script prints only a timestamp it has checked (YYYYMMDDTHHMMSSZ), or fails.
+        # The script prints only timestamps it has checked (YYYYMMDDTHHMMSSZ): the run's snapshot and the
+        # fallback both builds take when it stops serving its index (#6198), or fails.
         run: |
           ts=$(sh image/security-snapshot.sh resolve)
-          echo "timestamp=$ts" >> "$GITHUB_OUTPUT"
+          echo "snapshots=$ts" >> "$GITHUB_OUTPUT"
   build:
     needs: security-snapshot
     strategy:
@@ -212,7 +221,7 @@ jobs:
       - name: Build image
         shell: bash  # with pipefail, so tee keeps the build's exit status
         env:
-          AGENTOS_SECURITY_SNAPSHOT: ${{ needs.security-snapshot.outputs.timestamp }}  # the same for a and b (#5021)
+          AGENTOS_SECURITY_SNAPSHOT: ${{ needs.security-snapshot.outputs.snapshots }}  # the same for a and b (#5021)
         run: sudo env "PATH=$PATH" "AGENTOS_SECURITY_SNAPSHOT=$AGENTOS_SECURITY_SNAPSHOT" HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log"
       - name: Show the tree check's refusals
         # The tree check's refusals as annotations, so a tmpfiles.d line missing from

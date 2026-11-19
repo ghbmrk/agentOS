@@ -34,8 +34,9 @@ var (
 	// ending KEY-8 and KEY-4 holds early if the box clock is wrong-ahead. A
 	// wrong clock may only make the box more cautious (TIM-1's interval
 	// rule), so the text names no restart for the owner to make: it names
-	// the weekly restart (UPD-10), which commits the step anyway (KRN-clock-a).
-	ErrForgetClock = errors.New("I can't ask to forget anything right now, because my two clocks disagree by 10 minutes or more, so nothing is erased. Send FORGET again after my weekly restart.")
+	// the weekly restart (UPD-10), which commits the step anyway (KRN-clock-a),
+	// and the Wi-Fi page's Forget step, since a FORGET text starts none (D-284).
+	ErrForgetClock = errors.New("I can't ask to forget anything now: my two clocks disagree by 10 minutes or more, so nothing is erased. Try Forget on my Wi-Fi page after my weekly restart.")
 )
 
 // kindWords names a kind as the household says it, for one and for more; the

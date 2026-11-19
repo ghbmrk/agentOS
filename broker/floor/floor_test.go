@@ -168,9 +168,38 @@ func (r *floorRig) waitFilled(dir string, mib int64) {
 	deadline := time.Now().Add(60 * time.Second)
 	for memCurrentMiB(dir) < mib*9/10 {
 		if time.Now().After(deadline) {
-			r.t.Fatalf("%s holds %d MiB, want %d", dir, memCurrentMiB(dir), mib)
+			r.t.Fatalf("%s holds %d MiB, want %d; pool %d MiB, pool PSI: %s; pool events: %s",
+				dir, memCurrentMiB(dir), mib, memCurrentMiB(r.groups.Machines.Path), pressure(r.groups.Machines.Path), oneLine(filepath.Join(r.groups.Machines.Path, "memory.events")))
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func oneLine(file string) string {
+	b, _ := os.ReadFile(file)
+	return strings.Join(strings.Fields(string(b)), " ")
+}
+
+// drainPool waits for the pool to give back the memory of the machines just
+// destroyed. A checkpoint cut short by preemption (runsc exits 128, "urpc
+// ... EOF") may leave its partial image in page cache charged to the pool,
+// so the next rep's experiments would start at memory.high and reclaim keeps
+// them below their hog target (#1196, suspected, not reproduced). Reclaim is
+// asked for, then the pool is polled up to the same bound as waitFilled; the
+// next rep's own checks still decide whether the limits hold.
+func (r *floorRig) drainPool() {
+	r.t.Helper()
+	const leftMiB = 256
+	dir := r.groups.Machines.Path
+	deadline := time.Now().Add(60 * time.Second)
+	for memCurrentMiB(dir) > leftMiB && time.Now().Before(deadline) {
+		// memory.reclaim (Linux 5.19+) is best effort; its error (EAGAIN
+		// when it cannot free all asked) is ignored.
+		os.WriteFile(filepath.Join(dir, "memory.reclaim"), []byte("2G"), 0o644)
+		time.Sleep(100 * time.Millisecond)
+	}
+	if left := memCurrentMiB(dir); left > leftMiB {
+		r.t.Logf("pool still holds %d MiB after destroying every machine", left)
 	}
 }
 
@@ -261,6 +290,7 @@ func TestFloorAdmissionAndPreemption(t *testing.T) {
 		for _, id := range r.m.Machines() {
 			must(t, r.m.Destroy(ctx, id))
 		}
+		r.drainPool()
 	}
 	oom, err := r.root.OOMKills()
 	must(t, err)

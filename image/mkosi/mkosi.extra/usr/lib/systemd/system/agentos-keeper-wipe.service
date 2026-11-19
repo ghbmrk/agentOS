@@ -1,0 +1,50 @@
+# MOR-setup-factors (#5843, HW-8): the stop empties the /run directories agentos-mor's clear refuses
+# on (holdDirs: /run/agentos-setup, /run/agentos-link-capture), so an orderly shutdown between the
+# Owner Card confirm and a successful enrollment, or after a failed one, still clears MOR. Their files
+# (the card's two factors from agentos-keeper-setup@.service, the staged page authority, the first
+# edge's capture, and any hidden temporary a writer killed mid-write left) have no stop of their own;
+# enrollment removes them only on success and keeps them for a retry. A reboot discards them anyway
+# (tmpfs) and starts the card over, so nothing is lost that the next boot had kept. The unit holds no
+# process. Shutdown stops it before agentos-mor.service's clear, and it is ordered before every unit
+# that writes there, so it stops after each of them (setup@ names it in After=, since Before= cannot name
+# a template's instances); tests/test_image_mor.py holds both. An isolate leaves it active and a manual
+# stop is refused, so the staged authority a printed card names stays until shutdown. It has no default
+# dependencies, whose Requires=sysinit.target would let an emergency isolate stop it through sysinit's
+# Conflicts=emergency.target, and states the rest of them (MOR-pageca-emergency, #6178).
+[Unit]
+Description=agentOS setup files' removal at shutdown
+DefaultDependencies=no
+After=sysinit.target basic.target agentos-mor.service
+Conflicts=shutdown.target
+Before=shutdown.target agentos-keeper-pageca.service agentos-keeper-enroll.service agentos-keeper-link-capture.service
+IgnoreOnIsolate=yes
+RefuseManualStop=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStop=/usr/bin/find /run/agentos-setup /run/agentos-link-capture -xdev -mindepth 1 -delete
+# Journal only (MOR-wipe-console, #6042): a failed find leaves MOR set (fail-safe); the owner cannot act on a console line.
+StandardError=journal
+# The error is kept on disk (image/ASSUMPTIONS.md MOR-wipe-journal, #6078), and the owner is told in
+# STATUS (MOR-wipe-owner, #6094): whatever the stop's result, this records it, removing the file on
+# success and writing it on any failure; agentosd's STATUS shows a line while it exists
+# (broker/cmd/agentosd/wipenote.go), so until a later shutdown's wipe succeeds.
+StateDirectory=agentos-wipe
+StateDirectoryMode=0700
+ExecStopPost=/usr/bin/sh -c 'if [ "$$SERVICE_RESULT" = success ]; then exec /usr/bin/rm -f -- "$$STATE_DIRECTORY/failed"; fi; echo "$$SERVICE_RESULT $$EXIT_CODE $$EXIT_STATUS" >"$$STATE_DIRECTORY/failed"'
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+# No device but the standard pseudo-devices, and no TPM (#2889).
+DevicePolicy=closed
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr
+
+[Install]
+# Whenever a writer starts, in any target, and at every boot to multi-user.
+WantedBy=multi-user.target agentos-keeper-pageca.service agentos-keeper-enroll.service agentos-keeper-link-capture.service
