@@ -69,7 +69,8 @@ func marshalProblems(roots map[string]reflect.Type) []string {
 			k := ty.Key()
 			switch {
 			case k.Kind() == reflect.String:
-			case marshals(k):
+			case k.Implements(reflect.TypeFor[encoding.TextMarshaler]()):
+				// json reads only a value receiver's MarshalText for a key, never MarshalJSON.
 				if !known[k] {
 					out = append(out, at+" has a map key ("+k.String()+") with a marshaler no proof reads")
 				}
@@ -131,6 +132,7 @@ type (
 	marshalText   struct{ M map[marshalOdd]int }
 	marshalOdd    int
 	marshalIface  struct{ V any }
+	marshalPKKey  struct{ M map[key.PublicKey]int }
 )
 
 func (marshalOdd) MarshalText() ([]byte, error) { return nil, errors.New("refused") }
@@ -145,7 +147,7 @@ func TestMarshalProblemsFindsEachFailure(t *testing.T) {
 	for _, v := range []any{
 		marshalNaN{math.NaN()}, marshalInner{marshalNaN{math.NaN()}}, n, marshalRaw{json.RawMessage("{")},
 		marshalBool{map[bool]int{true: 1}}, marshalArrKey{map[[2]byte]int{{}: 1}}, marshalPtrKey{map[*string]int{&s: 1}},
-		marshalStrKey{map[struct{ A string }]int{{}: 1}}, marshalText{map[marshalOdd]int{1: 1}}, marshalIface{func() {}},
+		marshalStrKey{map[struct{ A string }]int{{}: 1}}, marshalText{map[marshalOdd]int{1: 1}}, marshalIface{func() {}}, marshalPKKey{map[key.PublicKey]int{{}: 1}},
 	} {
 		ty := reflect.TypeOf(v)
 		if len(marshalProblems(map[string]reflect.Type{"root": ty})) == 0 {
