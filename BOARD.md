@@ -420,11 +420,9 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CLK-seal-entry-swap-wipe-fu-d | CLK-seal-entry-swap-wipe-fu-d: the entry-count refusal runs before any slot or swap, withEntry checks its own entry again, and four comment lines are re-wrapped. Release; from #6049. | #6048, #6049 | building (release; tier A) |
 | VULN-node-openssl-pin | VULN-node-openssl-pin: bump the openclaw guest's node pin once a release bundles OpenSSL 3.5.10; until then the bundled entry records each fix's reach. Release; from #6074. | #5853, #6074 | queued (release; tier A; waits on a node release) |
 | MOR-writer-match-fu | MOR-writer-match-fu: the wipe test counts the clear's own unit as a writer except for its known clear action, not by skipping it by name. Release; from #6066. | #6043, #6066 | building (release; tier B) |
-| BROWSER-mutants-kill | BROWSER-mutants-kill: broker/browser has no surviving mutant on a covered line, and K4 says CI runs the real-driver tests. From #6063. | #5952, #6063 | building (tier A) |
 | IMG-keyring-spikes-fu-b | IMG-keyring-spikes-fu-b: each mkosi tree's keyring pins are looked up per tree, Mirror and Repositories are pinned, and record-directory trees are handled. Release; from #6082. | #5983, #6082 | building (release; tier A) |
 | MOR-clear-owner | MOR-clear-owner: a refused MOR clear is shown to the owner in STATUS, like a failed wipe. Release; from #6110. | #6094, #6110 | building (release; tier A) |
 | IMG-keyring-spikes-fu-d | IMG-keyring-spikes-fu-d: the record-directory check also catches a tracked symlink to a tree and a lone mkosi.configure. Release; from #6116. | #6088, #6116 | building (release; tier B) |
-| LINT-dial-types | LINT-dial-types: the inference lint reads exact types through go/types instead of its hand-built inferencer, keeping every existing negative case and measuring the cost. Re-plan; from #6119. | #6028, #6119 | building (re-plan; tier A) |
 | TIM-1-interval-fu-m | TIM-1-interval-fu-m: agentos-clock-boot drops its own state-file stat check, now covered by BootEstimate's shared CheckFile. Simplicity; from #6121. | #6058, #6121 | building (release; tier B) |
 | MOR-wipe-status-e2e | MOR-wipe-status-e2e: a failed wipe's STATUS line is shown by a test that runs agentosd's wiring, not only wipeNote. Release; from #6095. | #6094, #6095 | queued (release; tier B) |
 | MOR-clear-owner-fu | MOR-clear-owner-fu: the failed-shutdown STATUS line stops asking for a restart when the record outlives one, and a boot test holds the record's sync and mode. Release; from #6126. | #6111, #6126 | queued (release; tier B) |
@@ -444,7 +442,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | BROWSER-shell-cache-warning-cmd | BROWSER-shell-cache-warning-cmd: the headless-shell cache warning names the delete command for the bad entry. Release; rides the next ci.yml PR. | #6175, #6180 | queued (release; tier A; gate file) |
 | TEST-fdcount-before-guard | TEST-fdcount-before-guard: the boxe2e descriptor-count test fails when its before count is zero, so it cannot pass vacuously. Release; from #6186. | #6157, #6186 | queued (release; tier A) |
 | BROWSER-valueforms-tiebreak | BROWSER-valueforms-tiebreak: valueForms orders equal-length scrub forms deterministically, and the equivalence reasons name what they lean on. Release; from #6167. | #6085, #6167 | queued (release; tier A) |
-| IMG-security-snapshot-404 | IMG-security-snapshot-404: an image build falls back to the previous debian-security mirror run, for both builds, when apt cannot read the pinned snapshot's index. Second sighting; defect. | #5021, #5825 | building (defect; tier A; gate file) |
+| LINT-childenv-types | LINT-childenv-types: the child-environment lint reads exact types through the one go/types load instead of ast.Object scopes. Re-plan follow-up; from #6169. | #6120, #6169 | building (tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
