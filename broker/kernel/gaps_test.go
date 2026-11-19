@@ -319,7 +319,7 @@ func TestAFirstAttemptCountsEveryEarlierUse(t *testing.T) {
 	r.plan("p1", one, st(key.Organize, "m1"))
 	r.plan("p2", one, st(key.Organize, "m2"))
 	if r.status("p2") != kernel.SActive {
-		t.Skipf("p2 was not admitted: %s", r.status("p2"))
+		t.Fatalf("p2 was not admitted: %s", r.status("p2"))
 	}
 	must(t, r.tick(1))
 	if n := len(r.mail.Effects()); n != 1 || r.status("p2") != kernel.SCancelled {
