@@ -1644,6 +1644,9 @@ func set(n, m int) {
         self.assertEqual(mutgate.selected(site, failing), ["TestA", "TestF"])
         self.assertEqual(mutgate.set_seconds(["TestA", "TestF"], failing), 3.0)
         self.assertIsNone(mutgate.selected(site, ({"TestA": (at(5), 1.0), "TestB": (at(9), 6.0)}, {"TestF": 9.0})))
+        # #6226: the total counts failing-alone seconds too; here they alone keep the set under half.
+        tipped = ({"TestA": (at(5), 1.0), "TestB": (at(9), 4.0)}, {"TestF": 2.0})
+        self.assertEqual(mutgate.selected(site, tipped), ["TestA", "TestF"])
 
     def test_per_test_runs_each_test_alone_and_names_those_that_fail_alone(self):
         # REQ: MUT-delete-covering
@@ -1662,6 +1665,45 @@ func set(n, m int) {
         self.assertTrue({6, 7} <= lines("TestKeep") and 14 not in lines("TestKeep"))
         self.assertTrue(14 in lines("TestSide") and 6 not in lines("TestSide"))
         self.assertEqual(lines("TestNothing"), set())
+
+    def test_per_test_runs_a_test_that_failed_beside_another_again_alone(self):
+        # #6226 (L3 and Security on #6225): tests that collide on a fixed path when run in parallel
+        # each get their own coverage; the one that failed there runs again alone and passes.
+        # REQ: MUT-delete-covering
+        test = ("package hint\n\nimport (\n\t\"os\"\n\t\"testing\"\n\t\"time\"\n)\n\n"
+                "// The first to start holds lock until the second has failed on it, so they always collide.\n"
+                "func hold(t *testing.T) {\n\tf, err := os.OpenFile(\"lock\", os.O_CREATE|os.O_EXCL, 0o600)\n"
+                "\tif err != nil {\n\t\tos.WriteFile(\"collided\", nil, 0o600)\n\t\tt.Fatal(err)\n\t}\n"
+                "\tf.Close()\n\tdefer os.Remove(\"lock\")\n"
+                "\tfor end := time.Now().Add(30 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {\n"
+                "\t\tif _, err := os.Stat(\"collided\"); err == nil {\n\t\t\treturn\n\t\t}\n\t}\n}\n\n"
+                "func TestOne(t *testing.T) {\n\thold(t)\n\tKeep(1)\n}\n\n"
+                "func TestTwo(t *testing.T) {\n\thold(t)\n\tSide(1)\n}\n")
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.repo(d, "package hint\n", self.COVER_PR, test)
+            binary = pathlib.Path(d) / "b.test"
+            subprocess.run(["go", "test", "-c", "-cover", "-covermode=set", "-o", str(binary), "."], cwd=pkg, check=True,
+                           env={**os.environ, "GOFLAGS": "", "GOWORK": "off"})
+            ran, failing = mutgate.per_test(binary, pkg, d, 60, jobs=2)
+            self.assertTrue((pkg / "collided").exists())  # the parallel runs did collide
+        self.assertEqual((list(ran), failing), (["TestOne", "TestTwo"], {}))
+        lines = lambda name: {n for (s, _), (e, _) in ran[name][0].get("hint.go", []) for n in range(s, e + 1)}
+        self.assertTrue(6 in lines("TestOne") and 14 not in lines("TestOne"))
+        self.assertTrue(14 in lines("TestTwo") and 6 not in lines("TestTwo"))
+
+    def test_site_costs_overhead_counts_tests_that_fail_alone(self):
+        # #6226 (Security on #6225): the per-test pass runs a test that fails alone twice (in the pool,
+        # then alone), so its seconds count twice in the overhead each shard spends before its sites.
+        # REQ: MUT-delete-covering
+        at = lambda line: {"a.go": [((line, 1), (line, 9))]}
+        tests = ({"TestA": (at(5), 1.0), "TestB": (at(9), 6.0)}, {"TestF": 2.0})
+        sites = [{"file": "a.go", "cover_line": 5, "cover_col": 2}, {"file": "a.go", "cover_line": 7, "cover_col": 2}]
+        with tempfile.TemporaryDirectory() as tmp:
+            (pathlib.Path(tmp) / "suite.test").write_text("")
+            with mock.patch.object(mutgate, "per_test", lambda *a, **k: tests):
+                costs, overhead = mutgate.site_costs("hint", sites, 100.0, tmp)
+        self.assertEqual(costs, [6.0, 100.0])
+        self.assertEqual(overhead, 11.0)
 
     def test_site_costs_are_each_sites_own_tests(self):
         # REQ: MUT-delete-covering

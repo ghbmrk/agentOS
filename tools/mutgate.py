@@ -2207,7 +2207,8 @@ def set_seconds(names, tests):
 def site_costs(pkg, sites, suite, tmp):
     """(seconds per site, the per-test pass's seconds) `delete` spends on each site of broker/<pkg>/
     with the tests that cover it: its set's run plus at most one unmutated run of that set (`passes`),
-    or the whole suite; or (None, 0.0) when the tests cannot be timed alone. Only a schedule (`plan`)."""
+    or the whole suite; or (None, 0.0) when the tests cannot be timed alone. The pass runs every test
+    alone, and each that fails runs again (#6226). Only a schedule (`plan`)."""
     pkg_dir, binary = BROKER / pkg, pathlib.Path(tmp) / "suite.test"
     if not binary.exists() and subprocess.run(["go", "test", "-c", "-cover", "-covermode=set", "-o", str(binary), "."],
                                               cwd=pkg_dir, stdout=sys.stderr).returncode:
@@ -2215,7 +2216,7 @@ def site_costs(pkg, sites, suite, tmp):
     if not binary.exists() or (tests := per_test(binary, pkg_dir, tmp, 3 * suite + 10)) is None:
         return None, 0.0
     costs = [suite if (names := selected(s, tests)) is None else 2 * set_seconds(names, tests) for s in sites]
-    return costs, sum(secs for _, secs in tests[0].values())
+    return costs, sum(secs for _, secs in tests[0].values()) + 2 * sum(tests[1].values())
 
 
 def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
