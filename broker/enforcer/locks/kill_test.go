@@ -109,6 +109,13 @@ func TestCloseStopsTeller(t *testing.T) {
 	}
 	g.Tick(r.doc)
 	g.WaitWork()
+	if err := g.Act(context.Background(), "back", action.Unlock, ""); err != nil {
+		t.Fatal(err)
+	}
+	g.WaitTold()
+	a.mu.Lock()
+	a.kinds = nil
+	a.mu.Unlock()
 	g.Close()
 	if err := g.Act(context.Background(), "front", action.Unlock, ""); err != nil {
 		t.Fatal(err)

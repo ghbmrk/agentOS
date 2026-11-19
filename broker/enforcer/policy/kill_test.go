@@ -36,6 +36,11 @@ func openWith(t *testing.T, d Document) (*Engine, *authenticator, *memStore) {
 // Usual hours are [From, To): From is usual, To is not; and valid reads
 // each bound inclusively.
 func TestHoursBoundaries(t *testing.T) {
+	// A window of no length is never signed (valid); read alone it wraps
+	// whole, every hour usual.
+	if !(Hours{From: 5, To: 5}).Usual(5) {
+		t.Error("an empty window read as unusual")
+	}
 	h := Hours{From: 7, To: 22}
 	for hour, want := range map[int]bool{6: false, 7: true, 21: true, 22: false} {
 		if h.Usual(hour) != want {
@@ -120,16 +125,21 @@ func TestMDNSKeyLengths(t *testing.T) {
 // check refuses each malformed field it reads.
 func TestCheckRefusals(t *testing.T) {
 	for name, f := range map[string]func(*Document){
-		"label":            func(d *Document) { dev(d, "plug").Label = "weird" },
-		"class":            func(d *Document) { dev(d, "plug").Class = "toaster" },
-		"secure, everyday": func(d *Document) { dev(d, "tv").Secure = "off" },
-		"destination":      func(d *Document) { d.Destinations = append(d.Destinations, "a b") },
-		"rule twice":       func(d *Document) { d.Standing = append(d.Standing, d.Standing[0]) },
-		"drone not hex":    func(d *Document) { d.Drone = strings.Repeat("z", 64) },
+		"label": func(d *Document) { dev(d, "plug").Label = "weird" },
+		"class": func(d *Document) {
+			d.Devices = append(d.Devices, Device{ID: "toaster", Network: NetDevices, Class: "toaster"})
+		},
+		"destination":   func(d *Document) { d.Destinations = append(d.Destinations, "a b") },
+		"rule twice":    func(d *Document) { d.Standing = append(d.Standing, d.Standing[0]) },
+		"drone not hex": func(d *Document) { d.Drone = strings.Repeat("z", 64) },
 	} {
 		if _, err := Encode(edit(1, f)); !errors.Is(err, ErrMalformed) {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+	everyday := edit(1, func(d *Document) { dev(d, "tv").Secure = "off" })
+	if _, err := Encode(everyday); err == nil || !strings.Contains(err.Error(), "cannot be named safe") {
+		t.Errorf("an everyday device named safe: %v", err)
 	}
 	if _, err := Encode(edit(1, func(d *Document) { d.Drone = strings.Repeat("ab", 32) })); err != nil {
 		t.Errorf("a drone hash refused: %v", err)
@@ -165,7 +175,7 @@ func TestApplyRefusesNoChange(t *testing.T) {
 			t.Errorf("%s applied", name)
 		}
 	}
-	got, ok := Apply(d, Op{Kind: RemovePair, Pair: Pair{A: "speaker", B: "tv"}})
+	got, ok := Apply(d, Op{Kind: RemovePair, Pair: Pair{A: "tv", B: "speaker"}})
 	if !ok || len(got.Pairs) != 1 {
 		t.Errorf("a pair named the other way round: %v %v", ok, got.Pairs)
 	}
