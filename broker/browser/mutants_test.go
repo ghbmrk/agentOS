@@ -354,7 +354,7 @@ func TestAReadClaimsNoPrint(t *testing.T) {
 	r.c.Clock = func() int64 { return 3 * hour }
 	res := r.c.Do(kernel.Request{Plan: plan("r", r.root, s)}, r.k.State())
 	// The step is refused later (it was never dispatched), never for its claims.
-	if res.Detail == check.RClaim {
+	if res.Detail == check.RClaim.String() {
 		t.Fatalf("%+v", res)
 	}
 }
