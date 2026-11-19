@@ -11,8 +11,8 @@
 # agentOS root.json files); finish_image.py refuses the image if the root or any byte of the disk
 # holds one (NET-2 Channel). Both are required: an image without them is not an enforcer release.
 # AGENTOS_SECURITY_SNAPSHOT, optional: the debian-security snapshot timestamp (YYYYMMDDTHHMMSSZ) the
-# image and its initrd install security packages from (#5825, as the core's build.sh, #5021). Unset,
-# the build resolves one itself (../security-snapshot.sh resolve).
+# image and its initrd install security packages from, or two with a fallback (#5825, #6198, as the
+# core's build.sh). Unset, the build resolves them itself (../security-snapshot.sh resolve).
 # Output in OUT: enforcer_VERSION.raw (the drive), the release (enforcer_VERSION.usr.raw,
 # .usr-verity.raw, the boot entry, .release.json, .usr.list), and SHA256SUMS.
 set -eu
@@ -38,6 +38,8 @@ mkdir -p "$OUT"
 # it replaces the committed file for the image and its initrd; the file stays in OUT as the record.
 SECURITY_SNAPSHOT=${AGENTOS_SECURITY_SNAPSHOT-}
 [ -n "$SECURITY_SNAPSHOT" ] || SECURITY_SNAPSHOT=$(sh "$HERE/../security-snapshot.sh" resolve)
+# resolve's first candidate, or the run before it when the first no longer serves its index (#6198).
+SECURITY_SNAPSHOT=$(sh "$HERE/../security-snapshot.sh" pick "$SECURITY_SNAPSHOT")
 sh "$HERE/../security-snapshot.sh" sources "$SECURITY_SNAPSHOT" \
 	"$HERE/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources" >"$OUT/enforcer.sources"
 rm -rf "$OUT/pkgmngr"

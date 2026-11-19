@@ -409,7 +409,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-static-elf | VULN-static-elf: an image-build check that finds static ELFs (llama-server) and makes image-vulncheck scan their toolchain packages. Release; split from #5873. | #5873, #5871, #2919 | building (release; tier A; gate files; brief briefs/VULN-static-elf.md, PR #5940; parts a, b; after #5932, serial with #5889 on image.yml) |
 | KRN-forget-wide | KRN-forget-wide: a FORGET ask that a wide clock reading has already lapsed says so instead of asking. Release; from #5811. | #5391, #5811 | building (release; tier A) |
 | VULN-cipher-sweep-tidy-2 | VULN-cipher-sweep-tidy-2: image.yml paths for the codex digest pins; sweep refusal wording. Release; from #5878. | #5878 | building (release; tier A; gate file .github/workflows/image.yml) |
-| OWN-recall-holdline | OWN-recall-holdline: STATUS hold line names agents as the forget texts do | #5883 | building (release; tier A) |
 | VULN-codex-openssl | VULN-codex-openssl: bump the codex pin once a release links OpenSSL 3.6.5 or later; until then the bundled entry records each fix's reach. Release; from #5888. | #5873, #5888 | queued (release; tier A; waits on a codex release) |
 | IMG-keyring-pin-b | IMG-keyring-pin-b: the enforcer image and test-kit builds check the Debian archive keyring too. Release; from #5932. | #5932 | building (release; tier A; gate files) |
 | KRN-forget-minutes | KRN-forget-minutes: a Forget ask at a reading narrower than 10 minutes promises the true time left. Release; from #5937. | #5937, #5391 | building (release; tier A) |
@@ -443,9 +442,10 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MUT-delete-covering | MUT-delete-covering: mutgate's `delete` runs only the tests that cover each deletion site | #6171 | queued (release; tier A) |
 | TEST-kernel-ctx-stop | TEST-kernel-ctx-stop: TestEveryKernelLegsContextEndsWithTheLeg covers freshStop and StopCancelled, killing the daemon.go:825 and :881 mutants that were waived as equivalent. Release; from #6041. | #6041, #6123, #6147 | queued (release; tier B) |
 | TEST-privfile-one-ns | TEST-privfile-one-ns: the OpenDir owner-refusal mutant is killed by one namespace test, not two. Release; from #6041. | #6041, #6146 | queued (release; tier B) |
-| BROWSER-shell-cache-heal | BROWSER-shell-cache-heal: a headless-shell cache entry that fails the hash falls back to a checked fresh download instead of failing every run until evicted. Release; from #6163. | #6064, #6163 | building (release; tier A; gate file) |
 | CTL-agent-starting-status | CTL-agent-starting-status: STATUS during boot shows a starting line, not 'not set up' or 'waiting for memory'. Release; from #6136 (UX). | #5429, #6136 | queued (release; tier A) |
 | BROWSER-shell-cache-warning-cmd | BROWSER-shell-cache-warning-cmd: the headless-shell cache warning names the delete command for the bad entry. Release; rides the next ci.yml PR. | #6175, #6180 | queued (release; tier A; gate file) |
+| TEST-fdcount-before-guard | TEST-fdcount-before-guard: the boxe2e descriptor-count test fails when its before count is zero, so it cannot pass vacuously. Release; from #6186. | #6157, #6186 | queued (release; tier A) |
+| BROWSER-valueforms-tiebreak | BROWSER-valueforms-tiebreak: valueForms orders equal-length scrub forms deterministically, and the equivalence reasons name what they lean on. Release; from #6167. | #6085, #6167 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -499,4 +499,5 @@ issue #6168: needs exactly one state label of queued, building, in review, merge
 issue #6184: no section 'Tooling and CI' in BOARD.md
 issue #6192: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #6193: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #6196: no section 'Tooling and CI' in BOARD.md
 ```
