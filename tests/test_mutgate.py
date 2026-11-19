@@ -2173,12 +2173,40 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
                 self.repo(d, pr, src=src, test_base=was, src_pr=src_pr)
                 r = self.mutgate(d, "plan", "--git", "HEAD~1")
                 self.assertEqual(r.returncode, code, r.stdout + r.stderr)
+                # mark's `}` (line 15) is in its empty body's block, so it is code still (#6216).
                 gone = "broker/hint/hint.go: 14, 15 ran under the base's version of the tests this diff changes"
                 if code:
                     self.assertIn(gone + ", and no test of package hint runs them at the head", r.stderr)
                     self.assertNotIn(", 3,", r.stderr)  # Up's lines still run under TestUp
                 else:
                     self.assertNotIn(gone, r.stderr)
+
+    def test_a_closing_brace_the_base_ran_that_no_head_block_holds_is_not_unrun(self):
+        # #6216 (from #6012's cut.go:177): Go's cover profile ends a block at the start of a nested block
+        # that ends it, so the `}` closing Up's `if` (line 6), in the if's block at the base, is in no
+        # block once the head nests an `if` inside it. It is no code a test could run, so the plan passes.
+        # REQ: MUT-unrun-closing-brace
+        nested = TWO_SRC.replace("\t\treturn 10\n", "\t\tif n > 0 {\n\t\t\treturn 10\n\t\t}\n")
+        with tempfile.TemporaryDirectory() as d:
+            self.repo(d, TWO_TEST.replace('t.Fatal("up")', 't.Fatal("up!")'), src_pr=nested)
+            r = self.mutgate(d, "plan", "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertNotIn("ran under the base's version", r.stderr)
+
+    def test_unrun_skips_only_closing_lines_no_head_block_holds(self):
+        # #6216: the closing shapes Go's profile leaves out of every block (measured on go1.26: `}`,
+        # `})`, `},`, `}()`, `}}` after a nested block) are no code. The same line inside a head block (an
+        # `if` body's own `}`, an empty body's) is, and a line with any other token is named either way.
+        # REQ: MUT-unrun-closing-brace
+        rows = ["\t}", "\t})", "\t\t},", "\t}()", "\t}}", "} // end",
+                "\t} else {", "\t}, nil)", "\t}}.f", "\treturn 10", "\t)", "\t}(x)", "\tcase a,", "\t}"]
+        p = "broker/hint/hint.go"
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "hint").mkdir()
+            (pathlib.Path(d) / "hint" / "hint.go").write_text("\n".join(rows) + "\n")
+            with mock.patch.object(mutgate, "BROKER", pathlib.Path(d)):
+                got = mutgate.unrun({p: set(range(1, len(rows) + 1))}, {p: {10}}, {p: {14}})
+        self.assertEqual(got, {p: [7, 8, 9, 11, 12, 13, 14]})
 
     def test_an_archive_that_fails_prints_the_problem(self):
         # L3 R3 on #5770 (#5779): a failed `git archive` wrote no tar, and tarfile's ReadError came
@@ -2875,7 +2903,7 @@ class Plan(unittest.TestCase):
         from unittest import mock
         runs = []
 
-        def timed_cover(pkg, names, tmp):
+        def timed_cover(pkg, names, tmp, code=None):
             runs.append(names)
             return {"broker/p/a.go": {1}}, (2.0 if names is not None else 40.0), None
         for names, want, ran in ((["TestFast"], 40.0, [["TestFast"], None]), (None, 40.0, [None])):
