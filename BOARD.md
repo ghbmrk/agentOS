@@ -145,7 +145,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KEY-9-reach-inbound-offset | KEY-9-reach-inbound-offset: move kernel/proc's unreached client types out of the trusted core (KRN-2, D-310) | #5678 | queued (release; tier A; lane primary; after #5678's PR) |
 | KEY-9-reach-writer | KEY-9-reach-writer: write decl.reach entries from the owner graph's declarations (KEY-9, CLK-10) | #5672 | building (release; lane primary; brief briefs/KEY-9-reach-writer.md, PR #5950; after #5757) |
 | OWN-page-session-hold-control | OWN-page-session-hold-control: the owner sets the hold size on the page (CH-14; release of #5187) | #5187 | queued (tier A; needs brief) |
-| KEY-9-reach-read-copy | KEY-9-reach-read-copy: State.DeclReach returns a copy (KEY-9) | #5814 | queued (release; lane primary; from #5978 L3 finding 4) |
+| KEY-9-reach-read-copy | KEY-9-reach-read-copy: State.DeclReach returns a copy (KEY-9) | #5814 | building (release; lane primary; from #5978 L3 finding 4) |
 
 ## Identity, onboarding and setup (SPEC §11-12)
 
