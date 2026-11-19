@@ -133,9 +133,10 @@ func (d DirTarget) Tables(id string) ([]uint64, error) {
 
 func (DirTarget) AppendOnly() bool { return false }
 
-// sealedSize is the length n bytes of plaintext seal to: the header and
-// one tag per chunk, a full last chunk still one chunk, so it is
-// headerLen + n + ceil(n/chunkSize)*tagSize. A target holds no key table
+// sealedSize is the length n > 0 bytes of plaintext seal to: the header
+// and one tag per chunk, a full last chunk still one chunk, so it is
+// headerLen + n + ceil(n/chunkSize)*tagSize (an empty body is one empty
+// chunk, which this does not count). A target holds no key table
 // longer than sealedSize(maxTable), the largest table UnwrapTable accepts.
 func sealedSize(n int64) int64 {
 	return int64(headerLen) + n + (n+chunkSize-1)/chunkSize*tagSize
