@@ -427,8 +427,12 @@ class RiskTierTest(unittest.TestCase):
             ok = pathlib.Path(d) / "ok.txt"
             ok.write_text("core journal\nallow newpkg journal.Engine.Erase -- a reason\n")
             self.assertEqual(rt.core_list(ok)[2], {"newpkg"})
+            # A fixture line reads but adds no package: its allow line does.
+            ok.write_text("core journal\nallow newpkg journal.Engine.Erase -- a reason\nfixture newpkg\n")
+            self.assertEqual(rt.core_list(ok), ({"journal"}, set(), {"newpkg"}))
             for line in ("allow newpkg journal.Engine.Erase",
                          "allow newpkg journal.Engine.Erase --",
+                         "fixture", "fixture newpkg -- a reason",
                          "allow newpkg journal.Engine.Erase because it must"):
                 bad = pathlib.Path(d) / "bad.txt"
                 bad.write_text("core journal\n" + line + "\n")
