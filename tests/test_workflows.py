@@ -1668,7 +1668,7 @@ class WorkflowTest(unittest.TestCase):
         guard = "        if: steps.scope.outputs.records != 'true'\n"
         self.assertIn(guard, race[want])
         # #4961: `plan` runs a test-only diff's changed tests for their coverage, so it needs it too.
-        for job, first in (("mutants", "Gremlins on the package"), ("plan", "Shards for each package (#4961)")):
+        for job, first in (("mutants", "Gremlins and statement deletions on the package (#4573)"), ("plan", "Shards for each package (#4961)")):
             mut = job_steps((WORKFLOWS / "mutgate.yml").read_text(), job)
             names = [n for n, _ in mut]
             self.assertIn(want, names)
@@ -1686,7 +1686,7 @@ class WorkflowTest(unittest.TestCase):
         guard = "        if: steps.scope.outputs.records != 'true'\n"
         self.assertIn(guard, race[want])
         text = (WORKFLOWS / "mutgate.yml").read_text()
-        for job, first in (("mutants", "Gremlins on the package"), ("plan", "Shards for each package (#4961)")):
+        for job, first in (("mutants", "Gremlins and statement deletions on the package (#4573)"), ("plan", "Shards for each package (#4961)")):
             mut = job_steps(text, job)
             names = [n for n, _ in mut]
             self.assertIn(want, names, job)

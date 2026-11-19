@@ -107,8 +107,6 @@ start sysinit.target Requires from agentos-fallback.service
 start sysinit.target Requires from agentos-keeper-enroll.service
 start sysinit.target Requires from agentos-keeper-kernel.service
 start sysinit.target Requires from agentos-keeper-link-capture.service
-start sysinit.target Requires from agentos-keeper-pageca.service
-start sysinit.target Requires from agentos-keeper-wipe.service
 start sysinit.target Requires from agentos-link.service
 start sysinit.target Requires from agentos-modem-env.service
 start sysinit.target Requires from agentos-reboot.service
@@ -292,13 +290,11 @@ stop agentos-keeper-link-capture.service RequiredBy from sysinit.target
 stop agentos-keeper-mail.service RequiredBy from agentos-keeper.slice
 stop agentos-keeper-mail.service RequiredBy from sysinit.target
 stop agentos-keeper-pageca.service RequiredBy from agentos-keeper.slice
-stop agentos-keeper-pageca.service RequiredBy from sysinit.target
 stop agentos-keeper-rotate.socket RequiredBy from sysinit.target
 stop agentos-keeper-rotate.socket RequiredBy from system.slice
 stop agentos-keeper-setup.socket RequiredBy from sysinit.target
 stop agentos-keeper-setup.socket RequiredBy from system.slice
 stop agentos-keeper-wipe.service RequiredBy from agentos-keeper.slice
-stop agentos-keeper-wipe.service RequiredBy from sysinit.target
 stop agentos-keeper.slice RequiredBy from agentos.slice
 stop agentos-link.service BoundBy from sys-subsystem-net-devices-agentos\x2dlink.device
 stop agentos-link.service RequiredBy from agentos-inbound.service

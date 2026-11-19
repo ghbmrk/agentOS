@@ -80,7 +80,8 @@ class Lint(unittest.TestCase):
         self.assertEqual(out, ["Record line has no `· head <sha>` part"])
 
     def test_bad_head_text(self):
-        out = self.problems(draft(rec(head=SHORT.upper()), "<!-- record: l3 -->"))
+        # A fixed lettered head: SHORT.upper() is a no-op when the random sha's first 10 chars are all digits.
+        out = self.problems(draft(rec(head="ABCDEF0123"), "<!-- record: l3 -->"))
         self.assertTrue(any("lowercase hex" in p for p in out), out)
 
     def test_wrong_pr(self):

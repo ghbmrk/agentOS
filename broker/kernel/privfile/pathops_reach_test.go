@@ -571,3 +571,107 @@ func TestRootEnvFiles(t *testing.T) {
 		}
 	})
 }
+
+// TestUserUnitOpens: a unit with no root command still has the manager
+// open, mount or join paths as root for it (userOpens), each held out of
+// the world trees and out of every grant, a unit's or a tmpfiles line's
+// (#6143); and PermissionsStartOnly= and AmbientCapabilities= read as root
+// past a closed set (#4641 R-c and the capability item).
+// REQ: KRN-2
+func TestUserUnitOpens(t *testing.T) {
+	const unit = "image/mkosi/agentos-p.service"
+	const head = "[Service]\nUser=agentos-p\nExecStart=/bin/true\n"
+	base := reachBase() // agentos-x's RuntimeDirectory= grants /run/agentos-x
+	base["image/mkosi/mkosi.extra/usr/lib/tmpfiles.d/agentos-q.conf"] = "d /run/agentos-q 0700 agentos-q agentos-q -\n"
+	for name, c := range map[string]struct{ path, text, want string }{
+		"an opened file below a grant":        {unit, head + "OpenFile=/run/agentos-x/s:s\n", `path "/run/agentos-x/s" is at or below /run/agentos-x`},
+		"an opened file at a grant":           {unit, head + "OpenFile=/run/agentos-x\n", `path "/run/agentos-x" is at or below /run/agentos-x`},
+		"an opened file through /var/run":     {unit, head + "OpenFile=/var/run/agentos-x/s\n", `is at or below /run/agentos-x`},
+		"an opened file in a tmpfiles grant":  {unit, head + "OpenFile=/run/agentos-q/s:s:read-only\n", `is at or below /run/agentos-q`},
+		"an opened file in the unit's grant":  {"image/mkosi/agentos-x.service.d/z.conf", "[Service]\nOpenFile=/run/agentos-x/k.sock\n", `is at or below /run/agentos-x`},
+		"an opened file in /tmp":              {unit, head + "OpenFile=/tmp/s\n", `path "/tmp/s" is in /tmp`},
+		"an opened file in /run/lock":         {unit, head + "OpenFile=/var/lock/s\n", `is in /run/lock`},
+		"an opened file in /dev/shm":          {unit, head + "OpenFile=/run/shm/s\n", `is in /dev/shm`},
+		"an opened file through /dev/fd":      {unit, head + "OpenFile=/dev/fd/3\n", `is in /dev/fd`},
+		"a relative opened file":              {unit, head + "OpenFile=run/agentos-x/s\n", `want an absolute path`},
+		"an opened file with a ..":            {unit, head + "OpenFile=/etc/../run/agentos-x/s\n", `want an absolute path with no ..`},
+		"a quoted opened file":                {unit, head + "OpenFile=\"/etc/x\"\n", `byte "\""`},
+		"an opened file with a specifier":     {unit, head + "OpenFile=/run/%i/s\n", `byte "%"`},
+		"a bind from a grant":                 {unit, head + "BindPaths=/run/agentos-x/d:/srv/d\n", `BindPaths=/run/agentos-x/d:/srv/d: path "/run/agentos-x/d"`},
+		"a read-only bind from a grant":       {unit, head + "BindReadOnlyPaths=/etc -/run/agentos-x/d\n", `path "/run/agentos-x/d"`},
+		"a root directory in a grant":         {unit, head + "RootDirectory=/run/agentos-x/r\n", `path "/run/agentos-x/r"`},
+		"a root image in /var/tmp":            {unit, head + "RootImage=/var/tmp/x.img\n", `path "/var/tmp/x.img" is in /var/tmp`},
+		"a mount image in a grant":            {unit, head + "MountImages=-/run/agentos-q/x.img:/srv/x:ro\n", `path "/run/agentos-q/x.img"`},
+		"an extension directory in a grant":   {unit, head + "ExtensionDirectories=-/run/agentos-x/e\n", `path "/run/agentos-x/e"`},
+		"an extension image in /tmp":          {unit, head + "ExtensionImages=/tmp/e.raw\n", `path "/tmp/e.raw"`},
+		"a network namespace in a grant":      {unit, head + "NetworkNamespacePath=/run/agentos-x/net\n", `path "/run/agentos-x/net"`},
+		"an IPC namespace in /tmp":            {unit, head + "IPCNamespacePath=/tmp/ipc\n", `path "/tmp/ipc"`},
+		"a BPF program in a grant":            {unit, head + "BPFProgram=egress:/run/agentos-x/p\n", `path "/run/agentos-x/p"`},
+		"an ingress filter in a grant":        {unit, head + "IPIngressFilterPath=/run/agentos-x/i\n", `path "/run/agentos-x/i"`},
+		"an egress filter in /dev/shm":        {unit, head + "IPEgressFilterPath=/dev/shm/e\n", `path "/dev/shm/e"`},
+		"a dynamic user's opened file":        {unit, "[Service]\nDynamicUser=yes\nExecStart=/bin/true\nOpenFile=/tmp/s\n", `path "/tmp/s" is in /tmp`},
+		"start-only permissions spelt t":      {unit, head + "PermissionsStartOnly=t\nWorkingDirectory=/tmp\n", `path "/tmp"`},
+		"start-only permissions spelt y":      {unit, head + "PermissionsStartOnly=y\nWorkingDirectory=/tmp\n", `path "/tmp"`},
+		"start-only permissions misspelt":     {unit, head + "PermissionsStartOnly=nope\nWorkingDirectory=/tmp\n", `path "/tmp"`},
+		"start-only permissions in a drop-in": {"image/mkosi/agentos-x.service.d/z.conf", "[Service]\nPermissionsStartOnly=on\nWorkingDirectory=/tmp\n", `path "/tmp"`},
+		"an ambient override of file modes":   {unit, head + "AmbientCapabilities=CAP_DAC_OVERRIDE\nWorkingDirectory=/tmp\n", `path "/tmp"`},
+		"an ambient setuid in lower case":     {unit, head + "AmbientCapabilities=cap_net_raw cap_setuid\nWorkingDirectory=/tmp\n", `path "/tmp"`},
+		"an ambient capability by number":     {unit, head + "AmbientCapabilities=7\nWorkingDirectory=/tmp\n", `path "/tmp"`},
+		"an inverted ambient list":            {unit, head + "AmbientCapabilities=~CAP_NET_RAW\nWorkingDirectory=/tmp\n", `path "/tmp"`},
+		"an ambient reboot on the core":       {unit, head + "AmbientCapabilities=CAP_SYS_BOOT\nWorkingDirectory=/tmp\n", `path "/tmp"`},
+	} {
+		t.Run("refuses "+name, func(t *testing.T) {
+			files := clone(base)
+			files[c.path] = c.text
+			_, err := rootBinaries(fakeRepo(t, files))
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("got %v, want a refusal with %q", err, c.want)
+			}
+		})
+	}
+	for name, text := range map[string]string{
+		// The keepers' shape: the kernel's socket, outside every grant.
+		"a keeper's key socket":          head + "OpenFile=/run/agentos-kernel/key-mail.sock:clerk-key\n",
+		"an opened file in a root tree":  head + "OpenFile=/etc/agentos/f:f:read-only\n",
+		"a bind beside a grant":          head + "BindReadOnlyPaths=-/var/lib/agentos/modem /run/agentos-xy\nBindPaths=/var/lib/agentos-x:/srv/x\n",
+		"a grant's own bind destination": head + "BindPaths=/var/lib/agentos/d:/run/agentos-x/d\n",
+		"an empty reset":                 head + "OpenFile=\nBindPaths=\n",
+		"start-only permissions off":     head + "PermissionsStartOnly=OFF\nPermissionsStartOnly=f\nPermissionsStartOnly=0\nWorkingDirectory=/tmp\n",
+		"network ambient capabilities":   head + "AmbientCapabilities=CAP_NET_BIND_SERVICE cap_net_raw\nAmbientCapabilities=CAP_WAKE_ALARM CAP_BLOCK_SUSPEND\nAmbientCapabilities=\nWorkingDirectory=/tmp\n",
+	} {
+		t.Run("passes "+name, func(t *testing.T) {
+			files := clone(base)
+			files[unit] = text
+			if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	// The camera node's kernel has no kexec, so its reboot capability
+	// reads as non-root there alone (test_image_camnode pins both off).
+	t.Run("passes the camera node's ambient reboot", func(t *testing.T) {
+		files := clone(base)
+		files["image/camnode/external/board/common/overlay/etc/systemd/system/agentos-c.service"] = head + "AmbientCapabilities=cap_sys_boot\nWorkingDirectory=/tmp\n"
+		if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	// A built tree: our unit's opened file in a package's grant.
+	t.Run("refuses a built unit's opened file in a package's grant", func(t *testing.T) {
+		pkg := map[string]any{"unit": "pkg-g.service", "files": []any{map[string]any{"path": "/usr/lib/systemd/system/pkg-g.service", "ours": false,
+			"text": "[Service]\nUser=pkg\nExecStart=/usr/bin/pkg\nRuntimeDirectory=pkg-g\n"}}}
+		ours := map[string]any{"unit": "agentos-o.service", "files": []any{map[string]any{"path": "/usr/lib/systemd/system/agentos-o.service", "ours": true,
+			"text": "[Service]\nUser=agentos-o\nExecStart=/bin/true\nOpenFile=/run/pkg-g/s\n"}}}
+		b, err := json.Marshal(map[string]any{"units": []any{pkg, ours}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var recs unitRecords
+		if err := json.Unmarshal(b, &recs); err != nil {
+			t.Fatal(err)
+		}
+		if err := builtUnits(recs, t.TempDir()); err == nil || !strings.Contains(err.Error(), `path "/run/pkg-g/s" is at or below /run/pkg-g`) {
+			t.Fatalf("got %v, want the package's grant held", err)
+		}
+	})
+}

@@ -13,7 +13,8 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
   tools/mutgate.py plan --git BASE [--targets-out FILE]
                                              the `mutants` matrix as JSON: K shards for each claimed
                                              package, K from its target lines, deletion sites and
-                                             suite time (#4961, #5069); FILE gets the lines each
+                                             suite time (#4961, #5069), one job each, or past 256
+                                             jobs several a job (#6170); FILE gets the lines each
                                              package's changed tests cover
   tools/mutgate.py run [PKG...] [--out DIR] [--git BASE [--shard I --of K] [--targets FILE]]
                                              run gremlins per package (default: all listed),
@@ -34,7 +35,7 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
                                              entry of its package's record names, or a record
                                              entry is stale
   tools/mutgate.py verify DIR --git BASE [HEAD] [--body FILE [--body-from SHA]] [--summary FILE]
-                                             `gate`, after checking that DIR/*/ holds exactly
+                                             `gate`, after checking that DIR/*/ (and DIR/*/*/) holds exactly
                                              one readable result for each shard of every package
                                              `claimed` names, as `run` and `delete` check it, with
                                              one deletion verdict for each site it lists itself,
@@ -95,7 +96,8 @@ workers (#4633). `verify --summary` writes one table of every mutant on a target
 verdict, so a reviewer reads it rather than re-running mutants.
 Shards (#4961). A package's mutants can take longer than one CI job may run, so its target lines
 and deletion sites are split round-robin into K shards (`shard_lines`, `deletion_sites`' order), one
-`mutants` job each. Gremlins tests every mutant alone with the whole package suite, and `delete`
+`mutants` job each, or past GitHub's 256 jobs a matrix, up to 5 a job one after another, each in its
+own result directory and stopped at its own 60 minutes (`pack`, #6170). Gremlins tests every mutant alone with the whole package suite, and `delete`
 deletes every statement alone and runs the whole suite, so a mutant's verdict does not depend on
 which other mutants share its job: the joined shards give the verdicts one job would. K is only a
 schedule, so it may come from the untrusted `plan` job: `verify` refuses a package unless its
@@ -1224,10 +1226,19 @@ def violations(targets, live, waived=None, mutants=None):
 
 # Shards (#4961). The budgets size K so one shard's gremlins and deletion runs fit a job's 60 minutes:
 # localui's 1048 target lines (about 0.35 deletion sites a line) ran gremlins in 10 minutes and
-# deletion past 48 on #4945. GitHub runs at most 256 jobs from one matrix.
+# deletion past 48 on #4945. GitHub runs at most 256 jobs from one matrix and stops a hosted job at
+# 360 minutes, so past 256 shards a job runs up to 5 shards of one package, one after another, each
+# stopped at its own 60 minutes by the workflow (`timeout`), the job at 60 a shard plus 15 for its
+# setup (pack, MUT-plan-overflow #6170): at most 1280 shards in all, fewer when several packages
+# each leave a job part-filled.
 LINES_PER_SHARD = 250
 SITES_PER_SHARD = 100
 MATRIX_MAX = 256
+SHARD_MINUTES = 60
+SETUP_MINUTES = 15
+JOB_MINUTES_MAX = 360
+JOB_SHARDS_MAX = (JOB_MINUTES_MAX - SETUP_MINUTES) // SHARD_MINUTES
+SHARDS_MAX = MATRIX_MAX * JOB_SHARDS_MAX
 # Every gremlins mutant and every deletion runs the package's whole suite, so a shard's time is its
 # count times the suite's (#5069): kernel/sim's 48 s suite ran 6 shards of 89 sites past 60 minutes
 # on #5006 (run 42368800375), where browser's 7 s suite ran 9 shards of 92 in 6 to 14. Seen there, a
@@ -1246,6 +1257,21 @@ def shard_count(targets, sites, suite=0.0):
     runs = LINE_RUNS * lines + SITE_RUNS * len(sites)
     return max(1, -(-lines // LINES_PER_SHARD), -(-len(sites) // SITES_PER_SHARD),
                math.ceil(suite * runs / SHARD_SECONDS))
+
+
+def pack(counts):
+    """The `mutants` matrix for [(pkg, K)], or None when it cannot fit: one job per shard while the
+    shards fit MATRIX_MAX jobs, else the fewest shards a job that fit, each package's shards dealt
+    round-robin over ceil(K / per) jobs of its own (#6170). Each entry names its shards (indices joined
+    by ", ", as the job's name shows them) and the job's minutes, 60 a shard plus its setup, so every
+    shard of every package runs exactly once, alone; the workflow stops each shard at its own 60."""
+    for per in range(1, JOB_SHARDS_MAX + 1):
+        jobs = [(pkg, of, -(-of // per)) for pkg, of in counts]
+        if sum(j for _, _, j in jobs) <= MATRIX_MAX:
+            return [{"pkg": pkg, "shards": ", ".join(map(str, range(i, of, j))), "of": of,
+                     "minutes": SHARD_MINUTES * len(range(i, of, j)) + SETUP_MINUTES}
+                    for pkg, of, j in jobs for i in range(j)]
+    return None
 
 
 def suite_seconds(pkg, tmp):
@@ -1276,12 +1302,12 @@ def shard_lines(targets, index, of):
 
 def shard_of(data):
     """(index, of) a result records, (0, 1) when it records none (an unsharded run), or None when
-    the record is not two ints with 0 <= index < of <= MATRIX_MAX."""
+    the record is not two ints with 0 <= index < of <= SHARDS_MAX."""
     rec = data.get("shard", {"index": 0, "of": 1}) if isinstance(data, dict) else None
     if not isinstance(rec, dict) or set(rec) != {"index", "of"}:
         return None
     i, k = rec["index"], rec["of"]
-    if type(i) is not int or type(k) is not int or not 0 <= i < k <= MATRIX_MAX:
+    if type(i) is not int or type(k) is not int or not 0 <= i < k <= SHARDS_MAX:
         return None
     return i, k
 
@@ -2215,7 +2241,7 @@ def cmd_delete(args):
                 continue
             targets, problem = targets_for(pkg, added, tests, data, bases)
             if not problem and (shard := shard_of(data)) is None:
-                problem = f"{dest} records a shard that is not 0 <= index < of <= {MATRIX_MAX}"
+                problem = f"{dest} records a shard that is not 0 <= index < of <= {SHARDS_MAX}"
             mutants, problem = (None, problem) if problem else deletion_mutants(pkg, targets, tmp, lister, args.jobs, shard)
             if problem:
                 print(f"mutgate: {problem}", file=sys.stderr)
@@ -2226,13 +2252,15 @@ def cmd_delete(args):
 
 
 def read_results(pkgs, root, added, tests, lister, bases):
-    """({pkg: (data, targets)}, problems) for each package's shards under root/*/, each rechecked as
+    """({pkg: (data, targets)}, problems) for each package's shards under root/*/ or root/*/*/, each rechecked as
     `run` and `delete` check it, with the deletion sites listed here (#4106, #4602), then joined (#4961)."""
     out, problems = {}, []
     for pkg in pkgs:
-        # Each mutants job's artifact is its own directory, so a shard named twice (a job writing
-        # another's) is refused rather than one copy picked.
-        found = sorted(pathlib.Path(root).glob(f"*/{glob.escape(result_name(pkg))}"))
+        # Each mutants job's artifact is its own directory, and each shard a job runs its own directory
+        # in that (#6170), so a shard named twice (a job writing another's) is refused rather than one
+        # copy picked.
+        name = glob.escape(result_name(pkg))
+        found = sorted([*pathlib.Path(root).glob(f"*/{name}"), *pathlib.Path(root).glob(f"*/*/{name}")])
         if not found:
             problems.append(f"0 results for {pkg} in {root}, not one for each shard")
             continue
@@ -2264,7 +2292,7 @@ def join_shards(pkg, shards, added, tests, lister, bases):
         if not shape_ok(data):
             return None, f"{f} is not gremlins' files[].mutations[] shape"
         if (shard := shard_of(data)) is None:
-            return None, f"{f} records a shard that is not 0 <= index < of <= {MATRIX_MAX}"
+            return None, f"{f} records a shard that is not 0 <= index < of <= {SHARDS_MAX}"
         if shard in seen:
             if shard == (0, 1):
                 return None, f"{f} and {seen[shard]} are both results for {pkg}: one run gives one result"
@@ -2540,7 +2568,7 @@ def cmd_plan(args):
     an untrusted job; K is a schedule, and `verify` checks the shards whatever K is."""
     diff = broker_diff(args.git, "HEAD")
     added, tests = added_lines(diff)
-    include, planned = [], {}
+    counts, planned = [], {}
     bases = bases_for(diff, args.git, "HEAD", tests, claimed(diff))
     with tempfile.TemporaryDirectory() as tmp:
         if (lister := build_lister(tmp)) is None:
@@ -2575,13 +2603,20 @@ def cmd_plan(args):
             of = shard_count(targets, sites, suite)
             print(f"mutgate: {pkg}: {sum(map(len, targets.values()))} target lines, {len(sites)} deletion "
                   f"sites, a {suite:.0f} s suite, {of} shard(s)", file=sys.stderr)
-            include += [{"pkg": pkg, "shard": i, "of": of} for i in range(of)]
-    if not include or len(include) > MATRIX_MAX:
-        fix = ("split the PR so each part changes fewer tier-A or tier-B packages" if include
-               else "rerun the mutgate workflow")
-        print(f"mutgate: {len(include)} shards, not 1 to {MATRIX_MAX} (GitHub's matrix limit): {fix}",
-              file=sys.stderr)
+            counts.append((pkg, of))
+    include = pack(counts)
+    if not counts:
+        print("mutgate: 0 shards: no claimed package was planned; rerun the mutgate workflow", file=sys.stderr)
         return 1
+    if not include:
+        print(f"mutgate: {sum(of for _, of in counts)} shards do not fit {MATRIX_MAX} jobs (GitHub's matrix limit) "
+              f"of at most {JOB_SHARDS_MAX} shards of one package each (its {JOB_MINUTES_MAX}-minute job limit): "
+              "split the PR so each part changes fewer tier-A or tier-B packages", file=sys.stderr)
+        return 1
+    if len(include) < sum(of for _, of in counts):
+        most = max(len(e["shards"].split(", ")) for e in include)
+        print(f"mutgate: {sum(of for _, of in counts)} shards past {MATRIX_MAX} jobs: up to {most} shards a job, "
+              "one after another", file=sys.stderr)
     if args.targets_out:
         pathlib.Path(args.targets_out).write_text(json.dumps(planned))
     print(json.dumps(include))

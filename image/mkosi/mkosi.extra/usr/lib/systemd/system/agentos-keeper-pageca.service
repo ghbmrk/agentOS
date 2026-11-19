@@ -7,13 +7,19 @@
 # MOR-setup-hold (#5836, HW-8): the stop removes the pair and its certificate, so an orderly shutdown
 # before enrollment leaves /run/agentos-setup empty and agentos-mor clears MOR; nothing is lost that the
 # next boot's empty tmpfs had kept (brief OWN-card-flow: a reboot before the confirm prints a new card).
-# A manual stop is refused and an isolate (rescue, emergency) leaves the unit active, so the fingerprint
-# on a card printed this boot stays the staged one (MOR-setup-isolate, #5858); shutdown still stops it
-# through its default Conflicts=shutdown.target, which isolation does not decide.
+# A manual stop is refused and an isolate leaves the unit active, so the fingerprint on a card printed
+# this boot stays the staged one until shutdown (MOR-setup-isolate, #5858). Default dependencies would
+# add Requires=sysinit.target, which conflicts with emergency.target, so an emergency isolate stopped it
+# whatever IgnoreOnIsolate= says; it has none, and states the rest of them (MOR-pageca-emergency, #6178):
+# it starts after basic.target, and shutdown stops it, before agentos-mor.service's clear, which isolation
+# does not decide. The wipe, whose stop empties /run/agentos-setup, is held the same way.
 [Unit]
 Description=agentOS page authority staging
 ConditionPathExists=!/var/lib/agentos-store/store
-After=local-fs.target
+DefaultDependencies=no
+After=sysinit.target basic.target local-fs.target agentos-mor.service
+Conflicts=shutdown.target
+Before=shutdown.target
 Before=agentos-keeper-enroll.service agentos-localui.service
 RefuseManualStop=yes
 IgnoreOnIsolate=yes

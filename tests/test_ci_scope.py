@@ -451,13 +451,22 @@ def shell_cache_problems(ci):
         problems.append("the last step is not the cft cache save")
     if f"        if: {MAIN_PUSH} && steps.cft.outputs.cache-hit != 'true'\n" not in save:
         problems.append("the save runs outside a push to main")
+    # A restored zip that fails the pin is fetched afresh from the pinned URL (#6175), and the one
+    # unconditional check after the fallback gates the only unzip, so a second mismatch fails.
     zip_at = '          zip="$HOME/.cache/agentos-cft/shell.zip"\n'
-    check = '          echo "$CFT_SHELL_SHA256  $zip" | sha256sum -c -\n'
-    unzip = '          unzip -q "$zip" -d "$RUNNER_TEMP/shell"\n'
-    if not all(x in run for x in (zip_at, check, unzip)) or not run.index(zip_at) < run.index(check) < run.index(unzip):
-        problems.append("the browser step does not hash-check the zip before unzipping it")
+    heal = '          if ! { [ -f "$zip" ] && echo "$CFT_SHELL_SHA256  $zip" | sha256sum -c -; }; then\n'
+    fetch = '            curl -fsSL --retry 3 -o "$zip" "$CFT_SHELL_URL"\n'
+    gate = ('          fi\n          echo "$CFT_SHELL_SHA256  $zip" | sha256sum -c -\n'
+            '          unzip -q "$zip" -d "$RUNNER_TEMP/shell"\n')
+    order = (zip_at, heal, fetch, gate)
+    if not all(x in run for x in order) or [run.index(x) for x in order] != sorted(run.index(x) for x in order):
+        problems.append("the browser step does not fetch a zip that fails the pin afresh and hash-check it before unzipping")
     elif run.count(".zip") != 1:
         problems.append("the browser step reads a zip other than the checked one")
+    elif [run.count(x) for x in ("curl ", "sha256sum -c", "unzip ", "\n          fi\n")] != [1, 2, 1, 1]:
+        problems.append("the browser step fetches, checks or unzips the shell outside the one checked path")
+    if re.search(r"^        (if|continue-on-error):", run, re.M):
+        problems.append("the browser step is conditional or may fail")
     if "uses: actions/cache@" in body:
         problems.append("a combined restore-and-save cache")
     if ci.count("      CFT_SHELL_SHA256: ") != 1 or "\n    env:\n" not in body.split("\n    steps:\n", 1)[0]:
@@ -618,7 +627,8 @@ class WiringTest(unittest.TestCase):
 
     def test_the_headless_shell_cache_restores_on_prs_saves_on_main_and_is_hash_checked(self):
         # BROWSER-fixture-ci-fu (#6064, K4): a PR restores the shell zip but never saves it, so no
-        # PR writes what main restores, and the zip is hash-checked after any restore.
+        # PR writes what main restores, and the zip is hash-checked after any restore. #6175: a
+        # restored zip that fails the pin is fetched afresh and checked again before the unzip.
         ci = (WORKFLOWS / "ci.yml").read_text()
         self.assertEqual(shell_cache_problems(ci), [])
         save_if = f"        if: {MAIN_PUSH} && steps.cft.outputs.cache-hit != 'true'\n"
@@ -633,6 +643,20 @@ class WiringTest(unittest.TestCase):
             "key off the pin": (f"          {SHELL_KEY}\n      - name: The browser gate",
                                 "          key: cft-headless-shell\n      - name: The browser gate"),
             "unchecked second zip": ('          unzip -q "$zip"', '          unzip -q "$RUNNER_TEMP/shell.zip"'),
+            "second check dropped": ("          fi\n" + check, "          fi\n"),
+            "second check made soft": (check + '          unzip', check.replace(" -\n", " - || true\n") + '          unzip'),
+            "fallback only on a missing zip": (
+                '          if ! { [ -f "$zip" ] && echo "$CFT_SHELL_SHA256  $zip" | sha256sum -c -; }; then\n',
+                '          if [ ! -f "$zip" ]; then\n'),
+            "fallback fetches another url": ('-o "$zip" "$CFT_SHELL_URL"', '-o "$zip" "$CFT_SHELL_URL.bak"'),
+            "fallback unzips unchecked": ('            curl -fsSL --retry 3 -o "$zip" "$CFT_SHELL_URL"\n',
+                                          '            curl -fsSL --retry 3 -o "$zip" "$CFT_SHELL_URL"\n'
+                                          '            unzip -q "$zip" -d "$RUNNER_TEMP/shell"\n'),
+            "a second download": ('/shell.zip"\n          if !', '/shell.zip"\n          curl -fsSL -o "$zip" "$CFT_SHELL_URL"\n          if !'),
+            "browser step may fail": ("      - name: The browser gate through a real driver, and S5's executor on its fixture site (BROWSER-fixture-ci, #5952, K4)\n",
+                                      "      - name: The browser gate through a real driver, and S5's executor on its fixture site (BROWSER-fixture-ci, #5952, K4)\n"
+                                      "        continue-on-error: true\n"),
+            "save on a hit too": (save_if, f"        if: {MAIN_PUSH}\n"),
             "combined cache action": ("uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2\n        with:\n          path: ~/.cache/agentos-cft",
                                       "uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2\n        with:\n          path: ~/.cache/agentos-cft"),
         }.items():
