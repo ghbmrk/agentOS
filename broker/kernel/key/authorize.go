@@ -75,6 +75,12 @@ type Refusal struct {
 	Detail string
 }
 
+func (r *Refusal) Error() string { return r.code.name + ": " + r.Detail }
+
+func refuse(code Code, f string, a ...any) *Refusal {
+	return Refusef(code, f, a...)
+}
+
 // Refuse is a refusal for code c with detail.
 func Refuse(c Code, detail string) *Refusal { return &Refusal{code: c, Detail: detail} }
 
@@ -83,8 +89,6 @@ func Refusef(c Code, f string, a ...any) *Refusal { return Refuse(c, fmt.Sprintf
 
 // Code is the refusal's code.
 func (r *Refusal) Code() Code { return r.code }
-
-func (r *Refusal) Error() string { return r.code.name + ": " + r.Detail }
 
 // refusalJSON is a Refusal's wire form: the field names an exported Code
 // field gave it, so encodings are unchanged.
@@ -107,8 +111,6 @@ func (r *Refusal) UnmarshalJSON(b []byte) error {
 	*r = Refusal{w.Code, w.Detail}
 	return nil
 }
-
-func refuse(code Code, f string, a ...any) *Refusal { return Refusef(code, f, a...) }
 
 func in(s []string, v string) bool {
 	for _, x := range s {
