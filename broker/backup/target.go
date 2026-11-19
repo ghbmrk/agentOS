@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -132,13 +133,82 @@ func (d DirTarget) Tables(id string) ([]uint64, error) {
 
 func (DirTarget) AppendOnly() bool { return false }
 
-// readFile is os.ReadFile refusing a link at p (REV-CHK-links, #3945): a key
-// table is never a link, so one in the target directory was planted.
+// sealedSize is the length n > 0 bytes of plaintext seal to: the header
+// and one tag per chunk, a full last chunk still one chunk, so it is
+// headerLen + n + ceil(n/chunkSize)*tagSize (an empty body is one empty
+// chunk, which this does not count). A target holds no key table
+// longer than sealedSize(maxTable), the largest table UnwrapTable accepts.
+func sealedSize(n int64) int64 {
+	return int64(headerLen) + n + (n+chunkSize-1)/chunkSize*tagSize
+}
+
+// readFile reads a key table at p, refusing what a table is never
+// (REV-CHK-links, #3945, #3998). The directory is the owner's choice and
+// the read runs as root, so another uid may have planted the name: a link
+// is refused by O_NOFOLLOW; a FIFO, socket, device or directory by the
+// type of the open descriptor, O_NONBLOCK keeping the open of a FIFO from
+// waiting for a writer; and a file over sealedSize(maxTable) unread. A regular
+// file's reads never block, so O_NONBLOCK stays set. O_NOCTTY keeps a
+// planted terminal from becoming the daemon's controlling terminal; os.OpenFile
+// sets O_CLOEXEC itself.
 func readFile(p string) ([]byte, error) {
-	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0)
+	if errors.Is(err, syscall.ENXIO) {
+		return nil, fmt.Errorf("backup: %s is a socket or a device with no driver, not a regular file: %w", p, err)
+	}
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return io.ReadAll(f)
+	return readTable(f, p)
+}
+
+// readTable reads the key table open at f, named p in its errors: the
+// checks readFile makes on the descriptor it opened.
+func readTable(f *os.File, p string) ([]byte, error) {
+	st, err := f.Stat() // fstat of the descriptor opened, not of the name
+	if err != nil {
+		return nil, err
+	}
+	if m := st.Mode(); !m.IsRegular() {
+		return nil, fmt.Errorf("backup: %s is a %s, not a regular file", p, typeName(m))
+	}
+	limit := sealedSize(maxTable)
+	if st.Size() > limit {
+		return nil, fmt.Errorf("backup: %s is %d bytes, over the %d a key table can be", p, st.Size(), limit)
+	}
+	b, err := readBounded(f, limit)
+	if err != nil {
+		return nil, fmt.Errorf("backup: %s: %w", p, err)
+	}
+	return b, nil
+}
+
+// readBounded reads r to its end, refusing more than n bytes: a file can
+// grow between its fstat and its read.
+func readBounded(r io.Reader, n int64) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, n+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > n {
+		return nil, fmt.Errorf("over the %d bytes a key table can be", n)
+	}
+	return b, nil
+}
+
+func typeName(m fs.FileMode) string {
+	switch {
+	case m&fs.ModeNamedPipe != 0:
+		return "named pipe"
+	case m&fs.ModeSocket != 0:
+		return "socket"
+	case m&fs.ModeCharDevice != 0:
+		return "character device"
+	case m&fs.ModeDevice != 0:
+		return "block device"
+	case m.IsDir():
+		return "directory"
+	}
+	return "non-regular file"
 }

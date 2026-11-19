@@ -288,7 +288,8 @@ func open(key, blob, aad []byte) ([]byte, error) {
 	return g.Open(nil, blob[:g.NonceSize()], blob[g.NonceSize():], aad)
 }
 
-var wipe = func(b []byte) { clear(b) } // a var so a test can watch a wipe
+var wipe = func(b []byte) { clear(b) }                       // a var so a test can watch a wipe
+var clone = func(b []byte) []byte { return slices.Clone(b) } // a var so a test can count clones
 
 func random(n int) ([]byte, error) {
 	b := make([]byte, n)
@@ -837,8 +838,7 @@ func (s *Store) Put(name string, value []byte) error {
 	return s.commit(s.f.Slots, e)
 }
 
-// Swap is one slot ReplaceAndPut replaces, by ID, and the factor its new
-// slot takes.
+// Swap is one slot ReplaceAndPut replaces, by ID, and the factor its new slot takes.
 type Swap struct {
 	ID string
 	F  Factor
@@ -891,7 +891,7 @@ func (s *Store) withEntry(name string, value []byte) (map[string][]byte, error) 
 	if e[name] = nil; len(e) > MaxEntries { // counted before the clone, so a refusal leaves none
 		return nil, fmt.Errorf("seal: a store holds at most %d entries", MaxEntries)
 	}
-	e[name] = slices.Clone(value)
+	e[name] = clone(value)
 	return e, nil
 }
 
