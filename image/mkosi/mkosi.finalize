@@ -2994,8 +2994,10 @@ def bus_unit_violations(name, files):
 def starts_early(files):
     """#6037: whether a unit read from FILES may start before sockets.target: it sets DefaultDependencies=no and
     is not ordered after sockets.target or basic.target, which is after it (#6178: the page authority's staging
-    and the wipe drop the default dependencies but keep that order). ValueError as ini_words."""
-    return ((ini_last(files, "Unit", "DefaultDependencies") or "yes").lower() in FALSE_WORDS
+    and the wipe drop the default dependencies but keep that order). DefaultDependencies= is read by ini_canon,
+    since config_parse_bool keeps the value before one it cannot parse (#6158). ValueError as ini_words or
+    ini_canon."""
+    return (ini_canon(files, "Unit", "DefaultDependencies", YES_NO) == "no"
             and not {"sockets.target", "basic.target"} & set(ini_words(files, "Unit", "After")))
 
 
