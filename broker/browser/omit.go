@@ -294,9 +294,11 @@ func scrubText(s string, forms []string) string {
 // needs YAML quoting (a name holding ": ", for one) is single-quoted. The
 // text between [ref=...] tokens in a value counts on its own, because a
 // ref is never scrubbed (#2245). Forms shorter than min are left out.
+// The forms come in no set order and may repeat: containsForm reads no
+// order, and omitValues sorts each line's forms with longestFirst before
+// it scrubs, where a repeat finds nothing left to replace (#6195).
 func valueForms(values []string, min int) []string {
 	esc := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
-	seen := map[string]bool{}
 	var forms []string
 	for _, v := range values {
 		var ds []string
@@ -308,15 +310,13 @@ func valueForms(values []string, min int) []string {
 			for _, e := range []string{d, c, esc.Replace(d), esc.Replace(c)} {
 				for _, f := range []string{e, strings.ReplaceAll(e, "'", "''")} {
 					f = strings.TrimSpace(f)
-					if f != "" && len(f) >= min && !strings.Contains(f, "\x00") && !seen[f] {
-						seen[f] = true
+					if f != "" && len(f) >= min && !strings.Contains(f, "\x00") {
 						forms = append(forms, f)
 					}
 				}
 			}
 		}
 	}
-	slices.SortFunc(forms, longestFirst)
 	return forms
 }
 

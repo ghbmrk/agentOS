@@ -324,8 +324,8 @@ func TestUnapprovedPostProbesNotdone(t *testing.T) {
 	}
 }
 
-// An omitted field's ancestor is scrubbed of each distinct form once,
-// longest first and equal lengths in text order (longestFirst, #6195),
+// An omitted field's ancestor is scrubbed of each form longest first,
+// and equal lengths in text order (longestFirst, #6195),
 // also on a line that holds two fields. Overlapping forms of one length
 // leave different text in another order, so the output is pinned to that
 // contract: in "bacaabacacab", aba goes before bac and ab before ca.
