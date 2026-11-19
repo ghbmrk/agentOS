@@ -429,6 +429,79 @@ func TestFailedLiftAlertRetried(t *testing.T) {
 	}
 }
 
+// TestOwedCloseLogged (KRN-12 Response, #4305 item 2: "each call's error
+// is returned or logged"): a lift whose alerts the journal refused leaves
+// a close owed, and each failed retry is logged, at start-up and on each
+// tick, until a retry lands and that is logged too. The core and the edge
+// each get a fresh box, so one box's owed close never shows in the
+// other's log. Catches a dropped log line on any of those paths.
+func TestOwedCloseLogged(t *testing.T) {
+	fail := failAlertSync(t)
+	for _, b := range []struct {
+		name, owed, closed string
+		trip               func(x *box)
+		lift               func(x *box) error
+	}{
+		{"core", "cut: the core is not cut but its alerts did not close", "cut: the core's alerts closed",
+			func(x *box) { x.d.cut.Trip("test trip") }, func(x *box) error { return x.d.cut.Resume() }},
+		{"edge", "edge cut: the edge is not cut but its alerts did not close", "edge cut: the edge's alerts closed",
+			func(x *box) { x.d.edge.Trip(1, "test trip") }, func(x *box) error { return x.d.edge.Lift(1, false) }},
+	} {
+		fail.Store(false)
+		x, _ := enrolled(t, true)
+		b.trip(x)
+		fail.Store(true)
+		if err := b.lift(x); err == nil {
+			t.Fatalf("%s: a lift whose alerts were not saved answered nil", b.name)
+		}
+		n := x.logs(b.owed)
+		x.advance(time.Second)
+		if got := x.logs(b.owed); got != n+1 {
+			t.Fatalf("%s: a failed retry on a tick logged %d lines, want %d", b.name, got-n, 1)
+		}
+		x.d.Close()
+		n = x.logs(b.owed)
+		x.start()
+		if got := x.logs(b.owed); got != n+1 {
+			t.Fatalf("%s: a failed close at start-up logged %d lines, want 1", b.name, got-n)
+		}
+		if x.logs(b.closed) != 0 || x.colour() != alert.Red {
+			t.Fatalf("%s: the close was logged before it landed, light %v", b.name, x.colour())
+		}
+		fail.Store(false)
+		x.advance(time.Second)
+		if x.logs(b.closed) != 1 || x.colour() != alert.Off {
+			t.Fatalf("%s: the landed close logged %d lines, light %v", b.name, x.logs(b.closed), x.colour())
+		}
+	}
+}
+
+// TestTrippedRestartKeepsPause (KRN-12 Response, #4305 item 2): a core
+// that restarts cut keeps its channel-paused alert open, the same record,
+// since only the owner's resume closes it. Catches a start-up close run on
+// a cut core, which the lift's close path would do.
+func TestTrippedRestartKeepsPause(t *testing.T) {
+	x, _ := enrolled(t, true)
+	x.d.cut.Trip("test trip")
+	paused := func() []uint64 {
+		var ids []uint64
+		for _, r := range x.d.alerts.Log() {
+			if r.Kind == alert.ChannelPaused {
+				if !r.Open {
+					t.Fatalf("the channel-paused alert closed while the core stayed cut: %+v", r)
+				}
+				ids = append(ids, r.ID)
+			}
+		}
+		return ids
+	}
+	before := paused()
+	x.restart()
+	if after := paused(); len(before) != 1 || !slices.Equal(before, after) || x.d.cut.Stage() != channel.Tripped {
+		t.Fatalf("channel-paused alerts %v before the restart, %v after, stage %v", before, after, x.d.cut.Stage())
+	}
+}
+
 // TestTripDeviceNamesAreTheBoxConstants (KRN-12 Response, #4305 item 3):
 // every trip, missing record and lift in the daemon names its box by
 // coreDevice or edgeDevice, never a literal or a computed name, so Lifted

@@ -1223,3 +1223,27 @@ func TestLiftedCoveredKeepsLaterTrips(t *testing.T) {
 		t.Fatalf("the saved lift closed a trip after it: %v, light %v", err, a2.Status().Colour)
 	}
 }
+
+// TestLiftedCoveredNothingKeepsTrips (KRN-12 Response, #4305 item 2): a
+// lift that covered nothing closes nothing, whatever trips its box has
+// open, and still shows the light, so a bulb that missed a change catches
+// up. Catches an empty cover read as "every alert of the box", which would
+// turn the light off on a trip no lift covered.
+func TestLiftedCoveredNothingKeepsTrips(t *testing.T) {
+	r := newRig(t, &journal{})
+	trip, err := r.a.Raise(Trip, "core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ids := range [][]uint64{nil, {}} {
+		r.bulb.mu.Lock()
+		r.bulb.shown = []Colour{Off} // a power-cycled bulb
+		r.bulb.mu.Unlock()
+		if err := r.a.LiftedCovered("core", ids); err != nil {
+			t.Fatal(err)
+		}
+		if !r.a.Log()[r.a.byID[trip.ID]].Open || r.bulb.now() != Red {
+			t.Fatalf("an empty cover %#v: trip open %v, light %v", ids, r.a.Log()[r.a.byID[trip.ID]].Open, r.bulb.now())
+		}
+	}
+}
