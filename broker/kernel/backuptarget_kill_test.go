@@ -4,6 +4,8 @@ package kernel_test
 
 import (
 	"errors"
+	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
@@ -66,5 +68,18 @@ func TestABackupEntryThatIsNotItsShapeIsCorrupt(t *testing.T) {
 		if _, err := kernel.Replay(nil, []kernel.Entry{{Seq: 1, Type: typ, V: 1, Body: []byte(`"x"`)}}); !errors.Is(err, kernel.ErrCorrupt) {
 			t.Fatalf("%s with a string body: %v, want ErrCorrupt", typ, err)
 		}
+	}
+}
+
+// The kernel's X25519 order probe is built once at start; where X25519 is
+// refused (Go's FIPS 140-only mode) the package stops at start, naming why,
+// rather than starting with no probe and failing later on its first edge key.
+// Every test of this package starts the package, so each reaches that check.
+func TestNoX25519StopsTheKernelAtStart(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	cmd.Env = append(os.Environ(), "GODEBUG=fips140=only")
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "X25519 is not allowed in FIPS 140-only mode") {
+		t.Fatalf("started without X25519 (err %v): %s", err, out)
 	}
 }
