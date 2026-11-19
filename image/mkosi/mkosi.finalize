@@ -420,11 +420,14 @@ EXEC_TOPS = ("etc", "usr/local/lib", "usr/lib", "lib")
 # files' Exec lines as root. Each directory is walked whole and every entry in it, whatever its name
 # or suffix, is hashed (polkitd loads a dot name ending .rules; the readers' own filters are not
 # modelled). Anything in polkitd's /run directory is refused like the exec channels' /run copies.
+# #4641 R-b: the PAM stacks (libpam reads etc/pam.d, then its vendor directory usr/lib/pam.d, and etc/pam.conf
+# only without etc/pam.d), whose modules run as root before any unit or login drops to its user (pam_exec runs
+# any program), are held the same way.
 POLICY_DIRS = ("etc/polkit-1/rules.d", "usr/local/share/polkit-1/rules.d", "usr/share/polkit-1/rules.d",
                "usr/share/polkit-1/actions", "etc/dbus-1", "usr/local/share/dbus-1/system.d",
                "usr/share/dbus-1/system.d", "usr/local/share/dbus-1/system-services",
-               "usr/share/dbus-1/system-services", "lib/dbus-1/system-services")
-POLICY_FILES = ("usr/share/dbus-1/system.conf",)
+               "usr/share/dbus-1/system-services", "lib/dbus-1/system-services", "etc/pam.d", "usr/lib/pam.d")
+POLICY_FILES = ("usr/share/dbus-1/system.conf", "etc/pam.conf")
 POLICY_RUN = ("run/polkit-1/rules.d",)
 # IMG-dbus-reach (#5818): the system bus daemon's units. Every file systemd 257 merges into each (each unit
 # directory's file of that name and every drop-in unit_with_dropins applies, the type-wide service.d and
@@ -2961,7 +2964,7 @@ def keeper_violations(root):
                            % (n, svc))
     for n in sorted(set(paths)):
         out += keeper_path_violations(n, unit_with_dropins(root, dirs, n))
-    out += sysusers_tpm_violations(root) + bus_keep_violations(root, dirs)
+    out += sysusers_tpm_violations(root) + uid0_violations(root) + bus_keep_violations(root, dirs)
     return out
 
 
@@ -3449,6 +3452,54 @@ def sysusers_tpm_violations(root):
             if w[0].rstrip("!") == "u" and len(w) > 2 and ":" in w[2] and w[2].split(":", 1)[1] in TPM_GROUPS:
                 out.append("%s:%d: gives %s the group %s, which can open the TPM (#2889)"
                            % (f.rel, n, w[1], w[2].split(":", 1)[1]))
+    return out
+
+def uid0_violations(root):
+    """#4641 R-g: no user record but root's has uid 0: an etc/passwd line, a userdb .user record (its "uid"
+    read as JSON) or a sysusers.d u line whose ID's uid part is 0, each compared as a number (00 is 0, as glibc's
+    strtoul and systemd's parse_uid read it), and a uid that does not read as a plain decimal is refused. Anything at uid 0 is root under another name,
+    outside every check that reads User=root."""
+    out = []
+    try:
+        text = Conf(root, "etc/passwd").text()
+    except FileNotFoundError:
+        text = ""
+    except OSError as e:
+        text, out = "", ["etc/passwd: unreadable (%s); the tree check never passes it (#4641)" % e.strerror]
+    for n, ln in enumerate(text.splitlines(), 1):
+        w = ln.split(":")
+        if len(w) < 3:
+            continue  # no uid field: glibc's files NSS reads no user from it
+        if not w[2].isdigit() or not w[2].isascii():
+            out.append("etc/passwd:%d: a line whose uid is not a plain decimal number (#4641)" % n)
+        elif int(w[2]) == 0 and w[0] != "root":
+            out.append("etc/passwd:%d: %s has uid 0; only root may (#4641)" % (n, w[0]))
+    for f in conf_files(root, ("etc/userdb", "usr/local/lib/userdb", "usr/lib/userdb"), ".user"):
+        try:
+            rec = json.loads(f.content())
+        except (OSError, ValueError) as e:
+            out.append("%s: unreadable (%s); the tree check never passes it (#4641)" % (f.rel, e))
+            continue
+        uid = rec.get("uid") if isinstance(rec, dict) else None
+        if not isinstance(rec, dict) or (uid is not None and (type(uid) is not int or uid == 0) and rec.get("userName") != "root"):
+            out.append("%s: a user record with uid 0 other than root's, or not a JSON object (#4641)" % f.rel)
+    for f in conf_files(root, conf_paths("sysusers.d")):
+        try:
+            lines = f.content().decode("utf-8", "replace").splitlines()
+        except OSError as e:
+            out.append("%s: unreadable (%s); the tree check never passes it (#4641)" % (f.rel, e.strerror))
+            continue
+        for n, ln in enumerate(lines, 1):
+            w = ln.split()
+            if len(w) < 3 or w[0].rstrip("!") != "u" or w[1] == "root":
+                continue
+            uid = w[2].split(":", 1)[0]
+            if uid.isdigit() and uid.isascii() and int(uid) == 0:
+                out.append("%s:%d: gives %s uid 0; only root may (#4641)" % (f.rel, n, w[1]))
+            elif not (uid == "-" or uid.isdigit() and uid.isascii()):
+                # A path takes the uid of the file's owner (root's for most), and quotes or an escape are read
+                # by systemd's word splitter, which this does not model.
+                out.append("%s:%d: gives %s a uid that is not - or a plain decimal number (#4641)" % (f.rel, n, w[1]))
     return out
 
 def fstab_noexec_violations(root):
@@ -4465,7 +4516,8 @@ EXEC_ALLOW_HEADER = """\
 # (#1556, #2176): udev rules, system and environment generators, modules-load.d, modprobe.d,
 # sysctl.d, binfmt.d, and systemd's system-shutdown and system-sleep hooks, in etc, usr/local/lib,
 # usr/lib and lib; and (#2622) every polkit rules.d and actions file, everything under etc/dbus-1, and the
-# D-Bus system.conf, system.d and system-services files; and (#5818) every file systemd merges into
+# D-Bus system.conf, system.d and system-services files; and (#4641) every PAM file in etc/pam.d and
+# usr/lib/pam.d, and etc/pam.conf; and (#5818) every file systemd merges into
 # dbus.service and dbus.socket, drop-ins included, so dbus-daemon's ExecStart is the reviewed one. One per line: the file's path in the image tree, a tab, and "sha256:" with the
 # SHA-256 of what the box reads, or "mask" for an empty file or a link to /dev/null. Every file is
 # listed, not only the one that wins its name. mkosi.finalize fails the build on any file not here

@@ -2,7 +2,8 @@
 # (#1556, #2176): udev rules, system and environment generators, modules-load.d, modprobe.d,
 # sysctl.d, binfmt.d, and systemd's system-shutdown and system-sleep hooks, in etc, usr/local/lib,
 # usr/lib and lib; and (#2622) every polkit rules.d and actions file, everything under etc/dbus-1, and the
-# D-Bus system.conf, system.d and system-services files; and (#5818) every file systemd merges into
+# D-Bus system.conf, system.d and system-services files; and (#4641) every PAM file in etc/pam.d and
+# usr/lib/pam.d, and etc/pam.conf; and (#5818) every file systemd merges into
 # dbus.service and dbus.socket, drop-ins included, so dbus-daemon's ExecStart is the reviewed one. One per line: the file's path in the image tree, a tab, and "sha256:" with the
 # SHA-256 of what the box reads, or "mask" for an empty file or a link to /dev/null. Every file is
 # listed, not only the one that wins its name. mkosi.finalize fails the build on any file not here
@@ -102,6 +103,18 @@ usr/share/dbus-1/system-services/org.freedesktop.network1.service	sha256:2b6ff32
 usr/share/dbus-1/system-services/org.freedesktop.resolve1.service	sha256:5fc8808faa8da6c61553f11985eb8eb828b34e628421f3aedbb421e0d61426d1
 usr/share/dbus-1/system-services/org.freedesktop.systemd1.service	sha256:eac6205bbfde5563ebdd74f9d420db2d19b1fd2fadc7bc47ae8d55845a8bb82d
 usr/share/dbus-1/system-services/org.freedesktop.timedate1.service	sha256:0f3891c48db89bfaff72f50ab239b0a500a651a14998ce25d50373bd33d17ec9
+etc/pam.d/common-account	sha256:aa8a63d72e79399b6c51ebe4e9f828c954145a799eb4b8f3224724f51cbb9fac
+etc/pam.d/common-auth	sha256:b787b01c7e71c658fa9acb84cbe153f71786cf380af4b01ae9135210cdc0154d
+etc/pam.d/common-password	sha256:a76bcfdcb12436297ccf72a0d63daed8d9761d8e92996eb08295b81be32567d7
+etc/pam.d/common-session	sha256:f1ee6802a30cba8a3e93d62bfb4207238d0491cc1a82e9ff328f1ed635227c32
+etc/pam.d/common-session-noninteractive	sha256:5c624c6f8a8c9b1c75e487f339bbb67d02622736c133e26b39cf72600c39399b
+etc/pam.d/other	sha256:d13078e71d3351ef7f63a7265ddb50b710a2598b9febc78810fbb0130a02695a
+etc/pam.d/runuser	sha256:2d430cb6628248953568010427d663f3305856f3cb055955c2239bea226c5280
+etc/pam.d/runuser-l	sha256:be9329a8b26e3cfd4af879fe60900f646f8188f3fbe491688f23d4d8b491c5b1
+etc/pam.d/su	sha256:fda16622dc6198eae5d6ae522bb820b7b68dbf2e73899295c4cac9744f7c7904
+etc/pam.d/su-l	sha256:4d10241676e97e5e8d8935e5c8e8f6cb2f871afb881059715f155909be9ebd77
+usr/lib/pam.d/systemd-user	sha256:78e3e88bd7c242228040dcbcdbae383109508b89a4848b187de77db2520a22ab
 usr/share/dbus-1/system.conf	sha256:c0a02340950ce376ccee26d58df2c77466c534dcd368b3486b4b6a60d3741f6b
+etc/pam.conf	sha256:8aa7f3472ec88a24a572d6ffd9748ce3da223fba3b2545098eaaae768b6408c4
 usr/lib/systemd/system/dbus.service	sha256:dd0c15ee9b45ee75295d0d44e81052dbd20302db600ae80ebd6ede076eefad0f
 usr/lib/systemd/system/dbus.socket	sha256:e05359bbdc083b8db2b49542b26429166b5e13367a63668a4e8ff8a1b496f7ae

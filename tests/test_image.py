@@ -5704,6 +5704,8 @@ class ExecAllowTest(unittest.TestCase):
                                       r"(etc|usr/share)/polkit-1/rules\.d/[^/]+|usr/share/polkit-1/actions/[^/]+|"
                                       r"etc/dbus-1/.+|usr/share/dbus-1/(system\.d/[^/]+|system-services/[^/]+|"
                                       r"system\.conf)|"
+                                      # #4641 R-b: the PAM stacks.
+                                      r"(etc|usr/lib)/pam\.d/[^/]+|etc/pam\.conf|"
                                       # #5818: every file systemd merges into the bus daemon's units.
                                       r"(etc|usr/local/lib|usr/lib)/systemd/system/(dbus\.(service|socket)|"
                                       r"(dbus\.(service|socket)|service|socket)\.d/[^/]+\.conf))$")
@@ -5843,7 +5845,9 @@ class ExecAllowTest(unittest.TestCase):
               "usr/local/share/dbus-1/system-services/x.service", "lib/dbus-1/system-services/y.service",
               # Names a reader's own filter might skip are hashed all the same.
               "usr/share/polkit-1/rules.d/.x.rules", "usr/share/polkit-1/rules.d/x.rules~",
-              "etc/dbus-1/system.d/x.txt", "etc/dbus-1/system.d/sub/x.conf")
+              "etc/dbus-1/system.d/x.txt", "etc/dbus-1/system.d/sub/x.conf",
+              # #4641 R-b: the PAM stacks, whose modules run as root.
+              "etc/pam.d/login", "usr/lib/pam.d/su", "etc/pam.conf", "etc/pam.d/.x")
     YES = 'polkit.addRule(function(action, subject) { return polkit.Result.YES; });\n'
 
     def test_policy_files_are_held_by_hash(self):
