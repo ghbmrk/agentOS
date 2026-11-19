@@ -3,8 +3,12 @@ package clock
 // REQ: TIM-1, HW-8
 
 import (
+	"errors"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestHW8RTCReadsSysfs(t *testing.T) {
@@ -26,5 +30,49 @@ func TestTIM1BootClock(t *testing.T) {
 	}
 	if b := bootElapsed(); b < a {
 		t.Fatalf("CLOCK_BOOTTIME went back: %v then %v", a, b)
+	}
+}
+
+// An unreadable boot_id names no boot, so a saved anchor never matches it;
+// a readable one is its trimmed contents.
+func TestTIM1BootIDUnreadableIsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "boot_id")
+	if err := os.WriteFile(p, []byte(" 0f0e0d0c-0000-4000-8000-000000000001\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if id := bootIDAt(p); id != "0f0e0d0c-0000-4000-8000-000000000001" {
+		t.Fatalf("bootIDAt = %q", id)
+	}
+	if id := bootIDAt(filepath.Join(dir, "missing")); id != "" {
+		t.Fatalf("bootIDAt of a missing file = %q, want empty", id)
+	}
+}
+
+// A missing since_epoch file is its read's error, and one that holds no
+// whole number of seconds is an error, never the epoch; a number is that
+// many seconds after it, as UTC.
+func TestHW8RTCRefusesAnUnreadableValue(t *testing.T) {
+	dir := t.TempDir()
+	for _, c := range []struct {
+		body string
+		want time.Time
+		ok   bool
+	}{
+		{"1700000000\n", time.Unix(1700000000, 0).UTC(), true},
+		{"soon\n", time.Time{}, false},
+		{"", time.Time{}, false},
+	} {
+		p := filepath.Join(dir, "since_epoch")
+		if err := os.WriteFile(p, []byte(c.body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := rtcAt(p)
+		if (err == nil) != c.ok || !got.Equal(c.want) || got.Location() != time.UTC {
+			t.Fatalf("rtcAt(%q) = %v, %v; want %v, ok %v", c.body, got, err, c.want, c.ok)
+		}
+	}
+	if _, err := rtcAt(filepath.Join(dir, "missing")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("rtcAt of a missing file: %v, want not-exist", err)
 	}
 }

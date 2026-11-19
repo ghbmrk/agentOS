@@ -25,6 +25,8 @@ enable agentos-keeper-enroll.service
 # The Owner Card confirm's hand-off socket, and the path unit that starts enrollment on its factors.
 enable agentos-keeper-setup.socket
 enable agentos-keeper-enroll.path
+# Their files' removal at shutdown, so agentos-mor can clear MOR (HW-8).
+enable agentos-keeper-wipe.service
 enable agentos-keeper-kernel.service
 # The recovery-key rotation's socket (REC-4): its one-shot runs per connection.
 enable agentos-keeper-rotate.socket

@@ -33,6 +33,7 @@ import time
 import urllib.error
 import urllib.request
 
+import premerge  # tools/, beside this file
 import word_budget  # tools/, beside this file
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -341,13 +342,35 @@ def _runs_window(repo, token, lo, hi):
     return out
 
 
-def collect_github(repo, token, since=None):
+def rebase_deltas(root, heads, base):
+    """D-320 rule 5: how many of a merged PR's head changes were a main-merge or rebase that
+    `premerge.py` reads as `changed`. `heads` are `(sha, accepted)` for the heads its L3 verdicts name,
+    oldest first; `accepted` is True when a verdict at that head was an accept. Only a change away from
+    an accepted head is compared (#5955: against the last accepted head), so the delta review a
+    fix-list owes is not counted even when the fix push also merged main. A pair counts when main
+    moved into the branch (the merge base with `base`, the commit main was at when the PR merged,
+    differs) and `premerge.compare(old, new)` lists files; a `same` reading, a plain fix push (same
+    merge base) or an unknown SHA does not."""
+    n = 0
+    for (old, accepted), (new, _) in zip(heads, heads[1:]):
+        try:
+            if not accepted or old == new or \
+                    _git(root, "merge-base", old, base) == _git(root, "merge-base", new, base):
+                continue
+            n += bool(premerge.compare(str(root), old, new, base))
+        except subprocess.CalledProcessError:
+            continue
+    return n
+
+
+def collect_github(repo, token, since=None, root=None):
     """PRs and Actions runs. With `since` (an ISO time), skip what only frozen weeks use:
     reviews of PRs merged earlier (verdicts None = not collected) and older runs. That keeps
-    the call count inside GITHUB_TOKEN's hourly limit as history grows."""
+    the call count inside GITHUB_TOKEN's hourly limit as history grows. With `root` (a checkout holding
+    the PR commits), each merged PR also gets `rebase_deltas` (see there); without it the key is absent."""
     pulls = []
     for p in _pages(repo, "pulls?state=all", token):
-        verdicts = causes = rounds = notes_noise = None
+        verdicts = causes = rounds = notes_noise = deltas = None
         if p.get("merged_at") and (since is None or p["merged_at"] >= since):
             reviews = list(_pages(repo, f"pulls/{p['number']}/reviews", token))
             # A verdict posted as a conversation comment counts too, but only with a
@@ -375,13 +398,25 @@ def collect_github(repo, token, since=None):
             verdicts = [v for v in map(verdict, l3) if v]
             rounds = count_rounds([b for b in l3 if verdict(b)])
             notes_noise = noise([r.get("body") for r in reviews if trusted_review(r)])
+            if root is not None and p.get("merge_commit_sha"):
+                heads = []  # [sha, accepted] per distinct verdict head, oldest first
+                for b in l3:
+                    h = review_head(b) if verdict(b) else None
+                    if not h:
+                        continue
+                    hit = next((x for x in heads if x[0].startswith(h) or h.startswith(x[0])), None)
+                    if hit is None:
+                        heads.append(hit := [h, False])
+                    hit[1] = hit[1] or verdict(b) == "accept"
+                deltas = rebase_deltas(root, heads, p["merge_commit_sha"] + "^1")
             # A non-accept verdict without a Cause line counts as "none" so the gap shows.
             causes = [cause(b) or "none" for b in l3 if verdict(b) in ("fix-list", "reject")]
         pulls.append({"number": p["number"], "merged_at": p.get("merged_at"),
                       "state": p.get("state"), "draft": bool(p.get("draft")), "updated_at": p.get("updated_at"),
                       "body": p.get("body") or "", "verdicts": verdicts,
                       "labels": [l["name"] for l in p.get("labels") or []],
-                      "causes": causes, "rounds": rounds, "noise": notes_noise})
+                      "causes": causes, "rounds": rounds, "noise": notes_noise}
+                     | ({"rebase_deltas": deltas} if deltas is not None else {}))
     runs = []
     # The unfiltered runs listing stops at page 400 (page 401 is a 422), which this repo now
     # passes. A `created=` listing is capped at 1,000 results instead, so the runs are read in
@@ -566,6 +601,9 @@ def compute(raw):
             "defects": sorted(d for p in merged for d in defects(p["body"])),
             "flaky": flaky,
             "runs": n_runs,
+            # D-320 rule 5. Pulls collected before the count existed carry no key: n/a, never 0.
+            "rebase_deltas": sum(p["rebase_deltas"] for p in merged if "rebase_deltas" in p)
+                             if any("rebase_deltas" in p for p in merged) or not merged else None,
         })
         if out[-1]["current"] and out[-1]["newest_input"]:
             out[-1]["age_hours"] = (_when(raw["now"], tz) - _when(out[-1]["newest_input"], tz)).total_seconds() / 3600
@@ -588,13 +626,13 @@ def compute(raw):
 
 # Columns sourced from the GitHub API: frozen once a closed week has been recorded, so
 # later edits, deleted reviews or expired runs cannot rewrite a finished week.
-FROZEN = (5, 7, 8, 9, 11, 16, 17)
+FROZEN = (5, 7, 8, 9, 11, 16, 17, 19)
 COLUMNS = [
     "Week starting", "Usage all / Fable", "On-pace mark", "Reqs newly covered", "Usage per req",
     "First-pass L3 accept", "Escalation rate (cum.)", "Defects after merge", "CI flake rate",
     "L3 rounds per merged PR", "Usage per merged PR", "L3 causes",
     "Open BOARD rows", "Follow-up rows added", "Follow-ups per merged PR", "Promotions later to release",
-    "Stale PRs (48 h)", "Open PRs by lane", "Defects per merged PR",
+    "Stale PRs (48 h)", "Open PRs by lane", "Defects per merged PR", "Rebases needing a delta review",
 ]
 
 
@@ -637,6 +675,7 @@ def _cells(w):
         ", ".join(f"{k} {v}" for k, v in sorted(w["lanes"].items())) + f" (cap about {LANE_CAP})",
         NONE if w["defects_per_pr"] is None else
         f"{w['defects_per_pr']:.2f} ({len(w['defects'])}/{w['merged']})" + red("defects_per_pr"),
+        NA if w["rebase_deltas"] is None else (str(w["rebase_deltas"]) if w["merged"] else NONE),
     ]
 
 
@@ -853,6 +892,11 @@ def render(weeks, raw, previous_md=None):
         "counted for the current week only.",
         "- **Open PRs by lane**: open PRs per lane (a `lane:<name>` label, docs/LANES.md; no label is the peers) "
         "against a cap of about 10; current week only.",
+        "- **Rebases needing a delta review** (D-320 rule 5): PRs merged that week with a head change after "
+        "main moved into the branch (a rebase or main-merge) that `tools/premerge.py` reads as `changed` "
+        "against the last accepted head, which a later L3 delta-review verdict followed; a head change "
+        "after a fix-list or reject, a `same` reading and a fix push on an unmoved base do not count. "
+        "Counted once per such head change.",
         "- **red** / **n/a**: red marks a week above the D-086 baseline; `n/a` means the data to compute a column is "
         "absent (never printed as 0).",
         "- **Closed weeks**: once a finished week is recorded, its L3, defect and flake cells are kept as "
@@ -895,7 +939,7 @@ def main(argv=None):
         trace, board = git_history(root, args.ref)
         ledger = (root / "LEDGER.md").read_text()
         tz = dt.timezone(dt.timedelta(hours=TZ_HOURS))
-        pulls, runs = collect_github(args.repo, os.environ.get("GITHUB_TOKEN"), _since(previous, tz))
+        pulls, runs = collect_github(args.repo, os.environ.get("GITHUB_TOKEN"), _since(previous, tz), root)
         raw = {
             "now": args.now or dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
             "tz_hours": TZ_HOURS, "trace": trace, "board": board,

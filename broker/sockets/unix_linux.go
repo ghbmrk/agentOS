@@ -3,31 +3,10 @@ package sockets
 import (
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"syscall"
 )
-
-// peerUID returns the uid of the process on the other end of c.
-func peerUID(c net.Conn) (int, bool) {
-	uc, ok := c.(*net.UnixConn)
-	if !ok {
-		return 0, false
-	}
-	raw, err := uc.SyscallConn()
-	if err != nil {
-		return 0, false
-	}
-	var cred *syscall.Ucred
-	var cerr error
-	if err := raw.Control(func(fd uintptr) {
-		cred, cerr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
-	}); err != nil || cerr != nil {
-		return 0, false
-	}
-	return int(cred.Uid), true
-}
 
 func fileUID(fi os.FileInfo) (int, bool) {
 	st, ok := fi.Sys().(*syscall.Stat_t)
@@ -52,8 +31,3 @@ func lockDir(dir string) (func(), error) {
 	}
 	return func() { f.Close() }, nil
 }
-
-// PeerUID returns the uid of the process on the other end of a Unix
-// connection (SO_PEERCRED), for listeners outside Server that apply the
-// same peer rule.
-func PeerUID(c net.Conn) (int, bool) { return peerUID(c) }
