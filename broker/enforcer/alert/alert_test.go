@@ -1247,3 +1247,18 @@ func TestLiftedCoveredNothingKeepsTrips(t *testing.T) {
 		}
 	}
 }
+
+// TestResumedClosesFirstAlert (KRN-12 Response): Resumed closes the
+// channel-paused alert even when it is the first record of the log, at
+// index 0. Catches an index check that reads 0 as "none open", which
+// would keep the pause open after the owner resumed.
+func TestResumedClosesFirstAlert(t *testing.T) {
+	r := newRig(t, &journal{})
+	r.a.Paused()
+	if err := r.a.Resumed(); err != nil {
+		t.Fatal(err)
+	}
+	if log := r.a.Log(); len(log) != 1 || log[0].Kind != ChannelPaused || log[0].Open {
+		t.Fatalf("the first record after a resume: %+v", log)
+	}
+}
