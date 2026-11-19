@@ -84,7 +84,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ERASE-contain-first | ERASE-contain-first: contain the reader lineage before the erase is logged, the guest plane refuses a contained lineage's plans, and the erase confirmation lists the cancelled plans (LOG-4) | #3870 | queued(release; tier A; size M; from #4805 reviews) |
 | KRN-keys-print-factors | KRN-keys-print-factors: the sealed store's factors print no passphrase, recovery key or PIN (DECOY-b-8, CLK-1) | #4833 | building(release; tier A; size S; waits on #4833, #4845 and sub B's OK for localui/recovery_test.go) |
 | MIG-4-plan-login-texts | Owner texts for the plan sign-in's `signin-code` and the late-exchange end, once the home page runs on the plan host (#3180 item 2; CH-12, CLK-7). | MIG-4-plan-login-texts | queued (release; after #2780; sub B) |
-| BACKUP-table-fifo-f1 | BACKUP-table-fifo-f1: content read-back refuses FIFOs; table open refuses devices before opening; (STO-1, REC-1) | #3998 | queued (release; tier A) |
+| BACKUP-table-fifo-f1 | BACKUP-table-fifo-f1: content read-back refuses FIFOs; table open refuses devices before opening; (STO-1, REC-1) | #3998 | building (release; tier A) |
 
 ## Harness and operating model
 
@@ -412,7 +412,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KEY-refusal-code-r1 | KEY-refusal-code-r1: #6032 release items (kernel.Refusal encoding, code-var reassignment lint, requal named set, skew note, guest.set types) | #6032 review | queued (release; tier A; after #6032) |
 | CORE-trim-headroom | CORE-trim-headroom: cut lines from the trusted core that do no work (test-only code, dead code, duplicates) to free headroom under the D-310 ceiling. Release. | D-310, #5732, #5757 | building (release; tier A) |
 | TIM-1-interval-fu-l | TIM-1-interval-fu-l: clock load checks the state file's owner and mode on read, and bounds saved same-boot alert times. Release; from #6057. | #6026, #6057 | building (release; tier A) |
-| CLK-seal-entry-swap-wipe-fu-d | CLK-seal-entry-swap-wipe-fu-d: the entry-count refusal runs before any slot or swap, withEntry checks its own entry again, and four comment lines are re-wrapped. Release; from #6049. | #6048, #6049 | building (release; tier A) |
 | VULN-node-openssl-pin | VULN-node-openssl-pin: bump the openclaw guest's node pin once a release bundles OpenSSL 3.5.10; until then the bundled entry records each fix's reach. Release; from #6074. | #5853, #6074 | queued (release; tier A; waits on a node release) |
 | MOR-writer-match-fu | MOR-writer-match-fu: the wipe test counts the clear's own unit as a writer except for its known clear action, not by skipping it by name. Release; from #6066. | #6043, #6066 | building (release; tier B) |
 | IMG-keyring-spikes-fu-b | IMG-keyring-spikes-fu-b: each mkosi tree's keyring pins are looked up per tree, Mirror and Repositories are pinned, and record-directory trees are handled. Release; from #6082. | #5983, #6082 | building (release; tier A) |
@@ -426,12 +425,10 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-mkosi-run-bound-fu-disk | IMG-mkosi-run-bound-fu-disk: image.yml's stage job keeps its own IMG-disk budget. Release; from #6148. | #4690 | queued (release; tier B) |
 | VULN-debian-r11 | VULN-debian-r11: accept openssl's and glibc's new no-fix Debian 13 advisories so image-vulncheck passes again. Release; seventh no-fix Debian round. | #2919, #5871 | building (release; tier A) |
 | IMG-mkosi-run-bound-fu-local | IMG-mkosi-run-bound-fu-local: a local-only wrapper makes a local image build one command, with the mkosi line pinned equal to CI's. Release; from #6148. | #4690, #6148 | queued (release; tier B) |
-| MUT-plan-timing-skew | MUT-plan-timing-skew: the plan's reused suite time matches what a shard runs | #6156 | building (release; tier A) |
 | CTL-agent-starting-status | CTL-agent-starting-status: STATUS during boot shows a starting line, not 'not set up' or 'waiting for memory'. Release; from #6136 (UX). | #5429, #6136 | queued (release; tier A) |
 | BROWSER-shell-cache-warning-cmd | BROWSER-shell-cache-warning-cmd: the headless-shell cache warning names the delete command for the bad entry. Release; rides the next ci.yml PR. | #6175, #6180 | queued (release; tier A; gate file) |
-| LINT-childenv-types | LINT-childenv-types: the child-environment lint reads exact types through the one go/types load instead of ast.Object scopes. Re-plan follow-up; from #6169. | #6120, #6169 | building (tier A) |
-| MUT-delete-covering-fu | MUT-delete-covering-fu: a covering-test set never costs more than the whole suite; pin passes' headroom and set timeouts | #6213 | building (release; tier A) |
-| VULN-debian-r12 | VULN-debian-r12: accept openssl's two new no-fix Debian 13 advisories so image-vulncheck passes again. Release; eighth no-fix Debian round. | #2919, #6152 | building (release; tier A) |
+| MUT-plan-timing-skew-fu | MUT-plan-timing-skew-fu: timed_cover streams and bounds the test output; pin the last-match rule and the stderr echo | #6228 | building (release; tier A) |
+| MUT-plan-timing-skew-fu2 | MUT-plan-timing-skew-fu2: echo_ok.scan uses search, not findall and [-1]; an empty-line guard bounds a newline flood | #6235 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 

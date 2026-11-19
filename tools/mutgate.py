@@ -114,6 +114,7 @@ Install: go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
 """
 import argparse
 import bisect
+import codecs
 import collections
 import concurrent.futures
 import contextlib
@@ -1386,6 +1387,35 @@ def covered_by(pkg, names, tmp, broker=None):
 GO_OK = re.compile(r"(?m)^ok \s*\S+\s+(\d+(?:\.\d+)?)s(?:\s|$)")
 
 
+OK_KEEP = 4096  # bytes of a line echo_ok holds: an `ok` line's match ends within its first hundred
+
+
+def echo_ok(stream):
+    """Copies `go test`'s stdout to stderr as it arrives (`plan` prints the matrix on stdout, #4961)
+    and returns its last `ok` line's seconds, or None. It holds one chunk and the first OK_KEEP bytes
+    of the current line, so a test that floods its output costs no memory and shows live (#6232)."""
+    text = codecs.getincrementaldecoder("utf-8")("replace")
+    line, last = b"", None
+
+    def scan(whole):
+        nonlocal last
+        if ran := GO_OK.findall(whole.decode("utf-8", "replace")):
+            last = ran[-1]
+
+    while chunk := stream.read1(1 << 16):
+        sys.stderr.write(text.decode(chunk))
+        sys.stderr.flush()
+        *ends, rest = chunk.split(b"\n")
+        for part in ends:
+            scan(line + part)
+            line = b""
+        line = (line + rest)[:OK_KEEP]
+    sys.stderr.write(text.decode(b"", final=True))
+    sys.stderr.flush()
+    scan(line)
+    return last
+
+
 def timed_cover(pkg, names, tmp, broker=None, code=None):
     """covered_by's (lines, seconds, problem): seconds is how long its test binary ran, so a plan
     that ran the whole suite under coverage sizes the shards from that run, not a fourth (#6155).
@@ -1398,16 +1428,13 @@ def timed_cover(pkg, names, tmp, broker=None, code=None):
     if names is not None:
         cmd += ["-run", "^(" + "|".join(names) + ")$"]
     began = time.monotonic()
-    run = subprocess.run([*cmd, "."], cwd=broker / pkg, stdout=subprocess.PIPE)
-    # Its output goes to stderr: `plan` prints the matrix on stdout (#4961).
-    sys.stderr.write(out := run.stdout.decode("utf-8", "replace"))
-    sys.stderr.flush()
+    with subprocess.Popen([*cmd, "."], cwd=broker / pkg, stdout=subprocess.PIPE) as run:
+        ran = echo_ok(run.stdout)
     if run.returncode or not profile.exists():
         return None, None, f"broker/{pkg}/'s tests {'(all)' if names is None else names} fail under -coverprofile"
     # `go test`'s own `ok` line times the test binary's run alone, as suite_seconds times it: the wall
     # time adds the build and vet, which a cold cache makes many times a fast suite (#6162).
-    ran = GO_OK.findall(out)
-    seconds = float(ran[-1]) if ran else time.monotonic() - began
+    seconds = float(ran) if ran else time.monotonic() - began
     if (lister := lister_in(tmp)) is None:
         return None, None, "cannot build tools/mutgate_stmts.go"
     try:
@@ -2906,8 +2933,9 @@ def main(argv=None):
                        help="the PR head of the event whose body FILE is; a failure names it (#6077)")
         p.add_argument("--summary", metavar="FILE", help="append the table of verdicts here")
     args = ap.parse_args(argv)
-    if args.cmd == "run" and (not 0 <= args.shard < args.of <= MATRIX_MAX or (args.of > 1 and not args.git)):
-        ap.error(f"--shard I --of K needs 0 <= I < K <= {MATRIX_MAX}, and --git when K > 1")
+    # K is a package's shard count, which `plan` packs past MATRIX_MAX jobs up to SHARDS_MAX (#6170).
+    if args.cmd == "run" and (not 0 <= args.shard < args.of <= SHARDS_MAX or (args.of > 1 and not args.git)):
+        ap.error(f"--shard I --of K needs 0 <= I < K <= {SHARDS_MAX}, and --git when K > 1")
     if getattr(args, "body_from", None) and not args.body:
         ap.error("--body-from names the event whose body --body holds: give --body too")
     if args.cmd == "packages":

@@ -1965,6 +1965,103 @@ class TestOnly(unittest.TestCase):
         for none in ("FAIL\tagentos/broker/hint\t1.0s\n", "ok  \tagentos/broker/hint\t(cached)\n", "  ok  \tp\t1s\n"):
             self.assertEqual(mutgate.GO_OK.findall(none), [], none)
 
+    def test_echo_ok_streams_and_reads_the_last_ok_line(self):
+        # MUT-plan-timing-skew-fu (#6232): stdout reaches stderr chunk by chunk (`plan`'s stdout is
+        # the matrix, #4961), split lines and characters join, and the last `ok` line's seconds stand.
+        from unittest import mock
+
+        class Chunks:
+            def __init__(self, chunks):
+                self.chunks = list(chunks)
+
+            def read1(self, n):
+                return self.chunks.pop(0) if self.chunks else b""
+
+        cases = (
+            ([b"ok  \tagentos/broker/x\t9s\nlog \xc3", b"\xa9\nok  \tagentos/broker/hint\t1.", b"5s\tcoverage: 5%\n"], "1.5"),
+            ([b"ok  \tp\t9s\nok  \tp\t2s"], "2"),  # a last line with no newline
+            ([b"ok  \tp\t3s\t" + b"x" * 200000 + b"\n"], "3"),  # a long line's head still reads
+            ([b"x" * 200000 + b"ok  \tp\t4s\n"], None),  # an `ok` mid-line is no summary line
+            ([b"FAIL\tp\t1s\n"], None),
+            ([b"x\xc3"], None),  # a cut last character still echoes
+            ([], None),
+        )
+        for chunks, want in cases:
+            with self.subTest(want=want), mock.patch.object(sys, "stderr", io.StringIO()) as err:
+                self.assertEqual(mutgate.echo_ok(Chunks(chunks)), want)
+                self.assertEqual(err.getvalue(), b"".join(chunks).decode("utf-8", "replace"))
+
+    def test_echo_ok_holds_no_flood(self):
+        # MUT-plan-timing-skew-fu (#6232): a test flooding 64 MiB, in lines or in one line, costs
+        # echo_ok about a chunk, where buffering the output whole raised MemoryError in the plan job.
+        import tracemalloc
+        from unittest import mock
+
+        class Flood:
+            def __init__(self, piece, tail):
+                self.left, self.piece, self.tail = 1024, piece, tail
+
+            def read1(self, n):
+                self.left -= 1
+                return self.piece if self.left > 0 else (self.tail if self.left == 0 else b"")
+
+        class Sink:
+            seen = 0
+
+            def write(self, text):
+                Sink.seen += len(text)
+
+            def flush(self):
+                pass
+
+        for piece in (b"x" * 65536, (b"x" * 63 + b"\n") * 1024):
+            with self.subTest(lines=piece.count(b"\n")), mock.patch.object(sys, "stderr", Sink()):
+                Sink.seen = 0
+                tracemalloc.start()
+                try:
+                    got = mutgate.echo_ok(Flood(piece, b"\nok  \tagentos/broker/hint\t7.5s\n"))
+                    _, peak = tracemalloc.get_traced_memory()
+                finally:
+                    tracemalloc.stop()
+                self.assertEqual(got, "7.5")
+                self.assertEqual(Sink.seen, 1023 * 65536 + 31)
+                self.assertLess(peak, 4 << 20)
+
+    def test_timed_cover_echoes_live_and_times_the_last_ok_line(self):
+        # MUT-plan-timing-skew-fu (#6232): a `go` that prints another `ok` line, then waits 2 s
+        # before the real run: that line reaches stderr at once, and the real run's own (last) `ok`
+        # line times the run, not the first one's 99 s.
+        from unittest import mock
+        real = shutil.which("go")
+
+        class Clock(io.StringIO):
+            first = None
+
+            def flush(self):  # stderr shows text only once flushed
+                if self.getvalue() and Clock.first is None:
+                    Clock.first = time.monotonic()
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(mutgate, "BROKER", pathlib.Path(d) / "broker"):
+            self.repo(d, TWO_TEST + "\n// changed\n")
+            tmp, shim = pathlib.Path(d) / "tmp", pathlib.Path(d) / "shim"
+            tmp.mkdir()
+            shim.mkdir()
+            (shim / "go").write_text(f'#!/bin/sh\nprintf \'ok  \\tagentos/broker/other\\t99s\\n\'\nsleep 2\nexec "{real}" "$@"\n')
+            (shim / "go").chmod(0o755)
+            with mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off", "PATH": f"{shim}:{os.environ['PATH']}"}), \
+                    mock.patch.object(sys, "stderr", Clock()) as err:
+                began = time.monotonic()
+                got, secs, problem = mutgate.timed_cover("hint", None, tmp)
+                ended = time.monotonic()
+            self.assertIsNone(problem)
+            self.assertIn("broker/hint/hint.go", got)
+            self.assertLess(secs, 2.0)
+            self.assertLess(Clock.first - began, 1.5)
+            self.assertGreaterEqual(ended - began, 2.0)
+            out = err.getvalue()
+            self.assertTrue(out.startswith("ok  \tagentos/broker/other\t99s\n"), out)
+            self.assertRegex(out, r"(?m)^ok  \s*\S*hint\s+[0-9.]+s")
+
     def test_test_only_diff_mutates_covered_lines(self):
         # #3607: a test-only diff passed every gate. TestUp still runs Up(20) but no longer checks
         # the clamp, so its guard survives; TestDown is untouched, so Down's line is no target.
@@ -2105,7 +2202,7 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             self.assertIn("the shards of hint disagree; rerun the mutgate workflow", r.stderr)  # #4983: the remedy
             self.assertEqual(git("status", "--porcelain", "--", "broker").stdout, "")
             # A shard asked for outside 0 <= I < K is refused before anything runs.
-            for bad in (("--shard", "2", "--of", "2"), ("--shard", "-1", "--of", "2"), ("--of", "257", "--shard", "0")):
+            for bad in (("--shard", "2", "--of", "2"), ("--shard", "-1", "--of", "2"), ("--of", "1281", "--shard", "0")):
                 r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(pathlib.Path(d) / "x"), *bad, env=env)
                 self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
@@ -2937,6 +3034,20 @@ class Plan(unittest.TestCase):
         # The bounds verify reads a result's shard by (L3 4 on #6171): K up to SHARDS_MAX, never past it.
         self.assertEqual(mutgate.shard_of({"shard": {"index": 1279, "of": 1280}}), (1279, 1280))
         self.assertIsNone(mutgate.shard_of({"shard": {"index": 0, "of": 1281}}))
+
+    def test_run_takes_every_shard_a_plan_can_pack(self):
+        # MUT-plan-overflow-fu: `run` refused K past MATRIX_MAX after #6170 packed plans up to
+        # SHARDS_MAX, so all 294 of #6144's enforcer/nft shards exited 2 (run 44488046218). The K
+        # bound `run` takes is the largest one pack fits, whatever the constants become.
+        top = max(k for k in range(1, mutgate.SHARDS_MAX + 2) if mutgate.pack([("p", k)]))
+        with mock.patch.object(mutgate, "cmd_run", return_value=0) as ran:
+            for i in (0, top - 1):
+                self.assertEqual(mutgate.main(["run", "p", "--git", "HEAD~1", "--shard", str(i), "--of", str(top)]), 0)
+            self.assertEqual(ran.call_count, 2)
+            with self.assertRaises(SystemExit) as e, contextlib.redirect_stderr(io.StringIO()):
+                mutgate.main(["run", "p", "--git", "HEAD~1", "--shard", "0", "--of", str(top + 1)])
+            self.assertEqual(e.exception.code, 2)
+            self.assertEqual(ran.call_count, 2)
 
     def test_a_plan_past_the_matrix_names_its_packing(self):
         code, out, err = self.plan({"enforcer/nft": ({"broker/enforcer/nft/a.go": set(range(1, 1767))}, [{}] * 1019)},
