@@ -103,6 +103,11 @@ func passkeyText(err error) string {
 	return "I couldn't reach the part of me that keeps your passkeys. Try again in a minute."
 }
 
+// passkeyjs is registered once, as a package variable: Go sets those
+// before any file's init, so every page that runs the tap (backups, forget,
+// passkeys) parses with it.
+var _ = tmpl.Funcs(template.FuncMap{"passkeyjs": func() template.JS { return template.JS(passkeyJS) }})
+
 // passkeyJS is the passkey page's one script, pinned by its hash in the
 // page's CSP (L6). It runs the two WebAuthn ceremonies and nothing else:
 // create() for the phone's new ES256 passkey, whose public point it puts
@@ -354,7 +359,7 @@ func algName(alg string) string {
 }
 
 func init() {
-	tmpl.Funcs(template.FuncMap{"passkeyjs": func() template.JS { return template.JS(passkeyJS) }, "algname": algName,
+	tmpl.Funcs(template.FuncMap{"algname": algName,
 		"anchorreply": func() string { return AnchorReply }})
 	template.Must(tmpl.Parse(`{{define "passkeys"}}{{template "head" ""}}
 <h1>Passkeys</h1>

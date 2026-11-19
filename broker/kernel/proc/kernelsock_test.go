@@ -363,6 +363,11 @@ func TestAWrappedErrorCrossesAsWhatItWraps(t *testing.T) {
 		{kernel.ErrNotParked, kernel.ErrNotParked},
 		{kernel.ErrNotText, kernel.ErrNotText}, // as the log returns it
 		{fmt.Errorf("append: %w", kernel.ErrNotText), kernel.ErrNotText},
+		{kernel.ErrForgetName, kernel.ErrForgetName}, // the Forget sentinels the owner side (#5125) tells apart
+		{kernel.ErrForgetReply, kernel.ErrForgetReply},
+		{kernel.ErrForgetStop, kernel.ErrForgetStop},
+		{kernel.ErrForgetClock, kernel.ErrForgetClock},
+		{fmt.Errorf("askforget: %w", kernel.ErrForgetClock), kernel.ErrForgetClock},
 		{errors.New("kernel: something else"), nil},
 	} {
 		sock := filepath.Join(shortDir(t), "w.sock")
