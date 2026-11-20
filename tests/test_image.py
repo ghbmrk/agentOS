@@ -5701,6 +5701,8 @@ class ExecAllowTest(unittest.TestCase):
                                       r"(etc|usr/share)/polkit-1/rules\.d/[^/]+|usr/share/polkit-1/actions/[^/]+|"
                                       r"etc/dbus-1/.+|usr/share/dbus-1/(system\.d/[^/]+|system-services/[^/]+|"
                                       r"system\.conf)|"
+                                      # #4641 R-b: the PAM stacks.
+                                      r"(etc|usr/lib)/pam\.d/[^/]+|etc/pam\.conf|"
                                       # #5818: every file systemd merges into the bus daemon's units.
                                       r"(etc|usr/local/lib|usr/lib)/systemd/system/(dbus\.(service|socket)|"
                                       r"(dbus\.(service|socket)|service|socket)\.d/[^/]+\.conf))$")
@@ -5840,7 +5842,9 @@ class ExecAllowTest(unittest.TestCase):
               "usr/local/share/dbus-1/system-services/x.service", "lib/dbus-1/system-services/y.service",
               # Names a reader's own filter might skip are hashed all the same.
               "usr/share/polkit-1/rules.d/.x.rules", "usr/share/polkit-1/rules.d/x.rules~",
-              "etc/dbus-1/system.d/x.txt", "etc/dbus-1/system.d/sub/x.conf")
+              "etc/dbus-1/system.d/x.txt", "etc/dbus-1/system.d/sub/x.conf",
+              # #4641 R-b: the PAM stacks, whose modules run as root.
+              "etc/pam.d/login", "usr/lib/pam.d/su", "etc/pam.conf", "etc/pam.d/.x")
     YES = 'polkit.addRule(function(action, subject) { return polkit.Result.YES; });\n'
 
     def test_policy_files_are_held_by_hash(self):
@@ -8098,8 +8102,12 @@ class MkosiRunBoundTest(unittest.TestCase):
         (d / "bin").mkdir()
         (d / "bin/sudo").write_text('#!/bin/sh\nexec "$@"\n')
         (d / "bin/sudo").chmod(0o755)
+        # The step's git log lines would read the git store, a record (records_audit, CI-PATHS): a stub
+        # answers them, and the step runs outside the checkout (it reads only RUNNER_TEMP).
+        (d / "bin/git").write_text("#!/bin/sh\necho 0\n")
+        (d / "bin/git").chmod(0o755)
         env = dict(os.environ, RUNNER_TEMP=str(d), GITHUB_ENV=str(d / "env"), PATH="%s:%s" % (d / "bin", os.environ["PATH"]))
-        r = subprocess.run(["bash", "-e", "-c", script], cwd=ROOT, env=env, capture_output=True, text=True)
+        r = subprocess.run(["bash", "-e", "-c", script], cwd=d, env=env, capture_output=True, text=True)
         return r.returncode, r.stdout + r.stderr, d / "out"
 
     GOOD_STAGE = {"stage/usr/lib/agentos/x": b"x", "agentos.sources": b"Types: deb\n", "guest/agentos-guest.manifest": b"",

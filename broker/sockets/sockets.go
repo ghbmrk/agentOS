@@ -270,7 +270,7 @@ func (s *Server) accept(ctx context.Context, ln net.Listener, ep Endpoint) {
 		}
 		backoff = 0
 		if ep.PeerUID != nil {
-			if uid, ok := peerUID(c); !ok || uid != *ep.PeerUID {
+			if uid, ok := PeerUID(c); !ok || uid != *ep.PeerUID {
 				ep.refused(Response{Error: string(ErrPeer)})
 				refuse(c, ErrPeer)
 				continue

@@ -165,7 +165,7 @@ func TestUnusualTimeNeedsSecondAssertion(t *testing.T) {
 		t    time.Time
 		want bool
 	}{{at(6, 59), true}, {at(7, 0), false}, {at(21, 59), false}, {at(22, 0), true}, {at(0, 0), true}} {
-		if got := locks.Unusual(c.t, zone); got != c.want {
+		if got := locks.Unusual(c.t, zone, policy.DefaultHours); got != c.want {
 			t.Errorf("Unusual(%s) = %v, want %v", c.t.Format("15:04"), got, c.want)
 		}
 	}
@@ -174,6 +174,63 @@ func TestUnusualTimeNeedsSecondAssertion(t *testing.T) {
 	if err := r.tap("front", action.Unlock); err != nil {
 		t.Errorf("one tap at 10:00: %v", err)
 	}
+	// A lock the last tick's policy did not hold (added since) is held to
+	// a second assertion at any hour until the next tick reads its hours.
+	r.doc.Devices = append(r.doc.Devices, policy.Device{ID: "side", Network: policy.NetDevices, Class: policy.ClassLock, Secure: "lock"})
+	if err := r.tap("side", action.Unlock); !errors.Is(err, locks.ErrSecond) {
+		t.Errorf("one tap at 10:00 on a lock no tick has read: %v, want ErrSecond", err)
+	}
+
+	// NET-6: the owner-set hours (briefs/ENF-q-owner.md). With the front
+	// door's hours 06:00 to 24:00, an unlock at 23:30 needs one tap and is
+	// not texted, while the back door keeps the defaults; and the alarm's
+	// window wrapping midnight, 22:00 to 06:00, is usual on both sides of
+	// midnight and unusual outside it.
+	r = newRig(t, at(23, 30))
+	device(&r.doc, "front").UsualHours = &policy.Hours{From: 6, To: 24}
+	device(&r.doc, "alarm").UsualHours = &policy.Hours{From: 22, To: 6}
+	r.tick()
+	if !r.gate.Unusual(*device(&r.doc, "back")) || r.gate.Unusual(*device(&r.doc, "front")) {
+		t.Error("Gate.Unusual at 23:30 does not read the device's hours")
+	}
+	if err := r.tap("front", action.Unlock); err != nil {
+		t.Errorf("one tap at 23:30 inside the owner's hours: %v", err)
+	}
+	if r.alerts.has(alert.UnusualUnlock) {
+		t.Error("an unlock inside the owner's hours was texted")
+	}
+	if err := r.tap("back", action.Unlock); !errors.Is(err, locks.ErrSecond) {
+		t.Errorf("one tap at 23:30 on the back door, default hours: %v, want ErrSecond", err)
+	}
+	// What the enforcer only sees is read against the device's hours too.
+	r.gate.Seen(locks.Event{Device: "back", Report: locks.Unlocked})
+	r.tick()
+	if !r.alerts.has(alert.UnusualUnlock) {
+		t.Error("a seen unlock at 23:30 on the back door, default hours, was not texted")
+	}
+	for _, c := range []struct {
+		t       time.Time
+		unusual bool
+	}{{at(23, 30), false}, {at(0, 30), false}, {at(5, 59), false}, {at(6, 0), true}, {at(21, 59), true}, {at(22, 0), false}} {
+		r.clock.set(c.t)
+		err := r.tap("alarm", action.Disarm)
+		if got := errors.Is(err, locks.ErrSecond); got != c.unusual || (!c.unusual && err != nil) {
+			t.Errorf("one tap to disarm at %s with hours 22:00 to 06:00: %v, want unusual %v", c.t.Format("15:04"), err, c.unusual)
+		}
+		if got := locks.Unusual(c.t, zone, policy.Hours{From: 22, To: 6}); got != c.unusual {
+			t.Errorf("Unusual(%s, 22 to 06) = %v, want %v", c.t.Format("15:04"), got, c.unusual)
+		}
+	}
+}
+
+// device is the device id in d, for a test to change.
+func device(d *policy.Document, id string) *policy.Device {
+	for i := range d.Devices {
+		if d.Devices[i].ID == id {
+			return &d.Devices[i]
+		}
+	}
+	panic(id)
 }
 
 // A18 Locks: a text reply does not stand in for the second assertion.
@@ -465,6 +522,46 @@ func TestRelocksAfterInterval(t *testing.T) {
 	r2.tick()
 	if got := r2.radio.did(); count(got, "lock front") != 1 {
 		t.Errorf("an unanswered unlock was not relocked: %v", got)
+	}
+
+	// NET-6: the owner-set interval (briefs/ENF-q-owner.md). The front
+	// door set to 10 s relocks at 10 s, after a tap or an unlock it only
+	// sees; the back door, left at zero, relocks at the 60 s default.
+	r3 := newRig(t, at(10, 0))
+	device(&r3.doc, "front").RelockSeconds = 10
+	r3.tick()
+	for _, d := range []string{"front", "back"} {
+		if err := r3.tap(d, action.Unlock); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r3.clock.add(10*time.Second - time.Millisecond)
+	r3.tick()
+	if !r3.radio.unlocked("front") {
+		t.Fatal("the 10 s lock relocked early")
+	}
+	r3.clock.add(time.Millisecond)
+	r3.tick()
+	if r3.radio.unlocked("front") || !r3.radio.unlocked("back") {
+		t.Fatalf("at 10 s: front unlocked %v, back unlocked %v; want front relocked only", r3.radio.unlocked("front"), r3.radio.unlocked("back"))
+	}
+	r3.radio.locks["front"].unlocked = true
+	r3.gate.Seen(locks.Event{Device: "front", Report: locks.Unlocked})
+	r3.tick()
+	r3.clock.add(10 * time.Second)
+	r3.tick()
+	if r3.radio.unlocked("front") {
+		t.Error("an unlock the enforcer only saw was not relocked after 10 s")
+	}
+	r3.clock.set(at(10, 0).Add(policy.DefaultRelock - time.Millisecond))
+	r3.tick()
+	if !r3.radio.unlocked("back") {
+		t.Fatal("the default lock relocked early")
+	}
+	r3.clock.add(time.Millisecond)
+	r3.tick()
+	if r3.radio.unlocked("back") {
+		t.Error("the default lock was not relocked at 60 s")
 	}
 }
 

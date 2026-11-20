@@ -25,10 +25,63 @@ NO_DEFAULT_DEPS = {
     "agentos-inbound.service": "loads the inbound nftables ruleset; holds no secret",
     "agentos-mor.service": "this unit",
 }
+# Units that drop the default dependencies only to leave out their Requires=sysinit.target, which an
+# emergency isolate stops through sysinit.target's Conflicts=emergency.target (MOR-pageca-emergency, #6178):
+# each states the rest of them, and its stop is ordered before this unit's clear (STATED_DEPS).
+STATED = {
+    "agentos-keeper-pageca.service": "the page authority a printed Owner Card names",
+    "agentos-keeper-wipe.service": "its stop empties /run/agentos-setup, the staged authority's pair included",
+}
+STOP_LINKS = ("BindsTo", "PartOf", "Requires", "Requisite", "StopPropagatedFrom", "StopWhenUnneeded",
+              "RequiresMountsFor")
 
 
 def words(s, key):
     return " ".join(s.get(key, [])).split()
+
+
+def stated_deps(s):
+    """Whether settings S keep the default dependencies (After=sysinit.target, so the stop comes before
+    the clear's), or drop them and state each but Requires=sysinit.target: After=sysinit.target and
+    basic.target, Conflicts= and Before=shutdown.target, and After= this unit, so the stop is before the
+    clear's in a shutdown transaction directly."""
+    if "DefaultDependencies" not in s:
+        return True
+    return (s["DefaultDependencies"] == ["no"] and words(s, "Conflicts") == ["shutdown.target"]
+            and {"sysinit.target", "basic.target", UNIT.name} <= set(words(s, "After"))
+            and "shutdown.target" in words(s, "Before") and UNIT.name not in words(s, "Before"))
+
+
+def applied_dropins(units, name):
+    """The drop-ins systemd applies to service NAME from UNITS: NAME.d's, then each "-" prefix's, then
+    service.d's, a file named as one already taken being replaced by it (the more specific directory)."""
+    stem = name.rsplit(".", 1)[0]
+    dirs = [name + ".d"] + ["%s-.service.d" % stem[:i] for i in range(len(stem) - 1, 0, -1)
+                             if stem[i] == "-"] + ["service.d"]
+    seen, out = set(), []
+    for d in dirs:
+        for f in sorted((units / d).glob("*.conf")):
+            if f.name not in seen:
+                seen.add(f.name)
+                out.append(f)
+    return out
+
+
+def isolate_pin(units):
+    """Why agentos-mor.service, read from UNITS with every drop-in applied to it, could be stopped by an
+    isolate or with another unit (MOR-emergency-isolate, #5947; L3 and Security on #6159): IgnoreOnIsolate=
+    not set once to yes, a STOP_LINKS key, or any drop-in that has a [Unit] section."""
+    unit, dropins = units / UNIT.name, applied_dropins(units, UNIT.name)
+    out = []
+    every = {}
+    for f in [unit] + dropins:
+        for k, v in settings(f).items():
+            every.setdefault(k, []).extend(v)
+    if every.get("IgnoreOnIsolate") != ["yes"]:
+        out.append("IgnoreOnIsolate=%s" % every.get("IgnoreOnIsolate"))
+    out += ["%s=%s" % (k, every[k]) for k in STOP_LINKS if k in every]
+    out += ["[Unit] in %s" % f.name for f in dropins if re.search(r"^\s*\[Unit\]", f.read_text(), re.M)]
+    return out
 
 
 # Where systemd puts a system unit's directory settings, and the specifiers that name those bases.
@@ -117,7 +170,8 @@ def hold_writers(units):
 
 def unordered_writers(units):
     """The writers whose stop is not ordered before the wipe's: each must be in the wipe's Before= or
-    name it in After=, and keep default dependencies so it also stops before the clear. A .path unit
+    name it in After=, and keep default dependencies or state them (stated_deps), so it also stops
+    before the clear. A .path unit
     writes nothing; it starts enrollment, which is a writer of its own."""
     before = set(words(settings(units / WIPE), "Before"))
     bad = set()
@@ -125,7 +179,7 @@ def unordered_writers(units):
         if w.endswith(".path"):
             continue
         s = settings(units / w)
-        if not (w in before or WIPE in words(s, "After")) or "DefaultDependencies" in s:
+        if not (w in before or WIPE in words(s, "After")) or not stated_deps(s):
             bad.add(w)
     return bad
 
@@ -205,7 +259,8 @@ class MorUnitTest(unittest.TestCase):
 
     def test_every_other_unit_stops_first(self):
         # A unit with DefaultDependencies=no is not ordered after sysinit.target, so it could still
-        # run when MOR is cleared. Each one is listed with why it holds no secret.
+        # run when MOR is cleared. Each one is listed with why it holds no secret, or states the default
+        # dependencies but Requires=sysinit.target and is ordered after this unit (STATED, #6178).
         found = {u.name for u in UNITS.iterdir()
                  if u.is_file() and u.suffix in (".service", ".socket", ".mount", ".path", ".timer")
                  and (settings(u).get("DefaultDependencies") or ["yes"])[-1].lower() in ("no", "false", "0", "off")}
@@ -213,21 +268,36 @@ class MorUnitTest(unittest.TestCase):
             for f in d.glob("*.conf"):
                 if "DefaultDependencies" in settings(f):
                     found.add(d.name[:-2])
-        self.assertEqual(found, set(NO_DEFAULT_DEPS))
+        self.assertEqual(found, set(NO_DEFAULT_DEPS) | set(STATED))
+        for name in STATED:
+            s = settings(UNITS / name)
+            self.assertTrue(stated_deps(s), name)
+            self.assertEqual(sorted(UNITS.glob(name + ".d/*")), [])
+        # Each part of the stated order is needed: drop one and the unit no longer stops before the clear.
+        s = settings(UNITS / "agentos-keeper-pageca.service")
+        for key, word in (("After", "sysinit.target"), ("After", "basic.target"), ("After", UNIT.name),
+                          ("Conflicts", "shutdown.target"), ("Before", "shutdown.target")):
+            with self.subTest(key=key, word=word):
+                cut = dict(s, **{key: [" ".join(w for w in words(s, key) if w != word)]})
+                self.assertFalse(stated_deps(cut))
+        self.assertFalse(stated_deps(dict(s, Before=s["Before"] + [UNIT.name])))
+        self.assertFalse(stated_deps(dict(s, Conflicts=["shutdown.target emergency.target"])))
 
     def test_the_staged_page_authority_goes_at_stop(self):
         # MOR-setup-hold (#5836): before enrollment the page authority's sealed pair sits in
         # /run/agentos-setup, a holdDirs entry, so the clear refused on every orderly shutdown. The
         # staging unit's stop removes exactly the pair and certificate its start made; it keeps default
         # dependencies (test_every_other_unit_stops_first), so it stops before this unit's clear. A
-        # manual stop is refused, so a card printed this boot keeps its fingerprint until shutdown.
+        # manual stop is refused, so a card printed this boot keeps its fingerprint until shutdown. Its
+        # stated dependencies order that stop before the clear (#6178).
         unit = UNITS / "agentos-keeper-pageca.service"
         p, s = exec_args(unit), settings(unit)
         made = [p[p.index("-page-ca-file") + 1], p[p.index("-page-ca-cert") + 1]]
         self.assertEqual(s["ExecStopPost"], ["/usr/bin/rm -f " + " ".join(made)])
         self.assertEqual(made[0].rsplit("/", 1)[0], check.MOR_LISTED[0])
         self.assertEqual(s["RefuseManualStop"], ["yes"])
-        self.assertNotIn("DefaultDependencies", s)
+        self.assertEqual(s["DefaultDependencies"], ["no"])
+        self.assertTrue(stated_deps(s))
         for key in ("ExecStop", "ExecStopPre"):
             self.assertNotIn(key, s)
 
@@ -235,8 +305,8 @@ class MorUnitTest(unittest.TestCase):
         # MOR-setup-factors (#5843): the card's factors, and the first edge's capture, sit in holdDirs
         # entries from the confirm until a successful enrollment, and on a failure for a retry, with no
         # stop of their own, so an orderly shutdown then left MOR set. The wipe's stop empties every
-        # holdDirs entry on /run. It keeps default dependencies, so it stops before this unit's clear
-        # (test_every_other_unit_stops_first); it is ordered before every unit whose commands name a
+        # holdDirs entry on /run. Its stated dependencies order it before this unit's clear
+        # (test_every_other_unit_stops_first, #6178); it is ordered before every unit whose commands name a
         # holdDirs path, so it stops after each; nothing but shutdown stops it. /dev/shm: no unit names it.
         name = "agentos-keeper-wipe.service"
         wipe = UNITS / name
@@ -252,13 +322,14 @@ class MorUnitTest(unittest.TestCase):
         self.assertEqual(len(s["ExecStopPost"]), 1)
         self.assertTrue(s["ExecStopPost"][0].startswith("/usr/bin/sh -c "), s["ExecStopPost"])
         self.assertIn("MOR-wipe-journal", wipe.read_text())
-        for key in ("DefaultDependencies", "ExecStart", "Conflicts", "BindsTo", "PartOf",
-                    "Requires", "Requisite", "StopPropagatedFrom", "After"):
+        self.assertTrue(stated_deps(s))
+        self.assertEqual(set(words(s, "After")), {"sysinit.target", "basic.target", UNIT.name})
+        for key in ("ExecStart",) + STOP_LINKS:
             self.assertNotIn(key, s)
         self.assertFalse([k for k in s if k.startswith(("Condition", "Assert"))])
         self.assertEqual(sorted(UNITS.glob(name + ".d/*")), [])
         before, wanted = set(words(s, "Before")), set(ini(wipe)["Install"]["WantedBy"].split())
-        self.assertEqual(wanted, before | {"multi-user.target"})
+        self.assertEqual(wanted, before - {"shutdown.target"} | {"multi-user.target"})
         preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text()
         self.assertIn("\nenable %s\n" % name, preset)
         files = [u for u in UNITS.iterdir() if u.is_file()] + list(UNITS.glob("*.d/*.conf"))
@@ -372,26 +443,153 @@ class MorUnitTest(unittest.TestCase):
         # MOR-setup-isolate (#5858, HW-1, CH-9): RefuseManualStop= does not cover an isolate, so
         # "systemctl isolate rescue.target" stopped the staging unit, its stop removed the pair, and
         # the next confirm staged a new authority under a card already printed. An isolate now leaves
-        # the unit active. Shutdown still stops it through Conflicts=shutdown.target (default
-        # dependencies kept), so the pair goes before the clear. No other unit may stop it through a
-        # dependency: the staging names none that would, and no image unit names it in one that would.
-        name = "agentos-keeper-pageca.service"
-        unit = UNITS / name
-        self.assertEqual(ini(unit)["Unit"]["IgnoreOnIsolate"], "yes")
-        s = settings(unit)
-        self.assertNotIn("DefaultDependencies", s)
-        for key in ("Conflicts", "BindsTo", "PartOf", "Requires", "Requisite", "StopPropagatedFrom"):
-            self.assertNotIn(key, s)
-        self.assertEqual(sorted(UNITS.glob(name + ".d/*")), [])
+        # the unit active. MOR-pageca-emergency (#6178): default dependencies add Requires=sysinit.target,
+        # which conflicts with emergency.target, so an emergency isolate still stopped it; the staging and
+        # the wipe (whose stop empties the pair's directory) drop them and state the rest (stated_deps), so
+        # shutdown alone stops them, before the clear. No other unit may stop either through a dependency:
+        # neither names one that would, and no image unit names either in one that would.
+        for name in STATED:
+            unit = UNITS / name
+            self.assertEqual(ini(unit)["Unit"]["IgnoreOnIsolate"], "yes")
+            s = settings(unit)
+            self.assertEqual((s["IgnoreOnIsolate"], s["DefaultDependencies"]), (["yes"], ["no"]))
+            self.assertTrue(stated_deps(s))
+            for key in STOP_LINKS:
+                self.assertNotIn(key, s)
+            self.assertEqual(sorted(UNITS.glob(name + ".d/*")), [])
+            for f in [u for u in UNITS.iterdir() if u.is_file()] + list(UNITS.glob("*.d/*.conf")):
+                for key in ("Conflicts", "PropagatesStopTo"):
+                    with self.subTest(f.name, name=name, key=key):
+                        self.assertNotIn(name, words(settings(f), key))
+
+    def test_an_isolate_leaves_the_clear_alone(self):
+        # MOR-emergency-isolate (#5947): this unit is WantedBy=sysinit.target, which emergency.target does
+        # not pull in, so "systemctl isolate emergency.target" stopped it: its stop cleared MOR (or held on
+        # the staged pair), and "systemctl default" then restarted the secret holders with MOR clear, as
+        # its start only reads MOR. An isolate now leaves it active, so only the shutdown transaction stops
+        # it (Conflicts=shutdown.target). No other stop path: it needs no unit (test_no_ordering_cycle_with
+        # _tmp_mount), nothing stops it when unneeded, and no image unit names it in a stop dependency.
+        # tests/test_hostcheck.py's test_an_isolate_keeps_mor_set boots the image through both isolates.
+        # Its drop-ins are read with it, and none may have a [Unit] section (L3 and Security on #6159): each
+        # stop key, or a second IgnoreOnIsolate=, in a drop-in fails the pin.
+        self.assertEqual(ini(UNIT)["Unit"]["IgnoreOnIsolate"], "yes")
+        self.assertEqual(isolate_pin(UNITS), [])
+        self.assertEqual([f.name for f in applied_dropins(UNITS, UNIT.name)], ["50-main-side.conf"])
+        cases = {key: "[Unit]\n%s=%s\n" % (key, "yes" if key == "StopWhenUnneeded" else "/run" if key ==
+                                            "RequiresMountsFor" else "x.service") for key in STOP_LINKS}
+        cases.update({"IgnoreOnIsolate=no": "[Unit]\nIgnoreOnIsolate=no\n",
+                      "IgnoreOnIsolate=yes twice": "[Unit]\nIgnoreOnIsolate=yes\n",
+                      "a [Unit] section": "[Unit]\nDescription=x\n"})
+        for case, text in cases.items():
+            for d in ("agentos-mor.service.d", "agentos-.service.d", "service.d"):
+                with self.subTest(case, d=d), tempfile.TemporaryDirectory() as tmp:
+                    units = pathlib.Path(tmp) / "system"
+                    shutil.copytree(UNITS, units, symlinks=True)
+                    write(units, d + "/60-x.conf", text)
+                    self.assertNotEqual(isolate_pin(units), [])
         for f in [u for u in UNITS.iterdir() if u.is_file()] + list(UNITS.glob("*.d/*.conf")):
             for key in ("Conflicts", "PropagatesStopTo"):
                 with self.subTest(f.name, key=key):
-                    self.assertNotIn(name, words(settings(f), key))
+                    self.assertNotIn(UNIT.name, words(settings(f), key))
 
     def test_build_installs_the_program(self):
         build = (ROOT / "image/build.sh").read_text()
         loop = re.search(r"for cmd in ([^;]+); do", build, re.S).group(1).split()
         self.assertIn("agentos-mor", loop)
+
+
+class IsolateKeptTest(unittest.TestCase):
+    """MOR-pageca-emergency (#6178; Security on #6159): mkosi.finalize's isolate_violations reads the built
+    tree, so a later layer's unit or drop-in that lets an isolate stop the MOR clear, the page authority's
+    staging or the wipe fails the build, which the source-tree tests above cannot see."""
+    # REQ: HW-8
+    SYSTEM = "usr/lib/systemd/system/"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        shutil.copytree(UNITS, self.root / self.SYSTEM, symlinks=True)
+
+    def v(self):
+        return check.isolate_violations(self.root)
+
+    def test_the_image_passes(self):
+        self.assertEqual(check.ISOLATE_KEPT, (UNIT.name,) + tuple(STATED))
+        self.assertEqual(set(check.STOP_LINKS), set(STOP_LINKS))
+        self.assertEqual(self.v(), [])
+
+    def test_a_drop_in_that_lets_an_isolate_stop_one_is_refused(self):
+        once = "%s: IgnoreOnIsolate= is %s; must be set once, to exactly yes, so an isolate leaves it running (#6178)"
+        for name in check.ISOLATE_KEPT:
+            unit = self.SYSTEM + name
+            for value in ("no", "true", "1", "yes", ""):
+                for d in ("etc/systemd/system/%s.d" % name, "usr/local/lib/systemd/system/agentos-.service.d"):
+                    with self.subTest(name, value=value, d=d):
+                        f = write(self.root, d + "/zz.conf", "[Unit]\nIgnoreOnIsolate=%s\n" % value)
+                        got = self.v()
+                        f.unlink()
+                        self.assertIn(once % (name, "'yes' in %s, %r in %s" % (unit, value, d + "/zz.conf")), got)
+                        # agentos-.service.d applies to all three.
+                        self.assertEqual(len(got), 1 if d.startswith("etc") else len(check.ISOLATE_KEPT), got)
+            with self.subTest(name, case="dropped"):
+                saved = (self.root / unit).read_text()
+                write(self.root, unit, saved.replace("IgnoreOnIsolate=yes\n", ""))
+                self.assertEqual(self.v(), [once % (name, "unset")])
+                write(self.root, unit, saved)
+            with self.subTest(name, case="default dependencies"):
+                f = write(self.root, "etc/systemd/system/%s.d/zz.conf" % name, "[Unit]\nDefaultDependencies=yes\n")
+                got = self.v()
+                f.unlink()
+                self.assertEqual(got, ["%s: DefaultDependencies= is 'no' in %s, 'yes' in %s; must be set once, to "
+                                            "exactly no, so an isolate leaves it running (#6178)"
+                                            % (name, unit, f.relative_to(self.root))])
+            for key in check.STOP_LINKS:
+                with self.subTest(name, key=key):
+                    rel = "etc/systemd/system/%s.d/zz.conf" % name
+                    f = write(self.root, rel, "[Unit]\n%s=sysinit.target\n" % key)
+                    got = self.v()
+                    f.unlink()
+                    self.assertEqual(got, ["%s: %s=sysinit.target in %s; another unit's stop would stop it, "
+                                                "whatever IgnoreOnIsolate= says (#6178)" % (name, key, rel)])
+            with self.subTest(name, case="conflict"):
+                f = write(self.root, "etc/systemd/system/%s.d/zz.conf" % name, "[Unit]\nConflicts=emergency.target\n")
+                got = self.v()
+                f.unlink()
+                self.assertEqual(len(got), 1, got)
+                self.assertIn("must conflict with shutdown.target alone", got[0])
+        self.assertEqual(self.v(), [])
+
+    def test_each_holder_stops_before_the_clear(self):
+        for name in STATED:
+            for text in ("[Unit]\nBefore=agentos-mor.service\n", None):
+                with self.subTest(name, text=text):
+                    unit, zz = self.root / self.SYSTEM / name, self.root / ("etc/systemd/system/%s.d/zz.conf" % name)
+                    saved = unit.read_text()
+                    if text is None:
+                        self.assertIn(" agentos-mor.service\n", saved)
+                        unit.write_text(saved.replace(" agentos-mor.service\n", "\n", 1))
+                    else:
+                        write(self.root, str(zz.relative_to(self.root)), text)
+                    got = self.v()
+                    unit.write_text(saved)
+                    zz.unlink(missing_ok=True)
+                    self.assertEqual(len(got), 1, got)
+                    self.assertTrue(got[0].startswith(name + ": After="), got)
+                    self.assertIn("so shutdown stops it before the MOR clear (#6178)", got[0])
+
+    def test_a_mask_passes_and_an_alias_is_refused(self):
+        # A masked or missing unit never runs: MOR stays set, or no card is staged.
+        for name in check.ISOLATE_KEPT:
+            m = self.root / "etc/systemd/system" / name
+            m.parent.mkdir(parents=True, exist_ok=True)
+            m.symlink_to("/dev/null")
+            self.assertEqual(self.v(), [], name)
+            m.unlink()
+        alias = self.root / self.SYSTEM / "foo.service"
+        alias.symlink_to("agentos-keeper-pageca.service")
+        self.assertEqual(self.v(), ["%sfoo.service: an alias of agentos-keeper-pageca.service; the tree check does not "
+                                    "model unit aliases" % self.SYSTEM])
 
 
 class WipeOnTest(unittest.TestCase):
@@ -588,6 +786,60 @@ class WipeJournalTest(unittest.TestCase):
                 self.assertIn(dropin + ": a drop-in for systemd-journal-flush.service; the tree check "
                               "does not model a change to it (remove it)", self.journald())
                 (self.root / dropin).unlink()
+
+
+class ExactFormsTest(unittest.TestCase):
+    """MOR-wipe-journal-fu2 (#6158): two tree checks the L3 reviews of #6130 found read a value in a form
+    systemd may not read as written, or held one by no test."""
+    # REQ: HW-8
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        self.n = 0
+
+    def files(self, *texts):
+        out = []
+        for t in texts:
+            self.n += 1
+            write(self.root, "u/%d.conf" % self.n, t)
+            out.append(check.Conf(str(self.root), "u/%d.conf" % self.n))
+        return out
+
+    def test_a_path_unit_skips_a_first_unit_systemd_ignores(self):
+        # config_parse_trigger_unit (257): a value with no unit type is ignored, so the next one is the unit the
+        # path starts. Both ways: a keeper unit after it passes, any other unit after it is refused.
+        path, enroll = "agentos-keeper-enroll.path", "agentos-keeper-enroll.service"
+        watch = "PathExists=/run/agentos-setup/x\n"
+        for first in ("", "agentos-x", "agentos-keeper-enroll"):
+            with self.subTest(first=first):
+                got = check.keeper_path_violations(path, self.files(
+                    "[Path]\nUnit=%s\n%s" % (first, watch), "[Path]\nUnit=%s\n" % enroll))
+                self.assertEqual(got, [])
+                got = check.keeper_path_violations(path, self.files(
+                    "[Path]\nUnit=%s\n%s" % (first, watch), "[Path]\nUnit=agentos-x.service\n"))
+                self.assertEqual(got, [path + ": starts agentos-x.service, not one of the keeper's units (D-154)"])
+
+    def test_default_dependencies_take_only_their_exact_forms(self):
+        # config_parse_bool ignores a value it cannot parse and keeps the one before it, so "no" then "x" is no.
+        for texts, early in ((("[Unit]\nDefaultDependencies=no\n",), True),
+                             (("[Unit]\nDefaultDependencies=yes\n", "[Unit]\nDefaultDependencies=no\n"), True),
+                             (("[Unit]\nDefaultDependencies=no\n", "[Unit]\nDefaultDependencies=yes\n"), False),
+                             (("[Unit]\nDescription=x\n",), False),
+                             (("[Unit]\nDefaultDependencies=no\nAfter=basic.target\n",), False)):
+            with self.subTest(texts=texts):
+                self.assertIs(check.starts_early(self.files(*texts)), early)
+        for later in ("x", "", "false", "No", "0"):
+            with self.subTest(later=later):
+                files = self.files("[Unit]\nDefaultDependencies=no\n", "[Unit]\nDefaultDependencies=%s\n" % later)
+                with self.assertRaisesRegex(ValueError, r"^DefaultDependencies=%s in u/%d\.conf is a form the tree "
+                                            r"check does not read \(use yes or no\)$" % (re.escape(later), self.n)):
+                    check.starts_early(files)
+                # The service check names the line, read through the tree check's refusal of what it cannot read.
+                with self.assertRaises(ValueError):
+                    check.bus_unit_violations("agentos-x.service", files + self.files(
+                        "[Service]\nInaccessiblePaths=-/run/dbus\n"))
 
 
 if __name__ == "__main__":

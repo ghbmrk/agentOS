@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"math/rand/v2"
+	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -347,5 +349,52 @@ func TestAGrantPricesItsGraphReach(t *testing.T) {
 	}
 	if err := r.k.Issue(live, nil, draft("d1")); err != nil {
 		t.Fatalf("a draft key reaches nothing, so the edge does not price it: %v", err)
+	}
+}
+
+// KEY-9-reach-writer: the entry point logs a declaration unsigned, with no
+// co-sign or anchor, and refuses whole, logging nothing, one that would
+// take a node or edge out of a clerk's reach or that the fold would drop.
+func TestDeclReachAppendCannotWiden(t *testing.T) {
+	r := newRig(t)
+	base := kernel.DeclReach{
+		Nodes: []kernel.ReachNode{{ID: "mbox", Clerk: "mail", Classes: []key.Asset{key.AssetData}}, {ID: "bank", Classes: []key.Asset{key.AssetIdentity}}},
+		Edges: []kernel.ReachEdge{{Kind: "reset", From: []string{"mbox"}, To: "bank"}, {Kind: "act", From: []string{"mbox"}, To: "shop"}},
+	}
+	n := r.k.Log().Len()
+	must(t, r.k.DeclareReach(0, base))
+	if got := r.k.Log().Len(); got != n+1 {
+		t.Fatalf("a declaration logged %d entries, want 1", got-n)
+	}
+	if es := r.k.Log().Entries(); es[len(es)-1].Type != kernel.TDeclReach || kernel.Widening(kernel.TDeclReach) {
+		t.Fatalf("logged %s, a widening: %v", es[len(es)-1].Type, kernel.Widening(kernel.TDeclReach))
+	}
+	bad := map[string]kernel.DeclReach{
+		// Moving mail's clerk to an empty node drops the bank and the shop.
+		"clerk moved":  {Nodes: []kernel.ReachNode{{ID: "empty", Clerk: "mail"}}},
+		"node rebound": {Nodes: []kernel.ReachNode{{ID: "mbox", Clerk: "cal"}}},
+		// The shop, named by an edge, prices as every class until declared.
+		"unknown node narrowed": {Nodes: []kernel.ReachNode{{ID: "shop", Classes: []key.Asset{key.AssetData}}}},
+		"unknown edge":          {Edges: []kernel.ReachEdge{{Kind: "cutoff", From: []string{"mbox"}, To: "bank"}}},
+		"class past the table":  {Nodes: []kernel.ReachNode{{ID: "x", Classes: []key.Asset{key.AssetSafety + 1}}}},
+		"repeated node":         {Nodes: []kernel.ReachNode{{ID: "x"}, {ID: "x"}}},
+	}
+	before := kernel.Reached(r.k.State(), "mbox")
+	for name, d := range bad {
+		d.Nodes = append([]kernel.ReachNode{{ID: "extra", Classes: []key.Asset{key.AssetMoney}}}, d.Nodes...)
+		d.Edges = append(d.Edges, kernel.ReachEdge{Kind: "copy", From: []string{"mbox"}, To: "extra"})
+		n := r.k.Log().Len()
+		if err := r.k.DeclareReach(0, d); !errors.Is(err, kernel.ErrDeclReach) {
+			t.Fatalf("%s: %v, want %v", name, err, kernel.ErrDeclReach)
+		}
+		if r.k.Log().Len() != n || kernel.Reached(r.k.State(), "extra") != nil || !slices.Equal(kernel.Reached(r.k.State(), "mbox"), before) {
+			t.Fatalf("%s: a refused declaration changed the log or the reach", name)
+		}
+	}
+	// What the log declared reads back for a writer to diff against.
+	got := r.k.State().DeclReach()
+	slices.SortFunc(got.Nodes, func(a, b kernel.ReachNode) int { return strings.Compare(a.ID, b.ID) })
+	if want := []kernel.ReachNode{base.Nodes[1], base.Nodes[0]}; !reflect.DeepEqual(got.Nodes, want) || !reflect.DeepEqual(got.Edges, base.Edges) {
+		t.Fatalf("declared %+v, want %+v", got, base)
 	}
 }

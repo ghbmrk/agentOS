@@ -117,17 +117,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
-      timestamp: ${{ steps.resolve.outputs.timestamp }}
+      snapshots: ${{ steps.resolve.outputs.snapshots }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
       - name: Resolve the debian-security snapshot
         id: resolve
-        # The script prints only a timestamp it has checked (YYYYMMDDTHHMMSSZ), or fails.
+        # The script prints only timestamps it has checked (YYYYMMDDTHHMMSSZ): the run's snapshot and the
+        # fallback both builds take when it stops serving its index (#6198), or fails.
         run: |
           ts=$(sh image/security-snapshot.sh resolve)
-          echo "timestamp=$ts" >> "$GITHUB_OUTPUT"
+          echo "snapshots=$ts" >> "$GITHUB_OUTPUT"
   # IMG-mkosi-run-bound (#4690, D-276): build.sh runs as root, so it could repoint mkosi's config, flags or
   # binary on its own runner. It runs only here: it stages the image tree into OUT/stage, and the job
   # uploads that tree (with the guests' and linked package lists) for the build job, which runs the pinned
@@ -190,7 +191,7 @@ jobs:
       - name: Stage the image tree (image/build.sh)
         shell: bash  # with pipefail, so tee keeps the build's exit status
         env:
-          AGENTOS_SECURITY_SNAPSHOT: ${{ needs.security-snapshot.outputs.timestamp }}  # the same for a and b (#5021)
+          AGENTOS_SECURITY_SNAPSHOT: ${{ needs.security-snapshot.outputs.snapshots }}  # the same for a and b (#5021)
         run: sudo env "PATH=$PATH" "AGENTOS_SECURITY_SNAPSHOT=$AGENTOS_SECURITY_SNAPSHOT" HOME=/root GOCACHE=/tmp/gocache image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/stage.log"
       # A tar keeps the tree's owners, modes and links, which the artifact store does not. The stage is
       # /usr alone: the build job copies OUT/stage/usr to /usr and nowhere else.
@@ -305,10 +306,11 @@ jobs:
       - name: Build image
         shell: bash  # with pipefail, so tee keeps the build's exit status
         env:
-          AGENTOS_SECURITY_SNAPSHOT: ${{ needs.security-snapshot.outputs.timestamp }}  # the same for a and b (#5021)
           OUT: ${{ runner.temp }}/out
         run: |
-          sh image/security-snapshot.sh sources "$AGENTOS_SECURITY_SNAPSHOT" > "$RUNNER_TEMP/mkosi.sources"
+          # The stage picked the run's snapshot or its fallback (#6198); its agentos.sources is the record.
+          AGENTOS_SECURITY_SNAPSHOT=$(sed -n 's|^URIs: https://snapshot\.debian\.org/archive/debian-security/\([0-9]\{8\}T[0-9]\{6\}Z\)/$|\1|p' "$OUT/agentos.sources")
+          sh image/security-snapshot.sh sources "$AGENTOS_SECURITY_SNAPSHOT" > "$RUNNER_TEMP/mkosi.sources"  # refuses an empty or multi-line value
           cmp "$RUNNER_TEMP/mkosi.sources" "$OUT/agentos.sources"
           sudo rm -rf "$OUT/pkgmngr"
           sudo install -D -m 0644 "$RUNNER_TEMP/mkosi.sources" "$OUT/pkgmngr/etc/apt/sources.list.d/mkosi.sources"

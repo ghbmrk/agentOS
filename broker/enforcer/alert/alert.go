@@ -108,9 +108,9 @@ var kinds = map[Kind]spec{
 	FailedUnlocks:       {"FailedUnlocks", Call, true, "Enforcer: repeated failed attempts to unlock %s."},
 	RoutineUnlock:       {"RoutineUnlock", LogOnly, true, "%s unlocked."},
 	RoutineLock:         {"RoutineLock", LogOnly, true, "%s locked."},
-	Trip:                {"Trip", Text, true, "Enforcer: %s touched a decoy or broke a limit, a known attack. The enforcer's page at home shows whether it was cut off or needs your passkey there to isolate it; its light stays red until the cut lifts or you clear this there."},
+	Trip:                {"Trip", Text, true, "Enforcer: %s touched a decoy or broke a limit, a known attack. The enforcer's page at home shows whether it was cut off or needs your passkey there to isolate it; its light stays red until that cut lifts: lift it, or resume the core's channel, with your passkey there."},
 	FactoryReset:        {"FactoryReset", Text, false, "Enforcer: a factory reset was run with the code inside its case, which drops its passkey and recovery code. Anyone who opened the case has that code, so someone else may have run it. Nothing can loosen its rules until a new passkey enrols. Enrol one and clear this on the enforcer's page at home. Until a passkey enrols, the page says \"This enforcer was factory reset.\" If it does not say so and you have not enrolled a passkey since, the reset did not finish: run it again there."},
-	RecordMissing:       {"RecordMissing", Text, true, "Enforcer: its record of %[1]s's cut is missing or unreadable, so %[1]s stays cut. Someone may have tampered with the enforcer: check it before you let %[1]s back on the enforcer's page at home. Its light stays red until you do or you clear this there."},
+	RecordMissing:       {"RecordMissing", Text, true, "Enforcer: its record of %[1]s's cut is missing or unreadable, so %[1]s stays cut. Someone may have tampered with the enforcer: check it before you let %[1]s back on the enforcer's page at home. Its light stays red until you let %[1]s back there with your passkey."},
 }
 
 // ends maps a kind to the kind whose open alert for the same device it
@@ -149,9 +149,9 @@ func (k Kind) Delivery() (d Delivery, ok bool) {
 	return s.delivery, ok
 }
 
-// lights reports whether an open alert of kind k turns the light red: a
+// Lights reports whether an open alert of kind k turns the light red: a
 // known attack (D-254), which only lifting its cut resolves (Lifted).
-func (k Kind) lights() bool { return k == Trip || k == RecordMissing }
+func (k Kind) Lights() bool { return k == Trip || k == RecordMissing }
 
 // Words is the fixed text for k about device.
 func Words(k Kind, device string) (string, error) {
@@ -247,7 +247,7 @@ var (
 	ErrKind     = errors.New("alert: not a kind on the list")
 	ErrDevice   = errors.New("alert: device name missing, unexpected or not a name")
 	ErrUnknown  = errors.New("alert: no open alert with that id")
-	ErrResolved = errors.New("alert: a channel-paused alert resolves only when the channel resumes")
+	ErrResolved = errors.New("alert: this alert resolves only by its own step: resuming the channel or lifting the cut")
 	ErrCorrupt  = errors.New("alert: journal corrupt")
 )
 
@@ -261,6 +261,9 @@ type Alerts struct {
 	byID     map[uint64]int
 	next     uint64
 	coreDown bool
+	// sealed is the alerts a lift covers (Cover, Reseal): a repeat of
+	// their kind opens a new alert instead of counting on them.
+	sealed map[uint64]bool
 
 	// size is the journal's length after its last good append, so a
 	// failed append is cut back and leaves no fragment. dirty is set
@@ -290,7 +293,7 @@ func New(cfg Config) (*Alerts, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	a := &Alerts{cfg: cfg, byID: map[uint64]int{}, coreDown: true}
+	a := &Alerts{cfg: cfg, byID: map[uint64]int{}, sealed: map[uint64]bool{}, coreDown: true}
 	raw, err := cfg.Journal.Load()
 	if err != nil {
 		return nil, err
@@ -357,7 +360,9 @@ func (a *Alerts) write(r Record) error {
 // one text or call, and sends again after it, so a later event is never
 // silenced by an earlier one left open. A kind that ends another resolves
 // that kind's open alert for the same device once its own record is
-// journalled, so the page keeps one alert for the incident.
+// journalled, so the page keeps one alert for the incident. An open
+// alert a lift sealed (Cover, Reseal) takes no counts: the repeat opens a
+// new alert, which no lift saved before it covers.
 func (a *Alerts) Raise(k Kind, device string) (Record, error) {
 	text, err := Words(k, device)
 	if err != nil {
@@ -367,7 +372,7 @@ func (a *Alerts) Raise(k Kind, device string) (Record, error) {
 	now := a.cfg.Now().UTC()
 	a.mu.Lock()
 	r, tell := Record{}, d != LogOnly
-	if i := a.open(k, device); d != LogOnly && i >= 0 {
+	if i := a.open(k, device); d != LogOnly && i >= 0 && !a.sealed[a.log[i].ID] {
 		r = a.log[i]
 		r.Count++
 		r.Last = now
@@ -472,7 +477,9 @@ func (a *Alerts) Resumed() error {
 
 // Resolve closes open alert id. Only the enforcer's page calls it, after
 // the owner acted there; nothing on the channel resolves an alert. A
-// paused channel resolves only by resuming it (Resumed).
+// paused channel resolves only by resuming it (Resumed), and a trip or a
+// missing cut record only by lifting its box's cut (Lifted), so the light
+// never goes off while the cut stands (KRN-12 Response, #4305).
 func (a *Alerts) Resolve(id uint64) error {
 	a.mu.Lock()
 	i, ok := a.byID[id]
@@ -480,7 +487,7 @@ func (a *Alerts) Resolve(id uint64) error {
 	switch {
 	case !ok || !a.log[i].Open:
 		err = ErrUnknown
-	case a.log[i].Kind == ChannelPaused:
+	case a.log[i].Kind == ChannelPaused, a.log[i].Kind.Lights():
 		err = ErrResolved
 	default:
 		err = a.resolve(i)
@@ -500,16 +507,67 @@ func (a *Alerts) resolve(i int) error {
 	return nil
 }
 
-// Lifted resolves every open trip and missing record from device; the
-// page calls it once the owner's passkey has lifted that cut in full
-// (NET-4). The light goes off when none is left open.
-func (a *Alerts) Lifted(device string) error {
+// Lifted resolves every open trip and missing record from device, the
+// only way they close (Resolve refuses them). The light goes off when none
+// is left open.
+func (a *Alerts) Lifted(device string) error { return a.lifted(device, nil) }
+
+// Cover seals every open trip and missing record from device and returns
+// their IDs: what a lift saved at this moment covers. A sealed alert takes
+// no more counts: a later trip on the box opens a new alert with a new ID,
+// so it is never one the lift covers (#4305). A box's cut record saves the
+// IDs, so the daemon can close exactly those again after a failed append
+// or a crash, and Reseal restores the seal at start-up.
+func (a *Alerts) Cover(device string) []uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var ids []uint64
+	for _, r := range a.log {
+		if r.Open && r.Kind.Lights() && r.Device == device {
+			ids = append(ids, r.ID)
+			a.sealed[r.ID] = true
+		}
+	}
+	return ids
+}
+
+// Reseal seals the alerts a saved lift covers again after a restart, and
+// puts the next ID above every one of them, so no later alert reuses the
+// ID of a covered alert whose append was lost. The daemon calls it with a
+// saved lift's IDs at start-up, before anything is raised on that box.
+func (a *Alerts) Reseal(ids []uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, id := range ids {
+		a.sealed[id] = true
+		a.next = max(a.next, id)
+	}
+}
+
+// LiftedCovered is Lifted for the alerts ids names. The daemon calls it
+// once the owner's passkey has lifted that cut in full (NET-4), and again
+// for a box it finds open (a failed append, or a crash before one), so a
+// retry closes them. It never closes a trip after the lift, which stays
+// red: every alert ids names is sealed (Cover, Reseal), so a later trip
+// has an ID no cover names, whatever the journal kept of the covered
+// alerts' counts.
+func (a *Alerts) LiftedCovered(device string, ids []uint64) error {
+	if len(ids) == 0 {
+		a.show()
+		return nil
+	}
+	return a.lifted(device, ids)
+}
+
+func (a *Alerts) lifted(device string, ids []uint64) error {
 	a.mu.Lock()
 	var err error
 	for i := range a.log {
-		if r := a.log[i]; r.Open && r.Kind.lights() && r.Device == device {
-			err = errors.Join(err, a.resolve(i))
+		r := a.log[i]
+		if !r.Open || !r.Kind.Lights() || r.Device != device || ids != nil && !slices.Contains(ids, r.ID) {
+			continue
 		}
+		err = errors.Join(err, a.resolve(i))
 	}
 	a.mu.Unlock()
 	a.show()
@@ -555,7 +613,7 @@ func (a *Alerts) Status() Status {
 			s.Open = append(s.Open, r)
 		}
 	}
-	if slices.ContainsFunc(s.Open, func(r Record) bool { return r.Kind.lights() }) {
+	if slices.ContainsFunc(s.Open, func(r Record) bool { return r.Kind.Lights() }) {
 		s.Colour = Red
 	}
 	return s

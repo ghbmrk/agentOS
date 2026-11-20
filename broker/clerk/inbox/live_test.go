@@ -492,3 +492,37 @@ func TestLiveOrganizeAfterTrashLandsOnTheTrashCopy(t *testing.T) {
 		t.Fatalf("the mail is in %s with %v, want Trash with agentOS/spam", folder, flags)
 	}
 }
+
+// A Message-ID folded before a trailing comment is read unfolded, without
+// its comments (RFC 5322 3.2.2), so the trash's read-back finds the moved
+// mail and confirms it (#3020).
+func TestLiveTrashOfAFoldedMessageIDIsConfirmed(t *testing.T) {
+	const spam = "<f1@spam.test>"
+	// imaptest writes each "\n" as CRLF.
+	raw := "From: x@spam.test\nTo: owner@example.test\nSubject: Win\nMessage-ID: (lead) " + spam + "\n (trailing (nested) \\) comment)\n\nsynthetic body\n"
+	lr := newLiveRig(t, 30, map[string]string{spam: "spam"}, raw)
+	if _, ok := lr.mail[spam]; !ok {
+		t.Fatalf("the folded id is not read as %s: %v", spam, lr.mail)
+	}
+	if err := lr.box.Trash(context.Background(), lr.mail[spam]); err != nil {
+		t.Fatalf("trash: %v, want confirmed", err)
+	}
+}
+
+func TestMessageIDUnfoldsAndDropsComments(t *testing.T) {
+	for raw, want := range map[string]string{
+		"Message-ID: <a@x>\r\n\r\nb":                   "<a@x>",
+		"Message-ID: <a@x>\r\n (c)\r\n\r\nb":           "<a@x>",
+		"Message-ID:\r\n <a@x>\r\n\r\nb":               "<a@x>",
+		"Message-ID: (c (d) \\( e) <a@x> (f)\r\n\r\nb": "<a@x>",
+		"Message-ID: <a(b)@x>\r\n\r\nb":                "<a(b)@x>",
+		"Message-ID: (unclosed <a@x>\r\n\r\nb":         "",
+		"Message-ID: <a@x> (unclosed\r\n\r\nb":         "",
+		"Message-ID: <a@x\r\n .y>\r\n\r\nb":            "<a@x .y>",
+		"Subject: s\r\n\r\nb":                          "",
+	} {
+		if got := messageID([]byte(raw)); got != want {
+			t.Errorf("messageID(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}

@@ -1055,9 +1055,10 @@ state.write_text(json.dumps(calls))
 runs, answers, status, missing = json.loads(pathlib.Path(sys.argv[0]).with_name("mirror.json").read_text())
 url = a[-1]
 base = "https://snapshot.debian.org/archive/debian-security/"
-if url.endswith("/Packages.xz"):
+index = ("/InRelease", "/Packages.xz")
+if url.endswith(index):
     sys.exit(22 if url[len(base):len(base) + 16] in missing else 0)
-n = sum(1 for c in calls if not c[-1].endswith("/Packages.xz")) - 1
+n = sum(1 for c in calls if not c[-1].endswith(index)) - 1
 if n < len(answers) and answers[n] is not None:
     loc = answers[n]
 else:
@@ -1067,9 +1068,10 @@ sys.stdout.write(a[a.index("-w") + 1].replace("%{redirect_url}", loc))
 sys.exit(status[n] if n < len(status) else 0)
 """
 
-    def resolve(self, runs=("20201112T120000Z", "20201112T180512Z"), answers=(), status=(), missing=()):
+    def resolve(self, runs=("20201112T060000Z", "20201112T120000Z", "20201112T180512Z"), answers=(), status=(),
+                missing=()):
         """Run resolve against a model snapshot.debian.org holding RUNS; ANSWERS and STATUS override the
-        redirect calls' answers and exit codes in order, and MISSING runs have no Packages.xz."""
+        redirect calls' answers and exit codes in order, and MISSING runs serve no InRelease or Packages.xz."""
         with tempfile.TemporaryDirectory() as d:
             path = fake_tools(d, curl='exec python3 -I "$(dirname "$0")/mirror.py" "$@"\n')
             pathlib.Path(d, "bin/mirror.py").write_text(self.MIRROR)
@@ -1081,25 +1083,100 @@ sys.exit(status[n] if n < len(status) else 0)
     def test_resolve_takes_the_run_before_the_newest(self):
         # snapshot.debian.org answers a time between two mirror runs with a redirect to the earlier
         # run's own timestamp, a snapshot that never changes. The newest run may still be importing
-        # (#5606: InRelease served, Packages 404), so the pin is the run before it, checked whole.
+        # (#5606: InRelease served, Packages 404), so the pin is the run before it, and the run before
+        # that is the fallback (#6198), each checked for the files apt reads first.
         p, calls = self.resolve()
-        self.assertEqual((p.returncode, p.stdout), (0, "20201112T120000Z\n"), p.stderr)
+        self.assertEqual((p.returncode, p.stdout), (0, "20201112T120000Z 20201112T060000Z\n"), p.stderr)
         base = "https://snapshot.debian.org/archive/debian-security/"
         self.assertRegex(calls[0][-1], r"\A" + re.escape(base) + r"\d{8}T\d{6}Z/\Z")
-        self.assertEqual(calls[1][-1], base + "20201112T180511Z/")
-        self.assertEqual(calls[2][-1], base + "20201112T120000Z/dists/trixie-security/main/binary-amd64/Packages.xz")
-        self.assertEqual(len(calls), 3)
+        self.assertEqual([c[-1] for c in calls[1:]], [
+            base + "20201112T180511Z/", base + "20201112T115959Z/",
+            base + "20201112T120000Z/dists/trixie-security/InRelease",
+            base + "20201112T120000Z/dists/trixie-security/main/binary-amd64/Packages.xz",
+            base + "20201112T060000Z/dists/trixie-security/InRelease",
+            base + "20201112T060000Z/dists/trixie-security/main/binary-amd64/Packages.xz"])
         for args in calls:
             self.assertEqual(args[0], "-q")
             self.assertIn("f", "".join(a for a in args if re.fullmatch(r"-[A-Za-z]+", a)))
             self.assertEqual(args[args.index("--proto") + 1], "=https")
-            self.assertNotIn("-L", args)
-            self.assertNotIn("--location", args)
             self.assertIn("--retry", args)
+            self.assertNotIn("--location", args)
+            if args[-1].endswith("/"):
+                # A redirect lookup reads where the redirect points and never follows it.
+                self.assertNotIn("-L", args)
+            else:
+                # An index check follows snapshot.debian.org's redirect to the stored file, as apt does,
+                # and only over https (#6198: the redirect answered, the file it named was 404).
+                self.assertIn("-L", args)
+                self.assertEqual(args[args.index("--proto-redir") + 1], "=https")
+                self.assertIn("--max-redirs", args)
         # A day's first run steps back across midnight.
-        p, calls = self.resolve(runs=("20201111T235000Z", "20201112T000000Z"))
-        self.assertEqual((p.returncode, p.stdout), (0, "20201111T235000Z\n"), p.stderr)
+        p, calls = self.resolve(runs=("20201111T120000Z", "20201111T235000Z", "20201112T000000Z"))
+        self.assertEqual((p.returncode, p.stdout), (0, "20201111T235000Z 20201111T120000Z\n"), p.stderr)
         self.assertEqual(calls[1][-1], base + "20201111T235959Z/")
+
+    def test_resolve_lists_only_runs_that_serve_their_index(self):
+        # A candidate that answers 404 for InRelease or Packages.xz is left out, so a build never starts
+        # on it; the other still pins the run. Neither serving fails resolve.
+        for missing, want in ((("20201112T120000Z",), "20201112T060000Z\n"),
+                              (("20201112T060000Z",), "20201112T120000Z\n")):
+            with self.subTest(missing=missing):
+                p, _ = self.resolve(missing=missing)
+                self.assertEqual((p.returncode, p.stdout), (0, want), p.stderr)
+        p, _ = self.resolve(missing=("20201112T120000Z", "20201112T060000Z"))
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(p.stdout, "")
+        self.assertIn("neither debian-security snapshot 20201112T120000Z nor 20201112T060000Z serves", p.stderr)
+
+    def pick(self, d, candidates, missing):
+        """pick CANDIDATES against the model mirror in D (resolve's), with MISSING runs serving no index."""
+        mirror = pathlib.Path(d, "bin/mirror.json")
+        runs = json.loads(mirror.read_text())[0] if mirror.exists() else []
+        if not mirror.exists():
+            fake_tools(d, curl='exec python3 -I "$(dirname "$0")/mirror.py" "$@"\n')
+            pathlib.Path(d, "bin/mirror.py").write_text(self.MIRROR)
+        mirror.write_text(json.dumps([runs, [], [], list(missing)]))
+        return self.run_snap("pick", candidates, path="%s:%s" % (pathlib.Path(d, "bin"), os.environ["PATH"]))
+
+    def test_both_builds_fall_back_to_the_same_previous_run(self):
+        # REQ: UPD-1a. #6198: resolve passed, and minutes later the builds' apt got 404 for the pinned
+        # snapshot's index. Each build picks again from the run's one list of candidates: the first if
+        # it serves now, else the previous mirror run, with a notice; so builds a and b, reading the
+        # same mirror, take the same snapshot, and a build never fails on a run apt cannot read.
+        first, second = "20201112T120000Z", "20201112T060000Z"
+        for missing, want, notice in (((), first, False), ((first,), second, True)):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as d:
+                picks = [self.pick(d, first + " " + second, missing) for _ in "ab"]
+                for p in picks:
+                    self.assertEqual((p.returncode, p.stdout), (0, want + "\n"), p.stderr)
+                    self.assertEqual("::notice title=debian-security snapshot::%s does not serve its trixie-security "
+                                     "index now; this build reads the previous mirror run, %s\n" % (first, second)
+                                     if notice else "", p.stderr)
+                self.assertEqual(picks[0].stdout, picks[1].stdout)
+        with tempfile.TemporaryDirectory() as d:
+            # A hand-run build's one timestamp has no fallback; nothing serving fails the build.
+            for cands, missing in ((first, (first,)), (first + " " + second, (first, second))):
+                p = self.pick(d, cands, missing)
+                self.assertNotEqual(p.returncode, 0)
+                self.assertEqual(p.stdout, "")
+                self.assertIn("no candidate debian-security snapshot", p.stderr)
+            p = self.pick(d, first, ())
+            self.assertEqual((p.returncode, p.stdout), (0, first + "\n"), p.stderr)
+
+    def test_pick_refuses_anything_but_one_or_two_timestamps(self):
+        # Checked before any request; a glob is never expanded against the working directory.
+        with tempfile.TemporaryDirectory() as d:
+            for bad in ("", " ", "*", "20201112T120000Z *", "20201112T120000Z 20201112T060000Z 20201112T000000Z",
+                        "20201112T120000Z x\n::error::forged", "../20201112T120000Z"):
+                with self.subTest(bad=bad):
+                    p = self.pick(d, bad, ())
+                    self.assertEqual(p.returncode, 2)
+                    self.assertEqual(p.stdout, "")
+                    self.assertNotIn("::error", p.stderr)
+                    self.assertFalse(pathlib.Path(d, "bin/calls").exists())
+        for args in (("pick",), ("pick", "20201112T120000Z", "20201112T060000Z")):
+            p = self.run_snap(*args)
+            self.assertEqual((p.returncode, p.stdout), (2, ""))
 
     def test_resolve_refuses_any_other_answer(self):
         good = "https://snapshot.debian.org/archive/debian-security/20201112T180512Z/"
@@ -1110,8 +1187,9 @@ sys.exit(status[n] if n < len(status) else 0)
                "https://snapshot.debian.org/archive/debian-security/20201112T180512Z/\n",
                "http://snapshot.debian.org/archive/debian-security/20201112T180512Z/")
         cases = [dict(answers=(b,)) for b in bad] + [dict(answers=(None, b)) for b in bad]
+        cases += [dict(answers=(None, None, b)) for b in bad]
         cases += [dict(answers=(good,), status=(22,)), dict(answers=(None, good), status=(0, 22)),
-                  dict(missing=("20201112T120000Z",))]
+                  dict(answers=(None, None, good), status=(0, 0, 22))]
         for case in cases:
             with self.subTest(**case):
                 p, _ = self.resolve(**case)
@@ -1152,9 +1230,12 @@ sys.exit(status[n] if n < len(status) else 0)
         b = (IMG / "build.sh").read_text()
         self.assertIn('SECURITY_SNAPSHOT=${AGENTOS_SECURITY_SNAPSHOT-}', b)
         self.assertIn('[ -n "$SECURITY_SNAPSHOT" ] || SECURITY_SNAPSHOT=$(sh "$HERE/security-snapshot.sh" resolve)', b)
+        pick = b.index('SECURITY_SNAPSHOT=$(sh "$HERE/security-snapshot.sh" pick "$SECURITY_SNAPSHOT")\n')
+        self.assertLess(b.index('resolve)\n'), pick)
         write = b.index('sh "$HERE/security-snapshot.sh" sources "$SECURITY_SNAPSHOT" >"$OUT/agentos.sources"')
         tree = b.index('install -D -m 0644 "$OUT/agentos.sources" "$OUT/pkgmngr/etc/apt/sources.list.d/mkosi.sources"')
         guest = b.index('sh "$HERE/guest-base.sh" "$OUT/guest-base" "$OUT/guest/agentos-guest.manifest" "$OUT/agentos.sources"\n')
+        self.assertLess(pick, write)
         self.assertLess(write, tree)
         self.assertLess(tree, guest)
         self.assertEqual(b.count("guest-base.sh\""), 1)
@@ -1168,18 +1249,19 @@ sys.exit(status[n] if n < len(status) else 0)
     def test_workflow_resolves_once_for_both_builds(self):
         wf = WORKFLOW.read_text()
         job = wf[wf.index("\n  security-snapshot:\n"):wf.index("\n  stage:\n")]
-        self.assertIn("timestamp: ${{ steps.resolve.outputs.timestamp }}", job)
+        self.assertIn("snapshots: ${{ steps.resolve.outputs.snapshots }}", job)
         self.assertIn('ts=$(sh image/security-snapshot.sh resolve)', job)
-        self.assertIn('echo "timestamp=$ts" >> "$GITHUB_OUTPUT"', job)
+        self.assertIn('echo "snapshots=$ts" >> "$GITHUB_OUTPUT"', job)
         self.assertNotIn("matrix", job)
         stage = wf[wf.index("\n  stage:\n"):wf.index("\n  build:\n")]
         self.assertIn("    needs: security-snapshot\n", stage)
-        self.assertIn("AGENTOS_SECURITY_SNAPSHOT: ${{ needs.security-snapshot.outputs.timestamp }}", stage)
+        self.assertIn("AGENTOS_SECURITY_SNAPSHOT: ${{ needs.security-snapshot.outputs.snapshots }}", stage)
         self.assertIn('sudo env "PATH=$PATH" "AGENTOS_SECURITY_SNAPSHOT=$AGENTOS_SECURITY_SNAPSHOT" ', stage)
         self.assertEqual(stage.count('image/build.sh "$RUNNER_TEMP/out"'), 1)
         build = wf[wf.index("\n  build:\n"):wf.index("\n  reproduce:\n")]
         self.assertIn("    needs: [security-snapshot, stage]\n", build)
-        self.assertIn("AGENTOS_SECURITY_SNAPSHOT: ${{ needs.security-snapshot.outputs.timestamp }}", build)
+        self.assertNotIn("outputs.snapshots", build)  # the stage picked; its agentos.sources is the record (#6198)
+        self.assertIn("AGENTOS_SECURITY_SNAPSHOT=$(sed -n 's|^URIs: https://snapshot\\.debian\\.org/archive/debian-security/", build)
         self.assertIn('sh image/security-snapshot.sh sources "$AGENTOS_SECURITY_SNAPSHOT" > "$RUNNER_TEMP/mkosi.sources"', build)
         self.assertIn('"$RUNNER_TEMP"/out/agentos.sources', build[build.index("- name: Release record"):])
         # The reproduce job holds both builds to the same apt sources, security snapshot included.
@@ -1212,25 +1294,28 @@ class SecuritySnapshotEdgeTest(unittest.TestCase):
         # With the clock fixed, the choice is a function of the mirror's runs alone: the newest run at
         # or before now, then the run before it. A run after now is never taken.
         base = "https://snapshot.debian.org/archive/debian-security/"
-        runs = ("20201112T000000Z", "20201112T060000Z", "20201112T120000Z", "20201112T180000Z")
-        for now, before, want in (("20201112T130000Z", "20201112T115959Z", "20201112T060000Z"),
-                                  ("20201112T180000Z", "20201112T175959Z", "20201112T120000Z"),
-                                  ("20201112T060001Z", "20201112T055959Z", "20201112T000000Z")):
+        runs = ("20201111T180000Z", "20201112T000000Z", "20201112T060000Z", "20201112T120000Z", "20201112T180000Z")
+        for now, before, want, then in (("20201112T130000Z", "20201112T115959Z", "20201112T060000Z", "20201112T000000Z"),
+                                        ("20201112T180000Z", "20201112T175959Z", "20201112T120000Z", "20201112T060000Z"),
+                                        ("20201112T060001Z", "20201112T055959Z", "20201112T000000Z", "20201111T180000Z")):
             with self.subTest(now=now):
                 p, calls = self.frozen(now, runs)
-                self.assertEqual((p.returncode, p.stdout), (0, want + "\n"), p.stderr)
+                self.assertEqual((p.returncode, p.stdout), (0, want + " " + then + "\n"), p.stderr)
                 self.assertEqual(calls[:2], [base + now + "/", base + before + "/"])
-                self.assertEqual(calls[2], base + want + "/dists/trixie-security/main/binary-amd64/Packages.xz")
-                self.assertEqual(len(calls), 3)
+                self.assertEqual(calls[3], base + want + "/dists/trixie-security/InRelease")
+                self.assertEqual(calls[4], base + want + "/dists/trixie-security/main/binary-amd64/Packages.xz")
+                self.assertEqual(calls[6], base + then + "/dists/trixie-security/main/binary-amd64/Packages.xz")
+                self.assertEqual(len(calls), 7)
                 again, calls2 = self.frozen(now, runs)
                 self.assertEqual((again.stdout, calls2), (p.stdout, calls))
 
     def test_with_no_retries_left_it_refuses_at_once(self):
         # curl does the retrying (--retry); the script itself never loops. A mirror that keeps failing
         # (curl's retries spent, exit 22) ends resolve after that one call per step, with no stdout.
-        for status, ncalls in (((22,), 1), ((0, 22), 2), ((7,), 1)):
+        for status, ncalls in (((22,), 1), ((0, 22), 2), ((0, 0, 22), 3), ((7,), 1)):
             with self.subTest(status=status):
-                p, calls = self.frozen("20201112T130000Z", ("20201112T060000Z", "20201112T120000Z"), status=status)
+                p, calls = self.frozen("20201112T130000Z", ("20201112T000000Z", "20201112T060000Z", "20201112T120000Z"),
+                                       status=status)
                 self.assertNotEqual(p.returncode, 0)
                 self.assertEqual(p.stdout, "")
                 self.assertEqual(len(calls), ncalls)
@@ -1277,6 +1362,8 @@ class SecuritySnapshotEdgeTest(unittest.TestCase):
         b = (ENF / "build.sh").read_text()
         self.assertIn('SECURITY_SNAPSHOT=${AGENTOS_SECURITY_SNAPSHOT-}', b)
         self.assertIn('[ -n "$SECURITY_SNAPSHOT" ] || SECURITY_SNAPSHOT=$(sh "$HERE/../security-snapshot.sh" resolve)', b)
+        pick = b.index('SECURITY_SNAPSHOT=$(sh "$HERE/../security-snapshot.sh" pick "$SECURITY_SNAPSHOT")\n')
+        self.assertLess(pick, b.index('sources "$SECURITY_SNAPSHOT"'))
         write = b.index('sh "$HERE/../security-snapshot.sh" sources "$SECURITY_SNAPSHOT" \\\n'
                         '\t"$HERE/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources" >"$OUT/enforcer.sources"\n')
         tree = b.index('install -D -m 0644 "$OUT/enforcer.sources" "$OUT/pkgmngr/etc/apt/sources.list.d/mkosi.sources"')
