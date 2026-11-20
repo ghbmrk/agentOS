@@ -152,13 +152,16 @@ func (s *State) taskDue(id string, now int64) bool {
 	return t != nil && !t.ended && now >= t.Until
 }
 
-// Rung is the highest rung the owner events behind a step of task reached
-// (CH-3, D-311): the event that opened the task, P0 for none, raised to P3 by
-// a code approval of the step, which approve counts while the step waits.
-func (s *State) Rung(task string, approve bool) key.Proof {
-	r := key.P0
+// Rung is the highest rung the owner events behind a step of task under key
+// k reached (CH-3, D-311): the event that opened the task, P0 for none; the
+// event that derived k, for a standing key (IssueStanding, KEY-5), with or
+// without a task; raised to P3 by a code approval of the step, which approve
+// counts while the step waits. task is k's (key.TaskOf), which the caller
+// has already verified.
+func (s *State) Rung(task string, k key.Key, approve bool) key.Proof {
+	r := s.derived(k)
 	if t := s.tasks[task]; t != nil {
-		r = t.Rung
+		r = max(r, t.Rung)
 	}
 	if approve {
 		r = max(r, key.P3)
