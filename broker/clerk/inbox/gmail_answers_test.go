@@ -11,11 +11,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"sync"
@@ -150,20 +151,29 @@ func (k *sizedReader) Read(b []byte) (int, error) {
 }
 
 // OpenGmail draws its 32-byte sealing key from crypto/rand before it seals
-// the grant; a declaration NewAPI refuses fails the open.
+// the grant; a declaration NewAPI refuses fails the open. The draw is seen
+// through crypto/rand.Reader, swapped in a child that runs this test alone,
+// since TLS in other tests' connections reads that variable too.
 func TestOpenGmailDrawsItsKey(t *testing.T) {
-	srv := gmailtest.New()
-	defer srv.Close()
-	k := &sizedReader{}
-	defer func(r io.Reader) { rand.Reader = r }(rand.Reader)
-	rand.Reader = k
-	if _, err := OpenGmail(srv.Base(), srv.Token(), gmailtest.Grant(), srv.Guard(), srv.Roots()); err != nil {
-		t.Fatal(err)
+	const child = "INBOX_OPENGMAIL_KEY_CHILD"
+	guard := netguard.New(netguard.Config{Resolver: scriptedResolver{}})
+	base := "https://" + gmailtest.Host + "/gmail/v1/users/me"
+	if os.Getenv(child) == "1" {
+		k := &sizedReader{}
+		rand.Reader = k
+		if _, err := OpenGmail(base, "https://"+gmailtest.Host+"/token", gmailtest.Grant(), guard, nil); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Printf("sizes %v\n", k.sizes)
+		return
 	}
-	if len(k.sizes) == 0 || k.sizes[0] != 32 {
-		t.Fatalf("OpenGmail read %v random bytes; want its 32-byte key first", k.sizes)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestOpenGmailDrawsItsKey$", "-test.v")
+	cmd.Env = append(os.Environ(), child+"=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "sizes [32 ") {
+		t.Fatalf("OpenGmail's random reads (want its 32-byte key first): %v\n%s", err, out)
 	}
-	if g, err := OpenGmail(srv.Base(), srv.Token(), gmailtest.Grant(), nil, srv.Roots()); err == nil || g != nil {
+	if g, err := OpenGmail(base, "https://"+gmailtest.Host+"/token", gmailtest.Grant(), nil, nil); err == nil || g != nil {
 		t.Fatalf("OpenGmail with no home-network policy = %v, %v", g, err)
 	}
 }
