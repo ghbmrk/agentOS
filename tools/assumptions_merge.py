@@ -83,7 +83,7 @@ def merge(base, ours, theirs):
         for name, text in zip(names, (ours, base, theirs)):
             name.write_bytes(text)
         run = subprocess.run(["git", "merge-file", "-p", "--diff3", *(f"-L{mark}{i}" for i in range(3)),
-                              *map(str, names)], capture_output=True)
+                              *map(str, names)], cwd=d, capture_output=True)  # no repository read (records_audit)
     if not 0 <= run.returncode <= 127:  # merge-file counts conflicts up to 127; above is an error (a binary file)
         return None, False
     merged = run.stdout
