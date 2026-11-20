@@ -11,13 +11,15 @@ package wipelint_test
 //
 // The rule runs over every non-test file of broker, testdata included,
 // type-checked, whatever the file imports. A sealer constructor is any
-// function, method or func type whose results hold a clerk.Sealer, the
-// type or its pointer implementing it, found by type alone. Its possible
-// keys are the receiver and parameters whose type can hold key bytes
+// function, method or func type whose results hold a clerk.Sealer (a
+// type that, or whose pointer, implements it, anywhere inside a result:
+// a field, pointer, slice, map, channel or func result), found by type
+// alone. Its possible keys are the receiver and parameters whose type can
+// hold or produce key bytes
 // (keyForm): a byte slice or byte array, named or not, a string, a type
 // parameter whose type set holds one, or a type the lint cannot wipe
-// (any, a type set without terms, a pointer, slice, map or struct holding
-// key bytes). A named constructor with a possible key is listed in
+// (an interface, func, channel, uintptr or unsafe.Pointer, a type set
+// without terms, a pointer, slice, map or struct holding key bytes). A named constructor with a possible key is listed in
 // sealers, naming which of them are keys, or the build fails; a func
 // type or literal with one fails outright (no name to list). A listed key
 // is a byte slice: a string key cannot be wiped, an array key passes by
@@ -74,6 +76,37 @@ type sealerKey struct {
 // possible key. Nothing but review holds an entry.
 var sealers = map[string]sealerKey{
 	sealerPkg + ".NewAESSealer": {[]string{"key"}, "aes.NewCipher expands the key into its own schedule; the slice is not kept"},
+
+	// Constructors of things that hold a sealer, whose possible keys
+	// (paths, configs, built sealers, sealed stores, write funcs) are none.
+	"github.com/ghbmrk/agentos/broker/clerk.NewAPI":                          {nil, "the declaration, the store of sealed secrets and the trust roots hold no sealing key"},
+	"github.com/ghbmrk/agentos/broker/clerk.NewExit":                         {nil, "the declaration, the anchors' public keys, the sealed store and the trust roots hold no sealing key"},
+	"github.com/ghbmrk/agentos/broker/clerk.NewSignIn":                       {nil, "the declaration, the sealed store and the trust roots hold no sealing key"},
+	"github.com/ghbmrk/agentos/broker/clerk.NewSecrets":                      {nil, "s is a built sealer and write takes sealed bytes; the key was wiped where s was made"},
+	"github.com/ghbmrk/agentos/broker/clerk/inbox.OpenGmail":                 {nil, "base and token name the account, grant is sealed into the store it builds, and its sealing key is drawn and wiped inside"},
+	"github.com/ghbmrk/agentos/broker/clerk/inbox.NewGmail":                  {nil, "api is a built exit; no key"},
+	"(*github.com/ghbmrk/agentos/broker/clerk/inbox.Gmail).WithPoster":       {nil, "the mailbox and its network policy; no key"},
+	"github.com/ghbmrk/agentos/broker/clerk/line.New":                        {nil, "the config holds the account's addresses and paths, no sealing key"},
+	"(*github.com/ghbmrk/agentos/broker/clerk/line.Clerk).Account":           {nil, "returns the clerk's account; no key"},
+	"github.com/ghbmrk/agentos/broker/clerk/line.NewSigner":                  {nil, "c is a built clerk; no key"},
+	"github.com/ghbmrk/agentos/broker/clerk/model.NewAPIs":                   {nil, "declarations, the sealed key store, the network policy and trust roots hold no sealing key"},
+	"github.com/ghbmrk/agentos/broker/clerk/model.NewKeys":                   {nil, "s is a built sealer and write takes sealed bytes"},
+	"github.com/ghbmrk/agentos/broker/clerk/plan.New":                        {nil, "the declaration, the sealed store and trust roots hold no sealing key"},
+	"github.com/ghbmrk/agentos/broker/clerk/plan.NewStore":                   {nil, "s is a built sealer and write takes sealed bytes"},
+	"github.com/ghbmrk/agentos/broker/clerk/run.OpenExit":                    {nil, "dir is a path, s a built sealer, the rest declaration, public anchors and trust roots"},
+	"github.com/ghbmrk/agentos/broker/clerk/run.NewExitHost":                 {nil, "a built exit, its declaration and public anchors; no key"},
+	"(*github.com/ghbmrk/agentos/broker/clerk/run.MailHost).heldGmailSignIn": {nil, "slot and hint name the account; no key"},
+	"(*github.com/ghbmrk/agentos/broker/clerk/run.MailHost).newGmailSignIn":  {nil, "the sealed store and the account's slot and hint; no key"},
+	"(*github.com/ghbmrk/agentos/broker/clerk/run.MailHost).ownGmailSignIn":  {nil, "the host alone; its own sealing key is drawn and wiped inside"},
+	"github.com/ghbmrk/agentos/broker/clerk/run.gmailBox":                    {nil, "the sealed store, the account's slot and the mail config; no key"},
+	"github.com/ghbmrk/agentos/broker/clerk/run.NewMailHost":                 {nil, "ctx, a path, the sealed store and the mail config; no key"},
+	"github.com/ghbmrk/agentos/broker/clerk/run.OpenSecrets":                 {nil, "dir is a path and s a built sealer"},
+	"github.com/ghbmrk/agentos/broker/clerk/run.openSecrets":                 {nil, "dir is a path, s a built sealer and stop a test hook"},
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-camera.openSecrets":        {nil, "keyFile is the kernel's hand-off; the key read from it is wiped inside"},
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-homekit.openSecrets":       {nil, "keyFile is the kernel's hand-off; the key read from it is wiped inside"},
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-model.openStore":     {nil, "dir and slot are names, s a built sealer, stop a test hook"},
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-model.openKeys":      {nil, "dir is a path, s a built sealer, stop a test hook"},
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-model.newLogin":      {nil, "the declaration and the sealed store hold no sealing key"},
 }
 
 // keyExempt names, by types.Func.FullName, each function whose calls of a
@@ -552,13 +585,58 @@ func recvName(sig *types.Signature) string {
 	return ""
 }
 
-// givesSealer reports whether a result of sig is, or implements, the
-// sealer interface, as itself or through its pointer.
+// givesSealer reports whether a result of sig holds a sealer: a type
+// that is or implements the sealer interface, as itself or through its
+// pointer, anywhere inside it (a struct field, pointer, slice, array,
+// map, channel, or a func's results).
 func givesSealer(sig *types.Signature, sealer *types.Interface) bool {
+	seen := map[types.Type]bool{}
 	for i := range sig.Results().Len() {
-		t := sig.Results().At(i).Type()
-		if types.Implements(t, sealer) || types.Implements(types.NewPointer(t), sealer) {
+		if holdsSealer(sig.Results().At(i).Type(), sealer, seen) {
 			return true
+		}
+	}
+	return false
+}
+
+func holdsSealer(t types.Type, sealer *types.Interface, seen map[types.Type]bool) bool {
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
+	if types.Implements(t, sealer) || types.Implements(types.NewPointer(t), sealer) {
+		return true
+	}
+	in := func(ts ...types.Type) bool {
+		for _, e := range ts {
+			if holdsSealer(e, sealer, seen) {
+				return true
+			}
+		}
+		return false
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Pointer:
+		return in(u.Elem())
+	case *types.Slice:
+		return in(u.Elem())
+	case *types.Array:
+		return in(u.Elem())
+	case *types.Map:
+		return in(u.Key(), u.Elem())
+	case *types.Chan:
+		return in(u.Elem())
+	case *types.Struct:
+		for i := range u.NumFields() {
+			if in(u.Field(i).Type()) {
+				return true
+			}
+		}
+	case *types.Signature:
+		for i := range u.Results().Len() {
+			if in(u.Results().At(i).Type()) {
+				return true
+			}
 		}
 	}
 	return false
@@ -572,7 +650,7 @@ const (
 	formSlice               // a byte slice, named or not: clear(v)
 	formArray               // a byte array, named or not: passes by value, so the callee holds a copy
 	formString              // a string: cannot be wiped
-	formUnknown             // holds key bytes no statement wipes, or a type the lint cannot read
+	formUnknown             // holds or can produce key bytes no statement wipes, or a type the lint cannot read
 )
 
 // keyForm returns the form of key a value of type t can hold.
@@ -603,7 +681,7 @@ func formOf(t types.Type, seen map[types.Type]bool) form {
 	switch u := t.Underlying().(type) {
 	case *types.Basic:
 		switch {
-		case u.Kind() == types.Invalid:
+		case u.Kind() == types.Invalid, u.Kind() == types.Uintptr, u.Kind() == types.UnsafePointer:
 			return formUnknown
 		case u.Info()&types.IsString != 0:
 			return formString
@@ -631,10 +709,8 @@ func formOf(t types.Type, seen map[types.Type]bool) form {
 				return formUnknown
 			}
 		}
-	case *types.Interface:
-		if u.NumMethods() == 0 {
-			return formUnknown // any value, a key among them
-		}
+	case *types.Interface, *types.Signature, *types.Chan:
+		return formUnknown // any value behind it, a func or a channel can carry or produce key bytes
 	}
 	return formNone
 }
@@ -772,7 +848,7 @@ var pkgKey []byte
 	sink = s
 	return err
 }`, 0},
-		{"a sealer from no possible key is no constructor", `func wrap(s clerk.Sealer, n int) clerk.Sealer { return s }`, 0},
+		{"a sealer from no possible key is no constructor", `func wrap(n int) clerk.Sealer { return sink }`, 0},
 		{"a constructor listed with no keys has its calls unheld", `func f(n []byte) error {
 	s, err := newNonce(n[:12])
 	sink = s
@@ -947,6 +1023,19 @@ func (*vs) Seal(plain, aad []byte) ([]byte, error) { return nil, nil }
 func (*vs) Open(blob, aad []byte) ([]byte, error) { return nil, nil }
 
 func newVS(k []byte) vs { return vs{} }`, 1},
+		// Params that can carry or produce bytes, and results that hold
+		// a sealer inside (#6363 L3).
+		{"a sealer param is a possible key, unlisted", `func wrap(s clerk.Sealer, n int) clerk.Sealer { return s }`, 1},
+		{"a reader, unlisted", `func n1(r interface{ Read([]byte) (int, error) }) (clerk.Sealer, error) { return nil, nil }`, 1},
+		{"a func that yields a key, unlisted", `func n2(get func() []byte) (clerk.Sealer, error) { return nil, nil }`, 1},
+		{"a channel of keys, unlisted", `func n3(c chan []byte) (clerk.Sealer, error) { return nil, nil }`, 1},
+		{"a uintptr, unlisted", `func n7(k uintptr) (clerk.Sealer, error) { return nil, nil }`, 1},
+		{"a sealer in a struct result, unlisted", `type box struct{ S clerk.Sealer }
+
+func n5(k []byte) (*box, error) { return nil, nil }`, 1},
+		{"a slice of sealers, unlisted", `func n6(k []byte) ([]clerk.Sealer, error) { return nil, nil }`, 1},
+		{"a func result yielding a sealer, unlisted", `func n8(k []byte) func() clerk.Sealer { return nil }`, 1},
+		{"a key listed as an interface, cannot be wiped", `func newAny(k interface{ Key() []byte }) (clerk.Sealer, error) { return nil, nil }`, 1},
 		// A package that does not import clerk: its sealer is found by
 		// type, and its callers are held.
 		{"a wrapper in a package that does not import clerk", `package q
