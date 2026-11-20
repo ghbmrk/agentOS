@@ -356,9 +356,8 @@ var coreEnforcer = map[string]struct {
 
 // enforcerMain is the enforcer's daemon (slice l, #3670): the one
 // composition root that links the page, the nft loader and the rest
-// together. It imports only enforcer packages, kernel/key, x/sys/unix
-// for CLOCK_BOOTTIME (#4507) and the access point pusher's SSH package for
-// its key types (ENF-l-b2 part a), starts no process itself and serves no
+// together. It imports only enforcer packages, kernel/key and x/sys/unix
+// for CLOCK_BOOTTIME (#4507), starts no process itself and serves no
 // HTTP of its own; TestEnforcerImportsNothingFromAgentOS holds its
 // dependencies to the enforcer's.
 const enforcerMain = "cmd/agentos-enforcer"
@@ -369,7 +368,7 @@ var enforcerMainRule = struct {
 }{
 	[]string{"kernel/key", "enforcer/alert", "enforcer/channel", "enforcer/dns", "enforcer/dns/run", "enforcer/enrol", "enforcer/heads",
 		"enforcer/mdns", "enforcer/nft", "enforcer/nft/load", "enforcer/offload", "enforcer/page", "enforcer/policy", "enforcer/traffic",
-		"enforcer/wire", "enforcer/wol", "golang.org/x/sys/unix", "enforcer/ap", "enforcer/ap/push", "golang.org/x/crypto/ssh"},
+		"enforcer/wire", "enforcer/wol", "golang.org/x/sys/unix"},
 	[]string{"net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"},
 }
 
@@ -460,7 +459,9 @@ func TestARC2ControlPathCannotReachInference(t *testing.T) {
 	for pkg, rule := range coreEnforcer {
 		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
 	}
-	checkImports(t, enforcerMain, enforcerMainRule.allowed, enforcerMainRule.forbid, nil)
+	// The access point pusher's packages and its SSH client (ENF-l-b2 part a).
+	mainAllowed := append(slices.Clone(enforcerMainRule.allowed), "enforcer/ap", "enforcer/ap/push", "golang.org/x/crypto/ssh")
+	checkImports(t, enforcerMain, mainAllowed, enforcerMainRule.forbid, nil)
 }
 
 // TestCoreLinksOnlyEnforcerFormats: no core package imports an enforcer
