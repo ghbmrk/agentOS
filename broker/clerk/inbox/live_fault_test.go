@@ -101,3 +101,26 @@ func TestLiveTrashFailsWhenItsReadBackFails(t *testing.T) {
 		}
 	}
 }
+
+// A label fails with the error of its read-back's fetch, never confirmed or
+// merely unconfirmed; a mail this mailbox did not read is unknown.
+func TestLiveLabelFailsWhenItsReadBackFails(t *testing.T) {
+	srv := imaptest.Start(t)
+	srv.Deliver("INBOX", rawMail("<l1@shop.test>", "x@shop.test", "Hi"))
+	f := newFaultyLive(t, srv)
+	ms, err := f.box.Read(context.Background())
+	if err != nil || len(ms) != 1 {
+		t.Fatalf("read: %d mails, %v", len(ms), err)
+	}
+	f.arm(2) // after the flag change (1)
+	if err := f.box.Label(context.Background(), ms[0].ID, labelPrefix+"bulk"); err == nil || !strings.Contains(err.Error(), noProcess) {
+		t.Errorf("read-back failing: %v; want the session's error", err)
+	}
+	f.arm(0)
+	if err := f.box.Label(context.Background(), "unread", labelPrefix+"bulk"); !errors.Is(err, nUnknown) {
+		t.Errorf("label of a mail never read: %v, want %v", err, nUnknown)
+	}
+	if got := f.n.Load(); got != 0 {
+		t.Errorf("a label of an unknown mail ran %d sessions", got)
+	}
+}
