@@ -235,6 +235,31 @@ func TestAFullWindowFallsBackToItsDeclaredLength(t *testing.T) {
 	}
 }
 
+// A reset time equal to the call time is no reset time: a full reading then
+// runs its window from the call, so the pool stays closed (RES-5, #2666).
+func TestAFullWindowResettingNowRunsAWindowFromTheCall(t *testing.T) {
+	week := int64(7 * 24 * 3600 * 1000)
+	for name, tc := range map[string]struct{ every, want int64 }{
+		"declared length": {every: week, want: 1 + week},
+		"no length":       {every: 0, want: 1 + kernel.PoolWindowMS},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Windows: []model.PoolWindow{{Window: "7d", Used: 1000, ResetAt: 1, Every: tc.every}}}}}
+			c, k, _ := rig(t, f)
+			if _, err := c.Call(1, "t", "plan", "hi", 10); err != nil {
+				t.Fatal(err)
+			}
+			if got := k.State().Pools["codex-5h"].Windows["7d"].ResetAt; got != tc.want {
+				t.Fatalf("reset at %d, want %d", got, tc.want)
+			}
+			f.u.Pool = nil
+			if _, err := c.Call(2, "t", "plan", "hi", 10); err == nil || f.calls != 1 {
+				t.Fatalf("the full pool stays closed: %v calls=%d", err, f.calls)
+			}
+		})
+	}
+}
+
 func TestClerkCountsWhenProviderReportsNone(t *testing.T) {
 	f := &fake{}
 	c, k, _ := rig(t, f)
