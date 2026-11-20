@@ -3841,13 +3841,14 @@ class Record(unittest.TestCase):
         # #5774 dropped three of them (boxFor's StartTLS branch is gone; readMail's open-error branch and
         # its return are now killed by the ELOOP check). The nine it added for gremlins' cover-gap lines
         # said their mutants were not equivalent; #5909 deleted them once gremlins ran and killed each.
-        self.assertEqual(len(sites), 24, r.stdout)
-        self.assertEqual(len(set(sites)), 24, r.stdout)
+        # #6346 dropped ownGmailSignIn's clear(k): the sealer key-wipe lint kills its deletion.
+        self.assertEqual(len(sites), 23, r.stdout)
+        self.assertEqual(len(set(sites)), 23, r.stdout)
         # The two loadSenders proofs were re-read on #5780 after #5733 edited that func, readMail's
         # ReadAll proof on #5804 after it gained the setup-form check, and work's tick.Stop proof on #5998
         # after its ticker took MailConfig.every.
         self.assertEqual(sorted(" ".join(l.split(" ")[1:3]) for l in r.stdout.strip().split("\n")),
-                         ["STATEMENT_DELETION #5743"] * 20 + ["STATEMENT_DELETION #5780"] * 2
+                         ["STATEMENT_DELETION #5743"] * 19 + ["STATEMENT_DELETION #5780"] * 2
                          + ["STATEMENT_DELETION #5804", "STATEMENT_DELETION #5998"])
 
 
@@ -4678,6 +4679,144 @@ class Jobs(unittest.TestCase):
         from unittest import mock
         with mock.patch.object(os, "sched_getaffinity", create=True, return_value={0, 1, 2}):
             self.assertEqual(mutgate.default_jobs(), 3)
+
+
+
+# The fixture lints read hint.go from the tree they run in, as broker's lints read theirs.
+LINT_SRC = """package lint
+
+import (
+	"os"
+	"strings"
+	"testing"
+	"time"
+)
+
+func src(t *testing.T) string {
+	b, err := os.ReadFile("../hint/hint.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestWiped(t *testing.T) {
+	if !strings.Contains(src(t), "clear(b)") {
+		t.Fatal("hint.go: b is not wiped")
+	}
+}
+
+func TestBroken(t *testing.T) { t.Fatal("fails on every tree") }
+
+func TestSlow(t *testing.T) {
+	if !strings.Contains(src(t), "clear(b)") {
+		time.Sleep(time.Hour)
+	}
+}
+
+var hog []byte
+
+func TestHog(t *testing.T) {
+	if !strings.Contains(src(t), "clear(b)") {
+		hog = make([]byte, 1<<30)
+		for i := range hog {
+			hog[i] = 1
+		}
+		time.Sleep(time.Hour)
+	}
+}
+"""
+LINT_PR = "package hint\n\nfunc Keep(b []byte) int {\n\tn := len(b)\n\tclear(b)\n\treturn n\n}\n"
+LINT_TEST = "package hint\n\nimport \"testing\"\n\nfunc TestKeep(t *testing.T) {\n\tif Keep([]byte{1, 2}) != 2 {\n\t\tt.Fatal(\"Keep\")\n\t}\n}\n"
+
+
+class LintHeld(unittest.TestCase):
+    """MUT-lint-held (#6346): a deletion no test of its package fails, refused by a listed lint."""
+    repo, lister = Deletion.repo, Deletion.lister
+
+    def fixture(self, d):
+        """broker/hint of a repo whose PR adds LINT_PR, with the fixture lint package beside it."""
+        pkg = self.repo(d, "package hint\n", LINT_PR, LINT_TEST)
+        (pkg.parent / "lint").mkdir()
+        (pkg.parent / "lint" / "lint_test.go").write_text(LINT_SRC)
+        return pkg
+
+    def lint_verdicts(self, lints):
+        """({line: (status, killed_by)}, the tree's files after) of deletion_mutants on hint.go with
+        the fixture lint package beside it and LINTS as given."""
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.fixture(d)
+            added = mutgate.added_lines(subprocess.run(
+                ["git", "-C", d, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1", "--", "broker"],
+                capture_output=True, text=True, check=True).stdout)[0]
+            tmp = pathlib.Path(d) / "tmp"
+            tmp.mkdir()
+            with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "LINTS", lints):
+                got, problem = mutgate.deletion_mutants("hint", added, tmp, self.lister(tmp), 1)
+            self.assertIsNone(problem)
+            after = {p.relative_to(d).as_posix(): p.read_text() for p in pkg.parent.rglob("*.go")}
+        return {m["line"]: (m["status"], m.get("killed_by")) for m in got}, after
+
+    def test_a_deletion_a_listed_lint_refuses_is_killed_by_that_lint(self):
+        # REQ: MUT-lint-held
+        none, _ = self.lint_verdicts(())
+        self.assertEqual(none[5], ("LIVED", None))  # no test of hint reads b after Keep
+        # A lint that fails unmutated, or names no test, kills nothing; the one that refuses the tree does.
+        got, after = self.lint_verdicts((("lint", "TestBroken"), ("lint", "TestMissing"), ("lint", "TestWiped")))
+        self.assertEqual(got[5], ("KILLED", "TestWiped"))
+        self.assertEqual({**got, 5: none[5]}, none)  # the other sites keep their verdicts
+        # The lint ran on a copy: the tree holds the PR's text, and no lint-tree is left behind.
+        self.assertEqual(after["broker/hint/hint.go"], LINT_PR)
+        self.assertEqual(after["broker/lint/lint_test.go"], LINT_SRC)
+
+    def test_a_lint_that_passes_fails_unmutated_times_out_or_passes_the_cap_kills_nothing(self):
+        # REQ: MUT-lint-held
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.fixture(d)
+            gone = LINT_PR.replace("\tclear(b)\n", "\n").encode()
+            for lint in ("TestBroken", "TestSlow", "TestHog", "TestKeep", "TestMissing"):
+                with self.subTest(lint), mock.patch.object(mutgate, "BROKER", pkg.parent), \
+                        mock.patch.object(mutgate, "LINTS", (("lint", lint),)), tempfile.TemporaryDirectory() as tmp:
+                    self.assertEqual(mutgate.lint_kills("hint", [(0, "hint.go", gone)], pathlib.Path(tmp), 256 << 20), {})
+            with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "LINTS", (("nolint", "TestWiped"),)), \
+                    tempfile.TemporaryDirectory() as tmp:
+                self.assertEqual(mutgate.lint_kills("hint", [(0, "hint.go", gone)], pathlib.Path(tmp)), {})
+            # The same call with the refusing lint kills, so each case above is the lint's own.
+            with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "LINTS", (("lint", "TestWiped"),)), \
+                    tempfile.TemporaryDirectory() as tmp:
+                self.assertEqual(mutgate.lint_kills("hint", [(0, "hint.go", gone)], pathlib.Path(tmp), 256 << 20), {0: "TestWiped"})
+            # Each deletion is alone in the tree its lint reads: the one before it is put back.
+            with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "LINTS", (("lint", "TestWiped"),)), \
+                    tempfile.TemporaryDirectory() as tmp:
+                self.assertEqual(mutgate.lint_kills("hint", [(0, "hint.go", gone), (1, "hint.go", LINT_PR.encode())],
+                                                    pathlib.Path(tmp)), {0: "TestWiped"})
+
+    def test_each_listed_lint_is_a_top_level_test_of_its_package(self):
+        # REQ: MUT-lint-held
+        self.assertTrue(mutgate.LINTS)
+        for pkg, name in mutgate.LINTS:
+            srcs = "".join(p.read_text() for p in (ROOT / "broker" / pkg).glob("*_test.go"))
+            self.assertRegex(srcs, rf"(?m)^func {name}\(t \*testing\.T\) {{$", (pkg, name))
+
+    def test_the_wipe_lints_kill_the_deletions_whose_records_retired(self):
+        # REQ: MUT-lint-held
+        # The acceptance of #6346 on broker itself: each wipe whose record entry this row dropped.
+        sites = [("clerk/run", "gmailsignin.go", "sl, err := clerk.NewAESSealer(k)", "clear(k)"),
+                 ("clerk/handoff", "codeseed.go", "plain, err := g.Open(nil, rest[:g.NonceSize()]", "defer clear(plain)"),
+                 ("clerk/camera", "store.go", "plain, err := g.Open(nil, make([]byte, g.NonceSize()), ct", "defer clear(plain)")]
+        want = {}
+        for i, (pkg, fname, call, wipe) in enumerate(sites):
+            lines = (ROOT / "broker" / pkg / fname).read_text().split("\n")
+            at = next(n for n, l in enumerate(lines) if call in l) + 1
+            self.assertEqual(lines[at].strip(), wipe, (pkg, fname))
+            lines[at] = ""
+            with tempfile.TemporaryDirectory() as tmp:
+                got = mutgate.lint_kills(pkg, [(i, fname, "\n".join(lines).encode())], pathlib.Path(tmp))
+            want[i] = ("TestEverySealingKeyIsWipedRightAfterItsSealer" if i == 0
+                       else "TestEveryOpenedPlaintextIsWipedOnEveryPath")
+            self.assertEqual(got, {i: want[i]}, (pkg, fname))
 
 
 if __name__ == "__main__":
