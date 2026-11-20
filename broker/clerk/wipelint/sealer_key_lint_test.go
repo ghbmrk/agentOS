@@ -20,14 +20,15 @@ package wipelint_test
 // key bytes). A named constructor with a possible key is listed in
 // sealers, naming which of them are keys, or the build fails; a func
 // type or literal with one fails outright (no name to list). A listed key
-// is a byte slice or byte array: a string key cannot be wiped and a key of
-// any other form cannot be wiped by a statement, so each fails the
-// listing, with the reason. A call of a listed constructor with keys is
-// the only right-hand side of an assignment (`s, err := f(k)`, or =) in a
-// statement list, each key argument a local variable, and the statements
-// right after it are the builtin `clear(k)` for a slice or `clear(k[:])`
-// for an array (or `defer` of it), one per key, so the wipe runs before
-// anything can return. Any other use fails: an argument that is an
+// is a byte slice: a string key cannot be wiped, an array key passes by
+// value and leaves the callee an unwiped copy, and a key of any other form
+// cannot be wiped by a statement, so each fails the listing, with the
+// reason. A call of a listed constructor with keys is the only right-hand
+// side of an assignment (`s, err := f(k)`, or =) in a statement list,
+// each key argument a local variable, and the statements right after it
+// are the builtin `clear(k)` or `defer clear(k)`, one per key. `clear(k)`
+// wipes before anything can return; `defer clear(k)` wipes when the
+// function returns, on every path, so the key lives until then. Any other use fails: an argument that is an
 // expression, a wipe after an error check, a clear of another variable,
 // the call in a return, a var declaration, an if header or another call's
 // arguments, or the constructor taken as a value. A function listed in
@@ -320,7 +321,7 @@ func keyProblems(fset *token.FileSet, f *ast.File, info *types.Info, keys map[st
 		case !called[id]:
 			problems = append(problems, line(id)+": "+id.Name+" taken as a value; call it and clear its key right after")
 		default:
-			problems = append(problems, line(id)+": "+id.Name+"'s key is not wiped right after the call; write `s, err := "+id.Name+"(k)` then `clear(k)` (`clear(k[:])` for an array, or `defer` of it) as the next statement, with k a local variable")
+			problems = append(problems, line(id)+": "+id.Name+"'s key is not wiped right after the call; write `s, err := "+id.Name+"(k)` then `clear(k)` (or `defer clear(k)`) as the next statement, with k a local variable")
 		}
 		return true
 	})
@@ -328,9 +329,9 @@ func keyProblems(fset *token.FileSet, f *ast.File, info *types.Info, keys map[st
 }
 
 // keyedCall returns the listed callee of s when s is `a, b := f(k)` (or
-// =) with f listed, every key argument a local byte slice or byte array
-// variable, and the statements in rest starting with one builtin wipe of
-// each: `clear(v)` for a slice, `clear(v[:])` for an array, or defer.
+// =) with f listed, every key argument a local byte slice variable, and
+// the statements in rest starting with one builtin clear (or defer clear)
+// of each.
 func keyedCall(s ast.Stmt, info *types.Info, listed func(types.Object) *sealerKey, rest []ast.Stmt) *ast.Ident {
 	a, isAssign := s.(*ast.AssignStmt)
 	if !isAssign || len(a.Rhs) != 1 {
@@ -354,14 +355,13 @@ func keyedCall(s ast.Stmt, info *types.Info, listed func(types.Object) *sealerKe
 	if !isSig || sig.Variadic() || sig.Params().Len() != len(c.Args) {
 		return nil
 	}
-	want := map[types.Object]form{}
+	want := map[types.Object]bool{}
 	for i, arg := range c.Args {
 		p := sig.Params().At(i)
 		if !slices.Contains(entry.keys, p.Name()) {
 			continue
 		}
-		fm := keyForm(p.Type())
-		if fm != formSlice && fm != formArray {
+		if keyForm(p.Type()) != formSlice {
 			return nil
 		}
 		v, isID := ast.Unparen(arg).(*ast.Ident)
@@ -372,14 +372,14 @@ func keyedCall(s ast.Stmt, info *types.Info, listed func(types.Object) *sealerKe
 		if !isVar || obj.IsField() || obj.Parent() == nil || obj.Parent() == obj.Pkg().Scope() {
 			return nil
 		}
-		want[obj] = fm
+		want[obj] = true
 	}
 	if len(want) == 0 || len(rest) < len(want) {
 		return nil
 	}
 	for _, r := range rest[:len(want)] {
-		obj, fm := clearOf(r, info)
-		if obj == nil || want[obj] != fm {
+		obj := clearOf(r, info)
+		if obj == nil || !want[obj] {
 			return nil
 		}
 		delete(want, obj)
@@ -390,10 +390,9 @@ func keyedCall(s ast.Stmt, info *types.Info, listed func(types.Object) *sealerKe
 	return id
 }
 
-// clearOf returns the variable s wipes and its form when s is `clear(v)`
-// (a slice) or `clear(v[:])` (an array), or defer of either, with the
-// builtin clear, else nil.
-func clearOf(s ast.Stmt, info *types.Info) (types.Object, form) {
+// clearOf returns the variable s wipes when s is `clear(v)` or `defer
+// clear(v)` with the builtin clear, else nil.
+func clearOf(s ast.Stmt, info *types.Info) types.Object {
 	var c *ast.CallExpr
 	switch s := s.(type) {
 	case *ast.ExprStmt:
@@ -402,28 +401,20 @@ func clearOf(s ast.Stmt, info *types.Info) (types.Object, form) {
 		c = s.Call
 	}
 	if c == nil || len(c.Args) != 1 {
-		return nil, formNone
+		return nil
 	}
 	fn, isID := ast.Unparen(c.Fun).(*ast.Ident)
 	if !isID || fn.Name != "clear" {
-		return nil, formNone
+		return nil
 	}
 	if _, builtin := info.Uses[fn].(*types.Builtin); !builtin {
-		return nil, formNone
+		return nil
 	}
-	arg, fm := ast.Unparen(c.Args[0]), formSlice
-	if sl, isSlice := arg.(*ast.SliceExpr); isSlice && sl.Low == nil && sl.High == nil && !sl.Slice3 {
-		arg, fm = ast.Unparen(sl.X), formArray
-	}
-	v, isID := arg.(*ast.Ident)
+	v, isID := ast.Unparen(c.Args[0]).(*ast.Ident)
 	if !isID {
-		return nil, formNone
+		return nil
 	}
-	obj := info.Uses[v]
-	if obj == nil || keyForm(obj.Type()) != fm {
-		return nil, formNone
-	}
-	return obj, fm
+	return info.Uses[v]
 }
 
 // constructorProblems marks each listed function the file declares or
@@ -469,8 +460,10 @@ func constructorProblems(fset *token.FileSet, f *ast.File, info *types.Info, sea
 				problems = append(problems, line(id)+": "+name+" takes its key "+k+" as the receiver, which no call site can wipe; take it as a parameter")
 			case fm == formString:
 				problems = append(problems, line(id)+": "+name+" takes its key "+k+" as a string, which cannot be wiped; take it as a []byte")
-			case fm != formSlice && fm != formArray:
-				problems = append(problems, line(id)+": "+name+" takes its key "+k+" as a type the lint cannot wipe; take it as a []byte or [N]byte")
+			case fm == formArray:
+				problems = append(problems, line(id)+": "+name+" takes its key "+k+" as a byte array, which passes by value and leaves the callee an unwiped copy; take it as a []byte")
+			case fm != formSlice:
+				problems = append(problems, line(id)+": "+name+" takes its key "+k+" as a type the lint cannot wipe; take it as a []byte")
 			}
 		}
 	}
@@ -577,7 +570,7 @@ type form int
 const (
 	formNone    form = iota // holds no key bytes
 	formSlice               // a byte slice, named or not: clear(v)
-	formArray               // a byte array, named or not: clear(v[:])
+	formArray               // a byte array, named or not: passes by value, so the callee holds a copy
 	formString              // a string: cannot be wiped
 	formUnknown             // holds key bytes no statement wipes, or a type the lint cannot read
 )
@@ -695,8 +688,7 @@ func isByte(t types.Type) bool {
 // each case is one package (the head below, then the body, unless the
 // body is a whole file), and want is the number of problems it has.
 // newSealer stands for a listed constructor of two keys and a label,
-// newArr for one of an array key, newGen for a generic one, newNonce for
-// one listed with no keys.
+// newGen for a generic one, newNonce for one listed with no keys.
 func TestTheKeyLintRefusesEachShape(t *testing.T) {
 	l, err := keyLoad()
 	if err != nil {
@@ -711,7 +703,6 @@ import (
 )
 
 func newSealer(a []byte, label string, b []byte) (clerk.Sealer, error) { return nil, nil }
-func newArr(k [32]byte) (clerk.Sealer, error)                          { return nil, nil }
 func newGen[K ~[]byte](k K) (clerk.Sealer, error)                      { return nil, nil }
 func newNonce(n []byte) (clerk.Sealer, error)                          { return nil, nil }
 
@@ -895,19 +886,8 @@ func (own) Open(blob, aad []byte) ([]byte, error) { return nil, nil }
 
 func newOwn(key []byte) (*own, error) { return &own{}, nil }`, 1},
 		// Key forms (#6349).
-		{"an array key cleared through a slice of it", `func f() error {
-	var k [32]byte
-	s, err := newArr(k)
-	defer clear(k[:])
-	sink = s
-	return err
-}`, 0},
-		{"an array key not cleared", `func f(k [32]byte) error {
-	s, err := newArr(k)
-	sink = s
-	return err
-}`, 1},
-		{"an array key cleared as a slice would be refused by the compiler, a slice key cleared as an array is refused", `func f(k []byte) error {
+		{"an array key, listed, passes by value", `func newArr(k [32]byte) (clerk.Sealer, error) { return nil, nil }`, 1},
+		{"a key cleared through a reslice", `func f(k []byte) error {
 	s, err := clerk.NewAESSealer(k)
 	clear(k[:])
 	sink = s
