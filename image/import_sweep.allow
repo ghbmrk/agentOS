@@ -76,6 +76,168 @@
 # libformw (ncurses forms); nothing in the image needs it.
 /usr/lib/x86_64-linux-gnu/libformw.so.6.*
 
+[glob]
+# The files of the built image (main tree and initrds) that may import or reach glibc's glob(), glob64 or
+# wordexp, which calls glob() (DEBIAN-CVE-2026-126765, #6285): one glob per line, each a file the
+# -126765 records in assurance/vulncheck.json name. As for the regex list above, a file that matches
+# none fails the step, and so does an entry that matches no file.
+
+# libsystemd-shared's one glob() call is basic/glob-util.c safe_glob (systemd 257.13), behind glob_first,
+# glob_extend and glob_exists. Its callers and their patterns: PID 1 and systemd-executor (libsystemd-core)
+# for unit settings (EnvironmentFile=, ImportCredential=, PathExistsGlob=, ConditionPathExistsGlob=);
+# networkd and udevd for the conditions of .network, .netdev and .link files; systemd-analyze for a
+# condition on its command line; systemd-sysctl and systemd-tmpfiles for sysctl.d and tmpfiles.d
+# entries; journalctl for --file. Each pattern is root-owned configuration (no agentOS process
+# starts a transient unit) or the command line of a root tool; none comes from the network or a guest.
+/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so
+
+# The files that reach glob() only through libsystemd-shared; none of them but those named above calls
+# into safe_glob's wrappers, so linking it is all they share (journald, logind, resolved and the rest).
+/usr/bin/bootctl
+/usr/bin/busctl
+/usr/bin/hostnamectl
+/usr/bin/journalctl
+/usr/bin/kernel-install
+/usr/bin/localectl
+/usr/bin/loginctl
+/usr/bin/networkctl
+/usr/bin/resolvectl
+/usr/bin/systemctl
+/usr/bin/systemd-ac-power
+/usr/bin/systemd-analyze
+/usr/bin/systemd-ask-password
+/usr/bin/systemd-cat
+/usr/bin/systemd-cgls
+/usr/bin/systemd-cgtop
+/usr/bin/systemd-creds
+/usr/bin/systemd-cryptenroll
+/usr/bin/systemd-cryptsetup
+/usr/bin/systemd-delta
+/usr/bin/systemd-detect-virt
+/usr/bin/systemd-escape
+/usr/bin/systemd-firstboot
+/usr/bin/systemd-hwdb
+/usr/bin/systemd-id128
+/usr/bin/systemd-inhibit
+/usr/bin/systemd-machine-id-setup
+/usr/bin/systemd-mount
+/usr/bin/systemd-notify
+/usr/bin/systemd-path
+/usr/bin/systemd-repart
+/usr/bin/systemd-run
+/usr/bin/systemd-socket-activate
+/usr/bin/systemd-stdio-bridge
+/usr/bin/systemd-sysext
+/usr/bin/systemd-sysusers
+/usr/bin/systemd-tmpfiles
+/usr/bin/systemd-tty-ask-password-agent
+/usr/bin/systemd-vpick
+/usr/bin/timedatectl
+/usr/bin/udevadm
+/usr/bin/varlinkctl
+/usr/lib/systemd/system-generators/systemd-bless-boot-generator
+/usr/lib/systemd/system-generators/systemd-cryptsetup-generator
+/usr/lib/systemd/system-generators/systemd-debug-generator
+/usr/lib/systemd/system-generators/systemd-fstab-generator
+/usr/lib/systemd/system-generators/systemd-getty-generator
+/usr/lib/systemd/system-generators/systemd-gpt-auto-generator
+/usr/lib/systemd/system-generators/systemd-hibernate-resume-generator
+/usr/lib/systemd/system-generators/systemd-integritysetup-generator
+/usr/lib/systemd/system-generators/systemd-rc-local-generator
+/usr/lib/systemd/system-generators/systemd-run-generator
+/usr/lib/systemd/system-generators/systemd-ssh-generator
+/usr/lib/systemd/system-generators/systemd-system-update-generator
+/usr/lib/systemd/system-generators/systemd-sysv-generator
+/usr/lib/systemd/system-generators/systemd-tpm2-generator
+/usr/lib/systemd/system-generators/systemd-veritysetup-generator
+/usr/lib/systemd/systemd
+/usr/lib/systemd/systemd-backlight
+/usr/lib/systemd/systemd-battery-check
+/usr/lib/systemd/systemd-binfmt
+/usr/lib/systemd/systemd-bless-boot
+/usr/lib/systemd/systemd-boot-check-no-failures
+/usr/lib/systemd/systemd-bsod
+/usr/lib/systemd/systemd-cgroups-agent
+/usr/lib/systemd/systemd-executor
+/usr/lib/systemd/systemd-fsck
+/usr/lib/systemd/systemd-growfs
+/usr/lib/systemd/systemd-hibernate-resume
+/usr/lib/systemd/systemd-hostnamed
+/usr/lib/systemd/systemd-initctl
+/usr/lib/systemd/systemd-integritysetup
+/usr/lib/systemd/systemd-journald
+/usr/lib/systemd/systemd-keyutil
+/usr/lib/systemd/systemd-localed
+/usr/lib/systemd/systemd-logind
+/usr/lib/systemd/systemd-makefs
+/usr/lib/systemd/systemd-measure
+/usr/lib/systemd/systemd-modules-load
+/usr/lib/systemd/systemd-network-generator
+/usr/lib/systemd/systemd-networkd
+/usr/lib/systemd/systemd-networkd-wait-online
+/usr/lib/systemd/systemd-pcrextend
+/usr/lib/systemd/systemd-pcrlock
+/usr/lib/systemd/systemd-pstore
+/usr/lib/systemd/systemd-quotacheck
+/usr/lib/systemd/systemd-random-seed
+/usr/lib/systemd/systemd-remount-fs
+/usr/lib/systemd/systemd-reply-password
+/usr/lib/systemd/systemd-resolved
+/usr/lib/systemd/systemd-rfkill
+/usr/lib/systemd/systemd-sbsign
+/usr/lib/systemd/systemd-shutdown
+/usr/lib/systemd/systemd-sleep
+/usr/lib/systemd/systemd-socket-proxyd
+/usr/lib/systemd/systemd-ssh-proxy
+/usr/lib/systemd/systemd-storagetm
+/usr/lib/systemd/systemd-sulogin-shell
+/usr/lib/systemd/systemd-sysctl
+/usr/lib/systemd/systemd-timedated
+/usr/lib/systemd/systemd-tpm2-setup
+/usr/lib/systemd/systemd-update-done
+/usr/lib/systemd/systemd-user-runtime-dir
+/usr/lib/systemd/systemd-user-sessions
+/usr/lib/systemd/systemd-veritysetup
+/usr/lib/systemd/systemd-volatile-root
+/usr/lib/systemd/systemd-xdg-autostart-condition
+/usr/lib/systemd/user-environment-generators/30-systemd-environment-d-generator
+/usr/lib/systemd/user-generators/systemd-xdg-autostart-generator
+/usr/lib/udev/ata_id
+/usr/lib/udev/cdrom_id
+/usr/lib/udev/dmi_memory_id
+/usr/lib/udev/fido_id
+/usr/lib/udev/iocost
+/usr/lib/udev/mtd_probe
+/usr/lib/udev/scsi_id
+/usr/lib/udev/v4l_id
+/usr/lib/x86_64-linux-gnu/cryptsetup/libcryptsetup-token-systemd-fido2.so
+/usr/lib/x86_64-linux-gnu/cryptsetup/libcryptsetup-token-systemd-pkcs11.so
+/usr/lib/x86_64-linux-gnu/cryptsetup/libcryptsetup-token-systemd-tpm2.so
+/usr/lib/x86_64-linux-gnu/systemd/libsystemd-core-*.so
+
+# iproute2's ip: its one glob() (ip/iptuntap.c, 6.15) walks the fixed pattern /proc/[0-9]*/fd/[0-9]*
+# for "ip tuntap show".
+/usr/bin/ip
+
+# libnftables globs an "include" path in a ruleset. nft loads only rulesets agentOS renders (port1's
+# fixed set commands and a name matching [a-zA-Z0-9_.-], the enforcer's tables) or root-owned files;
+# none holds an include.
+/usr/lib/x86_64-linux-gnu/libnftables.so.1.*
+/usr/sbin/nft
+
+# libpopt globs only in its config readers (poptReadConfigFiles, poptReadDefaultConfig and poptInit,
+# src/poptconfig.c); cryptsetup 2.7.5's tools call none of them.
+/usr/lib/x86_64-linux-gnu/libpopt.so.0.*
+/usr/sbin/cryptsetup
+/usr/sbin/integritysetup
+/usr/sbin/veritysetup
+
+# PAM modules globbing their own root-owned config directories (/etc/security/access.d, limits.d and
+# namespace.d); a module runs only in a process that loads PAM, and its patterns are fixed paths.
+/usr/lib/x86_64-linux-gnu/security/pam_access.so
+/usr/lib/x86_64-linux-gnu/security/pam_limits.so
+/usr/lib/x86_64-linux-gnu/security/pam_namespace.so
+
 [cipher]
 # The files of the built image (main tree and initrds) whose bytes name an OpenSSL by-name cipher
 # selector (import_sweep.py CIPHER_NAMES: EVP_CIPHER_fetch, EVP_get_cipherbyname, systemd's

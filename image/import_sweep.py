@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Which ELF files in a built image import glibc's POSIX regex or wide scanf functions (#5697, EVL-5).
+"""Which ELF files in a built image import glibc's POSIX regex, glob() or wide scanf functions (#5697,
+#6285, EVL-5).
 
-The image's glibc records (assurance/vulncheck.json, DEBIAN-CVE-2026-100290 and -115819) accept the
-advisories on the grounds that no long-lived or network-facing process calls the affected functions.
+The image's glibc records (assurance/vulncheck.json, DEBIAN-CVE-2026-100290, -126765 and -115819) accept
+the advisories on the grounds that no long-lived or network-facing process calls the affected functions
+on input from the network or a guest.
 This reads that from the tree CI builds, not from another distribution's builds: every ELF file's
 dynamic imports (objdump -pT), in the main tree (the root partition and the verified /usr) and in each
 initrd of the boot entry (OUT/initrd/, every cpio member).
@@ -27,8 +29,9 @@ names do not.
 
 --summary exits 1 when a claim the glibc records rest on stops holding: any file, in any place, imports
 or reaches a wide scanf function, or imports or reaches a regex function and matches no glob in ALLOW
-(each a file the image -100290 record names); a glob that matches nothing also fails, so the list
-stays the record's. It also exits 1 when a file holding a selector name or a SPELT name matches no [cipher]
+(each a file the image -100290 record names), or imports or reaches glob() and matches no glob in its
+[glob] section (each a file the -126765 records name); a glob that matches nothing also fails, so each
+list stays its record's. It also exits 1 when a file holding a selector name or a SPELT name matches no [cipher]
 entry of ALLOW or more than one, or holds other sites or other bytes (SHA-256) than the counted entry it
 matches, or an entry matches nothing; and on an ALLOW it cannot read (read_allow). The
 control is the scan itself: it also exits 1 when objdump failed on a file,
@@ -55,8 +58,12 @@ sys.path.insert(0, str(HERE))
 # DEBIAN-CVE-2026-115819 (the wide scanf family, with the C99/C23 aliases glibc's headers bind them to).
 # glibc's own callers of the regex engine count as it: rpmatch (stdlib/rpmatch.c, the locale's
 # YESEXPR) and the compat step/advance (misc/regexp.c). The wide scanf family has none.
+# DEBIAN-CVE-2026-126765 (#6285): glob() and glob64, every version (posix/glob.c is the one engine), and
+# wordexp, glibc's one shared-library caller of it (posix/wordexp.c do_parse_glob, 2.41); its other
+# caller, ldconfig's include patterns (elf/ldconfig.c), is static and reads root-owned configuration.
 GROUPS = {
     "regex": re.compile(r"(regcomp|regexec|re_\w+|rpmatch|step|advance)$"),
+    "glob": re.compile(r"(glob(64)?|wordexp)$"),
     "wscanf": re.compile(r"(__isoc(99|23)_)?v?(sw|fw|w)scanf$"),
 }
 # #5341: the openssl records (DEBIAN-CVE-2026-88823 and -95692 among them, AES-GCM-SIV) rest on no file
@@ -300,7 +307,7 @@ def reach(places):
 
 
 def load_allow(path):
-    """The regex globs of ALLOW: one per line, after any '#' comment, up to a [cipher] line."""
+    """The regex globs of ALLOW: one per line, after any '#' comment, up to its first section line."""
     return read_allow(path)[0]
 
 
@@ -315,21 +322,30 @@ REVIEW = ("review where its names come from, then %s the [cipher] entry and the 
 
 
 def read_allow(path):
-    """(the regex globs, the [cipher] entries) of ALLOW. A [cipher] entry is a glob, then either "*" (not
+    """(the regex globs, the [cipher] entries, the [glob] globs) of ALLOW. The regex globs come first, one
+    per line, then each section once, opened by its line ([glob] or [cipher]); a [glob] entry is a glob,
+    as a regex one is. A [cipher] entry is a glob, then either "*" (not
     counted) or the SHA-256 of the file reviewed and the sites it holds exactly (FORMAT), read as
     {"sha256": hex, "sites": {name: count}}: a new package version changes the bytes, so the source is
     read again even when the counts hold (#5861). Exits naming the line on any other entry, a glob given
-    twice, or a name or the digest given twice in one entry."""
-    regex, cipher, section = [], {}, None
+    twice, or a name or the digest given twice in one entry, and on a section line it does not know or
+    has read already."""
+    regex, cipher, globs, section, seen = [], {}, [], None, set()
     for n, l in enumerate(pathlib.Path(path).read_text().splitlines(), 1):
         l = l.split("#", 1)[0].strip()
 
         def bad(why):
             sys.exit("import sweep: %s:%d: %s; a [cipher] entry is %s" % (path, n, why, FORMAT))
-        if l == "[cipher]":
-            section = "cipher"
+        if l.startswith("["):
+            section = l[1:-1] if l.endswith("]") else l
+            if section not in ("glob", "cipher") or section in seen:
+                sys.exit("import sweep: %s:%d: %s is %s; the sections are [glob] and [cipher], each once"
+                         % (path, n, l, "given again" if section in seen else "no section"))
+            seen.add(section)
         elif l and section is None:
             regex.append(l)
+        elif l and section == "glob":
+            globs.append(l)
         elif l:
             glob, *want = l.split()
             if glob in cipher:
@@ -355,7 +371,7 @@ def read_allow(path):
             if not sites:
                 bad("%s counts no site" % glob)
             cipher[glob] = {"sha256": digests[0], "sites": sites}
-    return regex, cipher
+    return regex, cipher, globs
 
 
 def entry_line(p, sha, sites):
@@ -396,21 +412,29 @@ def cipher_refusals(places, entries):
     return errs
 
 
-def refusals(places, allow):
-    """Each claim of the glibc records that PLACES break, against the regex globs ALLOW."""
-    errs, used = [], set()
+# Each listed group: what its importers are called, the allow file's section for them, and the records
+# naming them. A group not listed here (wscanf) has no allowed importer.
+LISTED = {"regex": ("a regex function", "", "the image -100290 record"),
+          "glob": ("glob()", " [glob]", "the -126765 records")}
+
+
+def refusals(places, allow, globs=()):
+    """Each claim of the glibc records that PLACES break, against the regex globs ALLOW and the [glob]
+    section's GLOBS."""
+    errs, used, entries = [], set(), {"regex": allow, "glob": globs}
     for (g, p), where in sorted(reach(places).items()):
-        if g == "wscanf":
+        if g not in LISTED:
             errs.append("%s: %s imports or reaches a wide scanf function; the -115819 records say nothing does"
                         % (" ".join(where), p))
             continue
-        hit = [a for a in allow if fnmatch.fnmatchcase(p, a)]
+        hit = [(g, a) for a in entries[g] if fnmatch.fnmatchcase(p, a)]
         used.update(hit)
         if not hit:
-            errs.append("%s: %s imports or reaches a regex function and is not in import_sweep.allow; review it, "
-                        "name it in the image -100290 record, then add the entry: %s" % (" ".join(where), p, p))
-    errs += ["import_sweep.allow: %s matches no file that reaches a regex function; remove it" % a
-             for a in allow if a not in used]
+            what, section, record = LISTED[g]
+            errs.append("%s: %s imports or reaches %s and is not in import_sweep.allow%s; review it, name it in "
+                        "%s, then add the entry: %s" % (" ".join(where), p, what, section, record, p))
+    errs += ["import_sweep.allow:%s %s matches no file that reaches %s; remove it" % (LISTED[g][1], a, LISTED[g][0])
+             for g in LISTED for a in entries[g] if (g, a) not in used]
     return errs
 
 
@@ -456,8 +480,8 @@ def main(argv):
         places = json.loads(pathlib.Path(argv[1]).read_text())
         lines = summary(places)
         print("\n".join(lines + annotations(lines)))
-        regex, cipher = read_allow(argv[2] if len(argv) == 3 else ALLOW)
-        errs = problems(places) + refusals(places, regex) + cipher_refusals(places, cipher)
+        regex, cipher, globs = read_allow(argv[2] if len(argv) == 3 else ALLOW)
+        errs = problems(places) + refusals(places, regex, globs) + cipher_refusals(places, cipher)
         for e in errs[:10]:
             print("::error title=import sweep::" + e.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
     elif len(argv) == 2 and argv[0] == "--tree":
