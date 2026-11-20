@@ -547,6 +547,11 @@ class RefusalsTest(unittest.TestCase):
         cipher = sweep.read_allow(sweep.ALLOW)[1]
         self.assertTrue(all(g.startswith("/usr/") for g in cipher), cipher)
         self.assertIn("EVP_CIPHER_fetch", cipher["/usr/lib/x86_64-linux-gnu/libcryptsetup.so.12.*"]["sites"])
+        # #6285: so are the [glob] entries, each named once, and libsystemd-shared's call sites are reviewed there.
+        globs = sweep.read_allow(sweep.ALLOW)[2]
+        self.assertTrue(all(g.startswith("/usr/") for g in globs), globs)
+        self.assertEqual(len(globs), len(set(globs)))
+        self.assertIn("/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so", globs)
 
     def test_bad_cipher_entries_name_the_line(self):
         # L3 6899461135 items 2, 3 and 6, and an entry not keyed to its bytes (#5861).
