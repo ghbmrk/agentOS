@@ -248,9 +248,16 @@ class Manager:
     def user_manager(self, timeout=120):
         """Start root's user manager (USER_MANAGER) in the container, wait until it is up, and return it
         (UserManager)."""
-        proc = subprocess.Popen(["nsenter", "-t", str(self.pid), "-a", "--", "sh", "-c", USER_MANAGER,
-                                 "offline-systemd-user"] + list(PINNED), stdin=subprocess.DEVNULL, stdout=self.slave,
-                                stderr=self.slave)
+        # Its cgroup is made and joined from the runner's side, before nsenter: under a cgroup2 mount with
+        # nsdelegate (a runner booted by systemd) a process in the container's cgroup namespace may not move
+        # itself in from outside it. PID 1 sits in init.scope directly under the container's root group.
+        cg = cgroup_of(self.pid) or ""
+        if not cg.endswith("/init.scope"):
+            raise SystemExit("offline systemd: PID 1 is in cgroup %r, not the container root's init.scope" % cg)
+        group = "/sys/fs/cgroup%s/agentos-offline-user" % cg[:-len("/init.scope")]
+        proc = subprocess.Popen(["sh", "-c", USER_CGROUP, "offline-systemd-user-cgroup", group, "nsenter", "-t",
+                                 str(self.pid), "-a", "--", "sh", "-c", USER_MANAGER, "offline-systemd-user"]
+                                + list(PINNED), stdin=subprocess.DEVNULL, stdout=self.slave, stderr=self.slave)
         self.user_procs.append(proc)
         u = UserManager(self)
         end = time.monotonic() + timeout
@@ -335,13 +342,18 @@ class UserManager:
 # Root's user manager, run in all of MANAGER's namespaces by nsenter, not as a unit of PID 1: a unit would take
 # the tree's own type-wide service.d drop-ins (a User= or Environment= there changed or stopped it). It gets
 # the environment pam_systemd and user-runtime-dir@0 give user@0.service (HOME, USER, LOGNAME, a
-# root-owned XDG_RUNTIME_DIR), a cgroup of its own (as Delegate=yes gives it), and the console's pty as its
-# output (user_manager), which Manager reads for failed generators (its user-generators). Its argv ends
-# with PINNED.
+# root-owned XDG_RUNTIME_DIR), a cgroup of its own (as Delegate=yes gives it; USER_CGROUP joins it on the
+# runner's side), and the console's pty as its output (user_manager), which Manager reads for failed
+# generators (its user-generators). Its argv ends with PINNED.
+USER_CGROUP = r'''set -eu
+mkdir -p "$1"
+echo $$ >"$1/cgroup.procs"
+shift
+exec "$@"
+'''
 USER_MANAGER = r'''set -eu
-mkdir -p /sys/fs/cgroup/agentos-offline-user /run/user/0
+mkdir -p /run/user/0
 chmod 0700 /run/user/0
-echo $$ >/sys/fs/cgroup/agentos-offline-user/cgroup.procs
 exec env -i HOME=/root USER=root LOGNAME=root XDG_RUNTIME_DIR=/run/user/0 /usr/lib/systemd/systemd --user "$@"
 '''
 
