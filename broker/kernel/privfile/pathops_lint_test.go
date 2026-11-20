@@ -6,7 +6,8 @@ package privfile
 // process makes by path follows any link on that path, so a guest, clerk or
 // other uid that can plant one in a directory on it redirects the write,
 // removal or read (#3282, #3382, #3624). The root side is derived, not
-// listed: every binary a shipped .service or .socket unit (#4330) starts
+// listed: every binary a shipped .service or .socket unit (#4330; one under
+// broker/ that image/build.sh installs counts too, #4636) starts
 // with no User= or DynamicUser= (or on an Exec line with a + or ! prefix),
 // each Exec program a plain absolute path, read across continued lines,
 // sections, quotes and ;, with no substitution in what a wrapper runs
@@ -50,12 +51,20 @@ package privfile
 // it names (a bare name on PATH, a relative path, a shell's own expansion,
 // a change of directory, a program in a tree another uid writes: #4493,
 // which replaces this with an allow-list of root programs), and a mount
-// drop-in read alone for a packaged unit, whose type the lint does not see,
-// and what a rootOwned EnvironmentFile= holds.
+// drop-in read alone for a packaged unit, whose type the lint does not see.
+// In a built tree, a manager's configuration and root's user manager's
+// units are outside the check (unit_rules.py reads neither), and an env
+// file is read as image/ ships it.
 // A root unit's own namespace, search, stream and credential settings are
-// read (rootPathKeys, #4589), and its Environment= sets only rootEnv names;
+// read (rootPathKeys, #4589), and its Environment= sets only rootEnv names,
+// as does what its EnvironmentFile= holds (#4699), a mount's or swap's exec
+// settings and a manager's DefaultEnvironment= (#4718);
 // rootOwned means in rootTrees, so a root unit's WorkingDirectory=
-// /var/lib/agentos is refused. builtUnits holds the units of the image's
+// /var/lib/agentos is refused. What the manager opens as root for any unit,
+// a User= one too (managerOpens: a standard stream's file, an env file, a
+// credential, a terminal), is held the same way (#4641), and the paths it
+// opens, mounts or joins for one (userOpens) lie outside the world trees and
+// every grant (#6143). builtUnits holds the units of the image's
 // built root file system to the same rules, each with the files its own
 // systemd applies (image/unit_rules.py), a packaged unit's User= and
 // drop-ins and generated units included (#4677). The initrd's and the
@@ -460,6 +469,37 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 			}
 		})
 	}
+	// #4636: a unit kept beside its command under broker/, which build.sh
+	// installs (agentos-localui.service's root agentos-port1 step), counts
+	// as an image/ unit does; one in testdata or node_modules ships nowhere.
+	t.Run("a + line in a unit under broker/", func(t *testing.T) {
+		files := clone(files)
+		files["broker/cmd/agentos-side/agentos-side.service"] = "[Service]\nUser=agentos-side\nExecStartPre=+/usr/lib/agentos/agentos-side -x\nExecStart=/bin/true\n"
+		if bins := set(t, files); len(bins) != 1 || bins[0] != "./cmd/agentos-side" {
+			t.Fatalf("got %q, want ./cmd/agentos-side", bins)
+		}
+		if problems := lintFiles(t, files, ""); len(problems) != 1 || !strings.Contains(problems[0], "broker/side/side.go") {
+			t.Fatalf("the broker unit's root step's linked package: got %q, want its os.Remove refused", problems)
+		}
+	})
+	for _, dir := range []string{"testdata", "node_modules"} {
+		t.Run("a root unit under broker/'s "+dir, func(t *testing.T) {
+			files := clone(files)
+			files["broker/cmd/agentos-side/"+dir+"/agentos-side.service"] = "[Service]\nExecStart=/usr/lib/agentos/agentos-side\n"
+			if bins := set(t, files); len(bins) != 0 {
+				t.Fatalf("got %q, want none", bins)
+			}
+		})
+	}
+	t.Run("refuses a linked unit under broker/", func(t *testing.T) {
+		root := fakeRepo(t, clone(files))
+		if err := os.Symlink("main.go", filepath.Join(root, "broker/cmd/agentos-side/agentos-side.service")); err != nil {
+			t.Fatal(err)
+		}
+		if bins, err := rootBinaries(root); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("got %q, %v, want the link refused", bins, err)
+		}
+	})
 	// #4494 L3 2: ExecPaths= and ExecSearchPath= are paths, not commands.
 	t.Run("a root unit whose paths name a binary it does not run", func(t *testing.T) {
 		files := clone(files)
@@ -560,9 +600,12 @@ func TestRootSideUnitPathsAndGrants(t *testing.T) {
 		// The shapes shipped units use.
 		unit: "[Service]\nExecStart=/usr/lib/agentos/agentos-side\nTemporaryFileSystem=/:ro,noexec /run/agentos-setup:ro /etc/agentos/t\nBindReadOnlyPaths=/usr/lib/agentos/agentos-side\n" +
 			"Environment=GOMEMLIMIT=1 PATH=/usr/bin:/usr/sbin\nEnvironmentFile=-/etc/agentos/x.env\nWorkingDirectory=-/etc/agentos\nExecSearchPath=/usr/bin\nStateDirectory=agentos/modem\nRuntimeDirectory=agentos-root\n",
-		// No root command: what it binds and searches is its user's.
-		"image/mkosi/agentos-user.service": "[Service]\nUser=agentos-user\nExecStart=/usr/lib/agentos/agentos-side\nBindPaths=/var/lib/agentos-user:/usr/lib/agentos\nWorkingDirectory=/tmp\nEnvironment=PATH=/tmp\n" +
+		// No root command: what it searches is its user's; what it binds
+		// lies outside every grant (#6143).
+		"image/mkosi/agentos-user.service": "[Service]\nUser=agentos-user\nExecStart=/usr/lib/agentos/agentos-side\nBindPaths=/var/lib/agentos/u:/usr/lib/agentos\nWorkingDirectory=/tmp\nEnvironment=PATH=/tmp\n" +
 			"RuntimeDirectory=agentos-user\nStateDirectory=agentos-user:agentos-u\nConfigurationDirectory=agentos-user\n",
+		// The env file the root unit names, which image/ ships (#4699).
+		"image/mkosi/mkosi.extra/etc/agentos/x.env": "GOMEMLIMIT=1\n",
 	}
 	if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
 		t.Fatalf("shipped shapes: %v", err)
@@ -1134,7 +1177,15 @@ func underSystemdListed(t *testing.T, files map[string]string, ours func(string)
 	if recs.Links == nil {
 		t.Fatal("unit_rules.py printed no links")
 	}
-	return builtUnits(recs, filepath.Join(dir, "tree"))
+	// A root unit of ours reads its env file from the fixture's tree.
+	env := func(_, p string) (map[string]string, error) {
+		b, err := os.ReadFile(filepath.Join(fs, filepath.FromSlash(p)))
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return map[string]string{p: string(b)}, err
+	}
+	return builtUnitsWith(recs, filepath.Join(dir, "tree"), env)
 }
 
 func hasSystemd() bool {
@@ -1181,7 +1232,13 @@ func TestBuiltUnits(t *testing.T) {
 			if !kinds[true] || !kinds[false] {
 				t.Fatalf("records of %d units hold a file of ours %v and a package's %v; want both", len(recs.Units), kinds[true], kinds[false])
 			}
-			err = builtUnits(recs, t.TempDir())
+			// A root unit of ours reads the env files image/ ships
+			// (#4699); the records hold no file but units.
+			files, err := imageFiles(repoRoot(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = builtUnitsWith(recs, t.TempDir(), shippedEnv(repoRoot(t), files))
 			switch {
 			case recs.Want == "" && err != nil:
 				t.Fatal(err)
@@ -1829,6 +1886,11 @@ func imageUnits(files map[string]string) map[string]string {
 			out["/usr/lib/systemd/system/"+path.Base(p)] = text
 		case strings.HasSuffix(p, ".conf") && isDropinDir(dir):
 			out["/usr/lib/systemd/system/"+dir+"/"+path.Base(p)] = text
+		default:
+			// Any other file at its path under mkosi.extra (an env file).
+			if _, rest, ok := strings.Cut(p, "/mkosi.extra/"); ok {
+				out["/"+rest] = text
+			}
 		}
 	}
 	return out
@@ -1922,8 +1984,9 @@ func parseAllow(text string) (allows, pending map[string]string, bad []string) {
 // types run no program (a .swap's swapon runs no helper).
 var execUnits = map[string]bool{".service": true, ".socket": true}
 
-// unitTypes are the unit types the scan reads.
-var unitTypes = map[string]bool{".service": true, ".socket": true, ".mount": true}
+// unitTypes are the unit types the scan reads: a .swap for its exec
+// settings, which swapon runs as root with (#4718 item 1).
+var unitTypes = map[string]bool{".service": true, ".socket": true, ".mount": true, ".swap": true}
 
 // isDropinDir reports whether dir names a drop-in directory of a unitTypes
 // type: a unit's or prefix's (x.service.d, agentos-.socket.d) or the
@@ -2146,7 +2209,20 @@ var rootTrees = []string{
 	// -confext merge images from these over /usr and /etc; sysusers.d makes
 	// users; root's home.
 	"/run/initramfs", "/run/extensions", "/var/lib/extensions", "/run/confexts", "/var/lib/confexts", "/run/sysusers.d", "/root",
+	// Packaged root units import credentials (sysctl.*, tmpfiles.*) from
+	// these stores (#4718 item 4).
+	"/run/credstore", "/run/credstore.encrypted",
 }
+
+// consoleTTY are the only terminals under /dev a root unit's TTYPath= may
+// name: the console, the virtual terminals and the on-board serial ports
+// (8250 ttyS, the PL011 ttyAMA of a cm4), whose nodes only the kernel makes
+// (/dev/shm and /dev/mqueue are writable by any, a pts is any uid's, and a
+// USB serial port or a /dev/serial link is whatever device or rule supplies
+// it, #4718 item 6, #6022 item 2). consoleTTYs names them in the refusal.
+var consoleTTY = regexp.MustCompile(`^/dev/(console|tty[0-9]+|ttyS[0-9]+|ttyAMA[0-9]+)$`)
+
+const consoleTTYs = "/dev/console, /dev/ttyN, /dev/ttySN or /dev/ttyAMAN"
 
 // pathAliases are the links every image has between trees: /var/run is
 // /run (systemd-tmpfiles also rewrites a /var/run/ path to /run/) and
@@ -2302,45 +2378,6 @@ func rootPathSetting(k, v string) error {
 		// A glob over the credential stores, /run/credstore among them,
 		// which the lint does not hold, as a LoadCredential= with no path.
 		return fmt.Errorf("ImportCredential= searches credential stores the lint does not hold; a unit with a root command loads a credential only by LoadCredential= with a rootOwned path")
-	case !pathSetting.MatchString(v):
-		return fmt.Errorf("byte %q, a byte other than a letter, digit, blank or one of _./@:,=+-, which the lint would have to expand", pathByte.FindString(v))
-	case v == "":
-		// An empty value resets the setting.
-	case wholePaths[k]:
-		paths = []string{strings.TrimPrefix(v, "-")}
-	case k == "ExtensionDirectories":
-		for _, w := range strings.Fields(v) {
-			paths = append(paths, strings.TrimPrefix(w, "-"))
-		}
-	case k == "ExecSearchPath":
-		paths = strings.Split(v, ":")
-	case k == "RootHash" && rootHash.MatchString(v), k == "RootHashSignature" && strings.HasPrefix(v, "base64:"):
-		// The hash or signature itself, not a file holding it.
-	case k == "RootHash" || k == "RootHashSignature":
-		paths = []string{v}
-	case strings.HasPrefix(k, "Standard"):
-		// file:, append: and truncate: name a path root opens; the
-		// others (journal, socket, null, tty, fd:x, data) name none.
-		kind, p, _ := strings.Cut(v, ":")
-		if kind == "file" || kind == "append" || kind == "truncate" {
-			paths = []string{p}
-		}
-	case strings.HasPrefix(k, "LoadCredential"):
-		// ID:PATH; with no path, or a relative one, systemd searches
-		// credential stores (/run/credstore among them) the lint does not
-		// hold, so the path is read as given and must be rootOwned.
-		_, p, _ := strings.Cut(v, ":")
-		paths = []string{p}
-	case k == "OpenFile":
-		// PATH[:NAME[:OPTIONS]]: the manager opens PATH, or connects to
-		// it, as root and hands the command the descriptor (#4698
-		// Security 1).
-		p, _, _ := strings.Cut(v, ":")
-		paths = []string{p}
-	case k == "BPFProgram":
-		// TYPE:PATH: the manager loads the pinned program at PATH.
-		_, p, _ := strings.Cut(v, ":")
-		paths = []string{p}
 	case k == "TemporaryFileSystem":
 		for _, w := range strings.Fields(v) {
 			p, opts, _ := strings.Cut(w, ":")
@@ -2354,18 +2391,267 @@ func rootPathSetting(k, v string) error {
 			}
 		}
 	default:
+		var err error
+		if paths, err = settingPaths(k, v); err != nil {
+			return err
+		}
+	}
+	for _, p := range paths {
+		if k == "TTYPath" && consoleTTY.MatchString(p) {
+			continue
+		}
+		if k == "TTYPath" && strings.HasPrefix(p, "/dev/") {
+			return fmt.Errorf("path %q; of /dev, a terminal the manager opens is only %s", p, consoleTTYs)
+		}
+		if !rootOwned(p) {
+			return fmt.Errorf("path %q; root reads, runs, searches and opens for a unit only absolute paths, with no .., in the trees root owns (rootTrees)", p)
+		}
+	}
+	return nil
+}
+
+// settingPaths returns the paths the manager opens, loads, mounts or joins
+// as root for one EnvironmentFile= or rootPathKeys setting k=v (but
+// Environment=, TemporaryFileSystem= and ImportCredential=, which
+// rootPathSetting reads itself), or an error for a byte the lint would have
+// to expand.
+func settingPaths(k, v string) ([]string, error) {
+	switch {
+	case !pathSetting.MatchString(v):
+		return nil, fmt.Errorf("byte %q, a byte other than a letter, digit, blank or one of _./@:,=+-, which the lint would have to expand", pathByte.FindString(v))
+	case v == "":
+		// An empty value resets the setting.
+	case wholePaths[k]:
+		return []string{strings.TrimPrefix(v, "-")}, nil
+	case k == "ExtensionDirectories":
+		var paths []string
+		for _, w := range strings.Fields(v) {
+			paths = append(paths, strings.TrimPrefix(w, "-"))
+		}
+		return paths, nil
+	case k == "ExecSearchPath":
+		return strings.Split(v, ":"), nil
+	case k == "RootHash" && rootHash.MatchString(v), k == "RootHashSignature" && strings.HasPrefix(v, "base64:"):
+		// The hash or signature itself, not a file holding it.
+	case k == "RootHash" || k == "RootHashSignature":
+		return []string{v}, nil
+	case strings.HasPrefix(k, "Standard"):
+		// file:, append: and truncate: name a path root opens; the
+		// others (journal, socket, null, tty, fd:x, data) name none.
+		kind, p, _ := strings.Cut(v, ":")
+		if kind == "file" || kind == "append" || kind == "truncate" {
+			return []string{p}, nil
+		}
+	case strings.HasPrefix(k, "LoadCredential"):
+		// ID:PATH; with no path, or a relative one, systemd searches
+		// credential stores (/run/credstore among them) the lint does not
+		// hold, so the path is read as given and must be rootOwned.
+		_, p, _ := strings.Cut(v, ":")
+		return []string{p}, nil
+	case k == "OpenFile":
+		// PATH[:NAME[:OPTIONS]]: the manager opens PATH, or connects to
+		// it, as root and hands the command the descriptor (#4698
+		// Security 1).
+		p, _, _ := strings.Cut(v, ":")
+		return []string{p}, nil
+	case k == "BPFProgram":
+		// TYPE:PATH: the manager loads the pinned program at PATH.
+		_, p, _ := strings.Cut(v, ":")
+		return []string{p}, nil
+	default:
 		// Each word is [-]SOURCE[:DEST[:OPTIONS]]; - lets it be missing.
+		var paths []string
 		for _, w := range strings.Fields(v) {
 			p, _, _ := strings.Cut(strings.TrimPrefix(w, "-"), ":")
 			paths = append(paths, p)
 		}
+		return paths, nil
 	}
-	for _, p := range paths {
-		if !rootOwned(p) {
-			return fmt.Errorf("path %q; a unit with a root command reads, runs and searches only absolute paths, with no .., in the trees root owns (rootTrees)", p)
+	return nil, nil
+}
+
+// envFileReasons are the env files a root unit may name that image/ does
+// not ship, each with why what it holds needs no reading (#4699).
+var envFileReasons = map[string]string{
+	"/etc/agentos/agentosd.env": "written at run time by root alone, mode 0600 in root's 0700 /etc/agentos, its values validated by onboarding's writer (image ASSUMPTIONS I6, P2-2 C4); agentosd.service passes on only AGENTOS_OWNER (unitVars)",
+}
+
+// envAssign is the only line an env file a root unit loads may hold, but a
+// blank or a comment: a plain NAME=VALUE, with no quote, escape, blank, $
+// or % in the value, which systemd's reader would decode and this does not.
+var envAssign = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_./:,+@=-]*$`)
+
+// envFileLines holds an env file's text, named name, to the rules
+// Environment= is held to: each variable rootEnv lists, a PATH= rootOwned.
+// A line systemd would continue into a comment (one ending in a backslash)
+// is read as a line, so it is refused or held, never skipped.
+func envFileLines(name, text string) error {
+	var errs []error
+	for i, line := range strings.Split(text, "\n") {
+		l := strings.TrimLeft(line, " \t")
+		switch {
+		case l == "" || l[0] == '#' || l[0] == ';':
+		case !envAssign.MatchString(l):
+			errs = append(errs, fmt.Errorf("%s:%d: %q; an env file a root unit loads holds only NAME=VALUE lines, with no quote, escape, blank, $ or %% in the value", name, i+1, line))
+		default:
+			if err := rootPathSetting("Environment", l); err != nil {
+				errs = append(errs, fmt.Errorf("%s:%d: %v", name, i+1, err))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// managerEnv holds a system or user manager's configuration file of ours
+// (system.conf, user.conf or a .conf in their .conf.d directories): its
+// DefaultEnvironment= reaches every unit the manager starts, root's own
+// user manager's included, and ManagerEnvironment= its generators, so
+// each is held as a root unit's Environment= (#4718 items 2 and 7).
+func managerEnv(root, f string) error {
+	rel, _ := filepath.Rel(root, f)
+	rel = filepath.ToSlash(rel)
+	b, err := os.ReadFile(f)
+	if err != nil {
+		return err
+	}
+	ul, err := unitLines(string(b))
+	if err != nil {
+		return fmt.Errorf("%s: %v", rel, err)
+	}
+	var errs []error
+	for _, l := range ul {
+		if l.section != "Manager" || l.key != "DefaultEnvironment" && l.key != "ManagerEnvironment" {
+			continue
+		}
+		if err := rootPathSetting("Environment", l.value); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %s=%s: %v", rel, l.key, l.value, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// isManagerConf reports whether the file p configures a system or user
+// manager.
+func isManagerConf(p string) bool {
+	dir, base := filepath.Base(filepath.Dir(p)), filepath.Base(p)
+	return dir == "systemd" && (base == "system.conf" || base == "user.conf") ||
+		strings.HasSuffix(base, ".conf") && (dir == "system.conf.d" || dir == "user.conf.d")
+}
+
+// shippedEnv finds the env file p among files, the paths under image/: the
+// copy at p in each overlay root (imageOverlays) of the image whose unit
+// names it (from), named relative to root and read only when it is a
+// regular file, not a link. A unit outside root (a built tree's) reads every
+// image's copy; a unit under image/ in no listed image reads none. A copy
+// anywhere else under image/ (an example, a doc, another image) is not
+// shipped (#6003 Security 2).
+func shippedEnv(root string, files []string) envLookup {
+	have := map[string]bool{}
+	for _, f := range files {
+		have[filepath.ToSlash(f)] = true
+	}
+	return func(from, p string) (map[string]string, error) {
+		roots := allOverlays()
+		if rel, err := filepath.Rel(root, from); err == nil && !strings.HasPrefix(filepath.ToSlash(rel), "../") {
+			roots = overlaysOf(filepath.ToSlash(rel))
+		}
+		out := map[string]string{}
+		for _, r := range roots {
+			f := filepath.ToSlash(filepath.Join(root, r, path.Clean("/"+p)))
+			if !have[f] {
+				continue
+			}
+			rel := path.Join(r, path.Clean("/"+p))
+			st, err := os.Lstat(f)
+			if err != nil {
+				return nil, err
+			}
+			if !st.Mode().IsRegular() {
+				return nil, fmt.Errorf("%s is not a regular file; the lint reads an env file only as one", rel)
+			}
+			b, err := os.ReadFile(f)
+			if err != nil {
+				return nil, err
+			}
+			out[rel] = string(b)
+		}
+		return out, nil
+	}
+}
+
+// imageOverlays are image/'s images, by the directory that holds each, and
+// the overlay roots whose trees that image's build copies to /: mkosi's
+// extra trees and the camnode boards' overlays. TestImageOverlaysAreListed
+// fails on an overlay directory under image/ that is not listed here.
+var imageOverlays = []struct {
+	image string
+	roots []string
+}{
+	{"image/enforcer/", []string{"image/enforcer/mkosi/mkosi.extra"}},
+	{"image/camnode/", []string{"image/camnode/external/board/common/overlay", "image/camnode/external/board/cm4/overlay", "image/camnode/external/board/qemu/overlay"}},
+	{"image/mkosi/", []string{"image/mkosi/mkosi.extra"}},
+}
+
+// imageOf is the directory of the listed image holding rel, or "".
+func imageOf(rel string) string {
+	for _, im := range imageOverlays {
+		if strings.HasPrefix(rel, im.image) {
+			return im.image
+		}
+	}
+	return ""
+}
+
+// instanceLink is an overlay link (rel) of an instance (name) to its
+// template.
+type instanceLink struct{ rel, name, template string }
+
+// relTo is p relative to root, with forward slashes.
+func relTo(root, p string) string {
+	rel, _ := filepath.Rel(root, p)
+	return filepath.ToSlash(rel)
+}
+
+// overlaysOf is the overlay roots of the image holding rel (a path relative
+// to the repository), or none.
+func overlaysOf(rel string) []string {
+	for _, im := range imageOverlays {
+		if strings.HasPrefix(rel, im.image) {
+			return im.roots
 		}
 	}
 	return nil
+}
+
+// allOverlays is every listed overlay root.
+func allOverlays() []string {
+	var out []string
+	for _, im := range imageOverlays {
+		out = append(out, im.roots...)
+	}
+	return out
+}
+
+// overlayRoot is the listed overlay root that holds rel, or "".
+func overlayRoot(rel string) string {
+	for _, r := range allOverlays() {
+		if strings.HasPrefix(rel, r+"/") {
+			return r
+		}
+	}
+	return ""
+}
+
+// imageFiles lists every file and link under root/image.
+func imageFiles(root string) ([]string, error) {
+	var out []string
+	err := filepath.WalkDir(filepath.Join(root, "image"), func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			out = append(out, p)
+		}
+		return err
+	})
+	return out, err
 }
 
 // dirBases are the directories systemd makes a unit's *Directory= paths
@@ -2436,20 +2722,61 @@ func unitGrants(root string, settings []envLine, asUser bool) ([]grant, error) {
 // any other ends a token (a quote, =, :, ;, $, a parenthesis or blank).
 var nameToken = regexp.MustCompile(`[A-Za-z0-9_./@+-]+`)
 
+// brokerUnits adds to units each unit file under broker/ outside testdata
+// and node_modules. A link there is refused: build.sh installs the file it
+// names, which the lint would not read as that unit.
+func brokerUnits(root string, units map[string]string) error {
+	return filepath.WalkDir(filepath.Join(root, "broker"), func(p string, d os.DirEntry, err error) error {
+		switch {
+		case err != nil:
+			return err
+		case d.IsDir() && (d.Name() == "testdata" || d.Name() == "node_modules"):
+			return filepath.SkipDir
+		case d.IsDir() || !unitTypes[filepath.Ext(p)]:
+			return nil
+		case !d.Type().IsRegular():
+			return fmt.Errorf("%s: a unit under broker/ is not a regular file; ship the file itself", relTo(root, p))
+		}
+		units[p] = d.Name()
+		return nil
+	})
+}
+
 // rootBinaries returns the broker packages (as ./path, relative to broker/)
-// of the binaries a unit under image/ starts as root or a runKinds file
-// names.
+// of the binaries a unit under image/ or broker/ starts as root or a runKinds
+// file names.
 func rootBinaries(root string) ([]string, error) {
 	units := map[string]string{}     // unit file path -> name
 	dropins := map[string][]string{} // drop-in directory name -> its .conf paths
-	var fstabs []string
+	var instances []instanceLink     // overlay links of an instance to its template
+	var fstabs, confs, files []string
 	err := filepath.WalkDir(filepath.Join(root, "image"), func(p string, d os.DirEntry, err error) error {
 		dir := filepath.Base(filepath.Dir(p))
+		if err == nil && !d.IsDir() {
+			files = append(files, p)
+		}
 		switch {
 		case err != nil:
 			return err
 		case d.IsDir():
 			return nil
+		case d.Type()&os.ModeSymlink != 0 && linkWhy(root, p) != "":
+			// WalkDir does not descend a link; systemd and the image
+			// build do (#4718 item 3). linkWhy says which links are
+			// read as the file they name; every other link is refused.
+			rel, _ := filepath.Rel(root, p)
+			return fmt.Errorf("%s: %s; ship the file itself", filepath.ToSlash(rel), linkWhy(root, p))
+		case d.Type()&os.ModeSymlink != 0 && overlayRoot(relTo(root, p)) != "":
+			// An overlay link is read through every overlay's copy at its
+			// target's path (linkWhy): a copy of its own name is read as a
+			// file, and a template's under each instance linked to it.
+			rel := relTo(root, p)
+			if t, _ := os.Readlink(p); t != "../"+d.Name() {
+				instances = append(instances, instanceLink{rel, d.Name(), path.Base(t)})
+			}
+			return nil
+		case isManagerConf(p):
+			confs = append(confs, p)
 		case unitTypes[filepath.Ext(p)]:
 			units[p] = d.Name()
 		case strings.HasSuffix(p, ".conf") && isDropinDir(dir):
@@ -2460,6 +2787,12 @@ func rootBinaries(root string) ([]string, error) {
 		return nil
 	})
 	if err != nil {
+		return nil, err
+	}
+	// A unit kept beside its command under broker/, which image/build.sh
+	// installs (agentos-localui.service and its root agentos-port1 step),
+	// starts its binaries as an image/ unit does (#4636).
+	if err := brokerUnits(root, units); err != nil {
 		return nil, err
 	}
 	pkgs, err := binaryPackages(root)
@@ -2478,14 +2811,20 @@ func rootBinaries(root string) ([]string, error) {
 			}
 		}
 	}
-	// A mount drop-in may also extend a unit a package ships (tmp.mount), so
-	// every one is read, not only those of image/'s own units.
+	c := &unitCheck{root: root, pkgs: pkgs, seen: seen, env: shippedEnv(root, files)}
+	// A mount or swap drop-in may also extend a unit a package ships
+	// (tmp.mount), so every one is read alone, not only those of image/'s
+	// own units.
 	for dir, confs := range dropins {
-		if !strings.HasSuffix(dir, ".mount.d") && dir != "mount.d" {
+		n := strings.TrimSuffix(dir, ".d")
+		if t := path.Ext("." + n); t != ".mount" && t != ".swap" {
 			continue
 		}
+		if !strings.Contains(n, ".") {
+			n = "." + n // mount.d, swap.d
+		}
 		for _, f := range confs {
-			if _, err := mountLines(root, []string{f}, ""); err != nil {
+			if err := c.unit(n, []string{f}, true, nil); err != nil {
 				return nil, err
 			}
 		}
@@ -2495,10 +2834,14 @@ func rootBinaries(root string) ([]string, error) {
 			return nil, err
 		}
 	}
+	for _, f := range confs {
+		if err := managerEnv(root, f); err != nil {
+			return nil, err
+		}
+	}
 	// A unit is read with every drop-in under image/ of a name systemd
 	// reads for it. A packaged unit's drop-ins, and units a package or build
 	// step ships, are read on the built root file systems (builtUnits, #4677).
-	c := &unitCheck{root: root, pkgs: pkgs, seen: seen}
 	for p, name := range units {
 		paths := []string{p}
 		for _, dir := range dropinDirs(name) {
@@ -2508,7 +2851,28 @@ func rootBinaries(root string) ([]string, error) {
 			return nil, err
 		}
 	}
-	if err := runBinaries(root, pkgs, seen, c.progs, c.grants); err != nil {
+	// Each overlay copy of a template, in the image of a link to it, is
+	// also read as each instance linked to it, with that instance's
+	// drop-ins (#6022 item 1).
+	for _, l := range instances {
+		for p, name := range units {
+			rel := relTo(root, p)
+			if name != l.template || overlayRoot(rel) == "" || imageOf(rel) != imageOf(l.rel) {
+				continue
+			}
+			paths := []string{p}
+			for _, dir := range dropinDirs(l.name) {
+				paths = append(paths, dropins[dir]...)
+			}
+			if err := c.unit(l.name, paths, false, nil); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := endpointsHeld(c.endpoints, c.grants); err != nil {
+		return nil, err
+	}
+	if err := runBinaries(root, pkgs, seen, c.progs, c.grants, c.opens); err != nil {
 		return nil, err
 	}
 
@@ -2547,6 +2911,14 @@ type unitCheck struct {
 	// package sockets and daemons whose ports it may share are.
 	links     map[string]string
 	pathsOnly bool
+	// Where a root unit of ours finds the env files it names (#4699).
+	env envLookup
+	// The paths of ours PID 1 binds, makes or opens for a socket
+	// (endpointsHeld, #4718 item 5).
+	endpoints []grant
+	// The paths of ours the manager opens, mounts or joins as root for a
+	// unit with no root command (userOpens, opensHeld, #6143).
+	opens []grant
 }
 
 // namesHeld returns the first word of a [Unit] line, key k, that names a
@@ -2597,13 +2969,8 @@ var owners = map[string]bool{"User": true, "Group": true, "DynamicUser": true}
 // files to a root command's rules, but its own commands and settings are
 // not held (#4677).
 func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[string]bool) error {
-	if filepath.Ext(name) == ".mount" {
-		unit := name
-		if alone {
-			unit = ""
-		}
-		_, err := mountLines(c.root, paths, unit)
-		return err
+	if ext := filepath.Ext(name); ext == ".mount" || ext == ".swap" {
+		return c.mountUnit(name, paths, alone, trusted)
 	}
 	// A later User= or DynamicUser= replaces an earlier one, and drop-ins
 	// sort across directories, so any assignment that runs as root (an
@@ -2664,11 +3031,21 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 					listen = filepath.ToSlash(rel) + ": " + k + "=" + v + ": a listen path of ours is quoted or escaped, which systemd reads and this does not; write it plainly"
 				}
 				for _, w := range words {
-					if why := c.onPkgListen(w); listen == "" && why != "" {
+					p, why := c.onPkgListen(k, w)
+					if why == "" && strings.HasPrefix(p, "/") {
+						c.endpoints = append(c.endpoints, grant{filepath.ToSlash(rel) + ": " + k + "=" + v, k, p})
+					}
+					if listen == "" && why != "" {
 						listen = filepath.ToSlash(rel) + ": " + k + "=" + v + ": a listen path of ours " + why
-						break
 					}
 				}
+			}
+			if line.section == section && !trusted[f] && managerPaths[k] && v != "" && (!pathSetting.MatchString(v) || !rootOwned(v)) {
+				fix := ""
+				if k == "PIDFile" {
+					fix = "; drop PIDFile= and use Type=notify or Type=simple, which need no PID file"
+				}
+				errs = append(errs, fmt.Errorf("%s: %s=%s: the manager opens this path as root whatever the unit's User=, so it is an absolute path in rootTrees with no .., quote, escape or %% specifier (#4718)%s", filepath.ToSlash(rel), k, v, fix))
 			}
 			if section == "Socket" && line.section == section && !trusted[f] && k == "DirectoryMode" && openMode(v) {
 				errs = append(errs, fmt.Errorf("%s: %s=%s: a directory mode of ours lets another uid write, or is not a plain octal mode; PID 1 makes a listen path's missing parents with it, and another uid could plant a package's path below them (#5620 R-a)", filepath.ToSlash(rel), k, v))
@@ -2688,7 +3065,7 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 			case line.section != section:
 				// systemd reads a unit's User= and Exec lines only in its
 				// type's own section.
-			case trusted[f] && k != "User" && k != "DynamicUser" && dirBases[strings.TrimSuffix(k, "Mode")] == "" && !strings.HasPrefix(k, "Exec"):
+			case trusted[f] && k != "User" && k != "DynamicUser" && k != "PermissionsStartOnly" && dirBases[strings.TrimSuffix(k, "Mode")] == "" && !strings.HasPrefix(k, "Exec"):
 				// A package's setting.
 			case k == "Environment" || k == "EnvironmentFile" || k == "PassEnvironment" || k == "PAMName":
 				env = append(env, envLine{f, k, v})
@@ -2701,6 +3078,15 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 			case k == "DynamicUser" && (v == "yes" || v == "true" || v == "1" || v == "on"):
 				asUser = true
 			case k == "DynamicUser":
+				asRoot = true
+			case k == "PermissionsStartOnly" && !falseWords[strings.ToLower(v)]:
+				// systemd's parse_boolean: any value but a false one (or
+				// one it refuses) runs every command but ExecStart= with
+				// full privileges (#4641 R-c).
+				asRoot = true
+			case k == "AmbientCapabilities" && !userCaps(v, strings.HasPrefix(relTo(c.root, f), "image/camnode/")):
+				// A capability that reads, writes or runs as root
+				// makes the unit root in all but uid (#4641).
 				asRoot = true
 			case rootPathKeys[k] || dirBases[strings.TrimSuffix(k, "Mode")] != "":
 				settings = append(settings, envLine{f, k, v})
@@ -2851,15 +3237,332 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 		}
 	}
 	if !rootCmd && !alone {
+		// KRN-2-std-files (#4641): whatever the unit's User=, the manager
+		// opens these as root before the command drops to it, following
+		// a link, so they are held as a root unit's are.
+		for _, l := range append(settings, env...) {
+			rel, _ := filepath.Rel(c.root, l.file)
+			where := filepath.ToSlash(rel) + ": " + l.key + "=" + l.value
+			if managerOpens[l.key] {
+				if err := rootPathSetting(l.key, l.value); err != nil {
+					errs = append(errs, fmt.Errorf("%s: the manager opens this path as root whatever the unit's User=: %v", where, err))
+				}
+			}
+			if !userOpens[l.key] {
+				continue
+			}
+			paths, err := settingPaths(l.key, l.value)
+			for _, p := range paths {
+				if err == nil && (!strings.HasPrefix(p, "/") || dotdot(p)) {
+					err = fmt.Errorf("path %q; want an absolute path with no ..", p)
+				}
+				if err == nil {
+					c.opens = append(c.opens, grant{where, l.key, path.Clean(p)})
+				}
+			}
+			if err != nil {
+				errs = append(errs, fmt.Errorf("%s: the manager opens, mounts or joins this path as root whatever the unit's User=: %v", where, err))
+			}
+		}
 		return errors.Join(errs...)
 	}
 	for _, l := range append(settings, env...) {
-		if err := rootPathSetting(l.key, l.value); err != nil {
-			rel, _ := filepath.Rel(c.root, l.file)
-			errs = append(errs, fmt.Errorf("%s: %s=%s: %v", filepath.ToSlash(rel), l.key, l.value, err))
+		errs = append(errs, c.rootSetting(l))
+	}
+	return errors.Join(errs...)
+}
+
+// managerOpens are the settings naming a file the manager opens for a
+// unit's commands as root, before they drop to its User= (StandardInput=,
+// StandardOutput= and StandardError= by file:, append: or truncate:, an env
+// file, a credential, a terminal): rootPathSetting holds them on every unit
+// (KRN-2-std-files, #4641); OpenFile= and the mount keys are userOpens'.
+var managerOpens = map[string]bool{
+	"StandardInput": true, "StandardOutput": true, "StandardError": true, "EnvironmentFile": true,
+	"LoadCredential": true, "LoadCredentialEncrypted": true, "TTYPath": true,
+}
+
+// userOpens are the settings of a unit with no root command naming a path
+// the manager opens, mounts or joins as root before the drop to its User=,
+// and hands the unit what it finds: a descriptor (OpenFile=, which the
+// keepers point at the kernel's sockets in /run/agentos-kernel, outside
+// rootTrees), a bind or image mount, a namespace or a BPF program. Each
+// path is plain and absolute, and opensHeld keeps it out of worldTrees and
+// out of every grant (#6143, Lens on #6146).
+var userOpens = map[string]bool{
+	"OpenFile": true, "BindPaths": true, "BindReadOnlyPaths": true, "RootDirectory": true, "RootImage": true,
+	"MountImages": true, "ExtensionDirectories": true, "ExtensionImages": true, "NetworkNamespacePath": true,
+	"IPCNamespacePath": true, "BPFProgram": true, "IPIngressFilterPath": true, "IPEgressFilterPath": true,
+}
+
+// worldTrees are the trees any uid may make a file in, or whose entries
+// link to another process's files (openDevs), with /run/lock, which is
+// world-writable like /tmp.
+var worldTrees = append([]string{"/tmp", "/var/tmp", "/run/lock"}, openDevs...)
+
+// opensHeld refuses a path the manager opens for a unit (opens) in a world
+// tree, or at or below a grant: that grant's uid could plant a link there,
+// which the manager follows as root (#6143).
+func opensHeld(opens, grants []grant) error {
+	var errs []error
+	for _, o := range opens {
+		if t, ok := inTree(o.path, worldTrees); ok {
+			errs = append(errs, fmt.Errorf("%s: path %q is in %s, where any uid may plant a link; the manager follows it as root", o.where, o.path, t))
+			continue
+		}
+		p := unalias(o.path)
+		for _, g := range grants {
+			if gp := unalias(g.path); p == gp || strings.HasPrefix(p, gp+"/") {
+				errs = append(errs, fmt.Errorf("%s: path %q is at or below %s, which %s (%s); that uid could plant a link there, which the manager follows as root", o.where, o.path, g.path, g.how, g.where))
+			}
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// falseWords are the values systemd's parse_boolean reads as false.
+var falseWords = map[string]bool{"0": true, "no": true, "n": true, "false": true, "f": true, "off": true}
+
+// userCaps reports whether an AmbientCapabilities= value holds only
+// userCapNames, which leave a unit with a User= a non-root unit: none reads,
+// writes or changes a file another uid owns, sets an id or runs code as
+// root (CAP_SETUID, CAP_DAC_OVERRIDE and CAP_SYS_ADMIN make it root in all
+// but uid, #4641). A closed list: a number, an inverted ~ list or any other
+// name counts as root. systemd reads the names in any case. CAP_SYS_BOOT
+// counts only on the camera node (camnode, a line in a file under
+// image/camnode/), whose kernel has no kexec: elsewhere it grants
+// kexec_file_load, which boots the signed kernel with any initramfs as
+// PID 1, with no firmware wipe between (Lens on #6189).
+func userCaps(v string, camnode bool) bool {
+	for _, w := range strings.Fields(v) {
+		if w = strings.ToUpper(w); !userCapNames[w] && !(camnode && w == "CAP_SYS_BOOT") {
+			return false
+		}
+	}
+	return true
+}
+
+var userCapNames = map[string]bool{"CAP_NET_BIND_SERVICE": true, "CAP_NET_RAW": true, "CAP_WAKE_ALARM": true, "CAP_BLOCK_SUSPEND": true}
+
+// managerPaths are the [Service] settings naming a file PID 1 itself
+// reads as root, whatever the unit's User= (#4718 item 5).
+var managerPaths = map[string]bool{"PIDFile": true, "USBFunctionDescriptors": true, "USBFunctionStrings": true}
+
+// rootSetting holds a setting of ours in a unit whose commands may run as
+// root to rootPathSetting, and what an EnvironmentFile= it names holds to
+// envFileLines (#4699).
+func (c *unitCheck) rootSetting(l envLine) error {
+	rel, _ := filepath.Rel(c.root, l.file)
+	rel = filepath.ToSlash(rel)
+	if err := rootPathSetting(l.key, l.value); err != nil {
+		return fmt.Errorf("%s: %s=%s: %v", rel, l.key, l.value, err)
+	}
+	p := strings.TrimPrefix(l.value, "-")
+	if l.key != "EnvironmentFile" || p == "" || envFileReasons[p] != "" {
+		return nil
+	}
+	var docs map[string]string
+	var err error
+	if c.env != nil {
+		docs, err = c.env(l.file, p)
+	}
+	switch {
+	case err != nil:
+		return fmt.Errorf("%s: %s=%s: %v", rel, l.key, l.value, err)
+	case len(docs) == 0:
+		return fmt.Errorf("%s: %s=%s: names %s, which no file under image/ ships and envFileReasons does not list; a unit whose commands may run as root loads only an env file the lint reads", rel, l.key, l.value, p)
+	}
+	names := make([]string, 0, len(docs))
+	for n := range docs {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var errs []error
+	for _, n := range names {
+		errs = append(errs, envFileLines(n, docs[n]))
+	}
+	return errors.Join(errs...)
+}
+
+// mountUnit reads a .mount or .swap unit from paths. mount(8) and swapon
+// run as root with its exec settings, so each of ours is held as a root
+// unit's (#4718 item 1); a mount's Type=, What= and Options= are held to
+// mountLines, and a swap's What= of ours, which swapon opens as root, to
+// heldSource. A package's lines (trusted) are not held (#4718 item 9).
+func (c *unitCheck) mountUnit(name string, paths []string, alone bool, trusted map[string]bool) error {
+	ext := filepath.Ext(name)
+	section := map[string]string{".mount": "Mount", ".swap": "Swap"}[ext]
+	var errs []error
+	for _, f := range paths {
+		if trusted[f] {
+			continue
+		}
+		rel, _ := filepath.Rel(c.root, f)
+		rel = filepath.ToSlash(rel)
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return err
+		}
+		ul, err := unitLines(string(b))
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %v", rel, err))
+			continue
+		}
+		for _, l := range ul {
+			switch {
+			case l.section != section:
+			case ext == ".swap" && l.key == "What" && !heldSource(l.value):
+				errs = append(errs, fmt.Errorf("%s: What=%s; swapon opens a swap's source as root, so it is a device node under /dev, not a file (nor anything in /dev/shm, /dev/mqueue or a /dev/fd link)", rel, l.value))
+			case l.key == "Environment" || l.key == "EnvironmentFile" || rootPathKeys[l.key]:
+				errs = append(errs, c.rootSetting(envLine{f, l.key, l.value}))
+			}
+		}
+	}
+	if ext == ".mount" {
+		unit := name
+		if alone {
+			unit = ""
+		}
+		if _, err := mountLines(c.root, paths, unit, trusted); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// endpointsHeld refuses an endpoint of ours (endpoints: a socket's listen
+// path or link) whose directory lies below a grant, or a path PID 1 opens
+// (openedListen) in or below one: PID 1 makes the missing directories on
+// the way as root, and the grant's uid could plant a link among them
+// (#4718 item 5). A path right in a granted directory is bound or linked
+// with its last component unfollowed.
+func endpointsHeld(endpoints, grants []grant) error {
+	var errs []error
+	for _, e := range endpoints {
+		p := unalias(e.path)
+		for _, g := range grants {
+			gp := unalias(g.path)
+			if strings.HasPrefix(path.Dir(p), gp+"/") || openedListen[e.how] && strings.HasPrefix(p, gp+"/") {
+				errs = append(errs, fmt.Errorf("%s: %s, below %s, which %s (%s); PID 1 makes and opens the directories on the way as root, and that uid could plant a link among them", e.where, e.path, g.path, g.how, g.where))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// linkTarget is the only target form a build-input link under image/ may
+// have: a file beside it or beside its directory. It is resolved lexically
+// in the repository, never through the runner's tree.
+var linkTarget = regexp.MustCompile(`^(\.\./)?[^/]+$`)
+
+// buildTarget reports whether t is the wider form a build-input link
+// (outside every overlay) may also have: climbs, then names, none of them
+// . or .., such as image/enforcer/mkosi/mkosi.configure's
+// ../../debian-archive-keyring.sh. It is never in the image, and its parents
+// and the names below are directories the walk reads, any link among them
+// refused, so the lexical resolution is the runner's; linkWhy then holds the
+// result under image/ outside every overlay.
+func buildTarget(t string) bool {
+	rest := t
+	for strings.HasPrefix(rest, "../") {
+		rest = rest[3:]
+	}
+	for _, c := range strings.Split(rest, "/") {
+		if c == "" || c == "." || c == ".." {
+			return false
+		}
+	}
+	return !strings.HasPrefix(t, "/")
+}
+
+// linkTypes are the unit types an overlay link may name: unitTypes, whose
+// every file the scan reads, and the types it reads none of, which name a
+// unit or a path but run nothing (#6022 item 1). A .path's MakeDirectory=
+// or a .timer's Unit= is as unread in a file as through a link.
+var linkTypes = map[string]bool{".service": true, ".socket": true, ".mount": true, ".swap": true, ".timer": true, ".target": true, ".path": true}
+
+// templateOf is the template an instance name (pre@inst.type) is made
+// from (pre@.type), or "" for any other name.
+func templateOf(name string) string {
+	ext := path.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	if at := strings.Index(base, "@"); at > 0 && at < len(base)-1 {
+		return base[:at+1] + ext
+	}
+	return ""
+}
+
+// linkWhy is why the link p under root is not read as a file, or "".
+//
+// In an overlay, the only links allowed are the two systemctl enable
+// makes (the .wants form): a unit of a linkTypes type linked to ../<its
+// own name>, and an instance linked to ../<its template> (#6022 item 1),
+// with both ends in rootTrees in the image. An image merges several
+// overlays and a later one's copy wins (camnode: common, then the
+// board's), so the file the link lands on in the image may come from
+// another overlay than the link's, and need be in only one of them. The
+// scan never reads the link itself: it reads every overlay's copy at the
+// target's path, as the unit of the link's name, whichever wins. A copy of
+// the link's own name is read under that name already, and rootBinaries
+// reads each copy of a template under every instance name linked to it.
+// A copy that is itself a link meets this rule in turn, and no copy may be
+// a directory (#6003 L3 round 3, option one).
+//
+// Outside every overlay a link is a build input: its target has
+// linkTarget's or buildTarget's form, is a regular file, and lies under
+// image/ outside every overlay. Neither kind may name a directory, another link or no
+// file, so the result never depends on the runner's tree.
+func linkWhy(root, p string) string {
+	from, err := filepath.Rel(root, p)
+	if err != nil {
+		return "a link the scan cannot place"
+	}
+	from = filepath.ToSlash(from)
+	r := overlayRoot(from)
+	t, err := os.Readlink(p)
+	if err != nil || !linkTarget.MatchString(t) && (r != "" || !buildTarget(t)) || t == ".." || t == "." || path.Base(t) == ".." || path.Base(t) == "." {
+		return "a link whose target is not a file beside it or beside its directory (an absolute, climbing or nested target resolves differently on the runner and in the image)"
+	}
+	to := path.Join(path.Dir(from), t)
+	name := path.Base(from)
+	tmpl := templateOf(name)
+	switch {
+	case r != "" && (t != "../"+name && (tmpl == "" || t != "../"+tmpl) || !linkTypes[path.Ext(name)]):
+		return "a link in an overlay other than a unit linked to ../" + name + " or an instance to ../<its template> (the image may take the target from another overlay, and the scan reads every copy only of a unit of the link's own name or template)"
+	case r != "" && !strings.HasPrefix(to, r+"/"):
+		return "a link that leaves its overlay " + r
+	case r == "" && (!strings.HasPrefix(to, "image/") || overlayRoot(to) != ""):
+		return "a link outside every overlay that lands in one or outside image/"
+	}
+	why := "a link to a directory, another link or no file, which this scan does not read"
+	if r == "" {
+		if st, err := os.Lstat(filepath.Join(root, filepath.FromSlash(to))); err != nil || !st.Mode().IsRegular() {
+			return why
+		}
+		return ""
+	}
+	// In the image the target is whichever overlay's copy wins: one must
+	// be a regular file, and none a directory.
+	found := false
+	for _, o := range overlaysOf(from) {
+		st, err := os.Lstat(filepath.Join(root, filepath.FromSlash(o+strings.TrimPrefix(to, r))))
+		switch {
+		case err != nil:
+		case st.IsDir():
+			return why
+		case st.Mode().IsRegular():
+			found = true
+		}
+	}
+	if !found {
+		return why
+	}
+	for _, q := range []string{from, to} {
+		if ip := strings.TrimPrefix(q, r); !rootOwned(ip) {
+			return "a link at or to " + ip + " in the image, outside rootTrees, where another uid or a tmpfs may supply the file at runtime"
+		}
+	}
+	return ""
 }
 
 // sharedRuns are trees many units' sockets sit in, so a package socket's
@@ -3127,8 +3830,12 @@ func pkgListenPat(w, p string, links map[string]string) listenPat {
 // following links), lie on no package socket's endpoint path or its
 // directory (unless one of sharedRuns), and lie under /run/agentos*
 // (inOurRuns), so it names no alias link, shared tree or ancestor of a
-// package's path, which PID 1 would unlink or replace.
-func (c *unitCheck) onPkgListen(v string) string {
+// package's path, which PID 1 would unlink or replace. A path PID 1 opens
+// as root rather than binds or links (openedListen) is held the same, so
+// it names no root-only file such as /etc/shadow (#6003 Security 1); one in
+// or below a grant is endpointsHeld's (#4718 item 5). p is the word as
+// read, for endpointsHeld.
+func (c *unitCheck) onPkgListen(k, v string) (p, why string) {
 	var b strings.Builder
 	for i := 0; i < len(v); i++ {
 		switch {
@@ -3141,32 +3848,36 @@ func (c *unitCheck) onPkgListen(v string) string {
 			b.WriteString("/run")
 			i++
 		default:
-			return "holds a specifier other than %t, whose value the reader does not read"
+			return "", "holds a specifier other than %t, whose value the reader does not read"
 		}
 	}
-	p := b.String()
+	p = b.String()
 	switch {
 	case !strings.HasPrefix(p, "/") && c.pathsOnly:
-		return "names no path: in a built tree a socket of ours listens only on a path under /run/agentos*, since a port, address, abstract name, netlink group or vsock address may be a package socket's or a package daemon's own, which PID 1 may share as root (SO_REUSEPORT, #5620 R-b)"
+		return p, "names no path: in a built tree a socket of ours listens only on a path under /run/agentos*, since a port, address, abstract name, netlink group or vsock address may be a package socket's or a package daemon's own, which PID 1 may share as root (SO_REUSEPORT, #5620 R-b)"
 	case !strings.HasPrefix(p, "/"):
-		return ""
+		return p, ""
 	case p != path.Clean(p):
-		return "is not canonical (a . or .. component, or a doubled or trailing slash), and the kernel follows links before .."
+		return p, "is not canonical (a . or .. component, or a doubled or trailing slash), and the kernel follows links before .."
 	}
 	q, via := resolveDirs(p, c.links)
 	for _, l := range c.pkgListen {
 		if l.re.MatchString(q) || l.dir != nil && l.dir.MatchString(q) {
-			return "on a package socket's path, " + l.raw
+			return p, "on a package socket's path, " + l.raw
 		}
 	}
-	if via != "" {
-		return "passes through a link in the tree, " + via + "; every directory on a listen path of ours must be a real one (#5620 R-c)"
+	switch {
+	case via != "":
+		return p, "passes through a link in the tree, " + via + "; every directory on a listen path of ours must be a real one (#5620 R-c)"
+	case !inOurRuns(p):
+		return p, "lies outside /run/agentos*, the only tree the reader holds as ours"
 	}
-	if !inOurRuns(p) {
-		return "lies outside /run/agentos*, the only tree the reader holds as ours"
-	}
-	return ""
+	return p, ""
 }
+
+// openedListen are the [Socket] keys whose path PID 1 opens as root rather
+// than binds (#4718 item 5).
+var openedListen = map[string]bool{"ListenSpecial": true, "ListenFIFO": true, "ListenUSBFunction": true}
 
 // execProgs returns the programs an Exec line names, read loosely: each
 // command's first word that is an absolute path, its prefix dropped.
@@ -3231,6 +3942,17 @@ type unitRecords struct {
 // files are written under dir, so a message names a file by its path in
 // the tree.
 func builtUnits(recs unitRecords, dir string) error {
+	return builtUnitsWith(recs, dir, nil)
+}
+
+// envLookup returns the text of each file that may be the env file p that
+// the unit file from names, by a name a message gives it; none when it
+// finds none.
+type envLookup func(from, p string) (map[string]string, error)
+
+// builtUnitsWith is builtUnits with env, where a root unit of ours finds
+// the env files it names (envLookup); nil finds none.
+func builtUnitsWith(recs unitRecords, dir string, env envLookup) error {
 	write := func(p, text string) (string, error) {
 		f := filepath.Join(dir, filepath.FromSlash(path.Clean("/"+p)))
 		if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
@@ -3240,7 +3962,7 @@ func builtUnits(recs unitRecords, dir string) error {
 	}
 	c := &unitCheck{root: dir, seen: map[string]bool{}, pkgSockets: map[string]bool{}, pkgFed: map[string]bool{},
 		held: map[string]bool{}, heldPre: recs.Held.Prefixes, pkgListen: pkgListenPaths(recs),
-		links: recs.Links, pathsOnly: true}
+		links: recs.Links, pathsOnly: true, env: env}
 	for _, n := range recs.Held.Names {
 		c.held[n] = true
 	}
@@ -3264,7 +3986,7 @@ func builtUnits(recs unitRecords, dir string) error {
 			trusted[f] = !rf.Ours
 			held = held || rf.Ours
 		}
-		if path.Ext(u.Unit) == ".mount" && !held {
+		if (path.Ext(u.Unit) == ".mount" || path.Ext(u.Unit) == ".swap") && !held {
 			continue
 		}
 		if err := c.unit(u.Unit, paths, u.Alone, trusted); err != nil {
@@ -3293,6 +4015,8 @@ func builtUnits(recs unitRecords, dir string) error {
 	}
 	errs = append(errs, grantsHeld(c.grants, append(append(append([]string{}, rootTrees...), c.progs...), c.pkgProgs...)))
 	errs = append(errs, grantsHeld(c.pkgGrants, c.progs))
+	errs = append(errs, endpointsHeld(c.endpoints, append(append([]grant{}, c.grants...), c.pkgGrants...)))
+	errs = append(errs, opensHeld(c.opens, append(append([]grant{}, c.grants...), c.pkgGrants...)))
 	return errors.Join(errs...)
 }
 
@@ -3727,9 +4451,12 @@ func mountWhere(name string) bool {
 // must set Type=; with none, a drop-in is read alone. Over a tree root reads or runs, What=
 // must be heldSource, and a tmpfs or ramfs needs a mode= in every Options=
 // (a later one replaces an earlier one, and drop-ins sort across
-// directories), and at least one Options=.
-func mountLines(root string, paths []string, unit string) (bool, error) {
-	typed, tmpfs, optioned, moded := false, false, false, true
+// directories), and at least one Options=. A file in trusted is a
+// package's: its Type= counts (the unit is typed, perhaps a tmpfs), but its
+// lines are not held, and a tmpfs needs an Options= of ours only when a
+// Type= of ours makes it one (#4718 item 9).
+func mountLines(root string, paths []string, unit string, trusted map[string]bool) (bool, error) {
+	typed, tmpfs, ourTmpfs, optioned, moded := false, false, false, false, true
 	var where string
 	for _, f := range paths {
 		rel, _ := filepath.Rel(root, f)
@@ -3757,10 +4484,15 @@ func mountLines(root string, paths []string, unit string) (bool, error) {
 			switch {
 			case line.section != "Mount":
 				// systemd reads no Type= or Options= elsewhere.
+			case k == "Type" && trusted[f]:
+				typed, tmpfs = true, tmpfs || held && tmpfsTypes[v]
+			case trusted[f]:
+				// A package's own What= and Options=.
 			case k == "Type" && (!plainFS[v] || v == "overlay" && held):
 				return false, fmt.Errorf("%s: Type=%s; want one of the plain file system types, whose mount runs no helper (and no overlay over a tree root reads or runs)", rel, v)
 			case k == "Type":
 				typed, tmpfs = true, tmpfs || held && tmpfsTypes[v]
+				ourTmpfs = ourTmpfs || held && tmpfsTypes[v]
 			case k == "Options":
 				m, err := mountOptions(v, held)
 				if err != nil {
@@ -3776,7 +4508,7 @@ func mountLines(root string, paths []string, unit string) (bool, error) {
 		return false, fmt.Errorf("%s: no Type=; mount(8) would probe the type and run its helper", filepath.ToSlash(paths[0]))
 	}
 	switch {
-	case tmpfs && !optioned:
+	case ourTmpfs && !optioned:
 		return false, fmt.Errorf("%s: a tmpfs or ramfs over a tree root reads or runs, with no Options=; its root directory would be 1777, so set Options=mode=0755", where)
 	case tmpfs && !moded:
 		return false, fmt.Errorf("%s: a tmpfs or ramfs over a tree root reads or runs, with an Options= that sets no mode=; its root directory would be 1777, so give every Options= mode=0755", where)
@@ -3938,7 +4670,7 @@ func inRunDir(rel string) bool {
 // file; or an owner other than root), and each of grants (unitGrants'), fails
 // on a path in or above rootTrees, progs (the programs units run as root)
 // or a listed program (#4423, #4584).
-func runBinaries(root string, pkgs map[string]string, seen map[string]bool, progs []string, grants []grant) error {
+func runBinaries(root string, pkgs map[string]string, seen map[string]bool, progs []string, grants, opens []grant) error {
 	// A repository with no list lets a file run nothing.
 	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(programsFile)))
 	if err != nil && !os.IsNotExist(err) {
@@ -4013,6 +4745,9 @@ func runBinaries(root string, pkgs map[string]string, seen map[string]bool, prog
 		held = append(held, path)
 	}
 	if err := grantsHeld(grants, held); err != nil {
+		return err
+	}
+	if err := opensHeld(opens, grants); err != nil {
 		return err
 	}
 	for path, used := range listed {

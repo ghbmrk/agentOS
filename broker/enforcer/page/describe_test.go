@@ -1,6 +1,6 @@
 package page
 
-// REQ: NET-4, NET-2, NET-3, NET-7
+// REQ: NET-4, NET-2, NET-3, NET-7, NET-6
 
 import (
 	"reflect"
@@ -193,5 +193,55 @@ func TestCloneSharesNothing(t *testing.T) {
 	c.Pairs[0].A, c.Standing[0].ID, c.Holds[0].Device = "x", "x", "x"
 	if !reflect.DeepEqual(d, was) {
 		t.Errorf("a write into the clone reached the original:\n%+v\nwas\n%+v", d, was)
+	}
+}
+
+// NET-4 Passkey rules, NET-6: a change to a lock's relock interval or a
+// lock's or alarm's usual hours names the old and the new value on the
+// screen the owner signs, including a change to or from the defaults and
+// a new device that sets them; a document that leaves both unset shows no
+// such line.
+func TestDescribeRelockAndHours(t *testing.T) {
+	h := func(f, to uint8) *policy.Hours { return &policy.Hours{From: f, To: to} }
+	lockWith := func(sec uint32, hrs *policy.Hours) policy.Document {
+		return edit(1, func(d *policy.Document) { dev(d, "lock").RelockSeconds, dev(d, "lock").UsualHours = sec, hrs })
+	}
+	alarm := func(hrs *policy.Hours) policy.Document {
+		return edit(1, func(d *policy.Document) {
+			d.Devices = append(d.Devices, policy.Device{ID: "alarm", Network: policy.NetDevices, Class: policy.ClassAlarm, UsualHours: hrs})
+		})
+	}
+	never := []string{"Relock", "usual hours"}
+	for _, c := range []struct {
+		name      string
+		old, next policy.Document
+		want      []string
+		never     []string
+	}{
+		{name: "shorten from the default", old: home(1), next: lockWith(10, nil),
+			want: []string{"Relock lock 10 seconds after any unlock, not 1 minute."}},
+		{name: "lengthen", old: lockWith(10, nil), next: lockWith(600, nil),
+			want: []string{"Relock lock 10 minutes after any unlock, not 10 seconds."}},
+		{name: "back to the default", old: lockWith(90, nil), next: home(1),
+			want: []string{"Relock lock 1 minute after any unlock, not 1 minute 30 seconds."}},
+		{name: "widen the hours", old: home(1), next: lockWith(0, h(6, 24)),
+			want: []string{"Make lock's usual hours 06:00 to 24:00, not 07:00 to 22:00: an unlock or disarm outside them needs a second passkey tap and texts you."}},
+		{name: "wrap the hours", old: lockWith(0, h(6, 24)), next: lockWith(0, h(18, 3)),
+			want: []string{"Make lock's usual hours 18:00 to 03:00, not 06:00 to 24:00: an unlock or disarm outside them needs a second passkey tap and texts you."}},
+		{name: "the alarm's hours", old: alarm(nil), next: alarm(h(9, 17)),
+			want: []string{"Make alarm's usual hours 09:00 to 17:00, not 07:00 to 22:00: an unlock or disarm outside them needs a second passkey tap and texts you."}},
+		{name: "default spelled out", old: home(1), next: lockWith(60, h(7, 22)),
+			want: []string{"Relock lock 1 minute after any unlock, not 1 minute.", "Make lock's usual hours 07:00 to 22:00, not 07:00 to 22:00: an unlock or disarm outside them needs a second passkey tap and texts you."}},
+		{name: "a new alarm with hours", old: home(1), next: alarm(h(22, 6)),
+			want: []string{"Make alarm's usual hours 22:00 to 06:00, not 07:00 to 22:00: an unlock or disarm outside them needs a second passkey tap and texts you."}},
+		{name: "a new alarm without", old: home(1), next: alarm(nil), never: never},
+		{name: "nothing set", old: home(1), next: edit(2, func(d *policy.Document) { dev(d, "lock").Allow = nil }), never: never},
+	} {
+		for _, d := range []policy.Document{c.old, c.next} {
+			if _, err := policy.Encode(d); err != nil {
+				t.Fatalf("%s: %v", c.name, err)
+			}
+		}
+		wantLines(t, c.name, Describe(c.old, c.next, zone), c.want, c.never)
 	}
 }

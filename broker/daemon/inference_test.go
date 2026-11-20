@@ -17,9 +17,12 @@ package daemon
 // (only their socket-capable imports are checked); reflection; values
 // built from the allowed types and handed across packages (modelroute's
 // transport, once built, is only as good as the code that builds it, which
-// this test reads); where a unix dial's address comes from (it must be a
-// field or variable, so from configuration, but the configuration itself
-// is the operator's); _test.go files, which are not linked; and code generated or
+// this test reads); where a unix dial's address comes from past its
+// package (configured holds it to a parameter or a listed field,
+// dialCallers holds the package's own callers, fieldStores the listed
+// fields in every linked package but the composition root, and handedOn
+// the module's packages a holder is handed to, but the root's wiring of
+// the operator's configuration is review's); _test.go files, which are not linked; and code generated or
 // loaded at run time (plugin, os/exec, and os.StartProcess are refused
 // outside their allow-lists, so none is expected).
 
@@ -28,8 +31,15 @@ import (
 	"bytes"
 	"fmt"
 	"go/ast"
+	"go/build"
+	"go/build/constraint"
+	"go/constant"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	"go/types"
+	"io"
+	"maps"
 	"math"
 	"os"
 	"os/exec"
@@ -80,10 +90,14 @@ type allowance struct {
 // syscall, or golang.org/x/sys/unix directly, the names they may use from
 // them, and why. Every net.Listen and dial must name "unix" (sourceUse).
 var netOK = map[string]allowance{
-	"sockets": {"unix listeners, SO_PEERCRED peer checks, and flock on the socket lock, opened O_NOFOLLOW",
-		[]string{"net.Conn", "net.ErrClosed", "net.Listen", "net.Listener", "net.UnixConn", "net.UnixListener",
-			"syscall.EWOULDBLOCK", "syscall.Flock", "syscall.GetsockoptUcred", "syscall.LOCK_EX", "syscall.LOCK_NB",
-			"syscall.O_NOFOLLOW", "syscall.SOL_SOCKET", "syscall.SO_PEERCRED", "syscall.Stat_t", "syscall.Ucred"}},
+	"sockets": {"unix listeners, and flock on the socket lock, opened O_NOFOLLOW; its peer checks are sockets/peers'",
+		[]string{"net.Conn", "net.ErrClosed", "net.Listen", "net.Listener", "net.UnixListener",
+			"syscall.EWOULDBLOCK", "syscall.Flock", "syscall.LOCK_EX", "syscall.LOCK_NB",
+			"syscall.O_NOFOLLOW", "syscall.Stat_t"}},
+	// The peer rule the kernel's process links without the rest of sockets (#6039).
+	"sockets/peers": {"unix listeners that admit only given uids, and SO_PEERCRED peer checks",
+		[]string{"net.Conn", "net.Listen", "net.Listener", "net.UnixConn",
+			"syscall.GetsockoptUcred", "syscall.SOL_SOCKET", "syscall.SO_PEERCRED", "syscall.Ucred"}},
 	"guest":      {"the guest plane's unix listeners; O_NOFOLLOW to read its inbox file", []string{"net.Conn", "net.ErrClosed", "net.Listen", "net.Listener", "syscall.O_NOFOLLOW"}},
 	"modelroute": {"dials only the vault process's unix socket", []string{"net.Conn", "net.Dialer", "net.OpError"}},
 	// The owner's mail account's client (SR3-mail-w2), as modelroute.
@@ -163,7 +177,7 @@ var netOK = map[string]allowance{
 	// they come in, which serves and dials only unix sockets (its dials are
 	// unixDialCalls), locks its own store and refuses to be dumpable.
 	"kernel/proc": {"unix listeners and dials with SO_PEERCRED peer checks, flock on its store and restore lock, O_NOFOLLOW opens, O_NONBLOCK so the restore lock's open never waits on a FIFO; no network client",
-		[]string{"net.Conn", "net.ErrClosed", "net.Listener", "net.UnixConn",
+		[]string{"net.Conn", "net.ErrClosed", "net.Listener", "net.UnixAddr", "net.UnixConn",
 			"syscall.EWOULDBLOCK", "syscall.Flock", "syscall.GetsockoptUcred", "syscall.LOCK_EX", "syscall.LOCK_NB",
 			"syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.SOL_SOCKET", "syscall.SO_PEERCRED", "syscall.Ucred"}},
 	"procguard": {"prctl to read and clear the process's dumpable flag (CLK-1); no network client",
@@ -175,7 +189,7 @@ var netOK = map[string]allowance{
 	// RES-5: wraps a machine socket's listener so each open connection holds budget; never listens or dials.
 	"inflight": {"wraps a caller's listener, budgeting its open connections", []string{"net.Conn", "net.ErrClosed", "net.Listener"}},
 	// Root-side reads that refuse a link planted at the path (REV-CHK-links, #3945).
-	"backup": {"O_NOFOLLOW on key-table reads and the target directory's sync open, with O_DIRECTORY; no network client", []string{"syscall.O_DIRECTORY", "syscall.O_NOFOLLOW"}},
+	"backup": {"O_NOFOLLOW on key-table reads and the target directory's sync open, with O_DIRECTORY; O_NONBLOCK so a key-table open never waits on a planted FIFO, O_NOCTTY so a planted terminal never becomes the controlling one, and ENXIO to name a planted socket or driverless device (#3998); no network client", []string{"syscall.ENXIO", "syscall.O_DIRECTORY", "syscall.O_NOCTTY", "syscall.O_NOFOLLOW", "syscall.O_NONBLOCK"}},
 	"follow": {"O_NOFOLLOW on the pending-alert read; no network client", []string{"syscall.O_NOFOLLOW"}},
 	"meter":  {"O_NOFOLLOW on the meter state's read; no network client", []string{"syscall.O_NOFOLLOW"}},
 }
@@ -211,13 +225,15 @@ var rawOK = map[string]map[string]string{
 
 // unixDialCalls are the dial functions a package may call directly, and
 // why; dials still checks each is on "unix" to a configured address.
-// kernel/proc dials its clerks' and its owner seam's sockets (#3430).
+// kernel/proc dials its clerks' and its owner seam's sockets (#3430), and
+// chronyd's command socket (#5391).
 var unixDialCalls = map[string]map[string]string{
-	"kernel/proc": {"net.Dial": "dials only a configured clerk's or kernel's unix socket, then checks the peer's uid"},
+	"kernel/proc": {"net.Dial": "dials only a configured clerk's or kernel's unix socket, then checks the peer's uid",
+		"net.DialUnix": "dials only chronyd's unixgram command socket (-chrony), from its own reply socket (#5391)"},
 }
 
 // escapes are imports past the checks above: foreign code, unchecked
-// memory (and go:linkname, which needs it), loaded code, and processes.
+// memory (and the linkname directive, which needs it), loaded code, and processes.
 var escapes = map[string]bool{"C": true, "unsafe": true, "plugin": true, "os/exec": true}
 
 // thirdPartyNet are the third-party packages in the graph allowed a
@@ -263,8 +279,9 @@ var clientTypes = map[string]string{
 }
 
 // dials are method or function names that open a connection, and the
-// index of their network argument, which must be "unix".
-var dials = map[string]int{"Dial": 0, "DialTimeout": 0, "DialContext": 1, "Listen": 0}
+// index of their network argument, which must be "unix" (DialUnix's
+// may be any unix network).
+var dials = map[string]int{"Dial": 0, "DialTimeout": 0, "DialContext": 1, "Listen": 0, "DialUnix": 0}
 
 type listed struct {
 	path, dir string
@@ -423,9 +440,7 @@ func inferenceUse(t *testing.T, ps []listed) []string {
 		if !ours {
 			continue
 		}
-		for _, f := range p.files {
-			bad = append(bad, sourceUse(t, filepath.Join(p.dir, f), p.path+"/"+f, rel)...)
-		}
+		bad = append(bad, packageUse(t, p.dir, p.files, p.path, rel, ps)...)
 	}
 	sort.Strings(bad)
 	return bad
@@ -458,66 +473,216 @@ func httpReach(ps []listed) map[string]bool {
 	return memo
 }
 
-// sourceUse reports, in one source file of broker package rel, by what its
-// imports are called there (renamed and dot imports included):
+// loaded is one package's files, parsed and type-checked once for every
+// rule below (#6120): each rule reads what a name denotes from go/types,
+// never from its spelling or a guess at its type.
+type loaded struct {
+	fset  *token.FileSet
+	files []*ast.File
+	src   [][]byte
+	pkg   *types.Package
+	info  *types.Info
+	err   error // the first type error
+	// params are the parameters and receivers of the functions declared
+	// here (a func literal's are not); wrote, each variable a statement
+	// assigns or a part of, or takes the address of, other than by its own
+	// := declaration; defs, a variable's := statement, as its first name.
+	params map[*types.Var]param
+	wrote  map[types.Object]bool
+	defs   map[*types.Var]*ast.AssignStmt
+}
+
+// param is a declared function's parameter: the function, as "h" or ".m"
+// for a method, and its index, or -1 for a receiver.
+type param struct {
+	fn string
+	i  int
+}
+
+// load parses and type-checks the named files of the package in dir as
+// package rel, reading its imports from the export data go list builds in
+// build tg (nil: go's own environment). cgo's C is as FakeImportC leaves
+// it, untyped, so a cgo file's own errors do not count.
+func load(t *testing.T, dir string, names []string, rel string, tg *envBuild) *loaded {
+	t.Helper()
+	l := &loaded{fset: token.NewFileSet(), params: map[*types.Var]param{}, wrote: map[types.Object]bool{}, defs: map[*types.Var]*ast.AssignStmt{}}
+	for _, name := range names {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := parser.ParseFile(l.fset, filepath.Join(dir, name), b, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l.files, l.src = append(l.files, f), append(l.src, b)
+	}
+	l.info = &types.Info{
+		Types:      map[ast.Expr]types.TypeAndValue{},
+		Defs:       map[*ast.Ident]types.Object{},
+		Uses:       map[*ast.Ident]types.Object{},
+		Selections: map[*ast.SelectorExpr]*types.Selection{},
+		Instances:  map[*ast.Ident]types.Instance{},
+	}
+	cgo := map[*token.File]bool{}
+	for _, f := range l.files {
+		if slices.ContainsFunc(f.Imports, func(im *ast.ImportSpec) bool { return im.Path.Value == `"C"` }) {
+			cgo[l.fset.File(f.Pos())] = true
+		}
+	}
+	conf := types.Config{FakeImportC: true, Importer: importer.ForCompiler(l.fset, "gc", exportData(t, l.files, tg)), Error: func(err error) {
+		if te, ok := err.(types.Error); l.err == nil && !(ok && cgo[l.fset.File(te.Pos)]) {
+			l.err = err
+		}
+	}}
+	l.pkg, _ = conf.Check(module+rel, l.fset, l.files, l.info)
+	// A write to x.f, x[i] or *x writes x; a := names its new variables in
+	// Defs and those it assigns again in Uses.
+	mark := func(e ast.Expr) {
+		for e != nil {
+			switch x := e.(type) {
+			case *ast.SelectorExpr:
+				e = x.X
+			case *ast.IndexExpr:
+				e = x.X
+			case *ast.StarExpr:
+				e = x.X
+			case *ast.ParenExpr:
+				e = x.X
+			case *ast.Ident:
+				if o := l.info.Uses[x]; o != nil {
+					l.wrote[o] = true
+				}
+				return
+			default:
+				return
+			}
+		}
+	}
+	for _, f := range l.files {
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			fn, i := fd.Name.Name, 0
+			if fd.Recv != nil {
+				fn = "." + fn
+				for _, nm := range fd.Recv.List[0].Names {
+					if v, ok := l.info.Defs[nm].(*types.Var); ok {
+						l.params[v] = param{fn, -1}
+					}
+				}
+			}
+			for _, p := range fd.Type.Params.List {
+				if len(p.Names) == 0 {
+					i++
+				}
+				for _, nm := range p.Names {
+					if v, ok := l.info.Defs[nm].(*types.Var); ok {
+						l.params[v] = param{fn, i}
+					}
+					i++
+				}
+			}
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.AssignStmt:
+				for _, e := range n.Lhs {
+					mark(e)
+				}
+				if v, ok := l.info.Defs[ident(n.Lhs[0])].(*types.Var); ok && n.Tok == token.DEFINE && len(n.Rhs) == 1 {
+					l.defs[v] = n
+				}
+			case *ast.RangeStmt:
+				if n.Tok == token.ASSIGN {
+					mark(n.Key)
+					mark(n.Value)
+				}
+			case *ast.IncDecStmt:
+				mark(n.X)
+			case *ast.UnaryExpr:
+				if n.Op == token.AND {
+					mark(n.X)
+				}
+			}
+			return true
+		})
+	}
+	return l
+}
+
+// ident is e as an identifier, or nil.
+func ident(e ast.Expr) *ast.Ident {
+	id, _ := e.(*ast.Ident)
+	return id
+}
+
+// qualified is "path.Name" for e naming another package's object through
+// its import (p.Name, renamed or not), or "".
+func qualified(info *types.Info, e ast.Expr) string {
+	se, ok := e.(*ast.SelectorExpr)
+	if !ok {
+		return ""
+	}
+	pn, ok := info.Uses[ident(se.X)].(*types.PkgName)
+	if !ok {
+		return ""
+	}
+	return pn.Imported().Path() + "." + se.Sel.Name
+}
+
+// sourceUse is fileUse over the one file at path, as package rel. Its type
+// errors are not reported here, so each fixture shows the rule that
+// catches it; packageUse, which the graph's walk runs, reports them.
+func sourceUse(t *testing.T, path, name, rel string) []string {
+	t.Helper()
+	return fileUse(load(t, filepath.Dir(path), []string{filepath.Base(path)}, rel, nil), 0, name, rel)
+}
+
+// fileUse reports, in file i of broker package rel, by the object each
+// name denotes (renamed imports included; a dot import is reported):
 //   - any client name (clients), except in modelroute a client type used
 //     as a composite literal's type that sets its own non-nil transport or
 //     dialer (clientTypes), or as a pointer type;
 //   - any name from net, syscall, or x/sys/unix outside rel's netOK uses;
-//   - any dial or Listen not called directly, or not on "unix".
-func sourceUse(t *testing.T, path, name, rel string) []string {
-	t.Helper()
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, path, nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	local := map[string]string{} // local name -> import path
+//   - any dial or Listen (by name, on any value, so a wrapper or an
+//     interface of the same name counts) not called directly, or not on
+//     the constant "unix".
+func fileUse(l *loaded, i int, name, rel string) []string {
+	f, info := l.files[i], l.info
 	var bad []string
 	for _, im := range f.Imports {
 		p, _ := strconv.Unquote(im.Path.Value)
-		if clients[p] == nil && !socketPkgs[p] && p != "os" {
-			continue
-		}
-		n := p[strings.LastIndex(p, "/")+1:]
-		if im.Name != nil {
-			n = im.Name.Name
-		}
-		if n == "." {
+		if im.Name != nil && im.Name.Name == "." && (clients[p] != nil || socketPkgs[p] || p == "os") {
 			bad = append(bad, name+": dot-imports "+p)
 		}
-		local[n] = p
 	}
 	uses := map[string]bool{}
 	for _, u := range netOK[rel].uses {
 		uses[u] = true
 	}
-	sel := func(e ast.Expr) string {
-		if se, ok := e.(*ast.SelectorExpr); ok {
-			if id, ok := se.X.(*ast.Ident); ok && local[id.Name] != "" {
-				return local[id.Name] + "." + se.Sel.Name
-			}
-		}
-		return ""
-	}
+	sel := func(e ast.Expr) string { return qualified(info, e) }
 	at := func(n ast.Node, what string) {
-		bad = append(bad, fmt.Sprintf("%s:%d: %s", name, fset.Position(n.Pos()).Line, what))
+		bad = append(bad, fmt.Sprintf("%s:%d: %s", name, l.fset.Position(n.Pos()).Line, what))
 	}
 	literalType := map[ast.Expr]bool{} // client types built as checked literals
 	callee := map[ast.Expr]bool{}
-	// Identifiers bound by := to a checked &http.Transport{} literal, which
-	// a client's Transport may name.
-	transports := map[string]bool{}
+	// Variables bound by := to a checked &http.Transport{} literal, which a
+	// client's Transport may name.
+	transports := map[types.Object]bool{}
 	ast.Inspect(f, func(n ast.Node) bool {
 		if as, ok := n.(*ast.AssignStmt); ok && as.Tok == token.DEFINE && len(as.Lhs) == len(as.Rhs) {
-			for i, l := range as.Lhs {
-				if id, ok := l.(*ast.Ident); ok && transportLit(as.Rhs[i], sel) {
-					transports[id.Name] = true
+			for j, lhs := range as.Lhs {
+				if o := info.Defs[ident(lhs)]; o != nil && transportLit(as.Rhs[j], sel) {
+					transports[o] = true
 				}
 			}
 		}
 		return true
 	})
+	checkedTransport := func(id *ast.Ident) bool { return transports[info.Uses[id]] }
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.CompositeLit:
@@ -526,7 +691,7 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 			if !isClient {
 				return true
 			}
-			if key != "" && !setsChecked(n, key, sel, transports) {
+			if key != "" && !setsChecked(n, key, sel, checkedTransport) {
 				at(n, full+" without its own "+key)
 			}
 			if unixDialers[rel] {
@@ -555,21 +720,52 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 				}
 			}
 			i, isDial := dials[se.Sel.Name]
-			if !isDial || len(n.Args) <= i {
+			if !isDial {
 				return true
 			}
-			if lit, ok := n.Args[i].(*ast.BasicLit); !ok || lit.Value != `"unix"` {
+			// DialUnix takes a unix network and its addresses as
+			// *net.UnixAddr: each must be nil or &net.UnixAddr{Name: x}
+			// with x from configuration, as Dial's address (#5757 S1).
+			if se.Sel.Name == "DialUnix" {
+				if len(n.Args) < 3 {
+					at(n, "DialUnix with arguments the lint cannot check")
+					return true
+				}
+				if v := info.Types[n.Args[0]].Value; v == nil || v.Kind() != constant.String || !unixNets[constant.StringVal(v)] {
+					at(n, "DialUnix on a network other than a unix one")
+				}
+				// The remote address may not be nil: an unconnected
+				// datagram socket sends anywhere through WriteToUnix
+				// (#5757 S2); only the local address may be.
+				if !configuredUnixAddr(l, n.Args[1], rel, sel, true) || !configuredUnixAddr(l, n.Args[2], rel, sel, false) {
+					at(n, "DialUnix to an address not taken from configuration")
+				}
+				return true
+			}
+			// A multi-value call spread into the dial (DialContext(t(ctx)))
+			// hides its network and address, so it fails closed (#6090).
+			if len(n.Args) < i+2 {
+				at(n, se.Sel.Name+" with arguments the lint cannot check")
+				return true
+			}
+			if v := info.Types[n.Args[i]].Value; v == nil || v.Kind() != constant.String || constant.StringVal(v) != "unix" {
 				at(n, se.Sel.Name+" on a network other than \"unix\"")
 			}
 			// A unix socket can front a network proxy, so a dial's
 			// address must come from configuration (a field or a
 			// variable), never a literal or an expression built here.
-			if se.Sel.Name != "Listen" && len(n.Args) > i+1 && !configured(n.Args[i+1], rel, f) {
+			if se.Sel.Name != "Listen" && !configured(l, n.Args[i+1], rel) {
 				at(n, se.Sel.Name+" to an address not taken from configuration")
 			}
 		case *ast.SelectorExpr:
 			if _, isDial := dials[n.Sel.Name]; isDial && !callee[n] {
 				at(n, n.Sel.Name+" used as a value, not called")
+			}
+			// A package that dials unix sockets itself sends only on
+			// its connected sockets: a send naming its own address
+			// would skip the dial's check (#5757 S2).
+			if unixDialCalls[rel] != nil && (n.Sel.Name == "WriteToUnix" || n.Sel.Name == "WriteMsgUnix" || n.Sel.Name == "WriteTo") {
+				at(n, "sends to an address of its own ("+n.Sel.Name+")")
 			}
 			full := sel(n)
 			if full == "" {
@@ -591,37 +787,80 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 }
 
 // configured reports a dial address that comes from configuration, and
-// accepts exactly three shapes (#6030 re-plan):
-//   - a string parameter of a function declared in this file, by value,
-//     that no statement here writes;
+// accepts exactly three shapes (#6030 re-plan), by the variable each
+// name denotes (#6120):
+//   - a string parameter of a function declared in the package, by value,
+//     that no statement writes;
 //   - a field read through such a function's parameter or receiver
-//     (p.field), when configuredFields lists the parameter's type and the
-//     field for package rel and nothing here writes p;
+//     (p.field), when configuredFields lists the parameter's type, declared
+//     in the package, and the field for package rel and nothing writes p;
 //   - a socket in a directory the function made (inTempDir).
 //
 // Anything else is not: a local (`sock := "/run/proxy.sock"`, #5775), a
 // func literal's parameter, a named result, a constant, a literal, an
 // expression, a package-level variable, a longer chain (c.a.b), or a
-// name this file does not declare (L3 S1 on #90).
-func configured(e ast.Expr, rel string, f *ast.File) bool {
+// name that does not type-check (L3 S1 on #90).
+func configured(l *loaded, e ast.Expr, rel string) bool {
 	field := ""
 	if se, ok := e.(*ast.SelectorExpr); ok {
 		field, e = se.Sel.Name, se.X
 	}
-	id, ok := e.(*ast.Ident)
-	if !ok || id.Obj == nil || id.Obj.Kind != ast.Var || written(id.Obj, f) {
+	v, ok := l.info.Uses[ident(e)].(*types.Var)
+	if !ok || l.wrote[v] {
 		return false
 	}
-	typ := param(id.Obj, f)
-	if field != "" {
-		if st, ok := typ.(*ast.StarExpr); ok {
-			typ = st.X
+	p, isParam := l.params[v]
+	switch {
+	case field != "":
+		t := v.Type()
+		if ptr, ok := t.(*types.Pointer); ok {
+			t = ptr.Elem()
 		}
-		t, ok := typ.(*ast.Ident)
-		return ok && configuredFields[rel][t.Name+"."+field] != ""
+		n, ok := t.(*types.Named)
+		return isParam && ok && n.Obj().Pkg() == l.pkg && configuredFields[rel][n.Obj().Name()+"."+field] != ""
+	case isParam:
+		return p.i >= 0 && types.Identical(v.Type(), types.Typ[types.String])
 	}
-	t, ok := typ.(*ast.Ident)
-	return ok && t.Name == "string" || inTempDir(id.Obj, f)
+	return inTempDir(l, v)
+}
+
+// unixNets are the networks DialUnix may name.
+var unixNets = map[string]bool{"unix": true, "unixgram": true, "unixpacket": true}
+
+// configuredUnixAddr reports a DialUnix address that is &net.UnixAddr{...}
+// whose Name is configured and whose other fields are constants, or nil
+// where orNil allows it; any other expression is not.
+func configuredUnixAddr(l *loaded, e ast.Expr, rel string, sel func(ast.Expr) string, orNil bool) bool {
+	if l.info.Types[e].IsNil() {
+		return orNil
+	}
+	u, ok := e.(*ast.UnaryExpr)
+	if !ok || u.Op != token.AND {
+		return false
+	}
+	c, ok := u.X.(*ast.CompositeLit)
+	if !ok || sel(c.Type) != "net.UnixAddr" {
+		return false
+	}
+	named := false
+	for _, el := range c.Elts {
+		kv, ok := el.(*ast.KeyValueExpr)
+		if !ok {
+			return false
+		}
+		k, _ := kv.Key.(*ast.Ident)
+		switch {
+		case k != nil && k.Name == "Name" && configured(l, kv.Value, rel):
+			named = true
+		case k != nil && k.Name == "Net":
+			if l.info.Types[kv.Value].Value == nil {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return named
 }
 
 // configuredFields are the fields a dial may read through a parameter or
@@ -631,146 +870,1266 @@ func configured(e ast.Expr, rel string, f *ast.File) bool {
 // type parameters, reflect), so no rule over syntax shows that a field is
 // only ever handed in (#6030 rounds 1 to 3). Each entry is instead a claim
 // a reviewer accepts, as an entry here in the PR's diff: that no code of
-// the package stores into the field, so it holds what callers hand in
-// (what they hand in is #6028's).
+// the package stores into the field, so it holds what callers hand in.
+// fieldStores backs the claim over the package's types (#6028).
 var configuredFields = map[string]map[string]string{
 	"infer":                {"Client.Path": "the inference service's socket, from agentosd's wiring"},
-	"kernel/proc":          {"Conn.Socket": "a kernel or clerk socket its caller names", "remote.Socket": "Remote.Socket, embedded; a Remote is handed to Clerk"},
+	"kernel/proc":          {"MainConfig.Chrony": "-chrony, chronyd's command socket, from agentos-kernel's flags", "MainConfig.ChronyReply": "-chrony-reply, the kernel's reply socket, from agentos-kernel's flags", "Conn.Socket": "a kernel or clerk socket its caller names", "remote.Socket": "Remote.Socket, embedded; a Remote is handed to Clerk"},
 	"localsrv/accountsock": {"Gmail.Socket": "the mail process's owner socket, from agentosd's wiring"},
 	"modelroute":           {"Config.Socket": "the vault process's model socket, from Forward's caller"},
 	"owner/kernelsock":     {"Keeper.Socket": "the keeper's socket, from agentosd's wiring", "Owner.Socket": "the kernel's owner socket, from agentosd's wiring"},
 }
 
-// param is the declared type of obj when obj is a parameter or receiver
-// of a function declared in f, or nil. A func literal's parameter is not
-// one: the literal is called here, where its caller may pass a literal
-// (Lens R1 on #6030).
-func param(obj *ast.Object, f *ast.File) ast.Expr {
-	for _, d := range f.Decls {
-		fd, ok := d.(*ast.FuncDecl)
-		if !ok {
-			continue
+// inTempDir reports a local bound by `sock := filepath.Join(dir, "s.sock")`
+// to a constant file name in dir (no "/", not "." or ".."), itself bound
+// by `dir, err := os.MkdirTemp(...)`: a socket in a fresh directory this
+// process made, which nothing listened on before it (agentos-infer's
+// llama-server socket). Neither may be written again.
+func inTempDir(l *loaded, v *types.Var) bool {
+	call := definedBy(l, v, "path/filepath.Join")
+	if call == nil || len(call.Args) != 2 {
+		return false
+	}
+	dir, ok := l.info.Uses[ident(call.Args[0])].(*types.Var)
+	name := l.info.Types[call.Args[1]].Value
+	if !ok || l.wrote[dir] || name == nil || name.Kind() != constant.String {
+		return false
+	}
+	if n := constant.StringVal(name); n == "" || n == "." || n == ".." || strings.Contains(n, "/") {
+		return false
+	}
+	return definedBy(l, dir, "os.MkdirTemp") != nil
+}
+
+// definedBy returns the call to fn (an import path and name) that v's
+// := statement binds it to, as the statement's first name, or nil.
+func definedBy(l *loaded, v *types.Var, fn string) *ast.CallExpr {
+	as := l.defs[v]
+	if as == nil {
+		return nil
+	}
+	call, ok := as.Rhs[0].(*ast.CallExpr)
+	if !ok || qualified(l.info, call.Fun) != fn {
+		return nil
+	}
+	return call
+}
+
+// packageUse loads a package's files (load), runs fileUse on each, then
+// the dial rules that need the whole package (#6028): dialCallers,
+// fieldStores and links, and handedOn along what fieldStores saw handed
+// on. A package that does not type-check fails closed. They rest on: the
+// composition root alone wiring the operator's configuration (every other
+// linked package is held by fieldStores); a package that cannot name a
+// listed type reaching it only through what it is handed, which handedOn
+// checks; unsafe staying an escape, and no linked file of the module
+// using the linkname directive (reported here); and a link or rename
+// going only through os, syscall or x/sys/unix.
+func packageUse(t *testing.T, dir string, files []string, prefix, rel string, ps []listed) []string {
+	t.Helper()
+	l := load(t, dir, files, rel, nil)
+	var bad []string
+	seen := map[string]bool{}
+	at := func(n ast.Node, what string) {
+		p := l.fset.Position(n.Pos())
+		s := fmt.Sprintf("%s/%s:%d: %s", prefix, filepath.Base(p.Filename), p.Line, what)
+		if !seen[s] {
+			seen[s] = true
+			bad = append(bad, s)
 		}
-		for _, fl := range []*ast.FieldList{fd.Recv, fd.Type.Params} {
-			if fl == nil {
-				continue
-			}
-			for _, p := range fl.List {
-				for _, nm := range p.Names {
-					if nm.Obj == obj {
-						return p.Type
+	}
+	if l.err != nil {
+		at(l.files[0], "does not type-check, so the lint cannot check it: "+l.err.Error())
+	}
+	for i, name := range files {
+		bad = append(bad, fileUse(l, i, prefix+"/"+name, rel)...)
+		// The directive reaches another package's variables past every
+		// rule here, unsafe or not (Security R2 on #6147).
+		if bytes.Contains(l.src[i], []byte(linkname)) {
+			bad = append(bad, prefix+"/"+name+": uses "+linkname[2:])
+		}
+	}
+	dialCallers(l, rel, at)
+	held := fieldStores(t, l, rel, nil, at)
+	links(l, files, rel, at)
+	if held == nil || ps == nil {
+		return bad // nothing handed, or a fixture with no graph
+	}
+	return append(bad, handedOn(t, rel, held, ps)...)
+}
+
+// linkname is the directive that binds a name to another package's
+// symbol, spelled in two parts so this file holds no such directive's
+// text (mutgate reads any as reaching every test).
+const linkname = "//go:" + "linkname"
+
+// dialAddrs calls visit with each unix dial's address in f: DialUnix's
+// are each &net.UnixAddr{...}'s Name.
+func dialAddrs(f *ast.File, visit func(ast.Expr)) {
+	ast.Inspect(f, func(n ast.Node) bool {
+		if c, ok := n.(*ast.CallExpr); ok {
+			if se, ok := c.Fun.(*ast.SelectorExpr); ok {
+				if i, ok := dials[se.Sel.Name]; ok && se.Sel.Name == "DialUnix" {
+					for _, a := range c.Args[min(1, len(c.Args)):] {
+						if u, ok := a.(*ast.UnaryExpr); ok {
+							if cl, ok := u.X.(*ast.CompositeLit); ok {
+								for _, el := range cl.Elts {
+									if kv, ok := el.(*ast.KeyValueExpr); ok {
+										if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Name" {
+											visit(kv.Value)
+										}
+									}
+								}
+							}
+						}
 					}
+				} else if ok && se.Sel.Name != "Listen" && len(c.Args) >= i+2 {
+					visit(c.Args[i+1])
 				}
 			}
 		}
-	}
-	return nil
-}
-
-// inTempDir reports a local bound by `sock := filepath.Join(dir, "s.sock")`
-// to a literal file name in dir (no "/", not "." or ".."), itself bound by `dir, err := os.MkdirTemp(...)`:
-// a socket in a fresh directory this process made, which nothing listened
-// on before it (agentos-infer's llama-server socket). Neither may be
-// written again (written).
-func inTempDir(obj *ast.Object, f *ast.File) bool {
-	call, ok := definedBy(obj, f, "path/filepath.Join")
-	if !ok || len(call.Args) != 2 {
-		return false
-	}
-	dir, ok := call.Args[0].(*ast.Ident)
-	name, lit := call.Args[1].(*ast.BasicLit)
-	if !ok || !lit || dir.Obj == nil || written(dir.Obj, f) {
-		return false
-	}
-	if n, err := strconv.Unquote(name.Value); err != nil || n == "" || n == "." || n == ".." || strings.Contains(n, "/") {
-		return false
-	}
-	_, ok = definedBy(dir.Obj, f, "os.MkdirTemp")
-	return ok
-}
-
-// definedBy returns the call to fn (an import path and name) that obj's
-// := statement binds it to, as the first name of the statement.
-func definedBy(obj *ast.Object, f *ast.File, fn string) (*ast.CallExpr, bool) {
-	as, ok := obj.Decl.(*ast.AssignStmt)
-	if !ok || as.Tok != token.DEFINE || len(as.Rhs) != 1 || len(as.Lhs) == 0 {
-		return nil, false
-	}
-	if id, ok := as.Lhs[0].(*ast.Ident); !ok || id.Obj != obj {
-		return nil, false
-	}
-	call, ok := as.Rhs[0].(*ast.CallExpr)
-	if !ok {
-		return nil, false
-	}
-	se, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return nil, false
-	}
-	x, ok := se.X.(*ast.Ident)
-	if !ok || x.Obj != nil {
-		return nil, false
-	}
-	for _, im := range f.Imports {
-		p, _ := strconv.Unquote(im.Path.Value)
-		n := p[strings.LastIndex(p, "/")+1:]
-		if im.Name != nil {
-			n = im.Name.Name
-		}
-		if n == x.Name && p+"."+se.Sel.Name == fn {
-			return call, true
-		}
-	}
-	return nil, false
-}
-
-// written reports a statement of f, other than the := that declares obj,
-// that writes obj or a part of it, or takes its address.
-func written(obj *ast.Object, f *ast.File) bool {
-	w := false
-	ast.Inspect(f, func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.AssignStmt:
-			for _, l := range n.Lhs {
-				w = w || n != obj.Decl && writes(l, obj)
-			}
-		case *ast.RangeStmt:
-			w = w || n.Tok == token.ASSIGN && (writes(n.Key, obj) || writes(n.Value, obj))
-		case *ast.IncDecStmt:
-			w = w || writes(n.X, obj)
-		case *ast.UnaryExpr:
-			w = w || n.Op == token.AND && writes(n.X, obj)
-		}
 		return true
 	})
-	return w
 }
 
-// writes reports that e, as an assignment's target or an operand of &,
-// is obj or a part of it (obj.f, obj[i], *obj).
-func writes(e ast.Expr, obj *ast.Object) bool {
-	for {
-		switch x := e.(type) {
-		case *ast.SelectorExpr:
-			e = x.X
-		case *ast.IndexExpr:
-			e = x.X
-		case *ast.StarExpr:
-			e = x.X
-		case *ast.ParenExpr:
-			e = x.X
-		case *ast.Ident:
-			return x.Obj == obj
-		default:
+// dialCallers holds each caller in the package to what configured holds a
+// dial to (#6028). configured takes a function's string parameter as
+// configuration, so the function is a dialing function: each call to it
+// in the package must pass, for that parameter, what configured accepts,
+// and a caller passing its own string parameter is a dialing function
+// too. Calls match by name (h, or any method m), so an interface or
+// another type's method of the same name is held too; a dialing function
+// taken as a value, called as a method expression, or handed arguments
+// the lint cannot count fails closed. Callers outside the package are the
+// composition root's wiring of its configuration.
+func dialCallers(l *loaded, rel string, at func(ast.Node, string)) {
+	addr := map[string]map[int]bool{} // "h" or ".m" -> parameter index
+	add := func(e ast.Expr) bool {
+		v, _ := l.info.Uses[ident(e)].(*types.Var)
+		p, ok := l.params[v]
+		if !ok || p.i < 0 || !types.Identical(v.Type(), types.Typ[types.String]) || addr[p.fn][p.i] {
 			return false
 		}
+		if addr[p.fn] == nil {
+			addr[p.fn] = map[int]bool{}
+		}
+		addr[p.fn][p.i] = true
+		return true
+	}
+	for _, f := range l.files {
+		dialAddrs(f, func(e ast.Expr) { add(e) })
+	}
+	// key is the dialing function e names, or "".
+	key := func(e ast.Expr) string {
+		switch x := e.(type) {
+		case *ast.Ident:
+			return x.Name
+		case *ast.SelectorExpr:
+			if _, ok := l.info.Uses[ident(x.X)].(*types.PkgName); ok {
+				return ""
+			}
+			return "." + x.Sel.Name
+		}
+		return ""
+	}
+	for grew := true; grew; {
+		grew = false
+		for _, f := range l.files {
+			called, named := map[ast.Node]bool{}, map[ast.Node]bool{}
+			ast.Inspect(f, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.FuncDecl:
+					named[n.Name] = true
+				case *ast.SelectorExpr:
+					named[n.Sel] = true
+				case *ast.KeyValueExpr:
+					named[n.Key] = true
+				case *ast.CallExpr:
+					called[n.Fun] = true
+					k := key(n.Fun)
+					if len(addr[k]) == 0 {
+						return true
+					}
+					// A method expression's arguments start with the
+					// receiver; one go/types did not resolve counts too.
+					if se, ok := n.Fun.(*ast.SelectorExpr); ok {
+						if s, ok := l.info.Selections[se]; !ok || s.Kind() == types.MethodExpr {
+							at(n, k[1:]+", a dialing function, called as a method expression")
+							return true
+						}
+					}
+					for i := range addr[k] {
+						if n.Ellipsis.IsValid() || i >= len(n.Args) {
+							at(n, strings.TrimPrefix(k, ".")+", a dialing function, with arguments the lint cannot check")
+							continue
+						}
+						if !configured(l, n.Args[i], rel) {
+							at(n, "passes "+strings.TrimPrefix(k, ".")+" an address not taken from configuration")
+						} else if add(n.Args[i]) {
+							grew = true
+						}
+					}
+				}
+				return true
+			})
+			ast.Inspect(f, func(n ast.Node) bool {
+				var k string
+				switch x := n.(type) {
+				case *ast.Ident:
+					if named[x] {
+						return true
+					}
+					k = x.Name
+				case *ast.SelectorExpr:
+					if k = key(x); k == "" {
+						return true
+					}
+				default:
+					return true
+				}
+				if len(addr[k]) > 0 && !called[n] {
+					at(n, strings.TrimPrefix(k, ".")+", a dialing function, used as a value")
+				}
+				return true
+			})
+		}
+	}
+}
+
+// fieldStores backs the configuredFields claim, that the package never
+// stores into a listed field, over the package's go/types types, so it
+// does not guess at any expression (#6028 re-plan after three Security
+// rounds on #6119). A listed field is a slot: a field index in a struct
+// shape, so any struct type identical to its owner's (tags aside), named
+// or not, has the same slot, and a conversion between them changes
+// nothing. The slots are the package's own and, but in the composition
+// root, those of every package whose objects it can reach; a package
+// handed holders (handedOn) has the interfaces it was handed them in as
+// holders too. In such a package, it reports:
+//   - a write or & of a slot (assignment, op-assignment, ++, range);
+//   - a composite literal that sets a slot, by key or by position;
+//   - a value of a type that reaches a slot (holds), wherever it may end
+//     up in an interface or in code outside the package: converted to an
+//     interface (assignment, call argument, return, literal element, send,
+//     map key, range), handed to a function or method of another package,
+//     or a type argument of any generic. Only those reach it by
+//     reflection (decoders, fmt, reflect itself), since another package
+//     cannot name the package's types, and unsafe stays an escape. Every
+//     place a value can go is listed in use; any other is reported, so a
+//     form it does not know fails closed.
+//
+// The rule is about types, not order: where in the program a store would
+// run does not matter, so no flow is followed (Security B1 round 3 on
+// #6119).
+func fieldStores(t *testing.T, l *loaded, rel string, handed map[string]bool, report func(ast.Node, string)) map[string]bool {
+	t.Helper()
+	// Only a package that declares a listed field, imports one of the
+	// module's packages (which may declare one), or is handed a holder
+	// can hold a slot; the composition root, which wires the
+	// configuration, may store into the fields it imports (#6138:
+	// clerk/run is not linked into agentosd, and every linked package but
+	// the root is held). One that does not type-check is reported by its
+	// caller, and fails closed: an import that did not load may be the one
+	// with slots (L3 R1 on #6147).
+	fs, pkg, info := l.files, l.pkg, l.info
+	inModule := false
+	for _, f := range fs {
+		for _, im := range f.Imports {
+			inModule = inModule || strings.HasPrefix(im.Path.Value, `"`+module)
+		}
+	}
+	if l.err != nil || len(configuredFields[rel]) == 0 && len(handed) == 0 && (!inModule || rel == compositionRoot) {
+		return nil
+	}
+	// The slots: each listed field's struct and index, through embedding,
+	// of the package and of every package whose objects it can reach, so
+	// a package that imports a listed one is held as its owner is.
+	type slot struct {
+		st *types.Struct
+		i  int
+	}
+	var slots []slot
+	seenPkg := map[*types.Package]bool{}
+	var addSlots func(p *types.Package)
+	addSlots = func(p *types.Package) {
+		if seenPkg[p] {
+			return
+		}
+		seenPkg[p] = true
+		for _, ip := range p.Imports() {
+			addSlots(ip)
+		}
+		prel, ours := strings.CutPrefix(p.Path(), module)
+		if !ours {
+			return
+		}
+		for tf := range configuredFields[prel] {
+			typ, field, _ := strings.Cut(tf, ".")
+			tn, ok := p.Scope().Lookup(typ).(*types.TypeName)
+			if !ok {
+				continue // a type the package does not declare holds nothing
+			}
+			obj, idx, _ := types.LookupFieldOrMethod(tn.Type(), true, p, field)
+			if _, ok := obj.(*types.Var); !ok {
+				report(fs[0], "configuredFields lists "+prel+" "+tf+", which is not a field")
+				continue
+			}
+			st := structOf(tn.Type())
+			for _, i := range idx[:len(idx)-1] {
+				st = structOf(st.Field(i).Type())
+			}
+			slots = append(slots, slot{st, idx[len(idx)-1]})
+		}
+	}
+	addSlots(pkg)
+	if len(slots) == 0 && len(handed) == 0 {
+		return nil
+	}
+	// listed is the slots st has, as field indices.
+	listed := func(st *types.Struct) map[int]bool {
+		m := map[int]bool{}
+		for _, s := range slots {
+			if st != nil && types.IdenticalIgnoreTags(st, s.st) {
+				m[s.i] = true
+			}
+		}
+		return m
+	}
+	// holds reports a type from which a slot can be reached: through
+	// pointers, elements, keys, fields, a function's parameters or
+	// results, or an exported method of the type or any method of an
+	// interface. A copy counts as much as a reference: a copy hands over
+	// the type, from which other code can mint a value (reflect.New,
+	// gob.Register) that dials (Security B1 on #6123).
+	// Tainting grows what holds, so the checks run to a fixed point
+	// quietly, then once more reporting.
+	quiet := true
+	at := func(n ast.Node, what string) {
+		if !quiet {
+			report(n, what)
+		}
+	}
+	memo := map[types.Type]bool{}
+	var holders []types.Type
+	// tainted are the interfaces outside the package a holder went into
+	// under a handOK entry (named in it, or by conversion or argument),
+	// so their values may be holders (Security B1 rounds 2 and 3 on
+	// #6123), and those a package handed holders was handed them in
+	// (handed). Any other conversion of a holder into one is reported, so
+	// none of another package's interfaces holds one otherwise.
+	tainted := maps.Clone(handed)
+	if tainted == nil {
+		tainted = map[string]bool{}
+	}
+	for key := range handOK[rel] {
+		tainted[key] = true
+	}
+	taint := func(t types.Type) {
+		if k := types.TypeString(t, nil); t != nil && types.IsInterface(t) && !tainted[k] {
+			tainted[k] = true
+			clear(memo)
+		}
+	}
+	implemented := func(it *types.Interface) bool {
+		for _, h := range holders {
+			if it.NumMethods() > 0 && types.Implements(h, it) {
+				return true
+			}
+		}
+		return false
+	}
+	var reach func(t types.Type, seen map[types.Type]bool) bool
+	reach = func(t types.Type, seen map[types.Type]bool) bool {
+		if r, ok := memo[t]; ok {
+			return r
+		}
+		if t == nil || seen[t] {
+			return false
+		}
+		seen[t] = true
+		r := false
+		in := func(t types.Type) { r = r || reach(t, seen) }
+		switch x := t.(type) {
+		case *types.Alias:
+			in(types.Unalias(x))
+		case *types.Named:
+			if it, ok := x.Underlying().(*types.Interface); ok {
+				// A named interface holds when a holder went into it
+				// under a handOK entry (tainted), or, declared here,
+				// when a holder implements it.
+				r = tainted[types.TypeString(x, nil)] || x.Obj().Pkg() == pkg && implemented(it)
+				for i := range it.NumMethods() {
+					in(it.Method(i).Type())
+				}
+				break
+			}
+			for _, ms := range []*types.MethodSet{types.NewMethodSet(x), types.NewMethodSet(types.NewPointer(x))} {
+				for i := range ms.Len() {
+					if ms.At(i).Obj().Exported() {
+						in(ms.At(i).Type())
+					}
+				}
+			}
+			in(x.Underlying())
+		case *types.Pointer:
+			in(x.Elem())
+		case *types.Slice:
+			in(x.Elem())
+		case *types.Chan:
+			in(x.Elem())
+		case *types.Map:
+			in(x.Key())
+			in(x.Elem())
+		case *types.Array:
+			in(x.Elem())
+		case *types.Struct:
+			r = len(listed(x)) > 0
+			for i := range x.NumFields() {
+				in(x.Field(i).Type())
+			}
+		case *types.Signature:
+			in(x.Params())
+			in(x.Results())
+		case *types.Tuple:
+			for i := range x.Len() {
+				in(x.At(i).Type())
+			}
+		case *types.Interface:
+			for i := range x.NumMethods() {
+				in(x.Method(i).Type())
+			}
+			// An unnamed interface a holder implements holds: its values'
+			// dynamic type may be the holder's, which reflect.TypeOf
+			// hands out.
+			r = r || tainted[types.TypeString(x, nil)] || implemented(x)
+		}
+		if len(seen) == 1 || r {
+			memo[t] = r // a false inside a cycle may be a partial answer
+		}
+		return r
+	}
+	holds := func(t types.Type) bool { return reach(t, map[types.Type]bool{}) }
+	check := func() {
+		holders = nil
+		clear(memo)
+		// holders are the types of the package's code that hold a slot and
+		// have methods, so an interface may sit in front of them: every type
+		// go/types gives an expression or declares (unnamed, instantiated and
+		// function-local ones included), and their pointers, grown to a fixed
+		// point, as a type that holds only through an interface a holder
+		// implements is a holder too (Security B1 rounds 2 and 3 on #6123).
+		var cands []types.Type
+		seenT := map[string]bool{}
+		cand := func(t types.Type) {
+			if t == nil {
+				return
+			}
+			for _, t := range []types.Type{t, types.NewPointer(t)} {
+				if k := types.TypeString(t, nil); !seenT[k] && types.NewMethodSet(t).Len() > 0 {
+					seenT[k] = true
+					cands = append(cands, t)
+				}
+			}
+		}
+		for _, tv := range info.Types {
+			cand(tv.Type)
+		}
+		for _, obj := range info.Defs {
+			if obj != nil {
+				cand(obj.Type())
+			}
+		}
+		for grew := true; grew; {
+			grew = false
+			for _, c := range cands {
+				if !slices.Contains(holders, c) && holds(c) {
+					holders = append(holders, c)
+					clear(memo)
+					grew = true
+				}
+			}
+		}
+		name := func(t types.Type) string { return types.TypeString(t, types.RelativeTo(pkg)) }
+		// Each node's parent, and each return's function signature.
+		parent := map[ast.Node]ast.Node{}
+		sigOf := map[*ast.ReturnStmt]*types.Signature{}
+		for _, f := range fs {
+			var stack []ast.Node
+			var sigs []*types.Signature
+			ast.Inspect(f, func(n ast.Node) bool {
+				if n == nil {
+					switch stack[len(stack)-1].(type) {
+					case *ast.FuncDecl, *ast.FuncLit:
+						sigs = sigs[:len(sigs)-1]
+					}
+					stack = stack[:len(stack)-1]
+					return true
+				}
+				if len(stack) > 0 {
+					parent[n] = stack[len(stack)-1]
+				}
+				switch x := n.(type) {
+				case *ast.FuncDecl:
+					sigs = append(sigs, info.Defs[x.Name].Type().(*types.Signature))
+				case *ast.FuncLit:
+					sigs = append(sigs, info.Types[x].Type.(*types.Signature))
+				case *ast.ReturnStmt:
+					sigOf[x] = sigs[len(sigs)-1]
+				}
+				stack = append(stack, n)
+				return true
+			})
+		}
+		// reviewed reports an interface handOK lists, by name or package.
+		reviewed := func(t types.Type) bool {
+			n, ok := types.Unalias(t).(*types.Named)
+			return handOK[rel][types.TypeString(t, nil)] != "" || handed[types.TypeString(t, nil)] || ok && n.Obj().Pkg() != nil && handOK[rel][n.Obj().Pkg().Path()] != ""
+		}
+		// into reports v, of a type that holds a slot, going to a place of
+		// type to: an interface or a type parameter could hand it on.
+		into := func(v ast.Node, from, to types.Type) {
+			if to != nil && types.IsInterface(to) && holds(from) && reviewed(to) {
+				taint(to)
+			} else if to != nil && types.IsInterface(to) && holds(from) {
+				at(v, "hands "+name(from)+", which reaches a configuredFields field, to "+name(to))
+			}
+		}
+		// spread checks a value list against the places it goes, a single
+		// multi-value call included.
+		spread := func(vals []ast.Expr, to func(int) types.Type) {
+			if len(vals) == 1 {
+				if tu, ok := info.TypeOf(vals[0]).(*types.Tuple); ok {
+					for i := range tu.Len() {
+						into(vals[0], tu.At(i).Type(), to(i))
+					}
+					return
+				}
+			}
+			for i, v := range vals {
+				into(v, info.TypeOf(v), to(i))
+			}
+		}
+		// use checks where e, whose type holds a slot, goes.
+		use := func(e ast.Expr) {
+			p := parent[e]
+			for pe, ok := p.(*ast.ParenExpr); ok; pe, ok = p.(*ast.ParenExpr) {
+				e, p = pe, parent[pe]
+			}
+			switch p := p.(type) {
+			case *ast.SelectorExpr, *ast.StarExpr, *ast.UnaryExpr, *ast.BinaryExpr, *ast.SliceExpr, *ast.TypeAssertExpr,
+				*ast.ExprStmt, *ast.IncDecStmt, *ast.SwitchStmt, *ast.CaseClause, *ast.IndexListExpr:
+				return // read in place, compared, or written whole
+			case *ast.IndexExpr:
+				if e == p.Index {
+					if m, ok := info.TypeOf(p.X).Underlying().(*types.Map); ok {
+						into(e, info.TypeOf(e), m.Key())
+					}
+				}
+				return
+			case *ast.CallExpr:
+				if e == p.Fun {
+					return
+				}
+				fun := ast.Unparen(p.Fun)
+				if tv := info.Types[fun]; tv.IsType() {
+					into(e, info.TypeOf(e), tv.Type)
+					return
+				}
+				if ix, ok := fun.(*ast.IndexExpr); ok {
+					fun = ix.X
+				} else if ix, ok := fun.(*ast.IndexListExpr); ok {
+					fun = ix.X
+				}
+				var obj types.Object
+				switch f := fun.(type) {
+				case *ast.Ident:
+					obj = info.Uses[f]
+				case *ast.SelectorExpr:
+					obj = info.Uses[f.Sel]
+				}
+				if fn, ok := obj.(*types.Func); ok && fn.Pkg() != pkg {
+					if !holds(info.TypeOf(e)) {
+						return
+					}
+					if handOKFunc(rel, fn) {
+						// What it takes the holder as may now hold one.
+						sig := info.TypeOf(p.Fun).Underlying().(*types.Signature)
+						i, n := slices.Index(p.Args, e), sig.Params().Len()
+						switch {
+						case len(p.Args) == 1 && n > 1: // f(g()): every parameter
+							for i := range n {
+								taint(sig.Params().At(i).Type())
+							}
+						case sig.Variadic() && i >= n-1 && !p.Ellipsis.IsValid():
+							taint(sig.Params().At(n - 1).Type().(*types.Slice).Elem())
+						case i < n:
+							taint(sig.Params().At(i).Type())
+						}
+						return
+					}
+					at(e, "hands "+name(info.TypeOf(e))+", which reaches a configuredFields field, to "+fn.FullName()+" outside the package")
+					return
+				}
+				sig := info.TypeOf(p.Fun).Underlying().(*types.Signature)
+				spread(p.Args, func(i int) types.Type {
+					n := sig.Params().Len()
+					if sig.Variadic() && i >= n-1 {
+						if p.Ellipsis.IsValid() {
+							return sig.Params().At(n - 1).Type()
+						}
+						return sig.Params().At(n - 1).Type().(*types.Slice).Elem()
+					}
+					if i < n {
+						return sig.Params().At(i).Type()
+					}
+					return nil
+				})
+				return
+			case *ast.AssignStmt:
+				if slices.Contains(p.Lhs, e) {
+					return
+				}
+				spread(p.Rhs, func(i int) types.Type { return info.TypeOf(p.Lhs[i]) })
+				return
+			case *ast.ValueSpec:
+				spread(p.Values, func(i int) types.Type { return info.Defs[p.Names[i]].Type() })
+				return
+			case *ast.ReturnStmt:
+				sig := sigOf[p]
+				spread(p.Results, func(i int) types.Type { return sig.Results().At(i).Type() })
+				return
+			case *ast.CompositeLit:
+				i := slices.Index(p.Elts, e)
+				switch u := litType(info.TypeOf(p)).(type) {
+				case *types.Struct:
+					into(e, info.TypeOf(e), u.Field(i).Type())
+				case *types.Slice:
+					into(e, info.TypeOf(e), u.Elem())
+				case *types.Array:
+					into(e, info.TypeOf(e), u.Elem())
+				}
+				return
+			case *ast.KeyValueExpr:
+				switch u := litType(info.TypeOf(parent[p].(*ast.CompositeLit))).(type) {
+				case *types.Struct:
+					for i := range u.NumFields() {
+						if k, ok := p.Key.(*ast.Ident); ok && e == p.Value && u.Field(i).Name() == k.Name {
+							into(e, info.TypeOf(e), u.Field(i).Type())
+						}
+					}
+				case *types.Slice:
+					into(e, info.TypeOf(e), u.Elem())
+				case *types.Array:
+					into(e, info.TypeOf(e), u.Elem())
+				case *types.Map:
+					if e == p.Key {
+						into(e, info.TypeOf(e), u.Key())
+					} else {
+						into(e, info.TypeOf(e), u.Elem())
+					}
+				}
+				return
+			case *ast.SendStmt:
+				if e == p.Value {
+					into(e, info.TypeOf(e), coreType(info.TypeOf(p.Chan)).(*types.Chan).Elem())
+				}
+				return
+			case *ast.RangeStmt:
+				if e == p.X && p.Tok == token.ASSIGN {
+					k, v := rangeTypes(info.TypeOf(e))
+					for _, x := range [][2]any{{p.Key, k}, {p.Value, v}} {
+						if l, _ := x[0].(ast.Expr); l != nil && x[1] != nil {
+							into(e, x[1].(types.Type), info.TypeOf(l))
+						}
+					}
+				}
+				return
+			case *ast.GoStmt, *ast.DeferStmt:
+				return
+			}
+			at(e, "a "+name(info.TypeOf(e))+", which reaches a configuredFields field, goes where the lint cannot check")
+		}
+		for e, tv := range info.Types {
+			if tv.IsValue() && holds(tv.Type) {
+				use(e)
+			}
+		}
+		for id, inst := range info.Instances {
+			// A listed function outside the module may take a holding type
+			// argument; one of the module's would carry the holder into a
+			// package handedOn walks as a type parameter it does not hold
+			// (L3 on #6147), so it is reported as a generic type is.
+			if fn, ok := info.Uses[id].(*types.Func); ok && handOKFunc(rel, fn) && !strings.HasPrefix(fn.Pkg().Path(), module) {
+				continue
+			}
+			for i := range inst.TypeArgs.Len() {
+				if ta := inst.TypeArgs.At(i); holds(ta) {
+					at(id, "instantiates "+id.Name+" with "+name(ta)+", which reaches a configuredFields field")
+				}
+			}
+		}
+		// outOf reports a value taken out of an interface as a type that
+		// reaches a slot (an interface a holder implements included): another
+		// package's code may have made it (Security B1 on #6123).
+		outOf := func(n ast.Node, from, t types.Type) {
+			if t == nil || types.Identical(t, types.Typ[types.UntypedNil]) {
+				return
+			}
+			switch {
+			case holds(t):
+				at(n, "takes a "+name(t)+", which reaches a configuredFields field, out of an interface")
+			case holds(from) && types.IsInterface(t):
+				// The holder would sit in an interface that holds nothing.
+				at(n, "takes a "+name(from)+", which reaches a configuredFields field, out as "+name(t))
+			}
+		}
+		// Stores into a slot, literals that set one, and values taken out of
+		// an interface as a type that reaches one: another package's code may
+		// have made them, from a copy it was handed (#6028).
+		for _, f := range fs {
+			ast.Inspect(f, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.TypeAssertExpr:
+					if n.Type != nil {
+						outOf(n, info.TypeOf(n.X), info.TypeOf(n.Type))
+					}
+				case *ast.TypeSwitchStmt:
+					var x ast.Expr
+					switch a := n.Assign.(type) {
+					case *ast.ExprStmt:
+						x = a.X.(*ast.TypeAssertExpr).X
+					case *ast.AssignStmt:
+						x = a.Rhs[0].(*ast.TypeAssertExpr).X
+					}
+					for _, cc := range n.Body.List {
+						for _, e := range cc.(*ast.CaseClause).List {
+							outOf(e, info.TypeOf(x), info.TypeOf(e))
+						}
+					}
+				case *ast.SelectorExpr:
+					sel := info.Selections[n]
+					if sel == nil || sel.Kind() != types.FieldVal {
+						return true
+					}
+					st, idx := structOf(sel.Recv()), sel.Index()
+					for _, i := range idx[:len(idx)-1] {
+						st = structOf(st.Field(i).Type())
+					}
+					if !listed(st)[idx[len(idx)-1]] {
+						return true
+					}
+					var e ast.Node = n
+					p := parent[e]
+					for pe, ok := p.(*ast.ParenExpr); ok; pe, ok = p.(*ast.ParenExpr) {
+						e, p = pe, parent[pe]
+					}
+					write := false
+					switch p := p.(type) {
+					case *ast.AssignStmt:
+						write = slices.Contains(p.Lhs, e.(ast.Expr))
+					case *ast.UnaryExpr:
+						write = p.Op == token.AND
+					case *ast.IncDecStmt:
+						write = true
+					case *ast.RangeStmt:
+						write = e == p.Key || e == p.Value
+					}
+					if write {
+						at(n, "stores into "+n.Sel.Name+", a configuredFields field")
+					}
+				case *ast.CompositeLit:
+					st, _ := litType(info.TypeOf(n)).(*types.Struct)
+					slotsHere := listed(st)
+					for i, el := range n.Elts {
+						kv, ok := el.(*ast.KeyValueExpr)
+						if !ok {
+							if slotsHere[i] {
+								at(n, "sets a configuredFields field by position here")
+							}
+							continue
+						}
+						if k, isID := kv.Key.(*ast.Ident); isID {
+							for j := range slotsHere {
+								if st.Field(j).Name() == k.Name {
+									at(n, "sets "+k.Name+", a configuredFields field, here")
+								}
+							}
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+	for n := -1; n != len(tainted); {
+		n = len(tainted)
+		check()
+	}
+	quiet = false
+	check()
+	return tainted
+}
+
+// handedOn checks each package of the module that rel hands a holder to
+// under a handOK entry (the package of a listed function, interface or
+// package), and each linked package that can reach such a package's
+// objects but the composition root, as fieldStores checks rel, with the
+// interfaces rel's holders went into (held) as holders there, and so on
+// along each one's own entries (#6124). A package that is handed a
+// holder, or gets one from a package that was, reaches a slot only by
+// reflection, unsafe or a decoder, so only through an interface or a
+// call the rule sees, or an escape import; what it hands on is checked
+// in turn, so the packages it merely imports need no check of their own.
+// A package entry names one import path exactly: a subpackage is not
+// covered, and fails closed. The standard library's functions are
+// trusted (the header's residual), and no entry names any other code
+// (TestHandOKNamesNoThirdParty). ps is the linked graph.
+func handedOn(t *testing.T, rel string, held map[string]bool, ps []listed) []string {
+	t.Helper()
+	byPath := map[string]listed{}
+	users := map[string][]string{} // a package's direct importers
+	for _, p := range ps {
+		byPath[p.path] = p
+		for _, im := range p.imports {
+			users[im] = append(users[im], p.path)
+		}
+	}
+	var bad []string
+	done := map[string]map[string]bool{module + rel: maps.Clone(held)}
+	var walk func(rel string, held map[string]bool)
+	walk = func(rel string, held map[string]bool) {
+		var next []string
+		for key := range handOK[rel] {
+			path := key
+			if !handOKPackage(key) {
+				path = key[:strings.LastIndex(key, ".")]
+			}
+			if strings.HasPrefix(path, module) && !slices.Contains(next, path) {
+				next = append(next, path)
+			}
+		}
+		// What rel's entries name, and each package that imports rel, the
+		// root aside (so on, through each one's own importers).
+		for _, u := range users[module+rel] {
+			if u != module+compositionRoot && !slices.Contains(next, u) {
+				next = append(next, u)
+			}
+		}
+		sort.Strings(next)
+		for _, path := range next {
+			// Checked again only with what it holds grown.
+			all, grew := maps.Clone(done[path]), done[path] == nil
+			if all == nil {
+				all = map[string]bool{}
+			}
+			for k := range held {
+				grew = grew || !all[k]
+				all[k] = true
+			}
+			if !grew {
+				continue
+			}
+			done[path] = all
+			p, ok := byPath[path]
+			if !ok {
+				bad = append(bad, module+rel+": hands a holder to "+path+", which is not in the graph")
+				continue
+			}
+			q := strings.TrimPrefix(path, module)
+			l := load(t, p.dir, p.files, q, nil)
+			at := func(n ast.Node, what string) {
+				pos := l.fset.Position(n.Pos())
+				s := fmt.Sprintf("%s/%s:%d: %s (handed by %s)", path, filepath.Base(pos.Filename), pos.Line, what, rel)
+				if !slices.Contains(bad, s) {
+					bad = append(bad, s)
+				}
+			}
+			if l.err != nil {
+				at(l.files[0], "does not type-check, so the lint cannot check it: "+l.err.Error())
+			}
+			for _, f := range l.files {
+				for _, im := range f.Imports {
+					if p, _ := strconv.Unquote(im.Path.Value); escapes[p] {
+						at(im, "imports "+p+", which reaches a handed value past the rule")
+					}
+				}
+			}
+			if more := fieldStores(t, l, q, all, at); more != nil {
+				walk(q, more)
+			}
+		}
+	}
+	walk(rel, held)
+	return bad
+}
+
+// handOK are the functions of other packages (by go/types full name)
+// that a package fieldStores checks may hand a value reaching a
+// configuredFields field, or instantiate with its type, and the
+// interfaces (by full type name) it may convert one to, or a whole
+// package (by exact import path) for both, by package, and why each
+// keeps what it is handed: a claim a reviewer accepts for the standard
+// library, as configuredFields' entries are. An interface a holder goes
+// into under an entry then holds (fieldStores' tainted), and a package
+// of the module an entry names is checked by the same rule, with those
+// interfaces as holders (handedOn), so its entry claims only that.
+var handOK = map[string]map[string]string{
+	"backup": {"maps.Keys": "ranges over the set's map keys, its backup ids; writes nothing (Set.List)"},
+	"kernel/proc": {
+		"maps.Keys":       "ranges over a map's keys; writes nothing (kernelmain.go, the clerk names)",
+		module + "backup": "the backup set and writer: it calls the methods of the Targets it is handed (*pendingPut, dirTarget, inFlight) and keeps them (handedOn checks it)",
+		module + "kernel": "the kernel: it calls Do and Probe on the Clerks it is handed and keeps them (handedOn checks it)",
+	},
+}
+
+// REQ: ARC-2
+//
+// Every handOK key names the standard library or the module: handedOn
+// checks the module's, and only the standard library is trusted
+// unchecked (Security R1 on #6147).
+func TestHandOKNamesNoThirdParty(t *testing.T) {
+	for rel, keys := range handOK {
+		for key := range keys {
+			if thirdPartyKey(key) {
+				t.Errorf("handOK[%q] names %q, outside the standard library and the module", rel, key)
+			}
+		}
+	}
+	for key, want := range map[string]bool{"maps.Keys": false, "io.ReadCloser": false, module + "kernel": false, module + "backup.Write": false, "golang.org/x/sys/unix.Syscall": true, "example.com/p": true, "example.com/p.T": true} {
+		if thirdPartyKey(key) != want {
+			t.Errorf("thirdPartyKey(%q) = %v", key, !want)
+		}
+	}
+}
+
+// thirdPartyKey reports a handOK key outside the standard library and
+// the module: a dot in its first path element.
+func thirdPartyKey(key string) bool {
+	return !strings.HasPrefix(key, module) && strings.Contains(strings.SplitN(key, "/", 2)[0], ".") && strings.Contains(key, "/")
+}
+
+// handOKFunc reports fn listed in handOK for rel, by name or package
+// (a method of the universe's error has none).
+func handOKFunc(rel string, fn *types.Func) bool {
+	return handOK[rel][fn.FullName()] != "" || fn.Pkg() != nil && handOK[rel][fn.Pkg().Path()] != ""
+}
+
+// handOKPackage reports a handOK key that names a package, not a
+// function or a type: no dot in its last path element.
+func handOKPackage(key string) bool {
+	return !strings.Contains(key[strings.LastIndex(key, "/")+1:], ".")
+}
+
+// REQ: ARC-2
+//
+// Every linked package but the composition root is held to the listed
+// fields of the packages whose objects it can reach (#6138: clerk/run is
+// not linked into agentosd, so it is no root; linked, it would be held),
+// and each package of the module a holder is handed to is checked as its
+// owner is, with what it was handed, along its own entries (#6124).
+func TestHandOffsAreHeld(t *testing.T) {
+	src := func(imports, body string) string { return "package p\nimport (" + imports + ")\n" + body + "\n" }
+	stores := src(`"encoding/json"; "github.com/ghbmrk/agentos/broker/modelroute"; "github.com/ghbmrk/agentos/broker/clerk/run"`,
+		`func f() modelroute.Config { return modelroute.Config{Socket: "/x"} }
+func g(c *modelroute.Config) { c.Socket = "y"; json.Unmarshal(nil, c) }
+func h(m *run.Model) { m.Socket = "z" }`)
+	got := useOf(t, "change", stores)
+	for _, want := range []string{
+		"p0.go:3: sets Socket, a configuredFields field, here",
+		"p0.go:4: stores into Socket, a configuredFields field",
+		"p0.go:4: hands *" + module + "modelroute.Config, which reaches a configuredFields field, to encoding/json.Unmarshal outside the package",
+		"p0.go:5: stores into Socket, a configuredFields field",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("a non-root importer's %q not reported; got %q", want, got)
+		}
+	}
+	if got := useOf(t, compositionRoot, stores); got != "" {
+		t.Errorf("the composition root's wiring reported: %q", got)
+	}
+	// A generic of a module package an entry names, instantiated with a
+	// holder, is reported in the owner (L3 on #6147), and an importer that
+	// does not type-check fails closed.
+	handOK["modelroute"] = map[string]string{module + "kernel/secret": "test"}
+	got = useOf(t, "modelroute", src(`"github.com/ghbmrk/agentos/broker/kernel/secret"`, `type Config struct{ Socket string }
+func g(c Config) { secret.Hide(c) }`))
+	delete(handOK, "modelroute")
+	if !strings.Contains(got, "instantiates Hide with Config, which reaches a configuredFields field") {
+		t.Errorf("a module generic instantiated with a holder passed: %q", got)
+	}
+	handOK["modelroute"] = map[string]string{module + "kernel/secret": "test"}
+	got = useOf(t, "modelroute", src(`"github.com/ghbmrk/agentos/broker/kernel/secret"`, `type Config struct{ Socket string }
+func g(c *Config) { secret.Hide[*Config](c) }`))
+	delete(handOK, "modelroute")
+	if !strings.Contains(got, "instantiates Hide with *Config, which reaches a configuredFields field") {
+		t.Errorf("an explicit module generic instantiation with a holder passed: %q", got)
+	}
+	if got := useOf(t, "change", src(`_ "unsafe"`, linkname+" x example.com/p.x\nvar x int")); !strings.Contains(got, "p0.go: uses "+linkname[2:]) {
+		t.Errorf("the linkname directive passed: %q", got)
+	}
+	if got := useOf(t, "change", src(`"github.com/ghbmrk/agentos/broker/nosuch"`, `var _ = nosuch.Config{}`)); !strings.Contains(got, "does not type-check") {
+		t.Errorf("an importer's type error passed: %q", got)
+	}
+	// A handed package: kept and called is quiet; a decoder, gob, reflect
+	// or fmt is reported. What it hands on under its own entries is
+	// checked in turn, and so is a package that reaches its objects (by
+	// the graph's imports here: fixtures cannot import each other), an
+	// escape import included; the root and a subpackage are not walked.
+	srcs := map[string]string{
+		"fake": src(`"encoding/gob"; "encoding/json"; "fmt"; "reflect"`, `type Clerk interface{ Do() }
+type named struct{ c Clerk }
+func (named) String() string { return "" }
+var keep = map[string]Clerk{}
+func a(c Clerk) { c.Do(); keep["a"] = c }
+func b(p []byte, c Clerk) { json.Unmarshal(p, c) }
+func d(c Clerk) { gob.Register(c) }
+func e(c Clerk) any { return reflect.ValueOf(c) }
+func h(c Clerk) string { return fmt.Sprint(c) }
+func s(c Clerk) fmt.Stringer { return named{c} }`),
+		"fake2":         src(`"encoding/json"; "fmt"; _ "unsafe"`, `func F(s fmt.Stringer) { json.Unmarshal(nil, s) }`),
+		"user":          src(`"encoding/json"; "fmt"`, `func U(s fmt.Stringer) { json.Unmarshal(nil, s) }`),
+		"fake/sub":      src(`"encoding/json"; "fmt"`, `func U(s fmt.Stringer) { json.Unmarshal(nil, s) }`),
+		compositionRoot: src(`"encoding/json"; "fmt"`, `func U(s fmt.Stringer) { json.Unmarshal(nil, s) }`),
+	}
+	var ps []listed
+	for _, rel := range slices.Sorted(maps.Keys(srcs)) {
+		d := t.TempDir()
+		if err := os.WriteFile(filepath.Join(d, "p.go"), []byte(srcs[rel]), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ps = append(ps, listed{path: module + rel, dir: d, files: []string{"p.go"}})
+	}
+	ps[slices.IndexFunc(ps, func(p listed) bool { return p.path == module+"fake2" })].imports = []string{module + "fake"}
+	ps[slices.IndexFunc(ps, func(p listed) bool { return p.path == module+"user" })].imports = []string{module + "fake2"}
+	ps[slices.IndexFunc(ps, func(p listed) bool { return p.path == module+compositionRoot })].imports = []string{module + "fake"}
+	handOK["zzowner"] = map[string]string{module + "fake": "test"}
+	handOK["fake"] = map[string]string{"fmt.Stringer": "test"}
+	defer delete(handOK, "zzowner")
+	defer delete(handOK, "fake")
+	got = strings.Join(handedOn(t, "zzowner", map[string]bool{module + "fake.Clerk": true}, ps), "\n")
+	for _, want := range []string{
+		"fake/p.go:8: hands Clerk, which reaches a configuredFields field, to encoding/json.Unmarshal outside the package (handed by zzowner)",
+		"fake/p.go:9: hands Clerk, which reaches a configuredFields field, to encoding/gob.Register outside the package (handed by zzowner)",
+		"fake/p.go:10: hands Clerk, which reaches a configuredFields field, to reflect.ValueOf outside the package (handed by zzowner)",
+		"fake/p.go:11: hands Clerk, which reaches a configuredFields field, to fmt.Sprint outside the package (handed by zzowner)",
+		"fake2/p.go:2: imports unsafe, which reaches a handed value past the rule (handed by fake)",
+		"fake2/p.go:3: hands fmt.Stringer, which reaches a configuredFields field, to encoding/json.Unmarshal outside the package (handed by fake)",
+		"user/p.go:3: hands fmt.Stringer, which reaches a configuredFields field, to encoding/json.Unmarshal outside the package (handed by fake2)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("not reported: %s\ngot %s", want, got)
+		}
+	}
+	if strings.Count(got, "\n") != 6 {
+		t.Errorf("want only those 7 reports (kept and called is quiet; root and subpackage unwalked); got\n%s", got)
+	}
+	// A walked package that does not type-check fails closed.
+	if err := os.WriteFile(filepath.Join(ps[slices.IndexFunc(ps, func(p listed) bool { return p.path == module+"user" })].dir, "p.go"), []byte(src(`"fmt"`, `func U(s fmt.Stringer) { nosuch(s) }`)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(handedOn(t, "zzowner", map[string]bool{module + "fake.Clerk": true}, ps), "\n"); !strings.Contains(got, "user/p.go:1: does not type-check") {
+		t.Errorf("a walked package's type error passed: %q", got)
+	}
+	// A package entry matches one import path exactly.
+	sub := types.NewFunc(token.NoPos, types.NewPackage(module+"kernel/ipform", "ipform"), "F", types.NewSignatureType(nil, nil, nil, nil, nil, false))
+	if handOKFunc("kernel/proc", sub) || !handOKFunc("kernel/proc", types.NewFunc(token.NoPos, types.NewPackage(module+"kernel", "kernel"), "F", sub.Signature())) {
+		t.Error("a package entry does not match its exact import path only")
+	}
+}
+
+// structOf is the struct a field selection steps through: t's, or its
+// pointee's, or its type parameter's core type's.
+func structOf(t types.Type) *types.Struct {
+	if p, ok := types.Unalias(t).Underlying().(*types.Pointer); ok {
+		t = p.Elem()
+	}
+	st, _ := coreType(t).(*types.Struct)
+	return st
+}
+
+// litType is a composite literal's core type; go/types gives an elided
+// &T{} element the type *T.
+func litType(t types.Type) types.Type {
+	if p, ok := coreType(t).(*types.Pointer); ok {
+		return coreType(p.Elem())
+	}
+	return coreType(t)
+}
+
+// coreType is t's underlying type, or a type parameter's single one.
+func coreType(t types.Type) types.Type {
+	tp, ok := types.Unalias(t).(*types.TypeParam)
+	if !ok {
+		return types.Unalias(t).Underlying()
+	}
+	var core types.Type
+	iface := tp.Constraint().Underlying().(*types.Interface)
+	for i := range iface.NumEmbeddeds() {
+		var terms []*types.Term
+		switch e := iface.EmbeddedType(i).(type) {
+		case *types.Union:
+			for j := range e.Len() {
+				terms = append(terms, e.Term(j))
+			}
+		default:
+			terms = append(terms, types.NewTerm(false, e))
+		}
+		for _, term := range terms {
+			if u := term.Type().Underlying(); core == nil {
+				core = u
+			} else if !types.Identical(core, u) {
+				return nil
+			}
+		}
+	}
+	return core
+}
+
+// rangeTypes are a range clause's key and value types over t.
+func rangeTypes(t types.Type) (k, v types.Type) {
+	switch u := coreType(t).(type) {
+	case *types.Slice:
+		return types.Typ[types.Int], u.Elem()
+	case *types.Array:
+		return types.Typ[types.Int], u.Elem()
+	case *types.Pointer:
+		if a, ok := u.Elem().Underlying().(*types.Array); ok {
+			return types.Typ[types.Int], a.Elem()
+		}
+	case *types.Map:
+		return u.Key(), u.Elem()
+	case *types.Chan:
+		return u.Elem(), nil
+	case *types.Signature:
+		if u.Params().Len() == 1 {
+			yield := u.Params().At(0).Type().Underlying().(*types.Signature)
+			if yield.Params().Len() > 0 {
+				k = yield.Params().At(0).Type()
+			}
+			if yield.Params().Len() > 1 {
+				v = yield.Params().At(1).Type()
+			}
+		}
+	}
+	return k, v
+}
+
+// exports maps a build and an import path to its export data file, from
+// go list.
+var exports sync.Map
+
+// exportData is the lookup go/importer's gc importer reads fs's imports
+// (and theirs) through: the export data go list -export builds for them in
+// build tg (nil: go's own environment). A file behind ignore is run alone
+// (go run), so its imports are built without that tag.
+func exportData(t *testing.T, fs []*ast.File, tg *envBuild) func(string) (io.ReadCloser, error) {
+	t.Helper()
+	in, args, env := "", []string{"list", "-e", "-export", "-deps", "-f", "{{.ImportPath}}\t{{.Export}}"}, os.Environ()
+	if tg != nil {
+		in = fmt.Sprint(*tg) + "\t"
+		args = append(args, "-tags="+strings.Join(slices.DeleteFunc(slices.Clone(tg.tags), func(w string) bool { return w == "ignore" }), ","))
+		env = append(env, "GOOS=linux", "GOARCH="+tg.arch, "CGO_ENABLED="+map[bool]string{true: "1", false: "0"}[tg.cgo])
+	}
+	var need []string
+	for _, f := range fs {
+		for _, im := range f.Imports {
+			p, _ := strconv.Unquote(im.Path.Value)
+			if _, ok := exports.Load(in + p); !ok && p != "unsafe" && p != "C" && !slices.Contains(need, p) {
+				need = append(need, p)
+			}
+		}
+	}
+	if len(need) > 0 {
+		cmd := exec.Command("go", append(args, need...)...)
+		cmd.Env = env
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("go list -export: %v\n%s", err, stderr.String())
+		}
+		for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if p, file, ok := strings.Cut(l, "\t"); ok && file != "" {
+				exports.Store(in+p, file)
+			}
+		}
+	}
+	return func(path string) (io.ReadCloser, error) {
+		file, ok := exports.Load(in + path)
+		if !ok {
+			return nil, fmt.Errorf("no export data for %s", path)
+		}
+		return os.Open(file.(string))
+	}
+}
+
+// linkCalls are the calls that make, move or replace a directory entry,
+// so a configured socket path, or its directory, could come to name
+// another socket (Security 4 on #6035).
+var linkCalls = map[string]bool{
+	"os.Symlink": true, "os.Link": true, "os.Rename": true,
+	"syscall.Symlink": true, "syscall.Link": true, "syscall.Rename": true,
+	"syscall.Symlinkat": true, "syscall.Linkat": true, "syscall.Renameat": true,
+	"golang.org/x/sys/unix.Symlink": true, "golang.org/x/sys/unix.Link": true, "golang.org/x/sys/unix.Rename": true,
+	"golang.org/x/sys/unix.Symlinkat": true, "golang.org/x/sys/unix.Linkat": true, "golang.org/x/sys/unix.Renameat": true,
+	"golang.org/x/sys/unix.Renameat2": true,
+}
+
+// linkOK are the linkCalls (or linkMethods, as ".Name") each file of a
+// package that dials may make, called or taken as a value, and why; a
+// file that dials makes none. Any other file owes an entry by review.
+var linkOK = map[string]map[string]string{
+	"kernel/proc/backup.go":  {"os.Link": "links a backup's content file into its snapshot, under the kernel's backup dir; also held as backups.link, its only use"},
+	"kernel/proc/restore.go": {"os.Rename": "moves a restore's staged content into the content dir"},
+}
+
+// linkMethods are the method names that make, move or replace a directory
+// entry (os.Root's, and any wrapper's); a method of that name on any value
+// counts.
+var linkMethods = map[string]bool{"Symlink": true, "Link": true, "Rename": true}
+
+// links refuses a linkCall or linkMethods method, called or taken as a
+// value, and os.OpenRoot or os.OpenInRoot, in a package that dials a unix
+// socket, except a linkOK use in its own file, which does not dial
+// (Security 4 on #6035, B2 and B3 on #6119).
+func links(l *loaded, names []string, rel string, at func(ast.Node, string)) {
+	if !unixDialers[rel] && unixDialCalls[rel] == nil {
+		return
+	}
+	for i, f := range l.files {
+		dialsHere := false
+		dialAddrs(f, func(ast.Expr) { dialsHere = true })
+		ok := linkOK[rel+"/"+names[i]]
+		ast.Inspect(f, func(n ast.Node) bool {
+			se, isSel := n.(*ast.SelectorExpr)
+			if !isSel {
+				return true
+			}
+			full := "." + se.Sel.Name
+			if q := qualified(l.info, se); q != "" {
+				full = q
+				if full == "os.OpenRoot" || full == "os.OpenInRoot" {
+					at(se, "opens an os.Root ("+full+"), whose methods link and rename, in a package that dials a unix socket")
+					return true
+				}
+				if !linkCalls[full] {
+					return true
+				}
+			} else if !linkMethods[se.Sel.Name] {
+				return true
+			}
+			if dialsHere || ok[full] == "" {
+				at(se, "links or renames ("+strings.TrimPrefix(full, ".")+") in a package that dials a unix socket")
+			}
+			return true
+		})
 	}
 }
 
 // setsChecked reports that a client literal sets field key to a value the
 // test can see: DialContext to a function literal, and Transport to a
 // checked &http.Transport{} literal or an identifier bound to one.
-func setsChecked(c *ast.CompositeLit, key string, sel func(ast.Expr) string, transports map[string]bool) bool {
+func setsChecked(c *ast.CompositeLit, key string, sel func(ast.Expr) string, transport func(*ast.Ident) bool) bool {
 	for _, e := range c.Elts {
 		kv, ok := e.(*ast.KeyValueExpr)
 		if !ok {
@@ -785,7 +2144,7 @@ func setsChecked(c *ast.CompositeLit, key string, sel func(ast.Expr) string, tra
 			return ok
 		case "Transport":
 			if id, ok := kv.Value.(*ast.Ident); ok {
-				return transports[id.Name]
+				return transport(id)
 			}
 			return transportLit(kv.Value, sel)
 		}
@@ -847,6 +2206,7 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		{"modelroute", src(`"net/http"; "net/http/httputil"`, `var rt http.RoundTripper; var p = httputil.ReverseProxy{Transport: rt}`)},
 		{"modelroute", src(`"net/http"`, `var c = &http.Client{Transport: http.RoundTripper(nil)}`)},
 		{"modelroute", src(`"net/http"`, `var none func(); var tr = &http.Transport{DialContext: none}`)},
+		{"modelroute", src(`"context"; "net"; "net/http"`, `var none func(context.Context, string, string) (net.Conn, error); var tr = &http.Transport{DialContext: none}`)},
 		{"vm/overlay", src(`"syscall"`, `var a, b, e = syscall.Syscall(41, 2, 1, 0)`)},
 		{"loops", src(`"os"`, `var p, _ = os.StartProcess("/bin/sh", nil, nil)`)},
 		{"modelroute", src(`"net"`, `var c, _ = (&net.Dialer{}).Dial("unix", "/run/proxy.sock")`)},
@@ -858,9 +2218,28 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		{"mail/mailsock", src(`"net"`, `func g() { (&net.Dialer{}).DialContext(nil, "tcp", "imap.example.com:993") }`)},
 		{"mail/mailsock", src(`"net"`, `func g() { (&net.Dialer{}).DialContext(nil, "unix", "/run/agentos-egress/mail.sock") }`)},
 		{"mail/mailsock", src(`"net"`, `var c, _ = net.Dial("tcp", "smtp.example.com:465")`)},
+		{"kernel/proc", src(`"net"`, `func g() { net.DialUnix("unixgram", nil, &net.UnixAddr{Name: "/run/proxy.sock", Net: "unixgram"}) }`)},
+		{"kernel/proc", src(`"net"`, `func g(sock string) { net.DialUnix("unixgram", &net.UnixAddr{Name: "/run/r.sock", Net: "unixgram"}, &net.UnixAddr{Name: sock, Net: "unixgram"}) }`)},
+		{"kernel/proc", src(`"net"`, `func g(a *net.UnixAddr) { net.DialUnix("unixgram", nil, a) }`)},
+		{"kernel/proc", src(`"net"`, `func g(sock string) { net.DialUnix("tcp", nil, &net.UnixAddr{Name: sock, Net: "unixgram"}) }`)},
+		{"kernel/proc", src(`"net"`, `var f = net.DialUnix`)},
+		{"kernel/proc", src(`"net"`, `func g(reply string) {
+	c, _ := net.DialUnix("unixgram", &net.UnixAddr{Name: reply, Net: "unixgram"}, nil)
+	c.WriteToUnix([]byte("x"), &net.UnixAddr{Name: "/run/proxy.sock", Net: "unixgram"})
+}`)},
+		{"kernel/proc", src(`"net"`, `func g(reply string) { net.DialUnix("unixgram", &net.UnixAddr{Name: reply, Net: "unixgram"}, nil) }`)},
+		{"kernel/proc", src(`"net"`, `func g(c *net.UnixConn) { c.WriteMsgUnix(nil, nil, &net.UnixAddr{Name: "/run/proxy.sock", Net: "unixgram"}) }`)},
+		{"kernel/proc", src(`"net"`, `func g(c *net.UnixConn) { c.WriteTo(nil, &net.UnixAddr{Name: "/run/proxy.sock", Net: "unixgram"}) }`)},
+		{"kernel/proc", src(`"net"`, `func g() { net.DialUnix("unixgram") }`)},
 		// A local bound to a literal is not configuration, whichever dial
 		// names it (#5775).
 		{"kernel/proc", src(`"net"`, `func g() { sock := "/run/proxy.sock"; net.DialUnix("unixgram", nil, &net.UnixAddr{Name: sock, Net: "unixgram"}) }`)},
+		// A multi-value call spread into a dial hides both its network and
+		// its address, so the lint refuses it (#6090).
+		{"modelroute", src(`"context"; "net"`, `func t(ctx context.Context) (context.Context, string, string) { return ctx, "tcp", "evil.example:443" }; func g(ctx context.Context) { (&net.Dialer{}).DialContext(t(ctx)) }`)},
+		{"modelroute", src(`"net"`, `func t() (string, string) { return "tcp", "evil.example:443" }; func g() { (&net.Dialer{}).Dial(t()) }`)},
+		{"modelroute", src(`"net"; "time"`, `func t() (string, string, time.Duration) { return "tcp", "evil.example:443", 0 }; func g() { net.DialTimeout(t()) }`)},
+		{"modelroute", src(`"net"`, `func t() (string, string) { return "tcp", ":0" }; func g() { net.Listen(t()) }`)},
 	} {
 		path := filepath.Join(t.TempDir(), "p.go")
 		if err := os.WriteFile(path, []byte(c.src), 0o600); err != nil {
@@ -944,6 +2323,19 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		src(`"net"`, `type cfg struct{ s string }; func use(c cfg) { (&net.Dialer{}).Dial("unix", c.s) }; func g() { use(struct{ s string }{"/run/proxy.sock"}) }`),
 		src(`"net"`, `type cfg struct{ s string }; type x = struct{ s string }; func use(c cfg) { (&net.Dialer{}).Dial("unix", c.s) }; func g() { use(x{"/run/proxy.sock"}) }`),
 		src(`"net"; "reflect"`, `type cfg struct{ S string }; func (c *cfg) dial() { (&net.Dialer{}).Dial("unix", c.S) }; func g(c *cfg) { reflect.ValueOf(c).Elem().Field(0).SetString("/run/proxy.sock"); c.dial() }`),
+		// The temp-dir socket only through the real os.MkdirTemp and
+		// path/filepath.Join, by the object each name resolves to, and with
+		// a constant name that stays in the directory (Security B1 on
+		// #6169).
+		src(`"net"; "os"`, `func j(a, b string) string { return "/run/proxy.sock" }; func g() { dir, _ := os.MkdirTemp("", "x"); sock := j(dir, "s.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "path/filepath"; "strings"`, `func g() { dir := strings.TrimSpace("/run"); sock := filepath.Join(dir, "proxy.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"; "path"`, `func g() { dir, _ := os.MkdirTemp("", "x"); sock := path.Join(dir, "s.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"`, `func g() { dir, _ := os.MkdirTemp("", "x"); filepath := struct{ Join func(a, b string) string }{func(a, b string) string { return "/run/proxy.sock" }}; sock := filepath.Join(dir, "s.sock"); (&net.Dialer{}).Dial("unix", sock) }`),
+		src(`"net"; "os"; "path/filepath"`, `const name = "../proxy.sock"; func g() { dir, _ := os.MkdirTemp("", "x"); sock := filepath.Join(dir, name); (&net.Dialer{}).Dial("unix", sock) }`),
+		// Type-correct forms of the cases above that do not type-check
+		// (Security R2 on #6169).
+		src(`"net"`, `type path string; func g(s path) { (&net.Dialer{}).Dial("unix", string(s)) }`),
+		src(`"net"`, `func g(s string) { s += ".x"; (&net.Dialer{}).Dial("unix", s) }`),
 	} {
 		path := filepath.Join(t.TempDir(), "p.go")
 		if err := os.WriteFile(path, []byte(c), 0o600); err != nil {
@@ -951,6 +2343,222 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		}
 		if got := strings.Join(sourceUse(t, path, "p.go", "modelroute"), "\n"); !strings.Contains(got, "not taken from configuration") {
 			t.Errorf("an unconfigured address passed: %q\n%s", got, c)
+		}
+	}
+	// A listed field counts only on a type the package declares, not on
+	// another package's type of the same name (Security B1 on #6169).
+	configuredFields["modelroute"]["Cmd.Path"] = "test"
+	got := useOf(t, "modelroute", src(`"net"; "os/exec"`, `func g(c *exec.Cmd) { (&net.Dialer{}).Dial("unix", c.Path) }`))
+	delete(configuredFields["modelroute"], "Cmd.Path")
+	if !strings.Contains(got, "not taken from configuration") {
+		t.Errorf("another package's Cmd.Path passed as a listed field: %q", got)
+	}
+	// What a dialing function's callers pass, what a listed package stores
+	// into a configuredFields field, and links or renames that could swap
+	// the socket under a configured path, are package-wide (#6028). Each
+	// case is one package of modelroute (Config.Socket listed), or of the
+	// named package.
+	dial := `func h(s string) { (&net.Dialer{}).Dial("unix", s) }; `
+	cfgDial := `type Config struct{ Socket string }; func (c *Config) dial() { (&net.Dialer{}).Dial("unix", c.Socket) }; `
+	for _, c := range []struct {
+		rel, want string
+		srcs      []string
+	}{
+		// A literal passed to a dialing function's parameter, directly,
+		// through another dialing function, or from another file.
+		{"modelroute", "passes h an address not taken from configuration", []string{src(`"net"`, dial+`func g() { h("/run/proxy.sock") }`)}},
+		{"modelroute", "passes k an address not taken from configuration", []string{src(`"net"`, dial+`func k(s string) { h(s) }; func g() { k("/run/proxy.sock") }`)}},
+		{"modelroute", "passes h an address not taken from configuration", []string{src(`"net"`, dial), src(``, `func g() { h("/run/proxy.sock") }`)}},
+		{"modelroute", "passes h an address not taken from configuration", []string{src(`"net"`, dial+`func g() { s := "/run/proxy.sock"; h(s) }`)}},
+		{"modelroute", "passes d an address not taken from configuration", []string{src(`"net"`, `type c struct{}; func (c) d(s string) { (&net.Dialer{}).Dial("unix", s) }; func g(x c) { x.d("/run/proxy.sock") }`)}},
+		{"modelroute", "passes d an address not taken from configuration", []string{src(`"net"`, `type c struct{}; func (c) d(s string) { (&net.Dialer{}).Dial("unix", s) }; type i interface{ d(string) }; func g(x i) { x.d("/run/proxy.sock") }`)}},
+		{"modelroute", "passes h an address not taken from configuration", []string{src(`"net"`, `func h(n int, s string) { (&net.Dialer{}).Dial("unix", s) }; func g() { h(0, "/run/proxy.sock") }`)}},
+		// A dialing function taken as a value, or called so that the lint
+		// cannot match its arguments.
+		{"modelroute", "h, a dialing function, used as a value", []string{src(`"net"`, dial+`var f = h; func g() { f("/run/proxy.sock") }`)}},
+		{"modelroute", "d, a dialing function, used as a value", []string{src(`"net"`, `type c struct{}; func (c) d(s string) { (&net.Dialer{}).Dial("unix", s) }; func g(x c) { f := x.d; f("/run/proxy.sock") }`)}},
+		{"modelroute", "d, a dialing function, called as a method expression", []string{src(`"net"`, `type c struct{}; func (c) d(s string) { (&net.Dialer{}).Dial("unix", s) }; func g() { c.d(c{}, "/run/proxy.sock") }`)}},
+		{"modelroute", "d, a dialing function, called as a method expression", []string{src(`"net"`, `type c struct{}; func (c) d(s string) { (&net.Dialer{}).Dial("unix", s) }; func g(x nosuch) { x.d("/run/proxy.sock") }`)}},
+		{"modelroute", "h, a dialing function, with arguments the lint cannot check", []string{src(`"net"`, `func h(n int, s string) { (&net.Dialer{}).Dial("unix", s) }; func t() (int, string) { return 0, "/run/proxy.sock" }; func g() { h(t()) }`)}},
+		// A literal stored in the listed field it dials: by key, by
+		// position, through a method, a method value, another struct of
+		// the same shape, an elided literal or a type parameter (Lens R1,
+		// Security 5 on #6035).
+		{"modelroute", "sets Socket, a configuredFields field, here", []string{src(`"net"`, cfgDial+`func g() { (&Config{Socket: "/run/proxy.sock"}).dial() }`)}},
+		{"modelroute", "sets a configuredFields field by position here", []string{src(`"net"`, cfgDial+`func g() { (&Config{"/run/proxy.sock"}).dial() }`)}},
+		{"modelroute", "stores into Socket, a configuredFields field", []string{src(`"net"`, cfgDial+`func (c *Config) fix() { c.Socket = "/run/proxy.sock" }; func g(c *Config) { c.fix(); c.dial() }`)}},
+		{"modelroute", "stores into Socket, a configuredFields field", []string{src(`"net"`, cfgDial+`func (c *Config) fix() { c.Socket = "/run/proxy.sock" }; func g(c *Config) { f := c.fix; f(); c.dial() }`)}},
+		{"modelroute", "stores into Socket, a configuredFields field", []string{src(`"net"; "fmt"`, cfgDial+`func g(c *Config) { fmt.Sscan("/run/proxy.sock", &c.Socket); c.dial() }`)}},
+		{"modelroute", "sets a configuredFields field by position here", []string{src(`"net"`, cfgDial+`func g(c *Config) { *c = struct{ Socket string }{"/run/proxy.sock"}; c.dial() }`)}},
+		{"modelroute", "sets a configuredFields field by position here", []string{src(`"net"`, cfgDial+`type u struct{ Socket string }; func g(c *Config) { *c = Config(u{"/run/proxy.sock"}); c.dial() }`)}},
+		{"modelroute", "sets a configuredFields field by position here", []string{src(`"net"`, cfgDial+`func g() { l := []Config{{"/run/proxy.sock"}}; l[0].dial() }`)}},
+		{"modelroute", "sets a configuredFields field by position here", []string{src(`"net"`, cfgDial+`type list map[string]*Config; func g() { l := list{"a": {"/run/proxy.sock"}}; l["a"].dial() }`)}},
+		{"modelroute", "sets a configuredFields field by position here", []string{src(`"net"`, cfgDial+`func set[T ~struct{ Socket string }](p *T) { *p = T{"/run/proxy.sock"} }; func g(c *Config) { set(c); c.dial() }`)}},
+		{"modelroute", "sets Socket, a configuredFields field, here", []string{src(`"net"`, cfgDial), src(``, `func g() { (&Config{Socket: "/run/proxy.sock"}).dial() }`)}},
+		// A decoder or reflect filling the listed field: a pointer to a
+		// type that holds it handed to a call, however the value was made
+		// (Lens on #6030), or a generic instantiated with such a type.
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "reflect"`, cfgDial+`func g(c *Config) { reflect.ValueOf(c).Elem().Field(0).SetString("/run/proxy.sock"); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(c *Config) { json.Unmarshal([]byte(`+"`"+`{"Socket":"/run/proxy.sock"}`+"`"+`), c); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte) { var d Config; json.Unmarshal(b, &d); d.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte) { d := new(Config); json.Unmarshal(b, d); d.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type outer struct{ In []Config }; func g(b []byte) { var o outer; json.Unmarshal(b, &o); o.In[0].dial() }`)}},
+		{"modelroute", "instantiates dec with Config", []string{src(`"net"; "encoding/json"`, cfgDial+`func dec[T any](b []byte) (t T) { json.Unmarshal(b, &t); return }; func g(b []byte) { c := dec[Config](b); c.dial() }`)}},
+		// A link or rename that could put another socket at the dialed
+		// path or its directory, in a package that dials, called or taken
+		// as a value (Security 4 on #6035).
+		{"modelroute", "links or renames (os.Symlink)", []string{src(`"net"; "os"; "path/filepath"`, `func g() { dir, _ := os.MkdirTemp("", "x"); os.Symlink("/run/proxy.sock", filepath.Join(dir, "s.sock")); sock := filepath.Join(dir, "s.sock"); (&net.Dialer{}).Dial("unix", sock) }`)}},
+		{"modelroute", "links or renames (os.Link)", []string{src(`"net"; "os"`, dial+`func g(s string) { os.Link("/run/proxy.sock", s) }`)}},
+		{"modelroute", "links or renames (os.Rename)", []string{src(`"net"`, dial), src(`"os"`, `func g(s string) { os.Rename("/run/proxy.sock", s) }`)}},
+		{"modelroute", "links or renames (syscall.Symlink)", []string{src(`"net"; "syscall"`, dial+`func g(s string) { syscall.Symlink("/run/proxy.sock", s) }`)}},
+		{"modelroute", "links or renames (golang.org/x/sys/unix.Renameat2)", []string{src(`"net"; "golang.org/x/sys/unix"`, dial+`func g(s string) { unix.Renameat2(0, "/run/proxy.sock", 0, s, 0) }`)}},
+		{"modelroute", "links or renames (golang.org/x/sys/unix.Linkat)", []string{src(`"net"; "golang.org/x/sys/unix"`, dial+`func g(s string) { unix.Linkat(0, "/run/proxy.sock", 0, s, 0) }`)}},
+		{"modelroute", "links or renames (os.Symlink)", []string{src(`"net"; "os"`, dial+`var link = os.Symlink`)}},
+		{"kernel/proc", "links or renames (os.Rename)", []string{src(`"net"; "os"`, `type Conn struct{ Socket string }; func (c *Conn) dial() { net.Dial("unix", c.Socket); os.Rename("/run/proxy.sock", c.Socket) }`)}},
+		{"kernel/proc", "links or renames (os.Symlink)", []string{src(`"net"`, `type Conn struct{ Socket string }; func (c *Conn) dial() { net.Dial("unix", c.Socket) }`), src(`"os"`, `func g(s string) { os.Symlink("/run/proxy.sock", s) }`)}},
+		// A writer's target the lint cannot show holds no listed field,
+		// however it is reached (B1 on #6119).
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func get() *Config { return nil }; func g(b []byte) { c := get(); json.Unmarshal(b, c); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ C Config }; func g(b []byte, w *W) { json.Unmarshal(b, &w.C); w.C.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte, l []Config) { json.Unmarshal(b, &l[0]); l[0].dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func get() *Config { return nil }; func g(b []byte) { json.Unmarshal(b, get()) }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte, c *Config) { var v any = c; json.Unmarshal(b, v); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte, x interface{ Get() *Config }) { json.Unmarshal(b, x.Get()); x.Get().dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"; "io"`, cfgDial+`func g(r io.Reader, c *Config) { json.NewDecoder(r).Decode(c); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "fmt"`, cfgDial+`func g(c *Config) { fmt.Sscan("/run/proxy.sock", c); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func load(b []byte, out any) { json.Unmarshal(b, out) }; func g(b []byte, c *Config) { load(b, c); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(b []byte, c *Config) { load(b, c); c.dial() }`), src(`"encoding/json"`, `func load(b []byte, out any) { json.Unmarshal(b, out) }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func load(b []byte, out any) { json.Unmarshal(b, out) }; var f = load; func g(b []byte, c *Config) { f(b, c) }`)}},
+		{"modelroute", "instantiates act with Config", []string{src(`"net"; "encoding/json"`, cfgDial+`func act[A any](f func(a A)) func([]byte) { return func(b []byte) { var a A; json.Unmarshal(b, &a); f(a) } }; var h = act(func(c Config) { c.dial() })`)}},
+		{"modelroute", "instantiates act with Config", []string{src(`"net"; "encoding/json"`, cfgDial+`func act[A any](f func(a A)) func([]byte) { return func(b []byte) { var a A; json.Unmarshal(b, &a); f(a) } }; var h = act[Config]`)}},
+		{"modelroute", "does not type-check", []string{src(`"net"; "example.com/fill"`, cfgDial+`func g(c *Config) { fill.In(c); c.dial() }`)}},
+		// A writer's target passes only as a fresh zero value of a type
+		// holding no listed field, and a writer taken as a value is
+		// reported (B1 round 2 on #6119).
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte, c *Config) { f := json.Unmarshal; f(b, c); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"; "io"`, cfgDial+`func g(r io.Reader, c *Config) { d := json.NewDecoder(r); f := d.Decode; f(c); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func get() int { return 0 }; func g(b []byte, c *Config) { get := func() any { return c }; json.Unmarshal(b, get()); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type resp struct{ N int }; func g(b []byte, c *Config) { resp := func() any { return c }; json.Unmarshal(b, resp()); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte, c *Config) { w := W{V: c}; json.Unmarshal(b, &w); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte, c *Config) { var w W; w.V = c; json.Unmarshal(b, &w); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func (w *W) set(v any) { w.V = v }; func g(b []byte, c *Config) { var w W; w.set(c); json.Unmarshal(b, &w); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte, c *Config) { var w W; for i := 0; i < 2; i++ { json.Unmarshal(b, &w); w.V = c }; c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`func g(b []byte) (c Config) { json.Unmarshal(b, &c); c.dial(); return }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`var c0 = new(Config); func load(b []byte, out any) { out = c0; json.Unmarshal(b, out) }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; . "encoding/json"`, cfgDial+`func g(b []byte, c *Config) { Unmarshal(b, c); c.dial() }`)}},
+		// The re-plan (#6028 after #6119): types, not order. A value whose
+		// type reaches the listed field goes into an interface, another
+		// package's code or a generic only by review, wherever and
+		// whenever the store would run (Security B1 round 3 on #6119).
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte, c *Config) { var w W; dec := func() { json.Unmarshal(b, &w) }; dec(); w.V = c; dec(); c.dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; var gw W; func decode(b []byte) { json.Unmarshal(b, &gw) }; func setup(c *Config) { gw.V = c }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte, c *Config) { var w W; defer func() { json.Unmarshal(b, &w) }(); w.V = c }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte, c *Config, ch chan bool) { var w W; go func() { <-ch; json.Unmarshal(b, &w) }(); w.V = c; ch <- true }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "encoding/json"`, cfgDial+`type W struct{ V any }; func g(b []byte) (func(), func(v *Config)) { var w W; return func() { json.Unmarshal(b, &w) }, func(v *Config) { w.V = v } }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config) any { return c }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config) { var v any; v = any(c); _ = v }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(l []*Config) { var v any; for _, v = range l {}; _ = v }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config, m map[any]int) { m[c] = 1 }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config, ch chan any) { ch <- c }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config) { _ = append([]any{}, c) }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config) { panic(c) }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "fmt"`, cfgDial+`func g(c *Config) { fmt.Println(c) }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "fmt"`, cfgDial+`func g(l []Config) { fmt.Println(l) }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "slices"`, cfgDial+`func g(l []Config) { slices.Reverse(l) }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"; "reflect"`, cfgDial+`func g() { reflect.New(reflect.TypeFor[Config]()).Interface().(*Config).dial() }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`type I interface{ Get() *Config }; type h struct{ c *Config }; func (x h) Get() *Config { return x.c }; func g(c *Config) any { return h{c} }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config) any { return func() *Config { return c } }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config) { var v struct{ V any }; v.V = c; _ = v }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config) { _ = []any{c}; _ = map[string]any{"a": c}; _ = struct{ V any }{c} }`)}},
+		{"modelroute", "reaches a configuredFields field", []string{src(`"net"`, cfgDial+`type W struct{ V any }; func g(c *Config) { _ = []*W{{V: c}} }`)}},
+		{"modelroute", "takes a *Config, which reaches a configuredFields field, out of an interface", []string{src(`"net"`, cfgDial+`func g(v any) { v.(*Config).dial() }`)}},
+		{"modelroute", "takes a Config, which reaches a configuredFields field, out of an interface", []string{src(`"net"`, cfgDial+`func g(v any, c *Config) { switch x := v.(type) { case Config: *c = x }; c.dial() }`)}},
+		{"modelroute", "stores into Socket, a configuredFields field", []string{src(`"net"`, cfgDial+`type u struct{ Socket string }; func g(c *Config) { (*u)(c).Socket = "/run/proxy.sock"; c.dial() }`)}},
+		{"modelroute", "stores into Socket, a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config) { c.Socket += ".x"; c.dial() }`)}},
+		{"modelroute", "stores into Socket, a configuredFields field", []string{src(`"net"`, cfgDial+`func g(c *Config, l []string) { for _, c.Socket = range l {}; c.dial() }`)}},
+		{"modelroute", "sets a configuredFields field by position here", []string{src(`"net"`, cfgDial+`type E struct{ Config }; func g() { (&E{Config{"/run/proxy.sock"}}).dial() }`)}},
+		// A copy hands over the type, from which a value can be minted
+		// that dials (Security B1 on #6123).
+		{"modelroute", "hands Config, which reaches a configuredFields field, to encoding/gob.Register", []string{src(`"net"; "encoding/gob"; "io"`, `type Config struct{ Socket string }; func (c Config) dial() { (&net.Dialer{}).Dial("unix", c.Socket) }; type dialer interface{ dial() }; func g(r io.Reader) { gob.Register(Config{}); var x any; gob.NewDecoder(r).Decode(&x); x.(dialer).dial() }`)}},
+		{"modelroute", "takes a dialer, which reaches a configuredFields field, out of an interface", []string{src(`"net"; "encoding/gob"; "io"`, `type Config struct{ Socket string }; func (c Config) dial() { (&net.Dialer{}).Dial("unix", c.Socket) }; type dialer interface{ dial() }; func g(r io.Reader) { gob.Register(Config{}); var x any; gob.NewDecoder(r).Decode(&x); x.(dialer).dial() }`)}},
+		{"modelroute", "hands Config, which reaches a configuredFields field, to reflect.TypeOf", []string{src(`"net"; "reflect"`, `type Config struct{ Socket string }; func (c Config) dial() { (&net.Dialer{}).Dial("unix", c.Socket) }; type dialer interface{ dial() }; func g() { v := reflect.New(reflect.TypeOf(Config{})).Elem(); v.Field(0).SetString("/e"); v.Interface().(dialer).dial() }`)}},
+		{"modelroute", "hands Config, which reaches a configuredFields field, to dialer", []string{src(`"net"; "reflect"`, `type Config struct{ Socket string }; func (c Config) dial() { (&net.Dialer{}).Dial("unix", c.Socket) }; type dialer interface{ dial() }; func g(c Config) { s := []dialer{c}; n := reflect.New(reflect.TypeOf(c)).Elem(); n.Field(0).SetString("/e"); reflect.ValueOf(s).Index(0).Set(n); s[0].dial() }`)}},
+		{"modelroute", "hands Config, which reaches a configuredFields field, to fmt.Sprint", []string{src(`"fmt"`, `type Config struct{ Socket string }; func g(c Config) string { return fmt.Sprint(c, c.Socket) }`)}},
+		{"modelroute", "takes a dialer, which reaches a configuredFields field, out of an interface", []string{src(`"net"`, `type Config struct{ Socket string }; func (c Config) dial() { (&net.Dialer{}).Dial("unix", c.Socket) }; type dialer interface{ dial() }; func g(v any) { switch x := v.(type) { case dialer: x.dial() } }`)}},
+		// An interface a holder implements holds too: its values hand out
+		// their dynamic type, and a type parameter can take one out
+		// (Security B1 round 2 on #6123).
+		{"modelroute", "hands map[string]clerk, which reaches a configuredFields field, to reflect.ValueOf", []string{src(`"net"; "reflect"`, `type Config struct{ Socket string }; type clerk interface{ Do() }; func (c Config) Do() { (&net.Dialer{}).Dial("unix", c.Socket) }; func g(m map[string]clerk, k clerk) { v := reflect.New(reflect.TypeOf(k)).Elem(); v.Field(0).SetString("/e"); reflect.ValueOf(m).SetMapIndex(reflect.ValueOf("a"), v); m["a"].Do() }`)}},
+		{"modelroute", "instantiates get with clerk", []string{src(`"net"; "reflect"`, `type Config struct{ Socket string }; type clerk interface{ Do() }; func (c Config) Do() { (&net.Dialer{}).Dial("unix", c.Socket) }; func get[T any](x any) T { return x.(T) }; func g(k clerk) { v := reflect.New(reflect.TypeOf(k)).Elem(); get[clerk](v.Interface()).Do() }`)}},
+		{"modelroute", "hands w, which reaches a configuredFields field, to io.Reader", []string{src(`"net"; "io"`, cfgDial+`func g(c Config) io.Reader { type w struct{ Config; io.Reader }; return w{c, nil} }`)}},
+		{"modelroute", "hands clerk, which reaches a configuredFields field, to reflect.TypeOf", []string{src(`"net"; "reflect"`, cfgDial+`type clerk interface{ Do() }; func (c *Config) Do() { c.dial() }; func g(k clerk) { reflect.TypeOf(k) }; func h(k clerk) any { return struct{ *Config; clerk }{nil, k} }`)}},
+		// An unnamed holder counts for the interfaces it implements, and an
+		// interface a holder went into holds (Security B1 round 3 on #6123).
+		{"modelroute", "hands clerk, which reaches a configuredFields field, to reflect.TypeOf", []string{src(`"net"; "reflect"`, cfgDial+`type clerk interface{ Do() }; func wrap(k clerk) clerk { return struct{ Config; clerk }{Config{}, k} }; func g(k clerk) { reflect.TypeOf(k) }`)}},
+		// os.Root's methods, and opening one (B2 on #6119).
+		{"modelroute", "links or renames (Symlink)", []string{src(`"net"; "os"`, dial+`func g(s string) { r, _ := os.OpenRoot("/tmp"); r.Symlink("/run/proxy.sock", s) }`)}},
+		{"modelroute", "links or renames (Rename)", []string{src(`"net"; "os"`, dial+`func g(r *os.Root, s string) { r.Rename("/run/proxy.sock", s) }`)}},
+		{"modelroute", "opens an os.Root (os.OpenRoot)", []string{src(`"net"; "os"`, dial+`func g() { os.OpenRoot("/tmp") }`)}},
+		// kernel/proc's allowance is per file and per call (B3 on #6119).
+		{"kernel/proc", "links or renames (os.Link)", []string{src(`"net"`, `type Conn struct{ Socket string }; func (c *Conn) dial() { net.Dial("unix", c.Socket) }`), src(`"os"`, `func g(a, b string) { os.Link(a, b) }`)}},
+	} {
+		if got := useOf(t, c.rel, c.srcs...); !strings.Contains(got, c.want) {
+			t.Errorf("in %s, not reported: %s; got %q\n%s", c.rel, c.want, got, strings.Join(c.srcs, "\n"))
+		}
+	}
+	// Callers that pass configuration, a dialing function's own string
+	// parameter, and kernel/proc's reviewed link and rename outside the
+	// files that dial, pass.
+	for _, c := range []struct {
+		rel  string
+		srcs []string
+	}{
+		{"modelroute", []string{src(`"net"`, `type Config struct{ Socket string }; `+dial+`func k(s string) { h(s) }; func g(c Config) { h(c.Socket); k(c.Socket) }`)}},
+		{"modelroute", []string{src(`"encoding/json"`, `type Config struct{ Socket string }; type resp struct{ N int }; func load(b []byte, out any) { json.Unmarshal(b, out) }; func g(b []byte) { var r resp; load(b, &r); var n struct{ N int }; json.Unmarshal(b, &n) }`)}},
+		{"modelroute", []string{src(`"encoding/json"; "io"`, `type Config struct{ Socket string }; type W struct{ V any; N int }; func load(b []byte, out any) error { return json.Unmarshal(b, out) }; func g(b []byte) (w W, err error) { err = load(b, &w); return }; func h(r io.Reader) W { var st W; if json.NewDecoder(r).Decode(&st) != nil { return W{} }; st.N = 1; return st }; func k(b []byte) { load(b, nil); p := new(W); json.Unmarshal(b, p); _ = p.N }`)}},
+		{"modelroute", []string{src(`"encoding/json"`, `type Config struct{ Socket string }; var dec = json.Unmarshal`)}},
+		{"modelroute", []string{src(`"encoding/json"`, `type Config struct{ Socket string }; type W struct{ V any }; func g(b []byte) { w := new(W); keep(w); json.Unmarshal(b, w) }; func keep(*W) {}`)}},
+		{"modelroute", []string{src(`"encoding/json"`, `type Config struct{ Socket string }; type S interface{ X() }; type W struct{ V S }; func g(b []byte, w *W) { json.Unmarshal(b, w) }`)}},
+		{"modelroute", []string{src(`"encoding/json"`, `type Config struct{ Socket string }; func g(b []byte, ch chan any) { json.Unmarshal(b, <-ch) }`)}},
+		{"modelroute", []string{src(`"encoding/json"`, `type Config struct{ Socket string }; type W struct{ V any }; func g(b []byte, c *Config) (*Config, W) { var w W; json.Unmarshal(b, &w); keep := *c; return &keep, w }`)}},
+		{"modelroute", []string{src(`"net"; "os"; fp "path/filepath"`, `const name = "s.sock"; func g() { dir, _ := os.MkdirTemp("", "x"); sock := fp.Join(dir, name); (&net.Dialer{}).Dial("unix", sock) }`)}},
+	} {
+		if got := useOf(t, c.rel, c.srcs...); got != "" {
+			t.Errorf("in %s, flagged: %q\n%s", c.rel, got, strings.Join(c.srcs, "\n"))
+		}
+	}
+	// A reviewed handOK entry lets a function or an interface take a
+	// holding value: fmt.Sprint and a Clerk-like interface here.
+	handOK["modelroute"] = map[string]string{"fmt.Sprint": "test", module + "modelroute.clerk": "test"}
+	got = useOf(t, "modelroute", src(`"fmt"`, `type Config struct{ Socket string }; type clerk interface{ Do() }; func (Config) Do() {}; func g(c Config) (string, clerk) { return fmt.Sprint(c, c.Socket), c }`))
+	delete(handOK, "modelroute")
+	if got != "" {
+		t.Errorf("handOK entries not honoured: %q", got)
+	}
+	// A reviewed interface then holds: its values cannot reach reflect,
+	// nor leave it as an interface that holds nothing (#6123 round 3).
+	handOK["modelroute"] = map[string]string{module + "modelroute.clerk": "test"}
+	got = useOf(t, "modelroute", src(`"io"; "reflect"`, `type Config struct{ Socket string }; type clerk interface{ Do() }; func (Config) Do() {}; func g(c Config) clerk { return c }; func h(k clerk) (io.Reader, any) { return k.(io.Reader), reflect.TypeOf(k) }`))
+	delete(handOK, "modelroute")
+	for _, want := range []string{"takes a clerk, which reaches a configuredFields field, out as io.Reader", "hands clerk, which reaches a configuredFields field, to reflect.TypeOf"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("not reported: %s; got %q", want, got)
+		}
+	}
+	if strings.Contains(got, "to clerk") {
+		t.Errorf("the reviewed conversion to clerk reported: %q", got)
+	}
+	// Another package's interface holds once a holder goes into it under
+	// an entry: named, or as a listed function's parameter.
+	for entry, body := range map[string]string{
+		"io.Closer":    `func g(c Config) io.Closer { return c }; func h(k io.Closer) { reflect.TypeOf(k) }`,
+		"io.NopCloser": `func g(c Config) io.ReadCloser { return io.NopCloser(c) }; func h(k io.Reader) { reflect.TypeOf(k) }`,
+	} {
+		handOK["modelroute"] = map[string]string{entry: "test"}
+		got = useOf(t, "modelroute", src(`"io"; "reflect"`, `type Config struct{ Socket string }; func (Config) Close() error { return nil }; func (Config) Read([]byte) (int, error) { return 0, nil }; `+body))
+		delete(handOK, "modelroute")
+		if !strings.Contains(got, "which reaches a configuredFields field, to reflect.TypeOf") || strings.Count(got, "\n") != 0 {
+			t.Errorf("with handOK %s, want only the reflect.TypeOf report; got %q", entry, got)
 		}
 	}
 	ok := src(`"net"; "net/http"; "net/http/httputil"; "os"; "path/filepath"`, `type Config struct{ Socket string }
@@ -988,6 +2596,38 @@ func keep(p *Remote, old Remote) { *p = old }`)
 	if got := strings.Join(sourceUse(t, path, "held.go", "modelroute"), "\n"); !strings.Contains(got, "not taken from configuration") {
 		t.Errorf("a field listed for another package passed: %q", got)
 	}
+	// kernel/proc's chronyd source dials from NewChrony's parameters, so
+	// its callers are held to configuration (#5757).
+	chrony := src(`"net"`, `type Chrony struct{ dial func() (*net.UnixConn, error) }
+func NewChrony(sock, reply string) *Chrony {
+	s := &Chrony{}
+	if sock != "" {
+		s.dial = func() (*net.UnixConn, error) { return dialChrony(sock, reply) }
+	}
+	return s
+}
+func dialChrony(sock, reply string) (*net.UnixConn, error) {
+	return net.DialUnix("unixgram", &net.UnixAddr{Name: reply, Net: "unixgram"}, &net.UnixAddr{Name: sock, Net: "unixgram"})
+}`)
+	if got := useOf(t, "kernel/proc", chrony); got != "" {
+		t.Errorf("kernel/proc's configured DialUnix flagged: %q", got)
+	}
+	if got := useOf(t, "kernel/proc", chrony, src(``, `var c = NewChrony("/run/proxy.sock", "/run/r.sock")`)); !strings.Contains(got, "passes NewChrony an address not taken from configuration") {
+		t.Errorf("a literal handed to NewChrony passed: %q", got)
+	}
+	// kernel/proc's reviewed link and rename stand in their own files.
+	files := map[string]string{
+		"conn.go":    src(`"net"`, `type Conn struct{ Socket string }; func (c *Conn) dial() { net.Dial("unix", c.Socket) }`),
+		"backup.go":  src(`"os"`, `type backups struct{ link func(a, b string) error }; var bk = backups{link: os.Link}; func g(a, b string) { os.Link(a, b) }`),
+		"restore.go": src(`"os"`, `func h(a, b string) { os.Rename(a, b) }`),
+	}
+	if got := useFiles(t, "kernel/proc", files); got != "" {
+		t.Errorf("kernel/proc's reviewed link and rename flagged: %q", got)
+	}
+	files["backup.go"] = src(`"os"`, `func g(a, b string) { os.Symlink(a, b) }`)
+	if got := useFiles(t, "kernel/proc", files); !strings.Contains(got, "links or renames (os.Symlink)") {
+		t.Errorf("a symlink in backup.go passed: %q", got)
+	}
 	// Imports: RPC, mail, raw sockets, and escape hatches.
 	reach := httpReach([]listed{{path: "net/rpc", imports: []string{"net/http"}}, {path: "net/http"}})
 	if !reach["net/rpc"] || !socketPkgs["net/smtp"] || !socketPkgs["syscall"] || !socketPkgs["golang.org/x/sys/unix"] {
@@ -998,6 +2638,32 @@ func keep(p *Remote, old Remote) { *p = old }`)
 			t.Fatalf("%s is not an escape", e)
 		}
 	}
+}
+
+// useOf writes srcs as the files of one package and returns what
+// packageUse reports for it as package rel.
+func useOf(t *testing.T, rel string, srcs ...string) string {
+	t.Helper()
+	files := map[string]string{}
+	for i, s := range srcs {
+		files[fmt.Sprintf("p%d.go", i)] = s
+	}
+	return useFiles(t, rel, files)
+}
+
+// useFiles is useOf with the files named.
+func useFiles(t *testing.T, rel string, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	var names []string
+	for name, s := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(packageUse(t, dir, names, "p", rel, nil), "\n")
 }
 
 // REQ: LOOP-7, LOOP-9
@@ -1038,34 +2704,196 @@ var envExempt = map[string]string{}
 // longer needed, as for envExempt.
 var vendorEnvExempt = map[string]string{}
 
-// launcherPkgs are the packages whose calls start a child or read the
-// process's environment, with their default names.
-var launcherPkgs = map[string]string{"os/exec": "exec", "os": "os", "syscall": "syscall", "golang.org/x/sys/unix": "unix", module + "childproc": "childproc"}
+// envBuild is a linux build: its GOARCH, whether cgo is on, and its tags.
+type envBuild struct {
+	arch string
+	cgo  bool
+	tags []string
+}
 
-// childEnvCheck reads one Go source and returns the functions that start
-// a child without an explicit environment (noEnv) and those that put the
-// process's own environment into one (inherits). Imports count under any
-// name, dot imports included. Every file is read, whatever it imports, so
-// the Env-value rules below hold everywhere (P3-4b-3r-env-r8). Since
-// P3-4b-3r-env-r8 this check is defence in depth: the boundary is
-// childproc, which checks a child's environment at its start, and the
-// gate that keeps every other package from starting one. Each function declaration, with the func literals inside it,
-// is checked as one unit, and so is each package-level var or type spec;
-// a flagged unit is named by its function, or by "var" or "type" and its
-// names.
+// envFiles calls check with each non-test .go file under root (vendor/
+// and third_party/ included, testdata/ and dot directories not), loaded
+// with its package's files in every linux build that compiles it (#6201):
+// amd64 with cgo, amd64 without, arm64 without (camnode's), each with any
+// of its directory's build tags, once per distinct set of package files.
+// A file no such build compiles (a !linux file, another platform's
+// vendored file) is in no box binary and is not checked. It returns each
+// package that does not type-check.
+func envFiles(t *testing.T, root string, check func(rel string, l *loaded, i int)) (failed []string) {
+	t.Helper()
+	dirs := map[string][]string{}
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && (d.Name() == "testdata" || strings.HasPrefix(d.Name(), ".")) && path != root {
+			return filepath.SkipDir
+		}
+		if !d.IsDir() && strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
+			dirs[filepath.Dir(path)] = append(dirs[filepath.Dir(path)], d.Name())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// go/build's knownOS and knownArch, and the tags a build sets itself:
+	// never a tag to try.
+	set := strings.Fields("aix android darwin dragonfly freebsd hurd illumos ios js linux nacl netbsd openbsd plan9 solaris wasip1 windows zos " +
+		"386 amd64 amd64p32 arm armbe arm64 arm64be loong64 mips mipsle mips64 mips64le mips64p32 mips64p32le ppc ppc64 ppc64le riscv riscv64 s390 s390x sparc sparc64 wasm cgo gc gccgo unix")
+	context := func(tg envBuild) *build.Context {
+		c := build.Default
+		c.GOOS, c.GOARCH, c.CgoEnabled, c.BuildTags = "linux", tg.arch, tg.cgo, tg.tags
+		return &c
+	}
+	words := regexp.MustCompile(`[\w.]+`)
+	type group struct {
+		dir, rel string
+		tg       envBuild
+		names    []string
+	}
+	// Each file's head and the tags its constraint names; a box build sets
+	// only tags the module's own files name (srclint pins those to the
+	// builds), so a tag only vendor/ or third_party/ names (purego, m68k)
+	// is never tried.
+	heads, tags, built := map[string]*ast.File{}, map[string][]string{}, map[string]bool{}
+	for dir, names := range dirs {
+		for _, name := range names {
+			file := filepath.Join(dir, name)
+			h, err := parser.ParseFile(token.NewFileSet(), file, nil, parser.ImportsOnly|parser.ParseComments)
+			if err != nil {
+				t.Fatal(err)
+			}
+			heads[file] = h
+			for _, c := range h.Comments {
+				for _, line := range c.List {
+					if _, expr, _ := strings.Cut(line.Text, "build"); c.Pos() < h.Package && (constraint.IsGoBuild(line.Text) || constraint.IsPlusBuild(line.Text)) {
+						for _, w := range words.FindAllString(expr, -1) {
+							if !slices.Contains(set, w) && !strings.Contains(w, ".") && !slices.Contains(tags[file], w) {
+								tags[file] = append(tags[file], w)
+							}
+						}
+					}
+				}
+			}
+			rel, _ := filepath.Rel(root, dir)
+			if top, _, _ := strings.Cut(filepath.ToSlash(rel), "/"); top != "vendor" && top != "third_party" {
+				for _, w := range tags[file] {
+					built[w] = true
+				}
+			}
+		}
+	}
+	// Every build that some file of the directory needs (the three base
+	// builds, each with every subset of its files' tags), and in each,
+	// every package's files; a file set seen in an earlier build is not
+	// loaded again (#6203 Security: a value that differs by build).
+	var groups []*group
+	byKey, byBuild, skipped := map[string]*group{}, map[string][]*ast.File{}, 0
+	for _, dir := range slices.Sorted(maps.Keys(dirs)) {
+		rel, _ := filepath.Rel(root, dir)
+		var try []string
+		for _, name := range dirs[dir] {
+			for _, w := range tags[filepath.Join(dir, name)] {
+				if built[w] && !slices.Contains(try, w) {
+					try = append(try, w)
+				}
+			}
+		}
+		slices.Sort(try)
+		checked := map[string]bool{}
+		for bits := 0; bits < 1<<len(try); bits++ {
+			var on []string
+			for j, w := range try {
+				if bits>>j&1 == 1 {
+					on = append(on, w)
+				}
+			}
+			for _, tg := range []envBuild{{"amd64", true, on}, {"amd64", false, on}, {"arm64", false, on}} {
+				pkgs := map[string][]string{}
+				for _, name := range slices.Sorted(slices.Values(dirs[dir])) {
+					if ok, _ := context(tg).MatchFile(dir, name); ok {
+						pkg := heads[filepath.Join(dir, name)].Name.Name
+						pkgs[pkg] = append(pkgs[pkg], name)
+					}
+				}
+				for _, pkg := range slices.Sorted(maps.Keys(pkgs)) {
+					key := fmt.Sprint(dir, pkg, pkgs[pkg])
+					if byKey[key] != nil {
+						continue
+					}
+					g := &group{dir: dir, rel: filepath.ToSlash(rel), tg: tg, names: pkgs[pkg]}
+					for _, n := range g.names {
+						checked[n] = true
+						byBuild[fmt.Sprint(tg)] = append(byBuild[fmt.Sprint(tg)], heads[filepath.Join(dir, n)])
+					}
+					byKey[key] = g
+					groups = append(groups, g)
+				}
+			}
+		}
+		skipped += len(dirs[dir]) - len(checked)
+	}
+	// One go list per build gives every package's imports their export data.
+	for _, g := range groups {
+		if fs := byBuild[fmt.Sprint(g.tg)]; fs != nil {
+			exportData(t, fs, &g.tg)
+			delete(byBuild, fmt.Sprint(g.tg))
+		}
+	}
+	t.Logf("%d packages checked; %d files in no linux amd64 or arm64 build", len(groups), skipped)
+	for _, g := range groups {
+		l := load(t, g.dir, g.names, g.rel, &g.tg)
+		if l.err != nil {
+			failed = append(failed, fmt.Sprintf("%s (%v): does not type-check, so the lint cannot check it: %v", g.rel, g.tg, l.err))
+		}
+		for i, name := range g.names {
+			check(filepath.ToSlash(filepath.Join(g.rel, name)), l, i)
+		}
+	}
+	return failed
+}
+
+// childEnvCheck writes files as one package, p0.go, p1.go and so on, and
+// checks p0.go (childEnv). Type errors are not reported, so each fixture
+// shows the rule that catches it.
+func childEnvCheck(t *testing.T, files ...string) (noEnv, inherits []string) {
+	t.Helper()
+	dir, names := t.TempDir(), []string{}
+	for i, c := range files {
+		names = append(names, fmt.Sprintf("p%d.go", i))
+		if err := os.WriteFile(filepath.Join(dir, names[i]), []byte(c), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return childEnv(load(t, dir, names, "p", &envBuild{"amd64", true, nil}), 0)
+}
+
+// childEnv returns the functions of file i of l that start a child without
+// an explicit environment (noEnv) and those that put the process's own
+// environment into one (inherits). Every name is read by the object go/types
+// says it denotes (#6201): a launcher or Environ under any import name, dot
+// imports included, and never a local or a method that shares its name; a
+// variable, function or method by its declaration, in any file of the
+// package. Every file is read, whatever it imports, so the Env-value rules
+// below hold everywhere (P3-4b-3r-env-r8). Since P3-4b-3r-env-r8 this check
+// is defence in depth: the boundary is childproc, which checks a child's
+// environment at its start, and the gate that keeps every other package
+// from starting one. Each function declaration, with the func literals
+// inside it, is checked as one unit, and so is each package-level var or
+// type spec; a flagged unit is named by its function, or by "var" or
+// "type" and its names.
 //
 // Procedural, held by review (reviews/security/README.md, the row on a child inheriting the daemon's environment):
 //   - an Env value the check cannot classify: a parameter, another
-//     struct's field, a map lookup, a declaration in another file, a
-//     multi-value call;
+//     struct's field, a map lookup, a multi-value call;
 //   - order and flow: an Env set after the child starts, or only on some
 //     paths (under a condition), counts as set;
 //   - a nil Env the check does not trace: from a method, a func literal,
-//     a slice or append of a nil value, or a conversion to a type of
-//     another file; a slice declared nil and appended to only on some
-//     paths; a nil Env set on a value not held as a command (a copy, a
-//     parameter, a promoted field); and a command copied by dereference
-//     (d := *c);
+//     a slice or append of a nil value; a slice declared nil and appended
+//     to only on some paths; a nil Env set on a value not held as a
+//     command (a copy, a parameter, a promoted field); and a command
+//     copied by dereference (d := *c);
 //   - a command constructed by a generic with an inferred type argument
 //     (var z T or new(T) where T is inferred as *exec.Cmd), including one
 //     inferred from its context (var mk func() *exec.Cmd = fresh);
@@ -1075,9 +2903,9 @@ var launcherPkgs = map[string]string{"os/exec": "exec", "os": "os", "syscall": "
 //   - a command whose Env is set in another function (except for a
 //     package-level declaration), or reached through a pointer the check
 //     does not follow;
-//   - an Environ helper behind a func value, an interface, another
-//     package, or more than three calls, and Environ itself used as a
-//     func value;
+//   - an Environ helper behind a func value (a method value included),
+//     another package, or more than three calls, and Environ itself used
+//     as a func value;
 //   - deliberate evasion: reflection, unsafe, raw syscalls (SYS_EXECVE),
 //     and an environment read from /proc/self/environ.
 //
@@ -1099,25 +2927,23 @@ var launcherPkgs = map[string]string{"os/exec": "exec", "os": "os", "syscall": "
 //     are held to the same rule for uniformity.
 //   - A command needs an Env set on the variable that holds it, after the
 //     command is stored there and before the variable is stored to again:
-//     a .Env assignment to the same identifier or selector chain (resolved
-//     to its declaration, so a same-named variable in another scope does
-//     not count), or a literal with an Env key stored with it. A command
-//     stored by a package-level declaration may have its Env set anywhere
-//     in the file; one stored later must have its own. An Env set
-//     on any other value, a copy of the command included, does not count.
-//     A command held in no variable (a call chained on the constructor, a
-//     return, an argument) is flagged, as is any reference to a launcher
-//     that is not a call (exec.Command as a function value), since the
-//     call it makes cannot be followed. A parenthesised launcher,
-//     (exec.Command)("x"), is the same call.
+//     a .Env assignment to the same variable and selector chain under it,
+//     or a literal with an Env key stored with it. A command stored by a
+//     package-level declaration may have its Env set anywhere in the file;
+//     one stored later must have its own. An Env set on any other value, a
+//     copy of the command included, does not count. A command held in no
+//     variable (a call chained on the constructor, a return, an argument)
+//     is flagged, as is any reference to a launcher that is not a call
+//     (exec.Command as a function value), since the call it makes cannot
+//     be followed. A parenthesised launcher, (exec.Command)("x"), is the
+//     same call.
 //   - An Env that is nil at run time counts as none and fails its command:
-//     a literal nil; a nil converted to a slice type or a type of this
-//     file ([]string(nil), E(nil)); a local var
-//     declared without a value, or with a nil one, and not assigned (or
-//     its address taken) before the Env takes it; a package-level var of
-//     this file declared so and assigned nowhere in the file; a call to a
-//     package function whose every return is one of those, or a bare
-//     return of a named result it never assigns.
+//     a literal nil; a nil converted to any type ([]string(nil), E(nil));
+//     a local var declared without a value, or with a nil one, and not
+//     assigned (or its address taken) before the Env takes it; a
+//     package-level var declared so and assigned nowhere in the package; a
+//     call to a package function whose every return is one of those, or a
+//     bare return of a named result it never assigns.
 //   - Such a nil Env is flagged whatever holds it, a command or not: an
 //     .Env assignment or an Env key of any literal (P3-4b-3r-env-r8, D4).
 //
@@ -1126,62 +2952,39 @@ var launcherPkgs = map[string]string{"os/exec": "exec", "os": "os", "syscall": "
 // Env value (a .Env assignment or an Env key of any literal) or Exec's
 // environment argument, or anywhere in a unit that starts a child, which
 // catches one passed through a local variable; or, in the same places, a
-// call to a package function or method (by name, in any file of the
-// package) whose return expression, or a local variable it returns, holds
-// one, followed three calls deep; a package-level var is followed into
-// its initializer and every assignment to it in its file. syscall.Exec and unix.Exec count as
-// starting a child. An argument to childproc.NewEnv counts as an Env value
+// call to a function or method of the package (an interface's method: each
+// of the package's methods of its name) whose return expression, or a
+// local variable it returns, holds one, followed three calls deep; a
+// package-level var is followed into its initializer and every assignment
+// to it in the package. syscall.Exec and unix.Exec count as starting a
+// child. An argument to childproc.NewEnv counts as an Env value
 // (P3-4b-3r-env-r8). It has no exemption.
-func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
-	t.Helper()
-	f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	names := map[string]string{}
-	for _, im := range f.Imports {
-		p, _ := strconv.Unquote(im.Path.Value)
-		if name, ok := launcherPkgs[p]; ok {
-			if im.Name != nil {
-				name = im.Name.Name
-			}
-			names[p] = name
-		}
-	}
-	// No early return for a file without a launcher import: the Env-value
-	// rules (a nil Env on any receiver, an Environ in an Env) hold in
-	// every file (P3-4b-3r-env-r8, brief D4).
-	is := func(e ast.Expr, pkg string, sels ...string) bool {
-		name := names[pkg]
-		sel := ""
-		// Unparen: (exec.Command)("x") is the same call (#621 delta
-		// Security 4a point 1).
-		switch e := ast.Unparen(e).(type) {
-		case *ast.SelectorExpr:
-			if id, ok := e.X.(*ast.Ident); !ok || name == "" || id.Name != name {
-				return false
-			}
-			sel = e.Sel.Name
+func childEnv(l *loaded, i int) (noEnv, inherits []string) {
+	f, info := l.files[i], l.info
+	// obj is the object an identifier, or a selector's name, denotes.
+	obj := func(e ast.Expr) types.Object {
+		switch x := ast.Unparen(e).(type) {
 		case *ast.Ident:
-			if name != "." {
-				return false
+			if o := info.Uses[x]; o != nil {
+				return o
 			}
-			sel = e.Name
-		default:
-			return false
+			return info.Defs[x]
+		case *ast.SelectorExpr:
+			return info.Uses[x.Sel]
 		}
-		for _, s := range sels {
-			if sel == s {
-				return true
-			}
-		}
-		return false
+		return nil
 	}
-	command := func(e ast.Expr) bool { return is(e, "os/exec", "Command", "CommandContext") }
-	attrLauncher := func(e ast.Expr) bool {
-		return is(e, "os", "StartProcess") || is(e, "syscall", "ForkExec", "StartProcess")
+	// is: e names one of objects, each another package's package-level
+	// "path.Name", reached through its import under any name or a dot
+	// import. (exec.Command)("x") is the same call (#621 delta Security 4a
+	// point 1).
+	is := func(e ast.Expr, objects ...string) bool {
+		o := obj(e)
+		return o != nil && o.Pkg() != nil && o.Parent() == o.Pkg().Scope() && slices.Contains(objects, o.Pkg().Path()+"."+o.Name())
 	}
-	execLauncher := func(e ast.Expr) bool { return is(e, "syscall", "Exec") || is(e, "golang.org/x/sys/unix", "Exec") }
+	command := func(e ast.Expr) bool { return is(e, "os/exec.Command", "os/exec.CommandContext") }
+	attrLauncher := func(e ast.Expr) bool { return is(e, "os.StartProcess", "syscall.ForkExec", "syscall.StartProcess") }
+	execLauncher := func(e ast.Expr) bool { return is(e, "syscall.Exec", "golang.org/x/sys/unix.Exec") }
 	environ := func(e ast.Node) bool {
 		found := false
 		ast.Inspect(e, func(n ast.Node) bool {
@@ -1191,7 +2994,7 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 			if se, ok := n.(*ast.SelectorExpr); ok && se.Sel.Name == "Environ" {
 				found = true
 			}
-			if x, ok := n.(ast.Expr); ok && (is(x, "os", "Environ") || is(x, "syscall", "Environ") || is(x, "golang.org/x/sys/unix", "Environ")) {
+			if x, ok := n.(ast.Expr); ok && is(x, "os.Environ", "syscall.Environ", "golang.org/x/sys/unix.Environ") {
 				found = true
 			}
 			return !found
@@ -1205,28 +3008,20 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 		}
 		return e
 	}
-	// isNil: a literal nil, bare or converted ([]string(nil)), which
-	// exec.Cmd and os.StartProcess read as "inherit" (L3 on #587).
+	// isNil: a literal nil, bare or converted to any type ([]string(nil),
+	// E(nil)), which exec.Cmd and os.StartProcess read as "inherit" (L3 on
+	// #587; #621 delta Security 4a point 3).
 	isNil := func(e ast.Expr) bool {
 		e = ast.Unparen(e)
-		if c, ok := e.(*ast.CallExpr); ok && len(c.Args) == 1 {
-			// A conversion: to a slice type, or to a type of this file
-			// (E(nil); #621 delta Security 4a point 3).
-			switch fn := ast.Unparen(c.Fun).(type) {
-			case *ast.ArrayType:
-				e = ast.Unparen(c.Args[0])
-			case *ast.Ident:
-				if fn.Obj != nil && fn.Obj.Kind == ast.Typ {
-					e = ast.Unparen(c.Args[0])
-				}
-			}
+		if c, ok := e.(*ast.CallExpr); ok && len(c.Args) == 1 && info.Types[c.Fun].IsType() {
+			e = c.Args[0]
 		}
-		id, ok := e.(*ast.Ident)
-		return ok && id.Name == "nil"
+		_, ok := obj(e).(*types.Nil)
+		return ok
 	}
 	// key names the variable that holds a command or ProcAttr: the root
-	// identifier's declaration and the selector chain under it, or "" if
-	// it is held in none.
+	// identifier's object and the selector chain under it, or "" if it is
+	// held in none.
 	key := func(e ast.Expr) string {
 		e = strip(e)
 		if s, ok := e.(*ast.StarExpr); ok {
@@ -1239,41 +3034,93 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 				chain, e = "."+x.Sel.Name+chain, ast.Unparen(x.X)
 				continue
 			case *ast.Ident:
-				if x.Name == "_" || x.Name == "nil" {
-					return ""
+				o := obj(x)
+				if _, isNil := o.(*types.Nil); o == nil || isNil {
+					return "" // _ or nil
 				}
-				if x.Obj != nil {
-					return fmt.Sprintf("%p", x.Obj) + chain
-				}
-				return x.Name + chain
+				return fmt.Sprintf("%p", o) + chain
 			}
 			return ""
 		}
 	}
-	// helpers are the package's functions (by name) and methods (by
-	// "."+name) that a call may reach, read from every file of the
-	// package once a call needs them.
-	var pkg *pkgDecls
-	helpers := func(c *ast.CallExpr) []*ast.FuncDecl {
-		var name string
-		switch fn := ast.Unparen(c.Fun).(type) {
-		case *ast.Ident:
-			if fn.Obj != nil && fn.Obj.Kind != ast.Fun {
-				return nil
+	// The package's declarations, from every file: each function and method
+	// (and each method by name, for an interface's), each var's declaring
+	// spec or :=, the package-level specs, and the values stored in each
+	// package-level var.
+	decls, methods := map[*types.Func]*ast.FuncDecl{}, map[string][]*ast.FuncDecl{}
+	declOf, top, srcs := map[types.Object]ast.Node{}, map[*ast.ValueSpec]bool{}, map[types.Object][]ast.Expr{}
+	// value is what the j-th of n names is given from xs: its own value,
+	// or a multi-value call's.
+	value := func(xs []ast.Expr, j, n int) ast.Expr {
+		if len(xs) == n {
+			return xs[j]
+		}
+		if len(xs) == 1 {
+			return xs[0]
+		}
+		return nil
+	}
+	pkgVar := func(o types.Object) bool {
+		_, ok := o.(*types.Var)
+		return ok && o.Parent() == l.pkg.Scope()
+	}
+	for _, g := range l.files {
+		for _, d := range g.Decls {
+			switch d := d.(type) {
+			case *ast.FuncDecl:
+				if fn, ok := info.Defs[d.Name].(*types.Func); ok {
+					decls[fn] = d
+				}
+				if d.Recv != nil {
+					methods[d.Name.Name] = append(methods[d.Name.Name], d)
+				}
+			case *ast.GenDecl:
+				for _, s := range d.Specs {
+					if vs, ok := s.(*ast.ValueSpec); ok {
+						top[vs] = true
+					}
+				}
 			}
-			name = fn.Name
-		case *ast.SelectorExpr:
-			if id, ok := fn.X.(*ast.Ident); ok && id.Obj == nil {
-				return nil // another package's function
+		}
+		ast.Inspect(g, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.ValueSpec:
+				for j, id := range n.Names {
+					if o := info.Defs[id]; o != nil {
+						declOf[o] = n
+						if x := value(n.Values, j, len(n.Names)); pkgVar(o) && x != nil {
+							srcs[o] = append(srcs[o], x)
+						}
+					}
+				}
+			case *ast.AssignStmt:
+				for j, lhs := range n.Lhs {
+					if o := info.Defs[ident(lhs)]; o != nil && n.Tok == token.DEFINE {
+						declOf[o] = n
+					}
+					if o := obj(ident(ast.Unparen(lhs))); pkgVar(o) {
+						srcs[o] = append(srcs[o], value(n.Rhs, j, len(n.Lhs)))
+					}
+				}
 			}
-			name = "." + fn.Sel.Name
-		default:
+			return true
+		})
+	}
+	// helpers are the declarations a name may reach: its function or
+	// method, called or as a value, or for an interface's method each of
+	// the package's methods of that name.
+	helpers := func(e ast.Expr) []*ast.FuncDecl {
+		fn, ok := obj(e).(*types.Func)
+		if !ok {
 			return nil
 		}
-		if pkg == nil {
-			pkg = packageFuncs(t, filepath.Dir(path))
+		if d := decls[fn.Origin()]; d != nil {
+			return []*ast.FuncDecl{d}
 		}
-		return pkg.funcs[name]
+		if recv := fn.Signature().Recv(); recv != nil && types.IsInterface(recv.Type()) {
+			return methods[fn.Name()]
+		}
+		return nil
 	}
 	returns := func(d *ast.FuncDecl) (rs []*ast.ReturnStmt) {
 		ast.Inspect(d.Body, func(n ast.Node) bool {
@@ -1285,9 +3132,9 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 		})
 		return rs
 	}
-	// holds: e references Environ, or calls a helper whose return does,
-	// depth calls deep (P3-4b-3r-env-r1 requirement 4).
-	fileVars := varSources(f)
+	// holds: e references Environ, or names a helper (called, or as a func
+	// or method value) whose return does, depth calls deep
+	// (P3-4b-3r-env-r1 requirement 4).
 	var holds func(e ast.Node, depth int) bool
 	holds = func(e ast.Node, depth int) bool {
 		if environ(e) {
@@ -1299,31 +3146,27 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 				return false
 			}
 			// A package-level var: its initializer and every assignment
-			// to it in its file (#621 L3 point 1).
-			if id, ok := n.(*ast.Ident); ok && id.Obj != nil && id.Obj.Kind == ast.Var {
-				srcs := fileVars[id.Obj]
-				if srcs == nil && pkg != nil {
-					srcs = pkg.vars[id.Obj]
-				}
-				for _, x := range srcs {
-					found = found || holds(x, depth-1)
-				}
-			}
-			c, ok := n.(*ast.CallExpr)
+			// to it (#621 L3 point 1).
+			id, ok := n.(*ast.Ident)
 			if !ok {
 				return !found
 			}
-			for _, d := range helpers(c) {
+			for _, x := range srcs[info.Uses[id]] {
+				found = found || holds(x, depth-1)
+			}
+			for _, d := range helpers(id) {
 				if found || d.Body == nil {
 					continue
 				}
-				objs := map[*ast.Object]bool{}
+				objs := map[types.Object]bool{}
 				for _, r := range returns(d) {
 					for _, x := range r.Results {
 						found = found || holds(x, depth-1)
 						ast.Inspect(x, func(n ast.Node) bool {
-							if id, ok := n.(*ast.Ident); ok && id.Obj != nil && id.Obj.Kind == ast.Var {
-								objs[id.Obj] = true
+							if id, ok := n.(*ast.Ident); ok {
+								if v, ok := info.Uses[id].(*types.Var); ok {
+									objs[v] = true
+								}
 							}
 							return true
 						})
@@ -1333,19 +3176,15 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 				ast.Inspect(d.Body, func(n ast.Node) bool {
 					switch n := n.(type) {
 					case *ast.AssignStmt:
-						for i, l := range n.Lhs {
-							if id, ok := ast.Unparen(l).(*ast.Ident); ok && objs[id.Obj] {
-								r := n.Rhs[0]
-								if len(n.Rhs) == len(n.Lhs) {
-									r = n.Rhs[i]
-								}
-								found = found || holds(r, depth-1)
+						for j, l := range n.Lhs {
+							if o := obj(ident(ast.Unparen(l))); o != nil && objs[o] {
+								found = found || holds(value(n.Rhs, j, len(n.Lhs)), depth-1)
 							}
 						}
 					case *ast.ValueSpec:
-						for i, id := range n.Names {
-							if objs[id.Obj] && i < len(n.Values) {
-								found = found || holds(n.Values[i], depth-1)
+						for j, id := range n.Names {
+							if x := value(n.Values, j, len(n.Names)); objs[info.Defs[id]] && x != nil {
+								found = found || holds(x, depth-1)
 							}
 						}
 					}
@@ -1356,23 +3195,13 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 		})
 		return found
 	}
-	top := map[*ast.ValueSpec]bool{}
-	for _, d := range f.Decls {
-		if g, ok := d.(*ast.GenDecl); ok {
-			for _, s := range g.Specs {
-				if vs, ok := s.(*ast.ValueSpec); ok {
-					top[vs] = true
-				}
-			}
-		}
-	}
 	// assignments: where each variable under n is assigned or has its
 	// address taken.
-	assignments := func(n ast.Node) map[*ast.Object][]token.Pos {
-		m := map[*ast.Object][]token.Pos{}
+	assignments := func(n ast.Node) map[types.Object][]token.Pos {
+		m := map[types.Object][]token.Pos{}
 		mark := func(e ast.Expr, at token.Pos) {
-			if id, ok := ast.Unparen(e).(*ast.Ident); ok && id.Obj != nil {
-				m[id.Obj] = append(m[id.Obj], at)
+			if o := obj(ident(ast.Unparen(e))); o != nil {
+				m[o] = append(m[o], at)
 			}
 		}
 		ast.Inspect(n, func(n ast.Node) bool {
@@ -1396,7 +3225,12 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 		})
 		return m
 	}
-	assigned := assignments(f)
+	assigned := map[types.Object][]token.Pos{}
+	for _, g := range l.files {
+		for o, ps := range assignments(g) {
+			assigned[o] = append(assigned[o], ps...)
+		}
+	}
 	// bind maps a value to the variable it is stored in and where;
 	// bindAt holds every position a variable is stored to. A package-level
 	// declaration's order in the file says nothing about when its Env is
@@ -1436,24 +3270,24 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 	// nilVar: e names a variable declared nil (with no value, nil, or a
 	// typed nil) inside a node in accepts, and not assigned since, before
 	// at; one declared at package level must be assigned nowhere.
-	nilVar := func(e ast.Expr, at token.Pos, assigned map[*ast.Object][]token.Pos, in func(ast.Node) bool) bool {
-		id, ok := ast.Unparen(e).(*ast.Ident)
-		if !ok || id.Obj == nil || id.Obj.Kind != ast.Var {
+	nilVar := func(e ast.Expr, at token.Pos, assigned map[types.Object][]token.Pos, in func(ast.Node) bool) bool {
+		v, ok := obj(ident(ast.Unparen(e))).(*types.Var)
+		if !ok {
 			return false
 		}
 		var decl ast.Node
 		pkgLevel := false
-		switch d := id.Obj.Decl.(type) {
+		switch d := declOf[v].(type) {
 		case *ast.ValueSpec:
-			for i, n := range d.Names {
-				if n.Name == id.Name && (len(d.Values) == 0 || len(d.Values) == len(d.Names) && isNil(d.Values[i])) {
+			for j, n := range d.Names {
+				if info.Defs[n] == v && (len(d.Values) == 0 || len(d.Values) == len(d.Names) && isNil(d.Values[j])) {
 					decl, pkgLevel = d, top[d]
 				}
 			}
 		case *ast.AssignStmt:
-			if d.Tok == token.DEFINE && len(d.Lhs) == len(d.Rhs) {
-				for i, l := range d.Lhs {
-					if lid, ok := l.(*ast.Ident); ok && lid.Name == id.Name && isNil(d.Rhs[i]) {
+			if len(d.Lhs) == len(d.Rhs) {
+				for j, l := range d.Lhs {
+					if info.Defs[ident(l)] == v && isNil(d.Rhs[j]) {
 						decl = d
 					}
 				}
@@ -1462,7 +3296,7 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 		if decl == nil || !in(decl) {
 			return false
 		}
-		for _, p := range assigned[id.Obj] {
+		for _, p := range assigned[v] {
 			if p != decl.Pos() && (pkgLevel || p < at) {
 				return false
 			}
@@ -1480,12 +3314,13 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 		if !ok {
 			return false
 		}
-		if _, ok := ast.Unparen(x.Fun).(*ast.Ident); !ok {
+		id, ok := ast.Unparen(x.Fun).(*ast.Ident)
+		if !ok {
 			return false
 		}
 		// A package function whose every return is nil, or a nil local
 		// of its own.
-		ds := helpers(x)
+		ds := helpers(id)
 		for _, d := range ds {
 			rs := returns(d)
 			if d.Body == nil || len(rs) == 0 {
@@ -1497,7 +3332,7 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 				if len(r.Results) == 0 {
 					// A bare return of one named result never assigned.
 					res := d.Type.Results
-					if res == nil || len(res.List) != 1 || len(res.List[0].Names) != 1 || len(local[res.List[0].Names[0].Obj]) > 0 {
+					if res == nil || len(res.List) != 1 || len(res.List[0].Names) != 1 || len(local[info.Defs[res.List[0].Names[0]]]) > 0 {
 						return false
 					}
 					continue
@@ -1520,7 +3355,7 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 		return false
 	}
 	// cmdType: exec.Cmd itself, as a type.
-	cmdType := func(e ast.Expr) bool { return is(ast.Unparen(e), "os/exec", "Cmd") }
+	cmdType := func(e ast.Expr) bool { return is(e, "os/exec.Cmd") }
 	// holdsCmd: a type that is, or holds at any depth through pointers,
 	// slices, arrays, maps, channels, type arguments and constraint
 	// terms, an exec.Cmd.
@@ -1607,13 +3442,10 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 	}
 	var children []held
 	for _, u := range units {
-		calls, skip, typeOK := map[ast.Expr]bool{}, map[*ast.Ident]bool{}, map[ast.Expr]bool{}
+		calls, sels, typeOK := map[ast.Expr]bool{}, map[*ast.Ident]bool{}, map[ast.Expr]bool{}
 		ast.Inspect(u.node, func(n ast.Node) bool {
 			switch n := n.(type) {
-			case *ast.FuncDecl:
-				skip[n.Name] = true
 			case *ast.TypeSpec:
-				skip[n.Name] = true
 				// Deny by default (#621 delta Security 4a, 6085258468): a
 				// command type in a container or a type's definition is a
 				// holder the check cannot follow.
@@ -1654,10 +3486,6 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 				if se, ok := ast.Unparen(n.X).(*ast.SelectorExpr); ok && n.Op == token.AND && se.Sel.Name == "Env" {
 					u.bad = true
 				}
-			case *ast.Field:
-				for _, id := range n.Names {
-					skip[id] = true
-				}
 			case *ast.StarExpr:
 				typeOK[ast.Unparen(n.X)] = true
 			case *ast.CallExpr:
@@ -1671,7 +3499,7 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 					}
 					fn = p.X
 				}
-				if fn, ok := ast.Unparen(n.Fun).(*ast.Ident); command(n.Fun) || ok && fn.Name == "new" && fn.Obj == nil && len(n.Args) == 1 && cmdType(n.Args[0]) {
+				if fn, ok := ast.Unparen(n.Fun).(*ast.Ident); command(n.Fun) || ok && obj(fn) == types.Universe.Lookup("new") && len(n.Args) == 1 && cmdType(n.Args[0]) {
 					if len(n.Args) == 1 {
 						typeOK[ast.Unparen(n.Args[0])] = true
 					}
@@ -1706,15 +3534,12 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 					}
 				}
 			case *ast.SelectorExpr:
-				skip[n.Sel] = true
+				sels[n.Sel] = true
 			case *ast.KeyValueExpr:
-				if id, ok := n.Key.(*ast.Ident); ok {
-					skip[id] = true
-					if id.Name == "Env" {
-						u.inherit = u.inherit || holds(n.Value, 3)
-						// A nil Env, whatever the literal's type (brief D4).
-						u.bad = u.bad || nilAt(n.Value, n.Pos())
-					}
+				if id, ok := n.Key.(*ast.Ident); ok && id.Name == "Env" {
+					u.inherit = u.inherit || holds(n.Value, 3)
+					// A nil Env, whatever the literal's type (brief D4).
+					u.bad = u.bad || nilAt(n.Value, n.Pos())
 				}
 			case *ast.CompositeLit:
 				typeOK[ast.Unparen(n.Type)] = true
@@ -1729,9 +3554,6 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 					envAt[b.key] = append(envAt[b.key], b.at)
 				}
 			case *ast.ValueSpec:
-				for _, id := range n.Names {
-					skip[id] = true
-				}
 				if len(n.Values) == 0 && n.Type != nil && cmdType(n.Type) {
 					typeOK[ast.Unparen(n.Type)] = true
 					u.starts = true
@@ -1764,14 +3586,14 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 			}
 			// The process's environment given to childproc.NewEnv is
 			// inherited, as in an Env (P3-4b-3r-env-r8 requirement 6).
-			if c, ok := n.(*ast.CallExpr); ok && is(c.Fun, module+"childproc", "NewEnv") {
+			if c, ok := n.(*ast.CallExpr); ok && is(c.Fun, module+"childproc.NewEnv") {
 				for _, a := range c.Args {
 					u.inherit = u.inherit || holds(a, 3)
 				}
 			}
 			if x, ok := n.(ast.Expr); ok {
 				id, isID := x.(*ast.Ident)
-				named := !isID || !skip[id]
+				named := !isID || !sels[id]
 				// A launcher referenced but not called: its call cannot be
 				// followed (P3-4b-3r-env-r1 requirement 2).
 				if !calls[x] && named && (command(x) || attrLauncher(x) || execLauncher(x)) {
@@ -1829,94 +3651,6 @@ func childEnvCheck(t *testing.T, path string) (noEnv, inherits []string) {
 	return noEnv, inherits
 }
 
-// pkgDecls are a package's function declarations, functions by name and
-// methods by "."+name, and the values stored in its package-level vars.
-type pkgDecls struct {
-	funcs map[string][]*ast.FuncDecl
-	vars  map[*ast.Object][]ast.Expr
-}
-
-// pkgCache caches packageFuncs by directory.
-var pkgCache sync.Map
-
-// packageFuncs reads the non-test Go files of dir, so childEnvCheck can
-// follow a helper into another file of the package.
-func packageFuncs(t *testing.T, dir string) *pkgDecls {
-	t.Helper()
-	if m, ok := pkgCache.Load(dir); ok {
-		return m.(*pkgDecls)
-	}
-	m := &pkgDecls{funcs: map[string][]*ast.FuncDecl{}, vars: map[*ast.Object][]ast.Expr{}}
-	files, err := filepath.Glob(filepath.Join(dir, "*.go"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, p := range files {
-		if strings.HasSuffix(p, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(token.NewFileSet(), p, nil, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, d := range f.Decls {
-			if fn, ok := d.(*ast.FuncDecl); ok {
-				name := fn.Name.Name
-				if fn.Recv != nil {
-					name = "." + name
-				}
-				m.funcs[name] = append(m.funcs[name], fn)
-			}
-		}
-		for o, xs := range varSources(f) {
-			m.vars[o] = xs
-		}
-	}
-	pkgCache.Store(dir, m)
-	return m
-}
-
-// varSources maps each package-level var of f to the values stored in it
-// in f: its initializer and the right-hand side of every assignment.
-func varSources(f *ast.File) map[*ast.Object][]ast.Expr {
-	m := map[*ast.Object][]ast.Expr{}
-	for _, d := range f.Decls {
-		g, ok := d.(*ast.GenDecl)
-		if !ok || g.Tok != token.VAR {
-			continue
-		}
-		for _, s := range g.Specs {
-			vs := s.(*ast.ValueSpec)
-			for i, id := range vs.Names {
-				if id.Obj == nil {
-					continue
-				}
-				m[id.Obj] = []ast.Expr{}
-				if len(vs.Values) == len(vs.Names) {
-					m[id.Obj] = append(m[id.Obj], vs.Values[i])
-				} else if len(vs.Values) == 1 {
-					m[id.Obj] = append(m[id.Obj], vs.Values[0])
-				}
-			}
-		}
-	}
-	ast.Inspect(f, func(n ast.Node) bool {
-		if a, ok := n.(*ast.AssignStmt); ok {
-			for i, l := range a.Lhs {
-				if id, ok := ast.Unparen(l).(*ast.Ident); ok && id.Obj != nil && m[id.Obj] != nil {
-					r := a.Rhs[0]
-					if len(a.Rhs) == len(a.Lhs) {
-						r = a.Rhs[i]
-					}
-					m[id.Obj] = append(m[id.Obj], r)
-				}
-			}
-		}
-		return true
-	})
-	return m
-}
-
 // P3-4b-3a requirement 2 (#515 Security 2, owed check), widened by
 // P3-4b-3r-env requirements 2 and 3: every child the broker starts, by
 // any launcher, gets an explicit environment, never an inherited one,
@@ -1926,39 +3660,30 @@ func varSources(f *ast.File) map[*ast.Object][]ast.Expr {
 func TestEveryChildGetsAnExplicitEnvironment(t *testing.T) {
 	seen := map[string]bool{}
 	var bad, inherit []string
-	err := filepath.WalkDir("..", func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() && (d.Name() == "testdata" || strings.HasPrefix(d.Name(), ".")) && path != ".." {
-			return filepath.SkipDir
-		}
-		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		rel, _ := filepath.Rel("..", path)
-		noEnv, inherits := childEnvCheck(t, path)
+	failed := envFiles(t, "..", func(rel string, l *loaded, i int) {
+		noEnv, inherits := childEnv(l, i)
 		for _, fn := range noEnv {
-			key := filepath.ToSlash(rel) + ":" + fn
+			key := rel + ":" + fn
 			seen[key] = true
 			if envExempt[key] == "" && vendorEnvExempt[key] == "" {
 				bad = append(bad, key)
 			}
 		}
 		for _, fn := range inherits {
-			inherit = append(inherit, filepath.ToSlash(rel)+":"+fn)
+			inherit = append(inherit, rel+":"+fn)
 		}
-		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
+	for _, f := range failed {
+		t.Error(f)
 	}
+	// A file checked in several builds is reported once.
+	sort.Strings(bad)
+	sort.Strings(inherit)
+	bad, inherit = slices.Compact(bad), slices.Compact(inherit)
 	if len(bad) > 0 {
-		sort.Strings(bad)
 		t.Errorf("child started without Env (it inherits the broker's environment); set Env to an explicit list (reviews/security/README.md, the row on a child inheriting the daemon's environment):\n%s", strings.Join(bad, "\n"))
 	}
 	if len(inherit) > 0 {
-		sort.Strings(inherit)
 		t.Errorf("os.Environ() in a child's Env (it inherits the broker's environment); name each variable the child needs instead (reviews/security/README.md, the row on a child inheriting the daemon's environment):\n%s", strings.Join(inherit, "\n"))
 	}
 	for k := range envExempt {
@@ -2029,13 +3754,6 @@ func TestEnvExemptionsAreTestFixturesOnly(t *testing.T) {
 // set an explicit one.
 func TestEnvCheckCatchesAnInheritedEnvironment(t *testing.T) {
 	src := func(imports, body string) string { return "package p\nimport (" + imports + ")\n" + body + "\n" }
-	check := func(c string) (noEnv, inherits []string) {
-		path := filepath.Join(t.TempDir(), "p.go")
-		if err := os.WriteFile(path, []byte(c), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		return childEnvCheck(t, path)
-	}
 	for _, c := range []string{
 		src(`"os/exec"`, `func f() { exec.Command("x").Run() }`),
 		src(`x "os/exec"`, `func f() { c := x.CommandContext(nil, "x"); c.Run() }`),
@@ -2057,7 +3775,7 @@ func TestEnvCheckCatchesAnInheritedEnvironment(t *testing.T) {
 		src(`"os/exec"`, `func f() { (&exec.Cmd{Path: "/x", Env: nil}).Run() }`),
 		src(`"os"`, `func f() { os.StartProcess("/x", nil, &os.ProcAttr{Env: (nil)}) }`),
 	} {
-		if noEnv, _ := check(c); len(noEnv) == 0 {
+		if noEnv, _ := childEnvCheck(t, c); len(noEnv) == 0 {
 			t.Errorf("missed:\n%s", c)
 		}
 	}
@@ -2081,7 +3799,7 @@ func TestEnvCheckCatchesAnInheritedEnvironment(t *testing.T) {
 		src(`"os"; "syscall"`, `func f() { syscall.Exec("/x", nil, os.Environ()) }`),
 		src(`"os"; u "golang.org/x/sys/unix"`, `func f() { e := append(os.Environ(), "A=1"); u.Exec("/x", nil, e) }`),
 	} {
-		if _, inherits := check(c); len(inherits) == 0 {
+		if _, inherits := childEnvCheck(t, c); len(inherits) == 0 {
 			t.Errorf("os.Environ() missed:\n%s", c)
 		}
 	}
@@ -2092,7 +3810,7 @@ func i() { var a syscall.ProcAttr; a.Env = []string{"PATH=/bin"}; syscall.ForkEx
 func j() { _ = os.Environ() }
 func k() { a := &os.ProcAttr{Env: []string{}}; os.StartProcess("/x", nil, a) }
 func l() { syscall.Exec("/x", nil, []string{"PATH=/bin"}) }`)
-	if noEnv, inherits := check(ok); len(noEnv)+len(inherits) != 0 {
+	if noEnv, inherits := childEnvCheck(t, ok); len(noEnv)+len(inherits) != 0 {
 		t.Errorf("flagged %v %v", noEnv, inherits)
 	}
 }
@@ -2105,15 +3823,6 @@ func l() { syscall.Exec("/x", nil, []string{"PATH=/bin"}) }`)
 // package; the first file is the one checked.
 func TestEnvCheckCatchesTheShapesItPassed(t *testing.T) {
 	src := func(imports, body string) string { return "package p\nimport (" + imports + ")\n" + body + "\n" }
-	check := func(files ...string) (noEnv, inherits []string) {
-		dir := t.TempDir()
-		for i, c := range files {
-			if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("p%d.go", i)), []byte(c), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
-		return childEnvCheck(t, filepath.Join(dir, "p0.go"))
-	}
 	for _, c := range [][]string{
 		// Requirement 1: an exec.Cmd made without a constructor.
 		{src(`"os/exec"`, `func f() { var c exec.Cmd; c.Path = "/x"; c.Args = []string{"x"}; c.Run() }`)},
@@ -2209,7 +3918,7 @@ func TestEnvCheckCatchesTheShapesItPassed(t *testing.T) {
 		{src(`"os/exec"`, `func g[T interface{ ~*exec.Cmd | *int }](t T) {}`)},
 		{src(`"os/exec"`, `type W[T interface{ *exec.Cmd }] struct{ t T }`)},
 	} {
-		if noEnv, _ := check(c...); len(noEnv) == 0 {
+		if noEnv, _ := childEnvCheck(t, c...); len(noEnv) == 0 {
 			t.Errorf("missed:\n%s", strings.Join(c, "\n"))
 		}
 	}
@@ -2232,7 +3941,7 @@ func TestEnvCheckCatchesTheShapesItPassed(t *testing.T) {
 		{src(`"os"; "syscall"`, `func env() []string { return os.Environ() }; func f() { (syscall.Exec)("/x", nil, env()) }`)},
 		{src(`"os"; "os/exec"`, `func env() []string { var e []string; (e) = os.Environ(); return e }; func f() { c := exec.Command("x"); c.Env = env(); c.Run() }`)},
 	} {
-		if _, inherits := check(c...); len(inherits) == 0 {
+		if _, inherits := childEnvCheck(t, c...); len(inherits) == 0 {
 			t.Errorf("os.Environ() missed:\n%s", strings.Join(c, "\n"))
 		}
 	}
@@ -2272,7 +3981,7 @@ func e11() { c := exec.Command("x"); (c.Env) = []string{}; c.Run() }
 func e12() { c := exec.Command("x"); ((c).Env) = []string{}; (c).Run() }
 func e10() { c := exec.Command("x"); c.Env = build(nil); c.Run() }
 func build(extra []string) []string { return append([]string{"PATH=/bin"}, extra...) }`), src(``, `func fixed2() []string { return []string{"PATH=/bin"} }`)}
-	if noEnv, inherits := check(ok...); len(noEnv)+len(inherits) != 0 {
+	if noEnv, inherits := childEnvCheck(t, ok...); len(noEnv)+len(inherits) != 0 {
 		t.Errorf("flagged %v %v", noEnv, inherits)
 	}
 }
@@ -2284,13 +3993,6 @@ func build(extra []string) []string { return append([]string{"PATH=/bin"}, extra
 // process's environment given to childproc.NewEnv counts as inherited.
 func TestEnvCheckFlagsANilEnvOnAnyReceiver(t *testing.T) {
 	src := func(imports, body string) string { return "package p\nimport (" + imports + ")\n" + body + "\n" }
-	check := func(c string) (noEnv, inherits []string) {
-		path := filepath.Join(t.TempDir(), "p.go")
-		if err := os.WriteFile(path, []byte(c), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		return childEnvCheck(t, path)
-	}
 	for _, c := range []string{
 		src(``, `type T struct{ Env []string }; func f() { var t T; t.Env = nil; _ = t }`),
 		src(``, `type T struct{ Env []string }; func f() T { return T{Env: []string(nil)} }`),
@@ -2298,18 +4000,18 @@ func TestEnvCheckFlagsANilEnvOnAnyReceiver(t *testing.T) {
 		src(``, `type T struct{ Env []string }; func none() []string { return nil }; func f(t *T) { t.Env = none() }`),
 		src(`"fmt"`, `func f(x *struct{ Env []string }) { x.Env = nil; fmt.Println(x) }`),
 	} {
-		if noEnv, _ := check(c); len(noEnv) == 0 {
+		if noEnv, _ := childEnvCheck(t, c); len(noEnv) == 0 {
 			t.Errorf("nil Env missed:\n%s", c)
 		}
 	}
 	// Environ in an Env, in a file with no launcher import (closes
 	// P3-4b-3r-env-r2; #651 UX 1).
 	noImport := src(``, `type C struct{ Env []string }; func (C) Environ() []string { return nil }; func f(c *C) { c.Env = append(c.Environ(), "A=1") }`)
-	if _, inherits := check(noImport); len(inherits) == 0 {
+	if _, inherits := childEnvCheck(t, noImport); len(inherits) == 0 {
 		t.Errorf("Environ in an Env missed in a file with no launcher import:\n%s", noImport)
 	}
 	noImportOK := src(``, `type C struct{ Env []string }; func f(c *C) { c.Env = append([]string{"PATH=/bin"}, "A=1") }`)
-	if noEnv, inherits := check(noImportOK); len(noEnv)+len(inherits) != 0 {
+	if noEnv, inherits := childEnvCheck(t, noImportOK); len(noEnv)+len(inherits) != 0 {
 		t.Errorf("flagged %v %v:\n%s", noEnv, inherits, noImportOK)
 	}
 	for _, c := range []string{
@@ -2317,7 +4019,7 @@ func TestEnvCheckFlagsANilEnvOnAnyReceiver(t *testing.T) {
 		src(`"os"; cp "github.com/ghbmrk/agentos/broker/childproc"`, `func f() cp.Env { return cp.NewEnv(append([]string{"PATH=/bin"}, os.Environ()...)...) }`),
 		src(`"os"; "github.com/ghbmrk/agentos/broker/childproc"`, `func env() []string { return os.Environ() }; func f() childproc.Env { return childproc.NewEnv(env()...) }`),
 	} {
-		if _, inherits := check(c); len(inherits) == 0 {
+		if _, inherits := childEnvCheck(t, c); len(inherits) == 0 {
 			t.Errorf("Environ into NewEnv missed:\n%s", c)
 		}
 	}
@@ -2325,8 +4027,111 @@ func TestEnvCheckFlagsANilEnvOnAnyReceiver(t *testing.T) {
 func f() T { return T{Env: []string{}} }
 func g(t *T) { t.Env = []string{"A=1"} }
 func h() childproc.Env { return childproc.NewEnv("PATH=/bin", "HOME="+os.Getenv("X")) }`)
-	if noEnv, inherits := check(ok); len(noEnv)+len(inherits) != 0 {
+	if noEnv, inherits := childEnvCheck(t, ok); len(noEnv)+len(inherits) != 0 {
 		t.Errorf("flagged %v %v", noEnv, inherits)
+	}
+}
+
+// REQ: CRED-1, ARC-1
+//
+// #6201: the check reads each name by the object go/types says it denotes.
+// It catches what a name's spelling or one file's scope hid (a func or
+// method value, a declaration in another file of the package), passes what
+// only shares a launcher's or nil's spelling, and still refuses what scopes
+// already told apart (a closure, a := redeclare).
+func TestEnvCheckReadsNamesByObject(t *testing.T) {
+	src := func(imports, body string) string { return "package p\nimport (" + imports + ")\n" + body + "\n" }
+	for _, c := range [][]string{
+		// A nil var, or a type a nil converts to, declared in another file.
+		{src(`"os/exec"`, `func f() { c := exec.Command("x"); c.Env = e; c.Run() }`), src(``, `var e []string`)},
+		{src(`"os/exec"`, `func f() { c := exec.Command("x"); c.Env = E(nil); c.Run() }`), src(``, `type E []string`)},
+		// Already refused: a closure's nil Env, a closure's own command, an
+		// Env set on another variable of the same name, a command stored
+		// again by a := redeclare.
+		{src(`"os/exec"`, `func f() { c := exec.Command("x"); c.Env = []string{}; func() { c.Env = nil }(); c.Run() }`)},
+		{src(`"os/exec"`, `func f() { c := exec.Command("x"); func() { c := exec.Command("y"); c.Env = []string{}; c.Run() }(); c.Run() }`)},
+		{src(`"os/exec"`, `type E struct{ Env []string }; func f() { c := exec.Command("x"); set := func(c *E) { c.Env = []string{} }; set(&E{}); c.Run() }`)},
+		{src(`"os/exec"`, `func f() error { c, err := exec.Command("a"), error(nil); c.Env = []string{}; c.Run(); c, err2 := exec.Command("b"), err; c.Run(); return err2 }`)},
+	} {
+		if noEnv, _ := childEnvCheck(t, c...); len(noEnv) == 0 {
+			t.Errorf("missed:\n%s", strings.Join(c, "\n"))
+		}
+	}
+	for _, c := range [][]string{
+		// A method value, a func value, a method of a var declared in
+		// another file, an interface's method.
+		{src(`"os"; "os/exec"`, `type T struct{}; func (T) env() []string { return os.Environ() }; func f(t T) { get := t.env; c := exec.Command("x"); c.Env = get(); c.Run() }`)},
+		{src(`"os"; "os/exec"`, `func env() []string { return os.Environ() }; func f() { get := env; c := exec.Command("x"); c.Env = get(); c.Run() }`)},
+		{src(`"os/exec"`, `func f() { c := exec.Command("x"); c.Env = conf.env(); c.Run() }`), src(`"os"`, `type T struct{}; func (T) env() []string { return os.Environ() }; var conf T`)},
+		{src(`"os"; "os/exec"`, `type E interface{ env() []string }; type T struct{}; func (T) env() []string { return os.Environ() }; func f(e E) { c := exec.Command("x"); c.Env = e.env(); c.Run() }`)},
+	} {
+		if _, inherits := childEnvCheck(t, c...); len(inherits) == 0 {
+			t.Errorf("os.Environ() missed:\n%s", strings.Join(c, "\n"))
+		}
+	}
+	// A local named exec or os, a shadowed nil, a local hiding a dot
+	// import's launcher, and a nil var assigned in another file.
+	for _, c := range [][]string{
+		{src(`"os/exec"`, `type runner struct{}; func (runner) Command(string) int { return 0 }; func f() { exec := runner{}; exec.Command("x") }; var _ = exec.ErrNotFound`)},
+		{src(`"os/exec"`, `func f() { exec := struct{ Command func(string) *int }{}; exec.Command("x") }; func g() { c := exec.Command("x"); c.Env = []string{}; c.Run() }`)},
+		{src(`"os"`, `type fake struct{}; func (fake) StartProcess(string, []string, *int) {}; func f() { os := fake{}; os.StartProcess("/x", nil, nil) }; var _ = os.Args`)},
+		{src(`"os/exec"`, `func f() { nil := []string{"A=1"}; c := exec.Command("x"); c.Env = nil; c.Run() }`)},
+		{src(`. "os/exec"`, `func f() { Command := func(string) int { return 0 }; Command("x") }; var _ = ErrNotFound`)},
+		{src(`"os/exec"`, `func f() { c := exec.Command("x"); c.Env = e; c.Run() }`), src(``, `var e []string; func init() { e = []string{"A=1"} }`)},
+	} {
+		if noEnv, inherits := childEnvCheck(t, c...); len(noEnv)+len(inherits) != 0 {
+			t.Errorf("flagged %v %v:\n%s", noEnv, inherits, strings.Join(c, "\n"))
+		}
+	}
+}
+
+// REQ: CRED-1, ARC-1
+//
+// #6201: the walk checks a file in every linux build that compiles it,
+// its own tags set (a value that differs by build is read in each), and
+// reports a package that does not type-check; a file no box build
+// compiles (!linux, or behind a tag only vendored code names) is not read.
+func TestEnvWalkChecksEveryBoxBuild(t *testing.T) {
+	root := t.TempDir()
+	for name, c := range map[string]string{
+		"a/a.go":        "package a\nfunc A() {}\n",
+		"a/tagged.go":   "//go:build envtag\n\npackage a\nimport \"os/exec\"\nfunc T() { exec.Command(\"x\").Run() }\n",
+		"a/other.go":    "//go:build !linux\n\npackage a\nimport \"os/exec\"\nfunc O() { exec.Command(\"x\").Run() }\n",
+		"a/gen.go":      "//go:build ignore\n\npackage main\nimport \"os/exec\"\nfunc main() { exec.Command(\"x\").Run() }\n",
+		"b/b.go":        "package b\nfunc B() int { return \"x\" }\n",
+		"vendor/v/v.go": "//go:build purego\n\npackage v\nimport \"os/exec\"\nfunc V() { exec.Command(\"x\").Run() }\n",
+		// A value that is explicit in one build and the process's
+		// environment in another (#6203 Security).
+		"c/shared.go": "package c\nimport \"os/exec\"\nfunc S() { c := exec.Command(\"x\"); c.Env = envVal(); c.Run() }\n",
+		"c/cgo.go":    "//go:build cgo\n\npackage c\nfunc envVal() []string { return []string{\"A=1\"} }\n",
+		"c/nocgo.go":  "//go:build !cgo\n\npackage c\nimport \"os\"\nfunc envVal() []string { return os.Environ() }\n",
+	} {
+		if err := os.MkdirAll(filepath.Join(root, filepath.Dir(name)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, name), []byte(c), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	visited, flagged := map[string]bool{}, map[string]bool{}
+	failed := envFiles(t, root, func(rel string, l *loaded, i int) {
+		visited[rel] = true
+		noEnv, inherits := childEnv(l, i)
+		for _, fn := range noEnv {
+			flagged[rel+" noEnv "+fn] = true
+		}
+		for _, fn := range inherits {
+			flagged[rel+" inherits "+fn] = true
+		}
+	})
+	if got, want := strings.Join(slices.Sorted(maps.Keys(visited)), " "), "a/a.go a/gen.go a/tagged.go b/b.go c/cgo.go c/nocgo.go c/shared.go"; got != want {
+		t.Errorf("checked %s, want %s", got, want)
+	}
+	if got, want := strings.Join(slices.Sorted(maps.Keys(flagged)), ", "), "a/gen.go noEnv main, a/tagged.go noEnv T, c/shared.go inherits S"; got != want {
+		t.Errorf("flagged %s, want %s", got, want)
+	}
+	if len(failed) != 1 || !strings.HasPrefix(failed[0], "b (") {
+		t.Errorf("type errors %q, want b's alone", failed)
 	}
 }
 

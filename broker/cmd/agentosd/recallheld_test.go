@@ -263,7 +263,7 @@ func TestLOG4UnsettledLineageStaysContained(t *testing.T) {
 	if !cfg.Grants.Contained(b.L) || cfg.Grants.Contained(b.M) {
 		t.Fatalf("grants contained: L %v M %v", cfg.Grants.Contained(b.L), cfg.Grants.Contained(b.M))
 	}
-	if n := cfg.Notes[len(cfg.Notes)-1](); !strings.Contains(n, "lamp still holds a record you deleted") || !strings.Contains(n, "no fork or merge until it goes back, which I try again when I restart") {
+	if n := cfg.Notes[len(cfg.Notes)-1](); !strings.Contains(n, "Agent lamp still holds a record you deleted") || !strings.Contains(n, "no fork or merge until it goes back, which I try again when I restart") {
 		t.Fatalf("STATUS %q", n)
 	}
 	if _, err := fork(m, "moss", []string{"moss2"}); err != nil {
@@ -347,7 +347,7 @@ func TestLOG4OwnerKeptLineageNotRolledBack(t *testing.T) {
 	if mc, _ := m.Get("lamp"); mc.Last != b.after.ID {
 		t.Fatalf("kept L moved to %s", mc.Last)
 	}
-	if n := h.Note(); n != "lamp still holds a record you deleted" {
+	if n := h.Note(); n != "Agent lamp still holds a record you deleted" {
 		t.Fatalf("STATUS %q", n)
 	}
 	if _, err := fork(m, "lamp", []string{"lamp2"}); err != nil {
@@ -733,6 +733,7 @@ func TestLOG4RecallFilesReadExactly(t *testing.T) {
 // or the files are unknown; a record covering only some of a lineage's
 // deleted items leaves it contained; each failure is logged; rollbacks
 // and notices go in lineage order, each notice naming its time.
+// REQ: OWN-6 (the hold line names agents as the forget texts do).
 func TestLOG4SettleOrdersAndLogs(t *testing.T) {
 	var logs, errs []string
 	logf := func(f string, a ...any) {
@@ -813,10 +814,13 @@ func TestLOG4SettleOrdersAndLogs(t *testing.T) {
 	if !has("rollback notice for agent %s not sent: %v") {
 		t.Fatalf("logs %q", logs)
 	}
-	if got := holdLine([]string{"moss", "lamp"}); got != "lamp, moss still hold a record you deleted" {
+	if got := holdLine([]string{"moss", "lamp"}); got != "Agents lamp and moss still hold a record you deleted" {
 		t.Fatalf("hold line: %q", got)
 	}
-	if got := holdLine([]string{"lamp"}); got != "lamp still holds a record you deleted" {
+	if got := holdLine([]string{"lamp"}); got != "Agent lamp still holds a record you deleted" {
+		t.Fatalf("hold line: %q", got)
+	}
+	if got := holdLine([]string{"moss", "lamp", "fern"}); got != "Agents fern, lamp and moss still hold a record you deleted" {
 		t.Fatalf("hold line: %q", got)
 	}
 	if got := recallBackNotice("lamp.1", time.Time{}); !strings.Contains(got, "went back to its start;") {

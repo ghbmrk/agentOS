@@ -398,7 +398,8 @@ MASK = "/dev/null"
 TOP_LINKS = {"lib": ("usr/lib", "/usr/lib")}
 READ_CONF = ("sysctl.d", "tmpfiles.d", "systemd/network", "systemd/system", "systemd/system.control",
              "systemd/system.attached") + tuple("systemd/%s%s" % (n, d) for n in
-                                                ("coredump.conf", "system.conf", "networkd.conf", "resolved.conf")
+                                                ("coredump.conf", "system.conf", "networkd.conf", "resolved.conf",
+                                                 "journald.conf")
                                                 for d in ("", ".d"))
 
 # #1556, #2176: the channels that run code as root at boot outside unit Exec lines, each held to
@@ -419,11 +420,14 @@ EXEC_TOPS = ("etc", "usr/local/lib", "usr/lib", "lib")
 # files' Exec lines as root. Each directory is walked whole and every entry in it, whatever its name
 # or suffix, is hashed (polkitd loads a dot name ending .rules; the readers' own filters are not
 # modelled). Anything in polkitd's /run directory is refused like the exec channels' /run copies.
+# #4641 R-b: the PAM stacks (libpam reads etc/pam.d, then its vendor directory usr/lib/pam.d, and etc/pam.conf
+# only without etc/pam.d), whose modules run as root before any unit or login drops to its user (pam_exec runs
+# any program), are held the same way.
 POLICY_DIRS = ("etc/polkit-1/rules.d", "usr/local/share/polkit-1/rules.d", "usr/share/polkit-1/rules.d",
                "usr/share/polkit-1/actions", "etc/dbus-1", "usr/local/share/dbus-1/system.d",
                "usr/share/dbus-1/system.d", "usr/local/share/dbus-1/system-services",
-               "usr/share/dbus-1/system-services", "lib/dbus-1/system-services")
-POLICY_FILES = ("usr/share/dbus-1/system.conf",)
+               "usr/share/dbus-1/system-services", "lib/dbus-1/system-services", "etc/pam.d", "usr/lib/pam.d")
+POLICY_FILES = ("usr/share/dbus-1/system.conf", "etc/pam.conf")
 POLICY_RUN = ("run/polkit-1/rules.d",)
 # IMG-dbus-reach (#5818): the system bus daemon's units. Every file systemd 257 merges into each (each unit
 # directory's file of that name and every drop-in unit_with_dropins applies, the type-wide service.d and
@@ -435,6 +439,13 @@ POLICY_RUN = ("run/polkit-1/rules.d",)
 BUS_DAEMON_UNITS = ("dbus.service", "dbus.socket")
 BUS_SOCKET = "/run/dbus/system_bus_socket"
 BUS_ADDRESS = "--address=systemd:"
+# #6037: the two commands dbus.service may run, each exactly this program, and the words its lines may
+# hold: none that systemd rewrites ($ and % expand, \ unescapes, quotes join words, a leading -@:+!|
+# changes how or as whom it runs, and ";" was once a command separator).
+BUS_DAEMON = "/usr/bin/dbus-daemon"
+BUS_RELOAD = "/usr/bin/dbus-send"
+BUS_COMMANDS = {("Service", "ExecStart"): BUS_DAEMON, ("Service", "ExecReload"): BUS_RELOAD}
+BUS_WORD = re.compile(r"[\w/.,:=-]+")
 
 _MAKERS = None  # #1829: tmpfiles_makers, tmpfiles_removers and unit_made_dirs by root inside once(), else None
 
@@ -533,7 +544,7 @@ def _violations(root):
             # absent (stock trixie has 2775 var/mail and var/local); a link's steps and the directories
             # holding it are held to one (#1829, step_refusal).
             out.append("%s: mode %04o is writable by anyone on the box (#1702)" % (rel, st.st_mode & 0o7777))
-    return (out + dump_violations(root) + swap_violations(root) + wifi_violations(root)
+    return (out + dump_violations(root) + journal_violations(root) + swap_violations(root) + wifi_violations(root)
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
             + exec_allow_violations(root) + bus_daemon_violations(root) + made_allow_violations(root) + credstore_violations(root) + stray_violations(root)
@@ -541,7 +552,7 @@ def _violations(root):
             + cached(unit_made_dirs, root)[1] + cached(unit_made_paths, root)[2] + unit_made_refusals(root)
             + inside_refusals(root) + gpt_auto_violations(root)
             + noexec_violations(root)
-            + keeper_violations(root) + clerk_key_violations(root)
+            + keeper_violations(root) + isolate_violations(root) + clerk_key_violations(root)
             + assembly_violations(root) + driver_violations(root) + e2e_violations(root))
 
 
@@ -1190,7 +1201,8 @@ def config_lines(data):
 
 def ini_last(files, section, key):
     """The value systemd ends up with for SECTION.KEY across FILES in order: the last assignment
-    wins, and an empty one resets it. None if never set."""
+    wins, and an empty one resets it. None if never set. For a key whose parser ignores a value it
+    rejects, see ini_canon."""
     val = None
     for f in files:
         try:
@@ -1309,12 +1321,12 @@ def sysctl_byte_violations(root):
 def dump_violations(root):
     """IMG-nodump: core dumps are discarded, for every process and for the card's service."""
     out = []
-    storage = ini_last(main_conf(root, "coredump.conf"), "Coredump", "Storage")
-    if storage != "none":
-        out.append("50-agentos-nodump.conf: coredump Storage is %s; must be none" % storage)
-    limit = ini_last(main_conf(root, "system.conf"), "Manager", "DefaultLimitCORE")
-    if limit not in ("0", "0:0"):
-        out.append("50-agentos-nodump.conf: DefaultLimitCORE is %s; must be 0" % limit)
+    for conf, sec, key, forms, want in (("coredump.conf", "Coredump", "Storage", COREDUMP_STORAGES, ("none",)),
+                                        ("system.conf", "Manager", "DefaultLimitCORE", LIMIT_FORMS, LIMIT_ZERO)):
+        v = ini_canon_or_why(main_conf(root, conf), sec, key, forms)
+        if v not in want:
+            out.append("50-agentos-nodump.conf: %s%s is %s; must be %s"
+                       % ("coredump " if conf == "coredump.conf" else "", key, v, want[0]))
     out += card_unit_violations(root)
     pattern = sysctl(root, "kernel.core_pattern")
     if pattern != CORE_PATTERN:
@@ -1323,6 +1335,149 @@ def dump_violations(root):
     if suid != "0":
         out.append("%s: fs.suid_dumpable is %s; must be 0" % (NODUMP_SYSCTL.rsplit("/", 1)[-1], suid))
     return out
+
+
+
+# systemd 257.13's log levels by name (log_level_from_string also takes the number).
+LOG_LEVELS = ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug")
+
+
+# journald's Storage= values (v257 storage_from_string).
+STORAGES = ("auto", "volatile", "persistent", "none")
+
+
+# #6095 (Potency on #6086): journald settings that delete or drop stored entries early. The image keeps
+# journald's defaults for them, so the check refuses any assignment.
+JOURNAL_DEFAULTS = ("SystemMaxUse", "SystemKeepFree", "SystemMaxFileSize", "SystemMaxFiles", "MaxRetentionSec",
+                    "RateLimitIntervalSec", "RateLimitInterval", "RateLimitBurst")
+JOURNAL_FLUSH = "systemd-journal-flush.service"
+
+
+def journal_violations(root):
+    """MOR-wipe-journal (#6078): a failed wipe's error (info, to the journal only) is still on disk
+    at the next boot. Storage=auto would rest on Debian's postinst having made /var/log/journal.
+    journald (v257 config_parse_storage, config_parse_log_level) ignores a value it cannot parse,
+    an empty one included, and keeps the one before it, so such a value is refused, never read as a
+    reset (Security on #6086). Each refusal names the file whose line decides."""
+    out, last, files = [], {}, main_conf(root, "journald.conf")
+    for f in files:
+        try:
+            lines = config_lines(f.content())
+        except (OSError, Unparsable) as e:
+            return ["%s: unreadable (%s); journald may not read it whole"
+                    % (f.rel, e.strerror if isinstance(e, OSError) else e)]
+        for sec, key, val in lines:
+            if sec == "Journal" and key in JOURNAL_DEFAULTS:
+                out.append("%s: journald %s=%s; the image keeps journald's default, so no entry goes early "
+                           "(remove that line)" % (f.rel, key, val))
+            valid = {"Storage": STORAGES, "MaxLevelStore": LOG_LEVELS + tuple("01234567")}.get(key)
+            if sec != "Journal" or valid is None:
+                continue
+            if val not in valid:
+                # UX on #6086: "keeping the one before it" only when there is one.
+                out.append("%s: journald %s=%s is a value journald ignores%s (set a valid one or remove that line)"
+                           % (f.rel, key, val, ", keeping the one before it" if key in last else ""))
+                last.setdefault(key, (None, None))
+            else:
+                last[key] = (val, f.rel)
+    storage, where = last.get("Storage", (None, None))
+    if "Storage" not in last:
+        out.append("journald Storage is not set (auto); must be persistent "
+                   "(usr/lib/systemd/journald.conf.d/50-agentos-persist.conf is missing or masked)")
+    elif not where:
+        out.append("journald has no valid Storage= in the chain, so it is auto; must be persistent")
+    elif storage != "persistent":
+        out.append("%s: journald Storage is %s; must be persistent (change or remove that line)" % (where, storage))
+    level, where = last.get("MaxLevelStore", ("debug", None))
+    if level is not None and level not in ("info", "debug", "6", "7"):
+        out.append("%s: journald MaxLevelStore is %s; must store info, a unit's stderr (set info or debug, "
+                   "or remove that line)" % (where, level))
+    return out + journal_flush_violations(root)
+
+
+def alias_violations(root, dirs, names):
+    """A link in a unit directory, under another name, that resolves to one of NAMES: it makes that name an
+    alias, whose drop-ins systemd applies too (unit_find_dropin_paths reads u->aliases), so it is refused
+    rather than modelled."""
+    out = []
+    for d in dirs:
+        for n in sorted(tree_listdir(root, d)):
+            if n in names or not stat.S_ISLNK(tree_lstat(root, d + "/" + n).st_mode):
+                continue
+            try:
+                target = tree_chase(root, d + "/" + n)[0].rsplit("/", 1)[-1]
+            except OSError:
+                continue
+            if target in names:
+                out.append("%s/%s: an alias of %s; the tree check does not model unit aliases" % (d, n, target))
+    return out
+
+
+# Debian's unit, the one place it may be, and every line it holds as config_lines reads it (Security and L3 on
+# #6130): read from usr/lib/systemd/system/systemd-journal-flush.service in systemd_257.13-1~deb13u1_amd64.deb
+# (deb.debian.org pool, sha256 ee81302a1d5b7434762b6e784a572854d4b6cf6235e33e2d104ad4e1cae71ab4), the version the
+# image installs; equal to upstream 257.7's units/systemd-journal-flush.service. A changed line is refused, not
+# modelled, so a Debian systemd update that changes the unit fails the build until this table is read again.
+JOURNAL_FLUSH_DIR = "usr/lib/systemd/system"
+JOURNAL_FLUSH_LINES = (
+    ("Unit", "Description", "Flush Journal to Persistent Storage"),
+    ("Unit", "Documentation", "man:systemd-journald.service(8) man:journald.conf(5)"),
+    ("Unit", "ConditionPathExists", "!/etc/initrd-release"),
+    ("Unit", "DefaultDependencies", "no"),
+    ("Unit", "After", "systemd-remount-fs.service systemd-quotacheck-root.service"),
+    ("Unit", "Before", "systemd-tmpfiles-setup.service"),
+    ("Unit", "Wants", "systemd-journald.service"),
+    ("Unit", "After", "systemd-journald.service"),
+    ("Unit", "RequiresMountsFor", "/var/log/journal"),
+    ("Unit", "Before", "soft-reboot.target systemd-soft-reboot.service"),
+    ("Unit", "Conflicts", "soft-reboot.target"),
+    ("Service", "ExecStart", "journalctl --flush"),
+    ("Service", "ExecStop", "journalctl --smart-relinquish-var"),
+    ("Service", "Type", "oneshot"),
+    ("Service", "RemainAfterExit", "yes"),
+    ("Service", "TimeoutSec", "90s"))
+
+
+def journal_flush_violations(root):
+    """#6095 (R1): journald writes to /var/log/journal only once systemd-journal-flush.service has asked it
+    to (server_system_journal_open, systemd 257.7); until then, Storage=persistent or not, the journal is in
+    /run and a reboot loses it. So the unit is Debian's file in JOURNAL_FLUSH_DIR, with no file or link of its
+    name in any other unit directory (a copy or a mask there would win), not masked (a link or an empty file),
+    holding JOURNAL_FLUSH_LINES and nothing else; started by sysinit.target (the link systemd installs); and
+    changed by no drop-in systemd applies to it, under its own name or an alias's."""
+    root = str(root)
+    dirs, out = unit_dirs(root)
+    why = "journald keeps the journal in /run until it runs, so a reboot loses it"
+    for d in dirs:
+        if d != JOURNAL_FLUSH_DIR and tree_lstat(root, d + "/" + JOURNAL_FLUSH):
+            out.append("%s/%s: replaces %s/%s; the tree check does not model a change to it (remove it)"
+                       % (d, JOURNAL_FLUSH, JOURNAL_FLUSH_DIR, JOURNAL_FLUSH))
+    unit = Conf(root, JOURNAL_FLUSH_DIR + "/" + JOURNAL_FLUSH) if JOURNAL_FLUSH_DIR in dirs else None
+    try:
+        masked = unit is None or not tree_lstat(root, unit.rel) or unit.is_link() or unit.content().strip() == b""
+    except OSError:
+        masked = True
+    if masked:
+        out.append("%s: missing or masked; %s" % (JOURNAL_FLUSH, why))
+    else:
+        try:
+            lines = tuple(config_lines(unit.content()))
+        except (OSError, Unparsable) as e:
+            lines = ("unreadable (%s)" % (e.strerror if isinstance(e, OSError) else e),)
+        if lines != JOURNAL_FLUSH_LINES:
+            diff = [l for l in lines if l not in JOURNAL_FLUSH_LINES] + [l for l in JOURNAL_FLUSH_LINES if l not in lines]
+            out.append("%s: not Debian systemd 257.13's unit (first difference: %s); the tree check does not model a "
+                       "change to it (restore it, or after a Debian systemd update read the new unit into "
+                       "JOURNAL_FLUSH_LINES)" % (unit.rel, diff[0] if diff else "the order of its lines"))
+    try:
+        wanted = any(tree_lstat(root, "%s/sysinit.target.wants/%s" % (d, JOURNAL_FLUSH)) for d in dirs)
+    except OSError:
+        wanted = False
+    if not wanted:
+        out.append("%s: not in sysinit.target.wants; %s" % (JOURNAL_FLUSH, why))
+    for f in unit_dropins(root, JOURNAL_FLUSH):  # its name's, each "-" prefix's and service.d (Security on #6128)
+        out.append("%s: a drop-in for %s; the tree check does not model a change to it (remove it)" % (f.rel, JOURNAL_FLUSH))
+    return out + alias_violations(root, dirs, (JOURNAL_FLUSH,))
 
 
 def unit_dropin_names(name):
@@ -1369,16 +1524,7 @@ def card_unit_violations(root):
     modelled."""
     root = str(root)
     dirs, out = unit_dirs(root)
-    for d in dirs:
-        for n in sorted(tree_listdir(root, d)):
-            if n in CARD_UNITS or not stat.S_ISLNK(tree_lstat(root, d + "/" + n).st_mode):
-                continue
-            try:
-                target = tree_chase(root, d + "/" + n)[0].rsplit("/", 1)[-1]
-            except OSError:
-                continue
-            if target in CARD_UNITS:
-                out.append("%s/%s: an alias of %s; the tree check does not model unit aliases" % (d, n, target))
+    out += alias_violations(root, dirs, CARD_UNITS)
     for name in CARD_UNITS:
         unit = next((Conf(root, d + "/" + name) for d in dirs if tree_lstat(root, d + "/" + name)), None)
         if unit is None:
@@ -1389,8 +1535,8 @@ def card_unit_violations(root):
             continue
         files = [unit] + conf_files(root, ["%s/%s.d" % (d, n) for d in UNIT_PATHS for n in unit_dropin_names(name)]
                                     + ["%s/service.d" % d for d in UNIT_PATHS])
-        limit = ini_last(files, "Service", "LimitCORE")
-        if limit not in ("0", "0:0"):
+        limit = ini_canon_or_why(files, "Service", "LimitCORE", LIMIT_FORMS)
+        if limit not in LIMIT_ZERO:
             out.append("%s: LimitCORE is %s; must be 0" % (name, limit))
     return out
 
@@ -1488,7 +1634,7 @@ def namespace_mount_violations(name, files):
         for key in NAMESPACE_ROOTS:
             if ini_words(files, "Service", key):
                 out.append("%s: sets %s; only the image's own /usr may execute (UPD-10)" % (name, key))
-        if ini_last(files, "Service", "PrivateTmp") == "disconnected":
+        if ini_canon(files, "Service", "PrivateTmp", YES_NO + ("disconnected",)) == "disconnected":
             out.append("%s: PrivateTmp=disconnected mounts a tmpfs that executes; use PrivateTmp=yes (UPD-10)" % name)
         for key in NAMESPACE_MOUNTS:
             for w in ini_words(files, "Service", key):
@@ -1835,6 +1981,7 @@ KERNEL_EXEC_TEXT = b"""ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/age
         -clerk-key camera=/run/agentos-kernel/key-camera.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-camera.service \\
         -clerk-key homekit=/run/agentos-kernel/key-homekit.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-homekit.service \\
         -link-sock /run/agentos-kernel/link.sock -link-uid @uid:agentos-link \\
+        -chrony /run/chrony/chronyd.sock -chrony-reply /run/agentos-kernel/chrony.sock \\
         -up /run/agentos-kernel/up
 """
 KERNEL_EXEC = config_lines(b"[Service]\n" + KERNEL_EXEC_TEXT)[0][2]
@@ -1859,6 +2006,65 @@ EXEC_KEYS = ("ExecCondition", "ExecStartPre", "ExecStart", "ExecStartPost", "Exe
              "ExecStopPost")
 TRUE_WORDS = ("1", "yes", "y", "true", "t", "on")
 FALSE_WORDS = ("0", "no", "n", "false", "f", "off")
+# #6095 (R4): forms a guarded key's every assignment must take (ini_canon), byte for byte. Each is one that
+# systemd 257 parses as written, so no parser is ported: any other form is refused.
+YES_NO = ("yes", "no")
+SERVICE_TYPES = ("simple", "exec", "forking", "oneshot", "dbus", "notify", "notify-reload", "idle")
+DEVICE_POLICIES = ("auto", "closed", "strict")
+COREDUMP_STORAGES = ("none", "external", "journal")
+LIMIT_ZERO = ("0", "0:0")
+# Debian ships DefaultLimitCORE=0:infinity (systemd.conf.d/10-coredump-debian.conf), which the image overrides.
+LIMIT_FORMS = LIMIT_ZERO + ("infinity", "0:infinity")
+
+
+class Form:
+    """A canonical form given by a regex for the whole value, and how a refusal names it."""
+    def __init__(self, pattern, label):
+        self.regex, self.label = re.compile(pattern), label
+
+    def __contains__(self, v):
+        return self.regex.fullmatch(v) is not None
+
+    def __str__(self):
+        return self.label
+
+
+# A plain absolute path: no specifier, escape, "." or ".." name, or repeated "/", so path_simplify_and_warn
+# takes it as written.
+CANON_PATH = r"(/[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}){1,16}"
+STD_FORMS = {
+    "StandardInput": Form(r"null|tty|socket|file:" + CANON_PATH, "null, tty, socket or file:/a/plain/path"),
+    "StandardOutput": Form(r"inherit|null|tty|kmsg|kmsg\+console|journal|journal\+console|socket|(file|append|truncate):"
+                           + CANON_PATH, "inherit, null, tty, kmsg, journal, socket (+console where it applies) or "
+                           "file:, append: or truncate: and a plain absolute path")}
+STD_FORMS["StandardError"] = STD_FORMS["StandardOutput"]
+SLICE_FORM = Form(r"[A-Za-z0-9_-]{1,64}\.slice", "a name of letters, digits, _ and - with .slice")
+BURST_FORM = Form(r"[1-9][0-9]{0,2}", "a number from 1")
+# No leading zero, so a zero interval is one that starts with "0".
+INTERVAL_FORM = Form(r"infinity|(0|[1-9][0-9]{0,8})(s|min|h)?", "infinity, or a number with no leading zero and s, min or h")
+
+
+def ini_canon(files, section, key, forms):
+    """#6095: the value systemd ends up with for SECTION.KEY across FILES, for a check that must not rest on how
+    systemd parses it. A parser that rejects a value ignores it and keeps the one before it, so a value read wrong
+    could hide an unsafe earlier one. So every assignment, the empty one included, must be one of FORMS (a tuple of
+    words or a Form), each read by systemd as written; then the last one wins. None if never set. ValueError for any
+    other assignment, naming its file, as journal_violations refuses Storage= (Lens and L3 on #6128)."""
+    val = None
+    for f, v in ini_every_in(files, section, key):
+        if v not in forms:
+            raise ValueError("%s=%s in %s is a form the tree check does not read (use %s)"
+                             % (key, v, f.rel, forms if isinstance(forms, Form) else " or ".join(forms)))
+        val = v
+    return val
+
+
+def ini_canon_or_why(files, section, key, forms):
+    """ini_canon's value, or its refusal as the text a message shows in place of the value."""
+    try:
+        return ini_canon(files, section, key, forms)
+    except ValueError as e:
+        return str(e)
 
 
 def unit_with_dropins(root, dirs, name):
@@ -1867,9 +2073,15 @@ def unit_with_dropins(root, dirs, name):
     unit = next((Conf(root, d + "/" + name) for d in dirs if tree_lstat(root, d + "/" + name)), None)
     if unit is None:
         return None
+    return [unit] + unit_dropins(root, name)
+
+
+def unit_dropins(root, name):
+    """Every drop-in systemd 257.13 applies to unit NAME, in its order, whether or not a file holds the unit
+    (a transient unit has drop-ins alone)."""
     typ = name.rsplit(".", 1)[1]
-    return [unit] + conf_files(root, ["%s/%s.d" % (d, n) for d in UNIT_PATHS for n in unit_dropin_names(name)]
-                               + ["%s/%s.d" % (d, typ) for d in UNIT_PATHS])
+    return conf_files(root, ["%s/%s.d" % (d, n) for d in UNIT_PATHS for n in unit_dropin_names(name)]
+                      + ["%s/%s.d" % (d, typ) for d in UNIT_PATHS])
 
 
 def service_dir(root, d):
@@ -2681,7 +2893,7 @@ def manager_paths(files):
             p = v if field is None else (v.split(":") + [""] * field)[field]
             out.append((key, v, p.lstrip("-")))
     for key in ("StandardInput", "StandardOutput", "StandardError"):
-        v = ini_last(files, "Service", key) or ""
+        v = ini_canon(files, "Service", key, STD_FORMS[key]) or ""
         if v.startswith(STD_FILES):
             out.append((key, v, v.split(":", 1)[1]))
     for key, top in MANAGER_DIRS.items():
@@ -2753,7 +2965,7 @@ def keeper_violations(root):
                            % (n, svc))
     for n in sorted(set(paths)):
         out += keeper_path_violations(n, unit_with_dropins(root, dirs, n))
-    out += sysusers_tpm_violations(root)
+    out += sysusers_tpm_violations(root) + uid0_violations(root) + bus_keep_violations(root, dirs)
     return out
 
 
@@ -2761,35 +2973,108 @@ def bus_unit_violations(name, files):
     """IMG-dbus-reach (#5818): agentos service NAME, read from FILES, masks BUS_DIR unless it is one of
     BUS_UNITS or NOEXEC_EXEMPT, its root is a driver's empty one (driver_root), or its own empty tmpfs
     leaves the directory out of view (tmpfs_hides; a mask there fails the unit, 226/NAMESPACE). The entry
-    takes "-" exactly when NAME is one of BUS_EARLY. ValueError as ini_paths."""
+    takes "-" exactly when the unit may start before sockets.target (starts_early), so before dbus.socket makes
+    the directory. ValueError as ini_paths."""
     if name in BUS_UNITS + NOEXEC_EXEMPT or driver_root(name, files) or tmpfs_hides(files, BUS_DIR):
         return []
     hidden = ini_paths(files, "Service", "InaccessiblePaths")
     words = [w for v in ini_entries(files, "Service", "InaccessiblePaths") for w in v.split()]
+    early = starts_early(files)
     if BUS_DIR not in hidden:
         return ["%s: InaccessiblePaths does not hold %s; a unit that makes no bus call never sees the system "
                 "bus (#5818)" % (name, BUS_DIR)]
-    if name in BUS_EARLY and "-" + BUS_DIR not in words:
-        return ["%s: InaccessiblePaths=%s fails the unit (226/NAMESPACE): it starts before dbus.socket makes "
-                "the directory, so the entry takes \"-\" (#5818)" % (name, BUS_DIR)]
-    if name not in BUS_EARLY and BUS_DIR not in words:
-        return ["%s: InaccessiblePaths=-%s gives no mask while the directory is missing; the unit starts after "
-                "dbus.socket makes it (#5818)" % (name, BUS_DIR)]
+    if early and "-" + BUS_DIR not in words:
+        return ["%s: InaccessiblePaths=%s fails the unit (226/NAMESPACE): with DefaultDependencies=no it may start "
+                "before dbus.socket makes the directory, so the entry takes \"-\" (#5818)" % (name, BUS_DIR)]
+    if not early and BUS_DIR not in words:
+        return ["%s: InaccessiblePaths=-%s gives no mask while the directory is missing; with default dependencies "
+                "the unit starts after dbus.socket makes it (#5818)" % (name, BUS_DIR)]
     return []
+
+
+def starts_early(files):
+    """#6037: whether a unit read from FILES may start before sockets.target: it sets DefaultDependencies=no and
+    is not ordered after sockets.target or basic.target, which is after it (#6178: the page authority's staging
+    and the wipe drop the default dependencies but keep that order). DefaultDependencies= is read by ini_canon,
+    since config_parse_bool keeps the value before one it cannot parse (#6158). ValueError as ini_words or
+    ini_canon."""
+    return (ini_canon(files, "Unit", "DefaultDependencies", YES_NO) == "no"
+            and not {"sockets.target", "basic.target"} & set(ini_words(files, "Unit", "After")))
+
+
+def isolate_violations(root):
+    """MOR-pageca-emergency (#6178): each ISOLATE_KEPT unit the tree ships, read with every drop-in systemd
+    applies to it, sets IgnoreOnIsolate= once, to exactly yes, and DefaultDependencies= once, to exactly no;
+    conflicts with shutdown.target alone and is ordered before it; and takes no STOP_LINKS key. Each but
+    MOR_UNIT is ordered after sysinit.target, basic.target and MOR_UNIT, never before MOR_UNIT, so shutdown
+    stops it before the clear. A unit the tree does not ship, or masks, never runs (MOR then stays set, or no
+    card is staged), so it passes; any other link, or an alias, is refused rather than modelled."""
+    root = str(root)
+    dirs, out = unit_dirs(root)
+    out += alias_violations(root, dirs, ISOLATE_KEPT)
+    for name in ISOLATE_KEPT:
+        files = unit_with_dropins(root, dirs, name)
+        try:
+            if files is None or files[0].content().strip() == b"":
+                continue
+            every = {k: ini_every_in(files, "Unit", k) for k in
+                     ("IgnoreOnIsolate", "DefaultDependencies", "Conflicts", "Before", "After") + STOP_LINKS}
+        except (OSError, ValueError) as e:
+            out.append("%s: unreadable (%s); the tree check never passes a unit it cannot read" % (name, e))
+            continue
+        words = {k: [w for _, v in every[k] for w in v.split()] for k in every}
+        for key, want in (("IgnoreOnIsolate", "yes"), ("DefaultDependencies", "no")):
+            if [v for _, v in every[key]] != [want]:
+                out.append("%s: %s= is %s; must be set once, to exactly %s, so an isolate leaves it running (#6178)"
+                           % (name, key, ", ".join("%r in %s" % (v, f.rel) for f, v in every[key]) or "unset", want))
+        for key in STOP_LINKS:
+            for f, v in every[key]:
+                out.append("%s: %s=%s in %s; another unit's stop would stop it, whatever IgnoreOnIsolate= says "
+                           "(#6178)" % (name, key, v, f.rel))
+        if set(words["Conflicts"]) != {"shutdown.target"} or "shutdown.target" not in words["Before"]:
+            out.append("%s: Conflicts=%s Before=%s; must conflict with shutdown.target alone and be ordered before "
+                       "it, so only the shutdown transaction stops it (#6178)"
+                       % (name, " ".join(words["Conflicts"]), " ".join(words["Before"])))
+        if name != MOR_UNIT and ({"sysinit.target", "basic.target", MOR_UNIT} - set(words["After"])
+                                 or MOR_UNIT in words["Before"]):
+            out.append("%s: After=%s Before=%s; must be After=sysinit.target basic.target %s and not before it, so "
+                       "shutdown stops it before the MOR clear (#6178)"
+                       % (name, " ".join(words["After"]), " ".join(words["Before"]), MOR_UNIT))
+    return out
+
+
+def bus_keep_violations(root, dirs):
+    """#6037: each BUS_UNITS unit, its file (none for the transient agentos-kernel-reboot.service) and every
+    drop-in systemd applies to it, lifts only BUS_DIR from the main side's mask: its InaccessiblePaths= is
+    KEEPER_PATHS exactly."""
+    out = []
+    for name in BUS_UNITS:
+        files = unit_with_dropins(root, dirs, name) or unit_dropins(root, name)
+        try:
+            got = sorted(ini_paths(files, "Service", "InaccessiblePaths"))
+        except ValueError as e:
+            got = [str(e)]
+        if got != sorted(KEEPER_PATHS):
+            out.append("%s: InaccessiblePaths=%s; a unit that keeps the bus masks the rest of the keeper's state, "
+                       "%s (#6037)" % (name, " ".join(got), " ".join(KEEPER_PATHS)))
+    return out
 
 
 def keeper_path_violations(name, files):
     """OWN-card-flow decision 6: an agentos-keeper .path unit NAME starts only a KEEPER_UNITS unit and
     watches only at or under a KEEPER_PATHS entry, with no '..' step, so the keeper's own state is all
     that can start it."""
-    unit = ini_last(files, "Path", "Unit") or name[:-len(".path")] + ".service"
+    try:
+        units = ini_all(files, "Path", "Unit")
+        watches = [(k, v) for k in PATH_WATCHES for v in ini_entries(files, "Path", k)]
+    except ValueError as e:
+        return ["%s: %s; the tree check never passes what it cannot read (D-154)" % (name, e)]
+    # config_parse_trigger_unit (#6095, R4): the first value naming another unit wins; a later or an empty
+    # one is ignored.
+    unit = next((v for v in units if "." in v and v != name), name[:-len(".path")] + ".service")
     out = []
     if unit not in KEEPER_UNITS:
         out.append("%s: starts %s, not one of the keeper's units (D-154)" % (name, unit))
-    try:
-        watches = [(k, v) for k in PATH_WATCHES for v in ini_entries(files, "Path", k)]
-    except ValueError as e:
-        return out + ["%s: %s; the tree check never passes what it cannot read (D-154)" % (name, e)]
     if not watches:
         out.append("%s: watches nothing the tree check reads (D-154)" % name)
     for k, v in watches:
@@ -2974,18 +3259,27 @@ EMPTY_ROOT_UNITS = ("agentos-imapconn@.service",)
 # with "-": its stop, at shutdown, is a command of its own, when every path exists.
 MOR_UNIT = "agentos-mor.service"
 MOR_LISTED = ("/run/agentos-setup", "/run/agentos-link-capture")
-# IMG-dbus-reach (#5818): the system bus's directory. dbus-daemon runs as root and stock system.conf lets
+# MOR-pageca-emergency (#6178; HW-8, HW-1, CH-9): the units an isolate must leave running (isolate_violations).
+# MOR_UNIT's stop clears MOR, and the secret holders could come back with it clear (#5947); the staging's and
+# the wipe's remove the page authority a printed Owner Card names. Default dependencies add
+# Requires=sysinit.target, which conflicts with emergency.target, so an emergency isolate would stop such a
+# unit whatever its IgnoreOnIsolate=; so would any STOP_LINKS key on it, through the unit it names.
+ISOLATE_KEPT = (MOR_UNIT, "agentos-keeper-pageca.service", "agentos-keeper-wipe.service")
+STOP_LINKS = ("Requires", "Requisite", "BindsTo", "PartOf", "StopPropagatedFrom", "StopWhenUnneeded",
+              "RequiresMountsFor")
+# IMG-dbus-reach (#5818): the system bus's directory. dbus-daemon is long-lived and stock system.conf lets
 # any local uid connect, so every agentos service masks it but BUS_UNITS, whose `systemctl reboot` asks
 # logind over the bus (--check-inhibitors=yes lists inhibitors; plain reboot goes through logind first).
 # agentos-kernel-reboot.service is the transient unit KERNEL_REBOOT starts; a drop-in lifts the mask for
-# it by name, as for the other two, and the tree check has no file of that name to weigh.
-# Root's other systemctl calls reach PID 1 on /run/systemd/private, not the bus. BUS_EARLY start before
-# sockets.target, so before dbus.socket makes the directory: their entry takes "-" (both are oneshots whose
-# command runs once; agentos-mor's stop gets a namespace of its own at shutdown). Every other service is
-# ordered after sockets.target (DefaultDependencies), so the directory is there and the entry takes no "-".
+# it by name, as for the other two, and bus_keep_violations weighs its drop-ins alone. A package that makes
+# another unit take a logind inhibitor adds it here (image/ASSUMPTIONS.md, UPD-10). Root's other systemctl
+# calls reach PID 1 on /run/systemd/private, not the bus. A unit with DefaultDependencies=no may start before
+# sockets.target, so before dbus.socket makes the directory: its entry takes "-" (agentos-inbound and
+# agentos-mor are oneshots whose command runs once; agentos-mor's stop gets a namespace of its own at
+# shutdown). Every other service is ordered after sockets.target, so the directory is there and the entry
+# takes no "-".
 BUS_DIR = "/run/dbus"
 BUS_UNITS = ("agentos-fallback.service", "agentos-kernel-reboot.service", "agentos-reboot.service")
-BUS_EARLY = ("agentos-inbound.service", MOR_UNIT)
 
 
 def driver_root(name, files):
@@ -3024,7 +3318,7 @@ def keeper_unit_violations(name, files, root):
     keeper = name in KEEPER_UNITS
     if name.startswith(KEEPER_PREFIX) and not keeper:
         out.append("%s: an agentos-keeper unit not in KEEPER_UNITS; the keeper group is listed in one place (D-154)" % name)
-    slice_ = ini_last(files, "Service", "Slice")
+    slice_ = ini_canon(files, "Service", "Slice", SLICE_FORM)
     if keeper and slice_ != KEEPER_SLICE:
         out.append("%s: Slice is %s; the keeper's units run in %s (D-154)" % (name, slice_, KEEPER_SLICE))
     if not keeper and slice_ == KEEPER_SLICE:
@@ -3075,11 +3369,11 @@ def keeper_unit_violations(name, files, root):
                 out.append("%s: %s=%s%s (D-154)" % (name, key, v, why))
     # #3477: a oneshot is starting until it exits, so RuntimeMaxSec= bounds nothing there (systemd
     # ignores it); its bound is TimeoutStartSec=.
-    if (ini_last(files, "Service", "Type") or "") == "oneshot" and ini_entries(files, "Service", "RuntimeMaxSec"):
+    if (ini_canon(files, "Service", "Type", SERVICE_TYPES) or "") == "oneshot" and ini_entries(files, "Service", "RuntimeMaxSec"):
         out.append("%s: RuntimeMaxSec= has no effect on a Type=oneshot unit; bound it with TimeoutStartSec= (#3477)"
                    % name)
     # #2981 (Security 3): every command but ExecStart= then runs as "+" does.
-    start_only = (ini_last(files, "Service", "PermissionsStartOnly") or "").lower() in TRUE_WORDS
+    start_only = ini_canon(files, "Service", "PermissionsStartOnly", YES_NO) == "yes"
     if start_only and name not in FULL_PRIVILEGE_EXEMPT:
         out.append("%s: PermissionsStartOnly=yes runs commands with full privileges, outside its device policy and "
                    "namespace (STO-2c)" % name)
@@ -3091,7 +3385,7 @@ def keeper_unit_violations(name, files, root):
                 out.append("%s: %s=%s runs with full privileges, outside its device policy and namespace (STO-2c)"
                            % (name, key, v.split()[0]))
     allows = [v.split()[0] for v in ini_entries(files, "Service", "DeviceAllow")]
-    policy = ini_last(files, "Service", "DevicePolicy")
+    policy = ini_canon(files, "Service", "DevicePolicy", DEVICE_POLICIES)
     if name in TPM_UNITS:
         for spec in allows:
             if tpm_spec(spec) and spec != TPM_DEVICE:
@@ -3102,7 +3396,7 @@ def keeper_unit_violations(name, files, root):
         for spec in allows:
             if tpm_spec(spec):
                 out.append("%s: DeviceAllow=%s reaches the TPM; only %s may (#2889)" % (name, spec, ", ".join(TPM_UNITS)))
-        private = (ini_last(files, "Service", "PrivateDevices") or "").lower() in TRUE_WORDS
+        private = ini_canon(files, "Service", "PrivateDevices", YES_NO) == "yes"
         if name not in NOEXEC_EXEMPT and not private and policy not in ("closed", "strict"):
             out.append("%s: neither PrivateDevices=yes nor DevicePolicy=closed; only %s may reach the TPM (#2889)"
                        % (name, ", ".join(TPM_UNITS)))
@@ -3115,18 +3409,18 @@ def keeper_unit_violations(name, files, root):
             for f, v in ini_all_in(files, section, key):
                 if v not in allowed:
                     out.append("%s: %s=%s in %s; %s; allowed: %s" % (name, key, v, f.rel, why, unlock_allowed(key, allowed)))
-        if (ini_last(files, "Service", "NoNewPrivileges") or "").lower() not in TRUE_WORDS:
+        if ini_canon(files, "Service", "NoNewPrivileges", YES_NO) != "yes":
             out.append("%s: NoNewPrivileges is not yes (#2899)" % name)
         service_limits = ini_keys(files, "Service") & {"StartLimitBurst", "StartLimitIntervalSec", "StartLimitInterval"}
         if service_limits or "StartLimitInterval" in ini_keys(files, "Unit"):
             out.append("%s: a start limit outside [Unit]'s StartLimitBurst= and StartLimitIntervalSec=; the tree "
                        "check does not model it (#2897)" % name)
-        burst = ini_last(files, "Unit", "StartLimitBurst")
-        if burst is None or not burst.isdigit() or not 1 <= int(burst) <= START_LIMIT_MAX:
+        burst = ini_canon(files, "Unit", "StartLimitBurst", BURST_FORM)
+        if burst is None or int(burst) > START_LIMIT_MAX:
             out.append("%s: StartLimitBurst is %s; must be 1 to %d, so a crash loop cannot wear the TPM counter (#2897)"
                        % (name, burst, START_LIMIT_MAX))
-        interval = ini_last(files, "Unit", "StartLimitIntervalSec")
-        if interval is None or re.fullmatch(r"0+(\.0*)?\s*[a-z]*", interval):
+        interval = ini_canon(files, "Unit", "StartLimitIntervalSec", INTERVAL_FORM)
+        if interval is None or interval.startswith("0"):
             out.append("%s: StartLimitIntervalSec is %s; a zero or unset interval does not bound restarts (#2897)"
                        % (name, interval))
         for key in EXEC_KEYS:
@@ -3161,6 +3455,54 @@ def sysusers_tpm_violations(root):
             if w[0].rstrip("!") == "u" and len(w) > 2 and ":" in w[2] and w[2].split(":", 1)[1] in TPM_GROUPS:
                 out.append("%s:%d: gives %s the group %s, which can open the TPM (#2889)"
                            % (f.rel, n, w[1], w[2].split(":", 1)[1]))
+    return out
+
+def uid0_violations(root):
+    """#4641 R-g: no user record but root's has uid 0: an etc/passwd line, a userdb .user record (its "uid"
+    read as JSON) or a sysusers.d u line whose ID's uid part is 0, each compared as a number (00 is 0, as glibc's
+    strtoul and systemd's parse_uid read it), and a uid that does not read as a plain decimal is refused. Anything at uid 0 is root under another name,
+    outside every check that reads User=root."""
+    out = []
+    try:
+        text = Conf(root, "etc/passwd").text()
+    except FileNotFoundError:
+        text = ""
+    except OSError as e:
+        text, out = "", ["etc/passwd: unreadable (%s); the tree check never passes it (#4641)" % e.strerror]
+    for n, ln in enumerate(text.splitlines(), 1):
+        w = ln.split(":")
+        if len(w) < 3:
+            continue  # no uid field: glibc's files NSS reads no user from it
+        if not w[2].isdigit() or not w[2].isascii():
+            out.append("etc/passwd:%d: a line whose uid is not a plain decimal number (#4641)" % n)
+        elif int(w[2]) == 0 and w[0] != "root":
+            out.append("etc/passwd:%d: %s has uid 0; only root may (#4641)" % (n, w[0]))
+    for f in conf_files(root, ("etc/userdb", "usr/local/lib/userdb", "usr/lib/userdb"), ".user"):
+        try:
+            rec = json.loads(f.content())
+        except (OSError, ValueError) as e:
+            out.append("%s: unreadable (%s); the tree check never passes it (#4641)" % (f.rel, e))
+            continue
+        uid = rec.get("uid") if isinstance(rec, dict) else None
+        if not isinstance(rec, dict) or (uid is not None and (type(uid) is not int or uid == 0) and rec.get("userName") != "root"):
+            out.append("%s: a user record with uid 0 other than root's, or not a JSON object (#4641)" % f.rel)
+    for f in conf_files(root, conf_paths("sysusers.d")):
+        try:
+            lines = f.content().decode("utf-8", "replace").splitlines()
+        except OSError as e:
+            out.append("%s: unreadable (%s); the tree check never passes it (#4641)" % (f.rel, e.strerror))
+            continue
+        for n, ln in enumerate(lines, 1):
+            w = ln.split()
+            if len(w) < 3 or w[0].rstrip("!") != "u" or w[1] == "root":
+                continue
+            uid = w[2].split(":", 1)[0]
+            if uid.isdigit() and uid.isascii() and int(uid) == 0:
+                out.append("%s:%d: gives %s uid 0; only root may (#4641)" % (f.rel, n, w[1]))
+            elif not (uid == "-" or uid.isdigit() and uid.isascii()):
+                # A path takes the uid of the file's owner (root's for most), and quotes or an escape are read
+                # by systemd's word splitter, which this does not model.
+                out.append("%s:%d: gives %s a uid that is not - or a plain decimal number (#4641)" % (f.rel, n, w[1]))
     return out
 
 def fstab_noexec_violations(root):
@@ -4053,12 +4395,15 @@ def bus_daemon_files(root, name):
 
 
 def bus_daemon_violations(root):
-    """#5818: the system bus listens only on dbus.socket. Across every file systemd merges into dbus.service,
-    one ExecStart= runs dbus-daemon with BUS_ADDRESS as its one --address (no --config-file, which could
-    name another config), and no other Exec*= line runs a command but ExecReload='s dbus-send; across
-    dbus.socket's, no Exec*= line at all, and every Listen* entry is ListenStream=BUS_SOCKET, and there
-    is one. A unit the image does not ship is not weighed: no bus runs without dbus.service, and
-    dbus.service with BUS_ADDRESS fails without its socket."""
+    """#5818, #6037: the system bus listens only on dbus.socket, read as systemd runs the units' commands.
+    Across every file systemd merges into dbus.service, one ExecStart= runs exactly BUS_DAEMON with
+    BUS_ADDRESS as its one --address (no --config-file, which could name another config), every ExecReload=
+    runs exactly BUS_RELOAD, and no other Exec*= or Sockets= line is set; each word of those lines is a
+    BUS_WORD, so no prefix, specifier, variable, escape, quote or ";" makes systemd run other than the words
+    read here. Across dbus.socket's, no Exec*= line at all, every Listen* entry is ListenStream=BUS_SOCKET,
+    there is one, and Service= may only be dbus.service. No other socket may start dbus.service and no
+    other service may take dbus.socket. A unit the image does not ship is not weighed: no bus runs without
+    dbus.service, and dbus.service with BUS_ADDRESS fails without its socket."""
     out = []
     for name, key in (("dbus.service", "Service"), ("dbus.socket", "Socket")):
         files = bus_daemon_files(root, name)
@@ -4072,36 +4417,63 @@ def bus_daemon_violations(root):
         tops = [f for f in files if f.name == name and not f.rel.endswith(".d/" + name)]
         files = tops[:1] + [f for f in files if f not in tops]
         try:
-            # Every other command line either unit runs: dbus.service's ExecReload= may only ask the bus to
-            # reload (dbus-send, as stock), and nothing else may start a process beside the daemon.
             for k in sorted(ini_keys(files, key)):
-                if not k.startswith("Exec") or k in ("ExecStart", "ExecSearchPath"):
-                    continue
-                for v in ini_entries(files, key, k):
-                    w = v.lstrip("-@:+!|").split()
-                    if not (key == "Service" and k == "ExecReload" and w and w[0].endswith("/dbus-send")
-                            and "dbus-daemon" not in v):
-                        out.append("%s: %s=%s; the bus units run dbus-daemon from ExecStart= alone, and reload only "
-                                   "through dbus-send (#5818)" % (name, k, v))
+                if k == "Sockets" or (k.startswith("Exec") and (key, k) not in BUS_COMMANDS):
+                    out.append("%s: %s= is set; the bus units run dbus-daemon from ExecStart= alone, reload only "
+                               "through dbus-send, and take no socket but dbus.socket (#5818)" % (name, k))
             if key == "Service":
                 cmds = ini_entries(files, key, "ExecStart")
                 if len(cmds) > 1:
                     out.append("%s: %d ExecStart= lines; the system bus is one dbus-daemon (#5818)" % (name, len(cmds)))
-                for v in cmds or [""]:
-                    w = v.lstrip("-@:+!|").split()
-                    addr = [x for x in w if x.startswith("--address")]
-                    if not w or not w[0].endswith("/dbus-daemon") or addr != [BUS_ADDRESS] or any(
-                            x.startswith("--config-file") for x in w):
-                        out.append("%s: ExecStart=%s; the system bus is dbus-daemon with %s alone, its one socket "
-                                   "from dbus.socket (#5818)" % (name, v, BUS_ADDRESS))
+                for k, prog in BUS_COMMANDS.items():
+                    for v in ini_entries(files, key, k[1]) or ([""] if k[1] == "ExecStart" else []):
+                        w = v.split()
+                        bad = [x for x in w if not BUS_WORD.fullmatch(x)]
+                        if bad:
+                            out.append("%s: %s=%s; %s is a word systemd rewrites or splits (a prefix, specifier, "
+                                       "variable, escape, quote or \";\"), so the command it runs is not the one "
+                                       "read here (#6037)" % (name, k[1], v, bad[0]))
+                        elif not w or w[0] != prog or (k[1] == "ExecStart" and (
+                                [x for x in w if x.startswith("--address")] != [BUS_ADDRESS]
+                                or any(x.startswith("--config-file") for x in w))):
+                            out.append("%s: %s=%s; the system bus runs %s with %s alone, its one socket from "
+                                       "dbus.socket, and reloads through %s (#5818)"
+                                       % (name, k[1], v, BUS_DAEMON, BUS_ADDRESS, BUS_RELOAD))
             else:
                 listens = [(k, v) for k in sorted(ini_keys(files, key)) if k.startswith("Listen")
                            for v in ini_entries(files, key, k)]
                 if listens != [("ListenStream", BUS_SOCKET)]:
                     out.append("%s: listens on %s; the system bus listens on ListenStream=%s alone (#5818)"
                                % (name, ", ".join("%s=%s" % x for x in listens) or "nothing", BUS_SOCKET))
+                for v in ini_all(files, key, "Service"):
+                    if v != "dbus.service":
+                        out.append("%s: Service=%s; the bus socket starts dbus.service alone (#6037)" % (name, v))
         except ValueError as e:
             out.append("%s: %s; the tree check never passes what it cannot read (#5818)" % (name, e))
+    return out + bus_reach_violations(root)
+
+
+def bus_reach_violations(root):
+    """#6037: no file under the unit directories (unit_files: any unit, drop-in or link target, in any
+    section's sense) but dbus.socket's own sets a [Socket] Service= that may name dbus.service (may_name: a
+    specifier or variable stands for any text), and none but dbus.service's own a [Service] Sockets= that
+    may name dbus.socket: either would put a second listener on the bus, or hand its socket to another
+    process. A generic socket.d or service.d drop-in is no unit's own."""
+    out = []
+    for rel in sorted(unit_files(root)[0]):
+        for section, key, own, other in (("Socket", "Service", "dbus.socket", "dbus.service"),
+                                         ("Service", "Sockets", "dbus.service", "dbus.socket")):
+            parts = rel.split("/")
+            if parts[-1] == own or parts[-2] == own + ".d":
+                continue
+            try:
+                vals = [w for v in ini_all([Conf(root, rel)], section, key) for w in v.split()]
+            except ValueError as e:
+                vals = [str(e)]
+            for v in vals:
+                if v.startswith("unreadable ") or may_name(v, other):
+                    out.append("%s: [%s] %s=%s; only %s is the system bus's %s (#6037)"
+                               % (rel, section, key, v, own, section.lower()))
     return out
 
 
@@ -4147,7 +4519,8 @@ EXEC_ALLOW_HEADER = """\
 # (#1556, #2176): udev rules, system and environment generators, modules-load.d, modprobe.d,
 # sysctl.d, binfmt.d, and systemd's system-shutdown and system-sleep hooks, in etc, usr/local/lib,
 # usr/lib and lib; and (#2622) every polkit rules.d and actions file, everything under etc/dbus-1, and the
-# D-Bus system.conf, system.d and system-services files; and (#5818) every file systemd merges into
+# D-Bus system.conf, system.d and system-services files; and (#4641) every PAM file in etc/pam.d and
+# usr/lib/pam.d, and etc/pam.conf; and (#5818) every file systemd merges into
 # dbus.service and dbus.socket, drop-ins included, so dbus-daemon's ExecStart is the reviewed one. One per line: the file's path in the image tree, a tab, and "sha256:" with the
 # SHA-256 of what the box reads, or "mask" for an empty file or a link to /dev/null. Every file is
 # listed, not only the one that wins its name. mkosi.finalize fails the build on any file not here
@@ -4423,7 +4796,8 @@ def resolved_violations(root):
     conf = main_conf(root, "resolved.conf")
     return [m for f in conf for m in byte_violations(f)] + [
         "50-agentos-uplink.conf: resolved %s is %s; must be no" % (key, v)
-        for key in ("LLMNR", "MulticastDNS") for v in [ini_last(conf, "Resolve", key)] if v != "no"]
+        for key in ("LLMNR", "MulticastDNS") for v in [ini_canon_or_why(conf, "Resolve", key, ("yes", "no", "resolve"))]
+        if v != "no"]
 
 
 # DEVSLOT-image (DEV-1, KRN-2, RES-2, D-189): a device driver is one vendor's protocol code built in a

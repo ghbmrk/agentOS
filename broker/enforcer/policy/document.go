@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -161,6 +162,66 @@ type Device struct {
 	// signature. An Owner or Household device's names are held for it: no
 	// other device may pin them. Two devices never pin one name.
 	MDNS [][]string `json:"mdns,omitempty"`
+	// RelockSeconds is how long after any unlock the enforcer relocks a
+	// lock (NET-6 "the owner-set interval"): MinRelock to MaxRelock
+	// seconds, and only on a lock. Zero is DefaultRelock and is omitted,
+	// so a document signed before the field keeps its bytes. Any change
+	// is a loosening: it is not on NET-4's closed tightening list.
+	RelockSeconds uint32 `json:"relock_seconds,omitempty"`
+	// UsualHours is a lock's or alarm's usual hours on the enforcer's
+	// clock (NET-6): an unlock or disarm outside them needs a second
+	// passkey assertion and is texted. Nil is DefaultHours and is omitted.
+	// Any change is a loosening.
+	UsualHours *Hours `json:"usual_hours,omitempty"`
+}
+
+// Hours is a window of whole hours on the enforcer's clock, [From, To),
+// wrapping midnight when From > To. From is 0 to 23 and To 1 to 24, so
+// midnight as an end is spelled 24 only; they differ, and 0 to 24 (every
+// hour) is refused, so some hours are always unusual.
+type Hours struct {
+	From uint8 `json:"from"`
+	To   uint8 `json:"to"`
+}
+
+// Usual reports whether hour (0 to 23) is inside h.
+func (h Hours) Usual(hour int) bool {
+	f, t := int(h.From), int(h.To)
+	if f < t {
+		return hour >= f && hour < t
+	}
+	return hour >= f || hour < t
+}
+
+func (h Hours) valid() bool {
+	return h.From <= 23 && h.To >= 1 && h.To <= 24 && h.From != h.To && !(h.From == 0 && h.To == 24)
+}
+
+// The defaults a lock or alarm keeps while its fields are unset, and the
+// bounds on RelockSeconds.
+const (
+	DefaultRelock = time.Minute
+	MinRelock     = 5
+	MaxRelock     = 3600
+)
+
+// DefaultHours is the usual hours of a lock or alarm with none set.
+var DefaultHours = Hours{From: 7, To: 22}
+
+// Relock is how long after an unlock d relocks.
+func (d Device) Relock() time.Duration {
+	if d.RelockSeconds == 0 {
+		return DefaultRelock
+	}
+	return time.Duration(d.RelockSeconds) * time.Second
+}
+
+// Hours is d's usual hours.
+func (d Device) Hours() Hours {
+	if d.UsualHours == nil {
+		return DefaultHours
+	}
+	return *d.UsualHours
 }
 
 // The NET-2 safety classes a device can carry; the empty class is unknown
@@ -396,6 +457,10 @@ func (d Document) normal() Document {
 		if dev.Safeguards = sorted(dev.Safeguards); len(dev.Safeguards) == 0 {
 			dev.Safeguards = nil // omitted, as Decode reads it
 		}
+		if dev.UsualHours != nil {
+			h := *dev.UsualHours // a copy: d's devices are never written
+			dev.UsualHours = &h
+		}
 		devs[i] = dev
 	}
 	slices.SortFunc(devs, func(a, b Device) int { return strings.Compare(a.ID, b.ID) })
@@ -516,7 +581,9 @@ func sorted(s []string) []string {
 // named for or that lacks a safeguard its class needs, a safeguard its
 // class does not need, a stream port on a device that is not a camera or microphone, a
 // drone reference that is not a hash, a pair, rule or hold naming no device,
-// an empty window, an mDNS name that is not one, or a byte cap that is 0,
+// an empty window, a relock interval or usual hours on a device that is
+// not a lock (an alarm too, for hours) or out of bounds, an mDNS name that
+// is not one, or a byte cap that is 0,
 // is for no destination, or makes the caps sum past 2^64-1 (so no group's
 // cap, a sum of some of them, overflows), or a cap basis off the closed
 // list or for no cap; with ErrNameHeld one mDNS name
@@ -569,6 +636,12 @@ func (d Document) check() error {
 			if (p.Proto != ProtoTCP && p.Proto != ProtoUDP) || p.Num == 0 {
 				return bad("device %q port %s/%d", dev.ID, p.Proto, p.Num)
 			}
+		}
+		if dev.RelockSeconds != 0 && (dev.Everyday || dev.Class != ClassLock || dev.RelockSeconds < MinRelock || dev.RelockSeconds > MaxRelock) {
+			return bad("device %q: a %q relocks after %d s", dev.ID, dev.Class, dev.RelockSeconds)
+		}
+		if h := dev.UsualHours; h != nil && (dev.Everyday || (dev.Class != ClassLock && dev.Class != ClassAlarm) || !h.valid()) {
+			return bad("device %q: a %q has usual hours %d to %d", dev.ID, dev.Class, h.From, h.To)
 		}
 		if len(dev.MDNS) > MaxMDNS {
 			return fmt.Errorf("%w: %s pins %d names, and one device pins at most %d; drop %d before signing", ErrTooManyNames, dev.ID, len(dev.MDNS), MaxMDNS, len(dev.MDNS)-MaxMDNS)
