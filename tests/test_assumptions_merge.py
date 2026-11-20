@@ -174,6 +174,17 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(assumptions_merge.duplicates(b"| ID |\n|---|\n| A-1 |\n| A-2 |\n| A-1 |\n"),
                          {"A-1": ["| A-1 |", "| A-1 |"]})
 
+    def test_a_file_merge_file_refuses_is_a_failure_and_ours_is_untouched(self):
+        # Security on #6341 (comment 7043047435): a NUL byte made merge-file fail; the driver wrote an empty file, exit 0.
+        with tempfile.TemporaryDirectory() as d:
+            paths = [pathlib.Path(d, n) for n in ("o", "a", "b")]
+            texts = [b"| ID |\n|---|\n| A-1 |\n", b"| ID |\n|---|\n| A-1 \0|\n", b"| ID |\n|---|\n| A-2 |\n"]
+            for p, t in zip(paths, texts):
+                p.write_bytes(t)
+            self.assertEqual(assumptions_merge.main([str(p) for p in paths] + ["ASSUMPTIONS.md"]), 1)
+            self.assertEqual(paths[1].read_bytes(), texts[1])
+        self.assertEqual(assumptions_merge.merge(texts[0], texts[1], texts[2]), (None, False))
+
     def test_usage(self):
         self.assertEqual(assumptions_merge.main([]), 2)
 

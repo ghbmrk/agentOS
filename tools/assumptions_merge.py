@@ -76,14 +76,17 @@ def duplicates(text):
 
 
 def merge(base, ours, theirs):
-    """(merged bytes, clean) for three versions of an ASSUMPTIONS.md."""
+    """(merged bytes, clean) for three versions of an ASSUMPTIONS.md; (None, False) when `git merge-file` fails."""
     mark = secrets.token_hex(16)  # labels no file can carry
     with tempfile.TemporaryDirectory() as d:
         names = [pathlib.Path(d, n) for n in LABELS]
         for name, text in zip(names, (ours, base, theirs)):
             name.write_bytes(text)
-        merged = subprocess.run(["git", "merge-file", "-p", "--diff3", *(f"-L{mark}{i}" for i in range(3)),
-                                 *map(str, names)], capture_output=True).stdout
+        run = subprocess.run(["git", "merge-file", "-p", "--diff3", *(f"-L{mark}{i}" for i in range(3)),
+                              *map(str, names)], capture_output=True)
+    if not 0 <= run.returncode <= 127:  # merge-file counts conflicts up to 127; above is an error (a binary file)
+        return None, False
+    merged = run.stdout
     out, hunk, side, clean = [], None, 0, True
     for line in merged.splitlines(keepends=True):
         bare = line.rstrip(b"\r\n")
@@ -132,6 +135,9 @@ def main(argv):
     path = argv[3] if len(argv) == 4 else argv[1]
     base, ours, theirs = (pathlib.Path(a).read_bytes() for a in argv[:3])
     text, clean = merge(base, ours, theirs)
+    if text is None:  # Security on #6341: a NUL byte made merge-file fail and the driver wrote an empty file
+        print(f"{path}: git merge-file could not merge it (a binary byte?); ours is left as it was", file=sys.stderr)
+        return 1
     pathlib.Path(argv[1]).write_bytes(text)
     if not clean:
         print(f"{path}: a row both sides changed, or a non-row line, is left in conflict markers", file=sys.stderr)
