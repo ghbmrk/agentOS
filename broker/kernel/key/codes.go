@@ -5,9 +5,8 @@ import (
 	"maps"
 )
 
-// Code is a refusal code: one declared below, or the zero Code ("", no code)
-// (KEY-refusal-code, #6023). Its field is unexported, so no other package
-// makes one, and it decodes only from a declared name.
+// Code is a refusal code declared below, or the zero Code ("", none) (#6023). Its
+// field is unexported: no other package makes one, and it decodes only by name.
 type Code struct{ name string }
 
 // The declared codes: key's, the kernel's, the clerks'; others alias them.
@@ -55,8 +54,7 @@ var (
 	DPlanUnknown = Code{"plan-unknown"} // the call names no plan this clerk serves; nothing done
 )
 
-// declared is every code by name, copied at initialisation: a later
-// assignment to a variable above changes no decoding.
+// declared is every code by name, copied at init so no reassignment changes it.
 var declared = func() map[string]Code {
 	m := map[string]Code{}
 	for _, c := range []Code{
@@ -64,8 +62,7 @@ var declared = func() map[string]Code {
 		RContent, RLabels, RSpendTask, RSpendDay, RRate, RUses, RTask, RRung,
 		CKey, CUngranted, CGrantHeld, CCutOff, CPlan, CDuplicate, CClerk, CPool,
 		CNotHeld, CExtension, CHeld, CBroken, CErased, CTrip, CTripped, CCosign,
-		CInFlight, COwner,
-		RClaim, RDispatch, RHold, DPlanUnknown,
+		CInFlight, COwner, RClaim, RDispatch, RHold, DPlanUnknown,
 	} {
 		m[c.name] = c
 	}
@@ -75,13 +72,9 @@ var declared = func() map[string]Code {
 // Codes is every declared code, keyed by name: a copy.
 func Codes() map[string]Code { return maps.Clone(declared) }
 
-// String is the code's name; the zero Code's is "".
-func (c Code) String() string { return c.name }
-
-// IsZero reports whether c names no code.
-func (c Code) IsZero() bool { return c.name == "" }
-
-// MarshalText writes the code's name.
+// String and MarshalText give the code's name, IsZero whether it names none.
+func (c Code) String() string               { return c.name }
+func (c Code) IsZero() bool                 { return c.name == "" }
 func (c Code) MarshalText() ([]byte, error) { return []byte(c.name), nil }
 
 // UnmarshalText reads a declared code's name, or "" as the zero Code.

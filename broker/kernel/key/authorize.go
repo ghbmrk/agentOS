@@ -71,9 +71,8 @@ type Context struct {
 	Rung Proof
 }
 
-// Refusal is a closed reason code plus detail for the log. Its code is
-// unexported, so a Refusal is made only by Refuse or Refusef, and its code is
-// one key declares (codes.go).
+// Refusal is a declared code (codes.go) plus detail for the log, made only by
+// Refuse or Refusef: its code is unexported.
 type Refusal struct {
 	code   Code
 	Detail string
@@ -100,13 +99,12 @@ type refusalJSON struct {
 func (r Refusal) MarshalJSON() ([]byte, error) { return json.Marshal(refusalJSON{r.code, r.Detail}) }
 
 // UnmarshalJSON reads a Refusal; an undeclared code fails.
-func (r *Refusal) UnmarshalJSON(b []byte) error {
+func (r *Refusal) UnmarshalJSON(b []byte) (err error) {
 	var w refusalJSON
-	if err := json.Unmarshal(b, &w); err != nil {
-		return err
+	if err = json.Unmarshal(b, &w); err == nil {
+		*r = Refusal{w.Code, w.Detail}
 	}
-	*r = Refusal{w.Code, w.Detail}
-	return nil
+	return err
 }
 
 func in(s []string, v string) bool {
