@@ -3930,6 +3930,25 @@ class MutantScope(unittest.TestCase):
             with self.subTest(bad):
                 self.assertIsNone(mutgate.record_entries(json.dumps(bad))[0])
 
+    def test_a_record_entry_repeated_word_for_word_is_one_entry(self):
+        # #6358: two PRs merged one proof; the union kept it twice, and mutgate read one site twice.
+        good = {"file": "a.go", "mutant": "STATEMENT_DELETION", "func": "b", "decl": "0" * 64, "stmt": ["b()"], "at": 0,
+                "after": "", "occurrence": [1, 1], "reason": "b does nothing", "accepted": "#6358"}
+        keys = {"a.go": {4: mutgate._entry_key(good)}}
+        line = json.dumps(good)
+        entries, problem = mutgate.record_entries("# c\n" + line + "\n# c\n" + line + "\n")
+        self.assertEqual((entries, problem), ([good], None))
+        self.assertEqual(mutgate.resolve_record("k", entries, keys), ({("broker/k/a.go", 4, "STATEMENT_DELETION", None): good}, []))
+        other = {**good, "reason": "b is never called"}  # one mutant, another proof: still fails, both printed
+        entries, _ = mutgate.record_entries(line + "\n" + json.dumps(other) + "\n")
+        found, problems = mutgate.resolve_record("k", entries, keys)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("names the same line, column and mutant as another entry; keep one of:", problems[0])
+        self.assertIn("b does nothing", problems[0])
+        self.assertIn("b is never called", problems[0])
+        self.assertEqual(len(mutgate.record_entries(line + "\n" + line.replace(", ", ",  ", 1) + "\n")[0]), 2,
+                         "only a word-for-word repeat is one entry")
+
     def test_the_clerk_run_entries_on_two_comparison_lines_name_their_column(self):
         # #5792's follow-up pinned the #5774 entries on mail.go:104 and :145; #5909 deleted those (gremlins now
         # runs and kills their mutants), so the rule is pinned on every record: a comparison entry on a line

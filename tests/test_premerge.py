@@ -579,8 +579,8 @@ class PremergeTest(unittest.TestCase):
         reviewed = self.records_merge(a + b + m, a + b + p, a + b)
         self.assertEqual(self.check(reviewed), [])
         for rows in (a + b + m + self.entry("p()", "proof, edited"), a + b + m, b + a + p + m, a + b + p,
-                     a + b + p + m + self.entry("z()"), a + b + m + p + m):
-            with self.subTest(wrong=rows):  # PR entry edited, dropped, reordered; main's dropped; one added; one doubled
+                     a + b + p + m + self.entry("z()")):
+            with self.subTest(wrong=rows):  # PR entry edited, dropped, reordered; main's dropped; one added
                 self.write(self.RECFILE, "# Mutant-equivalent proofs for broker/k.\n" + rows)
                 self.commit("another resolution")
                 self.assertEqual(self.check(reviewed), [self.RECFILE])
@@ -613,6 +613,39 @@ class PremergeTest(unittest.TestCase):
         self.setUp()
         reviewed = self.records_merge(a, self.entry("a()", col=3), "")  # another column is another key
         self.assertEqual(self.check(reviewed), [])
+
+    def test_records_one_entry_both_sides_added_word_for_word_reads_same(self):
+        # #6358: #6265, #6279, #6321 and #6032 carried one proof; the later merge dropped its copy, a new head.
+        a, b, m, p, s = (self.entry(x) for x in ("a()", "b()", "m()", "p()", "s()"))
+        top = "# Mutant-equivalent proofs for broker/k.\n"
+        reviewed = self.records_merge(a + m + s, a + p + s + b, a)
+        self.assertEqual(self.read(self.RECFILE).count('"s()"'), 2, "the union driver was meant to keep both copies")
+        self.assertEqual(self.check(reviewed), [])
+        for rows in (a + p + s + b + m, a + p + b + m + s, a + m + s + p + b, a + p + s + b + m + s):
+            with self.subTest(same=rows):  # kept once in either side's place (record_merge.py), or twice
+                self.write(self.RECFILE, top + rows)
+                self.commit("resolve")
+                self.assertEqual(self.check(reviewed), [])
+        for rows in (a + p + b + m, a + b + p + s + m, a + p + s + b + m + self.entry("s()", "another proof")):
+            with self.subTest(changed=rows):  # the shared entry dropped; the PR's own order broken; one key twice
+                self.write(self.RECFILE, top + rows)
+                self.commit("resolve")
+                self.assertEqual(self.check(reviewed), [self.RECFILE])
+
+    def test_assumptions_one_row_both_sides_added_word_for_word_reads_same(self):
+        # #6358 for the other record file: the union keeps the row twice; one copy or two is one row.
+        reviewed = self.union_merge("| L-1 | edge old |\n| M-1 | main |\n| S-1 | shared |\n",
+                                    "| L-1 | edge old |\n| S-1 | shared |\n| P-1 | pr |\n")
+        self.assertEqual(self.read("ASSUMPTIONS.md").count("| S-1 | shared |"), 2)
+        self.assertEqual(self.check(reviewed), [])
+        text, row = self.read("ASSUMPTIONS.md"), "| S-1 | shared |\n"
+        once = text[:text.rindex(row)] + text[text.rindex(row) + len(row):]  # tools/record_merge.py's result
+        self.write("ASSUMPTIONS.md", once)
+        self.commit("keep the shared row once")
+        self.assertEqual(self.check(reviewed), [])
+        self.write("ASSUMPTIONS.md", once.replace(row, "| S-1 | shared, edited |\n"))
+        self.commit("edit it")
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
 
     def test_records_union_under_a_criss_cross_merge_base_is_changed(self):
         # L3 on #6315: with two merge bases the exemption reads nothing, and a union that brought back an entry the

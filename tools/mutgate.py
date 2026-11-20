@@ -992,11 +992,13 @@ def statement_keys(src, sites, decls=()):
 
 
 def record_entries(text):
-    """([entry], None) of a record's text, or (None, problem). Each entry is checked for shape only."""
-    out = []
+    """([entry], None) of a record's text, or (None, problem). Each entry is checked for shape only. A line that
+    repeats an earlier one word for word is one entry (two PRs merged one proof, #6358)."""
+    out, seen = [], set()
     for i, row in enumerate(text.split("\n"), 1):
-        if not row.strip() or row.lstrip().startswith("#"):
+        if not row.strip() or row.lstrip().startswith("#") or row in seen:
             continue
+        seen.add(row)
         try:
             e = json.loads(row)
         except ValueError:
@@ -1076,7 +1078,9 @@ def resolve_record(pkg, entries, keys):
                             "delete its line from the record, read the proof again, and if it holds add it back with "
                             "`mutgate.py waive` at its current line")
         elif (site := (f"broker/{pkg}/{e['file']}", lines[i - 1], e["mutant"], e.get("col"))) in found:
-            problems.append(f"{where} names the same line, column and mutant as another entry")
+            # Both versions, for the builder to keep one (#6358: an identical one never gets here).
+            problems.append(f"{where} names the same line, column and mutant as another entry; keep one of:\n"
+                            f"  {json.dumps(found[site], ensure_ascii=False)}\n  {json.dumps(e, ensure_ascii=False)}")
         else:
             found[site] = e
     return found, problems
