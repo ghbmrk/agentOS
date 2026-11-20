@@ -54,7 +54,9 @@ changed lines run, even beside an added line, which would otherwise hide a delet
 `run` names them with one `go test -run '^(T1|T2)$' -coverprofile` run and records them in the result.
 A changed helper, type or import reaches the tests that name it, transitively, read as text
 (reaching_tests, D-319); a change every test may run (TestMain, init, a package var's initializer)
-runs every test, so the set is at most the package's covered lines. A weakened test (a t.Skip, an early
+runs every test, so the set is at most the package's covered lines. A declaration the diff moves byte for byte
+from a non-test file of the package into a test file, its imports binding alike, is no changed test line, nor is a
+new test file's header when all else in it moved (verbatim_moves, #6374): no code a test runs changed. A weakened test (a t.Skip, an early
 return, a build tag, a deletion) runs nothing at the head, so the base's version of the tests reaching
 the changed base lines (every base test when either side reaches every test) also runs, on a `git archive` of
 the base, its lines moved to the head's; the record holds both. A mutant NOT COVERED on any target
@@ -492,11 +494,12 @@ def union(*parts):
     return out
 
 
-def base_test_lines(diff_text):
+def base_test_lines(diff_text, moved=None):
     """{path: set(base line) or None} of the broker/ _test.go files the base has and a -U0 diff
     changes: the base lines it deletes or changes; None when the diff deletes the file. The base
     side of added_lines' tests (#5762). Returns (that, gaps): gaps is {path: set(base line)} of
-    where a hunk only adds, after that base line, for base_changed_tests to place by the file's text."""
+    where a hunk only adds, after that base line, for base_changed_tests to place by the file's text;
+    a hunk adding only lines of moved ({path: set(head line)}, verbatim_moves) is no gap (#6374)."""
     out, gaps, old, path, in_hunk, line = {}, {}, None, None, False, 0
 
     def touch(lines):
@@ -513,7 +516,7 @@ def base_test_lines(diff_text):
             if old is not None and is_test(old):
                 if path is None:
                     out[old] = None  # the file is deleted
-                elif m[2] == "0":
+                elif m[2] == "0" and not set(range(int(m[3]), int(m[3]) + int(m[4] or 1))) <= (moved or {}).get(path, set()):
                     gaps.setdefault(old, set()).add(line)  # the hunk adds after base line `line`
             continue
         if not in_hunk:
@@ -625,15 +628,168 @@ def base_changed_tests(btests, pkg, mb):
     return reaching_tests(files, changed)
 
 
-def bases_for(diff_text, base, head, tests, pkgs):
+def bases_for(diff_text, base, head, tests, pkgs, moved=None):
     """{pkg: base_changed_tests} for each of pkgs whose tests the diff changes; None (every test)
     when either side's change reaches every test, so neither side hides what the other runs.
-    changed_tests reads the same None for its head side."""
+    changed_tests reads the same None for its head side. moved: diff_changes' verbatim moves."""
     pkgs = [pkg for pkg in pkgs if tests_changed(tests, pkg)]
     if not pkgs:
         return {}
-    mb, btests = merge_base(base, head), base_test_lines(diff_text)  # (lines, gaps)
+    mb, btests = merge_base(base, head), base_test_lines(diff_text, moved)  # (lines, gaps)
     return {pkg: None if head_tests(tests, pkg) is None else base_changed_tests(btests, pkg, mb) for pkg in pkgs}
+
+
+# Verbatim moves (#6374, from #6305). A declaration moved byte for byte from a package's non-test
+# file into one of its _test.go files changes no code a test binary runs, so it is no changed test
+# line: reaching_tests would otherwise widen the targets to everything the tests calling it cover.
+IMPORT_SPEC = re.compile(r'^(?:([A-Za-z_]\w*|\.)\s+)?(?:"([^"\\]+)"|`([^`]+)`)$')
+VERSION_PART = re.compile(r"^v\d+$")
+
+
+def _imports(text):
+    """[(name or None, path)] of a Go file's import specs, read from its header declarations, or None
+    when a header row is not a package clause, an import keyword or one plain spec (gofmt's layout)."""
+    bare, out = _uncommented(text).split("\n"), []
+    for d in _decls("", text):
+        if d[1] != "header":
+            continue
+        for row in bare[d[6] - 1:d[7]]:
+            s = row.strip()
+            if not s or s in ("import (", ")") or re.fullmatch(r"package\s+\w+", s):
+                continue
+            m = IMPORT_SPEC.match(s[len("import "):].strip() if s.startswith("import ") else s)
+            if not m:
+                return None
+            out.append((m[1], m[2] or m[3]))
+    return out
+
+
+def _package_names(path, head, cache):
+    """The names an unnamed import of path can bind: a std package's last element (the one before a
+    `vN`), a broker package's package clause at head; None (any name) for anything else."""
+    if path not in cache:
+        if "\0go.mod" not in cache:
+            mod = base_text(head, "broker/go.mod") or ""
+            cache["\0go.mod"] = (m := re.search(r"^module\s+(\S+)", mod, re.M)) and m.group(1) + "/"
+        parts, prefix, names = path.split("/"), cache["\0go.mod"], None
+        if "." not in parts[0]:
+            names = {parts[-2] if len(parts) > 1 and VERSION_PART.match(parts[-1]) else parts[-1]}
+        elif prefix and path.startswith(prefix):
+            d = "broker/" + path[len(prefix):]
+            listing = subprocess.run(["git", "ls-tree", "-z", head, "--", d + "/"], cwd=ROOT,
+                                     capture_output=True, text=True, check=True).stdout
+            found = set()
+            for entry in filter(None, listing.split("\0")):
+                p = entry.split("\t", 1)[1]
+                if is_source(p) and p.rsplit("/", 1)[0] == d and (t := base_text(head, p)) is not None:
+                    m = re.search(r"^package\s+(\w+)", _uncommented(t, False), re.M)
+                    found.add(m and m.group(1))
+            names = found if found and None not in found and len(found) == 1 else None
+        cache[path] = names
+    return cache[path]
+
+
+def _same_binding(words, src, test, head, cache):
+    """Whether every word of a moved declaration's code that an import of either file could bind is
+    bound by the same import specs in both: then each name resolves alike in both files."""
+    if src is None or test is None or any(n == "." for n, _ in src + test):
+        return False
+
+    def binders(specs, w):
+        return {(n, p) for n, p in specs if n != "_" and (
+            n == w if n else (names := _package_names(p, head, cache)) is None or w in names)}
+    return all(binders(src, w) == binders(test, w) for w in words)
+
+
+def _span(rows, first, last):
+    """(first, last) of a declaration's lines less its trailing blank lines."""
+    while last > first and not rows[last - 1].strip():
+        last -= 1
+    return first, last
+
+
+def verbatim_moves(diff_text, base, head, tests):
+    """{path: set(head line)} of the added lines of changed _test.go files that are verbatim moves:
+    a top-level declaration (its doc comment and the blank lines either side too) whose text is byte for byte
+    a declaration of a non-test .go file of the same directory and package clause at the merge base,
+    every line of which the diff deletes or changes, whose words resolve to the same imports in both
+    files. A declaration every test may run (init, TestMain, a var with an initializer, a file with a
+    linkname) or holding a `//go:` line is never one. In a test file the base lacks, the header (the
+    package clause, comments, imports) is one too when every other declaration is a move and every
+    import spec is word for word one a source of those moves holds, none blank, dot or "C"."""
+    mb, move, cache, out = merge_base(base, head), head_line_of(diff_text), {}, {}
+    for path, lines in sorted(tests.items()):
+        if not lines or not is_test(path) or is_data(path):
+            continue
+        d = path.rsplit("/", 1)[0]
+        if not any(is_source(p) and p.rsplit("/", 1)[0] == d for p in move):
+            continue  # no package file of this directory loses a line: nothing moved here
+        text = base_text(head, path)
+        if text is None:
+            continue
+        sources = {}
+        for p in move:
+            if is_source(p) and p.rsplit("/", 1)[0] == d and (t := base_text(mb, p)) is not None:
+                sources[p] = (t.split("\n"), _decls(p, t), _imports(t))
+        rows, bare, timps = text.split("\n"), _uncommented(text, False).split("\n"), _imports(text)
+        moved, froms, used, rest = set(), set(), set(), False
+        for dd in _decls(path, text):
+            if dd[1] == "header":
+                continue
+            first, last = _span(rows, dd[6], dd[7])
+            block = rows[first - 1:last]
+            ok = (not dd[5] and set(range(first, last + 1)) <= lines
+                  and not any(r.lstrip().startswith("//go:") for r in block))
+            words = set(WORD.findall("\n".join(bare[first - 1:last])))
+            hit = None
+            for sp, (srows, sdecls, simps) in sorted(sources.items()) if ok else ():
+                for sd in sdecls:
+                    sf, sl = _span(srows, sd[6], sd[7])
+                    if ((sp, sf) in used or sd[1] == "header" or sd[5] or sd[8] != dd[8] or srows[sf - 1:sl] != block
+                            or any(move[sp](n) is not None for n in range(sf, sl + 1))
+                            or not _same_binding(words, simps, timps, head, cache)):
+                        continue
+                    hit = (sp, sf)
+                    break
+                if hit:
+                    break
+            if hit is None:
+                rest = True
+                continue
+            used.add(hit)
+            froms.add(hit[0])
+            moved |= set(range(dd[6], dd[7] + 1)) & lines
+            gap = dd[6] - 1  # the added blank lines right above it sit between declarations: no code
+            while gap in lines and not rows[gap - 1].strip():
+                moved.add(gap)
+                gap -= 1
+        if moved and not rest and base_text(mb, path) is None and timps is not None:
+            held = {s for sp in froms for s in sources[sp][2] or ()}
+            header = [dd for dd in _decls(path, text) if dd[1] == "header"]
+            hrows = [r for dd in header for r in rows[dd[6] - 1:dd[7]]]
+            if (all(s in held and s[0] not in ("_", ".") and s[1] != "C" for s in timps)
+                    and not any("//go:" in r or "+build" in r for r in hrows)):
+                moved |= {n for dd in header for n in range(dd[6], dd[7] + 1)} & lines
+        if moved:
+            out[path] = moved
+    return out
+
+
+def diff_changes(diff_text, base, head):
+    """added_lines with each verbatim move's lines dropped from its tests map, and the moves. A moved
+    line is an added one, so a deletion's marks (unchanged lines either side) stay; a file left with no
+    changed line is dropped unless the diff deletes or changes a base line of it, whose tests the base
+    side (bases_for) still runs."""
+    added, tests = added_lines(diff_text)
+    moved, out = verbatim_moves(diff_text, base, head, tests), {}
+    based = base_test_lines(diff_text)[0]
+    for p, ls in tests.items():
+        if ls is not None and p in moved:
+            ls = ls - moved[p]
+            if not ls and not based.get(p):
+                continue
+        out[p] = ls
+    return added, out, moved
 
 
 # Lexical reach over a package's _test.go files (D-319, #5826). A declaration (_decls) reaches every
@@ -1710,8 +1866,8 @@ def cmd_run(args):
     out = pathlib.Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     diff = broker_diff(args.git, "HEAD") if args.git else None
-    added, tests = added_lines(diff) if args.git else (None, None)
-    bases = bases_for(diff, args.git, "HEAD", tests, pkgs) if args.git else {}
+    added, tests, moved = diff_changes(diff, args.git, "HEAD") if args.git else (None, None, {})
+    bases = bases_for(diff, args.git, "HEAD", tests, pkgs, moved) if args.git else {}
     planned = None
     if args.targets is not None:
         try:
@@ -2416,8 +2572,8 @@ def add_mutants(data, mutants):
 def cmd_delete(args):
     out = pathlib.Path(args.out).resolve()
     diff = broker_diff(args.git, "HEAD")
-    added, tests = added_lines(diff)
-    bases = bases_for(diff, args.git, "HEAD", tests, args.pkg)
+    added, tests, moved = diff_changes(diff, args.git, "HEAD")
+    bases = bases_for(diff, args.git, "HEAD", tests, args.pkg, moved)
     bad = 0
     with tempfile.TemporaryDirectory() as tmp:
         tmp = pathlib.Path(tmp)
@@ -2546,7 +2702,7 @@ def join_shards(pkg, shards, added, tests, lister, bases):
 def cmd_verify(args):
     """The gate on JSON that PR code wrote (#4106): every claimed package has a readable result, then gate."""
     diff = broker_diff(args.git, args.head)
-    added, tests = added_lines(diff)
+    added, tests, moved = diff_changes(diff, args.git, args.head)
     pkgs = claimed(diff)
     if not pkgs:
         write_summary(args.summary, "### mutgate\n\nThis diff changes no .go line in a tier-A or tier-B package, and no "
@@ -2557,7 +2713,7 @@ def cmd_verify(args):
         if (lister := build_lister(tmp)) is None:
             return 1
         results, problems = read_results(pkgs, args.dir, added, tests, lister,
-                                         bases_for(diff, args.git, args.head, tests, pkgs))
+                                         bases_for(diff, args.git, args.head, tests, pkgs, moved))
         records = record_waivers(pkgs, lister, args.git, args.head)
     for problem in problems:
         print(f"mutgate: {problem}", file=sys.stderr)
@@ -2763,9 +2919,9 @@ def cmd_plan(args):
     target lines and deletion sites. It runs the PR's tests (changed tests' coverage), so only in
     an untrusted job; K is a schedule, and `verify` checks the shards whatever K is."""
     diff = broker_diff(args.git, "HEAD")
-    added, tests = added_lines(diff)
+    added, tests, moved = diff_changes(diff, args.git, "HEAD")
     counts, planned = [], {}
-    bases = bases_for(diff, args.git, "HEAD", tests, claimed(diff))
+    bases = bases_for(diff, args.git, "HEAD", tests, claimed(diff), moved)
     with tempfile.TemporaryDirectory() as tmp:
         if (lister := build_lister(tmp)) is None:
             return 1
@@ -2830,10 +2986,10 @@ def cmd_claimed(args):
 def cmd_gate(args):
     """`verify` without its checks, on DIR/<pkg>.json as `run` and `delete` write them (local use)."""
     diff = broker_diff(args.git, args.head)
-    added, tests = added_lines(diff)
+    added, tests, moved = diff_changes(diff, args.git, args.head)
     # The claim verify makes, less its tier filter: a record-only package's record is read too (#5812).
     pkgs = touched(added, tests) | records_changed(diff)
-    bases = bases_for(diff, args.git, args.head, tests, pkgs)
+    bases = bases_for(diff, args.git, args.head, tests, pkgs, moved)
     results, bad = {}, 0
     for pkg in sorted(pkgs):
         try:

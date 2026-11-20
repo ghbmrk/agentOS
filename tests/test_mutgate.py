@@ -4680,5 +4680,217 @@ class Jobs(unittest.TestCase):
             self.assertEqual(mutgate.default_jobs(), 3)
 
 
+MOVE_SRC = """package proc
+
+import (
+\t"errors"
+\t"fmt"
+\t"os"
+
+\t"example.com/m/broker/wire"
+)
+
+// Owner is the owner's client.
+type Owner struct{ c *wire.Conn }
+
+// Open dials the owner socket.
+func (o *Owner) Open() error {
+\tif o.c == nil {
+\t\treturn errors.New("no conn")
+\t}
+\treturn fmt.Errorf("open: %w", o.c.Err())
+}
+
+func keep() { _ = os.Getpid() }
+"""
+
+MOVE_KEPT = """package proc
+
+import (
+\t"errors"
+\t"fmt"
+\t"os"
+
+\t"example.com/m/broker/wire"
+)
+
+// Owner is the owner's client.
+type Owner struct{ c *wire.Conn }
+
+func keep() { _ = os.Getpid() }
+"""
+
+MOVE_TEST = """package proc
+
+import (
+\t"errors"
+\t"fmt"
+)
+
+// Open dials the owner socket.
+func (o *Owner) Open() error {
+\tif o.c == nil {
+\t\treturn errors.New("no conn")
+\t}
+\treturn fmt.Errorf("open: %w", o.c.Err())
+}
+"""
+
+OLD_TEST = """package proc
+
+import (
+\t"errors"
+\t"fmt"
+\t"testing"
+)
+
+func TestOpen(t *testing.T) {
+\tif (&Owner{}).Open() == nil {
+\t\tt.Fatal(errors.New(fmt.Sprint("open")))
+\t}
+}
+"""
+
+
+class VerbatimMoves(unittest.TestCase):
+    """REQ: TOOL-mutgate-verbatim-move (#6374, from #6305): a declaration moved byte for byte from
+    package code into a test file is no changed test line; any other change still is."""
+
+    def repo(self, d, files, head):
+        """A base commit of files ({repo path: text}) and a head commit applying head (text or None)."""
+        git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+        root = pathlib.Path(d)
+
+        def write(tree):
+            for p, t in tree.items():
+                f = root / p
+                if t is None:
+                    f.unlink()
+                else:
+                    f.parent.mkdir(parents=True, exist_ok=True)
+                    f.write_text(t)
+        write({"broker/go.mod": "module example.com/m/broker\n", "broker/wire/wire.go": "package wire\n", **files})
+        git("init", "-q")
+        for msg, tree in (("base", {}), ("head", head)):
+            write(tree)
+            git("add", "-A")
+            git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", msg)
+
+    def changes(self, files, head):
+        with tempfile.TemporaryDirectory() as d:
+            self.repo(d, files, head)
+            with mock.patch.object(mutgate, "ROOT", pathlib.Path(d)):
+                diff = mutgate.broker_diff("HEAD~1", "HEAD")
+                added, tests, moved = mutgate.diff_changes(diff, "HEAD~1", "HEAD")
+                return diff, added_tests(diff), tests, moved
+
+    SRC, NEW = "broker/proc/kernelsock.go", "broker/proc/clients_test.go"
+
+    def move(self, test=MOVE_TEST, kept=MOVE_KEPT, extra=None):
+        return self.changes({self.SRC: MOVE_SRC, **(extra or {})}, {self.SRC: kept, self.NEW: test})
+
+    def test_a_verbatim_move_into_a_new_test_file_changes_no_test(self):
+        _, before, tests, moved = self.move()
+        self.assertEqual(before[self.NEW], set(range(1, MOVE_TEST.count("\n") + 1)))
+        self.assertEqual(moved[self.NEW], before[self.NEW])  # the header goes with the moved method
+        self.assertNotIn(self.NEW, tests)
+        self.assertFalse(mutgate.tests_changed(tests, "proc"))
+
+    def test_one_changed_byte_keeps_the_file_counted(self):
+        for old, new in (('"no conn"', '"no conm"'), ("== nil", "!= nil"), ("// Open dials", "// Open opens")):
+            with self.subTest(new):
+                _, before, tests, moved = self.move(MOVE_TEST.replace(old, new))
+                self.assertEqual(moved, {})
+                self.assertEqual(tests[self.NEW], before[self.NEW])
+
+    def test_a_declaration_the_source_keeps_is_a_copy_not_a_move(self):
+        _, before, tests, moved = self.move(kept=MOVE_SRC)
+        self.assertEqual(moved, {})
+        _, before, tests, moved = self.move(kept=MOVE_SRC.replace("// Open dials", "// Open still dials"))
+        self.assertEqual(moved, {})  # the comment line changed, the body's lines did not
+        self.assertEqual(tests[self.NEW], before[self.NEW])
+
+    def test_another_package_clause_or_directory_is_no_move(self):
+        _, _, tests, moved = self.move(MOVE_TEST.replace("package proc", "package proc_test"))
+        self.assertEqual(moved, {})
+        _, before, tests, moved = self.changes({self.SRC: MOVE_SRC},
+                                               {self.SRC: MOVE_KEPT, "broker/other/clients_test.go": MOVE_TEST})
+        self.assertEqual(moved, {})
+        self.assertEqual(tests["broker/other/clients_test.go"], before["broker/other/clients_test.go"])
+
+    def test_an_import_name_bound_to_another_package_is_no_move(self):
+        rebound = MOVE_TEST.replace('\t"errors"\n', '\terrors "example.com/m/broker/wire"\n')
+        _, before, tests, moved = self.move(rebound)
+        self.assertEqual(moved, {})
+        # An unnamed broker import binds its package clause's name, read at head: wire's is `errors` here.
+        _, _, _, moved = self.move(MOVE_TEST.replace('\t"errors"\n', '\t"example.com/m/broker/wire"\n'),
+                                   extra={"broker/wire/wire.go": "package errors\n"})
+        self.assertEqual(moved, {})
+        # A third-party import may bind any name: it must be the source's too.
+        _, _, _, moved = self.move(MOVE_TEST.replace('\t"fmt"\n', '\t"fmt"\n\t"github.com/x/fmtx"\n'))
+        self.assertEqual(moved, {})
+
+    def test_a_header_with_an_import_no_source_holds_stays_counted(self):
+        for imp in ('\t_ "embed"\n', '\t"strings"\n', '\t. "fmt"\n'):
+            with self.subTest(imp):
+                _, before, tests, moved = self.move(MOVE_TEST.replace('\t"fmt"\n', '\t"fmt"\n' + imp))
+                self.assertLess(moved.get(self.NEW, set()), before[self.NEW])
+                self.assertIn(1, tests[self.NEW])  # the package clause is still a changed line
+
+    def test_a_directive_init_or_initialised_var_is_never_a_move(self):
+        cases = (("// Open dials the owner socket.\n", "// Open dials the owner socket.\n//go:noinline\n"),
+                 ("func (o *Owner) Open() error {", "func init() {"),)
+        for old, new in cases:
+            with self.subTest(new):
+                src = MOVE_SRC.replace(old, new)
+                _, before, tests, moved = self.changes({self.SRC: src}, {self.SRC: MOVE_KEPT,
+                                                                         self.NEW: MOVE_TEST.replace(old, new)})
+                self.assertEqual(moved, {})
+        src = MOVE_SRC.replace("func keep()", "var hook = fmt.Sprint(errors.New(\"x\"))\n\nfunc keep()")
+        test = MOVE_TEST + "\nvar hook = fmt.Sprint(errors.New(\"x\"))\n"
+        _, before, tests, moved = self.changes({self.SRC: src}, {self.SRC: MOVE_KEPT, self.NEW: test})
+        self.assertIn(test.count("\n"), tests[self.NEW])
+
+    def test_a_move_into_an_existing_test_file_is_no_gap_at_the_base(self):
+        old = "broker/proc/proc_test.go"
+        head = OLD_TEST + "\n" + MOVE_TEST.split(")\n\n", 1)[1]
+        diff, before, tests, moved = self.changes({self.SRC: MOVE_SRC, old: OLD_TEST}, {self.SRC: MOVE_KEPT, old: head})
+        self.assertTrue(before[old])
+        self.assertNotIn(old, tests)
+        self.assertEqual(mutgate.base_test_lines(diff, moved)[1], {})
+        self.assertTrue(mutgate.base_test_lines(diff)[1][old])  # without the move it is a gap
+        # The same move beside an edited test keeps only the edit.
+        edited = head.replace('fmt.Sprint("open")', 'fmt.Sprint("opened")')
+        _, before, tests, moved = self.changes({self.SRC: MOVE_SRC, old: OLD_TEST}, {self.SRC: MOVE_KEPT, old: edited})
+        self.assertEqual(tests[old], {edited.split("\n").index('\t\tt.Fatal(errors.New(fmt.Sprint("opened")))') + 1})
+
+    def test_a_test_deleted_beside_a_move_still_runs_at_the_base(self):
+        old = "broker/proc/proc_test.go"
+        base = OLD_TEST + "\nfunc TestGone(t *testing.T) {}\n"
+        head = OLD_TEST + "\n" + MOVE_TEST.split(")\n\n", 1)[1]
+        with tempfile.TemporaryDirectory() as d:
+            self.repo(d, {self.SRC: MOVE_SRC, old: base}, {self.SRC: MOVE_KEPT, old: head})
+            with mock.patch.object(mutgate, "ROOT", pathlib.Path(d)), \
+                    mock.patch.object(mutgate, "BROKER", pathlib.Path(d) / "broker"):
+                diff = mutgate.broker_diff("HEAD~1", "HEAD")
+                _, tests, moved = mutgate.diff_changes(diff, "HEAD~1", "HEAD")
+                self.assertTrue(moved[old])  # the moved method's lines are no change
+                self.assertEqual(tests[old], set())  # but the file stays: TestGone's deletion is one
+                self.assertTrue(mutgate.tests_changed(tests, "proc"))
+                self.assertEqual(mutgate.bases_for(diff, "HEAD~1", "HEAD", tests, ["proc"], moved), {"proc": ["TestGone"]})
+
+    def test_a_deletion_only_hunks_marks_beside_a_move_stay(self):
+        old = "broker/proc/proc_test.go"
+        tail = MOVE_TEST.split(")\n\n", 1)[1]
+        base = OLD_TEST + "\nfunc TestGone(t *testing.T) {}\n\nfunc TestKept(t *testing.T) {}\n"
+        head = OLD_TEST + "\nfunc TestKept(t *testing.T) {}\n\n" + tail
+        diff, before, tests, moved = self.changes({self.SRC: MOVE_SRC, old: base}, {self.SRC: MOVE_KEPT, old: head})
+        self.assertTrue(moved[old])
+        self.assertEqual(tests[old], {14, 15})  # added_lines' marks either side of TestGone's deletion
+
+def added_tests(diff):
+    return mutgate.added_lines(diff)[1]
+
+
 if __name__ == "__main__":
     unittest.main()
