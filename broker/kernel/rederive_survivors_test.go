@@ -11,9 +11,9 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
-// divergesAt fails t unless Rederive over es returns a *Divergence at seq,
+// divergenceAt fails t unless Rederive over es returns a *Divergence at seq,
 // and gives it.
-func divergesAt(t *testing.T, r *rig, es []kernel.Entry, seq uint64) *kernel.Divergence {
+func divergenceAt(t *testing.T, r *rig, es []kernel.Entry, seq uint64) *kernel.Divergence {
 	t.Helper()
 	_, err := kernel.Rederive(r.anchors(), r.k.Box(), es)
 	var d *kernel.Divergence
@@ -35,7 +35,7 @@ func TestRederiveDivergenceNamesTheDerivedDecision(t *testing.T) {
 		}
 		want := e.Type + " " + string(e.Body)
 		es[i].Type = kernel.TPlanAccepted
-		d := divergesAt(t, r, es, e.Seq)
+		d := divergenceAt(t, r, es, e.Seq)
 		if d.Derived != want {
 			t.Fatalf("derived %q, want %q", d.Derived, want)
 		}
@@ -56,7 +56,7 @@ func TestRederiveRefusesASecondDecisionForOnePlan(t *testing.T) {
 		again := e
 		again.Seq = e.Seq + 1
 		es := append(append(append([]kernel.Entry(nil), all[:i+1]...), again), all[i+1:]...)
-		if d := divergesAt(t, r, es, again.Seq); d.Derived != "nothing" {
+		if d := divergenceAt(t, r, es, again.Seq); d.Derived != "nothing" {
 			t.Fatalf("derived %q for a decided plan, want nothing", d.Derived)
 		}
 		return
@@ -109,7 +109,7 @@ func TestRederiveAllowsNoSendCancelAfterAnAnsweredStep(t *testing.T) {
 	last := es[len(es)-1]
 	forged := kernel.Entry{Seq: last.Seq + 1, At: last.At, Type: kernel.TPlanCancel,
 		Body: bytes.Replace(cancelB, []byte(`"plan":"b"`), []byte(`"plan":"a"`), 1)}
-	divergesAt(t, r, append(es, forged), forged.Seq)
+	divergenceAt(t, r, append(es, forged), forged.Seq)
 }
 
 // An unsent answer naming no step of a plan the log holds is folded as
@@ -156,5 +156,5 @@ func TestRederiveAllowsNoSendCancelForAnEndedPlan(t *testing.T) {
 		Body: []byte(`{"plan":"revoked","index":0,"idem":"` + kernel.Idem("revoked", 0) + `","outcome":"unsent"}`)}
 	again := kernel.Entry{Seq: last.Seq + 2, At: last.At, Type: kernel.TPlanCancel,
 		Body: bytes.Replace(stopped, []byte(`"plan":"stopped"`), []byte(`"plan":"revoked"`), 1)}
-	divergesAt(t, r, append(append([]kernel.Entry(nil), es...), unsent, again), again.Seq)
+	divergenceAt(t, r, append(append([]kernel.Entry(nil), es...), unsent, again), again.Seq)
 }
