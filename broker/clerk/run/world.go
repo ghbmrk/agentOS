@@ -25,8 +25,10 @@ import (
 // after a step fails they are empty, so VRB-2 stops at no-history.
 
 // sendersEvery is how often the worker reads the alert senders again,
-// besides after start and each change of account. A var for tests.
-var sendersEvery = 24 * time.Hour
+// besides after start and each change of account: a day, or c.every in tests.
+func (c MailConfig) sendersEvery() time.Duration {
+	return cmp.Or(c.every, 24*time.Hour)
+}
 
 // worldState is what the host's own world is built from. Its mu is taken
 // after h.mu, never before, and the world function takes only it, so a
@@ -248,7 +250,7 @@ func imapHost(s MailSettings) string {
 // a kick while a pause runs waits for it, so steps stay that far apart. It
 // pauses while a sign-in failure stops the clerk.
 func (h *MailHost) work() {
-	tick := time.NewTicker(sendersEvery)
+	tick := time.NewTicker(h.cfg.sendersEvery())
 	defer tick.Stop()
 	var step <-chan time.Time // the pause before the next step; nil: none
 	for {

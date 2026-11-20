@@ -955,7 +955,7 @@ func TestTIM1AForgetAskLapsesOnLatest(t *testing.T) {
 		return err
 	}
 	const f = kernel.ForgetAskFor
-	if err := reply(10+f, 10+f, ask(10, 10+f-1)); !errors.Is(err, kernel.ErrForgetReply) {
+	if err := reply(10+f, 10+f, ask(10, 10+f-1_000)); !errors.Is(err, kernel.ErrForgetReply) {
 		t.Fatalf("a YES ForgetAskFor after an ask's Earliest: %v", err)
 	}
 	e := 20 + f
@@ -1004,7 +1004,7 @@ func TestTIM1AWideReadingRefusesAForgetAsk(t *testing.T) {
 	if _, err := r.k.ForgetReply(0, before); !errors.Is(err, kernel.ErrForgetReply) {
 		t.Fatalf("a YES to the ask before a refused one: %v", err)
 	}
-	at(30, 30+f-1)
+	at(30, 30+f-1_000) // a second left: under it, see TestTIM1AForgetAskNamesTheTimeLeft
 	text, err = r.k.AskForget(0, "Alice")
 	must(t, err)
 	at(30+f-1, 30+f-1)
@@ -1020,6 +1020,56 @@ func TestTIM1AWideReadingRefusesAForgetAsk(t *testing.T) {
 	must(t, r.k.Stop(0))
 	if _, err := r.k.AskForget(0, "Alice"); !errors.Is(err, kernel.ErrForgetStop) {
 		t.Fatalf("an ask under STOP at a wide reading: %v", err)
+	}
+}
+
+// An ask at a reading w ms wide lapses ForgetAskFor − w of true time after
+// it is sent, however true time sits in the reading, so its text promises
+// that, rounded down: in minutes, then in seconds under a minute; under a
+// second it is refused as at a wider reading (TIM-1, CH-12; #5938).
+func TestTIM1AForgetAskNamesTheTimeLeft(t *testing.T) {
+	// REQ: TIM-1, CH-12
+	r := newErig(t)
+	r.seal(r.open(), "mail", kernel.ClassLabel, "Alice")
+	const f, minute, second = kernel.ForgetAskFor, int64(60_000), int64(1_000)
+	at := func(e, l int64) {
+		r.k.UseClock(func() kernel.Reading { return kernel.Reading{Earliest: e, Latest: l} })
+	}
+	for i, c := range []struct {
+		w       int64
+		promise string
+		ms      int64
+	}{
+		{0, "10 minutes", 10 * minute},
+		{1, "9 minutes", 9 * minute},
+		{f / 2, "5 minutes", 5 * minute},
+		{f/2 + 1, "4 minutes", 4 * minute},
+		{9 * minute, "1 minute", minute},
+		{9*minute + 1, "59 seconds", 59 * second},
+		{f - 2*second, "2 seconds", 2 * second},
+		{f - second, "1 second", second},
+	} {
+		e := int64(i+1) * 10 * f // each case after the last one's lapse
+		at(e, e+c.w)
+		text, err := r.k.AskForget(0, "Alice")
+		must(t, err)
+		if !strings.Contains(text, "or none within "+c.promise+", forgets nothing.") {
+			t.Fatalf("an ask at a reading %d ms wide: %q", c.w, text)
+		}
+		words := strings.Fields(text)
+		yes := "YES " + words[slices.Index(words, "YES")+1]
+		// True time ran c.ms − 1 and the reading moved with it: the YES
+		// comes inside the promise wherever true time was, so it is taken.
+		at(e+c.ms-1, e+c.w+c.ms-1)
+		if _, err := r.k.ForgetReply(0, yes); err != nil {
+			t.Fatalf("a YES inside the %s an ask at a reading %d ms wide promised: %v", c.promise, c.w, err)
+		}
+	}
+	for _, w := range []int64{f - second + 1, f - 1} {
+		at(20*f, 20*f+w)
+		if text, err := r.k.AskForget(0, "Alice"); !errors.Is(err, kernel.ErrForgetClock) || text != "" {
+			t.Fatalf("an ask at a reading %d ms wide, under a second left: %q, %v", w, text, err)
+		}
 	}
 }
 
