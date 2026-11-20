@@ -290,6 +290,7 @@ allow broker/backup/target.go DirTarget.PutTable os.Link link(2) never follows a
 allow broker/backup/target.go DirTarget.DeleteTable os.Remove unlink(2) removes a link at the table's name itself and never follows it
 allow broker/backup/target.go DirTarget.PutTable os.CreateTemp the temp table in the owner's target directory, which kernel/proc resolves and checks outside the kernel's data at each use; O_CREAT|O_EXCL at a fresh random name refuses a link there
 allow broker/backup/target.go DirTarget.Tables os.ReadDir lists that resolved target directory; it reads names only, and only names of the table form count
+allow broker/backup/target.go OpenRegular os.Open reopens /proc/self/fd/<n>, this process's own O_PATH descriptor of a regular file it fstat'd: procfs lets no uid plant a link there, and the magic link names that inode, never the planted path
 allow broker/change/store.go DirContent.Put os.MkdirAll the bodies directory beside agentosd's state file in root-held /var/lib/agentos
 allow broker/change/store.go DirContent.Delete os.Remove unlink(2) removes a link at the body's name itself and never follows it
 allow broker/follow/follow.go Executor.setUnsent os.Remove unlink(2) removes a link at the pending-alert name itself and never follows it
