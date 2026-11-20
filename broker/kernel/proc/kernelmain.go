@@ -358,7 +358,7 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 		Anchors: keys.Anchors, Clerks: cfg.Clerks, KeyDir: cfg.KeyDir,
 		ContentDir: cfg.ContentDir, Stores: slices.Sorted(maps.Keys(cfg.Content)),
 		BackupDir: cfg.BackupDir, Recipient: keys.Recipient, PageCA: keys.PageCA.Get(),
-		FirstEdge: first, LinkKey: keys.LinkKey.Get(), Checker: checker, Clock: kernelSource(cfg),
+		FirstEdge: first, LinkKey: keys.LinkKey.Get(), Checker: checker, Source: kernelSource(cfg),
 	}, clock())
 	if err != nil {
 		return err

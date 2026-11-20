@@ -641,7 +641,7 @@ func TestTIM1AOnLogReadsAndAppliesUnderOneLock(t *testing.T) {
 func TestTIM1AnOpenedKernelReadsItsClockOnTheLog(t *testing.T) {
 	b := newBBox(t, recipientWire(t, testRK))
 	box := b.now
-	b.cfg.Clock = func() (kernel.Reading, Stamp) { return kernel.At(box), Stamp{} }
+	b.cfg.Clock = func() kernel.Reading { return kernel.At(box) }
 	b.restart()
 	box = 1 << 50 // a forward step while running
 	err := b.h.With(func(k *kernel.Kernel) error {

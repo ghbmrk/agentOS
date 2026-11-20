@@ -34,6 +34,7 @@ type Chrony struct {
 	c     *net.UnixConn
 	seq   uint32
 	next  time.Time // no try before this after a failure
+	ref   Stamp     // the last answer's sample
 }
 
 // NewChrony is a source reading chronyd at sock, answered at reply; with
@@ -66,14 +67,14 @@ func (s *Chrony) Sample() (kernel.Reading, Stamp) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b0 := time.Now().UnixMilli()
-	corr, err, ref, ok := s.track()
+	corr, err, ok := s.track()
 	b1 := time.Now().UnixMilli()
 	if !ok {
 		return kernel.Reading{Latest: b1}, Stamp{}
 	}
 	lo := b0 + int64(math.Floor((corr-err)*1000))
 	hi := b1 + int64(math.Ceil((corr+err)*1000))
-	return kernel.Reading{Earliest: min(b0, lo), Latest: max(b1, hi)}, ref
+	return kernel.Reading{Earliest: min(b0, lo), Latest: max(b1, hi)}, s.ref
 }
 
 func (s *Chrony) drop() {
@@ -84,32 +85,32 @@ func (s *Chrony) drop() {
 	}
 }
 
-// track asks chronyd once: its correction (true time minus the box clock),
-// its error bound, in seconds, and its sample's Stamp; !ok when chronyd is
-// not synced to a source or does not answer well. A failure closes the socket and waits
+// track asks chronyd once: its correction (true time minus the box clock)
+// and its error bound, in seconds; !ok when chronyd is not synced to a
+// source or does not answer well. A failure closes the socket and waits
 // chronyRetry, so a hung chronyd delays a decision at most once in that.
-func (s *Chrony) track() (corr, bound float64, ref Stamp, ok bool) {
+func (s *Chrony) track() (corr, bound float64, ok bool) {
 	if s.dial == nil || time.Now().Before(s.next) {
-		return 0, 0, ref, false
+		return 0, 0, false
 	}
-	if corr, bound, ref, ok = s.ask(); !ok {
+	if corr, bound, ok = s.ask(); !ok {
 		s.drop()
 		s.next = time.Now().Add(chronyRetry)
 	}
 	return
 }
 
-func (s *Chrony) ask() (corr, bound float64, ref Stamp, ok bool) {
+func (s *Chrony) ask() (float64, float64, bool) {
 	if s.c == nil {
 		c, err := s.dial()
 		if err != nil {
-			return
+			return 0, 0, false
 		}
 		s.c = c
 		// chronyd runs as its own user; the connect above, not the mode,
 		// keeps every other sender out.
 		if os.Chmod(s.reply, 0o666) != nil {
-			return
+			return 0, 0, false
 		}
 	}
 	s.seq++
@@ -118,20 +119,21 @@ func (s *Chrony) ask() (corr, bound float64, ref Stamp, ok bool) {
 	binary.BigEndian.PutUint16(q[4:], chronyTracking)
 	binary.BigEndian.PutUint32(q[8:], s.seq)
 	if s.c.SetDeadline(time.Now().Add(chronyWait)) != nil {
-		return
+		return 0, 0, false
 	}
 	if _, err := s.c.Write(q); err != nil {
-		return
+		return 0, 0, false
 	}
 	p := make([]byte, chronyLen+1)
 	n, err := s.c.Read(p)
 	if err != nil {
-		return
+		return 0, 0, false
 	}
-	if corr, bound, ok = parseTracking(p[:n], s.seq); ok {
-		copy(ref[:], p[56:68])
+	corr, bound, ok := parseTracking(p[:n], s.seq)
+	if ok {
+		copy(s.ref[:], p[56:68])
 	}
-	return
+	return corr, bound, ok
 }
 
 // parseTracking reads an RPY_TRACKING reply to request seq: chronyd's

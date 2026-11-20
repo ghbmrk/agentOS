@@ -418,8 +418,9 @@ func closeChrony(s *Chrony) {
 // RunKernel reads chronyd at the sockets its config names (#5391, #5757 L3
 // round 2): kernelSource reads a synced chronyd at cfg.Chrony, answered at
 // cfg.ChronyReply, and the box clock alone without them; RunKernel hands
-// OpenKernel that source. Killed by hand: kernelSource's arguments empty or
-// swapped, and RunKernel's Clock set to anything else.
+// OpenKernel that source as its Source, which carries each sample's Stamp.
+// Killed by hand: kernelSource's arguments empty or swapped, and RunKernel's
+// Source set to anything else or handed as its Clock.
 //
 // REQ: TIM-1
 func TestTIM1ARunKernelReadsChronydAtItsConfiguredSocket(t *testing.T) {
@@ -441,11 +442,11 @@ func TestTIM1ARunKernelReadsChronydAtItsConfiguredSocket(t *testing.T) {
 		if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == "RunKernel" {
 			ast.Inspect(fn, func(n ast.Node) bool {
 				if kv, ok := n.(*ast.KeyValueExpr); ok {
-					if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Clock" {
+					if k, ok := kv.Key.(*ast.Ident); ok && (k.Name == "Source" || k.Name == "Clock") {
 						if c, ok := kv.Value.(*ast.CallExpr); ok && len(c.Args) == 1 {
 							fun, ok1 := c.Fun.(*ast.Ident)
 							if a, ok2 := c.Args[0].(*ast.Ident); ok1 && ok2 {
-								clocks = append(clocks, fun.Name+"("+a.Name+")")
+								clocks = append(clocks, k.Name+": "+fun.Name+"("+a.Name+")")
 								return true
 							}
 						}
@@ -456,8 +457,8 @@ func TestTIM1ARunKernelReadsChronydAtItsConfiguredSocket(t *testing.T) {
 			})
 		}
 	}
-	if len(clocks) != 1 || clocks[0] != "kernelSource(cfg)" {
-		t.Fatalf("RunKernel hands OpenKernel the clocks %q: want kernelSource(cfg) alone", clocks)
+	if len(clocks) != 1 || clocks[0] != "Source: kernelSource(cfg)" {
+		t.Fatalf("RunKernel hands OpenKernel the clocks %q: want Source: kernelSource(cfg) alone", clocks)
 	}
 }
 
@@ -505,5 +506,28 @@ func TestTIM1AChronyRisesOnlyOnANewReferenceTime(t *testing.T) {
 	ref.Add(64)
 	if r := w(); r.Earliest < box-3 {
 		t.Fatalf("a new sample read %+v: Earliest did not rise to the box's %d", r, box)
+	}
+}
+
+// OpenKernel reads its Source, else its Clock on no sample, else none: a
+// plain Clock never vouches for a fresh sample (#5759).
+//
+// REQ: TIM-1
+func TestTIM1AKernelConfigSource(t *testing.T) {
+	if (KernelConfig{}).source() != nil {
+		t.Fatal("no clock gave a source")
+	}
+	plain := KernelConfig{Clock: func() kernel.Reading { return kernel.At(7) }}
+	if src := plain.source(); src == nil {
+		t.Fatal("a Clock gave no source")
+	} else if r, st := src(); r != kernel.At(7) || st != (Stamp{}) {
+		t.Fatalf("a Clock read %+v stamped %x: want its reading on no sample", r, st)
+	}
+	plain.Source = func() (kernel.Reading, Stamp) { return kernel.At(9), Stamp{11: 1} }
+	if r, st := plain.source()(); r != kernel.At(9) || st != (Stamp{11: 1}) {
+		t.Fatalf("with a Source set the source read %+v stamped %x: want the Source", r, st)
+	}
+	if onLog(nil, nil) != nil {
+		t.Fatal("no source gave a clock")
 	}
 }

@@ -67,8 +67,23 @@ type KernelConfig struct {
 	// Clock is the kernel process's TIM-1 reading, which the kernel reads at
 	// each decision (kernel.BootClock) and when a backup re-seal finishes,
 	// so a failure backs off from then (#3339); nil reads only the time
-	// each call is handed. OpenKernel reads it through onLog.
-	Clock Source
+	// each call is handed. It vouches for no fresh sample (onLog).
+	Clock kernel.Clock
+	// Source, when set, is read in Clock's place: the reading and the
+	// Stamp of the sample behind it (Chrony.Sample, #5759).
+	Source Source
+}
+
+// source is cfg's TIM-1 source for onLog: Source, else Clock on no
+// sample, else none.
+func (cfg KernelConfig) source() Source {
+	if cfg.Source != nil {
+		return cfg.Source
+	}
+	if cfg.Clock == nil {
+		return nil
+	}
+	return func() (kernel.Reading, Stamp) { return cfg.Clock(), Stamp{} }
 }
 
 // Format prints a KernelConfig as its type alone, never the log key or the
@@ -147,10 +162,7 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 		st.Close()
 		return nil, err
 	}
-	var clock kernel.Clock
-	if cfg.Clock != nil {
-		clock = onLog(l, cfg.Clock)
-	}
+	clock := onLog(l, cfg.source())
 	// A clerk's view is verified against the state's anchors, which setup
 	// may log after boot.
 	var k *kernel.Kernel
@@ -427,6 +439,9 @@ func (h *Kernel) Close() error {
 // time, and once chronyd syncs a hold waits its length, not the gap (TIM-1,
 // KEY-7, KEY-8).
 func onLog(l *kernel.Log, c Source) kernel.Clock {
+	if c == nil {
+		return nil // the kernel reads the time each call is handed
+	}
 	r, last := c()
 	start := time.Now()
 	base := r.Earliest
