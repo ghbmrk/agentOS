@@ -8047,6 +8047,12 @@ class MkosiRunBoundTest(unittest.TestCase):
         # security-snapshot.sh's sources form: no repository script, test binary or Go build.
         build = workflow_job("build")
         before = workflow_code(build[:build.index(self.MKOSI_LINE)]).replace("go-version-file: broker/go.mod", "")
+        # #6357: the disk guard is the local action .github/actions/disk-budget, a workflow file of the same
+        # commit as this one (tier A, like image.yml), read when its step starts; the steps before it run
+        # only pinned actions and image.yml's shell, so nothing of the repository can change it first.
+        call = "        uses: ./.github/actions/disk-budget\n"
+        self.assertEqual(before.count(call), 1)
+        before = before.replace(call, "")
         install = before.index("sudo git -C /opt/mkosi -c advice.detachedHead=false checkout -q "
                                "26673f65e17ae099bb0cf65928fe70c93b8a6a37  # v24.3")
         self.assertLess(install, before.index("actions/download-artifact@"))
