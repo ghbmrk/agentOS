@@ -4787,10 +4787,12 @@ class LintHeld(unittest.TestCase):
             with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "LINTS", (("lint", "TestWiped"),)), \
                     tempfile.TemporaryDirectory() as tmp:
                 self.assertEqual(mutgate.lint_kills("hint", [(0, "hint.go", gone)], pathlib.Path(tmp), 256 << 20), {0: "TestWiped"})
-            # Each deletion is alone in the tree its lint reads: the one before it is put back.
+            # Each deletion is alone in the tree its lint reads: the one before it is put back. The second
+            # site is in another file of the package, so only the restore keeps the first out of its tree.
+            (pkg / "other.go").write_text("package hint\n")
             with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "LINTS", (("lint", "TestWiped"),)), \
                     tempfile.TemporaryDirectory() as tmp:
-                self.assertEqual(mutgate.lint_kills("hint", [(0, "hint.go", gone), (1, "hint.go", LINT_PR.encode())],
+                self.assertEqual(mutgate.lint_kills("hint", [(0, "hint.go", gone), (1, "other.go", b"package hint\n")],
                                                     pathlib.Path(tmp)), {0: "TestWiped"})
 
     def test_each_listed_lint_is_a_top_level_test_of_its_package(self):
