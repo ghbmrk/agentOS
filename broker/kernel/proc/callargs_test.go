@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -52,5 +53,30 @@ func TestAKernelCallWithArgsThatCannotMarshalIsRefused(t *testing.T) {
 	case got := <-lines:
 		t.Fatalf("a second line was sent: %q", got)
 	default:
+	}
+}
+
+// A call the kernel stopped reading is ErrLost even when an answer came
+// first: the kernel never took the whole call, so its answer is not the
+// call's (#2742 item 9).
+func TestAKernelCallWriteCutOffIsLostThoughAnswered(t *testing.T) {
+	sock := filepath.Join(shortDir(t), "cut.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		c.Write([]byte("{}\n"))
+		c.Close()
+	}()
+	c := Conn{Socket: sock, UID: os.Getuid(), Timeout: 5 * time.Second}
+	// Far past a socket buffer, inside maxCall: the write outlasts the close.
+	if err := c.Call("stop", strings.Repeat("a", maxCall/2), nil); !errors.Is(err, ErrLost) {
+		t.Fatalf("a call the kernel stopped reading: %v, want %v", err, ErrLost)
 	}
 }
