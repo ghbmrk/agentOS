@@ -46,7 +46,8 @@ func TestWriteAtomicRefusesADirOtherUidsCanWrite(t *testing.T) {
 	}
 }
 
-// A directory owned by another uid is refused: that uid can chmod it open.
+// A directory owned by another uid is refused, by OpenDir and so by
+// WriteAtomic: that uid can chmod it open. This is the one test of that rule.
 // As root the test chowns a directory away. As any other uid it runs in a
 // child in a new user namespace that maps only this uid and gid, where the
 // root-owned "/" reads as the overflow uid: neither this uid nor root, and
@@ -57,8 +58,12 @@ func TestWriteAtomicRefusesADirOfAnotherUid(t *testing.T) {
 		if err := os.Chown(dir, 12345, 12345); err != nil {
 			t.Fatal(err)
 		}
-		if err := WriteAtomic(dir, "f", []byte("canary"), nil); err == nil {
-			t.Fatal("a directory of uid 12345 was written")
+		err := WriteAtomic(dir, "f", []byte("canary"), nil)
+		if err == nil || !strings.Contains(err.Error(), "not this uid or root") {
+			t.Fatalf("a directory of uid 12345: %v, want the owner refusal", err)
+		}
+		if ents, _ := os.ReadDir(dir); len(ents) != 0 {
+			t.Fatalf("a refused directory of uid 12345 holds %d entries", len(ents))
 		}
 		return
 	}
