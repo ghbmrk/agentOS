@@ -155,3 +155,15 @@ func TestCH12PrefixCutsALongJoinedRun(t *testing.T) {
 		t.Fatalf("cut is %d units", u)
 	}
 }
+
+// REQ: CH-12. IsGSM7 refuses any character outside the basic set, and
+// Fit keeps a text of exactly MaxText bytes whole (mutgate on #6136).
+func TestIsGSM7AndFitBoundary(t *testing.T) {
+	if IsGSM7("ok ✓") || !IsGSM7("ok é") {
+		t.Fatal("IsGSM7 misreads the basic set")
+	}
+	s := strings.Repeat("a", MaxText)
+	if Fit(s) != s || Fit(s+"b") != s {
+		t.Fatalf("Fit at the limit: %d, %d", len(Fit(s)), len(Fit(s+"b")))
+	}
+}

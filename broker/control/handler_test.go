@@ -499,3 +499,98 @@ func TestSTOPThatFailsToRecordIsNotReportedDoneWhenAlreadyStopped(t *testing.T) 
 		t.Fatalf("STOP on an engine that could not record it: %q", r)
 	}
 }
+
+// REQ: CH-12. CTL-owner-text-lost (#5429): an owner text that arrives while the agent's
+// machine has no open services is dropped, not queued, and the reply says
+// so in plain words and says to send it again.
+
+// windowAgent refuses delivery while down, as guest.OwnerAgent does when
+// the machine has no open services, and records what it was given once up.
+type windowAgent struct {
+	down bool
+	got  []string
+}
+
+// errAgent refuses every text with err, as a running agent does when its
+// inbox is full or a store fails.
+type errAgent struct{ err error }
+
+func (e *errAgent) Deliver(context.Context, string, bool) error { return e.err }
+
+func (w *windowAgent) Deliver(_ context.Context, text string, _ bool) error {
+	if w.down {
+		return errors.New("guest: machine has no open services")
+	}
+	w.got = append(w.got, text)
+	return nil
+}
+
+func TestOwnerTextLostReplySaysNotReceivedAndResend(t *testing.T) {
+	agent := &windowAgent{down: true}
+	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, agent)
+	r := one(t, h.Handle(context.Background(), owner, "book a table for two"))
+	for _, w := range []string{"not received", "Send it again", "STATUS", "STOP"} {
+		if !strings.Contains(r, w) {
+			t.Fatalf("reply lacks %q: %q", w, r)
+		}
+	}
+	// One reply covers every Deliver error, so it names no cause: a
+	// running agent that refuses the text (a full inbox, a failed store;
+	// UX lens on #6136) gets the same words, which must hold there too.
+	if strings.Contains(r, "not running") || strings.Contains(r, "is back") {
+		t.Fatalf("reply claims the agent is down: %q", r)
+	}
+	full := &errAgent{err: errors.New("guest: the message was not stored")}
+	h2, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, full)
+	if got := one(t, h2.Handle(context.Background(), owner, "book a table for two")); got != r {
+		t.Fatalf("refused while running: %q, want %q", got, r)
+	}
+	// A reaction (Event) refused in the same window gets the same truth.
+	if got := one(t, h.Event(context.Background(), owner, "Owner reacted")); got != r {
+		t.Fatalf("Event reply %q, want %q", got, r)
+	}
+	// One SMS segment (CH-12), unchanged by Fit.
+	if n, _ := Units(r); n > 153 || Fit(r) != r {
+		t.Fatalf("reply is %d units or not GSM-7: %q", n, r)
+	}
+}
+
+func TestOwnerTextInWindowIsNeverDelivered(t *testing.T) {
+	agent := &windowAgent{down: true}
+	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, agent)
+	one(t, h.Handle(context.Background(), owner, "lost text"))
+	agent.down = false
+	if out := h.Handle(context.Background(), owner, "later text"); len(out) != 0 {
+		t.Fatalf("up reply = %q", out)
+	}
+	if len(agent.got) != 1 || agent.got[0] != "later text" {
+		t.Fatalf("agent got %q, want only the later text", agent.got)
+	}
+}
+
+// REQ: CH-12. Every reply the default branch builds goes out through Fit:
+// a setting's reply with a character outside GSM-7, or longer than
+// MaxText, reaches the owner fitted (mutgate on #6136).
+func TestDefaultRepliesAreFitted(t *testing.T) {
+	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, &recAgent{})
+	reply := "Done ✓ " + strings.Repeat("x", MaxText)
+	h.Settings = func(context.Context, string, bool) (string, bool) { return reply, true }
+	got := one(t, h.Handle(context.Background(), owner, "LOOPS ON"))
+	if got != Fit(reply) || !strings.HasPrefix(got, "Done ? ") || len(got) != MaxText {
+		t.Fatalf("setting reply not fitted: %d bytes, %q", len(got), got[:12])
+	}
+}
+
+// REQ: CH-12. The fixed replies to a YES, NO, UNDO or MORE with nothing
+// open name what is missing.
+func TestNothingOpenReplies(t *testing.T) {
+	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, forbiddenAgent{t})
+	for msg, want := range map[string]string{
+		"YES 1 123456": "No open requests.", "NO 1": "No open requests.",
+		"UNDO 7": "No request 7.", "MORE 7": "No request 7.",
+	} {
+		if got := one(t, h.Handle(context.Background(), owner, msg)); got != want {
+			t.Errorf("%s = %q, want %q", msg, got, want)
+		}
+	}
+}
