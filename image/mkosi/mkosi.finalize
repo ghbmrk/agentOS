@@ -558,8 +558,8 @@ def _violations(root):
             + cached(unit_made_dirs, root)[1] + cached(unit_made_paths, root)[2] + unit_made_refusals(root)
             + inside_refusals(root) + gpt_auto_violations(root)
             + noexec_violations(root)
-            + keeper_violations(root) + isolate_violations(root) + soft_reboot_violations(root)
-            + clerk_key_violations(root)
+            + keeper_violations(root) + isolate_violations(root) + ram_kept_violations(root)
+            + kexec_loader_violations(root) + clerk_key_violations(root)
             + assembly_violations(root) + driver_violations(root) + e2e_violations(root))
 
 
@@ -3057,29 +3057,62 @@ def isolate_violations(root):
 # the target's start fails as a whole (a Requires= on a unit that is not found fails the transaction)
 # and stops nothing; "--force" and SuccessAction=soft-reboot-force stop no unit, so MOR stays set.
 SOFT_REBOOT = "systemd-soft-reboot.service"
+# MOR-kexec-class (#6311): kexec.target requires KEXEC the same way, and an orderly kexec boots the next
+# kernel without the firmware's pass, so RAM is kept and that kernel's MOR_UNIT only reads MOR. The core's
+# kernel (Debian's) has CONFIG_KEXEC=y and CONFIG_KEXEC_FILE=y, so mkosi.conf removes KEXEC too. The tree
+# also holds no kexec loader, so no kernel is ever loaded: "systemctl kexec" fails before any unit stops
+# (load_kexec_kernel needs /usr/sbin/kexec), and a forced kexec stops no unit and falls back to a firmware
+# reboot (systemd-shutdown's LINUX_REBOOT_CMD_KEXEC case), whose pass wipes RAM while MOR is set.
+KEXEC = "systemd-kexec.service"
+RAM_KEPT = ((SOFT_REBOOT, "an orderly soft reboot", "#6182"), (KEXEC, "an orderly kexec", "#6311"))
+KEXEC_LOADER = "kexec"
+KEXEC_LOADER_DIRS = ("usr/sbin", "usr/bin", "usr/local/sbin", "usr/local/bin")
+KEXEC_PACKAGES = (b"kexec-tools", b"kdump-tools")
+KEXEC_WHY = ("a kexec loader; with a kernel loaded, a kexec or a crash kernel runs the next kernel on memory the "
+             "firmware never wiped (remove it, #6311)")
 
 
-def soft_reboot_violations(root):
-    """MOR-soft-reboot (#6182): the first entry named SOFT_REBOOT in the unit directories, in precedence
-    order, is a mask (a link to exactly MASK, or a file of size 0: systemd 257 reads either as masked), or
-    there is none. Any other file or link of that name makes the orderly soft reboot runnable again, and
-    one the check cannot read is refused."""
+def ram_kept_violations(root):
+    """MOR-soft-reboot (#6182), MOR-kexec-class (#6311): for each RAM_KEPT unit, the first entry of its name in
+    the unit directories, in precedence order, is a mask (a link to exactly MASK, or a file of size 0:
+    systemd 257 reads either as masked), or there is none. Any other file or link of that name makes its
+    orderly transition runnable again, and one the check cannot read is refused."""
     root = str(root)
     dirs, out = unit_dirs(root)
-    for d in dirs:
-        rel = d + "/" + SOFT_REBOOT
-        if not tree_lstat(root, rel):
-            continue
-        try:
-            masked = Conf(root, rel).content() == b""
-        except OSError as e:
-            out.append("%s: unreadable (%s); the tree check never passes a unit it cannot read" % (rel, e.strerror or e))
+    for name, what, row in RAM_KEPT:
+        for d in dirs:
+            rel = d + "/" + name
+            if not tree_lstat(root, rel):
+                continue
+            try:
+                masked = Conf(root, rel).content() == b""
+            except OSError as e:
+                out.append("%s: unreadable (%s); the tree check never passes a unit it cannot read" % (rel, e.strerror or e))
+                break
+            if not masked:
+                out.append("%s: present; %s stops %s, whose stop clears MOR, while the kernel keeps its memory, "
+                           "so the holders after it run with MOR clear (remove it or mask it, %s)"
+                           % (rel, what, MOR_UNIT, row))
             break
-        if not masked:
-            out.append("%s: present; an orderly soft reboot stops %s, whose stop clears MOR, while the kernel keeps "
-                       "its memory, so the holders after it run with MOR clear (remove it or mask it, #6182)"
-                       % (rel, MOR_UNIT))
-        break
+    return out
+
+
+def kexec_loader_violations(root):
+    """MOR-kexec-class (#6311): a kexec loader wherever the box would run it from (whatever the entry is), or
+    a KEXEC_PACKAGES package dpkg has unpacked. A dpkg status the check cannot read is refused; none at all
+    (a test tree) passes here, and tree_package_violations refuses that on a built image."""
+    root = str(root)
+    out = ["%s/%s: %s" % (d, KEXEC_LOADER, KEXEC_WHY)
+           for d in KEXEC_LOADER_DIRS if tree_stat(root, d + "/" + KEXEC_LOADER) is not None]
+    try:
+        status = Conf(root, DPKG_STATUS).content() if tree_lstat(root, DPKG_STATUS) else b""
+    except OSError as e:
+        return out + ["%s: unreadable (%s); %s" % (DPKG_STATUS, e.strerror or e, KEXEC_WHY)]
+    for p in deb822_fields(status, (b"Package", b"Status")):
+        words = p.get(b"Status", b"").split()
+        if p.get(b"Package") in KEXEC_PACKAGES and not (len(words) == 3 and words[2] in (b"not-installed",
+                                                                                          b"config-files")):
+            out.append("%s: %s is installed; %s" % (DPKG_STATUS, p[b"Package"].decode(), KEXEC_WHY))
     return out
 
 
