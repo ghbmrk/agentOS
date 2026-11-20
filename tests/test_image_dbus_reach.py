@@ -31,8 +31,10 @@ NETWORK_FACING = ("agentos-link.service", "agentos-egress.service", "agentos-kee
                   "agentos-keeper-link-capture.service")
 # Units whose own empty root or /run leaves /run/dbus out of view: a mask there fails the unit.
 OUT_OF_VIEW = ("agentos-camdecode@.service", "agentos-imapconn@.service")
-# Units with DefaultDependencies=no: they may start before dbus.socket makes /run/dbus.
+# Units with DefaultDependencies=no and no order after basic.target: they may start before dbus.socket makes
+# /run/dbus. The page authority's staging and the wipe drop the default dependencies but keep that order (#6178).
 EARLY = ("agentos-inbound.service", "agentos-mor.service")
+LATE_NO_DEFAULTS = ("agentos-keeper-pageca.service", "agentos-keeper-wipe.service")
 # #6037: the exact bytes the image ships, so exec.allow's two pins can be reviewed here: dbus.service from
 # Debian's dbus_1.16.2-2_amd64.deb and dbus.socket from dbus-system-bus-common_1.16.2-2_all.deb (trixie,
 # the image's snapshot; the .deb sha256s are f5c47639...e6f50f274 and 262e9ec8...4a1120a, as the archive's
@@ -105,9 +107,11 @@ class BusMaskTest(unittest.TestCase):
         names = self.services()
         for n in NETWORK_FACING + tuple(scripts_units(check.BUS_UNITS)) + EARLY + OUT_OF_VIEW:
             self.assertIn(n, names)
-        early = [n for n in names if check.ini_last(check.unit_with_dropins(str(self.root), self.dirs, n), "Unit",
-                                                     "DefaultDependencies") == "no"]
+        files = {n: check.unit_with_dropins(str(self.root), self.dirs, n) for n in names}
+        early = [n for n in names if check.starts_early(files[n])]
         self.assertEqual(early, list(EARLY))
+        self.assertEqual([n for n in names if check.ini_last(files[n], "Unit", "DefaultDependencies") == "no"],
+                         sorted(EARLY + LATE_NO_DEFAULTS))
         masked = [n for n in names if n not in check.BUS_UNITS + check.NOEXEC_EXEMPT + OUT_OF_VIEW]
         for n in masked:
             self.assertIn(check.BUS_DIR, self.hidden(n), n)
@@ -167,13 +171,20 @@ class BusMaskTest(unittest.TestCase):
     def test_early_is_read_from_the_unit(self):
         # #6037: any unit that drops the default dependencies may start before sockets.target, so it takes
         # the "-", whatever list it is on; told so, not told to drop it.
-        for word in ("no", "false", "0", "off"):
+        f = write(self.root, SYSTEM + "agentos-link.service.d/99-x.conf", "[Unit]\nDefaultDependencies=no\n")
+        got = self.v()
+        f.unlink()
+        self.assertEqual(got, [self.early_msg("agentos-link.service")])
+        # #6158: any other form is refused, naming its line, as config_parse_bool may keep the value before it.
+        for word in ("false", "0", "off", "No", ""):
             with self.subTest(word):
                 f = write(self.root, SYSTEM + "agentos-link.service.d/99-x.conf", "[Unit]\nDefaultDependencies=%s\n"
                           % word)
                 got = self.v()
                 f.unlink()
-                self.assertEqual(got, [self.early_msg("agentos-link.service")])
+                self.assertEqual(got, ["agentos-link.service: DefaultDependencies=%s in %sagentos-link.service.d/99-x.conf"
+                                       " is a form the tree check does not read (use yes or no); the tree check never "
+                                       "passes what it cannot read (STO-2c)" % (word, SYSTEM)])
         # Control: the same unit with the "-" passes; and back to default dependencies, an early unit's "-"
         # is refused.
         write(self.root, SYSTEM + "agentos-link.service.d/99-x.conf", "[Unit]\nDefaultDependencies=no\n"
@@ -184,6 +195,26 @@ class BusMaskTest(unittest.TestCase):
         self.assertEqual(self.v(), ["agentos-inbound.service: InaccessiblePaths=-/run/dbus gives no mask while the "
                                     "directory is missing; with default dependencies the unit starts after "
                                     "dbus.socket makes it (#5818)"])
+
+    def test_an_order_after_basic_target_is_not_early(self):
+        # #6178: a unit that drops the default dependencies but is ordered after basic.target or sockets.target
+        # starts after dbus.socket, so its entry takes no "-"; without that order it takes one.
+        for after in ("basic.target", "sockets.target", "x.service sockets.target"):
+            with self.subTest(after):
+                f = write(self.root, SYSTEM + "agentos-link.service.d/99-x.conf",
+                          "[Unit]\nDefaultDependencies=no\nAfter=%s\n" % after)
+                got = self.v()
+                f.unlink()
+                self.assertEqual(got, [])
+        for name in LATE_NO_DEFAULTS:
+            with self.subTest(name):
+                f = self.root / SYSTEM / name
+                saved = f.read_text()
+                self.assertIn(" basic.target ", saved)
+                f.write_text(saved.replace(" basic.target ", " ", 1))
+                got = self.v()
+                f.write_text(saved)
+                self.assertEqual(got, [self.early_msg(name)])
 
     def test_a_bus_unit_keeps_the_rest_of_the_mask(self):
         # #6037: the transient kernel-reboot unit has only drop-ins; its keeper list is weighed like the
