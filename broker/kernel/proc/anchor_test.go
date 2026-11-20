@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -554,10 +555,16 @@ func TestTIM1AFreshSampleRaisesEarliest(t *testing.T) {
 	if r := w(); r.Earliest < last || r.Earliest >= last+key.DayMS {
 		t.Fatalf("the start read %+v, not the log's %d", r, last)
 	}
-	// chronyd syncs: true time is the gap past the log.
+	// chronyd syncs: true time is the gap past the log. Earliest rises to
+	// the sample's bound and runs on from that read, not from the start.
+	time.Sleep(50 * time.Millisecond)
 	src, at = kernel.Reading{Earliest: last + gap, Latest: last + gap + 10}, 7
 	if r := w(); r.Earliest != last+gap || r.Latest != last+gap+10 {
 		t.Fatalf("a first sample read %+v: want Earliest raised to %d", r, last+gap)
+	}
+	risen := time.Now()
+	if r := w(); r.Earliest > last+gap+time.Since(risen).Milliseconds()+1 {
+		t.Fatalf("after the rise read %+v: Earliest ran on from the start, not the rise", r)
 	}
 	// The same sample, then the zero Stamp, following small box steps: no rise.
 	for _, a := range []byte{7, 0} {
