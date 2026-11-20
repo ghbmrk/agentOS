@@ -523,3 +523,92 @@ func TestGmailSendersStepRefusesABadIDOrAnotherMessage(t *testing.T) {
 		}
 	}
 }
+
+// readMail is one read mail scriptedReadMail lists: its From and
+// Message-ID ("" leaves the field out) and its arrival in seconds.
+type readMail struct {
+	id, from, mid string
+	at            int64
+}
+
+// scriptedReadMail answers Opened's one page of read mail with mails.
+func scriptedReadMail(t *testing.T, mails ...readMail) *Gmail {
+	t.Helper()
+	g, _ := scriptedGmail(t, func(r *http.Request) (int, string) {
+		var ids []string
+		for _, m := range mails {
+			ids = append(ids, `{"id":"`+m.id+`"}`)
+			if r.URL.Path != scriptedRoot+"/messages/"+m.id {
+				continue
+			}
+			var hs []string
+			if m.from != "" {
+				hs = append(hs, `{"name":"From","value":"`+m.from+`"}`)
+			}
+			if m.mid != "" {
+				hs = append(hs, `{"name":"Message-ID","value":"`+m.mid+`"}`)
+			}
+			return 200, fmt.Sprintf(`{"id":"%s","internalDate":"%d","payload":{"headers":[%s]}}`, m.id, m.at*1000, strings.Join(hs, ","))
+		}
+		return 200, `{"messages":[` + strings.Join(ids, ",") + `]}`
+	})
+	return g
+}
+
+// A read mail with no From opens no one and is not logged.
+func TestGmailOpenedPassesOverAMailWithoutFrom(t *testing.T) {
+	g := scriptedReadMail(t, readMail{"m1", "", "<1@x.test>", 1790812800})
+	got, kept, err := g.Opened(context.Background(), "2026-10-19", SeenLog{})
+	if err != nil || len(got) != 0 || len(kept.Seen) != 0 {
+		t.Fatalf("Opened over a mail without From = %v, %+v, %v", got, kept, err)
+	}
+}
+
+// A read that a sender's charge fills drops what it logged, oldest arrival
+// first, until it is back within openedMax: three logged mails fit, a fourth
+// sender (on a mail with no Message-ID, so nothing more is logged) does not,
+// and the full read hands back the two newest.
+func TestGmailOpenedFullDropsTheOldestFirst(t *testing.T) {
+	defer func(n int) { openedMax = n }(openedMax)
+	from := func(i int) string { return fmt.Sprintf("m%d@x.test", i) }
+	// Each logged mail is charged its entry and its sender's cost.
+	openedMax = 3 * (2*len(from(1)) + entryCost + senderCost)
+	for range 20 { // the log is a map: drop order must not hang on it
+		mails := []readMail{{"m4", from(4), "", 1790812804}}
+		for _, i := range []int{3, 1, 2} {
+			mails = append(mails, readMail{fmt.Sprintf("m%d", i), from(i), fmt.Sprintf("<%d@x.test>", i), 1790812800 + int64(i)})
+		}
+		g := scriptedReadMail(t, append(mails[1:], mails[0])...)
+		got, kept, err := g.Opened(context.Background(), "2026-10-19", SeenLog{})
+		var froms []string
+		for _, s := range kept.Seen {
+			froms = append(froms, s.From)
+		}
+		if !errors.Is(err, ErrTooMuchReadMail) || got != nil || !slices.Equal(froms, []string{from(2), from(3)}) {
+			t.Fatalf("full Opened = %v, %v, kept %v; want the two newest kept", got, err, froms)
+		}
+	}
+}
+
+// evict with nothing left to drop stops, whatever it was charged.
+func TestOpenedEvictStopsWithNothingToDrop(t *testing.T) {
+	o := &opened{kept: openedMax + 1, log: map[[16]byte]logged{}}
+	o.evict()
+	if o.kept != openedMax+1 {
+		t.Fatalf("evict changed the charge to %d", o.kept)
+	}
+}
+
+// A senders mail with no From counts for no one.
+func TestGmailSendersStepPassesOverAMailWithoutFrom(t *testing.T) {
+	g, _ := scriptedGmail(t, func(r *http.Request) (int, string) {
+		if r.URL.Path == scriptedRoot+"/messages" {
+			return 200, `{"messages":[{"id":"m1"}]}`
+		}
+		return 200, `{"id":"m1","internalDate":"5000","labelIds":["INBOX"],"payload":{"headers":[{"name":"To","value":"a@x.test"}]}}`
+	})
+	var r SendersRecord
+	if more, err := g.SendersStep(context.Background(), &r, 10); more || err != nil || len(r.Senders) != 0 {
+		t.Fatalf("step over a mail without From = %v, %v, senders %v", more, err, r.Senders)
+	}
+}
