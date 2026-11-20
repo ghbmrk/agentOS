@@ -1399,17 +1399,16 @@ def echo_ok(stream):
 
     def scan(whole):
         nonlocal last
-        if ran := GO_OK.findall(whole.decode("utf-8", "replace")):
-            last = ran[-1]
+        if ok := GO_OK.search(whole.decode("utf-8", "replace")):
+            last = ok[1]
 
     while chunk := stream.read1(1 << 16):
         sys.stderr.write(text.decode(chunk))
         sys.stderr.flush()
-        *ends, rest = chunk.split(b"\n")
-        for part in ends:
-            scan(line + part)
-            line = b""
-        line = (line + rest)[:OK_KEEP]
+        *ends, rest = (line + chunk).split(b"\n")
+        for part in filter(None, ends):  # a bare newline is no `ok` line: a flood of them stays cheap (#6236)
+            scan(part)
+        line = rest[:OK_KEEP]
     sys.stderr.write(text.decode(b"", final=True))
     sys.stderr.flush()
     scan(line)

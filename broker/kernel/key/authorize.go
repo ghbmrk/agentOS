@@ -64,6 +64,10 @@ type Context struct {
 	Late    int64
 	Changes *Changes
 	Ledger  Ledger
+	// Rung is the rung the owner events behind a metered call reached,
+	// which Spend checks as Authorize checks a step's own (CH-3). Unset it
+	// is P0, so a key that asks for more funds nothing.
+	Rung Proof
 }
 
 // Refusal codes.
@@ -263,17 +267,21 @@ func add(a, b int64) (int64, bool) {
 }
 
 // Spend is the check a metered call (a model call, a paid API call) makes
-// before it runs: the key is live, serves task when it serves one, and its
-// spend caps hold for amount more under task (LOG-7, KRN-5). Spend is
-// authorized by the funding key's spend caveat, whatever clerk the key was
-// issued for, and a key with no spend cap funds nothing. The kernel runs it in AdmitSpend, the check a clerk makes before a
-// call; Meter records usage and does not run it.
+// before it runs: the key is live, serves task when it serves one, the call's
+// rung (Context.Rung) meets the key's (CH-3), and its spend caps hold for
+// amount more under task (LOG-7, KRN-5). Spend is authorized by the funding
+// key's spend caveat, whatever clerk the key was issued for, and a key with
+// no spend cap funds nothing. The kernel runs it in AdmitSpend, the check a
+// clerk makes before a call; Meter records usage and does not run it.
 func (v *Verified) Spend(task string, amount int64, c Context) *Refusal {
 	if r := v.Live(c); r != nil {
 		return r
 	}
 	if r := v.task(task); r != nil {
 		return r
+	}
+	if c.Rung < v.Limits.Rung {
+		return refuse(RRung, "%v, the key asks %v", c.Rung, v.Limits.Rung)
 	}
 	if amount < 0 {
 		return refuse(RMalformed, "negative amount")

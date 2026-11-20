@@ -24,10 +24,10 @@ func TestOwnerEventRungMeetsTheKeysRung(t *testing.T) {
 	}
 	must(t, r.k.OpenTask(0, "top", key.P4))
 	must(t, r.k.OpenTask(0, "t1", key.P1))
-	if got := r.k.State().Rung("t1", false); got != key.P1 {
+	if got := r.k.State().Rung("t1", key.Key{}, false); got != key.P1 {
 		t.Fatalf("task rung %v, want P1", got)
 	}
-	if got := r.k.State().Rung("t1", true); got != key.P3 {
+	if got := r.k.State().Rung("t1", key.Key{}, true); got != key.P3 {
 		t.Fatalf("a code approval raises to %v, want P3 (CH-10)", got)
 	}
 
