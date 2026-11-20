@@ -507,6 +507,91 @@ class PremergeTest(unittest.TestCase):
                 self.commit("pick one")
                 self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
 
+    RECFILE = "broker/k/MUTANTS-EQUIVALENT"
+
+    @staticmethod
+    def entry(stmt, reason="proof", col=None):
+        """One synthetic MUTANTS-EQUIVALENT entry (tools/mutgate.py RECORD), keyed by `stmt`."""
+        import json
+        e = {"file": "k.go", "mutant": "STATEMENT_DELETION", "func": "F", "decl": "0" * 64, "stmt": [stmt], "at": 0,
+             "after": "x := 1", "occurrence": [1, 1], "reason": reason, "accepted": "#1"}
+        return json.dumps(e | ({"col": col} if col else {})) + "\n"
+
+    def records_merge(self, main, pr, base=""):
+        """#6272's shape: main and the PR each append entries to one MUTANTS-EQUIVALENT under the repository's own
+        .gitattributes; returns the reviewed head, with main merged into the PR by the union driver."""
+        git(self.r, "checkout", "-q", "main")
+        self.write(".gitattributes", (ROOT / ".gitattributes").read_text())
+        (self.r / "broker/k").mkdir(parents=True)
+        head = "# Mutant-equivalent proofs for broker/k.\n"
+        self.write(self.RECFILE, head + base)
+        self.commit("record")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write(self.RECFILE, head + pr)
+        reviewed = self.commit("pr appends")
+        self.merge_main_after(lambda: self.write(self.RECFILE, head + main))
+        return reviewed
+
+    def test_records_both_appended_merge_by_union_and_read_same(self):
+        # #6314: #6262 and #6272 both appended to one record; the add/add conflict's hand merge voided every accept.
+        a, m, p = self.entry("a()"), self.entry("m()"), self.entry("p()")
+        reviewed = self.records_merge(a + m, a + p, a)
+        self.assertEqual(self.read(self.RECFILE).count("\n"), 4, "the union driver was meant to keep both entries")
+        self.assertEqual(self.check(reviewed), [])
+        for rows in (a + m + p, a + p + m):
+            with self.subTest(order=rows):  # by hand, either side first: each side's own order kept
+                self.write(self.RECFILE, "# Mutant-equivalent proofs for broker/k.\n" + rows)
+                self.commit("resolve by hand")
+                self.assertEqual(self.check(reviewed), [])
+        self.write(self.RECFILE, "# Mutant-equivalent proofs for broker/k.\n" + m + a + p)  # main's own order broken
+        self.commit("reorder main's entries")
+        self.assertEqual(self.check(reviewed), [self.RECFILE])
+
+    def test_records_union_with_a_pr_entry_changed_dropped_or_reordered_is_changed(self):
+        a, b, m, p = self.entry("a()"), self.entry("b()"), self.entry("m()"), self.entry("p()")
+        reviewed = self.records_merge(a + b + m, a + b + p, a + b)
+        self.assertEqual(self.check(reviewed), [])
+        for rows in (a + b + m + self.entry("p()", "proof, edited"), a + b + m, b + a + p + m, a + b + p,
+                     a + b + p + m + self.entry("z()"), a + b + m + p + m):
+            with self.subTest(wrong=rows):  # PR entry edited, dropped, reordered; main's dropped; one added; one doubled
+                self.write(self.RECFILE, "# Mutant-equivalent proofs for broker/k.\n" + rows)
+                self.commit("another resolution")
+                self.assertEqual(self.check(reviewed), [self.RECFILE])
+
+    def test_records_union_that_keeps_an_edited_entry_twice_is_changed(self):
+        # The PR rewrote a's proof next to main's append: the union keeps both copies, one key twice.
+        a, m = self.entry("a()"), self.entry("m()")
+        reviewed = self.records_merge(a + m, self.entry("a()", "proof, edited"), a)
+        self.assertEqual(self.read(self.RECFILE).count('"a()"'), 2, "the union driver was meant to keep both")
+        self.assertEqual(self.check(reviewed), [self.RECFILE])
+        self.write(self.RECFILE, "# Mutant-equivalent proofs for broker/k.\n" + self.entry("a()", "proof, edited") + m)
+        self.commit("drop the stale entry")
+        self.assertEqual(self.check(reviewed), [])
+
+    def test_records_union_that_brings_back_a_deleted_entry_is_changed(self):
+        # The PR killed a's mutant and deleted its entry; the union brings it back beside main's append.
+        a, m = self.entry("a()"), self.entry("m()")
+        reviewed = self.records_merge(a + m, "", a)
+        self.assertIn('"a()"', self.read(self.RECFILE), "the union driver was meant to keep a")
+        self.assertEqual(self.check(reviewed), [self.RECFILE])
+        self.write(self.RECFILE, "# Mutant-equivalent proofs for broker/k.\n" + m)
+        self.commit("drop the stale entry")
+        self.assertEqual(self.check(reviewed), [])
+
+    def test_records_both_appending_one_key_is_changed(self):
+        # Two PRs proved the same mutant: the union is clean but mutgate would read one site twice.
+        a = self.entry("a()")
+        reviewed = self.records_merge(self.entry("d()", "main's proof"), self.entry("d()", "pr's proof"))
+        self.assertEqual(self.check(reviewed), [self.RECFILE])
+        self.setUp()
+        reviewed = self.records_merge(a, self.entry("a()", col=3), "")  # another column is another key
+        self.assertEqual(self.check(reviewed), [])
+
+    def test_records_union_with_a_mode_flip_is_changed(self):
+        reviewed = self.records_merge(self.entry("m()"), self.entry("p()"))
+        self.chmod_commit(self.RECFILE)
+        self.assertEqual(self.check(reviewed), [self.RECFILE])
+
     def test_a_clean_merge_that_repeats_a_decision_id_is_changed(self):
         # No union driver: both sides add D-9 far apart, git merges cleanly, doclint would fail the head.
         rows = "".join(f"| D-{i} | d{i} |\n" for i in range(1, 8))
