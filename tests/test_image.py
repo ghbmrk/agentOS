@@ -2614,7 +2614,7 @@ class ConfigTest(unittest.TestCase):
                 "Packages", "Release", "RemoveFiles", "RepartDirectories", "Repositories",
                 "RootPassword", "Seed", "ShimBootloader", "SplitArtifacts", "Timezone",
                 "UnifiedKernelImages", "WithDocs"},
-            MK / "initrd/mkosi.conf": {"RemoveFiles"},
+            MK / "initrd/mkosi.conf": {"FinalizeScripts", "RemoveFiles"},
         }
         for conf, allowed in keys.items():
             settings, cur = [], None
@@ -2637,6 +2637,9 @@ class ConfigTest(unittest.TestCase):
                 self.assertIn(k, allowed, "%s: key not on the list; %s" % (where, why))
                 if k == "InitrdInclude":
                     self.assertEqual(v, ["initrd/"], "%s: %s" % (where, why))
+                # #6149: the initrd's run adds the image's own check, and no other script.
+                if k == "FinalizeScripts":
+                    self.assertEqual(v, ["../mkosi.finalize"], "%s: %s" % (where, why))
                 # #4647: mkosi hands Environment= to apt-get and to mkosi.postinst and mkosi.finalize, so
                 # its value is pinned whole: repart's mkfs options for project quotas, nothing else.
                 if k == "Environment":
@@ -6163,13 +6166,13 @@ class TreeAccessTest(unittest.TestCase):
     (tree_lstat, tree_listdir, tree_readlink, tree_read, and tree_xattrs, #1803), none of which follows
     a link on the build host, in the two functions that read the repository's allowlists (tmpfiles.allow,
     exec.allow), not the tree, in script_net_dev, which reads the script sandbox's /proc (#4647), and in
-    pinned_packages and run_snapshots, which read the apt lists and config JSON mkosi mounts beside the
+    pinned_packages and run_config, which read the apt lists and config JSON mkosi mounts beside the
     tree (#4690). Only
     Conf.content (through conf_chase) and the key scan may read a file's bytes. Any other function that
     calls a file-reading or stat API fails here, however it names it."""
     # REQ: HW-1, DEV-2
     ALLOWED = frozenset(("tree_lstat", "tree_listdir", "tree_readlink", "tree_read", "tree_xattrs",
-                         "allow_path", "allow_entries", "script_net_dev", "pinned_packages", "run_snapshots", "repart_build",
+                         "allow_path", "allow_entries", "script_net_dev", "pinned_packages", "run_config", "repart_build",
                          "build_definitions"))
     READERS = {"tree_read": frozenset(("Conf.content", "has_key"))}
     SOURCE = (MK / "mkosi.finalize").read_text()
@@ -8069,12 +8072,18 @@ class MkosiRunBoundTest(unittest.TestCase):
             with self.subTest(text=text, sec=sec):
                 conf.write_text(text)
                 with unittest.mock.patch.dict(os.environ, {"MKOSI_CONFIG": str(conf), "AGENTOS_SECURITY_SNAPSHOT": sec}):
-                    self.assertEqual(check.run_snapshots(), want)
-        conf.write_text("{")
-        with unittest.mock.patch.dict(os.environ, {"MKOSI_CONFIG": str(conf), "AGENTOS_SECURITY_SNAPSHOT": self.SECURITY}):
-            m, s, out = check.run_snapshots()
-            self.assertIsNone(m)
-            self.assertIn("mkosi's config JSON: unreadable (", out[0])
+                    got, bad = check.run_config()
+                    self.assertEqual(bad, [])
+                    self.assertEqual(check.run_snapshots(got), want)
+        for text in ("{", "[]"):
+            with self.subTest(text=text):
+                conf.write_text(text)
+                with unittest.mock.patch.dict(os.environ, {"MKOSI_CONFIG": str(conf)}):
+                    got, bad = check.run_config()
+                self.assertEqual(got, {})
+                self.assertEqual(len(bad), 1)
+                self.assertTrue(bad[0].startswith("mkosi's config JSON: unreadable ("), bad)
+                self.assertTrue(bad[0].endswith(why), bad)
 
     def unpack(self, members):
         """Run image.yml's "Unpack the stage" step on a tar of MEMBERS ({name: bytes, or None for a directory,
@@ -8252,6 +8261,80 @@ class MkosiRunBoundTest(unittest.TestCase):
         self.assertEqual(check.violations(root), [
             "%s: a Debian package file; the image's packages come only from mkosi's signature-checked apt run (#4690)"
             % n for n in ("opt/z.ddeb", "usr/lib/agentos/x.deb", "var/cache/apt/archives/y.udeb")])
+
+
+    # REQ: HW-10
+    def test_the_default_initrd_runs_the_package_check(self):
+        # #6149: mkosi v24.3 builds the default initrd in a sub-run; initrd/mkosi.conf adds this check to its
+        # finalize scripts, after the initrd's own (mkosi runs the discovered script first, then FinalizeScripts=).
+        conf = ini(MK / "initrd/mkosi.conf")["Content"]
+        self.assertEqual(conf["FinalizeScripts"].split(), ["../mkosi.finalize"])
+        self.assertEqual((MK / "initrd" / conf["FinalizeScripts"]).resolve(), (MK / "mkosi.finalize").resolve())
+        self.assertTrue(os.access(MK / "initrd/mkosi.finalize", os.X_OK))
+        # It reads the status copy the initrd's postinst writes: mkosi-initrd removes var/lib/dpkg first.
+        drop = load("drop_6149", MK / "drop.py")
+        self.assertEqual(check.INITRD_STATUS, drop.INITRD_STATUS)
+        self.assertTrue(os.path.samefile(MK / "initrd/mkosi.postinst", MK / "drop.py"))
+        # Every tree that includes this initrd hands its run's security snapshot to mkosi, or the check refuses
+        # the build: the core's one mkosi line, and the enforcer's (its initrd is this one).
+        includers = sorted(str(c.relative_to(ROOT)) for top in ("image", "spikes")
+                           for c in (ROOT / top).glob("**/mkosi.conf")
+                           if ini(c).has_option("Config", "InitrdInclude")
+                           and (c.parent / ini(c)["Config"]["InitrdInclude"]).resolve() == (MK / "initrd").resolve())
+        self.assertEqual(includers, ["image/enforcer/mkosi/mkosi.conf", "image/mkosi/mkosi.conf"])
+        self.assertIn('--environment=AGENTOS_SECURITY_SNAPSHOT="$AGENTOS_SECURITY_SNAPSHOT"', self.MKOSI_LINE)
+        self.assertIn('--environment=AGENTOS_SECURITY_SNAPSHOT="$SECURITY_SNAPSHOT" --output-dir "$OUT" build',
+                      (IMG / "enforcer/build.sh").read_text())
+
+    def initrd_run(self, root, lists, security=None, image="default-initrd"):
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        conf = d / "config.json"
+        conf.write_text(json.dumps({"Image": image, "Mirror": "https://snapshot.debian.org/archive/debian/%s/" % self.MIRROR}))
+        return self.run_main_as_mkosi(root, lists, conf, security or self.SECURITY)
+
+    # REQ: HW-10
+    def test_initrd_run_refuses_a_package_from_no_pinned_index(self):
+        # #6149: in the initrd's run (its config JSON's Image), main() holds the initrd's status copy to this
+        # run's two snapshots and refuses any package file; the image's tree checks are not the initrd's.
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        pkg = lambda name: ("Package: %s\nVersion: 1\nArchitecture: amd64\n" % name).encode()
+        lists = self.lists({self.INDEX: pkg("systemd"), self.SEC: pkg("libssl3t64"),
+                            self.INDEX.replace(self.MIRROR, "20200101T000000Z"): pkg("evil")})
+        why = "the image's packages come only from the pinned, signature-checked snapshot sources (#4690)"
+        S = "usr/share/agentos/initrd.dpkg-status"
+        installed = lambda *names: self.status(*((n, "installed", "amd64", "1") for n in names)).decode()
+        # No status copy: refused, never passed.
+        code, out = self.initrd_run(root, lists)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out, "image check: initrd: %s: unreadable (No such file or directory); %s\n" % (S, why))
+        write(root, S, installed("systemd", "libssl3t64"))
+        # A bare initrd tree passes: none of the image's own checks run on it.
+        self.assertNotEqual(check.violations(root), [])
+        self.assertEqual(self.initrd_run(root, lists), (0, "image check: initrd: clean\n"))
+        # The dpkg status the image's run reads is not the initrd's.
+        write(root, "var/lib/dpkg/status", installed("evil"))
+        self.assertEqual(self.initrd_run(root, lists), (0, "image check: initrd: clean\n"))
+        write(root, S, installed("systemd", "libssl3t64", "evil"))
+        code, out = self.initrd_run(root, lists)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out.splitlines(), ["image check: initrd: %s: evil 1 (amd64) is installed, but no pinned Packages "
+                                            "index lists that version; %s" % (S, why)])
+        write(root, S, installed("systemd", "libssl3t64"))
+        code, out = self.initrd_run(root, lists, security="20261114T040404Z")
+        self.assertNotEqual(code, 0)
+        self.assertIn("image check: initrd: %s: libssl3t64 1 (amd64) is installed, but no pinned" % S, out)
+        write(root, "var/cache/x.deb", "!<arch>\n")
+        code, out = self.initrd_run(root, lists)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out.splitlines(), ["image check: initrd: var/cache/x.deb: a Debian package file; the image's "
+                                            "packages come only from mkosi's signature-checked apt run (#4690)"])
+        # Any other Image is the image's own run: the whole tree check, on dpkg's own status.
+        code, out = self.initrd_run(root, lists, image=None)
+        self.assertNotEqual(code, 0)
+        self.assertIn("image check: var/lib/dpkg/status: evil 1 (amd64) is installed", out)
+        self.assertNotIn("image check: initrd", out)
 
 
 class IgnoredValueTest(unittest.TestCase):
