@@ -80,18 +80,30 @@ func (r *sendersRig) openCtx(t *testing.T, ctx context.Context) {
 func (r *sendersRig) full(t *testing.T) inbox.World {
 	t.Helper()
 	eventually(t, "the senders read through", func() bool { return r.h.world().History != nil })
-	r.idle()
+	r.idle(t)
 	return r.h.world()
 }
 
 // idle waits until no read or step of the host is in flight. A step keeps
 // its result in the world before it is counted, both under h.mu, and the
 // world takes no h.mu: so once the world shows a step's result, the step
-// is counted only after h.mu is taken.
-func (r *sendersRig) idle() {
-	r.h.mu.Lock()
-	r.h.idle()
-	r.h.mu.Unlock()
+// is counted only after h.mu is taken. A step that hangs fails the test by
+// name within eventually's deadline, not at the go test timeout (#3580).
+func (r *sendersRig) idle(t *testing.T) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		r.h.mu.Lock()
+		r.h.idle()
+		r.h.mu.Unlock()
+		close(done)
+	}()
+	within := raceScale * 5 * time.Second
+	select {
+	case <-done:
+	case <-time.After(within):
+		t.Fatalf("the host is not idle within %v: a read or step hangs", within)
+	}
 }
 
 // blank fails unless the world has none of the three fields.
@@ -297,7 +309,7 @@ func TestSenderRecordIsSealedAndIncremental(t *testing.T) {
 	srv.DeliverAt("INBOX", day(9), mailFrom("new@new.test", "<n1@new.test>"))
 	r.h.listing(true) // a mail read
 	eventually(t, "the new sender", func() bool { return slices.Contains(r.h.world().KnownSenders, "new@new.test") })
-	r.idle()
+	r.idle(t)
 	if got := r.steps.Load(); got != n+1 || r.more.Load() {
 		t.Fatalf("one new mail at one mail a step: %d steps, more %v; want 1 step and none left", got-n, r.more.Load())
 	}
