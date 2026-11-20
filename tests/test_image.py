@@ -2614,7 +2614,7 @@ class ConfigTest(unittest.TestCase):
                 "Packages", "Release", "RemoveFiles", "RepartDirectories", "Repositories",
                 "RootPassword", "Seed", "ShimBootloader", "SplitArtifacts", "Timezone",
                 "UnifiedKernelImages", "WithDocs"},
-            MK / "initrd/mkosi.conf": {"RemoveFiles"},
+            MK / "initrd/mkosi.conf": {"FinalizeScripts", "RemoveFiles"},
         }
         for conf, allowed in keys.items():
             settings, cur = [], None
@@ -2637,6 +2637,9 @@ class ConfigTest(unittest.TestCase):
                 self.assertIn(k, allowed, "%s: key not on the list; %s" % (where, why))
                 if k == "InitrdInclude":
                     self.assertEqual(v, ["initrd/"], "%s: %s" % (where, why))
+                # #6149: the initrd's run adds the image's own check, and no other script.
+                if k == "FinalizeScripts":
+                    self.assertEqual(v, ["../mkosi.finalize"], "%s: %s" % (where, why))
                 # #4647: mkosi hands Environment= to apt-get and to mkosi.postinst and mkosi.finalize, so
                 # its value is pinned whole: repart's mkfs options for project quotas, nothing else.
                 if k == "Environment":
