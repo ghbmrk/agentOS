@@ -114,6 +114,7 @@ Install: go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
 """
 import argparse
 import bisect
+import codecs
 import collections
 import concurrent.futures
 import contextlib
@@ -1386,6 +1387,34 @@ def covered_by(pkg, names, tmp, broker=None):
 GO_OK = re.compile(r"(?m)^ok \s*\S+\s+(\d+(?:\.\d+)?)s(?:\s|$)")
 
 
+OK_KEEP = 4096  # bytes of a line echo_ok holds: an `ok` line's match ends within its first hundred
+
+
+def echo_ok(stream):
+    """Copies `go test`'s stdout to stderr as it arrives (`plan` prints the matrix on stdout, #4961)
+    and returns its last `ok` line's seconds, or None. It holds one chunk and the first OK_KEEP bytes
+    of the current line, so a test that floods its output costs no memory and shows live (#6232)."""
+    text = codecs.getincrementaldecoder("utf-8")("replace")
+    line, last = b"", None
+
+    def scan(whole):
+        nonlocal last
+        if ok := GO_OK.search(whole.decode("utf-8", "replace")):
+            last = ok[1]
+
+    while chunk := stream.read1(1 << 16):
+        sys.stderr.write(text.decode(chunk))
+        sys.stderr.flush()
+        *ends, rest = (line + chunk).split(b"\n")
+        for part in filter(None, ends):  # a bare newline is no `ok` line: a flood of them stays cheap (#6236)
+            scan(part)
+        line = rest[:OK_KEEP]
+    sys.stderr.write(text.decode(b"", final=True))
+    sys.stderr.flush()
+    scan(line)
+    return last
+
+
 def timed_cover(pkg, names, tmp, broker=None, code=None):
     """covered_by's (lines, seconds, problem): seconds is how long its test binary ran, so a plan
     that ran the whole suite under coverage sizes the shards from that run, not a fourth (#6155).
@@ -1398,16 +1427,13 @@ def timed_cover(pkg, names, tmp, broker=None, code=None):
     if names is not None:
         cmd += ["-run", "^(" + "|".join(names) + ")$"]
     began = time.monotonic()
-    run = subprocess.run([*cmd, "."], cwd=broker / pkg, stdout=subprocess.PIPE)
-    # Its output goes to stderr: `plan` prints the matrix on stdout (#4961).
-    sys.stderr.write(out := run.stdout.decode("utf-8", "replace"))
-    sys.stderr.flush()
+    with subprocess.Popen([*cmd, "."], cwd=broker / pkg, stdout=subprocess.PIPE) as run:
+        ran = echo_ok(run.stdout)
     if run.returncode or not profile.exists():
         return None, None, f"broker/{pkg}/'s tests {'(all)' if names is None else names} fail under -coverprofile"
     # `go test`'s own `ok` line times the test binary's run alone, as suite_seconds times it: the wall
     # time adds the build and vet, which a cold cache makes many times a fast suite (#6162).
-    ran = GO_OK.findall(out)
-    seconds = float(ran[-1]) if ran else time.monotonic() - began
+    seconds = float(ran) if ran else time.monotonic() - began
     if (lister := lister_in(tmp)) is None:
         return None, None, "cannot build tools/mutgate_stmts.go"
     try:

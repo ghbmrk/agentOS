@@ -1965,6 +1965,129 @@ class TestOnly(unittest.TestCase):
         for none in ("FAIL\tagentos/broker/hint\t1.0s\n", "ok  \tagentos/broker/hint\t(cached)\n", "  ok  \tp\t1s\n"):
             self.assertEqual(mutgate.GO_OK.findall(none), [], none)
 
+    def test_echo_ok_streams_and_reads_the_last_ok_line(self):
+        # MUT-plan-timing-skew-fu (#6232): stdout reaches stderr chunk by chunk (`plan`'s stdout is
+        # the matrix, #4961), split lines and characters join, and the last `ok` line's seconds stand.
+        from unittest import mock
+
+        class Chunks:
+            def __init__(self, chunks):
+                self.chunks = list(chunks)
+
+            def read1(self, n):
+                return self.chunks.pop(0) if self.chunks else b""
+
+        cases = (
+            ([b"ok  \tagentos/broker/x\t9s\nlog \xc3", b"\xa9\nok  \tagentos/broker/hint\t1.", b"5s\tcoverage: 5%\n"], "1.5"),
+            ([b"ok  \tp\t9s\nok  \tp\t2s"], "2"),  # a last line with no newline
+            ([b"ok  \tp\t3s\t" + b"x" * 200000 + b"\n"], "3"),  # a long line's head still reads
+            ([b"x" * 200000 + b"ok  \tp\t4s\n"], None),  # an `ok` mid-line is no summary line
+            ([b"FAIL\tp\t1s\n"], None),
+            ([b"x\xc3"], None),  # a cut last character still echoes
+            ([], None),
+        )
+        for chunks, want in cases:
+            with self.subTest(want=want), mock.patch.object(sys, "stderr", io.StringIO()) as err:
+                self.assertEqual(mutgate.echo_ok(Chunks(chunks)), want)
+                self.assertEqual(err.getvalue(), b"".join(chunks).decode("utf-8", "replace"))
+
+    def test_echo_ok_holds_no_flood(self):
+        # MUT-plan-timing-skew-fu (#6232): a test flooding 64 MiB, in lines or in one line, costs
+        # echo_ok about a chunk, where buffering the output whole raised MemoryError in the plan job.
+        import tracemalloc
+        from unittest import mock
+
+        class Flood:
+            def __init__(self, piece, tail):
+                self.left, self.piece, self.tail = 1024, piece, tail
+
+            def read1(self, n):
+                self.left -= 1
+                return self.piece if self.left > 0 else (self.tail if self.left == 0 else b"")
+
+        class Sink:
+            seen = 0
+
+            def write(self, text):
+                Sink.seen += len(text)
+
+            def flush(self):
+                pass
+
+        for piece in (b"x" * 65536, (b"x" * 63 + b"\n") * 1024):
+            with self.subTest(lines=piece.count(b"\n")), mock.patch.object(sys, "stderr", Sink()):
+                Sink.seen = 0
+                tracemalloc.start()
+                try:
+                    got = mutgate.echo_ok(Flood(piece, b"\nok  \tagentos/broker/hint\t7.5s\n"))
+                    _, peak = tracemalloc.get_traced_memory()
+                finally:
+                    tracemalloc.stop()
+                self.assertEqual(got, "7.5")
+                self.assertEqual(Sink.seen, 1023 * 65536 + 31)
+                self.assertLess(peak, 4 << 20)
+
+    def test_echo_ok_scans_no_bare_newline(self):
+        # MUT-plan-timing-skew-fu2 (#6236): a flood of bare newlines reaches no regex search (each
+        # cost about 90 ns a byte), lines split at a chunk's edge still join, and the last `ok` line
+        # stands. The one search past the lines is echo_ok's read of its unfinished last line.
+        from unittest import mock
+
+        class Chunks:
+            def __init__(self, chunks):
+                self.chunks = list(chunks)
+
+            def read1(self, n):
+                return self.chunks.pop(0) if self.chunks else b""
+
+        flood = b"\n" * 65536
+        cases = (
+            ([b"ok  \tp\t1", b"s" + flood, flood, b"ok  \tp\t7.5s" + flood, flood], "7.5", 3),
+            ([b"ok  \tp\t2s", flood], "2", 2),  # a chunk opening with a newline ends the carried line
+            ([flood, b"x\n" + flood + b"ok  \tp\t3s"], "3", 2),
+            ([flood, flood], None, 1),
+        )
+        for chunks, want, searches in cases:
+            with self.subTest(want=want), mock.patch.object(sys, "stderr", io.StringIO()), \
+                    mock.patch.object(mutgate, "GO_OK", wraps=mutgate.GO_OK) as go_ok:
+                self.assertEqual(mutgate.echo_ok(Chunks(chunks)), want)
+                self.assertEqual(go_ok.search.call_count, searches)
+
+    def test_timed_cover_echoes_live_and_times_the_last_ok_line(self):
+        # MUT-plan-timing-skew-fu (#6232): a `go` that prints another `ok` line, then waits 2 s
+        # before the real run: that line reaches stderr at once, and the real run's own (last) `ok`
+        # line times the run, not the first one's 99 s.
+        from unittest import mock
+        real = shutil.which("go")
+
+        class Clock(io.StringIO):
+            first = None
+
+            def flush(self):  # stderr shows text only once flushed
+                if self.getvalue() and Clock.first is None:
+                    Clock.first = time.monotonic()
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(mutgate, "BROKER", pathlib.Path(d) / "broker"):
+            self.repo(d, TWO_TEST + "\n// changed\n")
+            tmp, shim = pathlib.Path(d) / "tmp", pathlib.Path(d) / "shim"
+            tmp.mkdir()
+            shim.mkdir()
+            (shim / "go").write_text(f'#!/bin/sh\nprintf \'ok  \\tagentos/broker/other\\t99s\\n\'\nsleep 2\nexec "{real}" "$@"\n')
+            (shim / "go").chmod(0o755)
+            with mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off", "PATH": f"{shim}:{os.environ['PATH']}"}), \
+                    mock.patch.object(sys, "stderr", Clock()) as err:
+                began = time.monotonic()
+                got, secs, problem = mutgate.timed_cover("hint", None, tmp)
+                ended = time.monotonic()
+            self.assertIsNone(problem)
+            self.assertIn("broker/hint/hint.go", got)
+            self.assertLess(secs, 2.0)
+            self.assertLess(Clock.first - began, 1.5)
+            self.assertGreaterEqual(ended - began, 2.0)
+            out = err.getvalue()
+            self.assertTrue(out.startswith("ok  \tagentos/broker/other\t99s\n"), out)
+            self.assertRegex(out, r"(?m)^ok  \s*\S*hint\s+[0-9.]+s")
+
     def test_test_only_diff_mutates_covered_lines(self):
         # #3607: a test-only diff passed every gate. TestUp still runs Up(20) but no longer checks
         # the clamp, so its guard survives; TestDown is untouched, so Down's line is no target.

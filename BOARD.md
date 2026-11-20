@@ -145,7 +145,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KEY-9-reach-inbound-offset | KEY-9-reach-inbound-offset: move kernel/proc's unreached client types out of the trusted core (KRN-2, D-310) | #5678 | queued (release; tier A; lane primary; after #5678's PR) |
 | KEY-9-reach-writer | KEY-9-reach-writer: write decl.reach entries from the owner graph's declarations (KEY-9, CLK-10) | #5672 | building (release; lane primary; brief briefs/KEY-9-reach-writer.md, PR #5950; after #5757) |
 | OWN-page-session-hold-control | OWN-page-session-hold-control: the owner sets the hold size on the page (CH-14; release of #5187) | #5187 | queued (tier A; needs brief) |
-| KEY-9-reach-read-copy | KEY-9-reach-read-copy: State.DeclReach returns a copy (KEY-9) | #5814 | queued (release; lane primary; from #5978 L3 finding 4) |
+| KEY-9-reach-read-copy | KEY-9-reach-read-copy: State.DeclReach returns a copy (KEY-9) | #5814 | building (release; lane primary; from #5978 L3 finding 4) |
 
 ## Identity, onboarding and setup (SPEC §11-12)
 
@@ -412,7 +412,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KEY-refusal-code-r1 | KEY-refusal-code-r1: #6032 release items (kernel.Refusal encoding, code-var reassignment lint, requal named set, skew note, guest.set types) | #6032 review | queued (release; tier A; after #6032) |
 | CORE-trim-headroom | CORE-trim-headroom: cut lines from the trusted core that do no work (test-only code, dead code, duplicates) to free headroom under the D-310 ceiling. Release. | D-310, #5732, #5757 | building (release; tier A) |
 | TIM-1-interval-fu-l | TIM-1-interval-fu-l: clock load checks the state file's owner and mode on read, and bounds saved same-boot alert times. Release; from #6057. | #6026, #6057 | building (release; tier A) |
-| CLK-seal-entry-swap-wipe-fu-d | CLK-seal-entry-swap-wipe-fu-d: the entry-count refusal runs before any slot or swap, withEntry checks its own entry again, and four comment lines are re-wrapped. Release; from #6049. | #6048, #6049 | building (release; tier A) |
 | VULN-node-openssl-pin | VULN-node-openssl-pin: bump the openclaw guest's node pin once a release bundles OpenSSL 3.5.10; until then the bundled entry records each fix's reach. Release; from #6074. | #5853, #6074 | queued (release; tier A; waits on a node release) |
 | MOR-writer-match-fu | MOR-writer-match-fu: the wipe test counts the clear's own unit as a writer except for its known clear action, not by skipping it by name. Release; from #6066. | #6043, #6066 | building (release; tier B) |
 | IMG-keyring-spikes-fu-b | IMG-keyring-spikes-fu-b: each mkosi tree's keyring pins are looked up per tree, Mirror and Repositories are pinned, and record-directory trees are handled. Release; from #6082. | #5983, #6082 | building (release; tier A) |
@@ -426,11 +425,32 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-mkosi-run-bound-fu-disk | IMG-mkosi-run-bound-fu-disk: image.yml's stage job keeps its own IMG-disk budget. Release; from #6148. | #4690 | queued (release; tier B) |
 | VULN-debian-r11 | VULN-debian-r11: accept openssl's and glibc's new no-fix Debian 13 advisories so image-vulncheck passes again. Release; seventh no-fix Debian round. | #2919, #5871 | building (release; tier A) |
 | IMG-mkosi-run-bound-fu-local | IMG-mkosi-run-bound-fu-local: a local-only wrapper makes a local image build one command, with the mkosi line pinned equal to CI's. Release; from #6148. | #4690, #6148 | queued (release; tier B) |
-| MUT-plan-timing-skew | MUT-plan-timing-skew: the plan's reused suite time matches what a shard runs | #6156 | building (release; tier A) |
 | CTL-agent-starting-status | CTL-agent-starting-status: STATUS during boot shows a starting line, not 'not set up' or 'waiting for memory'. Release; from #6136 (UX). | #5429, #6136 | queued (release; tier A) |
 | BROWSER-shell-cache-warning-cmd | BROWSER-shell-cache-warning-cmd: the headless-shell cache warning names the delete command for the bad entry. Release; rides the next ci.yml PR. | #6175, #6180 | queued (release; tier A; gate file) |
-| MUT-delete-covering-fu2 | MUT-delete-covering-fu2: pin failing-alone seconds in the half rule and the per_test retry; site_costs counts failing-alone tests | #6225 | building (release; tier A) |
-| MUT-plan-timing-skew-fu | MUT-plan-timing-skew-fu: timed_cover streams and bounds the test output; pin the last-match rule and the stderr echo | #6228 | queued (release; tier A) |
+| MUT-plan-timing-skew-fu2 | MUT-plan-timing-skew-fu2: echo_ok.scan uses search, not findall and [-1]; an empty-line guard bounds a newline flood | #6235 | building (release; tier A) |
+| MUT-kill-6032-clerk-inbox | MUT-kill-6032-clerk-inbox: kill the surviving mutants in broker/clerk/inbox (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-clerk-run | MUT-kill-6032-clerk-run: kill the surviving mutants in broker/clerk/run (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-clerk | MUT-kill-6032-clerk: kill the surviving mutants in broker/clerk (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-guest | MUT-kill-6032-guest: kill the surviving mutants in broker/guest (blocks #6032) | #6032 | queued (release; tier A) |
+| MUT-kill-6032-kernel-backuptarget | MUT-kill-6032-kernel-backuptarget: kill the surviving mutants in broker/kernel/backuptarget.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-edge | MUT-kill-6032-kernel-edge: kill the surviving mutants in broker/kernel/edge.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-erase | MUT-kill-6032-kernel-erase: kill the surviving mutants in broker/kernel/erase.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-kernelgo | MUT-kill-6032-kernel-kernelgo: kill the surviving mutants in broker/kernel/kernel.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-key | MUT-kill-6032-kernel-key: kill the surviving mutants in broker/kernel/key (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-log | MUT-kill-6032-kernel-log: kill the surviving mutants in broker/kernel/log.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-pool | MUT-kill-6032-kernel-pool: kill the surviving mutants in broker/kernel/pool.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-proc | MUT-kill-6032-kernel-proc: kill the surviving mutants in broker/kernel/proc (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-rederive | MUT-kill-6032-kernel-rederive: kill the surviving mutants in broker/kernel/rederive.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-setup | MUT-kill-6032-kernel-setup: kill the surviving mutants in broker/kernel/setup.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-small | MUT-kill-6032-kernel-small: kill the surviving mutants in broker/kernel forget.go, codeapproval.go, cosign.go, suite.go, task.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-state | MUT-kill-6032-kernel-state: kill the surviving mutants in broker/kernel/state.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-trip | MUT-kill-6032-kernel-trip: kill the surviving mutants in broker/kernel/trip.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-requal-driver | MUT-kill-6032-requal-driver: kill the surviving mutants in broker/vm/requal/driver (blocks #6032) | #6032 | building (release; tier A) |
+| KRN-proc-mustraw-refuse | KRN-proc-mustraw-refuse: kernelsock's mustRaw refuses, not nulls, args that cannot marshal | #6261 | queued (release; tier A) |
+| MUT-kill-6032-kernel-fips-dedupe | MUT-kill-6032-kernel-fips-dedupe: keep one fips140=only start-refusal test in broker/kernel, not four | #6032 | queued (release; tier A) |
+| MUT-simplify-inbox-contenttype | MUT-simplify-inbox-contenttype: delete the empty-Content-Type default in wording.go and its two waivers | #6278 | queued (release; tier A) |
+| MUT-simplify-kernel-recent | MUT-simplify-kernel-recent: record only irreversible steps in s.recent and drop undo's delete branch and its two waivers | #6279 | queued (release; tier A) |
+| MUT-record-deps | MUT-record-deps: a MUTANTS-EQUIVALENT entry names the functions its proof depends on, and goes stale when they change | #6279 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
