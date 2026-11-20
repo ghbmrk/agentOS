@@ -4,22 +4,34 @@ The image that goes on the drive: Debian 13 packages, `/usr` read-only on dm-ver
 booted by Microsoft-signed shim, Debian-signed systemd-boot and kernel (S7), with boot counting.
 It carries the broker (`agentosd`), gVisor's `runsc`, and the OpenClaw guest image.
 
-Build, on a Linux host that can reach the Debian mirrors (cloud agent sessions cannot; CI can), as a user
-who can sudo, with the pinned mkosi v24.3 in `/opt/mkosi` (image.yml's "Install build and boot tools" step), in
-one command from the repository: `image/local-build.sh OUT [VERSION]` (#6161). It runs three steps
-(IMG-mkosi-run-bound, D-276): `sudo image/build.sh OUT VERSION`
-stages the tree; then the pinned mkosi v24.3 runs on the committed config with `OUT`, `VERSION`,
-`SOURCE_DATE_EPOCH` (the commit time) and `AGENTOS_SECURITY_SNAPSHOT` (the timestamp in `OUT/agentos.sources`) set, from the one line image.yml's "Build image" step runs:
-`sudo env "PATH=$PATH" HOME=/root "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" /opt/mkosi/bin/mkosi -C image/mkosi -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" --environment=AGENTOS_SECURITY_SNAPSHOT="$AGENTOS_SECURITY_SNAPSHOT" --extra-tree="$OUT/stage/usr:/usr" --output-dir "$OUT" build`;
-then `sudo image/finish.sh OUT VERSION`. The wrapper derives the four values and runs that same line,
-which `tests/test_image.py` holds byte-identical to image.yml's; CI never runs the wrapper. CI: `.github/workflows/image.yml` stages on two runners, builds
+Build with image.yml's own split (IMG-mkosi-run-bound, D-276; #6161, #6348): `build.sh` runs as root on one
+host and the pinned mkosi on another where `build.sh` never ran, so the repository's root code cannot reach
+mkosi, its config or its binary. Each host needs a clean checkout of the same commit, a user who can sudo, and
+network to the Debian mirrors (cloud agent sessions have none; CI does).
+
+1. On the stage host, with `build.sh`'s tools (image.yml's "Install staging tools" step):
+   `image/local-build.sh stage DIR` runs `image/build.sh` as image.yml's stage job does and packs the stage
+   as `DIR/stage-COMMIT.tar`.
+2. On the build host, with the pinned mkosi v24.3 in `/opt/mkosi` (image.yml's "Install build and boot tools"
+   step; the wrapper refuses any other commit): `image/local-build.sh build TAR DIR [VERSION]` holds the tar
+   to `stage/usr`, `agentos.sources`, `guest/` and `linked/`, then runs the one line image.yml's "Build image"
+   step runs:
+   `sudo env "PATH=$PATH" HOME=/root "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" /opt/mkosi/bin/mkosi -C image/mkosi -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" --environment=AGENTOS_SECURITY_SNAPSHOT="$AGENTOS_SECURITY_SNAPSHOT" --extra-tree="$OUT/stage/usr:/usr" --output-dir "$OUT" build`,
+   and `image/finish.sh`. The image is in `DIR/out`.
+
+`DIR` must not exist; relative paths are the caller's. Each half names its log (`DIR/stage.log`,
+`DIR/build.log`) on exit. A checkout with changes or untracked files is refused, as CI builds only commits.
+`VERSION` defaults to the commit time and may hold only `0-9 A-Z a-z . + _ -`. `AGENTOS_SECURITY_SNAPSHOT`,
+if set on both hosts, is the run's snapshot; unset, `build.sh` resolves one and the build host resolves the
+set it must be in. `tests/test_image.py` holds each of the wrapper's steps line for line equal to image.yml's;
+CI never runs the wrapper. CI: `.github/workflows/image.yml` stages on two runners, builds
 each on a fresh runner that never runs `build.sh`, boots one build under Secure Boot in QEMU, and
 compares the releases.
 
 | Path | What |
 |---|---|
 | `build.sh` | Stages the broker, runsc and guests into `OUT/stage`; never runs mkosi |
-| `local-build.sh` | Local only: the three steps in one command, with the mkosi line pinned equal to image.yml's |
+| `local-build.sh` | Local only: image.yml's stage and build halves, one per host, each step held line for line equal to image.yml's |
 | `finish.sh` | After mkosi: finishes the release, copies out the initrds, writes SHA256SUMS |
 | `mkosi/mkosi.conf` | Packages, boot chain, pinned snapshot, seed |
 | `mkosi/mkosi.repart/` | Disk layout: ESP, `/usr` A and B with verity, root last |
