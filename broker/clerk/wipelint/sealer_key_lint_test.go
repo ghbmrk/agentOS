@@ -1254,13 +1254,14 @@ var _ = clerk.NewAESSealer
 	}{
 		{map[string]sealerKey{}, 1},
 		{map[string]sealerKey{sealerPkg + ".NewAESSealer": {[]string{"key"}, nil, "case"}}, 0},
+		{map[string]sealerKey{sealerPkg + ".NewAESSealer": {nil, nil, "case: classifies none of key"}}, 1},
 	} {
 		seen := map[string]bool{}
 		got := constructorProblems(l.Fset, f, info, l.sealer, c.listing, "example.test/", seen)
 		if len(got) != c.want {
 			t.Errorf("listing %v: got %d problems %q; want %d", c.listing, len(got), got, c.want)
 		}
-		if c.want == 0 && !seen[sealerPkg+".NewAESSealer"] {
+		if len(c.listing) > 0 && !seen[sealerPkg+".NewAESSealer"] {
 			t.Errorf("a listed constructor from outside the tree was not marked seen")
 		}
 	}
