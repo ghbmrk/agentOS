@@ -554,3 +554,23 @@ func TestInboxClerkKeepsTheHoldOnItsOwnClock(t *testing.T) {
 		t.Fatalf("refusal %+v, want hold", rf)
 	}
 }
+
+// An account needs a mailbox; planner keys need a root that allows each
+// key's verbs, so a root without organize and trash yields neither key.
+func TestAccountAndPlannerKeysRefuseWhatTheyCannotUse(t *testing.T) {
+	if _, err := NewAccount(nil, []byte(secret), func() World { return World{} }, nil, nil, 30, ""); err == nil {
+		t.Error("an account with no mailbox")
+	}
+	_, ownerPriv := seed(1)
+	holderPub, holderPriv := seed(2)
+	plannerPub, _ := seed(4)
+	root, err := key.ClerkKey(key.Issue(key.Ed25519Signer(ownerPriv), key.Root{Clerk: Name, Verbs: []key.Verb{key.Unsubscribe}, Serial: mailKey}),
+		key.Ed25519Signer(ownerPriv), holderPub, t0-dayMS-kernel.GrantHold, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bulk, unsub, err := PlannerKeys(root, holderPriv, plannerPub, 600_000, dayMS)
+	if err == nil || len(bulk.Links) != 0 || len(unsub.Links) != 0 {
+		t.Fatalf("keys off an unsubscribe-only root: %v, %d and %d links", err, len(bulk.Links), len(unsub.Links))
+	}
+}
