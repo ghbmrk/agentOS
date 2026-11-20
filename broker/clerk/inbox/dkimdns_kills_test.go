@@ -124,7 +124,9 @@ func TestLookupDKIMEndsWithNoTaker(t *testing.T) {
 	dkimLookupsAtOnce, dkimReadWait = 0, 50*time.Millisecond
 	defer func() { dkimLookupsAtOnce, dkimReadWait = prevAtOnce, prevRead }()
 	ended := make(chan map[string]string, 1)
-	go func() { ended <- LookupDKIM(context.Background(), &fakeTXT{answers: map[string][]string{}}, []string{"a._domainkey.shop.test"}) }()
+	go func() {
+		ended <- LookupDKIM(context.Background(), &fakeTXT{answers: map[string][]string{}}, []string{"a._domainkey.shop.test"})
+	}()
 	select {
 	case got := <-ended:
 		if len(got) != 0 {
@@ -162,5 +164,19 @@ func TestKeyRecordTagList(t *testing.T) {
 		if got, ok := keyRecord([]string{rec}); ok {
 			t.Errorf("%q was kept as %q", rec, got)
 		}
+	}
+}
+
+// DKIMNames reads only DKIM-Signature fields whose tag list parses (empty
+// parts allowed, a repeated tag refuses it) and that name both s= and d=.
+func TestDKIMNamesFields(t *testing.T) {
+	raw := []byte("X-Sig: v=1; d=shop.test; s=other\r\n" +
+		"DKIM-Signature: v=1; d=shop.test; s=dup; s=evil\r\n" +
+		"DKIM-Signature: v=1; d=shop.test\r\n" +
+		"DKIM-Signature: v=1; s=nod\r\n" +
+		"DKIM-Signature: v=1;; d=shop.test; s=a;\r\n" +
+		"From: a@shop.test\r\n\r\nHi\r\n")
+	if got, want := DKIMNames(raw), []string{"a._domainkey.shop.test"}; !slices.Equal(got, want) {
+		t.Fatalf("DKIMNames gave %q, want %q", got, want)
 	}
 }
