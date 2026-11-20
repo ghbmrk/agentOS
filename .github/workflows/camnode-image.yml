@@ -75,7 +75,7 @@ jobs:
         id: key
         run: |
           h=$(cat image/camnode/build.sh image/camnode/external/configs/*.config image/camnode/external/board/*/linux.fragment | sha256sum | cut -c1-32)
-          echo "key=camnode-br-${{ matrix.board }}-$h" >> "$GITHUB_OUTPUT"
+          echo "key=camnode-br-probe6357-${{ matrix.board }}-$h" >> "$GITHUB_OUTPUT"
       - name: Runner image (cache keys, #4785)
         # Built outputs link the runner's libraries, so every cache key names the runner image.
         id: image
@@ -87,7 +87,7 @@ jobs:
             ~/camnode-dl
             ~/camnode-ccache
           key: ${{ steps.image.outputs.os }}-${{ steps.key.outputs.key }}
-          restore-keys: ${{ steps.image.outputs.os }}-camnode-br-${{ matrix.board }}-
+          restore-keys: ${{ steps.image.outputs.os }}-camnode-br-probe6357-${{ matrix.board }}-
       - name: Throwaway release key (cm4)
         if: matrix.board == 'cm4'
         run: |

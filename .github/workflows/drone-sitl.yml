@@ -63,7 +63,7 @@ jobs:
         id: key
         run: |
           h=$(cat drone/sitl/ardupilot.pin drone/sitl/ardupilot-signed-only.patch drone/sitl/build.sh | sha256sum | cut -c1-32)
-          echo "key=arducopter-sitl-$h" >> "$GITHUB_OUTPUT"
+          echo "key=arducopter-sitl-probe6357-$h" >> "$GITHUB_OUTPUT"
       - name: Runner image (cache keys, #4785)
         # Built outputs link the runner's libraries, so every cache key names the runner image.
         id: image
