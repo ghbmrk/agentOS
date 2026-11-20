@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/sockets"
@@ -72,7 +73,7 @@ type pageForget struct {
 }
 
 // forgetNotice is the owner's text after a page erase: what this erase
-// took, by count and kind, never by name (an erased label is not kept),
+// took, by count and kind in the kernel ask's words, never by name (an erased label is not kept),
 // and when. STOP ends every page session's reach to the erase ops
 // (localsrv), and a phone passkey can be cut off; a hardware key cannot
 // on the page, so its text names STOP alone.
@@ -81,7 +82,7 @@ func forgetNotice(r forgetResult, by key.PublicKey, phone bool, at time.Time) st
 	for _, c := range r.ErasedKinds {
 		n += c
 	}
-	what := plural(n, "item") + " (" + kindList(r.ErasedKinds) + ")"
+	what := plural(n, "item") + " (" + kernel.KindList(r.ErasedKinds) + ")"
 	if n == 0 {
 		what = "a name with nothing kept under it"
 	}

@@ -1,6 +1,6 @@
 package main
 
-// REQ: LOG-4, CH-3, CH-26
+// REQ: LOG-4, CH-3, CH-26, OWN-6
 
 import (
 	"context"
@@ -94,7 +94,7 @@ func TestTheForgetTapErasesTheListShown(t *testing.T) {
 	// The owner is texted of the page erase by count and kind, its time
 	// and the passkey that tapped, never by the name. A hardware key
 	// cannot be cut off on the page, so STOP is the step.
-	note := "I forgot 3 items (message 3) on my Wi-Fi page at 14:05 after a tap by passkey " + noticePrint(r.pk.anchors[1].public(t)) + ". Not you? Text STOP."
+	note := "I forgot 3 items (3 messages) on my Wi-Fi page at 14:05 after a tap by passkey " + noticePrint(r.pk.anchors[1].public(t)) + ". Not you? Text STOP."
 	if !slices.Equal(r.told, []string{note}) || strings.Contains(strings.ToLower(note), "alice") || owner.CodeShaped(note) || owner.SecretShaped(note) {
 		t.Fatalf("told %q", r.told)
 	}
@@ -254,7 +254,7 @@ func TestAPartialPageEraseIsNotTextedAsWhole(t *testing.T) {
 		t.Fatalf("partial: %q %v %v, erased %v", text, err, r.done.Kept, r.k.erases)
 	}
 	// It counts only what went: s3's one item, not s4's two.
-	if len(r.told) != 1 || !strings.HasPrefix(r.told[0], "I forgot 1 item (message 1) on my Wi-Fi page at 14:05 ") ||
+	if len(r.told) != 1 || !strings.HasPrefix(r.told[0], "I forgot 1 item (1 message) on my Wi-Fi page at 14:05 ") ||
 		!strings.Contains(r.told[0], ". Some others found with them are still kept. Not you?") {
 		t.Fatalf("told %q", r.told)
 	}
@@ -285,7 +285,7 @@ func TestTheForgetNoticeCountsOnlyThisErase(t *testing.T) {
 	if _, err := r.tap("sess-a", f, f.Challenge, r.pk.anchors[0]); err != nil || r.done.Kept {
 		t.Fatalf("%v kept %v", err, r.done.Kept)
 	}
-	if len(r.told) != 1 || !strings.HasPrefix(r.told[0], "I forgot 3 items (message 1, photo 2) on my Wi-Fi page") || strings.Contains(r.told[0], "still kept") {
+	if len(r.told) != 1 || !strings.HasPrefix(r.told[0], "I forgot 3 items (1 message, 2 photos) on my Wi-Fi page") || strings.Contains(r.told[0], "still kept") {
 		t.Fatalf("told %q", r.told)
 	}
 	r.told = nil
@@ -295,6 +295,17 @@ func TestTheForgetNoticeCountsOnlyThisErase(t *testing.T) {
 	if text, err := r.tap("sess-a", f, f.Challenge, r.pk.anchors[0]); err != nil || len(r.told) != 0 || r.done.Kept {
 		t.Fatalf("all erased meanwhile: %q %v, told %q", text, err, r.told)
 	}
+	// A face reads as a face, as in the kernel's ask, not by its class
+	// name (#5378).
+	r.told = nil
+	r.k.add("s7", "Fay", 1, nil)
+	r.k.items["s7"] = append(r.k.items["s7"], kernelsock.Item{Store: "vision", Class: "vision-wrap-key"})
+	f = r.find("sess-a", "Fay")
+	if _, err := r.tap("sess-a", f, f.Challenge, r.pk.anchors[0]); err != nil || len(r.told) != 1 ||
+		!strings.HasPrefix(r.told[0], "I forgot 2 items (1 face, 1 message) on my Wi-Fi page") {
+		t.Fatalf("told %q", r.told)
+	}
+	r.told = nil
 	// A subject with nothing kept under its name is told without a count.
 	r.k.add("s6", "Eve", 0, nil)
 	f = r.find("sess-a", "Eve")
