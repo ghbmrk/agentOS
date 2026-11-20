@@ -441,6 +441,10 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VM-snap-unread-notice-fu-1 | VM-snap-unread-notice-fu-1: add the ASSUMPTIONS.md row for the unread-snapshot notice once the 215 package-wide survivors it exposes in broker/cmd/agentosd are killed or proved | #6139 | queued (release; tier A; lane claude2) |
 | TEST-held-code-4829-flake | TEST-held-code-4829-flake: the held-code expired-view tests assert on a substring a random hex id can contain | #6139 | queued (release; tier A; lane claude2) |
 | VM-snap-unread-notice-fu-2 | VM-snap-unread-notice-fu-2: a held unread notice's retries over a modem outage count one missed text, not one per retry; pin the single-timer guard | #6139 | queued (release; tier A; lane claude2) |
+| VULN-debian-r13-f2 | VULN-debian-r13-f2: add a `via <library>` allow form to the import sweep's [regex] and [glob] sections so dependents of a reviewed library need no entry; a new direct caller still fails. Release. | #6285, #6294 | queued (release; tier A) |
+| VULN-debian-r13-f3 | VULN-debian-r13-f3: make the import sweep see static-glibc binaries and dlsym/dlopen lookups, and rename its image.yml step. Release. | #6285, #6294 | queued (release; tier A) |
+| VULN-debian-r13-f4 | VULN-debian-r13-f4: pin the import sweep's direct-importer allow entries by SHA-256 in every group, as [cipher] does. Release. | #6285, #6294 | queued (release; tier A) |
+| MUT-pin-inbox-badct | MUT-pin-inbox-badct: pin with a test and an ASSUMPTIONS row that a multipart message with a bad Content-Type parameter is read whole as text/plain. Release. | #6280, #6295 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
