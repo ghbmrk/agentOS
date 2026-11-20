@@ -90,17 +90,14 @@ func Refusef(c Code, f string, a ...any) *Refusal { return Refuse(c, fmt.Sprintf
 // Code is the refusal's code.
 func (r *Refusal) Code() Code { return r.code }
 
-// refusalJSON is a Refusal's wire form: the field names an exported Code
-// field gave it, so encodings are unchanged.
+// refusalJSON is a Refusal's wire form, the same as before #6023.
 type refusalJSON struct {
 	Code   Code
 	Detail string
 }
 
 // MarshalJSON writes {"Code":…,"Detail":…}.
-func (r Refusal) MarshalJSON() ([]byte, error) {
-	return json.Marshal(refusalJSON{r.code, r.Detail})
-}
+func (r Refusal) MarshalJSON() ([]byte, error) { return json.Marshal(refusalJSON{r.code, r.Detail}) }
 
 // UnmarshalJSON reads a Refusal; an undeclared code fails.
 func (r *Refusal) UnmarshalJSON(b []byte) error {
@@ -110,10 +107,6 @@ func (r *Refusal) UnmarshalJSON(b []byte) error {
 	}
 	*r = Refusal{w.Code, w.Detail}
 	return nil
-}
-
-func refuse(code Code, f string, a ...any) *Refusal {
-	return Refusef(code, f, a...)
 }
 
 func in(s []string, v string) bool {
@@ -129,21 +122,21 @@ func in(s []string, v string) bool {
 // pause anywhere in the chain, not expired.
 func (v *Verified) Live(c Context) *Refusal {
 	if c.Changes == nil {
-		return refuse(RMalformed, "no revocation view")
+		return Refusef(RMalformed, "no revocation view")
 	}
 	if c.Changes.Stopped {
-		return refuse(RStopped, "stop is in force")
+		return Refusef(RStopped, "stop is in force")
 	}
 	for _, id := range v.IDs {
 		if c.Changes.Revoked[id] {
-			return refuse(RRevoked, "%s", id)
+			return Refusef(RRevoked, "%s", id)
 		}
 		if c.Changes.Paused[id] {
-			return refuse(RPaused, "%s", id)
+			return Refusef(RPaused, "%s", id)
 		}
 	}
 	if l := v.Limits; l.NotAfter != nil && max(c.Now, c.Late) >= *l.NotAfter {
-		return refuse(RExpired, "expired at %d", *l.NotAfter)
+		return Refusef(RExpired, "expired at %d", *l.NotAfter)
 	}
 	return nil
 }
@@ -152,54 +145,54 @@ func (v *Verified) Live(c Context) *Refusal {
 // and every clerk (KEY-2). It fails closed on a missing view.
 func (v *Verified) Authorize(s Step, c Context) *Refusal {
 	if !v.held {
-		return refuse(RMalformed, "no proof of possession")
+		return Refusef(RMalformed, "no proof of possession")
 	}
 	if r := v.Live(c); r != nil {
 		return r
 	}
 	l := v.Limits
 	if s.Clerk != l.Clerk {
-		return refuse(RClerk, "key is for %s", l.Clerk)
+		return Refusef(RClerk, "key is for %s", l.Clerk)
 	}
 	if r := v.task(s.Task); r != nil {
 		return r
 	}
 	if s.Rung < l.Rung {
-		return refuse(RRung, "%v, the key asks %v", s.Rung, l.Rung)
+		return Refusef(RRung, "%v, the key asks %v", s.Rung, l.Rung)
 	}
 	if !in(l.Verbs, string(s.Verb)) {
-		return refuse(RVerb, "%s", s.Verb)
+		return Refusef(RVerb, "%s", s.Verb)
 	}
 	if !ArgsDeclared(s) {
-		return refuse(RArg, "%s takes exactly %v", s.Verb, argNames[s.Verb])
+		return Refusef(RArg, "%s takes exactly %v", s.Verb, argNames[s.Verb])
 	}
 	if l.Content != nil && !in(l.Content, s.Content) {
-		return refuse(RContent, "%q", s.Content)
+		return Refusef(RContent, "%q", s.Content)
 	}
 	if l.Labels != nil {
 		for _, x := range s.Labels {
 			if !in(l.Labels, x) {
-				return refuse(RLabels, "%q", x)
+				return Refusef(RLabels, "%q", x)
 			}
 		}
 	}
 	for name, b := range l.Args {
 		a, ok := s.Args[name]
 		if !ok || a.Source == SrcPlanner || (a.Source != SrcOwner && a.Source != SrcClerk) {
-			return refuse(RArg, "%s missing or not from owner or clerk", name)
+			return Refusef(RArg, "%s missing or not from owner or clerk", name)
 		}
 		if b.OneOf != nil && !in(b.OneOf, a.Value) {
-			return refuse(RArg, "%s outside set", name)
+			return Refusef(RArg, "%s outside set", name)
 		}
 		if b.Min != nil || b.Max != nil {
 			n, err := strconv.ParseInt(a.Value, 10, 64)
 			if err != nil || (b.Min != nil && n < *b.Min) || (b.Max != nil && n > *b.Max) {
-				return refuse(RArg, "%s outside range", name)
+				return Refusef(RArg, "%s outside range", name)
 			}
 		}
 	}
 	if s.Amount < 0 {
-		return refuse(RMalformed, "negative amount")
+		return Refusef(RMalformed, "negative amount")
 	}
 	return v.caps(s, c, false)
 }
@@ -209,7 +202,7 @@ func (v *Verified) Authorize(s Step, c Context) *Refusal {
 // named for one (KRN-5).
 func (v *Verified) task(t string) *Refusal {
 	if l := v.Limits.Task; l != "" && t != l {
-		return refuse(RTask, "key is for task %s", l)
+		return Refusef(RTask, "key is for task %s", l)
 	}
 	return nil
 }
@@ -218,7 +211,7 @@ func (v *Verified) task(t string) *Refusal {
 // spendOnly skips the rate and use caps, which count steps, not metered usage.
 func (v *Verified) caps(s Step, c Context, spendOnly bool) *Refusal {
 	if len(v.Limits.Caps) > 0 && c.Ledger == nil {
-		return refuse(RMalformed, "no ledger")
+		return Refusef(RMalformed, "no ledger")
 	}
 	for _, cp := range v.Limits.Caps {
 		if spendOnly && cp.Kind != KSpendTask && cp.Kind != KSpendDay {
@@ -254,19 +247,19 @@ func (v *Verified) caps(s Step, c Context, spendOnly bool) *Refusal {
 		switch cp.Kind {
 		case KSpendTask:
 			if !ok || sum > cp.N {
-				return refuse(RSpendTask, "cap %d", cp.N)
+				return Refusef(RSpendTask, "cap %d", cp.N)
 			}
 		case KSpendDay:
 			if !ok || sum > cp.N {
-				return refuse(RSpendDay, "cap %d", cp.N)
+				return Refusef(RSpendDay, "cap %d", cp.N)
 			}
 		case KRateDay, KRateRecipient:
 			if n+1 > cp.N {
-				return refuse(RRate, "%s cap %d", cp.Kind, cp.N)
+				return Refusef(RRate, "%s cap %d", cp.Kind, cp.N)
 			}
 		case KUses:
 			if n+1 > cp.N {
-				return refuse(RUses, "cap %d", cp.N)
+				return Refusef(RUses, "cap %d", cp.N)
 			}
 		}
 	}
@@ -295,17 +288,17 @@ func (v *Verified) Spend(task string, amount int64, c Context) *Refusal {
 		return r
 	}
 	if c.Rung < v.Limits.Rung {
-		return refuse(RRung, "%v, the key asks %v", c.Rung, v.Limits.Rung)
+		return Refusef(RRung, "%v, the key asks %v", c.Rung, v.Limits.Rung)
 	}
 	if amount < 0 {
-		return refuse(RMalformed, "negative amount")
+		return Refusef(RMalformed, "negative amount")
 	}
 	capped := false
 	for _, cp := range v.Limits.Caps {
 		capped = capped || cp.Kind == KSpendTask || cp.Kind == KSpendDay
 	}
 	if !capped {
-		return refuse(RMalformed, "no spend cap")
+		return Refusef(RMalformed, "no spend cap")
 	}
 	return v.caps(Step{Task: task, Amount: amount}, c, true)
 }

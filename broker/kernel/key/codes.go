@@ -1,18 +1,16 @@
 package key
 
-import "fmt"
+import (
+	"fmt"
+	"maps"
+)
 
-// Code is a refusal code. Its one field is unexported, so only this package
-// makes a Code: every code there is, is one of the values declared below
-// (KEY-refusal-code, #6023). A Code outside this package can only be copied
-// from them, or be the zero Code, which names no code ("" on the wire). A
-// Code reads and writes as its name, the same JSON string as before, and
-// decoding a name not declared here fails, so a log entry or socket message
-// cannot introduce one.
+// Code is a refusal code: one declared below, or the zero Code ("", no code)
+// (KEY-refusal-code, #6023). Its field is unexported, so no other package
+// makes one, and it decodes only from a declared name.
 type Code struct{ name string }
 
-// The declared codes: key's own, then the kernel's, then the clerks'.
-// Other packages may alias them (var CPlan = key.CPlan).
+// The declared codes: key's, the kernel's, the clerks'; others alias them.
 var (
 	RMalformed = Code{"malformed"}
 	RStopped   = Code{"stopped"}
@@ -28,11 +26,8 @@ var (
 	RSpendDay  = Code{"spend-day"}
 	RRate      = Code{"rate"}
 	RUses      = Code{"uses"}
-	// RTask is a step or a metered call for another task than the key's
-	// (KRN-5), and, as the kernel's CTask, a key whose task is not live: one
-	// wire name, so one code.
-	RTask = Code{"task"}
-	RRung = Code{"rung"} // the step's owner events reached a lower rung than the key asks (CH-3)
+	RTask      = Code{"task"} // a step or call for another task than the key's (KRN-5), or (CTask) a key whose task is not live
+	RRung      = Code{"rung"} // the step's owner events reached a lower rung than the key asks (CH-3)
 
 	CKey       = Code{"key"}          // the chain does not verify
 	CUngranted = Code{"not-granted"}  // the passkey never granted the key's root or first link into the log
@@ -60,9 +55,8 @@ var (
 	DPlanUnknown = Code{"plan-unknown"} // the call names no plan this clerk serves; nothing done
 )
 
-// declared is every code by name. It is built from copies taken at package
-// initialisation, so a later assignment to an exported variable above can
-// neither add a name nor change what a name decodes to.
+// declared is every code by name, copied at initialisation: a later
+// assignment to a variable above changes no decoding.
 var declared = func() map[string]Code {
 	m := map[string]Code{}
 	for _, c := range []Code{
@@ -78,14 +72,8 @@ var declared = func() map[string]Code {
 	return m
 }()
 
-// Codes is every declared code, keyed by name: a copy, for pins and tests.
-func Codes() map[string]Code {
-	m := make(map[string]Code, len(declared))
-	for n, c := range declared {
-		m[n] = c
-	}
-	return m
-}
+// Codes is every declared code, keyed by name: a copy.
+func Codes() map[string]Code { return maps.Clone(declared) }
 
 // String is the code's name; the zero Code's is "".
 func (c Code) String() string { return c.name }
@@ -96,25 +84,12 @@ func (c Code) IsZero() bool { return c.name == "" }
 // MarshalText writes the code's name.
 func (c Code) MarshalText() ([]byte, error) { return []byte(c.name), nil }
 
-// UnmarshalText reads a declared code's name, or "" as the zero Code. Any
-// other name fails.
+// UnmarshalText reads a declared code's name, or "" as the zero Code.
 func (c *Code) UnmarshalText(b []byte) error {
-	d, err := ParseCode(string(b))
-	if err != nil {
-		return err
+	d, ok := declared[string(b)]
+	if !ok && len(b) > 0 {
+		return fmt.Errorf("key: undeclared refusal code %q", b)
 	}
 	*c = d
 	return nil
-}
-
-// ParseCode is the declared code named n, or the zero Code for "".
-func ParseCode(n string) (Code, error) {
-	if n == "" {
-		return Code{}, nil
-	}
-	c, ok := declared[n]
-	if !ok {
-		return Code{}, fmt.Errorf("key: undeclared refusal code %q", n)
-	}
-	return c, nil
 }
