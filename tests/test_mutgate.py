@@ -1513,10 +1513,23 @@ func set(n, m int) {
                   "func TestNothing(t *testing.T) {}\n"
                   + "".join(f"\nfunc TestPad{i}(t *testing.T) {{}}\n" for i in range(4)))
 
+    @staticmethod
+    def even(per):
+        """per_test with every test's seconds alone read as 1.0, so `selected`'s half rule decides
+        the same set on any runner: run times of near-empty tests are noise (#6172's rerun test went
+        red on #5998 when TestBreak and TestUse ran slow)."""
+        def timed(*a, **k):
+            if (got := per(*a, **k)) is None:
+                return None
+            ran, failing = got
+            return {n: (blocks, 1.0) for n, (blocks, _) in ran.items()}, {n: 1.0 for n in failing}
+        return timed
+
     def spied_deletions(self, pr, test, whole=False, jobs=1, patches=None):
         """({line: status}, [(site dir, names)]) of deletion_mutants on a repo of these sources, with
         each run_tests call's tests recorded; whole runs every site with the whole suite (no per-test
-        pass); patches ({name: value}) replaces those mutgate names first, run_tests under the spy."""
+        pass); patches ({name: value}) replaces those mutgate names first, run_tests under the spy.
+        per_test's seconds are `even` unless patches replaces it."""
         from unittest import mock
         with tempfile.TemporaryDirectory() as d:
             pkg = self.repo(d, "package hint\n", pr, test)
@@ -1534,6 +1547,8 @@ func set(n, m int) {
                 st.enter_context(mock.patch.object(mutgate, "run_tests", spy))
                 if whole:
                     st.enter_context(mock.patch.object(mutgate, "per_test", lambda *a, **k: None))
+                elif "per_test" not in (patches or {}):
+                    st.enter_context(mock.patch.object(mutgate, "per_test", self.even(mutgate.per_test)))
                 tmp = pathlib.Path(d) / "tmp"
                 tmp.mkdir()
                 got, problem = mutgate.deletion_mutants("hint", added, tmp, self.lister(tmp), jobs)
@@ -1605,7 +1620,7 @@ func set(n, m int) {
         # times its tests' runs alone, summed, plus 10 s, not at the whole suite's timeout.
         # REQ: MUT-delete-covering
         seen, timed = [], []
-        per, runs, alone = mutgate.per_test, mutgate.run_tests, mutgate.run_alone
+        per, runs, alone = self.even(mutgate.per_test), mutgate.run_tests, mutgate.run_alone
         def per_test(*a, **k):
             seen.append(per(*a, **k))
             return seen[-1]
@@ -1712,7 +1727,8 @@ func set(n, m int) {
             added = {"broker/hint/hint.go": set(range(1, 17))}
             tmp = pathlib.Path(d) / "tmp"
             tmp.mkdir()
-            with mock.patch.object(mutgate, "BROKER", pkg.parent):
+            with mock.patch.object(mutgate, "BROKER", pkg.parent), \
+                    mock.patch.object(mutgate, "per_test", self.even(mutgate.per_test)):
                 sites, _ = mutgate.deletion_sites("hint", added, self.lister(tmp))
                 costs, overhead = mutgate.site_costs("hint", sites, 1000.0, tmp)
         got = {s["line"]: c for s, c in zip(sites, costs)}
