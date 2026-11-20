@@ -111,6 +111,7 @@ func TestParseAuthResultsCases(t *testing.T) {
 		{`mx.test; ; dkim=pass`, `mx.test`, []res{{"dkim", "pass", map[string]string{}}}},
 		{`mx.test; none`, `mx.test`, nil},
 		{`mx.test; =pass; dkim=; dkim=pass`, `mx.test`, []res{{"dkim", "pass", map[string]string{}}}},
+		{`mx.test; /x=pass`, `mx.test`, []res{{"", "pass", map[string]string{}}}},
 		{`mx.test; DKIM/1=PASS`, `mx.test`, []res{{"dkim", "pass", map[string]string{}}}},
 		{`mx.test; spf="Pass"`, `mx.test`, []res{{"spf", "pass", map[string]string{}}}},
 		{
