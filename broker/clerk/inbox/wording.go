@@ -233,13 +233,9 @@ func textParts(h getter, body io.Reader, b *strings.Builder, parts *int, depth i
 	if *parts++; *parts > maxTextParts || depth > 8 || b.Len() >= maxTextBytes {
 		return
 	}
-	ct := h.Get("Content-Type")
-	if ct == "" {
-		ct = "text/plain"
-	}
-	mt, params, err := mime.ParseMediaType(ct)
+	mt, params, err := mime.ParseMediaType(h.Get("Content-Type"))
 	if err != nil {
-		mt = "text/plain" // read it rather than skip it
+		mt = "text/plain" // a missing or broken Content-Type is read, not skipped
 	}
 	if strings.HasPrefix(mt, "multipart/") {
 		mr := multipart.NewReader(body, params["boundary"])
