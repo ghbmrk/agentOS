@@ -423,12 +423,32 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | NET-2-decl-daily-bytes | NET-2-decl-daily-bytes: each CLK-14 account declaration states the daily bytes it sends, proposed by the plan and confirmed by the owner (D-248) | #5157 | queued (release; tier A) |
 | IMG-mkosi-run-bound-fu-initrd | IMG-mkosi-run-bound-fu-initrd: the default initrd's packages are held to the pinned, signature-checked indexes as the image's are. Release; from #6148. | #4690 | queued (release; tier A) |
 | IMG-mkosi-run-bound-fu-disk | IMG-mkosi-run-bound-fu-disk: image.yml's stage job keeps its own IMG-disk budget. Release; from #6148. | #4690 | queued (release; tier B) |
-| VULN-debian-r11 | VULN-debian-r11: accept openssl's and glibc's new no-fix Debian 13 advisories so image-vulncheck passes again. Release; seventh no-fix Debian round. | #2919, #5871 | building (release; tier A) |
 | IMG-mkosi-run-bound-fu-local | IMG-mkosi-run-bound-fu-local: a local-only wrapper makes a local image build one command, with the mkosi line pinned equal to CI's. Release; from #6148. | #4690, #6148 | queued (release; tier B) |
 | CTL-agent-starting-status | CTL-agent-starting-status: STATUS during boot shows a starting line, not 'not set up' or 'waiting for memory'. Release; from #6136 (UX). | #5429, #6136 | queued (release; tier A) |
 | BROWSER-shell-cache-warning-cmd | BROWSER-shell-cache-warning-cmd: the headless-shell cache warning names the delete command for the bad entry. Release; rides the next ci.yml PR. | #6175, #6180 | queued (release; tier A; gate file) |
-| MUT-plan-timing-skew-fu | MUT-plan-timing-skew-fu: timed_cover streams and bounds the test output; pin the last-match rule and the stderr echo | #6228 | building (release; tier A) |
-| MUT-plan-timing-skew-fu2 | MUT-plan-timing-skew-fu2: echo_ok.scan uses search, not findall and [-1]; an empty-line guard bounds a newline flood | #6235 | queued (release; tier A) |
+| MUT-kill-6032-clerk-inbox | MUT-kill-6032-clerk-inbox: kill the surviving mutants in broker/clerk/inbox (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-clerk-run | MUT-kill-6032-clerk-run: kill the surviving mutants in broker/clerk/run (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-guest | MUT-kill-6032-guest: kill the surviving mutants in broker/guest (blocks #6032) | #6032 | queued (release; tier A) |
+| MUT-kill-6032-kernel-edge | MUT-kill-6032-kernel-edge: kill the surviving mutants in broker/kernel/edge.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-erase | MUT-kill-6032-kernel-erase: kill the surviving mutants in broker/kernel/erase.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-kernelgo | MUT-kill-6032-kernel-kernelgo: kill the surviving mutants in broker/kernel/kernel.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-log | MUT-kill-6032-kernel-log: kill the surviving mutants in broker/kernel/log.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-pool | MUT-kill-6032-kernel-pool: kill the surviving mutants in broker/kernel/pool.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-rederive | MUT-kill-6032-kernel-rederive: kill the surviving mutants in broker/kernel/rederive.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-setup | MUT-kill-6032-kernel-setup: kill the surviving mutants in broker/kernel/setup.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-small | MUT-kill-6032-kernel-small: kill the surviving mutants in broker/kernel forget.go, codeapproval.go, cosign.go, suite.go, task.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-state | MUT-kill-6032-kernel-state: kill the surviving mutants in broker/kernel/state.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-kill-6032-kernel-trip | MUT-kill-6032-kernel-trip: kill the surviving mutants in broker/kernel/trip.go (blocks #6032) | #6032 | building (release; tier A) |
+| KRN-proc-mustraw-refuse | KRN-proc-mustraw-refuse: kernelsock's mustRaw refuses, not nulls, args that cannot marshal | #6261 | queued (release; tier A) |
+| MUT-kill-6032-kernel-fips-dedupe | MUT-kill-6032-kernel-fips-dedupe: keep one fips140=only start-refusal test in broker/kernel, not four | #6032 | queued (release; tier A) |
+| MUT-simplify-inbox-contenttype | MUT-simplify-inbox-contenttype: delete the empty-Content-Type default in wording.go and its two waivers | #6278 | queued (release; tier A) |
+| MUT-simplify-kernel-recent | MUT-simplify-kernel-recent: record only irreversible steps in s.recent and drop undo's delete branch and its two waivers | #6279 | queued (release; tier A) |
+| MUT-record-deps | MUT-record-deps: a MUTANTS-EQUIVALENT entry names the functions its proof depends on, and goes stale when they change | #6279 | queued (release; tier A) |
+| VULN-debian-r13 | VULN-debian-r13: accept glibc's new no-fix Debian 13 advisory DEBIAN-CVE-2026-126765 so image-vulncheck passes again. Release; third glibc round. | #2919, #5503 | building (release; tier A) |
+| VULN-debian-r13-f1 | VULN-debian-r13-f1: sweep the built image for glibc glob() importers so the DEBIAN-CVE-2026-126765 records' reach is read from the tree. Release. | #6284, #5697 | queued (release; tier A) |
+| HANDOFF-probe-start | HANDOFF-probe-start: the handoff low-order probe stops the package at start when X25519 is refused, as edge.go's does | #6270 | building (release; tier A) |
+| VM-snap-unread-notice-fu-1 | VM-snap-unread-notice-fu-1: add the ASSUMPTIONS.md row for the unread-snapshot notice once the 215 package-wide survivors it exposes in broker/cmd/agentosd are killed or proved | #6139 | queued (release; tier A; lane claude2) |
+| TEST-held-code-4829-flake | TEST-held-code-4829-flake: the held-code expired-view tests assert on a substring a random hex id can contain | #6139 | queued (release; tier A; lane claude2) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 

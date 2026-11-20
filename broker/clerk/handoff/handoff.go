@@ -159,12 +159,11 @@ const anchorsTag, anchorsTagStem = "agentos-anchors/v1\n", "agentos-anchors/"
 const maxAnchor = 2 + len(key.AlgES256) + 1 + 253 + 1 + 65 + 1
 
 // maxHandoff is the longest hand-off: the tag, the log key, the head seed,
-// the clerk root key,
-// the counter, the recipient and the page authority with their lengths, the
-// link key, the first edge key, the slot and the new recovery key with
-// theirs, the count and
-// MaxAnchors ES256 keys. It is far below a pipe's 64 KiB buffer, so the
-// unlock step's write never waits for a reader.
+// the clerk root key, the counter, the recipient and the page authority
+// with their lengths, the link key, the first edge key, the slot and the
+// new recovery key with theirs, the count and MaxAnchors ES256 keys. It is
+// far below a pipe's 64 KiB buffer, so the unlock step's write never waits
+// for a reader.
 const maxHandoff = len(handoffTag) + 32 + ed25519.SeedSize + 32 + maxCounter + 2 + RecipientLen + 2 + pageca.MaxSealed + 1 + ed25519.SeedSize + 1 + ed25519.PublicKeySize + 1 + MaxSlot + 1 + MadeCardLen + 1 + MaxAnchors*maxAnchor
 
 // maxCounter is the longest counter: three length-prefixed fields and a
@@ -177,17 +176,16 @@ var ErrHandoff = errors.New("handoff: the unlock step's hand-off is damaged or m
 
 // KernelKeys is what the unlock step hands the kernel process: the log's
 // key, the head-signing key, the clerk root key, the log anchor's counter,
-// the owner's anchors,
-// none when the store holds none (the kernel then starts setup-only and
-// takes them into its log, kernel.Setup), and the backup recipient, empty
-// when the store holds none (a box enrolled before MIG-4-recovery-e1; the
-// kernel then takes no backup), and the page authority, none when the
-// store holds none (the kernel then certifies nothing). Then the link key
-// and the first edge key, each none when the store holds none (a box
-// enrolled before EDGE-link-core-b, or a restore's, which holds no first
-// key), and the slot that opened the store, which is always named. Last,
-// the recovery key the unlock step made at this boot on the lost-card
-// route, none on every other boot (REC-4, MIG-4-recovery-r3).
+// the owner's anchors, none when the store holds none (the kernel then
+// starts setup-only and takes them into its log, kernel.Setup), and the
+// backup recipient, empty when the store holds none (a box enrolled before
+// MIG-4-recovery-e1; the kernel then takes no backup), and the page
+// authority, none when the store holds none (the kernel then certifies
+// nothing). Then the link key and the first edge key, each none when the
+// store holds none (a box enrolled before EDGE-link-core-b, or a restore's,
+// which holds no first key), and the slot that opened the store, which is
+// always named. Last, the recovery key the unlock step made at this boot on
+// the lost-card route, none on every other boot (REC-4, MIG-4-recovery-r3).
 type KernelKeys struct {
 	Log  secret.Secret[[32]byte]
 	Head secret.Secret[ed25519.PrivateKey]
@@ -259,8 +257,16 @@ func SplitRecipient(r []byte) (x, ek []byte, err error) {
 
 // lowOrderProbe is a fixed X25519 key. Its scalar, like every X25519
 // scalar, is a multiple of the cofactor, so its ECDH against a low-order
-// point is all zeros, which crypto/ecdh refuses.
-var lowOrderProbe, _ = ecdh.X25519().NewPrivateKey(bytes.Repeat([]byte{0x42}, 32))
+// point is all zeros, which crypto/ecdh refuses. Where X25519 is refused
+// (Go's FIPS 140-only mode) the package stops at load, as kernel's
+// orderProbe does, not at the first recipient it checks.
+var lowOrderProbe = func() *ecdh.PrivateKey {
+	k, err := ecdh.X25519().NewPrivateKey(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		panic(err)
+	}
+	return k
+}()
 
 // validRecipient: r is RecipientLen bytes and both its keys parse, so a
 // backup can be sealed to it. NewPublicKey takes any 32 bytes, so the
@@ -419,13 +425,10 @@ func (k KernelKeys) Marshal() ([]byte, error) {
 	b = append(b, k.Log.Ref()[:]...)
 	b = append(b, head.Seed()...)
 	b = append(b, k.ClerkRoot.Ref()[:]...)
-	b = append(b, byte(len(k.Counter.SRK)))
-	b = append(b, k.Counter.SRK...)
+	b = append(append(b, byte(len(k.Counter.SRK))), k.Counter.SRK...)
 	b = binary.BigEndian.AppendUint32(b, k.Counter.Handle)
-	b = append(b, byte(len(k.Counter.Name)))
-	b = append(b, k.Counter.Name...)
-	b = append(b, byte(len(k.Counter.Auth.Get())))
-	b = append(b, k.Counter.Auth.Get()...)
+	b = append(append(b, byte(len(k.Counter.Name))), k.Counter.Name...)
+	b = append(append(b, byte(len(k.Counter.Auth.Get()))), k.Counter.Auth.Get()...)
 	b = binary.BigEndian.AppendUint16(b, uint16(len(k.Recipient)))
 	b = append(b, k.Recipient...)
 	b = binary.BigEndian.AppendUint16(b, uint16(len(ca)))
@@ -434,15 +437,11 @@ func (k KernelKeys) Marshal() ([]byte, error) {
 	if len(link) != 0 {
 		seed = link.Seed()
 	}
-	b = append(b, byte(len(seed)))
-	b = append(b, seed...)
+	b = append(append(b, byte(len(seed))), seed...)
 	clear(seed)
-	b = append(b, byte(len(k.FirstEdge)))
-	b = append(b, k.FirstEdge...)
-	b = append(b, byte(len(k.Slot)))
-	b = append(b, k.Slot...)
-	b = append(b, byte(len(rec)))
-	b = append(b, rec...)
+	b = append(append(b, byte(len(k.FirstEdge))), k.FirstEdge...)
+	b = append(append(b, byte(len(k.Slot))), k.Slot...)
+	b = append(append(b, byte(len(rec))), rec...)
 	out, err := appendAnchors(b, k.Anchors)
 	if err != nil {
 		clear(b)
