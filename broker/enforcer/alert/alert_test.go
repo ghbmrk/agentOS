@@ -145,11 +145,14 @@ func TestDroppedTripStillOnLight(t *testing.T) {
 	if c := r2.bulb.now(); c != Red {
 		t.Fatalf("light %v with the trip still open", c)
 	}
-	if err := r2.a.Resolve(refused.ID); err != nil {
+	if err := r2.a.Resolve(refused.ID); !errors.Is(err, ErrResolved) {
+		t.Fatalf("the trip cleared on the page: %v", err)
+	}
+	if err := r2.a.Lifted("edge"); err != nil {
 		t.Fatal(err)
 	}
 	if c := r2.bulb.now(); c != Off {
-		t.Fatalf("light %v once the owner resolved the trip", c)
+		t.Fatalf("light %v once the trip's cut lifted", c)
 	}
 	if err := r2.a.Resolve(dropped.ID); !errors.Is(err, ErrUnknown) {
 		t.Fatalf("resolving twice: %v", err)
@@ -290,7 +293,7 @@ func TestWordsFixed(t *testing.T) {
 		if s.delivery == Text && !strings.Contains(w, "enforcer's page at home") {
 			t.Fatalf("kind %d's text does not send the owner to the page: %q", k, w)
 		}
-		if strings.Contains(w, "light") != k.lights() {
+		if strings.Contains(w, "light") != k.Lights() {
 			t.Fatalf("kind %d's text and the light: %q", k, w)
 		}
 		want := Text
@@ -318,7 +321,7 @@ func TestWordsFixed(t *testing.T) {
 // unusual-time unlock, a recovery-code use, a new recovery code, an enrolment, a factory reset, a paused
 // channel, a pending recovery and a silent core each leave the light off
 // and show on the page; a trip at the enforcer, from any box or device,
-// turns it red until its cut lifts or the owner resolves it on the page.
+// turns it red until its cut lifts (Lifted); the page cannot clear it.
 // Catches routine alerts keeping the light red, so a real trip is read as
 // routine.
 func TestOnlyTripsLight(t *testing.T) {
@@ -393,7 +396,11 @@ func TestOnlyTripsLight(t *testing.T) {
 	if got := r.a.Log()[r.a.byID[edge.ID]]; got.Open || got.Resolved.IsZero() {
 		t.Fatalf("lifted trip still open: %+v", got)
 	}
-	if err := r.a.Resolve(cam.ID); err != nil {
+	if err := r.a.Resolve(cam.ID); !errors.Is(err, ErrResolved) {
+		t.Fatalf("a trip cleared on the page: %v", err)
+	}
+	red("device trip refused a clear")
+	if err := r.a.Lifted("camera-3"); err != nil {
 		t.Fatal(err)
 	}
 	off("both trips resolved")
@@ -419,12 +426,12 @@ func TestOnlyTripsLight(t *testing.T) {
 		t.Fatal(err)
 	}
 	red("edge record missing")
-	if w := r.core.got[len(r.core.got)-1].Text; w != "Enforcer: its record of the edge box's cut is missing or unreadable, so the edge box stays cut. Someone may have tampered with the enforcer: check it before you let the edge box back on the enforcer's page at home. Its light stays red until you do or you clear this there." {
+	if w := r.core.got[len(r.core.got)-1].Text; w != "Enforcer: its record of the edge box's cut is missing or unreadable, so the edge box stays cut. Someone may have tampered with the enforcer: check it before you let the edge box back on the enforcer's page at home. Its light stays red until you let the edge box back there with your passkey." {
 		t.Fatalf("missing record text: %q", w)
 	}
 	// The core reads as the page names it, not by its device ID (#5445
 	// item 5).
-	if w, err := Words(RecordMissing, "core"); err != nil || w != "Enforcer: its record of the core's cut is missing or unreadable, so the core stays cut. Someone may have tampered with the enforcer: check it before you let the core back on the enforcer's page at home. Its light stays red until you do or you clear this there." {
+	if w, err := Words(RecordMissing, "core"); err != nil || w != "Enforcer: its record of the core's cut is missing or unreadable, so the core stays cut. Someone may have tampered with the enforcer: check it before you let the core back on the enforcer's page at home. Its light stays red until you let the core back there with your passkey." {
 		t.Fatalf("missing record text for the core: %q, %v", w, err)
 	}
 	if err := r.a.Lifted("core"); err != nil {
@@ -1066,5 +1073,310 @@ func TestRefusedCancelKeepsRecoveryUsed(t *testing.T) {
 	st := r2.a.Status()
 	if len(st.Open) != 1 || st.Open[0].ID != used.ID || st.Open[0].Kind != RecoveryCodeUsed {
 		t.Fatalf("after a restart: open %+v, want RecoveryCodeUsed %d", st.Open, used.ID)
+	}
+}
+
+// TestResolveRefusesLightingKinds (KRN-12 Response, #4305 item 1): the
+// page's clear on an open trip or missing cut record is refused with
+// ErrResolved and leaves it open and the light red; only Lifted for its
+// box closes it. Every other text still clears. Catches a light cleared
+// while a cut stands.
+func TestResolveRefusesLightingKinds(t *testing.T) {
+	r := newRig(t, &journal{})
+	for _, k := range []Kind{Trip, RecordMissing} {
+		if !k.Lights() {
+			t.Fatalf("%v does not light the bulb", k)
+		}
+		rec, err := r.a.Raise(k, "core")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := r.a.Resolve(rec.ID); !errors.Is(err, ErrResolved) {
+			t.Fatalf("%v cleared on the page: %v", k, err)
+		}
+		if got := r.a.Log()[r.a.byID[rec.ID]]; !got.Open || !got.Resolved.IsZero() {
+			t.Fatalf("%v refused but closed: %+v", k, got)
+		}
+		if c, st := r.bulb.now(), r.a.Status(); c != Red || st.Colour != Red {
+			t.Fatalf("%v refused: light %v, status %v", k, c, st.Colour)
+		}
+		if err := r.a.Lifted("core"); err != nil {
+			t.Fatal(err)
+		}
+		if c := r.bulb.now(); c != Off {
+			t.Fatalf("%v lifted: light %v", k, c)
+		}
+	}
+	// A kind that does not light still clears on the page.
+	u, err := r.a.Raise(UnusualUnlock, "front-door")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.a.Resolve(u.ID); err != nil {
+		t.Fatalf("an unusual unlock refused a clear: %v", err)
+	}
+}
+
+// TestLightingKindsNameTheLiftStep (KRN-12 Response, NET-2 Texts and
+// calls, #4305 item 1): the texts of the kinds the page cannot clear send
+// the owner to the passkey step that lifts the cut, never to a clear.
+// Catches a text that sends the owner to a button that no longer exists.
+func TestLightingKindsNameTheLiftStep(t *testing.T) {
+	for _, k := range []Kind{Trip, RecordMissing} {
+		for _, dev := range []string{"core", "edge"} {
+			w, err := Words(k, dev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(strings.ToLower(w), "clear") {
+				t.Fatalf("%v about %s offers a clear: %q", k, dev, w)
+			}
+			if !strings.Contains(w, "with your passkey") || !strings.Contains(w, "light stays red until") {
+				t.Fatalf("%v about %s names no lift step: %q", k, dev, w)
+			}
+		}
+	}
+}
+
+// TestLiftedCoveredKeepsLaterTrips (KRN-12 Response, #4305 item 2, L3
+// and Security rounds 2 and 3 on #6012): a lift's Cover seals the open
+// trips and missing records of its box, so a later trip opens a new alert
+// instead of counting on one, and LiftedCovered closes only the covered
+// IDs, on that box only. After a restart Reseal restores the seal and
+// keeps a lost covered alert's ID from being reused, so neither a fold
+// rebuilt from the journal nor a reused ID makes a later trip covered.
+// Catches a bounded lift that closes a trip it never covered.
+func TestLiftedCoveredKeepsLaterTrips(t *testing.T) {
+	r := newRig(t, &journal{})
+	first, err := r.a.Raise(Trip, "core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	covers := r.a.Cover("core")
+	if len(covers) != 1 || covers[0] != first.ID || len(r.a.Cover("edge")) != 0 {
+		t.Fatalf("covers %+v", covers)
+	}
+	after, err := r.a.Raise(Trip, "core") // the same kind after the lift
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ID == first.ID || after.Count != 1 {
+		t.Fatalf("a trip after the lift counted on the covered alert: %+v", after)
+	}
+	if again, _ := r.a.Raise(Trip, "core"); again.ID != after.ID || again.Count != 2 {
+		t.Fatalf("an unsealed alert no longer counts repeats: %+v", again)
+	}
+	if err := r.a.LiftedCovered("edge", covers); err != nil || r.bulb.now() != Red {
+		t.Fatalf("another box's lift: %v, light %v", err, r.bulb.now())
+	}
+	if err := r.a.LiftedCovered("core", covers); err != nil {
+		t.Fatal(err)
+	}
+	log := r.a.Log()
+	if log[r.a.byID[first.ID]].Open || !log[r.a.byID[after.ID]].Open || r.bulb.now() != Red {
+		t.Fatalf("the covered lift: %+v, light %v", log, r.bulb.now())
+	}
+	if err := r.a.LiftedCovered("core", r.a.Cover("core")); err != nil || r.bulb.now() != Off {
+		t.Fatalf("full lift: %v, light %v", err, r.bulb.now())
+	}
+
+	// Across a restart: a covered alert whose count append was lost, and
+	// one whose own append was lost.
+	rj := &refusing{}
+	open := func() *Alerts {
+		a, err := New(Config{Send: (&core{refuse: true}).Send, Light: &bulb{}, Journal: rj})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	a1 := open()
+	kept, err := a1.Raise(Trip, "edge") // journalled, count 1
+	if err != nil {
+		t.Fatal(err)
+	}
+	rj.refuse, rj.n = 1, 0
+	if _, err := a1.Raise(Trip, "edge"); err == nil { // count 2, refused
+		t.Fatal("the refused count answered nil")
+	}
+	rj.refuse, rj.n = 0, 0
+	saved := a1.Cover("edge")
+	rj.refuse, rj.n = 1, 0
+	lost, err := a1.Raise(Trip, "edge") // sealed: a new alert, refused
+	if err == nil || lost.ID == kept.ID {
+		t.Fatalf("a trip after the cover: %+v, %v", lost, err)
+	}
+	saved = append(saved, a1.Cover("edge")...)
+	rj.refuse, rj.n = 0, 0
+	a2 := open()
+	a2.Reseal(saved)
+	for range 2 { // one counts back to the lost count, one past it
+		r, err := a2.Raise(Trip, "edge")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(saved, r.ID) {
+			t.Fatalf("a trip after the restart took covered ID %d (covers %v)", r.ID, saved)
+		}
+	}
+	if err := a2.LiftedCovered("edge", saved); err != nil || a2.Status().Colour != Red {
+		t.Fatalf("the saved lift closed a trip after it: %v, light %v", err, a2.Status().Colour)
+	}
+}
+
+// TestLiftedCoveredNothingKeepsTrips (KRN-12 Response, #4305 item 2): a
+// lift that covered nothing closes nothing, whatever trips its box has
+// open, and still shows the light, so a bulb that missed a change catches
+// up. Catches an empty cover read as "every alert of the box", which would
+// turn the light off on a trip no lift covered.
+func TestLiftedCoveredNothingKeepsTrips(t *testing.T) {
+	r := newRig(t, &journal{})
+	trip, err := r.a.Raise(Trip, "core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ids := range [][]uint64{nil, {}} {
+		r.bulb.mu.Lock()
+		r.bulb.shown = []Colour{Off} // a power-cycled bulb
+		r.bulb.mu.Unlock()
+		if err := r.a.LiftedCovered("core", ids); err != nil {
+			t.Fatal(err)
+		}
+		if !r.a.Log()[r.a.byID[trip.ID]].Open || r.bulb.now() != Red {
+			t.Fatalf("an empty cover %#v: trip open %v, light %v", ids, r.a.Log()[r.a.byID[trip.ID]].Open, r.bulb.now())
+		}
+	}
+}
+
+// TestResumedClosesFirstAlert (KRN-12 Response): Resumed closes the
+// channel-paused alert even when it is the first record of the log, at
+// index 0. Catches an index check that reads 0 as "none open", which
+// would keep the pause open after the owner resumed.
+func TestResumedClosesFirstAlert(t *testing.T) {
+	r := newRig(t, &journal{})
+	r.a.Paused()
+	if err := r.a.Resumed(); err != nil {
+		t.Fatal(err)
+	}
+	if log := r.a.Log(); len(log) != 1 || log[0].Kind != ChannelPaused || log[0].Open {
+		t.Fatalf("the first record after a resume: %+v", log)
+	}
+}
+
+// unreadable is a journal whose Load fails.
+type unreadable struct{ journal }
+
+func (unreadable) Load() ([]byte, error) { return nil, errors.New("CANARY-JOURNAL-UNREADABLE") }
+
+// TestOpenReadsJournalWhole (NET-2 Texts and calls, P6): New returns a
+// journal it cannot read or cut back, shows the light the journal holds
+// before any Core call, leaves a whole journal untouched even when its
+// cut-back fails, and cuts a later failed append back to the end of what
+// it read, never before it. Catches an open that drops a read error, a
+// cut-back it needed, the light at boot, or the size of the journal read.
+func TestOpenReadsJournalWhole(t *testing.T) {
+	open := func(j Journal) (*Alerts, *bulb, error) {
+		b := &bulb{}
+		a, err := New(Config{Send: (&core{}).Send, Light: b, Journal: j})
+		return a, b, err
+	}
+	if _, _, err := open(&unreadable{}); err == nil || !strings.Contains(err.Error(), "CANARY-JOURNAL-UNREADABLE") {
+		t.Fatalf("an unreadable journal opened: %v", err)
+	}
+	if _, _, err := open(&torn{journal: journal{b: []byte(`{"ID":1`)}, noCut: true}); err == nil {
+		t.Fatal("a torn journal whose cut-back failed opened")
+	}
+
+	r := newRig(t, &journal{})
+	if _, err := r.a.Raise(Trip, "core"); err != nil {
+		t.Fatal(err)
+	}
+	saved := slices.Clone(r.j.b)
+	j := &torn{journal: journal{b: slices.Clone(saved)}, noCut: true}
+	a, b, err := open(j)
+	if err != nil {
+		t.Fatalf("a whole journal whose cut-back fails: %v", err)
+	}
+	b.mu.Lock()
+	shown := slices.Clone(b.shown)
+	b.mu.Unlock()
+	if !slices.Equal(shown, []Colour{Red}) {
+		t.Fatalf("the light at open, before any Core call: %v", shown)
+	}
+	j.noCut, j.short = false, true
+	if _, err := a.Raise(Enrolment, ""); err == nil {
+		t.Fatal("a torn record was reported saved")
+	}
+	if string(j.b) != string(saved) {
+		t.Fatalf("the cut-back did not stop at the journal read: %q, want %q", j.b, saved)
+	}
+}
+
+// TestRaiseStateKept (NET-2 Texts and calls): a record the journal
+// cannot encode is refused, a kind with no words is refused, a repeat
+// moves the alert's Last time on, and Core's state shows on the page.
+// Catches a dropped encode or words error, a stale Last, or a Core that
+// leaves the page reading the core down.
+func TestRaiseStateKept(t *testing.T) {
+	now := time.Date(2026, 10, 29, 3, 0, 0, 0, time.UTC)
+	a, err := New(Config{Send: (&core{}).Send, Light: &bulb{}, Journal: &journal{},
+		Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.Status().CoreDown {
+		t.Fatal("a new log reads the core up")
+	}
+	a.Core(true)
+	if a.Status().CoreDown {
+		t.Fatal("Core(true) left the core down")
+	}
+	if _, err := a.Raise(Kind(255), "core"); !errors.Is(err, ErrKind) || len(a.Log()) != 0 {
+		t.Fatalf("a kind with no words: %v, log %+v", err, a.Log())
+	}
+	first, err := a.Raise(Trip, "core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	again, err := a.Raise(Trip, "core")
+	if err != nil || again.ID != first.ID || !again.Last.Equal(now) {
+		t.Fatalf("a repeat: %+v, %v", again, err)
+	}
+	now = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC) // past what JSON can encode
+	if _, err := a.Raise(Enrolment, ""); err == nil {
+		t.Fatal("a record the journal cannot encode was reported saved")
+	}
+}
+
+// TestResolveAndResumeShowLight (KRN-12): Resolve and Resumed show the
+// light again, so a bulb that missed a change catches up on them.
+// Catches a close that leaves the light to the next timer.
+func TestResolveAndResumeShowLight(t *testing.T) {
+	r := newRig(t, &journal{})
+	if _, err := r.a.Raise(Trip, "core"); err != nil {
+		t.Fatal(err)
+	}
+	en, err := r.a.Raise(RecoveryCodeUsed, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.a.Paused()
+	for _, step := range []struct {
+		name string
+		do   func() error
+	}{
+		{"Resolve", func() error { return r.a.Resolve(en.ID) }},
+		{"Resumed", r.a.Resumed},
+	} {
+		r.bulb.mu.Lock()
+		r.bulb.shown = []Colour{Off} // a power-cycled bulb
+		r.bulb.mu.Unlock()
+		if err := step.do(); err != nil {
+			t.Fatalf("%s: %v", step.name, err)
+		}
+		if r.bulb.now() != Red {
+			t.Fatalf("%s left the bulb at %v with a trip open", step.name, r.bulb.now())
+		}
 	}
 }
