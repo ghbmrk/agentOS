@@ -501,4 +501,4 @@ func startReport(r kernel.ContentReport, unlogged []string) string {
 }
 
 // kernelSource is the kernel's TIM-1 source: chronyd at cfg.Chrony (#5391), else the box clock alone.
-func kernelSource(cfg MainConfig) kernel.Clock { return NewChrony(cfg.Chrony, cfg.ChronyReply).Read }
+func kernelSource(cfg MainConfig) Source { return NewChrony(cfg.Chrony, cfg.ChronyReply).Sample }

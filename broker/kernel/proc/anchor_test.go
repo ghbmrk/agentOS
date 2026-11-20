@@ -10,9 +10,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
@@ -454,13 +457,21 @@ func ownDir(t *testing.T) string {
 	return d
 }
 
+// reading is a Source's reading without its Stamp.
+func reading(r kernel.Reading, _ Stamp) kernel.Reading { return r }
+
+// stamped is a Source reading *r on the sample *at (zero: none).
+func stamped(r *kernel.Reading, at *byte) Source {
+	return func() (kernel.Reading, Stamp) { return *r, Stamp{11: *at} }
+}
+
 // The kernel process's Earliest runs on the monotonic clock from the later of
 // the log's last time and its source's Earliest, or the box clock at the
-// start when the source vouches for none; while running the source raises
-// only Latest. A start behind the log reads the log's time and moves on, and
-// a step of the box clock while running, back or forward, leaves Earliest
-// where the monotonic clock has it, even when a second source follows the
-// step (TIM-1, KEY-7, KEY-8, #5147, #5391).
+// start when the source vouches for none. A start behind the log reads the
+// log's time and moves on, and a step of the box clock while running, back
+// or forward, leaves Earliest where the monotonic clock has it, even when a
+// second source follows the step on its last sample (TIM-1, KEY-7, KEY-8,
+// #5147, #5391).
 //
 // REQ: TIM-1, KEY-7, KEY-8
 func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
@@ -473,8 +484,9 @@ func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
 	if _, err := l.Append(last, kernel.TStop, 1, struct{}{}); err != nil {
 		t.Fatal(err)
 	}
-	box := int64(0) // a flat CMOS battery: the clock restarted in the past
-	alone := func() kernel.Reading { return kernel.Reading{Latest: box} }
+	box := kernel.Reading{} // a flat CMOS battery: the clock restarted in the past
+	var none byte
+	alone := stamped(&box, &none)
 	c := onLog(l, alone)
 	if r := c(); r.Earliest < last || r.Latest < r.Earliest {
 		t.Fatalf("a clock behind the log read %+v, below the log's %d", r, last)
@@ -482,28 +494,28 @@ func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
 	// The monotonic clock carries it on: a stopped time spins to the test's timeout.
 	for r := c(); r.Earliest == last; r = c() {
 	}
-	box = 3 * last // a forward step while running
-	if r := c(); r.Earliest >= 2*last || r.Latest != box {
+	box.Latest = 3 * last // a forward step while running
+	if r := c(); r.Earliest >= 2*last || r.Latest != box.Latest {
 		t.Fatalf("a forward step read %+v: it moved Earliest, or Latest is not the box clock", r)
 	}
-	box = 0 // and back
+	box.Latest = 0 // and back
 	if r := c(); r.Earliest <= last || r.Latest != r.Earliest {
 		t.Fatalf("a step back read %+v", r)
 	}
-	box = 5 * last // a start ahead of the log with no second source starts there
-	if r := onLog(l, alone)(); r.Earliest < box {
+	box.Latest = 5 * last // a start ahead of the log with no second source starts there
+	if r := onLog(l, alone)(); r.Earliest < box.Latest {
 		t.Fatalf("a start ahead of the log read %+v", r)
 	}
 	// A source that vouches starts at its Earliest, not its Latest (the box
 	// clock ahead of it), and Latest follows the source's Latest.
-	src := kernel.Reading{Earliest: 2 * last, Latest: 6 * last}
-	w := onLog(l, func() kernel.Reading { return src })
+	src, at := kernel.Reading{Earliest: 2 * last, Latest: 6 * last}, byte(1)
+	w := onLog(l, stamped(&src, &at))
 	if r := w(); r.Earliest >= 3*last || r.Latest != 6*last {
 		t.Fatalf("a wide source at the start read %+v: Earliest is not its Earliest", r)
 	}
-	// A source's Earliest raises nothing while running: chronyd misses a box
-	// step under 10 s until its next sample, so its Earliest follows each
-	// small forward step while its sample stays the same (#5757 L3 1).
+	// A source's Earliest raises nothing while its sample stays the same:
+	// chronyd misses a box step under 10 s until its next sample, so its
+	// Earliest follows each small forward step meanwhile (#5757 L3 1).
 	stale := int64(9_000) // ms: one step chronyd does not see
 	for i := int64(1); i <= 200; i++ {
 		src = kernel.Reading{Earliest: 2*last + i*stale, Latest: 6*last + i*stale}
@@ -517,6 +529,92 @@ func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
 	}
 }
 
+// Once a source has a fresh sample, Earliest rises to that sample's bound
+// and runs on from there: a kernel started behind true time (a flat CMOS
+// battery, the log's last time) catches up when chronyd syncs, so a hold
+// waits its length, not the gap (#5759). A sample is fresh when its Stamp
+// differs from the last one seen, earlier or later (chronyd fuzzes each by
+// up to a second); the zero Stamp vouches for none, and a fresh sample below
+// Earliest lowers nothing.
+//
+// REQ: TIM-1, KEY-7, KEY-8
+func TestTIM1AFreshSampleRaisesEarliest(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	l, err := kernel.Open(kernel.Config{Store: &kernel.MemStore{}, Anchor: &kernel.MemAnchor{}, Pub: pub, Sign: priv, Rand: rand.Reader})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const last = int64(1_000_000_000_000)
+	if _, err := l.Append(last, kernel.TStop, 1, struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	gap := 30 * key.DayMS
+	src, at := kernel.Reading{Latest: 1}, byte(0) // the box restarted at 1970, chronyd not yet synced
+	w := onLog(l, stamped(&src, &at))
+	if r := w(); r.Earliest < last || r.Earliest >= last+key.DayMS {
+		t.Fatalf("the start read %+v, not the log's %d", r, last)
+	}
+	// chronyd syncs: true time is the gap past the log.
+	src, at = kernel.Reading{Earliest: last + gap, Latest: last + gap + 10}, 7
+	if r := w(); r.Earliest != last+gap || r.Latest != last+gap+10 {
+		t.Fatalf("a first sample read %+v: want Earliest raised to %d", r, last+gap)
+	}
+	// The same sample, then the zero Stamp, following small box steps: no rise.
+	for _, a := range []byte{7, 0} {
+		at = a
+		src = kernel.Reading{Earliest: last + gap + 9_000, Latest: last + gap + 9_010}
+		if r := w(); r.Earliest >= last+gap+9_000 {
+			t.Fatalf("stamp %d read %+v: a reading on no new sample raised Earliest", a, r)
+		}
+	}
+	// A new sample, with a stamp below the last (the fuzz), raises it again;
+	// one below Earliest lowers nothing, and Earliest runs on from the rise.
+	src, at = kernel.Reading{Earliest: last + 2*gap, Latest: last + 2*gap}, 3
+	if r := w(); r.Earliest != last+2*gap {
+		t.Fatalf("a second sample read %+v: want Earliest raised to %d", r, last+2*gap)
+	}
+	src, at = kernel.Reading{Earliest: last, Latest: last}, 4
+	if r := w(); r.Earliest < last+2*gap || r.Latest != r.Earliest {
+		t.Fatalf("a sample behind Earliest read %+v: Earliest went back", r)
+	}
+	for r := w(); r.Earliest == last+2*gap; r = w() { // a stopped time spins to the test's timeout
+	}
+}
+
+// onLog's clock is read from more than one goroutine (a re-seal reads it off
+// the kernel's lock): under -race its rise is guarded.
+//
+// REQ: TIM-1
+func TestTIM1AOnLogIsSafeAcrossGoroutines(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	l, err := kernel.Open(kernel.Config{Store: &kernel.MemStore{}, Anchor: &kernel.MemAnchor{}, Pub: pub, Sign: priv, Rand: rand.Reader})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n atomic.Int64
+	w := onLog(l, func() (kernel.Reading, Stamp) {
+		i := n.Add(1)
+		return kernel.At(i * 1000), Stamp{0: byte(i)}
+	})
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			prev := int64(0)
+			for range 100 {
+				r := w()
+				if r.Earliest < prev {
+					t.Errorf("Earliest went back: %d after %d", r.Earliest, prev)
+					return
+				}
+				prev = r.Earliest
+			}
+		}()
+	}
+	wg.Wait()
+}
+
 // OpenKernel reads a configured clock through onLog: a forward step of the
 // box clock after boot does not move the time the kernel logs at (TIM-1).
 //
@@ -524,7 +622,7 @@ func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
 func TestTIM1AnOpenedKernelReadsItsClockOnTheLog(t *testing.T) {
 	b := newBBox(t, recipientWire(t, testRK))
 	box := b.now
-	b.cfg.Clock = func() kernel.Reading { return kernel.At(box) }
+	b.cfg.Clock = func() (kernel.Reading, Stamp) { return kernel.At(box), Stamp{} }
 	b.restart()
 	box = 1 << 50 // a forward step while running
 	err := b.h.With(func(k *kernel.Kernel) error {

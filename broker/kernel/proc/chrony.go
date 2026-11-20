@@ -47,23 +47,33 @@ func NewChrony(sock, reply string) *Chrony {
 	return s
 }
 
-// Read is the kernel process's TIM-1 source (onLog). With chronyd synced,
+// Stamp is the chronyd sample a reading rests on: its reference time as
+// chronyd sends it (RPY_TRACKING bytes 56 to 68), the zero Stamp for none.
+// onLog compares stamps only for equality: chronyd fuzzes each sample's
+// reference time by up to a second (reference.c fuzz_ref_time), so a later
+// sample's can read earlier.
+type Stamp [12]byte
+
+// Source is a TIM-1 reading and the Stamp of the sample behind its Earliest.
+type Source func() (kernel.Reading, Stamp)
+
+// Sample is the kernel process's TIM-1 source (onLog). With chronyd synced,
 // true time is the box clock plus chronyd's correction, within root delay /
 // 2 + root dispersion, and the reading is the hull of that and the box
 // clock: a disagreement widens it. Otherwise it vouches for no lower bound
-// (Earliest 0) and Latest is the box clock.
-func (s *Chrony) Read() kernel.Reading {
+// (Earliest 0), Latest is the box clock and the Stamp is zero.
+func (s *Chrony) Sample() (kernel.Reading, Stamp) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b0 := time.Now().UnixMilli()
-	corr, err, ok := s.track()
+	corr, err, ref, ok := s.track()
 	b1 := time.Now().UnixMilli()
 	if !ok {
-		return kernel.Reading{Latest: b1}
+		return kernel.Reading{Latest: b1}, Stamp{}
 	}
 	lo := b0 + int64(math.Floor((corr-err)*1000))
 	hi := b1 + int64(math.Ceil((corr+err)*1000))
-	return kernel.Reading{Earliest: min(b0, lo), Latest: max(b1, hi)}
+	return kernel.Reading{Earliest: min(b0, lo), Latest: max(b1, hi)}, ref
 }
 
 func (s *Chrony) drop() {
@@ -74,32 +84,32 @@ func (s *Chrony) drop() {
 	}
 }
 
-// track asks chronyd once: its correction (true time minus the box clock)
-// and its error bound, in seconds; !ok when chronyd is not synced to a
-// source or does not answer well. A failure closes the socket and waits
+// track asks chronyd once: its correction (true time minus the box clock),
+// its error bound, in seconds, and its sample's Stamp; !ok when chronyd is
+// not synced to a source or does not answer well. A failure closes the socket and waits
 // chronyRetry, so a hung chronyd delays a decision at most once in that.
-func (s *Chrony) track() (corr, bound float64, ok bool) {
+func (s *Chrony) track() (corr, bound float64, ref Stamp, ok bool) {
 	if s.dial == nil || time.Now().Before(s.next) {
-		return 0, 0, false
+		return 0, 0, ref, false
 	}
-	if corr, bound, ok = s.ask(); !ok {
+	if corr, bound, ref, ok = s.ask(); !ok {
 		s.drop()
 		s.next = time.Now().Add(chronyRetry)
 	}
 	return
 }
 
-func (s *Chrony) ask() (float64, float64, bool) {
+func (s *Chrony) ask() (corr, bound float64, ref Stamp, ok bool) {
 	if s.c == nil {
 		c, err := s.dial()
 		if err != nil {
-			return 0, 0, false
+			return
 		}
 		s.c = c
 		// chronyd runs as its own user; the connect above, not the mode,
 		// keeps every other sender out.
 		if os.Chmod(s.reply, 0o666) != nil {
-			return 0, 0, false
+			return
 		}
 	}
 	s.seq++
@@ -108,17 +118,20 @@ func (s *Chrony) ask() (float64, float64, bool) {
 	binary.BigEndian.PutUint16(q[4:], chronyTracking)
 	binary.BigEndian.PutUint32(q[8:], s.seq)
 	if s.c.SetDeadline(time.Now().Add(chronyWait)) != nil {
-		return 0, 0, false
+		return
 	}
 	if _, err := s.c.Write(q); err != nil {
-		return 0, 0, false
+		return
 	}
 	p := make([]byte, chronyLen+1)
 	n, err := s.c.Read(p)
 	if err != nil {
-		return 0, 0, false
+		return
 	}
-	return parseTracking(p[:n], s.seq)
+	if corr, bound, ok = parseTracking(p[:n], s.seq); ok {
+		copy(ref[:], p[56:68])
+	}
+	return
 }
 
 // parseTracking reads an RPY_TRACKING reply to request seq: chronyd's

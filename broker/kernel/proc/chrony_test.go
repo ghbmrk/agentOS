@@ -147,7 +147,7 @@ func TestTIM1AChronyReplyGivesNoLowerBoundUnlessSynced(t *testing.T) {
 	s := NewChrony(filepath.Join(dir, "none.sock"), filepath.Join(dir, "reply.sock"))
 	defer closeChrony(s)
 	before := time.Now().UnixMilli()
-	if r := s.Read(); r.Earliest != 0 || r.Latest < before {
+	if r := reading(s.Sample()); r.Earliest != 0 || r.Latest < before {
 		t.Fatalf("no chronyd read %+v, want no lower bound and the box clock", r)
 	}
 
@@ -155,11 +155,11 @@ func TestTIM1AChronyReplyGivesNoLowerBoundUnlessSynced(t *testing.T) {
 	// none for the retry interval.
 	mute := NewChrony(fakeChronyd(t, dir, func(uint32) []byte { return nil }), filepath.Join(dir, "mute.sock"))
 	defer closeChrony(mute)
-	if r := mute.Read(); r.Earliest != 0 {
+	if r := reading(mute.Sample()); r.Earliest != 0 {
 		t.Fatalf("a mute chronyd read %+v", r)
 	}
 	start := time.Now()
-	if r := mute.Read(); r.Earliest != 0 || time.Since(start) >= chronyWait {
+	if r := reading(mute.Sample()); r.Earliest != 0 || time.Since(start) >= chronyWait {
 		t.Fatalf("a mute chronyd was asked again at once: %+v after %v", r, time.Since(start))
 	}
 }
@@ -176,14 +176,14 @@ func TestTIM1AChronyReadsTheHullOfBothSources(t *testing.T) {
 	s := NewChrony(fakeChronyd(t, dir, func(seq uint32) []byte { return tracking(seq, corr.Load()) }), filepath.Join(dir, "reply.sock"))
 	defer closeChrony(s)
 	b0 := time.Now().UnixMilli()
-	r := s.Read()
+	r := reading(s.Sample())
 	b1 := time.Now().UnixMilli()
 	if r.Earliest < b0-3 || r.Earliest > b1 || r.Latest < b0 || r.Latest > b1+3 {
 		t.Fatalf("an agreeing chronyd read %+v around the box's [%d, %d]", r, b0, b1)
 	}
 	corr.Store(corrTwoDays)
 	b0 = time.Now().UnixMilli()
-	r = s.Read()
+	r = reading(s.Sample())
 	b1 = time.Now().UnixMilli()
 	if r.Earliest < b0-2*key.DayMS-3 || r.Earliest > b1-2*key.DayMS || r.Latest < b0 || r.Latest > b1 {
 		t.Fatalf("a box two days fast read %+v around the box's [%d, %d]", r, b0, b1)
@@ -200,7 +200,7 @@ func TestTIM1AOnlyChronydReachesTheReplySocket(t *testing.T) {
 	reply := filepath.Join(dir, "reply.sock")
 	s := NewChrony(fakeChronyd(t, dir, func(seq uint32) []byte { return tracking(seq, corrZero) }), reply)
 	defer closeChrony(s)
-	if r := s.Read(); r.Earliest == 0 {
+	if r := reading(s.Sample()); r.Earliest == 0 {
 		t.Fatalf("chronyd's answer read %+v", r)
 	}
 	forger, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: reply, Net: "unixgram"})
@@ -238,7 +238,7 @@ func TestTIM1AStartAheadWithChronySyncedEndsNoHoldEarly(t *testing.T) {
 	s := NewChrony(fakeChronyd(t, dir, func(seq uint32) []byte { return tracking(seq, corrTwoDays) }), filepath.Join(dir, "reply.sock"))
 	defer closeChrony(s)
 	box := time.Now().UnixMilli()
-	r := onLog(l, s.Read)()
+	r := onLog(l, s.Sample)()
 	if r.Earliest >= from {
 		t.Fatalf("the start read %+v, past the hold's end %d: the box clock ended it early", r, from)
 	}
@@ -248,7 +248,7 @@ func TestTIM1AStartAheadWithChronySyncedEndsNoHoldEarly(t *testing.T) {
 
 	// The box clock alone vouches for nothing, so a start reads it as before:
 	// that is the hold ending early that the second source prevents.
-	if r := onLog(l, NewChrony("", "").Read)(); r.Earliest < from {
+	if r := onLog(l, NewChrony("", "").Sample)(); r.Earliest < from {
 		t.Fatalf("without chronyd the start read %+v, before the hold's end %d: the contrast is gone", r, from)
 	}
 }
@@ -268,7 +268,7 @@ func TestTIM1AChronyAheadOfTheBoxReachesPastItByTheBound(t *testing.T) {
 	}), filepath.Join(dir, "reply.sock"))
 	defer closeChrony(s)
 	b0 := time.Now().UnixMilli()
-	r := s.Read()
+	r := reading(s.Sample())
 	b1 := time.Now().UnixMilli()
 	reach := 2*key.DayMS + 1000 // the correction, then the bound's 1 s
 	if r.Earliest < b0 || r.Earliest > b1 || r.Latest < b0+reach || r.Latest > b1+reach {
@@ -291,7 +291,7 @@ func TestTIM1AChronyBehindTheBoxReachesBeforeItByTheBound(t *testing.T) {
 	}), filepath.Join(dir, "reply.sock"))
 	defer closeChrony(s)
 	b0 := time.Now().UnixMilli()
-	r := s.Read()
+	r := reading(s.Sample())
 	b1 := time.Now().UnixMilli()
 	reach := 2*key.DayMS + 1000 // the correction, then the bound's 1 s
 	if r.Earliest < b0-reach || r.Earliest > b1-reach || r.Latest < b0 || r.Latest > b1 {
@@ -307,10 +307,10 @@ func TestTIM1AChronyRefusesAnAnswerToAnEarlierRequest(t *testing.T) {
 	dir := t.TempDir()
 	s := NewChrony(fakeChronyd(t, dir, func(uint32) []byte { return tracking(1, corrZero) }), filepath.Join(dir, "reply.sock"))
 	defer closeChrony(s)
-	if r := s.Read(); r.Earliest == 0 {
+	if r := reading(s.Sample()); r.Earliest == 0 {
 		t.Fatalf("the answer to the first request read %+v", r)
 	}
-	if r := s.Read(); r.Earliest != 0 {
+	if r := reading(s.Sample()); r.Earliest != 0 {
 		t.Fatalf("the first answer replayed to the second request read %+v", r)
 	}
 }
@@ -336,7 +336,7 @@ func TestTIM1AChronyReplySocketLifecycle(t *testing.T) {
 		return p
 	}), reply)
 	defer closeChrony(s)
-	if r := s.Read(); r.Earliest == 0 {
+	if r := reading(s.Sample()); r.Earliest == 0 {
 		t.Fatalf("over a stale file the reply socket read %+v", r)
 	}
 	if fi, err := os.Stat(reply); err != nil || fi.Mode()&os.ModeSocket == 0 || fi.Mode().Perm() != 0o666 {
@@ -360,7 +360,7 @@ func TestTIM1AChronyReplySocketLifecycle(t *testing.T) {
 
 	// Closing leaves Read usable: it binds the socket again.
 	done := make(chan kernel.Reading, 1)
-	go func() { done <- s.Read() }()
+	go func() { done <- reading(s.Sample()) }()
 	select {
 	case r := <-done:
 		if r.Earliest == 0 {
@@ -372,7 +372,7 @@ func TestTIM1AChronyReplySocketLifecycle(t *testing.T) {
 
 	c = s.c
 	synced.Store(false)
-	if r := s.Read(); r.Earliest != 0 {
+	if r := reading(s.Sample()); r.Earliest != 0 {
 		t.Fatalf("an unsynced chronyd read %+v", r)
 	}
 	closed(c, "after a failed answer")
@@ -398,12 +398,12 @@ func TestTIM1AChronyGoneFailsWithoutWaiting(t *testing.T) {
 	}()
 	s := NewChrony(sock, filepath.Join(dir, "reply.sock"))
 	defer closeChrony(s)
-	if r := s.Read(); r.Earliest == 0 {
+	if r := reading(s.Sample()); r.Earliest == 0 {
 		t.Fatalf("chronyd's answer read %+v", r)
 	}
 	l.Close()
 	start := time.Now()
-	if r := s.Read(); r.Earliest != 0 || time.Since(start) >= chronyWait {
+	if r := reading(s.Sample()); r.Earliest != 0 || time.Since(start) >= chronyWait {
 		t.Fatalf("a gone chronyd read %+v after %v", r, time.Since(start))
 	}
 }
@@ -426,10 +426,10 @@ func TestTIM1ARunKernelReadsChronydAtItsConfiguredSocket(t *testing.T) {
 	dir := t.TempDir()
 	cfg := MainConfig{Chrony: fakeChronyd(t, dir, func(seq uint32) []byte { return tracking(seq, corrTwoDays) }), ChronyReply: filepath.Join(dir, "reply.sock")}
 	box := time.Now().UnixMilli()
-	if r := kernelSource(cfg)(); r.Earliest == 0 || r.Earliest > box-2*key.DayMS+1000 || r.Latest < box {
+	if r := reading(kernelSource(cfg)()); r.Earliest == 0 || r.Earliest > box-2*key.DayMS+1000 || r.Latest < box {
 		t.Fatalf("the configured chronyd read %+v: want two days behind the box's %d", r, box)
 	}
-	if r := kernelSource(MainConfig{})(); r.Earliest != 0 || r.Latest < box {
+	if r := reading(kernelSource(MainConfig{})()); r.Earliest != 0 || r.Latest < box {
 		t.Fatalf("no chronyd read %+v: want the box clock alone", r)
 	}
 	f, err := parser.ParseFile(token.NewFileSet(), "kernelmain.go", nil, 0)
@@ -458,5 +458,52 @@ func TestTIM1ARunKernelReadsChronydAtItsConfiguredSocket(t *testing.T) {
 	}
 	if len(clocks) != 1 || clocks[0] != "kernelSource(cfg)" {
 		t.Fatalf("RunKernel hands OpenKernel the clocks %q: want kernelSource(cfg) alone", clocks)
+	}
+}
+
+// The Stamp is the reply's reference time as sent, zero for the box clock
+// alone; over onLog a kernel started two days behind catches up
+// only on a new reference time, not on a correction that changes while the
+// sample stays the same (an unseen box step), and not on the zero Stamp
+// (#5759).
+//
+// REQ: TIM-1, KEY-7, KEY-8
+func TestTIM1AChronyRisesOnlyOnANewReferenceTime(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	l, err := kernel.Open(kernel.Config{Store: &kernel.MemStore{}, Anchor: &kernel.MemAnchor{}, Pub: pub, Sign: priv, Rand: rand.Reader})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var corr, ref atomic.Uint32
+	corr.Store(corrTwoDays)
+	ref.Store(0x65000000)
+	dir := t.TempDir()
+	s := NewChrony(fakeChronyd(t, dir, func(seq uint32) []byte {
+		p := tracking(seq, corr.Load())
+		binary.BigEndian.PutUint32(p[60:], ref.Load()) // ref time's low seconds
+		binary.BigEndian.PutUint32(p[64:], 123)        // and its nanoseconds
+		return p
+	}), filepath.Join(dir, "reply.sock"))
+	defer closeChrony(s)
+	r, st := s.Sample()
+	if want := (Stamp{4: 0x65, 11: 123}); r.Earliest == 0 || st != want {
+		t.Fatalf("a synced reply read %+v stamped %x, want %x", r, st, want)
+	}
+
+	box := time.Now().UnixMilli()
+	w := onLog(l, s.Sample) // the box two days fast: Earliest two days back
+	if r := w(); r.Earliest > box-2*key.DayMS+1000 {
+		t.Fatalf("the start read %+v", r)
+	}
+	corr.Store(corrZero) // chronyd's correction follows, its sample does not
+	if r := w(); r.Earliest > box-2*key.DayMS+60_000 {
+		t.Fatalf("a changed correction on the same sample read %+v: Earliest rose", r)
+	}
+	if r, st := NewChrony("", "").Sample(); r.Earliest != 0 || st != (Stamp{}) {
+		t.Fatalf("the box clock alone read %+v stamped %x", r, st)
+	}
+	ref.Add(64)
+	if r := w(); r.Earliest < box-3 {
+		t.Fatalf("a new sample read %+v: Earliest did not rise to the box's %d", r, box)
 	}
 }
