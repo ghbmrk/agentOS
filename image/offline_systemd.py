@@ -77,14 +77,20 @@ pivot_root . .
 umount -l .
 exec env -i container=agentos-offline /usr/lib/systemd/systemd "$@"
 '''
-# The runner's systemctl, in the manager's PID namespace (systemd refuses a bus peer it cannot see),
-# reaching its private bus through /proc/PID/root.
+# The runner's systemctl or systemd-run, in the manager's PID namespace (systemd refuses a bus peer it
+# cannot see), reaching its private bus through /proc/PID/root, and with U set, root's user manager's
+# (UserManager) as $XDG_RUNTIME_DIR/systemd/private, where systemctl --user looks.
 CTL = r'''set -eu
-S=$1; shift
+S=$1 U=$2; shift 2
 mount -t tmpfs -o mode=755 tmpfs /run
 mkdir -p /run/systemd/system
 ln -s "$S" /run/systemd/private
-exec systemctl "$@"
+if [ -n "$U" ]; then
+  mkdir -p /run/user/0/systemd
+  ln -s "$U" /run/user/0/systemd/private
+  export XDG_RUNTIME_DIR=/run/user/0
+fi
+exec "$@"
 '''
 # How PID 1 says a generator failed (systemd 257 exec-util.c do_execute, process-util.c
 # wait_for_terminate_and_check): one console line, the generator's path, then an exit status, a signal or
@@ -132,6 +138,7 @@ class Manager:
         self.proc = subprocess.Popen(wrap + manager_argv(root, usr, cmdline, plant, os.ttyname(self.slave)),
                                      stdout=subprocess.DEVNULL, stderr=self.err)
         self.pid = None
+        self.user_procs = []
         try:
             if wrap:
                 self.hold_parent()
@@ -211,27 +218,47 @@ class Manager:
                 pass
         return out
 
-    def failed_generators(self):
+    def failed_generators(self, bus=None):
         """The generators that failed in this run (generator_failures() of the whole console, after the pty
-        is drained), plus GENERATOR_TIMEOUT when the generators ran close to systemd's timeout."""
+        is drained), plus GENERATOR_TIMEOUT when BUS's (this manager's, or a UserManager's) generators ran
+        close to systemd's timeout."""
         while self._pump(0):
             pass
         with self.lock:  # the drain thread may hold a chunk it read but has not yet written (#4876)
             pass
         out = generator_failures(pathlib.Path(self.log.name).read_text(errors="replace"))
-        t = self.manager(("GeneratorsStartTimestampMonotonic", "GeneratorsFinishTimestampMonotonic"))
+        t = (bus or self).manager(("GeneratorsStartTimestampMonotonic", "GeneratorsFinishTimestampMonotonic"))
         start, finish = int(t["GeneratorsStartTimestampMonotonic"]), int(t["GeneratorsFinishTimestampMonotonic"])
         if not finish or finish - start >= (GENERATOR_TIMEOUT_S - GENERATOR_SLACK_S) * 1000000:
             out.add(GENERATOR_TIMEOUT)
         return out
 
-    def ctl(self, args, check=True):
+    def ctl(self, args, check=True, user=False):
+        """The runner's systemctl with ARGS, on this manager's bus, or with USER on root's user manager's
+        (UserManager)."""
+        u = "/proc/%d/root/run/user/0/systemd/private" % self.pid if user else ""
         r = subprocess.run(["nsenter", "-t", str(self.pid), "-p", "--", "unshare", "-m", "--propagation", "private",
-                            "sh", "-c", CTL, "offline-systemd-ctl", "/proc/%d/root/run/systemd/private" % self.pid]
-                           + args, capture_output=True, text=True, timeout=300)
+                            "sh", "-c", CTL, "offline-systemd-ctl", "/proc/%d/root/run/systemd/private" % self.pid, u,
+                            "systemctl"] + (["--user"] if user else []) + args, capture_output=True, text=True,
+                           timeout=300)
         if check and r.returncode != 0:
             raise SystemExit("offline systemd: systemctl %s: %s" % (" ".join(args[:3]), r.stderr[-2000:]))
         return r
+
+    def user_manager(self, timeout=120):
+        """Start root's user manager (USER_MANAGER) in the container, wait until it is up, and return it
+        (UserManager)."""
+        proc = subprocess.Popen(["nsenter", "-t", str(self.pid), "-a", "--", "sh", "-c", USER_MANAGER,
+                                 "offline-systemd-user"] + list(PINNED), stdout=subprocess.DEVNULL, stderr=self.err)
+        self.user_procs.append(proc)
+        u = UserManager(self)
+        end = time.monotonic() + timeout
+        while time.monotonic() < end and proc.poll() is None:
+            r = u.ctl(["show", "-p", "SystemState", "--value"], check=False)
+            if r.returncode == 0 and r.stdout.strip() in ("running", "degraded"):
+                return u
+            time.sleep(0.2)
+        raise SystemExit("offline systemd: root's user manager did not start: %s" % self.console())
 
     def manager(self, props):
         """{prop: value} of the manager itself."""
@@ -269,6 +296,9 @@ class Manager:
                 pass
         self.proc.kill()
         self.proc.wait()
+        for p in self.user_procs:  # killed with the PID namespace; reaped here
+            p.kill()
+            p.wait()
         os.close(self.slave)
         with self.lock:
             os.close(self.master)
@@ -276,6 +306,43 @@ class Manager:
         self.drain.join(5)
         self.log.close()
         self.err.close()
+
+
+class UserManager:
+    """Root's user manager, as user@0.service starts it at a root login (#6002): the tree's
+    /usr/lib/systemd/systemd --user, uid 0, in MANAGER's container, with PINNED's options, so it too loads
+    its units and runs its generators but starts nothing. Asked over its own private bus, as Manager is."""
+
+    def __init__(self, m):
+        self.m = m
+
+    def ctl(self, args, check=True):
+        return self.m.ctl(args, check, user=True)
+
+    manager = Manager.manager
+    show = Manager.show
+
+    def failed_generators(self):
+        return self.m.failed_generators(self)
+
+    def unit_path(self):
+        """The directories it reads units from, highest first, as it resolved them (path-lookup.c's user
+        scope for uid 0, generator and transient directories included): its UnitPath."""
+        return shell_words(self.manager(("UnitPath",))["UnitPath"], "the user manager's UnitPath")
+
+
+# Root's user manager, run in all of MANAGER's namespaces by nsenter, not as a unit of PID 1: a unit would take
+# the tree's own type-wide service.d drop-ins (a User= or Environment= there changed or stopped it). It gets
+# the environment pam_systemd and user-runtime-dir@0 give user@0.service (HOME, USER, LOGNAME, a
+# root-owned XDG_RUNTIME_DIR), a cgroup of its own (as Delegate=yes gives it), and the console as its
+# output, which Manager reads for failed generators (its user-generators). Its argv ends with PINNED.
+USER_MANAGER = r'''set -eu
+mkdir -p /sys/fs/cgroup/agentos-offline-user /run/user/0
+chmod 0700 /run/user/0
+echo $$ >/sys/fs/cgroup/agentos-offline-user/cgroup.procs
+exec env -i HOME=/root USER=root LOGNAME=root XDG_RUNTIME_DIR=/run/user/0 /usr/lib/systemd/systemd --user "$@" \
+  </dev/null >/dev/console 2>&1
+'''
 
 
 # systemd's own options, after the boot entry's words: its getopt_long permutes argv and the last value
