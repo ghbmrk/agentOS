@@ -432,6 +432,9 @@ class GlobImportsTest(unittest.TestCase):
                                 "add the entry: /usr/lib/libglob-user.so.1.0"])
 
 
+E = sweep.Entry
+
+
 def place(imports, via=None, scanned=10):
     return {"scanned": scanned, "imports": imports, "via": via or {}}
 
@@ -501,10 +504,10 @@ class RefusalsTest(unittest.TestCase):
             a = pathlib.Path(d) / "allow"
             a.write_text("/usr/bin/bash\n[glob]\n# why\n/usr/bin/bash  # the shell\n/usr/lib/libg.so.*\n"
                          "[cipher]\n/usr/lib/libcrypto.so.3 *\n")
-            self.assertEqual(sweep.read_allow(a), (["/usr/bin/bash"], {"/usr/lib/libcrypto.so.3": "*"},
-                                                   ["/usr/bin/bash", "/usr/lib/libg.so.*"]))
+            self.assertEqual(sweep.read_allow(a), ([E("/usr/bin/bash")], {"/usr/lib/libcrypto.so.3": "*"},
+                                                   [E("/usr/bin/bash"), E("/usr/lib/libg.so.*")]))
             a.write_text("/usr/bin/bash\n[cipher]\n/usr/lib/libcrypto.so.3 *\n[glob]\n/usr/bin/x\n")
-            self.assertEqual(sweep.read_allow(a)[2], ["/usr/bin/x"])
+            self.assertEqual(sweep.read_allow(a)[2], [E("/usr/bin/x")])
             for body, want in (("[glob]\n/usr/bin/x\n[glob]\n", ":3: [glob] is given again"),
                                ("[regex]\n", ":1: [regex] is no section"),
                                ("[glob\n", ":1: [glob is no section")):
@@ -523,7 +526,7 @@ class RefusalsTest(unittest.TestCase):
             a.write_text("# comment\n/usr/bin/bash  # the shell\n/usr/lib/libsmartcols.so.1.*\n/usr/bin/lsblk\n"
                          "[cipher]\n/usr/lib/libcs.so.12.* sha256=%s EVP_CIPHER_fetch=1  # why\n"
                          "/usr/lib/libcrypto.so.3 *\n" % ("0f" * 32))
-            self.assertEqual(sweep.load_allow(a), self.ALLOW)
+            self.assertEqual(sweep.load_allow(a), [E(x) for x in self.ALLOW])
             self.assertEqual(sweep.read_allow(a)[1], {"/usr/lib/libcs.so.12.*": {"sha256": "0f" * 32,
                                                                               "sites": {"EVP_CIPHER_fetch": 1}},
                                                       "/usr/lib/libcrypto.so.3": "*"})
@@ -536,7 +539,7 @@ class RefusalsTest(unittest.TestCase):
                     self.assertEqual(sweep.main(["--summary", str(j), str(a)]), want)
 
     def test_shipped_allowlist_is_absolute_globs(self):
-        allow = sweep.load_allow(sweep.ALLOW)
+        allow = [e.glob for e in sweep.load_allow(sweep.ALLOW)]
         self.assertTrue(allow)
         for a in allow:
             with self.subTest(a=a):
@@ -549,9 +552,9 @@ class RefusalsTest(unittest.TestCase):
         self.assertIn("EVP_CIPHER_fetch", cipher["/usr/lib/x86_64-linux-gnu/libcryptsetup.so.12.*"]["sites"])
         # #6285: so are the [glob] entries, each named once, and libsystemd-shared's call sites are reviewed there.
         globs = sweep.read_allow(sweep.ALLOW)[2]
-        self.assertTrue(all(g.startswith("/usr/") for g in globs), globs)
+        self.assertTrue(all(g.glob.startswith("/usr/") for g in globs), globs)
         self.assertEqual(len(globs), len(set(globs)))
-        self.assertIn("/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so", globs)
+        self.assertIn(E("/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so"), globs)
 
     def test_bad_cipher_entries_name_the_line(self):
         # L3 6899461135 items 2, 3 and 6, and an entry not keyed to its bytes (#5861).
@@ -743,3 +746,167 @@ class ReadErrorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+SMARTCOLS = "/usr/lib/x86_64-linux-gnu/libsmartcols.so.1.1.0"
+SHARED_LIB = "/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-257.so"
+
+
+class ViaEntryTest(unittest.TestCase):
+    """VULN-debian-r13-f2 (#6297): "via GLOB" accepts a reviewed library's dependents without an entry each;
+    a new direct caller still fails, and so does a via entry that accepts nothing."""
+    REGEX = [E("/usr/lib/x86_64-linux-gnu/libsmartcols.so.1.*"), E("/usr/lib/x86_64-linux-gnu/libsmartcols.so.1.*", True)]
+    PLACES = {"tree": place({SMARTCOLS: ["regcomp"], "/usr/bin/bash": ["regcomp"]},
+                            {"/usr/bin/lsblk": [SMARTCOLS], "/usr/sbin/swapon": [SMARTCOLS]}),
+              "initrd:x": place({SMARTCOLS: ["regcomp"]}, {"/usr/bin/lsblk": [SMARTCOLS]})}
+    ALLOW = REGEX + [E("/usr/bin/bash")]
+
+    def errs(self, places, allow=None, globs=()):
+        return sweep.refusals(places, self.ALLOW if allow is None else allow, globs)
+
+    def test_dependents_of_a_listed_library_need_no_entry(self):
+        self.assertEqual(self.errs(self.PLACES), [])
+
+    def test_a_direct_caller_fails_though_its_library_is_via(self):
+        for syms in (["regcomp"], ["rpmatch"]):
+            places = {"tree": dict(self.PLACES["tree"], imports=dict(self.PLACES["tree"]["imports"],
+                                                                    **{"/usr/bin/lsblk": syms}))}
+            with self.subTest(syms=syms):
+                self.assertEqual(self.errs(places), [
+                    "tree: /usr/bin/lsblk imports or reaches a regex function and is not in import_sweep.allow; "
+                    "review it, name it in the image -100290 record, then add the entry: /usr/bin/lsblk"])
+                # Its own entry accepts it.
+                self.assertEqual(self.errs(places, self.ALLOW + [E("/usr/bin/lsblk")]), [])
+
+    def test_a_direct_caller_in_one_place_fails_there_only(self):
+        places = dict(self.PLACES, **{"initrd:x": place({SMARTCOLS: ["regcomp"], "/usr/bin/lsblk": ["regexec"]},
+                                                        {"/usr/bin/lsblk": [SMARTCOLS]})})
+        errs = self.errs(places)
+        self.assertEqual(len(errs), 1)
+        self.assertTrue(errs[0].startswith("initrd:x: /usr/bin/lsblk imports"), errs)
+
+    def test_via_a_library_without_its_own_entry_accepts_nothing(self):
+        errs = self.errs(self.PLACES, self.REGEX[1:] + [E("/usr/bin/bash")])
+        self.assertEqual([e.split(" imports")[0] for e in errs[:-1]],
+                         ["tree initrd:x: /usr/bin/lsblk", "tree initrd:x: " + SMARTCOLS,
+                          "tree: /usr/sbin/swapon"])
+        self.assertEqual(errs[-1], "import_sweep.allow: via /usr/lib/x86_64-linux-gnu/libsmartcols.so.1.* accepts "
+                                   "no file that reaches a regex function only through a library it names that "
+                                   "has an entry naming it; remove it")
+
+    def test_a_via_entry_matching_no_library_fails(self):
+        for g in ("/usr/lib/libgone.so.*", "/usr/bin/bash", "/usr/bin/lsblk"):
+            with self.subTest(g=g):
+                errs = self.errs(self.PLACES, self.ALLOW + [E(g, True)])
+                self.assertEqual(errs, ["import_sweep.allow: via %s accepts no file that reaches a regex function "
+                                        "only through a library it names that has an entry naming it; remove it" % g])
+
+    def test_every_library_reached_must_be_via(self):
+        other = "/usr/lib/libedit.so.2.0.75"
+        places = {"tree": place({SMARTCOLS: ["regcomp"], other: ["regexec"]},
+                                {"/usr/sbin/nft": sorted([SMARTCOLS, other])})}
+        allow = self.REGEX + [E("/usr/lib/libedit.so.2.*")]
+        # nft is refused, so the via entry accepts nothing either.
+        self.assertEqual([e.split(" imports")[0].split(" accepts")[0] for e in self.errs(places, allow)],
+                         ["tree: /usr/sbin/nft", "import_sweep.allow: via /usr/lib/x86_64-linux-gnu/libsmartcols.so.1.*"])
+        self.assertEqual(self.errs(places, allow + [E("/usr/lib/libedit.so.2.*", True)]), [])
+        # A library reaching another group only is not this group's: its via entry is not needed here.
+        places["tree"]["imports"][other] = ["glob"]
+        self.assertEqual(self.errs(places, allow + [E("/usr/bin/x")])[:1],
+                         ["tree: /usr/lib/libedit.so.2.0.75 imports or reaches glob() and is not in "
+                          "import_sweep.allow [glob]; review it, name it in the -126765 records, then add the "
+                          "entry: /usr/lib/libedit.so.2.0.75"])
+
+    def test_a_named_entry_still_accepts_a_dependent(self):
+        self.assertEqual(self.errs(self.PLACES, self.ALLOW + [E("/usr/bin/lsblk")]), [])
+
+    def test_an_importer_of_one_group_reaching_another_through_a_library(self):
+        # A file importing a regex function and loading libsystemd-shared reaches glob() too: it is held to
+        # [glob], and accepted there through the library (#6297; sweep keeps an importer's via list).
+        places = {"tree": place({SHARED_LIB: ["glob64"], "/usr/bin/bash": ["regcomp"]},
+                                {"/usr/bin/bash": [SHARED_LIB]})}
+        allow = [E("/usr/bin/bash")]
+        self.assertEqual([e.split(" and is")[0] for e in sweep.refusals(places, allow, [E(SHARED_LIB)])],
+                         ["tree: /usr/bin/bash imports or reaches glob()"])
+        self.assertEqual(sweep.refusals(places, allow, [E(SHARED_LIB), E(SHARED_LIB, True)]), [])
+        # And glob() imported directly with the library via is not accepted by the via entry.
+        places["tree"]["imports"]["/usr/bin/bash"].append("glob")
+        self.assertEqual([e.split(" and is")[0].split(" accepts")[0]
+                          for e in sweep.refusals(places, allow, [E(SHARED_LIB), E(SHARED_LIB, True)])],
+                         ["tree: /usr/bin/bash imports or reaches glob()", "import_sweep.allow: [glob] via " + SHARED_LIB])
+
+    def test_summary_counts_a_direct_importer_once(self):
+        # fdisk imports rpmatch and loads libsmartcols: an importer of the group, not one more reacher.
+        places = {"tree": place({SMARTCOLS: ["regcomp"], "/usr/sbin/fdisk": ["rpmatch"]},
+                                {"/usr/sbin/fdisk": [SMARTCOLS], "/usr/bin/lsblk": [SMARTCOLS]})}
+        lines = sweep.summary(places)
+        self.assertIn("tree regex: 2 files import a function, 1 more reach an importing library through NEEDED", lines)
+        self.assertNotIn("  via /usr/sbin/fdisk: " + SMARTCOLS, lines)
+
+    def test_entries_parse_and_bad_lines_name_the_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = pathlib.Path(d) / "allow"
+            a.write_text("/usr/lib/libs.so.*\nvia /usr/lib/libs.so.*  # its users\n[glob]\nvia  /usr/lib/libg.so.*\n")
+            self.assertEqual(sweep.read_allow(a), ([E("/usr/lib/libs.so.*"), E("/usr/lib/libs.so.*", True)], {},
+                                                   [E("/usr/lib/libg.so.*", True)]))
+            for body, want in (("via\n", ":1: via is not an entry; a regex entry is GLOB or via GLOB"),
+                               ("via /a /b\n", ":1: via /a /b is not an entry"),
+                               ("/a /b\n", ":1: /a /b is not an entry"),
+                               ("/a sha256=00\n", ":1: /a sha256=00 is not an entry"),
+                               ("[glob]\n/a b\n", ":2: /a b is not an entry; a [glob] entry is GLOB or via GLOB"),
+                               ("/a\n/a\n", ":2: /a is given again"),
+                               ("[glob]\nvia /a\nvia   /a\n", ":3: via   /a is given again")):
+                a.write_text(body)
+                with self.subTest(body=body), self.assertRaises(SystemExit) as cm:
+                    sweep.read_allow(a)
+                self.assertIn(want, str(cm.exception))
+
+    def test_shipped_lists_are_collapsed(self):
+        regex, _, globs = sweep.read_allow(sweep.ALLOW)
+        for section in (regex, globs):
+            for e in section:
+                with self.subTest(e=e):
+                    # Every via entry names a library that has its own entry, so it can accept a file.
+                    self.assertTrue(not e.via or E(e.glob) in section, e)
+        self.assertIn(E(SHARED_LIB.replace("257", "*"), True), globs)
+        named = {e.glob for e in globs}
+        for dependent in ("/usr/bin/systemctl", "/usr/lib/systemd/systemd", "/usr/lib/systemd/systemd-networkd",
+                          "/usr/sbin/nft", "/usr/sbin/cryptsetup"):
+            self.assertNotIn(dependent, named)
+        self.assertNotIn("/usr/bin/lsblk", {e.glob for e in regex})
+        # A file importing the function itself keeps its own entry: fdisk's rpmatch, ip's glob64.
+        self.assertIn(E("/usr/sbin/fdisk"), regex)
+        self.assertIn(E("/usr/bin/ip"), globs)
+
+
+@NEEDS_CC
+class CrossGroupReachTest(unittest.TestCase):
+    """#6297: sweep lists an importer's own via libraries, so a program importing rpmatch and loading a
+    glob() library is held to [glob] (before, any importer's via list was dropped)."""
+
+    def test_importer_keeps_its_via_list(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = pathlib.Path(t)
+            lib, src = t / "tree/usr/lib", t / "src"
+            for d in (lib, t / "tree/usr/bin", src):
+                d.mkdir(parents=True, exist_ok=True)
+
+            def cc(name, code, out, *args):
+                (src / name).write_text(code)
+                subprocess.run(["cc", "-D_GNU_SOURCE", "-o", str(out), str(src / name), *args], check=True)
+            cc("glob.c", GLOB_LIB, lib / "libglob-user.so.1.0", "-shared", "-fPIC", "-Wl,-soname,libglob-user.so.1")
+            os.symlink("libglob-user.so.1.0", lib / "libglob-user.so")
+            both = RPMATCH.replace("int main", "int f(const char *);\nint main").replace(
+                "return rpmatch(v[0]);", "return rpmatch(v[0]) + f(v[0]);")
+            cc("both.c", both, t / "tree/usr/bin/both", "-L" + str(lib), "-lglob-user")
+            got = sweep.run_tree(str(t / "tree"))
+        self.assertEqual(got["tree"]["imports"]["/usr/bin/both"], ["rpmatch"])
+        self.assertEqual(got["tree"]["via"], {"/usr/bin/both": ["/usr/lib/libglob-user.so.1.0"]})
+        errs = sweep.refusals(got, [E("/usr/bin/both")], [E("/usr/lib/libglob-user.so.*")])
+        self.assertEqual([e.split(" and is")[0] for e in errs], ["tree: /usr/bin/both imports or reaches glob()"])
+        self.assertEqual(sweep.refusals(got, [E("/usr/bin/both")], [E("/usr/lib/libglob-user.so.*"),
+                                                                     E("/usr/lib/libglob-user.so.*", True)]), [])
+        # The summary counts it among the glob group's reachers, not its importers.
+        lines = sweep.summary(got)
+        self.assertIn("tree glob: 1 files import a function, 1 more reach an importing library through NEEDED", lines)
+        self.assertIn("tree regex: 1 files import a function, 0 more reach an importing library through NEEDED", lines)

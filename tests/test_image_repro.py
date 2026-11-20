@@ -977,7 +977,7 @@ class ReproduceJobTest(unittest.TestCase):
         self.assertNotIn("$(", step)
 
     def test_build_hands_the_initrds_to_the_job(self):
-        build = (IMG / "build.sh").read_text()
+        build = (IMG / "finish.sh").read_text()
         self.assertIn('dst = out / "initrd" / p', build)
         self.assertLess(build.index("finish_image.py\" \"$OUT\""), build.index('rm -rf "$OUT/initrd"'))
         wf = WORKFLOW.read_text()
@@ -1235,29 +1235,36 @@ sys.exit(status[n] if n < len(status) else 0)
         write = b.index('sh "$HERE/security-snapshot.sh" sources "$SECURITY_SNAPSHOT" >"$OUT/agentos.sources"')
         tree = b.index('install -D -m 0644 "$OUT/agentos.sources" "$OUT/pkgmngr/etc/apt/sources.list.d/mkosi.sources"')
         guest = b.index('sh "$HERE/guest-base.sh" "$OUT/guest-base" "$OUT/guest/agentos-guest.manifest" "$OUT/agentos.sources"\n')
-        mk = b.index('$MKOSI -C "$HERE/mkosi" -f --package-manager-tree="$OUT/pkgmngr" ')
         self.assertLess(pick, write)
         self.assertLess(write, tree)
         self.assertLess(tree, guest)
-        self.assertLess(guest, mk)
         self.assertEqual(b.count("guest-base.sh\""), 1)
-        self.assertEqual(b.count("$MKOSI "), 1)
+        # build.sh only stages (#4690, D-276); image.yml's build job makes mkosi's package manager tree
+        # from the same timestamp and holds it equal to the stage's agentos.sources.
+        self.assertNotIn("$MKOSI ", b)
         # mkosi v24.3 appends a command-line tree after mkosi.pkgmngr and copies trees in order, so
         # this file replaces the committed one for the image and its initrd alike.
         self.assertNotIn("security.debian.org", b.replace("debian-security", ""))
 
     def test_workflow_resolves_once_for_both_builds(self):
         wf = WORKFLOW.read_text()
-        job = wf[wf.index("\n  security-snapshot:\n"):wf.index("\n  build:\n")]
+        job = wf[wf.index("\n  security-snapshot:\n"):wf.index("\n  stage:\n")]
         self.assertIn("snapshots: ${{ steps.resolve.outputs.snapshots }}", job)
         self.assertIn('ts=$(sh image/security-snapshot.sh resolve)', job)
         self.assertIn('echo "snapshots=$ts" >> "$GITHUB_OUTPUT"', job)
         self.assertNotIn("matrix", job)
+        stage = wf[wf.index("\n  stage:\n"):wf.index("\n  build:\n")]
+        self.assertIn("    needs: security-snapshot\n", stage)
+        self.assertIn("AGENTOS_SECURITY_SNAPSHOT: ${{ needs.security-snapshot.outputs.snapshots }}", stage)
+        self.assertIn('sudo env "PATH=$PATH" "AGENTOS_SECURITY_SNAPSHOT=$AGENTOS_SECURITY_SNAPSHOT" ', stage)
+        self.assertEqual(stage.count('image/build.sh "$RUNNER_TEMP/out"'), 1)
         build = wf[wf.index("\n  build:\n"):wf.index("\n  reproduce:\n")]
-        self.assertIn("    needs: security-snapshot\n", build)
-        self.assertIn("AGENTOS_SECURITY_SNAPSHOT: ${{ needs.security-snapshot.outputs.snapshots }}", build)
-        self.assertIn('sudo env "PATH=$PATH" "AGENTOS_SECURITY_SNAPSHOT=$AGENTOS_SECURITY_SNAPSHOT" ', build)
-        self.assertEqual(build.count('MKOSI=/opt/mkosi/bin/mkosi image/build.sh "$RUNNER_TEMP/out"'), 1)
+        self.assertIn("    needs: [security-snapshot, stage]\n", build)
+        # The stage picked one of the run's dates (#6198); the build job holds its pick to them (#6148 Security).
+        self.assertIn("SNAPSHOTS: ${{ needs.security-snapshot.outputs.snapshots }}", build)
+        self.assertIn('case " $SNAPSHOTS " in\n            *" $AGENTOS_SECURITY_SNAPSHOT "*) [ -n "$AGENTOS_SECURITY_SNAPSHOT" ] ;;', build)
+        self.assertIn("AGENTOS_SECURITY_SNAPSHOT=$(sed -n 's|^URIs: https://snapshot\\.debian\\.org/archive/debian-security/", build)
+        self.assertIn('sh image/security-snapshot.sh sources "$AGENTOS_SECURITY_SNAPSHOT" > "$RUNNER_TEMP/mkosi.sources"', build)
         self.assertIn('"$RUNNER_TEMP"/out/agentos.sources', build[build.index("- name: Release record"):])
         # The reproduce job holds both builds to the same apt sources, security snapshot included.
         self.assertIn("cmp rec/release-a/agentos.sources rec/release-b/agentos.sources || ok=0", compare_step())
