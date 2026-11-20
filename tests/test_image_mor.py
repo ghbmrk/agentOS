@@ -592,6 +592,79 @@ class IsolateKeptTest(unittest.TestCase):
                                     "model unit aliases" % self.SYSTEM])
 
 
+class SoftRebootTest(unittest.TestCase):
+    """MOR-soft-reboot (#6182): an orderly soft reboot stops agentos-mor.service through shutdown.target, so
+    its clear runs while the kernel keeps its memory, and the next userspace's start only reads MOR. The
+    image removes the unit soft-reboot.target requires, and mkosi.finalize's soft_reboot_violations
+    refuses a built tree where it can load again. tests/test_hostcheck.py test_an_isolate_keeps_mor_set
+    boots the image and runs the soft reboot."""
+    # REQ: HW-8
+    SYSTEM = "usr/lib/systemd/system/"
+    DEBIAN = "[Unit]\nRequires=shutdown.target umount.target final.target\n[Service]\nType=oneshot\n" \
+             "ExecStart=systemctl --force soft-reboot\n"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        shutil.copytree(UNITS, self.root / self.SYSTEM, symlinks=True)
+
+    def v(self):
+        return check.soft_reboot_violations(self.root)
+
+    def test_the_image_removes_the_unit(self):
+        self.assertEqual(check.SOFT_REBOOT, "systemd-soft-reboot.service")
+        removed = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
+        self.assertIn("/" + self.SYSTEM + check.SOFT_REBOOT, removed)
+        self.assertFalse((UNITS / check.SOFT_REBOOT).exists())
+        self.assertEqual(self.v(), [])
+        self.assertIn("soft_reboot_violations(root)", (MK / "mkosi.finalize").read_text())
+
+    def test_the_unit_coming_back_is_refused(self):
+        why = ("%s: present; an orderly soft reboot stops agentos-mor.service, whose stop clears MOR, while the "
+               "kernel keeps its memory, so the holders after it run with MOR clear (remove it or mask it, #6182)")
+        for d in check.UNIT_PATHS:
+            rel = "%s/%s" % (d, check.SOFT_REBOOT)
+            for text in (self.DEBIAN, "\n"):
+                with self.subTest(d=d, text=text):
+                    f = write(self.root, rel, text)
+                    got = self.v()
+                    f.unlink()
+                    self.assertEqual(got, [why % rel])
+
+    def test_a_mask_first_passes_and_a_mask_after_the_unit_does_not(self):
+        write(self.root, self.SYSTEM + check.SOFT_REBOOT, self.DEBIAN)
+        for kind in ("link", "empty"):
+            with self.subTest(kind=kind):
+                m = self.root / "etc/systemd/system" / check.SOFT_REBOOT
+                m.parent.mkdir(parents=True, exist_ok=True)
+                if kind == "link":
+                    m.symlink_to("/dev/null")
+                else:
+                    m.write_text("")
+                self.assertEqual(self.v(), [])
+                m.unlink()
+        (self.root / self.SYSTEM / check.SOFT_REBOOT).unlink()
+        # The first entry decides: a unit in /etc wins over a mask lower in the search path.
+        write(self.root, "etc/systemd/system/" + check.SOFT_REBOOT, self.DEBIAN)
+        (self.root / self.SYSTEM / check.SOFT_REBOOT).symlink_to("/dev/null")
+        got = self.v()
+        self.assertEqual(len(got), 1, got)
+        self.assertTrue(got[0].startswith("etc/systemd/system/%s: present;" % check.SOFT_REBOOT), got)
+
+    def test_a_link_of_its_name_is_refused(self):
+        # An alias (a link of its name to another unit) loads that unit under the name, so it is refused
+        # unread, as is any link but a mask.
+        link = self.root / self.SYSTEM / check.SOFT_REBOOT
+        for target in ("agentos-mor.service", "/usr/lib/systemd/system/agentos-mor.service", "/dev/zero"):
+            with self.subTest(target=target):
+                link.symlink_to(target)
+                got = self.v()
+                link.unlink()
+                self.assertEqual(len(got), 1, got)
+                self.assertTrue(got[0].startswith(self.SYSTEM + check.SOFT_REBOOT + ": unreadable ("), got)
+
+
 class WipeOnTest(unittest.TestCase):
     def test_kernel_zeroes_freed_memory(self):
         args = ini(MK / "mkosi.conf")["Content"]["KernelCommandLine"].split()
