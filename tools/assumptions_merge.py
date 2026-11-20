@@ -8,7 +8,7 @@
 keep reading. Git runs no command a repository names until the clone's own config does, so `--install` sets
 `merge.assumptions.driver` and puts `ASSUMPTIONS.md merge=assumptions` in `info/attributes`, which outranks
 `.gitattributes` for this clone only. A clone without it merges by union, as before; doclint still fails a
-duplicate ID (OPERATING §7).
+duplicate ID, and its error names the install (OPERATING §7).
 
 The driver runs `git merge-file --diff3` on the three versions and resolves each conflict hunk whose lines are
 all table rows as union by row ID: the ours rows, then the theirs rows, less each base row the other side changed
