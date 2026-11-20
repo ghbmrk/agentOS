@@ -106,9 +106,13 @@ DYNAMIC = re.compile(r"^\s+(NEEDED|SONAME)\s+(\S+)$")
 # A run-time lookup: a file importing glibc's dlsym or dlvsym can resolve any function whose name it
 # holds. dlopen alone runs only the opened file's code, which the sweep reads as a file of its own. Such a
 # file holding a group function's name as a whole string (NUL on each side, as a C string literal is
-# stored) counts as importing that function. The openssl group needs no such rule: [cipher] already
+# stored) counts as importing that function, except a COMPAT_ONLY name for a file importing dlsym alone.
+# The openssl group needs no such rule: [cipher] already
 # holds every file whose bytes hold a selector's name, a dlsym caller's string included (#5341).
 LOOKUP_FUNCS = ("dlsym", "dlvsym")
+# glibc exports these only under a hidden compat version (misc/regexp.c, compat_symbol since 2.23), and
+# dlsym never returns a hidden version (elf/dl-lookup.c check_match), so only dlvsym can reach them.
+COMPAT_ONLY = ("step", "advance")
 LOOKUP = re.compile(b"(?<=\0)(?:%s)(?=\0)" % b"|".join(rx.pattern.rstrip("$").encode() for rx in GROUPS.values()))
 # A static copy: a file loading no shared object carries any libc code it runs, with no symbol to read
 # once stripped (llama-server and agentos-camdecode link libc.a; Debian's ldconfig is static). A string
@@ -129,26 +133,28 @@ def read_elf(path):
     """(affected glibc symbols imported, NEEDED names, SONAME or None, read, how) of the ELF file at PATH.
     READ is False when objdump fails on it for any reason but its having no dynamic section (a static or
     relocatable file, which imports nothing), so a file objdump cannot parse is never counted clean. HOW
-    is "dlsym" when it imports a glibc run-time lookup (LOOKUP_FUNCS), "static" when it names no
+    is "dlvsym" or "dlsym" when it imports that glibc run-time lookup (LOOKUP_FUNCS; dlvsym when both),
+    "static" when it names no
     interpreter (PT_INTERP) and no NEEDED library, so whatever libc code it runs is in its own bytes,
     else None."""
     r = subprocess.run(["objdump", "-pT", str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                        text=True, errors="replace")
     out = r.stdout
     read = r.returncode == 0 or "not a dynamic object" in r.stderr
-    syms, needed, soname, interp, dl = set(), [], None, False, False
+    syms, needed, soname, interp, dl = set(), [], None, False, set()
     for line in out.splitlines():
         m = UND.search(line)
         if m and group_of(m.group(2)):
             syms.add(m.group(2))
-        dl = dl or bool(m and m.group(2) in LOOKUP_FUNCS)
+        if m and m.group(2) in LOOKUP_FUNCS:
+            dl.add(m.group(2))
         interp = interp or line.split()[:1] == ["INTERP"]
         m = DYNAMIC.match(line)
         if m and m.group(1) == "NEEDED":
             needed.append(m.group(2))
         elif m:
             soname = m.group(2)
-    how = "dlsym" if dl else None if interp or needed else "static"
+    how = max(dl) if dl else None if interp or needed else "static"
     return sorted(syms), needed, soname, read, how
 
 
@@ -201,13 +207,14 @@ def is_elf(path):
 
 
 def held_names(path, how):
-    """The group functions the ELF file at PATH reaches with no import (#6298), sorted: for HOW "dlsym", each
-    name it holds as a whole string (LOOKUP); for "static", the function each glibc mark it holds stands
-    for (CARRIES)."""
+    """The group functions the ELF file at PATH reaches with no import (#6298), sorted: for HOW "dlsym" or
+    "dlvsym", each name it holds as a whole string (LOOKUP), a COMPAT_ONLY one only for dlvsym; for
+    "static", the function each glibc mark it holds stands for (CARRIES)."""
     with open(path, "rb") as f:
         data = f.read()
-    if how == "dlsym":
-        return sorted({m.group().decode() for m in LOOKUP.finditer(data)})
+    if how != "static":
+        names = {m.group().decode() for m in LOOKUP.finditer(data)}
+        return sorted(names if how == "dlvsym" else names - set(COMPAT_ONLY))
     return sorted({name for mark, name in CARRIES.items() if mark in data})
 
 
@@ -219,13 +226,13 @@ def own(v, p):
 
 def sweep(files):
     """FILES maps a shown path to a readable path. Returns the place's record (module docstring)."""
-    imports, needed, by_name, unread, cipher, digest, unseen = {}, {}, {}, [], {}, {}, {"dlsym": {}, "static": {}}
+    imports, needed, by_name, unread, cipher, digest, unseen = {}, {}, {}, [], {}, {}, {"lookups": {}, "static": {}}
     for shown, real in files.items():
         syms, needed[shown], soname, read, how = read_elf(real)
         if how:
             held = held_names(real, how)
             if held:
-                unseen[how][shown] = held
+                unseen["static" if how == "static" else "lookups"][shown] = held
         sites, disassembled = cipher_sites(real)
         if sites is not None:
             cipher[shown] = sites
@@ -238,7 +245,7 @@ def sweep(files):
         # A NEEDED entry names a library's SONAME, which on disk is a symbolic link to the file read.
         for n in {os.path.basename(shown), soname} - {None}:
             by_name.setdefault(n, []).append(shown)
-    importers = set(imports) | set(unseen["dlsym"]) | set(unseen["static"])
+    importers = set(imports) | set(unseen["lookups"]) | set(unseen["static"])
     via = {}
     for shown in needed:
         seen, todo, hits = set(), list(needed[shown]), set()
@@ -254,7 +261,7 @@ def sweep(files):
         if hits:
             via[shown] = sorted(hits)
     return {"scanned": len(files), "imports": dict(sorted(imports.items())), "via": dict(sorted(via.items())),
-            "lookups": dict(sorted(unseen["dlsym"].items())), "static": dict(sorted(unseen["static"].items())),
+            "lookups": dict(sorted(unseen["lookups"].items())), "static": dict(sorted(unseen["static"].items())),
             "unread": sorted(unread), "cipher": dict(sorted(cipher.items())),
             "sha256": dict(sorted(digest.items()))}
 

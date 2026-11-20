@@ -107,6 +107,19 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 /usr/lib/x86_64-linux-gnu/security/pam_limits.so
 /usr/lib/x86_64-linux-gnu/security/pam_namespace.so
 
+# ldconfig, a static copy of glibc (#6298), in the main tree and the initrd: its one glob() expands the
+# include patterns of root-owned /etc/ld.so.conf and ld.so.conf.d (elf/ldconfig.c), run by root at
+# package install and boot. It is also the sweep's control that the static scan still reads glibc's marks.
+/usr/sbin/ldconfig
+
+# The openclaw guest's node imports dlsym and holds "glob" (#6298): the string is the name of its
+# JavaScript fs.glob API, implemented in JavaScript over readdir (lib/internal/fs/glob.js), and its
+# dlsym calls (src/node_binding.cc, deps/uv/src/unix/dl.c, deps/v8 platform-posix.cc; v24.22.3) look up
+# only fixed names: an addon's node_register_module_v137, napi_register_module_v1 and
+# node_api_module_get_api_version_v1, gnu_get_libc_version, memfd_create and pthread_setname_np. It runs
+# inside the guest sandbox, on the guest's own glibc (the image/guest -126765 record).
+/usr/lib/agentos/images/openclaw/usr/local/bin/node
+
 [cipher]
 # The files of the built image (main tree and initrds) whose bytes name an OpenSSL by-name cipher
 # selector (import_sweep.py CIPHER_NAMES: EVP_CIPHER_fetch, EVP_get_cipherbyname, systemd's

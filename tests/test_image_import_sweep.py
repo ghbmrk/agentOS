@@ -12,6 +12,8 @@ calls it), held to the allowlist's [glob] section, so the DEBIAN-CVE-2026-126765
 read from the tree."""
 # REQ: EVL-5
 import contextlib
+import ctypes
+import ctypes.util
 import errno
 import fnmatch
 import importlib.util
@@ -933,10 +935,13 @@ INTERP_ONLY = ('const char *m[] = {"glob_in_dir", "__vfwscanf_internal"};\n'
 STATIC_NEAR = ('const char *m[] = {"xglob_in_dir", "__vfwscanf_internal2", "Invalid preceding regular expressions"};\n'
                'int main(int c, char **v) { return m[c][0]; }\n')
 LOOKS_UP = ('#include <dlfcn.h>\nint main(int c, char **v) { return dlsym(RTLD_DEFAULT, c ? "glob" : "regcomp") != 0; }\n')
-LOOKS_UP_V = ('#include <dlfcn.h>\nint main(void) { return dlvsym(RTLD_DEFAULT, "__isoc99_swscanf", "GLIBC_2.7") != 0; }\n')
-# Names that are no group function's whole name, and a group name held by a file that cannot look it up.
-LOOKS_UP_OTHER = ('#include <dlfcn.h>\nint main(int c, char **v) { return dlsym(RTLD_DEFAULT, c ? "globber" : '
-                  '"my_regcomp") != 0; }\n')
+# A file importing both dlvsym and dlsym looks a compat-only name up through dlvsym.
+LOOKS_UP_V = ('#include <dlfcn.h>\nint main(int c, char **v) { return dlvsym(RTLD_DEFAULT, c ? "__isoc99_swscanf" : "step", '
+              'c ? "GLIBC_2.7" : "GLIBC_2.2.5") != dlsym(RTLD_DEFAULT, "x"); }\n')
+# Names that are no group function's whole name, compat-only names dlsym cannot return (COMPAT_ONLY), and a
+# group name held by a file that cannot look it up.
+LOOKS_UP_OTHER = ('#include <dlfcn.h>\nconst char *n[] = {"globber", "my_regcomp", "step", "advance"};\n'
+                  'int main(int c, char **v) { return dlsym(RTLD_DEFAULT, n[c]) != 0; }\n')
 HOLDS_NAME = 'const char *n = "glob";\nint main(void) { return n[0]; }\n'
 LIB_LOOKS_UP = '#include <dlfcn.h>\nint f(void) { return dlsym(RTLD_DEFAULT, "wordexp") != 0; }\n'
 
@@ -993,7 +998,7 @@ class UnimportedReachTest(unittest.TestCase):
     def test_lookups_are_whole_group_names_beside_dlsym(self):
         got = self.got["tree"]
         self.assertEqual(got["lookups"], {"/usr/bin/lookup": ["glob", "regcomp"],
-                                          "/usr/bin/lookupv": ["__isoc99_swscanf"],
+                                          "/usr/bin/lookupv": ["__isoc99_swscanf", "step"],
                                           "/usr/lib/liblook.so.1": ["wordexp"]})
         # A library that looks one up is reached through, as an importing library is.
         self.assertEqual(got["via"], {"/usr/bin/user": ["/usr/lib/liblook.so.1"]})
@@ -1001,16 +1006,35 @@ class UnimportedReachTest(unittest.TestCase):
     def test_each_counts_as_its_own_import(self):
         errs = sweep.refusals(self.got, [], [])
         refused = sorted(e.split(" imports or reaches ")[0].split(": ", 1)[1] for e in errs)
-        self.assertEqual(refused, ["/usr/bin/lookup", "/usr/bin/lookup", "/usr/bin/lookupv", "/usr/bin/user",
+        self.assertEqual(refused, ["/usr/bin/lookup", "/usr/bin/lookup", "/usr/bin/lookupv", "/usr/bin/lookupv",
+                                   "/usr/bin/user",
                                    "/usr/lib/liblook.so.1", "/usr/sbin/ldconfig", "/usr/sbin/spie",
                                    "/usr/sbin/sregex", "/usr/sbin/swide"])
-        regex = [E("/usr/bin/lookup"), E("/usr/sbin/sregex")]
+        regex = [E("/usr/bin/lookup"), E("/usr/bin/lookupv"), E("/usr/sbin/sregex")]
         globs = [E("/usr/bin/lookup"), E("/usr/sbin/ldconfig"), E("/usr/sbin/spie"), E("/usr/lib/liblook.so.1"),
                  E("/usr/lib/liblook.so.1", True)]
         errs = sweep.refusals(self.got, regex, globs)
         # The wide scanf group has no allowed file, a static copy or a lookup included.
         self.assertEqual(sorted(e.split(":")[1].split()[0] for e in errs), ["/usr/bin/lookupv", "/usr/sbin/swide"])
         self.assertTrue(all("wide scanf" in e for e in errs), errs)
+
+    def test_compat_only_names_are_glibcs_hidden_ones(self):
+        """COMPAT_ONLY is every group function the host's libc exports only under a hidden version, and dlsym
+        (ctypes looks names up with it) returns none of them, while it returns the others."""
+        libc = ctypes.util.find_library("c")
+        c = ctypes.CDLL(libc)
+        # The libc this process (and so ctypes) has mapped.
+        path = next(line.split()[-1] for line in pathlib.Path("/proc/self/maps").read_text().splitlines()
+                    if re.search(r"/libc\.so\.6$", line))
+        out = subprocess.run(["objdump", "-T", path], capture_output=True, text=True, check=True).stdout
+        default, hidden = set(), set()
+        for line in out.splitlines():
+            m = re.search(r"\.text\s+\S+\s+(\(?)GLIBC_[\d.]+\)?\s+(\S+)$", line)
+            if m and sweep.group_of(m.group(2)):
+                (hidden if m.group(1) else default).add(m.group(2))
+        self.assertEqual(hidden - default, set(sweep.COMPAT_ONLY))
+        self.assertTrue(all(not hasattr(c, n) for n in sweep.COMPAT_ONLY))
+        self.assertTrue(hasattr(c, "regcomp") and hasattr(c, "glob"))
 
     def test_summary_names_how(self):
         lines = sweep.summary(self.got)
