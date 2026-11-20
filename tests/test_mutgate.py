@@ -2992,11 +2992,28 @@ class DataFiles(unittest.TestCase):
                 ("a star behind a directory in a glob call", 'var _, _ = filepath.Glob(dir + "/*")', True),
                 ("a star in a join", 'var _ = filepath.Join(dir, "*/*")', True),
                 ("a star embedded", '//go:embed *\nvar docs embed.FS', True),
-                ("a named glob outside a call", 'var pattern = "*.md"', True)):
+                ("a named glob outside a call", 'var pattern = "*.md"', True),
+                # L3 on #6336 (row #6337): a package that lists or matches names anywhere can reach
+                # a wildcard-only glob held in a variable, a const, a table or a field.
+                ("a star in a variable", 'func f() { p := "*"; fs.Glob(F, p) }', True),
+                ("a star in a const", 'const pat = "*"\nvar _, _ = fs.Glob(F, pat)', True),
+                ("a star in a table", 'var pats = []string{"*"}\nfunc f() { for _, p := range pats { filepath.Glob(filepath.Join(d, p)) } }', True),
+                ("a star in a field", 'var c = struct{ p string }{"*"}\nvar _, _ = fs.Glob(F, c.p)', True),
+                ("a star beside a walk", 'var s = "*"\nvar _ = filepath.WalkDir(root, fn)', True),
+                ("a star beside an old walk", 'var s = "*"\nvar _ = filepath.Walk(root, fn)', True),
+                ("a star beside a listing", 'var s = "*"\nvar _, _ = os.ReadDir(d)', True),
+                ("a star beside a match", 'var s = "*"\nvar _, _ = filepath.Match(s, name)', True),
+                ("a star beside a call that only ends in Match", 'var s = "*"\nvar _ = re.FindMatch(s)', False),
+                ("a glob call named only in a comment or literal", 'var s = "*" // Glob(\nvar t = "ReadDir("', False)):
             with self.subTest(name), tempfile.TemporaryDirectory() as d, \
                     self.tree(d, {"hint/hint.go": "package hint\n", "hint/hint_test.go": f"package hint\n\n{src}\n"}):
                 got = mutgate.touched(*mutgate.added_lines(data_diff("broker/hint/ASSUMPTIONS.md")))
                 self.assertEqual(got, {"hint"} if counts else set())
+        # The glob call can sit in another file of the package (a helper).
+        with tempfile.TemporaryDirectory() as d, self.tree(d, {
+                "hint/hint.go": "package hint\n\nfunc list(p string) { fs.Glob(F, p) }\n",
+                "hint/hint_test.go": 'package hint\n\nvar all = "*"\n'}):
+            self.assertEqual(mutgate.touched(*mutgate.added_lines(data_diff("broker/hint/ASSUMPTIONS.md"))), {"hint"})
         # `?` is a wildcard too: "????" matches a.md only inside a path call.
         for src, counts in (('var q = "????"', False), ('var _, _ = fs.Glob(F, "????")', True)):
             with self.subTest(src), tempfile.TemporaryDirectory() as d, \
