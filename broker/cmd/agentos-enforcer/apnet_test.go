@@ -3,17 +3,29 @@ package main
 // REQ: NET-3, NET-4, HW-10
 
 import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
+	"fmt"
+	"io/fs"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/enforcer/ap"
+	"github.com/ghbmrk/agentos/broker/enforcer/ap/push"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
+	"golang.org/x/crypto/ssh"
 )
 
 // twoAPs is a box whose configuration has a second access point.
@@ -58,10 +70,14 @@ func TestOnePusherPerAccessPoint(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		x.advance(10 * time.Second)
 	}
+	x.d.Close()
 	x.ap.mu.Lock()
 	defer x.ap.mu.Unlock()
 	for _, addr := range []string{apAddr, second} {
 		ps := x.ap.made[addr]
+		if len(ps) > 0 && (ps[0].overlapped || ps[0].active != 0) {
+			t.Errorf("%s: Watch calls overlapped (%v) or ran on after close (%d)", addr, ps[0].overlapped, ps[0].active)
+		}
 		if len(ps) != 1 {
 			t.Fatalf("%s: %d pushers made in one run, want 1", addr, len(ps))
 		}
@@ -326,6 +342,9 @@ func TestAPConfigRefuses(t *testing.T) {
 		if err := c.check(); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+		if err := c.AP.check(c.Layout); err == nil {
+			t.Errorf("%s: the access point check accepted it", name)
+		}
 	}
 }
 
@@ -354,5 +373,365 @@ func TestProvisionChecksSetupFirst(t *testing.T) {
 	}
 	if err := provisionFiles(dir, code, good); err != nil {
 		t.Fatalf("the corrected re-run: %v", err)
+	}
+}
+
+// HW-10: first boot refuses a state directory that already holds Wi-Fi
+// passwords, or one it cannot read, and a setup password the access point
+// would refuse, writing nothing.
+func TestProvisionAPRefuses(t *testing.T) {
+	dir := t.TempDir()
+	st := fileStore{path: filepath.Join(dir, fileAPKeys)}
+	if err := provisionAP(st, "short"); err == nil {
+		t.Fatal("a setup password the access point refuses was provisioned")
+	}
+	if b, _ := st.Load(); b != nil {
+		t.Fatalf("a refused setup password was saved: %s", b)
+	}
+	if err := provisionAP(st, setupPW); err != nil {
+		t.Fatal(err)
+	}
+	if err := provisionAP(st, setupPW); err == nil || !strings.Contains(err.Error(), "already provisioned") {
+		t.Fatalf("provisioned twice: %v", err)
+	}
+	unreadable := fileStore{path: t.TempDir()} // a directory: Load fails
+	if err := provisionAP(unreadable, setupPW); err == nil {
+		t.Fatal("provisioned over a state file it could not read")
+	}
+}
+
+// First boot's file checks (ENF-l-ap-4): each missing or refused input
+// fails, and so does a state directory already provisioned.
+func TestProvisionFilesRefuses(t *testing.T) {
+	files := t.TempDir()
+	write := func(name, s string) string {
+		p := filepath.Join(files, name)
+		if err := os.WriteFile(p, []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	code, setup, missing := write("case", caseCode), write("setup", setupPW), filepath.Join(files, "missing")
+	notExist := func(err error) bool { return errors.Is(err, fs.ErrNotExist) }
+	for name, tc := range map[string]struct {
+		f    func(dir string) error
+		want func(error) bool
+	}{
+		"no case file":    {func(dir string) error { return provisionFiles(dir, missing, setup) }, notExist},
+		"no -ap-setup":    {func(dir string) error { return provisionFiles(dir, code, "") }, func(err error) bool { return strings.Contains(fmt.Sprint(err), "-ap-setup") }},
+		"no setup file":   {func(dir string) error { return provisionFiles(dir, code, missing) }, notExist},
+		"enrolment twice": {func(dir string) error { _ = provisionState(dir, caseCode); return provisionFiles(dir, code, setup) }, func(err error) bool { return err != nil }},
+	} {
+		dir := t.TempDir()
+		if err := tc.f(dir); !tc.want(err) {
+			t.Errorf("%s: provisioning gave %v", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, fileAPKeys)); err == nil {
+			t.Errorf("%s: the setup password was saved", name)
+		}
+	}
+}
+
+// -provision needs -ap-setup, and -ap-pub refuses a key file it cannot
+// read rather than printing another key.
+func TestRunAPFlagsRefuse(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("run refuses root")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	code := filepath.Join(t.TempDir(), "case")
+	if err := os.WriteFile(code, []byte(caseCode), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"-state", dir, "-provision", code}); err == nil || !strings.Contains(err.Error(), "-ap-setup") {
+		t.Fatalf("-provision with no -ap-setup: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, fileAPSSH), []byte("not a key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"-state", dir, "-ap-pub"}); err == nil {
+		t.Fatal("-ap-pub printed a key from a file that holds none")
+	}
+}
+
+// The enforcer's access point key: a file that holds no key is refused,
+// never replaced.
+func TestAPSSHKeyRefusesBadFile(t *testing.T) {
+	st := fileStore{path: filepath.Join(t.TempDir(), fileAPSSH)}
+	if err := st.Save([]byte("not a key\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := apSSHKey(st, rand.Reader); err == nil {
+		t.Fatal("a key file holding no key was accepted")
+	}
+}
+
+// Start refuses access points it cannot drive: no setup password
+// provisioned, a password file it cannot read, an SSH key file that holds
+// no key, or a host key that does not parse. With no access point
+// configured it starts with nothing provisioned, and enrolment refuses.
+func TestOpenAPRefuses(t *testing.T) {
+	x := newBox(t, false)
+	x.d.Close()
+	keys := filepath.Join(x.dir, fileAPKeys)
+	saved, err := os.ReadFile(keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expect := func(name, want string) {
+		t.Helper()
+		if _, err := x.open(); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: start gave %v, want %q", name, err, want)
+		}
+	}
+	os.Remove(keys)
+	expect("not provisioned", "-ap-setup")
+	if err := os.Mkdir(keys, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	expect("unreadable", "is a directory")
+	os.Remove(keys)
+	if err := os.WriteFile(keys, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expect("not JSON", "unexpected end of JSON input")
+	os.Remove(keys)
+	if err := os.WriteFile(keys, saved, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(x.dir, fileAPSSH), []byte("not a key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expect("ssh key", "access point key")
+	os.Remove(filepath.Join(x.dir, fileAPSSH))
+	good := x.cfg.AP.Points[0].HostKey
+	x.cfg.AP.Points[0].HostKey = "ssh-ed25519 not-a-key"
+	expect("host key", "host key")
+	x.cfg.AP.Points[0].HostKey = good
+
+	x.cfg.AP = APConfig{}
+	if err := x.cfg.check(); err != nil {
+		t.Fatalf("a configuration with no access point: %v", err)
+	}
+	os.Remove(keys)
+	x.start()
+	if _, err := x.d.ap.Replace(); err == nil || x.d.ap.Replaced() {
+		t.Fatal("enrolment handed over with no access point configured")
+	}
+}
+
+// NET-4: a hand-over already done answers with the Owner card at once,
+// pushing nothing; a second hand-over while one runs is refused; and
+// before the hand-over home shows no Wi-Fi card, even with the four
+// passwords made by a failed try.
+func TestReplaceOnceAtATime(t *testing.T) {
+	x := newBox(t, false)
+	x.d.Close()
+	x.waits.APWait = 300 * time.Millisecond
+	x.start()
+	x.ap.mu.Lock()
+	x.ap.silent = map[string]bool{apAddr: true}
+	x.ap.mu.Unlock()
+	first := make(chan error, 1)
+	go func() { _, err := x.d.ap.Replace(); first <- err }()
+	waitFor(t, func() bool { x.d.ap.mu.Lock(); defer x.d.ap.mu.Unlock(); return x.d.ap.replacing })
+	if _, err := x.d.ap.Replace(); err == nil || !strings.Contains(err.Error(), "already running") {
+		t.Fatalf("a second hand-over while one runs: %v", err)
+	}
+	if err := <-first; err == nil {
+		t.Fatal("a hand-over no access point answered succeeded")
+	}
+	if x.apKeys().Owner == "" {
+		t.Fatal("fixture: the failed try made no passwords")
+	}
+	if c := (pageAPs{x.d.ap}).Cards(); c != nil {
+		t.Fatalf("Wi-Fi cards before the hand-over: %v", c)
+	}
+	x.ap.mu.Lock()
+	x.ap.silent = nil
+	x.ap.mu.Unlock()
+	x.b.enrol(newAuthenticator(t), caseCode)
+	owner := x.apKeys().Owner
+	x.ap.mu.Lock()
+	x.ap.silent = map[string]bool{apAddr: true}
+	x.ap.mu.Unlock()
+	start := time.Now()
+	c, err := x.d.ap.Replace()
+	if err != nil || c.Shown != grouped4(owner) || time.Since(start) > 100*time.Millisecond {
+		t.Fatalf("a hand-over already done: %v %q in %v, want the Owner card at once", err, c.Shown, time.Since(start))
+	}
+}
+
+// ENF-g-8: once the device passwords are synced, the daemon's clock
+// pushes nothing more until the policy changes.
+func TestTickPushesOnlyOnChange(t *testing.T) {
+	x, _ := enrolled(t, false)
+	pushes := func() int { p := x.ap.last(apAddr); x.ap.mu.Lock(); defer x.ap.mu.Unlock(); return len(p.every) }
+	waitFor(t, func() bool { return strings.Contains(x.ap.wireless(apAddr), x.apKeys().Device["tv"].Password) })
+	time.Sleep(20 * time.Millisecond)
+	before := pushes()
+	for i := 0; i < 5; i++ {
+		x.advance(time.Second)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := pushes(); got != before {
+		t.Fatalf("%d pushes on ticks with no policy change", got-before)
+	}
+}
+
+// bareAP is an apNet over the given watchers alone, logging to log.
+func bareAP(log *[]string, mu *sync.Mutex, ws ...watcher) *apNet {
+	d := &Enforcer{dp: deps{Logf: func(s string) { mu.Lock(); *log = append(*log, s); mu.Unlock() }}}
+	n := &apNet{d: d, every: time.Hour, wait: time.Second}
+	n.cond = sync.NewCond(&n.mu)
+	for i, w := range ws {
+		n.points = append(n.points, &apPoint{addr: fmt.Sprint("ap", i), w: w, kick: make(chan struct{}, 1)})
+	}
+	return n
+}
+
+// NET-3 (#4569): each report is kept for the page and logged when it
+// changes; a push a nudge cut short is neither.
+func TestReportLogsChanges(t *testing.T) {
+	var log []string
+	var mu sync.Mutex
+	n := bareAP(&log, &mu, nil)
+	p := n.points[0]
+	n.report(p, 1, push.Result{}, context.Canceled)
+	if p.reported || len(log) != 0 {
+		t.Fatalf("a push cut short was kept (%v) or logged (%v)", p.reported, log)
+	}
+	fail := errors.New("dial: refused")
+	for _, r := range []struct {
+		err error
+		res push.Result
+	}{{nil, push.Result{}}, {nil, push.Result{}}, {fail, push.Result{}}, {fail, push.Result{}}, {push.ErrStalled, push.Result{Abandoned: 16}}, {nil, push.Result{}}} {
+		n.report(p, 1, r.res, r.err)
+	}
+	// The first success is no change: a point starts as pushed.
+	want := []string{"access point ap0: push failed: dial: refused",
+		"access point ap0: stalled, 16 session opens waiting: " + push.ErrStalled.Error(), "access point ap0: pushed"}
+	if !slices.Equal(log, want) {
+		t.Fatalf("log:\n%q\nwant\n%q", log, want)
+	}
+}
+
+// slowStop is a watcher whose Watch returns only when release closes,
+// after its context ends: a push.Pusher in the middle of a slow push.
+type slowStop struct{ release chan struct{} }
+
+func (s slowStop) Watch(ctx context.Context, _ time.Duration, _ func() ([]ap.File, error), _ func(push.Result, error)) {
+	<-ctx.Done()
+	<-s.release
+}
+
+// A nudge never waits on an access point: while its Watch is still
+// ending, further nudges return at once.
+func TestNudgeNeverBlocks(t *testing.T) {
+	var log []string
+	var mu sync.Mutex
+	s := slowStop{release: make(chan struct{})}
+	n := bareAP(&log, &mu, s)
+	n.start()
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 5; i++ {
+			n.nudge()
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("nudge blocked on an access point")
+	}
+	close(s.release)
+	n.close()
+}
+
+// Home lists the device cards by device id.
+func TestCardsSortedByDevice(t *testing.T) {
+	var log []string
+	var mu sync.Mutex
+	n := bareAP(&log, &mu)
+	n.layout = testAP(t).Layout
+	n.st = apState{Keys: ap.Keys{Setup: setupPW}, Replaced: true}
+	if err := n.st.Keys.Enrol(); err != nil {
+		t.Fatal(err)
+	}
+	n.st.Keys.Device = map[string]ap.DeviceKey{}
+	var ids []string
+	for i := 0; i < 12; i++ {
+		id := fmt.Sprintf("dev%02d", 11-i)
+		ids = append(ids, id)
+		n.st.Keys.Device[id] = ap.DeviceKey{VLAN: 101, Password: fmt.Sprintf("CANARYDEVICEPW%02d", i)}
+	}
+	slices.Sort(ids)
+	var got []string
+	for _, c := range (pageAPs{n}).Cards() {
+		if c.Device != "" {
+			got = append(got, c.Device)
+		}
+	}
+	if !slices.Equal(got, ids) {
+		t.Fatalf("device cards %v, want %v", got, ids)
+	}
+}
+
+// cloneKeys copies the device map, so a change to the copy leaves the
+// saved state as it was; keysEqual tells every field apart.
+func TestKeysCloneAndEqual(t *testing.T) {
+	k := ap.Keys{Setup: "s", Owner: "o", Household: "h", Guests: "g", Devices: "d", Device: map[string]ap.DeviceKey{"tv": {VLAN: 101, Password: "p"}}}
+	c := cloneKeys(k)
+	if !keysEqual(k, c) {
+		t.Fatal("a clone differs")
+	}
+	c.Device["tv"] = ap.DeviceKey{VLAN: 101, Password: "q"}
+	if k.Device["tv"].Password != "p" {
+		t.Fatal("a change to the clone reached the original")
+	}
+	for name, f := range map[string]func(*ap.Keys){
+		"setup": func(k *ap.Keys) { k.Setup = "x" }, "owner": func(k *ap.Keys) { k.Owner = "x" },
+		"household": func(k *ap.Keys) { k.Household = "x" }, "guests": func(k *ap.Keys) { k.Guests = "x" },
+		"devices":         func(k *ap.Keys) { k.Devices = "x" },
+		"device password": func(k *ap.Keys) { k.Device["tv"] = ap.DeviceKey{VLAN: 101, Password: "x"} },
+		"device added":    func(k *ap.Keys) { k.Device["lamp"] = ap.DeviceKey{VLAN: 102, Password: "x"} },
+		"device renamed":  func(k *ap.Keys) { delete(k.Device, "tv"); k.Device["lamp"] = ap.DeviceKey{VLAN: 101, Password: "p"} },
+	} {
+		o := cloneKeys(k)
+		f(&o)
+		if keysEqual(k, o) || keysEqual(o, k) {
+			t.Errorf("%s: keysEqual missed the change", name)
+		}
+	}
+}
+
+// ENF-g-8: the production pusher dials through the access point's admin
+// interface alone: a dial bound to an interface that does not exist fails
+// however near the address, and the pusher carries the address and keys.
+func TestNewPusherBindsTheInterface(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := newPusher("nosuchif0")(ln.Addr().String(), signer.PublicKey(), signer)
+	p, ok := w.(*push.Pusher)
+	if !ok || p.Addr != ln.Addr().String() || p.HostKey == nil || !bytes.Equal(p.HostKey.Marshal(), signer.PublicKey().Marshal()) || p.Signer != signer || p.Dial == nil {
+		t.Fatalf("pusher %#v", w)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if c, err := p.Dial(ctx, "tcp", ln.Addr().String()); err == nil {
+		c.Close()
+		t.Fatal("a dial bound to an interface that does not exist reached the address")
 	}
 }

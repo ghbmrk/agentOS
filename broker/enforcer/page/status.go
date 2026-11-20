@@ -311,11 +311,9 @@ func plainCards(cs []WiFiCard) []plainCard {
 	out := make([]plainCard, 0, len(cs))
 	for _, c := range cs {
 		title := "Device " + ascii(clip(c.Device))
-		switch c.Network {
-		case "":
-		case "setup":
-			title = "Setup network"
-		default:
+		// The setup network has no card here: home is served only once
+		// enrolment handed over (pageAPs.Cards).
+		if c.Network != "" {
 			title = labelNet(c.Network) + " network"
 		}
 		// The SSIDs come from the enforcer's setup and the password and
@@ -344,11 +342,8 @@ func plainCards(cs []WiFiCard) []plainCard {
 	return out
 }
 
-// labelNet is a network's name as the owner reads it.
+// labelNet is a network's name, never empty, as the owner reads it.
 func labelNet(n string) string {
-	if n == "" {
-		return n
-	}
 	return strings.ToUpper(n[:1]) + n[1:]
 }
 

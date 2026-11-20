@@ -4,6 +4,7 @@ package page
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/netip"
 	"regexp"
@@ -794,5 +795,54 @@ func TestHomeShowsAccessPoints(t *testing.T) {
 	}
 	if strings.Contains(h, "10.70.0.2:22 is stalled") {
 		t.Error("home shows the access point that is not stalled as stalled")
+	}
+}
+
+// ENF-g-6: each card's QR path draws exactly the code's dark modules, one
+// rectangle per run, read back here module by module.
+func TestCardQRPathDrawsTheCode(t *testing.T) {
+	text := "WIFI:T:WPA;S:Home;P:CANARYOWNERAAAA;;"
+	code, err := qrOf(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := plainCards([]WiFiCard{{Network: "owner", SSID: "Home", Shown: "CANA RYOW NERA AAAA", QR: text}})
+	if len(cs) != 1 || cs[0].QR == nil || cs[0].QR.Size != code.Size {
+		t.Fatalf("cards %+v, want one with a QR of size %d", cs, code.Size)
+	}
+	drawn := make([]byte, code.Size*code.Size)
+	for i := range drawn {
+		drawn[i] = '0'
+	}
+	for _, seg := range strings.Split(strings.TrimSuffix(cs[0].QR.Path, "z"), "z") {
+		var x, y, n, m int
+		if _, err := fmt.Sscanf(seg, "M%d %dh%dv1h-%d", &x, &y, &n, &m); err != nil || n != m || n < 1 || x+n > code.Size {
+			t.Fatalf("segment %q: %v", seg, err)
+		}
+		for i := x; i < x+n; i++ {
+			if drawn[y*code.Size+i] == '1' {
+				t.Fatalf("module %d,%d drawn twice", i, y)
+			}
+			drawn[y*code.Size+i] = '1'
+		}
+	}
+	if string(drawn) != code.Modules {
+		t.Fatal("the QR path does not draw the code's modules")
+	}
+}
+
+// #4569: a stalled access point's address is shown in ASCII, so an
+// address naming control or bidirectional characters cannot reorder the
+// card's text.
+func TestStalledAddressASCII(t *testing.T) {
+	g := newRig(t)
+	cfg := g.s.cfg
+	cfg.AccessPoints, cfg.Lock = &fakeAPs{points: []APState{{Addr: "10.70.0.3:22\u202e", Stalled: true, Abandoned: 16}}}, nil
+	var err error
+	if g.s, err = New(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if h := g.homeHTML(); strings.ContainsRune(h, '\u202e') || !strings.Contains(h, `10.70.0.3:22\u202e`) {
+		t.Fatalf("a stalled access point's address is not quoted in ASCII:\n%s", h)
 	}
 }

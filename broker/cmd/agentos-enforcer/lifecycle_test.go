@@ -358,6 +358,10 @@ type fakePusher struct {
 	addr  string
 	left  int // session opens left waiting, as push.Pusher counts them
 	every []time.Duration
+	// active counts the Watch calls running on this pusher; overlapped is
+	// set when two ran at once, which a push.Pusher does not allow.
+	active     int
+	overlapped bool
 }
 
 func (f *fakeAP) pusher(addr string, host ssh.PublicKey, signer ssh.Signer) watcher {
@@ -377,6 +381,12 @@ func (f *fakeAP) pusher(addr string, host ssh.PublicKey, signer ssh.Signer) watc
 // Watch is push.Pusher.Watch's loop over the fake access point: refused
 // with push.ErrStalled from push.MaxAbandoned opens left on.
 func (p *fakePusher) Watch(ctx context.Context, every time.Duration, cfg func() ([]ap.File, error), report func(push.Result, error)) {
+	p.ap.mu.Lock()
+	if p.active++; p.active > 1 {
+		p.overlapped = true
+	}
+	p.ap.mu.Unlock()
+	defer func() { p.ap.mu.Lock(); p.active--; p.ap.mu.Unlock() }()
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {

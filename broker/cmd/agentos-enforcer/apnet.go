@@ -60,7 +60,9 @@ type watcher interface {
 // access point's admin interface (ENF-g-8: Dial has no default).
 func newPusher(iface string) func(addr string, host ssh.PublicKey, signer ssh.Signer) watcher {
 	return func(addr string, host ssh.PublicKey, signer ssh.Signer) watcher {
-		d := net.Dialer{Timeout: 10 * time.Second, Control: func(_, _ string, c syscall.RawConn) error {
+		// No dial timeout of its own: Pusher bounds each push, its dial
+		// included, with its context (push.Pusher.Timeout).
+		d := net.Dialer{Control: func(_, _ string, c syscall.RawConn) error {
 			var serr error
 			if err := c.Control(func(fd uintptr) { serr = unix.SetsockoptString(int(fd), unix.SOL_SOCKET, unix.SO_BINDTODEVICE, iface) }); err != nil {
 				return err
@@ -90,11 +92,14 @@ func provisionAP(dir fileStore, setup string) error {
 	if err := checkSetup(setup); err != nil {
 		return err
 	}
-	b, err := json.Marshal(apState{Keys: ap.Keys{Setup: setup}})
-	if err != nil {
-		return err
-	}
-	return dir.Save(b)
+	return saveState(dir, apState{Keys: ap.Keys{Setup: setup}})
+}
+
+// saveState writes st to store. An apState is strings, a bool and a map
+// of string-keyed structs of strings, which json.Marshal always encodes.
+func saveState(store fileStore, st apState) error {
+	b, _ := json.Marshal(st)
+	return store.Save(b)
 }
 
 // checkSetup refuses a setup password the access point would not take,
@@ -166,8 +171,8 @@ type apNet struct {
 	// replacing is enrolment's hand-over in progress: the access points
 	// are pushed the four networks, not yet the saved state's setup one.
 	replacing bool
-	// gen counts each change of what the access points must hold that a
-	// waiter needs reported: enrolment's hand-over and its undoing.
+	// gen counts each hand-over, so its waiter reads only reports of
+	// pushes made from it on.
 	gen uint64
 	// hash is the policy the device passwords were last synced to.
 	hash string
@@ -239,12 +244,14 @@ func (n *apNet) start() {
 				}()
 				select {
 				case <-ctx.Done():
-					stop()
-					<-done
-					return
 				case <-p.kick:
-					stop()
-					<-done
+				}
+				// One Watch at a time on the pusher: the next starts only
+				// once this one has returned.
+				stop()
+				<-done
+				if ctx.Err() != nil {
+					return
 				}
 			}
 		}()
@@ -256,9 +263,6 @@ func (n *apNet) close() {
 		n.cancel()
 		n.wg.Wait()
 	}
-	n.mu.Lock()
-	n.cond.Broadcast()
-	n.mu.Unlock()
 }
 
 // nudge has every access point pushed now.
@@ -337,13 +341,7 @@ func (n *apNet) report(p *apPoint, gen uint64, res push.Result, err error) {
 	}
 }
 
-func (n *apNet) save(st apState) error {
-	b, err := json.Marshal(st)
-	if err != nil {
-		return err
-	}
-	return n.store.Save(b)
-}
+func (n *apNet) save(st apState) error { return saveState(n.store, st) }
 
 // Replaced reports whether enrolment's hand-over finished: every access
 // point held the four networks and that was saved.
@@ -404,7 +402,6 @@ func (n *apNet) Replace() (enrol.Card, error) {
 			return card, nil
 		}
 	}
-	n.gen++
 	n.mu.Unlock()
 	n.nudge() // the setup network again, wherever the four reached
 	return enrol.Card{}, err
@@ -453,9 +450,6 @@ func (n *apNet) ownerCard() enrol.Card {
 // passwords were last synced, so a device's new password, or the removal
 // of one, reaches the access points without waiting for apEvery.
 func (n *apNet) tick() {
-	if len(n.points) == 0 {
-		return
-	}
 	n.d.mu.Lock()
 	_, h := n.d.engine.CurrentHash()
 	n.d.mu.Unlock()
