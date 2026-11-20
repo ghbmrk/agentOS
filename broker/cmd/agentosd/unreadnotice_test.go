@@ -209,9 +209,16 @@ func TestUnreadNoticeRetriesEachStreak(t *testing.T) {
 
 // informOwner refuses before the owner channel is up with a refusal that
 // proves nothing went, so the deletion notice is retried rather than lost.
-func TestInformOwnerWithoutChannelIsNotSent(t *testing.T) {
+func TestInformOwnerNotSentOnlyWithoutChannel(t *testing.T) {
 	err := informOwner(func() *owner.Channel { return nil })("x")
 	if !errors.Is(err, modem.ErrNotSent) || !unreadNotSent(err) {
 		t.Fatalf("no channel: %v, want a not-sent refusal", err)
+	}
+	// Once the channel is up it decides: a channel with no modem refuses
+	// with its own plain error, which does not prove the text stayed, so
+	// the notice counts as possibly sent.
+	err = informOwner(func() *owner.Channel { return &owner.Channel{} })("x")
+	if err == nil || errors.Is(err, errNoOwnerChannel) || unreadNotSent(err) {
+		t.Fatalf("channel up: %v, want the channel's own refusal", err)
 	}
 }
