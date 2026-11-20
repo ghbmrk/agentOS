@@ -64,12 +64,13 @@ FREE_DISK_NOTICES = (
 # compared, never run, so no edit to the action (a full-path sudo, a repo script) reaches the shell here.
 # An edit to a step fails the test until its copy here is changed to match in the same PR. The action is
 # the one copy every disk job runs (#6357), so no test compares one job's steps with another's.
-DISK_BUDGET = r"""[[ "$DISK_NEED_GB" =~ ^[1-9][0-9]*$ ]] || { echo "::error title=disk budget::the $GITHUB_JOB job has no budget (DISK_NEED_GB is '$DISK_NEED_GB'): set DISK_NEED_GB, in GB, in its env in .github/workflows/image.yml"; exit 1; }
+DISK_BUDGET = r"""wf=${GITHUB_WORKFLOW_REF#*/*/}; wf=${wf%%@*}  # owner/repo/.github/workflows/x.yml@ref: the calling workflow
+[[ "$DISK_NEED_GB" =~ ^[1-9][0-9]*$ ]] || { echo "::error title=disk budget::the $GITHUB_JOB job has no budget (DISK_NEED_GB is '$DISK_NEED_GB'): set DISK_NEED_GB, in GB, in its env in ${wf:-its workflow}"; exit 1; }
 vendor=$(cat "${DMI_ID:-/sys/class/dmi/id}/sys_vendor" 2>/dev/null || true)
 case "$vendor" in
   "Amazon EC2"*) cloud=AWS;; "Microsoft Corporation"*) cloud=Azure;; *) cloud="unknown-cloud (${vendor:-no DMI vendor})";;
 esac
-df -BM --output=target "$RUNNER_TEMP" /var/tmp /tmp /root | tail -n +2 | sort -u > "$RUNNER_TEMP/disk.mounts"
+df -BM --output=target "$RUNNER_TEMP" /var/tmp /tmp /root "$HOME" | tail -n +2 | sort -u > "$RUNNER_TEMP/disk.mounts"
 fail=0
 while read -r m; do
   have=$(( $(df -BM --output=avail "$m" | tail -n 1 | tr -dc 0-9) / 1024 ))
@@ -87,6 +88,7 @@ chmod +x "$RUNNER_TEMP/disk-used"
 nohup sh -c 'while :; do "$RUNNER_TEMP/disk-used" >> "$RUNNER_TEMP/disk.samples"; sleep 1; done' >/dev/null 2>&1 &
 """
 DISK_BUDGET_HELD = r"""[ -s "$RUNNER_TEMP/disk.base" ] || { echo "disk budget: no baseline, the guard did not pass"; exit 0; }
+wf=${GITHUB_WORKFLOW_REF#*/*/}; wf=${wf%%@*}  # owner/repo/.github/workflows/x.yml@ref: the calling workflow
 now=$("$RUNNER_TEMP/disk-used")
 [[ "$now" =~ ^[0-9]+$ ]] || { echo "::error title=disk budget::cannot read the disk use (got '$now'), so the budget is unchecked: df read none of the file systems the \"Disk budget\" notices list, or $RUNNER_TEMP/disk-used is gone; rerun the job, and if it fails again check that those mounts and that script still exist when the job ends"; exit 1; }
 echo "$now" >> "$RUNNER_TEMP/disk.samples"
@@ -98,7 +100,7 @@ read -r peak rise < <(awk -v b="$(cat "$RUNNER_TEMP/disk.base")" \
 p=$(( (peak * 10 + 1023) / 1024 )); r=$(( (rise * 10 + 1023) / 1024 )); t=$(( p + r ))
 gb() { echo "$(( $1 / 10 )).$(( $1 % 10 ))"; }
 echo "::notice title=disk budget::the $GITHUB_JOB job grew its disk use by at most $(gb $t) GB of its $DISK_NEED_GB GB budget ($(gb $p) GB sampled, plus $(gb $r) GB, the largest rise in one sample interval, for a peak between samples)"
-[ "$t" -lt $(( DISK_NEED_GB * 10 )) ] || { echo "::error title=disk budget::the $GITHUB_JOB job may have used up to $(gb $t) GB, at or over its $DISK_NEED_GB GB budget; raise DISK_NEED_GB in .github/workflows/image.yml (the $GITHUB_JOB job's env)"; exit 1; }
+[ "$t" -lt $(( DISK_NEED_GB * 10 )) ] || { echo "::error title=disk budget::the $GITHUB_JOB job may have used up to $(gb $t) GB, at or over its $DISK_NEED_GB GB budget; raise DISK_NEED_GB in ${wf:-its workflow} (the $GITHUB_JOB job's env)"; exit 1; }
 """
 UNKNOWN_PHASE = r"""echo "::error title=disk budget::.github/actions/disk-budget has no phase '$PHASE' (the $GITHUB_JOB job's call): use start or held"
 exit 1
@@ -126,15 +128,18 @@ def free_disk_copies(script):
 
 def build_steps(job_id="build", text=None):
     """Job JOB_ID's steps as (name or uses, step text), read as text: CI's Python has no YAML. The job
-    ends at the next line indented two spaces (the next job, or a comment above it)."""
+    ends at the next line indented two spaces (the next job, or a comment above it). A block of comments
+    before the first step has the name None; a job with no steps (a called workflow) has none."""
     text = WORKFLOW.read_text() if text is None else text
-    start = text.index("\n  %s:\n" % job_id)
+    start = text.index("\n  %s:\n" % job_id, text.index("\njobs:\n"))
     end = re.compile(r"\n  [^ ]").search(text, start + 1)
     job = text[start:end.start() if end else len(text)]
     out = []
-    for block in re.split(r"\n(?=      - )", job[job.index("    steps:\n") + len("    steps:\n"):]):
+    if "\n    steps:\n" not in job:
+        return job, out
+    for block in re.split(r"\n(?=      - )", job[job.index("\n    steps:\n") + len("\n    steps:\n"):]):
         m = re.match(r"      - (?:name|uses): *(.+)", block)
-        out.append((m.group(1).strip(), block))
+        out.append((m.group(1).strip() if m else None, block))
     return job, out
 
 
@@ -197,9 +202,9 @@ def copy_of(name, script):
     return own
 
 
-# #6357: a job builds a large tree when a line it runs (comments aside) runs build.sh's staging, finish.sh
-# or mkosi: any script named *build.sh or *finish.sh (image/build.sh, image/local-build.sh, a script run
-# from inside image/), or mkosi as a command or a path's last part (/opt/mkosi/bin/mkosi, the clone of
+# #6357: a job of any workflow builds a large tree when a line it runs (comments and step names aside) runs
+# a build script, finish.sh or mkosi: any script named *build.sh or *finish.sh (image/build.sh, image/local-build.sh, Buildroot's
+# image/camnode/build.sh, drone/sitl/build.sh, a script run from inside its directory), or mkosi as a command or a path's last part (/opt/mkosi/bin/mkosi, the clone of
 # mkosi, `-C image/mkosi`), not a file under mkosi's config (image/mkosi/mkosi.sources).
 HEAVY = re.compile(r"[\w-]*(?:build|finish)\.sh\b|(?<![\w.-])mkosi(?![\w./-])")
 # What builds: those scripts, or the mkosi binary run (not its clone or checkout in a tool install).
@@ -207,8 +212,8 @@ BUILDS = re.compile(r"[\w-]*(?:build|finish)\.sh\b|/bin/mkosi\b")
 
 
 def code(text):
-    """TEXT's lines but its comments, which name build.sh and mkosi without running them."""
-    return [l for l in text.splitlines() if not l.lstrip().startswith("#")]
+    """TEXT's lines but its comments and step names, which name build.sh and mkosi without running them."""
+    return [l for l in text.splitlines() if not re.match(r"\s*(?:#|(?:- )?name:)", l)]
 
 
 def jobs(text):
@@ -287,7 +292,7 @@ class DiskBudgetTest(unittest.TestCase):
                 pass
         self.tmp.cleanup()
 
-    def run_step(self, name, avail_mb=0, used_mb=0, need="30", fs=None, vendor=None, phase=None):
+    def run_step(self, name, avail_mb=0, used_mb=0, need="30", fs=None, vendor=None, phase=None, ref=None):
         """Runs the test's own copy of a step (copy_of), never the step's text; FS maps mount points to
         (avail, used) MB, else one file system "/" has them."""
         script = copy_of(name, run_script(name))
@@ -300,9 +305,12 @@ class DiskBudgetTest(unittest.TestCase):
         if vendor is not None:
             (dmi / "sys_vendor").write_text(vendor + "\n")
         env = dict(os.environ, PATH="%s:%s" % (self.t / "bin", os.environ["PATH"]),
-                   RUNNER_TEMP=str(self.t / "temp"), DISK_NEED_GB=need, DMI_ID=str(dmi), GITHUB_JOB=self.JOB)
+                   RUNNER_TEMP=str(self.t / "temp"), DISK_NEED_GB=need, DMI_ID=str(dmi), GITHUB_JOB=self.JOB,
+                   GITHUB_WORKFLOW_REF="o/r/.github/workflows/heavy.yml@refs/pull/1/merge")
         if phase is not None:
             env["PHASE"] = phase
+        if ref is not None:
+            env["GITHUB_WORKFLOW_REF"] = ref
         p = subprocess.Popen(["bash", "-e", "-o", "pipefail", "-c", script], env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                              start_new_session=True)
@@ -382,11 +390,14 @@ class DiskBudgetTest(unittest.TestCase):
             rc, out = self.run_step("Disk budget", avail_mb=400 * 1024, used_mb=50000, need=need)
             self.assertNotEqual(rc, 0, (need, out))
             self.assertIn("::error title=disk budget::the heavy-job job has no budget (DISK_NEED_GB is '%s'): set "
-                          "DISK_NEED_GB, in GB, in its env in .github/workflows/image.yml\n" % need, out)
+                          "DISK_NEED_GB, in GB, in its env in .github/workflows/heavy.yml\n" % need, out)
             self.assertNotIn("::notice", out)
             self.assertFalse((self.t / "temp" / "disk.base").exists())
         rc, out = self.run_step("Disk budget", avail_mb=400 * 1024, used_mb=50000, need="1")
         self.assertEqual(rc, 0, out)
+        # With no workflow ref (never on a runner) the message still says where the budget goes.
+        rc, out = self.run_step("Disk budget", avail_mb=400 * 1024, used_mb=50000, need="", ref="")
+        self.assertIn("in its env in its workflow\n", out)
 
     def test_unknown_phase_fails(self):
         rc, out = self.run_step("Unknown phase", phase="stat")
@@ -409,7 +420,7 @@ class DiskBudgetTest(unittest.TestCase):
         self.assertRegex(run_script("Free runner disk"), r"(?m)^sudo rm -rf /usr/local/lib/android ")
         # The guard checks the file system of each place a disk job writes, and samples every second.
         dfline = next(l for l in run_script("Disk budget").splitlines() if l.startswith("df "))
-        for w in ('"$RUNNER_TEMP"', "/var/tmp", "/tmp", "/root"):
+        for w in ('"$RUNNER_TEMP"', "/var/tmp", "/tmp", "/root", '"$HOME"'):
             self.assertIn(w, dfline)
         self.assertIn("; sleep 1; done", run_script("Disk budget"))
 
@@ -445,7 +456,7 @@ class DiskBudgetTest(unittest.TestCase):
         rc, out = self.held(*self.ramp(29))
         self.assertNotEqual(rc, 0)
         self.assertIn("::error title=disk budget::the heavy-job job may have used up to 30.0 GB, at or over its 30 GB "
-                      "budget; raise DISK_NEED_GB in .github/workflows/image.yml (the %s job's env)" % self.JOB, out)
+                      "budget; raise DISK_NEED_GB in .github/workflows/heavy.yml (the %s job's env)" % self.JOB, out)
         rc, out = self.held(*self.ramp(28))
         self.assertEqual(rc, 0, out)
         self.assertIn("::notice title=disk budget::the heavy-job job grew its disk use by at most 29.0 GB of its 30 GB budget (28.0 GB sampled, plus 1.0 GB", out)
@@ -586,20 +597,34 @@ class DiskJobOrderTest(unittest.TestCase):
             self.assertIn(p, stage)
         self.assertIn('"$RUNNER_TEMP/stage.tar"', step("Pack the stage", "stage"))
 
-    def test_a_change_to_the_action_runs_the_image_workflow(self):
-        # The pull_request and push path lists both name the action, so an edit to it builds the image.
-        on = WORKFLOW.read_text().split("\njobs:\n", 1)[0]
-        self.assertEqual(on.count('\n      - ".github/actions/disk-budget/**"\n'), 2)
-
 
 class EveryDiskJobTest(unittest.TestCase):
-    """#6357: the jobs that build a large tree are found by what they run (HEAVY), not by a step they carry,
-    so a new heavy job with no budget fails here."""
+    """#6357: the jobs of every workflow that build a large tree are found by what they run (HEAVY), not by a
+    step they carry, so a new heavy job in any workflow with no budget fails here."""
 
     def test_every_job_that_builds_a_large_tree_keeps_a_budget(self):
-        text = WORKFLOW.read_text()
-        self.assertEqual(sorted(heavy_jobs(text)), ["build", "stage"])
-        self.assertEqual(disk_job_problems(text), [])
+        found, problems = [], []
+        for wf in sorted((ROOT / ".github/workflows").glob("*.y*ml")):
+            text = wf.read_text()
+            if "\njobs:\n" not in text:
+                problems.append("%s: no jobs: line, so its jobs are unread" % wf.name)
+                continue
+            found += ["%s %s" % (wf.name, j) for j in heavy_jobs(text)]
+            problems += ["%s: %s" % (wf.name, p) for p in disk_job_problems(text)]
+        self.assertEqual(problems, [])
+        # The set as of #6357, so a detector that stops finding a job fails too.
+        self.assertEqual(sorted(found), ["camnode-image.yml build", "drone-sitl.yml sitl", "enforcer-image.yml build",
+                                         "image.yml build", "image.yml stage", "testkit.yml image"])
+
+    def test_every_workflow_with_a_disk_job_runs_on_a_change_to_the_action(self):
+        for wf in sorted((ROOT / ".github/workflows").glob("*.y*ml")):
+            text = wf.read_text()
+            if "\njobs:\n" in text and heavy_jobs(text):
+                on = text.split("\njobs:\n", 1)[0]
+                lists = on.count("\n    paths:\n")
+                with self.subTest(workflow=wf.name):
+                    self.assertGreater(lists, 0)
+                    self.assertEqual(on.count('\n      - ".github/actions/disk-budget/**"\n'), lists)
 
     def with_job(self, steps, env='    env:\n      DISK_NEED_GB: "12"\n'):
         """image.yml with one more job, NEW, of STEPS (step lines at six spaces) and ENV."""
