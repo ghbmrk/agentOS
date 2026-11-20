@@ -345,9 +345,13 @@ RUNE = re.compile(r"'(?:[^'\\\n]|\\.)*'")
 
 
 def _literals(text):
-    """The contents of a Go file's string literals, comments left out, and the patterns of its
-    //go:embed directives (an `all:` prefix dropped), as text: what a test can name a file by."""
-    out = [m[0][1:-1] for m in LITERAL.finditer(_uncommented(text))]
+    """The contents of a Go file's string literals, comments left out: what a test can name a file by."""
+    return [m[0][1:-1] for m in LITERAL.finditer(_uncommented(text))]
+
+
+def _embeds(text):
+    """The patterns of a Go file's //go:embed directives, an `all:` prefix dropped."""
+    out = []
     for m in re.finditer(r"^[ \t]*//go:embed[ \t]+(.*)$", text, re.M):
         out += [w.strip('"`').removeprefix("all:") for w in m[1].split()]
     return out
@@ -381,22 +385,28 @@ def names_file(pkg_dir, rel):
     (`*?[`) that matches its base name, rel or a leading directory of it (`//go:embed *`,
     fs.Glob(fsys, "*.md"), filepath.Join(d, "*.md")), or whose last path part matches its base name
     (dir + "/*.md", "%s/*.md", "**/*.md"), or a literal anywhere in a path call's
-    arguments (PATH_CALL) that lists `.`, `..` or `/` or starts `./` or `../`. A link or an
-    unreadable file can name anything. A path built in a variable from parts holding none of these
-    is not seen (MUT-deleted-test-own-lines-1). Over-matching costs only a whole-suite run."""
+    arguments (PATH_CALL) that lists `.`, `..` or `/` or starts `./` or `../`. A glob made of
+    wildcards and slashes alone (`"*"`, `"*/*"`) counts only in a //go:embed pattern or a path
+    call's arguments: elsewhere it is mostly data, a table's `*` or a DNS wildcard (#6328). A link or
+    an unreadable file can name anything. A path built in a variable from parts holding none of
+    these, a wildcard-only glob among them, is not seen (MUT-deleted-test-own-lines-1).
+    Over-matching costs only a whole-suite run."""
     parts = rel.split("/")
     names = [parts[-1]] + ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]
     for f in sorted(pkg_dir.glob("*.go")):
         if f.is_symlink() or not f.is_file():
             return True
         text = f.read_bytes().decode("utf-8", "replace")
-        for lit in _literals(text):
+        called = _call_literals(_uncommented(text))
+        reach = set(_embeds(text)) | set(called)
+        for lit in _literals(text) + _embeds(text):
             if parts[-1] in lit or parts[0] in lit:
                 return True
-            if re.search(r"[*?\[]", lit) and (any(fnmatch.fnmatchcase(n, lit) for n in names)
-                                               or fnmatch.fnmatchcase(parts[-1], lit.rstrip("/").rsplit("/", 1)[-1])):
+            if re.search(r"[*?\[]", lit) and (lit in reach or re.sub(r"[*?/]", "", lit)) and (
+                    any(fnmatch.fnmatchcase(n, lit) for n in names)
+                    or fnmatch.fnmatchcase(parts[-1], lit.rstrip("/").rsplit("/", 1)[-1])):
                 return True
-        for lit in _call_literals(_uncommented(text)):
+        for lit in called:
             if (lit and lit.rstrip("/") in ("", ".", "..")) or lit.startswith(("./", "../")):
                 return True
     return False
