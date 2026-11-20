@@ -589,19 +589,28 @@ func TestTIM1AFreshSampleRaisesEarliest(t *testing.T) {
 }
 
 // onLog's clock is read from more than one goroutine (a re-seal reads it off
-// the kernel's lock): under -race its rise is guarded.
+// the kernel's lock), so it takes and applies each reading under one lock:
+// the source is never read by two at once, so no reading on an older sample
+// is applied after a fresher one, which would make the fresher sample count
+// as fresh again (#6304 L3 1, Security 1). Earliest never goes back.
 //
 // REQ: TIM-1
-func TestTIM1AOnLogIsSafeAcrossGoroutines(t *testing.T) {
+func TestTIM1AOnLogReadsAndAppliesUnderOneLock(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(nil)
 	l, err := kernel.Open(kernel.Config{Store: &kernel.MemStore{}, Anchor: &kernel.MemAnchor{}, Pub: pub, Sign: priv, Rand: rand.Reader})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var n atomic.Int64
+	var n, in atomic.Int64
+	var overlap atomic.Bool
 	w := onLog(l, func() (kernel.Reading, Stamp) {
+		if in.Add(1) > 1 {
+			overlap.Store(true)
+		}
+		defer in.Add(-1)
+		time.Sleep(100 * time.Microsecond) // a chronyd round trip
 		i := n.Add(1)
-		return kernel.At(i * 1000), Stamp{0: byte(i)}
+		return kernel.At(i * 1000), Stamp{0: byte(i), 1: byte(i >> 8)}
 	})
 	var wg sync.WaitGroup
 	for range 8 {
@@ -609,7 +618,7 @@ func TestTIM1AOnLogIsSafeAcrossGoroutines(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			prev := int64(0)
-			for range 100 {
+			for range 50 {
 				r := w()
 				if r.Earliest < prev {
 					t.Errorf("Earliest went back: %d after %d", r.Earliest, prev)
@@ -620,6 +629,9 @@ func TestTIM1AOnLogIsSafeAcrossGoroutines(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+	if overlap.Load() {
+		t.Fatal("two readers read the source at once: a stale reading can be applied after a fresh one")
+	}
 }
 
 // OpenKernel reads a configured clock through onLog: a forward step of the

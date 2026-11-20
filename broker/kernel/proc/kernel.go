@@ -436,15 +436,23 @@ func onLog(l *kernel.Log, c Source) kernel.Clock {
 	if es := l.Entries(); len(es) > 0 {
 		base = max(base, es[len(es)-1].At)
 	}
-	var mu sync.Mutex // re-seals read the clock off the kernel's lock
+	// Re-seals read the clock off the kernel's lock, so each reading is
+	// taken and applied under mu: one taken before a fresher one but applied
+	// after it would set last back, and the fresher sample would then count
+	// as fresh again (#6304 L3 1, Security 1). Chrony.Sample serialises its
+	// reads on its own lock already, so this adds no wait.
+	var mu sync.Mutex
 	return func() kernel.Reading {
-		r, ref := c()
 		mu.Lock()
 		defer mu.Unlock()
+		r, ref := c()
 		e := base + time.Since(start).Milliseconds()
 		if ref != (Stamp{}) && ref != last {
 			last = ref
 			if r.Earliest > e {
+				// r.Earliest was bounded when the read began, so starting
+				// the run after it returned under-counts by the read's
+				// wait, the safe side (#6304 L3 R1).
 				base, start, e = r.Earliest, time.Now(), r.Earliest
 			}
 		}
