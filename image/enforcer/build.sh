@@ -52,8 +52,10 @@ STAGE=$OUT/stage; rm -rf "$STAGE"
 install -D -m 0644 "$ROOT" "$STAGE/usr/share/agentos-enforcer/release-root.json"
 chmod -R u+w,go-w "$STAGE"
 
+# The initrd (../mkosi/initrd/, shared with the core image) runs the core's package-source check, which
+# holds its packages to this run's debian-security snapshot (#6149).
 $MKOSI -C "$HERE/mkosi" -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" --extra-tree="$STAGE:/" \
-	--output-dir "$OUT" build
+	--environment=AGENTOS_SECURITY_SNAPSHOT="$SECURITY_SNAPSHOT" --output-dir "$OUT" build
 rm -rf "$STAGE" "$OUT/pkgmngr"
 # shellcheck disable=SC2086
 python3 "$HERE/finish_image.py" "$OUT" "$VERSION" --root "$ROOT" $KEYS
