@@ -20,7 +20,8 @@ package wipelint_test
 // the lint cannot wipe (an interface, func, channel, uintptr or
 // unsafe.Pointer, a type set without terms, a pointer, slice, map or
 // struct holding key bytes). A named constructor with a possible key is
-// listed in sealers, naming which of them are keys, or the build fails; a
+// listed in sealers, classifying each as a key or not, or the build fails
+// (and fails again when its possible keys change); a
 // func type or literal with one fails outright (no name to list). A listed
 // key is a byte slice: a string key cannot be wiped, an array key passes
 // by value and leaves the callee an unwiped copy, and a key of any other
@@ -72,51 +73,59 @@ import (
 	"github.com/ghbmrk/agentos/broker/internal/lintload"
 )
 
-// sealerKey is one listed sealer constructor: the names of its parameters
-// that are sealing keys, wiped by each caller right after the call, and
-// what it does with them (or, with no keys, why its possible keys are
-// none).
+// sealerKey is one listed sealer constructor: each of its possible keys
+// (possibleKeys) by name, classified as a key or not, and why. The rule
+// fails when the signature's possible keys differ from the classified
+// set, so a parameter added later is held until a review classifies it.
+// classified returns the names the entry classifies, sorted.
+func (e sealerKey) classified() []string {
+	out := append(slices.Clone(e.keys), e.not...)
+	sort.Strings(out)
+	return out
+}
+
 type sealerKey struct {
-	keys []string
+	keys []string // its keys, each wiped by every caller right after the call
+	not  []string // its other possible keys, none a key, for the reason in why
 	why  string
 }
 
 // sealers names, by types.Func.FullName, each sealer constructor with a
 // possible key. Nothing but review holds an entry.
 var sealers = map[string]sealerKey{
-	sealerPkg + ".NewAESSealer": {[]string{"key"}, "aes.NewCipher expands the key into its own schedule; the slice is not kept"},
+	sealerPkg + ".NewAESSealer": {[]string{"key"}, nil, "aes.NewCipher expands the key into its own schedule; the slice is not kept"},
 
 	// Constructors of things that hold a sealer, whose possible keys
 	// (paths, configs, built sealers, sealed stores, write funcs) are none.
-	"github.com/ghbmrk/agentos/broker/clerk.NewAPI":                          {nil, "the declaration, the store of sealed secrets and the trust roots hold no sealing key"},
-	"github.com/ghbmrk/agentos/broker/clerk.NewExit":                         {nil, "the declaration, the anchors' public keys, the sealed store and the trust roots hold no sealing key"},
-	"github.com/ghbmrk/agentos/broker/clerk.NewSignIn":                       {nil, "the declaration, the sealed store and the trust roots hold no sealing key"},
-	"github.com/ghbmrk/agentos/broker/clerk.NewSecrets":                      {nil, "s is a built sealer and write takes sealed bytes; the key was wiped where s was made"},
-	"github.com/ghbmrk/agentos/broker/clerk/inbox.OpenGmail":                 {nil, "base and token name the account, grant is sealed into the store it builds, and its sealing key is drawn and wiped inside"},
-	"github.com/ghbmrk/agentos/broker/clerk/inbox.NewGmail":                  {nil, "api is a built exit; no key"},
-	"(*github.com/ghbmrk/agentos/broker/clerk/inbox.Gmail).WithPoster":       {nil, "the mailbox and its network policy; no key"},
-	"github.com/ghbmrk/agentos/broker/clerk/line.New":                        {nil, "the config holds the account's addresses and paths, no sealing key"},
-	"(*github.com/ghbmrk/agentos/broker/clerk/line.Clerk).Account":           {nil, "returns the clerk's account; no key"},
-	"github.com/ghbmrk/agentos/broker/clerk/line.NewSigner":                  {nil, "c is a built clerk; no key"},
-	"github.com/ghbmrk/agentos/broker/clerk/model.NewAPIs":                   {nil, "declarations, the sealed key store, the network policy and trust roots hold no sealing key"},
-	"github.com/ghbmrk/agentos/broker/clerk/model.NewKeys":                   {nil, "s is a built sealer and write takes sealed bytes"},
-	"github.com/ghbmrk/agentos/broker/clerk/plan.New":                        {nil, "the declaration, the sealed store and trust roots hold no sealing key"},
-	"github.com/ghbmrk/agentos/broker/clerk/plan.NewStore":                   {nil, "s is a built sealer and write takes sealed bytes"},
-	"github.com/ghbmrk/agentos/broker/clerk/run.OpenExit":                    {nil, "dir is a path, s a built sealer, the rest declaration, public anchors and trust roots"},
-	"github.com/ghbmrk/agentos/broker/clerk/run.NewExitHost":                 {nil, "a built exit, its declaration and public anchors; no key"},
-	"(*github.com/ghbmrk/agentos/broker/clerk/run.MailHost).heldGmailSignIn": {nil, "slot and hint name the account; no key"},
-	"(*github.com/ghbmrk/agentos/broker/clerk/run.MailHost).newGmailSignIn":  {nil, "the sealed store and the account's slot and hint; no key"},
-	"(*github.com/ghbmrk/agentos/broker/clerk/run.MailHost).ownGmailSignIn":  {nil, "the host alone; its own sealing key is drawn and wiped inside"},
-	"github.com/ghbmrk/agentos/broker/clerk/run.gmailBox":                    {nil, "the sealed store, the account's slot and the mail config; no key"},
-	"github.com/ghbmrk/agentos/broker/clerk/run.NewMailHost":                 {nil, "ctx, a path, the sealed store and the mail config; no key"},
-	"github.com/ghbmrk/agentos/broker/clerk/run.OpenSecrets":                 {nil, "dir is a path and s a built sealer"},
-	"github.com/ghbmrk/agentos/broker/clerk/run.openSecrets":                 {nil, "dir is a path, s a built sealer and stop a test hook"},
-	"(github.com/ghbmrk/agentos/broker/clerk/run.SignInSock).Start":          {nil, "returns a worker holding the sign-in host; ctx, the guest, the plan's name and the receiver hold no sealing key"},
-	"github.com/ghbmrk/agentos/broker/cmd/agentos-camera.openSecrets":        {nil, "keyFile is the kernel's hand-off; the key read from it is wiped inside"},
-	"github.com/ghbmrk/agentos/broker/cmd/agentos-homekit.openSecrets":       {nil, "keyFile is the kernel's hand-off; the key read from it is wiped inside"},
-	"github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-model.openStore":     {nil, "dir and slot are names, s a built sealer, stop a test hook"},
-	"github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-model.openKeys":      {nil, "dir is a path, s a built sealer, stop a test hook"},
-	"github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-model.newLogin":      {nil, "the declaration and the sealed store hold no sealing key"},
+	"github.com/ghbmrk/agentos/broker/clerk.NewAPI":                          {nil, []string{"d", "roots", "secrets"}, "the declaration, the store of sealed secrets and the trust roots hold no sealing key"},
+	"github.com/ghbmrk/agentos/broker/clerk.NewExit":                         {nil, []string{"anchors", "d", "roots", "secrets"}, "the declaration, the anchors' public keys, the sealed store and the trust roots hold no sealing key"},
+	"github.com/ghbmrk/agentos/broker/clerk.NewSignIn":                       {nil, []string{"d", "roots", "secrets"}, "the declaration, the sealed store and the trust roots hold no sealing key"},
+	"github.com/ghbmrk/agentos/broker/clerk.NewSecrets":                      {nil, []string{"s", "write"}, "s is a built sealer and write takes sealed bytes; the key was wiped where s was made"},
+	"github.com/ghbmrk/agentos/broker/clerk/inbox.OpenGmail":                 {nil, []string{"base", "grant", "guard", "roots", "token"}, "base and token name the account, grant is sealed into the store it builds, and its sealing key is drawn and wiped inside"},
+	"github.com/ghbmrk/agentos/broker/clerk/inbox.NewGmail":                  {nil, []string{"api"}, "api is a built exit; no key"},
+	"(*github.com/ghbmrk/agentos/broker/clerk/inbox.Gmail).WithPoster":       {nil, []string{"g", "guard"}, "the mailbox and its network policy; no key"},
+	"github.com/ghbmrk/agentos/broker/clerk/line.New":                        {nil, []string{"cfg"}, "the config holds the account's addresses and paths, no sealing key"},
+	"(*github.com/ghbmrk/agentos/broker/clerk/line.Clerk).Account":           {nil, []string{"c"}, "returns the clerk's account; no key"},
+	"github.com/ghbmrk/agentos/broker/clerk/line.NewSigner":                  {nil, []string{"c"}, "c is a built clerk; no key"},
+	"github.com/ghbmrk/agentos/broker/clerk/model.NewAPIs":                   {nil, []string{"decls", "guard", "keys", "roots"}, "declarations, the sealed key store, the network policy and trust roots hold no sealing key"},
+	"github.com/ghbmrk/agentos/broker/clerk/model.NewKeys":                   {nil, []string{"s", "write"}, "s is a built sealer and write takes sealed bytes"},
+	"github.com/ghbmrk/agentos/broker/clerk/plan.New":                        {nil, []string{"d", "roots", "store"}, "the declaration, the sealed store and trust roots hold no sealing key"},
+	"github.com/ghbmrk/agentos/broker/clerk/plan.NewStore":                   {nil, []string{"s", "write"}, "s is a built sealer and write takes sealed bytes"},
+	"github.com/ghbmrk/agentos/broker/clerk/run.OpenExit":                    {nil, []string{"anchors", "d", "dir", "roots", "s"}, "dir is a path, s a built sealer, the rest declaration, public anchors and trust roots"},
+	"github.com/ghbmrk/agentos/broker/clerk/run.NewExitHost":                 {nil, []string{"anchors", "d", "x"}, "a built exit, its declaration and public anchors; no key"},
+	"(*github.com/ghbmrk/agentos/broker/clerk/run.MailHost).heldGmailSignIn": {nil, []string{"h", "hint", "slot"}, "slot and hint name the account; no key"},
+	"(*github.com/ghbmrk/agentos/broker/clerk/run.MailHost).newGmailSignIn":  {nil, []string{"h", "hint", "sec", "slot"}, "the sealed store and the account's slot and hint; no key"},
+	"(*github.com/ghbmrk/agentos/broker/clerk/run.MailHost).ownGmailSignIn":  {nil, []string{"h"}, "the host alone; its own sealing key is drawn and wiped inside"},
+	"github.com/ghbmrk/agentos/broker/clerk/run.gmailBox":                    {nil, []string{"c", "sec", "slot"}, "the sealed store, the account's slot and the mail config; no key"},
+	"github.com/ghbmrk/agentos/broker/clerk/run.NewMailHost":                 {nil, []string{"cfg", "ctx", "dir", "sec"}, "ctx, a path, the sealed store and the mail config; no key"},
+	"github.com/ghbmrk/agentos/broker/clerk/run.OpenSecrets":                 {nil, []string{"dir", "s"}, "dir is a path and s a built sealer"},
+	"github.com/ghbmrk/agentos/broker/clerk/run.openSecrets":                 {nil, []string{"dir", "s", "stop"}, "dir is a path, s a built sealer and stop a test hook"},
+	"(github.com/ghbmrk/agentos/broker/clerk/run.SignInSock).Start":          {nil, []string{"ctx", "guest", "planName", "s"}, "returns a worker holding the sign-in host; ctx, the guest, the plan's name and the receiver hold no sealing key"},
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-camera.openSecrets":        {nil, []string{"dir", "keyFile"}, "keyFile is the kernel's hand-off; the key read from it is wiped inside"},
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-homekit.openSecrets":       {nil, []string{"dir", "keyFile"}, "keyFile is the kernel's hand-off; the key read from it is wiped inside"},
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-model.openStore":     {nil, []string{"dir", "s", "slot", "stop"}, "dir and slot are names, s a built sealer, stop a test hook"},
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-model.openKeys":      {nil, []string{"dir", "s", "stop"}, "dir is a path, s a built sealer, stop a test hook"},
+	"github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-model.newLogin":      {nil, []string{"d", "store"}, "the declaration and the sealed store hold no sealing key"},
 }
 
 // keyExempt names, by types.Func.FullName, each function whose calls of a
@@ -491,14 +500,19 @@ func constructorProblems(fset *token.FileSet, f *ast.File, info *types.Info, sea
 			return
 		}
 		if !listed {
-			problems = append(problems, line(id)+": "+name+" makes a sealer from a possible key ("+strings.Join(held.names(), ", ")+"); list it in sealers with which of them are keys (each caller wipes them) and why")
+			problems = append(problems, line(id)+": "+name+" makes a sealer from a possible key ("+strings.Join(held.names(), ", ")+"); list it in sealers with each classified as a key (each caller wipes it) or not, and why")
+			return
+		}
+		// Every possible key is classified, keys and not alike, so a new
+		// parameter that can carry a key fails until a review lists it.
+		listedNames := entry.classified()
+		if have := held.names(); !slices.Equal(have, listedNames) {
+			problems = append(problems, line(id)+": "+name+"'s possible keys are ("+strings.Join(have, ", ")+") but its sealers entry classifies ("+strings.Join(listedNames, ", ")+"); list each in keys or not")
 			return
 		}
 		for _, k := range entry.keys {
-			fm, in := held[k]
+			fm := held[k]
 			switch {
-			case !in:
-				problems = append(problems, line(id)+": "+name+" lists key "+k+", which is no parameter of it that can hold key bytes")
 			case k == recvName(sig):
 				problems = append(problems, line(id)+": "+name+" takes its key "+k+" as the receiver, which no call site can wipe; take it as a parameter")
 			case fm == formString:
@@ -565,12 +579,15 @@ func constructorProblems(fset *token.FileSet, f *ast.File, info *types.Info, sea
 				return true
 			}
 			name := fn.Origin().FullName()
-			if _, listed := keys[name]; listed {
+			if entry, listed := keys[name]; listed {
 				seen[name] = true
+				if have, cl := possibleKeys(fn.Origin().Type().(*types.Signature)).names(), entry.classified(); !slices.Equal(have, cl) {
+					problems = append(problems, line(n)+": "+name+"'s possible keys are ("+strings.Join(have, ", ")+") but its sealers entry classifies ("+strings.Join(cl, ", ")+"); list each in keys or not")
+				}
 				return true
 			}
 			if sig := fn.Type().(*types.Signature); givesSealer(sig, sealer) && len(possibleKeys(sig)) > 0 {
-				problems = append(problems, line(n)+": "+name+", declared outside the tree the rule reads, makes a sealer from a possible key ("+strings.Join(possibleKeys(sig).names(), ", ")+"); list it in sealers with which of them are keys and why")
+				problems = append(problems, line(n)+": "+name+", declared outside the tree the rule reads, makes a sealer from a possible key ("+strings.Join(possibleKeys(sig).names(), ", ")+"); list it in sealers with each classified as a key or not, and why")
 			}
 		case *ast.FuncDecl:
 			owned[n.Type] = true
@@ -874,20 +891,21 @@ var pkgKey []byte
 
 `
 	listing := map[string]sealerKey{
-		sealerPkg + ".NewAESSealer":      {[]string{"key"}, "case"},
-		"example.test/p.newSealer":       {[]string{"a", "b"}, "case"},
-		"example.test/p.newArr":          {[]string{"k"}, "case"},
-		"example.test/p.newGen":          {[]string{"k"}, "case"},
-		"example.test/p.newNonce":        {nil, "case: n is a nonce"},
-		"example.test/p.newStr":          {[]string{"k"}, "case"},
-		"example.test/p.newGenStr":       {[]string{"k"}, "case"},
-		"example.test/p.newAny":          {[]string{"k"}, "case"},
-		"example.test/p.newPtr":          {[]string{"k"}, "case"},
-		"example.test/p.newMissing":      {[]string{"key"}, "case"},
-		"example.test/p.notSealer":       {[]string{"k"}, "case"},
-		"(example.test/p.rawKey).Sealer": {[]string{"r"}, "case"},
-		"example.test/q.NewQ":            {[]string{"k"}, "case"},
-		"example.test/p.newOwn6":         {[]string{"k"}, "case"},
+		sealerPkg + ".NewAESSealer":      {[]string{"key"}, nil, "case"},
+		"example.test/p.newSealer":       {[]string{"a", "b"}, []string{"label"}, "case"},
+		"example.test/p.newArr":          {[]string{"k"}, nil, "case"},
+		"example.test/p.newGen":          {[]string{"k"}, nil, "case"},
+		"example.test/p.newNonce":        {nil, []string{"n"}, "case: n is a nonce"},
+		"example.test/p.newStr":          {[]string{"k"}, nil, "case"},
+		"example.test/p.newGenStr":       {[]string{"k"}, nil, "case"},
+		"example.test/p.newAny":          {[]string{"k"}, nil, "case"},
+		"example.test/p.newPtr":          {[]string{"k"}, nil, "case"},
+		"example.test/p.newMissing":      {[]string{"key"}, nil, "case"},
+		"example.test/p.notSealer":       {[]string{"k"}, nil, "case"},
+		"(example.test/p.rawKey).Sealer": {[]string{"r"}, nil, "case"},
+		"example.test/q.NewQ":            {[]string{"k"}, nil, "case"},
+		"example.test/p.nl":              {nil, nil, "case: listed before k was added"},
+		"example.test/p.newOwn6":         {[]string{"k"}, nil, "case"},
 	}
 	cases := []struct {
 		name, body string
@@ -1089,6 +1107,7 @@ func newT[K any](k K) (clerk.Sealer, error) { return nil, nil }`, 2},
 
 func newC(c config) (clerk.Sealer, error) { return nil, nil }`, 1},
 		{"a listed key that is no parameter", `func newMissing(k []byte) (clerk.Sealer, error) { return nil, nil }`, 1},
+		{"a keyless listing that gains a key", `func nl(n int, k []byte) (clerk.Sealer, error) { return nil, nil }`, 1},
 		{"a listed function that makes no sealer", `func notSealer(k []byte) error { return nil }`, 1},
 		{"a key receiver, listed", `type rawKey []byte
 
@@ -1234,7 +1253,7 @@ var _ = clerk.NewAESSealer
 		want    int
 	}{
 		{map[string]sealerKey{}, 1},
-		{map[string]sealerKey{sealerPkg + ".NewAESSealer": {[]string{"key"}, "case"}}, 0},
+		{map[string]sealerKey{sealerPkg + ".NewAESSealer": {[]string{"key"}, nil, "case"}}, 0},
 	} {
 		seen := map[string]bool{}
 		got := constructorProblems(l.Fset, f, info, l.sealer, c.listing, "example.test/", seen)
