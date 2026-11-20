@@ -171,13 +171,20 @@ class BusMaskTest(unittest.TestCase):
     def test_early_is_read_from_the_unit(self):
         # #6037: any unit that drops the default dependencies may start before sockets.target, so it takes
         # the "-", whatever list it is on; told so, not told to drop it.
-        for word in ("no", "false", "0", "off"):
+        f = write(self.root, SYSTEM + "agentos-link.service.d/99-x.conf", "[Unit]\nDefaultDependencies=no\n")
+        got = self.v()
+        f.unlink()
+        self.assertEqual(got, [self.early_msg("agentos-link.service")])
+        # #6158: any other form is refused, naming its line, as config_parse_bool may keep the value before it.
+        for word in ("false", "0", "off", "No", ""):
             with self.subTest(word):
                 f = write(self.root, SYSTEM + "agentos-link.service.d/99-x.conf", "[Unit]\nDefaultDependencies=%s\n"
                           % word)
                 got = self.v()
                 f.unlink()
-                self.assertEqual(got, [self.early_msg("agentos-link.service")])
+                self.assertEqual(got, ["agentos-link.service: DefaultDependencies=%s in %sagentos-link.service.d/99-x.conf"
+                                       " is a form the tree check does not read (use yes or no); the tree check never "
+                                       "passes what it cannot read (STO-2c)" % (word, SYSTEM)])
         # Control: the same unit with the "-" passes; and back to default dependencies, an early unit's "-"
         # is refused.
         write(self.root, SYSTEM + "agentos-link.service.d/99-x.conf", "[Unit]\nDefaultDependencies=no\n"

@@ -813,15 +813,49 @@ func hasFlag(flags []string, f string) bool {
 	return false
 }
 
-// messageID is the message's Message-ID header value, trimmed, or "".
+// messageID is the message's Message-ID header value, unfolded and without
+// the comments and white space around the id (RFC 5322 3.2.2), or "". A
+// comment left open makes it "": the id is then unknown, never guessed.
 func messageID(raw []byte) string {
 	hs, _ := splitMessage(raw)
 	for _, h := range hs {
 		if h.key() == "message-id" {
-			return strings.TrimSpace(string(h.value))
+			return stripCFWS(strings.NewReplacer("\r", "", "\n", "").Replace(string(h.value)))
 		}
 	}
 	return ""
+}
+
+// stripCFWS drops the comments outside "<...>" of an unfolded value, nested
+// and with quoted pairs, and trims the white space left at its ends.
+func stripCFWS(v string) string {
+	var b strings.Builder
+	depth, angle := 0, false
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		switch {
+		case depth > 0 && c == '\\':
+			i++ // a quoted pair inside a comment
+		case depth > 0 && c == '(':
+			depth++
+		case depth > 0 && c == ')':
+			depth--
+		case depth > 0:
+		case !angle && c == '(':
+			depth = 1
+		default:
+			if c == '<' {
+				angle = true
+			} else if c == '>' {
+				angle = false
+			}
+			b.WriteByte(c)
+		}
+	}
+	if depth > 0 {
+		return ""
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // The senders read (MAIL-world-b2): who has delivered mail to the owner and

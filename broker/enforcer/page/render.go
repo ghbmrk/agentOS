@@ -71,6 +71,7 @@ func Describe(old, next policy.Document, zone *time.Location) []string {
 			add("Label %s %s.", d.ID, labelWords(d.Label))
 			describePorts(policy.Device{ID: d.ID}, d, add)
 			describeMDNS(policy.Device{ID: d.ID}, d, add)
+			describeTiming(policy.Device{ID: d.ID}, d, add)
 			continue
 		}
 		describeDevice(*o, d, add)
@@ -319,7 +320,49 @@ func describeDevice(o, d policy.Device, add func(string, ...any)) {
 	}
 	describePorts(o, d, add)
 	describeMDNS(o, d, add)
+	describeTiming(o, d, add)
 }
+
+// describeTiming is a change to d's relock interval or usual hours (NET-6,
+// briefs/ENF-q-owner.md), each naming the new and the old value as they
+// take effect, defaults included. A field set to its default's value still
+// changes the signed bytes, so it is shown too, though the values read
+// alike.
+func describeTiming(o, d policy.Device, add func(string, ...any)) {
+	if o.RelockSeconds != d.RelockSeconds {
+		add("Relock %s %s after any unlock, not %s.", d.ID, spanWords(d.Relock()), spanWords(o.Relock()))
+	}
+	if (o.UsualHours == nil) != (d.UsualHours == nil) || o.Hours() != d.Hours() {
+		add("Make %s's usual hours %s, not %s: an unlock or disarm outside them needs a second passkey tap and texts you.", d.ID, hoursWords(d.Hours()), hoursWords(o.Hours()))
+	}
+}
+
+// spanWords is a whole number of seconds as hours, minutes and seconds,
+// such as "1 minute 30 seconds".
+func spanWords(t time.Duration) string {
+	var parts []string
+	n := int(t / time.Second)
+	for _, u := range []struct {
+		s    int
+		name string
+	}{{3600, "hour"}, {60, "minute"}, {1, "second"}} {
+		if k := n / u.s; k > 0 {
+			n -= k * u.s
+			w := u.name
+			if k != 1 {
+				w += "s"
+			}
+			parts = append(parts, strconv.Itoa(k)+" "+w)
+		}
+	}
+	if len(parts) == 0 {
+		return "0 seconds"
+	}
+	return strings.Join(parts, " ")
+}
+
+// hoursWords is h as a clock range, such as "22:00 to 06:00".
+func hoursWords(h policy.Hours) string { return fmt.Sprintf("%02d:00 to %02d:00", h.From, h.To) }
 
 // unpinned: pair p has a path in d (both ends Linked, as nft opens it)
 // and its end id is a Devices-network device that pins no mDNS name, so
