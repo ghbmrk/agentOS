@@ -1260,7 +1260,9 @@ sys.exit(status[n] if n < len(status) else 0)
         self.assertEqual(stage.count('image/build.sh "$RUNNER_TEMP/out"'), 1)
         build = wf[wf.index("\n  build:\n"):wf.index("\n  reproduce:\n")]
         self.assertIn("    needs: [security-snapshot, stage]\n", build)
-        self.assertNotIn("outputs.snapshots", build)  # the stage picked; its agentos.sources is the record (#6198)
+        # The stage picked one of the run's dates (#6198); the build job holds its pick to them (#6148 Security).
+        self.assertIn("SNAPSHOTS: ${{ needs.security-snapshot.outputs.snapshots }}", build)
+        self.assertIn('case " $SNAPSHOTS " in\n            *" $AGENTOS_SECURITY_SNAPSHOT "*) [ -n "$AGENTOS_SECURITY_SNAPSHOT" ] ;;', build)
         self.assertIn("AGENTOS_SECURITY_SNAPSHOT=$(sed -n 's|^URIs: https://snapshot\\.debian\\.org/archive/debian-security/", build)
         self.assertIn('sh image/security-snapshot.sh sources "$AGENTOS_SECURITY_SNAPSHOT" > "$RUNNER_TEMP/mkosi.sources"', build)
         self.assertIn('"$RUNNER_TEMP"/out/agentos.sources', build[build.index("- name: Release record"):])

@@ -8110,6 +8110,37 @@ class MkosiRunBoundTest(unittest.TestCase):
         r = subprocess.run(["bash", "-e", "-c", script], cwd=d, env=env, capture_output=True, text=True)
         return r.returncode, r.stdout + r.stderr, d / "out"
 
+    def bind_snapshot(self, staged, snapshots):
+        """Run image.yml's "Build image" step up to its package manager tree, on a stage whose
+        agentos.sources names debian-security snapshot STAGED, with the security-snapshot job's output
+        SNAPSHOTS; returns (exit status, output)."""
+        build = workflow_job("build")
+        step = build[build.index("      - name: Build image\n"):]
+        script = textwrap.dedent(step[step.index("run: |\n") + len("run: |\n"):step.index('          sudo rm -rf "$OUT/pkgmngr"')])
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        (d / "out").mkdir()
+        src = subprocess.run(["sh", str(ROOT / "image/security-snapshot.sh"), "sources", staged], capture_output=True, check=True)
+        (d / "out/agentos.sources").write_bytes(src.stdout)
+        env = dict(os.environ, RUNNER_TEMP=str(d), OUT=str(d / "out"), SNAPSHOTS=snapshots)
+        r = subprocess.run(["bash", "-e", "-c", script], cwd=ROOT, env=env, capture_output=True, text=True)
+        return r.returncode, r.stdout + r.stderr
+
+    def test_the_build_job_holds_the_stage_to_the_runs_snapshots(self):
+        # #6148 Security: the stage job runs the PR's build.sh as root and writes agentos.sources, so the
+        # build job takes its debian-security date only if the security-snapshot job resolved it.
+        run, fallback = "20261118T120000Z", "20261117T060000Z"
+        for staged in (run, fallback):
+            with self.subTest(staged=staged):
+                rc, out = self.bind_snapshot(staged, "%s %s" % (run, fallback))
+                self.assertEqual(rc, 0, out)
+        for staged, snapshots in (("20250815T000000Z", "%s %s" % (run, fallback)), (run, ""), (run, fallback),
+                                  (run, "%s0 %s" % (run, fallback))):
+            with self.subTest(staged=staged, snapshots=snapshots):
+                rc, out = self.bind_snapshot(staged, snapshots)
+                self.assertNotEqual(rc, 0, out)
+                self.assertIn("::error::the stage's debian-security snapshot '%s' is not one of this run's" % staged, out)
+
     GOOD_STAGE = {"stage/usr/lib/agentos/x": b"x", "agentos.sources": b"Types: deb\n", "guest/agentos-guest.manifest": b"",
                   "linked/agentos.dpkg-status": b""}
 

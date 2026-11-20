@@ -306,10 +306,16 @@ jobs:
       - name: Build image
         shell: bash  # with pipefail, so tee keeps the build's exit status
         env:
+          SNAPSHOTS: ${{ needs.security-snapshot.outputs.snapshots }}  # the run's snapshot, then its fallback (#6198)
           OUT: ${{ runner.temp }}/out
         run: |
-          # The stage picked the run's snapshot or its fallback (#6198); its agentos.sources is the record.
+          # The stage picked the run's snapshot or its fallback (#6198) and recorded it in agentos.sources. The
+          # stage ran build.sh as root, so its pick counts only if it is one of this job's resolved dates.
           AGENTOS_SECURITY_SNAPSHOT=$(sed -n 's|^URIs: https://snapshot\.debian\.org/archive/debian-security/\([0-9]\{8\}T[0-9]\{6\}Z\)/$|\1|p' "$OUT/agentos.sources")
+          case " $SNAPSHOTS " in
+            *" $AGENTOS_SECURITY_SNAPSHOT "*) [ -n "$AGENTOS_SECURITY_SNAPSHOT" ] ;;
+            *) echo "::error::the stage's debian-security snapshot '$AGENTOS_SECURITY_SNAPSHOT' is not one of this run's ($SNAPSHOTS)"; exit 1 ;;
+          esac
           sh image/security-snapshot.sh sources "$AGENTOS_SECURITY_SNAPSHOT" > "$RUNNER_TEMP/mkosi.sources"  # refuses an empty or multi-line value
           cmp "$RUNNER_TEMP/mkosi.sources" "$OUT/agentos.sources"
           sudo rm -rf "$OUT/pkgmngr"
