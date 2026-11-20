@@ -205,6 +205,41 @@ func TestWorldFollowsTheAccount(t *testing.T) {
 	}
 }
 
+// The worker reads the alert senders again every sendersEvery, with no
+// kick: each tick forces a fresh read past the one the world holds.
+func TestTheSendersReadRunsAgainEachTick(t *testing.T) {
+	dir := shortDir(t)
+	sec, err := OpenSecrets(dir, testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := ownConfig(mailConfig())
+	c.plain = false // these servers are not the loopback's
+	c.every = 20 * time.Millisecond
+	var reads atomic.Int64
+	c.senders = func(context.Context, func(context.Context) ([]string, error)) ([]string, error) {
+		reads.Add(1)
+		return []string{"tick.test"}, nil
+	}
+	h := NewMailHost(t.Context(), dir, sec, c)
+	owner := MailOwner{serveMail(t, h, MailOwnerSide)}
+	if err := owner.SetMail(MailSettings{Address: "owner@mailhub.test", IMAP: "imap.mailhub.test:993", SMTP: "smtp.mailhub.test:465"}, imaptest.Password); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "a senders read on a tick, after the one at setup", func() bool { return reads.Load() >= 3 })
+}
+
+// With no test interval the worker reads the senders again once a day; a
+// test's MailConfig.every replaces it.
+func TestTheSendersReadRunsDailyByDefault(t *testing.T) {
+	if got := (MailConfig{}).sendersEvery(); got != 24*time.Hour {
+		t.Fatalf("default senders interval %v, want 24h", got)
+	}
+	if got := (MailConfig{every: time.Second}).sendersEvery(); got != time.Second {
+		t.Fatalf("test senders interval %v, want 1s", got)
+	}
+}
+
 // guardRig is a host over a loopback account whose reader calls every mail
 // spam, served to a kernel that may trash.
 type guardRig struct {

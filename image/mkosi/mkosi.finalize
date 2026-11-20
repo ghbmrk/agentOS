@@ -28,6 +28,7 @@ DRIVER_TEMPLATE for its name, and nothing else names its user or the drivers' so
 Run by mkosi, it also refuses a run whose scripts had the network (#4647), so neither mkosi.postinst nor
 this script can fetch a package outside mkosi's checked apt run, and a tree with an installed package
 that no pinned, signature-checked Packages index lists at that version (#4690); any tree with a .deb.
+mkosi runs it on the default initrd too, for those two alone (INITRD_IMAGE, #6149).
 Usage outside mkosi: mkosi.finalize ROOT; mkosi.finalize --tmpfiles-allowlist ROOT and
 mkosi.finalize --exec-allowlist ROOT print those allowlists for a tree."""
 import bz2
@@ -534,8 +535,6 @@ def _violations(root):
             out.append("%s: %s" % (rel, E2E_WHY))
         if stat.S_ISSOCK(st.st_mode):
             out.append("%s: socket file (V15)" % rel)
-        elif stat.S_ISREG(st.st_mode) and rel.endswith(PACKAGE_FILES):
-            out.append("%s: %s" % (rel, PACKAGE_FILE_WHY))
         elif (stat.S_ISREG(st.st_mode) and st.st_size <= SCAN_MAX
               and rel.split("/", 1)[0] in SCAN and has_key(root, rel)):
             out.append("%s: private key material" % rel)
@@ -560,7 +559,7 @@ def _violations(root):
             + noexec_violations(root)
             + keeper_violations(root) + isolate_violations(root) + ram_kept_violations(root)
             + kexec_loader_violations(root) + clerk_key_violations(root)
-            + assembly_violations(root) + driver_violations(root) + e2e_violations(root))
+            + assembly_violations(root) + driver_violations(root) + e2e_violations(root) + package_file_violations(root))
 
 
 # #1715 (G1-e2e ASSUMPTIONS E1): the in-image end-to-end run is CI-only. Its root-run driver
@@ -5164,18 +5163,27 @@ def pinned_index(mirror, security):
                       % (re.escape(mirror), re.escape(security)))
 
 
-def run_snapshots():
-    """(mirror timestamp, security timestamp, refusals) of this mkosi run: Mirror= from mkosi's config JSON
-    ($MKOSI_CONFIG), the security one from $AGENTOS_SECURITY_SNAPSHOT."""
-    out, mirror = [], None
+def run_config():
+    """(mkosi's config JSON for this run, $MKOSI_CONFIG, as a dict; refusals)."""
     try:
         with open(os.environ.get("MKOSI_CONFIG", "/work/config.json")) as f:
-            m = MIRROR_URL.fullmatch(str(json.load(f).get("Mirror")))
-        mirror = m.group(1) if m else None
-        if not mirror:
-            out.append("mkosi's Mirror= is not a snapshot.debian.org debian snapshot; %s" % PACKAGE_WHY)
-    except (OSError, ValueError, AttributeError) as e:
-        out.append("mkosi's config JSON: unreadable (%s); %s" % (e, PACKAGE_WHY))
+            conf = json.load(f)
+        if isinstance(conf, dict):
+            return conf, []
+        why = "not a JSON object"
+    except (OSError, ValueError) as e:
+        why = e
+    return {}, ["mkosi's config JSON: unreadable (%s); %s" % (why, PACKAGE_WHY)]
+
+
+def run_snapshots(conf):
+    """(mirror timestamp, security timestamp, refusals) of this mkosi run: Mirror= from CONF, mkosi's config
+    JSON (run_config), the security one from $AGENTOS_SECURITY_SNAPSHOT."""
+    out = []
+    m = MIRROR_URL.fullmatch(str(conf.get("Mirror")))
+    mirror = m.group(1) if m else None
+    if not mirror:
+        out.append("mkosi's Mirror= is not a snapshot.debian.org debian snapshot; %s" % PACKAGE_WHY)
     security = os.environ.get("AGENTOS_SECURITY_SNAPSHOT", "")
     if not SNAPSHOT_TS.fullmatch(security):
         out.append("AGENTOS_SECURITY_SNAPSHOT is %r, not one debian-security snapshot timestamp (image.yml's mkosi "
@@ -5241,10 +5249,10 @@ def pinned_packages(lists, index):
     return got, read, other, out
 
 
-def package_source_violations(status, lists, mirror, security):
-    """Every package dpkg's STATUS (bytes, the tree's var/lib/dpkg/status) has unpacked whose name, version
-    and architecture no Packages index in directory LISTS from snapshots MIRROR and SECURITY lists, one
-    line each."""
+def package_source_violations(status, lists, mirror, security, name=DPKG_STATUS):
+    """Every package dpkg's STATUS (bytes, the tree's file NAME, default DPKG_STATUS) has unpacked whose name,
+    version and architecture no Packages index in directory LISTS from snapshots MIRROR and SECURITY lists,
+    one line each."""
     got, read, other, out = pinned_packages(lists, pinned_index(mirror, security))
     if not read:
         return out + ["%s holds no Packages index from the pinned snapshot sources (other indexes: %s); %s"
@@ -5258,22 +5266,38 @@ def package_source_violations(status, lists, mirror, security):
         key = (p.get(b"Package"), p.get(b"Version"), p.get(b"Architecture"))
         if key not in got:
             out.append("%s: %s %s (%s) is installed, but no pinned Packages index lists that version; %s"
-                       % (DPKG_STATUS, *(v.decode("utf-8", "replace") if v is not None else "(none)" for v in key),
+                       % (name, *(v.decode("utf-8", "replace") if v is not None else "(none)" for v in key),
                           PACKAGE_WHY))
     if not n:
-        out.append("%s: lists no installed package; %s" % (DPKG_STATUS, PACKAGE_WHY))
+        out.append("%s: lists no installed package; %s" % (name, PACKAGE_WHY))
     return out
 
 
-def tree_package_violations(root, mirror, security, lists=None):
-    """package_source_violations for the tree at ROOT, its dpkg status read inside the tree (Conf's rules),
-    against LISTS (default APT_LISTS, read at the call)."""
+def tree_package_violations(root, mirror, security, lists=None, status=DPKG_STATUS):
+    """package_source_violations for the tree at ROOT, its dpkg status file STATUS read inside the tree
+    (Conf's rules), against LISTS (default APT_LISTS, read at the call)."""
     lists = APT_LISTS if lists is None else lists
     try:
-        status = Conf(root, DPKG_STATUS).content()
+        data = Conf(root, status).content()
     except OSError as e:
-        return ["%s: unreadable (%s); %s" % (DPKG_STATUS, e.strerror, PACKAGE_WHY)]
-    return package_source_violations(status, lists, mirror, security)
+        return ["%s: unreadable (%s); %s" % (status, e.strerror, PACKAGE_WHY)]
+    return package_source_violations(data, lists, mirror, security, status)
+
+
+def package_file_violations(root):
+    """Every Debian package file (PACKAGE_FILES) in the tree at ROOT, one line each."""
+    return ["%s: %s" % (rel, PACKAGE_FILE_WHY) for rel, st in tree_walk(root)
+            if stat.S_ISREG(st.st_mode) and rel.endswith(PACKAGE_FILES)]
+
+
+# The default initrd (#6149): mkosi v24.3 builds it in a sub-run of its own (build_default_initrd), whose config
+# JSON names it Image "default-initrd", with this run's Mirror=, --environment and apt lists. initrd/mkosi.conf
+# adds this script to that run's finalize scripts, after initrd/mkosi.finalize. mkosi-initrd sets
+# CleanPackageMetadata=yes, so var/lib/dpkg is gone by then: the initrd's mkosi.postinst (drop.py) copies dpkg's
+# status, after its purges, to INITRD_STATUS, and the package check reads that copy. The image's other checks
+# are this tree's, not the initrd's; initrd/mkosi.finalize holds the initrd's own.
+INITRD_IMAGE = "default-initrd"
+INITRD_STATUS = "usr/share/agentos/initrd.dpkg-status"
 
 
 def main():
@@ -5289,18 +5313,30 @@ def main():
     root = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("BUILDROOT")
     if not root:
         sys.exit("usage: mkosi.finalize ROOT (or BUILDROOT=...)")
-    v = violations(root)
-    if len(sys.argv) == 1:  # run by mkosi, in its script sandbox
-        v += script_network_violations(os.environ.get("WITH_NETWORK"), script_net_dev())
-        mirror, security, bad = run_snapshots()
-        v += bad or tree_package_violations(root, mirror, security)
+    if len(sys.argv) > 1:
+        return report(violations(root))
+    # Run by mkosi, in its script sandbox: the image's run, or the default initrd's.
+    conf, bad = run_config()
+    initrd = conf.get("Image") == INITRD_IMAGE
+    v = package_file_violations(root) if initrd else violations(root)
+    v += script_network_violations(os.environ.get("WITH_NETWORK"), script_net_dev())
+    if not bad:
+        mirror, security, bad = run_snapshots(conf)
+    v += bad or tree_package_violations(root, mirror, security, status=INITRD_STATUS if initrd else DPKG_STATUS)
+    report(v, initrd)
+
+
+def report(v, initrd=False):
+    """Print each line of V; exit non-zero if there is any. INITRD: V is the default initrd's."""
+    label = "image check: initrd" if initrd else "image check"
     for line in v:
-        print("image check: " + line)
+        print("%s: %s" % (label, line))
+    if v and initrd:
+        sys.exit("%s: %d problem(s) in the default initrd's tree, each named above" % (label, len(v)))
     if v:
-        sys.exit("image check: %d problem(s) in the image tree, each named above; a tmpfiles.d line missing from %s "
-                 "that the guarded-path check passes ends in the entry to review and add there"
-                 % (len(v), TMPFILES_ALLOW_REPO))
-    print("image check: clean")
+        sys.exit("%s: %d problem(s) in the image tree, each named above; a tmpfiles.d line missing from %s that the "
+                 "guarded-path check passes ends in the entry to review and add there" % (label, len(v), TMPFILES_ALLOW_REPO))
+    print("%s: clean" % label)
 
 
 if __name__ == "__main__":
