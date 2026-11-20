@@ -159,34 +159,36 @@ func TestCodeNamesAreUnique(t *testing.T) {
 			t.Fatal(err)
 		}
 		ast.Inspect(af, func(n ast.Node) bool {
-			cl, ok := n.(*ast.CompositeLit)
+			if cl, ok := n.(*ast.CompositeLit); ok {
+				if id, ok := cl.Type.(*ast.Ident); ok && id.Name == "Code" && len(cl.Elts) > 0 {
+					// Only code itself fills a Code: Code{n}.
+					if el, ok := cl.Elts[0].(*ast.Ident); f != codesFile || len(cl.Elts) != 1 || !ok || el.Name != "n" {
+						t.Errorf("%s: a Code is made outside code()", fset.Position(cl.Pos()))
+					}
+				}
+				return true
+			}
+			call, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
 			}
-			if id, ok := cl.Type.(*ast.Ident); !ok || id.Name != "Code" {
+			if id, ok := call.Fun.(*ast.Ident); !ok || id.Name != "code" || len(call.Args) != 1 {
 				return true
-			}
-			if len(cl.Elts) == 0 {
-				return true // the zero Code, which names no code
 			}
 			if f != codesFile {
-				t.Errorf("%s: a Code is made outside %s", fset.Position(cl.Pos()), codesFile)
+				t.Errorf("%s: a code is declared outside %s", fset.Position(call.Pos()), codesFile)
 				return true
 			}
-			if len(cl.Elts) != 1 {
-				t.Errorf("%s: a Code literal with %d elements", fset.Position(cl.Pos()), len(cl.Elts))
-				return true
-			}
-			lit, ok := cl.Elts[0].(*ast.BasicLit)
+			lit, ok := call.Args[0].(*ast.BasicLit)
 			if !ok || lit.Kind != token.STRING {
-				t.Errorf("%s: a Code's name is not a string literal", fset.Position(cl.Pos()))
+				t.Errorf("%s: a code's name is not a string literal", fset.Position(call.Pos()))
 				return true
 			}
 			name, _ := strconv.Unquote(lit.Value)
 			if prev, dup := names[name]; dup {
-				t.Errorf("%s: code %q is declared again (first at %s)", fset.Position(cl.Pos()), name, prev)
+				t.Errorf("%s: code %q is declared again (first at %s)", fset.Position(call.Pos()), name, prev)
 			}
-			names[name] = fset.Position(cl.Pos()).String()
+			names[name] = fset.Position(call.Pos()).String()
 			return true
 		})
 	}
