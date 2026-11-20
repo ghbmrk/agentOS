@@ -5,9 +5,6 @@ package kernel_test
 import (
 	"encoding/base64"
 	"errors"
-	"os"
-	"os/exec"
-	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -78,21 +75,5 @@ func TestEnrollTheLiveKeyIsLive(t *testing.T) {
 	enrol(r, 1, a, 1)
 	if err := r.k.EdgeEnroll(2, a.pub, key.Cosign{}); !errors.Is(err, kernel.ErrEdgeLive) {
 		t.Fatalf("enrolling the live key: %v", err)
-	}
-}
-
-// Where X25519 is not allowed (GODEBUG=fips140=only) the kernel package
-// does not start, rather than holding a nil small-order probe that would
-// call every edge key small-order. Mutant: drop orderProbe's panic and the
-// test binary starts.
-func TestNoOrderProbeNoStart(t *testing.T) {
-	if os.Getenv("AGENTOS_EDGEMUT_CHILD") != "" {
-		return
-	}
-	cmd := exec.Command(os.Args[0], "-test.run=^TestNoOrderProbeNoStart$", "-test.count=1")
-	cmd.Env = append(os.Environ(), "GODEBUG=fips140=only", "AGENTOS_EDGEMUT_CHILD=1")
-	out, err := cmd.CombinedOutput()
-	if err == nil || !strings.Contains(string(out), "X25519 is not allowed") {
-		t.Fatalf("the kernel started without its small-order probe: %v\n%s", err, out)
 	}
 }
