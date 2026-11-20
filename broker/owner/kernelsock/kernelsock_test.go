@@ -371,29 +371,8 @@ func capturingKernel(t *testing.T) (string, <-chan string) {
 	return path, lines
 }
 
-// RETRY sends the bytes kernel/proc's own framing sends for the args its
-// retry call decodes, so the kernel reads the plan and step the owner
-// approved, not another (#2783 b).
-func TestRetrySendsTheKernelsOwnCall(t *testing.T) {
-	needRoot(t)
-	path, lines := capturingKernel(t)
-	// kernel/proc's retryArgs, field for field.
-	args := struct {
-		Plan    string `json:"plan"`
-		Index   int    `json:"index"`
-		Attempt int    `json:"attempt"`
-	}{"plan:7", 2, 3}
-	if err := (proc.Conn{Socket: path, UID: os.Getuid(), Timeout: 5 * time.Second}).Call("retry", args, nil); err != nil {
-		t.Fatal(err)
-	}
-	want := <-lines
-	if err := (Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}).Retry(context.Background(), "plan:7", 2, 3); err != nil {
-		t.Fatal(err)
-	}
-	if got := <-lines; got != want {
-		t.Fatalf("RETRY sends %q; kernel/proc sends %q", got, want)
-	}
-}
+// RETRY's wire is checked against the kernel's own retryArgs in kernel/proc
+// (TestRetrySendsTheKernelsOwnCall), where that type lives.
 
 // Status reads every field it names from the kernel's own frame
 // (kernel.Unsettled as the status read encodes it).
