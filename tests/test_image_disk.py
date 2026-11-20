@@ -352,7 +352,11 @@ class DiskBudgetTest(unittest.TestCase):
         job, steps = build_steps()
         names = [n for n, _ in steps]
         self.assertLess(names.index("Free runner disk"), names.index("Install build and boot tools"))
-        self.assertEqual(names[names.index("Disk budget") + 1], "Build image")
+        # The stage's download and unpack (#4690, D-276) write to RUNNER_TEMP after the guard, as the build does.
+        i = names.index("Disk budget")
+        self.assertEqual(names[i + 1:i + 4], ["actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0",
+                                              "Unpack the stage", "Build image"])
+        self.assertIn('"$RUNNER_TEMP/out"', step("Unpack the stage"))
         self.assertEqual(names[-1], "Disk budget held")
         self.assertIn("        if: always()\n", step("Disk budget held"))
         need = re.search(r'^      DISK_NEED_GB: "(\d+)"', job, re.M)
@@ -364,7 +368,7 @@ class DiskBudgetTest(unittest.TestCase):
         self.assertIn("; sleep 1; done", run_script("Disk budget"))
         # The build writes where the guard looks: its output in RUNNER_TEMP, HOME and GOCACHE.
         build = step("Build image")
-        for p in ("HOME=/root", "GOCACHE=/tmp/", '"$RUNNER_TEMP/out"'):
+        for p in ("HOME=/root", "OUT: ${{ runner.temp }}/out", '--output-dir "$OUT"'):
             self.assertIn(p, build)
 
     def test_guard_reads_each_file_system_the_build_writes_to(self):

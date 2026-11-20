@@ -10,6 +10,7 @@
 import argparse
 import hashlib
 import http.server
+import io
 import json
 import os
 import pathlib
@@ -47,6 +48,7 @@ def snap(**over):
         "tpm-nv": {"0x1500020": {"name": "n1", "attributes": 0x20060006, "size": 8, "data": "d1"}},
         "tpm-persistent": {},
         "tpm-setting": {"lockoutAuthSet": 0, "TPM2_PT_MAX_AUTH_FAIL": 3},
+        "uefi-source": "varstore",
     }
     for k, v in over.items():
         s[k.replace("_", "-")] = v
@@ -613,7 +615,7 @@ class AllowListTest(unittest.TestCase):
         keyed = [r for r in allow if "key" in r]
         self.assertEqual({r["change"] for r in keyed}, set(self.EXAMPLES))
         self.assertTrue(all("range" in r for r in allow if "key" not in r))
-        empty = {k: {} for k in hostcheck.KINDS}
+        empty = dict({k: {} for k in hostcheck.KINDS}, **{"uefi-source": "varstore"})
         for rule in keyed:
             self.assertTrue(rule["key"].startswith("^") and rule["key"].endswith("$"), rule["key"])
             for key in self.EXAMPLES[rule["change"]]:
@@ -658,6 +660,22 @@ class RtcOffsetTest(unittest.TestCase):
             with self.assertRaisesRegex(hostcheck.HostcheckError, "tolerance"):
                 self.check(snap(rtc=rtc(600.0)), snap(rtc=rtc(0.0)), rtc_tolerance=bad)
 
+    def test_a_tolerance_at_the_baseline_floor_is_refused(self):
+        # A write to true time moves the offset by at least RTC_BASELINE_FLOOR, so a tolerance
+        # that large would pass it: baseline 3600, after 0 and tolerance 4000 must not pass.
+        floor = hostcheck.RTC_BASELINE_FLOOR
+        for bad in (floor, 4000.0):
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "tolerance"):
+                self.check(snap(rtc=rtc(3600.0)), snap(rtc=rtc(0.0)), rtc_tolerance=bad)
+        r = self.check(snap(rtc=rtc(floor)), snap(rtc=rtc(0.0)), rtc_tolerance=floor - 0.5)
+        self.assertEqual(flagged(r), {("rtc", "offset", "changed")})
+        with tempfile.TemporaryDirectory() as d:
+            b, a = pathlib.Path(d, "b.json"), pathlib.Path(d, "a.json")
+            b.write_text(json.dumps(snap(rtc=rtc(3600.0))))
+            a.write_text(json.dumps(snap(rtc=rtc(0.0))))
+            with unittest.mock.patch("sys.stderr"):
+                self.assertEqual(hostcheck.main(["diff", str(b), str(a), "--rtc-tolerance", "4000"]), 2)
+
     def test_a_baseline_near_true_time_is_flagged(self):
         # An image whose kernel writes true time into an RTC that was already near true time
         # leaves the offset where it was, so the baseline must start well away from it.
@@ -665,16 +683,49 @@ class RtcOffsetTest(unittest.TestCase):
         self.assertFalse(r["pass"])
         self.assertEqual(flagged(r), {("rtc", "offset", "baseline-near-true-time")})
         self.assertIn("firmware setup", r["flagged"][0]["fix"])
+        self.assertIn("rerun the session", r["flagged"][0]["fix"])
         floor = hostcheck.RTC_BASELINE_FLOOR
         self.assertTrue(self.check(snap(rtc=rtc(-floor)), snap(rtc=rtc(-floor)))["pass"])
         self.assertFalse(self.check(snap(rtc=rtc(floor - 1)), snap(rtc=rtc(floor - 1)))["pass"])
-        self.assertFalse(self.check(snap(rtc=rtc(float("nan"))), snap(rtc=rtc(float("nan"))))["pass"])
+        nan = self.check(snap(rtc=rtc(float("nan"))), snap(rtc=rtc(float("nan"))))
+        self.assertEqual(flagged(nan), {("rtc", "offset", "baseline-near-true-time"), ("rtc", "offset", "changed")})
+
+    def test_snapshot_warns_on_a_baseline_near_true_time(self):
+        # The operator learns at the snapshot, not at the diff after a whole session.
+        for offset, warned in ((5.0, True), (-hostcheck.RTC_BASELINE_FLOOR, False)):
+            with tempfile.TemporaryDirectory() as d, \
+                    unittest.mock.patch.object(hostcheck, "snapshot", return_value=snap(rtc=rtc(offset))), \
+                    unittest.mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                self.assertEqual(hostcheck.main(["snapshot", "--efivarfs", d, "--tcti", "device:/dev/null",
+                                                 "--rtc-reference", "ntp.test", "-o", f"{d}/s.json"]), 0)
+            self.assertEqual("firmware setup" in err.getvalue(), warned, err.getvalue())
 
     def test_offset_in_one_snapshot_only_is_flagged(self):
         # A run that forgot the RTC in one snapshot cannot pass as clean.
         for before, after in ((snap(rtc=rtc(1)), snap()), (snap(), snap(rtc=rtc(1)))):
-            self.assertEqual(flagged(self.check(before, after)), {("rtc", "offset", "missing")})
+            r = self.check(before, after)
+            self.assertEqual(flagged(r), {("rtc", "offset", "missing")})
+            self.assertIn("--rtc-reference", r["flagged"][0]["fix"])
         self.assertTrue(self.check(snap(), snap())["pass"])  # the QEMU run records no offset
+
+    def test_a_pc_snapshot_without_an_offset_is_flagged(self):
+        # Two PC snapshots taken without --rtc-reference (old or hand-made) would leave the RTC unchecked.
+        pc = snap(uefi_source="efivarfs")
+        for before, after in ((pc, pc), (snap(), pc), (pc, snap())):
+            r = self.check(before, after)
+            self.assertEqual(flagged(r), {("rtc", "offset", "missing")})
+            self.assertIn("--rtc-reference", r["flagged"][0]["fix"])
+        unknown = snap()
+        del unknown["uefi-source"]
+        self.assertEqual(flagged(self.check(unknown, unknown)), {("rtc", "offset", "missing")})
+        self.assertTrue(self.check(snap(uefi_source="efivarfs", rtc=rtc(600)),
+                                   snap(uefi_source="efivarfs", rtc=rtc(600)))["pass"])
+        # The snapshot records where its UEFI variables came from.
+        with unittest.mock.patch.object(hostcheck, "uefi_from_varstore", return_value={}), \
+                unittest.mock.patch.object(hostcheck, "uefi_from_efivarfs", return_value={}), \
+                unittest.mock.patch.object(hostcheck, "rtc_snapshot", return_value=rtc(600)):
+            self.assertEqual(hostcheck.snapshot({}, varstore="v")["uefi-source"], "varstore")
+            self.assertEqual(hostcheck.snapshot({}, efivarfs="e", rtc_reference="ntp.test")["uefi-source"], "efivarfs")
 
     def test_rtc_is_read_at_its_second_edge(self):
         # sysfs gives whole seconds; the edge where the value ticks gives the sub-second phase.
@@ -745,7 +796,7 @@ class RtcOffsetTest(unittest.TestCase):
         # The guard against a synchronised third system: a wrong offset or polarity fails open in silence,
         # so the decode is tested on crafted bytes with junk around status, and against adjtimex's return.
         self.assertTrue(hostcheck.timex_synced(self.timex(0), 0))
-        self.assertTrue(hostcheck.timex_synced(self.timex(0x2001), 1))  # PLL, INS: still synchronised
+        self.assertTrue(hostcheck.timex_synced(self.timex(0x2001), 1))  # STA_PLL | STA_NANO: still synchronised
         self.assertFalse(hostcheck.timex_synced(self.timex(hostcheck.STA_UNSYNC), hostcheck.TIME_ERROR))
         self.assertFalse(hostcheck.timex_synced(self.timex(0x41, junk=0), hostcheck.TIME_ERROR))
         self.assertTrue(hostcheck.timex_synced(self.timex(hostcheck.STA_CLOCKERR), hostcheck.TIME_ERROR))
@@ -753,6 +804,9 @@ class RtcOffsetTest(unittest.TestCase):
         for status, ret in ((hostcheck.STA_UNSYNC, 0), (0, hostcheck.TIME_ERROR)):
             with self.assertRaisesRegex(hostcheck.HostcheckError, "does not match"):
                 hostcheck.timex_synced(self.timex(status), ret)
+        # A PPS fault (CONFIG_NTP_PPS) also returns TIME_ERROR with STA_UNSYNC clear: refused, naming that cause.
+        with self.assertRaisesRegex(hostcheck.HostcheckError, "PPS"):
+            hostcheck.timex_synced(self.timex(0x0004), hostcheck.TIME_ERROR)  # STA_PPSTIME, no STA_PPSSIGNAL
 
         def fake(status, ret):
             def adjtimex(buf):
@@ -778,8 +832,11 @@ class RtcOffsetTest(unittest.TestCase):
             dev.write_text("100\n")
             with unittest.mock.patch.object(hostcheck, "kernel_clock_synced", return_value=True), \
                     unittest.mock.patch.object(hostcheck, "sntp_offset", return_value=0.0):
-                with self.assertRaisesRegex(hostcheck.HostcheckError, "synchronised"):
+                with self.assertRaisesRegex(hostcheck.HostcheckError, "synchronised") as e:
                     hostcheck.rtc_snapshot("ntp.test", device=dev)
+                # A unit that is only stopped starts again at boot.
+                self.assertIn("systemctl disable --now systemd-timesyncd", str(e.exception))
+                self.assertIn("reboot", str(e.exception))
             with unittest.mock.patch.object(hostcheck, "kernel_clock_synced", return_value=False), \
                     unittest.mock.patch.object(hostcheck, "sntp_offset", return_value=10.0), \
                     unittest.mock.patch.object(hostcheck, "rtc_at_edge", return_value=(1000, 1600.25)):
@@ -787,6 +844,31 @@ class RtcOffsetTest(unittest.TestCase):
         self.assertEqual(r["rtc"], 1000)
         self.assertAlmostEqual(r["offset"], 1000 - 1610.25)
         self.assertEqual(r["server"], "ntp.test")
+
+    def test_a_bad_rtc_device_stops_the_snapshot(self):
+        # A missing or garbled device is an operator error (exit 2), not a traceback.
+        with tempfile.TemporaryDirectory() as d:
+            garbled = pathlib.Path(d, "garbled")
+            reads = iter(["12x\n", "13x\n"])
+            with unittest.mock.patch.object(hostcheck, "kernel_clock_synced", return_value=False), \
+                    unittest.mock.patch.object(hostcheck, "sntp_offset", return_value=0.0), \
+                    unittest.mock.patch.object(pathlib.Path, "read_text", lambda self: next(reads)):
+                with self.assertRaisesRegex(hostcheck.HostcheckError, "RTC"):
+                    hostcheck.rtc_snapshot("ntp.test", device=garbled)
+            with unittest.mock.patch.object(hostcheck, "kernel_clock_synced", return_value=False), \
+                    unittest.mock.patch.object(hostcheck, "sntp_offset", return_value=0.0):
+                with self.assertRaisesRegex(hostcheck.HostcheckError, "RTC"):
+                    hostcheck.rtc_snapshot("ntp.test", device=pathlib.Path(d, "missing"))
+
+    def test_the_clock_is_checked_before_the_disks_are_hashed(self):
+        # A bad clock or server is reported before a full disk hash, not after it.
+        hashed = []
+        with unittest.mock.patch.object(hostcheck, "hash_disk", side_effect=hashed.append), \
+                unittest.mock.patch.object(hostcheck, "rtc_snapshot",
+                                           side_effect=hostcheck.HostcheckError("synchronised")):
+            with self.assertRaises(hostcheck.HostcheckError):
+                hostcheck.snapshot({"win": "/dev/null"}, efivarfs="e", rtc_reference="ntp.test")
+        self.assertEqual(hashed, [])
 
 
 class OptedInDiskTest(unittest.TestCase):
@@ -797,24 +879,37 @@ class OptedInDiskTest(unittest.TestCase):
         before = snap(disk={"win": "aa" * 32, "data": "cc" * 32})
         written = snap(disk={"win": "aa" * 32, "data": "dd" * 32})
         self.assertFalse(self.check(before, written)["pass"])
-        r = self.check(before, written, opted_in_disks={"data"})
+        r = self.check(before, written, opted_in_disk="data")
         self.assertTrue(r["pass"], r)
         self.assertEqual([(e["key"], e["requirement"]) for e in r["excluded"]], [("data", "HW-8a")])
         both = snap(disk={"win": "bb" * 32, "data": "dd" * 32})
-        self.assertEqual(flagged(self.check(before, both, opted_in_disks={"data"})), {("disk", "win", "changed")})
+        self.assertEqual(flagged(self.check(before, both, opted_in_disk="data")), {("disk", "win", "changed")})
         gone = snap(disk={"win": "aa" * 32})
-        self.assertEqual(flagged(self.check(before, gone, opted_in_disks={"data"})), {("disk", "data", "removed")})
+        self.assertEqual(flagged(self.check(before, gone, opted_in_disk="data")), {("disk", "data", "removed")})
         # The flag names a disk, never another kind of key.
         after = snap(disk=before["disk"])
         after["uefi"][f"{GLOBAL}:BootOrder"] = {"attr": 7, "sha256": "99"}
-        self.assertFalse(self.check(before, after, opted_in_disks={f"{GLOBAL}:BootOrder"})["pass"])
+        self.assertFalse(self.check(before, after, opted_in_disk=f"{GLOBAL}:BootOrder")["pass"])
+
+    def test_a_second_opted_in_disk_is_refused(self):
+        # HW-8a gives agentOS one disk; naming two would exclude both.
+        with tempfile.TemporaryDirectory() as d:
+            b, a = pathlib.Path(d, "b.json"), pathlib.Path(d, "a.json")
+            b.write_text(json.dumps(snap(disk={"sda": "aa" * 32, "nvme0": "cc" * 32})))
+            a.write_text(json.dumps(snap(disk={"sda": "bb" * 32, "nvme0": "dd" * 32})))
+            with unittest.mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                self.assertEqual(hostcheck.main(["diff", str(b), str(a), "--opted-in-disk", "sda",
+                                                 "--opted-in-disk", "nvme0"]), 2)
+            self.assertIn("HW-8a", err.getvalue())
 
     def test_unknown_name_stops_the_diff(self):
         with tempfile.TemporaryDirectory() as d:
             b, a = pathlib.Path(d, "b.json"), pathlib.Path(d, "a.json")
             b.write_text(json.dumps(snap()))
             a.write_text(json.dumps(snap()))
-            self.assertEqual(hostcheck.main(["diff", str(b), str(a), "--opted-in-disk", "dta"]), 2)
+            with unittest.mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                self.assertEqual(hostcheck.main(["diff", str(b), str(a), "--opted-in-disk", "dta"]), 2)
+            self.assertIn("'win'", err.getvalue())  # the names the snapshots hold
 
 
 class PcrlockTest(unittest.TestCase):
@@ -2201,7 +2296,9 @@ class ImageTest(unittest.TestCase):
         # guest). agentos-mor.service stays active and MOR stays set throughout, so the holders that come back
         # are covered; its clear runs only at the shutdown, after the staging unit's stop has emptied
         # /run/agentos-setup (the clear refuses while that holds a file), and the next boot's responder prints
-        # its last line from the journal.
+        # its last line from the journal. MOR-soft-reboot (#6182): last, the probe runs "systemctl soft-reboot" and
+        # isolates soft-reboot.target; the image has no systemd-soft-reboot.service, so each fails before any unit
+        # stops (the isolate bypasses logind, so an inhibitor cannot explain its failure), and MOR stays set.
         d = self.dir / "isolate-in"
         d.mkdir(exist_ok=True)
         (d / "isolate.sh").write_text(
@@ -2220,6 +2317,8 @@ class ImageTest(unittest.TestCase):
             "\ttimeout 300 systemctl isolate \"$t.target\"; r=$?; say \"$t rc=$r\"\n"
             "\ttimeout 300 systemctl default; r=$?; say \"default rc=$r\"\n"
             "done\n"
+            "timeout 300 systemctl soft-reboot; r=$?; say \"soft-reboot rc=$r\"\n"
+            "timeout 300 systemctl isolate soft-reboot.target; r=$?; say \"soft-isolate rc=$r\"\n"
             "echo HOSTCHECK-ISOLATE done\n"
             "exec systemctl --no-block poweroff\n")
         (d / "probe.service").write_text(
@@ -2243,19 +2342,24 @@ class ImageTest(unittest.TestCase):
         seen = re.findall(rb"[^\r\n]*(?:HOSTCHECK|agentos-fallback|emergency|rescue|Reached target|sulogin)[^\r\n]*", console)
         print(*[ln.decode(errors="replace")[:240] for ln in seen[-60:]], sep="\n", file=sys.stderr)
         steps = re.findall(rb"HOSTCHECK-ISOLATE (.*?) mor (\S+) cert (\S+) pair (\S+) (.*?) *\r?\n", console)
-        self.assertEqual([x[0] for x in steps], [b"before", b"emergency rc=0", b"default rc=0",
-                                                 b"rescue rc=0", b"default rc=0"], steps)
+        self.assertEqual([x[0] for x in steps[:5]], [b"before", b"emergency rc=0", b"default rc=0",
+                                                     b"rescue rc=0", b"default rc=0"], steps)
+        # MOR-soft-reboot (#6182): the image has no systemd-soft-reboot.service, so an orderly soft reboot and an
+        # isolate of soft-reboot.target fail before any unit stops; the box stays in this userspace, so the probe
+        # prints both steps, and MOR and every unit below are as before.
+        self.assertEqual([x[0].split(b" rc=")[0] for x in steps[5:]], [b"soft-reboot", b"soft-isolate"], steps)
+        self.assertNotIn(b"rc=0", b" ".join(x[0] for x in steps[5:]), steps)
         # MOR is set before the isolates and stays set through every step: the clear's unit is never stopped.
         self.assertNotEqual(steps[0][1], b"0", steps)
         self.assertEqual({x[1] for x in steps}, {steps[0][1]}, steps)
-        self.assertEqual([x[4].split()[:2] for x in steps], [[b"agentos-mor.service", b"active"]] * 5, steps)
+        self.assertEqual([x[4].split()[:2] for x in steps], [[b"agentos-mor.service", b"active"]] * 7, steps)
         # Neither isolate stops the staging or the wipe (#6178), so the authority staged before them, its
         # certificate and its sealed pair, is the one after each step.
         self.assertEqual([x[4].split()[2:] for x in steps], [[b"agentos-keeper-pageca.service", b"active",
-                                                             b"agentos-keeper-wipe.service", b"active"]] * 5, steps)
+                                                             b"agentos-keeper-wipe.service", b"active"]] * 7, steps)
         self.assertRegex(steps[0][2], rb"^[0-9a-f]{64}$")
         self.assertEqual({x[2] for x in steps}, {steps[0][2]}, steps)
-        self.assertEqual([x[3] for x in steps[1:]], [b"same"] * 4, steps)
+        self.assertEqual([x[3] for x in steps[1:]], [b"same"] * 6, steps)
         after = (self.dir / "isolate" / "console-after.log").read_bytes()
         last = re.findall(rb"HOSTCHECK-DIAG start journal -1: (agentos-mor: [^\r\n]*)", after)
         self.assertEqual(last[-1:], [b"agentos-mor: mor=cleared"], last)

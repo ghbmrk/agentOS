@@ -31,6 +31,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/meter"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/modemlink"
 	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/owner/kernelsock"
@@ -1387,9 +1388,13 @@ func informOwner(own func() *owner.Channel) func(string) error {
 		if ch := own(); ch != nil {
 			return ch.Inform(text)
 		}
-		return errors.New("no owner channel")
+		return errNoOwnerChannel
 	}
 }
+
+// errNoOwnerChannel is informOwner's refusal before the owner channel is
+// up: provably nothing was sent, so a sender may try again (modem.ErrNotSent).
+var errNoOwnerChannel = fmt.Errorf("%w: no owner channel", modem.ErrNotSent)
 
 // alertOwner sends a broker notice the owner must act on if it was not
 // theirs, such as a passkey enrolment (#3228), as security class: never
