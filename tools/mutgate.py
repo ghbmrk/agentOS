@@ -114,6 +114,7 @@ Install: go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
 """
 import argparse
 import bisect
+import codecs
 import collections
 import concurrent.futures
 import contextlib
@@ -1255,7 +1256,9 @@ SHARD_SECONDS = 1800
 def shard_count(targets, sites, suite=0.0, costs=None, overhead=0.0):
     """K for a package with these target lines ({path: lines}) and deletion sites, whose whole test
     suite takes suite seconds: at least one. With costs (seconds per site, site_costs), a site costs
-    those, not a whole suite, and each shard first spends overhead on its per-test pass (#6172)."""
+    those, not a whole suite, and each shard first spends overhead on its per-test pass (#6172).
+    That pass leaves a shard's sites at least half of SHARD_SECONDS, so a pass past a quarter of the
+    job plans shards past the target, and one past 45 minutes past the job's 60 (#6217)."""
     lines = sum(len(v) for v in targets.values())
     if costs is None:
         work, budget = suite * (LINE_RUNS * lines + SITE_RUNS * len(sites)), SHARD_SECONDS
@@ -1380,8 +1383,40 @@ def covered_by(pkg, names, tmp, broker=None):
     return out, problem
 
 
+# `go test`'s summary line for one package: `ok  <import path>  <seconds>s`, then its coverage.
+GO_OK = re.compile(r"(?m)^ok \s*\S+\s+(\d+(?:\.\d+)?)s(?:\s|$)")
+
+
+OK_KEEP = 4096  # bytes of a line echo_ok holds: an `ok` line's match ends within its first hundred
+
+
+def echo_ok(stream):
+    """Copies `go test`'s stdout to stderr as it arrives (`plan` prints the matrix on stdout, #4961)
+    and returns its last `ok` line's seconds, or None. It holds one chunk and the first OK_KEEP bytes
+    of the current line, so a test that floods its output costs no memory and shows live (#6232)."""
+    text = codecs.getincrementaldecoder("utf-8")("replace")
+    line, last = b"", None
+
+    def scan(whole):
+        nonlocal last
+        if ok := GO_OK.search(whole.decode("utf-8", "replace")):
+            last = ok[1]
+
+    while chunk := stream.read1(1 << 16):
+        sys.stderr.write(text.decode(chunk))
+        sys.stderr.flush()
+        *ends, rest = (line + chunk).split(b"\n")
+        for part in filter(None, ends):  # a bare newline is no `ok` line: a flood of them stays cheap (#6236)
+            scan(part)
+        line = rest[:OK_KEEP]
+    sys.stderr.write(text.decode(b"", final=True))
+    sys.stderr.flush()
+    scan(line)
+    return last
+
+
 def timed_cover(pkg, names, tmp, broker=None, code=None):
-    """covered_by's (lines, seconds, problem): seconds is how long its `go test` took, so a plan
+    """covered_by's (lines, seconds, problem): seconds is how long its test binary ran, so a plan
     that ran the whole suite under coverage sizes the shards from that run, not a fourth (#6155).
     A code dict gains {path: lines} of every block the profile lists, ran or not (#6216): the lines
     a test could run, whichever tests ran."""
@@ -1392,10 +1427,13 @@ def timed_cover(pkg, names, tmp, broker=None, code=None):
     if names is not None:
         cmd += ["-run", "^(" + "|".join(names) + ")$"]
     began = time.monotonic()
-    # Its output goes to stderr: `plan` prints the matrix on stdout (#4961).
-    if subprocess.run([*cmd, "."], cwd=broker / pkg, stdout=sys.stderr).returncode or not profile.exists():
+    with subprocess.Popen([*cmd, "."], cwd=broker / pkg, stdout=subprocess.PIPE) as run:
+        ran = echo_ok(run.stdout)
+    if run.returncode or not profile.exists():
         return None, None, f"broker/{pkg}/'s tests {'(all)' if names is None else names} fail under -coverprofile"
-    seconds = time.monotonic() - began
+    # `go test`'s own `ok` line times the test binary's run alone, as suite_seconds times it: the wall
+    # time adds the build and vet, which a cold cache makes many times a fast suite (#6162).
+    seconds = float(ran) if ran else time.monotonic() - began
     if (lister := lister_in(tmp)) is None:
         return None, None, "cannot build tools/mutgate_stmts.go"
     try:
@@ -2147,10 +2185,10 @@ def run_alone(binary, cwd, args, timeout, mem, counters=None):
 
 
 def per_test(binary, cwd, tmp, timeout, mem=None, jobs=1):
-    """({test: (blocks, seconds)}, [tests that fail alone]) for each top-level test of a -cover test
-    binary, each run alone under -coverprofile in the suite's order; or None when it lists none. Runs
-    share `jobs` workers, and a run that fails there runs again alone, since tests can collide on a
-    fixed path or port; a test that still fails alone is in every site's set (`selected`)."""
+    """({test: (blocks, seconds)}, {test that fails alone: seconds}) for each top-level test of a
+    -cover test binary, each run alone under -coverprofile; or None when it lists none. Runs share
+    `jobs` workers, and a run that fails there runs again alone, since tests can collide on a fixed
+    path or port; a test that still fails alone has no coverage of its own, so it is in every set."""
     try:
         listed = subprocess.run([str(binary), "-test.list", "."], cwd=cwd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -2168,50 +2206,53 @@ def per_test(binary, cwd, tmp, timeout, mem=None, jobs=1):
         (d / "c").mkdir(parents=True)
         end, _, secs = run_alone(binary, cwd, [f"-test.run=^{names[i]}$", "-test.failfast", f"-test.gocoverdir={d / 'c'}",
                                                f"-test.coverprofile={d / 'p'}"], timeout, share, d / "c")
-        if end != 0 or not (d / "p").exists():
-            return None
-        return covered_blocks((d / "p").read_text()), secs
+        ok = end == 0 and (d / "p").exists()
+        return (covered_blocks((d / "p").read_text()) if ok else None), secs
     share = mem // max(1, jobs) if mem else None
     with concurrent.futures.ThreadPoolExecutor(max(1, jobs)) as pool:
         got = list(pool.map(lambda i: one(i, share), range(len(names))))
-    got = [g if g is not None else one(i, mem) for i, g in enumerate(got)]
+    got = [g if g[0] is not None else one(i, mem) for i, g in enumerate(got)]
     shutil.rmtree(root, ignore_errors=True)
-    return {n: g for n, g in zip(names, got) if g is not None}, [n for n, g in zip(names, got) if g is None]
+    return ({n: g for n, g in zip(names, got) if g[0] is not None},
+            {n: secs for n, (blocks, secs) in zip(names, got) if blocks is None})
 
 
 def selected(site, tests):
-    """The tests to run for a site with per_test's result: those whose run alone covers it, and those
-    that fail alone, in the suite's order; or None for the whole suite (no per-test result, no test
-    covers the site alone, or every test does)."""
+    """The tests to run for a site with per_test's result: those whose run alone covers it and those
+    that fail alone (`go test` runs them in the suite's order whatever their order here); or None
+    for the whole suite: no per-test result, no test covers the site alone, or the set's runs alone
+    take half the sum of every test's or more. A set costs its run and at most one unmutated run
+    (`passes`), so under half it costs less than the suite's tests run one by one; with parallel
+    tests (the whole suite's wall time below that sum) the bound is only an estimate."""
     if tests is None:
         return None
     ran, failing = tests
-    hit = [n for n, (blocks, _) in ran.items() if is_covered(blocks, site)]
-    if not hit or len(hit) == len(ran):
+    if not (hit := {n for n, (blocks, _) in ran.items() if is_covered(blocks, site)}):
         return None
-    return [n for n in [*ran, *failing] if n in hit or n in failing] if failing else hit
+    out = [n for n in [*ran, *failing] if n in hit or n in failing]
+    total = sum(secs for _, secs in ran.values()) + sum(failing.values())
+    return out if 2 * set_seconds(out, tests) < total else None
 
 
-def set_seconds(names, tests, suite):
-    """Seconds a run of these tests takes, the sum of their runs alone; suite's for the whole suite
-    or a set holding a test that fails alone, which has no time of its own."""
-    if names is None or any(n not in tests[0] for n in names):
-        return suite
-    return sum(tests[0][n][1] for n in names)
+def set_seconds(names, tests):
+    """The seconds these tests take run alone, summed."""
+    ran, failing = tests
+    return sum(ran[n][1] if n in ran else failing[n] for n in names)
 
 
 def site_costs(pkg, sites, suite, tmp):
     """(seconds per site, the per-test pass's seconds) `delete` spends on each site of broker/<pkg>/
     with the tests that cover it: its set's run plus at most one unmutated run of that set (`passes`),
-    or the whole suite; or (None, 0.0) when the tests cannot be timed alone. Only a schedule (`plan`)."""
+    or the whole suite; or (None, 0.0) when the tests cannot be timed alone. The pass runs every test
+    alone, and each that fails runs again (#6226). Only a schedule (`plan`)."""
     pkg_dir, binary = BROKER / pkg, pathlib.Path(tmp) / "suite.test"
     if not binary.exists() and subprocess.run(["go", "test", "-c", "-cover", "-covermode=set", "-o", str(binary), "."],
                                               cwd=pkg_dir, stdout=sys.stderr).returncode:
         return None, 0.0
     if not binary.exists() or (tests := per_test(binary, pkg_dir, tmp, 3 * suite + 10)) is None:
         return None, 0.0
-    costs = [suite if (names := selected(s, tests)) is None else 2 * set_seconds(names, tests, suite) for s in sites]
-    return costs, sum(secs for _, secs in tests[0].values())
+    costs = [suite if (names := selected(s, tests)) is None else 2 * set_seconds(names, tests) for s in sites]
+    return costs, sum(secs for _, secs in tests[0].values()) + 2 * sum(tests[1].values())
 
 
 def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
@@ -2290,7 +2331,7 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
         return checked[key]
 
     def limit(names):
-        return timeout if names is None else 3 * set_seconds(names, tests, suite) + 10
+        return timeout if names is None else 3 * set_seconds(names, tests) + 10
 
     def cap(alone):
         return alone_mem if alone or not alone_mem else alone_mem // max(1, jobs)
@@ -2726,8 +2767,8 @@ def cmd_plan(args):
                 print(f"mutgate: {problem}", file=sys.stderr)
                 return 1
             # A test-changing package's whole suite already ran under coverage in record_for: its time
-            # sizes the shards, so the slowest suite runs three times here, not four (#6155). The `go test`
-            # wall time holds the link too, so it can only add shards.
+            # sizes the shards, so the slowest suite runs three times here, not four (#6155). Both times
+            # are the test binary's run alone, so neither holds the build (#6162).
             if not (targets or sites):
                 suite, problem = 0.0, None
             elif suite is None:
@@ -2891,8 +2932,9 @@ def main(argv=None):
                        help="the PR head of the event whose body FILE is; a failure names it (#6077)")
         p.add_argument("--summary", metavar="FILE", help="append the table of verdicts here")
     args = ap.parse_args(argv)
-    if args.cmd == "run" and (not 0 <= args.shard < args.of <= MATRIX_MAX or (args.of > 1 and not args.git)):
-        ap.error(f"--shard I --of K needs 0 <= I < K <= {MATRIX_MAX}, and --git when K > 1")
+    # K is a package's shard count, which `plan` packs past MATRIX_MAX jobs up to SHARDS_MAX (#6170).
+    if args.cmd == "run" and (not 0 <= args.shard < args.of <= SHARDS_MAX or (args.of > 1 and not args.git)):
+        ap.error(f"--shard I --of K needs 0 <= I < K <= {SHARDS_MAX}, and --git when K > 1")
     if getattr(args, "body_from", None) and not args.body:
         ap.error("--body-from names the event whose body --body holds: give --body too")
     if args.cmd == "packages":

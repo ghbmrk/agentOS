@@ -1510,22 +1510,26 @@ func set(n, m int) {
     COVER_TEST = ("package hint\n\nimport \"testing\"\n\n// REQ: CRED-1\nfunc TestKeep(t *testing.T) {\n"
                   "\tif Keep(3) != 3 || count != 3 {\n\t\tt.Fatal(\"keep\")\n\t}\n}\n\n"
                   "func TestSide(t *testing.T) {\n\tif Side(1) != 2 {\n\t\tt.Fatal(\"side\")\n\t}\n}\n\n"
-                  "func TestNothing(t *testing.T) {}\n")
+                  "func TestNothing(t *testing.T) {}\n"
+                  + "".join(f"\nfunc TestPad{i}(t *testing.T) {{}}\n" for i in range(4)))
 
-    def spied_deletions(self, pr, test, whole=False, jobs=1):
+    def spied_deletions(self, pr, test, whole=False, jobs=1, patches=None):
         """({line: status}, [(site dir, names)]) of deletion_mutants on a repo of these sources, with
-        each run_tests call's tests recorded; whole runs every site with the whole suite (no per-test pass)."""
+        each run_tests call's tests recorded; whole runs every site with the whole suite (no per-test
+        pass); patches ({name: value}) replaces those mutgate names first, run_tests under the spy."""
         from unittest import mock
         with tempfile.TemporaryDirectory() as d:
             pkg = self.repo(d, "package hint\n", pr, test)
             added = mutgate.added_lines(subprocess.run(
                 ["git", "-C", d, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1", "--", "broker"],
                 capture_output=True, text=True, check=True).stdout)[0]
-            calls, real = [], mutgate.run_tests
+            calls, real = [], (patches or {}).get("run_tests", mutgate.run_tests)
             def spy(binary, cwd, timeout, mem=None, names=None):
                 calls.append((pathlib.Path(binary).parent.name, names))
                 return real(binary, cwd, timeout, mem=mem, names=names)
             with contextlib.ExitStack() as st:
+                for name, value in (patches or {}).items():
+                    st.enter_context(mock.patch.object(mutgate, name, value))
                 st.enter_context(mock.patch.object(mutgate, "BROKER", pkg.parent))
                 st.enter_context(mock.patch.object(mutgate, "run_tests", spy))
                 if whole:
@@ -1559,7 +1563,9 @@ func set(n, m int) {
         test = ("package hint\n\nimport \"testing\"\n\nvar ready = true\n\n// REQ: CRED-1\n"
                 "func TestBreak(t *testing.T) {\n\tready = false\n\tKeep(1)\n}\n\n"
                 "func TestFix(t *testing.T) {\n\tready = true\n}\n\n"
-                "func TestUse(t *testing.T) {\n\tif !ready || Keep(2) != 2 {\n\t\tt.Fatal(\"use\")\n\t}\n}\n")
+                "func TestUse(t *testing.T) {\n\tif !ready || Keep(2) != 2 {\n\t\tt.Fatal(\"use\")\n\t}\n}\n"
+                # Tests that reach nothing, so the set is under half the suite's runs alone (`selected`).
+                + "".join(f"\nfunc TestPad{i}(t *testing.T) {{}}\n" for i in range(4)))
         whole, _ = self.spied_deletions(pr, test, whole=True)
         self.assertEqual(whole, {6: "LIVED", 7: "NOT VIABLE"})
         for jobs in (1, 3):
@@ -1570,23 +1576,77 @@ func set(n, m int) {
                 self.assertEqual(six[0], ["TestBreak", "TestUse"])
                 self.assertIsNone(six[-1])  # the set failed unmutated: the whole suite's verdict stands
 
+    def test_a_set_past_half_the_memory_cap_unmutated_reruns_the_whole_suite(self):
+        # #6217 (Security on #6213): a set's kill stands only if the set, run unmutated, stays under
+        # half the memory cap, as the whole suite must (L3 on #5026); else a deletion that lives could
+        # read KILLED by the cap. TestKeep's unmutated run is made to report exactly half (it stands)
+        # or one byte more (the whole suite decides line 6).
+        # REQ: MUT-delete-covering
+        real = mutgate.run_alone
+        for over, last in ((0, ["TestKeep"]), (1, None)):
+            with self.subTest(over=over):
+                caps = []
+                def alone(binary, cwd, args, timeout, mem, counters=None):
+                    end, top, secs = real(binary, cwd, args, timeout, mem, counters)
+                    if pathlib.Path(binary).name == "plain.test":
+                        caps.append(mem)
+                        top = mem // 2 + over
+                    return end, top, secs
+                got, calls = self.spied_deletions(self.COVER_PR, self.COVER_TEST, patches={
+                    "run_alone": alone, "available_memory": lambda: 16 << 30})
+                self.assertEqual(got[6], "KILLED")
+                self.assertEqual(caps, [8 << 30])  # one unmutated run of the one detected set, under the cap
+                six = [names for site, names in calls if site == "site-0"]
+                self.assertEqual(six[0], ["TestKeep"])
+                self.assertEqual(six[-1], last)
+
+    def test_a_sets_runs_time_out_at_three_times_its_tests_runs_alone(self):
+        # #6217 (L3 and Security on #6213): a set's mutant run and its unmutated run time out at three
+        # times its tests' runs alone, summed, plus 10 s, not at the whole suite's timeout.
+        # REQ: MUT-delete-covering
+        seen, timed = [], []
+        per, runs, alone = mutgate.per_test, mutgate.run_tests, mutgate.run_alone
+        def per_test(*a, **k):
+            seen.append(per(*a, **k))
+            return seen[-1]
+        def run_tests(binary, cwd, timeout, mem=None, names=None):
+            timed.append((names, timeout))
+            return runs(binary, cwd, timeout, mem=mem, names=names)
+        def run_alone(binary, cwd, args, timeout, mem, counters=None):
+            if pathlib.Path(binary).name == "plain.test":
+                timed.append((re.fullmatch(r"-test\.run=\^\((.*)\)\$", args[-1])[1].split("|"), timeout))
+            return alone(binary, cwd, args, timeout, mem, counters)
+        self.spied_deletions(self.COVER_PR, self.COVER_TEST, patches={
+            "per_test": per_test, "run_tests": run_tests, "run_alone": run_alone})
+        sets = [(names, t) for names, t in timed if names is not None]
+        self.assertTrue(any(names == ["TestKeep"] for names, _ in sets), timed)
+        self.assertEqual(len(sets), len(timed) - sum(names is None for names, _ in timed))
+        for names, t in sets:
+            self.assertAlmostEqual(t, 3 * mutgate.set_seconds(names, seen[0]) + 10)
+
     def test_selected_reads_each_tests_own_coverage(self):
         # REQ: MUT-delete-covering
         site = {"file": "a.go", "cover_line": 5, "cover_col": 2}
         at = lambda line: {"a.go": [((line, 1), (line, 9))]}
-        tests = ({"TestA": (at(5), 1.0), "TestB": (at(9), 2.0), "TestC": (at(5), 4.0)}, [])
+        tests = ({"TestA": (at(5), 1.0), "TestB": (at(9), 6.0), "TestC": (at(5), 2.0)}, {})
         self.assertEqual(mutgate.selected(site, tests), ["TestA", "TestC"])
-        self.assertEqual(mutgate.set_seconds(["TestA", "TestC"], tests, 99.0), 5.0)
-        # No per-test result, no test covering the site alone, or every test covering it: the whole suite.
+        self.assertEqual(mutgate.set_seconds(["TestA", "TestC"], tests), 3.0)
+        # No per-test result, or no test covering the site alone: the whole suite.
         self.assertIsNone(mutgate.selected(site, None))
-        self.assertIsNone(mutgate.selected(site, ({"TestB": (at(9), 2.0)}, [])))
-        self.assertIsNone(mutgate.selected(site, ({"TestA": (at(5), 1.0)}, [])))
-        # A test that fails alone has no coverage of its own, so it joins every set, in the suite's order,
-        # and a set holding it is timed as the whole suite.
-        failing = ({"TestA": (at(5), 1.0), "TestB": (at(9), 2.0)}, ["TestF"])
+        self.assertIsNone(mutgate.selected(site, ({"TestB": (at(9), 2.0)}, {})))
+        # A set whose runs alone take half the sum of every test's or more costs no less than the
+        # whole suite (kernel/sim: each set of disk.go held its slow sweeps), so the whole suite runs.
+        self.assertIsNone(mutgate.selected(site, ({"TestA": (at(5), 1.0)}, {})))
+        self.assertIsNone(mutgate.selected(site, ({"TestA": (at(5), 3.0), "TestB": (at(9), 3.0)}, {})))
+        self.assertEqual(mutgate.selected(site, ({"TestA": (at(5), 2.9), "TestB": (at(9), 3.0)}, {})), ["TestA"])
+        # A test that fails alone has no coverage of its own, so it joins every set, timed by its failing run.
+        failing = ({"TestA": (at(5), 1.0), "TestB": (at(9), 6.0)}, {"TestF": 2.0})
         self.assertEqual(mutgate.selected(site, failing), ["TestA", "TestF"])
-        self.assertEqual(mutgate.set_seconds(["TestA", "TestF"], failing, 99.0), 99.0)
-        self.assertEqual(mutgate.set_seconds(None, failing, 99.0), 99.0)
+        self.assertEqual(mutgate.set_seconds(["TestA", "TestF"], failing), 3.0)
+        self.assertIsNone(mutgate.selected(site, ({"TestA": (at(5), 1.0), "TestB": (at(9), 6.0)}, {"TestF": 9.0})))
+        # #6226: the total counts failing-alone seconds too; here they alone keep the set under half.
+        tipped = ({"TestA": (at(5), 1.0), "TestB": (at(9), 4.0)}, {"TestF": 2.0})
+        self.assertEqual(mutgate.selected(site, tipped), ["TestA", "TestF"])
 
     def test_per_test_runs_each_test_alone_and_names_those_that_fail_alone(self):
         # REQ: MUT-delete-covering
@@ -1598,13 +1658,52 @@ func set(n, m int) {
             subprocess.run(["go", "test", "-c", "-cover", "-covermode=set", "-o", str(binary), "."], cwd=pkg, check=True,
                            env={**os.environ, "GOFLAGS": "", "GOWORK": "off"})
             ran, failing = mutgate.per_test(binary, pkg, d, 60, jobs=2)
-        self.assertEqual(list(ran), ["TestKeep", "TestSide", "TestNothing", "TestFirst"])
-        self.assertEqual(failing, ["TestAfterFirst"])
+        self.assertEqual(list(ran), ["TestKeep", "TestSide", "TestNothing", *(f"TestPad{i}" for i in range(4)), "TestFirst"])
+        self.assertEqual(list(failing), ["TestAfterFirst"])
         self.assertTrue(all(secs > 0 for _, secs in ran.values()))
         lines = lambda name: {n for (s, _), (e, _) in ran[name][0].get("hint.go", []) for n in range(s, e + 1)}
         self.assertTrue({6, 7} <= lines("TestKeep") and 14 not in lines("TestKeep"))
         self.assertTrue(14 in lines("TestSide") and 6 not in lines("TestSide"))
         self.assertEqual(lines("TestNothing"), set())
+
+    def test_per_test_runs_a_test_that_failed_beside_another_again_alone(self):
+        # #6226 (L3 and Security on #6225): tests that collide on a fixed path when run in parallel
+        # each get their own coverage; the one that failed there runs again alone and passes.
+        # REQ: MUT-delete-covering
+        test = ("package hint\n\nimport (\n\t\"os\"\n\t\"testing\"\n\t\"time\"\n)\n\n"
+                "// The first to start holds lock until the second has failed on it, so they always collide.\n"
+                "func hold(t *testing.T) {\n\tf, err := os.OpenFile(\"lock\", os.O_CREATE|os.O_EXCL, 0o600)\n"
+                "\tif err != nil {\n\t\tos.WriteFile(\"collided\", nil, 0o600)\n\t\tt.Fatal(err)\n\t}\n"
+                "\tf.Close()\n\tdefer os.Remove(\"lock\")\n"
+                "\tfor end := time.Now().Add(30 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {\n"
+                "\t\tif _, err := os.Stat(\"collided\"); err == nil {\n\t\t\treturn\n\t\t}\n\t}\n}\n\n"
+                "func TestOne(t *testing.T) {\n\thold(t)\n\tKeep(1)\n}\n\n"
+                "func TestTwo(t *testing.T) {\n\thold(t)\n\tSide(1)\n}\n")
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.repo(d, "package hint\n", self.COVER_PR, test)
+            binary = pathlib.Path(d) / "b.test"
+            subprocess.run(["go", "test", "-c", "-cover", "-covermode=set", "-o", str(binary), "."], cwd=pkg, check=True,
+                           env={**os.environ, "GOFLAGS": "", "GOWORK": "off"})
+            ran, failing = mutgate.per_test(binary, pkg, d, 60, jobs=2)
+            self.assertTrue((pkg / "collided").exists())  # the parallel runs did collide
+        self.assertEqual((list(ran), failing), (["TestOne", "TestTwo"], {}))
+        lines = lambda name: {n for (s, _), (e, _) in ran[name][0].get("hint.go", []) for n in range(s, e + 1)}
+        self.assertTrue(6 in lines("TestOne") and 14 not in lines("TestOne"))
+        self.assertTrue(14 in lines("TestTwo") and 6 not in lines("TestTwo"))
+
+    def test_site_costs_overhead_counts_tests_that_fail_alone(self):
+        # #6226 (Security on #6225): the per-test pass runs a test that fails alone twice (in the pool,
+        # then alone), so its seconds count twice in the overhead each shard spends before its sites.
+        # REQ: MUT-delete-covering
+        at = lambda line: {"a.go": [((line, 1), (line, 9))]}
+        tests = ({"TestA": (at(5), 1.0), "TestB": (at(9), 6.0)}, {"TestF": 2.0})
+        sites = [{"file": "a.go", "cover_line": 5, "cover_col": 2}, {"file": "a.go", "cover_line": 7, "cover_col": 2}]
+        with tempfile.TemporaryDirectory() as tmp:
+            (pathlib.Path(tmp) / "suite.test").write_text("")
+            with mock.patch.object(mutgate, "per_test", lambda *a, **k: tests):
+                costs, overhead = mutgate.site_costs("hint", sites, 100.0, tmp)
+        self.assertEqual(costs, [6.0, 100.0])
+        self.assertEqual(overhead, 11.0)
 
     def test_site_costs_are_each_sites_own_tests(self):
         # REQ: MUT-delete-covering
@@ -1831,6 +1930,164 @@ class TestOnly(unittest.TestCase):
             self.assertIsNone(problem)
             self.assertLess(quick, secs)
 
+    def test_timed_cover_times_the_test_binary_not_its_build(self):
+        # MUT-plan-timing-skew (#6162, Potency on #6156): suite_seconds times the built binary's run,
+        # so timed_cover's time must leave out what `go test` spends before it (build, link, vet),
+        # which a cold cache makes many times a fast suite. A `go` that sleeps 2 s first stands in for
+        # that; with no `ok` line to read, the wall time stands, which can only add shards.
+        from unittest import mock
+        real = shutil.which("go")
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(mutgate, "BROKER", pathlib.Path(d) / "broker"):
+            self.repo(d, TWO_TEST + "\n// changed\n")
+            pkg, tmp, shim = mutgate.BROKER / "hint", pathlib.Path(d) / "tmp", pathlib.Path(d) / "shim"
+            tmp.mkdir()
+            shim.mkdir()
+            (pkg / "slow_test.go").write_text(
+                'package hint\n\nimport (\n\t"testing"\n\t"time"\n)\n\nfunc TestSlow(t *testing.T) { time.Sleep(time.Second) }\n')
+            for tail, low, high in (("", 1.0, 2.0), (" >/dev/null", 3.0, None)):
+                with self.subTest(tail=tail):
+                    (shim / "go").write_text(f'#!/bin/sh\nsleep 2\nexec "{real}" "$@"{tail}\n')
+                    (shim / "go").chmod(0o755)
+                    with mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off",
+                                                      "PATH": f"{shim}:{os.environ['PATH']}"}):
+                        got, secs, problem = mutgate.timed_cover("hint", None, tmp)
+                    self.assertIsNone(problem)
+                    self.assertIn("broker/hint/hint.go", got)
+                    self.assertGreaterEqual(secs, low)
+                    if high is not None:
+                        self.assertLess(secs, high)
+
+    def test_go_ok_reads_go_tests_summary_line(self):
+        # MUT-plan-timing-skew (#6162): the last `ok` line's seconds, coverage suffix or not.
+        out = "ok  \tagentos/broker/x\t0.5s\n--- some log\nok  \tagentos/broker/hint\t12.034s\tcoverage: 50.0% of statements\n"
+        self.assertEqual(mutgate.GO_OK.findall(out), ["0.5", "12.034"])
+        self.assertEqual(mutgate.GO_OK.findall("ok  \tagentos/broker/hint\t3s\n"), ["3"])
+        for none in ("FAIL\tagentos/broker/hint\t1.0s\n", "ok  \tagentos/broker/hint\t(cached)\n", "  ok  \tp\t1s\n"):
+            self.assertEqual(mutgate.GO_OK.findall(none), [], none)
+
+    def test_echo_ok_streams_and_reads_the_last_ok_line(self):
+        # MUT-plan-timing-skew-fu (#6232): stdout reaches stderr chunk by chunk (`plan`'s stdout is
+        # the matrix, #4961), split lines and characters join, and the last `ok` line's seconds stand.
+        from unittest import mock
+
+        class Chunks:
+            def __init__(self, chunks):
+                self.chunks = list(chunks)
+
+            def read1(self, n):
+                return self.chunks.pop(0) if self.chunks else b""
+
+        cases = (
+            ([b"ok  \tagentos/broker/x\t9s\nlog \xc3", b"\xa9\nok  \tagentos/broker/hint\t1.", b"5s\tcoverage: 5%\n"], "1.5"),
+            ([b"ok  \tp\t9s\nok  \tp\t2s"], "2"),  # a last line with no newline
+            ([b"ok  \tp\t3s\t" + b"x" * 200000 + b"\n"], "3"),  # a long line's head still reads
+            ([b"x" * 200000 + b"ok  \tp\t4s\n"], None),  # an `ok` mid-line is no summary line
+            ([b"FAIL\tp\t1s\n"], None),
+            ([b"x\xc3"], None),  # a cut last character still echoes
+            ([], None),
+        )
+        for chunks, want in cases:
+            with self.subTest(want=want), mock.patch.object(sys, "stderr", io.StringIO()) as err:
+                self.assertEqual(mutgate.echo_ok(Chunks(chunks)), want)
+                self.assertEqual(err.getvalue(), b"".join(chunks).decode("utf-8", "replace"))
+
+    def test_echo_ok_holds_no_flood(self):
+        # MUT-plan-timing-skew-fu (#6232): a test flooding 64 MiB, in lines or in one line, costs
+        # echo_ok about a chunk, where buffering the output whole raised MemoryError in the plan job.
+        import tracemalloc
+        from unittest import mock
+
+        class Flood:
+            def __init__(self, piece, tail):
+                self.left, self.piece, self.tail = 1024, piece, tail
+
+            def read1(self, n):
+                self.left -= 1
+                return self.piece if self.left > 0 else (self.tail if self.left == 0 else b"")
+
+        class Sink:
+            seen = 0
+
+            def write(self, text):
+                Sink.seen += len(text)
+
+            def flush(self):
+                pass
+
+        for piece in (b"x" * 65536, (b"x" * 63 + b"\n") * 1024):
+            with self.subTest(lines=piece.count(b"\n")), mock.patch.object(sys, "stderr", Sink()):
+                Sink.seen = 0
+                tracemalloc.start()
+                try:
+                    got = mutgate.echo_ok(Flood(piece, b"\nok  \tagentos/broker/hint\t7.5s\n"))
+                    _, peak = tracemalloc.get_traced_memory()
+                finally:
+                    tracemalloc.stop()
+                self.assertEqual(got, "7.5")
+                self.assertEqual(Sink.seen, 1023 * 65536 + 31)
+                self.assertLess(peak, 4 << 20)
+
+    def test_echo_ok_scans_no_bare_newline(self):
+        # MUT-plan-timing-skew-fu2 (#6236): a flood of bare newlines reaches no regex search (each
+        # cost about 90 ns a byte), lines split at a chunk's edge still join, and the last `ok` line
+        # stands. The one search past the lines is echo_ok's read of its unfinished last line.
+        from unittest import mock
+
+        class Chunks:
+            def __init__(self, chunks):
+                self.chunks = list(chunks)
+
+            def read1(self, n):
+                return self.chunks.pop(0) if self.chunks else b""
+
+        flood = b"\n" * 65536
+        cases = (
+            ([b"ok  \tp\t1", b"s" + flood, flood, b"ok  \tp\t7.5s" + flood, flood], "7.5", 3),
+            ([b"ok  \tp\t2s", flood], "2", 2),  # a chunk opening with a newline ends the carried line
+            ([flood, b"x\n" + flood + b"ok  \tp\t3s"], "3", 2),
+            ([flood, flood], None, 1),
+        )
+        for chunks, want, searches in cases:
+            with self.subTest(want=want), mock.patch.object(sys, "stderr", io.StringIO()), \
+                    mock.patch.object(mutgate, "GO_OK", wraps=mutgate.GO_OK) as go_ok:
+                self.assertEqual(mutgate.echo_ok(Chunks(chunks)), want)
+                self.assertEqual(go_ok.search.call_count, searches)
+
+    def test_timed_cover_echoes_live_and_times_the_last_ok_line(self):
+        # MUT-plan-timing-skew-fu (#6232): a `go` that prints another `ok` line, then waits 2 s
+        # before the real run: that line reaches stderr at once, and the real run's own (last) `ok`
+        # line times the run, not the first one's 99 s.
+        from unittest import mock
+        real = shutil.which("go")
+
+        class Clock(io.StringIO):
+            first = None
+
+            def flush(self):  # stderr shows text only once flushed
+                if self.getvalue() and Clock.first is None:
+                    Clock.first = time.monotonic()
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(mutgate, "BROKER", pathlib.Path(d) / "broker"):
+            self.repo(d, TWO_TEST + "\n// changed\n")
+            tmp, shim = pathlib.Path(d) / "tmp", pathlib.Path(d) / "shim"
+            tmp.mkdir()
+            shim.mkdir()
+            (shim / "go").write_text(f'#!/bin/sh\nprintf \'ok  \\tagentos/broker/other\\t99s\\n\'\nsleep 2\nexec "{real}" "$@"\n')
+            (shim / "go").chmod(0o755)
+            with mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off", "PATH": f"{shim}:{os.environ['PATH']}"}), \
+                    mock.patch.object(sys, "stderr", Clock()) as err:
+                began = time.monotonic()
+                got, secs, problem = mutgate.timed_cover("hint", None, tmp)
+                ended = time.monotonic()
+            self.assertIsNone(problem)
+            self.assertIn("broker/hint/hint.go", got)
+            self.assertLess(secs, 2.0)
+            self.assertLess(Clock.first - began, 1.5)
+            self.assertGreaterEqual(ended - began, 2.0)
+            out = err.getvalue()
+            self.assertTrue(out.startswith("ok  \tagentos/broker/other\t99s\n"), out)
+            self.assertRegex(out, r"(?m)^ok  \s*\S*hint\s+[0-9.]+s")
+
     def test_test_only_diff_mutates_covered_lines(self):
         # #3607: a test-only diff passed every gate. TestUp still runs Up(20) but no longer checks
         # the clamp, so its guard survives; TestDown is untouched, so Down's line is no target.
@@ -1971,7 +2228,7 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             self.assertIn("the shards of hint disagree; rerun the mutgate workflow", r.stderr)  # #4983: the remedy
             self.assertEqual(git("status", "--porcelain", "--", "broker").stdout, "")
             # A shard asked for outside 0 <= I < K is refused before anything runs.
-            for bad in (("--shard", "2", "--of", "2"), ("--shard", "-1", "--of", "2"), ("--of", "257", "--shard", "0")):
+            for bad in (("--shard", "2", "--of", "2"), ("--shard", "-1", "--of", "2"), ("--of", "1281", "--shard", "0")):
                 r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(pathlib.Path(d) / "x"), *bad, env=env)
                 self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
@@ -2804,6 +3061,20 @@ class Plan(unittest.TestCase):
         self.assertEqual(mutgate.shard_of({"shard": {"index": 1279, "of": 1280}}), (1279, 1280))
         self.assertIsNone(mutgate.shard_of({"shard": {"index": 0, "of": 1281}}))
 
+    def test_run_takes_every_shard_a_plan_can_pack(self):
+        # MUT-plan-overflow-fu: `run` refused K past MATRIX_MAX after #6170 packed plans up to
+        # SHARDS_MAX, so all 294 of #6144's enforcer/nft shards exited 2 (run 44488046218). The K
+        # bound `run` takes is the largest one pack fits, whatever the constants become.
+        top = max(k for k in range(1, mutgate.SHARDS_MAX + 2) if mutgate.pack([("p", k)]))
+        with mock.patch.object(mutgate, "cmd_run", return_value=0) as ran:
+            for i in (0, top - 1):
+                self.assertEqual(mutgate.main(["run", "p", "--git", "HEAD~1", "--shard", str(i), "--of", str(top)]), 0)
+            self.assertEqual(ran.call_count, 2)
+            with self.assertRaises(SystemExit) as e, contextlib.redirect_stderr(io.StringIO()):
+                mutgate.main(["run", "p", "--git", "HEAD~1", "--shard", "0", "--of", str(top + 1)])
+            self.assertEqual(e.exception.code, 2)
+            self.assertEqual(ran.call_count, 2)
+
     def test_a_plan_past_the_matrix_names_its_packing(self):
         code, out, err = self.plan({"enforcer/nft": ({"broker/enforcer/nft/a.go": set(range(1, 1767))}, [{}] * 1019)},
                                    (364.0, None))
@@ -2850,6 +3121,10 @@ class Plan(unittest.TestCase):
         self.assertEqual(mutgate.shard_count(lines(1364), [0] * 825, 7.0), 9)
         self.assertEqual(mutgate.shard_count(lines(1048), [0] * 367, 0.0), 5)
         self.assertEqual(mutgate.shard_count({}, [], 1000.0), 1)
+        # #6217 (L3 on #6213): a shard's budget is what its per-test pass leaves of SHARD_SECONDS, but
+        # never under half: a pass past 15 minutes plans shards past the 30-minute target.
+        self.assertEqual(mutgate.shard_count({}, [0], costs=[1300.0], overhead=600.0), 2)
+        self.assertEqual(mutgate.shard_count({}, [0], costs=[1800.0], overhead=1700.0), 2)
 
     def test_a_package_with_no_target_line_plans_one_shard_and_no_suite_run(self):
         # MUT-waiver-store-claim (#5786): a record-only claim runs one cheap shard, never its suite.
