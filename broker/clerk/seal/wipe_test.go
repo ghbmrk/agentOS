@@ -5,6 +5,7 @@ package seal
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -85,8 +86,8 @@ func TestADisplacedValueIsWipedOnce(t *testing.T) {
 	if got := s.Entries(); !slices.Equal(got, []string{"x/c"}) {
 		t.Errorf("Entries = %v", got)
 	}
-	// The bounds withEntry checks before it clones: a value of MaxEntry
-	// bytes, and a name already held when the store is full, are taken.
+	// The bounds a write checks before it clones (entryErr, then withEntry's cap): a value of
+	// MaxEntry bytes, and a name already held when the store is full, are taken.
 	if s.Put("x/m", make([]byte, MaxEntry)) != nil || s.Put("x/m", make([]byte, MaxEntry+1)) == nil || s.Put("Bad Name", nil) == nil {
 		t.Fatal("the MaxEntry bound or the name pattern is off")
 	}
@@ -97,6 +98,9 @@ func TestADisplacedValueIsWipedOnce(t *testing.T) {
 	}
 	if s.Put("x/c", c) != nil || s.Put("x/new", nil) == nil {
 		t.Fatal("a full store refused a held name, or took a new one")
+	}
+	if _, err := s.ReplaceAndPut("x/new", nil, Swap{ID: s.f.Slots[0].ID, F: r}); err == nil || errors.Is(err, ErrNoSlot) {
+		t.Fatalf("ReplaceAndPut of a new name into a full store: %v, want the cap's refusal", err)
 	}
 	// encode refuses a file past MaxFile, which readFile and parse would refuse to open.
 	if _, err := s.encode(s.f, map[string][]byte{"x/big": make([]byte, MaxFile)}); err == nil {
@@ -143,5 +147,123 @@ func TestEntriesDecodeCopiesNoValue(t *testing.T) {
 		if string(v) != string(make([]byte, len(v))) {
 			t.Errorf("%s decoded to a copy %q", k, v)
 		}
+	}
+}
+
+// ReplaceAndPut refuses a bad entry name, a value past MaxEntry or a new name past MaxEntries
+// before it makes any slot, so a passphrase swap pays no Argon2 for one, and withEntry refuses
+// each itself (#6048, #6071; CLK-1). Each slot makeSlot makes wipes its slot key, so a refusal
+// that made one would show a wipe. The file write is stubbed to fail.
+func TestABadEntryMakesNoSlot(t *testing.T) {
+	r, key, id := Recovery{Key: make([]byte, RecoveryLen)}, slices.Repeat([]byte{0x6b}, keyLen), make([]byte, idLen)
+	sl, err := makeSlot(id, key, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Store{path: filepath.Join(t.TempDir(), "store"), key: secret.Hide(key), f: file{V: version, ID: id, Slots: []slot{sl}}, entries: secret.Hide(map[string][]byte{})}
+	w := writeTemp
+	t.Cleanup(func() { writeTemp = w })
+	writeTemp = func(string, []byte) (string, error) { return "", errors.New("no write") }
+	held := refusalWipes(t)
+	for name, v := range map[string][]byte{"Bad Name": nil, "x/long": make([]byte, MaxEntry+1)} {
+		if ids, err := s.ReplaceAndPut(name, v, Swap{ID: sl.ID, F: r}); err == nil || ids != nil {
+			t.Errorf("ReplaceAndPut(%q) = %v, %v; want a refusal", name, ids, err)
+		}
+		if e, err := s.withEntry(name, v); err == nil || e != nil { // its own check, whatever its caller did
+			t.Errorf("withEntry(%q) = %d entries, %v; want a refusal", name, len(e), err)
+		}
+	}
+	for i := range MaxEntries { // a full store refuses a new name, before any slot
+		s.entries.Get()[fmt.Sprintf("x/%d", i)] = nil
+	}
+	if e, err := s.withEntry("x/new", nil); err == nil || e != nil {
+		t.Errorf("withEntry of a new name into a full store = %d entries, %v; want a refusal", len(e), err)
+	}
+	if ids, err := s.ReplaceAndPut("x/new", nil, Swap{ID: sl.ID, F: r}); err == nil || ids != nil {
+		t.Errorf("ReplaceAndPut of a new name into a full store = %v, %v; want a refusal", ids, err)
+	}
+	if len(*held) != 0 || len(s.f.Slots) != 1 || s.f.Slots[0].ID != sl.ID {
+		t.Errorf("a refused entry made a slot: %d wipes, slots %v", len(*held), s.f.Slots)
+	}
+	if e, err := s.withEntry("x/0", []byte("v")); err != nil || len(e) != MaxEntries || string(e["x/0"]) != "v" {
+		t.Errorf("withEntry over a name in a full store = %d entries, %v; want it set", len(e), err)
+	}
+	if _, err := s.ReplaceAndPut("x/0", nil, Swap{ID: sl.ID, F: r}); err == nil || len(*held) == 0 {
+		t.Fatalf("a good entry: %v, %d wipes; want the stubbed write's error after a slot was made", err, len(*held))
+	}
+	s.Close() // a closed store says so first, whatever the name
+	_, err = s.ReplaceAndPut("Bad Name", nil, Swap{ID: sl.ID, F: r})
+	if !errors.Is(err, ErrClosed) || !errors.Is(s.Put("Bad Name", nil), ErrClosed) {
+		t.Errorf("a bad name to a closed store: %v, want ErrClosed", err)
+	}
+}
+
+// wipeRig is a store with one recovery slot whose file write goes to path directly, and its key r.
+func wipeRig(t *testing.T) (*Store, Recovery) {
+	r, key, id := Recovery{Key: make([]byte, RecoveryLen)}, slices.Repeat([]byte{0x6b}, keyLen), make([]byte, idLen)
+	sl, err := makeSlot(id, key, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, d := writeTemp, syncDir
+	t.Cleanup(func() { writeTemp, syncDir = w, d })
+	writeTemp = func(path string, b []byte) (string, error) { return path + ".new", os.WriteFile(path+".new", b, 0o600) }
+	syncDir = func(string) error { return nil }
+	path := filepath.Join(t.TempDir(), "store")
+	return &Store{path: path, key: secret.Hide(key), f: file{V: version, ID: id, Slots: []slot{sl}}, entries: secret.Hide(map[string][]byte{})}, r
+}
+
+// Unlock keeps each value as the buffer it decoded into, which Close wipes, not a clone of it
+// (#5948 item 1; CLK-1). A one-byte value's base64 is four bytes, which decode into three.
+func TestUnlockStoresTheDecodedBuffer(t *testing.T) {
+	s, r := wipeRig(t)
+	if err := s.Put("x/a", []byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	u, err := Unlock(s.path, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer u.Close()
+	if v := Entries(u)["x/a"]; string(v) != "\x01" || cap(v) != 3 {
+		t.Errorf("Unlock stored %q with cap %d, want the decoded buffer of cap 3", v, cap(v))
+	}
+}
+
+// A write clones its value only once nothing but the file write can refuse it (#5948 item 2;
+// CLK-1): no swaps, an unknown slot, a short recovery key, a full store and a bad name each
+// refuse with no clone made, and a write that is taken makes one.
+func TestARefusedWriteClonesNothing(t *testing.T) {
+	s, r := wipeRig(t)
+	id := s.f.Slots[0].ID
+	for i := range MaxEntries {
+		Entries(s)[string([]byte{'y', '/', byte('a' + i%26), byte('a' + i/26)})] = []byte{}
+	}
+	n, c := 0, clone
+	t.Cleanup(func() { clone = c })
+	clone = func(b []byte) []byte { n++; return c(b) }
+	v := []byte("refused-canary")
+	_, err1 := s.ReplaceAndPut("y/aa", v)
+	_, err2 := s.ReplaceAndPut("y/aa", v, Swap{ID: "none", F: r})
+	_, err3 := s.ReplaceAndPut("y/aa", v, Swap{ID: id, F: Recovery{Key: []byte("short")}})
+	_, err4 := s.ReplaceAndPut("x/new", v, Swap{ID: id, F: r})
+	_, err5 := s.ReplaceAndPut("Bad Name", v, Swap{ID: id, F: r})
+	err6, err7 := s.Put("x/new", v), s.Put("Bad Name", v)
+	for i, err := range []error{err1, err2, err3, err4, err5, err6, err7} {
+		if err == nil {
+			t.Errorf("refusal %d wrote", i+1)
+		}
+	}
+	if !errors.Is(err1, ErrNoSlot) || !errors.Is(err2, ErrNoSlot) || errors.Is(err4, ErrNoSlot) {
+		t.Errorf("no swaps: %v; an unknown slot: %v; a full store: %v", err1, err2, err4)
+	}
+	if n != 0 {
+		t.Errorf("refused writes cloned the value %d times, want none", n)
+	}
+	if _, err := s.ReplaceAndPut("y/aa", v, Swap{ID: id, F: r}); err != nil || n != 1 {
+		t.Errorf("a ReplaceAndPut: %v, cloned %d times; want once", err, n)
+	}
+	if err := s.Put("y/ab", v); err != nil || n != 2 {
+		t.Errorf("a Put: %v, cloned %d times in all; want twice", err, n)
 	}
 }

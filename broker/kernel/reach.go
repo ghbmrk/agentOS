@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"errors"
 	"maps"
 	"slices"
 
@@ -35,31 +36,40 @@ type (
 	}
 )
 
-// applyDecl folds a decl.reach entry. It refuses the whole entry, changing
-// nothing, on an empty ID, a class past the table, a repeated node, an edge
-// not reset, copy or act or without From, a clerk or node rebound, or a first
-// declaration of a node an edge named (priced as every class): each lowers.
+// ErrDeclReach refuses a declaration the fold would drop: malformed or lowering.
+var ErrDeclReach = errors.New("kernel: the declaration is malformed or would lower a price")
+
+// DeclareReach logs d unsigned, not a widening, since it only raises prices;
+// one the fold would drop is refused whole and logs nothing.
+func (k *Kernel) DeclareReach(at int64, d DeclReach) error {
+	if !k.s.declOK(d) {
+		return ErrDeclReach
+	}
+	_, err := k.emit(k.read(at), TDeclReach, d)
+	return err
+}
+
+// DeclReach is a copy of what the log declared, for a writer sending only
+// additions: editing it leaves the fold, so no price, unchanged.
+func (s *State) DeclReach() (d DeclReach) {
+	for _, n := range s.decl.nodes {
+		n.Classes = slices.Clone(n.Classes)
+		d.Nodes = append(d.Nodes, n)
+	}
+	for _, e := range s.decl.edges {
+		e.From = slices.Clone(e.From)
+		d.Edges = append(d.Edges, e)
+	}
+	return d
+}
+
+// applyDecl folds a decl.reach entry, or drops it whole if declOK refuses.
 func (s *State) applyDecl(e Entry) error {
 	b, err := body[DeclReach](e)
-	if err != nil {
+	if err != nil || !s.declOK(b) {
 		return err
 	}
-	d, bind, seen := &s.decl, maps.Collect(maps.All(s.decl.clerks)), map[string]bool{}
-	for _, n := range b.Nodes {
-		c, bound := bind[n.Clerk]
-		old, had := d.nodes[n.ID]
-		rebound := n.Clerk != "" && (had && old.Clerk != "" && old.Clerk != n.Clerk || bound && c != n.ID)
-		if rebound || seen[n.ID] || n.ID == "" || slices.ContainsFunc(n.Classes, func(a key.Asset) bool { return a > key.AssetSafety }) ||
-			!had && slices.ContainsFunc(d.edges, func(e ReachEdge) bool { return e.To == n.ID || slices.Contains(e.From, n.ID) }) {
-			return nil
-		}
-		seen[n.ID], bind[n.Clerk] = true, n.ID
-	}
-	for _, e := range b.Edges {
-		if !slices.Contains([]string{"reset", "copy", "act"}, e.Kind) || len(e.From) == 0 || e.To == "" || slices.Contains(e.From, "") {
-			return nil
-		}
-	}
+	d := &s.decl
 	if d.nodes == nil {
 		d.nodes, d.clerks = map[string]ReachNode{}, map[string]string{}
 	}
@@ -73,6 +83,30 @@ func (s *State) applyDecl(e Entry) error {
 	}
 	d.edges = append(d.edges, b.Edges...)
 	return nil
+}
+
+// declOK refuses, on an empty ID, a class past the table, a repeated node,
+// an edge not reset, copy or act or without From, a clerk or node rebound,
+// or a first declaration of a node an edge named (priced as every class):
+// each lowers.
+func (s *State) declOK(b DeclReach) bool {
+	d, bind, seen := &s.decl, maps.Collect(maps.All(s.decl.clerks)), map[string]bool{}
+	for _, n := range b.Nodes {
+		c, bound := bind[n.Clerk]
+		old, had := d.nodes[n.ID]
+		rebound := n.Clerk != "" && (had && old.Clerk != "" && old.Clerk != n.Clerk || bound && c != n.ID)
+		if rebound || seen[n.ID] || n.ID == "" || slices.ContainsFunc(n.Classes, func(a key.Asset) bool { return a > key.AssetSafety }) ||
+			!had && slices.ContainsFunc(d.edges, func(e ReachEdge) bool { return e.To == n.ID || slices.Contains(e.From, n.ID) }) {
+			return false
+		}
+		seen[n.ID], bind[n.Clerk] = true, n.ID
+	}
+	for _, e := range b.Edges {
+		if !slices.Contains([]string{"reset", "copy", "act"}, e.Kind) || len(e.From) == 0 || e.To == "" || slices.Contains(e.From, "") {
+			return false
+		}
+	}
+	return true
 }
 
 // reached is node and all it reaches; nil for a node no entry declared.

@@ -36,7 +36,8 @@ var controlPath = map[string][]string{
 	// #2783 (c) leaves them to the kernel.
 	"daemon/journalowner": {"control", "journal"},
 	"admission":           {},
-	"sockets":             {},
+	"sockets":             {"sockets/peers"},
+	"sockets/peers":       {}, // the peer rule (#6039)
 	"cgroup":              {},
 	"budget":              {"admission", "cgroup"}, // RES-2 component budget (P2-5)
 	"accel":               {"admission"},           // RES-3 discovery from sysfs (P2-5)
@@ -420,7 +421,8 @@ var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec",
 // stdExceptions are the forbidden standard packages a control-path package
 // may still use, and why.
 var stdExceptions = map[string][]string{
-	"sockets":         {"net", "syscall"}, // Unix listeners, SO_PEERCRED, flock
+	"sockets":         {"net", "syscall"}, // Unix listeners, flock
+	"sockets/peers":   {"net", "syscall"}, // Unix listeners, SO_PEERCRED
 	"cmd/agentosd":    {"syscall"},        // signal numbers for shutdown
 	"journal":         {"syscall"},        // flock on the journal file
 	"kernel/privfile": {"syscall"},        // O_NOFOLLOW and Stat_t for the owner-only check

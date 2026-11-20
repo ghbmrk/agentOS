@@ -6,19 +6,25 @@ name string (the only way to select AES-GCM-SIV), the references to it, held to 
 [cipher] section, so the openssl records' reach note is checked on each build.
 VULN-cipher-sweep-tidy (#5861): each counted entry is keyed to the reviewed file's SHA-256, so a new
 package version fails until its source is read again; malformed, empty, repeated and overlapping
-entries are refused, and every refusal points at the records' reach note."""
+entries are refused, and every refusal points at the records' reach note.
+VULN-debian-r13-f1 (#6285): it also reads which files import or reach glibc's glob() (and wordexp, which
+calls it), held to the allowlist's [glob] section, so the DEBIAN-CVE-2026-126765 records' reach is
+read from the tree."""
 # REQ: EVL-5
 import contextlib
+import errno
 import fnmatch
 import importlib.util
 import io
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "image"))
@@ -299,6 +305,9 @@ class CipherSitesTest(Tree):
         self.assertEqual(len(errs), 2)
         self.assertTrue(errs[0].endswith("adding: /usr/bin/dlsymmer sha256=%s EVP_get_cipherbyname=0"
                                          % places["tree"]["sha256"]["/usr/bin/dlsymmer"]), errs[0])
+        # #5889 item 3: no entry exists, so the refusal asks for one to be added, not updated.
+        self.assertIn("then add the [cipher] entry", errs[0])
+        self.assertNotIn("update", errs[0])
         self.assertIn("[cipher] /usr/sbin/gone matches no file", errs[1])
 
     def test_new_version_with_the_same_counts_fails(self):
@@ -310,6 +319,7 @@ class CipherSitesTest(Tree):
         self.assertEqual(len(errs), 1)
         self.assertIn("/usr/bin/spells holds other bytes (a new version?) than the ones reviewed", errs[0])
         self.assertNotIn("cipher references", errs[0])
+        self.assertIn("then update the [cipher] entry", errs[0])
         self.assertTrue(errs[0].endswith("as: /usr/bin/spells sha256=%s GCM-SIV=1"
                                          % places["tree"]["sha256"]["/usr/bin/spells"]), errs[0])
 
@@ -335,12 +345,91 @@ class CipherSitesTest(Tree):
                 self.assertEqual(len(errs), 1)
                 self.assertIn("/usr/lib/libfetcher.so.1 matches 2 [cipher] entries", errs[0])
 
+    def test_held_file_without_a_digest_is_a_broken_scan(self):
+        # #5889 item 3: a held file with no SHA-256 was offered "sha256=?", which read_allow refuses.
+        places = sweep.run_tree(str(self.tree))
+        ok = self.entries(places)
+        for entries in (ok, {k: v for k, v in ok.items() if k != "/usr/bin/spells"}):
+            broken = {"tree": dict(places["tree"], sha256={k: v for k, v in places["tree"]["sha256"].items()
+                                                           if k != "/usr/bin/spells"})}
+            errs = sweep.cipher_refusals(broken, entries)
+            with self.subTest(errs=errs):
+                self.assertEqual(len(errs), 1)
+                self.assertIn("/usr/bin/spells holds cipher sites (GCM-SIV=1) but the scan gives no SHA-256",
+                              errs[0])
+                self.assertIn("the scan is broken", errs[0])
+                self.assertNotIn("sha256=", errs[0])
+
     def test_summary_lists_sites(self):
         places = sweep.run_tree(str(self.tree))
         lines = sweep.summary(places)
         self.assertIn("tree cipher: 8 files hold a by-name cipher selector or spell GCM-SIV or KRB5KDF", lines)
         self.assertIn("  sites /usr/lib/libfetcher.so.1 sha256=%s EVP_CIPHER_fetch=2"
                       % places["tree"]["sha256"]["/usr/lib/libfetcher.so.1"], lines)
+
+# #6285: glob() and wordexp (glibc's caller of it) are DEBIAN-CVE-2026-126765's; globfree alone is not.
+GLOB_LIB = ('#include <glob.h>\nint f(const char *p) { glob_t g; int r = glob(p, 0, 0, &g); '
+            'globfree(&g); return r; }\n')
+GLOB64 = '#include <glob.h>\nint main(int c, char **v) { glob64_t g; return glob64(v[0], 0, 0, &g); }\n'
+WORDEXP = '#include <wordexp.h>\nint main(int c, char **v) { wordexp_t w; return wordexp(v[0], &w, 0); }\n'
+GLOBFREE = '#include <glob.h>\nint main(void) { glob_t g = {0}; globfree(&g); return 0; }\n'
+# A library's own glob, unversioned: not glibc's, so not counted.
+OWN_GLOB = "int glob(void) { return 1; }\n"
+USES_OWN_GLOB = "int glob(void);\nint main(void) { return glob(); }\n"
+
+
+@NEEDS_CC
+class GlobImportsTest(unittest.TestCase):
+    """#6285: the glob group is read from the binaries as the regex group is."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        t = pathlib.Path(cls.tmp.name)
+        cls.tree, src = t / "tree", t / "src"
+        src.mkdir()
+        for d in ("usr/bin", "usr/lib"):
+            (cls.tree / d).mkdir(parents=True)
+        lib = cls.tree / "usr/lib"
+
+        def cc(name, code, out, *args):
+            (src / name).write_text(code)
+            subprocess.run(["cc", "-D_GNU_SOURCE", "-o", str(out), str(src / name), *args], check=True)
+        cc("glob.c", GLOB_LIB, lib / "libglob-user.so.1.0", "-shared", "-fPIC", "-Wl,-soname,libglob-user.so.1")
+        os.symlink("libglob-user.so.1.0", lib / "libglob-user.so")
+        cc("uses.c", USES_LIB, cls.tree / "usr/bin/globd", "-L" + str(lib), "-lglob-user")
+        cc("g64.c", GLOB64, cls.tree / "usr/bin/g64")
+        cc("wordexp.c", WORDEXP, cls.tree / "usr/bin/wexp")
+        cc("globfree.c", GLOBFREE, cls.tree / "usr/bin/onlyfree")
+        cc("own.c", OWN_GLOB, lib / "libownglob.so", "-shared", "-fPIC")
+        cc("ownuse.c", USES_OWN_GLOB, cls.tree / "usr/bin/ownglob", "-L" + str(lib), "-lownglob")
+        cls.got = sweep.run_tree(str(cls.tree))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_glob_glob64_and_wordexp_import_globfree_and_own_glob_do_not(self):
+        got = self.got["tree"]
+        self.assertEqual(got["imports"], {"/usr/lib/libglob-user.so.1.0": ["glob"], "/usr/bin/g64": ["glob64"],
+                                          "/usr/bin/wexp": ["wordexp"]})
+        self.assertEqual(got["via"], {"/usr/bin/globd": ["/usr/lib/libglob-user.so.1.0"]})
+        self.assertEqual({sweep.group_of(s) for s in ("glob", "glob64", "wordexp")}, {"glob"})
+        self.assertEqual({sweep.group_of(s) for s in ("globfree", "globfree64", "glob_pattern_p", "globber")},
+                         {None})
+
+    def test_summary_lists_the_glob_group(self):
+        lines = sweep.summary(self.got)
+        self.assertIn("tree glob: 3 files import a function, 1 more reach an importing library through NEEDED", lines)
+        self.assertIn("  via /usr/bin/globd: /usr/lib/libglob-user.so.1.0", lines)
+
+    def test_unlisted_importers_fail_and_listed_pass(self):
+        listed = ["/usr/lib/libglob-user.so.*", "/usr/bin/globd", "/usr/bin/g64", "/usr/bin/wexp"]
+        self.assertEqual(sweep.refusals(self.got, [], listed), [])
+        errs = sweep.refusals(self.got, [], listed[1:])
+        self.assertEqual(errs, ["tree: /usr/lib/libglob-user.so.1.0 imports or reaches glob() and is not in "
+                                "import_sweep.allow [glob]; review it, name it in the -126765 records, then "
+                                "add the entry: /usr/lib/libglob-user.so.1.0"])
 
 
 def place(imports, via=None, scanned=10):
@@ -389,6 +478,41 @@ class RefusalsTest(unittest.TestCase):
         lib = {"tree": place({"/usr/lib/libw.so.1": ["__isoc99_vswscanf"]}, {"/usr/bin/bash": ["/usr/lib/libw.so.1"]})}
         self.assertEqual(len([e for e in sweep.refusals(lib, ["/usr/bin/bash"]) if "wide scanf" in e]), 2)
 
+    def test_glob_reach_is_held_to_the_glob_section_alone(self):
+        # #6285: a daemon reaching glob() fails, directly or through a library, and the regex list does not
+        # cover it: each section is its own record's.
+        glob = {"tree": dict(self.OK["tree"], imports=dict(self.OK["tree"]["imports"],
+                                                           **{"/usr/lib/libg.so.1": ["glob64"],
+                                                              "/usr/bin/bash": ["regcomp", "glob"]}),
+                             via={"/usr/lib/systemd/systemd": ["/usr/lib/libg.so.1"],
+                                  "/usr/bin/lsblk": ["/usr/lib/libsmartcols.so.1.1.0"]})}
+        errs = sweep.refusals(glob, self.ALLOW)
+        self.assertEqual([e.split(" imports")[0] for e in errs],
+                         ["tree: /usr/bin/bash", "tree: /usr/lib/libg.so.1", "tree: /usr/lib/systemd/systemd"])
+        self.assertTrue(all("reaches glob() and is not in import_sweep.allow [glob]" in e for e in errs), errs)
+        self.assertEqual(sweep.refusals(glob, self.ALLOW, ["/usr/bin/bash", "/usr/lib/libg.so.*",
+                                                           "/usr/lib/systemd/systemd"]), [])
+        # A [glob] entry matching no glob() importer fails, even one a regex importer matches.
+        self.assertEqual(sweep.refusals(self.OK, self.ALLOW, ["/usr/bin/bash"]),
+                         ["import_sweep.allow: [glob] /usr/bin/bash matches no file that reaches glob(); remove it"])
+
+    def test_glob_section_is_read_once_and_unknown_sections_fail(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = pathlib.Path(d) / "allow"
+            a.write_text("/usr/bin/bash\n[glob]\n# why\n/usr/bin/bash  # the shell\n/usr/lib/libg.so.*\n"
+                         "[cipher]\n/usr/lib/libcrypto.so.3 *\n")
+            self.assertEqual(sweep.read_allow(a), (["/usr/bin/bash"], {"/usr/lib/libcrypto.so.3": "*"},
+                                                   ["/usr/bin/bash", "/usr/lib/libg.so.*"]))
+            a.write_text("/usr/bin/bash\n[cipher]\n/usr/lib/libcrypto.so.3 *\n[glob]\n/usr/bin/x\n")
+            self.assertEqual(sweep.read_allow(a)[2], ["/usr/bin/x"])
+            for body, want in (("[glob]\n/usr/bin/x\n[glob]\n", ":3: [glob] is given again"),
+                               ("[regex]\n", ":1: [regex] is no section"),
+                               ("[glob\n", ":1: [glob is no section")):
+                a.write_text(body)
+                with self.subTest(body=body), self.assertRaises(SystemExit) as cm:
+                    sweep.read_allow(a)
+                self.assertIn(want, str(cm.exception))
+
     def test_unused_glob_fails(self):
         errs = sweep.refusals(self.OK, self.ALLOW + ["/usr/bin/gone"])
         self.assertEqual(errs, ["import_sweep.allow: /usr/bin/gone matches no file that reaches a regex function; remove it"])
@@ -423,6 +547,11 @@ class RefusalsTest(unittest.TestCase):
         cipher = sweep.read_allow(sweep.ALLOW)[1]
         self.assertTrue(all(g.startswith("/usr/") for g in cipher), cipher)
         self.assertIn("EVP_CIPHER_fetch", cipher["/usr/lib/x86_64-linux-gnu/libcryptsetup.so.12.*"]["sites"])
+        # #6285: so are the [glob] entries, each named once, and libsystemd-shared's call sites are reviewed there.
+        globs = sweep.read_allow(sweep.ALLOW)[2]
+        self.assertTrue(all(g.startswith("/usr/") for g in globs), globs)
+        self.assertEqual(len(globs), len(set(globs)))
+        self.assertIn("/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so", globs)
 
     def test_bad_cipher_entries_name_the_line(self):
         # L3 6899461135 items 2, 3 and 6, and an entry not keyed to its bytes (#5861).
@@ -448,6 +577,168 @@ class RefusalsTest(unittest.TestCase):
                 self.assertIn("%s:%d: " % (a, line), str(cm.exception))
                 self.assertIn(want, str(cm.exception))
                 self.assertIn("GLOB sha256=HEX NAME=COUNT", str(cm.exception))
+
+    def test_digest_in_either_case_is_kept_lowercased(self):
+        # #5889 item 2: an uppercase digest was refused as "gives 0 sha256=HEX tokens".
+        with tempfile.TemporaryDirectory() as d:
+            a = pathlib.Path(d) / "allow"
+            for hexd in ("0F" * 32, "0f" * 32, "0F0f" * 16):
+                a.write_text("/usr/bin/bash\n[cipher]\n/usr/bin/x sha256=%s GCM-SIV=1\n" % hexd)
+                with self.subTest(hexd=hexd):
+                    self.assertEqual(sweep.read_allow(a)[1]["/usr/bin/x"],
+                                     {"sha256": "0f" * 32, "sites": {"GCM-SIV": 1}})
+
+    def test_shipped_allow_comments_keep_the_wrap(self):
+        # #5889 item 4: comment lines wrap near 105 columns; only entry lines (a glob and its tokens) run on.
+        long = [(n, len(l)) for n, l in enumerate(pathlib.Path(sweep.ALLOW).read_text().splitlines(), 1)
+                if l.startswith("#") and len(l) > 107]
+        self.assertEqual(long, [])
+
+    def test_image_workflow_runs_on_every_guest_root_build_sh_builds(self):
+        # #5889 item 1: import_sweep.allow pins guest binaries by SHA-256, so a change to a guest root's
+        # inputs (a codex version bump) must run image.yml, on its pull request and on main.
+        guests = re.findall(r'"\$REPO/guest/([\w-]+)/build-rootfs\.sh"',
+                            (ROOT / "image/build.sh").read_text())
+        self.assertIn("codex", guests)
+        wf = (ROOT / ".github/workflows/image.yml").read_text()
+        on = wf.split("\njobs:\n", 1)[0]
+        pr, push = on.split("\n  pull_request:\n", 1)[1].split("\n  push:\n", 1)
+        for g in guests:
+            for name, part in (("pull_request", pr), ("push", push)):
+                with self.subTest(guest=g, on=name):
+                    self.assertIn('      - "guest/%s/**"\n' % g, part)
+
+
+class ReadErrorTest(unittest.TestCase):
+    """IMG-offline-verity-follow (#5988): a /usr block dm-verity refuses reads as EIO, and a file whose
+    first block reads so fails the run instead of being skipped as not ELF."""
+
+    def eio_on(self, target):
+        real = open
+
+        def fake(path, *a, **k):
+            if os.fspath(path) == target:
+                raise OSError(errno.EIO, os.strerror(errno.EIO), path)
+            return real(path, *a, **k)
+        return mock.patch.object(sweep, "open", fake, create=True)
+
+    def test_eio_fails_the_run_naming_the_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "bin")
+            pathlib.Path(f).write_bytes(b"\x7fELF" + b"\0" * 60)
+            with self.eio_on(f), self.assertRaises(SystemExit) as cm:
+                sweep.is_elf(f)
+        self.assertIn("cannot read %s" % f, str(cm.exception))
+        self.assertIn(os.strerror(errno.EIO), str(cm.exception))
+
+    def test_eio_in_the_walk_fails_the_tree(self):
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "usr/bin").mkdir(parents=True)
+            f = os.path.join(d, "usr/bin/tampered")
+            pathlib.Path(f).write_bytes(b"\x7fELF" + b"\0" * 60)
+            pathlib.Path(d, "usr/bin/text").write_text("not elf\n")
+            with self.eio_on(f), self.assertRaises(SystemExit):
+                sweep.run_tree(d)
+
+    def test_eio_on_a_directory_fails_the_run_naming_it(self):
+        # A directory block refused by dm-verity: os.walk would drop the subtree and the scan pass smaller.
+        real = os.scandir
+
+        def fake(path=".", *a, **k):
+            if os.fspath(path).endswith("/usr/bin"):
+                raise OSError(errno.EIO, os.strerror(errno.EIO), path)
+            return real(path, *a, **k)
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "usr/bin").mkdir(parents=True)
+            pathlib.Path(d, "usr/bin/tampered").write_bytes(b"\x7fELF" + b"\0" * 60)
+            with mock.patch.object(os, "scandir", fake), self.assertRaises(SystemExit) as cm:
+                sweep.run_tree(d)
+        self.assertIn("cannot read %s: %s" % (os.path.join(d, "usr/bin"), os.strerror(errno.EIO)),
+                      str(cm.exception))
+
+    def test_eio_on_an_initrd_directory_fails_the_build(self):
+        real = os.scandir
+
+        def fake(path=".", *a, **k):
+            if os.fspath(path).endswith("/initrd"):
+                raise OSError(errno.EIO, os.strerror(errno.EIO), path)
+            return real(path, *a, **k)
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "initrd").mkdir()
+            built = mock.patch.dict(sys.modules, offline_systemd=mock.Mock(
+                built_tree=lambda out, v: (d, None, None, lambda: None)))
+            with built, mock.patch.object(sweep, "run_tree", lambda root, usr: {}), \
+                    mock.patch.object(os, "scandir", fake), self.assertRaises(SystemExit) as cm:
+                sweep.run_build(d, "v")
+        self.assertIn("cannot read %s" % os.path.join(d, "initrd"), str(cm.exception))
+
+    def initrd_build(self, d):
+        """run_build over D's initrd directory alone, with its places' records as {name: path}."""
+        built = mock.patch.dict(sys.modules, offline_systemd=mock.Mock(
+            built_tree=lambda out, v: (d, None, None, lambda: None)))
+        with built, mock.patch.object(sweep, "run_tree", lambda root, usr: {}), \
+                mock.patch.object(sweep, "initrd_place", lambda p, scratch: os.fspath(p)):
+            return sweep.run_build(d, "v")
+
+    def test_a_stat_error_on_an_initrd_entry_fails_the_build(self):
+        # #6073: Path.is_file() read a symlink loop (or EIO) as "not a file" and skipped the initrd.
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "initrd").mkdir()
+            loop = pathlib.Path(d, "initrd", "loop")
+            loop.symlink_to("loop")
+            with self.assertRaises(SystemExit) as cm:
+                self.initrd_build(d)
+        self.assertIn("cannot read %s: %s" % (loop, os.strerror(errno.ELOOP)), str(cm.exception))
+
+    def test_initrd_entries_read_only_regular_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            i = pathlib.Path(d) / "initrd"
+            (i / "sub").mkdir(parents=True)
+            (i / "sub" / "main.img").write_bytes(b"x")
+            (i / "link.img").symlink_to("sub/main.img")
+            (i / "gone.img").symlink_to("nowhere")
+            os.mkfifo(i / "fifo")
+            got = self.initrd_build(d)
+        self.assertEqual(got, {"initrd:link.img": str(i / "link.img"), "initrd:sub/main.img": str(i / "sub/main.img")})
+
+    def tree_with_stat_error(self, err):
+        """run_tree over a tree whose one ELF file's lstat (either spelling) raises ERR."""
+        real = os.stat
+
+        def fake(path, *a, **k):
+            if os.fspath(path).endswith("/usr/bin/tampered") and k.get("follow_symlinks") is False:
+                raise OSError(err, os.strerror(err), path)
+            return real(path, *a, **k)
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "usr/bin").mkdir(parents=True)
+            pathlib.Path(d, "usr/bin/tampered").write_bytes(b"\x7fELF" + b"\0" * 60)
+            with mock.patch.object(os, "stat", fake), \
+                    mock.patch.object(os, "lstat", lambda path: fake(path, follow_symlinks=False)):
+                return sweep.run_tree(d)
+
+    def test_a_stat_error_in_the_tree_fails_the_run_naming_the_file(self):
+        # #6098: the tree walk's lstat raised a bare traceback; it now gives the initrd loop's message.
+        for err in (errno.EIO, errno.EACCES):
+            with self.subTest(err=errno.errorcode[err]):
+                with self.assertRaises(SystemExit) as cm:
+                    self.tree_with_stat_error(err)
+                self.assertRegex(str(cm.exception), r"^import sweep: cannot read /\S+/usr/bin/tampered: %s$"
+                                 % re.escape(os.strerror(err)))
+
+    def test_a_file_gone_from_the_tree_is_not_scanned(self):
+        # Gone between the walk and its stat: not a file, as is_elf and the initrd loop read it.
+        got = self.tree_with_stat_error(errno.ENOENT)
+        self.assertEqual(got["tree"]["scanned"], 0)
+
+    def test_vanished_short_and_plain_files_are_not_elf(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertFalse(sweep.is_elf(os.path.join(d, "gone")))
+            pathlib.Path(d, "short").write_bytes(b"\x7fE")
+            self.assertFalse(sweep.is_elf(os.path.join(d, "short")))
+            pathlib.Path(d, "text").write_text("#!/bin/sh\n")
+            self.assertFalse(sweep.is_elf(os.path.join(d, "text")))
+            pathlib.Path(d, "elf").write_bytes(b"\x7fELF")
+            self.assertTrue(sweep.is_elf(os.path.join(d, "elf")))
 
 
 if __name__ == "__main__":

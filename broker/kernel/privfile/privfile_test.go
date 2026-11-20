@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -45,17 +46,51 @@ func TestWriteAtomicRefusesADirOtherUidsCanWrite(t *testing.T) {
 	}
 }
 
-// A directory owned by another uid is refused: that uid can chmod it open.
+// A directory owned by another uid is refused, by OpenDir and so by
+// WriteAtomic: that uid can chmod it open. This is the one test of that rule.
+// As root the test chowns a directory away. As any other uid it runs in a
+// child in a new user namespace that maps only this uid and gid, where the
+// root-owned "/" reads as the overflow uid: neither this uid nor root, and
+// not writable by group or other, so only the owner check refuses it.
 func TestWriteAtomicRefusesADirOfAnotherUid(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("chown to another uid needs root")
+	if os.Geteuid() == 0 {
+		dir := t.TempDir()
+		if err := os.Chown(dir, 12345, 12345); err != nil {
+			t.Fatal(err)
+		}
+		err := WriteAtomic(dir, "f", []byte("canary"), nil)
+		if err == nil || !strings.Contains(err.Error(), "not this uid or root") {
+			t.Fatalf("a directory of uid 12345: %v, want the owner refusal", err)
+		}
+		if ents, _ := os.ReadDir(dir); len(ents) != 0 {
+			t.Fatalf("a refused directory of uid 12345 holds %d entries", len(ents))
+		}
+		return
 	}
-	dir := t.TempDir()
-	if err := os.Chown(dir, 12345, 12345); err != nil {
+	if os.Getenv(inChild) == "" {
+		runChild(t, &syscall.SysProcAttr{
+			Cloneflags:  syscall.CLONE_NEWUSER,
+			UidMappings: []syscall.SysProcIDMap{{ContainerID: os.Getuid(), HostID: os.Getuid(), Size: 1}},
+			GidMappings: []syscall.SysProcIDMap{{ContainerID: os.Getgid(), HostID: os.Getgid(), Size: 1}},
+		})
+		return
+	}
+	fi, err := os.Stat("/")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteAtomic(dir, "f", []byte("canary"), nil); err == nil {
-		t.Fatal("a directory of uid 12345 was written")
+	uid := fi.Sys().(*syscall.Stat_t).Uid
+	if uid == 0 || int(uid) == os.Geteuid() || fi.Mode().Perm()&0o022 != 0 {
+		t.Skipf("/ reads as uid %d, mode %v, here", uid, fi.Mode().Perm())
+	}
+	d, r, err := OpenDir("/")
+	if err == nil {
+		r.Close()
+		d.Close()
+		t.Fatalf("/ of uid %d was opened", uid)
+	}
+	if !strings.Contains(err.Error(), "not this uid or root") {
+		t.Fatalf("/ of uid %d: %v, want the owner refusal", uid, err)
 	}
 }
 
@@ -233,8 +268,8 @@ func TestWriteAtomicLeaksNoDescriptor(t *testing.T) {
 // no -test.coverprofile; it gets the parent's -test.gocoverdir, so its
 // coverage lands in the profile the parent writes.
 func TestWriteAtomicClosesTheTmpOnAFailedOrStoppedStep(t *testing.T) {
-	if os.Getenv(fsizeChild) == "" {
-		runFsizeChild(t)
+	if os.Getenv(inChild) == "" {
+		runChild(t, nil)
 		return
 	}
 	dir := t.TempDir()
@@ -278,15 +313,15 @@ func TestWriteAtomicClosesTheTmpOnAFailedOrStoppedStep(t *testing.T) {
 	}
 }
 
-const fsizeChild = "AGENTOS_PRIVFILE_FSIZE_CHILD"
+const inChild = "AGENTOS_PRIVFILE_FSIZE_CHILD"
 
-// runFsizeChild runs t's test alone in a child of this test binary and
-// fails t unless the child ran it and passed; a skip in the child is a skip
+// runChild runs t's test alone in a child of this test binary, made with
+// attr (nil for a plain child), and fails t unless the child ran it and passed; a skip in the child is a skip
 // here. A binary built with coverage that was given no -test.gocoverdir
 // (run directly, as tools/mutgate.py's deletion run does) gets one here,
 // since the testing package's teardown reads the flag only after the tests
 // and merges every counter file in that directory into -test.coverprofile.
-func runFsizeChild(t *testing.T) {
+func runChild(t *testing.T, attr *syscall.SysProcAttr) {
 	args := []string{"-test.run=^" + t.Name() + "$", "-test.count=1", "-test.v"}
 	if testing.CoverMode() != "" {
 		f := flag.Lookup("test.gocoverdir")
@@ -305,10 +340,14 @@ func runFsizeChild(t *testing.T) {
 		args = append(args, "-test.gocoverdir="+f.Value.String())
 	}
 	cmd := exec.Command(os.Args[0], args...)
-	cmd.Env = append(os.Environ(), fsizeChild+"=1")
+	cmd.Env = append(os.Environ(), inChild+"=1")
+	cmd.SysProcAttr = attr
 	out, err := cmd.CombinedOutput()
 	t.Logf("in the child:\n%s", out)
+	var exited *exec.ExitError
 	switch {
+	case attr != nil && err != nil && !errors.As(err, &exited):
+		t.Skipf("no child in a user namespace: %v", err)
 	case err != nil:
 		t.Fatalf("child: %v", err)
 	case bytes.Contains(out, []byte("--- SKIP: "+t.Name())):

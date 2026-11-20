@@ -58,6 +58,10 @@ type MainConfig struct {
 	// one refused at its start, which every boot repeats (#2998). "" makes
 	// none.
 	Up string
+	// Chrony is chronyd's command socket, bound read-only into the sandbox,
+	// and ChronyReply the socket the kernel binds for chronyd's answers
+	// (#5391); "" reads the box clock alone.
+	Chrony, ChronyReply string
 }
 
 // markUp makes path, empty. It never follows a link nor replaces what is
@@ -345,18 +349,16 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	if err != nil {
 		return err
 	}
-	// The kernel reads the box clock at each decision; OpenKernel floors it
-	// at the log and carries it forward on the monotonic clock (onLog), so
-	// its time never goes back (TIM-1, #5147).
-	read := func() kernel.Reading { return kernel.At(time.Now().UnixMilli()) }
-	clock := func() int64 { return read().Earliest }
+	// The kernel reads kernelSource at each decision; OpenKernel floors it at the
+	// log and carries it on the monotonic clock (onLog): it never goes back (TIM-1, #5147).
+	clock := func() int64 { return time.Now().UnixMilli() }
 	h, err := OpenKernel(KernelConfig{
 		Log: cfg.Log, Anchor: anchor, Key: keys.Log.Get(),
 		Pub: keys.Head.Get().Public().(ed25519.PublicKey), Sign: keys.Head.Get(),
 		Anchors: keys.Anchors, Clerks: cfg.Clerks, KeyDir: cfg.KeyDir,
 		ContentDir: cfg.ContentDir, Stores: slices.Sorted(maps.Keys(cfg.Content)),
 		BackupDir: cfg.BackupDir, Recipient: keys.Recipient, PageCA: keys.PageCA.Get(),
-		FirstEdge: first, LinkKey: keys.LinkKey.Get(), Checker: checker, Clock: read,
+		FirstEdge: first, LinkKey: keys.LinkKey.Get(), Checker: checker, Clock: kernelSource(cfg),
 	}, clock())
 	if err != nil {
 		return err
@@ -497,3 +499,6 @@ func startReport(r kernel.ContentReport, unlogged []string) string {
 	}
 	return fmt.Sprintf("run: the subject-key table lacks %d open subjects' keys and holds %d keys no subject names; the stores hold %d items no entry names in their store\n", len(r.Missing), len(r.Unnamed), len(unlogged))
 }
+
+// kernelSource is the kernel's TIM-1 source: chronyd at cfg.Chrony (#5391), else the box clock alone.
+func kernelSource(cfg MainConfig) kernel.Clock { return NewChrony(cfg.Chrony, cfg.ChronyReply).Read }

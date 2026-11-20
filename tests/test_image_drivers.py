@@ -103,7 +103,8 @@ class DriversTest(unittest.TestCase):
         self.assertEqual(check.violations(self.stage), [])
         build = (IMG / "build.sh").read_text()
         self.assertIn('finish_image.py" --stage-drivers "$DRIVERS" "$STAGE"', build)
-        self.assertIn('finish_image.py" "$OUT" "$VERSION" "$STAGE/usr/lib/agentos/drivers.json"', build)
+        self.assertIn('finish_image.py" "$OUT" "$VERSION" "$STAGE/usr/lib/agentos/drivers.json"',
+                      (IMG / "finish.sh").read_text())
 
     def test_manifest_names_each_driver(self):
         self.driver()

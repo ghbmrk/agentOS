@@ -768,6 +768,21 @@ func TestEveryKernelLegsContextEndsWithTheLeg(t *testing.T) {
 	if k.resumed != 0 {
 		t.Errorf("resumed %d times on a stop count never read", k.resumed)
 	}
+	// The STOP's fresh read and RESUME's count read take two legs each
+	// here (the read refused, then SetupOpen), each on its leg's context (#6173). The direct resumeKernel call above
+	// kept a background context, which never ends; forget it first.
+	k.live()
+	b.freshStop(context.Background())
+	if n := k.live(); n != 0 {
+		t.Errorf("freshStop: %d kernel contexts still live", n)
+	}
+	b.whole = true
+	if _, err := b.StopCancelled(); err == nil {
+		t.Error("StopCancelled with its read refused: no error")
+	}
+	if n := k.live(); n != 0 {
+		t.Errorf("StopCancelled: %d kernel contexts still live", n)
+	}
 }
 
 // nopEngine is a journal side with nothing in it.
@@ -941,4 +956,40 @@ func TestOP2SettleLoopChecksAgainEachRound(t *testing.T) {
 	settled("a") // the first round's
 	send("b")
 	settled("b") // a later round's
+}
+
+// Each way an approved retry ends is told in its own fixed words, and a
+// refusal names its reason (CH-12; #5757, whose mutgate owes these clauses).
+func TestEachRetryEndIsToldInItsOwnWords(t *testing.T) {
+	var told []string
+	r := &retrier{ctx: context.Background(), inform: func(s string) error { told = append(told, s); return nil }}
+	a := retryAsk{line: grants.RetryLine{Shown: ownerch.Item{Object: "a payment"}}}
+	refused := func(why string) string {
+		return "Retry R1 refused: " + why + ". A payment was not tried again; text RETRY later."
+	}
+	for _, c := range []struct {
+		st   journal.State
+		err  error
+		want string
+	}{
+		{journal.NotApplied, nil, "Retry R1: a payment did not go."},
+		{journal.Denied, nil, "Retry R1: a payment did not go."},
+		{journal.OutcomeUnknown, nil, "Retry R1: a payment is unclear again; it may have gone. Text RETRY to try again; it may go twice."},
+		{journal.InFlight, nil, "Retry R1: a payment is still being tried."},
+		{"", journal.ErrStopped, refused("STOP is on")},
+		{"", journal.ErrUnreconciled, refused("another action on the account is still unclear")},
+		{"", journal.ErrRecheck, refused("the broker's checks refused it")},
+		{"", grants.ErrRetryNotConfirmed, refused("it must be approved on my Wi-Fi page")},
+		{"", journal.ErrState, refused("it is no longer waiting for a retry")},
+		{"", errors.New("unreachable"), refused("it could not be started")},
+	} {
+		r.send = func(context.Context, retryAsk, bool) (journal.Status, error) {
+			return journal.Status{State: c.st}, c.err
+		}
+		told = nil
+		r.run("R1", a, false)
+		if len(told) != 1 || told[0] != c.want {
+			t.Errorf("%s %v: told %q, want %q", c.st, c.err, told, c.want)
+		}
+	}
 }

@@ -1,8 +1,9 @@
 package browser
 
 import (
+	"cmp"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -293,9 +294,11 @@ func scrubText(s string, forms []string) string {
 // needs YAML quoting (a name holding ": ", for one) is single-quoted. The
 // text between [ref=...] tokens in a value counts on its own, because a
 // ref is never scrubbed (#2245). Forms shorter than min are left out.
+// The forms come in no set order and may repeat: containsForm reads no
+// order, and omitValues sorts each line's forms with longestFirst before
+// it scrubs, where a repeat finds nothing left to replace (#6195).
 func valueForms(values []string, min int) []string {
 	esc := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
-	seen := map[string]bool{}
 	var forms []string
 	for _, v := range values {
 		var ds []string
@@ -307,16 +310,21 @@ func valueForms(values []string, min int) []string {
 			for _, e := range []string{d, c, esc.Replace(d), esc.Replace(c)} {
 				for _, f := range []string{e, strings.ReplaceAll(e, "'", "''")} {
 					f = strings.TrimSpace(f)
-					if f != "" && len(f) >= min && !strings.Contains(f, "\x00") && !seen[f] {
-						seen[f] = true
+					if f != "" && len(f) >= min && !strings.Contains(f, "\x00") {
 						forms = append(forms, f)
 					}
 				}
 			}
 		}
 	}
-	sort.Slice(forms, func(i, j int) bool { return len(forms[i]) > len(forms[j]) })
 	return forms
+}
+
+// longestFirst orders scrub forms longest first and forms of one length by
+// their text: a total order, so which of two overlapping forms is scrubbed
+// first is this contract, not whatever the sort algorithm leaves (#6195).
+func longestFirst(a, b string) int {
+	return cmp.Or(cmp.Compare(len(b), len(a)), strings.Compare(a, b))
 }
 
 // containsForm reports whether s shows one of forms outside its
@@ -435,7 +443,7 @@ func omitValues(snapshot string, refs, keep map[string]bool, said []string) stri
 		}
 	}
 	for j, forms := range scrub {
-		sort.Slice(forms, func(a, b int) bool { return len(forms[a]) > len(forms[b]) })
+		slices.SortFunc(forms, longestFirst)
 		e := end(j)
 		from := min(len(roleRE.FindString(lines[j])), e)
 		lines[j] = lines[j][:from] + scrubForms(lines[j][from:e], forms) + lines[j][e:]

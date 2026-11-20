@@ -38,8 +38,8 @@ allow broker/infer/supervise/supervise.go Supervisor.listen os.Chmod that direct
 allow broker/infer/supervise/supervise.go Supervisor.listen os.Remove an old socket at the name in that 0700 root directory
 allow broker/loops/machine.go TamperProbe.removeSiblings os.Remove unlink of a name carrying the round's nonce beside a target the Lstat shows is no link; a parent a guest swapped can only lead it to a file of that nonce name, which only the guest made
 allow broker/loops/machine.go targetDigest os.ReadDir lists a target's parent and hashes the tamper-sibling names only; a parent a guest swapped for a link changes the digest, as the guest's write does, and opens no file
-allow broker/sockets/peers.go ListenPeers os.Remove a stale socket at the name in the caller's run directory (its unit's RuntimeDirectory= or a tmpfiles.d directory), which only its own uid or root can write
-allow broker/sockets/peers.go ListenPeers os.Chmod the socket bind(2) just made at that name, in that run directory, which only its own uid or root can write to swap it
+allow broker/sockets/peers/peers.go ListenUnix os.Remove a stale socket at the name in the caller's run directory (its unit's RuntimeDirectory= or a tmpfiles.d directory), which only its own uid or root can write
+allow broker/sockets/peers/peers.go ListenUnix os.Chmod the socket bind(2) just made at that name, in that run directory, which only its own uid or root can write to swap it
 allow broker/sockets/sockets.go secureDir os.MkdirAll the socket directory's parent: agentosd's -sockets parent, /run (root-owned), or a caller's root-owned run directory
 allow broker/sockets/sockets.go secureDir os.Mkdir the socket directory itself, in that root-owned parent; mkdir(2) follows no link
 allow broker/sockets/sockets.go secureDir os.Chmod the socket directory, which the Lstat just before shows is a directory, not a link, owned by this uid
@@ -135,6 +135,9 @@ allow broker/vm/overlay/overlay.go copyObj os.Link prev is a file this copy just
 # name, and os.RemoveAll descends with O_NOFOLLOW. What these lines rest on,
 # and when to re-check them, is broker/kernel/proc/ASSUMPTIONS.md
 # REV-CHK-links-kernel-1.
+allow broker/kernel/proc/chrony.go dialChrony os.Remove the reply socket a last start left, -chrony-reply /run/agentos-kernel/chrony.sock, in the 0711 directory only root and the kernel uid write; unlink(2) removes a link at the name and never follows it
+allow broker/kernel/proc/chrony.go Chrony.ask os.Chmod the reply socket this process just bound, so chronyd's uid can answer on it; it is in the 0711 directory only root and the kernel uid write, so no other uid can have put a link at the name
+allow broker/kernel/proc/chrony.go Chrony.drop os.Remove the reply socket this process bound, in that 0711 directory, as Chrony.ask
 allow broker/kernel/proc/backup.go openBackups os.Mkdir the backup directory, -backup-dir /var/lib/agentos-kernel/backups, in the kernel uid's 0700 directory; privfile.Check refuses it next unless it is a directory of that uid's alone
 allow broker/kernel/proc/backup.go openBackups os.Link names os.Link as the snapshot's link function (no call here); see backups.snapItems
 allow broker/kernel/proc/backup.go backups.checkDir os.Stat a dir target's locator after EvalSymlinks resolved it, to refuse one in the kernel's own folders; a target is owner-chosen and may be written by other uids, and a swap after this check can only land fresh <id>.table.<n> or <id>.content names (ASSUMPTIONS MIG-4-recovery-e3-c)
@@ -287,9 +290,18 @@ allow broker/backup/target.go DirTarget.PutTable os.Link link(2) never follows a
 allow broker/backup/target.go DirTarget.DeleteTable os.Remove unlink(2) removes a link at the table's name itself and never follows it
 allow broker/backup/target.go DirTarget.PutTable os.CreateTemp the temp table in the owner's target directory, which kernel/proc resolves and checks outside the kernel's data at each use; O_CREAT|O_EXCL at a fresh random name refuses a link there
 allow broker/backup/target.go DirTarget.Tables os.ReadDir lists that resolved target directory; it reads names only, and only names of the table form count
+allow broker/backup/target.go OpenRegular os.Open reopens /proc/self/fd/<n>, this process's own O_PATH descriptor of a regular file it fstat'd: procfs lets no uid plant a link there, and the magic link names that inode, never the planted path
 allow broker/change/store.go DirContent.Put os.MkdirAll the bodies directory beside agentosd's state file in root-held /var/lib/agentos
 allow broker/change/store.go DirContent.Delete os.Remove unlink(2) removes a link at the body's name itself and never follows it
 allow broker/follow/follow.go Executor.setUnsent os.Remove unlink(2) removes a link at the pending-alert name itself and never follows it
+# broker/netguard/port1 (#4636): agentos-port1, agentos-localui.service's
+# root ExecStartPre=+ step, reads only sysfs at /sys (agentos-port1 passes
+# no other tree), which the kernel serves; no uid makes a link in sysfs, and
+# the class/net links Port1 follows are the kernel's own.
+allow broker/netguard/port1/port1.go Port1 os.ReadDir /sys/class/net, served by the kernel; no uid plants a link in sysfs
+allow broker/netguard/port1/port1.go Port1 os.ReadFile an interface's type under /sys/class/net, served by the kernel; no uid plants a link in sysfs
+allow broker/netguard/port1/port1.go Wired os.ReadFile the named interface's type under /sys/class/net, served by the kernel; no uid plants a link in sysfs
+allow broker/netguard/port1/port1.go removable os.ReadFile a device's removable attribute under /sys/devices, served by the kernel; no uid plants a link in sysfs
 allow broker/netguard/netlink.go routeGateway os.ReadFile /proc/net/route, served by the kernel; no uid plants a link in procfs
 allow broker/netguard/sources.go Sources.ReadLocal os.ReadFile its only root-side reader is the e2e/boxe2e harness (no root binary links netguard); procfs route, neighbour and ipv6_route tables are served by the kernel, and /etc/resolv.conf must follow its stock link into systemd-resolve's /run/systemd/resolve, image/ASSUMPTIONS.md I23's named exception: readers parse it as resolver configuration, and resolved already answers every DNS query
 allow broker/modem/at/serial_linux.go OpenSerial os.OpenFile the modem's tty, found by Discover under root-owned devtmpfs /dev, where udev's /dev/serial/by-id links are legitimate; the in-image e2e run reaches its pty through the sysroot's dev/ttyUSB2 link (boxe2e/sysroot.go), so the open must follow it; its only root-side caller, boxe2e, opens /dev/pts/N in kernel-served devpts
