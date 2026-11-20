@@ -6,7 +6,10 @@ name string (the only way to select AES-GCM-SIV), the references to it, held to 
 [cipher] section, so the openssl records' reach note is checked on each build.
 VULN-cipher-sweep-tidy (#5861): each counted entry is keyed to the reviewed file's SHA-256, so a new
 package version fails until its source is read again; malformed, empty, repeated and overlapping
-entries are refused, and every refusal points at the records' reach note."""
+entries are refused, and every refusal points at the records' reach note.
+VULN-debian-r13-f1 (#6285): it also reads which files import or reach glibc's glob() (and wordexp, which
+calls it), held to the allowlist's [glob] section, so the DEBIAN-CVE-2026-126765 records' reach is
+read from the tree."""
 # REQ: EVL-5
 import contextlib
 import errno
@@ -364,6 +367,70 @@ class CipherSitesTest(Tree):
         self.assertIn("  sites /usr/lib/libfetcher.so.1 sha256=%s EVP_CIPHER_fetch=2"
                       % places["tree"]["sha256"]["/usr/lib/libfetcher.so.1"], lines)
 
+# #6285: glob() and wordexp (glibc's caller of it) are DEBIAN-CVE-2026-126765's; globfree alone is not.
+GLOB_LIB = ('#include <glob.h>\nint f(const char *p) { glob_t g; int r = glob(p, 0, 0, &g); '
+            'globfree(&g); return r; }\n')
+GLOB64 = '#include <glob.h>\nint main(int c, char **v) { glob64_t g; return glob64(v[0], 0, 0, &g); }\n'
+WORDEXP = '#include <wordexp.h>\nint main(int c, char **v) { wordexp_t w; return wordexp(v[0], &w, 0); }\n'
+GLOBFREE = '#include <glob.h>\nint main(void) { glob_t g = {0}; globfree(&g); return 0; }\n'
+# A library's own glob, unversioned: not glibc's, so not counted.
+OWN_GLOB = "int glob(void) { return 1; }\n"
+USES_OWN_GLOB = "int glob(void);\nint main(void) { return glob(); }\n"
+
+
+@NEEDS_CC
+class GlobImportsTest(unittest.TestCase):
+    """#6285: the glob group is read from the binaries as the regex group is."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        t = pathlib.Path(cls.tmp.name)
+        cls.tree, src = t / "tree", t / "src"
+        src.mkdir()
+        for d in ("usr/bin", "usr/lib"):
+            (cls.tree / d).mkdir(parents=True)
+        lib = cls.tree / "usr/lib"
+
+        def cc(name, code, out, *args):
+            (src / name).write_text(code)
+            subprocess.run(["cc", "-D_GNU_SOURCE", "-o", str(out), str(src / name), *args], check=True)
+        cc("glob.c", GLOB_LIB, lib / "libglob-user.so.1.0", "-shared", "-fPIC", "-Wl,-soname,libglob-user.so.1")
+        os.symlink("libglob-user.so.1.0", lib / "libglob-user.so")
+        cc("uses.c", USES_LIB, cls.tree / "usr/bin/globd", "-L" + str(lib), "-lglob-user")
+        cc("g64.c", GLOB64, cls.tree / "usr/bin/g64")
+        cc("wordexp.c", WORDEXP, cls.tree / "usr/bin/wexp")
+        cc("globfree.c", GLOBFREE, cls.tree / "usr/bin/onlyfree")
+        cc("own.c", OWN_GLOB, lib / "libownglob.so", "-shared", "-fPIC")
+        cc("ownuse.c", USES_OWN_GLOB, cls.tree / "usr/bin/ownglob", "-L" + str(lib), "-lownglob")
+        cls.got = sweep.run_tree(str(cls.tree))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_glob_glob64_and_wordexp_import_globfree_and_own_glob_do_not(self):
+        got = self.got["tree"]
+        self.assertEqual(got["imports"], {"/usr/lib/libglob-user.so.1.0": ["glob"], "/usr/bin/g64": ["glob64"],
+                                          "/usr/bin/wexp": ["wordexp"]})
+        self.assertEqual(got["via"], {"/usr/bin/globd": ["/usr/lib/libglob-user.so.1.0"]})
+        self.assertEqual({sweep.group_of(s) for s in ("glob", "glob64", "wordexp")}, {"glob"})
+        self.assertEqual({sweep.group_of(s) for s in ("globfree", "globfree64", "glob_pattern_p", "globber")},
+                         {None})
+
+    def test_summary_lists_the_glob_group(self):
+        lines = sweep.summary(self.got)
+        self.assertIn("tree glob: 3 files import a function, 1 more reach an importing library through NEEDED", lines)
+        self.assertIn("  via /usr/bin/globd: /usr/lib/libglob-user.so.1.0", lines)
+
+    def test_unlisted_importers_fail_and_listed_pass(self):
+        listed = ["/usr/lib/libglob-user.so.*", "/usr/bin/globd", "/usr/bin/g64", "/usr/bin/wexp"]
+        self.assertEqual(sweep.refusals(self.got, [], listed), [])
+        errs = sweep.refusals(self.got, [], listed[1:])
+        self.assertEqual(errs, ["tree: /usr/lib/libglob-user.so.1.0 imports or reaches glob() and is not in "
+                                "import_sweep.allow [glob]; review it, name it in the -126765 records, then "
+                                "add the entry: /usr/lib/libglob-user.so.1.0"])
+
 
 def place(imports, via=None, scanned=10):
     return {"scanned": scanned, "imports": imports, "via": via or {}}
@@ -410,6 +477,41 @@ class RefusalsTest(unittest.TestCase):
                 self.assertIn("wide scanf", errs[0])
         lib = {"tree": place({"/usr/lib/libw.so.1": ["__isoc99_vswscanf"]}, {"/usr/bin/bash": ["/usr/lib/libw.so.1"]})}
         self.assertEqual(len([e for e in sweep.refusals(lib, ["/usr/bin/bash"]) if "wide scanf" in e]), 2)
+
+    def test_glob_reach_is_held_to_the_glob_section_alone(self):
+        # #6285: a daemon reaching glob() fails, directly or through a library, and the regex list does not
+        # cover it: each section is its own record's.
+        glob = {"tree": dict(self.OK["tree"], imports=dict(self.OK["tree"]["imports"],
+                                                           **{"/usr/lib/libg.so.1": ["glob64"],
+                                                              "/usr/bin/bash": ["regcomp", "glob"]}),
+                             via={"/usr/lib/systemd/systemd": ["/usr/lib/libg.so.1"],
+                                  "/usr/bin/lsblk": ["/usr/lib/libsmartcols.so.1.1.0"]})}
+        errs = sweep.refusals(glob, self.ALLOW)
+        self.assertEqual([e.split(" imports")[0] for e in errs],
+                         ["tree: /usr/bin/bash", "tree: /usr/lib/libg.so.1", "tree: /usr/lib/systemd/systemd"])
+        self.assertTrue(all("reaches glob() and is not in import_sweep.allow [glob]" in e for e in errs), errs)
+        self.assertEqual(sweep.refusals(glob, self.ALLOW, ["/usr/bin/bash", "/usr/lib/libg.so.*",
+                                                           "/usr/lib/systemd/systemd"]), [])
+        # A [glob] entry matching no glob() importer fails, even one a regex importer matches.
+        self.assertEqual(sweep.refusals(self.OK, self.ALLOW, ["/usr/bin/bash"]),
+                         ["import_sweep.allow: [glob] /usr/bin/bash matches no file that reaches glob(); remove it"])
+
+    def test_glob_section_is_read_once_and_unknown_sections_fail(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = pathlib.Path(d) / "allow"
+            a.write_text("/usr/bin/bash\n[glob]\n# why\n/usr/bin/bash  # the shell\n/usr/lib/libg.so.*\n"
+                         "[cipher]\n/usr/lib/libcrypto.so.3 *\n")
+            self.assertEqual(sweep.read_allow(a), (["/usr/bin/bash"], {"/usr/lib/libcrypto.so.3": "*"},
+                                                   ["/usr/bin/bash", "/usr/lib/libg.so.*"]))
+            a.write_text("/usr/bin/bash\n[cipher]\n/usr/lib/libcrypto.so.3 *\n[glob]\n/usr/bin/x\n")
+            self.assertEqual(sweep.read_allow(a)[2], ["/usr/bin/x"])
+            for body, want in (("[glob]\n/usr/bin/x\n[glob]\n", ":3: [glob] is given again"),
+                               ("[regex]\n", ":1: [regex] is no section"),
+                               ("[glob\n", ":1: [glob is no section")):
+                a.write_text(body)
+                with self.subTest(body=body), self.assertRaises(SystemExit) as cm:
+                    sweep.read_allow(a)
+                self.assertIn(want, str(cm.exception))
 
     def test_unused_glob_fails(self):
         errs = sweep.refusals(self.OK, self.ALLOW + ["/usr/bin/gone"])

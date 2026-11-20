@@ -76,6 +76,12 @@
 # libformw (ncurses forms); nothing in the image needs it.
 /usr/lib/x86_64-linux-gnu/libformw.so.6.*
 
+[glob]
+# The files of the built image (main tree and initrds) that may import or reach glibc's glob(), glob64 or
+# wordexp, which calls glob() (DEBIAN-CVE-2026-126765, #6285): one glob per line, each a file the
+# -126765 records in assurance/vulncheck.json name. As for the regex list above, a file that matches
+# none fails the step, and so does an entry that matches no file.
+
 [cipher]
 # The files of the built image (main tree and initrds) whose bytes name an OpenSSL by-name cipher
 # selector (import_sweep.py CIPHER_NAMES: EVP_CIPHER_fetch, EVP_get_cipherbyname, systemd's
