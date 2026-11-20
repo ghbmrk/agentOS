@@ -420,6 +420,9 @@ def machines_problems(ci):
 
 SHELL_ZIP = "~/.cache/agentos-cft/shell.zip"
 SHELL_KEY = "key: cft-headless-shell-${{ steps.image.outputs.os }}-${{ env.CFT_SHELL_SHA256 }}"
+SHELL_WARNING = ('            [ ! -f "$zip" ] || echo "::warning::The cached headless shell fails its pin; '
+                 'fetching it afresh. Delete the bad entry so main saves a good one (#6175): '
+                 'gh api -X DELETE \\"repos/$GITHUB_REPOSITORY/actions/caches?key=$CFT_KEY\\""\n')
 MAIN_PUSH = "github.event_name == 'push' && github.ref == 'refs/heads/main'"
 
 
@@ -465,6 +468,11 @@ def shell_cache_problems(ci):
         problems.append("the browser step reads a zip other than the checked one")
     elif [run.count(x) for x in ("curl ", "sha256sum -c", "unzip ", "\n          fi\n")] != [1, 2, 1, 1]:
         problems.append("the browser step fetches, checks or unzips the shell outside the one checked path")
+    # The warning names the cure: the delete command for the very entry the restore reads (#6188).
+    if f"        env:\n          CFT_KEY: {SHELL_KEY[len('key: '):]}\n" not in run:
+        problems.append("the browser step's CFT_KEY is not the cache restore's key")
+    if SHELL_WARNING not in run:
+        problems.append("the bad-cache warning does not name the delete command for that key")
     if re.search(r"^        (if|continue-on-error):", run, re.M):
         problems.append("the browser step is conditional or may fail")
     if "uses: actions/cache@" in body:
@@ -657,6 +665,9 @@ class WiringTest(unittest.TestCase):
                                       "      - name: The browser gate through a real driver, and S5's executor on its fixture site (BROWSER-fixture-ci, #5952, K4)\n"
                                       "        continue-on-error: true\n"),
             "save on a hit too": (save_if, f"        if: {MAIN_PUSH}\n"),
+            "warning key drifts from the cache key": ("          CFT_KEY: cft-headless-shell-${{ steps.image.outputs.os }}-",
+                                                       "          CFT_KEY: cft-headless-shell-"),
+            "warning drops the delete command": (' (#6175): gh api -X DELETE', ' (#6175).'),
             "combined cache action": ("uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2\n        with:\n          path: ~/.cache/agentos-cft",
                                       "uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2\n        with:\n          path: ~/.cache/agentos-cft"),
         }.items():
