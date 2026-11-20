@@ -18,9 +18,6 @@ type authResult struct {
 // as a result. It returns the authserv-id and the results.
 func parseAuthResults(v string) (string, []authResult) {
 	parts := splitOutsideQuotes(stripComments(v), ';')
-	if len(parts) == 0 {
-		return "", nil
-	}
 	head := fields(parts[0])
 	if len(head) == 0 {
 		return "", nil
