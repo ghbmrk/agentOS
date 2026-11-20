@@ -80,11 +80,16 @@ func (r ctxTXT) LookupTXT(ctx context.Context, _ string) ([]string, error) {
 // lookup past its bound; an answer that comes with an error is not kept,
 // whatever records come with it.
 func TestLookupOneBounds(t *testing.T) {
-	asked := false
+	asked := make(chan struct{}, 1)
 	done, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, ok := lookupOne(done, ctxTXT{hook: func(context.Context) { asked = true }}, "a._domainkey.shop.test"); ok || asked {
-		t.Fatalf("a lookup after the read ended asked=%v kept=%v; want neither", asked, ok)
+	if _, ok := lookupOne(done, ctxTXT{hook: func(context.Context) { asked <- struct{}{} }}, "a._domainkey.shop.test"); ok {
+		t.Fatal("a lookup after the read ended kept a key")
+	}
+	select {
+	case <-asked:
+		t.Fatal("a lookup after the read ended asked the resolver")
+	case <-time.After(time.Second):
 	}
 
 	var seen context.Context
