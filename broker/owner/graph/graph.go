@@ -4,8 +4,10 @@
 // cut-off sets, rotation lists, unset brakes and correlated safeguards
 // (KRN-11, CLK-10, CH-12).
 //
-// The package is advisory. It holds no key and sends nothing; enforcement
-// stays in the clerks and the kernel. It imports only the standard library.
+// The package is advisory. It holds no key, and sends only its declarations
+// to the kernel (reach.go), which can only raise prices; enforcement stays in
+// the clerks and the kernel. It imports only the standard library and, in
+// reach.go, the kernel's declaration types.
 package graph
 
 import (

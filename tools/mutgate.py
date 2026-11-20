@@ -25,7 +25,8 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
   tools/mutgate.py delete PKG... [--out DIR] --git BASE [--jobs N]
                                              delete each statement a target line belongs to, alone,
                                              on N parallel workers (default: one per usable CPU; a
-                                             detected verdict is confirmed alone), run its tests, and
+                                             detected verdict is confirmed alone), run the tests that
+                                             cover it (#6172), and
                                              add the verdicts to `run`'s JSON in DIR (#4573, #4603, #4633);
                                              only the sites of the result's own shard
   tools/mutgate.py report DIR                survivors per package, from the JSON in DIR
@@ -98,8 +99,9 @@ Shards (#4961). A package's mutants can take longer than one CI job may run, so 
 and deletion sites are split round-robin into K shards (`shard_lines`, `deletion_sites`' order), one
 `mutants` job each, or past GitHub's 256 jobs a matrix, up to 5 a job one after another, each in its
 own result directory and stopped at its own 60 minutes (`pack`, #6170). Gremlins tests every mutant alone with the whole package suite, and `delete`
-deletes every statement alone and runs the whole suite, so a mutant's verdict does not depend on
-which other mutants share its job: the joined shards give the verdicts one job would. K is only a
+deletes every statement alone and runs the tests whose runs alone cover it, or the whole suite (#6172),
+so a mutant's verdict does not depend on which other mutants share its job: the joined shards give the
+verdicts one job would. K is only a
 schedule, so it may come from the untrusted `plan` job: `verify` refuses a package unless its
 results agree on K and hold each shard 0..K-1 exactly once, each with only its own lines' and
 sites' mutants, so a missing or overlapping shard fails and the join covers every target.
@@ -112,6 +114,7 @@ Install: go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
 """
 import argparse
 import bisect
+import codecs
 import collections
 import concurrent.futures
 import contextlib
@@ -1239,8 +1242,8 @@ SETUP_MINUTES = 15
 JOB_MINUTES_MAX = 360
 JOB_SHARDS_MAX = (JOB_MINUTES_MAX - SETUP_MINUTES) // SHARD_MINUTES
 SHARDS_MAX = MATRIX_MAX * JOB_SHARDS_MAX
-# Every gremlins mutant and every deletion runs the package's whole suite, so a shard's time is its
-# count times the suite's (#5069): kernel/sim's 48 s suite ran 6 shards of 89 sites past 60 minutes
+# Every gremlins mutant runs the package's whole suite, and a deletion its covering tests' runs or
+# the whole suite (site_costs, #6172), so a shard's time is its count times the suite's (#5069): kernel/sim's 48 s suite ran 6 shards of 89 sites past 60 minutes
 # on #5006 (run 42368800375), where browser's 7 s suite ran 9 shards of 92 in 6 to 14. Seen there, a
 # target line cost gremlins 0.1 to 0.2 suite runs and a site about 0.6 (its parallel run, then a
 # detected one's run alone); the budget is half the job, as one package's shards took up to twice
@@ -1250,13 +1253,18 @@ SITE_RUNS = 1
 SHARD_SECONDS = 1800
 
 
-def shard_count(targets, sites, suite=0.0):
+def shard_count(targets, sites, suite=0.0, costs=None, overhead=0.0):
     """K for a package with these target lines ({path: lines}) and deletion sites, whose whole test
-    suite takes suite seconds: at least one."""
+    suite takes suite seconds: at least one. With costs (seconds per site, site_costs), a site costs
+    those, not a whole suite, and each shard first spends overhead on its per-test pass (#6172).
+    That pass leaves a shard's sites at least half of SHARD_SECONDS, so a pass past a quarter of the
+    job plans shards past the target, and one past 45 minutes past the job's 60 (#6217)."""
     lines = sum(len(v) for v in targets.values())
-    runs = LINE_RUNS * lines + SITE_RUNS * len(sites)
-    return max(1, -(-lines // LINES_PER_SHARD), -(-len(sites) // SITES_PER_SHARD),
-               math.ceil(suite * runs / SHARD_SECONDS))
+    if costs is None:
+        work, budget = suite * (LINE_RUNS * lines + SITE_RUNS * len(sites)), SHARD_SECONDS
+    else:
+        work, budget = suite * LINE_RUNS * lines + sum(costs), max(SHARD_SECONDS - overhead, SHARD_SECONDS / 2)
+    return max(1, -(-lines // LINES_PER_SHARD), -(-len(sites) // SITES_PER_SHARD), math.ceil(work / budget))
 
 
 def pack(counts):
@@ -1375,9 +1383,44 @@ def covered_by(pkg, names, tmp, broker=None):
     return out, problem
 
 
-def timed_cover(pkg, names, tmp, broker=None):
-    """covered_by's (lines, seconds, problem): seconds is how long its `go test` took, so a plan
-    that ran the whole suite under coverage sizes the shards from that run, not a fourth (#6155)."""
+# `go test`'s summary line for one package: `ok  <import path>  <seconds>s`, then its coverage.
+GO_OK = re.compile(r"(?m)^ok \s*\S+\s+(\d+(?:\.\d+)?)s(?:\s|$)")
+
+
+OK_KEEP = 4096  # bytes of a line echo_ok holds: an `ok` line's match ends within its first hundred
+
+
+def echo_ok(stream):
+    """Copies `go test`'s stdout to stderr as it arrives (`plan` prints the matrix on stdout, #4961)
+    and returns its last `ok` line's seconds, or None. It holds one chunk and the first OK_KEEP bytes
+    of the current line, so a test that floods its output costs no memory and shows live (#6232)."""
+    text = codecs.getincrementaldecoder("utf-8")("replace")
+    line, last = b"", None
+
+    def scan(whole):
+        nonlocal last
+        if ran := GO_OK.findall(whole.decode("utf-8", "replace")):
+            last = ran[-1]
+
+    while chunk := stream.read1(1 << 16):
+        sys.stderr.write(text.decode(chunk))
+        sys.stderr.flush()
+        *ends, rest = chunk.split(b"\n")
+        for part in ends:
+            scan(line + part)
+            line = b""
+        line = (line + rest)[:OK_KEEP]
+    sys.stderr.write(text.decode(b"", final=True))
+    sys.stderr.flush()
+    scan(line)
+    return last
+
+
+def timed_cover(pkg, names, tmp, broker=None, code=None):
+    """covered_by's (lines, seconds, problem): seconds is how long its test binary ran, so a plan
+    that ran the whole suite under coverage sizes the shards from that run, not a fourth (#6155).
+    A code dict gains {path: lines} of every block the profile lists, ran or not (#6216): the lines
+    a test could run, whichever tests ran."""
     broker = BROKER if broker is None else broker
     profile = pathlib.Path(tmp) / "tests.cover"
     profile.unlink(missing_ok=True)
@@ -1385,10 +1428,13 @@ def timed_cover(pkg, names, tmp, broker=None):
     if names is not None:
         cmd += ["-run", "^(" + "|".join(names) + ")$"]
     began = time.monotonic()
-    # Its output goes to stderr: `plan` prints the matrix on stdout (#4961).
-    if subprocess.run([*cmd, "."], cwd=broker / pkg, stdout=sys.stderr).returncode or not profile.exists():
+    with subprocess.Popen([*cmd, "."], cwd=broker / pkg, stdout=subprocess.PIPE) as run:
+        ran = echo_ok(run.stdout)
+    if run.returncode or not profile.exists():
         return None, None, f"broker/{pkg}/'s tests {'(all)' if names is None else names} fail under -coverprofile"
-    seconds = time.monotonic() - began
+    # `go test`'s own `ok` line times the test binary's run alone, as suite_seconds times it: the wall
+    # time adds the build and vet, which a cold cache makes many times a fast suite (#6162).
+    seconds = float(ran) if ran else time.monotonic() - began
     if (lister := lister_in(tmp)) is None:
         return None, None, "cannot build tools/mutgate_stmts.go"
     try:
@@ -1396,11 +1442,12 @@ def timed_cover(pkg, names, tmp, broker=None):
     except RuntimeError as e:
         return None, None, f"broker/{pkg}/: {e}"
     out = {}
-    for name, blocks in covered_blocks(text).items():
-        f = broker / pkg / name
-        if is_source(name) and f.is_file() and not f.is_symlink():
-            for (first, _), (last, _) in blocks:
-                out.setdefault(f"broker/{pkg}/{name}", set()).update(range(first, last + 1))
+    for into, ran in ((out, True), *(((code, False),) if code is not None else ())):
+        for name, blocks in covered_blocks(text, ran).items():
+            f = broker / pkg / name
+            if is_source(name) and f.is_file() and not f.is_symlink():
+                for (first, _), (last, _) in blocks:
+                    into.setdefault(f"broker/{pkg}/{name}", set()).update(range(first, last + 1))
     return out, seconds, None
 
 
@@ -1570,7 +1617,8 @@ def record_for(pkg, tests, bases, diff_text, base, tmp):
     as its `base` part, at the base (#5762), with the seconds its whole-suite run at the head took;
     or (None, None, problem). Runs the PR's tests: untrusted jobs only."""
     names = changed_tests(tests, pkg, bases)
-    covered, secs, problem = timed_cover(pkg, names, tmp)
+    code = {}
+    covered, secs, problem = timed_cover(pkg, names, tmp, code=code)
     if problem:
         return None, None, problem
     was, problem = base_covered(pkg, merge_base(base, "HEAD"), bases[pkg], tmp, diff_text)
@@ -1582,21 +1630,32 @@ def record_for(pkg, tests, bases, diff_text, base, tmp):
     every, secs, problem = (covered, secs, None) if names is None else timed_cover(pkg, None, tmp)
     if problem:
         return None, None, problem
-    if gone := unrun(was, every):
+    if gone := unrun(was, every, code):
         return None, None, ("; ".join(f"{p}: {', '.join(map(str, ls))}" for p, ls in gone.items())
                             + f" ran under the base's version of the tests this diff changes, and no test of package {pkg} "
                             "runs them at the head: keep a test that runs each, or delete the code")
     return {**coverage_record(names, covered), "base": coverage_record(bases[pkg], was)}, secs, None
 
 
-def unrun(was, every):
+# A line that only closes blocks and the calls or literals around them: `}`, `})`, `},`, `}()`, `}}`.
+CLOSER = re.compile(r"\}(?:[})\],]|\(\))*")
+
+
+def unrun(was, every, code):
     """{path: sorted lines} of was ({path: head lines} the base's tests ran) that every ({path: lines}
-    the head's whole suite runs) leaves out, holding code at the head: a blank or comment line between
-    two cover blocks, which an edit beside it can open, is no code a test runs."""
+    the head's whole suite runs) leaves out, holding code at the head. A blank or comment line between
+    two cover blocks, which an edit beside it can open, is no code a test runs; nor is a CLOSER line
+    in no block of code ({path: lines} of every block the head's profile lists, ran or not): Go's
+    profile ends a block at its last statement or at a nested block ending it, so such a brace is in
+    none once its block ends in an `if`, `for` or func literal (#6216). An `if` body's own `}` is in
+    its block, so an unrun body still names it; a multi-line `case` expression is in no block until
+    evaluated, so text alone, not the profile, decides the other lines."""
     out = {}
     for p, ls in sorted(was.items()):
         rows = _uncommented((BROKER / p.split("/", 1)[1]).read_bytes().decode("utf-8", "replace"), False).split("\n")
-        if left := sorted(n for n in ls - every.get(p, set()) if n <= len(rows) and rows[n - 1].strip()):
+        held = code.get(p, set())
+        if left := sorted(n for n in ls - every.get(p, set()) if n <= len(rows) and rows[n - 1].strip()
+                          and (n in held or not CLOSER.fullmatch(rows[n - 1].strip()))):
             out[p] = left
     return out
 
@@ -1725,12 +1784,13 @@ COUNTERS = {"LIVED": "mutants_lived", "KILLED": "mutants_killed", "NOT VIABLE": 
 TOTALLED = ("LIVED", "KILLED", "NOT VIABLE")
 
 
-def covered_blocks(profile):
-    """{file base name: [((line, col), (line, col))]} of the blocks a `-coverprofile` ran."""
+def covered_blocks(profile, ran=True):
+    """{file base name: [((line, col), (line, col))]} of the blocks a `-coverprofile` ran (every
+    block it lists, when not ran)."""
     out = {}
     for row in profile.split("\n")[1:]:
         m = COVER.match(row)
-        if m and int(m.group(6)) > 0:
+        if m and (int(m.group(6)) > 0 or not ran):
             out.setdefault(m.group(1).rsplit("/", 1)[-1], []).append(
                 ((int(m.group(2)), int(m.group(3))), (int(m.group(4)), int(m.group(5)))))
     return out
@@ -1968,17 +2028,19 @@ def build_mutant(src, site, build, mutant, pkg_dir):
     return False
 
 
-def run_tests(binary, cwd, timeout, mem=None):
+def run_tests(binary, cwd, timeout, mem=None, names=None):
     """'KILLED', 'LIVED' or 'TIMED OUT' for one run of a compiled test binary; its process group
     is killed at the timeout, so a test's child cannot outlive the verdict. Its output goes to
     BINARY.out, where failed_test reads which test failed. With mem, the run is also killed, and
     KILLED by `memory_cap`, once its session's resident memory passes mem bytes, as the Go runtime's
     own out of memory crash would end it: a deletion that drops a bound can grow a test by gigabytes
     in seconds, and on a CI runner that takes the runner down with the job (egress on #5011). That
-    counts as detection only because deletion_mutants first shows the unmutated tests stay well under it."""
+    counts as detection only because deletion_mutants first shows the unmutated tests stay well under it.
+    With names, only those top-level tests run (#6172)."""
     out = pathlib.Path(binary).with_suffix(".out")
+    only = [] if names is None else ["-test.run=^(" + "|".join(names) + ")$"]
     with open(out, "wb") as log:
-        p = subprocess.Popen([str(binary), "-test.failfast", f"-test.timeout={timeout + 2}s"], cwd=cwd,
+        p = subprocess.Popen([str(binary), "-test.failfast", *only, f"-test.timeout={timeout + 2}s"], cwd=cwd,
                              stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         end, _ = watch(p, timeout, mem)
         if end == "over":
@@ -2104,6 +2166,96 @@ def site_keys(sites):
     return collections.Counter((s["file"], s["at"], s["col"]) for s in sites)
 
 
+# MUT-delete-covering (#6172). A deletion on line L changes only the runs that reach L, so `delete` runs
+# each site with only the tests whose own run, alone, covers it (`selected`), in the suite's order, and
+# a site no test covers alone, or every test covers, with the whole suite. A smaller run can only miss
+# a kill (a LIVED that needs a proof: fails closed); a KILLED or TIMED OUT from it stands only once the
+# same tests pass unmutated, alone, under the same timeout and memory cap (`passes`), else the mutant
+# runs the whole suite and that verdict stands, so no test set's own failure reads as a kill.
+TEST_NAME = re.compile(r"^(?:Test|Fuzz|Example)(?![a-z])\w*$")
+
+
+def run_alone(binary, cwd, args, timeout, mem, counters=None):
+    """(end, peak, seconds) of one run of a test binary in its own session, as watch reads it; with
+    counters, a child it re-executes writes its coverage there too (#5803)."""
+    env = {**os.environ, "GOCOVERDIR": str(counters)} if counters else None
+    began = time.monotonic()
+    end, peak = watch(subprocess.Popen([str(binary), *args], cwd=cwd, env=env, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL, start_new_session=True), timeout, mem)
+    return end, peak, time.monotonic() - began
+
+
+def per_test(binary, cwd, tmp, timeout, mem=None, jobs=1):
+    """({test: (blocks, seconds)}, {test that fails alone: seconds}) for each top-level test of a
+    -cover test binary, each run alone under -coverprofile; or None when it lists none. Runs share
+    `jobs` workers, and a run that fails there runs again alone, since tests can collide on a fixed
+    path or port; a test that still fails alone has no coverage of its own, so it is in every set."""
+    try:
+        listed = subprocess.run([str(binary), "-test.list", "."], cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
+    names = [n for n in listed.stdout.split("\n") if TEST_NAME.match(n)] if listed.returncode == 0 else []
+    if not names:
+        return None
+    root = pathlib.Path(tmp) / "per-test"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir()
+
+    def one(i, share):
+        d = root / str(i)
+        shutil.rmtree(d, ignore_errors=True)
+        (d / "c").mkdir(parents=True)
+        end, _, secs = run_alone(binary, cwd, [f"-test.run=^{names[i]}$", "-test.failfast", f"-test.gocoverdir={d / 'c'}",
+                                               f"-test.coverprofile={d / 'p'}"], timeout, share, d / "c")
+        ok = end == 0 and (d / "p").exists()
+        return (covered_blocks((d / "p").read_text()) if ok else None), secs
+    share = mem // max(1, jobs) if mem else None
+    with concurrent.futures.ThreadPoolExecutor(max(1, jobs)) as pool:
+        got = list(pool.map(lambda i: one(i, share), range(len(names))))
+    got = [g if g[0] is not None else one(i, mem) for i, g in enumerate(got)]
+    shutil.rmtree(root, ignore_errors=True)
+    return ({n: g for n, g in zip(names, got) if g[0] is not None},
+            {n: secs for n, (blocks, secs) in zip(names, got) if blocks is None})
+
+
+def selected(site, tests):
+    """The tests to run for a site with per_test's result: those whose run alone covers it and those
+    that fail alone (`go test` runs them in the suite's order whatever their order here); or None
+    for the whole suite: no per-test result, no test covers the site alone, or the set's runs alone
+    take half the sum of every test's or more. A set costs its run and at most one unmutated run
+    (`passes`), so under half it costs less than the suite's tests run one by one; with parallel
+    tests (the whole suite's wall time below that sum) the bound is only an estimate."""
+    if tests is None:
+        return None
+    ran, failing = tests
+    if not (hit := {n for n, (blocks, _) in ran.items() if is_covered(blocks, site)}):
+        return None
+    out = [n for n in [*ran, *failing] if n in hit or n in failing]
+    total = sum(secs for _, secs in ran.values()) + sum(failing.values())
+    return out if 2 * set_seconds(out, tests) < total else None
+
+
+def set_seconds(names, tests):
+    """The seconds these tests take run alone, summed."""
+    ran, failing = tests
+    return sum(ran[n][1] if n in ran else failing[n] for n in names)
+
+
+def site_costs(pkg, sites, suite, tmp):
+    """(seconds per site, the per-test pass's seconds) `delete` spends on each site of broker/<pkg>/
+    with the tests that cover it: its set's run plus at most one unmutated run of that set (`passes`),
+    or the whole suite; or (None, 0.0) when the tests cannot be timed alone. The pass runs every test
+    alone, and each that fails runs again (#6226). Only a schedule (`plan`)."""
+    pkg_dir, binary = BROKER / pkg, pathlib.Path(tmp) / "suite.test"
+    if not binary.exists() and subprocess.run(["go", "test", "-c", "-cover", "-covermode=set", "-o", str(binary), "."],
+                                              cwd=pkg_dir, stdout=sys.stderr).returncode:
+        return None, 0.0
+    if not binary.exists() or (tests := per_test(binary, pkg_dir, tmp, 3 * suite + 10)) is None:
+        return None, 0.0
+    costs = [suite if (names := selected(s, tests)) is None else 2 * set_seconds(names, tests) for s in sites]
+    return costs, sum(secs for _, secs in tests[0].values()) + 2 * sum(tests[1].values())
+
+
 def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
     """([mutation dict], None) for each site deletion_sites lists in shard (index, of): every of-th
     site from the index-th (#4961); or (None, problem). The sites run
@@ -2157,15 +2309,37 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
         return None, f"broker/{pkg}/'s tests fail before any statement is deleted"
     if alone_mem and peak:
         jobs = max(1, min(jobs, alone_mem // (2 * peak)))
-    timeout = 3 * (time.monotonic() - began) + 10
+    suite = time.monotonic() - began
+    timeout = 3 * suite + 10
     blocks = covered_blocks(profile.read_text())
+    # MUT-delete-covering (#6172): the tests each covered site runs (None: the whole suite).
+    covered = [s for s in sites if is_covered(blocks, s)]
+    tests = per_test(base, pkg_dir, tmp, timeout, alone_mem, jobs) if covered else None
+    chosen = [selected(s, tests) for s in sites]
+    plain, checked = tmp / "plain.test", {}
+
+    def passes(names):
+        """Whether these tests pass unmutated, alone, under their timeout and the memory cap with
+        its headroom, run once per set: only then does their failure on a mutant show a kill."""
+        key = tuple(names)
+        if key not in checked:
+            if not plain.exists() and subprocess.run(["go", "test", "-c", "-o", str(plain), "."], cwd=pkg_dir).returncode:
+                checked[key] = False
+            else:
+                end, top, _ = run_alone(plain, pkg_dir, ["-test.failfast", "-test.run=^(" + "|".join(names) + ")$"],
+                                        limit(names), alone_mem)
+                checked[key] = end == 0 and not (alone_mem and 2 * top > alone_mem)
+        return checked[key]
+
+    def limit(names):
+        return timeout if names is None else 3 * set_seconds(names, tests) + 10
 
     def cap(alone):
         return alone_mem if alone or not alone_mem else alone_mem // max(1, jobs)
 
     def verdict(i, alone):
-        """The site's status, its binary when a detected verdict still needs confirming alone, and
-        the test that failed."""
+        """The site's status, its binary when a detected verdict still needs confirming (alone, or
+        that its tests pass unmutated), and the test that failed."""
         site = sites[i]
         if not is_covered(blocks, site):
             return "NOT COVERED", None, None
@@ -2179,8 +2353,8 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
             build = ["go", "test", "-c", "-overlay", str(overlay), "-o", str(binary), "."]
             if not build_mutant(src_path.read_bytes(), site, build, mutant, pkg_dir):
                 return "NOT VIABLE", None, None
-            status = run_tests(binary, pkg_dir, timeout, mem=cap(alone))
-            keep = not alone and status in DETECTED
+            status = run_tests(binary, pkg_dir, limit(chosen[i]), mem=cap(alone), names=chosen[i])
+            keep = status in DETECTED and (not alone or chosen[i] is not None)
             return status, binary if keep else None, failed_test(binary)
         finally:
             if not keep:
@@ -2190,10 +2364,15 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
     with concurrent.futures.ThreadPoolExecutor(max(1, jobs)) as pool:
         while len(statuses) < len(sites):
             batch = range(len(statuses), min(len(sites), len(statuses) + 4 * jobs))
-            results = [verdict(i, True) for i in batch] if jobs <= 1 else list(pool.map(lambda i: verdict(i, False), batch))
+            alone = jobs <= 1
+            results = [verdict(i, True) for i in batch] if alone else list(pool.map(lambda i: verdict(i, False), batch))
             for i, (status, binary, killer) in zip(batch, results):
                 if binary is not None:
-                    status, killer = run_tests(binary, pkg_dir, timeout, mem=alone_mem), failed_test(binary)
+                    names = chosen[i]
+                    if not alone:
+                        status, killer = run_tests(binary, pkg_dir, limit(names), mem=alone_mem, names=names), failed_test(binary)
+                    if status in DETECTED and names is not None and not passes(names):
+                        status, killer = run_tests(binary, pkg_dir, timeout, mem=alone_mem), failed_test(binary)
                     shutil.rmtree(binary.parent)
                 statuses.append((status, killer))
             if sum(st == "TIMED OUT" for st, _, _ in results) * 2 > len(batch):
@@ -2589,8 +2768,8 @@ def cmd_plan(args):
                 print(f"mutgate: {problem}", file=sys.stderr)
                 return 1
             # A test-changing package's whole suite already ran under coverage in record_for: its time
-            # sizes the shards, so the slowest suite runs three times here, not four (#6155). The `go test`
-            # wall time holds the link too, so it can only add shards.
+            # sizes the shards, so the slowest suite runs three times here, not four (#6155). Both times
+            # are the test binary's run alone, so neither holds the build (#6162).
             if not (targets or sites):
                 suite, problem = 0.0, None
             elif suite is None:
@@ -2600,7 +2779,9 @@ def cmd_plan(args):
             if problem:
                 print(f"mutgate: {problem}", file=sys.stderr)
                 return 1
-            of = shard_count(targets, sites, suite)
+            # `delete` runs each site with the tests that cover it (#6172), so its cost is theirs.
+            costs, overhead = site_costs(pkg, sites, suite, tmp) if sites else (None, 0.0)
+            of = shard_count(targets, sites, suite, costs, overhead)
             print(f"mutgate: {pkg}: {sum(map(len, targets.values()))} target lines, {len(sites)} deletion "
                   f"sites, a {suite:.0f} s suite, {of} shard(s)", file=sys.stderr)
             counts.append((pkg, of))
@@ -2752,8 +2933,9 @@ def main(argv=None):
                        help="the PR head of the event whose body FILE is; a failure names it (#6077)")
         p.add_argument("--summary", metavar="FILE", help="append the table of verdicts here")
     args = ap.parse_args(argv)
-    if args.cmd == "run" and (not 0 <= args.shard < args.of <= MATRIX_MAX or (args.of > 1 and not args.git)):
-        ap.error(f"--shard I --of K needs 0 <= I < K <= {MATRIX_MAX}, and --git when K > 1")
+    # K is a package's shard count, which `plan` packs past MATRIX_MAX jobs up to SHARDS_MAX (#6170).
+    if args.cmd == "run" and (not 0 <= args.shard < args.of <= SHARDS_MAX or (args.of > 1 and not args.git)):
+        ap.error(f"--shard I --of K needs 0 <= I < K <= {SHARDS_MAX}, and --git when K > 1")
     if getattr(args, "body_from", None) and not args.body:
         ap.error("--body-from names the event whose body --body holds: give --body too")
     if args.cmd == "packages":

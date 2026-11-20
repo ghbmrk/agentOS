@@ -638,8 +638,10 @@ func TestDowntime(t *testing.T) {
 	}
 }
 
-// TN-graph-i: the package imports only the standard library.
+// TN-graph-i: the package imports only the standard library, but for the
+// reach writer's kernel types (KEY-9-reach-writer).
 func TestImportsOnlyStdlib(t *testing.T) {
+	writer := map[string]bool{"github.com/ghbmrk/agentos/broker/kernel": true, "github.com/ghbmrk/agentos/broker/kernel/key": true}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
@@ -659,7 +661,7 @@ func TestImportsOnlyStdlib(t *testing.T) {
 		}
 		for _, imp := range af.Imports {
 			p, _ := strconv.Unquote(imp.Path.Value)
-			if first := strings.SplitN(p, "/", 2)[0]; strings.Contains(first, ".") || p == "C" {
+			if first := strings.SplitN(p, "/", 2)[0]; (strings.Contains(first, ".") || p == "C") && !(f == "reach.go" && writer[p]) {
 				t.Errorf("%s imports %q, outside the standard library", f, p)
 			}
 		}
