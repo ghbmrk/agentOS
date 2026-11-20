@@ -552,7 +552,8 @@ def _violations(root):
             + cached(unit_made_dirs, root)[1] + cached(unit_made_paths, root)[2] + unit_made_refusals(root)
             + inside_refusals(root) + gpt_auto_violations(root)
             + noexec_violations(root)
-            + keeper_violations(root) + isolate_violations(root) + clerk_key_violations(root)
+            + keeper_violations(root) + isolate_violations(root) + soft_reboot_violations(root)
+            + clerk_key_violations(root)
             + assembly_violations(root) + driver_violations(root) + e2e_violations(root))
 
 
@@ -3040,6 +3041,39 @@ def isolate_violations(root):
             out.append("%s: After=%s Before=%s; must be After=sysinit.target basic.target %s and not before it, so "
                        "shutdown stops it before the MOR clear (#6178)"
                        % (name, " ".join(words["After"]), " ".join(words["Before"]), MOR_UNIT))
+    return out
+
+
+# MOR-soft-reboot (#6182; HW-8): systemd 257's soft-reboot.target requires SOFT_REBOOT, which requires
+# shutdown.target, so an orderly "systemctl soft-reboot" (or an isolate of the target, AllowIsolate=yes)
+# stops MOR_UNIT, whose stop clears MOR, while the kernel and its memory are kept; the next userspace's
+# MOR_UNIT only reads MOR, so the holders it starts run with MOR clear. mkosi.conf removes the unit, so
+# the target's start fails as a whole (a Requires= on a unit that is not found fails the transaction)
+# and stops nothing; "--force" and SuccessAction=soft-reboot-force stop no unit, so MOR stays set.
+SOFT_REBOOT = "systemd-soft-reboot.service"
+
+
+def soft_reboot_violations(root):
+    """MOR-soft-reboot (#6182): the first entry named SOFT_REBOOT in the unit directories, in precedence
+    order, is a mask (a link to exactly MASK, or a file of size 0: systemd 257 reads either as masked), or
+    there is none. Any other file or link of that name makes the orderly soft reboot runnable again, and
+    one the check cannot read is refused."""
+    root = str(root)
+    dirs, out = unit_dirs(root)
+    for d in dirs:
+        rel = d + "/" + SOFT_REBOOT
+        if not tree_lstat(root, rel):
+            continue
+        try:
+            masked = Conf(root, rel).content() == b""
+        except OSError as e:
+            out.append("%s: unreadable (%s); the tree check never passes a unit it cannot read" % (rel, e.strerror or e))
+            break
+        if not masked:
+            out.append("%s: present; an orderly soft reboot stops %s, whose stop clears MOR, while the kernel keeps "
+                       "its memory, so the holders after it run with MOR clear (remove it or mask it, #6182)"
+                       % (rel, MOR_UNIT))
+        break
     return out
 
 
