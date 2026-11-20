@@ -2027,6 +2027,32 @@ class TestOnly(unittest.TestCase):
                 self.assertEqual(Sink.seen, 1023 * 65536 + 31)
                 self.assertLess(peak, 4 << 20)
 
+    def test_echo_ok_scans_no_bare_newline(self):
+        # MUT-plan-timing-skew-fu2 (#6236): a flood of bare newlines reaches no regex search (each
+        # cost about 90 ns a byte), lines split at a chunk's edge still join, and the last `ok` line
+        # stands. The one search past the lines is echo_ok's read of its unfinished last line.
+        from unittest import mock
+
+        class Chunks:
+            def __init__(self, chunks):
+                self.chunks = list(chunks)
+
+            def read1(self, n):
+                return self.chunks.pop(0) if self.chunks else b""
+
+        flood = b"\n" * 65536
+        cases = (
+            ([b"ok  \tp\t1", b"s" + flood, flood, b"ok  \tp\t7.5s" + flood, flood], "7.5", 3),
+            ([b"ok  \tp\t2s", flood], "2", 2),  # a chunk opening with a newline ends the carried line
+            ([flood, b"x\n" + flood + b"ok  \tp\t3s"], "3", 2),
+            ([flood, flood], None, 1),
+        )
+        for chunks, want, searches in cases:
+            with self.subTest(want=want), mock.patch.object(sys, "stderr", io.StringIO()), \
+                    mock.patch.object(mutgate, "GO_OK", wraps=mutgate.GO_OK) as go_ok:
+                self.assertEqual(mutgate.echo_ok(Chunks(chunks)), want)
+                self.assertEqual(go_ok.search.call_count, searches)
+
     def test_timed_cover_echoes_live_and_times_the_last_ok_line(self):
         # MUT-plan-timing-skew-fu (#6232): a `go` that prints another `ok` line, then waits 2 s
         # before the real run: that line reaches stderr at once, and the real run's own (last) `ok`
