@@ -19,7 +19,9 @@
 [Unit]
 Description=agentOS kernel
 ConditionPathExists=/var/lib/agentos-store/store
-After=local-fs.target systemd-sysusers.service agentos-keeper-enroll.service
+# time-sync.target (#5391): a start after chronyd syncs reads its time from chronyd, not the box
+# clock alone. It holds the start only where a unit such as chrony-wait.service pulls it in (HOST-1b).
+After=local-fs.target systemd-sysusers.service agentos-keeper-enroll.service time-sync.target
 # #2897: each start opens the counter anchor, which spends two of the TPM counter's increments
 # (LOG-anchor-tpm-b), so a crash loop under Restart= stops after three starts in a boot.
 StartLimitIntervalSec=infinity
@@ -51,6 +53,7 @@ ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-unlock -store /var
         -clerk-key camera=/run/agentos-kernel/key-camera.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-camera.service \
         -clerk-key homekit=/run/agentos-kernel/key-homekit.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-homekit.service \
         -link-sock /run/agentos-kernel/link.sock -link-uid @uid:agentos-link \
+        -chrony /run/chrony/chronyd.sock -chrony-reply /run/agentos-kernel/chrony.sock \
         -up /run/agentos-kernel/up
 # #2998: after the cap, a restart in this boot is refused at the unseal, so a kernel that came up (its
 # sockets listened, and it made "up") and then failed reboots the box. One refused at its start (no
@@ -69,6 +72,13 @@ ProtectSystem=full
 ProtectHome=yes
 PrivateNetwork=yes
 RestrictAddressFamilies=AF_UNIX
+# The kernel's second time source (TIM-1, #5391), its one exit outside /run/agentos-kernel: chronyd's
+# command socket in /run/chrony, read-only here (a socket on a read-only mount still connects). The
+# kernel asks it for the tracking report alone, from /run/agentos-kernel/chrony.sock, connected to it
+# so only chronyd can answer. Not a bind: the unlock step is root, and a root unit binds only paths in
+# root's trees (privfile's lint). "-": with no chronyd, or none the kernel's uid may reach (HOST-1b
+# grants it), the kernel reads the box clock alone.
+ReadOnlyPaths=-/run/chrony
 # The TPM is the keeper's (#2889 Security later 2). The kernel's uid opens none: it uses the
 # connection unlock opened (ASSUMPTIONS STO-2c-g).
 DevicePolicy=closed

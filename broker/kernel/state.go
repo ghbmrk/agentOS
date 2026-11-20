@@ -197,6 +197,7 @@ type (
 	grantBatch struct {
 		Keys    []key.Key
 		Cosigns []key.Cosign `json:",omitempty"` // a big batch's second passkey
+		Rung    key.Proof    `json:",omitempty"` // a standing batch's deriving event's (IssueStanding)
 	}
 	// lineSet is the owner's line for a big change, in percent (D-146).
 	lineSet struct {
@@ -535,6 +536,9 @@ type State struct {
 type Grant struct {
 	Key  key.Key
 	From int64
+	// Rung is the rung of the owner event that derived a standing key
+	// (IssueStanding, CH-3); P0 for any other grant.
+	Rung key.Proof `json:",omitempty"`
 }
 
 func NewState(anchors []key.PublicKey) *State {
@@ -768,6 +772,31 @@ func lapse(cs []key.Caveat) *int64 {
 
 func rootOf(k key.Key) key.ID { return key.Key{Root: k.Root}.Tip() }
 
+// derived is the rung of the owner event that derived k: the stamp on k's
+// own deriving grant, its first link, or its root for a bare root; P0 for
+// any other grant or none. A root's stamp never passes to a clerk key issued
+// under it later, whose own grant says how it was derived.
+func (s *State) derived(k key.Key) key.Proof {
+	if len(k.Links) == 0 {
+		return s.Grants[rootOf(k)].Rung
+	}
+	return s.Grants[key.Key{Root: k.Root, Links: k.Links[:1]}.Tip()].Rung
+}
+
+// standingOK reports whether rung r is one the signatures behind keys reach:
+// at most P4, and above P3Local only when an anchor owns every root (KEY-4).
+func (s *State) standingOK(keys []key.Key, r key.Proof) bool {
+	if r > key.P4 {
+		return false
+	}
+	for _, k := range keys {
+		if r > key.P3Local && !key.In(s.Anchors, k.Root.Owner) {
+			return false
+		}
+	}
+	return true
+}
+
 // owners is the passkey set a plan's key is verified against (PlanOwners).
 // A pinned root is verified against its own owner alone (Pin).
 func (s *State) owners(k key.Key) []key.PublicKey {
@@ -802,7 +831,7 @@ func (s *State) Dispatched(r Request) (Dispatch, bool) {
 		return Dispatch{}, false
 	}
 	return Dispatch{Seq: st.DispatchSeq, Held: st.HeldSeq != 0, HeldAt: st.HeldAt, Novel: st.Novel, Approved: st.Approved,
-		Rung: s.Rung(key.TaskOf(p.Plan.Key), st.Approved)}, true
+		Rung: s.Rung(key.TaskOf(p.Plan.Key), p.Plan.Key, st.Approved)}, true
 }
 
 // Unsettled is a step whose effect is uncertain: still being reconciled, or
@@ -987,8 +1016,12 @@ func (s *State) Apply(e Entry) error {
 		if err != nil {
 			return err
 		}
+		if !s.standingOK(b.Keys, b.Rung) {
+			break
+		}
 		add, _ := s.grants(b.Keys, b.Cosigns, e.reading()) // a refused key adds nothing, nor any after it
 		for id, g := range add {
+			g.Rung = b.Rung
 			s.Grants[id] = g
 		}
 	case TEnrolled:

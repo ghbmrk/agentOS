@@ -788,5 +788,59 @@ class WipeJournalTest(unittest.TestCase):
                 (self.root / dropin).unlink()
 
 
+class ExactFormsTest(unittest.TestCase):
+    """MOR-wipe-journal-fu2 (#6158): two tree checks the L3 reviews of #6130 found read a value in a form
+    systemd may not read as written, or held one by no test."""
+    # REQ: HW-8
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        self.n = 0
+
+    def files(self, *texts):
+        out = []
+        for t in texts:
+            self.n += 1
+            write(self.root, "u/%d.conf" % self.n, t)
+            out.append(check.Conf(str(self.root), "u/%d.conf" % self.n))
+        return out
+
+    def test_a_path_unit_skips_a_first_unit_systemd_ignores(self):
+        # config_parse_trigger_unit (257): a value with no unit type is ignored, so the next one is the unit the
+        # path starts. Both ways: a keeper unit after it passes, any other unit after it is refused.
+        path, enroll = "agentos-keeper-enroll.path", "agentos-keeper-enroll.service"
+        watch = "PathExists=/run/agentos-setup/x\n"
+        for first in ("", "agentos-x", "agentos-keeper-enroll"):
+            with self.subTest(first=first):
+                got = check.keeper_path_violations(path, self.files(
+                    "[Path]\nUnit=%s\n%s" % (first, watch), "[Path]\nUnit=%s\n" % enroll))
+                self.assertEqual(got, [])
+                got = check.keeper_path_violations(path, self.files(
+                    "[Path]\nUnit=%s\n%s" % (first, watch), "[Path]\nUnit=agentos-x.service\n"))
+                self.assertEqual(got, [path + ": starts agentos-x.service, not one of the keeper's units (D-154)"])
+
+    def test_default_dependencies_take_only_their_exact_forms(self):
+        # config_parse_bool ignores a value it cannot parse and keeps the one before it, so "no" then "x" is no.
+        for texts, early in ((("[Unit]\nDefaultDependencies=no\n",), True),
+                             (("[Unit]\nDefaultDependencies=yes\n", "[Unit]\nDefaultDependencies=no\n"), True),
+                             (("[Unit]\nDefaultDependencies=no\n", "[Unit]\nDefaultDependencies=yes\n"), False),
+                             (("[Unit]\nDescription=x\n",), False),
+                             (("[Unit]\nDefaultDependencies=no\nAfter=basic.target\n",), False)):
+            with self.subTest(texts=texts):
+                self.assertIs(check.starts_early(self.files(*texts)), early)
+        for later in ("x", "", "false", "No", "0"):
+            with self.subTest(later=later):
+                files = self.files("[Unit]\nDefaultDependencies=no\n", "[Unit]\nDefaultDependencies=%s\n" % later)
+                with self.assertRaisesRegex(ValueError, r"^DefaultDependencies=%s in u/%d\.conf is a form the tree "
+                                            r"check does not read \(use yes or no\)$" % (re.escape(later), self.n)):
+                    check.starts_early(files)
+                # The service check names the line, read through the tree check's refusal of what it cannot read.
+                with self.assertRaises(ValueError):
+                    check.bus_unit_violations("agentos-x.service", files + self.files(
+                        "[Service]\nInaccessiblePaths=-/run/dbus\n"))
+
+
 if __name__ == "__main__":
     unittest.main()

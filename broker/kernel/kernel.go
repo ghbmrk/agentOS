@@ -77,7 +77,7 @@ func admit(s *State, p Plan, now Reading) (key.ID, []key.ID, *Refusal) {
 			return key.ID{}, nil, on(key.Refuse(CPlan, "unknown verb "+string(st.Verb)), &i)
 		}
 		c, _ := key.ClassOf(st.Verb)
-		st.Rung = s.Rung(v.Limits.Task, c.Irreversible() && max(v.Window(st.Verb, false), v.Window(st.Verb, true)) > 0)
+		st.Rung = s.Rung(v.Limits.Task, p.Key, c.Irreversible() && max(v.Window(st.Verb, false), v.Window(st.Verb, true)) > 0)
 		if r := v.Authorize(st, ctx); r != nil {
 			return key.ID{}, nil, on(r, &i)
 		}
@@ -206,7 +206,7 @@ func next(s *State, id string, now Reading) Act {
 	class, _ := key.ClassOf(sp.Verb)
 	holds := class.Irreversible() && max(v.Window(sp.Verb, false), v.Window(sp.Verb, true)) > 0
 	due := v.Due(sp.Verb, st.HeldAt, st.Novel)
-	sp.Rung = s.Rung(v.Limits.Task, st.Approved || holds && (st.Phase == PQueued || st.Phase == PHeld && now.Earliest < due))
+	sp.Rung = s.Rung(v.Limits.Task, p.Plan.Key, st.Approved || holds && (st.Phase == PQueued || st.Phase == PHeld && now.Earliest < due))
 	if r := v.Authorize(sp, s.context(now, led)); r != nil {
 		if r.Code() == key.RPaused {
 			return a // waits for key.resumed
@@ -401,15 +401,36 @@ func (k *Kernel) emit(t Reading, typ string, body any) (Entry, error) {
 // Owner actions. The owner channel authenticates them; the kernel only records.
 
 func (k *Kernel) Issue(at int64, cos []key.Cosign, keys ...key.Key) error {
+	return k.issue(at, key.P0, cos, keys)
+}
+
+// IssueStanding is Issue for standing keys (KEY-5), stamped with the rung the
+// owner event that derived them reached, as OpenTask stamps a task (CH-3,
+// D-311): a step under such a key is checked at that rung, with or without a
+// task (State.Rung). A grant already in the log keeps its own stamp, so a
+// renewal never raises it. The rung is at most P4, and above P3Local only
+// when an anchor owns every key's root, since only a hardware key's
+// signature reaches P4 (KEY-4).
+func (k *Kernel) IssueStanding(at int64, rung key.Proof, cos []key.Cosign, keys ...key.Key) error {
+	return k.issue(at, rung, cos, keys)
+}
+
+// ErrStandingRung refuses a standing key's rung no signature behind it reaches.
+var ErrStandingRung = errors.New("kernel: a standing key's rung is at most P4, and above P3Local only under an anchor's root")
+
+func (k *Kernel) issue(at int64, rung key.Proof, cos []key.Cosign, keys []key.Key) error {
 	now := k.read(at)
 	keys, err := k.ownerKeys(now, OpIssue, "", keys...)
 	if err != nil {
 		return err
 	}
+	if !k.s.standingOK(keys, rung) {
+		return ErrStandingRung
+	}
 	if _, err := k.s.grants(keys, cos, now); err != nil {
 		return err
 	}
-	return k.owner(now, TKeyIssued, grantBatch{keys, cos})
+	return k.owner(now, TKeyIssued, grantBatch{keys, cos, rung})
 }
 
 // SetLine sets the owner's line for a big change. Lowering it narrows; a raise
@@ -534,8 +555,11 @@ func (k *Kernel) AdmitSpend(at int64, plan string, amount int64) (Admitted, *key
 		return Admitted{}, key.Refuse(CHeld, h.Code.String())
 	}
 	task := ps.Plan.Task()
-	if r := v.Spend(task, amount, k.s.context(now, k.s.Ledger())); r != nil {
+	ctx := k.s.context(now, k.s.Ledger())
+	ctx.Rung = k.s.Rung(v.Limits.Task, ps.Plan.Key, false)
+	if r := v.Spend(task, amount, ctx); r != nil {
 		settled := k.s.context(now, ledger{s: k.s, settled: true})
+		settled.Rung = ctx.Rung
 		sr := v.Spend(task, amount, settled)
 		if sr != nil {
 			// The cap settled usage alone exhausts, which is the one a hold
@@ -632,7 +656,11 @@ func (k *Kernel) Extend(at int64, ext key.Key, plan string) error {
 	if !slices.ContainsFunc(v.Limits.Caps, func(c key.Cap) bool { return c.Kind == key.KSpendTask }) {
 		return key.Refuse(CExtension, "no per-task cap")
 	}
-	if r := v.Spend(k.s.Plans[plan].Plan.Task(), 1, k.s.context(now, k.s.Ledger())); r != nil {
+	// The extension is checked at the held plan's rung, as its calls are.
+	held := k.s.Plans[plan].Plan
+	ctx := k.s.context(now, k.s.Ledger())
+	ctx.Rung = k.s.Rung(key.TaskOf(held.Key), held.Key, false)
+	if r := v.Spend(held.Task(), 1, ctx); r != nil {
 		return r
 	}
 	return k.owner(now, TSpendExtend, spendExtended{plan, ext})
@@ -887,7 +915,7 @@ func sendCheck(s *State, p *PlanState, st *StepState, i int, now Reading) *key.R
 		return r
 	}
 	sp := p.Plan.Step(i)
-	sp.Rung = s.Rung(v.Limits.Task, st.Approved)
+	sp.Rung = s.Rung(v.Limits.Task, p.Plan.Key, st.Approved)
 	return v.Authorize(sp, s.context(now, s.LedgerBefore(st.DispatchSeq)))
 }
 

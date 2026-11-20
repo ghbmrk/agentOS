@@ -142,3 +142,22 @@ func TestRungNames(t *testing.T) {
 		t.Fatalf("%v", rf)
 	}
 }
+
+// Spend checks the call's rung as Authorize checks a step's: a key asking
+// for P3 funds nothing at P2, or with no rung set (LOG-7, CH-3).
+func TestSpendChecksTheRung(t *testing.T) {
+	o, h, k := root(t)
+	d, err := Derive(k, h.priv, gen(3).pub, LimitRung(P3), LimitSpendTask(10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := verified(t, d, o, gen(3))
+	for r := P0; r <= P4; r++ {
+		c := ctx(1, nil)
+		c.Rung = r
+		got := v.Spend("", 1, c)
+		if r >= P3 && got != nil || r < P3 && (got == nil || got.Code != RRung) {
+			t.Errorf("spend at %v: %v", r, got)
+		}
+	}
+}
