@@ -2,6 +2,9 @@ package privfile
 
 import (
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -149,5 +152,31 @@ func TestBuiltRecordsFields(t *testing.T) {
 	}
 	if err := builtUnits(recs, t.TempDir()); err == nil || !strings.Contains(err.Error(), `etc/systemd/user.conf: DefaultEnvironment=BASH_ENV=/x: variable "BASH_ENV"`) {
 		t.Fatalf("got %v, want the manager file refused", err)
+	}
+}
+
+// TestBuiltUserGeneratorFails: a user generator that fails fails the run,
+// as a system one does, since a root login's user manager may write and
+// start the units it would have written (#6002). It reads the user
+// manager's console line, so it also shows that log reaches the reader.
+// REQ: KRN-2
+func TestBuiltUserGeneratorFails(t *testing.T) {
+	if os.Geteuid() != 0 || !hasSystemd() {
+		if os.Getenv("AGENTOS_REQUIRE_SYSTEMD") == "1" {
+			t.Fatal("AGENTOS_REQUIRE_SYSTEMD=1, but this is not root or has no /usr/lib/systemd/systemd")
+		}
+		t.Skip("needs root and systemd; the image workflow runs these")
+	}
+	fs := fsTree(t, map[string]string{"/etc/systemd/user-generators/agentos-gen": "#!/bin/sh\nexit 3\n"})
+	if err := os.Chmod(filepath.Join(fs, "etc/systemd/user-generators/agentos-gen"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	list := filepath.Join(t.TempDir(), "packaged")
+	if err := os.WriteFile(list, []byte("\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("python3", "-I", filepath.Join(repoRoot(t), "image", "unit_rules.py"), "--fixture", fs, list).CombinedOutput()
+	if want := "root's user manager: generators failed, so their units are not all in the tree: agentos-gen"; err == nil || !strings.Contains(string(out), want) {
+		t.Fatalf("got %v: %s, want %q", err, out, want)
 	}
 }
