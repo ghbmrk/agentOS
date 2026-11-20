@@ -7944,6 +7944,90 @@ class MkosiRunBoundTest(unittest.TestCase):
         readme = (IMG / "README.md").read_text()
         self.assertIn("`%s`" % self.MKOSI_LINE.split(" 2>&1")[0], readme)
 
+    def test_the_local_wrapper_runs_the_same_mkosi_line(self):
+        # #6161: image/local-build.sh runs image.yml's line byte for byte; both are held to MKOSI_LINE, so a
+        # change to either alone fails here. CI never runs the wrapper.
+        wrapper = (IMG / "local-build.sh").read_text().splitlines()
+        self.assertEqual([l.strip() for l in wrapper if "bin/mkosi " in l], [self.MKOSI_LINE])
+        for wf in sorted((ROOT / ".github/workflows").glob("*.y*ml")):
+            self.assertNotIn("local-build", wf.read_text(), wf.name)
+
+    def local_build(self, *args, sources=None, mkosi_fails=False, snapshot=None):
+        """Run image/local-build.sh in a one-commit copy of the repository with build.sh, finish.sh and
+        sudo replaced by stand-ins that log their arguments; returns (exit code, the log's calls, OUT)."""
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        repo, bin_ = d / "repo", d / "bin"
+        src_rel = "image/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources"
+        for rel in ("image/local-build.sh", "image/security-snapshot.sh", src_rel):
+            (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / rel, repo / rel)
+        write_x = lambda p, s: (p.parent.mkdir(parents=True, exist_ok=True), p.write_text(s), p.chmod(0o755))
+        log = 'for a; do printf "%s\\n" "$a"; done >> "$LOG"; echo -- >> "$LOG"\n'
+        write_x(repo / "image/build.sh", "#!/bin/sh\nset -- build.sh \"$@\" \"snap=${AGENTOS_SECURITY_SNAPSHOT-unset}\"\n"
+                + log + 'cp "$SOURCES" "$2/agentos.sources"\n')
+        write_x(repo / "image/finish.sh", '#!/bin/sh\nset -- finish.sh "$@" "SDE=$SOURCE_DATE_EPOCH"\n' + log)
+        write_x(bin_ / "sudo", "#!/bin/sh\n" + log + 'case " $* " in *" /opt/mkosi/bin/mkosi "*) '
+                'echo mkosi; [ -z "$MKOSI_FAILS" ];; *) exec "$@";; esac\n')
+        if sources is None:
+            sources = subprocess.check_output(["sh", str(IMG / "security-snapshot.sh"), "sources", self.SECURITY])
+        (d / "sources").write_bytes(sources)
+        env = dict(os.environ, PATH="%s:%s" % (bin_, os.environ["PATH"]), LOG=str(d / "log"),
+                   SOURCES=str(d / "sources"), MKOSI_FAILS="1" if mkosi_fails else "",
+                   GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid", GIT_COMMITTER_NAME="t",
+                   GIT_COMMITTER_EMAIL="t@example.invalid", GIT_AUTHOR_DATE="@1763000000 +0000",
+                   GIT_COMMITTER_DATE="@1763000000 +0000", GIT_CONFIG_GLOBAL=os.devnull)
+        env.pop("AGENTOS_SECURITY_SNAPSHOT", None)
+        if snapshot:
+            env["AGENTOS_SECURITY_SNAPSHOT"] = snapshot
+        for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "x"]):
+            subprocess.run(["git", "-C", str(repo)] + cmd, env=env, check=True)
+        out = d / "out"
+        out.mkdir()
+        r = subprocess.run([str(repo / "image/local-build.sh"), str(out)] + list(args), cwd=str(d), env=env,
+                           capture_output=True, text=True)
+        text = (d / "log").read_text() if (d / "log").exists() else ""
+        calls = [c.strip("\n").split("\n") for c in text.split("--\n") if c.strip()]
+        return r, calls, str(out)
+
+    def test_the_local_wrapper_runs_the_three_steps_with_the_four_values(self):
+        # #6161: one command runs build.sh, the mkosi line and finish.sh, in that order, with OUT, VERSION,
+        # SOURCE_DATE_EPOCH (the commit time) and AGENTOS_SECURITY_SNAPSHOT (from OUT/agentos.sources).
+        for args, version in (((), "20251113.021320"), (("7.1",), "7.1")):
+            with self.subTest(args=args):
+                r, calls, out = self.local_build(*args)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                path = os.environ["PATH"]
+                self.assertEqual([c[0] for c in calls], ["env", "build.sh", "env", "env", "finish.sh"])
+                self.assertEqual(calls[1], ["build.sh", out, version, "snap=unset"])
+                self.assertEqual(calls[2][3:], [
+                    "SOURCE_DATE_EPOCH=1763000000", "/opt/mkosi/bin/mkosi", "-C", "image/mkosi", "-f",
+                    "--package-manager-tree=%s/pkgmngr" % out, "--image-version=" + version,
+                    "--environment=AGENTOS_SECURITY_SNAPSHOT=" + self.SECURITY,
+                    "--extra-tree=%s/stage/usr:/usr" % out, "--output-dir", out, "build"])
+                self.assertTrue(calls[2][1].startswith("PATH=") and calls[2][1].endswith(":" + path), calls[2][1])
+                self.assertEqual(calls[2][2], "HOME=/root")
+                self.assertEqual(calls[3][3:], ["image/finish.sh", out, version])
+                self.assertEqual(calls[4], ["finish.sh", out, version, "SDE=1763000000"])
+        # A snapshot set by hand goes to build.sh, as image.yml's stage job passes the run's.
+        r, calls, out = self.local_build(snapshot=self.SECURITY)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(calls[1][-1], "snap=" + self.SECURITY)
+
+    def test_the_local_wrapper_stops_before_mkosi_on_a_bad_stage(self):
+        # No snapshot in OUT/agentos.sources, or sources that are not exactly the ones security-snapshot.sh
+        # writes for it: mkosi and finish.sh never run.
+        good = subprocess.check_output(["sh", str(IMG / "security-snapshot.sh"), "sources", self.SECURITY])
+        for sources in (b"", good.replace(self.SECURITY.encode(), b"2026111"), good + b"# extra\n"):
+            with self.subTest(sources=sources[-40:]):
+                r, calls, _ = self.local_build(sources=sources)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertEqual([c[0] for c in calls], ["env", "build.sh"])
+        # mkosi failing behind tee still stops the build: finish.sh never runs.
+        r, calls, _ = self.local_build(mkosi_fails=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual([c[0] for c in calls], ["env", "build.sh", "env"])
+
     def test_build_sh_only_stages(self):
         b = (IMG / "build.sh").read_text()
         code = "\n".join(l for l in b.splitlines() if not l.lstrip().startswith("#"))
