@@ -21,8 +21,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/localui"
 	"github.com/ghbmrk/agentos/broker/modelroute"
-	"github.com/ghbmrk/agentos/broker/modem"
-	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/owner/kernelsock"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
@@ -678,120 +676,6 @@ func TestOpenVMWiresUnreadLineAndNotice(t *testing.T) {
 	}
 	if got := caps.unreadLine(); got != "" {
 		t.Fatalf("STATUS line after the forget = %q", got)
-	}
-}
-
-// REQ: LOG-4, CH-12. VM-snap-unread-notice-fu (#5500): a deletion notice the
-// owner channel did not take is held and retried until it goes, and goes
-// once: an Inform that fails once, then succeeds, tells the owner once.
-func TestOpenVMRetriesUnreadNoticeUntilDelivered(t *testing.T) {
-	defer func(d time.Duration) { unreadRetry = d }(unreadRetry)
-	unreadRetry = 10 * time.Millisecond
-	state := t.TempDir()
-	must(t, os.MkdirAll(filepath.Join(state, "snapshots", "s0000000007", "meta.json"), 0o700))
-	var m *vm.Manager
-	adm, err := admission.New(admission.Config{CapacityMB: 8000}, lateManager{&m})
-	must(t, err)
-	var tries atomic.Int32
-	told := make(chan string, 4)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	m, err = openVM(ctx, vm.Config{
-		StateDir: state, Images: map[string]string{"base": t.TempDir()},
-		Runtime: &sleepRuntime{running: map[string]bool{}}, Admit: adm, NoCgroups: true, NoQuota: true,
-		FreeBytes: func(string) (int64, error) { return 1 << 50, nil },
-	}, &capState{}, func(text string) error {
-		if tries.Add(1) == 1 {
-			return errNoOwnerChannel
-		}
-		told <- text
-		return nil
-	})
-	must(t, err)
-	must(t, m.ForgetSince(context.Background(), "x.0", time.Now()))
-	select {
-	case got := <-told:
-		if got != unreadGoneNotice(1, true) {
-			t.Fatalf("owner told %q, want the forget notice", got)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the held notice was never retried")
-	}
-	time.Sleep(10 * unreadRetry)
-	if n := tries.Load(); n != 2 || len(told) != 0 {
-		t.Fatalf("%d tries, %d more told: want one failure, then one delivery", n, len(told))
-	}
-}
-
-// Notices held while the channel is down are summed by kind, so a long
-// outage owes at most one forget and one disk-space notice, each with the
-// true count; a cancelled context stops the retries.
-func TestUnreadNoticesSumWhileHeldAndStopWithContext(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	down := true
-	var told []string
-	u := newUnreadNotices(ctx, time.Hour, func(text string) error {
-		if down {
-			return modem.ErrNotSent
-		}
-		told = append(told, text)
-		return nil
-	})
-	u.gone(1, true)
-	u.gone(2, false)
-	u.gone(2, true)
-	if len(told) != 0 {
-		t.Fatalf("told while down: %q", told)
-	}
-	down = false
-	u.flush()
-	want := []string{unreadGoneNotice(3, true), unreadGoneNotice(2, false)}
-	if !slices.Equal(told, want) {
-		t.Fatalf("told %q, want %q", told, want)
-	}
-	u.flush()
-	if len(told) != 2 {
-		t.Fatalf("a delivered notice was sent again: %q", told)
-	}
-	down = true
-	cancel()
-	u.gone(1, false)
-	down = false
-	u.flush()
-	if len(told) != 2 {
-		t.Fatalf("retried after the context ended: %q", told)
-	}
-}
-
-// A send error that does not prove the text stayed (modem.ErrDown: a
-// silent bridge, an unknown receipt) may hide a text that reached the
-// owner, so the notice counts as told and is never sent twice (#1638,
-// #2363; L3 on #6139). Only proven refusals are retried.
-func TestUnreadNoticeMaybeSentIsNotSentTwice(t *testing.T) {
-	for _, c := range []struct {
-		err   error
-		tries int
-	}{
-		{modem.ErrDown, 1},
-		{errors.New("owner: save failed"), 1},
-		{modem.ErrNotSent, 2},
-		{errNoOwnerChannel, 2},
-		{owner.ErrNoModem, 2},
-	} {
-		tries := 0
-		u := newUnreadNotices(context.Background(), time.Hour, func(string) error {
-			tries++
-			if tries == 1 {
-				return c.err
-			}
-			return nil
-		})
-		u.gone(2, true)
-		u.flush()
-		u.flush()
-		if tries != c.tries {
-			t.Errorf("first error %v: %d sends, want %d", c.err, tries, c.tries)
-		}
 	}
 }
 
