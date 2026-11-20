@@ -142,57 +142,54 @@ func sealedSize(n int64) int64 {
 	return int64(headerLen) + n + (n+chunkSize-1)/chunkSize*tagSize
 }
 
-// readFile reads a key table at p, refusing what a table is never
-// (REV-CHK-links, #3945, #3998). The directory is the owner's choice and
-// the read runs as root, so another uid may have planted the name: a link
-// is refused by O_NOFOLLOW; a FIFO, socket, device or directory by the
-// type of the open descriptor, O_NONBLOCK keeping the open of a FIFO from
-// waiting for a writer; and a file over sealedSize(maxTable) unread. A regular
-// file's reads never block, so O_NONBLOCK stays set. O_NOCTTY keeps a
-// planted terminal from becoming the daemon's controlling terminal; os.OpenFile
-// sets O_CLOEXEC itself.
+// readFile reads the key table at p: a regular file of at most sealedSize(maxTable) bytes.
 func readFile(p string) ([]byte, error) {
-	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0)
-	if errors.Is(err, syscall.ENXIO) {
-		return nil, fmt.Errorf("backup: %s is a socket or a device with no driver, not a regular file: %w", p, err)
-	}
+	f, st, err := OpenRegular(p)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return readTable(f, p)
+	return readTable(f, st.Size(), sealedSize(maxTable), p)
 }
 
-// readTable reads the key table open at f, named p in its errors: the
-// checks readFile makes on the descriptor it opened.
-func readTable(f *os.File, p string) ([]byte, error) {
-	st, err := f.Stat() // fstat of the descriptor opened, not of the name
+const oPath = 0x200000 // Linux's O_PATH, absent from syscall; a test pins it to x/sys/unix's
+
+// OpenRegular opens the regular file at p, which another uid may have planted, for
+// reading, and gives its fstat (REV-CHK-links, #6014). The O_PATH open follows no
+// link and reaches no FIFO or driver; its fstat refuses what is not regular; the
+// reopen through /proc/self/fd is of that same inode, whatever the name holds by then.
+func OpenRegular(p string) (*os.File, fs.FileInfo, error) {
+	pf, err := os.OpenFile(p, oPath|syscall.O_NOFOLLOW, 0)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if m := st.Mode(); !m.IsRegular() {
-		return nil, fmt.Errorf("backup: %s is a %s, not a regular file", p, typeName(m))
+	defer pf.Close()
+	st, err := pf.Stat()
+	if err == nil && st.Mode()&fs.ModeSymlink != 0 {
+		err = &fs.PathError{Op: "open", Path: p, Err: syscall.ELOOP} // as O_NOFOLLOW alone gives
+	} else if err == nil && !st.Mode().IsRegular() {
+		err = fmt.Errorf("backup: %s is a %s, not a regular file", p, typeName(st.Mode()))
 	}
-	limit := sealedSize(maxTable)
-	if st.Size() > limit {
-		return nil, fmt.Errorf("backup: %s is %d bytes, over the %d a key table can be", p, st.Size(), limit)
+	if err != nil {
+		return nil, nil, err
 	}
-	b, err := readBounded(f, limit)
+	f, err := os.Open("/proc/self/fd/" + strconv.Itoa(int(pf.Fd())))
+	return f, st, err
+}
+
+// readTable reads the key table r, named p in its errors: one over limit by its
+// fstat's size is refused unread, and the read stops one byte past limit, for a
+// file that grows after its fstat.
+func readTable(r io.Reader, size, limit int64, p string) ([]byte, error) {
+	if size > limit {
+		return nil, fmt.Errorf("backup: %s is %d bytes, over the %d a key table can be", p, size, limit)
+	}
+	b, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err == nil && int64(len(b)) > limit {
+		err = fmt.Errorf("over the %d bytes a key table can be", limit)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("backup: %s: %w", p, err)
-	}
-	return b, nil
-}
-
-// readBounded reads r to its end, refusing more than n bytes: a file can
-// grow between its fstat and its read.
-func readBounded(r io.Reader, n int64) ([]byte, error) {
-	b, err := io.ReadAll(io.LimitReader(r, n+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(b)) > n {
-		return nil, fmt.Errorf("over the %d bytes a key table can be", n)
 	}
 	return b, nil
 }
