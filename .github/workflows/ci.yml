@@ -577,14 +577,17 @@ jobs:
         # require_ran.py for the Go tests; for the Python ones, AGENTOS_REQUIRE_BROWSER=1 and the
         # script run, which exits 1 on any skip. The zip may come from the cache step before; one
         # that fails the hash is fetched afresh and checked again (#6175), so a bad cache entry can
-        # neither supply another binary nor fail every run; a second mismatch still fails.
+        # neither supply another binary nor fail every run; a second mismatch still fails. The warning
+        # names the delete command for the entry the restore read: CFT_KEY is that step's key (#6188).
+        env:
+          CFT_KEY: cft-headless-shell-${{ steps.image.outputs.os }}-${{ env.CFT_SHELL_SHA256 }}
         run: |
           python3 -m venv "$RUNNER_TEMP/pw"
           "$RUNNER_TEMP/pw/bin/python" -m pip install -q --no-deps --only-binary=:all: --require-hashes \
             -r ../tests/requirements-browser.txt
           zip="$HOME/.cache/agentos-cft/shell.zip"
           if ! { [ -f "$zip" ] && echo "$CFT_SHELL_SHA256  $zip" | sha256sum -c -; }; then
-            [ ! -f "$zip" ] || echo "::warning::The cached headless shell fails its pin; fetching it afresh. Delete the cft-headless-shell cache entry so main saves a good one (#6175)."
+            [ ! -f "$zip" ] || echo "::warning::The cached headless shell fails its pin; fetching it afresh. Delete the bad entry so main saves a good one (#6175): gh api -X DELETE \"repos/$GITHUB_REPOSITORY/actions/caches?key=$CFT_KEY\""
             mkdir -p "${zip%/*}"
             curl -fsSL --retry 3 -o "$zip" "$CFT_SHELL_URL"
           fi

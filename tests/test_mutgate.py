@@ -1513,10 +1513,23 @@ func set(n, m int) {
                   "func TestNothing(t *testing.T) {}\n"
                   + "".join(f"\nfunc TestPad{i}(t *testing.T) {{}}\n" for i in range(4)))
 
+    @staticmethod
+    def even(per):
+        """per_test with every test's seconds alone read as 1.0, so `selected`'s half rule decides
+        the same set on any runner: run times of near-empty tests are noise (#6172's rerun test went
+        red on #5998 when TestBreak and TestUse ran slow)."""
+        def timed(*a, **k):
+            if (got := per(*a, **k)) is None:
+                return None
+            ran, failing = got
+            return {n: (blocks, 1.0) for n, (blocks, _) in ran.items()}, {n: 1.0 for n in failing}
+        return timed
+
     def spied_deletions(self, pr, test, whole=False, jobs=1, patches=None):
         """({line: status}, [(site dir, names)]) of deletion_mutants on a repo of these sources, with
         each run_tests call's tests recorded; whole runs every site with the whole suite (no per-test
-        pass); patches ({name: value}) replaces those mutgate names first, run_tests under the spy."""
+        pass); patches ({name: value}) replaces those mutgate names first, run_tests under the spy.
+        per_test's seconds are `even` unless patches replaces it."""
         from unittest import mock
         with tempfile.TemporaryDirectory() as d:
             pkg = self.repo(d, "package hint\n", pr, test)
@@ -1534,6 +1547,8 @@ func set(n, m int) {
                 st.enter_context(mock.patch.object(mutgate, "run_tests", spy))
                 if whole:
                     st.enter_context(mock.patch.object(mutgate, "per_test", lambda *a, **k: None))
+                elif "per_test" not in (patches or {}):
+                    st.enter_context(mock.patch.object(mutgate, "per_test", self.even(mutgate.per_test)))
                 tmp = pathlib.Path(d) / "tmp"
                 tmp.mkdir()
                 got, problem = mutgate.deletion_mutants("hint", added, tmp, self.lister(tmp), jobs)
@@ -1605,7 +1620,7 @@ func set(n, m int) {
         # times its tests' runs alone, summed, plus 10 s, not at the whole suite's timeout.
         # REQ: MUT-delete-covering
         seen, timed = [], []
-        per, runs, alone = mutgate.per_test, mutgate.run_tests, mutgate.run_alone
+        per, runs, alone = self.even(mutgate.per_test), mutgate.run_tests, mutgate.run_alone
         def per_test(*a, **k):
             seen.append(per(*a, **k))
             return seen[-1]
@@ -1712,7 +1727,8 @@ func set(n, m int) {
             added = {"broker/hint/hint.go": set(range(1, 17))}
             tmp = pathlib.Path(d) / "tmp"
             tmp.mkdir()
-            with mock.patch.object(mutgate, "BROKER", pkg.parent):
+            with mock.patch.object(mutgate, "BROKER", pkg.parent), \
+                    mock.patch.object(mutgate, "per_test", self.even(mutgate.per_test)):
                 sites, _ = mutgate.deletion_sites("hint", added, self.lister(tmp))
                 costs, overhead = mutgate.site_costs("hint", sites, 1000.0, tmp)
         got = {s["line"]: c for s, c in zip(sites, costs)}
@@ -2978,6 +2994,49 @@ class DataFiles(unittest.TestCase):
             os.symlink("hint.go", pathlib.Path(d) / "broker" / "hint" / "link.go")
             self.assertEqual(mutgate.data_owner("broker/hint/ASSUMPTIONS.md"), "hint")
 
+    def test_a_wildcard_only_glob_counts_only_where_it_can_reach_a_file(self):
+        # #6328: a bare "*" is mostly data (a confusables table's character, a DNS wildcard, an
+        # Accept header), so a glob of wildcards and slashes alone names a file only in a
+        # //go:embed pattern or a path call's arguments; a glob holding any other character
+        # ("**/*.md") still counts anywhere.
+        # REQ: MUT-deleted-test-own-lines-fu
+        for name, src, counts in (
+                ("a table's star", 'var table = map[rune]string{0x2217: "*"}', False),
+                ("a DNS wildcard", 'var _ = listHas(v, "email") || listHas(v, "*")', False),
+                ("an Accept header", 'var h = map[string]string{"Accept": "*/*"}', False),
+                ("a star in a glob call", 'var _, _ = fs.Glob(F, "*")', True),
+                ("a star behind a directory in a glob call", 'var _, _ = filepath.Glob(dir + "/*")', True),
+                ("a star in a join", 'var _ = filepath.Join(dir, "*/*")', True),
+                ("a star embedded", '//go:embed *\nvar docs embed.FS', True),
+                ("a named glob outside a call", 'var pattern = "*.md"', True),
+                # L3 on #6336 (row #6337): a package that lists or matches names anywhere can reach
+                # a wildcard-only glob held in a variable, a const, a table or a field.
+                ("a star in a variable", 'func f() { p := "*"; fs.Glob(F, p) }', True),
+                ("a star in a const", 'const pat = "*"\nvar _, _ = fs.Glob(F, pat)', True),
+                ("a star in a table", 'var pats = []string{"*"}\nfunc f() { for _, p := range pats { filepath.Glob(filepath.Join(d, p)) } }', True),
+                ("a star in a field", 'var c = struct{ p string }{"*"}\nvar _, _ = fs.Glob(F, c.p)', True),
+                ("a star beside a walk", 'var s = "*"\nvar _ = filepath.WalkDir(root, fn)', True),
+                ("a star beside an old walk", 'var s = "*"\nvar _ = filepath.Walk(root, fn)', True),
+                ("a star beside a listing", 'var s = "*"\nvar _, _ = os.ReadDir(d)', True),
+                ("a star beside a match", 'var s = "*"\nvar _, _ = filepath.Match(s, name)', True),
+                ("a star beside a call that only ends in Match", 'var s = "*"\nvar _ = re.FindMatch(s)', False),
+                ("a glob call named only in a comment or literal", 'var s = "*" // Glob(\nvar t = "ReadDir("', False)):
+            with self.subTest(name), tempfile.TemporaryDirectory() as d, \
+                    self.tree(d, {"hint/hint.go": "package hint\n", "hint/hint_test.go": f"package hint\n\n{src}\n"}):
+                got = mutgate.touched(*mutgate.added_lines(data_diff("broker/hint/ASSUMPTIONS.md")))
+                self.assertEqual(got, {"hint"} if counts else set())
+        # The glob call can sit in another file of the package (a helper).
+        with tempfile.TemporaryDirectory() as d, self.tree(d, {
+                "hint/hint.go": "package hint\n\nfunc list(p string) { fs.Glob(F, p) }\n",
+                "hint/hint_test.go": 'package hint\n\nvar all = "*"\n'}):
+            self.assertEqual(mutgate.touched(*mutgate.added_lines(data_diff("broker/hint/ASSUMPTIONS.md"))), {"hint"})
+        # `?` is a wildcard too: "????" matches a.md only inside a path call.
+        for src, counts in (('var q = "????"', False), ('var _, _ = fs.Glob(F, "????")', True)):
+            with self.subTest(src), tempfile.TemporaryDirectory() as d, \
+                    self.tree(d, {"hint/hint.go": "package hint\n", "hint/hint_test.go": f"package hint\n\n{src}\n"}):
+                got = mutgate.touched(*mutgate.added_lines(data_diff("broker/hint/a.md")))
+                self.assertEqual(got, {"hint"} if counts else set())
+
     def test_a_glob_matches_by_its_last_part_against_the_files_base_name(self):
         # Potency on #5943 (d92c2e23): the last-part clause survived `rsplit`→`split` (needs a glob
         # with two directory parts) and `parts[-1]`→`parts[0]` (needs a file below a subdirectory).
@@ -3784,11 +3843,12 @@ class Record(unittest.TestCase):
         # said their mutants were not equivalent; #5909 deleted them once gremlins ran and killed each.
         self.assertEqual(len(sites), 24, r.stdout)
         self.assertEqual(len(set(sites)), 24, r.stdout)
-        # The two loadSenders proofs were re-read on #5780 after #5733 edited that func, and readMail's
-        # ReadAll proof on #5804 after it gained the setup-form check.
+        # The two loadSenders proofs were re-read on #5780 after #5733 edited that func, readMail's
+        # ReadAll proof on #5804 after it gained the setup-form check, and work's tick.Stop proof on #5998
+        # after its ticker took MailConfig.every.
         self.assertEqual(sorted(" ".join(l.split(" ")[1:3]) for l in r.stdout.strip().split("\n")),
-                         ["STATEMENT_DELETION #5743"] * 21 + ["STATEMENT_DELETION #5780"] * 2
-                         + ["STATEMENT_DELETION #5804"])
+                         ["STATEMENT_DELETION #5743"] * 20 + ["STATEMENT_DELETION #5780"] * 2
+                         + ["STATEMENT_DELETION #5804", "STATEMENT_DELETION #5998"])
 
 
 
