@@ -61,6 +61,8 @@ ONE_CALL = ('void *EVP_CIPHER_fetch(void *, const char *, const char *);\n'
 TABLE = ONE_CALL + ('typedef void *(*F)(void *, const char *, const char *);\n'
                     'F table[] = {EVP_CIPHER_fetch};\n'
                     'void *b(int i, const char *n) { return table[i](0, n, 0); }\n')
+# #6298: a static glob() caller, the control's stand-in for Debian's ldconfig.
+STATIC_GLOB = "#include <glob.h>\nint main(int c, char **v) { glob_t g; return glob(v[0], 0, 0, &g); }\n"
 # A program spelling the cipher, with no fetch name (Security 6899468190).
 SPELLS = 'const char *c = "aes-256-gcm-siv";\nint main(void) { return c[0]; }\n'
 # A program selecting KRB5KDF by name, which takes a "cipher" and does not check its mode (#5861).
@@ -92,7 +94,7 @@ class Tree(unittest.TestCase):
         src = t / "src"
         src.mkdir()
         cls.tree = t / "tree"
-        for d in ("usr/bin", "usr/lib", "etc"):
+        for d in ("usr/bin", "usr/lib", "usr/sbin", "etc"):
             (cls.tree / d).mkdir(parents=True)
 
         def cc(name, code, out, *args):
@@ -123,6 +125,8 @@ class Tree(unittest.TestCase):
         cc("shared.c", SHARED, lib / "libsystemd-shared-257.so", "-shared", "-fPIC", "-L" + str(lib),
            "-l:libcrypto.so.3", "-Wl,--version-script," + str(src / "sd.map"))
         subprocess.run(["strip", str(lib / "libsystemd-shared-257.so")], check=True)
+        # #6298: the static-scan control's stand-in, a static glob() caller as Debian's ldconfig is.
+        cc("ldconfig.c", STATIC_GLOB, cls.tree / "usr/sbin/ldconfig", "-D_GNU_SOURCE", "-static", "-s")
         (cls.tree / "etc/notelf").write_text("regcomp\n")
         os.symlink("daemon", cls.tree / "usr/bin/daemon-link")
 
@@ -136,8 +140,8 @@ class ImportSweepTest(Tree):
 
     def test_tree_imports_and_reach(self):
         got = sweep.run_tree(str(self.tree))["tree"]
-        # Fifteen ELF files; the text file and the symbolic links are not read.
-        self.assertEqual(got["scanned"], 15)
+        # Sixteen ELF files; the text file and the symbolic links are not read.
+        self.assertEqual(got["scanned"], 16)
         self.assertEqual(got["imports"]["/usr/lib/libregex-user.so.1.0.0"], ["regcomp"])
         wide = got["imports"]["/usr/bin/wtool"]
         self.assertEqual(len(wide), 1)
@@ -218,9 +222,9 @@ class ImportSweepTest(Tree):
 
     def test_summary_names_importers_and_reach(self):
         lines = sweep.summary(sweep.run_tree(str(self.tree)))
-        self.assertIn("tree regex: 2 files import a function, 1 more reach an importing library through NEEDED", lines)
+        self.assertIn("tree regex: 2 files import a function (or look one up, or carry a static copy), 1 more reach one through a NEEDED library", lines)
         self.assertIn("  via /usr/bin/daemon: /usr/lib/libregex-user.so.1.0.0", lines)
-        self.assertIn("tree wscanf: 1 files import a function, 0 more reach an importing library through NEEDED", lines)
+        self.assertIn("tree wscanf: 1 files import a function (or look one up, or carry a static copy), 0 more reach one through a NEEDED library", lines)
         notes = sweep.annotations(lines)
         self.assertTrue(notes and all(n.startswith("::notice title=import sweep ") for n in notes))
         self.assertNotIn("\n", "".join(notes))
@@ -420,7 +424,7 @@ class GlobImportsTest(unittest.TestCase):
 
     def test_summary_lists_the_glob_group(self):
         lines = sweep.summary(self.got)
-        self.assertIn("tree glob: 3 files import a function, 1 more reach an importing library through NEEDED", lines)
+        self.assertIn("tree glob: 3 files import a function (or look one up, or carry a static copy), 1 more reach one through a NEEDED library", lines)
         self.assertIn("  via /usr/bin/globd: /usr/lib/libglob-user.so.1.0", lines)
 
     def test_unlisted_importers_fail_and_listed_pass(self):
@@ -524,6 +528,7 @@ class RefusalsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             j, a = pathlib.Path(d) / "p.json", pathlib.Path(d) / "allow"
             a.write_text("# comment\n/usr/bin/bash  # the shell\n/usr/lib/libsmartcols.so.1.*\n/usr/bin/lsblk\n"
+                         "[glob]\n/usr/sbin/ldconfig\n"
                          "[cipher]\n/usr/lib/libcs.so.12.* sha256=%s EVP_CIPHER_fetch=1  # why\n"
                          "/usr/lib/libcrypto.so.3 *\n" % ("0f" * 32))
             self.assertEqual(sweep.load_allow(a), [E(x) for x in self.ALLOW])
@@ -532,7 +537,10 @@ class RefusalsTest(unittest.TestCase):
                                                       "/usr/lib/libcrypto.so.3": "*"})
             bad = {"tree": dict(self.OK["tree"], imports=dict(self.OK["tree"]["imports"],
                                                               **{"/usr/lib/systemd/systemd": ["regexec", "swscanf"]}))}
-            for places, want in ((self.OK, 0), (bad, 1)):
+            # The static-scan control's ldconfig (#6298), accepted by the [glob] entry.
+            ok = {"tree": dict(self.OK["tree"], static={"/usr/sbin/ldconfig": ["glob"]})}
+            bad["tree"]["static"] = ok["tree"]["static"]
+            for places, want in ((ok, 0), (bad, 1)):
                 j.write_text(__import__("json").dumps(places))
                 with self.subTest(want=want), contextlib.redirect_stdout(io.StringIO()), \
                         contextlib.redirect_stderr(io.StringIO()):
@@ -840,7 +848,7 @@ class ViaEntryTest(unittest.TestCase):
         places = {"tree": place({SMARTCOLS: ["regcomp"], "/usr/sbin/fdisk": ["rpmatch"]},
                                 {"/usr/sbin/fdisk": [SMARTCOLS], "/usr/bin/lsblk": [SMARTCOLS]})}
         lines = sweep.summary(places)
-        self.assertIn("tree regex: 2 files import a function, 1 more reach an importing library through NEEDED", lines)
+        self.assertIn("tree regex: 2 files import a function (or look one up, or carry a static copy), 1 more reach one through a NEEDED library", lines)
         self.assertNotIn("  via /usr/sbin/fdisk: " + SMARTCOLS, lines)
 
     def test_entries_parse_and_bad_lines_name_the_line(self):
@@ -908,5 +916,131 @@ class CrossGroupReachTest(unittest.TestCase):
                                                                      E("/usr/lib/libglob-user.so.*", True)]), [])
         # The summary counts it among the glob group's reachers, not its importers.
         lines = sweep.summary(got)
-        self.assertIn("tree glob: 1 files import a function, 1 more reach an importing library through NEEDED", lines)
-        self.assertIn("tree regex: 1 files import a function, 0 more reach an importing library through NEEDED", lines)
+        self.assertIn("tree glob: 1 files import a function (or look one up, or carry a static copy), 1 more reach one through a NEEDED library", lines)
+        self.assertIn("tree regex: 1 files import a function (or look one up, or carry a static copy), 0 more reach one through a NEEDED library", lines)
+
+
+# #6298: what no import shows. Static copies, stripped as the image ships them; dlsym callers.
+STATIC_REGEX = "#include <regex.h>\nint main(int c, char **v) { regex_t r; return regcomp(&r, v[0], 0); }\n"
+STATIC_WSCANF = WSCANF
+# A dynamic file holding the regex engine's marks as its own strings: only a static file is read for them.
+MARKS_ONLY = ('const char *m[] = {"Invalid preceding regular expression", "glob_in_dir", "__vfwscanf_internal"};\n'
+              'int main(int c, char **v) { return m[c][0]; }\n')
+# The same marks in a file naming an interpreter but no library (no libc at all), which is not static either.
+INTERP_ONLY = ('const char *m[] = {"glob_in_dir", "__vfwscanf_internal"};\n'
+               'void _start(void) { for (;;) __asm__ volatile("" :: "r"(m)); }\n')
+# A static file holding strings that only contain the marks: no mark is a whole string of its.
+STATIC_NEAR = ('const char *m[] = {"xglob_in_dir", "__vfwscanf_internal2", "Invalid preceding regular expressions"};\n'
+               'int main(int c, char **v) { return m[c][0]; }\n')
+LOOKS_UP = ('#include <dlfcn.h>\nint main(int c, char **v) { return dlsym(RTLD_DEFAULT, c ? "glob" : "regcomp") != 0; }\n')
+LOOKS_UP_V = ('#include <dlfcn.h>\nint main(void) { return dlvsym(RTLD_DEFAULT, "__isoc99_swscanf", "GLIBC_2.7") != 0; }\n')
+# Names that are no group function's whole name, and a group name held by a file that cannot look it up.
+LOOKS_UP_OTHER = ('#include <dlfcn.h>\nint main(int c, char **v) { return dlsym(RTLD_DEFAULT, c ? "globber" : '
+                  '"my_regcomp") != 0; }\n')
+HOLDS_NAME = 'const char *n = "glob";\nint main(void) { return n[0]; }\n'
+LIB_LOOKS_UP = '#include <dlfcn.h>\nint f(void) { return dlsym(RTLD_DEFAULT, "wordexp") != 0; }\n'
+
+
+@NEEDS_CC
+class UnimportedReachTest(unittest.TestCase):
+    """#6298: a static copy of glibc's glob, regex or wide scanf code, and a dlsym or dlvsym lookup of a
+    function's name, count as the file importing it, in the same groups and allow sections."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        t = pathlib.Path(cls.tmp.name)
+        src, cls.tree = t / "src", t / "tree"
+        lib = cls.tree / "usr/lib"
+        for d in (src, lib, cls.tree / "usr/bin", cls.tree / "usr/sbin"):
+            d.mkdir(parents=True, exist_ok=True)
+
+        def cc(name, code, out, *args):
+            (src / name).write_text(code)
+            subprocess.run(["cc", "-D_GNU_SOURCE", "-o", str(out), str(src / name), *args], check=True)
+        for name, code in (("ldconfig", STATIC_GLOB), ("sregex", STATIC_REGEX), ("swide", STATIC_WSCANF),
+                           ("splain", STATIC_NEAR)):
+            cc(name + ".c", code, cls.tree / "usr/sbin" / name, "-static", "-s")
+        cc("pie.c", STATIC_GLOB, cls.tree / "usr/sbin/spie", "-static-pie", "-fPIE", "-s")
+        cc("marks.c", MARKS_ONLY, cls.tree / "usr/bin/marks")
+        # It calls puts, so it names libc.so.6 (a library calling nothing in libc names no library).
+        cc("libmarks.c", "#include <stdio.h>\n" + MARKS_ONLY.replace("return m[c][0];", "return puts(m[c]);")
+           .replace("main", "f"), lib / "libmarks.so.1", "-shared", "-fPIC")
+        cc("interp.c", INTERP_ONLY, cls.tree / "usr/bin/interp", "-nostdlib", "-pie", "-fPIE",
+           "-Wl,--dynamic-linker=/lib64/ld-linux-x86-64.so.2")
+        cc("lookup.c", LOOKS_UP, cls.tree / "usr/bin/lookup", "-ldl")
+        cc("lookupv.c", LOOKS_UP_V, cls.tree / "usr/bin/lookupv", "-ldl")
+        cc("other.c", LOOKS_UP_OTHER, cls.tree / "usr/bin/other", "-ldl")
+        cc("holds.c", HOLDS_NAME, cls.tree / "usr/bin/holds")
+        cc("liblook.c", LIB_LOOKS_UP, lib / "liblook.so.1", "-shared", "-fPIC", "-Wl,-soname,liblook.so.1", "-ldl")
+        cc("uses.c", USES_LIB, cls.tree / "usr/bin/user", "-L" + str(lib), "-l:liblook.so.1")
+        cls.got = sweep.run_tree(str(cls.tree))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_static_copies_are_read_by_glibc_marks(self):
+        got = self.got["tree"]
+        self.assertEqual(got["static"], {"/usr/sbin/ldconfig": ["glob"], "/usr/sbin/spie": ["glob"],
+                                         "/usr/sbin/sregex": ["regcomp"], "/usr/sbin/swide": ["vfwscanf"]})
+        # A file holding the marks as its own strings that names a library or an interpreter is not a static
+        # copy, and imports nothing.
+        for p in ("/usr/bin/marks", "/usr/lib/libmarks.so.1", "/usr/bin/interp"):
+            self.assertNotIn(p, got["imports"])
+        self.assertEqual(got["unread"], [])
+
+    def test_lookups_are_whole_group_names_beside_dlsym(self):
+        got = self.got["tree"]
+        self.assertEqual(got["lookups"], {"/usr/bin/lookup": ["glob", "regcomp"],
+                                          "/usr/bin/lookupv": ["__isoc99_swscanf"],
+                                          "/usr/lib/liblook.so.1": ["wordexp"]})
+        # A library that looks one up is reached through, as an importing library is.
+        self.assertEqual(got["via"], {"/usr/bin/user": ["/usr/lib/liblook.so.1"]})
+
+    def test_each_counts_as_its_own_import(self):
+        errs = sweep.refusals(self.got, [], [])
+        refused = sorted(e.split(" imports or reaches ")[0].split(": ", 1)[1] for e in errs)
+        self.assertEqual(refused, ["/usr/bin/lookup", "/usr/bin/lookup", "/usr/bin/lookupv", "/usr/bin/user",
+                                   "/usr/lib/liblook.so.1", "/usr/sbin/ldconfig", "/usr/sbin/spie",
+                                   "/usr/sbin/sregex", "/usr/sbin/swide"])
+        regex = [E("/usr/bin/lookup"), E("/usr/sbin/sregex")]
+        globs = [E("/usr/bin/lookup"), E("/usr/sbin/ldconfig"), E("/usr/sbin/spie"), E("/usr/lib/liblook.so.1"),
+                 E("/usr/lib/liblook.so.1", True)]
+        errs = sweep.refusals(self.got, regex, globs)
+        # The wide scanf group has no allowed file, a static copy or a lookup included.
+        self.assertEqual(sorted(e.split(":")[1].split()[0] for e in errs), ["/usr/bin/lookupv", "/usr/sbin/swide"])
+        self.assertTrue(all("wide scanf" in e for e in errs), errs)
+
+    def test_summary_names_how(self):
+        lines = sweep.summary(self.got)
+        self.assertIn("  carries /usr/sbin/ldconfig: glob", lines)
+        self.assertIn("  looks up /usr/bin/lookup: regcomp", lines)
+        self.assertIn("  via /usr/bin/user: /usr/lib/liblook.so.1", lines)
+        self.assertIn("tree glob: 4 files import a function (or look one up, or carry a static copy), 1 more reach "
+                      "one through a NEEDED library", lines)
+
+    def test_static_control(self):
+        tree = self.got["tree"]
+        want = ("tree: no static file carries glob() (ldconfig always does), so the static scan's marks read "
+                "nothing they should have (control)")
+        base = dict(tree, imports={"/usr/bin/bash": ["regcomp"]}, cipher={"/l": {"EVP_CIPHER_fetch": 1}})
+        self.assertEqual(sweep.problems({"tree": base}), [])
+        for static in ({}, {"/usr/sbin/sregex": ["regcomp"]}):
+            with self.subTest(static=static):
+                self.assertEqual(sweep.problems({"tree": dict(base, static=static)}), [want])
+        # An initrd's static copy is no main-tree control.
+        self.assertEqual(sweep.problems({"tree": dict(base, static={}), "initrd:x": dict(base, others=0)}), [want])
+
+
+class PerGroupLibraryTest(unittest.TestCase):
+    """#6319: a file reaching glob() through one library and regex through another is held, in each group,
+    to the via entries of that group's library only (the per-group filter in reach())."""
+
+    def test_each_group_names_only_its_libraries(self):
+        places = {"tree": place({"/usr/lib/libg.so.1": ["glob"], "/usr/lib/libr.so.1": ["regcomp"]},
+                                {"/usr/bin/both": ["/usr/lib/libg.so.1", "/usr/lib/libr.so.1"]})}
+        self.assertEqual(sweep.reach(places)[("glob", "/usr/bin/both")], {"tree": (False, ["/usr/lib/libg.so.1"])})
+        regex = [E("/usr/lib/libr.so.1"), E("/usr/lib/libr.so.1", True)]
+        globs = [E("/usr/lib/libg.so.1"), E("/usr/lib/libg.so.1", True)]
+        self.assertEqual(sweep.refusals(places, regex, globs), [])

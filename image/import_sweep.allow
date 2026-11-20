@@ -1,13 +1,16 @@
 # The files of the built image (main tree and initrds) that may import or reach glibc's regex engine
 # (DEBIAN-CVE-2026-100290, #5697): one glob per line, each a file the image -100290 record in
 # assurance/vulncheck.json names. image/import_sweep.py --summary fails on a file that matches none,
-# and on a glob that matches no file. Only command-line tools, the guests' shells and libraries whose
-# regex use the record explains belong here; a long-lived or network-facing process never does.
-# "via GLOB" (#6297) accepts every file that reaches the functions only through libraries GLOB names,
-# each with an entry of its own, and imports none itself: such a file can call them only through the
-# library's code, so the library's review (its comment here) covers it. A file importing a function
-# itself always needs its own entry, and a via entry that accepts no file fails as a glob that matches
-# none does.
+# and on a glob that matches no file. A file naming a function counts as importing it: by its dynamic
+# imports, by a dlsym or dlvsym lookup of a name it holds, or as a static copy of glibc's code (#6298).
+# Only files whose own regex use the record explains are named here: command-line tools, the guests'
+# shells and libraries. "via GLOB" (#6297) accepts every file that reaches the functions only through
+# libraries GLOB names, each with an entry of its own, and imports none itself: such a file can call them
+# only through the library's code. A via entry accepts each new dependent of its library without an entry
+# of its own, a long-lived or network-facing process among them, so the library's own entry, and its
+# comment here, is where the review sits: it has to cover every input the library's callers can pass. A
+# file importing a function itself always needs its own entry, and a via entry that accepts no file fails
+# as a glob that matches none does.
 
 # Shell and text tools, run locally.
 /usr/bin/bash
