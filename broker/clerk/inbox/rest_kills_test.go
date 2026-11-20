@@ -136,24 +136,31 @@ func TestPosterTreatsADropAfterConnectingAsUnconfirmed(t *testing.T) {
 	}
 }
 
-// Post closes the response's connection when it returns, though the body
-// runs past what it reads.
-func TestPosterClosesALongResponse(t *testing.T) {
-	rg := newPosterRig(t, map[string][]netip.Addr{"example.com": {public}})
-	closed := make(chan error, 1)
-	rg.response = func(w http.ResponseWriter, r *http.Request) {
-		c := hijack(t, w)
-		defer c.Close()
-		io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n"+strings.Repeat("x", 2*postReadMax))
-		c.SetReadDeadline(time.Now().Add(10 * time.Second))
-		_, err := io.Copy(io.Discard, c)
-		closed <- err
-	}
-	if err := rg.poster.Post(context.Background(), onePost("https://example.com/u")); err != nil {
+// closeCount is a response body that counts its Closes.
+type closeCount struct {
+	io.Reader
+	n *int
+}
+
+func (c closeCount) Close() error { *c.n++; return nil }
+
+type roundTrip func(*http.Request) (*http.Response, error)
+
+func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// Post closes the response body itself, not only through its context.
+func TestPosterClosesTheResponseBody(t *testing.T) {
+	ps := NewPoster(nil, nil)
+	closes := 0
+	ps.client.Transport = roundTrip(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Request: r,
+			Body: closeCount{strings.NewReader("ok"), &closes}}, nil
+	})
+	if err := ps.Post(context.Background(), onePost("https://example.com/u")); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-closed; err != nil {
-		t.Fatalf("the connection stayed open: %v", err)
+	if closes != 1 {
+		t.Fatalf("body closed %d times, want 1", closes)
 	}
 }
 
