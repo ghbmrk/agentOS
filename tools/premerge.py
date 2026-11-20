@@ -11,8 +11,9 @@ commit with the merge-base of `base` and `head`) and compares that tree with `he
 bytes, binary content and modes count, except that an ASSUMPTIONS.md differing only in its rows' first-cell ids (a renumbering after a main-merge) reads as same,
 and so does a DECISIONS.md whose only replay conflicts are table rows both sides appended at one spot, resolved by
 keeping both sides' rows verbatim, either side first (#3224, #3233), the PR's rows renumbered or not when no other PR file names an old ID (#4030),
-and so does a `*_allow.txt` whose lines are main's plus the PR's line changes, in any order (#3991). A replay file that fails a cheap gate never reads
-same as is: a duplicate row ID (doclint) in an ASSUMPTIONS.md or DECISIONS.md, or an ASSUMPTIONS.md row that
+and so does a `*_allow.txt` whose lines are main's plus the PR's line changes, in any order (#3991),
+and so does a MUTANTS-EQUIVALENT whose entries are main's plus the PR's entry changes, each side's entries in its own order (#6314). A replay file that fails a cheap gate never reads
+same as is: a duplicate row ID (doclint) in an ASSUMPTIONS.md or DECISIONS.md, a duplicate MUTANTS-EQUIVALENT key, or an ASSUMPTIONS.md row or entry that
 `merge=union` brought back (in the merge base and main, not in the reviewed commit). A head that resolves each union
 hunk without those rows, keeping its rows inside the hunk, reads same (#3400, #3401), unless `git merge-file`
 aligns the file unlike the replay: then every head reads changed and is resolved by hand. Main merged into the branch therefore reads as same, even next
@@ -366,7 +367,10 @@ def _stale(cwd, text, path, reviewed, onto):
 
 def _broken(cwd, tree, path, reviewed, onto):
     """True when the replay's `path` fails a cheap gate, so a head that keeps it never reads same (#3400): a
-    duplicate row ID in an ASSUMPTIONS.md or DECISIONS.md (doclint), or a row `merge=union` brought back."""
+    duplicate row ID in an ASSUMPTIONS.md or DECISIONS.md (doclint), a row `merge=union` brought back, or a
+    MUTANTS-EQUIVALENT that is no merge of its two sides (`_records_kept`)."""
+    if path.rsplit("/", 1)[-1] == RECORD:
+        return _records_kept(cwd, tree, tree, path, reviewed, onto) is not True
     if path != "DECISIONS.md" and path.rsplit("/", 1)[-1] != "ASSUMPTIONS.md":
         return False
     text = _git(cwd, "show", f"{tree}:{path}", ok=(0, 128))
@@ -509,6 +513,50 @@ def _lines_kept(cwd, tree, head, path, reviewed, onto):
     return main + (pr - mb) - (mb - pr) == want
 
 
+RECORD = "MUTANTS-EQUIVALENT"  # tools/mutgate.py's RECORD: one JSON entry per line, `#` and blank lines comments
+
+
+def _entry_keys(lines):
+    """The keys of a record's entry lines, a key being an entry less its proof (`reason`, `accepted`): two
+    entries with one key name one mutant twice. None when a line is no JSON object (mutgate fails it)."""
+    try:
+        entries = [json.loads(x) for x in lines]
+    except ValueError:
+        return None
+    if not all(isinstance(e, dict) for e in entries):
+        return None
+    return [json.dumps({k: v for k, v in e.items() if k not in ("reason", "accepted")}, sort_keys=True) for e in entries]
+
+
+def _records_kept(cwd, tree, head, path, reviewed, onto):
+    """True when `path` is a MUTANTS-EQUIVALENT (merge=union, .gitattributes) and `head`'s lines, as a multiset,
+    are main's plus the lines the reviewed commit added less those it removed, with each side's entries in that
+    side's order and no key twice: a union, or a hand merge keeping both sides (#6314). An entry the PR or the
+    resolution edited, dropped, reordered or doubled, or one the union brought back, reads False; None for a
+    criss-cross merge, which reads as changed (L3 on #6315: its union can bring back an entry unseen)."""
+    if path.rsplit("/", 1)[-1] != RECORD:
+        return False
+    bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
+    if len(bases) != 1:
+        return None
+    if not _same_mode(cwd, tree, head, path):
+        return False
+    # Split on \n only, as mutgate's record_entries does.
+    pr, mb, main, want = (_git(cwd, "show", f"{t}:{path}", ok=(0, 128)).split(b"\n") for t in (reviewed, bases[0], onto, head))
+    count = collections.Counter
+    if count(main) + (count(pr) - count(mb)) - (count(mb) - count(pr)) != count(want):
+        return False
+    entry = lambda lines: [x for x in lines if x.strip() and not x.lstrip().startswith(b"#")]
+    keys = _entry_keys(entry(want))
+    if keys is None or len(set(keys)) != len(keys):
+        return False
+    for side in (pr, main):  # each side's surviving entries in its own order
+        mine, kept = set(entry(side)), set(entry(want))
+        if [x for x in entry(want) if x in mine] != [x for x in entry(side) if x in kept]:
+            return False
+    return True
+
+
 def compare(cwd, reviewed, head="HEAD", base="origin/main"):
     onto = _git(cwd, "merge-base", base, head).decode().strip()
     tree = _replayed(cwd, reviewed, onto)
@@ -521,6 +569,7 @@ def compare(cwd, reviewed, head="HEAD", base="origin/main"):
     return sorted(kept | {f for f in differ if not _renumbered_only(cwd, tree, head, f, reviewed, onto)
                           and not _appends_kept(cwd, tree, head, f, reviewed, onto)
                           and not _lines_kept(cwd, tree, head, f, reviewed, onto)
+                          and not _records_kept(cwd, tree, head, f, reviewed, onto)
                           and not _stale_dropped(cwd, tree, head, f, reviewed, onto)})
 
 

@@ -19,26 +19,31 @@ It also reads, for the openssl records (#5341), which files hold the name of a b
 selector or spell GCM-SIV or KRB5KDF, as selecting AES-GCM-SIV takes one of its names (see CIPHER_NAMES
 and SPELT), and counts their references to each selector and their spellings.
 
-The JSON maps each place ("tree", and "initrd:<path>" for each initrd) to: "scanned", the ELF files
-read; "imports", each file importing an affected glibc symbol and those symbols; and "via", each other
-ELF file whose NEEDED closure (by SONAME or file name, within that place) holds an importing library, and those
-libraries; "cipher", each file whose bytes hold a CIPHER_NAMES or SPELT name and its references to each
-(cipher_sites); "sha256", each of those files' SHA-256; "unread", each ELF file objdump failed on; and, for an initrd, "others", its executable
-members that are not ELF files. Only symbols bound to a GLIBC_ version count, so a library's own re_*
-names do not.
+The JSON maps each place ("tree", and "initrd:<path>" for each initrd) to: "scanned", the ELF files read;
+"imports", each file importing an affected glibc symbol and those symbols; and "via", each ELF file whose
+NEEDED closure (by SONAME or file name, within that place) holds an importing library other than itself,
+and those libraries, whether or not the file imports a symbol itself (#6297: a file importing one group's
+symbols can reach another group's through a library); "cipher", each file whose bytes hold a CIPHER_NAMES
+or SPELT name and its references to each (cipher_sites); "sha256", each of those files' SHA-256;
+"unread", each ELF file objdump failed on; and, for an initrd, "others", its executable members that are
+not ELF files. Only symbols bound to a GLIBC_ version count, so a library's own re_* names do not.
 
 --summary exits 1 when a claim the glibc records rest on stops holding: any file, in any place, imports
-or reaches a wide scanf function, or imports or reaches a regex function and matches no glob in ALLOW
-(each a file the image -100290 record names), or imports or reaches glob() and matches no glob in its
-[glob] section (each a file the -126765 records name); a glob that matches nothing also fails, so each
-list stays its record's. It also exits 1 when a file holding a selector name or a SPELT name matches no [cipher]
-entry of ALLOW or more than one, or holds other sites or other bytes (SHA-256) than the counted entry it
-matches, or an entry matches nothing; and on an ALLOW it cannot read (read_allow). The
-control is the scan itself: it also exits 1 when objdump failed on a file,
-the main tree or an initrd with executable members read no ELF file, the main tree has no importer
-of regcomp (bash and grep always import it), or no call site of EVP_CIPHER_fetch (libcryptsetup and
-libcrypto always hold one), so a clean result is not a scan that read nothing.
+or reaches a wide scanf function, or imports or reaches a regex function and is not accepted by ALLOW's
+regex entries (the image -100290 record), or imports or reaches glob() and is not accepted by its [glob]
+section (the -126765 records). A file is accepted by an entry naming it (a glob), or, when it imports
+none of the group's functions itself, by "via" entries naming every library it reaches them through, each
+of which has an entry naming it (#6297): a reviewed library's dependents need no entry each, and a new
+direct caller still fails. An entry that accepts nothing also fails, so each list stays its record's. It
+also exits 1 when a file holding a selector name or a SPELT name matches no [cipher] entry of ALLOW or
+more than one, or holds other sites or other bytes (SHA-256) than the counted entry it matches, or an
+entry matches nothing; and on an ALLOW it cannot read (read_allow). The control is the scan itself: it
+also exits 1 when objdump failed on a file, the main tree or an initrd with executable members read no
+ELF file, the main tree has no importer of regcomp (bash and grep always import it), or no call site of
+EVP_CIPHER_fetch (libcryptsetup and libcrypto always hold one), so a clean result is not a scan that read
+nothing.
 """
+import collections
 import fnmatch
 import hashlib
 import json
@@ -198,7 +203,7 @@ def sweep(files):
                 if lib in importers and lib != shown:
                     hits.add(lib)
                 todo += needed.get(lib, [])
-        if hits and shown not in importers:
+        if hits:
             via[shown] = sorted(hits)
     return {"scanned": len(files), "imports": dict(sorted(imports.items())), "via": dict(sorted(via.items())),
             "unread": sorted(unread), "cipher": dict(sorted(cipher.items())),
@@ -294,21 +299,50 @@ def problems(places):
 
 
 def reach(places):
-    """{(group, path): [places]} of every file that imports or reaches a function of the group."""
+    """{(group, path): {place: (imports one itself, [the importing libraries it reaches one through])}} of
+    every file that imports or reaches a function of the group."""
     out = {}
     for place, v in places.items():
-        for p, syms in v["imports"].items():
-            for g in {group_of(x) for x in syms}:
-                out.setdefault((g, p), []).append(place)
-        for p, libs in v["via"].items():
-            for g in {group_of(x) for lib in libs for x in v["imports"].get(lib, [])}:
-                out.setdefault((g, p), []).append(place)
+        for p in set(v["imports"]) | set(v["via"]):
+            own = {group_of(x) for x in v["imports"].get(p, [])}
+            libs = v["via"].get(p, [])
+            for g in own | {group_of(x) for lib in libs for x in v["imports"].get(lib, [])}:
+                out.setdefault((g, p), {})[place] = (g in own, sorted(
+                    lib for lib in libs if g in {group_of(x) for x in v["imports"].get(lib, [])}))
     return out
 
 
 def load_allow(path):
-    """The regex globs of ALLOW: one per line, after any '#' comment, up to its first section line."""
+    """The regex entries of ALLOW: one per line, after any '#' comment, up to its first section line."""
     return read_allow(path)[0]
+
+
+# A [regex] or [glob] entry: GLOB, which accepts the files it names, or "via GLOB", which accepts a file
+# reaching the group only through libraries it names (refusals). Further fields (a reviewed file's
+# SHA-256) can follow with defaults.
+Entry = collections.namedtuple("Entry", "glob via", defaults=(False,))
+
+
+def shown(e):
+    return ("via " if e.via else "") + e.glob
+
+
+def entry(e):
+    """E as an Entry; a plain string is a GLOB entry."""
+    return e if isinstance(e, Entry) else Entry(e)
+
+
+def parse_entry(line):
+    """The Entry a [regex] or [glob] line gives, or None for a line of another form (ENTRY_FORMAT)."""
+    t = line.split()
+    if len(t) == 1 and t[0] != "via":
+        return Entry(t[0])
+    if len(t) == 2 and t[0] == "via":
+        return Entry(t[1], True)
+    return None
+
+
+ENTRY_FORMAT = "GLOB or via GLOB"
 
 
 # A [cipher] entry's tokens: the SHA-256 of the file reviewed (hex in either case, kept lowercased), and
@@ -322,9 +356,9 @@ REVIEW = ("review where its names come from, then %s the [cipher] entry and the 
 
 
 def read_allow(path):
-    """(the regex globs, the [cipher] entries, the [glob] globs) of ALLOW. The regex globs come first, one
-    per line, then each section once, opened by its line ([glob] or [cipher]); a [glob] entry is a glob,
-    as a regex one is. A [cipher] entry is a glob, then either "*" (not
+    """(the regex entries, the [cipher] entries, the [glob] entries) of ALLOW. The regex entries come first,
+    one per line, then each section once, opened by its line ([glob] or [cipher]); a regex or [glob] entry
+    is an Entry (ENTRY_FORMAT), each given once. A [cipher] entry is a glob, then either "*" (not
     counted) or the SHA-256 of the file reviewed and the sites it holds exactly (FORMAT), read as
     {"sha256": hex, "sites": {name: count}}: a new package version changes the bytes, so the source is
     read again even when the counts hold (#5861). Exits naming the line on any other entry, a glob given
@@ -342,10 +376,13 @@ def read_allow(path):
                 sys.exit("import sweep: %s:%d: %s is %s; the sections are [glob] and [cipher], each once"
                          % (path, n, l, "given again" if section in seen else "no section"))
             seen.add(section)
-        elif l and section is None:
-            regex.append(l)
-        elif l and section == "glob":
-            globs.append(l)
+        elif l and section in (None, "glob"):
+            e, into = parse_entry(l), regex if section is None else globs
+            if e is None or e in into:
+                sys.exit("import sweep: %s:%d: %s; a%s entry is %s, each given once" % (
+                    path, n, "%s is given again" % l if e else "%s is not an entry" % l,
+                    " [glob]" if section else " regex", ENTRY_FORMAT))
+            into.append(e)
         elif l:
             glob, *want = l.split()
             if glob in cipher:
@@ -419,22 +456,37 @@ LISTED = {"regex": ("a regex function", "", "the image -100290 record"),
 
 
 def refusals(places, allow, globs=()):
-    """Each claim of the glibc records that PLACES break, against the regex globs ALLOW and the [glob]
-    section's GLOBS."""
-    errs, used, entries = [], set(), {"regex": allow, "glob": globs}
-    for (g, p), where in sorted(reach(places).items()):
+    """Each claim of the glibc records that PLACES break, against the regex entries ALLOW and the [glob]
+    section's GLOBS (Entry, or a plain glob). In each place, a file reaching a group is accepted by a GLOB
+    entry matching it; or, when it imports none of the group's functions itself, when each library it
+    reaches them through matches a "via" entry and a GLOB entry of its own (#6297), so a new direct
+    caller is never accepted by a library's review. Every entry has to accept a file somewhere."""
+    errs, used = [], set()
+    entries = {"regex": [entry(e) for e in allow], "glob": [entry(e) for e in globs]}
+    for (g, p), at in sorted(reach(places).items()):
         if g not in LISTED:
             errs.append("%s: %s imports or reaches a wide scanf function; the -115819 records say nothing does"
-                        % (" ".join(where), p))
+                        % (" ".join(at), p))
             continue
-        hit = [(g, a) for a in entries[g] if fnmatch.fnmatchcase(p, a)]
-        used.update(hit)
-        if not hit:
+        def matching(path, via):
+            return [e for e in entries[g] if e.via == via and fnmatch.fnmatchcase(path, e.glob)]
+        named = matching(p, False)
+        used.update((g, e) for e in named)
+        refused = []
+        for place, (own, libs) in ([] if named else at.items()):
+            vias = [matching(lib, True) for lib in libs]
+            if own or not all(vias) or not all(matching(lib, False) for lib in libs):
+                refused.append(place)
+                continue
+            used.update((g, e) for v in vias for e in v)
+        if refused:
             what, section, record = LISTED[g]
             errs.append("%s: %s imports or reaches %s and is not in import_sweep.allow%s; review it, name it in "
-                        "%s, then add the entry: %s" % (" ".join(where), p, what, section, record, p))
-    errs += ["import_sweep.allow:%s %s matches no file that reaches %s; remove it" % (LISTED[g][1], a, LISTED[g][0])
-             for g in LISTED for a in entries[g] if (g, a) not in used]
+                        "%s, then add the entry: %s" % (" ".join(refused), p, what, section, record, p))
+    errs += ["import_sweep.allow:%s %s %s; remove it" % (
+        LISTED[g][1], shown(e), "accepts no file that reaches %s only through a library it names that has an entry "
+        "naming it" % LISTED[g][0] if e.via else "matches no file that reaches %s" % LISTED[g][0])
+        for g in LISTED for e in entries[g] if (g, e) not in used]
     return errs
 
 
@@ -445,7 +497,7 @@ def summary(places):
         for g in GROUPS:
             imp = {p: [s for s in syms if group_of(s) == g] for p, syms in v["imports"].items()}
             imp = {p: s for p, s in imp.items() if s}
-            via = {p: [lib for lib in libs if lib in imp] for p, libs in v["via"].items()}
+            via = {p: [lib for lib in libs if lib in imp] for p, libs in v["via"].items() if p not in imp}
             via = {p: libs for p, libs in via.items() if libs}
             lines.append("%s %s: %d files import a function, %d more reach an importing library through NEEDED"
                          % (place, g, len(imp), len(via)))

@@ -71,3 +71,14 @@ func TestDeclaredHeadersRefuseTheCorpus(t *testing.T) {
 		}
 	}
 }
+
+// Shipped declarations that do not parse stop the program at start, rather
+// than leaving the clerk with no providers.
+func TestBadShippedDeclarationsPanic(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("unparsable declarations did not panic")
+		}
+	}()
+	mustDeclarations([]byte("x"))
+}
