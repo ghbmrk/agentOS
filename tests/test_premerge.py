@@ -587,6 +587,30 @@ class PremergeTest(unittest.TestCase):
         reviewed = self.records_merge(a, self.entry("a()", col=3), "")  # another column is another key
         self.assertEqual(self.check(reviewed), [])
 
+    def test_records_union_under_a_criss_cross_merge_base_is_changed(self):
+        # L3 on #6315: with two merge bases the exemption reads nothing, and a union that brought back an entry the
+        # PR deleted read `same` once the head equalled the replay.
+        a, b, c, d = (self.entry(s) for s in ("a()", "b()", "c()", "d()"))
+        head = "# Mutant-equivalent proofs for broker/k.\n"
+        self.write(".gitattributes", (ROOT / ".gitattributes").read_text())
+        (self.r / "broker/k").mkdir(parents=True)
+        self.write(self.RECFILE, head + a + b + c)
+        self.commit("record")
+        for side in ("x", "y"):
+            git(self.r, "checkout", "-q", "-b", side, "main")
+            self.write(side + ".txt", side + "\n")
+            self.commit(side)
+        git(self.r, "checkout", "-q", "-b", "m1", "x"), git(self.r, "merge", "-q", "--no-edit", "y")
+        self.write(self.RECFILE, head + a + b + c + d)
+        main = self.commit("main appends d")
+        git(self.r, "checkout", "-q", "-b", "pr", "y"), git(self.r, "merge", "-q", "--no-edit", "x")
+        self.write(self.RECFILE, head + a + b)
+        reviewed = self.commit("pr deletes c")
+        self.assertEqual(len(git(self.r, "merge-base", "--all", reviewed, main).split()), 2)
+        git(self.r, "merge", "-q", "--no-edit", main)
+        self.assertIn('"c()"', self.read(self.RECFILE), "the union driver was meant to bring c back")
+        self.assertEqual(premerge.compare(self.r, reviewed, "HEAD", main), [self.RECFILE])
+
     def test_records_union_with_a_mode_flip_is_changed(self):
         reviewed = self.records_merge(self.entry("m()"), self.entry("p()"))
         self.chmod_commit(self.RECFILE)

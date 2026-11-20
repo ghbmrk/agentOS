@@ -370,7 +370,7 @@ def _broken(cwd, tree, path, reviewed, onto):
     duplicate row ID in an ASSUMPTIONS.md or DECISIONS.md (doclint), a row `merge=union` brought back, or a
     MUTANTS-EQUIVALENT that is no merge of its two sides (`_records_kept`)."""
     if path.rsplit("/", 1)[-1] == RECORD:
-        return _records_kept(cwd, tree, tree, path, reviewed, onto) is False
+        return _records_kept(cwd, tree, tree, path, reviewed, onto) is not True
     if path != "DECISIONS.md" and path.rsplit("/", 1)[-1] != "ASSUMPTIONS.md":
         return False
     text = _git(cwd, "show", f"{tree}:{path}", ok=(0, 128))
@@ -533,7 +533,7 @@ def _records_kept(cwd, tree, head, path, reviewed, onto):
     are main's plus the lines the reviewed commit added less those it removed, with each side's entries in that
     side's order and no key twice: a union, or a hand merge keeping both sides (#6314). An entry the PR or the
     resolution edited, dropped, reordered or doubled, or one the union brought back, reads False; None for a
-    criss-cross merge, which the caller reads as changed but not as broken."""
+    criss-cross merge, which reads as changed (L3 on #6315: its union can bring back an entry unseen)."""
     if path.rsplit("/", 1)[-1] != RECORD:
         return False
     bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
