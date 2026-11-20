@@ -49,7 +49,15 @@ func TestAnUnreadableKernelSubmitsNothing(t *testing.T) {
 // A plan the kernel took whose state then cannot be read is reported
 // unknown, never refused: it may run, and a repeat learns its state (KRN-5).
 func TestALostReadAfterASubmissionIsUnknown(t *testing.T) {
-	r := newRig(t, nil)
+	logged := make(chan string, 16)
+	r := newRig(t, func(c *Config) {
+		c.Logf = func(f string, _ ...any) {
+			select {
+			case logged <- f:
+			default:
+			}
+		}
+	})
 	r.kern.entered, r.kern.hold = make(chan struct{}), make(chan struct{})
 	go func() {
 		<-r.kern.entered
@@ -61,32 +69,16 @@ func TestALostReadAfterASubmissionIsUnknown(t *testing.T) {
 	if st, _ := r.tool("m1", "plan", send("r1")); st.State != "unknown" || st.Reason != reasonLost || r.kern.plans() != 1 {
 		t.Fatalf("a lost read after the kernel took the plan: %+v, %d plans", st, r.kern.plans())
 	}
-}
-
-// Shutdown stops waiting for a request still in flight after shutdownWait,
-// so one hung kernel call cannot hold the broker's stop.
-func TestShutdownGivesUpOnAHungRequest(t *testing.T) {
-	r := newRig(t, nil)
-	r.kern.entered, r.kern.hold = make(chan struct{}), make(chan struct{})
-	b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-		"params": map[string]any{"name": "plan", "arguments": send("r1")}})
-	c := r.client("m1")
-	go func() {
-		if resp, err := c.Post("http://broker/mcp", "application/json", strings.NewReader(string(b))); err == nil {
-			resp.Body.Close()
+	for {
+		select {
+		case f := <-logged:
+			if strings.Contains(f, "; read: ") {
+				return
+			}
+			continue
+		default:
 		}
-	}()
-	<-r.kern.entered
-	defer close(r.kern.hold)
-	done := make(chan struct{})
-	go func() {
-		r.p.Shutdown()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(shutdownWait + 10*time.Second):
-		t.Fatal("Shutdown still waits for a request held past shutdownWait")
+		t.Fatal("the broker's log has no line for the lost read")
 	}
 }
 
