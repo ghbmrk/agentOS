@@ -11,38 +11,47 @@ package wipelint_test
 //
 // The rule runs over every non-test file of broker, testdata included,
 // type-checked, whatever the file imports. A sealer constructor is any
-// function, method or func type whose results hold a clerk.Sealer (a
-// type that, or whose pointer, implements it, anywhere inside a result:
-// a field, pointer, slice, map, channel or func result), found by type
+// function, method or func type whose results hold a clerk.Sealer (a type
+// that, or whose pointer, implements it, anywhere inside a result: a
+// field, pointer, slice, map, channel or func result), found by type
 // alone. Its possible keys are the receiver and parameters whose type can
-// hold or produce key bytes
-// (keyForm): a byte slice or byte array, named or not, a string, a type
-// parameter whose type set holds one, or a type the lint cannot wipe
-// (an interface, func, channel, uintptr or unsafe.Pointer, a type set
-// without terms, a pointer, slice, map or struct holding key bytes). A named constructor with a possible key is listed in
-// sealers, naming which of them are keys, or the build fails; a func
-// type or literal with one fails outright (no name to list). A listed key
-// is a byte slice: a string key cannot be wiped, an array key passes by
-// value and leaves the callee an unwiped copy, and a key of any other form
-// cannot be wiped by a statement, so each fails the listing, with the
+// hold or produce key bytes (keyForm): a byte slice or byte array, named
+// or not, a string, a type parameter whose type set holds one, or a type
+// the lint cannot wipe (an interface, func, channel, uintptr or
+// unsafe.Pointer, a type set without terms, a pointer, slice, map or
+// struct holding key bytes). A named constructor with a possible key is
+// listed in sealers, naming which of them are keys, or the build fails; a
+// func type or literal with one fails outright (no name to list). A listed
+// key is a byte slice: a string key cannot be wiped, an array key passes
+// by value and leaves the callee an unwiped copy, and a key of any other
+// form cannot be wiped by a statement, so each fails the listing, with the
 // reason. A call of a listed constructor with keys is the only right-hand
-// side of an assignment (`s, err := f(k)`, or =) in a statement list,
-// each key argument a local variable, and the statements right after it
-// are the builtin `clear(k)` or `defer clear(k)`, one per key. `clear(k)`
-// wipes before anything can return; `defer clear(k)` wipes when the
-// function returns, on every path, so the key lives until then. Any other use fails: an argument that is an
-// expression, a wipe after an error check, a clear of another variable,
-// the call in a return, a var declaration, an if header or another call's
-// arguments, or the constructor taken as a value. A function listed in
-// keyExempt has its calls unheld, the reason given. A listed name that is
-// gone fails (stale). A non-test file the load did not read (a build tag,
-// cgo; lintload.Unread) fails unless unreadOK lists it with the reason it
-// holds no sealer.
+// side of an assignment (`s, err := f(k)`, or =) in a statement list, each
+// key argument a local variable, and the statements right after it are the
+// builtin `clear(k)` or `defer clear(k)`, one per key. `clear(k)` wipes
+// before anything can return; `defer clear(k)` wipes when the function
+// returns, on every path, so the key lives until then. Any other use
+// fails: an argument that is an expression, a wipe after an error check, a
+// clear of another variable, the call in a return, a var declaration, an
+// if header or another call's arguments, or the constructor taken as a
+// value. A function listed in keyExempt has its calls unheld, the reason
+// given. A listed name that is gone fails (stale). A non-test file the
+// load did not read (a build tag, cgo; lintload.Unread) fails unless
+// unreadOK lists it with the reason it holds no sealer.
 //
-// Bound: what the code does with the key before the call (a copy kept,
-// an early return that skips the wipe), what a constructor does with it
-// inside, and _test.go files, whose keys are fixed test bytes, are held
-// by review.
+// A sealer may also come into being with no call: a conversion to a
+// sealer type, or a composite literal of one, from a possible key fails
+// outside a listed constructor's own body. A function declared to return
+// an interface (any) that returns a value holding a sealer counts as
+// making one.
+//
+// Bound, held by review: what the code does with the key before the call
+// (a copy kept, `string(k)`, an early return that skips the wipe); what a
+// listed constructor does with it inside its own body; a key stored into
+// a sealer after it is made (a field assignment, an append, a channel
+// send); a sealer reached through reflect or unsafe; how long a key lives
+// under `defer clear(k)` (to the function's return, process life in a
+// serve loop); and _test.go files, whose keys are fixed test bytes.
 
 import (
 	"fmt"
@@ -102,6 +111,7 @@ var sealers = map[string]sealerKey{
 	"github.com/ghbmrk/agentos/broker/clerk/run.NewMailHost":                 {nil, "ctx, a path, the sealed store and the mail config; no key"},
 	"github.com/ghbmrk/agentos/broker/clerk/run.OpenSecrets":                 {nil, "dir is a path and s a built sealer"},
 	"github.com/ghbmrk/agentos/broker/clerk/run.openSecrets":                 {nil, "dir is a path, s a built sealer and stop a test hook"},
+	"(github.com/ghbmrk/agentos/broker/clerk/run.SignInSock).Start":          {nil, "returns a worker holding the sign-in host; ctx, the guest, the plan's name and the receiver hold no sealing key"},
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-camera.openSecrets":        {nil, "keyFile is the kernel's hand-off; the key read from it is wiped inside"},
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-homekit.openSecrets":       {nil, "keyFile is the kernel's hand-off; the key read from it is wiped inside"},
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-model.openStore":     {nil, "dir and slot are names, s a built sealer, stop a test hook"},
@@ -459,7 +469,7 @@ func clearOf(s ast.Stmt, info *types.Info) types.Object {
 func constructorProblems(fset *token.FileSet, f *ast.File, info *types.Info, sealer *types.Interface, keys map[string]sealerKey, tree string, seen map[string]bool) []string {
 	var problems []string
 	line := func(n ast.Node) string { return strconv.Itoa(fset.PositionFor(n.Pos(), false).Line) }
-	named := func(id *ast.Ident) {
+	named := func(id *ast.Ident, body *ast.BlockStmt) {
 		fn, isFunc := info.Defs[id].(*types.Func)
 		if !isFunc {
 			return
@@ -471,7 +481,7 @@ func constructorProblems(fset *token.FileSet, f *ast.File, info *types.Info, sea
 			seen[name] = true
 		}
 		held := possibleKeys(sig)
-		if !givesSealer(sig, sealer) {
+		if !givesSealer(sig, sealer) && !returnsSealer(body, sig, info, sealer) {
 			if listed {
 				problems = append(problems, line(id)+": "+name+" is listed in sealers but makes no sealer; remove the entry")
 			}
@@ -500,9 +510,55 @@ func constructorProblems(fset *token.FileSet, f *ast.File, info *types.Info, sea
 			}
 		}
 	}
+	// A listed constructor's own body builds its sealer from its key;
+	// what it does there is held by review (Bound).
+	var bodies []ast.Node
+	for _, d := range f.Decls {
+		if fd, isFn := d.(*ast.FuncDecl); isFn {
+			if fn, isFunc := info.Defs[fd.Name].(*types.Func); isFunc {
+				if _, listed := keys[fn.FullName()]; listed {
+					bodies = append(bodies, fd)
+				}
+			}
+		}
+	}
+	inListed := func(n ast.Node) bool {
+		return slices.ContainsFunc(bodies, func(b ast.Node) bool { return b.Pos() <= n.Pos() && n.End() <= b.End() })
+	}
+	// carries reports whether e is a value that can hold or produce key
+	// bytes and is not itself a sealer: no constant, no sealer re-typed.
+	carries := func(e ast.Expr) bool {
+		tv, ok := info.Types[e]
+		if !ok || tv.Value != nil || tv.IsNil() {
+			return false
+		}
+		return keyForm(tv.Type) != formNone && !holdsSealer(tv.Type, sealer, map[types.Type]bool{})
+	}
+	// isSealer reports whether t, or its pointer, is a sealer itself (not
+	// a wrapper that holds one beside other things).
+	isSealer := func(t types.Type) bool {
+		return types.Implements(t, sealer) || types.Implements(types.NewPointer(t), sealer)
+	}
 	owned := map[*ast.FuncType]bool{}
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch n := n.(type) {
+		case *ast.CallExpr:
+			// A conversion to a sealer type of a possible key.
+			if tv, ok := info.Types[n.Fun]; ok && tv.IsType() && len(n.Args) == 1 && isSealer(tv.Type) && carries(n.Args[0]) && !inListed(n) {
+				problems = append(problems, line(n)+": a conversion makes a sealer from a possible key; build it in a listed constructor")
+			}
+		case *ast.CompositeLit:
+			if t := info.TypeOf(n); t != nil && isSealer(t) && !inListed(n) {
+				for _, e := range n.Elts {
+					if kv, isKV := e.(*ast.KeyValueExpr); isKV {
+						e = kv.Value
+					}
+					if carries(e) {
+						problems = append(problems, line(n)+": a composite literal makes a sealer from a possible key; build it in a listed constructor")
+						break
+					}
+				}
+			}
 		case *ast.Ident:
 			fn, isFunc := info.Uses[n].(*types.Func)
 			if !isFunc || fn.Pkg() == nil || strings.HasPrefix(fn.Pkg().Path()+"/", tree) {
@@ -518,19 +574,19 @@ func constructorProblems(fset *token.FileSet, f *ast.File, info *types.Info, sea
 			}
 		case *ast.FuncDecl:
 			owned[n.Type] = true
-			named(n.Name)
+			named(n.Name, n.Body)
 		case *ast.InterfaceType:
 			for _, m := range n.Methods.List {
 				if ft, isFunc := m.Type.(*ast.FuncType); isFunc && len(m.Names) > 0 {
 					owned[ft] = true
 					for _, id := range m.Names {
-						named(id)
+						named(id, nil)
 					}
 				}
 			}
 		case *ast.FuncLit:
 			owned[n.Type] = true
-			if sig, isSig := info.TypeOf(n).(*types.Signature); isSig && givesSealer(sig, sealer) && len(possibleKeys(sig)) > 0 {
+			if sig, isSig := info.TypeOf(n).(*types.Signature); isSig && (givesSealer(sig, sealer) || returnsSealer(n.Body, sig, info, sealer)) && len(possibleKeys(sig)) > 0 {
 				problems = append(problems, line(n)+": a func literal makes a sealer from a possible key; declare it as a function and list it in sealers")
 			}
 		case *ast.FuncType:
@@ -597,6 +653,36 @@ func givesSealer(sig *types.Signature, sealer *types.Interface) bool {
 		}
 	}
 	return false
+}
+
+// returnsSealer reports whether body, of a function of sig, returns a
+// value holding a sealer as a result sig declares as an interface (any):
+// the sealer leaves under a type givesSealer cannot see.
+func returnsSealer(body *ast.BlockStmt, sig *types.Signature, info *types.Info, sealer *types.Interface) bool {
+	if body == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.FuncLit:
+			return false // its own returns are its own
+		case *ast.ReturnStmt:
+			if len(n.Results) != sig.Results().Len() {
+				return true // a bare return, or one call's results: that callee is held itself
+			}
+			for i, e := range n.Results {
+				if _, isIface := sig.Results().At(i).Type().Underlying().(*types.Interface); !isIface {
+					continue
+				}
+				if t := info.TypeOf(e); t != nil && holdsSealer(t, sealer, map[types.Type]bool{}) {
+					found = true
+				}
+			}
+		}
+		return !found
+	})
+	return found
 }
 
 func holdsSealer(t types.Type, sealer *types.Interface, seen map[types.Type]bool) bool {
@@ -801,6 +887,7 @@ var pkgKey []byte
 		"example.test/p.notSealer":       {[]string{"k"}, "case"},
 		"(example.test/p.rawKey).Sealer": {[]string{"r"}, "case"},
 		"example.test/q.NewQ":            {[]string{"k"}, "case"},
+		"example.test/p.newOwn6":         {[]string{"k"}, "case"},
 	}
 	cases := []struct {
 		name, body string
@@ -1036,6 +1123,39 @@ func n5(k []byte) (*box, error) { return nil, nil }`, 1},
 		{"a slice of sealers, unlisted", `func n6(k []byte) ([]clerk.Sealer, error) { return nil, nil }`, 1},
 		{"a func result yielding a sealer, unlisted", `func n8(k []byte) func() clerk.Sealer { return nil }`, 1},
 		{"a key listed as an interface, cannot be wiped", `func newAny(k interface{ Key() []byte }) (clerk.Sealer, error) { return nil, nil }`, 1},
+		// Sealers made with no constructor call (#6363 Security).
+		{"a conversion inline", `type raw []byte
+
+func (raw) Seal(plain, aad []byte) ([]byte, error) { return nil, nil }
+func (raw) Open(blob, aad []byte) ([]byte, error) { return nil, nil }
+
+func f(k []byte) { sink = raw(k) }`, 1},
+		{"a composite literal inline", `type own5 struct{ k []byte }
+
+func (*own5) Seal(plain, aad []byte) ([]byte, error) { return nil, nil }
+func (*own5) Open(blob, aad []byte) ([]byte, error) { return nil, nil }
+
+func f(k []byte) { sink = &own5{k} }`, 1},
+		{"a composite literal in a listed constructor's own body", `type own6 struct{ k []byte }
+
+func (*own6) Seal(plain, aad []byte) ([]byte, error) { return nil, nil }
+func (*own6) Open(blob, aad []byte) ([]byte, error) { return nil, nil }
+
+func newOwn6(k []byte) (clerk.Sealer, error) { return &own6{k: k}, nil }`, 0},
+		{"a wrapper literal beside a built sealer: only its unlisted maker fails", `type host struct {
+	s    clerk.Sealer
+	name string
+}
+
+func f(s clerk.Sealer) *host { return &host{s: s, name: "x"} }`, 1},
+		{"a sealer re-typed: only its unlisted maker fails", `func f(s clerk.Sealer) any { return clerk.Sealer(s) }`, 1},
+		{"a wrapper struct result", `func n9(k []byte) (*struct{ s clerk.Sealer }, error) { return nil, nil }`, 1},
+		{"an any result returning a sealer", `func n10(k []byte) (any, error) {
+	s, err := clerk.NewAESSealer(k)
+	clear(k)
+	return s, err
+}`, 1},
+		{"an any result returning no sealer", `func n11(k []byte) any { return len(k) }`, 0},
 		// A package that does not import clerk: its sealer is found by
 		// type, and its callers are held.
 		{"a wrapper in a package that does not import clerk", `package q
