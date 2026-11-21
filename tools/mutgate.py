@@ -1194,7 +1194,7 @@ def covering(waived, mutants):
 # of each line of the statement's own syntax, as `mutgate_stmts.go` lists them, or the line alone
 # when it is in no listed statement, whitespace runs as one space), at (which of stmt's lines),
 # after (the code line before the statement's first), occurrence ([i, n]: the i-th of the n lines
-# of the file with that same key), reason, accepted (`#<PR>` whose review accepted the proof), and
+# of the file with that same key), reason, accepted (`#<PR>`, the PR that adds the entry), and
 # optionally col (the mutant's column on its line, as the result gives it, #5792): an entry waives a
 # mutant only when no other mutant of its kind on its line (at its col, when it names one) is in the
 # result, so a line of several such mutants needs col.
@@ -3037,7 +3037,8 @@ def decide(results, added, tests, args, records=({}, [])):
     for w, hit in covering(waived, every)[1]:
         print(f"mutgate: the waiver {site_text(w)} matches {len(hit)} mutants ("
               + ", ".join(site_text((p, n, k, c)) for p, n, k, c in hit) + "), so it waives none: name the one it "
-              "proves by its column and kind, `Mutant-equivalent: <path>:<line>:<col>:<KIND> <reason>`")
+              "proves: delete its entry from the package's " f"{RECORD} and run `tools/mutgate.py waive FILE --accepted '#PR'` again "
+              "on a line `Mutant-equivalent: <path>:<line>:<col>:<KIND> <reason>`, then commit the record")
     return report_violations(found, lost) or (1 if stale else 0)
 
 
@@ -3299,8 +3300,9 @@ def report_violations(found, lost=()):
     if found:
         print("mutgate: add a test that fails when the line changes; if no test can tell, add a line "
               "`Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>` (`Mutant-uncovered:` for one no test "
-              "can reach) for that mutant to a file and record it with `tools/mutgate.py waive FILE --accepted '#PR'` "
-              "(its column and kind as the summary's Site and Mutant cells give them, where its line holds another)")
+              "can reach) for that mutant to a file, record it with `tools/mutgate.py waive FILE --accepted '#PR'` "
+              "(its column and kind as the summary's Site and Mutant cells give them, where its line holds another) "
+              "and commit the record")
     return 1 if found else 0
 
 
@@ -3373,7 +3375,7 @@ def main(argv=None):
     p = sub.add_parser("waive")
     p.add_argument("lines", metavar="FILE",
                    help="`Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>` lines, one per line")
-    p.add_argument("--accepted", required=True, metavar="#PR", type=pr_ref, help="the PR whose review accepted these proofs")
+    p.add_argument("--accepted", required=True, metavar="#PR", type=pr_ref, help="the PR that adds these entries; its review reads each proof")
     p.add_argument("--mutant", type=mutant_kind,
                    help=f"the one mutant kind the proofs are for, where a line names none (default {DELETION}; "
                         "or a gremlins type)")
