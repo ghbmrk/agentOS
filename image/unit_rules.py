@@ -981,7 +981,7 @@ def lint(root, usr, cmdline, packaged, plant_files=None, own_usr=False):
             recs["held"] = {"names": sorted(set(recs["held"]["names"]) | uheld),
                             "prefixes": sorted(set(recs["held"]["prefixes"]) | set(upre))}
             recs["managers"] = manager_confs(view, pkg)
-            recs["env"], recs["pkg_env"] = env_files(view, recs["units"], pkg)
+            recs["env"], recs["pkg_env"] = env_files(view, recs["units"], pkg, View(root) if own_usr else None)
             return recs
         finally:
             m.stop()
@@ -1034,60 +1034,159 @@ ENV_REFUSED_SPECIFIERS = "yYs"
 ENV_SPECIFIER = re.compile(r"%(.?)")
 
 
+WILD = None  # in a path pattern (env_patterns, tmpfiles_pattern): any run of bytes, "/" included
+
+
 def env_patterns(p):
-    """The paths an EnvironmentFile= value P may name: P with %% read as %, each path-valued specifier as
-    each of its ENV_PATH_SPECIFIERS values and every other one as any run of bytes, "/" included. Each is
-    (the path, None) when no wildcard is met, else (the literal directory it starts in, a regular
-    expression over a tree path); None when P holds no specifier. A refused or unknown specifier fails
-    the run (#6312 Security 1)."""
+    """The paths an EnvironmentFile= value P may name, as patterns: tuples of characters and WILD, with %%
+    read as %, each path-valued specifier as each of its ENV_PATH_SPECIFIERS values and every other one as
+    WILD. None when P holds no specifier. A refused or unknown specifier fails the run (#6312 Security 1)."""
     if "%" not in p:
         return None
-    outs = [("", "", False)]  # (regex so far, literal prefix so far, whether a wildcard has been met)
+    outs = [()]
     for i, part in enumerate(ENV_SPECIFIER.split(p)):
         if i % 2 == 0 or part == "%":
-            outs = [(r + re.escape(part), l if w else l + part, w) for r, l, w in outs]
+            outs = [o + tuple(part) for o in outs]
         elif part in ENV_PATH_SPECIFIERS:
-            outs = [(r + re.escape(v), l if w else l + v, w) for r, l, w in outs for v in ENV_PATH_SPECIFIERS[part]]
+            outs = [o + tuple(v) for o in outs for v in ENV_PATH_SPECIFIERS[part]]
         elif part in ENV_REFUSED_SPECIFIERS or not part.isalpha():
             raise SystemExit("unit rules: EnvironmentFile=%s: specifier %%%s names a path the reader does not "
                              "expand; name the env file without it (#6312)" % (p, part))
         else:
-            outs = [(r + ".*", l, True) for r, l, w in outs]
-    return sorted({(l.rpartition("/")[0] or "/", re.compile(r + r"\Z", re.S)) if w else (l, None)
-                   for r, l, w in outs}, key=lambda x: (x[0], x[1].pattern if x[1] else ""))
+            outs = [o + (WILD,) for o in outs]
+    return sorted(set(outs), key=lambda o: [c or "" for c in o])
 
 
-def env_matches(boot, pats):
-    """Each path in BOOT that one of PATS (env_patterns) may name: a fixed one as it is; a wildcard one by
-    every path that matches it, walked from the directory it starts in as systemd would open it, directory
-    links followed and every walked path to a directory walked, since the pattern is matched against the
-    walked path (#6312 Security delta 1). A wildcard matches paths of any length, so a link back to a
-    directory on the walk's own chain makes the paths it may name unbounded: that fails the run, naming
-    the link (#6312 Security delta 2)."""
-    out = set()
-    for top, pat in pats:
-        if pat is None:
-            out.add(top)
-            continue
-        todo = [(top, frozenset())]
+def pattern_step(pat, states, text):
+    """The positions in PAT (env_patterns) a match may be at after TEXT, from the positions STATES, each
+    past any WILD it may skip: a WILD stays where it is or is skipped, a character moves past its equal."""
+    def close(ss):
+        ss, todo = set(ss), list(ss)
         while todo:
-            d, chain = todo.pop()
-            final = boot.resolve(d)[0]
-            if final in chain:
-                raise SystemExit("unit rules: %s: a directory link back to %s, which an EnvironmentFile= wildcard "
-                                 "(%s) walks again, so the env files it may name are unbounded; remove the link "
-                                 "or name the env file without a specifier (#6312)" % (d, final, pat.pattern))
-            chain = chain | {final}
+            i = todo.pop()
+            if i < len(pat) and pat[i] is WILD and i + 1 not in ss:
+                ss.add(i + 1)
+                todo.append(i + 1)
+        return ss
+    states = close(states)
+    for c in text:
+        states = close({i if pat[i] is WILD else i + 1 for i in states if i < len(pat) and pat[i] in (WILD, c)})
+    return frozenset(states)
+
+
+def patterns_meet(a, b):
+    """Whether some path matches both patterns A and B (env_patterns, tmpfiles_pattern)."""
+    seen, todo = set(), [(0, 0)]
+    while todo:
+        i, j = todo.pop()
+        if (i, j) in seen:
+            continue
+        seen.add((i, j))
+        if i == len(a) and j == len(b):
+            return True
+        x = a[i] if i < len(a) else ""
+        y = b[j] if j < len(b) else ""
+        if x is WILD:
+            todo.append((i + 1, j))
+        if y is WILD:
+            todo.append((i, j + 1))
+        if x is WILD and y not in (WILD, ""):
+            todo.append((i, j + 1))
+        if y is WILD and x not in (WILD, ""):
+            todo.append((i + 1, j))
+        if x not in (WILD, "") and x == y:
+            todo.append((i + 1, j + 1))
+    return False
+
+
+def env_matches(boot, pats, ours_link=lambda link: True):
+    """Each path in BOOT that one of PATS (env_patterns) may name: a fixed one as it is; one with a WILD by
+    a walk from the directory its literal part ends in, as systemd would open it, directory links followed.
+    The pattern is matched against the walked path, so a directory is walked once for each (directory it
+    resolves to, positions in the pattern, whether a link OURS_LINK holds brought it in) it is reached with,
+    and not at all where no position is left: every file a matching path opens, through any alias of its
+    directory and around any link cycle, is named by one walked path, and the walk is bounded by the tree's
+    directories times the pattern's positions (#6474, after #6312 Security deltas 1 and 2). The path named
+    for a file is one that reaches it with a link of ours on the way if any does, so env_files sees the link."""
+    out = set()
+    for pat in pats:
+        if WILD not in pat:
+            out.add("".join(pat))
+            continue
+        lit = "".join(pat[:pat.index(WILD)])
+        top = lit.rpartition("/")[0] or "/"
+        todo, seen = [(top, pattern_step(pat, {0}, top.rstrip("/")))], set()
+        while todo:
+            d, states = todo.pop()
+            final, links = boot.resolve(d)
+            key = (final, states, any(ours_link(l) for l in links))
+            if key in seen:
+                continue
+            seen.add(key)
             for n in boot.entries(d):
                 q = d.rstrip("/") + "/" + n
-                if pat.match(q):
+                after = pattern_step(pat, states, "/" + n)
+                if not after:
+                    continue
+                if len(pat) in after:
                     out.add(q)
                 if boot.kind(boot.resolve(q)[0]) == 0o040000:
-                    todo.append((q, chain))
+                    todo.append((q, after))
     return sorted(out)
 
 
-def env_files(view, units, packaged=lambda p: True):
+# systemd-tmpfiles 257's path specifiers for the system manager; every other one, and a glob character, is
+# read as WILD (tmpfiles_pattern).
+TMPFILES_PATH_SPECIFIERS = {"t": "/run", "S": "/var/lib", "C": "/var/cache", "L": "/var/log", "T": "/tmp",
+                            "V": "/var/tmp", "h": "/root", "%": "%"}
+# The tmpfiles.d types that put content at their path at boot: write a file (f, F, w), copy (C) or link (L).
+TMPFILES_WRITERS = "fFwCL"
+
+
+def tmpfiles_pattern(path):
+    """A tmpfiles.d line's PATH as a pattern (env_patterns' form): each TMPFILES_PATH_SPECIFIERS value as it
+    is, any other specifier, glob character, quote or escape as WILD, which may name more, never less."""
+    out = []
+    for i, part in enumerate(ENV_SPECIFIER.split(path)):
+        if i % 2:
+            out += list(TMPFILES_PATH_SPECIFIERS.get(part, [WILD]))
+        else:
+            out += [WILD if c in "*?[]\"\'\\" else c for c in part]
+    return tuple(out)
+
+
+def tmpfiles_env_refusals(boot, units, packaged, usr_view=None):
+    """#6474: each tmpfiles.d line of ours (in a file not byte-identical to a package's, PACKAGED) of a type
+    that puts content at its path (TMPFILES_WRITERS), at, or for C and L under, a path a package's
+    EnvironmentFile= line in UNITS may name: such a file is made at boot (under /run, which BootView hides,
+    or anywhere the tree has none), so env_files never reads it. The run fails, naming both lines."""
+    writers = []
+    for f, line in tmpfiles_lines(boot, usr_view):
+        w = line.split()
+        if len(w) < 2 or w[0][0] not in TMPFILES_WRITERS or packaged(boot.resolve(f)[0]):
+            continue
+        pat = tmpfiles_pattern(w[1])
+        writers.append((f, line, [pat] + ([pat + ("/", WILD)] if w[0][0] in "CL" else [])))
+    if not writers:
+        return
+    for u in units:
+        for uf in u["files"]:
+            if uf["ours"]:
+                continue
+            for ln in uf["text"].split("\n"):
+                m = ENV_LINE.match(ln)
+                p = m and m.group(1).lstrip("-")
+                if not p or not p.startswith(("/", "%")):
+                    continue
+                for pat in env_patterns(p) or [tuple(p)]:
+                    for f, line, pats in writers:
+                        if any(patterns_meet(pat, t) for t in pats):
+                            raise SystemExit("unit rules: %s: tmpfiles.d line %r makes at boot a file a package's "
+                                             "EnvironmentFile=%s may name, which the unit lint does not read; "
+                                             "drop the line (#6474)" % (f, line, p))
+
+
+def env_files(view, units, packaged=lambda p: True, usr_view=None):
     """Two {path: text} maps, by the path an EnvironmentFile= line gives, of the env files the tree holds
     at boot (BootView: none under a boot mount) as a regular file. The first: each a line of a file of ours
     in UNITS names (#6002). A line this reads differently from the lint (a continued one, or one holding a
@@ -1096,8 +1195,10 @@ def env_files(view, units, packaged=lambda p: True):
     reached through a link other than a merged-/usr top link (merged()) or not byte-identical to a
     package's (PACKAGED), as a build step's edit to an /etc/default conffile is; one the first holds is not
     repeated. A package's line holding a specifier names every path env_patterns matches, so a file of
-    ours that a template's instance or a host name selects is held too (#6312 Security 1)."""
+    ours that a template's instance or a host name selects is held too (#6312 Security 1). One a
+    tmpfiles.d line of ours makes at boot fails the run (tmpfiles_env_refusals, #6474)."""
     boot, out, pkg = BootView(view), {}, {}
+    tmpfiles_env_refusals(boot, units, packaged, usr_view)
     for u in units:
         for f in u["files"]:
             for line in f["text"].split("\n"):
@@ -1113,7 +1214,7 @@ def env_files(view, units, packaged=lambda p: True):
                         pkg.pop(p, None)
                     continue
                 pats = env_patterns(p)
-                for q in env_matches(boot, pats) if pats else [p]:
+                for q in env_matches(boot, pats, lambda l: not merged(view, l)) if pats else [p]:
                     if q in out or q in pkg:
                         continue
                     final, links = boot.resolve(q)

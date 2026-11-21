@@ -41,6 +41,7 @@ import json
 import lzma
 import os
 import re
+import shlex
 import stat
 import sys
 
@@ -417,15 +418,17 @@ READ_CONF = ("sysctl.d", "tmpfiles.d", "systemd/network", "systemd/system", "sys
 # no key or line is refused by name. #6312: root's user manager (user@0.service, at a root login) runs
 # its user-generators and user-environment-generators as root, and systemd-environment-d-generator
 # (one of the latter) gives it every environment.d *.conf assignment, which each unit it starts
-# inherits; it also reads $XDG_CONFIG_HOME/environment.d, root's EXEC_HOME.
+# inherits; it also reads $XDG_CONFIG_HOME/environment.d, root's EXEC_HOME. #6474: systemd-xdg-autostart-generator
+# (a user generator) turns each .desktop file in $XDG_CONFIG_DIRS/autostart (etc/xdg) and
+# $XDG_CONFIG_HOME/autostart into a root user unit, so both are held the same way.
 EXEC_CHANNELS = (("udev/rules.d", ".rules", False), ("systemd/system-generators", "", False),
                  ("systemd/system-environment-generators", "", False), ("modules-load.d", ".conf", False),
                  ("modprobe.d", ".conf", True), ("sysctl.d", ".conf", False), ("binfmt.d", ".conf", False),
                  ("systemd/system-shutdown", "", False), ("systemd/system-sleep", "", False),
                  ("systemd/user-generators", "", False), ("systemd/user-environment-generators", "", False),
-                 ("environment.d", ".conf", False))
+                 ("environment.d", ".conf", False), ("xdg/autostart", ".desktop", False))
 EXEC_TOPS = ("etc", "usr/local/lib", "usr/lib", "lib")
-EXEC_HOME = (("root/.config/environment.d", ".conf"),)
+EXEC_HOME = (("root/.config/environment.d", ".conf"), ("root/.config/autostart", ".desktop"))
 # #2622: the bus and authorisation policy the packages ship, held to exec.allow the same way. polkitd
 # runs every rules.d file as JavaScript and takes an action's defaults from actions; dbus-daemon reads
 # system.conf, which includes system.d and everything under etc/dbus-1, and starts system-services
@@ -3557,11 +3560,31 @@ def sysusers_tpm_violations(root):
                            % (f.rel, n, w[1], w[2].split(":", 1)[1]))
     return out
 
+# #6474: EXEC_HOME, unit_rules.py's MANAGER_CONF_DIRS and root's user unit directories read root's files under
+# this home, so every record of root's home is held to it.
+ROOT_HOME = "/root"
+
+
+def record_homes(rec):
+    """Every "homeDirectory" a userdb JSON record REC gives, at any depth (its "perMachine" and "binding"
+    sections override the top one), each as found."""
+    if isinstance(rec, dict):
+        for k, v in rec.items():
+            if k == "homeDirectory":
+                yield v
+            else:
+                yield from record_homes(v)
+    elif isinstance(rec, list):
+        for v in rec:
+            yield from record_homes(v)
+
+
 def uid0_violations(root):
     """#4641 R-g: no user record but root's has uid 0: an etc/passwd line, a userdb .user record (its "uid"
     read as JSON) or a sysusers.d u line whose ID's uid part is 0, each compared as a number (00 is 0, as glibc's
     strtoul and systemd's parse_uid read it), and a uid that does not read as a plain decimal is refused. Anything at uid 0 is root under another name,
-    outside every check that reads User=root."""
+    outside every check that reads User=root. #6474: root's home, in its passwd line, any userdb record of it
+    and a sysusers.d u line for it, is ROOT_HOME."""
     out = []
     try:
         text = Conf(root, "etc/passwd").text()
@@ -3577,6 +3600,9 @@ def uid0_violations(root):
             out.append("etc/passwd:%d: a line whose uid is not a plain decimal number (#4641)" % n)
         elif int(w[2]) == 0 and w[0] != "root":
             out.append("etc/passwd:%d: %s has uid 0; only root may (#4641)" % (n, w[0]))
+        if w[0] == "root" and len(w) > 5 and w[5] != ROOT_HOME:
+            out.append("etc/passwd:%d: root's home is %s, not %s, which every check of root's own files reads "
+                       "(#6474)" % (n, w[5], ROOT_HOME))
     for f in conf_files(root, ("etc/userdb", "usr/local/lib/userdb", "usr/lib/userdb"), ".user"):
         try:
             rec = json.loads(f.content())
@@ -3586,6 +3612,9 @@ def uid0_violations(root):
         uid = rec.get("uid") if isinstance(rec, dict) else None
         if not isinstance(rec, dict) or (uid is not None and (type(uid) is not int or uid == 0) and rec.get("userName") != "root"):
             out.append("%s: a user record with uid 0 other than root's, or not a JSON object (#4641)" % f.rel)
+        elif rec.get("userName") == "root" and any(h != ROOT_HOME for h in record_homes(rec)):
+            out.append("%s: root's record gives a home other than %s, which every check of root's own files "
+                       "reads (#6474)" % (f.rel, ROOT_HOME))
     for f in conf_files(root, conf_paths("sysusers.d")):
         try:
             lines = f.content().decode("utf-8", "replace").splitlines()
@@ -3594,6 +3623,14 @@ def uid0_violations(root):
             continue
         for n, ln in enumerate(lines, 1):
             w = ln.split()
+            if len(w) > 1 and w[0].rstrip("!") == "u" and w[1] == "root":
+                try:
+                    home = shlex.split(ln)[4:5]
+                except ValueError:
+                    home = ["(unreadable)"]
+                if home and home[0] not in ("-", ROOT_HOME):
+                    out.append("%s:%d: gives root the home %s, not %s, which every check of root's own files reads "
+                               "(#6474)" % (f.rel, n, home[0], ROOT_HOME))
             if len(w) < 3 or w[0].rstrip("!") != "u" or w[1] == "root":
                 continue
             uid = w[2].split(":", 1)[0]
@@ -4596,8 +4633,8 @@ def exec_allow_violations(root, allowed=None):
     allowed = exec_allowed() if allowed is None else allowed
     if allowed is None:
         return ["%s: missing; every file in a boot-code channel (udev rules, generators, modules-load.d, modprobe.d, "
-                "sysctl.d, binfmt.d, shutdown and sleep hooks, root's user manager's generators and environment.d) "
-                "must be on it (#1556, #2176, #6312)" % EXEC_ALLOW]
+                "sysctl.d, binfmt.d, shutdown and sleep hooks, root's user manager's generators, environment.d and XDG "
+                "autostart) must be on it (#1556, #2176, #6312)" % EXEC_ALLOW]
     out = []
     for d in ["run/" + d for d, _, _ in EXEC_CHANNELS] + list(POLICY_RUN):
         try:
@@ -4631,7 +4668,8 @@ EXEC_ALLOW_HEADER = """\
 # usr/lib/pam.d, and etc/pam.conf; and (#5818) every file systemd merges into
 # dbus.service and dbus.socket, drop-ins included, so dbus-daemon's ExecStart is the reviewed one; and (#6312)
 # root's user manager's user-generators and user-environment-generators and every environment.d file,
-# root/.config/environment.d's too. One per line: the file's path in the image tree, a tab, and "sha256:" with the
+# root/.config/environment.d's too, and (#6474) the XDG autostart .desktop files in etc/xdg/autostart and
+# root/.config/autostart. One per line: the file's path in the image tree, a tab, and "sha256:" with the
 # SHA-256 of what the box reads, or "mask" for an empty file or a link to /dev/null. Every file is
 # listed, not only the one that wins its name. mkosi.finalize fails the build on any file not here
 # with that value, and on anything under the same directories in /run.

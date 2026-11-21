@@ -4046,7 +4046,9 @@ GUARDED_NAMES = ("sysctl.d", "modprobe.d", "tmpfiles.d", "systemd/network", "sys
                  "udev/rules.d", "modules-load.d", "systemd/system-environment-generators", "binfmt.d",
                  "systemd/system-shutdown", "systemd/system-sleep",
                  # #6312: root's user manager's generators and environment.d.
-                 "systemd/user-generators", "systemd/user-environment-generators", "environment.d")
+                 "systemd/user-generators", "systemd/user-environment-generators", "environment.d",
+                 # #6474: the XDG autostart files systemd-xdg-autostart-generator makes root user units of.
+                 "xdg/autostart")
 # #1543 reviews at bf7e5d3: B1 (C+ on an ancestor of /run/sysctl.d), B2 (a stock link with more
 # after its target, which systemd takes raw), B3 (/etc/sysctl.d and /etc/sysctl.conf) and R1 (every
 # other directory the tree check reads), plus /sys and ".." paths. Each must be refused.
@@ -4095,7 +4097,9 @@ TMPFILES_PROBES = (
     "C /usr/lib/systemd/system-sleep/x - - - - /usr/share/x/x", "f /etc/modules - - - - tun",
     # #6312: root's own environment.d, its parent made writable, and what systemd's 99-environment.conf names.
     "f /root/.config/environment.d/x.conf - - - - LD_PRELOAD=/tmp/x.so", "d /root/.config 0777",
-    "f+ /etc/environment - - - - LD_PRELOAD=/tmp/x.so", "f %h/.config/environment.d/x.conf")
+    "f+ /etc/environment - - - - LD_PRELOAD=/tmp/x.so", "f %h/.config/environment.d/x.conf",
+    # #6474: root's own XDG autostart directory.
+    "f /root/.config/autostart/x.desktop - - - - [Desktop Entry]", "L %h/.config/autostart - - - - /usr/share/x")
 # One probe per guarded name, under each configuration directory (#1543 P/UX B2). /usr is read-only
 # on the box and trixie's /lib is /usr/lib, but the check guards them anyway.
 TMPFILES_PROBES += tuple("f /%s/%s/x" % (top, n) for top in ("etc", "run", "usr/local/lib", "lib") for n in GUARDED_NAMES)
@@ -5683,7 +5687,9 @@ class ExecAllowTest(unittest.TestCase):
                 "usr/lib/systemd/user-generators/x", "etc/systemd/user-environment-generators/x",
                 "usr/local/lib/systemd/user-environment-generators/x", "usr/lib/systemd/user-environment-generators/x",
                 "etc/environment.d/x.conf", "usr/local/lib/environment.d/x.conf", "usr/lib/environment.d/x.conf",
-                "root/.config/environment.d/x.conf")
+                "root/.config/environment.d/x.conf",
+                # #6474: XDG autostart, which systemd-xdg-autostart-generator makes root user units of.
+                "etc/xdg/autostart/x.desktop", "root/.config/autostart/x.desktop")
     # #2176's failure paths: each runs root code at boot from a file the old check never hashed.
     PATHS = {"usr/lib/modprobe.d/x.conf": "install tun /usr/sbin/sysctl -w net.ipv4.ip_forward=1\n",
              "usr/lib/sysctl.d/x.conf": "kernel.modprobe = /usr/local/bin/x\n",
@@ -5694,7 +5700,9 @@ class ExecAllowTest(unittest.TestCase):
              # #6312's: every unit root's user manager starts loads agentos-x-controlled code as root.
              "etc/environment.d/50-x.conf": "LD_PRELOAD=/var/lib/agentos-x/x.so\n",
              "root/.config/environment.d/50-x.conf": "LD_PRELOAD=/var/lib/agentos-x/x.so\n",
-             "etc/systemd/user-generators/x": "#!/bin/sh\nsysctl -w net.ipv4.ip_forward=1\n"}
+             "etc/systemd/user-generators/x": "#!/bin/sh\nsysctl -w net.ipv4.ip_forward=1\n",
+             # #6474's: a .desktop file the autostart generator turns into a root user unit.
+             "etc/xdg/autostart/x.desktop": "[Desktop Entry]\nType=Application\nExec=/var/lib/agentos-x/x\n"}
     GENERATORS = ("usr/lib/systemd/system-generators/systemd-sysv-generator",
                   "usr/lib/systemd/system-generators/systemd-rc-local-generator")
 
@@ -5938,8 +5946,8 @@ class ExecAllowTest(unittest.TestCase):
                 self.assertEqual(moved.exec_allow_violations(self.root), [])
             with unittest.mock.patch.dict(os.environ, {"SRCDIR": tmp}):
                 want = ["exec.allow: missing; every file in a boot-code channel (udev rules, generators, modules-load.d, "
-                        "modprobe.d, sysctl.d, binfmt.d, shutdown and sleep hooks, root's user manager's generators "
-                        "and environment.d) must be on it (#1556, #2176, #6312)"]
+                        "modprobe.d, sysctl.d, binfmt.d, shutdown and sleep hooks, root's user manager's generators, "
+                        "environment.d and XDG autostart) must be on it (#1556, #2176, #6312)"]
                 self.assertEqual(moved.exec_allow_violations(self.root), want)
                 self.assertIn(want[0], moved.violations(self.root))
 
