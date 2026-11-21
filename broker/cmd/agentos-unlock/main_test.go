@@ -481,52 +481,8 @@ func (r *rig) boot() (*exec.Cmd, *bytes.Buffer) {
 	return cmd, &out
 }
 
-func (r *rig) owner() owner {
-	return owner{proc.Conn{Socket: r.mainConfig().OwnerSock, UID: r.kernelUID, Timeout: 5 * time.Second}}
-}
-
-// owner is the owner socket's calls these tests make, on kernel/proc's own
-// framing: the kernel process's client types are test code there, outside
-// the trusted core (KEY-9-reach-inbound-offset, #5732). The arg and answer
-// shapes are kernel/proc's, field for field.
-type owner struct{ proc.Conn }
-
-func (o owner) Status() (u []kernel.Unsettled, err error) { err = o.Call("status", nil, &u); return }
-func (o owner) LineChanges() (n int, err error)           { err = o.Call("linechanges", nil, &n); return }
-func (o owner) Changes() (c key.Changes, err error)       { err = o.Call("changes", nil, &c); return }
-func (o owner) Stop() error                               { return o.Call("stop", nil, nil) }
-func (o owner) Setup(f kernel.FirstAnchors) error         { return o.Call("setup", f, nil) }
-func (o owner) Backups() (v proc.BackupsView, err error)  { err = o.Call("backups", nil, &v); return }
-func (o owner) RecoveryCardDone() error                   { return o.Call("recoverycarddone", nil, nil) }
-
-func (o owner) SetupInfo() (i proc.SetupInfo, err error) {
-	err = o.Call("setupinfo", nil, &i)
-	return
-}
-
-func (o owner) SetLine(percent int64, cos ...key.Cosign) error {
-	return o.Call("setline", struct {
-		Percent int64        `json:"percent"`
-		Cosigns []key.Cosign `json:"cosigns"`
-	}{percent, cos}, nil)
-}
-
-func (o owner) RecoveryCardID() (string, error) {
-	var r struct {
-		ID string `json:"id"`
-	}
-	err := o.Call("recoverycardid", nil, &r)
-	return r.ID, err
-}
-
-func (o owner) RecoveryCard(c key.Cosign) ([]byte, error) {
-	var r struct {
-		Key []byte `json:"key"`
-	}
-	err := o.Call("recoverycard", struct {
-		Cosign key.Cosign `json:"cosign"`
-	}{c}, &r)
-	return r.Key, err
+func (r *rig) owner() proc.Owner {
+	return proc.Owner{Conn: proc.Conn{Socket: r.mainConfig().OwnerSock, UID: r.kernelUID, Timeout: 5 * time.Second}}
 }
 
 // up waits for the owner socket to answer, as the kernel's uid.

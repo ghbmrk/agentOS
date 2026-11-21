@@ -12,9 +12,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
-// Owner is the owner seam over the kernel process's owner socket.
-type Owner struct{ Conn }
-
 func (o Owner) Submit(p kernel.Plan) error { return o.Call("submit", p, nil) }
 func (o Owner) Retry(plan string, index, attempt int) error {
 	return o.Call("retry", retryArgs{plan, index, attempt}, nil)
@@ -29,9 +26,6 @@ func (o Owner) Unenroll(u key.Unenrollment) error {
 }
 func (o Owner) Extend(ext key.Key, plan string) error {
 	return o.Call("extend", extendArgs{ext, plan}, nil)
-}
-func (o Owner) SetLine(percent int64, cos ...key.Cosign) error {
-	return o.Call("setline", lineArgs{percent, cos}, nil)
 }
 
 // Reserve sets what is kept of pool for the owner. A lowering needs a live
@@ -50,19 +44,10 @@ func (o Owner) ApproveCode(a kernel.CodeApproval) error { return o.Call("approve
 func (o Owner) Revoke(id key.ID) error                  { return o.Call("revoke", id, nil) }
 func (o Owner) Pause(id key.ID) error                   { return o.Call("pause", id, nil) }
 func (o Owner) Unpause(id key.ID) error                 { return o.Call("unpause", id, nil) }
-func (o Owner) Stop() error                             { return o.Call("stop", nil, nil) }
 
 // Resume lifts the STOP whose count it names (Changes's stops).
 func (o Owner) Resume(stops uint64) error { return o.Call("resume", resumeArgs{stops}, nil) }
 
-// Setup logs the owner's first hardware keys on a setup-only kernel.
-func (o Owner) Setup(f kernel.FirstAnchors) error { return o.Call("setup", f, nil) }
-
-// SetupInfo reads whether setup is open and the box key it signs over.
-func (o Owner) SetupInfo() (i SetupInfo, err error) { err = o.Call("setupinfo", nil, &i); return }
-
-func (o Owner) Status() (u []kernel.Unsettled, err error) { err = o.Call("status", nil, &u); return }
-func (o Owner) LineChanges() (n int, err error)           { err = o.Call("linechanges", nil, &n); return }
 func (o Owner) SpendHeld() (m map[string]kernel.SpendHold, err error) {
 	err = o.Call("spendheld", nil, &m)
 	return
@@ -88,9 +73,6 @@ func (o Owner) Enrollments() ([]key.Enrollment, []key.PublicKey, error) {
 	err := o.Call("enrollments", nil, &e)
 	return e.Enrolled, e.Unenrolled, err
 }
-
-// Changes is the revocations, pauses and STOP in force.
-func (o Owner) Changes() (c key.Changes, err error) { err = o.Call("changes", nil, &c); return }
 
 // Plan is plan id's view: its status, a rejection's code and its steps'
 // results (kernel.PlanView); ok is false when the log has no such plan.
@@ -143,9 +125,6 @@ func (o Owner) DeclReach() (d kernel.DeclReach, err error) { err = o.Call("decla
 // Backup takes one backup now to every current destination.
 func (o Owner) Backup() (t []Taken, err error) { err = o.Call("backup", nil, &t); return }
 
-// Backups is the recipient's ID, every destination and every kept backup.
-func (o Owner) Backups() (v BackupsView, err error) { err = o.Call("backups", nil, &v); return }
-
 // RecoveryRotate asks for a recovery-key approval on an anchor's signature
 // c over kernel.RecoveryRotateHash(old, next), old the recipient the
 // kernel holds (Backups' Recipient): next is the new key's recipient ID,
@@ -161,25 +140,6 @@ func (o Owner) RecoveryRotate(next string, c key.Cosign) ([]byte, error) {
 func (o Owner) SwitchRecipient(r, approval []byte) error {
 	return o.Call("recipient", recipientArgs{r, approval}, nil)
 }
-
-// RecoveryCardID is the held card's backup recipient ID.
-func (o Owner) RecoveryCardID() (string, error) {
-	var r recoveryCardID
-	err := o.Call("recoverycardid", nil, &r)
-	return r.ID, err
-}
-
-// RecoveryCard is the recovery key the unlock step made at this boot on
-// the lost-card route, for the new card, on an anchor's signature c over
-// kernel.RecoveryCardHash of its ID; ErrNoRecoveryCard once confirmed.
-func (o Owner) RecoveryCard(c key.Cosign) ([]byte, error) {
-	var r recoveryCardRead
-	err := o.Call("recoverycard", recoveryCardArgs{c}, &r)
-	return r.Key, err
-}
-
-// RecoveryCardDone wipes it, once the owner has confirmed the card.
-func (o Owner) RecoveryCardDone() error { return o.Call("recoverycarddone", nil, nil) }
 
 // Certify signs the page's serving key, PKIX DER (Kernel.Certify).
 func (o Owner) Certify(pub []byte) (c Certified, err error) {
