@@ -2964,7 +2964,7 @@ MOVE_DOWN = """func TestDown(t *testing.T) {
 class MovedDecls(unittest.TestCase):
     """TOOL-mutgate-moved-lines (#6369): a declaration moved unchanged is no change of the tests."""
 
-    def reach(self, base, head, src=TWO_SRC, head_src=None, tree=None, fmt=True):
+    def reach(self, base, head, src=TWO_SRC, head_src=None, tree=None, fmt=True, extra=None):
         """(head tests, base tests) changed_tests and bases_for name for broker/hint/, the base holding
         hint.go (src) and the test files base {name: text}, the PR replacing them with head (and head_src),
         each through gofmt unless fmt is False; tree {name: text} is then written to the working tree,
@@ -2977,6 +2977,9 @@ class MovedDecls(unittest.TestCase):
             pkg = pathlib.Path(d) / "broker" / "hint"
             pkg.mkdir(parents=True)
             (pkg.parent / "go.mod").write_text(GO_MOD)
+            for name, text in (extra or {}).items():  # other broker/ files, on both sides
+                (pkg.parent / name).parent.mkdir(parents=True, exist_ok=True)
+                (pkg.parent / name).write_text(text)
             git("init", "-q")
             for side, files, text in (("base", base, src), ("pr", head, src if head_src is None else head_src)):
                 for f in pkg.glob("*_test.go"):
@@ -3128,7 +3131,9 @@ class MovedDecls(unittest.TestCase):
         self.assertEqual(c("p/_a_test.go", "package p\n"), "ignored")
         for unread in ("// +build linux\n\npackage p\n", "//go:build linux\n//go:build amd64\n\npackage p\n",
                        "//go:build linux &&\n\npackage p\n", "//go:build (linux\n\npackage p\n", "//go:build a b\n\npackage p\n",
-                       "//go:build " + " && ".join(f"t{i}" for i in range(13)) + "\n\npackage p\n"):
+                       "//go:build " + " && ".join(f"t{i}" for i in range(13)) + "\n\npackage p\n",
+                       "//go:build\x1cfoo\n\npackage p\n", "//go:build linux\n\npackage p // \x1f\n", "//go:build\vlinux\n\npackage p\n",
+                       "//go:build linux &&\u00a0foo\n\npackage p\n", "//go:build \u00e9t\u00e9\n\npackage p\n"):
             with self.subTest(unread):
                 self.assertIsNone(c("p/a_test.go", unread))
 
@@ -3139,7 +3144,12 @@ class MovedDecls(unittest.TestCase):
         heads = ["", "//go:build linux\n\n", "//go:build amd64 && linux\n\n", "//go:build !linux || foo\n\n",
                  "/*\n//go:build linux\n*/\n", "// doc\n/* x */\n//go:build (linux || darwin) && !arm64\n\n",
                  "//go:build linux\n// +build linux\n\n", "//go:build ignore\n\n", "//go:build go1.1 && foo\n\n",
-                 "package q\n\n//go:build linux\n"]
+                 "package q\n\n//go:build linux\n",
+                 # Security on #6421: Go reads U+001C-U+001F as no space, Python as space; go/build/constraint
+                 # skips only spaces and tabs; a tag is letters, digits, _ and .
+                 "//go:build\x1cfoo\n\n", "//go:build\x1ffoo\n\n", "//go:build linux\x1c\n\n", "//go:build\vlinux\n\n",
+                 "//go:build\u00a0linux\n\n", "//go:build linux &&\u00a0foo\n\n", "//go:build linux\f\n\n",
+                 "//go:build \u00e9t\u00e9\n\n", "//go:build\tlinux\t&&\tfoo\n\n", "//go:build  ( linux )\n\n"]
         names = ["x{}.go", "x{}_linux.go", "x{}_darwin_arm64.go", "x{}_amd64.go"]
         with tempfile.TemporaryDirectory() as d:
             (pathlib.Path(d) / "go.mod").write_text("module ex\n\ngo 1.22\n")
@@ -3153,14 +3163,19 @@ class MovedDecls(unittest.TestCase):
                                        ("linux", "arm64", "ignore")):
                 with self.subTest(goos=goos, goarch=goarch, tags=tags):
                     env = {**os.environ, "GOOS": goos, "GOARCH": goarch, "GOFLAGS": "", "CGO_ENABLED": "0"}
-                    got = subprocess.run(["go", "list", "-tags", tags, "-f", "{{range .GoFiles}}{{.}} {{end}}", "."], cwd=d,
+                    got = subprocess.run(["go", "list", "-e", "-tags", tags, "-f", "{{range .GoFiles}}{{.}} {{end}}", "."], cwd=d,
                                          env=env, capture_output=True, text=True, check=True).stdout.split()
                     on = {goos, goarch, "go1.1", "gc", *filter(None, tags.split(","))} | ({"unix"} if goos != "windows" else set())
-                    want = []
+                    want, read = [], 0
                     for f, text in sorted(files.items()):
-                        used, table = mutgate._constraint(f"p/{f}", text)
+                        if (c := mutgate._constraint(f"p/{f}", text)) is None:
+                            got = [g for g in got if g != f]  # not read: fails closed, whatever go makes of it
+                            continue
+                        read += 1
+                        used, table = c
                         want += [f] if table[sum(1 << i for i, t in enumerate(used) if t in on)] else []
                     self.assertEqual(sorted(got), want)
+                    self.assertGreaterEqual(read, 4 * 12)
 
     def test_a_move_across_another_effective_constraint_is_a_change(self):
         # #6385: the same build text where go reads none (inside /* */) is another build context; equal
@@ -3174,6 +3189,18 @@ class MovedDecls(unittest.TestCase):
         base = {"hint_test.go": rest, "a_test.go": "//go:build linux && amd64\n\n" + head + MOVE_ONE}
         self.assertEqual(self.reach(base, {"hint_test.go": rest, "b_test.go": "//go:build amd64 && linux\n\n" + head + MOVE_ONE}),
                          ([], []))
+
+    def test_a_constraint_go_reads_otherwise_moves_nothing(self):
+        # Security on #6421: `//go:build\x1cfoo` is a plain comment to Go (always built), a constraint foo to
+        # Python's whitespace; read as foo it made a move out of `//go:build foo` an unchanged one.
+        # REQ: TOOL-mutgate-moved-lines-fu
+        rest = MOVE_TEST.replace(MOVE_ONE, "").replace('\t"strings"\n', "")
+        head = 'package hint\n\nimport "strings"\n\n'
+        for was, now in (("//go:build foo", "//go:build\x1cfoo"), ("//go:build\x1ffoo", "//go:build foo")):
+            with self.subTest(was=was):
+                got = self.reach({"hint_test.go": rest, "b_test.go": was + "\n\n" + head + MOVE_ONE},
+                                 {"hint_test.go": rest, "a_test.go": now + "\n\n" + head + MOVE_ONE})
+                self.assertNotEqual(got, ([], []))
 
     def test_a_layout_gofmt_would_change_moves_nothing(self):
         # Security on #6378: `func TestB (t` hid TestB from RUNNABLE, so a reorder read as a move.
@@ -3198,6 +3225,16 @@ class MovedDecls(unittest.TestCase):
         par = MOVE_TEST.replace('t.Fatal("down")\n\t}', 't.Fatal("down")\n\t}\n\tt.Parallel()')
         self.assertEqual(self.reach({"hint_test.go": par}, {"hint_test.go": par, "z_test.go": new}),
                          (["TestDown", "TestNew", "TestUp"], ["TestDown", "TestUp"]))
+        # So does one a helper calls: in a non-test file of the package, or in a package it imports (L3 and
+        # Security on #6421).
+        both = (["TestDown", "TestNew", "TestUp"], ["TestDown", "TestUp"])
+        helper = TWO_SRC.replace("package hint\n", 'package hint\n\nimport "testing"\n') + "\nfunc par(t *testing.T) { t.Parallel() }\n"
+        self.assertEqual(self.reach(base, {**base, "z_test.go": new}, src=helper), both)
+        lib = 'package lib\n\nimport "testing"\n\n// Par runs t in parallel.\nfunc Par(t *testing.T) { t.Parallel() }\n'
+        src = TWO_SRC.replace("package hint\n", 'package hint\n\nimport _ "example.invalid/broker/lib"\n')
+        self.assertEqual(self.reach(base, {**base, "z_test.go": new}, src=src, extra={"lib/lib.go": lib}), both)
+        self.assertEqual(self.reach(base, {**base, "z_test.go": new}, src=src, extra={"lib/lib.go": lib.replace("t.Parallel()", "t.Helper()")}),
+                         (["TestNew"], []))
 
     def test_a_declaration_of_a_cgo_file_never_moves(self):
         # #6385, from #6376: a cgo file's code binds its own preamble, so nothing moves out of one.

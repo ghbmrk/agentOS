@@ -720,7 +720,8 @@ def changes(diff_text, base, head):
 # declaration of a file with a linkname or cgo (_decls' every), a move out of a test file into a non-test
 # one or into a file go ignores, and any edit, one token or a comment. `go test` runs tests in file then
 # source order, so every test at or after the first place the package's run list (RUNNABLE) changes is a
-# change, a new file named first or a moved test included, and every test when one calls Parallel (#6385).
+# change, a new file named first or a moved test included, and every test when the package or one it
+# imports names Parallel (_parallel, #6385).
 # What moved() reads assumes gofmt's layout: a package with a file gofmt would change moves nothing, and
 # one with such a test file has its run order unread, so every test is a change. Across two files each name the declaration qualifies a selector with
 # (`q.X`) must have the same binding imports in both, by name: an explicit one, a standard library path's
@@ -737,7 +738,7 @@ GOOS = set("aix android darwin dragonfly freebsd hurd illumos ios js linux nacl 
            "wasip1 windows zos".split())
 GOARCH = set("386 amd64 amd64p32 arm armbe arm64 arm64be loong64 mips mipsle mips64 mips64le mips64p32 "
              "mips64p32le ppc ppc64 ppc64le riscv riscv64 s390 s390x sparc sparc64 wasm".split())
-IMPORT_SPEC = re.compile(r'(?:([A-Za-z_]\w*|\.)\s+)?(?:"([^"\\\n]*)"|`([^`\n]*)`)')
+ONE_IMPORT = re.compile(r'(?:([A-Za-z_]\w*|\.)\s+)?(?:"([^"\\\n]*)"|`([^`\n]*)`)')
 QUALIFIER = re.compile(r"\b([A-Za-z_]\w*)\s*\.")
 MOVABLE = ("func", "method", "type", "var", "const")
 # What `go test` runs by name, in file then source order: moving one changes the run order.
@@ -767,19 +768,23 @@ def _constraint(path, text):
     equal: "ignored" for a file go ignores, else (the tags it hangs on, its truth table over them) for
     its `//go:build` line (the one before the package clause outside a /* comment, go/build's
     parseFileHeader) and file-name GOOS and GOARCH; None when not read: two such lines, a `+build` line
-    with no `//go:build` one, an expression not parsed, or over 12 tags (fail closed, #6385)."""
+    with no `//go:build` one, an expression go/build/constraint does not parse (it skips only spaces and
+    tabs; a tag here is ASCII), over 12 tags, or a character Go and Python split differently (NOT_GO_SPACE)
+    (fail closed, #6385)."""
     tags = _name_tags(path)
     if tags == ("ignored",):
         return "ignored"
+    if NOT_GO_SPACE.search(text):
+        return None
     line, plus, star = None, False, False
     for raw in text.split("\n"):
         s = raw.strip()
         if not s:
             continue
         if not star and s.startswith("//go:build") and (len(s) == 10 or s[10].isspace()):
-            if line is not None:
-                return None
-            line = s[10:]
+            if line is not None or (len(s) > 10 and s[10] not in " \t"):
+                return None  # two lines, or one constraint.Parse refuses
+            line = s[10:].strip()
         plus = plus or "+build" in s
         rest = s
         while rest:
@@ -796,7 +801,13 @@ def _constraint(path, text):
             break  # code: the header ends
     if line is None and plus:
         return None
-    tokens = re.findall(r"\s*(\(|\)|!|&&|\|\||[\w.]+|\S)", line or "")
+    tokens, at = [], 0
+    while at < len(line or ""):
+        m = re.compile(r"[ \t]*(\(|\)|!|&&|\|\||[A-Za-z0-9_.]+)[ \t]*").match(line, at)
+        if m is None:
+            return None  # a character go/build/constraint's lexer refuses, or one read otherwise here
+        tokens.append(m[1])
+        at = m.end()
     pos = 0
 
     def take(t):
@@ -816,7 +827,7 @@ def _constraint(path, text):
                 if not take(")"):
                     raise ValueError
                 return node
-            if pos < len(tokens) and re.fullmatch(r"[\w.]+", tokens[pos]):
+            if pos < len(tokens) and re.fullmatch(r"[A-Za-z0-9_.]+", tokens[pos]):
                 pos += 1
                 return tokens[pos - 1]
             raise ValueError
@@ -851,6 +862,9 @@ def _constraint(path, text):
 
 
 ALWAYS = ((), (True,))  # _constraint of a file with no constraint
+# Python's str.strip, isspace and \s read U+001C-U+001F as space and Go (unicode.IsSpace, bytes.TrimSpace)
+# does not; every other character both read alike. A file holding one is not read (Security on #6421).
+NOT_GO_SPACE = re.compile("[\x1c-\x1f]")
 
 
 def _facts(path, text):
@@ -871,7 +885,7 @@ def _facts(path, text):
             elif not group and re.fullmatch(r"import\s*\(", c):
                 group = True
             elif group or re.match(r"import\b", c):
-                m = IMPORT_SPEC.fullmatch(c if group else c[len("import"):].strip())
+                m = ONE_IMPORT.fullmatch(c if group else c[len("import"):].strip())
                 if m is None or specs is None:
                     specs = None  # a spec not read: no import of this file is known
                 else:
@@ -926,7 +940,7 @@ def _side(pkg, mb, module):
     files = _go_files(pkg, mb)
     if files is None:
         return None
-    rough = _unformatted(files)
+    rough = _unformatted(files) | {p for p, t in files.items() if NOT_GO_SPACE.search(t)}
     facts, clauses = {p: _facts(p, t) for p, t in files.items()}, {}
 
     def name(spec):
@@ -1000,6 +1014,41 @@ def _same_binding(sf, df, text, b, h):
                for q in set(QUALIFIER.findall(_uncommented(text, False))))
 
 
+def _package_reads(rel, commit):
+    """(names Parallel, module import paths) of broker/<rel>/'s .go files at commit, or None when a file
+    or an import spec is not read."""
+    files = _go_files(rel, commit)
+    if files is None or any(NOT_GO_SPACE.search(t) for t in files.values()):
+        return None
+    facts = [_facts(p, t) for p, t in files.items()]
+    if any(f.specs is None for f in facts):
+        return None
+    return any(f.parallel for f in facts), frozenset(path for f in facts for _, path in f.specs)
+
+
+def _parallel(pkg, commit, module, cache):
+    """Whether a test of broker/<pkg>/ may call Parallel: the word in a .go file of it (test or not) or of
+    a package of this module it imports, transitively; True when one is not read (L3 and Security on
+    #6421: a helper may call t.Parallel())."""
+    seen, todo = {pkg}, [pkg]
+    while todo:
+        rel = todo.pop()
+        if (rel, commit) not in cache:
+            cache[(rel, commit)] = _package_reads(rel, commit)
+        got = cache[(rel, commit)]
+        if got is None or got[0]:
+            return True
+        for path in got[1]:
+            if module and (path == module or path.startswith(module + "/")):
+                rel = path[len(module) + 1:] if path != module else ""
+                if ".." in rel.split("/"):
+                    return True
+                if rel not in seen:
+                    seen.add(rel)
+                    todo.append(rel)
+    return False
+
+
 def _run_list(side):
     """[(path, name, build, first line)] of what `go test` runs by name in one side of a package, in its
     order: the package's own _test.go files, then its _test package's, each in name then source order;
@@ -1021,10 +1070,10 @@ def moved(diff_text, mb, head):
     or left unchanged, or a header change, as Moved declarations above reads them (#6369); a package with
     a link or a file not read moves nothing. later is the same pair of the first lines of each test `go
     test` runs, in a package whose tests the diff changes, at or after the first place its run list
-    differs, every one when a test file names Parallel (a parallel test resumes after every other); a
+    differs, every one when _parallel (a parallel test resumes after every other); a
     path's lines are None (every test) where a side's run list is not read (#6385)."""
     tests, btests = added_lines(diff_text)[1], base_test_lines(diff_text)[0]
-    now, then, later_now, later_then = {}, {}, {}, {}
+    now, then, later_now, later_then, reads = {}, {}, {}, {}, {}
     module = (m := re.search(r"^module\s+(\S+)", base_text(head, "broker/go.mod") or "", re.M)) and m[1]
     for pkg in sorted({package_of(p) for p in [*tests, *btests] if is_test(p)} - {None}):
         b, h = _side(pkg, mb, module), _side(pkg, head, module)
@@ -1035,7 +1084,7 @@ def moved(diff_text, mb, head):
             continue
         was, now_runs = ([r[:3] for r in rs] for rs in runs)
         if was != now_runs:
-            k = 0 if any(f.parallel for s in (b, h) for p, f in s.facts.items() if is_test(p)) else next(
+            k = 0 if _parallel(pkg, mb, module, reads) or _parallel(pkg, head, module, reads) else next(
                 i for i in range(len(was) + 1) if i == len(was) or i == len(now_runs) or was[i] != now_runs[i])
             for side, rs in ((later_then, runs[0]), (later_now, runs[1])):
                 for p, _, _, first in rs[k:]:
