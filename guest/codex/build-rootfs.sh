@@ -77,11 +77,11 @@ chroot "$base" /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C sh -ec 'cd /tmp/agent
 	<"$work/bwrap.tar.xz"
 # The linker listed each file it read (-t), and the Debian package of each one outside the build's
 # /tmp is recorded as shipped (image/guest-shipped.sh, #5572): bwrap carries their code, so the image
-# vulnerability check scans them.
+# vulnerability check scans them; each also against bwrap's SHA-256, for image/static_elf.py (#5885).
 linked=$(sed -n 's/(.*$//; /^\/tmp\//d; /^\//p' "$src/bwrap/link.trace" | sort -u)
 [ -n "$linked" ] || { echo "bwrap: the linker listed no input outside /tmp" >&2; exit 1; }
 # shellcheck disable=SC2086  # one path per word
-sh "$here/../../image/guest-shipped.sh" "$base" $linked
+SHIPPED_FOR=$src/bwrap/bwrap sh "$here/../../image/guest-shipped.sh" "$base" $linked
 # Each CLI binary links OpenSSL statically (#5853), and tools/vulncheck.py queries advisories for
 # the copy its "bundled" record names (#5873): each must hold exactly one OpenSSL version string,
 # and the record must name that copy for this CLI.

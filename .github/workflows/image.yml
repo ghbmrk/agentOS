@@ -442,6 +442,15 @@ jobs:
           sudo python3 -I image/import_sweep.py "$RUNNER_TEMP/out" "$v" > "$RUNNER_TEMP/import-sweep.json" || s=1
           python3 -I image/import_sweep.py --summary "$RUNNER_TEMP/import-sweep.json" || s=1
           exit $s
+      # #5885 (VULN-static-elf, EVL-5): every ELF file of this tree, its guests' roots and its initrds that
+      # carries a C library or C++ runtime in its own bytes is declared in image/static_elf.allow with where
+      # image-vulncheck scans what it links (its recorded link inputs, its package, or a "bundled" record).
+      # Fails on an undeclared one.
+      - name: Static ELF files declared with what they link (image/static_elf.py)
+        if: matrix.run == 'a'
+        run: |
+          v=$(jq -r .version "$RUNNER_TEMP"/out/*.release.json)
+          sudo python3 -I image/static_elf.py "$RUNNER_TEMP/out" "$v"
       - name: Build the end-to-end driver
         if: matrix.run == 'a'
         run: cd broker && CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/e2e/box-e2e" ./e2e/boxe2e

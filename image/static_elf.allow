@@ -1,0 +1,29 @@
+# Every ELF file of the built image (main tree, the guests' roots, initrds) that carries a C library or
+# C++ runtime in its own bytes, and where tools/vulncheck.py image scans what it links (#5885, EVL-5).
+# image/static_elf.py fails on a listed file matching no line or two, a line matching no file, and a file
+# failing its kind's check. One line each: GLOB KIND [ARG] (kinds in static_elf.py's docstring).
+
+# Linked in the guest base from the image's pinned Debian sources, each LOAD input recorded by package
+# against the shipped bytes (image/guest-shipped.sh SHIPPED_FOR).
+/usr/lib/agentos/infer/llama-server linked linked
+/usr/lib/agentos/images/camdecode/agentos-camdecode linked guest
+/usr/lib/agentos/images/codex/usr/bin/bwrap linked guest
+/usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap linked guest
+
+# Built here with CGO_ENABLED=0 (image/build.sh, guest/codex/build-rootfs.sh), and gVisor's release
+# (pinned by hash in image/build.sh): Go, no C library.
+/usr/lib/agentos/agentos* go
+/usr/lib/agentos/runsc go
+/usr/lib/agentos/images/photo/agentos-photo go
+/usr/lib/agentos/images/codex/usr/local/bin/agentos-codex-forwarder go
+
+# The Codex CLI's static musl binaries, pinned by CODEX_INTEGRITY. Their OpenSSL is a "bundled" copy;
+# no musl version string is recoverable from them (release finding on #5885).
+/usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex bundled @openai/codex@0.162.1-linux-x64
+/usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host bundled @openai/codex@0.162.1-linux-x64
+/usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/codex-path/rg bundled @openai/codex@0.162.1-linux-x64
+
+# Debian's own static or runtime files, scanned with their package (and its Built-Using sources).
+/usr/sbin/ldconfig package libc-bin
+/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 package libc6
+/usr/lib/agentos/images/*/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 package libc6
