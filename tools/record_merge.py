@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-"""Merge driver for the record files, ASSUMPTIONS.md and MUTANTS-EQUIVALENT: lines merge by key (#6316, #6358).
+"""Merge driver for the record and allow files (CLASSES): lines merge by key (#6316, #6358, #6375).
 
   tools/record_merge.py --install            once per clone: this clone's merges of the record files use the driver
   tools/record_merge.py BASE OURS THEIRS [PATH]   git's driver call (%O %A %B %P); writes the merge to OURS
 
-A record line's key is the row ID of an ASSUMPTIONS.md table row or, in a MUTANTS-EQUIVALENT, the entry less its
-proof (`reason`, `accepted`: premerge's `_entry_keys`), so two lines with one key name one row or one mutant twice.
-`.gitattributes` gives both files `merge=union`, which CI's merges (premerge's replay, trusted-base, lookup) keep
-reading. Git runs no command a repository names until the clone's own config does, so `--install` sets
-`merge.records.driver` and puts `ASSUMPTIONS.md merge=records` and `MUTANTS-EQUIVALENT merge=records` in
-`info/attributes`, which outranks `.gitattributes` for this clone only. A clone without it merges by union, as
-before; doclint and mutgate still fail one key on two different lines, and doclint's error names the install
-(OPERATING §7).
+CLASSES lists the record and allow files by class, the one list `--install`, doclint's `record_files` and
+`.gitattributes` follow (a test holds `.gitattributes` to it; doclint reports a record or allow file outside it).
+A `row` line's key is the row ID of an ASSUMPTIONS.md table row and an `entry` line's, in a MUTANTS-EQUIVALENT, the
+entry less its proof (`reason`, `accepted`: premerge's `_entry_keys`), so two lines with one key name one row or
+one mutant twice. An allow file's `line` is its own key, and the driver merges only hunks where both sides appended
+at one spot and neither appended a section header: an allow line edited or deleted beside the other side's change
+stays a conflict, since a union could bring back an exit one side closed, and so does a header, which would move
+the other side's appends into its section. `.gitattributes` gives the row and entry files `merge=union`, which CI's merges
+(premerge's replay, trusted-base, lookup) keep reading, and every class `text eol=lf`, so git commits a CRLF line as
+its LF twin. Git runs no command a repository names until the clone's own config does, so `--install` sets
+`merge.records.driver` and puts `<pattern> merge=records` for each class in `info/attributes`, which outranks
+`.gitattributes` for this clone only. A clone without it merges as before; doclint and mutgate still fail one key on
+two different lines, and doclint's error names the install (OPERATING §7).
 
 The driver runs `git merge-file --diff3` on the three versions and resolves each conflict hunk whose lines are
 all record lines as union by key: the ours lines, then the theirs lines, less each base line the other side changed
@@ -21,9 +26,12 @@ proof) is kept once: an identical duplicate is a no-op here, in doclint, in mutg
 both sides changed, differently, or one side changed and the other deleted, and any hunk holding a line that is no
 record line, keep conflict markers; a result with one key on two different lines (both sides added one ID, or two
 proofs of one mutant) keeps both and prints them. Either exits 1, so git stops the merge for the builder to
-resolve (renumber the PR's row, or keep one proof), which premerge reads as `same`. Standard library only.
+resolve (renumber the PR's row, or keep one proof), which premerge reads as `same`. A side holding a carriage
+return is refused, as doclint and mutgate refuse one: record and allow files end lines in LF only, so every reader
+reads one line the same way (#6375). Standard library only.
 """
 import collections
+import fnmatch
 import json
 import pathlib
 import re
@@ -36,11 +44,25 @@ FIRST_CELL = re.compile(rb"^\|[ \t]*([^|\s][^|]*?)[ \t]*\|")  # premerge.py's FI
 LABELS = ("ours", "base", "theirs")
 DRIVER = "python3 tools/record_merge.py %O %A %B %P"
 RECORD = "MUTANTS-EQUIVALENT"  # tools/mutgate.py's RECORD: one JSON entry per line, `#` and blank lines comments
-FILES = ("ASSUMPTIONS.md", RECORD)
+# The record and allow files by class, as file-name patterns (#6375): see the module docstring.
+CLASSES = {"ASSUMPTIONS.md": "row", RECORD: "entry", "*_allow.txt": "line", "*.allow": "line", "allow*.txt": "line"}
+
+
+def record_class(path):
+    """The class of `path` in CLASSES, by its file name, or None for a file in none."""
+    name = pathlib.PurePosixPath(path).name
+    return next((c for p, c in CLASSES.items() if fnmatch.fnmatchcase(name, p)), None)
+
+
+def _section(line):
+    """True for an allow file's section header (`[cipher]` in image/import_sweep.allow): the lines after it are
+    read in its section, so a hunk holding one never merges by line (#6418 Security: a header one side appended
+    would take in the other side's appends)."""
+    return line.lstrip().startswith(b"[")
 
 
 def _is_record(path):
-    return pathlib.PurePosixPath(path).name == RECORD
+    return record_class(path) == "entry"
 
 
 def _row_key(line):
@@ -84,12 +106,16 @@ def resolve(ours, base, theirs, key=_row_key):
     n = [collections.Counter(h) for h in (ours, base, theirs)]
     gone = collections.Counter({x: min(n[2][x], c - n[0][x]) for x, c in n[1].items() if c > n[0][x]})
     cut = collections.Counter({x: min(n[0][x], c - n[2][x]) for x, c in n[1].items() if c > n[2][x]})
-    return _less(ours, cut) + _less(theirs, gone)
+    both = (n[0] - n[1]) & (n[2] - n[1])  # a line both sides added word for word is one addition (#6358, #6375)
+    return _less(ours, cut) + _less(_less(theirs, gone), both)
 
 
 def keyed(text, path="ASSUMPTIONS.md"):
     """[(line, key or None)] for `text`'s lines, ends kept: a MUTANTS-EQUIVALENT entry's key, or the row ID of a table
-    row, doclint's assumption_ids rule (premerge `_duplicate_id`)."""
+    row, doclint's assumption_ids rule (premerge `_duplicate_id`). An allow file's lines are keyed only inside a
+    hunk: one may repeat a line in another section, so none is dropped or compared file-wide."""
+    if record_class(path) == "line":
+        return [(line, None) for line in text.splitlines(keepends=True)]
     if _is_record(path):
         return [(line, entry_key(line)) for line in text.splitlines(keepends=True)]
     out, in_table = [], False
@@ -129,7 +155,11 @@ def duplicates(text, path="ASSUMPTIONS.md"):
 
 
 def merge(base, ours, theirs, path="ASSUMPTIONS.md"):
-    """(merged bytes, clean) for three versions of a record file; (None, False) when `git merge-file` fails."""
+    """(merged bytes, clean) for three versions of a record file; (None, False) when `git merge-file` fails or a
+    version holds a carriage return (#6375)."""
+    if any(b"\r" in text for text in (base, ours, theirs)):
+        return None, False
+    cls = record_class(path)
     mark = secrets.token_hex(16)  # labels no file can carry
     with tempfile.TemporaryDirectory() as d:
         names = [pathlib.Path(d, n) for n in LABELS]
@@ -152,7 +182,8 @@ def merge(base, ours, theirs, path="ASSUMPTIONS.md"):
         elif bare == b"=======" and side == 1:
             side = 2
         elif bare == f">>>>>>> {mark}2".encode() and side == 2:
-            rows = resolve(*hunk, key=entry_key if _is_record(path) else _row_key)
+            rows = (None if cls == "line" and (hunk[1] or any(map(_section, hunk[0] + hunk[2])))
+                    else resolve(*hunk, key={"row": _row_key, "entry": entry_key, "line": bytes}[cls]))
             if rows is None:
                 clean = False
                 out += [b"<<<<<<< ours\n", *hunk[0], b"||||||| base\n", *hunk[1], b"=======\n", *hunk[2],
@@ -173,7 +204,7 @@ def install(cwd="."):
     git("config", "merge.records.driver", DRIVER)
     attrs = pathlib.Path(cwd, git("rev-parse", "--git-path", "info/attributes"))
     old = attrs.read_text() if attrs.exists() else ""
-    if new := [f"{name} merge=records" for name in FILES if f"{name} merge=records" not in old.splitlines()]:
+    if new := [f"{name} merge=records" for name in CLASSES if f"{name} merge=records" not in old.splitlines()]:
         attrs.parent.mkdir(parents=True, exist_ok=True)
         attrs.write_text(old + ("" if not old or old.endswith("\n") else "\n") + "".join(x + "\n" for x in new))
 
@@ -186,10 +217,14 @@ def main(argv):
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         return 2
     path = argv[3] if len(argv) == 4 else argv[1]
+    if record_class(path) is None:
+        print(f"{path}: no record or allow file (tools/record_merge.py CLASSES); ours is left as it was", file=sys.stderr)
+        return 1
     base, ours, theirs = (pathlib.Path(a).read_bytes() for a in argv[:3])
     text, clean = merge(base, ours, theirs, path)
     if text is None:  # Security on #6341: a NUL byte made merge-file fail and the driver wrote an empty file
-        print(f"{path}: git merge-file could not merge it (a binary byte?); ours is left as it was", file=sys.stderr)
+        print(f"{path}: a version holds a carriage return (record and allow files end lines in LF only), or git "
+              "merge-file could not merge it (a binary byte?); ours is left as it was", file=sys.stderr)
         return 1
     pathlib.Path(argv[1]).write_bytes(text)
     if not clean:

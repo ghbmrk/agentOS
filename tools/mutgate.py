@@ -30,6 +30,8 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
                                              they pass (LINTS, #6346), and
                                              add the verdicts to `run`'s JSON in DIR (#4573, #4603, #4633);
                                              only the sites of the result's own shard
+  `plan`, `delete` and `run --git` first delete every broker/ Markdown file whose edit changes no
+  test (hide_docs, #6373): run them in a scratch clone.
   tools/mutgate.py report DIR                survivors per package, from the JSON in DIR
   tools/mutgate.py gate DIR --git BASE [HEAD] [--body FILE [--body-from SHA]] [--summary FILE]
                                              exit 1 if a LIVED mutant sits on a target line that no
@@ -355,12 +357,28 @@ def package_of(path):
 
 
 LITERAL = re.compile(r'"(?:[^"\\\n]|\\.)*"|`[^`]*`')
-RUNE = re.compile(r"'(?:[^'\\\n]|\\.)*'")
+# A Go interpreted string's escapes (the spec's list), so "ASSUMPTIONS\x2emd" names ASSUMPTIONS.md.
+ESCAPE = re.compile(r"\\(?:([0-7]{3})|x([0-9a-fA-F]{2})|u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})|(.))", re.S)
+SIMPLE = {"a": b"\a", "b": b"\b", "f": b"\f", "n": b"\n", "r": b"\r", "t": b"\t", "v": b"\v"}
+
+
+def _go_string(lit):
+    """The value of a literal _literals gave: an interpreted one's escapes decoded, a raw one as is."""
+    def one(m):
+        if m[1] or m[2]:
+            return bytes([min(int(m[1] or m[2], 8 if m[1] else 16), 255)])  # Go refuses \400 and up
+        if m[3] or m[4]:
+            return chr(min(int(m[3] or m[4], 16), 0x10FFFF)).encode("utf-8", "replace")
+        return SIMPLE.get(m[5], m[5].encode())
+    out, at = b"", 0
+    for m in ESCAPE.finditer(lit):
+        out, at = out + lit[at:m.start()].encode() + one(m), m.end()
+    return (out + lit[at:].encode()).decode("utf-8", "replace")
 
 
 def _literals(text):
-    """The contents of a Go file's string literals, comments left out: what a test can name a file by."""
-    return [m[0][1:-1] for m in LITERAL.finditer(_uncommented(text))]
+    """The values of a Go file's string literals, comments left out: what a test can name a file by."""
+    return [_go_string(m[0][1:-1]) if m[0][0] == '"' else m[0][1:-1] for m in LITERAL.finditer(_uncommented(text))]
 
 
 def _embeds(text):
@@ -371,90 +389,14 @@ def _embeds(text):
     return out
 
 
-# Packages whose functions read no file, so a literal given to one names none (`strings.Split(h,
-# ".")`). Every other call, a builtin, a method, a local helper or an alias included, may read a
-# path: a package missing here only costs a whole-suite run (#6390).
-PURE = ("bytes", "strings")
-
-# The keywords a `(` can follow: one opens a group, not a call.
-NOT_CALL = ("case", "const", "for", "if", "import", "range", "return", "switch", "var")
-
-# Imports that reach files no literal shows: a child process inherits the working directory, and
-# cgo or a raw system call reads by C string or descriptor (#6390).
-OPAQUE = ("C", "os/exec", "syscall", "golang.org/x/sys/unix")
-
-TOKEN = re.compile(r"\w+|\S")
-
-
-IMPORT_SPEC = re.compile(r"\s*(?:\(.*?\)|[^;\n]*)", re.S)
-
-
-def _import_spans(code):
-    """The (start, end) spans of code's import specs (comments blanked): after each `import`
-    keyword outside a literal, to the end of its `(...)` group, else to its line's end or `;`, so a
-    one-line group, an indented import and `package p; import "x"` all count (L3 on #6403)."""
-    blank, out = _uncommented(code, False), []
-    for m in re.finditer(r"\bimport\b", blank):
-        out.append((m.end(), IMPORT_SPEC.match(blank, m.end()).end()))
-    return out
-
-
-def _imports(code):
-    """{name: path} of the imports of code (comments blanked, literals kept)."""
-    out = {}
-    for start, end in _import_spans(code):
-        for m in re.finditer(r'(?:([\w.]+)\s+)?["`]([^"`]+)["`]', code[start:end]):
-            out[m[1] or m[2].rsplit("/", 1)[-1]] = m[2]
-    return out
-
-
-def _call_literals(code):
-    """The string literals of code (comments blanked) inside the parentheses of a call, at any
-    depth, unless every call around them is to a PURE package, so
-    os.ReadDir(strings.TrimSpace(".")) and g(".") give ".". A PURE package's name counts as it only
-    where the file imports it and never names it without a `.` after (no local shadows it)."""
-    blank = _uncommented(code, False)
-    for start, end in _import_spans(code):
-        blank = blank[:start] + " " * (end - start) + blank[end:]
-    pure = {n for n, p in _imports(code).items() if p in PURE and not re.search(rf"\b{re.escape(n)}\b(?!\s*\.)", blank)}
-    out, stack, toks, i = [], [], [""] * 2, 0  # toks: the tokens so far, whitespace (and comments) skipped
-    while i < len(code):
-        c = code[i]
-        lit = RUNE.match(code, i) if c == "'" else LITERAL.match(code, i) if c in "\"`" else None
-        if lit:  # a rune such as ')' moves no depth; a string's contents are an argument
-            if c != "'" and any(stack):
-                out.append(lit[0][1:-1])
-            i = lit.end()
-            continue
-        if c.isspace():
-            i += 1
-            continue
-        tok = TOKEN.match(code, i)[0]
-        if tok == "(":
-            # A call follows a name, `)`, `]` or `}`, and a keyword opens a group. A pure name is
-            # always followed by `.` (above), so toks[-3] in pure is a selector's qualifier; it is
-            # the package only at the selector's start (`strings.Split`, not `t.strings.Open`).
-            name = re.match(r"\w", toks[-1]) and toks[-1] not in NOT_CALL
-            stack.append(bool(name) and not (toks[-3] in pure and toks[-4] != ".") or toks[-1] in (")", "]", "}"))
-        elif tok in "[{":
-            stack.append(False)
-        elif tok in ")]}" and stack:
-            stack.pop()
-        toks.append(tok)
-        i += len(tok)
-    return out
-
-
 def names_file(pkg_dir, rel):
-    """Whether a .go file of pkg_dir can name rel (a path below it) as text: a string literal or
-    //go:embed pattern holding its base name or first directory, a literal or pattern holding a glob
-    (`*?[`) that matches its base name, rel or a leading directory of it (`//go:embed *`,
-    fs.Glob(fsys, "*.md"), filepath.Join(d, "*")), or whose last path part matches its base name
-    (dir + "/*.md", "%s/*.md", "**/*.md"), or a literal anywhere in a call's arguments
-    (_call_literals: any call but a PURE package's) that lists `.`, `..` or `/` or
-    starts `./` or `../`. A link, an unreadable file, or an OPAQUE import (os/exec, cgo, syscall)
-    can name anything (#6390). A path built in a variable from parts holding none of these is not
-    seen (MUT-deleted-test-own-lines-1). Over-matching costs only a whole-suite run."""
+    """Whether a .go file of pkg_dir names rel (a path below it) as text: a string literal (escapes
+    decoded) or //go:embed pattern holding its base name or first directory, or holding a glob
+    (`*?[`) that matches its base name, rel or a leading directory of it, or whose last path part
+    matches its base name (dir + "/*.md", "**/*.md"). A link or an unreadable file names anything.
+    A file no code names this way is absent from every tree the gate runs tests in (hide_docs), so
+    a read of it by any other means (a listing, a child process, a path built from runes, another
+    package) fails the gate's run rather than going unseen (#6373)."""
     parts = rel.split("/")
     names = [parts[-1]] + ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]
     texts = []
@@ -463,9 +405,6 @@ def names_file(pkg_dir, rel):
             return True
         texts.append(f.read_bytes().decode("utf-8", "replace"))
     for text in texts:
-        code = _uncommented(text)
-        if set(_imports(code).values()) & set(OPAQUE):
-            return True
         for lit in _literals(text) + _embeds(text):
             if parts[-1] in lit or parts[0] in lit:
                 return True
@@ -473,10 +412,26 @@ def names_file(pkg_dir, rel):
                     any(fnmatch.fnmatchcase(n, lit) for n in names)
                     or fnmatch.fnmatchcase(parts[-1], lit.rstrip("/").rsplit("/", 1)[-1])):
                 return True
-        for lit in _call_literals(code):
-            if (lit and lit.rstrip("/") in ("", ".", "..")) or lit.startswith(("./", "../")):
-                return True
     return False
+
+
+def hide_docs(broker):
+    """Delete, under broker (a tree the gate is about to run tests in), each Markdown file an edit to
+    which changes no package's tests (any without a data_owner; vendor/ is kept,
+    as is_data keeps it: a test compares it with its patched copy),
+    and return their paths. Every gate run then measures the suite without them, so no verdict can
+    depend on them and an edit to one changes no test (#6373); a test that needs one fails the run,
+    closed. It deletes from the working tree: run plan, run --git and delete in a scratch clone."""
+    gone = []
+    for d, dirs, files in os.walk(broker):
+        dirs.sort()
+        for f in sorted(files):
+            path = pathlib.Path(d, f)
+            rel = "broker/" + path.relative_to(broker).as_posix()
+            if f.endswith(".md") and "vendor" not in rel.split("/")[1:-1] and not data_owner(rel, broker):
+                path.unlink()
+                gone.append(rel)
+    return gone
 
 
 def data_owner(path, broker=None):
@@ -695,13 +650,18 @@ def bases_for(diff_text, base, head, tests, pkgs):
     if not pkgs:
         return {}
     mb = merge_base(base, head)
-    btests = base_test_lines(diff_text, moved(diff_text, mb, head))  # (lines, gaps)
+    pair, later = moved(diff_text, mb, head)
+    lines, gaps = base_test_lines(diff_text, pair)
+    btests = (_widen(lines, later[1]), gaps)
     return {pkg: None if head_tests(tests, pkg) is None else base_changed_tests(btests, pkg, mb) for pkg in pkgs}
 
 
 def changes(diff_text, base, head):
-    """added_lines with what moved() reads as moved left out of the test files' lines (#6369)."""
-    return added_lines(diff_text, moved(diff_text, merge_base(base, head), head))
+    """added_lines with what moved() reads as moved left out of the test files' lines (#6369), and the
+    tests whose run order the diff changes in (#6385)."""
+    pair, later = moved(diff_text, merge_base(base, head), head)
+    added, tests = added_lines(diff_text, pair)
+    return added, _widen(tests, later[0])
 
 
 # Moved declarations (TOOL-mutgate-moved-lines, #6369). The diffs ignore renames (#4147), so code moved
@@ -709,12 +669,16 @@ def changes(diff_text, base, head):
 # and every test reaching them became a changed test. A package-level declaration means the same in any
 # order and any file of its package, so a declaration of a test file is no change when its whole text
 # (doc comment to the next declaration, trailing blank lines left out), package clause and build context
-# (`//go:build` lines, file-name GOOS and GOARCH) are those of exactly one declaration of the package's .go
-# files at the base and of exactly one at the head. What hangs on order or file stays a change: init,
-# TestMain, a var with an initializer, any declaration of a file with a linkname (_decls' every), a move out
-# of a test file into a non-test one or into a file go ignores, a function `go test` runs by name (RUNNABLE)
-# unless it stays in its file with the file's run order unchanged (tests run in file then source order, and
-# one in a non-test file never ran), and any edit, one token or a comment. Across two files each name the declaration qualifies a selector with
+# (_constraint: the `//go:build` line go/build reads and file-name GOOS and GOARCH, compared by meaning)
+# are those of exactly one declaration of the package's .go files at the base and of exactly one at the
+# head. What hangs on order or file stays a change: init, TestMain, a var with an initializer, any
+# declaration of a file with a linkname or cgo (_decls' every), a move out of a test file into a non-test
+# one or into a file go ignores, and any edit, one token or a comment. `go test` runs tests in file then
+# source order, so every test at or after the first place the package's run list (RUNNABLE) changes is a
+# change, a new file named first or a moved test included, and every test when the package or one it
+# imports names Parallel (_parallel, #6385).
+# What moved() reads assumes gofmt's layout: a package with a file gofmt would change moves nothing, and
+# one with such a test file has its run order unread, so every test is a change. Across two files each name the declaration qualifies a selector with
 # (`q.X`) must have the same binding imports in both, by name: an explicit one, a standard library path's
 # last element, or the package clause this module's package has at that side; an import of a name not known
 # so must be in both files. A test file's header change (an import, a plain comment; a new or deleted
@@ -733,7 +697,7 @@ IMPORT_SPEC = re.compile(r'(?:([A-Za-z_]\w*|\.)\s+)?(?:"([^"\\\n]*)"|`([^`\n]*)`
 QUALIFIER = re.compile(r"\b([A-Za-z_]\w*)\s*\.")
 MOVABLE = ("func", "method", "type", "var", "const")
 # What `go test` runs by name, in file then source order: moving one changes the run order.
-RUNNABLE = re.compile(r"^func ((?:Test|Fuzz|Example|Benchmark)(?![a-z])\w*)\(")
+RUNNABLE = re.compile(r"^func ((?:Test|Fuzz|Example|Benchmark)(?![a-z])\w*)[(\[]")
 # Go's universe block: an import of one of these names would shadow it in its file (L3 on #6378).
 UNIVERSE = set("any append bool byte cap clear close comparable complex complex128 complex64 copy delete error false "
                "float32 float64 imag int int16 int32 int64 int8 iota len make max min new nil panic print println "
@@ -752,6 +716,110 @@ def _name_tags(path):
     if len(parts) >= 2 and parts[-2] in GOOS and parts[-1] in GOARCH:
         return tuple(parts[-2:])
     return (parts[-1],) if parts and (parts[-1] in GOOS or parts[-1] in GOARCH) else ()
+
+
+def _constraint(path, text):
+    """A .go file's build context as go/build reads it, canonical so that equivalent constraints are
+    equal: "ignored" for a file go ignores, else (the tags it hangs on, its truth table over them) for
+    its `//go:build` line (the one before the package clause outside a /* comment, go/build's
+    parseFileHeader) and file-name GOOS and GOARCH; None when not read: two such lines, a `+build` line
+    with no `//go:build` one, an expression go/build/constraint does not parse (it skips only spaces and
+    tabs; a tag here is ASCII), over 12 tags, or a character Go and Python split differently (NOT_GO_SPACE)
+    (fail closed, #6385)."""
+    tags = _name_tags(path)
+    if tags == ("ignored",):
+        return "ignored"
+    if NOT_GO_SPACE.search(text):
+        return None
+    line, plus, star = None, False, False
+    for raw in text.split("\n"):
+        s = raw.strip()
+        if not s:
+            continue
+        if not star and s.startswith("//go:build") and (len(s) == 10 or s[10].isspace()):
+            if line is not None or (len(s) > 10 and s[10] not in " \t"):
+                return None  # two lines, or one constraint.Parse refuses
+            line = s[10:].strip()
+        plus = plus or "+build" in s
+        rest = s
+        while rest:
+            if star:
+                i = rest.find("*/")
+                star, rest = (True, "") if i < 0 else (False, rest[i + 2:].strip())
+            elif rest.startswith("//"):
+                rest = ""
+            elif rest.startswith("/*"):
+                star, rest = True, rest[2:].strip()
+            else:
+                break
+        if rest:
+            break  # code: the header ends
+    if line is None and plus:
+        return None
+    tokens, at = [], 0
+    while at < len(line or ""):
+        m = re.compile(r"[ \t]*(\(|\)|!|&&|\|\||[A-Za-z0-9_.]+)[ \t]*").match(line, at)
+        if m is None:
+            return None  # a character go/build/constraint's lexer refuses, or one read otherwise here
+        tokens.append(m[1])
+        at = m.end()
+    pos = 0
+
+    def take(t):
+        nonlocal pos
+        if pos < len(tokens) and tokens[pos] == t:
+            pos += 1
+            return True
+        return False
+
+    def expr(level):  # level 0: ||, 1: &&, 2: ! and atoms; a node is ("or"|"and", a, b), ("not", a) or a tag
+        nonlocal pos
+        if level == 2:
+            if take("!"):
+                return ("not", expr(2))
+            if take("("):
+                node = expr(0)
+                if not take(")"):
+                    raise ValueError
+                return node
+            if pos < len(tokens) and re.fullmatch(r"[A-Za-z0-9_.]+", tokens[pos]):
+                pos += 1
+                return tokens[pos - 1]
+            raise ValueError
+        node = expr(level + 1)
+        while take(("||", "&&")[level]):
+            node = (("or", "and")[level], node, expr(level + 1))
+        return node
+    try:
+        node = expr(0) if line is not None else True
+    except (ValueError, RecursionError):
+        return None
+    if pos != len(tokens):
+        return None
+    for t in tags:
+        node = ("and", node, t)
+
+    def words(n):
+        return {n} if isinstance(n, str) else set().union(*map(words, n[1:])) if isinstance(n, tuple) else set()
+
+    def ev(n, on):
+        if isinstance(n, str):
+            return n in on
+        if not isinstance(n, tuple):
+            return n
+        return (not ev(n[1], on)) if n[0] == "not" else (any if n[0] == "or" else all)(ev(c, on) for c in n[1:])
+    names = sorted(words(node))
+    if len(names) > 12:
+        return None
+    rows = lambda ns: [{n for i, n in enumerate(ns) if k >> i & 1} for k in range(1 << len(ns))]
+    used = tuple(n for n in names if any(ev(node, on) != ev(node, on | {n}) for on in rows(names)))
+    return used, tuple(ev(node, on) for on in rows(used))
+
+
+ALWAYS = ((), (True,))  # _constraint of a file with no constraint
+# Python's str.strip, isspace and \s read U+001C-U+001F as space and Go (unicode.IsSpace, bytes.TrimSpace)
+# does not; every other character both read alike. A file holding one is not read (Security on #6421).
+NOT_GO_SPACE = re.compile("[\x1c-\x1f]")
 
 
 def _facts(path, text):
@@ -779,16 +847,15 @@ def _facts(path, text):
                     specs.append((m[1], m[2] if m[2] is not None else m[3]))
             else:
                 skeleton.append(c)
-    builds = tuple(s for s in skeleton if s.startswith(("//go:build", "// +build")))
     bare = _uncommented(text, False).split("\n")
 
     def run(d):
         """The name `go test` runs d by (RUNNABLE), or None."""
         at = next((rows[i - 1] for i in range(d[6], d[7] + 1) if DECL.match(bare[i - 1])), "")
         return d[1] == "func" and (m := RUNNABLE.match(at)) and m[1] or None
-    return types.SimpleNamespace(run=run, runs=lambda: [n for d in decls if (n := run(d))],
-        decls=decls, clause=decls[0][8] if decls else None, build=(builds, _name_tags(path)),
-        header=header, skeleton=skeleton, specs=specs, linked="go:linkname" in text,
+    return types.SimpleNamespace(run=run, parallel=bool(re.search(r"\bParallel\b", "\n".join(code))),
+        decls=decls, clause=decls[0][8] if decls else None, build=_constraint(path, text),
+        header=header, skeleton=skeleton, specs=specs, linked=_tied(text),
         text=lambda d: "\n".join(rows[d[6] - 1:d[7]]).rstrip())
 
 
@@ -807,11 +874,28 @@ def _go_files(pkg, commit):
     return out
 
 
+def _unformatted(files):
+    """The paths of {path: text} that gofmt would change, every one when gofmt fails or is missing: what
+    moved() reads assumes gofmt's layout (`func TestB (t` hides a test from RUNNABLE; Security on #6378)."""
+    with tempfile.TemporaryDirectory() as d:
+        names = {p.rsplit("/", 1)[-1]: p for p in files}
+        for name, p in names.items():
+            (pathlib.Path(d) / name).write_text(files[p])
+        try:
+            r = subprocess.run(["gofmt", "-l", "."], cwd=d, capture_output=True, text=True)
+        except OSError:
+            return set(files)
+        if r.returncode or r.stderr.strip():
+            return set(files)
+        return {names.get(n.strip().removeprefix("./"), n) for n in r.stdout.split("\n") if n.strip()}
+
+
 def _side(pkg, mb, module):
     """One side (commit mb) of broker/<pkg>/ as moved() reads it, or None."""
     files = _go_files(pkg, mb)
     if files is None:
         return None
+    rough = _unformatted(files) | {p for p, t in files.items() if NOT_GO_SPACE.search(t)}
     facts, clauses = {p: _facts(p, t) for p, t in files.items()}, {}
 
     def name(spec):
@@ -836,7 +920,7 @@ def _side(pkg, mb, module):
         """Whether a file of the directory built with build (or with no constraint) imports path."""
         if module and path == f"{module}/{pkg}":
             return True
-        rel = [f for f in facts.values() if f.build in (((), ()), build)]
+        rel = [f for f in facts.values() if f.build in (ALWAYS, build)]
         return all(f.specs is not None for f in rel) and any(path == s[1] for f in rel for s in f.specs)
 
     def names(clause):
@@ -845,22 +929,22 @@ def _side(pkg, mb, module):
     keyed = collections.defaultdict(list)
     for p, f in facts.items():
         for d in f.decls:
-            if d[1] in MOVABLE and not d[5]:
+            if d[1] in MOVABLE and not d[5] and f.build is not None:
                 keyed[(f.clause, f.build, f.text(d))].append((p, d))
-    return types.SimpleNamespace(facts=facts, name=name, imports=imports, names=names, keyed=keyed)
+    return types.SimpleNamespace(facts=facts, name=name, imports=imports, names=names, keyed=keyed, rough=rough)
 
 
 def _same_header(bf, hf, b, h):
     """Whether a test file's header change (bf at the base, hf at the head, either None when absent)
     changes nothing a line of it binds or any init that runs (see Moved declarations above)."""
-    if any(f is not None and (f.linked or f.specs is None) for f in (bf, hf)):
+    if any(f is not None and (f.linked or f.specs is None or f.build is None) for f in (bf, hf)):
         return False
     was, now = set(bf.specs) if bf else set(), set(hf.specs) if hf else set()
     added, removed = now - was, was - now
     if any(a in ("_", ".") for a, _ in added | removed):
         return False
     if bf and hf:
-        if bf.skeleton != hf.skeleton:
+        if bf.skeleton != hf.skeleton or bf.build != hf.build:
             return False
     elif not all(s.startswith(("package ", "//go:build", "// +build")) for s in (bf or hf).skeleton):
         return False
@@ -885,18 +969,83 @@ def _same_binding(sf, df, text, b, h):
                for q in set(QUALIFIER.findall(_uncommented(text, False))))
 
 
+def _package_reads(rel, commit):
+    """(names Parallel, module import paths) of broker/<rel>/'s .go files at commit, or None when a file
+    or an import spec is not read."""
+    files = _go_files(rel, commit)
+    if files is None or any(NOT_GO_SPACE.search(t) for t in files.values()):
+        return None
+    facts = [_facts(p, t) for p, t in files.items()]
+    if any(f.specs is None for f in facts):
+        return None
+    return any(f.parallel for f in facts), frozenset(path for f in facts for _, path in f.specs)
+
+
+def _parallel(pkg, commit, module, cache):
+    """Whether a test of broker/<pkg>/ may call Parallel: the word in a .go file of it (test or not) or of
+    a package of this module it imports, transitively; True when one is not read (L3 and Security on
+    #6421: a helper may call t.Parallel())."""
+    seen, todo = {pkg}, [pkg]
+    while todo:
+        rel = todo.pop()
+        if (rel, commit) not in cache:
+            cache[(rel, commit)] = _package_reads(rel, commit)
+        got = cache[(rel, commit)]
+        if got is None or got[0]:
+            return True
+        for path in got[1]:
+            if module and (path == module or path.startswith(module + "/")):
+                rel = path[len(module) + 1:] if path != module else ""
+                if ".." in rel.split("/"):
+                    return True
+                if rel not in seen:
+                    seen.add(rel)
+                    todo.append(rel)
+    return False
+
+
+def _run_list(side):
+    """[(path, name, build, first line)] of what `go test` runs by name in one side of a package, in its
+    order: the package's own _test.go files, then its _test package's, each in name then source order;
+    None when a test file's build context, package clause or layout (not gofmt's) is not read."""
+    files = sorted(((f.clause or "").endswith("_test"), p) for p, f in side.facts.items()
+                   if is_test(p) and f.build != "ignored")
+    out = []
+    for _, p in files:
+        f = side.facts[p]
+        if f.build is None or f.clause is None or p in side.rough:
+            return None
+        out += [(p, n, f.build, d[6]) for d in f.decls if (n := f.run(d))]
+    return out
+
+
 def moved(diff_text, mb, head):
-    """({path: head lines}, {path: base lines}) of the broker/ _test.go lines that the diff changes, or
-    any other, which are no change of the package's tests: a declaration moved or left unchanged, or a
-    header change, as Moved declarations above reads them (#6369). A package with a link or a file not
-    read moves nothing."""
+    """(moved, later): moved is ({path: head lines}, {path: base lines}) of the broker/ _test.go lines
+    that the diff changes, or any other, which are no change of the package's tests: a declaration moved
+    or left unchanged, or a header change, as Moved declarations above reads them (#6369); a package with
+    a link or a file not read moves nothing. later is the same pair of the first lines of each test `go
+    test` runs, in a package whose tests the diff changes, at or after the first place its run list
+    differs, every one when _parallel (a parallel test resumes after every other); a
+    path's lines are None (every test) where a side's run list is not read (#6385)."""
     tests, btests = added_lines(diff_text)[1], base_test_lines(diff_text)[0]
-    now, then = {}, {}
+    now, then, later_now, later_then, reads = {}, {}, {}, {}, {}
     module = (m := re.search(r"^module\s+(\S+)", base_text(head, "broker/go.mod") or "", re.M)) and m[1]
     for pkg in sorted({package_of(p) for p in [*tests, *btests] if is_test(p)} - {None}):
         b, h = _side(pkg, mb, module), _side(pkg, head, module)
-        if b is None or h is None:
+        runs = (_run_list(b), _run_list(h)) if b and h else (None, None)
+        if None in runs:
+            later_now.update({p: None for p in tests if is_test(p) and package_of(p) == pkg})
+            later_then.update({p: None for p in btests if is_test(p) and package_of(p) == pkg})
             continue
+        was, now_runs = ([r[:3] for r in rs] for rs in runs)
+        if was != now_runs:
+            k = 0 if _parallel(pkg, mb, module, reads) or _parallel(pkg, head, module, reads) else next(
+                i for i in range(len(was) + 1) if i == len(was) or i == len(now_runs) or was[i] != now_runs[i])
+            for side, rs in ((later_then, runs[0]), (later_now, runs[1])):
+                for p, _, _, first in rs[k:]:
+                    side.setdefault(p, set()).add(first)
+        if b.rough or h.rough:
+            continue  # a file not in gofmt's layout: nothing moves
         for p in sorted(set(b.facts) | set(h.facts)):
             bf, hf = b.facts.get(p), h.facts.get(p)
             if is_test(p) and _same_header(bf, hf, b, h):
@@ -910,12 +1059,21 @@ def moved(diff_text, mb, head):
             (hp, hd), (bp, bd) = at[0], was[0]
             if is_test(bp) and not is_test(hp):
                 continue  # `go test` runs no test function of a non-test file
-            if h.facts[hp].run(hd) and (hp != bp or h.facts[hp].runs() != b.facts[bp].runs()):
-                continue  # `go test` runs tests in file then source order (Security on #6378)
             if hp == bp or _same_binding(b.facts[bp], h.facts[hp], key[2], b, h):
                 now.setdefault(hp, set()).update(range(hd[6], hd[7] + 1))
                 then.setdefault(bp, set()).update(range(bd[6], bd[7] + 1))
-    return ({p: ls for p, ls in now.items() if is_test(p)}, {p: ls for p, ls in then.items() if is_test(p)})
+    return (({p: ls for p, ls in now.items() if is_test(p)}, {p: ls for p, ls in then.items() if is_test(p)}),
+            (later_now, later_then))
+
+
+def _widen(lines, extra):
+    """lines ({path: set or None}) with extra's lines added; None (the whole file) wins."""
+    for p, ls in extra.items():
+        if ls is None:
+            lines[p] = None
+        elif lines.get(p, ()) is not None:
+            lines.setdefault(p, set()).update(ls)
+    return lines
 
 
 # Lexical reach over a package's _test.go files (D-319, #5826). A declaration (_decls) reaches every
@@ -964,6 +1122,12 @@ def _uncommented(text, literals=True):
     return "".join(out)
 
 
+def _tied(text):
+    """Whether a file ties its code to itself: a go:linkname, or cgo (`import "C"`, whose preamble is the
+    file's own; any "C" literal is read as one, #6385)."""
+    return "go:linkname" in text or bool(re.search(r'"C"|`C`', _uncommented(text)))
+
+
 def _decls(path, text):
     """[(path, kind, names, receiver, words, every, first, last, package clause)] of one test file's declarations,
     each from its doc comment (the `//` lines right above it, directives such as go:embed too) to
@@ -983,7 +1147,7 @@ def _decls(path, text):
             prev = i + 1
     if not starts or starts[0][0] > 1:
         starts.insert(0, (1, None))
-    linked = "go:linkname" in text
+    linked = _tied(text)
     # x and x_test share a directory: a type is the test type of its own package clause only.
     clause = (m := re.search(r"^package\s+(\w+)", "\n".join(bare), re.M)) and m.group(1)
     out = []
@@ -1239,7 +1403,7 @@ def covering(waived, mutants):
 # of each line of the statement's own syntax, as `mutgate_stmts.go` lists them, or the line alone
 # when it is in no listed statement, whitespace runs as one space), at (which of stmt's lines),
 # after (the code line before the statement's first), occurrence ([i, n]: the i-th of the n lines
-# of the file with that same key), reason, accepted (`#<PR>` whose review accepted the proof), and
+# of the file with that same key), reason, accepted (`#<PR>`, the PR that adds the entry), and
 # optionally col (the mutant's column on its line, as the result gives it, #5792): an entry waives a
 # mutant only when no other mutant of its kind on its line (at its col, when it names one) is in the
 # result, so a line of several such mutants needs col.
@@ -1293,9 +1457,12 @@ def statement_keys(src, sites, decls=()):
 
 def record_entries(text):
     """([entry], None) of a record's text, or (None, problem). Each entry is checked for shape only. A line that
-    repeats an earlier one word for word is one entry (two PRs merged one proof, #6358)."""
+    repeats an earlier one word for word is one entry (two PRs merged one proof, #6358). A carriage return fails the
+    record: its lines end in LF only, so a CRLF repeat of an entry is never a second entry (#6375, .gitattributes)."""
     out, seen = [], set()
     for i, row in enumerate(text.split("\n"), 1):
+        if "\r" in row:
+            return None, f"line {i} holds a carriage return; a record's lines end in LF only"
         if not row.strip() or row.lstrip().startswith("#") or row in seen:
             continue
         seen.add(row)
@@ -1904,6 +2071,7 @@ def base_covered(pkg, mb, names, tmp, diff_text):
         print(f"mutgate: the base tree leaves out {name}, a link tar's data filter refuses", file=sys.stderr)
     if not (tree / "broker" / pkg).is_dir():
         return {}, None
+    hide_docs(tree / "broker")
     got, problem = covered_by(pkg, names, tmp, tree / "broker")
     if problem:
         return None, f"at the base ({mb[:12]}), {problem}"
@@ -1991,6 +2159,8 @@ def unleash(cmd, **kw):
 
 
 def cmd_run(args):
+    if args.git:  # the gate's runs; a run of whole packages gates nothing
+        hide_docs(BROKER)
     pkgs = args.pkg or gated_packages()
     # Absolute: gremlins runs in broker/, so a relative -o would name a directory there (#3947).
     out = pathlib.Path(args.out).resolve()
@@ -2802,6 +2972,7 @@ def add_mutants(data, mutants):
 
 
 def cmd_delete(args):
+    hide_docs(BROKER)
     out = pathlib.Path(args.out).resolve()
     diff = broker_diff(args.git, "HEAD")
     added, tests = changes(diff, args.git, "HEAD")
@@ -2984,7 +3155,8 @@ def decide(results, added, tests, args, records=({}, [])):
     for w, hit in covering(waived, every)[1]:
         print(f"mutgate: the waiver {site_text(w)} matches {len(hit)} mutants ("
               + ", ".join(site_text((p, n, k, c)) for p, n, k, c in hit) + "), so it waives none: name the one it "
-              "proves by its column and kind, `Mutant-equivalent: <path>:<line>:<col>:<KIND> <reason>`")
+              "proves: delete its entry from the package's " f"{RECORD} and run `tools/mutgate.py waive FILE --accepted '#PR'` again "
+              "on a line `Mutant-equivalent: <path>:<line>:<col>:<KIND> <reason>`, then commit the record")
     return report_violations(found, lost) or (1 if stale else 0)
 
 
@@ -3136,6 +3308,7 @@ def cmd_plan(args):
     """The `mutants` matrix (#4961): [{pkg, shard, of}] for each package `claimed` names, K from its
     target lines and deletion sites. It runs the PR's tests (changed tests' coverage), so only in
     an untrusted job; K is a schedule, and `verify` checks the shards whatever K is."""
+    hide_docs(BROKER)
     diff = broker_diff(args.git, "HEAD")
     added, tests = changes(diff, args.git, "HEAD")
     counts, planned = [], {}
@@ -3245,8 +3418,9 @@ def report_violations(found, lost=()):
     if found:
         print("mutgate: add a test that fails when the line changes; if no test can tell, add a line "
               "`Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>` (`Mutant-uncovered:` for one no test "
-              "can reach) for that mutant to a file and record it with `tools/mutgate.py waive FILE --accepted '#PR'` "
-              "(its column and kind as the summary's Site and Mutant cells give them, where its line holds another)")
+              "can reach) for that mutant to a file, record it with `tools/mutgate.py waive FILE --accepted '#PR'` "
+              "(its column and kind as the summary's Site and Mutant cells give them, where its line holds another) "
+              "and commit the record")
     return 1 if found else 0
 
 
@@ -3310,7 +3484,7 @@ def main(argv=None):
     p = sub.add_parser("waive")
     p.add_argument("lines", metavar="FILE",
                    help="`Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>` lines, one per line")
-    p.add_argument("--accepted", required=True, metavar="#PR", type=pr_ref, help="the PR whose review accepted these proofs")
+    p.add_argument("--accepted", required=True, metavar="#PR", type=pr_ref, help="the PR that adds these entries; its review reads each proof")
     p.add_argument("--mutant", type=mutant_kind,
                    help=f"the one mutant kind the proofs are for, where a line names none (default {DELETION}; "
                         "or a gremlins type)")
