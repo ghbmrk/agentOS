@@ -178,6 +178,24 @@ func TestLockStoreNamesAMissingDirectory(t *testing.T) {
 	}
 }
 
+// lockStore holds an exclusive flock on the directory until its release:
+// another descriptor's try fails while it is held and takes it after.
+func TestLockStoreHoldsTheLock(t *testing.T) {
+	dir := t.TempDir()
+	release, err := lockStore(dir)
+	must(t, err)
+	other, err := os.Open(dir)
+	must(t, err)
+	defer other.Close()
+	if err := syscall.Flock(int(other.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); !errors.Is(err, syscall.EWOULDBLOCK) {
+		t.Fatalf("another lock while lockStore holds it: %v, want EWOULDBLOCK", err)
+	}
+	release()
+	if err := syscall.Flock(int(other.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("another lock after the release: %v", err)
+	}
+}
+
 // lostStore is a store in dir as enrollment leaves it for the lost-card
 // route: its recovery key's backup recipient, and one passphrase slot.
 func lostStore(t *testing.T, dir string) (*seal.Store, []byte, ed25519.PrivateKey) {
