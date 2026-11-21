@@ -26,6 +26,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import unittest
 import unittest.mock
@@ -2613,7 +2614,7 @@ class ConfigTest(unittest.TestCase):
                 "Packages", "Release", "RemoveFiles", "RepartDirectories", "Repositories",
                 "RootPassword", "Seed", "ShimBootloader", "SplitArtifacts", "Timezone",
                 "UnifiedKernelImages", "WithDocs"},
-            MK / "initrd/mkosi.conf": {"RemoveFiles"},
+            MK / "initrd/mkosi.conf": {"FinalizeScripts", "RemoveFiles"},
         }
         for conf, allowed in keys.items():
             settings, cur = [], None
@@ -2636,19 +2637,18 @@ class ConfigTest(unittest.TestCase):
                 self.assertIn(k, allowed, "%s: key not on the list; %s" % (where, why))
                 if k == "InitrdInclude":
                     self.assertEqual(v, ["initrd/"], "%s: %s" % (where, why))
+                # #6149: the initrd's run adds the image's own check, and no other script.
+                if k == "FinalizeScripts":
+                    self.assertEqual(v, ["../mkosi.finalize"], "%s: %s" % (where, why))
                 # #4647: mkosi hands Environment= to apt-get and to mkosi.postinst and mkosi.finalize, so
                 # its value is pinned whole: repart's mkfs options for project quotas, nothing else.
                 if k == "Environment":
                     self.assertEqual(v, ["SYSTEMD_REPART_MKFS_OPTIONS_EXT4=-Oquota,project"], "%s: %s" % (where, why))
-        # image.yml sets MKOSI only to the pinned v24.3 binary. What build.sh itself does before it
-        # runs mkosi (its config dir, flags and tree) is #4690's row (from #4647): a line pin of shell cannot hold.
-        # AGENTOS_SECURITY_SNAPSHOT is the run's one debian-security timestamp (#5021), which
-        # build.sh checks (image/security-snapshot.sh) before apt reads it.
+        # image.yml runs the pinned v24.3 binary on this config from one line, in a job that never runs
+        # build.sh (#4690, D-276; MkosiRunBoundTest pins the line), so no MKOSI= is handed to a script.
         wf = (ROOT / ".github/workflows/image.yml").read_text().splitlines()
-        self.assertEqual([l.strip() for l in wf if "MKOSI" in l], [
-            'run: sudo env "PATH=$PATH" "AGENTOS_SECURITY_SNAPSHOT=$AGENTOS_SECURITY_SNAPSHOT" '
-            'HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi '
-            'image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log"'], why)
+        self.assertEqual([l.strip() for l in wf if "MKOSI" in l], [], why)
+        self.assertEqual([l.strip() for l in wf if "bin/mkosi " in l], [MkosiRunBoundTest.MKOSI_LINE], why)
 
     # REQ: HW-10
     def test_packages_come_from_the_pinned_snapshot(self):
@@ -6165,12 +6165,15 @@ class TreeAccessTest(unittest.TestCase):
     through pathlib). mkosi.finalize may touch the file system only in the five tree primitives
     (tree_lstat, tree_listdir, tree_readlink, tree_read, and tree_xattrs, #1803), none of which follows
     a link on the build host, in the two functions that read the repository's allowlists (tmpfiles.allow,
-    exec.allow), not the tree, and in script_net_dev, which reads the script sandbox's /proc (#4647). Only
+    exec.allow), not the tree, in script_net_dev, which reads the script sandbox's /proc (#4647), and in
+    pinned_packages and run_config, which read the apt lists and config JSON mkosi mounts beside the
+    tree (#4690). Only
     Conf.content (through conf_chase) and the key scan may read a file's bytes. Any other function that
     calls a file-reading or stat API fails here, however it names it."""
     # REQ: HW-1, DEV-2
     ALLOWED = frozenset(("tree_lstat", "tree_listdir", "tree_readlink", "tree_read", "tree_xattrs",
-                         "allow_path", "allow_entries", "script_net_dev", "repart_build", "build_definitions"))
+                         "allow_path", "allow_entries", "script_net_dev", "pinned_packages", "run_config", "repart_build",
+                         "build_definitions"))
     READERS = {"tree_read": frozenset(("Conf.content", "has_key"))}
     SOURCE = (MK / "mkosi.finalize").read_text()
 
@@ -7907,6 +7910,716 @@ class EdgeLinkUnitsTest(unittest.TestCase):
             self.assertIn(unit, jobs)
 
 
+def workflow_code(text):
+    """TEXT, a workflow's lines, without its comment lines."""
+    return "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+
+
+def workflow_job(name):
+    """The text of image.yml's job NAME, up to the next job."""
+    wf = (ROOT / ".github/workflows/image.yml").read_text()
+    start = wf.index("\n  %s:\n" % name)
+    nxt = re.search(r"\n  [a-z][a-z-]*:\n", wf[start + 1:])
+    return wf[start:start + 1 + nxt.start()] if nxt else wf[start:]
+
+
+class MkosiRunBoundTest(unittest.TestCase):
+    """IMG-mkosi-run-bound (#4690, D-276): the release's mkosi run reads only the committed config with
+    the pinned mkosi, out of build.sh's reach, and the image's packages come only from the pinned,
+    signature-checked sources."""
+    # REQ: HW-10
+
+    MKOSI_LINE = ('sudo env "PATH=$PATH" HOME=/root "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" /opt/mkosi/bin/mkosi '
+                  '-C image/mkosi -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" '
+                  '--environment=AGENTOS_SECURITY_SNAPSHOT="$AGENTOS_SECURITY_SNAPSHOT" '
+                  '--extra-tree="$OUT/stage/usr:/usr" --output-dir "$OUT" build 2>&1 | tee "$RUNNER_TEMP/build.log"')
+    MIRROR, SECURITY = "20261001T000000Z", "20261112T180512Z"
+    INDEX = "snapshot.debian.org_archive_debian_20261001T000000Z_dists_trixie_main_binary-amd64_Packages"
+    SEC = "snapshot.debian.org_archive_debian-security_20261112T180512Z_dists_trixie-security_main_binary-amd64_Packages"
+
+    def test_the_one_mkosi_line_is_pinned(self):
+        wf = (ROOT / ".github/workflows/image.yml").read_text().splitlines()
+        self.assertEqual([l.strip() for l in wf if "bin/mkosi " in l], [self.MKOSI_LINE])
+        # The local build calls the same line (image/README.md).
+        readme = (IMG / "README.md").read_text()
+        self.assertIn("`%s`" % self.MKOSI_LINE.split(" 2>&1")[0], readme)
+
+    def test_the_local_wrapper_runs_the_same_mkosi_line(self):
+        # #6161: image/local-build.sh runs image.yml's line byte for byte; both are held to MKOSI_LINE, so a
+        # change to either alone fails here. CI never runs the wrapper.
+        wrapper = (IMG / "local-build.sh").read_text().splitlines()
+        self.assertEqual([l.strip() for l in wrapper if "bin/mkosi " in l], [self.MKOSI_LINE])
+        for wf in sorted((ROOT / ".github/workflows").glob("*.y*ml")):
+            self.assertNotIn("local-build", wf.read_text(), wf.name)
+
+    # The image.yml steps the wrapper copies, by job and step name, with the lines it leaves out: a GitHub
+    # notice and the two $GITHUB_ENV lines, which the wrapper sets as plain variables.
+    LOCAL_STEPS = (("stage", "Stage the image tree (image/build.sh)", ()),
+                   ("stage", "Pack the stage", ("::notice title=stage size",)),
+                   ("build", "Unpack the stage", ('>> "$GITHUB_ENV"',)),
+                   ("build", "Build image", ()),
+                   ("build", "Finish the image (image/finish.sh)", ()))
+
+    @staticmethod
+    def step_run(job, name):
+        """The run lines of image.yml's step NAME in JOB, stripped, without comments or blank lines."""
+        lines = workflow_job(job).splitlines()
+        i = next(n for n, l in enumerate(lines) if l.strip() == "- name: " + name)
+        indent = len(lines[i]) - len(lines[i].lstrip())
+        body = []
+        for l in lines[i + 1:]:
+            if l.strip() and len(l) - len(l.lstrip()) <= indent:
+                break
+            body.append(l)
+        n = next(n for n, l in enumerate(body) if l.strip().startswith("run:"))
+        first = body[n].strip()[len("run:"):].strip()
+        run = [first] if first != "|" else [l.strip() for l in body[n + 1:]]
+        return [l for l in run if l and not l.startswith("#")]
+
+    def test_the_local_wrapper_runs_image_yml_steps_line_for_line(self):
+        # #6348 item 7: build.sh, the stage's pack and hold, mkosi and finish.sh run with image.yml's own
+        # split and lines, so a local build and a CI build are one class: every line of each step is in the
+        # wrapper, in order and adjacent (sudo where CI has sudo, the same checks between the halves).
+        wrapper = [l.strip() for l in (IMG / "local-build.sh").read_text().splitlines()]
+        wrapper = [l for l in wrapper if l and not l.startswith("#")]
+        for job, name, left_out in self.LOCAL_STEPS:
+            with self.subTest(step=name):
+                want = [l for l in self.step_run(job, name) if not any(x in l for x in left_out)]
+                self.assertGreater(len(want), 0)
+                starts = [n for n, l in enumerate(wrapper) if l == want[0]]
+                self.assertTrue(any(wrapper[s:s + len(want)] == want for s in starts), want)
+                if left_out:
+                    self.assertTrue(any(x in l for l in self.step_run(job, name) for x in left_out), left_out)
+        # The halves are separate commands: stage never reaches mkosi, build never reaches build.sh.
+        text = (IMG / "local-build.sh").read_text()
+        stage = text[text.index('if [ "$MODE" = stage ]; then\n'):text.index("\nfi\n\nSNAPSHOTS=")]
+        self.assertIn("image/build.sh", stage)
+        self.assertIn("\texit 0", stage)
+        self.assertNotIn("image/build.sh", text[text.index("\nfi\n\nSNAPSHOTS="):])
+
+    def test_the_local_wrapper_checks_image_yml_mkosi_pin(self):
+        # #6348 item 1: the wrapper refuses an /opt/mkosi at any commit but the one image.yml checks out.
+        pins = set(re.findall(r"checkout -q ([0-9a-f]{40})  # v24\.3", workflow_job("build")))
+        self.assertEqual(len(pins), 1, pins)
+        wrapper = (IMG / "local-build.sh").read_text()
+        self.assertEqual(re.findall(r"^MKOSI_COMMIT=([0-9a-f]{40}) ", wrapper, re.M), list(pins))
+
+    def local_build(self, *args, sources=None, mkosi_fails=False, snapshot=None, resolved=None,
+                    mkosi_head=None, mkosi_status="", stage_extra="", d=None, cwd=None):
+        """Run image/local-build.sh ARGS in a one-commit copy of the repository (made once per D) with
+        build.sh, finish.sh, sudo and the /opt/mkosi checkout replaced by stand-ins that log their
+        arguments; returns (the run, the log's calls, D). A stand-in security-snapshot.sh answers resolve
+        with RESOLVED and runs the real script otherwise."""
+        if d is None:
+            d = pathlib.Path(tempfile.mkdtemp())
+            self.addCleanup(shutil.rmtree, d)
+        repo, bin_ = d / "repo", d / "bin"
+        write_x = lambda p, s: (p.parent.mkdir(parents=True, exist_ok=True), p.write_text(s), p.chmod(0o755))
+        log = 'for a; do printf "%s\\n" "$a"; done >> "$LOG"; echo -- >> "$LOG"\n'
+        if not repo.exists():
+            src_rel = "image/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources"
+            for rel in ("image/local-build.sh", "image/security-snapshot.sh", src_rel):
+                (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / rel, repo / rel)
+            write_x(repo / "image/real-security-snapshot.sh", (ROOT / "image/security-snapshot.sh").read_text())
+            write_x(repo / "image/security-snapshot.sh", '#!/bin/sh\ncase $1 in resolve) echo "$RESOLVED"; '
+                    'echo resolve >> "$LOG.resolve";; *) exec sh "$(dirname "$0")/real-security-snapshot.sh" "$@";; esac\n')
+            write_x(repo / "image/build.sh", "#!/bin/sh\nset -- build.sh \"$@\" \"snap=${AGENTOS_SECURITY_SNAPSHOT-unset}\"\n"
+                    + log + 'mkdir -p "$2/stage/usr/lib" "$2/guest" "$2/linked" && echo x > "$2/stage/usr/lib/f"\n'
+                    'cp "$SOURCES" "$2/agentos.sources"\neval "$STAGE_EXTRA"\n')
+            write_x(repo / "image/finish.sh", '#!/bin/sh\nset -- finish.sh "$@" "SDE=$SOURCE_DATE_EPOCH"\n' + log)
+            write_x(bin_ / "sudo", "#!/bin/sh\n" + log + 'case " $* " in *" /opt/mkosi/bin/mkosi "*) '
+                    'echo mkosi; [ -z "$MKOSI_FAILS" ];; '
+                    '" git -C /opt/mkosi rev-parse HEAD ") echo "$MKOSI_HEAD";; '
+                    '" git -C /opt/mkosi status --porcelain ") printf "%s" "$MKOSI_STATUS";; '
+                    '*) exec "$@";; esac\n')
+            for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "x"]):
+                subprocess.run(["git", "-C", str(repo)] + cmd, env=self.git_env(), check=True)
+        if sources is None:
+            sources = subprocess.check_output(["sh", str(IMG / "security-snapshot.sh"), "sources", self.SECURITY])
+        (d / "sources").write_bytes(sources)
+        env = dict(self.git_env(), PATH="%s:%s" % (bin_, os.environ["PATH"]), LOG=str(d / "log"),
+                   SOURCES=str(d / "sources"), MKOSI_FAILS="1" if mkosi_fails else "", STAGE_EXTRA=stage_extra,
+                   MKOSI_HEAD=mkosi_head or "26673f65e17ae099bb0cf65928fe70c93b8a6a37", MKOSI_STATUS=mkosi_status,
+                   RESOLVED=resolved or "")
+        env.pop("AGENTOS_SECURITY_SNAPSHOT", None)
+        if snapshot:
+            env["AGENTOS_SECURITY_SNAPSHOT"] = snapshot
+        if (d / "log").exists():
+            (d / "log").unlink()
+        r = subprocess.run([str(repo / "image/local-build.sh")] + list(args), cwd=str(cwd or d), env=env,
+                           capture_output=True, text=True)
+        text = (d / "log").read_text() if (d / "log").exists() else ""
+        calls = [c.strip("\n").split("\n") for c in text.split("--\n") if c.strip()]
+        return r, calls, d
+
+    @staticmethod
+    def git_env():
+        return dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid", GIT_COMMITTER_NAME="t",
+                    GIT_COMMITTER_EMAIL="t@example.invalid", GIT_AUTHOR_DATE="@1763000000 +0000",
+                    GIT_COMMITTER_DATE="@1763000000 +0000", GIT_CONFIG_GLOBAL=os.devnull)
+
+    def staged(self, **kw):
+        """A stage run in a fresh copy; returns (its D, the tar's path, the commit)."""
+        r, calls, d = self.local_build("stage", "st", **kw)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        commit = subprocess.check_output(["git", "-C", str(d / "repo"), "rev-parse", "HEAD"], text=True).strip()
+        return d, d / "st" / ("stage-%s.tar" % commit), commit
+
+    @staticmethod
+    def runs(calls):
+        """The privileged runs (sudo env ...) and the stand-ins' own calls, in order."""
+        return [c for c in calls if c[0] in ("env", "build.sh", "finish.sh")]
+
+    def test_the_local_wrapper_stages_as_image_yml_does(self):
+        # The stage half runs build.sh as image.yml's stage job runs it (OUT only, the snapshot passed, the
+        # GOCACHE), and packs only stage, agentos.sources, guest and linked, named for the commit.
+        r, calls, d = self.local_build("stage", "st", snapshot=self.SECURITY)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = str(d / "st" / "out")
+        self.assertEqual([c[0] for c in self.runs(calls)], ["env", "build.sh"])
+        self.assertEqual(calls[0][2:], ["AGENTOS_SECURITY_SNAPSHOT=" + self.SECURITY, "HOME=/root",
+                                        "GOCACHE=/tmp/gocache", "image/build.sh", out])
+        self.assertEqual(calls[1], ["build.sh", out, "snap=" + self.SECURITY])
+        commit = subprocess.check_output(["git", "-C", str(d / "repo"), "rev-parse", "HEAD"], text=True).strip()
+        tar = d / "st" / ("stage-%s.tar" % commit)
+        members = subprocess.check_output(["tar", "-tf", str(tar)], text=True).split()
+        self.assertEqual(sorted(members), ["agentos.sources", "guest/", "linked/", "stage/", "stage/usr/",
+                                           "stage/usr/lib/", "stage/usr/lib/f"])
+        self.assertIn("stage log %s/stage.log" % (d / "st"), r.stderr)
+        # Unset, the snapshot goes to build.sh empty, and build.sh resolves its own (build.sh's line 46).
+        r, calls, _ = self.local_build("stage", "st")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(calls[1][-1], "snap=")
+        # A stage of more than usr/ is not packed.
+        r, calls, d = self.local_build("stage", "st", stage_extra='mkdir "$2/stage/etc"')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(list(d.glob("st/stage*.tar")), [])
+
+    def test_the_local_wrapper_builds_as_image_yml_does(self):
+        # The build half holds the tar, re-installs OUT/pkgmngr from the checked sources (#6348 item 4), and
+        # runs the pinned mkosi line and finish.sh with OUT, VERSION, SOURCE_DATE_EPOCH and the snapshot.
+        for args, version in (((), "20251113.021320"), (("7.1+b_2-x",), "7.1+b_2-x")):
+            with self.subTest(args=args):
+                d, tar, _ = self.staged(snapshot=self.SECURITY)
+                r, calls, _ = self.local_build("build", str(tar), "img", *args, snapshot=self.SECURITY, d=d)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                out = str(d / "img" / "out")
+                path = os.environ["PATH"]
+                runs = self.runs(calls)
+                self.assertEqual([c[0] for c in runs], ["env", "env", "finish.sh"])
+                self.assertEqual(runs[0][3:], [
+                    "SOURCE_DATE_EPOCH=1763000000", "/opt/mkosi/bin/mkosi", "-C", "image/mkosi", "-f",
+                    "--package-manager-tree=%s/pkgmngr" % out, "--image-version=" + version,
+                    "--environment=AGENTOS_SECURITY_SNAPSHOT=" + self.SECURITY,
+                    "--extra-tree=%s/stage/usr:/usr" % out, "--output-dir", out, "build"])
+                self.assertTrue(runs[0][1].startswith("PATH=") and runs[0][1].endswith(":" + path), runs[0][1])
+                self.assertEqual(runs[0][2], "HOME=/root")
+                self.assertEqual(runs[1][3:], ["image/finish.sh", out, version])
+                self.assertEqual(runs[2], ["finish.sh", out, version, "SDE=1763000000"])
+                self.assertEqual(calls[0], ["git", "-C", "/opt/mkosi", "rev-parse", "HEAD"])
+                self.assertEqual((d / "img/out/pkgmngr/etc/apt/sources.list.d/mkosi.sources").read_bytes(),
+                                 (d / "img/out/agentos.sources").read_bytes())
+                self.assertEqual((d / "img/out/stage/usr/lib/f").read_text(), "x\n")
+                self.assertIn("build log %s/build.log" % (d / "img"), r.stderr)
+                self.assertFalse((d / "img/stage-in").exists())
+        # Unset, the snapshot set is resolved on the build host, as image.yml's security-snapshot job does.
+        d, tar, _ = self.staged(snapshot=self.SECURITY)
+        r, calls, _ = self.local_build("build", str(tar), "img", resolved="20261113T000000Z " + self.SECURITY, d=d)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((d / "log.resolve").exists())
+
+    def test_the_local_wrapper_resolves_relative_paths_from_the_caller(self):
+        # #6348 item 6: a relative DIR or TAR is the caller's, not the repository's.
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        (d / "here").mkdir()
+        r, _, _ = self.local_build("stage", "st", snapshot=self.SECURITY, d=d, cwd=d / "here")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        tars = list((d / "here" / "st").glob("stage-*.tar"))
+        self.assertEqual(len(tars), 1)
+        self.assertFalse((d / "repo" / "st").exists())
+        r, _, _ = self.local_build("build", "st/" + tars[0].name, "img", snapshot=self.SECURITY, d=d, cwd=d / "here")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((d / "here/img/out/agentos.sources").is_file())
+        self.assertFalse((d / "repo" / "img").exists())
+
+    def test_the_local_wrapper_refuses_what_ci_would_not_build(self):
+        d, tar, commit = self.staged(snapshot=self.SECURITY)
+        # #6348 item 1: /opt/mkosi at another commit, or changed, is refused before anything runs.
+        for kw in ({"mkosi_head": "0" * 40}, {"mkosi_status": " M mkosi/__init__.py\n"}):
+            with self.subTest(**kw):
+                r, calls, _ = self.local_build("build", str(tar), "img", snapshot=self.SECURITY, d=d, **kw)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("checkout -q 26673f65e17ae099bb0cf65928fe70c93b8a6a37", r.stderr)
+                self.assertEqual(self.runs(calls), [])
+                self.assertFalse((d / "img").exists())
+        # #6348 item 5: a VERSION with a slash, a space or a leading dash is refused.
+        for v in ("1/2", "1 2", "-1", "1;x", "1\n2"):
+            with self.subTest(version=v):
+                r, calls, _ = self.local_build("build", str(tar), "img", v, snapshot=self.SECURITY, d=d)
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertEqual(self.runs(calls), [])
+        # A tar staged from another commit is refused (the name binds it to its commit).
+        other = d / "st" / ("stage-%s.tar" % ("1" * 40))
+        shutil.copy(tar, other)
+        r, calls, _ = self.local_build("build", str(other), "img", snapshot=self.SECURITY, d=d)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.runs(calls), [])
+        # An existing DIR is refused: each half starts from a fresh directory, as each runner does.
+        (d / "img").mkdir()
+        r, calls, _ = self.local_build("build", str(tar), "img", snapshot=self.SECURITY, d=d)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.runs(calls), [])
+        (d / "img").rmdir()
+        # #6348 item 3: a checkout with a change or an untracked file builds nothing, in either half.
+        repo = d / "repo"
+        for dirty in ("change", "untracked"):
+            with self.subTest(dirty=dirty):
+                f = repo / ("image/finish.sh" if dirty == "change" else "new")
+                before = f.read_text() if f.exists() else None
+                f.write_text((before or "") + "# x\n")
+                for args in (("stage", "st2"), ("build", str(tar), "img")):
+                    r, calls, _ = self.local_build(*args, snapshot=self.SECURITY, d=d)
+                    self.assertNotEqual(r.returncode, 0)
+                    self.assertIn("commit them", r.stderr)
+                    self.assertEqual(calls, [])
+                if before is None:
+                    f.unlink()
+                else:
+                    f.write_text(before)
+        # A stage snapshot outside the run's set is refused before mkosi.
+        r, calls, _ = self.local_build("build", str(tar), "img", snapshot="20261113T000000Z", d=d)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.runs(calls), [])
+
+    def test_the_local_wrapper_stops_before_mkosi_on_a_bad_stage(self):
+        # No snapshot in agentos.sources, or sources that are not exactly the ones security-snapshot.sh
+        # writes for it: mkosi and finish.sh never run.
+        good = subprocess.check_output(["sh", str(IMG / "security-snapshot.sh"), "sources", self.SECURITY])
+        for sources in (b"", good.replace(self.SECURITY.encode(), b"2026111"), good + b"# extra\n"):
+            with self.subTest(sources=sources[-40:]):
+                d, tar, _ = self.staged(sources=sources, snapshot=self.SECURITY)
+                r, calls, _ = self.local_build("build", str(tar), "img", snapshot=self.SECURITY, d=d)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertEqual(self.runs(calls), [])
+        # A tar holding anything beside the four names (a pkgmngr/ above all) is refused.
+        d, tar, _ = self.staged(snapshot=self.SECURITY)
+        (d / "pkgmngr").mkdir()
+        subprocess.run(["tar", "-C", str(d), "-rf", str(tar), "pkgmngr"], check=True)
+        r, calls, _ = self.local_build("build", str(tar), "img", snapshot=self.SECURITY, d=d)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("pkgmngr", r.stdout)
+        self.assertEqual(self.runs(calls), [])
+        # #6348 item 2: mkosi failing behind tee still stops the build, and the log is named.
+        d, tar, _ = self.staged(snapshot=self.SECURITY)
+        r, calls, _ = self.local_build("build", str(tar), "img", snapshot=self.SECURITY, mkosi_fails=True, d=d)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual([c[0] for c in self.runs(calls)], ["env"])
+        self.assertIn("build log %s/build.log" % (d / "img"), r.stderr)
+        self.assertEqual((d / "img/build.log").read_text(), "mkosi\n")
+
+    def test_the_local_wrapper_refuses_a_bad_call(self):
+        for args in ((), ("stage",), ("stage", "a", "b"), ("build", "t"), ("build", "t", "d", "v", "x"), ("x", "d")):
+            with self.subTest(args=args):
+                r, calls, _ = self.local_build(*args)
+                self.assertEqual(r.returncode, 2)
+                self.assertIn("usage:", r.stderr)
+                self.assertEqual(calls, [])
+
+    def test_build_sh_only_stages(self):
+        b = (IMG / "build.sh").read_text()
+        code = "\n".join(l for l in b.splitlines() if not l.lstrip().startswith("#"))
+        self.assertNotIn("mkosi -C", code)
+        self.assertNotIn("MKOSI", code)
+        self.assertNotIn("finish_image.py\" \"$OUT\"", code)
+        self.assertNotIn("SHA256SUMS", code)
+
+    def test_the_build_job_never_runs_build_sh(self):
+        build = workflow_job("build")
+        self.assertFalse("build.sh" in workflow_code(build))
+        self.assertIn("    needs: [security-snapshot, stage]\n", build)
+        self.assertIn("name: stage-${{ matrix.run }}", build)
+
+    def test_mkosi_is_pinned_before_any_repository_code_runs(self):
+        # Before the mkosi line, the build job runs only image.yml's own shell, pinned actions and
+        # security-snapshot.sh's sources form: no repository script, test binary or Go build.
+        build = workflow_job("build")
+        before = workflow_code(build[:build.index(self.MKOSI_LINE)]).replace("go-version-file: broker/go.mod", "")
+        install = before.index("sudo git -C /opt/mkosi -c advice.detachedHead=false checkout -q "
+                               "26673f65e17ae099bb0cf65928fe70c93b8a6a37  # v24.3")
+        self.assertLess(install, before.index("actions/download-artifact@"))
+        for word in ("go test", "go build", "python3", "broker/", "./", "make "):
+            self.assertFalse(word in before, word)
+        self.assertEqual(re.findall(r"\bimage/[\w./-]+", before),
+                         ["image/security-snapshot.sh"])
+        self.assertIn('sh image/security-snapshot.sh sources "$AGENTOS_SECURITY_SNAPSHOT" > "$RUNNER_TEMP/mkosi.sources"', before)
+        self.assertIn('cmp "$RUNNER_TEMP/mkosi.sources" "$OUT/agentos.sources"', before)
+        after = build[build.index(self.MKOSI_LINE):]
+        self.assertIn('image/finish.sh "$RUNNER_TEMP/out" "$VERSION"', after)
+
+    def test_the_stage_job_runs_build_sh_and_no_mkosi(self):
+        stage = workflow_job("stage")
+        self.assertIn("    needs: security-snapshot\n", stage)
+        self.assertEqual(stage.count('image/build.sh "$RUNNER_TEMP/out"'), 1)
+        self.assertNotIn("bin/mkosi", stage)
+        self.assertNotIn("/opt/mkosi", stage)
+        self.assertIn('[ "$(sudo ls -A "$RUNNER_TEMP/out/stage")" = usr ]', stage)
+        self.assertIn("name: stage-${{ matrix.run }}", stage)
+        # The root tests that need no image moved here, out of the mkosi job.
+        self.assertIn("- name: Disk adapter on a loop device (UPD-b3 (c1))", stage)
+        self.assertIn("- name: Unit-rule fixtures under systemd (image/unit_rules.py)", stage)
+
+    def test_finish_runs_after_mkosi_as_build_sh_did(self):
+        f = (IMG / "finish.sh").read_text()
+        self.assertLess(f.index('finish_image.py" "$OUT" "$VERSION" "$STAGE/usr/lib/agentos/drivers.json"'),
+                        f.index('rm -rf "$OUT/initrd"'))
+        self.assertIn("> SHA256SUMS", f)
+
+    def status(self, *pkgs):
+        return "".join("Package: %s\nStatus: install ok %s\nArchitecture: %s\nVersion: %s\nDescription: x\n y\n\n"
+                       % p for p in pkgs).encode()
+
+    def lists(self, files):
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        for name, data in files.items():
+            (d / name).write_bytes(data)
+        return str(d)
+
+    def test_installed_packages_are_in_a_pinned_index(self):
+        idx = b"Package: bash\nVersion: 5.2.37-2\nArchitecture: amd64\n\nPackage: tzdata\nVersion: 2025b-4\nArchitecture: all\n"
+        sec = b"Package: openssl\nArchitecture: amd64\nVersion: 3.5.7-1~deb13u1\n"
+        lists = self.lists({self.INDEX: idx, self.SEC + ".xz": __import__("lzma").compress(sec),
+                            "_repository_Packages": b"Package: evil\nVersion: 1\nArchitecture: amd64\n",
+                            "lock": b""})
+        ok = self.status(("bash", "installed", "amd64", "5.2.37-2"), ("tzdata", "installed", "all", "2025b-4"),
+                         ("openssl", "installed", "amd64", "3.5.7-1~deb13u1"),
+                         ("gone", "config-files", "amd64", "9"))
+        self.assertEqual(check.package_source_violations(ok, lists, self.MIRROR, self.SECURITY), [])
+        why = "the image's packages come only from the pinned, signature-checked snapshot sources (#4690)"
+        for pkg in (("evil", "installed", "amd64", "1"), ("bash", "installed", "amd64", "5.2.37-3"),
+                    ("bash", "unpacked", "i386", "5.2.37-2")):
+            with self.subTest(pkg=pkg):
+                self.assertEqual(check.package_source_violations(ok + self.status(pkg), lists, self.MIRROR, self.SECURITY), [
+                    "var/lib/dpkg/status: %s %s (%s) is installed, but no pinned Packages index lists that version; %s"
+                    % (pkg[0], pkg[3], pkg[2], why)])
+        # No pinned index read (only the local repository's, or a live archive's): every build refuses.
+        bare = self.lists({"_repository_Packages": idx,
+                           "deb.debian.org_debian_dists_trixie_main_binary-amd64_Packages": idx})
+        self.assertEqual(check.package_source_violations(ok, bare, self.MIRROR, self.SECURITY), [
+            "%s holds no Packages index from the pinned snapshot sources (other indexes: _repository_Packages, "
+            "deb.debian.org_debian_dists_trixie_main_binary-amd64_Packages); %s" % (bare, why)])
+        self.assertEqual(check.package_source_violations(b"", lists, self.MIRROR, self.SECURITY),
+                         ["var/lib/dpkg/status: lists no installed package; " + why])
+        broken = self.lists({self.INDEX + ".gz": b"not gzip"})
+        [line] = check.package_source_violations(ok, broken, self.MIRROR, self.SECURITY)[:1]
+        self.assertIn(self.INDEX + ".gz: unreadable", line)
+
+    def test_an_index_from_another_snapshot_counts_for_nothing(self):
+        # #6148 L3 B2: a signed index from another date (an older, vulnerable snapshot) is not a pinned source.
+        evil = b"Package: evil\nVersion: 1\nArchitecture: amd64\n"
+        status = self.status(("evil", "installed", "amd64", "1"))
+        why = "the image's packages come only from the pinned, signature-checked snapshot sources (#4690)"
+        old = self.INDEX.replace(self.MIRROR, "20200101T000000Z")
+        oldsec = self.SEC.replace(self.SECURITY, "20200101T000000Z")
+        good = {self.INDEX: b"Package: bash\nVersion: 1\nArchitecture: amd64\n"}
+        for name in (old, oldsec, self.INDEX.replace("_debian_", "_debian-ports_"),
+                     self.SEC.replace("debian-security_", "debian-security_x")):
+            with self.subTest(name=name):
+                lists = self.lists(dict(good, **{name: evil}))
+                self.assertEqual(check.package_source_violations(status, lists, self.MIRROR, self.SECURITY), [
+                    "var/lib/dpkg/status: evil 1 (amd64) is installed, but no pinned Packages index lists that "
+                    "version; " + why])
+        # The same index at this run's own dates counts.
+        for name in (self.INDEX, self.SEC):
+            lists = self.lists(dict(good, **{name: evil}))
+            self.assertEqual(check.package_source_violations(status, lists, self.MIRROR, self.SECURITY), [])
+
+    def test_the_run_names_its_two_snapshots(self):
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        conf = d / "config.json"
+        why = "the image's packages come only from the pinned, signature-checked snapshot sources (#4690)"
+        mirror = ini(MK / "mkosi.conf")["Distribution"]["Mirror"]
+        for text, sec, want in (
+                (json.dumps({"Mirror": mirror}), self.SECURITY, (self.MIRROR, self.SECURITY, [])),
+                (json.dumps({"Mirror": "https://deb.debian.org/debian"}), self.SECURITY,
+                 (None, self.SECURITY, ["mkosi's Mirror= is not a snapshot.debian.org debian snapshot; " + why])),
+                (json.dumps({"Mirror": mirror}), "", (self.MIRROR, None, [
+                    "AGENTOS_SECURITY_SNAPSHOT is '', not one debian-security snapshot timestamp (image.yml's mkosi "
+                    "line sets it); " + why])),
+                (json.dumps({"Mirror": mirror}), "2026111T1", (self.MIRROR, None, [
+                    "AGENTOS_SECURITY_SNAPSHOT is '2026111T1', not one debian-security snapshot timestamp (image.yml's "
+                    "mkosi line sets it); " + why]))):
+            with self.subTest(text=text, sec=sec):
+                conf.write_text(text)
+                with unittest.mock.patch.dict(os.environ, {"MKOSI_CONFIG": str(conf), "AGENTOS_SECURITY_SNAPSHOT": sec}):
+                    got, bad = check.run_config()
+                    self.assertEqual(bad, [])
+                    self.assertEqual(check.run_snapshots(got), want)
+        for text in ("{", "[]"):
+            with self.subTest(text=text):
+                conf.write_text(text)
+                with unittest.mock.patch.dict(os.environ, {"MKOSI_CONFIG": str(conf)}):
+                    got, bad = check.run_config()
+                self.assertEqual(got, {})
+                self.assertEqual(len(bad), 1)
+                self.assertTrue(bad[0].startswith("mkosi's config JSON: unreadable ("), bad)
+                self.assertTrue(bad[0].endswith(why), bad)
+
+    def unpack(self, members):
+        """Run image.yml's "Unpack the stage" step on a tar of MEMBERS ({name: bytes, or None for a directory,
+        or ("link", target)}), with sudo a pass-through; returns (exit status, output, out dir)."""
+        build = workflow_job("build")
+        step = build[build.index("      - name: Unpack the stage\n"):]
+        step = step[:step.index("\n      - ", 10)]
+        script = textwrap.dedent(step[step.index("run: |\n") + len("run: |\n"):])
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        src = d / "src"
+        for name, data in members.items():
+            p = src / name
+            if data is None:
+                p.mkdir(parents=True, exist_ok=True)
+            elif isinstance(data, tuple):
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.symlink_to(data[1])
+            else:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(data)
+        (d / "stage-in").mkdir()
+        subprocess.run(["tar", "-C", str(src), "-cf", str(d / "stage-in/stage.tar")] + sorted(
+            n for n in os.listdir(src)), check=True)
+        (d / "bin").mkdir()
+        (d / "bin/sudo").write_text('#!/bin/sh\nexec "$@"\n')
+        (d / "bin/sudo").chmod(0o755)
+        # The step's git log lines would read the git store, a record (records_audit, CI-PATHS): a stub
+        # answers them, and the step runs outside the checkout (it reads only RUNNER_TEMP).
+        (d / "bin/git").write_text("#!/bin/sh\necho 0\n")
+        (d / "bin/git").chmod(0o755)
+        env = dict(os.environ, RUNNER_TEMP=str(d), GITHUB_ENV=str(d / "env"), PATH="%s:%s" % (d / "bin", os.environ["PATH"]))
+        r = subprocess.run(["bash", "-e", "-c", script], cwd=d, env=env, capture_output=True, text=True)
+        return r.returncode, r.stdout + r.stderr, d / "out"
+
+    def bind_snapshot(self, staged, snapshots):
+        """Run image.yml's "Build image" step up to its package manager tree, on a stage whose
+        agentos.sources names debian-security snapshot STAGED, with the security-snapshot job's output
+        SNAPSHOTS; returns (exit status, output)."""
+        build = workflow_job("build")
+        step = build[build.index("      - name: Build image\n"):]
+        script = textwrap.dedent(step[step.index("run: |\n") + len("run: |\n"):step.index('          sudo rm -rf "$OUT/pkgmngr"')])
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        (d / "out").mkdir()
+        src = subprocess.run(["sh", str(ROOT / "image/security-snapshot.sh"), "sources", staged], capture_output=True, check=True)
+        (d / "out/agentos.sources").write_bytes(src.stdout)
+        env = dict(os.environ, RUNNER_TEMP=str(d), OUT=str(d / "out"), SNAPSHOTS=snapshots)
+        r = subprocess.run(["bash", "-e", "-c", script], cwd=ROOT, env=env, capture_output=True, text=True)
+        return r.returncode, r.stdout + r.stderr
+
+    def test_the_build_job_holds_the_stage_to_the_runs_snapshots(self):
+        # #6148 Security: the stage job runs the PR's build.sh as root and writes agentos.sources, so the
+        # build job takes its debian-security date only if the security-snapshot job resolved it.
+        run, fallback = "20261118T120000Z", "20261117T060000Z"
+        for staged in (run, fallback):
+            with self.subTest(staged=staged):
+                rc, out = self.bind_snapshot(staged, "%s %s" % (run, fallback))
+                self.assertEqual(rc, 0, out)
+        for staged, snapshots in (("20250815T000000Z", "%s %s" % (run, fallback)), (run, ""), (run, fallback),
+                                  (run, "%s0 %s" % (run, fallback))):
+            with self.subTest(staged=staged, snapshots=snapshots):
+                rc, out = self.bind_snapshot(staged, snapshots)
+                self.assertNotEqual(rc, 0, out)
+                self.assertIn("::error::the stage's debian-security snapshot '%s' is not one of this run's" % staged, out)
+
+    GOOD_STAGE = {"stage/usr/lib/agentos/x": b"x", "agentos.sources": b"Types: deb\n", "guest/agentos-guest.manifest": b"",
+                  "linked/agentos.dpkg-status": b""}
+
+    def test_the_build_job_takes_only_the_stage_from_the_tar(self):
+        # #6148 L3 B1: the stage job runs the PR's build.sh as root, so the build job holds its tar to
+        # stage/usr, agentos.sources, guest/ and linked/: a staged pkgmngr/ (apt settings, a trusted source)
+        # never reaches mkosi's package manager tree.
+        rc, out, o = self.unpack(self.GOOD_STAGE)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue((o / "stage/usr/lib/agentos/x").is_file())
+        for extra in ({"pkgmngr/etc/apt/apt.conf.d/99evil": b'Acquire::AllowInsecureRepositories "true";\n'},
+                      {"stage/etc/x": b"x"}, {"stage/var/lib/dpkg/status": b""}, {"evil": b""}, {"agentos.sources2": b""}):
+            with self.subTest(extra=extra):
+                rc, out, o = self.unpack(dict(self.GOOD_STAGE, **extra))
+                self.assertNotEqual(rc, 0, out)
+                self.assertIn("::error::the stage tar holds a member outside stage/usr", out)
+                self.assertFalse(o.exists())
+        for bad in ({"stage/usr": ("link", "/etc")}, {"agentos.sources": ("link", "/etc/passwd")}):
+            with self.subTest(bad=bad):
+                members = dict(self.GOOD_STAGE)
+                members = {k: v for k, v in members.items() if not k.startswith(next(iter(bad)))}
+                rc, out, o = self.unpack(dict(members, **bad))
+                self.assertNotEqual(rc, 0, out)
+                # A link at stage/usr lists without the directory's slash, so the name check refuses it first.
+                self.assertRegex(out, r"::error::the stage (tar holds a member outside|is not stage/usr alone)")
+        # The package manager tree is made from nothing, after the unpack, from the committed sources.
+        build = workflow_job("build")
+        self.assertLess(build.index('sudo rm -rf "$OUT/pkgmngr"'),
+                        build.index('sudo install -D -m 0644 "$RUNNER_TEMP/mkosi.sources" "$OUT/pkgmngr/'))
+
+    def run_main_as_mkosi(self, root, lists, conf, security):
+        """mkosi.finalize's main() as mkosi v24.3 runs it: no argument, BUILDROOT, WITH_NETWORK=0, the config
+        JSON at MKOSI_CONFIG, the security snapshot from the mkosi line's --environment, its apt lists at
+        APT_LISTS and a sandbox with only lo. Returns (exit code, stdout)."""
+        env = {"BUILDROOT": str(root), "WITH_NETWORK": "0", "MKOSI_CONFIG": str(conf),
+               "AGENTOS_SECURITY_SNAPSHOT": security}
+        out = io.StringIO()
+        code = 0
+        with unittest.mock.patch.dict(os.environ, env), unittest.mock.patch.object(sys, "argv", ["mkosi.finalize"]), \
+                unittest.mock.patch.object(check, "APT_LISTS", lists), \
+                unittest.mock.patch.object(check, "script_net_dev", lambda: TreeCheckTest.LO_ONLY), \
+                contextlib.redirect_stdout(out):
+            try:
+                check.main()
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue()
+
+    def test_mkosi_run_refuses_a_package_from_no_pinned_index(self):
+        # #6148 L3 round 2, Potency round 3: the package-source check as wired into main(), not only as a
+        # function. Each leg is held: dropping the check, or main() taking either snapshot date from anywhere
+        # but this run (the Mirror from MKOSI_CONFIG, not the committed mkosi.conf; the security date from
+        # AGENTOS_SECURITY_SNAPSHOT), fails here.
+        root = clean_tree(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        conf = d / "config.json"
+        # A Mirror date unlike the committed one, so only the run's config JSON can name it.
+        mirror = "20251111T111111Z"
+        self.assertNotIn(mirror, (MK / "mkosi.conf").read_text())
+        conf.write_text(json.dumps({"Mirror": "https://snapshot.debian.org/archive/debian/%s/" % mirror}))
+        security = "20261113T030303Z"
+        pkg = lambda name: ("Package: %s\nVersion: 1\nArchitecture: amd64\n" % name).encode()
+        index = self.INDEX.replace(self.MIRROR, mirror)
+        sec = self.SEC.replace(self.SECURITY, security)
+        lists = self.lists({index: pkg("bash"), sec: pkg("openssl"),
+                            # The same names at the committed Mirror and at another security date count for nothing.
+                            self.INDEX: pkg("committed"), self.SEC.replace(self.SECURITY, "20200101T000000Z"): pkg("oldsec"),
+                            index.replace(mirror, "20200101T000000Z"): pkg("evil")})
+        why = "the image's packages come only from the pinned, signature-checked snapshot sources (#4690)"
+        installed = lambda *names: self.status(*((n, "installed", "amd64", "1") for n in names)).decode()
+        write(root, "var/lib/dpkg/status", installed("bash", "openssl"))
+        self.assertEqual(self.run_main_as_mkosi(root, lists, conf, security), (0, "image check: clean\n"))
+        for name in ("evil", "committed", "oldsec"):
+            with self.subTest(name=name):
+                write(root, "var/lib/dpkg/status", installed("bash", "openssl", name))
+                code, out = self.run_main_as_mkosi(root, lists, conf, security)
+                self.assertNotEqual(code, 0)
+                self.assertEqual(out.splitlines(), [
+                    "image check: var/lib/dpkg/status: %s 1 (amd64) is installed, but no pinned Packages index lists "
+                    "that version; %s" % (name, why)])
+        # The security package passes only at the run's own security date.
+        write(root, "var/lib/dpkg/status", installed("bash", "openssl"))
+        code, out = self.run_main_as_mkosi(root, lists, conf, "20261114T040404Z")
+        self.assertNotEqual(code, 0)
+        self.assertIn("image check: var/lib/dpkg/status: openssl 1 (amd64) is installed, but no pinned", out)
+        # A run without its security snapshot refuses before reading any index.
+        code, out = self.run_main_as_mkosi(root, lists, conf, "")
+        self.assertNotEqual(code, 0)
+        self.assertIn("image check: AGENTOS_SECURITY_SNAPSHOT is ''", out)
+
+    def test_tree_status_is_read_inside_the_tree(self):
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        lists = self.lists({self.INDEX: b"Package: bash\nVersion: 1\nArchitecture: amd64\n"})
+        self.assertEqual(check.tree_package_violations(str(root), self.MIRROR, self.SECURITY, lists),
+                         ["var/lib/dpkg/status: unreadable (No such file or directory); the image's packages come only "
+                          "from the pinned, signature-checked snapshot sources (#4690)"])
+        write(root, "var/lib/dpkg/status", self.status(("bash", "installed", "amd64", "1")).decode())
+        self.assertEqual(check.tree_package_violations(str(root), self.MIRROR, self.SECURITY, lists), [])
+
+    def test_a_package_file_in_the_tree_is_refused(self):
+        root = clean_tree(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        self.assertEqual(check.violations(root), [])
+        for name in ("usr/lib/agentos/x.deb", "var/cache/apt/archives/y.udeb", "opt/z.ddeb"):
+            write(root, name, "!<arch>\n")
+        self.assertEqual(check.violations(root), [
+            "%s: a Debian package file; the image's packages come only from mkosi's signature-checked apt run (#4690)"
+            % n for n in ("opt/z.ddeb", "usr/lib/agentos/x.deb", "var/cache/apt/archives/y.udeb")])
+
+
+    # REQ: HW-10
+    def test_the_default_initrd_runs_the_package_check(self):
+        # #6149: mkosi v24.3 builds the default initrd in a sub-run; initrd/mkosi.conf adds this check to its
+        # finalize scripts, after the initrd's own (mkosi runs the discovered script first, then FinalizeScripts=).
+        conf = ini(MK / "initrd/mkosi.conf")["Content"]
+        self.assertEqual(conf["FinalizeScripts"].split(), ["../mkosi.finalize"])
+        self.assertEqual((MK / "initrd" / conf["FinalizeScripts"]).resolve(), (MK / "mkosi.finalize").resolve())
+        self.assertTrue(os.access(MK / "initrd/mkosi.finalize", os.X_OK))
+        # It reads the status copy the initrd's postinst writes: mkosi-initrd removes var/lib/dpkg first.
+        drop = load("drop_6149", MK / "drop.py")
+        self.assertEqual(check.INITRD_STATUS, drop.INITRD_STATUS)
+        self.assertTrue(os.path.samefile(MK / "initrd/mkosi.postinst", MK / "drop.py"))
+        # Every tree that includes this initrd hands its run's security snapshot to mkosi, or the check refuses
+        # the build: the core's one mkosi line, and the enforcer's (its initrd is this one).
+        includers = sorted(str(c.relative_to(ROOT)) for top in ("image", "spikes")
+                           for c in (ROOT / top).glob("**/mkosi.conf")
+                           if ini(c).has_option("Config", "InitrdInclude")
+                           and (c.parent / ini(c)["Config"]["InitrdInclude"]).resolve() == (MK / "initrd").resolve())
+        self.assertEqual(includers, ["image/enforcer/mkosi/mkosi.conf", "image/mkosi/mkosi.conf"])
+        self.assertIn('--environment=AGENTOS_SECURITY_SNAPSHOT="$AGENTOS_SECURITY_SNAPSHOT"', self.MKOSI_LINE)
+        self.assertIn('--environment=AGENTOS_SECURITY_SNAPSHOT="$SECURITY_SNAPSHOT" --output-dir "$OUT" build',
+                      (IMG / "enforcer/build.sh").read_text())
+
+    def initrd_run(self, root, lists, security=None, image="default-initrd"):
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        conf = d / "config.json"
+        conf.write_text(json.dumps({"Image": image, "Mirror": "https://snapshot.debian.org/archive/debian/%s/" % self.MIRROR}))
+        return self.run_main_as_mkosi(root, lists, conf, security or self.SECURITY)
+
+    # REQ: HW-10
+    def test_initrd_run_refuses_a_package_from_no_pinned_index(self):
+        # #6149: in the initrd's run (its config JSON's Image), main() holds the initrd's status copy to this
+        # run's two snapshots and refuses any package file; the image's tree checks are not the initrd's.
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        pkg = lambda name: ("Package: %s\nVersion: 1\nArchitecture: amd64\n" % name).encode()
+        lists = self.lists({self.INDEX: pkg("systemd"), self.SEC: pkg("libssl3t64"),
+                            self.INDEX.replace(self.MIRROR, "20200101T000000Z"): pkg("evil")})
+        why = "the image's packages come only from the pinned, signature-checked snapshot sources (#4690)"
+        S = "usr/share/agentos/initrd.dpkg-status"
+        installed = lambda *names: self.status(*((n, "installed", "amd64", "1") for n in names)).decode()
+        # No status copy: refused, never passed.
+        code, out = self.initrd_run(root, lists)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out, "image check: initrd: %s: unreadable (No such file or directory); %s\n" % (S, why))
+        write(root, S, installed("systemd", "libssl3t64"))
+        # A bare initrd tree passes: none of the image's own checks run on it.
+        self.assertNotEqual(check.violations(root), [])
+        self.assertEqual(self.initrd_run(root, lists), (0, "image check: initrd: clean\n"))
+        # The dpkg status the image's run reads is not the initrd's.
+        write(root, "var/lib/dpkg/status", installed("evil"))
+        self.assertEqual(self.initrd_run(root, lists), (0, "image check: initrd: clean\n"))
+        write(root, S, installed("systemd", "libssl3t64", "evil"))
+        code, out = self.initrd_run(root, lists)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out.splitlines(), ["image check: initrd: %s: evil 1 (amd64) is installed, but no pinned Packages "
+                                            "index lists that version; %s" % (S, why)])
+        write(root, S, installed("systemd", "libssl3t64"))
+        code, out = self.initrd_run(root, lists, security="20261114T040404Z")
+        self.assertNotEqual(code, 0)
+        self.assertIn("image check: initrd: %s: libssl3t64 1 (amd64) is installed, but no pinned" % S, out)
+        write(root, "var/cache/x.deb", "!<arch>\n")
+        code, out = self.initrd_run(root, lists)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out.splitlines(), ["image check: initrd: var/cache/x.deb: a Debian package file; the image's "
+                                            "packages come only from mkosi's signature-checked apt run (#4690)"])
+        # Any other Image is the image's own run: the whole tree check, on dpkg's own status.
+        code, out = self.initrd_run(root, lists, image=None)
+        self.assertNotEqual(code, 0)
+        self.assertIn("image check: var/lib/dpkg/status: evil 1 (amd64) is installed", out)
+        self.assertNotIn("image check: initrd", out)
+
+
 class IgnoredValueTest(unittest.TestCase):
     """#6095 (R4; Lens, L3 and Security on #6128): systemd ignores a value its parser rejects and keeps the one
     before it, so for the keys whose last value a check reads (ini_canon) every assignment must be one of a few
@@ -8037,6 +8750,7 @@ class IgnoredValueTest(unittest.TestCase):
                 got = " | ".join(check.resolved_violations(self.root))
                 self.assertIn("resolved LLMNR is LLMNR=%s in etc/systemd/resolved.conf.d/zz.conf is a form the tree "
                               "check does not read (use yes or no or resolve); must be no" % text.split("=")[1].strip(), got)
+
 
 if __name__ == "__main__":
     unittest.main()

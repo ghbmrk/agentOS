@@ -109,7 +109,7 @@ func TestCH2ControlWordsOverTheOwnerSocketWithEverythingElseDown(t *testing.T) {
 	if r := text(t, dir, owner, "HELP"); len(r) != 1 || !strings.Contains(r[0], "RESUME") {
 		t.Fatalf("HELP: %q", r)
 	}
-	if r := text(t, dir, owner, "plan my week"); len(r) != 1 || !strings.Contains(r[0], "not running") {
+	if r := text(t, dir, owner, "plan my week"); len(r) != 1 || !strings.Contains(r[0], "not received") {
 		t.Fatalf("task chat with no agent: %q", r)
 	}
 	if r := text(t, dir, "+15559999999", "RESUME"); len(r) != 0 {

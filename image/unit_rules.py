@@ -39,6 +39,13 @@ load at boot, which holds only for units no generator writes, or while the gener
 container matches a boot's. /etc/fstab is printed whole when it is ours; the units its generator
 writes are read like any other.
 
+Root's user manager (user@0.service, which a root login starts) runs its units as root too, so once the
+system manager's records are taken the tree's systemd --user is started in the same container as uid 0
+(offline_systemd.UserManager), and its units, from the directories its own UnitPath names, are printed the
+same way, each marked user (#6002). So are the system and user managers' configuration files of ours
+(manager_confs) and the env files an EnvironmentFile= line of ours names, as the tree holds them at boot
+(env_files).
+
 Usage (as root): unit_rules.py OUT VERSION prints build OUT's records as JSON; --control OUT VERSION
 prints them with CONTROL planted, which the lint must refuse; --fixture ROOT PACKAGED prints a fixture
 tree's records under the runner's systemd, with ROOT/usr over the runner's /usr (its unit directories
@@ -88,9 +95,16 @@ MERGED = {"/bin", "/sbin", "/lib", "/lib64"}
 # A drop-in of ours on a packaged root unit that no package's socket feeds (systemd's own oneshot), so the
 # Environment= rule refuses it rather than the fed-service one (#5072: journald, fed by its sockets, was
 # refused first): the lint must refuse it, or a pass of the built tree means nothing (#4677 Security R-1).
-CONTROL = {"etc/systemd/system/systemd-tmpfiles-setup.service.d/zz-agentos-unit-control.conf":
-           "[Service]\nEnvironment=LD_PRELOAD=/var/lib/agentos-x/x.so\n"}
-CONTROL_WANT = 'variable "LD_PRELOAD"'
+# The same drop-in on root's user manager's unit of that name (systemd ships both) shows its units reach the
+# lint too (#6002). CONTROL_WANT holds one refusal per line, each of which the lint must give.
+CONTROL_TEXT = "[Service]\nEnvironment=LD_PRELOAD=/var/lib/agentos-x/x.so\n"
+CONTROL = {"etc/systemd/%s/systemd-tmpfiles-setup.service.d/zz-agentos-unit-control.conf" % d: CONTROL_TEXT
+           for d in ("system", "user")}
+CONTROL_WANT = "\n".join((
+    'etc/systemd/system/systemd-tmpfiles-setup.service.d/zz-agentos-unit-control.conf: Environment=LD_PRELOAD'
+    '=/var/lib/agentos-x/x.so: variable "LD_PRELOAD"',
+    "root's user manager: systemd-tmpfiles-setup.service: etc/systemd/user/systemd-tmpfiles-setup.service.d/"
+    'zz-agentos-unit-control.conf: Environment=LD_PRELOAD=/var/lib/agentos-x/x.so: variable "LD_PRELOAD"'))
 
 
 class View:
@@ -217,10 +231,11 @@ class BootView(View):
         return [] if self.hidden(q) or q in BOOT_MOUNTS else super()._list(q)
 
 
-def unit_dirs(view):
-    """Each unit directory as resolved in the tree, once, in UNIT_DIRS' order."""
+def unit_dirs(view, top=UNIT_DIRS):
+    """Each unit directory (TOP: UNIT_DIRS, or a user manager's UnitPath) as resolved in the tree, once, in
+    TOP's order."""
     out = []
-    for d in UNIT_DIRS:
+    for d in top:
         r, _ = view.resolve(d)
         if view.kind(r) == 0o040000 and r not in out:
             out.append(r)
@@ -399,7 +414,7 @@ def fed_services(shown, pkgsock):
     return is_fed
 
 
-def unread(view, shown, dirs, packaged):
+def unread(view, shown, dirs, packaged, top=UNIT_DIRS):
     """A mask for each unit file or drop-in a package lists (packaged.listed) that systemd does not read as
     installed: changed, no longer a regular file, reached by a link, or gone while a unit still loads under
     its name or its directory is shared. Provenance by current bytes alone makes a changed one ours
@@ -413,7 +428,7 @@ def unread(view, shown, dirs, packaged):
                 loads.add(n)
                 if "@" in base:
                     loads.add(base.split("@")[0] + "@" + ext)  # any instance loads its template's files
-    top, out = set(dirs) | set(UNIT_DIRS), []  # listed paths are as dpkg laid them out (dpkg_packaged)
+    top, out = set(dirs) | set(top), []  # listed paths are as dpkg laid them out (dpkg_packaged)
     for p in sorted(getattr(packaged, "listed", ())):
         parent, base = os.path.split(p)
         if parent in top and base.endswith(TYPES):
@@ -828,6 +843,27 @@ def records(view, shown, dirs, prov, usr_view=None):
     reply for every name names() found. package marks a socket whose endpoint is a package's
     (package_sockets), fed a service such a socket hands its connections to (fed_services); a mask is a
     file of ours that hides a package's drop-in."""
+    recs, masks, held, prefixes = unit_records(view, shown, dirs, prov)
+    fstab = None
+    final, _ = view.resolve("/etc/fstab")
+    if view.kind(final) == 0o100000 and not prov.ours("/etc/fstab"):
+        for line in view.text(final).split("\n"):
+            w = line.split()
+            if w and not w[0].startswith("#") and (w[0].startswith("/") or "=" in w[0]):
+                # fstab-generator skips a device line in the manager's container mode, so the unit a boot
+                # writes from a package's line would go unread (an fstab of ours is printed whole below)
+                raise SystemExit("unit rules: a package's /etc/fstab names a device, which systemd in a "
+                                 "container skips: %r" % line.strip())
+    if view.kind(final) == 0o100000 and prov.ours("/etc/fstab"):
+        fstab = {"path": "/etc/fstab", "text": view.text(final)}
+    return {"units": recs, "fstab": fstab, "masks": masks, "links": boot_links(view, usr_view),
+            "held": {"names": sorted(held), "prefixes": sorted(prefixes)}}
+
+
+def unit_records(view, shown, dirs, prov, top=UNIT_DIRS):
+    """One manager's unit records, masks, held names and held prefixes (records()), from SHOWN, its reply
+    for every name names() found in DIRS, its unit directories as resolved in the tree (TOP as it names
+    them)."""
     recs, own, done = [], set(), set()
     pkgsock = package_sockets(shown, packaged_names(view, dirs, prov))
     for name in sorted(shown):
@@ -889,7 +925,7 @@ def records(view, shown, dirs, prov, usr_view=None):
                 elif view.kind(final) == 0o100000:
                     pkgdrop.setdefault((ext, c), []).append(p)
     masks += [{"path": p, "hides": q} for ext, c, p in ourdrop for q in pkgdrop.get((ext, c), [])]
-    masks += unread(view, shown, dirs, prov.packaged)
+    masks += unread(view, shown, dirs, prov.packaged, top)
     fed = fed_services(shown, pkgsock)
     for rec in recs:
         rec["package"] = rec["unit"] in pkgsock
@@ -900,20 +936,7 @@ def records(view, shown, dirs, prov, usr_view=None):
     for s in shown.values():
         if s["Id"] in pkgsock:
             held |= set(words(s, "Names"))
-    fstab = None
-    final, _ = view.resolve("/etc/fstab")
-    if view.kind(final) == 0o100000 and not prov.ours("/etc/fstab"):
-        for line in view.text(final).split("\n"):
-            w = line.split()
-            if w and not w[0].startswith("#") and (w[0].startswith("/") or "=" in w[0]):
-                # fstab-generator skips a device line in the manager's container mode, so the unit a boot
-                # writes from a package's line would go unread (an fstab of ours is printed whole below)
-                raise SystemExit("unit rules: a package's /etc/fstab names a device, which systemd in a "
-                                 "container skips: %r" % line.strip())
-    if view.kind(final) == 0o100000 and prov.ours("/etc/fstab"):
-        fstab = {"path": "/etc/fstab", "text": view.text(final)}
-    return {"units": recs, "fstab": fstab, "masks": masks, "links": boot_links(view, usr_view),
-            "held": {"names": sorted(held), "prefixes": sorted(fed.prefixes)}}
+    return recs, masks, held, fed.prefixes
 
 
 def lint(root, usr, cmdline, packaged, plant_files=None, own_usr=False):
@@ -935,9 +958,86 @@ def lint(root, usr, cmdline, packaged, plant_files=None, own_usr=False):
                 # a failed generator wrote none or only some of its units, which a boot may write and start
                 raise SystemExit("unit rules: generators failed, so their units are not all in the tree: %s"
                                  % ", ".join(sorted(failed)))
-            return records(view, shown, dirs, Provenance(view, dirs, packaged(view)), View(root) if own_usr else None)
+            pkg = packaged(view)
+            recs = records(view, shown, dirs, Provenance(view, dirs, pkg), View(root) if own_usr else None)
+            # Root's user manager (#6002), started only now, so nothing it writes under /run is in the
+            # system manager's records.
+            u = m.user_manager()
+            top = u.unit_path()
+            udirs = unit_dirs(view, top)
+            ushown = u.show(names(view, udirs), PROPS)
+            failed = u.failed_generators()
+            if failed:
+                raise SystemExit("unit rules: root's user manager: generators failed, so their units are not all "
+                                 "in the tree: %s" % ", ".join(sorted(failed)))
+            urecs, umasks, uheld, upre = unit_records(view, ushown, udirs, Provenance(view, udirs, pkg), top)
+            for rec in recs["units"]:
+                rec["user"] = False
+            for rec in urecs:
+                rec["user"] = True
+            recs["units"] += urecs
+            recs["masks"] += umasks
+            # one set for both managers: a name or prefix held in either is held in both, which holds more
+            recs["held"] = {"names": sorted(set(recs["held"]["names"]) | uheld),
+                            "prefixes": sorted(set(recs["held"]["prefixes"]) | set(upre))}
+            recs["managers"] = manager_confs(view, pkg)
+            recs["env"] = env_files(view, recs["units"])
+            return recs
         finally:
             m.stop()
+
+
+# #6002: the files a system manager and root's user manager read their own configuration from (systemd
+# 257's system.conf(5) and user.conf, the .conf.d directories of CONF_PATHS, and, for a user manager,
+# $XDG_CONFIG_HOME and $XDG_CONFIG_DIRS and $XDG_DATA_DIRS for uid 0), more than either reads: a file
+# printed that systemd does not read holds more, never less. DefaultEnvironment= reaches every unit the
+# manager starts and ManagerEnvironment= its generators (broker/kernel/privfile managerEnv).
+MANAGER_CONF_DIRS = ("/etc/systemd", "/run/systemd", "/usr/local/lib/systemd", "/usr/lib/systemd",
+                     "/root/.config/systemd", "/etc/xdg/systemd", "/usr/local/share/systemd", "/usr/share/systemd")
+MANAGER_CONFS = ("system.conf", "user.conf")
+
+
+def manager_confs(view, packaged):
+    """[{"path", "text"}] for each manager configuration file of ours (MANAGER_CONF_DIRS): one reached
+    through a link, or not byte-identical to a package's (PACKAGED), once; a /dev/null link masks."""
+    out, seen = [], set()
+    for d in MANAGER_CONF_DIRS:
+        for n in MANAGER_CONFS:
+            dropins = sorted(c for c in view.entries(d + "/" + n + ".d") if c.endswith(".conf"))
+            for p in [d + "/" + n] + [d + "/" + n + ".d/" + c for c in dropins]:
+                final, links = view.resolve(p)
+                if final in seen or final == "/dev/null" or view.kind(final) != 0o100000:
+                    continue
+                if links or not packaged(final):
+                    seen.add(final)
+                    out.append({"path": p, "text": view.text(final)})
+    return out
+
+
+# An EnvironmentFile= line, as systemd reads one: blanks around the key and value are dropped.
+ENV_LINE = re.compile(r"[ \t]*EnvironmentFile[ \t]*=[ \t]*(.*?)[ \t]*\Z")
+
+
+def env_files(view, units):
+    """{path: text} for each env file an EnvironmentFile= line of a file of ours in UNITS names, as the
+    tree holds it at boot (BootView: none under a boot mount), when it is a regular file there (#6002). A
+    line this reads differently from the lint (a continued one) names a path printed under no key, and the
+    lint refuses the unit for an env file it cannot read: so a miss holds more, never less."""
+    boot, out = BootView(view), {}
+    for u in units:
+        for f in u["files"]:
+            if not f["ours"]:
+                continue
+            for line in f["text"].split("\n"):
+                m = ENV_LINE.match(line)
+                p = m and m.group(1)
+                p = p[1:] if p and p.startswith("-") else p
+                if not p or not p.startswith("/") or p in out:
+                    continue
+                final, _ = boot.resolve(p)
+                if boot.kind(final) == 0o100000:
+                    out[p] = boot.text(final)
+    return out
 
 
 def merged(view, link):
@@ -990,13 +1090,20 @@ def dpkg_packaged(out):
     return for_view
 
 
+# The runner's user manager directories under /usr, hidden in a fixture as its system ones are (#6002).
+FIXTURE_USER = ("usr/lib/systemd/user", "usr/local/lib/systemd/user", "usr/share/systemd/user",
+                "usr/local/share/systemd/user", "usr/lib/systemd/user-generators",
+                "usr/local/lib/systemd/user-generators")
+
+
 def fixture(root, packaged_list):
     """Records of a fixture tree under the runner's systemd: ROOT/usr overlaid on the runner's /usr, with
-    the runner's own unit and generator directories hidden, so only the fixture's units load. Of the
-    runner's generators only systemd's fstab one runs (a package's, snapd's, writes units of its own)."""
+    the runner's own unit and generator directories hidden (FIXTURE_USER's too), so only the fixture's units
+    load. Of the runner's generators only systemd's fstab one runs (a package's, snapd's, writes units of
+    its own)."""
     root = pathlib.Path(root)
     for sub in ("usr/lib/systemd/system", "usr/local/lib/systemd/system", "proc", "sys", "dev", "run", "tmp",
-                "var/tmp", "etc/systemd/system"):
+                "var/tmp", "etc/systemd/system") + FIXTURE_USER:
         if not any(os.path.islink(root / sub.rsplit("/", i)[0]) for i in range(sub.count("/") + 1)):
             (root / sub).mkdir(parents=True, exist_ok=True)
     for n in ("bin", "lib", "lib64", "sbin"):
@@ -1010,7 +1117,7 @@ def fixture(root, packaged_list):
                  gen / "systemd-fstab-generator")
     (root / "usr/local/lib/systemd/system-generators").mkdir(parents=True, exist_ok=True)
     for d in ("usr/lib/systemd/system", "usr/local/lib/systemd/system", "usr/lib/systemd/system-generators",
-              "usr/local/lib/systemd/system-generators"):
+              "usr/local/lib/systemd/system-generators") + FIXTURE_USER:
         os.setxattr(root / d, "trusted.overlay.opaque", b"y", follow_symlinks=False)
     os.chmod(root, 0o755)
     lines = [l for l in pathlib.Path(packaged_list).read_text().splitlines() if l]

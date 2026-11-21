@@ -592,6 +592,177 @@ class IsolateKeptTest(unittest.TestCase):
                                     "model unit aliases" % self.SYSTEM])
 
 
+class SoftRebootTest(unittest.TestCase):
+    """MOR-soft-reboot (#6182): an orderly soft reboot stops agentos-mor.service through shutdown.target, so
+    its clear runs while the kernel keeps its memory, and the next userspace's start only reads MOR. The
+    image removes the unit soft-reboot.target requires, and mkosi.finalize's ram_kept_violations
+    refuses a built tree where it can load again. tests/test_hostcheck.py test_an_isolate_keeps_mor_set
+    boots the image and runs the soft reboot."""
+    # REQ: HW-8
+    SYSTEM = "usr/lib/systemd/system/"
+    DEBIAN = "[Unit]\nRequires=shutdown.target umount.target final.target\n[Service]\nType=oneshot\n" \
+             "ExecStart=systemctl --force soft-reboot\n"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        shutil.copytree(UNITS, self.root / self.SYSTEM, symlinks=True)
+
+    def v(self):
+        return check.ram_kept_violations(self.root)
+
+    def test_the_image_removes_the_unit(self):
+        self.assertEqual(check.SOFT_REBOOT, "systemd-soft-reboot.service")
+        removed = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
+        self.assertIn("/" + self.SYSTEM + check.SOFT_REBOOT, removed)
+        self.assertFalse((UNITS / check.SOFT_REBOOT).exists())
+        self.assertEqual(self.v(), [])
+        self.assertIn("ram_kept_violations(root)", (MK / "mkosi.finalize").read_text())
+
+    def test_the_unit_coming_back_is_refused(self):
+        why = ("%s: present; an orderly soft reboot stops agentos-mor.service, whose stop clears MOR, while the "
+               "kernel keeps its memory, so the holders after it run with MOR clear (remove it or mask it, #6182)")
+        for d in check.UNIT_PATHS:
+            rel = "%s/%s" % (d, check.SOFT_REBOOT)
+            for text in (self.DEBIAN, "\n"):
+                with self.subTest(d=d, text=text):
+                    f = write(self.root, rel, text)
+                    got = self.v()
+                    f.unlink()
+                    self.assertEqual(got, [why % rel])
+
+    def test_a_mask_first_passes_and_a_mask_after_the_unit_does_not(self):
+        write(self.root, self.SYSTEM + check.SOFT_REBOOT, self.DEBIAN)
+        for kind in ("link", "empty"):
+            with self.subTest(kind=kind):
+                m = self.root / "etc/systemd/system" / check.SOFT_REBOOT
+                m.parent.mkdir(parents=True, exist_ok=True)
+                if kind == "link":
+                    m.symlink_to("/dev/null")
+                else:
+                    m.write_text("")
+                self.assertEqual(self.v(), [])
+                m.unlink()
+        (self.root / self.SYSTEM / check.SOFT_REBOOT).unlink()
+        # The first entry decides: a unit in /etc wins over a mask lower in the search path.
+        write(self.root, "etc/systemd/system/" + check.SOFT_REBOOT, self.DEBIAN)
+        (self.root / self.SYSTEM / check.SOFT_REBOOT).symlink_to("/dev/null")
+        got = self.v()
+        self.assertEqual(len(got), 1, got)
+        self.assertTrue(got[0].startswith("etc/systemd/system/%s: present;" % check.SOFT_REBOOT), got)
+
+    def test_a_link_of_its_name_is_refused(self):
+        # An alias (a link of its name to another unit) loads that unit under the name, so it is refused
+        # unread, as is any link but a mask.
+        link = self.root / self.SYSTEM / check.SOFT_REBOOT
+        for target in ("agentos-mor.service", "/usr/lib/systemd/system/agentos-mor.service", "/dev/zero"):
+            with self.subTest(target=target):
+                link.symlink_to(target)
+                got = self.v()
+                link.unlink()
+                self.assertEqual(len(got), 1, got)
+                self.assertTrue(got[0].startswith(self.SYSTEM + check.SOFT_REBOOT + ": unreadable ("), got)
+
+
+
+class KexecClassTest(unittest.TestCase):
+    """MOR-kexec-class (#6311): Debian's kernel has CONFIG_KEXEC=y and CONFIG_KEXEC_FILE=y, so an orderly kexec
+    (kexec.target requires systemd-kexec.service, which requires shutdown.target) would stop
+    agentos-mor.service, clearing MOR, and boot the next kernel on memory the firmware never wiped. The image
+    removes the unit as it does the soft reboot's, ram_kept_violations refuses it coming back, and
+    kexec_loader_violations refuses a loader, so no kernel is ever loaded for a kexec or a crash kernel.
+    tests/test_hostcheck.py test_an_isolate_keeps_mor_set boots the image and runs the kexec."""
+    # REQ: HW-8
+    SYSTEM = "usr/lib/systemd/system/"
+    DEBIAN = "[Unit]\nRequires=shutdown.target umount.target final.target\nSuccessAction=kexec-force\n"
+    WHY = ("a kexec loader; with a kernel loaded, a kexec or a crash kernel runs the next kernel on memory the "
+           "firmware never wiped (remove it, #6311)")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        shutil.copytree(UNITS, self.root / self.SYSTEM, symlinks=True)
+
+    def test_the_image_removes_the_unit_and_runs_both_checks(self):
+        self.assertEqual(check.KEXEC, "systemd-kexec.service")
+        self.assertEqual([u for u, _, _ in check.RAM_KEPT], [check.SOFT_REBOOT, check.KEXEC])
+        removed = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
+        self.assertIn("/" + self.SYSTEM + check.KEXEC, removed)
+        self.assertFalse((UNITS / check.KEXEC).exists())
+        self.assertEqual(check.ram_kept_violations(self.root), [])
+        self.assertEqual(check.kexec_loader_violations(self.root), [])
+        text = (MK / "mkosi.finalize").read_text()
+        self.assertIn("kexec_loader_violations(root)", text)
+        self.assertIn("ram_kept_violations(root)", text)
+
+    def test_the_unit_coming_back_is_refused(self):
+        why = ("%s: present; an orderly kexec stops agentos-mor.service, whose stop clears MOR, while the kernel "
+               "keeps its memory, so the holders after it run with MOR clear (remove it or mask it, #6311)")
+        for d in check.UNIT_PATHS:
+            rel = "%s/%s" % (d, check.KEXEC)
+            for text in (self.DEBIAN, "\n"):
+                with self.subTest(d=d, text=text):
+                    f = write(self.root, rel, text)
+                    got = check.ram_kept_violations(self.root)
+                    f.unlink()
+                    self.assertEqual(got, [why % rel])
+
+    def test_a_mask_passes_and_both_units_are_reported(self):
+        m = self.root / "etc/systemd/system" / check.KEXEC
+        m.parent.mkdir(parents=True, exist_ok=True)
+        m.symlink_to("/dev/null")
+        write(self.root, self.SYSTEM + check.KEXEC, self.DEBIAN)
+        self.assertEqual(check.ram_kept_violations(self.root), [])
+        m.unlink()
+        write(self.root, self.SYSTEM + check.SOFT_REBOOT, self.DEBIAN)
+        got = check.ram_kept_violations(self.root)
+        self.assertEqual([g.split(":", 1)[0] for g in got], [self.SYSTEM + check.SOFT_REBOOT, self.SYSTEM + check.KEXEC])
+
+    def test_a_loader_anywhere_the_box_runs_it_is_refused(self):
+        for d in ("usr/sbin", "usr/bin", "usr/local/sbin", "usr/local/bin"):
+            for kind in ("file", "empty", "link"):
+                with self.subTest(d=d, kind=kind):
+                    p = self.root / d / "kexec"
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    if kind == "link":
+                        (self.root / "usr/lib/kexec-tools").parent.mkdir(parents=True, exist_ok=True)
+                        (self.root / "usr/lib/kexec-tools").write_bytes(b"\x7fELF")
+                        p.symlink_to("/usr/lib/kexec-tools")
+                    else:
+                        p.write_bytes(b"\x7fELF" if kind == "file" else b"")
+                    got = check.kexec_loader_violations(self.root)
+                    p.unlink()
+                    self.assertEqual(got, ["%s/kexec: %s" % (d, self.WHY)])
+        # The core's merged /usr: /sbin is a link to usr/sbin, so a loader there is the one in usr/sbin.
+        (self.root / "sbin").symlink_to("usr/sbin")
+        write(self.root, "sbin/kexec", "x")
+        self.assertEqual(check.kexec_loader_violations(self.root), ["usr/sbin/kexec: %s" % self.WHY])
+        self.assertIn("kexec_loader_violations(root)", (MK / "mkosi.finalize").read_text())
+
+    def test_a_loader_package_is_refused_and_a_removed_one_is_not(self):
+        status = check.DPKG_STATUS
+        stanza = "Package: %s\nStatus: install ok %s\nArchitecture: amd64\nVersion: 1\n"
+        for pkg in ("kexec-tools", "kdump-tools"):
+            for state, refused in (("installed", True), ("unpacked", True), ("half-configured", True),
+                                   ("config-files", False), ("not-installed", False)):
+                with self.subTest(pkg=pkg, state=state):
+                    write(self.root, status, "Package: systemd\nStatus: install ok installed\n\n" + stanza % (pkg, state))
+                    want = ["%s: %s is installed; %s" % (status, pkg, self.WHY)] if refused else []
+                    self.assertEqual(check.kexec_loader_violations(self.root), want)
+        write(self.root, status, stanza % ("kexec-tools-doc", "installed"))
+        self.assertEqual(check.kexec_loader_violations(self.root), [])
+
+    def test_an_unreadable_status_is_refused(self):
+        (self.root / check.DPKG_STATUS).parent.mkdir(parents=True)
+        (self.root / check.DPKG_STATUS).symlink_to("/proc/self/environ")
+        got = check.kexec_loader_violations(self.root)
+        self.assertEqual(len(got), 1, got)
+        self.assertTrue(got[0].startswith(check.DPKG_STATUS + ": unreadable ("), got)
+        self.assertTrue(got[0].endswith(self.WHY), got)
+
+
 class WipeOnTest(unittest.TestCase):
     def test_kernel_zeroes_freed_memory(self):
         args = ini(MK / "mkosi.conf")["Content"]["KernelCommandLine"].split()

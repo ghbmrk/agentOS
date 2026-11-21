@@ -219,10 +219,12 @@ def assumption_ids(root, files):
             elif cells[0] in ("ID", "#"):
                 in_table = True
             elif in_table and not set(cells[0]) <= set("-: "):
-                if cells[0] in seen:
-                    yield f"{name}:{n}: duplicate ID {cells[0]} (first on line {seen[cells[0]]})"
-                else:
-                    seen[cells[0]] = n
+                if cells[0] not in seen:
+                    seen[cells[0]] = (n, line)
+                elif seen[cells[0]][1] != line:  # a row repeated word for word is one row (#6358)
+                    # #6341 Lens: every role merges main, so the error names the fix for the union's duplicate.
+                    hint = "" if name == "DECISIONS.md" else "; a main merge keeps an edited row twice unless the clone ran `python3 tools/record_merge.py --install`"
+                    yield f"{name}:{n}: duplicate ID {cells[0]} (first on line {seen[cells[0]][0]}){hint}"
 
 
 def markdown_files(root):

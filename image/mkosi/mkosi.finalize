@@ -26,13 +26,18 @@ its unlock unit gets no descriptor past 2 and a bounded restart count (#2899, #2
 (DEVSLOT-image) ships only as a binary drivers.json lists with its hash, under units rendered from
 DRIVER_TEMPLATE for its name, and nothing else names its user or the drivers' sockets.
 Run by mkosi, it also refuses a run whose scripts had the network (#4647), so neither mkosi.postinst nor
-this script can fetch a package outside mkosi's checked apt run.
+this script can fetch a package outside mkosi's checked apt run, and a tree with an installed package
+that no pinned, signature-checked Packages index lists at that version (#4690); any tree with a .deb.
+mkosi runs it on the default initrd too, for those two alone (INITRD_IMAGE, #6149).
 Usage outside mkosi: mkosi.finalize ROOT; mkosi.finalize --tmpfiles-allowlist ROOT and
 mkosi.finalize --exec-allowlist ROOT print those allowlists for a tree."""
+import bz2
 import errno
 import fnmatch
+import gzip
 import hashlib
 import json
+import lzma
 import os
 import re
 import stat
@@ -552,8 +557,9 @@ def _violations(root):
             + cached(unit_made_dirs, root)[1] + cached(unit_made_paths, root)[2] + unit_made_refusals(root)
             + inside_refusals(root) + gpt_auto_violations(root)
             + noexec_violations(root)
-            + keeper_violations(root) + isolate_violations(root) + clerk_key_violations(root)
-            + assembly_violations(root) + driver_violations(root) + e2e_violations(root))
+            + keeper_violations(root) + isolate_violations(root) + ram_kept_violations(root)
+            + kexec_loader_violations(root) + clerk_key_violations(root)
+            + assembly_violations(root) + driver_violations(root) + e2e_violations(root) + package_file_violations(root))
 
 
 # #1715 (G1-e2e ASSUMPTIONS E1): the in-image end-to-end run is CI-only. Its root-run driver
@@ -3043,6 +3049,72 @@ def isolate_violations(root):
     return out
 
 
+# MOR-soft-reboot (#6182; HW-8): systemd 257's soft-reboot.target requires SOFT_REBOOT, which requires
+# shutdown.target, so an orderly "systemctl soft-reboot" (or an isolate of the target, AllowIsolate=yes)
+# stops MOR_UNIT, whose stop clears MOR, while the kernel and its memory are kept; the next userspace's
+# MOR_UNIT only reads MOR, so the holders it starts run with MOR clear. mkosi.conf removes the unit, so
+# the target's start fails as a whole (a Requires= on a unit that is not found fails the transaction)
+# and stops nothing; "--force" and SuccessAction=soft-reboot-force stop no unit, so MOR stays set.
+SOFT_REBOOT = "systemd-soft-reboot.service"
+# MOR-kexec-class (#6311): kexec.target requires KEXEC the same way, and an orderly kexec boots the next
+# kernel without the firmware's pass, so RAM is kept and that kernel's MOR_UNIT only reads MOR. The core's
+# kernel (Debian's) has CONFIG_KEXEC=y and CONFIG_KEXEC_FILE=y, so mkosi.conf removes KEXEC too. The tree
+# also holds no kexec loader, so no kernel is ever loaded: "systemctl kexec" fails before any unit stops
+# (load_kexec_kernel needs /usr/sbin/kexec), and a forced kexec stops no unit and falls back to a firmware
+# reboot (systemd-shutdown's LINUX_REBOOT_CMD_KEXEC case), whose pass wipes RAM while MOR is set.
+KEXEC = "systemd-kexec.service"
+RAM_KEPT = ((SOFT_REBOOT, "an orderly soft reboot", "#6182"), (KEXEC, "an orderly kexec", "#6311"))
+KEXEC_LOADER = "kexec"
+KEXEC_LOADER_DIRS = ("usr/sbin", "usr/bin", "usr/local/sbin", "usr/local/bin")
+KEXEC_PACKAGES = (b"kexec-tools", b"kdump-tools")
+KEXEC_WHY = ("a kexec loader; with a kernel loaded, a kexec or a crash kernel runs the next kernel on memory the "
+             "firmware never wiped (remove it, #6311)")
+
+
+def ram_kept_violations(root):
+    """MOR-soft-reboot (#6182), MOR-kexec-class (#6311): for each RAM_KEPT unit, the first entry of its name in
+    the unit directories, in precedence order, is a mask (a link to exactly MASK, or a file of size 0:
+    systemd 257 reads either as masked), or there is none. Any other file or link of that name makes its
+    orderly transition runnable again, and one the check cannot read is refused."""
+    root = str(root)
+    dirs, out = unit_dirs(root)
+    for name, what, row in RAM_KEPT:
+        for d in dirs:
+            rel = d + "/" + name
+            if not tree_lstat(root, rel):
+                continue
+            try:
+                masked = Conf(root, rel).content() == b""
+            except OSError as e:
+                out.append("%s: unreadable (%s); the tree check never passes a unit it cannot read" % (rel, e.strerror or e))
+                break
+            if not masked:
+                out.append("%s: present; %s stops %s, whose stop clears MOR, while the kernel keeps its memory, "
+                           "so the holders after it run with MOR clear (remove it or mask it, %s)"
+                           % (rel, what, MOR_UNIT, row))
+            break
+    return out
+
+
+def kexec_loader_violations(root):
+    """MOR-kexec-class (#6311): a kexec loader wherever the box would run it from (whatever the entry is), or
+    a KEXEC_PACKAGES package dpkg has unpacked. A dpkg status the check cannot read is refused; none at all
+    (a test tree) passes here, and tree_package_violations refuses that on a built image."""
+    root = str(root)
+    out = ["%s/%s: %s" % (d, KEXEC_LOADER, KEXEC_WHY)
+           for d in KEXEC_LOADER_DIRS if tree_stat(root, d + "/" + KEXEC_LOADER) is not None]
+    try:
+        status = Conf(root, DPKG_STATUS).content() if tree_lstat(root, DPKG_STATUS) else b""
+    except OSError as e:
+        return out + ["%s: unreadable (%s); %s" % (DPKG_STATUS, e.strerror or e, KEXEC_WHY)]
+    for p in deb822_fields(status, (b"Package", b"Status")):
+        words = p.get(b"Status", b"").split()
+        if p.get(b"Package") in KEXEC_PACKAGES and not (len(words) == 3 and words[2] in (b"not-installed",
+                                                                                          b"config-files")):
+            out.append("%s: %s is installed; %s" % (DPKG_STATUS, p[b"Package"].decode(), KEXEC_WHY))
+    return out
+
+
 def bus_keep_violations(root, dirs):
     """#6037: each BUS_UNITS unit, its file (none for the transient agentos-kernel-reboot.service) and every
     drop-in systemd applies to it, lifts only BUS_DIR from the main side's mask: its InaccessiblePaths= is
@@ -5070,6 +5142,164 @@ def script_network_violations(with_network, net_dev):
     return out
 
 
+# IMG-mkosi-run-bound (#4690, D-276): the image's packages come only from the pinned, signature-checked
+# sources. mkosi v24.3 mounts its apt state at /var/lib/apt for this script, and apt writes an index into
+# lists/ only after its InRelease signature (Signed-By, the keyrings image/debian-archive-keyring.sh pins)
+# and hash checked. The pinned sources are two snapshot.debian.org timestamps: the trixie archive's,
+# mkosi.conf's Mirror= (read from mkosi's config JSON), and the run's one debian-security snapshot, which
+# image.yml's mkosi line hands in as AGENTOS_SECURITY_SNAPSHOT (image/security-snapshot.sh, #5021). An
+# index from any other date (#6148 L3 B2: a signed but older snapshot), mkosi's local /repository or a
+# live archive counts for nothing, so a package only it lists is refused.
+APT_LISTS = "/var/lib/apt/lists"
+SNAPSHOT_TS = re.compile(r"\d{8}T\d{6}Z")
+MIRROR_URL = re.compile(r"https://snapshot\.debian\.org/archive/debian/(\d{8}T\d{6}Z)/?")
+
+
+def pinned_index(mirror, security):
+    """The Packages index names of the trixie archive at snapshot MIRROR and debian-security at SECURITY
+    (each YYYYMMDDTHHMMSSZ), plain or compressed; group 1 is the compression suffix."""
+    return re.compile(r"snapshot\.debian\.org_archive_(?:debian_%s_dists_trixie(?:-updates)?"
+                      r"|debian-security_%s_dists_trixie-security)_main_binary-(?:amd64|all)_Packages(\.gz|\.xz|\.bz2)?"
+                      % (re.escape(mirror), re.escape(security)))
+
+
+def run_config():
+    """(mkosi's config JSON for this run, $MKOSI_CONFIG, as a dict; refusals)."""
+    try:
+        with open(os.environ.get("MKOSI_CONFIG", "/work/config.json")) as f:
+            conf = json.load(f)
+        if isinstance(conf, dict):
+            return conf, []
+        why = "not a JSON object"
+    except (OSError, ValueError) as e:
+        why = e
+    return {}, ["mkosi's config JSON: unreadable (%s); %s" % (why, PACKAGE_WHY)]
+
+
+def run_snapshots(conf):
+    """(mirror timestamp, security timestamp, refusals) of this mkosi run: Mirror= from CONF, mkosi's config
+    JSON (run_config), the security one from $AGENTOS_SECURITY_SNAPSHOT."""
+    out = []
+    m = MIRROR_URL.fullmatch(str(conf.get("Mirror")))
+    mirror = m.group(1) if m else None
+    if not mirror:
+        out.append("mkosi's Mirror= is not a snapshot.debian.org debian snapshot; %s" % PACKAGE_WHY)
+    security = os.environ.get("AGENTOS_SECURITY_SNAPSHOT", "")
+    if not SNAPSHOT_TS.fullmatch(security):
+        out.append("AGENTOS_SECURITY_SNAPSHOT is %r, not one debian-security snapshot timestamp (image.yml's mkosi "
+                   "line sets it); %s" % (security, PACKAGE_WHY))
+        security = None
+    return mirror, security, out
+
+
+DPKG_STATUS = "var/lib/dpkg/status"
+# A Debian package file anywhere in the tree: a build step could install it outside apt's checked run.
+PACKAGE_FILES = (".deb", ".udeb", ".ddeb")
+PACKAGE_FILE_WHY = ("a Debian package file; the image's packages come only from mkosi's signature-checked apt run "
+                    "(#4690)")
+PACKAGE_WHY = "the image's packages come only from the pinned, signature-checked snapshot sources (#4690)"
+
+
+def deb822_fields(data, keys):
+    """(dict of KEYS) for each paragraph of DATA, a deb822 file (dpkg's status, an apt Packages index),
+    with each value stripped; continuation lines are not kept."""
+    para = {}
+    for line in data.split(b"\n"):
+        if not line.strip():
+            if para:
+                yield para
+            para = {}
+        elif line[:1] not in (b" ", b"\t") and b":" in line:
+            k, v = line.split(b":", 1)
+            if k in keys:
+                para[k] = v.strip()
+    if para:
+        yield para
+
+
+def pinned_packages(lists, index):
+    """((package, version, architecture) set, index names read, other Packages names seen, refusals) from
+    directory LISTS, apt's lists/: the indexes whose name INDEX (pinned_index) matches."""
+    got, read, other, out = set(), [], [], []
+    try:
+        names = sorted(os.listdir(lists))
+    except OSError as e:
+        return got, read, other, ["%s: unreadable (%s); %s" % (lists, e.strerror, PACKAGE_WHY)]
+    for n in names:
+        m = index.fullmatch(n)
+        if not m:
+            if "Packages" in n:
+                other.append(n)
+            continue
+        path = os.path.join(lists, n)
+        try:
+            st = os.lstat(path)
+            if not stat.S_ISREG(st.st_mode):
+                out.append("%s: not a regular file; %s" % (path, PACKAGE_WHY))
+                continue
+            with open(path, "rb") as f:
+                data = f.read()
+            data = {".gz": gzip.decompress, ".xz": lzma.decompress, ".bz2": bz2.decompress}.get(m.group(1), bytes)(data)
+        except (OSError, EOFError, lzma.LZMAError) as e:
+            out.append("%s: unreadable (%s); %s" % (path, e.strerror if isinstance(e, OSError) else e, PACKAGE_WHY))
+            continue
+        read.append(n)
+        for p in deb822_fields(data, (b"Package", b"Version", b"Architecture")):
+            got.add((p.get(b"Package"), p.get(b"Version"), p.get(b"Architecture")))
+    return got, read, other, out
+
+
+def package_source_violations(status, lists, mirror, security, name=DPKG_STATUS):
+    """Every package dpkg's STATUS (bytes, the tree's file NAME, default DPKG_STATUS) has unpacked whose name,
+    version and architecture no Packages index in directory LISTS from snapshots MIRROR and SECURITY lists,
+    one line each."""
+    got, read, other, out = pinned_packages(lists, pinned_index(mirror, security))
+    if not read:
+        return out + ["%s holds no Packages index from the pinned snapshot sources (other indexes: %s); %s"
+                      % (lists, ", ".join(other) or "none", PACKAGE_WHY)]
+    n = 0
+    for p in deb822_fields(status, (b"Package", b"Version", b"Architecture", b"Status")):
+        words = p.get(b"Status", b"").split()
+        if len(words) == 3 and words[2] in (b"not-installed", b"config-files"):
+            continue
+        n += 1
+        key = (p.get(b"Package"), p.get(b"Version"), p.get(b"Architecture"))
+        if key not in got:
+            out.append("%s: %s %s (%s) is installed, but no pinned Packages index lists that version; %s"
+                       % (name, *(v.decode("utf-8", "replace") if v is not None else "(none)" for v in key),
+                          PACKAGE_WHY))
+    if not n:
+        out.append("%s: lists no installed package; %s" % (name, PACKAGE_WHY))
+    return out
+
+
+def tree_package_violations(root, mirror, security, lists=None, status=DPKG_STATUS):
+    """package_source_violations for the tree at ROOT, its dpkg status file STATUS read inside the tree
+    (Conf's rules), against LISTS (default APT_LISTS, read at the call)."""
+    lists = APT_LISTS if lists is None else lists
+    try:
+        data = Conf(root, status).content()
+    except OSError as e:
+        return ["%s: unreadable (%s); %s" % (status, e.strerror, PACKAGE_WHY)]
+    return package_source_violations(data, lists, mirror, security, status)
+
+
+def package_file_violations(root):
+    """Every Debian package file (PACKAGE_FILES) in the tree at ROOT, one line each."""
+    return ["%s: %s" % (rel, PACKAGE_FILE_WHY) for rel, st in tree_walk(root)
+            if stat.S_ISREG(st.st_mode) and rel.endswith(PACKAGE_FILES)]
+
+
+# The default initrd (#6149): mkosi v24.3 builds it in a sub-run of its own (build_default_initrd), whose config
+# JSON names it Image "default-initrd", with this run's Mirror=, --environment and apt lists. initrd/mkosi.conf
+# adds this script to that run's finalize scripts, after initrd/mkosi.finalize. mkosi-initrd sets
+# CleanPackageMetadata=yes, so var/lib/dpkg is gone by then: the initrd's mkosi.postinst (drop.py) copies dpkg's
+# status, after its purges, to INITRD_STATUS, and the package check reads that copy. The image's other checks
+# are this tree's, not the initrd's; initrd/mkosi.finalize holds the initrd's own.
+INITRD_IMAGE = "default-initrd"
+INITRD_STATUS = "usr/share/agentos/initrd.dpkg-status"
+
+
 def main():
     if sys.argv[1:2] == ["--tmpfiles-allowlist"] and len(sys.argv) == 3:
         sys.stdout.write(tmpfiles_allowlist_text(sys.argv[2]))
@@ -5083,16 +5313,30 @@ def main():
     root = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("BUILDROOT")
     if not root:
         sys.exit("usage: mkosi.finalize ROOT (or BUILDROOT=...)")
-    v = violations(root)
-    if len(sys.argv) == 1:  # run by mkosi, in its script sandbox
-        v += script_network_violations(os.environ.get("WITH_NETWORK"), script_net_dev())
+    if len(sys.argv) > 1:
+        return report(violations(root))
+    # Run by mkosi, in its script sandbox: the image's run, or the default initrd's.
+    conf, bad = run_config()
+    initrd = conf.get("Image") == INITRD_IMAGE
+    v = package_file_violations(root) if initrd else violations(root)
+    v += script_network_violations(os.environ.get("WITH_NETWORK"), script_net_dev())
+    if not bad:
+        mirror, security, bad = run_snapshots(conf)
+    v += bad or tree_package_violations(root, mirror, security, status=INITRD_STATUS if initrd else DPKG_STATUS)
+    report(v, initrd)
+
+
+def report(v, initrd=False):
+    """Print each line of V; exit non-zero if there is any. INITRD: V is the default initrd's."""
+    label = "image check: initrd" if initrd else "image check"
     for line in v:
-        print("image check: " + line)
+        print("%s: %s" % (label, line))
+    if v and initrd:
+        sys.exit("%s: %d problem(s) in the default initrd's tree, each named above" % (label, len(v)))
     if v:
-        sys.exit("image check: %d problem(s) in the image tree, each named above; a tmpfiles.d line missing from %s "
-                 "that the guarded-path check passes ends in the entry to review and add there"
-                 % (len(v), TMPFILES_ALLOW_REPO))
-    print("image check: clean")
+        sys.exit("%s: %d problem(s) in the image tree, each named above; a tmpfiles.d line missing from %s that the "
+                 "guarded-path check passes ends in the entry to review and add there" % (label, len(v), TMPFILES_ALLOW_REPO))
+    print("%s: clean" % label)
 
 
 if __name__ == "__main__":

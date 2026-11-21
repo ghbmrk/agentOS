@@ -15,5 +15,5 @@ Also load the agentos-budget skill.
 - **Stop on lack of progress, not on spend:** the brief's usage figure is a checkpoint, not a ceiling; past it, continue while tests move toward green (note it in the PR). Stop, write a diagnosis in the PR and label its issue `state:escalated` when one test still fails after 2 fix attempts or the diff grows while the pass count is flat.
 - BOARD.md is generated from `work-item` issues (tools/board.py): change a row by editing its issue, never the file. Don't start a row labelled `frozen` (D-098). Class every finding you raise or receive as **blocker** (fix in this PR) or **release** (new `work-item` issue labelled `class:release`, required before the row is done; nothing is deferred), and list them on the PR's Findings line (OPERATING §2, D-250).
 - A **release** finding names the acceptance test or invariant it serves and one failure path. Tooling messages, and findings on a follow-up of a follow-up, are release items unless they are a false pass or exploit path (OPERATING §2, D-086).
-- Record what the package rests on in its `ASSUMPTIONS.md` (OPERATING §5).
+- Record what the package rests on in its `ASSUMPTIONS.md` (OPERATING §5). Before merging main, run `python3 tools/record_merge.py --install` once per clone.
 - Prefer reusing mature components. A new component needs a sentence in the PR on why reuse fails.

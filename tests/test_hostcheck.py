@@ -2296,7 +2296,11 @@ class ImageTest(unittest.TestCase):
         # guest). agentos-mor.service stays active and MOR stays set throughout, so the holders that come back
         # are covered; its clear runs only at the shutdown, after the staging unit's stop has emptied
         # /run/agentos-setup (the clear refuses while that holds a file), and the next boot's responder prints
-        # its last line from the journal.
+        # its last line from the journal. MOR-soft-reboot (#6182): last, the probe runs "systemctl soft-reboot" and
+        # isolates soft-reboot.target; the image has no systemd-soft-reboot.service, so each fails before any unit
+        # stops (the isolate bypasses logind, so an inhibitor cannot explain its failure), and MOR stays set.
+        # MOR-kexec-class (#6311): then "systemctl kexec" (no loader, so no kernel to load) and an isolate of
+        # kexec.target (no systemd-kexec.service); each fails the same way.
         d = self.dir / "isolate-in"
         d.mkdir(exist_ok=True)
         (d / "isolate.sh").write_text(
@@ -2315,6 +2319,10 @@ class ImageTest(unittest.TestCase):
             "\ttimeout 300 systemctl isolate \"$t.target\"; r=$?; say \"$t rc=$r\"\n"
             "\ttimeout 300 systemctl default; r=$?; say \"default rc=$r\"\n"
             "done\n"
+            "timeout 300 systemctl soft-reboot; r=$?; say \"soft-reboot rc=$r\"\n"
+            "timeout 300 systemctl isolate soft-reboot.target; r=$?; say \"soft-isolate rc=$r\"\n"
+            "timeout 300 systemctl kexec; r=$?; say \"kexec rc=$r\"\n"
+            "timeout 300 systemctl isolate kexec.target; r=$?; say \"kexec-isolate rc=$r\"\n"
             "echo HOSTCHECK-ISOLATE done\n"
             "exec systemctl --no-block poweroff\n")
         (d / "probe.service").write_text(
@@ -2338,19 +2346,25 @@ class ImageTest(unittest.TestCase):
         seen = re.findall(rb"[^\r\n]*(?:HOSTCHECK|agentos-fallback|emergency|rescue|Reached target|sulogin)[^\r\n]*", console)
         print(*[ln.decode(errors="replace")[:240] for ln in seen[-60:]], sep="\n", file=sys.stderr)
         steps = re.findall(rb"HOSTCHECK-ISOLATE (.*?) mor (\S+) cert (\S+) pair (\S+) (.*?) *\r?\n", console)
-        self.assertEqual([x[0] for x in steps], [b"before", b"emergency rc=0", b"default rc=0",
-                                                 b"rescue rc=0", b"default rc=0"], steps)
+        self.assertEqual([x[0] for x in steps[:5]], [b"before", b"emergency rc=0", b"default rc=0",
+                                                     b"rescue rc=0", b"default rc=0"], steps)
+        # MOR-soft-reboot (#6182): the image has no systemd-soft-reboot.service, so an orderly soft reboot and an
+        # isolate of soft-reboot.target fail before any unit stops; the box stays in this userspace, so the probe
+        # prints both steps, and MOR and every unit below are as before.
+        self.assertEqual([x[0].split(b" rc=")[0] for x in steps[5:]], [b"soft-reboot", b"soft-isolate", b"kexec",
+                                                                  b"kexec-isolate"], steps)
+        self.assertNotIn(b"rc=0", b" ".join(x[0] for x in steps[5:]), steps)
         # MOR is set before the isolates and stays set through every step: the clear's unit is never stopped.
         self.assertNotEqual(steps[0][1], b"0", steps)
         self.assertEqual({x[1] for x in steps}, {steps[0][1]}, steps)
-        self.assertEqual([x[4].split()[:2] for x in steps], [[b"agentos-mor.service", b"active"]] * 5, steps)
+        self.assertEqual([x[4].split()[:2] for x in steps], [[b"agentos-mor.service", b"active"]] * 9, steps)
         # Neither isolate stops the staging or the wipe (#6178), so the authority staged before them, its
         # certificate and its sealed pair, is the one after each step.
         self.assertEqual([x[4].split()[2:] for x in steps], [[b"agentos-keeper-pageca.service", b"active",
-                                                             b"agentos-keeper-wipe.service", b"active"]] * 5, steps)
+                                                             b"agentos-keeper-wipe.service", b"active"]] * 9, steps)
         self.assertRegex(steps[0][2], rb"^[0-9a-f]{64}$")
         self.assertEqual({x[2] for x in steps}, {steps[0][2]}, steps)
-        self.assertEqual([x[3] for x in steps[1:]], [b"same"] * 4, steps)
+        self.assertEqual([x[3] for x in steps[1:]], [b"same"] * 8, steps)
         after = (self.dir / "isolate" / "console-after.log").read_bytes()
         last = re.findall(rb"HOSTCHECK-DIAG start journal -1: (agentos-mor: [^\r\n]*)", after)
         self.assertEqual(last[-1:], [b"agentos-mor: mor=cleared"], last)

@@ -790,10 +790,14 @@ type Conn struct {
 
 // Call makes one call; out, when not nil, receives its result.
 func (c Conn) Call(op string, args, out any) error {
-	b, err := json.Marshal(kernelCall{op, mustRaw(args)})
-	if err != nil {
-		return err
+	if args == nil {
+		args = none{}
 	}
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return err // refused, never sent as null args (#6268)
+	}
+	b, _ := json.Marshal(kernelCall{op, raw}) // a string and valid JSON cannot fail (TestCallsAlwaysMarshal)
 	if len(b)+1 > maxCall {
 		// The server would read only part of it, and the call would
 		// read as lost though it was never taken (#2742 item 9).
@@ -828,14 +832,6 @@ func (c Conn) Call(op string, args, out any) error {
 		return json.Unmarshal(a.Result, out)
 	}
 	return nil
-}
-
-func mustRaw(v any) json.RawMessage {
-	if v == nil {
-		v = none{}
-	}
-	b, _ := json.Marshal(v)
-	return b
 }
 
 // asRefusal is err as the *key.Refusal it carries, nil when it carries none

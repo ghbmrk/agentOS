@@ -314,7 +314,7 @@ class WiringTest(unittest.TestCase):
         export = b.index('export GUEST_BASE="$OUT/guest-base"')
         guests = [b.index('sh "$REPO/guest/%s/build-rootfs.sh"' % g) for g in GUESTS]
         drop = b.index('rm -rf --one-file-system "$GUEST_BASE"')
-        mkosi = b.index('$MKOSI -C "$HERE/mkosi"')
+        mkosi = b.index('echo "staged $STAGE')  # build.sh only stages; mkosi runs after it (#4690)
         self.assertLess(base, export)
         self.assertLess(export, min(guests))
         self.assertLess(max(guests), drop)
