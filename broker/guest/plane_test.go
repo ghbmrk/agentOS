@@ -986,6 +986,43 @@ func TestDispatchMutPlanFaultsAreLogged(t *testing.T) {
 	}
 }
 
+// Shutdown waits for requests in flight only up to shutdownWait, however
+// many are held: two plans hung in their key lookup do not hold it.
+func TestShutdownGivesUpOnHungRequests(t *testing.T) {
+	entered, release := make(chan struct{}, 2), make(chan struct{})
+	r := newRig(t, func(c *Config) {
+		keys := c.Keys
+		c.Keys = func(m string) (key.Key, ed25519.PrivateKey, bool) {
+			entered <- struct{}{}
+			<-release
+			return keys(m)
+		}
+	})
+	c := r.client("m1")
+	for _, id := range []string{"r1", "r2"} {
+		b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+			"params": map[string]any{"name": "plan", "arguments": send(id)}})
+		go func() {
+			if resp, err := c.Post("http://broker/mcp", "application/json", strings.NewReader(string(b))); err == nil {
+				resp.Body.Close()
+			}
+		}()
+	}
+	<-entered
+	<-entered
+	defer close(release)
+	done := make(chan struct{})
+	go func() {
+		r.p.Shutdown()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(shutdownWait + 10*time.Second):
+		t.Fatal("Shutdown still waits for requests held past shutdownWait")
+	}
+}
+
 func TestDispatchMutLineageIsCachedOnlyWhenKnown(t *testing.T) {
 	// A lineage the manager could not give is asked again next time; one
 	// it gave is never asked again, and lineageOpen and goal read only that

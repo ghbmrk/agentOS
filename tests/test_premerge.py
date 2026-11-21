@@ -497,6 +497,33 @@ class PremergeTest(unittest.TestCase):
         self.commit("drop the stale row")
         self.assertEqual(self.check(reviewed), [])
 
+    def test_a_union_merge_under_a_criss_cross_merge_base_is_changed(self):
+        # #6316 (the #6315 Security finding's ASSUMPTIONS.md twin): with two merge bases `_stale` read nothing, so a
+        # union that brought back a row the PR deleted read `same`, as the head or renumbered.
+        self.write(".gitattributes", "ASSUMPTIONS.md merge=union\n")
+        self.write("ASSUMPTIONS.md", self.UNION + "| L-1 | edge old |\n")
+        self.commit("assumptions")
+        for side in ("x", "y"):
+            git(self.r, "checkout", "-q", "-b", side, "main")
+            self.write(side + ".txt", side + "\n")
+            self.commit(side)
+        git(self.r, "checkout", "-q", "-b", "m1", "x"), git(self.r, "merge", "-q", "--no-edit", "y")
+        self.write("ASSUMPTIONS.md", self.UNION + "| B-1 | bak |\n| L-1 | edge old |\n")
+        main = self.commit("main adds a row above L-1")
+        git(self.r, "checkout", "-q", "-b", "pr", "y"), git(self.r, "merge", "-q", "--no-edit", "x")
+        self.write("ASSUMPTIONS.md", self.UNION)
+        reviewed = self.commit("pr deletes L-1")
+        self.assertEqual(len(git(self.r, "merge-base", "--all", reviewed, main).split()), 2)
+        git(self.r, "merge", "-q", "--no-edit", main)
+        self.assertIn("| L-1 | edge old |", self.read("ASSUMPTIONS.md"), "the union driver was meant to bring L-1 back")
+        self.assertEqual(premerge.compare(self.r, reviewed, "HEAD", main), ["ASSUMPTIONS.md"])
+        self.write("ASSUMPTIONS.md", self.read("ASSUMPTIONS.md").replace("| L-1 |", "| L-2 |"))
+        self.commit("renumber the brought-back row")
+        self.assertEqual(premerge.compare(self.r, reviewed, "HEAD", main), ["ASSUMPTIONS.md"])
+        self.write("ASSUMPTIONS.md", self.UNION + "| B-1 | bak |\n")
+        self.commit("drop the stale row")
+        self.assertEqual(premerge.compare(self.r, reviewed, "HEAD", main), ["ASSUMPTIONS.md"], "unknown stays changed")
+
     def test_a_union_merge_of_two_edits_to_one_row_is_changed_however_resolved(self):
         # Both sides edited L-1: no stale row, a real conflict, so every resolution owes a delta review.
         reviewed = self.union_merge("| L-1 | main edit |\n", "| L-1 | pr edit |\n")

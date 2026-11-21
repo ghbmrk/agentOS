@@ -1,13 +1,16 @@
 # The files of the built image (main tree and initrds) that may import or reach glibc's regex engine
 # (DEBIAN-CVE-2026-100290, #5697): one glob per line, each a file the image -100290 record in
 # assurance/vulncheck.json names. image/import_sweep.py --summary fails on a file that matches none,
-# and on a glob that matches no file. Only command-line tools, the guests' shells and libraries whose
-# regex use the record explains belong here; a long-lived or network-facing process never does.
-# "via GLOB" (#6297) accepts every file that reaches the functions only through libraries GLOB names,
-# each with an entry of its own, and imports none itself: such a file can call them only through the
-# library's code, so the library's review (its comment here) covers it. A file importing a function
-# itself always needs its own entry, and a via entry that accepts no file fails as a glob that matches
-# none does.
+# and on a glob that matches no file. A file naming a function counts as importing it: by its dynamic
+# imports, by a dlsym or dlvsym lookup of a name it holds, or as a static copy of glibc's code (#6298).
+# Only files whose own regex use the record explains are named here: command-line tools, the guests'
+# shells and libraries. "via GLOB" (#6297) accepts every file that reaches the functions only through
+# libraries GLOB names, each with an entry of its own, and imports none itself: such a file can call them
+# only through the library's code. A via entry accepts each new dependent of its library without an entry
+# of its own, a long-lived or network-facing process among them, so the library's own entry, and its
+# comment here, is where the review sits: it has to cover every input the library's callers can pass. A
+# file importing a function itself always needs its own entry, and a via entry that accepts no file fails
+# as a glob that matches none does.
 
 # Shell and text tools, run locally.
 /usr/bin/bash
@@ -103,6 +106,19 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 /usr/lib/x86_64-linux-gnu/security/pam_access.so
 /usr/lib/x86_64-linux-gnu/security/pam_limits.so
 /usr/lib/x86_64-linux-gnu/security/pam_namespace.so
+
+# ldconfig, a static copy of glibc (#6298), in the main tree and the initrd: its one glob() expands the
+# include patterns of root-owned /etc/ld.so.conf and ld.so.conf.d (elf/ldconfig.c), run by root at
+# package install and boot. It is also the sweep's control that the static scan still reads glibc's marks.
+/usr/sbin/ldconfig
+
+# The openclaw guest's node imports dlsym and holds "glob" (#6298): the string is the name of its
+# JavaScript fs.glob API, implemented in JavaScript over readdir (lib/internal/fs/glob.js), and its
+# dlsym calls (src/node_binding.cc, deps/uv/src/unix/dl.c, deps/v8 platform-posix.cc; v24.22.3) look up
+# only fixed names: an addon's node_register_module_v137, napi_register_module_v1 and
+# node_api_module_get_api_version_v1, gnu_get_libc_version, memfd_create and pthread_setname_np. It runs
+# inside the guest sandbox, on the guest's own glibc (the image/guest -126765 record).
+/usr/lib/agentos/images/openclaw/usr/local/bin/node
 
 [cipher]
 # The files of the built image (main tree and initrds) whose bytes name an OpenSSL by-name cipher

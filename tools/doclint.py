@@ -220,7 +220,9 @@ def assumption_ids(root, files):
                 in_table = True
             elif in_table and not set(cells[0]) <= set("-: "):
                 if cells[0] in seen:
-                    yield f"{name}:{n}: duplicate ID {cells[0]} (first on line {seen[cells[0]]})"
+                    # #6341 Lens: every role merges main, so the error names the fix for the union's duplicate.
+                    hint = "" if name == "DECISIONS.md" else "; a main merge keeps an edited row twice unless the clone ran `python3 tools/assumptions_merge.py --install`"
+                    yield f"{name}:{n}: duplicate ID {cells[0]} (first on line {seen[cells[0]]}){hint}"
                 else:
                     seen[cells[0]] = n
 
