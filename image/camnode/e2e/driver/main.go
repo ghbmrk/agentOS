@@ -370,9 +370,9 @@ func testAlteredRoot(e *e2e) error {
 	if strings.Contains(log, "verified, mounted read-only") || strings.Contains(log, "systemd[1]") {
 		return errors.New("the altered root started")
 	}
-	// dm-verity's own report of the flipped block, not any other early failure.
-	if !regexp.MustCompile(`device-mapper: verity: [^\n]*data block \d+ is corrupted`).MatchString(log) {
-		return errors.New("the board restarted, but not on a verity failure")
+	// dm-verity's own restart, not any other early failure.
+	if cmd != "dm-verity device corrupted" {
+		return fmt.Errorf("the board restarted (%q), but not on a verity failure", cmd)
 	}
 	logf("altered root: restarted (%q) before systemd", cmd)
 	e.vm = nil
