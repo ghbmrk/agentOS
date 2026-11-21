@@ -3349,7 +3349,7 @@ class Plan(unittest.TestCase):
                 for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
                                     ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: pkgs),
                                     ("diff_targets", lambda added, pkg: {f"broker/{pkg}/x.go": {1}}),
-                                    ("deletion_sites", lambda *a: ([], None)), ("suite_seconds", lambda *a: (1.0, None)),
+                                    ("deletion_sites", lambda *a: ([], None)), ("lint_budget", lambda pkg, sites: (0.0, [0.0] * len(sites))), ("suite_seconds", lambda *a: (1.0, None)),
                                     ("shard_count", lambda *a: 100)):
                     st.enter_context(mock.patch.object(mutgate, name, value))
                 err = st.enter_context(contextlib.redirect_stderr(io.StringIO()))
@@ -3366,7 +3366,7 @@ class Plan(unittest.TestCase):
             for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
                                 ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: sorted(pkg_targets)),
                                 ("diff_targets", lambda added, pkg: pkg_targets[pkg][0]),
-                                ("deletion_sites", lambda pkg, t, lister: (pkg_targets[pkg][1], None)),
+                                ("deletion_sites", lambda pkg, t, lister: (pkg_targets[pkg][1], None)), ("lint_budget", lambda pkg, sites: (0.0, [0.0] * len(sites))),
                                 ("suite_seconds", lambda pkg, tmp: suite), ("site_costs", lambda *a: costs)):
                 st.enter_context(mock.patch.object(mutgate, name, value))
             err = st.enter_context(contextlib.redirect_stderr(io.StringIO()))
@@ -3503,7 +3503,7 @@ class Plan(unittest.TestCase):
                                 ("tests_changed", lambda tests, pkg: pkg == "kernel/sim"),
                                 ("record_for", lambda *a: ({"rec": 1}, 48.0, None)),
                                 ("targets_for", lambda pkg, added, tests, data, bases: (sim, None)),
-                                ("deletion_sites", lambda pkg, t, lister: ([{}] * 534, None)),
+                                ("deletion_sites", lambda pkg, t, lister: ([{}] * 534, None)), ("lint_budget", lambda pkg, sites: (0.0, [0.0] * len(sites))),
                                 ("suite_seconds", lambda pkg, tmp: timed.append(pkg) or (1.0, None)),
                                 ("site_costs", lambda *a: (None, 0.0))):
                 st.enter_context(mock.patch.object(mutgate, name, value))
@@ -5364,21 +5364,50 @@ class LintHeldFollowUp(unittest.TestCase):
     def test_the_plan_charges_lint_time_to_the_shards_of_a_package_the_lints_read(self):
         # REQ: MUT-lint-held-fu
         from unittest import mock
-        with mock.patch.multiple(mutgate, LINT_SETUP_SECONDS=300, LINT_RUN_SECONDS=10):
-            self.assertEqual(mutgate.lint_budget("localui", [b"package localui\n"] * 3), (0.0, [0, 0, 0]))
-            # A clerk file: both lints may run, and one refusal's confirming run.
-            self.assertEqual(mutgate.lint_budget("clerk/run", [b"package run\n", b"package run\n"]), (300, [30, 30]))
-            self.assertEqual(mutgate.lint_budget("localui", [b"package localui\n",
-                                                             b'import "github.com/ghbmrk/agentos/broker/clerk"\n']),
-                             (300, [0, 20]))
-            lines = {"a.go": list(range(10))}
-            # 100 sites of 10 s each fit one shard's 1800 s; 30 s of lints each and 300 s of setup take three.
-            self.assertEqual(mutgate.shard_count(lines, [0] * 100, 1.0, [10.0] * 100, 0.0), 1)
-            self.assertEqual(mutgate.shard_count(lines, [0] * 100, 1.0, [10.0] * 100, 0.0,
-                                                 mutgate.lint_budget("clerk/run", [b""] * 100)), 3)
-            self.assertEqual(mutgate.shard_count(lines, [0] * 100, 1.0, None, 0.0,
-                                                 mutgate.lint_budget("clerk/run", [b""] * 100)), 3)
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            for path, text in (("localui/a.go", "package localui\n"), ("clerk/run/a.go", "package run\n"),
+                               ("localui/b.go", 'package localui\n\nimport "github.com/ghbmrk/agentos/broker/clerk"\n')):
+                (root / path).parent.mkdir(parents=True, exist_ok=True)
+                (root / path).write_text(text)
+            with mock.patch.object(mutgate, "BROKER", root), mock.patch.multiple(mutgate, LINT_SETUP_SECONDS=300, LINT_RUN_SECONDS=10):
+                self.assertEqual(mutgate.lint_budget("localui", [{"file": "a.go"}] * 3), (0.0, [0, 0, 0]))
+                # A clerk file: both lints may run, and one refusal's confirming run.
+                self.assertEqual(mutgate.lint_budget("clerk/run", [{"file": "a.go"}] * 2), (300, [30, 30]))
+                self.assertEqual(mutgate.lint_budget("localui", [{"file": "a.go"}, {"file": "b.go"}]), (300, [0, 20]))
+                many = mutgate.lint_budget("clerk/run", [{"file": "a.go"}] * 100)
+        lines = {"a.go": list(range(10))}
+        # 100 sites of 10 s each fit one shard's 1800 s; 30 s of lints each and 300 s of setup take three.
+        self.assertEqual(mutgate.shard_count(lines, [0] * 100, 1.0, [10.0] * 100, 0.0), 1)
+        self.assertEqual(mutgate.shard_count(lines, [0] * 100, 1.0, [10.0] * 100, 0.0, many), 3)
+        self.assertEqual(mutgate.shard_count(lines, [0] * 100, 1.0, None, 0.0, many), 3)
+        # cmd_plan charges lint_budget's figure for the package's sites.
+        seen = []
 
+        def budget(pkg, sites):
+            seen.append((pkg, len(sites)))
+            return many
+        code, out, err = self.plan_with(budget, {"clerk/run": ({"broker/clerk/run/a.go": set(range(1, 11))}, [{}] * 100)})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(seen, [("clerk/run", 100)])
+        self.assertIn("clerk/run: 10 target lines, 100 deletion sites, a 1 s suite, 3 shard(s)", err)
+
+    def plan_with(self, budget, pkg_targets):
+        """Plan.plan's (code, matrix, stderr) with lint_budget as given and site_costs at 10 s a site."""
+        from unittest import mock
+        import contextlib, io, types
+        with contextlib.ExitStack() as st:
+            for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
+                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: sorted(pkg_targets)),
+                                ("diff_targets", lambda added, pkg: pkg_targets[pkg][0]),
+                                ("deletion_sites", lambda pkg, t, lister: (pkg_targets[pkg][1], None)),
+                                ("lint_budget", budget), ("suite_seconds", lambda pkg, tmp: (1.0, None)),
+                                ("site_costs", lambda pkg, sites, *a: ([10.0] * len(sites), 0.0))):
+                st.enter_context(mock.patch.object(mutgate, name, value))
+            err = st.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            out = st.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            code = mutgate.cmd_plan(types.SimpleNamespace(git="HEAD~1", targets_out=None))
+        return code, out.getvalue(), err.getvalue()
 
 if __name__ == "__main__":
     unittest.main()

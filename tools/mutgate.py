@@ -2769,10 +2769,11 @@ def lints_for(pkg, text):
             if any(pkg == d or pkg.startswith(d + "/") for d in lint[2][0]) or (lint[2][1] is not None and lint[2][1] in text)]
 
 
-def lint_budget(pkg, texts):
-    """(setup seconds, [seconds for each file text]) the lints spend on deletions in these files of
-    broker/<pkg>/: what `plan` charges a shard whose sites may all live and `delete` allows its LIVED ones."""
-    runs = [len(n) + 1 if (n := lints_for(pkg, t)) else 0 for t in texts]
+def lint_budget(pkg, sites):
+    """(setup seconds, [seconds for each site]) the lints spend on deletions at these sites of broker/<pkg>/
+    (each {"file": name, ...}): what `plan` charges a shard whose sites may all live and `delete` allows its LIVED ones."""
+    texts = {f: (BROKER / pkg / f).read_bytes() for f in {s["file"] for s in sites}}
+    runs = [len(n) + 1 if (n := lints_for(pkg, texts[s["file"]])) else 0 for s in sites]
     return (LINT_SETUP_SECONDS if any(runs) else 0.0), [LINT_RUN_SECONDS * r for r in runs]
 
 
@@ -2783,7 +2784,7 @@ def lint_kills(pkg, lived, tmp, mem=None):
     lived = [(i, f, t, ls) for i, f, t in lived if (ls := lints_for(pkg, (BROKER / pkg / f).read_bytes()))]
     if not lived:
         return {}, None
-    setup, each = lint_budget(pkg, [(BROKER / pkg / f).read_bytes() for _, f, _, _ in lived])
+    setup, each = lint_budget(pkg, [{"file": f} for _, f, _, _ in lived])
     print(f"mutgate: broker/{pkg}/: {len(lived)} LIVED deletion(s) go to the lints, within {setup:.0f} s of lint setup "
           f"and {sum(each):.0f} s of lint runs", file=sys.stderr)
     began, deadline = time.monotonic(), time.monotonic() + setup
@@ -3258,8 +3259,7 @@ def cmd_plan(args):
             # `delete` runs each site with the tests that cover it (#6172), so its cost is theirs.
             costs, overhead = site_costs(pkg, sites, suite, tmp) if sites else (None, 0.0)
             # Any site may live and go to the lints that read its file, each shard copying broker/ (#6366).
-            lint = lint_budget(pkg, [(BROKER / pkg / s["file"]).read_bytes() for s in sites])
-            of = shard_count(targets, sites, suite, costs, overhead, lint)
+            of = shard_count(targets, sites, suite, costs, overhead, lint_budget(pkg, sites))
             print(f"mutgate: {pkg}: {sum(map(len, targets.values()))} target lines, {len(sites)} deletion "
                   f"sites, a {suite:.0f} s suite, {of} shard(s)", file=sys.stderr)
             counts.append((pkg, of))
