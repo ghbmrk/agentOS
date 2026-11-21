@@ -36,7 +36,7 @@ type board struct {
 type vm struct {
 	cmd     *exec.Cmd
 	console string // the kernel's serial console (ttyAMA0)
-	journal string // the journal's console (hvc0), kept off the kernel's (see stopped)
+	journal string // the journal's console (hvc0), kept off the kernel's
 	part    int
 	trial   bool
 	done    chan error
@@ -122,13 +122,21 @@ func autoboot(p []byte) (def, try int, err error) {
 	return def, try, nil
 }
 
+// qemuArgs is the board. It has one CPU: the harness learns each restart, and whether it asked
+// for tryboot, from the kernel's "reboot: Restarting system" line (stopped), and with two CPUs
+// Linux can lose that line. kernel_restart prints it after syscore_shutdown has stopped the
+// printer threads, so the restarting CPU prints it itself unless another CPU owns the console at
+// that moment; that CPU is then left to print it, and machine_restart stops that CPU first. In CI
+// the other CPU was printing the I/O error that udev's probe of the slot just written gets once
+// device_shutdown has broken virtio-blk (#6407). With one CPU nothing else owns the console when
+// the restarting CPU prints.
 func (b *board) qemuArgs(button bool) []string {
 	flag := "0"
 	if button {
 		flag = "1"
 	}
 	return []string{
-		"-machine", "virt", "-cpu", "cortex-a72", "-smp", "2", "-m", "1024",
+		"-machine", "virt", "-cpu", "cortex-a72", "-smp", "1", "-m", "1024",
 		"-nodefaults", "-display", "none", "-no-reboot",
 		"-drive", "if=none,id=disk,format=raw,file=" + b.disk,
 		"-device", "virtio-blk-pci,drive=disk,addr=0x4",
@@ -281,9 +289,7 @@ func (v *vm) stopped(b *board, timeout time.Duration) (restart string, err error
 		v.cut()
 		return "", fmt.Errorf("board did not restart within %v", timeout)
 	}
-	// The kernel's console carries kernel messages only: with the journal on it too, a journal
-	// write holding the console when the node calls reboot could leave the restart line unprinted
-	// when the other CPU is stopped (seen in CI).
+	// The restart line is always on the kernel's console: the board has one CPU (qemuArgs).
 	m := restartRe.FindStringSubmatch(v.kernel())
 	if m == nil {
 		return "", fmt.Errorf("board stopped without restarting (qemu: %v)", v.cmd.ProcessState)
