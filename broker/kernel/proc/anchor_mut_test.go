@@ -111,7 +111,8 @@ func TestCounterAnchorRefusesHeadsThatDoNotHold(t *testing.T) {
 	}
 }
 
-// A counter at its limit takes no further write, so the open refuses.
+// A counter at its limit takes no further write, so the open refuses, and
+// a Put that reaches it breaks the anchor.
 func TestCounterAnchorAtItsLimit(t *testing.T) {
 	dir, c, priv := ownDir(t), &fakeCounter{n: ^uint64(0)}, headKey(t)
 	if err := InitCounterAnchor(dir, noLog(t), c, priv); err != nil {
@@ -119,5 +120,19 @@ func TestCounterAnchorAtItsLimit(t *testing.T) {
 	}
 	if _, err := OpenCounterAnchor(dir, c, priv); err == nil || !strings.Contains(err.Error(), "limit") {
 		t.Fatalf("an open at the counter's limit: %v", err)
+	}
+	dir, c = ownDir(t), &fakeCounter{n: ^uint64(0) - 2}
+	if err := InitCounterAnchor(dir, noLog(t), c, priv); err != nil {
+		t.Fatal(err)
+	}
+	a, err := OpenCounterAnchor(dir, c, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Put(head(priv, 1)); err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("a Put at the counter's limit: %v", err)
+	}
+	if err := a.Put(head(priv, 1)); !errors.Is(err, ErrAnchorBroken) {
+		t.Fatalf("a Put after the limit: %v, want ErrAnchorBroken", err)
 	}
 }
