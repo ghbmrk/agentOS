@@ -250,6 +250,47 @@ class PremergeTest(unittest.TestCase):
         self.commit("resolved")
         self.assertEqual(self.check(reviewed), ["x_allow.txt"])
 
+    def test_an_allowlist_line_both_sides_added_may_be_kept_once(self):
+        # #6375: tools/record_merge.py keeps a line both sides appended once; one copy or two reads same, a third
+        # copy or a dropped line reads changed.
+        for text, want in (("# h\na\ns\nm\n", []), ("# h\na\ns\nm\ns\n", []), ("# h\na\ns\ns\ns\nm\n", ["x_allow.txt"]),
+                           ("# h\na\nm\n", ["x_allow.txt"]), ("# h\na\ns\n", ["x_allow.txt"])):
+            with self.subTest(text=text):
+                self.setUp()
+                git(self.r, "checkout", "-q", "main")
+                self.write("x_allow.txt", "# h\na\n")
+                self.commit("allow")
+                git(self.r, "checkout", "-q", "-b", "pr")
+                self.write("x_allow.txt", "# h\na\ns\n")
+                reviewed = self.commit("pr")
+                git(self.r, "checkout", "-q", "main")
+                self.write("x_allow.txt", "# h\na\ns\nm\n")
+                self.commit("main")
+                git(self.r, "checkout", "-q", "pr")
+                subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "main"],
+                               cwd=self.r, capture_output=True)
+                self.write("x_allow.txt", text)
+                self.commit("resolved")
+                self.assertEqual(self.check(reviewed), want)
+
+    def test_a_sectioned_allowlist_is_no_order_free_list(self):
+        # #6418 Security: in a file with sections, a line kept in another section means something else.
+        git(self.r, "checkout", "-q", "main")
+        self.write("x_allow.txt", "[a]\nx\n[b]\ny\n")
+        self.commit("allow")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("x_allow.txt", "[a]\nx\np\n[b]\ny\n")
+        reviewed = self.commit("pr")
+        git(self.r, "checkout", "-q", "main")
+        self.write("x_allow.txt", "[a]\nx\nm\n[b]\ny\n")
+        self.commit("main")
+        git(self.r, "checkout", "-q", "pr")
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "main"],
+                       cwd=self.r, capture_output=True)
+        self.write("x_allow.txt", "[a]\nx\np\n[b]\ny\nm\n")
+        self.commit("resolved")
+        self.assertEqual(self.check(reviewed), ["x_allow.txt"])
+
     def test_a_list_not_named_allow_keeps_line_order(self):
         reviewed = self.pr()
         self.write("b.txt", "c\nb\n")
@@ -870,6 +911,22 @@ class PremergeTest(unittest.TestCase):
                   "tools/mutgate.pyc", "tools/x/mutgate.py", "tests/test_mutgate.py",
                   "tools/claims.pyc", "tools/x/claims.py", "tests/test_claims.py"):
             self.assertEqual(premerge.mark_paths([f]), [], f)
+
+    def test_a_module_a_gate_tool_imports_is_a_gate_file_with_its_tests(self):
+        # #6418 Security: premerge decides `same` with tools/record_merge.py, which no hand list named.
+        for f in ("tools/record_merge.py", "tests/test_record_merge.py"):
+            self.assertEqual(premerge.mark_paths([f]), [f], f)
+        for f in ("tools/record_merge.pyc", "tools/x/record_merge.py", "tools/record_merge.py\n", "tools/doclint.py"):
+            self.assertEqual(premerge.mark_paths([f]), [], repr(f))
+        with tempfile.TemporaryDirectory() as d:
+            for name, text in {"g.py": "import a\nfrom b import x\nP = 'c.py'\n", "a.py": "import d, os\n", "b.py": "",
+                               "c.py": "", "d.py": "", "e.py": "", "h.py": "import g\n"}.items():
+                pathlib.Path(d, name).write_text(text)
+            self.assertEqual(premerge.gate_modules(pathlib.Path(d), ("g",)), {"g", "a", "b", "c", "d"},
+                             "followed to the end; a module nothing imports, or one outside tools/, is none")
+        # Every tools/ module a gate tool imports, now, is a gate file.
+        for m in premerge.gate_modules():
+            self.assertEqual(premerge.mark_paths([f"tools/{m}.py"]), [f"tools/{m}.py"], m)
 
     def test_mark_paths_cover_agent_config_and_tier_inputs(self):
         # Security R3 on #1824: MCP config, other teams' rules, nested CLAUDE files, and the
