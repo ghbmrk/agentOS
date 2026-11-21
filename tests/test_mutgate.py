@@ -4325,6 +4325,10 @@ class MutantScope(unittest.TestCase):
         self.assertIn("b is never called", problems[0])
         self.assertEqual(len(mutgate.record_entries(line + "\n" + line.replace(", ", ",  ", 1) + "\n")[0]), 2,
                          "only a word-for-word repeat is one entry")
+        # #6375: a CRLF repeat would read as a second entry of one mutant; any carriage return fails the record.
+        for text in (line + "\n" + line + "\r\n", line + "\r\n" + line + "\n", "# c\r\n" + line + "\n"):
+            self.assertEqual(mutgate.record_entries(text)[0], None, text)
+        self.assertEqual(mutgate.record_entries(line + "\r\n")[1], "line 1 holds a carriage return; a record's lines end in LF only")
 
     def test_the_clerk_run_entries_on_two_comparison_lines_name_their_column(self):
         # #5792's follow-up pinned the #5774 entries on mail.go:104 and :145; #5909 deleted those (gremlins now
