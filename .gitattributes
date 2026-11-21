@@ -1,6 +1,8 @@
 # Two PRs appending a row to one assumptions table keep both rows on a local merge;
 # doclint fails any duplicate row ID, so the later builder renumbers.
-# GitHub's server-side merge ignores this file (agents merge main locally).
+# GitHub's server-side merge ignores this file (agents merge main locally). A clone that ran
+# `tools/assumptions_merge.py --install` merges ASSUMPTIONS.md rows by ID instead (info/attributes), so an edited
+# row is not kept twice; CI and premerge's replay keep the union.
 ASSUMPTIONS.md merge=union
 # The same for two PRs appending entries to one package's mutgate record; premerge reads a duplicate key,
 # or an entry the union brought back, as changed.

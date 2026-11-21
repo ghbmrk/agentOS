@@ -65,7 +65,7 @@ func (r Refused) Error() string { return "kernelsock: the kernel refused: " + r.
 // {"result"}, {"error"} or {"refusal"} answer (kernel/proc ServeOne).
 func (o Owner) call(ctx context.Context, op string, args, out any) error {
 	if args == nil {
-		args = struct{}{} // as kernel/proc's mustRaw sends no arguments
+		args = struct{}{} // as kernel/proc's Conn.Call sends no arguments
 	}
 	raw, err := json.Marshal(args)
 	if err != nil {
