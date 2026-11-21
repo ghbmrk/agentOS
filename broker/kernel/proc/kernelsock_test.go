@@ -244,7 +244,7 @@ func TestAKernelCallPastTheBoundIsNeverSent(t *testing.T) {
 	}()
 	c := Conn{Socket: sock, UID: os.Getuid(), Timeout: 5 * time.Second}
 	// sized is an argument whose call is n bytes with its newline.
-	b, _ := json.Marshal(kernelCall{"stop", mustRaw("")})
+	b, _ := json.Marshal(kernelCall{"stop", json.RawMessage(`""`)})
 	sized := func(n int) string { return strings.Repeat("a", n-len(b)-1) }
 	if err := c.Call("stop", sized(maxCall+1), nil); !errors.Is(err, ErrTooLarge) || dials.Load() != 0 {
 		t.Fatalf("a call one byte past the bound: %v after %d connections, want %v and none", err, dials.Load(), ErrTooLarge)

@@ -345,17 +345,26 @@ RUNE = re.compile(r"'(?:[^'\\\n]|\\.)*'")
 
 
 def _literals(text):
-    """The contents of a Go file's string literals, comments left out, and the patterns of its
-    //go:embed directives (an `all:` prefix dropped), as text: what a test can name a file by."""
-    out = [m[0][1:-1] for m in LITERAL.finditer(_uncommented(text))]
+    """The contents of a Go file's string literals, comments left out: what a test can name a file by."""
+    return [m[0][1:-1] for m in LITERAL.finditer(_uncommented(text))]
+
+
+def _embeds(text):
+    """The patterns of a Go file's //go:embed directives, an `all:` prefix dropped."""
+    out = []
     for m in re.finditer(r"^[ \t]*//go:embed[ \t]+(.*)$", text, re.M):
         out += [w.strip('"`').removeprefix("all:") for w in m[1].split()]
     return out
 
 
+# The functions names_file treats as reading, listing, matching or building a path, by name alone.
+PATH_FUNCS = ("ReadDir", "ReadFile", "Glob", "WalkDir", "Walk", "DirFS", "Sub", "Open", "OpenFile", "Stat",
+              "Lstat", "Join", "Abs", "Match")
+
+
 # A call that reads, lists or builds a path: a literal anywhere in its arguments that lists a
 # directory (".", "..", "/") or starts "./" or "../" names a file without spelling it.
-PATH_CALL = re.compile(r"\b(?:ReadDir|ReadFile|Glob|WalkDir|Walk|DirFS|Sub|Open|OpenFile|Stat|Lstat|Join|Abs)\(")
+PATH_CALL = re.compile(rf"\b(?:{'|'.join(f for f in PATH_FUNCS if f != 'Match')})\(")
 
 
 def _call_literals(code):
@@ -375,28 +384,52 @@ def _call_literals(code):
     return out
 
 
+# A call that lists or matches names, so a wildcard-only glob anywhere in its package can reach it
+# through a variable, a const, a field or a helper (L3 on #6336).
+GLOB_CALL = re.compile(r"\b(?:Glob|Walk|WalkDir|ReadDir|Match)\(")
+
+# A path function named but not called at once: a value (`g := filepath.Glob`, an argument, a table
+# or field entry, a method value or expression) that a call under another name reads paths through,
+# or a call spaced from its `(`. Its arguments are unseen, so its package can name any file (#6337).
+PATH_VALUE = re.compile(rf"\b(?:{'|'.join(PATH_FUNCS)})\b(?!\()")
+
+
 def names_file(pkg_dir, rel):
     """Whether a .go file of pkg_dir can name rel (a path below it) as text: a string literal or
     //go:embed pattern holding its base name or first directory, a literal or pattern holding a glob
     (`*?[`) that matches its base name, rel or a leading directory of it (`//go:embed *`,
     fs.Glob(fsys, "*.md"), filepath.Join(d, "*.md")), or whose last path part matches its base name
     (dir + "/*.md", "%s/*.md", "**/*.md"), or a literal anywhere in a path call's
-    arguments (PATH_CALL) that lists `.`, `..` or `/` or starts `./` or `../`. A link or an
-    unreadable file can name anything. A path built in a variable from parts holding none of these
+    arguments (PATH_CALL) that lists `.`, `..` or `/` or starts `./` or `../`. A glob made of
+    wildcards and slashes alone (`"*"`, `"*/*"`) counts only in a //go:embed pattern, in a path
+    call's arguments, or in a package whose code (comments and literals blanked) calls a GLOB_CALL
+    anywhere: elsewhere it is data, a table's `*` or a DNS wildcard (#6328). A link, an
+    unreadable file, or code (comments and literals blanked) naming a PATH_FUNCS function without
+    calling it at once (PATH_VALUE: an alias, a field named Open, by name alone) can name anything
+    (#6337). A path built in a variable from parts holding none of these
     is not seen (MUT-deleted-test-own-lines-1). Over-matching costs only a whole-suite run."""
     parts = rel.split("/")
     names = [parts[-1]] + ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]
+    texts = []
     for f in sorted(pkg_dir.glob("*.go")):
         if f.is_symlink() or not f.is_file():
             return True
-        text = f.read_bytes().decode("utf-8", "replace")
-        for lit in _literals(text):
+        texts.append(f.read_bytes().decode("utf-8", "replace"))
+    code = [_uncommented(t, False) for t in texts]
+    if any(PATH_VALUE.search(c) for c in code):
+        return True
+    lists = any(GLOB_CALL.search(c) for c in code)
+    for text in texts:
+        called = _call_literals(_uncommented(text))
+        reach = set(_embeds(text)) | set(called)
+        for lit in _literals(text) + _embeds(text):
             if parts[-1] in lit or parts[0] in lit:
                 return True
-            if re.search(r"[*?\[]", lit) and (any(fnmatch.fnmatchcase(n, lit) for n in names)
-                                               or fnmatch.fnmatchcase(parts[-1], lit.rstrip("/").rsplit("/", 1)[-1])):
+            if re.search(r"[*?\[]", lit) and (lists or lit in reach or re.sub(r"[*?/]", "", lit)) and (
+                    any(fnmatch.fnmatchcase(n, lit) for n in names)
+                    or fnmatch.fnmatchcase(parts[-1], lit.rstrip("/").rsplit("/", 1)[-1])):
                 return True
-        for lit in _call_literals(_uncommented(text)):
+        for lit in called:
             if (lit and lit.rstrip("/") in ("", ".", "..")) or lit.startswith(("./", "../")):
                 return True
     return False
