@@ -428,11 +428,12 @@ jobs:
           v=$(jq -r .version "$RUNNER_TEMP"/out/*.release.json)
           sudo python3 -I image/unlock_graph.py --control "$RUNNER_TEMP/out" "$v"
           sudo python3 -I image/unlock_graph.py "$RUNNER_TEMP/out" "$v"
-      # #5697: which files of this tree and its initrds import glibc's regex or wide scanf functions,
-      # directly or through a library, as notices: the glibc records' reachability (assurance/vulncheck.json)
-      # is read from here, not from another distribution's builds. #5341: and which can fetch an OpenSSL
-      # cipher by name, with their call sites, for the AES-GCM-SIV records. Fails on an unreviewed change.
-      - name: Glibc regex and wide scanf importers, OpenSSL by-name cipher fetches (image/import_sweep.py)
+      # #5697, #6285, #6298: which files of this tree and its initrds reach glibc's regex, glob() or wide
+      # scanf functions (an import, a dlsym lookup or a static copy), directly or through a library, as
+      # notices: the glibc records' reachability (assurance/vulncheck.json) is read from here, not from
+      # another distribution's builds. #5341: and which can fetch an OpenSSL cipher by name, with their
+      # call sites, for the AES-GCM-SIV records. Fails on an unreviewed change.
+      - name: Glibc regex, glob and wide scanf reach, OpenSSL by-name cipher fetches (image/import_sweep.py)
         if: matrix.run == 'a'
         run: |
           v=$(jq -r .version "$RUNNER_TEMP"/out/*.release.json)
