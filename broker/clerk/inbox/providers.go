@@ -114,8 +114,7 @@ func (p *Providers) For(api, host string) (authServ string, security []string) {
 			}
 		}
 	}
-	if key == "" {
-		return "", nil
-	}
+	// No key is "" (ParseProviders refuses one), so an unknown provider
+	// gets "" and none here.
 	return p.authServ[key], append([]string(nil), p.security[key]...)
 }
