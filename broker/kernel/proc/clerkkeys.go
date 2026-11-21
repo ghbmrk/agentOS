@@ -2,6 +2,7 @@ package proc
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
@@ -101,18 +102,13 @@ func handKey(conn net.Conn, name, cgroup string, root *[clerkkey.Len]byte, cgrou
 	if c, err := cgroupOf(pid); err != nil || !unitCgroup(c, cgroup) {
 		return ErrKeyPeer
 	}
-	k, err := clerkkey.Derive(root, name)
-	if err != nil {
-		return err
-	}
+	// serveClerkKey checked the name and the root, so neither call fails.
+	k, _ := clerkkey.Derive(root, name)
 	defer k.Wipe()
-	b, err := clerkkey.Marshal(k)
-	if err != nil {
-		return err
-	}
+	b, _ := clerkkey.Marshal(k)
 	defer clear(b)
 	conn.SetWriteDeadline(time.Now().Add(keyWait))
-	_, err = conn.Write(b)
+	_, err := conn.Write(b)
 	return err
 }
 
@@ -137,15 +133,15 @@ func peerPID(c net.Conn) (int32, bool) {
 	if !ok {
 		return 0, false
 	}
-	raw, err := uc.SyscallConn()
-	if err != nil {
-		return 0, false
-	}
 	var cred *syscall.Ucred
 	var cerr error
-	if err := raw.Control(func(fd uintptr) {
-		cred, cerr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
-	}); err != nil || cerr != nil || cred.Pid <= 0 {
+	raw, err := uc.SyscallConn()
+	if err == nil {
+		err = raw.Control(func(fd uintptr) {
+			cred, cerr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
+		})
+	}
+	if err != nil || cerr != nil || cred.Pid <= 0 {
 		return 0, false
 	}
 	return cred.Pid, true
@@ -159,10 +155,8 @@ func procCgroup(pid int32) (string, error) {
 	}
 	defer f.Close()
 	b, err := io.ReadAll(io.LimitReader(f, 4096))
-	if err != nil {
-		return "", err
-	}
-	return cgroupPath(b)
+	c, perr := cgroupPath(b)
+	return c, cmp.Or(err, perr)
 }
 
 // cgroupPath reads the unified (cgroup v2) line of a /proc/<pid>/cgroup
