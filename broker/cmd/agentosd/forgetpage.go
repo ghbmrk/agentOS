@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/localapi"
+	"github.com/ghbmrk/agentos/broker/owner/kernelsock"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
@@ -82,7 +82,7 @@ func forgetNotice(r forgetResult, by key.PublicKey, phone bool, at time.Time) st
 	for _, c := range r.ErasedKinds {
 		n += c
 	}
-	what := plural(n, "item") + " (" + kernel.KindList(r.ErasedKinds) + ")"
+	what := plural(n, "item") + " (" + kernelsock.KindList(r.ErasedKinds) + ")"
 	if n == 0 {
 		what = "a name with nothing kept under it"
 	}
