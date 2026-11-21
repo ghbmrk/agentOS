@@ -4520,7 +4520,8 @@ class Workflow(unittest.TestCase):
         script = re.split(r"\n      [-#] ", script, maxsplit=1)[0]
         script = "\n".join(l[10:] for l in script.split("\n"))
         cases = [
-            ("success", "[]", "skipped", "skipped", 0),
+            # #6401: an empty claim skips this job; were it to run, it fails, never passes.
+            ("success", "[]", "skipped", "skipped", 1),
             ("success", '["kernel"]', "success", "success", 0),
             ("success", '["kernel"]', "success", "failure", 1),
             ("success", '["kernel"]', "success", "cancelled", 1),  # #5069: a shard timed out
@@ -4541,7 +4542,8 @@ class Workflow(unittest.TestCase):
                              mutants == "cancelled" and claimed == "success", r.stdout)
             self.assertEqual("::error::the plan job timed out" in r.stdout,
                              plan == "cancelled" and claimed == "success", r.stdout)
-        self.assertIn("if: ${{ !cancelled() }}", job(self.text, "mutgate"))
+        self.assertIn("if: ${{ !cancelled() && (needs.claimed.result != 'success' || needs.claimed.outputs.packages != '[]') }}",
+                      job(self.text, "mutgate"))
         self.assertIn("needs: [claimed, plan, mutants]", job(self.text, "mutgate"))
 
     def test_each_shard_of_a_job_stops_at_its_own_60_minutes_and_is_named(self):
@@ -4619,7 +4621,7 @@ class Workflow(unittest.TestCase):
             body = job(self.text, name)
             self.assertNotRegex(body, r"\bgo (test|build|run|install)\b|gremlins unleash", name)
             self.assertEqual("setup-go" in body, name == "mutgate", name)
-            self.assertIn(restore, body.replace("        if: ${{ needs.claimed.outputs.packages != '[]' }}\n", ""))
+            self.assertIn(restore, body)
             self.assertLess(body.index("HEAD^1"), body.index("rm -rf tools"), name)
             self.assertLess(body.index("rm -rf tools"), body.index("python3 -I tools/mutgate.py"), name)
             self.assertEqual(body.count("python3 -I tools/mutgate.py"), 1, name)
@@ -4639,8 +4641,8 @@ class Workflow(unittest.TestCase):
             "name: The base copy of the gate",
             "name: Gate (MUT-tierA)",
         ])
-        for st in steps[1:]:
-            self.assertIn("        if: ${{ needs.claimed.outputs.packages != '[]' }}\n", st)
+        # The job runs only on a non-empty or failed claim (#6401), so no step carries its own `if`.
+        self.assertNotIn("        if:", body)
         self.assertIn("persist-credentials: false", steps[1])
         self.assertIn("fetch-depth: 0", steps[1])
         self.assertIn('[ "$(git rev-parse HEAD^2)" = "$PR_HEAD" ]', steps[2])
