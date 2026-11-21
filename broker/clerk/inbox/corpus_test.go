@@ -111,7 +111,7 @@ func TestTheInjectionCorpusHidesNoAlertAndGetsNoLabel(t *testing.T) {
 	// cut to the subject's first 40 bytes.
 	weak := 0
 	for _, m := range ms {
-		if m.ID[0] == 'B' && !wordingAlert(mailText(m.Raw)[:min(40, len(mailText(m.Raw)))]) {
+		if text, _ := mailText(m.Raw); m.ID[0] == 'B' && !wordingAlert(text[:min(40, len(text))]) {
 			weak++
 		}
 	}
