@@ -25,7 +25,8 @@ import (
 )
 
 // fakeQEMU is the QEMU end of a QMP connection: it greets, answers every command, writes word
-// to pmemsave's file, and emits SHUTDOWN with reason once the client has negotiated. closed is
+// to pmemsave's file, and emits SHUTDOWN with reason (GUEST_PANICKED for guest-panic) once the
+// client has negotiated. closed is
 // closed when the harness closes its end.
 type fakeQEMU struct {
 	cmds   chan string
@@ -57,7 +58,13 @@ func startFake(t *testing.T, reason string, word uint32) (*vm, *fakeQEMU) {
 				os.WriteFile(c.Arguments["filename"].(string), p[:], 0o600)
 			}
 			enc.Encode(map[string]any{"return": map[string]any{}})
-			if c.Execute == "qmp_capabilities" && reason != "" {
+			switch {
+			case c.Execute != "qmp_capabilities" || reason == "":
+			case reason == "guest-panic":
+				// As QEMU with -action shutdown=pause: a pvpanic report pauses the board and
+				// sends GUEST_PANICKED, never SHUTDOWN (system/runstate.c, qemu_system_guest_panicked).
+				enc.Encode(map[string]any{"event": "GUEST_PANICKED", "data": map[string]any{"action": "pause"}})
+			default:
 				enc.Encode(map[string]any{"event": "SHUTDOWN", "data": map[string]any{"guest": true, "reason": reason}})
 			}
 		}

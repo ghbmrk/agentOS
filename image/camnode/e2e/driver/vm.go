@@ -73,8 +73,8 @@ var restartCmds = map[uint32]string{1: "0 tryboot", 2: "dm-verity device corrupt
 
 // errPanic is a kernel panic. A panic restarts the board (panic=5) through emergency_restart,
 // which skips the reboot notifiers, so the mailbox reads 0 as for a plain restart; the pvpanic
-// device tells it apart instead: the kernel's panic notifier writes to it, and QEMU stops the
-// board with the reason guest-panic before the panic's restart.
+// device tells it apart instead: the kernel's panic notifier writes to it, and QEMU pauses the
+// board and sends GUEST_PANICKED before the panic's restart.
 var errPanic = errors.New("the kernel panicked")
 
 func newBoard(tools, work, disk, element, tap string) *board {
@@ -309,15 +309,16 @@ func (b *board) power(button bool) (*vm, error) {
 	defer ln.Close()
 	sock := ln.Addr().String()
 	// -no-reboot with shutdown=pause: a guest reset stops the board and QEMU says why on QMP,
-	// keeping its memory for the mailbox; panic=shutdown: a panic the pvpanic device reports
-	// stops it too, with the reason guest-panic. -S: the board starts only once QMP is listening.
+	// keeping its memory for the mailbox; panic=pause: a panic the pvpanic device reports stops
+	// it too, with the GUEST_PANICKED event (with shutdown=pause QEMU pauses on a panic whatever
+	// the panic action, and sends no SHUTDOWN). -S: the board starts only once QMP is listening.
 	args = append(args,
 		"-kernel", files["Image"], "-initrd", files["camnode-initramfs.cpio"],
 		"-append", strings.TrimSpace(strings.TrimSpace(string(cmdline))+" "+b.append), "-dtb", dtb,
 		"-serial", "file:"+console, "-monitor", "none",
 		"-device", "virtio-serial-pci,addr=0x7", "-chardev", "file,id=journal,path="+journal,
 		"-device", "virtconsole,chardev=journal",
-		"-action", "shutdown=pause", "-action", "panic=shutdown", "-S",
+		"-action", "shutdown=pause", "-action", "panic=pause", "-S",
 		"-chardev", "socket,id=qmp,path="+sock, "-mon", "chardev=qmp,mode=control")
 	cmd := exec.Command(b.tool("qemu-system-aarch64"), args...)
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
@@ -354,12 +355,12 @@ func qmpListen(dir string) (*net.UnixListener, error) {
 }
 
 // qmp is QEMU's machine protocol on one connection: the reader keeps the SHUTDOWN event's reason
-// and passes command replies on.
+// (or guest-panic for GUEST_PANICKED) and passes command replies on.
 type qmp struct {
 	conn    net.Conn
 	replies chan map[string]json.RawMessage
-	halted  chan struct{} // closed on the guest's SHUTDOWN, or when QEMU closes the connection
-	reason  string        // the SHUTDOWN's reason: guest-reset, guest-panic, guest-shutdown, ...
+	halted  chan struct{} // closed on the guest's SHUTDOWN or GUEST_PANICKED, or when QEMU closes the connection
+	reason  string        // the SHUTDOWN's reason (guest-reset, guest-shutdown, ...), or guest-panic for GUEST_PANICKED
 }
 
 func newQMP(conn net.Conn) (*qmp, error) {
@@ -386,10 +387,16 @@ func newQMP(conn net.Conn) (*qmp, error) {
 				return
 			}
 			if ev, ok := m["event"]; ok {
-				if string(ev) == `"SHUTDOWN"` && !once {
+				switch {
+				case once:
+				case string(ev) == `"SHUTDOWN"`:
 					var d struct{ Reason string }
 					json.Unmarshal(m["data"], &d)
 					q.reason = d.Reason
+					halt()
+				case string(ev) == `"GUEST_PANICKED"`:
+					// The pvpanic device's report: QEMU has paused the board and sends no SHUTDOWN.
+					q.reason = "guest-panic"
 					halt()
 				}
 				continue
