@@ -15,6 +15,7 @@
 # old entry). With the image tree at hand:
 #   python3 image/mkosi/mkosi.finalize --exec-allowlist ROOT > image/mkosi/exec.allow
 etc/modules-load.d/modules.conf	sha256:c0d37c5c430cb5c978a4ea00e42ddc4551b04f76352d149d6be5d5b65346df65
+usr/lib/environment.d/99-environment.conf	mask
 usr/lib/modprobe.d/agentos-no-bluetooth.conf	sha256:31cfea974ef954d2f75240cd117f0003f5c7b74bb5df2d520020d3c613a0b69c
 usr/lib/modprobe.d/aliases.conf	sha256:0ffc97a5b69113438c1b7e162ef6871e197e24973f359bfbeef448b089bd67e5
 usr/lib/modprobe.d/fbdev-blacklist.conf	sha256:e99b6166cf309aa1cbbd296d9fbf93af567148c7316c8d5d7a057cf3e85113ea
@@ -32,6 +33,8 @@ usr/lib/systemd/system-generators/systemd-run-generator	sha256:ef797a9f83c1052c1
 usr/lib/systemd/system-generators/systemd-ssh-generator	sha256:7dcfab738a560149936db7b11ebfa5ca9317b50902cabbd48739ba77b001c649
 usr/lib/systemd/system-generators/systemd-system-update-generator	sha256:a4530d6dc256d902786acb32372b678f196a4a760db135a0bbd68e35c4ce9824
 usr/lib/systemd/system-generators/systemd-tpm2-generator	sha256:07dd5f254baa1f830c1ce97d9155b79fdde4e61a6ff84b0161439f63fc250f77
+usr/lib/systemd/user-environment-generators/30-systemd-environment-d-generator	sha256:7a5523d0a9ead3a5fbeb7ed9a4f26aa6118a311b7f885be498f80e88477dd4ab
+usr/lib/systemd/user-generators/systemd-xdg-autostart-generator	sha256:d6fd07e7dde60aa808476ef60a18565b353f7c4dc307dc40e8efb08405b4f47e
 usr/lib/udev/rules.d/50-firmware.rules	sha256:37895a6ae81ab0e8753eb97a7c11b7cf578549e06fbbf2d6b192d109bc2cd9a3
 usr/lib/udev/rules.d/50-udev-default.rules	sha256:2fc7f00aa36ea57400d14b9a765b7d26f39a004f9bf666f69283d9aa5aaa34d2
 usr/lib/udev/rules.d/55-dm.rules	sha256:106ec258d978828312aca9c5730a674811542e74f403d9971c07ff3195d857e5
