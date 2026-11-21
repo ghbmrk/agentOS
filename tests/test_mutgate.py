@@ -12,6 +12,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1090,6 +1091,66 @@ class Deletion(unittest.TestCase):
             self.assertEqual(mutgate.run_tests(stub, d, 30, mem=1 << 30), "LIVED")
             stub.write_text("#!/bin/sh\nsleep 60\n")
             self.assertEqual(mutgate.run_tests(stub, d, 1, mem=1 << 30), "TIMED OUT")
+
+    @unittest.skipUnless(os.path.isdir("/proc/self"), "the memory cap reads /proc")
+    def test_a_capped_run_kills_a_child_that_left_its_process_group(self):
+        # #6392 item 1: the session's memory is counted, so the whole session is killed, a child that
+        # moved itself to a group of its own (setpgid) too, not only the run's process group.
+        with tempfile.TemporaryDirectory() as d:
+            stub, pidfile = pathlib.Path(d) / "t.test", pathlib.Path(d) / "child"
+            stub.write_text(f"#!/bin/sh\npython3 -c 'import os, time; os.setpgid(0, 0); open(\"{pidfile}\", \"w\").write(str(os.getpid())); "
+                            "b = bytearray(64 << 20); time.sleep(60)' &\nwait\n")
+            stub.chmod(0o755)
+            began = time.monotonic()
+            self.assertEqual(mutgate.run_tests(stub, d, 30, mem=32 << 20), "KILLED")
+            self.assertLess(time.monotonic() - began, 20)
+            child = int(pidfile.read_text())
+            for _ in range(100):  # reparented and reaped, or a zombie: nothing left running
+                if (mutgate.proc_stat(child) or ("", "Z"))[1] in "ZX":
+                    break
+                time.sleep(0.05)
+            self.assertIn((mutgate.proc_stat(child) or ("", "Z"))[1], "ZX")
+
+    @unittest.skipUnless(os.path.isdir("/proc/self"), "the memory cap reads /proc")
+    def test_kill_session_leaves_other_sessions_alone(self):
+        with tempfile.TemporaryDirectory() as d:
+            pidfile = pathlib.Path(d) / "child"
+            p = subprocess.Popen(["sh", "-c", f"python3 -c 'import os, time; os.setpgid(0, 0); "
+                                  f"open(\"{pidfile}\", \"w\").write(str(os.getpid())); time.sleep(60)' & sleep 60"],
+                                 start_new_session=True)
+            other = subprocess.Popen(["sleep", "60"], start_new_session=True)
+            try:
+                for _ in range(200):
+                    if pidfile.exists() and pidfile.read_text():
+                        break
+                    time.sleep(0.05)
+                child = int(pidfile.read_text())
+                self.assertNotEqual(os.getpgid(child), p.pid)  # its own group: killpg alone misses it
+                mutgate.kill_session(p.pid)
+                self.assertEqual(p.wait(), -signal.SIGKILL)
+                self.assertEqual(mutgate.session_procs(p.pid), [])
+                self.assertIsNone(other.poll())
+            finally:
+                other.kill()
+                other.wait()
+
+    @unittest.skipUnless(os.path.isdir("/proc/self"), "the memory cap reads /proc")
+    def test_a_spike_between_reads_still_counts(self):
+        # #6392 item 2: a base run's peak is the kernel's high-water mark, so a spike that ends between
+        # two reads still counts; a run that ends before any read counts its whole-life peak (wait4).
+        spike = "import time; b = bytearray(128 << 20); del b; time.sleep({})"
+        with mock.patch.object(mutgate, "MEM_POLL", 1.0):
+            for rest in (2.5, 0):  # read once after the spike, or never
+                with self.subTest(rest=rest):
+                    p = subprocess.Popen([sys.executable, "-c", spike.format(rest)], start_new_session=True)
+                    end, peak = mutgate.watch(p, 30)
+                    self.assertEqual(end, 0)
+                    self.assertGreater(peak, 128 << 20)
+            p = subprocess.Popen([sys.executable, "-c", spike.format(2.5)], start_new_session=True)
+            time.sleep(1.5)
+            rss = sum(r for r, _ in mutgate.session_memory(p.pid).values())
+            p.wait()
+            self.assertLess(rss, 64 << 20)  # what a read of the current memory alone saw after it
 
     def test_available_memory_reads_meminfo(self):
         got = mutgate.available_memory()
@@ -4671,6 +4732,24 @@ class GremlinsMemoryCap(unittest.TestCase):
             self.assertEqual(r.returncode, 1, r.stderr)
             self.assertIn("more than half", r.stderr)
 
+    def test_a_cover_run_counts_each_test_binarys_whole_life_peak(self):
+        # #6392 item 2: gremlins' coverage run runs each test binary through peak_exec (go test -exec),
+        # which records its wait4 peak, so a spike just before it exits counts against half the cap.
+        with tempfile.TemporaryDirectory() as d:
+            prof = pathlib.Path(d) / "c"
+            body = ('for a; do case "$a" in -exec=*) x="${a#-exec=}";; esac; done\n'
+                    'eval "$x python3 -c \'b = bytearray(128 << 20)\'" || exit 9\n'
+                    f": > {prof}\n")
+            shim = self.shim(d, body, 192 << 20)
+            r = subprocess.run([str(shim), "test", "-cover", "-coverprofile", str(prof), "./..."], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1, r.stderr)
+            self.assertIn("more than half", r.stderr)
+            (pid, start, top), = [row.split() for row in (pathlib.Path(d) / "exits").read_text().splitlines()]
+            self.assertGreater(int(top), 128 << 20)
+            r = subprocess.run([str(shim), "test", "-exec=x", "-coverprofile", str(prof), "./..."], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("without -exec", r.stderr)
+
     def test_toolchain_processes_are_not_counted(self):
         # A compile's memory is the toolchain's, not the tests': only processes outside TOOLCHAIN count.
         with tempfile.TemporaryDirectory() as d:
@@ -4681,7 +4760,7 @@ class GremlinsMemoryCap(unittest.TestCase):
                                       "import time; b = bytearray(64 << 20); time.sleep(3)"], start_new_session=True)
                 try:
                     time.sleep(1)
-                    got = mutgate.session_rss(p.pid, mutgate.TOOLCHAIN)
+                    got = sum(rss for rss, _ in mutgate.session_memory(p.pid, mutgate.TOOLCHAIN).values())
                 finally:
                     p.kill()
                     p.wait()

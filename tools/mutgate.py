@@ -2205,8 +2205,18 @@ def go_cover(real, tmp, args, mem=None):
     cap, the run fails unless its tests' memory stays under half of it (MUT-gremlins-memcap)."""
     if args[:1] == ["test"] and not any(a.lstrip("-").startswith("covermode") for a in args):
         args = ["test", "-covermode=count", *args[1:]]
+    exits = pathlib.Path(tmp) / "exits"
+    if mem:  # each test binary through peak_exec, so its whole-life peak counts (#6392)
+        if args[:1] != ["test"] or any(a in ("-exec", "--exec") or a.startswith(("-exec=", "--exec=")) for a in args):
+            print("mutgate: gremlins' coverage run is not a `go test` without -exec, so its tests' peak cannot be read",
+                  file=sys.stderr)
+            return 1
+        exits.write_text("")
+        q = shlex.quote
+        args = [args[0], f"-exec={q(sys.executable)} -I {q(str(pathlib.Path(__file__).resolve()))} peak-exec {q(str(exits))}",
+                *args[1:]]
     end, peak = watch(subprocess.Popen([real, *args], start_new_session=True, preexec_fn=die_with_parent),
-                      mem=mem, skip=TOOLCHAIN)
+                      mem=mem, skip=TOOLCHAIN, exits=exits if mem else None)
     if mem and (end == "over" or 2 * peak > mem):
         print(f"mutgate: the tests hold {peak >> 20} MB before any mutant, more than half the {mem >> 20} MB "
               "memory cap of a gremlins mutant run, so a cap kill would not show a test failed", file=sys.stderr)
@@ -2368,47 +2378,142 @@ def run_tests(binary, cwd, timeout, mem=None, names=None):
         return {"over": "KILLED", "timeout": "TIMED OUT"}.get(end) or ("LIVED" if end == 0 else "KILLED")
 
 
-def watch(p, timeout=None, mem=None, skip=()):
+def watch(p, timeout=None, mem=None, skip=(), exits=None):
     """(end, peak) for Popen p started in its own session: end is its exit code, or "timeout" or
-    "over" (resident memory past mem bytes), after which its session is killed; peak is the most
-    resident memory read across the session, every MEM_POLL seconds, leaving out processes named in skip."""
-    deadline, peak = None if timeout is None else time.monotonic() + timeout, 0
-    while True:
-        wait = MEM_POLL if deadline is None else max(0, min(MEM_POLL, deadline - time.monotonic()))
-        try:
-            return p.wait(timeout=wait), peak
-        except subprocess.TimeoutExpired:
-            peak = max(peak, session_rss(p.pid, skip))
-            end = "over" if mem is not None and peak > mem else "timeout" if deadline and time.monotonic() >= deadline else None
-            if end:
-                os.killpg(p.pid, signal.SIGKILL)
-                p.wait()
-                return end, peak
+    "over" (the session's resident memory, read every MEM_POLL seconds, past mem bytes), after which
+    every process in the session is killed (kill_session). Processes named in skip are not counted.
+    peak bounds what the session held from the kernel's own high-water marks, not from the reads
+    (MUT-gremlins-memcap-fu, #6392): the sum, over every process a read found, of the most it ever
+    held (VmHWM, which a spike between two reads still raised), p's taken at its exit from wait4, and
+    each process named on a `PID START BYTES` line of the file exits (peak_exec's) taken from there."""
+    deadline = None if timeout is None else time.monotonic() + timeout
+    peaks, counted, end = {}, pathlib.Path(p.args[0]).name[:15] not in skip, None
+    while (done := reap(p, MEM_POLL if deadline is None else max(0, min(MEM_POLL, deadline - time.monotonic())))) is None:
+        now = 0
+        for key, (rss, hwm) in session_memory(p.pid, skip).items():
+            now += rss
+            peaks[key] = max(peaks.get(key, 0), hwm)
+        end = "over" if mem is not None and now > mem else "timeout" if deadline and time.monotonic() >= deadline else None
+        if end:
+            kill_session(p.pid)
+            done = reap(p, float("inf"))
+            break
+    if counted:  # pid is p's alone until it is reaped, so its reads are p's
+        peaks = {k: v for k, v in peaks.items() if k[0] != p.pid} | {(p.pid, -1): done[1]}
+    return end or done[0], high(peaks, exits)
 
 
 MEM_POLL = 0.25  # seconds between memory reads: about 50 MB of growth at the 200 MB/s seen on #5011
 
 
-def session_rss(sid, skip=()):
-    """Resident bytes of every process in session sid (a test binary and its children) not named in
-    skip, from /proc; 0 where there is no /proc (macOS), so the cap there is the timeout alone."""
-    total = 0
+def high(peaks, exits):
+    """The sum of peaks ({(pid, start): bytes}) with each `PID START BYTES` line of the file exits
+    raising its process's own."""
     try:
-        pids = [n for n in os.listdir("/proc") if n.isdigit()]
+        rows = pathlib.Path(exits).read_text().splitlines() if exits else []
     except OSError:
-        return 0
-    for pid in pids:
+        rows = []
+    peaks = dict(peaks)
+    for row in rows:
+        if len(f := row.split()) == 3 and all(x.isdigit() for x in f):
+            key = (int(f[0]), int(f[1]))
+            peaks[key] = max(peaks.get(key, 0), int(f[2]))
+    return sum(peaks.values())
+
+
+def reap(p, wait):
+    """(exit code, whole-life peak resident bytes) of Popen p once it exits within wait seconds, from
+    wait4: the kernel's high-water mark at its exit, or its waited descendants' where higher; else None."""
+    end, pause = time.monotonic() + wait, 0.001
+    while True:
+        pid, status, usage = os.wait4(p.pid, os.WNOHANG)
+        if pid:
+            p.returncode = os.waitstatus_to_exitcode(status)
+            return p.returncode, usage.ru_maxrss * (1 if sys.platform == "darwin" else 1024)
+        if (left := end - time.monotonic()) <= 0:
+            return None
+        time.sleep(min(pause, left))
+        pause = min(2 * pause, 0.05)
+
+
+def peak_exec(out, argv):
+    """go test's -exec for go_cover: run the test binary argv, append `PID START BYTES` (its whole-life
+    peak, as reap reads it) to the file out, and exit as it did, so watch counts what the binary held
+    after its last read too."""
+    p = subprocess.Popen(argv, preexec_fn=die_with_parent)
+    start = (proc_stat(p.pid) or (None, None, None, -1))[3]  # not yet reaped: its stat stays
+    end, top = reap(p, float("inf"))
+    with open(out, "a") as f:
+        f.write(f"{p.pid} {start} {top}\n")
+    return exit_code(end)
+
+
+def kill_session(sid):
+    """SIGKILL every process in session sid: its process group, then every live process session_procs
+    finds there, in whatever group it moved itself to (setpgid), until none is left (#6392). Each is
+    signalled through a pidfd taken before its stat is read again, so a pid reused meanwhile is never
+    signalled. A process still alive after KILL_WAIT seconds raises: the run gives no verdict."""
+    try:
+        os.killpg(sid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    deadline = time.monotonic() + KILL_WAIT
+    while procs := session_procs(sid):
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"mutgate: processes {[pid for pid, _, _ in procs]} of session {sid} outlived SIGKILL")
+        for pid, _, start in procs:
+            try:
+                fd = os.pidfd_open(pid)
+            except ProcessLookupError:
+                continue
+            try:
+                if (proc_stat(pid) or ())[2:] == (sid, start):
+                    signal.pidfd_send_signal(fd, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            finally:
+                os.close(fd)
+        time.sleep(0.01)
+
+
+KILL_WAIT = 30  # seconds: a process in uninterruptible sleep dies once its I/O returns
+
+
+def proc_stat(pid):
+    """(name, state, session, start time in clock ticks) from /proc/PID/stat, or None once it is gone."""
+    try:
+        name, rest = pathlib.Path(f"/proc/{pid}/stat").read_text().split("(", 1)[1].rsplit(")", 1)
+        f = rest.split()
+        return name, f[0], int(f[3]), int(f[19])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def session_procs(sid):
+    """[(pid, name, start)] of every live process (not a zombie) in session sid, from /proc; [] where
+    there is no /proc (macOS), so the cap there is the timeout alone."""
+    try:
+        pids = [int(n) for n in os.listdir("/proc") if n.isdigit()]
+    except OSError:
+        return []
+    return [(pid, st[0], st[3]) for pid in pids if (st := proc_stat(pid)) and st[2] == sid and st[1] not in "ZX"]
+
+
+def session_memory(sid, skip=()):
+    """{(pid, start): (resident bytes, most resident bytes ever)} of each live process in session sid
+    not named in skip, from /proc/PID/status (VmRSS, VmHWM); a process gone meanwhile is left out."""
+    got = {}
+    for pid, name, start in session_procs(sid):
+        if name in skip:
+            continue
         try:
-            name, rest = pathlib.Path(f"/proc/{pid}/stat").read_text().split("(", 1)[1].rsplit(")", 1)
-            fields = rest.split()
-        except (OSError, IndexError, ValueError):
-            continue  # gone between the listing and the read
-        if len(fields) > 21 and fields[3] == str(sid) and name not in skip:
-            total += int(fields[21]) * PAGE
-    return total
-
-
-PAGE = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
+            text = pathlib.Path(f"/proc/{pid}/status").read_text()
+        except OSError:
+            continue
+        m = dict(re.findall(r"^(VmRSS|VmHWM):\s+(\d+) kB$", text, re.M))
+        if len(m) == 2:  # an exiting process has released its memory and lists neither
+            got[(pid, start)] = (int(m["VmRSS"]) << 10, int(m["VmHWM"]) << 10)
+    return got
 
 
 def available_memory():
@@ -3199,6 +3304,8 @@ def main(argv=None):
         return go_cover(argv[1], argv[2], argv[4:], int(argv[3]) or None)
     if argv[:1] == ["go-capped"] and len(argv) >= 3:
         return go_capped(argv[1], int(argv[2]), argv[3:])
+    if argv[:1] == ["peak-exec"] and len(argv) >= 3:
+        return peak_exec(argv[1], argv[2:])
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("packages")
