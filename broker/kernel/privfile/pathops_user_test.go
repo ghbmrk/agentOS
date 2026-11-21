@@ -162,6 +162,16 @@ func TestBuiltPackageEnvFiles(t *testing.T) {
 			}
 		})
 	}
+	// A template's line names a file per instance (#6312 Security 1): every
+	// file of ours it may name is held, whatever instance is enabled.
+	t.Run("refuses an env file of ours that a package's template names by its instance", func(t *testing.T) {
+		files := map[string]string{"/usr/lib/systemd/system/pkgx@.service": "[Service]\nExecStart=/usr/bin/pkgx\nEnvironmentFile=-/etc/default/pkgx-%i\n",
+			"/etc/default/pkgx-a": "LD_PRELOAD=/var/lib/agentos-x/x.so\n"}
+		want := `a package's unit loads /etc/default/pkgx-a, a file of ours: /etc/default/pkgx-a:1: variable "LD_PRELOAD"`
+		if err := underSystemd(t, files, ourEtc); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("got %v, want a refusal with %q", err, want)
+		}
+	})
 	t.Run("holds each printed record", func(t *testing.T) {
 		recs := builtRecs(t, "agentos-e.service", "", "[Service]\nExecStart=/usr/bin/true\n")
 		recs.PkgEnv = map[string]string{"/etc/default/pkgx": "BASH_ENV=/tmp/x\n"}

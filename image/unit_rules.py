@@ -1018,14 +1018,75 @@ def manager_confs(view, packaged):
 ENV_LINE = re.compile(r"[ \t]*EnvironmentFile[ \t]*=[ \t]*(.*?)[ \t]*\Z")
 
 
+# #6312 Security 1: the values systemd 257 gives a path-valued specifier in a unit's EnvironmentFile=
+# (unit_full_printf_full, src/core/unit-printf.c), for the system manager and for root's user manager:
+# both, since a record does not say which manager a package's line belongs to only, and more holds more.
+# %d is the unit's credentials directory, under the /run boot mount. Every other specifier names a value
+# no file in the tree decides (an instance, a host, an id), and %I, %J, %P and %f unescape "-" to "/", so
+# each is read as a wildcard across components. %y, %Y and %s (the unit file, its directory, the
+# shell) are refused, and so is a "%" with no letter after it: no env file is named that way, and the
+# reader does not guess. An unknown letter is read as a wildcard too (systemd refuses it at load).
+ENV_PATH_SPECIFIERS = {"h": ("/root",), "t": ("/run", "/run/user/0"), "S": ("/var/lib", "/root/.local/state"),
+                       "C": ("/var/cache", "/root/.cache"), "L": ("/var/log", "/root/.local/state/log"),
+                       "E": ("/etc", "/root/.config"), "T": ("/tmp",), "V": ("/var/tmp",),
+                       "d": ("/run/credentials",)}
+ENV_REFUSED_SPECIFIERS = "yYs"
+ENV_SPECIFIER = re.compile(r"%(.?)")
+
+
+def env_patterns(p):
+    """The paths an EnvironmentFile= value P may name, as (the literal directory each starts in, a regular
+    expression over a tree path): P with %% read as %, each path-valued specifier as each of its
+    ENV_PATH_SPECIFIERS values and every other one as any run of bytes, "/" included; None when P holds
+    no specifier. A refused or unknown specifier fails the run (#6312 Security 1)."""
+    if "%" not in p:
+        return None
+    outs = [("", "", False)]  # (regex so far, literal prefix so far, whether a wildcard has been met)
+    for i, part in enumerate(ENV_SPECIFIER.split(p)):
+        if i % 2 == 0 or part == "%":
+            outs = [(r + re.escape(part), l if w else l + part, w) for r, l, w in outs]
+        elif part in ENV_PATH_SPECIFIERS:
+            outs = [(r + re.escape(v), l if w else l + v, w) for r, l, w in outs for v in ENV_PATH_SPECIFIERS[part]]
+        elif part in ENV_REFUSED_SPECIFIERS or not part.isalpha():
+            raise SystemExit("unit rules: EnvironmentFile=%s: specifier %%%s names a path the reader does not "
+                             "expand; name the env file without it (#6312)" % (p, part))
+        else:
+            outs = [(r + ".*", l, True) for r, l, w in outs]
+    return sorted({(l.rpartition("/")[0] or "/", re.compile(r + r"\Z", re.S)) for r, l, w in outs},
+                  key=lambda x: (x[0], x[1].pattern))
+
+
+def env_matches(boot, pats):
+    """Each path in BOOT that one of PATS (env_patterns) matches, walked from the directory it starts in
+    as systemd would open it, directory links followed (each directory, as resolved, walked once)."""
+    out = set()
+    for top, pat in pats:
+        todo, seen = [top], set()
+        while todo:
+            d = todo.pop()
+            final = boot.resolve(d)[0]
+            if final in seen:
+                continue
+            seen.add(final)
+            for n in boot.entries(d):
+                q = d.rstrip("/") + "/" + n
+                if pat.match(q):
+                    out.add(q)
+                if boot.kind(boot.resolve(q)[0]) == 0o040000:
+                    todo.append(q)
+    return sorted(out)
+
+
 def env_files(view, units, packaged=lambda p: True):
     """Two {path: text} maps, by the path an EnvironmentFile= line gives, of the env files the tree holds
     at boot (BootView: none under a boot mount) as a regular file. The first: each a line of a file of ours
-    in UNITS names (#6002). A line this reads differently from the lint (a continued one) names a path
-    printed under no key, and the lint refuses the unit for an env file it cannot read: so a miss holds
-    more, never less. The second (#6312): each a package's line names that is ours, reached through a link
-    other than a merged-/usr top link (merged()) or not byte-identical to a package's (PACKAGED), as a
-    build step's edit to an /etc/default conffile is; one the first holds is not repeated."""
+    in UNITS names (#6002). A line this reads differently from the lint (a continued one, or one holding a
+    specifier) names a path printed under no key, and the lint refuses the unit for an env file it cannot
+    read: so a miss holds more, never less. The second (#6312): each a package's line names that is ours,
+    reached through a link other than a merged-/usr top link (merged()) or not byte-identical to a
+    package's (PACKAGED), as a build step's edit to an /etc/default conffile is; one the first holds is not
+    repeated. A package's line holding a specifier names every path env_patterns matches, so a file of
+    ours that a template's instance or a host name selects is held too (#6312 Security 1)."""
     boot, out, pkg = BootView(view), {}, {}
     for u in units:
         for f in u["files"]:
@@ -1033,16 +1094,22 @@ def env_files(view, units, packaged=lambda p: True):
                 m = ENV_LINE.match(line)
                 p = m and m.group(1)
                 p = p[1:] if p and p.startswith("-") else p
-                if not p or not p.startswith("/") or p in out or (p in pkg and not f["ours"]):
-                    continue
-                final, links = boot.resolve(p)
-                if boot.kind(final) != 0o100000:
+                if not p or not p.startswith("/") and not (p.startswith("%") and not f["ours"]) or p in out:
                     continue
                 if f["ours"]:
-                    out[p] = boot.text(final)
-                    pkg.pop(p, None)
-                elif not all(merged(view, l) for l in links) or not packaged(final):
-                    pkg[p] = boot.text(final)
+                    final, _ = boot.resolve(p)
+                    if boot.kind(final) == 0o100000:
+                        out[p] = boot.text(final)
+                        pkg.pop(p, None)
+                    continue
+                pats = env_patterns(p)
+                for q in env_matches(boot, pats) if pats else [p]:
+                    if q in out or q in pkg:
+                        continue
+                    final, links = boot.resolve(q)
+                    if boot.kind(final) == 0o100000 and (
+                            not all(merged(view, l) for l in links) or not packaged(final)):
+                        pkg[q] = boot.text(final)
     return out, pkg
 
 

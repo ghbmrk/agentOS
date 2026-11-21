@@ -1345,6 +1345,31 @@ class EnvFilesTest(unittest.TestCase):
         self.assertEqual(pkg, {"/etc/default/x": "LD_PRELOAD=/var/lib/agentos-x/x.so\n", "/etc/default/l": "P=1\n"})
 
 
+    def test_a_package_s_line_with_a_specifier_names_every_file_it_may(self):
+        # #6312 Security 1: a template's instance (%i) or a host name (%H) selects the file at run time, so
+        # every file of ours the line may name is held; a path specifier is read as each value it may take
+        bad = "LD_PRELOAD=/var/lib/agentos-x/x.so\n"
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/etc/default/pkgx-a": bad, "/etc/default/pkgx-b/c": bad, "/etc/default/other": bad,
+                         "/etc/default/host-box": bad, "/root/.config/pkgx.env": bad, "/etc/pkgx.env": "P=1\n",
+                         "/etc/default/pkgx-l": "-> /var/lib/agentos-x", "/var/lib/agentos-x/e": bad,
+                         "/etc/pct%.env": bad, "/run/pkgx-r": bad})
+            lines = ("EnvironmentFile=-/etc/default/pkgx-%i", "EnvironmentFile=/etc/default/host-%H",
+                     "EnvironmentFile=%E/pkgx.env", "EnvironmentFile=/etc/pct%%.env", "EnvironmentFile=%t/pkgx-r")
+            units = [{"files": [{"ours": False, "text": "[Service]\n" + "\n".join(lines) + "\n"}]}]
+            ours, pkg = r.env_files(v, units, lambda p: p == "/etc/pkgx.env")
+            self.assertEqual(ours, {})
+            # %I may unescape to a path, so the wildcard crosses components and directory links; /run is a
+            # boot mount; the package's own /etc/pkgx.env is the package's
+            self.assertEqual(sorted(pkg), ["/etc/default/host-box", "/etc/default/pkgx-a", "/etc/default/pkgx-b/c",
+                                           "/etc/default/pkgx-l/e", "/etc/pct%.env", "/root/.config/pkgx.env"])
+            for spec in ("%y", "%Y", "%s", "%1", "%"):
+                with self.subTest(spec=spec):
+                    units = [{"files": [{"ours": False, "text": "[Service]\nEnvironmentFile=/etc/x" + spec + "\n"}]}]
+                    with self.assertRaisesRegex(SystemExit, "does not expand"):
+                        r.env_files(v, units)
+
+
 class UserManagerTest(unittest.TestCase):
     """offline_systemd.UserManager asks root's user manager over its own bus (#6002)."""
 
