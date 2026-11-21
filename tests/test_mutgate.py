@@ -3095,6 +3095,40 @@ class MovedDecls(unittest.TestCase):
                                     {"hint_test.go": added, "u_test.go": 'package hint\n\nimport "unicode"\n\nvar _ = unicode.IsDigit\n'}),
                          (["TestDown"], ["TestDown"]))
 
+    def test_a_package_wide_directive_is_every_test(self):
+        # #6377: a //go:debug line sets a GODEBUG default for the whole test binary, so adding, changing,
+        # removing or moving one changes every test of the package, not only its own file's. A //go:
+        # directive not known to reach only its declaration or file is read so too (fail closed).
+        # REQ: MUT-go-debug-every
+        other = 'package hint\n\nimport "testing"\n\nfunc TestOther(t *testing.T) {}\n'
+        base = {"hint_test.go": MOVE_TEST, "other_test.go": other}
+        debug = "//go:debug panicnil=1\n\n"
+        for name, was, now in (
+                ("added above the package clause", base, {**base, "other_test.go": debug + other}),
+                ("added right above it", base, {**base, "other_test.go": debug.rstrip("\n") + "\n" + other}),
+                ("changed", {**base, "other_test.go": debug + other},
+                 {**base, "other_test.go": debug.replace("=1", "=0") + other}),
+                ("removed", {**base, "other_test.go": debug + other}, base),
+                ("moved to another file", {**base, "other_test.go": debug + other},
+                 {"hint_test.go": debug + MOVE_TEST, "other_test.go": other}),
+                ("in a new file", base, {**base, "new_test.go": debug + "package hint\n"}),
+                ("misplaced on a function", base,
+                 {**base, "other_test.go": other.replace("func TestOther", "//go:debug panicnil=1\nfunc TestOther")}),
+                ("a directive not known", base, {**base, "other_test.go": "//go:future x\n\n" + other})):
+            with self.subTest(name):
+                self.assertEqual(self.reach(was, now), (None, None))
+        # An unchanged go:debug line changes nothing: an edit elsewhere in its file is still that code's.
+        held = {**base, "other_test.go": debug + other}
+        self.assertEqual(self.reach(held, {**held, "other_test.go": debug + other.replace("{}\n", "{\n\t_ = Up(1)\n}\n")}),
+                         (["TestOther"], ["TestOther"]))
+        # A directive that reaches only its declaration stays that declaration's tests.
+        self.assertEqual(self.reach(base, {**base, "hint_test.go": MOVE_TEST.replace("func one()", "//go:noinline\nfunc one()")}),
+                         (["TestUp"], ["TestUp"]))
+        for d in ("go:debug x=1", "go:linkname a b", "go:future"):
+            self.assertTrue(mutgate._decls("broker/hint/a_test.go", f"//{d}\npackage hint\n")[0][5], d)
+        for d in ("go:build linux", "go:noinline", "go:nosplit", "go:embed x.txt"):
+            self.assertFalse(mutgate._decls("broker/hint/a_test.go", f"//{d}\npackage hint\n")[0][5], d)
+
 
     def test_file_name_constraints_cover_every_port(self):
         # _name_tags reads a GOOS or GOARCH from a file name only if it is listed: every port the pinned

@@ -894,14 +894,20 @@ def moved(diff_text, mb, head):
 # reaches its methods. A test reaches what it reaches, transitively; what every test may run
 # (TestMain, init, a package var with an initializer, a blank or dot import, a method on a type no
 # test file of its package clause declares, which package code may call through an interface, a
-# file with a linkname) reaches all of them, as does a line no test reaches (fail closed). A named
-# import reaches its file's declarations' tests (D-319).
+# file with a linkname, a directive go reads package-wide, such as go:debug) reaches all of them, as
+# does a line no test reaches (fail closed). A named import reaches its file's declarations' tests (D-319).
 WORD = re.compile(r"[A-Za-z_]\w*")
 FUNC_HEAD = re.compile(r"^func\s*(?:\(\s*(?:\w+\s+)?\*?\s*(\w+)[^)]*\)\s*)?(\w+)")
 NAMED = re.compile(r"^(?:var|const|type)\s+(\w+(?:\s*,\s*\w+)*)")
 GROUPED = re.compile(r"^(?:var|const|type)\s*\(")
 GROUP_NAMES = re.compile(r"(\w+(?:\s*,\s*\w+)*)")
 SIDE_IMPORT = re.compile(r'(?:^|[\s(;])[_.]\s*["`]', re.M)
+# A `//go:` directive reaches the declaration it sits on, or for a build line its own file, only when
+# go reads it so; any other, `//go:debug` (a GODEBUG default of the whole test binary, Go 1.21+) or one
+# not read here, is a setting of every test (#6377).
+DIRECTIVE = re.compile(r"^\s*//go:(\w*)", re.M)
+LOCAL_DIRECTIVES = {"build", "embed", "generate", "noinline", "nosplit", "norace", "noescape", "nocheckptr",
+                    "uintptrescapes", "fix"}
 EVERY = None
 
 
@@ -964,7 +970,8 @@ def _decls(path, text):
             continue
         body, plain = "\n".join(code[first - 1:last]), "\n".join(bare[first - 1:last])
         head = bare[at - 1] if at else ""
-        kind, names, recv, every = "header", set(), None, linked
+        kind, names, recv, every = "header", set(), None, linked or any(
+            m not in LOCAL_DIRECTIVES for m in DIRECTIVE.findall("\n".join(rows[first - 1:last])))
         if head.startswith("import"):
             every = every or bool(SIDE_IMPORT.search(body[body.index("import") + len("import"):]))
         elif head.startswith("func"):
