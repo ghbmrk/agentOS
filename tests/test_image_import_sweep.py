@@ -74,11 +74,12 @@ KRB5KDF = 'const char *k = "KRB5KDF";\nint main(void) { return k[0]; }\n'
 
 
 def newc(members):
-    """A newc cpio archive of MEMBERS (name, mode, content), then the trailer."""
+    """A newc cpio archive of MEMBERS (name, mode, content, and optionally ino and nlink), then the trailer."""
     out = b""
-    for i, (n, mode, body) in enumerate(list(members) + [("TRAILER!!!", 0, b"")]):
+    for i, (n, mode, body, *link) in enumerate(list(members) + [("TRAILER!!!", 0, b"")]):
         name = n.encode() + b"\0"
-        out += b"070701" + b"".join(b"%08X" % v for v in (1000 + i, mode, 0, 0, 1, 0, len(body), 0, 0, 0, 0,
+        ino, nlink = link or (1000 + i, 1)
+        out += b"070701" + b"".join(b"%08X" % v for v in (ino, mode, 0, 0, nlink, 0, len(body), 0, 0, 0, 0,
                                                             len(name), 0))
         out += name + b"\0" * (-(110 + len(name)) % 4) + body + b"\0" * (-len(body) % 4)
     return out
@@ -267,8 +268,10 @@ class CipherSitesTest(Tree):
 
     def test_digest_of_each_held_file(self):
         tree = sweep.run_tree(str(self.tree))["tree"]
-        # #6299: and of each file reaching a group, for the pinned [regex] and [glob] entries.
-        self.assertEqual(set(tree["sha256"]), set(tree["cipher"]) | {p for _, p in sweep.reach({"t": tree})})
+        # #6299: and of each file reaching a group, for the pinned [regex] and [glob] entries, and of each
+        # with an unresolved NEEDED name, for [unresolved] (Security on #6382).
+        self.assertEqual(set(tree["sha256"]), set(tree["cipher"]) | {p for _, p in sweep.reach({"t": tree})}
+                         | set(tree["unresolved"]))
         self.assertIn("/usr/bin/daemon", tree["sha256"])
         self.assertEqual(tree["sha256"]["/usr/bin/spells"],
                          __import__("hashlib").sha256((self.tree / "usr/bin/spells").read_bytes()).hexdigest())
@@ -533,7 +536,7 @@ class RefusalsTest(unittest.TestCase):
             a.write_text("/usr/bin/bash{0}\n[glob]\n# why\n/usr/bin/bash{0}  # the shell\n/usr/lib/libg.so.*{0}\n"
                          "[cipher]\n/usr/lib/libcrypto.so.3 *\n".format(PIN))
             self.assertEqual(sweep.read_allow(a), ([E("/usr/bin/bash")], {"/usr/lib/libcrypto.so.3": "*"},
-                                                   [E("/usr/bin/bash"), E("/usr/lib/libg.so.*")], []))
+                                                   [E("/usr/bin/bash"), E("/usr/lib/libg.so.*")], [], []))
             a.write_text("/usr/bin/bash{0}\n[cipher]\n/usr/lib/libcrypto.so.3 *\n[glob]\n/usr/bin/x{0}\n".format(PIN))
             self.assertEqual(sweep.read_allow(a)[2], [E("/usr/bin/x")])
             for body, want in (("[glob]\n/usr/bin/x%s\n[glob]\n" % PIN, ":3: [glob] is given again"),
@@ -886,7 +889,7 @@ class ViaEntryTest(unittest.TestCase):
             a = pathlib.Path(d) / "allow"
             a.write_text("/usr/lib/libs.so.*%s\nvia /usr/lib/libs.so.*  # its users\n[glob]\nvia  /usr/lib/libg.so.*\n" % PIN)
             self.assertEqual(sweep.read_allow(a), ([E("/usr/lib/libs.so.*"), E("/usr/lib/libs.so.*", True)], {},
-                                                   [E("/usr/lib/libg.so.*", True)], []))
+                                                   [E("/usr/lib/libg.so.*", True)], [], []))
             for body, want in (("via\n", ":1: via is not an entry; a regex entry is " + sweep.ENTRY_FORMAT),
                                ("via /a /b\n", ":1: via /a /b is not an entry"),
                                ("via /a%s\n" % PIN, "is not an entry"),
@@ -908,7 +911,7 @@ class ViaEntryTest(unittest.TestCase):
                 self.assertIn(want, str(cm.exception))
 
     def test_shipped_lists_are_collapsed(self):
-        regex, _, globs, _ = sweep.read_allow(sweep.ALLOW)
+        regex, _, globs, _, _ = sweep.read_allow(sweep.ALLOW)
         for section in (regex, globs):
             for e in section:
                 with self.subTest(e=e):
@@ -1421,8 +1424,8 @@ class GlibcIdentityTest(unittest.TestCase):
 
 @NEEDS_CC
 class UnresolvedTest(unittest.TestCase):
-    """Security R4 on #6382: a NEEDED name no file of the place answers to is named in the summary. The
-    loader cannot map that file in its root, so what the missing library would import never runs there."""
+    """Security R4 on #6382: a NEEDED name no file or link of the place answers to is named in the summary
+    and fails the step unless a pinned [unresolved] entry accepts the file (LinkTest has the links)."""
 
     def test_an_unresolved_needed_is_named(self):
         with tempfile.TemporaryDirectory() as t:
@@ -1437,11 +1440,122 @@ class UnresolvedTest(unittest.TestCase):
             got = sweep.run_tree(str(tree))["tree"]
             self.assertEqual(got["unresolved"], {})
             self.assertEqual(got["through"]["/usr/bin/w"], {"/usr/lib/x86_64-linux-gnu/libwraps.so.1": ["dlsym"]})
-            # The wrapper gone: the loader cannot map w in this root, and the summary names it.
+            # The wrapper gone: what it would look up is not read, and the summary names it.
             (lib / "libwraps.so.1").unlink()
             got = sweep.run_tree(str(tree))["tree"]
         self.assertEqual(got["unresolved"], {"/usr/bin/w": ["libwraps.so.1"]})
         self.assertIn("  unresolved /usr/bin/w: libwraps.so.1", sweep.summary({"t": got}))
+        # It fails the step until a pinned [unresolved] entry accepts w's bytes (Security on #6382).
+        sha = got["sha256"]["/usr/bin/w"]
+        places = {"t": got}
+        self.assertEqual(sweep.unresolved_refusals(places, []), [
+            "t: /usr/bin/w needs libwraps.so.1, which no file or link there answers to, so what it would import "
+            "through it is not read; find why it never loads there, then add the entry, with that reason, to "
+            "import_sweep.allow [unresolved]: /usr/bin/w sha256=" + sha])
+        self.assertEqual(sweep.unresolved_refusals(places, [sweep.Entry("/usr/bin/*", False, (sha,))]), [])
+        self.assertEqual(sweep.unresolved_refusals(places, [sweep.Entry("/usr/bin/w", False, ("cd" * 32,))]), [
+            "t: /usr/bin/w needs libwraps.so.1 and holds other bytes than import_sweep.allow [unresolved] /usr/bin/w "
+            "pins; review it again, then pin them: /usr/bin/w sha256=" + sha,
+            "import_sweep.allow: [unresolved] /usr/bin/w pins sha256=%s, which no file it matches holds; remove it"
+            % ("cd" * 32)])
+        self.assertEqual(sweep.unresolved_refusals(places, [sweep.Entry("/usr/bin/w", False, (sha,)),
+                                                            sweep.Entry("/usr/bin/gone", False, (sha,))]), [
+            "import_sweep.allow: [unresolved] /usr/bin/gone matches no file with an unresolved NEEDED name; "
+            "remove it"])
+
+    def test_the_section_parses(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = pathlib.Path(d) / "allow"
+            a.write_text("[unresolved]\n# why\n/usr/lib/x.node%s\n" % PIN)
+            self.assertEqual(sweep.read_allow(a)[4], [E("/usr/lib/x.node")])
+            for body, want in (("[unresolved]\nvia /usr/lib/x.node\n", "is not an entry"),
+                               ("[unresolved]\n/usr/lib/x.node\n", "pins no SHA-256"),
+                               ("[unresolved]\n[unresolved]\n", "[unresolved] is given again")):
+                a.write_text(body)
+                with self.subTest(body=body), self.assertRaises(SystemExit) as cm:
+                    sweep.read_allow(a)
+                self.assertIn(want, str(cm.exception))
+
+
+LIB_FWD = '#include <dlfcn.h>\nvoid *fwd(const char *n) { return dlsym(RTLD_DEFAULT, n); }\n'
+CALLS_FWD = 'void *fwd(const char *);\nint main(void) { return fwd("glob") == 0; }\n'
+
+
+@NEEDS_CC
+class LinkTest(unittest.TestCase):
+    """Security on #6382: a NEEDED name the loader resolves through a symbolic link (a library with no
+    SONAME, named by a link) answers to the file the link names, so a dlsym wrapper reached that way is a
+    lookup source and the library is in the file's closure. The Security repro, built with gcc -O2."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        t = cls.t = pathlib.Path(cls.tmp.name)
+        lib = t / "usr/lib/x86_64-linux-gnu"
+        lib.mkdir(parents=True)
+        (t / "usr/bin").mkdir()
+        built(LIB_FWD, lib / "libw-real.so", "-O2", "-shared", "-fPIC", "-ldl")
+        os.symlink("libw-real.so", lib / "libw.so")
+        built(CALLS_FWD, t / "usr/bin/m", "-O2", "-L" + str(lib), "-lw")
+        cls.lib = lib
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    REAL = "/usr/lib/x86_64-linux-gnu/libw-real.so"
+
+    def test_a_library_named_by_a_link_is_resolved(self):
+        self.assertEqual(sweep.read_elf(self.t / "usr/bin/m")[1:3], (["libw.so", "libc.so.6"], None))
+        got = sweep.run_tree(str(self.t))["tree"]
+        self.assertEqual(got["lookups"], {"/usr/bin/m": ["glob"]})
+        self.assertEqual(got["through"], {"/usr/bin/m": {self.REAL: ["dlsym"]}})
+        self.assertEqual(got["unresolved"]["/usr/bin/m"], ["libc.so.6"])
+        # Without the link the name is unresolved, and unresolved_refusals fails it.
+        without = sweep.sweep(sweep.tree_files(str(self.t)))
+        self.assertEqual(without["unresolved"]["/usr/bin/m"], ["libc.so.6", "libw.so"])
+        self.assertEqual(without["lookups"], {})
+
+    def test_links_through_directories_and_absolute_targets(self):
+        # /lib -> usr/lib (merged /usr), and an absolute target: both resolve within the place.
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d)
+            shutil.copytree(self.t / "usr", t / "usr", symlinks=True)
+            os.symlink("usr/lib", t / "lib")
+            (t / "usr/lib/x86_64-linux-gnu/libw.so").unlink()
+            os.symlink("/lib/x86_64-linux-gnu/libw-real.so", t / "usr/lib/x86_64-linux-gnu/libw.so")
+            got = sweep.run_tree(str(t))["tree"]
+        self.assertEqual(got["through"], {"/usr/bin/m": {self.REAL: ["dlsym"]}})
+
+    def test_resolve(self):
+        links = {"/lib": "usr/lib", "/usr/lib/a.so": "../lib/b.so", "/usr/lib/loop": "loop",
+                 "/usr/lib/agentos/images/g/usr/lib/c.so": "/usr/lib/d.so",
+                 "/usr/lib/agentos/images/g/usr/lib/e.so": "../../../../../../../../x.so"}
+        self.assertEqual(sweep.resolve("/lib/a.so", links), "/usr/lib/b.so")
+        self.assertIsNone(sweep.resolve("/usr/lib/loop", links))
+        # A guest's absolute link and its ".." stay in the guest root, as its processes see it.
+        self.assertEqual(sweep.resolve("/usr/lib/agentos/images/g/usr/lib/c.so", links),
+                         "/usr/lib/agentos/images/g/usr/lib/d.so")
+        self.assertEqual(sweep.resolve("/usr/lib/agentos/images/g/usr/lib/e.so", links),
+                         "/usr/lib/agentos/images/g/x.so")
+
+    def test_initrd_links_and_hard_links_resolve(self):
+        real = (self.lib / "libw-real.so").read_bytes()
+        m = (self.t / "usr/bin/m").read_bytes()
+        cases = {
+            "symbolic": [("usr/lib/libw-real.so", 0o100755, real), ("usr/lib/libw.so", 0o120777, b"libw-real.so")],
+            # Hard links: the body is on one name only (newc), the other name answers to the same file.
+            "hard": [("usr/lib/libw.so", 0o100755, b"", 7, 2), ("usr/lib/libw-real.so", 0o100755, real, 7, 2)],
+        }
+        for case, members in cases.items():
+            data = newc(members + [("usr/bin/m", 0o100755, m)])
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as d:
+                p = pathlib.Path(d) / "initrd"
+                p.write_bytes(data)
+                with tempfile.TemporaryDirectory() as scratch:
+                    got = sweep.initrd_place(p, scratch)
+                self.assertEqual(got["through"], {"/usr/bin/m": {"/usr/lib/libw-real.so": ["dlsym"]}})
+                self.assertEqual(set(got["unresolved"]), {"/usr/bin/m", "/usr/lib/libw-real.so"})
 
 
 @NEEDS_CC

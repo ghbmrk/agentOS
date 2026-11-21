@@ -29,7 +29,8 @@ the function each mark stands for (#6298, #6299); each of these three counts as 
 library other than itself, and those libraries, whether or not the file imports a symbol itself (#6297: a
 file importing one group's symbols can reach another group's through a library); "glibc", each glibc
 (SONAME libc.so.6 at GLIBC_PATH) and the marks it holds; "unresolved", each file with a NEEDED name no
-file of the place answers to, and those names; "packed", each file whose code is not in its bytes as stored,
+file or symbolic link of the place answers to, and those names (each place's links resolve names as the
+loader does; resolve()); "packed", each file whose code is not in its bytes as stored,
 and why (packed()); "cipher", each file whose bytes hold a CIPHER_NAMES or SPELT name and its references
 to each (cipher_sites); "sha256", the SHA-256 of each file reaching a group or held under "cipher";
 "unread", each ELF file objdump failed on; and, for an initrd, "others", its executable members that are not ELF files. Only symbols bound to a GLIBC_ version count, so a library's own
@@ -45,7 +46,8 @@ reviewed library's dependents need no entry each, and a new direct caller or new
 entry that accepts nothing, or a pin no accepted file holds, also fails, so each list stays its record's.
 It also exits 1 when a file holding a selector name or a SPELT name matches no [cipher] entry of ALLOW or
 more than one, or holds other sites or other bytes (SHA-256) than the counted entry it matches, or an
-entry matches nothing; on any packed file; and on an ALLOW it cannot read (read_allow). The control is the
+entry matches nothing; on any packed file; on any unresolved NEEDED name that no [unresolved] entry pinning
+the file accepts (unresolved_refusals); and on an ALLOW it cannot read (read_allow). The control is the
 scan itself: it also exits 1 when objdump failed on a file, the main tree or an initrd with executable
 members read no ELF file, the main tree has no importer of regcomp (bash and grep always import it), or no
 call site of EVP_CIPHER_fetch (libcryptsetup and libcrypto always hold one), no glibc, or no file carrying
@@ -145,6 +147,36 @@ CARRIES = {b"glob_in_dir\0": "glob", b"__vfwscanf_internal\0": "vfwscanf",
 # SONAME alone would let any file named so skip the carried-copy rule).
 GLIBC = "libc.so.6"
 GLIBC_PATH = re.compile(r"^(/usr/lib/agentos/images/[^/]+)?/usr/lib/x86_64-linux-gnu/libc\.so\.6$")
+# A guest root in the main tree: a process there sees it as /, so its absolute links resolve under it.
+GUEST_ROOT = re.compile(r"^/usr/lib/agentos/images/[^/]+(?=/)")
+
+
+def resolve(path, links, hops=40):
+    """The path PATH names once every symbolic link in it (LINKS: {path: target}, a directory's included)
+    is followed, as a process whose root is PATH's sees it (a guest's root for a path under one: GUEST_ROOT),
+    so ".." stops there and an absolute target starts there; None after HOPS links (a loop), as the
+    kernel's ELOOP. Security on #6382: a NEEDED name the loader maps through a link is resolved."""
+    m = GUEST_ROOT.match(path)
+    root = m.group().strip("/").split("/") if m else []
+    parts, done = path.strip("/").split("/")[len(root):], list(root)
+    while parts:
+        c = parts.pop(0)
+        if c in ("", "."):
+            continue
+        if c == "..":
+            done = done[:-1] if len(done) > len(root) else done
+            continue
+        cur = "/" + "/".join(done + [c])
+        if cur not in links:
+            done.append(c)
+            continue
+        hops -= 1
+        if hops < 0:
+            return None
+        if links[cur].startswith("/"):
+            done = list(root)
+        parts = links[cur].split("/") + parts
+    return "/" + "/".join(done)
 
 
 def group_of(sym):
@@ -305,8 +337,10 @@ def own(v, p):
     return set(v["imports"].get(p, [])) | set(v.get("lookups", {}).get(p, [])) | set(v.get("carries", {}).get(p, []))
 
 
-def sweep(files):
-    """FILES maps a shown path to a readable path. Returns the place's record (module docstring)."""
+def sweep(files, links=None):
+    """FILES maps a shown path to a readable path, and LINKS each symbolic link of the place (a shown path)
+    to its target, so a NEEDED name a link answers to resolves to the file the link names (resolve()).
+    Returns the place's record (module docstring)."""
     imports, needed, by_name, unread, cipher, digest = {}, {}, {}, [], {}, {}
     dl, names, carries, glibc, opaque = {}, {}, {}, {}, {}
     for shown, real in files.items():
@@ -333,6 +367,12 @@ def sweep(files):
         # A NEEDED entry names a library's SONAME, which on disk is a symbolic link to the file read.
         for n in {os.path.basename(shown), soname} - {None}:
             by_name.setdefault(n, []).append(shown)
+    # A NEEDED name can also be a link's (libw.so -> libw-real.so, a library with no SONAME; Security on
+    # #6382): the loader opens the link and maps the file it names, so the name answers to that file.
+    for link in sorted(links or {}):
+        to = resolve(link, links)
+        if to in files and to not in by_name.get(os.path.basename(link), []):
+            by_name.setdefault(os.path.basename(link), []).append(to)
 
     def closure(shown):
         """The files of this place in SHOWN's NEEDED closure, itself excluded."""
@@ -347,8 +387,8 @@ def sweep(files):
                 todo += needed.get(lib, [])
         return libs - {shown}
     reached = {shown: closure(shown) for shown in files}
-    # A NEEDED name no file of the place answers to (Security R4 on #6382): the loader cannot map such a
-    # file in that root, and the summary names it.
+    # A NEEDED name no file or link of the place answers to (Security R4 on #6382): what that library would
+    # import or look up is not read, so it fails unless an [unresolved] entry says why it never loads there.
     unresolved = {shown: sorted(set(n for n in needed[shown] if n not in by_name)) for shown in files}
     lookups, through = {}, {}
     for shown in files:
@@ -361,6 +401,7 @@ def sweep(files):
     # Each reaching or [cipher] file's SHA-256, and each lookup source's, for the pinned allow entries
     # (#5861, #6299).
     pinned = importers | set(via) | set(cipher) | {lib for src in through.values() for lib in src}
+    pinned |= {p for p, n in unresolved.items() if n}
     return {"scanned": len(files), "imports": dict(sorted(imports.items())), "via": dict(sorted(via.items())),
             "lookups": dict(sorted(lookups.items())), "through": dict(sorted(through.items())),
             "carries": dict(sorted(carries.items())),
@@ -391,6 +432,20 @@ def is_file(path, follow=True):
         cannot_read(e)
 
 
+def tree_links(top, prefix="/", skip=()):
+    """Every symbolic link under TOP, a directory's included, as {prefix + relative path: its target}."""
+    links = {}
+    for d, dirs, names in walk(top):
+        rel = os.path.relpath(d, top)
+        if rel == ".":
+            dirs[:] = [x for x in dirs if x not in skip]
+        for n in dirs + names:
+            p = os.path.join(d, n)
+            if os.path.islink(p):
+                links[os.path.normpath(os.path.join(prefix, rel, n))] = os.readlink(p)
+    return links
+
+
 def tree_files(top, prefix="/", skip=()):
     """Every regular ELF file under TOP (symbolic links not followed), as {prefix + relative path: path}."""
     files = {}
@@ -406,26 +461,37 @@ def tree_files(top, prefix="/", skip=()):
 
 
 def initrd_place(path, scratch):
-    """The record of the initrd at PATH: each regular ELF member written under SCRATCH and read."""
+    """The record of the initrd at PATH: each regular ELF member written under SCRATCH and read, with its
+    symbolic links, and each other name of a hard-linked ELF member as a link to it (Security on #6382)."""
     import finish_image
-    files, others = {}, 0
-    for i, (name, mode, body, _link) in enumerate(finish_image.cpio_members(pathlib.Path(path).read_bytes())):
-        if stat.S_ISREG(mode) and body[:4] == b"\x7fELF":
+    files, others, links, group = {}, 0, {}, {}
+    for i, (name, mode, body, link) in enumerate(finish_image.cpio_members(pathlib.Path(path).read_bytes())):
+        shown = "/" + name.lstrip("/")
+        if link is not None:
+            group.setdefault(link, []).append(shown)
+        if stat.S_ISLNK(mode):
+            links[shown] = body.decode("utf-8", "surrogateescape")
+        elif stat.S_ISREG(mode) and body[:4] == b"\x7fELF":
             f = os.path.join(scratch, "%d" % i)
             pathlib.Path(f).write_bytes(body)
-            files["/" + name.lstrip("/")] = f
+            files[shown] = f
         elif stat.S_ISREG(mode) and mode & 0o111:
             others += 1
+    for names in group.values():
+        to = next((n for n in names if n in files), None)
+        links.update({n: to for n in names if to and n not in files})
     # "others": executable regular members that are not ELF files (problems()). A modules initrd's
     # modules, indexes and firmware are not executable.
-    return dict(sweep(files), others=others)
+    return dict(sweep(files, links), others=others)
 
 
 def run_tree(root, usr=None):
     files = tree_files(root, skip=("usr",) if usr else ())
+    links = tree_links(root, skip=("usr",) if usr else ())
     if usr:
         files.update(tree_files(usr, "/usr"))
-    return {"tree": sweep(files)}
+        links.update(tree_links(usr, "/usr"))
+    return {"tree": sweep(files, links)}
 
 
 def run_build(out, version):
@@ -538,16 +604,16 @@ REVIEW = ("review where its names come from, then %s the [cipher] entry and the 
 
 
 def read_allow(path):
-    """(the regex entries, the [cipher] entries, the [glob] entries, the [wrapper] entries) of ALLOW. The
-    regex entries come first, one per line, then each section once, opened by its line ([glob], [cipher] or
-    [wrapper]); a regex, [glob] or [wrapper] entry is an Entry (ENTRY_FORMAT; a [wrapper] entry is never
-    "via"), each given once. A [cipher] entry is a glob, then either "*" (not
+    """(the regex entries, the [cipher] entries, the [glob] entries, the [wrapper] entries, the [unresolved]
+    entries) of ALLOW. The regex entries come first, one per line, then each section once, opened by its
+    line ([glob], [cipher], [wrapper] or [unresolved]); a regex, [glob], [wrapper] or [unresolved] entry is
+    an Entry (ENTRY_FORMAT; a [wrapper] or [unresolved] entry is never "via"), each given once. A [cipher] entry is a glob, then either "*" (not
     counted) or the SHA-256 of the file reviewed and the sites it holds exactly (FORMAT), read as
     {"sha256": hex, "sites": {name: count}}: a new package version changes the bytes, so the source is
     read again even when the counts hold (#5861). Exits naming the line on any other entry, a glob given
     twice, or a name or the digest given twice in one entry, and on a section line it does not know or
     has read already."""
-    regex, cipher, globs, wrappers, section, seen = [], {}, [], [], None, set()
+    regex, cipher, globs, wrappers, unres, section, seen = [], {}, [], [], [], None, set()
     for n, l in enumerate(pathlib.Path(path).read_text().splitlines(), 1):
         l = l.split("#", 1)[0].strip()
 
@@ -555,13 +621,14 @@ def read_allow(path):
             sys.exit("import sweep: %s:%d: %s; a [cipher] entry is %s" % (path, n, why, FORMAT))
         if l.startswith("["):
             section = l[1:-1] if l.endswith("]") else l
-            if section not in ("glob", "cipher", "wrapper") or section in seen:
-                sys.exit("import sweep: %s:%d: %s is %s; the sections are [glob], [cipher] and [wrapper], each once"
+            if section not in ("glob", "cipher", "wrapper", "unresolved") or section in seen:
+                sys.exit("import sweep: %s:%d: %s is %s; the sections are [glob], [cipher], [wrapper] and "
+                         "[unresolved], each once"
                          % (path, n, l, "given again" if section in seen else "no section"))
             seen.add(section)
-        elif l and section in (None, "glob", "wrapper"):
-            e, into = parse_entry(l), {None: regex, "glob": globs, "wrapper": wrappers}[section]
-            if section == "wrapper" and isinstance(e, Entry) and e.via:
+        elif l and section in (None, "glob", "wrapper", "unresolved"):
+            e, into = parse_entry(l), {None: regex, "glob": globs, "wrapper": wrappers, "unresolved": unres}[section]
+            if section in ("wrapper", "unresolved") and isinstance(e, Entry) and e.via:
                 e = "%s is not an entry" % l
             if not isinstance(e, Entry) or (e.glob, e.via) in {(x.glob, x.via) for x in into}:
                 sys.exit("import sweep: %s:%d: %s; a%s entry is %s, each given once" % (
@@ -593,7 +660,38 @@ def read_allow(path):
             if not sites:
                 bad("%s counts no site" % glob)
             cipher[glob] = {"sha256": digests[0], "sites": sites}
-    return regex, cipher, globs, wrappers
+    return regex, cipher, globs, wrappers, unres
+
+
+def unresolved_refusals(places, entries):
+    """Each file of PLACES with a NEEDED name no file or link of its place answers to (Security R4 on #6382)
+    that no [unresolved] entry (ENTRY_FORMAT, never "via") accepts: one naming it that pins its SHA-256,
+    whose comment says why that library never loads there (another architecture's or libc's build, a library
+    the image does not ship and the file's own code never needs at run time). The loader would refuse such a
+    file, or another file of that name it finds outside the place would run unread. Each entry has to accept
+    a file and each pin has to be one's, as [wrapper] entries do."""
+    errs, used = [], set()
+    for place, v in places.items():
+        for p, names in v.get("unresolved", {}).items():
+            hit = [e for e in entries if fnmatch.fnmatchcase(p, e.glob)]
+            sha = v.get("sha256", {}).get(p) or "MISSING"
+            ok = [e for e in hit if sha in e.sha256]
+            used.update((e, None) for e in hit)
+            used.update((e, sha) for e in ok)
+            if not hit:
+                errs.append("%s: %s needs %s, which no file or link there answers to, so what it would import "
+                            "through it is not read; find why it never loads there, then add the entry, with that "
+                            "reason, to import_sweep.allow [unresolved]: %s sha256=%s"
+                            % (place, p, " ".join(names), p, sha))
+            elif not ok:
+                errs.append("%s: %s needs %s and holds other bytes than import_sweep.allow [unresolved] %s pins; "
+                            "review it again, then pin them: %s sha256=%s"
+                            % (place, p, " ".join(names), hit[0].glob, hit[0].glob, sha))
+    errs += ["import_sweep.allow: [unresolved] %s matches no file with an unresolved NEEDED name; remove it" % e.glob
+             for e in entries if (e, None) not in used]
+    errs += ["import_sweep.allow: [unresolved] %s pins sha256=%s, which no file it matches holds; remove it"
+             % (e.glob, d) for e in entries if (e, None) in used for d in e.sha256 if (e, d) not in used]
+    return errs
 
 
 def entry_line(p, sha, sites):
@@ -742,9 +840,10 @@ def main(argv):
         places = json.loads(pathlib.Path(argv[1]).read_text())
         lines = summary(places)
         print("\n".join(lines + annotations(lines)))
-        regex, cipher, globs, wrappers = read_allow(argv[2] if len(argv) == 3 else ALLOW)
+        regex, cipher, globs, wrappers, unres = read_allow(argv[2] if len(argv) == 3 else ALLOW)
         places, wrapped = unwrapped(places, wrappers)
-        errs = problems(places) + wrapped + refusals(places, regex, globs) + cipher_refusals(places, cipher)
+        errs = (problems(places) + unresolved_refusals(places, unres) + wrapped + refusals(places, regex, globs)
+                + cipher_refusals(places, cipher))
         for e in errs[:10]:
             print("::error title=import sweep::" + e.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
     elif len(argv) == 2 and argv[0] == "--tree":

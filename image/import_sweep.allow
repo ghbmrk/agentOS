@@ -47,6 +47,13 @@
 /usr/lib/agentos/images/*/bin/bash sha256=223fe8564b60636bc738b6178d3ba9a50ef7d791266b0efae6363bb716e4c47f
 /usr/lib/agentos/images/*/bin/rm sha256=c959a237e7b95d229eea44764b2246fcb61a95dc679a10ad0cc97ad84c2316c1
 
+# The openclaw guest's libcua_driver_sdk.so (@trycua/cua-driver-linux-x64-gnu 0.32.0, Rust) imports dlsym
+# (Rust std's weak symbols, fixed names) and ends strings with "re_exec": both are in .strtab, the symbol
+# table no loader maps, as the Rust names regorus::builtins::glob::make_glob and std's Command::pre_exec,
+# so no lookup can pass them. It also never loads in the guest: it needs libX11, libXi and libxkbcommon,
+# which the guest does not ship ([unresolved] below).
+/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@trycua/cua-driver-linux-x64-gnu/libcua_driver_sdk.so sha256=eca8cf7669d0de73e56fb8e7481d219f08fe27a70fab17963431fc951736c49d
+
 # libsmartcols (filters, and rpmatch) and the util-linux tools that need it (findmnt, lsblk, losetup,
 # swapon and the rest); fdisk, sfdisk and cfdisk also import rpmatch for their prompts.
 /usr/lib/x86_64-linux-gnu/libsmartcols.so.1.* sha256=f97455584112dae5d2594ca9a771af006343088444ca1d62a02329eb51534c47
@@ -141,6 +148,13 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 # reading to this node build: another version's dlsym calls are read again before it passes (#6299).
 /usr/lib/agentos/images/openclaw/usr/local/bin/node sha256=a7ec1b37e6ff9d187e4198c5b6df9a4eb1c74dd31804fb3bac55cc4ceca1ac01
 
+# The openclaw guest's libcua_driver_sdk.so (@trycua/cua-driver-linux-x64-gnu 0.32.0, Rust) imports dlsym
+# (Rust std's weak symbols, fixed names) and ends strings with "glob": both are in .strtab, the symbol
+# table no loader maps, as the Rust names regorus::builtins::glob::make_glob and std's Command::pre_exec,
+# so no lookup can pass them. It also never loads in the guest: it needs libX11, libXi and libxkbcommon,
+# which the guest does not ship ([unresolved] below).
+/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@trycua/cua-driver-linux-x64-gnu/libcua_driver_sdk.so sha256=eca8cf7669d0de73e56fb8e7481d219f08fe27a70fab17963431fc951736c49d
+
 [wrapper]
 # Libraries that import dlsym or dlvsym and pass it only names of their own, never a caller's string
 # (#6299): a file that needs one is no lookup through it, so a string it holds is not read as a name it
@@ -151,6 +165,20 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 # DLSYM_ARG(name) list its callers spell (idn-util.c, bpf-dlopen.c, cryptsetup-util.c and the other
 # *-util.c loaders), userdb.c looks up "_nss_systemd_block", and tpm2-util.c TSS2_TCTI_INFO_SYMBOL.
 /usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so sha256=9f6f06ff4883d23eee5e628c625878e8bc7f60613e945e04ead7793ae969f37c
+
+[unresolved]
+# Files with a NEEDED name that no file or symbolic link of their place answers to (Security R4 on #6382),
+# each pinned, with why that library never loads there: what it would import or look up is not read. The
+# loader resolves NEEDED names in the guest's own root, which holds no file of these names.
+
+# pi-tui's X11 platform addons: the arm64 build is another architecture's, and the x64 build needs
+# libxcb, which the guest does not ship, so dlopen of either fails and none of its code runs.
+/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@earendil-works/pi-tui/native/linux/prebuilds/linux-arm64/linux-platform-x11.node sha256=63d4545349a25b5c97e352ea6d254cea50ff3c14161212ad3ddb3fc28022ddb5
+/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@earendil-works/pi-tui/native/linux/prebuilds/linux-x64/linux-platform-x11.node sha256=522d2550f7fa5d0d5bd204f45983f786ce2be9cf80f27f00179640d31d0689d6
+# koffi's musl build needs musl's libc, which the guest (glibc) does not ship.
+/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@koromix/koffi-linux-x64/musl_x64/koffi.node sha256=2df33bea84a018e03403360c8592af657a32bf394b0097dc7aa23defefd5885a
+# libcua_driver_sdk.so needs libX11, libXi and libxkbcommon, which the guest does not ship.
+/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@trycua/cua-driver-linux-x64-gnu/libcua_driver_sdk.so sha256=eca8cf7669d0de73e56fb8e7481d219f08fe27a70fab17963431fc951736c49d
 
 [cipher]
 # The files of the built image (main tree and initrds) whose bytes name an OpenSSL by-name cipher
