@@ -369,14 +369,27 @@ NOT_CALL = ("case", "const", "for", "if", "import", "range", "return", "switch",
 # cgo or a raw system call reads by C string or descriptor (#6390).
 OPAQUE = ("C", "os/exec", "syscall", "golang.org/x/sys/unix")
 
-CALLEE = re.compile(r"(?:\b([A-Za-z_]\w*)\s*\.\s*)?\b([A-Za-z_]\w*)\s*$|[)\]}]\s*$")
+TOKEN = re.compile(r"\w+|\S")
+
+
+IMPORT_SPEC = re.compile(r"\s*(?:\(.*?\)|[^;\n]*)", re.S)
+
+
+def _import_spans(code):
+    """The (start, end) spans of code's import specs (comments blanked): after each `import`
+    keyword outside a literal, to the end of its `(...)` group, else to its line's end or `;`, so a
+    one-line group, an indented import and `package p; import "x"` all count (L3 on #6403)."""
+    blank, out = _uncommented(code, False), []
+    for m in re.finditer(r"\bimport\b", blank):
+        out.append((m.end(), IMPORT_SPEC.match(blank, m.end()).end()))
+    return out
 
 
 def _imports(code):
     """{name: path} of the imports of code (comments blanked, literals kept)."""
     out = {}
-    for spec in re.findall(r"^import\s*\((.*?)^\)", code, re.M | re.S) + re.findall(r"^import\s+([^(\s].*)$", code, re.M):
-        for m in re.finditer(r'(?:([\w.]+)\s+)?"([^"]+)"', spec):
+    for start, end in _import_spans(code):
+        for m in re.finditer(r'(?:([\w.]+)\s+)?["`]([^"`]+)["`]', code[start:end]):
             out[m[1] or m[2].rsplit("/", 1)[-1]] = m[2]
     return out
 
@@ -386,11 +399,11 @@ def _call_literals(code):
     depth, unless every call around them is to a PURE package, so
     os.ReadDir(strings.TrimSpace(".")) and g(".") give ".". A PURE package's name counts as it only
     where the file imports it and never names it without a `.` after (no local shadows it)."""
-    imports = _imports(code)
     blank = _uncommented(code, False)
-    pure = {n for n, p in imports.items() if p in PURE and not re.search(rf"\b{re.escape(n)}\b(?!\s*\.)", re.sub(
-        r'^import\s*\(.*?^\)|^import\s[^\n]*', "", blank, flags=re.M | re.S))}
-    out, stack, i = [], [], 0
+    for start, end in _import_spans(code):
+        blank = blank[:start] + " " * (end - start) + blank[end:]
+    pure = {n for n, p in _imports(code).items() if p in PURE and not re.search(rf"\b{re.escape(n)}\b(?!\s*\.)", blank)}
+    out, stack, toks, i = [], [], [""] * 2, 0  # toks: the tokens so far, whitespace (and comments) skipped
     while i < len(code):
         c = code[i]
         lit = RUNE.match(code, i) if c == "'" else LITERAL.match(code, i) if c in "\"`" else None
@@ -399,12 +412,22 @@ def _call_literals(code):
                 out.append(lit[0][1:-1])
             i = lit.end()
             continue
-        if c in "([{":
-            m = CALLEE.search(code, max(0, i - 128), i) if c == "(" else None
-            stack.append(bool(m) and not (m[2] in NOT_CALL or m[1] in pure))
-        elif c in ")]}" and stack:
+        if c.isspace():
+            i += 1
+            continue
+        tok = TOKEN.match(code, i)[0]
+        if tok == "(":
+            # A call follows a name, `)`, `]` or `}`, and a keyword opens a group. A pure name is
+            # always followed by `.` (above), so toks[-3] in pure is a selector's qualifier; it is
+            # the package only at the selector's start (`strings.Split`, not `t.strings.Open`).
+            name = re.match(r"\w", toks[-1]) and toks[-1] not in NOT_CALL
+            stack.append(bool(name) and not (toks[-3] in pure and toks[-4] != ".") or toks[-1] in (")", "]", "}"))
+        elif tok in "[{":
+            stack.append(False)
+        elif tok in ")]}" and stack:
             stack.pop()
-        i += 1
+        toks.append(tok)
+        i += len(tok)
     return out
 
 

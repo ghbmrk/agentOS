@@ -3045,28 +3045,45 @@ class DataFiles(unittest.TestCase):
                 ("an alias", 'func f() { rd := fsys.ReadDir; rd(".") }', True),
                 ("a call spaced from its parenthesis", 'var _, _ = filepath.Glob (".")', True),
                 ("a call split by a comment", 'var _, _ = filepath.Glob/* x */(".")', True),
+                # Security on #6403: no lookback window, and a PURE name only at a selector's start.
+                ("a call split by a long comment", 'var _, _ = os.ReadDir/*' + "x" * 200 + '*/(".")', True),
+                ("a call split by long space", 'var _, _ = os.ReadDir' + " " * 127 + '\n' + " " * 200 + '(".")', True),
+                ("a call split by lines", 'var _, _ = os.\n\tReadDir\n\t(\n\t".")', True),
+                ("a field named for a pure package", 'import "strings"\n\nfunc f(t T) { _ = strings.ToUpper("a"); t.strings.Open("..") }', True),
+                ("a chain through a pure package's name", 'import "bytes"\n\nvar _ = a.b.bytes.Open("./x")', True),
+                ("a pure package after a call", 'import "strings"\n\nvar _ = f().strings.Open("..")', True),
                 ("a parenthesized function", 'var _, _ = (filepath.Glob)(".")', True),
                 ("a root", 'var _ = walk("/")', True),
                 ("a literal in a composite argument", 'var _ = run(cfg{dir: "."})', True),
                 ("a pure call inside a path call", 'import "strings"\n\nvar _, _ = os.ReadDir(strings.TrimSpace("."))', True),
                 ("a pure package not imported", 'var _ = strings.Split(h, ".")', True),
+                ("a pure package shadowed after an import", 'import "strings"; func f() { strings := 1; _ = strings }\nvar _ = strings.Split(h, "..")', True),
                 ("a pure package shadowed", 'import "strings"\n\nfunc f() { strings := l{}; strings.Split(".") }', True),
                 ("a pure call", 'import "strings"\n\nvar _ = strings.Split(h, ".")', False),
                 ("a pure call under an alias", 'import s "strings"\n\nvar _ = s.Split(h, "..")', False),
+                ("a pure call split by a comment", 'import "strings"\n\nvar _ = strings /* x */ . /*' + "y" * 200 + '*/ Split(h, "..")', False),
                 ("a pure call on bytes", 'import (\n\t"bytes"\n)\n\nvar _ = bytes.Split(h, nil, "/")', False),
                 ("a builtin", 'var _ = len(".")', True),
                 ("a keyword", 'var (\n\ta = "."\n)\nconst (\n\tb = ".."\n)\nimport (\n\t"./x"\n)\n'
                  'func f(v string) bool { if (v == ".") { return true }; for (v == "/") {}; switch (v + ".") { case (".."): }; '
                  'for range ("./x") {}; return (v == "/") }', False),
                 ("no call around it", 'func f(v string) bool { return v == "." }', False),
+                ("a group after an operator", 'var x = a + ("." + b) * (len)', False),
                 ("a value with no literal", 'var m = filepath.Match\nvar w = fs.FS.Open', False),
                 ("a call of a variable path", 'var _, _ = os.ReadDir(d)', False),
                 ("an empty literal", 'var _ = f("")', False),
                 ("a rune", "var _ = f('.')", False),
                 ("a literal after a call holding an index", 'var _ = f(x[0])\nvar s = map[string]string{"k": "."}', False),
+                ("a pure call under an alias in a one-line group", 'import ( s "strings" )\n\nvar _ = s.Split(h, "..")', False),
                 ("a pure call under an alias in a group", 'import (\n\ts "strings"\n)\n\nvar _ = s.Split(h, "..")', False),
                 ("an absolute listing", 'var _, _ = os.ReadDir("/proc/self/fd")', False),
                 ("a listing literal in a comment", '// os.ReadDir(".")\nvar _ = f(x)', False)))
+        # A group or a call can open the code scanned.
+        self.assertEqual(mutgate._call_literals('(".")'), [])
+        self.assertEqual(mutgate._call_literals('f(".")'), ["."])
+        self.assertEqual(mutgate._imports('import "os/exec"'), {"exec": "os/exec"})  # no newline at the end
+        self.assertEqual(mutgate._imports('import ("os/exec"'), {"exec": "os/exec"})  # an unclosed group
+        self.assertEqual(mutgate._imports("import"), {})
         # An alias declared in another file counts where it is called.
         with tempfile.TemporaryDirectory() as d, self.tree(d, {
                 "hint/hint.go": "package hint\n\nvar read = os.ReadFile\n",
@@ -3086,6 +3103,12 @@ class DataFiles(unittest.TestCase):
                 ("syscall", 'import "syscall"\n\nvar _ = syscall.Getpid()', True),
                 ("unix", 'import "golang.org/x/sys/unix"\n\nvar _ = unix.Getpid()', True),
                 ("an import named in a comment", '// import "os/exec"\nimport "fmt"', False),
+                # L3 on #6403: any import declaration's form.
+                ("exec in a one-line group", 'import ( "fmt"; "os/exec" )\n\nvar _ = fmt.Sprint(exec.Command)', True),
+                ("exec indented", '  import "os/exec"', True),
+                ("exec after a semicolon", 'var _ = 1; import "os/exec"', True),
+                ("exec as a raw string", 'import `os/exec`', True),
+                ("an import keyword in a literal", 'import "fmt"\n\nvar _ = fmt.Sprint(`import "os/exec"`)', False),
                 ("an import in a block comment", '/*\nimport "os/exec"\n*/\nimport "fmt"', False),
                 ("an import path in a literal", 'import "fmt"\n\nvar _ = fmt.Sprint("os/exec")', False)))
 
