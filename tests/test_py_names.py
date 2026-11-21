@@ -1,4 +1,4 @@
-"""No Python file in the repository binds one module-level name twice.
+"""No Python file in the repository, outside the record directories, binds one module-level name twice.
 
 A second top-level binding silently replaces the first for every function that reads the name at
 call time. Two PRs that each add a constant under one name both pass on their own, and merged, one
@@ -9,13 +9,18 @@ covers only unused functions, classes and imports, so it misses that shape.
 A binding here is a top-level def, class, plain or annotated assignment to a bare name (tuple
 targets included), or import. `import a.b` beside `import a.c` binds `a` to one package and is not
 a repeat; the same module imported twice is. Bindings inside a top-level if, try, for or with are
-conditional by design and not read, nor is an attribute or item assignment (`m.X = 1`).
+conditional by design and not read, nor is an attribute or item assignment (`m.X = 1`). The walk
+skips .git and the record directories, so scripts kept as evidence under reviews/ are not read.
 """
 import ast
+import os
 import pathlib
+import sys
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools"))
+import ci_scope  # noqa: E402
 
 
 def bindings(tree):
@@ -74,9 +79,14 @@ class Repeats(unittest.TestCase):
                 self.assertEqual(repeats(src), want)
 
     def test_no_python_file_repeats_a_name(self):
-        # A walk, not git ls-files: each unit-test module runs as a user of its own (tools/unit_tests.py).
-        files = sorted(str(p.relative_to(ROOT)) for p in ROOT.rglob("*.py")
-                       if ".git" not in p.relative_to(ROOT).parts)
+        # A walk that never enters .git or a record directory (tools/ci_scope.RECORD_DIRS), so the
+        # module reads no record (tests/records_audit.py); git ls-files would read .git.
+        skip = {".git"} | {d.rstrip("/") for d in ci_scope.RECORD_DIRS}
+        files = []
+        for top, dirs, names in os.walk(ROOT):
+            rel = pathlib.Path(top).relative_to(ROOT)
+            dirs[:] = sorted(d for d in dirs if (rel / d).as_posix() not in skip)
+            files += [(rel / n).as_posix() for n in sorted(names) if n.endswith(".py")]
         self.assertIn("tools/mutgate.py", files)
         found = [f"{f}: {r}" for f in files for r in repeats((ROOT / f).read_text(), f)]
         self.assertEqual(found, [], "a module-level name is bound twice; rename one")
