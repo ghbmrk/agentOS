@@ -16,8 +16,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
-// inProc is the kernel's owner calls made in process, as proc.Owner makes
-// them over the socket.
+// inProc is the kernel's owner calls made in process, as kernel/proc's test
+// client makes them over the socket.
 type inProc struct {
 	k  *kernel.Kernel
 	at int64
