@@ -11,8 +11,9 @@ commit with the merge-base of `base` and `head`) and compares that tree with `he
 bytes, binary content and modes count, except that an ASSUMPTIONS.md differing only in its rows' first-cell ids (a renumbering after a main-merge) reads as same,
 and so does a DECISIONS.md whose only replay conflicts are table rows both sides appended at one spot, resolved by
 keeping both sides' rows verbatim, either side first (#3224, #3233), the PR's rows renumbered or not when no other PR file names an old ID (#4030),
-and so does a `*_allow.txt` whose lines are main's plus the PR's line changes, in any order (#3991). A replay file that fails a cheap gate never reads
-same as is: a duplicate row ID (doclint) in an ASSUMPTIONS.md or DECISIONS.md, or an ASSUMPTIONS.md row that
+and so does a `*_allow.txt` whose lines are main's plus the PR's line changes, in any order (#3991),
+and so does a MUTANTS-EQUIVALENT whose entries are main's plus the PR's entry changes, each side's entries in its own order (#6314). A replay file that fails a cheap gate never reads
+same as is: a duplicate row ID (doclint) in an ASSUMPTIONS.md or DECISIONS.md, a MUTANTS-EQUIVALENT key on two different lines (an entry or row both sides added word for word is one, #6358), or an ASSUMPTIONS.md row or entry that
 `merge=union` brought back (in the merge base and main, not in the reviewed commit). A head that resolves each union
 hunk without those rows, keeping its rows inside the hunk, reads same (#3400, #3401), unless `git merge-file`
 aligns the file unlike the replay: then every head reads changed and is resolved by hand. Main merged into the branch therefore reads as same, even next
@@ -111,6 +112,10 @@ def mark_range(cwd, base, head):
 
 
 TRUSTED = {"OWNER", "MEMBER", "COLLABORATOR"}
+# A comment is a verdict only when its first line, stripped, starts with VERDICT, so a comment lacking it anywhere can never
+# change --check's output; premerge.yml starts the gate for a comment only when its body, or the body it had before an
+# edit, contains VERDICT in any case (CI-premerge-event-filter, #6398).
+VERDICT = "Verdict:"
 _L3 = re.compile(r"^<!-- record: (?:l3|combined) -->$", re.M)
 # D-137: a gate-file or tier-A PR also needs a Security accept in a comment of its own, so one review cannot count twice.
 _SECURITY = re.compile(r"^<!-- record: security -->$", re.M)
@@ -175,7 +180,7 @@ def verdict(comments, pr, security=False, lens=None):
     for c in sorted(comments, key=lambda c: c.get("created_at") or ""):
         body = c.get("body") or ""
         first = body.split("\n", 1)[0].strip()
-        if c.get("author_association") not in TRUSTED or not first.startswith("Verdict:"):
+        if c.get("author_association") not in TRUSTED or not first.startswith(VERDICT):
             continue
         own, placed, line = _record_block(body)
         # Only an accept is held to its record block (#4261); any other verdict reads the whole comment, as before, so a
@@ -286,15 +291,16 @@ def _renumbered_only(cwd, tree, head, path, reviewed, onto):
         return False
     a, b = (_git(cwd, "show", f"{t}:{path}", ok=(0, 128)) for t in (tree, head))
     return (bool(a) and bool(b) and ROW_ID.sub(b"| # |", a) == ROW_ID.sub(b"| # |", b)
-            and not _stale(cwd, a, path, reviewed, onto) and _same_mode(cwd, tree, head, path))
+            and _stale(cwd, a, path, reviewed, onto) == collections.Counter() and _same_mode(cwd, tree, head, path))
 
 
 FIRST_CELL = re.compile(rb"^\|[ \t]*([^|\s][^|]*?)[ \t]*\|")
 
 
 def _duplicate_id(text):
-    """True when a table of `text` repeats a first-cell row ID: doclint's assumption_ids rule (tools/doclint.py)."""
-    seen, in_table = set(), False
+    """True when a table of `text` holds a first-cell row ID on two different lines: doclint's assumption_ids rule
+    (tools/doclint.py). A row repeated word for word is one row (#6358)."""
+    seen, in_table = {}, False
     for line in text.decode(errors="surrogateescape").splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         if not line.startswith("|"):
@@ -302,9 +308,8 @@ def _duplicate_id(text):
         elif cells[0] in ("ID", "#"):
             in_table = True
         elif in_table and not set(cells[0]) <= set("-: "):
-            if cells[0] in seen:
+            if seen.setdefault(cells[0], line) != line:
                 return True
-            seen.add(cells[0])
     return False
 
 
@@ -328,12 +333,13 @@ def _stale(cwd, text, path, reviewed, onto):
     merge's own (main's plus the reviewed commit's, less the base's), so a copy one side edited or deleted and the
     other left alone (#3369, #1912, #3441, #3502). A copy both sides deleted outside a conflict is gone from the
     merge too (#3534). Where `git merge-file` aligns the file unlike the replay, the whole file counts as one
-    conflict. Empty for any other file or a criss-cross merge."""
+    conflict. Empty for any other file; None for a criss-cross merge, which reads as stale (#6316: its union can
+    bring back a row unseen)."""
     if path.rsplit("/", 1)[-1] != "ASSUMPTIONS.md":
         return collections.Counter()
     bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
     if len(bases) != 1:
-        return collections.Counter()
+        return None
     merged, mark = _merge_file(cwd, path, reviewed, bases[0], onto)
     hunks, union, hunk, side = [], [], None, 0
     for line in merged.splitlines(keepends=True):
@@ -366,11 +372,14 @@ def _stale(cwd, text, path, reviewed, onto):
 
 def _broken(cwd, tree, path, reviewed, onto):
     """True when the replay's `path` fails a cheap gate, so a head that keeps it never reads same (#3400): a
-    duplicate row ID in an ASSUMPTIONS.md or DECISIONS.md (doclint), or a row `merge=union` brought back."""
+    duplicate row ID in an ASSUMPTIONS.md or DECISIONS.md (doclint), a row `merge=union` brought back, or a
+    MUTANTS-EQUIVALENT that is no merge of its two sides (`_records_kept`)."""
+    if path.rsplit("/", 1)[-1] == RECORD:
+        return _records_kept(cwd, tree, tree, path, reviewed, onto) is not True
     if path != "DECISIONS.md" and path.rsplit("/", 1)[-1] != "ASSUMPTIONS.md":
         return False
     text = _git(cwd, "show", f"{tree}:{path}", ok=(0, 128))
-    return _duplicate_id(text) or bool(_stale(cwd, text, path, reviewed, onto))
+    return _duplicate_id(text) or _stale(cwd, text, path, reviewed, onto) != collections.Counter()
 
 
 def _less(rows, drop):
@@ -432,8 +441,29 @@ def _stale_dropped(cwd, tree, head, path, reviewed, onto):
     want = _git(cwd, "show", f"{head}:{path}", ok=(0, 128))
     # merge-file's diff can align the file unlike merge-tree's: the union of its hunks must be the replay (#3401)
     replay = _git(cwd, "show", f"{tree}:{path}", ok=(0, 128))
-    return (hunk is None and conflicts > 0 and b"".join(out[2]) == replay and want in (b"".join(out[0]), b"".join(out[1]))
+    # With no conflict, out[0] can differ from the replay only by an identical duplicate the driver kept once (#6358).
+    return (hunk is None and b"".join(out[2]) == replay
+            and want in {b"".join(o) for o in out[:2]} | {_once(b"".join(o)) for o in out[:2]}
             and not _duplicate_id(want) and _same_mode(cwd, tree, head, path))
+
+
+def _once(text):
+    """`text` less each table row that repeats an earlier row word for word (tools/record_merge.py's `once`)."""
+    seen, out, in_table = set(), [], False
+    for line in text.splitlines(keepends=True):
+        cells = [c.strip() for c in line.decode(errors="surrogateescape").strip().strip("|").split("|")]
+        row = False
+        if not line.startswith(b"|"):
+            in_table = False
+        elif cells[0] in ("ID", "#"):
+            in_table = True
+        else:
+            row = in_table and not set(cells[0]) <= set("-: ")
+        if not (row and line.rstrip(b"\r\n") in seen):
+            out.append(line)
+        if row:
+            seen.add(line.rstrip(b"\r\n"))
+    return b"".join(out)
 
 
 def _appends_kept(cwd, tree, head, path, reviewed, onto):
@@ -509,6 +539,55 @@ def _lines_kept(cwd, tree, head, path, reviewed, onto):
     return main + (pr - mb) - (mb - pr) == want
 
 
+RECORD = "MUTANTS-EQUIVALENT"  # tools/mutgate.py's RECORD: one JSON entry per line, `#` and blank lines comments
+
+
+def _entry_keys(lines):
+    """The keys of a record's entry lines, a key being an entry less its proof (`reason`, `accepted`): two
+    entries with one key name one mutant twice. None when a line is no JSON object (mutgate fails it)."""
+    try:
+        entries = [json.loads(x) for x in lines]
+    except ValueError:
+        return None
+    if not all(isinstance(e, dict) for e in entries):
+        return None
+    return [json.dumps({k: v for k, v in e.items() if k not in ("reason", "accepted")}, sort_keys=True) for e in entries]
+
+
+def _records_kept(cwd, tree, head, path, reviewed, onto):
+    """True when `path` is a MUTANTS-EQUIVALENT (merge=union, .gitattributes) and `head`'s lines, as a multiset,
+    are main's plus the lines the reviewed commit added less those it removed, with each side's entries in that
+    side's order and no key on two different lines: a union, or a hand merge keeping both sides (#6314). An entry
+    both sides added word for word counts once, in either side's place (#6358). An entry the PR or the resolution
+    edited, dropped or reordered, a key on two lines, or an entry the union brought back, reads False; None for a
+    criss-cross merge, which reads as changed (L3 on #6315: its union can bring back an entry unseen)."""
+    if path.rsplit("/", 1)[-1] != RECORD:
+        return False
+    bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
+    if len(bases) != 1:
+        return None
+    if not _same_mode(cwd, tree, head, path):
+        return False
+    # Split on \n only, as mutgate's record_entries does.
+    pr, mb, main, want = (_git(cwd, "show", f"{t}:{path}", ok=(0, 128)).split(b"\n") for t in (reviewed, bases[0], onto, head))
+    count, is_entry = collections.Counter, lambda x: bool(x.strip()) and not x.lstrip().startswith(b"#")
+    entry = lambda lines: list(dict.fromkeys(x for x in lines if is_entry(x)))  # each entry once, first place
+    # An entry repeated word for word is one entry to every reader (#6358): entries compare as a set, comments by count.
+    expect, have = count(main) + (count(pr) - count(mb)) - (count(mb) - count(pr)), count(want)
+    if ({x for x in expect if is_entry(x)} != {x for x in have if is_entry(x)}
+            or +count({x: c for x, c in expect.items() if not is_entry(x)}) != count({x: c for x, c in have.items() if not is_entry(x)})):
+        return False
+    keys = _entry_keys(entry(want))
+    if keys is None or len(set(keys)) != len(keys):
+        return False
+    both = (set(entry(pr)) & set(entry(main))) - set(entry(mb))  # one entry both sides added: neither side's order
+    for side in (pr, main):  # each side's other surviving entries in its own order
+        mine, kept = set(entry(side)) - both, set(entry(want))
+        if [x for x in entry(want) if x in mine] != [x for x in entry(side) if x in kept and x in mine]:
+            return False
+    return True
+
+
 def compare(cwd, reviewed, head="HEAD", base="origin/main"):
     onto = _git(cwd, "merge-base", base, head).decode().strip()
     tree = _replayed(cwd, reviewed, onto)
@@ -521,6 +600,7 @@ def compare(cwd, reviewed, head="HEAD", base="origin/main"):
     return sorted(kept | {f for f in differ if not _renumbered_only(cwd, tree, head, f, reviewed, onto)
                           and not _appends_kept(cwd, tree, head, f, reviewed, onto)
                           and not _lines_kept(cwd, tree, head, f, reviewed, onto)
+                          and not _records_kept(cwd, tree, head, f, reviewed, onto)
                           and not _stale_dropped(cwd, tree, head, f, reviewed, onto)})
 
 

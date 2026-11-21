@@ -46,6 +46,42 @@ func TestAnUnreadableKernelSubmitsNothing(t *testing.T) {
 	}
 }
 
+// A plan the kernel took whose state then cannot be read is reported
+// unknown, never refused: it may run, and a repeat learns its state (KRN-5).
+func TestALostReadAfterASubmissionIsUnknown(t *testing.T) {
+	logged := make(chan string, 16)
+	r := newRig(t, func(c *Config) {
+		c.Logf = func(f string, _ ...any) {
+			select {
+			case logged <- f:
+			default:
+			}
+		}
+	})
+	r.kern.entered, r.kern.hold = make(chan struct{}), make(chan struct{})
+	go func() {
+		<-r.kern.entered
+		r.kern.mu.Lock()
+		r.kern.readErr = true
+		r.kern.mu.Unlock()
+		close(r.kern.hold)
+	}()
+	if st, _ := r.tool("m1", "plan", send("r1")); st.State != "unknown" || st.Reason != reasonLost || r.kern.plans() != 1 {
+		t.Fatalf("a lost read after the kernel took the plan: %+v, %d plans", st, r.kern.plans())
+	}
+	for {
+		select {
+		case f := <-logged:
+			if strings.Contains(f, "; read: ") {
+				return
+			}
+			continue
+		default:
+		}
+		t.Fatal("the broker's log has no line for the lost read")
+	}
+}
+
 // A guest that hangs up while its plan is being submitted does not cancel
 // the submission: the plan reaches the kernel, and a repeat reads it (OP-1).
 func TestAHangUpDoesNotCancelASubmission(t *testing.T) {
