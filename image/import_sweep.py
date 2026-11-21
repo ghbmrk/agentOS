@@ -21,18 +21,18 @@ and SPELT), and counts their references to each selector and their spellings.
 
 The JSON maps each place ("tree", and "initrd:<path>" for each initrd) to: "scanned", the ELF files read;
 "imports", each file importing an affected glibc symbol and those symbols; "lookups", each file that holds
-an affected function's name as a whole string and imports glibc's dlsym or dlvsym or has a library in its
+an affected function's name at the end of a string and imports glibc's dlsym or dlvsym or has a library in its
 NEEDED closure that does (a wrapper; #6299), and those names; "carries", each file but a glibc whose bytes
 hold a mark of glibc's glob, regex or wide scanf code (CARRIES: a static copy, or embedded objects), and
 the function each mark stands for (#6298, #6299); each of these three counts as importing the function.
 "via", each ELF file whose NEEDED closure (by SONAME or file name, within that place) holds an importing
 library other than itself, and those libraries, whether or not the file imports a symbol itself (#6297: a
 file importing one group's symbols can reach another group's through a library); "glibc", each glibc
-(SONAME libc.so.6) and the marks it holds; "packed", each file whose code is not in its bytes as stored,
+(SONAME libc.so.6 at GLIBC_PATH) and the marks it holds; "unresolved", each file with a NEEDED name no
+file of the place answers to, and those names; "packed", each file whose code is not in its bytes as stored,
 and why (packed()); "cipher", each file whose bytes hold a CIPHER_NAMES or SPELT name and its references
 to each (cipher_sites); "sha256", the SHA-256 of each file reaching a group or held under "cipher";
-"unread", each ELF file objdump failed on or whose headers do not parse; and, for an initrd, "others", its
-executable members that are not ELF files. Only symbols bound to a GLIBC_ version count, so a library's own
+"unread", each ELF file objdump failed on; and, for an initrd, "others", its executable members that are not ELF files. Only symbols bound to a GLIBC_ version count, so a library's own
 re_* names do not.
 
 --summary exits 1 when a claim the glibc records rest on stops holding: any file, in any place, imports
@@ -45,7 +45,7 @@ reviewed library's dependents need no entry each, and a new direct caller or new
 entry that accepts nothing, or a pin no accepted file holds, also fails, so each list stays its record's.
 It also exits 1 when a file holding a selector name or a SPELT name matches no [cipher] entry of ALLOW or
 more than one, or holds other sites or other bytes (SHA-256) than the counted entry it matches, or an
-entry matches nothing; on any packed file; and on an ALLOW it cannot read (read_allow). The control is the
+entry matches nothing; on any packed file or unresolved NEEDED name; and on an ALLOW it cannot read (read_allow). The control is the
 scan itself: it also exits 1 when objdump failed on a file, the main tree or an initrd with executable
 members read no ELF file, the main tree has no importer of regcomp (bash and grep always import it), or no
 call site of EVP_CIPHER_fetch (libcryptsetup and libcrypto always hold one), no glibc, or no file carrying
@@ -112,29 +112,39 @@ DYNAMIC = re.compile(r"^\s+(NEEDED|SONAME)\s+(\S+)$")
 # A run-time lookup: a file whose own imports or NEEDED closure (within its place) import glibc's dlsym or
 # dlvsym can resolve any function whose name it holds, itself or through a library's wrapper around them
 # (libltdl, libuv and the like; #6299, L3 on #6339). dlopen alone runs only the opened file's code, which the
-# sweep reads as a file of its own. Such a file holding a group function's name as a whole string (NUL on
-# each side, as a C string literal is stored) counts as importing that function, except a COMPAT_ONLY name
-# when nothing in reach imports dlvsym. The openssl group needs no such rule: [cipher] already
+# sweep reads as a file of its own. Such a file holding a group function's name at the end of a string (a
+# NUL after it, as a C string literal is stored; the linker stores "glob" as the tail of "safe_glob" when a
+# file holds both, so no NUL need precede it: Security on #6382) counts as importing that function, except
+# a COMPAT_ONLY name when nothing in reach imports dlvsym. The openssl group needs no such rule: [cipher] already
 # holds every file whose bytes hold a selector's name, a dlsym caller's string included (#5341).
 LOOKUP_FUNCS = ("dlsym", "dlvsym")
 # glibc exports these only under a hidden compat version (misc/regexp.c, compat_symbol since 2.23), and
 # dlsym never returns a hidden version (elf/dl-lookup.c check_match), so only dlvsym can reach them.
 COMPAT_ONLY = ("step", "advance")
-LOOKUP = re.compile(b"(?<=\0)(?:%s)(?=\0)" % b"|".join(rx.pattern.rstrip("$").encode() for rx in GROUPS.values()))
+# glibc's exported re_* names, for LOOKUP: as a string's tail, the group's re_\w+ would match any string
+# holding "re_" (store_value).
+RE_NAMES = ("re_comp", "re_compile_fastmap", "re_compile_pattern", "re_exec", "re_match", "re_match_2",
+            "re_max_failures", "re_search", "re_search_2", "re_set_registers", "re_set_syntax", "re_syntax_options")
+LOOKUP = re.compile(b"(?:%s)(?=\0)" % b"|".join(
+    rx.pattern.rstrip("$").replace("re_\\w+", "|".join(RE_NAMES)).encode() for rx in GROUPS.values()))
 # A carried copy: a file can run glibc code it carries in its own bytes, with no symbol to read once
 # stripped: a static file (llama-server and agentos-camdecode link libc.a; Debian's ldconfig is static), or
 # a dynamic one embedding glibc's objects or a copy of their source (libc_pic, gnulib's glob and regex;
 # Security on #6339). A string glibc's own code holds marks each group's code: glob_in_dir's name
 # (posix/glob.c's assertions), the wide scanf engine's name (__vfwscanf_internal,
 # stdio-common/vfscanf-internal.c's assertions), and one of the regex engine's error messages
-# (posix/regcomp.c's table, which regcomp's object carries). Any file but a glibc (GLIBC) holding one counts
+# (posix/regcomp.c's table, which regcomp's object carries), each at the end of a string, as a merged
+# string can hold it (LOOKUP). Any file but a glibc (GLIBC) holding one counts
 # as importing the function named beside it. Every glibc in the image must hold every mark, which is the
 # control that the marks are those of the glibc the image ships (problems()); the main tree's static
 # ldconfig must carry glob(), the control that a carried copy is read.
-CARRIES = {b"\0glob_in_dir\0": "glob", b"\0__vfwscanf_internal\0": "vfwscanf",
-           b"\0Invalid preceding regular expression\0": "regcomp"}
-# glibc's shared library, the one file whose marks are the functions it exports, not a copy.
+CARRIES = {b"glob_in_dir\0": "glob", b"__vfwscanf_internal\0": "vfwscanf",
+           b"Invalid preceding regular expression\0": "regcomp"}
+# glibc's shared library, the one file whose marks are the functions it exports, not a copy: its SONAME,
+# at the path Debian installs it, in the main tree or initrd or a guest root (Security R2 on #6382: a
+# SONAME alone would let any file named so skip the carried-copy rule).
 GLIBC = "libc.so.6"
+GLIBC_PATH = re.compile(r"^(/usr/lib/agentos/images/[^/]+)?/usr/lib/x86_64-linux-gnu/libc\.so\.6$")
 
 
 def group_of(sym):
@@ -174,7 +184,8 @@ def packed(data):
     """Why the code of the ELF file DATA is not in its bytes as stored, so no import, lookup or mark of it
     can be read (#6299, Security on #6339): it loads segments and has no section table (UPX and its like
     drop it), or it maps a segment both writable and executable, or executable memory past the bytes the
-    file holds for it (code written at run time). "" for neither; None for headers that do not parse."""
+    file holds for it (code written at run time); or its headers do not parse, so neither can be read.
+    "" for none of these."""
     try:
         word, phoff, shoff, phentsize, phnum, *at = ELF_HEADER[data[4]]
         order = {1: "<", 2: ">"}[data[5]]
@@ -187,7 +198,7 @@ def packed(data):
                 loads.append((flags, filesz, memsz))
         no_sections = field(word, shoff) == 0
     except (KeyError, IndexError, struct.error):
-        return None
+        return "headers that do not parse"
     if loads and no_sections:
         return "no section table"
     if any(f & PF_X and f & PF_W for f, _, _ in loads):
@@ -262,7 +273,7 @@ def sweep(files):
         digest[shown] = hashlib.sha256(data).hexdigest()
         names[shown] = {m.group().decode() for m in LOOKUP.finditer(data)}
         marks = sorted({name for mark, name in CARRIES.items() if mark in data})
-        if soname == GLIBC:
+        if soname == GLIBC and GLIBC_PATH.match(shown):
             glibc[shown] = marks
         elif marks:
             carries[shown] = marks
@@ -272,7 +283,7 @@ def sweep(files):
         sites, disassembled = cipher_sites(real)
         if sites is not None:
             cipher[shown] = sites
-        if not (read and disassembled and why is not None):
+        if not (read and disassembled):
             unread.append(shown)
         if syms:
             imports[shown] = syms
@@ -293,6 +304,9 @@ def sweep(files):
                 todo += needed.get(lib, [])
         return libs - {shown}
     reached = {shown: closure(shown) for shown in files}
+    # A NEEDED name no file of the place answers to hides that library's imports, dlsym among them, from
+    # every rule above (Security R4 on #6382).
+    unresolved = {shown: sorted(set(n for n in needed[shown] if n not in by_name)) for shown in files}
     lookups = {}
     for shown in files:
         how = dl[shown].union(*(dl[lib] for lib in reached[shown]))
@@ -306,6 +320,7 @@ def sweep(files):
     return {"scanned": len(files), "imports": dict(sorted(imports.items())), "via": dict(sorted(via.items())),
             "lookups": dict(sorted(lookups.items())), "carries": dict(sorted(carries.items())),
             "glibc": dict(sorted(glibc.items())), "packed": dict(sorted(opaque.items())),
+            "unresolved": {p: n for p, n in sorted(unresolved.items()) if n},
             "unread": sorted(unread), "cipher": dict(sorted(cipher.items())),
             "sha256": {p: d for p, d in sorted(digest.items()) if p in pinned}}
 
@@ -411,6 +426,8 @@ def problems(places):
     # #6299: a file whose code is not in its bytes as stored can hide any import, lookup or copy.
     errs += ["%s: %s is packed (%s): its code cannot be read for imports, lookups or carried copies"
              % (k, p, why) for k, v in places.items() for p, why in v.get("packed", {}).items()]
+    errs += ["%s: %s needs %s, which no file there answers to, so what it imports is not read"
+             % (k, p, " ".join(n)) for k, v in places.items() for p, n in v.get("unresolved", {}).items()]
     return errs
 
 

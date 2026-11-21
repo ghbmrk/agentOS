@@ -180,6 +180,8 @@ class ImportSweepTest(Tree):
         # The library imports regcomp, which is what the control asks of a main tree; a glibc holding every
         # mark is the marks' control (#6299, GlibcControlTest).
         tree["tree"]["glibc"] = {"/usr/lib/libc.so.6": ["glob", "regcomp", "vfwscanf"]}
+        # The host's libc is outside this tree: every NEEDED it leaves unresolved is libc.so.6 (UnresolvedTest).
+        self.assertEqual({n for names in tree["tree"].pop("unresolved").values() for n in names}, {"libc.so.6"})
         self.assertEqual(sweep.problems(tree), [])
         no_regcomp = {"tree": dict(tree["tree"], imports={"/usr/bin/wtool": ["swscanf"]})}
         self.assertEqual(len(sweep.problems(no_regcomp)), 1)
@@ -967,16 +969,16 @@ MARKS_ONLY = ('const char *m[] = {"Invalid preceding regular expression", "glob_
               'int main(int c, char **v) { return m[c][0]; }\n')
 INTERP_ONLY = ('const char *m[] = {"glob_in_dir", "__vfwscanf_internal"};\n'
                'void _start(void) { for (;;) __asm__ volatile("" :: "r"(m)); }\n')
-# A static file holding strings that only contain the marks: no mark is a whole string of its.
-STATIC_NEAR = ('const char *m[] = {"xglob_in_dir", "__vfwscanf_internal2", "Invalid preceding regular expressions"};\n'
+# A static file holding strings that only contain the marks: no mark ends a string of its.
+STATIC_NEAR = ('const char *m[] = {"glob_in_dirx", "__vfwscanf_internal2", "Invalid preceding regular expressions"};\n'
                'int main(int c, char **v) { return m[c][0]; }\n')
 LOOKS_UP = ('#include <dlfcn.h>\nint main(int c, char **v) { return dlsym(RTLD_DEFAULT, c ? "glob" : "regcomp") != 0; }\n')
 # A file importing both dlvsym and dlsym looks a compat-only name up through dlvsym.
 LOOKS_UP_V = ('#include <dlfcn.h>\nint main(int c, char **v) { return dlvsym(RTLD_DEFAULT, c ? "__isoc99_swscanf" : "step", '
               'c ? "GLIBC_2.7" : "GLIBC_2.2.5") != dlsym(RTLD_DEFAULT, "x"); }\n')
-# Names that are no group function's whole name, compat-only names dlsym cannot return (COMPAT_ONLY), and a
-# group name held by a file that cannot look it up.
-LOOKS_UP_OTHER = ('#include <dlfcn.h>\nconst char *n[] = {"globber", "my_regcomp", "step", "advance"};\n'
+# Strings no group function's name ends (store_value holds "re_" but no glibc re_* name: RE_NAMES),
+# compat-only names dlsym cannot return (COMPAT_ONLY), and a group name held by a file that cannot look it up.
+LOOKS_UP_OTHER = ('#include <dlfcn.h>\nconst char *n[] = {"globber", "regcomp2", "store_value", "step", "advance"};\n'
                   'int main(int c, char **v) { return dlsym(RTLD_DEFAULT, n[c]) != 0; }\n')
 HOLDS_NAME = 'const char *n = "glob";\nint main(void) { return n[0]; }\n'
 LIB_LOOKS_UP = '#include <dlfcn.h>\nint f(void) { return dlsym(RTLD_DEFAULT, "wordexp") != 0; }\n'
@@ -1126,7 +1128,7 @@ class UnimportedReachTest(unittest.TestCase):
         want = ("tree: no file carries glob() (Debian's static ldconfig always does), so the scan reads no "
                 "carried copy (control)")
         base = dict(tree, imports={"/usr/bin/bash": ["regcomp"]}, cipher={"/l": {"EVP_CIPHER_fetch": 1}},
-                    glibc={"/usr/lib/libc.so.6": ["glob", "regcomp", "vfwscanf"]})
+                    glibc={"/usr/lib/libc.so.6": ["glob", "regcomp", "vfwscanf"]}, unresolved={})
         self.assertEqual(sweep.problems({"tree": base}), [])
         for carries in ({}, {"/usr/sbin/sregex": ["regcomp"]}):
             with self.subTest(carries=carries):
@@ -1161,6 +1163,12 @@ def host_libc():
     """The path of the libc.so.6 this process has mapped."""
     return next(line.split()[-1] for line in pathlib.Path("/proc/self/maps").read_text().splitlines()
                 if re.search(r"/libc\.so\.6$", line))
+
+
+def host_ld():
+    """The path of the dynamic loader this process has mapped, which libc.so.6 needs."""
+    return next(line.split()[-1] for line in pathlib.Path("/proc/self/maps").read_text().splitlines()
+                if re.search(r"/ld-linux-x86-64\.so\.2$", line))
 
 
 @NEEDS_CC
@@ -1257,6 +1265,7 @@ class GlibcControlTest(unittest.TestCase):
             tree = pathlib.Path(t)
             (tree / "usr/lib/x86_64-linux-gnu").mkdir(parents=True)
             shutil.copy(host_libc(), tree / "usr/lib/x86_64-linux-gnu/libc.so.6")
+            shutil.copy(host_ld(), tree / "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2")
             (tree / "usr/sbin").mkdir()
             built(STATIC_GLOB, tree / "usr/sbin/ldconfig", "-static", "-s")
             got = sweep.run_tree(str(tree))["tree"]
@@ -1282,7 +1291,7 @@ PACKED_SRC = STATIC_GLOB
 @NEEDS_CC
 class PackedTest(unittest.TestCase):
     """#6299: a file whose code is not in its bytes as stored (a UPX-style packer drops the section table and
-    unpacks into memory) is flagged and fails the step; a file whose headers do not parse is unread."""
+    unpacks into memory), or whose headers do not parse, is flagged and fails the step."""
 
     @classmethod
     def setUpClass(cls):
@@ -1315,12 +1324,16 @@ class PackedTest(unittest.TestCase):
         cls.tmp.cleanup()
 
     def test_packed_files_are_flagged(self):
+        # Headers that do not parse are flagged in their own right, whatever objdump makes of the file
+        # (Security R1 on #6382), and objdump leaves this one unread too.
         self.assertEqual(self.got["packed"], {"/nosections": "no section table",
                                               "/wx": "a writable and executable segment",
-                                              "/grows": "executable memory past its file bytes"})
+                                              "/grows": "executable memory past its file bytes",
+                                              "/badheaders": "headers that do not parse"})
         self.assertIn("/badheaders", self.got["unread"])
         self.assertNotIn("/plain", self.got["unread"])
-        self.assertEqual([sweep.packed(b"\x7fELF"), sweep.packed(b"\x7fELF\x03\x01" + bytes(60))], [None, None])
+        self.assertEqual({sweep.packed(b"\x7fELF"), sweep.packed(b"\x7fELF\x03\x01" + bytes(60))},
+                         {"headers that do not parse"})
 
     def test_packed_files_fail_the_step(self):
         errs = sweep.problems({"t": self.got})
@@ -1331,3 +1344,103 @@ class PackedTest(unittest.TestCase):
 
     def test_summary_names_them(self):
         self.assertIn("  packed /wx: a writable and executable segment", sweep.summary({"t": self.got}))
+
+
+# Security blocker on #6382: GNU ld merges a string literal into the tail of a longer one, so a file that
+# looks "glob" up and also holds "safe_glob" stores no "glob" with a NUL before it. Built with -O2 as
+# distribution packages are.
+MERGED_LOOKUP = ('#include <stdio.h>\n#include <dlfcn.h>\n'
+                 'int main(void) { puts("safe_glob"); return dlsym(RTLD_DEFAULT, "glob") != 0; }\n')
+MERGED_WRAPPED = 'int f(const char *);\nint puts(const char *);\nint main(void) { puts("safe_glob"); return f("glob"); }\n'
+LIB_WRAPS = '#include <dlfcn.h>\nint f(const char *n) { return dlsym(RTLD_DEFAULT, n) != 0; }\n'
+MERGED_MARK = ('int puts(const char *);\n'
+               'int main(void) { puts("my_glob_in_dir"); return puts("glob_in_dir"); }\n')
+
+
+@NEEDS_CC
+class TailMergeTest(unittest.TestCase):
+    """A group name or a glibc mark that ends a stored string counts, as a merged literal stores it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        t = pathlib.Path(cls.tmp.name)
+        lib = t / "usr/lib"
+        lib.mkdir(parents=True)
+        (t / "usr/bin").mkdir()
+        built(MERGED_LOOKUP, t / "usr/bin/merged", "-O2", "-ldl")
+        built(LIB_WRAPS, lib / "libwraps.so.1", "-O2", "-shared", "-fPIC", "-Wl,-soname,libwraps.so.1", "-ldl")
+        built(MERGED_WRAPPED, t / "usr/bin/mwrapped", "-O2", "-L" + str(lib), "-l:libwraps.so.1")
+        built(MERGED_MARK, t / "usr/bin/mmark", "-O2")
+        cls.bytes = {n: (t / "usr/bin" / n).read_bytes() for n in ("merged", "mwrapped", "mmark")}
+        cls.got = sweep.run_tree(str(t))["tree"]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_the_linker_merged_them(self):
+        # The premise: each name is stored only as the tail of the longer string.
+        for n, held in (("merged", b"glob"), ("mwrapped", b"glob"), ("mmark", b"glob_in_dir")):
+            with self.subTest(n=n):
+                self.assertNotIn(b"\0" + held + b"\0", self.bytes[n])
+                self.assertIn(held + b"\0", self.bytes[n])
+
+    def test_merged_names_and_marks_count(self):
+        self.assertEqual(self.got["lookups"]["/usr/bin/merged"], ["glob"])
+        self.assertEqual(self.got["lookups"]["/usr/bin/mwrapped"], ["glob"])
+        self.assertEqual(self.got["carries"]["/usr/bin/mmark"], ["glob"])
+
+    def test_re_names_are_glibcs(self):
+        """RE_NAMES, the bounded form of the group's re_\\w+ for string tails, is every re_* name the host's
+        libc exports."""
+        out = subprocess.run(["objdump", "-T", host_libc()], capture_output=True, text=True, check=True).stdout
+        exported = {line.split()[-1] for line in out.splitlines() if re.search(r"\sGLIBC_[\d.]+\)?\s+re_\w+$", line)}
+        self.assertEqual(exported, set(sweep.RE_NAMES))
+        self.assertEqual([m.group() for m in sweep.LOOKUP.finditer(b"\0store_value\0x_re_search_2\0")],
+                         [b"re_search_2"])
+
+
+@NEEDS_CC
+class GlibcIdentityTest(unittest.TestCase):
+    """Security R2 on #6382: only libc.so.6 at the path Debian installs it is a glibc; a file elsewhere
+    with that SONAME is read as any other file, so its marks are a carried copy."""
+
+    def test_a_libc_so_6_elsewhere_is_a_carried_copy(self):
+        with tempfile.TemporaryDirectory() as t:
+            tree = pathlib.Path(t)
+            for d in ("usr/lib/x86_64-linux-gnu", "usr/lib/agentos/images/g/usr/lib/x86_64-linux-gnu",
+                      "usr/lib/other"):
+                (tree / d).mkdir(parents=True)
+                shutil.copy(host_libc(), tree / d / "libc.so.6")
+            got = sweep.run_tree(str(tree))["tree"]
+        self.assertEqual(set(got["glibc"]), {"/usr/lib/x86_64-linux-gnu/libc.so.6",
+                                             "/usr/lib/agentos/images/g/usr/lib/x86_64-linux-gnu/libc.so.6"})
+        self.assertEqual(got["carries"], {"/usr/lib/other/libc.so.6": ["glob", "regcomp", "vfwscanf"]})
+
+
+@NEEDS_CC
+class UnresolvedTest(unittest.TestCase):
+    """Security R4 on #6382: a NEEDED name no file of the place answers to hides that library's imports,
+    a dlsym wrapper's among them, so it fails the step."""
+
+    def test_an_unresolved_needed_fails(self):
+        with tempfile.TemporaryDirectory() as t:
+            tree = pathlib.Path(t)
+            lib = tree / "usr/lib/x86_64-linux-gnu"
+            lib.mkdir(parents=True)
+            shutil.copy(host_libc(), lib / "libc.so.6")
+            shutil.copy(host_ld(), lib / "ld-linux-x86-64.so.2")
+            built(LIB_WRAPS, lib / "libwraps.so.1", "-shared", "-fPIC", "-Wl,-soname,libwraps.so.1", "-ldl")
+            (tree / "usr/bin").mkdir()
+            built(MERGED_WRAPPED, tree / "usr/bin/w", "-L" + str(lib), "-l:libwraps.so.1")
+            got = sweep.run_tree(str(tree))["tree"]
+            self.assertEqual(got["unresolved"], {})
+            self.assertEqual(got["lookups"]["/usr/bin/w"], ["glob"])
+            # The wrapper gone: w's lookup is no longer seen, and its NEEDED fails the step instead.
+            (lib / "libwraps.so.1").unlink()
+            got = sweep.run_tree(str(tree))["tree"]
+        self.assertEqual(got["unresolved"], {"/usr/bin/w": ["libwraps.so.1"]})
+        self.assertNotIn("/usr/bin/w", got["lookups"])
+        self.assertIn("t: /usr/bin/w needs libwraps.so.1, which no file there answers to, so what it imports "
+                      "is not read", sweep.problems({"t": got}))
