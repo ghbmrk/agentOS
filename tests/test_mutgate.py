@@ -12,6 +12,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -31,14 +32,21 @@ from _nogit_bg import setUpModule as _bg_up, tearDownModule as _bg_down  # noqa:
 _REAL_HIDE = mutgate.hide_docs
 _GUARD = mock.patch.object(mutgate, "hide_docs", lambda broker: [] if pathlib.Path(broker).resolve() == (
     ROOT / "broker").resolve() else _REAL_HIDE(broker))
+_LOCAL = {}
 
 
 def setUpModule():
     _bg_up()
     _GUARD.start()
+    # Without a delegated cgroup these tests run mutgate as a local, advisory run does, in CI's unit
+    # tests too, where CI is set; ci.yml's cgroup step runs the containment tests with one (#6392).
+    if not os.environ.get(mutgate.CGROUP_ENV):
+        _LOCAL.update({k: os.environ.pop(k) for k in ("CI", "GITHUB_ACTIONS") if k in os.environ})
 
 
 def tearDownModule():
+    os.environ.update(_LOCAL)
+    _LOCAL.clear()
     _GUARD.stop()
     _bg_down()
 
@@ -64,6 +72,15 @@ def gate(diff, live, waived=None):
     added = mutgate.added_lines(diff)[0]
     return [v[:4] for v in mutgate.violations({p: mutgate.diff_targets(added, p) for p in live}, live, waived)]
 
+
+def as_ci(args):
+    """Before a `verify` of results that `run` and `delete` wrote here, drop their advisory mark (#6392):
+    without a delegated cgroup they ran as a local run does, and these tests read the verdict as CI's."""
+    if args[:1] == ("verify",):
+        for f in pathlib.Path(args[1]).rglob("*.json"):
+            data = json.loads(f.read_text())
+            if isinstance(data, dict) and data.pop("advisory", None):
+                f.write_text(json.dumps(data))
 
 class Gate(unittest.TestCase):
     def test_live_mutant_on_added_line_in_claimed_package_fails(self):
@@ -525,6 +542,7 @@ class Shape(unittest.TestCase):
         r, data = self.run_silent_stub("Starting...\n\nNo results to report.\n")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("No results to report.", r.stdout)  # its output still shows
+        data.pop("advisory", None)  # a local run's mark (#6392)
         self.assertEqual(data, {"files": [], "mutants_total": 0, "mutants_lived": 0})
 
     def test_run_fails_closed_on_any_other_missing_result(self):
@@ -1107,6 +1125,113 @@ class Deletion(unittest.TestCase):
             stub.write_text("#!/bin/sh\nsleep 60\n")
             self.assertEqual(mutgate.run_tests(stub, d, 1, mem=1 << 30), "TIMED OUT")
 
+    @unittest.skipUnless(os.path.isdir("/proc/self"), "the memory cap reads /proc")
+    def test_a_capped_run_kills_a_child_that_left_its_process_group(self):
+        # #6392 item 1: the session's memory is counted, so the whole session is killed, a child that
+        # moved itself to a group of its own (setpgid) too, not only the run's process group.
+        with tempfile.TemporaryDirectory() as d:
+            stub, pidfile = pathlib.Path(d) / "t.test", pathlib.Path(d) / "child"
+            stub.write_text(f"#!/bin/sh\npython3 -c 'import os, time; os.setpgid(0, 0); open(\"{pidfile}\", \"w\").write(str(os.getpid())); "
+                            "b = bytearray(64 << 20); time.sleep(60)' &\nwait\n")
+            stub.chmod(0o755)
+            began = time.monotonic()
+            self.assertEqual(mutgate.run_tests(stub, d, 30, mem=32 << 20), "KILLED")
+            self.assertLess(time.monotonic() - began, 20)
+            child = int(pidfile.read_text())
+            for _ in range(100):  # reparented and reaped, or a zombie: nothing left running
+                if (mutgate.proc_stat(child) or ("", "Z"))[1] in "ZX":
+                    break
+                time.sleep(0.05)
+            self.assertIn((mutgate.proc_stat(child) or ("", "Z"))[1], "ZX")
+
+    @unittest.skipUnless(os.path.isdir("/proc/self"), "the memory cap reads /proc")
+    def test_kill_session_leaves_other_sessions_alone(self):
+        with tempfile.TemporaryDirectory() as d:
+            pidfile = pathlib.Path(d) / "child"
+            p = subprocess.Popen(["sh", "-c", f"python3 -c 'import os, time; os.setpgid(0, 0); "
+                                  f"open(\"{pidfile}\", \"w\").write(str(os.getpid())); time.sleep(60)' & sleep 60"],
+                                 start_new_session=True)
+            other = subprocess.Popen(["sleep", "60"], start_new_session=True)
+            try:
+                for _ in range(200):
+                    if pidfile.exists() and pidfile.read_text():
+                        break
+                    time.sleep(0.05)
+                child = int(pidfile.read_text())
+                self.assertNotEqual(os.getpgid(child), p.pid)  # its own group: killpg alone misses it
+                mutgate.kill_session(p.pid)
+                self.assertEqual(p.wait(), -signal.SIGKILL)
+                self.assertEqual(mutgate.session_procs(p.pid), [])
+                self.assertIsNone(other.poll())
+            finally:
+                other.kill()
+                other.wait()
+
+    @unittest.skipUnless(os.path.isdir("/proc/self"), "the memory cap reads /proc")
+    def test_a_spike_between_reads_still_counts(self):
+        # #6392 item 2: a base run's peak is the kernel's high-water mark, so a spike that ends between
+        # two reads still counts; a run that ends before any read counts its whole-life peak (wait4).
+        spike = "import time; b = bytearray(128 << 20); del b; time.sleep({})"
+        with mock.patch.object(mutgate, "MEM_POLL", 1.0):
+            for rest in (2.5, 0):  # read once after the spike, or never
+                with self.subTest(rest=rest):
+                    p = subprocess.Popen([sys.executable, "-c", spike.format(rest)], start_new_session=True)
+                    end, peak = mutgate.watch(p, 30)
+                    self.assertEqual(end, 0)
+                    self.assertGreater(peak, 128 << 20)
+            p = subprocess.Popen([sys.executable, "-c", spike.format(2.5)], start_new_session=True)
+            time.sleep(1.5)
+            rss = sum(r for r, _ in mutgate.session_memory(p.pid).values())
+            p.wait()
+            self.assertLess(rss, 64 << 20)  # what a read of the current memory alone saw after it
+
+    def test_ci_without_a_delegated_cgroup_is_an_error(self):
+        # #6392: in CI every run is in a cgroup leaf; a missing or unusable one fails, never advisory.
+        with tempfile.TemporaryDirectory() as d:
+            for env in ({"CI": "true"}, {"GITHUB_ACTIONS": "true"}, {mutgate.CGROUP_ENV: d}):
+                with self.subTest(env=env), mock.patch.dict(os.environ, env, clear=False):
+                    for k in {"CI", "GITHUB_ACTIONS", mutgate.CGROUP_ENV} - set(env):
+                        os.environ.pop(k, None)
+                    with self.assertRaises(RuntimeError):
+                        mutgate.contained(["true"])
+                    with self.assertRaises(RuntimeError):
+                        mutgate.advisory()
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for k in ("CI", "GITHUB_ACTIONS", mutgate.CGROUP_ENV):
+                os.environ.pop(k, None)
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertTrue(mutgate.advisory())
+            self.assertIn("ADVISORY", err.getvalue())
+
+    def test_verify_refuses_an_advisory_result(self):
+        data = {"files": [], "mutants_total": 0, "mutants_lived": 0, "shard": {"index": 0, "of": 1}, "advisory": True}
+        _, problem = mutgate.join_shards("hint", [(pathlib.Path("a/hint.json"), data)], {}, {}, None, {})
+        self.assertIn("advisory", problem)
+
+    @unittest.skipUnless(os.environ.get(mutgate.CGROUP_ENV), "needs a delegated cgroup v2 directory (CI's checks job)")
+    def test_a_cgroup_leaf_holds_every_descendant_and_its_exact_peak(self):
+        # #6392: a child that leaves the session (setsid) and its process group is still in the leaf: the
+        # cap kills it and the run's end kills it; the peak is memory.peak, a spike between reads included.
+        with tempfile.TemporaryDirectory() as d:
+            pidfile = pathlib.Path(d) / "child"
+            grow = (f"import os, time; os.setsid(); open('{pidfile}', 'w').write(str(os.getpid())); "
+                    "b = bytearray(64 << 20); time.sleep(60)")
+            stub = pathlib.Path(d) / "t.test"
+            stub.write_text(f"#!/bin/sh\npython3 -c \"{grow}\" &\nwait\n")
+            stub.chmod(0o755)
+            began = time.monotonic()
+            self.assertEqual(mutgate.run_tests(stub, d, 30, mem=32 << 20), "KILLED")
+            self.assertLess(time.monotonic() - began, 20)
+            self.assertIn((mutgate.proc_stat(int(pidfile.read_text())) or ("", "Z"))[1], "ZX")
+            # Left running when the run ends: killed with the leaf.
+            stub.write_text(f"#!/bin/sh\npython3 -c \"{grow.replace('64 << 20', '1')}\" &\nsleep 1\n")
+            self.assertEqual(mutgate.run_tests(stub, d, 30, mem=1 << 30), "LIVED")
+            self.assertIn((mutgate.proc_stat(int(pidfile.read_text())) or ("", "Z"))[1], "ZX")
+            end, peak = mutgate.contained([sys.executable, "-c", "b = bytearray(128 << 20); del b"], 1 << 30)
+            self.assertEqual(end, 0)
+            self.assertGreater(peak, 128 << 20)
+            self.assertEqual([p.name for p in pathlib.Path(os.environ[mutgate.CGROUP_ENV]).glob("run-*")], [])
+
     def test_available_memory_reads_meminfo(self):
         got = mutgate.available_memory()
         if os.path.isfile("/proc/meminfo"):
@@ -1133,6 +1258,7 @@ class Deletion(unittest.TestCase):
         return pkg
 
     def mutgate(self, d, *args):
+        as_ci(args)
         return subprocess.run([sys.executable, "-I", str(pathlib.Path(d) / "tools" / "mutgate.py"), *args],
                               capture_output=True, text=True, env={**os.environ, "GOFLAGS": "", "GOWORK": "off"})
 
@@ -1914,6 +2040,7 @@ class TestOnly(unittest.TestCase):
         return git
 
     def mutgate(self, d, *args, env=None):
+        as_ci(args)
         return subprocess.run([sys.executable, "-I", str(pathlib.Path(d) / "tools" / "mutgate.py"), *args],
                               capture_output=True, text=True,
                               env={**os.environ, "GOFLAGS": "", "GOWORK": "off", **(env or {})})
@@ -4675,12 +4802,14 @@ class GremlinsMemoryCap(unittest.TestCase):
     # REQ: MUT-gremlins-memcap
 
     GROW = "import time; b = bytearray(96 << 20); time.sleep(60)"
+    # As `go test -exec X` runs a test binary: `eval "$x BINARY"` in a body runs it through X.
+    EXEC = 'x=; for a; do case "$a" in -exec=*) x="${a#-exec=}";; esac; done\n'
 
     def fake_go(self, d, body):
         """A directory holding a `go` that runs body (a sh script) in place of the real go."""
         bindir = pathlib.Path(d) / "fakego"
         bindir.mkdir(exist_ok=True)
-        (bindir / "go").write_text("#!/bin/sh\n" + body)
+        (bindir / "go").write_text("#!/bin/sh\n" + self.EXEC + body)
         (bindir / "go").chmod(0o755)
         return bindir
 
@@ -4690,8 +4819,7 @@ class GremlinsMemoryCap(unittest.TestCase):
 
     def test_a_mutant_run_past_its_cap_is_killed_and_exits_1(self):
         with tempfile.TemporaryDirectory() as d:
-            # The test binary is go's child, as `go test` runs it: a child's memory counts.
-            shim = self.shim(d, f"python3 -c '{self.GROW}' &\nwait\n", 32 << 20)
+            shim = self.shim(d, f"eval \"$x python3 -c '{self.GROW}'\"\n", 32 << 20)
             began = time.monotonic()
             r = subprocess.run([str(shim), "test", "-timeout", "62s", "-failfast", "./p"], capture_output=True, text=True)
             self.assertEqual(r.returncode, 1, r.stderr)  # gremlins v0.6.0: exit 1 is KILLED
@@ -4701,7 +4829,7 @@ class GremlinsMemoryCap(unittest.TestCase):
     def test_a_mutant_run_under_its_cap_keeps_gos_exit_code(self):
         with tempfile.TemporaryDirectory() as d:
             for code in (0, 1, 2):
-                shim = self.shim(d, f"python3 -c 'b = bytearray(1 << 20)'\nexit {code}\n", 1 << 30)
+                shim = self.shim(d, f"eval \"$x python3 -c 'b = bytearray(1 << 20)'\"\nexit {code}\n", 1 << 30)
                 self.assertEqual(subprocess.run([str(shim), "test", "./p"]).returncode, code)
 
     def test_a_mutant_runs_own_toolchain_is_not_counted(self):
@@ -4709,7 +4837,8 @@ class GremlinsMemoryCap(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             link = pathlib.Path(d) / "compile"
             link.symlink_to(sys.executable)
-            shim = self.shim(d, f"{link} -c 'import time; b = bytearray(96 << 20); time.sleep(2)'\nexit 0\n", 32 << 20)
+            shim = self.shim(d, f"{link} -c 'import time; b = bytearray(96 << 20); time.sleep(2)'\n"
+                                f"eval \"$x python3 -c 'pass'\"\nexit 0\n", 32 << 20)
             r = subprocess.run([str(shim), "test", "-timeout", "62s", "-failfast", "./p"], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertNotIn("memory_cap", r.stderr)
@@ -4725,32 +4854,44 @@ class GremlinsMemoryCap(unittest.TestCase):
         # own coverage run is measured under the same cap and fails the run past half of it.
         with tempfile.TemporaryDirectory() as d:
             prof = pathlib.Path(d) / "c"
-            shim = self.shim(d, f"python3 -c 'import time; b = bytearray(64 << 20); time.sleep(1)'\n: > {prof}\n", 96 << 20)
+            shim = self.shim(d, f"eval \"$x python3 -c 'import time; b = bytearray(64 << 20); time.sleep(1)'\"\n: > {prof}\n", 96 << 20)
             r = subprocess.run([str(shim), "test", "-cover", "-coverprofile", str(prof), "./..."], capture_output=True, text=True)
             self.assertEqual(r.returncode, 1, r.stderr)
             self.assertIn("more than half", r.stderr)
 
-    def test_toolchain_processes_are_not_counted(self):
-        # A compile's memory is the toolchain's, not the tests': only processes outside TOOLCHAIN count.
+    def test_a_cover_run_counts_each_test_binarys_whole_life_peak(self):
+        # #6392 item 2: each test binary of gremlins' coverage run goes through cap_exec (go test -exec),
+        # which records its exact peak (memory.peak, or wait4 in an advisory run), so a spike just before
+        # it exits counts against half the cap.
         with tempfile.TemporaryDirectory() as d:
-            link = pathlib.Path(d) / "compile"
-            link.symlink_to(sys.executable)
-            for name, counted in (("compile", False), ("python3", True)):
-                p = subprocess.Popen([str(link) if name == "compile" else sys.executable, "-c",
-                                      "import time; b = bytearray(64 << 20); time.sleep(3)"], start_new_session=True)
-                try:
-                    time.sleep(1)
-                    got = mutgate.session_rss(p.pid, mutgate.TOOLCHAIN)
-                finally:
-                    p.kill()
-                    p.wait()
-                self.assertEqual(got > 32 << 20, counted, (name, got))
+            prof = pathlib.Path(d) / "c"
+            shim = self.shim(d, f"eval \"$x python3 -c 'b = bytearray(128 << 20)'\" || exit 9\n: > {prof}\n", 192 << 20)
+            r = subprocess.run([str(shim), "test", "-cover", "-coverprofile", str(prof), "./..."], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1, r.stderr)
+            self.assertIn("more than half", r.stderr)
+            (top, end), = [row.split() for row in (pathlib.Path(d) / "exits").read_text().splitlines()]
+            self.assertGreater(int(top), 128 << 20)
+            self.assertEqual(end, "0")
+
+    def test_a_go_test_that_cannot_be_capped_is_refused(self):
+        # A run naming its own -exec would put its test binaries outside the cap: refused, and REFUSED
+        # written, which fails `run` (a mutant run's exit 1 alone would read KILLED).
+        with tempfile.TemporaryDirectory() as d:
+            prof = pathlib.Path(d) / "c"
+            shim = self.shim(d, "exit 0\n", 1 << 30)
+            for args in (["test", "-exec=x", "-coverprofile", str(prof), "./..."], ["test", "-exec", "x", "./p"]):
+                (pathlib.Path(d) / mutgate.REFUSED).unlink(missing_ok=True)
+                r = subprocess.run([str(shim), *args], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 1)
+                self.assertIn("cannot be put under", r.stderr)
+                self.assertTrue((pathlib.Path(d) / mutgate.REFUSED).exists())
+            self.assertEqual(subprocess.run([str(shim), "env", "GOWORK"]).returncode, 0)  # not `go test`: as is
 
     def test_run_caps_gremlins_mutant_runs(self):
         # The wiring: `run` gives gremlins' shim each run's share of half the free memory.
         with tempfile.TemporaryDirectory() as d:
             seen = pathlib.Path(d) / "seen"
-            bindir = self.fake_go(d, f"python3 -c '{self.GROW}'\n")
+            bindir = self.fake_go(d, f"eval \"$x python3 -c '{self.GROW}'\"\n")
             (bindir / "gremlins").write_text(
                 f"#!/bin/sh\ngo test -timeout 62s -failfast ./hint\necho $? > {seen}\n"
                 "while [ \"$1\" != -o ]; do shift; done\nprintf '%s' '{\"files\": [], \"mutants_lived\": 0}' > \"$2\"\n")
@@ -4966,6 +5107,8 @@ class Workflow(unittest.TestCase):
                     '#!/bin/bash\nshift 2\nlim=$1; shift\nwhat="$4 $(basename "$7")"\n'
                     f'echo "$lim $what" >> {log}\n[ "$what" = "{slow}" ] && exit 124\nexit 0\n')
                 (bin_ / "timeout").chmod(0o755)
+                (bin_ / "sudo").write_text("#!/bin/sh\ncat > /dev/null\n")  # the move into the cgroup (#6392)
+                (bin_ / "sudo").chmod(0o755)
                 env = {"PATH": f"{bin_}:/usr/bin:/bin", "PKG": "enforcer/nft", "SHARDS": "0, 148", "OF": "296",
                        "BASE": "b" * 40, "RUNNER_TEMP": d}
                 r = subprocess.run(["bash", "-ec", script], env=env, capture_output=True, text=True, cwd=d)
