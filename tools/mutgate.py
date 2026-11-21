@@ -32,9 +32,8 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
   tools/mutgate.py report DIR                survivors per package, from the JSON in DIR
   tools/mutgate.py gate DIR --git BASE [HEAD] [--body FILE [--body-from SHA]] [--summary FILE]
                                              exit 1 if a LIVED mutant sits on a target line that no
-                                             `Mutant-equivalent:` line in FILE (the PR body) and no
                                              entry of its package's record names, or a record
-                                             entry is stale
+                                             entry is stale; FILE (the PR body) waives nothing (#6379)
   tools/mutgate.py verify DIR --git BASE [HEAD] [--body FILE [--body-from SHA]] [--summary FILE]
                                              `gate`, after checking that DIR/*/ (and DIR/*/*/) holds exactly
                                              one readable result for each shard of every package
@@ -69,15 +68,15 @@ them (data_owner, #5779): emptying a test's table weakens it with no _test.go li
 lines only: its `-D` reads `git diff --merge-base`, so for a package whose tests changed `run` points HEAD for
 that one call at a commit whose parent differs from the tree on exactly those lines.
 A LIVED mutant on a target line is code the package's tests run (gremlins mutates only covered
-code) but do not check, and fails the gate, unless the PR body holds the line
-`Mutant-equivalent: broker/<pkg>/<file>.go:<line>[:<col>][:<KIND>] <reason>` for it (spelled
-`Mutant-uncovered:` for a NOT COVERED one no test can reach, #5779; the two are one waiver): one mutant, one
-reason the reviewer checks, never a range or pattern. A waiver that matches more than one mutant of
+code) but do not check, and fails the gate, unless its package's record, broker/<pkg>/MUTANTS-EQUIVALENT
+(see RECORD below), holds an entry for it: one mutant, one reason the reviewer checks, never a range or
+pattern. `waive` writes entries from lines `Mutant-equivalent: broker/<pkg>/<file>.go:<line>[:<col>][:<KIND>]
+<reason>` (spelled `Mutant-uncovered:` for a NOT COVERED one no test can reach, #5779; the two are one
+waiver), keyed by statement, so a run that widens the targets reads it and a moved line keeps it; an
+entry whose statement changed is stale and fails (#5776). A waiver that matches more than one mutant of
 the result on its line (two comparisons of one kind, or a deletion and a comparison, with no column
-or kind to tell them apart) waives none of them (#5792). The body is read as text by this file, never run.
-A proof accepted once moves into the package's record, broker/<pkg>/MUTANTS-EQUIVALENT (`waive`;
-see RECORD below), keyed by statement, so a later run that widens the targets reads it without the
-body line and a moved line keeps it; an entry whose statement changed is stale and fails (#5776).
+or kind to tell them apart) waives none of them (#5792). The PR body waives nothing (#6379): it can change
+after a review without changing the head, so a waiver lives only in the record the head holds.
 Gremlins' coverage run is the only judge of "covered".
 Go's cover blocks hold no `case` expression, so that run's profile, and covered_by's, gains a ran block
 for each clause expression a ran clause body shows evaluated (with_cases, #5822): gremlins runs those
@@ -147,22 +146,21 @@ GATED_TIERS = ("A", "B")
 # into declarations; a test function is one of them whose name `go test -run` selects.
 DECL = re.compile(r"^(?:func|type|var|const|import|package)\b")
 TEST_FUNC = re.compile(r"^func ((?:Test|Fuzz|Example)(?![a-z])\w*)\(")
-# The PR body's waiver for one mutant: an exact repo path and line, optionally the mutant's column and
+# A waiver line, as `waive` reads it, for one mutant: an exact repo path and line, optionally the mutant's column and
 # kind, then a reason. A waiver that matches more than one mutant of the result waives none (#5792).
 EQUIVALENT = re.compile(r"^Mutant-(?:equivalent|uncovered): (broker/[^\s:*?\[\]]+\.go):([1-9]\d*)(?::([1-9]\d*))?(?::([A-Z][A-Z_]{0,63}))?"
                         r" +(\S.*?)\s*$")
-# A reason that says its mutant is not equivalent is no proof (#5891, from #5863 and #5883): a body line
-# holding one waives nothing and fails the gate, and waive refuses it, so a real survivor never becomes a
+# A reason that says its mutant is not equivalent is no proof (#5891, from #5863 and #5883): waive refuses it, so a real survivor never becomes a
 # record entry that later gates read as proved. A record entry holding one fails `records` and the gate,
 # and waive writes nothing to its record (#5909). Case and the space or hyphen between the words are ignored.
 NOT_EQUIVALENT = re.compile(r"\bnot[\s-]+equivalent", re.IGNORECASE)
 # The kinds a waiver can name (#5828): gremlins v0.6.0's mutator types (internal/mutator/mutator.go, the
-# version the workflow installs) and delete's STATEMENT_DELETION. A body line naming another proves nothing.
+# version the workflow installs) and delete's STATEMENT_DELETION. A line naming another proves nothing.
 KINDS = frozenset({"ARITHMETIC_BASE", "CONDITIONALS_BOUNDARY", "CONDITIONALS_NEGATION", "INCREMENT_DECREMENT",
                    "INVERT_ASSIGNMENTS", "INVERT_BITWISE", "INVERT_BWASSIGN", "INVERT_LOGICAL", "INVERT_LOOPCTRL",
                    "INVERT_NEGATIVES", "REMOVE_SELF_ASSIGNMENTS", "STATEMENT_DELETION"})
 # A line where no letter precedes a waiver's start (a checked task-list box aside): an indent or any Markdown
-# a PR body wraps lines in, a backtick, bullet, task box, quote, heading, bold or table cell, which waivers
+# a file wraps lines in, a backtick, bullet, task box, quote, heading, bold or table cell, which waivers
 # does not read (L3 on #5976). Prose that names one after a word is not a waiver line.
 WAIVER_START = re.compile(r"^(?:[^A-Za-z]|\[[xX]\])*Mutant-(?:equivalent|uncovered):", re.IGNORECASE)
 
@@ -850,7 +848,7 @@ def targets_for(pkg, added, tests, data, bases):
 
 
 def waivers(body):
-    """{(path, line, kind, col): reason} of the PR body's `Mutant-equivalent:` lines, kind and col None
+    """{(path, line, kind, col): reason} of a waiver file's `Mutant-equivalent:` lines, kind and col None
     where the line names none. The body is text only."""
     out = {}
     for row in (body or "").replace("\r\n", "\n").split("\n"):
@@ -867,7 +865,7 @@ def placeholder(reason):
 
 
 def malformed_waivers(body):
-    """A warning for each body line that starts like a waiver (behind any indent, backtick, bullet or quote
+    """A warning for each line that starts like a waiver (behind any indent, backtick, bullet or quote
     mark) but waivers does not read, holding the <reason> placeholder, or naming a kind no mutant has
     (#5828, L3 on #5976). Each waives nothing, so its mutant still fails (fail closed);
     the warning says why, rather than leaving the line unread or listed only as unused."""
@@ -908,7 +906,7 @@ def refuse_not_equivalent(sites, out=None):
 
 
 def site_text(w):
-    """A waiver key (path, line, kind, col) as a body line spells it: `<path>:<line>[:<col>][:<KIND>]`."""
+    """A waiver key (path, line, kind, col) as a waiver line spells it: `<path>:<line>[:<col>][:<KIND>]`."""
     path, line, kind, col = w
     return f"{path}:{line}" + (f":{col}" if col else "") + (f":{kind}" if kind else "")
 
@@ -941,7 +939,7 @@ def covering(waived, mutants):
         if len(hit) > 1:
             ambiguous.append((w, sorted(hit, key=lambda m: (m[3] or 0, m[2]))))
         elif hit:
-            cover[hit[0]] = w  # later waivers win: decide puts body lines last
+            cover[hit[0]] = w
     return cover, ambiguous
 
 
@@ -965,7 +963,7 @@ def covering(waived, mutants):
 # whose count n differs, is stale and fails the gate, so any edit inside the enclosing declaration
 # (the statement, the code after it that a proof cites, a twin of it) needs the proof read again,
 # while lines moved outside it keep it (Security on #5780). The record is the PR's
-# text, read as data: a new or changed entry shows as such in the summary, for review as a body line is.
+# text, read as data: a new or changed entry shows as such in the summary, for review.
 RECORD = "MUTANTS-EQUIVALENT"
 RECORD_KEYS = {"file", "mutant", "func", "decl", "stmt", "at", "after", "occurrence", "reason", "accepted"}
 RECORD_OPTIONAL = {"col"}
@@ -2567,17 +2565,16 @@ def cmd_verify(args):
 
 
 def decide(results, added, tests, args, records=({}, [])):
-    """Gate the read results against the PR body's waivers and the packages' records (record_waivers'
-    pair; a stale entry fails), and write the summary table. A body line wins over a record entry."""
+    """Gate the read results against the packages' records (record_waivers' pair; a stale entry fails),
+    and write the summary table. The PR body waives nothing (#6379): a body can change after a review
+    without changing the head, while a record is part of the head every accept names."""
     text = pathlib.Path(args.body).read_text(encoding="utf-8", errors="replace") if args.body else ""
-    for problem in malformed_waivers(text):
-        print(f"mutgate: {problem}")
-    body = waivers(text)
-    refused = not_equivalent(body)
-    body = {w: reason for w, reason in body.items() if site_text(w) not in refused}
+    if waivers(text) or malformed_waivers(text):
+        print(f"mutgate: the PR body's Mutant-equivalent and Mutant-uncovered lines waive nothing (#6379): write each into its package's "
+              f"{RECORD} with `tools/mutgate.py waive FILE --accepted '#PR'` and commit it")
     kept, stale = records
-    waived = {**{site: f"{reason} (record, {accepted}{', new in this PR' if new else ''})"
-                 for site, (reason, accepted, new) in kept.items()}, **body}
+    waived = {site: f"{reason} (record, {accepted}{', new in this PR' if new else ''})"
+              for site, (reason, accepted, new) in kept.items()}
     targets = {pkg: t for pkg, (_, t) in results.items()}
     every = {pkg: mutants_of(d) for pkg, (d, _) in results.items()}
     found = violations(targets, {pkg: survivors_of(d) for pkg, (d, _) in results.items()}, waived, every)
@@ -2591,23 +2588,14 @@ def decide(results, added, tests, args, records=({}, [])):
     fresh = sorted(((site, reason, accepted) for site, (reason, accepted, new) in kept.items() if new),
                    key=lambda f: (site_text(f[0]), f[1]))
     write_summary(args.summary, summary(results, tested, waived, {pkg for pkg in results if diff_targets(added, pkg)},
-                                        set(body), stale, fresh))
+                                        stale, fresh))
     for problem in stale:
         print(f"mutgate: {problem}")
     for w, hit in covering(waived, every)[1]:
         print(f"mutgate: the waiver {site_text(w)} matches {len(hit)} mutants ("
               + ", ".join(site_text((p, n, k, c)) for p, n, k, c in hit) + "), so it waives none: name the one it "
               "proves by its column and kind, `Mutant-equivalent: <path>:<line>:<col>:<KIND> <reason>`")
-    refuse_not_equivalent(refused)
-    rc = report_violations(found, lost) or (1 if stale or refused else 0)
-    # MUT-stale-body (#6077): the workflow passes the event's body, which "Re-run failed jobs" reuses, so a
-    # line added or reworded after the push is unread here although the current body holds it. Every failure
-    # can call for a body edit (a new, refused or ambiguous line), so each says which body this was.
-    if rc and getattr(args, "body_from", None):
-        print(f"mutgate: the body read is the PR body as it stood at head {args.body_from}, when the event that "
-              "started this run fired (the PR's opening, a push or a reopening); a line added to the body after "
-              "that is not read by this run or a rerun of it, so it counts only from the next push")
-    return rc
+    return report_violations(found, lost) or (1 if stale else 0)
 
 
 def write_summary(path, text):
@@ -2645,7 +2633,7 @@ ROWS = 2000
 FRESH = 100
 
 
-def summary(results, tested, waived, own=(), body=None, stale=(), fresh=()):
+def summary(results, tested, waived, own=(), stale=(), fresh=()):
     """One Markdown table of every mutant on a target line, survivors first, and its verdict.
     tested names the changed tests of each package whose tests changed (None: every test); own
     names the packages where the diff also adds non-test lines; fresh lists ((path, line, mutant),
@@ -2692,15 +2680,11 @@ def summary(results, tested, waived, own=(), body=None, stale=(), fresh=()):
     lines += ["", "| Site | Mutant | Verdict |", "| --- | --- | --- |", *(r[2] for r in rows[:ROWS])]
     if len(rows) > ROWS:
         lines.append(f"| {len(rows) - ROWS} more rows | | not shown |")
-    # A waiver matching several mutants is listed below with them, not as naming none (#5828).
-    if unused := sorted((set(waived) if body is None else body) - used - {w for w, _ in ambiguous}):
-        lines += ["", "Mutant-equivalent lines naming no surviving mutant on a target line: "
-                  + ", ".join(cell(site_text(w)) for w in sorted(unused, key=site_text))]
     if ambiguous:
         lines += ["", "Waivers matching more than one mutant, which waive none of them (#5792):",
                   *(f"- {cell(site_text(w))}: " + ", ".join(cell(site_text(m)) for m in hit) for w, hit in ambiguous)]
     if fresh:
-        lines += ["", f"New {RECORD} entries in this PR (read each proof as a Mutant-equivalent body line is read):",
+        lines += ["", f"New {RECORD} entries in this PR (read each proof: it waives its mutant from the merge on):",
                   *(f"- {cell(site_text((p, n, None, col)))} {cell(kind)} ({cell(accepted)}): {proof_cell(reason, p)}"
                     for (p, n, kind, col), reason, accepted in fresh[:FRESH])]
         if len(fresh) > FRESH:
@@ -2871,7 +2855,7 @@ def report_violations(found, lost=()):
     if found:
         print("mutgate: add a test that fails when the line changes; if no test can tell, add a line "
               "`Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>` (`Mutant-uncovered:` for one no test "
-              "can reach) to the PR body for that mutant "
+              "can reach) for that mutant to a file and record it with `tools/mutgate.py waive FILE --accepted '#PR'` "
               "(its column and kind as the summary's Site and Mutant cells give them, where its line holds another)")
     return 1 if found else 0
 
@@ -2933,7 +2917,7 @@ def main(argv=None):
     p.add_argument("dir")
     p = sub.add_parser("waive")
     p.add_argument("lines", metavar="FILE",
-                   help="`Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>` lines, as a PR body holds them")
+                   help="`Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>` lines, one per line")
     p.add_argument("--accepted", required=True, metavar="#PR", type=pr_ref, help="the PR whose review accepted these proofs")
     p.add_argument("--mutant", type=mutant_kind,
                    help=f"the one mutant kind the proofs are for, where a line names none (default {DELETION}; "
@@ -2945,16 +2929,14 @@ def main(argv=None):
         p.add_argument("dir")
         p.add_argument("--git", required=True, metavar="BASE")
         p.add_argument("head", nargs="?", default="HEAD")
-        p.add_argument("--body", metavar="FILE", help="the PR body, read as text for Mutant-equivalent lines")
-        p.add_argument("--body-from", metavar="SHA", type=commit_sha,
-                       help="the PR head of the event whose body FILE is; a failure names it (#6077)")
+        # Kept so an older workflow copy still runs; the body waives nothing (#6379).
+        p.add_argument("--body", metavar="FILE", help="the PR body: its waiver lines are named, never applied")
+        p.add_argument("--body-from", metavar="SHA", type=commit_sha, help="ignored (#6379)")
         p.add_argument("--summary", metavar="FILE", help="append the table of verdicts here")
     args = ap.parse_args(argv)
     # K is a package's shard count, which `plan` packs past MATRIX_MAX jobs up to SHARDS_MAX (#6170).
     if args.cmd == "run" and (not 0 <= args.shard < args.of <= SHARDS_MAX or (args.of > 1 and not args.git)):
         ap.error(f"--shard I --of K needs 0 <= I < K <= {SHARDS_MAX}, and --git when K > 1")
-    if getattr(args, "body_from", None) and not args.body:
-        ap.error("--body-from names the event whose body --body holds: give --body too")
     if args.cmd == "packages":
         print("\n".join(gated_packages()))
         return 0

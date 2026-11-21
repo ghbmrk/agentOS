@@ -619,10 +619,12 @@ class Verify(unittest.TestCase):
     # REV-CHK-mut-selftest (#4106): the JSON comes from a job that ran the PR's tests, so the
     # deciding job reads it as data and rechecks everything `run` checks before it gates.
     def verify(self, results, test=None, src="package netguard\nvar a = 1 + 1\n", body=None,
-               summary=False, extra=()):
+               summary=False, extra=(), pr_body=None, kind="ARITHMETIC_BASE"):
         """mutgate.py verify in a temp repo whose last commit adds broker/netguard/a.go line 2 (with src)
-        and a_test.go (unless test is None), on a results dir holding {file name: JSON or raw text},
-        with the PR body body; with summary, the summary file's text is set on the result."""
+        and a_test.go (unless test is None), on a results dir holding {file name: JSON or raw text}.
+        body's waiver lines go into the package record through `waive` in that commit (a line waive
+        refuses writes nothing; its output is r.waive; `--mutant kind` unless a line names its own), and pr_body is passed as --body, which waives
+        nothing (#6379); with summary, the summary file's text is set on the result."""
         with tempfile.TemporaryDirectory() as d:
             git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
             shutil.copytree(ROOT / "tools", pathlib.Path(d) / "tools")
@@ -637,6 +639,14 @@ class Verify(unittest.TestCase):
             if test is not None:
                 (pkg / "a_test.go").write_text(test)
             (pathlib.Path(d) / "notes.md").write_text("x\n")
+            waive = None
+            if body is not None:
+                (pathlib.Path(d) / "lines.md").write_bytes(body.encode())
+                waive = subprocess.run([sys.executable, "-I", str(pathlib.Path(d) / "tools" / "mutgate.py"), "waive",
+                                        str(pathlib.Path(d) / "lines.md"), "--accepted", "#1",
+                                        *(["--mutant", kind] if kind and not any(w[2] for w in mutgate.waivers(body)) else [])],
+                                       capture_output=True, text=True, cwd=d)
+                (pathlib.Path(d) / "lines.md").unlink()
             git("add", "-A")
             git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "pr")
             res = pathlib.Path(d) / "res"
@@ -647,13 +657,14 @@ class Verify(unittest.TestCase):
                 (res / name).parent.mkdir(parents=True, exist_ok=True)
                 (res / name).write_text(data if isinstance(data, str) else json.dumps(data))
             extra = list(extra)
-            if body is not None:
-                (pathlib.Path(d) / "body.md").write_bytes(body.encode())
+            if pr_body is not None:
+                (pathlib.Path(d) / "body.md").write_bytes(pr_body.encode())
                 extra += ["--body", str(pathlib.Path(d) / "body.md")]
             if summary:
                 extra += ["--summary", str(pathlib.Path(d) / "summary.md")]
             r = subprocess.run([sys.executable, "-I", str(pathlib.Path(d) / "tools" / "mutgate.py"), "verify",
                                 str(res), "--git", "HEAD~1", *extra], capture_output=True, text=True)
+            r.waive = waive
             if summary:
                 r.summary = (pathlib.Path(d) / "summary.md").read_text()
             return r
@@ -3297,7 +3308,7 @@ class Summary(unittest.TestCase):
         self.assertNotIn("forged.go:1 | X", text)  # a newline in a result field makes no row of its own
         self.assertNotIn("a.go:9", text)
         self.assertIn("- p: 4 target lines, the lines every test covers (a change every test may run)", text)
-        self.assertIn("Mutant-equivalent lines naming no surviving mutant on a target line: broker/p/a.go:7", text)
+        self.assertNotIn("a.go:7", text)  # a waiver naming no mutant is not listed: records are read on their own
         self.assertTrue(rows)
         for tested, caption in (({"p": ["TestA", "TestB"]}, "the lines TestA, TestB cover"), ({}, "the lines the diff changes")):
             self.assertIn(caption, mutgate.summary({"p": (data, targets)}, tested, {}))
@@ -3397,13 +3408,14 @@ class Equivalent(unittest.TestCase):
         rows = [l for l in r.summary.split("\n") if l.startswith("| broker/")]
         self.assertEqual(rows, [
             "| broker/netguard/a.go:3:9 | ARITHMETIC\\_BASE | **LIVED**: no test fails |",
-            "| broker/netguard/a.go:2:9 | ARITHMETIC\\_BASE | equivalent: a and b are never read, so no value tells the mutants apart |",
+            "| broker/netguard/a.go:2:9 | ARITHMETIC\\_BASE | equivalent: a and b are never read, so no value tells the mutants apart "
+            "(record, \\#1, new in this PR) |",
         ])
 
     def test_a_reason_saying_not_equivalent_fails_the_gate(self):
         # REQ: MUT-equivalent-not-equivalent
-        # #5891 (from #5863, #5883): a line whose reason says its mutant is not equivalent waives nothing,
-        # and fails the gate even where its mutant is killed, so it never reaches a record through waive.
+        # #5891 (from #5863, #5883): a line whose reason says its mutant is not equivalent never reaches a
+        # record: waive refuses the file, writes nothing, and its survivor fails the gate.
         ok = "Mutant-equivalent: broker/netguard/a.go:2 a and b are never read, so no value tells the mutants apart\n"
         for reason in ("not equivalent: gremlins misreads it, follow-up #1", "NOT  Equivalent, a real survivor",
                        "the guard is not-equivalent here"):
@@ -3411,15 +3423,12 @@ class Equivalent(unittest.TestCase):
             with self.subTest(reason):
                 r = self.v.verify({"netguard.json": self.result(2, 3)}, src=self.SRC, body=ok + bad, summary=True)
                 self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-                self.assertIn("broker/netguard/a.go:3 ARITHMETIC_BASE survives", r.stdout)
+                self.assertEqual(r.waive.returncode, 1, r.waive.stdout + r.waive.stderr)
                 self.assertIn("mutgate: the Mutant-equivalent line broker/netguard/a.go:3 says its mutant is not "
-                              "equivalent", r.stdout)
-                self.assertIn("delete the line, or reword it only if the mutant is in fact equivalent", r.stdout)
-                self.assertNotIn("a.go:2 ", r.stdout)
-                # Only line 2 survives: the refused line still fails the gate, naming no survivor.
-                r = self.v.verify({"netguard.json": self.result(2)}, src=self.SRC, body=ok + bad)
-                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-                self.assertIn("says its mutant is not equivalent", r.stdout)
+                              "equivalent", r.waive.stderr)
+                self.assertIn("delete the line, or reword it only if the mutant is in fact equivalent", r.waive.stderr)
+                self.assertIn("broker/netguard/a.go:3 ARITHMETIC_BASE survives", r.stdout)
+                self.assertIn("broker/netguard/a.go:2 ARITHMETIC_BASE survives", r.stdout)
         self.assertEqual(mutgate.not_equivalent(mutgate.waivers(ok + "Mutant-equivalent: broker/netguard/a.go:3 "
                                                                        "equivalent: every caller passes x > 0\n")), [])
 
@@ -3691,8 +3700,12 @@ class Record(unittest.TestCase):
                               "occurrence": [1, 1], "reason": "b is never read", "accepted": "#5743"}) + "\n"
             run = self.repo(d, base, "package netguard\n\n// moved\nvar a = 1 + 1\nvar b = 2 + 2\nvar c = 3 + 3\n",
                             base_record=rec)
-            r = self.verify(d, run, 6, body="Mutant-equivalent: broker/netguard/a.go:6 c is never read\n")
-            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            # PROC-review-no-mutgate-wait (#6379): a PR body line waives nothing; it is named, and the survivor fails.
+            r = self.verify(d, run, 6, body="Mutant-equivalent: broker/netguard/a.go:6:9:ARITHMETIC_BASE c is never read\n")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("broker/netguard/a.go:6 ARITHMETIC_BASE survives", r.stdout)
+            self.assertIn("mutgate: the PR body's Mutant-equivalent and Mutant-uncovered lines waive nothing (#6379)", r.stdout)
+            self.assertIn("| broker/netguard/a.go:6:9 | ARITHMETIC\\_BASE | **LIVED**: no test fails |", r.summary)
             self.assertNotIn("new in this PR", r.summary)
 
     def test_a_record_entry_saying_not_equivalent_fails_records_and_the_gate(self):
@@ -3920,7 +3933,7 @@ class MutantScope(unittest.TestCase):
         r = v.verify({"netguard.json": result}, src=src, body=f"Mutant-equivalent: broker/netguard/a.go:2 {reason}\n",
                      summary=True)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn("the waiver broker/netguard/a.go:2 matches 2 mutants (broker/netguard/a.go:2:11:ARITHMETIC_BASE, "
+        self.assertIn("the waiver broker/netguard/a.go:2:ARITHMETIC_BASE matches 2 mutants (broker/netguard/a.go:2:11:ARITHMETIC_BASE, "
                       "broker/netguard/a.go:2:15:ARITHMETIC_BASE), so it waives none", r.stdout)
         self.assertIn("Waivers matching more than one mutant", r.summary)
         self.assertNotIn("equivalent:", r.summary)
@@ -3930,7 +3943,7 @@ class MutantScope(unittest.TestCase):
         self.assertIn("broker/netguard/a.go:2 ARITHMETIC_BASE survives", r.stdout)
         rows = [l for l in r.summary.split("\n") if l.startswith("| broker/")]
         self.assertEqual(rows, ["| broker/netguard/a.go:2:11 | ARITHMETIC\\_BASE | **LIVED**: no test fails |",
-                                f"| broker/netguard/a.go:2:15 | ARITHMETIC\\_BASE | equivalent: {reason} |"])
+                                f"| broker/netguard/a.go:2:15 | ARITHMETIC\\_BASE | equivalent: {reason} (record, \\#1, new in this PR) |"])
         body = "".join(f"Mutant-equivalent: broker/netguard/a.go:2:{c}:ARITHMETIC_BASE {reason}\n" for c in (11, 15))
         r = v.verify({"netguard.json": result}, src=src, body=body)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -4036,60 +4049,52 @@ class WaiverMessages(unittest.TestCase):
         self.assertEqual(mutgate.violations({"p": {"broker/p/a.go": {4}}}, {"p": [("a.go", 4, "X", 7), ("a.go", 4, "X")]}),
                          [("p", "broker/p/a.go", 4, "X", 7), ("p", "broker/p/a.go", 4, "X", None)])
 
-    def test_a_failure_names_the_push_its_body_came_from(self):
-        # MUT-stale-body (#6077): the gate reads the body of the event that started the run, which a rerun
-        # reuses, so a proof added to the body after that push is not read. The failure says so, naming the head.
+    def test_a_pr_body_waiver_has_no_effect(self):
+        # PROC-review-no-mutgate-wait (#6379): the PR body can change after a review without changing the head,
+        # so it waives nothing; a waiver counts only from the package record the head holds. This also ends
+        # MUT-stale-body (#6077): no body is read, so none can be stale.
         # REQ: MUT-stale-body
         sha = "1adcc9bd" + "0" * 32
-        r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, body="", extra=["--body-from", sha])
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        # The run can start on the PR's opening or reopening too (#6151, L3), so the line names the head, not a push.
-        self.assertIn(f"mutgate: the body read is the PR body as it stood at head {sha}, when the event that started "
-                      "this run fired (the PR's opening, a push or a reopening); a line added to the body after that "
-                      "is not read by this run or a rerun of it, so it counts only from the next push\n", r.stdout)
-        # Nothing to name when nothing fails, and no claim about a push the gate was not told of.
-        body = "".join(f"Mutant-equivalent: broker/netguard/a.go:2:{c}:ARITHMETIC_BASE {self.REASON}\n" for c in (11, 15))
-        r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, body=body, extra=["--body-from", sha])
+        lines = "".join(f"Mutant-equivalent: broker/netguard/a.go:2:{c}:ARITHMETIC_BASE {self.REASON}\n" for c in (11, 15))
+        notice = "mutgate: the PR body's Mutant-equivalent and Mutant-uncovered lines waive nothing (#6379)"
+        # --body-from is still accepted so an older workflow copy runs, and is ignored.
+        for extra in ((), ("--body-from", sha)):
+            with self.subTest(extra):
+                r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, pr_body=lines, extra=extra)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn(notice, r.stdout)
+                for c in (11, 15):
+                    self.assertIn(f"its waiver line: Mutant-equivalent: broker/netguard/a.go:2:{c}:ARITHMETIC_BASE", r.stdout)
+                self.assertNotIn("the body read is", r.stdout)
+        # A line only malformed is named too; a body with no waiver line prints nothing about it.
+        r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC,
+                            pr_body=f"- Mutant-equivalent: broker/netguard/a.go:2:11 {self.REASON}\n")
+        self.assertIn(notice, r.stdout)
+        r = Verify().verify({"netguard.json": self.result("KILLED")}, src=self.SRC, pr_body="Intro.\n")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertNotIn("the body read is", r.stdout)
-        r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, body="")
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertNotIn("the body read is", r.stdout)
-        # A failure with no survivor still names the push: a refused line on a killed mutant (#6151, Lens), and an
-        # ambiguous waiver, are cured by a body edit too.
-        hint = f"the body read is the PR body as it stood at head {sha}"
-        refused = "Mutant-equivalent: broker/netguard/a.go:2:11:ARITHMETIC_BASE not equivalent, a real survivor\n"
-        r = Verify().verify({"netguard.json": self.result("KILLED")}, src=self.SRC, body=refused,
-                            extra=["--body-from", sha])
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn("says its mutant is not equivalent", r.stdout)
-        self.assertNotIn("survives", r.stdout)
-        self.assertIn(hint, r.stdout)
-        r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, extra=["--body-from", sha],
-                            body=f"Mutant-equivalent: broker/netguard/a.go:2 {self.REASON}\n")
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn("matches 2 mutants", r.stdout)
-        self.assertIn(hint, r.stdout)
-        # --body-from without --body names a push whose body the gate never read (#6151, Security): refused.
-        r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, extra=["--body-from", sha])
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        self.assertIn("give --body too", r.stderr)
-        # Only a full commit sha is a push: anything else is refused before the gate reads a result.
+        self.assertNotIn(notice, r.stdout)
+        # The same lines recorded through waive pass; the body adds and takes away nothing.
+        for pr_body in (None, "", lines):
+            with self.subTest(pr_body=pr_body):
+                r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, body=lines, pr_body=pr_body)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # A refused or misspelt body line on a killed mutant no longer fails the gate: the body is not a waiver.
+        r = Verify().verify({"netguard.json": self.result("KILLED")}, src=self.SRC,
+                            pr_body="Mutant-equivalent: broker/netguard/a.go:2:11:ARITHMETIC_BASE not equivalent, a real survivor\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # Only a full commit sha is accepted for the ignored --body-from, as before.
         for bad in ("1adcc9bd", "HEAD", sha.upper(), sha + "0", "-x"):
-            r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, body="",
-                                extra=["--body-from=" + bad])
+            r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, extra=["--body-from=" + bad])
             self.assertEqual(r.returncode, 2, bad + r.stdout + r.stderr)
 
     def test_an_ambiguous_waiver_is_not_listed_as_naming_no_mutant(self):
         # Item 2: a waiver matching both mutants was listed as ambiguous and also as naming no surviving mutant.
         r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, summary=True,
-                            body=f"Mutant-equivalent: broker/netguard/a.go:2 {self.REASON}\n"
-                                 f"Mutant-equivalent: broker/netguard/a.go:9 {self.REASON}\n")
+                            body=f"Mutant-equivalent: broker/netguard/a.go:2 {self.REASON}\n")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("Waivers matching more than one mutant, which waive none of them (#5792):\n"
-                      "- broker/netguard/a.go:2: ", r.summary)
-        unused = [l for l in r.summary.split("\n") if l.startswith("Mutant-equivalent lines naming no")]
-        self.assertEqual(unused, ["Mutant-equivalent lines naming no surviving mutant on a target line: broker/netguard/a.go:9"])
+                      "- broker/netguard/a.go:2:ARITHMETIC\\_BASE: ", r.summary)
+        self.assertNotIn("naming no surviving mutant", r.summary)
 
     def test_a_malformed_waiver_line_is_warned_about(self):
         # Item 3: these lines were dropped unread, or (an unknown kind) shown only as unused.
@@ -4128,26 +4133,27 @@ class WaiverMessages(unittest.TestCase):
         for (line, want), warning in zip(bad.items(), got):
             with self.subTest(line):
                 self.assertIn(want, warning)
-        # The gate prints each warning, and the mutant the bad line meant to waive still fails (fail closed).
+        # waive prints each warning, and the mutant the bad line meant to waive still fails the gate (fail closed).
         r = Verify().verify({"netguard.json": self.result("LIVED")}, src=self.SRC, body="\n".join([*bad, good[0]]) + "\n")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertEqual(r.stdout.count("mutgate: the line "), len(bad) - 4, r.stdout)
-        self.assertEqual(r.stdout.count("still holds the <reason> placeholder, so it waives nothing"), 3, r.stdout)
+        self.assertEqual(r.waive.stderr.count("mutgate: the line "), len(bad) - 4, r.waive.stderr)
+        self.assertEqual(r.waive.stderr.count("still holds the <reason> placeholder, so it waives nothing"), 3, r.waive.stderr)
         # A reason holding the placeholder waives nothing, as the warning says.
         self.assertEqual(mutgate.waivers("\n".join(good)), {("broker/netguard/a.go", 2, "ARITHMETIC_BASE", 15): self.REASON,
                          ("broker/netguard/a.go", 3, "STATEMENT_DELETION", None): self.REASON,
                          ("broker/netguard/a.go", 4, None, None): "the reason names reason among other words"})
-        self.assertIn("names the kind BOGUS, which no mutant has, so it waives nothing", r.stdout)
+        self.assertIn("names the kind BOGUS, which no mutant has, so it waives nothing", r.waive.stderr)
         self.assertIn("broker/netguard/a.go:2 ARITHMETIC_BASE survives", r.stdout)
         self.assertNotIn("a.go:2:15:ARITHMETIC_BASE <reason>", r.stdout)
         # KINDS is gremlins v0.6.0's list, so it moves with the version the workflow installs.
         self.assertIn("gremlins/cmd/gremlins@v0.6.0", WORKFLOW.read_text())
         self.assertIn(mutgate.DELETION, mutgate.KINDS)
 
-    def test_the_workflow_header_gives_the_waiver_syntax(self):
-        # Item 4: the header still gave `<path>:<line> <reason>`, which names no column or kind.
+    def test_the_workflow_header_gives_the_waiver_source(self):
+        # Item 4, then #6379: the header names the one waiver source, the package record, and that the body waives nothing.
         head = " ".join(l.lstrip("# ") for l in WORKFLOW.read_text().split("\n")[:12])
-        self.assertIn("`Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>`", head)
+        self.assertIn("MUTANTS-EQUIVALENT record", head)
+        self.assertIn("the PR body waives nothing", head)
         self.assertNotIn("<path>:<line> <reason>", head)
 
 
@@ -4609,32 +4615,25 @@ class Workflow(unittest.TestCase):
         self.assertIn("RESULTS: ${{ runner.temp }}/mutants", steps[6])
         self.assertIn('python3 -I tools/mutgate.py verify "$RESULTS" --git "$BASE"', steps[6])
 
-    def test_pr_body_reaches_the_gate_as_data_only(self):
-        # #4908: the body is the PR author's text. It enters once, through the gate step's env, and
-        # the script writes it to a file for the base's tool: no `${{ }}` in any script line.
-        self.assertEqual(self.text.count("github.event.pull_request.body"), 1)
+    def test_pr_body_never_reaches_the_gate(self):
+        # #6379: the body waives nothing, so the workflow never hands it to the gate (#4908 kept it data; now it is absent).
+        self.assertNotIn("github.event.pull_request.body", self.text)
+        self.assertNotIn("--body", self.text)
         gate = job(self.text, "mutgate").split("      - name: Gate (MUT-tierA)\n", 1)[1]
-        self.assertIn("          PR_BODY: ${{ github.event.pull_request.body }}\n", gate)
-        # MUT-stale-body (#6077): the head of the event the body came from, so a failure can name that push.
-        self.assertIn("          PR_HEAD: ${{ github.event.pull_request.head.sha }}\n", gate)
         script = gate.split("        run: |\n", 1)[1]
         self.assertNotIn("${{", script)
         script = "\n".join(l[10:] for l in script.split("\n"))
         with tempfile.TemporaryDirectory() as d:
             stub = pathlib.Path(d) / "bin"
             stub.mkdir()
-            (stub / "python3").write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$OUT/argv"\ncp "$RUNNER_TEMP/pr-body.md" "$OUT/body"\n')
+            (stub / "python3").write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$OUT/argv"\n')
             (stub / "python3").chmod(0o755)
-            body = "$(touch pwned) `touch pwned` \"; exit 7; '\n-n\n%s %d\\n\nMutant-equivalent: broker/x/a.go:1 r\n"
             env = {"PATH": f"{stub}:/usr/bin:/bin", "OUT": d, "RUNNER_TEMP": d, "RESULTS": "R", "BASE": "B",
-                   "GITHUB_STEP_SUMMARY": "S", "PR_BODY": body, "PR_HEAD": "H"}
+                   "GITHUB_STEP_SUMMARY": "S"}
             r = subprocess.run(["bash", "-e", "-c", script], cwd=d, env=env, capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual((pathlib.Path(d) / "body").read_text(), body)
             self.assertEqual((pathlib.Path(d) / "argv").read_text().split("\n")[:-1], [
-                "-I", "tools/mutgate.py", "verify", "R", "--git", "B", "--body", f"{d}/pr-body.md", "--body-from", "H",
-                "--summary", "S"])
-            self.assertFalse((pathlib.Path(d) / "pwned").exists())
+                "-I", "tools/mutgate.py", "verify", "R", "--git", "B", "--summary", "S"])
 
     def test_base_copy_step_drops_files_the_pr_adds_under_tools(self):
         # A PR-added tools/fnmatch.py would be imported by risk_tier under the base's mutgate.py.
