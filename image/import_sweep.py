@@ -20,32 +20,37 @@ selector or spell GCM-SIV or KRB5KDF, as selecting AES-GCM-SIV takes one of its 
 and SPELT), and counts their references to each selector and their spellings.
 
 The JSON maps each place ("tree", and "initrd:<path>" for each initrd) to: "scanned", the ELF files read;
-"imports", each file importing an affected glibc symbol and those symbols; "lookups", each file importing
-glibc's dlsym or dlvsym that holds an affected function's name as a whole string, and those names;
-"static", each file loading no shared object whose bytes hold a mark of glibc's glob, regex or wide scanf
-code (CARRIES), and the function each mark stands for (#6298); each of these three counts as importing
-the function. "via", each ELF file whose
-NEEDED closure (by SONAME or file name, within that place) holds an importing library other than itself,
-and those libraries, whether or not the file imports a symbol itself (#6297: a file importing one group's
-symbols can reach another group's through a library); "cipher", each file whose bytes hold a CIPHER_NAMES
-or SPELT name and its references to each (cipher_sites); "sha256", each of those files' SHA-256;
-"unread", each ELF file objdump failed on; and, for an initrd, "others", its executable members that are
-not ELF files. Only symbols bound to a GLIBC_ version count, so a library's own re_* names do not.
+"imports", each file importing an affected glibc symbol and those symbols; "lookups", each file that holds
+an affected function's name at the end of a string and imports glibc's dlsym or dlvsym or has a library in its
+NEEDED closure that does (a wrapper; #6299), and those names; "carries", each file but a glibc whose bytes
+hold a mark of glibc's glob, regex or wide scanf code (CARRIES: a static copy, or embedded objects), and
+the function each mark stands for (#6298, #6299); each of these three counts as importing the function.
+"via", each ELF file whose NEEDED closure (by SONAME or file name, within that place) holds an importing
+library other than itself, and those libraries, whether or not the file imports a symbol itself (#6297: a
+file importing one group's symbols can reach another group's through a library); "glibc", each glibc
+(SONAME libc.so.6 at GLIBC_PATH) and the marks it holds; "unresolved", each file with a NEEDED name no
+file of the place answers to, and those names; "packed", each file whose code is not in its bytes as stored,
+and why (packed()); "cipher", each file whose bytes hold a CIPHER_NAMES or SPELT name and its references
+to each (cipher_sites); "sha256", the SHA-256 of each file reaching a group or held under "cipher";
+"unread", each ELF file objdump failed on; and, for an initrd, "others", its executable members that are not ELF files. Only symbols bound to a GLIBC_ version count, so a library's own
+re_* names do not.
 
 --summary exits 1 when a claim the glibc records rest on stops holding: any file, in any place, imports
 or reaches a wide scanf function, or imports or reaches a regex function and is not accepted by ALLOW's
 regex entries (the image -100290 record), or imports or reaches glob() and is not accepted by its [glob]
-section (the -126765 records). A file is accepted by an entry naming it (a glob), or, when it imports
-none of the group's functions itself, by "via" entries naming every library it reaches them through, each
-of which has an entry naming it (#6297): a reviewed library's dependents need no entry each, and a new
-direct caller still fails. An entry that accepts nothing also fails, so each list stays its record's. It
-also exits 1 when a file holding a selector name or a SPELT name matches no [cipher] entry of ALLOW or
+section (the -126765 records). A file is accepted by an entry naming it (a glob) that pins its SHA-256
+(#6299), or, when no such glob names it and it imports none of the group's functions itself, by "via"
+entries naming every library it reaches them through, each of which has an entry naming it (#6297): a
+reviewed library's dependents need no entry each, and a new direct caller or new bytes still fail. An
+entry that accepts nothing, or a pin no accepted file holds, also fails, so each list stays its record's.
+It also exits 1 when a file holding a selector name or a SPELT name matches no [cipher] entry of ALLOW or
 more than one, or holds other sites or other bytes (SHA-256) than the counted entry it matches, or an
-entry matches nothing; and on an ALLOW it cannot read (read_allow). The control is the scan itself: it
-also exits 1 when objdump failed on a file, the main tree or an initrd with executable members read no
-ELF file, the main tree has no importer of regcomp (bash and grep always import it), or no call site of
-EVP_CIPHER_fetch (libcryptsetup and libcrypto always hold one), or no static file carrying glob() (Debian's
-ldconfig always does), so a clean result is not a scan that read nothing.
+entry matches nothing; on any packed file; and on an ALLOW it cannot read (read_allow). The control is the
+scan itself: it also exits 1 when objdump failed on a file, the main tree or an initrd with executable
+members read no ELF file, the main tree has no importer of regcomp (bash and grep always import it), or no
+call site of EVP_CIPHER_fetch (libcryptsetup and libcrypto always hold one), no glibc, or no file carrying
+glob() (Debian's static ldconfig always does), or a glibc lacks a mark, so a clean result is not a scan
+that read nothing.
 """
 import collections
 import fnmatch
@@ -55,6 +60,7 @@ import os
 import pathlib
 import re
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -103,26 +109,42 @@ RELOC = re.compile(r"^[0-9a-f]+\s+(R_\w+)\s+([A-Za-z_]\w*)(?:@[\w.@]*)?(?:[+-]0x
 UND = re.compile(r"\*UND\*\s+\S+\s+(?:Base\s+)?\((GLIBC_[^)]*)\)\s+(\S+)$")
 DYNAMIC = re.compile(r"^\s+(NEEDED|SONAME)\s+(\S+)$")
 # #6298: two ways to reach a group's code that no import shows.
-# A run-time lookup: a file importing glibc's dlsym or dlvsym can resolve any function whose name it
-# holds. dlopen alone runs only the opened file's code, which the sweep reads as a file of its own. Such a
-# file holding a group function's name as a whole string (NUL on each side, as a C string literal is
-# stored) counts as importing that function, except a COMPAT_ONLY name for a file importing dlsym alone.
-# The openssl group needs no such rule: [cipher] already
+# A run-time lookup: a file whose own imports or NEEDED closure (within its place) import glibc's dlsym or
+# dlvsym can resolve any function whose name it holds, itself or through a library's wrapper around them
+# (libltdl, libuv and the like; #6299, L3 on #6339). dlopen alone runs only the opened file's code, which the
+# sweep reads as a file of its own. Such a file holding a group function's name at the end of a string (a
+# NUL after it, as a C string literal is stored; the linker stores "glob" as the tail of "safe_glob" when a
+# file holds both, so no NUL need precede it: Security on #6382) counts as importing that function, except
+# a COMPAT_ONLY name when nothing in reach imports dlvsym. The openssl group needs no such rule: [cipher] already
 # holds every file whose bytes hold a selector's name, a dlsym caller's string included (#5341).
 LOOKUP_FUNCS = ("dlsym", "dlvsym")
 # glibc exports these only under a hidden compat version (misc/regexp.c, compat_symbol since 2.23), and
 # dlsym never returns a hidden version (elf/dl-lookup.c check_match), so only dlvsym can reach them.
 COMPAT_ONLY = ("step", "advance")
-LOOKUP = re.compile(b"(?<=\0)(?:%s)(?=\0)" % b"|".join(rx.pattern.rstrip("$").encode() for rx in GROUPS.values()))
-# A static copy: a file loading no shared object carries any libc code it runs, with no symbol to read
-# once stripped (llama-server and agentos-camdecode link libc.a; Debian's ldconfig is static). A string
-# glibc's own code holds marks each group's code: glob_in_dir's name (posix/glob.c's assertions), the
-# wide scanf engine's name (__vfwscanf_internal, stdio-common/vfscanf-internal.c's assertions), and one of
-# the regex engine's error messages (posix/regcomp.c's table, which regcomp's object carries). A file
-# holding one counts as importing the function named beside it. The main tree's ldconfig always carries
-# glob() (its include patterns), which is the control that the marks still read (problems()).
-CARRIES = {b"\0glob_in_dir\0": "glob", b"\0__vfwscanf_internal\0": "vfwscanf",
-           b"\0Invalid preceding regular expression\0": "regcomp"}
+# glibc's exported re_* names, for LOOKUP: as a string's tail, the group's re_\w+ would match any string
+# holding "re_" (store_value).
+RE_NAMES = ("re_comp", "re_compile_fastmap", "re_compile_pattern", "re_exec", "re_match", "re_match_2",
+            "re_max_failures", "re_search", "re_search_2", "re_set_registers", "re_set_syntax", "re_syntax_options")
+LOOKUP = re.compile(b"(?:%s)(?=\0)" % b"|".join(
+    rx.pattern.rstrip("$").replace("re_\\w+", "|".join(RE_NAMES)).encode() for rx in GROUPS.values()))
+# A carried copy: a file can run glibc code it carries in its own bytes, with no symbol to read once
+# stripped: a static file (llama-server and agentos-camdecode link libc.a; Debian's ldconfig is static), or
+# a dynamic one embedding glibc's objects or a copy of their source (libc_pic, gnulib's glob and regex;
+# Security on #6339). A string glibc's own code holds marks each group's code: glob_in_dir's name
+# (posix/glob.c's assertions), the wide scanf engine's name (__vfwscanf_internal,
+# stdio-common/vfscanf-internal.c's assertions), and one of the regex engine's error messages
+# (posix/regcomp.c's table, which regcomp's object carries), each at the end of a string, as a merged
+# string can hold it (LOOKUP). Any file but a glibc (GLIBC) holding one counts
+# as importing the function named beside it. Every glibc in the image must hold every mark, which is the
+# control that the marks are those of the glibc the image ships (problems()); the main tree's static
+# ldconfig must carry glob(), the control that a carried copy is read.
+CARRIES = {b"glob_in_dir\0": "glob", b"__vfwscanf_internal\0": "vfwscanf",
+           b"Invalid preceding regular expression\0": "regcomp"}
+# glibc's shared library, the one file whose marks are the functions it exports, not a copy: its SONAME,
+# at the path Debian installs it, in the main tree or initrd or a guest root (Security R2 on #6382: a
+# SONAME alone would let any file named so skip the carried-copy rule).
+GLIBC = "libc.so.6"
+GLIBC_PATH = re.compile(r"^(/usr/lib/agentos/images/[^/]+)?/usr/lib/x86_64-linux-gnu/libc\.so\.6$")
 
 
 def group_of(sym):
@@ -130,32 +152,60 @@ def group_of(sym):
 
 
 def read_elf(path):
-    """(affected glibc symbols imported, NEEDED names, SONAME or None, read, how) of the ELF file at PATH.
+    """(affected glibc symbols imported, NEEDED names, SONAME or None, read, lookup) of the ELF file at PATH.
     READ is False when objdump fails on it for any reason but its having no dynamic section (a static or
-    relocatable file, which imports nothing), so a file objdump cannot parse is never counted clean. HOW
-    is "dlvsym" or "dlsym" when it imports that glibc run-time lookup (LOOKUP_FUNCS; dlvsym when both),
-    "static" when it names no
-    interpreter (PT_INTERP) and no NEEDED library, so whatever libc code it runs is in its own bytes,
-    else None."""
+    relocatable file, which imports nothing), so a file objdump cannot parse is never counted clean. LOOKUP
+    is the set of glibc run-time lookups (LOOKUP_FUNCS) it imports."""
     r = subprocess.run(["objdump", "-pT", str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                        text=True, errors="replace")
-    out = r.stdout
     read = r.returncode == 0 or "not a dynamic object" in r.stderr
-    syms, needed, soname, interp, dl = set(), [], None, False, set()
-    for line in out.splitlines():
+    syms, needed, soname, dl = set(), [], None, set()
+    for line in r.stdout.splitlines():
         m = UND.search(line)
         if m and group_of(m.group(2)):
             syms.add(m.group(2))
         if m and m.group(2) in LOOKUP_FUNCS:
             dl.add(m.group(2))
-        interp = interp or line.split()[:1] == ["INTERP"]
         m = DYNAMIC.match(line)
         if m and m.group(1) == "NEEDED":
             needed.append(m.group(2))
         elif m:
             soname = m.group(2)
-    how = max(dl) if dl else None if interp or needed else "static"
-    return sorted(syms), needed, soname, read, how
+    return sorted(syms), needed, soname, read, dl
+
+
+# ELF header fields (#6299): by class (32 or 64-bit), the offsets of e_phoff, e_shoff, e_phentsize and
+# e_phnum, and each program header's p_type, p_flags, p_filesz and p_memsz.
+ELF_HEADER = {1: ("I", 0x1C, 0x20, 0x2A, 0x2C, 0, 24, 16, 20), 2: ("Q", 0x20, 0x28, 0x36, 0x38, 0, 4, 32, 40)}
+PT_LOAD, PF_X, PF_W = 1, 1, 2
+
+
+def packed(data):
+    """Why the code of the ELF file DATA is not in its bytes as stored, so no import, lookup or mark of it
+    can be read (#6299, Security on #6339): it loads segments and has no section table (UPX and its like
+    drop it), or it maps a segment both writable and executable, or executable memory past the bytes the
+    file holds for it (code written at run time); or its headers do not parse, so neither can be read.
+    "" for none of these."""
+    try:
+        word, phoff, shoff, phentsize, phnum, *at = ELF_HEADER[data[4]]
+        order = {1: "<", 2: ">"}[data[5]]
+        field = lambda fmt, off: struct.unpack_from(order + fmt, data, off)[0]
+        loads = []
+        for i in range(field("H", phnum)):
+            h = field(word, phoff) + i * field("H", phentsize)
+            typ, flags, filesz, memsz = (field("I" if n < 2 else word, h + o) for n, o in enumerate(at))
+            if typ == PT_LOAD:
+                loads.append((flags, filesz, memsz))
+        no_sections = field(word, shoff) == 0
+    except (KeyError, IndexError, struct.error):
+        return "headers that do not parse"
+    if loads and no_sections:
+        return "no section table"
+    if any(f & PF_X and f & PF_W for f, _, _ in loads):
+        return "a writable and executable segment"
+    if any(f & PF_X and memsz > filesz for f, filesz, memsz in loads):
+        return "executable memory past its file bytes"
+    return ""
 
 
 def cipher_sites(path):
@@ -206,38 +256,76 @@ def is_elf(path):
         sys.exit("import sweep: cannot read %s: %s" % (path, e))
 
 
-def held_names(path, how):
-    """The group functions the ELF file at PATH reaches with no import (#6298), sorted: for HOW "dlsym" or
-    "dlvsym", each name it holds as a whole string (LOOKUP), a COMPAT_ONLY one only for dlvsym; for
-    "static", the function each glibc mark it holds stands for (CARRIES)."""
-    with open(path, "rb") as f:
-        data = f.read()
-    if how != "static":
-        names = {m.group().decode() for m in LOOKUP.finditer(data)}
-        return sorted(names if how == "dlvsym" else names - set(COMPAT_ONLY))
-    return sorted({name for mark, name in CARRIES.items() if mark in data})
+def lookup_names(held, src):
+    """The names of HELD a file can look up through SRC ({file: the LOOKUP_FUNCS it imports}): none
+    without a source, and a COMPAT_ONLY name only where one imports dlvsym."""
+    funcs = {f for fs in src.values() for f in fs}
+    return sorted(held if "dlvsym" in funcs else set(held) - set(COMPAT_ONLY)) if funcs else []
+
+
+def unwrapped(places, wrappers):
+    """(PLACES with each lookup recounted without the sources a [wrapper] entry accepts, the refusals of
+    those entries). A [wrapper] entry names a library, pinned as a [glob] entry is, whose dlsym and dlvsym
+    calls take only names of its own, so a dependent's string is no lookup through it (the libraries
+    libsystemd-shared and libpam load plugins by fixed names). A file's own dlsym import always counts. An
+    entry whose library's bytes it does not pin accepts nothing, and one that accepts nothing fails."""
+    errs, used, out = [], set(), {}
+    for place, v in places.items():
+        v = dict(v, lookups=dict(v.get("lookups", {})))
+        for p, src in v.get("through", {}).items():
+            keep = {}
+            for lib, funcs in src.items():
+                hit = [e for e in wrappers if lib != p and fnmatch.fnmatchcase(lib, e.glob)]
+                sha = v.get("sha256", {}).get(lib) or "MISSING"
+                ok = [e for e in hit if sha in e.sha256]
+                used.update((e, sha) for e in ok)
+                used.update((e, None) for e in hit)
+                if hit and not ok:
+                    errs.append("%s: %s holds other bytes than import_sweep.allow [wrapper] %s pins; review its "
+                                "dlsym calls again, then pin them: %s sha256=%s" % (place, lib, hit[0].glob,
+                                                                                  hit[0].glob, sha))
+                if not ok:
+                    keep[lib] = funcs
+            names = lookup_names(v["lookups"][p], keep)
+            if names:
+                v["lookups"][p] = names
+            else:
+                del v["lookups"][p]
+        out[place] = v
+    errs += ["import_sweep.allow: [wrapper] %s matches no library a lookup goes through; remove it" % e.glob
+             for e in wrappers if (e, None) not in used]
+    errs += ["import_sweep.allow: [wrapper] %s pins sha256=%s, which no library it matches holds; remove it"
+             % (e.glob, d) for e in wrappers if (e, None) in used for d in e.sha256 if (e, d) not in used]
+    return out, sorted(set(errs), key=errs.index)
 
 
 def own(v, p):
     """The group functions file P of place V imports itself: by import, by a run-time lookup of a name it
-    holds, or as a static copy it carries (#6298)."""
-    return set(v["imports"].get(p, [])) | set(v.get("lookups", {}).get(p, [])) | set(v.get("static", {}).get(p, []))
+    holds, or as a copy of glibc's code it carries (#6298, #6299)."""
+    return set(v["imports"].get(p, [])) | set(v.get("lookups", {}).get(p, [])) | set(v.get("carries", {}).get(p, []))
 
 
 def sweep(files):
     """FILES maps a shown path to a readable path. Returns the place's record (module docstring)."""
-    imports, needed, by_name, unread, cipher, digest, unseen = {}, {}, {}, [], {}, {}, {"lookups": {}, "static": {}}
+    imports, needed, by_name, unread, cipher, digest = {}, {}, {}, [], {}, {}
+    dl, names, carries, glibc, opaque = {}, {}, {}, {}, {}
     for shown, real in files.items():
-        syms, needed[shown], soname, read, how = read_elf(real)
-        if how:
-            held = held_names(real, how)
-            if held:
-                unseen["static" if how == "static" else "lookups"][shown] = held
+        syms, needed[shown], soname, read, dl[shown] = read_elf(real)
+        with open(real, "rb") as f:
+            data = f.read()
+        digest[shown] = hashlib.sha256(data).hexdigest()
+        names[shown] = {m.group().decode() for m in LOOKUP.finditer(data)}
+        marks = sorted({name for mark, name in CARRIES.items() if mark in data})
+        if soname == GLIBC and GLIBC_PATH.match(shown):
+            glibc[shown] = marks
+        elif marks:
+            carries[shown] = marks
+        why = packed(data)
+        if why:
+            opaque[shown] = why
         sites, disassembled = cipher_sites(real)
         if sites is not None:
             cipher[shown] = sites
-            with open(real, "rb") as f:
-                digest[shown] = hashlib.sha256(f.read()).hexdigest()
         if not (read and disassembled):
             unread.append(shown)
         if syms:
@@ -245,25 +333,41 @@ def sweep(files):
         # A NEEDED entry names a library's SONAME, which on disk is a symbolic link to the file read.
         for n in {os.path.basename(shown), soname} - {None}:
             by_name.setdefault(n, []).append(shown)
-    importers = set(imports) | set(unseen["lookups"]) | set(unseen["static"])
-    via = {}
-    for shown in needed:
-        seen, todo, hits = set(), list(needed[shown]), set()
+
+    def closure(shown):
+        """The files of this place in SHOWN's NEEDED closure, itself excluded."""
+        seen, todo, libs = set(), list(needed[shown]), set()
         while todo:
             n = todo.pop()
             if n in seen:
                 continue
             seen.add(n)
             for lib in by_name.get(n, []):
-                if lib in importers and lib != shown:
-                    hits.add(lib)
+                libs.add(lib)
                 todo += needed.get(lib, [])
-        if hits:
-            via[shown] = sorted(hits)
+        return libs - {shown}
+    reached = {shown: closure(shown) for shown in files}
+    # A NEEDED name no file of the place answers to (Security R4 on #6382): the loader cannot map such a
+    # file in that root, and the summary names it.
+    unresolved = {shown: sorted(set(n for n in needed[shown] if n not in by_name)) for shown in files}
+    lookups, through = {}, {}
+    for shown in files:
+        src = {lib: sorted(dl[lib]) for lib in sorted(reached[shown] | {shown}) if dl[lib]}
+        held = lookup_names(names[shown], src)
+        if held:
+            lookups[shown], through[shown] = held, src
+    importers = set(imports) | set(lookups) | set(carries)
+    via = {shown: sorted(reached[shown] & importers) for shown in files if reached[shown] & importers}
+    # Each reaching or [cipher] file's SHA-256, and each lookup source's, for the pinned allow entries
+    # (#5861, #6299).
+    pinned = importers | set(via) | set(cipher) | {lib for src in through.values() for lib in src}
     return {"scanned": len(files), "imports": dict(sorted(imports.items())), "via": dict(sorted(via.items())),
-            "lookups": dict(sorted(unseen["lookups"].items())), "static": dict(sorted(unseen["static"].items())),
+            "lookups": dict(sorted(lookups.items())), "through": dict(sorted(through.items())),
+            "carries": dict(sorted(carries.items())),
+            "glibc": dict(sorted(glibc.items())), "packed": dict(sorted(opaque.items())),
+            "unresolved": {p: n for p, n in sorted(unresolved.items()) if n},
             "unread": sorted(unread), "cipher": dict(sorted(cipher.items())),
-            "sha256": dict(sorted(digest.items()))}
+            "sha256": {p: d for p, d in sorted(digest.items()) if p in pinned}}
 
 
 def cannot_read(e):
@@ -351,11 +455,22 @@ def problems(places):
     # libcryptsetup and libcrypto always call EVP_CIPHER_fetch: none found is a disassembly that read nothing.
     if not any(v.get("EVP_CIPHER_fetch") for v in places.get("tree", {}).get("cipher", {}).values()):
         errs.append("tree: no call site of EVP_CIPHER_fetch, so the cipher scan read nothing it should have (control)")
-    # #6298: Debian's static ldconfig always carries glob() (its include patterns): none found is a mark
-    # (CARRIES) a new glibc no longer holds, so static copies would pass unread.
-    if "glob" not in {s for names in places.get("tree", {}).get("static", {}).values() for s in names}:
-        errs.append("tree: no static file carries glob() (ldconfig always does), so the static scan's marks read "
-                    "nothing they should have (control)")
+    # #6299: every glibc read holds every mark (CARRIES), so the marks are checked against the glibc the image
+    # ships, not only the runner's libc.a; and the main tree holds one. A missing mark would let that
+    # group's carried copies pass unread.
+    errs += ["%s: the glibc %s holds no %s mark, so carried copies of that code would pass unread (control)"
+             % (k, p, name) for k, v in places.items() for p, held in v.get("glibc", {}).items()
+             for name in sorted(set(CARRIES.values()) - set(held))]
+    if not places.get("tree", {}).get("glibc"):
+        errs.append("tree: no glibc (%s) read, so the marks are checked against none (control)" % GLIBC)
+    # #6298: Debian's static ldconfig always carries glob() (its include patterns): none found is a carried
+    # copy the scan no longer reads.
+    if "glob" not in {s for names in places.get("tree", {}).get("carries", {}).values() for s in names}:
+        errs.append("tree: no file carries glob() (Debian's static ldconfig always does), so the scan reads no "
+                    "carried copy (control)")
+    # #6299: a file whose code is not in its bytes as stored can hide any import, lookup or copy.
+    errs += ["%s: %s is packed (%s): its code cannot be read for imports, lookups or carried copies"
+             % (k, p, why) for k, v in places.items() for p, why in v.get("packed", {}).items()]
     return errs
 
 
@@ -364,7 +479,7 @@ def reach(places):
     every file that imports or reaches a function of the group."""
     out = {}
     for place, v in places.items():
-        for p in set(v["imports"]) | set(v.get("lookups", {})) | set(v.get("static", {})) | set(v["via"]):
+        for p in set(v["imports"]) | set(v.get("lookups", {})) | set(v.get("carries", {})) | set(v["via"]):
             mine = {group_of(x) for x in own(v, p)}
             libs = v["via"].get(p, [])
             for g in mine | {group_of(x) for lib in libs for x in own(v, lib)}:
@@ -378,10 +493,11 @@ def load_allow(path):
     return read_allow(path)[0]
 
 
-# A [regex] or [glob] entry: GLOB, which accepts the files it names, or "via GLOB", which accepts a file
-# reaching the group only through libraries it names (refusals). Further fields (a reviewed file's
-# SHA-256) can follow with defaults.
-Entry = collections.namedtuple("Entry", "glob via", defaults=(False,))
+# A [regex] or [glob] entry: GLOB and the SHA-256 of each file reviewed under it, which accepts the files
+# it names whose bytes are one of those (#6299: as [cipher] entries are keyed, so a new version, or another
+# file the glob matches, is read before it is accepted), or "via GLOB", which accepts a file reaching the
+# group only through libraries it names (refusals), whose own GLOB entries pin them.
+Entry = collections.namedtuple("Entry", "glob via sha256", defaults=(False, ()))
 
 
 def shown(e):
@@ -389,21 +505,26 @@ def shown(e):
 
 
 def entry(e):
-    """E as an Entry; a plain string is a GLOB entry."""
+    """E as an Entry; a plain string is a GLOB entry pinning no bytes, which accepts no file."""
     return e if isinstance(e, Entry) else Entry(e)
 
 
 def parse_entry(line):
-    """The Entry a [regex] or [glob] line gives, or None for a line of another form (ENTRY_FORMAT)."""
+    """The Entry a [regex] or [glob] line gives, or why it is none (ENTRY_FORMAT)."""
     t = line.split()
-    if len(t) == 1 and t[0] != "via":
-        return Entry(t[0])
-    if len(t) == 2 and t[0] == "via":
-        return Entry(t[1], True)
-    return None
+    if t[0] == "via":
+        return Entry(t[1], True) if len(t) == 2 else "%s is not an entry" % line
+    pins = [w[len("sha256="):].lower() for w in t[1:] if DIGEST.match(w)]
+    if t[0].startswith("sha256=") or len(pins) < len(t) - 1:
+        return "%s is not an entry" % line
+    if not pins:
+        return "%s pins no SHA-256" % line
+    if len(set(pins)) < len(pins):
+        return "%s gives a SHA-256 twice" % line
+    return Entry(t[0], False, tuple(sorted(pins)))
 
 
-ENTRY_FORMAT = "GLOB or via GLOB"
+ENTRY_FORMAT = "GLOB sha256=HEX ... (the SHA-256 of each file reviewed) or via GLOB"
 
 
 # A [cipher] entry's tokens: the SHA-256 of the file reviewed (hex in either case, kept lowercased), and
@@ -417,15 +538,16 @@ REVIEW = ("review where its names come from, then %s the [cipher] entry and the 
 
 
 def read_allow(path):
-    """(the regex entries, the [cipher] entries, the [glob] entries) of ALLOW. The regex entries come first,
-    one per line, then each section once, opened by its line ([glob] or [cipher]); a regex or [glob] entry
-    is an Entry (ENTRY_FORMAT), each given once. A [cipher] entry is a glob, then either "*" (not
+    """(the regex entries, the [cipher] entries, the [glob] entries, the [wrapper] entries) of ALLOW. The
+    regex entries come first, one per line, then each section once, opened by its line ([glob], [cipher] or
+    [wrapper]); a regex, [glob] or [wrapper] entry is an Entry (ENTRY_FORMAT; a [wrapper] entry is never
+    "via"), each given once. A [cipher] entry is a glob, then either "*" (not
     counted) or the SHA-256 of the file reviewed and the sites it holds exactly (FORMAT), read as
     {"sha256": hex, "sites": {name: count}}: a new package version changes the bytes, so the source is
     read again even when the counts hold (#5861). Exits naming the line on any other entry, a glob given
     twice, or a name or the digest given twice in one entry, and on a section line it does not know or
     has read already."""
-    regex, cipher, globs, section, seen = [], {}, [], None, set()
+    regex, cipher, globs, wrappers, section, seen = [], {}, [], [], None, set()
     for n, l in enumerate(pathlib.Path(path).read_text().splitlines(), 1):
         l = l.split("#", 1)[0].strip()
 
@@ -433,15 +555,17 @@ def read_allow(path):
             sys.exit("import sweep: %s:%d: %s; a [cipher] entry is %s" % (path, n, why, FORMAT))
         if l.startswith("["):
             section = l[1:-1] if l.endswith("]") else l
-            if section not in ("glob", "cipher") or section in seen:
-                sys.exit("import sweep: %s:%d: %s is %s; the sections are [glob] and [cipher], each once"
+            if section not in ("glob", "cipher", "wrapper") or section in seen:
+                sys.exit("import sweep: %s:%d: %s is %s; the sections are [glob], [cipher] and [wrapper], each once"
                          % (path, n, l, "given again" if section in seen else "no section"))
             seen.add(section)
-        elif l and section in (None, "glob"):
-            e, into = parse_entry(l), regex if section is None else globs
-            if e is None or e in into:
+        elif l and section in (None, "glob", "wrapper"):
+            e, into = parse_entry(l), {None: regex, "glob": globs, "wrapper": wrappers}[section]
+            if section == "wrapper" and isinstance(e, Entry) and e.via:
+                e = "%s is not an entry" % l
+            if not isinstance(e, Entry) or (e.glob, e.via) in {(x.glob, x.via) for x in into}:
                 sys.exit("import sweep: %s:%d: %s; a%s entry is %s, each given once" % (
-                    path, n, "%s is given again" % l if e else "%s is not an entry" % l,
+                    path, n, e if not isinstance(e, Entry) else "%s is given again" % l,
                     " [glob]" if section else " regex", ENTRY_FORMAT))
             into.append(e)
         elif l:
@@ -469,7 +593,7 @@ def read_allow(path):
             if not sites:
                 bad("%s counts no site" % glob)
             cipher[glob] = {"sha256": digests[0], "sites": sites}
-    return regex, cipher, globs
+    return regex, cipher, globs, wrappers
 
 
 def entry_line(p, sha, sites):
@@ -518,11 +642,12 @@ LISTED = {"regex": ("a regex function", "", "the image -100290 record"),
 
 def refusals(places, allow, globs=()):
     """Each claim of the glibc records that PLACES break, against the regex entries ALLOW and the [glob]
-    section's GLOBS (Entry, or a plain glob). In each place, a file reaching a group is accepted by a GLOB
-    entry matching it; or, when it imports none of the group's functions itself, when each library it
-    reaches them through matches a "via" entry and a GLOB entry of its own (#6297), so a new direct
-    caller is never accepted by a library's review. Every entry has to accept a file somewhere."""
-    errs, used = [], set()
+    section's GLOBS (Entry, or a plain glob, which pins nothing). In each place, a file reaching a group is
+    accepted by a GLOB entry matching it that pins its SHA-256 (#6299); or, when no GLOB entry matches it and
+    it imports none of the group's functions itself, when each library it reaches them through matches a
+    "via" entry and a GLOB entry of its own (#6297), so a new direct caller is never accepted by a library's
+    review. Every entry has to accept a file somewhere, and every pin has to be a file's it accepts."""
+    errs, used, pinned = [], set(), set()
     entries = {"regex": [entry(e) for e in allow], "glob": [entry(e) for e in globs]}
     for (g, p), at in sorted(reach(places).items()):
         if g not in LISTED:
@@ -533,21 +658,38 @@ def refusals(places, allow, globs=()):
             return [e for e in entries[g] if e.via == via and fnmatch.fnmatchcase(path, e.glob)]
         named = matching(p, False)
         used.update((g, e) for e in named)
-        refused = []
-        for place, (own, libs) in ([] if named else at.items()):
+        refused, other = {}, {}
+        for place, (own, libs) in at.items():
+            sha = places[place].get("sha256", {}).get(p) or "MISSING"
+            if named:
+                hit = [e for e in named if sha in e.sha256]
+                pinned.update((g, e, sha) for e in hit)
+                if not hit:
+                    other[place] = sha
+                continue
             vias = [matching(lib, True) for lib in libs]
             if own or not all(vias) or not all(matching(lib, False) for lib in libs):
-                refused.append(place)
+                refused[place] = sha
                 continue
             used.update((g, e) for v in vias for e in v)
+        what, section, record = LISTED[g]
+        pins = lambda d: " ".join("sha256=" + x for x in sorted(set(d.values())))
         if refused:
-            what, section, record = LISTED[g]
             errs.append("%s: %s imports or reaches %s and is not in import_sweep.allow%s; review it, name it in "
-                        "%s, then add the entry: %s" % (" ".join(refused), p, what, section, record, p))
+                        "%s, then add the entry: %s %s" % (" ".join(refused), p, what, section, record, p,
+                                                           pins(refused)))
+        if other:
+            errs.append("%s: %s reaches %s and holds other bytes than import_sweep.allow%s %s pins (a new version, "
+                        "or another file it matches); review it again, then pin them: %s %s" % (
+                            " ".join(other), p, what, section, " ".join(e.glob for e in named), named[0].glob,
+                            pins(other)))
     errs += ["import_sweep.allow:%s %s %s; remove it" % (
         LISTED[g][1], shown(e), "accepts no file that reaches %s only through a library it names that has an entry "
         "naming it" % LISTED[g][0] if e.via else "matches no file that reaches %s" % LISTED[g][0])
         for g in LISTED for e in entries[g] if (g, e) not in used]
+    errs += ["import_sweep.allow:%s %s pins sha256=%s, which no file it accepts holds; remove it"
+             % (LISTED[g][1], e.glob, d) for g in LISTED for e in entries[g] if (g, e) in used
+             for d in e.sha256 if (g, e, d) not in pinned]
     return errs
 
 
@@ -557,15 +699,20 @@ def summary(places):
         lines.append("%s: %d ELF files read" % (place, v["scanned"]))
         for g in GROUPS:
             how = {k: {p: [s for s in syms if group_of(s) == g] for p, syms in v.get(key, {}).items()}
-                   for k, key in (("imports", "imports"), ("looks up", "lookups"), ("carries", "static"))}
+                   for k, key in (("imports", "imports"), ("looks up", "lookups"), ("carries", "carries"))}
             how = {k: {p: s for p, s in d.items() if s} for k, d in how.items()}
             imp = {p for d in how.values() for p in d}
             via = {p: [lib for lib in libs if lib in imp] for p, libs in v["via"].items() if p not in imp}
             via = {p: libs for p, libs in via.items() if libs}
-            lines.append("%s %s: %d files import a function (or look one up, or carry a static copy), %d more reach "
+            lines.append("%s %s: %d files import a function (or look one up, or carry a copy), %d more reach "
                          "one through a NEEDED library" % (place, g, len(imp), len(via)))
             lines += ["  %s %s: %s" % (k, p, " ".join(s)) for k, d in how.items() for p, s in sorted(d.items())]
             lines += ["  via %s: %s" % (p, " ".join(libs)) for p, libs in via.items()]
+        lines += ["  glibc %s holds the marks of: %s" % (p, " ".join(m) or "none") for p, m in v.get("glibc", {}).items()]
+        lines += ["  packed %s: %s" % kv for kv in v.get("packed", {}).items()]
+        lines += ["  looks up through %s: %s" % (p, " ".join("%s=%s" % (lib, "+".join(f)) for lib, f in src.items()))
+                  for p, src in v.get("through", {}).items()]
+        lines += ["  unresolved %s: %s" % (p, " ".join(n)) for p, n in v.get("unresolved", {}).items()]
         cipher = v.get("cipher", {})
         lines.append("%s cipher: %d files hold a by-name cipher selector or spell %s"
                      % (place, len(cipher), " or ".join(SPELT)))
@@ -595,8 +742,9 @@ def main(argv):
         places = json.loads(pathlib.Path(argv[1]).read_text())
         lines = summary(places)
         print("\n".join(lines + annotations(lines)))
-        regex, cipher, globs = read_allow(argv[2] if len(argv) == 3 else ALLOW)
-        errs = problems(places) + refusals(places, regex, globs) + cipher_refusals(places, cipher)
+        regex, cipher, globs, wrappers = read_allow(argv[2] if len(argv) == 3 else ALLOW)
+        places, wrapped = unwrapped(places, wrappers)
+        errs = problems(places) + wrapped + refusals(places, regex, globs) + cipher_refusals(places, cipher)
         for e in errs[:10]:
             print("::error title=import sweep::" + e.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
     elif len(argv) == 2 and argv[0] == "--tree":
