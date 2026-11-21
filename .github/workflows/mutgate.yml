@@ -3,9 +3,9 @@ name: mutgate
 # #1814) on every pull request. A PR fails when a mutant lives on one of a tier-A or tier-B broker
 # package's target lines: the lines it adds or changes in the package's non-test .go files, or, when
 # it changes only the package's tests, the lines its changed test functions run. The tests run that
-# line but do not check it. The one exception is a `Mutant-equivalent: <path>:<line>[:<col>][:<KIND>]
-# <reason>` line in the PR body for that mutant (#5792, #5828), which the reviewer checks; the body
-# reaches the gate through env as text, read by the base's tool. Gremlins runs only on those packages (`mutgate.py claimed`), and
+# line but do not check it. The one exception is an entry for that mutant in its package's
+# MUTANTS-EQUIVALENT record (#5776, #5792, #5828), which the reviewer checks; the PR body waives nothing
+# (#6379), since it can change after a review without changing the head. Gremlins runs only on those packages (`mutgate.py claimed`), and
 # only on their target lines (`run --git`), split into K shards a package, one job each (#4961): the
 # `plan` job counts each package's targets, times its suite (#5069) and picks K, so no job runs past its timeout, and measures a
 # test-only package's covered lines once for every shard to read (#4970). Every mutant
@@ -22,8 +22,6 @@ name: mutgate
 # broker/core/core.txt (the tier list risk_tier reads) with the base commit's before running
 # them, and `mutgate` reruns `run`'s checks on the artifact with `verify` (#4106), which builds the
 # base's statement lister (standard library only) to recount the deletion sites (#4602).
-# The body is the event's: a waiver added to the body later counts from the next push, as a failure says,
-# naming that push's head (#6077; the reasons the gate does not read the current body are in that PR).
 on:
   pull_request:
 permissions:
@@ -373,13 +371,8 @@ jobs:
       # exactly one readable result for each shard of each claimed package across them, rechecks each
       # as `run` does, needs one deletion verdict per site it lists, joins the shards, then gates: the
       # JSON is data, never a verdict.
-      # The PR body is data: it reaches the tool through env and a file, never the script's text.
       - name: Gate (MUT-tierA)
         env:
           RESULTS: ${{ runner.temp }}/mutants
-          PR_BODY: ${{ github.event.pull_request.body }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
-          python3 -I tools/mutgate.py verify "$RESULTS" --git "$BASE" --body "$RUNNER_TEMP/pr-body.md" --body-from "$PR_HEAD" \
-            --summary "$GITHUB_STEP_SUMMARY"
+          python3 -I tools/mutgate.py verify "$RESULTS" --git "$BASE" --summary "$GITHUB_STEP_SUMMARY"
