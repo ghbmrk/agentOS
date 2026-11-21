@@ -701,6 +701,22 @@ def _same_binding(words, src, test, head, cache):
     return all(binders(src, w) == binders(test, w) for w in words)
 
 
+# Go's known GOOS and GOARCH values (go/build's syslist.go): a file name part naming one is a build constraint.
+BUILD_NAMES = frozenset("aix android darwin dragonfly freebsd hurd illumos ios js linux nacl netbsd openbsd plan9 "
+                        "solaris wasip1 windows zos 386 amd64 amd64p32 arm armbe arm64 arm64be loong64 mips mipsle "
+                        "mips64 mips64le mips64p32 mips64p32le ppc ppc64 ppc64le riscv riscv64 s390 s390x sparc "
+                        "sparc64 wasm".split())
+
+
+def _constrained(path, text):
+    """Whether a Go file may be left out of some build: a `//go:build` or `+build` line anywhere in it, or
+    a part of its name after the first `_` that names a GOOS or GOARCH (L3 on #6376). Read wider than Go
+    reads it, which only refuses more moves."""
+    parts = path.rsplit("/", 1)[-1].removesuffix(".go").removesuffix("_test").split("_")[1:]
+    return any(p in BUILD_NAMES for p in parts) or any(
+        r.lstrip().startswith(("//go:build", "// +build", "//+build")) for r in text.split("\n"))
+
+
 def _span(rows, first, last):
     """(first, last) of a declaration's lines less its trailing blank lines."""
     while last > first and not rows[last - 1].strip():
@@ -713,7 +729,8 @@ def verbatim_moves(diff_text, base, head, tests):
     a top-level declaration (its doc comment and the blank lines either side too) whose text is byte for byte
     a declaration of a non-test .go file of the same directory and package clause at the merge base,
     every line of which the diff deletes or changes, whose words resolve to the same imports in both
-    files. A declaration every test may run (init, TestMain, a var with an initializer, a file with a
+    files. Neither file may carry a build constraint (_constrained): code a build leaves out at the
+    base would enter it at the head. A declaration every test may run (init, TestMain, a var with an initializer, a file with a
     linkname) or holding a `//go:` line is never one. In a test file the base lacks, the header (the
     package clause, comments, imports) is one too when every other declaration is a move and every
     import spec is word for word one a source of those moves holds, none blank, dot or "C"."""
@@ -725,11 +742,12 @@ def verbatim_moves(diff_text, base, head, tests):
         if not any(is_source(p) and p.rsplit("/", 1)[0] == d for p in move):
             continue  # no package file of this directory loses a line: nothing moved here
         text = base_text(head, path)
-        if text is None:
+        if text is None or _constrained(path, text):
             continue
         sources = {}
         for p in move:
-            if is_source(p) and p.rsplit("/", 1)[0] == d and (t := base_text(mb, p)) is not None:
+            if (is_source(p) and p.rsplit("/", 1)[0] == d and (t := base_text(mb, p)) is not None
+                    and not _constrained(p, t)):
                 sources[p] = (t.split("\n"), _decls(p, t), _imports(t))
         rows, bare, timps = text.split("\n"), _uncommented(text, False).split("\n"), _imports(text)
         moved, froms, used, rest = set(), set(), set(), False

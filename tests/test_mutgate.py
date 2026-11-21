@@ -4837,6 +4837,41 @@ class VerbatimMoves(unittest.TestCase):
                 self.assertLess(moved.get(self.NEW, set()), before[self.NEW])
                 self.assertIn(1, tests[self.NEW])  # the package clause is still a changed line
 
+    def test_a_file_a_build_constraint_can_leave_out_is_never_a_move(self):
+        # L3 on #6376: an `_other` body moved into an unconstrained test file enters the linux test binary.
+        for src, text in (("broker/proc/kernelsock_other.go", "//go:build !linux\n\n" + MOVE_SRC),
+                          ("broker/proc/kernelsock_other.go", "// +build !linux\n\n" + MOVE_SRC),
+                          ("broker/proc/kernelsock_windows.go", MOVE_SRC),
+                          ("broker/proc/kernelsock_linux_arm64.go", MOVE_SRC)):
+            with self.subTest(src, text=text[:20]):
+                kept = text.replace(MOVE_SRC, MOVE_KEPT)
+                _, before, tests, moved = self.changes({src: text}, {src: kept, self.NEW: MOVE_TEST})
+                self.assertEqual(moved, {})
+                self.assertEqual(tests[self.NEW], before[self.NEW])
+        for new, test in (("broker/proc/clients_test.go", "//go:build linux\n\n" + MOVE_TEST),
+                          ("broker/proc/clients_windows_test.go", MOVE_TEST)):
+            with self.subTest(new):
+                _, before, tests, moved = self.changes({self.SRC: MOVE_SRC}, {self.SRC: MOVE_KEPT, new: test})
+                self.assertEqual(moved, {})
+        # A name part that only looks like one (`windowsx`) is no constraint.
+        _, _, tests, moved = self.changes({"broker/proc/kernel_windowsx.go": MOVE_SRC},
+                                          {"broker/proc/kernel_windowsx.go": MOVE_KEPT, self.NEW: MOVE_TEST})
+        self.assertNotIn(self.NEW, tests)
+
+    def test_a_blank_dot_or_cgo_import_keeps_the_header_even_when_the_source_holds_it(self):
+        # L3 on #6376: held alone would pass these, since the source imports them too.
+        for imp in ('\t_ "embed"\n', '\t. "strings"\n', '\t"C"\n'):
+            with self.subTest(imp):
+                src = MOVE_SRC.replace('\t"fmt"\n', '\t"fmt"\n' + imp)
+                _, before, tests, moved = self.changes({self.SRC: src}, {
+                    self.SRC: MOVE_KEPT.replace('\t"fmt"\n', '\t"fmt"\n' + imp),
+                    self.NEW: MOVE_TEST.replace('\t"fmt"\n', '\t"fmt"\n' + imp)})
+                self.assertIn(1, tests[self.NEW])  # the package clause is still a changed line
+        src = MOVE_SRC.replace('\t"fmt"\n', '\t"fmt"\n\t_ "embed"\n')
+        _, _, tests, moved = self.changes({self.SRC: src}, {self.SRC: MOVE_KEPT.replace('\t"fmt"\n', '\t"fmt"\n\t_ "embed"\n'),
+                                                            self.NEW: MOVE_TEST})
+        self.assertNotIn(self.NEW, tests)  # the control: the same source with a plain header moves whole
+
     def test_a_directive_init_or_initialised_var_is_never_a_move(self):
         cases = (("// Open dials the owner socket.\n", "// Open dials the owner socket.\n//go:noinline\n"),
                  ("func (o *Owner) Open() error {", "func init() {"),)
