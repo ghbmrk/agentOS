@@ -34,6 +34,7 @@ type Chrony struct {
 	c     *net.UnixConn
 	seq   uint32
 	next  time.Time // no try before this after a failure
+	ref   Stamp     // the last answer's sample
 }
 
 // NewChrony is a source reading chronyd at sock, answered at reply; with
@@ -47,23 +48,33 @@ func NewChrony(sock, reply string) *Chrony {
 	return s
 }
 
-// Read is the kernel process's TIM-1 source (onLog). With chronyd synced,
+// Stamp is the chronyd sample a reading rests on: its reference time as
+// chronyd sends it (RPY_TRACKING bytes 56 to 68), the zero Stamp for none.
+// onLog compares stamps only for equality: chronyd fuzzes each sample's
+// reference time by up to a second (reference.c fuzz_ref_time), so a later
+// sample's can read earlier.
+type Stamp [12]byte
+
+// Source is a TIM-1 reading and the Stamp of the sample behind its Earliest.
+type Source func() (kernel.Reading, Stamp)
+
+// Sample is the kernel process's TIM-1 source (onLog). With chronyd synced,
 // true time is the box clock plus chronyd's correction, within root delay /
 // 2 + root dispersion, and the reading is the hull of that and the box
 // clock: a disagreement widens it. Otherwise it vouches for no lower bound
-// (Earliest 0) and Latest is the box clock.
-func (s *Chrony) Read() kernel.Reading {
+// (Earliest 0), Latest is the box clock and the Stamp is zero.
+func (s *Chrony) Sample() (kernel.Reading, Stamp) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b0 := time.Now().UnixMilli()
 	corr, err, ok := s.track()
 	b1 := time.Now().UnixMilli()
 	if !ok {
-		return kernel.Reading{Latest: b1}
+		return kernel.Reading{Latest: b1}, Stamp{}
 	}
 	lo := b0 + int64(math.Floor((corr-err)*1000))
 	hi := b1 + int64(math.Ceil((corr+err)*1000))
-	return kernel.Reading{Earliest: min(b0, lo), Latest: max(b1, hi)}
+	return kernel.Reading{Earliest: min(b0, lo), Latest: max(b1, hi)}, s.ref
 }
 
 func (s *Chrony) drop() {
@@ -118,7 +129,11 @@ func (s *Chrony) ask() (float64, float64, bool) {
 	if err != nil {
 		return 0, 0, false
 	}
-	return parseTracking(p[:n], s.seq)
+	corr, bound, ok := parseTracking(p[:n], s.seq)
+	if ok {
+		copy(s.ref[:], p[56:68])
+	}
+	return corr, bound, ok
 }
 
 // parseTracking reads an RPY_TRACKING reply to request seq: chronyd's

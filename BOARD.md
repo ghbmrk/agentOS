@@ -393,7 +393,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KRN-forget-c-notice-words | KRN-forget-c-notice-words: the after-erase Forget notice names kinds in the kernel's household words, as the ask does, not raw class names. From #5163. | #5163, #5125 | queued (release; tier A) |
 | KRN-clock-hold-gap | KRN-clock-hold-gap: a hold started while Latest-Earliest is wide is not lengthened by the gap (unit after time-sync, window from Earliest while monotonic, or bound via #5391); STATUS can say why. Release; from #5387. | #5147, #5387, #5391, #5279 | queued (release; tier A) |
 | IMG-initrd-global-ext-dirs | IMG-initrd-global-ext-dirs: INITRD_IMAGE_DIRS adds /.extra/global_sysext and /.extra/global_confext when the image's systemd moves past v257. Release; blocked on that bump; from #5501 (Security). | #5488, #5501 | queued (release; tier A; blocked on the systemd bump) |
-| GUEST-bridge-tree-dead-fu | GUEST-bridge-tree-dead-fu: retire the stale TREE rows and B16, bound the idle-bridge test, drop the guest-plane tree exemption (#5611 reviews) | - | building (release; tier B) |
 | TIM-1-interval-fu-c | TIM-1-interval-fu-c: the question book moves off Guard.Now to the interval, and the clock drops the restricted mode's last API. Release; from #5216. | #5216, #5279 | queued (release; tier A) |
 | KRN-clock-fresh-rise | KRN-clock-fresh-rise: a kernel started behind the log catches up on a fresh chronyd sample (TIM-1). Release; from #5757. | #5391, #5757 | building (release; tier A) |
 | OWN-page-session-mut2c | OWN-page-session mutants part 2c: old cmd/agentosd survivors in evidence, main, held, signinhost (76) | #5862 | building (release; tier A) |
@@ -416,13 +415,9 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MOR-wipe-status-e2e | MOR-wipe-status-e2e: a failed wipe's STATUS line is shown by a test that runs agentosd's wiring, not only wipeNote. Release; from #6095. | #6094, #6095 | queued (release; tier B) |
 | MOR-clear-owner-fu | MOR-clear-owner-fu: the failed-shutdown STATUS line stops asking for a restart when the record outlives one, and a boot test holds the record's sync and mode. Release; from #6126. | #6111, #6126 | queued (release; tier B) |
 | NET-2-decl-daily-bytes | NET-2-decl-daily-bytes: each CLK-14 account declaration states the daily bytes it sends, proposed by the plan and confirmed by the owner (D-248) | #5157 | queued (release; tier A) |
-| IMG-mkosi-run-bound-fu-initrd | IMG-mkosi-run-bound-fu-initrd: the default initrd's packages are held to the pinned, signature-checked indexes as the image's are. Release; from #6148. | #4690 | building (release; tier A) |
-| IMG-mkosi-run-bound-fu-disk | IMG-mkosi-run-bound-fu-disk: image.yml's stage job keeps its own IMG-disk budget. Release; from #6148. | #4690 | building (release; tier B) |
-| IMG-mkosi-run-bound-fu-local | IMG-mkosi-run-bound-fu-local: a local-only wrapper makes a local image build one command, with the mkosi line pinned equal to CI's. Release; from #6148. | #4690, #6148 | building (release; tier B) |
 | CTL-agent-starting-status | CTL-agent-starting-status: STATUS during boot shows a starting line, not 'not set up' or 'waiting for memory'. Release; from #6136 (UX). | #5429, #6136 | queued (release; tier A) |
 | MUT-kill-6032-guest | MUT-kill-6032-guest: kill the surviving mutants in broker/guest (blocks #6032) | #6032 | queued (release; tier A) |
 | MUT-kill-6032-kernel-erase | MUT-kill-6032-kernel-erase: kill the surviving mutants in broker/kernel/erase.go (blocks #6032) | #6032 | building (release; tier A) |
-| MUT-kill-6032-kernel-pool | MUT-kill-6032-kernel-pool: kill the surviving mutants in broker/kernel/pool.go (blocks #6032) | #6032 | building (release; tier A) |
 | MUT-kill-6032-kernel-rederive | MUT-kill-6032-kernel-rederive: kill the surviving mutants in broker/kernel/rederive.go (blocks #6032) | #6032 | building (release; tier A) |
 | MUT-kill-6032-kernel-state | MUT-kill-6032-kernel-state: kill the surviving mutants in broker/kernel/state.go (blocks #6032) | #6032 | building (release; tier A) |
 | KRN-proc-mustraw-refuse | KRN-proc-mustraw-refuse: kernelsock's mustRaw refuses, not nulls, args that cannot marshal | #6261 | building (release; tier A) |
@@ -438,23 +433,21 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MUT-simplify-kernel-state-dead | MUT-simplify-kernel-state-dead: delete the unreachable code at broker/kernel/state.go:1263-1265 and its equivalence record | #6279 | queued (release; tier A) |
 | MOR-kexec-class | MOR-kexec-class: close every RAM-keeping transition that clears MOR, kexec first, or record why the kernel has none. Release. | #6182, #6306 | building (release; tier A) |
 | REV-CHK-links-ns8 | REV-CHK-links-ns8: root's user manager's environment.d and generators, and env files of ours a package's unit names, reach a check | #6002 build | queued (release; tier A; kernel lane) |
-| TOOL-assumptions-merge | TOOL-assumptions-merge: a main merge of ASSUMPTIONS.md merges rows by ID, so an edited row is never duplicated by merge=union. Release. | #6238, #6032, #6314 | building (release; tier A) |
 | VULN-debian-r13-f5 | VULN-debian-r13-f5: pin the per-group library filter in the import sweep with a test, and reword the allow file header for the `via` form. Release. | #6297, #6310 | queued (release; tier A) |
-| MUT-record-kernel-log-equiv | MUT-record-kernel-log-equiv: record #6275's five log.go Mutant-equivalent proofs in broker/kernel/MUTANTS-EQUIVALENT | #6251, #6275 | building (release; tier A) |
-| MUT-delete-covering-flake | MUT-delete-covering-flake: the covering-set tests read fixed per-test seconds, so selected's half rule cannot flip on a slow runner | #6172 | building (release; tier C) |
-| TOOL-mutgate-names-file-glob | TOOL-mutgate-names-file-glob: names_file counts a glob literal only inside //go:embed or a path call, not a bare "*" literal anywhere. Release. | #6300, #6309 | building (release; tier A) |
 | MUT-kill-inbox-gmail | MUT-kill-inbox-gmail: kill or prove the ~26 deletion survivors in broker/clerk/inbox (gmail.go) that an ASSUMPTIONS.md edit exposes | #6300 | building (release; tier A) |
-| MUT-kill-inbox-authres | MUT-kill-inbox-authres: kill or prove the ~20 deletion survivors in broker/clerk/inbox (authres.go) that an ASSUMPTIONS.md edit exposes | #6300 | building (release; tier A) |
-| MUT-kill-inbox-mailbox | MUT-kill-inbox-mailbox: kill or prove the ~15 deletion survivors in broker/clerk/inbox (mailbox.go) that an ASSUMPTIONS.md edit exposes | #6300 | queued (release; tier A) |
-| MUT-kill-inbox-dkimdns | MUT-kill-inbox-dkimdns: kill or prove the ~11 deletion survivors in broker/clerk/inbox (dkimdns.go) that an ASSUMPTIONS.md edit exposes | #6300 | queued (release; tier A) |
-| MUT-kill-inbox-dkim-alert | MUT-kill-inbox-dkim-alert: kill or prove the ~14 deletion survivors in broker/clerk/inbox (dkim.go and alert.go) that an ASSUMPTIONS.md edit exposes | #6300 | queued (release; tier A) |
-| MUT-kill-inbox-rest | MUT-kill-inbox-rest: kill or prove the ~the remaining ~100 deletion survivors in broker/clerk/inbox (every other file of the package that the local run lists) that an ASSUMPTIONS.md edit exposes | #6300 | queued (release; tier A) |
-| TOOL-mutgate-names-file-alias-glob | TOOL-mutgate-names-file-alias-glob: names_file widens the gate when a path function is aliased as a value, instead of missing it. Release. | #6328, #6336 | queued (release; tier A) |
-| LINT-sealer-key-wipe | LINT-sealer-key-wipe: wipelint requires clear(k) right after every NewAESSealer(k), so key wipes are enforced by the build, not mutation-waived. Release. | #6329, #6343 | building (release; tier A) |
+| MUT-kill-inbox-mailbox | MUT-kill-inbox-mailbox: kill or prove the ~15 deletion survivors in broker/clerk/inbox (mailbox.go) that an ASSUMPTIONS.md edit exposes | #6300 | building (release; tier A) |
+| MUT-kill-inbox-dkimdns | MUT-kill-inbox-dkimdns: kill or prove the ~11 deletion survivors in broker/clerk/inbox (dkimdns.go) that an ASSUMPTIONS.md edit exposes | #6300 | building (release; tier A) |
+| MUT-kill-inbox-dkim-alert | MUT-kill-inbox-dkim-alert: kill or prove the ~14 deletion survivors in broker/clerk/inbox (dkim.go and alert.go) that an ASSUMPTIONS.md edit exposes | #6300 | building (release; tier A) |
+| MUT-kill-inbox-rest | MUT-kill-inbox-rest: kill or prove the ~the remaining ~100 deletion survivors in broker/clerk/inbox (every other file of the package that the local run lists) that an ASSUMPTIONS.md edit exposes | #6300 | building (release; tier A) |
+| TOOL-mutgate-names-file-alias-glob | TOOL-mutgate-names-file-alias-glob: names_file widens the gate when a path function is aliased as a value, instead of missing it. Release. | #6328, #6336 | building (release; tier A) |
 | MOR-kexec-class-fu | MOR-kexec-class-fu: set kernel.kexec_load_disabled=1 with a final-value check and a hostcheck step, and extend kexec_loader_violations to the initrd tree. Release. | #6311, #6335 | queued (release; tier A) |
-| MUT-lint-held | MUT-lint-held: mutgate counts a statement deletion as killed when a listed source lint refuses the mutated tree, so lint-held wipe waivers retire. Release. | #6344 | queued (release; tier A) |
-| IMG-mkosi-run-bound-fu-local-fu | IMG-mkosi-run-bound-fu-local-fu: local-build.sh verifies the mkosi pin, prints its log path on exit, and marks a dirty tree. Release. | #6161, #6326 | queued (release; tier A) |
-| LINT-sealer-key-wipe-fu | LINT-sealer-key-wipe-fu: the sealer key-wipe lint scans by type, covers string, array and generic keys and packages that do not import clerk, and fails closed. Release. | #6344, #6347 | queued (release; tier A) |
+| MUT-lint-held | MUT-lint-held: mutgate counts a statement deletion as killed when a listed source lint refuses the mutated tree, so lint-held wipe waivers retire. Release. | #6344 | building (release; tier A) |
+| IMG-mkosi-run-bound-fu-local-fu | IMG-mkosi-run-bound-fu-local-fu: local-build.sh verifies the mkosi pin, prints its log path on exit, and marks a dirty tree. Release. | #6161, #6326 | building (release; tier A) |
+| LINT-sealer-key-wipe-fu | LINT-sealer-key-wipe-fu: the sealer key-wipe lint scans by type, covers string, array and generic keys and packages that do not import clerk, and fails closed. Release. | #6344, #6347 | building (release; tier A) |
+| MUT-simplify-check-recipient | MUT-simplify-check-recipient: remove the unreachable recipient guard in check.go verify, or move the invariant into Normalize, and drop its two waivers | #6023, #6032 | queued (release; tier A) |
+| IMG-mkosi-run-bound-fu-disk-fu | IMG-mkosi-run-bound-fu-disk-fu: one local disk-budget composite action for every disk job, $GITHUB_JOB in its messages, and EveryDiskJobTest finds disk jobs by class. Release. | #6150, #6325 | building (release; tier A) |
+| TOOL-record-dup-noop | TOOL-record-dup-noop: an identical duplicate MUTANTS-EQUIVALENT record is a no-op in the record merge, mutgate and doclint; a conflicting duplicate still fails closed. Release. | #6341, #6316, #6314 | building (release; tier A) |
+| KEY-refusal-code-r2 | KEY-refusal-code-r2: the code() lint requires each call in a package var initialiser and accepts a Code literal only inside code() itself. Release. | #6023, #6032 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
