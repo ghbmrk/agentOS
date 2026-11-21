@@ -4847,7 +4847,13 @@ class VerbatimMoves(unittest.TestCase):
                           ("broker/proc/_kernelsock.go", str),  # L3 round 2: go/build skips _ and . names
                           ("broker/proc/.kernelsock.go", str),
                           ("broker/proc/kernelsock~.go", str),
-                          ("broker/proc/kernelsock_cgo.go", cgo)):  # left out when cgo is off
+                          ("broker/proc/kernelsock.go", lambda t: "//  +build ignore\n\n" + t),  # L3 round 3
+                          ("broker/proc/kernelsock.go", lambda t: "//\t+build ignore\n\n" + t),
+                          ("broker/proc/kernelsock.go", lambda t: "// go:build ignore\n\n" + t),
+                          ("broker/proc/kernelsock_cgo.go", cgo),  # left out when cgo is off
+                          ("broker/proc/kernelsock_cgo.go", lambda t: t.replace('\t"os"\n', '\t"os"\n\t"C"\n')),
+                          ("broker/proc/kernelsock_cgo.go", lambda t: t.replace("import (\n", 'import ("C")\n\nimport (\n')),
+                          ("broker/proc/kernelsock_cgo.go", lambda t: t.replace("import (\n", "import `C`\n\nimport (\n"))):
             with self.subTest(src, text=wrap("")[:20]):
                 _, before, tests, moved = self.changes({src: wrap(MOVE_SRC)}, {src: wrap(MOVE_KEPT), self.NEW: MOVE_TEST})
                 self.assertEqual(moved, {})

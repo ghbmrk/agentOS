@@ -716,14 +716,14 @@ BUILT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\.go")
 def _always_built(path, text):
     """Whether every build of its package compiles this Go file: an allow-list, read narrower than go/build
     reads it, which only refuses more moves. Its name fits BUILT_NAME and no part after the first `_` names
-    a GOOS or GOARCH; no line is a `//go:build` or `+build` constraint; it imports no "C" (a cgo file,
-    left out when cgo is off). `go list` would read the set exactly, but verify runs no go tool on PR
+    a GOOS or GOARCH; its text holds no `+build` or `go:build` anywhere, in any spelling of a
+    constraint line or none, and no `"C"` or `` `C` `` anywhere (a cgo file, left out when cgo is
+    off, in any import form; L3 round 3). `go list` would read the set exactly, but verify runs no go tool on PR
     files (#4106), so the rules are read as text (L3 and Security on #6376)."""
     name = path.rsplit("/", 1)[-1]
     parts = name.removesuffix(".go").removesuffix("_test").split("_")[1:]
     return (BUILT_NAME.fullmatch(name) is not None and not any(p in BUILD_NAMES for p in parts)
-            and not any(r.lstrip().startswith(("//go:build", "// +build", "//+build")) for r in text.split("\n"))
-            and not re.search(r'^\s*(?:import\s+)?(?:\w+\s+)?"C"\s*$', _uncommented(text), re.M))
+            and "+build" not in text and "go:build" not in text and '"C"' not in text and "`C`" not in text)
 
 
 def _span(rows, first, last):
