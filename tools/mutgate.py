@@ -357,57 +357,67 @@ def _embeds(text):
     return out
 
 
-# The functions names_file treats as reading, listing, matching or building a path, by name alone.
-PATH_FUNCS = ("ReadDir", "ReadFile", "Glob", "WalkDir", "Walk", "DirFS", "Sub", "Open", "OpenFile", "Stat",
-              "Lstat", "Join", "Abs", "Match")
+# Packages whose functions read no file, so a literal given to one names none (`strings.Split(h,
+# ".")`). Every other call, a builtin, a method, a local helper or an alias included, may read a
+# path: a package missing here only costs a whole-suite run (#6390).
+PURE = ("bytes", "strings")
+
+# The keywords a `(` can follow: one opens a group, not a call.
+NOT_CALL = ("case", "const", "for", "if", "import", "range", "return", "switch", "var")
+
+# Imports that reach files no literal shows: a child process inherits the working directory, and
+# cgo or a raw system call reads by C string or descriptor (#6390).
+OPAQUE = ("C", "os/exec", "syscall", "golang.org/x/sys/unix")
+
+CALLEE = re.compile(r"(?:\b([A-Za-z_]\w*)\s*\.\s*)?\b([A-Za-z_]\w*)\s*$|[)\]}]\s*$")
 
 
-# A call that reads, lists or builds a path: a literal anywhere in its arguments that lists a
-# directory (".", "..", "/") or starts "./" or "../" names a file without spelling it.
-PATH_CALL = re.compile(rf"\b(?:{'|'.join(f for f in PATH_FUNCS if f != 'Match')})\(")
-
-
-def _call_literals(code):
-    """The string literals inside the parentheses of each PATH_CALL of code (comments blanked), in
-    any argument and at any depth: fs.WalkDir(os.DirFS(root), ".", fn) gives "."."""
-    out = []
-    for m in PATH_CALL.finditer(code):
-        i, depth = m.end(), 1
-        while i < len(code) and depth:
-            lit = RUNE.match(code, i) if code[i] == "'" else LITERAL.match(code, i)
-            if lit:  # a rune such as ')' moves no depth; a string's contents are an argument
-                out += [] if code[i] == "'" else [lit[0][1:-1]]
-                i = lit.end()
-                continue
-            depth += {"(": 1, ")": -1}.get(code[i], 0)
-            i += 1
+def _imports(code):
+    """{name: path} of the imports of code (comments blanked, literals kept)."""
+    out = {}
+    for spec in re.findall(r"^import\s*\((.*?)^\)", code, re.M | re.S) + re.findall(r"^import\s+([^(\s].*)$", code, re.M):
+        for m in re.finditer(r'(?:([\w.]+)\s+)?"([^"]+)"', spec):
+            out[m[1] or m[2].rsplit("/", 1)[-1]] = m[2]
     return out
 
 
-# A call that lists or matches names, so a wildcard-only glob anywhere in its package can reach it
-# through a variable, a const, a field or a helper (L3 on #6336).
-GLOB_CALL = re.compile(r"\b(?:Glob|Walk|WalkDir|ReadDir|Match)\(")
-
-# A path function named but not called at once: a value (`g := filepath.Glob`, an argument, a table
-# or field entry, a method value or expression) that a call under another name reads paths through,
-# or a call spaced from its `(`. Its arguments are unseen, so its package can name any file (#6337).
-PATH_VALUE = re.compile(rf"\b(?:{'|'.join(PATH_FUNCS)})\b(?!\()")
+def _call_literals(code):
+    """The string literals of code (comments blanked) inside the parentheses of a call, at any
+    depth, unless every call around them is to a PURE package, so
+    os.ReadDir(strings.TrimSpace(".")) and g(".") give ".". A PURE package's name counts as it only
+    where the file imports it and never names it without a `.` after (no local shadows it)."""
+    imports = _imports(code)
+    blank = _uncommented(code, False)
+    pure = {n for n, p in imports.items() if p in PURE and not re.search(rf"\b{re.escape(n)}\b(?!\s*\.)", re.sub(
+        r'^import\s*\(.*?^\)|^import\s[^\n]*', "", blank, flags=re.M | re.S))}
+    out, stack, i = [], [], 0
+    while i < len(code):
+        c = code[i]
+        lit = RUNE.match(code, i) if c == "'" else LITERAL.match(code, i) if c in "\"`" else None
+        if lit:  # a rune such as ')' moves no depth; a string's contents are an argument
+            if c != "'" and any(stack):
+                out.append(lit[0][1:-1])
+            i = lit.end()
+            continue
+        if c in "([{":
+            m = CALLEE.search(code, max(0, i - 128), i) if c == "(" else None
+            stack.append(bool(m) and not (m[2] in NOT_CALL or m[1] in pure))
+        elif c in ")]}" and stack:
+            stack.pop()
+        i += 1
+    return out
 
 
 def names_file(pkg_dir, rel):
     """Whether a .go file of pkg_dir can name rel (a path below it) as text: a string literal or
     //go:embed pattern holding its base name or first directory, a literal or pattern holding a glob
     (`*?[`) that matches its base name, rel or a leading directory of it (`//go:embed *`,
-    fs.Glob(fsys, "*.md"), filepath.Join(d, "*.md")), or whose last path part matches its base name
-    (dir + "/*.md", "%s/*.md", "**/*.md"), or a literal anywhere in a path call's
-    arguments (PATH_CALL) that lists `.`, `..` or `/` or starts `./` or `../`. A glob made of
-    wildcards and slashes alone (`"*"`, `"*/*"`) counts only in a //go:embed pattern, in a path
-    call's arguments, or in a package whose code (comments and literals blanked) calls a GLOB_CALL
-    anywhere: elsewhere it is data, a table's `*` or a DNS wildcard (#6328). A link, an
-    unreadable file, or code (comments and literals blanked) naming a PATH_FUNCS function without
-    calling it at once (PATH_VALUE: an alias, a field named Open, by name alone) can name anything
-    (#6337). A path built in a variable from parts holding none of these
-    is not seen (MUT-deleted-test-own-lines-1). Over-matching costs only a whole-suite run."""
+    fs.Glob(fsys, "*.md"), filepath.Join(d, "*")), or whose last path part matches its base name
+    (dir + "/*.md", "%s/*.md", "**/*.md"), or a literal anywhere in a call's arguments
+    (_call_literals: any call but a PURE package's) that lists `.`, `..` or `/` or
+    starts `./` or `../`. A link, an unreadable file, or an OPAQUE import (os/exec, cgo, syscall)
+    can name anything (#6390). A path built in a variable from parts holding none of these is not
+    seen (MUT-deleted-test-own-lines-1). Over-matching costs only a whole-suite run."""
     parts = rel.split("/")
     names = [parts[-1]] + ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]
     texts = []
@@ -415,21 +425,18 @@ def names_file(pkg_dir, rel):
         if f.is_symlink() or not f.is_file():
             return True
         texts.append(f.read_bytes().decode("utf-8", "replace"))
-    code = [_uncommented(t, False) for t in texts]
-    if any(PATH_VALUE.search(c) for c in code):
-        return True
-    lists = any(GLOB_CALL.search(c) for c in code)
     for text in texts:
-        called = _call_literals(_uncommented(text))
-        reach = set(_embeds(text)) | set(called)
+        code = _uncommented(text)
+        if set(_imports(code).values()) & set(OPAQUE):
+            return True
         for lit in _literals(text) + _embeds(text):
             if parts[-1] in lit or parts[0] in lit:
                 return True
-            if re.search(r"[*?\[]", lit) and (lists or lit in reach or re.sub(r"[*?/]", "", lit)) and (
+            if re.search(r"[*?\[]", lit) and (
                     any(fnmatch.fnmatchcase(n, lit) for n in names)
                     or fnmatch.fnmatchcase(parts[-1], lit.rstrip("/").rsplit("/", 1)[-1])):
                 return True
-        for lit in called:
+        for lit in _call_literals(code):
             if (lit and lit.rstrip("/") in ("", ".", "..")) or lit.startswith(("./", "../")):
                 return True
     return False
