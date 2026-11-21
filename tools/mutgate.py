@@ -386,7 +386,7 @@ OPAQUE = ("C", "os/exec", "syscall", "golang.org/x/sys/unix")
 TOKEN = re.compile(r"\w+|\S")
 
 
-IMPORT_SPEC = re.compile(r"\s*(?:\(.*?\)|[^;\n]*)", re.S)
+IMPORT_REACH = re.compile(r"\s*(?:\(.*?\)|[^;\n]*)", re.S)
 
 
 def _import_spans(code):
@@ -395,7 +395,7 @@ def _import_spans(code):
     one-line group, an indented import and `package p; import "x"` all count (L3 on #6403)."""
     blank, out = _uncommented(code, False), []
     for m in re.finditer(r"\bimport\b", blank):
-        out.append((m.end(), IMPORT_SPEC.match(blank, m.end()).end()))
+        out.append((m.end(), IMPORT_REACH.match(blank, m.end()).end()))
     return out
 
 
