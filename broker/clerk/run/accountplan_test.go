@@ -324,3 +324,26 @@ func TestAccountPlanOverIMAPReportsARefusedSignIn(t *testing.T) {
 		t.Fatalf("the clerk goes on signing in: stop %v", stop)
 	}
 }
+
+// TestGmailDestinationsAreDeclared (#6145 acceptance 1, NET-2 Byte caps):
+// every host the mail clerk's Gmail client sends to from the core (the API,
+// token and revoke endpoints; the consent page is the owner's browser's) is
+// a destination the table's Gmail entry declares with its daily bytes, so
+// signing the caps from the declarations leaves none of them out.
+func TestGmailDestinationsAreDeclared(t *testing.T) {
+	tbl, err := accounts.Known()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, ok := tbl.Entry(APIGmail)
+	if !ok {
+		t.Fatal("no Gmail entry")
+	}
+	for _, u := range []string{inbox.GmailBase, inbox.GmailToken, inbox.GmailRevoke} {
+		h := strings.TrimPrefix(u, "https://")
+		h = h[:strings.IndexByte(h+"/", '/')]
+		if !slices.ContainsFunc(e.Sends, func(x accounts.Send) bool { return x.Host == h && x.DailyBytes > 0 }) {
+			t.Errorf("%s: host %s is not a declared destination with daily bytes (%+v)", u, h, e.Sends)
+		}
+	}
+}
