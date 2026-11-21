@@ -30,6 +30,8 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
                                              they pass (LINTS, #6346), and
                                              add the verdicts to `run`'s JSON in DIR (#4573, #4603, #4633);
                                              only the sites of the result's own shard
+  `plan`, `delete` and `run --git` first delete every broker/ Markdown file whose edit changes no
+  test (hide_docs, #6373): run them in a scratch clone.
   tools/mutgate.py report DIR                survivors per package, from the JSON in DIR
   tools/mutgate.py gate DIR --git BASE [HEAD] [--body FILE [--body-from SHA]] [--summary FILE]
                                              exit 1 if a LIVED mutant sits on a target line that no
@@ -355,12 +357,28 @@ def package_of(path):
 
 
 LITERAL = re.compile(r'"(?:[^"\\\n]|\\.)*"|`[^`]*`')
-RUNE = re.compile(r"'(?:[^'\\\n]|\\.)*'")
+# A Go interpreted string's escapes (the spec's list), so "ASSUMPTIONS\x2emd" names ASSUMPTIONS.md.
+ESCAPE = re.compile(r"\\(?:([0-7]{3})|x([0-9a-fA-F]{2})|u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})|(.))", re.S)
+SIMPLE = {"a": b"\a", "b": b"\b", "f": b"\f", "n": b"\n", "r": b"\r", "t": b"\t", "v": b"\v"}
+
+
+def _go_string(lit):
+    """The value of a literal _literals gave: an interpreted one's escapes decoded, a raw one as is."""
+    def one(m):
+        if m[1] or m[2]:
+            return bytes([min(int(m[1] or m[2], 8 if m[1] else 16), 255)])  # Go refuses \400 and up
+        if m[3] or m[4]:
+            return chr(min(int(m[3] or m[4], 16), 0x10FFFF)).encode("utf-8", "replace")
+        return SIMPLE.get(m[5], m[5].encode())
+    out, at = b"", 0
+    for m in ESCAPE.finditer(lit):
+        out, at = out + lit[at:m.start()].encode() + one(m), m.end()
+    return (out + lit[at:].encode()).decode("utf-8", "replace")
 
 
 def _literals(text):
-    """The contents of a Go file's string literals, comments left out: what a test can name a file by."""
-    return [m[0][1:-1] for m in LITERAL.finditer(_uncommented(text))]
+    """The values of a Go file's string literals, comments left out: what a test can name a file by."""
+    return [_go_string(m[0][1:-1]) if m[0][0] == '"' else m[0][1:-1] for m in LITERAL.finditer(_uncommented(text))]
 
 
 def _embeds(text):
@@ -371,90 +389,14 @@ def _embeds(text):
     return out
 
 
-# Packages whose functions read no file, so a literal given to one names none (`strings.Split(h,
-# ".")`). Every other call, a builtin, a method, a local helper or an alias included, may read a
-# path: a package missing here only costs a whole-suite run (#6390).
-PURE = ("bytes", "strings")
-
-# The keywords a `(` can follow: one opens a group, not a call.
-NOT_CALL = ("case", "const", "for", "if", "import", "range", "return", "switch", "var")
-
-# Imports that reach files no literal shows: a child process inherits the working directory, and
-# cgo or a raw system call reads by C string or descriptor (#6390).
-OPAQUE = ("C", "os/exec", "syscall", "golang.org/x/sys/unix")
-
-TOKEN = re.compile(r"\w+|\S")
-
-
-IMPORT_SPEC = re.compile(r"\s*(?:\(.*?\)|[^;\n]*)", re.S)
-
-
-def _import_spans(code):
-    """The (start, end) spans of code's import specs (comments blanked): after each `import`
-    keyword outside a literal, to the end of its `(...)` group, else to its line's end or `;`, so a
-    one-line group, an indented import and `package p; import "x"` all count (L3 on #6403)."""
-    blank, out = _uncommented(code, False), []
-    for m in re.finditer(r"\bimport\b", blank):
-        out.append((m.end(), IMPORT_SPEC.match(blank, m.end()).end()))
-    return out
-
-
-def _imports(code):
-    """{name: path} of the imports of code (comments blanked, literals kept)."""
-    out = {}
-    for start, end in _import_spans(code):
-        for m in re.finditer(r'(?:([\w.]+)\s+)?["`]([^"`]+)["`]', code[start:end]):
-            out[m[1] or m[2].rsplit("/", 1)[-1]] = m[2]
-    return out
-
-
-def _call_literals(code):
-    """The string literals of code (comments blanked) inside the parentheses of a call, at any
-    depth, unless every call around them is to a PURE package, so
-    os.ReadDir(strings.TrimSpace(".")) and g(".") give ".". A PURE package's name counts as it only
-    where the file imports it and never names it without a `.` after (no local shadows it)."""
-    blank = _uncommented(code, False)
-    for start, end in _import_spans(code):
-        blank = blank[:start] + " " * (end - start) + blank[end:]
-    pure = {n for n, p in _imports(code).items() if p in PURE and not re.search(rf"\b{re.escape(n)}\b(?!\s*\.)", blank)}
-    out, stack, toks, i = [], [], [""] * 2, 0  # toks: the tokens so far, whitespace (and comments) skipped
-    while i < len(code):
-        c = code[i]
-        lit = RUNE.match(code, i) if c == "'" else LITERAL.match(code, i) if c in "\"`" else None
-        if lit:  # a rune such as ')' moves no depth; a string's contents are an argument
-            if c != "'" and any(stack):
-                out.append(lit[0][1:-1])
-            i = lit.end()
-            continue
-        if c.isspace():
-            i += 1
-            continue
-        tok = TOKEN.match(code, i)[0]
-        if tok == "(":
-            # A call follows a name, `)`, `]` or `}`, and a keyword opens a group. A pure name is
-            # always followed by `.` (above), so toks[-3] in pure is a selector's qualifier; it is
-            # the package only at the selector's start (`strings.Split`, not `t.strings.Open`).
-            name = re.match(r"\w", toks[-1]) and toks[-1] not in NOT_CALL
-            stack.append(bool(name) and not (toks[-3] in pure and toks[-4] != ".") or toks[-1] in (")", "]", "}"))
-        elif tok in "[{":
-            stack.append(False)
-        elif tok in ")]}" and stack:
-            stack.pop()
-        toks.append(tok)
-        i += len(tok)
-    return out
-
-
 def names_file(pkg_dir, rel):
-    """Whether a .go file of pkg_dir can name rel (a path below it) as text: a string literal or
-    //go:embed pattern holding its base name or first directory, a literal or pattern holding a glob
-    (`*?[`) that matches its base name, rel or a leading directory of it (`//go:embed *`,
-    fs.Glob(fsys, "*.md"), filepath.Join(d, "*")), or whose last path part matches its base name
-    (dir + "/*.md", "%s/*.md", "**/*.md"), or a literal anywhere in a call's arguments
-    (_call_literals: any call but a PURE package's) that lists `.`, `..` or `/` or
-    starts `./` or `../`. A link, an unreadable file, or an OPAQUE import (os/exec, cgo, syscall)
-    can name anything (#6390). A path built in a variable from parts holding none of these is not
-    seen (MUT-deleted-test-own-lines-1). Over-matching costs only a whole-suite run."""
+    """Whether a .go file of pkg_dir names rel (a path below it) as text: a string literal (escapes
+    decoded) or //go:embed pattern holding its base name or first directory, or holding a glob
+    (`*?[`) that matches its base name, rel or a leading directory of it, or whose last path part
+    matches its base name (dir + "/*.md", "**/*.md"). A link or an unreadable file names anything.
+    A file no code names this way is absent from every tree the gate runs tests in (hide_docs), so
+    a read of it by any other means (a listing, a child process, a path built from runes, another
+    package) fails the gate's run rather than going unseen (#6373)."""
     parts = rel.split("/")
     names = [parts[-1]] + ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]
     texts = []
@@ -463,9 +405,6 @@ def names_file(pkg_dir, rel):
             return True
         texts.append(f.read_bytes().decode("utf-8", "replace"))
     for text in texts:
-        code = _uncommented(text)
-        if set(_imports(code).values()) & set(OPAQUE):
-            return True
         for lit in _literals(text) + _embeds(text):
             if parts[-1] in lit or parts[0] in lit:
                 return True
@@ -473,10 +412,26 @@ def names_file(pkg_dir, rel):
                     any(fnmatch.fnmatchcase(n, lit) for n in names)
                     or fnmatch.fnmatchcase(parts[-1], lit.rstrip("/").rsplit("/", 1)[-1])):
                 return True
-        for lit in _call_literals(code):
-            if (lit and lit.rstrip("/") in ("", ".", "..")) or lit.startswith(("./", "../")):
-                return True
     return False
+
+
+def hide_docs(broker):
+    """Delete, under broker (a tree the gate is about to run tests in), each Markdown file an edit to
+    which changes no package's tests (any without a data_owner; vendor/ is kept,
+    as is_data keeps it: a test compares it with its patched copy),
+    and return their paths. Every gate run then measures the suite without them, so no verdict can
+    depend on them and an edit to one changes no test (#6373); a test that needs one fails the run,
+    closed. It deletes from the working tree: run plan, run --git and delete in a scratch clone."""
+    gone = []
+    for d, dirs, files in os.walk(broker):
+        dirs.sort()
+        for f in sorted(files):
+            path = pathlib.Path(d, f)
+            rel = "broker/" + path.relative_to(broker).as_posix()
+            if f.endswith(".md") and "vendor" not in rel.split("/")[1:-1] and not data_owner(rel, broker):
+                path.unlink()
+                gone.append(rel)
+    return gone
 
 
 def data_owner(path, broker=None):
@@ -1904,6 +1859,7 @@ def base_covered(pkg, mb, names, tmp, diff_text):
         print(f"mutgate: the base tree leaves out {name}, a link tar's data filter refuses", file=sys.stderr)
     if not (tree / "broker" / pkg).is_dir():
         return {}, None
+    hide_docs(tree / "broker")
     got, problem = covered_by(pkg, names, tmp, tree / "broker")
     if problem:
         return None, f"at the base ({mb[:12]}), {problem}"
@@ -1991,6 +1947,8 @@ def unleash(cmd, **kw):
 
 
 def cmd_run(args):
+    if args.git:  # the gate's runs; a run of whole packages gates nothing
+        hide_docs(BROKER)
     pkgs = args.pkg or gated_packages()
     # Absolute: gremlins runs in broker/, so a relative -o would name a directory there (#3947).
     out = pathlib.Path(args.out).resolve()
@@ -3032,6 +2990,7 @@ def add_mutants(data, mutants):
 
 
 def cmd_delete(args):
+    hide_docs(BROKER)
     out = pathlib.Path(args.out).resolve()
     diff = broker_diff(args.git, "HEAD")
     added, tests = changes(diff, args.git, "HEAD")
@@ -3380,6 +3339,7 @@ def cmd_plan(args):
     except RuntimeError as e:
         print(e, file=sys.stderr)
         return 1
+    hide_docs(BROKER)
     diff = broker_diff(args.git, "HEAD")
     added, tests = changes(diff, args.git, "HEAD")
     counts, planned = [], {}
