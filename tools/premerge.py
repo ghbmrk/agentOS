@@ -116,6 +116,10 @@ def mark_range(cwd, base, head):
 
 
 TRUSTED = {"OWNER", "MEMBER", "COLLABORATOR"}
+# A comment is a verdict only when its first line, stripped, starts with VERDICT, so a comment lacking it anywhere can never
+# change --check's output; premerge.yml starts the gate for a comment only when its body, or the body it had before an
+# edit, contains VERDICT in any case (CI-premerge-event-filter, #6398).
+VERDICT = "Verdict:"
 _L3 = re.compile(r"^<!-- record: (?:l3|combined) -->$", re.M)
 # D-137: a gate-file or tier-A PR also needs a Security accept in a comment of its own, so one review cannot count twice.
 _SECURITY = re.compile(r"^<!-- record: security -->$", re.M)
@@ -180,7 +184,7 @@ def verdict(comments, pr, security=False, lens=None):
     for c in sorted(comments, key=lambda c: c.get("created_at") or ""):
         body = c.get("body") or ""
         first = body.split("\n", 1)[0].strip()
-        if c.get("author_association") not in TRUSTED or not first.startswith("Verdict:"):
+        if c.get("author_association") not in TRUSTED or not first.startswith(VERDICT):
             continue
         own, placed, line = _record_block(body)
         # Only an accept is held to its record block (#4261); any other verdict reads the whole comment, as before, so a
