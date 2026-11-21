@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"os"
@@ -14,8 +15,11 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/bridgeproto"
 	"github.com/ghbmrk/agentos/broker/modem"
+	"github.com/ghbmrk/agentos/broker/modemlink"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/sockets"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
@@ -220,5 +224,65 @@ func TestInformOwnerNotSentOnlyWithoutChannel(t *testing.T) {
 	err = informOwner(func() *owner.Channel { return &owner.Channel{} })("x")
 	if err == nil || errors.Is(err, errNoOwnerChannel) || unreadNotSent(err) {
 		t.Fatalf("channel up: %v, want the channel's own refusal", err)
+	}
+}
+
+// REQ: CH-12. VM-snap-unread-notice-fu-2 (#6292): a held notice retried
+// through the real owner link over an outage of many retry periods is one
+// text the owner missed, so the recovery text counts one, not one per try.
+func TestHeldUnreadNoticeOverAnOutageCountsOneMissedText(t *testing.T) {
+	const own = "+15550000999"
+	link := modemlink.New(modemlink.Config{Owner: own})
+	state := func(line string) {
+		t.Helper()
+		b, _ := json.Marshal(bridgeproto.State{OwnerLine: line})
+		if _, err := link.Ops()[bridgeproto.OpState](context.Background(), sockets.Peer{Kind: "owner"}, b); err != nil {
+			t.Fatalf("state %s: %v", line, err)
+		}
+	}
+	state(bridgeproto.StateDown)
+	const periods = 20
+	var tries atomic.Int32
+	enough := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	u := newUnreadNotices(ctx, time.Millisecond, func(text string) error {
+		if tries.Add(1) == periods {
+			close(enough)
+		}
+		return link.Send(own, text)
+	})
+	u.gone(1, true)
+	select {
+	case <-enough:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%d tries, want %d", tries.Load(), periods)
+	}
+	u.mu.Lock()
+	cancel()
+	u.mu.Unlock()
+	state(bridgeproto.StateOK)
+	if o := link.LastOutage(); o.Missed != 1 {
+		t.Fatalf("after %d refused tries the outage counts %d missed texts, want 1", tries.Load(), o.Missed)
+	}
+}
+
+// REQ: LOG-4. #6292: refusals while a retry is armed arm no second timer,
+// so one held notice never runs as parallel retry loops.
+func TestRepeatedUnreadRefusalsArmOneTimer(t *testing.T) {
+	u := newUnreadNotices(context.Background(), time.Hour, func(string) error { return modem.ErrNotSent })
+	u.gone(1, true)
+	u.mu.Lock()
+	first := u.timer
+	u.mu.Unlock()
+	if first == nil {
+		t.Fatal("a refusal armed no retry")
+	}
+	defer first.Stop()
+	u.gone(1, false)
+	u.flush()
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.timer != first {
+		t.Fatal("a refusal while a retry was armed armed another timer")
 	}
 }

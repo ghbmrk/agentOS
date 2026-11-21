@@ -294,7 +294,7 @@ func TestRecoveryTextCountsWhatWasNotSent(t *testing.T) {
 		if i > 0 {
 			send = l.SendRequest
 		}
-		if err := send(ownerNum, "approve? code 1234"); !errors.Is(err, modem.ErrDown) {
+		if err := send(ownerNum, fmt.Sprintf("approve? code 123%d", i)); !errors.Is(err, modem.ErrDown) {
 			t.Fatalf("send while down: %v", err)
 		}
 		clk.add(30 * time.Minute)
@@ -746,6 +746,66 @@ func TestQueuedCountsTextsWaitingForTheBridge(t *testing.T) {
 	it := poll(t, l)
 	if n := l.Queued(); n != 0 {
 		t.Fatalf("Queued once the bridge took %q: %d", it.Text, n)
+	}
+}
+
+// REQ: CH-12. #6292: a sender that retries a refused text over an outage, as
+// agentosd's held unread-snapshot notice does every 30 s, cost the owner
+// one text, so the recovery text counts one and the journal logs one;
+// the same words as a request, and other words, count apart. The next
+// outage counts afresh.
+func TestARetriedTextCountsOnceInAnOutage(t *testing.T) {
+	l, clk := rig(t)
+	var logged int
+	l.cfg.Logf = func(f string, a ...any) {
+		if strings.HasPrefix(fmt.Sprintf(f, a...), MissedLog) {
+			logged++
+		}
+	}
+	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateDown}, nil)
+	for i := 0; i < 120; i++ { // an hour of 30 s retries
+		if err := l.Send(ownerNum, "synthetic held notice"); !errors.Is(err, modem.ErrDown) {
+			t.Fatalf("retry %d while down: %v", i, err)
+		}
+		clk.add(30 * time.Second)
+	}
+	if err := l.SendRequest(ownerNum, "synthetic held notice"); !errors.Is(err, modem.ErrDown) {
+		t.Fatalf("request while down: %v", err)
+	}
+	if err := l.Send(ownerNum, "synthetic other notice"); !errors.Is(err, modem.ErrDown) {
+		t.Fatalf("other text while down: %v", err)
+	}
+	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateOK}, nil)
+	if o := l.LastOutage(); o.Missed != 3 || o.Requests != 1 {
+		t.Fatalf("outage %+v, want 3 missed (the retried text once), 1 request", o)
+	}
+	if logged != 3 {
+		t.Fatalf("%d missed lines logged, want 3", logged)
+	}
+	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateDown}, nil)
+	if err := l.Send(ownerNum, "synthetic held notice"); !errors.Is(err, modem.ErrDown) {
+		t.Fatalf("send in the next outage: %v", err)
+	}
+	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateOK}, nil)
+	if o := l.LastOutage(); o.Missed != 1 {
+		t.Fatalf("next outage %+v, want the same words counted again", o)
+	}
+}
+
+// Past missedKeys distinct texts in one outage, a text not yet seen counts
+// on every refusal: the count may run high, never low.
+func TestMissedCountPastItsBoundRunsHighNotLow(t *testing.T) {
+	l, _ := rig(t)
+	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateDown}, nil)
+	for i := 0; i < missedKeys; i++ {
+		_ = l.Send(ownerNum, fmt.Sprintf("synthetic %d", i))
+	}
+	_ = l.Send(ownerNum, "synthetic 0") // seen: once
+	_ = l.Send(ownerNum, "synthetic late")
+	_ = l.Send(ownerNum, "synthetic late") // unseen past the bound: counts again
+	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateOK}, nil)
+	if o := l.LastOutage(); o.Missed != missedKeys+2 {
+		t.Fatalf("outage %+v, want %d", o, missedKeys+2)
 	}
 }
 
