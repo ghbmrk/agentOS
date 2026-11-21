@@ -1,6 +1,7 @@
 package accounts
 
 import (
+	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -8,6 +9,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/clerk/enflist"
+	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 )
 
 // REQ: TN-account-plan-3, TN-account-plan-4, TN-account-plan-5
@@ -48,7 +52,11 @@ func TestKnownTableLoadsAndValidates(t *testing.T) {
 			if e.Group != "account" {
 				continue
 			}
-			for _, s := range append([]string{e.Name}, append(e.Domains, e.SignIn...)...) {
+			strs := append([]string{e.Name}, append(e.Domains, e.SignIn...)...)
+			for _, x := range e.Sends {
+				strs = append(strs, x.Host)
+			}
+			for _, s := range strs {
 				if strings.Contains(string(b), s) {
 					t.Errorf("%s names the provider %q outside the table", f, s)
 				}
@@ -63,7 +71,7 @@ func TestKnownTableRefusesUnknownFieldsAndEachBrokenRule(t *testing.T) {
 		{"id":"payment-wallet","name":"Wallet","kind":"money","group":"payment","route":"none"},
 		{"id":"mailbox","name":"Mailbox","kind":"mail","group":"mailbox","route":"none"}`
 	with := func(extra string) string { return "[" + base + extra + "]" }
-	if _, err := Load([]byte(with(`,{"id":"a","name":"A","kind":"other","group":"account","route":"oauth","narrower":true,"domains":["a.test","xn--bcher-kva.test"],"signin":["login.a.test"]}`))); err != nil {
+	if _, err := Load([]byte(with(`,{"id":"a","name":"A","kind":"other","group":"account","route":"oauth","narrower":true,"domains":["a.test","xn--bcher-kva.test"],"signin":["login.a.test"],"sends":[{"host":"api.a.test","daily_bytes":1},{"host":"a.test","daily_bytes":18446744073709551615}]}`))); err != nil {
 		t.Fatalf("a good table: %v", err)
 	}
 	for name, table := range map[string]string{
@@ -84,6 +92,16 @@ func TestKnownTableRefusesUnknownFieldsAndEachBrokenRule(t *testing.T) {
 		"no name":                with(`,{"id":"a","name":" ","kind":"other","group":"account","route":"none"}`),
 		"bad device kind":        with(`,{"id":"a","name":"A","kind":"other","group":"account","route":"none","implied_by":["EV Charger"]}`),
 		"trailing data":          with(``) + `[]`,
+		"send with no figure":    with(`,{"id":"a","name":"A","kind":"other","group":"account","route":"oauth","sends":[{"host":"api.a.test"}]}`),
+		"send of zero bytes":     with(`,{"id":"a","name":"A","kind":"other","group":"account","route":"oauth","sends":[{"host":"api.a.test","daily_bytes":0}]}`),
+		"send figure as text":    with(`,{"id":"a","name":"A","kind":"other","group":"account","route":"oauth","sends":[{"host":"api.a.test","daily_bytes":"1 MB"}]}`),
+		"negative send figure":   with(`,{"id":"a","name":"A","kind":"other","group":"account","route":"oauth","sends":[{"host":"api.a.test","daily_bytes":-1}]}`),
+		"send unknown field":     with(`,{"id":"a","name":"A","kind":"other","group":"account","route":"oauth","sends":[{"host":"api.a.test","daily_bytes":1,"margin":2}]}`),
+		"send host with scheme":  with(`,{"id":"a","name":"A","kind":"other","group":"account","route":"oauth","sends":[{"host":"https://api.a.test","daily_bytes":1}]}`),
+		"send host with port":    with(`,{"id":"a","name":"A","kind":"other","group":"account","route":"oauth","sends":[{"host":"api.a.test:443","daily_bytes":1}]}`),
+		"send host upper-case":   with(`,{"id":"a","name":"A","kind":"other","group":"account","route":"oauth","sends":[{"host":"API.a.test","daily_bytes":1}]}`),
+		"send host twice":        with(`,{"id":"a","name":"A","kind":"other","group":"account","route":"oauth","sends":[{"host":"api.a.test","daily_bytes":1},{"host":"api.a.test","daily_bytes":2}]}`),
+		"send host in two":       with(`,{"id":"a","name":"A","kind":"other","group":"account","route":"oauth","sends":[{"host":"api.a.test","daily_bytes":1}]},{"id":"b","name":"B","kind":"other","group":"account","route":"oauth","sends":[{"host":"api.a.test","daily_bytes":1}]}`),
 		"missing card":           strings.Replace(with(``), `"id":"payment-card"`, `"id":"card"`, 1),
 		"missing wallet":         strings.Replace(with(``), `"id":"payment-wallet"`, `"id":"wallet"`, 1),
 		"missing mailbox":        strings.Replace(with(``), `"id":"mailbox"`, `"id":"inbox"`, 1),
@@ -302,5 +320,103 @@ func TestHeldIsOnlyWhatBuildMatches(t *testing.T) {
 	}
 	if got := fixed.Held([]string{"card.test", "wallet.test", "mailbox.test"}); got != nil {
 		t.Fatalf("the fixed items hold %q", got)
+	}
+}
+
+// REQ: NET-2, CLK-14
+
+// TestShippedAccountsStateTheirDailyBytes (#6145 acceptance 1): every
+// shipped account the core reaches over the internet (any route but none)
+// names the destinations it sends to, and each states its daily bytes; the
+// card, wallet and mailbox offers and route-none accounts send nothing.
+func TestShippedAccountsStateTheirDailyBytes(t *testing.T) {
+	tab, err := Known()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range tab.Entries() {
+		switch {
+		case e.Route == "none" && len(e.Sends) != 0:
+			t.Errorf("%s: route none, yet it declares destinations %v", e.ID, e.Sends)
+		case e.Route != "none" && len(e.Sends) == 0:
+			t.Errorf("%s: route %s and no destination with its daily bytes", e.ID, e.Route)
+		}
+		for _, x := range e.Sends {
+			if x.DailyBytes == 0 {
+				t.Errorf("%s: %s states no daily bytes", e.ID, x.Host)
+			}
+		}
+	}
+}
+
+// dests is the declared part of enflist.Inputs, as the caller (#5157)
+// builds it from Declared.
+func dests(ss []Send) []enflist.Dest {
+	var out []enflist.Dest
+	for _, x := range ss {
+		out = append(out, enflist.Dest{Host: x.Host, Basis: enflist.Declared, DailyBytes: x.DailyBytes})
+	}
+	return out
+}
+
+// TestDeclaredFeedsEnflist (#6145 acceptance 3): the Inputs built from the
+// confirmed accounts' declarations names every destination they declare,
+// with basis Declared and the table's figure, in table order whatever the
+// order of ids, and enflist signs exactly those figures. An account with
+// no destination adds none; an id twice counts once.
+func TestDeclaredFeedsEnflist(t *testing.T) {
+	tab := household(t)
+	ss, err := tab.Declared([]string{"shop", "power", "bank", "shop", CardID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := dests(ss)
+	want := []enflist.Dest{
+		{Host: "api.bank.test", Basis: enflist.Declared, DailyBytes: 4 << 20},
+		{Host: "token.bank.test", Basis: enflist.Declared, DailyBytes: 64 << 10},
+		{Host: "shop.test", Basis: enflist.Declared, DailyBytes: 1 << 20},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Declared = %+v, want %+v", got, want)
+	}
+	n, err := enflist.Propose(policy.Document{Version: 1}, enflist.Inputs{Dests: got, EdgeDeclaredBytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	figs := n.Figures()
+	for _, d := range want {
+		if !slices.Contains(figs, enflist.Figure{Host: d.Host, Bytes: d.DailyBytes, Basis: enflist.Declared}) {
+			t.Errorf("signed figures %+v lack %+v", figs, d)
+		}
+	}
+	if len(figs) != len(want)+1 {
+		t.Errorf("signed figures %+v: want the %d declared and the edge's", figs, len(want))
+	}
+
+	if got, err := tab.Declared(nil); err != nil || len(got) != 0 {
+		t.Errorf("Declared(nil) = %v, %v; want none", got, err)
+	}
+	if _, err := tab.Declared([]string{"bank", "nope"}); !errors.Is(err, ErrNotInTable) {
+		t.Errorf("an id outside the table: %v, want ErrNotInTable", err)
+	}
+	if _, err := (*Table)(nil).Declared([]string{"bank"}); !errors.Is(err, ErrNotInTable) {
+		t.Errorf("a nil table: %v, want ErrNotInTable", err)
+	}
+
+	// The shipped table: every confirmed account's destinations sign.
+	k, err := Known()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var all []string
+	for _, e := range k.Entries() {
+		all = append(all, e.ID)
+	}
+	ds, err := k.Declared(all)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enflist.Propose(policy.Document{Version: 1}, enflist.Inputs{Dests: dests(ds), EdgeDeclaredBytes: 1}); err != nil {
+		t.Fatalf("the shipped declarations do not sign: %v", err)
 	}
 }
