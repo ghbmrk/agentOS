@@ -250,6 +250,29 @@ class PremergeTest(unittest.TestCase):
         self.commit("resolved")
         self.assertEqual(self.check(reviewed), ["x_allow.txt"])
 
+    def test_an_allowlist_line_both_sides_added_may_be_kept_once(self):
+        # #6375: tools/record_merge.py keeps a line both sides appended once; one copy or two reads same, a third
+        # copy or a dropped line reads changed.
+        for text, want in (("# h\na\ns\nm\n", []), ("# h\na\ns\nm\ns\n", []), ("# h\na\ns\ns\ns\nm\n", ["x_allow.txt"]),
+                           ("# h\na\nm\n", ["x_allow.txt"]), ("# h\na\ns\n", ["x_allow.txt"])):
+            with self.subTest(text=text):
+                self.setUp()
+                git(self.r, "checkout", "-q", "main")
+                self.write("x_allow.txt", "# h\na\n")
+                self.commit("allow")
+                git(self.r, "checkout", "-q", "-b", "pr")
+                self.write("x_allow.txt", "# h\na\ns\n")
+                reviewed = self.commit("pr")
+                git(self.r, "checkout", "-q", "main")
+                self.write("x_allow.txt", "# h\na\ns\nm\n")
+                self.commit("main")
+                git(self.r, "checkout", "-q", "pr")
+                subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "main"],
+                               cwd=self.r, capture_output=True)
+                self.write("x_allow.txt", text)
+                self.commit("resolved")
+                self.assertEqual(self.check(reviewed), want)
+
     def test_a_list_not_named_allow_keeps_line_order(self):
         reviewed = self.pr()
         self.write("b.txt", "c\nb\n")

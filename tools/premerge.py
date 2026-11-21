@@ -11,7 +11,8 @@ commit with the merge-base of `base` and `head`) and compares that tree with `he
 bytes, binary content and modes count, except that an ASSUMPTIONS.md differing only in its rows' first-cell ids (a renumbering after a main-merge) reads as same,
 and so does a DECISIONS.md whose only replay conflicts are table rows both sides appended at one spot, resolved by
 keeping both sides' rows verbatim, either side first (#3224, #3233), the PR's rows renumbered or not when no other PR file names an old ID (#4030),
-and so does a `*_allow.txt` whose lines are main's plus the PR's line changes, in any order (#3991),
+and so does a `*_allow.txt` whose lines are main's plus the PR's line changes, in any order, a line both added kept once or twice (#3991, #6375),
+and so does any allow file (tools/record_merge.py CLASSES) that is the driver's clean merge of both sides (#6375),
 and so does a MUTANTS-EQUIVALENT whose entries are main's plus the PR's entry changes, each side's entries in its own order (#6314). A replay file that fails a cheap gate never reads
 same as is: a duplicate row ID (doclint) in an ASSUMPTIONS.md or DECISIONS.md, a MUTANTS-EQUIVALENT key on two different lines (an entry or row both sides added word for word is one, #6358), or an ASSUMPTIONS.md row or entry that
 `merge=union` brought back (in the merge base and main, not in the reviewed commit). A head that resolves each union
@@ -75,6 +76,9 @@ import zipfile
 import zlib
 
 # By path: the workflow runs `python3 -I`, which keeps tools/ off sys.path.
+_rm = importlib.util.spec_from_file_location("record_merge", pathlib.Path(__file__).resolve().parent / "record_merge.py")
+record_merge = importlib.util.module_from_spec(_rm)
+_rm.loader.exec_module(record_merge)
 _spec = importlib.util.spec_from_file_location("risk_tier", pathlib.Path(__file__).resolve().parent / "risk_tier.py")
 risk_tier = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(risk_tier)
@@ -523,7 +527,8 @@ def _names(ids, text):
 def _lines_kept(cwd, tree, head, path, reviewed, onto):
     """True when `path` is an allowlist (`*_allow.txt`, one entry per line, order free) and `head`'s lines, as a
     multiset, are main's plus the lines the reviewed commit added less those it removed: a main-merge that kept
-    both sides of a conflict at one spot (#3991) reads as same in any order. Any other line reads as changed."""
+    both sides of a conflict at one spot (#3991) reads as same in any order. A line both sides added word for word
+    may be kept once, as tools/record_merge.py keeps it (#6375). Any other line reads as changed."""
     if not path.endswith("_allow.txt"):
         return False
     bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
@@ -532,7 +537,22 @@ def _lines_kept(cwd, tree, head, path, reviewed, onto):
     # Split on \n only, as the readers do: bytes.splitlines() also splits on \r and would count unread entries (#4041).
     pr, mb, main, want = (collections.Counter(_git(cwd, "show", f"{t}:{path}", ok=(0, 128)).split(b"\n"))
                           for t in (reviewed, bases[0], onto, head))
-    return main + (pr - mb) - (mb - pr) == want
+    want_max = main + (pr - mb) - (mb - pr)
+    return not want - want_max and not (want_max - want) - ((pr - mb) & (main - mb))
+
+
+def _driver_kept(cwd, tree, head, path, reviewed, onto):
+    """True when `path` is an allow file (tools/record_merge.py's class `line`) and `head`'s copy is the driver's
+    clean merge of the reviewed commit's and main's copies on their one merge base: both sides' appends at one spot,
+    in place, a line both appended once (#6375). The driver leaves every other change to a line in conflict."""
+    if record_merge.record_class(path) != "line":
+        return False
+    bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
+    if len(bases) != 1 or not _same_mode(cwd, tree, head, path):
+        return False
+    pr, mb, main, want = (_git(cwd, "show", f"{t}:{path}", ok=(0, 128)) for t in (reviewed, bases[0], onto, head))
+    text, clean = record_merge.merge(mb, pr, main, path)
+    return clean and text == want
 
 
 RECORD = "MUTANTS-EQUIVALENT"  # tools/mutgate.py's RECORD: one JSON entry per line, `#` and blank lines comments
@@ -596,6 +616,7 @@ def compare(cwd, reviewed, head="HEAD", base="origin/main"):
     return sorted(kept | {f for f in differ if not _renumbered_only(cwd, tree, head, f, reviewed, onto)
                           and not _appends_kept(cwd, tree, head, f, reviewed, onto)
                           and not _lines_kept(cwd, tree, head, f, reviewed, onto)
+                          and not _driver_kept(cwd, tree, head, f, reviewed, onto)
                           and not _records_kept(cwd, tree, head, f, reviewed, onto)
                           and not _stale_dropped(cwd, tree, head, f, reviewed, onto)})
 

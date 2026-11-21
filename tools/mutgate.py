@@ -1026,9 +1026,12 @@ def statement_keys(src, sites, decls=()):
 
 def record_entries(text):
     """([entry], None) of a record's text, or (None, problem). Each entry is checked for shape only. A line that
-    repeats an earlier one word for word is one entry (two PRs merged one proof, #6358)."""
+    repeats an earlier one word for word is one entry (two PRs merged one proof, #6358). A carriage return fails the
+    record: its lines end in LF only, so a CRLF repeat of an entry is never a second entry (#6375, .gitattributes)."""
     out, seen = [], set()
     for i, row in enumerate(text.split("\n"), 1):
+        if "\r" in row:
+            return None, f"line {i} holds a carriage return; a record's lines end in LF only"
         if not row.strip() or row.lstrip().startswith("#") or row in seen:
             continue
         seen.add(row)
