@@ -26,7 +26,8 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
                                              delete each statement a target line belongs to, alone,
                                              on N parallel workers (default: one per usable CPU; a
                                              detected verdict is confirmed alone), run the tests that
-                                             cover it (#6172), and
+                                             cover it (#6172), or a listed source lint where
+                                             they pass (LINTS, #6346), and
                                              add the verdicts to `run`'s JSON in DIR (#4573, #4603, #4633);
                                              only the sites of the result's own shard
   tools/mutgate.py report DIR                survivors per package, from the JSON in DIR
@@ -2667,7 +2668,7 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
     covered = [s for s in sites if is_covered(blocks, s)]
     tests = per_test(base, pkg_dir, tmp, timeout, alone_mem, jobs) if covered else None
     chosen = [selected(s, tests) for s in sites]
-    plain, checked = tmp / "plain.test", {}
+    plain, checked, texts = tmp / "plain.test", {}, {}
 
     def passes(names):
         """Whether these tests pass unmutated, alone, under their timeout and the memory cap with
@@ -2704,6 +2705,7 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
             build = ["go", "test", "-c", "-overlay", str(overlay), "-o", str(binary), "."]
             if not build_mutant(src_path.read_bytes(), site, build, mutant, pkg_dir):
                 return "NOT VIABLE", None, None
+            texts[i] = mutant.read_bytes()  # the tree a listed lint reads if no test fails (lint_kills)
             status = run_tests(binary, pkg_dir, limit(chosen[i]), mem=cap(alone), names=chosen[i])
             keep = status in DETECTED and (not alone or chosen[i] is not None)
             return status, binary if keep else None, failed_test(binary)
@@ -2728,7 +2730,59 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
                 statuses.append((status, killer))
             if sum(st == "TIMED OUT" for st, _, _ in results) * 2 > len(batch):
                 jobs = 1  # each run needs the runner to itself: the rest runs alone, once
+    lived = [(i, sites[i]["file"], texts[i]) for i, (st, _) in enumerate(statuses) if st == "LIVED"]
+    for i, name in lint_kills(pkg, lived, tmp, alone_mem).items():
+        statuses[i] = ("KILLED", name)
     return [mutation(s, *st) for s, st in zip(sites, statuses)], None
+
+
+# MUT-lint-held (#6346). A source lint holds statement shapes no test can observe (a key wiped right
+# after its sealer takes it), and fails on a tree without them. A deletion its package's tests let
+# live is KILLED when a listed lint test, run on a copy of broker/ with only that deletion in it (the
+# text the tests ran), fails, the same binary having passed on the unmutated copy: the lint read the
+# mutated tree and refused it. A lint that fails unmutated, times out or passes the memory cap
+# leaves the deletion LIVED. Each entry is (package under broker/, top-level test).
+LINTS = (("clerk/wipelint", "TestEverySealingKeyIsWipedRightAfterItsSealer"),
+         ("clerk/wipelint", "TestEveryOpenedPlaintextIsWipedOnEveryPath"))
+
+
+def lint_kills(pkg, lived, tmp, mem=None):
+    """{index: lint test} for each (index, file, mutant text) of broker/<pkg>/ that a listed lint
+    refuses, as above; the first in LINTS order that fails names it."""
+    if not lived:
+        return {}
+    tree = pathlib.Path(tmp) / "lint-tree"
+    shutil.rmtree(tree, ignore_errors=True)
+    shutil.copytree(BROKER, tree / "broker", symlinks=True)
+    lints = []
+    for n, (lpkg, name) in enumerate(LINTS):
+        cwd, binary = tree / "broker" / lpkg, pathlib.Path(tmp) / f"lint-{n}.test"
+        if not cwd.is_dir() or subprocess.run(["go", "test", "-c", "-o", str(binary), "."], cwd=cwd,
+                                              stdout=sys.stderr).returncode or not binary.exists():
+            print(f"mutgate: lint broker/{lpkg} {name} does not build; it kills nothing", file=sys.stderr)
+            continue
+        began = time.monotonic()
+        if run_tests(binary, cwd, LINT_SECONDS, mem, [name]) != "LIVED":
+            print(f"mutgate: lint broker/{lpkg} {name} does not pass unmutated; it kills nothing", file=sys.stderr)
+            continue
+        lints.append((cwd, binary, name, 3 * (time.monotonic() - began) + 10))
+    out = {}
+    for i, fname, text in lived:
+        path = tree / "broker" / pkg / fname
+        was = path.read_bytes()
+        path.write_bytes(text)
+        try:
+            for cwd, binary, name, limit in lints:
+                if run_tests(binary, cwd, limit, mem, [name]) == "KILLED" and failed_test(binary) == name:
+                    out[i] = name
+                    break
+        finally:
+            path.write_bytes(was)
+    shutil.rmtree(tree, ignore_errors=True)
+    return out
+
+
+LINT_SECONDS = 600  # a lint's unmutated run: a cold build cache compiles what it loads
 
 
 def add_mutants(data, mutants):
