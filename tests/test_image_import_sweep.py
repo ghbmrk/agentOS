@@ -533,7 +533,7 @@ class RefusalsTest(unittest.TestCase):
             a.write_text("/usr/bin/bash{0}\n[glob]\n# why\n/usr/bin/bash{0}  # the shell\n/usr/lib/libg.so.*{0}\n"
                          "[cipher]\n/usr/lib/libcrypto.so.3 *\n".format(PIN))
             self.assertEqual(sweep.read_allow(a), ([E("/usr/bin/bash")], {"/usr/lib/libcrypto.so.3": "*"},
-                                                   [E("/usr/bin/bash"), E("/usr/lib/libg.so.*")]))
+                                                   [E("/usr/bin/bash"), E("/usr/lib/libg.so.*")], []))
             a.write_text("/usr/bin/bash{0}\n[cipher]\n/usr/lib/libcrypto.so.3 *\n[glob]\n/usr/bin/x{0}\n".format(PIN))
             self.assertEqual(sweep.read_allow(a)[2], [E("/usr/bin/x")])
             for body, want in (("[glob]\n/usr/bin/x%s\n[glob]\n" % PIN, ":3: [glob] is given again"),
@@ -886,7 +886,7 @@ class ViaEntryTest(unittest.TestCase):
             a = pathlib.Path(d) / "allow"
             a.write_text("/usr/lib/libs.so.*%s\nvia /usr/lib/libs.so.*  # its users\n[glob]\nvia  /usr/lib/libg.so.*\n" % PIN)
             self.assertEqual(sweep.read_allow(a), ([E("/usr/lib/libs.so.*"), E("/usr/lib/libs.so.*", True)], {},
-                                                   [E("/usr/lib/libg.so.*", True)]))
+                                                   [E("/usr/lib/libg.so.*", True)], []))
             for body, want in (("via\n", ":1: via is not an entry; a regex entry is " + sweep.ENTRY_FORMAT),
                                ("via /a /b\n", ":1: via /a /b is not an entry"),
                                ("via /a%s\n" % PIN, "is not an entry"),
@@ -908,7 +908,7 @@ class ViaEntryTest(unittest.TestCase):
                 self.assertIn(want, str(cm.exception))
 
     def test_shipped_lists_are_collapsed(self):
-        regex, _, globs = sweep.read_allow(sweep.ALLOW)
+        regex, _, globs, _ = sweep.read_allow(sweep.ALLOW)
         for section in (regex, globs):
             for e in section:
                 with self.subTest(e=e):
@@ -1421,10 +1421,10 @@ class GlibcIdentityTest(unittest.TestCase):
 
 @NEEDS_CC
 class UnresolvedTest(unittest.TestCase):
-    """Security R4 on #6382: a NEEDED name no file of the place answers to hides that library's imports,
-    a dlsym wrapper's among them, so it fails the step."""
+    """Security R4 on #6382: a NEEDED name no file of the place answers to is named in the summary. The
+    loader cannot map that file in its root, so what the missing library would import never runs there."""
 
-    def test_an_unresolved_needed_fails(self):
+    def test_an_unresolved_needed_is_named(self):
         with tempfile.TemporaryDirectory() as t:
             tree = pathlib.Path(t)
             lib = tree / "usr/lib/x86_64-linux-gnu"
@@ -1436,11 +1436,76 @@ class UnresolvedTest(unittest.TestCase):
             built(MERGED_WRAPPED, tree / "usr/bin/w", "-L" + str(lib), "-l:libwraps.so.1")
             got = sweep.run_tree(str(tree))["tree"]
             self.assertEqual(got["unresolved"], {})
-            self.assertEqual(got["lookups"]["/usr/bin/w"], ["glob"])
-            # The wrapper gone: w's lookup is no longer seen, and its NEEDED fails the step instead.
+            self.assertEqual(got["through"]["/usr/bin/w"], {"/usr/lib/x86_64-linux-gnu/libwraps.so.1": ["dlsym"]})
+            # The wrapper gone: the loader cannot map w in this root, and the summary names it.
             (lib / "libwraps.so.1").unlink()
             got = sweep.run_tree(str(tree))["tree"]
         self.assertEqual(got["unresolved"], {"/usr/bin/w": ["libwraps.so.1"]})
-        self.assertNotIn("/usr/bin/w", got["lookups"])
-        self.assertIn("t: /usr/bin/w needs libwraps.so.1, which no file there answers to, so what it imports "
-                      "is not read", sweep.problems({"t": got}))
+        self.assertIn("  unresolved /usr/bin/w: libwraps.so.1", sweep.summary({"t": got}))
+
+
+@NEEDS_CC
+class WrapperTest(unittest.TestCase):
+    """A [wrapper] entry names a library, pinned, whose dlsym calls take only its own names: a dependent's
+    string is no lookup through it. The file's own dlsym import still counts."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        t = pathlib.Path(cls.tmp.name)
+        lib = t / "usr/lib"
+        lib.mkdir(parents=True)
+        (t / "usr/bin").mkdir()
+        built(LIB_WRAPS, lib / "libwraps.so.1", "-shared", "-fPIC", "-Wl,-soname,libwraps.so.1", "-ldl")
+        built(LIB_VLOOKS_UP, lib / "libvlook.so.1", "-shared", "-fPIC", "-Wl,-soname,libvlook.so.1", "-ldl")
+        built(MERGED_WRAPPED, t / "usr/bin/w", "-L" + str(lib), "-l:libwraps.so.1")
+        built(WRAPPED_V.replace('"advance"', '"glob"'), t / "usr/bin/wv", "-L" + str(lib), "-l:libvlook.so.1")
+        built(MERGED_LOOKUP, t / "usr/bin/own", "-O2", "-L" + str(lib), "-l:libwraps.so.1", "-ldl",
+              "-Wl,--no-as-needed")
+        cls.got = sweep.run_tree(str(t))
+        cls.sha = cls.got["tree"]["sha256"]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def wrap(self, *libs):
+        return [sweep.Entry(g, False, (self.sha.get(g, "cd" * 32),)) for g in libs]
+
+    def test_a_reviewed_wrapper_drops_its_dependents_lookups(self):
+        lookups = self.got["tree"]["lookups"]
+        self.assertEqual((lookups["/usr/bin/w"], lookups["/usr/bin/own"], lookups["/usr/bin/wv"]),
+                         (["glob"], ["glob"], ["glob", "step"]))
+        got, errs = sweep.unwrapped(self.got, self.wrap("/usr/lib/libwraps.so.1", "/usr/lib/libvlook.so.1"))
+        self.assertEqual(errs, [])
+        # w looked up only through libwraps; own imports dlsym itself; wv's names go with libvlook's dlvsym.
+        self.assertEqual({p: n for p, n in got["tree"]["lookups"].items() if p.startswith("/usr/bin/")},
+                         {"/usr/bin/own": ["glob"]})
+        self.assertEqual(self.got["tree"]["lookups"]["/usr/bin/w"], ["glob"])
+
+    def test_a_wrapper_holding_other_bytes_accepts_nothing(self):
+        stale = [sweep.Entry("/usr/lib/libwraps.so.1", False, ("cd" * 32,))]
+        got, errs = sweep.unwrapped(self.got, stale)
+        self.assertEqual(got["tree"]["lookups"]["/usr/bin/w"], ["glob"])
+        self.assertIn("tree: /usr/lib/libwraps.so.1 holds other bytes than import_sweep.allow [wrapper] "
+                      "/usr/lib/libwraps.so.1 pins; review its dlsym calls again, then pin them: "
+                      "/usr/lib/libwraps.so.1 sha256=" + self.sha["/usr/lib/libwraps.so.1"], errs)
+        self.assertIn("import_sweep.allow: [wrapper] /usr/lib/libwraps.so.1 pins sha256=%s, which no library "
+                      "it matches holds; remove it" % ("cd" * 32), errs)
+
+    def test_an_unused_wrapper_fails(self):
+        _, errs = sweep.unwrapped(self.got, self.wrap("/usr/lib/libgone.so.1"))
+        self.assertEqual(errs, ["import_sweep.allow: [wrapper] /usr/lib/libgone.so.1 matches no library a "
+                                "lookup goes through; remove it"])
+
+    def test_the_section_parses(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = pathlib.Path(d) / "allow"
+            a.write_text("[wrapper]\n/usr/lib/libwraps.so.*%s\n" % PIN)
+            self.assertEqual(sweep.read_allow(a)[3], [E("/usr/lib/libwraps.so.*")])
+            for body, want in (("[wrapper]\nvia /usr/lib/libw.so\n", "is not an entry"),
+                               ("[wrapper]\n/usr/lib/libw.so\n", "pins no SHA-256")):
+                a.write_text(body)
+                with self.subTest(body=body), self.assertRaises(SystemExit) as cm:
+                    sweep.read_allow(a)
+                self.assertIn(want, str(cm.exception))

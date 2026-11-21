@@ -99,6 +99,13 @@ via /usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so
 # PID 1, systemd-executor and systemd-analyze reach it through libsystemd-core and libsystemd-shared only.
 via /usr/lib/x86_64-linux-gnu/systemd/libsystemd-core-*.so
 
+# bash (the main tree's and the guests', the same bytes) imports dlsym and ends strings with "glob" (its
+# shopt names extglob, nullglob, failglob, dotglob, nocaseglob and noglob). Its only dlsym calls are
+# enable -f's (builtins/enable.def dyn_load_builtin, bash 5.2), which look up NAME_struct,
+# NAME_builtin_load and NAME_builtin_unload, no glob() name; it expands patterns with its own lib/glob.
+/usr/bin/bash sha256=223fe8564b60636bc738b6178d3ba9a50ef7d791266b0efae6363bb716e4c47f
+/usr/lib/agentos/images/*/bin/bash sha256=223fe8564b60636bc738b6178d3ba9a50ef7d791266b0efae6363bb716e4c47f
+
 # iproute2's ip: its one glob() (ip/iptuntap.c, 6.15) walks the fixed pattern /proc/[0-9]*/fd/[0-9]*
 # for "ip tuntap show".
 /usr/bin/ip sha256=024784c6d16b183dc7c97d93a943a9270976f167f95f771e14d72442dc657f0c
@@ -133,6 +140,17 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 # inside the guest sandbox, on the guest's own glibc (the image/guest -126765 record). The pin keys that
 # reading to this node build: another version's dlsym calls are read again before it passes (#6299).
 /usr/lib/agentos/images/openclaw/usr/local/bin/node sha256=a7ec1b37e6ff9d187e4198c5b6df9a4eb1c74dd31804fb3bac55cc4ceca1ac01
+
+[wrapper]
+# Libraries that import dlsym or dlvsym and pass it only names of their own, never a caller's string
+# (#6299): a file that needs one is no lookup through it, so a string it holds is not read as a name it
+# can resolve. Each entry pins the bytes whose dlsym calls were read, as [glob] entries do; a file's own
+# dlsym import always counts, and an entry that a lookup's sources do not include fails.
+
+# libsystemd-shared (systemd 257): dlsym_many_or_warn (src/basic/dlfcn-util.c) resolves the
+# DLSYM_ARG(name) list its callers spell (idn-util.c, bpf-dlopen.c, cryptsetup-util.c and the other
+# *-util.c loaders), userdb.c looks up "_nss_systemd_block", and tpm2-util.c TSS2_TCTI_INFO_SYMBOL.
+/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so sha256=9f6f06ff4883d23eee5e628c625878e8bc7f60613e945e04ead7793ae969f37c
 
 [cipher]
 # The files of the built image (main tree and initrds) whose bytes name an OpenSSL by-name cipher

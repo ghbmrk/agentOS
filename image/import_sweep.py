@@ -45,7 +45,7 @@ reviewed library's dependents need no entry each, and a new direct caller or new
 entry that accepts nothing, or a pin no accepted file holds, also fails, so each list stays its record's.
 It also exits 1 when a file holding a selector name or a SPELT name matches no [cipher] entry of ALLOW or
 more than one, or holds other sites or other bytes (SHA-256) than the counted entry it matches, or an
-entry matches nothing; on any packed file or unresolved NEEDED name; and on an ALLOW it cannot read (read_allow). The control is the
+entry matches nothing; on any packed file; and on an ALLOW it cannot read (read_allow). The control is the
 scan itself: it also exits 1 when objdump failed on a file, the main tree or an initrd with executable
 members read no ELF file, the main tree has no importer of regcomp (bash and grep always import it), or no
 call site of EVP_CIPHER_fetch (libcryptsetup and libcrypto always hold one), no glibc, or no file carrying
@@ -256,6 +256,49 @@ def is_elf(path):
         sys.exit("import sweep: cannot read %s: %s" % (path, e))
 
 
+def lookup_names(held, src):
+    """The names of HELD a file can look up through SRC ({file: the LOOKUP_FUNCS it imports}): none
+    without a source, and a COMPAT_ONLY name only where one imports dlvsym."""
+    funcs = {f for fs in src.values() for f in fs}
+    return sorted(held if "dlvsym" in funcs else set(held) - set(COMPAT_ONLY)) if funcs else []
+
+
+def unwrapped(places, wrappers):
+    """(PLACES with each lookup recounted without the sources a [wrapper] entry accepts, the refusals of
+    those entries). A [wrapper] entry names a library, pinned as a [glob] entry is, whose dlsym and dlvsym
+    calls take only names of its own, so a dependent's string is no lookup through it (the libraries
+    libsystemd-shared and libpam load plugins by fixed names). A file's own dlsym import always counts. An
+    entry whose library's bytes it does not pin accepts nothing, and one that accepts nothing fails."""
+    errs, used, out = [], set(), {}
+    for place, v in places.items():
+        v = dict(v, lookups=dict(v.get("lookups", {})))
+        for p, src in v.get("through", {}).items():
+            keep = {}
+            for lib, funcs in src.items():
+                hit = [e for e in wrappers if lib != p and fnmatch.fnmatchcase(lib, e.glob)]
+                sha = v.get("sha256", {}).get(lib) or "MISSING"
+                ok = [e for e in hit if sha in e.sha256]
+                used.update((e, sha) for e in ok)
+                used.update((e, None) for e in hit)
+                if hit and not ok:
+                    errs.append("%s: %s holds other bytes than import_sweep.allow [wrapper] %s pins; review its "
+                                "dlsym calls again, then pin them: %s sha256=%s" % (place, lib, hit[0].glob,
+                                                                                  hit[0].glob, sha))
+                if not ok:
+                    keep[lib] = funcs
+            names = lookup_names(v["lookups"][p], keep)
+            if names:
+                v["lookups"][p] = names
+            else:
+                del v["lookups"][p]
+        out[place] = v
+    errs += ["import_sweep.allow: [wrapper] %s matches no library a lookup goes through; remove it" % e.glob
+             for e in wrappers if (e, None) not in used]
+    errs += ["import_sweep.allow: [wrapper] %s pins sha256=%s, which no library it matches holds; remove it"
+             % (e.glob, d) for e in wrappers if (e, None) in used for d in e.sha256 if (e, d) not in used]
+    return out, sorted(set(errs), key=errs.index)
+
+
 def own(v, p):
     """The group functions file P of place V imports itself: by import, by a run-time lookup of a name it
     holds, or as a copy of glibc's code it carries (#6298, #6299)."""
@@ -304,21 +347,23 @@ def sweep(files):
                 todo += needed.get(lib, [])
         return libs - {shown}
     reached = {shown: closure(shown) for shown in files}
-    # A NEEDED name no file of the place answers to hides that library's imports, dlsym among them, from
-    # every rule above (Security R4 on #6382).
+    # A NEEDED name no file of the place answers to (Security R4 on #6382): the loader cannot map such a
+    # file in that root, and the summary names it.
     unresolved = {shown: sorted(set(n for n in needed[shown] if n not in by_name)) for shown in files}
-    lookups = {}
+    lookups, through = {}, {}
     for shown in files:
-        how = dl[shown].union(*(dl[lib] for lib in reached[shown]))
-        held = names[shown] if "dlvsym" in how else names[shown] - set(COMPAT_ONLY)
-        if how and held:
-            lookups[shown] = sorted(held)
+        src = {lib: sorted(dl[lib]) for lib in sorted(reached[shown] | {shown}) if dl[lib]}
+        held = lookup_names(names[shown], src)
+        if held:
+            lookups[shown], through[shown] = held, src
     importers = set(imports) | set(lookups) | set(carries)
     via = {shown: sorted(reached[shown] & importers) for shown in files if reached[shown] & importers}
-    # Each reaching or [cipher] file's SHA-256, for the pinned allow entries (#5861, #6299).
-    pinned = importers | set(via) | set(cipher)
+    # Each reaching or [cipher] file's SHA-256, and each lookup source's, for the pinned allow entries
+    # (#5861, #6299).
+    pinned = importers | set(via) | set(cipher) | {lib for src in through.values() for lib in src}
     return {"scanned": len(files), "imports": dict(sorted(imports.items())), "via": dict(sorted(via.items())),
-            "lookups": dict(sorted(lookups.items())), "carries": dict(sorted(carries.items())),
+            "lookups": dict(sorted(lookups.items())), "through": dict(sorted(through.items())),
+            "carries": dict(sorted(carries.items())),
             "glibc": dict(sorted(glibc.items())), "packed": dict(sorted(opaque.items())),
             "unresolved": {p: n for p, n in sorted(unresolved.items()) if n},
             "unread": sorted(unread), "cipher": dict(sorted(cipher.items())),
@@ -426,8 +471,6 @@ def problems(places):
     # #6299: a file whose code is not in its bytes as stored can hide any import, lookup or copy.
     errs += ["%s: %s is packed (%s): its code cannot be read for imports, lookups or carried copies"
              % (k, p, why) for k, v in places.items() for p, why in v.get("packed", {}).items()]
-    errs += ["%s: %s needs %s, which no file there answers to, so what it imports is not read"
-             % (k, p, " ".join(n)) for k, v in places.items() for p, n in v.get("unresolved", {}).items()]
     return errs
 
 
@@ -495,15 +538,16 @@ REVIEW = ("review where its names come from, then %s the [cipher] entry and the 
 
 
 def read_allow(path):
-    """(the regex entries, the [cipher] entries, the [glob] entries) of ALLOW. The regex entries come first,
-    one per line, then each section once, opened by its line ([glob] or [cipher]); a regex or [glob] entry
-    is an Entry (ENTRY_FORMAT), each given once. A [cipher] entry is a glob, then either "*" (not
+    """(the regex entries, the [cipher] entries, the [glob] entries, the [wrapper] entries) of ALLOW. The
+    regex entries come first, one per line, then each section once, opened by its line ([glob], [cipher] or
+    [wrapper]); a regex, [glob] or [wrapper] entry is an Entry (ENTRY_FORMAT; a [wrapper] entry is never
+    "via"), each given once. A [cipher] entry is a glob, then either "*" (not
     counted) or the SHA-256 of the file reviewed and the sites it holds exactly (FORMAT), read as
     {"sha256": hex, "sites": {name: count}}: a new package version changes the bytes, so the source is
     read again even when the counts hold (#5861). Exits naming the line on any other entry, a glob given
     twice, or a name or the digest given twice in one entry, and on a section line it does not know or
     has read already."""
-    regex, cipher, globs, section, seen = [], {}, [], None, set()
+    regex, cipher, globs, wrappers, section, seen = [], {}, [], [], None, set()
     for n, l in enumerate(pathlib.Path(path).read_text().splitlines(), 1):
         l = l.split("#", 1)[0].strip()
 
@@ -511,12 +555,14 @@ def read_allow(path):
             sys.exit("import sweep: %s:%d: %s; a [cipher] entry is %s" % (path, n, why, FORMAT))
         if l.startswith("["):
             section = l[1:-1] if l.endswith("]") else l
-            if section not in ("glob", "cipher") or section in seen:
-                sys.exit("import sweep: %s:%d: %s is %s; the sections are [glob] and [cipher], each once"
+            if section not in ("glob", "cipher", "wrapper") or section in seen:
+                sys.exit("import sweep: %s:%d: %s is %s; the sections are [glob], [cipher] and [wrapper], each once"
                          % (path, n, l, "given again" if section in seen else "no section"))
             seen.add(section)
-        elif l and section in (None, "glob"):
-            e, into = parse_entry(l), regex if section is None else globs
+        elif l and section in (None, "glob", "wrapper"):
+            e, into = parse_entry(l), {None: regex, "glob": globs, "wrapper": wrappers}[section]
+            if section == "wrapper" and isinstance(e, Entry) and e.via:
+                e = "%s is not an entry" % l
             if not isinstance(e, Entry) or (e.glob, e.via) in {(x.glob, x.via) for x in into}:
                 sys.exit("import sweep: %s:%d: %s; a%s entry is %s, each given once" % (
                     path, n, e if not isinstance(e, Entry) else "%s is given again" % l,
@@ -547,7 +593,7 @@ def read_allow(path):
             if not sites:
                 bad("%s counts no site" % glob)
             cipher[glob] = {"sha256": digests[0], "sites": sites}
-    return regex, cipher, globs
+    return regex, cipher, globs, wrappers
 
 
 def entry_line(p, sha, sites):
@@ -664,6 +710,9 @@ def summary(places):
             lines += ["  via %s: %s" % (p, " ".join(libs)) for p, libs in via.items()]
         lines += ["  glibc %s holds the marks of: %s" % (p, " ".join(m) or "none") for p, m in v.get("glibc", {}).items()]
         lines += ["  packed %s: %s" % kv for kv in v.get("packed", {}).items()]
+        lines += ["  looks up through %s: %s" % (p, " ".join("%s=%s" % (lib, "+".join(f)) for lib, f in src.items()))
+                  for p, src in v.get("through", {}).items()]
+        lines += ["  unresolved %s: %s" % (p, " ".join(n)) for p, n in v.get("unresolved", {}).items()]
         cipher = v.get("cipher", {})
         lines.append("%s cipher: %d files hold a by-name cipher selector or spell %s"
                      % (place, len(cipher), " or ".join(SPELT)))
@@ -693,8 +742,9 @@ def main(argv):
         places = json.loads(pathlib.Path(argv[1]).read_text())
         lines = summary(places)
         print("\n".join(lines + annotations(lines)))
-        regex, cipher, globs = read_allow(argv[2] if len(argv) == 3 else ALLOW)
-        errs = problems(places) + refusals(places, regex, globs) + cipher_refusals(places, cipher)
+        regex, cipher, globs, wrappers = read_allow(argv[2] if len(argv) == 3 else ALLOW)
+        places, wrapped = unwrapped(places, wrappers)
+        errs = problems(places) + wrapped + refusals(places, regex, globs) + cipher_refusals(places, cipher)
         for e in errs[:10]:
             print("::error title=import sweep::" + e.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
     elif len(argv) == 2 and argv[0] == "--tree":
