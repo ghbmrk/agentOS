@@ -1989,6 +1989,25 @@ def cmd_run(args):
     free = available_memory()
     if shim := go_shim(cfgdir.name, free // 2 // default_jobs() if free else None):
         env["PATH"] = f"{shim}{os.pathsep}{env.get('PATH', '')}"
+    try:
+        with cgroup_scope():
+            bad += run_packages(args, pkgs, out, added, tests, bases, planned, diff, cfgdir.name, cfg, env)
+    except RuntimeError as e:
+        print(e, file=sys.stderr)
+        bad += 1
+    if (refused := pathlib.Path(cfgdir.name) / REFUSED).exists():
+        print(f"mutgate: gremlins ran go in a way its test binaries could not be capped: {refused.read_text().strip()}",
+              file=sys.stderr)
+        bad += 1
+    cfgdir.cleanup()
+    return 1 if bad else 0
+
+
+def run_packages(args, pkgs, out, added, tests, bases, planned, diff, tmp, cfg, env):
+    """`run`'s gremlins pass over pkgs, each package's result in out; the count of packages that failed."""
+    bad, adv = 0, advisory()
+    if CGROUP_ENV in os.environ:  # cgroup_scope's, for the shims' cap_exec
+        env = {**env, CGROUP_ENV: os.environ[CGROUP_ENV]}
     for pkg in pkgs:
         dest = out / result_name(pkg)
         targets, record = (diff_targets(added, pkg) if args.git else None), None
@@ -2000,7 +2019,7 @@ def cmd_run(args):
                 full, problem = planned_targets(planned, pkg, added, tests, bases)
                 record = None if problem else planned[pkg]
             else:
-                record, _, problem = record_for(pkg, tests, bases, diff, args.git, cfgdir.name)
+                record, _, problem = record_for(pkg, tests, bases, diff, args.git, tmp)
                 full, problem = (None, problem) if problem else targets_for(pkg, added, tests, {"targets": record}, bases)
             if problem:
                 print(f"mutgate: {problem}", file=sys.stderr)
@@ -2019,7 +2038,7 @@ def cmd_run(args):
             # that changes no test keeps it; a share or a test change marks its lines on a commit.
             marked = record or args.of > 1
             try:
-                with marked_base(pkg, mine, cfgdir.name) if marked else contextlib.nullcontext(args.git) as base:
+                with marked_base(pkg, mine, tmp) if marked else contextlib.nullcontext(args.git) as base:
                     r = unleash(["gremlins", "unleash", str(BROKER / pkg), "-D", base, "--config", str(cfg),
                                  *SUBDIRS, "-o", str(dest)], cwd=BROKER / pkg, env={**env, **DIFF_GIT_CONFIG})
             except RuntimeError as e:
@@ -2042,8 +2061,9 @@ def cmd_run(args):
             bad += 1
         elif args.git:
             dest.write_text(json.dumps({**(outside_lines(data, pkg, mine) if marked else data), **extra}))
-    cfgdir.cleanup()
-    return 1 if bad else 0
+        if adv and dest.exists():
+            dest.write_text(json.dumps({**json.loads(dest.read_text()), "advisory": True}))
+    return bad
 
 
 # MUTGATE-stmt-delete (#4573): the mutant kind gremlins v0.6.0 lacks. mutgate_stmts.go lists the
@@ -2178,8 +2198,8 @@ def lister_in(tmp):
 
 def go_shim(tmp, mem=None):
     """A directory holding a `go` for gremlins' PATH: a run with -coverprofile goes through go_cover,
-    every other (its mutant runs) to the real go, through go_capped where mem caps each run's memory;
-    or None where no go is on PATH."""
+    every other (its mutant runs) to the real go, through go_capped where mem caps each test binary's
+    memory; or None where no go is on PATH."""
     real = shutil.which("go")
     if real is None:
         return None
@@ -2188,7 +2208,7 @@ def go_shim(tmp, mem=None):
     bindir.mkdir(exist_ok=True)
     me = f"exec {q(sys.executable)} -I {q(str(pathlib.Path(__file__).resolve()))}"
     cover = f"{me} go-cover {q(real)} {q(str(tmp))} {int(mem or 0)}"
-    rest = f"{me} go-capped {q(real)} {int(mem)}" if mem else f"exec {q(real)}"
+    rest = f"{me} go-capped {q(real)} {q(str(tmp))} {int(mem)}" if mem else f"exec {q(real)}"
     (bindir / "go").write_text(f"""#!/bin/sh
 for a in "$@"; do
   case "$a" in -coverprofile|-coverprofile=*|--coverprofile|--coverprofile=*) {cover} "$@";; esac
@@ -2199,28 +2219,49 @@ done
     return bindir
 
 
+# MUT-gremlins-memcap (#6388): a gremlins mutant that drops a bound can grow a test by gigabytes, as a
+# deletion can (#5011), and took a runner down on #6000. Gremlins v0.6.0 reads its `go test`'s exit 1
+# as KILLED (executor.go getTestFailedStatus), so a test binary past its cap is killed and exits 1, as
+# run_tests' memory_cap is KILLED. Only the test binaries go under the cap, through `go test -exec`
+# (cap_exec, #6392): a mutant changes what the tests do, not how much the compiler holds.
+def capped_go(real, tmp, args, mem, exits=None):
+    """args for the real go with each test binary run through cap_exec under mem bytes (its peak and
+    end appended to the file exits, when given); None, with the reason printed and REFUSED written in
+    tmp for `run` to read, unless args are a `go test` naming no -exec of their own."""
+    if args[:1] != ["test"] or any(a in ("-exec", "--exec") or a.startswith(("-exec=", "--exec=")) for a in args):
+        print(f"mutgate: gremlins ran `go {shlex.join(args[:1])}` with -exec or not as `go test`, so its test "
+              "binaries cannot be put under their memory cap", file=sys.stderr)
+        (pathlib.Path(tmp) / REFUSED).write_text(shlex.join(args) + "\n")
+        return None
+    q = shlex.quote
+    wrap = f"{q(sys.executable)} -I {q(str(pathlib.Path(__file__).resolve()))} cap-exec {int(mem)} {q(str(exits or '-'))}"
+    return [args[0], f"-exec={wrap}", *args[1:]]
+
+
+REFUSED = "refused"  # go_shim's runs that could not be capped: `run` gives no verdict while it exists
+
+
 def go_cover(real, tmp, args, mem=None):
     """`go` args through the real go, with `-covermode=count` unless they name a mode (with_cases needs
     counts), then the -coverprofile it wrote read through with_cases. With mem, a mutant run's memory
-    cap, the run fails unless its tests' memory stays under half of it (MUT-gremlins-memcap)."""
+    cap, each test binary runs under it, and the run fails unless their peaks together stay under half
+    of it (MUT-gremlins-memcap): only then does a cap kill show the mutant changed the tests' memory."""
     if args[:1] == ["test"] and not any(a.lstrip("-").startswith("covermode") for a in args):
         args = ["test", "-covermode=count", *args[1:]]
     exits = pathlib.Path(tmp) / "exits"
-    if mem:  # each test binary through peak_exec, so its whole-life peak counts (#6392)
-        if args[:1] != ["test"] or any(a in ("-exec", "--exec") or a.startswith(("-exec=", "--exec=")) for a in args):
-            print("mutgate: gremlins' coverage run is not a `go test` without -exec, so its tests' peak cannot be read",
-                  file=sys.stderr)
-            return 1
+    run = args
+    if mem:
         exits.write_text("")
-        q = shlex.quote
-        args = [args[0], f"-exec={q(sys.executable)} -I {q(str(pathlib.Path(__file__).resolve()))} peak-exec {q(str(exits))}",
-                *args[1:]]
-    end, peak = watch(subprocess.Popen([real, *args], start_new_session=True, preexec_fn=die_with_parent),
-                      mem=mem, skip=TOOLCHAIN, exits=exits if mem else None)
-    if mem and (end == "over" or 2 * peak > mem):
-        print(f"mutgate: the tests hold {peak >> 20} MB before any mutant, more than half the {mem >> 20} MB "
-              "memory cap of a gremlins mutant run, so a cap kill would not show a test failed", file=sys.stderr)
-        return 1
+        if (run := capped_go(real, tmp, args, mem, exits)) is None:
+            return 1
+    end = subprocess.Popen([real, *run], preexec_fn=die_with_parent).wait()
+    if mem:
+        rows = [row.split() for row in exits.read_text().splitlines()]
+        peak = sum(int(r[0]) for r in rows)
+        if any(r[1] == "over" for r in rows) or 2 * peak > mem:
+            print(f"mutgate: the tests hold {peak >> 20} MB before any mutant, more than half the {mem >> 20} MB "
+                  "memory cap of a gremlins mutant run, so a cap kill would not show a test failed", file=sys.stderr)
+            return 1
     if code := exit_code(end):
         return code
     path = next((a.split("=", 1)[1] for a in args if a.startswith(("-coverprofile=", "--coverprofile="))), None)
@@ -2237,22 +2278,26 @@ def go_cover(real, tmp, args, mem=None):
     return 0
 
 
-# MUT-gremlins-memcap (#6388): a gremlins mutant that drops a bound can grow a test by gigabytes, as a
-# deletion can (#5011), and took a runner down on #6000. Gremlins v0.6.0 reads its `go test`'s exit 1
-# as KILLED (executor.go getTestFailedStatus), so a run past its cap is killed and exits 1, as
-# run_tests' memory_cap is KILLED. The toolchain's own processes (TOOLCHAIN) are not counted: a
-# mutant changes what the tests do, not how much the compiler holds.
-TOOLCHAIN = frozenset({"go", "compile", "link", "asm", "cgo", "vet", "cover"})
+def go_capped(real, tmp, mem, args):
+    """`go` args through the real go, each test binary of a `go test` under mem bytes (cap_exec); go's
+    exit code, or 1 when they cannot be capped (and REFUSED is written)."""
+    if args[:1] == ["test"] and (args := capped_go(real, tmp, args, mem)) is None:
+        return 1
+    return exit_code(subprocess.Popen([real, *args], preexec_fn=die_with_parent).wait())
 
 
-def go_capped(real, mem, args):
-    """`go` args through the real go, its session killed and 1 returned once its tests' resident memory
-    passes mem bytes; else go's own exit code."""
-    end, peak = watch(subprocess.Popen([real, *args], start_new_session=True, preexec_fn=die_with_parent),
-                      mem=mem, skip=TOOLCHAIN)
+def cap_exec(mem, exits, argv):
+    """go test's -exec: run the test binary argv contained under mem bytes; past it, print memory_cap's
+    failure and exit 1, which gremlins reads as KILLED; else exit as it did. With exits not "-", append
+    `PEAK END` (bytes, and "over" or its exit code) to that file for go_cover."""
+    die_with_parent()
+    end, peak = contained(argv, mem)
+    if exits != "-":
+        with open(exits, "a") as f:
+            f.write(f"{peak} {end}\n")
     if end == "over":
-        print(f"\n--- FAIL: memory_cap\nmutgate: the tests passed {peak >> 20} MB, this mutant run's "
-              f"{mem >> 20} MB memory cap, and were killed", file=sys.stderr)
+        print(f"\n--- FAIL: memory_cap\nmutgate: the tests passed this mutant run's {mem >> 20} MB memory cap "
+              "and were killed", file=sys.stderr)
         return 1
     return exit_code(end)
 
@@ -2263,8 +2308,8 @@ def exit_code(end):
 
 
 def die_with_parent():
-    """In a child before exec: SIGKILL it when its parent dies (Linux PR_SET_PDEATHSIG), so gremlins'
-    kill of the shim at a mutant's timeout also ends the go it started in a session of its own."""
+    """In a child before exec, or a process itself: SIGKILL it when its parent dies (Linux
+    PR_SET_PDEATHSIG), so gremlins' kill of the shim at a mutant's timeout also ends what it started."""
     try:
         import ctypes
         ctypes.CDLL(None).prctl(1, signal.SIGKILL)
@@ -2359,38 +2404,149 @@ def build_mutant(src, site, build, mutant, pkg_dir):
 
 
 def run_tests(binary, cwd, timeout, mem=None, names=None):
-    """'KILLED', 'LIVED' or 'TIMED OUT' for one run of a compiled test binary; its process group
-    is killed at the timeout, so a test's child cannot outlive the verdict. Its output goes to
-    BINARY.out, where failed_test reads which test failed. With mem, the run is also killed, and
-    KILLED by `memory_cap`, once its session's resident memory passes mem bytes, as the Go runtime's
-    own out of memory crash would end it: a deletion that drops a bound can grow a test by gigabytes
-    in seconds, and on a CI runner that takes the runner down with the job (egress on #5011). That
-    counts as detection only because deletion_mutants first shows the unmutated tests stay well under it.
+    """'KILLED', 'LIVED' or 'TIMED OUT' for one run of a compiled test binary, contained: everything it
+    started is killed when it ends or at the timeout, so a test's child cannot outlive the verdict. Its
+    output goes to BINARY.out, where failed_test reads which test failed. With mem, the run is also
+    killed, and KILLED by `memory_cap`, once it passes mem bytes, as the Go runtime's own out of memory
+    crash would end it: a deletion that drops a bound can grow a test by gigabytes in seconds, and on a
+    CI runner that takes the runner down with the job (egress on #5011). That counts as detection only
+    because deletion_mutants first shows the unmutated tests stay under half of it.
     With names, only those top-level tests run (#6172)."""
     out = pathlib.Path(binary).with_suffix(".out")
     only = [] if names is None else ["-test.run=^(" + "|".join(names) + ")$"]
     with open(out, "wb") as log:
-        p = subprocess.Popen([str(binary), "-test.failfast", *only, f"-test.timeout={timeout + 2}s"], cwd=cwd,
-                             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        end, _ = watch(p, timeout, mem)
+        end, _ = contained([str(binary), "-test.failfast", *only, f"-test.timeout={timeout + 2}s"], mem, timeout,
+                           cwd=cwd, stdout=log, stderr=subprocess.STDOUT)
         if end == "over":
             log.write(b"\n--- FAIL: memory_cap\n")  # failed_test's name for it, so the table says why
         return {"over": "KILLED", "timeout": "TIMED OUT"}.get(end) or ("LIVED" if end == 0 else "KILLED")
 
 
-def watch(p, timeout=None, mem=None, skip=(), exits=None):
-    """(end, peak) for Popen p started in its own session: end is its exit code, or "timeout" or
-    "over" (the session's resident memory, read every MEM_POLL seconds, past mem bytes), after which
-    every process in the session is killed (kill_session). Processes named in skip are not counted.
-    peak bounds what the session held from the kernel's own high-water marks, not from the reads
-    (MUT-gremlins-memcap-fu, #6392): the sum, over every process a read found, of the most it ever
-    held (VmHWM, which a spike between two reads still raised), p's taken at its exit from wait4, and
-    each process named on a `PID START BYTES` line of the file exits (peak_exec's) taken from there."""
+# MUT-memcap-cgroup (#6392): every run of tests goes in a cgroup v2 leaf of its own, under a delegated
+# directory CI names in AGENTOS_MUTGATE_CGROUP: memory.max caps it with no swap, an OOM kills the whole
+# leaf (memory.oom.group), cgroup.kill ends whatever is left, in any session or process group, and
+# memory.peak is its exact peak. In CI (CI or GITHUB_ACTIONS set) a missing or unusable one is an error.
+# Elsewhere a run is advisory (`watch`'s per-session reads) and its results never pass `verify`.
+CGROUP_ENV = "AGENTOS_MUTGATE_CGROUP"
+
+
+def cgroup_parent():
+    """The delegated cgroup v2 directory whose children cap each run, or None for an advisory local
+    run; raises in CI without one, and anywhere it names one without the memory controller for its children."""
+    path = os.environ.get(CGROUP_ENV)
+    if not path:
+        if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+            raise RuntimeError(f"mutgate: in CI every run needs a delegated cgroup v2 directory in {CGROUP_ENV}")
+        return None
+    try:
+        enabled = (pathlib.Path(path) / "cgroup.subtree_control").read_text().split()
+    except OSError:
+        enabled = []
+    if "memory" not in enabled:
+        raise RuntimeError(f"mutgate: {CGROUP_ENV}={path} is not a cgroup v2 directory giving its children the memory controller")
+    return pathlib.Path(path)
+
+
+def advisory():
+    """Whether runs here are advisory (no delegated cgroup), saying so on stderr; raises as cgroup_parent does."""
+    if cgroup_parent() is not None:
+        return False
+    print(f"mutgate: ADVISORY: no delegated cgroup ({CGROUP_ENV}), so memory caps are estimated from the "
+          "session's processes; these results are not a verdict and `verify` refuses them", file=sys.stderr)
+    return True
+
+
+def contained(argv, mem=None, timeout=None, **popen):
+    """(end, peak) of one run of argv: end is its exit code, or "timeout", or "over" (past mem bytes);
+    peak its peak memory in bytes. In a cgroup leaf where there is one (cgroup_parent), else in a session
+    of its own under `watch`. Whatever it started is killed once it ends."""
+    parent = cgroup_parent()
+    if parent is None:
+        return watch(subprocess.Popen(argv, start_new_session=True, preexec_fn=die_with_parent, **popen), timeout, mem)
+    leaf = parent / f"run-{os.getpid()}-{os.urandom(8).hex()}"
+    leaf.mkdir()
+    try:
+        for name, value in (("memory.max", str(mem) if mem else "max"), ("memory.swap.max", "0"), ("memory.oom.group", "1")):
+            (leaf / name).write_text(value)
+        # The shell moves itself into the leaf, then execs argv there: nothing argv starts runs outside it.
+        # (No preexec_fn: `delete` starts runs from several threads.)
+        p = subprocess.Popen(["/bin/sh", "-c", 'echo 0 > "$0" && exec "$@"', str(leaf / "cgroup.procs"), *argv], **popen)
+        try:
+            end = p.wait(timeout)
+        except subprocess.TimeoutExpired:
+            end = "timeout"
+        empty(leaf)
+        p.wait()
+        if not (peak := int((leaf / "memory.peak").read_text())):
+            raise RuntimeError(f"mutgate: {argv[0]} never ran in its cgroup leaf {leaf}")
+        events = dict(row.split() for row in (leaf / "memory.events").read_text().splitlines())
+        if int(events.get("oom_kill", 0)) or int(events.get("oom_group_kill", 0)):
+            end = "over"
+        return end, peak
+    finally:
+        empty(leaf)
+        leaf.rmdir()
+
+
+def empty(cg):
+    """Kill every process in cgroup cg and its children (cgroup.kill) and wait until none is left;
+    raises after KILL_WAIT seconds, so the run gives no verdict."""
+    (cg / "cgroup.kill").write_text("1")
+    deadline = time.monotonic() + KILL_WAIT
+    while "populated 1" in (cg / "cgroup.events").read_text():
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"mutgate: processes in {cg} outlived cgroup.kill")
+        time.sleep(0.01)
+
+
+@contextlib.contextmanager
+def cgroup_scope():
+    """For `run`: a cgroup under the delegated one that its runs' leaves go in (through the environment,
+    which gremlins' shims inherit), killed and removed with every leaf left in it at the end: a shim
+    gremlins kills at a mutant's timeout leaves its test binary's leaf behind."""
+    parent = cgroup_parent()
+    if parent is None:
+        yield
+        return
+    scope = parent / f"scope-{os.getpid()}-{os.urandom(8).hex()}"
+    scope.mkdir()
+    try:
+        (scope / "cgroup.subtree_control").write_text("+memory")
+        with env_set(CGROUP_ENV, str(scope)):
+            yield
+    finally:
+        empty(scope)
+        for leaf in scope.iterdir():
+            if leaf.is_dir():
+                leaf.rmdir()
+        scope.rmdir()
+
+
+@contextlib.contextmanager
+def env_set(name, value):
+    """os.environ[name] = value for the block."""
+    old = os.environ.get(name)
+    os.environ[name] = value
+    try:
+        yield
+    finally:
+        if old is None:
+            del os.environ[name]
+        else:
+            os.environ[name] = old
+
+
+def watch(p, timeout=None, mem=None):
+    """(end, peak) for Popen p started in its own session, an advisory run's containment (no cgroup):
+    end is its exit code, or "timeout" or "over" (the session's resident memory, read every MEM_POLL
+    seconds, past mem bytes); its session is killed (kill_session) once it ends. peak is the sum, over
+    every process a read found, of the most it ever held (VmHWM, which a spike between two reads still
+    raised), p's own from wait4 at its exit. A process that leaves the session (setsid) escapes both."""
     deadline = None if timeout is None else time.monotonic() + timeout
-    peaks, counted, end = {}, pathlib.Path(p.args[0]).name[:15] not in skip, None
+    peaks, end = {}, None
     while (done := reap(p, MEM_POLL if deadline is None else max(0, min(MEM_POLL, deadline - time.monotonic())))) is None:
         now = 0
-        for key, (rss, hwm) in session_memory(p.pid, skip).items():
+        for key, (rss, hwm) in session_memory(p.pid).items():
             now += rss
             peaks[key] = max(peaks.get(key, 0), hwm)
         end = "over" if mem is not None and now > mem else "timeout" if deadline and time.monotonic() >= deadline else None
@@ -2398,27 +2554,12 @@ def watch(p, timeout=None, mem=None, skip=(), exits=None):
             kill_session(p.pid)
             done = reap(p, float("inf"))
             break
-    if counted:  # pid is p's alone until it is reaped, so its reads are p's
-        peaks = {k: v for k, v in peaks.items() if k[0] != p.pid} | {(p.pid, -1): done[1]}
-    return end or done[0], high(peaks, exits)
+    kill_session(p.pid)  # a child left running once p ends
+    peaks = {k: v for k, v in peaks.items() if k[0] != p.pid} | {(p.pid, -1): done[1]}
+    return end or done[0], sum(peaks.values())
 
 
 MEM_POLL = 0.25  # seconds between memory reads: about 50 MB of growth at the 200 MB/s seen on #5011
-
-
-def high(peaks, exits):
-    """The sum of peaks ({(pid, start): bytes}) with each `PID START BYTES` line of the file exits
-    raising its process's own."""
-    try:
-        rows = pathlib.Path(exits).read_text().splitlines() if exits else []
-    except OSError:
-        rows = []
-    peaks = dict(peaks)
-    for row in rows:
-        if len(f := row.split()) == 3 and all(x.isdigit() for x in f):
-            key = (int(f[0]), int(f[1]))
-            peaks[key] = max(peaks.get(key, 0), int(f[2]))
-    return sum(peaks.values())
 
 
 def reap(p, wait):
@@ -2434,18 +2575,6 @@ def reap(p, wait):
             return None
         time.sleep(min(pause, left))
         pause = min(2 * pause, 0.05)
-
-
-def peak_exec(out, argv):
-    """go test's -exec for go_cover: run the test binary argv, append `PID START BYTES` (its whole-life
-    peak, as reap reads it) to the file out, and exit as it did, so watch counts what the binary held
-    after its last read too."""
-    p = subprocess.Popen(argv, preexec_fn=die_with_parent)
-    start = (proc_stat(p.pid) or (None, None, None, -1))[3]  # not yet reaped: its stat stays
-    end, top = reap(p, float("inf"))
-    with open(out, "a") as f:
-        f.write(f"{p.pid} {start} {top}\n")
-    return exit_code(end)
 
 
 def kill_session(sid):
@@ -2499,13 +2628,11 @@ def session_procs(sid):
     return [(pid, st[0], st[3]) for pid in pids if (st := proc_stat(pid)) and st[2] == sid and st[1] not in "ZX"]
 
 
-def session_memory(sid, skip=()):
-    """{(pid, start): (resident bytes, most resident bytes ever)} of each live process in session sid
-    not named in skip, from /proc/PID/status (VmRSS, VmHWM); a process gone meanwhile is left out."""
+def session_memory(sid):
+    """{(pid, start): (resident bytes, most resident bytes ever)} of each live process in session sid,
+    from /proc/PID/status (VmRSS, VmHWM); a process gone meanwhile is left out."""
     got = {}
-    for pid, name, start in session_procs(sid):
-        if name in skip:
-            continue
+    for pid, _, start in session_procs(sid):
         try:
             text = pathlib.Path(f"/proc/{pid}/status").read_text()
         except OSError:
@@ -2602,12 +2729,12 @@ TEST_NAME = re.compile(r"^(?:Test|Fuzz|Example)(?![a-z])\w*$")
 
 
 def run_alone(binary, cwd, args, timeout, mem, counters=None):
-    """(end, peak, seconds) of one run of a test binary in its own session, as watch reads it; with
+    """(end, peak, seconds) of one run of a test binary, contained; with
     counters, a child it re-executes writes its coverage there too (#5803)."""
     env = {**os.environ, "GOCOVERDIR": str(counters)} if counters else None
     began = time.monotonic()
-    end, peak = watch(subprocess.Popen([str(binary), *args], cwd=cwd, env=env, stdout=subprocess.DEVNULL,
-                                       stderr=subprocess.DEVNULL, start_new_session=True), timeout, mem)
+    end, peak = contained([str(binary), *args], mem, timeout, cwd=cwd, env=env, stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL)
     return end, peak, time.monotonic() - began
 
 
@@ -2724,10 +2851,8 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
     shutil.rmtree(counters, ignore_errors=True)
     counters.mkdir()
     began = time.monotonic()
-    end, peak = watch(subprocess.Popen([str(base), "-test.failfast", f"-test.gocoverdir={counters}",
-                                        f"-test.coverprofile={profile}"], cwd=pkg_dir,
-                                       env={**os.environ, "GOCOVERDIR": str(counters)},
-                                       start_new_session=True), mem=alone_mem)
+    end, peak = contained([str(base), "-test.failfast", f"-test.gocoverdir={counters}", f"-test.coverprofile={profile}"],
+                          alone_mem, cwd=pkg_dir, env={**os.environ, "GOCOVERDIR": str(counters)})
     if alone_mem and (end == "over" or 2 * peak > alone_mem):
         return None, (f"broker/{pkg}/'s tests hold {peak >> 20} MB before any statement is deleted, more than "
                       f"half the {alone_mem >> 20} MB memory cap of a run, so a cap kill would not show a test failed")
@@ -2828,6 +2953,11 @@ def cmd_delete(args):
     added, tests = changes(diff, args.git, "HEAD")
     bases = bases_for(diff, args.git, "HEAD", tests, args.pkg)
     bad = 0
+    try:
+        adv = advisory()
+    except RuntimeError as e:
+        print(e, file=sys.stderr)
+        return 1
     with tempfile.TemporaryDirectory() as tmp:
         tmp = pathlib.Path(tmp)
         if (lister := build_lister(tmp)) is None:
@@ -2852,7 +2982,7 @@ def cmd_delete(args):
                 print(f"mutgate: {problem}", file=sys.stderr)
                 bad += 1
                 continue
-            dest.write_text(json.dumps(add_mutants(data, mutants)))
+            dest.write_text(json.dumps({**add_mutants(data, mutants), **({"advisory": True} if adv else {})}))
     return 1 if bad else 0
 
 
@@ -2896,6 +3026,8 @@ def join_shards(pkg, shards, added, tests, lister, bases):
     for f, data in shards:
         if not shape_ok(data):
             return None, f"{f} is not gremlins' files[].mutations[] shape"
+        if data.get("advisory"):
+            return None, f"{f} is an advisory local result (no delegated cgroup), not a verdict"
         if (shard := shard_of(data)) is None:
             return None, f"{f} records a shard that is not 0 <= index < of <= {SHARDS_MAX}"
         if shard in seen:
@@ -3132,6 +3264,8 @@ def shape_ok(data):
 
 
 def cmd_report(args):
+    if any(json.loads(f.read_text()).get("advisory") for f in pathlib.Path(args.dir).glob("*.json")):
+        print("ADVISORY: local results without a delegated cgroup, not a verdict")
     live = survivors(args.dir)
     for pkg, items in live.items():
         print(f"{pkg}: {len(items)} surviving")
@@ -3157,6 +3291,11 @@ def cmd_plan(args):
     """The `mutants` matrix (#4961): [{pkg, shard, of}] for each package `claimed` names, K from its
     target lines and deletion sites. It runs the PR's tests (changed tests' coverage), so only in
     an untrusted job; K is a schedule, and `verify` checks the shards whatever K is."""
+    try:
+        advisory()
+    except RuntimeError as e:
+        print(e, file=sys.stderr)
+        return 1
     diff = broker_diff(args.git, "HEAD")
     added, tests = changes(diff, args.git, "HEAD")
     counts, planned = [], {}
@@ -3241,6 +3380,8 @@ def cmd_gate(args):
             bad += 1
             continue
         results[pkg] = (data, targets)
+    if any(data.get("advisory") for data, _ in results.values()):
+        print("mutgate: ADVISORY: local results without a delegated cgroup, not a verdict", file=sys.stderr)
     with tempfile.TemporaryDirectory() as tmp:
         records = ({}, [])
         if any((BROKER / pkg / RECORD).exists() or (BROKER / pkg / RECORD).is_symlink() for pkg in results):
@@ -3302,10 +3443,10 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["go-cover"] and len(argv) >= 4:  # go_shim's entries, not commands of their own
         return go_cover(argv[1], argv[2], argv[4:], int(argv[3]) or None)
-    if argv[:1] == ["go-capped"] and len(argv) >= 3:
-        return go_capped(argv[1], int(argv[2]), argv[3:])
-    if argv[:1] == ["peak-exec"] and len(argv) >= 3:
-        return peak_exec(argv[1], argv[2:])
+    if argv[:1] == ["go-capped"] and len(argv) >= 4:
+        return go_capped(argv[1], argv[2], int(argv[3]), argv[4:])
+    if argv[:1] == ["cap-exec"] and len(argv) >= 4:
+        return cap_exec(int(argv[1]), argv[2], argv[3:])
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("packages")
