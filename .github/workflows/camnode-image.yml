@@ -17,6 +17,7 @@ on:
       - "broker/camwire/**"
       - "broker/cmd/agentos-camnode/**"
       - ".github/workflows/camnode-image.yml"
+      - ".github/actions/disk-budget/**"
   pull_request:
     paths:
       - "image/camnode/**"
@@ -26,6 +27,7 @@ on:
       - "broker/go.mod"
       - "broker/go.sum"
       - ".github/workflows/camnode-image.yml"
+      - ".github/actions/disk-budget/**"
 permissions:
   contents: read
 # CI-cancel-superseded (#5345, #5348, #5361): a PR's first-attempt run cancels that PR's older first
@@ -46,6 +48,8 @@ jobs:
         board: [qemu, cm4]
     runs-on: ubuntu-24.04
     timeout-minutes: 300
+    env:
+      DISK_NEED_GB: "37" # IMG-disk (#6357): measured bound 20.8 GB (19.1 sampled + 1.7 rise, qemu, Azure, cold caches; cm4 17.4); see .github/actions/disk-budget
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -62,6 +66,11 @@ jobs:
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; go.mod names $want" >&2; exit 1; }
       - name: Install Buildroot's host requirements and the test's DHCP server
         run: sudo apt-get update -q && sudo apt-get install -y -q build-essential cpio rsync bc unzip file dnsmasq-base
+      # IMG-disk (#6357): the runner disk budget, against this job's DISK_NEED_GB (.github/actions/disk-budget).
+      - name: Disk budget
+        uses: ./.github/actions/disk-budget
+        with:
+          phase: start
       - name: Cache key
         id: key
         run: |
@@ -119,3 +128,8 @@ jobs:
             ${{ runner.temp }}/consoles.tar.gz
             ${{ runner.temp }}/build.log
           if-no-files-found: ignore
+      - name: Disk budget held
+        if: always()
+        uses: ./.github/actions/disk-budget
+        with:
+          phase: held
