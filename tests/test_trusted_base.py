@@ -271,9 +271,9 @@ class CorePure(unittest.TestCase):
         return {"root": set(root), "allow": set(allow), "known": set(known)}
 
     def test_equal_and_shrink_pass(self):
-        self.assertEqual(tb.compare_core(self.c(), self.c(), self.m(), self.m(), "", ""), ([], {}))
-        self.assertEqual(tb.compare_core(self.c(), self.c(known=()), self.m(), self.m(lines=3, imports=()), "", "")[0], [])
-        self.assertEqual(tb.compare_core(self.c(), self.c(root=("k", "j")), self.m(), self.m(), "", "")[0], [])
+        self.assertEqual(tb.compare_core(self.c(), self.c(), self.m(), self.m(), "", "", PR), ([], {}))
+        self.assertEqual(tb.compare_core(self.c(), self.c(known=()), self.m(), self.m(lines=3, imports=()), "", "", PR)[0], [])
+        self.assertEqual(tb.compare_core(self.c(), self.c(root=("k", "j")), self.m(), self.m(), "", "", PR)[0], [])
 
     def test_each_loosening_needs_a_decision(self):
         cases = [("root", self.c(root=()), self.m()),
@@ -281,7 +281,7 @@ class CorePure(unittest.TestCase):
                  ("known", self.c(known=("a/b", "c/d")), self.m(imports=("a/b", "c/d"))),
                  ("file", None, None)]
         for key, head_core, head in cases:
-            problems, owed = tb.compare_core(self.c(), head_core, self.m(), head, "", DECISIONS)
+            problems, owed = tb.compare_core(self.c(), head_core, self.m(), head, "", DECISIONS, PR)
             self.assertEqual(set(owed), {key})
             self.assertEqual(len(problems), 1, key)
             self.assertIn("no `Trusted-core: <decision ID>` line", problems[0])
@@ -290,17 +290,17 @@ class CorePure(unittest.TestCase):
             self.assertEqual(tb.compare_core(self.c(), head_core, self.m(), head, "Body.\nTrusted-core: D-7\n", DECISIONS, PR)[0], [])
             # #2945: the row has to name this PR; with no PR number nothing waives.
             self.assertTrue(tb.compare_core(self.c(), head_core, self.m(), head, "Trusted-core: D-7", DECISIONS, 43)[0])
-            self.assertTrue(tb.compare_core(self.c(), head_core, self.m(), head, "Trusted-core: D-7", DECISIONS)[0])
+            self.assertTrue(tb.compare_core(self.c(), head_core, self.m(), head, "Trusted-core: D-7", DECISIONS, None)[0])
 
     def test_unlisted_and_unused_fail_whatever_the_body(self):
         head = self.m(unlisted=["new/pkg"])
         self.assertTrue(tb.compare_core(self.c(), self.c(), self.m(), head, "Trusted-core: D-7", DECISIONS, PR)[0])
-        self.assertTrue(tb.compare_core(None, self.c(), None, head, "", "")[0])
-        self.assertTrue(tb.compare_core(None, self.c(), None, self.m(unused=["a/b"]), "", "")[0])
+        self.assertTrue(tb.compare_core(None, self.c(), None, head, "", "", PR)[0])
+        self.assertTrue(tb.compare_core(None, self.c(), None, self.m(unused=["a/b"]), "", "", PR)[0])
 
     def test_no_base_file_owes_nothing(self):
-        self.assertEqual(tb.compare_core(None, self.c(), None, self.m(lines=10**6), "", ""), ([], {}))
-        self.assertEqual(tb.compare_core(None, None, None, None, "", ""), ([], {}))
+        self.assertEqual(tb.compare_core(None, self.c(), None, self.m(lines=10**6), "", "", PR), ([], {}))
+        self.assertEqual(tb.compare_core(None, None, None, None, "", "", PR), ([], {}))
 
 
 class CeilingsPure(unittest.TestCase):
@@ -1589,6 +1589,87 @@ class Symlinks(unittest.TestCase):
         self.assertIn("symlink", out)
         self.assertNotIn("CANARY-6406", out + pathlib.Path(summary).read_text())
         self.assertIn("**Error (check):**", pathlib.Path(summary).read_text())
+
+
+@unittest.skipUnless(shutil.which("go"), "go is not installed")
+class BrokerSymlinks(unittest.TestCase):
+    """#6477 L3: `go list` reads the head tree's Go sources, and its parse error quotes the first
+    token of a symlinked runner file into the job summary. Any symlink under broker/ (and under an
+    old-core directory, whose files are counted) is refused before anything there is read."""
+
+    CANARY = "CANARYSECRET6477"
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.secret = self.tmp / "runner-file"
+        self.secret.write_text(f"{self.CANARY} abc\n")
+        saved, tb.FALLBACK = tb.FALLBACK, self.tmp / "no-fallback"
+        self.addCleanup(setattr, tb, "FALLBACK", saved)
+
+    def check(self, link, target=None, old_core=None):
+        """`check` of a head whose `link` is a symlink (to the canary file by default): rc, output, summary."""
+        base, head = self.tmp / "base", self.tmp / "head"
+        for t in (base, head):
+            shutil.rmtree(t, ignore_errors=True)
+            tree(str(t))
+            if old_core:
+                write(t, tb.OLD_CORE, old_core + "\n")
+                write(t, f"{old_core}/x.go", "package old\n")
+        body, summary = self.tmp / "body.txt", self.tmp / "summary.md"
+        body.write_text("")
+        summary.unlink(missing_ok=True)
+        argv = ["check", "--base-tree", str(base), "--head-tree", str(head), "--body", str(body),
+                "--pr", str(PR), "--markdown", str(summary)]
+        if link is not None:
+            p = head / link
+            if p.is_dir():
+                shutil.rmtree(p)
+            elif p.exists():
+                p.unlink()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(target or self.secret, p)
+        rc, out = run(argv)
+        return rc, out, summary.read_text() if summary.exists() else ""
+
+    def test_positive_control(self):
+        rc, out, _ = self.check(None)
+        self.assertEqual(rc, 0, out)
+
+    def test_a_symlinked_go_source_is_refused_without_echo(self):
+        for link in ("broker/calc/calc.go", "broker/cmd/a/main.go", "broker/calc/extra.go"):
+            with self.subTest(link=link):
+                rc, out, summary = self.check(link)
+                self.assertEqual(rc, 2, out)
+                self.assertIn(f"{link}: a symlink", summary)
+                self.assertNotIn(self.CANARY, out + summary)
+
+    def test_other_symlinks_under_broker_are_refused(self):
+        dangling = self.tmp / "nothing"
+        real = self.tmp / "realdir"
+        write(real, "calc.go", "package calc\n\nfunc Add(a, b int) int { return a + b }\n")
+        for link, target in (("broker/go.mod", None), ("broker/vendor/modules.txt", None),
+                             ("broker/calc/notes.txt", dangling), ("broker/calc", real)):
+            with self.subTest(link=link):
+                rc, out, summary = self.check(link, target)
+                self.assertEqual(rc, 2, out)
+                self.assertIn(f"{link}: a symlink", summary)
+                self.assertNotIn(self.CANARY, out + summary)
+
+    def test_a_symlinked_broker_is_refused(self):
+        real = self.tmp / "realtree"
+        tree(str(real))
+        rc, out, summary = self.check("broker", real / "broker")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("broker: a symlink", summary)
+
+    def test_a_symlink_under_an_old_core_directory_is_refused(self):
+        rc, out, _ = self.check(None, old_core="old")
+        self.assertEqual(rc, 0, out)  # positive control: the directory is counted as regular files
+        rc, out, summary = self.check("old/y.go", old_core="old")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("old/y.go: a symlink", summary)
+        self.assertNotIn(self.CANARY, out + summary)
 
 
 class CheckNeedsPR(unittest.TestCase):

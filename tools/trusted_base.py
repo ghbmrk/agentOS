@@ -137,16 +137,40 @@ def tree_file(tree, rel):
     """tree/rel, or None when absent. A symlink at any step below tree, or a file that is not a
     regular file, is refused (#6406): CI checks the PR's tree out under pull_request_target, and a
     committed symlink would have this tool read and echo a runner file as one of the PR's own."""
-    path = pathlib.Path(tree)
-    for part in pathlib.PurePosixPath(rel).parts:
-        path = path / part
-        if path.is_symlink():
-            raise MeasureError(f"{path}: a symlink; {rel} is read only as a committed regular file")
+    path = no_symlink_steps(tree, rel, "a committed regular file")
     if not path.exists():
         return None
     if not path.is_file():
         raise MeasureError(f"{path}: not a regular file")
     return path
+
+
+def no_symlink_steps(tree, rel, what):
+    """tree/rel, refusing a symlink at any step below tree."""
+    path = pathlib.Path(tree)
+    for part in pathlib.PurePosixPath(rel).parts:
+        path = path / part
+        if path.is_symlink():
+            raise MeasureError(f"{path}: a symlink; {rel} is read only as {what}")
+    return path
+
+
+def no_symlinks_under(tree, rel):
+    """tree/rel with no symlink at a step or anywhere below it, dangling or not (#6477 L3). `go list`
+    and the line counts read every file there, and a parse error quotes a symlinked runner file's
+    first token into the job summary, so the whole directory is refused before anything reads it."""
+    root = no_symlink_steps(tree, rel, "committed regular files")
+    for d, dirs, files in os.walk(root):  # does not follow a symlinked directory; lists it in dirs
+        for name in sorted(dirs + files):
+            if os.path.islink(os.path.join(d, name)):
+                raise MeasureError(f"{os.path.join(d, name)}: a symlink; {rel}/ is read only as committed regular files")
+    return root
+
+
+def broker_dir(tree):
+    """The tree's broker/, resolved, once no_symlinks_under has passed it."""
+    no_symlinks_under(tree, "broker")
+    return pathlib.Path(tree).resolve() / "broker"
 
 
 def read_list(tree, rel):
@@ -210,7 +234,7 @@ def count_lines(path):
 def packages(tree, targets=None):
     """{import path: (kind, lines)} with kind own, dep or std, for the tree's trusted processes
     (or for `targets`, ./<dir> paths under broker/)."""
-    broker = pathlib.Path(tree).resolve() / "broker"
+    broker = broker_dir(tree)
     own_mod = module_path(broker)
     out = {}
     for p in go_list(broker, targets or trusted_mains(tree)):
@@ -387,7 +411,7 @@ def read_core(tree):
 
 def measure_core(tree, core):
     """Core lines, the linked packages a known line must cover, and the known lines unused."""
-    roots = {f"{module_path(pathlib.Path(tree).resolve() / 'broker')}/{r}" for r in core["root"]}
+    roots = {f"{module_path(broker_dir(tree))}/{r}" for r in core["root"]}
     m = {"lines": 0, "imports": set()}
     for path, (kind, lines) in packages(tree, sorted("./" + r for r in core["root"])).items():
         if kind == "std" or path in core["allow"]:
@@ -410,7 +434,7 @@ def active_decision(decisions, ident, pr):
     return False
 
 
-def compare_core(base_core, head_core, base, head, body, decisions, pr=None):
+def compare_core(base_core, head_core, base, head, body, decisions, pr):
     """(problems, owed) for the core; base_core and base are None when the base has no core file."""
     problems, owed = [], {}
     if head is not None:
@@ -486,9 +510,9 @@ def old_core_lines(tree, dirs):
     A file is counted whatever its build tags: the old core is measured as it sits, not as linked."""
     total = 0
     for d in sorted(dirs):
-        root = pathlib.Path(tree) / d
         if ".." in pathlib.PurePosixPath(d).parts or d.startswith("/"):
             raise MeasureError(f"{OLD_CORE}: {d} is not a directory of the repository")
+        root = no_symlinks_under(tree, d)
         for f in sorted(root.rglob("*.go")) if root.is_dir() else ():
             rel = f.relative_to(root).parts
             if f.is_file() and not f.name.endswith("_test.go") and "testdata" not in rel:
@@ -765,7 +789,7 @@ def main(argv=None):
             if core:
                 c = measure_core(a.tree, core)
                 text += f"core lines {c['lines']}, linked packages outside std and allow {len(c['imports'])}\n"
-                problems += compare_core(None, core, None, c, "", "")[0]
+                problems += compare_core(None, core, None, c, "", "", None)[0]
                 e = ceiling_measures(a.tree, c, old_core_dirs(a.tree))
                 caps = read_ceilings(a.tree) or {}
                 text += "".join(f"{k} {e[k]}" + (f" (ceiling {caps[k]})" if k in caps else "") + "\n" for k in CEILING_NAMES)
