@@ -11,7 +11,8 @@ commit with the merge-base of `base` and `head`) and compares that tree with `he
 bytes, binary content and modes count, except that an ASSUMPTIONS.md differing only in its rows' first-cell ids (a renumbering after a main-merge) reads as same,
 and so does a DECISIONS.md whose only replay conflicts are table rows both sides appended at one spot, resolved by
 keeping both sides' rows verbatim, either side first (#3224, #3233), the PR's rows renumbered or not when no other PR file names an old ID (#4030),
-and so does a `*_allow.txt` whose lines are main's plus the PR's line changes, in any order (#3991),
+and so does a `*_allow.txt` whose lines are main's plus the PR's line changes, in any order, a line both added kept once or twice (#3991, #6375),
+and so does any allow file (tools/record_merge.py CLASSES) that is the driver's clean merge of both sides (#6375),
 and so does a MUTANTS-EQUIVALENT whose entries are main's plus the PR's entry changes, each side's entries in its own order (#6314). A replay file that fails a cheap gate never reads
 same as is: a duplicate row ID (doclint) in an ASSUMPTIONS.md or DECISIONS.md, a MUTANTS-EQUIVALENT key on two different lines (an entry or row both sides added word for word is one, #6358), or an ASSUMPTIONS.md row or entry that
 `merge=union` brought back (in the merge base and main, not in the reviewed commit). A head that resolves each union
@@ -62,6 +63,7 @@ Otherwise it prints `not-bot <files>` (the diff) or `bot-unproven <why>` and exi
 the branch is this repository's, not a fork's, and fetches the run and artifact the head commit's `Bot-Run:`
 trailer names.
 """
+import ast
 import collections
 import importlib.util
 import json
@@ -75,6 +77,9 @@ import zipfile
 import zlib
 
 # By path: the workflow runs `python3 -I`, which keeps tools/ off sys.path.
+_rm = importlib.util.spec_from_file_location("record_merge", pathlib.Path(__file__).resolve().parent / "record_merge.py")
+record_merge = importlib.util.module_from_spec(_rm)
+_rm.loader.exec_module(record_merge)
 _spec = importlib.util.spec_from_file_location("risk_tier", pathlib.Path(__file__).resolve().parent / "risk_tier.py")
 risk_tier = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(risk_tier)
@@ -87,11 +92,37 @@ DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", 
 # CLAUDE*.md, AGENTS.md, .mcp.json and .claude (a directory or a symlink, #2138) count at any depth;
 # broker/core/core.txt sets risk tiers (risk_tier.py); tools/trace.py and tools/old_core.txt are the old-core ratchet (D-139); tools/trusted_base.py, tools/trusted_core.txt and tools/ceilings.txt are the trusted core's budget and the ceilings (KRN-2cap, #2935; D-310); tools/mutgate.py is the mutation gate, which the mutgate workflow decides with once it is on the base (#3955, #4106); the tests that pin the merge gates count too
 # (PREMERGE-paths, #1835), as do this gate's own tests and the lens rules, so a PR cannot weaken them on L3 alone (#2438). Matched with fullmatch and DOTALL, so a path with a newline in it cannot slip past `$`-style matching.
+# A module a gate tool imports decides with it, so the gate tools' tools/ imports, followed to the end, are gate
+# files too, with their tests (#6418 Security): derived from the base's sources, never a hand list.
+GATE_TOOLS = ("risk_tier", "premerge", "trace", "trusted_base", "mutgate", "claims")
+
+
+def gate_modules(tools=pathlib.Path(__file__).resolve().parent, roots=GATE_TOOLS):
+    """The tools/ modules `roots` import, directly or through each other: an `import` or `from` of a module in
+    `tools`, or a string naming one of its files (premerge loads its imports by path), followed to the end."""
+    out, todo = set(), list(roots)
+    while todo:
+        name = todo.pop()
+        if name in out or not (tools / f"{name}.py").is_file():
+            continue
+        out.add(name)
+        for n in ast.walk(ast.parse((tools / f"{name}.py").read_text())):
+            if isinstance(n, ast.Import):
+                todo += [a.name.split(".")[0] for a in n.names]
+            elif isinstance(n, ast.ImportFrom) and n.level == 0 and n.module:
+                todo.append(n.module.split(".")[0])
+            elif isinstance(n, ast.Constant) and isinstance(n.value, str) and re.fullmatch(r"\w+\.py", n.value):
+                todo.append(n.value[:-3])
+    return out
+
+
+_IMPORTED = "|".join(sorted(gate_modules() - set(GATE_TOOLS)))
 _CFG = r"(?:.*/)?"
 MARK_PATHS = re.compile(rf"{_CFG}CLAUDE(?:\.local)?\.md|{_CFG}AGENTS\.md|{_CFG}\.mcp\.json|{_CFG}\.claude(?:/.*)?|"
                         r"docs/OPERATING\.md|docs/LANES\.md|\.github/.*|broker/core/core\.txt|"
-                        r"tools/(risk_tier|premerge|trace|trusted_base|mutgate|claims)\.py|tools/(old_core|trusted_core|ceilings)\.txt|tools/ci_scope[^/]*|"
-                        r"tests/test_premerge[^/]*|reviews/[^/]+/README[^/]*",
+                        rf"tools/({'|'.join(GATE_TOOLS)})\.py|tools/(old_core|trusted_core|ceilings)\.txt|tools/ci_scope[^/]*|"
+                        r"tests/test_premerge[^/]*|reviews/[^/]+/README[^/]*"
+                        + (rf"|tools/({_IMPORTED})\.py|tests/test_({_IMPORTED})[^/]*" if _IMPORTED else ""),
                         re.DOTALL)
 
 
@@ -527,7 +558,8 @@ def _names(ids, text):
 def _lines_kept(cwd, tree, head, path, reviewed, onto):
     """True when `path` is an allowlist (`*_allow.txt`, one entry per line, order free) and `head`'s lines, as a
     multiset, are main's plus the lines the reviewed commit added less those it removed: a main-merge that kept
-    both sides of a conflict at one spot (#3991) reads as same in any order. Any other line reads as changed."""
+    both sides of a conflict at one spot (#3991) reads as same in any order. A line both sides added word for word
+    may be kept once, as tools/record_merge.py keeps it (#6375). Any other line reads as changed."""
     if not path.endswith("_allow.txt"):
         return False
     bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
@@ -536,7 +568,24 @@ def _lines_kept(cwd, tree, head, path, reviewed, onto):
     # Split on \n only, as the readers do: bytes.splitlines() also splits on \r and would count unread entries (#4041).
     pr, mb, main, want = (collections.Counter(_git(cwd, "show", f"{t}:{path}", ok=(0, 128)).split(b"\n"))
                           for t in (reviewed, bases[0], onto, head))
-    return main + (pr - mb) - (mb - pr) == want
+    if any(record_merge._section(x) for side in (pr, main, want) for x in side):
+        return False  # a sectioned file is no order-free list (#6418 Security)
+    want_max = main + (pr - mb) - (mb - pr)
+    return not want - want_max and not (want_max - want) - ((pr - mb) & (main - mb))
+
+
+def _driver_kept(cwd, tree, head, path, reviewed, onto):
+    """True when `path` is an allow file (tools/record_merge.py's class `line`) and `head`'s copy is the driver's
+    clean merge of the reviewed commit's and main's copies on their one merge base: both sides' appends at one spot,
+    in place, a line both appended once (#6375). The driver leaves every other change to a line in conflict."""
+    if record_merge.record_class(path) != "line":
+        return False
+    bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
+    if len(bases) != 1 or not _same_mode(cwd, tree, head, path):
+        return False
+    pr, mb, main, want = (_git(cwd, "show", f"{t}:{path}", ok=(0, 128)) for t in (reviewed, bases[0], onto, head))
+    text, clean = record_merge.merge(mb, pr, main, path)
+    return clean and text == want
 
 
 RECORD = "MUTANTS-EQUIVALENT"  # tools/mutgate.py's RECORD: one JSON entry per line, `#` and blank lines comments
@@ -600,6 +649,7 @@ def compare(cwd, reviewed, head="HEAD", base="origin/main"):
     return sorted(kept | {f for f in differ if not _renumbered_only(cwd, tree, head, f, reviewed, onto)
                           and not _appends_kept(cwd, tree, head, f, reviewed, onto)
                           and not _lines_kept(cwd, tree, head, f, reviewed, onto)
+                          and not _driver_kept(cwd, tree, head, f, reviewed, onto)
                           and not _records_kept(cwd, tree, head, f, reviewed, onto)
                           and not _stale_dropped(cwd, tree, head, f, reviewed, onto)})
 
@@ -659,11 +709,15 @@ HELD = {"assurance": (), "vulncheck": (), "image": ("image-vulncheck",), "lane-g
 # The PR-triggered workflow files left out of HELD: every job of ci and trusted-base is a required check of main's
 # ruleset, and premerge is the gate itself. A workflow file with a PR trigger is in exactly one of the two (#5385).
 UNHELD = ("ci", "trusted-base", "premerge")
-# PREMERGE-gate-not-base-excusable (#6411): the HELD workflows whose verdict is on the PR's own diff (base to head), so a
-# failure in main's run of the merge base says nothing about the PR. None of their jobs is ever excused: mutgate's
-# `claimed` carries a stale head and `mutgate` a survivor, whatever the base did. The rest judge the tree and keep the
-# #3532 excusal of a failure the head inherited.
-DIFF_GATES = ("mutgate", "lane-gate", "word-budget")
+# PREMERGE-gate-not-base-excusable (#6411): a DIFF_GATE workflow's verdict is on the PR's own diff (base to head), so a
+# failure in main's run of the merge base says nothing about the PR, and none of its jobs is ever excused: mutgate's
+# `claimed` carries a stale head and `mutgate` a survivor, whatever the base did. A TREE workflow judges the tree and
+# keeps the #3532 excusal of a failure the head inherited. PREMERGE-held-class-table (#6425): every HELD workflow has a
+# class here, a test keeps the keys equal to HELD's, and one missing from the table is read as DIFF_GATE (fail closed).
+DIFF_GATE, TREE = "diff-gate", "tree"
+HELD_CLASS = {"mutgate": DIFF_GATE, "lane-gate": DIFF_GATE, "word-budget": DIFF_GATE,
+              "assurance": TREE, "vulncheck": TREE, "image": TREE, "formal": TREE, "keycheck": TREE, "infer-real": TREE,
+              "vision-real": TREE, "testkit": TREE, "enforcer-image": TREE, "camnode-image": TREE, "drone-sitl": TREE}
 PASSED = ("success", "skipped")
 NO_RUNS = "needs-runs: every verdict is in; pass --runs <runs.json> (tools/premerge_runs.sh builds it) to read the held checks"
 _GLOB = re.compile(r"[A-Za-z0-9._/*-]+")
@@ -785,7 +839,7 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
     number and head repository and branch, and the Actions runs (API JSON) on the head and on the merge base, each
     failed one with a `jobs` list (the head's latest attempt, the base's first). Only this PR's runs count (`_bind`). A run passes on `success` or
     `skipped`, or on `failure` when every failed job is one HELD exempts or one that failed on the merge base too, never in
-    a DIFF_GATES workflow.
+    a workflow HELD_CLASS does not class TREE.
     A queued, running, cancelled or timed-out run holds, and so does a missing one the workflow's PR trigger owes, as
     `unbound` when only this branch's runs that name no PR or another PR are on the head."""
     pr = runs.get("pr") if isinstance(runs, dict) else None
@@ -811,7 +865,7 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
             continue
         if state == "failure":
             jobs = _jobs(r, r.get("run_attempt"))
-            excused = set() if name in DIFF_GATES else set(exempt) | _base_failed(runs["base"], path, onto, runs["repo"])
+            excused = set(exempt) | _base_failed(runs["base"], path, onto, runs["repo"]) if HELD_CLASS.get(name) == TREE else set()
             bad = [(n, c) for n, c in jobs or [] if c not in PASSED]
             if bad and all(c == "failure" and n in excused for n, c in bad):
                 continue
