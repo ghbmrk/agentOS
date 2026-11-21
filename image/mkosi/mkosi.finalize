@@ -28,7 +28,8 @@ DRIVER_TEMPLATE for its name, and nothing else names its user or the drivers' so
 Run by mkosi, it also refuses a run whose scripts had the network (#4647), so neither mkosi.postinst nor
 this script can fetch a package outside mkosi's checked apt run, and a tree with an installed package
 that no pinned, signature-checked Packages index lists at that version (#4690); any tree with a .deb.
-mkosi runs it on the default initrd too, for those two alone (INITRD_IMAGE, #6149).
+mkosi runs it on the default initrd too, for those two and the kexec loader check alone (INITRD_IMAGE, #6149,
+#6345).
 Usage outside mkosi: mkosi.finalize ROOT; mkosi.finalize --tmpfiles-allowlist ROOT and
 mkosi.finalize --exec-allowlist ROOT print those allowlists for a tree."""
 import bz2
@@ -558,7 +559,7 @@ def _violations(root):
             + inside_refusals(root) + gpt_auto_violations(root)
             + noexec_violations(root)
             + keeper_violations(root) + isolate_violations(root) + ram_kept_violations(root)
-            + kexec_loader_violations(root) + clerk_key_violations(root)
+            + kexec_loader_violations(root) + kexec_sysctl_violations(root) + clerk_key_violations(root)
             + assembly_violations(root) + driver_violations(root) + e2e_violations(root) + package_file_violations(root))
 
 
@@ -3096,23 +3097,44 @@ def ram_kept_violations(root):
     return out
 
 
-def kexec_loader_violations(root):
+def kexec_loader_violations(root, status=None):
     """MOR-kexec-class (#6311): a kexec loader wherever the box would run it from (whatever the entry is), or
     a KEXEC_PACKAGES package dpkg has unpacked. A dpkg status the check cannot read is refused; none at all
-    (a test tree) passes here, and tree_package_violations refuses that on a built image."""
+    (a test tree) passes here, and tree_package_violations refuses that on a built image. STATUS: the dpkg
+    status file to read, DPKG_STATUS unless given (the default initrd's run gives INITRD_STATUS, #6345)."""
     root = str(root)
+    rel = status or DPKG_STATUS
     out = ["%s/%s: %s" % (d, KEXEC_LOADER, KEXEC_WHY)
            for d in KEXEC_LOADER_DIRS if tree_stat(root, d + "/" + KEXEC_LOADER) is not None]
     try:
-        status = Conf(root, DPKG_STATUS).content() if tree_lstat(root, DPKG_STATUS) else b""
+        status = Conf(root, rel).content() if tree_lstat(root, rel) else b""
     except OSError as e:
-        return out + ["%s: unreadable (%s); %s" % (DPKG_STATUS, e.strerror or e, KEXEC_WHY)]
+        return out + ["%s: unreadable (%s); %s" % (rel, e.strerror or e, KEXEC_WHY)]
     for p in deb822_fields(status, (b"Package", b"Status")):
         words = p.get(b"Status", b"").split()
         if p.get(b"Package") in KEXEC_PACKAGES and not (len(words) == 3 and words[2] in (b"not-installed",
                                                                                           b"config-files")):
-            out.append("%s: %s is installed; %s" % (DPKG_STATUS, p[b"Package"].decode(), KEXEC_WHY))
+            out.append("%s: %s is installed; %s" % (rel, p[b"Package"].decode(), KEXEC_WHY))
     return out
+
+
+# MOR-kexec-class-fu (#6345): KEXEC_SYSCTL sets kernel.kexec_load_disabled=1 at sysinit, before any unit with
+# default dependencies starts. Linux 6.12's kexec_load_permitted (kernel/kexec_core.c), which kexec_load
+# (kernel/kexec.c) and kexec_file_load (kernel/kexec_file.c) both call first, refuses while it is 1, for root
+# too, and its sysctl entry takes only 1 (extra1 and extra2 are SYSCTL_ONE), so nothing sets it back to 0 until
+# the next boot: no process loads a kernel, whatever loader it carries.
+# The loader check above is then defence in depth. The value is checked as systemd-sysctl sets it, after every
+# file it reads, as NODUMP_SYSCTL's are.
+KEXEC_SYSCTL = "usr/lib/sysctl.d/99-agentos-kexec.conf"
+
+
+def kexec_sysctl_violations(root):
+    """MOR-kexec-class-fu (#6345): kernel.kexec_load_disabled ends up 1 after every sysctl.d file."""
+    v = sysctl(str(root), "kernel.kexec_load_disabled")
+    if v == "1":
+        return []
+    return ["%s: kernel.kexec_load_disabled is %s; must be 1, so no process loads a kernel that boots on memory "
+            "the firmware never wiped (#6345)" % (KEXEC_SYSCTL.rsplit("/", 1)[-1], v)]
 
 
 def bus_keep_violations(root, dirs):
@@ -5294,8 +5316,11 @@ def package_file_violations(root):
 # JSON names it Image "default-initrd", with this run's Mirror=, --environment and apt lists. initrd/mkosi.conf
 # adds this script to that run's finalize scripts, after initrd/mkosi.finalize. mkosi-initrd sets
 # CleanPackageMetadata=yes, so var/lib/dpkg is gone by then: the initrd's mkosi.postinst (drop.py) copies dpkg's
-# status, after its purges, to INITRD_STATUS, and the package check reads that copy. The image's other checks
-# are this tree's, not the initrd's; initrd/mkosi.finalize holds the initrd's own.
+# status, after its purges, to INITRD_STATUS, and the package check reads that copy. The kexec loader check
+# (#6345) runs on it too, on the same copy: a loader in the initrd could load a kernel before switch-root, while
+# kernel.kexec_load_disabled is still 0 (the initrd ships no sysctl.d of its own; KEXEC_SYSCTL is the main
+# tree's, applied after switch-root and before any first-party unit). The image's other checks are this tree's,
+# not the initrd's; initrd/mkosi.finalize holds the initrd's own.
 INITRD_IMAGE = "default-initrd"
 INITRD_STATUS = "usr/share/agentos/initrd.dpkg-status"
 
@@ -5318,7 +5343,7 @@ def main():
     # Run by mkosi, in its script sandbox: the image's run, or the default initrd's.
     conf, bad = run_config()
     initrd = conf.get("Image") == INITRD_IMAGE
-    v = package_file_violations(root) if initrd else violations(root)
+    v = package_file_violations(root) + kexec_loader_violations(root, INITRD_STATUS) if initrd else violations(root)
     v += script_network_violations(os.environ.get("WITH_NETWORK"), script_net_dev())
     if not bad:
         mirror, security, bad = run_snapshots(conf)
