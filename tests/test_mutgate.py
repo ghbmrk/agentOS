@@ -3037,6 +3037,52 @@ class DataFiles(unittest.TestCase):
                 got = mutgate.touched(*mutgate.added_lines(data_diff("broker/hint/a.md")))
                 self.assertEqual(got, {"hint"} if counts else set())
 
+    def test_a_path_function_named_without_a_call_can_name_any_file(self):
+        # #6337 (Security on #6336): a path function taken as a value and called under another name
+        # (`g := filepath.Glob; g("*")`) has no `Glob(` in the source, so the literals it reads are
+        # unseen. Any reference to a PATH_FUNCS name not followed at once by `(` reads the package
+        # as able to name any file, as a link does: fail closed, by name, with no type resolution.
+        # REQ: MUT-deleted-test-own-lines-fu
+        for name, src, counts in (
+                ("an alias", 'func f() { g := filepath.Glob; g("*") }', True),
+                ("an assigned alias", 'var g func(string) ([]string, error)\nfunc f() { g = filepath.Glob; g("*") }', True),
+                ("a function-typed parameter", 'func list(g func(string) ([]string, error)) { g("*") }\nvar _ = func() int { list(filepath.Glob); return 0 }()', True),
+                ("a slice of path functions", 'var fns = []func(string) ([]os.DirEntry, error){os.ReadDir}\nvar _, _ = fns[0](".")', True),
+                ("a map of path functions", 'var fns = map[string]func(string) ([]string, error){"g": filepath.Glob}', True),
+                ("a struct field", 'var s = struct{ read func(string) ([]byte, error) }{os.ReadFile}', True),
+                ("a method value", 'func f(fsys fs.ReadDirFS) { rd := fsys.ReadDir; rd(".") }', True),
+                ("a method expression", 'var open = fs.FS.Open', True),
+                ("a matcher value", 'var m = filepath.Match', True),
+                ("a walker value", 'var w = filepath.WalkDir', True),
+                ("a call spaced from its parenthesis", 'var _, _ = filepath.Glob ("*")', True),
+                ("a call split by a comment", 'var _, _ = filepath.Glob/* x */("*")', True),
+                ("a parenthesized function", 'var _, _ = (filepath.Glob)("*")', True),
+                # Unchanged from #6336: a direct call, and data beside no path function.
+                ("a direct call", 'var _, _ = os.ReadDir(d)', False),
+                ("a join of words", 'var _ = strings.Join(words, "")', False),
+                ("a table's star", 'var table = map[rune]string{0x2217: "*"}', False),
+                ("a DNS wildcard", 'var _ = listHas(v, "email") || listHas(v, "*")', False),
+                ("a longer name", 'var _ fs.ReadDirFS\nvar _ filepath.WalkFunc\nvar _ fs.StatFS', False),
+                ("a name in a comment or literal", 'var s = "filepath.Glob" // g := filepath.Glob', False)):
+            with self.subTest(name), tempfile.TemporaryDirectory() as d, \
+                    self.tree(d, {"hint/hint.go": "package hint\n", "hint/hint_test.go": f"package hint\n\n{src}\n"}):
+                got = mutgate.touched(*mutgate.added_lines(data_diff("broker/hint/ASSUMPTIONS.md")))
+                self.assertEqual(got, {"hint"} if counts else set())
+        # The reference can sit in another file of the package from the literal it reads.
+        with tempfile.TemporaryDirectory() as d, self.tree(d, {
+                "hint/hint.go": "package hint\n\nvar read = os.ReadFile\n",
+                "hint/hint_test.go": 'package hint\n\nvar _, _ = read(".")\n'}):
+            self.assertEqual(mutgate.touched(*mutgate.added_lines(data_diff("broker/hint/ASSUMPTIONS.md"))), {"hint"})
+        # One name set makes the call and the value patterns, so neither can drift from the other.
+        for f in mutgate.PATH_FUNCS:
+            with self.subTest(f):
+                self.assertTrue(mutgate.PATH_VALUE.search(f"x := y.{f}\n"))
+                self.assertFalse(mutgate.PATH_VALUE.search(f"y.{f}(z)\n"))
+        self.assertEqual({m for m in mutgate.PATH_FUNCS if mutgate.PATH_CALL.search(f"{m}(")} | {"Match"},
+                         set(mutgate.PATH_FUNCS))
+        self.assertEqual({m for m in mutgate.PATH_FUNCS if mutgate.GLOB_CALL.search(f"{m}(")},
+                         {"Glob", "Walk", "WalkDir", "ReadDir", "Match"})
+
     def test_a_glob_matches_by_its_last_part_against_the_files_base_name(self):
         # Potency on #5943 (d92c2e23): the last-part clause survived `rsplit`→`split` (needs a glob
         # with two directory parts) and `parts[-1]`→`parts[0]` (needs a file below a subdirectory).
