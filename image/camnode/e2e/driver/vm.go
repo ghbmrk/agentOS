@@ -40,6 +40,7 @@ type board struct {
 	mac     string
 	tryboot bool // the last restart asked for the one-shot partition
 	boots   int
+	append  string // added to the kernel command line (test_panic_is_reported)
 }
 
 // vm is one power-on of the board.
@@ -65,10 +66,16 @@ const (
 )
 
 // restartCmds are the restart commands the mailbox carries, by word: agentos-camnode's reboot
-// ("0 tryboot", sys_linux.go) and dm-verity's restart_on_corruption. A restart with any other
-// command, or none, leaves 0. Device-tree names cannot hold a space; the kernel matches
-// "mode-0-tryboot" to "0 tryboot".
+// ("0 tryboot", sys_linux.go; vm_test.go reads it there) and dm-verity's restart_on_corruption.
+// A restart with any other command, or none, leaves 0. Device-tree names cannot hold a space; the
+// kernel matches "mode-0-tryboot" to "0 tryboot".
 var restartCmds = map[uint32]string{1: "0 tryboot", 2: "dm-verity device corrupted"}
+
+// errPanic is a kernel panic. A panic restarts the board (panic=5) through emergency_restart,
+// which skips the reboot notifiers, so the mailbox reads 0 as for a plain restart; the pvpanic
+// device tells it apart instead: the kernel's panic notifier writes to it, and QEMU stops the
+// board with the reason guest-panic before the panic's restart.
+var errPanic = errors.New("the kernel panicked")
 
 func newBoard(tools, work, disk, element, tap string) *board {
 	return &board{tools: tools, work: work, disk: disk, element: element, tap: tap, mac: "52:54:00:ca:4e:01"}
@@ -165,7 +172,33 @@ func (b *board) qemuArgs(button bool) []string {
 		"-netdev", "tap,id=net,ifname=" + b.tap + ",script=no,downscript=no",
 		"-device", "virtio-net-pci,netdev=net,mac=" + b.mac + ",addr=0x6",
 		"-fw_cfg", "name=opt/camnode/button,string=" + flag,
+		"-device", "pvpanic-pci,addr=0x8",
 	}
+}
+
+// inMemory checks that the mailbox page lies inside the RAM that the /memory node's reg (two
+// address cells, two size cells, as fdtget prints them in hex) describes: the page the kernel
+// writes and the page pmemsave reads must be guest RAM, not a hole.
+func inMemory(reg string) error {
+	f := strings.Fields(reg)
+	if len(f) == 0 || len(f)%4 != 0 {
+		return fmt.Errorf("/memory reg %q", reg)
+	}
+	for i := 0; i < len(f); i += 4 {
+		var c [4]uint64
+		for j := range c {
+			n, err := strconv.ParseUint(f[i+j], 16, 32)
+			if err != nil {
+				return fmt.Errorf("/memory reg %q: %v", reg, err)
+			}
+			c[j] = n
+		}
+		base, size := c[0]<<32|c[1], c[2]<<32|c[3]
+		if base <= mailbox && mailbox+0x1000 <= base+size {
+			return nil
+		}
+	}
+	return fmt.Errorf("the mailbox page %#x is outside /memory (reg %q)", mailbox, reg)
 }
 
 // power starts the board, as the bootloader would after power-on or a restart.
@@ -231,6 +264,13 @@ func (b *board) power(button bool) (*vm, error) {
 	if out, err := dump.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("dumpdtb: %v: %s", err, out)
 	}
+	reg, err := exec.Command(b.tool("fdtget"), "-t", "x", dtb, fmt.Sprintf("/memory@%x", ramBase), "reg").CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("fdtget /memory: %v: %s", err, reg)
+	}
+	if err := inMemory(string(reg)); err != nil {
+		return nil, err
+	}
 	tb := "0"
 	if trial {
 		tb = "1"
@@ -262,22 +302,22 @@ func (b *board) power(button bool) (*vm, error) {
 		}
 	}
 	console, journal := filepath.Join(dir, "console.log"), filepath.Join(dir, "journal.log")
-	sock := filepath.Join(dir, "qmp.sock")
-	os.Remove(sock)
-	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
+	ln, err := qmpListen(dir)
 	if err != nil {
 		return nil, err
 	}
 	defer ln.Close()
+	sock := ln.Addr().String()
 	// -no-reboot with shutdown=pause: a guest reset stops the board and QEMU says why on QMP,
-	// keeping its memory for the mailbox. -S: the board starts only once QMP is listening.
+	// keeping its memory for the mailbox; panic=shutdown: a panic the pvpanic device reports
+	// stops it too, with the reason guest-panic. -S: the board starts only once QMP is listening.
 	args = append(args,
 		"-kernel", files["Image"], "-initrd", files["camnode-initramfs.cpio"],
-		"-append", strings.TrimSpace(string(cmdline)), "-dtb", dtb,
+		"-append", strings.TrimSpace(strings.TrimSpace(string(cmdline))+" "+b.append), "-dtb", dtb,
 		"-serial", "file:"+console, "-monitor", "none",
 		"-device", "virtio-serial-pci,addr=0x7", "-chardev", "file,id=journal,path="+journal,
 		"-device", "virtconsole,chardev=journal",
-		"-action", "shutdown=pause", "-S",
+		"-action", "shutdown=pause", "-action", "panic=shutdown", "-S",
 		"-chardev", "socket,id=qmp,path="+sock, "-mon", "chardev=qmp,mode=control")
 	cmd := exec.Command(b.tool("qemu-system-aarch64"), args...)
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
@@ -302,13 +342,24 @@ func (b *board) power(button bool) (*vm, error) {
 	return v, nil
 }
 
+// qmpListen listens for QEMU's QMP connection on a socket in a new directory under dir that
+// only the harness's user can enter (MkdirTemp: 0700), so no other user's process on the runner can reach
+// the socket and drive the board. Closing the listener removes the socket.
+func qmpListen(dir string) (*net.UnixListener, error) {
+	private, err := os.MkdirTemp(dir, "qmp")
+	if err != nil {
+		return nil, err
+	}
+	return net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(private, "qmp.sock"), Net: "unix"})
+}
+
 // qmp is QEMU's machine protocol on one connection: the reader keeps the SHUTDOWN event's reason
 // and passes command replies on.
 type qmp struct {
 	conn    net.Conn
 	replies chan map[string]json.RawMessage
 	halted  chan struct{} // closed on the guest's SHUTDOWN, or when QEMU closes the connection
-	reason  string        // the SHUTDOWN's reason: guest-reset, guest-shutdown, ...
+	reason  string        // the SHUTDOWN's reason: guest-reset, guest-panic, guest-shutdown, ...
 }
 
 func newQMP(conn net.Conn) (*qmp, error) {
@@ -404,7 +455,10 @@ func (v *vm) wait(re string, timeout time.Duration) error {
 			if rx.MatchString(v.log()) {
 				return nil
 			}
-			return fmt.Errorf("board stopped before %q", re)
+			if v.qmp.reason == "guest-panic" {
+				return fmt.Errorf("%w before %q", errPanic, re)
+			}
+			return fmt.Errorf("board stopped (%q) before %q", v.qmp.reason, re)
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
@@ -414,7 +468,8 @@ func (v *vm) wait(re string, timeout time.Duration) error {
 // stopped waits for the board to restart by itself and returns the restart command the mailbox
 // names ("" for one it does not know, or none), recording whether it asked for tryboot, as the
 // Pi firmware reads the reboot argument. QEMU's SHUTDOWN reason tells a restart (guest-reset)
-// from a power-off or anything else.
+// from a kernel panic (errPanic), a power-off or anything else. Every handle the run holds is
+// released on every path: QEMU is told to quit, or killed, and the QMP connection is closed.
 func (v *vm) stopped(b *board, timeout time.Duration) (restart string, err error) {
 	select {
 	case <-v.qmp.halted:
@@ -422,20 +477,24 @@ func (v *vm) stopped(b *board, timeout time.Duration) (restart string, err error
 		v.cut()
 		return "", fmt.Errorf("board did not restart within %v", timeout)
 	}
-	// The guest has stopped: QEMU is told to quit, as it would have exited at the reset.
+	// The guest has stopped: QEMU is told to quit, as it would have exited at the reset, and
+	// whatever is left (the process if quit failed, the connection always) goes with cut.
 	defer func() {
 		if v.qmp.run("quit", nil) == nil {
 			select {
 			case err := <-v.done:
 				v.done <- err
-				return
 			case <-time.After(10 * time.Second):
 			}
 		}
 		v.cut()
 	}()
-	if v.qmp.reason != "guest-reset" {
-		return "", fmt.Errorf("board stopped without restarting (qemu: %q, %v)", v.qmp.reason, v.cmd.ProcessState)
+	switch v.qmp.reason {
+	case "guest-reset":
+	case "guest-panic":
+		return "", errPanic
+	default:
+		return "", fmt.Errorf("board stopped without restarting (qemu: %q)", v.qmp.reason)
 	}
 	word := filepath.Join(v.dir, "mailbox")
 	if err := v.qmp.run("pmemsave", map[string]any{"val": mailbox, "size": 4, "filename": word}); err != nil {
