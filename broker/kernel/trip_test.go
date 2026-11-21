@@ -199,7 +199,7 @@ func TestOutboundDecoyPausesScope(t *testing.T) {
 	if !r.k.State().Tripped() {
 		t.Fatal("planning not stopped")
 	}
-	if rf := r.admits("p2", ok, 2); rf == nil || rf.Code != kernel.CTripped {
+	if rf := r.admits("p2", ok, 2); rf == nil || rf.Code() != kernel.CTripped {
 		t.Fatalf("a plan under another key after a full trip: %v", rf)
 	}
 	if err := r.k.OpenTask(2, "t2", 0); !errors.Is(err, kernel.ErrTaskOpen) {
@@ -659,7 +659,7 @@ func TestHoneyKeyAtOwnerSideTripsFull(t *testing.T) {
 	other := r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "other"}), 1<<40)
 
 	var rf *key.Refusal
-	if err := r.k.Extend(3, hk, "t1"); !errors.As(err, &rf) || rf.Code != kernel.CTrip {
+	if err := r.k.Extend(3, hk, "t1"); !errors.As(err, &rf) || rf.Code() != kernel.CTrip {
 		t.Fatalf("a honey key extending t1: %v", err)
 	}
 	tr := r.trips(1, 1)
@@ -681,7 +681,7 @@ func TestHoneyKeyAtOwnerSideTripsFull(t *testing.T) {
 	if !r.k.State().Tripped() {
 		t.Fatal("planning not stopped")
 	}
-	if rf := r.admits("p2", other, 4); rf == nil || rf.Code != kernel.CTripped {
+	if rf := r.admits("p2", other, 4); rf == nil || rf.Code() != kernel.CTripped {
 		t.Fatalf("a plan under another key after an owner-side trip: %v", rf)
 	}
 	if r.k.State().SecurityTexts()[0].Text != r.fullText(t) {
@@ -696,7 +696,7 @@ func TestHoneyKeyAtOwnerSideTripsFull(t *testing.T) {
 	r2 := newRig(t)
 	tb2 := r2.decoys()
 	honey2, _, _ := honeyKey(t, tb2, "t1")
-	if err := r2.k.Issue(4, approve([]key.Key{honey2}, r2.owner, r2.spare), honey2); !errors.As(err, &rf) || rf.Code != kernel.CTrip {
+	if err := r2.k.Issue(4, approve([]key.Key{honey2}, r2.owner, r2.spare), honey2); !errors.As(err, &rf) || rf.Code() != kernel.CTrip {
 		t.Fatalf("a honey key in an Issue batch: %v", err)
 	}
 	if tr := r2.trips(1, 1); tr.Response != kernel.RespFull || tr.Plan != "" || len(tr.Scopes) != 0 || len(r2.k.State().Changes.Paused) != 0 || !r2.k.State().Tripped() {
@@ -732,7 +732,7 @@ func TestHoneyKeyAtExtendPausesTheEarlierExtension(t *testing.T) {
 		t.Fatalf("the hold is funded by %s, want the extension %s", h.Funding, ext.Tip())
 	}
 	_, hk, _ := honeyKey(t, tb, "t1")
-	if err := r.k.Extend(6, hk, "t1"); !errors.As(err, &rf) || rf.Code != kernel.CTrip {
+	if err := r.k.Extend(6, hk, "t1"); !errors.As(err, &rf) || rf.Code() != kernel.CTrip {
 		t.Fatalf("a honey key extending t1 again: %v", err)
 	}
 	tr := r.trips(1, 1)
@@ -882,7 +882,7 @@ func TestHoneyKeyNotUTF8StillPauses(t *testing.T) {
 			err = r.k.Issue(3, approve([]key.Key{hk}, r.owner, r.spare), hk)
 		}
 		var rf *key.Refusal
-		if !errors.As(err, &rf) || rf.Code != kernel.CTrip {
+		if !errors.As(err, &rf) || rf.Code() != kernel.CTrip {
 			t.Fatalf("%s: %v", op, err)
 		}
 		tr := r.trips(1, 1)
@@ -917,7 +917,7 @@ func TestHoneyKeyAtExtendOfAnUnheldPlanPausesOnlyItself(t *testing.T) {
 	modelPlan(r, "t1", m1)
 	_, hk, _ := honeyKey(t, tb, "t1")
 	var rf *key.Refusal
-	if err := r.k.Extend(3, hk, "t1"); !errors.As(err, &rf) || rf.Code != kernel.CTrip {
+	if err := r.k.Extend(3, hk, "t1"); !errors.As(err, &rf) || rf.Code() != kernel.CTrip {
 		t.Fatalf("a honey key extending an unheld plan: %v", err)
 	}
 	tr := r.trips(1, 1)
@@ -945,7 +945,7 @@ func TestOnlyAnActivePlanIsHeld(t *testing.T) {
 	}
 	must(t, r.k.Cancel(3, "t1"))
 	var got *key.Refusal
-	if err := r.k.Hold(4, "t1", rf); !errors.As(err, &got) || got.Code != kernel.CPlan {
+	if err := r.k.Hold(4, "t1", rf); !errors.As(err, &got) || got.Code() != kernel.CPlan {
 		t.Fatalf("a hold on a cancelled plan: %v", err)
 	}
 	if _, held := r.k.State().SpendHeld["t1"]; held {

@@ -1079,3 +1079,21 @@ func TestStopCancelledReadsTheKernelsCount(t *testing.T) {
 		}
 	}
 }
+
+// A reply whose refusal names a code key does not declare does not decode:
+// it is lost, never read as a refusal with a new code, nor as success
+// (KEY-refusal-code, #6023). REQ: KRN-5
+func TestAnUndeclaredCodeDoesNotDecode(t *testing.T) {
+	var a wireAnswer
+	if err := json.Unmarshal([]byte(`{"refusal":{"code":"new-check","detail":"x"}}`), &a); err == nil {
+		t.Fatalf("an undeclared code decoded: %+v", a.Refusal)
+	}
+	if err := json.Unmarshal([]byte(`{"refusal":{"code":"stopped","detail":"x"}}`), &a); err != nil || a.Refusal.Code != key.RStopped {
+		t.Fatalf("a declared code: %+v %v", a.Refusal, err)
+	}
+	needRoot(t)
+	o := cannedKernel(t, `{"refusal":{"code":"new-check","detail":"stop is in force"}}`)
+	if err := o.Stop(context.Background()); !errors.Is(err, ErrLost) {
+		t.Fatalf("a refusal with an undeclared code: %v, want ErrLost", err)
+	}
+}

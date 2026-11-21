@@ -54,7 +54,7 @@ func TestOwnerEventRungMeetsTheKeysRung(t *testing.T) {
 	// step only an approval lifts is refused there until the approval comes.
 	for _, id := range []string{"approved", "lapsed"} {
 		p := r.k.State().Plans[id]
-		if rf := kernel.SendCheck(r.k.State(), p, &p.Steps[0], 0, 2); rf == nil || rf.Code != key.RRung {
+		if rf := kernel.SendCheck(r.k.State(), p, &p.Steps[0], 0, 2); rf == nil || rf.Code() != key.RRung {
 			t.Fatalf("%s sent before its approval: %v", id, rf)
 		}
 	}

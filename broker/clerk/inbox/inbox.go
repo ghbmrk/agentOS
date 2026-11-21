@@ -187,11 +187,11 @@ func (a *Account) Preload(idem string) {
 
 // Reason is the refusal reason for a rejection code the planner could cause by
 // asking for what its key does not allow.
-func Reason(code string) string {
+func Reason(code key.Code) string {
 	if code == key.RVerb || code == kernel.CPlan {
 		return "outside-key"
 	}
-	return code
+	return code.String()
 }
 
 // Do runs one step. It acts only on a step the bound kernel's log, or the
@@ -216,7 +216,7 @@ func (a *Account) Do(r kernel.Request, v kernel.View) kernel.Result {
 		return kernel.Result{Outcome: "ok", Detail: "already done"}
 	}
 	if rf := check.Check(a.anchors, Name, a.Facts, a.Clock.Now(), r, view); rf != nil {
-		return a.refuse(string(s.Verb), s.Args["target"].Value, Reason(rf.Code))
+		return a.refuse(string(s.Verb), s.Args["target"].Value, Reason(rf.Code()))
 	}
 	switch s.Verb {
 	case key.Organize, key.Trash:

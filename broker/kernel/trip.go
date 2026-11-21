@@ -65,9 +65,9 @@ const (
 )
 
 // Refusal codes of a trip.
-const (
-	CTrip    = "trip"    // the plan is a trip: refused, and the trip logged
-	CTripped = "tripped" // planning is stopped after a trip until the owner resumes
+var (
+	CTrip    = key.CTrip    // the plan is a trip: refused, and the trip logged
+	CTripped = key.CTripped // planning is stopped after a trip until the owner resumes
 )
 
 // A trip's cause, exit and response, each from a closed list.
@@ -392,7 +392,7 @@ func (k *Kernel) ownerKeys(now Reading, op, plan string, given ...key.Key) ([]ke
 			if _, err := k.emit(now, TTripOwner, ownerTrip{op, keys[i], *t}); err != nil {
 				return nil, err
 			}
-			return nil, &key.Refusal{Code: CTrip, Detail: CauseHoneyKey}
+			return nil, key.Refuse(CTrip, CauseHoneyKey)
 		}
 	}
 	return keys, nil
@@ -445,8 +445,8 @@ func (s *State) ownerTripOf(op, plan string, ky key.Key) *Trip {
 // rejection is decide's entry for refusing plan p with r: a trip refusal
 // carries its trip, so both are one append (CH-15).
 func (s *State) rejection(p *PlanState, r *Refusal) planRejected {
-	b := planRejected{Plan: p.Plan.ID, Cause: p.Seq, Code: r.Code, Detail: r.Detail, Session: r.Session, Step: r.Step}
-	if r.Code == CTrip {
+	b := planRejected{Plan: p.Plan.ID, Cause: p.Seq, Code: r.Code(), Detail: r.Detail, Session: r.Session, Step: r.Step}
+	if r.Code() == CTrip {
 		b.Trip = s.tripOf(p.Plan)
 	}
 	return b

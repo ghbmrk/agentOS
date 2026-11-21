@@ -162,7 +162,7 @@ func (g PlanGuest) meter(body []byte) (func(plan.Used), string) {
 	if err != nil {
 		var rf *key.Refusal
 		if errors.As(err, &rf) && rf != nil {
-			return nil, DPlanRefused + " " + rf.Code
+			return nil, DPlanRefused + " " + rf.Code().String()
 		}
 		return nil, DPlanMeter
 	}

@@ -49,7 +49,7 @@ func TestOwnerCallsDecideOnTheLoggedKey(t *testing.T) {
 		rewritten(t, ext)
 		n := len(r.k.Log().Entries())
 		var rf *key.Refusal
-		if err := r.k.Extend(3, ext, "t1"); !errors.As(err, &rf) || rf.Code != kernel.CKey {
+		if err := r.k.Extend(3, ext, "t1"); !errors.As(err, &rf) || rf.Code() != kernel.CKey {
 			t.Fatalf("an extension the log cannot hold as signed: %v", err)
 		}
 		if got := len(r.k.Log().Entries()); got != n {
@@ -90,7 +90,7 @@ func TestSpendHeldFoldsOnlyForAnActivePlan(t *testing.T) {
 	modelPlan(r, "live", k)
 	modelPlan(r, "ended", k)
 	must(t, r.k.Cancel(1, "ended"))
-	if err := r.k.Hold(2, "ended", &key.Refusal{Code: key.RSpendTask}); err == nil {
+	if err := r.k.Hold(2, "ended", key.Refuse(key.RSpendTask, "")); err == nil {
 		t.Fatal("Hold took an ended plan")
 	}
 	pending, err := json.Marshal(r.sign(kernel.Plan{ID: "pending", Key: k,

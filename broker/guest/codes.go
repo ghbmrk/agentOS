@@ -16,13 +16,13 @@ import (
 var codes = set(
 	// The kernel's refusal codes: a rejected plan, or a step a clerk
 	// refused for the kernel's own check (a clerk's rf.Code).
-	kernel.CKey, kernel.CUngranted, kernel.CGrantHeld, kernel.CCutOff, kernel.CPlan,
-	kernel.CDuplicate, kernel.CClerk, kernel.CPool, kernel.CNotHeld, kernel.CExtension,
-	kernel.CHeld, kernel.CBroken, kernel.CInFlight, kernel.CTask, kernel.CCosign,
-	kernel.CTrip, kernel.CTripped, kernel.CErased,
-	key.RMalformed, key.RStopped, key.RRevoked, key.RPaused, key.RExpired, key.RClerk,
-	key.RVerb, key.RArg, key.RContent, key.RLabels, key.RSpendTask, key.RSpendDay,
-	key.RRate, key.RUses, key.RTask, key.RRung,
+	[]key.Code{kernel.CKey, kernel.CUngranted, kernel.CGrantHeld, kernel.CCutOff, kernel.CPlan,
+		kernel.CDuplicate, kernel.CClerk, kernel.CPool, kernel.CNotHeld, kernel.CExtension,
+		kernel.CHeld, kernel.CBroken, kernel.CInFlight, kernel.CTask, kernel.CCosign,
+		kernel.CTrip, kernel.CTripped, kernel.CErased,
+		key.RMalformed, key.RStopped, key.RRevoked, key.RPaused, key.RExpired, key.RClerk,
+		key.RVerb, key.RArg, key.RContent, key.RLabels, key.RSpendTask, key.RSpendDay,
+		key.RRate, key.RUses, key.RTask, key.RRung},
 
 	// The kernel's clerk wire (kernel/proc).
 	"unreachable", "lost", "view", "too-large",
@@ -64,8 +64,11 @@ var codes = set(
 	"unapproved", "verb", "owner", "malformed",
 )
 
-func set(cs ...string) map[string]bool {
-	m := make(map[string]bool, len(cs))
+func set(kc []key.Code, cs ...string) map[string]bool {
+	m := map[string]bool{}
+	for _, c := range kc {
+		m[c.String()] = true
+	}
 	for _, c := range cs {
 		m[c] = true
 	}

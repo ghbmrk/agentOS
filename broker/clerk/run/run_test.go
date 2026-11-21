@@ -144,7 +144,7 @@ func TestCallRunsOnlyAStepTheLogHasInFlight(t *testing.T) {
 		res = b.remote.Clerk(b.cfg.Anchors).Do(kernel.Request{Plan: p, Index: 0}, k.State())
 		return nil
 	})
-	if res.Outcome != "failed" || res.Detail != check.RDispatch {
+	if res.Outcome != "failed" || res.Detail != check.RDispatch.String() {
 		t.Fatalf("replayed request: %+v, want failed %s", res, check.RDispatch)
 	}
 	// A plan the log never saw, signed by the holder, is refused the same way.
@@ -154,7 +154,7 @@ func TestCallRunsOnlyAStepTheLogHasInFlight(t *testing.T) {
 		res = b.remote.Clerk(b.cfg.Anchors).Do(kernel.Request{Plan: forged, Index: 0}, k.State())
 		return nil
 	})
-	if res.Outcome != "failed" || res.Detail != check.RDispatch {
+	if res.Outcome != "failed" || res.Detail != check.RDispatch.String() {
 		t.Fatalf("unlogged plan: %+v, want failed %s", res, check.RDispatch)
 	}
 	if h := w.hits(t); len(h) != 1 {

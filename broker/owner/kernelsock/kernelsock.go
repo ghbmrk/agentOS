@@ -104,7 +104,7 @@ func (o Owner) call(ctx context.Context, op string, args, out any) error {
 	case err != nil:
 		return err
 	case a.Refusal != nil:
-		return Refused{a.Refusal.Code + ": " + a.Refusal.Detail}
+		return Refused{a.Refusal.Code.String() + ": " + a.Refusal.Detail}
 	case a.Error != "":
 		return Refused{a.Error}
 	case out != nil:
@@ -128,8 +128,8 @@ type wireAnswer struct {
 
 // wireRefusal is a key.Refusal's code and detail.
 type wireRefusal struct {
-	Code   string `json:"code"`
-	Detail string `json:"detail"`
+	Code   key.Code `json:"code"`
+	Detail string   `json:"detail"`
 }
 
 // setupInfo is kernel/proc SetupInfo's frame; the box key is not read here.

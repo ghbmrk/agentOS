@@ -56,7 +56,7 @@ func TestOnlyAHardwareKeyCutsAPhoneOff(t *testing.T) {
 		t.Fatalf("a cut-off phone's grants still pending: %d", len(got))
 	}
 	p := r.sign(kernel.Plan{ID: "p1", Key: ck, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})
-	if c := admits(r, p, 3*kernel.GrantHold); c == "" {
+	if c := admits(r, p, 3*kernel.GrantHold); c.IsZero() {
 		t.Fatal("a cut-off phone's held grant came live")
 	}
 }

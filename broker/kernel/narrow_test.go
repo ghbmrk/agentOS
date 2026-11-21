@@ -56,7 +56,7 @@ func TestAPasskeysNarrowingKeepsItsHolderAndEndsAtCutOff(t *testing.T) {
 	must(t, r.k.Unenroll(1, key.Unenroll(r.owner.pass, phone.pk)))
 	for _, k := range []key.Key{ok, below} {
 		p := r.sign(kernel.Plan{ID: "p1", Key: k, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})
-		if _, _, rf := kernel.Admit(r.k.State(), p, 2); rf == nil || rf.Code != kernel.CCutOff {
+		if _, _, rf := kernel.Admit(r.k.State(), p, 2); rf == nil || rf.Code() != kernel.CCutOff {
 			t.Fatalf("a cut-off passkey's approval, and a key derived below it, must stop: %v", rf)
 		}
 	}

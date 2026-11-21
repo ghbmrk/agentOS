@@ -72,10 +72,10 @@ func TestATaskKeyServesOnlyALiveTask(t *testing.T) {
 	if _, err := key.Derive(r.ck, r.holder.priv, r.holder.pub, key.Caveat{Kind: key.KTask, Set: []string{"t1", "t2"}}); !errors.Is(err, key.ErrMalformed) {
 		t.Fatalf("a key for two tasks: %v", err)
 	}
-	if rf := r.admits("p1", r.serve("t9"), 1); rf == nil || rf.Code != kernel.CTask {
+	if rf := r.admits("p1", r.serve("t9"), 1); rf == nil || rf.Code() != kernel.CTask {
 		t.Fatalf("a task never opened: %v", rf)
 	}
-	if rf := r.admits("p2", r.serve("t1"), kernel.TaskTimeout); rf == nil || rf.Code != kernel.CTask {
+	if rf := r.admits("p2", r.serve("t1"), kernel.TaskTimeout); rf == nil || rf.Code() != kernel.CTask {
 		t.Fatalf("a task past its timeout: %v", rf)
 	}
 	if rf := r.admits("p3", r.ck, 1); rf != nil {
@@ -138,7 +138,7 @@ func TestEachEndEndsTheTask(t *testing.T) {
 			if _, ok := r.k.State().Task("t1", at); ok {
 				t.Fatal("still live")
 			}
-			if rf := r.admits("late", r.serve("t1"), at); rf == nil || rf.Code != kernel.CTask {
+			if rf := r.admits("late", r.serve("t1"), at); rf == nil || rf.Code() != kernel.CTask {
 				t.Fatalf("a plan served an ended task: %v", rf)
 			}
 			if err := r.k.EndTask(at, "t1"); err != kernel.ErrTask {
@@ -276,7 +276,7 @@ func TestATasksSpendCapSpansItsRePlans(t *testing.T) {
 	modelPlan(r, "p2", serve("t1"))
 	modelPlan(r, "p3", serve("t2"))
 	must(t, r.meter(1, "p1", "api", 8, "provider"))
-	if rf := r.admit(2, "p2", 3); rf == nil || rf.Code != key.RSpendTask {
+	if rf := r.admit(2, "p2", 3); rf == nil || rf.Code() != key.RSpendTask {
 		t.Fatalf("a re-plan started a fresh per-task budget: %v", rf)
 	}
 	if rf := r.admit(2, "p2", 2); rf != nil {
@@ -304,7 +304,7 @@ func TestAPlanNamedLikeATaskSpendsNoneOfIt(t *testing.T) {
 	if rf := r.admit(2, "p2", 10); rf != nil {
 		t.Fatalf("a plan named like the task drained it: %v", rf)
 	}
-	if rf := r.admit(2, "t1", 1); rf == nil || rf.Code != key.RSpendTask {
+	if rf := r.admit(2, "t1", 1); rf == nil || rf.Code() != key.RSpendTask {
 		t.Fatalf("the plan's own cap: %v", rf)
 	}
 	if err := r.k.OpenTask(3, key.PlanPrefix+"t1", 0); err == nil {

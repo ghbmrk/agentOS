@@ -264,7 +264,7 @@ func TestClerkRefusesAStepTheLogDoesNotHaveInFlight(t *testing.T) {
 	if err := f.k.Submit(1, admitted); err != nil {
 		t.Fatal(err)
 	}
-	if rf := checkAt(kernel.Request{Plan: admitted}); rf == nil || rf.Code != check.RDispatch {
+	if rf := checkAt(kernel.Request{Plan: admitted}); rf == nil || rf.Code() != check.RDispatch {
 		t.Fatalf("an admitted step not yet dispatched: %v", rf)
 	}
 	if err := f.k.Tick(1); err != nil {
@@ -273,10 +273,10 @@ func TestClerkRefusesAStepTheLogDoesNotHaveInFlight(t *testing.T) {
 	if during[0] != nil {
 		t.Fatalf("the step in flight was refused: %v", during[0])
 	}
-	if during[1] == nil || during[1].Code != check.RDispatch {
+	if during[1] == nil || during[1].Code() != check.RDispatch {
 		t.Fatalf("another plan under the logged id passed: %v", during[1])
 	}
-	if rf := checkAt(kernel.Request{Plan: admitted}); rf == nil || rf.Code != check.RDispatch {
+	if rf := checkAt(kernel.Request{Plan: admitted}); rf == nil || rf.Code() != check.RDispatch {
 		t.Fatalf("a settled step redelivered: %v", rf)
 	}
 	if n := len(f.mail.Effects()); n != 1 {
@@ -288,12 +288,12 @@ func TestClerkRefusesAStepTheLogDoesNotHaveInFlight(t *testing.T) {
 // every step rather than take the planner's word (KEY-2, CLK-2).
 func TestClerkWithoutFactsRefuses(t *testing.T) {
 	f := setup(t, key.Trash)
-	if rf := check.Check([]key.PublicKey{key.Ed25519(opubOf())}, "mail", nil, f.now, f.req, f.view()); rf == nil || rf.Code != check.RClaim {
+	if rf := check.Check([]key.PublicKey{key.Ed25519(opubOf())}, "mail", nil, f.now, f.req, f.view()); rf == nil || rf.Code() != check.RClaim {
 		t.Fatalf("a clerk with no facts passed a step: %v", rf)
 	}
 	claim := stepOf(key.Trash)
 	claim.Content = "invoice"
-	if r := f.mail.Do(f.request("i2", f.root, claim), f.view()); r.Outcome != "failed" || r.Detail != check.RClaim || len(f.mail.Effects()) != 0 {
+	if r := f.mail.Do(f.request("i2", f.root, claim), f.view()); r.Outcome != "failed" || r.Detail != check.RClaim.String() || len(f.mail.Effects()) != 0 {
 		t.Fatalf("a claim the mailbox does not read was taken as given: %+v", r)
 	}
 }
@@ -316,7 +316,7 @@ func TestClerkRefusesARootNoAnchorVouchesForWhateverTheViewSays(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := f.request("i9", forged, stepOf(key.Trash))
-	if rf := check.Check([]key.PublicKey{key.Ed25519(opubOf())}, "mail", f.mail.Facts, f.now, r, lying{f.view()}); rf == nil || rf.Code != kernel.CKey {
+	if rf := check.Check([]key.PublicKey{key.Ed25519(opubOf())}, "mail", f.mail.Facts, f.now, r, lying{f.view()}); rf == nil || rf.Code() != kernel.CKey {
 		t.Fatalf("a forged root a lying view vouches for: %v", rf)
 	}
 	if res := f.mail.Do(r, lying{f.view()}); res.Outcome != "failed" || len(f.mail.Effects()) != 0 {
@@ -346,13 +346,13 @@ func TestClerkRefusesAVeryLargeOneOffWithoutASecondPasskey(t *testing.T) {
 		f.plans[id] = p
 		return kernel.Request{Plan: p}
 	}
-	if rf := check.Check(anchors, "mail", f.mail.Facts, f.now, oneOff("o1"), strict{f.view()}); rf == nil || rf.Code != kernel.CCosign {
+	if rf := check.Check(anchors, "mail", f.mail.Facts, f.now, oneOff("o1"), strict{f.view()}); rf == nil || rf.Code() != kernel.CCosign {
 		t.Fatalf("a one-off past the line, alone: %v", rf)
 	}
 	if rf := check.Check(anchors, "mail", f.mail.Facts, f.now, oneOff("o2", bpriv), strict{f.view()}); rf != nil {
 		t.Fatalf("a one-off the second hardware key co-signed: %v", rf)
 	}
-	if rf := check.Check(anchors[:1], "mail", f.mail.Facts, f.now, oneOff("o3", bpriv), strict{f.view()}); rf == nil || rf.Code != kernel.CCosign {
+	if rf := check.Check(anchors[:1], "mail", f.mail.Facts, f.now, oneOff("o3", bpriv), strict{f.view()}); rf == nil || rf.Code() != kernel.CCosign {
 		t.Fatalf("a co-signer the clerk's anchors do not know: %v", rf)
 	}
 }

@@ -116,7 +116,7 @@ func derive(s *State, e Entry, head ed25519.PublicKey, refused *derived) ([]deri
 		return scheduled(s, ref.Plan, e.reading()), true
 	case TPlanCancel:
 		_ = json.Unmarshal(e.Body, &ref)
-		if ref.Code == "owner" {
+		if ref.Code == key.COwner.String() {
 			return nil, false // Cancel: the owner's
 		}
 		cands := scheduled(s, ref.Plan, e.reading())
@@ -210,7 +210,7 @@ func scheduled(s *State, id string, now Reading) []derived {
 	ref := stepRef{a.Plan, a.Index}
 	switch a.Kind {
 	case ActCancel:
-		return []derived{entry(TPlanCancel, planCancel{Plan: a.Plan, Code: a.Refusal.Code, Detail: a.Refusal.Detail})}
+		return []derived{entry(TPlanCancel, planCancel{Plan: a.Plan, Code: a.Refusal.Code(), Detail: a.Refusal.Detail})}
 	case ActHold:
 		return []derived{entry(TStepHeld, stepHeld{ref, 0, a.Novel})}
 	case ActDispatch:
@@ -240,9 +240,9 @@ func refusedSend(s *State, e Entry) *derived {
 		return nil
 	}
 	r := sendCheck(s, p, st, b.Index, e.reading())
-	if r == nil || r.Code == key.RPaused {
+	if r == nil || r.Code() == key.RPaused {
 		return nil
 	}
-	d := entry(TPlanCancel, planCancel{Plan: b.Plan, Code: r.Code, Detail: r.Detail})
+	d := entry(TPlanCancel, planCancel{Plan: b.Plan, Code: r.Code(), Detail: r.Detail})
 	return &d
 }

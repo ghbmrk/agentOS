@@ -389,7 +389,7 @@ func (s *session) verdicts() []verdict {
 		if ps == nil || kernel.PlanHash(ps.Plan) != h || undecided || s.repeat(i, h) {
 			continue
 		}
-		named := ps.Status == kernel.SRejected && ps.Reject != ""
+		named := ps.Status == kernel.SRejected && !ps.Reject.IsZero()
 		vs[i] = verdict{logged: ps.Status != kernel.SRejected || named && s.recorded(p, ps), rejected: named}
 	}
 	return vs

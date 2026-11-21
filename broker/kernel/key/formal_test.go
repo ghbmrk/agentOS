@@ -190,7 +190,7 @@ func TestFormalKeyVerdict(t *testing.T) {
 			}
 			got := "ok"
 			if r := b.ver.Authorize(step, ctx); r != nil {
-				got = r.Code
+				got = r.Code().String()
 			}
 			if got != s.Verdict[i] {
 				t.Fatalf("state %d, step %v: Authorize %q, the model %q (KEY-2, KEY-6, KEY-7)\n%s", n, st, got, s.Verdict[i], show(s))

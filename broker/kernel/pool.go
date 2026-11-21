@@ -338,15 +338,15 @@ func (k *Kernel) AdmitPool(at int64, pool string) *key.Refusal {
 	if (*k.log.p).broken {
 		// The pool may have been reopened by a widening whose anchor failed
 		// (KRN-5, #2613 item 13).
-		return &key.Refusal{Code: CBroken, Detail: ErrBroken.Error()}
+		return key.Refuse(CBroken, ErrBroken.Error())
 	}
 	if err := k.resetIfDue(now, pool); err != nil {
-		return &key.Refusal{Code: CPool, Detail: pool + ": " + err.Error()}
+		return key.Refuse(CPool, pool+": "+err.Error())
 	}
 	if k.s.PoolOpen(now.Earliest, pool) {
 		return nil
 	}
-	return &key.Refusal{Code: CPool, Detail: pool}
+	return key.Refuse(CPool, pool)
 }
 
 // PoolsAt is every pool as it stands at now, for the owner's reads.

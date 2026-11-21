@@ -680,7 +680,7 @@ func ServeOne(conn net.Conn, handle func(op string, args json.RawMessage) (json.
 		out.Result = res
 	case errors.As(err, &rf):
 		out.Refusal = rf
-		if rf == nil || rf.Code == "" {
+		if rf == nil || rf.Code().IsZero() {
 			out.Refusal, out.Error = nil, "run: a refusal with no code"
 		}
 	case err.Error() != "":
@@ -846,7 +846,7 @@ func asRefusal(err error) *key.Refusal {
 	if errors.As(err, &rf) {
 		return rf
 	}
-	return &key.Refusal{Code: kernel.CBroken, Detail: err.Error()}
+	return key.Refuse(kernel.CBroken, err.Error())
 }
 
 // Owner is the owner seam over the kernel process's owner socket.

@@ -71,12 +71,12 @@ func TestRootAuthorizesItsVerbsOnly(t *testing.T) {
 	if r := v.Authorize(step(Trash), ctx(1, nil)); r != nil {
 		t.Fatal(r)
 	}
-	if r := v.Authorize(step(Send), ctx(1, nil)); r == nil || r.Code != RVerb {
+	if r := v.Authorize(step(Send), ctx(1, nil)); r == nil || r.Code() != RVerb {
 		t.Fatalf("send: %v", r)
 	}
 	s := step(Trash)
 	s.Clerk = "bank"
-	if r := v.Authorize(s, ctx(1, nil)); r == nil || r.Code != RClerk {
+	if r := v.Authorize(s, ctx(1, nil)); r == nil || r.Code() != RClerk {
 		t.Fatalf("clerk: %v", r)
 	}
 }
@@ -121,7 +121,7 @@ func TestDeriveNarrowsAndNeverLoosens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := verified(t, d, o, gen(3)).Authorize(step(Unsubscribe), ctx(1, nil)); r == nil || r.Code != RVerb {
+	if r := verified(t, d, o, gen(3)).Authorize(step(Unsubscribe), ctx(1, nil)); r == nil || r.Code() != RVerb {
 		t.Fatalf("narrowed verb: %v", r)
 	}
 	if _, err := Derive(d, h2.priv, gen(4).pub, LimitVerbs(Trash, Send)); !errors.Is(err, ErrLoosens) {
@@ -164,22 +164,22 @@ func TestExpiryRevokePauseStop(t *testing.T) {
 	if r := v.Authorize(step(Trash), ctx(99, nil)); r != nil {
 		t.Fatal(r)
 	}
-	if r := v.Authorize(step(Trash), ctx(100, nil)); r == nil || r.Code != RExpired {
+	if r := v.Authorize(step(Trash), ctx(100, nil)); r == nil || r.Code() != RExpired {
 		t.Fatalf("expiry: %v", r)
 	}
 	c := ctx(1, nil)
 	c.Changes.Revoked[v.Root()] = true // revoking a prefix revokes the derived key
-	if r := v.Authorize(step(Trash), c); r == nil || r.Code != RRevoked {
+	if r := v.Authorize(step(Trash), c); r == nil || r.Code() != RRevoked {
 		t.Fatalf("revoked: %v", r)
 	}
 	c = ctx(1, nil)
 	c.Changes.Paused[v.ID()] = true
-	if r := v.Authorize(step(Trash), c); r == nil || r.Code != RPaused {
+	if r := v.Authorize(step(Trash), c); r == nil || r.Code() != RPaused {
 		t.Fatalf("paused: %v", r)
 	}
 	c = ctx(1, nil)
 	c.Changes.Stopped = true
-	if r := v.Authorize(step(Trash), c); r == nil || r.Code != RStopped {
+	if r := v.Authorize(step(Trash), c); r == nil || r.Code() != RStopped {
 		t.Fatalf("stopped: %v", r)
 	}
 	if r := v.Authorize(step(Trash), Context{Now: 1}); r == nil {
@@ -206,7 +206,7 @@ func TestArgBoundsNeedNonPlannerSource(t *testing.T) {
 		"planner": mk("a", "3", SrcPlanner), "set": mk("c", "3", SrcOwner), "low": mk("a", "0", SrcOwner),
 		"high": mk("a", "6", SrcOwner), "nan": mk("a", "x", SrcOwner), "missing": step(Organize),
 	} {
-		if r := v.Authorize(s, ctx(1, nil)); r == nil || r.Code != RArg {
+		if r := v.Authorize(s, ctx(1, nil)); r == nil || r.Code() != RArg {
 			t.Fatalf("%s: %v", name, r)
 		}
 	}
@@ -222,11 +222,11 @@ func TestContentAndLabels(t *testing.T) {
 		t.Fatal(r)
 	}
 	s.Content = "file"
-	if r := v.Authorize(s, ctx(1, nil)); r == nil || r.Code != RContent {
+	if r := v.Authorize(s, ctx(1, nil)); r == nil || r.Code() != RContent {
 		t.Fatal(r)
 	}
 	s.Content, s.Labels = "text", []string{"public", "medical"}
-	if r := v.Authorize(s, ctx(1, nil)); r == nil || r.Code != RLabels {
+	if r := v.Authorize(s, ctx(1, nil)); r == nil || r.Code() != RLabels {
 		t.Fatal(r)
 	}
 }
@@ -256,11 +256,11 @@ func TestAKeyServesOnlyItsTask(t *testing.T) {
 	}
 	for _, other := range []string{"t2", ""} {
 		s.Task = other
-		if r := v.Authorize(s, ctx(1, ledger{})); r == nil || r.Code != RTask {
+		if r := v.Authorize(s, ctx(1, ledger{})); r == nil || r.Code() != RTask {
 			t.Fatalf("step for task %q: %v", other, r)
 		}
 		// Another task's empty ledger would leave the per-task cap whole.
-		if r := v.Spend(other, 10, ctx(1, ledger{})); r == nil || r.Code != RTask {
+		if r := v.Spend(other, 10, ctx(1, ledger{})); r == nil || r.Code() != RTask {
 			t.Fatalf("spend for task %q: %v", other, r)
 		}
 	}
@@ -284,23 +284,23 @@ func TestCapsChargeEveryPrefix(t *testing.T) {
 		t.Fatal(r)
 	}
 	s.Amount = 11
-	if r := v.Authorize(s, ctx(1000, ledger{})); r == nil || r.Code != RSpendTask {
+	if r := v.Authorize(s, ctx(1000, ledger{})); r == nil || r.Code() != RSpendTask {
 		t.Fatalf("task: %v", r)
 	}
 	// A sibling's uses, charged to the parent, count against the child.
 	l := ledger{pid: {{At: 900, Amount: 45, Recipient: "x", Task: "other"}}}
 	s.Amount = 6
-	if r := v.Authorize(s, ctx(1000, l)); r == nil || r.Code != RSpendDay {
+	if r := v.Authorize(s, ctx(1000, l)); r == nil || r.Code() != RSpendDay {
 		t.Fatalf("day: %v", r)
 	}
 	l = ledger{pid: {{At: 900, Recipient: "r"}}}
 	s.Amount = 1
-	if r := v.Authorize(s, ctx(1000, l)); r == nil || r.Code != RRate {
+	if r := v.Authorize(s, ctx(1000, l)); r == nil || r.Code() != RRate {
 		t.Fatalf("recipient: %v", r)
 	}
 	l = ledger{pid: {{At: 1, Recipient: "a"}, {At: 2, Recipient: "b"}}}
 	s.Amount = 0
-	if r := v.Authorize(s, ctx(1000, l)); r == nil || r.Code != RUses {
+	if r := v.Authorize(s, ctx(1000, l)); r == nil || r.Code() != RUses {
 		t.Fatalf("uses: %v", r)
 	}
 	// Rolling window: old uses fall out of day-scoped caps.
@@ -311,7 +311,7 @@ func TestCapsChargeEveryPrefix(t *testing.T) {
 	}
 	nl := ctx(1000, nil)
 	nl.Ledger = nil
-	if r := v.Authorize(s, nl); r == nil || r.Code != RMalformed {
+	if r := v.Authorize(s, nl); r == nil || r.Code() != RMalformed {
 		t.Fatal("caps without a ledger must fail closed")
 	}
 }
@@ -327,7 +327,7 @@ func TestLoweredDayCapCountsTheAccount(t *testing.T) {
 	vl, vs := verified(t, lowered, o, h), verified(t, share, o, h)
 	account := vl.Scopes()[len(vl.Scopes())-1]
 	l := ledger{account: {{At: 900, Amount: 1000}}, vl.IDs[1]: {{At: 900, Amount: 1000}}, vl.IDs[2]: {{At: 900, Amount: 1000}}}
-	if r := vl.Spend("", 1, ctx(1000, l)); r == nil || r.Code != RSpendDay {
+	if r := vl.Spend("", 1, ctx(1000, l)); r == nil || r.Code() != RSpendDay {
 		t.Fatalf("a lowered cap admitted spend past the day's earlier spend: %v", r)
 	}
 	if r := vs.Spend("", 500, ctx(1000, l)); r != nil {
@@ -370,7 +370,7 @@ func TestSpendSumThatOverflowsIsRefused(t *testing.T) {
 		amount int64
 		uses   []Use
 		spend  bool
-		code   string
+		code   Code
 	}{
 		// spend-day: the uses are in the window
 		"day: huge step, 1 spent":       {day, huge, []Use{{At: now - 1, Amount: 1, Task: "t1"}}, false, RSpendDay},
@@ -397,7 +397,7 @@ func TestSpendSumThatOverflowsIsRefused(t *testing.T) {
 				s.Task, s.Amount = "t1", tc.amount
 				r = v.Authorize(s, c)
 			}
-			if r == nil || r.Code != tc.code {
+			if r == nil || r.Code() != tc.code {
 				t.Fatalf("want %s, got %v", tc.code, r)
 			}
 		})
@@ -494,7 +494,7 @@ func TestChainAloneNeverAuthorizes(t *testing.T) {
 	if r := v.Spend("t", 5, ctx(1, ledger{})); r != nil {
 		t.Fatalf("a chained key funds spend: %v", r)
 	}
-	if r := v.Authorize(step(Trash), ctx(1, ledger{})); r == nil || r.Code != RMalformed {
+	if r := v.Authorize(step(Trash), ctx(1, ledger{})); r == nil || r.Code() != RMalformed {
 		t.Fatalf("a chained key authorizes a step: %v", r)
 	}
 	if _, err := Chain(d, []PublicKey{gen(9).pk}); !errors.Is(err, ErrWrongOwner) {
@@ -536,7 +536,7 @@ func TestKeyOffTheRootLapsesAndIsCapped(t *testing.T) {
 	if *v.Limits.NotAfter != 500+ClerkLife {
 		t.Fatalf("clerk key lives %d", *v.Limits.NotAfter-500)
 	}
-	if rf := v.Authorize(step(Trash), ctx(500+ClerkLife+1, nil)); rf == nil || rf.Code != RExpired {
+	if rf := v.Authorize(step(Trash), ctx(500+ClerkLife+1, nil)); rf == nil || rf.Code() != RExpired {
 		t.Fatalf("a lapsed clerk key: %v", rf)
 	}
 	g, err := Derive(d, h.priv, gen(4).pub)

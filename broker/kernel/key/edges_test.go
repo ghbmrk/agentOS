@@ -147,13 +147,13 @@ func TestAStepCarriesExactlyItsArgs(t *testing.T) {
 		if ArgsDeclared(s) {
 			t.Errorf("ArgsDeclared(%s)", name)
 		}
-		if r := v.Authorize(s, c); r == nil || r.Code != RArg {
+		if r := v.Authorize(s, c); r == nil || r.Code() != RArg {
 			t.Errorf("%s: %v", name, r)
 		}
 	}
 	neg := step(Organize)
 	neg.Amount = -1
-	if r := v.Authorize(neg, c); r == nil || r.Code != RMalformed {
+	if r := v.Authorize(neg, c); r == nil || r.Code() != RMalformed {
 		t.Errorf("negative amount: %v", r)
 	}
 }
@@ -171,7 +171,7 @@ func TestARateCapCountsTheDay(t *testing.T) {
 	if r := v.Authorize(step(Organize), ctx(now, ledger{id: {{At: now - DayMS}}})); r != nil {
 		t.Errorf("a day-old step counted: %v", r)
 	}
-	if r := v.Authorize(step(Organize), ctx(now, ledger{id: {{At: now - 1}}})); r == nil || r.Code != RRate {
+	if r := v.Authorize(step(Organize), ctx(now, ledger{id: {{At: now - 1}}})); r == nil || r.Code() != RRate {
 		t.Errorf("today's step not counted: %v", r)
 	}
 }
@@ -192,19 +192,19 @@ func TestSpendChecksItsOwnRules(t *testing.T) {
 	if r := v.Spend("t", 1, ctx(2, used)); r != nil {
 		t.Errorf("a spent use cap refused a spend: %v", r)
 	}
-	if r := v.Spend("t", -1, ctx(2, used)); r == nil || r.Code != RMalformed {
+	if r := v.Spend("t", -1, ctx(2, used)); r == nil || r.Code() != RMalformed {
 		t.Errorf("negative spend: %v", r)
 	}
-	if r := v.Spend("u", 1, ctx(2, used)); r == nil || r.Code != RTask {
+	if r := v.Spend("u", 1, ctx(2, used)); r == nil || r.Code() != RTask {
 		t.Errorf("another task: %v", r)
 	}
 	c := ctx(2, used)
 	c.Changes.Revoked[v.ID()] = true
-	if r := v.Spend("t", 1, c); r == nil || r.Code != RRevoked {
+	if r := v.Spend("t", 1, c); r == nil || r.Code() != RRevoked {
 		t.Errorf("revoked: %v", r)
 	}
 	nocap := &Verified{Key: d, IDs: v.IDs, Limits: Limits{Clerk: "mail"}}
-	if r := nocap.Spend("", 1, ctx(2, ledger{})); r == nil || r.Code != RMalformed {
+	if r := nocap.Spend("", 1, ctx(2, ledger{})); r == nil || r.Code() != RMalformed {
 		t.Errorf("no spend cap: %v", r)
 	}
 }

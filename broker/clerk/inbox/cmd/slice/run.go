@@ -373,7 +373,7 @@ func plannerStep(k *kernel.Kernel, acct *inbox.Account, planner key.Key, holder 
 	if p == nil || p.Status != kernel.SRejected {
 		return nil, fmt.Errorf("step %s was not rejected by the kernel", ps.Op)
 	}
-	return []inbox.Refusal{{Op: ps.Op, Mail: mail, At: "kernel", Reason: inbox.Reason(rejectionCode(k, id))}}, nil
+	return []inbox.Refusal{{Op: ps.Op, Mail: mail, At: "kernel", Reason: inbox.Reason(p.Reject)}}, nil
 }
 
 // keyView is what the key lets its holder do, read from the key itself; the
@@ -402,19 +402,6 @@ func ownerTaps(k *kernel.Kernel, standing bool, renewals map[uint64]bool) []stri
 		taps = taps[1:]
 	}
 	return taps
-}
-
-func rejectionCode(k *kernel.Kernel, plan string) string {
-	for _, e := range k.Log().Entries() {
-		if e.Type != kernel.TPlanRejected {
-			continue
-		}
-		var b struct{ Plan, Code string }
-		if json.Unmarshal(e.Body, &b) == nil && b.Plan == plan {
-			return b.Code
-		}
-	}
-	return ""
 }
 
 // holds reports the hold each unsubscribe step waited behind, read from the log.

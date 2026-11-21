@@ -68,12 +68,12 @@ func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	ver, rf := check.Verify(c.Anchors, c.Name, c.facts, now, r, v)
 	if rf != nil {
 		c.record(id, ran{})
-		if msg := []byte(st.Args["msg"].Value); rf.Code == check.RClaim && st.Verb == key.Post && st.Content != "" && c.g.print(msg) != st.Content {
+		if msg := []byte(st.Args["msg"].Value); rf.Code() == check.RClaim && st.Verb == key.Post && st.Content != "" && c.g.print(msg) != st.Content {
 			// The post claims a print the page no longer yields: say so,
 			// with what approval would cover now (CLK-3).
 			return kernel.Result{Outcome: "failed", Detail: logged(c.g.reask(msg))}
 		}
-		return kernel.Result{Outcome: "failed", Detail: rf.Code}
+		return kernel.Result{Outcome: "failed", Detail: rf.Code().String()}
 	}
 	var res Result
 	var rec ran

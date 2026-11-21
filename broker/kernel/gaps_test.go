@@ -283,10 +283,10 @@ func TestASpendAdmissionTheLogCannotTakeIsRefused(t *testing.T) {
 	rebootWith(r, fs, r.mail)
 	modelPlan(r, "p", modelKey(r, "m1", key.LimitSpendTask(10)))
 	fs.left = 0
-	if _, rf := r.k.AdmitSpend(1, "p", 1); rf == nil || rf.Code != kernel.CBroken {
+	if _, rf := r.k.AdmitSpend(1, "p", 1); rf == nil || rf.Code() != kernel.CBroken {
 		t.Fatalf("an admission the store refused: %v", rf)
 	}
-	if _, rf := r.k.AdmitSpend(1, "p", 11); rf == nil || rf.Code != kernel.CBroken {
+	if _, rf := r.k.AdmitSpend(1, "p", 11); rf == nil || rf.Code() != kernel.CBroken {
 		t.Fatalf("an admission over its cap on a broken log: %v", rf)
 	}
 }
@@ -316,7 +316,7 @@ func TestAOneOffUnderAnUnenrolledPhoneIsCancelled(t *testing.T) {
 			if ok, err := r.k.Send(at, cs[0]); ok || err != nil {
 				t.Fatalf("sent after the phone was unenrolled: %v %v", ok, err)
 			}
-		} else if a := kernel.Next(r.k.State(), "p", at); a.Kind != kernel.ActCancel || a.Refusal.Code != kernel.CKey {
+		} else if a := kernel.Next(r.k.State(), "p", at); a.Kind != kernel.ActCancel || a.Refusal.Code() != kernel.CKey {
 			t.Fatalf("next after the phone was unenrolled: %+v", a)
 		}
 	}
@@ -373,7 +373,7 @@ func TestAnExtendedPlanStopsWhenItsNarrowerIsCutOff(t *testing.T) {
 	exhaust(r, "p", 10)
 	must(t, r.k.Extend(3, extension(r, env, key.LimitSpendTask(100)), "p"))
 	must(t, r.k.Unenroll(4, key.Unenroll(r.owner.pass, phone.pk)))
-	if _, rf := r.k.AdmitSpend(5, "p", 1); rf == nil || rf.Code != kernel.CCutOff {
+	if _, rf := r.k.AdmitSpend(5, "p", 1); rf == nil || rf.Code() != kernel.CCutOff {
 		t.Fatalf("a plan its cut-off narrower approved: %v", rf)
 	}
 }
@@ -434,7 +434,7 @@ func TestRederiveChecksResetsAcceptsAndSendCancels(t *testing.T) {
 	cs, err := r.k.Calls(0)
 	must(t, err)
 	must(t, r.k.Answer(hour, cs[0], kernel.Result{Outcome: "ok"}))
-	if !divergesAt(r, hour, kernel.TPlanCancel, 1, cancel{"p", late.Refusal.Code, late.Refusal.Detail}) {
+	if !divergesAt(r, hour, kernel.TPlanCancel, 1, cancel{"p", late.Refusal.Code().String(), late.Refusal.Detail}) {
 		t.Fatal("a cancel after a sent step's answer was not refused")
 	}
 }

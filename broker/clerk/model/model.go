@@ -341,7 +341,7 @@ func (c *Clerk) admit(now int64, plan, route string, in, maxOut int64) (Price, i
 	}
 	if p.Pool != "" {
 		if until, ok := c.closed[p.Pool]; ok && now < until {
-			return Price{}, 0, none, &key.Refusal{Code: kernel.CPool, Detail: p.Pool + ": a reading the log refused"}
+			return Price{}, 0, none, key.Refuse(kernel.CPool, p.Pool+": a reading the log refused")
 		} else if ok {
 			delete(c.closed, p.Pool)
 		}
@@ -351,7 +351,7 @@ func (c *Clerk) admit(now int64, plan, route string, in, maxOut int64) (Price, i
 	}
 	a, r := c.Ledger.AdmitSpend(now, plan, worst)
 	if r != nil {
-		if r.Code == key.RSpendTask || r.Code == key.RSpendDay {
+		if r.Code() == key.RSpendTask || r.Code() == key.RSpendDay {
 			if err := c.Ledger.Hold(now, plan, r); err != nil {
 				return Price{}, 0, none, err
 			}
