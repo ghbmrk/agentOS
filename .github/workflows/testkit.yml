@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      DISK_NEED_GB: "40" # IMG-disk (#6357): provisional, for the first measured run
+      DISK_NEED_GB: "6" # IMG-disk (#6357): measured bound 3.1 GB (2.5 sampled + 0.6 rise, AWS); see .github/actions/disk-budget
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
