@@ -63,6 +63,7 @@ Otherwise it prints `not-bot <files>` (the diff) or `bot-unproven <why>` and exi
 the branch is this repository's, not a fork's, and fetches the run and artifact the head commit's `Bot-Run:`
 trailer names.
 """
+import ast
 import collections
 import importlib.util
 import json
@@ -91,11 +92,37 @@ DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", 
 # CLAUDE*.md, AGENTS.md, .mcp.json and .claude (a directory or a symlink, #2138) count at any depth;
 # broker/core/core.txt sets risk tiers (risk_tier.py); tools/trace.py and tools/old_core.txt are the old-core ratchet (D-139); tools/trusted_base.py, tools/trusted_core.txt and tools/ceilings.txt are the trusted core's budget and the ceilings (KRN-2cap, #2935; D-310); tools/mutgate.py is the mutation gate, which the mutgate workflow decides with once it is on the base (#3955, #4106); the tests that pin the merge gates count too
 # (PREMERGE-paths, #1835), as do this gate's own tests and the lens rules, so a PR cannot weaken them on L3 alone (#2438). Matched with fullmatch and DOTALL, so a path with a newline in it cannot slip past `$`-style matching.
+# A module a gate tool imports decides with it, so the gate tools' tools/ imports, followed to the end, are gate
+# files too, with their tests (#6418 Security): derived from the base's sources, never a hand list.
+GATE_TOOLS = ("risk_tier", "premerge", "trace", "trusted_base", "mutgate", "claims")
+
+
+def gate_modules(tools=pathlib.Path(__file__).resolve().parent, roots=GATE_TOOLS):
+    """The tools/ modules `roots` import, directly or through each other: an `import` or `from` of a module in
+    `tools`, or a string naming one of its files (premerge loads its imports by path), followed to the end."""
+    out, todo = set(), list(roots)
+    while todo:
+        name = todo.pop()
+        if name in out or not (tools / f"{name}.py").is_file():
+            continue
+        out.add(name)
+        for n in ast.walk(ast.parse((tools / f"{name}.py").read_text())):
+            if isinstance(n, ast.Import):
+                todo += [a.name.split(".")[0] for a in n.names]
+            elif isinstance(n, ast.ImportFrom) and n.level == 0 and n.module:
+                todo.append(n.module.split(".")[0])
+            elif isinstance(n, ast.Constant) and isinstance(n.value, str) and re.fullmatch(r"\w+\.py", n.value):
+                todo.append(n.value[:-3])
+    return out
+
+
+_IMPORTED = "|".join(sorted(gate_modules() - set(GATE_TOOLS)))
 _CFG = r"(?:.*/)?"
 MARK_PATHS = re.compile(rf"{_CFG}CLAUDE(?:\.local)?\.md|{_CFG}AGENTS\.md|{_CFG}\.mcp\.json|{_CFG}\.claude(?:/.*)?|"
                         r"docs/OPERATING\.md|docs/LANES\.md|\.github/.*|broker/core/core\.txt|"
-                        r"tools/(risk_tier|premerge|trace|trusted_base|mutgate|claims)\.py|tools/(old_core|trusted_core|ceilings)\.txt|tools/ci_scope[^/]*|"
-                        r"tests/test_premerge[^/]*|reviews/[^/]+/README[^/]*",
+                        rf"tools/({'|'.join(GATE_TOOLS)})\.py|tools/(old_core|trusted_core|ceilings)\.txt|tools/ci_scope[^/]*|"
+                        r"tests/test_premerge[^/]*|reviews/[^/]+/README[^/]*"
+                        + (rf"|tools/({_IMPORTED})\.py|tests/test_({_IMPORTED})[^/]*" if _IMPORTED else ""),
                         re.DOTALL)
 
 
@@ -541,6 +568,8 @@ def _lines_kept(cwd, tree, head, path, reviewed, onto):
     # Split on \n only, as the readers do: bytes.splitlines() also splits on \r and would count unread entries (#4041).
     pr, mb, main, want = (collections.Counter(_git(cwd, "show", f"{t}:{path}", ok=(0, 128)).split(b"\n"))
                           for t in (reviewed, bases[0], onto, head))
+    if any(record_merge._section(x) for side in (pr, main, want) for x in side):
+        return False  # a sectioned file is no order-free list (#6418 Security)
     want_max = main + (pr - mb) - (mb - pr)
     return not want - want_max and not (want_max - want) - ((pr - mb) & (main - mb))
 

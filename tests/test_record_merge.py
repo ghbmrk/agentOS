@@ -291,6 +291,17 @@ class AllowTest(unittest.TestCase):
         self.commit("moved")
         self.assertEqual(premerge.compare(self.r, reviewed, "HEAD", tip), [name])
 
+    def test_a_section_header_in_an_append_is_a_conflict(self):
+        # #6418 Security: main's /y would follow the PR's [cipher] header and leave [glob].
+        for mine, main in (("[glob]\n/a\n[cipher]\n/c\n", "[glob]\n/a\n/y\n"), ("[glob]\n/a\n/y\n", "[glob]\n/a\n[cipher]\n/c\n")):
+            with self.subTest(mine=mine):
+                self.setUp()
+                _, _, out = self.merge_allow("image/import_sweep.allow", "[glob]\n/a\n", mine, main)
+                self.assertNotEqual(out.returncode, 0)
+                self.assertIn("<<<<<<<", (self.r / "image/import_sweep.allow").read_text())
+        self.assertEqual(record_merge.merge(b"[glob]\n/a\n", b"[glob]\n/a\n[cipher]\n/c\n", b"[glob]\n/a\n/y\n",
+                                            "image/import_sweep.allow")[1], False)
+
     def test_an_allow_line_edited_or_deleted_beside_a_change_is_a_conflict(self):
         # A union would bring back the exit main closed; the builder resolves it.
         for mine, main in (("allow a why2\nallow p\n", "allow m\n"), ("allow p\n", "allow a why3\n")):

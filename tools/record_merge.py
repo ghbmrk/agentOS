@@ -9,8 +9,9 @@ CLASSES lists the record and allow files by class, the one list `--install`, doc
 A `row` line's key is the row ID of an ASSUMPTIONS.md table row and an `entry` line's, in a MUTANTS-EQUIVALENT, the
 entry less its proof (`reason`, `accepted`: premerge's `_entry_keys`), so two lines with one key name one row or
 one mutant twice. An allow file's `line` is its own key, and the driver merges only hunks where both sides appended
-at one spot: an allow line edited or deleted beside the other side's change stays a conflict, since a union could
-bring back an exit one side closed. `.gitattributes` gives the row and entry files `merge=union`, which CI's merges
+at one spot and neither appended a section header: an allow line edited or deleted beside the other side's change
+stays a conflict, since a union could bring back an exit one side closed, and so does a header, which would move
+the other side's appends into its section. `.gitattributes` gives the row and entry files `merge=union`, which CI's merges
 (premerge's replay, trusted-base, lookup) keep reading, and every class `text eol=lf`, so git commits a CRLF line as
 its LF twin. Git runs no command a repository names until the clone's own config does, so `--install` sets
 `merge.records.driver` and puts `<pattern> merge=records` for each class in `info/attributes`, which outranks
@@ -51,6 +52,13 @@ def record_class(path):
     """The class of `path` in CLASSES, by its file name, or None for a file in none."""
     name = pathlib.PurePosixPath(path).name
     return next((c for p, c in CLASSES.items() if fnmatch.fnmatchcase(name, p)), None)
+
+
+def _section(line):
+    """True for an allow file's section header (`[cipher]` in image/import_sweep.allow): the lines after it are
+    read in its section, so a hunk holding one never merges by line (#6418 Security: a header one side appended
+    would take in the other side's appends)."""
+    return line.lstrip().startswith(b"[")
 
 
 def _is_record(path):
@@ -174,7 +182,7 @@ def merge(base, ours, theirs, path="ASSUMPTIONS.md"):
         elif bare == b"=======" and side == 1:
             side = 2
         elif bare == f">>>>>>> {mark}2".encode() and side == 2:
-            rows = (None if cls == "line" and hunk[1]  # an allow line edited or deleted: the builder resolves it
+            rows = (None if cls == "line" and (hunk[1] or any(map(_section, hunk[0] + hunk[2])))
                     else resolve(*hunk, key={"row": _row_key, "entry": entry_key, "line": bytes}[cls]))
             if rows is None:
                 clean = False
