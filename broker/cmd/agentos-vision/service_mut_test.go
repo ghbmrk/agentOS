@@ -206,7 +206,7 @@ func TestIdleConnectionIsClosed(t *testing.T) {
 }
 
 // A header over its bound is answered once, logged, and ends the
-// connection even with a good request behind it (lines 196, 198).
+// connection even with a good request behind it (line 196).
 func TestOverlongHeaderEndsTheConnection(t *testing.T) {
 	log := &lockedBuffer{}
 	s := newService(Config{}, &stubRT{}, log)
@@ -517,7 +517,7 @@ func TestConcurrentReadyLoadsOnce(t *testing.T) {
 	go func() { got <- s.ready() }()
 	<-entered // the first holds the load lock
 	go func() { got <- s.ready() }()
-	time.Sleep(50 * time.Millisecond) // the second waits on it
+	time.Sleep(200 * time.Millisecond) // the second waits on it
 	close(gate)
 	for range 2 {
 		if l := <-got; l.cause != "" || l.model.Name != "vis-stub" {
