@@ -1385,8 +1385,9 @@ class PremergeTest(unittest.TestCase):
     def test_diff_gate_failure_is_never_base_excused(self):
         # PREMERGE-gate-not-base-excusable (#6411): a diff gate's failed job holds even when main's own first-attempt run
         # of the merge base failed the same job; a tree check's inherited failure is still excused.
-        self.assertEqual(premerge.DIFF_GATES, ("mutgate", "lane-gate", "word-budget"))
-        self.assertTrue(all(premerge.HELD[g] == () for g in premerge.DIFF_GATES))
+        gates = [n for n, c in premerge.HELD_CLASS.items() if c == premerge.DIFF_GATE]
+        self.assertEqual(gates, ["mutgate", "lane-gate", "word-budget"])
+        self.assertTrue(all(premerge.HELD[g] == () for g in gates))
         onto, sha = self.held_repo()
         ok = self.wf(1, "vulncheck", "success", sha)
         held = lambda *runs, base=(): premerge.checks_held(self.r, bundle([ok, *runs], base), "HEAD", "main")
@@ -1397,6 +1398,27 @@ class PremergeTest(unittest.TestCase):
             self.assertEqual(held(run, base=[mainrun]), [f"{name}:failure"], (name, jobs))
             self.assertEqual(held({**run, "name": "formal", "path": ".github/workflows/formal.yml"},
                                   base=[{**mainrun, "name": "formal", "path": ".github/workflows/formal.yml"}]), [], (name, jobs))
+
+    def test_held_class_table_matches_held(self):
+        # PREMERGE-held-class-table (#6425): every HELD workflow is classed DIFF_GATE or TREE and the table names no
+        # other, so a new HELD workflow fails here until classed; the test reads HELD itself, no second list.
+        self.assertEqual(set(premerge.HELD_CLASS), set(premerge.HELD))
+        self.assertEqual(set(premerge.HELD_CLASS.values()), {premerge.DIFF_GATE, premerge.TREE})
+
+    def test_unclassed_held_workflow_is_never_base_excused(self):
+        # PREMERGE-held-class-table (#6425): a HELD workflow missing from HELD_CLASS counts as DIFF_GATE, so a failed job
+        # holds although main's run of the merge base failed it too; classed TREE, the same failure is excused.
+        onto, sha = self.held_repo()
+        ok = self.wf(1, "vulncheck", "success", sha)
+        run = self.wf(5, "formal", "failure", sha, jobs=[("formal", "failure")])
+        mainrun = self.wf(9, "formal", "failure", onto, event="push", branch="main", jobs=[("formal", "failure")])
+        held = lambda: premerge.checks_held(self.r, bundle([ok, run], [mainrun]), "HEAD", "main")
+        self.assertEqual(held(), [])
+        unclassed = {k: v for k, v in premerge.HELD_CLASS.items() if k != "formal"}
+        with mock.patch.object(premerge, "HELD_CLASS", unclassed):
+            self.assertEqual(held(), ["formal:failure"])
+        with mock.patch.object(premerge, "HELD_CLASS", {**premerge.HELD_CLASS, "formal": "unknown"}):
+            self.assertEqual(held(), ["formal:failure"])
 
     def test_image_vulncheck_is_the_one_exempt_job(self):
         # #5366: image-vulncheck stays out (Mark's #2919 paste); every other image job is held.
