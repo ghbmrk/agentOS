@@ -242,6 +242,20 @@ class StaticElfTest(unittest.TestCase):
         self.assertEqual(errs, ["tree: /usr/lib/agentos/runsc is not listed, so the walk did not read what it "
                                 "should have (control)"])
 
+    def test_a_glob_star_stays_in_its_segment_and_each_debian_initrd_has_its_control(self):
+        # L3 7068815628 point 3: "*" does not cross "/". Points 2 and 5: an initrd with a dpkg status must
+        # list ldconfig; a modules initrd (no status) needs nothing.
+        self.assertTrue(se.matches("/usr/lib/agentos/agentosd", "/usr/lib/agentos/agentos*"))
+        self.assertFalse(se.matches("/usr/lib/agentos/agentos-x/y", "/usr/lib/agentos/agentos*"))
+        self.assertTrue(se.matches("/usr/lib/agentos/images/codex/lib64/ld.so", "/usr/lib/agentos/images/*/lib64/ld.so"))
+        info = se.classify(self.bins["static"])
+        places = {"tree": {p: info for p in se.REQUIRED}, "initrd:a/initrd": {}, "initrd:a/modules": {}}
+        errs = se.control(places, {}, {"initrd:a/initrd": {"libc-bin"}, "initrd:a/modules": None})
+        self.assertEqual(errs, ["initrd:a/initrd: /usr/sbin/ldconfig is not listed, so the initrd's walk did not "
+                                "read what it should have (control)"])
+        places["initrd:a/initrd"] = {"/usr/sbin/ldconfig": info}
+        self.assertEqual(se.control(places, {}, {"initrd:a/initrd": {"libc-bin"}, "initrd:a/modules": None}), [])
+
     def test_guest_shipped_records_each_input_against_the_binary(self):
         # SEL-6 linked: with SHIPPED_FOR, each owner is recorded against the binary's SHA-256, and --status
         # moves the lines to DIR/agentos.inputs; without it, nothing is recorded per file.
@@ -279,7 +293,7 @@ class ShippedTest(unittest.TestCase):
         entries = se.read_allow(se.ALLOW)
         self.assertTrue(entries)
         for path in se.REQUIRED:
-            self.assertEqual(sum(__import__("fnmatch").fnmatchcase(path, e[1]) for e in entries), 1, path)
+            self.assertEqual(sum(se.matches(path, e[1]) for e in entries), 1, path)
         for bad in ("usr/bin/x go", "/usr/bin/x go extra", "/usr/bin/x linked", "/usr/bin/x static y",
                     "/usr/bin/x sha256 abc"):
             with self.subTest(bad):

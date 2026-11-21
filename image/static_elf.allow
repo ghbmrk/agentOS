@@ -29,8 +29,10 @@
 /usr/lib/agentos/gvisor-bin/gvisor-sentry-prewarmer sha256 3315d7ad7c2d3751d349e4976fa02da1da6fd7e41746c35622304e5fabe4fce0
 /usr/lib/agentos/gvisor-bin/runsc-fd-parking sha256 03af90d07ea466c10ecc3e3ba839b2a59540959dd3286aea3886917cba850c11
 
-# The Codex CLI's static musl binaries, pinned by CODEX_INTEGRITY. Their OpenSSL is a "bundled" copy;
-# no musl version string is recoverable from them (release finding #6435).
+# The Codex CLI's static musl binaries, pinned by CODEX_INTEGRITY. codex and codex-code-mode-host link
+# the OpenSSL copy the holder's "bundled" record queries; rg links no OpenSSL, so for it the record
+# scans nothing. None holds a recoverable musl version: their musl (and rg's own static code) is
+# unscanned, release finding #6435.
 /usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex bundled @openai/codex@0.162.1-linux-x64
 /usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host bundled @openai/codex@0.162.1-linux-x64
 /usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/codex-path/rg bundled @openai/codex@0.162.1-linux-x64

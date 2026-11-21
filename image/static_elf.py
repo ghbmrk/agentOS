@@ -14,10 +14,12 @@ and holds it to image/static_elf.allow:
 A file is listed (SEL-5) when it is an x86 executable or shared object (ET_EXEC or ET_DYN, EM_X86_64 or
 EM_386; relocatable objects and other machines' firmware run nothing here) and either names no
 interpreter and no NEEDED library (import_sweep.read_elf's "static"), or is dynamic, needs no libstdc++
-or libc++, and carries a C++ runtime: it defines one of CXX_DEFS or holds one of CXX_MARKS.
+or libc++, and holds one of CXX_MARKS, a C++ runtime's own strings (a shipped file is stripped, so its
+symbols say nothing).
 
 Each listed file must match exactly one entry of ALLOW, a line "GLOB KIND [ARG]", GLOB an absolute
-fnmatch pattern on the file's path (an initrd's members by their path inside it). Kinds (SEL-6):
+pattern on the file's path (an initrd's members by their path inside it) matched segment by segment, so
+"*" never crosses "/" (matches). Kinds (SEL-6):
   go             a Go binary built without cgo, read from the file: its build info says CGO_ENABLED=0, or
                  records no setting and the file holds none of runtime/cgo's C code (go_cgo): no C library
   linked LIST    a build step recorded the file's link inputs (image/guest-shipped.sh with SHIPPED_FOR):
@@ -61,17 +63,16 @@ MACHINES = (3, 62)  # EM_386, EM_X86_64
 REQUIRED = ("/usr/lib/agentos/infer/llama-server", "/usr/lib/agentos/runsc",
             "/usr/lib/agentos/images/camdecode/agentos-camdecode", "/usr/sbin/ldconfig")
 GUEST_ROOTS = "/usr/lib/agentos/images/"
+INITRD_REQUIRED = "/usr/sbin/ldconfig"
 LISTS = ("linked", "guest")
 INPUTS, STATUS, MD5SUMS = "agentos.inputs", "agentos.dpkg-status", "agentos.dpkg-md5sums"
 INITRD_STATUS = "/usr/share/agentos/initrd.dpkg-status"
-# A C++ runtime's own code: the ABI entry points libsupc++ and libc++abi define, and the strings they
-# hold (the verbose terminate handler's message; __class_type_info's type name, which only the runtime
-# defines, NUL on each side so the tail of an imported symbol's name in .dynstr does not count).
-CXX_DEFS = {"__cxa_throw", "__cxa_begin_catch", "__gxx_personality_v0", "_ZSt9terminatev"}
+# A C++ runtime's own code: strings libsupc++ and libc++abi hold (the verbose terminate handlers'
+# messages; __class_type_info's type name, which only the runtime defines, NUL on each side so the tail of
+# an imported symbol's name in .dynstr does not count).
 CXX_MARKS = (b"terminate called after throwing an instance of '", b"\0N10__cxxabiv117__class_type_infoE\0",
              b"terminating due to uncaught exception of type ")
 CXX_NEEDED = re.compile(r"^lib(std)?c\+\+\.so")
-SYM = re.compile(r"^[0-9a-f]+\s.{7}\s(\S+)\s+[0-9a-f]+\s+(?:\S+\s+)?(\S+)$")
 BUILDINFO = b"\xff Go buildinf:"
 # The largest file the sha256 kind may declare: gVisor's sidecars are 1.4 KiB; a static libc is far larger.
 SHA256_MAX = 16384
@@ -135,17 +136,6 @@ def go_shown(go):
             "cgo": "Go, no cgo setting, cgo code", "0-cgo": "Go CGO_ENABLED=0 but cgo code"}[go]
 
 
-def cxx_defined(path):
-    """Whether the file at PATH defines (not imports) one of CXX_DEFS in its symbol tables."""
-    r = subprocess.run(["objdump", "-tT", str(path)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                       text=True, errors="replace")
-    for line in r.stdout.splitlines():
-        m = SYM.match(line)
-        if m and m.group(1) != "*UND*" and m.group(2).split("@")[0] in CXX_DEFS:
-            return True
-    return False
-
-
 def classify(path):
     """None when the ELF file at PATH is not listed (SEL-5); else {"why": "static" or "c++ runtime",
     "sha256", "go": go_cgo's answer}. Unread when objdump or the header cannot read it."""
@@ -163,7 +153,7 @@ def classify(path):
         why = "static"
     elif any(CXX_NEEDED.match(n) for n in needed):
         return None
-    elif any(m in data for m in CXX_MARKS) or cxx_defined(path):
+    elif any(m in data for m in CXX_MARKS):
         why = "c++ runtime"
     else:
         return None
@@ -291,7 +281,7 @@ def refusals(places, entries, ctx, statuses):
     errs, used = [], set()
     for place, files in sorted(places.items()):
         for shown, info in sorted(files.items()):
-            hits = [e for e in entries if fnmatch.fnmatchcase(shown, e[1])]
+            hits = [e for e in entries if matches(shown, e[1])]
             used.update(e[0] for e in hits)
             where = shown if place == "tree" else "%s %s" % (place, shown)
             if not hits:
@@ -311,12 +301,24 @@ def refusals(places, entries, ctx, statuses):
     return errs
 
 
-def control(places, unread):
+def matches(path, glob):
+    """Whether PATH matches GLOB segment by segment (fnmatch within each), so "*" never crosses "/"
+    (L3 7068815628 point 3)."""
+    p, g = path.split("/"), glob.split("/")
+    return len(p) == len(g) and all(fnmatch.fnmatchcase(a, b) for a, b in zip(p, g))
+
+
+def control(places, unread, statuses=None):
+    """The control (SEL-7): unreadable files, the main tree's REQUIRED, and in each initrd that holds a
+    dpkg status (the one Debian initrd; a modules initrd holds no program) Debian's static ldconfig
+    (L3 7068815628 point 2, Potency 7068815856 point 5)."""
     errs = ["%s: cannot read %s: %s" % (place, shown, why) for place, u in sorted(unread.items())
             for shown, why in sorted(u.items())]
     tree = places.get("tree", {})
     errs += ["tree: %s is not listed, so the walk did not read what it should have (control)" % p
              for p in REQUIRED if p not in tree]
+    errs += ["%s: %s is not listed, so the initrd's walk did not read what it should have (control)" % (k, INITRD_REQUIRED)
+             for k, st in sorted((statuses or {}).items()) if st is not None and INITRD_REQUIRED not in places.get(k, {})]
     return errs
 
 
@@ -358,7 +360,7 @@ def run(root, usr, out, allow):
     if usr is not None:
         initrd_places(out, places, unread, statuses)
     entries = read_allow(allow)
-    return places, control(places, unread) + refusals(places, entries, context(out), statuses)
+    return places, control(places, unread, statuses) + refusals(places, entries, context(out), statuses)
 
 
 def escaped(line):
