@@ -2307,7 +2307,9 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(out), "--targets", str(plan), env=env)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             seen = json.loads((pathlib.Path(d) / "seen-lines").read_text().splitlines()[0])["hint.go"]
-            self.assertEqual(rec["base"], {"tests": ["TestUp"], "lines": {"hint.go": [3, 4, 5, 6, 7]}})
+            # TestDown ran after TestUp at the base, so its run order changed too (#6385): the base runs both.
+            self.assertEqual(rec["base"]["tests"], ["TestDown", "TestUp"])
+            self.assertTrue({3, 4, 5, 6, 7} <= set(rec["base"]["lines"]["hint.go"]), rec)
             self.assertEqual(sorted(seen), sorted(set(rec["lines"]["hint.go"]) | set(rec["base"]["lines"]["hint.go"]) | {13}))
             r = self.mutgate(d, "delete", "hint", "--git", "HEAD~1", "--out", str(out), "--jobs", "1")
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -2897,18 +2899,19 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
         # D-319 (#5826) item 4, #5757's shape: a new _test.go file whose import and helper only its
         # own test uses used to make every test's lines targets, so the package's old survivor (Up's
         # clamp, line 4, LIVED in the stub) failed a PR that never touched Up. It claims only the
-        # lines its test covers now (Down's), and the gate passes.
+        # lines its test covers now (Down's), and the gate passes. Named after hint_test.go, it changes no
+        # other test's run order (#6385).
         # REQ: MUT-test-helper-scope
         new = ('package hint\n\nimport (\n\t"strconv"\n\t"testing"\n)\n\n'
                'func text(n int) string { return strconv.Itoa(n) }\n\n'
                'func TestDownText(t *testing.T) {\n\tif text(Down(5)) != "4" {\n\t\tt.Fatal("down")\n\t}\n}\n')
         with tempfile.TemporaryDirectory() as d:
-            r, seen = self.gate_run(d, TWO_TEST, TWO_TEST, extra={"down_test.go": new})
+            r, seen = self.gate_run(d, TWO_TEST, TWO_TEST, extra={"more_test.go": new})
             self.assertEqual(seen, {10, 11, 12})
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             # The same file with a package var's initializer runs before every test: every line again.
         with tempfile.TemporaryDirectory() as d:
-            r, seen = self.gate_run(d, TWO_TEST, TWO_TEST, extra={"down_test.go": new + "\nvar four = text(4)\n"})
+            r, seen = self.gate_run(d, TWO_TEST, TWO_TEST, extra={"more_test.go": new + "\nvar four = text(4)\n"})
             self.assertTrue({4, 5, 7, 11} <= seen, seen)
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("broker/hint/hint.go:4 CONDITIONALS_NEGATION survives", r.stdout)
@@ -2977,15 +2980,22 @@ MOVE_DOWN = """func TestDown(t *testing.T) {
 class MovedDecls(unittest.TestCase):
     """TOOL-mutgate-moved-lines (#6369): a declaration moved unchanged is no change of the tests."""
 
-    def reach(self, base, head, src=TWO_SRC, head_src=None, tree=None):
+    def reach(self, base, head, src=TWO_SRC, head_src=None, tree=None, fmt=True, extra=None):
         """(head tests, base tests) changed_tests and bases_for name for broker/hint/, the base holding
-        hint.go (src) and the test files base {name: text}, the PR replacing them with head (and head_src);
-        tree {name: text} is then written to the working tree, uncommitted."""
+        hint.go (src) and the test files base {name: text}, the PR replacing them with head (and head_src),
+        each through gofmt unless fmt is False; tree {name: text} is then written to the working tree,
+        uncommitted."""
+        if fmt:
+            gofmt = lambda t: subprocess.run(["gofmt"], input=t, capture_output=True, text=True, check=True).stdout
+            base, head = ({n: gofmt(t) for n, t in files.items()} for files in (base, head))
         with tempfile.TemporaryDirectory() as d:
             git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
             pkg = pathlib.Path(d) / "broker" / "hint"
             pkg.mkdir(parents=True)
             (pkg.parent / "go.mod").write_text(GO_MOD)
+            for name, text in (extra or {}).items():  # other broker/ files, on both sides
+                (pkg.parent / name).parent.mkdir(parents=True, exist_ok=True)
+                (pkg.parent / name).write_text(text)
             git("init", "-q")
             for side, files, text in (("base", base, src), ("pr", head, src if head_src is None else head_src)):
                 for f in pkg.glob("*_test.go"):
@@ -3122,6 +3132,156 @@ class MovedDecls(unittest.TestCase):
                                     {"hint_test.go": added, "u_test.go": 'package hint\n\nimport "unicode"\n\nvar _ = unicode.IsDigit\n'}),
                          (["TestDown"], ["TestDown"]))
 
+    def test_build_constraints_compare_as_go_reads_them(self):
+        # #6385: a constraint is read as go/build reads the header and compared by meaning, not text.
+        # REQ: TOOL-mutgate-moved-lines-fu
+        c = mutgate._constraint
+        self.assertEqual(c("p/a_test.go", "//go:build linux && amd64\n\npackage p\n"),
+                         c("p/b_test.go", "//go:build amd64 && linux\n\npackage p\n"))
+        self.assertEqual(c("p/a_test.go", "//go:build linux && amd64\n\npackage p\n"), c("p/b_linux_amd64_test.go", "package p\n"))
+        self.assertEqual(c("p/a_test.go", "//go:build linux || !linux\n\npackage p\n"), mutgate.ALWAYS)
+        self.assertEqual(c("p/a_test.go", "/*\n//go:build linux\n*/\npackage p\n"), mutgate.ALWAYS)  # inside /* */: none
+        self.assertEqual(c("p/a_test.go", "package p\n\n//go:build linux\n"), mutgate.ALWAYS)  # after the clause: none
+        self.assertNotEqual(c("p/a_test.go", "//go:build linux\n\npackage p\n"), mutgate.ALWAYS)
+        self.assertNotEqual(c("p/a_test.go", "//go:build linux\n\npackage p\n"), c("p/a_test.go", "//go:build linux && cgo\n\npackage p\n"))
+        self.assertEqual(c("p/_a_test.go", "package p\n"), "ignored")
+        for unread in ("// +build linux\n\npackage p\n", "//go:build linux\n//go:build amd64\n\npackage p\n",
+                       "//go:build linux &&\n\npackage p\n", "//go:build (linux\n\npackage p\n", "//go:build a b\n\npackage p\n",
+                       "//go:build " + " && ".join(f"t{i}" for i in range(13)) + "\n\npackage p\n",
+                       "//go:build\x1cfoo\n\npackage p\n", "//go:build linux\n\npackage p // \x1f\n", "//go:build\vlinux\n\npackage p\n",
+                       "//go:build linux &&\u00a0foo\n\npackage p\n", "//go:build \u00e9t\u00e9\n\npackage p\n"):
+            with self.subTest(unread):
+                self.assertIsNone(c("p/a_test.go", unread))
+
+    def test_build_constraints_match_go_list(self):
+        # The differential corpus #6385 asks for: for each header shape and build context, a file is in
+        # `go list`'s GoFiles exactly when its _constraint's truth table says it builds there.
+        # REQ: TOOL-mutgate-moved-lines-fu
+        heads = ["", "//go:build linux\n\n", "//go:build amd64 && linux\n\n", "//go:build !linux || foo\n\n",
+                 "/*\n//go:build linux\n*/\n", "// doc\n/* x */\n//go:build (linux || darwin) && !arm64\n\n",
+                 "//go:build linux\n// +build linux\n\n", "//go:build ignore\n\n", "//go:build go1.1 && foo\n\n",
+                 "package q\n\n//go:build linux\n",
+                 # Security on #6421: Go reads U+001C-U+001F as no space, Python as space; go/build/constraint
+                 # skips only spaces and tabs; a tag is letters, digits, _ and .
+                 "//go:build\x1cfoo\n\n", "//go:build\x1ffoo\n\n", "//go:build linux\x1c\n\n", "//go:build\vlinux\n\n",
+                 "//go:build\u00a0linux\n\n", "//go:build linux &&\u00a0foo\n\n", "//go:build linux\f\n\n",
+                 "//go:build \u00e9t\u00e9\n\n", "//go:build\tlinux\t&&\tfoo\n\n", "//go:build  ( linux )\n\n"]
+        names = ["x{}.go", "x{}_linux.go", "x{}_darwin_arm64.go", "x{}_amd64.go"]
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "go.mod").write_text("module ex\n\ngo 1.22\n")
+            files = {}
+            for i, head in enumerate(heads):
+                for name in names:
+                    f = name.format(i)
+                    files[f] = head + ("" if head.startswith("package") else "package q\n")
+                    (pathlib.Path(d) / f).write_text(files[f])
+            for goos, goarch, tags in (("linux", "amd64", ""), ("darwin", "arm64", "foo"), ("windows", "amd64", "foo"),
+                                       ("linux", "arm64", "ignore")):
+                with self.subTest(goos=goos, goarch=goarch, tags=tags):
+                    env = {**os.environ, "GOOS": goos, "GOARCH": goarch, "GOFLAGS": "", "CGO_ENABLED": "0"}
+                    got = subprocess.run(["go", "list", "-e", "-tags", tags, "-f", "{{range .GoFiles}}{{.}} {{end}}", "."], cwd=d,
+                                         env=env, capture_output=True, text=True, check=True).stdout.split()
+                    on = {goos, goarch, "go1.1", "gc", *filter(None, tags.split(","))} | ({"unix"} if goos != "windows" else set())
+                    want, read = [], 0
+                    for f, text in sorted(files.items()):
+                        if (c := mutgate._constraint(f"p/{f}", text)) is None:
+                            got = [g for g in got if g != f]  # not read: fails closed, whatever go makes of it
+                            continue
+                        read += 1
+                        used, table = c
+                        want += [f] if table[sum(1 << i for i, t in enumerate(used) if t in on)] else []
+                    self.assertEqual(sorted(got), want)
+                    self.assertGreaterEqual(read, 4 * 12)
+
+    def test_a_move_across_another_effective_constraint_is_a_change(self):
+        # #6385: the same build text where go reads none (inside /* */) is another build context; equal
+        # constraints written in another order are the same one.
+        # REQ: TOOL-mutgate-moved-lines-fu
+        rest = MOVE_TEST.replace(MOVE_ONE, "").replace('\t"strings"\n', "")
+        head = 'package hint\n\nimport "strings"\n\n'
+        base = {"hint_test.go": rest, "a_test.go": "/*\n//go:build linux\n*/\n" + head + MOVE_ONE}
+        self.assertEqual(self.reach(base, {"hint_test.go": rest, "b_test.go": "//go:build linux\n\n" + head + MOVE_ONE}),
+                         (["TestUp"], ["TestUp"]))
+        base = {"hint_test.go": rest, "a_test.go": "//go:build linux && amd64\n\n" + head + MOVE_ONE}
+        self.assertEqual(self.reach(base, {"hint_test.go": rest, "b_test.go": "//go:build amd64 && linux\n\n" + head + MOVE_ONE}),
+                         ([], []))
+
+    def test_a_constraint_go_reads_otherwise_moves_nothing(self):
+        # Security on #6421: `//go:build\x1cfoo` is a plain comment to Go (always built), a constraint foo to
+        # Python's whitespace; read as foo it made a move out of `//go:build foo` an unchanged one.
+        # REQ: TOOL-mutgate-moved-lines-fu
+        rest = MOVE_TEST.replace(MOVE_ONE, "").replace('\t"strings"\n', "")
+        head = 'package hint\n\nimport "strings"\n\n'
+        for was, now in (("//go:build foo", "//go:build\x1cfoo"), ("//go:build\x1ffoo", "//go:build foo")):
+            with self.subTest(was=was):
+                got = self.reach({"hint_test.go": rest, "b_test.go": was + "\n\n" + head + MOVE_ONE},
+                                 {"hint_test.go": rest, "a_test.go": now + "\n\n" + head + MOVE_ONE})
+                self.assertNotEqual(got, ([], []))
+
+    def test_a_layout_gofmt_would_change_moves_nothing(self):
+        # Security on #6378: `func TestB (t` hid TestB from RUNNABLE, so a reorder read as a move.
+        # REQ: TOOL-mutgate-moved-lines-fu
+        spaced = MOVE_TEST.replace("func TestDown(t", "func TestDown (t")
+        up = spaced[spaced.index("func TestUp"):spaced.index("func TestDown")]
+        got = self.reach({"hint_test.go": spaced}, {"hint_test.go": spaced.replace(up, "") + "\n" + up.rstrip("\n") + "\n"}, fmt=False)
+        self.assertEqual(got, (None, None))
+
+    def test_a_new_test_file_that_runs_first_changes_the_tests_after_it(self):
+        # Security on #6378: `go test` runs files in name order, so a new file's tests run before every
+        # test of a file named after it; a file named last, or one that adds no test, changes no other.
+        # REQ: TOOL-mutgate-moved-lines-fu
+        new = 'package hint\n\nimport "testing"\n\nfunc TestNew(t *testing.T) {\n\tif Up(2) != 3 {\n\t\tt.Fatal(0)\n\t}\n}\n'
+        base = {"hint_test.go": MOVE_TEST}
+        self.assertEqual(self.reach(base, {**base, "a_test.go": new}), (["TestDown", "TestNew", "TestUp"], ["TestDown", "TestUp"]))
+        self.assertEqual(self.reach(base, {**base, "z_test.go": new}), (["TestNew"], []))
+        # Renamed: its tests run in another place, so the tests between both places run after other ones.
+        self.assertEqual(self.reach({**base, "z_test.go": new}, {**base, "a_test.go": new}),
+                         (["TestDown", "TestNew", "TestUp"], ["TestDown", "TestNew", "TestUp"]))
+        # A parallel test resumes after every sequential one: any change to the run list reaches it.
+        par = MOVE_TEST.replace('t.Fatal("down")\n\t}', 't.Fatal("down")\n\t}\n\tt.Parallel()')
+        self.assertEqual(self.reach({"hint_test.go": par}, {"hint_test.go": par, "z_test.go": new}),
+                         (["TestDown", "TestNew", "TestUp"], ["TestDown", "TestUp"]))
+        # So does one a helper calls: in a non-test file of the package, or in a package it imports (L3 and
+        # Security on #6421).
+        both = (["TestDown", "TestNew", "TestUp"], ["TestDown", "TestUp"])
+        helper = TWO_SRC.replace("package hint\n", 'package hint\n\nimport "testing"\n') + "\nfunc par(t *testing.T) { t.Parallel() }\n"
+        self.assertEqual(self.reach(base, {**base, "z_test.go": new}, src=helper), both)
+        lib = 'package lib\n\nimport "testing"\n\n// Par runs t in parallel.\nfunc Par(t *testing.T) { t.Parallel() }\n'
+        src = TWO_SRC.replace("package hint\n", 'package hint\n\nimport _ "example.invalid/broker/lib"\n')
+        self.assertEqual(self.reach(base, {**base, "z_test.go": new}, src=src, extra={"lib/lib.go": lib}), both)
+        self.assertEqual(self.reach(base, {**base, "z_test.go": new}, src=src, extra={"lib/lib.go": lib.replace("t.Parallel()", "t.Helper()")}),
+                         (["TestNew"], []))
+
+    def test_a_declaration_of_a_cgo_file_never_moves(self):
+        # #6385, from #6376: a cgo file's code binds its own preamble, so nothing moves out of one.
+        # REQ: TOOL-mutgate-moved-lines-fu
+        helper = "// two is a helper.\nfunc two() int { return Up(1) }\n"
+        test = 'package hint\n\nimport "testing"\n\nfunc TestTwo(t *testing.T) {\n\tif two() != 2 {\n\t\tt.Fatal(2)\n\t}\n}\n'
+        cgo = TWO_SRC.replace("package hint\n", 'package hint\n\n// int c(void) { return 1; }\nimport "C"\n') + "\n" + helper
+        base = {"hint_test.go": TWO_TEST, "two_test.go": test}
+        self.assertEqual(self.reach(base, {**base, "z_test.go": "package hint\n\n" + helper}, src=cgo, head_src=TWO_SRC),
+                         (["TestTwo"], []))
+        self.assertEqual(self.reach(base, {**base, "z_test.go": "package hint\n\n" + helper},
+                                    src=TWO_SRC + "\n" + helper, head_src=TWO_SRC), ([], []))
+
+    def test_a_qualifier_bound_otherwise_and_a_pure_add_of_moved_lines(self):
+        # #6385 items from #6376, shown held: a package name is usable only as a qualifier (Go refuses a
+        # bare one, and one name in both the file and package block), so a word's binding differs only
+        # behind `q.`, which must bind the same import; and a hunk that only adds moved lines is no gap.
+        # REQ: TOOL-mutgate-moved-lines-fu
+        rest = MOVE_TEST.replace(MOVE_ONE, "").replace('\t"strings"\n', "")
+        local = "package hint\n\nvar strings struct{ Repeat func(string, int) string }\n\n" + MOVE_ONE.rstrip("\n") + "\n"
+        got = self.reach({"hint_test.go": MOVE_TEST}, {"hint_test.go": rest, "other_test.go": local})
+        self.assertIn("TestUp", got[0])
+        self.assertIn("TestUp", got[1])
+        none = 'package hint\n\nimport "testing"\n\nfunc TestNone(t *testing.T) {}\n'
+        with_one = none.replace('import "testing"', 'import (\n\t"strings"\n\t"testing"\n)') + "\n" + MOVE_ONE.rstrip("\n") + "\n"
+        diff = ("diff --git a/broker/hint/other_test.go b/broker/hint/other_test.go\n--- a/broker/hint/other_test.go\n"
+                "+++ b/broker/hint/other_test.go\n@@ -5,0 +6,3 @@\n+\n+// one is TestUp's helper.\n+func one() int\n")
+        self.assertEqual(mutgate.base_test_lines(diff, ({"broker/hint/other_test.go": {6, 7, 8}}, {})), ({}, {}))
+        self.assertEqual(mutgate.base_test_lines(diff)[1], {"broker/hint/other_test.go": {5}})
+        self.assertEqual(self.reach({"hint_test.go": MOVE_TEST, "other_test.go": none}, {"hint_test.go": rest, "other_test.go": with_one}),
+                         ([], []))
 
     def test_file_name_constraints_cover_every_port(self):
         # _name_tags reads a GOOS or GOARCH from a file name only if it is listed: every port the pinned
