@@ -3322,6 +3322,18 @@ class DataFiles(unittest.TestCase):
                 ("an import in a block comment", '/*\nimport "os/exec"\n*/\nimport "fmt"', False),
                 ("an import path in a literal", 'import "fmt"\n\nvar _ = fmt.Sprint("os/exec")', False)))
 
+    def test_a_grouped_import_is_read_after_both_import_regexes_merged(self):
+        # #6403 and #6378 each added a module-level IMPORT_SPEC; merged, the later one replaced the
+        # first, so _import_spans crashed (None.end()) on any `import (` and `claimed` failed for a
+        # broker .md edit in such a package. tests/test_py_names.py now fails a repeated name.
+        # REQ: MUT-deleted-test-own-lines-fu
+        code = 'package hint\n\nimport (\n\t"fmt"\n\t"os/exec"\n)\n'
+        start = code.index("import") + len("import")
+        self.assertEqual(mutgate._import_spans(code), [(start, code.index(")") + 1)])
+        self.assertEqual(mutgate._imports(code), {"fmt": "fmt", "exec": "os/exec"})
+        with tempfile.TemporaryDirectory() as d, self.tree(d, {"hint/hint.go": code}):
+            self.assertEqual(mutgate.data_owner("broker/hint/ASSUMPTIONS.md"), "hint")
+
     def test_a_glob_matches_by_its_last_part_against_the_files_base_name(self):
         # Potency on #5943 (d92c2e23): the last-part clause survived `rsplit`→`split` (needs a glob
         # with two directory parts) and `parts[-1]`→`parts[0]` (needs a file below a subdirectory).
