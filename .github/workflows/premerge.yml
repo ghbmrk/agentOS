@@ -11,7 +11,9 @@ name: premerge
 # is the bot's (MAIN-PROT-3, #757): the head commit's `Bot-Run:` trailer names the writer run, and
 # the file must equal that run's artifact while the run is main's own workflow on a main commit.
 # Main must require the `premerge` status (a ruleset change Mark makes).
-# It reruns on every PR push and on every PR comment created, edited or deleted. Both events
+# It reruns on every PR push and on every PR comment created, edited or deleted that holds `Verdict:` in any case, before
+# or after an edit (premerge.VERDICT; #6398). Any other comment can change no verdict, so its run joins no PR
+# group, where it would replace a pending run that reads the records, and skips the gate. Both events
 # run the BASE branch's workflow file and tools/premerge.py: the PR head is fetched as git
 # objects for `git merge-tree` and `git diff`; it is never checked out, imported or executed.
 # Fail closed: anything but a clean `same` or `bot` posts `failure`.
@@ -90,12 +92,12 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: premerge-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || inputs.pr || github.run_id }}
+  group: premerge-${{ github.event.pull_request.number || ((contains(github.event.comment.body, 'Verdict:') || contains(github.event.changes.body.from, 'Verdict:')) && github.event.issue.number) || github.event.workflow_run.pull_requests[0].number || inputs.pr || github.run_id }}
   cancel-in-progress: false
 jobs:
   premerge-gate:
     name: premerge-gate
-    if: (github.event_name == 'pull_request_target' && github.event.action != 'closed') || github.event.issue.pull_request || github.event.workflow_run.pull_requests[0] || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'pull_request_target' && github.event.action != 'closed') || (github.event.issue.pull_request && (contains(github.event.comment.body, 'Verdict:') || contains(github.event.changes.body.from, 'Verdict:'))) || github.event.workflow_run.pull_requests[0] || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     environment: premerge # deployment branches: main only; holds PREMERGE_APP_KEY
