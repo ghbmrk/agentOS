@@ -349,6 +349,16 @@ func TestShippedAccountsStateTheirDailyBytes(t *testing.T) {
 	}
 }
 
+// dests is the declared part of enflist.Inputs, as the caller (#5157)
+// builds it from Declared.
+func dests(ss []Send) []enflist.Dest {
+	var out []enflist.Dest
+	for _, x := range ss {
+		out = append(out, enflist.Dest{Host: x.Host, Basis: enflist.Declared, DailyBytes: x.DailyBytes})
+	}
+	return out
+}
+
 // TestDeclaredFeedsEnflist (#6145 acceptance 3): the Inputs built from the
 // confirmed accounts' declarations names every destination they declare,
 // with basis Declared and the table's figure, in table order whatever the
@@ -356,10 +366,11 @@ func TestShippedAccountsStateTheirDailyBytes(t *testing.T) {
 // no destination adds none; an id twice counts once.
 func TestDeclaredFeedsEnflist(t *testing.T) {
 	tab := household(t)
-	got, err := tab.Declared([]string{"shop", "power", "bank", "shop", CardID})
+	ss, err := tab.Declared([]string{"shop", "power", "bank", "shop", CardID})
 	if err != nil {
 		t.Fatal(err)
 	}
+	got := dests(ss)
 	want := []enflist.Dest{
 		{Host: "api.bank.test", Basis: enflist.Declared, DailyBytes: 4 << 20},
 		{Host: "token.bank.test", Basis: enflist.Declared, DailyBytes: 64 << 10},
@@ -405,7 +416,7 @@ func TestDeclaredFeedsEnflist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := enflist.Propose(policy.Document{Version: 1}, enflist.Inputs{Dests: ds, EdgeDeclaredBytes: 1}); err != nil {
+	if _, err := enflist.Propose(policy.Document{Version: 1}, enflist.Inputs{Dests: dests(ds), EdgeDeclaredBytes: 1}); err != nil {
 		t.Fatalf("the shipped declarations do not sign: %v", err)
 	}
 }

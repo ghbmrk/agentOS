@@ -19,8 +19,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-
-	"github.com/ghbmrk/agentos/broker/clerk/enflist"
 )
 
 //go:embed known.json
@@ -224,14 +222,16 @@ func validate(es []Entry) error {
 var ErrNotInTable = errors.New("accounts: not in the table")
 
 // Declared is the destinations the entries with ids declare, each with the
-// daily bytes its declaration states and basis Declared, in table order:
-// the declared part of enflist.Inputs for the accounts the owner has set
-// up on the plan (CLK-14, NET-2 Byte caps). The caller passes every
-// account the owner confirmed, since Inputs is the core's whole list and a
-// destination left out is dropped; an id twice counts once, and an id the
-// table lacks is ErrNotInTable. The figures are the embedded table's, the
-// ones the plan's screen showed, never the mail clerk's answer.
-func (t *Table) Declared(ids []string) ([]enflist.Dest, error) {
+// daily bytes its declaration states, in table order: the declared part of
+// enflist.Inputs for the accounts the owner has set up on the plan (CLK-14,
+// NET-2 Byte caps), each becoming an enflist.Dest with basis Declared. The
+// caller passes every account the owner confirmed, since Inputs is the
+// core's whole list and a destination left out is dropped; an id twice
+// counts once, and an id the table lacks is ErrNotInTable. The figures are
+// the embedded table's, the ones the plan's screen showed, never the mail
+// clerk's answer. The package does not import enflist, so that linking the
+// plan into agentosd and the mail clerk does not link the cap composer.
+func (t *Table) Declared(ids []string) ([]Send, error) {
 	if t == nil {
 		return nil, ErrNotInTable
 	}
@@ -240,13 +240,10 @@ func (t *Table) Declared(ids []string) ([]enflist.Dest, error) {
 			return nil, fmt.Errorf("%w: %s", ErrNotInTable, strconv.QuoteToASCII(id))
 		}
 	}
-	var out []enflist.Dest
+	var out []Send
 	for _, e := range t.entries {
-		if !slices.Contains(ids, e.ID) {
-			continue
-		}
-		for _, x := range e.Sends {
-			out = append(out, enflist.Dest{Host: x.Host, Basis: enflist.Declared, DailyBytes: x.DailyBytes})
+		if slices.Contains(ids, e.ID) {
+			out = append(out, e.Sends...)
 		}
 	}
 	return out, nil
