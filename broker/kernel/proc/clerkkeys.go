@@ -75,8 +75,11 @@ const keyWait = 2 * time.Second
 // Serving one at a time, it returns only once no hand-off still reads
 // root, and the caller may then clear it.
 func ServeClerkKey(ln net.Listener, name, cgroup string, root *[clerkkey.Len]byte) error {
-	return serveClerkKey(ln, name, cgroup, root, procCgroup)
+	return serveClerkKey(ln, name, cgroup, root, keyCgroup)
 }
+
+// keyCgroup reads a key peer's cgroup: procCgroup, or a test's.
+var keyCgroup = procCgroup
 
 func serveClerkKey(ln net.Listener, name, cgroup string, root *[clerkkey.Len]byte, cgroupOf func(pid int32) (string, error)) error {
 	if !clerkkey.ValidName(name) || !ValidCgroup(cgroup) || *root == ([clerkkey.Len]byte{}) {

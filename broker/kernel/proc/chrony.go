@@ -115,10 +115,10 @@ func (s *Chrony) ask() (float64, float64, bool) {
 	}
 	p := make([]byte, chronyLen+1)
 	n, err := s.c.Read(p)
-	if err != nil {
-		return 0, 0, false
+	if err == nil {
+		return parseTracking(p[:n], s.seq)
 	}
-	return parseTracking(p[:n], s.seq)
+	return 0, 0, false
 }
 
 // parseTracking reads an RPY_TRACKING reply to request seq: chronyd's
