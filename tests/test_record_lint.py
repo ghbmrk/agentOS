@@ -162,5 +162,10 @@ class Main(unittest.TestCase):
         self.assertEqual(code, 0)
 
 
+    def test_reviewer_skill_runs_the_lint(self):
+        # RECORD-lint-step (#5661, #6370): the lint stopped no repost while no reviewer was told to run it.
+        skill = (ROOT / ".claude/skills/agentos-reviewer/SKILL.md").read_text()
+        self.assertIn("`python3 tools/record_lint.py <N> --head <SHA> <draft>` passes", skill)
+
 if __name__ == "__main__":
     unittest.main()
