@@ -782,7 +782,9 @@ class KexecSysctlTest(unittest.TestCase):
 
     def test_the_image_sets_it_and_the_tree_check_runs_it(self):
         self.assertEqual(check.KEXEC_SYSCTL, "usr/lib/sysctl.d/99-agentos-kexec.conf")
-        self.assertEqual(check.sysctl(str(MK / "mkosi.extra"), "kernel.kexec_load_disabled"), "1")
+        # nodump() copies the shipped file from mkosi.extra into this tree; the check reads it as the box would.
+        self.assertIn("\nkernel.kexec_load_disabled=1\n", (MK / "mkosi.extra" / check.KEXEC_SYSCTL).read_text())
+        self.assertEqual(check.sysctl(str(self.root), "kernel.kexec_load_disabled"), "1")
         self.assertEqual(check.kexec_sysctl_violations(self.root), [])
         (self.root / check.KEXEC_SYSCTL).unlink()
         self.assertEqual(check.kexec_sysctl_violations(self.root), self.refusal(None))
