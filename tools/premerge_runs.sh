@@ -29,14 +29,14 @@ branch=$(jq -er '.head.ref | strings | select(length > 0) | @uri' "$pr") || { ec
 tmp=$(mktemp -d) || exit 1
 trap 'rm -rf "$tmp"' EXIT
 
-runs() { # $1: the runs query, $2: the jobs route under a failed run
+runs() { # $1: the runs query, $2: the jobs route under a failed run, $3: read jobs only for this workflow path (optional)
   gh api --paginate "repos/$repo/actions/runs?$1&per_page=100" --jq '.workflow_runs[]' | jq -s . > "$tmp/r.json" || return 1
-  jq -r '.[] | select(.conclusion == "failure") | .id' "$tmp/r.json" | while read -r id; do
+  jq -r --arg p "${3:-}" '.[] | select(.conclusion == "failure" and ($p == "" or .path == $p)) | .id' "$tmp/r.json" | while read -r id; do
     gh api --paginate "repos/$repo/actions/runs/$id/$2?per_page=100" --jq '.jobs[]' || exit 1
   done | jq -s --slurpfile r "$tmp/r.json" '. as $j | $r[0] | map(.id as $id | . + {jobs: [$j[] | select(.run_id == $id)]})'
 }
 runs "head_sha=$head" jobs > "$tmp/head.json" || exit 1
-runs "branch=$branch&event=pull_request" jobs > "$tmp/branch.json" || exit 1
+runs "branch=$branch&event=pull_request" jobs .github/workflows/mutgate.yml > "$tmp/branch.json" || exit 1
 runs "head_sha=$onto&event=push" attempts/1/jobs > "$tmp/push.json" || exit 1
 runs "head_sha=$onto&event=schedule" attempts/1/jobs > "$tmp/schedule.json" || exit 1
 jq -n --slurpfile h "$tmp/head.json" --slurpfile b "$tmp/branch.json" --slurpfile p "$tmp/push.json" --slurpfile s "$tmp/schedule.json" \

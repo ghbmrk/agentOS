@@ -51,9 +51,9 @@ an armed PR past a cancelled one: `--runs` is the head's and merge base's Action
 workflow's newest pull_request run on the head must pass, else it prints `needs-check <workflow>:<state> ...` and
 exits 1. Without `--runs` it prints `needs-runs` and exits 1, so no caller reads `same` with the checks unread;
 `tools/premerge_runs.sh` builds the runs file, for premerge.yml and for a local check alike (#5386).
-A head other than the L3 accept's reads `same` only when mutgate also passed on the accepted head (the runs
-file's `branch` list), else it prints `needs-l3 mutgate:<state> ...` and exits 1 (#6379): an accept may precede
-mutgate, and a waiver pushed later in an empty commit or main-merge would pass mutgate with no review reading it.
+The L3 accept counts only when mutgate finished and passed on its head before it was posted, and no mutgate run on
+that head was created or updated after it (the runs file's `head` and `branch` lists), else it prints
+`needs-l3 mutgate:<state> ...` and exits 1 (#6379): a waiver passes mutgate only through the summary a review read.
 
 `--bot` is the gate form for the generated-file bot PRs, which carry no verdict (PREMERGE-wire, #1860): it
 prints `bot` (exit 0) only when `head-ref` is one of the BOT branches, base..head changes nothing but that
@@ -164,7 +164,7 @@ def lenses_owed(files):
     return ["combined"] if tier == "B" else []
 
 
-def verdict(comments, pr, security=False, lens=None):
+def verdict(comments, pr, security=False, lens=None, at=False):
     """(verdict, reviewed-sha) of the newest trusted L3 verdict comment for PR `pr`, or None.
 
     With `security`, of the newest trusted Security verdict comment that carries no L3 marker instead;
@@ -174,7 +174,8 @@ def verdict(comments, pr, security=False, lens=None):
     `unparsed` (`_record_block`, #4261, #5541); any other verdict reads the whole comment, so it fails closed.
     A qualifying comment edited after posting (updated_at missing or different from created_at) reads as verdict
     `edited`, which is never an accept, until a later comment supersedes it: a verdict is the text that was reviewed.
-    A qualifying comment with no well-formed Record line for any PR reads as `unparsed` the same way (#3611)."""
+    A qualifying comment with no well-formed Record line for any PR reads as `unparsed` the same way (#3611).
+    With `at`, the tuple also carries the comment's `created_at` (#6379)."""
     found = None
     for c in sorted(comments, key=lambda c: c.get("created_at") or ""):
         body = c.get("body") or ""
@@ -200,7 +201,7 @@ def verdict(comments, pr, security=False, lens=None):
                 found = ("misplaced" if misplaced and ours.match(line or "") else "unparsed", None)
         elif marked:
             edited = c.get("updated_at") != c.get("created_at") or not c.get("created_at")
-            found = ("edited" if edited else first.split(":", 1)[1].strip().lower(), rec.group(1))
+            found = ("edited" if edited else first.split(":", 1)[1].strip().lower(), rec.group(1)) + ((c.get("created_at"),) if at else ())
     return found
 
 
@@ -755,7 +756,7 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main", only=None, key="head
     `skipped`, or on `failure` when every failed job is one HELD exempts or one that failed on the merge base too.
     A queued, running, cancelled or timed-out run holds, and so does a missing one the workflow's PR trigger owes, as
     `unbound` when only this branch's runs that name no PR or another PR are on the head. `only` limits the workflows
-    read and `key` names the run list (`branch` for `mutgate_unreviewed`)."""
+    read and `key` names the run list (`pinned` for `mutgate_unreviewed`)."""
     pr = runs.get("pr") if isinstance(runs, dict) else None
     if not (isinstance(pr, dict) and isinstance(pr.get("number"), int) and all(isinstance(pr.get(k), str) for k in ("repo", "branch"))
             and isinstance(runs.get("repo"), str) and all(isinstance(runs.get(k), list) for k in ("head", "base", key))):
@@ -789,24 +790,30 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main", only=None, key="head
     return held
 
 
-# PROC-review-no-mutgate-wait (#6379): an L3 accept may come before mutgate. mutgate passes a survivor on a
-# `Mutant-equivalent:`/`Mutant-uncovered:` line in the body of the push it runs on, and a push that changes no diff
-# (an empty commit, a main-merge) reads `same`, so a waiver pushed after the accept would merge with no reviewer
-# reading it. So a head other than the accepted one reads `same` only when mutgate passed on the accepted head too:
-# its waivers, if any, were in front of that review. Otherwise the L3 accept is owed again at this head.
-REWAIVE = "needs-l3 mutgate:{} at accepted head {}: a waiver may pass mutgate after review, accept this head"
+# PROC-review-no-mutgate-wait (#6379): reviews may start while mutgate runs, but mutgate passes a survivor on a
+# `Mutant-equivalent:`/`Mutant-uncovered:` line in the body its event carries, and a new event on the same head (a
+# reopen) or a push that changes no diff (an empty commit, a main-merge) reads `same`. So an L3 accept counts only
+# when mutgate had finished and passed on the accepted head before the accept was posted, and no mutgate run on that
+# head was created or updated after it: every waiver that passed was in the summary that review could read.
+REWAIVE = "needs-l3 mutgate:{} at accepted head {}: accept only after mutgate has passed on that head"
+_PR_EVENTS = ("pull_request", "pull_request_target")
 
 
-def mutgate_unreviewed(cwd, runs, accepted, head="HEAD", base="origin/main"):
-    """`[<state>]` when `head` is not the accepted commit and mutgate did not pass on the accepted one (or the runs
-    document has no `branch` list to tell), else `[]`. Reads the PR branch's runs (`branch`, premerge_runs.sh)."""
-    sha = _git(cwd, "rev-parse", f"{head}^{{commit}}").decode().strip()
-    seen = _git(cwd, "rev-parse", f"{accepted}^{{commit}}").decode().strip()
-    if sha == seen:
-        return []
-    if not isinstance(runs.get("branch"), list):
+def mutgate_unreviewed(cwd, runs, accepted, at, base="origin/main"):
+    """`[<state>]` unless mutgate passed on the accepted commit before the accept's `created_at` (`at`) and no run of it
+    on that commit, bound to this PR or unbound, was created or updated after `at` (`after-accept`); `unread` when the
+    runs document has no `branch` list (premerge_runs.sh). The head's and the branch's runs are read together."""
+    if not isinstance(runs.get("branch"), list) or not isinstance(runs.get("head"), list):
         return ["unread"]
-    return [h.split(":", 1)[1] for h in checks_held(cwd, runs, seen, base, only=("mutgate",), key="branch")]
+    seen = _git(cwd, "rev-parse", f"{accepted}^{{commit}}").decode().strip()
+    path = ".github/workflows/mutgate.yml"
+    pool = {r.get("id"): r for r in runs["head"] + runs["branch"] if isinstance(r, dict) and r.get("path") == path
+            and r.get("head_sha") == seen and r.get("event") in _PR_EVENTS}
+    mine = [r for r in pool.values() if _bind(r, runs["pr"], runs["repo"]) != "foreign"]
+    at = at if isinstance(at, str) and at else ""  # no time never precedes a run
+    if any(not (isinstance(r.get(k), str) and r[k] <= at) for r in mine for k in ("created_at", "updated_at")):
+        return ["after-accept"]
+    return [h.split(":", 1)[1] for h in checks_held(cwd, {**runs, "pinned": mine}, seen, base, only=("mutgate",), key="pinned")]
 
 
 def main(argv):
@@ -861,7 +868,7 @@ def main(argv):
         if held:
             print("needs-check " + " ".join(held))
             return 1
-        held = mutgate_unreviewed(".", runs, v[1], head, base)
+        held = mutgate_unreviewed(".", runs, v[1], verdict(comments, pr, at=True)[2], base)
         if held:
             print(REWAIVE.format(held[0], v[1][:7]))
             return 1
