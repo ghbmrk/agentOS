@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"os/exec"
 	"regexp"
 	"slices"
@@ -448,6 +449,89 @@ func TestSharedLabelFreeLoad(t *testing.T) {
 	for tag, want := range map[uint16]bool{oldForged: false, oldOwn: false, newForged: false, newOwn: true} {
 		if got := atPeer.has(tag); got != want {
 			t.Errorf("error %d (1801 forged and 1802 own on the flow open across the load, 1803 and 1804 on a new one) arrived %v, want %v", tag, got, want)
+		}
+	}
+}
+
+// TestHostTimeoutBasisIsHostIdle (#4704, NET-2 Device paths, NET-3): a
+// shared host's record is refreshed only by the host's own packets, so
+// HostTimeout and HostTCPTimeout bound how long the host may stay idle,
+// not how long conntrack keeps the connection, and ASSUMPTIONS
+// ENF-ct-bind-2 names the receive-only datagram flow that residual cuts.
+// Reads the compiled ruleset: every update of a host set is in its
+// segment's bound chain, every jump to a bound chain is on an
+// original-direction packet (established or related in the original
+// direction, or new), and the set's and the assured rule's timeouts are
+// HostTimeout and HostTCPTimeout. Catches a change that widens the
+// refresh to replies (then the residual is gone and the ASSUMPTIONS row
+// is wrong) or narrows it, or a row that drops the residual.
+func TestHostTimeoutBasisIsHostIdle(t *testing.T) {
+	text, err := Compile(fixturePolicy(), fixtureLayout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := chains(text)
+	jumps := map[string]int{}
+	for name, lines := range cs {
+		for _, l := range lines {
+			if strings.Contains(l, "update @host_") && !strings.HasPrefix(name, "bound_") {
+				t.Errorf("chain %s refreshes a host record: %s", name, l)
+			}
+			if !strings.Contains(l, "bound_") {
+				continue
+			}
+			if !strings.HasPrefix(l, "ct state established,related ct direction original ") && !strings.HasPrefix(l, "ct state new ") {
+				t.Errorf("chain %s reaches a bound chain on a packet that may be a reply: %s", name, l)
+			}
+			for _, sg := range segments(fixtureLayout()) {
+				if strings.Contains(l, "jump "+bound(sg.name)) {
+					jumps[sg.name]++
+				}
+			}
+		}
+	}
+	for _, sg := range segments(fixtureLayout()) {
+		if jumps[sg.name] == 0 {
+			t.Errorf("no rule reaches %s", bound(sg.name))
+		}
+		var tcp, other int
+		for _, l := range cs[bound(sg.name)] {
+			switch {
+			case strings.Contains(l, "ct status assured update @host_") && strings.Contains(l, " timeout "+secs(HostTCPTimeout)+" } return"):
+				tcp++
+			case strings.Contains(l, "update @host_") && !strings.Contains(l, " timeout "):
+				other++
+			case strings.Contains(l, "update @host_"):
+				t.Errorf("%s refreshes for another timeout: %s", bound(sg.name), l)
+			}
+		}
+		if tcp != 2 || other != 2 {
+			t.Errorf("%s: %d assured-TCP and %d other refreshes, want 2 and 2 (one per family)", bound(sg.name), tcp, other)
+		}
+		for _, v6 := range []bool{false, true} {
+			decl := regexp.MustCompile(`(?s)set ` + HostSet(sg.name, v6) + ` \{[^}]*timeout ` + secs(HostTimeout) + `;`)
+			if !decl.MatchString(text) {
+				t.Errorf("%s is not declared with timeout %s", HostSet(sg.name, v6), secs(HostTimeout))
+			}
+		}
+	}
+	b, err := os.ReadFile("ASSUMPTIONS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row string
+	for _, l := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(l, "| ENF-ct-bind-2 |") {
+			row = l
+		}
+	}
+	for _, want := range []string{
+		"Only the host's own packets refresh it",
+		"bound how long the host may stay idle, not the connection",
+		"only receives on for longer than `HostTimeout` keeps its conntrack entry and loses its record",
+	} {
+		if !strings.Contains(row, want) {
+			t.Errorf("ASSUMPTIONS ENF-ct-bind-2 does not say %q", want)
 		}
 	}
 }
