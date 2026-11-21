@@ -54,22 +54,23 @@ func TestPinnedOpenAndReadErrorsPassThrough(t *testing.T) {
 }
 
 // TestReadPinnedClosesTheFile: reading a pinned file, accepted or refused,
-// leaves no descriptor open (collection is off, so no finalizer closes a
-// leaked one).
+// leaves no descriptor open on it: no entry of /proc/self/fd links into
+// its directory afterwards (collection is off, so no finalizer closes a
+// leaked one). Other tests' descriptors, which run in parallel, are not
+// counted.
 func TestReadPinnedClosesTheFile(t *testing.T) {
-	fds := func() int {
-		es, err := os.ReadDir("/proc/self/fd")
-		if err != nil {
-			t.Skip("no /proc/self/fd")
-		}
-		return len(es)
-	}
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "m.onnx"), []byte("x"), 0o644)
 	os.WriteFile(filepath.Join(dir, "w.onnx"), []byte("y"), 0o644)
 	withPins(t, hashOf("x")+"  m.onnx  https://example.invalid/m\n"+hashOf("x")+"  w.onnx  https://example.invalid/w\n")
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
-	before := fds()
+	if _, err := os.ReadDir("/proc/self/fd"); err != nil {
+		t.Skip("no /proc/self/fd")
+	}
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < 8; i++ {
 		if _, err := readPinned(dir, "m.onnx"); err != nil {
 			t.Fatal(err)
@@ -78,7 +79,10 @@ func TestReadPinnedClosesTheFile(t *testing.T) {
 			t.Fatalf("a wrong hash: %v", err)
 		}
 	}
-	if after := fds(); after != before {
-		t.Fatalf("%d descriptors open before, %d after", before, after)
+	es, _ := os.ReadDir("/proc/self/fd")
+	for _, e := range es {
+		if to, err := os.Readlink(filepath.Join("/proc/self/fd", e.Name())); err == nil && strings.HasPrefix(to, real+string(filepath.Separator)) {
+			t.Errorf("descriptor %s is left open on %s", e.Name(), to)
+		}
 	}
 }
