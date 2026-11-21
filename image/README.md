@@ -6,16 +6,19 @@ It carries the broker (`agentosd`), gVisor's `runsc`, and the OpenClaw guest ima
 
 Build with image.yml's own split (IMG-mkosi-run-bound, D-276; #6161, #6348): `build.sh` runs as root on one
 host and the pinned mkosi on another where `build.sh` never ran, so the repository's root code cannot reach
-mkosi, its config or its binary. Each host needs a clean checkout of the same commit, a user who can sudo, and
-network to the Debian mirrors (cloud agent sessions have none; CI does).
+mkosi, its config or its binary. Each host needs a checkout of the same commit with no changed, untracked or
+ignored file, a user who can sudo, and network to the Debian mirrors (cloud agent sessions have none; CI does).
+The stage host need not last: a disposable VM, thrown away once the tar is copied out, is a valid stage host.
 
 1. On the stage host, with `build.sh`'s tools (image.yml's "Install staging tools" step):
-   `image/local-build.sh stage DIR` runs `image/build.sh` as image.yml's stage job does and packs the stage
-   as `DIR/stage-COMMIT.tar`.
-2. On the build host, with the pinned mkosi v24.3 in `/opt/mkosi` (image.yml's "Install build and boot tools"
-   step; the wrapper refuses any other commit): `image/local-build.sh build TAR DIR [VERSION]` holds the tar
-   to `stage/usr`, `agentos.sources`, `guest/` and `linked/`, then runs the one line image.yml's "Build image"
-   step runs:
+   `image/local-build.sh stage DIR` marks the host as one that staged (`/var/lib/agentos-stage-host`), runs
+   `image/build.sh` as image.yml's stage job does, packs the stage as `DIR/stage-COMMIT.tar` and prints the
+   build command with the tar's SHA-256.
+2. On the build host, which never staged (the wrapper refuses a host with the mark), with the pinned mkosi
+   v24.3 in `/opt/mkosi` (image.yml's "Install build and boot tools" step; the wrapper refuses any other
+   commit, and any changed, untracked or ignored file there): `image/local-build.sh build TAR SHA256 DIR
+   [VERSION]` refuses a tar whose content is not the SHA-256 the stage printed, holds it to `stage/usr`,
+   `agentos.sources`, `guest/` and `linked/`, then runs the one line image.yml's "Build image" step runs:
    `sudo env "PATH=$PATH" HOME=/root "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" /opt/mkosi/bin/mkosi -C image/mkosi -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" --environment=AGENTOS_SECURITY_SNAPSHOT="$AGENTOS_SECURITY_SNAPSHOT" --extra-tree="$OUT/stage/usr:/usr" --output-dir "$OUT" build`,
    and `image/finish.sh`. The image is in `DIR/out`.
 
@@ -23,7 +26,8 @@ network to the Debian mirrors (cloud agent sessions have none; CI does).
 `DIR/build.log`) on exit. A checkout with changes or untracked files is refused, as CI builds only commits.
 `VERSION` defaults to the commit time and may hold only `0-9 A-Z a-z . + _ -`. `AGENTOS_SECURITY_SNAPSHOT`,
 if set on both hosts, is the run's snapshot; unset, `build.sh` resolves one and the build host resolves the
-set it must be in. `tests/test_image.py` holds each of the wrapper's steps line for line equal to image.yml's;
+set it must be in, later, so the two can differ: the build then refuses and names the fix, setting it on both
+hosts to one of the build host's (`sh image/security-snapshot.sh resolve` prints them) and staging again. `tests/test_image.py` holds each of the wrapper's steps line for line equal to image.yml's;
 CI never runs the wrapper. CI: `.github/workflows/image.yml` stages on two runners, builds
 each on a fresh runner that never runs `build.sh`, boots one build under Secure Boot in QEMU, and
 compares the releases.
