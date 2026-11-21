@@ -286,7 +286,9 @@ def added_lines(diff_text, moved=None):
     reached is read at the base (base_test_lines). A changed data file (is_data) is in the second
     map too, as None: data_owner names the package whose tests it changes (#5779). moved is
     moved()'s pair: a test line it names at the head is no change, nor is a hunk or file deletion
-    whose every base line it names (#6369)."""
+    whose every base line it names (#6369). A hunk deleting any other base line always changes the
+    file: when moved() names all its added lines, the line either side of them is touched (L3 and
+    Security on #6378: a deleted test beside a moved-in declaration is one replace hunk)."""
     added, tests, path, old, line, in_hunk = {}, {}, None, None, 0, False
     at_head, at_base = moved or ({}, {})
 
@@ -319,8 +321,12 @@ def added_lines(diff_text, moved=None):
             if path is None and old is not None and is_test(old):
                 if not gone(m):
                     tests[old] = None  # the file is deleted
-            elif path is not None and is_test(path) and m.group(2) == "0" and not gone(m):
-                touch(path, {line, line + 1})  # git numbers a deletion after new line `line`
+            elif path is not None and is_test(path) and not gone(m) and HUNKS.match(raw)[2] != "0":
+                new = int(m.group(2) or 1)
+                if new == 0:
+                    touch(path, {line, line + 1})  # git numbers a deletion after new line `line`
+                elif set(range(line, line + new)) <= at_head.get(path, set()):
+                    touch(path, {n for n in (line - 1, line + new) if n > 0})
             continue
         if not in_hunk:
             if raw.startswith("--- "):
@@ -645,13 +651,13 @@ def bases_for(diff_text, base, head, tests, pkgs):
     if not pkgs:
         return {}
     mb = merge_base(base, head)
-    btests = base_test_lines(diff_text, moved(diff_text, mb))  # (lines, gaps)
+    btests = base_test_lines(diff_text, moved(diff_text, mb, head))  # (lines, gaps)
     return {pkg: None if head_tests(tests, pkg) is None else base_changed_tests(btests, pkg, mb) for pkg in pkgs}
 
 
 def changes(diff_text, base, head):
     """added_lines with what moved() reads as moved left out of the test files' lines (#6369)."""
-    return added_lines(diff_text, moved(diff_text, merge_base(base, head)))
+    return added_lines(diff_text, moved(diff_text, merge_base(base, head), head))
 
 
 # Moved declarations (TOOL-mutgate-moved-lines, #6369). The diffs ignore renames (#4147), so code moved
@@ -662,8 +668,9 @@ def changes(diff_text, base, head):
 # (`//go:build` lines, file-name GOOS and GOARCH) are those of exactly one declaration of the package's .go
 # files at the base and of exactly one at the head. What hangs on order or file stays a change: init,
 # TestMain, a var with an initializer, any declaration of a file with a linkname (_decls' every), a move out
-# of a test file into a non-test one (`go test` runs no test there) or into a file go ignores, and any edit,
-# one token or a comment. Across two files each name the declaration qualifies a selector with
+# of a test file into a non-test one or into a file go ignores, a function `go test` runs by name (RUNNABLE)
+# unless it stays in its file with the file's run order unchanged (tests run in file then source order, and
+# one in a non-test file never ran), and any edit, one token or a comment. Across two files each name the declaration qualifies a selector with
 # (`q.X`) must have the same binding imports in both, by name: an explicit one, a standard library path's
 # last element, or the package clause this module's package has at that side; an import of a name not known
 # so must be in both files. A test file's header change (an import, a plain comment; a new or deleted
@@ -671,8 +678,9 @@ def changes(diff_text, base, head):
 # removed import is blank or dot, every added import path was imported at the base by a file of the
 # directory built with it (no build constraint, or the same) or is the package itself, and every removed
 # one still is at the head (no init changes), and, in a file on both sides, the added and removed imports
-# have known names, none shared, no added one a package-level name at the base and no removed one at the
-# head: an unchanged line of the file then binds each name as before. Anything unread fails closed.
+# have known names, none shared or a universe name, no added one a package-level name at the base and no
+# removed one at the head: an unchanged line of the file then binds each name as before. Both sides are read
+# from git (the merge base and the diff's head), never the working tree. Anything unread fails closed.
 GOOS = set("aix android darwin dragonfly freebsd hurd illumos ios js linux nacl netbsd openbsd plan9 solaris "
            "wasip1 windows zos".split())
 GOARCH = set("386 amd64 amd64p32 arm armbe arm64 arm64be loong64 mips mipsle mips64 mips64le mips64p32 "
@@ -680,6 +688,12 @@ GOARCH = set("386 amd64 amd64p32 arm armbe arm64 arm64be loong64 mips mipsle mip
 IMPORT_SPEC = re.compile(r'(?:([A-Za-z_]\w*|\.)\s+)?(?:"([^"\\\n]*)"|`([^`\n]*)`)')
 QUALIFIER = re.compile(r"\b([A-Za-z_]\w*)\s*\.")
 MOVABLE = ("func", "method", "type", "var", "const")
+# What `go test` runs by name, in file then source order: moving one changes the run order.
+RUNNABLE = re.compile(r"^func ((?:Test|Fuzz|Example|Benchmark)(?![a-z])\w*)\(")
+# Go's universe block: an import of one of these names would shadow it in its file (L3 on #6378).
+UNIVERSE = set("any append bool byte cap clear close comparable complex complex128 complex64 copy delete error false "
+               "float32 float64 imag int int16 int32 int64 int8 iota len make max min new nil panic print println "
+               "real recover rune string true uint uint16 uint32 uint64 uint8 uintptr".split())
 
 
 def _name_tags(path):
@@ -722,38 +736,35 @@ def _facts(path, text):
             else:
                 skeleton.append(c)
     builds = tuple(s for s in skeleton if s.startswith(("//go:build", "// +build")))
-    return types.SimpleNamespace(
+    bare = _uncommented(text, False).split("\n")
+
+    def run(d):
+        """The name `go test` runs d by (RUNNABLE), or None."""
+        at = next((rows[i - 1] for i in range(d[6], d[7] + 1) if DECL.match(bare[i - 1])), "")
+        return d[1] == "func" and (m := RUNNABLE.match(at)) and m[1] or None
+    return types.SimpleNamespace(run=run, runs=lambda: [n for d in decls if (n := run(d))],
         decls=decls, clause=decls[0][8] if decls else None, build=(builds, _name_tags(path)),
         header=header, skeleton=skeleton, specs=specs, linked="go:linkname" in text,
         text=lambda d: "\n".join(rows[d[6] - 1:d[7]]).rstrip())
 
 
-def _go_files(pkg, mb=None):
-    """{path: text} of broker/<pkg>/'s .go files at commit mb, or in the working tree when mb is None; None
-    when one is a link or not a regular file, or the directory is a link."""
+def _go_files(pkg, commit):
+    """{path: text} of broker/<pkg>/'s .go files at commit, or None when one is a link or not a regular
+    file. Both sides are read from git, never the working tree, so `verify --head` reads the head it names."""
     out, prefix = {}, f"broker/{pkg}/" if pkg else "broker/"
-    if mb is None:
-        d = BROKER / pkg if pkg else BROKER
-        if d.is_symlink():
-            return None
-        for f in sorted(d.glob("*.go")) if d.is_dir() else ():
-            if f.is_symlink() or not f.is_file():
-                return None
-            out[prefix + f.name] = f.read_bytes().decode("utf-8", "replace")
-        return out
-    listing = subprocess.run(["git", "ls-tree", "-z", mb, "--", prefix], cwd=ROOT, capture_output=True,
+    listing = subprocess.run(["git", "ls-tree", "-z", commit, "--", prefix], cwd=ROOT, capture_output=True,
                              text=True, check=True).stdout
     for entry in filter(None, listing.split("\0")):
         meta, path = entry.split("\t", 1)
         if path.endswith(".go"):
-            if (text := base_text(mb, path)) is None:
+            if (text := base_text(commit, path)) is None:
                 return None
             out[path] = text
     return out
 
 
 def _side(pkg, mb, module):
-    """One side (commit mb, or the working tree for None) of broker/<pkg>/ as moved() reads it, or None."""
+    """One side (commit mb) of broker/<pkg>/ as moved() reads it, or None."""
     files = _go_files(pkg, mb)
     if files is None:
         return None
@@ -813,7 +824,7 @@ def _same_header(bf, hf, b, h):
         return False
     if bf and hf:
         an, rn = {h.name(s) for s in added}, {b.name(s) for s in removed}
-        if None in an | rn or an & rn or an & b.names(bf.clause) or rn & h.names(hf.clause):
+        if None in an | rn or an & rn or (an | rn) & UNIVERSE or an & b.names(bf.clause) or rn & h.names(hf.clause):
             return False
     return True
 
@@ -830,23 +841,22 @@ def _same_binding(sf, df, text, b, h):
                for q in set(QUALIFIER.findall(_uncommented(text, False))))
 
 
-def moved(diff_text, mb):
+def moved(diff_text, mb, head):
     """({path: head lines}, {path: base lines}) of the broker/ _test.go lines that the diff changes, or
     any other, which are no change of the package's tests: a declaration moved or left unchanged, or a
     header change, as Moved declarations above reads them (#6369). A package with a link or a file not
     read moves nothing."""
     tests, btests = added_lines(diff_text)[1], base_test_lines(diff_text)[0]
-    head, base = {}, {}
-    mod = (BROKER / "go.mod").read_text(errors="replace") if (BROKER / "go.mod").is_file() else ""
-    module = (m := re.search(r"^module\s+(\S+)", mod, re.M)) and m[1]
+    now, then = {}, {}
+    module = (m := re.search(r"^module\s+(\S+)", base_text(head, "broker/go.mod") or "", re.M)) and m[1]
     for pkg in sorted({package_of(p) for p in [*tests, *btests] if is_test(p)} - {None}):
-        b, h = _side(pkg, mb, module), _side(pkg, None, module)
+        b, h = _side(pkg, mb, module), _side(pkg, head, module)
         if b is None or h is None:
             continue
         for p in sorted(set(b.facts) | set(h.facts)):
             bf, hf = b.facts.get(p), h.facts.get(p)
             if is_test(p) and _same_header(bf, hf, b, h):
-                for side, f in ((base, bf), (head, hf)):
+                for side, f in ((then, bf), (now, hf)):
                     if f is not None:
                         side.setdefault(p, set()).update(f.header)
         for key, at in h.keyed.items():
@@ -856,10 +866,12 @@ def moved(diff_text, mb):
             (hp, hd), (bp, bd) = at[0], was[0]
             if is_test(bp) and not is_test(hp):
                 continue  # `go test` runs no test function of a non-test file
+            if h.facts[hp].run(hd) and (hp != bp or h.facts[hp].runs() != b.facts[bp].runs()):
+                continue  # `go test` runs tests in file then source order (Security on #6378)
             if hp == bp or _same_binding(b.facts[bp], h.facts[hp], key[2], b, h):
-                head.setdefault(hp, set()).update(range(hd[6], hd[7] + 1))
-                base.setdefault(bp, set()).update(range(bd[6], bd[7] + 1))
-    return ({p: ls for p, ls in head.items() if is_test(p)}, {p: ls for p, ls in base.items() if is_test(p)})
+                now.setdefault(hp, set()).update(range(hd[6], hd[7] + 1))
+                then.setdefault(bp, set()).update(range(bd[6], bd[7] + 1))
+    return ({p: ls for p, ls in now.items() if is_test(p)}, {p: ls for p, ls in then.items() if is_test(p)})
 
 
 # Lexical reach over a package's _test.go files (D-319, #5826). A declaration (_decls) reaches every

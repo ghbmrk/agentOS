@@ -2950,9 +2950,10 @@ MOVE_DOWN = """func TestDown(t *testing.T) {
 class MovedDecls(unittest.TestCase):
     """TOOL-mutgate-moved-lines (#6369): a declaration moved unchanged is no change of the tests."""
 
-    def reach(self, base, head, src=TWO_SRC, head_src=None):
+    def reach(self, base, head, src=TWO_SRC, head_src=None, tree=None):
         """(head tests, base tests) changed_tests and bases_for name for broker/hint/, the base holding
-        hint.go (src) and the test files base {name: text}, the PR replacing them with head (and head_src)."""
+        hint.go (src) and the test files base {name: text}, the PR replacing them with head (and head_src);
+        tree {name: text} is then written to the working tree, uncommitted."""
         with tempfile.TemporaryDirectory() as d:
             git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
             pkg = pathlib.Path(d) / "broker" / "hint"
@@ -2967,7 +2968,9 @@ class MovedDecls(unittest.TestCase):
                     (pkg / name).write_text(body)
                 git("add", "-A")
                 git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", side)
-            diff = git("diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "--no-renames", "HEAD~1").stdout
+            diff = git("diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "--no-renames", "HEAD~1", "HEAD").stdout
+            for name, body in (tree or {}).items():
+                (pkg / name).write_text(body)
             with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "ROOT", pathlib.Path(d)):
                 tests = mutgate.changes(diff, "HEAD~1", "HEAD")[1]
                 bases = mutgate.bases_for(diff, "HEAD~1", "HEAD", tests, ["hint"])
@@ -2975,18 +2978,57 @@ class MovedDecls(unittest.TestCase):
 
     def test_a_pure_move_changes_no_test(self):
         # REQ: TOOL-mutgate-moved-lines
-        imports = 'package hint\n\nimport (\n\t"strings"\n\t"testing"\n)\n\n'
-        rest = MOVE_TEST.replace(MOVE_ONE, "").replace("\n" + MOVE_DOWN, "").replace('\t"strings"\n', "")
-        none = "func TestNone(t *testing.T) {}\n"
+        rest = MOVE_TEST.replace(MOVE_ONE, "").replace('\t"strings"\n', "")
+        none = 'package hint\n\nimport "testing"\n\nfunc TestNone(t *testing.T) {}\n'
         base = {"hint_test.go": MOVE_TEST}
         for name, was, now in (
                 ("within a file", base, {"hint_test.go": MOVE_TEST.replace(MOVE_ONE, "") + "\n" + MOVE_ONE.rstrip("\n") + "\n"}),
-                ("to a new file, an import with it", base, {"hint_test.go": rest, "other_test.go": imports + MOVE_ONE + MOVE_DOWN}),
-                ("to an existing file", {**base, "other_test.go": 'package hint\n\nimport "testing"\n\n' + none},
-                 {"hint_test.go": rest, "other_test.go": imports + none + "\n" + MOVE_ONE + MOVE_DOWN}),
-                ("every test file into a new one", base, {"all_test.go": MOVE_TEST})):
+                ("to a new file, an import with it", base,
+                 {"hint_test.go": rest, "other_test.go": 'package hint\n\nimport "strings"\n\n' + MOVE_ONE}),
+                ("to an existing file", {**base, "other_test.go": none},
+                 {"hint_test.go": rest, "other_test.go": none.replace('import "testing"', 'import (\n\t"strings"\n\t"testing"\n)')
+                  + "\n" + MOVE_ONE})):
             with self.subTest(name):
                 self.assertEqual(self.reach(was, now), ([], []))
+        # Both sides are read from git: the working tree, here a file that drops the move, is not read.
+        self.assertEqual(self.reach(base, {"hint_test.go": rest, "other_test.go": 'package hint\n\nimport "strings"\n\n' + MOVE_ONE},
+                                    tree={"other_test.go": "package hint\n"}), ([], []))
+
+    def test_a_moved_test_function_is_a_change(self):
+        # `go test` runs tests in file then source order, so moving one can change what another sees;
+        # one in a non-test file never ran (Security on #6378). A helper's move is still none (above).
+        # REQ: TOOL-mutgate-moved-lines
+        up = MOVE_TEST[MOVE_TEST.index("func TestUp"):MOVE_TEST.index(MOVE_DOWN)]
+        for name, files, src in (
+                ("reordered in its file", {"hint_test.go": MOVE_TEST.replace(up, "").rstrip("\n") + "\n\n" + up.rstrip("\n") + "\n"}, None),
+                ("to another file", {"hint_test.go": MOVE_TEST.replace("\n" + MOVE_DOWN, ""),
+                                     "down_test.go": 'package hint\n\nimport "testing"\n\n' + MOVE_DOWN}, None),
+                ("every test file into one new", {"all_test.go": MOVE_TEST}, None)):
+            with self.subTest(name):
+                got = self.reach({"hint_test.go": MOVE_TEST}, files, head_src=src)
+                self.assertIn("TestDown" if name != "reordered in its file" else "TestUp", got[0] or ["TestUp", "TestDown"])
+        never = 'package hint\n\nimport "testing"\n\n' + MOVE_DOWN
+        self.assertIn("TestDown", self.reach({"hint_test.go": TWO_TEST.replace("\n" + MOVE_DOWN, "")},
+                                             {"hint_test.go": TWO_TEST.replace("\n" + MOVE_DOWN, ""), "down_test.go": never},
+                                             src=TWO_SRC.replace("package hint\n", 'package hint\n\nimport "testing"\n') + "\n" + MOVE_DOWN,
+                                             head_src=TWO_SRC)[0])
+
+    def test_a_deleted_test_beside_a_moved_declaration_is_a_change(self):
+        # L3 and Security on #6378: in -U0 a test deleted where a moved declaration lands is one replace
+        # hunk; every added line moved, the deletion must still change the file and read the base.
+        # REQ: TOOL-mutgate-moved-lines
+        keep = "func TestKeep(t *testing.T) {\n\tif Up(1) != 2 {\n\t\tt.Fatal(1)\n\t}\n}\n"
+        gone = "func TestCritical(t *testing.T) {\n\tif Down(3) != 2 {\n\t\tt.Fatal(2)\n\t}\n}\n"
+        tail = "func TestTail(t *testing.T) {\n\tif Up(20) != 10 || helperH() != 0 {\n\t\tt.Fatal(3)\n\t}\n}\n"
+        helper = "func helperH() int {\n\treturn Down(1)\n}\n"
+        head = 'package hint\n\nimport "testing"\n\n'
+        base = {"a_test.go": head + keep + "\n" + gone + "\n" + tail, "b_test.go": "package hint\n\n" + helper}
+        now = {"a_test.go": head + keep + "\n" + helper + "\n" + tail, "b_test.go": "package hint\n"}
+        got = self.reach(base, now)
+        self.assertIn("TestCritical", got[1])
+        self.assertTrue(got[0])  # the head side is changed too, so the base side is read
+        # The whole file deleted, part of it moved: still a deleted file, every base test of it (here every test).
+        self.assertEqual(self.reach(base, {"b_test.go": "package hint\n", "c_test.go": head + keep + "\n" + tail}), (None, None))
 
     def test_production_code_moved_into_a_test_file_changes_no_test(self):
         # #6305's shape: a client no binary links moves from a non-test file into a new test file.
@@ -3042,12 +3084,31 @@ class MovedDecls(unittest.TestCase):
         swapped = MOVE_TEST.replace('\t"strings"\n', '\tstrings "example.invalid/broker/hint/fake"\n')
         self.assertEqual(self.reach({"hint_test.go": MOVE_TEST}, {"hint_test.go": swapped}),
                          (["TestDown", "TestUp"], ["TestDown", "TestUp"]))
+        # An import named as a universe name would shadow the builtin in every line of its file (L3 on #6378).
+        shadow = MOVE_TEST.replace('\t"testing"\n', '\t"testing"\n\tmax "example.invalid/broker/hint"\n')
+        self.assertEqual(self.reach({"hint_test.go": MOVE_TEST}, {"hint_test.go": shadow}),
+                         (["TestDown", "TestUp"], ["TestDown", "TestUp"]))
         # An import added for new code, with nothing else of the header changed, changes only that code's tests.
         added = MOVE_TEST.replace('\t"testing"\n', '\t"testing"\n\t"unicode"\n').replace(
             "Down(3) != 2", "Down(3) != 2 || !unicode.IsDigit('3')")
         self.assertEqual(self.reach({"hint_test.go": MOVE_TEST, "u_test.go": 'package hint\n\nimport "unicode"\n\nvar _ = unicode.IsDigit\n'},
                                     {"hint_test.go": added, "u_test.go": 'package hint\n\nimport "unicode"\n\nvar _ = unicode.IsDigit\n'}),
                          (["TestDown"], ["TestDown"]))
+
+
+    def test_file_name_constraints_cover_every_port(self):
+        # _name_tags reads a GOOS or GOARCH from a file name only if it is listed: every port the pinned
+        # Go names must be (L3 on #6378). go/build's known lists hold more (nacl, zos); that is safe.
+        ports = subprocess.run(["go", "tool", "dist", "list"], capture_output=True, text=True, check=True).stdout.split()
+        self.assertTrue(ports)
+        for port in ports:
+            goos, goarch = port.split("/")
+            self.assertIn(goos, mutgate.GOOS)
+            self.assertIn(goarch, mutgate.GOARCH)
+            self.assertEqual(mutgate._name_tags(f"broker/p/x_{goos}_{goarch}_test.go"), (goos, goarch))
+        self.assertEqual(mutgate._name_tags("broker/p/x_linux.go"), ("linux",))
+        self.assertEqual(mutgate._name_tags("broker/p/clients_test.go"), ())
+        self.assertEqual(mutgate._name_tags("broker/p/_x_test.go"), ("ignored",))
 
 
 class DataFiles(unittest.TestCase):
