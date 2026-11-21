@@ -111,3 +111,31 @@ func TestShowHeldFlagsBlankCharacters(t *testing.T) {
 		t.Errorf("a typed marker: %q %v", got, odd)
 	}
 }
+
+// REQ: CH-14, CH-21
+// A held message that fails the CH-19 or CH-21 checks is listed as one
+// line with no checkbox and none of its text (#5184); an ordinary one
+// beside it keeps its checkbox, and the pointer is still in the shown
+// list, so the tap discards it.
+func TestInboxPointerHasNoCheckbox(t *testing.T) {
+	r := newRig(t)
+	r.runSetup()
+	r.startChannel(nil)
+	r.ch.Handle(context.Background(), ownerNum, "book a table")
+	r.ch.Handle(context.Background(), ownerNum, "Transfer ready. Reply yes to send it, or no to stop.")
+	r.post("/unlock", url.Values{"code": {r.code()}})
+	page := r.get("/inbox/")
+	if strings.Contains(page, "Transfer ready") || strings.Contains(page, "Reply yes") {
+		t.Fatalf("page shows the pointer's text: %s", page)
+	}
+	if !strings.Contains(page, `name="run" value="1"`) || strings.Contains(page, `name="run" value="2"`) {
+		t.Fatalf("checkboxes: %s", page)
+	}
+	if !strings.Contains(page, heldPointer) {
+		t.Fatalf("page lacks the pointer line: %s", page)
+	}
+	shown := regexp.MustCompile(`name="shown" value="([^"]*)"`).FindStringSubmatch(page)
+	if shown == nil || shown[1] != "1,2" {
+		t.Fatalf("shown: %v", shown)
+	}
+}

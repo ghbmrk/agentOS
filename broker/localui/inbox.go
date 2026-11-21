@@ -19,7 +19,9 @@ import (
 // ones marked and discards the rest of those shown. One that arrived after
 // the page was drawn stays for the next visit. The form is bound to this
 // phone's sign-in and to the list as shown, so another phone cannot
-// replay it and a changed list is refused (stalePage).
+// replay it and a changed list is refused (stalePage). A message that
+// fails the CH-19 or CH-21 checks comes as a pointer (owner.LocalHeld)
+// and is listed as one line with no checkbox and no text (CH-14).
 
 type inboxView struct {
 	Msgs        []inboxMsgView
@@ -36,7 +38,12 @@ type inboxMsgView struct {
 	// shown as [U+XXXX] (showField), so nothing the agent would get is
 	// hidden from the owner (CH-14: they run only what they have read).
 	Odd bool
+	// Pointer marks a message shown only as heldPointer (CH-14).
+	Pointer bool
 }
+
+// heldPointer is the one line a pointer-only held message gets.
+const heldPointer = "A message held back: it looked like a code or a reply to one of my texts, so it can't be sent from here."
 
 // showHeld returns a held message as the page shows it (CH-14: the owner
 // runs only text they have read). Visible characters show as they are:
@@ -140,8 +147,11 @@ func (s *Server) inbox(w http.ResponseWriter, r *http.Request) {
 	var ids []string
 	for _, m := range in.Msgs {
 		ids = append(ids, m.ID)
-		text, odd := showHeld(m.Text)
-		v.Msgs = append(v.Msgs, inboxMsgView{ID: m.ID, Date: m.At.Local().Format("2 Jan 2006, 15:04"), Text: text, Odd: odd})
+		mv := inboxMsgView{ID: m.ID, Date: m.At.Local().Format("2 Jan 2006, 15:04"), Pointer: m.Pointer}
+		if !m.Pointer {
+			mv.Text, mv.Odd = showHeld(m.Text)
+		}
+		v.Msgs = append(v.Msgs, mv)
 	}
 	v.Shown = strings.Join(ids, ",")
 	v.Tok = s.formToken(sess, "inbox", v.Shown)
@@ -197,9 +207,10 @@ func init() {
 {{with .Msg}}<p>{{.}}</p>{{end}}{{with .Err}}<p class="err">{{.}}</p>{{end}}
 {{if .Msgs}}<form method="post" action="/inbox/">
 <input type="hidden" name="shown" value="{{.Shown}}"><input type="hidden" name="tok" value="{{.Tok}}">
-{{range .Msgs}}<section class="card"><label><input type="checkbox" name="run" value="{{.ID}}"> Send</label>
+{{range .Msgs}}{{if .Pointer}}<p class="muted">{{.Date}}: ` + heldPointer + `</p>
+{{else}}<section class="card"><label><input type="checkbox" name="run" value="{{.ID}}"> Send</label>
 <p class="muted">{{.Date}}</p>{{if .Odd}}<p class="err">This message has hidden or unusual characters, shown as [U+…]. Send it only if you wrote all of it.</p>{{end}}<pre style="white-space:pre-wrap;overflow-wrap:anywhere">{{.Text}}</pre></section>
-{{end}}<p><button type="submit">Send the marked ones, discard the rest</button></p></form>
+{{end}}{{end}}<p><button type="submit">Send the marked ones, discard the rest</button></p></form>
 {{else}}{{if not .Err}}<p>Nothing is waiting.</p>{{end}}{{end}}
 {{with .Dropped}}<p class="muted">{{.}} more were dropped unread: the hold was full, or a deletion removed them because they quoted what it deleted.</p>{{end}}
 {{with .Expired}}<p class="muted">{{.}} expired before you read them.</p>{{end}}

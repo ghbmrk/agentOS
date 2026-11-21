@@ -20,7 +20,9 @@ import (
 // spoofer cannot displace what the owner sent first. Each message is
 // discarded UnlockFor after it arrives. The page shows each in full, and
 // the owner's tap runs the ones it marks and discards the rest
-// (LocalRunHeld), so the owner runs only text they have read.
+// (LocalRunHeld), so the owner runs only text they have read. A message
+// that fails the CH-19 or CH-21 checks the channel runs on agent text
+// (heldFails) is shown only as a pointer and cannot be run.
 
 // DefaultHoldSegments is CH-14's default bound on held text, in SMS
 // segments (D-087).
@@ -34,7 +36,17 @@ type WaitingMsg struct {
 	// React marks a held reaction, set by the hold itself (reactionLocked)
 	// so a forget drops exactly what was held as one (CAP-3).
 	React bool `json:"react,omitempty"`
+	// Pointer marks a message LocalHeld shows only as a pointer, its Text
+	// left out, because it fails the CH-19 or CH-21 checks (heldFails).
+	// It is never stored: each read sets it from the held text.
+	Pointer bool `json:"pointer,omitempty"`
 }
+
+// heldFails reports whether held text fails the checks checkAgent runs on
+// agent text: CH-19's secret shapes (AgentSecret) or CH-21's code words,
+// reply grammar, request openings and reply footer (AgentVoice), each in
+// the three readings those use (CH-14).
+func heldFails(text string) bool { return AgentSecret(text) || AgentVoice(text) }
 
 // waitingReply is the one reply a locked period gets (CH-14).
 const waitingReply = "Locked. I kept your message for my Wi-Fi page: sign in there at home to read it and send it."
@@ -101,7 +113,8 @@ func (c *Channel) expireWaitingLocked(now time.Time) {
 }
 
 // LocalHeld lists the messages held for the page, in arrival order and in
-// full, with the counts of those dropped (at the bound, or by a deletion
+// full, except that one failing heldFails comes back as a pointer, with
+// Pointer set and no text (CH-14), with the counts of those dropped (at the bound, or by a deletion
 // because they quoted a text it forgot) and those expired
 // since the owner last ran or discarded them.
 func (c *Channel) LocalHeld() (msgs []WaitingMsg, dropped, expired int) {
@@ -109,7 +122,13 @@ func (c *Channel) LocalHeld() (msgs []WaitingMsg, dropped, expired int) {
 	defer c.mu.Unlock()
 	c.expireWaitingLocked(c.cfg.Now())
 	st := c.codes.st
-	return slices.Clone(st.Waiting), st.WaitingDropped + st.WaitingForgot, st.WaitingExpired
+	msgs = slices.Clone(st.Waiting)
+	for i := range msgs {
+		if heldFails(msgs[i].Text) {
+			msgs[i].Text, msgs[i].Pointer = "", true
+		}
+	}
+	return msgs, st.WaitingDropped + st.WaitingForgot, st.WaitingExpired
 }
 
 // heldNote is STATUS's line for held messages, "" when there are none.
@@ -141,7 +160,7 @@ func (c *Channel) heldNote() string {
 }
 
 // ErrHeldChanged refuses a run whose shown list names a message no longer
-// held, or marks one it did not show.
+// held, or marks one it did not show or showed only as a pointer.
 var ErrHeldChanged = errors.New("owner: the held messages changed")
 
 // LocalRunHeld is the owner's tap on the page (CH-14): of the held messages
@@ -150,7 +169,9 @@ var ErrHeldChanged = errors.New("owner: the held messages changed")
 // drawn stays held. It needs an open session, which only the page opens,
 // so the run is the owner's at P3; each message then routes as if it had
 // arrived in that session. The replies go to the owner's number. It
-// returns how many ran.
+// returns how many ran. A run marking a message that fails heldFails is
+// refused whole, whatever the page showed, since LocalHeld showed it only
+// as a pointer (CH-14); it can still be discarded as one of shown.
 func (c *Channel) LocalRunHeld(shown, run []string) (int, error) {
 	now := c.cfg.Now()
 	c.mu.Lock()
@@ -159,9 +180,10 @@ func (c *Channel) LocalRunHeld(shown, run []string) (int, error) {
 		return 0, ErrLocked
 	}
 	c.expireWaitingLocked(now)
-	held := map[string]bool{}
+	held, runnable := map[string]bool{}, map[string]bool{}
 	for _, m := range c.codes.st.Waiting {
 		held[m.ID] = true
+		runnable[m.ID] = !heldFails(m.Text)
 	}
 	show := map[string]bool{}
 	for _, id := range shown {
@@ -173,7 +195,7 @@ func (c *Channel) LocalRunHeld(shown, run []string) (int, error) {
 	}
 	marked := map[string]bool{}
 	for _, id := range run {
-		if !show[id] {
+		if !show[id] || !runnable[id] {
 			c.mu.Unlock()
 			return 0, ErrHeldChanged
 		}
