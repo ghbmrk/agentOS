@@ -8,8 +8,12 @@ import (
 	"net"
 	"net/netip"
 	"path/filepath"
+	"slices"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
+	"github.com/ghbmrk/agentos/broker/enforcer/ap"
 	"github.com/ghbmrk/agentos/broker/enforcer/dns"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
@@ -49,8 +53,30 @@ type Config struct {
 	// one's hardware address and the interface of its network. Empty
 	// runs no Wake-on-LAN relay.
 	Wake []WakeMachine `json:"wake"`
+	// AP is the Wi-Fi access points (NET-3, slice g): their one layout
+	// and each one's admin address and pinned SSH host key. None leaves
+	// enrolment refusing, since nothing would replace the setup network.
+	AP APConfig `json:"ap"`
 
 	zone *time.Location
+}
+
+// APConfig is the access points in the configuration file. They share
+// one layout, so every one carries the same networks and passwords. The
+// layout's EnforcerKey is left out: the daemon fills it from its own key
+// (-ap-pub prints it for setup).
+type APConfig struct {
+	Layout ap.Layout `json:"layout"`
+	Points []APPoint `json:"points"`
+}
+
+// APPoint is one access point: its admin address with the SSH port, one
+// of the firewall layout's APAdmin addresses, and its host key in
+// authorized_keys form, pinned at setup over the wired admin port
+// (ap ASSUMPTIONS ENF-g-8, ASSUMPTIONS ENF-l-ap-2).
+type APPoint struct {
+	Addr    netip.AddrPort `json:"addr"`
+	HostKey string         `json:"host_key"`
 }
 
 // WakeMachine is one paired machine in the configuration file.
@@ -121,6 +147,41 @@ func (c *Config) check() error {
 	}
 	if _, err := c.machines(); err != nil {
 		return fail("wake: " + err.Error())
+	}
+	if err := c.AP.check(c.Layout); err != nil {
+		return fail("ap: " + err.Error())
+	}
+	return nil
+}
+
+// check refuses access points the daemon could not reach or pin: an
+// address outside the firewall's APAdmin, a repeated one, a host key that
+// does not parse, or a layout ap refuses.
+func (a APConfig) check(l nft.Layout) error {
+	if len(a.Points) == 0 {
+		return nil
+	}
+	if a.Layout.EnforcerKey != "" {
+		return errors.New("layout's enforcer key is the daemon's own: leave it out")
+	}
+	lay := a.Layout
+	lay.EnforcerKey = "ssh-ed25519 AAAA" // filled at start
+	if err := lay.Check(); err != nil {
+		return err
+	}
+	if l.APMgmt == "" {
+		return errors.New("the firewall layout names no access point admin interface")
+	}
+	for i, p := range a.Points {
+		if !p.Addr.IsValid() || p.Addr.Port() == 0 || !slices.Contains(l.APAdmin, p.Addr.Addr()) {
+			return fmt.Errorf("address %v is not one of the layout's access point admin addresses with a port", p.Addr)
+		}
+		if slices.ContainsFunc(a.Points[:i], func(o APPoint) bool { return o.Addr == p.Addr }) {
+			return fmt.Errorf("access point %v twice", p.Addr)
+		}
+		if _, _, _, rest, err := ssh.ParseAuthorizedKey([]byte(p.HostKey)); err != nil || len(rest) != 0 {
+			return fmt.Errorf("access point %v: host key is not one authorized_keys line", p.Addr)
+		}
 	}
 	return nil
 }
