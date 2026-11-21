@@ -18,6 +18,7 @@ on:
       - "broker/go.sum"
       - "broker/vendor/github.com/bluenviron/**"
       - ".github/workflows/drone-sitl.yml"
+      - ".github/actions/disk-budget/**"
 permissions:
   contents: read
 # CI-cancel-superseded (#5345, #5348, #5361): a PR's first-attempt run cancels that PR's older first
@@ -38,6 +39,8 @@ jobs:
       run:
         shell: bash
         working-directory: broker
+    env:
+      DISK_NEED_GB: "4" # IMG-disk (#6357): measured bound 1.8 GB (1.5 sampled + 0.3 rise, AWS, cold build); see .github/actions/disk-budget
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -51,6 +54,11 @@ jobs:
           want=$(awk '$1 == "toolchain" {print $2}' go.mod)
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; go.mod names $want" >&2; exit 1; }
+      # IMG-disk (#6357): the runner disk budget, against this job's DISK_NEED_GB (.github/actions/disk-budget).
+      - name: Disk budget
+        uses: ./.github/actions/disk-budget
+        with:
+          phase: start
       - name: SITL cache key
         id: key
         run: |
@@ -81,3 +89,8 @@ jobs:
         run: |
           export AGENTOS_SITL_BIN="$HOME/sitl/arducopter" AGENTOS_SITL_DEFAULTS="$HOME/sitl/copter.parm"
           go test -tags sitl -count=1 -p 1 -timeout 60m -v ./drone/...
+      - name: Disk budget held
+        if: always()
+        uses: ./.github/actions/disk-budget
+        with:
+          phase: held
