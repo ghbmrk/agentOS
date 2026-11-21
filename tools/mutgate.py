@@ -1984,7 +1984,10 @@ def cmd_run(args):
     cfg.write_text("{}\n")
     # Gremlins' coverage run reads its profile through with_cases, so it runs case-expression mutants
     # (#5822); with no go on PATH, gremlins can run no test at all.
-    if shim := go_shim(cfgdir.name):
+    # MUT-gremlins-memcap (#6388): each of gremlins' parallel mutant runs (one per usable CPU, as
+    # runtime.NumCPU counts them) gets its share of half the memory free now, as `delete`'s do.
+    free = available_memory()
+    if shim := go_shim(cfgdir.name, free // 2 // default_jobs() if free else None):
         env["PATH"] = f"{shim}{os.pathsep}{env.get('PATH', '')}"
     for pkg in pkgs:
         dest = out / result_name(pkg)
@@ -2173,32 +2176,42 @@ def lister_in(tmp):
     return lister if lister.is_file() else build_lister(tmp)
 
 
-def go_shim(tmp):
+def go_shim(tmp, mem=None):
     """A directory holding a `go` for gremlins' PATH: a run with -coverprofile goes through go_cover,
-    every other (its mutant runs) to the real go unchanged; or None where no go is on PATH."""
+    every other (its mutant runs) to the real go, through go_capped where mem caps each run's memory;
+    or None where no go is on PATH."""
     real = shutil.which("go")
     if real is None:
         return None
     q = shlex.quote
     bindir = pathlib.Path(tmp) / "gobin"
     bindir.mkdir(exist_ok=True)
-    cover = f"exec {q(sys.executable)} -I {q(str(pathlib.Path(__file__).resolve()))} go-cover {q(real)} {q(str(tmp))}"
+    me = f"exec {q(sys.executable)} -I {q(str(pathlib.Path(__file__).resolve()))}"
+    cover = f"{me} go-cover {q(real)} {q(str(tmp))} {int(mem or 0)}"
+    rest = f"{me} go-capped {q(real)} {int(mem)}" if mem else f"exec {q(real)}"
     (bindir / "go").write_text(f"""#!/bin/sh
 for a in "$@"; do
   case "$a" in -coverprofile|-coverprofile=*|--coverprofile|--coverprofile=*) {cover} "$@";; esac
 done
-exec {q(real)} "$@"
+{rest} "$@"
 """)
     (bindir / "go").chmod(0o755)
     return bindir
 
 
-def go_cover(real, tmp, args):
+def go_cover(real, tmp, args, mem=None):
     """`go` args through the real go, with `-covermode=count` unless they name a mode (with_cases needs
-    counts), then the -coverprofile it wrote read through with_cases."""
+    counts), then the -coverprofile it wrote read through with_cases. With mem, a mutant run's memory
+    cap, the run fails unless its tests' memory stays under half of it (MUT-gremlins-memcap)."""
     if args[:1] == ["test"] and not any(a.lstrip("-").startswith("covermode") for a in args):
         args = ["test", "-covermode=count", *args[1:]]
-    if code := subprocess.run([real, *args]).returncode:
+    end, peak = watch(subprocess.Popen([real, *args], start_new_session=True, preexec_fn=die_with_parent),
+                      mem=mem, skip=TOOLCHAIN)
+    if mem and (end == "over" or 2 * peak > mem):
+        print(f"mutgate: the tests hold {peak >> 20} MB before any mutant, more than half the {mem >> 20} MB "
+              "memory cap of a gremlins mutant run, so a cap kill would not show a test failed", file=sys.stderr)
+        return 1
+    if code := exit_code(end):
         return code
     path = next((a.split("=", 1)[1] for a in args if a.startswith(("-coverprofile=", "--coverprofile="))), None)
     path = path or next((b for a, b in zip(args, args[1:]) if a in ("-coverprofile", "--coverprofile")), None)
@@ -2212,6 +2225,41 @@ def go_cover(real, tmp, args):
         print(f"mutgate: cannot add the case clauses to the cover profile: {e}", file=sys.stderr)
         return 1
     return 0
+
+
+# MUT-gremlins-memcap (#6388): a gremlins mutant that drops a bound can grow a test by gigabytes, as a
+# deletion can (#5011), and took a runner down on #6000. Gremlins v0.6.0 reads its `go test`'s exit 1
+# as KILLED (executor.go getTestFailedStatus), so a run past its cap is killed and exits 1, as
+# run_tests' memory_cap is KILLED. The toolchain's own processes (TOOLCHAIN) are not counted: a
+# mutant changes what the tests do, not how much the compiler holds.
+TOOLCHAIN = frozenset({"go", "compile", "link", "asm", "cgo", "vet", "cover"})
+
+
+def go_capped(real, mem, args):
+    """`go` args through the real go, its session killed and 1 returned once its tests' resident memory
+    passes mem bytes; else go's own exit code."""
+    end, peak = watch(subprocess.Popen([real, *args], start_new_session=True, preexec_fn=die_with_parent),
+                      mem=mem, skip=TOOLCHAIN)
+    if end == "over":
+        print(f"\n--- FAIL: memory_cap\nmutgate: the tests passed {peak >> 20} MB, this mutant run's "
+              f"{mem >> 20} MB memory cap, and were killed", file=sys.stderr)
+        return 1
+    return exit_code(end)
+
+
+def exit_code(end):
+    """A shell's exit status for a Popen return code: 128 + N for a run killed by signal N."""
+    return end if end >= 0 else 128 - end
+
+
+def die_with_parent():
+    """In a child before exec: SIGKILL it when its parent dies (Linux PR_SET_PDEATHSIG), so gremlins'
+    kill of the shim at a mutant's timeout also ends the go it started in a session of its own."""
+    try:
+        import ctypes
+        ctypes.CDLL(None).prctl(1, signal.SIGKILL)
+    except (OSError, AttributeError):
+        pass  # no prctl (macOS): the test binary's own -test.timeout still ends it
 
 
 def deleted(src, site, names=()):
@@ -2320,17 +2368,17 @@ def run_tests(binary, cwd, timeout, mem=None, names=None):
         return {"over": "KILLED", "timeout": "TIMED OUT"}.get(end) or ("LIVED" if end == 0 else "KILLED")
 
 
-def watch(p, timeout=None, mem=None):
+def watch(p, timeout=None, mem=None, skip=()):
     """(end, peak) for Popen p started in its own session: end is its exit code, or "timeout" or
     "over" (resident memory past mem bytes), after which its session is killed; peak is the most
-    resident memory read across the session, every MEM_POLL seconds."""
+    resident memory read across the session, every MEM_POLL seconds, leaving out processes named in skip."""
     deadline, peak = None if timeout is None else time.monotonic() + timeout, 0
     while True:
         wait = MEM_POLL if deadline is None else max(0, min(MEM_POLL, deadline - time.monotonic()))
         try:
             return p.wait(timeout=wait), peak
         except subprocess.TimeoutExpired:
-            peak = max(peak, session_rss(p.pid))
+            peak = max(peak, session_rss(p.pid, skip))
             end = "over" if mem is not None and peak > mem else "timeout" if deadline and time.monotonic() >= deadline else None
             if end:
                 os.killpg(p.pid, signal.SIGKILL)
@@ -2341,9 +2389,9 @@ def watch(p, timeout=None, mem=None):
 MEM_POLL = 0.25  # seconds between memory reads: about 50 MB of growth at the 200 MB/s seen on #5011
 
 
-def session_rss(sid):
-    """Resident bytes of every process in session sid (a test binary and its children), from
-    /proc; 0 where there is no /proc (macOS), so the cap there is the timeout alone."""
+def session_rss(sid, skip=()):
+    """Resident bytes of every process in session sid (a test binary and its children) not named in
+    skip, from /proc; 0 where there is no /proc (macOS), so the cap there is the timeout alone."""
     total = 0
     try:
         pids = [n for n in os.listdir("/proc") if n.isdigit()]
@@ -2351,10 +2399,11 @@ def session_rss(sid):
         return 0
     for pid in pids:
         try:
-            fields = pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-        except (OSError, IndexError):
+            name, rest = pathlib.Path(f"/proc/{pid}/stat").read_text().split("(", 1)[1].rsplit(")", 1)
+            fields = rest.split()
+        except (OSError, IndexError, ValueError):
             continue  # gone between the listing and the read
-        if len(fields) > 21 and fields[3] == str(sid):
+        if len(fields) > 21 and fields[3] == str(sid) and name not in skip:
             total += int(fields[21]) * PAGE
     return total
 
@@ -3146,8 +3195,10 @@ def pr_ref(v):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    if argv[:1] == ["go-cover"] and len(argv) >= 3:  # go_shim's entry, not a command of its own
-        return go_cover(argv[1], argv[2], argv[3:])
+    if argv[:1] == ["go-cover"] and len(argv) >= 4:  # go_shim's entries, not commands of their own
+        return go_cover(argv[1], argv[2], argv[4:], int(argv[3]) or None)
+    if argv[:1] == ["go-capped"] and len(argv) >= 3:
+        return go_capped(argv[1], int(argv[2]), argv[3:])
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("packages")

@@ -4608,6 +4608,126 @@ class CaseClauseCover(unittest.TestCase):
         self.assertFalse({s for line, s in got if line in (5, 7, 9)} & {"NOT COVERED"}, got)
 
 
+@unittest.skipUnless(os.path.isdir("/proc/self"), "the memory cap reads /proc")
+class GremlinsMemoryCap(unittest.TestCase):
+    """MUT-gremlins-memcap (#6388): a gremlins mutant grew a test past 13 GB and took the runner down on
+    #6000. Each mutant's `go test` runs under a memory cap through the shim, and a run past it exits 1,
+    which gremlins reads as KILLED; that counts only where the unmutated tests stay under half the cap."""
+    # REQ: MUT-gremlins-memcap
+
+    GROW = "import time; b = bytearray(96 << 20); time.sleep(60)"
+
+    def fake_go(self, d, body):
+        """A directory holding a `go` that runs body (a sh script) in place of the real go."""
+        bindir = pathlib.Path(d) / "fakego"
+        bindir.mkdir(exist_ok=True)
+        (bindir / "go").write_text("#!/bin/sh\n" + body)
+        (bindir / "go").chmod(0o755)
+        return bindir
+
+    def shim(self, d, body, mem):
+        with mock.patch.dict(os.environ, {"PATH": f"{self.fake_go(d, body)}{os.pathsep}{os.environ['PATH']}"}):
+            return mutgate.go_shim(d, mem) / "go"
+
+    def test_a_mutant_run_past_its_cap_is_killed_and_exits_1(self):
+        with tempfile.TemporaryDirectory() as d:
+            # The test binary is go's child, as `go test` runs it: a child's memory counts.
+            shim = self.shim(d, f"python3 -c '{self.GROW}' &\nwait\n", 32 << 20)
+            began = time.monotonic()
+            r = subprocess.run([str(shim), "test", "-timeout", "62s", "-failfast", "./p"], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1, r.stderr)  # gremlins v0.6.0: exit 1 is KILLED
+            self.assertLess(time.monotonic() - began, 20)
+            self.assertIn("--- FAIL: memory_cap", r.stderr)
+
+    def test_a_mutant_run_under_its_cap_keeps_gos_exit_code(self):
+        with tempfile.TemporaryDirectory() as d:
+            for code in (0, 1, 2):
+                shim = self.shim(d, f"python3 -c 'b = bytearray(1 << 20)'\nexit {code}\n", 1 << 30)
+                self.assertEqual(subprocess.run([str(shim), "test", "./p"]).returncode, code)
+
+    def test_a_mutant_runs_own_toolchain_is_not_counted(self):
+        # L3 on #6389: a mutant's rebuild is the toolchain's memory; counted, a compile alone would read KILLED.
+        with tempfile.TemporaryDirectory() as d:
+            link = pathlib.Path(d) / "compile"
+            link.symlink_to(sys.executable)
+            shim = self.shim(d, f"{link} -c 'import time; b = bytearray(96 << 20); time.sleep(2)'\nexit 0\n", 32 << 20)
+            r = subprocess.run([str(shim), "test", "-timeout", "62s", "-failfast", "./p"], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn("memory_cap", r.stderr)
+
+    def test_no_cap_runs_the_real_go_directly(self):
+        with tempfile.TemporaryDirectory() as d:
+            shim = self.shim(d, "exit 0\n", None)
+            self.assertNotIn("go-capped", shim.read_text())
+            self.assertIn("go-capped", self.shim(d, "exit 0\n", 1 << 30).read_text())
+
+    def test_a_cover_run_past_half_the_cap_fails(self):
+        # The unmutated tests must leave a cap kill meaning a test failed (L3 on #5026), so gremlins'
+        # own coverage run is measured under the same cap and fails the run past half of it.
+        with tempfile.TemporaryDirectory() as d:
+            prof = pathlib.Path(d) / "c"
+            shim = self.shim(d, f"python3 -c 'import time; b = bytearray(64 << 20); time.sleep(1)'\n: > {prof}\n", 96 << 20)
+            r = subprocess.run([str(shim), "test", "-cover", "-coverprofile", str(prof), "./..."], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1, r.stderr)
+            self.assertIn("more than half", r.stderr)
+
+    def test_toolchain_processes_are_not_counted(self):
+        # A compile's memory is the toolchain's, not the tests': only processes outside TOOLCHAIN count.
+        with tempfile.TemporaryDirectory() as d:
+            link = pathlib.Path(d) / "compile"
+            link.symlink_to(sys.executable)
+            for name, counted in (("compile", False), ("python3", True)):
+                p = subprocess.Popen([str(link) if name == "compile" else sys.executable, "-c",
+                                      "import time; b = bytearray(64 << 20); time.sleep(3)"], start_new_session=True)
+                try:
+                    time.sleep(1)
+                    got = mutgate.session_rss(p.pid, mutgate.TOOLCHAIN)
+                finally:
+                    p.kill()
+                    p.wait()
+                self.assertEqual(got > 32 << 20, counted, (name, got))
+
+    def test_run_caps_gremlins_mutant_runs(self):
+        # The wiring: `run` gives gremlins' shim each run's share of half the free memory.
+        with tempfile.TemporaryDirectory() as d:
+            seen = pathlib.Path(d) / "seen"
+            bindir = self.fake_go(d, f"python3 -c '{self.GROW}'\n")
+            (bindir / "gremlins").write_text(
+                f"#!/bin/sh\ngo test -timeout 62s -failfast ./hint\necho $? > {seen}\n"
+                "while [ \"$1\" != -o ]; do shift; done\nprintf '%s' '{\"files\": [], \"mutants_lived\": 0}' > \"$2\"\n")
+            (bindir / "gremlins").chmod(0o755)
+            with mock.patch.dict(os.environ, {"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}), \
+                    mock.patch.object(mutgate, "available_memory", return_value=128 << 20), \
+                    mock.patch.object(mutgate, "default_jobs", return_value=2), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(mutgate.main(["run", "hint", "--out", str(pathlib.Path(d) / "out")]), 0)
+            self.assertEqual(seen.read_text().strip(), "1")  # 96 MB past the 32 MB share: killed
+
+    @unittest.skipUnless(shutil.which("gremlins"), "gremlins v0.6.0 is not installed")
+    def test_gremlins_reads_a_capped_mutant_as_killed(self):
+        # #6000's shape: a mutant (`i--`) turns a bounded append into one that grows until the runner dies.
+        src = ("package p\n\nfunc Pad(n int) []byte {\n\tvar b []byte\n"
+               "\tfor i := 0; i < n; i++ {\n\t\tb = append(b, make([]byte, 1<<20)...)\n\t}\n\treturn b\n}\n")
+        test = ("package p\n\nimport \"testing\"\n\nfunc TestPad(t *testing.T) {\n"
+                "\tif len(Pad(3)) != 3<<20 {\n\t\tt.Fatal()\n\t}\n}\n")
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}):
+            pkg = pathlib.Path(d) / "broker" / "p"
+            pkg.mkdir(parents=True)
+            (pkg.parent / "go.mod").write_text(GO_MOD)
+            (pkg / "a.go").write_text(src)
+            (pkg / "a_test.go").write_text(test)
+            (pathlib.Path(d) / "cfg.yaml").write_text("{}\n")
+            out = pathlib.Path(d) / "out.json"
+            env = {**os.environ, "PATH": f"{mutgate.go_shim(d, 256 << 20)}{os.pathsep}{os.environ['PATH']}"}
+            began = time.monotonic()
+            r = subprocess.run(["gremlins", "unleash", "--config", str(pathlib.Path(d) / "cfg.yaml"), "-o", str(out), str(pkg)],
+                               cwd=pkg, env=env, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            got = {(m["line"], m["type"], m["status"]) for f in json.loads(out.read_text())["files"] for m in f["mutations"]}
+        self.assertIn((5, "INCREMENT_DECREMENT", "KILLED"), got)
+        self.assertLess(time.monotonic() - began, 120)
+
+
 class LiteralTailCover(unittest.TestCase):
     """MUT-legacy-not-equivalent-records (#5909): Go's cover ends a statement's block at a func literal it
     holds, so the code after the literal on its line was in no block and gremlins read its mutants NOT
