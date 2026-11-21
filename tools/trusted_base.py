@@ -14,8 +14,12 @@ only reads the tree, so a PR's code is listed, never built or run.
 Every linked package outside the standard library must match a registry line, so no package
 enters a trusted process unclassified. Own and dependency lines are reported, not gated: the
 keeper domain's growth is gated by the trusted core below (D-157). A PR whose head adds a
-parser package or reclassifies a parser as inert fails unless its body has a line
-`Trusted-base: <parsers|registry> -- <reason>`. It is a measure, not a cap.
+parser package or reclassifies a parser as inert fails unless it adds a line
+`<parsers|registry> #<PR> -- <reason>` to tools/trusted_base_reasons.txt. It is a measure, not a cap.
+The reason is a committed line, not PR-body text (#6395): a body can change after the reviews without
+changing the head, while the record is part of the head every accept names. A line counts only for
+the PR it names and only when the base lacks it, so an old line never waives later growth; a body
+`Trusted-base:` line waives nothing and only gets a notice.
 
 The trusted core (KRN-2cap, #2935) is the budgeted subset: the `root` packages of
 tools/trusted_core.txt (kernel, key-check library, the clerk check path) and everything they
@@ -83,16 +87,17 @@ import subprocess
 import sys
 
 REGISTRY = "tools/trusted_base_parsers.txt"
+REASONS = "tools/trusted_base_reasons.txt"
 CORE = "tools/trusted_core.txt"
 FALLBACK = pathlib.Path(__file__).resolve().parent.parent  # the checkout this copy runs from
 CORE_LIST = "broker/core/core.txt"
 KEYS = ("parsers", "registry")
-RETIRED = ("lines", "deps")  # keys that no longer gate (D-157); a body that still has one passes
 GO_ENV = {
     "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64", "GOFLAGS": "-mod=vendor",
     "GOTOOLCHAIN": "local", "GOWORK": "off", "GOPROXY": "off", "GOENV": "off",
 }
-REASON = re.compile(r"^\s*Trusted-base:\s*(\S+)\s+--\s+(.*?)\s*$")
+BODY_REASON = re.compile(r"(?im)^\s*Trusted-base:\s*(?:parsers|registry)\b")
+RECORD_LINE = re.compile(r"^(\S+)\s+#([1-9]\d*)\s+--\s+(.*?)\s*$")
 WAIVER = re.compile(r"^\s*Trusted-core:\s*(\S+)\s*$", re.M)
 CEILINGS = "tools/ceilings.txt"
 OLD_CORE = "tools/old_core.txt"
@@ -253,41 +258,54 @@ def measure(pkgs, rules):
     return m
 
 
-def reasons(body):
-    """{key: reason} from the PR body's `Trusted-base: <key> -- <reason>` lines; bad keys listed."""
-    got, bad = {}, []
-    for line in (body or "").splitlines():
-        r = REASON.match(line)
+def read_reasons(tree):
+    """The lines of tree's reason record, comments and blanks dropped; none when it has no record."""
+    path = pathlib.Path(tree) / REASONS
+    if not path.exists():
+        return []
+    return [line.strip() for _, line in list_lines(read_list(path), path)
+            if line.strip() and not line.lstrip().startswith("#")]
+
+
+def reasons(base_lines, head_lines, pr=None):
+    """({key: reason}, [problem]) from the reason-record lines the head adds to the base's, for PR
+    `pr` (any PR when None). A line the base already holds is history and waives nothing."""
+    got, bad, old = {}, [], {" ".join(x.split()) for x in base_lines}
+    for line in head_lines:
+        if " ".join(line.split()) in old:
+            continue
+        r = RECORD_LINE.match(line)
         if not r:
+            bad.append(f"{REASONS}: `{line.strip()}`: want `<parsers|registry> #<PR> -- <reason>`")
             continue
-        key, why = r.group(1).lower(), r.group(2)
-        if key in RETIRED:
-            continue
+        key, num, why = r.group(1).lower(), int(r.group(2)), r.group(3)
         if key not in KEYS:
-            bad.append(f"`{line.strip()}`: the key must be one of {', '.join(KEYS)}")
+            bad.append(f"{REASONS}: `{line.strip()}`: the key must be one of {', '.join(KEYS)}")
+        elif pr is not None and num != int(pr):
+            bad.append(f"{REASONS}: `{line.strip()}`: names #{num}, not this PR (#{int(pr)})")
         elif len(why.split()) < 2 or PLACEHOLDER.match(why):
-            bad.append(f"`{line.strip()}`: the reason must be at least two words, not a placeholder")
+            bad.append(f"{REASONS}: `{line.strip()}`: the reason must be at least two words, not a placeholder")
         else:
             got[key] = why
     return got, bad
 
 
-def compare(base, head, reclassified, body):
-    """(problems, owed) for a base and head measure; owed maps each key that needs a reason to its
-    detail. Own and dependency lines show in the table only."""
+def compare(base, head, reclassified, record=({}, [])):
+    """(problems, owed) for a base and head measure and reasons()' pair; owed maps each key that
+    needs a reason to its detail. Own and dependency lines show in the table only."""
     owed = {}
     new = sorted(head["parsers"] - base["parsers"])
     if new:
         owed["parsers"] = "new parser packages: " + ", ".join(new)
     if reclassified:
         owed["registry"] = "reclassified from parser to inert: " + ", ".join(reclassified)
-    got, bad = reasons(body)
+    got, bad = record
     problems = list(bad)
     for p in head["unclassified"]:
         problems.append(f"{p} is linked into a trusted process but no line of {REGISTRY} classes it")
     for key, detail in owed.items():
         if key not in got:
-            problems.append(f"{detail}, and the PR body has no `Trusted-base: {key} -- <reason>` line")
+            problems.append(f"{detail}, and the PR adds no `{key} #<PR> -- <reason>` line to {REASONS}")
     return problems, owed
 
 
@@ -658,8 +676,12 @@ def run_check(base_tree, head_tree, body, fallback_tree=None, pr=None):
     head = measure(head_pkgs, rules)
     reclassified = sorted(p for p in head_pkgs
                           if classify(p, base_rules) == "parser" and classify(p, rules) == "inert")
-    problems, owed = compare(base, head, reclassified, body)
+    record = reasons(read_reasons(base_tree), read_reasons(head_tree), pr)
+    problems, owed = compare(base, head, reclassified, record)
     text = table(base, head, owed, problems, trusted_mains(head_tree))
+    if BODY_REASON.search(body or ""):
+        text += (f"\nNote: the PR body's `Trusted-base:` lines waive nothing (#6395): commit each as a line "
+                 f"`<parsers|registry> #<PR> -- <reason>` in {REASONS}.\n")
     base_core, head_core = read_core(base_tree), read_core(head_tree)
     if base_core is None:
         # A branch whose merge base predates the core file is measured with the file of the

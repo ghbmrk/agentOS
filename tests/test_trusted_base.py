@@ -85,12 +85,18 @@ class Pure(unittest.TestCase):
             with self.assertRaises(tb.MeasureError, msg=text):
                 tb.parse_registry(text)
 
-    def test_reason_lines(self):
-        got, bad = tb.reasons("x\nTrusted-base: registry -- dec reads its own frames\n"
-                              "Trusted-base: parsers -- TODO\nTrusted-base: size -- big growth\n"
-                              "  Trusted-base: lines -- an old body's line, ignored now\n")
-        self.assertEqual(set(got), {"registry"})
-        self.assertEqual(len(bad), 2)
+    def test_reason_record_lines(self):
+        # #6395: a reason is a record line the head adds, for this PR; a line the base holds is history.
+        head = ["registry #7 -- dec reads its own frames", "parsers #7 -- TODO", "size #7 -- big growth",
+                "parsers #8 -- another PR's reason here", "parsers -- no PR number", "parsers  #3  --  an old reason"]
+        got, bad = tb.reasons(["parsers #3 -- an old reason"], head, 7)
+        self.assertEqual(got, {"registry": "dec reads its own frames"})
+        self.assertEqual(len(bad), 4, bad)
+        self.assertEqual(tb.reasons(["parsers #3 -- an old reason"], ["parsers #3 -- an old reason"], 3), ({}, []))
+        self.assertEqual(set(tb.reasons([], head[:1] + head[3:4], None)[0]), {"registry", "parsers"})
+
+    def rec(self, *lines, pr=None):
+        return tb.reasons([], list(lines), pr)
 
     def m(self, lines=10, deps=10, parsers=("p",), unclassified=()):
         return {"lines": lines, "deps": deps, "parsers": set(parsers), "unclassified": list(unclassified)}
@@ -98,36 +104,36 @@ class Pure(unittest.TestCase):
     def test_new_parser_needs_its_own_reason(self):
         # KRN-2m-e: a new parser fails without its key, passes with it.
         head = self.m(parsers=("p", "q"))
-        problems, owed = tb.compare(self.m(), head, [], "")
+        problems, owed = tb.compare(self.m(), head, [])
         self.assertEqual(set(owed), {"parsers"})
         self.assertEqual(len(problems), 1)
-        self.assertTrue(tb.compare(self.m(), head, [], "Trusted-base: registry -- unrelated reason here")[0])
-        self.assertEqual(tb.compare(self.m(), head, [], "Trusted-base: parsers -- needed for the change")[0], [])
+        self.assertTrue(tb.compare(self.m(), head, [], self.rec("registry #1 -- unrelated reason here"))[0])
+        self.assertEqual(tb.compare(self.m(), head, [], self.rec("parsers #1 -- needed for the change"))[0], [])
 
     def test_line_growth_is_reported_not_gated(self):
         # D-157: own and dependency growth passes with no body line; the trusted core gates the keeper.
-        self.assertEqual(tb.compare(self.m(), self.m(lines=11, deps=11), [], ""), ([], {}))
+        self.assertEqual(tb.compare(self.m(), self.m(lines=11, deps=11), []), ([], {}))
 
     def test_shrink_and_equal_pass_without_reason(self):
-        self.assertEqual(tb.compare(self.m(), self.m(), [], "")[0], [])
-        self.assertEqual(tb.compare(self.m(), self.m(lines=1, deps=1, parsers=()), [], "")[0], [])
+        self.assertEqual(tb.compare(self.m(), self.m(), [])[0], [])
+        self.assertEqual(tb.compare(self.m(), self.m(lines=1, deps=1, parsers=()), [])[0], [])
 
     def test_swapped_parser_counts_as_new(self):
         # Same count, different parser: a new decoder still needs a reason.
-        problems, owed = tb.compare(self.m(), self.m(parsers=("q",)), [], "")
+        problems, owed = tb.compare(self.m(), self.m(parsers=("q",)), [])
         self.assertIn("parsers", owed)
         self.assertTrue(problems)
 
     def test_reclassification_needs_registry_reason(self):
-        problems, owed = tb.compare(self.m(), self.m(), ["x/y"], "")
+        problems, owed = tb.compare(self.m(), self.m(), ["x/y"])
         self.assertEqual(set(owed), {"registry"})
         self.assertTrue(problems)
-        self.assertEqual(tb.compare(self.m(), self.m(), ["x/y"], "Trusted-base: registry -- x/y only reads its own store")[0], [])
+        self.assertEqual(tb.compare(self.m(), self.m(), ["x/y"], self.rec("registry #1 -- x/y only reads its own store"))[0], [])
 
     def test_unclassified_fails_whatever_the_body(self):
         # KRN-2m-d: no reason line lets a package in unclassified.
-        body = "\n".join(f"Trusted-base: {k} -- stated reason here" for k in tb.KEYS)
-        self.assertTrue(tb.compare(self.m(), self.m(unclassified=["new/pkg"]), [], body)[0])
+        record = self.rec(*(f"{k} #1 -- stated reason here" for k in tb.KEYS))
+        self.assertTrue(tb.compare(self.m(), self.m(unclassified=["new/pkg"]), [], record)[0])
 
 
 @unittest.skipUnless(shutil.which("go"), "go is not installed")
@@ -143,9 +149,10 @@ class SyntheticTree(unittest.TestCase):
         pathlib.Path(self.body).write_text("")
         tree(self.base)
 
-    def check(self, body=""):
+    def check(self, body="", pr=None):
         pathlib.Path(self.body).write_text(body)
-        return run(["check", "--base-tree", self.base, "--head-tree", self.head, "--body", self.body])
+        return run(["check", "--base-tree", self.base, "--head-tree", self.head, "--body", self.body,
+                    *(["--pr", str(pr)] if pr else [])])
 
     def test_counts(self):
         # KRN-2m-a/b/c: own lines are compiled own files only (no _test.go), deps the
@@ -191,7 +198,26 @@ class SyntheticTree(unittest.TestCase):
         rc, out = self.check()
         self.assertEqual(rc, 1, out)
         self.assertIn("reclassified from parser to inert: example.com/dec", out)
-        self.assertEqual(self.check("Trusted-base: registry -- dec reads only its own frames\n")[0], 0)
+        write(self.head, tb.REASONS, "# reasons\nregistry #9 -- dec reads only its own frames\n")
+        self.assertEqual(self.check(pr=9)[0], 0)
+
+    def test_a_body_reason_line_waives_nothing(self):
+        # #6395 (Security on #6381): the body can change after the accepts at the same head, so a
+        # body line never turns the check green; only a record line the head adds for this PR does.
+        reg = REGISTRY.replace("parser example.com/dec -- decodes frames", "inert example.com/dec -- trust me now")
+        tree(self.head, registry=reg)
+        rc, out = self.check("Trusted-base: registry -- dec reads only its own frames\n", pr=9)
+        self.assertEqual(rc, 1, out)
+        self.assertIn(f"adds no `registry #<PR> -- <reason>` line to {tb.REASONS}", out)
+        self.assertIn("the PR body's `Trusted-base:` lines waive nothing", out)
+        write(self.head, tb.REASONS, "registry #8 -- dec reads only its own frames\n")
+        rc, out = self.check(pr=9)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("names #8, not this PR (#9)", out)
+        # A line the base already holds is an earlier PR's reason and waives nothing now.
+        write(self.base, tb.REASONS, "registry #9 -- dec reads only its own frames\n")
+        write(self.head, tb.REASONS, "registry #9 -- dec reads only its own frames\n")
+        self.assertEqual(self.check(pr=9)[0], 1)
 
     def test_dropping_a_dependency_passes(self):
         tree(self.head, use_dec=False)
@@ -735,7 +761,7 @@ RERUN_PIN = [
     '        run: |',
     '          prs=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" --jq \'.[] | "\\(.number) \\(.head.sha)"\') || { echo "::error::cannot list open PRs"; exit 1; }',
     '          since=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .created_at) && [[ $since =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || { echo "::error::cannot read this run\'s start"; exit 1; }',
-    "          measured='^(broker/|decisions/|(SPEC|DECISIONS)\\.md$|\\.gitattributes$|\\.github/workflows/trusted-base\\.yml$|tools/(trusted_base\\.py|claims\\.py|trusted_base_parsers\\.txt|trusted_core\\.txt|ceilings\\.txt|old_core\\.txt)$)'",
+    "          measured='^(broker/|decisions/|(SPEC|DECISIONS)\\.md$|\\.gitattributes$|\\.github/workflows/trusted-base\\.yml$|tools/(trusted_base\\.py|claims\\.py|trusted_base_parsers\\.txt|trusted_base_reasons\\.txt|trusted_core\\.txt|ceilings\\.txt|old_core\\.txt)$)'",
     '          last=$(gh api "repos/$REPO/actions/workflows/trusted-base-rerun.yml/runs?branch=main&event=push&status=success&per_page=1" --jq \'.workflow_runs[0].head_sha // ""\') || { echo "::error::cannot list this workflow\'s runs"; exit 1; }',
     '          if [[ $last =~ ^[0-9a-f]{40}$ ]] && changed=$(gh api "repos/$REPO/compare/$last...$GITHUB_SHA" --jq \'if (.status == "ahead" or .status == "identical") and (.files | length) < 300 then (.files[] | .filename, (.previous_filename // empty)) else "broker/" end\') && { grep -Eq "$measured" <<< "$changed"; [ $? = 1 ]; }; then',
     '            printf \'\\n%s\\n\' "No path the check reads changed since $last; nothing rerun." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0',
