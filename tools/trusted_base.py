@@ -18,26 +18,28 @@ parser package or reclassifies a parser as inert fails unless it adds a line
 `<parsers|registry> #<PR> -- <reason>` to tools/trusted_base_reasons.txt. It is a measure, not a cap.
 The reason is a committed line, not PR-body text (#6395): a body can change after the reviews without
 changing the head, while the record is part of the head every accept names. A line counts only for
-the PR it names and only when the base lacks it, so an old line never waives later growth; a body
-`Trusted-base:` line waives nothing and only gets a notice.
+the PR it names and only when the base lacks it, so an old line never waives later growth. The
+decision waivers below are record lines too (#6404), so `check` reads no PR body at all.
 
 The trusted core (KRN-2cap, #2935) is the budgeted subset: the `root` packages of
 tools/trusted_core.txt (kernel, key-check library, the clerk check path) and everything they
 link. Its lines are every linked package's outside the standard library and the `allow` lines,
 each one exact package from golang.org/x/crypto or golang.org/x/sys (a subtree would let a new
 package or a vendored file under it in at +0). Every such package other than a root must have a
-`known` line, so a new import fails whatever the body, and a `known` line the core no longer
+`known` line, so a new import fails whatever the record says, and a `known` line the core no longer
 links must be deleted. Against the base tree's file, a head that adds a `known` or `allow` line,
-drops a root or deletes the file fails unless the body has a line `Trusted-core: <decision ID>`
-naming an active DECISIONS.md row of the base tree whose text names the PR (`#<number>`, from
---pr), so neither a row added by the PR itself nor an unrelated standing row can waive it; the
+drops a root or deletes the file fails unless the head adds a record line
+`trusted-core #<PR> -- <decision ID>` naming an active DECISIONS.md row of the base tree whose text
+names the PR (`#<number>`, from --pr), so neither a row added by the PR itself nor an unrelated
+standing row can waive it; the
 reviewer checks that the row records Mark approving it (#2945). Core lines are reported here and
 capped by the ceilings below, not waived per PR (D-310 ends D-159's rule 2).
 
 The ceilings (D-310) are tools/ceilings.txt: trusted lines (core lines plus the old core's Go
 lines, tools/old_core.txt) and SPEC.md's words. A measure fails when it ends above the base's
 ceiling and above the base's measure, and names the cut that passes; raising a ceiling or deleting
-the file needs a line `Ceiling: <decision ID>` naming an active base-tree row that names the PR.
+the file needs a record line `ceiling #<PR> -- <decision ID>` naming an active base-tree row that
+names the PR.
 In CI the base tree is the base branch's tip when the check runs (not the event's base.sha) and
 the head tree is the PR head merged onto it, so the budget is what main holds now and the
 measure is exactly what lands: a branch that cherry-picks main's cuts instead of merging main
@@ -73,7 +75,7 @@ Usage:
       check the measure sentences of the D-159 decisions the head adds; each named PR's head is
       refs/remotes/pr/<N> in REPO (fetched from REMOTE's refs/pull/<N>/head with --fetch). Exit 0
       pass, 1 a missing or wrong sentence, 2 a measurement or fetch error.
-  tools/trusted_base.py check --base-tree DIR --head-tree DIR --body FILE [--pr N] [--markdown FILE]
+  tools/trusted_base.py check --base-tree DIR --head-tree DIR [--pr N] [--markdown FILE]
       the registry is the head tree's; the base tree's registry is read only to find
       reclassified parsers. Exit 0 pass, 1 growth without a reason or an unclassified
       package, 2 a measurement error.
@@ -91,19 +93,18 @@ REASONS = "tools/trusted_base_reasons.txt"
 CORE = "tools/trusted_core.txt"
 FALLBACK = pathlib.Path(__file__).resolve().parent.parent  # the checkout this copy runs from
 CORE_LIST = "broker/core/core.txt"
-KEYS = ("parsers", "registry")
+KEYS = ("parsers", "registry", "trusted-core", "ceiling")
+# The keys whose reason is a decision: its first word names a base-tree DECISIONS.md row (#6404).
+DECIDED = ("trusted-core", "ceiling")
 GO_ENV = {
     "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64", "GOFLAGS": "-mod=vendor",
     "GOTOOLCHAIN": "local", "GOWORK": "off", "GOPROXY": "off", "GOENV": "off",
 }
-BODY_REASON = re.compile(r"(?im)^\s*Trusted-base:\s*(?:parsers|registry)\b")
 RECORD_LINE = re.compile(r"^(\S+)\s+#([1-9]\d*)\s+--\s+(.*?)\s*$")
-WAIVER = re.compile(r"^\s*Trusted-core:\s*(\S+)\s*$", re.M)
 CEILINGS = "tools/ceilings.txt"
 OLD_CORE = "tools/old_core.txt"
 SPEC = "SPEC.md"
 CEILING_NAMES = ("trusted-lines", "spec-words")
-RAISE = re.compile(r"^\s*Ceiling:\s*(\S+)\s*$", re.M)
 PLACEHOLDER = re.compile(r"(?i)^(todo|tbd|n/?a|none|reason|-+|\.+)$")
 
 
@@ -276,14 +277,16 @@ def reasons(base_lines, head_lines, pr=None):
             continue
         r = RECORD_LINE.match(line)
         if not r:
-            bad.append(f"{REASONS}: `{line.strip()}`: want `<parsers|registry> #<PR> -- <reason>`")
+            bad.append(f"{REASONS}: `{line.strip()}`: want `<{'|'.join(KEYS)}> #<PR> -- <reason>`")
             continue
         key, num, why = r.group(1).lower(), int(r.group(2)), r.group(3)
         if key not in KEYS:
             bad.append(f"{REASONS}: `{line.strip()}`: the key must be one of {', '.join(KEYS)}")
         elif pr is not None and num != int(pr):
             bad.append(f"{REASONS}: `{line.strip()}`: names #{num}, not this PR (#{int(pr)})")
-        elif len(why.split()) < 2 or PLACEHOLDER.match(why):
+        elif key in DECIDED and (not why or PLACEHOLDER.match(why.split()[0])):
+            bad.append(f"{REASONS}: `{line.strip()}`: the reason must start with a decision ID")
+        elif key not in DECIDED and (len(why.split()) < 2 or PLACEHOLDER.match(why)):
             bad.append(f"{REASONS}: `{line.strip()}`: the reason must be at least two words, not a placeholder")
         else:
             got[key] = why
@@ -391,7 +394,22 @@ def active_decision(decisions, ident, pr):
     return False
 
 
-def compare_core(base_core, head_core, base, head, body, decisions, pr=None):
+def waiver(key, record, decisions, pr):
+    """'' when the head's record line for `key` names an active base-tree decision row that names PR
+    `pr`, else why not. Only a committed record line waives (#6404): the PR body can change after
+    the accepts at the same head, so it is never read."""
+    why = record[0].get(key)
+    if why is None:
+        return f"the PR adds no `{key} #<PR> -- <decision ID>` line to {REASONS}"
+    ident = why.split()[0]
+    if pr is None:
+        return f"`{key} -- {ident}` cannot be checked without the PR number (--pr)"
+    if not active_decision(decisions, ident, pr):
+        return f"`{key} #{int(pr)} -- {ident}` names no active DECISIONS.md row on the base branch that names #{int(pr)}"
+    return ""
+
+
+def compare_core(base_core, head_core, base, head, record, decisions, pr=None):
     """(problems, owed) for the core; base_core and base are None when the base has no core file."""
     problems, owed = [], {}
     if head is not None:
@@ -407,12 +425,8 @@ def compare_core(base_core, head_core, base, head, body, decisions, pr=None):
                                        ("known", head_core["known"] - base_core["known"], "added")):
                 if change:
                     owed[kind] = f"{kind} lines {verb}: " + ", ".join(sorted(change))
-    if owed:
-        w = WAIVER.search(body or "")
-        if not (w and active_decision(decisions, w.group(1), pr)):
-            why = (f"`Trusted-core: {w.group(1)}` names no active DECISIONS.md row on the base branch that names #{pr}"
-                   if w else "no `Trusted-core: <decision ID>` line")
-            problems += [f"{detail}, and the PR body has {why}" for detail in owed.values()]
+    why = waiver("trusted-core", record, decisions, pr) if owed else ""
+    problems += [f"{detail}, and {why}" for detail in owed.values() if why]
     return problems, owed
 
 
@@ -493,11 +507,11 @@ def ceiling_measures(tree, core_measure, dirs):
     return {"trusted-lines": core + old, "core": core, "old-core": old, "spec-words": spec_words(tree)}
 
 
-def compare_ceilings(base_c, head_c, base, head, body, decisions, pr=None):
+def compare_ceilings(base_c, head_c, base, head, record, decisions, pr=None):
     """(problems, caps) for the ceilings (D-310). A measure fails when it ends above its ceiling
     and above the base's measure: while main is over a ceiling a PR may not grow it, and no PR
     crosses one upward. The ceiling is the base's; a head that raises or deletes one needs a
-    `Ceiling: <decision ID>` line naming an active base-tree DECISIONS.md row that names the PR,
+    `ceiling #<PR> -- <decision ID>` record line naming an active base-tree DECISIONS.md row that names the PR,
     and then the head's number holds. A head that lowers one is held to the lower number."""
     if base_c is None:
         return [], {}
@@ -506,18 +520,9 @@ def compare_ceilings(base_c, head_c, base, head, body, decisions, pr=None):
         raised.append(f"{CEILINGS} is deleted")
     else:
         raised += [f"{k} ceiling {base_c[k]} -> {head_c[k]}" for k in CEILING_NAMES if head_c[k] > base_c[k]]
-    waived = False
-    if raised:
-        w = RAISE.search(body or "")
-        waived = bool(w and active_decision(decisions, w.group(1), pr))
-        if not waived:
-            if not w:
-                why = "the PR body has no `Ceiling: <decision ID>` line"
-            elif pr is None:
-                why = f"`Ceiling: {w.group(1)}` cannot be checked without the PR number (--pr)"
-            else:
-                why = f"`Ceiling: {w.group(1)}` names no active DECISIONS.md row on the base branch that names #{pr}"
-            problems += [f"{r}: only Mark raises a ceiling (D-310), and {why}" for r in raised]
+    why = waiver("ceiling", record, decisions, pr) if raised else ""
+    waived = bool(raised) and not why
+    problems += [f"{r}: only Mark raises a ceiling (D-310), and {why}" for r in raised if why]
     for k in CEILING_NAMES:
         if head_c is None:
             caps[k] = None if waived else base_c[k]
@@ -668,7 +673,7 @@ def run_claims(base_tree, head_tree, repo, onto="HEAD", fetch=None):
     return problems, "\n".join(out) + "\n"
 
 
-def run_check(base_tree, head_tree, body, fallback_tree=None, pr=None):
+def run_check(base_tree, head_tree, fallback_tree=None, pr=None):
     rules = read_rules(head_tree, True)
     base_rules = read_rules(base_tree, False)
     head_pkgs = packages(head_tree)
@@ -679,9 +684,6 @@ def run_check(base_tree, head_tree, body, fallback_tree=None, pr=None):
     record = reasons(read_reasons(base_tree), read_reasons(head_tree), pr)
     problems, owed = compare(base, head, reclassified, record)
     text = table(base, head, owed, problems, trusted_mains(head_tree))
-    if BODY_REASON.search(body or ""):
-        text += (f"\nNote: the PR body's `Trusted-base:` lines waive nothing (#6395): commit each as a line "
-                 f"`<parsers|registry> #<PR> -- <reason>` in {REASONS}.\n")
     base_core, head_core = read_core(base_tree), read_core(head_tree)
     if base_core is None:
         # A branch whose merge base predates the core file is measured with the file of the
@@ -694,7 +696,7 @@ def run_check(base_tree, head_tree, body, fallback_tree=None, pr=None):
     # The base tree's decisions: a row the PR adds itself is not yet Mark's record (#2945).
     decisions = pathlib.Path(base_tree, "DECISIONS.md")
     decisions = decisions.read_text() if decisions.exists() else ""
-    cproblems, cowed = compare_core(base_core, head_core, cbase, chead, body, decisions, pr)
+    cproblems, cowed = compare_core(base_core, head_core, cbase, chead, record, decisions, pr)
     # The ceilings (D-310): old-core directories listed on either side count on both, so dropping
     # a line of tools/old_core.txt cannot shed lines whose files stay.
     dirs = old_core_dirs(base_tree) | old_core_dirs(head_tree)
@@ -702,7 +704,7 @@ def run_check(base_tree, head_tree, body, fallback_tree=None, pr=None):
     hcore = chead if head_core is not None else (base_core and measure_core(head_tree, base_core))
     ebase, ehead = ceiling_measures(base_tree, cbase, dirs), ceiling_measures(head_tree, hcore, dirs)
     eproblems, caps = compare_ceilings(read_ceilings(base_tree), read_ceilings(head_tree), ebase, ehead,
-                                       body, decisions, pr)
+                                       record, decisions, pr)
     return (problems + cproblems + eproblems,
             text + core_table(cbase, chead, cowed, cproblems) + ceilings_table(ebase, ehead, caps, eproblems))
 
@@ -724,7 +726,6 @@ def main(argv=None):
     c = sub.add_parser("check")
     c.add_argument("--base-tree", required=True)
     c.add_argument("--head-tree", required=True)
-    c.add_argument("--body", required=True, help="file holding the PR body")
     c.add_argument("--pr", type=int, help="the PR number a waiving decision row must name")
     c.add_argument("--markdown", help="also write the table to this file")
     a = ap.parse_args(argv)
@@ -746,14 +747,13 @@ def main(argv=None):
             if core:
                 c = measure_core(a.tree, core)
                 text += f"core lines {c['lines']}, linked packages outside std and allow {len(c['imports'])}\n"
-                problems += compare_core(None, core, None, c, "", "")[0]
+                problems += compare_core(None, core, None, c, ({}, []), "")[0]
                 e = ceiling_measures(a.tree, c, old_core_dirs(a.tree))
                 caps = read_ceilings(a.tree) or {}
                 text += "".join(f"{k} {e[k]}" + (f" (ceiling {caps[k]})" if k in caps else "") + "\n" for k in CEILING_NAMES)
             text += "".join(f"- {p}\n" for p in problems)
         else:
-            body = pathlib.Path(a.body).read_text()
-            problems, text = run_check(a.base_tree, a.head_tree, body, pr=a.pr)
+            problems, text = run_check(a.base_tree, a.head_tree, pr=a.pr)
     except (MeasureError, OSError, ValueError) as e:
         print(f"trusted_base: {e}", file=sys.stderr)
         if a.cmd in ("check", "claims") and a.markdown:

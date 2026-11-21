@@ -10,6 +10,7 @@ real broker, so a package that enters a trusted process unclassified fails here 
 # REQ: KRN-2
 import ast
 import contextlib
+import inspect
 import io
 import json
 import os
@@ -145,14 +146,10 @@ class SyntheticTree(unittest.TestCase):
         saved, tb.FALLBACK = tb.FALLBACK, pathlib.Path(self.tmp, "no-fallback")
         self.addCleanup(setattr, tb, "FALLBACK", saved)
         self.base, self.head = os.path.join(self.tmp, "base"), os.path.join(self.tmp, "head")
-        self.body = os.path.join(self.tmp, "body.txt")
-        pathlib.Path(self.body).write_text("")
         tree(self.base)
 
-    def check(self, body="", pr=None):
-        pathlib.Path(self.body).write_text(body)
-        return run(["check", "--base-tree", self.base, "--head-tree", self.head, "--body", self.body,
-                    *(["--pr", str(pr)] if pr else [])])
+    def check(self, pr=None):
+        return run(["check", "--base-tree", self.base, "--head-tree", self.head, *(["--pr", str(pr)] if pr else [])])
 
     def test_counts(self):
         # KRN-2m-a/b/c: own lines are compiled own files only (no _test.go), deps the
@@ -188,7 +185,7 @@ class SyntheticTree(unittest.TestCase):
 
     def test_unclassified_package_fails(self):
         tree(self.head, registry=REGISTRY.replace("parser example.com/dec -- decodes frames\n", ""))
-        rc, out = self.check("Trusted-base: registry -- dropped the dec line on purpose\n")
+        rc, out = self.check()
         self.assertEqual(rc, 1, out)
         self.assertIn("example.com/dec is linked into a trusted process but no line", out)
 
@@ -201,15 +198,14 @@ class SyntheticTree(unittest.TestCase):
         write(self.head, tb.REASONS, "# reasons\nregistry #9 -- dec reads only its own frames\n")
         self.assertEqual(self.check(pr=9)[0], 0)
 
-    def test_a_body_reason_line_waives_nothing(self):
-        # #6395 (Security on #6381): the body can change after the accepts at the same head, so a
-        # body line never turns the check green; only a record line the head adds for this PR does.
+    def test_only_a_record_line_the_head_adds_waives(self):
+        # #6395 (Security on #6381): the body can change after the accepts at the same head, so
+        # only a record line the head adds for this PR waives; `check` reads no body (#6404).
         reg = REGISTRY.replace("parser example.com/dec -- decodes frames", "inert example.com/dec -- trust me now")
         tree(self.head, registry=reg)
-        rc, out = self.check("Trusted-base: registry -- dec reads only its own frames\n", pr=9)
+        rc, out = self.check(pr=9)
         self.assertEqual(rc, 1, out)
         self.assertIn(f"adds no `registry #<PR> -- <reason>` line to {tb.REASONS}", out)
-        self.assertIn("the PR body's `Trusted-base:` lines waive nothing", out)
         write(self.head, tb.REASONS, "registry #8 -- dec reads only its own frames\n")
         rc, out = self.check(pr=9)
         self.assertEqual(rc, 1, out)
@@ -236,8 +232,7 @@ class SyntheticTree(unittest.TestCase):
     def test_markdown_goes_to_the_summary(self):
         tree(self.head)
         summary = os.path.join(self.tmp, "summary.md")
-        rc, _ = run(["check", "--base-tree", self.base, "--head-tree", self.head, "--body", self.body,
-                     "--markdown", summary])
+        rc, _ = run(["check", "--base-tree", self.base, "--head-tree", self.head, "--markdown", summary])
         self.assertEqual(rc, 0)
         self.assertIn("## Trusted base (KRN-2)", pathlib.Path(summary).read_text())
 
@@ -245,6 +240,12 @@ class SyntheticTree(unittest.TestCase):
 CORE = "root calc\nallow golang.org/x/crypto/argon2\n"
 # D-7 names the test PR (#42, as --pr 42); D-5 is active but names another PR (#2945).
 PR = 42
+NOREC = ({}, [])
+
+
+def rec(*lines, pr=PR):
+    """reasons()' pair for record lines the head adds (#6404: waivers are record lines)."""
+    return tb.reasons([], list(lines), pr)
 
 
 def ceilings(lines, words=0):
@@ -273,9 +274,9 @@ class CorePure(unittest.TestCase):
         return {"root": set(root), "allow": set(allow), "known": set(known)}
 
     def test_equal_and_shrink_pass(self):
-        self.assertEqual(tb.compare_core(self.c(), self.c(), self.m(), self.m(), "", ""), ([], {}))
-        self.assertEqual(tb.compare_core(self.c(), self.c(known=()), self.m(), self.m(lines=3, imports=()), "", "")[0], [])
-        self.assertEqual(tb.compare_core(self.c(), self.c(root=("k", "j")), self.m(), self.m(), "", "")[0], [])
+        self.assertEqual(tb.compare_core(self.c(), self.c(), self.m(), self.m(), NOREC, ""), ([], {}))
+        self.assertEqual(tb.compare_core(self.c(), self.c(known=()), self.m(), self.m(lines=3, imports=()), NOREC, "")[0], [])
+        self.assertEqual(tb.compare_core(self.c(), self.c(root=("k", "j")), self.m(), self.m(), NOREC, "")[0], [])
 
     def test_each_loosening_needs_a_decision(self):
         cases = [("root", self.c(root=()), self.m()),
@@ -283,26 +284,34 @@ class CorePure(unittest.TestCase):
                  ("known", self.c(known=("a/b", "c/d")), self.m(imports=("a/b", "c/d"))),
                  ("file", None, None)]
         for key, head_core, head in cases:
-            problems, owed = tb.compare_core(self.c(), head_core, self.m(), head, "", DECISIONS)
+            problems, owed = tb.compare_core(self.c(), head_core, self.m(), head, NOREC, DECISIONS)
             self.assertEqual(set(owed), {key})
             self.assertEqual(len(problems), 1, key)
-            self.assertIn("no `Trusted-core: <decision ID>` line", problems[0])
-            for body in ("Trusted-core: D-6", "Trusted-core: D-8", "Trusted-core: D-5", "Trusted-base: lines -- calc grows here"):
-                self.assertTrue(tb.compare_core(self.c(), head_core, self.m(), head, body, DECISIONS, PR)[0], (key, body))
-            self.assertEqual(tb.compare_core(self.c(), head_core, self.m(), head, "Body.\nTrusted-core: D-7\n", DECISIONS, PR)[0], [])
+            self.assertIn(f"the PR adds no `trusted-core #<PR> -- <decision ID>` line to {tb.REASONS}", problems[0])
+            # A superseded row, a missing row, a row naming another PR, another key: none waives.
+            for line in ("trusted-core #42 -- D-6", "trusted-core #42 -- D-8", "trusted-core #42 -- D-5",
+                         "ceiling #42 -- D-7", "parsers #42 -- D-7 calc grows here"):
+                self.assertTrue(tb.compare_core(self.c(), head_core, self.m(), head, rec(line), DECISIONS, PR)[0], (key, line))
+            self.assertEqual(tb.compare_core(self.c(), head_core, self.m(), head, rec("trusted-core #42 -- D-7"), DECISIONS, PR)[0], [])
+            self.assertEqual(tb.compare_core(self.c(), head_core, self.m(), head, rec("trusted-core #42 -- D-7 for calc"),
+                                             DECISIONS, PR)[0], [])
             # #2945: the row has to name this PR; with no PR number nothing waives.
-            self.assertTrue(tb.compare_core(self.c(), head_core, self.m(), head, "Trusted-core: D-7", DECISIONS, 43)[0])
-            self.assertTrue(tb.compare_core(self.c(), head_core, self.m(), head, "Trusted-core: D-7", DECISIONS)[0])
+            self.assertTrue(tb.compare_core(self.c(), head_core, self.m(), head, rec("trusted-core #42 -- D-7", pr=43),
+                                            DECISIONS, 43)[0])
+            self.assertTrue(tb.compare_core(self.c(), head_core, self.m(), head, rec("trusted-core #43 -- D-7", pr=43),
+                                            DECISIONS, 43)[0])
+            self.assertTrue(tb.compare_core(self.c(), head_core, self.m(), head, rec("trusted-core #42 -- D-7", pr=None),
+                                            DECISIONS)[0])
 
     def test_unlisted_and_unused_fail_whatever_the_body(self):
         head = self.m(unlisted=["new/pkg"])
-        self.assertTrue(tb.compare_core(self.c(), self.c(), self.m(), head, "Trusted-core: D-7", DECISIONS, PR)[0])
-        self.assertTrue(tb.compare_core(None, self.c(), None, head, "", "")[0])
-        self.assertTrue(tb.compare_core(None, self.c(), None, self.m(unused=["a/b"]), "", "")[0])
+        self.assertTrue(tb.compare_core(self.c(), self.c(), self.m(), head, rec("trusted-core #42 -- D-7"), DECISIONS, PR)[0])
+        self.assertTrue(tb.compare_core(None, self.c(), None, head, NOREC, "")[0])
+        self.assertTrue(tb.compare_core(None, self.c(), None, self.m(unused=["a/b"]), NOREC, "")[0])
 
     def test_no_base_file_owes_nothing(self):
-        self.assertEqual(tb.compare_core(None, self.c(), None, self.m(lines=10**6), "", ""), ([], {}))
-        self.assertEqual(tb.compare_core(None, None, None, None, "", ""), ([], {}))
+        self.assertEqual(tb.compare_core(None, self.c(), None, self.m(lines=10**6), NOREC, ""), ([], {}))
+        self.assertEqual(tb.compare_core(None, None, None, None, NOREC, ""), ([], {}))
 
 
 class CeilingsPure(unittest.TestCase):
@@ -339,7 +348,6 @@ class CoreTree(unittest.TestCase):
         saved, tb.FALLBACK = tb.FALLBACK, pathlib.Path(self.tmp, "no-fallback")
         self.addCleanup(setattr, tb, "FALLBACK", saved)
         self.base, self.head = os.path.join(self.tmp, "base"), os.path.join(self.tmp, "head")
-        self.body = os.path.join(self.tmp, "body.txt")
         tree(self.base)
         write(self.base, tb.CORE, CORE)
         write(self.base, "DECISIONS.md", DECISIONS)
@@ -347,15 +355,15 @@ class CoreTree(unittest.TestCase):
         self.ceil = ceilings(tb.measure_core(self.base, tb.parse_core(CORE))["lines"])
         write(self.base, tb.CEILINGS, self.ceil)
 
-    def check(self, body="", head_core=CORE, pr=PR, head_decisions="", head_ceil=None, **kw):
+    def check(self, record="", head_core=CORE, pr=PR, head_decisions="", head_ceil=None, **kw):
+        """Run check on a fresh head; `record` is the text of the head's tools/trusted_base_reasons.txt."""
         tree(self.head, **kw)
         write(self.head, "DECISIONS.md", DECISIONS + head_decisions)
         if head_core is not None:
             write(self.head, tb.CORE, head_core)
         write(self.head, tb.CEILINGS, self.ceil if head_ceil is None else head_ceil)
-        pathlib.Path(self.body).write_text(body)
-        return run(["check", "--base-tree", self.base, "--head-tree", self.head, "--body", self.body]
-                   + ([] if pr is None else ["--pr", str(pr)]))
+        write(self.head, tb.REASONS, record)  # replaced on every call: the head dir is reused
+        return run(["check", "--base-tree", self.base, "--head-tree", self.head] + ([] if pr is None else ["--pr", str(pr)]))
 
     def test_counts_only_the_roots_closure(self):
         m = tb.measure_core(self.base, tb.parse_core(CORE))
@@ -375,16 +383,16 @@ class CoreTree(unittest.TestCase):
         # #4946 UX: the message names the cut that makes the PR pass.
         self.assertIn(f"trusted-lines {n} -> {n + 4} ends above its ceiling {n} ({tb.CEILINGS}):"
                       " cut 4 lines elsewhere in this PR (D-310)", out)
-        self.assertEqual(self.check("Trusted-core: D-7\n", extra_own=4)[0], 1)
+        self.assertEqual(self.check("trusted-core #42 -- D-7\n", extra_own=4)[0], 1)
         rc, out = self.check(extra_own=4, head_ceil=ceilings(n + 4))
         self.assertEqual(rc, 1, out)
         self.assertIn(f"trusted-lines ceiling {n} -> {n + 4}: only Mark raises a ceiling (D-310),"
-                      " and the PR body has no `Ceiling: <decision ID>` line", out)
+                      f" and the PR adds no `ceiling #<PR> -- <decision ID>` line to {tb.REASONS}", out)
         # #4946 Potency: an unwaived raise leaves the base's ceiling in force, not the head's.
         self.assertIn(f"trusted-lines {n} -> {n + 4} ends above its ceiling {n} ({tb.CEILINGS}): cut 4 lines", out)
         self.assertIn(f"| trusted-lines | {n} | {n + 4} | +4 | {n} |", out)
-        self.assertEqual(self.check("Ceiling: D-7\n", extra_own=4, head_ceil=ceilings(n + 3))[0], 1)
-        rc, out = self.check("Ceiling: D-7\n", extra_own=4, head_ceil=ceilings(n + 4))
+        self.assertEqual(self.check("ceiling #42 -- D-7\n", extra_own=4, head_ceil=ceilings(n + 3))[0], 1)
+        rc, out = self.check("ceiling #42 -- D-7\n", extra_own=4, head_ceil=ceilings(n + 4))
         self.assertEqual(rc, 0, out)
         self.assertIn(f"| trusted-lines | {n} | {n + 4} | +4 | {n + 4} |", out)
 
@@ -518,49 +526,53 @@ class CoreTree(unittest.TestCase):
         n = tb.measure_core(self.base, tb.parse_core(CORE))["lines"]
         up = dict(extra_own=4, head_ceil=ceilings(n + 4))
         own_row = "| D-9 | 2026-10-24 | active | raise for #42 |\n"
-        rc, out = self.check("Ceiling: D-9\n", head_decisions=own_row, **up)
+        rc, out = self.check("ceiling #42 -- D-9\n", head_decisions=own_row, **up)
         self.assertEqual(rc, 1, out)
-        self.assertIn("names no active DECISIONS.md row on the base branch that names #42", out)
-        self.assertEqual(self.check("Ceiling: D-7\n", pr=43, **up)[0], 1)
-        self.assertEqual(self.check("Ceiling: D-7\n", pr=None, **up)[0], 1)
-        self.assertEqual(self.check("Ceiling: D-5\n", **up)[0], 1)
-        self.assertEqual(self.check("Ceiling: D-6\n", **up)[0], 1)
-        self.assertEqual(self.check("Trusted-core: D-7\n", **up)[0], 1)
-        # #4946 Potency: the line must start the line, so prose that quotes it waives nothing.
-        self.assertEqual(self.check("Ceiling: D-7\n", **up)[0], 0)
-        self.assertEqual(self.check("Not a Ceiling: D-7\n", **up)[0], 1)
+        self.assertIn("`ceiling #42 -- D-9` names no active DECISIONS.md row on the base branch that names #42", out)
+        self.assertEqual(self.check("ceiling #42 -- D-7\n", pr=43, **up)[0], 1)
+        self.assertEqual(self.check("ceiling #42 -- D-7\n", pr=None, **up)[0], 1)
+        self.assertEqual(self.check("ceiling #42 -- D-5\n", **up)[0], 1)
+        self.assertEqual(self.check("ceiling #42 -- D-6\n", **up)[0], 1)
+        self.assertEqual(self.check("trusted-core #42 -- D-7\n", **up)[0], 1)
+        self.assertEqual(self.check("ceiling #42 -- D-7\n", **up)[0], 0)
+        # A malformed line, a placeholder or a line the base already holds waives nothing.
+        self.assertEqual(self.check("Not a ceiling #42 -- D-7\n", **up)[0], 1)
+        self.assertEqual(self.check("ceiling #42 -- TODO\n", **up)[0], 1)
+        write(self.base, tb.REASONS, "ceiling #42 -- D-7\n")
+        self.assertEqual(self.check("ceiling #42 -- D-7\n", **up)[0], 1)
+        os.remove(os.path.join(self.base, tb.REASONS))
         # #4946 UX: with no PR number the message says so instead of naming #None.
-        rc, out = self.check("Ceiling: D-7\n", pr=None, **up)
-        self.assertIn("`Ceiling: D-7` cannot be checked without the PR number (--pr)", out)
+        rc, out = self.check("ceiling #42 -- D-7\n", pr=None, **up)
+        self.assertIn("`ceiling -- D-7` cannot be checked without the PR number (--pr)", out)
         self.assertNotIn("#None", out)
 
     def test_deleting_the_ceilings_file_needs_a_decision(self):
         self.check()
         os.remove(os.path.join(self.head, tb.CEILINGS))
-        pathlib.Path(self.body).write_text("")
-        problems = tb.run_check(self.base, self.head, "", pr=PR)[0]
+        problems = tb.run_check(self.base, self.head, pr=PR)[0]
         self.assertTrue(any(f"{tb.CEILINGS} is deleted" in p for p in problems), problems)
-        self.assertEqual(tb.run_check(self.base, self.head, "Ceiling: D-7", pr=PR)[0], [])
+        write(self.head, tb.REASONS, "ceiling #42 -- D-7\n")
+        self.assertEqual(tb.run_check(self.base, self.head, pr=PR)[0], [])
+        os.remove(os.path.join(self.head, tb.REASONS))
         # Without its file the base ceiling still holds.
         tree(self.head, extra_own=4)
-        problems = tb.run_check(self.base, self.head, "", pr=PR)[0]
+        problems = tb.run_check(self.base, self.head, pr=PR)[0]
         self.assertTrue(any("ends above its ceiling" in p for p in problems), problems)
 
     def test_deleting_the_core_file_sheds_no_lines(self):
-        problems = self.check("Trusted-core: D-7", head_core=None, extra_own=4)
+        problems = self.check("trusted-core #42 -- D-7", head_core=None, extra_own=4)
         self.assertEqual(problems[0], 1, problems[1])
         self.assertIn("trusted-lines", problems[1])
 
     def test_new_import_fails_until_listed_with_a_decision(self):
         self.ceil = ceilings(10**6)  # room under the ceiling: only the import is owed
         write(self.base, tb.CEILINGS, self.ceil)
-        body = "Trusted-base: lines -- calc links dec now\n"
-        rc, out = self.check(body + "Trusted-core: D-7\n", calc_dec=True)
+        rc, out = self.check("trusted-core #42 -- D-7\n", calc_dec=True)
         self.assertEqual(rc, 1, out)
         self.assertIn("example.com/dec is linked into the trusted core", out)
         listed = CORE + "known example.com/dec -- frames for calc\n"
-        self.assertEqual(self.check(body, head_core=listed, calc_dec=True)[0], 1)
-        rc, out = self.check(body + "Trusted-core: D-7\n", head_core=listed, calc_dec=True)
+        self.assertEqual(self.check(head_core=listed, calc_dec=True)[0], 1)
+        rc, out = self.check("trusted-core #42 -- D-7\n", head_core=listed, calc_dec=True)
         self.assertEqual(rc, 0, out)
 
     def test_package_beside_an_allowed_one_fails(self):
@@ -568,7 +580,7 @@ class CoreTree(unittest.TestCase):
         # same module (here example.com/dec beside an allowed example.com/dec/other) is an import.
         allow = CORE + "allow example.com/dec/other\n"
         write(self.base, tb.CORE, allow)
-        rc, out = self.check("Trusted-base: lines -- calc links dec now\nTrusted-core: D-7\n", head_core=allow, calc_dec=True)
+        rc, out = self.check("trusted-core #42 -- D-7\n", head_core=allow, calc_dec=True)
         self.assertEqual(rc, 1, out)
         self.assertIn("example.com/dec is linked into the trusted core", out)
 
@@ -578,7 +590,7 @@ class CoreTree(unittest.TestCase):
         self.ceil = ceilings(10**6)
         write(self.base, tb.CEILINGS, self.ceil)
         # calc's own lines grow under the ceiling; dec itself needs no known line.
-        rc, out = self.check("Trusted-base: lines -- calc links dec now\nTrusted-core: D-7\n", head_core=allow, calc_dec=True)
+        rc, out = self.check("trusted-core #42 -- D-7\n", head_core=allow, calc_dec=True)
         self.assertEqual(rc, 0, out)
         self.assertIn("| Linked packages outside std and allow | 0 | 0 | +0 |", out)
 
@@ -586,17 +598,18 @@ class CoreTree(unittest.TestCase):
         rc, out = self.check(head_core=None)
         self.assertEqual(rc, 1, out)
         self.assertIn(f"{tb.CORE} is deleted", out)
-        self.assertEqual(self.check("Trusted-core: D-7", head_core=None)[0], 0)
+        self.assertEqual(self.check("trusted-core #42 -- D-7", head_core=None)[0], 0)
 
     def test_first_file_owes_nothing(self):
         os.remove(os.path.join(self.base, tb.CORE))
         os.remove(os.path.join(self.base, tb.CEILINGS))
-        rc, out = self.check(extra_own=4, body="Trusted-base: lines -- calc grows here")
+        rc, out = self.check(extra_own=4)
         self.assertEqual(rc, 0, out)
 
-    def checked(self, body, fallback, **kw):
+    def checked(self, record, fallback, **kw):
         tree(self.head, **kw)
-        return tb.run_check(self.base, self.head, body, fallback_tree=fallback, pr=PR)[0]
+        write(self.head, tb.REASONS, record)
+        return tb.run_check(self.base, self.head, fallback_tree=fallback, pr=PR)[0]
 
     def test_branch_older_than_the_file_uses_the_running_copy(self):
         # L3 blocker on #2941: neither tree has the file, the base branch tip does.
@@ -604,13 +617,12 @@ class CoreTree(unittest.TestCase):
         tip = os.path.join(self.tmp, "tip")
         write(tip, tb.CORE, CORE)
         os.remove(os.path.join(self.base, tb.CEILINGS))
-        body = "Trusted-base: lines -- calc grows here\n"
-        problems = self.checked(body, tip, calc_dec=True)
+        problems = self.checked("", tip, calc_dec=True)
         self.assertTrue(any("example.com/dec is linked into the trusted core" in p for p in problems), problems)
-        problems = self.checked(body + "Trusted-core: D-7\n", tip, calc_dec=True)
+        problems = self.checked("trusted-core #42 -- D-7\n", tip, calc_dec=True)
         self.assertTrue(any("example.com/dec is linked into the trusted core" in p for p in problems), problems)
         # No copy anywhere (this PR's own run): nothing to check.
-        self.assertEqual(self.checked(body, os.path.join(self.tmp, "none"), extra_own=4), [])
+        self.assertEqual(self.checked("", os.path.join(self.tmp, "none"), extra_own=4), [])
 
     def test_bad_core_file_exits_2(self):
         self.assertEqual(self.check(head_core="root ../vault\n")[0], 2)
@@ -668,7 +680,7 @@ PIN = [
     "name: trusted-base",
     "on:",
     "  pull_request_target:",
-    "    types: [opened, synchronize, reopened, edited]",
+    "    types: [opened, synchronize, reopened]",
     "concurrency:",
     "  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}",
     "  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}",
@@ -701,7 +713,6 @@ PIN = [
     "        env:",
     "          HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
     "          PR_NUMBER: ${{ github.event.pull_request.number }}",
-    "          PR_BODY: ${{ github.event.pull_request.body }}",
     "        run: |",
     "          git fetch --no-tags origin \"+refs/pull/$PR_NUMBER/head:refs/remotes/pr/head\"",
     "          git cat-file -e \"$HEAD_SHA^{commit}\"",
@@ -710,20 +721,12 @@ PIN = [
     " -p HEAD -p \"$HEAD_SHA\" -m merge \"$MERGED\")",
     "          git -c core.hooksPath=/dev/null worktree add --detach \"$RUNNER_TEMP/base\" HEAD",
     "          git -c core.hooksPath=/dev/null worktree add --detach \"$RUNNER_TEMP/head\" \"$MERGE\"",
-    "          printf '%s\\n' \"$PR_BODY\" > \"$RUNNER_TEMP/body.txt\"",
     "          python3 -I tools/trusted_base.py check --base-tree \"$RUNNER_TEMP/base\" --head-tree \"$RUNNER_TEMP/head\""
-    " --body \"$RUNNER_TEMP/body.txt\" --pr \"$PR_NUMBER\" --markdown \"$GITHUB_STEP_SUMMARY\"",
+    " --pr \"$PR_NUMBER\" --markdown \"$GITHUB_STEP_SUMMARY\"",
     "      - name: Measure sentences of added trusted-core growth decisions (base copy, D-159)",
     "        if: ${{ !cancelled() }}",
     "        run: python3 -I tools/trusted_base.py claims --base-tree \"$RUNNER_TEMP/base\" --head-tree \"$RUNNER_TEMP/head\""
     " --repo . --fetch origin --markdown \"$GITHUB_STEP_SUMMARY\"",
-    "      - name: Closing keywords against deferred parts (base copy of tools/claims.py)",
-    "        if: ${{ !cancelled() }}",
-    "        env:",
-    "          PR_BODY: ${{ github.event.pull_request.body }}",
-    "        run: |",
-    "          printf '%s\\n' \"$PR_BODY\" > \"$RUNNER_TEMP/claims-body.txt\"",
-    "          python3 -I tools/claims.py closes --body \"$RUNNER_TEMP/claims-body.txt\" --markdown \"$GITHUB_STEP_SUMMARY\"",
 ]
 
 
@@ -761,7 +764,7 @@ RERUN_PIN = [
     '        run: |',
     '          prs=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" --jq \'.[] | "\\(.number) \\(.head.sha)"\') || { echo "::error::cannot list open PRs"; exit 1; }',
     '          since=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .created_at) && [[ $since =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || { echo "::error::cannot read this run\'s start"; exit 1; }',
-    "          measured='^(broker/|decisions/|(SPEC|DECISIONS)\\.md$|\\.gitattributes$|\\.github/workflows/trusted-base\\.yml$|tools/(trusted_base\\.py|claims\\.py|trusted_base_parsers\\.txt|trusted_base_reasons\\.txt|trusted_core\\.txt|ceilings\\.txt|old_core\\.txt)$)'",
+    "          measured='^(broker/|decisions/|(SPEC|DECISIONS)\\.md$|\\.gitattributes$|\\.github/workflows/trusted-base\\.yml$|tools/(trusted_base\\.py|trusted_base_parsers\\.txt|trusted_base_reasons\\.txt|trusted_core\\.txt|ceilings\\.txt|old_core\\.txt)$)'",
     '          last=$(gh api "repos/$REPO/actions/workflows/trusted-base-rerun.yml/runs?branch=main&event=push&status=success&per_page=1" --jq \'.workflow_runs[0].head_sha // ""\') || { echo "::error::cannot list this workflow\'s runs"; exit 1; }',
     '          if [[ $last =~ ^[0-9a-f]{40}$ ]] && changed=$(gh api "repos/$REPO/compare/$last...$GITHUB_SHA" --jq \'if (.status == "ahead" or .status == "identical") and (.files | length) < 300 then (.files[] | .filename, (.previous_filename // empty)) else "broker/" end\') && { grep -Eq "$measured" <<< "$changed"; [ $? = 1 ]; }; then',
     '            printf \'\\n%s\\n\' "No path the check reads changed since $last; nothing rerun." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0',
@@ -842,10 +845,12 @@ class Workflow(unittest.TestCase):
                          ("--detach \"$RUNNER_TEMP/base\" HEAD", "--detach \"$RUNNER_TEMP/base\" \"$(git merge-base HEAD \"$HEAD_SHA\")\""),
                          ("    runs-on: ubuntu-24.04", "    continue-on-error: true\n    runs-on: ubuntu-24.04"),
                          # REV-PROOF-claims (#4909): the claim steps run the base copies and cannot be skipped.
-                         ("python3 -I tools/claims.py", "python3 -I \"$RUNNER_TEMP/head/tools/claims.py\""),
                          (" --fetch origin", ""),
-                         ("--body \"$RUNNER_TEMP/claims-body.txt\" --markdown \"$GITHUB_STEP_SUMMARY\"",
-                          "--body \"$RUNNER_TEMP/claims-body.txt\" --markdown \"$GITHUB_STEP_SUMMARY\" || true"),
+                         # CI-trusted-base-records (#6404): no body rerun, no body passed.
+                         ("types: [opened, synchronize, reopened]", "types: [opened, synchronize, reopened, edited]"),
+                         ("          PR_NUMBER: ${{ github.event.pull_request.number }}\n",
+                          "          PR_NUMBER: ${{ github.event.pull_request.number }}\n"
+                          "          PR_BODY: ${{ github.event.pull_request.body }}\n"),
                          ("--head-tree \"$RUNNER_TEMP/head\" --repo .", "--head-tree \"$RUNNER_TEMP/base\" --repo .")]:
             self.assertIn(old, text)
             self.assertTrue(pin_problems(text.replace(old, new, 1)), old)
@@ -1191,7 +1196,7 @@ class RerunScript(unittest.TestCase):
     # REQ: CI-rerun-fresh-fu
     def test_measured_paths_hold_every_path_the_check_reads(self):
         # A push that changes no `measured` path cannot change any PR's measure only if the list
-        # holds every repository path the check reads: the two base-copy tools, trusted-base.yml
+        # holds every repository path the check reads: the base-copy tool, trusted-base.yml
         # (broker/go.mod's toolchain line), .gitattributes (git merge-tree honours it) and every
         # string constant in the tools, any quote or f-string part, whose first part names an
         # entry at the root or in broker/ (where go.mod is read), plus each old-core directory.
@@ -1201,7 +1206,7 @@ class RerunScript(unittest.TestCase):
         def covered(p):
             return bool(measured.search(p) or measured.search(p.rstrip("/") + "/x"))
 
-        tools = ("tools/trusted_base.py", "tools/claims.py")
+        tools = ("tools/trusted_base.py",)
         reads = {*tools, ".github/workflows/trusted-base.yml", ".gitattributes"}
         for name in tools:
             reads |= path_constants((ROOT / name).read_text())
@@ -1283,10 +1288,8 @@ class MergeMeasure(unittest.TestCase):
         r = subprocess.run(["bash", "-c", merge_steps()], cwd=self.repo, env=env, capture_output=True, text=True)
         if r.returncode:
             return r.returncode, "merge step: " + r.stdout + r.stderr
-        body = os.path.join(env["RUNNER_TEMP"], "body.txt")
-        pathlib.Path(body).write_text("Trusted-base: lines -- calc grows here\n")
         return run(["check", "--base-tree", os.path.join(env["RUNNER_TEMP"], "base"),
-                    "--head-tree", os.path.join(env["RUNNER_TEMP"], "head"), "--body", body, "--pr", str(PR)])
+                    "--head-tree", os.path.join(env["RUNNER_TEMP"], "head"), "--pr", str(PR)])
 
     def test_cherry_picked_cut_does_not_keep_the_old_budget(self):
         # main cuts 20 lines and lowers the ceiling with them; the branch copies the cut instead
@@ -1304,10 +1307,8 @@ class MergeMeasure(unittest.TestCase):
         old = tempfile.mkdtemp(dir=self.tmp)
         self.git("worktree", "add", "-q", "--detach", old + "/b", merge_base)
         self.git("worktree", "add", "-q", "--detach", old + "/h", head)
-        body = os.path.join(old, "body.txt")
-        pathlib.Path(body).write_text("Trusted-base: lines -- calc grows here\n")
         # The merge-base measure this replaces reads the branch as a 10-line cut.
-        self.assertEqual(run(["check", "--base-tree", old + "/b", "--head-tree", old + "/h", "--body", body])[0], 0)
+        self.assertEqual(run(["check", "--base-tree", old + "/b", "--head-tree", old + "/h"])[0], 0)
         rc, out = self.measure(head)
         self.assertEqual(rc, 1, out)
         self.assertIn("ends above its ceiling", out)
@@ -1511,6 +1512,49 @@ class SentenceEnd(unittest.TestCase):
                          (", broker/x", False), ("x", False), (".go", False)]:
             text = f"| D-9 | x | active | Trusted-core growth for PR #12 (D-159) ({want}{tail}"
             self.assertEqual(tb.check_claims([("DECISIONS.md:1", "D-9", text)], exp) == [], ok, tail)
+
+
+
+class BodyIsNotRead(unittest.TestCase):
+    """CI-trusted-base-records (#6404, from the #6381 review): a gate's waiver comes from committed
+    records, never the PR body, which can change after the accepts at the same head. `check` takes
+    no body, and the workflow passes it none and has no `edited` trigger, so editing the body alone
+    can neither rerun nor change the trusted-base result. The closing-keyword check, whose subject
+    is the body, runs in lane-gate (pinned in tests/test_workflows.py), which reruns on `edited`."""
+
+    # REQ: CI-trusted-base-records
+    def test_check_takes_no_body(self):
+        with tempfile.TemporaryDirectory() as d:
+            body = os.path.join(d, "body.txt")
+            pathlib.Path(body).write_text("Trusted-core: D-7\nCeiling: D-7\n")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as e:
+                tb.main(["check", "--base-tree", d, "--head-tree", d, "--body", body, "--pr", str(PR)])
+            self.assertEqual(e.exception.code, 2)
+            self.assertIn("unrecognized arguments: --body", err.getvalue())
+        self.assertNotIn("body", inspect.signature(tb.run_check).parameters)
+        for name in ("compare_core", "compare_ceilings"):
+            self.assertNotIn("body", inspect.signature(getattr(tb, name)).parameters, name)
+
+    # REQ: CI-trusted-base-records
+    def test_workflow_neither_reruns_on_nor_reads_the_body(self):
+        text = (ROOT / ".github/workflows/trusted-base.yml").read_text()
+        code = "\n".join(l for l in text.split("\n") if not l.lstrip().startswith("#"))
+        self.assertIn("    types: [opened, synchronize, reopened]\n", code)
+        for word in ("edited", "body", "PR_BODY", "claims.py"):
+            self.assertNotIn(word, code)
+
+    # REQ: CI-trusted-base-records
+    def test_decision_waivers_are_record_lines(self):
+        self.assertTrue(set(tb.DECIDED) <= set(tb.KEYS))
+        got, bad = tb.reasons([], ["trusted-core #42 -- D-7", "ceiling #42 -- D-7 raised for calc"], PR)
+        self.assertEqual((got, bad), ({"trusted-core": "D-7", "ceiling": "D-7 raised for calc"}, []))
+        for line in ("trusted-core #42 -- TODO", "ceiling #42 --  ", "trusted-core #41 -- D-7"):
+            self.assertTrue(tb.reasons([], [line], PR)[1], line)
+        # A line the base already holds is history.
+        self.assertEqual(tb.reasons(["ceiling #42 -- D-7"], ["ceiling #42 -- D-7"], PR), ({}, []))
+        self.assertEqual(tb.waiver("ceiling", rec("ceiling #42 -- D-7"), DECISIONS, PR), "")
+        self.assertIn("names no active DECISIONS.md row", tb.waiver("ceiling", rec("ceiling #42 -- D-5"), DECISIONS, PR))
 
 
 if __name__ == "__main__":
