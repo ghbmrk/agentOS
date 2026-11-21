@@ -2912,6 +2912,144 @@ def data_diff(path, kind="change"):
     return head + f"--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-x\n+y\n"
 
 
+# The base of MovedDecls: a helper TestUp names, with an import only it uses.
+MOVE_TEST = """package hint
+
+import (
+\t"strings"
+\t"testing"
+)
+
+// one is TestUp's helper.
+func one() int { return len(strings.Repeat("x", 1)) }
+
+func TestUp(t *testing.T) {
+\tif Up(one()) != 2 || Up(20) != 10 {
+\t\tt.Fatal("up")
+\t}
+}
+
+func TestDown(t *testing.T) {
+\tif Down(3) != 2 {
+\t\tt.Fatal("down")
+\t}
+}
+"""
+MOVE_ONE = """// one is TestUp's helper.
+func one() int { return len(strings.Repeat("x", 1)) }
+
+"""
+MOVE_DOWN = """func TestDown(t *testing.T) {
+\tif Down(3) != 2 {
+\t\tt.Fatal("down")
+\t}
+}
+"""
+
+
+class MovedDecls(unittest.TestCase):
+    """TOOL-mutgate-moved-lines (#6369): a declaration moved unchanged is no change of the tests."""
+
+    def reach(self, base, head, src=TWO_SRC, head_src=None):
+        """(head tests, base tests) changed_tests and bases_for name for broker/hint/, the base holding
+        hint.go (src) and the test files base {name: text}, the PR replacing them with head (and head_src)."""
+        with tempfile.TemporaryDirectory() as d:
+            git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+            pkg = pathlib.Path(d) / "broker" / "hint"
+            pkg.mkdir(parents=True)
+            (pkg.parent / "go.mod").write_text(GO_MOD)
+            git("init", "-q")
+            for side, files, text in (("base", base, src), ("pr", head, src if head_src is None else head_src)):
+                for f in pkg.glob("*_test.go"):
+                    f.unlink()
+                (pkg / "hint.go").write_text(text)
+                for name, body in files.items():
+                    (pkg / name).write_text(body)
+                git("add", "-A")
+                git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", side)
+            diff = git("diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "--no-renames", "HEAD~1").stdout
+            with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "ROOT", pathlib.Path(d)):
+                tests = mutgate.changes(diff, "HEAD~1", "HEAD")[1]
+                bases = mutgate.bases_for(diff, "HEAD~1", "HEAD", tests, ["hint"])
+                return mutgate.changed_tests(tests, "hint", bases), bases.get("hint", [])
+
+    def test_a_pure_move_changes_no_test(self):
+        # REQ: TOOL-mutgate-moved-lines
+        imports = 'package hint\n\nimport (\n\t"strings"\n\t"testing"\n)\n\n'
+        rest = MOVE_TEST.replace(MOVE_ONE, "").replace("\n" + MOVE_DOWN, "").replace('\t"strings"\n', "")
+        none = "func TestNone(t *testing.T) {}\n"
+        base = {"hint_test.go": MOVE_TEST}
+        for name, was, now in (
+                ("within a file", base, {"hint_test.go": MOVE_TEST.replace(MOVE_ONE, "") + "\n" + MOVE_ONE.rstrip("\n") + "\n"}),
+                ("to a new file, an import with it", base, {"hint_test.go": rest, "other_test.go": imports + MOVE_ONE + MOVE_DOWN}),
+                ("to an existing file", {**base, "other_test.go": 'package hint\n\nimport "testing"\n\n' + none},
+                 {"hint_test.go": rest, "other_test.go": imports + none + "\n" + MOVE_ONE + MOVE_DOWN}),
+                ("every test file into a new one", base, {"all_test.go": MOVE_TEST})):
+            with self.subTest(name):
+                self.assertEqual(self.reach(was, now), ([], []))
+
+    def test_production_code_moved_into_a_test_file_changes_no_test(self):
+        # #6305's shape: a client no binary links moves from a non-test file into a new test file.
+        # REQ: TOOL-mutgate-moved-lines
+        three = "// Three is what TestThree checks.\nfunc Three() int { return 3 }\n"
+        test = 'package hint\n\nimport "testing"\n\nfunc TestThree(t *testing.T) {\n\tif Three() != 3 {\n\t\tt.Fatal(3)\n\t}\n}\n'
+        base = {"hint_test.go": TWO_TEST, "three_test.go": test}
+        self.assertEqual(self.reach(base, {**base, "client_test.go": "package hint\n\n// Moved out of the binary.\n\n" + three},
+                                    src=TWO_SRC + "\n" + three, head_src=TWO_SRC), ([], []))
+        # Left in place as well, it is held twice: a new test function's change.
+        self.assertEqual(self.reach(base, {**base, "client_test.go": "package hint\n\n" + three}, src=TWO_SRC + "\n" + three),
+                         (["TestThree"], []))
+
+    def test_an_edited_or_unsure_move_is_a_change(self):
+        # Fail closed: one token edited, a block held twice, another import behind a qualifier, another
+        # build constraint, another package clause, and init (its order is its file's) all stay changes.
+        # REQ: TOOL-mutgate-moved-lines
+        rest = MOVE_TEST.replace(MOVE_ONE, "").replace("\n" + MOVE_DOWN, "").replace('\t"strings"\n', "")
+        head = 'package hint\n\nimport (\n\t"strings"\n\t"testing"\n)\n\n'
+        for name, files, want in (
+                ("one token", {"hint_test.go": rest, "other_test.go": head + MOVE_ONE + MOVE_DOWN.replace("Down(3) != 2", "Down(3) != 1")},
+                 (["TestDown", "TestUp"], ["TestDown"])),  # the deletion's line either side is TestUp's brace
+                ("held twice", {"hint_test.go": MOVE_TEST.replace(MOVE_ONE, ""), "other_test.go": head + MOVE_ONE,
+                                "again_test.go": head.replace('\t"testing"\n', "") + MOVE_ONE},
+                 (["TestDown", "TestUp"], ["TestUp"])),  # the deletion's line either side is the header's
+                ("another import", {"hint_test.go": rest, "other_test.go": head.replace('"strings"', 'strings "example.invalid/strings"')
+                                    + MOVE_ONE + MOVE_DOWN}, (None, None)),
+                ("a build constraint", {"hint_test.go": rest, "other_test.go": "//go:build linux\n\n" + head + MOVE_ONE + MOVE_DOWN},
+                 (["TestDown", "TestUp"], ["TestDown", "TestUp"])),
+                ("a file name constraint", {"hint_test.go": rest, "other_linux_test.go": head + MOVE_ONE + MOVE_DOWN},
+                 (["TestDown", "TestUp"], ["TestDown", "TestUp"]))):
+            with self.subTest(name):
+                got = self.reach({"hint_test.go": MOVE_TEST}, files)
+                if want == (None, None):
+                    self.assertNotEqual(got, ([], []))
+                    self.assertIn("TestUp", got[0] or ["TestUp"])
+                else:
+                    self.assertEqual(got, want)
+        # A test moved where `go test` no longer runs it (a non-test file, a file go ignores) was deleted.
+        rest = MOVE_TEST.replace("\n" + MOVE_DOWN, "")
+        for name, files, src in (("into a non-test file", {"hint_test.go": rest},
+                                  TWO_SRC.replace("package hint\n", 'package hint\n\nimport "testing"\n') + "\n" + MOVE_DOWN),
+                                 ("into an ignored file", {"hint_test.go": rest, "_down_test.go": head + MOVE_DOWN}, TWO_SRC)):
+            with self.subTest(name):
+                self.assertIn("TestDown", self.reach({"hint_test.go": MOVE_TEST}, files, head_src=src)[1])
+        init = "func init() {\n\t_ = 1\n}\n"
+        self.assertEqual(self.reach({"hint_test.go": MOVE_TEST + "\n" + init},
+                                    {"hint_test.go": MOVE_TEST, "init_test.go": "package hint\n\n" + init}), (None, None))
+
+    def test_an_import_swapped_under_one_name_is_a_change(self):
+        # A header change counts as none only when no line of the file can bind a name differently.
+        # REQ: TOOL-mutgate-moved-lines
+        swapped = MOVE_TEST.replace('\t"strings"\n', '\tstrings "example.invalid/broker/hint/fake"\n')
+        self.assertEqual(self.reach({"hint_test.go": MOVE_TEST}, {"hint_test.go": swapped}),
+                         (["TestDown", "TestUp"], ["TestDown", "TestUp"]))
+        # An import added for new code, with nothing else of the header changed, changes only that code's tests.
+        added = MOVE_TEST.replace('\t"testing"\n', '\t"testing"\n\t"unicode"\n').replace(
+            "Down(3) != 2", "Down(3) != 2 || !unicode.IsDigit('3')")
+        self.assertEqual(self.reach({"hint_test.go": MOVE_TEST, "u_test.go": 'package hint\n\nimport "unicode"\n\nvar _ = unicode.IsDigit\n'},
+                                    {"hint_test.go": added, "u_test.go": 'package hint\n\nimport "unicode"\n\nvar _ = unicode.IsDigit\n'}),
+                         (["TestDown"], ["TestDown"]))
+
+
 class DataFiles(unittest.TestCase):
     """MUT-deleted-test-own-lines-fu (#5779, Security S1 on #5770): a changed data file of a package
     changes its tests, every one of them."""
@@ -3061,7 +3199,7 @@ class Plan(unittest.TestCase):
                            "changes fewer tier-A or tier-B packages"),
                           ([], "0 shards: no claimed package was planned; rerun the mutgate workflow")):
             with self.subTest(pkgs), contextlib.ExitStack() as st:
-                for name, value in (("broker_diff", lambda *a: ""), ("added_lines", lambda d: ({}, {})),
+                for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
                                     ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: pkgs),
                                     ("diff_targets", lambda added, pkg: {f"broker/{pkg}/x.go": {1}}),
                                     ("deletion_sites", lambda *a: ([], None)), ("suite_seconds", lambda *a: (1.0, None)),
@@ -3078,7 +3216,7 @@ class Plan(unittest.TestCase):
         from unittest import mock
         import contextlib, io, types
         with contextlib.ExitStack() as st:
-            for name, value in (("broker_diff", lambda *a: ""), ("added_lines", lambda d: ({}, {})),
+            for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
                                 ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: sorted(pkg_targets)),
                                 ("diff_targets", lambda added, pkg: pkg_targets[pkg][0]),
                                 ("deletion_sites", lambda pkg, t, lister: (pkg_targets[pkg][1], None)),
@@ -3212,7 +3350,7 @@ class Plan(unittest.TestCase):
         sim = {"broker/kernel/sim/a.go": set(range(1, 824))}
         timed = []
         with contextlib.ExitStack() as st:
-            for name, value in (("broker_diff", lambda *a: ""), ("added_lines", lambda d: ({}, {})),
+            for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
                                 ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: ["kernel/sim", "other"]),
                                 ("bases_for", lambda *a: {}), ("diff_targets", lambda added, pkg: sim),
                                 ("tests_changed", lambda tests, pkg: pkg == "kernel/sim"),
