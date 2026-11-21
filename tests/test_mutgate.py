@@ -4872,6 +4872,28 @@ class VerbatimMoves(unittest.TestCase):
                                                             self.NEW: MOVE_TEST})
         self.assertNotIn(self.NEW, tests)  # the control: the same source with a plain header moves whole
 
+    def test_a_dot_import_in_either_file_refuses_a_move_into_an_existing_file(self):
+        # Security on #6376: Sqrt would rebind from math.Sqrt to cmplx.Sqrt.
+        calc, old = "broker/proc/calc.go", "broker/proc/calc_test.go"
+        root = "func Root() string { return fmt.Sprint(Sqrt(-1)) }\n"
+        src = 'package proc\n\nimport (\n\t"fmt"\n\t. "math"\n)\n\n' + root + "\nfunc keep() { _ = Pi }\n"
+        kept = 'package proc\n\nimport . "math"\n\nfunc keep() { _ = Pi }\n'
+        test = 'package proc\n\nimport (\n\t"fmt"\n\t. "math/cmplx"\n\t"testing"\n)\n\nfunc TestRoot(t *testing.T) { t.Log(fmt.Sprint(Inf())) }\n'
+        for side in ("math/cmplx", "math"):
+            with self.subTest(side):
+                head = test.replace("math/cmplx", side) + "\n" + root
+                _, before, tests, moved = self.changes({calc: src, old: test.replace("math/cmplx", side)},
+                                                       {calc: kept, old: head})
+                self.assertEqual(moved, {})
+                self.assertEqual(tests[old], before[old])
+
+    def test_a_linkname_in_the_source_file_refuses_its_moves(self):
+        src = MOVE_SRC.replace("func keep()", "//go:linkname now runtime.nanotime\nfunc now() int64\n\nfunc keep()")
+        _, before, tests, moved = self.changes({self.SRC: src}, {
+            self.SRC: MOVE_KEPT.replace("func keep()", "//go:linkname now runtime.nanotime\nfunc now() int64\n\nfunc keep()"),
+            self.NEW: MOVE_TEST})
+        self.assertEqual(moved, {})
+
     def test_a_directive_init_or_initialised_var_is_never_a_move(self):
         cases = (("// Open dials the owner socket.\n", "// Open dials the owner socket.\n//go:noinline\n"),
                  ("func (o *Owner) Open() error {", "func init() {"),)
