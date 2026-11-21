@@ -1,6 +1,7 @@
 package proc
 
 import (
+	"cmp"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
@@ -121,11 +122,7 @@ func initCounterAnchor(dir, logPath string, c Counter, sign ed25519.PrivateKey, 
 	if err != nil {
 		return err
 	}
-	b, err := signAnchor(sign, anchorRec{V: 1, N: n})
-	if err != nil {
-		return err
-	}
-	return privfile.WriteAtomic(dir, anchorName, b, stop)
+	return privfile.WriteAtomic(dir, anchorName, signAnchor(sign, anchorRec{V: 1, N: n}), stop)
 }
 
 // OpenCounterAnchor loads the head file in dir and checks it against the
@@ -179,14 +176,11 @@ func readAnchor(dir string, pub ed25519.PublicKey) (anchorRec, error) {
 		return anchorRec{}, err
 	}
 	b, err := io.ReadAll(io.LimitReader(f, maxAnchor+1))
-	if err != nil {
-		return anchorRec{}, err
-	}
 	var af anchorFile
 	var rec anchorRec
-	if len(b) > maxAnchor || json.Unmarshal(b, &af) != nil || !ed25519.Verify(pub, anchorMsg(af.Rec), af.Sig) ||
+	if err != nil || len(b) > maxAnchor || json.Unmarshal(b, &af) != nil || !ed25519.Verify(pub, anchorMsg(af.Rec), af.Sig) ||
 		json.Unmarshal(af.Rec, &rec) != nil || rec.V != 1 {
-		return anchorRec{}, ErrAnchorCorrupt
+		return anchorRec{}, cmp.Or(err, ErrAnchorCorrupt)
 	}
 	for _, h := range []*kernel.Head{rec.Head, rec.Prev} {
 		if h != nil && !h.Valid(pub) {
@@ -199,12 +193,13 @@ func readAnchor(dir string, pub ed25519.PublicKey) (anchorRec, error) {
 	return rec, nil
 }
 
-func signAnchor(sign ed25519.PrivateKey, rec anchorRec) ([]byte, error) {
-	rb, err := json.Marshal(rec)
-	if err != nil {
-		return nil, err
-	}
-	return json.Marshal(anchorFile{Rec: rb, Sig: ed25519.Sign(sign, anchorMsg(rb))})
+// signAnchor is rec signed as the head file holds it. Neither Marshal can
+// fail: rec holds ints, [32]byte hashes and byte slices, and Rec is
+// Marshal's own output.
+func signAnchor(sign ed25519.PrivateKey, rec anchorRec) []byte {
+	rb, _ := json.Marshal(rec)
+	b, _ := json.Marshal(anchorFile{Rec: rb, Sig: ed25519.Sign(sign, anchorMsg(rb))})
+	return b
 }
 
 // write puts head at the next number, then advances the counter. An
@@ -217,10 +212,7 @@ func (a *CounterAnchor) write(head, prev *kernel.Head) error {
 		a.broken = true
 		return errors.New("run: anchor counter at its limit")
 	}
-	b, err := signAnchor(**a.sign, anchorRec{V: 1, N: a.n + 1, Head: head, Prev: prev})
-	if err == nil {
-		err = privfile.WriteAtomic(a.dir, anchorName, b, a.stop)
-	}
+	err := privfile.WriteAtomic(a.dir, anchorName, signAnchor(**a.sign, anchorRec{V: 1, N: a.n + 1, Head: head, Prev: prev}), a.stop)
 	if err == nil {
 		if err = a.c.Increment(); err != nil {
 			if got, rerr := a.c.Read(); rerr == nil && got == a.n+1 {

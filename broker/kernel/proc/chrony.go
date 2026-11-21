@@ -126,14 +126,12 @@ func (s *Chrony) ask() (float64, float64, bool) {
 	}
 	p := make([]byte, chronyLen+1)
 	n, err := s.c.Read(p)
-	if err != nil {
+	corr, bound, ok := parseTracking(p[:n], s.seq)
+	if !ok || err != nil {
 		return 0, 0, false
 	}
-	corr, bound, ok := parseTracking(p[:n], s.seq)
-	if ok {
-		copy(s.ref[:], p[56:68])
-	}
-	return corr, bound, ok
+	copy(s.ref[:], p[56:68])
+	return corr, bound, true
 }
 
 // parseTracking reads an RPY_TRACKING reply to request seq: chronyd's
