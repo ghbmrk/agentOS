@@ -4375,6 +4375,16 @@ class GremlinsMemoryCap(unittest.TestCase):
                 shim = self.shim(d, f"python3 -c 'b = bytearray(1 << 20)'\nexit {code}\n", 1 << 30)
                 self.assertEqual(subprocess.run([str(shim), "test", "./p"]).returncode, code)
 
+    def test_a_mutant_runs_own_toolchain_is_not_counted(self):
+        # L3 on #6389: a mutant's rebuild is the toolchain's memory; counted, a compile alone would read KILLED.
+        with tempfile.TemporaryDirectory() as d:
+            link = pathlib.Path(d) / "compile"
+            link.symlink_to(sys.executable)
+            shim = self.shim(d, f"{link} -c 'import time; b = bytearray(96 << 20); time.sleep(2)'\nexit 0\n", 32 << 20)
+            r = subprocess.run([str(shim), "test", "-timeout", "62s", "-failfast", "./p"], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn("memory_cap", r.stderr)
+
     def test_no_cap_runs_the_real_go_directly(self):
         with tempfile.TemporaryDirectory() as d:
             shim = self.shim(d, "exit 0\n", None)
