@@ -10,12 +10,24 @@
 /usr/lib/agentos/images/codex/usr/bin/bwrap linked guest
 /usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap linked guest
 
-# Built here with CGO_ENABLED=0 (image/build.sh, guest/codex/build-rootfs.sh), and gVisor's release
-# (pinned by hash in image/build.sh): Go, no C library.
+# Built here with CGO_ENABLED=0 (image/build.sh, the guests' build-rootfs.sh): Go, no C library.
 /usr/lib/agentos/agentos* go
-/usr/lib/agentos/runsc go
 /usr/lib/agentos/images/photo/agentos-photo go
 /usr/lib/agentos/images/codex/usr/local/bin/agentos-codex-forwarder go
+/usr/lib/agentos/images/openclaw/usr/local/bin/agentos-guest-bridge go
+# gVisor's release (GVISOR_SHA512 in image/build.sh), built by Bazel, whose build info records no cgo
+# setting: none holds runtime/cgo's C code. Its two sidecars below are not Go.
+/usr/lib/agentos/runsc go
+/usr/lib/agentos/gvisor-bin/checkpointgofer go
+/usr/lib/agentos/gvisor-bin/gvisor_sentry go
+/usr/lib/agentos/gvisor-bin/runsc-metric-server go
+# OpenClaw's esbuild (package-lock.json @esbuild/linux-x64 0.28.2, npm integrity): Go with no build info.
+/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@esbuild/linux-x64/bin/esbuild go
+
+# gVisor's two 1.3 KiB C sidecars (release-20260928.0): no libc, only raw system calls (objdump -d shows
+# syscall instructions and one local call), held to the bytes read.
+/usr/lib/agentos/gvisor-bin/gvisor-sentry-prewarmer sha256 3315d7ad7c2d3751d349e4976fa02da1da6fd7e41746c35622304e5fabe4fce0
+/usr/lib/agentos/gvisor-bin/runsc-fd-parking sha256 03af90d07ea466c10ecc3e3ba839b2a59540959dd3286aea3886917cba850c11
 
 # The Codex CLI's static musl binaries, pinned by CODEX_INTEGRITY. Their OpenSSL is a "bundled" copy;
 # no musl version string is recoverable from them (release finding #6435).
@@ -24,6 +36,12 @@
 /usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/codex-path/rg bundled @openai/codex@0.162.1-linux-x64
 
 # Debian's own static or runtime files, scanned with their package (and its Built-Using sources).
+# In the main tree and the initrd (ldconfig, the loader, pam_deny.so) or the main tree (klibc, which
+# the initramfs tools ship); in the guests' roots, copied there by image/guest-userland.sh.
 /usr/sbin/ldconfig package libc-bin
 /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 package libc6
-/usr/lib/agentos/images/*/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 package libc6
+/usr/lib/x86_64-linux-gnu/security/pam_deny.so package libpam-modules
+/usr/lib/klibc-*.so package libklibc
+/usr/lib/klibc/bin/* package klibc-utils
+/usr/lib/agentos/images/*/lib64/ld-linux-x86-64.so.2 package libc6
+/usr/lib/agentos/images/openclaw/usr/lib/x86_64-linux-gnu/libstdc++.so.6 package libstdc++6

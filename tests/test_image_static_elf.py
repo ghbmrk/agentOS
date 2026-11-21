@@ -70,6 +70,9 @@ class StaticElfTest(unittest.TestCase):
         }
         subprocess.run(["gcc", "-c", "-x", "c", "-", "-o", str(pathlib.Path(d) / "obj.o")], input=C, text=True, check=True)
         cls.bins["object"] = pathlib.Path(d) / "obj.o"
+        # Go binaries with no build info (esbuild's release has none; Bazel's records no cgo setting).
+        for b in ("go", "cgo"):
+            subprocess.run(["objcopy", "-R", ".go.buildinfo", str(cls.bins[b]), str(cls.bins[b]) + "-noinfo"], check=True)
 
     @classmethod
     def tearDownClass(cls):
@@ -86,6 +89,10 @@ class StaticElfTest(unittest.TestCase):
         self.assertEqual(got["static"]["sha256"], hashlib.sha256(self.bins["static"].read_bytes()).hexdigest())
         # Go build info is read from the file: cgo off says 0, cgo on says 1, a C program is no Go binary.
         self.assertEqual((got["go"]["go"], got["cgo"]["go"], got["static"]["go"]), ("0", "1", None))
+        # With no build info, cgo is read from runtime/cgo's own C code in the file.
+        self.assertEqual(se.go_cgo(pathlib.Path(str(self.bins["go"]) + "-noinfo").read_bytes()), "none")
+        self.assertEqual(se.go_cgo(pathlib.Path(str(self.bins["cgo"]) + "-noinfo").read_bytes()), "cgo")
+        self.assertNotIn(se.CGO_MARK, self.bins["go"].read_bytes())
         # An imported runtime symbol's name in .dynstr is not the runtime's own string.
         self.assertNotIn(se.CXX_MARKS[1], self.bins["dynamic"].read_bytes())
 
@@ -108,7 +115,7 @@ class StaticElfTest(unittest.TestCase):
                  "/usr/lib/agentos/images/camdecode/agentos-camdecode": "cgo", "/usr/sbin/ldconfig": "static",
                  "/usr/lib/agentos/images/codex/usr/local/bin/rg": "static",
                  "/usr/lib/agentos/images/codex/usr/bin/bwrap": "cxx-static-runtime",
-                 "/usr/bin/dyn": "dynamic"}
+                 "/usr/lib/agentos/gvisor-bin/prewarmer": "static", "/usr/bin/dyn": "dynamic"}
         for path, b in files.items():
             dst = root / path.lstrip("/")
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -131,7 +138,8 @@ class StaticElfTest(unittest.TestCase):
                    "/usr/lib/agentos/images/camdecode/agentos-camdecode linked guest",
                    "/usr/sbin/ldconfig package libc-bin",
                    "/usr/lib/agentos/images/codex/usr/local/bin/rg bundled @openai/codex@1-linux-x64",
-                   "/usr/lib/agentos/images/codex/usr/bin/bwrap linked guest"]
+                   "/usr/lib/agentos/images/codex/usr/bin/bwrap linked guest",
+                   "/usr/lib/agentos/gvisor-bin/prewarmer sha256 " + sha["static"].upper()]
         allow.write_text("# a comment\n" + "\n".join(entries) + "\n")
         return root, out, allow, config, entries
 
@@ -158,10 +166,16 @@ class StaticElfTest(unittest.TestCase):
              "/usr/lib/agentos/gone matches no listed file"),
             # go on a cgo binary
             ("cgo", lambda: allow.write_text(allow.read_text().replace(
-                "agentos-camdecode linked guest", "agentos-camdecode go")), "built with CGO_ENABLED=1, not 0"),
+                "agentos-camdecode linked guest", "agentos-camdecode go")), "a Go binary with cgo (Go CGO_ENABLED=1)"),
             # go on a C binary
             ("not go", lambda: allow.write_text(allow.read_text().replace(
                 "llama-server linked linked", "llama-server go")), "not a Go binary"),
+            # sha256, with other bytes than the reviewed ones
+            ("sha256", lambda: allow.write_text(allow.read_text().replace(
+                "/usr/lib/agentos/runsc go", "/usr/lib/agentos/runsc sha256 " + "a" * 64)), "not the reviewed " + "a" * 64),
+            # go on a Go binary with no build info and cgo code
+            ("cgo, no info", lambda: shutil.copy(str(self.bins["cgo"]) + "-noinfo", root / "usr/lib/agentos/runsc"),
+             "a Go binary with cgo (Go, no cgo setting, cgo code)"),
             # linked, with a link input missing from the status the scan reads
             ("missing", lambda: (out / "guest" / se.STATUS).write_text(STATUS % "libavcodec-pin"),
              "its link inputs ['libcap-dev'] are not in guest/agentos.dpkg-status"),
@@ -240,7 +254,8 @@ class ShippedTest(unittest.TestCase):
         self.assertTrue(entries)
         for path in se.REQUIRED:
             self.assertEqual(sum(__import__("fnmatch").fnmatchcase(path, e[1]) for e in entries), 1, path)
-        for bad in ("usr/bin/x go", "/usr/bin/x go extra", "/usr/bin/x linked", "/usr/bin/x static y"):
+        for bad in ("usr/bin/x go", "/usr/bin/x go extra", "/usr/bin/x linked", "/usr/bin/x static y",
+                    "/usr/bin/x sha256 abc"):
             with self.subTest(bad):
                 with tempfile.NamedTemporaryFile("w", suffix=".allow") as f:
                     f.write(bad + "\n")

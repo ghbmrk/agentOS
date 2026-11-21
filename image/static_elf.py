@@ -18,7 +18,8 @@ or libc++, and carries a C++ runtime: it defines one of CXX_DEFS or holds one of
 
 Each listed file must match exactly one entry of ALLOW, a line "GLOB KIND [ARG]", GLOB an absolute
 fnmatch pattern on the file's path (an initrd's members by their path inside it). Kinds (SEL-6):
-  go             a Go binary whose build info (read from the file) says CGO_ENABLED=0: no C library
+  go             a Go binary built without cgo, read from the file: its build info says CGO_ENABLED=0, or
+                 records no setting and the file holds none of runtime/cgo's C code (go_cgo): no C library
   linked LIST    a build step recorded the file's link inputs (image/guest-shipped.sh with SHIPPED_FOR):
                  OUT/LIST/agentos.inputs names the packages its link loaded, by the file's SHA-256, and
                  each must be in OUT/LIST/agentos.dpkg-status, the status the scan reads for LIST
@@ -28,6 +29,8 @@ fnmatch pattern on the file's path (an initrd's members by their path inside it)
                  the guests' roots, the initrd's own for an initrd member. vulncheck.py also queries each
                  source a package's Built-Using names, so a Debian static build's sources are scanned.
   bundled HOLDER a pinned download's binary: assurance/vulncheck.json "bundled" names HOLDER
+  sha256 HEX     a pinned download's binary reviewed as linking no library (raw system calls), held to
+                 those exact bytes, so a new release fails until it is read again
 A listed file matching no entry or two, an entry matching no listed file, an unknown kind, and any
 kind's check that fails are refusals. Control (SEL-7): the main tree must list each of REQUIRED, and
 a file the check cannot read fails, so a clean result is not a walk that read nothing. Exit 1 on any.
@@ -69,6 +72,11 @@ CXX_MARKS = (b"terminate called after throwing an instance of '", b"\0N10__cxxab
 CXX_NEEDED = re.compile(r"^lib(std)?c\+\+\.so")
 SYM = re.compile(r"^[0-9a-f]+\s.{7}\s(\S+)\s+[0-9a-f]+\s+(?:\S+\s+)?(\S+)$")
 BUILDINFO = b"\xff Go buildinf:"
+# A Go binary's section names, for one whose build info is missing.
+GO_SECTIONS = (b"\0.gopclntab\0", b"\0.go.buildinfo\0")
+# runtime/cgo's C code (gcc_libinit.c _cgo_try_pthread_create's message): in every cgo binary, static or
+# dynamic, glibc or musl, and in no binary built with cgo off.
+CGO_MARK = b"pthread_create failed"
 
 
 class Unread(Exception):
@@ -83,14 +91,18 @@ def header(data):
 
 
 def go_cgo(data):
-    """A Go binary's CGO_ENABLED setting from its build info: "0", "1", "" (Go, no setting recorded), or
-    None when DATA holds no Go build info. Unread when the build info is of a form this cannot read
-    (pre-1.18, by pointer)."""
+    """A Go binary's cgo state, read from DATA: "0" or "1" from its build info's CGO_ENABLED; for a Go
+    binary whose build info records no setting (Bazel's rules_go, as gVisor's release is built) or that
+    has none (a .gopclntab section but no .go.buildinfo, as esbuild's release), "cgo" when it holds
+    runtime/cgo's C code (CGO_MARK) and "none" when it does not; None when DATA is no Go binary. Unread
+    when the build info is of a form this cannot read (pre-1.18, by pointer)."""
     i = data.find(BUILDINFO)
     while i >= 0 and i % 16:
         i = data.find(BUILDINFO, i + 1)
     if i < 0:
-        return None
+        if not any(m in data for m in GO_SECTIONS):
+            return None
+        return "cgo" if CGO_MARK in data else "none"
     if len(data) < i + 32 or not data[i + 15] & 2:
         raise Unread("Go build info is not inline (Go before 1.18?)")
     j, out = i + 32, []
@@ -108,7 +120,14 @@ def go_cgo(data):
         out.append(data[j:j + n])
         j += n
     m = re.search(rb"(?m)^build\tCGO_ENABLED=(\d)$", out[1])
-    return m.group(1).decode() if m else ""
+    if m:
+        return m.group(1).decode()
+    return "cgo" if CGO_MARK in data else "none"
+
+
+def go_shown(go):
+    return {"0": "Go CGO_ENABLED=0", "1": "Go CGO_ENABLED=1", "none": "Go, no cgo setting, no cgo code",
+            "cgo": "Go, no cgo setting, cgo code"}[go]
 
 
 def cxx_defined(path):
@@ -213,9 +232,10 @@ def read_allow(path):
         if not line:
             continue
         parts = line.split()
-        if not parts[0].startswith("/") or parts[1:2] not in (["go"], ["linked"], ["package"], ["bundled"]) \
-                or len(parts) != (2 if parts[1] == "go" else 3):
-            raise ValueError("%s:%d: not \"GLOB go\" or \"GLOB linked|package|bundled ARG\": %r" % (path, n, line))
+        if not parts[0].startswith("/") or parts[1:2] not in (["go"], ["linked"], ["package"], ["bundled"], ["sha256"]) \
+                or len(parts) != (2 if parts[1] == "go" else 3) \
+                or (parts[1] == "sha256" and not re.fullmatch(r"[0-9a-fA-F]{64}", parts[2])):
+            raise ValueError("%s:%d: not \"GLOB go\" or \"GLOB linked|package|bundled|sha256 ARG\": %r" % (path, n, line))
         entries.append((n, parts[0], parts[1], parts[2] if len(parts) == 3 else None))
     return entries
 
@@ -223,10 +243,11 @@ def read_allow(path):
 def kind_refusal(shown, place, info, kind, arg, ctx, place_status):
     """Why the listed file SHOWN of PLACE fails its entry's KIND, or None."""
     if kind == "go":
-        if info["go"] != "0":
-            return ("not a Go binary" if info["go"] is None else
-                    "a Go binary built with CGO_ENABLED=%s, not 0" % (info["go"] or "unrecorded"))
-        return None
+        if info["go"] in ("0", "none"):
+            return None
+        return "not a Go binary" if info["go"] is None else "a Go binary with cgo (%s)" % go_shown(info["go"])
+    if kind == "sha256":
+        return None if info["sha256"] == arg.lower() else "its SHA-256 is %s, not the reviewed %s" % (info["sha256"], arg)
     if kind == "linked":
         lst = ctx["lists"].get(arg)
         if lst is None:
@@ -265,7 +286,7 @@ def refusals(places, entries, ctx, statuses):
             where = shown if place == "tree" else "%s %s" % (place, shown)
             if not hits:
                 errs.append("%s (%s%s): no entry in static_elf.allow declares it" % (
-                    where, info["why"], "" if info["go"] is None else ", Go CGO_ENABLED=%s" % (info["go"] or "?")))
+                    where, info["why"], "" if info["go"] is None else ", " + go_shown(info["go"])))
                 continue
             if len(hits) > 1:
                 errs.append("%s: matches %d entries (lines %s)" % (where, len(hits), ", ".join(str(e[0]) for e in hits)))
@@ -344,7 +365,8 @@ def main(argv):
         sys.exit(__doc__)
     for place, files in sorted(places.items()):
         for shown, info in sorted(files.items()):
-            print("%s %s: %s%s" % (place, shown, info["why"], "" if info["go"] is None else ", Go CGO_ENABLED=%s" % info["go"]))
+            print("%s %s: %s%s sha256=%s" % (place, shown, info["why"], "" if info["go"] is None else ", " + go_shown(info["go"]),
+                                             info["sha256"]))
     for e in errs:
         print("::error title=static ELF check::" + e.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
     return 1 if errs else 0
