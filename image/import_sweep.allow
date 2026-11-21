@@ -1,8 +1,11 @@
 # The files of the built image (main tree and initrds) that may import or reach glibc's regex engine
-# (DEBIAN-CVE-2026-100290, #5697): one glob per line, each a file the image -100290 record in
-# assurance/vulncheck.json names. image/import_sweep.py --summary fails on a file that matches none,
-# and on a glob that matches no file. A file naming a function counts as importing it: by its dynamic
-# imports, by a dlsym or dlvsym lookup of a name it holds, or as a static copy of glibc's code (#6298).
+# (DEBIAN-CVE-2026-100290, #5697): one entry per line, a glob naming files the image -100290 record in
+# assurance/vulncheck.json names and the SHA-256 of each file reviewed under it (sha256=HEX, #6299), so a
+# new version, or a new file the glob matches, fails until it is read again. image/import_sweep.py
+# --summary fails on a file that matches none or whose bytes it does not pin, on a glob that matches no
+# file, and on a pin no file holds. A file naming a function counts as importing it: by its dynamic
+# imports, by a lookup of a name it holds where it or a library it needs imports dlsym or dlvsym, or as
+# a copy of glibc's code it carries, static or embedded (#6298, #6299).
 # Only files whose own regex use the record explains are named here: command-line tools, the guests'
 # shells and libraries. "via GLOB" (#6297) accepts every file that reaches the functions only through
 # libraries GLOB names, each with an entry of its own, and imports none itself: such a file can call them
@@ -13,64 +16,64 @@
 # as a glob that matches none does.
 
 # Shell and text tools, run locally.
-/usr/bin/bash
-/usr/bin/csplit
-/usr/bin/du
-/usr/bin/expr
-/usr/bin/find
-/usr/bin/grep
-/usr/bin/hardlink
-/usr/bin/kmod
-/usr/bin/less
-/usr/bin/localedef
-/usr/bin/more
-/usr/bin/nl
-/usr/bin/ptx
-/usr/bin/run-parts
-/usr/bin/sed
-/usr/bin/tac
+/usr/bin/bash sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/bin/csplit sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/bin/du sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/bin/expr sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/bin/find sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/bin/grep sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/bin/hardlink sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/bin/kmod sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/bin/less sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/bin/localedef sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/bin/more sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/bin/nl sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/bin/ptx sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/bin/run-parts sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/bin/sed sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/bin/tac sha256=0000000000000000000000000000000000000000000000000000000000000000
 
 # Tools that import only glibc's rpmatch, which runs the locale's YESEXPR on a yes/no answer to an
 # interactive prompt (cp -i, rm -i and the like).
-/usr/bin/cp
-/usr/bin/install
-/usr/bin/ln
-/usr/bin/mv
-/usr/bin/rename.ul
-/usr/bin/rm
+/usr/bin/cp sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/bin/install sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/bin/ln sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/bin/mv sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/bin/rename.ul sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/bin/rm sha256=0000000000000000000000000000000000000000000000000000000000000000
 
 # The guests' bash, an agent-driven shell inside the guest sandbox, and their rm (rpmatch), both
 # linking the guest's own glibc (the image/guest -100290 record).
-/usr/lib/agentos/images/*/bin/bash
-/usr/lib/agentos/images/*/bin/rm
+/usr/lib/agentos/images/*/bin/bash sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/lib/agentos/images/*/bin/rm sha256=0000000000000000000000000000000000000000000000000000000000000000
 
 # libsmartcols (filters, and rpmatch) and the util-linux tools that need it (findmnt, lsblk, losetup,
 # swapon and the rest); fdisk, sfdisk and cfdisk also import rpmatch for their prompts.
-/usr/lib/x86_64-linux-gnu/libsmartcols.so.1.*
+/usr/lib/x86_64-linux-gnu/libsmartcols.so.1.* sha256=0000000000000000000000000000000000000000000000000000000000000000
 via /usr/lib/x86_64-linux-gnu/libsmartcols.so.1.*
-/usr/sbin/cfdisk
-/usr/sbin/fdisk
-/usr/sbin/sfdisk
+/usr/sbin/cfdisk sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/sbin/fdisk sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/sbin/sfdisk sha256=0000000000000000000000000000000000000000000000000000000000000000
 
 # libcryptsetup (its one regcomp parses FileVault2 metadata) and what needs it: its token plugins,
 # systemd's cryptsetup, cryptenroll, integritysetup and veritysetup, and cryptsetup's own tools.
-/usr/lib/x86_64-linux-gnu/libcryptsetup.so.12.*
+/usr/lib/x86_64-linux-gnu/libcryptsetup.so.12.* sha256=0000000000000000000000000000000000000000000000000000000000000000
 via /usr/lib/x86_64-linux-gnu/libcryptsetup.so.12.*
 
 # libedit (line editing) and nft, which needs it for its interactive mode; nft itself is a one-shot
 # ruleset load.
-/usr/lib/x86_64-linux-gnu/libedit.so.2.*
+/usr/lib/x86_64-linux-gnu/libedit.so.2.* sha256=0000000000000000000000000000000000000000000000000000000000000000
 via /usr/lib/x86_64-linux-gnu/libedit.so.2.*
 
 # libformw (ncurses forms); nothing in the image needs it.
-/usr/lib/x86_64-linux-gnu/libformw.so.6.*
+/usr/lib/x86_64-linux-gnu/libformw.so.6.* sha256=0000000000000000000000000000000000000000000000000000000000000000
 
 [glob]
 # The files of the built image (main tree and initrds) that may import or reach glibc's glob(), glob64 or
-# wordexp, which calls glob() (DEBIAN-CVE-2026-126765, #6285): one entry per line, each a file the
-# -126765 records in assurance/vulncheck.json name, or "via GLOB" for the files reaching it only through
-# a library with its own entry. As for the regex list above, a file no entry accepts fails the step, and
-# so does an entry that accepts no file.
+# wordexp, which calls glob() (DEBIAN-CVE-2026-126765, #6285): one entry per line, a glob naming files
+# the -126765 records in assurance/vulncheck.json name with the SHA-256 of each (#6299), or "via GLOB"
+# for the files reaching it only through a library with its own entry. As for the regex list above, a
+# file no entry accepts fails the step, and so does an entry that accepts no file or a pin no file holds.
 
 # libsystemd-shared's one glob() call is basic/glob-util.c safe_glob (systemd 257.13), behind glob_first,
 # glob_extend and glob_exists. Its callers and their patterns: PID 1 and systemd-executor (libsystemd-core)
@@ -79,7 +82,7 @@ via /usr/lib/x86_64-linux-gnu/libedit.so.2.*
 # condition on its command line; systemd-sysctl and systemd-tmpfiles for sysctl.d and tmpfiles.d
 # entries; journalctl for --file. Each pattern is root-owned configuration (no agentOS process
 # starts a transient unit) or the command line of a root tool; none comes from the network or a guest.
-/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so
+/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so sha256=0000000000000000000000000000000000000000000000000000000000000000
 
 # The files that reach glob() only through libsystemd-shared (systemctl, journald, logind, resolved,
 # networkd, udevd's helpers, the generators, libsystemd-core, the cryptsetup token plugins and the rest);
@@ -88,37 +91,38 @@ via /usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so
 
 # iproute2's ip: its one glob() (ip/iptuntap.c, 6.15) walks the fixed pattern /proc/[0-9]*/fd/[0-9]*
 # for "ip tuntap show".
-/usr/bin/ip
+/usr/bin/ip sha256=0000000000000000000000000000000000000000000000000000000000000000
 
 # libnftables globs an "include" path in a ruleset. nft loads only rulesets agentOS renders (port1's
 # fixed set commands and a name matching [a-zA-Z0-9_.-], the enforcer's tables) or root-owned files;
 # none holds an include.
-/usr/lib/x86_64-linux-gnu/libnftables.so.1.*
+/usr/lib/x86_64-linux-gnu/libnftables.so.1.* sha256=0000000000000000000000000000000000000000000000000000000000000000
 via /usr/lib/x86_64-linux-gnu/libnftables.so.1.*
 
 # libpopt globs only in its config readers (poptReadConfigFiles, poptReadDefaultConfig and poptInit,
 # src/poptconfig.c); cryptsetup 2.7.5's tools call none of them.
-/usr/lib/x86_64-linux-gnu/libpopt.so.0.*
+/usr/lib/x86_64-linux-gnu/libpopt.so.0.* sha256=0000000000000000000000000000000000000000000000000000000000000000
 via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 
 # PAM modules globbing their own root-owned config directories (/etc/security/access.d, limits.d and
 # namespace.d); a module runs only in a process that loads PAM, and its patterns are fixed paths.
-/usr/lib/x86_64-linux-gnu/security/pam_access.so
-/usr/lib/x86_64-linux-gnu/security/pam_limits.so
-/usr/lib/x86_64-linux-gnu/security/pam_namespace.so
+/usr/lib/x86_64-linux-gnu/security/pam_access.so sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/lib/x86_64-linux-gnu/security/pam_limits.so sha256=0000000000000000000000000000000000000000000000000000000000000000
+/usr/lib/x86_64-linux-gnu/security/pam_namespace.so sha256=0000000000000000000000000000000000000000000000000000000000000000
 
 # ldconfig, a static copy of glibc (#6298), in the main tree and the initrd: its one glob() expands the
 # include patterns of root-owned /etc/ld.so.conf and ld.so.conf.d (elf/ldconfig.c), run by root at
 # package install and boot. It is also the sweep's control that the static scan still reads glibc's marks.
-/usr/sbin/ldconfig
+/usr/sbin/ldconfig sha256=0000000000000000000000000000000000000000000000000000000000000000
 
 # The openclaw guest's node imports dlsym and holds "glob" (#6298): the string is the name of its
 # JavaScript fs.glob API, implemented in JavaScript over readdir (lib/internal/fs/glob.js), and its
 # dlsym calls (src/node_binding.cc, deps/uv/src/unix/dl.c, deps/v8 platform-posix.cc; v24.22.3) look up
 # only fixed names: an addon's node_register_module_v137, napi_register_module_v1 and
 # node_api_module_get_api_version_v1, gnu_get_libc_version, memfd_create and pthread_setname_np. It runs
-# inside the guest sandbox, on the guest's own glibc (the image/guest -126765 record).
-/usr/lib/agentos/images/openclaw/usr/local/bin/node
+# inside the guest sandbox, on the guest's own glibc (the image/guest -126765 record). The pin keys that
+# reading to this node build: another version's dlsym calls are read again before it passes (#6299).
+/usr/lib/agentos/images/openclaw/usr/local/bin/node sha256=0000000000000000000000000000000000000000000000000000000000000000
 
 [cipher]
 # The files of the built image (main tree and initrds) whose bytes name an OpenSSL by-name cipher
