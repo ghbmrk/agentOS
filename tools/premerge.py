@@ -287,7 +287,7 @@ def _renumbered_only(cwd, tree, head, path, reviewed, onto):
         return False
     a, b = (_git(cwd, "show", f"{t}:{path}", ok=(0, 128)) for t in (tree, head))
     return (bool(a) and bool(b) and ROW_ID.sub(b"| # |", a) == ROW_ID.sub(b"| # |", b)
-            and not _stale(cwd, a, path, reviewed, onto) and _same_mode(cwd, tree, head, path))
+            and _stale(cwd, a, path, reviewed, onto) == collections.Counter() and _same_mode(cwd, tree, head, path))
 
 
 FIRST_CELL = re.compile(rb"^\|[ \t]*([^|\s][^|]*?)[ \t]*\|")
@@ -329,12 +329,13 @@ def _stale(cwd, text, path, reviewed, onto):
     merge's own (main's plus the reviewed commit's, less the base's), so a copy one side edited or deleted and the
     other left alone (#3369, #1912, #3441, #3502). A copy both sides deleted outside a conflict is gone from the
     merge too (#3534). Where `git merge-file` aligns the file unlike the replay, the whole file counts as one
-    conflict. Empty for any other file or a criss-cross merge."""
+    conflict. Empty for any other file; None for a criss-cross merge, which reads as stale (#6316: its union can
+    bring back a row unseen)."""
     if path.rsplit("/", 1)[-1] != "ASSUMPTIONS.md":
         return collections.Counter()
     bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
     if len(bases) != 1:
-        return collections.Counter()
+        return None
     merged, mark = _merge_file(cwd, path, reviewed, bases[0], onto)
     hunks, union, hunk, side = [], [], None, 0
     for line in merged.splitlines(keepends=True):
@@ -374,7 +375,7 @@ def _broken(cwd, tree, path, reviewed, onto):
     if path != "DECISIONS.md" and path.rsplit("/", 1)[-1] != "ASSUMPTIONS.md":
         return False
     text = _git(cwd, "show", f"{tree}:{path}", ok=(0, 128))
-    return _duplicate_id(text) or bool(_stale(cwd, text, path, reviewed, onto))
+    return _duplicate_id(text) or _stale(cwd, text, path, reviewed, onto) != collections.Counter()
 
 
 def _less(rows, drop):

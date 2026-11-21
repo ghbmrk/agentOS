@@ -1,4 +1,4 @@
-"""IMG-disk (#4317), IMG-disk-2 (#4366), IMG-disk-4 (#4434): the image build has a guaranteed runner disk budget and fails
+"""IMG-disk (#4317), IMG-disk-2 (#4366), IMG-disk-4 (#4434), #6150 (the stage job): the image build has a guaranteed runner disk budget and fails
 fast when short, naming the runner's cloud.
 systemd-repart died mid-copy with ENOSPC when the runner's disk, not the image's partition, filled
 up. image.yml frees the runner's unused toolchains, then a guard checks every file system the job
@@ -92,7 +92,7 @@ read -r peak rise < <(awk -v b="$(cat "$RUNNER_TEMP/disk.base")" \
 p=$(( (peak * 10 + 1023) / 1024 )); r=$(( (rise * 10 + 1023) / 1024 )); t=$(( p + r ))
 gb() { echo "$(( $1 / 10 )).$(( $1 % 10 ))"; }
 echo "::notice title=disk budget::the job grew its disk use by at most $(gb $t) GB of its $DISK_NEED_GB GB budget ($(gb $p) GB sampled, plus $(gb $r) GB, the largest rise in one sample interval, for a peak between samples)"
-[ "$t" -lt $(( DISK_NEED_GB * 10 )) ] || { echo "::error title=disk budget::image build may have used up to $(gb $t) GB, at or over its $DISK_NEED_GB GB budget; raise DISK_NEED_GB in .github/workflows/image.yml (the build job's env)"; exit 1; }
+[ "$t" -lt $(( DISK_NEED_GB * 10 )) ] || { echo "::error title=disk budget::image build may have used up to $(gb $t) GB, at or over its $DISK_NEED_GB GB budget; raise DISK_NEED_GB in .github/workflows/image.yml (the $GITHUB_JOB job's env)"; exit 1; }
 """
 
 
@@ -106,10 +106,13 @@ def free_disk_copies(script):
     return "\n".join((FREE_DISK_GB,) + FREE_DISK_NOTICES) + "\n"
 
 
-def build_steps():
-    """The build job's steps as (name or uses, step text), read as text: CI's Python has no YAML."""
+def build_steps(job_id="build"):
+    """Job JOB_ID's steps as (name or uses, step text), read as text: CI's Python has no YAML. The job
+    ends at the next line indented two spaces (the next job, or a comment above it)."""
     text = WORKFLOW.read_text()
-    job = text[text.index("\n  build:\n"):text.index("\n  reproduce:\n")]
+    start = text.index("\n  %s:\n" % job_id)
+    end = re.compile(r"\n  [^ ]").search(text, start + 1)
+    job = text[start:end.start() if end else len(text)]
     out = []
     for block in re.split(r"\n(?=      - )", job[job.index("    steps:\n") + len("    steps:\n"):]):
         m = re.match(r"      - (?:name|uses): *(.+)", block)
@@ -117,17 +120,17 @@ def build_steps():
     return job, out
 
 
-def step(name):
+def step(name, job_id="build"):
     """The one step named NAME; a second step of that name fails, so no test reads the wrong one."""
-    blocks = [b for n, b in build_steps()[1] if n == name]
+    blocks = [b for n, b in build_steps(job_id)[1] if n == name]
     if len(blocks) != 1:
         raise AssertionError("%d steps are named %s" % (len(blocks), name))
     return blocks[0]
 
 
-def run_script(name):
+def run_script(name, job_id="build"):
     """A `run: |` block's script, dedented."""
-    lines = step(name).split("\n")
+    lines = step(name, job_id).split("\n")
     i = lines.index("        run: |")
     return "\n".join(l[10:] for l in lines[i + 1:]) + "\n"
 
@@ -146,6 +149,10 @@ def copy_of(name, script):
 
 
 class DiskBudgetTest(unittest.TestCase):
+    """The build job's guard; StageDiskBudgetTest runs every test again on the stage job's (#6150)."""
+    JOB = "build"
+    INSTALL = "Install build and boot tools"
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.t = pathlib.Path(self.tmp.name)
@@ -170,9 +177,9 @@ class DiskBudgetTest(unittest.TestCase):
     def run_step(self, name, avail_mb=0, used_mb=0, need="30", fs=None, vendor=None):
         """Runs the test's own copy of a step (copy_of), never the step's text; FS maps mount points to
         (avail, used) MB, else one file system "/" has them."""
-        script = copy_of(name, run_script(name))
+        script = copy_of(name, run_script(name, self.JOB))
         # The copies run as `shell: bash` runs a step (bash -e -o pipefail), so the step must say so.
-        if name != "Free runner disk" and "\n        shell: bash\n" not in step(name):
+        if name != "Free runner disk" and "\n        shell: bash\n" not in step(name, self.JOB):
             raise AssertionError("%s: the test runs its copy as `shell: bash`; the step no longer says that" % name)
         (self.t / "bin" / "fs.json").write_text(json.dumps(fs or {"/": (avail_mb, used_mb)}))
         dmi = self.t / "dmi"
@@ -180,7 +187,7 @@ class DiskBudgetTest(unittest.TestCase):
         if vendor is not None:
             (dmi / "sys_vendor").write_text(vendor + "\n")
         env = dict(os.environ, PATH="%s:%s" % (self.t / "bin", os.environ["PATH"]),
-                   RUNNER_TEMP=str(self.t / "temp"), DISK_NEED_GB=need, DMI_ID=str(dmi))
+                   RUNNER_TEMP=str(self.t / "temp"), DISK_NEED_GB=need, DMI_ID=str(dmi), GITHUB_JOB=self.JOB)
         p = subprocess.Popen(["bash", "-e", "-o", "pipefail", "-c", script], env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                              start_new_session=True)
@@ -213,7 +220,7 @@ class DiskBudgetTest(unittest.TestCase):
 
     def test_free_runner_disk_copies_match_the_step(self):
         # #4440: the step frees disk through sudo, and an edit to any copied line fails the test.
-        script = run_script("Free runner disk")
+        script = run_script("Free runner disk", self.JOB)
         self.assertRegex(script, r"(?m)^sudo rm -rf /usr/local/lib/android ")
         for line in (FREE_DISK_GB,) + FREE_DISK_NOTICES:
             for edited in (line.replace("1024", "1000"), line.replace("GB", "GiB"), " " + line, line + " "):
@@ -231,7 +238,7 @@ class DiskBudgetTest(unittest.TestCase):
         mutant = self.t / "image.yml"
         text = WORKFLOW.read_text()
         for name in ("Disk budget", "Disk budget held"):
-            block = step(name)
+            block = step(name, self.JOB)
             head, body = block.split("        run: |\n")
             moved.write_text(run_script(name) + "/bin/touch %s\n" % marker)
             for edited in (head + "        run: |\n          /bin/touch %s\n" % marker + body,
@@ -251,7 +258,7 @@ class DiskBudgetTest(unittest.TestCase):
                         self.run_step(name, avail_mb=40 * 1024, used_mb=50000)
         # A step with no copy here cannot run at all, even one whose text is a plain `run: |` block.
         with self.assertRaises(KeyError):
-            self.run_step("Install build and boot tools")
+            self.run_step(self.INSTALL)
 
     def test_guard_passes_and_samples_when_the_budget_is_there(self):
         rc, out = self.run_step("Disk budget", avail_mb=31 * 1024, used_mb=50000)
@@ -285,7 +292,7 @@ class DiskBudgetTest(unittest.TestCase):
         rc, out = self.held(*self.ramp(29))
         self.assertNotEqual(rc, 0)
         self.assertIn("::error title=disk budget::image build may have used up to 30.0 GB, at or over its 30 GB "
-                      "budget; raise DISK_NEED_GB in .github/workflows/image.yml (the build job's env)", out)
+                      "budget; raise DISK_NEED_GB in .github/workflows/image.yml (the %s job's env)" % self.JOB, out)
         rc, out = self.held(*self.ramp(28))
         self.assertEqual(rc, 0, out)
         self.assertIn("grew its disk use by at most 29.0 GB of its 30 GB budget (28.0 GB sampled, plus 1.0 GB", out)
@@ -349,23 +356,28 @@ class DiskBudgetTest(unittest.TestCase):
         self.assertIn("no baseline", out)
 
     def test_order_and_budget(self):
-        job, steps = build_steps()
+        job, steps = build_steps(self.JOB)
         names = [n for n, _ in steps]
-        self.assertLess(names.index("Free runner disk"), names.index("Install build and boot tools"))
+        # Freed, tools installed, then the guard before the job's first large write; the held check last.
+        self.assertLess(names.index("Free runner disk"), names.index(self.INSTALL))
+        self.assertEqual(names[names.index(self.INSTALL) + 1], "Disk budget")
+        self.assertEqual(names[-1], "Disk budget held")
+        self.assertIn("        if: always()\n", step("Disk budget held", self.JOB))
+        need = re.search(r'^      DISK_NEED_GB: "(\d+)"', job, re.M)
+        self.assertGreater(int(need.group(1)), 0)
+        # The guard checks the file system of each place the job writes, and samples every second.
+        dfline = next(l for l in run_script("Disk budget", self.JOB).splitlines() if l.startswith("df "))
+        for p in ('"$RUNNER_TEMP"', "/var/tmp", "/tmp", "/root"):
+            self.assertIn(p, dfline)
+        self.assertIn("; sleep 1; done", run_script("Disk budget", self.JOB))
+        self.check_writes(names)
+
+    def check_writes(self, names):
         # The stage's download and unpack (#4690, D-276) write to RUNNER_TEMP after the guard, as the build does.
         i = names.index("Disk budget")
         self.assertEqual(names[i + 1:i + 4], ["actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0",
                                               "Unpack the stage", "Build image"])
         self.assertIn('"$RUNNER_TEMP/out"', step("Unpack the stage"))
-        self.assertEqual(names[-1], "Disk budget held")
-        self.assertIn("        if: always()\n", step("Disk budget held"))
-        need = re.search(r'^      DISK_NEED_GB: "(\d+)"', job, re.M)
-        self.assertGreater(int(need.group(1)), 0)
-        # The guard checks the file system of each place the job writes, and samples every second.
-        dfline = next(l for l in run_script("Disk budget").splitlines() if l.startswith("df "))
-        for p in ('"$RUNNER_TEMP"', "/var/tmp", "/tmp", "/root"):
-            self.assertIn(p, dfline)
-        self.assertIn("; sleep 1; done", run_script("Disk budget"))
         # The build writes where the guard looks: its output in RUNNER_TEMP, HOME and GOCACHE.
         build = step("Build image")
         for p in ("HOME=/root", "OUT: ${{ runner.temp }}/out", '--output-dir "$OUT"'):
@@ -409,6 +421,40 @@ class DiskBudgetTest(unittest.TestCase):
         self.assertIn("::notice title=disk budget::Azure runner: image build needs 30 GB free on /", out)
         rc, out = self.run_step("Disk budget", avail_mb=31 * 1024, used_mb=50000, vendor="QEMU")
         self.assertIn("unknown-cloud (QEMU) runner:", out)
+
+
+class StageDiskBudgetTest(DiskBudgetTest):
+    """#6150: the stage job runs build.sh's staging (guest roots, llama-server, the model) on its own runner,
+    so it carries the same guard and held check, byte for byte, against its own DISK_NEED_GB."""
+    JOB = "stage"
+    INSTALL = "Install staging tools"
+
+    def check_writes(self, names):
+        # Every step after the guard up to the upload writes to the file systems it reads: the loop
+        # device's and fixtures' test binaries in RUNNER_TEMP, build.sh's tree in RUNNER_TEMP/out
+        # with HOME=/root and GOCACHE in /tmp, and the tar in RUNNER_TEMP.
+        i = names.index("Disk budget")
+        self.assertEqual(names[i + 1:i + 5], ["Disk adapter on a loop device (UPD-b3 (c1))",
+                                              "Unit-rule fixtures under systemd (image/unit_rules.py)",
+                                              "Stage the image tree (image/build.sh)", "Pack the stage"])
+        stage = step("Stage the image tree (image/build.sh)", "stage")
+        for p in ("HOME=/root", "GOCACHE=/tmp/gocache", 'image/build.sh "$RUNNER_TEMP/out"'):
+            self.assertIn(p, stage)
+        self.assertIn('"$RUNNER_TEMP/stage.tar"', step("Pack the stage", "stage"))
+
+
+class EveryDiskJobTest(unittest.TestCase):
+    def test_every_job_that_frees_the_disk_keeps_a_budget(self):
+        # #6150: each job that frees the runner disk writes the build's large trees, so each has its own
+        # DISK_NEED_GB, guard and held check; a new such job without them fails here.
+        jobs = re.findall(r"(?m)^  ([a-z][\w-]*):\n", WORKFLOW.read_text().split("\njobs:\n", 1)[1])
+        freeing = [j for j in jobs if "Free runner disk" in [n for n, _ in build_steps(j)[1]]]
+        self.assertEqual(sorted(freeing), ["build", "stage"])
+        for j in freeing:
+            names = [n for n, _ in build_steps(j)[1]]
+            self.assertEqual([names.count("Disk budget"), names.count("Disk budget held")], [1, 1], j)
+            self.assertRegex(build_steps(j)[0], r'(?m)^    env:\n      DISK_NEED_GB: "\d+"', j)
+
 
 if __name__ == "__main__":
     unittest.main()
