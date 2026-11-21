@@ -4839,17 +4839,23 @@ class VerbatimMoves(unittest.TestCase):
 
     def test_a_file_a_build_constraint_can_leave_out_is_never_a_move(self):
         # L3 on #6376: an `_other` body moved into an unconstrained test file enters the linux test binary.
-        for src, text in (("broker/proc/kernelsock_other.go", "//go:build !linux\n\n" + MOVE_SRC),
-                          ("broker/proc/kernelsock_other.go", "// +build !linux\n\n" + MOVE_SRC),
-                          ("broker/proc/kernelsock_windows.go", MOVE_SRC),
-                          ("broker/proc/kernelsock_linux_arm64.go", MOVE_SRC)):
-            with self.subTest(src, text=text[:20]):
-                kept = text.replace(MOVE_SRC, MOVE_KEPT)
-                _, before, tests, moved = self.changes({src: text}, {src: kept, self.NEW: MOVE_TEST})
+        cgo = lambda t: t.replace("import (\n", 'import "C"\n\nimport (\n')
+        for src, wrap in (("broker/proc/kernelsock_other.go", lambda t: "//go:build !linux\n\n" + t),
+                          ("broker/proc/kernelsock_other.go", lambda t: "// +build !linux\n\n" + t),
+                          ("broker/proc/kernelsock_windows.go", str),
+                          ("broker/proc/kernelsock_linux_arm64.go", str),
+                          ("broker/proc/_kernelsock.go", str),  # L3 round 2: go/build skips _ and . names
+                          ("broker/proc/.kernelsock.go", str),
+                          ("broker/proc/kernelsock~.go", str),
+                          ("broker/proc/kernelsock_cgo.go", cgo)):  # left out when cgo is off
+            with self.subTest(src, text=wrap("")[:20]):
+                _, before, tests, moved = self.changes({src: wrap(MOVE_SRC)}, {src: wrap(MOVE_KEPT), self.NEW: MOVE_TEST})
                 self.assertEqual(moved, {})
                 self.assertEqual(tests[self.NEW], before[self.NEW])
         for new, test in (("broker/proc/clients_test.go", "//go:build linux\n\n" + MOVE_TEST),
-                          ("broker/proc/clients_windows_test.go", MOVE_TEST)):
+                          ("broker/proc/clients_windows_test.go", MOVE_TEST),
+                          ("broker/proc/_clients_test.go", MOVE_TEST),
+                          ("broker/proc/.clients_test.go", MOVE_TEST)):
             with self.subTest(new):
                 _, before, tests, moved = self.changes({self.SRC: MOVE_SRC}, {self.SRC: MOVE_KEPT, new: test})
                 self.assertEqual(moved, {})

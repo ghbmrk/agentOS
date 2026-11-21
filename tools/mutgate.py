@@ -708,13 +708,22 @@ BUILD_NAMES = frozenset("aix android darwin dragonfly freebsd hurd illumos ios j
                         "sparc64 wasm".split())
 
 
-def _constrained(path, text):
-    """Whether a Go file may be left out of some build: a `//go:build` or `+build` line anywhere in it, or
-    a part of its name after the first `_` that names a GOOS or GOARCH (L3 on #6376). Read wider than Go
-    reads it, which only refuses more moves."""
-    parts = path.rsplit("/", 1)[-1].removesuffix(".go").removesuffix("_test").split("_")[1:]
-    return any(p in BUILD_NAMES for p in parts) or any(
-        r.lstrip().startswith(("//go:build", "// +build", "//+build")) for r in text.split("\n"))
+# The file names every build of a package compiles whatever its GOOS, GOARCH, tags and cgo: a letter or digit
+# first (go/build skips a name starting `_` or `.`), then letters, digits, `_` and `-` (L3 on #6376).
+BUILT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\.go")
+
+
+def _always_built(path, text):
+    """Whether every build of its package compiles this Go file: an allow-list, read narrower than go/build
+    reads it, which only refuses more moves. Its name fits BUILT_NAME and no part after the first `_` names
+    a GOOS or GOARCH; no line is a `//go:build` or `+build` constraint; it imports no "C" (a cgo file,
+    left out when cgo is off). `go list` would read the set exactly, but verify runs no go tool on PR
+    files (#4106), so the rules are read as text (L3 and Security on #6376)."""
+    name = path.rsplit("/", 1)[-1]
+    parts = name.removesuffix(".go").removesuffix("_test").split("_")[1:]
+    return (BUILT_NAME.fullmatch(name) is not None and not any(p in BUILD_NAMES for p in parts)
+            and not any(r.lstrip().startswith(("//go:build", "// +build", "//+build")) for r in text.split("\n"))
+            and not re.search(r'^\s*(?:import\s+)?(?:\w+\s+)?"C"\s*$', _uncommented(text), re.M))
 
 
 def _span(rows, first, last):
@@ -729,7 +738,7 @@ def verbatim_moves(diff_text, base, head, tests):
     a top-level declaration (its doc comment and the blank lines either side too) whose text is byte for byte
     a declaration of a non-test .go file of the same directory and package clause at the merge base,
     every line of which the diff deletes or changes, whose words resolve to the same imports in both
-    files. Neither file may carry a build constraint (_constrained): code a build leaves out at the
+    files. Both files must be ones every build compiles (_always_built): code a build leaves out at the
     base would enter it at the head. A declaration every test may run (init, TestMain, a var with an initializer, a file with a
     linkname) or holding a `//go:` line is never one. In a test file the base lacks, the header (the
     package clause, comments, imports) is one too when every other declaration is a move and every
@@ -742,12 +751,12 @@ def verbatim_moves(diff_text, base, head, tests):
         if not any(is_source(p) and p.rsplit("/", 1)[0] == d for p in move):
             continue  # no package file of this directory loses a line: nothing moved here
         text = base_text(head, path)
-        if text is None or _constrained(path, text):
+        if text is None or not _always_built(path, text):
             continue
         sources = {}
         for p in move:
             if (is_source(p) and p.rsplit("/", 1)[0] == d and (t := base_text(mb, p)) is not None
-                    and not _constrained(p, t)):
+                    and _always_built(p, t)):
                 sources[p] = (t.split("\n"), _decls(p, t), _imports(t))
         rows, bare, timps = text.split("\n"), _uncommented(text, False).split("\n"), _imports(text)
         moved, froms, used, rest = set(), set(), set(), False
