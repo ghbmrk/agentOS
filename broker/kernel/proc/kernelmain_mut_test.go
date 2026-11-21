@@ -386,9 +386,6 @@ func TestTheKernelProcessTicks(t *testing.T) {
 // test is uid 0 it refuses at once.
 func TestTheKernelProcessRefusesRoot(t *testing.T) {
 	if os.Getenv("AGENTOS_TEST_ROOT_CHILD") == "1" {
-		if os.Geteuid() != 0 {
-			os.Exit(3)
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		d := t.TempDir()
