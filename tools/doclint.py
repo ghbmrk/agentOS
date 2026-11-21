@@ -240,7 +240,7 @@ def record_files(root):
         files = _tracked(root, ".")
     except (OSError, subprocess.CalledProcessError):
         files = [str(p.relative_to(root)) for p in root.rglob("*") if ".git" not in p.parts]
-    for f in files:
+    for f in sorted(files):
         name, p = pathlib.PurePosixPath(f).name, root / f
         if record_merge.record_class(f) is None:
             if "allow" in name.lower() and not name.endswith(CODE):
