@@ -53,10 +53,12 @@ package wipelint_test
 // the operand of len or cap, or as an argument of a function listed in
 // keyUses (one that keeps no reference to the slice and returns no key
 // bytes), and never inside a func literal; and no other expression in the
-// body has the type of key bytes (a byte slice, byte array or string that
-// is not a constant), the parameters the entry classifies as not keys
-// aside. A copy kept, a reslice, a conversion, a key drawn or derived
-// inside, or a sealer literal holding raw bytes each fail.
+// body has a type that holds bytes (bytesIn: a byte slice, byte array or
+// string that is not a constant, or a pointer, struct, array, slice or map
+// holding one), the parameters the entry classifies as not keys aside. A
+// copy kept, a reslice, a conversion, a key drawn or derived inside, or a
+// sealer literal holding bytes, directly or behind a pointer or field,
+// each fail.
 //
 // Bound, held by review: what the code does with the key before the call
 // (a copy kept, `string(k)`, an early return that skips the wipe); what a
@@ -144,6 +146,10 @@ var sealers = map[string]sealerKey{
 // constructor may hand its key to, with why it keeps no reference to the
 // slice and returns no key bytes. Nothing but review holds an entry.
 var keyUses = map[string]string{
+	// Go 1.26 src/crypto/aes/aes.go NewCipher → crypto/internal/fips140/aes
+	// newOutlined → newBlockExpanded → expandKeyGeneric, which writes the
+	// round keys into the Block's fixed arrays and stores no slice (the
+	// boring path is off: the broker builds without GOEXPERIMENT=boringcrypto).
 	"crypto/aes.NewCipher": "expands the key into the round keys of the block it returns, the sealer's own state, and keeps no reference to the slice",
 }
 
@@ -647,7 +653,6 @@ func constructorProblems(fset *token.FileSet, f *ast.File, info *types.Info, sea
 func bodyProblems(fset *token.FileSet, f *ast.File, info *types.Info, keys map[string]sealerKey, uses map[string]string, seen map[string]bool) []string {
 	var problems []string
 	line := func(n ast.Node) string { return strconv.Itoa(fset.PositionFor(n.Pos(), false).Line) }
-	raw := func(fm form) bool { return fm == formSlice || fm == formArray || fm == formString }
 	for _, d := range f.Decls {
 		fd, isFn := d.(*ast.FuncDecl)
 		if !isFn || fd.Body == nil {
@@ -664,8 +669,14 @@ func bodyProblems(fset *token.FileSet, f *ast.File, info *types.Info, keys map[s
 		}
 		sig := fn.Type().(*types.Signature)
 		key, not := map[types.Object]bool{}, map[types.Object]bool{}
+		vars := []*types.Var{}
+		if r := sig.Recv(); r != nil {
+			vars = append(vars, r) // a receiver key also fails in constructorProblems
+		}
 		for i := range sig.Params().Len() {
-			p := sig.Params().At(i)
+			vars = append(vars, sig.Params().At(i))
+		}
+		for _, p := range vars {
 			switch {
 			case slices.Contains(entry.keys, p.Name()):
 				key[p] = true
@@ -698,7 +709,7 @@ func bodyProblems(fset *token.FileSet, f *ast.File, info *types.Info, keys map[s
 					seen[obj.Origin().FullName()] = true
 					r := obj.Type().(*types.Signature).Results()
 					for i := range r.Len() {
-						if raw(keyForm(r.At(i).Type())) {
+						if bytesIn(r.At(i).Type()) {
 							problems = append(problems, line(n)+": "+name+" hands its key to "+obj.Origin().FullName()+", which returns bytes ("+r.At(i).Type().String()+"); remove it from keyUses")
 						}
 					}
@@ -736,7 +747,7 @@ func bodyProblems(fset *token.FileSet, f *ast.File, info *types.Info, keys map[s
 			if !ok || tv.IsType() || tv.Value != nil || tv.IsNil() {
 				return true
 			}
-			if raw(keyForm(tv.Type)) {
+			if bytesIn(tv.Type) {
 				problems = append(problems, line(e)+": "+name+" holds bytes that are not its key parameters ("+types.ExprString(e)+"), so it builds or derives a key no caller wipes; a listed constructor takes its key bytes only from its callers")
 				return false
 			}
@@ -984,6 +995,51 @@ func termsForm(iface *types.Interface, seen map[types.Type]bool) (form, bool) {
 	return formUnknown, true
 }
 
+// bytesIn reports whether a value of type t holds bytes a statement could
+// keep: a string, a byte slice or array, a uintptr or unsafe.Pointer, a
+// type parameter that may be one, or a pointer, struct, array, slice, map
+// or tuple holding one. It stops at an interface, func or channel, whose
+// contents a listed body's review holds (Bound).
+func bytesIn(t types.Type) bool { return bytesOf(t, map[types.Type]bool{}) }
+
+func bytesOf(t types.Type, seen map[types.Type]bool) bool {
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
+	if _, isTP := t.(*types.TypeParam); isTP {
+		return keyForm(t) != formNone
+	}
+	in := func(ts ...types.Type) bool {
+		return slices.ContainsFunc(ts, func(e types.Type) bool { return bytesOf(e, seen) })
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Basic:
+		return u.Info()&types.IsString != 0 || u.Kind() == types.Uintptr || u.Kind() == types.UnsafePointer || u.Kind() == types.Invalid
+	case *types.Slice:
+		return isByte(u.Elem()) || in(u.Elem())
+	case *types.Array:
+		return isByte(u.Elem()) || in(u.Elem())
+	case *types.Pointer:
+		return in(u.Elem())
+	case *types.Map:
+		return in(u.Key(), u.Elem())
+	case *types.Struct:
+		for i := range u.NumFields() {
+			if in(u.Field(i).Type()) {
+				return true
+			}
+		}
+	case *types.Tuple:
+		for i := range u.Len() {
+			if in(u.At(i).Type()) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // isByte reports whether t's underlying type is byte.
 func isByte(t types.Type) bool {
 	b, isBasic := t.Underlying().(*types.Basic)
@@ -1051,6 +1107,11 @@ func (gs) Open(blob, aad []byte) ([]byte, error)  { return nil, nil }
 		"example.test/p.newB7":           {[]string{"k"}, nil, "case"},
 		"example.test/p.newB8":           {[]string{"k"}, nil, "case"},
 		"example.test/p.newKL":           {nil, []string{"n"}, "case: n is a nonce"},
+		"example.test/p.newB9":           {[]string{"k"}, nil, "case"},
+		"example.test/p.newB10":          {[]string{"k"}, nil, "case"},
+		"example.test/p.newP1":           {[]string{"k"}, nil, "case"},
+		"example.test/p.newP2":           {[]string{"k"}, nil, "case"},
+		"(example.test/p.rk).Mk":         {[]string{"r"}, nil, "case"},
 	}
 	uses := map[string]string{"crypto/aes.NewCipher": "case", "example.test/p.leak": "case"}
 	cases := []struct {
@@ -1406,6 +1467,61 @@ func newB8(k []byte) (clerk.Sealer, error) {
 	g, err := cipher.NewGCM(expand(k))
 	return gs{g}, err
 }`, 1},
+		// Bytes behind a pointer or inside a struct (#6445 Security).
+		{"a body that draws its key behind a pointer", `type own9 struct{ p *[32]byte }
+
+func (*own9) Seal(plain, aad []byte) ([]byte, error) { return nil, nil }
+func (*own9) Open(blob, aad []byte) ([]byte, error) { return nil, nil }
+
+func fill(p *[32]byte) {}
+
+func newB9(k []byte) (clerk.Sealer, error) {
+	p := new([32]byte)
+	fill(p)
+	return &own9{p}, nil
+}`, 3},
+		{"a body that takes its key inside a struct", `type kb struct{ b []byte }
+
+type own10 struct{ k kb }
+
+func (*own10) Seal(plain, aad []byte) ([]byte, error) { return nil, nil }
+func (*own10) Open(blob, aad []byte) ([]byte, error) { return nil, nil }
+
+func load() kb { return kb{} }
+
+func newB10(k []byte) (clerk.Sealer, error) {
+	return &own10{load()}, nil
+}`, 1},
+		{"a body that builds its block from a key behind a pointer (#6445 L3)", `func fill2(p *[32]byte) {}
+func blk(p *[32]byte) cipher.Block { return nil }
+
+func newP1(k []byte) (clerk.Sealer, error) {
+	if len(k) != 32 {
+		return nil, errors.New("x")
+	}
+	own := new([32]byte)
+	fill2(own)
+	g, err := cipher.NewGCM(blk(own))
+	return gs{g}, err
+}`, 3},
+		{"a body that builds its block from a key in a struct (#6445 L3)", `type kb2 struct{ b []byte }
+
+func load2() kb2 { return kb2{} }
+func blk2(x kb2) cipher.Block { return nil }
+
+func newP2(k []byte) (clerk.Sealer, error) {
+	_ = len(k)
+	g, err := cipher.NewGCM(blk2(load2()))
+	return gs{g}, err
+}`, 1},
+		{"a receiver key handed to an unlisted function", `type rk []byte
+
+func keep(b []byte) {}
+
+func (r rk) Mk() (clerk.Sealer, error) {
+	keep(r)
+	return sink, nil
+}`, 2},
 		{"a keyless entry's body makes a sealer from bytes", `func newKL(n []byte) (clerk.Sealer, error) {
 	_ = n
 	return &own7{make([]byte, 32)}, nil
