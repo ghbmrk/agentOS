@@ -65,6 +65,9 @@ func main() {
 	}
 }
 
+// getuid is os.Getuid; a test replaces it to see run refuse root.
+var getuid = os.Getuid
+
 func run(args []string) error {
 	fs := flag.NewFlagSet("agentos-enforcer", flag.ContinueOnError)
 	state := fs.String("state", "", "the enforcer's state directory (mode 0700, owned by this user)")
@@ -79,7 +82,7 @@ func run(args []string) error {
 	if *state == "" {
 		return errors.New("-state is required")
 	}
-	if os.Getuid() == 0 {
+	if getuid() == 0 {
 		return errors.New("refusing to run as root: run as the enforcer's own user with CAP_NET_ADMIN and CAP_NET_BIND_SERVICE")
 	}
 	if err := checkStateDir(*state); err != nil {

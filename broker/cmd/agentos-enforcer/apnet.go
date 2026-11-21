@@ -44,10 +44,11 @@ const (
 // at once (nudge).
 const apEvery = time.Minute
 
-// apReplaceWait bounds how long enrolment waits for every access point to
-// hold the four networks: one push's own bound (push.Pusher.Timeout's
-// default) and a margin for the push a nudge cut short.
-const apReplaceWait = 45 * time.Second
+// apReplaceWait bounds, in seconds, how long enrolment waits for every
+// access point to hold the four networks: one push's own bound
+// (push.Pusher.Timeout's default) and a margin for the push a nudge cut
+// short. openAP makes it a duration, in code a test runs.
+const apReplaceWait = 45
 
 // watcher is an access point's pusher as the daemon drives it:
 // *push.Pusher in production, a fake access point in the lifecycle test.
@@ -62,14 +63,20 @@ func newPusher(iface string) func(addr string, host ssh.PublicKey, signer ssh.Si
 	return func(addr string, host ssh.PublicKey, signer ssh.Signer) watcher {
 		// No dial timeout of its own: Pusher bounds each push, its dial
 		// included, with its context (push.Pusher.Timeout).
-		d := net.Dialer{Control: func(_, _ string, c syscall.RawConn) error {
-			var serr error
-			if err := c.Control(func(fd uintptr) { serr = unix.SetsockoptString(int(fd), unix.SOL_SOCKET, unix.SO_BINDTODEVICE, iface) }); err != nil {
-				return err
-			}
-			return serr
-		}}
+		d := net.Dialer{Control: bindTo(iface)}
 		return &push.Pusher{Addr: addr, HostKey: host, Signer: signer, Dial: d.DialContext}
+	}
+}
+
+// bindTo is the dialer's Control: it binds each socket to iface before
+// it connects, and refuses the dial if it cannot reach the socket.
+func bindTo(iface string) func(network, address string, c syscall.RawConn) error {
+	return func(_, _ string, c syscall.RawConn) error {
+		var serr error
+		if err := c.Control(func(fd uintptr) { serr = unix.SetsockoptString(int(fd), unix.SOL_SOCKET, unix.SO_BINDTODEVICE, iface) }); err != nil {
+			return err
+		}
+		return serr
 	}
 }
 
@@ -164,6 +171,9 @@ type apNet struct {
 	store  fileStore
 	every  time.Duration
 	wait   time.Duration
+	// enrol makes the four networks' passwords: ap.Keys.Enrol, which a
+	// test replaces to see a failure.
+	enrol func(*ap.Keys) error
 
 	mu   sync.Mutex
 	cond *sync.Cond
@@ -186,7 +196,8 @@ type apNet struct {
 // refuses, as before this slice, so the sticker never outlives an
 // enrolment that pushed nothing.
 func (d *Enforcer) openAP() (*apNet, error) {
-	n := &apNet{d: d, layout: d.cfg.AP.Layout, store: d.store(fileAPKeys), every: apEvery, wait: apReplaceWait}
+	n := &apNet{d: d, layout: d.cfg.AP.Layout, store: d.store(fileAPKeys), every: apEvery,
+		wait: apReplaceWait * time.Second, enrol: (*ap.Keys).Enrol}
 	n.cond = sync.NewCond(&n.mu)
 	if d.dp.APWait != 0 {
 		n.wait = d.dp.APWait
@@ -373,7 +384,7 @@ func (n *apNet) Replace() (enrol.Card, error) {
 	}
 	if !n.st.Keys.Enrolled() {
 		next := apState{Keys: cloneKeys(n.st.Keys)}
-		if err := next.Keys.Enrol(); err != nil {
+		if err := n.enrol(&next.Keys); err != nil {
 			n.mu.Unlock()
 			return enrol.Card{}, err
 		}

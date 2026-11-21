@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -733,5 +735,167 @@ func TestNewPusherBindsTheInterface(t *testing.T) {
 	if c, err := p.Dial(ctx, "tcp", ln.Addr().String()); err == nil {
 		c.Close()
 		t.Fatal("a dial bound to an interface that does not exist reached the address")
+	}
+}
+
+// fakeUID has run see uid as its user id until the test ends.
+func fakeUID(t *testing.T, uid int) {
+	old := getuid
+	getuid = func() int { return uid }
+	t.Cleanup(func() { getuid = old })
+}
+
+// run refuses a missing -state, root, and a state directory others can
+// read, before it reads or makes any key.
+func TestRunRefuses(t *testing.T) {
+	fakeUID(t, 1000)
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(nil); err == nil || !strings.Contains(err.Error(), "-state is required") {
+		t.Fatalf("no -state: %v", err)
+	}
+	open := t.TempDir()
+	if err := os.Chmod(open, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"-state", open, "-ap-pub"}); !errors.Is(err, errStateDir) {
+		t.Fatalf("a state directory others can read: %v", err)
+	}
+	fakeUID(t, 0)
+	if err := run([]string{"-state", dir, "-ap-pub"}); err == nil || !strings.Contains(err.Error(), "refusing to run as root") {
+		t.Fatalf("as root: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, fileAPSSH)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a refused run made a key: %v", err)
+	}
+}
+
+// -ap-pub prints the key the enforcer logs in to the access points with,
+// as one authorized_keys line, and exits.
+func TestRunAPPubPrintsTheKey(t *testing.T) {
+	fakeUID(t, 1000)
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout := os.Stdout
+	os.Stdout = w
+	err = run([]string{"-state", dir, "-ap-pub"})
+	os.Stdout = stdout
+	w.Close()
+	out, _ := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("-ap-pub: %v", err)
+	}
+	s, err := apSSHKey(fileStore{path: filepath.Join(dir, fileAPSSH)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := authorizedKey(s) + "\n"; string(out) != want {
+		t.Fatalf("-ap-pub printed %q, want the saved key %q", out, want)
+	}
+}
+
+// rawConn is a socket whose Control fails, as a closed one's does, or
+// runs f on fd.
+type rawConn struct {
+	err error
+	fd  uintptr
+}
+
+func (c rawConn) Control(f func(uintptr)) error {
+	if c.err == nil {
+		f(c.fd)
+	}
+	return c.err
+}
+func (rawConn) Read(func(uintptr) bool) error  { return errors.New("unused") }
+func (rawConn) Write(func(uintptr) bool) error { return errors.New("unused") }
+
+// ENF-g-8: the dialer refuses a socket it cannot reach or bind, rather
+// than dialling from whatever interface routing picks.
+func TestBindToRefuses(t *testing.T) {
+	closed := errors.New("use of closed file")
+	if err := bindTo("eth9")("tcp", "10.70.0.2:22", rawConn{err: closed}); !errors.Is(err, closed) {
+		t.Fatalf("a socket Control cannot reach: %v", err)
+	}
+	if err := bindTo("eth9")("tcp", "10.70.0.2:22", rawConn{fd: ^uintptr(0)}); !errors.Is(err, syscall.EBADF) {
+		t.Fatalf("a bind that failed: %v", err)
+	}
+}
+
+// NET-4: enrolment waits for every access point longer than one push may
+// take (push.Pusher's default bound, 30 seconds), so a slow but working
+// access point is not taken for a failed one.
+func TestOpenAPWaitsPastOnePush(t *testing.T) {
+	x := newBox(t, false)
+	if w := x.d.ap.wait; w <= 30*time.Second {
+		t.Fatalf("enrolment waits %v for the access points, no longer than one push", w)
+	}
+}
+
+// NET-4: a failure making the four passwords fails the hand-over before
+// anything is saved or pushed, and leaves the access points usable.
+func TestReplaceRefusesAFailedEnrol(t *testing.T) {
+	x := newBox(t, false)
+	n := x.d.ap
+	fail := errors.New("two passwords alike")
+	n.mu.Lock()
+	n.enrol = func(*ap.Keys) error { return fail }
+	n.mu.Unlock()
+	if _, err := n.Replace(); !errors.Is(err, fail) {
+		t.Fatalf("Replace with a failed Enrol: %v", err)
+	}
+	done := make(chan bool, 1)
+	go func() { done <- n.Replaced() }()
+	select {
+	case r := <-done:
+		if r {
+			t.Fatal("a failed Enrol replaced the setup network")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Replace kept the lock after a failed Enrol")
+	}
+	n.mu.Lock()
+	enrolled, replacing := n.st.Keys.Enrolled(), n.replacing
+	n.mu.Unlock()
+	if enrolled || replacing {
+		t.Fatalf("a failed Enrol left keys enrolled %v, a hand-over running %v", enrolled, replacing)
+	}
+}
+
+// NET-4: a policy whose device passwords could not be synced is synced
+// again on the next push, not taken as done.
+func TestFilesRetriesARefusedSync(t *testing.T) {
+	x, _ := enrolled(t, false)
+	n := x.d.ap
+	waitFor(t, func() bool { return x.apKeys().Device["tv"].Password != "" })
+	n.mu.Lock()
+	good := n.st
+	good.Keys = cloneKeys(n.st.Keys)
+	n.st.Keys = ap.Keys{Setup: good.Keys.Setup}
+	n.hash = ""
+	n.mu.Unlock()
+	if _, files, err := n.files(); err == nil || files != nil {
+		t.Fatalf("a sync that failed gave %d files, %v", len(files), err)
+	}
+	n.mu.Lock()
+	delete(good.Keys.Device, "tv")
+	n.st = good
+	n.mu.Unlock()
+	if _, _, err := n.files(); err != nil {
+		t.Fatalf("the sync was not retried: %v", err)
+	}
+	n.mu.Lock()
+	pw := n.st.Keys.Device["tv"].Password
+	n.mu.Unlock()
+	if pw == "" {
+		t.Fatal("the tv was given no password on the retry")
 	}
 }
