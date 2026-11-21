@@ -1058,22 +1058,25 @@ def env_patterns(p):
 
 def env_matches(boot, pats):
     """Each path in BOOT that one of PATS (env_patterns) matches, walked from the directory it starts in
-    as systemd would open it, directory links followed (each directory, as resolved, walked once)."""
+    as systemd would open it, directory links followed. Every walked path to a directory is walked, since
+    the pattern is matched against the walked path, not the resolved one (#6312 Security delta 1: one
+    visited set let the alias walked first hide the one the line names); a branch stops only where it
+    re-enters a directory already on its own chain, a cycle."""
     out = set()
     for top, pat in pats:
-        todo, seen = [top], set()
+        todo = [(top, frozenset())]
         while todo:
-            d = todo.pop()
+            d, chain = todo.pop()
             final = boot.resolve(d)[0]
-            if final in seen:
+            if final in chain:
                 continue
-            seen.add(final)
+            chain = chain | {final}
             for n in boot.entries(d):
                 q = d.rstrip("/") + "/" + n
                 if pat.match(q):
                     out.add(q)
                 if boot.kind(boot.resolve(q)[0]) == 0o040000:
-                    todo.append(q)
+                    todo.append((q, chain))
     return sorted(out)
 
 

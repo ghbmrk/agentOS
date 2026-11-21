@@ -1370,6 +1370,18 @@ class EnvFilesTest(unittest.TestCase):
                         r.env_files(v, units)
 
 
+    def test_every_alias_of_a_directory_is_walked(self):
+        # #6312 Security delta 1: a link of ours to the directory the line names, walked first by name
+        # order, must not hide it; a cycle of links ends
+        bad = "LD_PRELOAD=/var/lib/agentos-x/x.so\n"
+        for alias in ("zzz", "aaa"):
+            with self.subTest(alias=alias), tempfile.TemporaryDirectory() as d:
+                v = tree(d, {"/etc/default/pkgx-dir/f": bad, "/etc/default/" + alias: "-> /etc/default/pkgx-dir",
+                             "/etc/default/pkgx-dir/loop": "-> /etc/default"})
+                u = [{"files": [{"ours": False, "text": "[Service]\nEnvironmentFile=-/etc/default/pkgx-%I\n"}]}]
+                self.assertIn("/etc/default/pkgx-dir/f", r.env_files(v, u, lambda p: False)[1])
+
+
 class UserManagerTest(unittest.TestCase):
     """offline_systemd.UserManager asks root's user manager over its own bus (#6002)."""
 
