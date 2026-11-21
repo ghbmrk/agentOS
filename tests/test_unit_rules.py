@@ -1376,10 +1376,24 @@ class EnvFilesTest(unittest.TestCase):
         bad = "LD_PRELOAD=/var/lib/agentos-x/x.so\n"
         for alias in ("zzz", "aaa"):
             with self.subTest(alias=alias), tempfile.TemporaryDirectory() as d:
-                v = tree(d, {"/etc/default/pkgx-dir/f": bad, "/etc/default/" + alias: "-> /etc/default/pkgx-dir",
-                             "/etc/default/pkgx-dir/loop": "-> /etc/default"})
+                v = tree(d, {"/etc/default/pkgx-dir/f": bad, "/etc/default/" + alias: "-> /etc/default/pkgx-dir"})
                 u = [{"files": [{"ours": False, "text": "[Service]\nEnvironmentFile=-/etc/default/pkgx-%I\n"}]}]
                 self.assertIn("/etc/default/pkgx-dir/f", r.env_files(v, u, lambda p: False)[1])
+
+    def test_a_link_cycle_under_a_wildcard_fails_the_run(self):
+        # #6312 Security delta 2: %I may name pkgx-dir/loop/other, which is /etc/default/other, through a link
+        # back to an ancestor, so the paths a wildcard names are unbounded and the run fails, naming the link
+        u = [{"files": [{"ours": False, "text": "[Service]\nEnvironmentFile=-/etc/default/pkgx-%I\n"}]}]
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/etc/default/pkgx-dir/f": "X=1\n", "/etc/default/pkgx-dir/loop": "-> /etc/default",
+                         "/etc/default/other": "LD_PRELOAD=/var/lib/agentos-x/x.so\n"})
+            with self.assertRaisesRegex(SystemExit, "/etc/default/pkgx-dir/loop: a directory link back to /etc/default"):
+                r.env_files(v, u, lambda p: False)
+        # a path specifier alone is a fixed path, read without a walk, so a cycle beside it is not walked
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/etc/pkgx.env": "LD_PRELOAD=/x.so\n", "/etc/loop": "-> /etc"})
+            u = [{"files": [{"ours": False, "text": "[Service]\nEnvironmentFile=%E/pkgx.env\n"}]}]
+            self.assertEqual(r.env_files(v, u, lambda p: False)[1], {"/etc/pkgx.env": "LD_PRELOAD=/x.so\n"})
 
 
 class UserManagerTest(unittest.TestCase):

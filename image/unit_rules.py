@@ -1035,10 +1035,11 @@ ENV_SPECIFIER = re.compile(r"%(.?)")
 
 
 def env_patterns(p):
-    """The paths an EnvironmentFile= value P may name, as (the literal directory each starts in, a regular
-    expression over a tree path): P with %% read as %, each path-valued specifier as each of its
-    ENV_PATH_SPECIFIERS values and every other one as any run of bytes, "/" included; None when P holds
-    no specifier. A refused or unknown specifier fails the run (#6312 Security 1)."""
+    """The paths an EnvironmentFile= value P may name: P with %% read as %, each path-valued specifier as
+    each of its ENV_PATH_SPECIFIERS values and every other one as any run of bytes, "/" included. Each is
+    (the path, None) when no wildcard is met, else (the literal directory it starts in, a regular
+    expression over a tree path); None when P holds no specifier. A refused or unknown specifier fails
+    the run (#6312 Security 1)."""
     if "%" not in p:
         return None
     outs = [("", "", False)]  # (regex so far, literal prefix so far, whether a wildcard has been met)
@@ -1052,24 +1053,30 @@ def env_patterns(p):
                              "expand; name the env file without it (#6312)" % (p, part))
         else:
             outs = [(r + ".*", l, True) for r, l, w in outs]
-    return sorted({(l.rpartition("/")[0] or "/", re.compile(r + r"\Z", re.S)) for r, l, w in outs},
-                  key=lambda x: (x[0], x[1].pattern))
+    return sorted({(l.rpartition("/")[0] or "/", re.compile(r + r"\Z", re.S)) if w else (l, None)
+                   for r, l, w in outs}, key=lambda x: (x[0], x[1].pattern if x[1] else ""))
 
 
 def env_matches(boot, pats):
-    """Each path in BOOT that one of PATS (env_patterns) matches, walked from the directory it starts in
-    as systemd would open it, directory links followed. Every walked path to a directory is walked, since
-    the pattern is matched against the walked path, not the resolved one (#6312 Security delta 1: one
-    visited set let the alias walked first hide the one the line names); a branch stops only where it
-    re-enters a directory already on its own chain, a cycle."""
+    """Each path in BOOT that one of PATS (env_patterns) may name: a fixed one as it is; a wildcard one by
+    every path that matches it, walked from the directory it starts in as systemd would open it, directory
+    links followed and every walked path to a directory walked, since the pattern is matched against the
+    walked path (#6312 Security delta 1). A wildcard matches paths of any length, so a link back to a
+    directory on the walk's own chain makes the paths it may name unbounded: that fails the run, naming
+    the link (#6312 Security delta 2)."""
     out = set()
     for top, pat in pats:
+        if pat is None:
+            out.add(top)
+            continue
         todo = [(top, frozenset())]
         while todo:
             d, chain = todo.pop()
             final = boot.resolve(d)[0]
             if final in chain:
-                continue
+                raise SystemExit("unit rules: %s: a directory link back to %s, which an EnvironmentFile= wildcard "
+                                 "(%s) walks again, so the env files it may name are unbounded; remove the link "
+                                 "or name the env file without a specifier (#6312)" % (d, final, pat.pattern))
             chain = chain | {final}
             for n in boot.entries(d):
                 q = d.rstrip("/") + "/" + n
