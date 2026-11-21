@@ -34,9 +34,11 @@ UNRESOLVED = lambda kind, sha: ["unresolved-record", kind + ":", "Record", "head
 REPO = "o/agentOS"
 
 
-def bundle(head=(), base=(), pr=7, repo=REPO, branch="pr"):
-    """A --runs document for PR `pr` from `repo`'s `branch` into this repository."""
-    return {"repo": REPO, "pr": {"number": pr, "repo": repo, "branch": branch}, "head": list(head), "base": list(base)}
+def bundle(head=(), base=(), pr=7, repo=REPO, branch="pr", on_branch=None):
+    """A --runs document for PR `pr` from `repo`'s `branch` into this repository; `on_branch` is the branch's runs on
+    any head (premerge_runs.sh's `branch`), the head's runs when not given."""
+    return {"repo": REPO, "pr": {"number": pr, "repo": repo, "branch": branch}, "head": list(head),
+            "branch": list(head if on_branch is None else on_branch), "base": list(base)}
 
 
 def status_of(*lines):
@@ -1440,6 +1442,63 @@ class PremergeTest(unittest.TestCase):
         self.assertTrue(g("a/**", "a/b/c.go") and g("a/*", "a/b") and g("**/x.go", "x.go") and g("**/x.go", "a/b/x.go"))
         self.assertFalse(g("a/*", "a/b/c") or g("a/**", "ab/c") or g("a.b", "aXb") or g("a/**", "a"))
 
+    def test_check_gate_holds_a_later_head_until_mutgate_passed_on_the_accepted_one(self):
+        # PROC-review-no-mutgate-wait (#6379): an L3 accept may come before mutgate. A push that changes no diff (an
+        # empty commit, a main-merge) reads same, and mutgate reads waivers from that push's body, so a waiver pushed
+        # after the accept passed mutgate with no reviewer reading it. A head other than the accepted one now reads
+        # same only when mutgate passed on the accepted head.
+        import json
+        (self.r / ".github/workflows").mkdir(parents=True)
+        self.write(".github/workflows/mutgate.yml", "name: mutgate\non:\n  pull_request:\n")
+        self.write(".github/workflows/vulncheck.yml", "name: vulncheck\non:\n  pull_request:\n")
+        self.commit("workflows")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("b.md", "x\n")
+        sha = self.commit("code")
+        f = pathlib.Path(self._d.name + ".comments.json")
+        self.addCleanup(lambda: f.unlink(missing_ok=True))
+        l3 = lambda head=sha, at="1": self.rec("accept", head, "<!-- record: l3 -->\n", at=at)
+        wf = lambda id, state, on, **k: self.wf(id, "mutgate", state, on, **k)
+        def run(comments, head, on_branch=None, drop_branch=False):
+            f.write_text(json.dumps(comments))
+            doc = bundle(head, on_branch=on_branch)
+            if drop_branch:
+                del doc["branch"]
+            r = pathlib.Path(self._d.name + ".runs.json")
+            self.addCleanup(lambda: r.unlink(missing_ok=True))
+            r.write_text(json.dumps(doc))
+            p = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--check", str(f), "7", "--runs", str(r),
+                                "--base", "main"], cwd=self.r, capture_output=True, text=True)
+            return p.returncode, p.stdout.strip()
+        rewaive = lambda state: (1, premerge.REWAIVE.format(state, sha[:7]))
+        # the accepted head itself: the reviewer read its body's waivers (reviewer skill), so mutgate passing is enough
+        vuln = lambda id, on: self.wf(id, "vulncheck", "success", on)
+        self.assertEqual(run([l3()], [wf(1, "success", sha), vuln(9, sha)]), (0, "same"))
+        # a waiver pushed in an empty commit after the accept, mutgate having failed on the accepted head: held
+        later = (git(self.r, "commit", "-q", "--allow-empty", "-m", "waiver push"), git(self.r, "rev-parse", "HEAD"))[1]
+        ok = [wf(2, "success", later), vuln(10, later)]  # only mutgate is read on the accepted head
+        failed = wf(1, "failure", sha, jobs=[("mutgate", "failure")])
+        self.assertEqual(run([l3()], ok, ok + [failed]), rewaive("failure"))
+        for state, status in (("in_progress", "in_progress"), ("queued", "queued"), ("cancelled", "completed")):
+            with self.subTest(state=state):
+                run_ = wf(1, "cancelled" if status == "completed" else None, sha, status=status)
+                self.assertEqual(run([l3()], ok, ok + [run_]), rewaive(state))
+        self.assertEqual(run([l3()], ok, ok), rewaive("missing"))  # the accepted head's run is owed, not optional
+        self.assertEqual(run([l3()], ok, drop_branch=True), rewaive("unread"))  # an old runs document fails closed
+        # another PR's or branch's run on the accepted head does not count
+        self.assertEqual(run([l3()], ok, ok + [wf(1, "success", sha, prs=((8, "main"),))]), rewaive("unbound"))
+        self.assertEqual(run([l3()], ok, ok + [wf(1, "success", sha, branch="other")]), rewaive("missing"))
+        # mutgate passed on the accepted head: a main-merge or empty push carries the accept, as before
+        self.assertEqual(run([l3()], ok, ok + [wf(1, "success", sha)]), (0, "same"))
+        # the newest run on the accepted head decides
+        self.assertEqual(run([l3()], ok, ok + [wf(1, "success", sha), wf(3, "cancelled", sha)]), rewaive("cancelled"))
+        # an L3 accept at the later head clears the hold: that review read the waiver
+        self.assertEqual(run([l3(), l3(later, at="2")], ok, ok + [failed]), (0, "same"))
+        # a diff that differs still reads changed first
+        self.write("b.md", "y\n")
+        self.commit("more")
+        self.assertEqual(run([l3()], ok, ok + [wf(1, "success", sha)])[1], "changed b.md")
+
     def runs_helper(self, routes, onto, pr=None, drop=()):
         """Run tools/premerge_runs.sh with `gh` stubbed: `routes` maps each API route to the items its --jq selects.
         Returns the exit code, the parsed document (None if stdout is empty) and the routes read, in order."""
@@ -1475,6 +1534,7 @@ class PremergeTest(unittest.TestCase):
         job = lambda run, attempt, name: {"run_id": run, "run_attempt": attempt, "name": name, "conclusion": "failure"}
         routes = {f"{api}?head_sha={sha}&per_page=100": head,
                   f"{api}/11/jobs?per_page=100": [job(11, 2, "scan")],
+                  f"{api}?branch=pr&event=pull_request&per_page=100": head[1:],
                   f"{api}?head_sha={onto}&event=push&per_page=100": push,
                   f"{api}/21/attempts/1/jobs?per_page=100": [job(21, 1, "scan")],
                   f"{api}?head_sha={onto}&event=schedule&per_page=100": sched}
@@ -1482,7 +1542,8 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(calls, list(routes))  # only failed runs' jobs are read, each by its own route
         self.assertEqual(doc, bundle([{**head[0], "jobs": [job(11, 2, "scan")]}, {**head[1], "jobs": []}],
-                                     [{**push[0], "jobs": [job(21, 1, "scan")]}, {**sched[0], "jobs": []}]))
+                                     [{**push[0], "jobs": [job(21, 1, "scan")]}, {**sched[0], "jobs": []}],
+                                     on_branch=[{**head[1], "jobs": []}]))
         # The gate's reader passes the head's vulncheck failure only because the same job failed in main's newest run on
         # the merge base (the push, id 21 over the schedule's 19).
         self.assertEqual(premerge.checks_held(self.r, doc, "HEAD", "main"), [])
@@ -1497,6 +1558,7 @@ class PremergeTest(unittest.TestCase):
         routes = {f"{api}?head_sha={sha}&per_page=100": [self.wf(11, "vulncheck", "failure", sha), self.wf(12, "formal", "failure", sha)],
                   f"{api}/11/jobs?per_page=100": [],
                   f"{api}/12/jobs?per_page=100": [],
+                  f"{api}?branch=pr&event=pull_request&per_page=100": [],
                   f"{api}?head_sha={onto}&event=push&per_page=100": [],
                   f"{api}?head_sha={onto}&event=schedule&per_page=100": []}
         self.assertEqual(self.runs_helper(routes, onto)[0], 0)
@@ -1506,7 +1568,8 @@ class PremergeTest(unittest.TestCase):
         for bad in ("", onto[:39], onto.upper(), onto + "&event=push", "HEAD"):
             with self.subTest(onto=bad):
                 self.assertEqual(self.runs_helper(routes, bad), (2, None, []))
-        for pr in ({"number": 7}, {"number": 7, "head": {"sha": "HEAD"}}, {"number": 7, "head": {"sha": sha + "\nx"}}):
+        for pr in ({"number": 7}, {"number": 7, "head": {"sha": "HEAD"}}, {"number": 7, "head": {"sha": sha + "\nx"}},
+                   {"number": 7, "head": {"sha": sha}}, {"number": 7, "head": {"sha": sha, "ref": ""}}):
             with self.subTest(pr=pr):
                 self.assertEqual(self.runs_helper(routes, onto, pr=pr), (1, None, []))  # nothing read
 

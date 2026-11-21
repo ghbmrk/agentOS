@@ -1,6 +1,7 @@
 #!/bin/bash
 # Prints the `--runs` document `tools/premerge.py --check` reads (PREMERGE-runs-local, #5386): the PR head's
-# Actions runs and the merge base's main push and scheduled runs, each failed run with its jobs (the head's latest
+# Actions runs, the PR branch's pull_request runs on any head (`branch`, for mutgate on the accepted head, #6379)
+# and the merge base's main push and scheduled runs, each failed run with its jobs (the head's latest
 # attempt, the base's first), plus the PR's number, head repository and branch, which bind each head run to this PR
 # (another PR can share the commit). premerge.yml runs main's copy of this script, so a local check reads exactly
 # what the gate reads. Needs gh (signed in) and jq.
@@ -24,6 +25,7 @@ repo=$1 pr=$2 onto=$3
 [[ "$onto" =~ ^[0-9a-f]{40}$ ]] || { echo "not a merge-base sha: $onto" >&2; exit 2; }
 head=$(jq -r .head.sha "$pr") || exit 1
 [[ "$head" =~ ^[0-9a-f]{40}$ ]] || { echo "pr.json names no head sha" >&2; exit 1; }
+branch=$(jq -er '.head.ref | strings | select(length > 0) | @uri' "$pr") || { echo "pr.json names no head branch" >&2; exit 1; }
 tmp=$(mktemp -d) || exit 1
 trap 'rm -rf "$tmp"' EXIT
 
@@ -34,10 +36,11 @@ runs() { # $1: the runs query, $2: the jobs route under a failed run
   done | jq -s --slurpfile r "$tmp/r.json" '. as $j | $r[0] | map(.id as $id | . + {jobs: [$j[] | select(.run_id == $id)]})'
 }
 runs "head_sha=$head" jobs > "$tmp/head.json" || exit 1
+runs "branch=$branch&event=pull_request" jobs > "$tmp/branch.json" || exit 1
 runs "head_sha=$onto&event=push" attempts/1/jobs > "$tmp/push.json" || exit 1
 runs "head_sha=$onto&event=schedule" attempts/1/jobs > "$tmp/schedule.json" || exit 1
-jq -n --slurpfile h "$tmp/head.json" --slurpfile p "$tmp/push.json" --slurpfile s "$tmp/schedule.json" \
+jq -n --slurpfile h "$tmp/head.json" --slurpfile b "$tmp/branch.json" --slurpfile p "$tmp/push.json" --slurpfile s "$tmp/schedule.json" \
   --slurpfile pr "$pr" --arg repo "$repo" \
   '{repo: $repo, pr: {number: $pr[0].number, repo: $pr[0].head.repo.full_name, branch: $pr[0].head.ref},
-    head: $h[0], base: ($p[0] + $s[0])}' > "$tmp/runs.json" || exit 1
+    head: $h[0], branch: $b[0], base: ($p[0] + $s[0])}' > "$tmp/runs.json" || exit 1
 cat "$tmp/runs.json"

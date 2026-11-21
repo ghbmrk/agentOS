@@ -1943,7 +1943,8 @@ class PremergeRunTest(unittest.TestCase):
         calls, a, b = [], self.SHA, "b" * 40
         self.assertEqual(self.run_gate("same", calls=calls), (0, ["success"]))
         q = "api --paginate repos/o/r/actions/runs?%s&per_page=100 --jq .workflow_runs[]"
-        self.assertEqual(calls[1:], [q % f"head_sha={a}", q % f"head_sha={b}&event=push", q % f"head_sha={b}&event=schedule"])
+        self.assertEqual(calls[1:], [q % f"head_sha={a}", q % "branch=feature&event=pull_request", q % f"head_sha={b}&event=push",
+                                     q % f"head_sha={b}&event=schedule"])  # the branch's runs: mutgate on the accepted head (#6379)
         self.assertRegex(calls[0], r"^-I tools/premerge\.py --check \S+/comments\.json 7 --runs \S+/runs\.json --base refs/remotes/pr/base " + a + "$")
 
     @staticmethod

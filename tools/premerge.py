@@ -51,6 +51,9 @@ an armed PR past a cancelled one: `--runs` is the head's and merge base's Action
 workflow's newest pull_request run on the head must pass, else it prints `needs-check <workflow>:<state> ...` and
 exits 1. Without `--runs` it prints `needs-runs` and exits 1, so no caller reads `same` with the checks unread;
 `tools/premerge_runs.sh` builds the runs file, for premerge.yml and for a local check alike (#5386).
+A head other than the L3 accept's reads `same` only when mutgate also passed on the accepted head (the runs
+file's `branch` list), else it prints `needs-l3 mutgate:<state> ...` and exits 1 (#6379): an accept may precede
+mutgate, and a waiver pushed later in an empty commit or main-merge would pass mutgate with no review reading it.
 
 `--bot` is the gate form for the generated-file bot PRs, which carry no verdict (PREMERGE-wire, #1860): it
 prints `bot` (exit 0) only when `head-ref` is one of the BOT branches, base..head changes nothing but that
@@ -743,7 +746,7 @@ def _base_failed(runs, path, onto, repo):
     return {n for n, c in _jobs(r, 1) or [] if c == "failure"}
 
 
-def checks_held(cwd, runs, head="HEAD", base="origin/main"):
+def checks_held(cwd, runs, head="HEAD", base="origin/main", only=None, key="head"):
     """`<workflow>:<state>` for each HELD workflow whose newest pull_request run on `head` did not pass.
 
     `runs` is {"repo": ..., "pr": {"number", "repo", "branch"}, "head": [...], "base": [...]}: this repository, the PR's
@@ -751,18 +754,21 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
     failed one with a `jobs` list (the head's latest attempt, the base's first). Only this PR's runs count (`_bind`). A run passes on `success` or
     `skipped`, or on `failure` when every failed job is one HELD exempts or one that failed on the merge base too.
     A queued, running, cancelled or timed-out run holds, and so does a missing one the workflow's PR trigger owes, as
-    `unbound` when only this branch's runs that name no PR or another PR are on the head."""
+    `unbound` when only this branch's runs that name no PR or another PR are on the head. `only` limits the workflows
+    read and `key` names the run list (`branch` for `mutgate_unreviewed`)."""
     pr = runs.get("pr") if isinstance(runs, dict) else None
     if not (isinstance(pr, dict) and isinstance(pr.get("number"), int) and all(isinstance(pr.get(k), str) for k in ("repo", "branch"))
-            and isinstance(runs.get("repo"), str) and all(isinstance(runs.get(k), list) for k in ("head", "base"))):
+            and isinstance(runs.get("repo"), str) and all(isinstance(runs.get(k), list) for k in ("head", "base", key))):
         raise ValueError("runs must be {\"repo\": str, \"pr\": {\"number\": int, \"repo\": str, \"branch\": str}, \"head\": [...], \"base\": [...]}")
     sha = _git(cwd, "rev-parse", f"{head}^{{commit}}").decode().strip()
     onto = _git(cwd, "merge-base", base, head).decode().strip()
     files = [f for f in _git(cwd, *DIFF, onto, sha).decode(errors="surrogateescape").split("\0") if f]
     held = []
     for name, exempt in HELD.items():
+        if only is not None and name not in only:
+            continue
         path = f".github/workflows/{name}.yml"
-        bound = [(_bind(r, pr, runs["repo"]), r) for r in runs["head"] if r.get("path") == path
+        bound = [(_bind(r, pr, runs["repo"]), r) for r in runs[key] if r.get("path") == path
                  and r.get("head_sha") == sha and r.get("event") in ("pull_request", "pull_request_target")]
         mine = [r for b, r in bound if b == "ours"]
         if not mine:
@@ -781,6 +787,26 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
                 continue
         held.append(f"{name}:{state or 'unknown'}")
     return held
+
+
+# PROC-review-no-mutgate-wait (#6379): an L3 accept may come before mutgate. mutgate passes a survivor on a
+# `Mutant-equivalent:`/`Mutant-uncovered:` line in the body of the push it runs on, and a push that changes no diff
+# (an empty commit, a main-merge) reads `same`, so a waiver pushed after the accept would merge with no reviewer
+# reading it. So a head other than the accepted one reads `same` only when mutgate passed on the accepted head too:
+# its waivers, if any, were in front of that review. Otherwise the L3 accept is owed again at this head.
+REWAIVE = "needs-l3 mutgate:{} at accepted head {}: a waiver may pass mutgate after review, accept this head"
+
+
+def mutgate_unreviewed(cwd, runs, accepted, head="HEAD", base="origin/main"):
+    """`[<state>]` when `head` is not the accepted commit and mutgate did not pass on the accepted one (or the runs
+    document has no `branch` list to tell), else `[]`. Reads the PR branch's runs (`branch`, premerge_runs.sh)."""
+    sha = _git(cwd, "rev-parse", f"{head}^{{commit}}").decode().strip()
+    seen = _git(cwd, "rev-parse", f"{accepted}^{{commit}}").decode().strip()
+    if sha == seen:
+        return []
+    if not isinstance(runs.get("branch"), list):
+        return ["unread"]
+    return [h.split(":", 1)[1] for h in checks_held(cwd, runs, seen, base, only=("mutgate",), key="branch")]
 
 
 def main(argv):
@@ -834,6 +860,10 @@ def main(argv):
         held = checks_held(".", runs, head, base)
         if held:
             print("needs-check " + " ".join(held))
+            return 1
+        held = mutgate_unreviewed(".", runs, v[1], head, base)
+        if held:
+            print(REWAIVE.format(held[0], v[1][:7]))
             return 1
         print("same")
         return 0
