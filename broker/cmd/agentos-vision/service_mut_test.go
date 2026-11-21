@@ -14,6 +14,8 @@ import (
 	"io"
 	"math"
 	"net"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -310,7 +312,7 @@ func TestReplyLineZeroedAfterWrite(t *testing.T) {
 	rep := vision.Reply{Template: f32s(0.25, -0.5, 1, 2)}
 	b, _ := json.Marshal(rep)
 	if cap(b) == len(b) {
-		t.Skip("this reply's line has no room for its newline, so the conn's slice is a copy")
+		t.Fatal("this reply's line has no room for its newline, so the conn's slice is a copy and the line 245 wipe goes unchecked")
 	}
 	c := &scriptConn{in: bytes.NewReader(nil)}
 	if !s.write(c, rep) {
@@ -324,6 +326,27 @@ func TestReplyLineZeroedAfterWrite(t *testing.T) {
 	}
 	if !zero(c.sent[0][:len(b)]) {
 		t.Fatalf("the sent line was left in memory: %q", c.sent[0])
+	}
+}
+
+// stuckEnv makes the test binary, re-run by TestDefaultStuckExits, call
+// the default stuck and report back through its exit status.
+const stuckEnv = "AGENTOS_VISION_DEFAULT_STUCK"
+
+// A runtime call wedged past CallTimeout still holds its payload, so the
+// default stuck ends the process with status 1 rather than serve on
+// (line 159). The child runs it; the parent checks the exit.
+func TestDefaultStuckExits(t *testing.T) {
+	if os.Getenv(stuckEnv) == "1" {
+		newService(Config{}, &stubRT{}, nil).stuck()
+		os.Exit(0) // reached only when stuck returns
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDefaultStuckExits$", "-test.count=1")
+	cmd.Env = append(os.Environ(), stuckEnv+"=1")
+	err := cmd.Run()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 1 {
+		t.Fatalf("default stuck: %v, want exit status 1", err)
 	}
 }
 
