@@ -154,8 +154,8 @@ LANE_GATE_LINES = [
     "  pull_request_target:",
     "    types: [opened, synchronize, reopened, edited]",
     "concurrency:",
-    "  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}",
-    "  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}",
+    "  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && 'main' || format('run-{0}', github.run_id) }}",
+    "  cancel-in-progress: ${{ (startsWith(github.event_name, 'pull_request') || github.event_name == 'push' && github.ref == 'refs/heads/main') && github.run_attempt == 1 }}",
     "permissions:",
     "  contents: read",
     "jobs:",
@@ -725,8 +725,9 @@ def cache_key_problems(text):
 SUPERSEDE_LINES = [
     "concurrency:",
     "  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && "
-    "format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}",
-    "  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}",
+    "format('pr-{0}', github.event.pull_request.number) || "
+    "github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && 'main' || format('run-{0}', github.run_id) }}",
+    "  cancel-in-progress: ${{ (startsWith(github.event_name, 'pull_request') || github.event_name == 'push' && github.ref == 'refs/heads/main') && github.run_attempt == 1 }}",
 ]
 SUPERSEDE = ["trusted-base.yml", "lane-gate.yml", "word-budget.yml", "formal.yml", "keycheck.yml",
              "ci.yml", "assurance.yml", "vulncheck.yml", "image.yml", "infer-real.yml", "vision-real.yml",
@@ -940,6 +941,13 @@ class WorkflowTest(unittest.TestCase):
             "rerun cancels": (cancel, "  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') }}"),
             "always cancels": (cancel, "  cancel-in-progress: true"),
             "push group by sha": (group, group.replace("format('run-{0}', github.run_id)", "github.sha")),
+            # CI-main-supersede: a main rerun back in the main group could cancel the tip's run, a main
+            # group without the ref test could take another branch's push, and one shared by every
+            # event could cancel a schedule or dispatch run.
+            "main rerun in the main group": (group, group.replace("'refs/heads/main' && github.run_attempt == 1 && ", "'refs/heads/main' && ")),
+            "main group any branch": (group, group.replace("github.event_name == 'push' && github.ref == 'refs/heads/main' && ", "github.event_name == 'push' && ")),
+            "main never cancels": (cancel, "  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}"),
+            "every event cancels": (cancel, "  cancel-in-progress: ${{ github.run_attempt == 1 }}"),
             # #5348: a rerun back in the PR's group could replace the current head's pending run.
             "rerun in the PR group": (group, group.replace("github.run_attempt == 1 && ", "")),
             "one group": (group, "  group: ${{ github.workflow }}"),

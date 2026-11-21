@@ -280,8 +280,9 @@ CI_PREAMBLE_LINES = [
     '  contents: read',
     'concurrency:',
     "  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && "
-    "format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}",
-    "  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}",
+    "format('pr-{0}', github.event.pull_request.number) || "
+    "github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && 'main' || format('run-{0}', github.run_id) }}",
+    "  cancel-in-progress: ${{ (startsWith(github.event_name, 'pull_request') || github.event_name == 'push' && github.ref == 'refs/heads/main') && github.run_attempt == 1 }}",
     'env:',
     '  GOTOOLCHAIN: local',
     '  GOWORK: "off"',
