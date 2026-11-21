@@ -151,10 +151,10 @@ jobs:
         # The uid boundary end to end, as root as tools/unit_tests.py runs; under it, as a module's
         # user, that test skips. The variable makes it fail rather than skip here.
         run: sudo -E env "PATH=$PATH" AGENTOS_REQUIRE_UID_BOUNDARY=1 python -m unittest tests.test_unit_tests -v
-      # MUT-memcap-cgroup (#6392): the unit tests run mutgate as a local, advisory run (no cgroup); its
-      # containment runs here as mutgate.yml runs it, in a delegated cgroup v2 directory, with no skip.
       - name: mutgate's cgroup containment (#6392)
         if: steps.scope.outputs.records != 'true'
+        # MUT-memcap-cgroup: the unit tests run mutgate as a local, advisory run (no cgroup); its
+        # containment runs here as mutgate.yml runs it, in a delegated cgroup v2 directory, with no skip.
         working-directory: tests
         run: |
           sudo mkdir /sys/fs/cgroup/mutgate /sys/fs/cgroup/mutgate/main
