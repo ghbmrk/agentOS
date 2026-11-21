@@ -30,6 +30,7 @@ func fixturePolicy() policy.Document {
 		Version:      7,
 		Destinations: []string{"core.example"},
 		Caps:         map[string]uint64{"core.example": 1 << 40},
+		Basis:        map[string]string{"core.example": policy.BasisImage},
 		EdgeCap:      1 << 40,
 		Devices: []policy.Device{
 			{ID: "tv", Network: policy.NetDevices, WiFi: "vlan101", Allow: []string{"tv.example"}, VendorCloud: true, Everyday: true, Control: []policy.Port{{Proto: policy.ProtoTCP, Num: 80}}},

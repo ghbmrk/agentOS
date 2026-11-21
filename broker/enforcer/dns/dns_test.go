@@ -44,6 +44,7 @@ func fixturePolicy() policy.Document {
 		Version:      7,
 		Destinations: []string{"core.example", "updates.core.example"},
 		Caps:         map[string]uint64{"core.example": 1 << 40, "updates.core.example": 1 << 40},
+		Basis:        map[string]string{"core.example": policy.BasisImage, "updates.core.example": policy.BasisImage},
 		Devices: []policy.Device{
 			{ID: "tv", Network: policy.NetDevices, WiFi: "vlan101", Allow: []string{"tv.example", "cdn.example"}, VendorCloud: true, Everyday: true},
 			{ID: "speaker", Network: policy.NetDevices, WiFi: "vlan102", Allow: []string{"speaker.example"}, Everyday: true},
@@ -337,6 +338,7 @@ func TestGenerateRefuses(t *testing.T) {
 		return func(d *policy.Document, _ *Setup) {
 			d.Destinations = []string{n}
 			d.Caps = map[string]uint64{n: 1 << 40}
+			d.Basis = map[string]string{n: policy.BasisImage}
 		}
 	}
 	long := strings.Repeat("a", 64) + ".example"
@@ -404,6 +406,7 @@ func TestGenerateRefuses(t *testing.T) {
 	d := fixturePolicy()
 	d.Destinations = append(d.Destinations, "Zed.example", "Abc.example")
 	d.Caps["Zed.example"], d.Caps["Abc.example"] = 1<<40, 1<<40
+	d.Basis["Zed.example"], d.Basis["Abc.example"] = policy.BasisImage, policy.BasisImage
 	var got Refused
 	if _, err := Generate(d, l, fixtureSetup()); !errors.As(err, &got) || !slices.Equal(got, Refused{BadName{"Abc.example"}, BadName{"Zed.example"}}) || !errors.Is(err, ErrConfig) {
 		t.Errorf("two bad names: %#v, %v", got, err)
@@ -412,6 +415,7 @@ func TestGenerateRefuses(t *testing.T) {
 	d = fixturePolicy()
 	d.Destinations = append(d.Destinations, "Zed.example")
 	d.Caps["Zed.example"] = 1 << 40
+	d.Basis["Zed.example"] = policy.BasisImage
 	d.Devices[0].Allow = append(d.Devices[0].Allow, "Zed.example")
 	if _, err := Generate(d, l, fixtureSetup()); !errors.As(err, &got) || !slices.Equal(got, Refused{BadName{"Zed.example"}}) {
 		t.Errorf("a bad name in two lists: %#v, %v", got, err)

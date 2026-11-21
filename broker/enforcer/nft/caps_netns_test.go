@@ -160,6 +160,10 @@ func capDoc(caps map[string]uint64, edge uint64) policy.Document {
 		}
 	})
 	d.Caps, d.EdgeCap = caps, edge
+	d.Basis = map[string]string{}
+	for n := range caps {
+		d.Basis[n] = policy.BasisImage
+	}
 	return d
 }
 

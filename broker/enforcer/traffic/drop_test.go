@@ -32,6 +32,7 @@ func capPolicy() policy.Document {
 	d := doc()
 	d.Destinations = []string{"a.example", "b.example"}
 	d.Caps = map[string]uint64{"a.example": 100, "b.example": 100}
+	d.Basis = map[string]string{"a.example": policy.BasisImage, "b.example": policy.BasisDeclared}
 	d.EdgeCap = 50
 	return d
 }

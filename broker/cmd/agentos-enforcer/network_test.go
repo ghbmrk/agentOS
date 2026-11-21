@@ -144,6 +144,7 @@ func capped(t *testing.T) (*box, policy.Document, *authenticator) {
 	next := x.current()
 	next.Destinations = []string{"updates.example"}
 	next.Caps = map[string]uint64{"updates.example": 1000}
+	next.Basis = map[string]string{"updates.example": policy.BasisImage}
 	next.EdgeCap = 5000
 	if w := x.b.approve(a, next); w.Code != http.StatusOK {
 		t.Fatalf("approve: %d %s", w.Code, w.Body)

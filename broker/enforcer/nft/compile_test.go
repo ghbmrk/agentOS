@@ -60,6 +60,7 @@ func TestNoPolicyTextInRuleset(t *testing.T) {
 	d.Pairs = nil
 	d.Destinations = []string{`x"}accept`}
 	d.Caps = map[string]uint64{`x"}accept`: 5}
+	d.Basis = map[string]string{`x"}accept`: policy.BasisImage}
 	d.Devices[0].Allow = []string{`y{accept}`}
 	got, err := Compile(d, fixtureLayout())
 	if err != nil {

@@ -19,6 +19,7 @@ func twoCaps() policy.Document {
 	d := fixturePolicy()
 	d.Destinations = []string{"a.example", "b.example", "c.example"}
 	d.Caps = map[string]uint64{"a.example": 100, "b.example": 200, "c.example": 300}
+	d.Basis = map[string]string{"a.example": policy.BasisImage, "b.example": policy.BasisDeclared, "c.example": policy.BasisBackup}
 	return d
 }
 
@@ -161,6 +162,7 @@ func TestDropsCarriesTheGap(t *testing.T) {
 	}
 	d.Destinations = append(d.Destinations, "k.example")
 	d.Caps["k.example"] = 10
+	d.Basis["k.example"] = policy.BasisDeclared
 	read := listing(map[string]uint64{"a": 50, "b": 10, "c": 5, "r": 3, "k": 4, "edge": 15})
 	running := listing(map[string]uint64{"a": 70, "b": 30, "c": 10, "r": 10, "k": 9, "edge": 20})
 	_, qab := groupNames(1, ab)
