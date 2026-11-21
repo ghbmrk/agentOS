@@ -43,8 +43,8 @@ Root's user manager (user@0.service, which a root login starts) runs its units a
 system manager's records are taken the tree's systemd --user is started in the same container as uid 0
 (offline_systemd.UserManager), and its units, from the directories its own UnitPath names, are printed the
 same way, each marked user (#6002). So are the system and user managers' configuration files of ours
-(manager_confs) and the env files an EnvironmentFile= line of ours names, as the tree holds them at boot
-(env_files).
+(manager_confs), the env files an EnvironmentFile= line of ours names, as the tree holds them at boot
+(env_files), and each env file of ours a package's EnvironmentFile= line names (env_files' second map, #6312).
 
 Usage (as root): unit_rules.py OUT VERSION prints build OUT's records as JSON; --control OUT VERSION
 prints them with CONTROL planted, which the lint must refuse; --fixture ROOT PACKAGED prints a fixture
@@ -981,7 +981,7 @@ def lint(root, usr, cmdline, packaged, plant_files=None, own_usr=False):
             recs["held"] = {"names": sorted(set(recs["held"]["names"]) | uheld),
                             "prefixes": sorted(set(recs["held"]["prefixes"]) | set(upre))}
             recs["managers"] = manager_confs(view, pkg)
-            recs["env"] = env_files(view, recs["units"])
+            recs["env"], recs["pkg_env"] = env_files(view, recs["units"], pkg)
             return recs
         finally:
             m.stop()
@@ -1018,26 +1018,32 @@ def manager_confs(view, packaged):
 ENV_LINE = re.compile(r"[ \t]*EnvironmentFile[ \t]*=[ \t]*(.*?)[ \t]*\Z")
 
 
-def env_files(view, units):
-    """{path: text} for each env file an EnvironmentFile= line of a file of ours in UNITS names, as the
-    tree holds it at boot (BootView: none under a boot mount), when it is a regular file there (#6002). A
-    line this reads differently from the lint (a continued one) names a path printed under no key, and the
-    lint refuses the unit for an env file it cannot read: so a miss holds more, never less."""
-    boot, out = BootView(view), {}
+def env_files(view, units, packaged=lambda p: True):
+    """Two {path: text} maps, by the path an EnvironmentFile= line gives, of the env files the tree holds
+    at boot (BootView: none under a boot mount) as a regular file. The first: each a line of a file of ours
+    in UNITS names (#6002). A line this reads differently from the lint (a continued one) names a path
+    printed under no key, and the lint refuses the unit for an env file it cannot read: so a miss holds
+    more, never less. The second (#6312): each a package's line names that is ours, reached through a link
+    other than a merged-/usr top link (merged()) or not byte-identical to a package's (PACKAGED), as a
+    build step's edit to an /etc/default conffile is; one the first holds is not repeated."""
+    boot, out, pkg = BootView(view), {}, {}
     for u in units:
         for f in u["files"]:
-            if not f["ours"]:
-                continue
             for line in f["text"].split("\n"):
                 m = ENV_LINE.match(line)
                 p = m and m.group(1)
                 p = p[1:] if p and p.startswith("-") else p
-                if not p or not p.startswith("/") or p in out:
+                if not p or not p.startswith("/") or p in out or (p in pkg and not f["ours"]):
                     continue
-                final, _ = boot.resolve(p)
-                if boot.kind(final) == 0o100000:
+                final, links = boot.resolve(p)
+                if boot.kind(final) != 0o100000:
+                    continue
+                if f["ours"]:
                     out[p] = boot.text(final)
-    return out
+                    pkg.pop(p, None)
+                elif not all(merged(view, l) for l in links) or not packaged(final):
+                    pkg[p] = boot.text(final)
+    return out, pkg
 
 
 def merged(view, link):

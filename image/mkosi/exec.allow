@@ -4,7 +4,9 @@
 # usr/lib and lib; and (#2622) every polkit rules.d and actions file, everything under etc/dbus-1, and the
 # D-Bus system.conf, system.d and system-services files; and (#4641) every PAM file in etc/pam.d and
 # usr/lib/pam.d, and etc/pam.conf; and (#5818) every file systemd merges into
-# dbus.service and dbus.socket, drop-ins included, so dbus-daemon's ExecStart is the reviewed one. One per line: the file's path in the image tree, a tab, and "sha256:" with the
+# dbus.service and dbus.socket, drop-ins included, so dbus-daemon's ExecStart is the reviewed one; and (#6312)
+# root's user manager's user-generators and user-environment-generators and every environment.d file,
+# root/.config/environment.d's too. One per line: the file's path in the image tree, a tab, and "sha256:" with the
 # SHA-256 of what the box reads, or "mask" for an empty file or a link to /dev/null. Every file is
 # listed, not only the one that wins its name. mkosi.finalize fails the build on any file not here
 # with that value, and on anything under the same directories in /run.

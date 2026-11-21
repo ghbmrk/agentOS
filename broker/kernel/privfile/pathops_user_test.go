@@ -139,15 +139,51 @@ func TestBuiltEnvFiles(t *testing.T) {
 	})
 }
 
+// TestBuiltPackageEnvFiles: a package's unit that loads an env file of
+// ours (a conffile a build step changed) is held to what the file sets, as
+// a unit of ours is; the package's own copy, and a package's unit's
+// lines, are not held (#6312).
+// REQ: KRN-2
+func TestBuiltPackageEnvFiles(t *testing.T) {
+	const pkgUnit = "[Service]\nExecStart=/usr/bin/pkgx\nEnvironmentFile=-/etc/default/pkgx\n"
+	ourEtc := func(p string) bool { return strings.HasPrefix(p, "/etc/") }
+	for name, dir := range map[string]string{"a system unit": "/usr/lib/systemd/system/", "a user unit": "/usr/lib/systemd/user/"} {
+		t.Run("refuses an env file of ours that a package's "+name+" loads", func(t *testing.T) {
+			files := map[string]string{dir + "pkg-x.service": pkgUnit, "/etc/default/pkgx": "LD_PRELOAD=/var/lib/agentos-x/x.so\n"}
+			want := `a package's unit loads /etc/default/pkgx, a file of ours: /etc/default/pkgx:1: variable "LD_PRELOAD"`
+			if err := underSystemd(t, files, ourEtc); err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("got %v, want a refusal with %q", err, want)
+			}
+		})
+		t.Run("passes the env file a package's "+name+" loads as the package ships it", func(t *testing.T) {
+			files := map[string]string{dir + "pkg-x.service": pkgUnit, "/etc/default/pkgx": "LD_PRELOAD=/usr/lib/pkgx/x.so\n"}
+			if err := underSystemd(t, files, func(string) bool { return false }); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	t.Run("holds each printed record", func(t *testing.T) {
+		recs := builtRecs(t, "agentos-e.service", "", "[Service]\nExecStart=/usr/bin/true\n")
+		recs.PkgEnv = map[string]string{"/etc/default/pkgx": "BASH_ENV=/tmp/x\n"}
+		if err := builtUnits(recs, t.TempDir()); err == nil || !strings.Contains(err.Error(), `/etc/default/pkgx:1: variable "BASH_ENV"`) {
+			t.Fatalf("got %v, want the package's env file of ours refused", err)
+		}
+		recs.PkgEnv["/etc/default/pkgx"] = "GOMEMLIMIT=1\n"
+		if err := builtUnits(recs, t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
 // TestBuiltRecordsFields: the records' user, managers and env fields
 // decode as unit_rules.py prints them.
 func TestBuiltRecordsFields(t *testing.T) {
 	var recs unitRecords
-	b := `{"units": [{"unit": "x.service", "user": true, "files": []}], "managers": [{"path": "/etc/systemd/user.conf", "text": "[Manager]\nDefaultEnvironment=BASH_ENV=/x\n"}], "env": {"/etc/x.env": "A=1\n"}}`
+	b := `{"units": [{"unit": "x.service", "user": true, "files": []}], "managers": [{"path": "/etc/systemd/user.conf", "text": "[Manager]\nDefaultEnvironment=BASH_ENV=/x\n"}], "env": {"/etc/x.env": "A=1\n"}, "pkg_env": {"/etc/default/x": "B=1\n"}}`
 	if err := json.Unmarshal([]byte(b), &recs); err != nil {
 		t.Fatal(err)
 	}
-	if !recs.Units[0].User || len(recs.Managers) != 1 || recs.Env["/etc/x.env"] != "A=1\n" {
+	if !recs.Units[0].User || len(recs.Managers) != 1 || recs.Env["/etc/x.env"] != "A=1\n" || recs.PkgEnv["/etc/default/x"] != "B=1\n" {
 		t.Fatalf("decoded %+v", recs)
 	}
 	if err := builtUnits(recs, t.TempDir()); err == nil || !strings.Contains(err.Error(), `etc/systemd/user.conf: DefaultEnvironment=BASH_ENV=/x: variable "BASH_ENV"`) {

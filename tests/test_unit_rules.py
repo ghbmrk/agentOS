@@ -1219,7 +1219,7 @@ class LintTest(unittest.TestCase):
                 got = r.lint(d, d, "", lambda view: lambda p: False)
                 self.assertEqual([(u["unit"], u["user"]) for u in got["units"]],
                                  [("a.service", False), ("b.service", True)])
-                self.assertEqual((got["managers"], got["env"]), ([], {}))
+                self.assertEqual((got["managers"], got["env"], got["pkg_env"]), ([], {}, {}))
             finally:
                 offline_systemd.Manager = real
             self.assertEqual(len(stopped), 4)
@@ -1323,8 +1323,26 @@ class EnvFilesTest(unittest.TestCase):
             units = [{"files": [{"ours": True, "text": unit}]},
                      {"files": [{"ours": False, "text": "[Service]\nEnvironmentFile=/etc/p.env\n"}]}]
             got = r.env_files(v, units)
-        # /run is a boot mount (BootView), a package's line is the package's, a relative path is the lint's to refuse
-        self.assertEqual(got, {"/etc/a.env": "A=1\n", "/etc/l.env": "A=1\n"})
+        # /run is a boot mount (BootView), a package's line names a package's file, a relative path is the
+        # lint's to refuse
+        self.assertEqual(got, ({"/etc/a.env": "A=1\n", "/etc/l.env": "A=1\n"}, {}))
+
+    def test_a_file_of_ours_a_package_s_line_names(self):
+        # #6312: a package's unit loads an /etc/default conffile a build step changed, so the file is ours
+        pkg_unit = ("[Service]\nEnvironmentFile=-/etc/default/x\nEnvironmentFile=/usr/lib/x/p.env\n"
+                    "EnvironmentFile=/lib/x/p.env\nEnvironmentFile=/etc/default/l\nEnvironmentFile=/etc/default/both\n"
+                    "EnvironmentFile=/run/x.env\n")
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/etc/default/x": "LD_PRELOAD=/var/lib/agentos-x/x.so\n", "/usr/lib/x/p.env": "P=1\n",
+                         "/lib": "-> usr/lib", "/etc/default/l": "-> /usr/lib/x/p.env", "/etc/default/both": "B=1\n",
+                         "/run/x.env": "R=1\n"})
+            units = [{"files": [{"ours": False, "text": pkg_unit}]},
+                     {"files": [{"ours": True, "text": "[Service]\nEnvironmentFile=/etc/default/both\n"}]}]
+            ours, pkg = r.env_files(v, units, lambda p: p in ("/usr/lib/x/p.env", "/etc/default/both"))
+        # the package's own file, also through the merged /lib, is the package's; a link of ours to it is ours;
+        # one a line of ours names is in the first map alone
+        self.assertEqual(ours, {"/etc/default/both": "B=1\n"})
+        self.assertEqual(pkg, {"/etc/default/x": "LD_PRELOAD=/var/lib/agentos-x/x.so\n", "/etc/default/l": "P=1\n"})
 
 
 class UserManagerTest(unittest.TestCase):
