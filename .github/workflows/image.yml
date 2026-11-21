@@ -15,6 +15,7 @@ on:
     paths:
       - "image/**"
       - ".github/workflows/image.yml"
+      - ".github/actions/disk-budget/**"
       # The guest roots build.sh builds into the image (#5889): import_sweep.allow pins the codex
       # binaries by SHA-256, so a version bump in build-rootfs.sh must meet the sweep in its own PR.
       - "guest/codex/**"
@@ -59,6 +60,7 @@ on:
     paths:
       - "image/**"
       - ".github/workflows/image.yml"
+      - ".github/actions/disk-budget/**"
       # The guest roots build.sh builds into the image (#5889): import_sweep.allow pins the codex
       # binaries by SHA-256, so a version bump in build-rootfs.sh must meet the sweep in its own PR.
       - "guest/codex/**"
@@ -143,21 +145,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      DISK_NEED_GB: "12" # IMG-disk (#6150): measured bound 6.9 GB (5.4 sampled + 1.5 rise, stage b); see "Disk budget" in the build job
+      DISK_NEED_GB: "12" # IMG-disk (#6150): measured bound 6.9 GB (5.4 sampled + 1.5 rise, stage b); see .github/actions/disk-budget
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
-      # IMG-disk (#4317): the runner's disk, not the image, ran out mid-build (systemd-repart ENOSPC).
-      # Preinstalled toolchains the job never uses go first; the guard below then checks the result.
-      - name: Free runner disk
-        run: |
-          gb() { echo $(( $(df -BM --output=avail / | tail -n 1 | tr -dc 0-9) / 1024 )); }
-          echo "::notice title=disk budget::/ had $(gb) GB free before freeing the runner disk"
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/local/share/chromium
-          sudo docker image prune -a -f >/dev/null 2>&1 || true
-          echo "::notice title=disk budget::/ has $(gb) GB free after freeing the runner disk"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
         with:
           go-version-file: broker/go.mod
@@ -168,32 +160,12 @@ jobs:
           sudo apt-get install -y -q --no-install-recommends debian-archive-keyring erofs-utils dosfstools mtools \
             e2fsprogs cpio zstd kmod bubblewrap cryptsetup-bin mmdebstrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      # IMG-disk (#6150): the same guard and sampler as the build job's, over the same file systems
-      # (the stage in RUNNER_TEMP, build.sh's mktemp and GOCACHE in /tmp, HOME=/root), so a staging
-      # change that outgrows the runner fails on its budget, not on ENOSPC.
+      # IMG-disk (#6150): the stage writes the stage in RUNNER_TEMP, build.sh's mktemp and GOCACHE in /tmp,
+      # and HOME=/root, so a staging change that outgrows the runner fails on its budget, not on ENOSPC.
       - name: Disk budget
-        shell: bash
-        run: |
-          vendor=$(cat "${DMI_ID:-/sys/class/dmi/id}/sys_vendor" 2>/dev/null || true)
-          case "$vendor" in
-            "Amazon EC2"*) cloud=AWS;; "Microsoft Corporation"*) cloud=Azure;; *) cloud="unknown-cloud (${vendor:-no DMI vendor})";;
-          esac
-          df -BM --output=target "$RUNNER_TEMP" /var/tmp /tmp /root | tail -n +2 | sort -u > "$RUNNER_TEMP/disk.mounts"
-          fail=0
-          while read -r m; do
-            have=$(( $(df -BM --output=avail "$m" | tail -n 1 | tr -dc 0-9) / 1024 ))
-            echo "::notice title=disk budget::$cloud runner: image build needs $DISK_NEED_GB GB free on $m, runner has $have GB"
-            # "Free runner disk" frees space on / only; a short mount of its own needs the build's writes moved.
-            if [ "$m" = / ]; then fix='free more in "Free runner disk"'
-            else fix="$m is its own file system, which \"Free runner disk\" does not free: move what every step of this job writes under $m to a directory on /, and put that directory in place of $m in this step's df line"; fi
-            [ "$have" -ge "$DISK_NEED_GB" ] || { echo "::error title=disk budget::$cloud runner: image build needs $DISK_NEED_GB GB free on $m, runner has $have GB; $fix"; fail=1; }
-          done < "$RUNNER_TEMP/disk.mounts"
-          [ "$fail" = 0 ]
-          # Used MB summed over those file systems (awk reads "1234M" as 1234).
-          printf '%s\n' '#!/bin/sh' 'xargs -d "\n" df -BM --output=used < "$RUNNER_TEMP/disk.mounts" | awk "NR > 1 {s += \$1} END {print s}"' > "$RUNNER_TEMP/disk-used"
-          chmod +x "$RUNNER_TEMP/disk-used"
-          "$RUNNER_TEMP/disk-used" > "$RUNNER_TEMP/disk.base"
-          nohup sh -c 'while :; do "$RUNNER_TEMP/disk-used" >> "$RUNNER_TEMP/disk.samples"; sleep 1; done' >/dev/null 2>&1 &
+        uses: ./.github/actions/disk-budget
+        with:
+          phase: start
       - name: Disk adapter on a loop device (UPD-b3 (c1))
         # As root: a GPT on a loop device, the booted slot held by dm-verity (broker/apply/bootab).
         # A skipped test exits 0, so the step also requires the loop test's PASS line.
@@ -235,24 +207,11 @@ jobs:
           compression-level: 1
           retention-days: 1
           if-no-files-found: error
-      # The build job's "Disk budget held", byte for byte: the stage's bound against its own DISK_NEED_GB.
       - name: Disk budget held
         if: always()
-        shell: bash
-        run: |
-          [ -s "$RUNNER_TEMP/disk.base" ] || { echo "disk budget: no baseline, the guard did not pass"; exit 0; }
-          now=$("$RUNNER_TEMP/disk-used")
-          [[ "$now" =~ ^[0-9]+$ ]] || { echo "::error title=disk budget::cannot read the disk use (got '$now'), so the budget is unchecked: df read none of the file systems the \"Disk budget\" notices list, or $RUNNER_TEMP/disk-used is gone; rerun the job, and if it fails again check that those mounts and that script still exist when the job ends"; exit 1; }
-          echo "$now" >> "$RUNNER_TEMP/disk.samples"
-          # Growth of the highest sample over the baseline, and the largest rise between two samples (MB).
-          # An empty sample (one df that failed) is skipped; the final reading above always counts.
-          read -r peak rise < <(awk -v b="$(cat "$RUNNER_TEMP/disk.base")" \
-            'BEGIN {p = b; q = b} /^[0-9]+$/ {if ($1 > p) p = $1; if ($1 - q > r) r = $1 - q; q = $1} END {print p - b, r + 0}' "$RUNNER_TEMP/disk.samples")
-          # In tenths of a GB, each rounded up.
-          p=$(( (peak * 10 + 1023) / 1024 )); r=$(( (rise * 10 + 1023) / 1024 )); t=$(( p + r ))
-          gb() { echo "$(( $1 / 10 )).$(( $1 % 10 ))"; }
-          echo "::notice title=disk budget::the job grew its disk use by at most $(gb $t) GB of its $DISK_NEED_GB GB budget ($(gb $p) GB sampled, plus $(gb $r) GB, the largest rise in one sample interval, for a peak between samples)"
-          [ "$t" -lt $(( DISK_NEED_GB * 10 )) ] || { echo "::error title=disk budget::image build may have used up to $(gb $t) GB, at or over its $DISK_NEED_GB GB budget; raise DISK_NEED_GB in .github/workflows/image.yml (the $GITHUB_JOB job's env)"; exit 1; }
+        uses: ./.github/actions/disk-budget
+        with:
+          phase: held
   # The pinned mkosi on the committed config (IMG-mkosi-run-bound, #4690, D-276): mkosi is installed before
   # anything from the repository runs, and the one line "Build image" runs reads the config directory from
   # this checkout and the extra tree from the stage job's upload; this job never runs image/build.sh.
@@ -265,21 +224,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      DISK_NEED_GB: "24" # IMG-disk (#4317): measured peak growth 15 GB (build a, boots included); see "Disk budget"
+      DISK_NEED_GB: "24" # IMG-disk (#4317): measured peak growth 15 GB (build a, boots included); see .github/actions/disk-budget
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
-      # IMG-disk (#4317): the runner's disk, not the image, ran out mid-build (systemd-repart ENOSPC).
-      # Preinstalled toolchains the job never uses go first; the guard below then checks the result.
-      - name: Free runner disk
-        run: |
-          gb() { echo $(( $(df -BM --output=avail / | tail -n 1 | tr -dc 0-9) / 1024 )); }
-          echo "::notice title=disk budget::/ had $(gb) GB free before freeing the runner disk"
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/local/share/chromium
-          sudo docker image prune -a -f >/dev/null 2>&1 || true
-          echo "::notice title=disk budget::/ has $(gb) GB free after freeing the runner disk"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
         with:
           go-version-file: broker/go.mod
@@ -294,35 +243,12 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo git clone -q https://github.com/systemd/mkosi /opt/mkosi
           sudo git -C /opt/mkosi -c advice.detachedHead=false checkout -q 26673f65e17ae099bb0cf65928fe70c93b8a6a37  # v24.3
-      # IMG-disk (#4317, #4366): each file system the job writes to (output and boot copies in
-      # RUNNER_TEMP, mkosi's workspace in /var/tmp, GOCACHE in /tmp, mkosi's cache under /root) must
-      # have DISK_NEED_GB free, or the job stops here with both numbers and the runner's cloud (from
-      # its firmware vendor: the runner pool mixes AWS and Azure machines). A sampler then records the
-      # use of those file systems every second, and "Disk budget held" fails a job whose growth went
-      # over it, so a change that grows the build turns its own PR red instead of a later one.
+      # IMG-disk (#4317, #4366): the build writes its output and boot copies in RUNNER_TEMP, mkosi's
+      # workspace in /var/tmp, GOCACHE in /tmp and mkosi's cache under /root.
       - name: Disk budget
-        shell: bash
-        run: |
-          vendor=$(cat "${DMI_ID:-/sys/class/dmi/id}/sys_vendor" 2>/dev/null || true)
-          case "$vendor" in
-            "Amazon EC2"*) cloud=AWS;; "Microsoft Corporation"*) cloud=Azure;; *) cloud="unknown-cloud (${vendor:-no DMI vendor})";;
-          esac
-          df -BM --output=target "$RUNNER_TEMP" /var/tmp /tmp /root | tail -n +2 | sort -u > "$RUNNER_TEMP/disk.mounts"
-          fail=0
-          while read -r m; do
-            have=$(( $(df -BM --output=avail "$m" | tail -n 1 | tr -dc 0-9) / 1024 ))
-            echo "::notice title=disk budget::$cloud runner: image build needs $DISK_NEED_GB GB free on $m, runner has $have GB"
-            # "Free runner disk" frees space on / only; a short mount of its own needs the build's writes moved.
-            if [ "$m" = / ]; then fix='free more in "Free runner disk"'
-            else fix="$m is its own file system, which \"Free runner disk\" does not free: move what every step of this job writes under $m to a directory on /, and put that directory in place of $m in this step's df line"; fi
-            [ "$have" -ge "$DISK_NEED_GB" ] || { echo "::error title=disk budget::$cloud runner: image build needs $DISK_NEED_GB GB free on $m, runner has $have GB; $fix"; fail=1; }
-          done < "$RUNNER_TEMP/disk.mounts"
-          [ "$fail" = 0 ]
-          # Used MB summed over those file systems (awk reads "1234M" as 1234).
-          printf '%s\n' '#!/bin/sh' 'xargs -d "\n" df -BM --output=used < "$RUNNER_TEMP/disk.mounts" | awk "NR > 1 {s += \$1} END {print s}"' > "$RUNNER_TEMP/disk-used"
-          chmod +x "$RUNNER_TEMP/disk-used"
-          "$RUNNER_TEMP/disk-used" > "$RUNNER_TEMP/disk.base"
-          nohup sh -c 'while :; do "$RUNNER_TEMP/disk-used" >> "$RUNNER_TEMP/disk.samples"; sleep 1; done' >/dev/null 2>&1 &
+        uses: ./.github/actions/disk-budget
+        with:
+          phase: start
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           name: stage-${{ matrix.run }}
@@ -428,11 +354,12 @@ jobs:
           v=$(jq -r .version "$RUNNER_TEMP"/out/*.release.json)
           sudo python3 -I image/unlock_graph.py --control "$RUNNER_TEMP/out" "$v"
           sudo python3 -I image/unlock_graph.py "$RUNNER_TEMP/out" "$v"
-      # #5697: which files of this tree and its initrds import glibc's regex or wide scanf functions,
-      # directly or through a library, as notices: the glibc records' reachability (assurance/vulncheck.json)
-      # is read from here, not from another distribution's builds. #5341: and which can fetch an OpenSSL
-      # cipher by name, with their call sites, for the AES-GCM-SIV records. Fails on an unreviewed change.
-      - name: Glibc regex and wide scanf importers, OpenSSL by-name cipher fetches (image/import_sweep.py)
+      # #5697, #6285, #6298: which files of this tree and its initrds reach glibc's regex, glob() or wide
+      # scanf functions (an import, a dlsym lookup or a static copy), directly or through a library, as
+      # notices: the glibc records' reachability (assurance/vulncheck.json) is read from here, not from
+      # another distribution's builds. #5341: and which can fetch an OpenSSL cipher by name, with their
+      # call sites, for the AES-GCM-SIV records. Fails on an unreviewed change.
+      - name: Glibc regex, glob and wide scanf reach, OpenSSL by-name cipher fetches (image/import_sweep.py)
         if: matrix.run == 'a'
         run: |
           v=$(jq -r .version "$RUNNER_TEMP"/out/*.release.json)
@@ -511,29 +438,11 @@ jobs:
             ${{ runner.temp }}/out/qemu-console*.log
           retention-days: 7
           if-no-files-found: warn
-      # A peak that rose and fell between two samples is missed, so the check adds the largest rise
-      # seen in one interval to the highest sample, and the job fails when that bound reaches
-      # DISK_NEED_GB. The largest rise seen is only an estimate of such a peak: the budget's headroom
-      # over the measured peak (24 GB over 15 GB in #4317) is the real cover, for a missed peak and
-      # for the build's growth to come. Each part is rounded up to 0.1 GB and the bound is their sum,
-      # so the printed numbers add up and never understate.
       - name: Disk budget held
         if: always()
-        shell: bash
-        run: |
-          [ -s "$RUNNER_TEMP/disk.base" ] || { echo "disk budget: no baseline, the guard did not pass"; exit 0; }
-          now=$("$RUNNER_TEMP/disk-used")
-          [[ "$now" =~ ^[0-9]+$ ]] || { echo "::error title=disk budget::cannot read the disk use (got '$now'), so the budget is unchecked: df read none of the file systems the \"Disk budget\" notices list, or $RUNNER_TEMP/disk-used is gone; rerun the job, and if it fails again check that those mounts and that script still exist when the job ends"; exit 1; }
-          echo "$now" >> "$RUNNER_TEMP/disk.samples"
-          # Growth of the highest sample over the baseline, and the largest rise between two samples (MB).
-          # An empty sample (one df that failed) is skipped; the final reading above always counts.
-          read -r peak rise < <(awk -v b="$(cat "$RUNNER_TEMP/disk.base")" \
-            'BEGIN {p = b; q = b} /^[0-9]+$/ {if ($1 > p) p = $1; if ($1 - q > r) r = $1 - q; q = $1} END {print p - b, r + 0}' "$RUNNER_TEMP/disk.samples")
-          # In tenths of a GB, each rounded up.
-          p=$(( (peak * 10 + 1023) / 1024 )); r=$(( (rise * 10 + 1023) / 1024 )); t=$(( p + r ))
-          gb() { echo "$(( $1 / 10 )).$(( $1 % 10 ))"; }
-          echo "::notice title=disk budget::the job grew its disk use by at most $(gb $t) GB of its $DISK_NEED_GB GB budget ($(gb $p) GB sampled, plus $(gb $r) GB, the largest rise in one sample interval, for a peak between samples)"
-          [ "$t" -lt $(( DISK_NEED_GB * 10 )) ] || { echo "::error title=disk budget::image build may have used up to $(gb $t) GB, at or over its $DISK_NEED_GB GB budget; raise DISK_NEED_GB in .github/workflows/image.yml (the $GITHUB_JOB job's env)"; exit 1; }
+        uses: ./.github/actions/disk-budget
+        with:
+          phase: held
   reproduce:
     # Two runners, one commit: the release must match: the /usr root hash, every /usr file, the boot
     # entry, the kernel and both initrds (IMG-2). A differing initrd is listed member by member, and
