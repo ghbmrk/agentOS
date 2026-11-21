@@ -128,20 +128,9 @@ func TestFoldTextFoldsLookAlikes(t *testing.T) {
 	}
 }
 
-// mailText reads a mail that does not parse whole; puts the subject and each
-// part on lines of their own; reads a part with no or a broken Content-Type
-// as text; skips parts that are not text; and stops after maxTextParts parts.
+// mailText skips parts that are not text and stops after maxTextParts parts;
+// what it cannot read is TestMailTextReportsWhatItCannotRead's.
 func TestMailTextReadsTextPartsOnly(t *testing.T) {
-	bad := "not a header line\r\n\r\nbody"
-	if got := mailText([]byte(bad)); got != bad {
-		t.Errorf("unparsable mail: %q", got)
-	}
-	if got := mailText([]byte("Subject: Hi\r\n\r\nthere")); got != "Hi\nthere" {
-		t.Errorf("plain mail: %q", got)
-	}
-	if got := mailText([]byte("Subject: S\r\nContent-Type: ;;;\r\n\r\nbroken")); got != "S\nbroken" {
-		t.Errorf("broken Content-Type: %q", got)
-	}
 	var b strings.Builder
 	b.WriteString("Subject: S\r\nContent-Type: multipart/mixed; boundary=XX\r\n\r\n")
 	b.WriteString("--XX\r\nContent-Type: application/octet-stream\r\n\r\nbinaryword\r\n")
@@ -149,8 +138,8 @@ func TestMailTextReadsTextPartsOnly(t *testing.T) {
 		fmt.Fprintf(&b, "--XX\r\nContent-Type: text/plain\r\n\r\nword%02d\r\n", i)
 	}
 	b.WriteString("--XX--\r\n")
-	got := mailText([]byte(b.String()))
-	if strings.Contains(got, "binaryword") {
+	got, ok := mailText([]byte(b.String()))
+	if !ok || strings.Contains(got, "binaryword") {
 		t.Errorf("read a part that is not text: %q", got)
 	}
 	// The top level and the binary part count too, so text parts 1 to
