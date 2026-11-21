@@ -6,7 +6,7 @@
 // the owner side's (asUID), so the peer the kernel reads is the one the
 // deployment names, and no frame carries a uid.
 //
-// This is the wire kernel/proc's Owner speaks, written out here rather
+// This is the wire kernel/proc's OwnerSide serves, written out here rather
 // than imported, as localsrv/accountsock writes out the mail clerk's:
 // kernel/proc is the kernel process's own host, which agentosd's control
 // path does not link (daemon TestARC2ControlPathCannotReachInference).
