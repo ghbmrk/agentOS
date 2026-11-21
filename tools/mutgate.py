@@ -738,7 +738,7 @@ GOOS = set("aix android darwin dragonfly freebsd hurd illumos ios js linux nacl 
            "wasip1 windows zos".split())
 GOARCH = set("386 amd64 amd64p32 arm armbe arm64 arm64be loong64 mips mipsle mips64 mips64le mips64p32 "
              "mips64p32le ppc ppc64 ppc64le riscv riscv64 s390 s390x sparc sparc64 wasm".split())
-ONE_IMPORT = re.compile(r'(?:([A-Za-z_]\w*|\.)\s+)?(?:"([^"\\\n]*)"|`([^`\n]*)`)')
+IMPORT_SPEC = re.compile(r'(?:([A-Za-z_]\w*|\.)\s+)?(?:"([^"\\\n]*)"|`([^`\n]*)`)')
 QUALIFIER = re.compile(r"\b([A-Za-z_]\w*)\s*\.")
 MOVABLE = ("func", "method", "type", "var", "const")
 # What `go test` runs by name, in file then source order: moving one changes the run order.
@@ -885,7 +885,7 @@ def _facts(path, text):
             elif not group and re.fullmatch(r"import\s*\(", c):
                 group = True
             elif group or re.match(r"import\b", c):
-                m = ONE_IMPORT.fullmatch(c if group else c[len("import"):].strip())
+                m = IMPORT_SPEC.fullmatch(c if group else c[len("import"):].strip())
                 if m is None or specs is None:
                     specs = None  # a spec not read: no import of this file is known
                 else:
