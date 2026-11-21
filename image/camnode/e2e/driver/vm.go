@@ -54,8 +54,9 @@ type vm struct {
 	qmp     *qmp
 }
 
-// The firmware page: the last page of the board's 1 GiB, left out of the kernel's memory in the
-// device tree and given to the syscon-reboot-mode driver as one 32-bit register. The kernel's
+// The firmware page: the last page of the board's 1 GiB, reserved no-map in the device tree (QEMU
+// rewrites /memory itself, so the page stays in it) and given to the syscon-reboot-mode driver as
+// one 32-bit register. The kernel's
 // reboot notifier writes the word for a restart command it knows, before device_shutdown; the
 // guest's RAM starts zeroed at every power-on, so the word is 0 unless this boot asked.
 const (
@@ -240,7 +241,12 @@ func (b *board) power(button bool) (*vm, error) {
 		{"-c", dtb, "/chosen/bootloader"},
 		{"-t", "x", dtb, "/chosen/bootloader", "partition", strconv.FormatInt(int64(part), 16)},
 		{"-t", "x", dtb, "/chosen/bootloader", "tryboot", tb},
-		{"-t", "x", dtb, fmt.Sprintf("/memory@%x", ramBase), "reg", "0", hex(ramBase), "0", hex(mailbox - ramBase)},
+		{"-p", "-c", dtb, fmt.Sprintf("/reserved-memory/camnode-firmware@%x", mailbox)},
+		{"-t", "x", dtb, "/reserved-memory", "#address-cells", "2"},
+		{"-t", "x", dtb, "/reserved-memory", "#size-cells", "2"},
+		{"-t", "x", dtb, "/reserved-memory", "ranges"},
+		{"-t", "x", dtb, fmt.Sprintf("/reserved-memory/camnode-firmware@%x", mailbox), "reg", "0", hex(mailbox), "0", "1000"},
+		{"-t", "x", dtb, fmt.Sprintf("/reserved-memory/camnode-firmware@%x", mailbox), "no-map"},
 		{"-p", "-c", dtb, box + "/reboot-mode"},
 		{"-t", "s", dtb, box, "compatible", "syscon", "simple-mfd"},
 		{"-t", "x", dtb, box, "reg", "0", hex(mailbox), "0", "1000"},
