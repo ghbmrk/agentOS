@@ -79,12 +79,18 @@ Usage:
       package, 2 a measurement error.
 """
 import argparse
+import importlib.util
 import json
 import os
 import pathlib
 import re
 import subprocess
 import sys
+
+# By path: the workflow runs `python3 -I`, which keeps tools/ off sys.path.
+_rm = importlib.util.spec_from_file_location("record_merge", pathlib.Path(__file__).resolve().parent / "record_merge.py")
+record_merge = importlib.util.module_from_spec(_rm)
+_rm.loader.exec_module(record_merge)
 
 REGISTRY = "tools/trusted_base_parsers.txt"
 REASONS = "tools/trusted_base_reasons.txt"
@@ -134,8 +140,9 @@ def list_lines(text, where):
 
 
 def read_list(path):
-    """A list file's text, line ends untranslated (read_text() turns "\r" into "\n")."""
-    return pathlib.Path(path).read_bytes().decode("utf-8", "replace")
+    """A list file's text, line ends untranslated (read_text() turns "\r" into "\n"); a file tools/record_merge.py's
+    CLASSES declares in no class fails closed (#6441)."""
+    return record_merge.read_list(path)
 
 
 def trusted_mains(tree):
