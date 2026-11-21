@@ -26,15 +26,15 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
                                              delete each statement a target line belongs to, alone,
                                              on N parallel workers (default: one per usable CPU; a
                                              detected verdict is confirmed alone), run the tests that
-                                             cover it (#6172), and
+                                             cover it (#6172), or a listed source lint where
+                                             they pass (LINTS, #6346), and
                                              add the verdicts to `run`'s JSON in DIR (#4573, #4603, #4633);
                                              only the sites of the result's own shard
   tools/mutgate.py report DIR                survivors per package, from the JSON in DIR
   tools/mutgate.py gate DIR --git BASE [HEAD] [--body FILE [--body-from SHA]] [--summary FILE]
                                              exit 1 if a LIVED mutant sits on a target line that no
-                                             `Mutant-equivalent:` line in FILE (the PR body) and no
                                              entry of its package's record names, or a record
-                                             entry is stale
+                                             entry is stale; FILE (the PR body) waives nothing (#6379)
   tools/mutgate.py verify DIR --git BASE [HEAD] [--body FILE [--body-from SHA]] [--summary FILE]
                                              `gate`, after checking that DIR/*/ (and DIR/*/*/) holds exactly
                                              one readable result for each shard of every package
@@ -70,15 +70,15 @@ them (data_owner, #5779): emptying a test's table weakens it with no _test.go li
 lines only: its `-D` reads `git diff --merge-base`, so for a package whose tests changed `run` points HEAD for
 that one call at a commit whose parent differs from the tree on exactly those lines.
 A LIVED mutant on a target line is code the package's tests run (gremlins mutates only covered
-code) but do not check, and fails the gate, unless the PR body holds the line
-`Mutant-equivalent: broker/<pkg>/<file>.go:<line>[:<col>][:<KIND>] <reason>` for it (spelled
-`Mutant-uncovered:` for a NOT COVERED one no test can reach, #5779; the two are one waiver): one mutant, one
-reason the reviewer checks, never a range or pattern. A waiver that matches more than one mutant of
+code) but do not check, and fails the gate, unless its package's record, broker/<pkg>/MUTANTS-EQUIVALENT
+(see RECORD below), holds an entry for it: one mutant, one reason the reviewer checks, never a range or
+pattern. `waive` writes entries from lines `Mutant-equivalent: broker/<pkg>/<file>.go:<line>[:<col>][:<KIND>]
+<reason>` (spelled `Mutant-uncovered:` for a NOT COVERED one no test can reach, #5779; the two are one
+waiver), keyed by statement, so a run that widens the targets reads it and a moved line keeps it; an
+entry whose statement changed is stale and fails (#5776). A waiver that matches more than one mutant of
 the result on its line (two comparisons of one kind, or a deletion and a comparison, with no column
-or kind to tell them apart) waives none of them (#5792). The body is read as text by this file, never run.
-A proof accepted once moves into the package's record, broker/<pkg>/MUTANTS-EQUIVALENT (`waive`;
-see RECORD below), keyed by statement, so a later run that widens the targets reads it without the
-body line and a moved line keeps it; an entry whose statement changed is stale and fails (#5776).
+or kind to tell them apart) waives none of them (#5792). The PR body waives nothing (#6379): it can change
+after a review without changing the head, so a waiver lives only in the record the head holds.
 Gremlins' coverage run is the only judge of "covered".
 Go's cover blocks hold no `case` expression, so that run's profile, and covered_by's, gains a ran block
 for each clause expression a ran clause body shows evaluated (with_cases, #5822): gremlins runs those
@@ -148,22 +148,21 @@ GATED_TIERS = ("A", "B")
 # into declarations; a test function is one of them whose name `go test -run` selects.
 DECL = re.compile(r"^(?:func|type|var|const|import|package)\b")
 TEST_FUNC = re.compile(r"^func ((?:Test|Fuzz|Example)(?![a-z])\w*)\(")
-# The PR body's waiver for one mutant: an exact repo path and line, optionally the mutant's column and
+# A waiver line, as `waive` reads it, for one mutant: an exact repo path and line, optionally the mutant's column and
 # kind, then a reason. A waiver that matches more than one mutant of the result waives none (#5792).
 EQUIVALENT = re.compile(r"^Mutant-(?:equivalent|uncovered): (broker/[^\s:*?\[\]]+\.go):([1-9]\d*)(?::([1-9]\d*))?(?::([A-Z][A-Z_]{0,63}))?"
                         r" +(\S.*?)\s*$")
-# A reason that says its mutant is not equivalent is no proof (#5891, from #5863 and #5883): a body line
-# holding one waives nothing and fails the gate, and waive refuses it, so a real survivor never becomes a
+# A reason that says its mutant is not equivalent is no proof (#5891, from #5863 and #5883): waive refuses it, so a real survivor never becomes a
 # record entry that later gates read as proved. A record entry holding one fails `records` and the gate,
 # and waive writes nothing to its record (#5909). Case and the space or hyphen between the words are ignored.
 NOT_EQUIVALENT = re.compile(r"\bnot[\s-]+equivalent", re.IGNORECASE)
 # The kinds a waiver can name (#5828): gremlins v0.6.0's mutator types (internal/mutator/mutator.go, the
-# version the workflow installs) and delete's STATEMENT_DELETION. A body line naming another proves nothing.
+# version the workflow installs) and delete's STATEMENT_DELETION. A line naming another proves nothing.
 KINDS = frozenset({"ARITHMETIC_BASE", "CONDITIONALS_BOUNDARY", "CONDITIONALS_NEGATION", "INCREMENT_DECREMENT",
                    "INVERT_ASSIGNMENTS", "INVERT_BITWISE", "INVERT_BWASSIGN", "INVERT_LOGICAL", "INVERT_LOOPCTRL",
                    "INVERT_NEGATIVES", "REMOVE_SELF_ASSIGNMENTS", "STATEMENT_DELETION"})
 # A line where no letter precedes a waiver's start (a checked task-list box aside): an indent or any Markdown
-# a PR body wraps lines in, a backtick, bullet, task box, quote, heading, bold or table cell, which waivers
+# a file wraps lines in, a backtick, bullet, task box, quote, heading, bold or table cell, which waivers
 # does not read (L3 on #5976). Prose that names one after a word is not a waiver line.
 WAIVER_START = re.compile(r"^(?:[^A-Za-z]|\[[xX]\])*Mutant-(?:equivalent|uncovered):", re.IGNORECASE)
 
@@ -372,57 +371,90 @@ def _embeds(text):
     return out
 
 
-# The functions names_file treats as reading, listing, matching or building a path, by name alone.
-PATH_FUNCS = ("ReadDir", "ReadFile", "Glob", "WalkDir", "Walk", "DirFS", "Sub", "Open", "OpenFile", "Stat",
-              "Lstat", "Join", "Abs", "Match")
+# Packages whose functions read no file, so a literal given to one names none (`strings.Split(h,
+# ".")`). Every other call, a builtin, a method, a local helper or an alias included, may read a
+# path: a package missing here only costs a whole-suite run (#6390).
+PURE = ("bytes", "strings")
+
+# The keywords a `(` can follow: one opens a group, not a call.
+NOT_CALL = ("case", "const", "for", "if", "import", "range", "return", "switch", "var")
+
+# Imports that reach files no literal shows: a child process inherits the working directory, and
+# cgo or a raw system call reads by C string or descriptor (#6390).
+OPAQUE = ("C", "os/exec", "syscall", "golang.org/x/sys/unix")
+
+TOKEN = re.compile(r"\w+|\S")
 
 
-# A call that reads, lists or builds a path: a literal anywhere in its arguments that lists a
-# directory (".", "..", "/") or starts "./" or "../" names a file without spelling it.
-PATH_CALL = re.compile(rf"\b(?:{'|'.join(f for f in PATH_FUNCS if f != 'Match')})\(")
+IMPORT_SPEC = re.compile(r"\s*(?:\(.*?\)|[^;\n]*)", re.S)
 
 
-def _call_literals(code):
-    """The string literals inside the parentheses of each PATH_CALL of code (comments blanked), in
-    any argument and at any depth: fs.WalkDir(os.DirFS(root), ".", fn) gives "."."""
-    out = []
-    for m in PATH_CALL.finditer(code):
-        i, depth = m.end(), 1
-        while i < len(code) and depth:
-            lit = RUNE.match(code, i) if code[i] == "'" else LITERAL.match(code, i)
-            if lit:  # a rune such as ')' moves no depth; a string's contents are an argument
-                out += [] if code[i] == "'" else [lit[0][1:-1]]
-                i = lit.end()
-                continue
-            depth += {"(": 1, ")": -1}.get(code[i], 0)
-            i += 1
+def _import_spans(code):
+    """The (start, end) spans of code's import specs (comments blanked): after each `import`
+    keyword outside a literal, to the end of its `(...)` group, else to its line's end or `;`, so a
+    one-line group, an indented import and `package p; import "x"` all count (L3 on #6403)."""
+    blank, out = _uncommented(code, False), []
+    for m in re.finditer(r"\bimport\b", blank):
+        out.append((m.end(), IMPORT_SPEC.match(blank, m.end()).end()))
     return out
 
 
-# A call that lists or matches names, so a wildcard-only glob anywhere in its package can reach it
-# through a variable, a const, a field or a helper (L3 on #6336).
-GLOB_CALL = re.compile(r"\b(?:Glob|Walk|WalkDir|ReadDir|Match)\(")
+def _imports(code):
+    """{name: path} of the imports of code (comments blanked, literals kept)."""
+    out = {}
+    for start, end in _import_spans(code):
+        for m in re.finditer(r'(?:([\w.]+)\s+)?["`]([^"`]+)["`]', code[start:end]):
+            out[m[1] or m[2].rsplit("/", 1)[-1]] = m[2]
+    return out
 
-# A path function named but not called at once: a value (`g := filepath.Glob`, an argument, a table
-# or field entry, a method value or expression) that a call under another name reads paths through,
-# or a call spaced from its `(`. Its arguments are unseen, so its package can name any file (#6337).
-PATH_VALUE = re.compile(rf"\b(?:{'|'.join(PATH_FUNCS)})\b(?!\()")
+
+def _call_literals(code):
+    """The string literals of code (comments blanked) inside the parentheses of a call, at any
+    depth, unless every call around them is to a PURE package, so
+    os.ReadDir(strings.TrimSpace(".")) and g(".") give ".". A PURE package's name counts as it only
+    where the file imports it and never names it without a `.` after (no local shadows it)."""
+    blank = _uncommented(code, False)
+    for start, end in _import_spans(code):
+        blank = blank[:start] + " " * (end - start) + blank[end:]
+    pure = {n for n, p in _imports(code).items() if p in PURE and not re.search(rf"\b{re.escape(n)}\b(?!\s*\.)", blank)}
+    out, stack, toks, i = [], [], [""] * 2, 0  # toks: the tokens so far, whitespace (and comments) skipped
+    while i < len(code):
+        c = code[i]
+        lit = RUNE.match(code, i) if c == "'" else LITERAL.match(code, i) if c in "\"`" else None
+        if lit:  # a rune such as ')' moves no depth; a string's contents are an argument
+            if c != "'" and any(stack):
+                out.append(lit[0][1:-1])
+            i = lit.end()
+            continue
+        if c.isspace():
+            i += 1
+            continue
+        tok = TOKEN.match(code, i)[0]
+        if tok == "(":
+            # A call follows a name, `)`, `]` or `}`, and a keyword opens a group. A pure name is
+            # always followed by `.` (above), so toks[-3] in pure is a selector's qualifier; it is
+            # the package only at the selector's start (`strings.Split`, not `t.strings.Open`).
+            name = re.match(r"\w", toks[-1]) and toks[-1] not in NOT_CALL
+            stack.append(bool(name) and not (toks[-3] in pure and toks[-4] != ".") or toks[-1] in (")", "]", "}"))
+        elif tok in "[{":
+            stack.append(False)
+        elif tok in ")]}" and stack:
+            stack.pop()
+        toks.append(tok)
+        i += len(tok)
+    return out
 
 
 def names_file(pkg_dir, rel):
     """Whether a .go file of pkg_dir can name rel (a path below it) as text: a string literal or
     //go:embed pattern holding its base name or first directory, a literal or pattern holding a glob
     (`*?[`) that matches its base name, rel or a leading directory of it (`//go:embed *`,
-    fs.Glob(fsys, "*.md"), filepath.Join(d, "*.md")), or whose last path part matches its base name
-    (dir + "/*.md", "%s/*.md", "**/*.md"), or a literal anywhere in a path call's
-    arguments (PATH_CALL) that lists `.`, `..` or `/` or starts `./` or `../`. A glob made of
-    wildcards and slashes alone (`"*"`, `"*/*"`) counts only in a //go:embed pattern, in a path
-    call's arguments, or in a package whose code (comments and literals blanked) calls a GLOB_CALL
-    anywhere: elsewhere it is data, a table's `*` or a DNS wildcard (#6328). A link, an
-    unreadable file, or code (comments and literals blanked) naming a PATH_FUNCS function without
-    calling it at once (PATH_VALUE: an alias, a field named Open, by name alone) can name anything
-    (#6337). A path built in a variable from parts holding none of these
-    is not seen (MUT-deleted-test-own-lines-1). Over-matching costs only a whole-suite run."""
+    fs.Glob(fsys, "*.md"), filepath.Join(d, "*")), or whose last path part matches its base name
+    (dir + "/*.md", "%s/*.md", "**/*.md"), or a literal anywhere in a call's arguments
+    (_call_literals: any call but a PURE package's) that lists `.`, `..` or `/` or
+    starts `./` or `../`. A link, an unreadable file, or an OPAQUE import (os/exec, cgo, syscall)
+    can name anything (#6390). A path built in a variable from parts holding none of these is not
+    seen (MUT-deleted-test-own-lines-1). Over-matching costs only a whole-suite run."""
     parts = rel.split("/")
     names = [parts[-1]] + ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]
     texts = []
@@ -430,21 +462,18 @@ def names_file(pkg_dir, rel):
         if f.is_symlink() or not f.is_file():
             return True
         texts.append(f.read_bytes().decode("utf-8", "replace"))
-    code = [_uncommented(t, False) for t in texts]
-    if any(PATH_VALUE.search(c) for c in code):
-        return True
-    lists = any(GLOB_CALL.search(c) for c in code)
     for text in texts:
-        called = _call_literals(_uncommented(text))
-        reach = set(_embeds(text)) | set(called)
+        code = _uncommented(text)
+        if set(_imports(code).values()) & set(OPAQUE):
+            return True
         for lit in _literals(text) + _embeds(text):
             if parts[-1] in lit or parts[0] in lit:
                 return True
-            if re.search(r"[*?\[]", lit) and (lists or lit in reach or re.sub(r"[*?/]", "", lit)) and (
+            if re.search(r"[*?\[]", lit) and (
                     any(fnmatch.fnmatchcase(n, lit) for n in names)
                     or fnmatch.fnmatchcase(parts[-1], lit.rstrip("/").rsplit("/", 1)[-1])):
                 return True
-        for lit in called:
+        for lit in _call_literals(code):
             if (lit and lit.rstrip("/") in ("", ".", "..")) or lit.startswith(("./", "../")):
                 return True
     return False
@@ -1103,7 +1132,7 @@ def targets_for(pkg, added, tests, data, bases):
 
 
 def waivers(body):
-    """{(path, line, kind, col): reason} of the PR body's `Mutant-equivalent:` lines, kind and col None
+    """{(path, line, kind, col): reason} of a waiver file's `Mutant-equivalent:` lines, kind and col None
     where the line names none. The body is text only."""
     out = {}
     for row in (body or "").replace("\r\n", "\n").split("\n"):
@@ -1120,7 +1149,7 @@ def placeholder(reason):
 
 
 def malformed_waivers(body):
-    """A warning for each body line that starts like a waiver (behind any indent, backtick, bullet or quote
+    """A warning for each line that starts like a waiver (behind any indent, backtick, bullet or quote
     mark) but waivers does not read, holding the <reason> placeholder, or naming a kind no mutant has
     (#5828, L3 on #5976). Each waives nothing, so its mutant still fails (fail closed);
     the warning says why, rather than leaving the line unread or listed only as unused."""
@@ -1161,7 +1190,7 @@ def refuse_not_equivalent(sites, out=None):
 
 
 def site_text(w):
-    """A waiver key (path, line, kind, col) as a body line spells it: `<path>:<line>[:<col>][:<KIND>]`."""
+    """A waiver key (path, line, kind, col) as a waiver line spells it: `<path>:<line>[:<col>][:<KIND>]`."""
     path, line, kind, col = w
     return f"{path}:{line}" + (f":{col}" if col else "") + (f":{kind}" if kind else "")
 
@@ -1194,7 +1223,7 @@ def covering(waived, mutants):
         if len(hit) > 1:
             ambiguous.append((w, sorted(hit, key=lambda m: (m[3] or 0, m[2]))))
         elif hit:
-            cover[hit[0]] = w  # later waivers win: decide puts body lines last
+            cover[hit[0]] = w
     return cover, ambiguous
 
 
@@ -1218,7 +1247,7 @@ def covering(waived, mutants):
 # whose count n differs, is stale and fails the gate, so any edit inside the enclosing declaration
 # (the statement, the code after it that a proof cites, a twin of it) needs the proof read again,
 # while lines moved outside it keep it (Security on #5780). The record is the PR's
-# text, read as data: a new or changed entry shows as such in the summary, for review as a body line is.
+# text, read as data: a new or changed entry shows as such in the summary, for review.
 RECORD = "MUTANTS-EQUIVALENT"
 RECORD_KEYS = {"file", "mutant", "func", "decl", "stmt", "at", "after", "occurrence", "reason", "accepted"}
 RECORD_OPTIONAL = {"col"}
@@ -1986,7 +2015,10 @@ def cmd_run(args):
     cfg.write_text("{}\n")
     # Gremlins' coverage run reads its profile through with_cases, so it runs case-expression mutants
     # (#5822); with no go on PATH, gremlins can run no test at all.
-    if shim := go_shim(cfgdir.name):
+    # MUT-gremlins-memcap (#6388): each of gremlins' parallel mutant runs (one per usable CPU, as
+    # runtime.NumCPU counts them) gets its share of half the memory free now, as `delete`'s do.
+    free = available_memory()
+    if shim := go_shim(cfgdir.name, free // 2 // default_jobs() if free else None):
         env["PATH"] = f"{shim}{os.pathsep}{env.get('PATH', '')}"
     for pkg in pkgs:
         dest = out / result_name(pkg)
@@ -2175,32 +2207,42 @@ def lister_in(tmp):
     return lister if lister.is_file() else build_lister(tmp)
 
 
-def go_shim(tmp):
+def go_shim(tmp, mem=None):
     """A directory holding a `go` for gremlins' PATH: a run with -coverprofile goes through go_cover,
-    every other (its mutant runs) to the real go unchanged; or None where no go is on PATH."""
+    every other (its mutant runs) to the real go, through go_capped where mem caps each run's memory;
+    or None where no go is on PATH."""
     real = shutil.which("go")
     if real is None:
         return None
     q = shlex.quote
     bindir = pathlib.Path(tmp) / "gobin"
     bindir.mkdir(exist_ok=True)
-    cover = f"exec {q(sys.executable)} -I {q(str(pathlib.Path(__file__).resolve()))} go-cover {q(real)} {q(str(tmp))}"
+    me = f"exec {q(sys.executable)} -I {q(str(pathlib.Path(__file__).resolve()))}"
+    cover = f"{me} go-cover {q(real)} {q(str(tmp))} {int(mem or 0)}"
+    rest = f"{me} go-capped {q(real)} {int(mem)}" if mem else f"exec {q(real)}"
     (bindir / "go").write_text(f"""#!/bin/sh
 for a in "$@"; do
   case "$a" in -coverprofile|-coverprofile=*|--coverprofile|--coverprofile=*) {cover} "$@";; esac
 done
-exec {q(real)} "$@"
+{rest} "$@"
 """)
     (bindir / "go").chmod(0o755)
     return bindir
 
 
-def go_cover(real, tmp, args):
+def go_cover(real, tmp, args, mem=None):
     """`go` args through the real go, with `-covermode=count` unless they name a mode (with_cases needs
-    counts), then the -coverprofile it wrote read through with_cases."""
+    counts), then the -coverprofile it wrote read through with_cases. With mem, a mutant run's memory
+    cap, the run fails unless its tests' memory stays under half of it (MUT-gremlins-memcap)."""
     if args[:1] == ["test"] and not any(a.lstrip("-").startswith("covermode") for a in args):
         args = ["test", "-covermode=count", *args[1:]]
-    if code := subprocess.run([real, *args]).returncode:
+    end, peak = watch(subprocess.Popen([real, *args], start_new_session=True, preexec_fn=die_with_parent),
+                      mem=mem, skip=TOOLCHAIN)
+    if mem and (end == "over" or 2 * peak > mem):
+        print(f"mutgate: the tests hold {peak >> 20} MB before any mutant, more than half the {mem >> 20} MB "
+              "memory cap of a gremlins mutant run, so a cap kill would not show a test failed", file=sys.stderr)
+        return 1
+    if code := exit_code(end):
         return code
     path = next((a.split("=", 1)[1] for a in args if a.startswith(("-coverprofile=", "--coverprofile="))), None)
     path = path or next((b for a, b in zip(args, args[1:]) if a in ("-coverprofile", "--coverprofile")), None)
@@ -2214,6 +2256,41 @@ def go_cover(real, tmp, args):
         print(f"mutgate: cannot add the case clauses to the cover profile: {e}", file=sys.stderr)
         return 1
     return 0
+
+
+# MUT-gremlins-memcap (#6388): a gremlins mutant that drops a bound can grow a test by gigabytes, as a
+# deletion can (#5011), and took a runner down on #6000. Gremlins v0.6.0 reads its `go test`'s exit 1
+# as KILLED (executor.go getTestFailedStatus), so a run past its cap is killed and exits 1, as
+# run_tests' memory_cap is KILLED. The toolchain's own processes (TOOLCHAIN) are not counted: a
+# mutant changes what the tests do, not how much the compiler holds.
+TOOLCHAIN = frozenset({"go", "compile", "link", "asm", "cgo", "vet", "cover"})
+
+
+def go_capped(real, mem, args):
+    """`go` args through the real go, its session killed and 1 returned once its tests' resident memory
+    passes mem bytes; else go's own exit code."""
+    end, peak = watch(subprocess.Popen([real, *args], start_new_session=True, preexec_fn=die_with_parent),
+                      mem=mem, skip=TOOLCHAIN)
+    if end == "over":
+        print(f"\n--- FAIL: memory_cap\nmutgate: the tests passed {peak >> 20} MB, this mutant run's "
+              f"{mem >> 20} MB memory cap, and were killed", file=sys.stderr)
+        return 1
+    return exit_code(end)
+
+
+def exit_code(end):
+    """A shell's exit status for a Popen return code: 128 + N for a run killed by signal N."""
+    return end if end >= 0 else 128 - end
+
+
+def die_with_parent():
+    """In a child before exec: SIGKILL it when its parent dies (Linux PR_SET_PDEATHSIG), so gremlins'
+    kill of the shim at a mutant's timeout also ends the go it started in a session of its own."""
+    try:
+        import ctypes
+        ctypes.CDLL(None).prctl(1, signal.SIGKILL)
+    except (OSError, AttributeError):
+        pass  # no prctl (macOS): the test binary's own -test.timeout still ends it
 
 
 def deleted(src, site, names=()):
@@ -2322,17 +2399,17 @@ def run_tests(binary, cwd, timeout, mem=None, names=None):
         return {"over": "KILLED", "timeout": "TIMED OUT"}.get(end) or ("LIVED" if end == 0 else "KILLED")
 
 
-def watch(p, timeout=None, mem=None):
+def watch(p, timeout=None, mem=None, skip=()):
     """(end, peak) for Popen p started in its own session: end is its exit code, or "timeout" or
     "over" (resident memory past mem bytes), after which its session is killed; peak is the most
-    resident memory read across the session, every MEM_POLL seconds."""
+    resident memory read across the session, every MEM_POLL seconds, leaving out processes named in skip."""
     deadline, peak = None if timeout is None else time.monotonic() + timeout, 0
     while True:
         wait = MEM_POLL if deadline is None else max(0, min(MEM_POLL, deadline - time.monotonic()))
         try:
             return p.wait(timeout=wait), peak
         except subprocess.TimeoutExpired:
-            peak = max(peak, session_rss(p.pid))
+            peak = max(peak, session_rss(p.pid, skip))
             end = "over" if mem is not None and peak > mem else "timeout" if deadline and time.monotonic() >= deadline else None
             if end:
                 os.killpg(p.pid, signal.SIGKILL)
@@ -2343,9 +2420,9 @@ def watch(p, timeout=None, mem=None):
 MEM_POLL = 0.25  # seconds between memory reads: about 50 MB of growth at the 200 MB/s seen on #5011
 
 
-def session_rss(sid):
-    """Resident bytes of every process in session sid (a test binary and its children), from
-    /proc; 0 where there is no /proc (macOS), so the cap there is the timeout alone."""
+def session_rss(sid, skip=()):
+    """Resident bytes of every process in session sid (a test binary and its children) not named in
+    skip, from /proc; 0 where there is no /proc (macOS), so the cap there is the timeout alone."""
     total = 0
     try:
         pids = [n for n in os.listdir("/proc") if n.isdigit()]
@@ -2353,10 +2430,11 @@ def session_rss(sid):
         return 0
     for pid in pids:
         try:
-            fields = pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-        except (OSError, IndexError):
+            name, rest = pathlib.Path(f"/proc/{pid}/stat").read_text().split("(", 1)[1].rsplit(")", 1)
+            fields = rest.split()
+        except (OSError, IndexError, ValueError):
             continue  # gone between the listing and the read
-        if len(fields) > 21 and fields[3] == str(sid):
+        if len(fields) > 21 and fields[3] == str(sid) and name not in skip:
             total += int(fields[21]) * PAGE
     return total
 
@@ -2590,7 +2668,7 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
     covered = [s for s in sites if is_covered(blocks, s)]
     tests = per_test(base, pkg_dir, tmp, timeout, alone_mem, jobs) if covered else None
     chosen = [selected(s, tests) for s in sites]
-    plain, checked = tmp / "plain.test", {}
+    plain, checked, texts = tmp / "plain.test", {}, {}
 
     def passes(names):
         """Whether these tests pass unmutated, alone, under their timeout and the memory cap with
@@ -2627,6 +2705,7 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
             build = ["go", "test", "-c", "-overlay", str(overlay), "-o", str(binary), "."]
             if not build_mutant(src_path.read_bytes(), site, build, mutant, pkg_dir):
                 return "NOT VIABLE", None, None
+            texts[i] = mutant.read_bytes()  # the tree a listed lint reads if no test fails (lint_kills)
             status = run_tests(binary, pkg_dir, limit(chosen[i]), mem=cap(alone), names=chosen[i])
             keep = status in DETECTED and (not alone or chosen[i] is not None)
             return status, binary if keep else None, failed_test(binary)
@@ -2651,7 +2730,59 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
                 statuses.append((status, killer))
             if sum(st == "TIMED OUT" for st, _, _ in results) * 2 > len(batch):
                 jobs = 1  # each run needs the runner to itself: the rest runs alone, once
+    lived = [(i, sites[i]["file"], texts[i]) for i, (st, _) in enumerate(statuses) if st == "LIVED"]
+    for i, name in lint_kills(pkg, lived, tmp, alone_mem).items():
+        statuses[i] = ("KILLED", name)
     return [mutation(s, *st) for s, st in zip(sites, statuses)], None
+
+
+# MUT-lint-held (#6346). A source lint holds statement shapes no test can observe (a key wiped right
+# after its sealer takes it), and fails on a tree without them. A deletion its package's tests let
+# live is KILLED when a listed lint test, run on a copy of broker/ with only that deletion in it (the
+# text the tests ran), fails, the same binary having passed on the unmutated copy: the lint read the
+# mutated tree and refused it. A lint that fails unmutated, times out or passes the memory cap
+# leaves the deletion LIVED. Each entry is (package under broker/, top-level test).
+LINTS = (("clerk/wipelint", "TestEverySealingKeyIsWipedRightAfterItsSealer"),
+         ("clerk/wipelint", "TestEveryOpenedPlaintextIsWipedOnEveryPath"))
+
+
+def lint_kills(pkg, lived, tmp, mem=None):
+    """{index: lint test} for each (index, file, mutant text) of broker/<pkg>/ that a listed lint
+    refuses, as above; the first in LINTS order that fails names it."""
+    if not lived:
+        return {}
+    tree = pathlib.Path(tmp) / "lint-tree"
+    shutil.rmtree(tree, ignore_errors=True)
+    shutil.copytree(BROKER, tree / "broker", symlinks=True)
+    lints = []
+    for n, (lpkg, name) in enumerate(LINTS):
+        cwd, binary = tree / "broker" / lpkg, pathlib.Path(tmp) / f"lint-{n}.test"
+        if not cwd.is_dir() or subprocess.run(["go", "test", "-c", "-o", str(binary), "."], cwd=cwd,
+                                              stdout=sys.stderr).returncode or not binary.exists():
+            print(f"mutgate: lint broker/{lpkg} {name} does not build; it kills nothing", file=sys.stderr)
+            continue
+        began = time.monotonic()
+        if run_tests(binary, cwd, LINT_SECONDS, mem, [name]) != "LIVED":
+            print(f"mutgate: lint broker/{lpkg} {name} does not pass unmutated; it kills nothing", file=sys.stderr)
+            continue
+        lints.append((cwd, binary, name, 3 * (time.monotonic() - began) + 10))
+    out = {}
+    for i, fname, text in lived:
+        path = tree / "broker" / pkg / fname
+        was = path.read_bytes()
+        path.write_bytes(text)
+        try:
+            for cwd, binary, name, limit in lints:
+                if run_tests(binary, cwd, limit, mem, [name]) == "KILLED" and failed_test(binary) == name:
+                    out[i] = name
+                    break
+        finally:
+            path.write_bytes(was)
+    shutil.rmtree(tree, ignore_errors=True)
+    return out
+
+
+LINT_SECONDS = 600  # a lint's unmutated run: a cold build cache compiles what it loads
 
 
 def add_mutants(data, mutants):
@@ -2824,17 +2955,16 @@ def cmd_verify(args):
 
 
 def decide(results, added, tests, args, records=({}, [])):
-    """Gate the read results against the PR body's waivers and the packages' records (record_waivers'
-    pair; a stale entry fails), and write the summary table. A body line wins over a record entry."""
+    """Gate the read results against the packages' records (record_waivers' pair; a stale entry fails),
+    and write the summary table. The PR body waives nothing (#6379): a body can change after a review
+    without changing the head, while a record is part of the head every accept names."""
     text = pathlib.Path(args.body).read_text(encoding="utf-8", errors="replace") if args.body else ""
-    for problem in malformed_waivers(text):
-        print(f"mutgate: {problem}")
-    body = waivers(text)
-    refused = not_equivalent(body)
-    body = {w: reason for w, reason in body.items() if site_text(w) not in refused}
+    if waivers(text) or malformed_waivers(text):
+        print(f"mutgate: the PR body's Mutant-equivalent and Mutant-uncovered lines waive nothing (#6379): write each into its package's "
+              f"{RECORD} with `tools/mutgate.py waive FILE --accepted '#PR'` and commit it")
     kept, stale = records
-    waived = {**{site: f"{reason} (record, {accepted}{', new in this PR' if new else ''})"
-                 for site, (reason, accepted, new) in kept.items()}, **body}
+    waived = {site: f"{reason} (record, {accepted}{', new in this PR' if new else ''})"
+              for site, (reason, accepted, new) in kept.items()}
     targets = {pkg: t for pkg, (_, t) in results.items()}
     every = {pkg: mutants_of(d) for pkg, (d, _) in results.items()}
     found = violations(targets, {pkg: survivors_of(d) for pkg, (d, _) in results.items()}, waived, every)
@@ -2848,23 +2978,14 @@ def decide(results, added, tests, args, records=({}, [])):
     fresh = sorted(((site, reason, accepted) for site, (reason, accepted, new) in kept.items() if new),
                    key=lambda f: (site_text(f[0]), f[1]))
     write_summary(args.summary, summary(results, tested, waived, {pkg for pkg in results if diff_targets(added, pkg)},
-                                        set(body), stale, fresh))
+                                        stale, fresh))
     for problem in stale:
         print(f"mutgate: {problem}")
     for w, hit in covering(waived, every)[1]:
         print(f"mutgate: the waiver {site_text(w)} matches {len(hit)} mutants ("
               + ", ".join(site_text((p, n, k, c)) for p, n, k, c in hit) + "), so it waives none: name the one it "
               "proves by its column and kind, `Mutant-equivalent: <path>:<line>:<col>:<KIND> <reason>`")
-    refuse_not_equivalent(refused)
-    rc = report_violations(found, lost) or (1 if stale or refused else 0)
-    # MUT-stale-body (#6077): the workflow passes the event's body, which "Re-run failed jobs" reuses, so a
-    # line added or reworded after the push is unread here although the current body holds it. Every failure
-    # can call for a body edit (a new, refused or ambiguous line), so each says which body this was.
-    if rc and getattr(args, "body_from", None):
-        print(f"mutgate: the body read is the PR body as it stood at head {args.body_from}, when the event that "
-              "started this run fired (the PR's opening, a push or a reopening); a line added to the body after "
-              "that is not read by this run or a rerun of it, so it counts only from the next push")
-    return rc
+    return report_violations(found, lost) or (1 if stale else 0)
 
 
 def write_summary(path, text):
@@ -2902,7 +3023,7 @@ ROWS = 2000
 FRESH = 100
 
 
-def summary(results, tested, waived, own=(), body=None, stale=(), fresh=()):
+def summary(results, tested, waived, own=(), stale=(), fresh=()):
     """One Markdown table of every mutant on a target line, survivors first, and its verdict.
     tested names the changed tests of each package whose tests changed (None: every test); own
     names the packages where the diff also adds non-test lines; fresh lists ((path, line, mutant),
@@ -2949,15 +3070,11 @@ def summary(results, tested, waived, own=(), body=None, stale=(), fresh=()):
     lines += ["", "| Site | Mutant | Verdict |", "| --- | --- | --- |", *(r[2] for r in rows[:ROWS])]
     if len(rows) > ROWS:
         lines.append(f"| {len(rows) - ROWS} more rows | | not shown |")
-    # A waiver matching several mutants is listed below with them, not as naming none (#5828).
-    if unused := sorted((set(waived) if body is None else body) - used - {w for w, _ in ambiguous}):
-        lines += ["", "Mutant-equivalent lines naming no surviving mutant on a target line: "
-                  + ", ".join(cell(site_text(w)) for w in sorted(unused, key=site_text))]
     if ambiguous:
         lines += ["", "Waivers matching more than one mutant, which waive none of them (#5792):",
                   *(f"- {cell(site_text(w))}: " + ", ".join(cell(site_text(m)) for m in hit) for w, hit in ambiguous)]
     if fresh:
-        lines += ["", f"New {RECORD} entries in this PR (read each proof as a Mutant-equivalent body line is read):",
+        lines += ["", f"New {RECORD} entries in this PR (read each proof: it waives its mutant from the merge on):",
                   *(f"- {cell(site_text((p, n, None, col)))} {cell(kind)} ({cell(accepted)}): {proof_cell(reason, p)}"
                     for (p, n, kind, col), reason, accepted in fresh[:FRESH])]
         if len(fresh) > FRESH:
@@ -3128,7 +3245,7 @@ def report_violations(found, lost=()):
     if found:
         print("mutgate: add a test that fails when the line changes; if no test can tell, add a line "
               "`Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>` (`Mutant-uncovered:` for one no test "
-              "can reach) to the PR body for that mutant "
+              "can reach) for that mutant to a file and record it with `tools/mutgate.py waive FILE --accepted '#PR'` "
               "(its column and kind as the summary's Site and Mutant cells give them, where its line holds another)")
     return 1 if found else 0
 
@@ -3162,8 +3279,10 @@ def pr_ref(v):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    if argv[:1] == ["go-cover"] and len(argv) >= 3:  # go_shim's entry, not a command of its own
-        return go_cover(argv[1], argv[2], argv[3:])
+    if argv[:1] == ["go-cover"] and len(argv) >= 4:  # go_shim's entries, not commands of their own
+        return go_cover(argv[1], argv[2], argv[4:], int(argv[3]) or None)
+    if argv[:1] == ["go-capped"] and len(argv) >= 3:
+        return go_capped(argv[1], int(argv[2]), argv[3:])
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("packages")
@@ -3190,7 +3309,7 @@ def main(argv=None):
     p.add_argument("dir")
     p = sub.add_parser("waive")
     p.add_argument("lines", metavar="FILE",
-                   help="`Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>` lines, as a PR body holds them")
+                   help="`Mutant-equivalent: <path>:<line>[:<col>][:<KIND>] <reason>` lines, one per line")
     p.add_argument("--accepted", required=True, metavar="#PR", type=pr_ref, help="the PR whose review accepted these proofs")
     p.add_argument("--mutant", type=mutant_kind,
                    help=f"the one mutant kind the proofs are for, where a line names none (default {DELETION}; "
@@ -3202,16 +3321,14 @@ def main(argv=None):
         p.add_argument("dir")
         p.add_argument("--git", required=True, metavar="BASE")
         p.add_argument("head", nargs="?", default="HEAD")
-        p.add_argument("--body", metavar="FILE", help="the PR body, read as text for Mutant-equivalent lines")
-        p.add_argument("--body-from", metavar="SHA", type=commit_sha,
-                       help="the PR head of the event whose body FILE is; a failure names it (#6077)")
+        # Kept so an older workflow copy still runs; the body waives nothing (#6379).
+        p.add_argument("--body", metavar="FILE", help="the PR body: its waiver lines are named, never applied")
+        p.add_argument("--body-from", metavar="SHA", type=commit_sha, help="ignored (#6379)")
         p.add_argument("--summary", metavar="FILE", help="append the table of verdicts here")
     args = ap.parse_args(argv)
     # K is a package's shard count, which `plan` packs past MATRIX_MAX jobs up to SHARDS_MAX (#6170).
     if args.cmd == "run" and (not 0 <= args.shard < args.of <= SHARDS_MAX or (args.of > 1 and not args.git)):
         ap.error(f"--shard I --of K needs 0 <= I < K <= {SHARDS_MAX}, and --git when K > 1")
-    if getattr(args, "body_from", None) and not args.body:
-        ap.error("--body-from names the event whose body --body holds: give --body too")
     if args.cmd == "packages":
         print("\n".join(gated_packages()))
         return 0
