@@ -30,7 +30,8 @@ fnmatch pattern on the file's path (an initrd's members by their path inside it)
                  source a package's Built-Using names, so a Debian static build's sources are scanned.
   bundled HOLDER a pinned download's binary: assurance/vulncheck.json "bundled" names HOLDER
   sha256 HEX     a pinned download's binary reviewed as linking no library (raw system calls), held to
-                 those exact bytes, so a new release fails until it is read again
+                 those exact bytes, so a new release fails until it is read again; only a static file of
+                 at most SHA256_MAX bytes, too small to hold a C library
 A listed file matching no entry or two, an entry matching no listed file, an unknown kind, and any
 kind's check that fails are refusals. Control (SEL-7): the main tree must list each of REQUIRED, and
 a file the check cannot read fails, so a clean result is not a walk that read nothing. Exit 1 on any.
@@ -72,6 +73,8 @@ CXX_MARKS = (b"terminate called after throwing an instance of '", b"\0N10__cxxab
 CXX_NEEDED = re.compile(r"^lib(std)?c\+\+\.so")
 SYM = re.compile(r"^[0-9a-f]+\s.{7}\s(\S+)\s+[0-9a-f]+\s+(?:\S+\s+)?(\S+)$")
 BUILDINFO = b"\xff Go buildinf:"
+# The largest file the sha256 kind may declare: gVisor's sidecars are 1.4 KiB; a static libc is far larger.
+SHA256_MAX = 16384
 # A Go binary's section names, for one whose build info is missing.
 GO_SECTIONS = (b"\0.gopclntab\0", b"\0.go.buildinfo\0")
 # runtime/cgo's C code (gcc_libinit.c _cgo_try_pthread_create's message): in every cgo binary, static or
@@ -121,13 +124,15 @@ def go_cgo(data):
         j += n
     m = re.search(rb"(?m)^build\tCGO_ENABLED=(\d)$", out[1])
     if m:
-        return m.group(1).decode()
+        # Build info saying cgo off is held to the code too (Security 7068790342 R2): a file that holds
+        # runtime/cgo's C code is not taken as cgo off on its build info's word.
+        return "0-cgo" if m.group(1) == b"0" and CGO_MARK in data else m.group(1).decode()
     return "cgo" if CGO_MARK in data else "none"
 
 
 def go_shown(go):
     return {"0": "Go CGO_ENABLED=0", "1": "Go CGO_ENABLED=1", "none": "Go, no cgo setting, no cgo code",
-            "cgo": "Go, no cgo setting, cgo code"}[go]
+            "cgo": "Go, no cgo setting, cgo code", "0-cgo": "Go CGO_ENABLED=0 but cgo code"}[go]
 
 
 def cxx_defined(path):
@@ -162,7 +167,7 @@ def classify(path):
         why = "c++ runtime"
     else:
         return None
-    return {"why": why, "sha256": hashlib.sha256(data).hexdigest(), "go": go_cgo(data)}
+    return {"why": why, "sha256": hashlib.sha256(data).hexdigest(), "go": go_cgo(data), "size": len(data)}
 
 
 def listed(files):
@@ -247,6 +252,11 @@ def kind_refusal(shown, place, info, kind, arg, ctx, place_status):
             return None
         return "not a Go binary" if info["go"] is None else "a Go binary with cgo (%s)" % go_shown(info["go"])
     if kind == "sha256":
+        # Bounded by what the check reads (Security 7068790342 R1): only a static file too small to hold a
+        # C library can be declared by review alone.
+        if info["why"] != "static" or info["size"] > SHA256_MAX:
+            return "the sha256 kind takes only a static file of at most %d bytes (this: %s, %d bytes)" % (
+                SHA256_MAX, info["why"], info["size"])
         return None if info["sha256"] == arg.lower() else "its SHA-256 is %s, not the reviewed %s" % (info["sha256"], arg)
     if kind == "linked":
         lst = ctx["lists"].get(arg)
@@ -351,6 +361,10 @@ def run(root, usr, out, allow):
     return places, control(places, unread) + refusals(places, entries, context(out), statuses)
 
 
+def escaped(line):
+    return line.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def main(argv):
     if len(argv) in (3, 4) and argv[0] == "--tree":
         places, errs = run(argv[1], None, argv[2], argv[3] if len(argv) == 4 else ALLOW)
@@ -365,10 +379,11 @@ def main(argv):
         sys.exit(__doc__)
     for place, files in sorted(places.items()):
         for shown, info in sorted(files.items()):
-            print("%s %s: %s%s sha256=%s" % (place, shown, info["why"], "" if info["go"] is None else ", " + go_shown(info["go"]),
-                                             info["sha256"]))
+            # Escaped as the errors are (Security 7068790342 R3): a path cannot start a workflow command.
+            print(escaped("%s %s: %s%s sha256=%s" % (place, shown, info["why"],
+                                                     "" if info["go"] is None else ", " + go_shown(info["go"]), info["sha256"])))
     for e in errs:
-        print("::error title=static ELF check::" + e.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
+        print("::error title=static ELF check::" + escaped(e))
     return 1 if errs else 0
 
 

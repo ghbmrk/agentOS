@@ -28,6 +28,8 @@ spec.loader.exec_module(se)
 C = "int main(void) { return 0; }\n"
 CXX = ('#include <stdexcept>\nint main(int c, char **v) { try { if (c > 5) throw std::runtime_error(v[0]); }\n'
        ' catch (std::exception &) { return 1; } return 0; }\n')
+# No libc: exit by a raw system call, as gVisor's two C sidecars do.
+TINY = 'void _start(void) { __asm__ volatile("mov $60, %eax\\n xor %edi, %edi\\n syscall"); }\n'
 GO = "package main\n\nfunc main() {}\n"
 CGO = 'package main\n\n// int f(void) { return 1; }\nimport "C"\n\nfunc main() { _ = C.f() }\n'
 STATUS = "Package: %s\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1.0-1\n\n"
@@ -64,6 +66,7 @@ class StaticElfTest(unittest.TestCase):
             "dynamic": build(d, "dynamic", C, "gcc", "-O2"),
             "cxx": build(d, "cxx", CXX, "g++", "-O2"),
             "cxx-static-runtime": build(d, "cxx-static-runtime", CXX, "g++", "-O2", "-static-libstdc++", "-s"),
+            "tiny": build(d, "tiny", TINY, "gcc", "-static", "-nostdlib", "-O2", "-s"),
             "go": build(d, "go", GO, "go", "build", "-trimpath", "-ldflags=-s -w", env={"CGO_ENABLED": "0"}),
             "cgo": build(d, "cgo", CGO, "go", "build", "-trimpath",
                          "-ldflags=-s -w -linkmode=external -extldflags=-static", env={"CGO_ENABLED": "1"}),
@@ -73,6 +76,14 @@ class StaticElfTest(unittest.TestCase):
         # Go binaries with no build info (esbuild's release has none; Bazel's records no cgo setting).
         for b in ("go", "cgo"):
             subprocess.run(["objcopy", "-R", ".go.buildinfo", str(cls.bins[b]), str(cls.bins[b]) + "-noinfo"], check=True)
+            # Build info kept with no CGO_ENABLED line, as gVisor's Bazel builds record it (Security 7068790342):
+            # the setting's key rewritten to a same-length key the reader does not match.
+            data = cls.bins[b].read_bytes()
+            assert data.count(b"build\tCGO_ENABLED=") >= 1
+            pathlib.Path(str(cls.bins[b]) + "-nosetting").write_bytes(data.replace(b"build\tCGO_ENABLED=", b"build\tXGO_ENABLED="))
+            # R2: build info saying cgo off over cgo code.
+            if b == "cgo":
+                pathlib.Path(str(cls.bins[b]) + "-says0").write_bytes(data.replace(b"build\tCGO_ENABLED=1", b"build\tCGO_ENABLED=0"))
 
     @classmethod
     def tearDownClass(cls):
@@ -83,7 +94,7 @@ class StaticElfTest(unittest.TestCase):
         # the C++ runtime's code (stripped, so by its marks) is listed too; a dynamic C or C++ program and a
         # relocatable object are not.
         got = {k: se.classify(p) for k, p in self.bins.items()}
-        self.assertEqual({k for k, v in got.items() if v}, {"static", "cxx-static-runtime", "go", "cgo"})
+        self.assertEqual({k for k, v in got.items() if v}, {"static", "tiny", "cxx-static-runtime", "go", "cgo"})
         self.assertEqual(got["static"]["why"], "static")
         self.assertEqual(got["cxx-static-runtime"]["why"], "c++ runtime")
         self.assertEqual(got["static"]["sha256"], hashlib.sha256(self.bins["static"].read_bytes()).hexdigest())
@@ -93,6 +104,11 @@ class StaticElfTest(unittest.TestCase):
         self.assertEqual(se.go_cgo(pathlib.Path(str(self.bins["go"]) + "-noinfo").read_bytes()), "none")
         self.assertEqual(se.go_cgo(pathlib.Path(str(self.bins["cgo"]) + "-noinfo").read_bytes()), "cgo")
         self.assertNotIn(se.CGO_MARK, self.bins["go"].read_bytes())
+        # Build info with no cgo setting (gVisor's): read from the code, both ways.
+        self.assertEqual(se.go_cgo(pathlib.Path(str(self.bins["go"]) + "-nosetting").read_bytes()), "none")
+        self.assertEqual(se.go_cgo(pathlib.Path(str(self.bins["cgo"]) + "-nosetting").read_bytes()), "cgo")
+        # Build info saying cgo off is not trusted over cgo code.
+        self.assertEqual(se.go_cgo(pathlib.Path(str(self.bins["cgo"]) + "-says0").read_bytes()), "0-cgo")
         # An imported runtime symbol's name in .dynstr is not the runtime's own string.
         self.assertNotIn(se.CXX_MARKS[1], self.bins["dynamic"].read_bytes())
 
@@ -115,7 +131,7 @@ class StaticElfTest(unittest.TestCase):
                  "/usr/lib/agentos/images/camdecode/agentos-camdecode": "cgo", "/usr/sbin/ldconfig": "static",
                  "/usr/lib/agentos/images/codex/usr/local/bin/rg": "static",
                  "/usr/lib/agentos/images/codex/usr/bin/bwrap": "cxx-static-runtime",
-                 "/usr/lib/agentos/gvisor-bin/prewarmer": "static", "/usr/bin/dyn": "dynamic"}
+                 "/usr/lib/agentos/gvisor-bin/prewarmer": "tiny", "/usr/bin/dyn": "dynamic"}
         for path, b in files.items():
             dst = root / path.lstrip("/")
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -139,7 +155,7 @@ class StaticElfTest(unittest.TestCase):
                    "/usr/sbin/ldconfig package libc-bin",
                    "/usr/lib/agentos/images/codex/usr/local/bin/rg bundled @openai/codex@1-linux-x64",
                    "/usr/lib/agentos/images/codex/usr/bin/bwrap linked guest",
-                   "/usr/lib/agentos/gvisor-bin/prewarmer sha256 " + sha["static"].upper()]
+                   "/usr/lib/agentos/gvisor-bin/prewarmer sha256 " + sha["tiny"].upper()]
         allow.write_text("# a comment\n" + "\n".join(entries) + "\n")
         return root, out, allow, config, entries
 
@@ -171,11 +187,21 @@ class StaticElfTest(unittest.TestCase):
             ("not go", lambda: allow.write_text(allow.read_text().replace(
                 "llama-server linked linked", "llama-server go")), "not a Go binary"),
             # sha256, with other bytes than the reviewed ones
-            ("sha256", lambda: allow.write_text(allow.read_text().replace(
-                "/usr/lib/agentos/runsc go", "/usr/lib/agentos/runsc sha256 " + "a" * 64)), "not the reviewed " + "a" * 64),
+            ("sha256", lambda: allow.write_text(re.sub(
+                r"(?m)^(/usr/lib/agentos/gvisor-bin/prewarmer sha256 )\w+$", r"\g<1>" + "a" * 64, allow.read_text())),
+             "not the reviewed " + "a" * 64),
             # go on a Go binary with no build info and cgo code
             ("cgo, no info", lambda: shutil.copy(str(self.bins["cgo"]) + "-noinfo", root / "usr/lib/agentos/runsc"),
              "a Go binary with cgo (Go, no cgo setting, cgo code)"),
+            # go on a Go binary whose build info records no cgo setting and that holds cgo code
+            ("cgo, no setting", lambda: shutil.copy(str(self.bins["cgo"]) + "-nosetting", root / "usr/lib/agentos/runsc"),
+             "a Go binary with cgo (Go, no cgo setting, cgo code)"),
+            # go on a binary whose build info says cgo off over cgo code
+            ("cgo, says 0", lambda: shutil.copy(str(self.bins["cgo"]) + "-says0", root / "usr/lib/agentos/runsc"),
+             "a Go binary with cgo (Go CGO_ENABLED=0 but cgo code)"),
+            # sha256 on a file too large to be declared by review alone
+            ("sha256 size", lambda: allow.write_text(allow.read_text().replace(
+                "/usr/lib/agentos/runsc go", "/usr/lib/agentos/runsc sha256 " + "a" * 64)), "only a static file of at most"),
             # linked, with a link input missing from the status the scan reads
             ("missing", lambda: (out / "guest" / se.STATUS).write_text(STATUS % "libavcodec-pin"),
              "its link inputs ['libcap-dev'] are not in guest/agentos.dpkg-status"),
