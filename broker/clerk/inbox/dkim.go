@@ -67,7 +67,8 @@ func relaxedBody(body []byte, limit int) []byte {
 	return out
 }
 
-// sigTags parses a DKIM-Signature's tag list; a repeated tag is an error.
+// sigTags parses a DKIM-Signature's tag list; a repeated tag is an error,
+// with a nil map.
 func sigTags(value []byte) (map[string]string, error) {
 	out := map[string]string{}
 	for _, part := range strings.Split(strings.Join(strings.Fields(string(value)), ""), ";") {
@@ -221,10 +222,7 @@ func DKIMNames(raw []byte) []string {
 		if h.key() != "dkim-signature" {
 			continue
 		}
-		t, err := sigTags(h.value)
-		if err != nil {
-			continue
-		}
+		t, _ := sigTags(h.value) // nil when it does not parse, which names nothing
 		if n := dkimName(t); n != "" && !contains(out, n) {
 			out = append(out, n)
 		}
