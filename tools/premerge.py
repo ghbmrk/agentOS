@@ -629,6 +629,11 @@ HELD = {"assurance": (), "vulncheck": (), "image": ("image-vulncheck",), "lane-g
 # The PR-triggered workflow files left out of HELD: every job of ci and trusted-base is a required check of main's
 # ruleset, and premerge is the gate itself. A workflow file with a PR trigger is in exactly one of the two (#5385).
 UNHELD = ("ci", "trusted-base", "premerge")
+# PREMERGE-gate-not-base-excusable (#6411): the HELD workflows whose verdict is on the PR's own diff (base to head), so a
+# failure in main's run of the merge base says nothing about the PR. None of their jobs is ever excused: mutgate's
+# `claimed` carries a stale head and `mutgate` a survivor, whatever the base did. The rest judge the tree and keep the
+# #3532 excusal of a failure the head inherited.
+DIFF_GATES = ("mutgate", "lane-gate", "word-budget")
 PASSED = ("success", "skipped")
 NO_RUNS = "needs-runs: every verdict is in; pass --runs <runs.json> (tools/premerge_runs.sh builds it) to read the held checks"
 _GLOB = re.compile(r"[A-Za-z0-9._/*-]+")
@@ -749,7 +754,8 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
     `runs` is {"repo": ..., "pr": {"number", "repo", "branch"}, "head": [...], "base": [...]}: this repository, the PR's
     number and head repository and branch, and the Actions runs (API JSON) on the head and on the merge base, each
     failed one with a `jobs` list (the head's latest attempt, the base's first). Only this PR's runs count (`_bind`). A run passes on `success` or
-    `skipped`, or on `failure` when every failed job is one HELD exempts or one that failed on the merge base too.
+    `skipped`, or on `failure` when every failed job is one HELD exempts or one that failed on the merge base too, never in
+    a DIFF_GATES workflow.
     A queued, running, cancelled or timed-out run holds, and so does a missing one the workflow's PR trigger owes, as
     `unbound` when only this branch's runs that name no PR or another PR are on the head."""
     pr = runs.get("pr") if isinstance(runs, dict) else None
@@ -775,7 +781,7 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
             continue
         if state == "failure":
             jobs = _jobs(r, r.get("run_attempt"))
-            excused = set(exempt) | _base_failed(runs["base"], path, onto, runs["repo"])
+            excused = set() if name in DIFF_GATES else set(exempt) | _base_failed(runs["base"], path, onto, runs["repo"])
             bad = [(n, c) for n, c in jobs or [] if c not in PASSED]
             if bad and all(c == "failure" and n in excused for n, c in bad):
                 continue

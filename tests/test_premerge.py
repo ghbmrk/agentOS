@@ -1349,6 +1349,22 @@ class PremergeTest(unittest.TestCase):
         mixed["jobs"].append({"run_id": 99, "run_attempt": 1, "name": "deps", "conclusion": "failure"})
         self.assertEqual(held([mixed], [mainrun()]), no)  # a list with any foreign job is unread, not filtered
 
+    def test_diff_gate_failure_is_never_base_excused(self):
+        # PREMERGE-gate-not-base-excusable (#6411): a diff gate's failed job holds even when main's own first-attempt run
+        # of the merge base failed the same job; a tree check's inherited failure is still excused.
+        self.assertEqual(premerge.DIFF_GATES, ("mutgate", "lane-gate", "word-budget"))
+        self.assertTrue(all(premerge.HELD[g] == () for g in premerge.DIFF_GATES))
+        onto, sha = self.held_repo()
+        ok = self.wf(1, "vulncheck", "success", sha)
+        held = lambda *runs, base=(): premerge.checks_held(self.r, bundle([ok, *runs], base), "HEAD", "main")
+        for name, jobs in (("mutgate", ["claimed", "mutgate"]), ("mutgate", ["mutgate"]), ("mutgate", ["mutants pkg shard 1 of 2"]),
+                           ("lane-gate", ["lane-gate"]), ("word-budget", ["count"])):
+            run = self.wf(5, name, "failure", sha, jobs=[(j, "failure") for j in jobs])
+            mainrun = self.wf(9, name, "failure", onto, event="push", branch="main", jobs=[(j, "failure") for j in jobs])
+            self.assertEqual(held(run, base=[mainrun]), [f"{name}:failure"], (name, jobs))
+            self.assertEqual(held({**run, "name": "formal", "path": ".github/workflows/formal.yml"},
+                                  base=[{**mainrun, "name": "formal", "path": ".github/workflows/formal.yml"}]), [], (name, jobs))
+
     def test_image_vulncheck_is_the_one_exempt_job(self):
         # #5366: image-vulncheck stays out (Mark's #2919 paste); every other image job is held.
         self.assertEqual(premerge.HELD["image"], ("image-vulncheck",))
