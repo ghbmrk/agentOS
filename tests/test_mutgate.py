@@ -2995,7 +2995,7 @@ class MovedDecls(unittest.TestCase):
                     (pkg / name).write_text(body)
                 git("add", "-A")
                 git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", side)
-            diff = git("diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "--no-renames", "HEAD~1", "HEAD").stdout
+            diff = git("diff", "-U0", "--text", "--src-prefix=a/", "--dst-prefix=b/", "--no-renames", "HEAD~1", "HEAD").stdout  # as main() runs it
             for name, body in (tree or {}).items():
                 (pkg / name).write_text(body)
             with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "ROOT", pathlib.Path(d)):
@@ -3121,6 +3121,102 @@ class MovedDecls(unittest.TestCase):
         self.assertEqual(self.reach({"hint_test.go": MOVE_TEST, "u_test.go": 'package hint\n\nimport "unicode"\n\nvar _ = unicode.IsDigit\n'},
                                     {"hint_test.go": added, "u_test.go": 'package hint\n\nimport "unicode"\n\nvar _ = unicode.IsDigit\n'}),
                          (["TestDown"], ["TestDown"]))
+
+    def test_a_package_wide_directive_is_every_test(self):
+        # #6377: a //go:debug line sets a GODEBUG default for the whole test binary, so adding, changing,
+        # removing or moving one changes every test of the package, not only its own file's. A //go:
+        # directive not known to reach only its declaration or file is read so too (fail closed).
+        # REQ: MUT-go-debug-every
+        other = 'package hint\n\nimport "testing"\n\nfunc TestOther(t *testing.T) {}\n'
+        base = {"hint_test.go": MOVE_TEST, "other_test.go": other}
+        debug = "//go:debug panicnil=1\n\n"
+        for name, was, now in (
+                ("added above the package clause", base, {**base, "other_test.go": debug + other}),
+                ("added right above it", base, {**base, "other_test.go": debug.rstrip("\n") + "\n" + other}),
+                ("changed", {**base, "other_test.go": debug + other},
+                 {**base, "other_test.go": debug.replace("=1", "=0") + other}),
+                ("removed", {**base, "other_test.go": debug + other}, base),
+                ("moved to another file", {**base, "other_test.go": debug + other},
+                 {"hint_test.go": debug + MOVE_TEST, "other_test.go": other}),
+                ("in a new file", base, {**base, "new_test.go": debug + "package hint\n"}),
+                ("misplaced on a function", base,
+                 {**base, "other_test.go": other.replace("func TestOther", "//go:debug panicnil=1\nfunc TestOther")}),
+                ("a directive not known", base, {**base, "other_test.go": "//go:future x\n\n" + other}),
+                # Security on #6419: go skips a leading byte order mark and reads the directive behind it.
+                ("behind a byte order mark", base, {**base, "other_test.go": "\ufeff" + debug + other}),
+                ("indented, as go/build reads it", base, {**base, "other_test.go": "\t" + debug + other}),
+                # Text go refuses to compile (a NUL, a BOM past the start) is not read: every test.
+                ("a NUL", base, {**base, "other_test.go": other + "// \0\n"}),
+                ("a byte order mark past the start", base, {**base, "other_test.go": other + "// \ufeff\n"})):
+            with self.subTest(name):
+                self.assertEqual(self.reach(was, now), (None, None))
+        # An unchanged go:debug line changes nothing: an edit elsewhere in its file is still that code's.
+        held = {**base, "other_test.go": debug + other}
+        self.assertEqual(self.reach(held, {**held, "other_test.go": debug + other.replace("{}\n", "{\n\t_ = Up(1)\n}\n")}),
+                         (["TestOther"], ["TestOther"]))
+        # A directive that reaches only its declaration stays that declaration's tests.
+        self.assertEqual(self.reach(base, {**base, "hint_test.go": MOVE_TEST.replace("func one()", "//go:noinline\nfunc one()")}),
+                         (["TestUp"], ["TestUp"]))
+        for d in ("go:debug x=1", "go:linkname a b", "go:future"):
+            self.assertTrue(mutgate._decls("broker/hint/a_test.go", f"//{d}\npackage hint\n")[0][5], d)
+        for d in ("go:build linux", "go:noinline", "go:nosplit", "go:embed x.txt"):
+            self.assertFalse(mutgate._decls("broker/hint/a_test.go", f"//{d}\npackage hint\n")[0][5], d)
+
+    def test_go_text_reads_go_source_as_go_does(self):
+        # Security on #6419: every Go-source read goes through go_text, which skips one leading byte
+        # order mark as go/scanner does and refuses what go does not compile (#6377).
+        # REQ: MUT-go-debug-every
+        self.assertEqual(mutgate.go_text("\ufeffpackage p\n".encode()), "package p\n")
+        self.assertEqual(mutgate.go_text(b"package p\n"), "package p\n")
+        for raw in (b"package p\n// \xff\n", b"package p\n// \x00\n", "\ufeff\ufeffpackage p\n".encode(),
+                    "package p\n// \ufeff\n".encode()):
+            self.assertIsNone(mutgate.go_text(raw), raw)
+        with tempfile.TemporaryDirectory() as d:
+            pkg = pathlib.Path(d) / "broker" / "p"
+            pkg.mkdir(parents=True)
+            (pkg / "a_test.go").write_bytes(b'package p\n\nimport "testing"\n\nfunc TestA(t *testing.T) {}\n// \xff\n')
+            with mock.patch.object(mutgate, "BROKER", pkg.parent):
+                self.assertIsNone(mutgate.head_tests({"broker/p/a_test.go": {5}}, "p"))
+                self.assertTrue(mutgate.names_file(pkg, "x.txt"))
+
+    def test_directives_match_go_build(self):
+        # Differential check (Security on #6419): each header spelling go/build reads a //go: directive
+        # from, other than one LOCAL_DIRECTIVES holds, is every test here.
+        # REQ: MUT-go-debug-every
+        corpus = {
+            "plain_test.go": "//go:debug panicnil=1\npackage p\n",
+            "blank_test.go": "//go:debug panicnil=1\n\npackage p\n",
+            "bom_test.go": "\ufeff//go:debug panicnil=1\npackage p\n",
+            "crlf_test.go": "//go:debug panicnil=1\r\npackage p\r\n",
+            "tab_test.go": "\t//go:debug panicnil=1\npackage p\n",
+            "space_test.go": "  //go:debug panicnil=1\npackage p\n",
+            "doc_test.go": "// Package p.\n//go:debug panicnil=1\npackage p\n",
+            "block_test.go": "/* x */\n//go:debug panicnil=1\npackage p\n",
+            "build_test.go": "//go:build linux\n\n//go:debug panicnil=1\npackage p\n",
+            "future_test.go": "//go:future\npackage p\n",
+            "local_test.go": "//go:build linux\n\npackage p\n",
+        }
+        oracle = ('package main\n\nimport (\n\t"encoding/json"\n\t"go/build"\n\t"os"\n)\n\nfunc main() {\n'
+                  '\tp, err := build.ImportDir(os.Args[1], build.IgnoreVendor)\n\tif err != nil {\n\t\tpanic(err)\n\t}\n'
+                  '\tjson.NewEncoder(os.Stdout).Encode(p.TestDirectives)\n}\n')
+        with tempfile.TemporaryDirectory() as d:
+            pkg, tool = pathlib.Path(d) / "p", pathlib.Path(d) / "oracle"
+            pkg.mkdir()
+            tool.mkdir()
+            (pkg / "p.go").write_text("package p\n")
+            for name, text in corpus.items():
+                (pkg / name).write_bytes(text.encode())
+            (tool / "main.go").write_text(oracle)
+            env = {**os.environ, "GOOS": "linux", "GO111MODULE": "off", "GOFLAGS": ""}
+            got = json.loads(subprocess.run(["go", "run", "main.go", str(pkg)], cwd=tool, env=env, capture_output=True,
+                                            text=True, check=True).stdout) or []
+        wide = {pathlib.Path(g["Pos"]["Filename"]).name for g in got
+                if g["Text"][len("//go:"):].split()[0] not in mutgate.LOCAL_DIRECTIVES}
+        self.assertEqual(wide, set(corpus) - {"local_test.go"})  # go/build reads every spelling above
+        for name, text in corpus.items():
+            with self.subTest(name):
+                read = mutgate._decls(f"broker/p/{name}", mutgate.go_text(text.encode()))
+                self.assertEqual(any(x[5] for x in read if x[1] == "header"), name in wide)
 
 
     def test_file_name_constraints_cover_every_port(self):
