@@ -1183,8 +1183,24 @@ class LintTest(unittest.TestCase):
                 def failed_generators(self):
                     return self.failed
 
+                def user_manager(self):
+                    return User()
+
                 def stop(self):
                     stopped.append(1)
+
+            class User:
+                """Root's user manager: its units are read from its UnitPath (#6002)."""
+                failed = set()
+
+                def unit_path(self):
+                    return ["/etc/systemd/user", "/usr/lib/systemd/user"]
+
+                def show(self, units, props):
+                    return shown({u: ("loaded", "/etc/systemd/user/" + u, []) for u in units})
+
+                def failed_generators(self):
+                    return self.failed
             real = offline_systemd.Manager
             offline_systemd.Manager = Fake
             try:
@@ -1194,11 +1210,19 @@ class LintTest(unittest.TestCase):
                         with self.assertRaisesRegex(SystemExit, "generators failed"):
                             r.lint(d, d, "", lambda view: lambda p: False)
                 Fake.failed = set()
-                self.assertEqual([u["unit"] for u in r.lint(d, d, "", lambda view: lambda p: False)["units"]],
-                                 ["a.service"])
+                User.failed = {"x-user-generator"}
+                with self.assertRaisesRegex(SystemExit, "root's user manager: generators failed"):
+                    r.lint(d, d, "", lambda view: lambda p: False)
+                User.failed = set()
+                (pathlib.Path(v.root) / "etc/systemd/user").mkdir(parents=True)
+                (pathlib.Path(v.root) / "etc/systemd/user/b.service").write_text("[Service]\n")
+                got = r.lint(d, d, "", lambda view: lambda p: False)
+                self.assertEqual([(u["unit"], u["user"]) for u in got["units"]],
+                                 [("a.service", False), ("b.service", True)])
+                self.assertEqual((got["managers"], got["env"]), ([], {}))
             finally:
                 offline_systemd.Manager = real
-            self.assertEqual(len(stopped), 3)
+            self.assertEqual(len(stopped), 4)
 
 
 class NamesTest(unittest.TestCase):
@@ -1258,12 +1282,71 @@ class NamesTest(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, "a name with a byte outside"):
                     r.names(v, r.unit_dirs(v))
 
-    def test_the_control_is_a_drop_in_of_ours_on_a_packaged_root_unit(self):
-        (p, text), = r.CONTROL.items()
-        self.assertTrue(p.startswith("etc/systemd/system/systemd-tmpfiles-setup.service.d/"))
-        self.assertIn("LD_PRELOAD", text)
-        self.assertEqual(r.CONTROL_WANT, 'variable "LD_PRELOAD"')
+    def test_the_control_is_a_drop_in_of_ours_on_a_packaged_root_unit_of_each_manager(self):
+        self.assertEqual(sorted(p.split("/")[2] for p in r.CONTROL), ["system", "user"])
+        want = r.CONTROL_WANT.split("\n")
+        self.assertEqual(len(want), 2)
+        for p, text in r.CONTROL.items():
+            self.assertTrue(p.split("/", 3)[3].startswith("systemd-tmpfiles-setup.service.d/"), p)
+            self.assertIn("LD_PRELOAD", text)
+            # each refusal names its own file, so one manager's cannot stand for the other's
+            self.assertEqual(len([w for w in want if p + ": Environment=LD_PRELOAD" in w]), 1, p)
+        self.assertTrue(want[1].startswith("root's user manager: "))
 
+
+class ManagerConfTest(unittest.TestCase):
+    """manager_confs() prints each system.conf, user.conf and .conf.d file of ours (#6002 item 2)."""
+
+    def test_only_files_of_ours_are_printed_and_a_mask_is_not(self):
+        bad = "[Manager]\nDefaultEnvironment=BASH_ENV=/tmp/x\n"
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/etc/systemd/user.conf.d/z.conf": bad, "/etc/systemd/system.conf": bad,
+                         "/usr/lib/systemd/user.conf.d/p.conf": bad, "/usr/lib/systemd/system.conf.d/l.conf":
+                         "-> /usr/lib/systemd/user.conf.d/p.conf", "/etc/systemd/system.conf.d/m.conf": "-> /dev/null",
+                         "/root/.config/systemd/user.conf": bad, "/etc/xdg/systemd/user.conf.d/x.conf": bad,
+                         "/etc/systemd/user.conf.d/z.txt": bad})
+            got = [c["path"] for c in r.manager_confs(v, lambda p: p == "/usr/lib/systemd/user.conf.d/p.conf")]
+        self.assertEqual(got, ["/etc/systemd/system.conf", "/etc/systemd/user.conf.d/z.conf",
+                               "/usr/lib/systemd/system.conf.d/l.conf", "/root/.config/systemd/user.conf",
+                               "/etc/xdg/systemd/user.conf.d/x.conf"])
+
+
+class EnvFilesTest(unittest.TestCase):
+    """env_files() prints the env files units of ours name, as the tree holds them at boot (#6002 item 3)."""
+
+    def test_the_tree_copy_of_each_named_file(self):
+        unit = ("[Service]\nEnvironmentFile=-/etc/a.env\n EnvironmentFile = /etc/l.env \nEnvironmentFile=/etc/gone.env\n"
+                "EnvironmentFile=/etc/r.env\nEnvironmentFile=rel.env\n")
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/etc/a.env": "A=1\n", "/etc/l.env": "-> /etc/a.env", "/etc/r.env": "-> /run/r.env",
+                         "/run/r.env": "R=1\n", "/etc/p.env": "P=1\n"})
+            units = [{"files": [{"ours": True, "text": unit}]},
+                     {"files": [{"ours": False, "text": "[Service]\nEnvironmentFile=/etc/p.env\n"}]}]
+            got = r.env_files(v, units)
+        # /run is a boot mount (BootView), a package's line is the package's, a relative path is the lint's to refuse
+        self.assertEqual(got, {"/etc/a.env": "A=1\n", "/etc/l.env": "A=1\n"})
+
+
+class UserManagerTest(unittest.TestCase):
+    """offline_systemd.UserManager asks root's user manager over its own bus (#6002)."""
+
+    def test_it_asks_with_user_and_reads_its_unit_path(self):
+        m = offline_systemd.Manager.__new__(offline_systemd.Manager)
+        calls = []
+
+        def ctl(args, check=True, user=False):
+            calls.append((user, args))
+            return type("R", (), {"stdout": "UnitPath=/etc/systemd/user /usr/lib/systemd/user\n"})()
+        m.ctl = ctl
+        u = offline_systemd.UserManager(m)
+        self.assertEqual(u.unit_path(), ["/etc/systemd/user", "/usr/lib/systemd/user"])
+        self.assertEqual(calls, [(True, ["show", "-p", "UnitPath"])])
+
+    def test_it_is_the_trees_systemd_user_outside_pid_1s_units(self):
+        # not a unit of PID 1, whose type-wide service.d drop-ins would apply to it
+        self.assertIn("exec env -i HOME=/root USER=root LOGNAME=root XDG_RUNTIME_DIR=/run/user/0 "
+                      "/usr/lib/systemd/systemd --user", offline_systemd.USER_MANAGER)
+        self.assertNotIn("systemd-run", offline_systemd.USER_MANAGER)
 
 if __name__ == "__main__":
     unittest.main()

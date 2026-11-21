@@ -19,7 +19,7 @@ import (
 // a kind json refuses (float, for NaN; complex, interface, chan, func), a map
 // key json refuses, a recursive type (a cyclic value fails), a marshaler
 // other than the ones the proofs read, or a json.RawMessage anywhere but
-// kernelCall.Args, which mustRaw fills only from a Marshal that succeeded.
+// kernelCall.Args, which Conn.Call fills only from a Marshal that succeeded.
 // Embedded fields are walked whether exported or not, since json promotes
 // their fields.
 func marshalProblems(roots map[string]reflect.Type) []string {
@@ -93,10 +93,10 @@ func marshalProblems(roots map[string]reflect.Type) []string {
 	return out
 }
 
-// TestCallsAlwaysMarshal pins what the Mutant-equivalent proofs for
-// kernelsock.go's Conn.Call and wire.go's remote.call rest on: json.Marshal
-// of a kernelCall or a call cannot fail, so their `if err != nil` is never
-// taken. A type change that could make it fail fails this test, so the
+// TestCallsAlwaysMarshal pins what wire.go's remote.call Mutant-equivalent
+// proof and kernelsock.go's Conn.Call dropping its second Marshal error rest
+// on: json.Marshal of a call, or of a kernelCall whose Args a Marshal filled,
+// cannot fail. A type change that could make it fail fails this test, so the
 // proofs are read again (#6253).
 func TestCallsAlwaysMarshal(t *testing.T) {
 	if p := marshalProblems(map[string]reflect.Type{"call": reflect.TypeFor[call](), "kernelCall": reflect.TypeFor[kernelCall]()}); len(p) > 0 {
