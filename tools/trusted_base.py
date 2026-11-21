@@ -73,7 +73,7 @@ Usage:
       check the measure sentences of the D-159 decisions the head adds; each named PR's head is
       refs/remotes/pr/<N> in REPO (fetched from REMOTE's refs/pull/<N>/head with --fetch). Exit 0
       pass, 1 a missing or wrong sentence, 2 a measurement or fetch error.
-  tools/trusted_base.py check --base-tree DIR --head-tree DIR --body FILE [--pr N] [--markdown FILE]
+  tools/trusted_base.py check --base-tree DIR --head-tree DIR --body FILE --pr N [--markdown FILE]
       the registry is the head tree's; the base tree's registry is read only to find
       reclassified parsers. Exit 0 pass, 1 growth without a reason or an unclassified
       package, 2 a measurement error.
@@ -133,18 +133,37 @@ def list_lines(text, where):
         yield n, line
 
 
-def read_list(path):
-    """A list file's text, line ends untranslated (read_text() turns "\r" into "\n")."""
-    return pathlib.Path(path).read_bytes().decode("utf-8", "replace")
+def tree_file(tree, rel):
+    """tree/rel, or None when absent. A symlink at any step below tree, or a file that is not a
+    regular file, is refused (#6406): CI checks the PR's tree out under pull_request_target, and a
+    committed symlink would have this tool read and echo a runner file as one of the PR's own."""
+    path = pathlib.Path(tree)
+    for part in pathlib.PurePosixPath(rel).parts:
+        path = path / part
+        if path.is_symlink():
+            raise MeasureError(f"{path}: a symlink; {rel} is read only as a committed regular file")
+    if not path.exists():
+        return None
+    if not path.is_file():
+        raise MeasureError(f"{path}: not a regular file")
+    return path
+
+
+def read_list(tree, rel):
+    """A list file's text, line ends untranslated (read_text() turns "\r" into "\n"); None when absent."""
+    path = tree_file(tree, rel)
+    return None if path is None else path.read_bytes().decode("utf-8", "replace")
 
 
 def trusted_mains(tree):
     """The `wiring cmd/<name>` lines of the tree's core list, as ./cmd/<name>."""
     path = pathlib.Path(tree) / CORE_LIST
     try:
-        text = read_list(path)
+        text = read_list(tree, CORE_LIST)
     except OSError as e:
         raise MeasureError(f"cannot read {path}: {e}")
+    if text is None:
+        raise MeasureError(f"cannot read {path}: missing")
     mains = []
     for _, line in list_lines(text, path):
         w = line.split("#", 1)[0].split()
@@ -260,16 +279,16 @@ def measure(pkgs, rules):
 
 def read_reasons(tree):
     """The lines of tree's reason record, comments and blanks dropped; none when it has no record."""
-    path = pathlib.Path(tree) / REASONS
-    if not path.exists():
+    text = read_list(tree, REASONS)
+    if text is None:
         return []
-    return [line.strip() for _, line in list_lines(read_list(path), path)
+    return [line.strip() for _, line in list_lines(text, pathlib.Path(tree) / REASONS)
             if line.strip() and not line.lstrip().startswith("#")]
 
 
-def reasons(base_lines, head_lines, pr=None):
+def reasons(base_lines, head_lines, pr):
     """({key: reason}, [problem]) from the reason-record lines the head adds to the base's, for PR
-    `pr` (any PR when None). A line the base already holds is history and waives nothing."""
+    `pr`. A line the base already holds is history and waives nothing."""
     got, bad, old = {}, [], {" ".join(x.split()) for x in base_lines}
     for line in head_lines:
         if " ".join(line.split()) in old:
@@ -281,7 +300,7 @@ def reasons(base_lines, head_lines, pr=None):
         key, num, why = r.group(1).lower(), int(r.group(2)), r.group(3)
         if key not in KEYS:
             bad.append(f"{REASONS}: `{line.strip()}`: the key must be one of {', '.join(KEYS)}")
-        elif pr is not None and num != int(pr):
+        elif num != int(pr):
             bad.append(f"{REASONS}: `{line.strip()}`: names #{num}, not this PR (#{int(pr)})")
         elif len(why.split()) < 2 or PLACEHOLDER.match(why):
             bad.append(f"{REASONS}: `{line.strip()}`: the reason must be at least two words, not a placeholder")
@@ -330,12 +349,12 @@ def table(base, head, owed, problems, mains):
 
 
 def read_rules(tree, required):
-    path = pathlib.Path(tree) / REGISTRY
-    if not path.exists():
+    path, text = pathlib.Path(tree) / REGISTRY, read_list(tree, REGISTRY)
+    if text is None:
         if required:
             raise MeasureError(f"{path} is missing")
         return []
-    return parse_registry(read_list(path), str(path))
+    return parse_registry(text, str(path))
 
 
 def parse_core(text, where=CORE):
@@ -362,8 +381,8 @@ def parse_core(text, where=CORE):
 
 
 def read_core(tree):
-    path = pathlib.Path(tree) / CORE
-    return parse_core(read_list(path), str(path)) if path.exists() else None
+    text = read_list(tree, CORE)
+    return None if text is None else parse_core(text, str(pathlib.Path(tree) / CORE))
 
 
 def measure_core(tree, core):
@@ -450,15 +469,16 @@ def parse_ceilings(text, where=CEILINGS):
 
 
 def read_ceilings(tree):
-    path = pathlib.Path(tree) / CEILINGS
-    return parse_ceilings(read_list(path), str(path)) if path.exists() else None
+    text = read_list(tree, CEILINGS)
+    return None if text is None else parse_ceilings(text, str(pathlib.Path(tree) / CEILINGS))
 
 
 def old_core_dirs(tree):
-    path = pathlib.Path(tree) / OLD_CORE
-    if not path.exists():
+    text = read_list(tree, OLD_CORE)
+    if text is None:
         return set()
-    return {s.strip() for _, s in list_lines(read_list(path), str(path)) if s.strip() and not s.lstrip().startswith("#")}
+    return {s.strip() for _, s in list_lines(text, str(pathlib.Path(tree) / OLD_CORE))
+            if s.strip() and not s.lstrip().startswith("#")}
 
 
 def old_core_lines(tree, dirs):
@@ -478,8 +498,8 @@ def old_core_lines(tree, dirs):
 
 def spec_words(tree):
     """SPEC.md's words as tools/word_budget.py counts them: runs of non-whitespace."""
-    path = pathlib.Path(tree) / SPEC
-    return len(path.read_text(encoding="utf-8").split()) if path.exists() else 0
+    path = tree_file(tree, SPEC)
+    return len(path.read_text(encoding="utf-8").split()) if path else 0
 
 
 UNITS = {"trusted-lines": "lines", "spec-words": "words"}
@@ -493,7 +513,7 @@ def ceiling_measures(tree, core_measure, dirs):
     return {"trusted-lines": core + old, "core": core, "old-core": old, "spec-words": spec_words(tree)}
 
 
-def compare_ceilings(base_c, head_c, base, head, body, decisions, pr=None):
+def compare_ceilings(base_c, head_c, base, head, body, decisions, pr):
     """(problems, caps) for the ceilings (D-310). A measure fails when it ends above its ceiling
     and above the base's measure: while main is over a ceiling a PR may not grow it, and no PR
     crosses one upward. The ceiling is the base's; a head that raises or deletes one needs a
@@ -513,8 +533,6 @@ def compare_ceilings(base_c, head_c, base, head, body, decisions, pr=None):
         if not waived:
             if not w:
                 why = "the PR body has no `Ceiling: <decision ID>` line"
-            elif pr is None:
-                why = f"`Ceiling: {w.group(1)}` cannot be checked without the PR number (--pr)"
             else:
                 why = f"`Ceiling: {w.group(1)}` names no active DECISIONS.md row on the base branch that names #{pr}"
             problems += [f"{r}: only Mark raises a ceiling (D-310), and {why}" for r in raised]
@@ -588,8 +606,8 @@ def growth_claims(base_tree, head_tree):
     """[(where, ID, text)] for each decision the head tree adds that records trusted-core growth
     under D-159: a DECISIONS.md row or a decisions/D-*.md file whose ID the base tree lacks."""
     def rows(tree):
-        p = pathlib.Path(tree, "DECISIONS.md")
-        return p.read_text().split("\n") if p.exists() else []
+        p = tree_file(tree, "DECISIONS.md")
+        return p.read_text().split("\n") if p else []
     base_ids = {m.group(1) for m in map(CLAIM_ROW.match, rows(base_tree)) if m}
     out = []
     for n, line in enumerate(rows(head_tree), 1):
@@ -599,7 +617,7 @@ def growth_claims(base_tree, head_tree):
     for f in sorted(pathlib.Path(head_tree, "decisions").glob("D-*.md")):
         if f.stem == "D-159" or pathlib.Path(base_tree, "decisions", f.name).exists():
             continue
-        text = f.read_text()
+        text = tree_file(head_tree, f"decisions/{f.name}").read_text()
         if "D-159" in text and GROWTH.search(text):
             out.append((f"decisions/{f.name}", f.stem, text))
     return out
@@ -668,7 +686,7 @@ def run_claims(base_tree, head_tree, repo, onto="HEAD", fetch=None):
     return problems, "\n".join(out) + "\n"
 
 
-def run_check(base_tree, head_tree, body, fallback_tree=None, pr=None):
+def run_check(base_tree, head_tree, body, pr, fallback_tree=None):
     rules = read_rules(head_tree, True)
     base_rules = read_rules(base_tree, False)
     head_pkgs = packages(head_tree)
@@ -692,8 +710,8 @@ def run_check(base_tree, head_tree, body, fallback_tree=None, pr=None):
     cbase = base_core and measure_core(base_tree, base_core)
     chead = head_core and measure_core(head_tree, head_core)
     # The base tree's decisions: a row the PR adds itself is not yet Mark's record (#2945).
-    decisions = pathlib.Path(base_tree, "DECISIONS.md")
-    decisions = decisions.read_text() if decisions.exists() else ""
+    decisions = tree_file(base_tree, "DECISIONS.md")
+    decisions = decisions.read_text() if decisions else ""
     cproblems, cowed = compare_core(base_core, head_core, cbase, chead, body, decisions, pr)
     # The ceilings (D-310): old-core directories listed on either side count on both, so dropping
     # a line of tools/old_core.txt cannot shed lines whose files stay.
@@ -725,7 +743,8 @@ def main(argv=None):
     c.add_argument("--base-tree", required=True)
     c.add_argument("--head-tree", required=True)
     c.add_argument("--body", required=True, help="file holding the PR body")
-    c.add_argument("--pr", type=int, help="the PR number a waiving decision row must name")
+    # Required (#6406): without it a reason line naming any PR would pass, weaker than CI.
+    c.add_argument("--pr", type=int, required=True, help="the PR number a reason line or waiving decision row must name")
     c.add_argument("--markdown", help="also write the table to this file")
     a = ap.parse_args(argv)
     if a.cmd == "measure" and a.sentence and a.pr is None:
