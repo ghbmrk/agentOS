@@ -93,16 +93,22 @@ class LintTest(unittest.TestCase):
     def test_duplicate_assumption_id(self):
         text = "# A\n\n| ID | Assumption |\n|---|---|\n| X-U1 | a |\n| X-U2 | b |\n| X-U1 | c |\n"
         self.assertEqual(self.lint(**{"broker/x/ASSUMPTIONS.md": text}),
-                         ["broker/x/ASSUMPTIONS.md:7: duplicate ID X-U1 (first on line 5); a main merge keeps an edited row twice unless the clone ran `python3 tools/assumptions_merge.py --install`"])
+                         ["broker/x/ASSUMPTIONS.md:7: duplicate ID X-U1 (first on line 5); a main merge keeps an edited row twice unless the clone ran `python3 tools/record_merge.py --install`"])
 
     def test_distinct_assumption_ids_pass(self):
         text = "| ID | Assumption |\n|---|---|\n| X-U1 | a |\n| X-U2 | b |\n"
         self.assertEqual(self.lint(**{"broker/x/ASSUMPTIONS.md": text}), [])
 
+    def test_a_row_repeated_word_for_word_is_one_row(self):
+        # #6358: two PRs added one row; the union kept it twice. Another row of that ID still fails.
+        text = "| ID | Assumption |\n|---|---|\n| X-U1 | a |\n| X-U2 | b |\n| X-U1 | a |\n| X-U1 | c |\n"
+        self.assertEqual(self.lint(**{"broker/x/ASSUMPTIONS.md": text}),
+                         ["broker/x/ASSUMPTIONS.md:6: duplicate ID X-U1 (first on line 3); a main merge keeps an edited row twice unless the clone ran `python3 tools/record_merge.py --install`"])
+
     def test_hash_header_tables_and_other_tables_are_checked_only_by_id(self):
         text = "| # | A |\n|---|---|\n| P-1 | a |\n| P-1 | b |\n\n| Item | Size |\n|---|---|\n| x-y | 1 |\n| x-y | 2 |\n"
         self.assertEqual(self.lint(**{"broker/x/ASSUMPTIONS.md": text}),
-                         ["broker/x/ASSUMPTIONS.md:4: duplicate ID P-1 (first on line 3); a main merge keeps an edited row twice unless the clone ran `python3 tools/assumptions_merge.py --install`"])
+                         ["broker/x/ASSUMPTIONS.md:4: duplicate ID P-1 (first on line 3); a main merge keeps an edited row twice unless the clone ran `python3 tools/record_merge.py --install`"])
 
     # ASSUMPTIONS-ID: package-scoped row IDs
 
@@ -354,7 +360,7 @@ class AssumptionsUnionMerge(unittest.TestCase):
             self.git(d, "merge", "-q", "--no-edit", "main")
             self.assertEqual(f.read_text().count("| X-U2 |"), 2)
             self.assertEqual(list(doclint.assumption_ids(root, ["ASSUMPTIONS.md"])),
-                             ["ASSUMPTIONS.md:5: duplicate ID X-U2 (first on line 4); a main merge keeps an edited row twice unless the clone ran `python3 tools/assumptions_merge.py --install`"])
+                             ["ASSUMPTIONS.md:5: duplicate ID X-U2 (first on line 4); a main merge keeps an edited row twice unless the clone ran `python3 tools/record_merge.py --install`"])
 
 
 if __name__ == "__main__":
