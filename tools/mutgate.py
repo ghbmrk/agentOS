@@ -429,7 +429,9 @@ def names_file(pkg_dir, rel):
     for f in sorted(pkg_dir.glob("*.go")):
         if f.is_symlink() or not f.is_file():
             return True
-        texts.append(f.read_bytes().decode("utf-8", "replace"))
+        if (text := go_text(f.read_bytes())) is None:
+            return True
+        texts.append(text)
     code = [_uncommented(t, False) for t in texts]
     if any(PATH_VALUE.search(c) for c in code):
         return True
@@ -598,13 +600,26 @@ def merge_base(base, head):
                           check=True).stdout.strip()
 
 
+def go_text(raw):
+    """Go source bytes as the go toolchain reads them: one leading byte order mark skipped (go/scanner,
+    go/build), so a directive behind it is read; None for bytes go refuses to compile (not UTF-8, a NUL,
+    a BOM anywhere else), so every caller fails closed instead of reading a text go never builds (#6377)."""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    text = text[1:] if text.startswith("\ufeff") else text
+    return None if "\ufeff" in text or "\0" in text else text
+
+
 def base_text(mb, path):
-    """The text of path in commit mb when it is a regular file there, else None (a link is not read)."""
+    """The text of path in commit mb when it is a regular file there, else None (a link is not read);
+    a .go file is read by go_text."""
     r = subprocess.run(["git", "ls-tree", mb, "--", path], cwd=ROOT, capture_output=True, text=True, check=True)
     if not r.stdout.startswith(("100644 ", "100755 ")):
         return None
     blob = subprocess.run(["git", "cat-file", "blob", f"{mb}:{path}"], cwd=ROOT, capture_output=True, check=True)
-    return blob.stdout.decode("utf-8", "replace")
+    return go_text(blob.stdout) if path.endswith(".go") else blob.stdout.decode("utf-8", "replace")
 
 
 def _body(bare, d):
@@ -1063,7 +1078,9 @@ def head_tests(tests, pkg):
         if f.is_symlink():
             return None
         if f.is_file():
-            files[f"broker/{pkg}/{f.name}"] = f.read_bytes().decode("utf-8", "replace")
+            if (text := go_text(f.read_bytes())) is None:
+                return None
+            files[f"broker/{pkg}/{f.name}"] = text
     changed = {p: ls for p, ls in tests.items() if package_of(p) == pkg and p in files}
     if any(ls is None for ls in changed.values()):
         return None
@@ -1324,8 +1341,10 @@ def file_keys(pkg, names, lister, pkg_dir=None):
         sites[s["file"]].append(s)
     for s in json.loads(d.stdout):
         decls[s["file"]].append(s)
-    return {p.name: statement_keys(p.read_bytes().decode("utf-8", "replace"), sites[p.name], decls[p.name])
-            for p in files}, None
+    texts = {p.name: go_text(p.read_bytes()) for p in files}
+    if bad := sorted(n for n, t in texts.items() if t is None):
+        return None, f"broker/{pkg}/ holds .go files go does not compile as text (not UTF-8, a NUL or a misplaced BOM): {bad}"
+    return {n: statement_keys(t, sites[n], decls[n]) for n, t in texts.items()}, None
 
 
 def read_record(pkg, pkg_dir=None):
@@ -1933,7 +1952,12 @@ def unrun(was, every, code):
     evaluated, so text alone, not the profile, decides the other lines."""
     out = {}
     for p, ls in sorted(was.items()):
-        rows = _uncommented((BROKER / p.split("/", 1)[1]).read_bytes().decode("utf-8", "replace"), False).split("\n")
+        text = go_text((BROKER / p.split("/", 1)[1]).read_bytes())
+        if text is None:  # not Go text: every line it ran and the head does not is code (fail closed)
+            if left := sorted(ls - every.get(p, set())):
+                out[p] = left
+            continue
+        rows = _uncommented(text, False).split("\n")
         held = code.get(p, set())
         if left := sorted(n for n in ls - every.get(p, set()) if n <= len(rows) and rows[n - 1].strip()
                           and (n in held or not CLOSER.fullmatch(rows[n - 1].strip()))):
