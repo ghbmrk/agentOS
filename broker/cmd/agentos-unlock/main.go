@@ -281,7 +281,7 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		writeClerkAnchors(c.clerkAnchors, ca)
+		writeClerkAnchors(c.clerkAnchors, ca, nil)
 	}
 	if k.Counter, err = counter(st); err != nil {
 		return nil, err
@@ -336,11 +336,11 @@ func readRequest(path string) ([]byte, error) {
 	}
 	defer f.Close()
 	fi, err := f.Stat()
+	if err == nil && !fi.Mode().IsRegular() {
+		err = fmt.Errorf("%s is not a file", path)
+	}
 	if err != nil {
 		return nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a file", path)
 	}
 	b, err := io.ReadAll(io.LimitReader(f, maxRequest+1))
 	if err == nil && len(b) > maxRequest {
@@ -445,11 +445,11 @@ func storeRecipientID(st *seal.Store) (string, error) {
 	if err != nil || !ok {
 		return "", err
 	}
+	var x, ek []byte
 	w, err := handoff.ParseRecipient(v)
-	if err != nil {
-		return "", fmt.Errorf("the backup recipient in my store: %w", err)
+	if err == nil {
+		x, ek, err = handoff.SplitRecipient(w)
 	}
-	x, ek, err := handoff.SplitRecipient(w)
 	if err != nil {
 		return "", fmt.Errorf("the backup recipient in my store: %w", err)
 	}
@@ -547,11 +547,11 @@ func logStart(path string) ([]byte, error) {
 	}
 	defer f.Close()
 	fi, err := f.Stat()
+	if err == nil && !fi.Mode().IsRegular() {
+		err = fmt.Errorf("%s is not a file", path)
+	}
 	if err != nil {
 		return nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a file", path)
 	}
 	b := make([]byte, 4+kernel.MaxSetupFrame)
 	n, err := io.ReadFull(f, b)
@@ -567,8 +567,9 @@ func logStart(path string) ([]byte, error) {
 // the clerk mains require (MAIL-main-a-3). No anchors removes it, so a
 // clerk never starts on an earlier boot's. A failure is said, the file is
 // removed, and the kernel still starts: only the clerks go without.
-func writeClerkAnchors(path string, anchors []key.PublicKey) {
-	if err := putClerkAnchors(path, anchors); err != nil {
+// stop is putClerkAnchors'.
+func writeClerkAnchors(path string, anchors []key.PublicKey, stop func(int) bool) {
+	if err := putClerkAnchors(path, anchors, stop); err != nil {
 		fmt.Fprintf(os.Stderr, "agentos-unlock: the clerks' hardware keys: %v\n", err)
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintf(os.Stderr, "agentos-unlock: remove %s: %v\n", path, err)
@@ -576,7 +577,11 @@ func writeClerkAnchors(path string, anchors []key.PublicKey) {
 	}
 }
 
-func putClerkAnchors(path string, anchors []key.PublicKey) error {
+// putClerkAnchors writes the file for writeClerkAnchors through
+// privfile.WriteAtomic, then opens it to every reader. A crash between
+// the two leaves a file only root reads, which the clerks refuse until the
+// next boot writes it again. stop is a test seam only, as putCheckerSeed's.
+func putClerkAnchors(path string, anchors []key.PublicKey, stop func(int) bool) error {
 	dir := filepath.Dir(path)
 	if err := ownDir(dir, 0o755, 0o022); err != nil {
 		return err
@@ -588,28 +593,13 @@ func putClerkAnchors(path string, anchors []key.PublicKey) error {
 		return nil
 	}
 	b, err := handoff.EncodeAnchors(anchors)
-	if err != nil {
-		return err
-	}
-	f, err := os.CreateTemp(dir, ".anchors-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	_, err = f.Write(b)
 	if err == nil {
-		err = f.Chmod(0o644)
-	}
-	if err == nil {
-		err = f.Sync()
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
+		err = privfile.WriteAtomic(dir, filepath.Base(path), b, stop)
 	}
 	if err != nil {
 		return err
 	}
-	return os.Rename(f.Name(), path) // durable:exempt lifecycle:exempt durable is old core (tools/old_core.txt), so the trusted unlock step cannot link it; the anchors are public, rewritten each boot, and pinned in the store
+	return os.Chmod(path, 0o644)
 }
 
 // writeCheckerSeed makes path hold the store's code seed sealed under the
@@ -669,11 +659,11 @@ func putCheckerSeed(path string, st *seal.Store, root *[32]byte, stop func(int) 
 		return fmt.Errorf("in my store: %w", err)
 	}
 	defer s.Wipe()
+	var sealer []byte
 	k, err := clerkkey.Derive(root, handoff.CheckerName)
-	if err != nil {
-		return err
+	if err == nil {
+		sealer, err = k.Sealer()
 	}
-	sealer, err := k.Sealer()
 	k.Wipe()
 	if err != nil {
 		return err
@@ -688,12 +678,10 @@ func putCheckerSeed(path string, st *seal.Store, root *[32]byte, stop func(int) 
 
 // tpmSelections is every PCR selection of the store's tpm slots' boot
 // paths: a rotation cut short leaves two slots, and either would unseal.
+// Only a tpm slot has boot paths (seal.SlotInfo.Policies).
 func tpmSelections(st *seal.Store) [][]uint {
 	var out [][]uint
 	for _, sl := range st.Slots() {
-		if sl.Kind != seal.KindTPM {
-			continue
-		}
 		for _, p := range sl.Policies {
 			out = append(out, p.PCRs)
 		}
