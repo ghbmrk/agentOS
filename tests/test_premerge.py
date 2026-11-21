@@ -1368,6 +1368,53 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(held(img([("image-vulncheck", "cancelled")])), ["image:failure"])
         self.assertEqual(held(), ["image:missing"])
 
+    def test_comment_filter_admits_every_verdict(self):
+        # CI-premerge-event-filter (#6398): premerge.yml starts the gate for a comment only when its body, or its body before
+        # an edit, contains premerge.VERDICT in any case (GitHub's contains() ignores case); any other comment's run takes
+        # a group of its own (run_id), so it cannot replace the PR group's pending run, and skips the gate.
+        lines = (ROOT / ".github" / "workflows" / "premerge.yml").read_text().splitlines()
+        f = "(contains(github.event.comment.body, '{0}') || contains(github.event.changes.body.from, '{0}'))".format(premerge.VERDICT)
+        group = [l for l in lines if l.startswith("  group: ")]
+        gate = [l for l in lines if l.startswith("    if: (github.event_name == 'pull_request_target'")]
+        self.assertEqual(len(group), 1)
+        self.assertEqual(len(gate), 1)
+        self.assertIn(f"|| ({f} && github.event.issue.number) ||", group[0])
+        self.assertIn(f"|| (github.event.issue.pull_request && {f}) ||", gate[0])
+        for line in group + gate:  # no unfiltered way for a comment into the group or the gate
+            self.assertEqual(line.count("github.event.issue."), 1, line)
+            self.assertEqual(line.count("github.event.comment"), 1, line)
+        runs = lambda *bodies: any(premerge.VERDICT.lower() in (b or "").lower() for b in bodies)
+        # Differential: every comment whose posting, deletion or edit changes any verdict --check reads must start a run.
+        sha = "a" * 40
+        def c(body, at, edited=False):
+            return {"author_association": "OWNER", "created_at": at, "updated_at": at + ("x" if edited else ""), "body": body}
+        rec = f"Record: PR #7 · package X-1 · head {sha}"
+        bodies = [f"Verdict: accept\n{rec}\n<!-- record: {k} -->" for k in ("l3", "security", "ux", "potency")] + [
+            f"Verdict: accept\n{rec}\n<!-- record: combined -->\n<!-- record: security -->",
+            f"  Verdict: fix-list\n{rec}\n<!-- record: l3 -->", f"Verdict: reject\n{rec}\n<!-- record: security -->",
+            f"Verdict: accept\n<!-- record: l3 -->\n{rec}",  # misplaced marker
+            f"Verdict: accept\nRecord: PR #7 · package X 1 · head {sha}\n<!-- record: l3 -->",  # unparsed
+            f"verdict: accept\n{rec}\n<!-- record: l3 -->", f"VERDICT: accept\n{rec}\n<!-- record: l3 -->",
+            f"{rec}\n<!-- record: l3 -->", "<!-- record: l3 -->", "looks good", "", None,
+            f"> Verdict: accept\n> {rec}\n> <!-- record: l3 -->\nquoted",
+        ]
+        reads = lambda cs: [premerge.verdict(cs, 7, security=s) for s in (False, True)] + \
+            [premerge.verdict(cs, 7, lens=k) for k in ("ux", "potency", "combined")]
+        prior = [[], [c(bodies[0], "1")], [c(bodies[5], "1")], [c(bodies[1], "1"), c(bodies[0], "2")]]
+        changed = 0
+        for before in prior:
+            for b in bodies:
+                posted = before + [c(b, "5")]
+                if reads(posted) != reads(before):  # created, or deleted (the event carries the deleted body)
+                    changed += 1
+                    self.assertTrue(runs(b), b)
+                for old in bodies:  # edited from `old` to `b`
+                    if reads(before + [c(b, "5", edited=True)]) != reads(before + [c(old, "5")]):
+                        self.assertTrue(runs(b, old), (old, b))
+        self.assertGreater(changed, 10)
+        for b in ("looks good", "<!-- record: l3 -->", f"{rec}\n<!-- record: l3 -->", "", None):
+            self.assertFalse(runs(b), b)
+
     def test_every_pr_workflow_is_held_or_required(self):
         # PREMERGE-held-rest (#5385): a PR-triggered workflow outside HELD merges past a cancelled run unless main's
         # ruleset requires its jobs, so each workflow file with a PR trigger is HELD or UNHELD (ci, trusted-base,
@@ -1388,9 +1435,10 @@ class PremergeTest(unittest.TestCase):
         # names a workflow by its `name:`, which for testkit.yml is testkit-image.
         on = (wfs / "premerge.yml").read_text().split("workflow_run:\n", 1)[1].split("\n")[0]
         listed = {w.strip() for w in on.split("[", 1)[1].split("]", 1)[0].split(",")}
-        for stem in premerge.HELD:
-            name = next(l[6:].strip() for l in (wfs / f"{stem}.yml").read_text().splitlines() if l.startswith("name: "))
-            self.assertIn(name, listed, stem)
+        # CI-premerge-event-filter (#6398): the list is exactly HELD plus the UNHELD workflows the merge job waits on (ci,
+        # trusted-base), so a completion no check reads starts no run, and a new HELD entry fails until listed.
+        name = lambda stem: next(l[6:].strip() for l in (wfs / f"{stem}.yml").read_text().splitlines() if l.startswith("name: "))
+        self.assertEqual(sorted(listed), sorted(name(s) for s in [*premerge.HELD, *premerge.UNHELD] if s != "premerge"))
         # a mutgate shard cut at its timeout fails the run (mutgate.yml), and that failure is not excused
         onto, sha = self.held_repo()
         self.write(".github/workflows/mutgate.yml", "on:\n  pull_request:\n")
