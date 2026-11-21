@@ -29,9 +29,10 @@ package wipelint_test
 // reason. A call of a listed constructor with keys is the only right-hand
 // side of an assignment (`s, err := f(k)`, or =) in a statement list, each
 // key argument a local variable, and the statements right after it are the
-// builtin `clear(k)` or `defer clear(k)`, one per key. `clear(k)` wipes
-// before anything can return; `defer clear(k)` wipes when the function
-// returns, on every path, so the key lives until then. Any other use
+// builtin `clear(k)`, one per key, so the key is wiped straight after its
+// last use, before anything can return (#6383). `defer clear(k)` fails: it
+// wipes only when the function returns, so the key stays live through the
+// rest of the function, a serve loop's whole life included. Any other use
 // fails: an argument that is an expression, a wipe after an error check, a
 // clear of another variable, the call in a return, a var declaration, an
 // if header or another call's arguments, or the constructor taken as a
@@ -42,17 +43,28 @@ package wipelint_test
 //
 // A sealer may also come into being with no call: a conversion to a
 // sealer type, or a composite literal of one, from a possible key fails
-// outside a listed constructor's own body. A function declared to return
-// an interface (any) that returns a value holding a sealer counts as
-// making one.
+// outside the body of a listed constructor with keys. A function declared
+// to return an interface (any) that returns a value holding a sealer
+// counts as making one.
+//
+// The body of a listed constructor with keys, declared in the tree, is
+// held too (#6383): it keeps, copies, builds and derives no key, so the
+// caller's wipe is the only one owed. Each key parameter appears only as
+// the operand of len or cap, or as an argument of a function listed in
+// keyUses (one that keeps no reference to the slice and returns no key
+// bytes), and never inside a func literal; and no other expression in the
+// body has the type of key bytes (a byte slice, byte array or string that
+// is not a constant), the parameters the entry classifies as not keys
+// aside. A copy kept, a reslice, a conversion, a key drawn or derived
+// inside, or a sealer literal holding raw bytes each fail.
 //
 // Bound, held by review: what the code does with the key before the call
 // (a copy kept, `string(k)`, an early return that skips the wipe); what a
-// listed constructor does with it inside its own body; a key stored into
-// a sealer after it is made (a field assignment, an append, a channel
-// send); a sealer reached through reflect or unsafe; how long a key lives
-// under `defer clear(k)` (to the function's return, process life in a
-// serve loop); and _test.go files, whose keys are fixed test bytes.
+// keyUses function does inside; key bytes a listed body carries inside an
+// interface, func or channel value; a key stored into a sealer after it
+// is made (a field assignment, an append, a channel send); a sealer
+// reached through reflect or unsafe; and _test.go files, whose keys are
+// fixed test bytes.
 
 import (
 	"fmt"
@@ -126,6 +138,13 @@ var sealers = map[string]sealerKey{
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-model.openStore":     {nil, []string{"dir", "s", "slot", "stop"}, "dir and slot are names, s a built sealer, stop a test hook"},
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-model.openKeys":      {nil, []string{"dir", "s", "stop"}, "dir is a path, s a built sealer, stop a test hook"},
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-model.newLogin":      {nil, []string{"d", "store"}, "the declaration and the sealed store hold no sealing key"},
+}
+
+// keyUses names, by types.Func.FullName, each function a listed
+// constructor may hand its key to, with why it keeps no reference to the
+// slice and returns no key bytes. Nothing but review holds an entry.
+var keyUses = map[string]string{
+	"crypto/aes.NewCipher": "expands the key into the round keys of the block it returns, the sealer's own state, and keeps no reference to the slice",
 }
 
 // keyExempt names, by types.Func.FullName, each function whose calls of a
@@ -260,6 +279,7 @@ func TestEverySealingKeyIsWipedRightAfterItsSealer(t *testing.T) {
 			n, ps := keyProblems(l.Fset, f, p.Info, sealers, keyExempt, seen)
 			calls += n
 			ps = append(ps, constructorProblems(l.Fset, f, p.Info, l.sealer, sealers, brokerModule+"/", seen)...)
+			ps = append(ps, bodyProblems(l.Fset, f, p.Info, sealers, keyUses, seen)...)
 			for _, s := range ps {
 				problems = append(problems, filepath.ToSlash(rel)+":"+s)
 			}
@@ -284,7 +304,7 @@ func TestEverySealingKeyIsWipedRightAfterItsSealer(t *testing.T) {
 	if calls < 7 {
 		t.Fatalf("the lint saw %d sealer constructor calls; want the clerk mains among them", calls)
 	}
-	for name, list := range map[string][]string{"sealers": slices.Collect(mapKeys(sealers)), "keyExempt": slices.Collect(mapKeys(keyExempt)), "unreadOK": slices.Collect(mapKeys(unreadOK))} {
+	for name, list := range map[string][]string{"sealers": slices.Collect(mapKeys(sealers)), "keyExempt": slices.Collect(mapKeys(keyExempt)), "keyUses": slices.Collect(mapKeys(keyUses)), "unreadOK": slices.Collect(mapKeys(unreadOK))} {
 		for _, w := range list {
 			if !seen[w] {
 				problems = append(problems, name+": "+w+" is no longer in the tree the rule reads as listed; remove the stale entry")
@@ -373,7 +393,7 @@ func keyProblems(fset *token.FileSet, f *ast.File, info *types.Info, keys map[st
 		case !called[id]:
 			problems = append(problems, line(id)+": "+id.Name+" taken as a value; call it and clear its key right after")
 		default:
-			problems = append(problems, line(id)+": "+id.Name+"'s key is not wiped right after the call; write `s, err := "+id.Name+"(k)` then `clear(k)` (or `defer clear(k)`) as the next statement, with k a local variable")
+			problems = append(problems, line(id)+": "+id.Name+"'s key is not wiped right after the call; write `s, err := "+id.Name+"(k)` then `clear(k)` as the next statement, with k a local variable; a `defer clear(k)` keeps the key live until the function returns")
 		}
 		return true
 	})
@@ -382,8 +402,7 @@ func keyProblems(fset *token.FileSet, f *ast.File, info *types.Info, keys map[st
 
 // keyedCall returns the listed callee of s when s is `a, b := f(k)` (or
 // =) with f listed, every key argument a local byte slice variable, and
-// the statements in rest starting with one builtin clear (or defer clear)
-// of each.
+// the statements in rest starting with one builtin clear of each.
 func keyedCall(s ast.Stmt, info *types.Info, listed func(types.Object) *sealerKey, rest []ast.Stmt) *ast.Ident {
 	a, isAssign := s.(*ast.AssignStmt)
 	if !isAssign || len(a.Rhs) != 1 {
@@ -442,16 +461,15 @@ func keyedCall(s ast.Stmt, info *types.Info, listed func(types.Object) *sealerKe
 	return id
 }
 
-// clearOf returns the variable s wipes when s is `clear(v)` or `defer
-// clear(v)` with the builtin clear, else nil.
+// clearOf returns the variable s wipes when s is `clear(v)` with the
+// builtin clear, else nil. A `defer clear(v)` wipes only at the return, so
+// it is no wipe here.
 func clearOf(s ast.Stmt, info *types.Info) types.Object {
-	var c *ast.CallExpr
-	switch s := s.(type) {
-	case *ast.ExprStmt:
-		c, _ = ast.Unparen(s.X).(*ast.CallExpr)
-	case *ast.DeferStmt:
-		c = s.Call
+	e, isExpr := s.(*ast.ExprStmt)
+	if !isExpr {
+		return nil
 	}
+	c, _ := ast.Unparen(e.X).(*ast.CallExpr)
 	if c == nil || len(c.Args) != 1 {
 		return nil
 	}
@@ -524,13 +542,13 @@ func constructorProblems(fset *token.FileSet, f *ast.File, info *types.Info, sea
 			}
 		}
 	}
-	// A listed constructor's own body builds its sealer from its key;
-	// what it does there is held by review (Bound).
+	// A listed constructor with keys builds its sealer in its own body,
+	// which bodyProblems holds; a keyless entry's body gets no leave.
 	var bodies []ast.Node
 	for _, d := range f.Decls {
 		if fd, isFn := d.(*ast.FuncDecl); isFn {
 			if fn, isFunc := info.Defs[fd.Name].(*types.Func); isFunc {
-				if _, listed := keys[fn.FullName()]; listed {
+				if e, listed := keys[fn.FullName()]; listed && len(e.keys) > 0 {
 					bodies = append(bodies, fd)
 				}
 			}
@@ -616,6 +634,115 @@ func constructorProblems(fset *token.FileSet, f *ast.File, info *types.Info, sea
 		}
 		return true
 	})
+	return problems
+}
+
+// bodyProblems returns a problem for each place where the body of a
+// listed constructor with keys, declared in f, could keep, copy, build or
+// derive a key: a key parameter used other than as the operand of len or
+// cap or an argument of a keyUses function, or inside a func literal; a
+// keyUses function that returns bytes; and any other expression with
+// the type of key bytes, the parameters classified as not keys aside. A
+// keyUses function called is marked in seen.
+func bodyProblems(fset *token.FileSet, f *ast.File, info *types.Info, keys map[string]sealerKey, uses map[string]string, seen map[string]bool) []string {
+	var problems []string
+	line := func(n ast.Node) string { return strconv.Itoa(fset.PositionFor(n.Pos(), false).Line) }
+	raw := func(fm form) bool { return fm == formSlice || fm == formArray || fm == formString }
+	for _, d := range f.Decls {
+		fd, isFn := d.(*ast.FuncDecl)
+		if !isFn || fd.Body == nil {
+			continue
+		}
+		fn, isFunc := info.Defs[fd.Name].(*types.Func)
+		if !isFunc {
+			continue
+		}
+		name := fn.FullName()
+		entry, listed := keys[name]
+		if !listed || len(entry.keys) == 0 {
+			continue
+		}
+		sig := fn.Type().(*types.Signature)
+		key, not := map[types.Object]bool{}, map[types.Object]bool{}
+		for i := range sig.Params().Len() {
+			p := sig.Params().At(i)
+			switch {
+			case slices.Contains(entry.keys, p.Name()):
+				key[p] = true
+			case slices.Contains(entry.not, p.Name()):
+				not[p] = true
+			}
+		}
+		// handed marks each key use that is an operand of len or cap or an
+		// argument of a keyUses function, outside any func literal.
+		handed := map[*ast.Ident]bool{}
+		var lits []ast.Node
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.FuncLit:
+				lits = append(lits, n)
+			case *ast.CallExpr:
+				id := callee(n)
+				if id == nil {
+					return true
+				}
+				switch obj := info.Uses[id].(type) {
+				case *types.Builtin:
+					if obj.Name() != "len" && obj.Name() != "cap" {
+						return true
+					}
+				case *types.Func:
+					if _, in := uses[obj.Origin().FullName()]; !in {
+						return true
+					}
+					seen[obj.Origin().FullName()] = true
+					r := obj.Type().(*types.Signature).Results()
+					for i := range r.Len() {
+						if raw(keyForm(r.At(i).Type())) {
+							problems = append(problems, line(n)+": "+name+" hands its key to "+obj.Origin().FullName()+", which returns bytes ("+r.At(i).Type().String()+"); remove it from keyUses")
+						}
+					}
+				default:
+					return true
+				}
+				for _, a := range n.Args {
+					if v, isID := ast.Unparen(a).(*ast.Ident); isID && key[info.Uses[v]] {
+						handed[v] = true
+					}
+				}
+			}
+			return true
+		})
+		inLit := func(n ast.Node) bool {
+			return slices.ContainsFunc(lits, func(l ast.Node) bool { return l.Pos() <= n.Pos() && n.End() <= l.End() })
+		}
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			e, isExpr := n.(ast.Expr)
+			if !isExpr {
+				return true
+			}
+			if id, isID := e.(*ast.Ident); isID {
+				switch obj := info.Uses[id]; {
+				case key[obj]:
+					if !handed[id] || inLit(id) {
+						problems = append(problems, line(id)+": "+name+" uses its key "+id.Name+" other than in len, cap or a call of a keyUses function, so it could keep or copy it; hand the key only to a function listed in keyUses")
+					}
+					return false
+				case not[obj]:
+					return false
+				}
+			}
+			tv, ok := info.Types[e]
+			if !ok || tv.IsType() || tv.Value != nil || tv.IsNil() {
+				return true
+			}
+			if raw(keyForm(tv.Type)) {
+				problems = append(problems, line(e)+": "+name+" holds bytes that are not its key parameters ("+types.ExprString(e)+"), so it builds or derives a key no caller wipes; a listed constructor takes its key bytes only from its callers")
+				return false
+			}
+			return true
+		})
+	}
 	return problems
 }
 
@@ -876,6 +1003,8 @@ func TestTheKeyLintRefusesEachShape(t *testing.T) {
 	const head = `package p
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"errors"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
@@ -886,8 +1015,15 @@ func newGen[K ~[]byte](k K) (clerk.Sealer, error)                      { return 
 func newNonce(n []byte) (clerk.Sealer, error)                          { return nil, nil }
 
 var _ = errors.New
+var _ = aes.NewCipher
+var _ = cipher.NewGCM
 var sink clerk.Sealer
 var pkgKey []byte
+
+type gs struct{ g cipher.AEAD }
+
+func (gs) Seal(plain, aad []byte) ([]byte, error) { return nil, nil }
+func (gs) Open(blob, aad []byte) ([]byte, error)  { return nil, nil }
 
 `
 	listing := map[string]sealerKey{
@@ -906,7 +1042,17 @@ var pkgKey []byte
 		"example.test/q.NewQ":            {[]string{"k"}, nil, "case"},
 		"example.test/p.nl":              {nil, nil, "case: listed before k was added"},
 		"example.test/p.newOwn6":         {[]string{"k"}, nil, "case"},
+		"example.test/p.newB1":           {[]string{"k"}, nil, "case"},
+		"example.test/p.newB2":           {[]string{"k"}, nil, "case"},
+		"example.test/p.newB3":           {[]string{"k"}, nil, "case"},
+		"example.test/p.newB4":           {[]string{"k"}, nil, "case"},
+		"example.test/p.newB5":           {[]string{"k"}, nil, "case"},
+		"example.test/p.newB6":           {[]string{"k"}, []string{"label"}, "case"},
+		"example.test/p.newB7":           {[]string{"k"}, nil, "case"},
+		"example.test/p.newB8":           {[]string{"k"}, nil, "case"},
+		"example.test/p.newKL":           {nil, []string{"n"}, "case: n is a nonce"},
 	}
+	uses := map[string]string{"crypto/aes.NewCipher": "case", "example.test/p.leak": "case"}
 	cases := []struct {
 		name, body string
 		want       int
@@ -923,15 +1069,10 @@ var pkgKey []byte
 	sink = s
 	return nil
 }`, 0},
-		{"defer clear right after the call", `func f(k []byte) (err error) {
-	sink, err = clerk.NewAESSealer(k)
-	defer clear(k)
-	return err
-}`, 0},
 		{"two keys, cleared in either order, the label no key", `func f(a, b []byte) error {
 	s, err := newSealer(a, "x", b)
 	clear(b)
-	defer clear(a)
+	clear(a)
 	sink = s
 	return err
 }`, 0},
@@ -944,7 +1085,7 @@ var pkgKey []byte
 	switch n {
 	case 1:
 		s, _ := clerk.NewAESSealer(k)
-		defer clear(k)
+		clear(k)
 		sink = s
 	}
 }`, 0},
@@ -983,6 +1124,31 @@ var pkgKey []byte
 		{"one of two keys cleared", `func f(a, b []byte) error {
 	s, err := newSealer(a, "x", b)
 	clear(a)
+	sink = s
+	return err
+}`, 1},
+		// A defer clear keeps the key until the return (#6383).
+		{"defer clear right after the call", `func f(k []byte) (err error) {
+	sink, err = clerk.NewAESSealer(k)
+	defer clear(k)
+	return err
+}`, 1},
+		{"a defer clear with a long tail after the last use", `func f(k []byte, serve func()) error {
+	s, err := clerk.NewAESSealer(k)
+	defer clear(k)
+	if err != nil {
+		return err
+	}
+	sink = s
+	for range 3 {
+		serve()
+	}
+	return nil
+}`, 1},
+		{"one of two keys deferred", `func f(a, b []byte) error {
+	s, err := newSealer(a, "x", b)
+	clear(b)
+	defer clear(a)
 	sink = s
 	return err
 }`, 1},
@@ -1155,12 +1321,12 @@ func (*own5) Seal(plain, aad []byte) ([]byte, error) { return nil, nil }
 func (*own5) Open(blob, aad []byte) ([]byte, error) { return nil, nil }
 
 func f(k []byte) { sink = &own5{k} }`, 1},
-		{"a composite literal in a listed constructor's own body", `type own6 struct{ k []byte }
+		{"a composite literal in a listed constructor's own body keeps the key", `type own6 struct{ k []byte }
 
 func (*own6) Seal(plain, aad []byte) ([]byte, error) { return nil, nil }
 func (*own6) Open(blob, aad []byte) ([]byte, error) { return nil, nil }
 
-func newOwn6(k []byte) (clerk.Sealer, error) { return &own6{k: k}, nil }`, 0},
+func newOwn6(k []byte) (clerk.Sealer, error) { return &own6{k: k}, nil }`, 1},
 		{"a wrapper literal beside a built sealer: only its unlisted maker fails", `type host struct {
 	s    clerk.Sealer
 	name string
@@ -1175,6 +1341,80 @@ func f(s clerk.Sealer) *host { return &host{s: s, name: "x"} }`, 1},
 	return s, err
 }`, 1},
 		{"an any result returning no sealer", `func n11(k []byte) any { return len(k) }`, 0},
+		// A listed constructor's own body (#6383).
+		{"a body that hands its key only to a keyUses function", `func newB1(k []byte) (clerk.Sealer, error) {
+	if len(k) != 32 || cap(k) < 32 {
+		return nil, errors.New("clerk: sealing key must be 32 bytes")
+	}
+	b, err := aes.NewCipher(k)
+	if err != nil {
+		return nil, err
+	}
+	g, err := cipher.NewGCM(b)
+	if err != nil {
+		return nil, err
+	}
+	return gs{g}, nil
+}`, 0},
+		{"a body that keeps a copy of its key", `var kept []byte
+
+func newB2(k []byte) (clerk.Sealer, error) {
+	kept = append([]byte(nil), k...)
+	return sink, nil
+}`, 2},
+		{"a body that draws a key of its own", `func newB3(k []byte) (clerk.Sealer, error) {
+	own := make([]byte, 32)
+	b, err := aes.NewCipher(own)
+	if err != nil {
+		return nil, err
+	}
+	g, err := cipher.NewGCM(b)
+	return gs{g}, err
+}`, 2},
+		{"a body that uses its key in a func literal", `func newB4(k []byte) (clerk.Sealer, error) {
+	go func() { aes.NewCipher(k) }()
+	return sink, nil
+}`, 1},
+		{"a body that hands on a reslice of its key", `func newB5(k []byte) (clerk.Sealer, error) {
+	b, err := aes.NewCipher(k[:16])
+	if err != nil {
+		return nil, err
+	}
+	g, err := cipher.NewGCM(b)
+	return gs{g}, err
+}`, 1},
+		{"a body that uses a parameter classified as no key", `func newB6(k []byte, label string) (clerk.Sealer, error) {
+	if label == "" {
+		return nil, errors.New(label)
+	}
+	b, err := aes.NewCipher(k)
+	if err != nil {
+		return nil, err
+	}
+	g, err := cipher.NewGCM(b)
+	return gs{g}, err
+}`, 0},
+		{"a body that hands its key to a keyUses function returning bytes", `func leak(k []byte) []byte { return k }
+
+func newB7(k []byte) (clerk.Sealer, error) {
+	leak(k)
+	return sink, nil
+}`, 2},
+		{"a body that hands its key to an unlisted function", `func expand(k []byte) cipher.Block { return nil }
+
+func newB8(k []byte) (clerk.Sealer, error) {
+	g, err := cipher.NewGCM(expand(k))
+	return gs{g}, err
+}`, 1},
+		{"a keyless entry's body makes a sealer from bytes", `func newKL(n []byte) (clerk.Sealer, error) {
+	_ = n
+	return &own7{make([]byte, 32)}, nil
+}
+
+type own7 struct{ k []byte }
+
+func (*own7) Seal(plain, aad []byte) ([]byte, error) { return nil, nil }
+func (*own7) Open(blob, aad []byte) ([]byte, error) { return nil, nil }`, 1},
 		// A package that does not import clerk: its sealer is found by
 		// type, and its callers are held.
 		{"a wrapper in a package that does not import clerk", `package q
@@ -1218,6 +1458,7 @@ func bad(k []byte) error {
 			exempt := map[string]string{"example.test/p.probe": "case"}
 			_, got := keyProblems(l.Fset, f, info, listing, exempt, map[string]bool{})
 			got = append(got, constructorProblems(l.Fset, f, info, l.sealer, listing, "example.test/", map[string]bool{})...)
+			got = append(got, bodyProblems(l.Fset, f, info, listing, uses, map[string]bool{})...)
 			if len(got) != c.want {
 				t.Fatalf("got %d problems %q; want %d", len(got), got, c.want)
 			}
