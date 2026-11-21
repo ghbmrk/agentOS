@@ -7959,6 +7959,8 @@ class MkosiRunBoundTest(unittest.TestCase):
                    ("build", "Unpack the stage", ('>> "$GITHUB_ENV"',)),
                    ("build", "Build image", ()),
                    ("build", "Finish the image (image/finish.sh)", ()))
+    # CI lines the wrapper runs under sudo: its tar copy sits in a root-owned directory (#6417 item 3).
+    LOCAL_SUDO = ('rm -rf "$RUNNER_TEMP/stage-in"',)
 
     @staticmethod
     def step_run(job, name):
@@ -7985,11 +7987,14 @@ class MkosiRunBoundTest(unittest.TestCase):
         for job, name, left_out in self.LOCAL_STEPS:
             with self.subTest(step=name):
                 want = [l for l in self.step_run(job, name) if not any(x in l for x in left_out)]
+                want = ["sudo " + l if l in self.LOCAL_SUDO else l for l in want]
                 self.assertGreater(len(want), 0)
                 starts = [n for n, l in enumerate(wrapper) if l == want[0]]
                 self.assertTrue(any(wrapper[s:s + len(want)] == want for s in starts), want)
                 if left_out:
                     self.assertTrue(any(x in l for l in self.step_run(job, name) for x in left_out), left_out)
+        for l in self.LOCAL_SUDO:
+            self.assertIn(l, self.step_run("build", "Unpack the stage"))
         # The halves are separate commands: stage never reaches mkosi, build never reaches build.sh.
         text = (IMG / "local-build.sh").read_text()
         stage = text[text.index('if [ "$MODE" = stage ]; then\n'):text.index("\nfi\n\nSNAPSHOTS=")]
@@ -8005,10 +8010,11 @@ class MkosiRunBoundTest(unittest.TestCase):
         self.assertEqual(re.findall(r"^MKOSI_COMMIT=([0-9a-f]{40}) ", wrapper, re.M), list(pins))
 
     def local_build(self, *args, sources=None, mkosi_fails=False, snapshot=None, resolved=None,
-                    mkosi_head=None, stage_extra="", d=None, cwd=None):
+                    mkosi_head=None, stage_extra="", d=None, cwd=None, sudo_fails=False):
         """Run image/local-build.sh ARGS in a one-commit copy of the repository (made once per D) with
         build.sh, finish.sh and sudo replaced by stand-ins that log their arguments, /opt/mkosi by the git
-        checkout D/mkosi (whose HEAD reads as MKOSI_HEAD) and the stage mark by D/stage-host; returns (the
+        checkout D/mkosi (whose HEAD reads as MKOSI_HEAD) and the host marks by D/agentos-stage-host and
+        D/agentos-build-host; returns (the
         run, the log's calls, D). A stand-in security-snapshot.sh answers resolve with RESOLVED and runs
         the real script otherwise."""
         if d is None:
@@ -8029,13 +8035,15 @@ class MkosiRunBoundTest(unittest.TestCase):
                     + log + 'mkdir -p "$2/stage/usr/lib" "$2/guest" "$2/linked" && echo x > "$2/stage/usr/lib/f"\n'
                     'cp "$SOURCES" "$2/agentos.sources"\neval "$STAGE_EXTRA"\n')
             write_x(repo / "image/finish.sh", '#!/bin/sh\nset -- finish.sh "$@" "SDE=$SOURCE_DATE_EPOCH"\n' + log)
+            # The marks live in D (/var/lib/agentos-X is D/agentos-X); SUDO_FAILS makes a mark read fail as
+            # sudo does (exit 1, nothing printed); install runs without its -o/-g, which need root.
             write_x(bin_ / "sudo", "#!/bin/sh\n" + log + 'case " $* " in *" /opt/mkosi/bin/mkosi "*) '
-                    'echo mkosi; [ -z "$MKOSI_FAILS" ];; '
-                    '" git -C /opt/mkosi rev-parse HEAD ") echo "$MKOSI_HEAD";; '
+                    'echo mkosi; [ -z "$MKOSI_FAILS" ]; exit;; '
+                    '" git -C /opt/mkosi rev-parse HEAD ") echo "$MKOSI_HEAD"; exit;; '
                     '" git -C /opt/mkosi "*) shift 3; exec git -C "$MKOSI_DIR" "$@";; '
-                    '" touch /var/lib/agentos-stage-host ") touch "$MARK";; '
-                    '" test -e /var/lib/agentos-stage-host ") test -e "$MARK";; '
-                    '*) exec "$@";; esac\n')
+                    '" sh -c "*" /var/lib/agentos-"*) [ -z "$SUDO_FAILS" ] || exit 1;; esac\n'
+                    'for a; do shift; case $a in /var/lib/agentos-*) a="$MARKS/${a#/var/lib/}";; root) continue;; '
+                    '-o|-g) [ "$1" = root ] && continue;; esac; set -- "$@" "$a"; done\nexec "$@"\n')
             mk = d / "mkosi"
             (mk / "mkosi").mkdir(parents=True)
             (mk / ".gitignore").write_text("__pycache__\nmkosi.local.conf\n")
@@ -8049,7 +8057,7 @@ class MkosiRunBoundTest(unittest.TestCase):
         env = dict(self.git_env(), PATH="%s:%s" % (bin_, os.environ["PATH"]), LOG=str(d / "log"),
                    SOURCES=str(d / "sources"), MKOSI_FAILS="1" if mkosi_fails else "", STAGE_EXTRA=stage_extra,
                    MKOSI_HEAD=mkosi_head or "26673f65e17ae099bb0cf65928fe70c93b8a6a37", MKOSI_DIR=str(d / "mkosi"),
-                   MARK=str(d / "stage-host"), RESOLVED=resolved or "")
+                   MARKS=str(d), SUDO_FAILS="1" if sudo_fails else "", RESOLVED=resolved or "")
         env.pop("AGENTOS_SECURITY_SNAPSHOT", None)
         if snapshot:
             env["AGENTOS_SECURITY_SNAPSHOT"] = snapshot
@@ -8072,7 +8080,7 @@ class MkosiRunBoundTest(unittest.TestCase):
         host's; returns (its D, the tar's path, the commit)."""
         r, calls, d = self.local_build("stage", "st", **kw)
         self.assertEqual(r.returncode, 0, r.stderr)
-        (d / "stage-host").unlink()
+        (d / "agentos-stage-host").unlink()
         commit = subprocess.check_output(["git", "-C", str(d / "repo"), "rev-parse", "HEAD"], text=True).strip()
         return d, d / "st" / ("stage-%s.tar" % commit), commit
 
@@ -8095,10 +8103,12 @@ class MkosiRunBoundTest(unittest.TestCase):
         self.assertEqual([c[0] for c in self.runs(calls)], ["env", "build.sh"])
         # #6380 item 3: the host is marked before build.sh runs as root.
         self.assertEqual(calls[0], ["touch", "/var/lib/agentos-stage-host"])
-        self.assertTrue((d / "stage-host").exists())
-        self.assertEqual(calls[1][2:], ["AGENTOS_SECURITY_SNAPSHOT=" + self.SECURITY, "HOME=/root",
+        self.assertTrue((d / "agentos-stage-host").exists())
+        # #6417 item 2: then, the mark written, it reads as root that the host never built.
+        self.assertEqual(calls[1][:2] + calls[1][-2:], ["sh", "-c", "sh", "/var/lib/agentos-build-host"])
+        self.assertEqual(calls[2][2:], ["AGENTOS_SECURITY_SNAPSHOT=" + self.SECURITY, "HOME=/root",
                                         "GOCACHE=/tmp/gocache", "image/build.sh", out])
-        self.assertEqual(calls[2], ["build.sh", out, "snap=" + self.SECURITY])
+        self.assertEqual(calls[3], ["build.sh", out, "snap=" + self.SECURITY])
         commit = subprocess.check_output(["git", "-C", str(d / "repo"), "rev-parse", "HEAD"], text=True).strip()
         tar = d / "st" / ("stage-%s.tar" % commit)
         # #6380 item 6: the stage prints the tar's SHA-256 in the build line the other host runs.
@@ -8111,7 +8121,7 @@ class MkosiRunBoundTest(unittest.TestCase):
         # Unset, the snapshot goes to build.sh empty, and build.sh resolves its own (build.sh's line 46).
         r, calls, _ = self.local_build("stage", "st")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(calls[2][-1], "snap=")
+        self.assertEqual(calls[3][-1], "snap=")
         # A stage of more than usr/ is not packed.
         r, calls, d = self.local_build("stage", "st", stage_extra='mkdir "$2/stage/etc"')
         self.assertNotEqual(r.returncode, 0)
@@ -8159,7 +8169,7 @@ class MkosiRunBoundTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         tars = list((d / "here" / "st").glob("stage-*.tar"))
         self.assertEqual(len(tars), 1)
-        (d / "stage-host").unlink()  # the build is another host's
+        (d / "agentos-stage-host").unlink()  # the build is another host's
         self.assertFalse((d / "repo" / "st").exists())
         r, _, _ = self.build("st/" + tars[0].name, "img", snapshot=self.SECURITY, d=d, cwd=d / "here")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -8224,13 +8234,13 @@ class MkosiRunBoundTest(unittest.TestCase):
                 self.assertIn("usage:", r.stderr)
                 self.assertEqual(calls, [])
         # #6380 item 3: a host that staged never builds, whichever commit or tar it is given.
-        (d / "stage-host").touch()
+        (d / "agentos-stage-host").touch()
         r, calls, _ = self.build(str(tar), "img", snapshot=self.SECURITY, d=d)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("this host staged (/var/lib/agentos-stage-host)", r.stderr)
         self.assertEqual(self.runs(calls), [])
         self.assertFalse((d / "img").exists())
-        (d / "stage-host").unlink()
+        (d / "agentos-stage-host").unlink()
         # An existing DIR is refused: each half starts from a fresh directory, as each runner does.
         (d / "img").mkdir()
         r, calls, _ = self.build(str(tar), "img", snapshot=self.SECURITY, d=d)
@@ -8269,6 +8279,55 @@ class MkosiRunBoundTest(unittest.TestCase):
                               "on both hosts and stage again", r.stderr)
                 self.assertEqual(self.runs(calls), [])
                 shutil.rmtree(d / "img")
+
+    def test_the_local_wrapper_keeps_the_halves_on_separate_hosts(self):
+        # #6417 item 1: a sudo that fails reading a mark stops either half, never reads as "no mark".
+        d, tar, _ = self.staged(snapshot=self.SECURITY)
+        r, calls, _ = self.build(str(tar), "img", snapshot=self.SECURITY, d=d, sudo_fails=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("cannot read /var/lib/agentos-stage-host as root (sudo failed)", r.stderr)
+        self.assertEqual(self.runs(calls), [])
+        self.assertFalse((d / "img").exists())
+        r, calls, d2 = self.local_build("stage", "st", snapshot=self.SECURITY, sudo_fails=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("cannot read /var/lib/agentos-build-host as root (sudo failed)", r.stderr)
+        self.assertEqual(self.runs(calls), [])
+        self.assertFalse((d2 / "st").exists())
+        # A dangling link at the mark's path is a mark.
+        os.symlink(str(d / "nowhere"), str(d / "agentos-stage-host"))
+        r, calls, _ = self.build(str(tar), "img", snapshot=self.SECURITY, d=d)
+        self.assertIn("this host staged (/var/lib/agentos-stage-host), so it cannot build", r.stderr)
+        self.assertEqual(self.runs(calls), [])
+        (d / "agentos-stage-host").unlink()
+        # #6417 item 2: the build marks its host before any byte of the stage is read, and a host that built
+        # never stages: it refuses before build.sh runs, whichever order the two marks were written in.
+        r, calls, _ = self.build(str(tar), "img", snapshot=self.SECURITY, d=d)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((d / "agentos-build-host").exists())
+        firsts = [c[0] for c in calls if c[0] in ("touch", "sh", "install")]
+        self.assertEqual(firsts[:3], ["touch", "sh", "install"])
+        self.assertEqual(calls[2], ["touch", "/var/lib/agentos-build-host"])
+        r, calls, _ = self.local_build("stage", "st2", snapshot=self.SECURITY, d=d)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("this host built (/var/lib/agentos-build-host), so it cannot stage", r.stderr)
+        self.assertEqual(self.runs(calls), [])
+        self.assertFalse((d / "st2").exists())
+        # Each half writes its own mark before it reads the other's, so two run at once both refuse: the
+        # stage just refused left its mark, and now a build is refused too.
+        self.assertTrue((d / "agentos-stage-host").exists())
+        r, calls, _ = self.build(str(tar), "img2", snapshot=self.SECURITY, d=d)
+        self.assertIn("this host staged", r.stderr)
+        self.assertEqual(self.runs(calls), [])
+        # #6417 item 3: the build's copy of the tar is a read-only file, installed (as root) in a directory
+        # made for it, before it is hashed; a copy refused by its hash stays so.
+        d, tar, _ = self.staged(snapshot=self.SECURITY)
+        r, calls, _ = self.build(str(tar), "img", snapshot=self.SECURITY, d=d, sha="0" * 64)
+        self.assertIn("not the %s its stage printed" % ("0" * 64), r.stderr)
+        copy = d / "img/stage-in/stage.tar"
+        self.assertIn(["install", "-d", "-o", "root", "-g", "root", "-m", "0755", str(d / "img/stage-in")], calls)
+        self.assertIn(["install", "-o", "root", "-g", "root", "-m", "0444", str(tar), str(copy)], calls)
+        self.assertEqual(copy.stat().st_mode & 0o7777, 0o444)
+        self.assertEqual(copy.read_bytes(), tar.read_bytes())
 
     def test_the_local_wrapper_stops_before_mkosi_on_a_bad_stage(self):
         # No snapshot in agentos.sources, or sources that are not exactly the ones security-snapshot.sh

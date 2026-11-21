@@ -7,10 +7,10 @@
 # such line equal to the workflow's (MkosiRunBoundTest). CI never runs this script.
 #
 # Usage: image/local-build.sh stage DIR
-#          on the stage host (a disposable VM will do): marks the host as one that staged, runs build.sh as
-#          root, packs the stage as DIR/stage-COMMIT.tar and prints its SHA-256
+#          on the stage host (a disposable VM will do; never one that built): marks the host as one that
+#          staged, runs build.sh as root, packs the stage as DIR/stage-COMMIT.tar and prints its SHA-256
 #        image/local-build.sh build TAR SHA256 DIR [VERSION]
-#          on a host that never staged, with the pinned mkosi in /opt/mkosi: the tar held to the SHA-256 the
+#          on a host that never staged (marked from then on as one that built), with the pinned mkosi in /opt/mkosi: the tar held to the SHA-256 the
 #          stage printed, then mkosi and finish.sh; the image lands in DIR/out
 #   Both run from a checkout of one commit with no changed, untracked or ignored file (a tar from another
 #   commit is refused), as a user who can sudo, on Linux with build.sh's or mkosi's tools and network. DIR
@@ -21,8 +21,19 @@
 #   exit, pass or fail.
 set -euo pipefail
 MKOSI_COMMIT=26673f65e17ae099bb0cf65928fe70c93b8a6a37  # v24.3, as image.yml's "Install build and boot tools" checks out
-# Written by the stage half before build.sh runs as root; the build half refuses a host that has it (#6380).
-STAGE_MARK=/var/lib/agentos-stage-host
+# Each half writes its own mark, then refuses a host holding the other's (#6380, #6417): one host never plays
+# both halves, even two run at once (each writes before it checks).
+STAGE_MARK=/var/lib/agentos-stage-host BUILD_MARK=/var/lib/agentos-build-host
+# Refuse a host holding mark $1 ($2 names the role it marks). Read as root, the answer is present or absent;
+# a sudo that fails prints neither, and that stops the run rather than reading as "no mark" (#6417).
+refuse_mark() {
+	local s; s=$(sudo sh -c 'if [ -e "$1" ] || [ -L "$1" ]; then echo present; else echo absent; fi' sh "$1") || s=
+	case $s in
+		absent) ;;
+		present) echo "local-build.sh: this host $2 ($1), so it cannot $MODE; $MODE on a host that never $2" >&2; exit 1 ;;
+		*) echo "local-build.sh: cannot read $1 as root (sudo failed), so this host's past role is unknown; stopping" >&2; exit 1 ;;
+	esac
+}
 usage() { echo "usage: image/local-build.sh stage DIR | build TAR SHA256 DIR [VERSION]" >&2; exit 2; }
 case "${1-} $#" in "stage 2"|"build 4"|"build 5") ;; *) usage ;; esac
 MODE=$1
@@ -47,13 +58,16 @@ if [ "$MODE" = build ]; then
 		echo "local-build.sh: /opt/mkosi is not an unchanged mkosi v24.3 at $MKOSI_COMMIT; install it as image.yml does:" >&2
 		echo "  sudo rm -rf /opt/mkosi && sudo git clone -q https://github.com/systemd/mkosi /opt/mkosi && sudo git -C /opt/mkosi -c advice.detachedHead=false checkout -q $MKOSI_COMMIT" >&2
 		exit 1; }
-	! sudo test -e "$STAGE_MARK" || { echo "local-build.sh: this host staged ($STAGE_MARK): build.sh ran here as root, so it cannot build; build on a host that never staged" >&2; exit 1; }
+	sudo touch "$BUILD_MARK"  # before any byte of a stage is read: from here on this host never stages
+	refuse_mark "$STAGE_MARK" staged  # build.sh ran here as root
+else
+	sudo touch "$STAGE_MARK"  # before build.sh: from here on this host never builds
+	refuse_mark "$BUILD_MARK" built  # build.sh as root here could reach what the builds left
 fi
 mkdir -- "$RUNNER_TEMP"  # a fresh directory, as each runner's
 trap 'echo "local-build.sh: $MODE log $RUNNER_TEMP/$MODE.log" >&2' EXIT
 
 if [ "$MODE" = stage ]; then
-	sudo touch "$STAGE_MARK"  # before build.sh: from here on this host never builds
 	# image.yml stage job, "Stage the image tree (image/build.sh)".
 	sudo env "PATH=$PATH" "AGENTOS_SECURITY_SNAPSHOT=$AGENTOS_SECURITY_SNAPSHOT" HOME=/root GOCACHE=/tmp/gocache image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/stage.log"
 	# "Pack the stage".
@@ -67,8 +81,11 @@ if [ "$MODE" = stage ]; then
 fi
 
 SNAPSHOTS=${AGENTOS_SECURITY_SNAPSHOT:-$(sh image/security-snapshot.sh resolve)}  # image.yml's security-snapshot job
-mkdir "$RUNNER_TEMP/stage-in"; cp "$TAR" "$RUNNER_TEMP/stage-in/stage.tar"  # its download-artifact step
-# The copy read below is the tar the stage made, by content (#6380): the name only says which commit.
+# Its download-artifact step, into a root-owned directory as a read-only root-owned file (#6417): nothing on
+# this host but root can change the copy between the hash below and the unpack. The copy read below is the
+# tar the stage made, by content (#6380): the name only says which commit.
+sudo install -d -o root -g root -m 0755 "$RUNNER_TEMP/stage-in"
+sudo install -o root -g root -m 0444 "$TAR" "$RUNNER_TEMP/stage-in/stage.tar"
 GOT=$(sha256sum < "$RUNNER_TEMP/stage-in/stage.tar"); GOT=${GOT%% *}
 [ "$GOT" = "$SHA256" ] || { echo "local-build.sh: $TAR has SHA-256 $GOT, not the $SHA256 its stage printed" >&2; exit 1; }
 # image.yml build job, "Unpack the stage".
@@ -80,7 +97,7 @@ if grep -Evx 'stage/|stage/usr/|stage/usr/.+|agentos\.sources|guest/|guest/.+|li
 fi
 sudo mkdir "$RUNNER_TEMP/out"
 sudo tar -C "$RUNNER_TEMP/out" --numeric-owner -xf "$t"
-rm -rf "$RUNNER_TEMP/stage-in"
+sudo rm -rf "$RUNNER_TEMP/stage-in"
 o="$RUNNER_TEMP/out"
 { [ -d "$o/stage" ] && [ ! -h "$o/stage" ] && [ -d "$o/stage/usr" ] && [ ! -h "$o/stage/usr" ] \
   && [ "$(sudo ls -A "$o/stage")" = usr ] && [ -f "$o/agentos.sources" ] && [ ! -h "$o/agentos.sources" ] \
