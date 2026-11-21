@@ -22,7 +22,7 @@ import (
 // the file write stubbed, so the test reaches no more of the package than
 // the write.
 func TestADisplacedValueIsWipedOnce(t *testing.T) {
-	r, key, id := Recovery{Key: make([]byte, RecoveryLen)}, slices.Repeat([]byte{0x6b}, keyLen), make([]byte, idLen)
+	r, key, id := Recovery{Key: secret.Hide(make([]byte, RecoveryLen))}, slices.Repeat([]byte{0x6b}, keyLen), make([]byte, idLen)
 	sl, err := makeSlot(id, key, r)
 	if err != nil {
 		t.Fatal(err)
@@ -62,7 +62,7 @@ func TestADisplacedValueIsWipedOnce(t *testing.T) {
 	if v, _, _ := s.Get("x/a"); string(v) != string(b) || refusalCount(*held, b) != 0 || refusalCount(*held, dd) != 2 {
 		t.Fatalf("after failed writes x/a is %q, b wiped %d times, d %d; want %q, 0, 2", v, refusalCount(*held, b), refusalCount(*held, dd), b)
 	}
-	if _, err := s.ReplaceAndPut("x/a", dd, Swap{ID: sl.ID, F: Recovery{Key: []byte("short")}}); err == nil {
+	if _, err := s.ReplaceAndPut("x/a", dd, Swap{ID: sl.ID, F: Recovery{Key: secret.Hide([]byte("short"))}}); err == nil {
 		t.Fatal("ReplaceAndPut with a short recovery key wrote")
 	}
 	if _, err := s.ReplaceAndPut("Bad Name", dd, Swap{ID: sl.ID, F: r}); err == nil {
@@ -155,7 +155,7 @@ func TestEntriesDecodeCopiesNoValue(t *testing.T) {
 // each itself (#6048, #6071; CLK-1). Each slot makeSlot makes wipes its slot key, so a refusal
 // that made one would show a wipe. The file write is stubbed to fail.
 func TestABadEntryMakesNoSlot(t *testing.T) {
-	r, key, id := Recovery{Key: make([]byte, RecoveryLen)}, slices.Repeat([]byte{0x6b}, keyLen), make([]byte, idLen)
+	r, key, id := Recovery{Key: secret.Hide(make([]byte, RecoveryLen))}, slices.Repeat([]byte{0x6b}, keyLen), make([]byte, idLen)
 	sl, err := makeSlot(id, key, r)
 	if err != nil {
 		t.Fatal(err)
@@ -200,7 +200,7 @@ func TestABadEntryMakesNoSlot(t *testing.T) {
 
 // wipeRig is a store with one recovery slot whose file write goes to path directly, and its key r.
 func wipeRig(t *testing.T) (*Store, Recovery) {
-	r, key, id := Recovery{Key: make([]byte, RecoveryLen)}, slices.Repeat([]byte{0x6b}, keyLen), make([]byte, idLen)
+	r, key, id := Recovery{Key: secret.Hide(make([]byte, RecoveryLen))}, slices.Repeat([]byte{0x6b}, keyLen), make([]byte, idLen)
 	sl, err := makeSlot(id, key, r)
 	if err != nil {
 		t.Fatal(err)
@@ -245,7 +245,7 @@ func TestARefusedWriteClonesNothing(t *testing.T) {
 	v := []byte("refused-canary")
 	_, err1 := s.ReplaceAndPut("y/aa", v)
 	_, err2 := s.ReplaceAndPut("y/aa", v, Swap{ID: "none", F: r})
-	_, err3 := s.ReplaceAndPut("y/aa", v, Swap{ID: id, F: Recovery{Key: []byte("short")}})
+	_, err3 := s.ReplaceAndPut("y/aa", v, Swap{ID: id, F: Recovery{Key: secret.Hide([]byte("short"))}})
 	_, err4 := s.ReplaceAndPut("x/new", v, Swap{ID: id, F: r})
 	_, err5 := s.ReplaceAndPut("Bad Name", v, Swap{ID: id, F: r})
 	err6, err7 := s.Put("x/new", v), s.Put("Bad Name", v)

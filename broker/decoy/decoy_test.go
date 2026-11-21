@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -26,10 +27,12 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"unicode"
 
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 	"github.com/ghbmrk/agentos/broker/decoy/match"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 // rangeAddrs stands in for the enforcer's decoy range (decision 4, DECOY-d).
@@ -348,7 +351,7 @@ func TestTableSealedAndReplayed(t *testing.T) {
 	path := filepath.Join(dir, "store")
 	rk := make([]byte, seal.RecoveryLen)
 	rand.Read(rk)
-	st, err := seal.Create(path, seal.Recovery{Key: rk})
+	st, err := seal.Create(path, seal.Recovery{Key: secret.Hide(rk)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,10 +421,10 @@ func TestTableSealedAndReplayed(t *testing.T) {
 		}
 	}
 	// Only the store key reads it back.
-	if _, err := seal.Unlock(path, seal.Recovery{Key: make([]byte, seal.RecoveryLen)}); err == nil {
+	if _, err := seal.Unlock(path, seal.Recovery{Key: secret.Hide(make([]byte, seal.RecoveryLen))}); err == nil {
 		t.Fatal("a wrong key opened the store")
 	}
-	st2, err := seal.Unlock(path, seal.Recovery{Key: rk})
+	st2, err := seal.Unlock(path, seal.Recovery{Key: secret.Hide(rk)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -603,6 +606,154 @@ func TestGenerateRules(t *testing.T) {
 		t.Fatalf("the table's stored form does not fit: %v", err)
 	}
 	t.Logf("stored form: %d bytes of %d", len(big.encode()), MaxStored)
+}
+
+// countReader counts the bytes read through it.
+type countReader struct {
+	r io.Reader
+	n int
+}
+
+func (c *countReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
+}
+
+// failOnce fails its first read with err, then reads from r.
+type failOnce struct {
+	err    error
+	r      io.Reader
+	failed bool
+}
+
+func (f *failOnce) Read(p []byte) (int, error) {
+	if !f.failed {
+		f.failed = true
+		return 0, f.err
+	}
+	return f.r.Read(p)
+}
+
+// The edges of each bound and each error path, so every check is shown to
+// matter (mutgate survivors on #6000, where a changed test made the whole
+// package's covered lines targets).
+func TestBoundsAndErrors(t *testing.T) {
+	boom := errors.New("boom")
+	fail := iotest.ErrReader(boom)
+	// uniform: n from 1 to 1<<16; one byte up to 256, two above; a byte at
+	// or past the rejection limit is drawn again; a read error is returned.
+	for _, n := range []int{0, 1<<16 + 1} {
+		if _, err := uniform(rand.Reader, n); err != ErrTooMany {
+			t.Fatalf("uniform over %d: %v", n, err)
+		}
+	}
+	if i, err := uniform(bytes.NewReader([]byte{1, 9}), 1<<16); err != nil || i != 265 {
+		t.Fatalf("uniform over 1<<16: %d, %v", i, err)
+	}
+	if i, err := uniform(bytes.NewReader([]byte{200}), 256); err != nil || i != 200 {
+		t.Fatalf("uniform over 256 reads one byte: %d, %v", i, err)
+	}
+	if i, err := uniform(bytes.NewReader([]byte{255, 7}), 3); err != nil || i != 1 {
+		t.Fatalf("uniform over 3 kept 255, past its limit 255: %d, %v", i, err)
+	}
+	if i, err := uniform(bytes.NewReader([]byte{254}), 3); err != nil || i != 2 {
+		t.Fatalf("uniform over 3 refused 254, under its limit: %d, %v", i, err)
+	}
+	if _, err := uniform(fail, 3); err != boom {
+		t.Fatalf("uniform on a failed read: %v", err)
+	}
+	if _, err := draw(fail, base62, 3); err != boom {
+		t.Fatalf("draw on a failed read: %v", err)
+	}
+	// Each generator stops at its first failed read, though the reads after
+	// it would succeed.
+	for name, mk := range map[string]func(io.Reader) (string, error){"github": gitHub, "aws key id": awsKeyID, "openai": openAI} {
+		if _, err := mk(&failOnce{err: boom, r: newSeeded(8)}); err != boom {
+			t.Fatalf("%s on a failed read: %v", name, err)
+		}
+	}
+	// Generate: exactly MaxRange addresses pass the range check, one more
+	// does not, before any read.
+	full := make([]netip.Addr, MaxRange+1)
+	for i := range full {
+		full[i] = netip.AddrFrom4([4]byte{10, byte(i >> 16), byte(i >> 8), byte(i)})
+	}
+	if _, err := Generate(fail, full[:MaxRange]); err != boom {
+		t.Fatalf("%d addresses: %v", MaxRange, err)
+	}
+	if _, err := Generate(fail, full); err != ErrTooMany {
+		t.Fatalf("%d addresses: %v", len(full), err)
+	}
+	// A caller's generator failing, and the last address pick failing.
+	quiet := func(io.Reader) (string, error) { return "honey-0123456789abcdef0123456789abcdef", nil }
+	if _, err := Generate(rand.Reader, rangeAddrs, Own{KHoneyKey, PPlannerView, func(io.Reader) (string, error) { return "", boom }}); err != boom {
+		t.Fatalf("a failed own generator: %v", err)
+	}
+	c := &countReader{r: newSeeded(7)}
+	if _, err := Generate(c, rangeAddrs, Own{KHoneyKey, PPlannerView, quiet}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Generate(io.LimitReader(newSeeded(7), int64(c.n-1)), rangeAddrs, Own{KHoneyKey, PPlannerView, quiet}); err != io.ErrUnexpectedEOF && err != io.EOF {
+		t.Fatalf("the last pick short of a byte: %v", err)
+	}
+	// Load and Stored: a form of exactly MaxStored bytes, a value of exactly
+	// match.MaxValue bytes; one past either, an unknown kind or place, a
+	// value at the metadata address and a form that is not JSON are refused.
+	entry := func(v, k, d, p string) string {
+		return `{"v":"` + v + `","k":"` + k + `","d":"` + d + `","p":"` + p + `"}`
+	}
+	honeyAt := func(n int) string {
+		return entry(strings.Repeat("h", n), "honey-key", "192.168.10.250", "planner.view")
+	}
+	for _, n := range []int{MinValue, match.MaxValue} {
+		if _, err := Load([]byte("[" + honeyAt(n) + "]")); err != nil {
+			t.Fatalf("a %d-byte value: %v", n, err)
+		}
+	}
+	for _, bad := range []string{
+		"[" + honeyAt(match.MaxValue+1) + "]",
+		"[" + entry("honey-0123456789", "no-such-kind", "192.168.10.250", "planner.view") + "]",
+		"[" + entry("honey-0123456789", "honey-key", "192.168.10.250", "no.such.place") + "]",
+		"[" + entry("honey-0123456789", "honey-key", Metadata.String(), "planner.view") + "]",
+		"not json",
+		// A type error leaves the entry decoded; the error still refuses it.
+		`[{"v":"honey-0123456789","k":"honey-key","d":"192.168.10.250","p":"planner.view","v":5}]`,
+	} {
+		if _, err := Load([]byte(bad)); err != ErrBadTable {
+			t.Fatalf("%.60s: %v", bad, err)
+		}
+	}
+	// A compact table of exactly MaxStored bytes: entries of distinct
+	// values, the last sized to fill.
+	var parts []string
+	size := func() int { return len("[" + strings.Join(parts, ",") + "]") }
+	for i := 0; size() < MaxStored; i++ {
+		v := fmt.Sprintf("honey-%04d-", i) + strings.Repeat("h", 300)
+		parts = append(parts, entry(v, "honey-key", "192.168.10.250", "planner.view"))
+	}
+	last := parts[len(parts)-1]
+	v := fmt.Sprintf("honey-%04d-", len(parts)-1) + strings.Repeat("h", 300-(size()-MaxStored))
+	parts[len(parts)-1] = entry(v, "honey-key", "192.168.10.250", "planner.view")
+	exact := []byte("[" + strings.Join(parts, ",") + "]")
+	tab, err := Load(exact)
+	if err != nil || len(exact) != MaxStored {
+		t.Fatalf("a %d-byte stored form: %v", len(exact), err)
+	}
+	if b, err := Stored(tab); err != nil || !bytes.Equal(b, exact) {
+		t.Fatalf("Stored of a %d-byte form: %v", len(exact), err)
+	}
+	if _, err := Load(append(exact[:len(exact):len(exact)], ' ')); err != ErrBadTable {
+		t.Fatalf("a %d-byte stored form: %v", len(exact)+1, err)
+	}
+	parts[len(parts)-1] = last
+	over, err := decode([]byte("[" + strings.Join(parts, ",") + "]"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Stored(over); err != ErrTooBig {
+		t.Fatalf("Stored past MaxStored: %v", err)
+	}
 }
 
 // No two entries share a value, at Generate and when a table is read back,

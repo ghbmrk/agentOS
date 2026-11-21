@@ -10,6 +10,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 // A -checker-seed whose directory the check refuses (open to others, or a
@@ -19,7 +20,7 @@ import (
 // REQ: CH-4
 func TestCheckerSeedRefusedDirectoryIsNotRemovedIn(t *testing.T) {
 	d := t.TempDir()
-	st, err := seal.Create(filepath.Join(d, "store"), seal.Recovery{Key: make([]byte, 32)})
+	st, err := seal.Create(filepath.Join(d, "store"), seal.Recovery{Key: secret.Hide(make([]byte, 32))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +150,7 @@ func TestClerkAnchorsRefuseAGroupWritableDirectory(t *testing.T) {
 // REQ: CH-4
 func TestCheckerSeedFailureRemovesTheStaleSeed(t *testing.T) {
 	d := t.TempDir()
-	st, err := seal.Create(filepath.Join(d, "store"), seal.Recovery{Key: make([]byte, 32)})
+	st, err := seal.Create(filepath.Join(d, "store"), seal.Recovery{Key: secret.Hide(make([]byte, 32))})
 	if err != nil {
 		t.Fatal(err)
 	}
