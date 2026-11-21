@@ -813,7 +813,7 @@ func TestHeldCodeShowsItsExpiredView(t *testing.T) {
 	r.now = r.now.Add(time.Hour)
 	r.ev.kept.sweep()
 	raw, _ := r.store.Load()
-	if strings.Contains(string(raw), "4829") {
+	if sweptHolds(raw, r.ev.kept.list(), "4829") {
 		t.Fatalf("swept file %s", raw)
 	}
 	if l := r.ev.kept.list(); l[0].Text != owner.ExpiredCode || !l[0].CodeExpired {
@@ -838,10 +838,20 @@ func TestRetriedHeldCodeKeepsTheStricterView(t *testing.T) {
 		r.now = r.now.Add(time.Hour)
 		r.ev.kept.sweep()
 		raw, _ := r.store.Load()
-		if l := r.ev.kept.list(); len(l) != 1 || strings.Contains(string(raw), "4829") || l[0].Text != owner.ExpiredCode {
+		if l := r.ev.kept.list(); len(l) != 1 || sweptHolds(raw, l, "4829") || l[0].Text != owner.ExpiredCode {
 			t.Fatalf("%q then %q: kept %+v", order[0], order[1], l)
 		}
 	}
+}
+
+// sweptHolds reports whether the swept file holds sub outside the kept
+// items' random hex ids, which can hold any digits by chance (#6291).
+func sweptHolds(raw []byte, l []keptReply, sub string) bool {
+	s := string(raw)
+	for _, it := range l {
+		s = strings.ReplaceAll(s, `"`+it.ID+`"`, `""`)
+	}
+	return strings.Contains(s, sub)
 }
 
 // TestCH21RoomHasNoPrefixBudget: agent text carries no label (CH-21), so
