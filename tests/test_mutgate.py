@@ -3538,7 +3538,7 @@ class Plan(unittest.TestCase):
                 for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
                                     ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: pkgs),
                                     ("diff_targets", lambda added, pkg: {f"broker/{pkg}/x.go": {1}}),
-                                    ("deletion_sites", lambda *a: ([], None)), ("suite_seconds", lambda *a: (1.0, None)),
+                                    ("deletion_sites", lambda *a: ([], None)), ("lint_budget", lambda pkg, sites: (0.0, [0.0] * len(sites))), ("suite_seconds", lambda *a: (1.0, None)),
                                     ("shard_count", lambda *a: 100)):
                     st.enter_context(mock.patch.object(mutgate, name, value))
                 err = st.enter_context(contextlib.redirect_stderr(io.StringIO()))
@@ -3555,7 +3555,7 @@ class Plan(unittest.TestCase):
             for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
                                 ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: sorted(pkg_targets)),
                                 ("diff_targets", lambda added, pkg: pkg_targets[pkg][0]),
-                                ("deletion_sites", lambda pkg, t, lister: (pkg_targets[pkg][1], None)),
+                                ("deletion_sites", lambda pkg, t, lister: (pkg_targets[pkg][1], None)), ("lint_budget", lambda pkg, sites: (0.0, [0.0] * len(sites))),
                                 ("suite_seconds", lambda pkg, tmp: suite), ("site_costs", lambda *a: costs)):
                 st.enter_context(mock.patch.object(mutgate, name, value))
             err = st.enter_context(contextlib.redirect_stderr(io.StringIO()))
@@ -3692,7 +3692,7 @@ class Plan(unittest.TestCase):
                                 ("tests_changed", lambda tests, pkg: pkg == "kernel/sim"),
                                 ("record_for", lambda *a: ({"rec": 1}, 48.0, None)),
                                 ("targets_for", lambda pkg, added, tests, data, bases: (sim, None)),
-                                ("deletion_sites", lambda pkg, t, lister: ([{}] * 534, None)),
+                                ("deletion_sites", lambda pkg, t, lister: ([{}] * 534, None)), ("lint_budget", lambda pkg, sites: (0.0, [0.0] * len(sites))),
                                 ("suite_seconds", lambda pkg, tmp: timed.append(pkg) or (1.0, None)),
                                 ("site_costs", lambda *a: (None, 0.0))):
                 st.enter_context(mock.patch.object(mutgate, name, value))
@@ -5321,6 +5321,23 @@ func TestSlow(t *testing.T) {
 	}
 }
 
+// TestFlaky refuses a tree once, then passes it: no confirming refusal (#6366).
+func TestFlaky(t *testing.T) {
+	if !strings.Contains(src(t), "clear(b)") {
+		if _, err := os.Stat("../flaky-seen"); err != nil {
+			os.WriteFile("../flaky-seen", nil, 0o644)
+			t.Fatal("hint.go: b is not wiped")
+		}
+	}
+}
+
+// TestPanics panics on the tree it would refuse: Go prints its --- FAIL: line all the same (#6366).
+func TestPanics(t *testing.T) {
+	if !strings.Contains(src(t), "clear(b)") {
+		panic("hint.go: b is not wiped")
+	}
+}
+
 var hog []byte
 
 func TestHog(t *testing.T) {
@@ -5335,6 +5352,11 @@ func TestHog(t *testing.T) {
 """
 LINT_PR = "package hint\n\nfunc Keep(b []byte) int {\n\tn := len(b)\n\tclear(b)\n\treturn n\n}\n"
 LINT_TEST = "package hint\n\nimport \"testing\"\n\nfunc TestKeep(t *testing.T) {\n\tif Keep([]byte{1, 2}) != 2 {\n\t\tt.Fatal(\"Keep\")\n\t}\n}\n"
+
+
+def lint(name, pkg="lint", scope=(("hint",), None)):
+    """A LINTS entry for the fixture lint package, reading broker/hint's files by default."""
+    return (pkg, name, scope)
 
 
 class LintHeld(unittest.TestCase):
@@ -5370,7 +5392,7 @@ class LintHeld(unittest.TestCase):
         none, _ = self.lint_verdicts(())
         self.assertEqual(none[5], ("LIVED", None))  # no test of hint reads b after Keep
         # A lint that fails unmutated, or names no test, kills nothing; the one that refuses the tree does.
-        got, after = self.lint_verdicts((("lint", "TestBroken"), ("lint", "TestMissing"), ("lint", "TestWiped")))
+        got, after = self.lint_verdicts((lint("TestBroken"), lint("TestMissing"), lint("TestWiped")))
         self.assertEqual(got[5], ("KILLED", "TestWiped"))
         self.assertEqual({**got, 5: none[5]}, none)  # the other sites keep their verdicts
         # The lint ran on a copy: the tree holds the PR's text, and no lint-tree is left behind.
@@ -5383,29 +5405,30 @@ class LintHeld(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             pkg = self.fixture(d)
             gone = LINT_PR.replace("\tclear(b)\n", "\n").encode()
-            for lint in ("TestBroken", "TestSlow", "TestHog", "TestKeep", "TestMissing"):
-                with self.subTest(lint), mock.patch.object(mutgate, "BROKER", pkg.parent), \
-                        mock.patch.object(mutgate, "LINTS", (("lint", lint),)), tempfile.TemporaryDirectory() as tmp:
-                    self.assertEqual(mutgate.lint_kills("hint", [(0, "hint.go", gone)], pathlib.Path(tmp), 256 << 20), {})
-            with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "LINTS", (("nolint", "TestWiped"),)), \
+            for name in ("TestBroken", "TestSlow", "TestHog", "TestKeep", "TestMissing"):
+                with self.subTest(name), mock.patch.object(mutgate, "BROKER", pkg.parent), \
+                        mock.patch.object(mutgate, "LINTS", (lint(name),)), tempfile.TemporaryDirectory() as tmp:
+                    self.assertEqual(mutgate.lint_kills("hint", [(0, "hint.go", gone)], pathlib.Path(tmp), 256 << 20), ({}, None))
+            with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "LINTS", (lint("TestWiped", "nolint"),)), \
                     tempfile.TemporaryDirectory() as tmp:
-                self.assertEqual(mutgate.lint_kills("hint", [(0, "hint.go", gone)], pathlib.Path(tmp)), {})
+                self.assertEqual(mutgate.lint_kills("hint", [(0, "hint.go", gone)], pathlib.Path(tmp)), ({}, None))
             # The same call with the refusing lint kills, so each case above is the lint's own.
-            with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "LINTS", (("lint", "TestWiped"),)), \
+            with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "LINTS", (lint("TestWiped"),)), \
                     tempfile.TemporaryDirectory() as tmp:
-                self.assertEqual(mutgate.lint_kills("hint", [(0, "hint.go", gone)], pathlib.Path(tmp), 256 << 20), {0: "TestWiped"})
+                self.assertEqual(mutgate.lint_kills("hint", [(0, "hint.go", gone)], pathlib.Path(tmp), 256 << 20),
+                                 ({0: "TestWiped"}, None))
             # Each deletion is alone in the tree its lint reads: the one before it is put back. The second
             # site is in another file of the package, so only the restore keeps the first out of its tree.
             (pkg / "other.go").write_text("package hint\n")
-            with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "LINTS", (("lint", "TestWiped"),)), \
+            with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "LINTS", (lint("TestWiped"),)), \
                     tempfile.TemporaryDirectory() as tmp:
                 self.assertEqual(mutgate.lint_kills("hint", [(0, "hint.go", gone), (1, "other.go", b"package hint\n")],
-                                                    pathlib.Path(tmp)), {0: "TestWiped"})
+                                                    pathlib.Path(tmp)), ({0: "TestWiped"}, None))
 
     def test_each_listed_lint_is_a_top_level_test_of_its_package(self):
         # REQ: MUT-lint-held
         self.assertTrue(mutgate.LINTS)
-        for pkg, name in mutgate.LINTS:
+        for pkg, name, _ in mutgate.LINTS:
             srcs = "".join(p.read_text() for p in (ROOT / "broker" / pkg).glob("*_test.go"))
             self.assertRegex(srcs, rf"(?m)^func {name}\(t \*testing\.T\) {{$", (pkg, name))
 
@@ -5425,8 +5448,161 @@ class LintHeld(unittest.TestCase):
                 got = mutgate.lint_kills(pkg, [(i, fname, "\n".join(lines).encode())], pathlib.Path(tmp))
             want[i] = ("TestEverySealingKeyIsWipedRightAfterItsSealer" if i == 0
                        else "TestEveryOpenedPlaintextIsWipedOnEveryPath")
-            self.assertEqual(got, {i: want[i]}, (pkg, fname))
+            self.assertEqual(got, ({i: want[i]}, None), (pkg, fname))
 
+
+class LintHeldFollowUp(unittest.TestCase):
+    """MUT-lint-held-fu (#6366): a lint kill is two refusals by the lint's own check, the lints read
+    only their files, and their time is budgeted apart from the tests'."""
+    fixture = LintHeld.fixture
+    repo, lister = Deletion.repo, Deletion.lister
+    gone = LINT_PR.replace("\tclear(b)\n", "\n").encode()
+
+    def kills(self, lints, mem=None, **budget):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.fixture(d)
+            with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "LINTS", lints), \
+                    (mock.patch.multiple(mutgate, **budget) if budget else contextlib.nullcontext()), \
+                    tempfile.TemporaryDirectory() as tmp:
+                got = mutgate.lint_kills("hint", [(0, "hint.go", self.gone)], pathlib.Path(tmp), mem)
+                self.assertFalse((pathlib.Path(tmp) / "lint-tree").exists())
+            # The lints ran on a copy: a flaky lint's mark is not left in the tree.
+            self.assertFalse((pkg.parent / "flaky-seen").exists())
+        return got
+
+    def test_a_lint_that_refuses_once_then_passes_kills_nothing(self):
+        # REQ: MUT-lint-held-fu
+        self.assertEqual(self.kills((lint("TestFlaky"),)), ({}, None))
+        # A lint after it in LINTS still runs on the deletion, and its two refusals kill.
+        self.assertEqual(self.kills((lint("TestFlaky"), lint("TestWiped"))), ({0: "TestWiped"}, None))
+
+    def test_a_lint_that_panics_on_the_mutated_tree_kills_nothing(self):
+        # REQ: MUT-lint-held-fu
+        self.assertEqual(self.kills((lint("TestPanics"),)), ({}, None))
+        self.assertEqual(self.kills((lint("TestPanics"), lint("TestWiped"))), ({0: "TestWiped"}, None))
+
+    def test_a_refusal_is_exit_1_with_its_own_fail_line_and_no_panic(self):
+        # REQ: MUT-lint-held-fu
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            binary, out = pathlib.Path(d) / "l.test", pathlib.Path(d) / "l.out"
+            cases = [(1, b"--- FAIL: TestWiped (0.00s)\n    lint_test.go:9: hint.go: panic: b\nFAIL\n", "refused"),
+                     (1, b"--- FAIL: TestWiped (0.00s)\npanic: boom [recovered]\n", "exit 1, with a panic"),
+                     (1, b"--- FAIL: TestWiped (0.00s)\nfatal error: concurrent map writes\n", "exit 1, with a panic"),
+                     (1, b"--- FAIL: TestOther (0.00s)\nFAIL\n", "exit 1"),
+                     (1, b"exit status 1\n", "exit 1"),
+                     (2, b"--- FAIL: TestWiped (0.00s)\npanic: boom\n", "exit 2"),
+                     (0, b"PASS\n", "passed"), ("timeout", b"", "timeout"), ("over", b"", "memory cap")]
+            for end, text, want in cases:
+                class P:
+                    def __init__(self, *a, stdout, **k):
+                        stdout.write(text)
+                with self.subTest(want=want, text=text), mock.patch.object(subprocess, "Popen", P), \
+                        mock.patch.object(mutgate, "watch", lambda p, t, m: (end, 0)):
+                    self.assertEqual(mutgate.lint_run(binary, d, 5, None, "TestWiped"), want)
+                    self.assertTrue(out.exists())
+
+    def test_a_lint_reads_only_its_files_and_a_package_none_reads_makes_no_copy(self):
+        # REQ: MUT-lint-held-fu
+        from unittest import mock
+        copied = []
+        real = shutil.copytree
+
+        def copytree(src, dst, *a, **k):  # the fixture's repo is made with copytree too
+            if pathlib.Path(dst).parent.name == "lint-tree":
+                copied.append(src)
+            return real(src, dst, *a, **k)
+        with mock.patch.object(shutil, "copytree", copytree):
+            self.assertEqual(self.kills((lint("TestWiped", scope=(("other", "hin"), None)),)), ({}, None))
+            self.assertEqual(copied, [])
+            # A needle in the file's text, or the package under a listed directory, brings the lint in.
+            self.assertEqual(self.kills((lint("TestWiped", scope=((), b"func Keep(")),)), ({0: "TestWiped"}, None))
+            self.assertEqual(self.kills((lint("TestWiped", scope=(("hint",), b"nowhere")),)), ({0: "TestWiped"}, None))
+            self.assertEqual(len(copied), 2)
+        # broker's lints: the key lint reads clerk and its importers, the wipe lint clerk alone.
+        key, wipe = mutgate.LINTS
+        imports = b'import (\n\tc "github.com/ghbmrk/agentos/broker/clerk"\n)\n'
+        self.assertEqual(mutgate.lints_for("localui", b"package localui\n"), [])
+        self.assertEqual(mutgate.lints_for("clerkish", b"package clerkish\n"), [])
+        self.assertEqual(mutgate.lints_for("localui", b"package localui\n" + imports), [key])
+        self.assertEqual(mutgate.lints_for("clerk", b"package clerk\n"), [key, wipe])
+        self.assertEqual(mutgate.lints_for("clerk/run", b"package run\n"), [key, wipe])
+
+    def test_lint_time_past_its_budget_fails_the_run_and_names_the_lints(self):
+        # REQ: MUT-lint-held-fu
+        from unittest import mock
+        # TestSlow sleeps on the mutated tree: its own limit is 3 times its unmutated run plus 10 s,
+        # past the runs' 2 s budget, so the budget stops it and the run gives no verdict.
+        got = self.kills((lint("TestSlow"),), LINT_SETUP_SECONDS=300, LINT_RUN_SECONDS=1)
+        self.assertEqual(got, (None, got[1]))
+        self.assertIn("lints passed their 2 s budget of runs on 1 deletion(s) at hint.go", got[1])
+        self.assertIn("LINT_SETUP_SECONDS", got[1])
+        # A budget spent before the unmutated run names that.
+        got = self.kills((lint("TestWiped"),), LINT_SETUP_SECONDS=-10, LINT_RUN_SECONDS=1)
+        self.assertEqual(got, (None, got[1]))
+        self.assertIn("building the lints", got[1])
+        # deletion_mutants returns the problem in place of verdicts.
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.fixture(d)
+            added = mutgate.added_lines(subprocess.run(
+                ["git", "-C", d, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1", "--", "broker"],
+                capture_output=True, text=True, check=True).stdout)[0]
+            tmp = pathlib.Path(d) / "tmp"
+            tmp.mkdir()
+            with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "LINTS", (lint("TestSlow"),)), \
+                    mock.patch.multiple(mutgate, LINT_SETUP_SECONDS=300, LINT_RUN_SECONDS=1):
+                got, problem = mutgate.deletion_mutants("hint", added, tmp, self.lister(tmp), 1)
+            self.assertIsNone(got)
+            self.assertIn("lints passed their", problem)
+
+    def test_the_plan_charges_lint_time_to_the_shards_of_a_package_the_lints_read(self):
+        # REQ: MUT-lint-held-fu
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            for path, text in (("localui/a.go", "package localui\n"), ("clerk/run/a.go", "package run\n"),
+                               ("localui/b.go", 'package localui\n\nimport "github.com/ghbmrk/agentos/broker/clerk"\n')):
+                (root / path).parent.mkdir(parents=True, exist_ok=True)
+                (root / path).write_text(text)
+            with mock.patch.object(mutgate, "BROKER", root), mock.patch.multiple(mutgate, LINT_SETUP_SECONDS=300, LINT_RUN_SECONDS=10):
+                self.assertEqual(mutgate.lint_budget("localui", [{"file": "a.go"}] * 3), (0.0, [0, 0, 0]))
+                # A clerk file: both lints may run, and one refusal's confirming run.
+                self.assertEqual(mutgate.lint_budget("clerk/run", [{"file": "a.go"}] * 2), (300, [30, 30]))
+                self.assertEqual(mutgate.lint_budget("localui", [{"file": "a.go"}, {"file": "b.go"}]), (300, [0, 20]))
+                many = mutgate.lint_budget("clerk/run", [{"file": "a.go"}] * 100)
+        lines = {"a.go": list(range(10))}
+        # 100 sites of 10 s each fit one shard's 1800 s; 30 s of lints each and 300 s of setup take three.
+        self.assertEqual(mutgate.shard_count(lines, [0] * 100, 1.0, [10.0] * 100, 0.0), 1)
+        self.assertEqual(mutgate.shard_count(lines, [0] * 100, 1.0, [10.0] * 100, 0.0, many), 3)
+        self.assertEqual(mutgate.shard_count(lines, [0] * 100, 1.0, None, 0.0, many), 3)
+        # cmd_plan charges lint_budget's figure for the package's sites.
+        seen = []
+
+        def budget(pkg, sites):
+            seen.append((pkg, len(sites)))
+            return many
+        code, out, err = self.plan_with(budget, {"clerk/run": ({"broker/clerk/run/a.go": set(range(1, 11))}, [{}] * 100)})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(seen, [("clerk/run", 100)])
+        self.assertIn("clerk/run: 10 target lines, 100 deletion sites, a 1 s suite, 3 shard(s)", err)
+
+    def plan_with(self, budget, pkg_targets):
+        """Plan.plan's (code, matrix, stderr) with lint_budget as given and site_costs at 10 s a site."""
+        from unittest import mock
+        import contextlib, io, types
+        with contextlib.ExitStack() as st:
+            for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
+                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: sorted(pkg_targets)),
+                                ("diff_targets", lambda added, pkg: pkg_targets[pkg][0]),
+                                ("deletion_sites", lambda pkg, t, lister: (pkg_targets[pkg][1], None)),
+                                ("lint_budget", budget), ("suite_seconds", lambda pkg, tmp: (1.0, None)),
+                                ("site_costs", lambda pkg, sites, *a: ([10.0] * len(sites), 0.0))):
+                st.enter_context(mock.patch.object(mutgate, name, value))
+            err = st.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            out = st.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            code = mutgate.cmd_plan(types.SimpleNamespace(git="HEAD~1", targets_out=None))
+        return code, out.getvalue(), err.getvalue()
 
 if __name__ == "__main__":
     unittest.main()

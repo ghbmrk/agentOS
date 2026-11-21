@@ -1724,17 +1724,20 @@ SITE_RUNS = 1
 SHARD_SECONDS = 1800
 
 
-def shard_count(targets, sites, suite=0.0, costs=None, overhead=0.0):
+def shard_count(targets, sites, suite=0.0, costs=None, overhead=0.0, lint=(0.0, ())):
     """K for a package with these target lines ({path: lines}) and deletion sites, whose whole test
     suite takes suite seconds: at least one. With costs (seconds per site, site_costs), a site costs
     those, not a whole suite, and each shard first spends overhead on its per-test pass (#6172).
     That pass leaves a shard's sites at least half of SHARD_SECONDS, so a pass past a quarter of the
-    job plans shards past the target, and one past 45 minutes past the job's 60 (#6217)."""
+    job plans shards past the target, and one past 45 minutes past the job's 60 (#6217). lint is
+    lint_budget's (setup, [seconds per site]): each shard spends setup, and each site its seconds (#6366)."""
     lines = sum(len(v) for v in targets.values())
+    setup, each = lint
     if costs is None:
-        work, budget = suite * (LINE_RUNS * lines + SITE_RUNS * len(sites)), SHARD_SECONDS
+        work, budget = suite * (LINE_RUNS * lines + SITE_RUNS * len(sites)) + sum(each), SHARD_SECONDS - setup
     else:
-        work, budget = suite * LINE_RUNS * lines + sum(costs), max(SHARD_SECONDS - overhead, SHARD_SECONDS / 2)
+        work = suite * LINE_RUNS * lines + sum(costs) + sum(each)
+        budget = max(SHARD_SECONDS - overhead, SHARD_SECONDS / 2) - setup
     return max(1, -(-lines // LINES_PER_SHARD), -(-len(sites) // SITES_PER_SHARD), math.ceil(work / budget))
 
 
@@ -2901,7 +2904,10 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
             if sum(st == "TIMED OUT" for st, _, _ in results) * 2 > len(batch):
                 jobs = 1  # each run needs the runner to itself: the rest runs alone, once
     lived = [(i, sites[i]["file"], texts[i]) for i, (st, _) in enumerate(statuses) if st == "LIVED"]
-    for i, name in lint_kills(pkg, lived, tmp, alone_mem).items():
+    kills, problem = lint_kills(pkg, lived, tmp, alone_mem)
+    if problem:
+        return None, problem
+    for i, name in kills.items():
         statuses[i] = ("KILLED", name)
     return [mutation(s, *st) for s, st in zip(sites, statuses)], None
 
@@ -2909,50 +2915,130 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
 # MUT-lint-held (#6346). A source lint holds statement shapes no test can observe (a key wiped right
 # after its sealer takes it), and fails on a tree without them. A deletion its package's tests let
 # live is KILLED when a listed lint test, run on a copy of broker/ with only that deletion in it (the
-# text the tests ran), fails, the same binary having passed on the unmutated copy: the lint read the
-# mutated tree and refused it. A lint that fails unmutated, times out or passes the memory cap
-# leaves the deletion LIVED. Each entry is (package under broker/, top-level test).
-LINTS = (("clerk/wipelint", "TestEverySealingKeyIsWipedRightAfterItsSealer"),
-         ("clerk/wipelint", "TestEveryOpenedPlaintextIsWipedOnEveryPath"))
+# text the tests ran), refuses it twice running, the same binary having passed on the unmutated copy:
+# the lint read the mutated tree and refused it, and a lint that refuses once is flaky, not a kill
+# (#6366). A refusal is the lint's own assertion: exit 1 with a `--- FAIL:` line naming the test and no
+# panic. A panic, a timeout, the memory cap or any other end leaves the deletion LIVED, as does a lint
+# that fails unmutated. Each entry is (package under broker/, top-level test, the files it reads: the
+# packages under these broker/ directories, and any file holding this text). A deletion in a file no
+# listed lint reads goes to no lint (#6366): a package with no sealer skips them, and no broker/ copy is made.
+CLERK = "clerk"
+LINTS = (("clerk/wipelint", "TestEverySealingKeyIsWipedRightAfterItsSealer", ((CLERK,), b'"github.com/ghbmrk/agentos/broker/clerk"')),
+         ("clerk/wipelint", "TestEveryOpenedPlaintextIsWipedOnEveryPath", ((CLERK,), None)))
+# Lint time has its own budget (#6366), which `plan` charges each shard and `delete` holds: SETUP for the
+# broker/ copy, each lint's build and its unmutated run (a cold cache compiles all it loads), and RUN for
+# each run on a deletion, which every lint reading its file may take, plus the refusal's confirming run.
+# Measured on #6365's sites: 4 s an unmutated run, under 1 s a mutated one, about 13 s in all for two sites.
+LINT_SETUP_SECONDS = 300
+LINT_RUN_SECONDS = 10
+
+
+def lints_for(pkg, text):
+    """The LINTS entries that read a file of broker/<pkg>/ holding text (bytes)."""
+    return [lint for lint in LINTS
+            if any(pkg == d or pkg.startswith(d + "/") for d in lint[2][0]) or (lint[2][1] is not None and lint[2][1] in text)]
+
+
+def lint_budget(pkg, sites):
+    """(setup seconds, [seconds for each site]) the lints spend on deletions at these sites of broker/<pkg>/
+    (each {"file": name, ...}): what `plan` charges a shard whose sites may all live and `delete` allows its LIVED ones."""
+    texts = {f: (BROKER / pkg / f).read_bytes() for f in {s["file"] for s in sites}}
+    runs = [len(n) + 1 if (n := lints_for(pkg, texts[s["file"]])) else 0 for s in sites]
+    return (LINT_SETUP_SECONDS if any(runs) else 0.0), [LINT_RUN_SECONDS * r for r in runs]
 
 
 def lint_kills(pkg, lived, tmp, mem=None):
-    """{index: lint test} for each (index, file, mutant text) of broker/<pkg>/ that a listed lint
-    refuses, as above; the first in LINTS order that fails names it."""
+    """({index: lint test}, None) for each (index, file, mutant text) of broker/<pkg>/ that a listed
+    lint reading its file refuses, as above, the first in LINTS order that refuses naming it; or (None,
+    problem) when the lints pass their budget (lint_budget), which names the lint time, not the tests'."""
+    lived = [(i, f, t, ls) for i, f, t in lived if (ls := lints_for(pkg, (BROKER / pkg / f).read_bytes()))]
     if not lived:
-        return {}
+        return {}, None
+    setup, each = lint_budget(pkg, [{"file": f} for _, f, _, _ in lived])
+    print(f"mutgate: broker/{pkg}/: {len(lived)} LIVED deletion(s) go to the lints, within {setup:.0f} s of lint setup "
+          f"and {sum(each):.0f} s of lint runs", file=sys.stderr)
+    began, deadline = time.monotonic(), time.monotonic() + setup
+
+    def left():
+        return deadline - time.monotonic()
+
+    def spent(where):
+        return None, (f"broker/{pkg}/'s lints passed their {where}, so no lint verdict was given; nothing was shown "
+                      "to survive. Rerun; if it recurs, LINT_SETUP_SECONDS or LINT_RUN_SECONDS in tools/mutgate.py are too small")
     tree = pathlib.Path(tmp) / "lint-tree"
     shutil.rmtree(tree, ignore_errors=True)
     shutil.copytree(BROKER, tree / "broker", symlinks=True)
-    lints = []
-    for n, (lpkg, name) in enumerate(LINTS):
-        cwd, binary = tree / "broker" / lpkg, pathlib.Path(tmp) / f"lint-{n}.test"
-        if not cwd.is_dir() or subprocess.run(["go", "test", "-c", "-o", str(binary), "."], cwd=cwd,
-                                              stdout=sys.stderr).returncode or not binary.exists():
-            print(f"mutgate: lint broker/{lpkg} {name} does not build; it kills nothing", file=sys.stderr)
-            continue
-        began = time.monotonic()
-        if run_tests(binary, cwd, LINT_SECONDS, mem, [name]) != "LIVED":
-            print(f"mutgate: lint broker/{lpkg} {name} does not pass unmutated; it kills nothing", file=sys.stderr)
-            continue
-        lints.append((cwd, binary, name, 3 * (time.monotonic() - began) + 10))
-    out = {}
-    for i, fname, text in lived:
-        path = tree / "broker" / pkg / fname
-        was = path.read_bytes()
-        path.write_bytes(text)
-        try:
-            for cwd, binary, name, limit in lints:
-                if run_tests(binary, cwd, limit, mem, [name]) == "KILLED" and failed_test(binary) == name:
-                    out[i] = name
-                    break
-        finally:
-            path.write_bytes(was)
-    shutil.rmtree(tree, ignore_errors=True)
-    return out
+    try:
+        lints = {}
+        for n, lint in enumerate(LINTS):
+            lpkg, name = lint[0], lint[1]
+            if not any(lint in ls for _, _, _, ls in lived):
+                continue
+            cwd, binary = tree / "broker" / lpkg, pathlib.Path(tmp) / f"lint-{n}.test"
+            if not cwd.is_dir() or subprocess.run(["go", "test", "-c", "-o", str(binary), "."], cwd=cwd,
+                                                  stdout=sys.stderr).returncode or not binary.exists():
+                print(f"mutgate: lint broker/{lpkg} {name} does not build; it kills nothing", file=sys.stderr)
+                continue
+            if left() <= 0:
+                return spent(f"{setup:.0f} s setup budget building the lints")
+            start = time.monotonic()
+            end = lint_run(binary, cwd, left(), mem, name)
+            if end == "timeout":
+                return spent(f"{setup:.0f} s setup budget on {name}'s unmutated run")
+            if end != "passed":
+                print(f"mutgate: lint broker/{lpkg} {name} does not pass unmutated ({end}); it kills nothing", file=sys.stderr)
+                continue
+            lints[lint] = (cwd, binary, name, 3 * (time.monotonic() - start) + 10)
+        out, deadline = {}, time.monotonic() + sum(each)  # the runs' own budget, after the setup's
+        for i, fname, text, ls in lived:
+            path = tree / "broker" / pkg / fname
+            was = path.read_bytes()
+            path.write_bytes(text)
+            try:
+                for cwd, binary, name, limit in (lints[lint] for lint in ls if lint in lints):
+                    ends, over = [], f"{sum(each):.0f} s budget of runs on {len(lived)} deletion(s) at {fname}"
+                    while len(ends) < 2 and (not ends or ends[-1] == "refused"):  # a refusal runs once more
+                        if left() <= 0:
+                            return spent(over)
+                        ends.append(lint_run(binary, cwd, min(limit, left()), mem, name))
+                        if ends[-1] == "timeout" and left() <= 0:  # the budget stopped it, not its own limit
+                            return spent(over)
+                    if ends == ["refused", "refused"]:
+                        out[i] = name
+                        break
+                    if ends != ["passed"]:
+                        print(f"mutgate: lint {name} on broker/{pkg}/{fname} ended {', then '.join(ends)}: "
+                              "not a refusal twice, so it kills nothing", file=sys.stderr)
+            finally:
+                path.write_bytes(was)
+        print(f"mutgate: broker/{pkg}/'s lints took {time.monotonic() - began:.0f} s", file=sys.stderr)
+        return out, None
+    finally:
+        shutil.rmtree(tree, ignore_errors=True)
 
 
-LINT_SECONDS = 600  # a lint's unmutated run: a cold build cache compiles what it loads
+def lint_run(binary, cwd, timeout, mem, name):
+    """How one run of lint test name ended: 'passed' (exit 0); 'refused' (exit 1, its own `--- FAIL:`
+    line, and no line opening `panic: ` or `fatal error: `, which a panic or a crash prints and a test's
+    message, indented, does not); 'timeout'; 'memory cap'; or 'exit N' (a panic is exit 2)."""
+    out = pathlib.Path(binary).with_suffix(".out")
+    with open(out, "wb") as log:
+        p = subprocess.Popen([str(binary), "-test.failfast", f"-test.run=^{name}$", f"-test.timeout={timeout + 2}s"],
+                             cwd=cwd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        end, _ = watch(p, timeout, mem)
+    if end == 0:
+        return "passed"
+    if end in ("timeout", "over"):
+        return {"over": "memory cap"}.get(end, end)
+    if end == 1 and failed_test(binary) == name:
+        with open(out, "rb") as f:
+            if not any(CRASHED.match(line) for line in f):
+                return "refused"
+        return "exit 1, with a panic"
+    return f"exit {end}"
+
+
+CRASHED = re.compile(rb"(panic: |fatal error: )")
 
 
 def add_mutants(data, mutants):
@@ -3345,7 +3431,8 @@ def cmd_plan(args):
                 return 1
             # `delete` runs each site with the tests that cover it (#6172), so its cost is theirs.
             costs, overhead = site_costs(pkg, sites, suite, tmp) if sites else (None, 0.0)
-            of = shard_count(targets, sites, suite, costs, overhead)
+            # Any site may live and go to the lints that read its file, each shard copying broker/ (#6366).
+            of = shard_count(targets, sites, suite, costs, overhead, lint_budget(pkg, sites))
             print(f"mutgate: {pkg}: {sum(map(len, targets.values()))} target lines, {len(sites)} deletion "
                   f"sites, a {suite:.0f} s suite, {of} shard(s)", file=sys.stderr)
             counts.append((pkg, of))
