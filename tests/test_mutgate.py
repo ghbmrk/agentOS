@@ -3328,9 +3328,9 @@ class DataFiles(unittest.TestCase):
                 ("past a rune", "var _ = os.ReadDir(string(')') + \".\")", True),
                 ("in a comment", "// see ASSUMPTIONS.md", False),
                 ("a glob of another name", '//go:embed *.html\nvar docs embed.FS', False),
-                ("a join of words", 'var _ = strings.Join(words, "")', False),
+                ("a join of words", 'import "strings"\n\nvar _ = strings.Join(words, "")', False),
                 ("another glob", 'var _, _ = filepath.Glob("*.go")', False),
-                ("a dot elsewhere", 'var _ = strings.Split(h, ".")', False),
+                ("a dot elsewhere", 'import "strings"\n\nvar _ = strings.Split(h, ".")', False),
                 ("an absolute listing", 'var _, _ = os.ReadDir("/proc/self/fd")', False)):
             with self.subTest(name), tempfile.TemporaryDirectory() as d, \
                     self.tree(d, {"hint/hint.go": "package hint\n", "hint/hint_test.go": f"package hint\n\n{src}\n"}):
@@ -3340,94 +3340,123 @@ class DataFiles(unittest.TestCase):
             os.symlink("hint.go", pathlib.Path(d) / "broker" / "hint" / "link.go")
             self.assertEqual(mutgate.data_owner("broker/hint/ASSUMPTIONS.md"), "hint")
 
-    def test_a_wildcard_only_glob_counts_only_where_it_can_reach_a_file(self):
-        # #6328: a bare "*" is mostly data (a confusables table's character, a DNS wildcard, an
-        # Accept header), so a glob of wildcards and slashes alone names a file only in a
-        # //go:embed pattern or a path call's arguments; a glob holding any other character
-        # ("**/*.md") still counts anywhere.
-        # REQ: MUT-deleted-test-own-lines-fu
-        for name, src, counts in (
-                ("a table's star", 'var table = map[rune]string{0x2217: "*"}', False),
-                ("a DNS wildcard", 'var _ = listHas(v, "email") || listHas(v, "*")', False),
-                ("an Accept header", 'var h = map[string]string{"Accept": "*/*"}', False),
-                ("a star in a glob call", 'var _, _ = fs.Glob(F, "*")', True),
-                ("a star behind a directory in a glob call", 'var _, _ = filepath.Glob(dir + "/*")', True),
-                ("a star in a join", 'var _ = filepath.Join(dir, "*/*")', True),
-                ("a star embedded", '//go:embed *\nvar docs embed.FS', True),
-                ("a named glob outside a call", 'var pattern = "*.md"', True),
-                # L3 on #6336 (row #6337): a package that lists or matches names anywhere can reach
-                # a wildcard-only glob held in a variable, a const, a table or a field.
-                ("a star in a variable", 'func f() { p := "*"; fs.Glob(F, p) }', True),
-                ("a star in a const", 'const pat = "*"\nvar _, _ = fs.Glob(F, pat)', True),
-                ("a star in a table", 'var pats = []string{"*"}\nfunc f() { for _, p := range pats { filepath.Glob(filepath.Join(d, p)) } }', True),
-                ("a star in a field", 'var c = struct{ p string }{"*"}\nvar _, _ = fs.Glob(F, c.p)', True),
-                ("a star beside a walk", 'var s = "*"\nvar _ = filepath.WalkDir(root, fn)', True),
-                ("a star beside an old walk", 'var s = "*"\nvar _ = filepath.Walk(root, fn)', True),
-                ("a star beside a listing", 'var s = "*"\nvar _, _ = os.ReadDir(d)', True),
-                ("a star beside a match", 'var s = "*"\nvar _, _ = filepath.Match(s, name)', True),
-                ("a star beside a call that only ends in Match", 'var s = "*"\nvar _ = re.FindMatch(s)', False),
-                ("a glob call named only in a comment or literal", 'var s = "*" // Glob(\nvar t = "ReadDir("', False)):
+    def assertNames(self, cases, path="broker/hint/ASSUMPTIONS.md"):
+        for name, src, counts in cases:
             with self.subTest(name), tempfile.TemporaryDirectory() as d, \
                     self.tree(d, {"hint/hint.go": "package hint\n", "hint/hint_test.go": f"package hint\n\n{src}\n"}):
-                got = mutgate.touched(*mutgate.added_lines(data_diff("broker/hint/ASSUMPTIONS.md")))
-                self.assertEqual(got, {"hint"} if counts else set())
-        # The glob call can sit in another file of the package (a helper).
-        with tempfile.TemporaryDirectory() as d, self.tree(d, {
-                "hint/hint.go": "package hint\n\nfunc list(p string) { fs.Glob(F, p) }\n",
-                "hint/hint_test.go": 'package hint\n\nvar all = "*"\n'}):
-            self.assertEqual(mutgate.touched(*mutgate.added_lines(data_diff("broker/hint/ASSUMPTIONS.md"))), {"hint"})
-        # `?` is a wildcard too: "????" matches a.md only inside a path call.
-        for src, counts in (('var q = "????"', False), ('var _, _ = fs.Glob(F, "????")', True)):
-            with self.subTest(src), tempfile.TemporaryDirectory() as d, \
-                    self.tree(d, {"hint/hint.go": "package hint\n", "hint/hint_test.go": f"package hint\n\n{src}\n"}):
-                got = mutgate.touched(*mutgate.added_lines(data_diff("broker/hint/a.md")))
+                got = mutgate.touched(*mutgate.added_lines(data_diff(path)))
                 self.assertEqual(got, {"hint"} if counts else set())
 
-    def test_a_path_function_named_without_a_call_can_name_any_file(self):
-        # #6337 (Security on #6336): a path function taken as a value and called under another name
-        # (`g := filepath.Glob; g("*")`) has no `Glob(` in the source, so the literals it reads are
-        # unseen. Any reference to a PATH_FUNCS name not followed at once by `(` reads the package
-        # as able to name any file, as a link does: fail closed, by name, with no type resolution.
+    def test_a_glob_counts_anywhere(self):
+        # #6390: a glob held as data ("*" in a table, a DNS wildcard) can reach any listing call
+        # through a variable, and no list of listing functions is complete (ParseGlob, Readdirnames),
+        # so a glob of wildcards alone counts anywhere, as every other glob does (#6328 and #6336
+        # counted it only beside a listing function the gate knew by name).
         # REQ: MUT-deleted-test-own-lines-fu
-        for name, src, counts in (
-                ("an alias", 'func f() { g := filepath.Glob; g("*") }', True),
-                ("an assigned alias", 'var g func(string) ([]string, error)\nfunc f() { g = filepath.Glob; g("*") }', True),
-                ("a function-typed parameter", 'func list(g func(string) ([]string, error)) { g("*") }\nvar _ = func() int { list(filepath.Glob); return 0 }()', True),
-                ("a slice of path functions", 'var fns = []func(string) ([]os.DirEntry, error){os.ReadDir}\nvar _, _ = fns[0](".")', True),
-                ("a map of path functions", 'var fns = map[string]func(string) ([]string, error){"g": filepath.Glob}', True),
-                ("a struct field", 'var s = struct{ read func(string) ([]byte, error) }{os.ReadFile}', True),
-                ("a method value", 'func f(fsys fs.ReadDirFS) { rd := fsys.ReadDir; rd(".") }', True),
-                ("a method expression", 'var open = fs.FS.Open', True),
-                ("a matcher value", 'var m = filepath.Match', True),
-                ("a walker value", 'var w = filepath.WalkDir', True),
-                ("a call spaced from its parenthesis", 'var _, _ = filepath.Glob ("*")', True),
-                ("a call split by a comment", 'var _, _ = filepath.Glob/* x */("*")', True),
-                ("a parenthesized function", 'var _, _ = (filepath.Glob)("*")', True),
-                # Unchanged from #6336: a direct call, and data beside no path function.
-                ("a direct call", 'var _, _ = os.ReadDir(d)', False),
-                ("a join of words", 'var _ = strings.Join(words, "")', False),
-                ("a table's star", 'var table = map[rune]string{0x2217: "*"}', False),
-                ("a DNS wildcard", 'var _ = listHas(v, "email") || listHas(v, "*")', False),
-                ("a longer name", 'var _ fs.ReadDirFS\nvar _ filepath.WalkFunc\nvar _ fs.StatFS', False),
-                ("a name in a comment or literal", 'var s = "filepath.Glob" // g := filepath.Glob', False)):
-            with self.subTest(name), tempfile.TemporaryDirectory() as d, \
-                    self.tree(d, {"hint/hint.go": "package hint\n", "hint/hint_test.go": f"package hint\n\n{src}\n"}):
-                got = mutgate.touched(*mutgate.added_lines(data_diff("broker/hint/ASSUMPTIONS.md")))
-                self.assertEqual(got, {"hint"} if counts else set())
-        # The reference can sit in another file of the package from the literal it reads.
+        self.assertNames((
+                ("a table's star", 'var table = map[rune]string{0x2217: "*"}', True),
+                ("a DNS wildcard", 'var _ = listHas(v, "email") || listHas(v, "*")', True),
+                ("an Accept header", 'var h = map[string]string{"Accept": "*/*"}', True),
+                ("a star in a variable", 'func f() { p := "*"; fs.Glob(F, p) }', True),
+                ("a star beside a template glob", 'var s = "*"\nvar _ = template.Must(template.ParseGlob(s))', True),
+                ("a star embedded", '//go:embed *\nvar docs embed.FS', True),
+                ("a star only in a comment", '// "*"\nvar s = "x"', False),
+                ("a glob of another name", 'var s = "*.html"', False)))
+        self.assertNames((('var q = "????"', 'var q = "????"', True), ('var q = "???"', 'var q = "???"', False)),
+                         "broker/hint/a.md")
+
+    def test_any_call_but_a_pure_ones_reads_its_literals(self):
+        # #6390 (Security on #6362): a list of path functions misses some (Readdirnames, ParseGlob,
+        # ParseFS, OpenRoot, CopyFS, parser.ParseDir) and every helper, alias or method that wraps
+        # one, so a listing literal (`.`, `..`, `/`, `./x`, `../x`) counts in the arguments of any
+        # call but a PURE package's (strings, bytes), at any depth, a builtin's included (it can be shadowed). Nothing is kept by name: a new
+        # stdlib function, a local helper and an alias count with no list naming them.
+        # REQ: MUT-deleted-test-own-lines-fu
+        self.assertNames((
+                ("OpenRoot", 'var _, _ = os.OpenRoot(".")', True),
+                ("Readdirnames on a new file", 'func f() { d := os.NewFile(3, "."); d.Readdirnames(-1) }', True),
+                ("Readdir on a root's file", 'func f(r *os.Root) { d, _ := r.Open("."); d.Readdir(-1) }', True),
+                ("ParseFS", 'var _, _ = template.ParseFS(sub(".."), "x")', True),
+                ("CopyFS", 'var _ = os.CopyFS(dst, os.DirFS(".."))', True),
+                ("ParseDir", 'var _, _ = parser.ParseDir(fset, ".", nil, 0)', True),
+                ("a function no list has seen", 'var _ = fsx.LoadEverything("./")', True),
+                ("a method", 'var _ = loader.Load("..")', True),
+                ("a local helper", 'func f(t *testing.T) { literals(t, "../modem/at") }', True),
+                ("a generic call", 'var _ = load[string](".")', True),
+                ("a call of a call", 'var _ = opener()(".")', True),
+                ("an index call", 'var _, _ = fns[0](".")', True),
+                ("a function literal called", 'var _ = func(s string) error { return nil }(".")', True),
+                ("a raw string", 'var _ = f(`..`)', True),
+                ("a listing after an index in a call", 'var _ = f(x[0], ".")', True),
+                ("an alias", 'func f() { rd := fsys.ReadDir; rd(".") }', True),
+                ("a call spaced from its parenthesis", 'var _, _ = filepath.Glob (".")', True),
+                ("a call split by a comment", 'var _, _ = filepath.Glob/* x */(".")', True),
+                # Security on #6403: no lookback window, and a PURE name only at a selector's start.
+                ("a call split by a long comment", 'var _, _ = os.ReadDir/*' + "x" * 200 + '*/(".")', True),
+                ("a call split by long space", 'var _, _ = os.ReadDir' + " " * 127 + '\n' + " " * 200 + '(".")', True),
+                ("a call split by lines", 'var _, _ = os.\n\tReadDir\n\t(\n\t".")', True),
+                ("a field named for a pure package", 'import "strings"\n\nfunc f(t T) { _ = strings.ToUpper("a"); t.strings.Open("..") }', True),
+                ("a chain through a pure package's name", 'import "bytes"\n\nvar _ = a.b.bytes.Open("./x")', True),
+                ("a pure package after a call", 'import "strings"\n\nvar _ = f().strings.Open("..")', True),
+                ("a parenthesized function", 'var _, _ = (filepath.Glob)(".")', True),
+                ("a root", 'var _ = walk("/")', True),
+                ("a literal in a composite argument", 'var _ = run(cfg{dir: "."})', True),
+                ("a pure call inside a path call", 'import "strings"\n\nvar _, _ = os.ReadDir(strings.TrimSpace("."))', True),
+                ("a pure package not imported", 'var _ = strings.Split(h, ".")', True),
+                ("a pure package shadowed after an import", 'import "strings"; func f() { strings := 1; _ = strings }\nvar _ = strings.Split(h, "..")', True),
+                ("a pure package shadowed", 'import "strings"\n\nfunc f() { strings := l{}; strings.Split(".") }', True),
+                ("a pure call", 'import "strings"\n\nvar _ = strings.Split(h, ".")', False),
+                ("a pure call under an alias", 'import s "strings"\n\nvar _ = s.Split(h, "..")', False),
+                ("a pure call split by a comment", 'import "strings"\n\nvar _ = strings /* x */ . /*' + "y" * 200 + '*/ Split(h, "..")', False),
+                ("a pure call on bytes", 'import (\n\t"bytes"\n)\n\nvar _ = bytes.Split(h, nil, "/")', False),
+                ("a builtin", 'var _ = len(".")', True),
+                ("a keyword", 'var (\n\ta = "."\n)\nconst (\n\tb = ".."\n)\nimport (\n\t"./x"\n)\n'
+                 'func f(v string) bool { if (v == ".") { return true }; for (v == "/") {}; switch (v + ".") { case (".."): }; '
+                 'for range ("./x") {}; return (v == "/") }', False),
+                ("no call around it", 'func f(v string) bool { return v == "." }', False),
+                ("a group after an operator", 'var x = a + ("." + b) * (len)', False),
+                ("a value with no literal", 'var m = filepath.Match\nvar w = fs.FS.Open', False),
+                ("a call of a variable path", 'var _, _ = os.ReadDir(d)', False),
+                ("an empty literal", 'var _ = f("")', False),
+                ("a rune", "var _ = f('.')", False),
+                ("a literal after a call holding an index", 'var _ = f(x[0])\nvar s = map[string]string{"k": "."}', False),
+                ("a pure call under an alias in a one-line group", 'import ( s "strings" )\n\nvar _ = s.Split(h, "..")', False),
+                ("a pure call under an alias in a group", 'import (\n\ts "strings"\n)\n\nvar _ = s.Split(h, "..")', False),
+                ("an absolute listing", 'var _, _ = os.ReadDir("/proc/self/fd")', False),
+                ("a listing literal in a comment", '// os.ReadDir(".")\nvar _ = f(x)', False)))
+        # A group or a call can open the code scanned.
+        self.assertEqual(mutgate._call_literals('(".")'), [])
+        self.assertEqual(mutgate._call_literals('f(".")'), ["."])
+        self.assertEqual(mutgate._imports('import "os/exec"'), {"exec": "os/exec"})  # no newline at the end
+        self.assertEqual(mutgate._imports('import ("os/exec"'), {"exec": "os/exec"})  # an unclosed group
+        self.assertEqual(mutgate._imports("import"), {})
+        # An alias declared in another file counts where it is called.
         with tempfile.TemporaryDirectory() as d, self.tree(d, {
                 "hint/hint.go": "package hint\n\nvar read = os.ReadFile\n",
                 "hint/hint_test.go": 'package hint\n\nvar _, _ = read(".")\n'}):
             self.assertEqual(mutgate.touched(*mutgate.added_lines(data_diff("broker/hint/ASSUMPTIONS.md"))), {"hint"})
-        # One name set makes the call and the value patterns, so neither can drift from the other.
-        for f in mutgate.PATH_FUNCS:
-            with self.subTest(f):
-                self.assertTrue(mutgate.PATH_VALUE.search(f"x := y.{f}\n"))
-                self.assertFalse(mutgate.PATH_VALUE.search(f"y.{f}(z)\n"))
-        self.assertEqual({m for m in mutgate.PATH_FUNCS if mutgate.PATH_CALL.search(f"{m}(")} | {"Match"},
-                         set(mutgate.PATH_FUNCS))
-        self.assertEqual({m for m in mutgate.PATH_FUNCS if mutgate.GLOB_CALL.search(f"{m}(")},
-                         {"Glob", "Walk", "WalkDir", "ReadDir", "Match"})
+
+    def test_an_import_that_reads_unseen_names_any_file(self):
+        # #6390: a child process inherits the working directory (`exec.Command("ls")` lists the
+        # package with no literal), and cgo or a raw system call reads by C string or descriptor,
+        # so a package importing os/exec, C, syscall or golang.org/x/sys/unix counts.
+        # REQ: MUT-deleted-test-own-lines-fu
+        self.assertNames((
+                ("exec", 'import "os/exec"\n\nvar _ = exec.Command("ls")', True),
+                ("exec under an alias", 'import x "os/exec"\n\nvar _ = x.Command("ls")', True),
+                ("exec in a group", 'import (\n\t"fmt"\n\t"os/exec"\n)\n\nvar _ = fmt.Sprint(exec.Command)', True),
+                ("cgo", '// #include <stdio.h>\nimport "C"', True),
+                ("syscall", 'import "syscall"\n\nvar _ = syscall.Getpid()', True),
+                ("unix", 'import "golang.org/x/sys/unix"\n\nvar _ = unix.Getpid()', True),
+                ("an import named in a comment", '// import "os/exec"\nimport "fmt"', False),
+                # L3 on #6403: any import declaration's form.
+                ("exec in a one-line group", 'import ( "fmt"; "os/exec" )\n\nvar _ = fmt.Sprint(exec.Command)', True),
+                ("exec indented", '  import "os/exec"', True),
+                ("exec after a semicolon", 'var _ = 1; import "os/exec"', True),
+                ("exec as a raw string", 'import `os/exec`', True),
+                ("an import keyword in a literal", 'import "fmt"\n\nvar _ = fmt.Sprint(`import "os/exec"`)', False),
+                ("an import in a block comment", '/*\nimport "os/exec"\n*/\nimport "fmt"', False),
+                ("an import path in a literal", 'import "fmt"\n\nvar _ = fmt.Sprint("os/exec")', False)))
 
     def test_a_glob_matches_by_its_last_part_against_the_files_base_name(self):
         # Potency on #5943 (d92c2e23): the last-part clause survived `rsplit`→`split` (needs a glob
@@ -4235,13 +4264,14 @@ class Record(unittest.TestCase):
         # #5774 dropped three of them (boxFor's StartTLS branch is gone; readMail's open-error branch and
         # its return are now killed by the ELOOP check). The nine it added for gremlins' cover-gap lines
         # said their mutants were not equivalent; #5909 deleted them once gremlins ran and killed each.
-        self.assertEqual(len(sites), 24, r.stdout)
-        self.assertEqual(len(set(sites)), 24, r.stdout)
+        # #6346 dropped ownGmailSignIn's clear(k): the sealer key-wipe lint kills its deletion.
+        self.assertEqual(len(sites), 23, r.stdout)
+        self.assertEqual(len(set(sites)), 23, r.stdout)
         # The two loadSenders proofs were re-read on #5780 after #5733 edited that func, readMail's
         # ReadAll proof on #5804 after it gained the setup-form check, and work's tick.Stop proof on #5998
         # after its ticker took MailConfig.every.
         self.assertEqual(sorted(" ".join(l.split(" ")[1:3]) for l in r.stdout.strip().split("\n")),
-                         ["STATEMENT_DELETION #5743"] * 20 + ["STATEMENT_DELETION #5780"] * 2
+                         ["STATEMENT_DELETION #5743"] * 19 + ["STATEMENT_DELETION #5780"] * 2
                          + ["STATEMENT_DELETION #5804", "STATEMENT_DELETION #5998"])
 
 
@@ -5213,6 +5243,146 @@ class Jobs(unittest.TestCase):
         from unittest import mock
         with mock.patch.object(os, "sched_getaffinity", create=True, return_value={0, 1, 2}):
             self.assertEqual(mutgate.default_jobs(), 3)
+
+
+
+# The fixture lints read hint.go from the tree they run in, as broker's lints read theirs.
+LINT_SRC = """package lint
+
+import (
+	"os"
+	"strings"
+	"testing"
+	"time"
+)
+
+func src(t *testing.T) string {
+	b, err := os.ReadFile("../hint/hint.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestWiped(t *testing.T) {
+	if !strings.Contains(src(t), "clear(b)") {
+		t.Fatal("hint.go: b is not wiped")
+	}
+}
+
+func TestBroken(t *testing.T) { t.Fatal("fails on every tree") }
+
+func TestSlow(t *testing.T) {
+	if !strings.Contains(src(t), "clear(b)") {
+		time.Sleep(time.Hour)
+	}
+}
+
+var hog []byte
+
+func TestHog(t *testing.T) {
+	if !strings.Contains(src(t), "clear(b)") {
+		hog = make([]byte, 1<<30)
+		for i := range hog {
+			hog[i] = 1
+		}
+		time.Sleep(time.Hour)
+	}
+}
+"""
+LINT_PR = "package hint\n\nfunc Keep(b []byte) int {\n\tn := len(b)\n\tclear(b)\n\treturn n\n}\n"
+LINT_TEST = "package hint\n\nimport \"testing\"\n\nfunc TestKeep(t *testing.T) {\n\tif Keep([]byte{1, 2}) != 2 {\n\t\tt.Fatal(\"Keep\")\n\t}\n}\n"
+
+
+class LintHeld(unittest.TestCase):
+    """MUT-lint-held (#6346): a deletion no test of its package fails, refused by a listed lint."""
+    repo, lister = Deletion.repo, Deletion.lister
+
+    def fixture(self, d):
+        """broker/hint of a repo whose PR adds LINT_PR, with the fixture lint package beside it."""
+        pkg = self.repo(d, "package hint\n", LINT_PR, LINT_TEST)
+        (pkg.parent / "lint").mkdir()
+        (pkg.parent / "lint" / "lint_test.go").write_text(LINT_SRC)
+        return pkg
+
+    def lint_verdicts(self, lints):
+        """({line: (status, killed_by)}, the tree's files after) of deletion_mutants on hint.go with
+        the fixture lint package beside it and LINTS as given."""
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.fixture(d)
+            added = mutgate.added_lines(subprocess.run(
+                ["git", "-C", d, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1", "--", "broker"],
+                capture_output=True, text=True, check=True).stdout)[0]
+            tmp = pathlib.Path(d) / "tmp"
+            tmp.mkdir()
+            with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "LINTS", lints):
+                got, problem = mutgate.deletion_mutants("hint", added, tmp, self.lister(tmp), 1)
+            self.assertIsNone(problem)
+            after = {p.relative_to(d).as_posix(): p.read_text() for p in pkg.parent.rglob("*.go")}
+        return {m["line"]: (m["status"], m.get("killed_by")) for m in got}, after
+
+    def test_a_deletion_a_listed_lint_refuses_is_killed_by_that_lint(self):
+        # REQ: MUT-lint-held
+        none, _ = self.lint_verdicts(())
+        self.assertEqual(none[5], ("LIVED", None))  # no test of hint reads b after Keep
+        # A lint that fails unmutated, or names no test, kills nothing; the one that refuses the tree does.
+        got, after = self.lint_verdicts((("lint", "TestBroken"), ("lint", "TestMissing"), ("lint", "TestWiped")))
+        self.assertEqual(got[5], ("KILLED", "TestWiped"))
+        self.assertEqual({**got, 5: none[5]}, none)  # the other sites keep their verdicts
+        # The lint ran on a copy: the tree holds the PR's text, and no lint-tree is left behind.
+        self.assertEqual(after["broker/hint/hint.go"], LINT_PR)
+        self.assertEqual(after["broker/lint/lint_test.go"], LINT_SRC)
+
+    def test_a_lint_that_passes_fails_unmutated_times_out_or_passes_the_cap_kills_nothing(self):
+        # REQ: MUT-lint-held
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.fixture(d)
+            gone = LINT_PR.replace("\tclear(b)\n", "\n").encode()
+            for lint in ("TestBroken", "TestSlow", "TestHog", "TestKeep", "TestMissing"):
+                with self.subTest(lint), mock.patch.object(mutgate, "BROKER", pkg.parent), \
+                        mock.patch.object(mutgate, "LINTS", (("lint", lint),)), tempfile.TemporaryDirectory() as tmp:
+                    self.assertEqual(mutgate.lint_kills("hint", [(0, "hint.go", gone)], pathlib.Path(tmp), 256 << 20), {})
+            with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "LINTS", (("nolint", "TestWiped"),)), \
+                    tempfile.TemporaryDirectory() as tmp:
+                self.assertEqual(mutgate.lint_kills("hint", [(0, "hint.go", gone)], pathlib.Path(tmp)), {})
+            # The same call with the refusing lint kills, so each case above is the lint's own.
+            with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "LINTS", (("lint", "TestWiped"),)), \
+                    tempfile.TemporaryDirectory() as tmp:
+                self.assertEqual(mutgate.lint_kills("hint", [(0, "hint.go", gone)], pathlib.Path(tmp), 256 << 20), {0: "TestWiped"})
+            # Each deletion is alone in the tree its lint reads: the one before it is put back. The second
+            # site is in another file of the package, so only the restore keeps the first out of its tree.
+            (pkg / "other.go").write_text("package hint\n")
+            with mock.patch.object(mutgate, "BROKER", pkg.parent), mock.patch.object(mutgate, "LINTS", (("lint", "TestWiped"),)), \
+                    tempfile.TemporaryDirectory() as tmp:
+                self.assertEqual(mutgate.lint_kills("hint", [(0, "hint.go", gone), (1, "other.go", b"package hint\n")],
+                                                    pathlib.Path(tmp)), {0: "TestWiped"})
+
+    def test_each_listed_lint_is_a_top_level_test_of_its_package(self):
+        # REQ: MUT-lint-held
+        self.assertTrue(mutgate.LINTS)
+        for pkg, name in mutgate.LINTS:
+            srcs = "".join(p.read_text() for p in (ROOT / "broker" / pkg).glob("*_test.go"))
+            self.assertRegex(srcs, rf"(?m)^func {name}\(t \*testing\.T\) {{$", (pkg, name))
+
+    def test_the_wipe_lints_kill_the_deletions_whose_records_retired(self):
+        # REQ: MUT-lint-held
+        # The acceptance of #6346 on broker itself: each wipe whose record entry this row dropped.
+        sites = [("clerk/run", "gmailsignin.go", "sl, err := clerk.NewAESSealer(k)", "clear(k)"),
+                 ("clerk/handoff", "codeseed.go", "plain, err := g.Open(nil, rest[:g.NonceSize()]", "defer clear(plain)"),
+                 ("clerk/camera", "store.go", "plain, err := g.Open(nil, make([]byte, g.NonceSize()), ct", "defer clear(plain)")]
+        want = {}
+        for i, (pkg, fname, call, wipe) in enumerate(sites):
+            lines = (ROOT / "broker" / pkg / fname).read_text().split("\n")
+            at = next(n for n, l in enumerate(lines) if call in l) + 1
+            self.assertEqual(lines[at].strip(), wipe, (pkg, fname))
+            lines[at] = ""
+            with tempfile.TemporaryDirectory() as tmp:
+                got = mutgate.lint_kills(pkg, [(i, fname, "\n".join(lines).encode())], pathlib.Path(tmp))
+            want[i] = ("TestEverySealingKeyIsWipedRightAfterItsSealer" if i == 0
+                       else "TestEveryOpenedPlaintextIsWipedOnEveryPath")
+            self.assertEqual(got, {i: want[i]}, (pkg, fname))
 
 
 if __name__ == "__main__":
