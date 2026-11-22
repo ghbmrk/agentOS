@@ -781,6 +781,12 @@ def main(argv=None):
     # Required (#6406): without it a reason line naming any PR would pass, weaker than CI.
     c.add_argument("--pr", type=int, required=True, help="the PR number a reason line or waiving decision row must name")
     c.add_argument("--markdown", help="also write the table to this file")
+    # Deprecated, accepted and never read (#6491 dropped it): a trusted-base-rerun rerun replays the
+    # workflow file of the run's first attempt, so a run started before #6491 merged still passes
+    # --body to this live copy, and exit 2 on an unknown flag would fail it. The value is not opened;
+    # the result is the same with or without it. Remove once no open PR's newest trusted-base run
+    # predates #6491's merge (a37503b8, 2026-11-22).
+    c.add_argument("--body", help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
     if a.cmd == "measure" and a.sentence and a.pr is None:
         ap.error("--sentence needs --pr")
