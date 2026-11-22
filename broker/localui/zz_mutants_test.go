@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -101,6 +102,20 @@ func TestTheCodesPageNamesWhyNoKeyWasMade(t *testing.T) {
 			t.Fatalf("%v: the page lacks %q:\n%s", err, want, page)
 		}
 	}
+	// Any other failure fails the page load, and shows no step.
+	r := newRig(t)
+	h := &codeErrs{fakeHooks: r.hooks}
+	r.via = h
+	r.srv = r.open(&MemStore{})
+	h.enroll = errors.New("vault busy")
+	r.hooks.mu.Lock()
+	r.hooks.progress.Online = true
+	r.hooks.mu.Unlock()
+	code := regexp.MustCompile(`PAIR%20([A-Z2-9]{8})`).FindStringSubmatch(html.UnescapeString(r.get("/setup")))[1]
+	r.srv.OfferText(ownerNum, "PAIR "+code)
+	if w := r.do("GET", "/setup", nil); w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "Setup could not start this step.") {
+		t.Fatalf("an enroll failure: %d %s", w.Code, w.Body.String())
+	}
 }
 
 // Sign-in names agentosd's limit, and any other failure, as such: neither
@@ -165,11 +180,11 @@ func TestConnectDeclarationRefusesABrokenUse(t *testing.T) {
 func TestAccountPlanServesItsPathAndMethodsAlone(t *testing.T) {
 	r, _ := accountPlanRig(t, GmailConnect)
 	r.signIn()
-	if w := r.do("GET", "/account-plan/x", nil); w.Code != http.StatusNotFound {
-		t.Fatalf("GET below the plan: %d", w.Code)
+	if w := r.do("GET", "/account-plan/x", nil); w.Code != http.StatusNotFound || strings.Contains(w.Body.String(), "Gmail") {
+		t.Fatalf("GET below the plan: %d %s", w.Code, w.Body.String())
 	}
-	if w := r.do("PUT", "/account-plan/", nil); w.Code != http.StatusMethodNotAllowed || w.Header().Get("Allow") != "GET, POST" {
-		t.Fatalf("PUT: %d, Allow %q", w.Code, w.Header().Get("Allow"))
+	if w := r.do("PUT", "/account-plan/", nil); w.Code != http.StatusMethodNotAllowed || w.Header().Get("Allow") != "GET, POST" || strings.Contains(w.Body.String(), "Gmail") {
+		t.Fatalf("PUT: %d, Allow %q: %s", w.Code, w.Header().Get("Allow"), w.Body.String())
 	}
 	if p := html.UnescapeString(r.get("/account-plan/")); !strings.Contains(p, "<b>Gmail</b>") {
 		t.Fatalf("the plan:\n%s", p)
