@@ -5615,6 +5615,52 @@ class GremlinsMemoryCap(unittest.TestCase):
                 self.assertEqual(mutgate.main(["run", "hint", "--out", str(pathlib.Path(d) / "out")]), 0)
             self.assertEqual(seen.read_text().strip(), "1")  # 96 MB past the 32 MB share: killed
 
+    def fitted_run(self, d, grow, free, jobs, pkgs=("hint",)):
+        """`run` over pkgs with a fake gremlins whose coverage run holds grow bytes: (exit, [--workers of
+        each gremlins run]). The fake fails, as gremlins does, where the shim's coverage run fails."""
+        seen, prof = pathlib.Path(d) / "seen", pathlib.Path(d) / "c"
+        bindir = self.fake_go(d, f"eval \"$x python3 -c 'b = bytearray({grow}); import time; time.sleep(0.5)'\"\n: > {prof}\n")
+        (bindir / "gremlins").write_text(
+            "#!/bin/sh\nw=; o=; while [ $# -gt 0 ]; do case \"$1\" in --workers) w=$2;; -o) o=$2;; esac; shift; done\n"
+            f"echo $w >> {seen}\n"
+            f"go test -cover -coverprofile {prof} ./... 2>&1 | grep -q 'more than half' && exit 1\n"
+            "printf '%s' '{\"files\": [], \"mutants_total\": 0, \"mutants_lived\": 0}' > \"$o\"\n")
+        (bindir / "gremlins").chmod(0o755)
+        with mock.patch.dict(os.environ, {"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}), \
+                mock.patch.object(mutgate, "available_memory", return_value=free), \
+                mock.patch.object(mutgate, "default_jobs", return_value=jobs), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = mutgate.main(["run", *pkgs, "--out", str(pathlib.Path(d) / "out")])
+        return code, [int(w) for w in seen.read_text().split()]
+
+    def test_tests_past_half_a_share_run_again_on_fewer_workers(self):
+        # #6396: egress's tests held 1017 MB of a 1820 MB share, so every run of it failed by name. The
+        # parallel share gives way, not the half-cap check: 4 workers of 64 MB, then shares that fit.
+        with tempfile.TemporaryDirectory() as d:
+            code, workers = self.fitted_run(d, 48 << 20, 512 << 20, 4)
+            self.assertEqual(code, 0)
+            self.assertEqual(workers[0], 4)
+            self.assertEqual(len(workers), 2, workers)
+            self.assertIn(workers[1], (1, 2))
+
+    def test_tests_past_half_of_all_the_memory_still_fail(self):
+        # One worker under all of it is the floor: tests past half of that still give no verdict.
+        with tempfile.TemporaryDirectory() as d:
+            code, workers = self.fitted_run(d, 96 << 20, 256 << 20, 4)
+            self.assertEqual(code, 1)
+            self.assertEqual(workers[0], 4)
+            self.assertEqual(workers[-1], 1)
+            self.assertEqual(workers, sorted(workers, reverse=True))
+
+    def test_each_package_starts_at_the_full_worker_count(self):
+        # A refit share is the package's own: the next package runs on every worker again, so the
+        # workers' shares together never pass half the free memory.
+        with tempfile.TemporaryDirectory() as d:
+            code, workers = self.fitted_run(d, 48 << 20, 512 << 20, 4, ("hint", "hint2"))
+            self.assertEqual(code, 0)
+            self.assertEqual(workers[0], 4)
+            self.assertEqual(workers.count(4), 2, workers)
+
     @unittest.skipUnless(shutil.which("gremlins"), "gremlins v0.6.0 is not installed")
     def test_gremlins_reads_a_capped_mutant_as_killed(self):
         # #6000's shape: a mutant (`i--`) turns a bounded append into one that grows until the runner dies.
