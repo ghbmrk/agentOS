@@ -65,7 +65,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-exit-d2 | MIG-4-exit-d2: delete `broker/vault`, `egress` and `holder` and their last importers; #2571 closes (CLK-1, D-139). | #3686 (d1); #3432; #3624 | queued (tier A; slice d2 of #2571; size M) |
 | MIG-4-adapters-e-wire-b | MIG-4-adapters-e-wire-b: agentos-kernel passes the image's pinned update root as `KernelConfig.Pinned` (never an anchor); agentosd builds the update clerk with `Paused` from the channel (UPD-3, UPD-4, KEY-1). | #3677 | queued (tier A; agentosd serial slot) |
 | KRN-pin-audit | KRN-pin-audit: a replay given no pinned roots no longer reports a false divergence on a pinned plan (KRN-4). | KRN-pin (#3701) | queued (later; tier A; from #3701 review) |
-| KRN-pin-anchors | KRN-pin-anchors: the pinned key is checked against anchors logged later, and against re-anchors (KRN-4). | KRN-pin (#3701) | queued (later; tier A; from #3701 review) |
 | CLK-8-line | CLK-8-line: the second-line clerk: third-party texts through the `send` verb on an owner-held calling account, never the owner's number; E.164 recipients the clerk verified or the owner fixed; one rate budget; transcripts logged; inbound as untrusted data (CLK-8, CH-1, DEP-3, KEY-2). Rebuild under D-227. | part a: none; part b: a, #3686 (d1), #3685 (p), Mark's D-154 rule 3 answer; part c: b, #3685 (p) | queued (release; tier A; brief briefs/CLK-8-line.md; part a in PR #3881) |
 | DECOY-e | DECOY-e: sandbox, host and sealed-store placements, honey keys, three decoy wallets (KRN-12) | #3762, #3763, #3764 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 | DECOY-f | DECOY-f: scheduled sim drills with targets; stale drill shows broken in STATUS (KRN-12) | #3763, #3764, #3765, #3766 | queued(tier A; lane primary; brief briefs/DECOY.md) |
@@ -84,7 +83,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ERASE-contain-first | ERASE-contain-first: contain the reader lineage before the erase is logged, the guest plane refuses a contained lineage's plans, and the erase confirmation lists the cancelled plans (LOG-4) | #3870 | queued(release; tier A; size M; from #4805 reviews) |
 | KRN-keys-print-factors | KRN-keys-print-factors: the sealed store's factors print no passphrase, recovery key or PIN (DECOY-b-8, CLK-1) | #4833 | building(release; tier A; size S; waits on #4833, #4845 and sub B's OK for localui/recovery_test.go) |
 | MIG-4-plan-login-texts | Owner texts for the plan sign-in's `signin-code` and the late-exchange end, once the home page runs on the plan host (#3180 item 2; CH-12, CLK-7). | MIG-4-plan-login-texts | queued (release; after #2780; sub B) |
-| BACKUP-table-fifo-f1 | BACKUP-table-fifo-f1: content read-back refuses FIFOs; table open refuses devices before opening; (STO-1, REC-1) | #3998 | queued (release; tier A) |
 
 ## Harness and operating model
 
@@ -137,15 +135,14 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | OWN-surfaces-spec | OWN-surfaces-spec: text, call and page as surface declarations with rung, binding, audience and size; one kernel check over them; CH-12 becomes the text row (D-311 row 3). | #4937 | queued (L1; tier B) |
 | OWN-surface-decls | OWN-surface-decls: text, call and page as declarations in code; one kernel approval and disclosure check over them (D-311 row 6). | #4939, #4940 | queued (tier A; Opus) |
 | OWN-drop-generator | OWN-drop-generator: after QUAL-page-ca passes, delete codecheck, the kernel's code path, broker/checker, secrets.go and totp.go; CH-4 retires; close #3969, cut #3684 (D-311 row 7). | #3170, #4941 | queued (tier A; Opus; gate file) |
-| OWN-rung-standing | OWN-rung-standing: standing-key steps and task approvals carry their deriving event's rung (CH-3, KEY-2; release item of #4940) | #4940 | building (tier A; Opus; brief briefs/OWN-rung-standing.md, PR #5950; parts a, b) |
+| OWN-rung-standing | OWN-rung-standing: standing-key steps and task approvals carry their deriving event's rung (CH-3, KEY-2; release item of #4940) | #4940 | queued (tier A; Opus; brief briefs/OWN-rung-standing.md, PR #5950; parts a, b) |
 | VOICE-ro-b2 | VOICE-ro-b2: the speech process's recognizer and synthesizer engines (public weights, pinned, tuned on telephone audio), turn timing on the M6 Ultra, and the barge-in cancel cost (R2 from #5182); part b2 of [VOICE-ro](briefs/VOICE-ro.md) | #5171 | queued (tier A; Opus; held on M6 Ultra) |
 | OWN-page-session-checks | OWN-page-session-checks: held owner text failing CH-19 or CH-21 shows as a pointer and cannot be run (CH-14; release of #4941) | #4941 | building (tier A; brief briefs/OWN-page-session-checks.md, PR #5950; startable) |
 | OWN-page-session-hold | OWN-page-session-hold: owner-set hold size (MaxInbox to match) and mid-message code hygiene on held text (CH-14, CH-18; release of #4941) | #4941 | building (tier A; brief briefs/OWN-page-session-hold.md, PR #5950; after #5184) |
 | KEY-9-reach-b2b | KEY-9-reach-b2b: grows-then-narrows, the kernel narrows a grown key to its old worth and logs the offer (KEY-9, D-307) | #5060 | queued (release; tier A; lane primary) |
-| KEY-9-reach-inbound-offset | KEY-9-reach-inbound-offset: move kernel/proc's unreached client types out of the trusted core (KRN-2, D-310) | #5678 | queued (release; tier A; lane primary; after #5678's PR) |
-| KEY-9-reach-writer | KEY-9-reach-writer: write decl.reach entries from the owner graph's declarations (KEY-9, CLK-10) | #5672 | building (release; lane primary; brief briefs/KEY-9-reach-writer.md, PR #5950; after #5757) |
+| KEY-9-reach-writer | KEY-9-reach-writer: write decl.reach entries from the owner graph's declarations (KEY-9, CLK-10) | #5672 | queued (release; lane primary; brief briefs/KEY-9-reach-writer.md, PR #5950; after #5757) |
 | OWN-page-session-hold-control | OWN-page-session-hold-control: the owner sets the hold size on the page (CH-14; release of #5187) | #5187 | queued (tier A; needs brief) |
-| KEY-9-reach-read-copy | KEY-9-reach-read-copy: State.DeclReach returns a copy (KEY-9) | #5814 | queued (release; lane primary; from #5978 L3 finding 4) |
+| KEY-9-named-utf8 | KEY-9-named-utf8: owner/kernelsock's Named refuses an invalid-UTF-8 label (LOG-4) | #5732 | building (release; tier A; lane primary; from #6305 Security) |
 
 ## Identity, onboarding and setup (SPEC §11-12)
 
@@ -284,7 +281,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | LOG-4-period-mark | LOG-4-period-mark: a keep period's erase records a high-water mark so a cursor reset cannot bring expired items back (LOG-4) | #4167 | queued (later) |
 | KEYS-route-fds | KEYS-route-fds: a keyed clerk's OpenFile= is its key line alone and its standard streams hold no socket; the kernel unit's other commands and environment are pinned (CLK-1, NET-2; #4264 Security later 3 and 5) | KEYS-route-by-cgroup (#4210) | queued (later; tier A) |
 | ENF-live-vmap | ENF-live-vmap: dispatch the live chain by interface if HW-4 shows its cost | #4238 | queued(later; recheck) |
-| ENF-light-f1 | ENF-light-f1: page and bulb driver use the trip light by name and lift it only on a full cut lift; (KRN-12) | #4165 | building (release; tier A) |
 | REV-LOW-workers | REV-LOW-workers: workers and image findings (llama.cpp missing from vulncheck, Held over 64 KiB, no tail/tee in the OpenClaw image, snapshot compare after destroy) | 23-Low review (2026-11-01) | queued(release; tier A; brief to write) |
 | IMG-disk-3 | IMG-disk-3: runner disk on AWS-provisioned runners (recheck when an AWS notice appears) | #4416 L3 | queued(tier A; lane primary) |
 | CTRL-usb4 | [M6 Ultra spike: USB4 networking at line rate](briefs/CTRL-usb4.md) | G1; Mark: hardware (M6 Ultra unit, a USB4 peer) | queued (later; G7, A17, D-104; HW-12; tier C; one sitting with the unit) |
@@ -304,14 +300,14 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | NET-2-cap-basis-required | NET-2-cap-basis-required: every signed byte cap names its basis (D-248) | #4578, #5165 | building (release; tier A) |
 | ENF-shared-quota-b | ENF-shared-quota-b: a host cannot fill its shared segment's records (ct timeout plus per-MAC count and meter). Release; split from #4701; waits for Mark's card. | #4701 | queued (release; tier A; lane primary) |
 | HOST-1e2b | HOST-1e2b: host-untouched check on an S1 PC: the third-system snapshot procedure, RTC offset, the pcrlock index if P2-1 pins one, HOST-1d's opted-in disk excluded by the owner's flag. | #5746, #6135 | queued (tier A) |
-| IMG-offline-verity-follow | IMG-offline-verity-follow: verity row cells and scope; import_sweep fails on EIO (#5945 L3/Potency) | IMG-offline-verity (#4825) | building (release; tier A) |
 | ENF-light-f2 | ENF-light-f2: page words for trips the owner cannot clear name the lift step; (KRN-12, NET-2) | #4305 | queued (release; tier A) |
 | ENF-light-f3 | ENF-light-f3: trip light restart, lift race and bulb latency follow-ups; (KRN-12, NET-2) | #4305 | queued (release; tier A) |
 | ENF-l-ap-fail-shown | ENF-l-ap-fail-shown: home shows an access point whose push keeps failing | #6013 UX 3 | queued(tier A; lane primary; brief briefs/ENF-l-b2.md) |
 | ENF-l-ap-stall-words | ENF-l-ap-stall-words: the stall reaches the owner by text and says how to restart | #6013 UX 4 | queued(tier A; lane primary; brief briefs/ENF-l-b2.md) |
 | ENF-l-ap-handover-words | ENF-l-ap-handover-words: a failed hand-over says what to do, not SSH internals | #6013 UX 5 | queued(tier A; lane primary; brief briefs/ENF-l-b2.md) |
 | ENF-l-ap-new-cards | ENF-l-ap-new-cards: home marks the device passwords still to enter and uses the owner's labels | #6013 UX 6 | queued(tier A; lane primary; brief briefs/ENF-l-b2.md) |
-| MOR-soft-reboot | MOR-soft-reboot: an orderly soft reboot clears MOR while the kernel keeps its memory, so the holders after it run with MOR clear. Release; from #6178. | #5947 | queued (release; tier A) |
+| MOR-kexec | MOR-kexec: an orderly kexec clears MOR while memory survives into the next kernel; nothing pins the image's lack of a kexec loader. Release; from #6306. | #6182 | queued (release; tier A) |
+| ENF-l-ap-two-step | ENF-l-ap-two-step: enrolment shows the Owner Wi-Fi card before the hand-over, then enrols from the Owner network | #6013 UX 1 | queued(tier A; lane primary; needs brief; after #6013) |
 
 ## Model routes and the Codex lane
 
@@ -378,10 +374,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | UPD-5r-b3s | security suite over the kernel socket: seed, read, drop, keep, notice (brief briefs/UPD-5r-b.md, b3) | UPD-5r-b3 (#4045), #4108 | queued (A; trusted core: kernel/proc) |
 | MIG-4-recovery-r4h | MIG-4-recovery-r4h: the localui r4b-3 assumption row says what r4c changed | MIG-4-recovery-r4c (#4170) | queued (release; tier A; from #4170 L3) |
 | REV-LOW-recall | REV-LOW-recall: legacy recall rollback findings (partial listing rolls back, notice understates lost work) | 23-Low review (2026-11-01); drop if #3426 deletes recallheld.go first | queued(later; tier A; brief to write) |
-| BROWSER-fixture-gate | BROWSER-fixture-gate: TestFixtureThroughTheGate signs in first and finds Playwright 1.63's headless shell. Release; from #4406. | #4406 | building (release; tier A; brief briefs/BROWSER-fixture-gate.md, PR #5950; startable) |
 | REV-CHK-links-path | REV-CHK-links-path: a bare name a wrapper or shell resolves through PATH joins the root side | #4390 package build | escalated(tier A; kernel lane) |
 | MIG-4-plan-labels | MIG-4-plan-labels: close the Codex turn-metadata labels to the CLI's word lists | #3133 live Codex capture; #4595 (#4630) | queued (release; tier A; waits on the live Codex capture, #3133) |
-| IMG-mkosi-run-bound | IMG-mkosi-run-bound: CI runs the pinned mkosi on the committed config in its own job, out of build.sh's reach; finalize checks installed packages against the signed apt lists. Release; split from #4647. | #4647 | building (release; tier A) |
 | UPD-5r-b7f-step-session-d | UPD-5r-b7f-step-session-d: pin the ASSUMPTIONS row's kernel step-check list to the code (PLN-4, EVL-3) | #4734, #6023 | queued (release; tier A; from #4734 Security review) |
 | ENF-keys-print | ENF-keys-print: enforcer/channel.Key and the page RootKey print no key (DECOY-b-8, CLK-1) | #4833 | queued (tier A; sub B directories; split from #4833) |
 | MIG-4-recovery-r4j | MIG-4-recovery-r4j: the Recovery key page says it cannot tell the shown card when the recipient read fails | MIG-4-recovery-r4g (#4883) | queued (release; tier A; from #4883 L3) |
@@ -392,46 +386,66 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | NET-2-cap-sizing-owner | NET-2-cap-sizing-owner: the agentosd call site and backups wording call enflist.Propose, show ErrNoDailyBytes, and hand the owner the link. Sub B half of #4578. | #4578 | queued (release; tier A; sub B) |
 | ENF-down-report | ENF-down-report: a refused first firewall load exits the enforcer before any page is served and nothing reports the down enforcer. Release; from #5243. | #5243 | queued (release; tier A) |
 | TIM-1-interval-fu-b | TIM-1-interval-fu-b: agentosd's STATUS line moves to the interval, and the PLAN ON reply says consent is withdrawn. Release; from #5215. | #5215, #5216 | queued (release; tier A) |
-| KRN-forget-c-notice-words | KRN-forget-c-notice-words: the after-erase Forget notice names kinds in the kernel's household words, as the ask does, not raw class names. From #5163. | #5163, #5125 | queued (release; tier A) |
+| KRN-forget-c-notice-words | KRN-forget-c-notice-words: the after-erase Forget notice names kinds in the kernel's household words, as the ask does, not raw class names. From #5163. | #5163, #5125 | building (release; tier A) |
 | KRN-clock-hold-gap | KRN-clock-hold-gap: a hold started while Latest-Earliest is wide is not lengthened by the gap (unit after time-sync, window from Earliest while monotonic, or bound via #5391); STATUS can say why. Release; from #5387. | #5147, #5387, #5391, #5279 | queued (release; tier A) |
-| CTL-owner-text-lost | CTL-owner-text-lost: an owner text that arrives while the agent has no open services is dropped, and the reply says it was lost and to resend. Release; from #5427. | #5425, #5427 | building (release; tier A; sub B) |
-| VM-snap-unread-notice-fu | VM-snap-unread-notice-fu: the unread-snapshot deletion notice is held and retried until the owner channel delivers it. Release; from #5499 (UX). | #5481, #5499 | building (release; tier B) |
 | IMG-initrd-global-ext-dirs | IMG-initrd-global-ext-dirs: INITRD_IMAGE_DIRS adds /.extra/global_sysext and /.extra/global_confext when the image's systemd moves past v257. Release; blocked on that bump; from #5501 (Security). | #5488, #5501 | queued (release; tier A; blocked on the systemd bump) |
-| GUEST-bridge-tree-dead-fu | GUEST-bridge-tree-dead-fu: retire the stale TREE rows and B16, bound the idle-bridge test, drop the guest-plane tree exemption (#5611 reviews) | - | building (release; tier B) |
 | TIM-1-interval-fu-c | TIM-1-interval-fu-c: the question book moves off Guard.Now to the interval, and the clock drops the restricted mode's last API. Release; from #5216. | #5216, #5279 | queued (release; tier A) |
-| KRN-clock-fresh-rise | KRN-clock-fresh-rise: a kernel started behind the log catches up on a fresh chronyd sample (TIM-1). Release; from #5757. | #5391, #5757 | queued (release; tier A) |
-| OWN-page-session-mut2c | OWN-page-session mutants part 2c: old cmd/agentosd survivors in evidence, main, held, signinhost (76) | #5862 | building (release; tier A) |
 | VULN-static-elf | VULN-static-elf: an image-build check that finds static ELFs (llama-server) and makes image-vulncheck scan their toolchain packages. Release; split from #5873. | #5873, #5871, #2919 | building (release; tier A; gate files; brief briefs/VULN-static-elf.md, PR #5940; parts a, b; after #5932, serial with #5889 on image.yml) |
-| VULN-cipher-sweep-tidy-2 | VULN-cipher-sweep-tidy-2: image.yml paths for the codex digest pins; sweep refusal wording. Release; from #5878. | #5878 | building (release; tier A; gate file .github/workflows/image.yml) |
 | VULN-codex-openssl | VULN-codex-openssl: bump the codex pin once a release links OpenSSL 3.6.5 or later; until then the bundled entry records each fix's reach. Release; from #5888. | #5873, #5888 | queued (release; tier A; waits on a codex release) |
-| IMG-keyring-pin-b | IMG-keyring-pin-b: the enforcer image and test-kit builds check the Debian archive keyring too. Release; from #5932. | #5932 | building (release; tier A; gate files) |
-| KRN-forget-minutes | KRN-forget-minutes: a Forget ask at a reading narrower than 10 minutes promises the true time left. Release; from #5937. | #5937, #5391 | building (release; tier A) |
-| IMG-keyring-minimal | IMG-keyring-minimal: the image builds trust a keyring of only the keys the pinned snapshot is signed with. Release; from #5932. | #5578, #5932 | building (release; tier A; gate files) |
-| REV-CHK-links-ns5 | REV-CHK-links-ns5: built trees' root user manager units, manager config and env files reach the unit lint | #4718 build | queued (release; tier A; kernel lane) |
 | KEY-refusal-code | KEY-refusal-code: key.Refusal's code is a closed key.Code set only through key constructors (PLN-4, KRN-5) | #6021 review | building (release; tier A; blocks #4736) |
+| REV-CHK-links-ns7 | REV-CHK-links-ns7: release findings from #6029's reviews (instance drop-ins, per-merge link targets, messages) | #6029 review | in review (release; tier A; kernel lane) |
 | KEY-refusal-code-r1 | KEY-refusal-code-r1: #6032 release items (kernel.Refusal encoding, code-var reassignment lint, requal named set, skew note, guest.set types) | #6032 review | queued (release; tier A; after #6032) |
-| CORE-trim-headroom | CORE-trim-headroom: cut lines from the trusted core that do no work (test-only code, dead code, duplicates) to free headroom under the D-310 ceiling. Release. | D-310, #5732, #5757 | building (release; tier A) |
-| TIM-1-interval-fu-l | TIM-1-interval-fu-l: clock load checks the state file's owner and mode on read, and bounds saved same-boot alert times. Release; from #6057. | #6026, #6057 | building (release; tier A) |
-| CLK-seal-entry-swap-wipe-fu-d | CLK-seal-entry-swap-wipe-fu-d: the entry-count refusal runs before any slot or swap, withEntry checks its own entry again, and four comment lines are re-wrapped. Release; from #6049. | #6048, #6049 | building (release; tier A) |
 | VULN-node-openssl-pin | VULN-node-openssl-pin: bump the openclaw guest's node pin once a release bundles OpenSSL 3.5.10; until then the bundled entry records each fix's reach. Release; from #6074. | #5853, #6074 | queued (release; tier A; waits on a node release) |
-| MOR-writer-match-fu | MOR-writer-match-fu: the wipe test counts the clear's own unit as a writer except for its known clear action, not by skipping it by name. Release; from #6066. | #6043, #6066 | building (release; tier B) |
-| IMG-keyring-spikes-fu-b | IMG-keyring-spikes-fu-b: each mkosi tree's keyring pins are looked up per tree, Mirror and Repositories are pinned, and record-directory trees are handled. Release; from #6082. | #5983, #6082 | building (release; tier A) |
-| MOR-clear-owner | MOR-clear-owner: a refused MOR clear is shown to the owner in STATUS, like a failed wipe. Release; from #6110. | #6094, #6110 | building (release; tier A) |
-| IMG-keyring-spikes-fu-d | IMG-keyring-spikes-fu-d: the record-directory check also catches a tracked symlink to a tree and a lone mkosi.configure. Release; from #6116. | #6088, #6116 | building (release; tier B) |
-| TIM-1-interval-fu-m | TIM-1-interval-fu-m: agentos-clock-boot drops its own state-file stat check, now covered by BootEstimate's shared CheckFile. Simplicity; from #6121. | #6058, #6121 | building (release; tier B) |
-| MOR-wipe-status-e2e | MOR-wipe-status-e2e: a failed wipe's STATUS line is shown by a test that runs agentosd's wiring, not only wipeNote. Release; from #6095. | #6094, #6095 | queued (release; tier B) |
 | MOR-clear-owner-fu | MOR-clear-owner-fu: the failed-shutdown STATUS line stops asking for a restart when the record outlives one, and a boot test holds the record's sync and mode. Release; from #6126. | #6111, #6126 | queued (release; tier B) |
-| NET-2-decl-daily-bytes | NET-2-decl-daily-bytes: each CLK-14 account declaration states the daily bytes it sends, proposed by the plan and confirmed by the owner (D-248) | #5157 | queued (release; tier A) |
-| IMG-mkosi-run-bound-fu-initrd | IMG-mkosi-run-bound-fu-initrd: the default initrd's packages are held to the pinned, signature-checked indexes as the image's are. Release; from #6148. | #4690 | queued (release; tier A) |
-| IMG-mkosi-run-bound-fu-disk | IMG-mkosi-run-bound-fu-disk: image.yml's stage job keeps its own IMG-disk budget. Release; from #6148. | #4690 | queued (release; tier B) |
-| VULN-debian-r11 | VULN-debian-r11: accept openssl's and glibc's new no-fix Debian 13 advisories so image-vulncheck passes again. Release; seventh no-fix Debian round. | #2919, #5871 | building (release; tier A) |
-| IMG-mkosi-run-bound-fu-local | IMG-mkosi-run-bound-fu-local: a local-only wrapper makes a local image build one command, with the mkosi line pinned equal to CI's. Release; from #6148. | #4690, #6148 | queued (release; tier B) |
-| MUT-plan-timing-skew | MUT-plan-timing-skew: the plan's reused suite time matches what a shard runs | #6156 | building (release; tier A) |
+| NET-2-decl-daily-bytes | NET-2-decl-daily-bytes: each CLK-14 account declaration states the daily bytes it sends, proposed by the plan and confirmed by the owner (D-248) | #5157 | building (release; tier A) |
 | CTL-agent-starting-status | CTL-agent-starting-status: STATUS during boot shows a starting line, not 'not set up' or 'waiting for memory'. Release; from #6136 (UX). | #5429, #6136 | queued (release; tier A) |
-| BROWSER-shell-cache-warning-cmd | BROWSER-shell-cache-warning-cmd: the headless-shell cache warning names the delete command for the bad entry. Release; rides the next ci.yml PR. | #6175, #6180 | queued (release; tier A; gate file) |
-| LINT-childenv-types | LINT-childenv-types: the child-environment lint reads exact types through the one go/types load instead of ast.Object scopes. Re-plan follow-up; from #6169. | #6120, #6169 | building (tier A) |
-| MUT-delete-covering-fu | MUT-delete-covering-fu: a covering-test set never costs more than the whole suite; pin passes' headroom and set timeouts | #6213 | building (release; tier A) |
-| VULN-debian-r12 | VULN-debian-r12: accept openssl's two new no-fix Debian 13 advisories so image-vulncheck passes again. Release; eighth no-fix Debian round. | #2919, #6152 | building (release; tier A) |
+| MUT-kill-6032-guest | MUT-kill-6032-guest: kill the surviving mutants in broker/guest (blocks #6032) | #6032 | queued (release; tier A) |
+| MUT-kill-6032-kernel-rederive | MUT-kill-6032-kernel-rederive: kill the surviving mutants in broker/kernel/rederive.go (blocks #6032) | #6032 | building (release; tier A) |
+| MUT-simplify-kernel-recent | MUT-simplify-kernel-recent: record only irreversible steps in s.recent and drop undo's delete branch and its two waivers | #6279 | building (release; tier A) |
+| MUT-record-deps | MUT-record-deps: a MUTANTS-EQUIVALENT entry names the functions its proof depends on, and goes stale when they change | #6279 | building (release; tier A) |
+| VM-snap-unread-notice-fu-1 | VM-snap-unread-notice-fu-1: add the ASSUMPTIONS.md row for the unread-snapshot notice once the 215 package-wide survivors it exposes in broker/cmd/agentosd are killed or proved | #6139 | queued (release; tier A; lane claude2) |
+| VM-snap-unread-notice-fu-2 | VM-snap-unread-notice-fu-2: a held unread notice's retries over a modem outage count one missed text, not one per retry; pin the single-timer guard | #6139 | building (release; tier A; lane claude2) |
+| VULN-debian-r13-f4 | VULN-debian-r13-f4: pin the import sweep's direct-importer allow entries by SHA-256 in every group, as [cipher] does. Release. | #6285, #6294 | building (release; tier A) |
+| MUT-simplify-kernel-state-dead | MUT-simplify-kernel-state-dead: delete the unreachable code at broker/kernel/state.go:1263-1265 and its equivalence record | #6279 | queued (release; tier A) |
+| MUT-kill-inbox-gmail | MUT-kill-inbox-gmail: kill or prove the ~26 deletion survivors in broker/clerk/inbox (gmail.go) that an ASSUMPTIONS.md edit exposes | #6300 | building (release; tier A) |
+| MUT-kill-inbox-mailbox | MUT-kill-inbox-mailbox: kill or prove the ~15 deletion survivors in broker/clerk/inbox (mailbox.go) that an ASSUMPTIONS.md edit exposes | #6300 | building (release; tier A) |
+| MUT-kill-inbox-rest | MUT-kill-inbox-rest: kill or prove the ~the remaining ~100 deletion survivors in broker/clerk/inbox (every other file of the package that the local run lists) that an ASSUMPTIONS.md edit exposes | #6300 | building (release; tier A) |
+| MUT-simplify-check-recipient | MUT-simplify-check-recipient: remove the unreachable recipient guard in check.go verify, or move the invariant into Normalize, and drop its two waivers | #6023, #6032 | queued (release; tier A) |
+| KEY-refusal-code-r2 | KEY-refusal-code-r2: the code() lint requires each call in a package var initialiser and accepts a Code literal only inside code() itself. Release. | #6023, #6032 | queued (release; tier A) |
+| MUT-lint-held-fu | MUT-lint-held-fu: a lint kill is confirmed by one re-run, and lint time has its own budget in mutgate. Release. | #6346, #6365 | building (release; tier A) |
+| MUT-kill-6305-proc | MUT-kill-6305-proc: kill or prove the 198 kernel/proc survivors on main that #6305's mutgate exposed. | #6322, #6305 | building (release; tier A) |
+| MUT-kill-6305-unlock | MUT-kill-6305-unlock: kill or prove the 74 cmd/agentos-unlock main.go survivors on main that #6305's mutgate exposed. | #6322, #6305 | building (release; tier A) |
+| KRN-forget-c-readback-words | KRN-forget-c-readback-words: the Wi-Fi page's Forget readback names kinds in the kernel's household words, as the ask and the after-erase notice do. From #5378. | #5378 | queued (release; tier A) |
+| MUT-go-debug-every | MUT-go-debug-every: a //go:debug line in a test file reaches every test of its package. Release. | #6369 | building (release; tier A) |
+| LINT-sealer-key-wipe-fu2 | LINT-sealer-key-wipe-fu2: the wipe lint checks the listed constructors' bodies and refuses a defer clear that holds the key past its last use. Release. | #6349, #6363 | building (release; tier A) |
+| KRN-2-proc-test-support | KRN-2-proc-test-support: move proc.RestoreSections and the test-only proc.Owner lines into a test-support package the trusted-base measure does not count. Release. | #5732, #6305 | queued (release; tier A) |
+| TOOL-mutgate-memcap-fu | TOOL-mutgate-memcap-fu: a capped run's whole session is killed, and a gremlins cap kill is confirmed against a measured base peak. Release. | #6388, #6389 | building (release; tier A) |
+| MUT-waivers-to-records-6304-6013-6000 | MUT-waivers-to-records-6304-6013-6000: record the body waivers of #6304, #6013 and #6000 with mutgate.py waive, and kill #6013's five uncovered apnet.go lines. Release. | #6304, #6013, #6000, #6381 | building (release; tier A) |
+| CI-main-supersede | CI-main-supersede: a first-attempt main push cancels main's older run of the same workflow; the tip always finishes. Release. | #5345, #5348, #5361 | building (release; tier A) |
+| CI-trusted-base-records | CI-trusted-base-records: Trusted-base reasons come from committed records, not the PR body; drop the edited trigger. Release. | #6381 | building (release; tier A) |
+| ENV-session-hooks-unloaded | ENV-session-hooks-unloaded: project-thread sessions load no checkout hook, so close_guard is absent where #5702 L3 needed it; add a loud loaded-or-not check and correct TN-vulncheck-11; the environment's setup-script line is Mark's setting | #6412 | building (release; tier C) |
+| NET-2-image-daily-bytes | NET-2-image-daily-bytes: the signed image states the daily bytes the kernel sends to each of its own destinations (D-248) | #5157 | building (release; tier A) |
+| NET-2-owner-host-daily-bytes | NET-2-owner-host-daily-bytes: an owner-entered destination (IMAP server) states its daily bytes, confirmed at set-up (D-248) | #5157 | queued (release; tier A) |
+| VULN-codex-musl | VULN-codex-musl: the Codex CLI's static musl libc (and code-mode-host's libc++abi) is unversioned, so no advisory is queried for it. Release; from #5885. | #5885, #5894 | queued (release; tier A) |
+| TOOL-mutgate-cross-package-data | TOOL-mutgate-cross-package-data: a test reading another package's tree (imapconn reads vendor/ and third_party/go-imap) is not claimed when those files change. Release; from #6373. | #6373 | building (release; tier A) |
+| TOOL-classes-structural | TOOL-classes-structural: every allowlist or exit list a gate tool reads must be declared in CLASSES, enforced by the reader; an undeclared file fails closed. Release. | #6375, #6418 | building (release; tier A) |
+| TOOL-mutgate-gofmt-pin | TOOL-mutgate-gofmt-pin: mutgate uses the toolchain's gofmt and asserts its version, failing closed; measure whether the sort-last test-file line helps. Release. | #6385, #6421 | building (release; tier A) |
+| PREMERGE-replay-inputs-gate | PREMERGE-replay-inputs-gate: every input to premerge's replay (.gitattributes) is a gate file. Release. | #6375, #6418 | building (release; tier A) |
+| MUT-6461-fu | MUT-6461-fu: hold the service.go:217 DEV-7 wipe mechanically and sync-order TestConcurrentReadyLoadsOnce (#6461 release findings). | #6461 | queued (release; tier B) |
+| CI-checks-under-45 | CI-checks-under-45: the required checks job runs the unit tests serially and times out at 45 minutes on loaded runners; shard the unit-test units with no coverage removed. HIGH PRIORITY. | #6430 | building (flake; tier A) |
+| VULN-debian-r14-glibc-u5 | VULN-debian-r14-glibc-u5: move the image's pin to glibc 2.41-12+deb13u5 and drop the vulncheck accepts it makes stale. HIGH PRIORITY. | #2919, #6284 | building (release; tier A) |
+| VULN-debian-r14-hint | VULN-debian-r14-hint: vulncheck's fixed-image-finding hint names the main-snapshot bump when the fix is only in a point release. | #6466 | queued (release) |
+| PREMERGE-records-dropped-same | PREMERGE-records-dropped-same: a main merge that drops a MUTANTS-EQUIVALENT entry main already carries word for word reads same, as record_merge's docstring says. Release. | #6032, #6265 | queued (release; tier A) |
+| REV-CHK-links-ns9 | REV-CHK-links-ns9: root's home, XDG autostart, and boot-made /run env files reach a check | #6400 review | building (release; tier A; kernel lane) |
+| NET-2-drop-cap-row-basis | NET-2-drop-cap-row-basis: the "drop a core cap" row of TestCapChangesAreLoosenings clears its Basis, so it exercises Classify and not check. Release. | #6144 | queued (release; tier A) |
+| NET-2-host-canonical | NET-2-host-canonical: imagedest.Join and enflist.Propose canonicalize destination hosts (case, trailing dot), so one DNS name never gets two caps. Release. | #6432, #6447 | queued (release; tier A) |
+| VULN-debian-r15 | VULN-debian-r15: accept openssl's no-fix Debian 13 advisory DEBIAN-CVE-2026-121481 so image-vulncheck passes again. Release; no-fix Debian round. | #2919, #6223 | building (release; tier A) |
+| VULN-builtusing-remedy | VULN-builtusing-remedy: a fixed finding on a Built-Using source cannot be accepted, so image-vulncheck can stay red until Debian rebuilds the package. Release; from #6437. | #5885, #6437, #6470 | queued (release; tier A) |
+| VULN-static-elf-tighten | VULN-static-elf-tighten: guest-root package files bound to bytes; Go read from section headers; .syso C code seen. Release; from #6437. | #5885, #6437 | queued (release; tier A) |
+| VULN-debian-r13-f5 | VULN-debian-r13-f5: import sweep [wrapper] entries: a test that a wrapper's own held names count (R5), and exports that forward a caller's name stay lookups (R6). Release. | #6299, #6382 | queued (release; tier A) |
+| SPEC-krn2-core-record | SPEC-krn2-core-record: KRN-2 says the core grows under a committed record line, not a PR-body line. Release. | #6404 | queued (release; L1 spec-diff) |
+| CI-word-budget-record | CI-word-budget-record: the Word-budget waiver comes from a committed record, not the PR body; drop the edited trigger. Release. | #6404 | queued (release; tier A) |
+| MUT-record-deps-audit | MUT-record-deps-audit: re-record entries whose proof rests on outside declarations with --dep, and lint entries that name one without deps. Release. | #6282, #6498 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -459,7 +473,6 @@ issue #4021: needs exactly one state label of queued, building, in review, merge
 issue #4023: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4339: body has no board-row block
 issue #4382: no section 'Tooling and CI' in BOARD.md
-issue #4795: body has no board-row block
 issue #4902: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4916: body has no board-row block
 issue #4934: board-row block: Expecting value: line 1 column 1 (char 0)
@@ -467,7 +480,6 @@ issue #4950: body has no board-row block
 issue #4954: body has no board-row block
 issue #4982: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5062: body has no board-row block
-issue #5177: body has no board-row block
 issue #5709: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5736: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5756: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
@@ -477,13 +489,23 @@ issue #6005: needs exactly one state label of queued, building, in review, merge
 issue #6006: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #6007: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #6008: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #6033: body has no board-row block
-issue #6069: body has no board-row block
-issue #6077: body has no board-row block
 issue #6168: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #6184: no section 'Tooling and CI' in BOARD.md
 issue #6192: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #6193: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #6196: no section 'Tooling and CI' in BOARD.md
-issue #6219: no section 'Tooling and CI' in BOARD.md
+issue #6408: body has no board-row block
+issue #6416: title '6300-fu INBOX-badct-base64-fail-closed: mail with a broken Content-Type and a base64 text part is never trashed unread' does not start with '<ID>: '
+issue #6417: title '6380-fu IMG-mkosi-local-fu3: local build/stage halves fail closed on sudo, refuse a host that built, and get a local two-stage compare' does not start with '<ID>: '
+issue #6420: title '6377-fu MUT-go-debug-every-fu: a //go:debug in a non-test main file, and go.mod go/godebug changes, widen mutgate to every test in the affected packages' does not start with '<ID>: '
+issue #6422: title '6351-fu INBOX-dkim-bounded-verify: VerifyDKIM memoizes the body hash per (canonicalization, l=) and bounds the signatures it evaluates' does not start with '<ID>: '
+issue #6424: title '6408-fu CI-pin-liveness: a scheduled check names any pinned external download that stops resolving; the hash pin stays the only authority' does not start with '<ID>: '
+issue #6426: title "6408-fu VIS-ort-asset-cause: find why onnxruntime 1.29.0's release asset 404s, record it in VIS-A27, and move the PyPI wheel pin if it was withdrawn for security" does not start with '<ID>: '
+issue #6427: title "6367-fu KRN-proc-fu3: pin keytable Get's length guard and dropSnaps' failed RemoveAll, fix Backup's stale comment, confirm or restrict RunKernel's clerk-root copy" does not start with '<ID>: '
+issue #6446: title '6409-fu VIS-ort-nuget-pin: fetch libonnxruntime.so 1.29.0 from NuGet and restore the originally reviewed library pin; keep package and library hash pins fail closed' does not start with '<ID>: '
+issue #6448: title '6299-fu IMG-pin-refusal-diff: a refused pin prints the owning package old and new versions and its regex and glob symbol diff beside the paste-ready entry' does not start with '<ID>: '
+issue #6449: title '6382-fu VULN-debian-r13-f4-fu: fix the initrd -126765 vulncheck record and the image count (113 to 112); test the glibc exemption with a SONAME library' does not start with '<ID>: '
+issue #6450: title '6416-fu INBOX-unreadable-reason: unreadable mail gets its own unreadable reason with the same protection as alert; measure the malformed-junk volume kept' does not start with '<ID>: '
+issue #6451: title '6416-fu INBOX-unreadable-class: any part or subject the wording net cannot decode to text makes the mail unreadable (charset, encoded subject, duplicate Content-Type, other text/*)' does not start with '<ID>: '
+issue #6452: title '6407-fu CAM-e2e-harness-fu: a panic is not a trial failure, close handles after QEMU quits, mailbox inside /memory, restartCmds pinned to sys_linux.go, QMP socket peer-checked' does not start with '<ID>: '
+issue #6457: title "6409-fu MUT-kill-6409-vision: kill or prove the 86 cmd/agentos-vision survivors that #6409's pin change exposes" does not start with '<ID>: '
+issue #6458: title '6409-fu TOOL-mutgate-embed-reach: a changed //go:embed file reaches only the tests that reach its embedding var, not every test' does not start with '<ID>: '
 ```

@@ -18,7 +18,8 @@ import (
 // side texts it unchanged, and ForgetReply hands the subjects out only for
 // "YES <code>" from it. One ask waits at a time, unlogged: a newer ask,
 // STOP, any other reply, ForgetAskFor or a restart ends it, erasing nothing.
-// A reading too wide for any reply to arrive in time asks nothing.
+// The text names the time a reply has, which a wide reading shortens; a
+// reading too wide for any reply to arrive in time asks nothing.
 
 const ForgetAskFor int64 = 600_000 // ms
 
@@ -70,8 +71,17 @@ func (k *Kernel) AskForget(at int64, label string) (string, error) {
 	// ForgetReply refuses a YES once Latest reaches the lapse, so it would
 	// refuse every YES while Latest does not narrow; were it to narrow, the
 	// refusal costs one retry and never an unwanted erase.
-	if now.Latest >= now.Earliest+ForgetAskFor {
+	// The YES is refused once Latest has run left more, wherever true time
+	// sits in the reading, so the text promises left rounded down; under a
+	// second no promise is true, and the refusal's "10 minutes or more" is
+	// true to the second (#5938).
+	left := now.Earliest + ForgetAskFor - now.Latest
+	if left < 1_000 {
 		return "", ErrForgetClock
+	}
+	within := plural(left/60_000, "minute")
+	if left < 60_000 {
+		within = plural(left/1_000, "second")
 	}
 	all := "everything"
 	if len(unread) > 0 {
@@ -106,8 +116,15 @@ func (k *Kernel) AskForget(at int64, label string) (string, error) {
 		return "", err
 	}
 	k.forget = &forgetAsk{subjects, fmt.Sprintf("%06d", binary.BigEndian.Uint64(b[:])%1_000_000), now.Earliest + ForgetAskFor}
-	return fmt.Sprintf("Forget %s under “%s”, %s? Reply YES %s to forget it. Any other reply, or none within 10 minutes, forgets nothing.",
-		all, label, items, k.forget.code), nil
+	return fmt.Sprintf("Forget %s under “%s”, %s? Reply YES %s to forget it. Any other reply, or none within %s, forgets nothing.",
+		all, label, items, k.forget.code, within), nil
+}
+
+func plural(n int64, unit string) string {
+	if n == 1 {
+		return "1 " + unit
+	}
+	return fmt.Sprintf("%d %ss", n, unit)
 }
 
 // ForgetReply ends the waiting ask and, if reply is "YES <code>" from its

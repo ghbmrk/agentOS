@@ -1177,15 +1177,9 @@ func underSystemdListed(t *testing.T, files map[string]string, ours func(string)
 	if recs.Links == nil {
 		t.Fatal("unit_rules.py printed no links")
 	}
-	// A root unit of ours reads its env file from the fixture's tree.
-	env := func(_, p string) (map[string]string, error) {
-		b, err := os.ReadFile(filepath.Join(fs, filepath.FromSlash(p)))
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return map[string]string{p: string(b)}, err
-	}
-	return builtUnitsWith(recs, filepath.Join(dir, "tree"), env)
+	// A root unit of ours reads its env file as unit_rules.py printed it
+	// from the fixture's tree (#6002).
+	return builtUnitsWith(recs, filepath.Join(dir, "tree"), nil)
 }
 
 func hasSystemd() bool {
@@ -1239,11 +1233,15 @@ func TestBuiltUnits(t *testing.T) {
 				t.Fatal(err)
 			}
 			err = builtUnitsWith(recs, t.TempDir(), shippedEnv(repoRoot(t), files))
-			switch {
-			case recs.Want == "" && err != nil:
+			if recs.Want == "" && err != nil {
 				t.Fatal(err)
-			case recs.Want != "" && (err == nil || !strings.Contains(err.Error(), recs.Want)):
-				t.Fatalf("control: got %v, want a refusal with %q", err, recs.Want)
+			}
+			// One refusal per line: the system manager's and root's user
+			// manager's (#6002).
+			for _, want := range strings.Split(recs.Want, "\n") {
+				if want != "" && (err == nil || !strings.Contains(err.Error(), want)) {
+					t.Fatalf("control: got %v, want a refusal with %q", err, want)
+				}
 			}
 		})
 	}
@@ -3898,16 +3896,19 @@ func execProgs(v string) []string {
 }
 
 // unitRecords are what image/unit_rules.py prints for a root file system:
-// each unit its own systemd loads, with the files systemd applies to it in
-// systemd's order after every mask (its fragment, then its drop-ins), or a
-// drop-in of ours to read alone; /etc/fstab when it is ours; and, for a
-// control, the refusal wanted.
+// each unit its own systemd loads, and root's user manager (User, #6002),
+// with the files systemd applies to it in systemd's order after every mask
+// (its fragment, then its drop-ins), or a drop-in of ours to read alone;
+// /etc/fstab when it is ours; the managers' configuration files of ours
+// and the env files units of ours name, as the tree holds them; and, for a
+// control, the refusals wanted, one per line.
 type unitRecords struct {
 	Units []struct {
 		Unit    string `json:"unit"`
 		Alone   bool   `json:"alone"`
 		Package bool   `json:"package"`
 		Fed     bool   `json:"fed"`
+		User    bool   `json:"user"`
 		Files   []struct {
 			Path string `json:"path"`
 			Ours bool   `json:"ours"`
@@ -3929,7 +3930,19 @@ type unitRecords struct {
 	// Every link in the tree that does not resolve to a file other than a
 	// directory, mapped to its target resolved in the tree.
 	Links map[string]string `json:"links"`
-	Want  string            `json:"want"`
+	// The system manager's and root's user manager's configuration files
+	// of ours (system.conf, user.conf and their .conf.d files).
+	Managers []struct {
+		Path string `json:"path"`
+		Text string `json:"text"`
+	} `json:"managers"`
+	// Each env file an EnvironmentFile= line of ours names that the tree
+	// holds at boot as a regular file, by the path the line gives.
+	Env map[string]string `json:"env"`
+	// Each env file of ours a package's EnvironmentFile= line names (a
+	// conffile a build step changed), as the tree holds it at boot (#6312).
+	PkgEnv map[string]string `json:"pkg_env"`
+	Want   string            `json:"want"`
 }
 
 // builtUnits holds a built root file system's units, as its systemd loads
@@ -3951,8 +3964,10 @@ func builtUnits(recs unitRecords, dir string) error {
 type envLookup func(from, p string) (map[string]string, error)
 
 // builtUnitsWith is builtUnits with env, where a root unit of ours finds
-// the env files it names (envLookup); nil finds none.
+// the env files it names (envLookup) besides the tree's own copy
+// (recs.Env, #6002); nil finds only that.
 func builtUnitsWith(recs unitRecords, dir string, env envLookup) error {
+	env = treeEnv(recs.Env, env)
 	write := func(p, text string) (string, error) {
 		f := filepath.Join(dir, filepath.FromSlash(path.Clean("/"+p)))
 		if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
@@ -3990,8 +4005,22 @@ func builtUnitsWith(recs unitRecords, dir string, env envLookup) error {
 			continue
 		}
 		if err := c.unit(u.Unit, paths, u.Alone, trusted); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %v", u.Unit, err))
+			name := u.Unit
+			if u.User {
+				name = "root's user manager: " + name
+			}
+			errs = append(errs, fmt.Errorf("%s: %v", name, err))
 		}
+	}
+	// A manager configuration file of ours sets every unit's environment
+	// (DefaultEnvironment=), root's user manager's units' included, and its
+	// generators' (ManagerEnvironment=) (#6002 item 2).
+	for _, m := range recs.Managers {
+		f, err := write(m.Path, m.Text)
+		if err != nil {
+			return err
+		}
+		errs = append(errs, managerEnv(dir, f))
 	}
 	// A file of ours named as a package's drop-in, or a unit file a package
 	// lists that systemd does not read as installed (changed, replaced or
@@ -4003,6 +4032,19 @@ func builtUnitsWith(recs unitRecords, dir string, env envLookup) error {
 			continue
 		}
 		errs = append(errs, fmt.Errorf("%s: a file of ours hides a package's drop-in, %s, and with it the package's lines", m.Path, m.Hides))
+	}
+	// An env file of ours that a package's unit loads sets that unit's
+	// environment as a line of ours would, whatever the unit's User=, so it
+	// is held to envFileLines as a root unit's is (#6312).
+	envs := make([]string, 0, len(recs.PkgEnv))
+	for p := range recs.PkgEnv {
+		envs = append(envs, p)
+	}
+	sort.Strings(envs)
+	for _, p := range envs {
+		if err := envFileLines(p, recs.PkgEnv[p]); err != nil {
+			errs = append(errs, fmt.Errorf("a package's unit loads %s, a file of ours: %v", p, err))
+		}
 	}
 	if recs.Fstab != nil {
 		f, err := write(recs.Fstab.Path, recs.Fstab.Text)
@@ -4018,6 +4060,31 @@ func builtUnitsWith(recs unitRecords, dir string, env envLookup) error {
 	errs = append(errs, endpointsHeld(c.endpoints, append(append([]grant{}, c.grants...), c.pkgGrants...)))
 	errs = append(errs, opensHeld(c.opens, append(append([]grant{}, c.grants...), c.pkgGrants...)))
 	return errors.Join(errs...)
+}
+
+// treeEnv is env with the built tree's copy of each env file (tree, by the
+// path an EnvironmentFile= line gives) found too: a unit of ours is held to
+// what the tree holds at boot, and to every copy env finds (#6002 item 3).
+func treeEnv(tree map[string]string, env envLookup) envLookup {
+	if tree == nil {
+		return env
+	}
+	return func(from, p string) (map[string]string, error) {
+		out := map[string]string{}
+		if env != nil {
+			got, err := env(from, p)
+			if err != nil {
+				return nil, err
+			}
+			for k, v := range got {
+				out[k] = v
+			}
+		}
+		if text, ok := tree[p]; ok {
+			out[p] = text
+		}
+		return out, nil
+	}
 }
 
 // TestBuiltUnitsEveryRefusal: builtUnits reports every refusal in one

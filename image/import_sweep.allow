@@ -1,8 +1,16 @@
 # The files of the built image (main tree and initrds) that may import or reach glibc's regex engine
 # (DEBIAN-CVE-2026-100290, #5697): one glob per line, each a file the image -100290 record in
 # assurance/vulncheck.json names. image/import_sweep.py --summary fails on a file that matches none,
-# and on a glob that matches no file. Only command-line tools, the guests' shells and libraries whose
-# regex use the record explains belong here; a long-lived or network-facing process never does.
+# and on a glob that matches no file. A file naming a function counts as importing it: by its dynamic
+# imports, by a dlsym or dlvsym lookup of a name it holds, or as a static copy of glibc's code (#6298).
+# Only files whose own regex use the record explains are named here: command-line tools, the guests'
+# shells and libraries. "via GLOB" (#6297) accepts every file that reaches the functions only through
+# libraries GLOB names, each with an entry of its own, and imports none itself: such a file can call them
+# only through the library's code. A via entry accepts each new dependent of its library without an entry
+# of its own, a long-lived or network-facing process among them, so the library's own entry, and its
+# comment here, is where the review sits: it has to cover every input the library's callers can pass. A
+# file importing a function itself always needs its own entry, and a via entry that accepts no file fails
+# as a glob that matches none does.
 
 # Shell and text tools, run locally.
 /usr/bin/bash
@@ -36,45 +44,81 @@
 /usr/lib/agentos/images/*/bin/bash
 /usr/lib/agentos/images/*/bin/rm
 
-# libsmartcols (filters, and rpmatch) and the util-linux tools that need it; fdisk, sfdisk and cfdisk
-# also import rpmatch for their prompts.
+# libsmartcols (filters, and rpmatch) and the util-linux tools that need it (findmnt, lsblk, losetup,
+# swapon and the rest); fdisk, sfdisk and cfdisk also import rpmatch for their prompts.
 /usr/lib/x86_64-linux-gnu/libsmartcols.so.1.*
-/usr/bin/findmnt
-/usr/bin/lsblk
-/usr/bin/lscpu
-/usr/bin/lsipc
-/usr/bin/lslocks
-/usr/bin/lsmem
-/usr/bin/lsns
-/usr/bin/partx
-/usr/bin/prlimit
-/usr/bin/wdctl
+via /usr/lib/x86_64-linux-gnu/libsmartcols.so.1.*
 /usr/sbin/cfdisk
 /usr/sbin/fdisk
-/usr/sbin/losetup
 /usr/sbin/sfdisk
-/usr/sbin/swapon
-/usr/sbin/wipefs
-/usr/sbin/zramctl
 
-# libcryptsetup (its one regcomp parses FileVault2 metadata) and what needs it.
+# libcryptsetup (its one regcomp parses FileVault2 metadata) and what needs it: its token plugins,
+# systemd's cryptsetup, cryptenroll, integritysetup and veritysetup, and cryptsetup's own tools.
 /usr/lib/x86_64-linux-gnu/libcryptsetup.so.12.*
-/usr/lib/x86_64-linux-gnu/cryptsetup/libcryptsetup-token-systemd-*.so
-/usr/bin/systemd-cryptenroll
-/usr/bin/systemd-cryptsetup
-/usr/lib/systemd/systemd-integritysetup
-/usr/lib/systemd/systemd-veritysetup
-/usr/sbin/cryptsetup
-/usr/sbin/integritysetup
-/usr/sbin/veritysetup
+via /usr/lib/x86_64-linux-gnu/libcryptsetup.so.12.*
 
 # libedit (line editing) and nft, which needs it for its interactive mode; nft itself is a one-shot
 # ruleset load.
 /usr/lib/x86_64-linux-gnu/libedit.so.2.*
-/usr/sbin/nft
+via /usr/lib/x86_64-linux-gnu/libedit.so.2.*
 
 # libformw (ncurses forms); nothing in the image needs it.
 /usr/lib/x86_64-linux-gnu/libformw.so.6.*
+
+[glob]
+# The files of the built image (main tree and initrds) that may import or reach glibc's glob(), glob64 or
+# wordexp, which calls glob() (DEBIAN-CVE-2026-126765, #6285): one entry per line, each a file the
+# -126765 records in assurance/vulncheck.json name, or "via GLOB" for the files reaching it only through
+# a library with its own entry. As for the regex list above, a file no entry accepts fails the step, and
+# so does an entry that accepts no file.
+
+# libsystemd-shared's one glob() call is basic/glob-util.c safe_glob (systemd 257.13), behind glob_first,
+# glob_extend and glob_exists. Its callers and their patterns: PID 1 and systemd-executor (libsystemd-core)
+# for unit settings (EnvironmentFile=, ImportCredential=, PathExistsGlob=, ConditionPathExistsGlob=);
+# networkd and udevd for the conditions of .network, .netdev and .link files; systemd-analyze for a
+# condition on its command line; systemd-sysctl and systemd-tmpfiles for sysctl.d and tmpfiles.d
+# entries; journalctl for --file. Each pattern is root-owned configuration (no agentOS process
+# starts a transient unit) or the command line of a root tool; none comes from the network or a guest.
+/usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so
+
+# The files that reach glob() only through libsystemd-shared (systemctl, journald, logind, resolved,
+# networkd, udevd's helpers, the generators, libsystemd-core, the cryptsetup token plugins and the rest);
+# none of them but those named above calls into safe_glob's wrappers, so linking it is all they share.
+via /usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so
+
+# iproute2's ip: its one glob() (ip/iptuntap.c, 6.15) walks the fixed pattern /proc/[0-9]*/fd/[0-9]*
+# for "ip tuntap show".
+/usr/bin/ip
+
+# libnftables globs an "include" path in a ruleset. nft loads only rulesets agentOS renders (port1's
+# fixed set commands and a name matching [a-zA-Z0-9_.-], the enforcer's tables) or root-owned files;
+# none holds an include.
+/usr/lib/x86_64-linux-gnu/libnftables.so.1.*
+via /usr/lib/x86_64-linux-gnu/libnftables.so.1.*
+
+# libpopt globs only in its config readers (poptReadConfigFiles, poptReadDefaultConfig and poptInit,
+# src/poptconfig.c); cryptsetup 2.7.5's tools call none of them.
+/usr/lib/x86_64-linux-gnu/libpopt.so.0.*
+via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
+
+# PAM modules globbing their own root-owned config directories (/etc/security/access.d, limits.d and
+# namespace.d); a module runs only in a process that loads PAM, and its patterns are fixed paths.
+/usr/lib/x86_64-linux-gnu/security/pam_access.so
+/usr/lib/x86_64-linux-gnu/security/pam_limits.so
+/usr/lib/x86_64-linux-gnu/security/pam_namespace.so
+
+# ldconfig, a static copy of glibc (#6298), in the main tree and the initrd: its one glob() expands the
+# include patterns of root-owned /etc/ld.so.conf and ld.so.conf.d (elf/ldconfig.c), run by root at
+# package install and boot. It is also the sweep's control that the static scan still reads glibc's marks.
+/usr/sbin/ldconfig
+
+# The openclaw guest's node imports dlsym and holds "glob" (#6298): the string is the name of its
+# JavaScript fs.glob API, implemented in JavaScript over readdir (lib/internal/fs/glob.js), and its
+# dlsym calls (src/node_binding.cc, deps/uv/src/unix/dl.c, deps/v8 platform-posix.cc; v24.22.3) look up
+# only fixed names: an addon's node_register_module_v137, napi_register_module_v1 and
+# node_api_module_get_api_version_v1, gnu_get_libc_version, memfd_create and pthread_setname_np. It runs
+# inside the guest sandbox, on the guest's own glibc (the image/guest -126765 record).
+/usr/lib/agentos/images/openclaw/usr/local/bin/node
 
 [cipher]
 # The files of the built image (main tree and initrds) whose bytes name an OpenSSL by-name cipher

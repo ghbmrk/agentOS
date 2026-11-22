@@ -269,7 +269,7 @@ func TestASendersSaveStoppedThroughReadSendersKeepsOneWhole(t *testing.T) {
 		r := newSendersRigCtx(t, ctx, srv, nil)
 		r.full(t)
 		cancel()
-		r.idle()
+		r.idle(t)
 		slot := slotOf(mustRead(t, r.dir))
 
 		srv.DeliverAt("INBOX", day(1), mailFrom("new@new.test", "<n1@new.test>"))
@@ -278,7 +278,7 @@ func TestASendersSaveStoppedThroughReadSendersKeepsOneWhole(t *testing.T) {
 		r.openCtx(t, ctx) // the record loads from disk, and each save stops
 		eventually(t, "the new sender", func() bool { return slices.Contains(r.h.world().KnownSenders, "new@new.test") })
 		cancel()
-		r.idle()
+		r.idle(t)
 		if w := r.h.world(); !slices.Equal(w.KnownSenders, []string{"new@new.test", "old@old.test"}) {
 			t.Fatalf("stopped after step %d: the running host's senders %v", i, w.KnownSenders)
 		}
