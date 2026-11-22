@@ -188,6 +188,9 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 /usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@earendil-works/pi-tui/native/linux/prebuilds/linux-x64/linux-platform-x11.node sha256=522d2550f7fa5d0d5bd204f45983f786ce2be9cf80f27f00179640d31d0689d6
 # koffi's musl build needs musl's libc, which the guest (glibc) does not ship.
 /usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@koromix/koffi-linux-x64/musl_x64/koffi.node sha256=2df33bea84a018e03403360c8592af657a32bf394b0097dc7aa23defefd5885a
+# node-pty's prebuilt addon needs libutil.so.1: image/guest-userland.sh copies only the libraries of the
+# programs it is given (node, not this addon), so the guest has no libutil.so.1 and dlopen of it fails.
+/usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@lydell/node-pty-linux-x64/prebuilds/linux-x64/pty.node sha256=123792d8f22f36d519b21dfb6f4b716f9b18b9e579085ea2840d0773d88d35fd
 # libcua_driver_sdk.so needs libX11, libXi and libxkbcommon, which the guest does not ship.
 /usr/lib/agentos/images/openclaw/opt/openclaw/node_modules/@trycua/cua-driver-linux-x64-gnu/libcua_driver_sdk.so sha256=eca8cf7669d0de73e56fb8e7481d219f08fe27a70fab17963431fc951736c49d
 
