@@ -6,6 +6,7 @@ package proc
 // by what it returns.
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"errors"
 	"os"
@@ -134,5 +135,36 @@ func TestCounterAnchorAtItsLimit(t *testing.T) {
 	}
 	if err := a.Put(head(priv, 1)); !errors.Is(err, ErrAnchorBroken) {
 		t.Fatalf("a Put after the limit: %v, want ErrAnchorBroken", err)
+	}
+}
+
+// A head file of maxAnchor bytes is read and one a byte longer is refused,
+// whatever its last byte; a record at 0 on a counter at its limit is behind
+// it, not one ahead; and a Put of the head the anchor holds is taken again.
+func TestCounterAnchorBounds(t *testing.T) {
+	dir, c, priv, a := newAnchor(t)
+	h1 := head(priv, 1)
+	put(t, a, h1)
+	if err := a.Put(h1); err != nil {
+		t.Fatalf("a Put of the head it holds: %v", err)
+	}
+	p, pub := filepath.Join(dir, anchorName), priv.Public().(ed25519.PublicKey)
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for size, ok := range map[int]bool{maxAnchor: true, maxAnchor + 1: false} {
+		pad := append(append([]byte{}, b...), bytes.Repeat([]byte(" "), size-len(b))...)
+		if err := os.WriteFile(p, pad, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readAnchor(dir, pub); (err == nil) != ok || !ok && !errors.Is(err, ErrAnchorCorrupt) {
+			t.Fatalf("a head file of %d bytes: %v", size, err)
+		}
+	}
+	c.n = ^uint64(0)
+	writeRec(t, dir, priv, anchorRec{V: 1, N: 0, Head: &h1})
+	if _, err := OpenCounterAnchor(dir, c, priv); !errors.Is(err, ErrAnchorRolledBack) {
+		t.Fatalf("a record at 0 on a counter at its limit: %v, want ErrAnchorRolledBack", err)
 	}
 }

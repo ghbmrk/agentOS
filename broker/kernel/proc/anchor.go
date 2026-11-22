@@ -145,13 +145,15 @@ func OpenCounterAnchor(dir string, c Counter, sign ed25519.PrivateKey) (*Counter
 		return nil, err
 	}
 	a := &CounterAnchor{dir: dir, c: c, sign: new(&sign), n: n}
+	// A record behind the counter is refused first, so n+1 below never
+	// wraps to a record at 0: n at its limit with a record at 0 is behind.
 	switch {
-	case rec.N == n:
-		a.head = rec.Head
-	case n < ^uint64(0) && rec.N == n+1:
-		a.head = rec.Prev
 	case rec.N < n:
 		return nil, ErrAnchorRolledBack
+	case rec.N == n:
+		a.head = rec.Head
+	case rec.N == n+1:
+		a.head = rec.Prev
 	default:
 		return nil, ErrAnchorAhead
 	}

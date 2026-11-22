@@ -358,7 +358,8 @@ func TestTheKernelWaitsForAKeyHandOff(t *testing.T) {
 	}
 }
 
-// A Tick of the kernel process re-seals a backup an erase left due.
+// A Tick of the kernel process re-seals a backup an erase left due, and
+// the process runs on across its ticks.
 func TestTheKernelProcessTicks(t *testing.T) {
 	b := newBBox(t, recipientWire(t, testRK))
 	gone := b.subject()
@@ -374,11 +375,19 @@ func TestTheKernelProcessTicks(t *testing.T) {
 	keys := mainKeys()
 	keys.Recipient = recipientWire(t, testRK)
 	cancel, done := runMain(t, mainCfg(t, b), keys, anchor(t, b.cfg.Log))
-	defer stopMain(cancel, done)
 	for deadline := time.Now().Add(5 * time.Second); gives(t, dir, id, gone); time.Sleep(10 * time.Millisecond) {
 		if time.Now().After(deadline) {
 			t.Fatal("no Tick re-sealed the backup")
 		}
+	}
+	time.Sleep(10 * 10 * time.Millisecond) // ten ticks
+	select {
+	case err := <-done:
+		t.Fatalf("the kernel process ended on a tick: %v", err)
+	default:
+	}
+	if err := stopMain(cancel, done); err != nil {
+		t.Fatal(err)
 	}
 }
 
