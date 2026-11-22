@@ -2676,8 +2676,11 @@ def go_cover(real, tmp, args, mem=None):
 # deletion can (#5011), and took a runner down on #6000. Gremlins v0.6.0 reads its `go test`'s exit 1
 # as KILLED (executor.go getTestFailedStatus), so a run past its cap is killed and exits 1, as
 # run_tests' memory_cap is KILLED. The toolchain's own processes (TOOLCHAIN) are not counted: a
-# mutant changes what the tests do, not how much the compiler holds.
-TOOLCHAIN = frozenset({"go", "compile", "link", "asm", "cgo", "vet", "cover"})
+# mutant changes what the tests do, not how much the compiler holds. The `go` driver is counted
+# (MUT-gremlins-memcap-go, #6507): given a package, `go test` holds the test binary's whole output in
+# its own memory (cmd/go runTestActor), so a mutant that loops printing grows `go`, not the test, and
+# passed the cap uncounted; the driver alone holds about 30 MB (broker/owner, cold or warm).
+TOOLCHAIN = frozenset({"compile", "link", "asm", "cgo", "vet", "cover"})
 
 
 def go_capped(real, mem, args):

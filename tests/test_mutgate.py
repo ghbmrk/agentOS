@@ -5228,7 +5228,7 @@ class GremlinsMemoryCap(unittest.TestCase):
     """MUT-gremlins-memcap (#6388): a gremlins mutant grew a test past 13 GB and took the runner down on
     #6000. Each mutant's `go test` runs under a memory cap through the shim, and a run past it exits 1,
     which gremlins reads as KILLED; that counts only where the unmutated tests stay under half the cap."""
-    # REQ: MUT-gremlins-memcap
+    # REQ: MUT-gremlins-memcap, MUT-gremlins-memcap-go
 
     GROW = "import time; b = bytearray(96 << 20); time.sleep(60)"
 
@@ -5291,8 +5291,10 @@ class GremlinsMemoryCap(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             link = pathlib.Path(d) / "compile"
             link.symlink_to(sys.executable)
-            for name, counted in (("compile", False), ("python3", True)):
-                p = subprocess.Popen([str(link) if name == "compile" else sys.executable, "-c",
+            (pathlib.Path(d) / "go").symlink_to(sys.executable)
+            # The go driver counts (MUT-gremlins-memcap-go): it holds the tests' buffered output.
+            for name, counted in (("compile", False), ("go", True), ("python3", True)):
+                p = subprocess.Popen([str(pathlib.Path(d) / name) if name != "python3" else sys.executable, "-c",
                                       "import time; b = bytearray(64 << 20); time.sleep(3)"], start_new_session=True)
                 try:
                     time.sleep(1)
@@ -5301,6 +5303,20 @@ class GremlinsMemoryCap(unittest.TestCase):
                     p.kill()
                     p.wait()
                 self.assertEqual(got > 32 << 20, counted, (name, got))
+
+    def test_a_go_driver_past_the_cap_is_killed(self):
+        # MUT-gremlins-memcap-go (#6507): `go test PKG` buffers the test binary's output in the driver, so a
+        # mutant that loops printing grows the process named go; uncounted, it took #5974's runners down.
+        with tempfile.TemporaryDirectory() as d:
+            drv = pathlib.Path(d) / "driver"
+            drv.mkdir()
+            (drv / "go").symlink_to(sys.executable)
+            shim = self.shim(d, f"{drv / 'go'} -c '{self.GROW}' &\nwait\n", 32 << 20)
+            began = time.monotonic()
+            r = subprocess.run([str(shim), "test", "-timeout", "62s", "-failfast", "./p"], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1, r.stderr)
+            self.assertLess(time.monotonic() - began, 20)
+            self.assertIn("--- FAIL: memory_cap", r.stderr)
 
     def test_run_caps_gremlins_mutant_runs(self):
         # The wiring: `run` gives gremlins' shim each run's share of half the free memory.
@@ -5340,6 +5356,31 @@ class GremlinsMemoryCap(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             got = {(m["line"], m["type"], m["status"]) for f in json.loads(out.read_text())["files"] for m in f["mutations"]}
         self.assertIn((5, "INCREMENT_DECREMENT", "KILLED"), got)
+        self.assertLess(time.monotonic() - began, 120)
+
+    @unittest.skipUnless(shutil.which("gremlins"), "gremlins v0.6.0 is not installed")
+    def test_gremlins_reads_a_capped_output_flood_as_killed(self):
+        # #5974's class through the driver (MUT-gremlins-memcap-go): `i--` turns a bounded print loop into an
+        # unbounded one, and `go test PKG` holds all of it; the test binary's own memory stays small.
+        src = ("package p\n\nimport (\n\t\"fmt\"\n\t\"strings\"\n)\n\nfunc Say(n int) int {\n"
+               "\tfor i := 0; i < n; i++ {\n\t\tfmt.Println(strings.Repeat(\"x\", 1<<20))\n\t}\n\treturn n\n}\n")
+        test = ("package p\n\nimport \"testing\"\n\nfunc TestSay(t *testing.T) {\n"
+                "\tif Say(3) != 3 {\n\t\tt.Fatal()\n\t}\n}\n")
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}):
+            pkg = pathlib.Path(d) / "broker" / "p"
+            pkg.mkdir(parents=True)
+            (pkg.parent / "go.mod").write_text(GO_MOD)
+            (pkg / "a.go").write_text(src)
+            (pkg / "a_test.go").write_text(test)
+            (pathlib.Path(d) / "cfg.yaml").write_text("{}\n")
+            out = pathlib.Path(d) / "out.json"
+            env = {**os.environ, "PATH": f"{mutgate.go_shim(d, 256 << 20)}{os.pathsep}{os.environ['PATH']}"}
+            began = time.monotonic()
+            r = subprocess.run(["gremlins", "unleash", "--config", str(pathlib.Path(d) / "cfg.yaml"), "-o", str(out), str(pkg)],
+                               cwd=pkg, env=env, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            got = {(m["line"], m["type"], m["status"]) for f in json.loads(out.read_text())["files"] for m in f["mutations"]}
+        self.assertIn((9, "INCREMENT_DECREMENT", "KILLED"), got)
         self.assertLess(time.monotonic() - began, 120)
 
 
