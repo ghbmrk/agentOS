@@ -239,8 +239,6 @@ class SyntheticTree(unittest.TestCase):
 
 
 CORE = "root calc\nallow golang.org/x/crypto/argon2\n"
-# D-7 names the test PR (#42, as --pr 42); D-5 is active but names another PR (#2945).
-PR = 42
 NOREC = ({}, [])
 
 
