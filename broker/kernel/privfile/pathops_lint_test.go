@@ -474,8 +474,9 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 		})
 	}
 	// A unit that is no template has no instance name to ignore: its
-	// specifier refusal names only the step (#6504 item 1).
-	for _, unit := range []string{"image/mkosi/agentos-h.service", "image/mkosi/agentos-h.socket"} {
+	// specifier refusal names only the step (#6504 item 1). A leading @
+	// makes no template either: systemd needs a prefix before it.
+	for _, unit := range []string{"image/mkosi/agentos-h.service", "image/mkosi/agentos-h.socket", "image/mkosi/@agentos-h.service"} {
 		t.Run("refuses a specifier in "+path.Base(unit)+" without the template clause", func(t *testing.T) {
 			files := clone(files)
 			files[unit] = "[Service]\nExecStart=/usr/lib/agentos/agentos-h %H\n"
