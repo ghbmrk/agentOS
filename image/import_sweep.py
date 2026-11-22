@@ -109,9 +109,12 @@ SITE = re.compile(r"^\s*[0-9a-f]+:\s.*<([A-Za-z_]\w*)(?:@[\w.@]*)?>\s*$")
 # slot (GLOB_DAT) is a reference no instruction shows; JUMP_SLOT is the PLT's, already counted at its calls.
 RELOC = re.compile(r"^[0-9a-f]+\s+(R_\w+)\s+([A-Za-z_]\w*)(?:@[\w.@]*)?(?:[+-]0x[0-9a-f]+)?\s*$")
 UND = re.compile(r"\*UND\*\s+\S+\s+(?:Base\s+)?\((GLIBC_[^)]*)\)\s+(\S+)$")
+# Any import, whatever library or version it names, for LOOKUP_FUNCS (a dlsym that another library defines
+# still resolves names).
+UND_ANY = re.compile(r"\*UND\*\s+\S+\s+(?:Base\s+)?(?:\([^)]*\)\s+)?(\S+)$")
 DYNAMIC = re.compile(r"^\s+(NEEDED|SONAME)\s+(\S+)$")
 # #6298: two ways to reach a group's code that no import shows.
-# A run-time lookup: a file whose own imports or NEEDED closure (within its place) import glibc's dlsym or
+# A run-time lookup: a file whose own imports or NEEDED closure (in its root) import glibc's dlsym or
 # dlvsym can resolve any function whose name it holds, itself or through a library's wrapper around them
 # (libltdl, libuv and the like; #6299, L3 on #6339). dlopen alone runs only the opened file's code, which the
 # sweep reads as a file of its own. Such a file holding a group function's name at the end of a string (a
@@ -119,7 +122,12 @@ DYNAMIC = re.compile(r"^\s+(NEEDED|SONAME)\s+(\S+)$")
 # file holds both, so no NUL need precede it: Security on #6382) counts as importing that function, except
 # a COMPAT_ONLY name when nothing in reach imports dlvsym. The openssl group needs no such rule: [cipher] already
 # holds every file whose bytes hold a selector's name, a dlsym caller's string included (#5341).
-LOOKUP_FUNCS = ("dlsym", "dlvsym")
+# A library's own export that passes its caller's name on to dlsym counts as a lookup function too, so a
+# [wrapper] entry can hold that library to its own names and a caller of the export is still read: OpenSSL
+# 3.5's libcrypto exports DSO_bind_func and DSO_global_lookup, which pass the name they are given to dlsym
+# (crypto/dso/dso_dlfcn.c), and DSO_METHOD_openssl, the table that holds both. Its other dlsym calls take
+# fixed names (provider_core.c, eng_dyn.c, conf_mod.c, the comp/ and rand_unix.c loaders).
+LOOKUP_FUNCS = ("dlsym", "dlvsym", "DSO_bind_func", "DSO_global_lookup", "DSO_METHOD_openssl")
 # glibc exports these only under a hidden compat version (misc/regexp.c, compat_symbol since 2.23), and
 # dlsym never returns a hidden version (elf/dl-lookup.c check_match), so only dlvsym can reach them.
 COMPAT_ONLY = ("step", "advance")
@@ -149,6 +157,12 @@ GLIBC = "libc.so.6"
 GLIBC_PATH = re.compile(r"^(/usr/lib/agentos/images/[^/]+)?/usr/lib/x86_64-linux-gnu/libc\.so\.6$")
 # A guest root in the main tree: a process there sees it as /, so its absolute links resolve under it.
 GUEST_ROOT = re.compile(r"^/usr/lib/agentos/images/[^/]+(?=/)")
+
+
+def root_of(path):
+    """The root a process running PATH sees: a guest's (GUEST_ROOT) for a path under one, else ""."""
+    m = GUEST_ROOT.match(path)
+    return m.group() if m else ""
 
 
 def resolve(path, links, hops=40):
@@ -196,8 +210,9 @@ def read_elf(path):
         m = UND.search(line)
         if m and group_of(m.group(2)):
             syms.add(m.group(2))
-        if m and m.group(2) in LOOKUP_FUNCS:
-            dl.add(m.group(2))
+        a = UND_ANY.search(line)
+        if a and a.group(1) in LOOKUP_FUNCS:
+            dl.add(a.group(1))
         m = DYNAMIC.match(line)
         if m and m.group(1) == "NEEDED":
             needed.append(m.group(2))
@@ -364,32 +379,35 @@ def sweep(files, links=None):
             unread.append(shown)
         if syms:
             imports[shown] = syms
-        # A NEEDED entry names a library's SONAME, which on disk is a symbolic link to the file read.
+        # A NEEDED entry names a library's SONAME, which on disk is a symbolic link to the file read. The
+        # loader looks for it only in the process's own root, so a name answers only within one (root_of).
         for n in {os.path.basename(shown), soname} - {None}:
-            by_name.setdefault(n, []).append(shown)
+            by_name.setdefault((root_of(shown), n), []).append(shown)
     # A NEEDED name can also be a link's (libw.so -> libw-real.so, a library with no SONAME; Security on
     # #6382): the loader opens the link and maps the file it names, so the name answers to that file.
     for link in sorted(links or {}):
-        to = resolve(link, links)
-        if to in files and to not in by_name.get(os.path.basename(link), []):
-            by_name.setdefault(os.path.basename(link), []).append(to)
+        to, n = resolve(link, links), (root_of(link), os.path.basename(link))
+        if to in files and to not in by_name.get(n, []):
+            by_name.setdefault(n, []).append(to)
 
     def closure(shown):
-        """The files of this place in SHOWN's NEEDED closure, itself excluded."""
+        """The files of this place in SHOWN's NEEDED closure, itself excluded: in SHOWN's root only."""
+        root = root_of(shown)
         seen, todo, libs = set(), list(needed[shown]), set()
         while todo:
             n = todo.pop()
             if n in seen:
                 continue
             seen.add(n)
-            for lib in by_name.get(n, []):
+            for lib in by_name.get((root, n), []):
                 libs.add(lib)
                 todo += needed.get(lib, [])
         return libs - {shown}
     reached = {shown: closure(shown) for shown in files}
     # A NEEDED name no file or link of the place answers to (Security R4 on #6382): what that library would
     # import or look up is not read, so it fails unless an [unresolved] entry says why it never loads there.
-    unresolved = {shown: sorted(set(n for n in needed[shown] if n not in by_name)) for shown in files}
+    unresolved = {shown: sorted(set(n for n in needed[shown] if (root_of(shown), n) not in by_name))
+                  for shown in files}
     lookups, through = {}, {}
     for shown in files:
         src = {lib: sorted(dl[lib]) for lib in sorted(reached[shown] | {shown}) if dl[lib]}

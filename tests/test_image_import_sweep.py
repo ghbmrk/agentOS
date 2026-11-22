@@ -1544,6 +1544,48 @@ class LinkTest(unittest.TestCase):
         self.assertEqual(got["through"], {"/usr/bin/m": {self.REAL: ["dlsym"]}})
         self.assertEqual(got["lookups"], {"/usr/bin/m": ["glob"]})
 
+    def test_a_name_answers_only_in_its_own_root(self):
+        # The loader searches the process's own root: a guest's library is no core file's, nor the reverse.
+        g = "/usr/lib/agentos/images/g"
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d)
+            shutil.copytree(self.t / "usr/lib", t / g.strip("/") / "usr/lib", symlinks=True)
+            (t / "usr/bin").mkdir(parents=True)
+            shutil.copy(self.t / "usr/bin/m", t / "usr/bin/m")
+            got = sweep.run_tree(str(t))["tree"]
+            self.assertEqual((got["lookups"], got["through"]), ({}, {}))
+            self.assertEqual(got["unresolved"]["/usr/bin/m"], ["libc.so.6", "libw.so"])
+            (t / g.strip("/") / "usr/bin").mkdir()
+            shutil.copy(self.t / "usr/bin/m", t / g.strip("/") / "usr/bin/m")
+            got = sweep.run_tree(str(t))["tree"]
+        self.assertEqual(got["through"], {g + "/usr/bin/m": {g + self.REAL: ["dlsym"]}})
+        self.assertEqual(got["unresolved"]["/usr/bin/m"], ["libc.so.6", "libw.so"])
+        self.assertEqual(sweep.root_of(g + "/usr/bin/m"), g)
+        self.assertEqual(sweep.root_of("/usr/lib/agentos/images/g"), "")
+
+    def test_a_dlsym_forwarding_export_is_a_lookup_function(self):
+        # libcrypto's DSO_bind_func passes its caller's name to dlsym: importing it is a lookup, under any
+        # version or none (a library of the test's own here), as importing dlsym is.
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d)
+            lib = t / "usr/lib"
+            lib.mkdir(parents=True)
+            (t / "usr/bin").mkdir()
+            built("void *DSO_bind_func(void *d, const char *n) { return (void *)n; }\n", lib / "libdso.so.1",
+                  "-shared", "-fPIC", "-Wl,-soname,libdso.so.1")
+            built('void *DSO_bind_func(void *, const char *);\n'
+                  'int main(void) { return DSO_bind_func(0, "glob") == 0; }\n', t / "usr/bin/f",
+                  "-L" + str(lib), "-l:libdso.so.1")
+            self.assertEqual(sweep.read_elf(t / "usr/bin/f")[4], {"DSO_bind_func"})
+            got = sweep.run_tree(str(t))["tree"]
+        self.assertEqual(got["lookups"], {"/usr/bin/f": ["glob"]})
+        self.assertEqual(got["through"], {"/usr/bin/f": {"/usr/bin/f": ["DSO_bind_func"]}})
+        for line, name in (("0000000000000000      DF *UND*\t0000000000000000 (OPENSSL_3.0.0) DSO_bind_func",
+                            "DSO_bind_func"),
+                           ("0000000000000000      DF *UND*\t0000000000000000  Base        dlsym", "dlsym"),
+                           ("0000000000000000      DF *UND*\t0000000000000000              dlvsym", "dlvsym")):
+            self.assertEqual(sweep.UND_ANY.search(line).group(1), name)
+
     def test_resolve(self):
         links = {"/lib": "usr/lib", "/usr/lib/a.so": "../lib/b.so", "/usr/lib/loop": "loop",
                  "/usr/lib/agentos/images/g/usr/lib/c.so": "/usr/lib/d.so",

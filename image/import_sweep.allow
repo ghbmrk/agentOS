@@ -96,16 +96,6 @@ via /usr/lib/x86_64-linux-gnu/libedit.so.2.*
 # none of them but those named above calls into safe_glob's wrappers, so linking it is all they share.
 via /usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so
 
-# libsystemd-core holds "glob" as a whole string and needs libsystemd-shared, which imports dlsym, so it
-# counts as looking glob() up (#6299). The string is assert(glob) in src/core/exec-credential.c (systemd
-# 257), an assertion's text, not a name passed to dlsym: libsystemd-shared's dlsym calls
-# (src/basic/dlfcn-util.c dlsym_many_or_warn, userdb.c, tpm2-util.c) take only fixed symbol names of the
-# libraries it opens. Its glob() reach is libsystemd-shared's safe_glob, reviewed above (PID 1, executor).
-/usr/lib/x86_64-linux-gnu/systemd/libsystemd-core-*.so sha256=1f7ea1b1aae9272febf71b7a74321c85327c53f1b163016063e6d09bc2677fc5
-
-# PID 1, systemd-executor and systemd-analyze reach it through libsystemd-core and libsystemd-shared only.
-via /usr/lib/x86_64-linux-gnu/systemd/libsystemd-core-*.so
-
 # bash (the main tree's and the guests', the same bytes) imports dlsym and ends strings with "glob" (its
 # shopt names extglob, nullglob, failglob, dotglob, nocaseglob and noglob). Its only dlsym calls are
 # enable -f's (builtins/enable.def dyn_load_builtin, bash 5.2), which look up NAME_struct,
@@ -157,14 +147,35 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 
 [wrapper]
 # Libraries that import dlsym or dlvsym and pass it only names of their own, never a caller's string
-# (#6299): a file that needs one is no lookup through it, so a string it holds is not read as a name it
-# can resolve. Each entry pins the bytes whose dlsym calls were read, as [glob] entries do; a file's own
-# dlsym import always counts, and an entry that a lookup's sources do not include fails.
+# but through an export the sweep counts as a lookup function itself (LOOKUP_FUNCS; #6299): a file that
+# needs one is no lookup through it, so a string it holds is not read as a name it can resolve. Each
+# entry pins the bytes whose dlsym calls were read, as [glob] entries do; a file's own dlsym import always
+# counts, and an entry that a lookup's sources do not include fails.
 
 # libsystemd-shared (systemd 257): dlsym_many_or_warn (src/basic/dlfcn-util.c) resolves the
 # DLSYM_ARG(name) list its callers spell (idn-util.c, bpf-dlopen.c, cryptsetup-util.c and the other
 # *-util.c loaders), userdb.c looks up "_nss_systemd_block", and tpm2-util.c TSS2_TCTI_INFO_SYMBOL.
 /usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-*.so sha256=9f6f06ff4883d23eee5e628c625878e8bc7f60613e945e04ead7793ae969f37c
+
+# libpam (Linux-PAM 1.7.0): pam_handlers.c _load_module resolves the pam_sm_* names its switch spells
+# through _pam_dlsym (pam_dynamic.c), which libpam does not export.
+/usr/lib/x86_64-linux-gnu/libpam.so.0.* sha256=7e61037c89b06382c9d22518174914fef77b9e473962f49ab1c90c55c9b5bca2
+
+# libselinux (3.8.1): load_policy.c resolves ten sepol_* names it spells from libsepol; nothing else
+# calls dlsym, and it exports no wrapper.
+/usr/lib/x86_64-linux-gnu/libselinux.so.1 sha256=5cb5293b4e7590463b94f7b23152d54807a6a2ccaf8cac9e343908c6692c086c
+
+# libmount (util-linux 2.41.5): hook_veritydev.c resolves the crypt_* names of its static
+# verity_symbols table from libcryptsetup; it exports no wrapper.
+/usr/lib/x86_64-linux-gnu/libmount.so.1.* sha256=1654d2cf948e3608cc0d38340807d4ddac1114315a3a77f7b274c4c859cb2181
+
+# libcrypto (OpenSSL 3.5.7): dlfcn_bind_func and dlfcn_globallookup (crypto/dso/dso_dlfcn.c) are its
+# only dlsym calls. A caller's name reaches them only through the exports DSO_bind_func,
+# DSO_global_lookup and DSO_METHOD_openssl, which the sweep counts as lookup functions of their own
+# (LOOKUP_FUNCS); libcrypto's own callers spell fixed names (provider_core.c OSSL_provider_init,
+# eng_dyn.c v_check and bind_engine, conf_mod.c OPENSSL_init and OPENSSL_finish, the comp/ loaders,
+# rand_unix.c getentropy).
+/usr/lib/x86_64-linux-gnu/libcrypto.so.3 sha256=8ae56f0a9481280a68c19f59809cd242a07a91ad7142944d21a878221992244b
 
 [unresolved]
 # Files with a NEEDED name that no file or symbolic link of their place answers to (Security R4 on #6382),
