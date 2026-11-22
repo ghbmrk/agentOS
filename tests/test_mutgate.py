@@ -2920,12 +2920,13 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
 
     def test_tests_that_cover_nothing_run_no_gremlins(self):
         # Gremlins' -D mutates every line when its diff is empty, so no target line means no run.
-        # The base's TestDown runs nothing either, so neither side covers a line.
+        # The base's TestDown runs nothing either, so neither side covers a line. The pinned go leads PATH:
+        # a runner's /usr/bin can hold another Go, whose gofmt mutgate refuses (#6442).
         base = TWO_TEST.replace("func TestDown(t *testing.T) {\n\tif Down(3) != 2 {", "func TestDown(t *testing.T) {\n\tif 3 != 3 {")
         with tempfile.TemporaryDirectory() as d:
             self.repo(d, base.replace('t.Fatal("down")', 't.Fatal("down!")'), test_base=base)
             out = pathlib.Path(d) / "res" / "mutants-0"
-            r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(out), env={"PATH": "/usr/bin:/bin:" + str(pathlib.Path(sys.executable).parent) + ":" + os.path.dirname(shutil.which("go"))})
+            r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(out), env={"PATH": os.path.dirname(shutil.which("go")) + ":/usr/bin:/bin:" + str(pathlib.Path(sys.executable).parent)})
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertEqual(json.loads((out / "hint.json").read_text())["targets"], {"tests": ["TestDown"], "lines": {}, "base": {"tests": ["TestDown"], "lines": {}}})
             self.assertFalse((pathlib.Path(d) / "seen").exists())
