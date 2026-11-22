@@ -8,7 +8,7 @@
 # Components match Repositories= in mkosi.conf. Each Signed-By names a keyring of only the key that
 # signs that archive (IMG-keyring-minimal, #5954), pinned by image/debian-archive-keyring.sh.
 Types: deb
-URIs: https://snapshot.debian.org/archive/debian/20261001T000000Z/
+URIs: https://snapshot.debian.org/archive/debian/20261122T000000Z/
 Suites: trixie trixie-updates
 Components: main
 Signed-By: /usr/share/keyrings/debian-archive-bookworm-automatic.gpg

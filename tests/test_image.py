@@ -7973,8 +7973,8 @@ class MkosiRunBoundTest(unittest.TestCase):
                   '-C image/mkosi -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" '
                   '--environment=AGENTOS_SECURITY_SNAPSHOT="$AGENTOS_SECURITY_SNAPSHOT" '
                   '--extra-tree="$OUT/stage/usr:/usr" --output-dir "$OUT" build 2>&1 | tee "$RUNNER_TEMP/build.log"')
-    MIRROR, SECURITY = "20261001T000000Z", "20261112T180512Z"
-    INDEX = "snapshot.debian.org_archive_debian_20261001T000000Z_dists_trixie_main_binary-amd64_Packages"
+    MIRROR, SECURITY = "20261122T000000Z", "20261112T180512Z"
+    INDEX = "snapshot.debian.org_archive_debian_20261122T000000Z_dists_trixie_main_binary-amd64_Packages"
     SEC = "snapshot.debian.org_archive_debian-security_20261112T180512Z_dists_trixie-security_main_binary-amd64_Packages"
 
     def test_the_one_mkosi_line_is_pinned(self):
