@@ -66,7 +66,10 @@ alone): a weakened test plus an edit to the lines it ran, or a moved file, drops
 base record's mapping, and new code no test runs (code moved in with its test left behind) is unchecked.
 A changed file of a package that is not its Go code (anything under testdata/, and a non-.go file a
 .go file of the package can name, such as an embedded or read file) changes its tests, every one of
-them (data_owner, #5779): emptying a test's table weakens it with no _test.go line changed. Coverage can differ from run to run
+them (data_owner, #5779): emptying a test's table weakens it with no _test.go line changed. So does
+any file, in the repository or another package, that a package's .go file names by its exact path
+from the package's directory ("../../SPEC.md"; readers, #6436). vendor/ changes no test: CI rebuilds
+it with `go mod vendor` and fails any difference (is_vendored). Coverage can differ from run to run
 (a timing branch, a retry), so in CI `plan` measures it once and every shard reads that one record
 (`--targets`), never a coverage run of its own: K shards of one package then name the same lines (#4970). Gremlins mutates a package's target
 lines only: its `-D` reads `git diff --merge-base`, so for a package whose tests changed `run` points HEAD for
@@ -122,12 +125,14 @@ import collections
 import concurrent.futures
 import contextlib
 import fnmatch
+import functools
 import glob
 import hashlib
 import json
 import math
 import os
 import pathlib
+import posixpath
 import re
 import shlex
 import shutil
@@ -255,11 +260,20 @@ def is_test(path):
     return path.startswith("broker/") and path.endswith("_test.go")
 
 
+def is_vendored(path):
+    """Whether a path is under broker/'s vendor/ tree, which no edit can change on its own: the
+    required `checks` job reruns `go mod vendor` and fails on any difference, so its content is
+    fixed by go.sum's modules and the local replace directories (third_party/, gated packages of
+    their own). A test that reads it reads those, and an edit to it claims no package (#6436)."""
+    parts = path.split("/")
+    return parts[0] == "broker" and "vendor" in parts[1:-1]
+
+
 def is_data(path):
     """Whether a broker/ path is a package's file but not its Go code: anything under a testdata/
     directory, or a non-.go file other than a MUTANTS-EQUIVALENT record (read by records_changed)."""
     parts = path.split("/")
-    return (parts[0] == "broker" and len(parts) > 2 and "vendor" not in parts[1:-1] and parts[-1] != RECORD
+    return (parts[0] == "broker" and len(parts) > 2 and not is_vendored(path) and parts[-1] != RECORD
             and ("testdata" in parts[1:-1] or not parts[-1].endswith(".go")))
 
 
@@ -285,7 +299,8 @@ def added_lines(diff_text, moved=None):
     _test.go files it changes). A test file's set holds the lines it adds and, for a hunk that only
     deletes, the line either side; it is None when the diff deletes the file. What a deleted line
     reached is read at the base (base_test_lines). A changed data file (is_data) is in the second
-    map too, as None: data_owner names the package whose tests it changes (#5779). moved is
+    map too, as None, as is any other changed file a package names by path (readers, #6436): owners
+    names the packages whose tests it changes (data_owner for a package's own data, #5779). moved is
     moved()'s pair: a test line it names at the head is no change, nor is a hunk or file deletion
     whose every base line it names (#6369). A hunk deleting any other base line always changes the
     file: when moved() names all its added lines, the line either side of them is touched (L3 and
@@ -303,7 +318,7 @@ def added_lines(diff_text, moved=None):
 
     def data(*paths):
         for p in paths:
-            if p is not None and is_data(p):
+            if p is not None and (is_data(p) or not is_test(p) and readers(p)) and not is_vendored(p):
                 tests[p] = None
 
     # split("\n"), not splitlines(): that also breaks on \r, \x0b, \x0c, \x1c-\x1e, \x85, U+2028 and
@@ -423,8 +438,8 @@ MADE = set()
 
 def hide_docs(broker, *also):
     """Delete, under broker (a tree the gate is about to run tests in), each Markdown file an edit to
-    which changes no package's tests (any without a data_owner in broker or any broker of also;
-    vendor/ is kept, as is_data keeps it: a test compares it with its patched copy), and return
+    which changes no package's tests (owners names none in broker or any broker of also: its
+    data_owner or a package naming it by path, readers; vendor/ is kept: is_vendored), and return
     their paths. Every gate run then measures the suite without them, so no verdict can depend on
     them and an edit to one changes no test (#6373); a test that needs one fails the run, closed.
     It refuses (ValueError) a tree this process did not make, so no working tree loses a file (#6456)."""
@@ -436,8 +451,8 @@ def hide_docs(broker, *also):
         for f in sorted(files):
             path = pathlib.Path(d, f)
             rel = "broker/" + path.relative_to(broker).as_posix()
-            if (f.endswith(".md") and "vendor" not in rel.split("/")[1:-1]
-                    and not any(data_owner(rel, b) for b in (broker, *also))):
+            if (f.endswith(".md") and not is_vendored(rel)
+                    and not any(owners(rel, b) for b in (broker, *also))):
                 path.unlink()
                 gone.append(rel)
     return gone
@@ -500,15 +515,66 @@ def data_owner(path, broker=None):
     return "/".join(dirs)
 
 
-def test_owner(path):
-    """The package a path of added_lines' second map changes the tests of, or None."""
-    return data_owner(path) if is_data(path) else package_of(path)
+def owners(path, broker=None):
+    """The packages (as package_of names them) every one of whose tests a changed file changes:
+    its own package's when it is that package's data (data_owner), and every other package that
+    names it by path (readers). A vendored file has none (is_vendored). A package's own _test.go
+    file changes only the tests that reach its changed lines (owners_of, head_tests)."""
+    if is_vendored(path):
+        return set()
+    own = data_owner(path, broker) if is_data(path) else None
+    return ({own} - {None}) | readers(path, broker)
+
+
+@functools.lru_cache(maxsize=None)
+def read_index(broker):
+    """{repo path: {package}} of the paths each broker/ package's .go files name with a string
+    literal (escapes decoded, comments left out; _literals), read as a relative path from the
+    package's directory, as `go test` runs there: "../../SPEC.md" in broker/enforcer/page names
+    SPEC.md. An absolute literal, one that climbs out of the repository, or one naming a vendored
+    file (is_vendored) names nothing. vendor/,
+    testdata/ and the directories Go skips (`.` or `_` first) hold no package. The tree is read once
+    per broker directory per process: the gate reads its claims before it changes a file."""
+    broker = pathlib.Path(broker)
+    index = collections.defaultdict(set)
+    for d, dirs, files in os.walk(broker):
+        dirs[:] = sorted(x for x in dirs if x not in ("vendor", "testdata") and x[0] not in "._")
+        rel = pathlib.Path(d).relative_to(broker).as_posix()
+        if rel == ".":
+            continue
+        for f in sorted(files):
+            if not f.endswith(".go"):
+                continue
+            text = pathlib.Path(d, f).read_bytes().decode("utf-8", "replace")
+            for lit in _literals(text):
+                if lit and not lit.startswith("/") and "\x00" not in lit:
+                    path = posixpath.normpath(posixpath.join("broker", rel, lit))
+                    if path != ".." and not path.startswith("../") and not is_vendored(path):
+                        index[path].add(rel)
+    return dict(index)
+
+
+def readers(path, broker=None):
+    """The packages other than the file's own (package_of, data_owner) whose .go files name a
+    changed file by its exact path (read_index): a test that reads SPEC.md or another package's
+    fixture changes when it does, though no line of its own package changed (#6436). A read by a
+    path built at run time, or through a directory it names, is not one of these."""
+    broker = BROKER if broker is None else pathlib.Path(broker)
+    found = set(read_index(broker.resolve()).get(path, ()))
+    return found - {package_of(path), data_owner(path, broker) if is_data(path) else None}
+
+
+def owners_of(path):
+    """The packages whose tests a path of added_lines' second map changes: owners, and the
+    package of its own _test.go file (head_tests reads which of them)."""
+    return owners(path) | ({package_of(path)} if is_test(path) and not is_data(path) else set())
 
 
 def touched(added, tests):
     """The broker/ packages where the diff adds a line to a non-test .go file or changes a test file
-    (or a data file, data_owner)."""
-    return ({package_of(p) for p in added if is_source(p) and not is_data(p)} | {test_owner(p) for p in tests}) - {None}
+    or a file one reads (owners_of)."""
+    return ({package_of(p) for p in added if is_source(p) and not is_data(p) and not is_vendored(p)}
+            | {o for p in tests for o in owners_of(p)}) - {None}
 
 
 def records_changed(diff_text):
@@ -541,8 +607,9 @@ def diff_targets(added, pkg):
 
 
 def tests_changed(tests, pkg):
-    """Whether the diff changes or deletes a _test.go file of broker/<pkg>/, or a data file of it."""
-    return any(test_owner(p) == pkg for p in tests)
+    """Whether the diff changes or deletes a _test.go file of broker/<pkg>/, or a file its tests
+    read (owners)."""
+    return any(pkg in owners_of(p) for p in tests)
 
 
 def union(*parts):
@@ -935,17 +1002,45 @@ def _go_files(pkg, commit):
     return out
 
 
+# The go.mod whose toolchain line pins Go, read where mutgate lives (tests move BROKER, not the pin).
+GO_MOD_PIN = BROKER / "go.mod"
+
+
+@functools.cache
+def gofmt():
+    """The path of the toolchain's own gofmt: GOROOT/bin/gofmt of the Go that broker/go.mod selects, whose
+    build info names go.mod's toolchain version. Raises instead, never taking gofmt from PATH: another
+    gofmt's layout can read a reformat as a move or hide one (#6442)."""
+    pin = re.search(r"^toolchain\s+(go\S+)\s*$", GO_MOD_PIN.read_text(), re.M)
+    if not pin:
+        raise RuntimeError(f"mutgate: {GO_MOD_PIN} names no toolchain, so no gofmt is pinned")
+    run = lambda *a: subprocess.run(["go", *a], cwd=GO_MOD_PIN.parent, capture_output=True, text=True,
+                                    env={**os.environ, "GOWORK": "off"})
+    try:
+        r = run("env", "GOROOT")
+        binary = pathlib.Path(r.stdout.strip()) / "bin" / "gofmt"
+        if r.returncode or not r.stdout.strip() or not binary.is_absolute() or not binary.is_file():
+            raise RuntimeError(f"mutgate: no gofmt in the toolchain's GOROOT ({r.stdout.strip()!r}): {r.stderr.strip()[:300]}")
+        v = run("version", str(binary))
+    except OSError as e:
+        raise RuntimeError(f"mutgate: cannot run go to find the toolchain's gofmt: {e}") from e
+    if v.returncode or v.stdout.strip() != f"{binary}: {pin[1]}":
+        raise RuntimeError(f"mutgate: {binary} is not {pin[1]}'s gofmt: {(v.stdout + v.stderr).strip()[:300]}")
+    return str(binary)
+
+
 def _unformatted(files):
-    """The paths of {path: text} that gofmt would change, every one when gofmt fails or is missing: what
+    """The paths of {path: text} that the pinned gofmt would change, every one when it fails on them: what
     moved() reads assumes gofmt's layout (`func TestB (t` hides a test from RUNNABLE; Security on #6378)."""
+    binary = gofmt()
     with tempfile.TemporaryDirectory() as d:
         names = {p.rsplit("/", 1)[-1]: p for p in files}
         for name, p in names.items():
             (pathlib.Path(d) / name).write_text(files[p])
         try:
-            r = subprocess.run(["gofmt", "-l", "."], cwd=d, capture_output=True, text=True)
-        except OSError:
-            return set(files)
+            r = subprocess.run([binary, "-l", "."], cwd=d, capture_output=True, text=True)
+        except OSError as e:
+            raise RuntimeError(f"mutgate: cannot run the toolchain's gofmt {binary}: {e}") from e
         if r.returncode or r.stderr.strip():
             return set(files)
         return {names.get(n.strip().removeprefix("./"), n) for n in r.stdout.split("\n") if n.strip()}
@@ -1310,8 +1405,8 @@ def head_tests(tests, pkg):
     d = BROKER / pkg
     if not tests_changed(tests, pkg):
         return []
-    if d.is_symlink() or any(is_data(p) and data_owner(p) == pkg for p in tests):
-        return None  # a data file's readers are not traced: every test may read it (#5779)
+    if d.is_symlink() or any(pkg in owners(p) for p in tests):
+        return None  # a read file's readers are not traced: every test may read it (#5779, #6436)
     files = {}
     for f in sorted(d.glob("*_test.go")) if d.is_dir() else ():
         if f.is_symlink():
@@ -2609,8 +2704,11 @@ def go_cover(real, tmp, args, mem=None):
 # deletion can (#5011), and took a runner down on #6000. Gremlins v0.6.0 reads its `go test`'s exit 1
 # as KILLED (executor.go getTestFailedStatus), so a run past its cap is killed and exits 1, as
 # run_tests' memory_cap is KILLED. The toolchain's own processes (TOOLCHAIN) are not counted: a
-# mutant changes what the tests do, not how much the compiler holds.
-TOOLCHAIN = frozenset({"go", "compile", "link", "asm", "cgo", "vet", "cover"})
+# mutant changes what the tests do, not how much the compiler holds. The `go` driver is counted
+# (MUT-gremlins-memcap-go, #6507): given a package, `go test` holds the test binary's whole output in
+# its own memory (cmd/go runTestActor), so a mutant that loops printing grows `go`, not the test, and
+# passed the cap uncounted; the driver alone holds about 30 MB (broker/owner, cold or warm).
+TOOLCHAIN = frozenset({"compile", "link", "asm", "cgo", "vet", "cover"})
 
 
 def go_capped(real, mem, args):
@@ -3551,12 +3649,20 @@ def cmd_report(args):
 
 
 def broker_diff(base, head):
+    """`git diff BASE...HEAD` of broker/, and of each file outside it that a broker package names by
+    path (read_index, #6436): an edit to SPEC.md changes the tests that read it."""
+    names = subprocess.run(["git", "-c", "core.quotepath=off", "diff", "--name-only", "-z", "--no-renames", "--no-relative",
+                            f"{base}...{head}"], cwd=ROOT, capture_output=True, check=True).stdout
+    index = read_index(BROKER.resolve())
+    read = sorted({n for n in names.decode("utf-8", "surrogateescape").split("\0")
+                   if n and n.split("/")[0] != "broker" and n in index})
     return subprocess.run(
         # --text: a `-diff` .gitattributes line would otherwise hide a file's lines as binary.
         # The prefix, colour, external-diff, textconv and rename options pin the format: git config such as diff.noprefix,
         # color.ui=always, diff.external a diff.<driver>.textconv or diff.renames=copies would otherwise hide added lines (#4115).
-        ["git", "-c", "core.quotepath=off", "diff", "-U0", "--text", "--src-prefix=a/", "--dst-prefix=b/",
-         "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", f"{base}...{head}", "--", "broker"],
+        # Literal pathspecs: a read file's name is a path, never a pattern.
+        ["git", "--literal-pathspecs", "-c", "core.quotepath=off", "diff", "-U0", "--text", "--src-prefix=a/", "--dst-prefix=b/",
+         "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", f"{base}...{head}", "--", "broker", *read],
         # errors="replace" below: with --text a binary file's bytes are diff lines, and need not be UTF-8.
         cwd=ROOT, capture_output=True, check=True,
     # Bytes decoded here: text=True would turn a lone \r into \n and number the lines wrongly (#4028).
