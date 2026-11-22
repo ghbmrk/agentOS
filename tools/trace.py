@@ -16,10 +16,16 @@ Usage:
   tools/trace.py --ratchet BASE  fail if the old core grew between BASE and HEAD
 """
 import argparse
+import importlib.util
 import pathlib
 import re
 import subprocess
 import sys
+
+# By path, as premerge loads its imports: a run with `python3 -I` keeps tools/ off sys.path.
+_rm = importlib.util.spec_from_file_location("record_merge", pathlib.Path(__file__).resolve().parent / "record_merge.py")
+record_merge = importlib.util.module_from_spec(_rm)
+_rm.loader.exec_module(record_merge)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ID_DEF = re.compile(r"\*\*([A-Z]{2,4}-\d+[a-z]?)\*\*")
@@ -102,6 +108,7 @@ def git_tree(root, ref):
 def old_core_dirs(tree):
     # "\n" only, printable ASCII only: splitlines() also ends a line at "\r", U+2028 and
     # others, so a break hidden in a comment would add a line (REV-CHK-crlf, #3902).
+    record_merge.listed(OLD_CORE)  # the list read is a declared one (#6441)
     dirs = []
     for n, l in enumerate(tree.get(OLD_CORE, "").split("\n"), 1):
         bad = [c for c in l if not " " <= c <= "~"]

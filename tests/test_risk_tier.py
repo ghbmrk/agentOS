@@ -424,29 +424,31 @@ class RiskTierTest(unittest.TestCase):
     def test_allow_line_parsing_matches_core_test(self):
         # Same grammar as broker/core/core_test.go: allow <pkg> <symbol> -- <reason>.
         with tempfile.TemporaryDirectory() as d:
-            ok = pathlib.Path(d) / "ok.txt"
+            ok = pathlib.Path(d) / "broker/core/core.txt"  # the declared list's path (#6441), read uncached
+            ok.parent.mkdir(parents=True)
             ok.write_text("core journal\nallow newpkg journal.Engine.Erase -- a reason\n")
-            self.assertEqual(rt.core_list(ok)[2], {"newpkg"})
+            self.assertEqual(rt.core_list.__wrapped__(ok)[2], {"newpkg"})
             # A fixture line reads but adds no package: its allow line does.
             ok.write_text("core journal\nallow newpkg journal.Engine.Erase -- a reason\nfixture newpkg\n")
-            self.assertEqual(rt.core_list(ok), ({"journal"}, set(), {"newpkg"}))
+            self.assertEqual(rt.core_list.__wrapped__(ok), ({"journal"}, set(), {"newpkg"}))
             for line in ("allow newpkg journal.Engine.Erase",
                          "allow newpkg journal.Engine.Erase --",
                          "fixture", "fixture newpkg -- a reason",
                          "allow newpkg journal.Engine.Erase because it must"):
-                bad = pathlib.Path(d) / "bad.txt"
+                bad = ok
                 bad.write_text("core journal\n" + line + "\n")
                 with self.subTest(line=line), self.assertRaises(SystemExit):
-                    rt.core_list(bad)
+                    rt.core_list.__wrapped__(bad)
 
     def test_core_list_unreadable_fails(self):
         with tempfile.TemporaryDirectory() as d:
-            bad = pathlib.Path(d) / "core.txt"
+            bad = pathlib.Path(d) / "broker/core/core.txt"  # the declared list's path (#6441)
+            bad.parent.mkdir(parents=True)
             bad.write_text("core journal\nkernel vault\n")
-            with self.assertRaises(SystemExit):
-                rt.core_list(bad)
-            with self.assertRaises(SystemExit):
-                rt.core_list(pathlib.Path(d) / "missing.txt")
+            with self.assertRaisesRegex(SystemExit, "kernel"):
+                rt.core_list.__wrapped__(bad)
+            with self.assertRaisesRegex(SystemExit, "cannot read"):
+                rt.core_list.__wrapped__(pathlib.Path(d) / "missing/broker/core/core.txt")
 
     # CTRL-lane-gate (#1300; a work item with no SPEC row, so no REQ marker): CI runs
     # `risk_tier.py --git BASE HEAD --pr-branch B --pr-title T` on every PR.
