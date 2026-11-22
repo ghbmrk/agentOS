@@ -1219,7 +1219,7 @@ class LintTest(unittest.TestCase):
                 got = r.lint(d, d, "", lambda view: lambda p: False)
                 self.assertEqual([(u["unit"], u["user"]) for u in got["units"]],
                                  [("a.service", False), ("b.service", True)])
-                self.assertEqual((got["managers"], got["env"]), ([], {}))
+                self.assertEqual((got["managers"], got["env"], got["pkg_env"]), ([], {}, {}))
             finally:
                 offline_systemd.Manager = real
             self.assertEqual(len(stopped), 4)
@@ -1323,8 +1323,77 @@ class EnvFilesTest(unittest.TestCase):
             units = [{"files": [{"ours": True, "text": unit}]},
                      {"files": [{"ours": False, "text": "[Service]\nEnvironmentFile=/etc/p.env\n"}]}]
             got = r.env_files(v, units)
-        # /run is a boot mount (BootView), a package's line is the package's, a relative path is the lint's to refuse
-        self.assertEqual(got, {"/etc/a.env": "A=1\n", "/etc/l.env": "A=1\n"})
+        # /run is a boot mount (BootView), a package's line names a package's file, a relative path is the
+        # lint's to refuse
+        self.assertEqual(got, ({"/etc/a.env": "A=1\n", "/etc/l.env": "A=1\n"}, {}))
+
+    def test_a_file_of_ours_a_package_s_line_names(self):
+        # #6312: a package's unit loads an /etc/default conffile a build step changed, so the file is ours
+        pkg_unit = ("[Service]\nEnvironmentFile=-/etc/default/x\nEnvironmentFile=/usr/lib/x/p.env\n"
+                    "EnvironmentFile=/lib/x/p.env\nEnvironmentFile=/etc/default/l\nEnvironmentFile=/etc/default/both\n"
+                    "EnvironmentFile=/run/x.env\n")
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/etc/default/x": "LD_PRELOAD=/var/lib/agentos-x/x.so\n", "/usr/lib/x/p.env": "P=1\n",
+                         "/lib": "-> usr/lib", "/etc/default/l": "-> /usr/lib/x/p.env", "/etc/default/both": "B=1\n",
+                         "/run/x.env": "R=1\n"})
+            units = [{"files": [{"ours": False, "text": pkg_unit}]},
+                     {"files": [{"ours": True, "text": "[Service]\nEnvironmentFile=/etc/default/both\n"}]}]
+            ours, pkg = r.env_files(v, units, lambda p: p in ("/usr/lib/x/p.env", "/etc/default/both"))
+        # the package's own file, also through the merged /lib, is the package's; a link of ours to it is ours;
+        # one a line of ours names is in the first map alone
+        self.assertEqual(ours, {"/etc/default/both": "B=1\n"})
+        self.assertEqual(pkg, {"/etc/default/x": "LD_PRELOAD=/var/lib/agentos-x/x.so\n", "/etc/default/l": "P=1\n"})
+
+
+    def test_a_package_s_line_with_a_specifier_names_every_file_it_may(self):
+        # #6312 Security 1: a template's instance (%i) or a host name (%H) selects the file at run time, so
+        # every file of ours the line may name is held; a path specifier is read as each value it may take
+        bad = "LD_PRELOAD=/var/lib/agentos-x/x.so\n"
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/etc/default/pkgx-a": bad, "/etc/default/pkgx-b/c": bad, "/etc/default/other": bad,
+                         "/etc/default/host-box": bad, "/root/.config/pkgx.env": bad, "/etc/pkgx.env": "P=1\n",
+                         "/etc/default/pkgx-l": "-> /var/lib/agentos-x", "/var/lib/agentos-x/e": bad,
+                         "/etc/pct%.env": bad, "/run/pkgx-r": bad})
+            lines = ("EnvironmentFile=-/etc/default/pkgx-%i", "EnvironmentFile=/etc/default/host-%H",
+                     "EnvironmentFile=%E/pkgx.env", "EnvironmentFile=/etc/pct%%.env", "EnvironmentFile=%t/pkgx-r")
+            units = [{"files": [{"ours": False, "text": "[Service]\n" + "\n".join(lines) + "\n"}]}]
+            ours, pkg = r.env_files(v, units, lambda p: p == "/etc/pkgx.env")
+            self.assertEqual(ours, {})
+            # %I may unescape to a path, so the wildcard crosses components and directory links; /run is a
+            # boot mount; the package's own /etc/pkgx.env is the package's
+            self.assertEqual(sorted(pkg), ["/etc/default/host-box", "/etc/default/pkgx-a", "/etc/default/pkgx-b/c",
+                                           "/etc/default/pkgx-l/e", "/etc/pct%.env", "/root/.config/pkgx.env"])
+            for spec in ("%y", "%Y", "%s", "%1", "%"):
+                with self.subTest(spec=spec):
+                    units = [{"files": [{"ours": False, "text": "[Service]\nEnvironmentFile=/etc/x" + spec + "\n"}]}]
+                    with self.assertRaisesRegex(SystemExit, "does not expand"):
+                        r.env_files(v, units)
+
+
+    def test_every_alias_of_a_directory_is_walked(self):
+        # #6312 Security delta 1: a link of ours to the directory the line names, walked first by name
+        # order, must not hide it; a cycle of links ends
+        bad = "LD_PRELOAD=/var/lib/agentos-x/x.so\n"
+        for alias in ("zzz", "aaa"):
+            with self.subTest(alias=alias), tempfile.TemporaryDirectory() as d:
+                v = tree(d, {"/etc/default/pkgx-dir/f": bad, "/etc/default/" + alias: "-> /etc/default/pkgx-dir"})
+                u = [{"files": [{"ours": False, "text": "[Service]\nEnvironmentFile=-/etc/default/pkgx-%I\n"}]}]
+                self.assertIn("/etc/default/pkgx-dir/f", r.env_files(v, u, lambda p: False)[1])
+
+    def test_a_link_cycle_under_a_wildcard_fails_the_run(self):
+        # #6312 Security delta 2: %I may name pkgx-dir/loop/other, which is /etc/default/other, through a link
+        # back to an ancestor, so the paths a wildcard names are unbounded and the run fails, naming the link
+        u = [{"files": [{"ours": False, "text": "[Service]\nEnvironmentFile=-/etc/default/pkgx-%I\n"}]}]
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/etc/default/pkgx-dir/f": "X=1\n", "/etc/default/pkgx-dir/loop": "-> /etc/default",
+                         "/etc/default/other": "LD_PRELOAD=/var/lib/agentos-x/x.so\n"})
+            with self.assertRaisesRegex(SystemExit, "/etc/default/pkgx-dir/loop: a directory link back to /etc/default"):
+                r.env_files(v, u, lambda p: False)
+        # a path specifier alone is a fixed path, read without a walk, so a cycle beside it is not walked
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/etc/pkgx.env": "LD_PRELOAD=/x.so\n", "/etc/loop": "-> /etc"})
+            u = [{"files": [{"ours": False, "text": "[Service]\nEnvironmentFile=%E/pkgx.env\n"}]}]
+            self.assertEqual(r.env_files(v, u, lambda p: False)[1], {"/etc/pkgx.env": "LD_PRELOAD=/x.so\n"})
 
 
 class UserManagerTest(unittest.TestCase):
