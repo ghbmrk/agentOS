@@ -18,9 +18,11 @@ The SHA-256 the stage prints binds the tar in transit only: it proves the build 
 host packed, not that a hostile stage host packed an honest `/usr`.
 
 On the build host, nothing a non-root process can write is read as root: after its checks the build copies
-the commit (`git archive`) and the tar into a root-only directory that `mktemp` makes in `/var/lib`, and runs
-every later step there as root with root's own `PATH`, so the tar hashed is the tar unpacked and the tree
-checked is the tree mkosi reads. The image then moves to `DIR/out`.
+the commit and the tar into a root-only directory that `mktemp` makes in `/var/lib` (the commit's objects into
+root's own repository there, checked against their ids, then checked out with no config or attributes of the
+caller's, and refused unless the copy is exactly the commit's tree), and runs every later step there as root
+with root's own `PATH`, so the tar hashed is the tar unpacked and the tree checked is the tree mkosi reads.
+The image then moves to `DIR/out`.
 
 1. On the stage host, with `build.sh`'s tools (image.yml's "Install staging tools" step):
    `image/local-build.sh stage DIR` marks the host as one that staged (`/var/lib/agentos-stage-host`), runs

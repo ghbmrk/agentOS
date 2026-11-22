@@ -8079,12 +8079,15 @@ class MkosiRunBoundTest(unittest.TestCase):
                     '" sh -c "*" /var/lib/agentos-"*) [ -z "$SUDO_FAILS" ] || exit 1;; esac\n'
                     'for a; do shift; case $a in /var/lib/agentos-*) a="$MARKS/${a#/var/lib/}";; '
                     'PATH=/usr/local/sbin:*) a="PATH=$STANDINS:${a#PATH=}";; '
-                    'esac; set -- "$@" "$a"; done\nexec "$@"\n')
+                    'esac; set -- "$@" "$a"; done\nAS_ROOT=1 exec "$@"\n')
+            # id -u reads 0 under the stand-in sudo, as it does under sudo, and 1000 outside it.
+            write_x(bin_ / "id", '#!/bin/sh\n[ "$*" = -u ] || exit 9\n[ -n "$AS_ROOT" ] && echo 0 || echo 1000\n')
             mk = d / "mkosi"
             (mk / "mkosi").mkdir(parents=True)
             (mk / ".gitignore").write_text("__pycache__\nmkosi.local.conf\n")
             (mk / "mkosi/__init__.py").write_text("")
-            for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "x"]):
+            # The checkout's commit has a parent, as a real one does (its copy takes no parent, #6417).
+            for cmd in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "base"], ["add", "-A"], ["commit", "-qm", "x"]):
                 for r_ in (repo, mk):
                     subprocess.run(["git", "-C", str(r_)] + cmd, env=self.git_env(), check=True)
         if sources is None:
@@ -8134,7 +8137,8 @@ class MkosiRunBoundTest(unittest.TestCase):
     @staticmethod
     def runs(calls):
         """The privileged runs (sudo env ...) and the stand-ins' own calls, in order."""
-        return [c for c in calls if c[0] in ("env", "build.sh", "finish.sh") and "build-root" not in c]
+        return [c for c in calls if c[0] in ("env", "build.sh", "finish.sh") and "build-root" not in c
+                and c[:2] != ["env", "-i"]]
 
     def test_the_local_wrapper_stages_as_image_yml_does(self):
         # The stage half runs build.sh as image.yml's stage job runs it (OUT only, the snapshot passed, the
@@ -8399,6 +8403,35 @@ class MkosiRunBoundTest(unittest.TestCase):
         for c in calls[first + 1:last]:
             self.assertFalse([a for a in c if img in a], c)
         self.assertFalse(pathlib.Path(w).exists())  # W goes on success
+
+    def test_the_local_wrapper_copies_the_commit_not_what_the_caller_s_git_makes_of_it(self):
+        # #6417, B2 of Security on #6440: the build's copy of the commit is the commit's tree, whatever the
+        # caller's .git/info/attributes, core.attributesFile or tar.* settings say (export-ignore drops a
+        # file from git archive, export-subst rewrites one): root checks the tree out from objects index-pack
+        # checked, with env -i and no config but its repository's own, and refuses a copy that differs.
+        d, tar, _ = self.staged(snapshot=self.SECURITY)
+        repo = d / "repo"
+        (repo / ".git/info").mkdir(exist_ok=True)
+        (repo / ".git/info/attributes").write_text("image/finish.sh export-ignore\nimage/security-snapshot.sh export-subst\n")
+        (d / "attrs").write_text("image/real-security-snapshot.sh export-ignore\n")
+        for k, v in (("core.attributesFile", str(d / "attrs")), ("tar.umask", "0")):
+            subprocess.run(["git", "-C", str(repo), "config", k, v], env=self.git_env(), check=True)
+        r, calls, _ = self.build(str(tar), "img", snapshot=self.SECURITY, d=d, mkosi_fails=True)
+        self.assertNotEqual(r.returncode, 0)  # mkosi's stand-in fails, so W stays to be read
+        w = pathlib.Path(self.root_dir(calls))
+        commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+        files = subprocess.check_output(["git", "-C", str(repo), "ls-files"], env=self.git_env(), text=True).split()
+        self.assertEqual(sorted(str(f.relative_to(w / "src")) for f in (w / "src").rglob("*") if not f.is_dir()), sorted(files))
+        for f in files:
+            self.assertEqual((w / "src" / f).read_bytes(), (repo / f).read_bytes(), f)
+        self.assertIn(["env", "-i", "PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root", "GIT_CONFIG_NOSYSTEM=1",
+                       "GIT_CONFIG_GLOBAL=/dev/null", "git", "--git-dir=%s/git" % w, "--work-tree=%s/src" % w,
+                       "read-tree", "-u", "--reset", commit + "^{tree}"], calls)
+        # build-root is only the build's second part: run by anyone but root, it refuses before reading anything.
+        r, calls, _ = self.local_build("build-root", str(w), "0" * 64, "1", d=d)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("build-root is the build's second part, run as root by build", r.stderr)
+        self.assertEqual(calls, [])
 
     def test_the_local_wrapper_stops_before_mkosi_on_a_bad_stage(self):
         # No snapshot in agentos.sources, or sources that are not exactly the ones security-snapshot.sh

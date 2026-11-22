@@ -40,10 +40,12 @@ usage() { echo "usage: image/local-build.sh stage DIR | build TAR SHA256 DIR [VE
 case "${1-} $#" in "stage 2"|"build 4"|"build 5"|"build-root 4") ;; *) usage ;; esac
 MODE=$1
 if [ "$MODE" = build-root ]; then
+	[ "$(id -u)" = 0 ] || { echo "local-build.sh: build-root is the build's second part, run as root by build; run build" >&2; exit 2; }
 	# The build's second part, run below by the first as root from the root-only copy W of the commit: W holds
 	# src/ (the commit), stage-in/stage.tar (the tar) and every file the steps write (#6417).
 	RUNNER_TEMP=$2 SHA256=$3 VERSION=$4
 	cd "$RUNNER_TEMP/src"  # the first part names the log on exit
+	case ${SOURCE_DATE_EPOCH-} in ""|*[!0-9]*) echo "local-build.sh: SOURCE_DATE_EPOCH '${SOURCE_DATE_EPOCH-}' is not a count of seconds" >&2; exit 2 ;; esac
 fi
 if [ "$MODE" = build ]; then
 	TAR=$(realpath -e -- "$2"); SHA256=$3; shift 2
@@ -99,7 +101,18 @@ if [ "$MODE" = build ]; then
 	BUILD_LOG="$W/build.log (root-only; $W stays for it)"
 	trap 'echo "local-build.sh: build log $BUILD_LOG" >&2' EXIT
 	sudo mkdir "$W/src" "$W/stage-in"
-	git archive --format=tar "$COMMIT" | sudo tar -C "$W/src" -xf -
+	# The commit's objects (not its parents) go into root's own repository W/git, where index-pack checks every
+	# object against its id and fsck's rules, and root checks out COMMIT's tree with no config or attributes but its own and the tree's: the
+	# caller's git config, .git/info/attributes or hooks reach no byte of W/src (#6417). A pack that lacks an
+	# object, or holds another commit, fails the checkout.
+	rootgit() { sudo env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git "$@"; }
+	g() { rootgit --git-dir="$W/git" --work-tree="$W/src" "$@"; }
+	rootgit init -q --bare "$W/git"
+	git rev-list --objects -n 1 "$COMMIT" | git pack-objects -q --stdout | g index-pack --fsck-objects --stdin >/dev/null
+	g read-tree -u --reset "$COMMIT^{tree}"
+	# The index is the commit's tree, every file in W/src matches it, and W/src holds no other file.
+	[ "$(g write-tree)" = "$(g rev-parse "$COMMIT^{tree}")" ] && g diff-files --quiet && [ -z "$(g ls-files --others)" ] \
+	  || { echo "local-build.sh: the copy of $COMMIT in $W/src is not its tree" >&2; exit 1; }
 	sudo install -m 0444 "$TAR" "$W/stage-in/stage.tar"  # its download-artifact step
 	# Root's own PATH, not the caller's: a directory of the caller's in it would let a non-root process choose
 	# the tar, sed or tool mkosi runs as root.
