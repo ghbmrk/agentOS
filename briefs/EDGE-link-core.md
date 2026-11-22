@@ -131,7 +131,7 @@ Follow-up of b, from its reviews on #3359: L3 points 1 and 2 (comment 6433663497
 - `edgelink/hello_test.go::TestHelloBindsItsConnection`: a hello verifies only against its own connection's exporter value; one from another connection, under another domain, or not exactly 64 bytes refuses. This pins the hello for the edge-side row.
 - `edgelink/tls_test.go::TestSignerSeesOnlyCertificateVerify`: the signer the server calls receives only the CertificateVerify input shape decision 4 names (the shape `linksign` will check).
 - `edgelink/kind_test.go::TestLabelComesFromTheKind`: no field of a frame changes the label.
-**Needs:** nothing; it can start now. **Guard files:** `tools/risk_tier.py` (`edgelink` in `TIER_A_BROKER`), `tools/trusted_base_parsers.txt` (`parser .../broker/edgelink -- frames and handshakes from the edge`), `broker/daemon/arc2_test.go` (stdlib only). **Gate:** gate-file PR (`risk_tier.py`): the separate Security accept; body line `Trusted-base: parsers -- edgelink decodes the edge's frames`.
+**Needs:** nothing; it can start now. **Guard files:** `tools/risk_tier.py` (`edgelink` in `TIER_A_BROKER`), `tools/trusted_base_parsers.txt` (`parser .../broker/edgelink -- frames and handshakes from the edge`), `broker/daemon/arc2_test.go` (stdlib only). **Gate:** gate-file PR (`risk_tier.py`): the separate Security accept; record line `parsers #<PR> -- edgelink decodes the edge's frames` in `tools/trusted_base_reasons.txt`.
 **Estimate:** 80k tokens.
 
 ## c2: the link process on the core (#3297), split into c2a, c2b and c2c

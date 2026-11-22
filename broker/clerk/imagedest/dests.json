@@ -1,0 +1,6 @@
+{"destinations": [
+  {"host": "time.cloudflare.com", "daily_bytes": 2097152},
+  {"host": "nts.netnod.se", "daily_bytes": 2097152},
+  {"host": "ptbtime1.ptb.de", "daily_bytes": 2097152},
+  {"host": "2.debian.pool.ntp.org", "daily_bytes": 1048576}
+]}
