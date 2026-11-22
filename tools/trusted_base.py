@@ -79,12 +79,18 @@ Usage:
       package, 2 a measurement error.
 """
 import argparse
+import importlib.util
 import json
 import os
 import pathlib
 import re
 import subprocess
 import sys
+
+# By path: the workflow runs `python3 -I`, which keeps tools/ off sys.path.
+_rm = importlib.util.spec_from_file_location("record_merge", pathlib.Path(__file__).resolve().parent / "record_merge.py")
+record_merge = importlib.util.module_from_spec(_rm)
+_rm.loader.exec_module(record_merge)
 
 REGISTRY = "tools/trusted_base_parsers.txt"
 REASONS = "tools/trusted_base_reasons.txt"
@@ -174,7 +180,9 @@ def broker_dir(tree):
 
 
 def read_list(tree, rel):
-    """A list file's text, line ends untranslated (read_text() turns "\r" into "\n"); None when absent."""
+    """A list file's text, line ends untranslated (read_text() turns "\r" into "\n"); None when absent. A list
+    tools/record_merge.py's CLASSES declares in no class fails closed, present or not (#6441)."""
+    record_merge.listed(rel)
     path = tree_file(tree, rel)
     return None if path is None else path.read_bytes().decode("utf-8", "replace")
 
