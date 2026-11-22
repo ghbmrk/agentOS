@@ -1094,7 +1094,7 @@ def env_chain_refusal(boot, p, uid=0):
     return None
 
 
-def env_path_refusal(boot, value, tmpfiles, mounts, uid=0, made=()):
+def env_path_refusal(boot, value, tmpfiles, mounts, uid=0, made=(), links=None):
     """Why the EnvironmentFile= VALUE (its leading - dropped) may load a file other than root wrote, or
     None. It is absolute and normal and holds no ENV_MAGIC byte; it is under one of ENV_TREES; no mount
     point (MOUNTS) covers it; env_chain_refusal finds its chain root's alone; no path PID 1 may make for a
@@ -1112,7 +1112,7 @@ def env_path_refusal(boot, value, tmpfiles, mounts, uid=0, made=()):
     m = covering(p, mounts)
     if m:
         return "%s is a mount point on its way, whose file system the lint does not see" % m
-    why = env_chain_refusal(boot, p, uid) or env_made_refusal(p, made)
+    why = env_chain_refusal(boot, p, uid) or env_made_refusal(p, made, boot, links)
     if why:
         return why
     for f, line, q in tmpfiles:
@@ -1144,6 +1144,21 @@ def tmpfiles_way_lines(boot, packaged, usr_view=None):
     return out
 
 
+def tmpfiles_l_targets(boot, usr_view=None):
+    """{path: target} for each tmpfiles.d L line at boot, ours or a package's, its target as systemd-tmpfiles
+    makes it: relative to the line's directory, or /usr/share/factory/<path> for "" or "-" (made_forms)."""
+    out = {}
+    for _, line in tmpfiles_lines(boot, usr_view):
+        read = tmpfiles_words(line)
+        if not read or len(read[0]) < 2 or not read[0][0].startswith("L"):
+            continue
+        path = tmpfiles_simplified(read[0][1])
+        arg = ((tmpfiles_words(read[1], 1) or [[]])[0] or [read[1]])[0] if read[1] else ""
+        t = "/usr/share/factory" + path if arg in ("", "-") else os.path.join(os.path.dirname(path), arg)
+        out[path] = tmpfiles_simplified(t)
+    return out
+
+
 def tmpfiles_simplified(q):
     """Q as systemd-tmpfiles takes it before it acts (path_simplify): runs of / collapsed, . steps and a
     trailing / dropped (#6506 L3 7076358038 item 2: z /etc//agentos, /etc/./agentos, //etc/agentos and
@@ -1164,7 +1179,9 @@ def tmpfiles_simplified(q):
 PID1_UNREAD = None  # in pid1_made: a value the lint would have to decode, so any path
 # Settings whose paths PID 1 only reads, opens (OpenFile= has no O_CREAT), chdirs to or passes on, beyond mkosi.finalize's PID1_READS, which
 # is kept narrow for its own rules: PID 1 never makes a host path for them (systemd 257 exec_child, chdir).
-PID1_MAKES_NONE = ("WorkingDirectory", "Environment", "UnsetEnvironment", "PassEnvironment", "OpenFile")
+PID1_MAKES_NONE = ("WorkingDirectory", "Environment", "UnsetEnvironment", "PassEnvironment", "OpenFile",
+                   # names only (#6506 L3 7076852851): a socket's or path's unit, a service's sockets, aliases
+                   "Service", "Unit", "Sockets", "Alias", "DefaultInstance", "FileDescriptorName")
 
 
 def pid1_made(units):
@@ -1206,22 +1223,100 @@ def pid1_made(units):
                         or key in ("PathExists", "PathExistsGlob")
                         or key in FINALIZE.PATH_WATCHES and not make_dir):
                     continue
-                words = None
-                if not (any(not " " <= c <= "~" and c != "\t" or c in "\"'\\" for c in v)
-                        or "%" in v.replace("%%", "")):
-                    words = FINALIZE.path_words(v)
-                if words is None:
+                if any(not " " <= c <= "~" and c != "\t" or c in "\"'\\" for c in v):
                     out.append((PID1_UNREAD, why))
                     continue
-                out += [(tmpfiles_simplified(w), why) for w in words]
+                if "%" not in v.replace("%%", ""):
+                    words = FINALIZE.path_words(v)
+                    if words is None:
+                        out.append((PID1_UNREAD, why))
+                    else:
+                        out += [(tmpfiles_simplified(w), why) for w in words]
+                    continue
+                out += [(m, why) for m in specifier_paths(v)]
     return out
 
 
-def env_made_refusal(p, made):
+# #6506 L3 7076852851: the path-valued specifiers systemd 257 expands in a unit setting, each as every value
+# either manager gives it (the system manager's and root's user manager's, as ENV trees are read for both).
+# %y and %Y (the unit file and its directory) and an unknown letter are not expanded: a word opening with
+# one is unread. Every other specifier names a value that is not a path (a unit, instance, host or id).
+PID1_PATH_SPECIFIERS = {"h": ("/root",), "t": ("/run", "/run/user/0"), "S": ("/var/lib", "/root/.local/state"),
+                        "C": ("/var/cache", "/root/.cache"), "L": ("/var/log", "/root/.local/state/log"),
+                        "E": ("/etc", "/root/.config"), "T": ("/tmp",), "V": ("/var/tmp",),
+                        "d": ("/run/credentials",)}
+PID1_NAME_SPECIFIERS = "abBgGHiIjJlmMnNopPqRsuUvwW"
+
+
+def specifier_paths(v):
+    """The paths PID 1 may make for setting value V that holds a specifier, as PREFIX made paths: each word
+    (split at blanks, ':', '=' and ',', past any -+!@ prefix) that opens with '/' or a path specifier, the
+    specifier as each of its PID1_PATH_SPECIFIERS values, cut at the next specifier and marked a prefix
+    (PrefixPath), so it names every path its fixed part begins, as a tmpfiles.d path with a specifier is read.
+    A word opening with a name specifier names no path (a relative one is no path PID 1 makes); a word
+    opening with another specifier, or relative but holding a '/', gives PID1_UNREAD."""
+    out = []
+    for w in re.split(r"[\s:=,]+", v.replace("%%", "\0")):
+        w = w.lstrip("-+!@")
+        if not w or "/" not in w and "%" not in w:
+            continue
+        bases = [""]
+        if w.startswith("%"):
+            c = w[1:2]
+            if c in PID1_PATH_SPECIFIERS:
+                bases, w = PID1_PATH_SPECIFIERS[c], w[2:]
+            elif c in PID1_NAME_SPECIFIERS:
+                continue
+            else:
+                out.append(PID1_UNREAD)
+                continue
+        elif not w.startswith("/"):
+            out.append(PID1_UNREAD)
+            continue
+        for b in bases:
+            q = (b + w).replace("\0", "%")
+            cut = q.split("%")[0] if "%" in (b + w) else None
+            out.append(PrefixPath(cut) if cut is not None else tmpfiles_simplified(q))
+    return out
+
+
+class PrefixPath(str):
+    """A made path read as the string its fixed part begins (specifier_paths)."""
+
+
+def made_forms(boot, m, links):
+    """Every path made path M may reach at boot, M included: PID 1 follows links on its way when it makes a
+    path's directories (mkdirat_parents_internal; #6506 Security 7076878035: /var/lib/e -> /etc made
+    ListenStream=/var/lib/e/agentos/s.sock make /etc/agentos), so M is resolved through the tree's links
+    (BOOT) and the links tmpfiles.d L lines make (LINKS, {path: target}), each step kept. A PrefixPath's last,
+    cut component stays as written past its resolved directory. More than 40 steps fail the run."""
+    prefix = isinstance(m, PrefixPath)
+    head, tail = (m.rsplit("/", 1) if prefix else (m, None))
+    forms, todo = set(), [head or "/"]
+    while todo:
+        q = todo.pop()
+        if q in forms:
+            continue
+        forms.add(q)
+        if len(forms) > 40:
+            raise SystemExit("unit rules: %s: more than 40 links on the way of a path PID 1 may make; shorten "
+                             "the chain (#6506)" % m)
+        todo.append(boot.resolve(q)[0])
+        for k, t in links.items():
+            if q == k or q.startswith(k.rstrip("/") + "/"):
+                todo.append(tmpfiles_simplified(t + q[len(k):]))
+    if prefix:
+        return [PrefixPath(f.rstrip("/") + "/" + tail) for f in forms]
+    return sorted(forms)
+
+
+def env_made_refusal(p, made, boot=None, links=None):
     """Why a path PID 1 may make (MADE, pid1_made) reaches env path P in a writable ENV_TREES tree, or None:
-    one at or above P, or at or under P's tree (mkdir_p_label makes a path's missing parents with its mode,
-    so a path below /etc/agentos may make /etc/agentos), or a value the lint does not read. /usr is the
-    read-only verity image, where PID 1 makes nothing, so no path counts there."""
+    one that, in any form it reaches at boot (made_forms, with BOOT and LINKS), is at or above P, or at or
+    under P's tree (mkdir_p_label makes a path's missing parents with its mode, so a path below /etc/agentos
+    may make /etc/agentos), or a value the lint does not read. A PrefixPath counts by string: it reaches P
+    when P's tree begins with it or it begins with P's tree (P begins with its tree, so this covers P). /usr is the read-only verity image,
+    where PID 1 makes nothing, so no path counts there."""
     top = next(t for t in ENV_TREES if p.startswith(t + "/"))
     if top in ENV_READ_ONLY:
         return None
@@ -1229,8 +1324,14 @@ def env_made_refusal(p, made):
         if m is PID1_UNREAD:
             return ("%s holds a path PID 1 may make that the lint does not read (a specifier, quote, escape or "
                     "relative path), which may be on its way" % why)
-        if p == m or p.startswith(m.rstrip("/") + "/") or m == top or m.startswith(top + "/"):
-            return "%s names %s, a directory PID 1 may make on its way when it starts the unit" % (why, m)
+        for f in (made_forms(boot, m, links or {}) if boot is not None else [m]):
+            if isinstance(f, PrefixPath):
+                hit = top.startswith(f) or f.startswith(top + "/")  # P begins with top
+            else:
+                hit = p == f or p.startswith(f.rstrip("/") + "/") or f == top or f.startswith(top + "/")
+            if hit:
+                return ("%s names %s%s, a directory PID 1 may make on its way when it starts the unit"
+                        % (why, m, "" if f == m else " (reaching %s through a link)" % f))
     return None
 
 
@@ -1246,12 +1347,13 @@ def env_files(view, units, packaged=lambda p: True, usr_view=None, uid=0):
     lines = tmpfiles_way_lines(boot, packaged, usr_view)
     mounts = mount_points(view)
     made = pid1_made(units)
+    links = tmpfiles_l_targets(boot, usr_view)
     for u in units:
         for f in u["files"]:
             for v in env_values(f):
                 if v == "":
                     continue  # an empty value resets the list and names no file
-                why = env_path_refusal(boot, v, lines, mounts, uid, made)
+                why = env_path_refusal(boot, v, lines, mounts, uid, made, links)
                 if why:
                     step = ("name an env file under %s, a fixed path" % " or ".join(ENV_TREES) if f["ours"] else
                             "the unit is a package's, so mask it (a link to /dev/null of its name in "
