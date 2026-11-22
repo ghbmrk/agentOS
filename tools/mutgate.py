@@ -1002,17 +1002,45 @@ def _go_files(pkg, commit):
     return out
 
 
+# The go.mod whose toolchain line pins Go, read where mutgate lives (tests move BROKER, not the pin).
+GO_MOD_PIN = BROKER / "go.mod"
+
+
+@functools.cache
+def gofmt():
+    """The path of the toolchain's own gofmt: GOROOT/bin/gofmt of the Go that broker/go.mod selects, whose
+    build info names go.mod's toolchain version. Raises instead, never taking gofmt from PATH: another
+    gofmt's layout can read a reformat as a move or hide one (#6442)."""
+    pin = re.search(r"^toolchain\s+(go\S+)\s*$", GO_MOD_PIN.read_text(), re.M)
+    if not pin:
+        raise RuntimeError(f"mutgate: {GO_MOD_PIN} names no toolchain, so no gofmt is pinned")
+    run = lambda *a: subprocess.run(["go", *a], cwd=GO_MOD_PIN.parent, capture_output=True, text=True,
+                                    env={**os.environ, "GOWORK": "off"})
+    try:
+        r = run("env", "GOROOT")
+        binary = pathlib.Path(r.stdout.strip()) / "bin" / "gofmt"
+        if r.returncode or not r.stdout.strip() or not binary.is_absolute() or not binary.is_file():
+            raise RuntimeError(f"mutgate: no gofmt in the toolchain's GOROOT ({r.stdout.strip()!r}): {r.stderr.strip()[:300]}")
+        v = run("version", str(binary))
+    except OSError as e:
+        raise RuntimeError(f"mutgate: cannot run go to find the toolchain's gofmt: {e}") from e
+    if v.returncode or v.stdout.strip() != f"{binary}: {pin[1]}":
+        raise RuntimeError(f"mutgate: {binary} is not {pin[1]}'s gofmt: {(v.stdout + v.stderr).strip()[:300]}")
+    return str(binary)
+
+
 def _unformatted(files):
-    """The paths of {path: text} that gofmt would change, every one when gofmt fails or is missing: what
+    """The paths of {path: text} that the pinned gofmt would change, every one when it fails on them: what
     moved() reads assumes gofmt's layout (`func TestB (t` hides a test from RUNNABLE; Security on #6378)."""
+    binary = gofmt()
     with tempfile.TemporaryDirectory() as d:
         names = {p.rsplit("/", 1)[-1]: p for p in files}
         for name, p in names.items():
             (pathlib.Path(d) / name).write_text(files[p])
         try:
-            r = subprocess.run(["gofmt", "-l", "."], cwd=d, capture_output=True, text=True)
-        except OSError:
-            return set(files)
+            r = subprocess.run([binary, "-l", "."], cwd=d, capture_output=True, text=True)
+        except OSError as e:
+            raise RuntimeError(f"mutgate: cannot run the toolchain's gofmt {binary}: {e}") from e
         if r.returncode or r.stderr.strip():
             return set(files)
         return {names.get(n.strip().removeprefix("./"), n) for n in r.stdout.split("\n") if n.strip()}
@@ -2676,8 +2704,11 @@ def go_cover(real, tmp, args, mem=None):
 # deletion can (#5011), and took a runner down on #6000. Gremlins v0.6.0 reads its `go test`'s exit 1
 # as KILLED (executor.go getTestFailedStatus), so a run past its cap is killed and exits 1, as
 # run_tests' memory_cap is KILLED. The toolchain's own processes (TOOLCHAIN) are not counted: a
-# mutant changes what the tests do, not how much the compiler holds.
-TOOLCHAIN = frozenset({"go", "compile", "link", "asm", "cgo", "vet", "cover"})
+# mutant changes what the tests do, not how much the compiler holds. The `go` driver is counted
+# (MUT-gremlins-memcap-go, #6507): given a package, `go test` holds the test binary's whole output in
+# its own memory (cmd/go runTestActor), so a mutant that loops printing grows `go`, not the test, and
+# passed the cap uncounted; the driver alone holds about 30 MB (broker/owner, cold or warm).
+TOOLCHAIN = frozenset({"compile", "link", "asm", "cgo", "vet", "cover"})
 
 
 def go_capped(real, mem, args):

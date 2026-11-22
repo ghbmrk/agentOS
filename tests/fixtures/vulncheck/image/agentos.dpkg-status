@@ -42,5 +42,6 @@ Installed-Size: 1
 Maintainer: agentOS control <control@example.invalid>
 Architecture: all
 Version: 2.0-1
+Built-Using: agentos-undeclared (= 1.0-1)
 Description: planted package whose advisory Debian has not fixed
  tools/vulncheck.py control: a record may accept it.
