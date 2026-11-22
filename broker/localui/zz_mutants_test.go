@@ -19,7 +19,8 @@ import (
 // REQ: ONB-3, CRED-8, CH-7, NET-2
 
 // codeErrs is the rig's hooks with EnrollCode and ConfirmCode answering
-// the given errors.
+// the given errors; EnrollCode's error comes with a good link, which the
+// page must not show.
 type codeErrs struct {
 	*fakeHooks
 	enroll, confirm error
@@ -27,7 +28,8 @@ type codeErrs struct {
 
 func (c *codeErrs) EnrollCode() (string, error) {
 	if c.enroll != nil {
-		return "", c.enroll
+		link, _ := c.fakeHooks.EnrollCode()
+		return link, c.enroll
 	}
 	return c.fakeHooks.EnrollCode()
 }
@@ -113,7 +115,8 @@ func TestTheCodesPageNamesWhyNoKeyWasMade(t *testing.T) {
 	r.hooks.mu.Unlock()
 	code := regexp.MustCompile(`PAIR%20([A-Z2-9]{8})`).FindStringSubmatch(html.UnescapeString(r.get("/setup")))[1]
 	r.srv.OfferText(ownerNum, "PAIR "+code)
-	if w := r.do("GET", "/setup", nil); w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "Setup could not start this step.") {
+	if w := r.do("GET", "/setup", nil); w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "Setup could not start this step.") ||
+		strings.Contains(w.Body.String(), "<html") {
 		t.Fatalf("an enroll failure: %d %s", w.Code, w.Body.String())
 	}
 }
