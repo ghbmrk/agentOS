@@ -1458,9 +1458,20 @@ def covering(waived, mutants):
 # (the statement, the code after it that a proof cites, a twin of it) needs the proof read again,
 # while lines moved outside it keep it (Security on #5780). The record is the PR's
 # text, read as data: a new or changed entry shows as such in the summary, for review.
+# A proof that rests on code outside its own declaration names that code in optionally deps
+# (MUT-record-deps, #6282): a list of {file (a non-test .go file under broker/, from the repository
+# root, any package), func (a name the top-level declaration declares, as `-decls` lists its names:
+# `Recv.Name` for a method, any name of a var, const or type group), decl (that declaration's digest,
+# as decl)}. An entry is stale, as when its own decl changed, while a dep's file is gone, declares no
+# such name or declares it twice, or holds it with another digest; so an edit to code a proof cites,
+# in any file, needs the proof read again. An entry without deps reads as before. `waive --dep` writes them.
 RECORD = "MUTANTS-EQUIVALENT"
 RECORD_KEYS = {"file", "mutant", "func", "decl", "stmt", "at", "after", "occurrence", "reason", "accepted"}
-RECORD_OPTIONAL = {"col"}
+RECORD_OPTIONAL = {"col", "deps"}
+DEP_KEYS = {"file", "func", "decl"}
+DEP_FILE = re.compile(r"broker(?:/[A-Za-z0-9_-][A-Za-z0-9_.-]*)+\.go")  # no `.`, `..` or hidden segment
+DEP_NAME = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?")
+DIGEST = re.compile(r"[0-9a-f]{64}")
 MUTANT_KIND = re.compile(r"[A-Z][A-Z_]{0,63}")
 RECORD_MAX = 1 << 20
 RECORD_FILE = re.compile(r"[A-Za-z0-9_.-]+\.go")
@@ -1476,6 +1487,26 @@ def _code(text):
     return bool(s) and not s.startswith("//")
 
 
+def _digest(lines, d):
+    """sha256 of declaration d's lines (`-decls`' start and end) of a file's lines, whitespace runs as one space."""
+    lo, hi = d["start"] - 1, min(d["end"], len(lines))
+    return hashlib.sha256("\n".join(_norm(t) for t in lines[lo:hi]).encode()).hexdigest()
+
+
+def dep_file_ok(path):
+    """Whether path can be a dep's file: a non-test .go file under broker/, named from the repository root."""
+    return isinstance(path, str) and bool(DEP_FILE.fullmatch(path)) and not path.endswith("_test.go")
+
+
+def deps_ok(deps):
+    """Whether a record entry's deps has RECORD's shape: a non-empty list of distinct {file, func, decl}."""
+    return (isinstance(deps, list) and len(deps) > 0
+            and all(isinstance(x, dict) and set(x) == DEP_KEYS and dep_file_ok(x["file"])
+                    and isinstance(x["func"], str) and DEP_NAME.fullmatch(x["func"]) is not None
+                    and isinstance(x["decl"], str) and DIGEST.fullmatch(x["decl"]) is not None for x in deps)
+            and len({(x["file"], x["func"]) for x in deps}) == len(deps))
+
+
 def statement_keys(src, sites, decls=()):
     """{line: key} for every line of one file's source src, sites being the lister's sites for that
     file and decls its top-level declarations (`-decls`, go/parser's spans, Security on #5780); a key
@@ -1483,8 +1514,7 @@ def statement_keys(src, sites, decls=()):
     lines = src.split("\n")
     funcs, decls_of = [""] * len(lines), [""] * len(lines)
     for d in decls:
-        lo, hi = d["start"] - 1, min(d["end"], len(lines))
-        digest = hashlib.sha256("\n".join(_norm(t) for t in lines[lo:hi]).encode()).hexdigest()
+        lo, hi, digest = d["start"] - 1, min(d["end"], len(lines)), _digest(lines, d)
         funcs[lo:hi] = [d["name"]] * (hi - lo)
         decls_of[lo:hi] = [digest] * (hi - lo)
     owner = {}
@@ -1528,7 +1558,8 @@ def record_entries(text):
               and isinstance(e["occurrence"], list) and len(e["occurrence"]) == 2
               and all(type(x) is int for x in e["occurrence"]) and 1 <= e["occurrence"][0] <= e["occurrence"][1]
               and isinstance(e["reason"], str) and re.search(r"[A-Za-z]{2}", e["reason"])
-              and isinstance(e["accepted"], str) and re.fullmatch(r"#[1-9]\d*", e["accepted"]))
+              and isinstance(e["accepted"], str) and re.fullmatch(r"#[1-9]\d*", e["accepted"])
+              and ("deps" not in e or deps_ok(e["deps"])))
         if not ok:
             return None, (f"line {i} is not an entry of {sorted(RECORD_KEYS)} (and optionally "
                           f"{sorted(RECORD_OPTIONAL)}) as tools/mutgate.py's RECORD says")
@@ -1563,6 +1594,48 @@ def file_keys(pkg, names, lister, pkg_dir=None):
             for p in files}, None
 
 
+def list_dep_decls(paths, lister):
+    """({path: [(names, digest)] of its top-level declarations, or None when it is no regular file}, None) for each
+    dep file path (see RECORD) at the working tree, listed by lister (`-decls`, one run per directory), or (None,
+    problem). The lister is Go's own parser, so a file it cannot parse is a problem, not an empty file."""
+    out, by_dir = {}, collections.defaultdict(list)
+    for p in sorted(set(paths)):
+        parts = pathlib.PurePosixPath(p).parts[1:]
+        if any(BROKER.joinpath(*parts[:i + 1]).is_symlink() for i in range(len(parts))):
+            return None, f"{p}, which a record entry's deps name, is or is under a symbolic link, which mutgate does not follow"
+        if not BROKER.joinpath(*parts).is_file():
+            out[p] = None
+            continue
+        by_dir[BROKER.joinpath(*parts[:-1])].append(p)
+    for d, ps in sorted(by_dir.items()):
+        files = [d / pathlib.PurePosixPath(p).name for p in ps]
+        r = subprocess.run([str(lister), "-decls", *map(str, files)], capture_output=True)
+        if r.returncode != 0:
+            return None, f"cannot list the declarations of {', '.join(ps)}: {r.stderr.decode(errors='replace')}"
+        rows = collections.defaultdict(list)
+        for s in json.loads(r.stdout):
+            rows[s["file"]].append(s)
+        for p, f in zip(ps, files):
+            lines = f.read_bytes().decode("utf-8", "replace").split("\n")
+            out[p] = [(s.get("names") or [s["name"]], _digest(lines, s)) for s in rows[f.name]]
+    return out, None
+
+
+def stale_deps(e, decls):
+    """[(dep, why)] for each of entry e's deps that no longer holds at decls (list_dep_decls')."""
+    out = []
+    for x in e.get("deps", ()):
+        have = decls.get(x["file"])
+        named = [dg for names, dg in have or () if x["func"] in names]
+        if have is None:
+            out.append((x, "is no file now"))
+        elif len(named) != 1:
+            out.append((x, f"declares {x['func']} {len(named)} times now, not once"))
+        elif named[0] != x["decl"]:
+            out.append((x, f"has changed {x['func']}"))
+    return out
+
+
 def read_record(pkg, pkg_dir=None):
     """(text or None, problem or None) of broker/<pkg>/MUTANTS-EQUIVALENT in the working tree."""
     path = (pkg_dir or BROKER / pkg) / RECORD
@@ -1575,14 +1648,19 @@ def read_record(pkg, pkg_dir=None):
     return path.read_bytes().decode("utf-8", "replace"), None
 
 
-def resolve_record(pkg, entries, keys):
-    """({(path, line, mutant, col): entry}, [problem]): each entry's line at the head, or why it names none."""
+def resolve_record(pkg, entries, keys, decls=None):
+    """({(path, line, mutant, col): entry}, [problem]): each entry's line at the head, or why it names none; decls
+    is list_dep_decls' for the entries' deps (an entry whose dep file it lacks is stale)."""
     found, problems = {}, []
     for e in entries:
         lines = sorted(n for n, k in keys.get(e["file"], {}).items() if k == _entry_key(e))
         i, n = e["occurrence"]
         where = f"broker/{pkg}/{RECORD}: the entry for {e['file']} {e['func'] or '(top level)'} {e['stmt'][e['at']]!r}"
-        if not lines:
+        if stale := stale_deps(e, decls or {}):
+            problems.append(f"{where} rests on " + "; ".join(f"{x['func']} in {x['file']}, which {why}" for x, why in stale)
+                            + ": delete its line from the record, read the proof again, and if it holds add it back with "
+                            "`mutgate.py waive --dep` naming what it rests on now")
+        elif not lines:
             problems.append(f"{where} names no statement at the head: the statement or the func around it "
                             "changed; delete its line from the record, read the proof again, and if it holds add it "
                             "back with `mutgate.py waive` at its current line")
@@ -1615,10 +1693,12 @@ def record_waivers(pkgs, lister, base=None, head="HEAD"):
             problems.append(f"broker/{pkg}/{RECORD}: {problem}")
             continue
         keys, problem = file_keys(pkg, [e["file"] for e in entries], lister)
+        if not problem:
+            decls, problem = list_dep_decls([x["file"] for e in entries for x in e.get("deps", ())], lister)
         if problem:
             problems.append(problem)
             continue
-        found, bad = resolve_record(pkg, entries, keys)
+        found, bad = resolve_record(pkg, entries, keys, decls)
         problems += bad + [refused_entry(pkg, e) for e in entries if NOT_EQUIVALENT.search(e["reason"])]
         # An entry whose reason says not equivalent is no proof (#5909): it waives nothing and fails.
         found = {site: e for site, e in found.items() if not NOT_EQUIVALENT.search(e["reason"])}
@@ -1637,15 +1717,15 @@ def refused_entry(pkg, e):
             "line, or reword it only if the mutant is in fact equivalent")
 
 
-def record_entry(pkg, fname, line, reason, accepted, keys, mutant=None, col=None):
+def record_entry(pkg, fname, line, reason, accepted, keys, mutant=None, col=None, deps=None):
     """The record entry for mutant (default: a statement deletion) at broker/<pkg>/<fname>:<line> (at
-    column col, when given) at the working tree, keys being file_keys'."""
+    column col, when given) at the working tree, keys being file_keys', resting on deps (see RECORD) when given."""
     mutant = mutant or DELETION
     k = keys[fname][line]
     same = sorted(n for n, o in keys[fname].items() if o == k)
     return {"file": fname, "mutant": mutant, "func": k[0], "decl": k[1], "stmt": list(k[2]), "at": k[3], "after": k[4],
             "occurrence": [same.index(line) + 1, len(same)], "reason": reason, "accepted": accepted,
-            **({"col": col} if col else {})}
+            **({"col": col} if col else {}), **({"deps": deps} if deps else {})}
 
 
 def cmd_waive(args):
@@ -1669,6 +1749,18 @@ def cmd_waive(args):
     with tempfile.TemporaryDirectory() as tmp:
         if (lister := build_lister(tmp)) is None:
             return 1
+        named, deps = sorted(set(args.dep or ())), []
+        decls, problem = list_dep_decls([f for f, _ in named], lister)
+        if problem:
+            print(f"mutgate: {problem}", file=sys.stderr)
+            return 1
+        for f, name in named:
+            # A dep is one declaration the proof cites, so a name declared twice (or not at all) names none.
+            if len(got := [dg for names, dg in decls[f] or () if name in names]) != 1:
+                print(f"mutgate: --dep {f}:{name}: {f} " + ("is no file" if decls[f] is None else
+                      f"declares {name} {len(got)} times, not once"), file=sys.stderr)
+                return 1
+            deps.append({"file": f, "func": name, "decl": got[0]})
         for pkg, sites in sorted(by_pkg.items()):
             keys, problem = file_keys(pkg, [f for f, *_ in sites], lister)
             missing = [f"broker/{pkg}/{f}:{n}" for f, n, *_ in sites if n not in (keys or {}).get(f, {})]
@@ -1680,6 +1772,8 @@ def cmd_waive(args):
                 return 1
             text, problem = read_record(pkg)
             entries, bad = record_entries(text or "")
+            if not problem and not bad:
+                decls, problem = list_dep_decls([x["file"] for e in entries for x in e.get("deps", ())], lister)
             if problem or bad:
                 print(f"mutgate: {problem or bad}", file=sys.stderr)
                 return 1
@@ -1688,7 +1782,7 @@ def cmd_waive(args):
                 for r in refused:
                     print(f"mutgate: {r}, then run waive again", file=sys.stderr)
                 return 1
-            new = [record_entry(pkg, f, n, reason, args.accepted, keys, kind, col) for f, n, reason, kind, col in sites]
+            new = [record_entry(pkg, f, n, reason, args.accepted, keys, kind, col, deps) for f, n, reason, kind, col in sites]
             # Every line of a parsed declaration has its digest; a line outside any has nothing to prove.
             if nodigest := [f"broker/{pkg}/{e['file']}: {e['stmt'][e['at']]!r}" for e in new if not e["decl"]]:
                 print(f"mutgate: {', '.join(nodigest)} is in no top-level declaration, so no entry can key on one",
@@ -1696,7 +1790,7 @@ def cmd_waive(args):
                 return 1
             # waive never guesses which stale entry a new one rewrites (L3 and UX on #5780): while a file it
             # writes holds one, it writes nothing and names each, for the builder to delete by hand.
-            if stale := [e for e in entries if e["file"] in keys and resolve_record(pkg, [e], keys)[1]]:
+            if stale := [e for e in entries if e["file"] in keys and resolve_record(pkg, [e], keys, decls)[1]]:
                 for e in stale:
                     print(f"mutgate: broker/{pkg}/{RECORD} holds a stale entry for {e['file']} {e['func'] or '(top level)'} "
                           f"{e['stmt'][e['at']]!r} ({e['mutant']}, occurrence {e['occurrence'][0]} of "
@@ -3579,6 +3673,15 @@ def commit_sha(v):
     return v
 
 
+def dep_ref(v):
+    """argparse type of --dep: (file, name), file a dep file (see RECORD) and name one its declaration declares."""
+    f, _, name = v.rpartition(":")
+    if not dep_file_ok(f) or not DEP_NAME.fullmatch(name):
+        raise argparse.ArgumentTypeError(f"{v!r} is not broker/<pkg>/<file>.go:<name>, a non-test .go file and a "
+                                         "name its top-level declaration declares (`Recv.Name` for a method)")
+    return f, name
+
+
 def pr_ref(v):
     if not re.fullmatch(r"#[1-9]\d*", v):
         raise argparse.ArgumentTypeError("give the PR as #<number>")
@@ -3622,6 +3725,9 @@ def main(argv=None):
     p.add_argument("--mutant", type=mutant_kind,
                    help=f"the one mutant kind the proofs are for, where a line names none (default {DELETION}; "
                         "or a gremlins type)")
+    p.add_argument("--dep", action="append", type=dep_ref, metavar="broker/PKG/FILE.go:NAME",
+                   help="a top-level declaration every one of these proofs rests on, outside its own (repeatable): "
+                        "the entries go stale when it changes (see RECORD's deps)")
     p = sub.add_parser("records")
     p.add_argument("pkg", nargs="*")
     for name in ("gate", "verify"):

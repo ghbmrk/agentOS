@@ -4408,6 +4408,156 @@ class Record(unittest.TestCase):
 
 
 
+class RecordDeps(unittest.TestCase):
+    """MUT-record-deps (#6282): an entry names the declarations its proof rests on, in any file under broker/,
+    and goes stale when one of them changes, moves or goes."""
+    # REQ: MUT-record-deps
+
+    SRC = Record.SRC
+    DEP = ("package netguard\n\n// g is what the proof of f's line 8 cites.\nfunc g() int {\n\treturn 1\n}\n\n"
+           "func unrelated() int {\n\treturn 2\n}\n\nvar (\n\tfirst  = 1\n\tprobe = g()\n)\n")
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d)
+        self.run_ = Record().repo(self.d, self.SRC, self.SRC)
+        self.pkg = pathlib.Path(self.d) / "broker" / "netguard"
+        (self.pkg / "b.go").write_text(self.DEP)
+        self.record = self.pkg / mutgate.RECORD
+
+    def waive(self, *deps, line=8, reason="the two branches return the same value, as g always returns 1"):
+        (pathlib.Path(self.d) / "w.txt").write_text(f"Mutant-equivalent: broker/netguard/a.go:{line} {reason}\n")
+        return self.run_("waive", str(pathlib.Path(self.d) / "w.txt"), "--accepted", "#6282",
+                         *(a for dep in deps for a in ("--dep", dep)))
+
+    def records(self):
+        return self.run_("records", "netguard")
+
+    def entry(self):
+        return json.loads(next(l for l in self.record.read_text().split("\n") if l.startswith("{")))
+
+    def test_waive_writes_each_dep_with_its_digest(self):
+        r = self.waive("broker/netguard/b.go:g", "broker/netguard/b.go:probe")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        deps = self.entry()["deps"]
+        self.assertEqual([(x["file"], x["func"]) for x in deps], [("broker/netguard/b.go", "g"), ("broker/netguard/b.go", "probe")])
+        self.assertEqual(deps[0]["decl"], Record.digest("func g() int {\nreturn 1\n}"))
+        # probe is the second name of a var group: the dep is the whole group's text.
+        self.assertEqual(deps[1]["decl"], Record.digest("var (\nfirst = 1\nprobe = g()\n)"))
+        r = self.records()
+        self.assertEqual((r.returncode, r.stdout.split(" ")[0]), (0, "broker/netguard/a.go:8"), r.stderr)
+
+    def test_a_changed_moved_or_missing_dep_is_stale_and_an_unrelated_edit_is_not(self):
+        self.assertEqual(self.waive("broker/netguard/b.go:g").returncode, 0)
+        for edit, why in ((lambda: (self.pkg / "b.go").write_text(self.DEP.replace("return 1", "return 3")), "which has changed g"),
+                          (lambda: (self.pkg / "b.go").unlink(), "which is no file now"),
+                          (lambda: ((self.pkg / "b.go").write_text(self.DEP.replace("func g() int {\n\treturn 1\n}\n", "")),
+                                    (self.pkg / "c.go").write_text("package netguard\n\nfunc g() int {\n\treturn 1\n}\n")),
+                           "which declares g 0 times now, not once"),
+                          (lambda: (self.pkg / "c.go").write_text("package netguard\n\nfunc (T) g() {}\n\ntype T int\n"
+                                                                  "\nvar _ = 0\n") or (self.pkg / "b.go").write_text(
+                              self.DEP + "\nfunc init() {}\n"), None)):
+            with self.subTest(why):
+                (self.pkg / "b.go").write_text(self.DEP)
+                (self.pkg / "c.go").unlink(missing_ok=True)
+                self.assertEqual(self.records().returncode, 0)
+                edit()
+                r = self.records()
+                if why is None:  # another file's method g (T.g) and a new init are other declarations
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                    continue
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("a.go f 'if x > 1 {' rests on g in broker/netguard/b.go, " + why, r.stderr)
+                self.assertIn("`mutgate.py waive --dep`", r.stderr)
+                self.assertEqual(r.stdout, "")
+        # Another declaration, or g's doc comment (outside go/parser's span, as for an entry's own decl), is no change.
+        for unrelated in (self.DEP.replace("return 2", "return 4"), self.DEP.replace("first  = 1", "first  = 5"),
+                          self.DEP.replace("// g is", "// g, now, is"),
+                          "package netguard\n\nvar z = 0\n\n" + self.DEP.split("\n", 2)[2]):
+            with self.subTest(unrelated):
+                (self.pkg / "b.go").write_text(unrelated)
+                self.assertEqual(self.records().returncode, 0, self.records().stderr)
+
+    def test_a_name_declared_twice_is_stale(self):
+        self.assertEqual(self.waive("broker/netguard/b.go:g").returncode, 0)
+        (self.pkg / "b.go").write_text(self.DEP + "\nvar _x = 0\n")
+        self.assertEqual(self.records().returncode, 0)
+        # Go refuses a redeclared g, but the record does not rely on the compiler: two declarations name none.
+        (self.pkg / "b.go").write_text(self.DEP + "\nvar g = 2\n")
+        r = self.records()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("which declares g 2 times now, not once", r.stderr)
+
+    def test_a_dep_in_another_package_is_tracked(self):
+        other = pathlib.Path(self.d) / "broker" / "other" / "deep"
+        other.mkdir(parents=True)
+        (other / "t.go").write_text("package deep\n\ntype (\n\tRecord struct{ N int }\n\tRecipient struct{ K string }\n)\n")
+        r = self.waive("broker/other/deep/t.go:Recipient")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.records().returncode, 0)
+        (other / "t.go").write_text("package deep\n\ntype (\n\tRecord struct{ N int }\n\tRecipient struct{ K chan int }\n)\n")
+        r = self.records()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("rests on Recipient in broker/other/deep/t.go, which has changed Recipient", r.stderr)
+
+    def test_an_entry_without_deps_reads_as_before(self):
+        self.assertEqual(self.waive().returncode, 0)
+        self.assertNotIn("deps", self.entry())
+        (self.pkg / "b.go").unlink()
+        self.assertEqual(self.records().returncode, 0)
+
+    def test_waive_refuses_a_dep_it_cannot_digest(self):
+        for dep, code, said in (("broker/netguard/b.go:nothere", 1, "declares nothere 0 times, not once"),
+                                ("broker/netguard/z.go:g", 1, "broker/netguard/z.go is no file"),
+                                ("broker/netguard/b_test.go:g", 2, "is not broker/<pkg>/<file>.go:<name>"),
+                                ("broker/../tools/x.go:g", 2, "is not broker/<pkg>/<file>.go:<name>"),
+                                ("tools/x.go:g", 2, "is not broker/<pkg>/<file>.go:<name>"),
+                                ("broker/netguard/b.go:", 2, "is not broker/<pkg>/<file>.go:<name>"),
+                                ("broker/netguard/b.go:g()", 2, "is not broker/<pkg>/<file>.go:<name>")):
+            with self.subTest(dep):
+                r = self.waive(dep)
+                self.assertEqual(r.returncode, code, r.stdout + r.stderr)
+                self.assertIn(said, r.stderr)
+                self.assertFalse(self.record.exists())
+        (self.pkg / "l.go").symlink_to(self.pkg / "b.go")
+        r = self.waive("broker/netguard/l.go:g")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("symbolic link", r.stderr)
+        self.assertFalse(self.record.exists())
+
+    def test_waive_writes_nothing_while_an_entry_s_dep_is_stale(self):
+        self.assertEqual(self.waive("broker/netguard/b.go:g").returncode, 0)
+        rec = self.record.read_text()
+        (self.pkg / "b.go").write_text(self.DEP.replace("return 1", "return 3"))
+        r = self.waive("broker/netguard/b.go:g", line=11, reason="a second proof resting on g")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("holds a stale entry", r.stderr)
+        self.assertEqual(self.record.read_text(), rec)
+        # Written again at the same site, the entry takes g's new digest.
+        self.record.write_text(rec.split("\n")[0] + "\n")
+        self.assertEqual(self.waive("broker/netguard/b.go:g").returncode, 0)
+        self.assertEqual(self.records().returncode, 0)
+
+    def test_a_record_s_deps_are_checked_for_shape(self):
+        good = {"file": "a.go", "mutant": "STATEMENT_DELETION", "func": "b", "decl": "0" * 64, "stmt": ["b()"], "at": 0,
+                "after": "", "occurrence": [1, 1], "reason": "b does nothing", "accepted": "#6282"}
+        dep = {"file": "broker/kernel/edge.go", "func": "orderProbe", "decl": "1" * 64}
+        for ok in ([dep], [dep, {**dep, "func": "State.Apply"}]):
+            self.assertIsNotNone(mutgate.record_entries(json.dumps({**good, "deps": ok}))[0], ok)
+        for bad in ([], dep, [dep, dep], [{**dep, "x": 1}], [{k: v for k, v in dep.items() if k != "decl"}],
+                    [{**dep, "decl": "x"}], [{**dep, "func": ""}], [{**dep, "func": "a b"}], [{**dep, "func": 1}],
+                    [{**dep, "file": "edge.go"}], [{**dep, "file": "broker/kernel/edge_test.go"}],
+                    [{**dep, "file": "broker/../x.go"}], [{**dep, "file": "broker/.x/x.go"}], [{**dep, "file": "/broker/x.go"}],
+                    [{**dep, "file": "broker/x.txt"}], [{**dep, "file": "tools/x.go"}], [{**dep, "file": None}], ["x"], None):
+            with self.subTest(bad):
+                self.assertIsNone(mutgate.record_entries(json.dumps({**good, "deps": bad}))[0])
+        # A whole entry is stale when the dep's file is not among the listed ones (fail closed).
+        keys = {"a.go": {4: mutgate._entry_key(good)}}
+        found, problems = mutgate.resolve_record("k", [{**good, "deps": [dep]}], keys)
+        self.assertEqual(found, {})
+        self.assertIn("rests on orderProbe in broker/kernel/edge.go, which is no file now", problems[0])
+
+
 class MutantScope(unittest.TestCase):
     """MUT-waiver-mutant-scope (#5792, Security on #5774): a waiver waives the one mutant it proves, never
     every mutant of its kind on its line."""
