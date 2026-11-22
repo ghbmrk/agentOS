@@ -662,7 +662,9 @@ func TestDropInAUserNamespace(t *testing.T) {
 			err = drop(5, 5)
 		}
 		fmt.Printf("drop: %v\n", err)
-		return
+		// Exit here, as TestMain's roles do, so a -cover binary writes this
+		// child's counters into the GOCOVERDIR it inherits.
+		os.Exit(0)
 	}
 	for _, c := range []struct {
 		mode, want string
