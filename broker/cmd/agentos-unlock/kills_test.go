@@ -14,8 +14,10 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -546,5 +548,157 @@ func TestUnlockStopsAtAClerksEntryThatDoesNotRead(t *testing.T) {
 	if b, err := unlock(c, role.pins); err == nil || !strings.Contains(err.Error(), "the clerks' copy") {
 		clear(b)
 		t.Fatalf("a clerks' entry that does not read: %v", err)
+	}
+}
+
+// TestParseTakesEveryFlagAndSaysWhyNot: each optional flag is read into its
+// field, each refusal names its own rule, and a bad flag's usage goes to the
+// stderr given.
+func TestParseTakesEveryFlagAndSaysWhyNot(t *testing.T) {
+	base := func(more ...string) []string {
+		return append([]string{"-store", "/s", "-uid", "980", "-gid", "981", "-exec", "/k"}, more...)
+	}
+	c, err := parse(base("-clerk-anchors", "/a", "-log", "/l", "-checker-seed", "/c", "-recovery-request", "/r"), io.Discard)
+	if err != nil || c.clerkAnchors != "/a" || c.log != "/l" || c.checkerSeed != "/c" || c.request != "/r" {
+		t.Fatalf("parse: %+v %v", c, err)
+	}
+	for _, b := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-clerk-anchors", "/a"}, "come together"},
+		{[]string{"-log", "/l"}, "come together"},
+		{[]string{"-clerk-anchors", "a", "-log", "/l"}, "are absolute paths"},
+		{[]string{"-clerk-anchors", "/a", "-log", "l"}, "are absolute paths"},
+		{[]string{"-checker-seed", "c"}, "-checker-seed is an absolute path"},
+		{[]string{"-recovery-request", "r"}, "-recovery-request is an absolute path"},
+	} {
+		if _, err := parse(base(b.args...), io.Discard); err == nil || !strings.Contains(err.Error(), b.want) {
+			t.Errorf("parse %q: got %v, want %q", b.args, err, b.want)
+		}
+	}
+	var usage bytes.Buffer
+	if _, err := parse(base("-nosuch"), &usage); err == nil || !strings.Contains(usage.String(), "-nosuch") {
+		t.Errorf("a bad flag: %v, and its stderr says %q", err, usage.String())
+	}
+}
+
+// TestDropSaysItNeverRunsAsRoot: root's ids are refused for that reason,
+// before any id is read or changed.
+func TestDropSaysItNeverRunsAsRoot(t *testing.T) {
+	for _, ids := range [][2]int{{0, 980}, {980, 0}} {
+		if err := drop(ids[0], ids[1]); err == nil || !strings.Contains(err.Error(), "never runs as root") {
+			t.Errorf("drop to %v: %v", ids, err)
+		}
+	}
+}
+
+// TestGroupsAndCapsRefuseEachWay: a failed read, an extra group, a kept
+// capability in any of the three sets, or a status without all three is
+// refused; the bounding set and the gid itself are not.
+func TestGroupsAndCapsRefuseEachWay(t *testing.T) {
+	gone := errors.New("synthetic read failure")
+	if err := groupsIn(5, []int{5}, gone); err != gone {
+		t.Errorf("groups unread: %v", err)
+	}
+	if err := groupsIn(5, []int{5}, nil); err != nil {
+		t.Errorf("only the gid: %v", err)
+	}
+	if err := groupsIn(5, []int{5, 7}, nil); !errors.Is(err, errExtraGroup) {
+		t.Errorf("an extra group: %v", err)
+	}
+	sets := []string{"CapPrm", "CapEff", "CapAmb"}
+	status := func(kept, without string) []byte {
+		var b strings.Builder
+		b.WriteString("Name:\tagentos-unlock\nCapInh:\t0000000000000000\nCapBnd:\t000001ffffffffff\n")
+		for _, s := range sets {
+			switch s {
+			case without:
+			case kept:
+				fmt.Fprintf(&b, "%s:\t0000000002000000\n", s)
+			default:
+				fmt.Fprintf(&b, "%s:\t0000000000000000\n", s)
+			}
+		}
+		return []byte(b.String())
+	}
+	if err := capsIn(status("", ""), gone); err != gone {
+		t.Errorf("status unread: %v", err)
+	}
+	if err := capsIn(status("", ""), nil); err != nil {
+		t.Errorf("no capability: %v", err)
+	}
+	for _, s := range sets {
+		if err := capsIn(status(s, ""), nil); err == nil || !strings.Contains(err.Error(), s+" is 0000000002000000") {
+			t.Errorf("%s kept: %v", s, err)
+		}
+		if err := capsIn(status("", s), nil); err == nil || !strings.Contains(err.Error(), "cannot read my capability sets") {
+			t.Errorf("no %s line: %v", s, err)
+		}
+	}
+}
+
+// dropChild names the drop TestDropInAUserNamespace's child runs; set only
+// by that test.
+const dropChild = "AGENTOS_UNLOCK_TEST_DROP"
+
+// TestDropInAUserNamespace runs the drop in a child that is root, or that
+// keeps an ambient capability, in a user namespace of its own (a plain user
+// can make one): as root the drop starts with the groups, which a user
+// namespace's root may not set; a kept capability is refused after the ids
+// check out; ids other than the kernel's are refused; and the kernel's ids
+// with no capability leave only the groups to judge.
+func TestDropInAUserNamespace(t *testing.T) {
+	if mode := os.Getenv(dropChild); mode != "" {
+		var err error
+		switch mode {
+		case "root":
+			err = drop(1, 1)
+		case "caps":
+			err = drop(5, 5)
+		case "ids":
+			err = drop(6, 5)
+		case "plain":
+			err = drop(5, 5)
+		}
+		fmt.Printf("drop: %v\n", err)
+		return
+	}
+	for _, c := range []struct {
+		mode, want string
+		id         int
+		ambient    []uintptr
+	}{
+		{"root", "agentos-unlock: drop groups:", 0, nil},
+		{"caps", "agentos-unlock: CapPrm is 0000000002000000 after the drop, not empty", 5, []uintptr{unix.CAP_SYS_TIME}},
+		{"ids", "agentos-unlock: running as uid 5/5/5 gid 5/5/5, not the kernel's 6:5", 5, nil},
+		// The kernel's ids and no capability: only the groups are left,
+		// which the namespace shows as they are outside it.
+		{"plain", "", 5, nil},
+	} {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestDropInAUserNamespace$")
+		cmd.Env = append(os.Environ(), dropChild+"="+c.mode)
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Cloneflags:  syscall.CLONE_NEWUSER,
+			UidMappings: []syscall.SysProcIDMap{{ContainerID: c.id, HostID: os.Getuid(), Size: 1}},
+			GidMappings: []syscall.SysProcIDMap{{ContainerID: c.id, HostID: os.Getgid(), Size: 1}},
+			AmbientCaps: c.ambient,
+		}
+		if c.id != 0 {
+			cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(c.id), Gid: uint32(c.id), NoSetGroups: true}
+		}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s: the child: %v\n%s", c.mode, err, out)
+		}
+		if c.mode == "plain" {
+			if !strings.Contains(string(out), "drop: <nil>") && !strings.Contains(string(out), "drop: "+errExtraGroup.Error()+" ") {
+				t.Errorf("plain: got\n%s\nwant the groups' verdict alone", out)
+			}
+			continue
+		}
+		if !strings.Contains(string(out), "drop: "+c.want) {
+			t.Errorf("%s: got\n%s\nwant drop: %s", c.mode, out, c.want)
+		}
 	}
 }

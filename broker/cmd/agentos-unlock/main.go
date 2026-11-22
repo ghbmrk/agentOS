@@ -813,10 +813,6 @@ func drop(uid, gid int) error {
 			return errors.New("agentos-unlock: root came back after the drop")
 		}
 	}
-	gs, err := syscall.Getgroups()
-	if err != nil {
-		return err
-	}
 	ru, eu, su := getresuid()
 	rg, eg, sg := getresgid()
 	if ru != uid || eu != uid || su != uid || rg != gid || eg != gid || sg != gid {
@@ -827,6 +823,16 @@ func drop(uid, gid int) error {
 	}
 	// Last, so a test that cannot shed its own groups (below) has had
 	// every other check.
+	gs, err := syscall.Getgroups()
+	return groupsIn(gid, gs, err)
+}
+
+// groupsIn checks one read of this process's supplementary groups: nil only
+// when it read, and holds no group but gid.
+func groupsIn(gid int, gs []int, err error) error {
+	if err != nil {
+		return err
+	}
 	for _, g := range gs {
 		if g != gid {
 			return fmt.Errorf("%w %d", errExtraGroup, g)
@@ -844,7 +850,12 @@ var errExtraGroup = errors.New("agentos-unlock: still in group")
 // no-setuid-fixup securebits or ambient capabilities would otherwise carry
 // some through setresuid and the exec (#2896 L3 item 3).
 func noCaps() error {
-	b, err := os.ReadFile("/proc/self/status")
+	return capsIn(os.ReadFile("/proc/self/status"))
+}
+
+// capsIn checks one read of /proc/self/status: nil only when it read, and
+// it holds CapPrm, CapEff and CapAmb each empty.
+func capsIn(b []byte, err error) error {
 	if err != nil {
 		return err
 	}
