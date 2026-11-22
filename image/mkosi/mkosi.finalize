@@ -581,6 +581,7 @@ def _violations(root):
             + exec_allow_violations(root) + bus_daemon_violations(root) + made_allow_violations(root) + credstore_violations(root) + stray_violations(root)
             + manager_environment_violations(root)
             + cached(unit_made_dirs, root)[1] + cached(unit_made_paths, root)[2] + unit_made_refusals(root)
+            + user_unit_made_dir_violations(root)
             + inside_refusals(root) + gpt_auto_violations(root)
             + noexec_violations(root)
             + keeper_violations(root) + isolate_violations(root) + ram_kept_violations(root)
@@ -2163,6 +2164,57 @@ def unit_made_dirs(root):
             for d in got:
                 made.setdefault(d, "%s= in %s" % (key, rel))
     return made, out
+
+
+# #6474 (#6506 Security 7077682648): root's user manager's unit directories in the image (systemd 257
+# lookup_paths_init for a user manager, its persistent entries, with root's home ROOT_HOME). unit_made_dirs
+# reads only UNIT_PATHS, so a user unit's *Directory= value was read nowhere at build.
+USER_UNIT_PATHS = ("root/.config/systemd/user.control", "root/.config/systemd/user", "etc/systemd/user",
+                   "etc/xdg/systemd/user", "root/.local/share/systemd/user", "usr/local/share/systemd/user",
+                   "usr/share/systemd/user", "usr/local/lib/systemd/user", "usr/lib/systemd/user")
+
+
+def user_unit_made_dir_violations(root):
+    """#6474: one error per *Directory= value in a file under USER_UNIT_PATHS (or the regular file a link
+    there leads to) that made_dir_words does not model, as unit_made_dirs refuses it in a system unit: a
+    specifier, quote, escape, glob, '..' or leading '/' is refused, not decoded, so every user-manager-made
+    directory is a plain name under its top. A file or link the check cannot read is refused too."""
+    root, out, seen = str(root), [], set()
+    for d in USER_UNIT_PATHS:
+        for rel, st in tree_walk(root, d):
+            path = rel
+            if stat.S_ISLNK(st.st_mode):
+                if tree_readlink(root, rel) == MASK:
+                    continue
+                try:
+                    got, end = tree_chase(root, rel)
+                except OSError:
+                    got, end = None, None
+                if end is None or not stat.S_ISREG(end.st_mode):
+                    out.append("%s: a link to %s, not a file the tree holds; the tree check never passes a link "
+                               "in a user unit directory it cannot read (#6474)" % (rel, tree_readlink(root, rel)))
+                    continue
+                path = got
+            elif not stat.S_ISREG(st.st_mode):
+                continue
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                lines = config_lines(Conf(root, path).content())
+            except (OSError, Unparsable) as e:
+                out.append("%s: unreadable (%s); the tree check never passes a user unit file it cannot read (#6474)"
+                           % (rel, e.strerror if isinstance(e, OSError) else e))
+                continue
+            for _, key, v in lines:
+                if key not in UNIT_MADE_DIRS or not v:
+                    continue
+                try:
+                    made_dir_words(key, v)
+                except ValueError:
+                    out.append("%s: %s=%s: the tree check does not model it in a user unit (#6474)%s"
+                               % (path, key, v if v.isprintable() else repr(v), DIR_FIX))
+    return out
 
 
 def unit_file_lines(root):

@@ -767,8 +767,9 @@ class MountView(BootView):
         return final, links
 
 
-def boot_links(view, usr_view=None):
-    """The links a path may pass through at boot, {link: its target resolved}: the tree's and tmpfiles.d's L
+def boot_links(view, usr_view=None, every=False):
+    """The links a path may pass through at boot, {link: its target resolved} (with EVERY, every link, as
+    {link: (its target resolved, that path's file type at boot or None)}): the tree's and tmpfiles.d's L
     lines', each one that does not resolve to a file other than a directory (one an endpoint path's directory
     may pass through, a dangling one included, #5620 R-c, R-i), read at a MountView. The mount points are read
     from VIEW, not the BootView, since generators write their units under /run. Every link, one to a file
@@ -833,7 +834,7 @@ def boot_links(view, usr_view=None):
             raise SystemExit("unit rules: a link %s (%s)%s is on a loop or a chain of more than 40 links, which "
                              "the unit lint cannot follow; %s" % (k, what, to, fix))
 
-    out = {}
+    out, finals = {}, {}
     for k in sorted(set(tree_links(boot, usr_view)) | set(lines)):
         # A kept path records the tree's link, which is what is there at boot; its line's target is walked
         # too, so a refusal of either fails the run (tmpfiles_links held both to one path at the BootView).
@@ -841,8 +842,11 @@ def boot_links(view, usr_view=None):
             final = walk(k, True, lines[k][2] if k in kept else k)
         if k not in lines or k in kept:
             final = walk(k, False, k)
+        finals[k] = (final, mv.kind(final))
         if mv.kind(final) in (None, 0o040000):
             out[k] = final
+    if every:  # #6474: every link with its end and that end's kind at boot (link_refusals)
+        return finals
     tmpfiles_copies(boot, out, usr_view, mounts)
     for k, v in sorted(out.items()):
         if v not in API_TARGETS and any(v == m or v.startswith(m + "/") for m in API_MOUNTS):
@@ -1094,7 +1098,10 @@ def env_chain_refusal(boot, p, uid=0):
     return None
 
 
-def env_path_refusal(boot, value, tmpfiles, mounts, uid=0, made=(), links=None):
+OWN = "\0own:"  # env_path_refusal: a cause in the value itself, whose step is the reading unit's
+
+
+def env_path_refusal(boot, value, tmpfiles, mounts, uid=0, made=()):
     """Why the EnvironmentFile= VALUE (its leading - dropped) may load a file other than root wrote, or
     None. It is absolute and normal and holds no ENV_MAGIC byte; it is under one of ENV_TREES; no mount
     point (MOUNTS) covers it; env_chain_refusal finds its chain root's alone; no path PID 1 may make for a
@@ -1104,15 +1111,18 @@ def env_path_refusal(boot, value, tmpfiles, mounts, uid=0, made=(), links=None):
     or writes on its way at boot, whatever its type."""
     p = value[1:] if value.startswith("-") else value
     if any(c in p for c in ENV_MAGIC):
-        return "it holds a specifier, a glob (*, ? or [) or a backslash, so which file it names is not fixed"
+        return OWN + "it holds a specifier, a glob (*, ? or [) or a backslash, so which file it names is not fixed"
     if not p.startswith("/") or p.startswith("//") or os.path.normpath(p) != p:
-        return "it is not an absolute, normal path"
+        return OWN + "it is not an absolute, normal path"
     if not any(p.startswith(t + "/") for t in ENV_TREES):
-        return "it is not under %s, the trees only root writes" % " or ".join(ENV_TREES)
+        return OWN + "it is not under %s, the trees only root writes" % " or ".join(ENV_TREES)
     m = covering(p, mounts)
     if m:
-        return "%s is a mount point on its way, whose file system the lint does not see" % m
-    why = env_chain_refusal(boot, p, uid) or env_made_refusal(p, made, boot, links)
+        return "%s is a mount point on its way, whose file system the lint does not see; move the mount off it" % m
+    why = env_chain_refusal(boot, p, uid)
+    if why:
+        return why + "; make that component a root-owned directory (the file a regular file) no group or other writes"
+    why = env_made_refusal(p, made)
     if why:
         return why
     for f, line, q in tmpfiles:
@@ -1122,7 +1132,7 @@ def env_path_refusal(boot, value, tmpfiles, mounts, uid=0, made=(), links=None):
         # a fixed path names P or a directory on its way; one with a specifier or glob may name any path its
         # fixed part begins, so it is read as a string prefix, which names more, never less
         if p.startswith(cut) if cut != q else p == q or p.startswith(q.rstrip("/") + "/"):
-            return "%s: tmpfiles.d line %r names it or a directory on its way" % (f, line)
+            return "%s: tmpfiles.d line %r names it or a directory on its way; drop or move that line" % (f, line)
     return None
 
 
@@ -1141,25 +1151,6 @@ def tmpfiles_way_lines(boot, packaged, usr_view=None):
                              % (f, line))
         if read and len(read[0]) > 1:
             out.append((f, line, tmpfiles_simplified(read[0][1])))
-    return out
-
-
-def tmpfiles_l_targets(boot, usr_view=None):
-    """{path: target} for each tmpfiles.d L line at boot, ours or a package's, its target as systemd-tmpfiles
-    makes it: relative to the line's directory, or /usr/share/factory/<path> for "" or "-" (made_forms); a
-    target holding a specifier is PID1_UNREAD, a link to any path."""
-    out = {}
-    for _, line in tmpfiles_lines(boot, usr_view):
-        read = tmpfiles_words(line)
-        if not read or len(read[0]) < 2 or not read[0][0].startswith("L"):
-            continue
-        path = tmpfiles_simplified(read[0][1])
-        arg = ((tmpfiles_words(read[1], 1) or [[]])[0] or [read[1]])[0] if read[1] else ""
-        if "%" in arg:  # #6506 L3 7077264942 1(c): systemd-tmpfiles expands it (%T/../etc), so any path
-            out[path] = PID1_UNREAD
-            continue
-        t = "/usr/share/factory" + path if arg in ("", "-") else os.path.join(os.path.dirname(path), arg)
-        out[path] = tmpfiles_simplified(t)
     return out
 
 
@@ -1192,7 +1183,9 @@ def pid1_made(units):
     """[(absolute path, "<key>= in <file>")] for each path PID 1 may make for a unit in UNITS. A value the
     lint would have to decode to read (a specifier, quote, escape or byte outside printable ASCII, or a '/'
     that opens no absolute path, as mkosi.finalize's unit_made_dirs and unit_made_paths refuse) gives
-    PID1_UNREAD in place of a path: it may make any."""
+    PID1_UNREAD in place of a path: it may make any. A user unit's *Directory= is read at the system manager's top (rec["user"] is
+    not read): link_refusals holds every top alike, so a made path lands under its top, and only /etc can
+    hold a writable env tree, so reading root's ~/.config as /etc refuses more, never less."""
     out = []
     for u in units:
         files = u["files"]
@@ -1238,7 +1231,7 @@ def pid1_made(units):
                     if words is None:
                         out.append((PID1_UNREAD, why))
                     else:
-                        out += [(tmpfiles_simplified(w), why) for w in words]
+                        out += [(made_plain(w), why) for w in words]
                     continue
                 out += [(m, why) for m in specifier_paths(v)]
     return out
@@ -1263,7 +1256,7 @@ def specifier_word(q, dirs=False):
     path, where systemd refuses a .. step after expansion), if a component it is in may expand to '.' or '..'
     (its fixed bytes are all dots and it holds no hex specifier); else a PrefixPath cut at the first one."""
     q = tmpfiles_simplified(q)
-    if ".." in q.split("%", 1)[1].split("/"):  # a .. past the cut leaves the prefix
+    if ".." in q.split("/"):  # a .. leaves the prefix, before the cut through a link (made_plain) or past it
         return PID1_UNREAD
     for c in q.split("/"):
         if "%" not in c:
@@ -1303,7 +1296,7 @@ def specifier_paths(v):
             continue
         for b in bases:
             q = b + w
-            out.append(specifier_word(q) if "%" in q else tmpfiles_simplified(q.replace("\0", "%")))
+            out.append(specifier_word(q) if "%" in q else made_plain(q.replace("\0", "%")))
     return out
 
 
@@ -1317,98 +1310,92 @@ def specifier_dirs(top, v):
             if not part or part.startswith("/") or ".." in part.split("/"):
                 continue
             q = "/%s/%s" % (top, part)
-            out.append(specifier_word(q, dirs=True) if "%" in q else tmpfiles_simplified(q.replace("\0", "%")))
+            out.append(specifier_word(q, dirs=True) if "%" in q else made_plain(q.replace("\0", "%")))
     return out
+
+
+def made_plain(q):
+    """Absolute path Q, with no specifier, as a made path: simplified (tmpfiles_simplified), or PID1_UNREAD
+    if a .. step is left. Paths are compared as strings (env_made_refusal), and PID 1 takes .. after the
+    link before it (/var/run/../etc is /etc), so a .. is refused, not read lexically."""
+    q = tmpfiles_simplified(q)
+    return PID1_UNREAD if ".." in q.split("/") else q
 
 
 class PrefixPath(str):
     """A made path read as the string its fixed part begins (specifier_paths)."""
 
 
-def tree_links_under(boot, f, links):
-    """The first link, a tree link or a tmpfiles.d L line's path, whose path begins with string F, or None:
-    a specifier at F's end may name any entry its tail begins, and so any link at or below one."""
-    for k in links:
-        if k.startswith(f):
-            return k
-    head, tail = f.rsplit("/", 1)
-    todo = [os.path.join(head or "/", n) for n in boot._list(head or "/") if n.startswith(tail)]
-    seen = 0
-    while todo:
-        q = todo.pop()
-        seen += 1
-        if seen > 100000:
-            raise SystemExit("unit rules: %s: more than 100000 entries under a made path's fixed part (#6506)" % f)
-        st = boot._lstat(q)
-        if st is None:
-            continue
-        kind = st.st_mode & 0o170000
-        if kind == 0o120000:
-            return q
-        if kind == 0o040000:
-            todo += [os.path.join(q, n) for n in boot._list(q)]
-    return None
-
-
-def made_forms(boot, m, links):
-    """Every path made path M may reach at boot, M included: PID 1 follows links on its way when it makes a
-    path's directories (mkdirat_parents_internal; #6506 Security 7076878035: /var/lib/e -> /etc made
-    ListenStream=/var/lib/e/agentos/s.sock make /etc/agentos), so M is resolved through the tree's links
-    (BOOT) and the links tmpfiles.d L lines make (LINKS, {path: target}), each step kept. A PrefixPath's
-    resolved directory is joined to its cut tail; a link whose path begins with a resolved prefix (the
-    specifier may name it, Security 7077245541, L3 7077264942 1(b)), or an L line with an unread target on
-    the way, gives [PID1_UNREAD]: refused, not modelled. More than 40 steps fail the run."""
-    prefix = isinstance(m, PrefixPath)
-    head, tail = (m.rsplit("/", 1) if prefix else (m, None))
-    forms, todo = set(), [head or "/"]
-    while todo:
-        q = todo.pop()
-        if q in forms:
-            continue
-        forms.add(q)
-        if len(forms) > 40:
-            raise SystemExit("unit rules: %s: more than 40 links on the way of a path PID 1 may make; shorten "
-                             "the chain (#6506)" % m)
-        todo.append(boot.resolve(q)[0])
-        for k, t in links.items():
-            if q == k or q.startswith(k.rstrip("/") + "/"):
-                if t is PID1_UNREAD:
-                    return [PID1_UNREAD]
-                todo.append(tmpfiles_simplified(t + q[len(k):]))
-    if not prefix:
-        return sorted(forms)
-    out = [PrefixPath(f.rstrip("/") + "/" + tail) for f in forms]
-    if any(tree_links_under(boot, f, links) for f in out):
-        return [PID1_UNREAD]
-    return out
-
-
-def env_made_refusal(p, made, boot=None, links=None):
+def env_made_refusal(p, made):
     """Why a path PID 1 may make (MADE, pid1_made) reaches env path P in a writable ENV_TREES tree, or None:
-    one that, in any form it reaches at boot (made_forms, with BOOT and LINKS), is at or above P, or at or
-    under P's tree (mkdir_p_label makes a path's missing parents with its mode, so a path below /etc/agentos
-    may make /etc/agentos), or a value the lint does not read. A PrefixPath counts by string: it reaches P
-    when P's tree begins with it or it begins with P's tree (P begins with its tree, so this covers P). /usr is the read-only verity image,
-    where PID 1 makes nothing, so no path counts there."""
+    one at or above P, or at or under P's tree (mkdir_p_label makes a path's missing parents with its mode,
+    so a path below /etc/agentos may make /etc/agentos), or a value the lint does not read. Paths are
+    compared as strings: no link a made path may pass through leads anywhere but /usr or an entry of
+    LINK_ALLOW (link_refusals), so the string is where it lands. A PrefixPath counts by string: it reaches
+    P when P's tree begins with it or it begins with P's tree. /usr is the read-only verity image, where PID
+    1 makes nothing, so no path counts there."""
     top = next(t for t in ENV_TREES if p.startswith(t + "/"))
     if top in ENV_READ_ONLY:
         return None
     for m, why in made:
         if m is PID1_UNREAD:
-            return ("%s holds a path PID 1 may make that the lint does not read (a specifier, quote, escape or "
-                    "relative path), which may be on its way" % why)
-        for f in (made_forms(boot, m, links or {}) if boot is not None else [m]):
-            if f is PID1_UNREAD:
-                return ("%s names %s, which may reach a link the lint does not follow (a specifier names it, "
-                        "or a tmpfiles.d L target holds one)" % (why, m))
-            if isinstance(f, PrefixPath):
-                hit = top.startswith(f) or f.startswith(top + "/")  # P begins with top
-            else:
-                hit = p == f or p.startswith(f.rstrip("/") + "/") or f == top or f.startswith(top + "/")
-            if hit:
-                return ("%s names %s%s, a directory PID 1 may make on its way when it starts the unit"
-                        % (why, m, "" if f == m else " (reaching %s through a link)" % f))
+            return ("%s holds a path PID 1 may make that the lint does not read (a specifier, quote, escape, '..' "
+                    "or relative path), which may be on its way; write it as a plain absolute path, or drop it"
+                    % why)
+        if isinstance(m, PrefixPath):
+            hit = top.startswith(m) or m.startswith(top + "/")  # P begins with top
+        else:
+            hit = p == m or p.startswith(m.rstrip("/") + "/") or m == top or m.startswith(top + "/")
+        if hit:
+            return ("%s names %s, a directory PID 1 may make on its way when it starts the unit; remove that "
+                    "setting from that unit" % (why, m))
     return None
+
+
+# #6474 re-plan (#6506 Security 7077682648, step back): either manager makes a path for a unit through every
+# link on its way (mkdir_parents_label and setup_exec_directory follow links), and a made path may sit in any
+# writable tree (a *Directory= under either manager's tops, root's user manager's under /root and
+# /run/user/0, a socket, a mount point or a watched path anywhere), while a link in read-only /usr may lead
+# out of it. Three rounds resolved each made path through the links on its way and each missed one more
+# form. Instead every link the tree holds or a tmpfiles.d L line makes, wherever it sits, is held to one
+# rule, so a made path lands where its string says and is compared as a string (env_made_refusal): a link
+# a path may pass through (it ends at a directory or at nothing at boot), or one that ends in a writable
+# ENV_TREES tree, must end under /usr (the read-only image: PID 1 makes nothing there and every link in it
+# is held here too) or at an API_TARGETS path (boot_links already holds those), or be on LINK_ALLOW. A
+# link to another regular file is not passed through: a made directory under it fails (ENOTDIR).
+# LINK_ALLOW: {link: (where it ends at boot, why that is safe)}. Add an entry only for a link the build
+# ships, copied from the run's refusal, whose end is neither at, above nor under a writable ENV_TREES tree
+# (link_refusals checks that), and say why no non-root user decides what is at that end.
+LINK_ALLOW = {
+    "/var/run": ("/run", "trixie's base-files and legacy.conf: /run is the box's tmpfs, which holds no env "
+                 "tree, and every link under it is an L line held by this rule"),
+    "/var/lock": ("/run/lock", "trixie's legacy.conf: as /var/run; /run/lock is 1777, so a made path there is "
+                  "refused by review on made.allow (BOX_LINKS' exception)"),
+    "/etc/resolv.conf": ("/run/systemd/resolve/stub-resolv.conf", "systemd-resolve.conf: a file in resolved's "
+                         "RuntimeDirectory=, which nothing makes a path under (BOX_LINKS' exception)"),
+}
+
+
+def link_refusals(finals):
+    """One refusal per link FINALS (boot_links with every) holds against the rule above, naming the link,
+    where it ends and the step, so one run names every link a build must drop or list."""
+    writable = [t for t in ENV_TREES if t not in ENV_READ_ONLY]
+    out = []
+    for k, (final, kind) in sorted(finals.items()):
+        in_env = any(final == t or final.startswith(t + "/") for t in writable)
+        if kind not in (None, 0o040000) and not in_env:
+            continue  # a link to another file: nothing is made under it
+        if final == "/usr" or final.startswith("/usr/") or final in API_TARGETS:
+            continue
+        allowed = LINK_ALLOW.get(k)
+        if allowed and allowed[0] == final and not in_env and not any(t.startswith(final.rstrip("/") + "/")
+                                                                     for t in writable):
+            continue
+        out.append("%s, a link ending at %s: a path PID 1 makes for a unit may pass through it to a directory the "
+                   "lint does not compare; drop it (mkosi.conf RemoveFiles=, or the tmpfiles.d line), point it into "
+                   "/usr, or, if it ships and ends outside %s, add it to LINK_ALLOW with why (#6474)"
+                   % (k, final, " and ".join(writable)))
+    return out
 
 
 def env_files(view, units, packaged=lambda p: True, usr_view=None, uid=0):
@@ -1423,20 +1410,24 @@ def env_files(view, units, packaged=lambda p: True, usr_view=None, uid=0):
     lines = tmpfiles_way_lines(boot, packaged, usr_view)
     mounts = mount_points(view)
     made = pid1_made(units)
-    links = tmpfiles_l_targets(boot, usr_view)
     for u in units:
         for f in u["files"]:
             for v in env_values(f):
                 if v == "":
                     continue  # an empty value resets the list and names no file
-                why = env_path_refusal(boot, v, lines, mounts, uid, made, links)
+                why = env_path_refusal(boot, v, lines, mounts, uid, made)
                 if why:
-                    step = ("name an env file under %s, a fixed path" % " or ".join(ENV_TREES) if f["ours"] else
-                            "the unit is a package's, so mask it (a link to /dev/null of its name in "
-                            "/etc/systemd/system), replace it whole with a unit of ours of the same name, or "
-                            "drop the package")
-                    raise SystemExit("unit rules: %s: EnvironmentFile=%s: %s; %s (#6474)"
-                                     % (f.get("path", "a unit file"), v, why, step))
+                    # #6506 UX 7077742901: the step follows the cause; only a cause in the value itself is the
+                    # reading unit's to fix, so only then does a package's unit get the mask step
+                    own = why.startswith(OWN)
+                    why = why[len(OWN):] if own else why
+                    if own:
+                        why += ("; name an env file under %s, a fixed path" % " or ".join(ENV_TREES) if f["ours"] else
+                                "; the unit is a package's, so mask it (a link to /dev/null of its name in "
+                                "/etc/systemd/system), replace it whole with a unit of ours of the same name, or "
+                                "drop the package")
+                    raise SystemExit("unit rules: %s: EnvironmentFile=%s: %s (#6474)"
+                                     % (f.get("path", "a unit file"), v, why))
                 p = v[1:] if v.startswith("-") else v
                 if p in out or boot.kind(p) != 0o100000:
                     continue
@@ -1445,6 +1436,10 @@ def env_files(view, units, packaged=lambda p: True, usr_view=None, uid=0):
                     pkg.pop(p, None)
                 elif p not in pkg and not packaged(p):
                     pkg[p] = boot.text(p)
+    # after each value's own refusal, which names the unit; a made path's rests on this (env_made_refusal)
+    bad = link_refusals(boot_links(view, usr_view, every=True))
+    if bad:
+        raise SystemExit("unit rules: " + "\nunit rules: ".join(bad))
     return out, pkg
 
 

@@ -5184,6 +5184,30 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
             "var/lib/agentos-store", "var/lib/agentos/modem", "var/lib/agentos-wipe")))
 
 
+    def test_a_user_unit_directory_value_the_check_does_not_model_fails_the_build(self):
+        # #6474 (#6506 Security 7077682648): root's user manager's units are read too, quoted values included
+        for rel, text in (("usr/lib/systemd/user/m.service", '[Service]\nStateDirectory="e/agentos"\n'),
+                          ("root/.config/systemd/user/m.service", "[Service]\nCacheDirectory=x%i\n"),
+                          ("etc/systemd/user/m.service.d/x.conf", "[Service]\nConfigurationDirectory=../agentos\n"),
+                          ("usr/share/systemd/user/m.service", "[Service]\nLogsDirectory=/var/log/x\n")):
+            with self.subTest(rel=rel), tempfile.TemporaryDirectory() as t:
+                write(pathlib.Path(t), rel, text)
+                out = check.user_unit_made_dir_violations(t)
+                self.assertEqual(len(out), 1, out)
+                self.assertTrue(out[0].startswith(rel + ": "), out)
+                self.assertIn("in a user unit (#6474)", out[0])
+        with tempfile.TemporaryDirectory() as t:  # a link is read at its file, once; a mask and plain names pass
+            write(pathlib.Path(t), "usr/lib/systemd/user/m.service", "[Service]\nStateDirectory=x\nRuntimeDirectory='y'\n")
+            write(pathlib.Path(t), "usr/lib/systemd/user/ok.service", "[Service]\nStateDirectory=a/b c\n")
+            os.makedirs(os.path.join(t, "etc/systemd/user/default.target.wants"))
+            os.symlink("/usr/lib/systemd/user/m.service", os.path.join(t, "etc/systemd/user/default.target.wants/m.service"))
+            os.symlink("/dev/null", os.path.join(t, "etc/systemd/user/n.service"))
+            os.symlink("/var/tmp/gone", os.path.join(t, "etc/systemd/user/g.service"))
+            out = check.user_unit_made_dir_violations(t)
+        self.assertEqual(len(out), 2, out)
+        self.assertTrue(any(o.startswith("usr/lib/systemd/user/m.service: RuntimeDirectory='y'") for o in out), out)
+        self.assertTrue(any(o.startswith("etc/systemd/user/g.service: a link to /var/tmp/gone") for o in out), out)
+
 class ReferenceToolTest(unittest.TestCase):
     """#1531: the differential tests fail, not skip, where CI requires their reference tools."""
     # REQ: DEV-2, CH-9
@@ -8964,7 +8988,7 @@ class EveryCheckCalledTest(unittest.TestCase):
               "sysctl_byte_violations", "network_violations", "resolved_violations", "tmpfiles_violations",
               "tmpfiles_allow_violations", "exec_allow_violations", "bus_daemon_violations", "made_allow_violations",
               "credstore_violations", "stray_violations", "manager_environment_violations", "unit_made_dirs",
-              "unit_made_paths", "unit_made_refusals", "inside_refusals", "gpt_auto_violations", "noexec_violations",
+              "unit_made_paths", "unit_made_refusals", "user_unit_made_dir_violations", "inside_refusals", "gpt_auto_violations", "noexec_violations",
               "keeper_violations", "isolate_violations", "ram_kept_violations", "kexec_loader_violations",
               "kexec_sysctl_violations", "clerk_key_violations", "assembly_violations", "driver_violations",
               "e2e_violations", "package_file_violations")
