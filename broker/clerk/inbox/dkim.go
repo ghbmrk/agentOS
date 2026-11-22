@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
-	"errors"
 	"regexp"
 	"strconv"
 	"strings"
@@ -48,9 +47,6 @@ func relaxedHeader(name string, value []byte) []byte {
 // relaxedBody is RFC 6376 section 3.4.4, cut to limit bytes when limit >= 0.
 func relaxedBody(body []byte, limit int) []byte {
 	lines := bytes.Split(body, []byte("\r\n"))
-	if n := len(lines); n > 0 && len(lines[n-1]) == 0 {
-		lines = lines[:n-1]
-	}
 	for i, l := range lines {
 		lines[i] = bytes.TrimRight(wsp.ReplaceAll(l, []byte(" ")), " ")
 	}
@@ -67,9 +63,9 @@ func relaxedBody(body []byte, limit int) []byte {
 	return out
 }
 
-// sigTags parses a DKIM-Signature's tag list; a repeated tag is an error,
-// with a nil map.
-func sigTags(value []byte) (map[string]string, error) {
+// sigTags parses a DKIM-Signature's tag list, nil when a tag repeats: a nil
+// list has no v=, d= or s=, so its signature fails and names no key.
+func sigTags(value []byte) map[string]string {
 	out := map[string]string{}
 	for _, part := range strings.Split(strings.Join(strings.Fields(string(value)), ""), ";") {
 		if part == "" {
@@ -77,11 +73,11 @@ func sigTags(value []byte) (map[string]string, error) {
 		}
 		k, v, _ := strings.Cut(part, "=")
 		if _, dup := out[k]; dup {
-			return nil, errors.New("repeated tag " + k)
+			return nil
 		}
 		out[k] = v
 	}
-	return out, nil
+	return out
 }
 
 // signedHeaders picks the instances h= names, bottom-up per name. A name listed
@@ -133,10 +129,7 @@ func VerifyDKIM(raw []byte, keys map[string]string) []Sig {
 
 func verifyOne(hs []header, body, value []byte, keys map[string]string) Sig {
 	r := Sig{T: -1, X: -1}
-	t, err := sigTags(value)
-	if err != nil {
-		return r
-	}
+	t := sigTags(value)
 	r.D = strings.ToLower(t["d"])
 	for _, x := range strings.Split(t["h"], ":") {
 		if x = strings.ToLower(strings.TrimSpace(x)); x != "" {
@@ -165,10 +158,6 @@ func verifyOne(hs []header, body, value []byte, keys map[string]string) Sig {
 	if name == "" {
 		return r
 	}
-	rec, ok := keys[name]
-	if !ok {
-		return r
-	}
 	limit := -1
 	if n, err := strconv.Atoi(l); hasL && err == nil && n >= 0 {
 		limit = n
@@ -177,7 +166,8 @@ func verifyOne(hs []header, body, value []byte, keys map[string]string) Sig {
 	if base64.StdEncoding.EncodeToString(bh[:]) != t["bh"] {
 		return r
 	}
-	der, err := base64.StdEncoding.DecodeString(rec)
+	// An absent key reads as "", which parses as no key.
+	der, err := base64.StdEncoding.DecodeString(keys[name])
 	if err != nil {
 		return r
 	}
@@ -222,8 +212,7 @@ func DKIMNames(raw []byte) []string {
 		if h.key() != "dkim-signature" {
 			continue
 		}
-		t, _ := sigTags(h.value) // nil when it does not parse, which names nothing
-		if n := dkimName(t); n != "" && !contains(out, n) {
+		if n := dkimName(sigTags(h.value)); n != "" && !contains(out, n) {
 			out = append(out, n)
 		}
 	}

@@ -763,6 +763,50 @@ class KexecClassTest(unittest.TestCase):
         self.assertTrue(got[0].endswith(self.WHY), got)
 
 
+class KexecSysctlTest(unittest.TestCase):
+    """MOR-kexec-class-fu (#6345): the image sets kernel.kexec_load_disabled=1, which refuses kexec_load and
+    kexec_file_load to every process and takes no other value until the next boot, so the loader check is
+    defence in depth. kexec_sysctl_violations reads its value after every sysctl.d file, as systemd-sysctl sets
+    it. tests/test_hostcheck.py test_an_isolate_keeps_mor_set reads it, and /sys/kernel/kexec_loaded, on a boot."""
+    # REQ: HW-8
+    WHY = "must be 1, so no process loads a kernel that boots on memory the firmware never wiped (#6345)"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        nodump(self.root)
+
+    def refusal(self, v):
+        return ["99-agentos-kexec.conf: kernel.kexec_load_disabled is %s; %s" % (v, self.WHY)]
+
+    def test_the_image_sets_it_and_the_tree_check_runs_it(self):
+        self.assertEqual(check.KEXEC_SYSCTL, "usr/lib/sysctl.d/99-agentos-kexec.conf")
+        # nodump() copies the shipped file from mkosi.extra into this tree; the check reads it as the box would.
+        self.assertIn("\nkernel.kexec_load_disabled=1\n", (MK / "mkosi.extra" / check.KEXEC_SYSCTL).read_text())
+        self.assertEqual(check.sysctl(str(self.root), "kernel.kexec_load_disabled"), "1")
+        self.assertEqual(check.kexec_sysctl_violations(self.root), [])
+        (self.root / check.KEXEC_SYSCTL).unlink()
+        self.assertEqual(check.kexec_sysctl_violations(self.root), self.refusal(None))
+        self.assertIn(self.refusal(None)[0], check.violations(self.root))
+
+    def test_a_later_or_other_form_that_leaves_it_unset_or_0_is_refused(self):
+        for rel, text, v in (("usr/lib/sysctl.d/99-zz.conf", "kernel.kexec_load_disabled = 0\n", "0"),
+                             ("etc/sysctl.d/99-agentos-kexec.conf", "kernel.kexec_load_disabled=0\n", "0"),
+                             ("etc/sysctl.d/99-agentos-kexec.conf", "# kernel.kexec_load_disabled=1\n", None),
+                             ("usr/lib/sysctl.d/99-zz.conf", "kernel/kexec_load_disabled=0\n", "0"),
+                             ("usr/lib/sysctl.d/99-zz.conf", "-kernel.kexec_load_disabled\n", None),
+                             ("usr/lib/sysctl.d/99-zz.conf", "kernel.kexec_load_disabled=2\n", "2")):
+            with self.subTest(rel=rel, text=text):
+                f = write(self.root, rel, text)
+                got = check.kexec_sysctl_violations(self.root)
+                f.unlink()
+                self.assertEqual(got, self.refusal(v))
+        # An earlier file setting 0 is overridden by the image's, as systemd-sysctl applies it.
+        write(self.root, "usr/lib/sysctl.d/10-early.conf", "kernel.kexec_load_disabled=0\n")
+        self.assertEqual(check.kexec_sysctl_violations(self.root), [])
+
+
 class WipeOnTest(unittest.TestCase):
     def test_kernel_zeroes_freed_memory(self):
         args = ini(MK / "mkosi.conf")["Content"]["KernelCommandLine"].split()

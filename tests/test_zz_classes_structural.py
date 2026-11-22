@@ -132,7 +132,7 @@ class ClassesStructuralTest(unittest.TestCase):
             for name, reader in {"netguardcheck.load_allow": netguardcheck.load_allow,
                                  "srclint.load_allow": srclint.load_allow,
                                  "hostcheck.load_allow": hostcheck.load_allow,
-                                 "trusted_base.read_list": trusted_base.read_list,
+                                 "trusted_base.read_list": lambda p: trusted_base.read_list(p.parents[1], f"{p.parent.name}/{p.name}"),
                                  "risk_tier.core_list": risk_tier.core_list.__wrapped__}.items():
                 for p in (pathlib.Path(d, "tools/permit.txt"), missing):
                     with self.subTest(reader=name, file=p.name), self.assertRaises(SystemExit) as e:
