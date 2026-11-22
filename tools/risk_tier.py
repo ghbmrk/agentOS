@@ -28,9 +28,15 @@ Usage:
 """
 import argparse
 import functools
+import importlib.util
 import pathlib
 import subprocess
 import sys
+
+# By path, as premerge loads its imports: a run with `python3 -I` keeps tools/ off sys.path.
+_rm = importlib.util.spec_from_file_location("record_merge", pathlib.Path(__file__).resolve().parent / "record_merge.py")
+record_merge = importlib.util.module_from_spec(_rm)
+_rm.loader.exec_module(record_merge)
 
 # The trusted core (ARC-1, D-095): `core <pkg>`, `wiring <pkg>` and
 # `allow <pkg> ...` lines name directories under broker/ that are tier A; a
@@ -44,7 +50,7 @@ CORE_LIST = pathlib.Path(__file__).resolve().parent.parent / "broker" / "core" /
 def core_list(path=CORE_LIST):
     """Return (core, wiring, allowed) package sets from the core list; exit if unreadable."""
     try:
-        text = path.read_bytes().decode("utf-8", "replace")
+        text = record_merge.read_list(path)  # a file in no class of CLASSES fails closed (#6441)
     except OSError as e:
         sys.exit(f"risk_tier: cannot read the core list: {e}")
     core, wiring, allowed = set(), set(), set()
