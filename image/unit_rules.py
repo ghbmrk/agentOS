@@ -1146,7 +1146,8 @@ def tmpfiles_way_lines(boot, packaged, usr_view=None):
 
 def tmpfiles_l_targets(boot, usr_view=None):
     """{path: target} for each tmpfiles.d L line at boot, ours or a package's, its target as systemd-tmpfiles
-    makes it: relative to the line's directory, or /usr/share/factory/<path> for "" or "-" (made_forms)."""
+    makes it: relative to the line's directory, or /usr/share/factory/<path> for "" or "-" (made_forms); a
+    target holding a specifier is PID1_UNREAD, a link to any path."""
     out = {}
     for _, line in tmpfiles_lines(boot, usr_view):
         read = tmpfiles_words(line)
@@ -1154,6 +1155,9 @@ def tmpfiles_l_targets(boot, usr_view=None):
             continue
         path = tmpfiles_simplified(read[0][1])
         arg = ((tmpfiles_words(read[1], 1) or [[]])[0] or [read[1]])[0] if read[1] else ""
+        if "%" in arg:  # #6506 L3 7077264942 1(c): systemd-tmpfiles expands it (%T/../etc), so any path
+            out[path] = PID1_UNREAD
+            continue
         t = "/usr/share/factory" + path if arg in ("", "-") else os.path.join(os.path.dirname(path), arg)
         out[path] = tmpfiles_simplified(t)
     return out
@@ -1210,6 +1214,9 @@ def pid1_made(units):
                     try:
                         words = FINALIZE.made_dir_words(key, v)
                     except ValueError:
+                        if "%" in v and not any(not " " < c <= "~" or c in "\"'\\*?[" for c in v.replace(" ", "")):
+                            out += [(m, why) for m in specifier_dirs(FINALIZE.UNIT_MADE_DIRS[key], v)]
+                            continue
                         # systemd makes a *Directory= only under its own top (an absolute path or a ..
                         # step is refused at load), so only ConfigurationDirectory='s, under /etc, may reach
                         if FINALIZE.UNIT_MADE_DIRS[key] == "etc":
@@ -1239,22 +1246,43 @@ def pid1_made(units):
 
 # #6506 L3 7076852851: the path-valued specifiers systemd 257 expands in a unit setting, each as every value
 # either manager gives it (the system manager's and root's user manager's, as ENV trees are read for both).
-# %y and %Y (the unit file and its directory) and an unknown letter are not expanded: a word opening with
-# one is unread. Every other specifier names a value that is not a path (a unit, instance, host or id).
 PID1_PATH_SPECIFIERS = {"h": ("/root",), "t": ("/run", "/run/user/0"), "S": ("/var/lib", "/root/.local/state"),
                         "C": ("/var/cache", "/root/.cache"), "L": ("/var/log", "/root/.local/state/log"),
                         "E": ("/etc", "/root/.config"), "T": ("/tmp",), "V": ("/var/tmp",),
                         "d": ("/run/credentials",)}
-PID1_NAME_SPECIFIERS = "abBgGHiIjJlmMnNopPqRsuUvwW"
+# Specifiers whose value never holds a '/': unit and instance names as escaped, ids, host and user names,
+# os-release ids. %I, %J, %P and %f unescape ('-' is '/', L3 7077264942 1(a)), %s, %y and %Y are paths and
+# %q is free text: a word holding one of those, or an unknown letter, is unread (refused, not modelled).
+PID1_NAME_SPECIFIERS = "abBgGHijlmMnNopuUvwWA"
+PID1_HEX_SPECIFIERS = "mb"  # 32 hex digits: never empty, '.' or '..'
+
+
+def specifier_word(q, dirs=False):
+    """Absolute word Q (%% as NUL) holding a specifier, as a made path: PID1_UNREAD if a specifier in it may
+    hold a '/' (not in PID1_NAME_SPECIFIERS), if a .. step follows the cut, or, unless DIRS (a *Directory=
+    path, where systemd refuses a .. step after expansion), if a component it is in may expand to '.' or '..'
+    (its fixed bytes are all dots and it holds no hex specifier); else a PrefixPath cut at the first one."""
+    q = tmpfiles_simplified(q)
+    if ".." in q.split("%", 1)[1].split("/"):  # a .. past the cut leaves the prefix
+        return PID1_UNREAD
+    for c in q.split("/"):
+        if "%" not in c:
+            continue
+        letters = re.findall(r"%(.?)", c)
+        if any(x not in PID1_NAME_SPECIFIERS for x in letters):
+            return PID1_UNREAD
+        if not dirs and not re.sub(r"%.", "", c).strip(".") and not set(letters) & set(PID1_HEX_SPECIFIERS):
+            return PID1_UNREAD
+    return PrefixPath(q.split("%")[0].replace("\0", "%"))
 
 
 def specifier_paths(v):
-    """The paths PID 1 may make for setting value V that holds a specifier, as PREFIX made paths: each word
-    (split at blanks, ':', '=' and ',', past any -+!@ prefix) that opens with '/' or a path specifier, the
-    specifier as each of its PID1_PATH_SPECIFIERS values, cut at the next specifier and marked a prefix
-    (PrefixPath), so it names every path its fixed part begins, as a tmpfiles.d path with a specifier is read.
-    A word opening with a name specifier names no path (a relative one is no path PID 1 makes); a word
-    opening with another specifier, or relative but holding a '/', gives PID1_UNREAD."""
+    """The paths PID 1 may make for setting value V that holds a specifier: each word (split at blanks, ':',
+    '=' and ',', past any -+!@ prefix) that opens with '/' or a path specifier, the specifier as each of its
+    PID1_PATH_SPECIFIERS values, read by specifier_word, so a path with a specifier names every path its
+    fixed part begins, as a tmpfiles.d path with one is read. A word opening with a name specifier is
+    relative, no path PID 1 makes; a word opening with another specifier, or relative but holding a '/',
+    gives PID1_UNREAD."""
     out = []
     for w in re.split(r"[\s:=,]+", v.replace("%%", "\0")):
         w = w.lstrip("-+!@")
@@ -1265,7 +1293,7 @@ def specifier_paths(v):
             c = w[1:2]
             if c in PID1_PATH_SPECIFIERS:
                 bases, w = PID1_PATH_SPECIFIERS[c], w[2:]
-            elif c in PID1_NAME_SPECIFIERS:
+            elif c in PID1_NAME_SPECIFIERS and "/" not in w:
                 continue
             else:
                 out.append(PID1_UNREAD)
@@ -1274,9 +1302,22 @@ def specifier_paths(v):
             out.append(PID1_UNREAD)
             continue
         for b in bases:
-            q = (b + w).replace("\0", "%")
-            cut = q.split("%")[0] if "%" in (b + w) else None
-            out.append(PrefixPath(cut) if cut is not None else tmpfiles_simplified(q))
+            q = b + w
+            out.append(specifier_word(q) if "%" in q else tmpfiles_simplified(q.replace("\0", "%")))
+    return out
+
+
+def specifier_dirs(top, v):
+    """specifier_paths for a *Directory= value V holding a specifier, under its TOP: each field of each word
+    as /<top>/<field>, its specifier read by specifier_word (an absolute field or one with a .. step is
+    refused by systemd at load, so it is no path)."""
+    out = []
+    for w in v.replace("%%", "\0").split():
+        for part in w.split(":"):
+            if not part or part.startswith("/") or ".." in part.split("/"):
+                continue
+            q = "/%s/%s" % (top, part)
+            out.append(specifier_word(q, dirs=True) if "%" in q else tmpfiles_simplified(q.replace("\0", "%")))
     return out
 
 
@@ -1284,12 +1325,39 @@ class PrefixPath(str):
     """A made path read as the string its fixed part begins (specifier_paths)."""
 
 
+def tree_links_under(boot, f, links):
+    """The first link, a tree link or a tmpfiles.d L line's path, whose path begins with string F, or None:
+    a specifier at F's end may name any entry its tail begins, and so any link at or below one."""
+    for k in links:
+        if k.startswith(f):
+            return k
+    head, tail = f.rsplit("/", 1)
+    todo = [os.path.join(head or "/", n) for n in boot._list(head or "/") if n.startswith(tail)]
+    seen = 0
+    while todo:
+        q = todo.pop()
+        seen += 1
+        if seen > 100000:
+            raise SystemExit("unit rules: %s: more than 100000 entries under a made path's fixed part (#6506)" % f)
+        st = boot._lstat(q)
+        if st is None:
+            continue
+        kind = st.st_mode & 0o170000
+        if kind == 0o120000:
+            return q
+        if kind == 0o040000:
+            todo += [os.path.join(q, n) for n in boot._list(q)]
+    return None
+
+
 def made_forms(boot, m, links):
     """Every path made path M may reach at boot, M included: PID 1 follows links on its way when it makes a
     path's directories (mkdirat_parents_internal; #6506 Security 7076878035: /var/lib/e -> /etc made
     ListenStream=/var/lib/e/agentos/s.sock make /etc/agentos), so M is resolved through the tree's links
-    (BOOT) and the links tmpfiles.d L lines make (LINKS, {path: target}), each step kept. A PrefixPath's last,
-    cut component stays as written past its resolved directory. More than 40 steps fail the run."""
+    (BOOT) and the links tmpfiles.d L lines make (LINKS, {path: target}), each step kept. A PrefixPath's
+    resolved directory is joined to its cut tail; a link whose path begins with a resolved prefix (the
+    specifier may name it, Security 7077245541, L3 7077264942 1(b)), or an L line with an unread target on
+    the way, gives [PID1_UNREAD]: refused, not modelled. More than 40 steps fail the run."""
     prefix = isinstance(m, PrefixPath)
     head, tail = (m.rsplit("/", 1) if prefix else (m, None))
     forms, todo = set(), [head or "/"]
@@ -1304,10 +1372,15 @@ def made_forms(boot, m, links):
         todo.append(boot.resolve(q)[0])
         for k, t in links.items():
             if q == k or q.startswith(k.rstrip("/") + "/"):
+                if t is PID1_UNREAD:
+                    return [PID1_UNREAD]
                 todo.append(tmpfiles_simplified(t + q[len(k):]))
-    if prefix:
-        return [PrefixPath(f.rstrip("/") + "/" + tail) for f in forms]
-    return sorted(forms)
+    if not prefix:
+        return sorted(forms)
+    out = [PrefixPath(f.rstrip("/") + "/" + tail) for f in forms]
+    if any(tree_links_under(boot, f, links) for f in out):
+        return [PID1_UNREAD]
+    return out
 
 
 def env_made_refusal(p, made, boot=None, links=None):
@@ -1325,6 +1398,9 @@ def env_made_refusal(p, made, boot=None, links=None):
             return ("%s holds a path PID 1 may make that the lint does not read (a specifier, quote, escape or "
                     "relative path), which may be on its way" % why)
         for f in (made_forms(boot, m, links or {}) if boot is not None else [m]):
+            if f is PID1_UNREAD:
+                return ("%s names %s, which may reach a link the lint does not follow (a specifier names it, "
+                        "or a tmpfiles.d L target holds one)" % (why, m))
             if isinstance(f, PrefixPath):
                 hit = top.startswith(f) or f.startswith(top + "/")  # P begins with top
             else:

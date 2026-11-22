@@ -1483,7 +1483,10 @@ class EnvFilesTest(unittest.TestCase):
                                             + re.escape(why) + ".*a directory PID 1 may make on its way"):
                     r.env_files(tree(d, {}), units, lambda p: False, uid=self.UID)
         # a value PID 1 would decode may make any path: it refuses an env path in /etc/agentos, not one in /usr
-        for text in ("[Service]\nConfigurationDirectory=%i\n", "[Socket]\nListenStream=%y/agentos\n",
+        for text in ("[Socket]\nListenStream=/etc/%i/s\n", "[Socket]\nListenStream=%y/agentos\n",
+                     "[Socket]\nListenStream=/etc/x/.%i/agentos/s\n", "[Socket]\nListenStream=/run/%I/s\n",
+                     "[Socket]\nListenStream=/etc/x/%m.%i/../../agentos/s\n", "[Socket]\nListenStream=/run/x%I/s\n",
+                     "[Socket]\nListenStream=%i/agentos/s\n", "[Service]\nStateDirectory=x%I\n",
                      "[Socket]\nListenStream=etc/agentos/%i\n",
                      "[Mount]\nWhat=/etc/\\x61gentos\nWhere=/mnt/x\n", "[Socket]\nListenStream=etc/agentos/s\n",
                      "[Service]\nConfigurationDirectory=../agentos\n"):
@@ -1502,7 +1505,9 @@ class EnvFilesTest(unittest.TestCase):
             "[Mount]\nWhat=%E/agentos\nWhere=/mnt/x\nOptions=bind\n": "What= in /usr/lib/systemd/system/m.service names /etc/agentos,",
             "[Socket]\nListenStream=%E/agentos/s\n": "names /etc/agentos/s,",
             "[Socket]\nListenStream=/etc/agen%i/s\n": "names /etc/agen,",
-            "[Socket]\nListenStream=/etc/%i/s\n": "names /etc/,",
+            "[Service]\nConfigurationDirectory=%i\n": "names /etc/,",
+            "[Service]\nConfigurationDirectory=agentos%i\n": "names /etc/agentos,",
+            "[Socket]\nListenStream=/etc/agentos/%m.%i/s\n": "names /etc/agentos/,",
             "[Socket]\nListenFIFO=-%E/agentos/%%x\n": "names /etc/agentos/%x,",
             "[Socket]\nListenStream=/etc/agentos/q%i/s\n": "names /etc/agentos/q,",
             "[Socket]\nListenStream=%E//agentos/./s\n": "names /etc/agentos/s,",
@@ -1521,7 +1526,9 @@ class EnvFilesTest(unittest.TestCase):
                      "ListenDatagram=/run/systemd/journal.%i/socket\nListenDatagram=/run/systemd/journal.%i/dev-log\n"
                      "SocketMode=0666\nPassCredentials=yes\nPassSecurity=yes\nReceiveBuffer=8M\nSendBuffer=8M\n",
                      "[Unit]\nDescription=D-Bus User Message Bus Socket\n[Socket]\nListenStream=%t/bus\nExecStartPost=-/usr/bin/systemctl --user set-environment DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus\n[Install]\nWantedBy=sockets.target\nAlso=dbus.service\n",
-                     "[Socket]\nListenStream=%i\nSymlinks=/run/x/%N\nListenFIFO=%E/agentos-x/f\nListenSpecial=%h/x\n"
+                     "[Service]\nLogsDirectory=journal/%m.%i\nRuntimeDirectory=systemd/journal.%i redis-%i\n",
+                     "[Socket]\nListenStream=/run/os-%o-%p/s\n",
+                     "[Socket]\nListenStream=%i\nSymlinks=/run/x/n-%N\nListenFIFO=%E/agentos-x/f\nListenSpecial=%h/x\n"
                      "[Install]\nAlias=x@%i.socket\nDefaultInstance=%H\n"):
             with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
                 units = [{"files": [{"ours": False, "path": "/usr/lib/systemd/system/m.socket", "text": text}]},
@@ -1549,6 +1556,53 @@ class EnvFilesTest(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, r"names /\S+ \(reaching /etc/agen\S* through a link\), a directory "
                                             "PID 1 may make"):
                     r.env_files(tree(d, files), units, lambda p: p == "/usr/lib/tmpfiles.d/pkg.conf", uid=self.UID)
+        # #6506 Security 7077245541, L3 7077264942: a specifier that may name a link, unescape to a '/', or an
+        # L target holding one, is refused, not modelled
+        unread = {
+            "Security %o": ({"/var/lib/debian": "-> /etc"},
+                            "[Socket]\nListenStream=/var/lib/%o/agentos/s.sock\nDirectoryMode=0777\n"),
+            "Security e%i": ({"/var/lib/eX": "-> /etc"},
+                             "[Socket]\nListenStream=/var/lib/e%i/agentos/s.sock\nDirectoryMode=0777\n"),
+            "Security %S/%o": ({"/var/lib/debian": "-> /etc"},
+                               "[Socket]\nListenStream=%S/%o/agentos/s.sock\nDirectoryMode=0777\n"),
+            "Security %H": ({"/var/lib/h": "-> /etc"},
+                            "[Mount]\nWhat=/var/lib/%H/agentos\nWhere=/mnt/x\nOptions=bind\nDirectoryMode=0777\n"),
+            "L3 %I": ({}, "[Socket]\nListenStream=%I/s.sock\nDirectoryMode=0777\n"),
+            "L3 Symlinks %I": ({}, "[Socket]\nListenStream=/run/m.sock\nSymlinks=%I/l\n"),
+            "L3 path %I": ({}, "[Path]\nPathChanged=%I/q\nMakeDirectory=yes\nDirectoryMode=0777\n"),
+            "L3 /var/lib/%i": ({"/var/lib/e": "-> /etc"}, "[Socket]\nListenStream=/var/lib/%i/agentos/s.sock\n"),
+            "L3 L line %i": ({"/usr/lib/tmpfiles.d/pkg.conf": "L /run/e - - - - ../etc\n"},
+                             "[Socket]\nListenStream=/run/%i/agentos/s.sock\n"),
+            "L3 L target %T": ({"/usr/lib/tmpfiles.d/pkg.conf": "L /tmp/e - - - - %T/../etc\n"},
+                               "[Socket]\nListenStream=/tmp/e/agentos/s.sock\n"),
+            "link below the cut": ({"/var/lib/eX/a": "-> /etc"}, "[Socket]\nListenStream=/var/lib/e%i/a/agentos/s\n"),
+            "L line by prefix": ({"/usr/lib/tmpfiles.d/pkg.conf": "L /run/ex - - - - ../etc\n"},
+                                 "[Socket]\nListenStream=/run/e%i/agentos/s\n"),
+            "directory field": ({"/var/lib/e": "-> /etc"}, "[Service]\nStateDirectory=%i/agentos\n"),
+            "%J": ({}, "[Socket]\nListenStream=/run/x%J/s\n"),
+            "%P": ({}, "[Mount]\nWhat=/x%P\nWhere=/mnt/x\nOptions=bind\n"),
+        }
+        for name, (files, text) in unread.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
+                units = [{"files": [{"ours": False, "path": "/usr/lib/systemd/system/m@.socket", "text": text}]},
+                         {"files": [{"ours": True, "path": self.PKG, "text": env}]}]
+                with self.assertRaisesRegex(SystemExit, re.escape("EnvironmentFile=-/etc/agentos/agentosd.env: ") +
+                                            r".* in /usr/lib/systemd/system/m@\.socket (holds a path PID 1 may make that "
+                                            r"the lint does not read|names \S+, which may reach a link the lint does not follow)"):
+                    r.env_files(tree(d, files), units, lambda p: p == "/usr/lib/tmpfiles.d/pkg.conf", uid=self.UID)
+        # controls: no link begins with the cut, an L target with a specifier off the way, a /usr env path
+        for files, text, value in (
+                ({"/var/lib/f": "-> /etc"}, "[Socket]\nListenStream=/var/lib/e%i/agentos/s\n", env),
+                ({"/var/lib/eX/a": "-> /var/lib/g"}, "[Socket]\nListenStream=/var/lib/eX/b%i/s\n", env),
+                ({"/usr/lib/tmpfiles.d/pkg.conf": "L /tmp/e - - - - %T/../etc\n"},
+                 "[Socket]\nListenStream=/tmp/f/agentos/s.sock\n", env),
+                ({"/var/lib/eX": "-> /etc"}, "[Socket]\nListenStream=/var/lib/e%i/agentos/s\n",
+                 "[Service]\nEnvironmentFile=-/usr/lib/x/a.env\n")):
+            with self.subTest(text=text, files=files), tempfile.TemporaryDirectory() as d:
+                units = [{"files": [{"ours": False, "path": "/usr/lib/systemd/system/m@.socket", "text": text}]},
+                         {"files": [{"ours": True, "path": self.PKG, "text": value}]}]
+                self.assertEqual(r.env_files(tree(d, files), units, lambda p: p == "/usr/lib/tmpfiles.d/pkg.conf",
+                                             uid=self.UID), ({}, {}))
         with tempfile.TemporaryDirectory() as d:  # a tmpfiles.d line other than L makes no link
             units = [{"files": [{"ours": False, "path": "/usr/lib/systemd/system/m.service",
                                  "text": "[Socket]\nListenStream=/run/e/agentos/s.sock\n"}]},
@@ -1572,7 +1626,8 @@ class EnvFilesTest(unittest.TestCase):
                      "[Service]\nWorkingDirectory=-/etc/agentos\nEnvironment=A=/etc/agentos PATH=%h\n"
                      "UnsetEnvironment=/etc/agentos\nPassEnvironment=X\nOpenFile=/etc/agentos/f:f\n",
                      # outside /etc a *Directory= value systemd refuses or expands stays under its own top
-                     "[Service]\nRuntimeDirectory=agentos-%i ../../etc/agentos /etc/agentos\nStateDirectory=%i\n"):
+                     "[Service]\nRuntimeDirectory=agentos-%i ../../etc/agentos /etc/agentos\nStateDirectory=%i\n",
+                     "[Service]\nRuntimeDirectory=../../etc/agentos /etc/agentos\n"):
             with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
                 units = [{"files": [{"ours": False, "path": "/usr/lib/systemd/system/m.service", "text": text}]},
                          {"files": [{"ours": True, "path": self.PKG,
