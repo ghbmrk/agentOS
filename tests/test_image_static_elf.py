@@ -229,23 +229,6 @@ class StaticElfTest(unittest.TestCase):
                 errs = self.check(root, out, allow, config)
                 self.assertTrue(any(want in e for e in errs), errs)
 
-    def test_a_built_using_packages_static_file_fails_until_declared_package(self):
-        # #6481: vulncheck.py queries Built-Using sources only for packages this allow-list declares
-        # "package". A static file a package with Built-Using ships (libcap2-bin's capsh, say) still
-        # fails the gate with no entry, so narrowing the scan cannot pass an undeclared static copy;
-        # declaring it "package" passes it and puts its package's Built-Using sources in the scan.
-        root, out, allow, config, _ = self.tree()
-        shutil.copy(self.bins["static"], root / "usr/sbin/capsh")
-        (out / se.STATUS).write_text(STATUS % "libc-bin" + STATUS % "libcap2-bin")
-        md5 = hashlib.md5(self.bins["static"].read_bytes()).hexdigest()
-        (out / se.MD5SUMS).write_text("%s  usr/sbin/ldconfig\n%s  usr/sbin/capsh\n" % (md5, md5))
-        self.assertEqual(self.check(root, out, allow, config),
-                         ["/usr/sbin/capsh (static): no entry in static_elf.allow declares it"])
-        self.assertNotIn("libcap2-bin", vulncheck.declared_packages(allow))
-        allow.write_text(allow.read_text() + "/usr/sbin/capsh package libcap2-bin\n")
-        self.assertEqual(self.check(root, out, allow, config), [])
-        self.assertEqual(vulncheck.declared_packages(allow), {"libc-bin", "libcap2-bin"})
-
     def test_the_control_fails_on_a_tree_missing_a_required_file(self):
         # SEL-7: a walk that does not list llama-server, runsc, agentos-camdecode and ldconfig read nothing
         # it should have; and the CLI exits 1 on any refusal, 0 on a clean tree.
@@ -323,15 +306,17 @@ class ShippedTest(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         se.read_allow(f.name)
 
-    def test_vulncheck_reads_the_same_package_entries(self):
-        # #6481: the packages whose Built-Using sources the image scan queries are exactly the shipped
-        # allow-list's "package" entries as this check reads them; bwrap's libcap-dev, a linked input,
-        # is not among them (its libcap.a is queried by package as a "linked" input).
-        want = {a for _n, _g, k, a in se.read_allow(se.ALLOW) if k == "package"}
-        self.assertTrue(want)
-        self.assertEqual(vulncheck.declared_packages(vulncheck.STATIC_ELF_ALLOW), want)
+    def test_each_built_using_exclusion_is_a_linked_entry_this_check_reads(self):
+        # #6481: vulncheck.py skips a package's Built-Using sources only where image/builtusing.exclude
+        # names it against a "linked" entry; differential: that entry, as this check reads the shipped
+        # allow-list, is "linked" with the same list, and the shipped exclusion is libcap-dev's alone.
         self.assertEqual(vulncheck.STATIC_ELF_ALLOW, se.ALLOW)
-        self.assertNotIn("libcap-dev", want)
+        linked = {g: a for _n, g, k, a in se.read_allow(se.ALLOW) if k == "linked"}
+        excluded = vulncheck.excluded_packages()
+        self.assertEqual({p for pkgs in excluded.values() for p in pkgs}, {"libcap-dev"})
+        for name, pkgs in excluded.items():
+            for pkg, glob in pkgs.items():
+                self.assertEqual(linked.get(glob), name, (pkg, glob))
 
     def test_each_link_record_sets_shipped_for_on_the_bytes_it_ships(self):
         # SEL-6 linked: the three static link builds record their inputs against the binary they install.

@@ -1,5 +1,4 @@
-# tools/vulncheck.py control (#6481): the allow-list whose "package" entries name the packages whose
-# Built-Using sources the image scan queries. agentos-fixed is declared, so its Built-Using source
-# (agentos-builtusing, DEB-9) is queried; agentos-nofix is not, so its (agentos-undeclared, DEB-10) is not.
+# tools/vulncheck.py control (#6481): the allow-list the control's Built-Using exclusions
+# (builtusing.exclude) are held to; an exclusion's GLOB must be a "linked" entry here.
+/usr/lib/agentos/images/control/bin/tool linked guest
 /usr/lib/agentos-fixed/* package agentos-fixed
-/usr/lib/agentos-other/* linked linked
