@@ -2,6 +2,7 @@
 
 No requirement IDs: PLAN.md tooling, not SPEC.md behaviour. All data is synthetic.
 """
+import os
 import pathlib
 import re
 import subprocess
@@ -13,6 +14,7 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import premerge  # noqa: E402
+import ci_scope  # noqa: E402
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
 
@@ -247,6 +249,47 @@ class PremergeTest(unittest.TestCase):
         subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "main"],
                        cwd=self.r, capture_output=True)
         self.write("x_allow.txt", "# h\nallow a\nallow m\nallow p why\nallow q why\n")
+        self.commit("resolved")
+        self.assertEqual(self.check(reviewed), ["x_allow.txt"])
+
+    def test_an_allowlist_line_both_sides_added_may_be_kept_once(self):
+        # #6375: tools/record_merge.py keeps a line both sides appended once; one copy or two reads same, a third
+        # copy or a dropped line reads changed.
+        for text, want in (("# h\na\ns\nm\n", []), ("# h\na\ns\nm\ns\n", []), ("# h\na\ns\ns\ns\nm\n", ["x_allow.txt"]),
+                           ("# h\na\nm\n", ["x_allow.txt"]), ("# h\na\ns\n", ["x_allow.txt"])):
+            with self.subTest(text=text):
+                self.setUp()
+                git(self.r, "checkout", "-q", "main")
+                self.write("x_allow.txt", "# h\na\n")
+                self.commit("allow")
+                git(self.r, "checkout", "-q", "-b", "pr")
+                self.write("x_allow.txt", "# h\na\ns\n")
+                reviewed = self.commit("pr")
+                git(self.r, "checkout", "-q", "main")
+                self.write("x_allow.txt", "# h\na\ns\nm\n")
+                self.commit("main")
+                git(self.r, "checkout", "-q", "pr")
+                subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "main"],
+                               cwd=self.r, capture_output=True)
+                self.write("x_allow.txt", text)
+                self.commit("resolved")
+                self.assertEqual(self.check(reviewed), want)
+
+    def test_a_sectioned_allowlist_is_no_order_free_list(self):
+        # #6418 Security: in a file with sections, a line kept in another section means something else.
+        git(self.r, "checkout", "-q", "main")
+        self.write("x_allow.txt", "[a]\nx\n[b]\ny\n")
+        self.commit("allow")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("x_allow.txt", "[a]\nx\np\n[b]\ny\n")
+        reviewed = self.commit("pr")
+        git(self.r, "checkout", "-q", "main")
+        self.write("x_allow.txt", "[a]\nx\nm\n[b]\ny\n")
+        self.commit("main")
+        git(self.r, "checkout", "-q", "pr")
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "main"],
+                       cwd=self.r, capture_output=True)
+        self.write("x_allow.txt", "[a]\nx\np\n[b]\ny\nm\n")
         self.commit("resolved")
         self.assertEqual(self.check(reviewed), ["x_allow.txt"])
 
@@ -871,6 +914,59 @@ class PremergeTest(unittest.TestCase):
                   "tools/claims.pyc", "tools/x/claims.py", "tests/test_claims.py"):
             self.assertEqual(premerge.mark_paths([f]), [], f)
 
+    def test_a_module_a_gate_tool_imports_is_a_gate_file_with_its_tests(self):
+        # #6418 Security: premerge decides `same` with tools/record_merge.py, which no hand list named.
+        for f in ("tools/record_merge.py", "tests/test_record_merge.py"):
+            self.assertEqual(premerge.mark_paths([f]), [f], f)
+        for f in ("tools/record_merge.pyc", "tools/x/record_merge.py", "tools/record_merge.py\n", "tools/doclint.py"):
+            self.assertEqual(premerge.mark_paths([f]), [], repr(f))
+        with tempfile.TemporaryDirectory() as d:
+            for name, text in {"g.py": "import a\nfrom b import x\nP = 'c.py'\n", "a.py": "import d, os\n", "b.py": "",
+                               "c.py": "", "d.py": "", "e.py": "", "h.py": "import g\n"}.items():
+                pathlib.Path(d, name).write_text(text)
+            self.assertEqual(premerge.gate_modules(pathlib.Path(d), ("g",)), {"g", "a", "b", "c", "d"},
+                             "followed to the end; a module nothing imports, or one outside tools/, is none")
+        # Every tools/ module a gate tool imports, now, is a gate file.
+        for m in premerge.gate_modules():
+            self.assertEqual(premerge.mark_paths([f"tools/{m}.py"]), [f"tools/{m}.py"], m)
+
+    # REQ: PREMERGE-replay-inputs-gate
+    def test_every_replay_input_is_a_gate_file(self):
+        # #6444: premerge's replay (`git merge-tree`, run in a checkout of the base) honours the base's attributes, so a
+        # `merge=` line, at the root or in a subdirectory, decides which heads read `same`.
+        (self.r / "sub").mkdir()
+        self.write("sub/R.md", "row 0\n")
+        self.commit("rows")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("sub/R.md", "row 0\nrow pr\n")
+        reviewed = self.commit("pr row")
+        git(self.r, "checkout", "-q", "main")
+        self.write("sub/R.md", "row 0\nrow main\n")
+        self.commit("main row")
+        conflicted = premerge._replayed(self.r, reviewed, "main")
+        self.write("sub/.gitattributes", "R.md merge=union\n")
+        self.commit("attributes")
+        self.assertNotEqual(premerge._replayed(self.r, reviewed, "main"), conflicted,
+                            "a nested .gitattributes is an input to the replay")
+        for f in (".gitattributes", "sub/.gitattributes", "broker/vendor/x/.gitattributes", ".gitmodules"):
+            self.assertEqual(premerge.mark_paths([f]), [f], f)
+        for f in (".gitattributes.bak", "x.gitattributes", ".gitattributes/x", "sub/.gitmodules", ".gitignore",
+                  "sub/.gitignore", ".mailmap", ".gitattributes\n"):
+            self.assertEqual(premerge.mark_paths([f]), [], repr(f))
+        # The class is closed: every file git gives meaning by name in a tree is a replay input or one the replay
+        # never reads (ignore rules and the mailmap shape no merge), so a new kind fails here until it is classed.
+        # Walked, not `git ls-files`: this module reads no record and no git store (records_audit); the record
+        # directories hold records only, and a .gitattributes in one is a gate file by the pattern above all the same.
+        skip = {".git", *(d.rstrip("/") for d in ci_scope.RECORD_DIRS)}
+        named = set()
+        for top, dirs, files in os.walk(ROOT):
+            rel = os.path.relpath(top, ROOT)
+            dirs[:] = [d for d in dirs if os.path.normpath(os.path.join(rel, d)) not in skip]
+            named |= {os.path.normpath(os.path.join(rel, f)) for f in files if f.startswith(".git") or f == ".mailmap"}
+        self.assertTrue(named, "the repository tracks .gitattributes")
+        for f in named:
+            self.assertTrue(premerge.mark_paths([f]) or f.rsplit("/", 1)[-1] in premerge.NOT_REPLAY_INPUTS, f)
+
     def test_mark_paths_cover_agent_config_and_tier_inputs(self):
         # Security R3 on #1824: MCP config, other teams' rules, nested CLAUDE files, and the
         # core list tools/risk_tier.py reads to set tiers.
@@ -1381,6 +1477,44 @@ class PremergeTest(unittest.TestCase):
         mixed = failed([("vulncheck", "failure")])
         mixed["jobs"].append({"run_id": 99, "run_attempt": 1, "name": "deps", "conclusion": "failure"})
         self.assertEqual(held([mixed], [mainrun()]), no)  # a list with any foreign job is unread, not filtered
+
+    def test_diff_gate_failure_is_never_base_excused(self):
+        # PREMERGE-gate-not-base-excusable (#6411): a diff gate's failed job holds even when main's own first-attempt run
+        # of the merge base failed the same job; a tree check's inherited failure is still excused.
+        gates = [n for n, c in premerge.HELD_CLASS.items() if c == premerge.DIFF_GATE]
+        self.assertEqual(gates, ["mutgate", "lane-gate", "word-budget"])
+        self.assertTrue(all(premerge.HELD[g] == () for g in gates))
+        onto, sha = self.held_repo()
+        ok = self.wf(1, "vulncheck", "success", sha)
+        held = lambda *runs, base=(): premerge.checks_held(self.r, bundle([ok, *runs], base), "HEAD", "main")
+        for name, jobs in (("mutgate", ["claimed", "mutgate"]), ("mutgate", ["mutgate"]), ("mutgate", ["mutants pkg shard 1 of 2"]),
+                           ("lane-gate", ["lane-gate"]), ("word-budget", ["count"])):
+            run = self.wf(5, name, "failure", sha, jobs=[(j, "failure") for j in jobs])
+            mainrun = self.wf(9, name, "failure", onto, event="push", branch="main", jobs=[(j, "failure") for j in jobs])
+            self.assertEqual(held(run, base=[mainrun]), [f"{name}:failure"], (name, jobs))
+            self.assertEqual(held({**run, "name": "formal", "path": ".github/workflows/formal.yml"},
+                                  base=[{**mainrun, "name": "formal", "path": ".github/workflows/formal.yml"}]), [], (name, jobs))
+
+    def test_held_class_table_matches_held(self):
+        # PREMERGE-held-class-table (#6425): every HELD workflow is classed DIFF_GATE or TREE and the table names no
+        # other, so a new HELD workflow fails here until classed; the test reads HELD itself, no second list.
+        self.assertEqual(set(premerge.HELD_CLASS), set(premerge.HELD))
+        self.assertEqual(set(premerge.HELD_CLASS.values()), {premerge.DIFF_GATE, premerge.TREE})
+
+    def test_unclassed_held_workflow_is_never_base_excused(self):
+        # PREMERGE-held-class-table (#6425): a HELD workflow missing from HELD_CLASS counts as DIFF_GATE, so a failed job
+        # holds although main's run of the merge base failed it too; classed TREE, the same failure is excused.
+        onto, sha = self.held_repo()
+        ok = self.wf(1, "vulncheck", "success", sha)
+        run = self.wf(5, "formal", "failure", sha, jobs=[("formal", "failure")])
+        mainrun = self.wf(9, "formal", "failure", onto, event="push", branch="main", jobs=[("formal", "failure")])
+        held = lambda: premerge.checks_held(self.r, bundle([ok, run], [mainrun]), "HEAD", "main")
+        self.assertEqual(held(), [])
+        unclassed = {k: v for k, v in premerge.HELD_CLASS.items() if k != "formal"}
+        with mock.patch.object(premerge, "HELD_CLASS", unclassed):
+            self.assertEqual(held(), ["formal:failure"])
+        with mock.patch.object(premerge, "HELD_CLASS", {**premerge.HELD_CLASS, "formal": "unknown"}):
+            self.assertEqual(held(), ["formal:failure"])
 
     def test_image_vulncheck_is_the_one_exempt_job(self):
         # #5366: image-vulncheck stays out (Mark's #2919 paste); every other image job is held.
