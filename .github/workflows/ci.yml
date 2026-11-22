@@ -225,6 +225,30 @@ jobs:
           [ -z "$pkgs" ] || { sudo apt-get update -q && sudo apt-get install -y -q $pkgs; }
           d="$GITHUB_WORKSPACE"; while [ "$d" != / ]; do sudo chmod o+x "$d"; d=$(dirname "$d"); done
           sudo -E env "PATH=$PATH" AGENTOS_REQUIRE_UID_BOUNDARY=1 python -m unittest tests.test_unit_tests -v
+      - name: mutgate's cgroup containment (#6392)
+        if: steps.scope.outputs.records != 'true'
+        # MUT-memcap-cgroup: the unit tests run mutgate as a local, advisory run (no cgroup); its
+        # containment runs here as mutgate.yml runs it, in a delegated cgroup v2 directory, with no skip.
+        working-directory: tests
+        run: |
+          sudo mkdir /sys/fs/cgroup/mutgate /sys/fs/cgroup/mutgate/main
+          echo +memory | sudo tee /sys/fs/cgroup/mutgate/cgroup.subtree_control > /dev/null
+          sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/mutgate
+          echo $$ | sudo tee /sys/fs/cgroup/mutgate/main/cgroup.procs > /dev/null
+          AGENTOS_MUTGATE_CGROUP=/sys/fs/cgroup/mutgate python -m unittest \
+            test_mutgate.Deletion.test_a_cgroup_leaf_holds_every_descendant_and_its_exact_peak \
+            test_mutgate.Deletion.test_a_test_run_past_its_memory_cap_is_killed_with_its_children \
+            test_mutgate.Deletion.test_a_capped_run_kills_a_child_that_left_its_process_group \
+            test_mutgate.Deletion.test_ci_without_a_delegated_cgroup_is_an_error \
+            test_mutgate.GremlinsMemoryCap.test_a_mutant_run_past_its_cap_is_killed_and_exits_1 \
+            test_mutgate.GremlinsMemoryCap.test_a_mutant_run_under_its_cap_keeps_gos_exit_code \
+            test_mutgate.GremlinsMemoryCap.test_a_mutant_runs_own_toolchain_is_not_counted \
+            test_mutgate.GremlinsMemoryCap.test_a_cover_run_past_half_the_cap_fails \
+            test_mutgate.GremlinsMemoryCap.test_a_cover_run_counts_each_test_binarys_whole_life_peak \
+            test_mutgate.GremlinsMemoryCap.test_a_go_test_that_cannot_be_capped_is_refused \
+            test_mutgate.GremlinsMemoryCap.test_run_caps_gremlins_mutant_runs > "$RUNNER_TEMP/cgroup.log" 2>&1 || { cat "$RUNNER_TEMP/cgroup.log"; exit 1; }
+          cat "$RUNNER_TEMP/cgroup.log"
+          tail -n 1 "$RUNNER_TEMP/cgroup.log" | grep -qx OK
       - name: Document tool tests (records-only change; CI-docs)
         # The tests of the tools the steps below run, and every test that reads a record file;
         # full CI's record-read audit fails when a test that reads one is missing here.
