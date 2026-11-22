@@ -2,6 +2,7 @@
 
 No requirement IDs: PLAN.md tooling, not SPEC.md behaviour. All data is synthetic.
 """
+import os
 import pathlib
 import re
 import subprocess
@@ -13,6 +14,7 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import premerge  # noqa: E402
+import ci_scope  # noqa: E402
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
 
@@ -927,6 +929,43 @@ class PremergeTest(unittest.TestCase):
         # Every tools/ module a gate tool imports, now, is a gate file.
         for m in premerge.gate_modules():
             self.assertEqual(premerge.mark_paths([f"tools/{m}.py"]), [f"tools/{m}.py"], m)
+
+    # REQ: PREMERGE-replay-inputs-gate
+    def test_every_replay_input_is_a_gate_file(self):
+        # #6444: premerge's replay (`git merge-tree`, run in a checkout of the base) honours the base's attributes, so a
+        # `merge=` line, at the root or in a subdirectory, decides which heads read `same`.
+        (self.r / "sub").mkdir()
+        self.write("sub/R.md", "row 0\n")
+        self.commit("rows")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("sub/R.md", "row 0\nrow pr\n")
+        reviewed = self.commit("pr row")
+        git(self.r, "checkout", "-q", "main")
+        self.write("sub/R.md", "row 0\nrow main\n")
+        self.commit("main row")
+        conflicted = premerge._replayed(self.r, reviewed, "main")
+        self.write("sub/.gitattributes", "R.md merge=union\n")
+        self.commit("attributes")
+        self.assertNotEqual(premerge._replayed(self.r, reviewed, "main"), conflicted,
+                            "a nested .gitattributes is an input to the replay")
+        for f in (".gitattributes", "sub/.gitattributes", "broker/vendor/x/.gitattributes", ".gitmodules"):
+            self.assertEqual(premerge.mark_paths([f]), [f], f)
+        for f in (".gitattributes.bak", "x.gitattributes", ".gitattributes/x", "sub/.gitmodules", ".gitignore",
+                  "sub/.gitignore", ".mailmap", ".gitattributes\n"):
+            self.assertEqual(premerge.mark_paths([f]), [], repr(f))
+        # The class is closed: every file git gives meaning by name in a tree is a replay input or one the replay
+        # never reads (ignore rules and the mailmap shape no merge), so a new kind fails here until it is classed.
+        # Walked, not `git ls-files`: this module reads no record and no git store (records_audit); the record
+        # directories hold records only, and a .gitattributes in one is a gate file by the pattern above all the same.
+        skip = {".git", *(d.rstrip("/") for d in ci_scope.RECORD_DIRS)}
+        named = set()
+        for top, dirs, files in os.walk(ROOT):
+            rel = os.path.relpath(top, ROOT)
+            dirs[:] = [d for d in dirs if os.path.normpath(os.path.join(rel, d)) not in skip]
+            named |= {os.path.normpath(os.path.join(rel, f)) for f in files if f.startswith(".git") or f == ".mailmap"}
+        self.assertTrue(named, "the repository tracks .gitattributes")
+        for f in named:
+            self.assertTrue(premerge.mark_paths([f]) or f.rsplit("/", 1)[-1] in premerge.NOT_REPLAY_INPUTS, f)
 
     def test_mark_paths_cover_agent_config_and_tier_inputs(self):
         # Security R3 on #1824: MCP config, other teams' rules, nested CLAUDE files, and the

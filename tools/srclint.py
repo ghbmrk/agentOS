@@ -47,9 +47,15 @@ code reached from outside broker/ by a go.mod `replace` or a go.work `use`.
 Usage: srclint.py [--root DIR] [--allow FILE]
 """
 import argparse
+import importlib.util
 import pathlib
 import re
 import sys
+
+# By path, as premerge loads its imports: a run with `python3 -I` keeps tools/ off sys.path.
+_rm = importlib.util.spec_from_file_location("record_merge", pathlib.Path(__file__).resolve().parent / "record_merge.py")
+record_merge = importlib.util.module_from_spec(_rm)
+_rm.loader.exec_module(record_merge)
 
 # go/build's knownExt, less .go: every other file the go tool compiles, assembles or links.
 NON_GO = frozenset({
@@ -453,9 +459,10 @@ def load_allow(path):
     control character, a line break other than LF or a byte that is not UTF-8 fails: a line must mean what it shows."""
     allow = {}
     path = pathlib.Path(path)
+    record_merge.listed(path)  # a list in no class of CLASSES fails closed, present or not (#6441)
     if not path.exists():
         return allow
-    text = path.read_bytes().decode("utf-8", "replace")  # a byte that is not UTF-8 reads as U+FFFD, refused on its line
+    text = record_merge.read_list(path)  # a byte that is not UTF-8 reads as U+FFFD, refused on its line
     for n, raw in enumerate(text.split("\n"), 1):
         bad = [c for c in raw if (ord(c) < 32 and c != "\t") or 0x7F <= ord(c) <= 0x9F
                or c in "  \ufffd"]

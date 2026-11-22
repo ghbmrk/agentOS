@@ -15,3 +15,7 @@ CONFIG_VIRTIO_CONSOLE=y
 CONFIG_POWER_RESET=y
 CONFIG_MFD_SYSCON=y
 CONFIG_SYSCON_REBOOT_MODE=y
+# The harness's panic signal (e2e/driver/vm.go, errPanic): the panic notifier writes to QEMU's
+# pvpanic-pci device before the panic's restart, which skips the reboot notifiers and so the mailbox.
+CONFIG_PVPANIC=y
+CONFIG_PVPANIC_PCI=y
