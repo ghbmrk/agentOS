@@ -6,6 +6,9 @@ name: lane-gate
 # objects for `git diff --name-only`; it is never checked out, imported or executed. A base
 # without the gate's flags fails the job (fail closed). Main must require the `lane-gate`
 # check for a failure to block a merge (a ruleset change, Mark's or a coordinator worker's).
+# REV-PROOF-claims (#4909), moved here from trusted-base.yml (#6404): a body that closes an issue
+# must name a follow-up for any part of it the body defers (base copy of tools/claims.py). The body
+# is this step's subject, so it reruns on `edited`; premerge holds this check.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
@@ -42,3 +45,10 @@ jobs:
           git fetch --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/remotes/pr/head"
           git cat-file -e "$HEAD_SHA^{commit}"
           python3 -I tools/risk_tier.py --git "$BASE_SHA" "$HEAD_SHA" --pr-branch "$PR_BRANCH" --pr-title "$PR_TITLE"
+      - name: Closing keywords against deferred parts (base copy of tools/claims.py)
+        if: ${{ !cancelled() }}
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          printf '%s\n' "$PR_BODY" > "$RUNNER_TEMP/claims-body.txt"
+          python3 -I tools/claims.py closes --body "$RUNNER_TEMP/claims-body.txt" --markdown "$GITHUB_STEP_SUMMARY"
