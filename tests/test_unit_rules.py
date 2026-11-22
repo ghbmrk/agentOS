@@ -4,8 +4,10 @@ broker/kernel/privfile's (TestUnitRulesUnderSystemd, TestBuiltUnits); these pin 
 
 REQ: KRN-2
 """
+import ast
 import hashlib
 import os
+import re
 import pathlib
 import shutil
 import subprocess
@@ -1440,102 +1442,279 @@ class EnvFilesTest(unittest.TestCase):
         self.assertEqual(set(pkg.values()), {"LD_PRELOAD=/var/lib/agentos-x/x.so\n"})
         self.assertLess(len(calls), 50 * depth, len(calls))
 
+    TYPE = "tmpfiles.d line of ours .* is of type"
+
     def test_a_tmpfiles_line_of_ours_making_a_package_s_env_file_fails_the_run(self):
-        # #6474: /run is a boot mount, so a file a tmpfiles.d line of ours writes there at boot is never read
+        # #6474: /run is a boot mount, so a file a tmpfiles.d line of ours writes there at boot is never read;
+        # #6495: a file of ours holds only d lines, so every writer of ours fails the run, wherever it writes
         units = [{"files": [{"ours": False, "text": "[Service]\nEnvironmentFile=-%t/pkgx-r\n"
                                                     "EnvironmentFile=-/etc/default/pkgx-%i\n"}]}]
         for line in ("f /run/pkgx-r - - - - LD_PRELOAD=/var/lib/agentos-x/x.so", "w+ %t/pkgx-* - - - - X=1",
                      "L /run - - - - /var/lib/agentos-x", "C /etc/default - - - - /usr/share/x",
-                     "f+ /etc/default/pkgx-a - - - - LD_PRELOAD=/x.so"):
+                     "f+ /etc/default/pkgx-a - - - - LD_PRELOAD=/x.so", "f /run/other - - - - X=1",
+                     "L /run/pkgx - - - - /x", "f %t/other - - - - X=1", "d= /run/x", "d+ /run/x", "D /run/x"):
             with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
                 v = tree(d, {"/usr/lib/tmpfiles.d/x.conf": line + "\n"})
-                with self.assertRaisesRegex(SystemExit, "makes at boot a file a unit's EnvironmentFile="):
+                with self.assertRaisesRegex(SystemExit, "unit rules: /usr/lib/tmpfiles.d/x.conf: " + self.TYPE):
                     r.env_files(v, units, lambda p: False)
                 # a package's own line is the package's
                 self.assertEqual(r.env_files(v, units, lambda p: p == "/usr/lib/tmpfiles.d/x.conf"), ({}, {}))
-        for line in ("d /run/pkgx-r 0700 root root -", "f /run/other - - - - X=1", "L /run/pkgx - - - - /x",
-                     "f %t/other - - - - X=1"):
+        for line in ("d /run/pkgx-r 0700 root root -", "d! /run/x", "d-! /run/x 0700", "# f /run/pkgx-r"):
             with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
                 v = tree(d, {"/usr/lib/tmpfiles.d/x.conf": line + "\n"})
                 self.assertEqual(r.env_files(v, units, lambda p: False), ({}, {}))
 
+    def test_a_tmpfiles_line_of_ours_off_the_directory_allowlist_fails_the_run(self):
+        # #6495 L3 7075438189 item 2: p (a FIFO any user may write) or c at an env path; and every type but d,
+        # so a type systemd adds later fails too. The refusal names the file, the line and its type (item 3).
+        units = [{"files": [{"ours": True, "text": "[Service]\nEnvironmentFile=-/run/agentos-x.env\n"}]}]
+        for typ in ("p", "c", "b", "z", "Z", "a+", "A", "h", "H", "t", "T", "e", "x", "X", "r", "R", "v", "q", "Q",
+                    "f^", "L+", "C+", "?"):
+            line = "%s /run/agentos-x.env 0666 - - - 8:1" % typ
+            with self.subTest(typ=typ), tempfile.TemporaryDirectory() as d:
+                v = tree(d, {"/usr/lib/tmpfiles.d/x.conf": line + "\n"})
+                with self.assertRaisesRegex(SystemExit, re.escape("x.conf: tmpfiles.d line of ours %r is of type %r; "
+                                                                  "a tmpfiles.d file of ours holds only d lines"
+                                                                  % (line, typ))):
+                    r.env_files(v, units, lambda p: False)
+
     def test_a_tmpfiles_path_is_read_unescaped_and_unquoted_as_systemd_tmpfiles_reads_it(self):
         # #6495 Security 1: systemd-tmpfiles reads its words with EXTRACT_UNQUOTE | EXTRACT_CUNESCAPE, so
-        # /run/pkg\x78-r is /run/pkgx-r and a quoted path runs past its spaces
-        units = [{"files": [{"ours": False, "text": "[Service]\nEnvironmentFile=-%t/pkgx-r\n"
-                                                    "EnvironmentFile=-/run/a b\n"}]}]
-        for line in ("f /run/pkg\\x78-r - - - - LD_PRELOAD=/x.so", 'f "/run/a b" - - - - LD_PRELOAD=/x.so',
-                     "f /run/a\\sb - - - - X=1", "f /run/'pkgx'-r - - - - X=1", '"f" /run/pkgx-r - - - - X=1',
-                     "\\x66 /run/pkgx-r - - - - X=1", "f /run/pkg\\170-r - - - - X=1",
-                     "f /run/pkg\\u0078-r - - - - X=1", "f \\x25t/pkgx-r - - - - X=1"):
+        # "\x66" is the type f, and a quoted type is read unquoted
+        units = [{"files": [{"ours": False, "text": "[Service]\nEnvironmentFile=-%t/pkgx-r\n"}]}]
+        for line in ('"f" /run/pkgx-r - - - - X=1', "\\x66 /run/pkgx-r - - - - X=1", "'f'+ /run/x - - - - X=1",
+                     '"d "/run/x', "\\x64\\x2b /run/x"):
             with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
                 v = tree(d, {"/usr/lib/tmpfiles.d/x.conf": line + "\n"})
-                with self.assertRaisesRegex(SystemExit, "makes at boot a file a unit's EnvironmentFile="):
+                with self.assertRaisesRegex(SystemExit, self.TYPE):
                     r.env_files(v, units, lambda p: False)
-        # a line systemd-tmpfiles refuses, or reads apart from the lint, fails the run
-        for line in ('f "/run/x - - - - X=1', "f /run/x\\q - - - - X=1", "f /run/x\\x00 - - - - X=1",
-                     "f /run/x\\", "f /run/../etc/default/pkgx - - - - X=1", "f /run/*/pkgx - - - - X=1"):
+        for line in ('"d" /run/x', "\\x64 /run/x", "d'!' /run/x"):
             with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
                 v = tree(d, {"/usr/lib/tmpfiles.d/x.conf": line + "\n"})
-                with self.assertRaisesRegex(SystemExit, "unit rules: /usr/lib/tmpfiles.d/x.conf: tmpfiles.d line"):
+                self.assertEqual(r.env_files(v, units, lambda p: False), ({}, {}))
+        # a line systemd-tmpfiles refuses fails the run
+        for line in ('d "/run/x', "d /run/x\\q", "d /run/x\\x00", "d /run/x\\", "d /run/x\\400", "d /run/\\U0000D800",
+                     "d /run/x 07\\q"):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                v = tree(d, {"/usr/lib/tmpfiles.d/x.conf": line + "\n"})
+                with self.assertRaisesRegex(SystemExit, "unit rules: /usr/lib/tmpfiles.d/x.conf: tmpfiles.d line of "
+                                            "ours .*: systemd-tmpfiles refuses its words"):
                     r.env_files(v, units, lambda p: False)
-        self.assertEqual(r.tmpfiles_words('f "/run/a b" - -'), ["f", "/run/a b"])
-        self.assertEqual(r.tmpfiles_words("w /run/a\\tb\\303\\251"), ["w", "/run/a\tb\u00e9"])
-        self.assertEqual(r.tmpfiles_words("d /run/a\\U0001F600"), ["d", "/run/a\U0001F600"])
+        self.assertEqual(r.tmpfiles_words('f "/run/a b" - -'), (["f", "/run/a b", "-", "-"], ""))
+        self.assertEqual(r.tmpfiles_words("w /run/a\\tb\\303\\251", 2), (["w", "/run/a\tbé"], ""))
+        self.assertEqual(r.tmpfiles_words("d /run/a\\U0001F600 0700", 2), (["d", "/run/a\U0001F600"], "0700"))
+        self.assertEqual(r.tmpfiles_words('L "/run/x y" - - - -  /t "u v" '), (["L", "/run/x y", "-", "-", "-", "-"],
+                                                                             '/t "u v"'))
+
+    def test_a_tmpfiles_line_ends_at_nul_cr_or_lf_as_systemd_tmpfiles_reads_it(self):
+        # #6495 Security R1: read_line ends a line at NUL too, so "d /run/q\0f /run/pkgx-r ..." is two lines;
+        # a vertical tab or form feed ends none, and only space and tab are stripped
+        units = [{"files": [{"ours": False, "text": "[Service]\nEnvironmentFile=-%t/pkgx-r\n"}]}]
+        for text in ("d /run/q\0f /run/pkgx-r - - - - X=1\n", "d /run/q\rf /run/pkgx-r - - - - X=1\n"):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
+                v = tree(d, {"/usr/lib/tmpfiles.d/x.conf": text})
+                with self.assertRaisesRegex(SystemExit, "line of ours 'f /run/pkgx-r - - - - X=1' is of type 'f'"):
+                    r.env_files(v, units, lambda p: False)
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/usr/lib/tmpfiles.d/x.conf": "d /run/q\vf /run/x\n\x0c\n# c\0d /run/y\n"})
+            self.assertEqual(r.tmpfiles_lines(r.BootView(v)), [("/usr/lib/tmpfiles.d/x.conf", "d /run/q\vf /run/x"),
+                                                              ("/usr/lib/tmpfiles.d/x.conf", "\x0c"),
+                                                              ("/usr/lib/tmpfiles.d/x.conf", "d /run/y")])
 
     @unittest.skipUnless(shutil.which("systemd-tmpfiles"), "no systemd-tmpfiles")
     def test_tmpfiles_words_agree_with_systemd_tmpfiles(self):
-        # #6495 Security 1, differential: each line's path as systemd-tmpfiles --create makes it
-        for path in ("/run/pkg\\x78-r", '"/run/a b"', "/run/a\\sb", "/run/'q'x", '/run/x"y z"w', "/run/a\\\\b",
-                     "/run/c\\303\\251", "/run/d\\u00e9", "/run/e\\'f"):
-            with self.subTest(path=path), tempfile.TemporaryDirectory() as d:
+        # #6495 Security 1, differential: each line's path, and an L line's target, as systemd-tmpfiles
+        # --create makes it; a line the reader refuses makes nothing
+        def made(text):
+            with tempfile.TemporaryDirectory() as d:
                 conf = pathlib.Path(d) / "x.conf"
-                conf.write_text("f %s - - - - X=1\n" % path)
+                conf.write_bytes(text.encode("utf-8", "surrogateescape"))
                 subprocess.run(["systemd-tmpfiles", "--create", "--root=" + d, str(conf)],
                                check=False, capture_output=True)
-                made = sorted(str(p)[len(d):] for p in pathlib.Path(d, "run").iterdir())
-                self.assertEqual(made, [r.tmpfiles_words("f " + path)[1]])
+                run = pathlib.Path(d, "run")
+                return sorted((str(p)[len(d):], os.readlink(p) if p.is_symlink() else None)
+                              for p in (run.iterdir() if run.is_dir() else []))
+
+        def read(text):
+            out = []
+            for _, line in r.FINALIZE.tmpfiles_lines(text.encode("utf-8", "surrogateescape")):
+                got = r.tmpfiles_words(line)
+                if got:
+                    (typ, path, *_), arg = got
+                    out.append((path, arg if typ == "L" else None))
+            return sorted(out)
+        for path in ("/run/pkg\\x78-r", '"/run/a b"', "/run/a\\sb", "/run/'q'x", '/run/x"y z"w', "/run/a\\\\b",
+                     "/run/c\\303\\251", "/run/d\\u00e9", "/run/e\\'f", "/run/f\\uFDD0", "/run/g\vh", "/run/i\\400",
+                     "/run/j\\x00", "/run/k\\q", '"/run/l', "/run/m\\uD800", "/run/n\\U0000D800",
+                     "/run/o\\U0010FFFF", "/run/p\\U0001F600", "/run/q\\uFFFE", "/run/r\\U00110000"):
+            with self.subTest(path=path):
+                self.assertEqual(made("f %s - - - - X=1\n" % path), read("f %s - - - - X=1\n" % path))
+        for text in ('L "/run/x y" - - - - /var/lib/d\n', "L /run/t - - - -     /etc\n", "L /run/z - - - - \"/e x\"\n",
+                     "d /run/q\0f /run/p - - - - X=1\n", "d /run/r\rd /run/s\n", "d /run/t\x0cd\n", "d /run/u\x85v\n"):
+            with self.subTest(text=text):
+                self.assertEqual(made(text), read(text))
 
     def test_a_tmpfiles_line_of_ours_making_our_own_env_file_fails_the_run(self):
         # #6495 Security 2: a unit of ours naming a /run env file a tmpfiles.d line of ours writes
         units = [{"files": [{"ours": True, "text": "[Service]\nEnvironmentFile=-/run/agentos-x.env\n"}]}]
         with tempfile.TemporaryDirectory() as d:
             v = tree(d, {"/usr/lib/tmpfiles.d/x.conf": "f /run/agentos-x.env - - - - LD_PRELOAD=/x.so\n"})
-            with self.assertRaisesRegex(SystemExit, "makes at boot a file a unit's EnvironmentFile=/run/agentos-x"):
+            with self.assertRaisesRegex(SystemExit, self.TYPE):
                 r.env_files(v, units, lambda p: False)
 
     def test_a_tmpfiles_line_writing_through_a_link_fails_the_run(self):
-        # #6495 L3: the env path or the tmpfiles path reaching the same file through a tree link, or an L line's
+        # #6495 L3 (9ed2535 and 7075438189 item 1) and Security 7075436586 item 1: the env path or the
+        # tmpfiles path reaching the same file through a tree link, an L line's link (relative, through a
+        # tree link, or a quoted path holding a space) or a link a C line copies. Each writer of ours fails
+        # the run by its type, whatever the links.
         units = [{"files": [{"ours": False, "text": "[Service]\nEnvironmentFile=-/etc/default/pkgx\n"
-                                                    "EnvironmentFile=-/etc/pkgy/%i.env\n"}]}]
-        pkg = lambda p: p == "/etc/default/pkgx"
+                                                    "EnvironmentFile=-/etc/pkgy/%i.env\nEnvironmentFile=-/run/x y/pkgx\n"
+                                                    "EnvironmentFile=-/run/lnk/pkgx\n"}]}]
+        pkg = lambda p: p in ("/etc/default/pkgx", "/usr/lib/tmpfiles.d/pkg.conf")
         for files in ({"/etc/default/pkgx": "-> /run/pkgx-env", "/x.conf": "f /run/pkgx-env - - - - LD_PRELOAD=/x.so"},
                       {"/etc/default": "-> /run/dflt", "/x.conf": "f /run/dflt/pkgx - - - - LD_PRELOAD=/x.so"},
                       {"/etc/pkgy": "-> /var/lib/y", "/var/lib/y/a.env": "X=1\n",
                        "/x.conf": "f /var/lib/y/b.env - - - - LD_PRELOAD=/x.so"},
-                      {"/etc/pkgy/q": "-> /run/q", "/x.conf": "f /run/q.env - - - - LD_PRELOAD=/x.so"},
-                      # the tree's /run/pkgx-env is not there at boot, so the file is the line's
-                      {"/etc/default/pkgx": "-> /run/pkgx-env", "/run/pkgx-env": "-> /var/lib/z",
-                       "/x.conf": "f /run/pkgx-env - - - - LD_PRELOAD=/x.so"}):
-            with self.subTest(files=files), tempfile.TemporaryDirectory() as d:
-                files = dict(files, **{"/usr/lib/tmpfiles.d/x.conf": files.pop("/x.conf") + "\n"})
-                v = tree(d, files)
-                with self.assertRaisesRegex(SystemExit, "makes at boot a file a unit's EnvironmentFile="):
-                    r.env_files(v, units, pkg)
-        for files in ({"/etc/default/pkgx": "X=1\n", "/var/lib/x": "-> /etc/default",
+                      {"/etc/default/pkgx": "X=1\n", "/var/lib/x": "-> /etc/default",
                        "/x.conf": "w /var/lib/x/pkgx - - - - LD_PRELOAD=/x.so"},
                       {"/x.conf": "L /run/x - - - - /etc/default\nf /run/x/pkgx - - - - LD_PRELOAD=/x.so"},
-                      {"/x.conf": "L /run/x - - - - /etc\nf /etc/default/pkgx - - - - LD_PRELOAD=/x.so"}):
+                      # Security 7075436586 item 1
+                      {"/usr/lib/tmpfiles.d/pkg.conf": 'L "/run/x y" - - - - /var/lib/d\n',
+                       "/x.conf": "f /var/lib/d/pkgx - - - - LD_PRELOAD=/x.so"},
+                      # L3 7075438189 item 1 (a): a C line copies a tree link
+                      {"/etc/default/pkgx": "X=1\n", "/usr/share/factory/cx/l": "-> ../../etc/default",
+                       "/x.conf": "C /run/cx - - - - /usr/share/factory/cx\nw /run/cx/l/pkgx - - - - LD_PRELOAD=/x.so"},
+                      # (b) a relative L target, and (c) one that is a tree link
+                      {"/usr/lib/tmpfiles.d/pkg.conf": "L /run/lnk - - - - ../var/q\n",
+                       "/x.conf": "f /var/q/pkgx - - - - LD_PRELOAD=/x.so"},
+                      {"/usr/lib/tmpfiles.d/pkg.conf": "L /run/lnk - - - - /var/r\n", "/var/r": "-> /var/q",
+                       "/x.conf": "f /var/q/pkgx - - - - LD_PRELOAD=/x.so"}):
             with self.subTest(files=files), tempfile.TemporaryDirectory() as d:
                 files = dict(files, **{"/usr/lib/tmpfiles.d/x.conf": files.pop("/x.conf") + "\n"})
                 v = tree(d, files)
-                with self.assertRaisesRegex(SystemExit, "writes at boot where the unit lint does not read"):
+                with self.assertRaisesRegex(SystemExit, "x.conf: " + self.TYPE):
                     r.env_files(v, units, pkg)
-        # an unlinked writer elsewhere passes
+        # a directory of ours under any of those links passes: it puts no content there
         with tempfile.TemporaryDirectory() as d:
-            v = tree(d, {"/etc/default/pkgx": "-> /run/pkgx-env",
-                         "/usr/lib/tmpfiles.d/x.conf": "f /run/other - - - - X=1\n"})
+            v = tree(d, {"/etc/default/pkgx": "-> /run/pkgx-env", "/usr/lib/tmpfiles.d/pkg.conf": "L /run/lnk - - - - /var/q\n",
+                         "/usr/lib/tmpfiles.d/x.conf": "d /run/pkgx-env\nd /var/q/pkgx 0700\n"})
             self.assertEqual(r.env_files(v, units, pkg), ({}, {}))
+
+    def test_a_continued_environment_file_line_is_read_as_systemd_reads_it(self):
+        # #6495 Security R2: config_parse joins a line ending in a backslash with the next, the backslash
+        # read as a space, and skips a comment line inside the continuation
+        bad = "LD_PRELOAD=/x.so\n"
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/etc/default/ pkgx": bad, "/etc/default/pkgx": bad, "/etc/a .env": "A=1\n",
+                         "/etc/b.env": "B=1\n"})
+            pkg_unit = "[Service]\nEnvironmentFile=-/etc/default/\\\npkgx\n"
+            ours_unit = "[Service]\nEnvironmentFile=-/etc/a\\\n;x\n.env\nEnvironmentFile=/etc/b.env\\\n"
+            units = [{"files": [{"ours": False, "text": pkg_unit}]}, {"files": [{"ours": True, "text": ours_unit}]}]
+            self.assertEqual(r.env_files(v, units, lambda p: False),
+                             ({"/etc/a .env": "A=1\n", "/etc/b.env": "B=1\n"},
+                              {"/etc/default/ pkgx": bad}))
+            # a file config_parse refuses fails the run, naming it
+            for text in ("[Service]\nEnvironmentFile=/etc/a.env\r\n", "[Service]\0\n", "[Service\n"):
+                with self.subTest(text=text):
+                    u = [{"files": [{"ours": False, "path": "/usr/lib/systemd/system/p.service", "text": text}]}]
+                    with self.assertRaisesRegex(SystemExit, "p.service: a unit file systemd's config_parse refuses"):
+                        r.env_files(v, u, lambda p: False)
+
+
+class TmpfilesReaderTest(unittest.TestCase):
+    """#6495: mkosi.finalize's tmpfiles_lines and tmpfiles_words are the one reading of tmpfiles.d lines and
+    fields. This parses unit_rules.py and mkosi.finalize and fails on any other read of one: a tmpfiles.d
+    line (from tmpfiles_lines or tmpfiles_entries, or tmpfiles_links' line) may be handed to tmpfiles_words
+    or tmpfiles_stock, compared, sliced from its start or formatted into a message, and nothing else."""
+
+    FILES = (ROOT / "image" / "unit_rules.py", ROOT / "image" / "mkosi" / "mkosi.finalize")
+    SOURCES = {"tmpfiles_lines": -1, "tmpfiles_entries": -1}  # which element of each yielded tuple is the line
+    READERS = {"tmpfiles_words", "tmpfiles_stock"}
+    PRODUCERS = {"tmpfiles_lines", "tmpfiles_entries", "tmpfiles_words", "tmpfiles_stock"}
+
+    def misuses(self, src):
+        tree_ = ast.parse(src)
+        parents = {}
+        for node in ast.walk(tree_):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+        out = []
+        for fn in [n for n in ast.walk(tree_) if isinstance(n, ast.FunctionDef) and n.name not in self.PRODUCERS]:
+            held = set()  # names bound to a call of a source (lines = tmpfiles_lines(...))
+            for n in ast.walk(fn):
+                if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call) and self.source(n.value):
+                    held |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+                if isinstance(n, ast.Assign) and isinstance(n.value, ast.Tuple):
+                    for t in n.targets:
+                        if isinstance(t, ast.Tuple):
+                            held |= {x.id for x, v in zip(t.elts, n.value.elts) if isinstance(x, ast.Name)
+                                     and isinstance(v, ast.Call) and self.source(v)}
+            tainted = set()
+            for n in ast.walk(fn):
+                it = n.iter if isinstance(n, (ast.For, ast.comprehension)) else None
+                if it is None:
+                    continue
+                if (isinstance(it, ast.Call) and self.source(it)) or (isinstance(it, ast.Name) and it.id in held):
+                    t = n.target
+                    line = t.elts[-1] if isinstance(t, ast.Tuple) else None
+                    if isinstance(line, ast.Name):
+                        tainted.add(line.id)
+                    elif not isinstance(line, ast.Name):
+                        out.append("%s line %d: a tmpfiles.d line bound to no name" % (fn.name, n.lineno))
+            for n in ast.walk(fn):
+                if isinstance(n, ast.Name) and n.id in tainted and isinstance(n.ctx, ast.Load):
+                    if not self.allowed(n, parents):
+                        out.append("%s line %d: %s" % (fn.name, n.lineno, ast.unparse(parents[n])))
+        return out
+
+    def source(self, call):
+        f = call.func
+        return (f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)) in self.SOURCES
+
+    def allowed(self, n, parents):
+        p = parents[n]
+        if isinstance(p, ast.Call) and n in p.args:
+            f = p.func
+            return (f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)) in self.READERS
+        if isinstance(p, ast.Subscript) and p.value is n:
+            return isinstance(p.slice, ast.Slice) and p.slice.lower is None and p.slice.step is None
+        if isinstance(p, ast.BinOp) and isinstance(p.op, ast.Mod) and p.right is n:
+            return True
+        return isinstance(p, (ast.Tuple, ast.List, ast.Set, ast.Compare, ast.FormattedValue))
+
+    def test_no_other_split_of_a_tmpfiles_d_line(self):
+        for f in self.FILES:
+            with self.subTest(file=f.name):
+                self.assertEqual(self.misuses(f.read_text()), [])
+        # unit_rules reads lines and fields with mkosi.finalize's own functions
+        self.assertIs(r.tmpfiles_words, r.FINALIZE.tmpfiles_words)
+        src = (ROOT / "image" / "unit_rules.py").read_text()
+        self.assertNotIn("def tmpfiles_words", src)
+        self.assertIn("FINALIZE.tmpfiles_lines(", src)
+        # the one split of a tmpfiles.d file into lines is mkosi.finalize's tmpfiles_lines: no other function
+        # named for tmpfiles.d, in either file, splits text into lines
+        for f in self.FILES:
+            src = f.read_text()
+            for fn in ast.walk(ast.parse(src)):
+                if isinstance(fn, ast.FunctionDef) and "tmpfiles" in fn.name and fn.name != "tmpfiles_lines":
+                    seg = ast.get_source_segment(src, fn)
+                    with self.subTest(fn=fn.name):
+                        self.assertFalse(any(x in seg for x in ("re.split(", "splitlines(", 'split("\\n")')), fn.name)
+
+    def test_the_check_refuses_each_other_split(self):
+        # the check's own mutants: each other reading of a tmpfiles.d line is caught
+        base = ("def a(view):\n    for f, line in tmpfiles_lines(view):\n        %s\n"
+                "def b(root):\n    lines = tmpfiles_lines(root)\n    for f, ln in lines:\n        %s\n")
+        for bad in ("w = line.split()", "w = line.split(None, 6)", "w = shlex.split(line)", "t = line[0]",
+                    "p = line.partition(' ')", "t = line.strip()", "x = re.split('\\\\s', line)", "w = (line or '').split()"):
+            with self.subTest(bad=bad):
+                self.assertTrue(self.misuses(base % (bad, "pass")))
+                self.assertTrue(self.misuses(base % ("pass", bad.replace("line", "ln"))))
+        good = ("w = tmpfiles_words(line)", "raise SystemExit('%r' % (line,))", "x = line[:80]",
+                "y = (f, line) in s", "z = any(c in line for c in '%')")
+        for ok in good:
+            with self.subTest(ok=ok):
+                self.assertEqual(self.misuses(base % (ok, "pass")), [])
 
 
 class UserManagerTest(unittest.TestCase):

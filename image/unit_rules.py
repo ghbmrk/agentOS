@@ -66,6 +66,21 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import offline_systemd  # noqa: E402
 
+
+def _finalize():
+    """mkosi.finalize as a module: its tmpfiles_lines, tmpfiles_words and config_lines are the image's one
+    reading of tmpfiles.d lines and unit files (#6495), so this lint reads them as the build check does."""
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader("agentos_finalize", str(HERE / "mkosi" / "mkosi.finalize"))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(mod)
+    return mod
+
+
+FINALIZE = _finalize()
+tmpfiles_words = FINALIZE.tmpfiles_words
+
 INSTANCE = "agentos-unit-lint"
 # The system manager's unit directories (systemd path-lookup.c, v255 to v257), highest first. A
 # directory missed here makes an alias into it read as a link of ours, which holds more, never less.
@@ -481,7 +496,8 @@ def tmpfiles_lines(view, usr_view=None):
     USR_VIEW, /usr's directories are listed there (tree_links). #5703 Security delta 2: a link anywhere
     on the way to a file, but a file's own link to exactly /dev/null, fails the run, so no file is read
     from where the tree's content is not the box's at boot (BOOT_MOUNTS, or a mount the list misses).
-    mkosi.finalize refuses every link under tmpfiles.d in the built image, so the image needs none."""
+    mkosi.finalize refuses every link under tmpfiles.d in the built image, so the image needs none. Lines
+    are read by mkosi.finalize's tmpfiles_lines, their fields by its tmpfiles_words (#6495)."""
     chosen = {}
     for d in TMPFILES_DIRS:
         lister = usr_view if usr_view and d.startswith("/usr/") else view
@@ -501,15 +517,13 @@ def tmpfiles_lines(view, usr_view=None):
         final, _ = view.resolve(chosen[e])
         if final == "/dev/null" or view.kind(final) != 0o100000:
             continue
-        for line in view.text(final).splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                out.append((chosen[e], line))
+        # #6495 Security R1: lines end at LF, CR or NUL and lose only blanks, as systemd-tmpfiles reads them
+        out += [(chosen[e], line) for _, line in FINALIZE.tmpfiles_lines(view.data(final))]
     return out
 
 
 def tmpfiles_links(view, usr_view=None, mounts=()):
-    """{path: (file, line, target)} for each link a tmpfiles.d L line makes at boot (#5651, KRN-2), its target
+    """{path: (file, line, target, type)} for each link a tmpfiles.d L line makes at boot (#5651, KRN-2), its target
     absolute (the factory copy when it gives none): tmpfiles.allow gates these lines by review alone. VIEW is
     a BootView (boot_links), which resolves the targets with the tree's links and the other lines' (MountView).
     Every L line counts, with any modifier; a tree entry at a plain L line's path fails the run, unless it is
@@ -523,13 +537,13 @@ def tmpfiles_links(view, usr_view=None, mounts=()):
     systemd-tmpfiles' to decide) fails the run too."""
     lines, named = tmpfiles_lines(view, usr_view), {}
     for f, line in lines:
-        w = line.split()
+        w = (tmpfiles_words(line, 2) or ([],))[0]  # None: systemd-tmpfiles skips the line
         if len(w) > 1:
             named.setdefault(w[1], []).append(w[0])
-    found, found_mod = {}, {}
+    found = {}
     for f, line in lines:
-        w = line.split(None, 6)
-        if not w[0].startswith("L"):
+        w, arg = tmpfiles_words(line) or ([], "")
+        if not w or not w[0].startswith("L"):
             continue
         if any(ch in line for ch in "%\"\'\\"):
             raise SystemExit("unit rules: %s: L line %r holds a specifier, a quote or an escape, which the "
@@ -552,10 +566,9 @@ def tmpfiles_links(view, usr_view=None, mounts=()):
         if via:
             raise SystemExit("unit rules: %s: L line %r: its path's directory passes through a link in the "
                              "tree (%s), which may not be there at boot" % (f, line, via[0]))
-        arg = w[6].strip() if len(w) > 6 else "-"
         target = "/usr/share/factory" + p if arg in ("", "-") else os.path.join(os.path.dirname(p), arg)
-        found[p], found_mod[p] = (f, line, target), w[0]
-    for key, (f, line, target) in found.items():
+        found[p] = (f, line, target, w[0])
+    for key, (f, line, target, typ) in found.items():
         final, via = view.resolve(target)
         if via:
             raise SystemExit("unit rules: %s: L line %r: its target passes through a link in the tree (%s), "
@@ -563,7 +576,7 @@ def tmpfiles_links(view, usr_view=None, mounts=()):
         # #5703 L3 6872965749: a plain L leaves whatever the tree has at its path, so a tree entry there
         # fails the run unless it is a link that resolves where the line's does (debian's /etc/mtab);
         # L+ removes the entry first. Which of the two is there at boot rests on mounts; neither is picked.
-        if "+" not in found_mod[key] and view.lstat(key) is not None and (
+        if "+" not in typ and view.lstat(key) is not None and (
                 view.readlink(key) is None or view.resolve(key)[0] != final):
             raise SystemExit("unit rules: %s: L line %r: the tree already has an entry there, which a plain L "
                              "leaves in place; use L+, remove the entry, or make it a link to the same target"
@@ -581,10 +594,11 @@ def tmpfiles_copies(view, links, usr_view=None, mounts=()):
     any L line's path or one of MOUNTS (mount_points: its file system, not the tree, is the source at boot),
     or one outside /usr (#5715: no exception; the image drops systemd's /.extra lines)."""
     lines = tmpfiles_lines(view, usr_view)
-    ls = [w[1] for w in (line.split() for _, line in lines) if w[0].startswith("L") and len(w) > 1]
+    ls = [w[1] for w, _ in filter(None, (tmpfiles_words(line, 2) for _, line in lines))
+          if len(w) > 1 and w[0].startswith("L")]
     for f, line in lines:
-        w = line.split(None, 6)
-        if not w[0].startswith("C"):
+        w, arg = tmpfiles_words(line) or ([], "")
+        if not w or not w[0].startswith("C"):
             continue
         if any(ch in line for ch in "%\"\'\\"):
             raise SystemExit("unit rules: %s: C line %r holds a specifier, a quote or an escape, which the "
@@ -592,7 +606,6 @@ def tmpfiles_copies(view, links, usr_view=None, mounts=()):
         if "~" in w[0] or "^" in w[0]:
             raise SystemExit("unit rules: %s: C line %r: its source is encoded or a credential, which the "
                              "unit lint does not read" % (f, line))
-        arg = w[6].strip() if len(w) > 6 else "-"
         src = "/usr/share/factory" + (w[1] if len(w) > 1 else "") if arg in ("", "-") else arg
         if not src.startswith("/") or src.startswith("//") or os.path.normpath(src) != src:
             raise SystemExit("unit rules: %s: C line %r: its source is not absolute and normal" % (f, line))
@@ -770,8 +783,8 @@ def boot_links(view, usr_view=None):
     # #5731 Security 6877511165: a plain L leaves a tree entry at its path (tmpfiles_links lets only a link
     # through there), so at boot that path is the tree's link, not the line's: the MountView keeps it, and
     # every walk through it reads the tree's link.
-    kept = {k for k, (_, l, _) in lines.items() if "+" not in l.split()[0] and boot.lstat(k) is not None}
-    mv = MountView(boot, mounts, {k: t for k, (_, _, t) in lines.items() if k not in kept})
+    kept = {k for k, (_, _, _, typ) in lines.items() if "+" not in typ and boot.lstat(k) is not None}
+    mv = MountView(boot, mounts, {k: t for k, (_, _, t, _) in lines.items() if k not in kept})
     drop = ", or drop it (mkosi.conf RemoveFiles=) if a package makes it"
 
     def walk(k, line, p):
@@ -1015,7 +1028,18 @@ def manager_confs(view, packaged):
 
 
 # An EnvironmentFile= line, as systemd reads one: blanks around the key and value are dropped.
-ENV_LINE = re.compile(r"[ \t]*EnvironmentFile[ \t]*=[ \t]*(.*?)[ \t]*\Z")
+def env_values(f):
+    """The EnvironmentFile= values unit file F ({"path", "text"}) sets, as systemd's config_parse reads them
+    (mkosi.finalize's config_lines): a line ending in an unescaped backslash continues into the next, the
+    backslash read as a space, and a comment line inside a continuation is skipped (#6495 Security R2).
+    Every section counts, which reads more, never less. A file config_parse refuses (NUL, CR, invalid
+    UTF-8, a bad section header) fails the run: systemd stops reading it there, and so does not this lint."""
+    try:
+        lines = FINALIZE.config_lines(f["text"].encode("utf-8", "surrogateescape"))
+    except FINALIZE.Unparsable as e:
+        raise SystemExit("unit rules: %s: a unit file systemd's config_parse refuses (%s), whose EnvironmentFile= "
+                         "lines the unit lint does not read; fix the file (#6495)" % (f.get("path", "a unit file"), e))
+    return [v for _, k, v in lines if k == "EnvironmentFile"]
 
 
 # #6312 Security 1: the values systemd 257 gives a path-valued specifier in a unit's EnvironmentFile=
@@ -1034,7 +1058,7 @@ ENV_REFUSED_SPECIFIERS = "yYs"
 ENV_SPECIFIER = re.compile(r"%(.?)")
 
 
-WILD = None  # in a path pattern (env_patterns, tmpfiles_pattern): any run of bytes, "/" included
+WILD = None  # in a path pattern (env_patterns): any run of bytes, "/" included
 
 
 def env_patterns(p):
@@ -1074,31 +1098,6 @@ def pattern_step(pat, states, text):
     return frozenset(states)
 
 
-def patterns_meet(a, b):
-    """Whether some path matches both patterns A and B (env_patterns, tmpfiles_pattern)."""
-    seen, todo = set(), [(0, 0)]
-    while todo:
-        i, j = todo.pop()
-        if (i, j) in seen:
-            continue
-        seen.add((i, j))
-        if i == len(a) and j == len(b):
-            return True
-        x = a[i] if i < len(a) else ""
-        y = b[j] if j < len(b) else ""
-        if x is WILD:
-            todo.append((i + 1, j))
-        if y is WILD:
-            todo.append((i, j + 1))
-        if x is WILD and y not in (WILD, ""):
-            todo.append((i, j + 1))
-        if y is WILD and x not in (WILD, ""):
-            todo.append((i + 1, j))
-        if x not in (WILD, "") and x == y:
-            todo.append((i + 1, j + 1))
-    return False
-
-
 def env_matches(boot, pats, ours_link=lambda link: True):
     """Each path in BOOT that one of PATS (env_patterns) may name: a fixed one as it is; one with a WILD by
     a walk from the directory its literal part ends in, as systemd would open it, directory links followed.
@@ -1135,212 +1134,59 @@ def env_matches(boot, pats, ours_link=lambda link: True):
     return sorted(out)
 
 
-# systemd-tmpfiles 257's path specifiers for the system manager; every other one, and a glob character, is
-# read as WILD (tmpfiles_pattern).
-TMPFILES_PATH_SPECIFIERS = {"t": "/run", "S": "/var/lib", "C": "/var/cache", "L": "/var/log", "T": "/tmp",
-                            "V": "/var/tmp", "h": "/root", "%": "%"}
-# The tmpfiles.d types that put content at their path at boot: write a file (f, F, w), copy (C) or link (L).
-TMPFILES_WRITERS = "fFwCL"
-# cunescape_one's (src/basic/escape.c, v255 to v257) one-character escapes.
-TMPFILES_ESCAPES = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "\\": 92, '"': 34, "'": 39,
-                    "s": 32}
+# #6495 (L3 7075438189 items 1 to 3, Potency): the tmpfiles.d types a file of ours may hold, an allowlist,
+# so a type systemd adds later is refused too. d makes a directory, or sets an existing one's mode and
+# owner, and puts no content at its path. Every other type writes a file (f, F, w), copies a tree with its
+# links (C), makes a link (L), a FIFO or a device node (p, c, b), or sets an existing file's mode, owner,
+# ACL or attributes (z, Z, a, A, h, H, t, T, e): each may put content where a unit's EnvironmentFile=
+# reads at boot, or hand that file to a writer. The modifiers ! (at boot only) and - (errors ignored)
+# change nothing the line makes. Files of ours hold only d lines (mkosi.extra's agentos.conf).
+TMPFILES_OURS_TYPES = frozenset("d")
+TMPFILES_OURS_MODIFIERS = frozenset("!-")
 
 
-def tmpfiles_words(line, n=2):
-    """The first N words of a tmpfiles.d LINE as systemd-tmpfiles reads them (extract_many_words with
-    EXTRACT_UNQUOTE | EXTRACT_CUNESCAPE, src/basic/extract-word.c, v255 to v257): split at unquoted
-    whitespace, a quote (' or ") anywhere in a word opening a run that runs to the same quote, and a
-    backslash escape (cunescape_one) read inside or outside one. None where systemd-tmpfiles refuses the
-    line: an unknown or NUL escape, a trailing backslash or an open quote (#6495 Security 1)."""
-    b, i, words = line.encode("utf-8", "surrogateescape"), 0, []
-    hexd, octd = b"0123456789abcdefABCDEF", b"01234567"
-    while len(words) < n:
-        while i < len(b) and b[i] in b" \t\n\r":
-            i += 1
-        if i == len(b):
-            break
-        out, quote = bytearray(), None
-        while i < len(b) and (quote or b[i] not in b" \t\n\r"):
-            c = b[i]
-            i += 1
-            if quote and c == quote:
-                quote = None
-            elif not quote and c in b"'\"":
-                quote = c
-            elif c != 0x5C:
-                out.append(c)
-            elif i == len(b):
-                return None
-            else:
-                e, i = chr(b[i]), i + 1
-                if e in TMPFILES_ESCAPES:
-                    out.append(TMPFILES_ESCAPES[e])
-                elif e == "x" and len(b) >= i + 2 and all(x in hexd for x in b[i:i + 2]):
-                    v, i = int(b[i:i + 2], 16), i + 2
-                    if not v:
-                        return None
-                    out.append(v)
-                elif e in "uU" and len(b) >= i + (4 if e == "u" else 8) and \
-                        all(x in hexd for x in b[i:i + (4 if e == "u" else 8)]):
-                    k = 4 if e == "u" else 8
-                    v, i = int(b[i:i + k], 16), i + k
-                    if not v or v > 0x10FFFF or 0xD800 <= v <= 0xDFFF:
-                        return None
-                    out += chr(v).encode("utf-8")
-                elif e in "0123" and len(b) >= i + 2 and all(x in octd for x in b[i:i + 2]):
-                    v, i = int(e + b[i:i + 2].decode(), 8), i + 2
-                    if not v:
-                        return None
-                    out.append(v)
-                else:
-                    return None
-        if quote:
-            return None
-        words.append(bytes(out).decode("utf-8", "surrogateescape"))
-    return words
-
-
-def tmpfiles_pattern(path):
-    """A tmpfiles.d line's PATH (as tmpfiles_words gives it) as a pattern (env_patterns' form): each
-    TMPFILES_PATH_SPECIFIERS value as it is, any other specifier, glob character, quote or backslash as WILD,
-    which may name more, never less."""
-    out = []
-    for i, part in enumerate(ENV_SPECIFIER.split(path)):
-        if i % 2:
-            out += list(TMPFILES_PATH_SPECIFIERS.get(part, [WILD]))
-        else:
-            out += [WILD if c in "*?[]\"\'\\" else c for c in part]
-    return tuple(out)
-
-
-def env_reach(view, pats):
-    """The paths in VIEW where the files PATS (env_patterns) may name sit once the tree's links are followed,
-    as patterns: for each path a walk (env_matches') reaches through a link, the path it resolves to followed
-    by the rest of the pattern. A tmpfiles.d line writing there writes the file the unit opens (#6495 L3)."""
-    out = set()
-    for pat in pats:
-        if WILD not in pat:
-            final, links = view.resolve("".join(pat))
-            if links:
-                out.add(tuple(final))
-            continue
-        lit = "".join(pat[:pat.index(WILD)])
-        top = lit.rpartition("/")[0] or "/"
-        todo, seen = [(top, pattern_step(pat, {0}, top.rstrip("/")))], set()
-        while todo:
-            d, states = todo.pop()
-            final, links = view.resolve(d)
-            if (final, states) in seen:
-                continue
-            seen.add((final, states))
-            if links:
-                out.update(tuple(final.rstrip("/")) + pat[i:] for i in states)
-            for n in view.entries(d):
-                q = d.rstrip("/") + "/" + n
-                after = pattern_step(pat, states, "/" + n)
-                if not after:
-                    continue
-                fq, ql = view.resolve(q)
-                if view.kind(fq) == 0o040000:
-                    todo.append((q, after))
-                elif ql:
-                    out.update(tuple(fq) + pat[i:] for i in after)
-    return list(out)
-
-
-def tmpfiles_writer_unread(p, pat, plain, aliases):
-    """Why the unit lint cannot tell where a tmpfiles.d writer line at P (PAT, tmpfiles_pattern) writes, or
-    None: a . or .. in P; a wildcard in its directory, which a glob may walk through any link; its directory
-    passing through a link in PLAIN (systemd-tmpfiles follows a root-owned parent link, CHASE_SAFE); or P at
-    or under one of ALIASES' targets, or under its path, which an L line links at boot (#6495 L3)."""
-    if any(c in (".", "..") for c in p.split("/")):
-        return "its path holds a . or .."
-    d = pat[:len(pat) - 1 - pat[::-1].index("/")] if "/" in pat else ()
-    if WILD in d:
-        return "its directory holds a wildcard"
-    via = plain.resolve("".join(d) or "/")[1]
-    if via:
-        return "its directory passes through a link in the tree (%s)" % via[0]
-    for lp, lt in aliases:
-        if patterns_meet(pat, lp + ("/", WILD)) or patterns_meet(pat, lt) or patterns_meet(pat, lt + ("/", WILD)):
-            return "it is under an L line's path, or at or under its target, which the line links at boot"
-    return None
-
-
-def tmpfiles_env_refusals(boot, units, packaged, usr_view=None):
-    """#6474: each tmpfiles.d line of ours (in a file not byte-identical to a package's, PACKAGED) of a type
-    that puts content at its path (TMPFILES_WRITERS), at, or for C and L under, a path an EnvironmentFile=
-    line in UNITS, a package's or ours, may name, as written or with the tree's links followed at boot (env_reach at BOOT):
-    such a file is made at boot (under /run, which BootView hides, or anywhere the tree has none), so
-    env_files never reads it. The line's words are read as systemd-tmpfiles reads them (tmpfiles_words). A
-    line of ours it cannot read, or a writer of ours whose directory holds a wildcard, a . or .., or passes
-    through a link in the tree or under any L line's path, or whose path is at or under any L line's
-    target, fails the run too, since where it writes is not read (#6495). The run fails, naming the line."""
-    plain, lines = View(boot.root, boot.usr), tmpfiles_lines(boot, usr_view)
-    aliases = []  # (L path, its target) patterns of every L line, a package's included
-    for f, line in lines:
-        w, rest = tmpfiles_words(line), line.split(None, 6)
-        if w and len(w) == 2 and w[0][:1] == "L" and w[1].startswith(("/", "%")):
-            arg = rest[6].strip() if len(rest) > 6 else "-"
-            t = "/usr/share/factory" + w[1] if arg in ("", "-") else os.path.join(os.path.dirname(w[1]), arg)
-            simple = not any(ch in arg for ch in "%\"\'\\")
-            aliases.append((tmpfiles_pattern(w[1]), tmpfiles_pattern(t) if simple else (WILD,)))
-    writers = []
-    for f, line in lines:
+def tmpfiles_ours_refusals(boot, packaged, usr_view=None):
+    """#6474, #6495: each tmpfiles.d line of ours (in a file not byte-identical to a package's, PACKAGED) is
+    of a type in TMPFILES_OURS_TYPES with modifiers in TMPFILES_OURS_MODIFIERS, its type read as
+    systemd-tmpfiles reads it (tmpfiles_words). A line of ours that writes, copies, links or makes a node
+    at boot puts content where env_files does not read (under /run, which BootView hides, or through a
+    link a C line copies or an L line makes), so every other line of ours, and one systemd-tmpfiles
+    refuses, fails the run, naming its file and the line, whether or not an EnvironmentFile= names its
+    path. A package's lines are read by tmpfiles_links and tmpfiles_copies."""
+    for f, line in tmpfiles_lines(boot, usr_view):
         if packaged(boot.resolve(f)[0]):
             continue
-        w = tmpfiles_words(line)
-        if w is None:
-            raise SystemExit("unit rules: %s: tmpfiles.d line %r: systemd-tmpfiles refuses or reads its words "
-                             "differently from the unit lint; write it plainly (#6495)" % (f, line))
-        if len(w) < 2 or w[0][:1] not in TMPFILES_WRITERS:
-            continue
-        p = re.sub("/+", "/", w[1])
-        p = p.rstrip("/") or p
-        pat = tmpfiles_pattern(p)
-        why = tmpfiles_writer_unread(p, pat, plain, aliases)
-        if why:
-            raise SystemExit("unit rules: %s: tmpfiles.d line %r writes at boot where the unit lint does not "
-                             "read: %s; drop the line (#6495)" % (f, line, why))
-        writers.append((f, line, [pat] + ([pat + ("/", WILD)] if w[0][0] in "CL" else [])))
-    if not writers:
-        return
-    for u in units:
-        for uf in u["files"]:
-            for ln in uf["text"].split("\n"):
-                m = ENV_LINE.match(ln)
-                p = m and m.group(1).lstrip("-")
-                if not p or not p.startswith(("/", "%")):
-                    continue
-                pats = env_patterns(p) or [tuple(p)]
-                pats = pats + env_reach(boot, pats)
-                for pat in pats:
-                    for f, line, wpats in writers:
-                        if any(patterns_meet(pat, t) for t in wpats):
-                            raise SystemExit("unit rules: %s: tmpfiles.d line %r makes at boot a file a unit's "
-                                             "EnvironmentFile=%s may name, which the unit lint does not read; "
-                                             "drop the line (#6474)" % (f, line, p))
+        read = tmpfiles_words(line)
+        if read is None:
+            raise SystemExit("unit rules: %s: tmpfiles.d line of ours %r: systemd-tmpfiles refuses its words (an "
+                             "unknown or NUL escape, an open quote or a trailing backslash); write it plainly (#6495)"
+                             % (f, line))
+        typ = (read[0] or [""])[0]
+        if typ[:1] not in TMPFILES_OURS_TYPES or not set(typ[1:]) <= TMPFILES_OURS_MODIFIERS:
+            raise SystemExit("unit rules: %s: tmpfiles.d line of ours %r is of type %r; a tmpfiles.d file of ours "
+                             "holds only %s lines (with %s), which put no content at boot where the unit lint does "
+                             "not read: make the file in the image (mkosi.extra) instead, or drop the line (#6495)"
+                             % (f, line, typ, ", ".join(sorted(TMPFILES_OURS_TYPES)),
+                                " or ".join(sorted(TMPFILES_OURS_MODIFIERS))))
 
 
 def env_files(view, units, packaged=lambda p: True, usr_view=None):
     """Two {path: text} maps, by the path an EnvironmentFile= line gives, of the env files the tree holds
     at boot (BootView: none under a boot mount) as a regular file. The first: each a line of a file of ours
-    in UNITS names (#6002). A line this reads differently from the lint (a continued one, or one holding a
-    specifier) names a path printed under no key, and the lint refuses the unit for an env file it cannot
-    read: so a miss holds more, never less. The second (#6312): each a package's line names that is ours,
+    in UNITS names (#6002), its lines read as systemd reads them, continued ones joined (env_values). A
+    line holding a specifier names a path printed under no key, and the lint refuses the unit for an env
+    file it cannot read: so a miss holds more, never less. The second (#6312): each a package's line names that is ours,
     reached through a link other than a merged-/usr top link (merged()) or not byte-identical to a
     package's (PACKAGED), as a build step's edit to an /etc/default conffile is; one the first holds is not
     repeated. A package's line holding a specifier names every path env_patterns matches, so a file of
     ours that a template's instance or a host name selects is held too (#6312 Security 1). One a
-    tmpfiles.d line of ours makes at boot fails the run (tmpfiles_env_refusals, #6474)."""
+    tmpfiles.d line of ours other than a directory fails the run (tmpfiles_ours_refusals, #6474, #6495)."""
     boot, out, pkg = BootView(view), {}, {}
-    tmpfiles_env_refusals(boot, units, packaged, usr_view)
+    tmpfiles_ours_refusals(boot, packaged, usr_view)
     for u in units:
         for f in u["files"]:
-            for line in f["text"].split("\n"):
-                m = ENV_LINE.match(line)
-                p = m and m.group(1)
-                p = p[1:] if p and p.startswith("-") else p
+            for p in env_values(f):
+                p = p[1:] if p.startswith("-") else p
                 if not p or not p.startswith("/") and not (p.startswith("%") and not f["ours"]) or p in out:
                     continue
                 if f["ours"]:

@@ -2532,7 +2532,8 @@ def made_way_refusal(root, form):
     except OSError as e:
         return "is or sits under a link or a file in the tree (/%s)" % (e.filename or e.strerror)
     for rel, n, ln in tmpfiles_entries(root):
-        words = tmpfiles_words(ln)[0] if n is not None else []
+        # a line the reader refuses (None) systemd-tmpfiles skips, and tmpfiles_refusals fails the build on it
+        words = (tmpfiles_words(ln) or [[]])[0] if n is not None else []
         if len(words) < 2 or words[0][:1] in MADE_LAST_TYPES and set(words[0][1:]) <= TMPFILES_STEP_MODIFIERS:
             continue
         for m in tmpfiles_paths(root, words[1], words[0][:1] == "L"):
@@ -4021,41 +4022,64 @@ TMPFILES_SPECIFIERS = {"t": "/run", "S": "/var/lib", "C": "/var/cache", "L": "/v
                        # '/', so a glob component. Every other specifier (%u, %U, %g, %o, %a, %H, %A, %B, which may be
                        # empty and drop a component, and any a later systemd adds) is refused (tmpfiles_specifier).
                        "m": "*", "b": "*"}
-C_ESCAPES = {"a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", "s": " "}
+# cunescape_one's (src/basic/escape.c, v255 to v257) one-character escapes.
+TMPFILES_ESCAPES = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "\\": 92, '"': 34, "'": 39,
+                    "s": 32}
 
 
 def tmpfiles_words(ln, n=6):
-    """The first N words of LN as extract_first_word(EXTRACT_UNQUOTE|EXTRACT_CUNESCAPE) gives them,
-    and the rest of the line (the argument). Quotes may start anywhere in a word; \\xHH, octal,
-    \\u and C escapes are decoded and any other escaped character kept, which errs safe (systemd
-    refuses the line)."""
-    words, i = [], 0
+    """The one reader of a tmpfiles.d line's fields (#6495; mkosi.finalize and unit_rules.py both read
+    with it, and test_unit_rules' TmpfilesReaderTest refuses any other split of a tmpfiles.d line):
+    (the first N words of LN, the rest of the line) as systemd-tmpfiles 255 to 257 reads them with
+    extract_many_words(EXTRACT_UNQUOTE | EXTRACT_CUNESCAPE) (src/basic/extract-word.c): split at
+    unquoted space, tab, CR or LF; a quote (' or ") anywhere in a word opens a run that ends at the same
+    quote; a backslash escape (cunescape_one) is read inside or outside one. The rest (an L target, a C
+    source, f or w content) is the line after the Nth word and its blanks, as written. None where
+    systemd-tmpfiles refuses the line, so it acts on none of it: an unknown escape, one giving NUL, a
+    \\U code point unichar_is_valid refuses, a trailing backslash or an open quote."""
+    b, i, words = os.fsencode(ln), 0, []
+    hexd, octd = b"0123456789abcdefABCDEF", b"01234567"
     while len(words) < n:
-        while i < len(ln) and ln[i] in " \t\n\r":
+        while i < len(b) and b[i] in b" \t\n\r":
             i += 1
-        if i >= len(ln):
+        if i == len(b):
             break
-        w, quote = [], None
-        while i < len(ln) and (quote or ln[i] not in " \t\n\r"):
-            c = ln[i]
+        out, quote = bytearray(), None
+        while i < len(b) and (quote or b[i] not in b" \t\n\r"):
+            c = b[i]
             i += 1
-            if c == quote:
+            if quote and c == quote:
                 quote = None
-            elif quote is None and c in "'\"":
+            elif not quote and c in b"'\"":
                 quote = c
-            elif c == "\\" and i < len(ln):
-                m = re.match(r"x([0-9a-fA-F]{2})|([0-7]{3})|u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})", ln[i:])
-                if m:
-                    w.append(chr(int(m.group(1) or m.group(3) or m.group(4) or "0", 16) if not m.group(2)
-                                 else int(m.group(2), 8)))
-                    i += m.end()
-                else:
-                    w.append(C_ESCAPES.get(ln[i], ln[i]))
-                    i += 1
+            elif c != 0x5C:
+                out.append(c)
+            elif i == len(b):
+                return None
             else:
-                w.append(c)
-        words.append("".join(w))
-    return words, ln[i:].strip(" \t\n\r")
+                e, i = chr(b[i]), i + 1
+                k = {"x": 2, "u": 4, "U": 8}.get(e, 0)
+                if e in TMPFILES_ESCAPES:
+                    out.append(TMPFILES_ESCAPES[e])
+                elif k and len(b) >= i + k and all(x in hexd for x in b[i:i + k]):
+                    v, i = int(b[i:i + k], 16), i + k
+                    # cunescape_one checks \U with unichar_is_valid and \u not at all: systemd-tmpfiles 255.4 makes
+                    # /run/a\uD800 and /run/a\uFFFE, and refuses \U0000D800, \U0000FFFE and \U0010FFFF (#6495)
+                    if not v or e == "U" and (v > 0x10FFFF or 0xD800 <= v <= 0xDFFF or 0xFDD0 <= v <= 0xFDEF
+                                              or v & 0xFFFE == 0xFFFE):
+                        return None
+                    out += bytes([v]) if e == "x" else chr(v).encode("utf-8", "surrogatepass")
+                elif e in "0123" and len(b) >= i + 2 and all(x in octd for x in b[i:i + 2]):
+                    v, i = int(e + b[i:i + 2].decode(), 8), i + 2
+                    if not v:
+                        return None
+                    out.append(v)
+                else:
+                    return None
+        if quote:
+            return None
+        words.append(os.fsdecode(bytes(out)))
+    return words, os.fsdecode(b[i:]).strip(" \t\n\r")
 
 
 def tmpfiles_expand(p):
@@ -4203,45 +4227,52 @@ def tmpfiles_refusals(root):
     tell which lines this one refuses (#1543 P/UX U4-1)."""
     out, root = [], str(root)
     targets = tmpfiles_targets(root)
-    for f in tmpfiles_files(root):
-        try:
-            data = f.content()
-        except OSError as e:
-            out.append((f.rel, None, "%s: unreadable (%s); the tree check never passes a file it cannot read"
-                        % (f.rel, e.strerror)))
+    for rel, n, ln in tmpfiles_entries(root):
+        if n is None:
+            out.append((rel, None, "%s: unreadable (%s); the tree check never passes a file it cannot read" % (rel, ln)))
             continue
-        for n, raw in enumerate(re.split(rb"[\n\r\x00]", data), 1):
-            ln = os.fsdecode(raw).strip(" \t")
-            if not ln or ln.startswith("#") or re.sub(r"[ \t]+", " ", ln) in TMPFILES_STOCK:
-                continue
-            (typ, path, *_), arg = tmpfiles_words(ln) if len(tmpfiles_words(ln)[0]) >= 2 else ([ln, ""], "")
-            raw_path, path = path, tmpfiles_expand(path)
-            names, sources = [path], []
-            if typ[:1] in ("L", "C"):
-                words = tmpfiles_words(arg, 1)[0]
-                for a in {arg, words[0] if words else arg}:
-                    a = tmpfiles_expand(a)
-                    sources.append(a)
-                    if a in ("", "-"):
-                        a = "/usr/share/factory/" + path
-                    names.append(a if a.startswith("/") else path.rsplit("/", 1)[0] + "/" + a)
-            unread = tmpfiles_specifier(raw_path) or (typ[:1] in ("L", "C") and next(filter(None, map(
-                tmpfiles_specifier, {arg, (tmpfiles_words(arg, 1)[0] or [arg])[0]})), None))
-            if unread:
-                why = ("a specifier the tree check does not expand (%s), so it cannot tell what the line names; write "
-                       "the path without it (#5191)" % unread)
-            elif ".." in path.split("/"):
-                why = "a path with a '..' component (#1530)"
-            elif any(".." in a.split("/") for a in sources):
-                why = "a link target or copy source with a '..' component (#1543)"
-            elif any(tmpfiles_hits(root, path_parts(p), targets) for p in names):
-                why = "it reaches /proc, /sys or configuration the tree check reads (#1530)"
-            elif typ[:1] == "L" and any(tmpfiles_link_refusal(root, path, p) for p in names[1:]):
-                why = next(tmpfiles_link_refusal(root, path, p) for p in names[1:] if tmpfiles_link_refusal(root, path, p))
-            else:
-                continue
-            out.append((f.rel, n, "%s: line %d: %s; %s" % (f.rel, n, ln[:120], why)))
+        if tmpfiles_stock(ln):
+            continue
+        read = tmpfiles_words(ln)
+        if read is None:
+            out.append((rel, n, "%s: line %d: %s; systemd-tmpfiles refuses its words (an unknown or NUL escape, an "
+                        "open quote or a trailing backslash), so what it names is not read; write it plainly (#6495)"
+                        % (rel, n, ln[:120])))
+            continue
+        (typ, path, *_), arg = read if len(read[0]) >= 2 else ([ln, ""], "")
+        raw_path, path = path, tmpfiles_expand(path)
+        names, sources = [path], []
+        if typ[:1] in ("L", "C"):
+            words = (tmpfiles_words(arg, 1) or [[]])[0]
+            for a in {arg, words[0] if words else arg}:
+                a = tmpfiles_expand(a)
+                sources.append(a)
+                if a in ("", "-"):
+                    a = "/usr/share/factory/" + path
+                names.append(a if a.startswith("/") else path.rsplit("/", 1)[0] + "/" + a)
+        unread = tmpfiles_specifier(raw_path) or (typ[:1] in ("L", "C") and next(filter(None, map(
+            tmpfiles_specifier, {arg, ((tmpfiles_words(arg, 1) or [[]])[0] or [arg])[0]})), None))
+        if unread:
+            why = ("a specifier the tree check does not expand (%s), so it cannot tell what the line names; write "
+                   "the path without it (#5191)" % unread)
+        elif ".." in path.split("/"):
+            why = "a path with a '..' component (#1530)"
+        elif any(".." in a.split("/") for a in sources):
+            why = "a link target or copy source with a '..' component (#1543)"
+        elif any(tmpfiles_hits(root, path_parts(p), targets) for p in names):
+            why = "it reaches /proc, /sys or configuration the tree check reads (#1530)"
+        elif typ[:1] == "L" and any(tmpfiles_link_refusal(root, path, p) for p in names[1:]):
+            why = next(tmpfiles_link_refusal(root, path, p) for p in names[1:] if tmpfiles_link_refusal(root, path, p))
+        else:
+            continue
+        out.append((rel, n, "%s: line %d: %s; %s" % (rel, n, ln[:120], why)))
     return out
+
+
+def tmpfiles_stock(ln):
+    """Whether tmpfiles.d line LN is one of Debian's TMPFILES_STOCK lines, compared whole with its runs of
+    blanks read as one: a whole-line comparison, never a read of its fields (tmpfiles_words)."""
+    return re.sub(r"[ \t]+", " ", ln) in TMPFILES_STOCK
 
 
 def tmpfiles_link_refusal(root, path, to):
@@ -4269,7 +4300,7 @@ def tmpfiles_makers(root):
     but root: it counts only where the step's group, from the tree or a parent, is not root."""
     out = []
     for rel, n, ln in tmpfiles_entries(root):
-        words, arg = tmpfiles_words(ln) if n is not None else ([], "")
+        words, arg = (tmpfiles_words(ln) or ([], "")) if n is not None else ([], "")  # None: tmpfiles_refusals
         if len(words) < 2:
             continue
         typ, _, mode, user, group = (words + ["-"] * 5)[:5]
@@ -4310,7 +4341,7 @@ def tmpfiles_removers(root):
     runs --remove at boot) or a line with an age (systemd-tmpfiles-clean; x and X only exclude)."""
     out = []
     for rel, n, ln in tmpfiles_entries(root):
-        words, _ = tmpfiles_words(ln) if n is not None else ([], "")
+        words, _ = (tmpfiles_words(ln) or ([], "")) if n is not None else ([], "")  # None: tmpfiles_refusals
         if len(words) < 2:
             continue
         typ, age = words[0][:1], (words + ["-"] * 6)[5]

@@ -4448,8 +4448,8 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
                     f.unlink()
 
     def test_without_the_tmpfiles_link_rule_its_links_pass(self):
-        m = self.mutant('            elif typ[:1] == "L" and any(tmpfiles_link_refusal(root, path, p) for p in names[1:]):\n',
-                        "            elif False:\n")
+        m = self.mutant('        elif typ[:1] == "L" and any(tmpfiles_link_refusal(root, path, p) for p in names[1:]):\n',
+                        "        elif False:\n")
         self.tmpfiles("L /etc/udev/hwdb.d - - - - /var/tmp\n")
         self.assertNotIn("x.conf: line", self.v(m))
         self.assertIn("x.conf: line", self.v())
