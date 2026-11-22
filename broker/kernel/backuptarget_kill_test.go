@@ -75,11 +75,14 @@ func TestABackupEntryThatIsNotItsShapeIsCorrupt(t *testing.T) {
 // refused (Go's FIPS 140-only mode) the package stops at start, naming why,
 // rather than starting with no probe and failing later on its first edge key.
 // Every test of this package starts the package, so each reaches that check.
+// Since a process that links the kernel dies in its init there, no fips-only
+// error branch elsewhere in the package runs (the proof the log's AEAD
+// waivers in MUTANTS-EQUIVALENT rest on). The package's one such test.
 func TestNoX25519StopsTheKernelAtStart(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "-test.run=^$")
 	cmd.Env = append(os.Environ(), "GODEBUG=fips140=only")
 	out, err := cmd.CombinedOutput()
-	if err == nil || !strings.Contains(string(out), "X25519 is not allowed in FIPS 140-only mode") {
+	if err == nil || !strings.Contains(string(out), "X25519 is not allowed in FIPS 140-only mode") || !strings.Contains(string(out), "broker/kernel.init") {
 		t.Fatalf("started without X25519 (err %v): %s", err, out)
 	}
 }

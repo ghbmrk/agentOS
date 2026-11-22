@@ -81,9 +81,15 @@ NODUMP_SRC = {"usr/lib/systemd/system/agentos-localui.service":
               ROOT / "broker/cmd/agentos-localui/agentos-localui.service"}
 
 
+# The image's kexec sysctl (#6345), which the tree check refuses a tree without: copied into every tree
+# nodump() makes.
+KEXEC_SYSCTL = "usr/lib/sysctl.d/99-agentos-kexec.conf"
+
+
 def nodump(root):
     for rel in NODUMP:
         write(root, rel, NODUMP_SRC.get(rel, MK / "mkosi.extra" / rel).read_text())
+    write(root, KEXEC_SYSCTL, (MK / "mkosi.extra" / KEXEC_SYSCTL).read_text())
     noexec(root)
 
 
@@ -4011,7 +4017,9 @@ TMPFILES_PASS = ("d /run/user 0755 root root -", "L /var/run - - - - ../run", "L
                  "z /run/credstore 0700 root root", "z /run/credstore.encrypted 0700 root root",
                  "L+ /etc/default/locale - - -  -  ../locale.conf", "L /var/lock - - - - ../run/lock",
                  "L$ /var/log/README - - - - ../../usr/share/doc/systemd/README.logs",
-                 "L! /etc/resolv.conf - - - - ../run/systemd/resolve/stub-resolv.conf")
+                 "L! /etc/resolv.conf - - - - ../run/systemd/resolve/stub-resolv.conf",
+                 # provision.conf's root home, above root/.config/environment.d (#6312).
+                 "d- /root :0700 root :root -", "d- /root/.ssh :0700 root :root -")
 AGENTOS_TMPFILES = MK / "mkosi.extra/usr/lib/tmpfiles.d/agentos.conf"
 
 
@@ -4036,7 +4044,9 @@ GUARDED_NAMES = ("sysctl.d", "modprobe.d", "tmpfiles.d", "systemd/network", "sys
                  "systemd/resolved.conf.d", "systemd/system-generators", "credstore", "credstore.encrypted",
                  # #2176: every boot-code channel exec.allow holds.
                  "udev/rules.d", "modules-load.d", "systemd/system-environment-generators", "binfmt.d",
-                 "systemd/system-shutdown", "systemd/system-sleep")
+                 "systemd/system-shutdown", "systemd/system-sleep",
+                 # #6312: root's user manager's generators and environment.d.
+                 "systemd/user-generators", "systemd/user-environment-generators", "environment.d")
 # #1543 reviews at bf7e5d3: B1 (C+ on an ancestor of /run/sysctl.d), B2 (a stock link with more
 # after its target, which systemd takes raw), B3 (/etc/sysctl.d and /etc/sysctl.conf) and R1 (every
 # other directory the tree check reads), plus /sys and ".." paths. Each must be refused.
@@ -4082,7 +4092,10 @@ TMPFILES_PROBES = (
     "C /run/systemd/system-environment-generators/x - - - - /usr/share/x/x",
     "L /etc/binfmt.d/x.conf - - - - /usr/share/x/x.conf", "C /run/binfmt.d/x.conf - - - - /usr/share/x/x.conf",
     "L /usr/lib/systemd/system-shutdown/x - - - - /usr/share/x/x",
-    "C /usr/lib/systemd/system-sleep/x - - - - /usr/share/x/x", "f /etc/modules - - - - tun")
+    "C /usr/lib/systemd/system-sleep/x - - - - /usr/share/x/x", "f /etc/modules - - - - tun",
+    # #6312: root's own environment.d, its parent made writable, and what systemd's 99-environment.conf names.
+    "f /root/.config/environment.d/x.conf - - - - LD_PRELOAD=/tmp/x.so", "d /root/.config 0777",
+    "f+ /etc/environment - - - - LD_PRELOAD=/tmp/x.so", "f %h/.config/environment.d/x.conf")
 # One probe per guarded name, under each configuration directory (#1543 P/UX B2). /usr is read-only
 # on the box and trixie's /lib is /usr/lib, but the check guards them anyway.
 TMPFILES_PROBES += tuple("f /%s/%s/x" % (top, n) for top in ("etc", "run", "usr/local/lib", "lib") for n in GUARDED_NAMES)
@@ -5664,14 +5677,24 @@ class ExecAllowTest(unittest.TestCase):
                 "lib/modprobe.d/x.conf", "etc/sysctl.d/x.conf", "usr/local/lib/sysctl.d/x.conf",
                 "usr/lib/sysctl.d/x.conf", "etc/binfmt.d/x.conf", "usr/lib/binfmt.d/x.conf",
                 "usr/lib/systemd/system-shutdown/x", "usr/lib/systemd/system-sleep/x",
-                "etc/systemd/system-shutdown/x", "usr/local/lib/systemd/system-sleep/x")
+                "etc/systemd/system-shutdown/x", "usr/local/lib/systemd/system-sleep/x",
+                # #6312: root's user manager's generators and environment.d, root's own included.
+                "etc/systemd/user-generators/x", "usr/local/lib/systemd/user-generators/x",
+                "usr/lib/systemd/user-generators/x", "etc/systemd/user-environment-generators/x",
+                "usr/local/lib/systemd/user-environment-generators/x", "usr/lib/systemd/user-environment-generators/x",
+                "etc/environment.d/x.conf", "usr/local/lib/environment.d/x.conf", "usr/lib/environment.d/x.conf",
+                "root/.config/environment.d/x.conf")
     # #2176's failure paths: each runs root code at boot from a file the old check never hashed.
     PATHS = {"usr/lib/modprobe.d/x.conf": "install tun /usr/sbin/sysctl -w net.ipv4.ip_forward=1\n",
              "usr/lib/sysctl.d/x.conf": "kernel.modprobe = /usr/local/bin/x\n",
              "etc/sysctl.d/y.conf": "kernel/hotplug=/usr/local/bin/x\n",
              "usr/lib/binfmt.d/x.conf": ":x:E::x::/usr/local/bin/x:\n",
              "usr/lib/systemd/system-shutdown/x": "#!/bin/sh\nsysctl -w net.ipv4.ip_forward=1\n",
-             "usr/lib/systemd/system-sleep/x": "#!/bin/sh\nsysctl -w net.ipv4.ip_forward=1\n"}
+             "usr/lib/systemd/system-sleep/x": "#!/bin/sh\nsysctl -w net.ipv4.ip_forward=1\n",
+             # #6312's: every unit root's user manager starts loads agentos-x-controlled code as root.
+             "etc/environment.d/50-x.conf": "LD_PRELOAD=/var/lib/agentos-x/x.so\n",
+             "root/.config/environment.d/50-x.conf": "LD_PRELOAD=/var/lib/agentos-x/x.so\n",
+             "etc/systemd/user-generators/x": "#!/bin/sh\nsysctl -w net.ipv4.ip_forward=1\n"}
     GENERATORS = ("usr/lib/systemd/system-generators/systemd-sysv-generator",
                   "usr/lib/systemd/system-generators/systemd-rc-local-generator")
 
@@ -5699,7 +5722,9 @@ class ExecAllowTest(unittest.TestCase):
                 self.assertTrue(tab, ln)
                 self.assertRegex(rel, r"^((etc|usr/local/lib|usr/lib|lib)/(udev/rules\.d/[^/]+\.rules|systemd/system-"
                                       r"((environment-)?generators|shutdown|sleep)/[^/]+|"
-                                      r"(modules-load|modprobe|sysctl|binfmt)\.d/[^/]+\.conf)|"
+                                      r"systemd/user-(environment-)?generators/[^/]+|"
+                                      r"(modules-load|modprobe|sysctl|binfmt|environment)\.d/[^/]+\.conf)|"
+                                      r"root/\.config/environment\.d/[^/]+\.conf|"
                                       # #2622: bus and polkit policy.
                                       r"(etc|usr/share)/polkit-1/rules\.d/[^/]+|usr/share/polkit-1/actions/[^/]+|"
                                       r"etc/dbus-1/.+|usr/share/dbus-1/(system\.d/[^/]+|system-services/[^/]+|"
@@ -5817,13 +5842,27 @@ class ExecAllowTest(unittest.TestCase):
         self.assertNotEqual(self.v(check.exec_allowed() | {("etc/modules-load.d/modules.conf", self.entry("tun\n"))}),
                             [])
         f.unlink()
-        link(self.root, "etc/modules-load.d/modules.conf", "/etc/modules")
+        f = link(self.root, "etc/modules-load.d/modules.conf", "/etc/modules")
         self.assertIn("etc/modules-load.d/modules.conf: unreadable", " | ".join(self.v()))
+        f.unlink()
+        # #6312: systemd's 99-environment.conf -> /etc/environment is read through, as that file; any other
+        # target is refused.
+        rel, data = "usr/lib/environment.d/99-environment.conf", "LD_PRELOAD=/var/lib/agentos-x/x.so\n"
+        write(self.root, "etc/environment", data)
+        f = link(self.root, rel, "/etc/environment")
+        self.assertIn("entry: %s\t%s" % (rel, self.entry(data)), " | ".join(self.v()))
+        self.assertEqual(self.v(check.exec_allowed() | {(rel, self.entry(data))}), [])
+        write(self.root, "etc/environment", "")
+        self.assertEqual(self.v(check.exec_allowed() | {(rel, "mask")}), [])
+        f.unlink()
+        link(self.root, rel, "../../../etc/environment")
+        self.assertIn("%s: unreadable" % rel, " | ".join(self.v()))
 
     def test_run_and_unreadable_are_refused(self):
         for d in ("run/udev/rules.d", "run/systemd/system-generators", "run/systemd/system-environment-generators",
                   "run/modules-load.d", "run/modprobe.d", "run/sysctl.d", "run/binfmt.d",
-                  "run/systemd/system-shutdown", "run/systemd/system-sleep"):
+                  "run/systemd/system-shutdown", "run/systemd/system-sleep", "run/systemd/user-generators",
+                  "run/systemd/user-environment-generators", "run/environment.d"):
             with self.subTest(d=d):
                 write(self.root, d + "/x", self.HARM)
                 self.assertIn("%s: not on the boot-code allowlist; /run is a tmpfs on the box (#1556)" % d,
@@ -5899,7 +5938,8 @@ class ExecAllowTest(unittest.TestCase):
                 self.assertEqual(moved.exec_allow_violations(self.root), [])
             with unittest.mock.patch.dict(os.environ, {"SRCDIR": tmp}):
                 want = ["exec.allow: missing; every file in a boot-code channel (udev rules, generators, modules-load.d, "
-                        "modprobe.d, sysctl.d, binfmt.d, shutdown and sleep hooks) must be on it (#1556, #2176)"]
+                        "modprobe.d, sysctl.d, binfmt.d, shutdown and sleep hooks, root's user manager's generators "
+                        "and environment.d) must be on it (#1556, #2176, #6312)"]
                 self.assertEqual(moved.exec_allow_violations(self.root), want)
                 self.assertIn(want[0], moved.violations(self.root))
 
@@ -5917,7 +5957,7 @@ class ExecAllowTest(unittest.TestCase):
         self.assertEqual(allowed, {("etc/udev/rules.d/99-x.rules", self.entry(self.HARM)),
                                    ("usr/lib/systemd/system-generators/y", "mask")} | {
                                    (rel, self.entry((MK / "mkosi.extra" / rel).read_text()))
-                                   for rel in (self.TPM, BT_BLOCK, "usr/lib/sysctl.d/99-agentos-nodump.conf")})
+                                   for rel in (self.TPM, BT_BLOCK, "usr/lib/sysctl.d/99-agentos-nodump.conf", KEXEC_SYSCTL)})
         self.assertEqual(self.v(allowed), [])
         self.assertNotEqual(self.v(allowed - {("usr/lib/systemd/system-generators/y", "mask")}), [])
 
@@ -8547,11 +8587,12 @@ class MkosiRunBoundTest(unittest.TestCase):
         self.assertLess(build.index('sudo rm -rf "$OUT/pkgmngr"'),
                         build.index('sudo install -D -m 0644 "$RUNNER_TEMP/mkosi.sources" "$OUT/pkgmngr/'))
 
-    def run_main_as_mkosi(self, root, lists, conf, security):
-        """mkosi.finalize's main() as mkosi v24.3 runs it: no argument, BUILDROOT, WITH_NETWORK=0, the config
+    def run_main_as_mkosi(self, root, lists, conf, security, network="0"):
+        """mkosi.finalize's main() as mkosi v24.3 runs it: no argument, BUILDROOT, WITH_NETWORK=NETWORK, the config
         JSON at MKOSI_CONFIG, the security snapshot from the mkosi line's --environment, its apt lists at
-        APT_LISTS and a sandbox with only lo. Returns (exit code, stdout)."""
-        env = {"BUILDROOT": str(root), "WITH_NETWORK": "0", "MKOSI_CONFIG": str(conf),
+        APT_LISTS and a sandbox with only lo. Returns (exit code, stdout); the code is sys.exit's message, the
+        text mkosi prints on stderr, when there is one."""
+        env = {"BUILDROOT": str(root), "WITH_NETWORK": network, "MKOSI_CONFIG": str(conf),
                "AGENTOS_SECURITY_SNAPSHOT": security}
         out = io.StringIO()
         code = 0
@@ -8653,12 +8694,56 @@ class MkosiRunBoundTest(unittest.TestCase):
         self.assertIn('--environment=AGENTOS_SECURITY_SNAPSHOT="$SECURITY_SNAPSHOT" --output-dir "$OUT" build',
                       (IMG / "enforcer/build.sh").read_text())
 
-    def initrd_run(self, root, lists, security=None, image="default-initrd"):
+    def initrd_run(self, root, lists, security=None, image="default-initrd", network="0"):
         d = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, d)
         conf = d / "config.json"
         conf.write_text(json.dumps({"Image": image, "Mirror": "https://snapshot.debian.org/archive/debian/%s/" % self.MIRROR}))
-        return self.run_main_as_mkosi(root, lists, conf, security or self.SECURITY)
+        return self.run_main_as_mkosi(root, lists, conf, security or self.SECURITY, network=network)
+
+    def initrd_tree(self):
+        """A bare initrd tree whose status copy lists only packages LISTS indexes, and those lists."""
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        pkg = lambda name: ("Package: %s\nVersion: 1\nArchitecture: amd64\n" % name).encode()
+        lists = self.lists({self.INDEX: pkg("systemd") + b"\n" + pkg("kexec-tools"), self.SEC: pkg("libssl3t64")})
+        write(root, check.INITRD_STATUS, self.status(("systemd", "installed", "amd64", "1"),
+                                                     ("libssl3t64", "installed", "amd64", "1")).decode())
+        return root, lists
+
+    # REQ: HW-8, HW-10
+    def test_initrd_run_refuses_a_kexec_loader(self):
+        # #6345: the default initrd's run holds its tree to the kexec loader check, on the initrd's status copy: a
+        # loader there could load a kernel before switch-root, while kernel.kexec_load_disabled is still 0. A
+        # package from a pinned index is refused all the same, and the stderr line names the initrd's tree.
+        root, lists = self.initrd_tree()
+        why = check.KEXEC_WHY
+        self.assertEqual(self.initrd_run(root, lists), (0, "image check: initrd: clean\n"))
+        f = write(root, "usr/sbin/kexec", "\x7fELF")
+        code, out = self.initrd_run(root, lists)
+        f.unlink()
+        self.assertEqual(out, "image check: initrd: usr/sbin/kexec: %s\n" % why)
+        self.assertEqual(code, "image check: initrd: 1 problem(s) in the default initrd's tree, each named above")
+        write(root, check.INITRD_STATUS, self.status(("systemd", "installed", "amd64", "1"),
+                                                     ("libssl3t64", "installed", "amd64", "1"),
+                                                     ("kexec-tools", "installed", "amd64", "1")).decode())
+        code, out = self.initrd_run(root, lists)
+        self.assertEqual(out, "image check: initrd: %s: kexec-tools is installed; %s\n" % (check.INITRD_STATUS, why))
+        self.assertEqual(code, "image check: initrd: 1 problem(s) in the default initrd's tree, each named above")
+        # The image's own dpkg status is not the initrd's: a loader package there is not this run's.
+        write(root, check.INITRD_STATUS, self.status(("systemd", "installed", "amd64", "1"),
+                                                     ("libssl3t64", "installed", "amd64", "1")).decode())
+        write(root, check.DPKG_STATUS, self.status(("kexec-tools", "installed", "amd64", "1")).decode())
+        self.assertEqual(self.initrd_run(root, lists), (0, "image check: initrd: clean\n"))
+
+    # REQ: HW-10
+    def test_initrd_run_refuses_a_run_with_the_network(self):
+        # #6345 (Security on #6327): the network check runs in the initrd's run too, not only in the image's.
+        root, lists = self.initrd_tree()
+        code, out = self.initrd_run(root, lists, network="1")
+        self.assertEqual(out, "image check: initrd: WITH_NETWORK is 1; mkosi.postinst and mkosi.finalize run with no "
+                              "network, so they fetch no package outside mkosi's checked apt run (#4647)\n")
+        self.assertEqual(code, "image check: initrd: 1 problem(s) in the default initrd's tree, each named above")
 
     # REQ: HW-10
     def test_initrd_run_refuses_a_package_from_no_pinned_index(self):
@@ -8834,6 +8919,69 @@ class IgnoredValueTest(unittest.TestCase):
                 got = " | ".join(check.resolved_violations(self.root))
                 self.assertIn("resolved LLMNR is LLMNR=%s in etc/systemd/resolved.conf.d/zz.conf is a form the tree "
                               "check does not read (use yes or no or resolve); must be no" % text.split("=")[1].strip(), got)
+
+
+
+class EveryCheckCalledTest(unittest.TestCase):
+    """#6345 item 5 (L3 on #6335): every check _violations() calls reaches violations()'s result. A source grep for
+    "name(root)" passes with the call dropped from _violations(); this reads the checks from _violations()'s
+    return expression (each call, and each cached(fn, root) step) and replaces each with a stand-in that records
+    the root it was given and returns a line of its own. Dropping any call, or calling it on another root, loses
+    that line. A check added to the expression is covered with no new case."""
+    # REQ: HW-8
+    CHECKS = ("dump_violations", "journal_violations", "swap_violations", "wifi_violations", "bluetooth_violations",
+              "sysctl_byte_violations", "network_violations", "resolved_violations", "tmpfiles_violations",
+              "tmpfiles_allow_violations", "exec_allow_violations", "bus_daemon_violations", "made_allow_violations",
+              "credstore_violations", "stray_violations", "manager_environment_violations", "unit_made_dirs",
+              "unit_made_paths", "unit_made_refusals", "inside_refusals", "gpt_auto_violations", "noexec_violations",
+              "keeper_violations", "isolate_violations", "ram_kept_violations", "kexec_loader_violations",
+              "kexec_sysctl_violations", "clerk_key_violations", "assembly_violations", "driver_violations",
+              "e2e_violations", "package_file_violations")
+
+    def checks(self):
+        """(name, cached) for each check in _violations()'s return expression, in order."""
+        fn = next(n for n in ast.parse((MK / "mkosi.finalize").read_text()).body
+                  if isinstance(n, ast.FunctionDef) and n.name == "_violations")
+        ret = [n for n in fn.body if isinstance(n, ast.Return)]
+        self.assertEqual(len(ret), 1)
+        out = []
+        for n in ast.walk(ret[0].value):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+                if n.func.id == "cached":
+                    out.append((n.args[0].id, True))
+                else:
+                    self.assertEqual([type(a) for a in n.args], [ast.Name], n.func.id)
+                    self.assertEqual(n.args[0].id, "root", n.func.id)
+                    out.append((n.func.id, False))
+        return out
+
+    def test_every_check_in_violations_reaches_the_result(self):
+        found = self.checks()
+        names = [n for n, _ in found]
+        self.assertEqual(len(names), len(set(names)), names)
+        # The checks, pinned: dropping a call from _violations() fails here as well as below, and a check added
+        # there is added here, where its review sees it.
+        self.assertEqual(sorted(names), sorted(self.CHECKS))
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root)
+        seen = collections.defaultdict(list)
+
+        def stand_in(name, is_cached):
+            line = ["STAND-IN %s" % name]
+
+            def f(r, *rest):
+                seen[name].append(r)
+                return (line, line, line) if is_cached else line
+            return f
+
+        with contextlib.ExitStack() as stack:
+            for name, is_cached in found:
+                stack.enter_context(unittest.mock.patch.object(check, name, stand_in(name, is_cached)))
+            got = check.violations(root)
+        for name, _ in found:
+            with self.subTest(check=name):
+                self.assertEqual(got.count("STAND-IN %s" % name), 1, got)
+                self.assertEqual(seen[name], [root])
 
 
 if __name__ == "__main__":
