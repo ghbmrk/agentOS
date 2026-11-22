@@ -5557,6 +5557,48 @@ class GremlinsMemoryCap(unittest.TestCase):
             subprocess.run([str(shim), "test", "-coverprofile", str(prof), "./..."], capture_output=True)
             self.assertIn("x" * 4096, seen.read_text())
 
+    def broken_cgroup(self, d):
+        """A directory that passes cgroup_parent but is no cgroup: contained fails once its run ends."""
+        cg = pathlib.Path(d) / "notcg"
+        cg.mkdir()
+        (cg / "cgroup.subtree_control").write_text("memory\n")
+        return str(cg)
+
+    def test_a_containment_error_in_a_mutant_run_is_no_verdict(self):
+        # L3 and Security on #6423: an error inside cap_exec exited 1, which go test passes on and gremlins
+        # reads as KILLED. It writes REFUSED instead, the only channel, on both cap_exec paths.
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {mutgate.CGROUP_ENV: self.broken_cgroup(d)}):
+            refused = pathlib.Path(d) / mutgate.REFUSED
+            r = subprocess.run([str(self.shim(d, "eval \"$x true\"\n", 1 << 30)), "test", "./p"], capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 1, r.stderr)
+            self.assertIn("no verdict", r.stderr)
+            self.assertIn("cap_exec", refused.read_text())
+            refused.unlink()
+            prof = pathlib.Path(d) / "c"
+            shim = self.shim(d, f"eval \"$x true\" || exit 1\n: > {prof}\n", 1 << 30)
+            r = subprocess.run([str(shim), "test", "-coverprofile", str(prof), "./..."], capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0, r.stderr)
+            self.assertIn("cap_exec", refused.read_text())
+
+    def test_run_drops_a_package_whose_mutant_run_was_refused(self):
+        # The marker, not gremlins' scored KILLED, decides: `run` keeps no result for that package.
+        with tempfile.TemporaryDirectory() as d:
+            bindir = self.fake_go(d, "eval \"$x true\"\nexit 1\n")  # go test's own exit 1 for a failing -exec
+            (bindir / "gremlins").write_text(
+                f"#!/bin/sh\n{mutgate.CGROUP_ENV}={self.broken_cgroup(d)} go test -timeout 62s ./hint\n"
+                "while [ \"$1\" != -o ]; do shift; done\n"
+                "printf '%s' '{\"files\": [], \"mutants_total\": 0, \"mutants_killed\": 1, \"mutants_lived\": 0}' > \"$2\"\n")
+            (bindir / "gremlins").chmod(0o755)
+            out = pathlib.Path(d) / "out"
+            err = io.StringIO()
+            with mock.patch.dict(os.environ, {"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}), \
+                    mock.patch.object(mutgate, "available_memory", return_value=1 << 30), \
+                    mock.patch.object(mutgate, "default_jobs", return_value=2), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                self.assertEqual(mutgate.main(["run", "hint", "--out", str(out)]), 1)
+            self.assertFalse((out / mutgate.result_name("hint")).exists())
+            self.assertIn("hint has no verdict", err.getvalue())
+
     def test_run_caps_gremlins_mutant_runs(self):
         # The wiring: `run` gives gremlins' shim each run's share of half the free memory.
         with tempfile.TemporaryDirectory() as d:

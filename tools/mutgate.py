@@ -2534,6 +2534,10 @@ def run_packages(args, pkgs, out, added, tests, bases, planned, diff, tmp, cfg, 
             bad += 1
         elif args.git:
             dest.write_text(json.dumps({**(outside_lines(data, pkg, mine) if marked else data), **extra}))
+        if (pathlib.Path(tmp) / REFUSED).exists():  # a shim run failed in this package: no verdict (shim_entry)
+            print(f"mutgate: {pkg} has no verdict: {(pathlib.Path(tmp) / REFUSED).read_text().strip()}", file=sys.stderr)
+            dest.unlink(missing_ok=True)
+            return bad + 1
         if adv and dest.exists():
             dest.write_text(json.dumps({**json.loads(dest.read_text()), "advisory": True}))
     return bad
@@ -2708,11 +2712,31 @@ def capped_go(real, tmp, args, mem, exits=None):
         (pathlib.Path(tmp) / REFUSED).write_text(shlex.join(args) + "\n")
         return None
     q = shlex.quote
-    wrap = f"{q(sys.executable)} -I {q(str(pathlib.Path(__file__).resolve()))} cap-exec {int(mem)} {q(str(exits or '-'))}"
+    wrap = f"{q(sys.executable)} -I {q(str(pathlib.Path(__file__).resolve()))} cap-exec {q(str(tmp))} {int(mem)} {q(str(exits or '-'))}"
     return [args[0], f"-exec={wrap}", *args[1:]]
 
 
 REFUSED = "refused"  # go_shim's runs that could not be capped: `run` gives no verdict while it exists
+NO_VERDICT = 125  # a shim entry's own failure; the REFUSED marker, not this code, carries it (shim_entry)
+
+
+def shim_entry(tmp, fn, *args):
+    """fn(*args) for one of go_shim's entries (go-cover, go-capped, cap-exec), which gremlins scores by
+    exit code alone: any error of the entry itself (a cgroup file, a kill that did not empty its leaf)
+    writes REFUSED in tmp, so `run` drops that package's result and gives no verdict (L3 and Security on
+    #6423). The marker is the only channel: `go test` turns any failing -exec into its own exit 1, which
+    gremlins reads as KILLED, so no exit code of cap_exec's can say "no verdict"; NO_VERDICT (read as LIVED
+    where it reaches gremlins directly) only keeps go-capped and go-cover from looking like a test failure."""
+    try:
+        return fn(*args)
+    except Exception as e:  # every class: a verdict needs a contained run that ended as reported
+        print(f"mutgate: {fn.__name__} failed, so this run gives no verdict: {e!r}", file=sys.stderr)
+        try:
+            with open(pathlib.Path(tmp) / REFUSED, "a") as f:
+                f.write(f"{fn.__name__}: {e!r}\n")
+        except OSError:
+            pass  # gremlins then reads NO_VERDICT as LIVED, which fails the gate: still closed
+        return NO_VERDICT
 
 
 def go_cover(real, tmp, args, mem=None):
@@ -4074,11 +4098,11 @@ def pr_ref(v):
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["go-cover"] and len(argv) >= 4:  # go_shim's entries, not commands of their own
-        return go_cover(argv[1], argv[2], argv[4:], int(argv[3]) or None)
+        return shim_entry(argv[2], go_cover, argv[1], argv[2], argv[4:], int(argv[3]) or None)
     if argv[:1] == ["go-capped"] and len(argv) >= 4:
-        return go_capped(argv[1], argv[2], int(argv[3]), argv[4:])
-    if argv[:1] == ["cap-exec"] and len(argv) >= 4:
-        return cap_exec(int(argv[1]), argv[2], argv[3:])
+        return shim_entry(argv[2], go_capped, argv[1], argv[2], int(argv[3]), argv[4:])
+    if argv[:1] == ["cap-exec"] and len(argv) >= 5:
+        return shim_entry(argv[1], cap_exec, int(argv[2]), argv[3], argv[4:])
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("packages")
