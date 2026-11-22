@@ -451,6 +451,34 @@ class ImageTest(unittest.TestCase):
             self.assertIn((vulncheck.CANARY, "0"), vulncheck.dpkg_installed(status.decode()))
             self.assertIn(b"ID=debian", layer.extractfile("etc/os-release").read())
 
+    def test_each_built_using_source_is_queried_in_the_same_tree(self):
+        # #5885 SEL-6 (package kind): a Debian package whose binaries carry another source's code (a static
+        # build's libc) names it in Built-Using; the scan queries that source as part of the package's tree,
+        # at the version named. A folded field, several sources and a package not installed are read.
+        text = ("Package: a\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1\n"
+                "Built-Using: glibc (= 2.41-12),\n gcc-14 (= 14.2.0-19)\n\n"
+                "Package: b\nStatus: deinstall ok config-files\nBuilt-Using: x (= 1)\n\n"
+                "Package: c\nStatus: install ok installed\nVersion: 1\n")
+        got = vulncheck.built_using(text)
+        self.assertEqual(vulncheck.dpkg_installed(got), {("a+built-using+glibc", "2.41-12"), ("a+built-using+gcc-14", "14.2.0-19")})
+        self.assertIn("Source: glibc (2.41-12)\n", got)
+        self.assertIn("Source: gcc-14 (14.2.0-19)\n", got)
+        self.assertEqual(vulncheck.built_using("Package: c\nStatus: install ok installed\n"), "")
+        # In the archive the scan reads, beside the tree's own packages: the control's agentos-fixed is
+        # Built-Using agentos-builtusing, whose advisory (DEB-9) the main tree's control must report.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        out = pathlib.Path(tmp.name) / "a.tar"
+        vulncheck.image_archive(vulncheck.FIXTURE / "image", out)
+        with tarfile.open(out) as t:
+            manifest = json.load(t.extractfile("manifest.json"))
+            layer = tarfile.open(fileobj=t.extractfile(manifest[0]["Layers"][0]))
+            status = layer.extractfile("var/lib/dpkg/status").read().decode()
+        self.assertIn(("agentos-fixed+built-using+agentos-builtusing", "1.0-1"), vulncheck.dpkg_installed(status))
+        self.assertIn("Source: agentos-builtusing (1.0-1)\n", status)
+        self.assertIn((vulncheck.IMAGE, "AGENTOS-VULNCHECK-DEB-9"), vulncheck.CONTROL_IMAGE_FAILS)
+        self.assertIn((vulncheck.IMAGE, "AGENTOS-VULNCHECK-DEB-9", "FAIL"), vulncheck.CONTROL_IMAGE_VERDICTS)
+
     def test_a_missing_or_empty_list_fails(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)

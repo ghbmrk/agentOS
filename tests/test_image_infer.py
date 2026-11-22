@@ -239,7 +239,7 @@ class TestInferImage(unittest.TestCase):
         """Run the script's link-map section on a fixture base: a map with LOADS, one CMakeFiles
         directory per LINKDIRS, and a stand-in guest-shipped.sh that logs its arguments and exits OWNER."""
         s = (IMG / "llamaserver.sh").read_text()
-        part = s[s.index("\nMAP=$WORK/llama-server.map"):s.index("\njail strip -o")]
+        part = s[s.index("\nMAP=$WORK/llama-server.map"):s.index("\ninstall -m 0755")]
         with tempfile.TemporaryDirectory() as t:
             t = pathlib.Path(t)
             lib = "/tmp/agentos-llama"

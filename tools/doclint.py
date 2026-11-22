@@ -9,6 +9,8 @@
                 RECORD_FROM or later has a `Record:` line directly under its title (PR, package,
                 head or main SHA)
   DECISIONS.md  a Decision cell over 300 characters links decisions/D-NNN.md (D-056); links resolve
+  record files  every tracked record or allow file is in a class of tools/record_merge.py's CLASSES, and none
+                holds a carriage return (#6375)
   ASSUMPTIONS   no row ID appears twice in one ASSUMPTIONS.md; a new row's ID is package-scoped and the
                 legacy list does not grow vs the PR's base side (tools/assumptions_ids.py)
   briefs/       each brief within the 20k-token cap (CLAUDE.md, Budget), as characters / 4, and
@@ -26,6 +28,7 @@ import subprocess
 import sys
 
 import assumptions_ids
+import record_merge
 
 
 RULE_FILES = ("CLAUDE.md", "AGENTS.md", "README.md", "docs/OPERATING.md", "docs/LANES.md")
@@ -219,12 +222,32 @@ def assumption_ids(root, files):
             elif cells[0] in ("ID", "#"):
                 in_table = True
             elif in_table and not set(cells[0]) <= set("-: "):
-                if cells[0] in seen:
+                if cells[0] not in seen:
+                    seen[cells[0]] = (n, line)
+                elif seen[cells[0]][1] != line:  # a row repeated word for word is one row (#6358)
                     # #6341 Lens: every role merges main, so the error names the fix for the union's duplicate.
-                    hint = "" if name == "DECISIONS.md" else "; a main merge keeps an edited row twice unless the clone ran `python3 tools/assumptions_merge.py --install`"
-                    yield f"{name}:{n}: duplicate ID {cells[0]} (first on line {seen[cells[0]]}){hint}"
-                else:
-                    seen[cells[0]] = n
+                    hint = "" if name == "DECISIONS.md" else "; a main merge keeps an edited row twice unless the clone ran `python3 tools/record_merge.py --install`"
+                    yield f"{name}:{n}: duplicate ID {cells[0]} (first on line {seen[cells[0]][0]}){hint}"
+
+
+CODE = (".go", ".py", ".sh", ".md", ".c", ".h", ".rs", ".js", ".ts")  # a name holding `allow` that is code or prose
+
+
+def record_files(root):
+    """Each tracked file named like an allowlist (`allow` in its name, not code or prose) is in a class of tools/record_merge.py's CLASSES, so the
+    merge driver, .gitattributes and the readers cover it; and no file in a class holds a carriage return (#6375)."""
+    try:
+        files = _tracked(root, ".")
+    except (OSError, subprocess.CalledProcessError):
+        files = [str(p.relative_to(root)) for p in root.rglob("*") if ".git" not in p.parts]
+    for f in sorted(files):
+        name, p = pathlib.PurePosixPath(f).name, root / f
+        if record_merge.record_class(f) is None:
+            if "allow" in name.lower() and not name.endswith(CODE):
+                yield (f"{f}: a record or allow file in no class of tools/record_merge.py's CLASSES; add its pattern "
+                       "there and in .gitattributes, or rename it")
+        elif p.is_file() and not p.is_symlink() and b"\r" in p.read_bytes():
+            yield f"{f}: holds a carriage return; record and allow files end lines in LF only (.gitattributes)"
 
 
 def markdown_files(root):
@@ -238,7 +261,7 @@ def lint(root):
     root = pathlib.Path(root)
     files = markdown_files(root)
     return [*readme(root), *rule_files(root), *operating_refs(root, files),
-            *briefs(root), *records(root), *decisions(root), *assumption_ids(root, files),
+            *briefs(root), *records(root), *decisions(root), *assumption_ids(root, files), *record_files(root),
             *assumptions_ids.check(root, files)]
 
 

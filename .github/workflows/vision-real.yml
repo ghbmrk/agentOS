@@ -60,12 +60,12 @@ jobs:
           }
           d="$RUNNER_TEMP/vision-models"
           mkdir -p "$d" "$RUNNER_TEMP/ort"
-          tgz=onnxruntime-linux-x64-1.29.0.tgz
+          tgz=onnxruntime-1.29.0-cp312-cp312-manylinux_2_28_x86_64.whl
           curl -fsSL --retry 3 --retry-delay 5 -o "$RUNNER_TEMP/$tgz" "$(pin $tgz 3)"
           check "$RUNNER_TEMP/$tgz" $tgz
-          tar -xzf "$RUNNER_TEMP/$tgz" -C "$RUNNER_TEMP/ort"
+          python3 -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extract("onnxruntime/capi/libonnxruntime.so.1.29.0", sys.argv[2])' "$RUNNER_TEMP/$tgz" "$RUNNER_TEMP/ort"
           lib=libonnxruntime.so.1.29.0
-          cp "$RUNNER_TEMP/ort/onnxruntime-linux-x64-1.29.0/lib/$lib" "$d/$lib"
+          cp "$RUNNER_TEMP/ort/onnxruntime/capi/$lib" "$d/$lib"
           check "$d/$lib" $lib
           for m in yolox_tiny.onnx face_detection_yunet_2023mar.onnx face_recognition_sface_2021dec.onnx \
               yolo-v9-t-416-license-plates-end2end.onnx cct_xs_v2_global.onnx yamnet.onnx; do

@@ -1,7 +1,8 @@
 name: trusted-base
 # KRN-2m (#2849): measures the trusted base on every PR (own lines, dependency lines, parsers;
 # SPEC KRN-2) and shows the table in this check's job summary; it fails a PR that adds a parser
-# without a `Trusted-base: <key> -- <reason>` line in its body, or grows the trusted core
+# without a `<key> #<PR> -- <reason>` line added to tools/trusted_base_reasons.txt (a body line
+# waives nothing, #6395: it can change after the reviews at the same head), or grows the trusted core
 # (tools/trusted_core.txt) without a `Trusted-core:` line. It runs on
 # pull_request_target, so the workflow and tools/trusted_base.py are the base branch's copies:
 # a PR cannot loosen the check it is measured by. The base side is base.sha; the head side is
@@ -9,7 +10,7 @@ name: trusted-base
 # cannot keep an older, larger budget (KRN-2cap-harden, #2945); a merge that conflicts fails
 # the step. Both trees are checked out as worktrees and only listed by `go list` (vendored,
 # offline, GOTOOLCHAIN=local); no PR code is built or run. `edited` reruns it when the body
-# changes. CI-ceiling-fall (#5174): the base is the base branch's tip when the job runs, not the
+# changes, for the `Trusted-core:`, `Ceiling:` and closing-keyword lines. CI-ceiling-fall (#5174): the base is the base branch's tip when the job runs, not the
 # event's base.sha, so when trusted-base-rerun.yml reruns this run after main grows, the PR is
 # measured against the new main and a PR that no longer fits under a ceiling turns red. Two more steps (REV-PROOF-claims, #4909) hold text a tool computes to the tool: a
 # trusted-core growth decision the PR adds must carry `trusted_base.py measure --sentence` output

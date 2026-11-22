@@ -200,12 +200,12 @@ PREMERGE_LINES = [
     'permissions:',
     '  contents: read',
     'concurrency:',
-    '  group: premerge-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || inputs.pr || github.run_id }}',
+    "  group: premerge-${{ github.event.pull_request.number || ((contains(github.event.comment.body, 'Verdict:') || contains(github.event.changes.body.from, 'Verdict:')) && github.event.issue.number) || github.event.workflow_run.pull_requests[0].number || inputs.pr || github.run_id }}",
     '  cancel-in-progress: false',
     'jobs:',
     '  premerge-gate:',
     '    name: premerge-gate',
-    "    if: (github.event_name == 'pull_request_target' && github.event.action != 'closed') || github.event.issue.pull_request || github.event.workflow_run.pull_requests[0] || github.event_name == 'workflow_dispatch'",
+    "    if: (github.event_name == 'pull_request_target' && github.event.action != 'closed') || (github.event.issue.pull_request && (contains(github.event.comment.body, 'Verdict:') || contains(github.event.changes.body.from, 'Verdict:'))) || github.event.workflow_run.pull_requests[0] || github.event_name == 'workflow_dispatch'",
     '    runs-on: ubuntu-24.04',
     '    timeout-minutes: 5',
     '    environment: premerge # deployment branches: main only; holds PREMERGE_APP_KEY',
@@ -848,21 +848,16 @@ def concurrency_problems(top):
     return []
 
 
-# CI-mutgate-head-guard (#5409): a rerun keeps its event, so it can test a head the PR has left.
-# mutgate's first job is this one, pinned whole: it reads the PR's head from the API and, when the
-# run's is older, ends with a notice. `claimed` runs only on its `current`, and no later job runs
-# past a skipped claim but the `mutgate` job, which then fails, so a stale run never passes.
-HEAD_GUARD_LINES = [
-    "  head:",
-    "    runs-on: ubuntu-24.04",
-    "    timeout-minutes: 5",
+# CI-mutgate-head-guard (#5409): a rerun keeps its event, so it can test a head the PR has left, and
+# "Re-run failed jobs" copies a succeeded job's result from attempt 1 (L3 on #5433). So each job that
+# runs PR tests or decides reads the PR's head itself as its first step and fails on an older one.
+HEAD_CHECK_JOBS = ("claimed", "plan", "mutants", "mutgate")
+HEAD_CHECK_LINES = [
     "    permissions:",
+    "      contents: read",
     "      pull-requests: read",
-    "    outputs:",
-    "      current: ${{ steps.head.outputs.current }}",
     "    steps:",
-    "      - name: This run's head is the PR's current head",
-    "        id: head",
+    "      - name: This run's head is still the PR's current head",
     "        env:",
     "          GH_TOKEN: ${{ github.token }}",
     "          REPO: ${{ github.repository }}",
@@ -872,40 +867,23 @@ HEAD_GUARD_LINES = [
     '          now=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha) || '
     '{ echo "::error::cannot read the PR\'s head"; exit 1; }',
     "          [[ \"$now\" =~ ^[0-9a-f]{40}$ ]] || { echo \"::error::the PR's head is not a sha: $now\"; exit 1; }",
-    '          if [ "$now" = "$RUN_HEAD" ]; then echo "current=true" >> "$GITHUB_OUTPUT"; exit 0; fi',
-    '          echo "::notice::this run\'s head $RUN_HEAD is not the PR\'s current head $now: no gate runs; '
-    'the current head\'s own run decides"',
-    '          echo "current=false" >> "$GITHUB_OUTPUT"',
-]
-CLAIM_WAITS = ["  claimed:", "    needs: head", "    if: ${{ needs.head.outputs.current == 'true' }}"]
-# L3 on #5433: "Re-run failed jobs" copies `head`'s current=true from attempt 1, so each job that
-# runs PR tests or decides reads the head itself as its first step and fails on an older one.
-HEAD_CHECK_JOBS = ("plan", "mutants", "mutgate")
-HEAD_CHECK_LINES = [
-    "    permissions:",
-    "      contents: read",
-    "      pull-requests: read",
-    "    steps:",
-    "      - name: This run's head is still the PR's current head",
-] + HEAD_GUARD_LINES[HEAD_GUARD_LINES.index("        env:"):-3] + [
     '          [ "$now" = "$RUN_HEAD" ] || { echo "::error::this run\'s head $RUN_HEAD is not the PR\'s current head '
     '$now: a rerun of an old head gates nothing; the current head\'s own run decides"; exit 1; }',
 ]
+# CI-mutgate-zero-target-fast (#6401): `claimed` is the first job, so a PR that claims nothing takes one
+# runner slot. The deciding job skips only on a claim that succeeded and printed a literal `[]`; any
+# other claim (failed, timed out, no list) runs it, and it fails unless the claim succeeded.
+GATE_IF = "    if: ${{ !cancelled() && (needs.claimed.result != 'success' || needs.claimed.outputs.packages != '[]') }}"
 
 
 def head_guard_problems(text):
-    """Return why mutgate.yml can run its gate on a head the PR has left; empty when it cannot."""
+    """Return why mutgate.yml can pass a head the PR has left or a claim that did not print `[]`; empty when it cannot."""
     if "\njobs:\n" not in text:
         return ["no `jobs:` line"]
     code = [l for l in text.split("\njobs:\n", 1)[1].split("\n") if l.strip(SP) and not l.lstrip(SP).startswith("#")]
     jobs = [i for i, l in enumerate(code) if re.match(r"  \S", l)] + [len(code)]
-    first = code[:jobs[1]] if len(jobs) > 1 else code
-    if first != HEAD_GUARD_LINES:
-        return ["the first job is not the pinned head check"]
-    claim = [i for i in jobs[:-1] if code[i] == "  claimed:"]
-    if not claim or code[claim[0]:claim[0] + 3] != CLAIM_WAITS:
-        return ["`claimed` does not wait on the head check"]
-    # Only the deciding job may run past a skipped claim, and it fails unless the claim succeeded.
+    if code[jobs[0]] != "  claimed:":
+        return ["the first job is not `claimed`"]
     for a, b in zip(jobs, jobs[1:]):
         body = "\n".join(code[a:b])
         name = code[a].strip(SP + ":")
@@ -914,11 +892,35 @@ def head_guard_problems(text):
             if [l for l in code[a:b] if l.startswith("    permissions")] != ["    permissions:"] or \
                     code[at[0]:at[0] + len(HEAD_CHECK_LINES)] != HEAD_CHECK_LINES or "    steps:" in code[a:at[0]]:
                 return ["%s does not read the PR's head first" % name]
-        if code[a] != "  mutgate:" and re.search(r"\b(always|cancelled|failure|success)\(", body):
-            return ["%s runs past a skipped claim" % name]
-        if code[a] == "  mutgate:" and '[ "$CLAIMED" = success ] || exit 1' not in body:
-            return ["the mutgate job does not fail when the claim did not run"]
+        # Only the deciding job may run past a failed claim, and it fails unless the claim succeeded.
+        if name != "mutgate" and re.search(r"\b(always|cancelled|failure|success)\(", body):
+            return ["%s runs past a failed claim" % name]
+        if name == "mutgate" and ([l for l in code[a:b] if l.startswith("    if:")] != [GATE_IF]
+                                  or '[ "$CLAIMED" = success ] || exit 1' not in body):
+            return ["the mutgate job can pass or skip a claim that did not succeed with `[]`"]
     return []
+
+
+def step_script(text, job, step):
+    """The run: script of the step named `step` in `job` of a workflow, dedented to column 0."""
+    body = text.split("\n  %s:\n" % job, 1)[1]
+    lines = body.split("      - name: %s\n" % step, 1)[1].split("\n")
+    run = lines.index("        run: |")
+    out = []
+    for l in lines[run + 1:]:
+        if l and not l.startswith("          "):
+            break
+        out.append(l[10:])
+    return "\n".join(out)
+
+
+def gate_runs(cancelled, result, packages):
+    """GATE_IF's expression evaluated for one run: whether the deciding job runs."""
+    expr = GATE_IF.split("${{", 1)[1].rsplit("}}", 1)[0]
+    for k, v in (("!cancelled()", "(not cancelled)"), ("needs.claimed.result", "result"),
+                 ("needs.claimed.outputs.packages", "packages"), ("&&", " and "), ("||", " or ")):
+        expr = expr.replace(k, v)
+    return eval(expr, {"__builtins__": {}}, {"cancelled": cancelled, "result": result, "packages": packages})
 
 
 class WorkflowTest(unittest.TestCase):
@@ -1058,27 +1060,24 @@ class WorkflowTest(unittest.TestCase):
                 self.assertTrue(supersede_problems("x.yml", text.replace("pull_request", "push")), name)
 
     def test_a_stale_mutgate_run_stops_at_its_first_job(self):
-        # CI-mutgate-head-guard (#5409): mutgate's first job is the pinned head check, `claimed`
-        # waits on it, and no job but the failing `mutgate` one runs past a skipped claim.
+        # CI-mutgate-head-guard (#5409): every job that runs PR tests or decides reads the PR's head
+        # first; `claimed`, the first job, fails on an older head, so no later job runs but the failing gate.
         text = (WORKFLOWS / "mutgate.yml").read_text()
         self.assertEqual(head_guard_problems(text), [])
-        guard = "\n".join(HEAD_GUARD_LINES) + "\n"
         edits = {
-            "no guard": (guard, ""),
-            "a job before the guard": ("\njobs:\n", "\njobs:\n  early:\n    runs-on: ubuntu-24.04\n"),
-            "guard widened": ("      pull-requests: read\n", "      pull-requests: write\n"),
-            "guard always passes": ('if [ "$now" = "$RUN_HEAD" ]', 'if true || [ "$now" = "$RUN_HEAD" ]'),
-            "guard reads the event": ('gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha', 'echo "$RUN_HEAD"'),
-            "claim ignores it": ("    if: ${{ needs.head.outputs.current == 'true' }}\n", ""),
-            "claim waits on nothing": ("    needs: head\n", ""),
-            "plan runs past a skip": ("    if: ${{ needs.claimed.outputs.packages != '[]' }}\n",
-                                      "    if: ${{ always() && needs.claimed.outputs.packages != '[]' }}\n"),
-            "gate passes a skip": ('[ "$CLAIMED" = success ] || exit 1', '[ "$CLAIMED" != failure ] || exit 1'),
+            "a job before the claim": ("\njobs:\n", "\njobs:\n  early:\n    runs-on: ubuntu-24.04\n"),
+            "check widened": ("      pull-requests: read\n", "      pull-requests: write\n"),
+            "check reads the event": ('gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha', 'echo "$RUN_HEAD"'),
+            "plan runs past a failure": ("    if: ${{ needs.claimed.outputs.packages != '[]' }}\n",
+                                         "    if: ${{ always() && needs.claimed.outputs.packages != '[]' }}\n"),
+            "gate passes a failed claim": ('[ "$CLAIMED" = success ] || exit 1', '[ "$CLAIMED" != failure ] || exit 1'),
+            # CI-mutgate-zero-target-fast (#6401): the gate skips only on a successful literal `[]`.
+            "gate skips a failed claim's []": (GATE_IF + "\n", "    if: ${{ !cancelled() && needs.claimed.outputs.packages != '[]' }}\n"),
+            "gate skips an empty claim": (GATE_IF + "\n", GATE_IF.replace("!= '[]'", "!= '[]' && needs.claimed.outputs.packages != ''") + "\n"),
             "no jobs line": ("\njobs:\n", "\njobs: \n"),
-            # L3 on #5433: each job that runs PR tests or decides checks the head itself, first.
             "a job's check passes an old head": ('          [ "$now" = "$RUN_HEAD" ] || { echo "::error::this run',
                                                  '          true || { echo "::error::this run'),
-            "a second permissions key": ("    if: ${{ !cancelled() }}\n", "    if: ${{ !cancelled() }}\n    permissions: {}\n"),
+            "a second permissions key": (GATE_IF + "\n", GATE_IF + "\n    permissions: {}\n"),
         }
         check = "\n".join(HEAD_CHECK_LINES[4:]) + "\n"
         for job in HEAD_CHECK_JOBS:
@@ -1086,38 +1085,68 @@ class WorkflowTest(unittest.TestCase):
             edits["no check in " + job] = ("\n  %s:\n" % job + body[:body.index(check) + len(check)],
                                            "\n  %s:\n" % job + body[:body.index(check)].replace(
                                                "    permissions:\n      contents: read\n      pull-requests: read\n", ""))
-            edits["check after the checkout in " + job] = (
-                "\n  %s:\n" % job + body[:body.index(check) + len(check)] + "      - uses: actions/checkout@",
-                "\n  %s:\n" % job + body[:body.index(check)] + "      - uses: actions/checkout@x\n" + check
-                + "      - uses: actions/checkout@") if job != "mutgate" else (
-                "\n  %s:\n" % job + body[:body.index(check) + len(check)] + "      - name: The claim ran",
-                "\n  %s:\n" % job + body[:body.index(check)] + "      - run: true\n" + check + "      - name: The claim ran")
+            nxt = body[body.index(check) + len(check):].split("\n", 1)[0] + "\n"
+            edits["check after another step in " + job] = (
+                "\n  %s:\n" % job + body[:body.index(check) + len(check)] + nxt,
+                "\n  %s:\n" % job + body[:body.index(check)] + "      - run: true\n" + check + nxt)
         for edit, (old, new) in edits.items():
             with self.subTest(edit):
                 self.assertIn(old, text)
                 self.assertTrue(head_guard_problems(text.replace(old, new, 1)), edit)
-        # The guard's script: the current head runs the gate, an older one ends green with a notice,
-        # and an unreadable head fails the job (so `claimed` and every gate job skip and mutgate fails).
-        script = "\n".join(l[10:] for l in HEAD_GUARD_LINES[HEAD_GUARD_LINES.index("        run: |") + 1:])
+        # The check's script: only the current head goes on; anything else fails the job.
+        script = step_script(text, "claimed", "This run's head is still the PR's current head")
+        self.assertEqual(script.rstrip("\n").split("\n"), [l[10:] for l in HEAD_CHECK_LINES[11:]])
         sha, other = "a" * 40, "b" * 40
-        for out, rc, want_rc, want in [(sha, 0, 0, "current=true"), (other, 0, 0, "current=false"),
-                                       ("", 1, 1, ""), ("not a sha", 0, 1, ""), (sha + "\n" + sha, 0, 1, "")]:
+        for out, rc, ok in [(sha, 0, True), (other, 0, False), ("", 1, False), ("not a sha", 0, False),
+                            (sha + "\n" + sha, 0, False)]:
             with self.subTest(out=out, rc=rc), tempfile.TemporaryDirectory() as d:
                 gh = pathlib.Path(d, "gh")
                 gh.write_text("#!/bin/sh\nprintf '%s\\n' \"$STUB_OUT\"\nexit \"$STUB_RC\"\n")
                 gh.chmod(0o755)
                 env = {"PATH": d + ":/usr/bin:/bin", "STUB_OUT": out, "STUB_RC": str(rc), "RUN_HEAD": sha,
-                       "REPO": "o/r", "PR_NUMBER": "1", "GITHUB_OUTPUT": str(pathlib.Path(d, "out"))}
+                       "REPO": "o/r", "PR_NUMBER": "1"}
                 r = subprocess.run(["bash", "-e", "-c", script], env=env, capture_output=True, text=True)
-                self.assertEqual(r.returncode, want_rc, r.stdout + r.stderr)
-                got = pathlib.Path(d, "out").read_text().strip() if pathlib.Path(d, "out").exists() else ""
-                self.assertEqual(got, want)
-                self.assertEqual("::notice::this run's head" in r.stdout, want == "current=false")
-                # Each later job's own check: only the current head goes on; anything else fails the job.
-                check = "\n".join(l[10:] for l in HEAD_CHECK_LINES[HEAD_CHECK_LINES.index("        run: |") + 1:])
-                r = subprocess.run(["bash", "-e", "-c", check], env=env, capture_output=True, text=True)
-                self.assertEqual(r.returncode, 0 if want == "current=true" else 1, r.stdout + r.stderr)
-                self.assertEqual("a rerun of an old head gates nothing" in r.stdout, want == "current=false")
+                self.assertEqual(r.returncode, 0 if ok else 1, r.stdout + r.stderr)
+                self.assertEqual("a rerun of an old head gates nothing" in r.stdout, out == other)
+
+    def test_a_zero_target_mutgate_passes_only_on_a_claim_that_printed_an_empty_list(self):
+        # CI-mutgate-zero-target-fast (#6401): a PR that claims no package passes from `claimed` alone:
+        # plan, shards and the gate all skip, which GitHub counts as passing. Fail closed: the claim step
+        # fails unless the tool succeeded and printed one line holding a list, and the gate skips only
+        # when `claimed` succeeded with a literal `[]`; every other claim runs the gate, which fails it.
+        text = (WORKFLOWS / "mutgate.yml").read_text()
+        self.assertEqual(head_guard_problems(text), [])
+        for job in ("plan", "mutants"):
+            self.assertIn("\n  %s:\n" % job, text)
+            body = text.split("\n  %s:\n" % job, 1)[1]
+            self.assertIn("    if: ${{ needs.claimed.outputs.packages != '[]' }}\n", body.split("\n    steps:\n", 1)[0])
+        script = step_script(text, "claimed", "Tier-A and tier-B packages this PR changes")
+        self.assertIn('python3 -I tools/mutgate.py claimed --git "$BASE" --json', script)
+        for out, rc, want in [("[]", 0, "[]"), ('["hint"]', 0, '["hint"]'), ('["a", "kernel/b"]', 0, '["a", "kernel/b"]'),
+                              ("", 0, None), ("[]", 1, None), ("[]", 124, None), ("", 1, None), ("[]\n[]", 0, None),
+                              ("[\n]", 0, None), ("none", 0, None), ("[] trailing", 0, None), ("Traceback\n[]", 0, None)]:
+            with self.subTest(out=out, rc=rc), tempfile.TemporaryDirectory() as d:
+                py = pathlib.Path(d, "python3")
+                py.write_text("#!/bin/sh\nprintf '%s\\n' \"$STUB_OUT\"\nexit \"$STUB_RC\"\n")
+                py.chmod(0o755)
+                outf, summ = pathlib.Path(d, "out"), pathlib.Path(d, "summary")
+                env = {"PATH": d + ":/usr/bin:/bin", "STUB_OUT": out, "STUB_RC": str(rc), "BASE": "x",
+                       "GITHUB_OUTPUT": str(outf), "GITHUB_STEP_SUMMARY": str(summ)}
+                r = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
+                                   env=env, capture_output=True, text=True)
+                self.assertEqual(r.returncode == 0, want is not None, r.stdout + r.stderr)
+                got = outf.read_text() if outf.exists() else ""
+                self.assertEqual(got, "" if want is None else "packages=%s\n" % want)
+                self.assertEqual(summ.exists(), want == "[]")
+        # The deciding job: skipped only for a succeeded claim with a literal `[]`; a cancelled run is
+        # cancelled whatever it skips. Every result other than success runs the gate.
+        for result in ("success", "failure", "cancelled", "skipped", ""):
+            for packages in ("[]", '["hint"]', "", "[ ]", "null"):
+                with self.subTest(result=result, packages=packages):
+                    self.assertEqual(gate_runs(False, result, packages), not (result == "success" and packages == "[]"))
+                    self.assertFalse(gate_runs(True, result, packages))
+        # When it runs, it fails unless the claim succeeded: tests/test_mutgate.py's
+        # test_summary_fails_unless_the_claim_ran_and_each_package_passed pins its script.
 
     def test_concurrency_block_is_read_whole(self):
         # #5409 (from #5408's review): the pinned block's three lines with more after them fail,

@@ -106,7 +106,7 @@ def scope_repo(d, base_has_tool=True):
 
 
 # CI-par-4: the jobs whose steps a records-only change skips, and the jobs that always run in full.
-SCOPED = ("checks", "broker-race")
+SCOPED = ("checks", "unit-tests", "broker-race")
 FULL = ("broker-checks", "machines", "hostcheck")
 
 
@@ -601,10 +601,12 @@ class WiringTest(unittest.TestCase):
     def test_ci_skips_only_on_records_and_checks_always_runs(self):
         jobs = ci_jobs()
         for job in SCOPED + FULL:
-            self.assertFalse([l for l in jobs[job][1] if l.startswith("    needs:")], job)
-        # No job waits for another: main requires the split jobs directly (CI-par-5).
+            self.assertEqual([l for l in jobs[job][1] if l.startswith("    needs:")],
+                             ["    needs: unit-tests"] if job == "checks" else [], job)
+        # No job waits for another to decide scope: main requires the split race jobs directly
+        # (CI-par-5). checks waits for the unit-tests shards alone, for their traces (#6464).
         ci = (WORKFLOWS / "ci.yml").read_text()
-        self.assertNotIn("needs:", ci)
+        self.assertEqual(ci.count("needs:"), 1)
         for job in FULL:
             self.assertFalse([s for s, c in jobs[job][2] if c and "records" in c], job)
         # The document checks never depend on scope.
@@ -692,11 +694,28 @@ class WiringTest(unittest.TestCase):
         # and the next step fails on a module that opened a record and is not listed whole.
         ci = (WORKFLOWS / "ci.yml").read_text()
         unit = ci[ci.index("      - name: Unit tests\n"):]
-        unit, check = unit.split("\n      - ", 2)[:2]
+        unit, upload = unit.split("\n      - ", 2)[:2]
+        upload = upload.split("\n  checks:\n")[0]  # the unit-tests job's last step
         self.assertIn("        if: steps.scope.outputs.records != 'true'\n", unit)
         self.assertIn("          GOFLAGS: -buildvcs=false\n", unit)
-        # tools/unit_tests.py runs each module under strace into its own trace (test_unit_tests).
-        self.assertTrue(unit.endswith('          sudo -E env "PATH=$PATH" python tools/unit_tests.py "$RUNNER_TEMP/reads"'), unit)
+        # tools/unit_tests.py runs each of its shard's modules under strace into its own trace
+        # (test_unit_tests), and the shard hands every trace on to checks (CI-checks-under-45).
+        self.assertTrue(unit.endswith('          sudo -E env "PATH=$PATH" python tools/unit_tests.py "$RUNNER_TEMP/reads" '
+                                      '--shards 2 --index "$SHARD"'), unit)
+        self.assertEqual(upload.splitlines()[1:], [
+            "        if: steps.scope.outputs.records != 'true'", "        with:", "          name: unit-traces-${{ matrix.shard }} # the traces and shard-<index>.json, for checks",
+            "          path: ${{ runner.temp }}/reads", "          if-no-files-found: error", "          retention-days: 7",
+            "          overwrite: true # a rerun shard replaces its own"])
+        self.assertTrue(upload.startswith("uses: actions/upload-artifact@"), upload)
+        # checks gathers every shard's traces into the same directory, then audits them.
+        checks = ci[ci.index("\n  checks:\n"):ci.index("\n  broker-race:\n")]
+        gather = checks[checks.index("uses: actions/download-artifact@"):]
+        gather, combine, check = gather.split("\n      - ", 3)[:3]
+        self.assertEqual(gather.splitlines()[1:], [
+            "        if: steps.scope.outputs.records != 'true'", "        with:", "          pattern: unit-traces-*",
+            "          merge-multiple: true", "          path: ${{ runner.temp }}/reads"])
+        self.assertEqual(combine.splitlines()[1:], ["        if: steps.scope.outputs.records != 'true'",
+                         '        run: python tools/unit_tests.py --combine "$RUNNER_TEMP/reads"'])
         self.assertEqual(check.splitlines()[1:], ["        if: steps.scope.outputs.records != 'true'",
                          '        run: python tests/records_audit.py "$RUNNER_TEMP/reads"'])
 
@@ -784,10 +803,17 @@ class WiringTest(unittest.TestCase):
         jobs = ci_jobs()
         self.assertEqual(set(jobs), {*SCOPED, *FULL})
         for job, (cond, _, steps) in jobs.items():
-            self.assertIsNone(cond, job)
+            # checks runs always, so a failed or cancelled shard fails it rather than skipping it.
+            self.assertEqual(cond, "${{ always() }}" if job == "checks" else None, job)
         ci = (WORKFLOWS / "ci.yml").read_text()
         self.assertEqual(ci.count("uses: ./.github/actions/scope\n"), ci.count(SCOPE_STEP.format("full # CI-mainguard")))
-        self.assertEqual(ci.count(SCOPE_STEP.format("full # CI-mainguard")), 2)
+        self.assertEqual(ci.count(SCOPE_STEP.format("full # CI-mainguard")), 3)
+        # Its first step after scope fails it unless every shard succeeded.
+        self.assertEqual(jobs["checks"][2][2], (
+            "      - name: Every unit-tests shard succeeded (CI-checks-under-45)\n        env:\n"
+            "          SHARDS: ${{ needs.unit-tests.result }}\n"
+            "        run: '[ \"$SHARDS\" = success ] || { echo \"::error::the unit-tests shards ended $SHARDS\"; exit 1; }'\n",
+            None))
 
     def test_push_runs_only_on_main(self):
         # CIMG-a holds because push fires only for main: an unscoped push from any other
@@ -811,7 +837,9 @@ class WiringTest(unittest.TestCase):
         ci = (WORKFLOWS / "ci.yml").read_text()
         self.assertIn("        shard: [0, 1, 2]", ci)
         # Main requires broker-race (0), (1), (2) and broker-checks; `broker` is gone (CI-par-5).
-        self.assertEqual(sorted(jobs), sorted(["checks", "broker-race", "broker-checks", "machines", "hostcheck"]))
+        # The unit-tests shards are not required by name: checks fails unless they all succeed.
+        self.assertEqual(sorted(jobs), sorted(["checks", "unit-tests", "broker-race", "broker-checks", "machines",
+                                               "hostcheck"]))
 
     def test_machines_job_lists_infer(self):
         # REQ: INFER-CI-1
