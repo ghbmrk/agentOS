@@ -212,3 +212,27 @@ func TestSoundClassesClosed(t *testing.T) {
 		}
 	}
 }
+
+// TestResizeSamplesTheRegion (MUT-kill-6409-vision, #6457): a region away
+// from the frame's origin is sampled where it is: at scale 1 each pixel
+// is the frame's own at the region's offset.
+func TestResizeSamplesTheRegion(t *testing.T) {
+	const w, h = 40, 40
+	f := vision.Frame{Format: vision.FormatRGB24, Width: w, Height: h, Data: make([]byte, w*h*3)}
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			f.Data[(y*w+x)*3], f.Data[(y*w+x)*3+1] = byte(x), byte(y)
+		}
+	}
+	r := rect{10, 20, 14, 24}
+	n := 0
+	resize(f, r, 4, 4, func(x, y int, rgb [3]float64) {
+		n++
+		if rgb[0] != float64(r.x0+x) || rgb[1] != float64(r.y0+y) || rgb[2] != 0 {
+			t.Errorf("(%d,%d): %v, want %d %d 0", x, y, rgb, r.x0+x, r.y0+y)
+		}
+	})
+	if n != 16 {
+		t.Fatalf("%d pixels, want 16", n)
+	}
+}

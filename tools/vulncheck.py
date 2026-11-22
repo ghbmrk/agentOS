@@ -256,15 +256,16 @@ CONTROL_BARE_FILES = ("AGENTOS-VULNCHECK-INLINED-4", "npm:agentos-bare inlined i
 # agentos-guestonly); their base root's manifest also lists agentos-toolchain, which they do not
 # carry, so its advisory (DEB-7) must not be reported. The main tree's static link inputs (#5885;
 # FIXTURE/image/linked) hold libstatic-dev (source agentos-linkedonly), in no other status file, so
-# its advisory (DEB-8) is the main tree's.
+# its advisory (DEB-8) is the main tree's. agentos-fixed is Built-Using agentos-builtusing 1.0-1 (#5885), whose
+# advisory (DEB-9) Debian fixed in 1.0-2: it is queried as the main tree's, and no record can accept it.
 CONTROL_IMAGE_FAILS = {(IMAGE, "AGENTOS-VULNCHECK-DEB-1"), (IMAGE, "AGENTOS-VULNCHECK-DEB-4"),
-                       (IMAGE, "AGENTOS-VULNCHECK-DEB-8"),
+                       (IMAGE, "AGENTOS-VULNCHECK-DEB-8"), (IMAGE, "AGENTOS-VULNCHECK-DEB-9"),
                        (INITRD, "AGENTOS-VULNCHECK-DEB-4"), (INITRD, "AGENTOS-VULNCHECK-DEB-5"),
                        (GUEST, "AGENTOS-VULNCHECK-DEB-4"), (GUEST, "AGENTOS-VULNCHECK-DEB-6")}
 # With the fixture's records: the fixed advisory still fails and its record goes unused, and the
 # main tree's record for agentos-nofix does not accept the same advisory in the initrd or the guests.
 CONTROL_IMAGE_VERDICTS = {(IMAGE, "AGENTOS-VULNCHECK-DEB-1", "FAIL"), (IMAGE, "AGENTOS-VULNCHECK-DEB-4", "accepted #1"),
-                          (IMAGE, "AGENTOS-VULNCHECK-DEB-8", "accepted #1"),
+                          (IMAGE, "AGENTOS-VULNCHECK-DEB-8", "accepted #1"), (IMAGE, "AGENTOS-VULNCHECK-DEB-9", "FAIL"),
                           (INITRD, "AGENTOS-VULNCHECK-DEB-4", "FAIL"), (INITRD, "AGENTOS-VULNCHECK-DEB-5", "accepted #1"),
                           (GUEST, "AGENTOS-VULNCHECK-DEB-4", "FAIL"), (GUEST, "AGENTOS-VULNCHECK-DEB-6", "accepted #1")}
 # The initrd's status file in the fixture, which the control packs into an initrd (control_image).
@@ -1435,7 +1436,8 @@ def image_archive(src, dest, status=None):
     """A one-layer docker-archive holding SRC's dpkg status (or STATUS, the initrd's) and
     os-release where a Debian tree keeps them, the input osv-scanner's image scan reads: its
     dpkg extractor takes the ecosystem from os-release and queries each installed package by its
-    source package. The status file gains the canary (CANARY_STANZA)."""
+    source package. The status file gains a stanza per Built-Using source (built_using) and the
+    canary (CANARY_STANZA)."""
     files = {"etc/os-release": pathlib.Path(src) / OS_RELEASE,
              "var/lib/dpkg/status": pathlib.Path(src) / DPKG_STATUS}
     for name, f in files.items():
@@ -1454,7 +1456,7 @@ def image_archive(src, dest, status=None):
         for name, f in files.items():
             data = status if status is not None and name == "var/lib/dpkg/status" else f.read_bytes()
             if name == "var/lib/dpkg/status":
-                data = data.rstrip(b"\n") + b"\n\n" + CANARY_STANZA.encode()
+                data = data.rstrip(b"\n") + b"\n\n" + built_using(data.decode("utf-8", "replace")).encode() + CANARY_STANZA.encode()
             ti = tarfile.TarInfo(name)
             ti.size, ti.mode = len(data), 0o644
             t.addfile(ti, io.BytesIO(data))
@@ -1471,6 +1473,23 @@ def image_archive(src, dest, status=None):
             ti = tarfile.TarInfo(name)
             ti.size = len(data)
             t.addfile(ti, io.BytesIO(data))
+
+
+def built_using(text):
+    """A stanza for each source package an installed package's Built-Using field names (#5885 SEL-6):
+    Debian records there the sources whose code a package's binaries carry, such as a static build's
+    libc, so each is queried as part of the same tree, under the binary name PACKAGE+built-using+SOURCE.
+    Each ends in a blank line; "" when none names one."""
+    out = []
+    for stanza in re.split(r"\n\s*\n", text):
+        fields = dict(m.groups() for m in re.finditer(r"(?m)^([A-Za-z-]+):[ \t]*(.*(?:\n[ \t].*)*)", stanza))
+        if not fields.get("Status", "").endswith(" installed") or not fields.get("Package"):
+            continue
+        for src, version in re.findall(r"([a-z0-9][a-z0-9+.-]*)\s*\(\s*=\s*([^)\s]+)\s*\)", fields.get("Built-Using", "")):
+            out.append(f"Package: {fields['Package']}+built-using+{src}\nStatus: install ok installed\n"
+                       f"Architecture: {fields.get('Architecture', 'all')}\nSource: {src} ({version})\nVersion: {version}\n"
+                       f"Description: tools/vulncheck.py: {fields['Package']} is Built-Using {src}; not a package\n\n")
+    return "".join(sorted(set(out)))
 
 
 def image_findings(doc, where=IMAGE):

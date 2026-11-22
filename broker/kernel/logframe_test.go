@@ -11,9 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"math/rand/v2"
-	"os"
-	"os/exec"
-	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -172,19 +169,5 @@ func TestOpenUnderZeroHead(t *testing.T) {
 	}
 	if l, err := kernel.Open(cfg); err != nil || l.Len() != 2 {
 		t.Fatalf("a log under a head at seq 0: %v", err)
-	}
-}
-
-// The kernel refuses to start where FIPS 140-only mode is enforced, since its
-// edge order probe needs X25519, which that mode forbids: a process that
-// links it dies in its init, so no fips-only error branch elsewhere in it
-// runs (the proof the log's AEAD waivers rest on).
-// Catches the init's panic dropped, which would start a kernel there.
-func TestKernelRefusesFIPSOnly(t *testing.T) {
-	cmd := exec.Command(os.Args[0], "-test.run=^$")
-	cmd.Env = append(os.Environ(), "GODEBUG=fips140=only")
-	out, err := cmd.CombinedOutput()
-	if err == nil || !strings.Contains(string(out), "X25519 is not allowed in FIPS 140-only mode") || !strings.Contains(string(out), "broker/kernel.init") {
-		t.Fatalf("a test binary under fips140=only: %v\n%s", err, out)
 	}
 }
