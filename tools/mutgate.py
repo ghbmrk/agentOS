@@ -469,6 +469,36 @@ def embedded_by(pkg, rel):
     return out or None
 
 
+@contextlib.contextmanager
+def hidden_at_run(broker, paths, tmp):
+    """Yield the `go` flags that build broker's tests with paths (repo paths, embedded files:
+    embedded_by) as they are and run them with paths absent: each is moved under tmp and named in an
+    -overlay, which go reads for embedding too, and put back after. A test that reads one at run time
+    then fails the run, as hide_docs makes an unnamed doc's reader fail it (#6373, #6458). It moves
+    files only in a tree this process made (MADE), and only regular files (ValueError otherwise)."""
+    tree = pathlib.Path(broker).resolve().parent
+    if paths and tree not in MADE:
+        raise ValueError(f"{broker} is no tree mutgate made")
+    store, moved = pathlib.Path(tmp).resolve() / "hidden", []
+    try:
+        for n, path in enumerate(paths):
+            src = tree / path
+            if src.is_symlink() or not src.is_file():
+                raise ValueError(f"{path} is not a regular file")
+            store.mkdir(exist_ok=True)
+            shutil.copy2(src, store / str(n))
+            src.unlink()
+            moved.append((src, store / str(n)))
+        if not moved:
+            yield []
+            return
+        (store / "overlay.json").write_text(json.dumps({"Replace": {str(a): str(b) for a, b in moved}}))
+        yield [f"-overlay={store / 'overlay.json'}"]
+    finally:
+        for src, kept in moved:
+            shutil.copy2(kept, src)
+
+
 # The trees this process made (scratch's worktree, base_covered's archive): the only ones hide_docs deletes in.
 MADE = set()
 
@@ -2222,11 +2252,12 @@ def echo_ok(stream):
     return last
 
 
-def timed_cover(pkg, names, tmp, broker=None, code=None):
+def timed_cover(pkg, names, tmp, broker=None, code=None, hidden=()):
     """covered_by's (lines, seconds, problem): seconds is how long its test binary ran, so a plan
     that ran the whole suite under coverage sizes the shards from that run, not a fourth (#6155).
     A code dict gains {path: lines} of every block the profile lists, ran or not (#6216): the lines
-    a test could run, whichever tests ran."""
+    a test could run, whichever tests ran. hidden names repo paths built in but absent while the
+    tests run (hidden_at_run)."""
     broker = BROKER if broker is None else broker
     profile = pathlib.Path(tmp) / "tests.cover"
     profile.unlink(missing_ok=True)
@@ -2234,10 +2265,17 @@ def timed_cover(pkg, names, tmp, broker=None, code=None):
     if names is not None:
         cmd += ["-run", "^(" + "|".join(names) + ")$"]
     began = time.monotonic()
-    with subprocess.Popen([*cmd, "."], cwd=broker / pkg, stdout=subprocess.PIPE) as run:
-        ran = echo_ok(run.stdout)
+    try:
+        with hidden_at_run(broker, hidden, tmp) as flags:
+            with subprocess.Popen([*cmd, *flags, "."], cwd=broker / pkg, stdout=subprocess.PIPE) as run:
+                ran = echo_ok(run.stdout)
+    except (OSError, ValueError) as e:
+        return None, None, f"broker/{pkg}/: cannot hide {', '.join(hidden)} from its tests' run: {e}"
     if run.returncode or not profile.exists():
-        return None, None, f"broker/{pkg}/'s tests {'(all)' if names is None else names} fail under -coverprofile"
+        return None, None, (f"broker/{pkg}/'s tests {'(all)' if names is None else names} fail under -coverprofile"
+                            + (f" with {', '.join(hidden)} absent while they run: a test that reads one at run "
+                               "time must name it with a string literal (every test is then a changed test)"
+                               if hidden else ""))
     # `go test`'s own `ok` line times the test binary's run alone, as suite_seconds times it: the wall
     # time adds the build and vet, which a cold cache makes many times a fast suite (#6162).
     seconds = float(ran) if ran else time.monotonic() - began
@@ -2439,7 +2477,10 @@ def record_for(pkg, tests, bases, diff_text, base, tmp):
     # Every target line runs (L1 on #5770, #5942): a line no mutant and no deletion names (a brace, a
     # bare `return g()`) has no NOT COVERED verdict, so a weakened test that stops running it was unseen.
     # One whole-suite run at the head (none more when the changed tests are every test) names it.
-    every, secs, problem = (covered, secs, None) if names is None else timed_cover(pkg, None, tmp)
+    # A data file read only through an embedding var (head_tests) is absent while the whole suite
+    # runs: a test that reads it another way fails the run, so no reader goes unseen (#6458).
+    hidden = sorted(p for p in tests if pkg in owners(p)) if names is not None else []
+    every, secs, problem = (covered, secs, None) if names is None else timed_cover(pkg, None, tmp, hidden=hidden)
     if problem:
         return None, None, problem
     if gone := unrun(was, every, code):

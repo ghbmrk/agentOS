@@ -3962,6 +3962,51 @@ class EmbedReach(unittest.TestCase):
         self.assertEqual(self.reach({**EMBED_PKG, "v/onnx_test.go": '//go:build vision_onnx\n\npackage v\n\nimport "testing"\n\n'
                                      'func TestOnnx(t *testing.T) { _ = modelPins }\n'}), ["TestOnnx", "TestPins"])
 
+    def test_the_whole_suite_runs_with_the_embedded_file_absent(self):
+        # The narrowing's other half (#6458, coordinator on #6518): the whole-suite run builds the
+        # package with the file and runs it without, so a test reading it at run time by a path no
+        # literal holds fails the gate's run, as hide_docs makes an unnamed doc's reader fail it.
+        # REQ: MUT-embed-reach
+        lister = 'package v\n\nimport (\n\t"os"\n\t"testing"\n)\n\nfunc TestList(t *testing.T) {\n' \
+                 '\tes, _ := os.ReadDir(".")\n\tfor _, e := range es {\n\t\tif e.Name()[0] == \'m\' {\n' \
+                 '\t\t\tif _, err := os.ReadFile(e.Name()); err != nil {\n\t\t\t\tt.Fatal(err)\n\t\t\t}\n\t\t\treturn\n' \
+                 '\t\t}\n\t}\n\tt.Fatal("unlisted")\n}\n'
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}):
+            d = pathlib.Path(d).resolve()
+            tree, tmp = d / "tree", d / "tmp"
+            tmp.mkdir()
+            with DataFiles.tree(None, tree, {**EMBED_PKG, "go.mod": GO_MOD}), mock.patch.object(mutgate, "MADE", {tree}):
+                pins, hidden = tree / "broker/v/models.pins", ["broker/v/models.pins"]
+                got, _, problem = mutgate.timed_cover("v", None, tmp, hidden=hidden)
+                self.assertIsNone(problem)
+                self.assertIn("broker/v/pins.go", got)
+                self.assertEqual(pins.read_text(), "abc lib.so\n")  # put back
+                (tree / "broker/v/list_test.go").write_text(lister)
+                self.assertIsNone(mutgate.timed_cover("v", None, tmp)[2])  # present: the listing reads it
+                _, _, problem = mutgate.timed_cover("v", None, tmp, hidden=hidden)
+                self.assertIn("with broker/v/models.pins absent while they run", problem)
+                self.assertEqual(pins.read_text(), "abc lib.so\n")
+                # Not a regular file, or a tree mutgate did not make: no run, a problem.
+                with mock.patch.object(mutgate, "MADE", set()):
+                    self.assertIn("cannot hide", mutgate.timed_cover("v", None, tmp, hidden=hidden)[2])
+                self.assertIn("not a regular file", mutgate.timed_cover("v", None, tmp, hidden=["broker/v/gone.pins"])[2])
+                self.assertEqual(pins.read_text(), "abc lib.so\n")
+                # record_for hides the narrowed package's embedded data files in its whole-suite run only.
+                runs = []
+
+                def cover(pkg, names, tmp, code=None, hidden=()):
+                    runs.append((names, list(hidden)))
+                    return {}, 1.0, None
+                with mock.patch.object(mutgate, "timed_cover", cover), \
+                        mock.patch.object(mutgate, "merge_base", lambda b, h: "b" * 40), \
+                        mock.patch.object(mutgate, "base_covered", lambda *a: ({}, None)):
+                    tests = {"broker/v/models.pins": None, "broker/v/other_test.go": {5}}
+                    self.assertIsNone(mutgate.record_for("v", tests, {"v": []}, "", "HEAD~1", tmp)[2])
+                    self.assertEqual(runs, [(["TestOther", "TestPins"], []), (None, hidden)])
+                    runs.clear()
+                    self.assertIsNone(mutgate.record_for("v", {"broker/v/other_test.go": {5}}, {"v": []}, "", "HEAD~1", tmp)[2])
+                    self.assertEqual(runs, [(["TestOther"], []), (None, [])])
+
     def test_unbuilt_reads_the_toolchain_tags(self):
         # REQ: MUT-embed-reach
         with mock.patch.dict(os.environ, {"GOFLAGS": ""}):
@@ -4171,7 +4216,7 @@ class Plan(unittest.TestCase):
         from unittest import mock
         runs = []
 
-        def timed_cover(pkg, names, tmp, code=None):
+        def timed_cover(pkg, names, tmp, code=None, hidden=()):
             runs.append(names)
             return {"broker/p/a.go": {1}}, (2.0 if names is not None else 40.0), None
         for names, want, ran in ((["TestFast"], 40.0, [["TestFast"], None]), (None, 40.0, [None])):
