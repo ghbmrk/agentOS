@@ -278,3 +278,26 @@ func internet(h string) bool {
 	}
 	return true
 }
+
+// TestHostnameEdges: a name of exactly 253 characters and one of exactly
+// two labels are accepted; 254 characters and one label are refused.
+func TestHostnameEdges(t *testing.T) {
+	l63 := strings.Repeat("a", 63)
+	n253 := l63 + "." + l63 + "." + l63 + "." + strings.Repeat("b", 61) // 63*3 + 61 + 3 dots
+	if len(n253) != 253 {
+		t.Fatalf("len %d", len(n253))
+	}
+	for h, want := range map[string]bool{
+		"agentos.dev": true,
+		n253:          true,
+		"agentos":     false,
+	} {
+		if got := hostname(h); got != want {
+			t.Errorf("hostname(%d chars %q...) = %v, want %v", len(h), h[:min(len(h), 12)], got, want)
+		}
+	}
+	n254 := l63 + "." + l63 + "." + l63 + "." + strings.Repeat("b", 62)
+	if len(n254) != 254 || hostname(n254) {
+		t.Errorf("a %d-character name of valid labels is accepted", len(n254))
+	}
+}
