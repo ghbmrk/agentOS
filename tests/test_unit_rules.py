@@ -1855,8 +1855,9 @@ class UserManagerTest(unittest.TestCase):
         self.assertNotIn("systemd-run", offline_systemd.USER_MANAGER)
 
 class ZLinkRuleTest(unittest.TestCase):
-    """#6474 re-plan (#6506 Security 7077682648): every link a made path may pass through ends under /usr, at
-    an API target, or on LINK_ALLOW, so a made path is compared by its string; one run names every refusal."""
+    """#6474 re-plan (#6506 Security 7077682648; #6521 arbitration 7078402683): no link the tree holds or an L
+    line makes ends at /, above a writable env tree or in one, so a made path is compared by its string; one
+    run names every refusal."""
     PKG = "/usr/lib/systemd/system/pkgx.service"
     UID = os.getuid()
     ENV = "[Service]\nEnvironmentFile=-/etc/agentos/agentosd.env\n"
@@ -1872,8 +1873,8 @@ class ZLinkRuleTest(unittest.TestCase):
             return r.env_files(v, units, lambda p: p == "/usr/lib/tmpfiles.d/pkg.conf", uid=self.UID)
 
     def refused(self, files, link, end, text=None, user=False):
-        with self.assertRaisesRegex(SystemExit, re.escape("unit rules: %s, a link ending at %s: a path PID 1 makes "
-                                                          "for a unit may pass through it" % (link, end))):
+        with self.assertRaisesRegex(SystemExit, re.escape("unit rules: %s, a link ending at %s, which is " % (link, end))
+                                    + "(in|above) /etc/agentos: a path PID 1 makes for a unit through it"):
             self.run_env(files, text, user)
 
     def test_a_link_under_root_s_user_manager_tops_fails_the_run(self):
@@ -1897,23 +1898,26 @@ class ZLinkRuleTest(unittest.TestCase):
                 ({"/var/lib/debian": "-> /etc"}, "/var/lib/debian", "/etc"),
                 ({"/usr/lib/tmpfiles.d/pkg.conf": "L /run/e - - - - ../etc\n"}, "/run/e", "/etc"),
                 ({"/srv/x": "-> /", "/srv/.keep": ""}, "/srv/x", "/"),
-                ({"/var/lib/g": "-> /var/lib/gone"}, "/var/lib/g", "/var/lib/gone"),  # dangling: anything may be there
-                ({"/var/lib/h": "-> /var/tmp"}, "/var/lib/h", "/var/tmp"),
+                ({"/var/lib/g": "-> /etc/agentos/new"}, "/var/lib/g", "/etc/agentos/new"),  # dangling, in the tree
+                ({"/var/lib/h": "-> /etc/agentos"}, "/var/lib/h", "/etc/agentos"),
+                ({"/var/lib/i": "-> /etc/"}, "/var/lib/i", "/etc"),
                 # a link in read-only /usr still leads a made path out of it
                 ({"/usr/lib/x": "-> /etc", "/etc/.keep": ""}, "/usr/lib/x", "/etc"),
                 # one that ends at a file in a writable env tree, whatever its kind
                 ({"/etc/agentos/a.env": "A=1\n", "/var/lib/k": "-> /etc/agentos/a.env"}, "/var/lib/k",
                  "/etc/agentos/a.env"),
-                # a LINK_ALLOW path that ends elsewhere, and a tree that only begins with /usr's name
-                ({"/var/run": "-> /etc"}, "/var/run", "/etc"),
-                ({"/var/run": "-> /var/tmp"}, "/var/run", "/var/tmp"),
-                ({"/var/lib/e": "-> /usr2", "/usr2/.keep": ""}, "/var/lib/e", "/usr2")):
+                ({"/var/run": "-> /etc"}, "/var/run", "/etc")):
             with self.subTest(files=files):
                 self.refused(files, link, end)
 
-    def test_a_link_into_usr_to_an_api_target_to_another_file_or_listed_passes(self):
+    def test_a_link_ending_elsewhere_passes(self):
+        # L3 7078398392 / Potency 7078401764: stock links that cannot reach /etc/agentos, whatever their kind
         for files in ({"/var/lib/e": "-> /usr/lib", "/usr/lib/.keep": ""},
-                      {"/var/lib/e": "-> ../../usr/lib/gone"},  # under /usr, which nothing writes on the box
+                      {"/usr/lib/ssl/certs": "-> /etc/ssl/certs", "/usr/lib/ssl/private": "-> /etc/ssl/private",
+                       "/etc/ssl/certs/.keep": "", "/etc/ssl/private/.keep": ""},
+                      {"/etc/xdg/systemd/user": "-> ../../systemd/user", "/etc/systemd/user/.keep": ""},
+                      {"/var/lib/g": "-> /var/lib/gone"}, {"/var/lib/h": "-> /var/tmp"},
+                      {"/var/lib/e": "-> /etc/agentos-x"}, {"/var/lib/e": "-> /etcx"},
                       {"/etc/mtab": "-> ../proc/self/mounts"},
                       {"/etc/vconsole.conf": "-> default/keyboard", "/etc/default/keyboard": "X=1\n"},
                       {"/var/run": "-> ../run", "/var/lock": "-> ../run/lock",
@@ -1921,6 +1925,16 @@ class ZLinkRuleTest(unittest.TestCase):
                       {"/usr/lib/tmpfiles.d/pkg.conf": "L /var/run - - - - ../run\n"}):
             with self.subTest(files=files):
                 self.assertEqual(self.run_env(files), ({}, {}))
+
+    def test_an_unread_directory_value_names_the_directory_step(self):
+        # #6521 UX 7078400301 item 1: the step matches mkosi.finalize's DIR_FIX, not "a plain absolute path"
+        with self.assertRaises(SystemExit) as cm:
+            self.run_env({}, '[Service]\nConfigurationDirectory="ag"\n')
+        self.assertIn("ConfigurationDirectory= in /usr/lib/systemd/system/m.service holds a path", str(cm.exception))
+        self.assertIn("write it as plain directory names under its top", str(cm.exception))
+        with self.assertRaises(SystemExit) as cm:
+            self.run_env({}, "[Socket]\nListenStream=/run/%I/s\n")
+        self.assertIn("write it as a plain absolute path, or drop it", str(cm.exception))
 
     def test_one_run_names_every_refused_link(self):
         with self.assertRaises(SystemExit) as cm:
@@ -1952,14 +1966,6 @@ class ZLinkRuleTest(unittest.TestCase):
                 else:
                     self.assertIn(step, msg)
                     self.assertNotIn("so mask it", msg)
-
-    def test_link_allow_entries_end_outside_and_not_above_a_writable_env_tree(self):
-        writable = [t for t in r.ENV_TREES if t not in r.ENV_READ_ONLY]
-        for k, (end, why) in r.LINK_ALLOW.items():
-            with self.subTest(link=k):
-                self.assertTrue(why)
-                self.assertFalse(any(end == t or end.startswith(t + "/") or t.startswith(end.rstrip("/") + "/")
-                                     for t in writable))
 
 
 if __name__ == "__main__":

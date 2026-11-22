@@ -6562,6 +6562,14 @@ class UplinkTest(unittest.TestCase):
         removed = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
         self.assertIn("/usr/lib/systemd/network/80-*.network", removed)
 
+    def test_the_xdg_user_unit_link_is_removed_from_the_image(self):
+        # REQ: KRN-2 (#6521 Security 7078398840): upstream systemd ships etc/xdg/systemd/user -> ../../systemd/user;
+        # user_unit_made_dir_violations refuses a user unit directory that is a link, and etc/systemd/user, which
+        # it aliases, is read already, so the link goes.
+        removed = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
+        self.assertIn("/etc/xdg/systemd/user", removed)
+        self.assertIn("etc/systemd/user", check.USER_UNIT_PATHS)
+
     def test_the_mail_spool_link_is_removed_from_the_image(self):
         # REQ: HW-1, DEV-2 (#1829): Debian's var/spool/mail links to 2775 root:mail var/mail, a step
         # gid 8 can write, so the tree check refuses it; the box runs no mail, so the link goes.

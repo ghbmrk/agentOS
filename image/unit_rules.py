@@ -768,8 +768,8 @@ class MountView(BootView):
 
 
 def boot_links(view, usr_view=None, every=False):
-    """The links a path may pass through at boot, {link: its target resolved} (with EVERY, every link, as
-    {link: (its target resolved, that path's file type at boot or None)}): the tree's and tmpfiles.d's L
+    """The links a path may pass through at boot, {link: its target resolved} (with EVERY, every link, whatever
+    its end's kind, link_refusals): the tree's and tmpfiles.d's L
     lines', each one that does not resolve to a file other than a directory (one an endpoint path's directory
     may pass through, a dangling one included, #5620 R-c, R-i), read at a MountView. The mount points are read
     from VIEW, not the BootView, since generators write their units under /run. Every link, one to a file
@@ -842,10 +842,10 @@ def boot_links(view, usr_view=None, every=False):
             final = walk(k, True, lines[k][2] if k in kept else k)
         if k not in lines or k in kept:
             final = walk(k, False, k)
-        finals[k] = (final, mv.kind(final))
+        finals[k] = final
         if mv.kind(final) in (None, 0o040000):
             out[k] = final
-    if every:  # #6474: every link with its end and that end's kind at boot (link_refusals)
+    if every:  # #6474: every link with its end at boot (link_refusals)
         return finals
     tmpfiles_copies(boot, out, usr_view, mounts)
     for k, v in sorted(out.items()):
@@ -1184,8 +1184,8 @@ def pid1_made(units):
     lint would have to decode to read (a specifier, quote, escape or byte outside printable ASCII, or a '/'
     that opens no absolute path, as mkosi.finalize's unit_made_dirs and unit_made_paths refuse) gives
     PID1_UNREAD in place of a path: it may make any. A user unit's *Directory= is read at the system manager's top (rec["user"] is
-    not read): link_refusals holds every top alike, so a made path lands under its top, and only /etc can
-    hold a writable env tree, so reading root's ~/.config as /etc refuses more, never less."""
+    not read): link_refusals holds every top alike, so a made path reaches a writable env tree only by its
+    string, and only /etc can hold one, so reading root's ~/.config as /etc refuses more, never less."""
     out = []
     for u in units:
         files = u["files"]
@@ -1330,8 +1330,8 @@ def env_made_refusal(p, made):
     """Why a path PID 1 may make (MADE, pid1_made) reaches env path P in a writable ENV_TREES tree, or None:
     one at or above P, or at or under P's tree (mkdir_p_label makes a path's missing parents with its mode,
     so a path below /etc/agentos may make /etc/agentos), or a value the lint does not read. Paths are
-    compared as strings: no link a made path may pass through leads anywhere but /usr or an entry of
-    LINK_ALLOW (link_refusals), so the string is where it lands. A PrefixPath counts by string: it reaches
+    compared as strings: no link a made path may pass through ends at /, above a writable env tree or in one
+    (link_refusals), and a .. is refused (made_plain), so no string outside the tree lands in it. A PrefixPath counts by string: it reaches
     P when P's tree begins with it or it begins with P's tree. /usr is the read-only verity image, where PID
     1 makes nothing, so no path counts there."""
     top = next(t for t in ENV_TREES if p.startswith(t + "/"))
@@ -1339,9 +1339,11 @@ def env_made_refusal(p, made):
         return None
     for m, why in made:
         if m is PID1_UNREAD:
+            # #6521 UX 7078400301 item 1: a *Directory= value is plain names under its top, never absolute
+            step = (FINALIZE.DIR_FIX[2:] if why.split("=", 1)[0] in FINALIZE.UNIT_MADE_DIRS
+                    else "write it as a plain absolute path, or drop it")
             return ("%s holds a path PID 1 may make that the lint does not read (a specifier, quote, escape, '..' "
-                    "or relative path), which may be on its way; write it as a plain absolute path, or drop it"
-                    % why)
+                    "or relative path), which may be on its way; %s" % (why, step))
         if isinstance(m, PrefixPath):
             hit = top.startswith(m) or m.startswith(top + "/")  # P begins with top
         else:
@@ -1352,49 +1354,34 @@ def env_made_refusal(p, made):
     return None
 
 
-# #6474 re-plan (#6506 Security 7077682648, step back): either manager makes a path for a unit through every
-# link on its way (mkdir_parents_label and setup_exec_directory follow links), and a made path may sit in any
-# writable tree (a *Directory= under either manager's tops, root's user manager's under /root and
-# /run/user/0, a socket, a mount point or a watched path anywhere), while a link in read-only /usr may lead
-# out of it. Three rounds resolved each made path through the links on its way and each missed one more
-# form. Instead every link the tree holds or a tmpfiles.d L line makes, wherever it sits, is held to one
-# rule, so a made path lands where its string says and is compared as a string (env_made_refusal): a link
-# a path may pass through (it ends at a directory or at nothing at boot), or one that ends in a writable
-# ENV_TREES tree, must end under /usr (the read-only image: PID 1 makes nothing there and every link in it
-# is held here too) or at an API_TARGETS path (boot_links already holds those), or be on LINK_ALLOW. A
-# link to another regular file is not passed through: a made directory under it fails (ENOTDIR).
-# LINK_ALLOW: {link: (where it ends at boot, why that is safe)}. Add an entry only for a link the build
-# ships, copied from the run's refusal, whose end is neither at, above nor under a writable ENV_TREES tree
-# (link_refusals checks that), and say why no non-root user decides what is at that end.
-LINK_ALLOW = {
-    "/var/run": ("/run", "trixie's base-files and legacy.conf: /run is the box's tmpfs, which holds no env "
-                 "tree, and every link under it is an L line held by this rule"),
-    "/var/lock": ("/run/lock", "trixie's legacy.conf: as /var/run; /run/lock is 1777, so a made path there is "
-                  "refused by review on made.allow (BOX_LINKS' exception)"),
-    "/etc/resolv.conf": ("/run/systemd/resolve/stub-resolv.conf", "systemd-resolve.conf: a file in resolved's "
-                         "RuntimeDirectory=, which nothing makes a path under (BOX_LINKS' exception)"),
-}
+# #6474 re-plan (#6506 Security 7077682648, step back; #6521 arbitration 7078402683): either manager makes a
+# path for a unit through every link on its way (mkdir_parents_label and setup_exec_directory follow links),
+# and a made path may sit in any writable tree (a *Directory= under either manager's tops, root's user
+# manager's under /root and /run/user/0, a socket, a mount point or a watched path anywhere), while a link
+# in read-only /usr may lead out of it. Three rounds resolved each made path through the links on its way
+# and each missed one more form. Instead every link the tree holds or a tmpfiles.d L line makes, wherever it
+# sits, is held to one rule at its resolved end, so a made path is compared as a string (env_made_refusal):
+# that compare counts a path at, above or under a writable ENV_TREES tree, and made_plain refuses a .., so a
+# link can bring a made path into such a tree only if it ends at /, at a directory above the tree, or at or
+# under the tree. Such a link fails the run, whatever its kind; every other end cannot reach the tree.
+# Links into what a non-root user writes are mkosi.finalize's link_refusal's (WORLD_WRITABLE, SERVICE_DIRS,
+# box mounts), and links planted at run time are #6519's.
 
 
 def link_refusals(finals):
-    """One refusal per link FINALS (boot_links with every) holds against the rule above, naming the link,
-    where it ends and the step, so one run names every link a build must drop or list."""
+    """One refusal per link in FINALS ({link: its resolved end}, boot_links with every) that ends at /, or at,
+    above or under a writable ENV_TREES tree, naming the link, where it ends and the step, so one run names
+    every link a build must drop."""
     writable = [t for t in ENV_TREES if t not in ENV_READ_ONLY]
     out = []
-    for k, (final, kind) in sorted(finals.items()):
-        in_env = any(final == t or final.startswith(t + "/") for t in writable)
-        if kind not in (None, 0o040000) and not in_env:
-            continue  # a link to another file: nothing is made under it
-        if final == "/usr" or final.startswith("/usr/") or final in API_TARGETS:
+    for k, f in sorted(finals.items()):  # resolve() gives each end with no trailing /
+        if not any(f == "/" or f == t or f.startswith(t + "/") or t.startswith(f + "/") for t in writable):
             continue
-        allowed = LINK_ALLOW.get(k)
-        if allowed and allowed[0] == final and not in_env and not any(t.startswith(final.rstrip("/") + "/")
-                                                                     for t in writable):
-            continue
-        out.append("%s, a link ending at %s: a path PID 1 makes for a unit may pass through it to a directory the "
-                   "lint does not compare; drop it (mkosi.conf RemoveFiles=, or the tmpfiles.d line), point it into "
-                   "/usr, or, if it ships and ends outside %s, add it to LINK_ALLOW with why (#6474)"
-                   % (k, final, " and ".join(writable)))
+        out.append("%s, a link ending at %s, which is %s: a path PID 1 makes for a unit through it would land "
+                   "where the lint does not compare; drop it (mkosi.conf RemoveFiles=, or the tmpfiles.d line) or "
+                   "point it elsewhere (#6474)"
+                   % (k, f, "in " + " or ".join(writable) if any(f == t or f.startswith(t + "/") for t in writable)
+                      else "above " + " and ".join(writable)))
     return out
 
 
