@@ -17,6 +17,7 @@ on:
       - broker/go.sum
       - broker/vendor/github.com/yalue/**
       - .github/workflows/vision-real.yml
+      - tools/pins.py
   schedule:
     - cron: "17 4 * * *"
   workflow_dispatch:
@@ -52,29 +53,21 @@ jobs:
       - name: Download the pinned runtime and models, check each hash
         run: |
           pins=broker/cmd/agentos-vision/models.pins
-          pin() { awk -v f="$1" -v n="$2" '$1 !~ /^#/ && $2 == f {print $n}' "$pins"; }
-          check() { # file, pinned name
-            got=$(sha256sum "$1" | cut -d' ' -f1); want=$(pin "$2" 1)
-            echo "$2: sha256 $got (pinned: $want)"
-            [ -n "$want" ] && [ "$got" = "$want" ] || { echo "::error file=$pins::$2 hashes to $got, pinned $want"; exit 1; }
-          }
           d="$RUNNER_TEMP/vision-models"
           mkdir -p "$d" "$RUNNER_TEMP/ort"
-          # The library's pin names its package and the member inside it (VIS-A27): the package
-          # is checked against its own pin, then the library against the reviewed one; either
+          # The library's pin names its package and the member inside it (VIS-A27): pins.py checks
+          # the package against its own pin, then the library against the reviewed one; either
           # off its pin stops the run, with no other source tried.
           lib=libonnxruntime.so.1.29.0
-          src=$(pin $lib 3); pkg=${src%%:*}; member=${src#*:}
+          src=$(awk -v f="$lib" '$1 !~ /^#/ && $2 == f {print $3}' "$pins"); pkg=${src%%:*}; member=${src#*:}
           [ -n "$pkg" ] && [ "$member" != "$src" ] || { echo "::error file=$pins::$lib names no package:member"; exit 1; }
-          curl -fsSL --retry 3 --retry-delay 5 -o "$RUNNER_TEMP/$pkg" "$(pin $pkg 3)"
-          check "$RUNNER_TEMP/$pkg" $pkg
+          python3 -I tools/pins.py fetch "$pins" "$pkg" "$RUNNER_TEMP/$pkg"
           python3 -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extract(sys.argv[2], sys.argv[3])' "$RUNNER_TEMP/$pkg" "$member" "$RUNNER_TEMP/ort"
           cp "$RUNNER_TEMP/ort/$member" "$d/$lib"
-          check "$d/$lib" $lib
+          python3 -I tools/pins.py verify "$pins" $lib "$d/$lib"
           for m in yolox_tiny.onnx face_detection_yunet_2023mar.onnx face_recognition_sface_2021dec.onnx \
               yolo-v9-t-416-license-plates-end2end.onnx cct_xs_v2_global.onnx yamnet.onnx; do
-            curl -fsSL --retry 3 --retry-delay 5 -o "$d/$m" "$(pin $m 3)"
-            check "$d/$m" $m
+            python3 -I tools/pins.py fetch "$pins" $m "$d/$m"
           done
           echo "AGENTOS_VISION_MODELS=$d" >> "$GITHUB_ENV"
       - name: Download the pinned scene set, check its hashes

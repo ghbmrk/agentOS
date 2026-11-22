@@ -1,7 +1,7 @@
 """vision-real.yml fetches ONNX Runtime from its pinned NuGet package and checks both pins (row #6446).
 
 No requirement IDs: CI tooling, not SPEC.md behaviour (VIS-A27). The workflow's download step is
-run as written, against a stand-in pin file and a stand-in `curl` that serves local files, so the
+run as written, against a stand-in pin file and a stand-in `curl` that serves local files (through tools/pins.py), so the
 test shows the step takes the package, its member path and both hashes from the pin file, and that
 a package or library off its pin stops the run with nothing installed.
 """
@@ -25,13 +25,12 @@ NUGET = "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.29.0/
 MODELS = ("yolox_tiny.onnx", "face_detection_yunet_2023mar.onnx", "face_recognition_sface_2021dec.onnx",
           "yolo-v9-t-416-license-plates-end2end.onnx", "cct_xs_v2_global.onnx", "yamnet.onnx")
 
-# Stands in for curl: `curl <flags> -o OUT URL` copies $SERVE/<last path part of URL> to OUT.
+# Stands in for curl (tools/pins.py runs `curl <flags> -o OUT URL`): copies $SERVE/<last path part
+# of URL, its last argument> to OUT.
 CURL = """#!/bin/sh
-out=; url=
-while [ $# -gt 0 ]; do
-  case "$1" in -o) out=$2; shift 2;; --retry|--retry-delay) shift 2;; -*) shift;; *) url=$1; shift;; esac
-done
-cp "$SERVE/${url##*/}" "$out"
+out=; prev=
+for a; do [ "$prev" = -o ] && out=$a; prev=$a; done
+cp "$SERVE/${prev##*/}" "$out"
 """
 
 
@@ -76,8 +75,10 @@ class DownloadStep(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp)
         self.serve = self.tmp / "serve"
         bindir = self.tmp / "bin"
-        for d in (self.serve, bindir, self.tmp / "runner", self.tmp / "ws" / PINS.parent.relative_to(ROOT)):
+        for d in (self.serve, bindir, self.tmp / "runner", self.tmp / "ws" / PINS.parent.relative_to(ROOT),
+                  self.tmp / "ws" / "tools"):
             d.mkdir(parents=True)
+        shutil.copy(ROOT / "tools" / "pins.py", self.tmp / "ws" / "tools" / "pins.py")
         (bindir / "curl").write_text(CURL)
         (bindir / "curl").chmod(stat.S_IRWXU)
         self.env = dict(os.environ, PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}", SERVE=str(self.serve),
@@ -110,14 +111,14 @@ class DownloadStep(unittest.TestCase):
             z.writestr("extra", b"one more file")
         r, lib = self.run_step()
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("stand-in.nupkg hashes to", r.stdout)
+        self.assertRegex(r.stdout + r.stderr, r"stand-in\.nupkg from \S+ hashes to [0-9a-f]{64}, pinned")
         self.assertFalse(lib.exists())
 
     def test_changed_library_pin_fails(self):
         self.rows[LIB][0] = REVIEWED_LIB
         r, lib = self.run_step()
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn(f"{LIB} hashes to {_sha(self.lib)}, pinned {REVIEWED_LIB}", r.stdout)
+        self.assertRegex(r.stdout + r.stderr, f"/{LIB} hashes to {_sha(self.lib)}, pinned {REVIEWED_LIB}")
 
     def test_changed_package_pin_fails(self):
         self.rows["stand-in.nupkg"][0] = "0" * 64
