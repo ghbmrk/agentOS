@@ -7,6 +7,8 @@ REQ: KRN-2
 import hashlib
 import os
 import pathlib
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -1447,7 +1449,7 @@ class EnvFilesTest(unittest.TestCase):
                      "f+ /etc/default/pkgx-a - - - - LD_PRELOAD=/x.so"):
             with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
                 v = tree(d, {"/usr/lib/tmpfiles.d/x.conf": line + "\n"})
-                with self.assertRaisesRegex(SystemExit, "makes at boot a file a package's EnvironmentFile="):
+                with self.assertRaisesRegex(SystemExit, "makes at boot a file a unit's EnvironmentFile="):
                     r.env_files(v, units, lambda p: False)
                 # a package's own line is the package's
                 self.assertEqual(r.env_files(v, units, lambda p: p == "/usr/lib/tmpfiles.d/x.conf"), ({}, {}))
@@ -1456,6 +1458,84 @@ class EnvFilesTest(unittest.TestCase):
             with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
                 v = tree(d, {"/usr/lib/tmpfiles.d/x.conf": line + "\n"})
                 self.assertEqual(r.env_files(v, units, lambda p: False), ({}, {}))
+
+    def test_a_tmpfiles_path_is_read_unescaped_and_unquoted_as_systemd_tmpfiles_reads_it(self):
+        # #6495 Security 1: systemd-tmpfiles reads its words with EXTRACT_UNQUOTE | EXTRACT_CUNESCAPE, so
+        # /run/pkg\x78-r is /run/pkgx-r and a quoted path runs past its spaces
+        units = [{"files": [{"ours": False, "text": "[Service]\nEnvironmentFile=-%t/pkgx-r\n"
+                                                    "EnvironmentFile=-/run/a b\n"}]}]
+        for line in ("f /run/pkg\\x78-r - - - - LD_PRELOAD=/x.so", 'f "/run/a b" - - - - LD_PRELOAD=/x.so',
+                     "f /run/a\\sb - - - - X=1", "f /run/'pkgx'-r - - - - X=1", '"f" /run/pkgx-r - - - - X=1',
+                     "\\x66 /run/pkgx-r - - - - X=1", "f /run/pkg\\170-r - - - - X=1",
+                     "f /run/pkg\\u0078-r - - - - X=1", "f \\x25t/pkgx-r - - - - X=1"):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                v = tree(d, {"/usr/lib/tmpfiles.d/x.conf": line + "\n"})
+                with self.assertRaisesRegex(SystemExit, "makes at boot a file a unit's EnvironmentFile="):
+                    r.env_files(v, units, lambda p: False)
+        # a line systemd-tmpfiles refuses, or reads apart from the lint, fails the run
+        for line in ('f "/run/x - - - - X=1', "f /run/x\\q - - - - X=1", "f /run/x\\x00 - - - - X=1",
+                     "f /run/x\\", "f /run/../etc/default/pkgx - - - - X=1", "f /run/*/pkgx - - - - X=1"):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                v = tree(d, {"/usr/lib/tmpfiles.d/x.conf": line + "\n"})
+                with self.assertRaisesRegex(SystemExit, "unit rules: /usr/lib/tmpfiles.d/x.conf: tmpfiles.d line"):
+                    r.env_files(v, units, lambda p: False)
+        self.assertEqual(r.tmpfiles_words('f "/run/a b" - -'), ["f", "/run/a b"])
+        self.assertEqual(r.tmpfiles_words("w /run/a\\tb\\303\\251"), ["w", "/run/a\tb\u00e9"])
+        self.assertEqual(r.tmpfiles_words("d /run/a\\U0001F600"), ["d", "/run/a\U0001F600"])
+
+    @unittest.skipUnless(shutil.which("systemd-tmpfiles"), "no systemd-tmpfiles")
+    def test_tmpfiles_words_agree_with_systemd_tmpfiles(self):
+        # #6495 Security 1, differential: each line's path as systemd-tmpfiles --create makes it
+        for path in ("/run/pkg\\x78-r", '"/run/a b"', "/run/a\\sb", "/run/'q'x", '/run/x"y z"w', "/run/a\\\\b",
+                     "/run/c\\303\\251", "/run/d\\u00e9", "/run/e\\'f"):
+            with self.subTest(path=path), tempfile.TemporaryDirectory() as d:
+                conf = pathlib.Path(d) / "x.conf"
+                conf.write_text("f %s - - - - X=1\n" % path)
+                subprocess.run(["systemd-tmpfiles", "--create", "--root=" + d, str(conf)],
+                               check=False, capture_output=True)
+                made = sorted(str(p)[len(d):] for p in pathlib.Path(d, "run").iterdir())
+                self.assertEqual(made, [r.tmpfiles_words("f " + path)[1]])
+
+    def test_a_tmpfiles_line_of_ours_making_our_own_env_file_fails_the_run(self):
+        # #6495 Security 2: a unit of ours naming a /run env file a tmpfiles.d line of ours writes
+        units = [{"files": [{"ours": True, "text": "[Service]\nEnvironmentFile=-/run/agentos-x.env\n"}]}]
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/usr/lib/tmpfiles.d/x.conf": "f /run/agentos-x.env - - - - LD_PRELOAD=/x.so\n"})
+            with self.assertRaisesRegex(SystemExit, "makes at boot a file a unit's EnvironmentFile=/run/agentos-x"):
+                r.env_files(v, units, lambda p: False)
+
+    def test_a_tmpfiles_line_writing_through_a_link_fails_the_run(self):
+        # #6495 L3: the env path or the tmpfiles path reaching the same file through a tree link, or an L line's
+        units = [{"files": [{"ours": False, "text": "[Service]\nEnvironmentFile=-/etc/default/pkgx\n"
+                                                    "EnvironmentFile=-/etc/pkgy/%i.env\n"}]}]
+        pkg = lambda p: p == "/etc/default/pkgx"
+        for files in ({"/etc/default/pkgx": "-> /run/pkgx-env", "/x.conf": "f /run/pkgx-env - - - - LD_PRELOAD=/x.so"},
+                      {"/etc/default": "-> /run/dflt", "/x.conf": "f /run/dflt/pkgx - - - - LD_PRELOAD=/x.so"},
+                      {"/etc/pkgy": "-> /var/lib/y", "/var/lib/y/a.env": "X=1\n",
+                       "/x.conf": "f /var/lib/y/b.env - - - - LD_PRELOAD=/x.so"},
+                      {"/etc/pkgy/q": "-> /run/q", "/x.conf": "f /run/q.env - - - - LD_PRELOAD=/x.so"},
+                      # the tree's /run/pkgx-env is not there at boot, so the file is the line's
+                      {"/etc/default/pkgx": "-> /run/pkgx-env", "/run/pkgx-env": "-> /var/lib/z",
+                       "/x.conf": "f /run/pkgx-env - - - - LD_PRELOAD=/x.so"}):
+            with self.subTest(files=files), tempfile.TemporaryDirectory() as d:
+                files = dict(files, **{"/usr/lib/tmpfiles.d/x.conf": files.pop("/x.conf") + "\n"})
+                v = tree(d, files)
+                with self.assertRaisesRegex(SystemExit, "makes at boot a file a unit's EnvironmentFile="):
+                    r.env_files(v, units, pkg)
+        for files in ({"/etc/default/pkgx": "X=1\n", "/var/lib/x": "-> /etc/default",
+                       "/x.conf": "w /var/lib/x/pkgx - - - - LD_PRELOAD=/x.so"},
+                      {"/x.conf": "L /run/x - - - - /etc/default\nf /run/x/pkgx - - - - LD_PRELOAD=/x.so"},
+                      {"/x.conf": "L /run/x - - - - /etc\nf /etc/default/pkgx - - - - LD_PRELOAD=/x.so"}):
+            with self.subTest(files=files), tempfile.TemporaryDirectory() as d:
+                files = dict(files, **{"/usr/lib/tmpfiles.d/x.conf": files.pop("/x.conf") + "\n"})
+                v = tree(d, files)
+                with self.assertRaisesRegex(SystemExit, "writes at boot where the unit lint does not read"):
+                    r.env_files(v, units, pkg)
+        # an unlinked writer elsewhere passes
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/etc/default/pkgx": "-> /run/pkgx-env",
+                         "/usr/lib/tmpfiles.d/x.conf": "f /run/other - - - - X=1\n"})
+            self.assertEqual(r.env_files(v, units, pkg), ({}, {}))
 
 
 class UserManagerTest(unittest.TestCase):

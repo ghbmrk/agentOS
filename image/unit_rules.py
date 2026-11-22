@@ -1106,8 +1106,8 @@ def env_matches(boot, pats, ours_link=lambda link: True):
     resolves to, positions in the pattern, whether a link OURS_LINK holds brought it in) it is reached with,
     and not at all where no position is left: every file a matching path opens, through any alias of its
     directory and around any link cycle, is named by one walked path, and the walk is bounded by the tree's
-    directories times the pattern's positions (#6474, after #6312 Security deltas 1 and 2). The path named
-    for a file is one that reaches it with a link of ours on the way if any does, so env_files sees the link."""
+    directories times the position sets reachable in the pattern (#6474, after #6312 Security deltas 1
+    and 2). The path named for a file is one that reaches it with a link of ours on the way if any does, so env_files sees the link."""
     out = set()
     for pat in pats:
         if WILD not in pat:
@@ -1141,11 +1141,69 @@ TMPFILES_PATH_SPECIFIERS = {"t": "/run", "S": "/var/lib", "C": "/var/cache", "L"
                             "V": "/var/tmp", "h": "/root", "%": "%"}
 # The tmpfiles.d types that put content at their path at boot: write a file (f, F, w), copy (C) or link (L).
 TMPFILES_WRITERS = "fFwCL"
+# cunescape_one's (src/basic/escape.c, v255 to v257) one-character escapes.
+TMPFILES_ESCAPES = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "\\": 92, '"': 34, "'": 39,
+                    "s": 32}
+
+
+def tmpfiles_words(line, n=2):
+    """The first N words of a tmpfiles.d LINE as systemd-tmpfiles reads them (extract_many_words with
+    EXTRACT_UNQUOTE | EXTRACT_CUNESCAPE, src/basic/extract-word.c, v255 to v257): split at unquoted
+    whitespace, a quote (' or ") anywhere in a word opening a run that runs to the same quote, and a
+    backslash escape (cunescape_one) read inside or outside one. None where systemd-tmpfiles refuses the
+    line: an unknown or NUL escape, a trailing backslash or an open quote (#6495 Security 1)."""
+    b, i, words = line.encode("utf-8", "surrogateescape"), 0, []
+    hexd, octd = b"0123456789abcdefABCDEF", b"01234567"
+    while len(words) < n:
+        while i < len(b) and b[i] in b" \t\n\r":
+            i += 1
+        if i == len(b):
+            break
+        out, quote = bytearray(), None
+        while i < len(b) and (quote or b[i] not in b" \t\n\r"):
+            c = b[i]
+            i += 1
+            if quote and c == quote:
+                quote = None
+            elif not quote and c in b"'\"":
+                quote = c
+            elif c != 0x5C:
+                out.append(c)
+            elif i == len(b):
+                return None
+            else:
+                e, i = chr(b[i]), i + 1
+                if e in TMPFILES_ESCAPES:
+                    out.append(TMPFILES_ESCAPES[e])
+                elif e == "x" and len(b) >= i + 2 and all(x in hexd for x in b[i:i + 2]):
+                    v, i = int(b[i:i + 2], 16), i + 2
+                    if not v:
+                        return None
+                    out.append(v)
+                elif e in "uU" and len(b) >= i + (4 if e == "u" else 8) and \
+                        all(x in hexd for x in b[i:i + (4 if e == "u" else 8)]):
+                    k = 4 if e == "u" else 8
+                    v, i = int(b[i:i + k], 16), i + k
+                    if not v or v > 0x10FFFF or 0xD800 <= v <= 0xDFFF:
+                        return None
+                    out += chr(v).encode("utf-8")
+                elif e in "0123" and len(b) >= i + 2 and all(x in octd for x in b[i:i + 2]):
+                    v, i = int(e + b[i:i + 2].decode(), 8), i + 2
+                    if not v:
+                        return None
+                    out.append(v)
+                else:
+                    return None
+        if quote:
+            return None
+        words.append(bytes(out).decode("utf-8", "surrogateescape"))
+    return words
 
 
 def tmpfiles_pattern(path):
-    """A tmpfiles.d line's PATH as a pattern (env_patterns' form): each TMPFILES_PATH_SPECIFIERS value as it
-    is, any other specifier, glob character, quote or escape as WILD, which may name more, never less."""
+    """A tmpfiles.d line's PATH (as tmpfiles_words gives it) as a pattern (env_patterns' form): each
+    TMPFILES_PATH_SPECIFIERS value as it is, any other specifier, glob character, quote or backslash as WILD,
+    which may name more, never less."""
     out = []
     for i, part in enumerate(ENV_SPECIFIER.split(path)):
         if i % 2:
@@ -1155,33 +1213,111 @@ def tmpfiles_pattern(path):
     return tuple(out)
 
 
+def env_reach(view, pats):
+    """The paths in VIEW where the files PATS (env_patterns) may name sit once the tree's links are followed,
+    as patterns: for each path a walk (env_matches') reaches through a link, the path it resolves to followed
+    by the rest of the pattern. A tmpfiles.d line writing there writes the file the unit opens (#6495 L3)."""
+    out = set()
+    for pat in pats:
+        if WILD not in pat:
+            final, links = view.resolve("".join(pat))
+            if links:
+                out.add(tuple(final))
+            continue
+        lit = "".join(pat[:pat.index(WILD)])
+        top = lit.rpartition("/")[0] or "/"
+        todo, seen = [(top, pattern_step(pat, {0}, top.rstrip("/")))], set()
+        while todo:
+            d, states = todo.pop()
+            final, links = view.resolve(d)
+            if (final, states) in seen:
+                continue
+            seen.add((final, states))
+            if links:
+                out.update(tuple(final.rstrip("/")) + pat[i:] for i in states)
+            for n in view.entries(d):
+                q = d.rstrip("/") + "/" + n
+                after = pattern_step(pat, states, "/" + n)
+                if not after:
+                    continue
+                fq, ql = view.resolve(q)
+                if view.kind(fq) == 0o040000:
+                    todo.append((q, after))
+                elif ql:
+                    out.update(tuple(fq) + pat[i:] for i in after)
+    return list(out)
+
+
+def tmpfiles_writer_unread(p, pat, plain, aliases):
+    """Why the unit lint cannot tell where a tmpfiles.d writer line at P (PAT, tmpfiles_pattern) writes, or
+    None: a . or .. in P; a wildcard in its directory, which a glob may walk through any link; its directory
+    passing through a link in PLAIN (systemd-tmpfiles follows a root-owned parent link, CHASE_SAFE); or P at
+    or under one of ALIASES' targets, or under its path, which an L line links at boot (#6495 L3)."""
+    if any(c in (".", "..") for c in p.split("/")):
+        return "its path holds a . or .."
+    d = pat[:len(pat) - 1 - pat[::-1].index("/")] if "/" in pat else ()
+    if WILD in d:
+        return "its directory holds a wildcard"
+    via = plain.resolve("".join(d) or "/")[1]
+    if via:
+        return "its directory passes through a link in the tree (%s)" % via[0]
+    for lp, lt in aliases:
+        if patterns_meet(pat, lp + ("/", WILD)) or patterns_meet(pat, lt) or patterns_meet(pat, lt + ("/", WILD)):
+            return "it is under an L line's path, or at or under its target, which the line links at boot"
+    return None
+
+
 def tmpfiles_env_refusals(boot, units, packaged, usr_view=None):
     """#6474: each tmpfiles.d line of ours (in a file not byte-identical to a package's, PACKAGED) of a type
-    that puts content at its path (TMPFILES_WRITERS), at, or for C and L under, a path a package's
-    EnvironmentFile= line in UNITS may name: such a file is made at boot (under /run, which BootView hides,
-    or anywhere the tree has none), so env_files never reads it. The run fails, naming both lines."""
+    that puts content at its path (TMPFILES_WRITERS), at, or for C and L under, a path an EnvironmentFile=
+    line in UNITS, a package's or ours, may name, as written or with the tree's links followed at boot (env_reach at BOOT):
+    such a file is made at boot (under /run, which BootView hides, or anywhere the tree has none), so
+    env_files never reads it. The line's words are read as systemd-tmpfiles reads them (tmpfiles_words). A
+    line of ours it cannot read, or a writer of ours whose directory holds a wildcard, a . or .., or passes
+    through a link in the tree or under any L line's path, or whose path is at or under any L line's
+    target, fails the run too, since where it writes is not read (#6495). The run fails, naming the line."""
+    plain, lines = View(boot.root, boot.usr), tmpfiles_lines(boot, usr_view)
+    aliases = []  # (L path, its target) patterns of every L line, a package's included
+    for f, line in lines:
+        w, rest = tmpfiles_words(line), line.split(None, 6)
+        if w and len(w) == 2 and w[0][:1] == "L" and w[1].startswith(("/", "%")):
+            arg = rest[6].strip() if len(rest) > 6 else "-"
+            t = "/usr/share/factory" + w[1] if arg in ("", "-") else os.path.join(os.path.dirname(w[1]), arg)
+            simple = not any(ch in arg for ch in "%\"\'\\")
+            aliases.append((tmpfiles_pattern(w[1]), tmpfiles_pattern(t) if simple else (WILD,)))
     writers = []
-    for f, line in tmpfiles_lines(boot, usr_view):
-        w = line.split()
-        if len(w) < 2 or w[0][0] not in TMPFILES_WRITERS or packaged(boot.resolve(f)[0]):
+    for f, line in lines:
+        if packaged(boot.resolve(f)[0]):
             continue
-        pat = tmpfiles_pattern(w[1])
+        w = tmpfiles_words(line)
+        if w is None:
+            raise SystemExit("unit rules: %s: tmpfiles.d line %r: systemd-tmpfiles refuses or reads its words "
+                             "differently from the unit lint; write it plainly (#6495)" % (f, line))
+        if len(w) < 2 or w[0][:1] not in TMPFILES_WRITERS:
+            continue
+        p = re.sub("/+", "/", w[1])
+        p = p.rstrip("/") or p
+        pat = tmpfiles_pattern(p)
+        why = tmpfiles_writer_unread(p, pat, plain, aliases)
+        if why:
+            raise SystemExit("unit rules: %s: tmpfiles.d line %r writes at boot where the unit lint does not "
+                             "read: %s; drop the line (#6495)" % (f, line, why))
         writers.append((f, line, [pat] + ([pat + ("/", WILD)] if w[0][0] in "CL" else [])))
     if not writers:
         return
     for u in units:
         for uf in u["files"]:
-            if uf["ours"]:
-                continue
             for ln in uf["text"].split("\n"):
                 m = ENV_LINE.match(ln)
                 p = m and m.group(1).lstrip("-")
                 if not p or not p.startswith(("/", "%")):
                     continue
-                for pat in env_patterns(p) or [tuple(p)]:
-                    for f, line, pats in writers:
-                        if any(patterns_meet(pat, t) for t in pats):
-                            raise SystemExit("unit rules: %s: tmpfiles.d line %r makes at boot a file a package's "
+                pats = env_patterns(p) or [tuple(p)]
+                pats = pats + env_reach(boot, pats)
+                for pat in pats:
+                    for f, line, wpats in writers:
+                        if any(patterns_meet(pat, t) for t in wpats):
+                            raise SystemExit("unit rules: %s: tmpfiles.d line %r makes at boot a file a unit's "
                                              "EnvironmentFile=%s may name, which the unit lint does not read; "
                                              "drop the line (#6474)" % (f, line, p))
 
