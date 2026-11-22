@@ -175,7 +175,17 @@ LANE_GATE_LINES = [
     "        env:",
 ] + ["          " + e for e in LANE_GATE_ENV] + [
     "        run: |",
-] + ["          " + r for r in LANE_GATE_RUN]
+] + ["          " + r for r in LANE_GATE_RUN] + [
+    # REV-PROOF-claims (#4909), here since CI-trusted-base-records (#6404): the body is this step's
+    # subject, so it runs where `edited` reruns it, from the base copy, and cannot be skipped.
+    "      - name: Closing keywords against deferred parts (base copy of tools/claims.py)",
+    "        if: ${{ !cancelled() }}",
+    "        env:",
+    "          PR_BODY: ${{ github.event.pull_request.body }}",
+    "        run: |",
+    "          printf '%s\\n' \"$PR_BODY\" > \"$RUNNER_TEMP/claims-body.txt\"",
+    "          python3 -I tools/claims.py closes --body \"$RUNNER_TEMP/claims-body.txt\" --markdown \"$GITHUB_STEP_SUMMARY\"",
+]
 
 
 # PREMERGE-wire (#1860): premerge.yml is pinned the same way. It needs `statuses: write`, so

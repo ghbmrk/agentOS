@@ -24,6 +24,9 @@ sys.path.insert(0, str(IMG))
 spec = importlib.util.spec_from_file_location("static_elf", IMG / "static_elf.py")
 se = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(se)
+vspec = importlib.util.spec_from_file_location("vulncheck", ROOT / "tools" / "vulncheck.py")
+vulncheck = importlib.util.module_from_spec(vspec)
+vspec.loader.exec_module(vulncheck)
 
 C = "int main(void) { return 0; }\n"
 CXX = ('#include <stdexcept>\nint main(int c, char **v) { try { if (c > 5) throw std::runtime_error(v[0]); }\n'
@@ -302,6 +305,18 @@ class ShippedTest(unittest.TestCase):
                     f.flush()
                     with self.assertRaises(ValueError):
                         se.read_allow(f.name)
+
+    def test_each_built_using_exclusion_is_a_linked_entry_this_check_reads(self):
+        # #6481: vulncheck.py skips a package's Built-Using sources only where image/builtusing.exclude
+        # names it against a "linked" entry; differential: that entry, as this check reads the shipped
+        # allow-list, is "linked" with the same list, and the shipped exclusion is libcap-dev's alone.
+        self.assertEqual(vulncheck.STATIC_ELF_ALLOW, se.ALLOW)
+        linked = {g: a for _n, g, k, a in se.read_allow(se.ALLOW) if k == "linked"}
+        excluded = vulncheck.excluded_packages()
+        self.assertEqual({p for pkgs in excluded.values() for p in pkgs}, {"libcap-dev"})
+        for name, pkgs in excluded.items():
+            for pkg, glob in pkgs.items():
+                self.assertEqual(linked.get(glob), name, (pkg, glob))
 
     def test_each_link_record_sets_shipped_for_on_the_bytes_it_ships(self):
         # SEL-6 linked: the three static link builds record their inputs against the binary they install.
