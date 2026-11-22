@@ -263,7 +263,7 @@ FSTAB_PATH_FIX = "; write every bind source and option path in it as an absolute
 #   grep -E '^\{\{type\}\}\.' load-fragment-gperf.gperf.in   (v257 tag; list the parser per key)
 # Whether a key belongs on PID1_NAMES is judged by review against that proof, not by a tool (image/ASSUMPTIONS.md).
 NAME_ONLY_SYSTEMD = "257"
-NAME_ONLY_SNAPSHOT = "20261001T000000Z"
+NAME_ONLY_SNAPSHOT = "20261121T160000Z"
 NAME_ONLY_KEYS = frozenset(("Environment", "PassEnvironment", "UnsetEnvironment", "LogExtraFields", "SetCredential",
                             "SetCredentialEncrypted", "LogNamespace"))
 # #5191 (Lens R1 on #5566): every key systemd NAME_ONLY_SYSTEMD's unit file parser knows, read with NAME_ONLY_KEYS from
