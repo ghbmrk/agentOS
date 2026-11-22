@@ -27,19 +27,12 @@ import mutgate  # noqa: E402
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from _nogit_bg import setUpModule as _bg_up, tearDownModule as _bg_down  # noqa: E402
 
-# hide_docs deletes files: tests that run plan, run or delete on this clone's broker/ must not (#6373).
-_REAL_HIDE = mutgate.hide_docs
-_GUARD = mock.patch.object(mutgate, "hide_docs", lambda broker: [] if pathlib.Path(broker).resolve() == (
-    ROOT / "broker").resolve() else _REAL_HIDE(broker))
-
 
 def setUpModule():
     _bg_up()
-    _GUARD.start()
 
 
 def tearDownModule():
-    _GUARD.stop()
     _bg_down()
 
 
@@ -3443,7 +3436,7 @@ class DataFiles(unittest.TestCase):
                  "named/named.go": 'package named\n\nconst doc = "ASSUMPTIONS.md"\n', "named/ASSUMPTIONS.md": "x",
                  "vendor/example.com/m/README.md": "x", "vendor/example.com/m/m.go": "package m\n",
                  "docs/guide.md": "x"}
-        with tempfile.TemporaryDirectory() as d, self.tree(d, files):
+        with tempfile.TemporaryDirectory() as d, self.tree(d, files), self.made(d):
             broker = pathlib.Path(d) / "broker"
             gone = mutgate.hide_docs(broker)
             self.assertEqual(gone, ["broker/docs/guide.md", "broker/hint/ASSUMPTIONS.md", "broker/hint/sub/notes.md"])
@@ -3452,19 +3445,85 @@ class DataFiles(unittest.TestCase):
                                     "named/ASSUMPTIONS.md", "named/named.go", "vendor/example.com/m/README.md",
                                     "vendor/example.com/m/m.go"])
             self.assertEqual(mutgate.hide_docs(broker), [])
-        # Each command that runs the gate's tests hides first, before reading anything else; `run`
-        # without --git (whole packages, never the gate's) leaves the tree alone.
-        import types
-        for cmd in (mutgate.cmd_plan, mutgate.cmd_run, mutgate.cmd_delete):
-            with self.subTest(cmd.__name__), mock.patch.object(mutgate, "hide_docs", side_effect=RuntimeError("hid")) as hide, \
-                    mock.patch.object(mutgate, "broker_diff", side_effect=AssertionError("read before hiding")):
-                with self.assertRaisesRegex(RuntimeError, "hid"):
-                    cmd(types.SimpleNamespace(pkg=["hint"], out="unused", git="b", targets=None))
-                hide.assert_called_once_with(mutgate.BROKER)
-        with mock.patch.object(mutgate, "hide_docs") as hide, mock.patch.object(mutgate, "gated_packages", return_value=[]):
-            with tempfile.TemporaryDirectory() as d:
-                mutgate.cmd_run(types.SimpleNamespace(pkg=[], out=d, git=None, targets=None))
-            hide.assert_not_called()
+        # Each command that runs the gate's tests runs in scratch's tree; `run` without --git (whole
+        # packages, never the gate's) runs in none, and no command hides in the tree it was given.
+        for argv, want in ((["plan", "--git", "b"], "cmd_plan"), (["delete", "p", "--git", "b"], "cmd_delete"),
+                           (["run", "p", "--git", "b"], "cmd_run"), (["run", "p"], None)):
+            with self.subTest(argv), contextlib.ExitStack() as st:
+                inside = []
+
+                @contextlib.contextmanager
+                def scratch():
+                    inside.append(True)
+                    yield
+                    inside.append(False)
+                st.enter_context(mock.patch.object(mutgate, "scratch", scratch))
+                hide = st.enter_context(mock.patch.object(mutgate, "hide_docs"))
+                cmds = {n: st.enter_context(mock.patch.object(mutgate, n, side_effect=lambda a: 0 if inside[-1:] == [True] else 7))
+                        for n in ("cmd_plan", "cmd_delete", "cmd_run")}
+                self.assertEqual(mutgate.main(argv), 0 if want else 7)
+                self.assertEqual(inside, [True, False] if want else [])
+                self.assertEqual([n for n, c in cmds.items() if c.called], [want or "cmd_run"])
+                hide.assert_not_called()
+
+    @staticmethod
+    def made(d):
+        """mutgate.MADE holding only d: hide_docs deletes in no other tree."""
+        return mock.patch.object(mutgate, "MADE", {pathlib.Path(d).resolve()})
+
+    def test_hiding_refuses_every_tree_mutgate_did_not_make(self):
+        # #6456: hide_docs deleted from whatever broker/ it was given, so a local plan, delete or
+        # run --git wiped uncommitted ASSUMPTIONS.md edits. It now refuses any tree but its own copies.
+        # REQ: MUT-deleted-test-own-lines-fu
+        with tempfile.TemporaryDirectory() as d, self.tree(d, {"hint/hint.go": "package hint\n", "hint/A.md": "edit"}):
+            broker = pathlib.Path(d) / "broker"
+            for made in (set(), {broker.resolve()}, {pathlib.Path(d).resolve().parent}):
+                with self.subTest(made), mock.patch.object(mutgate, "MADE", made):
+                    with self.assertRaisesRegex(ValueError, "no tree mutgate made"):
+                        mutgate.hide_docs(broker)
+            self.assertEqual((broker / "hint/A.md").read_text(), "edit")
+
+    def test_a_gate_command_leaves_the_working_tree_as_it_was(self):
+        # #6456: plan, delete and run --git run in a copy of the working tree, hidden there; the
+        # clone's dirty, untracked and committed docs, its index and its HEAD are as they were after,
+        # and the copy is gone. The copy holds what is on disk: a dirty, staged, untracked or
+        # deleted file is so there too, and an ignored one is not.
+        # REQ: MUT-deleted-test-own-lines-fu
+        repo = self.repo({"broker/hint/hint.go": "package hint\n", "broker/hint/ASSUMPTIONS.md": "base",
+                          "broker/hint/notes.md": "x", "broker/hint/gone.go": "package hint\n",
+                          "broker/hint/staged.go": "package hint\n", ".gitignore": "*.out\n"})
+        git = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True, check=True).stdout
+        (repo / "broker/hint/ASSUMPTIONS.md").write_text("uncommitted")
+        (repo / "broker/hint/new.md").write_text("untracked")
+        (repo / "broker/hint/new.go").write_text('package hint\n\nconst n = "new.md"\n')
+        (repo / "broker/hint/hint.go").write_text("package hint // dirty\n")
+        (repo / "broker/hint/staged.go").write_text("package hint // staged\n")
+        git("add", "broker/hint/staged.go")
+        (repo / "broker/hint/gone.go").unlink()
+        (repo / "broker/hint/x.out").write_text("ignored")
+        before = (git("rev-parse", "HEAD"), git("status", "--porcelain", "--ignored"), git("ls-files", "-s"))
+        seen = {}
+
+        def plan(args):
+            broker = mutgate.BROKER
+            seen["root"] = mutgate.ROOT
+            seen["left"] = {p.relative_to(broker).as_posix(): p.read_text() for p in broker.rglob("*") if p.is_file()}
+            seen["head"] = subprocess.run(["git", "rev-parse", "HEAD"], cwd=broker, capture_output=True,
+                                          text=True).stdout
+            return 0
+        with mock.patch.object(mutgate, "ROOT", repo), mock.patch.object(mutgate, "BROKER", repo / "broker"), \
+                mock.patch.object(mutgate, "cmd_plan", side_effect=plan):
+            self.assertEqual(mutgate.main(["plan", "--git", "HEAD"]), 0)
+            self.assertEqual((mutgate.ROOT, mutgate.BROKER), (repo, repo / "broker"))
+        self.assertNotEqual(seen["root"], repo)
+        self.assertEqual(seen["left"], {"hint/hint.go": "package hint // dirty\n", "hint/new.go": 'package hint\n\nconst n = "new.md"\n',
+                                        "hint/new.md": "untracked", "hint/staged.go": "package hint // staged\n"})
+        self.assertEqual(seen["head"], before[0])
+        self.assertEqual((git("rev-parse", "HEAD"), git("status", "--porcelain", "--ignored"), git("ls-files", "-s")), before)
+        self.assertEqual((repo / "broker/hint/ASSUMPTIONS.md").read_text(), "uncommitted")
+        self.assertFalse(seen["root"].exists())
+        self.assertEqual(git("worktree", "list").count("\n"), 1)
+        self.assertEqual(mutgate.MADE, set())
 
     def test_a_base_tree_run_reads_no_unnamed_markdown_file(self):
         # #6373: base_covered's archive of the base holds the base's docs; they go before its run.
@@ -3481,6 +3540,25 @@ class DataFiles(unittest.TestCase):
             sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
             self.assertEqual(mutgate.base_covered("hint", sha, None, tmp, ""), ({}, None))
         self.assertEqual(seen["left"], ["hint.go"])
+
+    def test_the_base_tree_keeps_a_doc_the_head_names(self):
+        # #6456: the base tree hid by the base's names alone, so a doc the head newly names was read
+        # at the head and gone at the base. A doc either tree names is now in the base's run; one
+        # neither names is gone from it.
+        # REQ: MUT-deleted-test-own-lines-fu
+        seen = {}
+
+        def cover(pkg, names, tmp, broker):
+            seen["left"] = sorted(p.name for p in (broker / pkg).iterdir())
+            return {}, None
+        repo = self.repo({"broker/hint/hint.go": 'package hint\n\nconst a = "A.md"\n', "broker/hint/A.md": "x",
+                          "broker/hint/B.md": "x", "broker/hint/C.md": "x"})
+        with tempfile.TemporaryDirectory() as head, self.tree(head, {"hint/hint.go": 'package hint\n\nconst b = "B.md"\n'}), \
+                tempfile.TemporaryDirectory() as tmp, mock.patch.object(mutgate, "ROOT", repo), \
+                mock.patch.object(mutgate, "covered_by", side_effect=cover):
+            sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
+            self.assertEqual(mutgate.base_covered("hint", sha, None, tmp, ""), ({}, None))
+        self.assertEqual(seen["left"], ["A.md", "B.md", "hint.go"])
 
     def repo(self, files):
         d = pathlib.Path(tempfile.mkdtemp())
@@ -3503,7 +3581,7 @@ class DataFiles(unittest.TestCase):
                  "hint/hint_test.go": 'package hint\n\nimport (\n\t"os"\n\t"testing"\n)\n\n'
                  "func TestDoc(t *testing.T) {\n\tif _, err := os.ReadFile(string([]byte{65, 46, 109, 100})); err != nil {\n"
                  "\t\tt.Fatal(err)\n\t}\n}\n", "hint/A.md": "x"}
-        with tempfile.TemporaryDirectory() as d, self.tree(d, files):
+        with tempfile.TemporaryDirectory() as d, self.tree(d, files), self.made(d):
             broker = pathlib.Path(d) / "broker"
             run = lambda: subprocess.run(["go", "test", "-count=1", "./hint"], cwd=broker, capture_output=True,
                                          env={**os.environ, "GOFLAGS": "-mod=mod", "GOTOOLCHAIN": "local"})
@@ -3599,7 +3677,8 @@ class Plan(unittest.TestCase):
         # SHARDS_MAX, so all 294 of #6144's enforcer/nft shards exited 2 (run 44488046218). The K
         # bound `run` takes is the largest one pack fits, whatever the constants become.
         top = max(k for k in range(1, mutgate.SHARDS_MAX + 2) if mutgate.pack([("p", k)]))
-        with mock.patch.object(mutgate, "cmd_run", return_value=0) as ran:
+        with mock.patch.object(mutgate, "cmd_run", return_value=0) as ran, \
+                mock.patch.object(mutgate, "scratch", contextlib.nullcontext):
             for i in (0, top - 1):
                 self.assertEqual(mutgate.main(["run", "p", "--git", "HEAD~1", "--shard", str(i), "--of", str(top)]), 0)
             self.assertEqual(ran.call_count, 2)

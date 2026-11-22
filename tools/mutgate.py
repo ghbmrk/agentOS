@@ -30,8 +30,8 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
                                              they pass (LINTS, #6346), and
                                              add the verdicts to `run`'s JSON in DIR (#4573, #4603, #4633);
                                              only the sites of the result's own shard
-  `plan`, `delete` and `run --git` first delete every broker/ Markdown file whose edit changes no
-  test (hide_docs, #6373): run them in a scratch clone.
+  `plan`, `delete` and `run --git` run in a copy of the working tree (scratch, #6456), without every
+  broker/ Markdown file whose edit changes no test (hide_docs, #6373).
   tools/mutgate.py report DIR                survivors per package, from the JSON in DIR
   tools/mutgate.py gate DIR --git BASE [HEAD] [--body FILE [--body-from SHA]] [--summary FILE]
                                              exit 1 if a LIVED mutant sits on a target line that no
@@ -415,23 +415,69 @@ def names_file(pkg_dir, rel):
     return False
 
 
-def hide_docs(broker):
+# The trees this process made (scratch's worktree, base_covered's archive): the only ones hide_docs deletes in.
+MADE = set()
+
+
+def hide_docs(broker, *also):
     """Delete, under broker (a tree the gate is about to run tests in), each Markdown file an edit to
-    which changes no package's tests (any without a data_owner; vendor/ is kept,
-    as is_data keeps it: a test compares it with its patched copy),
-    and return their paths. Every gate run then measures the suite without them, so no verdict can
-    depend on them and an edit to one changes no test (#6373); a test that needs one fails the run,
-    closed. It deletes from the working tree: run plan, run --git and delete in a scratch clone."""
+    which changes no package's tests (any without a data_owner in broker or any broker of also;
+    vendor/ is kept, as is_data keeps it: a test compares it with its patched copy), and return
+    their paths. Every gate run then measures the suite without them, so no verdict can depend on
+    them and an edit to one changes no test (#6373); a test that needs one fails the run, closed.
+    It refuses (ValueError) a tree this process did not make, so no working tree loses a file (#6456)."""
+    if pathlib.Path(broker).resolve().parent not in MADE:
+        raise ValueError(f"mutgate: {broker} is no tree mutgate made; it hides docs only in its own copies")
     gone = []
     for d, dirs, files in os.walk(broker):
         dirs.sort()
         for f in sorted(files):
             path = pathlib.Path(d, f)
             rel = "broker/" + path.relative_to(broker).as_posix()
-            if f.endswith(".md") and "vendor" not in rel.split("/")[1:-1] and not data_owner(rel, broker):
+            if (f.endswith(".md") and "vendor" not in rel.split("/")[1:-1]
+                    and not any(data_owner(rel, b) for b in (broker, *also))):
                 path.unlink()
                 gone.append(rel)
     return gone
+
+
+@contextlib.contextmanager
+def scratch():
+    """Run the block with ROOT and BROKER a copy of the working tree (a detached `git worktree` of
+    HEAD, with each file that differs from HEAD or is untracked and not ignored copied over it), its
+    docs hidden (hide_docs), and remove it after: plan, delete and run --git read what is on disk as
+    before, but delete, write or move nothing in the working tree, its index or its HEAD
+    (marked_base moves the copy's own; #6456)."""
+    global ROOT, BROKER
+    repo, broker = ROOT, BROKER
+    with tempfile.TemporaryDirectory() as tmp:
+        tree = pathlib.Path(tmp).resolve() / "tree"
+        # No hook runs: a post-checkout hook is the clone's code, not the commit's.
+        subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "worktree", "add", "--quiet", "--detach", str(tree),
+                        "HEAD"], cwd=repo, check=True)
+        MADE.add(tree)
+        try:
+            for name in sorted(set(_git_names(repo, "diff", "--name-only", "--no-renames", "HEAD"))
+                               | set(_git_names(repo, "ls-files", "--others", "--exclude-standard"))):
+                src, dst = repo / name, tree / name
+                if dst.is_symlink() or dst.is_file():
+                    dst.unlink()
+                if src.is_symlink() or src.is_file():  # else deleted: gone from the copy too
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dst, follow_symlinks=False)
+            ROOT, BROKER = tree, tree / "broker"
+            hide_docs(BROKER)
+            yield
+        finally:
+            ROOT, BROKER = repo, broker
+            MADE.discard(tree)
+            subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=repo, capture_output=True)
+
+
+def _git_names(repo, *args):
+    """The repo-relative paths a `git <args> -z` run in repo prints."""
+    out = subprocess.run(["git", *args, "-z"], cwd=repo, capture_output=True, check=True).stdout
+    return [n for n in out.decode("utf-8", "surrogateescape").split("\0") if n]
 
 
 def data_owner(path, broker=None):
@@ -2074,7 +2120,12 @@ def base_covered(pkg, mb, names, tmp, diff_text):
         print(f"mutgate: the base tree leaves out {name}, a link tar's data filter refuses", file=sys.stderr)
     if not (tree / "broker" / pkg).is_dir():
         return {}, None
-    hide_docs(tree / "broker")
+    # The head's names too (#6456): a doc either tree names is in both, so the base's run reads what the head's does.
+    MADE.add(tree.resolve())
+    try:
+        hide_docs(tree / "broker", BROKER)
+    finally:
+        MADE.discard(tree.resolve())
     got, problem = covered_by(pkg, names, tmp, tree / "broker")
     if problem:
         return None, f"at the base ({mb[:12]}), {problem}"
@@ -2162,8 +2213,6 @@ def unleash(cmd, **kw):
 
 
 def cmd_run(args):
-    if args.git:  # the gate's runs; a run of whole packages gates nothing
-        hide_docs(BROKER)
     pkgs = args.pkg or gated_packages()
     # Absolute: gremlins runs in broker/, so a relative -o would name a directory there (#3947).
     out = pathlib.Path(args.out).resolve()
@@ -3058,7 +3107,6 @@ def add_mutants(data, mutants):
 
 
 def cmd_delete(args):
-    hide_docs(BROKER)
     out = pathlib.Path(args.out).resolve()
     diff = broker_diff(args.git, "HEAD")
     added, tests = changes(diff, args.git, "HEAD")
@@ -3394,7 +3442,6 @@ def cmd_plan(args):
     """The `mutants` matrix (#4961): [{pkg, shard, of}] for each package `claimed` names, K from its
     target lines and deletion sites. It runs the PR's tests (changed tests' coverage), so only in
     an untrusted job; K is a schedule, and `verify` checks the shards whatever K is."""
-    hide_docs(BROKER)
     diff = broker_diff(args.git, "HEAD")
     added, tests = changes(diff, args.git, "HEAD")
     counts, planned = [], {}
@@ -3593,8 +3640,12 @@ def main(argv=None):
     if args.cmd == "packages":
         print("\n".join(gated_packages()))
         return 0
-    return {"claimed": cmd_claimed, "plan": cmd_plan, "run": cmd_run, "delete": cmd_delete, "report": cmd_report, "gate": cmd_gate,
-            "verify": cmd_verify, "waive": cmd_waive, "records": cmd_records}[args.cmd](args)
+    cmd = {"claimed": cmd_claimed, "plan": cmd_plan, "run": cmd_run, "delete": cmd_delete, "report": cmd_report, "gate": cmd_gate,
+           "verify": cmd_verify, "waive": cmd_waive, "records": cmd_records}[args.cmd]
+    if args.cmd in ("plan", "delete") or (args.cmd == "run" and args.git):  # the gate's runs (#6456)
+        with scratch():
+            return cmd(args)
+    return cmd(args)
 
 
 if __name__ == "__main__":
