@@ -3938,8 +3938,11 @@ type unitRecords struct {
 	} `json:"managers"`
 	// Each env file an EnvironmentFile= line of ours names that the tree
 	// holds at boot as a regular file, by the path the line gives.
-	Env  map[string]string `json:"env"`
-	Want string            `json:"want"`
+	Env map[string]string `json:"env"`
+	// Each env file of ours a package's EnvironmentFile= line names (a
+	// conffile a build step changed), as the tree holds it at boot (#6312).
+	PkgEnv map[string]string `json:"pkg_env"`
+	Want   string            `json:"want"`
 }
 
 // builtUnits holds a built root file system's units, as its systemd loads
@@ -4029,6 +4032,19 @@ func builtUnitsWith(recs unitRecords, dir string, env envLookup) error {
 			continue
 		}
 		errs = append(errs, fmt.Errorf("%s: a file of ours hides a package's drop-in, %s, and with it the package's lines", m.Path, m.Hides))
+	}
+	// An env file of ours that a package's unit loads sets that unit's
+	// environment as a line of ours would, whatever the unit's User=, so it
+	// is held to envFileLines as a root unit's is (#6312).
+	envs := make([]string, 0, len(recs.PkgEnv))
+	for p := range recs.PkgEnv {
+		envs = append(envs, p)
+	}
+	sort.Strings(envs)
+	for _, p := range envs {
+		if err := envFileLines(p, recs.PkgEnv[p]); err != nil {
+			errs = append(errs, fmt.Errorf("a package's unit loads %s, a file of ours: %v", p, err))
+		}
 	}
 	if recs.Fstab != nil {
 		f, err := write(recs.Fstab.Path, recs.Fstab.Text)
