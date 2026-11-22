@@ -1,4 +1,4 @@
-"""Tests for tools/record_merge.py, the record-file merge driver that merges lines by key (#6316, #6358).
+"""Tests for tools/record_merge.py, the record-file merge driver that merges lines by key (#6316, #6358, #6375).
 
 No requirement IDs: PLAN.md tooling, not SPEC.md behaviour. All data is synthetic.
 """
@@ -90,7 +90,42 @@ class DriverTest(unittest.TestCase):
         attrs = self.r / ".git/info/attributes"
         attrs.write_text("*.bin binary")  # no final newline
         record_merge.install(self.r)
-        self.assertEqual(attrs.read_text(), "*.bin binary\nASSUMPTIONS.md merge=records\nMUTANTS-EQUIVALENT merge=records\n")
+        self.assertEqual(attrs.read_text(), "*.bin binary\n" + "".join(
+            f"{p} merge=records\n" for p, c in record_merge.CLASSES.items() if c in record_merge.DRIVEN))
+        for name in ("tools/x_allow.txt", "image/x.allow", "broker/h/allow-corpus.txt"):
+            self.assertEqual(git(self.r, "check-attr", "merge", name).stdout.strip(), f"{name}: merge: records")
+        # #6441: a declared exit list is merged by git as text, never by the driver.
+        self.assertEqual(git(self.r, "check-attr", "merge", "tools/old_core.txt").stdout.strip(),
+                         "tools/old_core.txt: merge: unspecified")
+
+    def test_gitattributes_lists_every_class_and_no_other_file(self):
+        # #6375: CLASSES is the one list; .gitattributes holds each pattern as LF text, with the union for rows and
+        # entries only (a union could bring back an allow line one side removed).
+        lines = [x.split() for x in (ROOT / ".gitattributes").read_text().splitlines() if x and not x.startswith("#")]
+        self.assertEqual([x[0] for x in lines], list(record_merge.CLASSES))
+        for pattern, *attrs in lines:
+            union = record_merge.CLASSES[pattern] in ("row", "entry")
+            self.assertEqual(attrs, ["merge=union"] * union + ["text", "eol=lf"], pattern)
+        self.assertEqual([record_merge.record_class(f) for f in ("a/ASSUMPTIONS.md", "a/MUTANTS-EQUIVALENT",
+                          "tools/srclint_allow.txt", "image/import_sweep.allow", "broker/h/allow.txt", "README.md",
+                          "a/allow.go", "a/MUTANTS-EQUIVALENT.txt")],
+                         ["row", "entry", "line", "line", "line", None, None, None])
+
+    def test_a_crlf_repeat_committed_through_git_is_the_lf_line(self):
+        # #6375 item 1: .gitattributes' eol=lf makes git commit a CRLF line as its LF twin, so both sides' copies are
+        # one entry, kept once, on either side.
+        a, s = entry("a()"), entry("s()")
+        for crlf_on in ("pr", "main"):
+            with self.subTest(crlf_on=crlf_on):
+                self.setUp()
+                crlf = s.replace("\n", "\r\n")
+                reviewed, tip, out = self.merge_records(a, a + (crlf if crlf_on == "pr" else s),
+                                                        a + (crlf if crlf_on == "main" else s))
+                self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+                # The commit, as bytes: the worktree may keep the CRLF it was written with.
+                blob = subprocess.run(["git", "show", f"HEAD:{RECORD}"], cwd=self.r, capture_output=True).stdout
+                self.assertEqual(blob.count(b'"s()"'), 1)
+                self.assertNotIn(b"\r", blob)
 
     def test_a_row_the_pr_edited_beside_a_main_append_is_kept_once(self):
         # #6238, #6032: the union kept `edge old` and `edge new`; doclint failed after the push.
@@ -221,13 +256,75 @@ class DriverTest(unittest.TestCase):
         self.assertEqual(self.read().count("| L-2 |"), 2, "the union keeps both; doclint is the backstop there")
 
 
+class AllowTest(unittest.TestCase):
+    """#6375 item 2: allow files merge by line, appends at one spot only."""
+    setUp, write, commit, same_in_ci = DriverTest.setUp, DriverTest.write, DriverTest.commit, DriverTest.same_in_ci
+
+    def merge_allow(self, name, base, mine, main):
+        (self.r / name).parent.mkdir(parents=True, exist_ok=True)
+        self.write(base, name)
+        self.commit("allow")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write(mine, name)
+        reviewed = self.commit("pr")
+        git(self.r, "checkout", "-q", "main")
+        self.write(main, name)
+        tip = self.commit("main")
+        git(self.r, "checkout", "-q", "pr")
+        return reviewed, tip, git(self.r, "merge", "--no-edit", "main", check=False)
+
+    def test_a_line_both_sides_appended_is_kept_once_and_reads_same(self):
+        name = "tools/x_allow.txt"
+        reviewed, tip, out = self.merge_allow(name, "# h\nallow a\n", "# h\nallow a\nallow p\nallow s\n",
+                                              "# h\nallow a\nallow s\nallow m\n")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual((self.r / name).read_text(), "# h\nallow a\nallow p\nallow s\nallow m\n")
+        self.assertEqual(self.same_in_ci(reviewed, tip), ([], []))
+
+    def test_appends_in_a_sectioned_allow_file_stay_in_their_section(self):
+        name = "image/x.allow"
+        base = "[a]\n/usr/bin/x\n\n[b]\n/usr/bin/x\n"
+        reviewed, tip, out = self.merge_allow(name, base, base.replace("[b]\n", "[b]\n/usr/bin/p\n"),
+                                              base.replace("[b]\n", "[b]\n/usr/bin/m\n"))
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual((self.r / name).read_text(), "[a]\n/usr/bin/x\n\n[b]\n/usr/bin/p\n/usr/bin/m\n/usr/bin/x\n",
+                         "a line in two sections is no duplicate")
+        self.assertEqual(self.same_in_ci(reviewed, tip), ([], []), "premerge's _driver_kept reads the driver's merge")
+        # The PR's line moved to the other section is no merge of the two sides.
+        self.write("[a]\n/usr/bin/p\n/usr/bin/x\n\n[b]\n/usr/bin/m\n/usr/bin/x\n", name)
+        self.commit("moved")
+        self.assertEqual(premerge.compare(self.r, reviewed, "HEAD", tip), [name])
+
+    def test_a_section_header_in_an_append_is_a_conflict(self):
+        # #6418 Security: main's /y would follow the PR's [cipher] header and leave [glob].
+        for mine, main in (("[glob]\n/a\n[cipher]\n/c\n", "[glob]\n/a\n/y\n"), ("[glob]\n/a\n/y\n", "[glob]\n/a\n[cipher]\n/c\n")):
+            with self.subTest(mine=mine):
+                self.setUp()
+                _, _, out = self.merge_allow("image/import_sweep.allow", "[glob]\n/a\n", mine, main)
+                self.assertNotEqual(out.returncode, 0)
+                self.assertIn("<<<<<<<", (self.r / "image/import_sweep.allow").read_text())
+        self.assertEqual(record_merge.merge(b"[glob]\n/a\n", b"[glob]\n/a\n[cipher]\n/c\n", b"[glob]\n/a\n/y\n",
+                                            "image/import_sweep.allow")[1], False)
+
+    def test_an_allow_line_edited_or_deleted_beside_a_change_is_a_conflict(self):
+        # A union would bring back the exit main closed; the builder resolves it.
+        for mine, main in (("allow a why2\nallow p\n", "allow m\n"), ("allow p\n", "allow a why3\n")):
+            with self.subTest(mine=mine, main=main):
+                self.setUp()
+                _, _, out = self.merge_allow("broker/h/allow.txt", "allow a why\n", mine, main)
+                self.assertNotEqual(out.returncode, 0)
+                self.assertIn("<<<<<<<", (self.r / "broker/h/allow.txt").read_text())
+
+
 class ResolveTest(unittest.TestCase):
     def test_resolve(self):
         r = lambda *sides: record_merge.resolve(*([f"| {x} |\n".encode() for x in s] for s in sides))
         rows = lambda *xs: [f"| {x} |\n".encode() for x in xs]
         self.assertEqual(r(["A-1 | new"], ["A-1 | old"], ["A-1 | old", "B-1 | b"]), rows("A-1 | new", "B-1 | b"))
         self.assertEqual(r(["A-1 | old", "P-1 | p"], ["A-1 | old"], ["A-1 | new"]), rows("P-1 | p", "A-1 | new"))
-        self.assertEqual(r(["A-1 | x"], ["A-1 | old"], ["A-1 | x"]), rows("A-1 | x", "A-1 | x"), "a duplicate is caught later")
+        self.assertEqual(r(["A-1 | x"], ["A-1 | old"], ["A-1 | x"]), rows("A-1 | x"), "one change both sides made (#6375)")
+        self.assertEqual(r(["P-1", "S-1"], [], ["S-1", "M-1"]), rows("P-1", "S-1", "M-1"))
+        self.assertEqual(r(["S-1", "S-1"], [], ["S-1"]), rows("S-1", "S-1"), "a copy only one side added stays")
         self.assertIsNone(r(["A-1 | x"], ["A-1 | old"], ["A-1 | y"]))
         self.assertIsNone(r([], ["A-1 | old"], ["A-1 | y"]))
         self.assertIsNone(r(["A-1 | x"], ["A-1 | old"], []))
@@ -269,6 +366,29 @@ class ResolveTest(unittest.TestCase):
             self.assertEqual(record_merge.main([str(p) for p in paths] + ["ASSUMPTIONS.md"]), 1)
             self.assertEqual(paths[1].read_bytes(), texts[1])
         self.assertEqual(record_merge.merge(texts[0], texts[1], texts[2]), (None, False))
+
+    def test_a_carriage_return_on_either_side_is_refused_and_ours_is_untouched(self):
+        # #6375 item 1: a CRLF repeat of an LF record that reached a commit around git's eol=lf is refused, as doclint
+        # and mutgate refuse it, on each side and in base.
+        lf = entry("a()").encode()
+        crlf = lf.replace(b"\n", b"\r\n")
+        for i in range(3):
+            with self.subTest(side=("ours", "base", "theirs")[i]), tempfile.TemporaryDirectory() as d:
+                texts = [lf, lf, lf + lf]
+                texts[i] += crlf
+                paths = [pathlib.Path(d, n) for n in ("o", "a", "b")]
+                for p, t in zip(paths, texts):
+                    p.write_bytes(t)
+                self.assertEqual(record_merge.main([str(p) for p in paths] + [RECORD]), 1)
+                self.assertEqual(paths[1].read_bytes(), texts[1])
+                self.assertEqual(record_merge.merge(texts[0], texts[1], texts[2], RECORD), (None, False))
+
+    def test_a_file_in_no_class_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            paths = [pathlib.Path(d, n) for n in ("o", "a", "b")]
+            for p in paths:
+                p.write_bytes(b"x\n")
+            self.assertEqual(record_merge.main([str(p) for p in paths] + ["README.md"]), 1)
 
     def test_usage(self):
         self.assertEqual(record_merge.main([]), 2)

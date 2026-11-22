@@ -18,6 +18,7 @@ Installed-Size: 1
 Maintainer: agentOS control <control@example.invalid>
 Architecture: all
 Version: 1.0-2
+Built-Using: agentos-builtusing (= 1.0-1)
 Description: planted package at the advisory's fixed version
  tools/vulncheck.py control: it must not be reported.
 

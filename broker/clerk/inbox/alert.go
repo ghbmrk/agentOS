@@ -33,10 +33,8 @@ func VerifiedAlert(raw []byte, w World) bool {
 	if !alertSender(raw, w) {
 		return false
 	}
+	// A From with no domain aligns with nothing (aligned).
 	_, domain, _ := strings.Cut(canonAddr(FromAddress(raw)), "@")
-	if domain == "" {
-		return false
-	}
 	var pass []Sig
 	for _, s := range VerifyDKIM(raw, w.DKIMKeys) {
 		if s.Pass {
@@ -211,11 +209,10 @@ func senderIn(addr string, entries []string) bool {
 		if e == "" {
 			continue
 		}
-		if strings.Contains(strings.TrimPrefix(e, "@"), "@") {
-			if e == addr {
-				return true
-			}
-			continue
+		// An address entry (an @ after any leading one) matches only itself; as
+		// a domain it matches nothing, since a domain holds no @.
+		if e == addr && strings.Contains(strings.TrimPrefix(e, "@"), "@") {
+			return true
 		}
 		e = strings.TrimPrefix(e, "@")
 		if d != "" && (d == e || strings.HasSuffix(d, "."+e)) {
