@@ -3494,9 +3494,8 @@ def lint_run(binary, cwd, timeout, mem, name):
     message, indented, does not); 'timeout'; 'memory cap'; or 'exit N' (a panic is exit 2)."""
     out = pathlib.Path(binary).with_suffix(".out")
     with open(out, "wb") as log:
-        p = subprocess.Popen([str(binary), "-test.failfast", f"-test.run=^{name}$", f"-test.timeout={timeout + 2}s"],
-                             cwd=cwd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        end, _ = watch(p, timeout, mem)
+        end, _ = contained([str(binary), "-test.failfast", f"-test.run=^{name}$", f"-test.timeout={timeout + 2}s"],
+                           mem, timeout, cwd=cwd, stdout=log, stderr=subprocess.STDOUT)
     if end == 0:
         return "passed"
     if end in ("timeout", "over"):
