@@ -4017,7 +4017,9 @@ TMPFILES_PASS = ("d /run/user 0755 root root -", "L /var/run - - - - ../run", "L
                  "z /run/credstore 0700 root root", "z /run/credstore.encrypted 0700 root root",
                  "L+ /etc/default/locale - - -  -  ../locale.conf", "L /var/lock - - - - ../run/lock",
                  "L$ /var/log/README - - - - ../../usr/share/doc/systemd/README.logs",
-                 "L! /etc/resolv.conf - - - - ../run/systemd/resolve/stub-resolv.conf")
+                 "L! /etc/resolv.conf - - - - ../run/systemd/resolve/stub-resolv.conf",
+                 # provision.conf's root home, above root/.config/environment.d (#6312).
+                 "d- /root :0700 root :root -", "d- /root/.ssh :0700 root :root -")
 AGENTOS_TMPFILES = MK / "mkosi.extra/usr/lib/tmpfiles.d/agentos.conf"
 
 
@@ -4042,7 +4044,9 @@ GUARDED_NAMES = ("sysctl.d", "modprobe.d", "tmpfiles.d", "systemd/network", "sys
                  "systemd/resolved.conf.d", "systemd/system-generators", "credstore", "credstore.encrypted",
                  # #2176: every boot-code channel exec.allow holds.
                  "udev/rules.d", "modules-load.d", "systemd/system-environment-generators", "binfmt.d",
-                 "systemd/system-shutdown", "systemd/system-sleep")
+                 "systemd/system-shutdown", "systemd/system-sleep",
+                 # #6312: root's user manager's generators and environment.d.
+                 "systemd/user-generators", "systemd/user-environment-generators", "environment.d")
 # #1543 reviews at bf7e5d3: B1 (C+ on an ancestor of /run/sysctl.d), B2 (a stock link with more
 # after its target, which systemd takes raw), B3 (/etc/sysctl.d and /etc/sysctl.conf) and R1 (every
 # other directory the tree check reads), plus /sys and ".." paths. Each must be refused.
@@ -4088,7 +4092,10 @@ TMPFILES_PROBES = (
     "C /run/systemd/system-environment-generators/x - - - - /usr/share/x/x",
     "L /etc/binfmt.d/x.conf - - - - /usr/share/x/x.conf", "C /run/binfmt.d/x.conf - - - - /usr/share/x/x.conf",
     "L /usr/lib/systemd/system-shutdown/x - - - - /usr/share/x/x",
-    "C /usr/lib/systemd/system-sleep/x - - - - /usr/share/x/x", "f /etc/modules - - - - tun")
+    "C /usr/lib/systemd/system-sleep/x - - - - /usr/share/x/x", "f /etc/modules - - - - tun",
+    # #6312: root's own environment.d, its parent made writable, and what systemd's 99-environment.conf names.
+    "f /root/.config/environment.d/x.conf - - - - LD_PRELOAD=/tmp/x.so", "d /root/.config 0777",
+    "f+ /etc/environment - - - - LD_PRELOAD=/tmp/x.so", "f %h/.config/environment.d/x.conf")
 # One probe per guarded name, under each configuration directory (#1543 P/UX B2). /usr is read-only
 # on the box and trixie's /lib is /usr/lib, but the check guards them anyway.
 TMPFILES_PROBES += tuple("f /%s/%s/x" % (top, n) for top in ("etc", "run", "usr/local/lib", "lib") for n in GUARDED_NAMES)
@@ -5670,14 +5677,24 @@ class ExecAllowTest(unittest.TestCase):
                 "lib/modprobe.d/x.conf", "etc/sysctl.d/x.conf", "usr/local/lib/sysctl.d/x.conf",
                 "usr/lib/sysctl.d/x.conf", "etc/binfmt.d/x.conf", "usr/lib/binfmt.d/x.conf",
                 "usr/lib/systemd/system-shutdown/x", "usr/lib/systemd/system-sleep/x",
-                "etc/systemd/system-shutdown/x", "usr/local/lib/systemd/system-sleep/x")
+                "etc/systemd/system-shutdown/x", "usr/local/lib/systemd/system-sleep/x",
+                # #6312: root's user manager's generators and environment.d, root's own included.
+                "etc/systemd/user-generators/x", "usr/local/lib/systemd/user-generators/x",
+                "usr/lib/systemd/user-generators/x", "etc/systemd/user-environment-generators/x",
+                "usr/local/lib/systemd/user-environment-generators/x", "usr/lib/systemd/user-environment-generators/x",
+                "etc/environment.d/x.conf", "usr/local/lib/environment.d/x.conf", "usr/lib/environment.d/x.conf",
+                "root/.config/environment.d/x.conf")
     # #2176's failure paths: each runs root code at boot from a file the old check never hashed.
     PATHS = {"usr/lib/modprobe.d/x.conf": "install tun /usr/sbin/sysctl -w net.ipv4.ip_forward=1\n",
              "usr/lib/sysctl.d/x.conf": "kernel.modprobe = /usr/local/bin/x\n",
              "etc/sysctl.d/y.conf": "kernel/hotplug=/usr/local/bin/x\n",
              "usr/lib/binfmt.d/x.conf": ":x:E::x::/usr/local/bin/x:\n",
              "usr/lib/systemd/system-shutdown/x": "#!/bin/sh\nsysctl -w net.ipv4.ip_forward=1\n",
-             "usr/lib/systemd/system-sleep/x": "#!/bin/sh\nsysctl -w net.ipv4.ip_forward=1\n"}
+             "usr/lib/systemd/system-sleep/x": "#!/bin/sh\nsysctl -w net.ipv4.ip_forward=1\n",
+             # #6312's: every unit root's user manager starts loads agentos-x-controlled code as root.
+             "etc/environment.d/50-x.conf": "LD_PRELOAD=/var/lib/agentos-x/x.so\n",
+             "root/.config/environment.d/50-x.conf": "LD_PRELOAD=/var/lib/agentos-x/x.so\n",
+             "etc/systemd/user-generators/x": "#!/bin/sh\nsysctl -w net.ipv4.ip_forward=1\n"}
     GENERATORS = ("usr/lib/systemd/system-generators/systemd-sysv-generator",
                   "usr/lib/systemd/system-generators/systemd-rc-local-generator")
 
@@ -5705,7 +5722,9 @@ class ExecAllowTest(unittest.TestCase):
                 self.assertTrue(tab, ln)
                 self.assertRegex(rel, r"^((etc|usr/local/lib|usr/lib|lib)/(udev/rules\.d/[^/]+\.rules|systemd/system-"
                                       r"((environment-)?generators|shutdown|sleep)/[^/]+|"
-                                      r"(modules-load|modprobe|sysctl|binfmt)\.d/[^/]+\.conf)|"
+                                      r"systemd/user-(environment-)?generators/[^/]+|"
+                                      r"(modules-load|modprobe|sysctl|binfmt|environment)\.d/[^/]+\.conf)|"
+                                      r"root/\.config/environment\.d/[^/]+\.conf|"
                                       # #2622: bus and polkit policy.
                                       r"(etc|usr/share)/polkit-1/rules\.d/[^/]+|usr/share/polkit-1/actions/[^/]+|"
                                       r"etc/dbus-1/.+|usr/share/dbus-1/(system\.d/[^/]+|system-services/[^/]+|"
@@ -5823,13 +5842,27 @@ class ExecAllowTest(unittest.TestCase):
         self.assertNotEqual(self.v(check.exec_allowed() | {("etc/modules-load.d/modules.conf", self.entry("tun\n"))}),
                             [])
         f.unlink()
-        link(self.root, "etc/modules-load.d/modules.conf", "/etc/modules")
+        f = link(self.root, "etc/modules-load.d/modules.conf", "/etc/modules")
         self.assertIn("etc/modules-load.d/modules.conf: unreadable", " | ".join(self.v()))
+        f.unlink()
+        # #6312: systemd's 99-environment.conf -> /etc/environment is read through, as that file; any other
+        # target is refused.
+        rel, data = "usr/lib/environment.d/99-environment.conf", "LD_PRELOAD=/var/lib/agentos-x/x.so\n"
+        write(self.root, "etc/environment", data)
+        f = link(self.root, rel, "/etc/environment")
+        self.assertIn("entry: %s\t%s" % (rel, self.entry(data)), " | ".join(self.v()))
+        self.assertEqual(self.v(check.exec_allowed() | {(rel, self.entry(data))}), [])
+        write(self.root, "etc/environment", "")
+        self.assertEqual(self.v(check.exec_allowed() | {(rel, "mask")}), [])
+        f.unlink()
+        link(self.root, rel, "../../../etc/environment")
+        self.assertIn("%s: unreadable" % rel, " | ".join(self.v()))
 
     def test_run_and_unreadable_are_refused(self):
         for d in ("run/udev/rules.d", "run/systemd/system-generators", "run/systemd/system-environment-generators",
                   "run/modules-load.d", "run/modprobe.d", "run/sysctl.d", "run/binfmt.d",
-                  "run/systemd/system-shutdown", "run/systemd/system-sleep"):
+                  "run/systemd/system-shutdown", "run/systemd/system-sleep", "run/systemd/user-generators",
+                  "run/systemd/user-environment-generators", "run/environment.d"):
             with self.subTest(d=d):
                 write(self.root, d + "/x", self.HARM)
                 self.assertIn("%s: not on the boot-code allowlist; /run is a tmpfs on the box (#1556)" % d,
@@ -5905,7 +5938,8 @@ class ExecAllowTest(unittest.TestCase):
                 self.assertEqual(moved.exec_allow_violations(self.root), [])
             with unittest.mock.patch.dict(os.environ, {"SRCDIR": tmp}):
                 want = ["exec.allow: missing; every file in a boot-code channel (udev rules, generators, modules-load.d, "
-                        "modprobe.d, sysctl.d, binfmt.d, shutdown and sleep hooks) must be on it (#1556, #2176)"]
+                        "modprobe.d, sysctl.d, binfmt.d, shutdown and sleep hooks, root's user manager's generators "
+                        "and environment.d) must be on it (#1556, #2176, #6312)"]
                 self.assertEqual(moved.exec_allow_violations(self.root), want)
                 self.assertIn(want[0], moved.violations(self.root))
 
