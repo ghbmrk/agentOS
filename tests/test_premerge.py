@@ -2,6 +2,7 @@
 
 No requirement IDs: PLAN.md tooling, not SPEC.md behaviour. All data is synthetic.
 """
+import os
 import pathlib
 import re
 import subprocess
@@ -13,6 +14,7 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import premerge  # noqa: E402
+import ci_scope  # noqa: E402
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
 
@@ -953,8 +955,14 @@ class PremergeTest(unittest.TestCase):
             self.assertEqual(premerge.mark_paths([f]), [], repr(f))
         # The class is closed: every file git gives meaning by name in a tree is a replay input or one the replay
         # never reads (ignore rules and the mailmap shape no merge), so a new kind fails here until it is classed.
-        named = {f for f in git(ROOT, "ls-files", "-z").split("\0")
-                 if f.rsplit("/", 1)[-1].startswith(".git") or f.rsplit("/", 1)[-1] == ".mailmap"}
+        # Walked, not `git ls-files`: this module reads no record and no git store (records_audit); the record
+        # directories hold records only, and a .gitattributes in one is a gate file by the pattern above all the same.
+        skip = {".git", *(d.rstrip("/") for d in ci_scope.RECORD_DIRS)}
+        named = set()
+        for top, dirs, files in os.walk(ROOT):
+            rel = os.path.relpath(top, ROOT)
+            dirs[:] = [d for d in dirs if os.path.normpath(os.path.join(rel, d)) not in skip]
+            named |= {os.path.normpath(os.path.join(rel, f)) for f in files if f.startswith(".git") or f == ".mailmap"}
         self.assertTrue(named, "the repository tracks .gitattributes")
         for f in named:
             self.assertTrue(premerge.mark_paths([f]) or f.rsplit("/", 1)[-1] in premerge.NOT_REPLAY_INPUTS, f)
