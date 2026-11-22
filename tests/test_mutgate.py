@@ -3639,6 +3639,71 @@ class DataFiles(unittest.TestCase):
             self.assertEqual(mutgate.base_covered("hint", sha, None, tmp, ""), ({}, None))
         self.assertEqual(seen["left"], ["hint.go"])
 
+    def test_a_file_named_by_path_changes_its_readers_tests(self):
+        # #6436: a test reading another package's fixture, another package's code or a file outside
+        # broker/ by a literal path from its own directory changes when that file does, every test
+        # of it; the file's own package keeps its claim. A path built otherwise, a directory, a
+        # vendored file, an absolute path or one leaving the repository names nothing.
+        # REQ: MUT-deleted-test-own-lines-fu
+        code = {"other/other.go": "package other\n", "other/testdata/x.json": "x",
+                "cmd/x/main.go": "package main\n", "vendor/example.com/m/m.go": "package m\n",
+                "page/page.go": "package page\n",
+                "page/page_test.go": 'package page\n\nvar (\n\t_ = "../../SPEC.md"\n\t_ = "../other/testdata/x\\x2ejson"\n'
+                                     '\t_ = "../cmd/x/main.go"\n\t_ = "../vendor/example.com/m/m.go"\n\t_ = "../other"\n'
+                                     '\t_ = "/etc/hosts"\n\t_ = "../../../outside.txt"\n\t_ = "page.go"\n'
+                                     '\t_ = filepath.Join("..", "..", "docs", "guide.md")\n)\n\n// "../../README.md"\n'}
+        with tempfile.TemporaryDirectory() as d, self.tree(d, code):
+            for path, want in (("SPEC.md", {"page"}),
+                               ("broker/other/testdata/x.json", {"page", "other"}),
+                               ("broker/cmd/x/main.go", {"page", "cmd/x"}),
+                               ("broker/page/page.go", {"page"}),               # its own code: its own lines
+                               ("broker/other/other.go", {"other"}),            # a directory names no file
+                               ("broker/vendor/example.com/m/m.go", set()),     # go mod vendor fixes it
+                               ("docs/guide.md", set()),                        # built at run time
+                               ("README.md", set()),                            # a comment names nothing
+                               ("outside.txt", set())):
+                for kind in ("change", "empty", "delete"):
+                    with self.subTest(path=path, kind=kind):
+                        added, tests = mutgate.added_lines(data_diff(path, kind))
+                        own = {mutgate.package_of(path)} if mutgate.is_source(path) and kind != "change" else set()
+                        self.assertEqual(mutgate.touched(added, tests), want - own)  # code claims by added lines
+                        self.assertEqual(mutgate.tests_changed(tests, "page"), path != "broker/page/page.go" and "page" in want)
+                        if "page" in want and path != "broker/page/page.go":
+                            self.assertIsNone(mutgate.head_tests(tests, "page"))  # every test
+                            self.assertEqual(mutgate.diff_targets(added, "page"), {})
+                            self.assertEqual(mutgate.claimed(data_diff(path, kind), packages=["page"]), ["page"])
+            self.assertEqual(mutgate.readers("broker/vendor/example.com/m/m.go"), set())
+            self.assertEqual(mutgate.owners("broker/vendor/example.com/m/m.go"), set())
+            self.assertTrue(mutgate.is_vendored("broker/vendor/example.com/m/m.go"))
+            self.assertFalse(mutgate.is_vendored("vendor/x.go"))
+
+    def test_a_markdown_file_another_package_names_stays_in_the_gate_trees(self):
+        # #6436: hide_docs keeps a Markdown file whose edit claims a reader in another package.
+        # REQ: MUT-deleted-test-own-lines-fu
+        files = {"hint/hint.go": "package hint\n", "hint/ASSUMPTIONS.md": "x", "hint/NOTES.md": "x",
+                 "read/read.go": 'package read\n\nconst doc = "../hint/NOTES.md"\n'}
+        with tempfile.TemporaryDirectory() as d, self.tree(d, files), self.made(d):
+            self.assertEqual(mutgate.hide_docs(pathlib.Path(d) / "broker"), ["broker/hint/ASSUMPTIONS.md"])
+            self.assertEqual(mutgate.owners("broker/hint/NOTES.md"), {"read"})
+
+    def test_the_gates_diff_holds_the_files_outside_broker_a_package_reads(self):
+        # #6436: broker_diff adds each file outside broker/ that a package names by path, and no
+        # other; a name holding pattern characters is read as a path.
+        # REQ: MUT-deleted-test-own-lines-fu
+        files = {"broker/page/page.go": 'package page\n\nvar _ = []string{"../../SPEC.md", "../../a[1].md"}\n',
+                 "SPEC.md": "x\n", "README.md": "x\n", "a[1].md": "x\n", "a1.md": "x\n"}
+        repo = self.repo(files)
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+        for name in ("SPEC.md", "README.md", "a[1].md", "a1.md"):
+            (repo / name).write_text("y\n")
+        subprocess.run(["git", "-c", "commit.gpgsign=false", "commit", "-qam", "head"], cwd=repo, env=env, check=True)
+        with mock.patch.object(mutgate, "ROOT", repo), mock.patch.object(mutgate, "BROKER", repo / "broker"):
+            diff = mutgate.broker_diff("HEAD~1", "HEAD")
+            heads = sorted(line for line in diff.split("\n") if line.startswith("diff --git"))
+            self.assertEqual(heads, ["diff --git a/SPEC.md b/SPEC.md", "diff --git a/a[1].md b/a[1].md"])
+            self.assertEqual(mutgate.touched(*mutgate.added_lines(diff)), {"page"})
+
     def test_the_base_tree_keeps_a_doc_the_head_names(self):
         # #6456: the base tree hid by the base's names alone, so a doc the head newly names was read
         # at the head and gone at the base. A doc either tree names is now in the base's run; one
