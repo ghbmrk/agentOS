@@ -293,6 +293,13 @@ func (s *store) save() error {
 	return nil
 }
 
+// syncFile and closeFile are writeFile's fsync and close of the temporary
+// file; a test swaps them for ones that fail, which no real file does on demand.
+var (
+	syncFile  = (*os.File).Sync
+	closeFile = (*os.File).Close
+)
+
 // writeFile replaces path with b (0600) so that a power cut leaves the old
 // file or the new one whole: a temporary file beside it, synced, renamed over
 // it, then the directory synced. A failed directory sync is still an error,
@@ -310,9 +317,9 @@ func writeFile(path string, b []byte) error {
 		err = f.Chmod(0o600)
 	}
 	if err == nil {
-		err = f.Sync()
+		err = syncFile(f)
 	}
-	if cerr := f.Close(); err == nil {
+	if cerr := closeFile(f); err == nil {
 		err = cerr
 	}
 	if err == nil {

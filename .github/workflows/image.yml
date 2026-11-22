@@ -15,6 +15,7 @@ on:
     paths:
       - "image/**"
       - ".github/workflows/image.yml"
+      - ".github/actions/disk-budget/**"
       # The guest roots build.sh builds into the image (#5889): import_sweep.allow pins the codex
       # binaries by SHA-256, so a version bump in build-rootfs.sh must meet the sweep in its own PR.
       - "guest/codex/**"
@@ -59,6 +60,7 @@ on:
     paths:
       - "image/**"
       - ".github/workflows/image.yml"
+      - ".github/actions/disk-budget/**"
       # The guest roots build.sh builds into the image (#5889): import_sweep.allow pins the codex
       # binaries by SHA-256, so a version bump in build-rootfs.sh must meet the sweep in its own PR.
       - "guest/codex/**"
@@ -129,44 +131,41 @@ jobs:
         run: |
           ts=$(sh image/security-snapshot.sh resolve)
           echo "snapshots=$ts" >> "$GITHUB_OUTPUT"
-  build:
+  # IMG-mkosi-run-bound (#4690, D-276): build.sh runs as root, so it could repoint mkosi's config, flags or
+  # binary on its own runner. It runs only here: it stages the image tree into OUT/stage, and the job
+  # uploads that tree (with the guests' and linked package lists) for the build job, which runs the pinned
+  # mkosi on the committed config on a fresh runner and never runs build.sh. The root tests that need no
+  # image run here too, so nothing from the repository runs as root before mkosi there.
+  stage:
     needs: security-snapshot
     strategy:
       fail-fast: false
       matrix:
         run: [a, b]
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 90
     env:
-      DISK_NEED_GB: "24" # IMG-disk (#4317): measured peak growth 15 GB (build a, boots included); see "Disk budget"
+      DISK_NEED_GB: "12" # IMG-disk (#6150): measured bound 6.9 GB (5.4 sampled + 1.5 rise, stage b); see .github/actions/disk-budget
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
-      # IMG-disk (#4317): the runner's disk, not the image, ran out mid-build (systemd-repart ENOSPC).
-      # Preinstalled toolchains the job never uses go first; the guard below then checks the result.
-      - name: Free runner disk
-        run: |
-          gb() { echo $(( $(df -BM --output=avail / | tail -n 1 | tr -dc 0-9) / 1024 )); }
-          echo "::notice title=disk budget::/ had $(gb) GB free before freeing the runner disk"
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/local/share/chromium
-          sudo docker image prune -a -f >/dev/null 2>&1 || true
-          echo "::notice title=disk budget::/ has $(gb) GB free after freeing the runner disk"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
         with:
           go-version-file: broker/go.mod
           cache: false
-      - name: Install build and boot tools
+      - name: Install staging tools
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends debian-archive-keyring systemd-boot systemd-boot-efi \
-            systemd-container erofs-utils dosfstools mtools e2fsprogs cpio zstd kmod bubblewrap cryptsetup-bin \
-            qemu-system-x86 ovmf swtpm swtpm-tools mmdebstrap
-          # Ubuntu 24.04 confines user namespaces via AppArmor, which breaks mkosi's bubblewrap sandbox.
+          sudo apt-get install -y -q --no-install-recommends debian-archive-keyring erofs-utils dosfstools mtools \
+            e2fsprogs cpio zstd kmod bubblewrap cryptsetup-bin mmdebstrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          sudo git clone -q https://github.com/systemd/mkosi /opt/mkosi
-          sudo git -C /opt/mkosi -c advice.detachedHead=false checkout -q 26673f65e17ae099bb0cf65928fe70c93b8a6a37  # v24.3
+      # IMG-disk (#6150): the stage writes the stage in RUNNER_TEMP, build.sh's mktemp and GOCACHE in /tmp,
+      # and HOME=/root, so a staging change that outgrows the runner fails on its budget, not on ENOSPC.
+      - name: Disk budget
+        uses: ./.github/actions/disk-budget
+        with:
+          phase: start
       - name: Disk adapter on a loop device (UPD-b3 (c1))
         # As root: a GPT on a loop device, the booted slot held by dm-verity (broker/apply/bootab).
         # A skipped test exits 0, so the step also requires the loop test's PASS line.
@@ -189,40 +188,113 @@ jobs:
           sudo env "PATH=$PATH" AGENTOS_REQUIRE_SYSTEMD=1 "$RUNNER_TEMP/privfile.test" -test.run '^(TestUnitRulesUnderSystemd|TestRootSideUnitPathsAndGrants)$' -test.v -test.count=1 | tee "$RUNNER_TEMP/unit-fixtures.log"
           grep -q -- '^--- PASS: TestUnitRulesUnderSystemd ' "$RUNNER_TEMP/unit-fixtures.log"
           grep -q -- '^--- PASS: TestRootSideUnitPathsAndGrants ' "$RUNNER_TEMP/unit-fixtures.log"
-      # IMG-disk (#4317, #4366): each file system the job writes to (output and boot copies in
-      # RUNNER_TEMP, mkosi's workspace in /var/tmp, GOCACHE in /tmp, mkosi's cache under /root) must
-      # have DISK_NEED_GB free, or the job stops here with both numbers and the runner's cloud (from
-      # its firmware vendor: the runner pool mixes AWS and Azure machines). A sampler then records the
-      # use of those file systems every second, and "Disk budget held" fails a job whose growth went
-      # over it, so a change that grows the build turns its own PR red instead of a later one.
-      - name: Disk budget
-        shell: bash
-        run: |
-          vendor=$(cat "${DMI_ID:-/sys/class/dmi/id}/sys_vendor" 2>/dev/null || true)
-          case "$vendor" in
-            "Amazon EC2"*) cloud=AWS;; "Microsoft Corporation"*) cloud=Azure;; *) cloud="unknown-cloud (${vendor:-no DMI vendor})";;
-          esac
-          df -BM --output=target "$RUNNER_TEMP" /var/tmp /tmp /root | tail -n +2 | sort -u > "$RUNNER_TEMP/disk.mounts"
-          fail=0
-          while read -r m; do
-            have=$(( $(df -BM --output=avail "$m" | tail -n 1 | tr -dc 0-9) / 1024 ))
-            echo "::notice title=disk budget::$cloud runner: image build needs $DISK_NEED_GB GB free on $m, runner has $have GB"
-            # "Free runner disk" frees space on / only; a short mount of its own needs the build's writes moved.
-            if [ "$m" = / ]; then fix='free more in "Free runner disk"'
-            else fix="$m is its own file system, which \"Free runner disk\" does not free: move what every step of this job writes under $m to a directory on /, and put that directory in place of $m in this step's df line"; fi
-            [ "$have" -ge "$DISK_NEED_GB" ] || { echo "::error title=disk budget::$cloud runner: image build needs $DISK_NEED_GB GB free on $m, runner has $have GB; $fix"; fail=1; }
-          done < "$RUNNER_TEMP/disk.mounts"
-          [ "$fail" = 0 ]
-          # Used MB summed over those file systems (awk reads "1234M" as 1234).
-          printf '%s\n' '#!/bin/sh' 'xargs -d "\n" df -BM --output=used < "$RUNNER_TEMP/disk.mounts" | awk "NR > 1 {s += \$1} END {print s}"' > "$RUNNER_TEMP/disk-used"
-          chmod +x "$RUNNER_TEMP/disk-used"
-          "$RUNNER_TEMP/disk-used" > "$RUNNER_TEMP/disk.base"
-          nohup sh -c 'while :; do "$RUNNER_TEMP/disk-used" >> "$RUNNER_TEMP/disk.samples"; sleep 1; done' >/dev/null 2>&1 &
-      - name: Build image
+      - name: Stage the image tree (image/build.sh)
         shell: bash  # with pipefail, so tee keeps the build's exit status
         env:
           AGENTOS_SECURITY_SNAPSHOT: ${{ needs.security-snapshot.outputs.snapshots }}  # the same for a and b (#5021)
-        run: sudo env "PATH=$PATH" "AGENTOS_SECURITY_SNAPSHOT=$AGENTOS_SECURITY_SNAPSHOT" HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log"
+        run: sudo env "PATH=$PATH" "AGENTOS_SECURITY_SNAPSHOT=$AGENTOS_SECURITY_SNAPSHOT" HOME=/root GOCACHE=/tmp/gocache image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/stage.log"
+      # A tar keeps the tree's owners, modes and links, which the artifact store does not. The stage is
+      # /usr alone: the build job copies OUT/stage/usr to /usr and nowhere else.
+      - name: Pack the stage
+        run: |
+          [ "$(sudo ls -A "$RUNNER_TEMP/out/stage")" = usr ] || { echo "::error::OUT/stage holds more than usr/"; exit 1; }
+          sudo tar -C "$RUNNER_TEMP/out" --numeric-owner -cf "$RUNNER_TEMP/stage.tar" stage agentos.sources guest linked
+          echo "::notice title=stage size::$(du -m "$RUNNER_TEMP/stage.tar" | cut -f1) MB"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: stage-${{ matrix.run }}
+          path: ${{ runner.temp }}/stage.tar
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
+      - name: Disk budget held
+        if: always()
+        uses: ./.github/actions/disk-budget
+        with:
+          phase: held
+  # The pinned mkosi on the committed config (IMG-mkosi-run-bound, #4690, D-276): mkosi is installed before
+  # anything from the repository runs, and the one line "Build image" runs reads the config directory from
+  # this checkout and the extra tree from the stage job's upload; this job never runs image/build.sh.
+  build:
+    needs: [security-snapshot, stage]
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [a, b]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      DISK_NEED_GB: "24" # IMG-disk (#4317): measured peak growth 15 GB (build a, boots included); see .github/actions/disk-budget
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
+        with:
+          go-version-file: broker/go.mod
+          cache: false
+      - name: Install build and boot tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends debian-archive-keyring systemd-boot systemd-boot-efi \
+            systemd-container erofs-utils dosfstools mtools e2fsprogs cpio zstd kmod bubblewrap cryptsetup-bin \
+            qemu-system-x86 ovmf swtpm swtpm-tools mmdebstrap
+          # Ubuntu 24.04 confines user namespaces via AppArmor, which breaks mkosi's bubblewrap sandbox.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo git clone -q https://github.com/systemd/mkosi /opt/mkosi
+          sudo git -C /opt/mkosi -c advice.detachedHead=false checkout -q 26673f65e17ae099bb0cf65928fe70c93b8a6a37  # v24.3
+      # IMG-disk (#4317, #4366): the build writes its output and boot copies in RUNNER_TEMP, mkosi's
+      # workspace in /var/tmp, GOCACHE in /tmp and mkosi's cache under /root.
+      - name: Disk budget
+        uses: ./.github/actions/disk-budget
+        with:
+          phase: start
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: stage-${{ matrix.run }}
+          path: ${{ runner.temp }}/stage-in
+      # The stage job runs the PR's build.sh as root, so its tar is held here (#6148 L3 B1): only stage/usr,
+      # agentos.sources, guest/ and linked/ may be in it, with stage and stage/usr real directories and
+      # agentos.sources a regular file; anything else (a pkgmngr/ above all) refuses the build.
+      - name: Unpack the stage
+        run: |
+          t="$RUNNER_TEMP/stage-in/stage.tar"
+          tar -tf "$t" > "$RUNNER_TEMP/stage.list"
+          if grep -Evx 'stage/|stage/usr/|stage/usr/.+|agentos\.sources|guest/|guest/.+|linked/|linked/.+' "$RUNNER_TEMP/stage.list" \
+            || grep -E '(^|/)\.\.(/|$)' "$RUNNER_TEMP/stage.list"; then
+            echo "::error::the stage tar holds a member outside stage/usr, agentos.sources, guest/ and linked/ (above)"; exit 1
+          fi
+          sudo mkdir "$RUNNER_TEMP/out"
+          sudo tar -C "$RUNNER_TEMP/out" --numeric-owner -xf "$t"
+          rm -rf "$RUNNER_TEMP/stage-in"
+          o="$RUNNER_TEMP/out"
+          { [ -d "$o/stage" ] && [ ! -h "$o/stage" ] && [ -d "$o/stage/usr" ] && [ ! -h "$o/stage/usr" ] \
+            && [ "$(sudo ls -A "$o/stage")" = usr ] && [ -f "$o/agentos.sources" ] && [ ! -h "$o/agentos.sources" ] \
+            && [ ! -e "$o/pkgmngr" ]; } || { echo "::error::the stage is not stage/usr alone (directories, no links) and a regular agentos.sources"; exit 1; }
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+          echo "VERSION=$(TZ=UTC git log -1 --date=format-local:%Y%m%d.%H%M%S --format=%cd)" >> "$GITHUB_ENV"
+      # The run's one debian-security snapshot (#5021) as mkosi's package manager tree, made here from the
+      # committed sources; the guests' roots were installed from the same file (the stage's agentos.sources).
+      - name: Build image
+        shell: bash  # with pipefail, so tee keeps the build's exit status
+        env:
+          SNAPSHOTS: ${{ needs.security-snapshot.outputs.snapshots }}  # the run's snapshot, then its fallback (#6198)
+          OUT: ${{ runner.temp }}/out
+        run: |
+          # The stage picked the run's snapshot or its fallback (#6198) and recorded it in agentos.sources. The
+          # stage ran build.sh as root, so its pick counts only if it is one of this job's resolved dates.
+          AGENTOS_SECURITY_SNAPSHOT=$(sed -n 's|^URIs: https://snapshot\.debian\.org/archive/debian-security/\([0-9]\{8\}T[0-9]\{6\}Z\)/$|\1|p' "$OUT/agentos.sources")
+          case " $SNAPSHOTS " in
+            *" $AGENTOS_SECURITY_SNAPSHOT "*) [ -n "$AGENTOS_SECURITY_SNAPSHOT" ] ;;
+            *) echo "::error::the stage's debian-security snapshot '$AGENTOS_SECURITY_SNAPSHOT' is not one of this run's ($SNAPSHOTS)"; exit 1 ;;
+          esac
+          sh image/security-snapshot.sh sources "$AGENTOS_SECURITY_SNAPSHOT" > "$RUNNER_TEMP/mkosi.sources"  # refuses an empty or multi-line value
+          cmp "$RUNNER_TEMP/mkosi.sources" "$OUT/agentos.sources"
+          sudo rm -rf "$OUT/pkgmngr"
+          sudo install -D -m 0644 "$RUNNER_TEMP/mkosi.sources" "$OUT/pkgmngr/etc/apt/sources.list.d/mkosi.sources"
+          sudo env "PATH=$PATH" HOME=/root "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" /opt/mkosi/bin/mkosi -C image/mkosi -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" --environment=AGENTOS_SECURITY_SNAPSHOT="$AGENTOS_SECURITY_SNAPSHOT" --extra-tree="$OUT/stage/usr:/usr" --output-dir "$OUT" build 2>&1 | tee "$RUNNER_TEMP/build.log"
+      - name: Finish the image (image/finish.sh)
+        run: sudo env "PATH=$PATH" "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" image/finish.sh "$RUNNER_TEMP/out" "$VERSION"
       - name: Show the tree check's refusals
         # The tree check's refusals as annotations, so a tmpfiles.d line missing from
         # image/mkosi/tmpfiles.allow can be reviewed (and its entry copied) without the full log (#1543).
@@ -282,11 +354,12 @@ jobs:
           v=$(jq -r .version "$RUNNER_TEMP"/out/*.release.json)
           sudo python3 -I image/unlock_graph.py --control "$RUNNER_TEMP/out" "$v"
           sudo python3 -I image/unlock_graph.py "$RUNNER_TEMP/out" "$v"
-      # #5697: which files of this tree and its initrds import glibc's regex or wide scanf functions,
-      # directly or through a library, as notices: the glibc records' reachability (assurance/vulncheck.json)
-      # is read from here, not from another distribution's builds. #5341: and which can fetch an OpenSSL
-      # cipher by name, with their call sites, for the AES-GCM-SIV records. Fails on an unreviewed change.
-      - name: Glibc regex and wide scanf importers, OpenSSL by-name cipher fetches (image/import_sweep.py)
+      # #5697, #6285, #6298: which files of this tree and its initrds reach glibc's regex, glob() or wide
+      # scanf functions (an import, a dlsym lookup or a static copy), directly or through a library, as
+      # notices: the glibc records' reachability (assurance/vulncheck.json) is read from here, not from
+      # another distribution's builds. #5341: and which can fetch an OpenSSL cipher by name, with their
+      # call sites, for the AES-GCM-SIV records. Fails on an unreviewed change.
+      - name: Glibc regex, glob and wide scanf reach, OpenSSL by-name cipher fetches (image/import_sweep.py)
         if: matrix.run == 'a'
         run: |
           v=$(jq -r .version "$RUNNER_TEMP"/out/*.release.json)
@@ -295,6 +368,15 @@ jobs:
           sudo python3 -I image/import_sweep.py "$RUNNER_TEMP/out" "$v" > "$RUNNER_TEMP/import-sweep.json" || s=1
           python3 -I image/import_sweep.py --summary "$RUNNER_TEMP/import-sweep.json" || s=1
           exit $s
+      # #5885 (VULN-static-elf, EVL-5): every ELF file of this tree, its guests' roots and its initrds that
+      # carries a C library or C++ runtime in its own bytes is declared in image/static_elf.allow with where
+      # image-vulncheck scans what it links (its recorded link inputs, its package, or a "bundled" record).
+      # Fails on an undeclared one.
+      - name: Static ELF files declared with what they link (image/static_elf.py)
+        if: matrix.run == 'a'
+        run: |
+          v=$(jq -r .version "$RUNNER_TEMP"/out/*.release.json)
+          sudo python3 -I image/static_elf.py "$RUNNER_TEMP/out" "$v"
       - name: Build the end-to-end driver
         if: matrix.run == 'a'
         run: cd broker && CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/e2e/box-e2e" ./e2e/boxe2e
@@ -365,29 +447,11 @@ jobs:
             ${{ runner.temp }}/out/qemu-console*.log
           retention-days: 7
           if-no-files-found: warn
-      # A peak that rose and fell between two samples is missed, so the check adds the largest rise
-      # seen in one interval to the highest sample, and the job fails when that bound reaches
-      # DISK_NEED_GB. The largest rise seen is only an estimate of such a peak: the budget's headroom
-      # over the measured peak (24 GB over 15 GB in #4317) is the real cover, for a missed peak and
-      # for the build's growth to come. Each part is rounded up to 0.1 GB and the bound is their sum,
-      # so the printed numbers add up and never understate.
       - name: Disk budget held
         if: always()
-        shell: bash
-        run: |
-          [ -s "$RUNNER_TEMP/disk.base" ] || { echo "disk budget: no baseline, the guard did not pass"; exit 0; }
-          now=$("$RUNNER_TEMP/disk-used")
-          [[ "$now" =~ ^[0-9]+$ ]] || { echo "::error title=disk budget::cannot read the disk use (got '$now'), so the budget is unchecked: df read none of the file systems the \"Disk budget\" notices list, or $RUNNER_TEMP/disk-used is gone; rerun the job, and if it fails again check that those mounts and that script still exist when the job ends"; exit 1; }
-          echo "$now" >> "$RUNNER_TEMP/disk.samples"
-          # Growth of the highest sample over the baseline, and the largest rise between two samples (MB).
-          # An empty sample (one df that failed) is skipped; the final reading above always counts.
-          read -r peak rise < <(awk -v b="$(cat "$RUNNER_TEMP/disk.base")" \
-            'BEGIN {p = b; q = b} /^[0-9]+$/ {if ($1 > p) p = $1; if ($1 - q > r) r = $1 - q; q = $1} END {print p - b, r + 0}' "$RUNNER_TEMP/disk.samples")
-          # In tenths of a GB, each rounded up.
-          p=$(( (peak * 10 + 1023) / 1024 )); r=$(( (rise * 10 + 1023) / 1024 )); t=$(( p + r ))
-          gb() { echo "$(( $1 / 10 )).$(( $1 % 10 ))"; }
-          echo "::notice title=disk budget::the job grew its disk use by at most $(gb $t) GB of its $DISK_NEED_GB GB budget ($(gb $p) GB sampled, plus $(gb $r) GB, the largest rise in one sample interval, for a peak between samples)"
-          [ "$t" -lt $(( DISK_NEED_GB * 10 )) ] || { echo "::error title=disk budget::image build may have used up to $(gb $t) GB, at or over its $DISK_NEED_GB GB budget; raise DISK_NEED_GB in .github/workflows/image.yml (the build job's env)"; exit 1; }
+        uses: ./.github/actions/disk-budget
+        with:
+          phase: held
   reproduce:
     # Two runners, one commit: the release must match: the /usr root hash, every /usr file, the boot
     # entry, the kernel and both initrds (IMG-2). A differing initrd is listed member by member, and

@@ -228,6 +228,33 @@ func TestTheStoreClosesItsFiles(t *testing.T) {
 	}
 }
 
+// A failed fsync or close of the temporary file fails the write and leaves
+// the old file in place: the rename comes only after both succeed.
+func TestAFailedSyncOrCloseKeepsTheOldFile(t *testing.T) {
+	sync, close := syncFile, closeFile
+	t.Cleanup(func() { syncFile, closeFile = sync, close })
+	broken := errors.New("broken disk")
+	for _, c := range []struct {
+		name        string
+		sync, close func(*os.File) error
+	}{
+		{"sync", func(*os.File) error { return broken }, close},
+		{"close", sync, func(f *os.File) error { close(f); return broken }},
+	} {
+		syncFile, closeFile = c.sync, c.close
+		path := filepath.Join(t.TempDir(), "inbox.json")
+		if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeFile(path, []byte("new")); !errors.Is(err, broken) {
+			t.Fatalf("a failed %s: writeFile returned %v", c.name, err)
+		}
+		if b, err := os.ReadFile(path); err != nil || string(b) != "old" {
+			t.Fatalf("after a failed %s the file holds %q, %v", c.name, b, err)
+		}
+	}
+}
+
 // A goal whose time cannot be encoded (past year 9999) fails the write
 // and leaves the file as it was, never an empty one (G5, G14).
 func TestAnUnencodableGoalLeavesTheFileWhole(t *testing.T) {

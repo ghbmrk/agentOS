@@ -16,7 +16,7 @@ Work item #3104, prerequisite for #2780(b). Tier A. Split into three slices on t
 
 **Scope (a):** `broker/clerk/plan/` (new: `plan.go`, `store.go`, `plan_test.go`, `ASSUMPTIONS.md`), `tools/trusted_base_parsers.txt` (one `parser` line), this brief.
 
-**Guard files:** `tools/trusted_base_parsers.txt` (the new package is a parser; the PR body carries a `Trusted-base:` line). `tools/risk_tier.py` already classes `broker/clerk/...` as tier A, and no core root links the package, so `tools/trusted_core.txt` is unchanged.
+**Guard files:** `tools/trusted_base_parsers.txt` (the new package is a parser; the PR adds a `parsers #<PR> --` line to `tools/trusted_base_reasons.txt`). `tools/risk_tier.py` already classes `broker/clerk/...` as tier A, and no core root links the package, so `tools/trusted_core.txt` is unchanged.
 
 **Acceptance tests:** slice (a), all in `broker/clerk/plan/plan_test.go`:
 - `TestPlanGuestHoldsOnlyPlaceholders` (CLK-1): after a sign-in, a guest's token set holds no real value, and its id_token carries the account. Fails if a real token reaches the guest.
