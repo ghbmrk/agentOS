@@ -1,0 +1,35 @@
+name: cancel-stale
+# CI-cancel-stale-sha (#6529): a queued or pending PR run whose commit is no open PR's head only holds a
+# runner slot (15% of 231 waiting runs on 2026-11-22: rerun attempts in their own `run-<id>` group, and
+# first attempts no newer run superseded). Every 15 minutes main's tools/cancel_stale.py cancels each such
+# run by its id; the script's docstring gives the rules. It never cancels an open PR's head, an in-progress
+# run, a premerge run (premerge gates the head it reads at job start, not its run's sha) or a run naming
+# no open PR, and any failed read before the plan cancels nothing. A sweep, not a per-push run: one job
+# covers every PR, and no PR event gets `actions: write`. The group keeps at most one sweep waiting.
+# tests/test_zz_cancel_stale.py pins every line below and runs the script.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: cancel-stale
+  cancel-in-progress: false
+jobs:
+  cancel:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: write # cancel a stale run by its id (the script's only write)
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Cancel queued or pending PR runs for no open PR's head (tools/cancel_stale.py)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I tools/cancel_stale.py --repo "$GITHUB_REPOSITORY"
