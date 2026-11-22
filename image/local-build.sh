@@ -10,15 +10,17 @@
 #          on the stage host (a disposable VM will do; never one that built): marks the host as one that
 #          staged, runs build.sh as root, packs the stage as DIR/stage-COMMIT.tar and prints its SHA-256
 #        image/local-build.sh build TAR SHA256 DIR [VERSION]
-#          on a host that never staged (marked from then on as one that built), with the pinned mkosi in /opt/mkosi: the tar held to the SHA-256 the
-#          stage printed, then mkosi and finish.sh; the image lands in DIR/out
+#          on a host that never staged (marked from then on as one that built), with the pinned mkosi in
+#          /opt/mkosi: the commit and the tar are copied into a root-only directory under /var/lib, and the
+#          rest runs as root from there (the tar held to the SHA-256 the stage printed, mkosi, finish.sh), so
+#          no non-root process reaches a file it reads (#6417); the image then moves to DIR/out
 #   Both run from a checkout of one commit with no changed, untracked or ignored file (a tar from another
 #   commit is refused), as a user who can sudo, on Linux with build.sh's or mkosi's tools and network. DIR
 #   must not exist; a relative DIR or TAR is read from the caller's directory. VERSION defaults to the
 #   commit time, as in CI. AGENTOS_SECURITY_SNAPSHOT, if set, is the run's snapshot (and fallback) for both
 #   halves, as image.yml's security-snapshot job passes it; unset, build.sh resolves its own and the build
-#   half resolves the set its pick must be in. The half's log (DIR/stage.log or DIR/build.log) is named on
-#   exit, pass or fail.
+#   half resolves the set its pick must be in. The half's log (DIR/stage.log, or the build's in its root-only
+#   directory) is named on exit, pass or fail.
 set -euo pipefail
 MKOSI_COMMIT=26673f65e17ae099bb0cf65928fe70c93b8a6a37  # v24.3, as image.yml's "Install build and boot tools" checks out
 # Each half writes its own mark, then refuses a host holding the other's (#6380, #6417): one host never plays
@@ -35,18 +37,24 @@ refuse_mark() {
 	esac
 }
 usage() { echo "usage: image/local-build.sh stage DIR | build TAR SHA256 DIR [VERSION]" >&2; exit 2; }
-case "${1-} $#" in "stage 2"|"build 4"|"build 5") ;; *) usage ;; esac
+case "${1-} $#" in "stage 2"|"build 4"|"build 5"|"build-root 4") ;; *) usage ;; esac
 MODE=$1
+if [ "$MODE" = build-root ]; then
+	# The build's second part, run below by the first as root from the root-only copy W of the commit: W holds
+	# src/ (the commit), stage-in/stage.tar (the tar) and every file the steps write (#6417).
+	RUNNER_TEMP=$2 SHA256=$3 VERSION=$4
+	cd "$RUNNER_TEMP/src"  # the first part names the log on exit
+fi
 if [ "$MODE" = build ]; then
 	TAR=$(realpath -e -- "$2"); SHA256=$3; shift 2
-	case "$SHA256" in *[!0-9a-f]*|"") usage ;; esac
-	[ ${#SHA256} = 64 ] || usage
 fi
-RUNNER_TEMP=$(realpath -m -- "$2"); VERSION=${3-}  # before the cd: relative paths are the caller's (#6348)
+case "$MODE" in build|build-root) case "$SHA256" in *[!0-9a-f]*|"") usage ;; esac; [ ${#SHA256} = 64 ] || usage ;; esac
+[ "$MODE" = build-root ] || { RUNNER_TEMP=$(realpath -m -- "$2"); VERSION=${3-}; }  # before the cd: relative paths are the caller's (#6348)
 case "$VERSION" in
 	-*|*[!0-9A-Za-z.+_-]*) echo "local-build.sh: VERSION may hold only 0-9 A-Z a-z . + _ - and may not start with -" >&2; exit 2 ;;
 esac
 AGENTOS_SECURITY_SNAPSHOT=${AGENTOS_SECURITY_SNAPSHOT-}
+if [ "$MODE" != build-root ]; then
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/.." && pwd)
 cd "$REPO"  # image.yml's steps run from the repository's top
 # Ignored files too (#6380): mkosi reads an ignored image/mkosi/mkosi.local.conf, and go build an ignored .go file.
@@ -65,9 +73,10 @@ else
 	refuse_mark "$BUILD_MARK" built  # build.sh as root here could reach what the builds left
 fi
 mkdir -- "$RUNNER_TEMP"  # a fresh directory, as each runner's
-trap 'echo "local-build.sh: $MODE log $RUNNER_TEMP/$MODE.log" >&2' EXIT
+fi
 
 if [ "$MODE" = stage ]; then
+	trap 'echo "local-build.sh: stage log $RUNNER_TEMP/stage.log" >&2' EXIT
 	# image.yml stage job, "Stage the image tree (image/build.sh)".
 	sudo env "PATH=$PATH" "AGENTOS_SECURITY_SNAPSHOT=$AGENTOS_SECURITY_SNAPSHOT" HOME=/root GOCACHE=/tmp/gocache image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/stage.log"
 	# "Pack the stage".
@@ -80,14 +89,31 @@ if [ "$MODE" = stage ]; then
 	exit 0
 fi
 
+if [ "$MODE" = build ]; then
+	SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+	VERSION=${VERSION:-$(TZ=UTC git log -1 --date=format-local:%Y%m%d.%H%M%S --format=%cd)}
+	# W and every directory above it are root's (mktemp makes W 0700 in /var/lib): no non-root process can
+	# rename, replace or write anything the build reads from here on, the commit, the tar or what the steps
+	# write, so the tar hashed is the tar unpacked and the tree checked is the tree mkosi reads (#6417).
+	W=$(sudo mktemp -d /var/lib/agentos-build.XXXXXXXX)
+	BUILD_LOG="$W/build.log (root-only; $W stays for it)"
+	trap 'echo "local-build.sh: build log $BUILD_LOG" >&2' EXIT
+	sudo mkdir "$W/src" "$W/stage-in"
+	git archive --format=tar "$COMMIT" | sudo tar -C "$W/src" -xf -
+	sudo install -m 0444 "$TAR" "$W/stage-in/stage.tar"  # its download-artifact step
+	# Root's own PATH, not the caller's: a directory of the caller's in it would let a non-root process choose
+	# the tar, sed or tool mkosi runs as root.
+	sudo env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root "AGENTOS_SECURITY_SNAPSHOT=$AGENTOS_SECURITY_SNAPSHOT" "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" bash "$W/src/image/local-build.sh" build-root "$W" "$SHA256" "$VERSION"
+	sudo mv "$W/out" "$RUNNER_TEMP/out"; sudo mv "$W/build.log" "$RUNNER_TEMP/build.log"; BUILD_LOG=$RUNNER_TEMP/build.log
+	sudo rm -rf "$W"
+	echo "agentOS image $VERSION of $COMMIT in $RUNNER_TEMP/out"
+	exit 0
+fi
+
 SNAPSHOTS=${AGENTOS_SECURITY_SNAPSHOT:-$(sh image/security-snapshot.sh resolve)}  # image.yml's security-snapshot job
-# Its download-artifact step, into a root-owned directory as a read-only root-owned file (#6417): nothing on
-# this host but root can change the copy between the hash below and the unpack. The copy read below is the
-# tar the stage made, by content (#6380): the name only says which commit.
-sudo install -d -o root -g root -m 0755 "$RUNNER_TEMP/stage-in"
-sudo install -o root -g root -m 0444 "$TAR" "$RUNNER_TEMP/stage-in/stage.tar"
+# The copy read below is the tar the stage made, by content (#6380): the name only says which commit.
 GOT=$(sha256sum < "$RUNNER_TEMP/stage-in/stage.tar"); GOT=${GOT%% *}
-[ "$GOT" = "$SHA256" ] || { echo "local-build.sh: $TAR has SHA-256 $GOT, not the $SHA256 its stage printed" >&2; exit 1; }
+[ "$GOT" = "$SHA256" ] || { echo "local-build.sh: the tar has SHA-256 $GOT, not the $SHA256 its stage printed" >&2; exit 1; }
 # image.yml build job, "Unpack the stage".
 t="$RUNNER_TEMP/stage-in/stage.tar"
 tar -tf "$t" > "$RUNNER_TEMP/stage.list"
@@ -97,7 +123,7 @@ if grep -Evx 'stage/|stage/usr/|stage/usr/.+|agentos\.sources|guest/|guest/.+|li
 fi
 sudo mkdir "$RUNNER_TEMP/out"
 sudo tar -C "$RUNNER_TEMP/out" --numeric-owner -xf "$t"
-sudo rm -rf "$RUNNER_TEMP/stage-in"
+rm -rf "$RUNNER_TEMP/stage-in"
 o="$RUNNER_TEMP/out"
 { [ -d "$o/stage" ] && [ ! -h "$o/stage" ] && [ -d "$o/stage/usr" ] && [ ! -h "$o/stage/usr" ] \
   && [ "$(sudo ls -A "$o/stage")" = usr ] && [ -f "$o/agentos.sources" ] && [ ! -h "$o/agentos.sources" ] \
@@ -108,8 +134,6 @@ case " $SNAPSHOTS " in
   *" $STAGED "*) ;;
   *) [ -z "$STAGED" ] || { echo "local-build.sh: the stage's debian-security snapshot $STAGED is not one of this host's ($SNAPSHOTS); the halves resolved it at different times, so set AGENTOS_SECURITY_SNAPSHOT to one of this host's on both hosts and stage again" >&2; exit 1; } ;;
 esac
-SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
-VERSION=${VERSION:-$(TZ=UTC git log -1 --date=format-local:%Y%m%d.%H%M%S --format=%cd)}
 # "Build image".
 OUT=$RUNNER_TEMP/out
 AGENTOS_SECURITY_SNAPSHOT=$(sed -n 's|^URIs: https://snapshot\.debian\.org/archive/debian-security/\([0-9]\{8\}T[0-9]\{6\}Z\)/$|\1|p' "$OUT/agentos.sources")
@@ -124,4 +148,3 @@ sudo install -D -m 0644 "$RUNNER_TEMP/mkosi.sources" "$OUT/pkgmngr/etc/apt/sourc
 sudo env "PATH=$PATH" HOME=/root "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" /opt/mkosi/bin/mkosi -C image/mkosi -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" --environment=AGENTOS_SECURITY_SNAPSHOT="$AGENTOS_SECURITY_SNAPSHOT" --extra-tree="$OUT/stage/usr:/usr" --output-dir "$OUT" build 2>&1 | tee "$RUNNER_TEMP/build.log"
 # "Finish the image (image/finish.sh)".
 sudo env "PATH=$PATH" "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" image/finish.sh "$RUNNER_TEMP/out" "$VERSION"
-echo "agentOS image $VERSION of $COMMIT in $OUT"
