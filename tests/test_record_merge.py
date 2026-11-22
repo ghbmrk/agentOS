@@ -90,9 +90,13 @@ class DriverTest(unittest.TestCase):
         attrs = self.r / ".git/info/attributes"
         attrs.write_text("*.bin binary")  # no final newline
         record_merge.install(self.r)
-        self.assertEqual(attrs.read_text(), "*.bin binary\n" + "".join(f"{p} merge=records\n" for p in record_merge.CLASSES))
+        self.assertEqual(attrs.read_text(), "*.bin binary\n" + "".join(
+            f"{p} merge=records\n" for p, c in record_merge.CLASSES.items() if c in record_merge.DRIVEN))
         for name in ("tools/x_allow.txt", "image/x.allow", "broker/h/allow-corpus.txt"):
             self.assertEqual(git(self.r, "check-attr", "merge", name).stdout.strip(), f"{name}: merge: records")
+        # #6441: a declared exit list is merged by git as text, never by the driver.
+        self.assertEqual(git(self.r, "check-attr", "merge", "tools/old_core.txt").stdout.strip(),
+                         "tools/old_core.txt: merge: unspecified")
 
     def test_gitattributes_lists_every_class_and_no_other_file(self):
         # #6375: CLASSES is the one list; .gitattributes holds each pattern as LF text, with the union for rows and
