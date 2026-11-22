@@ -1,0 +1,29 @@
+name: pin-liveness
+# CI-pin-liveness (#6424): every source of every pinned external download still serves the bytes its
+# sha256 pins. tools/pins.py live reads every tracked pin file (bar tools/pins.py NOT_YET, owed by
+# its release row), downloads each source and fails naming file:line, the pin and the URL of each one
+# that 404s, moved or changed, so a dead pin shows here within a day, not as another PR's red check.
+# A repin goes through review like any pin change; nothing here writes a pin.
+on:
+  schedule:
+    - cron: "23 5 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "**.pins"
+      - "**.pin"
+      - tools/pins.py
+      - .github/workflows/pin-liveness.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  live:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Every pinned source still serves its pinned bytes
+        run: python3 -I tools/pins.py live
