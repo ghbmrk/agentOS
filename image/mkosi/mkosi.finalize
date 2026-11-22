@@ -28,6 +28,8 @@ DRIVER_TEMPLATE for its name, and nothing else names its user or the drivers' so
 Run by mkosi, it also refuses a run whose scripts had the network (#4647), so neither mkosi.postinst nor
 this script can fetch a package outside mkosi's checked apt run, and a tree with an installed package
 that no pinned, signature-checked Packages index lists at that version (#4690); any tree with a .deb.
+mkosi runs it on the default initrd too, for those two and the kexec loader check alone (INITRD_IMAGE, #6149,
+#6345).
 Usage outside mkosi: mkosi.finalize ROOT; mkosi.finalize --tmpfiles-allowlist ROOT and
 mkosi.finalize --exec-allowlist ROOT print those allowlists for a tree."""
 import bz2
@@ -412,12 +414,18 @@ READ_CONF = ("sysctl.d", "tmpfiles.d", "systemd/network", "systemd/system", "sys
 # kernel.modprobe and kernel.hotplug name the kernel's usermode helpers; binfmt.d registers
 # interpreters; system-shutdown and system-sleep hold programs systemd runs as root (systemd 257 runs
 # them only from /usr/lib/systemd, so the other tops are a superset). Every file is hashed whole, so
-# no key or line is refused by name.
+# no key or line is refused by name. #6312: root's user manager (user@0.service, at a root login) runs
+# its user-generators and user-environment-generators as root, and systemd-environment-d-generator
+# (one of the latter) gives it every environment.d *.conf assignment, which each unit it starts
+# inherits; it also reads $XDG_CONFIG_HOME/environment.d, root's EXEC_HOME.
 EXEC_CHANNELS = (("udev/rules.d", ".rules", False), ("systemd/system-generators", "", False),
                  ("systemd/system-environment-generators", "", False), ("modules-load.d", ".conf", False),
                  ("modprobe.d", ".conf", True), ("sysctl.d", ".conf", False), ("binfmt.d", ".conf", False),
-                 ("systemd/system-shutdown", "", False), ("systemd/system-sleep", "", False))
+                 ("systemd/system-shutdown", "", False), ("systemd/system-sleep", "", False),
+                 ("systemd/user-generators", "", False), ("systemd/user-environment-generators", "", False),
+                 ("environment.d", ".conf", False))
 EXEC_TOPS = ("etc", "usr/local/lib", "usr/lib", "lib")
+EXEC_HOME = (("root/.config/environment.d", ".conf"),)
 # #2622: the bus and authorisation policy the packages ship, held to exec.allow the same way. polkitd
 # runs every rules.d file as JavaScript and takes an action's defaults from actions; dbus-daemon reads
 # system.conf, which includes system.d and everything under etc/dbus-1, and starts system-services
@@ -534,8 +542,6 @@ def _violations(root):
             out.append("%s: %s" % (rel, E2E_WHY))
         if stat.S_ISSOCK(st.st_mode):
             out.append("%s: socket file (V15)" % rel)
-        elif stat.S_ISREG(st.st_mode) and rel.endswith(PACKAGE_FILES):
-            out.append("%s: %s" % (rel, PACKAGE_FILE_WHY))
         elif (stat.S_ISREG(st.st_mode) and st.st_size <= SCAN_MAX
               and rel.split("/", 1)[0] in SCAN and has_key(root, rel)):
             out.append("%s: private key material" % rel)
@@ -558,9 +564,9 @@ def _violations(root):
             + cached(unit_made_dirs, root)[1] + cached(unit_made_paths, root)[2] + unit_made_refusals(root)
             + inside_refusals(root) + gpt_auto_violations(root)
             + noexec_violations(root)
-            + keeper_violations(root) + isolate_violations(root) + soft_reboot_violations(root)
-            + clerk_key_violations(root)
-            + assembly_violations(root) + driver_violations(root) + e2e_violations(root))
+            + keeper_violations(root) + isolate_violations(root) + ram_kept_violations(root)
+            + kexec_loader_violations(root) + kexec_sysctl_violations(root) + clerk_key_violations(root)
+            + assembly_violations(root) + driver_violations(root) + e2e_violations(root) + package_file_violations(root))
 
 
 # #1715 (G1-e2e ASSUMPTIONS E1): the in-image end-to-end run is CI-only. Its root-run driver
@@ -3057,30 +3063,84 @@ def isolate_violations(root):
 # the target's start fails as a whole (a Requires= on a unit that is not found fails the transaction)
 # and stops nothing; "--force" and SuccessAction=soft-reboot-force stop no unit, so MOR stays set.
 SOFT_REBOOT = "systemd-soft-reboot.service"
+# MOR-kexec-class (#6311): kexec.target requires KEXEC the same way, and an orderly kexec boots the next
+# kernel without the firmware's pass, so RAM is kept and that kernel's MOR_UNIT only reads MOR. The core's
+# kernel (Debian's) has CONFIG_KEXEC=y and CONFIG_KEXEC_FILE=y, so mkosi.conf removes KEXEC too. The tree
+# also holds no kexec loader, so no kernel is ever loaded: "systemctl kexec" fails before any unit stops
+# (load_kexec_kernel needs /usr/sbin/kexec), and a forced kexec stops no unit and falls back to a firmware
+# reboot (systemd-shutdown's LINUX_REBOOT_CMD_KEXEC case), whose pass wipes RAM while MOR is set.
+KEXEC = "systemd-kexec.service"
+RAM_KEPT = ((SOFT_REBOOT, "an orderly soft reboot", "#6182"), (KEXEC, "an orderly kexec", "#6311"))
+KEXEC_LOADER = "kexec"
+KEXEC_LOADER_DIRS = ("usr/sbin", "usr/bin", "usr/local/sbin", "usr/local/bin")
+KEXEC_PACKAGES = (b"kexec-tools", b"kdump-tools")
+KEXEC_WHY = ("a kexec loader; with a kernel loaded, a kexec or a crash kernel runs the next kernel on memory the "
+             "firmware never wiped (remove it, #6311)")
 
 
-def soft_reboot_violations(root):
-    """MOR-soft-reboot (#6182): the first entry named SOFT_REBOOT in the unit directories, in precedence
-    order, is a mask (a link to exactly MASK, or a file of size 0: systemd 257 reads either as masked), or
-    there is none. Any other file or link of that name makes the orderly soft reboot runnable again, and
-    one the check cannot read is refused."""
+def ram_kept_violations(root):
+    """MOR-soft-reboot (#6182), MOR-kexec-class (#6311): for each RAM_KEPT unit, the first entry of its name in
+    the unit directories, in precedence order, is a mask (a link to exactly MASK, or a file of size 0:
+    systemd 257 reads either as masked), or there is none. Any other file or link of that name makes its
+    orderly transition runnable again, and one the check cannot read is refused."""
     root = str(root)
     dirs, out = unit_dirs(root)
-    for d in dirs:
-        rel = d + "/" + SOFT_REBOOT
-        if not tree_lstat(root, rel):
-            continue
-        try:
-            masked = Conf(root, rel).content() == b""
-        except OSError as e:
-            out.append("%s: unreadable (%s); the tree check never passes a unit it cannot read" % (rel, e.strerror or e))
+    for name, what, row in RAM_KEPT:
+        for d in dirs:
+            rel = d + "/" + name
+            if not tree_lstat(root, rel):
+                continue
+            try:
+                masked = Conf(root, rel).content() == b""
+            except OSError as e:
+                out.append("%s: unreadable (%s); the tree check never passes a unit it cannot read" % (rel, e.strerror or e))
+                break
+            if not masked:
+                out.append("%s: present; %s stops %s, whose stop clears MOR, while the kernel keeps its memory, "
+                           "so the holders after it run with MOR clear (remove it or mask it, %s)"
+                           % (rel, what, MOR_UNIT, row))
             break
-        if not masked:
-            out.append("%s: present; an orderly soft reboot stops %s, whose stop clears MOR, while the kernel keeps "
-                       "its memory, so the holders after it run with MOR clear (remove it or mask it, #6182)"
-                       % (rel, MOR_UNIT))
-        break
     return out
+
+
+def kexec_loader_violations(root, status=None):
+    """MOR-kexec-class (#6311): a kexec loader wherever the box would run it from (whatever the entry is), or
+    a KEXEC_PACKAGES package dpkg has unpacked. A dpkg status the check cannot read is refused; none at all
+    (a test tree) passes here, and tree_package_violations refuses that on a built image. STATUS: the dpkg
+    status file to read, DPKG_STATUS unless given (the default initrd's run gives INITRD_STATUS, #6345)."""
+    root = str(root)
+    rel = status or DPKG_STATUS
+    out = ["%s/%s: %s" % (d, KEXEC_LOADER, KEXEC_WHY)
+           for d in KEXEC_LOADER_DIRS if tree_stat(root, d + "/" + KEXEC_LOADER) is not None]
+    try:
+        status = Conf(root, rel).content() if tree_lstat(root, rel) else b""
+    except OSError as e:
+        return out + ["%s: unreadable (%s); %s" % (rel, e.strerror or e, KEXEC_WHY)]
+    for p in deb822_fields(status, (b"Package", b"Status")):
+        words = p.get(b"Status", b"").split()
+        if p.get(b"Package") in KEXEC_PACKAGES and not (len(words) == 3 and words[2] in (b"not-installed",
+                                                                                          b"config-files")):
+            out.append("%s: %s is installed; %s" % (rel, p[b"Package"].decode(), KEXEC_WHY))
+    return out
+
+
+# MOR-kexec-class-fu (#6345): KEXEC_SYSCTL sets kernel.kexec_load_disabled=1 at sysinit, before any unit with
+# default dependencies starts. Linux 6.12's kexec_load_permitted (kernel/kexec_core.c), which kexec_load
+# (kernel/kexec.c) and kexec_file_load (kernel/kexec_file.c) both call first, refuses while it is 1, for root
+# too, and its sysctl entry takes only 1 (extra1 and extra2 are SYSCTL_ONE), so nothing sets it back to 0 until
+# the next boot: no process loads a kernel, whatever loader it carries.
+# The loader check above is then defence in depth. The value is checked as systemd-sysctl sets it, after every
+# file it reads, as NODUMP_SYSCTL's are.
+KEXEC_SYSCTL = "usr/lib/sysctl.d/99-agentos-kexec.conf"
+
+
+def kexec_sysctl_violations(root):
+    """MOR-kexec-class-fu (#6345): kernel.kexec_load_disabled ends up 1 after every sysctl.d file."""
+    v = sysctl(str(root), "kernel.kexec_load_disabled")
+    if v == "1":
+        return []
+    return ["%s: kernel.kexec_load_disabled is %s; must be 1, so no process loads a kernel that boots on memory "
+            "the firmware never wiped (#6345)" % (KEXEC_SYSCTL.rsplit("/", 1)[-1], v)]
 
 
 def bus_keep_violations(root, dirs):
@@ -3890,7 +3950,8 @@ CREDSTORE_ALLOWED = ("usr/lib/credstore/firstboot.keymap", "usr/lib/credstore/fi
 TMPFILES_TARGETS = (("proc",), ("sys",), ("etc", "sysctl.conf"), ("etc", "fstab"), ("usr", "lib", "firmware"),
                     ("lib", "firmware"), ("etc", "agentos"), ("efi",), ("boot",), ("etc", "modules")) + tuple(
     tuple(("%s/%s" % (top, n)).split("/")) for top in EXEC_TOPS + ("run",)
-    for n in READ_CONF + tuple(d for d, _, _ in EXEC_CHANNELS if d not in READ_CONF) + ("credstore", "credstore.encrypted"))
+    for n in READ_CONF + tuple(d for d, _, _ in EXEC_CHANNELS if d not in READ_CONF) + ("credstore", "credstore.encrypted")
+) + tuple(tuple(d.split("/")) for d, _ in EXEC_HOME) + (("etc", "environment"),)
 # Debian's own lines that touch one, as whole lines with runs of blanks collapsed: /var/run is
 # /run, and /etc/mtab names the mount table, a file (debian.conf, var.conf); trixie's credstore.conf
 # makes the empty stores (credstore_violations refuses anything in them); and four relative links
@@ -3911,7 +3972,10 @@ TMPFILES_STOCK = ("L /var/run - - - - ../run", "L+ /var/run - - - - ../run", "L 
                   "L! /etc/resolv.conf - - - - ../run/systemd/resolve/stub-resolv.conf",
                   # Debian's legacy.conf alias of /dev/shm, which the box mounts 1777 itself, as var/lock
                   # is of /run/lock; the link rule (#1803) would refuse it as a link into /dev.
-                  "L /run/shm - - - - /dev/shm")
+                  "L /run/shm - - - - /dev/shm",
+                  # provision.conf makes root's home if it is missing; it writes nothing in it, and EXEC_HOME's
+                  # root/.config/environment.d below it is a target since #6312.
+                  "d- /root :0700 root :root -")
 # systemd-tmpfiles 257.13's path specifiers for the system manager (src/tmpfiles/tmpfiles.c); the
 # others expand to names without a slash.
 TMPFILES_SPECIFIERS = {"t": "/run", "S": "/var/lib", "C": "/var/cache", "L": "/var/log", "T": "/tmp",
@@ -4359,7 +4423,8 @@ EXEC_ALLOW_REPO = "image/mkosi/" + EXEC_ALLOW
 EXEC_REGENERATE = "mkosi.finalize --exec-allowlist ROOT"
 # Links the stock tree ships that are read through: the link's path, its exact target, and the
 # in-image file whose content is hashed in its place. Any other link is refused (Conf.content).
-EXEC_LINKS = {"etc/modules-load.d/modules.conf": ("../modules", "etc/modules")}
+EXEC_LINKS = {"etc/modules-load.d/modules.conf": ("../modules", "etc/modules"),
+              "usr/lib/environment.d/99-environment.conf": ("/etc/environment", "etc/environment")}
 
 
 def exec_value(f):
@@ -4395,6 +4460,8 @@ def exec_files(root):
     for d, suffix, kmod in EXEC_CHANNELS:
         for top in EXEC_TOPS:
             yield from conf_files(root, ("%s/%s" % (top, d),), suffix, kmod)
+    for d, suffix in EXEC_HOME:
+        yield from conf_files(root, (d,), suffix)
     for d in POLICY_DIRS:
         if not entry_mode(root, d):
             continue
@@ -4529,7 +4596,8 @@ def exec_allow_violations(root, allowed=None):
     allowed = exec_allowed() if allowed is None else allowed
     if allowed is None:
         return ["%s: missing; every file in a boot-code channel (udev rules, generators, modules-load.d, modprobe.d, "
-                "sysctl.d, binfmt.d, shutdown and sleep hooks) must be on it (#1556, #2176)" % EXEC_ALLOW]
+                "sysctl.d, binfmt.d, shutdown and sleep hooks, root's user manager's generators and environment.d) "
+                "must be on it (#1556, #2176, #6312)" % EXEC_ALLOW]
     out = []
     for d in ["run/" + d for d, _, _ in EXEC_CHANNELS] + list(POLICY_RUN):
         try:
@@ -4561,7 +4629,9 @@ EXEC_ALLOW_HEADER = """\
 # usr/lib and lib; and (#2622) every polkit rules.d and actions file, everything under etc/dbus-1, and the
 # D-Bus system.conf, system.d and system-services files; and (#4641) every PAM file in etc/pam.d and
 # usr/lib/pam.d, and etc/pam.conf; and (#5818) every file systemd merges into
-# dbus.service and dbus.socket, drop-ins included, so dbus-daemon's ExecStart is the reviewed one. One per line: the file's path in the image tree, a tab, and "sha256:" with the
+# dbus.service and dbus.socket, drop-ins included, so dbus-daemon's ExecStart is the reviewed one; and (#6312)
+# root's user manager's user-generators and user-environment-generators and every environment.d file,
+# root/.config/environment.d's too. One per line: the file's path in the image tree, a tab, and "sha256:" with the
 # SHA-256 of what the box reads, or "mask" for an empty file or a link to /dev/null. Every file is
 # listed, not only the one that wins its name. mkosi.finalize fails the build on any file not here
 # with that value, and on anything under the same directories in /run.
@@ -5131,18 +5201,27 @@ def pinned_index(mirror, security):
                       % (re.escape(mirror), re.escape(security)))
 
 
-def run_snapshots():
-    """(mirror timestamp, security timestamp, refusals) of this mkosi run: Mirror= from mkosi's config JSON
-    ($MKOSI_CONFIG), the security one from $AGENTOS_SECURITY_SNAPSHOT."""
-    out, mirror = [], None
+def run_config():
+    """(mkosi's config JSON for this run, $MKOSI_CONFIG, as a dict; refusals)."""
     try:
         with open(os.environ.get("MKOSI_CONFIG", "/work/config.json")) as f:
-            m = MIRROR_URL.fullmatch(str(json.load(f).get("Mirror")))
-        mirror = m.group(1) if m else None
-        if not mirror:
-            out.append("mkosi's Mirror= is not a snapshot.debian.org debian snapshot; %s" % PACKAGE_WHY)
-    except (OSError, ValueError, AttributeError) as e:
-        out.append("mkosi's config JSON: unreadable (%s); %s" % (e, PACKAGE_WHY))
+            conf = json.load(f)
+        if isinstance(conf, dict):
+            return conf, []
+        why = "not a JSON object"
+    except (OSError, ValueError) as e:
+        why = e
+    return {}, ["mkosi's config JSON: unreadable (%s); %s" % (why, PACKAGE_WHY)]
+
+
+def run_snapshots(conf):
+    """(mirror timestamp, security timestamp, refusals) of this mkosi run: Mirror= from CONF, mkosi's config
+    JSON (run_config), the security one from $AGENTOS_SECURITY_SNAPSHOT."""
+    out = []
+    m = MIRROR_URL.fullmatch(str(conf.get("Mirror")))
+    mirror = m.group(1) if m else None
+    if not mirror:
+        out.append("mkosi's Mirror= is not a snapshot.debian.org debian snapshot; %s" % PACKAGE_WHY)
     security = os.environ.get("AGENTOS_SECURITY_SNAPSHOT", "")
     if not SNAPSHOT_TS.fullmatch(security):
         out.append("AGENTOS_SECURITY_SNAPSHOT is %r, not one debian-security snapshot timestamp (image.yml's mkosi "
@@ -5208,10 +5287,10 @@ def pinned_packages(lists, index):
     return got, read, other, out
 
 
-def package_source_violations(status, lists, mirror, security):
-    """Every package dpkg's STATUS (bytes, the tree's var/lib/dpkg/status) has unpacked whose name, version
-    and architecture no Packages index in directory LISTS from snapshots MIRROR and SECURITY lists, one
-    line each."""
+def package_source_violations(status, lists, mirror, security, name=DPKG_STATUS):
+    """Every package dpkg's STATUS (bytes, the tree's file NAME, default DPKG_STATUS) has unpacked whose name,
+    version and architecture no Packages index in directory LISTS from snapshots MIRROR and SECURITY lists,
+    one line each."""
     got, read, other, out = pinned_packages(lists, pinned_index(mirror, security))
     if not read:
         return out + ["%s holds no Packages index from the pinned snapshot sources (other indexes: %s); %s"
@@ -5225,22 +5304,41 @@ def package_source_violations(status, lists, mirror, security):
         key = (p.get(b"Package"), p.get(b"Version"), p.get(b"Architecture"))
         if key not in got:
             out.append("%s: %s %s (%s) is installed, but no pinned Packages index lists that version; %s"
-                       % (DPKG_STATUS, *(v.decode("utf-8", "replace") if v is not None else "(none)" for v in key),
+                       % (name, *(v.decode("utf-8", "replace") if v is not None else "(none)" for v in key),
                           PACKAGE_WHY))
     if not n:
-        out.append("%s: lists no installed package; %s" % (DPKG_STATUS, PACKAGE_WHY))
+        out.append("%s: lists no installed package; %s" % (name, PACKAGE_WHY))
     return out
 
 
-def tree_package_violations(root, mirror, security, lists=None):
-    """package_source_violations for the tree at ROOT, its dpkg status read inside the tree (Conf's rules),
-    against LISTS (default APT_LISTS, read at the call)."""
+def tree_package_violations(root, mirror, security, lists=None, status=DPKG_STATUS):
+    """package_source_violations for the tree at ROOT, its dpkg status file STATUS read inside the tree
+    (Conf's rules), against LISTS (default APT_LISTS, read at the call)."""
     lists = APT_LISTS if lists is None else lists
     try:
-        status = Conf(root, DPKG_STATUS).content()
+        data = Conf(root, status).content()
     except OSError as e:
-        return ["%s: unreadable (%s); %s" % (DPKG_STATUS, e.strerror, PACKAGE_WHY)]
-    return package_source_violations(status, lists, mirror, security)
+        return ["%s: unreadable (%s); %s" % (status, e.strerror, PACKAGE_WHY)]
+    return package_source_violations(data, lists, mirror, security, status)
+
+
+def package_file_violations(root):
+    """Every Debian package file (PACKAGE_FILES) in the tree at ROOT, one line each."""
+    return ["%s: %s" % (rel, PACKAGE_FILE_WHY) for rel, st in tree_walk(root)
+            if stat.S_ISREG(st.st_mode) and rel.endswith(PACKAGE_FILES)]
+
+
+# The default initrd (#6149): mkosi v24.3 builds it in a sub-run of its own (build_default_initrd), whose config
+# JSON names it Image "default-initrd", with this run's Mirror=, --environment and apt lists. initrd/mkosi.conf
+# adds this script to that run's finalize scripts, after initrd/mkosi.finalize. mkosi-initrd sets
+# CleanPackageMetadata=yes, so var/lib/dpkg is gone by then: the initrd's mkosi.postinst (drop.py) copies dpkg's
+# status, after its purges, to INITRD_STATUS, and the package check reads that copy. The kexec loader check
+# (#6345) runs on it too, on the same copy: a loader in the initrd could load a kernel before switch-root, while
+# kernel.kexec_load_disabled is still 0 (the initrd ships no sysctl.d of its own; KEXEC_SYSCTL is the main
+# tree's, applied after switch-root and before any first-party unit). The image's other checks are this tree's,
+# not the initrd's; initrd/mkosi.finalize holds the initrd's own.
+INITRD_IMAGE = "default-initrd"
+INITRD_STATUS = "usr/share/agentos/initrd.dpkg-status"
 
 
 def main():
@@ -5256,18 +5354,30 @@ def main():
     root = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("BUILDROOT")
     if not root:
         sys.exit("usage: mkosi.finalize ROOT (or BUILDROOT=...)")
-    v = violations(root)
-    if len(sys.argv) == 1:  # run by mkosi, in its script sandbox
-        v += script_network_violations(os.environ.get("WITH_NETWORK"), script_net_dev())
-        mirror, security, bad = run_snapshots()
-        v += bad or tree_package_violations(root, mirror, security)
+    if len(sys.argv) > 1:
+        return report(violations(root))
+    # Run by mkosi, in its script sandbox: the image's run, or the default initrd's.
+    conf, bad = run_config()
+    initrd = conf.get("Image") == INITRD_IMAGE
+    v = package_file_violations(root) + kexec_loader_violations(root, INITRD_STATUS) if initrd else violations(root)
+    v += script_network_violations(os.environ.get("WITH_NETWORK"), script_net_dev())
+    if not bad:
+        mirror, security, bad = run_snapshots(conf)
+    v += bad or tree_package_violations(root, mirror, security, status=INITRD_STATUS if initrd else DPKG_STATUS)
+    report(v, initrd)
+
+
+def report(v, initrd=False):
+    """Print each line of V; exit non-zero if there is any. INITRD: V is the default initrd's."""
+    label = "image check: initrd" if initrd else "image check"
     for line in v:
-        print("image check: " + line)
+        print("%s: %s" % (label, line))
+    if v and initrd:
+        sys.exit("%s: %d problem(s) in the default initrd's tree, each named above" % (label, len(v)))
     if v:
-        sys.exit("image check: %d problem(s) in the image tree, each named above; a tmpfiles.d line missing from %s "
-                 "that the guarded-path check passes ends in the entry to review and add there"
-                 % (len(v), TMPFILES_ALLOW_REPO))
-    print("image check: clean")
+        sys.exit("%s: %d problem(s) in the image tree, each named above; a tmpfiles.d line missing from %s that the "
+                 "guarded-path check passes ends in the entry to review and add there" % (label, len(v), TMPFILES_ALLOW_REPO))
+    print("%s: clean" % label)
 
 
 if __name__ == "__main__":

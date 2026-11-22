@@ -1667,8 +1667,8 @@ class KeyringSpikesTest(unittest.TestCase):
                                  "mkosi.repart"},
         "spikes/S1S2-testkit/mkosi": {"mkosi.conf", "mkosi.configure", "mkosi.extra", "mkosi.pkgmngr", "mkosi.repart"},
     }
-    KEYS = {"BiosBootloader", "Bootable", "Bootloader", "Distribution", "Environment", "Format", "Hostname",
-            "ImageId", "ImageVersion", "InitrdInclude", "KernelCommandLine", "KernelModulesExclude",
+    KEYS = {"BiosBootloader", "Bootable", "Bootloader", "Distribution", "Environment", "FinalizeScripts", "Format",
+            "Hostname", "ImageId", "ImageVersion", "InitrdInclude", "KernelCommandLine", "KernelModulesExclude",
             "KernelModulesInitrdExclude", "Keymap", "Locale", "ManifestFormat", "Mirror", "Packages", "Release",
             "RemoveFiles", "RepartDirectories", "Repositories", "RootPassword", "Seed", "ShimBootloader",
             "SplitArtifacts", "Timezone", "UnifiedKernelImages", "WithDocs"}
@@ -1676,12 +1676,12 @@ class KeyringSpikesTest(unittest.TestCase):
     PINNED = {
         "image/mkosi": {"InitrdInclude": ["initrd/"], "Mirror": [SNAPSHOT], "Repositories": ["main"],
                         "Environment": ["SYSTEMD_REPART_MKFS_OPTIONS_EXT4=-Oquota,project"]},
-        "image/mkosi/initrd": {},
+        "image/mkosi/initrd": {"FinalizeScripts": ["../mkosi.finalize"]},
         "image/enforcer/mkosi": {"InitrdInclude": ["../../mkosi/initrd/"], "Mirror": [SNAPSHOT],
                                  "Repositories": ["main"]},
         "spikes/S1S2-testkit/mkosi": {"Repositories": ["main"]},
     }
-    PINNED_KEYS = {"InitrdInclude", "Environment", "Mirror", "Repositories"}
+    PINNED_KEYS = {"InitrdInclude", "Environment", "FinalizeScripts", "Mirror", "Repositories"}
     PKGMNGR = {"etc/apt/sources.list.d/mkosi.sources", "etc/apt/apt.conf.d/80-agentos-retries"}
 
     @staticmethod

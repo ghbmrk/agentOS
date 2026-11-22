@@ -20,6 +20,7 @@ on:
       - "broker/cmd/agentos-release/**"
       - "broker/update/**"
       - ".github/workflows/enforcer-image.yml"
+      - ".github/actions/disk-budget/**"
   push:
     branches: [main]
     paths:
@@ -32,6 +33,7 @@ on:
       - "broker/cmd/agentos-release/**"
       - "broker/update/**"
       - ".github/workflows/enforcer-image.yml"
+      - ".github/actions/disk-budget/**"
 env:
   GOWORK: "off"
 permissions:
@@ -47,6 +49,8 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      DISK_NEED_GB: "5" # IMG-disk (#6357): measured bound 2.4 GB (1.8 sampled + 0.6 rise, AWS); see .github/actions/disk-budget
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -75,6 +79,11 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo git clone -q https://github.com/systemd/mkosi /opt/mkosi
           sudo git -C /opt/mkosi -c advice.detachedHead=false checkout -q 26673f65e17ae099bb0cf65928fe70c93b8a6a37  # v24.3
+      # IMG-disk (#6357): the runner disk budget, against this job's DISK_NEED_GB (.github/actions/disk-budget).
+      - name: Disk budget
+        uses: ./.github/actions/disk-budget
+        with:
+          phase: start
       - name: Build image
         shell: bash  # with pipefail, so tee keeps the build's exit status
         run: |
@@ -96,3 +105,8 @@ jobs:
           name: enforcer-image-logs
           path: ${{ runner.temp }}/logs.tar.gz
           if-no-files-found: ignore
+      - name: Disk budget held
+        if: always()
+        uses: ./.github/actions/disk-budget
+        with:
+          phase: held

@@ -112,23 +112,23 @@ func lookupOne(ctx context.Context, r TXTResolver, name string) (string, bool) {
 		txt, err := r.LookupTXT(ctx, name+".")
 		got <- answer{txt, err}
 	}()
-	var a answer
 	select {
-	case a = <-got:
+	case a := <-got:
+		if a.err != nil {
+			return "", false
+		}
+		size := 0
+		for _, t := range a.txt {
+			size += len(t)
+		}
+		if size > dkimMaxTXT {
+			return "", false
+		}
+		return keyRecord(a.txt)
 	case <-ctx.Done():
-		return "", false // a resolver that ignores its context does not hold the read
+		// a resolver that ignores its context does not hold the read
 	}
-	if a.err != nil {
-		return "", false
-	}
-	size := 0
-	for _, t := range a.txt {
-		size += len(t)
-	}
-	if size > dkimMaxTXT {
-		return "", false
-	}
-	return keyRecord(a.txt)
+	return "", false
 }
 
 // dnsName reports whether n is at most 253 bytes of labels of 1 to 63
