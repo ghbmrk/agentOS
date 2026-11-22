@@ -241,3 +241,68 @@ func TestClearFace(t *testing.T) {
 		}
 	}
 }
+
+// faceMarks are landmarks for decoded test faces; any finite five do.
+var faceMarks = [5][2]float64{{150, 90}, {170, 90}, {160, 100}, {152, 110}, {168, 110}}
+
+// TestYunetDecodeOrdersClampsAndBounds (MUT-kill-6409-vision, #6457):
+// faces come best first whatever grid they decode from; a face past the
+// frame's far edges is clamped to them; at most MaxDetections are kept;
+// and an anchor whose class and objectness are both negative scores 0,
+// not the root of their product.
+func TestYunetDecodeOrdersClampsAndBounds(t *testing.T) {
+	outs := yunetOuts()
+	yunetAnchor(outs, 0, 5, 5, 0.64, 1, 44, 44, 20, 20, faceMarks)     // 0.8 on the first grid
+	yunetAnchor(outs, 2, 15, 15, 0.81, 1, 500, 500, 30, 30, faceMarks) // 0.9 on the last
+	fs := yunetDecode(outs, letterbox{scale: 1}, 640, 640, yunetMinScore)
+	if len(fs) != 2 || !near2(fs[0].score, 0.9) || !near2(fs[1].score, 0.8) {
+		t.Fatalf("best first: %+v", fs)
+	}
+	outs = yunetOuts()
+	yunetAnchor(outs, 0, 79, 79, 1, 1, 636, 636, 20, 20, faceMarks)
+	if fs := yunetDecode(outs, letterbox{scale: 1}, 640, 640, yunetMinScore); len(fs) != 1 || fs[0].x1 != 640 || fs[0].y1 != 640 {
+		t.Fatalf("a face past the far edges: %+v", fs)
+	}
+	outs = yunetOuts()
+	n := 0
+	for r := 0; r < 80 && n < vision.MaxDetections+6; r += 4 {
+		for c := 0; c < 80 && n < vision.MaxDetections+6; c += 4 {
+			yunetAnchor(outs, 0, r, c, 0.81, 1, float64(8*c+4), float64(8*r+4), 8, 8, faceMarks)
+			n++
+		}
+	}
+	if fs := yunetDecode(outs, letterbox{scale: 1}, 640, 640, yunetMinScore); len(fs) != vision.MaxDetections {
+		t.Fatalf("%d apart faces gave %d, want %d", n, len(fs), vision.MaxDetections)
+	}
+	outs = yunetOuts()
+	yunetAnchor(outs, 0, 10, 10, -0.81, -1, 84, 84, 20, 20, faceMarks)
+	if fs := yunetDecode(outs, letterbox{scale: 1}, 640, 640, yunetMinScore); len(fs) != 0 {
+		t.Fatalf("negative scores: %+v", fs)
+	}
+}
+
+// TestNoTransformFromTinyLandmarks: landmarks within a millionth of a
+// pixel of each other give no transform, and no aligned input is made
+// from landmarks all at one point.
+func TestNoTransformFromTinyLandmarks(t *testing.T) {
+	var marks [5][2]float64
+	for i, m := range sfaceMarks {
+		marks[i] = [2]float64{5 + 1e-7*m[0], 5 + 1e-7*m[1]}
+	}
+	if a, b, tx, ty, ok := similarity(marks); ok {
+		t.Fatalf("tiny landmarks gave %v %v %v %v", a, b, tx, ty)
+	}
+	f := vision.Frame{Format: vision.FormatGray8, Width: 20, Height: 20, Data: make([]byte, 400)}
+	fc := face{marks: [5][2]float64{{5, 5}, {5, 5}, {5, 5}, {5, 5}, {5, 5}}}
+	if sfaceInput(f, fc, make([]float32, 3*sfaceSize*sfaceSize)) {
+		t.Fatal("one point gave an aligned input")
+	}
+}
+
+// TestFaceOutsideEveryPersonUnassigned: a face whose centre no person box
+// holds is given to no one.
+func TestFaceOutsideEveryPersonUnassigned(t *testing.T) {
+	if got := facesOf([]Seen{person(0, 0, 100, 100)}, []face{faceAt(200, 200, 40, 0.9)}); len(got) != 0 {
+		t.Fatalf("%+v", got)
+	}
+}
