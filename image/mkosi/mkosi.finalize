@@ -2178,9 +2178,23 @@ def user_unit_made_dir_violations(root):
     """#6474: one error per *Directory= value in a file under USER_UNIT_PATHS (or the regular file a link
     there leads to) that made_dir_words does not model, as unit_made_dirs refuses it in a system unit: a
     specifier, quote, escape, glob, '..' or leading '/' is refused, not decoded, so every user-manager-made
-    directory is a plain name under its top. A file or link the check cannot read is refused too."""
+    directory is a plain name under its top. A file or link the check cannot read is refused too, and so is a
+    USER_UNIT_PATHS entry that is a link, sits under one or cannot be listed."""
     root, out, seen = str(root), [], set()
     for d in USER_UNIT_PATHS:
+        # #6521 Security 7078329075: tree_walk reads a root that is a link, or sits under one, as empty
+        try:
+            top = tree_lstat(root, d)
+        except OSError as e:
+            out.append("%s: a user unit directory the tree check cannot list (%s); root's user manager reads it, so "
+                       "the check never passes it; make each step a plain directory (#6474)" % (d, e.strerror or e))
+            continue
+        if top is None:
+            continue
+        if not stat.S_ISDIR(top.st_mode):
+            out.append("%s: a user unit directory that is a link or not a directory; root's user manager reads it, "
+                       "so the check never passes it; make it a plain directory (#6474)" % d)
+            continue
         for rel, st in tree_walk(root, d):
             path = rel
             if stat.S_ISLNK(st.st_mode):

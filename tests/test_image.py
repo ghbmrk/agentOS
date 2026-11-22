@@ -5207,6 +5207,18 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
         self.assertEqual(len(out), 2, out)
         self.assertTrue(any(o.startswith("usr/lib/systemd/user/m.service: RuntimeDirectory='y'") for o in out), out)
         self.assertTrue(any(o.startswith("etc/systemd/user/g.service: a link to /var/tmp/gone") for o in out), out)
+        # #6521 Security 7078329075: a unit directory that is a link, or sits under one, is refused, not read as empty
+        for link, target in (("root/.config/systemd/user", "/usr/share/u"), ("root/.config", "/usr/share/c")):
+            with self.subTest(link=link), tempfile.TemporaryDirectory() as t:
+                write(pathlib.Path(t), "usr/share/u/a.service", '[Service]\nStateDirectory="x y"\n')
+                write(pathlib.Path(t), "usr/share/c/systemd/user/a.service", '[Service]\nStateDirectory="x y"\n')
+                write(pathlib.Path(t), "etc/systemd/user/b.service", '[Service]\nStateDirectory="x y"\n')
+                os.makedirs(os.path.join(t, os.path.dirname(link)), exist_ok=True)
+                os.symlink(target, os.path.join(t, link))
+                out = check.user_unit_made_dir_violations(t)
+                self.assertTrue(any(o.startswith("etc/systemd/user/b.service: StateDirectory=") for o in out), out)
+                self.assertTrue(any(o.startswith(("root/.config/systemd/user: a user unit directory",
+                                                  "root/.config/systemd/user.control: a user unit directory")) for o in out), out)
 
 class ReferenceToolTest(unittest.TestCase):
     """#1531: the differential tests fail, not skip, where CI requires their reference tools."""
