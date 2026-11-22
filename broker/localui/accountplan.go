@@ -197,10 +197,10 @@ func (s *Server) accountPlanPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if v.Reason == "" && ok {
-		t, err := accounts.Known()
-		if err != nil {
-			t = nil // no figure is shown, and accounts.Table.Declared cannot sign one either
-		}
+		// Known is nil on an error (a broken embedded table, which
+		// TestKnownTableLoadsAndValidates keeps from shipping): then no
+		// figure is shown, and accounts.Table.Declared signs none either.
+		t, _ := accounts.Known()
 		for _, it := range p.Items {
 			v.Rows = append(v.Rows, planRow{AccountPlanItem: it, ShowLabel: it.Source != string(accounts.Always), State: s.plan.get(it.ID),
 				Sends: planSends(t, it.ID)})

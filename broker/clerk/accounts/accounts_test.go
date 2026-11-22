@@ -90,6 +90,7 @@ func TestKnownTableRefusesUnknownFieldsAndEachBrokenRule(t *testing.T) {
 		"unknown group":          with(`,{"id":"a","name":"A","kind":"other","group":"extra","route":"none"}`),
 		"unknown route":          with(`,{"id":"a","name":"A","kind":"other","group":"account","route":"sms"}`),
 		"no name":                with(`,{"id":"a","name":" ","kind":"other","group":"account","route":"none"}`),
+		"id outside the token":   with(`,{"id":"A","name":"A","kind":"other","group":"account","route":"none"}`),
 		"bad device kind":        with(`,{"id":"a","name":"A","kind":"other","group":"account","route":"none","implied_by":["EV Charger"]}`),
 		"trailing data":          with(``) + `[]`,
 		"send with no figure":    with(`,{"id":"a","name":"A","kind":"other","group":"account","route":"oauth","sends":[{"host":"api.a.test"}]}`),
