@@ -1066,6 +1066,7 @@ def env_values(f):
 # expands in the value (a specifier, safe_glob's *, ? and [) or the lint would have to read as an escape:
 # each makes the set of files unknowable before boot, so each fails the run rather than being expanded.
 ENV_TREES = ("/etc/agentos", "/usr")
+ENV_READ_ONLY = ("/usr",)  # the dm-verity image: no unit, tmpfiles line or user writes there on the box
 ENV_MAGIC = "%*?[\\"
 ENV_CUT = "%*?["  # the bytes at which a tmpfiles.d path stops being fixed (a specifier or a glob)
 
@@ -1093,10 +1094,11 @@ def env_chain_refusal(boot, p, uid=0):
     return None
 
 
-def env_path_refusal(boot, value, tmpfiles, mounts, uid=0):
+def env_path_refusal(boot, value, tmpfiles, mounts, uid=0, made=()):
     """Why the EnvironmentFile= VALUE (its leading - dropped) may load a file other than root wrote, or
     None. It is absolute and normal and holds no ENV_MAGIC byte; it is under one of ENV_TREES; no mount
-    point (MOUNTS) covers it; env_chain_refusal finds its chain root's alone; and no tmpfiles.d line
+    point (MOUNTS) covers it; env_chain_refusal finds its chain root's alone; no path PID 1 may make for a
+    unit (MADE, pid1_made) is on its way or in its tree (env_made_refusal); and no tmpfiles.d line
     (TMPFILES: [(file, line, path)], ours or a package's) names it or a directory above it, a path holding a
     specifier or glob read as the string its fixed part begins, so no line re-modes, re-owns, links, copies
     or writes on its way at boot, whatever its type."""
@@ -1110,7 +1112,7 @@ def env_path_refusal(boot, value, tmpfiles, mounts, uid=0):
     m = covering(p, mounts)
     if m:
         return "%s is a mount point on its way, whose file system the lint does not see" % m
-    why = env_chain_refusal(boot, p, uid)
+    why = env_chain_refusal(boot, p, uid) or env_made_refusal(p, made)
     if why:
         return why
     for f, line, q in tmpfiles:
@@ -1138,8 +1140,98 @@ def tmpfiles_way_lines(boot, packaged, usr_view=None):
                              "unknown or NUL escape, an open quote or a trailing backslash); write it plainly (#6495)"
                              % (f, line))
         if read and len(read[0]) > 1:
-            out.append((f, line, read[0][1]))
+            out.append((f, line, tmpfiles_simplified(read[0][1])))
     return out
+
+
+def tmpfiles_simplified(q):
+    """Q as systemd-tmpfiles takes it before it acts (path_simplify): runs of / collapsed, . steps and a
+    trailing / dropped (#6506 L3 7076358038 item 2: z /etc//agentos, /etc/./agentos, //etc/agentos and
+    /etc/agentos/. all re-mode /etc/agentos). A .. step is kept, which names more, never less; systemd
+    refuses such a line."""
+    if not q.startswith("/"):
+        return q
+    return "/" + "/".join(c for c in q.split("/") if c not in ("", "."))
+
+
+# #6506 Security 7076346600 item 1: PID 1 makes a host directory for a unit when it starts it, as root, with
+# the unit's mode: a *Directory= (ConfigurationDirectory=agentos is /etc/agentos, chmodded to its Mode=; a:b
+# links /etc/b to /etc/a), a bind mount's What= and a mount point (mkdir_p_label with DirectoryMode=), a path
+# unit's watched path with MakeDirectory=, and any other setting off mkosi.finalize's PID1_READS and
+# PID1_NAMES, read as unit_made_paths reads them. A namespace mount (PID1_NAMESPACE_MAKES) makes only root's
+# 0755 directories on the host, which leave a chain root's. An env path at, under or above one of them, or in the same
+# ENV_TREES tree, fails the run (env_made_refusal), whoever owns the unit and whichever manager runs it.
+PID1_UNREAD = None  # in pid1_made: a value the lint would have to decode, so any path
+# Settings whose paths PID 1 only reads, opens (OpenFile= has no O_CREAT), chdirs to or passes on, beyond mkosi.finalize's PID1_READS, which
+# is kept narrow for its own rules: PID 1 never makes a host path for them (systemd 257 exec_child, chdir).
+PID1_MAKES_NONE = ("WorkingDirectory", "Environment", "UnsetEnvironment", "PassEnvironment", "OpenFile")
+
+
+def pid1_made(units):
+    """[(absolute path, "<key>= in <file>")] for each path PID 1 may make for a unit in UNITS. A value the
+    lint would have to decode to read (a specifier, quote, escape or byte outside printable ASCII, or a '/'
+    that opens no absolute path, as mkosi.finalize's unit_made_dirs and unit_made_paths refuse) gives
+    PID1_UNREAD in place of a path: it may make any."""
+    out = []
+    for u in units:
+        files = u["files"]
+        read = []
+        for f in files:
+            try:
+                read.append((f, FINALIZE.config_lines(f["text"].encode("utf-8", "surrogateescape"))))
+            except FINALIZE.Unparsable:
+                env_values(f)  # refuses it, naming the file
+        make_dir = any(k == "MakeDirectory" and v and v.lower() not in FINALIZE.FALSE_WORDS
+                       for _, lines in read for _, k, v in lines)
+        for f, lines in read:
+            where = f.get("path", "a unit file")
+            for _, key, v in lines:
+                why = "%s= in %s" % (key, where)
+                if not v:
+                    continue
+                if key in FINALIZE.UNIT_MADE_DIRS:
+                    try:
+                        words = FINALIZE.made_dir_words(key, v)
+                    except ValueError:
+                        # systemd makes a *Directory= only under its own top (an absolute path or a ..
+                        # step is refused at load), so only ConfigurationDirectory='s, under /etc, may reach
+                        if FINALIZE.UNIT_MADE_DIRS[key] == "etc":
+                            out.append((PID1_UNREAD, why))
+                        continue
+                    out += [("/" + d, why) for w in words for d in w]  # a dynamic user's <top>/private form is off ENV_TREES
+                    continue
+                if (key in FINALIZE.PID1_READS or key in FINALIZE.PID1_NAMES
+                        or key.startswith(FINALIZE.PID1_READ_PREFIXES) or key in FINALIZE.PID1_NAMESPACE_MAKES
+                        or key in PID1_MAKES_NONE
+                        or key in ("PathExists", "PathExistsGlob")
+                        or key in FINALIZE.PATH_WATCHES and not make_dir):
+                    continue
+                words = None
+                if not (any(not " " <= c <= "~" and c != "\t" or c in "\"'\\" for c in v)
+                        or "%" in v.replace("%%", "")):
+                    words = FINALIZE.path_words(v)
+                if words is None:
+                    out.append((PID1_UNREAD, why))
+                    continue
+                out += [(tmpfiles_simplified(w), why) for w in words]
+    return out
+
+
+def env_made_refusal(p, made):
+    """Why a path PID 1 may make (MADE, pid1_made) reaches env path P in a writable ENV_TREES tree, or None:
+    one at or above P, or at or under P's tree (mkdir_p_label makes a path's missing parents with its mode,
+    so a path below /etc/agentos may make /etc/agentos), or a value the lint does not read. /usr is the
+    read-only verity image, where PID 1 makes nothing, so no path counts there."""
+    top = next(t for t in ENV_TREES if p.startswith(t + "/"))
+    if top in ENV_READ_ONLY:
+        return None
+    for m, why in made:
+        if m is PID1_UNREAD:
+            return ("%s holds a path PID 1 may make that the lint does not read (a specifier, quote, escape or "
+                    "relative path), which may be on its way" % why)
+        if p == m or p.startswith(m.rstrip("/") + "/") or m == top or m.startswith(top + "/"):
+            return "%s names %s, a directory PID 1 may make on its way when it starts the unit" % (why, m)
+    return None
 
 
 def env_files(view, units, packaged=lambda p: True, usr_view=None, uid=0):
@@ -1153,12 +1245,13 @@ def env_files(view, units, packaged=lambda p: True, usr_view=None, uid=0):
     boot, out, pkg = BootView(view), {}, {}
     lines = tmpfiles_way_lines(boot, packaged, usr_view)
     mounts = mount_points(view)
+    made = pid1_made(units)
     for u in units:
         for f in u["files"]:
             for v in env_values(f):
                 if v == "":
                     continue  # an empty value resets the list and names no file
-                why = env_path_refusal(boot, v, lines, mounts, uid)
+                why = env_path_refusal(boot, v, lines, mounts, uid, made)
                 if why:
                     step = ("name an env file under %s, a fixed path" % " or ".join(ENV_TREES) if f["ours"] else
                             "the unit is a package's, so mask it (a link to /dev/null of its name in "

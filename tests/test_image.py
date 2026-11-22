@@ -568,6 +568,29 @@ class TreeCheckTest(unittest.TestCase):
                 self.assertTrue(any(rel in v for v in check.violations(self.root)))
                 f.unlink()
 
+    # REQ: KRN-2
+    def test_a_user_tmpfiles_d_line_must_not_ship(self):
+        # #6506 L3 7076358038 item 1: root's user manager runs systemd-tmpfiles --user as root, which applies
+        # these lines anywhere (z /etc/agentos 0777), and no check reads them. An empty directory passes.
+        self.assertEqual(check.violations(self.root), [])
+        for d in check.USER_TMPFILES_DIRS:
+            with self.subTest(d=d):
+                (self.root / d).mkdir(parents=True)
+                self.assertEqual(check.violations(self.root), [])
+                f = write(self.root, d + "/x.conf", "z /etc/agentos 0777 - - -\n")
+                self.assertIn(d + ": a user-tmpfiles.d directory that holds something", " | ".join(check.violations(self.root)))
+                f.unlink()
+                (self.root / d).rmdir()
+                write(self.root, d, "")  # not a directory
+                self.assertIn(d + ": a user-tmpfiles.d directory", " | ".join(check.violations(self.root)))
+                (self.root / d).unlink()
+                (self.root / d).symlink_to("/var/tmp")  # a link
+                self.assertIn(d + ": a user-tmpfiles.d directory", " | ".join(check.violations(self.root)))
+                (self.root / d).unlink()
+        self.assertTrue(set(check.USER_TMPFILES_DIRS) >= {"root/.config/user-tmpfiles.d", "etc/xdg/user-tmpfiles.d",
+                                                           "usr/share/user-tmpfiles.d", "root/.local/share/user-tmpfiles.d",
+                                                           "usr/local/share/user-tmpfiles.d", "run/user/0/user-tmpfiles.d"})
+
     def test_owner_state_must_not_ship(self):
         write(self.root, "etc/agentos/agentosd.env", "AGENTOS_OWNER=+15550100\n")
         self.assertIn("etc/agentos", " ".join(check.violations(self.root)))

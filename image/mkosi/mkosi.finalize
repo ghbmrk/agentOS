@@ -51,6 +51,11 @@ GENERATED = ("var/lib/systemd/random-seed", "var/lib/systemd/credential.secret",
              "etc/credstore*/*", "var/lib/systemd/credential*/*")
 # Owner configuration and broker state. Created on the drive at onboarding, never in the image.
 OWNER_DIRS = ("etc/agentos", "var/lib/agentos")
+# #6506: where systemd-tmpfiles --user reads lines for root's user manager (XDG_CONFIG_HOME, XDG_RUNTIME_DIR,
+# XDG_DATA_HOME, XDG_CONFIG_DIRS, XDG_DATA_DIRS for uid 0, tmpfiles.c user_config_paths), plus /usr/lib.
+USER_TMPFILES_DIRS = ("root/.config/user-tmpfiles.d", "run/user/0/user-tmpfiles.d", "root/.local/share/user-tmpfiles.d",
+                      "etc/xdg/user-tmpfiles.d", "usr/local/share/user-tmpfiles.d", "usr/share/user-tmpfiles.d",
+                      "usr/lib/user-tmpfiles.d")
 # Content scan: where build-generated keys land. /usr is package content, the same for everyone.
 SCAN = ("etc", "var", "root", "home", "srv", "opt", "boot", "efi")
 KEY_MARKERS = (b"PRIVATE KEY-----", b"PGP PRIVATE KEY BLOCK", b"AGE-SECRET-KEY-")
@@ -536,6 +541,17 @@ def _violations(root):
             out.append("etc/agentos: owner configuration; written at onboarding only")
         elif d == "var/lib/agentos" and tree_dir(root, d) and tree_listdir(root, tree_dir(root, d)):
             out.append("var/lib/agentos: broker state; must be empty")
+    # #6506 L3 7076358038 item 1: root's user manager runs systemd-tmpfiles --user as uid 0, which applies
+    # these lines to any path (/etc/agentos included), and no check reads them, so none may ship.
+    for d in USER_TMPFILES_DIRS:
+        mode = entry_mode(root, d)
+        try:
+            held = mode and tree_listdir(root, d)
+        except OSError:
+            held = True  # not a directory, or a link: tree_listdir refuses both
+        if held:
+            out.append("%s: a user-tmpfiles.d directory that holds something; root's user manager applies its lines "
+                       "as root and no check reads them, so it ships empty or not at all (#6506)" % d)
     # The vault and the page's claim state: their units create them on the box (#1249, #1270).
     for d, what in (("var/lib/agentos-egress", "vault state"), ("var/lib/agentos-localui", "claim state")):
         if entry_mode(root, d):
