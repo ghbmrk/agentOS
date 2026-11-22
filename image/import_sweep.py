@@ -77,7 +77,7 @@ GROUPS = {
 }
 # #5341: the openssl records (DEBIAN-CVE-2026-88823 and -95692 among them, AES-GCM-SIV) rest on no file
 # passing a name read from data to an OpenSSL cipher fetch. AES-GCM-SIV has no OID or NID
-# (crypto/objects/objects.txt, 3.5.7), so only a selector given one of its names picks it: EVP_CIPHER_fetch,
+# (crypto/objects/objects.txt, 3.5.9), so only a selector given one of its names picks it: EVP_CIPHER_fetch,
 # or systemd's openssl_cipher_many (src/shared/openssl-util.c, v257), which formats "%s-%zu-%s" from its
 # caller's arguments and fetches that. EVP_get_cipherbyname cannot return it (crypto/evp/names.c reads only
 # the legacy table) but is counted, as it hands a name to the same table. Every ELF file whose bytes hold one of these
