@@ -1,8 +1,24 @@
-# Two PRs appending a row to one assumptions table, or an entry to one package's mutgate record, keep both
-# on a local merge. A line both add word for word is one line to every reader (#6358); doclint, mutgate and
-# premerge fail one ID or mutant key on two different lines, and premerge reads an entry the union brought back
-# as changed. GitHub's server-side merge ignores this file (agents merge main locally). A clone that ran
-# `tools/record_merge.py --install` merges both files by key instead (info/attributes), so an edited line is not
+# The record and allow files, by tools/record_merge.py's CLASSES (a test holds this file to it; #6375). Two PRs
+# appending a row to one assumptions table, or an entry to one package's mutgate record, keep both on a local merge.
+# A line both add word for word is one line to every reader (#6358); doclint, mutgate and premerge fail one ID or
+# mutant key on two different lines, and premerge reads an entry the union brought back as changed. Allow files
+# take no union: it could bring back a line one side removed. Every class is LF text, so git commits a CRLF line as
+# its LF twin, and doclint, mutgate and the driver refuse a carriage return that reached a commit another way.
+# GitHub's server-side merge ignores this file (agents merge main locally). A clone that ran
+# `tools/record_merge.py --install` merges every class by key instead (info/attributes), so an edited line is not
 # kept twice and an identical one is kept once; CI and premerge's replay keep the union.
-ASSUMPTIONS.md merge=union
-MUTANTS-EQUIVALENT merge=union
+# A `list` (an allow or exit list a gate tool reads whole, #6441) is LF text git merges as text.
+broker/core/core.txt text eol=lf
+tools/trusted_core.txt text eol=lf
+tools/ceilings.txt text eol=lf
+tools/trusted_base_parsers.txt text eol=lf
+tools/trusted_base_reasons.txt text eol=lf
+tools/old_core.txt text eol=lf
+tools/assumptions_legacy_ids.txt text eol=lf
+tools/brief_acceptance_baseline.txt text eol=lf
+tools/hostcheck_hw8.json text eol=lf
+ASSUMPTIONS.md merge=union text eol=lf
+MUTANTS-EQUIVALENT merge=union text eol=lf
+*_allow.txt text eol=lf
+*.allow text eol=lf
+allow*.txt text eol=lf
