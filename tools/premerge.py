@@ -118,10 +118,15 @@ def gate_modules(tools=pathlib.Path(__file__).resolve().parent, roots=GATE_TOOLS
 
 _IMPORTED = "|".join(sorted(gate_modules() - set(GATE_TOOLS)))
 _CFG = r"(?:.*/)?"
+# The tree files premerge's replay reads (#6444): `git merge-tree`, run in a checkout of the base, takes each
+# directory's .gitattributes (a `merge=` line decides whether a conflict replays clean, so which heads read `same`),
+# and merge-ort finds a submodule through the root .gitmodules. The other names git reads in a tree shape no merge.
+REPLAY_INPUTS = rf"{_CFG}\.gitattributes|\.gitmodules"
+NOT_REPLAY_INPUTS = (".gitignore", ".mailmap")
 MARK_PATHS = re.compile(rf"{_CFG}CLAUDE(?:\.local)?\.md|{_CFG}AGENTS\.md|{_CFG}\.mcp\.json|{_CFG}\.claude(?:/.*)?|"
                         r"docs/OPERATING\.md|docs/LANES\.md|\.github/.*|broker/core/core\.txt|"
                         rf"tools/({'|'.join(GATE_TOOLS)})\.py|tools/(old_core|trusted_core|ceilings)\.txt|tools/ci_scope[^/]*|"
-                        r"tests/test_premerge[^/]*|reviews/[^/]+/README[^/]*"
+                        r"tests/test_premerge[^/]*|reviews/[^/]+/README[^/]*|" + REPLAY_INPUTS
                         + (rf"|tools/({_IMPORTED})\.py|tests/test_({_IMPORTED})[^/]*" if _IMPORTED else ""),
                         re.DOTALL)
 
