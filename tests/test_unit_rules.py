@@ -1600,6 +1600,101 @@ class EnvFilesTest(unittest.TestCase):
                          "/usr/lib/tmpfiles.d/x.conf": "d /run/pkgx-env\nd /var/q/pkgx 0700\n"})
             self.assertEqual(r.env_files(v, units, pkg), ({}, {}))
 
+    DIR = "tmpfiles.d line of ours %r: a d line of ours makes a fresh directory"
+
+    def test_a_d_line_of_ours_may_not_re_mode_or_hand_off_a_directory(self):
+        # #6495 L3 7075856011 item 1 (Potency): a d line sets an existing directory's mode and owner, so
+        # d /etc/default 0777 made every package's env file there writable. A d line of ours makes a fresh
+        # directory (no package ships it, no other line names it), within 0755, owned by root, or by a
+        # service user only where no EnvironmentFile= may read from it.
+        units = [{"files": [{"ours": False, "path": "/usr/lib/systemd/system/pkgx.service",
+                             "text": "[Service]\nEnvironmentFile=-/etc/default/pkgx\nEnvironmentFile=-/run/pkgx/env\n"
+                                     "EnvironmentFile=-/var/lib/pkgy-%i/env\n"}]},
+                 {"files": [{"ours": True, "path": "/usr/lib/systemd/system/agentos-x.service",
+                             "text": "[Service]\nEnvironmentFile=-/run/agentos/x.env\n"
+                                     "EnvironmentFile=-/etc/agentos/l/x.env\n"}]}]
+        base = {"/etc/default/pkgx": "X=1\n", "/etc/agentos/l": "-> /var/lib/agentos-l",
+                "/usr/lib/tmpfiles.d/pkg.conf": "d /run/pkgx 0755 root root -\nZ /var/lib/pkgz 0755 - - -\n"
+                                                "x /var/lib/pkgw-* - - - -\n"}
+        refused = {
+            # the L3 and Potency repros
+            "d /etc/default 0777 - - -": "the tree already has /etc/default",
+            "d /etc/default 0755 nobody - -": "the tree already has /etc/default",
+            "d /run/pkgx 0777 - - -": "pkg.conf: line 'd /run/pkgx 0755 root root -' also names it",
+            "d /run/agentos 0777 - - -": "its mode '0777' is not - or plain octal within 0755",
+            "d /run/agentos ~0777 - - -": "its mode '~0777'",
+            "d /run/agentos-x 0700 agentos-mail - -": "its owner agentos-mail:- is not root and its path is under a boot mount",
+            # group or other write, and the other widening forms
+            "d /var/lib/agentos-n 0775 - - -": "its mode '0775'", "d /var/lib/agentos-n 0757 - - -": "its mode '0757'",
+            "d /var/lib/agentos-n 1755 - - -": "its mode '1755'", "d /var/lib/agentos-n 4755 - - -": "its mode '4755'",
+            "d /var/lib/agentos-n :0700 - - -": "its mode ':0700'", "d /var/lib/agentos-n 0x7 - - -": "its mode '0x7'",
+            # not fresh: a link on the way, an ancestor's recursive line, a glob line, a mount, a duplicate
+            "d /etc/default/sub 0700 - - -": None,  # passes: /etc/default/sub is new, root's, within 0755
+            "d /etc/agentos/l 0700 - - -": "the tree already has /etc/agentos/l",
+            "d /var/lib/pkgz/q 0700 - - -": "also names it or a path under it, or sets it recursively",
+            "d /var/lib/pkgw-q 0700 - - -": "line 'x /var/lib/pkgw-* - - - -' also names it",
+            "d /boot/q 0700 - - -": "its path is at, under or above /boot, a mount point",
+            "d /run/agentos-q\nd /run/agentos-q": "also names it",
+            "d /run/%m 0700": "its path is not absolute, normal and fixed", "d /run//q 0700": "not absolute, normal",
+            "d run/q 0700": "not absolute",
+            # a service user's directory that an EnvironmentFile= may read: fixed through a link, or a pattern
+            "d /var/lib/agentos-l 0700 agentos-l agentos-l -": "agentos-x.service's EnvironmentFile=/etc/agentos/l/x.env",
+            "d /var/lib/pkgy-a 0700 agentos-y - -": "pkgx.service's EnvironmentFile=/var/lib/pkgy-%i/env",
+            # Security 338500b delta repros
+            "d /etc/default 1777": "the tree already has /etc/default",
+            "d /run/agentos 0755 nobody nogroup -": "its owner nobody:nogroup is not root and its path is under a boot mount",
+            "d /var/lib/agentos-n 1777 - - -": "its mode '1777'", "d /var/lib/agentos-n ~0755 - - -": "its mode '~0755'",
+            "d /var/lib/agentos-n 0700 - agentos-n -": None,
+        }
+        for line, why in refused.items():
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                v = tree(d, dict(base, **{"/usr/lib/tmpfiles.d/x.conf": line + "\n"}))
+                pkg = lambda p: p == "/usr/lib/tmpfiles.d/pkg.conf"
+                if why is None:
+                    r.env_files(v, units, pkg)  # passes
+                    continue
+                first = line.split("\n")[0]
+                with self.assertRaisesRegex(SystemExit, re.escape(self.DIR % first) + ".*" + re.escape(why)):
+                    r.env_files(v, units, pkg)
+        # a wildcard reaching the directory through a link to an ancestor
+        u = [{"files": [{"ours": False, "path": "/usr/lib/systemd/system/pkgv.service",
+                         "text": "[Service]\nEnvironmentFile=-/etc/pkgv/%i/agentos-v/env\n"}]}]
+        for line, why in (("d /var/lib/agentos-v 0700 agentos-v - -", "may read /etc/pkgv/a/agentos-v from it"),
+                          ("d /var/lib/agentos-v 0700 - - -", None)):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                v = tree(d, {"/etc/pkgv/a": "-> /var/lib", "/var/lib/q": "X=1\n", "/usr/lib/tmpfiles.d/x.conf": line + "\n"})
+                if why is None:
+                    r.env_files(v, u, lambda p: False)
+                    continue
+                with self.assertRaisesRegex(SystemExit, re.escape(why)):
+                    r.env_files(v, u, lambda p: False)
+        # systemd-tmpfiles does what the repro says: d re-modes an existing directory
+        if shutil.which("systemd-tmpfiles"):
+            with tempfile.TemporaryDirectory() as d:
+                os.makedirs(d + "/etc/default", 0o755)
+                conf = pathlib.Path(d) / "x.conf"
+                conf.write_text("d /etc/default 0777 - - -\n")
+                subprocess.run(["systemd-tmpfiles", "--create", "--root=" + d, str(conf)], check=False,
+                               capture_output=True)
+                self.assertEqual(os.stat(d + "/etc/default").st_mode & 0o777, 0o777)
+
+    def test_the_shipped_agentos_tmpfiles_conf_passes(self):
+        # #6495 L3 7075856011 item 1: every line of mkosi.extra's agentos.conf makes a fresh directory, and the
+        # service users' state directories are read by no EnvironmentFile= (agentosd's is under /etc/agentos)
+        conf = (ROOT / "image/mkosi/mkosi.extra/usr/lib/tmpfiles.d/agentos.conf").read_text()
+        units = [{"files": [{"ours": True, "path": "/usr/lib/systemd/system/agentosd.service",
+                             "text": "[Service]\nEnvironmentFile=/etc/agentos/agentosd.env\n"}]}]
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/usr/lib/tmpfiles.d/agentos.conf": conf, "/etc/agentos/agentosd.env": "A=1\n",
+                         "/var/lib/systemd/x": "X=1\n"})
+            self.assertEqual(r.env_files(v, units, lambda p: False)[0], {"/etc/agentos/agentosd.env": "A=1\n"})
+            # and a unit reading an env file from a service user's directory fails it
+            bad = [{"files": [{"ours": False, "path": "/usr/lib/systemd/system/p.service",
+                               "text": "[Service]\nEnvironmentFile=-/var/lib/agentos-%i/env\n"}]}]
+            with self.assertRaisesRegex(SystemExit, "its owner agentos-kernel:agentos-kernel is not root, and "
+                                        "/usr/lib/systemd/system/p.service's EnvironmentFile=/var/lib/agentos-%i/env"):
+                r.env_files(v, bad, lambda p: False)
+
     def test_a_continued_environment_file_line_is_read_as_systemd_reads_it(self):
         # #6495 Security R2: config_parse joins a line ending in a backslash with the next, the backslash
         # read as a space, and skips a comment line inside the continuation
@@ -1613,12 +1708,23 @@ class EnvFilesTest(unittest.TestCase):
             self.assertEqual(r.env_files(v, units, lambda p: False),
                              ({"/etc/a .env": "A=1\n", "/etc/b.env": "B=1\n"},
                               {"/etc/default/ pkgx": bad}))
-            # a file config_parse refuses fails the run, naming it
-            for text in ("[Service]\nEnvironmentFile=/etc/a.env\r\n", "[Service]\0\n", "[Service\n"):
-                with self.subTest(text=text):
-                    u = [{"files": [{"ours": False, "path": "/usr/lib/systemd/system/p.service", "text": text}]}]
-                    with self.assertRaisesRegex(SystemExit, "p.service: a unit file systemd's config_parse refuses"):
-                        r.env_files(v, u, lambda p: False)
+            # a file the reader does not read fails the run, naming it, saying why (#6495 UX 7075856011 item 2:
+            # systemd reads a CR or NUL as a line end; only the lint refuses it) and giving a step that fits
+            # whose file it is
+            nul_cr = "holds a NUL or CR byte, which systemd reads as a line end and the unit lint refuses rather than models"
+            stops = r"systemd's config_parse stops reading it there \(line 1: invalid section header\)"
+            pkg_step = r"the file is a package's, so mask the unit .* replace it whole with a unit of ours"
+            ours_step = "rewrite the file with LF line ends and no NUL byte"
+            for text, why in (("[Service]\r\nExecStart=/x\r\n", nul_cr), ("[Service]\0\n", nul_cr),
+                              ("[Service\n", stops)):
+                for ours, step in ((False, pkg_step), (True, ours_step)):
+                    with self.subTest(text=text, ours=ours):
+                        u = [{"files": [{"ours": ours, "path": "/usr/lib/systemd/system/p.service", "text": text}]}]
+                        with self.assertRaisesRegex(SystemExit, "p.service: (it )?%s.*; %s" % (why, step)) as cm:
+                            r.env_files(v, u, lambda p: False)
+                        self.assertNotIn("systemd's config_parse refuses", str(cm.exception))
+                        if ours:
+                            self.assertNotIn("package", str(cm.exception))
 
 
 class TmpfilesReaderTest(unittest.TestCase):

@@ -1029,16 +1029,30 @@ def manager_confs(view, packaged):
 
 # An EnvironmentFile= line, as systemd reads one: blanks around the key and value are dropped.
 def env_values(f):
-    """The EnvironmentFile= values unit file F ({"path", "text"}) sets, as systemd's config_parse reads them
-    (mkosi.finalize's config_lines): a line ending in an unescaped backslash continues into the next, the
+    """The EnvironmentFile= values unit file F ({"path", "ours", "text"}) sets, as systemd's config_parse reads
+    them (mkosi.finalize's config_lines): a line ending in an unescaped backslash continues into the next, the
     backslash read as a space, and a comment line inside a continuation is skipped (#6495 Security R2).
-    Every section counts, which reads more, never less. A file config_parse refuses (NUL, CR, invalid
-    UTF-8, a bad section header) fails the run: systemd stops reading it there, and so does not this lint."""
+    Every section counts, which reads more, never less. A file config_lines does not read fails the run: one
+    holding a NUL or CR byte, which systemd reads as a line end and this reader refuses rather than models,
+    and one where config_parse itself stops (invalid UTF-8, a bad section header, a line of 1 MiB or more).
+    The refusal says which, and gives a step for a file of ours and another for a package's (#6495 UX)."""
     try:
         lines = FINALIZE.config_lines(f["text"].encode("utf-8", "surrogateescape"))
     except FINALIZE.Unparsable as e:
-        raise SystemExit("unit rules: %s: a unit file systemd's config_parse refuses (%s), whose EnvironmentFile= "
-                         "lines the unit lint does not read; fix the file (#6495)" % (f.get("path", "a unit file"), e))
+        path = f.get("path", "a unit file")
+        if "\0" in f["text"] or "\r" in f["text"]:
+            why = ("it holds a NUL or CR byte, which systemd reads as a line end and the unit lint refuses rather "
+                   "than models, so the lint does not read its EnvironmentFile= lines")
+        else:
+            why = ("systemd's config_parse stops reading it there (%s), and so does the unit lint, which then "
+                   "does not read its EnvironmentFile= lines" % e)
+        if f.get("ours"):
+            step = "rewrite the file with LF line ends and no NUL byte, as valid UTF-8 with well-formed section headers"
+        else:
+            step = ("the file is a package's, so mask the unit (a link to /dev/null of its name in "
+                    "/etc/systemd/system), replace it whole with a unit of ours of the same name there, or drop "
+                    "the package")
+        raise SystemExit("unit rules: %s: %s; %s (#6495)" % (path, why, step))
     return [v for _, k, v in lines if k == "EnvironmentFile"]
 
 
@@ -1135,28 +1149,142 @@ def env_matches(boot, pats, ours_link=lambda link: True):
 
 
 # #6495 (L3 7075438189 items 1 to 3, Potency): the tmpfiles.d types a file of ours may hold, an allowlist,
-# so a type systemd adds later is refused too. d makes a directory, or sets an existing one's mode and
-# owner, and puts no content at its path. Every other type writes a file (f, F, w), copies a tree with its
-# links (C), makes a link (L), a FIFO or a device node (p, c, b), or sets an existing file's mode, owner,
-# ACL or attributes (z, Z, a, A, h, H, t, T, e): each may put content where a unit's EnvironmentFile=
-# reads at boot, or hand that file to a writer. The modifiers ! (at boot only) and - (errors ignored)
-# change nothing the line makes. Files of ours hold only d lines (mkosi.extra's agentos.conf).
+# so a type systemd adds later is refused too. Every type but d writes a file (f, F, w), copies a tree with
+# its links (C), makes a link (L), a FIFO or a device node (p, c, b), or sets an existing file's mode, owner,
+# ACL or attributes (z, Z, a, A, h, H, t, T, e): each may put content where a unit's EnvironmentFile= reads
+# at boot, or hand that file to a writer. A d line also sets an existing directory's mode and owner
+# (#6495 L3 7075856011 item 1: d /etc/default 0777 makes every package's env file there writable), so a d
+# line of ours is held to tmpfiles_dir_refusal: a fresh directory, never widened. The modifiers ! (at boot
+# only) and - (errors ignored) change nothing the line makes. Files of ours hold only d lines
+# (mkosi.extra's agentos.conf).
 TMPFILES_OURS_TYPES = frozenset("d")
 TMPFILES_OURS_MODIFIERS = frozenset("!-")
+TMPFILES_DIR_MODE = 0o755  # the widest mode a d line of ours may give: no group or other write, no s or t bit
+TMPFILES_ROOT_OWNERS = ("-", "root", "0")
+TMPFILES_MAGIC = "%*?["  # a specifier or glob: the path is then not one the lint reads as fixed
+TMPFILES_RECURSIVE = "ZA"  # the types that set the mode, owner or ACL of what is under their path
 
 
-def tmpfiles_ours_refusals(boot, packaged, usr_view=None):
+class FreshView(View):
+    """BOOT (a BootView) with directory D, and each missing directory on the way to it, read as present and
+    holding nothing but the way to D: the tree as a d line of ours makes it at boot (env_reach)."""
+
+    def __init__(self, boot, d):
+        super().__init__(boot.root, boot.usr)
+        self.boot, self.d = boot, d
+
+    def above(self, q):
+        return q == self.d or self.d.startswith(q.rstrip("/") + "/")
+
+    def _lstat(self, q):
+        st = self.boot._lstat(q)
+        return self.boot._lstat("/") if st is None and self.above(q) else st
+
+    def _list(self, q):
+        names = self.boot._list(q)
+        if q != self.d and self.above(q):
+            n = self.d[len(q.rstrip("/")) + 1:].split("/")[0]
+            names = sorted(set(names) | {n})
+        return names
+
+
+def env_reach(boot, pats, d):
+    """The first path one of PATS (env_patterns) may name at or under directory D, as systemd would open it
+    with D made fresh at boot (FreshView): a fixed one resolved through the tree's links, one with a WILD by
+    env_matches' walk, every alias and link cycle included, each (resolved directory, pattern positions) once.
+    None when none may."""
+    fv = FreshView(boot, d)
+
+    def under(p):
+        return p == d or p.startswith(d + "/")
+    for pat in pats:
+        if WILD not in pat:
+            if under(fv.resolve("".join(pat))[0]):
+                return "".join(pat)
+            continue
+        lit = "".join(pat[:pat.index(WILD)])
+        top = lit.rpartition("/")[0] or "/"
+        todo, seen = [(top, pattern_step(pat, {0}, top.rstrip("/")))], set()
+        while todo:
+            q, states = todo.pop()
+            final = fv.resolve(q)[0]
+            if under(final) and (len(pat) in states or pattern_step(pat, states, "/")):
+                return q
+            if (final, states) in seen:
+                continue
+            seen.add((final, states))
+            for n in fv.entries(q):
+                after = pattern_step(pat, states, "/" + n)
+                if after and fv.kind(fv.resolve(q.rstrip("/") + "/" + n)[0]) == 0o040000:
+                    todo.append((q.rstrip("/") + "/" + n, after))
+    return None
+
+
+def tmpfiles_dir_refusal(boot, words, others, units, mounts):
+    """#6495 L3 7075856011 item 1: why a d line of ours (WORDS, as tmpfiles_words reads it) may hand a
+    directory to a writer, or None. Its path is absolute, normal and fixed (no specifier or glob), not in the
+    tree at boot nor reached through a link (BootView: no package ships it), named by no other tmpfiles.d line
+    (OTHERS: [(file, line, type, path)]), ours or a package's, at or under it (a glob or specifier one by its
+    fixed part, which reads more), nor above it by a recursive Z or A line, and off every mount point (MOUNTS), so the line makes a fresh directory and re-modes or
+    re-owns none. Its mode is - or plain octal within TMPFILES_DIR_MODE (no ~ or : form). Its user and group
+    are root (TMPFILES_ROOT_OWNERS), or, for a service user's state directory, the path is outside the boot
+    mounts (where the tree, not boot, says what is there) and no EnvironmentFile= of any unit in UNITS, ours
+    or a package's, may name a path at or under it (env_reach)."""
+    path = words[1] if len(words) > 1 else ""
+    mode, user, group = (list(words[2:5]) + ["-", "-", "-"])[:3]
+    if (not path.startswith("/") or path.startswith("//") or os.path.normpath(path) != path
+            or any(c in path for c in TMPFILES_MAGIC)):
+        return "its path is not absolute, normal and fixed (no specifier or glob)"
+    if boot.lstat(path) is not None or boot.resolve(path)[1]:
+        return ("the tree already has %s or a link on the way to it, so the line would set the mode and owner of "
+                "a directory a package ships" % path)
+    m = covering(path, mounts)
+    if m:
+        return "its path is at, under or above %s, a mount point, whose file system may already hold it" % m
+    for f, line, typ, q in others:
+        lit = q
+        for c in TMPFILES_MAGIC:
+            lit = lit.split(c)[0]
+        if (path == q or q.startswith(path + "/") or lit != q and (path.startswith(lit) or lit.startswith(path + "/"))
+                or typ[:1] in TMPFILES_RECURSIVE and path.startswith(lit.rstrip("/") + "/")):
+            return ("%s: line %r also names it or a path under it%s, so which mode and owner it has is not this "
+                    "line's alone" % (f, line, ", or sets it recursively" if typ[:1] in TMPFILES_RECURSIVE else ""))
+    if mode != "-" and not re.fullmatch(r"[0-7]{1,4}", mode) or mode != "-" and int(mode, 8) & ~TMPFILES_DIR_MODE:
+        return ("its mode %r is not - or plain octal within %04o (no group or other write, no setuid, setgid or "
+                "sticky bit, no ~ or : form)" % (mode, TMPFILES_DIR_MODE))
+    if user in TMPFILES_ROOT_OWNERS and group in TMPFILES_ROOT_OWNERS:
+        return None
+    if any(path == m or path.startswith(m + "/") for m in BOOT_MOUNTS):
+        return ("its owner %s:%s is not root and its path is under a boot mount, where what is there at boot is "
+                "not in the tree" % (user, group))
+    for u in units:
+        for f in u["files"]:
+            for v in env_values(f):
+                v = v[1:] if v.startswith("-") else v
+                if not v.startswith("/") and not v.startswith("%"):
+                    continue
+                hit = env_reach(boot, env_patterns(v) or [tuple(v)], path)
+                if hit:
+                    return ("its owner %s:%s is not root, and %s's EnvironmentFile=%s may read %s from it"
+                            % (user, group, f.get("path", "a unit"), v, hit))
+    return None
+
+
+def tmpfiles_ours_refusals(boot, packaged, usr_view=None, units=(), mounts=()):
     """#6474, #6495: each tmpfiles.d line of ours (in a file not byte-identical to a package's, PACKAGED) is
     of a type in TMPFILES_OURS_TYPES with modifiers in TMPFILES_OURS_MODIFIERS, its type read as
-    systemd-tmpfiles reads it (tmpfiles_words). A line of ours that writes, copies, links or makes a node
+    systemd-tmpfiles reads it (tmpfiles_words), and makes a fresh directory it widens to no writer
+    (tmpfiles_dir_refusal, with UNITS and MOUNTS). A line of ours that writes, copies, links or makes a node
     at boot puts content where env_files does not read (under /run, which BootView hides, or through a
     link a C line copies or an L line makes), so every other line of ours, and one systemd-tmpfiles
     refuses, fails the run, naming its file and the line, whether or not an EnvironmentFile= names its
     path. A package's lines are read by tmpfiles_links and tmpfiles_copies."""
-    for f, line in tmpfiles_lines(boot, usr_view):
+    lines = [(f, line, tmpfiles_words(line)) for f, line in tmpfiles_lines(boot, usr_view)]
+    named = [(i, (f, line, read[0][0], read[0][1])) for i, (f, line, read) in enumerate(lines)
+             if read and len(read[0]) > 1]
+    for i, (f, line, read) in enumerate(lines):
         if packaged(boot.resolve(f)[0]):
             continue
-        read = tmpfiles_words(line)
         if read is None:
             raise SystemExit("unit rules: %s: tmpfiles.d line of ours %r: systemd-tmpfiles refuses its words (an "
                              "unknown or NUL escape, an open quote or a trailing backslash); write it plainly (#6495)"
@@ -1168,6 +1296,12 @@ def tmpfiles_ours_refusals(boot, packaged, usr_view=None):
                              "not read: make the file in the image (mkosi.extra) instead, or drop the line (#6495)"
                              % (f, line, typ, ", ".join(sorted(TMPFILES_OURS_TYPES)),
                                 " or ".join(sorted(TMPFILES_OURS_MODIFIERS))))
+        why = tmpfiles_dir_refusal(boot, read[0], [o for j, o in named if j != i], units, mounts)
+        if why:
+            raise SystemExit("unit rules: %s: tmpfiles.d line of ours %r: a d line of ours makes a fresh directory "
+                             "that no writer but root, or a service user no env file is read from, holds; %s. Name a "
+                             "new path under /var/lib or /run, owned by root with a mode within %04o, or drop the "
+                             "line (#6495)" % (f, line, why, TMPFILES_DIR_MODE))
 
 
 def env_files(view, units, packaged=lambda p: True, usr_view=None):
@@ -1182,7 +1316,7 @@ def env_files(view, units, packaged=lambda p: True, usr_view=None):
     ours that a template's instance or a host name selects is held too (#6312 Security 1). One a
     tmpfiles.d line of ours other than a directory fails the run (tmpfiles_ours_refusals, #6474, #6495)."""
     boot, out, pkg = BootView(view), {}, {}
-    tmpfiles_ours_refusals(boot, packaged, usr_view)
+    tmpfiles_ours_refusals(boot, packaged, usr_view, units, mount_points(view))
     for u in units:
         for f in u["files"]:
             for p in env_values(f):
