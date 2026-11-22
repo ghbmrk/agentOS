@@ -52,6 +52,7 @@ CASES = {
     "tools/trusted_core.txt": {"trusted_base.read_core": trusted_base.read_core},
     "tools/ceilings.txt": {"trusted_base.read_ceilings": trusted_base.read_ceilings},
     "tools/trusted_base_parsers.txt": {"trusted_base.read_rules": lambda t: trusted_base.read_rules(t, True)},
+    "tools/trusted_base_reasons.txt": {"trusted_base.read_reasons": trusted_base.read_reasons},
     "tools/old_core.txt": {"trace.old_core_dirs": _old_core_dirs, "trusted_base.old_core_dirs": trusted_base.old_core_dirs},
     "tools/assumptions_legacy_ids.txt": {
         "assumptions_ids.legacy": assumptions_ids.legacy,
@@ -100,7 +101,7 @@ def reads(name, reader, text):
 def targets(lines):
     """Line numbers to break: the first line (a comment in most lists, where #1347 hid its
     "\\r") and the first line a reader acts on."""
-    first_entry = next(n for n, l in enumerate(lines, 1) if l.strip() and not l.lstrip().startswith("#"))
+    first_entry = next((n for n, l in enumerate(lines, 1) if l.strip() and not l.lstrip().startswith("#")), 1)
     return sorted({1, first_entry})
 
 
@@ -136,6 +137,17 @@ class ListReadersTest(unittest.TestCase):
                             err = reads(name, reader, text)
                             self.assertIsNotNone(err, "accepted")
                             self.assertIn(f":{n}:", err, "the refusal names the line")
+
+    def test_a_comment_only_list_breaks_a_synthetic_entry_too(self):
+        # tools/trusted_base_reasons.txt holds only comments on main, so targets() finds no entry
+        # line there; break one the reader would act on (Security on #6397).
+        lines = (ROOT / "tools/trusted_base_reasons.txt").read_bytes().decode("utf-8").split("\n")
+        lines = [*lines[:-1], "parsers #1 -- a synthetic reason", ""]
+        for bname, brk in BREAKS.items():
+            with self.subTest(brk=bname):
+                err = reads("tools/trusted_base_reasons.txt", trusted_base.read_reasons, broken(lines, len(lines) - 1, brk))
+                self.assertIsNotNone(err, "accepted")
+                self.assertIn(f":{len(lines) - 1}:", err, "the refusal names the line")
 
     def test_every_list_file_has_a_reader_case(self):
         lists = {str(p.relative_to(ROOT)) for p in (ROOT / "tools").glob("*.txt")} | {"broker/core/core.txt"}

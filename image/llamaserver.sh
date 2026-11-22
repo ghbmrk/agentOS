@@ -91,6 +91,9 @@ UI_H=$WORK/build/tools/ui/ui.h
 BIN=$WORK/build/bin/llama-server
 ! jail readelf -l "${BIN#"$base"}" | grep -q INTERP || { echo "llama-server is not static" >&2; exit 1; }
 ! jail readelf -d "${BIN#"$base"}" 2>/dev/null | grep -q NEEDED || { echo "llama-server needs shared libraries" >&2; exit 1; }
+# Stripped before its inputs are recorded: they are recorded against the shipped bytes' SHA-256
+# (image/static_elf.py's "linked linked" entry, #5885).
+jail strip -o "$lib/llama-server.stripped" "$lib/build/bin/llama-server"
 # The link's inputs (#5885). CMake runs the link from the target's own build directory, the one
 # holding CMakeFiles/llama-server.dir, and names its objects and the project's archives relative to
 # it; the compiler driver names the base's archives and start-up files by absolute path. Each LOAD
@@ -111,7 +114,6 @@ for want in libstdc++.a libc.a; do
 	printf '%s\n' "$loaded" | grep -q "/$want\$" || { echo "llama-server: the link map loads no $want from the base" >&2; exit 1; }
 done
 # shellcheck disable=SC2086  # one path per word
-GUEST_SHIPPED=$linked sh "$HERE/guest-shipped.sh" "$base" $loaded
-jail strip -o "$lib/llama-server.stripped" "$lib/build/bin/llama-server"
+SHIPPED_FOR=$WORK/llama-server.stripped GUEST_SHIPPED=$linked sh "$HERE/guest-shipped.sh" "$base" $loaded
 install -m 0755 "$WORK/llama-server.stripped" "$DEST/llama-server"
 install -m 0644 "$WORK/src/LICENSE" "$DEST/LICENSE"

@@ -108,11 +108,12 @@ done
 faults=$(linkfaults "$base$lib/camdecode.map")
 [ -z "$faults" ] || { printf 'agentos-camdecode links a network call:\n%s\n' "$faults" >&2; exit 1; }
 # Each file the link loaded from outside $lib, by its LOAD line in the map ("LOAD linker stubs" names
-# no file). A relative path is passed on too, and fails there, so no input goes unrecorded.
+# no file). A relative path is passed on too, and fails there, so no input goes unrecorded. Each is
+# also recorded against the binary's SHA-256, for image/static_elf.py's "linked guest" entry (#5885).
 loaded=$(awk -v lib="$lib/" '/^LOAD / && $2 != "linker" && index($2, lib) != 1 { print $2 }' "$base$lib/camdecode.map" | sort -u)
 [ -n "$loaded" ] || { echo "agentos-camdecode: the link map loads nothing from outside $lib" >&2; exit 1; }
 # shellcheck disable=SC2086  # one path per word
-sh "$HERE/guest-shipped.sh" "$base" $loaded
+SHIPPED_FOR=$base$lib/agentos-camdecode sh "$HERE/guest-shipped.sh" "$base" $loaded
 ! jail readelf -l "$lib/agentos-camdecode" | grep -q INTERP || { echo "agentos-camdecode is not static" >&2; exit 1; }
 install -m 0755 "$base$lib/agentos-camdecode" "$ROOT/agentos-camdecode"
 install -D -m 0644 "$base$lib/opt/agentos-libavcodec/share/COPYING.LGPLv2.1" "$LICENSES/libavcodec/COPYING.LGPLv2.1"
