@@ -7,19 +7,22 @@ A word is a run of non-whitespace (Python's str.split), so a standalone dash cou
 `wc -w` in the C locale skips those and reads a little lower.
 
 A PR may not grow either set. It passes when each set's count at the head is at most
-the base's, or when its body has a line `Word-budget: <decision ID>` naming an active
-row of DECISIONS.md at the base whose text names the PR (`#<number>`, from $PR_NUMBER), so
-neither a row the PR adds nor an unrelated standing row can waive it (#2945); the reviewer
-checks that the row records Mark approving the addition. Words cut from one set do not pay for words added to the other.
+the base's, or when it adds a line `word-budget #<PR> -- <decision ID>` to tools/word_budget_reasons.txt
+naming an active row of DECISIONS.md at the base whose text names the PR (`#<number>`, from
+$PR_NUMBER), so neither a row the PR adds nor an unrelated standing row can waive it (#2945);
+the reviewer checks that the row records Mark approving the addition. Words cut from one set do
+not pay for words added to the other. The waiver is a committed line, never PR-body text (#6490):
+a body can change after the reviews accept a head, the line cannot without a new head. A line the
+base already holds is history and waives nothing; an added line that is malformed or names
+another PR fails the check.
 
 word-budget.yml runs the base commit's copy of this file, so a PR cannot loosen the check
 for itself; only the PR that adds the file runs its own copy. Standard library only.
 
 Usage:
   tools/word_budget.py                                 counts in the working tree
-  tools/word_budget.py --git BASE HEAD [--body-file F] fail (exit 1) if HEAD grew a set
-      a waiver counts only with the PR number in $PR_NUMBER (an environment variable, so a
-      workflow that sets it works with base copies older than this rule)
+  tools/word_budget.py --git BASE HEAD                 fail (exit 1) if HEAD grew a set
+      a waiver counts only with the PR number in $PR_NUMBER
 """
 import argparse
 import os
@@ -31,7 +34,8 @@ import sys
 SPEC = ("SPEC.md",)
 PROCESS = ("CLAUDE.md", "AGENTS.md", "PLAN.md", "docs/OPERATING.md", "docs/LANES.md")
 SKILL = re.compile(r"^\.claude/skills/[^/]+/SKILL\.md$")
-WAIVER = re.compile(r"^Word-budget:\s*(\S+)\s*$", re.M)
+RECORD = "tools/word_budget_reasons.txt"
+RECORD_LINE = re.compile(r"^word-budget #([1-9]\d*) -- (\S+)$")
 
 
 def words(text):
@@ -80,35 +84,66 @@ def active_decision(decisions, ident, pr):
     return False
 
 
-def check(base, head, body, decisions, pr=None):
-    """Return (ok, report lines)."""
+def record_lines(text):
+    """The record's entries, whitespace runs folded to one space: lines neither blank nor `#` comments."""
+    return [" ".join(x.split()) for x in (text or "").splitlines() if x.strip() and not x.lstrip().startswith("#")]
+
+
+def waivers(base_text, head_text, pr):
+    """([decision ID], [problem]) from the record lines the head adds to the base's, for PR `pr`."""
+    got, bad, old = [], [], set(record_lines(base_text))
+    for line in record_lines(head_text):
+        if line in old:
+            continue
+        r = RECORD_LINE.match(line)
+        if not r:
+            bad.append(f"{RECORD}: `{line}`: want `word-budget #<PR> -- <decision ID>`")
+        elif pr is None or int(r.group(1)) != int(pr):
+            bad.append(f"{RECORD}: `{line}`: names #{r.group(1)}, not this PR (#{pr})")
+        else:
+            got.append(r.group(2))
+    return got, bad
+
+
+def check(base, head, record, decisions, pr=None):
+    """Return (ok, report lines). `record` is waivers()' pair for the PR's added record lines."""
     grew = [k for k in head if head[k] > base.get(k, 0)]
     lines = [f"{k}: {base.get(k, 0)} -> {head[k]} words ({head[k] - base.get(k, 0):+d})" for k in head]
+    got, bad = record
+    if bad:
+        return False, lines + bad
     if not grew:
         return True, lines
-    m = WAIVER.search(body or "")
-    if m and active_decision(decisions, m.group(1), pr):
+    ok = [d for d in got if active_decision(decisions, d, pr)]
+    if ok:
         note = " SPEC.md stays capped by tools/ceilings.txt (D-310), which the trusted-base check enforces." if "spec" in grew else ""
-        return True, lines + [f"grew {', '.join(grew)}: allowed by {m.group(1)} (reviewer: confirm Mark approved the addition).{note}"]
-    why = f"`Word-budget: {m.group(1)}` names no active DECISIONS.md row at the base that names #{pr}" if m else "no `Word-budget: <decision ID>` line"
+        return True, lines + [f"grew {', '.join(grew)}: allowed by {ok[0]} (reviewer: confirm Mark approved the addition).{note}"]
+    why = (f"`{RECORD}` names no active DECISIONS.md row at the base that names #{pr} ({', '.join(got)})" if got
+           else f"no `word-budget #{pr if pr is not None else '<PR>'} -- <decision ID>` line added to {RECORD}")
     return False, lines + [f"grew {', '.join(grew)} and {why}: retire as many words in the same set (D-152)"]
+
+
+def git_record(ref):
+    """The record's text at `ref`, or "" where the tree has none."""
+    r = subprocess.run(["git", "cat-file", "-e", f"{ref}:{RECORD}"], capture_output=True)
+    return _git("show", f"{ref}:{RECORD}").decode("utf-8") if r.returncode == 0 else ""
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--git", nargs=2, metavar=("BASE", "HEAD"))
-    ap.add_argument("--body-file")
     args = ap.parse_args(argv)
     if not args.git:
         for k, v in tree_counts(".").items():
             print(f"{k} {v}")
         return 0
     base_ref, head_ref = args.git
-    body = pathlib.Path(args.body_file).read_text(encoding="utf-8") if args.body_file else ""
     # The base's decisions: a row the PR adds itself is not yet Mark's record (#2945).
     decisions = _git("show", f"{base_ref}:DECISIONS.md").decode("utf-8")
     pr = os.environ.get("PR_NUMBER", "")
-    ok, lines = check(git_counts(base_ref), git_counts(head_ref), body, decisions, int(pr) if pr.isdigit() else None)
+    pr = int(pr) if pr.isdigit() else None
+    record = waivers(git_record(base_ref), git_record(head_ref), pr)
+    ok, lines = check(git_counts(base_ref), git_counts(head_ref), record, decisions, pr)
     print("\n".join(lines))
     return 0 if ok else 1
 

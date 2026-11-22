@@ -1,13 +1,14 @@
 name: word-budget
 # D-152: SPEC.md and the process docs only shrink on main. tools/word_budget.py counts both
-# sets at the PR's base and head and fails a PR that grows either one, unless its body has a
-# `Word-budget: <decision ID>` line naming an active DECISIONS.md row at the base that names
-# the PR (#2945; PR_NUMBER below). It runs as the BASE
+# sets at the PR's base and head and fails a PR that grows either one, unless it adds a
+# `word-budget #<PR> -- <decision ID>` line to tools/word_budget_reasons.txt naming an active
+# DECISIONS.md row at the base that names the PR (#2945; PR_NUMBER below). It runs as the BASE
 # commit has it, so a PR cannot loosen the check for itself; with no base copy (only the PR
-# that adds the file) it runs the head's. `edited` reruns it when the body changes.
+# that adds the file) it runs the head's. The waiver is a committed line, never the PR body, so
+# there is no `edited` trigger: a body edit cannot change the result at a reviewed head (#6490).
 on:
   pull_request:
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened]
 # CI-cancel-superseded (#5345, #5348): a PR's first-attempt run cancels that PR's older first
 # attempts, so a superseded head never holds the queue. A rerun (attempt 2 or later) and every push,
 # merge-queue, schedule or dispatch run is a group of its own (run id), so it never cancels or
@@ -31,13 +32,11 @@ jobs:
       - name: Count words (tools/word_budget.py, base copy)
         shell: bash # -eo pipefail, so tee keeps the tool's exit status
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           # HEAD is the PR's test merge (base^1, branch^2), as in .github/actions/scope. Count the base
           # against the merge itself, not the branch tip: a stale branch's tip lacks main's
           # later edits, which would read as its own growth or hide it.
-          printf '%s\n' "$PR_BODY" > "$RUNNER_TEMP/body.md"
           git show HEAD^1:tools/word_budget.py > "$RUNNER_TEMP/word_budget.py" 2>/dev/null \
             || cp tools/word_budget.py "$RUNNER_TEMP/word_budget.py"
-          python3 -I "$RUNNER_TEMP/word_budget.py" --git HEAD^1 HEAD --body-file "$RUNNER_TEMP/body.md" | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 -I "$RUNNER_TEMP/word_budget.py" --git HEAD^1 HEAD | tee -a "$GITHUB_STEP_SUMMARY"
