@@ -573,10 +573,18 @@ class RefusalsTest(unittest.TestCase):
                                     "/usr/sbin/ldconfig", "/usr/lib/systemd/systemd"], D)))}
             for k in ("carries", "glibc", "sha256"):
                 bad["tree"][k] = ok["tree"][k]
-            for places, want in ((ok, 0), (bad, 1)):
+            body = a.read_text()
+            # An unresolved NEEDED name fails --summary until a pinned [unresolved] entry accepts the file,
+            # and a stale [wrapper] entry fails it (L3 and Lens on #6382: each refusal is wired into errs).
+            gone = {"tree": dict(ok["tree"], unresolved={"/usr/bin/lsblk": ["libgone.so.1"]})}
+            for places, extra, want in ((ok, "", 0), (bad, "", 1), (gone, "", 1),
+                                        (gone, "[unresolved]\n/usr/bin/lsblk%s  # never loaded\n" % PIN, 0),
+                                        (gone, "[unresolved]\n/usr/bin/lsblk sha256=%s\n" % ("cd" * 32), 1),
+                                        (ok, "[wrapper]\n/usr/lib/libgone.so.1%s\n" % PIN, 1)):
                 j.write_text(__import__("json").dumps(places))
-                with self.subTest(want=want), contextlib.redirect_stdout(io.StringIO()), \
-                        contextlib.redirect_stderr(io.StringIO()):
+                a.write_text(body + extra)
+                with self.subTest(want=want, extra=extra, unresolved="unresolved" in places["tree"]), \
+                        contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                     self.assertEqual(sweep.main(["--summary", str(j), str(a)]), want)
 
     def test_shipped_allowlist_is_absolute_globs(self):
@@ -1526,6 +1534,15 @@ class LinkTest(unittest.TestCase):
             os.symlink("/lib/x86_64-linux-gnu/libw-real.so", t / "usr/lib/x86_64-linux-gnu/libw.so")
             got = sweep.run_tree(str(t))["tree"]
         self.assertEqual(got["through"], {"/usr/bin/m": {self.REAL: ["dlsym"]}})
+
+    def test_a_split_usr_tree_reads_the_links_under_usr(self):
+        # run_build's path: the root and /usr come from two directories, and /usr's links count too.
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as d:
+            usr = pathlib.Path(d) / "usr"
+            shutil.copytree(self.t / "usr", usr, symlinks=True)
+            got = sweep.run_tree(root, str(usr))["tree"]
+        self.assertEqual(got["through"], {"/usr/bin/m": {self.REAL: ["dlsym"]}})
+        self.assertEqual(got["lookups"], {"/usr/bin/m": ["glob"]})
 
     def test_resolve(self):
         links = {"/lib": "usr/lib", "/usr/lib/a.so": "../lib/b.so", "/usr/lib/loop": "loop",
