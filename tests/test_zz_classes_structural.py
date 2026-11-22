@@ -11,6 +11,7 @@ file directly in tools/ or a file CLASSES puts in an allow or exit class.
 """
 import ast
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -34,14 +35,11 @@ from test_list_readers import CASES  # noqa: E402
 
 CODE = (".py", ".go", ".c", ".h", ".md", ".sh")
 LISTS = ("list", "line")  # the allow and exit classes
+PATHLIKE = re.compile(r"[\w.+-]+(?:/[\w.+-]+)*")  # a relative path: no space, no leading `/`
 # Each tool loads its own copy of record_merge (by path, for `python3 -I`); a test that drops a CLASSES entry
 # drops it from every copy.
 COPIES = {id(m.record_merge): m.record_merge for m in (assumptions_ids, doclint, hostcheck, netguardcheck, risk_tier,
                                                          srclint, trace, trusted_base)} | {id(record_merge): record_merge}
-
-
-def tracked(root):
-    return set(subprocess.run(["git", "ls-files"], cwd=root, capture_output=True, text=True, check=True).stdout.split())
 
 
 def constants(tree):
@@ -58,18 +56,22 @@ def constants(tree):
                 yield "/".join(parts)
 
 
-def walk(root, files):
-    """{module: {list file}}: each tracked file a tools/*.py names (a path, or a bare name of a file directly in
+def walk(root):
+    """{module: {list file}}: each file of the tree a tools/*.py names (a path, or a bare name of a file directly in
     tools/) that is a non-code file directly in tools/ or in an allow or exit class of CLASSES. record_merge.py, which
-    declares them, is left out."""
-    top = {pathlib.PurePosixPath(f).name: f for f in files if f.startswith("tools/") and f.count("/") == 1}
+    declares them, is left out. Files are found by stat, not by git, so no record or object store is read."""
+    root = pathlib.Path(root)
     out = {}
-    for py in sorted(pathlib.Path(root, "tools").glob("*.py")):
+    for py in sorted((root / "tools").glob("*.py")):
         if py.name == "record_merge.py":
             continue
         for v in constants(ast.parse(py.read_text())):
-            f = v if v in files else top.get(v)
-            if f and (record_merge.record_class(f) in LISTS or f in top.values() and not f.endswith(CODE)):
+            if not PATHLIKE.fullmatch(v) or ".." in v.split("/"):
+                continue  # a message or pattern, not a repository path
+            top = "/" not in v and (root / "tools" / v).is_file()
+            f = f"tools/{v}" if top else v if v and (root / v).is_file() else None
+            if f and (record_merge.record_class(f) in LISTS or f.count("/") == 1 and f.startswith("tools/")
+                      and not f.endswith(CODE)):
                 out.setdefault(py.name, set()).add(f)
     return out
 
@@ -93,7 +95,7 @@ def undeclared(name):
 class ClassesStructuralTest(unittest.TestCase):
 
     def test_every_list_a_gate_tool_reads_is_declared(self):
-        found = walk(ROOT, tracked(ROOT))
+        found = walk(ROOT)
         self.assertIn("tools/hostcheck_hw8.json", found.get("hostcheck.py", ()), "positive control: the walk sees reads")
         for module, lists in sorted(found.items()):
             for f in sorted(lists):
@@ -110,7 +112,8 @@ class ClassesStructuralTest(unittest.TestCase):
             (pathlib.Path(d) / "tools/exits.py").write_text(
                 'import pathlib\nROOT = pathlib.Path(".")\nLIST = ROOT / "tools" / "permit.txt"\n'
                 'print(LIST.read_text())\n')
-            found = walk(d, {"tools/exits.py", "tools/permit.txt"})
+            (pathlib.Path(d) / "tools/permit.txt").write_text("x\n")
+            found = walk(d)
         self.assertEqual(found, {"exits.py": {"tools/permit.txt"}})
         self.assertIsNone(record_merge.record_class("tools/permit.txt"))
         self.assertFalse(uses_reader("LIST.read_text()"))
