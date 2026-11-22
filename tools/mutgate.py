@@ -30,8 +30,8 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
                                              they pass (LINTS, #6346), and
                                              add the verdicts to `run`'s JSON in DIR (#4573, #4603, #4633);
                                              only the sites of the result's own shard
-  `plan`, `delete` and `run --git` first delete every broker/ Markdown file whose edit changes no
-  test (hide_docs, #6373): run them in a scratch clone.
+  `plan`, `delete` and `run --git` run in a copy of the working tree (scratch, #6456), without every
+  broker/ Markdown file whose edit changes no test (hide_docs, #6373).
   tools/mutgate.py report DIR                survivors per package, from the JSON in DIR
   tools/mutgate.py gate DIR --git BASE [HEAD] [--body FILE [--body-from SHA]] [--summary FILE]
                                              exit 1 if a LIVED mutant sits on a target line that no
@@ -404,7 +404,9 @@ def names_file(pkg_dir, rel):
     for f in sorted(pkg_dir.glob("*.go")):
         if f.is_symlink() or not f.is_file():
             return True
-        texts.append(f.read_bytes().decode("utf-8", "replace"))
+        if (text := go_text(f.read_bytes())) is None:
+            return True
+        texts.append(text)
     for text in texts:
         for lit in _literals(text) + _embeds(text):
             if parts[-1] in lit or parts[0] in lit:
@@ -416,23 +418,69 @@ def names_file(pkg_dir, rel):
     return False
 
 
-def hide_docs(broker):
+# The trees this process made (scratch's worktree, base_covered's archive): the only ones hide_docs deletes in.
+MADE = set()
+
+
+def hide_docs(broker, *also):
     """Delete, under broker (a tree the gate is about to run tests in), each Markdown file an edit to
-    which changes no package's tests (any without a data_owner; vendor/ is kept,
-    as is_data keeps it: a test compares it with its patched copy),
-    and return their paths. Every gate run then measures the suite without them, so no verdict can
-    depend on them and an edit to one changes no test (#6373); a test that needs one fails the run,
-    closed. It deletes from the working tree: run plan, run --git and delete in a scratch clone."""
+    which changes no package's tests (any without a data_owner in broker or any broker of also;
+    vendor/ is kept, as is_data keeps it: a test compares it with its patched copy), and return
+    their paths. Every gate run then measures the suite without them, so no verdict can depend on
+    them and an edit to one changes no test (#6373); a test that needs one fails the run, closed.
+    It refuses (ValueError) a tree this process did not make, so no working tree loses a file (#6456)."""
+    if pathlib.Path(broker).resolve().parent not in MADE:
+        raise ValueError(f"mutgate: {broker} is no tree mutgate made; it hides docs only in its own copies")
     gone = []
     for d, dirs, files in os.walk(broker):
         dirs.sort()
         for f in sorted(files):
             path = pathlib.Path(d, f)
             rel = "broker/" + path.relative_to(broker).as_posix()
-            if f.endswith(".md") and "vendor" not in rel.split("/")[1:-1] and not data_owner(rel, broker):
+            if (f.endswith(".md") and "vendor" not in rel.split("/")[1:-1]
+                    and not any(data_owner(rel, b) for b in (broker, *also))):
                 path.unlink()
                 gone.append(rel)
     return gone
+
+
+@contextlib.contextmanager
+def scratch():
+    """Run the block with ROOT and BROKER a copy of the working tree (a detached `git worktree` of
+    HEAD, with each file that differs from HEAD or is untracked and not ignored copied over it), its
+    docs hidden (hide_docs), and remove it after: plan, delete and run --git read what is on disk as
+    before, but delete, write or move nothing in the working tree, its index or its HEAD
+    (marked_base moves the copy's own; #6456)."""
+    global ROOT, BROKER
+    repo, broker = ROOT, BROKER
+    with tempfile.TemporaryDirectory() as tmp:
+        tree = pathlib.Path(tmp).resolve() / "tree"
+        # No hook runs: a post-checkout hook is the clone's code, not the commit's.
+        subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "worktree", "add", "--quiet", "--detach", str(tree),
+                        "HEAD"], cwd=repo, check=True)
+        MADE.add(tree)
+        try:
+            for name in sorted(set(_git_names(repo, "diff", "--name-only", "--no-renames", "HEAD"))
+                               | set(_git_names(repo, "ls-files", "--others", "--exclude-standard"))):
+                src, dst = repo / name, tree / name
+                if dst.is_symlink() or dst.is_file():
+                    dst.unlink()
+                if src.is_symlink() or src.is_file():  # else deleted: gone from the copy too
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dst, follow_symlinks=False)
+            ROOT, BROKER = tree, tree / "broker"
+            hide_docs(BROKER)
+            yield
+        finally:
+            ROOT, BROKER = repo, broker
+            MADE.discard(tree)
+            subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=repo, capture_output=True)
+
+
+def _git_names(repo, *args):
+    """The repo-relative paths a `git <args> -z` run in repo prints."""
+    out = subprocess.run(["git", *args, "-z"], cwd=repo, capture_output=True, check=True).stdout
+    return [n for n in out.decode("utf-8", "surrogateescape").split("\0") if n]
 
 
 def data_owner(path, broker=None):
@@ -583,13 +631,26 @@ def merge_base(base, head):
                           check=True).stdout.strip()
 
 
+def go_text(raw):
+    """Go source bytes as the go toolchain reads them: one leading byte order mark skipped (go/scanner,
+    go/build), so a directive behind it is read; None for bytes go refuses to compile (not UTF-8, a NUL,
+    a BOM anywhere else), so every caller fails closed instead of reading a text go never builds (#6377)."""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    text = text[1:] if text.startswith("\ufeff") else text
+    return None if "\ufeff" in text or "\0" in text else text
+
+
 def base_text(mb, path):
-    """The text of path in commit mb when it is a regular file there, else None (a link is not read)."""
+    """The text of path in commit mb when it is a regular file there, else None (a link is not read);
+    a .go file is read by go_text."""
     r = subprocess.run(["git", "ls-tree", mb, "--", path], cwd=ROOT, capture_output=True, text=True, check=True)
     if not r.stdout.startswith(("100644 ", "100755 ")):
         return None
     blob = subprocess.run(["git", "cat-file", "blob", f"{mb}:{path}"], cwd=ROOT, capture_output=True, check=True)
-    return blob.stdout.decode("utf-8", "replace")
+    return go_text(blob.stdout) if path.endswith(".go") else blob.stdout.decode("utf-8", "replace")
 
 
 def _body(bare, d):
@@ -1110,14 +1171,20 @@ def _widen(lines, extra):
 # reaches its methods. A test reaches what it reaches, transitively; what every test may run
 # (TestMain, init, a package var with an initializer, a blank or dot import, a method on a type no
 # test file of its package clause declares, which package code may call through an interface, a
-# file with a linkname) reaches all of them, as does a line no test reaches (fail closed). A named
-# import reaches its file's declarations' tests (D-319).
+# file with a linkname, a directive go reads package-wide, such as go:debug) reaches all of them, as
+# does a line no test reaches (fail closed). A named import reaches its file's declarations' tests (D-319).
 WORD = re.compile(r"[A-Za-z_]\w*")
 FUNC_HEAD = re.compile(r"^func\s*(?:\(\s*(?:\w+\s+)?\*?\s*(\w+)[^)]*\)\s*)?(\w+)")
 NAMED = re.compile(r"^(?:var|const|type)\s+(\w+(?:\s*,\s*\w+)*)")
 GROUPED = re.compile(r"^(?:var|const|type)\s*\(")
 GROUP_NAMES = re.compile(r"(\w+(?:\s*,\s*\w+)*)")
 SIDE_IMPORT = re.compile(r'(?:^|[\s(;])[_.]\s*["`]', re.M)
+# A `//go:` directive reaches the declaration it sits on, or for a build line its own file, only when
+# go reads it so; any other, `//go:debug` (a GODEBUG default of the whole test binary, Go 1.21+) or one
+# not read here, is a setting of every test (#6377).
+DIRECTIVE = re.compile(r"^\s*//go:(\w*)", re.M)
+LOCAL_DIRECTIVES = {"build", "embed", "generate", "noinline", "nosplit", "norace", "noescape", "nocheckptr",
+                    "uintptrescapes", "fix"}
 EVERY = None
 
 
@@ -1186,7 +1253,8 @@ def _decls(path, text):
             continue
         body, plain = "\n".join(code[first - 1:last]), "\n".join(bare[first - 1:last])
         head = bare[at - 1] if at else ""
-        kind, names, recv, every = "header", set(), None, linked
+        kind, names, recv, every = "header", set(), None, linked or any(
+            m not in LOCAL_DIRECTIVES for m in DIRECTIVE.findall("\n".join(rows[first - 1:last])))
         if head.startswith("import"):
             every = every or bool(SIDE_IMPORT.search(body[body.index("import") + len("import"):]))
         elif head.startswith("func"):
@@ -1278,7 +1346,9 @@ def head_tests(tests, pkg):
         if f.is_symlink():
             return None
         if f.is_file():
-            files[f"broker/{pkg}/{f.name}"] = f.read_bytes().decode("utf-8", "replace")
+            if (text := go_text(f.read_bytes())) is None:
+                return None
+            files[f"broker/{pkg}/{f.name}"] = text
     changed = {p: ls for p, ls in tests.items() if package_of(p) == pkg and p in files}
     if any(ls is None for ls in changed.values()):
         return None
@@ -1441,9 +1511,20 @@ def covering(waived, mutants):
 # (the statement, the code after it that a proof cites, a twin of it) needs the proof read again,
 # while lines moved outside it keep it (Security on #5780). The record is the PR's
 # text, read as data: a new or changed entry shows as such in the summary, for review.
+# A proof that rests on code outside its own declaration names that code in optionally deps
+# (MUT-record-deps, #6282): a list of {file (a non-test .go file under broker/, from the repository
+# root, any package), func (a name the top-level declaration declares, as `-decls` lists its names:
+# `Recv.Name` for a method, any name of a var, const or type group), decl (that declaration's digest,
+# as decl)}. An entry is stale, as when its own decl changed, while a dep's file is gone, declares no
+# such name or declares it twice, or holds it with another digest; so an edit to code a proof cites,
+# in any file, needs the proof read again. An entry without deps reads as before. `waive --dep` writes them.
 RECORD = "MUTANTS-EQUIVALENT"
 RECORD_KEYS = {"file", "mutant", "func", "decl", "stmt", "at", "after", "occurrence", "reason", "accepted"}
-RECORD_OPTIONAL = {"col"}
+RECORD_OPTIONAL = {"col", "deps"}
+DEP_KEYS = {"file", "func", "decl"}
+DEP_FILE = re.compile(r"broker(?:/[A-Za-z0-9_-][A-Za-z0-9_.-]*)+\.go")  # no `.`, `..` or hidden segment
+DEP_NAME = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?")
+DIGEST = re.compile(r"[0-9a-f]{64}")
 MUTANT_KIND = re.compile(r"[A-Z][A-Z_]{0,63}")
 RECORD_MAX = 1 << 20
 RECORD_FILE = re.compile(r"[A-Za-z0-9_.-]+\.go")
@@ -1459,6 +1540,26 @@ def _code(text):
     return bool(s) and not s.startswith("//")
 
 
+def _digest(lines, d):
+    """sha256 of declaration d's lines (`-decls`' start and end) of a file's lines, whitespace runs as one space."""
+    lo, hi = d["start"] - 1, min(d["end"], len(lines))
+    return hashlib.sha256("\n".join(_norm(t) for t in lines[lo:hi]).encode()).hexdigest()
+
+
+def dep_file_ok(path):
+    """Whether path can be a dep's file: a non-test .go file under broker/, named from the repository root."""
+    return isinstance(path, str) and bool(DEP_FILE.fullmatch(path)) and not path.endswith("_test.go")
+
+
+def deps_ok(deps):
+    """Whether a record entry's deps has RECORD's shape: a non-empty list of distinct {file, func, decl}."""
+    return (isinstance(deps, list) and len(deps) > 0
+            and all(isinstance(x, dict) and set(x) == DEP_KEYS and dep_file_ok(x["file"])
+                    and isinstance(x["func"], str) and DEP_NAME.fullmatch(x["func"]) is not None
+                    and isinstance(x["decl"], str) and DIGEST.fullmatch(x["decl"]) is not None for x in deps)
+            and len({(x["file"], x["func"]) for x in deps}) == len(deps))
+
+
 def statement_keys(src, sites, decls=()):
     """{line: key} for every line of one file's source src, sites being the lister's sites for that
     file and decls its top-level declarations (`-decls`, go/parser's spans, Security on #5780); a key
@@ -1466,8 +1567,7 @@ def statement_keys(src, sites, decls=()):
     lines = src.split("\n")
     funcs, decls_of = [""] * len(lines), [""] * len(lines)
     for d in decls:
-        lo, hi = d["start"] - 1, min(d["end"], len(lines))
-        digest = hashlib.sha256("\n".join(_norm(t) for t in lines[lo:hi]).encode()).hexdigest()
+        lo, hi, digest = d["start"] - 1, min(d["end"], len(lines)), _digest(lines, d)
         funcs[lo:hi] = [d["name"]] * (hi - lo)
         decls_of[lo:hi] = [digest] * (hi - lo)
     owner = {}
@@ -1511,7 +1611,8 @@ def record_entries(text):
               and isinstance(e["occurrence"], list) and len(e["occurrence"]) == 2
               and all(type(x) is int for x in e["occurrence"]) and 1 <= e["occurrence"][0] <= e["occurrence"][1]
               and isinstance(e["reason"], str) and re.search(r"[A-Za-z]{2}", e["reason"])
-              and isinstance(e["accepted"], str) and re.fullmatch(r"#[1-9]\d*", e["accepted"]))
+              and isinstance(e["accepted"], str) and re.fullmatch(r"#[1-9]\d*", e["accepted"])
+              and ("deps" not in e or deps_ok(e["deps"])))
         if not ok:
             return None, (f"line {i} is not an entry of {sorted(RECORD_KEYS)} (and optionally "
                           f"{sorted(RECORD_OPTIONAL)}) as tools/mutgate.py's RECORD says")
@@ -1542,8 +1643,52 @@ def file_keys(pkg, names, lister, pkg_dir=None):
         sites[s["file"]].append(s)
     for s in json.loads(d.stdout):
         decls[s["file"]].append(s)
-    return {p.name: statement_keys(p.read_bytes().decode("utf-8", "replace"), sites[p.name], decls[p.name])
-            for p in files}, None
+    texts = {p.name: go_text(p.read_bytes()) for p in files}
+    if bad := sorted(n for n, t in texts.items() if t is None):
+        return None, f"broker/{pkg}/ holds .go files go does not compile as text (not UTF-8, a NUL or a misplaced BOM): {bad}"
+    return {n: statement_keys(t, sites[n], decls[n]) for n, t in texts.items()}, None
+
+
+def list_dep_decls(paths, lister):
+    """({path: [(names, digest)] of its top-level declarations, or None when it is no regular file}, None) for each
+    dep file path (see RECORD) at the working tree, listed by lister (`-decls`, one run per directory), or (None,
+    problem). The lister is Go's own parser, so a file it cannot parse is a problem, not an empty file."""
+    out, by_dir = {}, collections.defaultdict(list)
+    for p in sorted(set(paths)):
+        parts = pathlib.PurePosixPath(p).parts[1:]
+        if any(BROKER.joinpath(*parts[:i + 1]).is_symlink() for i in range(len(parts))):
+            return None, f"{p}, which a record entry's deps name, is or is under a symbolic link, which mutgate does not follow"
+        if not BROKER.joinpath(*parts).is_file():
+            out[p] = None
+            continue
+        by_dir[BROKER.joinpath(*parts[:-1])].append(p)
+    for d, ps in sorted(by_dir.items()):
+        files = [d / pathlib.PurePosixPath(p).name for p in ps]
+        r = subprocess.run([str(lister), "-decls", *map(str, files)], capture_output=True)
+        if r.returncode != 0:
+            return None, f"cannot list the declarations of {', '.join(ps)}: {r.stderr.decode(errors='replace')}"
+        rows = collections.defaultdict(list)
+        for s in json.loads(r.stdout):
+            rows[s["file"]].append(s)
+        for p, f in zip(ps, files):
+            lines = f.read_bytes().decode("utf-8", "replace").split("\n")
+            out[p] = [(s.get("names") or [s["name"]], _digest(lines, s)) for s in rows[f.name]]
+    return out, None
+
+
+def stale_deps(e, decls):
+    """[(dep, why)] for each of entry e's deps that no longer holds at decls (list_dep_decls')."""
+    out = []
+    for x in e.get("deps", ()):
+        have = decls.get(x["file"])
+        named = [dg for names, dg in have or () if x["func"] in names]
+        if have is None:
+            out.append((x, "is no file now"))
+        elif len(named) != 1:
+            out.append((x, f"declares {x['func']} {len(named)} times now, not once"))
+        elif named[0] != x["decl"]:
+            out.append((x, f"has changed {x['func']}"))
+    return out
 
 
 def read_record(pkg, pkg_dir=None):
@@ -1558,14 +1703,19 @@ def read_record(pkg, pkg_dir=None):
     return path.read_bytes().decode("utf-8", "replace"), None
 
 
-def resolve_record(pkg, entries, keys):
-    """({(path, line, mutant, col): entry}, [problem]): each entry's line at the head, or why it names none."""
+def resolve_record(pkg, entries, keys, decls=None):
+    """({(path, line, mutant, col): entry}, [problem]): each entry's line at the head, or why it names none; decls
+    is list_dep_decls' for the entries' deps (an entry whose dep file it lacks is stale)."""
     found, problems = {}, []
     for e in entries:
         lines = sorted(n for n, k in keys.get(e["file"], {}).items() if k == _entry_key(e))
         i, n = e["occurrence"]
         where = f"broker/{pkg}/{RECORD}: the entry for {e['file']} {e['func'] or '(top level)'} {e['stmt'][e['at']]!r}"
-        if not lines:
+        if stale := stale_deps(e, decls or {}):
+            problems.append(f"{where} rests on " + "; ".join(f"{x['func']} in {x['file']}, which {why}" for x, why in stale)
+                            + ": delete its line from the record, read the proof again, and if it holds add it back with "
+                            "`mutgate.py waive --dep` naming what it rests on now")
+        elif not lines:
             problems.append(f"{where} names no statement at the head: the statement or the func around it "
                             "changed; delete its line from the record, read the proof again, and if it holds add it "
                             "back with `mutgate.py waive` at its current line")
@@ -1598,10 +1748,12 @@ def record_waivers(pkgs, lister, base=None, head="HEAD"):
             problems.append(f"broker/{pkg}/{RECORD}: {problem}")
             continue
         keys, problem = file_keys(pkg, [e["file"] for e in entries], lister)
+        if not problem:
+            decls, problem = list_dep_decls([x["file"] for e in entries for x in e.get("deps", ())], lister)
         if problem:
             problems.append(problem)
             continue
-        found, bad = resolve_record(pkg, entries, keys)
+        found, bad = resolve_record(pkg, entries, keys, decls)
         problems += bad + [refused_entry(pkg, e) for e in entries if NOT_EQUIVALENT.search(e["reason"])]
         # An entry whose reason says not equivalent is no proof (#5909): it waives nothing and fails.
         found = {site: e for site, e in found.items() if not NOT_EQUIVALENT.search(e["reason"])}
@@ -1620,15 +1772,15 @@ def refused_entry(pkg, e):
             "line, or reword it only if the mutant is in fact equivalent")
 
 
-def record_entry(pkg, fname, line, reason, accepted, keys, mutant=None, col=None):
+def record_entry(pkg, fname, line, reason, accepted, keys, mutant=None, col=None, deps=None):
     """The record entry for mutant (default: a statement deletion) at broker/<pkg>/<fname>:<line> (at
-    column col, when given) at the working tree, keys being file_keys'."""
+    column col, when given) at the working tree, keys being file_keys', resting on deps (see RECORD) when given."""
     mutant = mutant or DELETION
     k = keys[fname][line]
     same = sorted(n for n, o in keys[fname].items() if o == k)
     return {"file": fname, "mutant": mutant, "func": k[0], "decl": k[1], "stmt": list(k[2]), "at": k[3], "after": k[4],
             "occurrence": [same.index(line) + 1, len(same)], "reason": reason, "accepted": accepted,
-            **({"col": col} if col else {})}
+            **({"col": col} if col else {}), **({"deps": deps} if deps else {})}
 
 
 def cmd_waive(args):
@@ -1652,6 +1804,18 @@ def cmd_waive(args):
     with tempfile.TemporaryDirectory() as tmp:
         if (lister := build_lister(tmp)) is None:
             return 1
+        named, deps = sorted(set(args.dep or ())), []
+        decls, problem = list_dep_decls([f for f, _ in named], lister)
+        if problem:
+            print(f"mutgate: {problem}", file=sys.stderr)
+            return 1
+        for f, name in named:
+            # A dep is one declaration the proof cites, so a name declared twice (or not at all) names none.
+            if len(got := [dg for names, dg in decls[f] or () if name in names]) != 1:
+                print(f"mutgate: --dep {f}:{name}: {f} " + ("is no file" if decls[f] is None else
+                      f"declares {name} {len(got)} times, not once"), file=sys.stderr)
+                return 1
+            deps.append({"file": f, "func": name, "decl": got[0]})
         for pkg, sites in sorted(by_pkg.items()):
             keys, problem = file_keys(pkg, [f for f, *_ in sites], lister)
             missing = [f"broker/{pkg}/{f}:{n}" for f, n, *_ in sites if n not in (keys or {}).get(f, {})]
@@ -1663,6 +1827,8 @@ def cmd_waive(args):
                 return 1
             text, problem = read_record(pkg)
             entries, bad = record_entries(text or "")
+            if not problem and not bad:
+                decls, problem = list_dep_decls([x["file"] for e in entries for x in e.get("deps", ())], lister)
             if problem or bad:
                 print(f"mutgate: {problem or bad}", file=sys.stderr)
                 return 1
@@ -1671,7 +1837,7 @@ def cmd_waive(args):
                 for r in refused:
                     print(f"mutgate: {r}, then run waive again", file=sys.stderr)
                 return 1
-            new = [record_entry(pkg, f, n, reason, args.accepted, keys, kind, col) for f, n, reason, kind, col in sites]
+            new = [record_entry(pkg, f, n, reason, args.accepted, keys, kind, col, deps) for f, n, reason, kind, col in sites]
             # Every line of a parsed declaration has its digest; a line outside any has nothing to prove.
             if nodigest := [f"broker/{pkg}/{e['file']}: {e['stmt'][e['at']]!r}" for e in new if not e["decl"]]:
                 print(f"mutgate: {', '.join(nodigest)} is in no top-level declaration, so no entry can key on one",
@@ -1679,7 +1845,7 @@ def cmd_waive(args):
                 return 1
             # waive never guesses which stale entry a new one rewrites (L3 and UX on #5780): while a file it
             # writes holds one, it writes nothing and names each, for the builder to delete by hand.
-            if stale := [e for e in entries if e["file"] in keys and resolve_record(pkg, [e], keys)[1]]:
+            if stale := [e for e in entries if e["file"] in keys and resolve_record(pkg, [e], keys, decls)[1]]:
                 for e in stale:
                     print(f"mutgate: broker/{pkg}/{RECORD} holds a stale entry for {e['file']} {e['func'] or '(top level)'} "
                           f"{e['stmt'][e['at']]!r} ({e['mutant']}, occurrence {e['occurrence'][0]} of "
@@ -1753,17 +1919,20 @@ SITE_RUNS = 1
 SHARD_SECONDS = 1800
 
 
-def shard_count(targets, sites, suite=0.0, costs=None, overhead=0.0):
+def shard_count(targets, sites, suite=0.0, costs=None, overhead=0.0, lint=(0.0, ())):
     """K for a package with these target lines ({path: lines}) and deletion sites, whose whole test
     suite takes suite seconds: at least one. With costs (seconds per site, site_costs), a site costs
     those, not a whole suite, and each shard first spends overhead on its per-test pass (#6172).
     That pass leaves a shard's sites at least half of SHARD_SECONDS, so a pass past a quarter of the
-    job plans shards past the target, and one past 45 minutes past the job's 60 (#6217)."""
+    job plans shards past the target, and one past 45 minutes past the job's 60 (#6217). lint is
+    lint_budget's (setup, [seconds per site]): each shard spends setup, and each site its seconds (#6366)."""
     lines = sum(len(v) for v in targets.values())
+    setup, each = lint
     if costs is None:
-        work, budget = suite * (LINE_RUNS * lines + SITE_RUNS * len(sites)), SHARD_SECONDS
+        work, budget = suite * (LINE_RUNS * lines + SITE_RUNS * len(sites)) + sum(each), SHARD_SECONDS - setup
     else:
-        work, budget = suite * LINE_RUNS * lines + sum(costs), max(SHARD_SECONDS - overhead, SHARD_SECONDS / 2)
+        work = suite * LINE_RUNS * lines + sum(costs) + sum(each)
+        budget = max(SHARD_SECONDS - overhead, SHARD_SECONDS / 2) - setup
     return max(1, -(-lines // LINES_PER_SHARD), -(-len(sites) // SITES_PER_SHARD), math.ceil(work / budget))
 
 
@@ -2100,7 +2269,12 @@ def base_covered(pkg, mb, names, tmp, diff_text):
         print(f"mutgate: the base tree leaves out {name}, a link tar's data filter refuses", file=sys.stderr)
     if not (tree / "broker" / pkg).is_dir():
         return {}, None
-    hide_docs(tree / "broker")
+    # The head's names too (#6456): a doc either tree names is in both, so the base's run reads what the head's does.
+    MADE.add(tree.resolve())
+    try:
+        hide_docs(tree / "broker", BROKER)
+    finally:
+        MADE.discard(tree.resolve())
     got, problem = covered_by(pkg, names, tmp, tree / "broker")
     if problem:
         return None, f"at the base ({mb[:12]}), {problem}"
@@ -2152,7 +2326,12 @@ def unrun(was, every, code):
     evaluated, so text alone, not the profile, decides the other lines."""
     out = {}
     for p, ls in sorted(was.items()):
-        rows = _uncommented((BROKER / p.split("/", 1)[1]).read_bytes().decode("utf-8", "replace"), False).split("\n")
+        text = go_text((BROKER / p.split("/", 1)[1]).read_bytes())
+        if text is None:  # not Go text: every line it ran and the head does not is code (fail closed)
+            if left := sorted(ls - every.get(p, set())):
+                out[p] = left
+            continue
+        rows = _uncommented(text, False).split("\n")
         held = code.get(p, set())
         if left := sorted(n for n in ls - every.get(p, set()) if n <= len(rows) and rows[n - 1].strip()
                           and (n in held or not CLOSER.fullmatch(rows[n - 1].strip()))):
@@ -2188,8 +2367,6 @@ def unleash(cmd, **kw):
 
 
 def cmd_run(args):
-    if args.git:  # the gate's runs; a run of whole packages gates nothing
-        hide_docs(BROKER)
     pkgs = args.pkg or gated_packages()
     # Absolute: gremlins runs in broker/, so a relative -o would name a directory there (#3947).
     out = pathlib.Path(args.out).resolve()
@@ -2930,7 +3107,10 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
             if sum(st == "TIMED OUT" for st, _, _ in results) * 2 > len(batch):
                 jobs = 1  # each run needs the runner to itself: the rest runs alone, once
     lived = [(i, sites[i]["file"], texts[i]) for i, (st, _) in enumerate(statuses) if st == "LIVED"]
-    for i, name in lint_kills(pkg, lived, tmp, alone_mem).items():
+    kills, problem = lint_kills(pkg, lived, tmp, alone_mem)
+    if problem:
+        return None, problem
+    for i, name in kills.items():
         statuses[i] = ("KILLED", name)
     return [mutation(s, *st) for s, st in zip(sites, statuses)], None
 
@@ -2938,50 +3118,130 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
 # MUT-lint-held (#6346). A source lint holds statement shapes no test can observe (a key wiped right
 # after its sealer takes it), and fails on a tree without them. A deletion its package's tests let
 # live is KILLED when a listed lint test, run on a copy of broker/ with only that deletion in it (the
-# text the tests ran), fails, the same binary having passed on the unmutated copy: the lint read the
-# mutated tree and refused it. A lint that fails unmutated, times out or passes the memory cap
-# leaves the deletion LIVED. Each entry is (package under broker/, top-level test).
-LINTS = (("clerk/wipelint", "TestEverySealingKeyIsWipedRightAfterItsSealer"),
-         ("clerk/wipelint", "TestEveryOpenedPlaintextIsWipedOnEveryPath"))
+# text the tests ran), refuses it twice running, the same binary having passed on the unmutated copy:
+# the lint read the mutated tree and refused it, and a lint that refuses once is flaky, not a kill
+# (#6366). A refusal is the lint's own assertion: exit 1 with a `--- FAIL:` line naming the test and no
+# panic. A panic, a timeout, the memory cap or any other end leaves the deletion LIVED, as does a lint
+# that fails unmutated. Each entry is (package under broker/, top-level test, the files it reads: the
+# packages under these broker/ directories, and any file holding this text). A deletion in a file no
+# listed lint reads goes to no lint (#6366): a package with no sealer skips them, and no broker/ copy is made.
+CLERK = "clerk"
+LINTS = (("clerk/wipelint", "TestEverySealingKeyIsWipedRightAfterItsSealer", ((CLERK,), b'"github.com/ghbmrk/agentos/broker/clerk"')),
+         ("clerk/wipelint", "TestEveryOpenedPlaintextIsWipedOnEveryPath", ((CLERK,), None)))
+# Lint time has its own budget (#6366), which `plan` charges each shard and `delete` holds: SETUP for the
+# broker/ copy, each lint's build and its unmutated run (a cold cache compiles all it loads), and RUN for
+# each run on a deletion, which every lint reading its file may take, plus the refusal's confirming run.
+# Measured on #6365's sites: 4 s an unmutated run, under 1 s a mutated one, about 13 s in all for two sites.
+LINT_SETUP_SECONDS = 300
+LINT_RUN_SECONDS = 10
+
+
+def lints_for(pkg, text):
+    """The LINTS entries that read a file of broker/<pkg>/ holding text (bytes)."""
+    return [lint for lint in LINTS
+            if any(pkg == d or pkg.startswith(d + "/") for d in lint[2][0]) or (lint[2][1] is not None and lint[2][1] in text)]
+
+
+def lint_budget(pkg, sites):
+    """(setup seconds, [seconds for each site]) the lints spend on deletions at these sites of broker/<pkg>/
+    (each {"file": name, ...}): what `plan` charges a shard whose sites may all live and `delete` allows its LIVED ones."""
+    texts = {f: (BROKER / pkg / f).read_bytes() for f in {s["file"] for s in sites}}
+    runs = [len(n) + 1 if (n := lints_for(pkg, texts[s["file"]])) else 0 for s in sites]
+    return (LINT_SETUP_SECONDS if any(runs) else 0.0), [LINT_RUN_SECONDS * r for r in runs]
 
 
 def lint_kills(pkg, lived, tmp, mem=None):
-    """{index: lint test} for each (index, file, mutant text) of broker/<pkg>/ that a listed lint
-    refuses, as above; the first in LINTS order that fails names it."""
+    """({index: lint test}, None) for each (index, file, mutant text) of broker/<pkg>/ that a listed
+    lint reading its file refuses, as above, the first in LINTS order that refuses naming it; or (None,
+    problem) when the lints pass their budget (lint_budget), which names the lint time, not the tests'."""
+    lived = [(i, f, t, ls) for i, f, t in lived if (ls := lints_for(pkg, (BROKER / pkg / f).read_bytes()))]
     if not lived:
-        return {}
+        return {}, None
+    setup, each = lint_budget(pkg, [{"file": f} for _, f, _, _ in lived])
+    print(f"mutgate: broker/{pkg}/: {len(lived)} LIVED deletion(s) go to the lints, within {setup:.0f} s of lint setup "
+          f"and {sum(each):.0f} s of lint runs", file=sys.stderr)
+    began, deadline = time.monotonic(), time.monotonic() + setup
+
+    def left():
+        return deadline - time.monotonic()
+
+    def spent(where):
+        return None, (f"broker/{pkg}/'s lints passed their {where}, so no lint verdict was given; nothing was shown "
+                      "to survive. Rerun; if it recurs, LINT_SETUP_SECONDS or LINT_RUN_SECONDS in tools/mutgate.py are too small")
     tree = pathlib.Path(tmp) / "lint-tree"
     shutil.rmtree(tree, ignore_errors=True)
     shutil.copytree(BROKER, tree / "broker", symlinks=True)
-    lints = []
-    for n, (lpkg, name) in enumerate(LINTS):
-        cwd, binary = tree / "broker" / lpkg, pathlib.Path(tmp) / f"lint-{n}.test"
-        if not cwd.is_dir() or subprocess.run(["go", "test", "-c", "-o", str(binary), "."], cwd=cwd,
-                                              stdout=sys.stderr).returncode or not binary.exists():
-            print(f"mutgate: lint broker/{lpkg} {name} does not build; it kills nothing", file=sys.stderr)
-            continue
-        began = time.monotonic()
-        if run_tests(binary, cwd, LINT_SECONDS, mem, [name]) != "LIVED":
-            print(f"mutgate: lint broker/{lpkg} {name} does not pass unmutated; it kills nothing", file=sys.stderr)
-            continue
-        lints.append((cwd, binary, name, 3 * (time.monotonic() - began) + 10))
-    out = {}
-    for i, fname, text in lived:
-        path = tree / "broker" / pkg / fname
-        was = path.read_bytes()
-        path.write_bytes(text)
-        try:
-            for cwd, binary, name, limit in lints:
-                if run_tests(binary, cwd, limit, mem, [name]) == "KILLED" and failed_test(binary) == name:
-                    out[i] = name
-                    break
-        finally:
-            path.write_bytes(was)
-    shutil.rmtree(tree, ignore_errors=True)
-    return out
+    try:
+        lints = {}
+        for n, lint in enumerate(LINTS):
+            lpkg, name = lint[0], lint[1]
+            if not any(lint in ls for _, _, _, ls in lived):
+                continue
+            cwd, binary = tree / "broker" / lpkg, pathlib.Path(tmp) / f"lint-{n}.test"
+            if not cwd.is_dir() or subprocess.run(["go", "test", "-c", "-o", str(binary), "."], cwd=cwd,
+                                                  stdout=sys.stderr).returncode or not binary.exists():
+                print(f"mutgate: lint broker/{lpkg} {name} does not build; it kills nothing", file=sys.stderr)
+                continue
+            if left() <= 0:
+                return spent(f"{setup:.0f} s setup budget building the lints")
+            start = time.monotonic()
+            end = lint_run(binary, cwd, left(), mem, name)
+            if end == "timeout":
+                return spent(f"{setup:.0f} s setup budget on {name}'s unmutated run")
+            if end != "passed":
+                print(f"mutgate: lint broker/{lpkg} {name} does not pass unmutated ({end}); it kills nothing", file=sys.stderr)
+                continue
+            lints[lint] = (cwd, binary, name, 3 * (time.monotonic() - start) + 10)
+        out, deadline = {}, time.monotonic() + sum(each)  # the runs' own budget, after the setup's
+        for i, fname, text, ls in lived:
+            path = tree / "broker" / pkg / fname
+            was = path.read_bytes()
+            path.write_bytes(text)
+            try:
+                for cwd, binary, name, limit in (lints[lint] for lint in ls if lint in lints):
+                    ends, over = [], f"{sum(each):.0f} s budget of runs on {len(lived)} deletion(s) at {fname}"
+                    while len(ends) < 2 and (not ends or ends[-1] == "refused"):  # a refusal runs once more
+                        if left() <= 0:
+                            return spent(over)
+                        ends.append(lint_run(binary, cwd, min(limit, left()), mem, name))
+                        if ends[-1] == "timeout" and left() <= 0:  # the budget stopped it, not its own limit
+                            return spent(over)
+                    if ends == ["refused", "refused"]:
+                        out[i] = name
+                        break
+                    if ends != ["passed"]:
+                        print(f"mutgate: lint {name} on broker/{pkg}/{fname} ended {', then '.join(ends)}: "
+                              "not a refusal twice, so it kills nothing", file=sys.stderr)
+            finally:
+                path.write_bytes(was)
+        print(f"mutgate: broker/{pkg}/'s lints took {time.monotonic() - began:.0f} s", file=sys.stderr)
+        return out, None
+    finally:
+        shutil.rmtree(tree, ignore_errors=True)
 
 
-LINT_SECONDS = 600  # a lint's unmutated run: a cold build cache compiles what it loads
+def lint_run(binary, cwd, timeout, mem, name):
+    """How one run of lint test name ended: 'passed' (exit 0); 'refused' (exit 1, its own `--- FAIL:`
+    line, and no line opening `panic: ` or `fatal error: `, which a panic or a crash prints and a test's
+    message, indented, does not); 'timeout'; 'memory cap'; or 'exit N' (a panic is exit 2)."""
+    out = pathlib.Path(binary).with_suffix(".out")
+    with open(out, "wb") as log:
+        p = subprocess.Popen([str(binary), "-test.failfast", f"-test.run=^{name}$", f"-test.timeout={timeout + 2}s"],
+                             cwd=cwd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        end, _ = watch(p, timeout, mem)
+    if end == 0:
+        return "passed"
+    if end in ("timeout", "over"):
+        return {"over": "memory cap"}.get(end, end)
+    if end == 1 and failed_test(binary) == name:
+        with open(out, "rb") as f:
+            if not any(CRASHED.match(line) for line in f):
+                return "refused"
+        return "exit 1, with a panic"
+    return f"exit {end}"
+
+
+CRASHED = re.compile(rb"(panic: |fatal error: )")
 
 
 def add_mutants(data, mutants):
@@ -3001,7 +3261,6 @@ def add_mutants(data, mutants):
 
 
 def cmd_delete(args):
-    hide_docs(BROKER)
     out = pathlib.Path(args.out).resolve()
     diff = broker_diff(args.git, "HEAD")
     added, tests = changes(diff, args.git, "HEAD")
@@ -3337,7 +3596,6 @@ def cmd_plan(args):
     """The `mutants` matrix (#4961): [{pkg, shard, of}] for each package `claimed` names, K from its
     target lines and deletion sites. It runs the PR's tests (changed tests' coverage), so only in
     an untrusted job; K is a schedule, and `verify` checks the shards whatever K is."""
-    hide_docs(BROKER)
     diff = broker_diff(args.git, "HEAD")
     added, tests = changes(diff, args.git, "HEAD")
     counts, planned = [], {}
@@ -3374,7 +3632,8 @@ def cmd_plan(args):
                 return 1
             # `delete` runs each site with the tests that cover it (#6172), so its cost is theirs.
             costs, overhead = site_costs(pkg, sites, suite, tmp) if sites else (None, 0.0)
-            of = shard_count(targets, sites, suite, costs, overhead)
+            # Any site may live and go to the lints that read its file, each shard copying broker/ (#6366).
+            of = shard_count(targets, sites, suite, costs, overhead, lint_budget(pkg, sites))
             print(f"mutgate: {pkg}: {sum(map(len, targets.values()))} target lines, {len(sites)} deletion "
                   f"sites, a {suite:.0f} s suite, {of} shard(s)", file=sys.stderr)
             counts.append((pkg, of))
@@ -3474,6 +3733,15 @@ def commit_sha(v):
     return v
 
 
+def dep_ref(v):
+    """argparse type of --dep: (file, name), file a dep file (see RECORD) and name one its declaration declares."""
+    f, _, name = v.rpartition(":")
+    if not dep_file_ok(f) or not DEP_NAME.fullmatch(name):
+        raise argparse.ArgumentTypeError(f"{v!r} is not broker/<pkg>/<file>.go:<name>, a non-test .go file and a "
+                                         "name its top-level declaration declares (`Recv.Name` for a method)")
+    return f, name
+
+
 def pr_ref(v):
     if not re.fullmatch(r"#[1-9]\d*", v):
         raise argparse.ArgumentTypeError("give the PR as #<number>")
@@ -3517,6 +3785,9 @@ def main(argv=None):
     p.add_argument("--mutant", type=mutant_kind,
                    help=f"the one mutant kind the proofs are for, where a line names none (default {DELETION}; "
                         "or a gremlins type)")
+    p.add_argument("--dep", action="append", type=dep_ref, metavar="broker/PKG/FILE.go:NAME",
+                   help="a top-level declaration every one of these proofs rests on, outside its own (repeatable): "
+                        "the entries go stale when it changes (see RECORD's deps)")
     p = sub.add_parser("records")
     p.add_argument("pkg", nargs="*")
     for name in ("gate", "verify"):
@@ -3535,8 +3806,12 @@ def main(argv=None):
     if args.cmd == "packages":
         print("\n".join(gated_packages()))
         return 0
-    return {"claimed": cmd_claimed, "plan": cmd_plan, "run": cmd_run, "delete": cmd_delete, "report": cmd_report, "gate": cmd_gate,
-            "verify": cmd_verify, "waive": cmd_waive, "records": cmd_records}[args.cmd](args)
+    cmd = {"claimed": cmd_claimed, "plan": cmd_plan, "run": cmd_run, "delete": cmd_delete, "report": cmd_report, "gate": cmd_gate,
+           "verify": cmd_verify, "waive": cmd_waive, "records": cmd_records}[args.cmd]
+    if args.cmd in ("plan", "delete") or (args.cmd == "run" and args.git):  # the gate's runs (#6456)
+        with scratch():
+            return cmd(args)
+    return cmd(args)
 
 
 if __name__ == "__main__":
