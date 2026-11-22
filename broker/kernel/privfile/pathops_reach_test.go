@@ -10,6 +10,7 @@ package privfile
 import (
 	"encoding/json"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -213,11 +214,39 @@ func TestRootSideLintReach(t *testing.T) {
 			if err := os.Symlink(target, filepath.Join(root, c.link)); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := rootBinaries(root); err == nil || !strings.Contains(err.Error(), c.link+": ") || !strings.Contains(err.Error(), c.want) {
+			_, err := rootBinaries(root)
+			if err == nil || !strings.Contains(err.Error(), c.link+": ") || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("got %v, want a refusal of %s with %q", err, c.link, c.want)
+			}
+			// A dependency entry is started by name: a file in its place
+			// is no fix, so its refusal never says to ship one (#6493 UX 1).
+			if dep := isDependencyDir(path.Base(path.Dir(c.link))); dep != strings.HasSuffix(err.Error(), "; "+dependencyStep) || dep && strings.Contains(err.Error(), "ship the file itself") {
+				t.Fatalf("got %v, want the dependency step exactly when %s is a dependency entry", err, c.link)
 			}
 		})
 	}
+	// systemd reads a dependency directory's entries by name only and
+	// starts the unit of that name from its search path, so a regular file
+	// there is not what runs: the qemu build would start the packaged
+	// debug-shell.service (#6493 UX 1 and 4).
+	for _, dep := range []string{"multi-user.target.wants", "multi-user.target.requires", "multi-user.target.upholds", "agentos-z.service.wants"} {
+		t.Run("refuses a regular file in "+dep, func(t *testing.T) {
+			files := reachBase()
+			files[camCm4+"etc/systemd/system/debug-shell.service"] = "[Service]\nExecStart=/bin/true\n"
+			entry := camQemu + "etc/systemd/system/" + dep + "/debug-shell.service"
+			files[entry] = "[Service]\nExecStart=/bin/true\n"
+			if _, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), entry+": a regular file in a dependency directory") || !strings.HasSuffix(err.Error(), dependencyStep) {
+				t.Fatalf("got %v, want %s refused as a file in a dependency directory", err, entry)
+			}
+		})
+	}
+	t.Run("reads a regular file in a directory of no unit's dependencies", func(t *testing.T) {
+		files := reachBase()
+		files[ext+"etc/agentos/x.wants/notes"] = "plain\n"
+		if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
+			t.Fatal(err)
+		}
+	})
 	// An image merges its overlays, and a later one's copy wins (camnode:
 	// common, then the board's). A link in one overlay may land on another
 	// overlay's copy, so that copy must be read too (#6003 L3 round 3).

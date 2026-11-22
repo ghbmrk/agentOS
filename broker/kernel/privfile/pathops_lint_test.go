@@ -1993,6 +1993,25 @@ var unitTypes = map[string]bool{".service": true, ".socket": true, ".mount": tru
 // isDropinDir reports whether dir names a drop-in directory of a unitTypes
 // type: a unit's or prefix's (x.service.d, agentos-.socket.d) or the
 // type's own (service.d).
+// isDependencyDir reports whether dir is a unit's dependency directory
+// (systemd.unit(5) ".wants/, .requires/, .upholds/"): systemd reads each
+// entry there by name only.
+func isDependencyDir(dir string) bool {
+	for _, s := range []string{".wants", ".requires", ".upholds"} {
+		if t, ok := strings.CutSuffix(dir, s); ok && allUnitTypes[path.Ext(t)] {
+			return true
+		}
+	}
+	return false
+}
+
+// allUnitTypes are every unit type systemd loads (systemd.unit(5)), whose
+// units may own dependency directories.
+var allUnitTypes = map[string]bool{".service": true, ".socket": true, ".device": true, ".mount": true, ".automount": true, ".swap": true, ".target": true, ".path": true, ".timer": true, ".slice": true, ".scope": true}
+
+// dependencyStep is the fix a refused dependency entry is told.
+const dependencyStep = "make the entry a link to ../<its name> or ../<its template>, ship that unit in an overlay of every build holding the entry (or move the entry to the overlay that ships it), or drop the entry"
+
 func isDropinDir(dir string) bool {
 	t, ok := strings.CutSuffix(dir, ".d")
 	return ok && (unitTypes[path.Ext(t)] || unitTypes["."+t])
@@ -2776,7 +2795,13 @@ func rootBinaries(root string) ([]string, error) {
 			// WalkDir does not descend a link; systemd and the image
 			// build do (#4718 item 3). linkWhy says which links are
 			// read as the file they name; every other link is refused.
-			return fmt.Errorf("%s: %s; ship the file itself", relTo(root, p), linkWhy(root, p))
+			// A dependency entry is started by its name, so a file in its
+			// place is no fix (#6493 UX 1).
+			step := "ship the file itself"
+			if isDependencyDir(dir) {
+				step = dependencyStep
+			}
+			return fmt.Errorf("%s: %s; %s", relTo(root, p), linkWhy(root, p), step)
 		case d.Type()&os.ModeSymlink != 0 && overlayRoot(relTo(root, p)) != "":
 			// An overlay link is read through every overlay's copy at its
 			// target's path (linkWhy): a copy of its own name is read as a
@@ -2785,6 +2810,11 @@ func rootBinaries(root string) ([]string, error) {
 				instances = append(instances, relTo(root, p))
 			}
 			return nil
+		case d.Type()&os.ModeSymlink == 0 && isDependencyDir(dir):
+			// systemd reads only the entry's name and loads the unit of
+			// that name from its search path, so a file here is not what
+			// runs (#6493 UX 4).
+			return fmt.Errorf("%s: a regular file in a dependency directory, where systemd reads only the entry's name and starts the unit of that name from its search path, not this file; %s", relTo(root, p), dependencyStep)
 		case isManagerConf(p):
 			confs = append(confs, p)
 		case unitTypes[filepath.Ext(p)]:
@@ -3594,7 +3624,7 @@ func linkWhy(root, p string) string {
 			}
 		}
 		if !found {
-			return "a link to no file in the image built from " + strings.Join(m, " and ") + ", where systemd would start a packaged unit of that name"
+			return "a link to no file in the image built from " + strings.Join(m, " and ") + ", where systemd would start a packaged unit of that name, if any"
 		}
 	}
 	for _, q := range []string{from, to} {
