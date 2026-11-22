@@ -39,4 +39,6 @@ jobs:
           # later edits, which would read as its own growth or hide it.
           git show HEAD^1:tools/word_budget.py > "$RUNNER_TEMP/word_budget.py" 2>/dev/null \
             || cp tools/word_budget.py "$RUNNER_TEMP/word_budget.py"
+          git show HEAD^1:tools/record_merge.py > "$RUNNER_TEMP/record_merge.py" 2>/dev/null \
+            || cp tools/record_merge.py "$RUNNER_TEMP/record_merge.py"
           python3 -I "$RUNNER_TEMP/word_budget.py" --git HEAD^1 HEAD | tee -a "$GITHUB_STEP_SUMMARY"

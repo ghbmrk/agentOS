@@ -16,8 +16,9 @@ a body can change after the reviews accept a head, the line cannot without a new
 base already holds is history and waives nothing; an added line that is malformed or names
 another PR fails the check.
 
-word-budget.yml runs the base commit's copy of this file, so a PR cannot loosen the check
-for itself; only the PR that adds the file runs its own copy. Standard library only.
+word-budget.yml runs the base commit's copy of this file and of tools/record_merge.py, so a PR
+cannot loosen the check for itself; only the PR that adds the file runs its own copy. Standard
+library only.
 
 Usage:
   tools/word_budget.py                                 counts in the working tree
@@ -25,11 +26,18 @@ Usage:
       a waiver counts only with the PR number in $PR_NUMBER
 """
 import argparse
+import importlib.util
 import os
 import pathlib
 import re
 import subprocess
 import sys
+
+# The record is a declared list (#6441): its class comes from record_merge, loaded from beside this copy by path,
+# since `python3 -I` puts no script directory on sys.path (word-budget.yml copies the base's beside it).
+_rm = importlib.util.spec_from_file_location("record_merge", pathlib.Path(__file__).resolve().parent / "record_merge.py")
+record_merge = importlib.util.module_from_spec(_rm)
+_rm.loader.exec_module(record_merge)
 
 SPEC = ("SPEC.md",)
 PROCESS = ("CLAUDE.md", "AGENTS.md", "PLAN.md", "docs/OPERATING.md", "docs/LANES.md")
@@ -84,14 +92,25 @@ def active_decision(decisions, ident, pr):
     return False
 
 
-def record_lines(text):
-    """The record's entries, whitespace runs folded to one space: lines neither blank nor `#` comments."""
-    return [" ".join(x.split()) for x in (text or "").splitlines() if x.strip() and not x.lstrip().startswith("#")]
+def record_lines(text, where=RECORD):
+    """The record's entries, whitespace runs folded to one space: lines neither blank nor `#` comments.
+    Lines are "\n"-separated and SystemExit names any character outside printable ASCII: splitlines()
+    also ends a line at "\r", U+0085, U+2028 and others, so a waiver hidden in a comment would count
+    unseen (trusted_base.list_lines' rule, REV-CHK-crlf; #6525 Security)."""
+    record_merge.listed(RECORD)
+    out = []
+    for n, line in enumerate((text or "").split("\n"), 1):
+        bad = [c for c in line if not " " <= c <= "~"]
+        if bad:
+            raise SystemExit(f"{where}:{n}: character {bad[0]!r} outside printable ASCII")
+        if line.strip() and not line.lstrip().startswith("#"):
+            out.append(" ".join(line.split()))
+    return out
 
 
 def waivers(base_text, head_text, pr):
     """([decision ID], [problem]) from the record lines the head adds to the base's, for PR `pr`."""
-    got, bad, old = [], [], set(record_lines(base_text))
+    got, bad, old = [], [], set(record_lines(base_text, f"{RECORD} (base)"))
     for line in record_lines(head_text):
         if line in old:
             continue
@@ -126,7 +145,7 @@ def check(base, head, record, decisions, pr=None):
 def git_record(ref):
     """The record's text at `ref`, or "" where the tree has none."""
     r = subprocess.run(["git", "cat-file", "-e", f"{ref}:{RECORD}"], capture_output=True)
-    return _git("show", f"{ref}:{RECORD}").decode("utf-8") if r.returncode == 0 else ""
+    return _git("show", f"{ref}:{RECORD}").decode("utf-8", "surrogateescape") if r.returncode == 0 else ""
 
 
 def main(argv=None):

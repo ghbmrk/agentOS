@@ -114,6 +114,18 @@ class RecordTest(unittest.TestCase):
     def test_comments_and_blanks_are_not_entries(self):
         self.assertEqual(word_budget.waivers("", "# word-budget #43 -- D-7\n\n   \n  # x\n", 42), NONE)
 
+    def test_a_waiver_hidden_after_an_odd_line_break_is_refused(self):
+        # #6525 Security/L3: splitlines() ends a line at these, so a waiver inside a comment the
+        # diff shows as one line would count unseen. Split on "\n" only; refuse the rest, naming the line.
+        for brk in ("\x85", "\u2028", "\u2029", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\r", "\t", "\0"):
+            for base in (False, True):
+                with self.subTest(brk=repr(brk), base=base):
+                    text = f"# Lines stay as history{brk}word-budget #42 -- D-7\n"
+                    with self.assertRaises(SystemExit) as e:
+                        word_budget.waivers(text, "", 42) if base else word_budget.waivers("", text, 42)
+                    self.assertIn("tools/word_budget_reasons.txt", str(e.exception.code))
+                    self.assertIn(":1:", str(e.exception.code))
+
     def test_the_failure_names_the_record(self):
         ok, lines = word_budget.check(self.base, self.grew, NONE, DECISIONS, 42)
         self.assertFalse(ok)
