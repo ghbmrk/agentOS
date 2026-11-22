@@ -150,9 +150,6 @@ type Link struct {
 	// began before it may be a dead bridge's connection, so it is handed
 	// nothing (its item would be lost).
 	okSince time.Time
-	// missedSeen holds a digest of each text counted in the open outage,
-	// so a sender that retries a refused text counts it once (#6292).
-	missedSeen map[[sha256.Size]byte]struct{}
 	// iccid is the SIM the bridge reports while the line is swapped or
 	// unbound ("": none, or unreadable); adopted, the one Adopt recorded,
 	// until the bridge reports another state or SIM.
@@ -190,7 +187,7 @@ func (l *Link) Inbox() <-chan modem.SMS { return l.inbox }
 // usableLocked says the owner line can carry texts now, and opens an
 // outage when it cannot. Caller holds mu.
 func (l *Link) usableLocked(now time.Time) bool {
-	ok := l.state == bridgeproto.StateOK && now.Sub(l.seen) <= Silent
+	ok := l.okLocked(now)
 	if !ok && l.outage == nil {
 		from := now
 		if l.state == bridgeproto.StateOK { // silent: down since last heard
@@ -199,6 +196,21 @@ func (l *Link) usableLocked(now time.Time) bool {
 		l.outage = &Outage{From: from}
 	}
 	return ok
+}
+
+// okLocked says the owner line can carry texts at now. Caller holds mu.
+func (l *Link) okLocked(now time.Time) bool {
+	return l.state == bridgeproto.StateOK && now.Sub(l.seen) <= Silent
+}
+
+// Usable says the owner line can carry a text now, and opens no outage
+// and counts nothing. A sender holding a refused text asks it before
+// trying again, so its retries over an outage are not one more missed
+// text each (CH-12, #6292).
+func (l *Link) Usable() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.okLocked(l.cfg.Now())
 }
 
 // heardLocked notes the bridge spoke at now, and closes an outage the line
@@ -212,7 +224,7 @@ func (l *Link) heardLocked(now time.Time) {
 	}
 	o := *l.outage
 	o.To = now
-	l.outage, l.last, l.okSince, l.missedSeen = nil, o, now, nil
+	l.outage, l.last, l.okSince = nil, o, now
 	if o.Missed == 0 {
 		return
 	}
@@ -389,7 +401,7 @@ func (l *Link) deliver(text string, request bool) Receipt {
 	now := l.cfg.Now()
 	l.mu.Lock()
 	if !l.usableLocked(now) || len(l.queue)+len(l.out) >= MaxQueued {
-		counted := l.outage != nil && l.firstMissLocked(text, request)
+		counted := l.outage != nil
 		if counted {
 			l.outage.Missed++
 			if request {
@@ -442,34 +454,6 @@ func (l *Link) deliver(text string, request bool) Receipt {
 		l.mu.Unlock()
 		return Receipt{Outcome: ReceiptUnknown, Evidence: it.ID}
 	}
-}
-
-// missedKeys bounds missedSeen. Past it, a text not yet seen counts on
-// every refusal, as before #6292: the count can then run high, never low.
-const missedKeys = 1024
-
-// firstMissLocked says text (of its kind) is refused for the first time in
-// the open outage. A retrier, such as agentosd's held unread-snapshot
-// notice every 30 s, sends the same words again; the owner missed one
-// text, so the recovery text counts one (CH-12, #6292). Two senders that
-// send the very same words in one outage count once: the owner was not
-// told those words, once. Caller holds mu.
-func (l *Link) firstMissLocked(text string, request bool) bool {
-	kind := "text\x00"
-	if request {
-		kind = "request\x00"
-	}
-	key := sha256.Sum256([]byte(kind + text))
-	if _, seen := l.missedSeen[key]; seen {
-		return false
-	}
-	if len(l.missedSeen) < missedKeys {
-		if l.missedSeen == nil {
-			l.missedSeen = map[[sha256.Size]byte]struct{}{}
-		}
-		l.missedSeen[key] = struct{}{}
-	}
-	return true
 }
 
 // dropLocked forgets it, queued or handed out; a late result for it is

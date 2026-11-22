@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -227,12 +228,13 @@ func TestInformOwnerNotSentOnlyWithoutChannel(t *testing.T) {
 	}
 }
 
-// REQ: CH-12. VM-snap-unread-notice-fu-2 (#6292): a held notice retried
-// through the real owner link over an outage of many retry periods is one
-// text the owner missed, so the recovery text counts one, not one per try.
+// REQ: CH-12. VM-snap-unread-notice-fu-2 (#6292): a held notice over an
+// outage of many retry periods, through the real owner link, is one text
+// the owner missed: its retries wait for the line rather than be refused
+// and counted each time, and it goes once the line is back.
 func TestHeldUnreadNoticeOverAnOutageCountsOneMissedText(t *testing.T) {
 	const own = "+15550000999"
-	link := modemlink.New(modemlink.Config{Owner: own})
+	link := modemlink.New(modemlink.Config{Owner: own, SendWait: time.Millisecond})
 	state := func(line string) {
 		t.Helper()
 		b, _ := json.Marshal(bridgeproto.State{OwnerLine: line})
@@ -241,28 +243,121 @@ func TestHeldUnreadNoticeOverAnOutageCountsOneMissedText(t *testing.T) {
 		}
 	}
 	state(bridgeproto.StateDown)
+	caps := &capState{}
+	caps.ownerLineUsable(link.Usable)
 	const periods = 20
-	var tries atomic.Int32
-	enough := make(chan struct{})
+	var tries, asked atomic.Int32
+	sent := make(chan string, 4)
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	u := newUnreadNotices(ctx, time.Millisecond, func(text string) error {
-		if tries.Add(1) == periods {
+		tries.Add(1)
+		if err := link.Send(own, text); err != nil {
+			return err
+		}
+		sent <- text
+		return nil
+	})
+	enough := make(chan struct{})
+	u.up = func() bool {
+		if asked.Add(1) == periods {
 			close(enough)
 		}
-		return link.Send(own, text)
-	})
+		return caps.ownerLineUp()
+	}
 	u.gone(1, true)
 	select {
 	case <-enough:
 	case <-time.After(5 * time.Second):
-		t.Fatalf("%d tries, want %d", tries.Load(), periods)
+		t.Fatalf("the line was asked %d times, want %d", asked.Load(), periods)
 	}
-	u.mu.Lock()
-	cancel()
-	u.mu.Unlock()
+	if n := tries.Load(); n != 1 {
+		t.Fatalf("%d sends while the line was down, want the first only", n)
+	}
 	state(bridgeproto.StateOK)
 	if o := link.LastOutage(); o.Missed != 1 {
-		t.Fatalf("after %d refused tries the outage counts %d missed texts, want 1", tries.Load(), o.Missed)
+		t.Fatalf("after %d retry periods the outage counts %d missed texts, want 1", periods, o.Missed)
+	}
+	deadline := time.After(5 * time.Second)
+	for tries.Load() < 2 {
+		select {
+		case <-deadline:
+			t.Fatal("the held notice was not sent once the line was back")
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+// With nothing wired, the owner line reads as up, so a sender tries; once
+// wired, it reads as the link says.
+func TestOwnerLineUpUntilWired(t *testing.T) {
+	caps := &capState{}
+	if !caps.ownerLineUp() {
+		t.Fatal("an unwired owner line reads as down")
+	}
+	up := false
+	caps.ownerLineUsable(func() bool { return up })
+	if caps.ownerLineUp() {
+		t.Fatal("a down owner line reads as up")
+	}
+	up = true
+	if !caps.ownerLineUp() {
+		t.Fatal("an up owner line reads as down")
+	}
+}
+
+// openVM gives the held notice the owner line's state, and main wires the
+// line's state from the modem bridge's link (#6292).
+func TestHeldUnreadNoticeAsksTheOwnerLine(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	must(t, err)
+	s := string(src)
+	link := strings.Index(s, "\t\tlink := modemlink.New(")
+	wire := strings.Index(s, "\t\tcaps.ownerLineUsable(link.Usable)\n")
+	if link < 0 || wire < link || strings.Count(s, "caps.ownerLineUsable(") != 1 {
+		t.Fatal("main.go does not wire the owner line's state from the modem link once, after making it")
+	}
+	if open := strings.Index(s, "openVM(ctx, vmc, caps,"); open < wire {
+		t.Fatalf("openVM at %d, before the owner line is wired at %d", open, wire)
+	}
+	caps := &capState{}
+	caps.ownerLineUsable(func() bool { return false })
+	var tries int
+	told := make(chan struct{}, 1)
+	state := t.TempDir()
+	must(t, os.MkdirAll(filepath.Join(state, "snapshots", "s0000000007", "meta.json"), 0o700))
+	var m *vm.Manager
+	adm, err := admission.New(admission.Config{CapacityMB: 8000}, lateManager{&m})
+	must(t, err)
+	defer func(d time.Duration) { unreadRetry = d }(unreadRetry)
+	unreadRetry = time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	m, err = openVM(ctx, vm.Config{
+		StateDir: state, Images: map[string]string{"base": t.TempDir()},
+		Runtime: &sleepRuntime{running: map[string]bool{}}, Admit: adm, NoCgroups: true, NoQuota: true,
+		FreeBytes: func(string) (int64, error) { return 1 << 50, nil },
+	}, caps, func(string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		tries++
+		if tries > 1 {
+			told <- struct{}{}
+		}
+		return modem.ErrNotSent
+	})
+	must(t, err)
+	must(t, m.ForgetSince(context.Background(), "x.0", time.Now()))
+	select {
+	case <-told:
+		t.Fatal("a held notice was sent again while the owner line was down")
+	case <-time.After(50 * unreadRetry):
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if tries != 1 {
+		t.Fatalf("%d sends, want the first only", tries)
 	}
 }
 

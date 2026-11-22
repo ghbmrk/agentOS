@@ -326,8 +326,7 @@ func TestAnUnpluggedModemIsDownAndRecovers(t *testing.T) {
 	dev.Unplug()
 	r.waitNote(func(n string) bool { return strings.HasPrefix(n, "I can't reach my phone modem.") })
 	for i := 0; i < 2; i++ {
-		// Distinct words: one text refused again counts once (#6292).
-		if err := r.link.Send(ownerNum, fmt.Sprintf("approve? code 12345%d", i)); !errors.Is(err, modem.ErrDown) {
+		if err := r.link.Send(ownerNum, "approve? code 123456"); !errors.Is(err, modem.ErrDown) {
 			t.Fatalf("send while unplugged: %v", err)
 		}
 	}

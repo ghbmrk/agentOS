@@ -131,8 +131,7 @@ func outageNoticeOf(t *testing.T, texts, requests int) string {
 		if i >= texts {
 			send = l.SendRequest
 		}
-		// Distinct words: one text refused again counts once (#6292).
-		if err := send(phoneNum, fmt.Sprintf("Daily digest: 48291%d canary-e2e-7f3a", i)); err == nil {
+		if err := send(phoneNum, "Daily digest: 482913 canary-e2e-7f3a"); err == nil {
 			t.Fatal("a send before the bridge reported the line went")
 		}
 	}

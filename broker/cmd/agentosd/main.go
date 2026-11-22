@@ -590,6 +590,7 @@ func main() {
 		link := modemlink.New(modemlink.Config{Owner: cfg.OwnerNumber, Record: recordOwnerSIM(*modemRoles), Picture: pictures.tell, Logf: log.Printf})
 		cfg.Notes = append(cfg.Notes, link.PictureNote)
 		cfg.Modem, cfg.OwnerOps, cfg.OwnerDrainOps, cfg.OwnerDrainLive = link, link.Ops(), modemlink.DrainOps(), link.Bridged
+		caps.ownerLineUsable(link.Usable)
 		if cfg.PageSocket != nil {
 			cfg.PageSocket.Line, cfg.PageSocket.AdoptSIM = pageLine(link), adoptSIM(link.Adopt)
 		}

@@ -294,7 +294,7 @@ func TestRecoveryTextCountsWhatWasNotSent(t *testing.T) {
 		if i > 0 {
 			send = l.SendRequest
 		}
-		if err := send(ownerNum, fmt.Sprintf("approve? code 123%d", i)); !errors.Is(err, modem.ErrDown) {
+		if err := send(ownerNum, "approve? code 1234"); !errors.Is(err, modem.ErrDown) {
 			t.Fatalf("send while down: %v", err)
 		}
 		clk.add(30 * time.Minute)
@@ -749,63 +749,33 @@ func TestQueuedCountsTextsWaitingForTheBridge(t *testing.T) {
 	}
 }
 
-// REQ: CH-12. #6292: a sender that retries a refused text over an outage, as
-// agentosd's held unread-snapshot notice does every 30 s, cost the owner
-// one text, so the recovery text counts one and the journal logs one;
-// the same words as a request, and other words, count apart. The next
-// outage counts afresh.
-func TestARetriedTextCountsOnceInAnOutage(t *testing.T) {
-	l, clk := rig(t)
-	var logged int
-	l.cfg.Logf = func(f string, a ...any) {
-		if strings.HasPrefix(fmt.Sprintf(f, a...), MissedLog) {
-			logged++
-		}
+// REQ: CH-12. #6292: Usable says whether the owner line can carry a text
+// now, as a send would find it, but opens no outage and counts nothing,
+// so a sender holding a refused text can ask before trying again. New's
+// defaults stand when the config leaves them unset.
+func TestUsableAsksWithoutCounting(t *testing.T) {
+	clk := &clock{t: time.Date(2026, 10, 5, 13, 5, 0, 0, time.UTC)}
+	l := New(Config{Owner: ownerNum, Now: clk.now})
+	if l.cfg.SendWait != SendWait || l.cfg.PollWait != bridgeproto.OutboxWait {
+		t.Fatalf("defaults %v %v, want %v %v", l.cfg.SendWait, l.cfg.PollWait, SendWait, bridgeproto.OutboxWait)
 	}
-	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateDown}, nil)
-	for i := 0; i < 120; i++ { // an hour of 30 s retries
-		if err := l.Send(ownerNum, "synthetic held notice"); !errors.Is(err, modem.ErrDown) {
-			t.Fatalf("retry %d while down: %v", i, err)
-		}
-		clk.add(30 * time.Second)
+	if l.Usable() {
+		t.Fatal("a line the bridge never reported reads as usable")
 	}
-	if err := l.SendRequest(ownerNum, "synthetic held notice"); !errors.Is(err, modem.ErrDown) {
-		t.Fatalf("request while down: %v", err)
+	l.state, l.seen = bridgeproto.StateOK, clk.now()
+	if !l.Usable() {
+		t.Fatal("a line reported ok just now reads as unusable")
 	}
-	if err := l.Send(ownerNum, "synthetic other notice"); !errors.Is(err, modem.ErrDown) {
-		t.Fatalf("other text while down: %v", err)
+	clk.add(Silent)
+	if !l.Usable() {
+		t.Fatal("a line heard exactly Silent ago reads as unusable")
 	}
-	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateOK}, nil)
-	if o := l.LastOutage(); o.Missed != 3 || o.Requests != 1 {
-		t.Fatalf("outage %+v, want 3 missed (the retried text once), 1 request", o)
+	clk.add(time.Nanosecond)
+	if l.Usable() {
+		t.Fatal("a line silent past Silent reads as usable")
 	}
-	if logged != 3 {
-		t.Fatalf("%d missed lines logged, want 3", logged)
-	}
-	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateDown}, nil)
-	if err := l.Send(ownerNum, "synthetic held notice"); !errors.Is(err, modem.ErrDown) {
-		t.Fatalf("send in the next outage: %v", err)
-	}
-	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateOK}, nil)
-	if o := l.LastOutage(); o.Missed != 1 {
-		t.Fatalf("next outage %+v, want the same words counted again", o)
-	}
-}
-
-// Past missedKeys distinct texts in one outage, a text not yet seen counts
-// on every refusal: the count may run high, never low.
-func TestMissedCountPastItsBoundRunsHighNotLow(t *testing.T) {
-	l, _ := rig(t)
-	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateDown}, nil)
-	for i := 0; i < missedKeys; i++ {
-		_ = l.Send(ownerNum, fmt.Sprintf("synthetic %d", i))
-	}
-	_ = l.Send(ownerNum, "synthetic 0") // seen: once
-	_ = l.Send(ownerNum, "synthetic late")
-	_ = l.Send(ownerNum, "synthetic late") // unseen past the bound: counts again
-	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateOK}, nil)
-	if o := l.LastOutage(); o.Missed != missedKeys+2 {
-		t.Fatalf("outage %+v, want %d", o, missedKeys+2)
+	if l.outage != nil {
+		t.Fatalf("asking opened an outage: %+v", *l.outage)
 	}
 }
 
