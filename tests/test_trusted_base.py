@@ -29,6 +29,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
 
 OWN = "github.com/ghbmrk/agentos/broker"
+# D-7 names the test PR (#42, as --pr 42); D-5 is active but names another PR (#2945).
+PR = 42
 
 
 def write(root, rel, text):
@@ -94,9 +96,8 @@ class Pure(unittest.TestCase):
         self.assertEqual(got, {"registry": "dec reads its own frames"})
         self.assertEqual(len(bad), 4, bad)
         self.assertEqual(tb.reasons(["parsers #3 -- an old reason"], ["parsers #3 -- an old reason"], 3), ({}, []))
-        self.assertEqual(set(tb.reasons([], head[:1] + head[3:4], None)[0]), {"registry", "parsers"})
 
-    def rec(self, *lines, pr=None):
+    def rec(self, *lines, pr=1):
         return tb.reasons([], list(lines), pr)
 
     def m(self, lines=10, deps=10, parsers=("p",), unclassified=()):
@@ -148,8 +149,8 @@ class SyntheticTree(unittest.TestCase):
         self.base, self.head = os.path.join(self.tmp, "base"), os.path.join(self.tmp, "head")
         tree(self.base)
 
-    def check(self, pr=None):
-        return run(["check", "--base-tree", self.base, "--head-tree", self.head, *(["--pr", str(pr)] if pr else [])])
+    def check(self, pr=PR):
+        return run(["check", "--base-tree", self.base, "--head-tree", self.head, "--pr", str(pr)])
 
     def test_counts(self):
         # KRN-2m-a/b/c: own lines are compiled own files only (no _test.go), deps the
@@ -232,7 +233,7 @@ class SyntheticTree(unittest.TestCase):
     def test_markdown_goes_to_the_summary(self):
         tree(self.head)
         summary = os.path.join(self.tmp, "summary.md")
-        rc, _ = run(["check", "--base-tree", self.base, "--head-tree", self.head, "--markdown", summary])
+        rc, _ = run(["check", "--base-tree", self.base, "--head-tree", self.head, "--pr", str(PR), "--markdown", summary])
         self.assertEqual(rc, 0)
         self.assertIn("## Trusted base (KRN-2)", pathlib.Path(summary).read_text())
 
@@ -300,7 +301,7 @@ class CorePure(unittest.TestCase):
                                             DECISIONS, 43)[0])
             self.assertTrue(tb.compare_core(self.c(), head_core, self.m(), head, rec("trusted-core #43 -- D-7", pr=43),
                                             DECISIONS, 43)[0])
-            self.assertTrue(tb.compare_core(self.c(), head_core, self.m(), head, rec("trusted-core #42 -- D-7", pr=None),
+            self.assertTrue(tb.compare_core(self.c(), head_core, self.m(), head, rec("trusted-core #42 -- D-7"),
                                             DECISIONS)[0])
 
     def test_unlisted_and_unused_fail_whatever_the_body(self):
@@ -522,7 +523,7 @@ class CoreTree(unittest.TestCase):
 
     def test_the_raise_is_the_base_trees_decision_and_names_the_pr(self):
         # #2945 (L3 3 and Security R2 on #2941): a row the PR adds itself, a row for another PR,
-        # an inactive row and a waiver checked with no PR number all fail.
+        # and an inactive row all fail; a check with no PR number is refused (#6406).
         n = tb.measure_core(self.base, tb.parse_core(CORE))["lines"]
         up = dict(extra_own=4, head_ceil=ceilings(n + 4))
         own_row = "| D-9 | 2026-10-24 | active | raise for #42 |\n"
@@ -530,7 +531,6 @@ class CoreTree(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertIn("`ceiling #42 -- D-9` names no active DECISIONS.md row on the base branch that names #42", out)
         self.assertEqual(self.check("ceiling #42 -- D-7\n", pr=43, **up)[0], 1)
-        self.assertEqual(self.check("ceiling #42 -- D-7\n", pr=None, **up)[0], 1)
         self.assertEqual(self.check("ceiling #42 -- D-5\n", **up)[0], 1)
         self.assertEqual(self.check("ceiling #42 -- D-6\n", **up)[0], 1)
         self.assertEqual(self.check("trusted-core #42 -- D-7\n", **up)[0], 1)
@@ -541,8 +541,9 @@ class CoreTree(unittest.TestCase):
         write(self.base, tb.REASONS, "ceiling #42 -- D-7\n")
         self.assertEqual(self.check("ceiling #42 -- D-7\n", **up)[0], 1)
         os.remove(os.path.join(self.base, tb.REASONS))
-        # #4946 UX: with no PR number the message says so instead of naming #None.
-        rc, out = self.check("ceiling #42 -- D-7\n", pr=None, **up)
+        # #4946 UX: with no PR number the message says so instead of naming #None (the CLI
+        # requires --pr since #6406, so this reaches waiver() only from a direct call).
+        out = tb.waiver("ceiling", rec("ceiling #42 -- D-7"), DECISIONS, None)
         self.assertIn("`ceiling -- D-7` cannot be checked without the PR number (--pr)", out)
         self.assertNotIn("#None", out)
 
@@ -1308,7 +1309,7 @@ class MergeMeasure(unittest.TestCase):
         self.git("worktree", "add", "-q", "--detach", old + "/b", merge_base)
         self.git("worktree", "add", "-q", "--detach", old + "/h", head)
         # The merge-base measure this replaces reads the branch as a 10-line cut.
-        self.assertEqual(run(["check", "--base-tree", old + "/b", "--head-tree", old + "/h"])[0], 0)
+        self.assertEqual(run(["check", "--base-tree", old + "/b", "--head-tree", old + "/h", "--pr", str(PR)])[0], 0)
         rc, out = self.measure(head)
         self.assertEqual(rc, 1, out)
         self.assertIn("ends above its ceiling", out)
@@ -1555,6 +1556,183 @@ class BodyIsNotRead(unittest.TestCase):
         self.assertEqual(tb.reasons(["ceiling #42 -- D-7"], ["ceiling #42 -- D-7"], PR), ({}, []))
         self.assertEqual(tb.waiver("ceiling", rec("ceiling #42 -- D-7"), DECISIONS, PR), "")
         self.assertIn("names no active DECISIONS.md row", tb.waiver("ceiling", rec("ceiling #42 -- D-5"), DECISIONS, PR))
+
+
+class Symlinks(unittest.TestCase):
+    """#6406: trusted-base reads a tree's files only as committed regular files. Under
+    pull_request_target the head tree is the PR's, so a committed symlink in place of a list file
+    (or a directory above it) would have the tool read, and echo into the job summary, a file of
+    the runner. Each reader refuses one, even when its target is well formed or missing."""
+
+    # Each fixed-name file the tool reads from a tree, with a well-formed body and its reader.
+    READERS = {
+        tb.REGISTRY: (REGISTRY, lambda t: tb.read_rules(t, True)),
+        tb.REASONS: ("parsers #42 -- a stated reason\n", tb.read_reasons),
+        tb.CORE: (CORE, tb.read_core),
+        tb.CEILINGS: (ceilings(10), tb.read_ceilings),
+        tb.OLD_CORE: ("broker/old\n", tb.old_core_dirs),
+        tb.SPEC: ("some words\n", tb.spec_words),
+        tb.CORE_LIST: ("wiring cmd/a\n", tb.trusted_mains),
+        "DECISIONS.md": (DECISIONS, lambda t: tb.growth_claims(t, t)),
+    }
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def refused(self, reader, t, step):
+        with self.assertRaises(tb.MeasureError) as e:
+            reader(t)
+        self.assertIn(str(t / step), str(e.exception))
+        self.assertIn("symlink", str(e.exception))
+
+    def test_each_reader_refuses_a_symlinked_file(self):
+        for rel, (text, reader) in self.READERS.items():
+            for target in ("present", "missing"):
+                with self.subTest(file=rel, target=target):
+                    t, outside = self.tmp / f"{abs(hash(rel))}-{target}", self.tmp / f"{abs(hash(rel))}-{target}.txt"
+                    write(t, rel, text)
+                    reader(t)  # positive control: the same text as a regular file reads
+                    shutil.move(str(t / rel), str(outside))
+                    os.symlink(outside if target == "present" else self.tmp / "nothing", t / rel)
+                    self.refused(reader, t, rel)
+
+    def test_a_symlinked_directory_above_the_file_is_refused(self):
+        for rel, (text, reader) in self.READERS.items():
+            if "/" not in rel:
+                continue
+            with self.subTest(file=rel):
+                t, real = self.tmp / f"d{abs(hash(rel))}", self.tmp / f"real{abs(hash(rel))}"
+                write(real, rel, text)
+                t.mkdir()
+                top = rel.split("/")[0]
+                os.symlink(real / top, t / top)
+                self.refused(reader, t, top)
+
+    def test_a_symlinked_decision_file_is_refused(self):
+        t = self.tmp / "dec"
+        write(t, "elsewhere/D-9.md", "D-159 trusted-core growth\n")
+        write(t, "decisions/D-8.md", "plain\n")
+        tb.growth_claims(self.tmp / "nobase", t)
+        os.symlink(t / "elsewhere/D-9.md", t / "decisions/D-9.md")
+        self.refused(lambda x: tb.growth_claims(self.tmp / "nobase", x), t, "decisions/D-9.md")
+
+    def test_a_directory_in_place_of_a_list_is_refused(self):
+        t = self.tmp / "dir"
+        (t / tb.CEILINGS).mkdir(parents=True)
+        with self.assertRaisesRegex(tb.MeasureError, "not a regular file"):
+            tb.read_ceilings(t)
+
+    def test_check_fails_closed_without_echoing_the_target(self):
+        tmp = str(self.tmp)
+        saved, tb.FALLBACK = tb.FALLBACK, self.tmp / "no-fallback"
+        self.addCleanup(setattr, tb, "FALLBACK", saved)
+        base, head, summary = (os.path.join(tmp, n) for n in ("base", "head", "summary.md"))
+        tree(base)
+        tree(head)
+        argv = ["check", "--base-tree", base, "--head-tree", head, "--pr", str(PR), "--markdown", summary]
+        self.assertEqual(run(argv)[0], 0)  # positive control
+        secret = self.tmp / "runner-file"
+        secret.write_text("CANARY-6406 not a list line\n")
+        os.symlink(secret, os.path.join(head, tb.CEILINGS))
+        rc, out = run(argv)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("symlink", out)
+        self.assertNotIn("CANARY-6406", out + pathlib.Path(summary).read_text())
+        self.assertIn("**Error (check):**", pathlib.Path(summary).read_text())
+
+
+@unittest.skipUnless(shutil.which("go"), "go is not installed")
+class BrokerSymlinks(unittest.TestCase):
+    """#6477 L3: `go list` reads the head tree's Go sources, and its parse error quotes the first
+    token of a symlinked runner file into the job summary. Any symlink under broker/ (and under an
+    old-core directory, whose files are counted) is refused before anything there is read."""
+
+    CANARY = "CANARYSECRET6477"
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.secret = self.tmp / "runner-file"
+        self.secret.write_text(f"{self.CANARY} abc\n")
+        saved, tb.FALLBACK = tb.FALLBACK, self.tmp / "no-fallback"
+        self.addCleanup(setattr, tb, "FALLBACK", saved)
+
+    def check(self, link, target=None, old_core=None):
+        """`check` of a head whose `link` is a symlink (to the canary file by default): rc, output, summary."""
+        base, head = self.tmp / "base", self.tmp / "head"
+        for t in (base, head):
+            shutil.rmtree(t, ignore_errors=True)
+            tree(str(t))
+            if old_core:
+                write(t, tb.OLD_CORE, old_core + "\n")
+                write(t, f"{old_core}/x.go", "package old\n")
+        summary = self.tmp / "summary.md"
+        summary.unlink(missing_ok=True)
+        argv = ["check", "--base-tree", str(base), "--head-tree", str(head),
+                "--pr", str(PR), "--markdown", str(summary)]
+        if link is not None:
+            p = head / link
+            if p.is_dir():
+                shutil.rmtree(p)
+            elif p.exists():
+                p.unlink()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(target or self.secret, p)
+        rc, out = run(argv)
+        return rc, out, summary.read_text() if summary.exists() else ""
+
+    def test_positive_control(self):
+        rc, out, _ = self.check(None)
+        self.assertEqual(rc, 0, out)
+
+    def test_a_symlinked_go_source_is_refused_without_echo(self):
+        for link in ("broker/calc/calc.go", "broker/cmd/a/main.go", "broker/calc/extra.go"):
+            with self.subTest(link=link):
+                rc, out, summary = self.check(link)
+                self.assertEqual(rc, 2, out)
+                self.assertIn(f"{link}: a symlink", summary)
+                self.assertNotIn(self.CANARY, out + summary)
+
+    def test_other_symlinks_under_broker_are_refused(self):
+        dangling = self.tmp / "nothing"
+        real = self.tmp / "realdir"
+        write(real, "calc.go", "package calc\n\nfunc Add(a, b int) int { return a + b }\n")
+        for link, target in (("broker/go.mod", None), ("broker/vendor/modules.txt", None),
+                             ("broker/calc/notes.txt", dangling), ("broker/calc", real)):
+            with self.subTest(link=link):
+                rc, out, summary = self.check(link, target)
+                self.assertEqual(rc, 2, out)
+                self.assertIn(f"{link}: a symlink", summary)
+                self.assertNotIn(self.CANARY, out + summary)
+
+    def test_a_symlinked_broker_is_refused(self):
+        real = self.tmp / "realtree"
+        tree(str(real))
+        rc, out, summary = self.check("broker", real / "broker")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("broker: a symlink", summary)
+
+    def test_a_symlink_under_an_old_core_directory_is_refused(self):
+        rc, out, _ = self.check(None, old_core="old")
+        self.assertEqual(rc, 0, out)  # positive control: the directory is counted as regular files
+        rc, out, summary = self.check("old/y.go", old_core="old")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("old/y.go: a symlink", summary)
+        self.assertNotIn(self.CANARY, out + summary)
+
+
+class CheckNeedsPR(unittest.TestCase):
+    def test_check_without_pr_refuses(self):
+        # #6406: CI always passes --pr; without it a reason line naming any PR would pass, so the
+        # command refuses before reading anything, exit 2, naming the flag.
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as e:
+            tb.main(["check", "--base-tree", tmp, "--head-tree", tmp])
+        self.assertEqual(e.exception.code, 2)
+        self.assertIn("the following arguments are required: --pr", err.getvalue())
 
 
 if __name__ == "__main__":
