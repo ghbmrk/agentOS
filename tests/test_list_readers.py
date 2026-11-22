@@ -26,6 +26,7 @@ import risk_tier  # noqa: E402
 import srclint  # noqa: E402
 import trace  # noqa: E402
 import trusted_base  # noqa: E402
+import word_budget  # noqa: E402
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
 
@@ -53,6 +54,9 @@ CASES = {
     "tools/ceilings.txt": {"trusted_base.read_ceilings": trusted_base.read_ceilings},
     "tools/trusted_base_parsers.txt": {"trusted_base.read_rules": lambda t: trusted_base.read_rules(t, True)},
     "tools/trusted_base_reasons.txt": {"trusted_base.read_reasons": trusted_base.read_reasons},
+    # word_budget.git_record's decoding of `git show`, then the one reader of the record's text.
+    "tools/word_budget_reasons.txt": {"word_budget.record_lines": lambda t: word_budget.record_lines(
+        (t / word_budget.RECORD).read_bytes().decode("utf-8", "surrogateescape"))},
     "tools/old_core.txt": {"trace.old_core_dirs": _old_core_dirs, "trusted_base.old_core_dirs": trusted_base.old_core_dirs},
     "tools/assumptions_legacy_ids.txt": {
         "assumptions_ids.legacy": assumptions_ids.legacy,
