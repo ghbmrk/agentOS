@@ -140,6 +140,10 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("finish_image", ROOT / "image" / "finish_image.py")
 finish_image = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(finish_image)
+# The declared-list reader (#6441), by path as premerge loads its imports: STATIC_ELF_ALLOW is read through it.
+_rm = importlib.util.spec_from_file_location("record_merge", ROOT / "tools" / "record_merge.py")
+record_merge = importlib.util.module_from_spec(_rm)
+_rm.loader.exec_module(record_merge)
 CONFIG = ROOT / "assurance" / "vulncheck.json"
 FIXTURE = ROOT / "tests" / "fixtures" / "vulncheck"
 STDLIB = "stdlib"
@@ -1761,7 +1765,8 @@ def excluded_packages(path=BUILTUSING_EXCLUDE, allow=STATIC_ELF_ALLOW):
     reason, or GLOB is not an entry "GLOB linked LIST" of ALLOW: an exclusion holds only for a package
     whose code reaches the image as a pinned linked file's input, which LIST's status queries."""
     try:
-        text, allow_text = pathlib.Path(path).read_text(), pathlib.Path(allow).read_text()
+        text = pathlib.Path(path).read_text()
+        allow_text = record_merge.read_list(allow, "image/static_elf.allow")
     except OSError as e:
         raise ScanError(f"unreadable Built-Using exclusions or allow-list ({e})")
     linked = {}
