@@ -13,7 +13,7 @@ and holds it to image/static_elf.allow:
 
 A file is listed (SEL-5) when it is an x86 executable or shared object (ET_EXEC or ET_DYN, EM_X86_64 or
 EM_386; relocatable objects and other machines' firmware run nothing here) and either names no
-interpreter and no NEEDED library (import_sweep.read_elf's "static"), or is dynamic, needs no libstdc++
+interpreter and no NEEDED library (import_sweep.read_elf's STATIC), or is dynamic, needs no libstdc++
 or libc++, and holds one of CXX_MARKS, a C++ runtime's own strings (a shipped file is stripped, so its
 symbols say nothing).
 
@@ -146,10 +146,10 @@ def classify(path):
     e_type, machine = header(data)
     if e_type not in (ET_EXEC, ET_DYN) or machine not in MACHINES:
         return None
-    _syms, needed, _soname, read, how = import_sweep.read_elf(path)
+    _syms, needed, _soname, read, _lookup, static = import_sweep.read_elf(path)
     if not read:
         raise Unread("objdump cannot read it")
-    if how == "static":
+    if static:
         why = "static"
     elif any(CXX_NEEDED.match(n) for n in needed):
         return None

@@ -198,15 +198,18 @@ def group_of(sym):
 
 
 def read_elf(path):
-    """(affected glibc symbols imported, NEEDED names, SONAME or None, read, lookup) of the ELF file at PATH.
-    READ is False when objdump fails on it for any reason but its having no dynamic section (a static or
-    relocatable file, which imports nothing), so a file objdump cannot parse is never counted clean. LOOKUP
-    is the set of glibc run-time lookups (LOOKUP_FUNCS) it imports."""
+    """(affected glibc symbols imported, NEEDED names, SONAME or None, read, lookup, static) of the ELF file
+    at PATH. READ is False when objdump fails on it for any reason but its having no dynamic section (a
+    static or relocatable file, which imports nothing), so a file objdump cannot parse is never counted
+    clean. LOOKUP is the set of run-time lookup functions (LOOKUP_FUNCS) it imports. STATIC is whether it
+    names no interpreter (PT_INTERP) and no NEEDED library, so whatever libc code it runs is in its own
+    bytes (static_elf.py)."""
     r = subprocess.run(["objdump", "-pT", str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                        text=True, errors="replace")
     read = r.returncode == 0 or "not a dynamic object" in r.stderr
-    syms, needed, soname, dl = set(), [], None, set()
+    syms, needed, soname, dl, interp = set(), [], None, set(), False
     for line in r.stdout.splitlines():
+        interp = interp or line.split()[:1] == ["INTERP"]
         m = UND.search(line)
         if m and group_of(m.group(2)):
             syms.add(m.group(2))
@@ -218,7 +221,7 @@ def read_elf(path):
             needed.append(m.group(2))
         elif m:
             soname = m.group(2)
-    return sorted(syms), needed, soname, read, dl
+    return sorted(syms), needed, soname, read, dl, not (interp or needed)
 
 
 # ELF header fields (#6299): by class (32 or 64-bit), the offsets of e_phoff, e_shoff, e_phentsize and
@@ -359,7 +362,7 @@ def sweep(files, links=None):
     imports, needed, by_name, unread, cipher, digest = {}, {}, {}, [], {}, {}
     dl, names, carries, glibc, opaque = {}, {}, {}, {}, {}
     for shown, real in files.items():
-        syms, needed[shown], soname, read, dl[shown] = read_elf(real)
+        syms, needed[shown], soname, read, dl[shown], _static = read_elf(real)
         with open(real, "rb") as f:
             data = f.read()
         digest[shown] = hashlib.sha256(data).hexdigest()
