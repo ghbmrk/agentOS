@@ -914,7 +914,9 @@ class Verify(unittest.TestCase):
         self.assertIn("and no MUTANTS-EQUIVALENT record of one", r.summary)
 
 
-GO_MOD = "module example.invalid/broker\n\ngo 1.22\n"
+# A fixture module pins broker/go.mod's toolchain, whose gofmt mutgate needs (#6442).
+TOOLCHAIN = re.search(r"^toolchain\s+(\S+)$", (ROOT / "broker" / "go.mod").read_text(), re.M)[1]
+GO_MOD = f"module example.invalid/broker\n\ngo 1.22\n\ntoolchain {TOOLCHAIN}\n"
 # hint.go before the PR: one function the tests call.
 BASE_SRC = """package hint
 
@@ -2911,12 +2913,13 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
 
     def test_tests_that_cover_nothing_run_no_gremlins(self):
         # Gremlins' -D mutates every line when its diff is empty, so no target line means no run.
-        # The base's TestDown runs nothing either, so neither side covers a line.
+        # The base's TestDown runs nothing either, so neither side covers a line. The pinned go leads PATH:
+        # a runner's /usr/bin can hold another Go, whose gofmt mutgate refuses (#6442).
         base = TWO_TEST.replace("func TestDown(t *testing.T) {\n\tif Down(3) != 2 {", "func TestDown(t *testing.T) {\n\tif 3 != 3 {")
         with tempfile.TemporaryDirectory() as d:
             self.repo(d, base.replace('t.Fatal("down")', 't.Fatal("down!")'), test_base=base)
             out = pathlib.Path(d) / "res" / "mutants-0"
-            r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(out), env={"PATH": "/usr/bin:/bin:" + str(pathlib.Path(sys.executable).parent) + ":" + os.path.dirname(shutil.which("go"))})
+            r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(out), env={"PATH": os.path.dirname(shutil.which("go")) + ":/usr/bin:/bin:" + str(pathlib.Path(sys.executable).parent)})
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertEqual(json.loads((out / "hint.json").read_text())["targets"], {"tests": ["TestDown"], "lines": {}, "base": {"tests": ["TestDown"], "lines": {}}})
             self.assertFalse((pathlib.Path(d) / "seen").exists())
@@ -2979,7 +2982,7 @@ class MovedDecls(unittest.TestCase):
         each through gofmt unless fmt is False; tree {name: text} is then written to the working tree,
         uncommitted."""
         if fmt:
-            gofmt = lambda t: subprocess.run(["gofmt"], input=t, capture_output=True, text=True, check=True).stdout
+            gofmt = lambda t: subprocess.run([mutgate.gofmt()], input=t, capture_output=True, text=True, check=True).stdout
             base, head = ({n: gofmt(t) for n, t in files.items()} for files in (base, head))
         with tempfile.TemporaryDirectory() as d:
             git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
@@ -3387,6 +3390,101 @@ class MovedDecls(unittest.TestCase):
         self.assertEqual(mutgate._name_tags("broker/p/x_linux.go"), ("linux",))
         self.assertEqual(mutgate._name_tags("broker/p/clients_test.go"), ())
         self.assertEqual(mutgate._name_tags("broker/p/_x_test.go"), ("ignored",))
+
+
+class GofmtPin(unittest.TestCase):
+    """TOOL-mutgate-gofmt-pin (#6442): moved() reads layout with the toolchain's own gofmt, never PATH's;
+    a gofmt that is missing or not go.mod's toolchain version refuses the run."""
+
+    def setUp(self):
+        mutgate.gofmt.cache_clear()
+        self.addCleanup(mutgate.gofmt.cache_clear)
+
+    def test_the_gofmt_is_the_toolchains_and_its_version(self):
+        # REQ: TOOL-mutgate-gofmt-pin
+        env = {**os.environ, "GOWORK": "off"}
+        goroot = subprocess.run(["go", "env", "GOROOT"], cwd=mutgate.BROKER, capture_output=True, text=True,
+                                check=True, env=env).stdout.strip()
+        got = mutgate.gofmt()
+        self.assertEqual(got, str(pathlib.Path(goroot) / "bin" / "gofmt"))
+        self.assertEqual(subprocess.run(["go", "version", got], cwd=mutgate.BROKER, capture_output=True,
+                                        text=True, env=env).stdout.strip(), f"{got}: {TOOLCHAIN}")
+        # The pin stays broker/go.mod's where a test moves BROKER.
+        with mock.patch.object(mutgate, "BROKER", pathlib.Path("/nonexistent")):
+            mutgate.gofmt.cache_clear()
+            self.assertEqual(mutgate.gofmt(), got)
+
+    def test_unformatted_runs_the_pinned_gofmt_not_paths(self):
+        # REQ: TOOL-mutgate-gofmt-pin
+        real, argv = subprocess.run, []
+        record = lambda cmd, *a, **k: (argv.append(list(cmd)), real(cmd, *a, **k))[1]
+        with mock.patch.object(mutgate.subprocess, "run", side_effect=record):
+            self.assertEqual(mutgate._unformatted({"broker/x/a.go": "package x\nfunc  F() {}\n",
+                                                   "broker/x/b.go": "package x\n"}), {"broker/x/a.go"})
+        self.assertEqual([c for c in argv if "-l" in c], [[mutgate.gofmt(), "-l", "."]])
+
+    def pinned(self, mod, answers):
+        """mutgate.gofmt() with go.mod text mod and `go` answering answers: {first arg: (rc, stdout) or an
+        OSError}; any other command is refused, so PATH's gofmt never runs."""
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        (d / "go.mod").write_text(mod)
+        calls = []
+
+        def run(cmd, *a, **k):
+            calls.append(list(cmd))
+            if cmd[0] != "go" or cmd[1] not in answers:
+                raise AssertionError(f"unexpected command {cmd}")
+            got = answers[cmd[1]]
+            if isinstance(got, OSError):
+                raise got
+            rc, out = got(d) if callable(got) else got
+            return subprocess.CompletedProcess(cmd, rc, out, "refused" if rc else "")
+        with mock.patch.object(mutgate, "GO_MOD_PIN", d / "go.mod"), \
+                mock.patch.object(mutgate.subprocess, "run", side_effect=run):
+            try:
+                return mutgate.gofmt(), calls
+            except RuntimeError as e:
+                return e, calls
+
+    def test_a_gofmt_not_the_pinned_one_refuses_the_run(self):
+        # REQ: TOOL-mutgate-gofmt-pin
+        mod = "module example.invalid/broker\n\ngo 1.26.4\n\ntoolchain go1.26.11\n"
+
+        def goroot(d, made=True):
+            if made:
+                (d / "root" / "bin").mkdir(parents=True, exist_ok=True)
+                (d / "root" / "bin" / "gofmt").write_text("")
+            return 0, f"{d / 'root'}\n"
+        version = lambda d, v="go1.26.11": (0, f"{d / 'root' / 'bin' / 'gofmt'}: {v}\n")
+        got, calls = self.pinned(mod, {"env": goroot, "version": version})
+        self.assertIsInstance(got, str)
+        self.assertTrue(got.endswith("/root/bin/gofmt"), got)
+        self.assertEqual([c[:2] for c in calls], [["go", "env"], ["go", "version"]])
+        for why, m, answers in (
+                ("no toolchain line", mod.replace("toolchain go1.26.11\n", ""), {}),
+                ("go missing", mod, {"env": FileNotFoundError("go")}),
+                ("go env fails", mod, {"env": (1, "")}),
+                ("no GOROOT", mod, {"env": (0, "\n")}),
+                ("no gofmt in GOROOT", mod, {"env": lambda d: goroot(d, made=False)}),
+                ("another version", mod, {"env": goroot, "version": lambda d: version(d, "go1.24.7")}),
+                ("a version that only starts alike", mod, {"env": goroot, "version": lambda d: version(d, "go1.26.110")}),
+                ("go version fails", mod, {"env": goroot, "version": (1, "")})):
+            with self.subTest(why):
+                mutgate.gofmt.cache_clear()
+                got, calls = self.pinned(m, answers)
+                self.assertIsInstance(got, RuntimeError)
+                self.assertTrue(all(c[0] == "go" for c in calls), calls)
+
+    def test_a_refused_gofmt_refuses_unformatted(self):
+        # The run refuses rather than reading every file as rough, the old fallback for a missing gofmt.
+        # REQ: TOOL-mutgate-gofmt-pin
+        with mock.patch.object(mutgate, "gofmt", side_effect=RuntimeError("mutgate: no gofmt")):
+            with self.assertRaises(RuntimeError):
+                mutgate._unformatted({"broker/x/a.go": "package x\n"})
+        with mock.patch.object(mutgate, "gofmt", return_value="/nonexistent/bin/gofmt"):
+            with self.assertRaises(RuntimeError):
+                mutgate._unformatted({"broker/x/a.go": "package x\n"})
 
 
 class DataFiles(unittest.TestCase):
@@ -5228,7 +5326,7 @@ class GremlinsMemoryCap(unittest.TestCase):
     """MUT-gremlins-memcap (#6388): a gremlins mutant grew a test past 13 GB and took the runner down on
     #6000. Each mutant's `go test` runs under a memory cap through the shim, and a run past it exits 1,
     which gremlins reads as KILLED; that counts only where the unmutated tests stay under half the cap."""
-    # REQ: MUT-gremlins-memcap
+    # REQ: MUT-gremlins-memcap, MUT-gremlins-memcap-go
 
     GROW = "import time; b = bytearray(96 << 20); time.sleep(60)"
 
@@ -5291,8 +5389,10 @@ class GremlinsMemoryCap(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             link = pathlib.Path(d) / "compile"
             link.symlink_to(sys.executable)
-            for name, counted in (("compile", False), ("python3", True)):
-                p = subprocess.Popen([str(link) if name == "compile" else sys.executable, "-c",
+            (pathlib.Path(d) / "go").symlink_to(sys.executable)
+            # The go driver counts (MUT-gremlins-memcap-go): it holds the tests' buffered output.
+            for name, counted in (("compile", False), ("go", True), ("python3", True)):
+                p = subprocess.Popen([str(pathlib.Path(d) / name) if name != "python3" else sys.executable, "-c",
                                       "import time; b = bytearray(64 << 20); time.sleep(3)"], start_new_session=True)
                 try:
                     time.sleep(1)
@@ -5301,6 +5401,20 @@ class GremlinsMemoryCap(unittest.TestCase):
                     p.kill()
                     p.wait()
                 self.assertEqual(got > 32 << 20, counted, (name, got))
+
+    def test_a_go_driver_past_the_cap_is_killed(self):
+        # MUT-gremlins-memcap-go (#6507): `go test PKG` buffers the test binary's output in the driver, so a
+        # mutant that loops printing grows the process named go; uncounted, it took #5974's runners down.
+        with tempfile.TemporaryDirectory() as d:
+            drv = pathlib.Path(d) / "driver"
+            drv.mkdir()
+            (drv / "go").symlink_to(sys.executable)
+            shim = self.shim(d, f"{drv / 'go'} -c '{self.GROW}' &\nwait\n", 32 << 20)
+            began = time.monotonic()
+            r = subprocess.run([str(shim), "test", "-timeout", "62s", "-failfast", "./p"], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1, r.stderr)
+            self.assertLess(time.monotonic() - began, 20)
+            self.assertIn("--- FAIL: memory_cap", r.stderr)
 
     def test_run_caps_gremlins_mutant_runs(self):
         # The wiring: `run` gives gremlins' shim each run's share of half the free memory.
@@ -5340,6 +5454,31 @@ class GremlinsMemoryCap(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             got = {(m["line"], m["type"], m["status"]) for f in json.loads(out.read_text())["files"] for m in f["mutations"]}
         self.assertIn((5, "INCREMENT_DECREMENT", "KILLED"), got)
+        self.assertLess(time.monotonic() - began, 120)
+
+    @unittest.skipUnless(shutil.which("gremlins"), "gremlins v0.6.0 is not installed")
+    def test_gremlins_reads_a_capped_output_flood_as_killed(self):
+        # #5974's class through the driver (MUT-gremlins-memcap-go): `i--` turns a bounded print loop into an
+        # unbounded one, and `go test PKG` holds all of it; the test binary's own memory stays small.
+        src = ("package p\n\nimport (\n\t\"fmt\"\n\t\"strings\"\n)\n\nfunc Say(n int) int {\n"
+               "\tfor i := 0; i < n; i++ {\n\t\tfmt.Println(strings.Repeat(\"x\", 1<<20))\n\t}\n\treturn n\n}\n")
+        test = ("package p\n\nimport \"testing\"\n\nfunc TestSay(t *testing.T) {\n"
+                "\tif Say(3) != 3 {\n\t\tt.Fatal()\n\t}\n}\n")
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}):
+            pkg = pathlib.Path(d) / "broker" / "p"
+            pkg.mkdir(parents=True)
+            (pkg.parent / "go.mod").write_text(GO_MOD)
+            (pkg / "a.go").write_text(src)
+            (pkg / "a_test.go").write_text(test)
+            (pathlib.Path(d) / "cfg.yaml").write_text("{}\n")
+            out = pathlib.Path(d) / "out.json"
+            env = {**os.environ, "PATH": f"{mutgate.go_shim(d, 256 << 20)}{os.pathsep}{os.environ['PATH']}"}
+            began = time.monotonic()
+            r = subprocess.run(["gremlins", "unleash", "--config", str(pathlib.Path(d) / "cfg.yaml"), "-o", str(out), str(pkg)],
+                               cwd=pkg, env=env, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            got = {(m["line"], m["type"], m["status"]) for f in json.loads(out.read_text())["files"] for m in f["mutations"]}
+        self.assertIn((9, "INCREMENT_DECREMENT", "KILLED"), got)
         self.assertLess(time.monotonic() - began, 120)
 
 
