@@ -3766,6 +3766,126 @@ class DataFiles(unittest.TestCase):
                 self.assertEqual(mutgate.touched(*mutgate.added_lines(data_diff(path))), {"hint"})
 
 
+# A package that embeds one data file into a var, read by package code a test reaches (#6409's shape).
+EMBED_PKG = {
+    "v/pins.go": 'package v\n\nimport _ "embed"\n\n// pins names each file.\n//\n//go:embed models.pins\n'
+                 'var modelPins string\n\nfunc pinFor(f string) string { return modelPins + f }\n',
+    "v/other.go": "package v\n\nfunc other() int { return 1 }\n",
+    "v/models.pins": "abc lib.so\n",
+    "v/pins_test.go": 'package v\n\nimport "testing"\n\nfunc TestPins(t *testing.T) { _ = pinFor("x") }\n',
+    "v/other_test.go": 'package v\n\nimport "testing"\n\nfunc TestOther(t *testing.T) { _ = other() }\n',
+}
+
+
+class EmbedReach(unittest.TestCase):
+    """MUT-embed-reach (#6458): a changed data file whose only namer is a //go:embed var changes the
+    tests that reach that var, through package code too; any other namer, or a reach every test may
+    run, is every test."""
+
+    def reach(self, files, path="broker/v/models.pins", kind="change", env=None):
+        with tempfile.TemporaryDirectory() as d, DataFiles.tree(None, d, files), \
+                mock.patch.dict(os.environ, env or {"GOFLAGS": ""}):
+            added, tests = mutgate.added_lines(data_diff(path, kind))
+            self.assertEqual(mutgate.touched(added, tests), {"v"})
+            return mutgate.head_tests(tests, "v")
+
+    def test_an_embedded_file_reaches_its_vars_tests(self):
+        # REQ: MUT-embed-reach
+        for kind in ("change", "empty", "delete"):  # a moved or comment-only line is a change too
+            self.assertEqual(self.reach(EMBED_PKG, kind=kind), ["TestPins"], kind)
+        quoted = EMBED_PKG["v/pins.go"].replace("embed models.pins", 'embed "all:models.pins"')
+        self.assertEqual(self.reach({**EMBED_PKG, "v/pins.go": quoted}), ["TestPins"])
+        # A test that names the var directly, or reaches it through a type's method, counts.
+        held = {**EMBED_PKG, "v/held_test.go": 'package v\n\nimport "testing"\n\nfunc TestHeld(t *testing.T) { _ = modelPins }\n',
+                "v/kind.go": "package v\n\ntype K struct{}\n\nfunc (K) Pin() string { return pinFor(\"y\") }\n",
+                "v/kind_test.go": 'package v\n\nimport "testing"\n\nfunc TestKind(t *testing.T) { _ = K{} }\n'}
+        self.assertEqual(self.reach(held), ["TestHeld", "TestKind", "TestPins"])
+        # A Test-named function of package code is no test.
+        self.assertEqual(self.reach({**EMBED_PKG, "v/other.go": "package v\n\nfunc TestLike() string { return modelPins }\n"
+                                     "\nfunc other() int { return 1 }\n"}), ["TestPins"])
+        # A testdata file embedded by its path.
+        td = {**EMBED_PKG, "v/testdata/m.pins": "x\n",
+              "v/pins.go": EMBED_PKG["v/pins.go"].replace("embed models.pins", "embed testdata/m.pins")}
+        self.assertEqual(self.reach(td, "broker/v/testdata/m.pins"), ["TestPins"])
+        # With a test file also changed, both reaches join.
+        with tempfile.TemporaryDirectory() as d, DataFiles.tree(None, d, EMBED_PKG):
+            tests = {"broker/v/models.pins": None, "broker/v/other_test.go": {5}}
+            self.assertEqual(mutgate.head_tests(tests, "v"), ["TestOther", "TestPins"])
+
+    def test_any_other_namer_is_every_test(self):
+        # REQ: MUT-embed-reach
+        pins = EMBED_PKG["v/pins.go"]
+        for name, files in (
+                ("a test literal", {"v/read_test.go": 'package v\n\nvar _ = "models.pins"\n'}),
+                ("a package literal", {"v/other.go": 'package v\n\nfunc other() int { return len("models.pins") }\n'}),
+                ("a glob literal", {"v/read_test.go": 'package v\n\nvar _ = "*.pins"\n'}),
+                ("an embed.FS glob", {"v/pins.go": pins.replace("embed models.pins\nvar modelPins string",
+                                                                 "embed *.pins\nvar modelPins embed.FS")}),
+                ("a directive listing more", {"v/pins.go": pins.replace("embed models.pins", "embed models.pins other.pins")}),
+                ("a second var on another shape", {"v/two.go": 'package v\n\nvar (\n\t//go:embed models.pins\n\ttwo string\n)\n'}),
+                ("an indented directive", {"v/pins.go": pins.replace("//go:embed", " //go:embed")}),
+                ("a directive in a raw string", {"v/gen_test.go": 'package v\n\nvar src = `\n//go:embed models.pins\nvar x string\n`\n'}),
+                ("a directory embed", {"v/pins.go": pins.replace("embed models.pins", "embed sub"), "v/sub/models.pins": ""}),
+                ("an init reading the var", {"v/init.go": "package v\n\nfunc init() { _ = pinFor(\"z\") }\n"}),
+                ("an initializer reading it", {"v/init.go": "package v\n\nvar h = len(modelPins)\n"}),
+                ("TestMain reaching it", {"v/main_test.go": 'package v\n\nimport "testing"\n\nfunc TestMain(m *testing.M) { _ = pinFor("") }\n'}),
+                ("a toolchain-tagged init", {"v/init.go": "//go:build linux && amd64.v2\n\npackage v\n\nfunc init() { _ = modelPins }\n"}),
+                ("a linked file", {}),
+                ("a directive in a block comment", {"v/x.go": "package v\n\nvar x string\n\n/*\n//go:embed models.pins\nvar x string\n*/\n"}),
+                ("nothing embeds it", {"v/pins.go": "package v\n\nvar modelPins string\n\nfunc pinFor(f string) string { return modelPins + f }\n"})):
+            with self.subTest(name):
+                files = {**EMBED_PKG, **files}
+                if name == "a linked file":
+                    with tempfile.TemporaryDirectory() as d, DataFiles.tree(None, d, files):
+                        (pathlib.Path(d) / "broker/v/link.go").symlink_to(pathlib.Path(d) / "broker/v/other.go")
+                        self.assertIsNone(mutgate.head_tests({"broker/v/models.pins": None}, "v"))
+                        self.assertIsNone(mutgate.embedded_by("v", "models.pins"))
+                    continue
+                self.assertIsNone(self.reach(files))
+        # A file named like a glob: its pattern may match more files.
+        glob = {**EMBED_PKG, "v/m*.pins": "", "v/pins.go": EMBED_PKG["v/pins.go"].replace("embed models.pins", "embed m*.pins")}
+        self.assertIsNone(self.reach(glob, "broker/v/m*.pins"))
+        # Another package naming the file by its path reaches every test of its own (readers).
+        other = {**EMBED_PKG, "w/w.go": "package w\n", "w/w_test.go": 'package w\n\nvar _ = "../v/models.pins"\n'}
+        with tempfile.TemporaryDirectory() as d, DataFiles.tree(None, d, other), mock.patch.dict(os.environ, {"GOFLAGS": ""}):
+            mutgate.read_index.cache_clear()
+            added, tests = mutgate.added_lines(data_diff("broker/v/models.pins"))
+            self.assertEqual(mutgate.touched(added, tests), {"v", "w"})
+            self.assertEqual(mutgate.head_tests(tests, "v"), ["TestPins"])
+            self.assertIsNone(mutgate.head_tests(tests, "w"))
+            mutgate.read_index.cache_clear()
+        # A file no `go test` here builds (a custom tag, a name go ignores) is not read for reach; a
+        # GOFLAGS naming tags reads it.
+        tagged = {**EMBED_PKG, "v/onnx.go": "//go:build vision_onnx\n\npackage v\n\nvar h = len(modelPins)\n",
+                  "v/_x.go": "package v\n\nfunc init() { _ = modelPins }\n"}
+        self.assertEqual(self.reach(tagged), ["TestPins"])
+        self.assertIsNone(self.reach(tagged, env={"GOFLAGS": "-tags=vision_onnx"}))
+        # A test file under a custom tag still counts: more tests, never fewer.
+        self.assertEqual(self.reach({**EMBED_PKG, "v/onnx_test.go": '//go:build vision_onnx\n\npackage v\n\nimport "testing"\n\n'
+                                     'func TestOnnx(t *testing.T) { _ = modelPins }\n'}), ["TestOnnx", "TestPins"])
+
+    def test_unbuilt_reads_the_toolchain_tags(self):
+        # REQ: MUT-embed-reach
+        with mock.patch.dict(os.environ, {"GOFLAGS": ""}):
+            for line, out in (("", False), ("//go:build vision_onnx\n", True), ("//go:build !vision_onnx\n", False),
+                              ("//go:build linux\n", False), ("//go:build windows\n", False), ("//go:build cgo && x\n", True),
+                              ("//go:build go1.21 || x\n", False), ("//go:build goexperiment.foo\n", False),
+                              ("//go:build amd64.v3\n", False), ("//go:build race\n", False), ("//go:build ignore\n", True),
+                              ("//go:build (\n", False)):
+                self.assertEqual(mutgate.unbuilt("a.go", line + "\npackage v\n"), out, line)
+            self.assertTrue(mutgate.unbuilt("_a.go", "package v\n"))
+            self.assertFalse(mutgate.unbuilt("a_linux.go", "package v\n"))
+
+    def test_vision_pins_reach_only_their_var(self):
+        # #6409's case on the real tree: models.pins reaches modelPins' tests, not the package.
+        # REQ: MUT-embed-reach
+        with mock.patch.dict(os.environ, {"GOFLAGS": ""}):
+            got = mutgate.head_tests({"broker/cmd/agentos-vision/models.pins": None}, "cmd/agentos-vision")
+        self.assertIn("TestPinsCheckEveryFile", got)
+        self.assertNotIn("TestHeatBlobBoxAndConfidence", got or ["x"])
+        self.assertLess(len(got), 20)
+
+
 class Plan(unittest.TestCase):
     def test_a_plan_past_the_matrix_limit_names_a_remedy(self):
         # #4983: a refused plan says what to do next. Each claimed package plans 100 shards here.

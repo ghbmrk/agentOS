@@ -412,8 +412,6 @@ def names_file(pkg_dir, rel):
     A file no code names this way is absent from every tree the gate runs tests in (hide_docs), so
     a read of it by any other means (a listing, a child process, a path built from runes, another
     package) fails the gate's run rather than going unseen (#6373)."""
-    parts = rel.split("/")
-    names = [parts[-1]] + ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]
     texts = []
     for f in sorted(pkg_dir.glob("*.go")):
         if f.is_symlink() or not f.is_file():
@@ -421,15 +419,54 @@ def names_file(pkg_dir, rel):
         if (text := go_text(f.read_bytes())) is None:
             return True
         texts.append(text)
-    for text in texts:
-        for lit in _literals(text) + _embeds(text):
-            if parts[-1] in lit or parts[0] in lit:
-                return True
-            if re.search(r"[*?\[]", lit) and (
-                    any(fnmatch.fnmatchcase(n, lit) for n in names)
-                    or fnmatch.fnmatchcase(parts[-1], lit.rstrip("/").rsplit("/", 1)[-1])):
-                return True
-    return False
+    return any(_names(lit, rel) for text in texts for lit in _literals(text) + _embeds(text))
+
+
+def _names(lit, rel):
+    """Whether one literal or embed pattern names rel, as names_file reads it."""
+    parts = rel.split("/")
+    names = [parts[-1]] + ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]
+    if parts[-1] in lit or parts[0] in lit:
+        return True
+    return bool(re.search(r"[*?\[]", lit)) and (
+        any(fnmatch.fnmatchcase(n, lit) for n in names)
+        or fnmatch.fnmatchcase(parts[-1], lit.rstrip("/").rsplit("/", 1)[-1]))
+
+
+# A //go:embed line and the package-level `var name Type` gofmt puts at column 0 under it, comment
+# lines between (Go's rule: only blank lines and line comments may come between them).
+EMBED_VAR = re.compile(r"^//go:embed[ \t]+(.*)\n(?://.*\n)*var ([A-Za-z_]\w*)[ \t]+[^=\n(]+\n", re.M)
+
+
+def embedded_by(pkg, rel):
+    """{repo path: {line}} of the package-level var declarations whose //go:embed directive is the
+    only way broker/<pkg>/'s .go files name rel, a path below it (names_file), or None. Each such
+    directive lists rel alone (quoted or `all:` too), no glob, right above a plain `var name Type`
+    at column 0 (comment lines between), so the var holds that file's bytes and nothing else. Any
+    other namer (a string literal, a glob, a directive listing more or on another shape, a link or
+    unreadable file) is None. A change to rel then changes only what reads that var: the tests
+    reaching it (head_tests, #6458)."""
+    out, d = {}, BROKER / pkg
+    for f in sorted(d.glob("*.go")):
+        if f.is_symlink() or not f.is_file() or (text := go_text(f.read_bytes())) is None:
+            return None
+        if any(_names(lit, rel) for lit in _literals(text)):
+            return None
+        path, bare, held = f"broker/{pkg}/{f.name}", _uncommented(text, False).split("\n"), 0
+        for m in EMBED_VAR.finditer(text):
+            pats = [w.strip('"`').removeprefix("all:") for w in m[1].split()]
+            if not any(_names(x, rel) for x in pats):
+                continue
+            line = text.count("\n", 0, m.end())
+            if pats != [rel] or re.search(r"[*?\[]", rel) or not bare[line - 1].startswith(f"var {m[2]} ") or not any(
+                    k == "var" and names == {m[2]} and first <= line <= last
+                    for _, k, names, _r, _w, _e, first, last, _c in _decls(path, text)):
+                return None
+            out.setdefault(path, set()).add(line)
+            held += 1
+        if held != sum(1 for x in _embeds(text) if _names(x, rel)):
+            return None  # a directive naming rel that is not on such a var
+    return out or None
 
 
 # The trees this process made (scratch's worktree, base_covered's archive): the only ones hide_docs deletes in.
@@ -1335,7 +1372,8 @@ def reaching_tests(files, changed):
              | {j for n in (d[2] if d[1] == "type" else ()) for j in methods.get(n, ())} for d in decls]
     reach = [set() for _ in decls]
     for i, (_, kind, names, recv, _w, every, *_rest) in enumerate(decls):
-        test = kind == "func" and not every and TEST_FUNC.match(f"func {next(iter(names), '')}(")
+        test = kind == "func" and not every and decls[i][0].endswith("_test.go") and TEST_FUNC.match(
+            f"func {next(iter(names), '')}(")
         if kind == "method" and (decls[i][8] is None or (decls[i][8], recv) not in types):
             every = True
         if not (test or every):
@@ -1373,24 +1411,58 @@ def head_tests(tests, pkg):
     """Sorted names of the head's test functions that reach the lines the diff changes in
     broker/<pkg>/'s _test.go files, or None for every test (reaching_tests). Every _test.go file of
     the package is read as text from the tree, never run; a link is not followed, so one in the
-    package is every test (L3 on #4643). A deleted file has no head lines: its base side runs."""
+    package is every test (L3 on #4643). A deleted file has no head lines: its base side runs. A
+    changed data file whose only namer is an embedding var (embedded_by) changes that var's
+    declaration, read over every .go file of the package so a test reaching it through package
+    code counts; an init or initialized var reaching it is every test (reaching_tests)."""
     d = BROKER / pkg
     if not tests_changed(tests, pkg):
         return []
-    if d.is_symlink() or any(pkg in owners(p) for p in tests):
-        return None  # a read file's readers are not traced: every test may read it (#5779, #6436)
+    if d.is_symlink():
+        return None
+    held = {}
+    for p in tests:
+        if pkg in owners(p):
+            # A read file's readers are not traced: every test may read it (#5779, #6436), unless
+            # the package's only namer is an embedding var, whose readers are (#6458).
+            got = embedded_by(pkg, p[len(f"broker/{pkg}/"):]) if is_data(p) and pkg == data_owner(p) else None
+            if got is None:
+                return None
+            held = union(held, got)
     files = {}
-    for f in sorted(d.glob("*_test.go")) if d.is_dir() else ():
+    for f in sorted(d.glob("*.go" if held else "*_test.go")) if d.is_dir() else ():
         if f.is_symlink():
             return None
         if f.is_file():
             if (text := go_text(f.read_bytes())) is None:
                 return None
-            files[f"broker/{pkg}/{f.name}"] = text
-    changed = {p: ls for p, ls in tests.items() if package_of(p) == pkg and p in files}
+            if is_test(f"broker/{pkg}/{f.name}") or not unbuilt(f.name, text):
+                files[f"broker/{pkg}/{f.name}"] = text
+    changed = {p: ls for p, ls in tests.items() if package_of(p) == pkg and is_test(p) and p in files}
     if any(ls is None for ls in changed.values()):
         return None
-    return reaching_tests(files, changed)
+    return reaching_tests(files, union(changed, held))
+
+
+# The build tags the go toolchain itself may set (go/build's Context and cmd/go's -race, -msan, -asan):
+# any other tag is on only when a -tags flag sets it, and no `go` command the gate runs passes one.
+TOOLCHAIN_TAGS = {"unix", "cgo", "gc", "gccgo", "race", "msan", "asan", "boringcrypto"}
+
+
+def unbuilt(name, text):
+    """Whether a non-test .go file is in no build the gate's `go test` runs: a name go ignores, or a
+    build constraint false whatever the toolchain's own tags (TOOLCHAIN_TAGS, any GOOS, GOARCH or
+    feature level, go1.N, goexperiment.X) hold, with every other tag off. A constraint not read, or a
+    GOFLAGS naming tags, keeps the file (#6458)."""
+    c = _constraint(name, text)
+    if c == "ignored":
+        return True
+    if c is None or "tags" in os.environ.get("GOFLAGS", ""):
+        return False
+    used, table = c
+    own = [t in TOOLCHAIN_TAGS | GOOS | GOARCH or t.split(".")[0] in GOARCH or t.startswith(("go1.", "goexperiment."))
+           for t in used]
+    return not any(v for k, v in enumerate(table) if all(own[i] for i in range(len(used)) if k >> i & 1))
 
 
 def changed_tests(tests, pkg, bases):
