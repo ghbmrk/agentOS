@@ -105,6 +105,29 @@ class LintTest(unittest.TestCase):
         self.assertEqual(self.lint(**{"broker/x/ASSUMPTIONS.md": text}),
                          ["broker/x/ASSUMPTIONS.md:6: duplicate ID X-U1 (first on line 3); a main merge keeps an edited row twice unless the clone ran `python3 tools/record_merge.py --install`"])
 
+    def test_a_record_or_allow_file_in_no_class_is_reported(self):
+        # #6375 item 2: tools/record_merge.py's CLASSES lists every record and allow file; one outside it is named.
+        self.assertEqual(self.lint(**{"tools/x_allow.txt": "a\n", "image/x.allow": "a\n", "broker/h/allow.txt": "a\n",
+                                      "broker/h/allow.go": "package h\n", "notes/allowing.md": "x\n"}), [])
+        self.assertEqual(self.lint(**{"tools/x.allowlist": "a\n", "image/allowed.json": "[]\n"}),
+                         ["image/allowed.json: a record or allow file in no class of tools/record_merge.py's CLASSES; "
+                          "add its pattern there and in .gitattributes, or rename it",
+                          "tools/x.allowlist: a record or allow file in no class of tools/record_merge.py's CLASSES; "
+                          "add its pattern there and in .gitattributes, or rename it"])
+
+    def test_a_carriage_return_in_a_record_or_allow_file_is_reported(self):
+        # #6375 item 1: a CRLF repeat of an LF row reads as the same row to read_text(), and as another line to
+        # mutgate and premerge; every class is LF only, so the readers agree.
+        row = "| ID | A |\n|---|---|\n| X-U1 | a |\n"
+        self.assertEqual(sorted(self.lint(**{"broker/x/ASSUMPTIONS.md": row + "| X-U1 | a |\r\n",
+                                             "broker/x/MUTANTS-EQUIVALENT": "# c\r\n", "tools/x_allow.txt": "a\rb\n",
+                                             "notes.txt": "a\r\n"})),
+                         [f"{f}: holds a carriage return; record and allow files end lines in LF only (.gitattributes)"
+                          for f in ("broker/x/ASSUMPTIONS.md", "broker/x/MUTANTS-EQUIVALENT", "tools/x_allow.txt")])
+
+    def test_the_repository_holds_no_unclassed_record_file(self):
+        self.assertEqual(list(doclint.record_files(ROOT)), [])
+
     def test_hash_header_tables_and_other_tables_are_checked_only_by_id(self):
         text = "| # | A |\n|---|---|\n| P-1 | a |\n| P-1 | b |\n\n| Item | Size |\n|---|---|\n| x-y | 1 |\n| x-y | 2 |\n"
         self.assertEqual(self.lint(**{"broker/x/ASSUMPTIONS.md": text}),

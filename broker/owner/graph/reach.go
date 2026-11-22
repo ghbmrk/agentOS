@@ -15,8 +15,8 @@ import (
 // clerk's node reaches. The kernel folds an entry only when it adds, so the
 // writer sends only what the log lacks.
 
-// Declarer is the kernel's owner socket as the writer uses it; proc.Owner
-// is one.
+// Declarer is the kernel's owner socket as the writer uses it: kernel/proc's
+// OwnerSide serves it as declared and declreach.
 type Declarer interface {
 	DeclReach() (kernel.DeclReach, error)
 	DeclareReach(kernel.DeclReach) error
