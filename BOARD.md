@@ -401,7 +401,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CTL-agent-starting-status | CTL-agent-starting-status: STATUS during boot shows a starting line, not 'not set up' or 'waiting for memory'. Release; from #6136 (UX). | #5429, #6136 | queued (release; tier A) |
 | MUT-kill-6032-guest | MUT-kill-6032-guest: kill the surviving mutants in broker/guest (blocks #6032) | #6032 | queued (release; tier A) |
 | MUT-kill-6032-kernel-rederive | MUT-kill-6032-kernel-rederive: kill the surviving mutants in broker/kernel/rederive.go (blocks #6032) | #6032 | building (release; tier A) |
-| MUT-kill-6032-kernel-fips-dedupe | MUT-kill-6032-kernel-fips-dedupe: keep one fips140=only start-refusal test in broker/kernel, not four | #6032 | building (release; tier A) |
 | MUT-simplify-kernel-recent | MUT-simplify-kernel-recent: record only irreversible steps in s.recent and drop undo's delete branch and its two waivers | #6279 | building (release; tier A) |
 | MUT-record-deps | MUT-record-deps: a MUTANTS-EQUIVALENT entry names the functions its proof depends on, and goes stale when they change | #6279 | building (release; tier A) |
 | VM-snap-unread-notice-fu-1 | VM-snap-unread-notice-fu-1: add the ASSUMPTIONS.md row for the unread-snapshot notice once the 215 package-wide survivors it exposes in broker/cmd/agentosd are killed or proved | #6139 | queued (release; tier A; lane claude2) |
@@ -511,7 +510,6 @@ issue #6449: title '6382-fu VULN-debian-r13-f4-fu: fix the initrd -126765 vulnch
 issue #6450: title '6416-fu INBOX-unreadable-reason: unreadable mail gets its own unreadable reason with the same protection as alert; measure the malformed-junk volume kept' does not start with '<ID>: '
 issue #6451: title '6416-fu INBOX-unreadable-class: any part or subject the wording net cannot decode to text makes the mail unreadable (charset, encoded subject, duplicate Content-Type, other text/*)' does not start with '<ID>: '
 issue #6452: title '6407-fu CAM-e2e-harness-fu: a panic is not a trial failure, close handles after QEMU quits, mailbox inside /memory, restartCmds pinned to sys_linux.go, QMP socket peer-checked' does not start with '<ID>: '
-issue #6456: title '6373-fu TOOL-mutgate-hide-docs-fu: hide_docs never deletes working-tree files on a local run (HIGH); base and head trees hide by one name set' does not start with '<ID>: '
 issue #6457: title "6409-fu MUT-kill-6409-vision: kill or prove the 86 cmd/agentos-vision survivors that #6409's pin change exposes" does not start with '<ID>: '
 issue #6458: title '6409-fu TOOL-mutgate-embed-reach: a changed //go:embed file reaches only the tests that reach its embedding var, not every test' does not start with '<ID>: '
 ```
