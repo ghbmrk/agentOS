@@ -34,9 +34,18 @@ no process a module controls can open, signal or trace strace, the runner, anoth
 trace, and the kernel, not a check of the trace, is what refuses it. The runner so runs as root,
 locally too, and each module's user needs search permission on every directory above the repository:
 
-    sudo -E env "PATH=$PATH" python3 tools/unit_tests.py TRACE_DIR [--jobs N]
+CI-checks-under-45 (#6464): ci.yml runs the modules across runners, `--shards N --index I` on each
+(shard(): a pure function of the module list and SECONDS, so every runner computes the same split).
+A shard writes its results to <TRACE_DIR>/shard-<I>.json beside the traces and leaves the long-pole
+check to `--combine`, which ci.yml's checks job runs on every shard's traces together: it fails unless
+the shards are exactly 0..N-1 and each ran exactly shard()'s modules (so every module ran once), then
+applies report() to all modules as one run, the long-pole check included, with the same formula.
+
+    sudo -E env "PATH=$PATH" python3 tools/unit_tests.py TRACE_DIR [--jobs N] [--shards N --index I]
     python3 tools/unit_tests.py --split MODULE [--workers N]   (run from the repository root)
+    python3 tools/unit_tests.py --combine TRACE_DIR
 """
+import json
 import argparse
 import concurrent.futures
 import grp
@@ -75,13 +84,15 @@ SERIAL = {}
 # Modules whose tests run across workers inside their one strace tree (CI-par-3), with why.
 SPLIT = {"test_image": "about 10 min on a shared runner; one class is 45% of it, so it splits by test (#4332)",
          "test_image_keeper": "481s on the runner after #5167's way tests, over the step's long pole; it splits by test"}
-# Seconds per module on the CI runner (checks job of #4308, 2026-10-31), for ordering only: a
-# module not listed starts after these, biggest file first.
-SECONDS = {"test_image": 741, "test_image_keeper": 169, "test_slice_inbox_slice": 101,
-           "test_image_noexec": 82, "test_premerge": 51, "test_slice_boot": 46,
-           "test_image_drivers": 31, "test_image_imapconn": 22, "test_boot_net": 19,
-           "test_mutgate": 15, "test_trusted_base": 15, "test_root_tests": 14,
-           "test_risk_tier_custody": 13, "test_fuzzrun": 12, "test_require_ran": 11}
+# Seconds per module on the CI runner (checks job 136812618291 of #6430's run, 2026-11-21), for
+# ordering and for shard(): a module not listed starts after these, biggest file first, and weighs 1.
+SECONDS = {"test_image_keeper": 1407, "test_mutgate": 746, "test_image": 480, "test_premerge": 246,
+           "test_slice_inbox_slice": 173, "test_image_noexec": 145, "test_trusted_base": 80,
+           "test_image_dbus_reach": 49, "test_slice_boot": 49, "test_image_drivers": 47, "test_image_imapconn": 43,
+           "test_workflows": 40, "test_image_mor": 36, "test_image_repro": 36, "test_hostcheck": 32,
+           "test_image_clerk_keys": 24, "test_boot_net": 19, "test_unit_tests": 18, "test_image_drill": 16,
+           "test_image_import_sweep": 16, "test_record_merge": 15, "test_root_tests": 15, "test_image_wifidel": 14,
+           "test_ci_disk": 13, "test_image_disk": 13, "test_require_ran": 12, "test_fuzzrun": 12}
 # git status and diff refresh the worktree's index under .git/index.lock as a side effect; two
 # modules doing so at once in the shared worktree is a clash (tests/clash_audit.py). Without the
 # optional lock, any write left there is a git command that changes the index: a real clash.
@@ -104,6 +115,25 @@ FLOOR = 60  # seconds: a module shorter than this never fails the long-pole chec
 
 def modules(root=ROOT):
     return sorted(p.stem for p in (root / "tests").glob("test*.py"))
+
+
+def order(names, root=ROOT):
+    """names longest first: SECONDS, then file size, then name."""
+    return sorted(names, key=lambda m: (-SECONDS.get(m, 0), -size(m, root), m))
+
+
+def shard(names, shards, index, root=ROOT):
+    """The modules shard `index` of `shards` runs, in name order: each module, longest first (order()),
+    goes to the shard with the least SECONDS so far (the lowest index on a tie), so every module is on
+    exactly one shard whatever SECONDS says; stale or missing figures only balance the shards less well."""
+    if not 0 <= index < shards:
+        raise ValueError(f"shard {index} of {shards}: want 0 <= index < shards")
+    load, out = [0] * shards, [[] for _ in range(shards)]
+    for m in order(names, root):
+        i = min(range(shards), key=lambda s: (load[s], s))
+        load[i] += SECONDS.get(m, 1)
+        out[i].append(m)
+    return sorted(out[index])
 
 
 def command(module, trace_dir, workers=None):
@@ -536,7 +566,7 @@ def run(names, trace_dir, jobs, runner=run_one, progress=lambda line: print(line
         lanes=None):
     """Run names (SERIAL ones last, one at a time) and return {module: (rc, seconds, output)}.
     lanes, if given, gets [(worker, module)] in finishing order."""
-    pooled = sorted((m for m in names if m not in SERIAL), key=lambda m: (-SECONDS.get(m, 0), -size(m), m))
+    pooled = order(m for m in names if m not in SERIAL)
     results = {}
     lock = threading.Lock()
     lanes = [] if lanes is None else lanes
@@ -593,10 +623,12 @@ def long_pole(results, jobs, split=None):
     return (m, secs, ideal, part) if secs > FLOOR and secs > LONG_POLE * ideal else None
 
 
-def report(names, results, write=sys.stdout.write, jobs=1, lanes=(), wall=None, split=None):
+def report(names, results, write=sys.stdout.write, jobs=1, lanes=(), wall=None, split=None, logs=True, pole=True):
+    """logs: print each module's output (a shard's run; --combine's shards printed theirs). pole: apply the
+    long-pole check (left to --combine for a shard, whose share of the modules is not the run's)."""
     split = SPLIT if split is None else split
     failed = [m for m in names if m not in results or results[m][0] != 0]
-    for m in names:
+    for m in names if logs else ():
         rc, secs, out = results.get(m, (None, 0.0, "did not run\n"))
         write(f"::group::{m} ({'ok' if rc == 0 else 'FAILED'}, {secs:.0f}s)\n{out}::endgroup::\n")
     write("module times, slowest first:\n")
@@ -611,7 +643,7 @@ def report(names, results, write=sys.stdout.write, jobs=1, lanes=(), wall=None, 
     write(f"critical path {sum(s for _, s in path):.0f}s: " + ", ".join(f"{m} {s:.0f}s" for m, s in path) + "\n")
     for m in failed:
         write(f"::error::{m} failed\n")
-    pole = long_pole(results, jobs, split)
+    pole = long_pole(results, jobs, split) if pole else None
     if pole and pole[0] in split and pole[3]:
         write(f"::error::{pole[0]} is already split (tools/unit_tests.py SPLIT): its slowest part, {pole[3][1]}, "
               f"took {pole[1]:.0f}s, over {LONG_POLE} times the step's ideal {pole[2]:.0f}s. It is at its split "
@@ -630,18 +662,72 @@ def report(names, results, write=sys.stdout.write, jobs=1, lanes=(), wall=None, 
     return 1 if failed or pole else 0
 
 
+def shard_file(trace_dir, index):
+    return pathlib.Path(trace_dir) / f"shard-{index}.json"
+
+
+def combine(trace_dir, write=sys.stdout.write, root=ROOT):
+    """Every shard's shard-<I>.json in trace_dir as one run: 1 unless the files are shards 0..N-1 of one N,
+    each ran exactly shard()'s modules for its index, and report() passes on all modules together."""
+    shards, problems, results, walls, lanes = {}, [], {}, {}, {}
+    for f in sorted(pathlib.Path(trace_dir).glob("shard-*.json")):
+        try:
+            data = json.loads(f.read_text())
+            shards[f.name] = (int(data["shards"]), int(data["index"]), int(data["jobs"]), float(data["wall"]),
+                              {str(m): (int(r[0]), float(r[1]), str(r[2])) for m, r in data["results"].items()},
+                              [(str(a), str(b)) for a, b in data["lanes"]])
+        except (OSError, ValueError, KeyError, TypeError, IndexError) as e:
+            problems.append(f"{f.name} is not a shard's results: {e!r}")
+    names = modules(root)
+    counts = {n for n, *_ in shards.values()}
+    if len(counts) != 1:
+        problems.append(f"the shards' files name {sorted(counts) or 'no'} shard counts; want one")
+    else:
+        n = counts.pop()
+        got = sorted(i for _, i, *_ in shards.values())
+        if got != list(range(n)):
+            problems.append(f"shards {got} reported; want each of 0..{n - 1} once")
+        for name, (_, i, jobs, wall, res, ln) in sorted(shards.items()):
+            if name != shard_file("", i).name:
+                problems.append(f"{name} holds shard {i}")
+            want = shard(names, n, i, root) if 0 <= i < n else []
+            if sorted(res) != want:
+                problems.append(f"shard {i} ran {sorted(set(res) - set(want)) or 'nothing'} beyond, and not "
+                                f"{sorted(set(want) - set(res)) or 'nothing'} of, the modules shard() gives it")
+            walls[i] = wall
+            results.update((m, r) for m, r in res.items() if m in want)
+            lanes[i] = [(a, b) for a, b in ln if b in want]
+    jobs = max((j for _, _, j, *_ in shards.values()), default=1)
+    for p in problems:
+        write(f"::error::{p}\n")
+    write("".join(f"shard {i}: {walls[i]:.0f}s wall\n" for i in sorted(walls)))
+    slowest = max(walls, key=walls.get, default=None)  # the critical path is the slowest shard's
+    if slowest is not None:
+        write(f"the slowest shard is shard {slowest}\n")
+    rc = report(names, results, write, jobs=jobs, lanes=lanes.get(slowest, ()), wall=walls.get(slowest), logs=False)
+    return 1 if problems or rc else 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("trace_dir", nargs="?")
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 1)
     ap.add_argument("--split", metavar="MODULE", help="run one module's tests across --workers processes")
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 1)
+    ap.add_argument("--shards", type=int, help="with --index: run only shard()'s modules for that shard")
+    ap.add_argument("--index", type=int)
+    ap.add_argument("--combine", metavar="TRACE_DIR", help="check every shard's results as one run")
     args = ap.parse_args(argv)
     if args.split:
         return split(args.split, args.workers)
+    if args.combine:
+        return combine(args.combine)
     if not args.trace_dir:
         ap.error("TRACE_DIR is required")
-    names = modules()
+    sharded = args.shards is not None or args.index is not None
+    if sharded and (args.shards is None or args.index is None or not 0 <= args.index < args.shards):
+        ap.error("--shards N and --index I go together, with 0 <= I < N")
+    names = shard(modules(), args.shards, args.index) if sharded else modules()
     try:
         prepare(names, args.trace_dir)
     except (OSError, subprocess.CalledProcessError) as e:
@@ -653,7 +739,12 @@ def main(argv=None):
         results = run(names, args.trace_dir, args.jobs, lanes=lanes)
     finally:
         shutil.rmtree(scratch(args.trace_dir), ignore_errors=True)
-    return report(names, results, jobs=args.jobs, lanes=lanes, wall=time.monotonic() - start)
+    wall = time.monotonic() - start
+    if sharded:
+        shard_file(args.trace_dir, args.index).write_text(json.dumps(
+            {"shards": args.shards, "index": args.index, "jobs": args.jobs, "wall": wall,
+             "results": {m: list(r) for m, r in results.items()}, "lanes": lanes}))
+    return report(names, results, jobs=args.jobs, lanes=lanes, wall=wall, pole=not sharded)
 
 
 if __name__ == "__main__":

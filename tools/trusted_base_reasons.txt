@@ -1,0 +1,9 @@
+# Stated reasons for trusted-base growth (SPEC KRN-2, #2849; committed record, #6395).
+# A PR that adds a parser package to a trusted process, or reclassifies a parser as inert in
+# tools/trusted_base_parsers.txt, adds one line here: `<parsers|registry> #<PR> -- <reason>`,
+# the reason at least two words. A PR that grows the trusted core (tools/trusted_core.txt) or raises
+# or deletes a ceiling (tools/ceilings.txt) adds `trusted-core #<PR> -- <decision ID>` or
+# `ceiling #<PR> -- <decision ID>`, naming an active base-branch DECISIONS.md row that names the PR
+# (#6404). tools/trusted_base.py counts only lines the base lacks that name
+# the PR being checked, so the reason is part of the reviewed head and a later body edit cannot
+# change it. Lines stay as the history of past reasons; append, never edit.
