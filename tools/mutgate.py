@@ -2696,7 +2696,8 @@ done
 # deletion can (#5011), and took a runner down on #6000. Gremlins v0.6.0 reads its `go test`'s exit 1
 # as KILLED (executor.go getTestFailedStatus), so a test binary past its cap is killed and exits 1, as
 # run_tests' memory_cap is KILLED. Only the test binaries go under the cap, through `go test -exec`
-# (cap_exec, #6392): a mutant changes what the tests do, not how much the compiler holds.
+# (cap_exec, #6392): a mutant changes what the tests do, not how much the compiler holds. The `go`
+# driver would hold a mutant run's output (#6507), so none reaches it (cap_exec).
 def capped_go(real, tmp, args, mem, exits=None):
     """args for the real go with each test binary run through cap_exec under mem bytes (its peak and
     end appended to the file exits, when given); None, with the reason printed and REFUSED written in
@@ -2762,9 +2763,12 @@ def go_capped(real, tmp, mem, args):
 def cap_exec(mem, exits, argv):
     """go test's -exec: run the test binary argv contained under mem bytes; past it, print memory_cap's
     failure and exit 1, which gremlins reads as KILLED; else exit as it did. With exits not "-", append
-    `PEAK END` (bytes, and "over" or its exit code) to that file for go_cover."""
+    `PEAK END` (bytes, and "over" or its exit code) to that file for go_cover; with exits "-", a mutant
+    run, the binary's output goes to /dev/null (MUT-gremlins-memcap-go): gremlins discards a mutant run's
+    output and reads only its exit code, and given a package `go test` holds all of it in the driver."""
     die_with_parent()
-    end, peak = contained(argv, mem)
+    quiet = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL} if exits == "-" else {}
+    end, peak = contained(argv, mem, **quiet)
     if exits != "-":
         with open(exits, "a") as f:
             f.write(f"{peak} {end}\n")
