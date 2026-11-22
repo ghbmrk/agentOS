@@ -24,6 +24,9 @@ sys.path.insert(0, str(IMG))
 spec = importlib.util.spec_from_file_location("static_elf", IMG / "static_elf.py")
 se = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(se)
+vspec = importlib.util.spec_from_file_location("vulncheck", ROOT / "tools" / "vulncheck.py")
+vulncheck = importlib.util.module_from_spec(vspec)
+vspec.loader.exec_module(vulncheck)
 
 C = "int main(void) { return 0; }\n"
 CXX = ('#include <stdexcept>\nint main(int c, char **v) { try { if (c > 5) throw std::runtime_error(v[0]); }\n'
@@ -226,6 +229,23 @@ class StaticElfTest(unittest.TestCase):
                 errs = self.check(root, out, allow, config)
                 self.assertTrue(any(want in e for e in errs), errs)
 
+    def test_a_built_using_packages_static_file_fails_until_declared_package(self):
+        # #6481: vulncheck.py queries Built-Using sources only for packages this allow-list declares
+        # "package". A static file a package with Built-Using ships (libcap2-bin's capsh, say) still
+        # fails the gate with no entry, so narrowing the scan cannot pass an undeclared static copy;
+        # declaring it "package" passes it and puts its package's Built-Using sources in the scan.
+        root, out, allow, config, _ = self.tree()
+        shutil.copy(self.bins["static"], root / "usr/sbin/capsh")
+        (out / se.STATUS).write_text(STATUS % "libc-bin" + STATUS % "libcap2-bin")
+        md5 = hashlib.md5(self.bins["static"].read_bytes()).hexdigest()
+        (out / se.MD5SUMS).write_text("%s  usr/sbin/ldconfig\n%s  usr/sbin/capsh\n" % (md5, md5))
+        self.assertEqual(self.check(root, out, allow, config),
+                         ["/usr/sbin/capsh (static): no entry in static_elf.allow declares it"])
+        self.assertNotIn("libcap2-bin", vulncheck.declared_packages(allow))
+        allow.write_text(allow.read_text() + "/usr/sbin/capsh package libcap2-bin\n")
+        self.assertEqual(self.check(root, out, allow, config), [])
+        self.assertEqual(vulncheck.declared_packages(allow), {"libc-bin", "libcap2-bin"})
+
     def test_the_control_fails_on_a_tree_missing_a_required_file(self):
         # SEL-7: a walk that does not list llama-server, runsc, agentos-camdecode and ldconfig read nothing
         # it should have; and the CLI exits 1 on any refusal, 0 on a clean tree.
@@ -302,6 +322,16 @@ class ShippedTest(unittest.TestCase):
                     f.flush()
                     with self.assertRaises(ValueError):
                         se.read_allow(f.name)
+
+    def test_vulncheck_reads_the_same_package_entries(self):
+        # #6481: the packages whose Built-Using sources the image scan queries are exactly the shipped
+        # allow-list's "package" entries as this check reads them; bwrap's libcap-dev, a linked input,
+        # is not among them (its libcap.a is queried by package as a "linked" input).
+        want = {a for _n, _g, k, a in se.read_allow(se.ALLOW) if k == "package"}
+        self.assertTrue(want)
+        self.assertEqual(vulncheck.declared_packages(vulncheck.STATIC_ELF_ALLOW), want)
+        self.assertEqual(vulncheck.STATIC_ELF_ALLOW, se.ALLOW)
+        self.assertNotIn("libcap-dev", want)
 
     def test_each_link_record_sets_shipped_for_on_the_bytes_it_ships(self):
         # SEL-6 linked: the three static link builds record their inputs against the binary they install.

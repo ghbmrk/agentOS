@@ -395,7 +395,7 @@ class ImageTest(unittest.TestCase):
         saved = (vulncheck.run_image, vulncheck.manifest_problems, vulncheck.initrd_status, vulncheck.guest_problems,
                  vulncheck.linked_problems)
         # The main tree's findings come once, from its own status, not again from its linked inputs.
-        vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None: (
+        vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None, declared=None: (
             [] if pathlib.Path(src).name == vulncheck.LINKED else [dict(f) for f in found if f["where"] == where], [])
         vulncheck.manifest_problems = lambda src: []
         vulncheck.initrd_status = lambda src: (b"Package: x\n", [])
@@ -459,23 +459,41 @@ class ImageTest(unittest.TestCase):
                 "Built-Using: glibc (= 2.41-12),\n gcc-14 (= 14.2.0-19)\n\n"
                 "Package: b\nStatus: deinstall ok config-files\nBuilt-Using: x (= 1)\n\n"
                 "Package: c\nStatus: install ok installed\nVersion: 1\n")
-        got = vulncheck.built_using(text)
+        got = vulncheck.built_using(text, {"a", "b", "c"})
         self.assertEqual(vulncheck.dpkg_installed(got), {("a+built-using+glibc", "2.41-12"), ("a+built-using+gcc-14", "14.2.0-19")})
         self.assertIn("Source: glibc (2.41-12)\n", got)
         self.assertIn("Source: gcc-14 (14.2.0-19)\n", got)
-        self.assertEqual(vulncheck.built_using("Package: c\nStatus: install ok installed\n"), "")
+        self.assertEqual(vulncheck.built_using("Package: c\nStatus: install ok installed\n", {"c"}), "")
+        # #6481: only a package image/static_elf.allow declares "package" has its sources queried.
+        self.assertEqual(vulncheck.built_using(text, {"b", "c"}), "")
+        self.assertEqual(vulncheck.built_using(text, set()), "")
         # In the archive the scan reads, beside the tree's own packages: the control's agentos-fixed is
         # Built-Using agentos-builtusing, whose advisory (DEB-9) the main tree's control must report.
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         out = pathlib.Path(tmp.name) / "a.tar"
-        vulncheck.image_archive(vulncheck.FIXTURE / "image", out)
+        vulncheck.image_archive(vulncheck.FIXTURE / "image", out,
+                                declared=vulncheck.declared_packages(vulncheck.CONTROL_ALLOW))
         with tarfile.open(out) as t:
             manifest = json.load(t.extractfile("manifest.json"))
             layer = tarfile.open(fileobj=t.extractfile(manifest[0]["Layers"][0]))
             status = layer.extractfile("var/lib/dpkg/status").read().decode()
         self.assertIn(("agentos-fixed+built-using+agentos-builtusing", "1.0-1"), vulncheck.dpkg_installed(status))
         self.assertIn("Source: agentos-builtusing (1.0-1)\n", status)
+        # agentos-nofix is Built-Using agentos-undeclared, but the control's allow-list does not declare
+        # it "package": its source is not queried, and the control must not report DEB-10 anywhere.
+        self.assertNotIn("agentos-nofix+built-using+", status)
+        self.assertNotIn("agentos-undeclared", status.split("Package: agentos-nofix\n", 1)[1].split("\n\n", 1)[1])
+        self.assertFalse({f for f in vulncheck.CONTROL_IMAGE_FAILS if f[1] == "AGENTOS-VULNCHECK-DEB-10"})
+
+    def test_an_unreadable_static_elf_allow_stops_the_image_scan(self):
+        # #6481: the Built-Using sources follow image/static_elf.allow's "package" entries, so a list the
+        # scan cannot read stops it rather than querying none.
+        with self.assertRaises(vulncheck.ScanError):
+            vulncheck.declared_packages(vulncheck.FIXTURE / "no-such.allow")
+        with self.assertRaises(vulncheck.ScanError):
+            vulncheck.scan_image({"accepted": []}, vulncheck.FIXTURE / "image", offline=True,
+                                 allow=vulncheck.FIXTURE / "no-such.allow")
         self.assertIn((vulncheck.IMAGE, "AGENTOS-VULNCHECK-DEB-9"), vulncheck.CONTROL_IMAGE_FAILS)
         self.assertIn((vulncheck.IMAGE, "AGENTOS-VULNCHECK-DEB-9", "FAIL"), vulncheck.CONTROL_IMAGE_VERDICTS)
 
@@ -534,7 +552,7 @@ class ImageTest(unittest.TestCase):
         shutil.copytree(self.image_dir() / vulncheck.GUESTS, d / vulncheck.GUESTS)
         shutil.copytree(self.image_dir() / vulncheck.LINKED, d / vulncheck.LINKED)
         saved = vulncheck.run_image
-        vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None: ([], [])
+        vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None, declared=None: ([], [])
         try:
             _, probs, _ = vulncheck.scan_image({"accepted": []}, d)
             self.assertEqual(probs, vulncheck.manifest_problems(d))
@@ -549,7 +567,7 @@ class ImageTest(unittest.TestCase):
         # like the main tree's, and its findings are the initrd's.
         d, calls = self.image_dir(), []
 
-        def run(src, env=None, offline=False, where="image", status=None):
+        def run(src, env=None, offline=False, where="image", status=None, declared=None):
             calls.append((where, status))
             return [{**fail("DSA-1"), "where": where}], []
         saved = vulncheck.run_image
@@ -570,7 +588,7 @@ class ImageTest(unittest.TestCase):
         # directory is reported, never a scan of nothing.
         d, srcs = self.image_dir(), []
 
-        def run(src, env=None, offline=False, where="image", status=None):
+        def run(src, env=None, offline=False, where="image", status=None, declared=None):
             srcs.append((where, pathlib.Path(src)))
             return [], []
         saved = vulncheck.run_image
@@ -641,7 +659,7 @@ class ImageTest(unittest.TestCase):
         # image record accepts them and no guest or initrd record does.
         d, srcs = self.image_dir(), []
 
-        def run(src, env=None, offline=False, where="image", status=None):
+        def run(src, env=None, offline=False, where="image", status=None, declared=None):
             srcs.append((where, pathlib.Path(src)))
             if pathlib.Path(src).name != vulncheck.LINKED:
                 return [], []
@@ -672,7 +690,7 @@ class ImageTest(unittest.TestCase):
                      "Package: x\nStatus: deinstall ok config-files\n"),
                  "no directory": lambda d: shutil.rmtree(d)}
         saved = vulncheck.run_image
-        vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None: ([], [])
+        vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None, declared=None: ([], [])
         try:
             for name, spoil in cases.items():
                 with self.subTest(name):
