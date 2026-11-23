@@ -10,6 +10,7 @@ and anything unreadable falls back to the full check.
 import contextlib
 import io
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -164,6 +165,39 @@ class MainTest(unittest.TestCase):
         self.assertEqual((code, main, report["unused_records"]), (0, [rec("DSA-1", 1)], []))
         self.assertEqual([r["id"] for r in report["deferred_unused"]], ["DSA-9"])
         self.assertIn("inherited mode:", out)
+
+    def test_main_image_records_reach_the_issue_check(self):
+        # Potency on #6631: a main record whose issue is closed must not clear a PR; a non-image main record is not
+        # checked here (`run` checks those).
+        saved = (vulncheck.scan_image, vulncheck.changed_paths, vulncheck.issue_problems)
+        self.addCleanup(lambda: (setattr(vulncheck, "scan_image", saved[0]), setattr(vulncheck, "changed_paths", saved[1]),
+                                 setattr(vulncheck, "issue_problems", saved[2])))
+        checked = []
+
+        def issues(records, repo, token):
+            checked.extend(records)
+            return [f"issue #{r['issue']} is closed" for r in records if r["issue"] == 12]
+        vulncheck.scan_image = lambda config, src, main_records=(): ([], [], [])
+        vulncheck.changed_paths = lambda base, root=vulncheck.ROOT: ["broker/kernel/a.go"]
+        vulncheck.issue_problems = issues
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = pathlib.Path(tmp.name)
+        own, img, lock = rec("DSA-9", 9), rec("DSA-2", 12), {**rec("GHSA-1", 13, where="npm/package-lock.json"),
+                                                            "version": "1.0.0"}
+        (d / "c.json").write_text(json.dumps({"accepted": [own]}))
+        (d / "m.json").write_text(json.dumps({"accepted": [img, lock]}))
+        env = {"GITHUB_REPOSITORY": "o/r", "GITHUB_TOKEN": "synthetic-canary"}
+        saved_env = {k: os.environ.get(k) for k in env}
+        os.environ.update(env)
+        self.addCleanup(lambda: [os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+                                 for k, v in saved_env.items()])
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = vulncheck.main(["image", "x", "--config", str(d / "c.json"), "--check-issues",
+                                   "--inherit", str(d / "m.json"), "--base", "HEAD^1"])
+        self.assertEqual(sorted(r["issue"] for r in checked), [9, 12])
+        self.assertEqual(code, 1)
+        self.assertIn("issue #12 is closed", out.getvalue())
 
     def test_a_pr_touching_an_input_gets_the_full_check(self):
         code, out, main, report = self.run_main(["broker/kernel/a.go", "assurance/vulncheck.json"])
