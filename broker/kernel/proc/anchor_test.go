@@ -186,7 +186,7 @@ func TestCounterAnchorRefusesAnEditedFile(t *testing.T) {
 	}
 	older := head(priv, 3)
 	other := headKey(t)
-	resigned, _ := signAnchor(other, anchorRec{V: 1, N: rec.N, Head: rec.Head, Prev: rec.Prev})
+	resigned := signAnchor(other, anchorRec{V: 1, N: rec.N, Head: rec.Head, Prev: rec.Prev})
 	for name, b := range map[string][]byte{
 		"number":       edit(func(r *anchorRec) { r.N++ }),
 		"head swapped": edit(func(r *anchorRec) { r.Head = &older }),
