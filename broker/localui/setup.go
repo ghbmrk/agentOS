@@ -1398,11 +1398,13 @@ func (u *setup) aiPrivate(r *http.Request, _ string) error {
 }
 
 // keyErrText is the page's text for a key the vault did not store: only a
-// key the provider refused is blamed on the provider (U-2, #1265).
+// key the provider refused is blamed on the provider (U-2, #1265), with the
+// usual fix, a whole fresh paste (#1359), and the permission an OpenAI
+// restricted key needs for the models-list check (#1361).
 func keyErrText(err error) string {
 	switch {
 	case errors.Is(err, ErrKeyRefused):
-		return "The provider did not accept that key."
+		return "The provider did not accept that key. Copy the whole key again from your provider's page and paste it here. An OpenAI restricted key also needs the \"Models: Read\" permission."
 	case errors.Is(err, ErrKeyUnchecked):
 		return "I could not reach the provider to check that key, so I did not save it. Try again in a minute."
 	case errors.Is(err, ErrKeysLimited):

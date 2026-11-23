@@ -160,6 +160,20 @@ func (a AgentosdSetup) Providers() []Provider {
 	return out
 }
 
+// keyRefusals pairs each agentosd code ConnectAPIKey names with the page's
+// error, in a fixed order (#1363).
+var keyRefusals = [...]struct {
+	code  string
+	named error
+}{
+	{localapi.ErrKeyRefused, ErrKeyRefused},
+	{localapi.ErrKeyUnchecked, ErrKeyUnchecked},
+	{localapi.ErrLimited, ErrKeysLimited},
+	{localapi.ErrBadArgs, ErrKeyNotTaken},
+	{localapi.ErrSetupClosed, ErrSetupClosed},
+	{localapi.ErrEnrollUnavailable, ErrCodesUnavailable},
+}
+
 // ConnectAPIKey passes the key to agentosd, which passes it to the vault
 // process; the page keeps nothing (CRED-1, CRED-5). The vault checks the
 // key with its provider first (ONB-3), so the call waits up to
@@ -170,16 +184,9 @@ func (a AgentosdSetup) ConnectAPIKey(id, key string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), localapi.APIKeyTimeout)
 	defer cancel()
 	err := a.Owner.Call(ctx, localapi.OpSetupAPIKey, localapi.APIKey{Provider: id, Key: key}, nil)
-	for code, named := range map[string]error{
-		localapi.ErrKeyRefused:        ErrKeyRefused,
-		localapi.ErrKeyUnchecked:      ErrKeyUnchecked,
-		localapi.ErrLimited:           ErrKeysLimited,
-		localapi.ErrBadArgs:           ErrKeyNotTaken,
-		localapi.ErrSetupClosed:       ErrSetupClosed,
-		localapi.ErrEnrollUnavailable: ErrCodesUnavailable,
-	} {
-		if refused(err, code) {
-			return fmt.Errorf("%w (%w)", named, err)
+	for _, c := range keyRefusals {
+		if refused(err, c.code) {
+			return fmt.Errorf("%w (%w)", c.named, err)
 		}
 	}
 	return err
