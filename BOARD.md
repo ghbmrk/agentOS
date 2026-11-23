@@ -393,7 +393,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-static-elf | VULN-static-elf: an image-build check that finds static ELFs (llama-server) and makes image-vulncheck scan their toolchain packages. Release; split from #5873. | #5873, #5871, #2919 | building (release; tier A; gate files; brief briefs/VULN-static-elf.md, PR #5940; parts a, b; after #5932, serial with #5889 on image.yml) |
 | VULN-codex-openssl | VULN-codex-openssl: bump the codex pin once a release links OpenSSL 3.6.5 or later; until then the bundled entry records each fix's reach. Release; from #5888. | #5873, #5888 | queued (release; tier A; waits on a codex release) |
 | KEY-refusal-code | KEY-refusal-code: key.Refusal's code is a closed key.Code set only through key constructors (PLN-4, KRN-5) | #6021 review | building (release; tier A; blocks #4736) |
-| REV-CHK-links-ns7 | REV-CHK-links-ns7: release findings from #6029's reviews (instance drop-ins, per-merge link targets, messages) | #6029 review | in review (release; tier A; kernel lane) |
 | KEY-refusal-code-r1 | KEY-refusal-code-r1: #6032 release items (kernel.Refusal encoding, code-var reassignment lint, requal named set, skew note, guest.set types) | #6032 review | queued (release; tier A; after #6032) |
 | VULN-node-openssl-pin | VULN-node-openssl-pin: bump the openclaw guest's node pin once a release bundles OpenSSL 3.5.10; until then the bundled entry records each fix's reach. Release; from #6074. | #5853, #6074 | queued (release; tier A; waits on a node release) |
 | MOR-clear-owner-fu | MOR-clear-owner-fu: the failed-shutdown STATUS line stops asking for a restart when the record outlives one, and a boot test holds the record's sync and mode. Release; from #6126. | #6111, #6126 | queued (release; tier B) |
@@ -419,18 +418,10 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MUT-go-debug-every | MUT-go-debug-every: a //go:debug line in a test file reaches every test of its package. Release. | #6369 | building (release; tier A) |
 | LINT-sealer-key-wipe-fu2 | LINT-sealer-key-wipe-fu2: the wipe lint checks the listed constructors' bodies and refuses a defer clear that holds the key past its last use. Release. | #6349, #6363 | building (release; tier A) |
 | KRN-2-proc-test-support | KRN-2-proc-test-support: move proc.RestoreSections and the test-only proc.Owner lines into a test-support package the trusted-base measure does not count. Release. | #5732, #6305 | queued (release; tier A) |
-| TOOL-mutgate-memcap-fu | TOOL-mutgate-memcap-fu: a capped run's whole session is killed, and a gremlins cap kill is confirmed against a measured base peak. Release. | #6388, #6389 | building (release; tier A) |
-| MUT-waivers-to-records-6304-6013-6000 | MUT-waivers-to-records-6304-6013-6000: record the body waivers of #6304, #6013 and #6000 with mutgate.py waive, and kill #6013's five uncovered apnet.go lines. Release. | #6304, #6013, #6000, #6381 | building (release; tier A) |
 | CI-main-supersede | CI-main-supersede: a first-attempt main push cancels main's older run of the same workflow; the tip always finishes. Release. | #5345, #5348, #5361 | building (release; tier A) |
-| CI-trusted-base-records | CI-trusted-base-records: Trusted-base reasons come from committed records, not the PR body; drop the edited trigger. Release. | #6381 | building (release; tier A) |
-| ENV-session-hooks-unloaded | ENV-session-hooks-unloaded: project-thread sessions load no checkout hook, so close_guard is absent where #5702 L3 needed it; add a loud loaded-or-not check and correct TN-vulncheck-11; the environment's setup-script line is Mark's setting | #6412 | building (release; tier C) |
-| NET-2-image-daily-bytes | NET-2-image-daily-bytes: the signed image states the daily bytes the kernel sends to each of its own destinations (D-248) | #5157 | building (release; tier A) |
+| ENV-session-hooks-unloaded | ENV-session-hooks-unloaded: project-thread sessions load no checkout hook, so close_guard is absent where #5702 L3 needed it; add a loud loaded-or-not check and correct TN-vulncheck-11; the environment's setup-script line is Mark's setting | #6412 | queued (release; tier C) |
 | NET-2-owner-host-daily-bytes | NET-2-owner-host-daily-bytes: an owner-entered destination (IMAP server) states its daily bytes, confirmed at set-up (D-248) | #5157 | queued (release; tier A) |
 | VULN-codex-musl | VULN-codex-musl: the Codex CLI's static musl libc (and code-mode-host's libc++abi) is unversioned, so no advisory is queried for it. Release; from #5885. | #5885, #5894 | queued (release; tier A) |
-| TOOL-mutgate-cross-package-data | TOOL-mutgate-cross-package-data: a test reading another package's tree (imapconn reads vendor/ and third_party/go-imap) is not claimed when those files change. Release; from #6373. | #6373 | building (release; tier A) |
-| TOOL-classes-structural | TOOL-classes-structural: every allowlist or exit list a gate tool reads must be declared in CLASSES, enforced by the reader; an undeclared file fails closed. Release. | #6375, #6418 | building (release; tier A) |
-| TOOL-mutgate-gofmt-pin | TOOL-mutgate-gofmt-pin: mutgate uses the toolchain's gofmt and asserts its version, failing closed; measure whether the sort-last test-file line helps. Release. | #6385, #6421 | building (release; tier A) |
-| PREMERGE-replay-inputs-gate | PREMERGE-replay-inputs-gate: every input to premerge's replay (.gitattributes) is a gate file. Release. | #6375, #6418 | building (release; tier A) |
 | MUT-6461-fu | MUT-6461-fu: hold the service.go:217 DEV-7 wipe mechanically and sync-order TestConcurrentReadyLoadsOnce (#6461 release findings). | #6461 | queued (release; tier B) |
 | CI-checks-under-45 | CI-checks-under-45: the required checks job runs the unit tests serially and times out at 45 minutes on loaded runners; shard the unit-test units with no coverage removed. HIGH PRIORITY. | #6430 | building (flake; tier A) |
 | VULN-debian-r14-glibc-u5 | VULN-debian-r14-glibc-u5: move the image's pin to glibc 2.41-12+deb13u5 and drop the vulncheck accepts it makes stale. HIGH PRIORITY. | #2919, #6284 | building (release; tier A) |
@@ -439,13 +430,17 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | REV-CHK-links-ns9 | REV-CHK-links-ns9: root's home, XDG autostart, and boot-made /run env files reach a check | #6400 review | building (release; tier A; kernel lane) |
 | NET-2-drop-cap-row-basis | NET-2-drop-cap-row-basis: the "drop a core cap" row of TestCapChangesAreLoosenings clears its Basis, so it exercises Classify and not check. Release. | #6144 | queued (release; tier A) |
 | NET-2-host-canonical | NET-2-host-canonical: imagedest.Join and enflist.Propose canonicalize destination hosts (case, trailing dot), so one DNS name never gets two caps. Release. | #6432, #6447 | queued (release; tier A) |
-| VULN-debian-r15 | VULN-debian-r15: accept openssl's no-fix Debian 13 advisory DEBIAN-CVE-2026-121481 so image-vulncheck passes again. Release; no-fix Debian round. | #2919, #6223 | building (release; tier A) |
-| VULN-builtusing-remedy | VULN-builtusing-remedy: a fixed finding on a Built-Using source cannot be accepted, so image-vulncheck can stay red until Debian rebuilds the package. Release; from #6437. | #5885, #6437, #6470 | queued (release; tier A) |
 | VULN-static-elf-tighten | VULN-static-elf-tighten: guest-root package files bound to bytes; Go read from section headers; .syso C code seen. Release; from #6437. | #5885, #6437 | queued (release; tier A) |
 | VULN-debian-r13-f5 | VULN-debian-r13-f5: import sweep [wrapper] entries: a test that a wrapper's own held names count (R5), and exports that forward a caller's name stay lookups (R6). Release. | #6299, #6382 | queued (release; tier A) |
-| SPEC-krn2-core-record | SPEC-krn2-core-record: KRN-2 says the core grows under a committed record line, not a PR-body line. Release. | #6404 | queued (release; L1 spec-diff) |
-| CI-word-budget-record | CI-word-budget-record: the Word-budget waiver comes from a committed record, not the PR body; drop the edited trigger. Release. | #6404 | queued (release; tier A) |
+| SPEC-krn2-core-record | SPEC-krn2-core-record: KRN-2 says the core grows under a committed record line, not a PR-body line. Release. | #6404 | building (release; L1 spec-diff) |
 | MUT-record-deps-audit | MUT-record-deps-audit: re-record entries whose proof rests on outside declarations with --dep, and lint entries that name one without deps. Release. | #6282, #6498 | queued (release; tier A) |
+| MUT-6368-fu | MUT-6368-fu: unlock sets the anchors file mode before the rename, seal tests pin that only TPM slots carry Policies, and a test pins the store-key wipe on every return. Release. | #6368, #6384 | queued (release; tier A) |
+| TOOL-mutgate-memcap-fu2 | TOOL-mutgate-memcap-fu2: the capped-run refusal message says memory.peak includes page cache and names the cap and the peak. Release. | #6392, #6423 | queued (release; tier A) |
+| REV-CHK-links-ns10 | REV-CHK-links-ns10: a link planted at run time on a made path's way reaches no check | #6474 re-plan | queued (release; tier A; kernel lane) |
+| CI-core-record-comments | CI-core-record-comments: trusted-base workflow and trusted_core.txt comments name the committed record line, not a PR-body line. Release. | #6489 | queued (release) |
+| CI-pin-liveness-fu | CI-pin-liveness-fu: NOT_YET lists shrink only by test, bypass detection is structural, live checks a zip's hash before reading a member, and the schedule comment says daily. Release. | #6424, #6517 | queued (release; tier A) |
+| CI-cancel-stale-sha | CI-cancel-stale-sha: queued or pending runs for a SHA that is not their PR's head (rerun attempts, stale premerge) are cancelled by class; the current head's runs never are. Release. | runner-queue check 2026-11-22 | building (release; tier A) |
+| CI-cancel-stale-sha-fu | CI-cancel-stale-sha-fu: the trusted-base-rerun header says what it cancels, the cancel step is continue-on-error, and the live cancel is verified after merge. Release. | #6529, #6530 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -492,7 +487,6 @@ issue #6008: needs exactly one state label of queued, building, in review, merge
 issue #6168: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #6192: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #6193: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #6408: body has no board-row block
 issue #6416: title '6300-fu INBOX-badct-base64-fail-closed: mail with a broken Content-Type and a base64 text part is never trashed unread' does not start with '<ID>: '
 issue #6417: title '6380-fu IMG-mkosi-local-fu3: local build/stage halves fail closed on sudo, refuse a host that built, and get a local two-stage compare' does not start with '<ID>: '
 issue #6420: title '6377-fu MUT-go-debug-every-fu: a //go:debug in a non-test main file, and go.mod go/godebug changes, widen mutgate to every test in the affected packages' does not start with '<ID>: '
@@ -505,7 +499,10 @@ issue #6448: title '6299-fu IMG-pin-refusal-diff: a refused pin prints the ownin
 issue #6449: title '6382-fu VULN-debian-r13-f4-fu: fix the initrd -126765 vulncheck record and the image count (113 to 112); test the glibc exemption with a SONAME library' does not start with '<ID>: '
 issue #6450: title '6416-fu INBOX-unreadable-reason: unreadable mail gets its own unreadable reason with the same protection as alert; measure the malformed-junk volume kept' does not start with '<ID>: '
 issue #6451: title '6416-fu INBOX-unreadable-class: any part or subject the wording net cannot decode to text makes the mail unreadable (charset, encoded subject, duplicate Content-Type, other text/*)' does not start with '<ID>: '
-issue #6452: title '6407-fu CAM-e2e-harness-fu: a panic is not a trial failure, close handles after QEMU quits, mailbox inside /memory, restartCmds pinned to sys_linux.go, QMP socket peer-checked' does not start with '<ID>: '
-issue #6457: title "6409-fu MUT-kill-6409-vision: kill or prove the 86 cmd/agentos-vision survivors that #6409's pin change exposes" does not start with '<ID>: '
 issue #6458: title '6409-fu TOOL-mutgate-embed-reach: a changed //go:embed file reaches only the tests that reach its embedding var, not every test' does not start with '<ID>: '
+issue #6500: body has no board-row block
+issue #6505: body has no board-row block
+issue #6509: title '6417-fu IMG-mkosi-local-fu4: local two-stage compare before a local image is accepted (blocked on Mark design pick)' does not start with '<ID>: '
+issue #6515: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #6534: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 ```
