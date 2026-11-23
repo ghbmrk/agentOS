@@ -12,6 +12,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -27,12 +28,20 @@ import mutgate  # noqa: E402
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from _nogit_bg import setUpModule as _bg_up, tearDownModule as _bg_down  # noqa: E402
 
+_LOCAL = {}
+
 
 def setUpModule():
     _bg_up()
+    # Without a delegated cgroup these tests run mutgate as a local, advisory run does, in CI's unit
+    # tests too, where CI is set; ci.yml's cgroup step runs the containment tests with one (#6392).
+    if not os.environ.get(mutgate.CGROUP_ENV):
+        _LOCAL.update({k: os.environ.pop(k) for k in ("CI", "GITHUB_ACTIONS") if k in os.environ})
 
 
 def tearDownModule():
+    os.environ.update(_LOCAL)
+    _LOCAL.clear()
     _bg_down()
 
 
@@ -57,6 +66,15 @@ def gate(diff, live, waived=None):
     added = mutgate.added_lines(diff)[0]
     return [v[:4] for v in mutgate.violations({p: mutgate.diff_targets(added, p) for p in live}, live, waived)]
 
+
+def as_ci(args):
+    """Before a `verify` of results that `run` and `delete` wrote here, drop their advisory mark (#6392):
+    without a delegated cgroup they ran as a local run does, and these tests read the verdict as CI's."""
+    if args[:1] == ("verify",):
+        for f in pathlib.Path(args[1]).rglob("*.json"):
+            data = json.loads(f.read_text())
+            if isinstance(data, dict) and data.pop("advisory", None):
+                f.write_text(json.dumps(data))
 
 class Gate(unittest.TestCase):
     def test_live_mutant_on_added_line_in_claimed_package_fails(self):
@@ -518,6 +536,7 @@ class Shape(unittest.TestCase):
         r, data = self.run_silent_stub("Starting...\n\nNo results to report.\n")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("No results to report.", r.stdout)  # its output still shows
+        data.pop("advisory", None)  # a local run's mark (#6392)
         self.assertEqual(data, {"files": [], "mutants_total": 0, "mutants_lived": 0})
 
     def test_run_fails_closed_on_any_other_missing_result(self):
@@ -578,7 +597,7 @@ class Shape(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         cwd, argv, diff = seen.split("\n", 2)
         self.assertEqual(pathlib.Path(cwd).name, "hint")
-        self.assertRegex(argv, r"/broker/hint -D HEAD~1 --config \S+ --exclude-files / -o D/out/hint\.json$")
+        self.assertRegex(argv, r"/broker/hint -D HEAD~1 --config \S+ --exclude-files / -o D/out/hint\.json --workers \d+$")
         self.assertIn("+++ b/hint.go\n@@ -1,0 +2,2 @@", diff)
         self.assertNotIn("\n package hint\n", diff)  # no context line
         # A mutant gremlins skipped on a line the gate reads fails the run, not the gate empty.
@@ -1102,6 +1121,113 @@ class Deletion(unittest.TestCase):
             stub.write_text("#!/bin/sh\nsleep 60\n")
             self.assertEqual(mutgate.run_tests(stub, d, 1, mem=1 << 30), "TIMED OUT")
 
+    @unittest.skipUnless(os.path.isdir("/proc/self"), "the memory cap reads /proc")
+    def test_a_capped_run_kills_a_child_that_left_its_process_group(self):
+        # #6392 item 1: the session's memory is counted, so the whole session is killed, a child that
+        # moved itself to a group of its own (setpgid) too, not only the run's process group.
+        with tempfile.TemporaryDirectory() as d:
+            stub, pidfile = pathlib.Path(d) / "t.test", pathlib.Path(d) / "child"
+            stub.write_text(f"#!/bin/sh\npython3 -c 'import os, time; os.setpgid(0, 0); open(\"{pidfile}\", \"w\").write(str(os.getpid())); "
+                            "b = bytearray(64 << 20); time.sleep(60)' &\nwait\n")
+            stub.chmod(0o755)
+            began = time.monotonic()
+            self.assertEqual(mutgate.run_tests(stub, d, 30, mem=32 << 20), "KILLED")
+            self.assertLess(time.monotonic() - began, 20)
+            child = int(pidfile.read_text())
+            for _ in range(100):  # reparented and reaped, or a zombie: nothing left running
+                if (mutgate.proc_stat(child) or ("", "Z"))[1] in "ZX":
+                    break
+                time.sleep(0.05)
+            self.assertIn((mutgate.proc_stat(child) or ("", "Z"))[1], "ZX")
+
+    @unittest.skipUnless(os.path.isdir("/proc/self"), "the memory cap reads /proc")
+    def test_kill_session_leaves_other_sessions_alone(self):
+        with tempfile.TemporaryDirectory() as d:
+            pidfile = pathlib.Path(d) / "child"
+            p = subprocess.Popen(["sh", "-c", f"python3 -c 'import os, time; os.setpgid(0, 0); "
+                                  f"open(\"{pidfile}\", \"w\").write(str(os.getpid())); time.sleep(60)' & sleep 60"],
+                                 start_new_session=True)
+            other = subprocess.Popen(["sleep", "60"], start_new_session=True)
+            try:
+                for _ in range(200):
+                    if pidfile.exists() and pidfile.read_text():
+                        break
+                    time.sleep(0.05)
+                child = int(pidfile.read_text())
+                self.assertNotEqual(os.getpgid(child), p.pid)  # its own group: killpg alone misses it
+                mutgate.kill_session(p.pid)
+                self.assertEqual(p.wait(), -signal.SIGKILL)
+                self.assertEqual(mutgate.session_procs(p.pid), [])
+                self.assertIsNone(other.poll())
+            finally:
+                other.kill()
+                other.wait()
+
+    @unittest.skipUnless(os.path.isdir("/proc/self"), "the memory cap reads /proc")
+    def test_a_spike_between_reads_still_counts(self):
+        # #6392 item 2: a base run's peak is the kernel's high-water mark, so a spike that ends between
+        # two reads still counts; a run that ends before any read counts its whole-life peak (wait4).
+        spike = "import time; b = bytearray(128 << 20); del b; time.sleep({})"
+        with mock.patch.object(mutgate, "MEM_POLL", 1.0):
+            for rest in (2.5, 0):  # read once after the spike, or never
+                with self.subTest(rest=rest):
+                    p = subprocess.Popen([sys.executable, "-c", spike.format(rest)], start_new_session=True)
+                    end, peak = mutgate.watch(p, 30)
+                    self.assertEqual(end, 0)
+                    self.assertGreater(peak, 128 << 20)
+            p = subprocess.Popen([sys.executable, "-c", spike.format(2.5)], start_new_session=True)
+            time.sleep(1.5)
+            rss = sum(r for r, _ in mutgate.session_memory(p.pid).values())
+            p.wait()
+            self.assertLess(rss, 64 << 20)  # what a read of the current memory alone saw after it
+
+    def test_ci_without_a_delegated_cgroup_is_an_error(self):
+        # #6392: in CI every run is in a cgroup leaf; a missing or unusable one fails, never advisory.
+        with tempfile.TemporaryDirectory() as d:
+            for env in ({"CI": "true"}, {"GITHUB_ACTIONS": "true"}, {mutgate.CGROUP_ENV: d}):
+                with self.subTest(env=env), mock.patch.dict(os.environ, env, clear=False):
+                    for k in {"CI", "GITHUB_ACTIONS", mutgate.CGROUP_ENV} - set(env):
+                        os.environ.pop(k, None)
+                    with self.assertRaises(RuntimeError):
+                        mutgate.contained(["true"])
+                    with self.assertRaises(RuntimeError):
+                        mutgate.advisory()
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for k in ("CI", "GITHUB_ACTIONS", mutgate.CGROUP_ENV):
+                os.environ.pop(k, None)
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertTrue(mutgate.advisory())
+            self.assertIn("ADVISORY", err.getvalue())
+
+    def test_verify_refuses_an_advisory_result(self):
+        data = {"files": [], "mutants_total": 0, "mutants_lived": 0, "shard": {"index": 0, "of": 1}, "advisory": True}
+        _, problem = mutgate.join_shards("hint", [(pathlib.Path("a/hint.json"), data)], {}, {}, None, {})
+        self.assertIn("advisory", problem)
+
+    @unittest.skipUnless(os.environ.get(mutgate.CGROUP_ENV), "needs a delegated cgroup v2 directory (CI's checks job)")
+    def test_a_cgroup_leaf_holds_every_descendant_and_its_exact_peak(self):
+        # #6392: a child that leaves the session (setsid) and its process group is still in the leaf: the
+        # cap kills it and the run's end kills it; the peak is memory.peak, a spike between reads included.
+        with tempfile.TemporaryDirectory() as d:
+            pidfile = pathlib.Path(d) / "child"
+            grow = (f"import os, time; os.setsid(); open('{pidfile}', 'w').write(str(os.getpid())); "
+                    "b = bytearray(64 << 20); time.sleep(60)")
+            stub = pathlib.Path(d) / "t.test"
+            stub.write_text(f"#!/bin/sh\npython3 -c \"{grow}\" &\nwait\n")
+            stub.chmod(0o755)
+            began = time.monotonic()
+            self.assertEqual(mutgate.run_tests(stub, d, 30, mem=32 << 20), "KILLED")
+            self.assertLess(time.monotonic() - began, 20)
+            self.assertIn((mutgate.proc_stat(int(pidfile.read_text())) or ("", "Z"))[1], "ZX")
+            # Left running when the run ends: killed with the leaf.
+            stub.write_text(f"#!/bin/sh\npython3 -c \"{grow.replace('64 << 20', '1')}\" &\nsleep 1\n")
+            self.assertEqual(mutgate.run_tests(stub, d, 30, mem=1 << 30), "LIVED")
+            self.assertIn((mutgate.proc_stat(int(pidfile.read_text())) or ("", "Z"))[1], "ZX")
+            end, peak = mutgate.contained([sys.executable, "-c", "b = bytearray(128 << 20); del b"], 1 << 30)
+            self.assertEqual(end, 0)
+            self.assertGreater(peak, 128 << 20)
+            self.assertEqual([p.name for p in pathlib.Path(os.environ[mutgate.CGROUP_ENV]).glob("run-*")], [])
+
     def test_available_memory_reads_meminfo(self):
         got = mutgate.available_memory()
         if os.path.isfile("/proc/meminfo"):
@@ -1128,6 +1254,7 @@ class Deletion(unittest.TestCase):
         return pkg
 
     def mutgate(self, d, *args):
+        as_ci(args)
         return subprocess.run([sys.executable, "-I", str(pathlib.Path(d) / "tools" / "mutgate.py"), *args],
                               capture_output=True, text=True, env={**os.environ, "GOFLAGS": "", "GOWORK": "off"})
 
@@ -1909,6 +2036,7 @@ class TestOnly(unittest.TestCase):
         return git
 
     def mutgate(self, d, *args, env=None):
+        as_ci(args)
         return subprocess.run([sys.executable, "-I", str(pathlib.Path(d) / "tools" / "mutgate.py"), *args],
                               capture_output=True, text=True,
                               env={**os.environ, "GOFLAGS": "", "GOWORK": "off", **(env or {})})
@@ -3345,6 +3473,11 @@ class MovedDecls(unittest.TestCase):
         self.assertEqual(self.reach(base, {**base, "z_test.go": new}, src=src, extra={"lib/lib.go": lib}), both)
         self.assertEqual(self.reach(base, {**base, "z_test.go": new}, src=src, extra={"lib/lib.go": lib.replace("t.Parallel()", "t.Helper()")}),
                          (["TestNew"], []))
+        # An imported package's own tests are not built into this package's test binary (#6372).
+        quiet = lib.replace("t.Parallel()", "t.Helper()")
+        self.assertEqual(self.reach(base, {**base, "z_test.go": new}, src=src,
+                                    extra={"lib/lib.go": quiet, "lib/lib_test.go": lib.replace("func Par(", "func par(")}),
+                         (["TestNew"], []))
 
     def test_a_declaration_of_a_cgo_file_never_moves(self):
         # #6385, from #6376: a cgo file's code binds its own preamble, so nothing moves out of one.
@@ -3864,6 +3997,219 @@ class DataFiles(unittest.TestCase):
                 self.assertEqual(mutgate.touched(*mutgate.added_lines(data_diff(path))), {"hint"})
 
 
+# A package that embeds one data file into a var, read by package code a test reaches (#6409's shape).
+EMBED_PKG = {
+    "v/pins.go": 'package v\n\nimport _ "embed"\n\n// pins names each file.\n//\n//go:embed models.pins\n'
+                 'var modelPins string\n\nfunc pinFor(f string) string { return modelPins + f }\n',
+    "v/other.go": "package v\n\nfunc other() int { return 1 }\n",
+    "v/models.pins": "abc lib.so\n",
+    "v/pins_test.go": 'package v\n\nimport "testing"\n\nfunc TestPins(t *testing.T) { _ = pinFor("x") }\n',
+    "v/other_test.go": 'package v\n\nimport "testing"\n\nfunc TestOther(t *testing.T) { _ = other() }\n',
+}
+
+
+class EmbedReach(unittest.TestCase):
+    """MUT-embed-reach (#6458): a changed data file whose only namer is a //go:embed var changes the
+    tests that reach that var, through package code too; any other namer, or a reach every test may
+    run, is every test."""
+
+    def reach(self, files, path="broker/v/models.pins", kind="change", env=None):
+        with tempfile.TemporaryDirectory() as d, DataFiles.tree(None, d, files), \
+                mock.patch.dict(os.environ, env or {"GOFLAGS": ""}):
+            added, tests = mutgate.added_lines(data_diff(path, kind))
+            self.assertEqual(mutgate.touched(added, tests), {"v"})
+            return mutgate.head_tests(tests, "v")
+
+    def test_an_embedded_file_reaches_its_vars_tests(self):
+        # REQ: MUT-embed-reach
+        for kind in ("change", "empty", "delete"):  # a moved or comment-only line is a change too
+            self.assertEqual(self.reach(EMBED_PKG, kind=kind), ["TestPins"], kind)
+        quoted = EMBED_PKG["v/pins.go"].replace("embed models.pins", 'embed "all:models.pins"')
+        self.assertEqual(self.reach({**EMBED_PKG, "v/pins.go": quoted}), ["TestPins"])
+        # A test that names the var directly, or reaches it through a type's method, counts.
+        held = {**EMBED_PKG, "v/held_test.go": 'package v\n\nimport "testing"\n\nfunc TestHeld(t *testing.T) { _ = modelPins }\n',
+                "v/kind.go": "package v\n\ntype K struct{}\n\nfunc (K) Pin() string { return pinFor(\"y\") }\n",
+                "v/kind_test.go": 'package v\n\nimport "testing"\n\nfunc TestKind(t *testing.T) { _ = K{} }\n'}
+        self.assertEqual(self.reach(held), ["TestHeld", "TestKind", "TestPins"])
+        # A Test-named function of package code is no test.
+        self.assertEqual(self.reach({**EMBED_PKG, "v/other.go": "package v\n\nfunc TestLike() string { return modelPins }\n"
+                                     "\nfunc other() int { return 1 }\n"}), ["TestPins"])
+        # A testdata file embedded by its path.
+        td = {**EMBED_PKG, "v/testdata/m.pins": "x\n",
+              "v/pins.go": EMBED_PKG["v/pins.go"].replace("embed models.pins", "embed testdata/m.pins")}
+        self.assertEqual(self.reach(td, "broker/v/testdata/m.pins"), ["TestPins"])
+        # With a test file also changed, both reaches join.
+        with tempfile.TemporaryDirectory() as d, DataFiles.tree(None, d, EMBED_PKG):
+            tests = {"broker/v/models.pins": None, "broker/v/other_test.go": {5}}
+            self.assertEqual(mutgate.head_tests(tests, "v"), ["TestOther", "TestPins"])
+
+    def test_any_other_namer_is_every_test(self):
+        # REQ: MUT-embed-reach
+        pins = EMBED_PKG["v/pins.go"]
+        for name, files in (
+                ("a test literal", {"v/read_test.go": 'package v\n\nvar _ = "models.pins"\n'}),
+                ("a package literal", {"v/other.go": 'package v\n\nfunc other() int { return len("models.pins") }\n'}),
+                ("a glob literal", {"v/read_test.go": 'package v\n\nvar _ = "*.pins"\n'}),
+                ("an embed.FS glob", {"v/pins.go": pins.replace("embed models.pins\nvar modelPins string",
+                                                                 "embed *.pins\nvar modelPins embed.FS")}),
+                ("a directive listing more", {"v/pins.go": pins.replace("embed models.pins", "embed models.pins other.pins")}),
+                ("a second var on another shape", {"v/two.go": 'package v\n\nvar (\n\t//go:embed models.pins\n\ttwo string\n)\n'}),
+                ("an indented directive", {"v/pins.go": pins.replace("//go:embed", " //go:embed")}),
+                ("a directive in a raw string", {"v/gen_test.go": 'package v\n\nvar src = `\n//go:embed models.pins\nvar x string\n`\n'}),
+                ("a directory embed", {"v/pins.go": pins.replace("embed models.pins", "embed sub"), "v/sub/models.pins": ""}),
+                ("an init reading the var", {"v/init.go": "package v\n\nfunc init() { _ = pinFor(\"z\") }\n"}),
+                ("an initializer reading it", {"v/init.go": "package v\n\nvar h = len(modelPins)\n"}),
+                ("TestMain reaching it", {"v/main_test.go": 'package v\n\nimport "testing"\n\nfunc TestMain(m *testing.M) { _ = pinFor("") }\n'}),
+                ("a toolchain-tagged init", {"v/init.go": "//go:build linux && amd64.v2\n\npackage v\n\nfunc init() { _ = modelPins }\n"}),
+                ("a linked file", {}),
+                ("a directive in a block comment", {"v/x.go": "package v\n\nvar x string\n\n/*\n//go:embed models.pins\nvar x string\n*/\n"}),
+                ("an exported var", {"v/pins.go": pins.replace("modelPins", "ModelPins")}),
+                ("no inotify to watch the run", {}),
+                ("nothing embeds it", {"v/pins.go": "package v\n\nvar modelPins string\n\nfunc pinFor(f string) string { return modelPins + f }\n"})):
+            with self.subTest(name):
+                files = {**EMBED_PKG, **files}
+                if name == "no inotify to watch the run":
+                    with mock.patch.object(mutgate, "_inotify", lambda: None):
+                        self.assertIsNone(self.reach(files))
+                    continue
+                if name == "a linked file":
+                    with tempfile.TemporaryDirectory() as d, DataFiles.tree(None, d, files):
+                        (pathlib.Path(d) / "broker/v/link.go").symlink_to(pathlib.Path(d) / "broker/v/other.go")
+                        self.assertIsNone(mutgate.head_tests({"broker/v/models.pins": None}, "v"))
+                        self.assertIsNone(mutgate.embedded_by("v", "models.pins"))
+                    continue
+                self.assertIsNone(self.reach(files))
+        # A file named like a glob: its pattern may match more files.
+        glob = {**EMBED_PKG, "v/m*.pins": "", "v/pins.go": EMBED_PKG["v/pins.go"].replace("embed models.pins", "embed m*.pins")}
+        self.assertIsNone(self.reach(glob, "broker/v/m*.pins"))
+        # Another package naming the file by its path reaches every test of its own (readers).
+        other = {**EMBED_PKG, "w/w.go": "package w\n", "w/w_test.go": 'package w\n\nvar _ = "../v/models.pins"\n'}
+        with tempfile.TemporaryDirectory() as d, DataFiles.tree(None, d, other), mock.patch.dict(os.environ, {"GOFLAGS": ""}):
+            mutgate.read_index.cache_clear()
+            added, tests = mutgate.added_lines(data_diff("broker/v/models.pins"))
+            self.assertEqual(mutgate.touched(added, tests), {"v", "w"})
+            self.assertEqual(mutgate.head_tests(tests, "v"), ["TestPins"])
+            self.assertIsNone(mutgate.head_tests(tests, "w"))
+            mutgate.read_index.cache_clear()
+        # A file no `go test` here builds (a custom tag, a name go ignores) is not read for reach; a
+        # GOFLAGS naming tags reads it.
+        tagged = {**EMBED_PKG, "v/onnx.go": "//go:build vision_onnx\n\npackage v\n\nvar h = len(modelPins)\n",
+                  "v/_x.go": "package v\n\nfunc init() { _ = modelPins }\n"}
+        self.assertEqual(self.reach(tagged), ["TestPins"])
+        self.assertIsNone(self.reach(tagged, env={"GOFLAGS": "-tags=vision_onnx"}))
+        # A test file under a custom tag still counts: more tests, never fewer.
+        self.assertEqual(self.reach({**EMBED_PKG, "v/onnx_test.go": '//go:build vision_onnx\n\npackage v\n\nimport "testing"\n\n'
+                                     'func TestOnnx(t *testing.T) { _ = modelPins }\n'}), ["TestOnnx", "TestPins"])
+
+    def test_the_whole_suite_watches_the_embedded_file(self):
+        # The narrowing's other half (#6458; Security on #6518): the whole-suite run builds the
+        # package from a copy of the file and watches the file itself, so a test reading it at run
+        # time by a path no literal holds fails the gate's run, even one that passes with it absent.
+        # REQ: MUT-embed-reach
+        def lister(cond, read):
+            return ('package v\n\nimport (\n\t"os"\n\t"os/exec"\n\t"strings"\n\t"testing"\n)\n\n'
+                    'var _ = exec.Command\n\nfunc TestList(t *testing.T) {\n\tes, _ := os.ReadDir(".")\n'
+                    '\tfor _, e := range es {\n\t\tif ' + cond + ' {\n\t\t\tb, err := ' + read + '\n'
+                    '\t\t\tif err != nil {\n\t\t\t\treturn\n\t\t\t}\n'
+                    '\t\t\tif !strings.HasPrefix(string(b), "abc") {\n\t\t\t\tt.Fatal("weak pin")\n\t\t\t}\n\t\t}\n\t}\n}\n')
+        tolerant = lister('strings.HasSuffix(e.Name(), ".pins")', "os.ReadFile(e.Name())")
+        child = lister('strings.HasSuffix(e.Name(), ".pins")', 'exec.Command("cat", e.Name()).Output()')
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}):
+            d = pathlib.Path(d).resolve()
+            tree, tmp = d / "tree", d / "tmp"
+            tmp.mkdir()
+            with DataFiles.tree(None, tree, {**EMBED_PKG, "go.mod": GO_MOD}):
+                pins, watched = tree / "broker/v/models.pins", ["broker/v/models.pins"]
+                got, _, problem = mutgate.timed_cover("v", None, tmp, watched=watched)
+                self.assertIsNone(problem)  # the build reads the copy: no event
+                self.assertIn("broker/v/pins.go", got)
+                self.assertEqual(pins.read_text(), "abc lib.so\n")  # untouched
+                # A reader that passes with the file absent, a child process reading it: seen.
+                pins.write_text("zzz lib.so\n")
+                for name, src in (("tolerant", tolerant), ("child", child)):
+                    with self.subTest(name):
+                        (tree / "broker/v/list_test.go").write_text(src)
+                        problem = mutgate.timed_cover("v", None, tmp, watched=watched)[2]
+                        self.assertIn("a test read broker/v/models.pins at run time", problem)
+                # Emptied, read by a reader that checks each line (so passes on no lines): a read of 0
+                # bytes raises no IN_ACCESS, only the open is seen (L3 on #6518).
+                pins.write_text("")
+                (tree / "broker/v/list_test.go").write_text(
+                    'package v\n\nimport (\n\t"os"\n\t"strings"\n\t"testing"\n)\n\nfunc TestLines(t *testing.T) {\n'
+                    '\tes, _ := os.ReadDir(".")\n\tfor _, e := range es {\n\t\tif strings.HasSuffix(e.Name(), ".pins") {\n'
+                    '\t\t\tb, _ := os.ReadFile(e.Name())\n\t\t\tfor _, l := range strings.Split(string(b), "\\n") {\n'
+                    '\t\t\t\tif l != "" && !strings.HasPrefix(l, "abc") {\n\t\t\t\t\tt.Fatal("weak pin")\n\t\t\t\t}\n'
+                    '\t\t\t}\n\t\t}\n\t}\n}\n')
+                self.assertIsNone(mutgate.timed_cover("v", None, tmp)[2])  # unwatched, it passes
+                problem = mutgate.timed_cover("v", None, tmp, watched=watched)[2]
+                self.assertIn("a test read broker/v/models.pins at run time", problem)
+                pins.write_text("abc lib.so\n")
+                # A reader through mmap: its reads raise no IN_ACCESS either (Security on #6518).
+                (tree / "broker/v/list_test.go").write_text(
+                    'package v\n\nimport (\n\t"os"\n\t"strings"\n\t"syscall"\n\t"testing"\n)\n\n'
+                    'func TestMapped(t *testing.T) {\n\tes, _ := os.ReadDir(".")\n\tfor _, e := range es {\n'
+                    '\t\tif strings.HasSuffix(e.Name(), ".pins") {\n\t\t\tf, err := os.Open(e.Name())\n'
+                    '\t\t\tif err != nil {\n\t\t\t\treturn\n\t\t\t}\n\t\t\tdefer f.Close()\n'
+                    '\t\t\tb, err := syscall.Mmap(int(f.Fd()), 0, 3, syscall.PROT_READ, syscall.MAP_SHARED)\n'
+                    '\t\t\tif err != nil {\n\t\t\t\tt.Fatal(err)\n\t\t\t}\n\t\t\tdefer syscall.Munmap(b)\n'
+                    '\t\t\tif string(b) != "abc" {\n\t\t\t\tt.Fatal("weak pin")\n\t\t\t}\n\t\t}\n\t}\n}\n')
+                self.assertIsNone(mutgate.timed_cover("v", None, tmp)[2])  # unwatched, it passes
+                problem = mutgate.timed_cover("v", None, tmp, watched=watched)[2]
+                self.assertIn("a test read broker/v/models.pins at run time", problem)
+                # The same for a testdata file embedded by its path.
+                (tree / "broker/v/testdata").mkdir()
+                (tree / "broker/v/testdata/m.pins").write_text("abc\n")
+                (tree / "broker/v/pins.go").write_text(EMBED_PKG["v/pins.go"].replace("embed models.pins", "embed testdata/m.pins"))
+                (tree / "broker/v/list_test.go").write_text(
+                    tolerant.replace('os.ReadDir(".")', 'os.ReadDir("testdata")').replace(
+                        "os.ReadFile(e.Name())", 'os.ReadFile("testdata/" + e.Name())'))
+                problem = mutgate.timed_cover("v", None, tmp, watched=["broker/v/testdata/m.pins"])[2]
+                self.assertIn("a test read broker/v/testdata/m.pins at run time", problem)
+                self.assertIsNone(mutgate.timed_cover("v", None, tmp, watched=watched)[2])  # unread: fine
+                # Not a regular file, or no inotify: no run, a problem; and no narrowing without it.
+                self.assertIn("not a regular file", mutgate.timed_cover("v", None, tmp, watched=["broker/v/gone.pins"])[2])
+                with mock.patch.object(mutgate, "_inotify", lambda: None):
+                    self.assertIn("cannot watch", mutgate.timed_cover("v", None, tmp, watched=watched)[2])
+                # record_for watches the narrowed package's embedded data files in its whole-suite run only.
+                runs = []
+
+                def cover(pkg, names, tmp, code=None, watched=()):
+                    runs.append((names, list(watched)))
+                    return {}, 1.0, None
+                with mock.patch.object(mutgate, "timed_cover", cover), \
+                        mock.patch.object(mutgate, "merge_base", lambda b, h: "b" * 40), \
+                        mock.patch.object(mutgate, "base_covered", lambda *a: ({}, None)):
+                    (tree / "broker/v/pins.go").write_text(EMBED_PKG["v/pins.go"])
+                    (tree / "broker/v/list_test.go").unlink()
+                    tests = {"broker/v/models.pins": None, "broker/v/other_test.go": {5}}
+                    self.assertIsNone(mutgate.record_for("v", tests, {"v": []}, "", "HEAD~1", tmp)[2])
+                    self.assertEqual(runs, [(["TestOther", "TestPins"], []), (None, watched)])
+                    runs.clear()
+                    self.assertIsNone(mutgate.record_for("v", {"broker/v/other_test.go": {5}}, {"v": []}, "", "HEAD~1", tmp)[2])
+                    self.assertEqual(runs, [(["TestOther"], []), (None, [])])
+
+    def test_unbuilt_reads_the_toolchain_tags(self):
+        # REQ: MUT-embed-reach
+        with mock.patch.dict(os.environ, {"GOFLAGS": ""}):
+            for line, out in (("", False), ("//go:build vision_onnx\n", True), ("//go:build !vision_onnx\n", False),
+                              ("//go:build linux\n", False), ("//go:build windows\n", False), ("//go:build cgo && x\n", True),
+                              ("//go:build go1.21 || x\n", False), ("//go:build goexperiment.foo\n", False),
+                              ("//go:build amd64.v3\n", False), ("//go:build race\n", False), ("//go:build ignore\n", True),
+                              ("//go:build (\n", False)):
+                self.assertEqual(mutgate.unbuilt("a.go", line + "\npackage v\n"), out, line)
+            self.assertTrue(mutgate.unbuilt("_a.go", "package v\n"))
+            self.assertFalse(mutgate.unbuilt("a_linux.go", "package v\n"))
+
+    def test_vision_pins_reach_only_their_var(self):
+        # #6409's case on the real tree: models.pins reaches modelPins' tests, not the package.
+        # REQ: MUT-embed-reach
+        with mock.patch.dict(os.environ, {"GOFLAGS": ""}):
+            got = mutgate.head_tests({"broker/cmd/agentos-vision/models.pins": None}, "cmd/agentos-vision")
+        self.assertIn("TestPinsCheckEveryFile", got)
+        self.assertNotIn("TestHeatBlobBoxAndConfidence", got or ["x"])
+        self.assertLess(len(got), 20)
+
+
 class Plan(unittest.TestCase):
     def test_a_plan_past_the_matrix_limit_names_a_remedy(self):
         # #4983: a refused plan says what to do next. Each claimed package plans 100 shards here.
@@ -3875,7 +4221,7 @@ class Plan(unittest.TestCase):
                           ([], "0 shards: no claimed package was planned; rerun the mutgate workflow")):
             with self.subTest(pkgs), contextlib.ExitStack() as st:
                 for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
-                                    ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: pkgs),
+                                    ("build_lister", lambda tmp: "lister"), ("claimed", lambda d, **_: pkgs),
                                     ("diff_targets", lambda added, pkg: {f"broker/{pkg}/x.go": {1}}),
                                     ("deletion_sites", lambda *a: ([], None)), ("lint_budget", lambda pkg, sites: (0.0, [0.0] * len(sites))), ("suite_seconds", lambda *a: (1.0, None)),
                                     ("shard_count", lambda *a: 100)):
@@ -3892,7 +4238,7 @@ class Plan(unittest.TestCase):
         import contextlib, io, types
         with contextlib.ExitStack() as st:
             for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
-                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: sorted(pkg_targets)),
+                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d, **_: sorted(pkg_targets)),
                                 ("diff_targets", lambda added, pkg: pkg_targets[pkg][0]),
                                 ("deletion_sites", lambda pkg, t, lister: (pkg_targets[pkg][1], None)), ("lint_budget", lambda pkg, sites: (0.0, [0.0] * len(sites))),
                                 ("suite_seconds", lambda pkg, tmp: suite), ("site_costs", lambda *a: costs)):
@@ -4027,7 +4373,7 @@ class Plan(unittest.TestCase):
         timed = []
         with contextlib.ExitStack() as st:
             for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
-                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: ["kernel/sim", "other"]),
+                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d, **_: ["kernel/sim", "other"]),
                                 ("bases_for", lambda *a: {}), ("diff_targets", lambda added, pkg: sim),
                                 ("tests_changed", lambda tests, pkg: pkg == "kernel/sim"),
                                 ("record_for", lambda *a: ({"rec": 1}, 48.0, None)),
@@ -4051,7 +4397,7 @@ class Plan(unittest.TestCase):
         from unittest import mock
         runs = []
 
-        def timed_cover(pkg, names, tmp, code=None):
+        def timed_cover(pkg, names, tmp, code=None, watched=()):
             runs.append(names)
             return {"broker/p/a.go": {1}}, (2.0 if names is not None else 40.0), None
         for names, want, ran in ((["TestFast"], 40.0, [["TestFast"], None]), (None, 40.0, [None])):
@@ -4667,6 +5013,68 @@ class Record(unittest.TestCase):
                          ["STATEMENT_DELETION #5743"] * 19 + ["STATEMENT_DELETION #5780"] * 2
                          + ["STATEMENT_DELETION #5804", "STATEMENT_DELETION #5998"])
 
+
+class WaiveKeepsOrder(unittest.TestCase):
+    """TOOL-waive-keeps-order (#6573): waive keeps a record's lines in place, so premerge's union check reads it as kept."""
+    # REQ: TOOL-waive-keeps-order
+    SRC, repo, waive = Record.SRC, Record.repo, Record.waive
+
+    def test_waive_keeps_an_unsorted_record_in_its_order(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        import premerge
+        with tempfile.TemporaryDirectory() as d:
+            git = lambda *a: subprocess.run(["git", "-C", d, "-c", "user.email=t@example.invalid", "-c", "user.name=t", *a],
+                                            check=True, capture_output=True, text=True).stdout.strip()
+            run = self.repo(d, self.SRC, self.SRC)
+            pkg = pathlib.Path(d) / "broker" / "netguard"
+            (pkg / "b.go").write_text("package netguard\n\nfunc g(x int) int {\n\tif x > 1 {\n\t\treturn 2\n\t}\n\treturn x\n}\n")
+            wfile = pathlib.Path(d) / "w.txt"
+
+            def waive(*sites, accepted="#5743"):
+                wfile.write_text("".join(f"Mutant-equivalent: broker/netguard/{s} both give the same value on every input\n"
+                                         for s in sites))
+                r = run("waive", str(wfile), "--accepted", accepted)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                return r.stdout
+            for site in ("a.go:5", "a.go:8", "a.go:11", "b.go:4"):
+                waive(site)
+            path = pkg / mutgate.RECORD
+            rows = path.read_text().rstrip("\n").split("\n")
+            a5, a8, a11, b4 = rows[1:]  # each new site after its file's last entry: in waive order here
+            self.assertEqual([(e["file"], e["stmt"][e["at"]]) for e in map(json.loads, rows[1:])],
+                             [("a.go", "if x > 1 {"), ("a.go", "if x > 1 {"), ("a.go", "return x"), ("b.go", "if x > 1 {")])
+            # A hand-ordered record: a.go's entries reversed, a comment and a blank line between them, a word-for-word
+            # repeat of one entry, and b.go's entry last.
+            hand = [rows[0], a11, "# a note between entries", "", a8, a8, a5, b4]
+            path.write_text("\n".join(hand) + "\n")
+            git("add", "-A")
+            git("commit", "-qm", "base")
+            base = git("rev-parse", "HEAD")
+            # Rewrite a.go:8 (the repeated entry, under another accepting PR) and add a.go:6.
+            self.assertIn("2 entries written, 5 in all", waive("a.go:8", "a.go:6", accepted="#6573"))
+            out = path.read_text().rstrip("\n").split("\n")
+            self.assertEqual(out[:4], hand[:4])               # untouched lines in place, word for word
+            self.assertEqual(json.loads(out[4])["accepted"], "#6573")  # rewritten in its own place; its repeat gone
+            self.assertEqual(json.loads(out[4])["stmt"], json.loads(a8)["stmt"])
+            self.assertEqual(out[5], a5)
+            self.assertEqual(json.loads(out[6])["stmt"], ["return 2"])  # new: after a.go's last entry, not at the end
+            self.assertEqual(json.loads(out[6])["file"], "a.go")
+            self.assertEqual(out[7:], [b4])
+            git("add", "-A")
+            git("commit", "-qm", "waive")
+            head = git("rev-parse", "HEAD")
+            rel = f"broker/netguard/{mutgate.RECORD}"
+            self.assertIs(premerge._records_kept(d, head, head, rel, head, base), True)
+            # Two untouched entries swapped (as the old sorted rewrite moved them, #6559) read as changed.
+            moved = [out[0], out[5], out[2], out[3], out[4], out[1], out[6], out[7]]
+            path.write_text("\n".join(moved) + "\n")
+            git("commit", "-qam", "moved")
+            head = git("rev-parse", "HEAD")
+            self.assertIs(premerge._records_kept(d, head, head, rel, head, base), False)
+
+    def test_waive_writes_a_head_into_a_new_record(self):
+        rows, total = mutgate.waive_rows("p", "", [])
+        self.assertEqual((rows[0][0], total), ("#", 0))
 
 
 class RecordDeps(unittest.TestCase):
@@ -5329,23 +5737,25 @@ class GremlinsMemoryCap(unittest.TestCase):
     # REQ: MUT-gremlins-memcap, MUT-gremlins-memcap-go
 
     GROW = "import time; b = bytearray(96 << 20); time.sleep(60)"
+    # As `go test -exec X` runs a test binary: `eval "$x BINARY"` in a body runs it through X.
+    EXEC = 'x=; for a; do case "$a" in -exec=*) x="${a#-exec=}";; esac; done\n'
 
     def fake_go(self, d, body):
         """A directory holding a `go` that runs body (a sh script) in place of the real go."""
         bindir = pathlib.Path(d) / "fakego"
         bindir.mkdir(exist_ok=True)
-        (bindir / "go").write_text("#!/bin/sh\n" + body)
+        (bindir / "go").write_text("#!/bin/sh\n" + self.EXEC + body)
         (bindir / "go").chmod(0o755)
         return bindir
 
     def shim(self, d, body, mem):
+        (pathlib.Path(d) / mutgate.REFUSED).touch()  # as `run` makes it before gremlins starts
         with mock.patch.dict(os.environ, {"PATH": f"{self.fake_go(d, body)}{os.pathsep}{os.environ['PATH']}"}):
             return mutgate.go_shim(d, mem) / "go"
 
     def test_a_mutant_run_past_its_cap_is_killed_and_exits_1(self):
         with tempfile.TemporaryDirectory() as d:
-            # The test binary is go's child, as `go test` runs it: a child's memory counts.
-            shim = self.shim(d, f"python3 -c '{self.GROW}' &\nwait\n", 32 << 20)
+            shim = self.shim(d, f"eval \"$x python3 -c '{self.GROW}'\"\n", 32 << 20)
             began = time.monotonic()
             r = subprocess.run([str(shim), "test", "-timeout", "62s", "-failfast", "./p"], capture_output=True, text=True)
             self.assertEqual(r.returncode, 1, r.stderr)  # gremlins v0.6.0: exit 1 is KILLED
@@ -5355,7 +5765,7 @@ class GremlinsMemoryCap(unittest.TestCase):
     def test_a_mutant_run_under_its_cap_keeps_gos_exit_code(self):
         with tempfile.TemporaryDirectory() as d:
             for code in (0, 1, 2):
-                shim = self.shim(d, f"python3 -c 'b = bytearray(1 << 20)'\nexit {code}\n", 1 << 30)
+                shim = self.shim(d, f"eval \"$x python3 -c 'b = bytearray(1 << 20)'\"\nexit {code}\n", 1 << 30)
                 self.assertEqual(subprocess.run([str(shim), "test", "./p"]).returncode, code)
 
     def test_a_mutant_runs_own_toolchain_is_not_counted(self):
@@ -5363,7 +5773,8 @@ class GremlinsMemoryCap(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             link = pathlib.Path(d) / "compile"
             link.symlink_to(sys.executable)
-            shim = self.shim(d, f"{link} -c 'import time; b = bytearray(96 << 20); time.sleep(2)'\nexit 0\n", 32 << 20)
+            shim = self.shim(d, f"{link} -c 'import time; b = bytearray(96 << 20); time.sleep(2)'\n"
+                                f"eval \"$x python3 -c 'pass'\"\nexit 0\n", 32 << 20)
             r = subprocess.run([str(shim), "test", "-timeout", "62s", "-failfast", "./p"], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertNotIn("memory_cap", r.stderr)
@@ -5379,48 +5790,234 @@ class GremlinsMemoryCap(unittest.TestCase):
         # own coverage run is measured under the same cap and fails the run past half of it.
         with tempfile.TemporaryDirectory() as d:
             prof = pathlib.Path(d) / "c"
-            shim = self.shim(d, f"python3 -c 'import time; b = bytearray(64 << 20); time.sleep(1)'\n: > {prof}\n", 96 << 20)
+            shim = self.shim(d, f"eval \"$x python3 -c 'import time; b = bytearray(64 << 20); time.sleep(1)'\"\n: > {prof}\n", 96 << 20)
             r = subprocess.run([str(shim), "test", "-cover", "-coverprofile", str(prof), "./..."], capture_output=True, text=True)
             self.assertEqual(r.returncode, 1, r.stderr)
             self.assertIn("more than half", r.stderr)
 
-    def test_toolchain_processes_are_not_counted(self):
-        # A compile's memory is the toolchain's, not the tests': only processes outside TOOLCHAIN count.
+    def test_a_cover_run_counts_each_test_binarys_whole_life_peak(self):
+        # #6392 item 2: each test binary of gremlins' coverage run goes through cap_exec (go test -exec),
+        # which records its exact peak (memory.peak, or wait4 in an advisory run), so a spike just before
+        # it exits counts against half the cap.
         with tempfile.TemporaryDirectory() as d:
-            link = pathlib.Path(d) / "compile"
-            link.symlink_to(sys.executable)
-            (pathlib.Path(d) / "go").symlink_to(sys.executable)
-            # The go driver counts (MUT-gremlins-memcap-go): it holds the tests' buffered output.
-            for name, counted in (("compile", False), ("go", True), ("python3", True)):
-                p = subprocess.Popen([str(pathlib.Path(d) / name) if name != "python3" else sys.executable, "-c",
-                                      "import time; b = bytearray(64 << 20); time.sleep(3)"], start_new_session=True)
-                try:
-                    time.sleep(1)
-                    got = mutgate.session_rss(p.pid, mutgate.TOOLCHAIN)
-                finally:
-                    p.kill()
-                    p.wait()
-                self.assertEqual(got > 32 << 20, counted, (name, got))
-
-    def test_a_go_driver_past_the_cap_is_killed(self):
-        # MUT-gremlins-memcap-go (#6507): `go test PKG` buffers the test binary's output in the driver, so a
-        # mutant that loops printing grows the process named go; uncounted, it took #5974's runners down.
-        with tempfile.TemporaryDirectory() as d:
-            drv = pathlib.Path(d) / "driver"
-            drv.mkdir()
-            (drv / "go").symlink_to(sys.executable)
-            shim = self.shim(d, f"{drv / 'go'} -c '{self.GROW}' &\nwait\n", 32 << 20)
-            began = time.monotonic()
-            r = subprocess.run([str(shim), "test", "-timeout", "62s", "-failfast", "./p"], capture_output=True, text=True)
+            prof = pathlib.Path(d) / "c"
+            shim = self.shim(d, f"eval \"$x python3 -c 'b = bytearray(128 << 20)'\" || exit 9\n: > {prof}\n", 192 << 20)
+            r = subprocess.run([str(shim), "test", "-cover", "-coverprofile", str(prof), "./..."], capture_output=True, text=True)
             self.assertEqual(r.returncode, 1, r.stderr)
-            self.assertLess(time.monotonic() - began, 20)
-            self.assertIn("--- FAIL: memory_cap", r.stderr)
+            self.assertIn("more than half", r.stderr)
+            (top, end), = [row.split() for row in (pathlib.Path(d) / "exits").read_text().splitlines()]
+            self.assertGreater(int(top), 128 << 20)
+            self.assertEqual(end, "0")
+
+    def test_a_go_test_that_cannot_be_capped_is_refused(self):
+        # A run naming its own -exec would put its test binaries outside the cap: refused, and REFUSED
+        # written, which fails `run` (a mutant run's exit 1 alone would read KILLED).
+        with tempfile.TemporaryDirectory() as d:
+            prof = pathlib.Path(d) / "c"
+            shim = self.shim(d, "exit 0\n", 1 << 30)
+            for args in (["test", "-exec=x", "-coverprofile", str(prof), "./..."], ["test", "-exec", "x", "./p"]):
+                (pathlib.Path(d) / mutgate.REFUSED).write_text("")  # as `run` makes it
+                r = subprocess.run([str(shim), *args], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 1)
+                self.assertIn("cannot be put under", r.stderr)
+                self.assertIn(args[-1], mutgate.refusal(d))
+            self.assertEqual(subprocess.run([str(shim), "env", "GOWORK"]).returncode, 0)  # not `go test`: as is
+
+    def test_a_mutant_runs_output_never_reaches_the_go_driver(self):
+        # MUT-gremlins-memcap-go (#6507): `go test PKG` buffers the test binary's output in the driver, so a
+        # mutant that loops printing grew the process named go past the cap (#5974). Gremlins discards a
+        # mutant run's output, so cap_exec sends it to /dev/null; a coverage run's output still passes.
+        with tempfile.TemporaryDirectory() as d:
+            seen = pathlib.Path(d) / "seen"
+            loud = "eval \"$x python3 -c 'print(\\\"x\\\" * 4096)'\" > " + str(seen) + " 2>&1\n"
+            r = subprocess.run([str(self.shim(d, loud, 1 << 30)), "test", "./p"], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(seen.read_text(), "")
+            prof = pathlib.Path(d) / "c"
+            shim = self.shim(d, loud + f": > {prof}\n", 1 << 30)
+            subprocess.run([str(shim), "test", "-coverprofile", str(prof), "./..."], capture_output=True)
+            self.assertIn("x" * 4096, seen.read_text())
+
+    def broken_cgroup(self, d):
+        """A directory that passes cgroup_parent but is no cgroup: contained fails once its run ends."""
+        cg = pathlib.Path(d) / "notcg"
+        cg.mkdir()
+        (cg / "cgroup.subtree_control").write_text("memory\n")
+        return str(cg)
+
+    def test_a_containment_error_in_a_mutant_run_is_no_verdict(self):
+        # L3 and Security on #6423: an error inside cap_exec exited 1, which go test passes on and gremlins
+        # reads as KILLED. It writes REFUSED instead, the only channel, on both cap_exec paths.
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {mutgate.CGROUP_ENV: self.broken_cgroup(d)}):
+            refused = pathlib.Path(d) / mutgate.REFUSED
+            refused.touch()  # as `run` makes it
+            r = subprocess.run([str(self.shim(d, "eval \"$x true\"\n", 1 << 30)), "test", "./p"], capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 1, r.stderr)
+            self.assertIn("no verdict", r.stderr)
+            self.assertIn("cap_exec", refused.read_text())
+            refused.write_text("")
+            prof = pathlib.Path(d) / "c"
+            shim = self.shim(d, f"eval \"$x true\" || exit 1\n: > {prof}\n", 1 << 30)
+            r = subprocess.run([str(shim), "test", "-coverprofile", str(prof), "./..."], capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0, r.stderr)
+            self.assertIn("cap_exec", refused.read_text())
+
+    def test_run_drops_a_package_whose_mutant_run_was_refused(self):
+        # The marker, not gremlins' scored KILLED, decides: `run` keeps no result for that package.
+        with tempfile.TemporaryDirectory() as d:
+            bindir = self.fake_go(d, "eval \"$x true\"\nexit 1\n")  # go test's own exit 1 for a failing -exec
+            (bindir / "gremlins").write_text(
+                f"#!/bin/sh\n{mutgate.CGROUP_ENV}={self.broken_cgroup(d)} go test -timeout 62s ./hint\n"
+                "while [ \"$1\" != -o ]; do shift; done\n"
+                "printf '%s' '{\"files\": [], \"mutants_total\": 0, \"mutants_killed\": 1, \"mutants_lived\": 0}' > \"$2\"\n")
+            (bindir / "gremlins").chmod(0o755)
+            out = pathlib.Path(d) / "out"
+            err = io.StringIO()
+            with mock.patch.dict(os.environ, {"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}), \
+                    mock.patch.object(mutgate, "available_memory", return_value=1 << 30), \
+                    mock.patch.object(mutgate, "default_jobs", return_value=2), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                self.assertEqual(mutgate.main(["run", "hint", "--out", str(out)]), 1)
+            self.assertFalse((out / mutgate.result_name("hint")).exists())
+            self.assertIn("hint has no verdict", err.getvalue())
+
+    def test_the_half_cap_refusal_names_page_cache_the_cap_and_the_peak(self):
+        # #6512 (Lens on #6423): memory.peak counts page cache, so a refusal at a figure the tests never held
+        # as heap says why, with both figures, in gremlins' coverage run and in delete's base run alike.
+        why = mutgate.past_half(1017 << 20, 1820 << 20)
+        for part in ("peaked at 1017 MB", "1820 MB memory cap", "memory.peak", "page cache", "without a leak"):
+            self.assertIn(part, why)
+        self.assertIn("where the cap killed them", mutgate.past_half(1820 << 20, 1820 << 20, over=True))
+        with tempfile.TemporaryDirectory() as d:
+            prof = pathlib.Path(d) / "c"
+            shim = self.shim(d, f"eval \"$x python3 -c 'b = bytearray(64 << 20)'\"\n: > {prof}\n", 96 << 20)
+            r = subprocess.run([str(shim), "test", "-cover", "-coverprofile", str(prof), "./..."], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1, r.stderr)
+            self.assertRegex(r.stderr, r"peaked at (6[4-9]|[7-9]\d) MB, more than half of their 96 MB memory cap")
+            self.assertIn("page cache", r.stderr)
+
+    def test_a_shim_fault_with_an_unwritable_marker_never_reads_killed(self):
+        # #6512 (Security item 1 on #6423): a fault whose marker write failed exited 125, go test made that
+        # its own exit 1, and gremlins read KILLED. The marker is opened before the entry runs, so a later
+        # fault still writes it; where it cannot be opened the entry does not run, and `run` reads no verdict.
+        with tempfile.TemporaryDirectory() as d, contextlib.redirect_stderr(io.StringIO()):
+            tmp = pathlib.Path(d) / "tmp"
+            tmp.mkdir()
+            (tmp / mutgate.REFUSED).touch()
+            self.assertEqual(mutgate.refusal(tmp), "")
+
+            def fault():  # nothing can be opened any more, then the cgroup fails
+                mock.patch.object(mutgate, "open_marker", side_effect=PermissionError(13, "Permission denied")).start()
+                raise RuntimeError("memory.events: No such file or directory")
+            try:
+                self.assertEqual(mutgate.shim_entry(tmp, fault), mutgate.NO_VERDICT)
+            finally:
+                mock.patch.stopall()
+            self.assertIn("fault: RuntimeError('memory.events", mutgate.refusal(tmp))
+
+            gone = pathlib.Path(d) / "nonexistent"  # a marker that cannot be opened: a fault is told by refusal
+            self.assertEqual(mutgate.shim_entry(gone, fault), mutgate.NO_VERDICT)
+            mock.patch.stopall()
+            self.assertIn("cannot be written", mutgate.refusal(gone))
+            self.assertEqual(mutgate.shim_entry(gone, int, "7"), 7)  # with no fault, the run's own result
+
+            # Security on #6557: an open that fails before the entry runs, then a fault once it would pass,
+            # still writes the marker, as the open at fault time before #6512 did.
+            (tmp / mutgate.REFUSED).write_text("")
+            real, calls = mutgate.open_marker, []
+
+            def first_open_fails(tmp):
+                calls.append(tmp)
+                if len(calls) == 1:
+                    raise OSError(24, "Too many open files")
+                return real(tmp)
+
+            def cap_exec():
+                raise RuntimeError("cgroup write failed")
+            with mock.patch.object(mutgate, "open_marker", side_effect=first_open_fails):
+                self.assertEqual(mutgate.shim_entry(tmp, cap_exec), mutgate.NO_VERDICT)
+            self.assertEqual(len(calls), 2)
+            self.assertIn("cap_exec: RuntimeError('cgroup write failed')", mutgate.refusal(tmp))
+
+            # L3 on #6557: a marker that opens but cannot be written (a full disk) is removed, so `run` sees it gone.
+            (tmp / mutgate.REFUSED).write_text("")
+            full = mock.Mock(**{"write.side_effect": OSError(28, "No space left on device")})
+            with mock.patch.object(mutgate, "open_marker", return_value=full):
+                self.assertEqual(mutgate.shim_entry(tmp, cap_exec), mutgate.NO_VERDICT)
+            self.assertFalse((tmp / mutgate.REFUSED).exists())
+            self.assertIn("cannot be written", mutgate.refusal(tmp))  # gone after run made it: no verdict
+            # L3 round 3 on #6557: the next mutants, a clean one and a faulting one, never make it again.
+            self.assertEqual(mutgate.shim_entry(tmp, int, "0"), 0)
+            self.assertEqual(mutgate.shim_entry(tmp, cap_exec), mutgate.NO_VERDICT)
+            self.assertFalse((tmp / mutgate.REFUSED).exists())
+            self.assertIn("cannot be written", mutgate.refusal(tmp))
+
+            # Security on #6557: capped_go's own refusal, written to a full disk, removes the marker too.
+            (tmp / mutgate.REFUSED).write_text("")
+            with mock.patch.object(mutgate, "open_marker", return_value=full):
+                self.assertIsNone(mutgate.capped_go("go", tmp, ["test", "-exec=x", "./p"], 1 << 30))
+            self.assertIn("cannot be written", mutgate.refusal(tmp))
+
+    def test_run_gives_no_verdict_when_its_marker_is_gone(self):
+        # #6512: a shim that could not open the marker cannot say so, so `run` checks the channel it made.
+        with tempfile.TemporaryDirectory() as d:
+            bindir = self.fake_go(d, "exit 0\n")
+            (bindir / "gremlins").write_text(
+                "#!/bin/sh\nrm -f \"$(dirname \"$(command -v go)\")/../refused\"\n"
+                "while [ \"$1\" != -o ]; do shift; done\n"
+                "printf '%s' '{\"files\": [], \"mutants_total\": 0, \"mutants_killed\": 1, \"mutants_lived\": 0}' > \"$2\"\n")
+            (bindir / "gremlins").chmod(0o755)
+            out = pathlib.Path(d) / "out"
+            err = io.StringIO()
+            with mock.patch.dict(os.environ, {"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}), \
+                    mock.patch.object(mutgate, "available_memory", return_value=1 << 30), \
+                    mock.patch.object(mutgate, "default_jobs", return_value=2), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                self.assertEqual(mutgate.main(["run", "hint", "--out", str(out)]), 1)
+            self.assertFalse((out / mutgate.result_name("hint")).exists())
+            self.assertIn("hint has no verdict: its refused marker cannot be written", err.getvalue())
+
+    def fake_leaf(self, events):
+        """A stand-in for empty: its first call gives the leaf the files a cgroup's kernel would (memory.peak,
+        memory.events with events), its second clears the leaf so contained can remove it."""
+        calls = []
+
+        def empty(cg):
+            calls.append(cg)
+            if len(calls) == 1:
+                (cg / "memory.peak").write_text("4096\n")
+                (cg / "memory.events").write_text(events)
+            else:
+                for f in cg.iterdir():
+                    f.unlink()
+        return empty
+
+    def test_an_oom_kill_after_a_clean_exit_is_no_cap_kill(self):
+        # #6512 (Security item 4 on #6423): memory.oom.group kills argv with its leaf, so an oom_kill once argv
+        # has exited 0 hit only a child left behind after the tests passed; a run that did not exit 0 stays over.
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {mutgate.CGROUP_ENV: self.broken_cgroup(d)}):
+            for code, want in ((0, 0), (1, "over")):
+                with self.subTest(code=code), mock.patch.object(mutgate, "empty", self.fake_leaf("oom 1\noom_kill 1\n")):
+                    self.assertEqual(mutgate.contained(["/bin/sh", "-c", f"exit {code}"], 1 << 30), (want, 4096))
+                with self.subTest(code=code), mock.patch.object(mutgate, "empty", self.fake_leaf("oom_kill 0\n")):
+                    self.assertEqual(mutgate.contained(["/bin/sh", "-c", f"exit {code}"], 1 << 30), (code, 4096))
+
+    def test_a_cleanup_error_keeps_the_first_error_as_its_cause(self):
+        # #6512 (Security item 4 on #6423): `finally: empty(leaf)` raised over the run's own error and hid it.
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {mutgate.CGROUP_ENV: self.broken_cgroup(d)}):
+            first = RuntimeError("memory.max: Invalid argument")
+            with mock.patch.object(mutgate, "in_leaf", side_effect=first), \
+                    mock.patch.object(mutgate, "empty", side_effect=RuntimeError("outlived cgroup.kill")):
+                with self.assertRaises(RuntimeError) as got:
+                    mutgate.contained(["true"], 1 << 30)
+            self.assertIn("outlived", str(got.exception))
+            self.assertIs(got.exception.__cause__, first)
 
     def test_run_caps_gremlins_mutant_runs(self):
         # The wiring: `run` gives gremlins' shim each run's share of half the free memory.
         with tempfile.TemporaryDirectory() as d:
             seen = pathlib.Path(d) / "seen"
-            bindir = self.fake_go(d, f"python3 -c '{self.GROW}'\n")
+            bindir = self.fake_go(d, f"eval \"$x python3 -c '{self.GROW}'\"\n")
             (bindir / "gremlins").write_text(
                 f"#!/bin/sh\ngo test -timeout 62s -failfast ./hint\necho $? > {seen}\n"
                 "while [ \"$1\" != -o ]; do shift; done\nprintf '%s' '{\"files\": [], \"mutants_lived\": 0}' > \"$2\"\n")
@@ -5431,6 +6028,52 @@ class GremlinsMemoryCap(unittest.TestCase):
                     contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(mutgate.main(["run", "hint", "--out", str(pathlib.Path(d) / "out")]), 0)
             self.assertEqual(seen.read_text().strip(), "1")  # 96 MB past the 32 MB share: killed
+
+    def fitted_run(self, d, grow, free, jobs, pkgs=("hint",)):
+        """`run` over pkgs with a fake gremlins whose coverage run holds grow bytes: (exit, [--workers of
+        each gremlins run]). The fake fails, as gremlins does, where the shim's coverage run fails."""
+        seen, prof = pathlib.Path(d) / "seen", pathlib.Path(d) / "c"
+        bindir = self.fake_go(d, f"eval \"$x python3 -c 'b = bytearray({grow}); import time; time.sleep(0.5)'\"\n: > {prof}\n")
+        (bindir / "gremlins").write_text(
+            "#!/bin/sh\nw=; o=; while [ $# -gt 0 ]; do case \"$1\" in --workers) w=$2;; -o) o=$2;; esac; shift; done\n"
+            f"echo $w >> {seen}\n"
+            f"go test -cover -coverprofile {prof} ./... 2>&1 | grep -q 'more than half' && exit 1\n"
+            "printf '%s' '{\"files\": [], \"mutants_total\": 0, \"mutants_lived\": 0}' > \"$o\"\n")
+        (bindir / "gremlins").chmod(0o755)
+        with mock.patch.dict(os.environ, {"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}), \
+                mock.patch.object(mutgate, "available_memory", return_value=free), \
+                mock.patch.object(mutgate, "default_jobs", return_value=jobs), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = mutgate.main(["run", *pkgs, "--out", str(pathlib.Path(d) / "out")])
+        return code, [int(w) for w in seen.read_text().split()]
+
+    def test_tests_past_half_a_share_run_again_on_fewer_workers(self):
+        # #6396: egress's tests held 1017 MB of a 1820 MB share, so every run of it failed by name. The
+        # parallel share gives way, not the half-cap check: 4 workers of 64 MB, then shares that fit.
+        with tempfile.TemporaryDirectory() as d:
+            code, workers = self.fitted_run(d, 48 << 20, 512 << 20, 4)
+            self.assertEqual(code, 0)
+            self.assertEqual(workers[0], 4)
+            self.assertEqual(len(workers), 2, workers)
+            self.assertIn(workers[1], (1, 2))
+
+    def test_tests_past_half_of_all_the_memory_still_fail(self):
+        # One worker under all of it is the floor: tests past half of that still give no verdict.
+        with tempfile.TemporaryDirectory() as d:
+            code, workers = self.fitted_run(d, 96 << 20, 256 << 20, 4)
+            self.assertEqual(code, 1)
+            self.assertEqual(workers[0], 4)
+            self.assertEqual(workers[-1], 1)
+            self.assertEqual(workers, sorted(workers, reverse=True))
+
+    def test_each_package_starts_at_the_full_worker_count(self):
+        # A refit share is the package's own: the next package runs on every worker again, so the
+        # workers' shares together never pass half the free memory.
+        with tempfile.TemporaryDirectory() as d:
+            code, workers = self.fitted_run(d, 48 << 20, 512 << 20, 4, ("hint", "hint2"))
+            self.assertEqual(code, 0)
+            self.assertEqual(workers[0], 4)
+            self.assertEqual(workers.count(4), 2, workers)
 
     @unittest.skipUnless(shutil.which("gremlins"), "gremlins v0.6.0 is not installed")
     def test_gremlins_reads_a_capped_mutant_as_killed(self):
@@ -5661,6 +6304,8 @@ class Workflow(unittest.TestCase):
                     '#!/bin/bash\nshift 2\nlim=$1; shift\nwhat="$4 $(basename "$7")"\n'
                     f'echo "$lim $what" >> {log}\n[ "$what" = "{slow}" ] && exit 124\nexit 0\n')
                 (bin_ / "timeout").chmod(0o755)
+                (bin_ / "sudo").write_text("#!/bin/sh\ncat > /dev/null\n")  # the move into the cgroup (#6392)
+                (bin_ / "sudo").chmod(0o755)
                 env = {"PATH": f"{bin_}:/usr/bin:/bin", "PKG": "enforcer/nft", "SHARDS": "0, 148", "OF": "296",
                        "BASE": "b" * 40, "RUNNER_TEMP": d}
                 r = subprocess.run(["bash", "-ec", script], env=env, capture_output=True, text=True, cwd=d)
@@ -6124,7 +6769,7 @@ class LintHeldFollowUp(unittest.TestCase):
         import contextlib, io, types
         with contextlib.ExitStack() as st:
             for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
-                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: sorted(pkg_targets)),
+                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d, **_: sorted(pkg_targets)),
                                 ("diff_targets", lambda added, pkg: pkg_targets[pkg][0]),
                                 ("deletion_sites", lambda pkg, t, lister: (pkg_targets[pkg][1], None)),
                                 ("lint_budget", budget), ("suite_seconds", lambda pkg, tmp: (1.0, None)),
@@ -6134,6 +6779,197 @@ class LintHeldFollowUp(unittest.TestCase):
             out = st.enter_context(contextlib.redirect_stdout(io.StringIO()))
             code = mutgate.cmd_plan(types.SimpleNamespace(git="HEAD~1", targets_out=None))
         return code, out.getvalue(), err.getvalue()
+
+
+def mod_diff(path, minus=(), plus=()):
+    """A -U0 diff of one file that deletes the lines minus and adds the lines plus, in one hunk."""
+    out = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -3,{len(minus)} +3,{len(plus)} @@\n"
+    return out + "".join(f"-{x}\n" for x in minus) + "".join(f"+{x}\n" for x in plus)
+
+
+class GoDebugEveryFu(unittest.TestCase):
+    """MUT-go-debug-every-fu (#6420): an edit that changes Go's runtime defaults for a whole package or
+    module (a package-wide //go: directive in a non-test file, a go.mod `go` or `godebug` line) changes
+    every test there, as #6377's test-file directive does; an edit the go.mod reading cannot place is one."""
+
+    CODE = {"hint/hint.go": "package hint\n", "hint/hint_test.go": "package hint\n",
+            "cmd/tool/main.go": "package main\n", "cmd/tool/main_test.go": "package main\n",
+            "mail/mail.go": "package mail\n", "mail/mail_test.go": "package mail\n"}
+    ALL = {"hint", "cmd/tool", "mail"}
+
+    def tree(self, d):
+        return DataFiles.tree(self, d, self.CODE)
+
+    def every(self, diff, pkgs):
+        added, tests = mutgate.added_lines(diff)
+        self.assertEqual(mutgate.touched(added, tests), pkgs)
+        for pkg in pkgs:
+            self.assertTrue(mutgate.tests_changed(tests, pkg), pkg)
+            self.assertIsNone(mutgate.head_tests(tests, pkg), pkg)  # every test
+        self.assertEqual(mutgate.claimed(diff, packages=sorted(self.ALL)), sorted(pkgs))
+
+    def test_a_directive_in_a_main_file_is_every_test_of_its_package(self):
+        # REQ: MUT-go-debug-every-fu
+        with tempfile.TemporaryDirectory() as d, self.tree(d):
+            for name, minus, plus in (("added", (), ("//go:debug panicnil=1",)),
+                                      ("changed", ("//go:debug panicnil=1",), ("//go:debug panicnil=0",)),
+                                      ("removed", ("//go:debug panicnil=1",), ()),
+                                      ("indented", (), ("\t//go:debug panicnil=1",)),
+                                      # L3 on #6558: go skips one leading byte order mark and reads the directive.
+                                      ("behind a byte order mark", (), ("\ufeff//go:debug panicnil=1",)),
+                                      ("removed behind a byte order mark", ("\ufeff//go:debug panicnil=1",), ()),
+                                      ("a directive not known", (), ("//go:future x",))):
+                with self.subTest(name):
+                    self.every(mod_diff("broker/cmd/tool/main.go", minus, plus), {"cmd/tool"})
+            # A deleted main file takes its directive with it.
+            gone = data_diff("broker/cmd/tool/main.go", "delete").replace("-x\n", "-//go:debug panicnil=1\n")
+            self.every(gone, {"cmd/tool"})
+            # Any package's non-test file counts: go reads the directive only in main, the gate fails closed.
+            self.every(mod_diff("broker/hint/hint.go", (), ("//go:debug x=1",)), {"hint"})
+            # A directive that reaches only its declaration or file, or ordinary code, widens nothing.
+            for line in ("//go:build linux", "//go:noinline", "//go:embed x.txt", "x := 1", "// go:debug x=1"):
+                with self.subTest(line):
+                    added, tests = mutgate.added_lines(mod_diff("broker/cmd/tool/main.go", (), (line,)))
+                    self.assertEqual(tests, {})
+                    self.assertEqual(mutgate.touched(added, tests), {"cmd/tool"})
+            # A vendored file's directive is fixed by go.sum (is_vendored): no claim.
+            added, tests = mutgate.added_lines(mod_diff("broker/vendor/x/y/y.go", (), ("//go:debug x=1",)))
+            self.assertEqual(mutgate.touched(added, tests), set())
+
+    def test_an_edit_that_switches_on_an_unchanged_directive_is_every_test(self):
+        # Security on #6558: a //go:debug line the diff leaves alone is switched on by its file's //go:build
+        # line, or by removing a /* */ pair around it; any change to a non-test file holding a package-wide
+        # directive at the base or head is every test of its package (dormant, read from git).
+        # REQ: MUT-go-debug-every-fu
+        main = "//go:build never\n\n//go:debug panicnil=1\n\npackage main\n\nfunc main() {}\n"
+        hidden = "/*\n//go:debug http2client=0\n*/\n\npackage main\n\nfunc main() {}\n"
+        plain = "//go:build never\n\npackage main\n\nfunc main() {}\n"
+        for name, was, now, wide in (("its build line", main, main.replace("never", "linux"), True),
+                                     ("a comment pair removed", hidden, hidden.replace("/*\n", "").replace("*/\n", ""), True),
+                                     ("ordinary code beside it", main, main.replace("{}", "{ println() }"), True),
+                                     ("the directive's file deleted", main, None, True),
+                                     ("added in a new file", None, main, True),
+                                     ("no package-wide directive", plain, plain.replace("never", "linux"), False)):
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+                tool = pathlib.Path(d) / "broker" / "cmd" / "tool"
+                tool.mkdir(parents=True)
+                (tool / "main_test.go").write_text("package main\n")
+                git("init", "-q")
+                for text in (was, now):
+                    if text is None:
+                        (tool / "main.go").unlink(missing_ok=True)
+                    else:
+                        (tool / "main.go").write_text(text)
+                    git("add", "-A")
+                    git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "x")
+                diff = git("diff", "-U0", "--no-renames", "HEAD~1...HEAD", "--", "broker").stdout
+                with mock.patch.object(mutgate, "ROOT", pathlib.Path(d)), \
+                        mock.patch.object(mutgate, "BROKER", pathlib.Path(d) / "broker"):
+                    got = mutgate.dormant(diff, "HEAD~1", "HEAD")
+                    self.assertEqual(got, {f"broker/cmd/tool/{mutgate.EVERY_TEST}": None} if wide else {})
+                    tests = mutgate._widen(mutgate.added_lines(diff)[1], got)
+                    self.assertEqual(mutgate.head_tests(tests, "cmd/tool"), None if wide else [])
+                    self.assertEqual(mutgate.claimed(diff, ["cmd/tool"], "HEAD~1", "HEAD"), ["cmd/tool"])
+
+    def test_the_gate_entry_points_read_a_dormant_directive(self):
+        # L3 on #6558: changes(), cmd_plan, cmd_verify and cmd_claimed each read dormant(), so reverting any
+        # call site fails here. Security's case (b): only the /* */ pair around an unchanged //go:debug goes.
+        # REQ: MUT-go-debug-every-fu
+        import contextlib, io, types
+        hidden = "/*\n//go:debug http2client=0\n*/\n\npackage main\n\nfunc main() {}\n"
+        key = f"broker/cmd/tool/{mutgate.EVERY_TEST}"
+
+        class Reached(Exception):
+            pass
+
+        def stop(diff, base, head, tests, pkgs):
+            raise Reached(tests, pkgs)
+
+        with tempfile.TemporaryDirectory() as d:
+            git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+            tool = pathlib.Path(d) / "broker" / "cmd" / "tool"
+            tool.mkdir(parents=True)
+            (tool / "main_test.go").write_text("package main\n")
+            git("init", "-q")
+            for text in (hidden, hidden.replace("/*\n", "").replace("*/\n", "")):
+                (tool / "main.go").write_text(text)
+                git("add", "-A")
+                git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "x")
+            diff = git("diff", "-U0", "--no-renames", "HEAD~1...HEAD", "--", "broker").stdout
+            self.assertEqual(mutgate.claimed(diff, ["cmd/tool"]), [])  # the diff alone shows no directive line
+            with contextlib.ExitStack() as st:
+                for name, value in (("ROOT", pathlib.Path(d)), ("BROKER", pathlib.Path(d) / "broker"),
+                                    ("broker_diff", lambda *a: diff), ("gated_packages", lambda *a: ["cmd/tool"]),
+                                    ("advisory", lambda: None), ("build_lister", lambda tmp: "lister"),
+                                    ("bases_for", stop), ("read_results", lambda *a: ({}, []))):
+                    st.enter_context(mock.patch.object(mutgate, name, value))
+                st.enter_context(contextlib.redirect_stderr(io.StringIO()))
+                out = st.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                self.assertIn(key, mutgate.changes(diff, "HEAD~1", "HEAD")[1])
+                for name, cmd, args in (("plan", mutgate.cmd_plan, types.SimpleNamespace(git="HEAD~1", targets_out=None)),
+                                        ("verify", mutgate.cmd_verify,
+                                         types.SimpleNamespace(git="HEAD~1", head="HEAD", dir=d, summary=None))):
+                    with self.subTest(name), self.assertRaises(Reached) as got:
+                        cmd(args)
+                    tests, pkgs = got.exception.args
+                    self.assertIn(key, tests)
+                    self.assertEqual(pkgs, ["cmd/tool"])
+                self.assertEqual(mutgate.cmd_claimed(types.SimpleNamespace(git="HEAD~1", head="HEAD", json=True)), 0)
+                self.assertEqual(json.loads(out.getvalue().splitlines()[-1]), ["cmd/tool"])
+
+    def test_a_go_mod_go_line_is_every_test_of_the_module(self):
+        # REQ: MUT-go-debug-every-fu
+        with tempfile.TemporaryDirectory() as d, self.tree(d):
+            for minus, plus in ((("go 1.26.4",), ("go 1.27",)), ((), ("go 1.27 // pinned",)), (("go 1.26.4",), ())):
+                with self.subTest(minus=minus, plus=plus):
+                    self.every(mod_diff("broker/go.mod", minus, plus), self.ALL)
+
+    def test_a_go_mod_godebug_line_is_every_test_of_the_module(self):
+        # REQ: MUT-go-debug-every-fu
+        with tempfile.TemporaryDirectory() as d, self.tree(d):
+            for minus, plus in (((), ("godebug default=go1.21",)),
+                                ((), ("godebug (", "\tpanicnil=1", ")")),
+                                (("\tpanicnil=1",), ("\tpanicnil=0",)),   # -U0: an entry with no block in sight
+                                (("\thttp2client=0 // off",), ())):
+                with self.subTest(minus=minus, plus=plus):
+                    self.every(mod_diff("broker/go.mod", minus, plus), self.ALL)
+
+    def test_an_unplaceable_go_mod_edit_is_every_test_of_the_module(self):
+        # REQ: MUT-go-debug-every-fu
+        with tempfile.TemporaryDirectory() as d, self.tree(d):
+            # An unindented entry and a bare directive keyword are lines go refuses; they fail closed too.
+            for line in ("ignore ./old", "use ./x", "\tx=>1", "garbage", "\ta = b", "godebug(", "go",
+                         "github.com/a/b v1.0.0", "require", "toolchain", "\ufeffrequire x v1"):
+                with self.subTest(line):
+                    self.every(mod_diff("broker/go.mod", (), (line,)), self.ALL)
+            # What sets no default stays no claim: requirements (go.sum fixes vendor/), replacements,
+            # exclusions, retractions, the toolchain, comments and layout.
+            for minus, plus in ((("\tgithub.com/a/b v1.0.0",), ("\tgithub.com/a/b v1.1.0 // indirect",)),
+                                ((), ("require github.com/a/b v1.0.0",)),
+                                ((), ("require (", "\tgithub.com/a/b v1.0.0", ")")),
+                                ((), ("replace github.com/a/b => ./third_party/b",)),
+                                ((), ("\tgithub.com/a/b v1.0.0 => github.com/c/b v1.0.1",)),
+                                ((), ("exclude github.com/a/b v0.9.0", "retract [v1.0.0, v1.0.1] // bad")),
+                                (("toolchain go1.26.11",), ("toolchain go1.26.12",)),
+                                ((), ("// godebug panicnil=1", "", "module github.com/x/broker"))):
+                with self.subTest(minus=minus, plus=plus):
+                    added, tests = mutgate.added_lines(mod_diff("broker/go.mod", minus, plus))
+                    self.assertEqual(mutgate.touched(added, tests), set())
+            # Security on #6558: a toolchain bump can satisfy an unchanged file's `//go:build go1.N` line and switch
+            # on its //go:debug, so it is every test of each package holding a package-wide directive, only those.
+            bump = mod_diff("broker/go.mod", ("toolchain go1.26.11",), ("toolchain go1.27.0",))
+            dormant = {"cmd/tool/new.go": "//go:build go1.27\n\n//go:debug panicnil=1\n\npackage main\n",
+                       "mail/x.go": "/*\n//go:debug x=1\n*/\npackage mail\n", "hint/y.go": "//go:noinline\npackage hint\n"}
+            with tempfile.TemporaryDirectory() as d2, DataFiles.tree(self, d2, {**self.CODE, **dormant}):
+                added, tests = mutgate.added_lines(bump)
+                self.assertEqual(mutgate.touched(added, tests), {"cmd/tool", "mail"})
+                self.assertIsNone(mutgate.head_tests(tests, "cmd/tool"))
+                self.assertEqual(mutgate.head_tests(tests, "hint"), [])
+            # Another module's go.mod (third_party/, a replace directory) is that package's data, as before.
+            added, tests = mutgate.added_lines(mod_diff("broker/hint/go.mod", (), ("go 1.27",)))
+            self.assertEqual(mutgate.touched(added, tests), {"hint"})
+
 
 if __name__ == "__main__":
     unittest.main()
