@@ -1,10 +1,11 @@
 package vision
 
 import (
-	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"time"
@@ -94,9 +95,13 @@ func (c Client) call(ctx context.Context, req Request, payload []byte) (Reply, e
 	if werr == nil && len(payload) > 0 {
 		_, werr = conn.Write(payload)
 	}
-	line, err := ReadLine(bufio.NewReaderSize(conn, 4<<10), MaxReplyLine)
-	// An enrol reply's line holds a template as text.
-	defer clear(line)
+	// An enrol reply's line holds a template as text, so the reply is
+	// read straight into one buffer this call owns and zeroes on every
+	// path: no bufio.Reader keeps a window of it, and no append growth
+	// leaves an earlier copy behind.
+	buf := replyBuf()
+	defer clear(buf)
+	line, err := readLine(conn, buf)
 	if err != nil {
 		switch {
 		case ctx.Err() != nil:
@@ -111,75 +116,189 @@ func (c Client) call(ctx context.Context, req Request, payload []byte) (Reply, e
 	return parseReply(req, line, c.Enrolled)
 }
 
-// parseReply decodes one reply line for req and checks every field: an
-// unknown field, a field req's op does not take, or a value off its list
-// or outside its bound (a detection's against req's frame) is
-// Unavailable.
-func parseReply(req Request, line []byte, enrolled func(string) bool) (Reply, error) {
-	op := req.Op
+// replyBuf returns the buffer one call reads its reply into: a line at
+// its bound and its newline. A var so tests can see it is zeroed.
+var replyBuf = func() []byte { return make([]byte, MaxReplyLine+1) }
+
+// readLine reads one reply line from r into buf and returns it without
+// its newline, a slice of buf. A line that does not fit is
+// ErrLineTooLong; one cut short is io.ErrUnexpectedEOF.
+func readLine(r io.Reader, buf []byte) ([]byte, error) {
+	n := 0
+	for n < len(buf) {
+		m, err := r.Read(buf[n:])
+		if i := bytes.IndexByte(buf[n:n+m], '\n'); i >= 0 {
+			return buf[:n+i], nil
+		}
+		n += m
+		if err != nil {
+			if err == io.EOF && n > 0 {
+				return nil, io.ErrUnexpectedEOF
+			}
+			return nil, err
+		}
+	}
+	return nil, ErrLineTooLong
+}
+
+// skipValue takes any JSON value and keeps none of it.
+type skipValue struct{}
+
+func (*skipValue) UnmarshalJSON([]byte) error { return nil }
+
+// wireTemplate decodes a reply's template from the line itself into one
+// buffer of its own, so no copy of it, as text or bytes, is left in
+// encoding/json, and keeps where in the line its text was. A template
+// that is not a string, or is given twice, is refused, and so is one
+// written with escapes (which encoding/json would unquote into a buffer
+// of its own), since base64 has no backslash. The one decoded first stays
+// for the caller to zero.
+type wireTemplate struct {
+	v   []byte
+	raw []byte
+}
+
+// decoded sees each template as it is decoded, and strictInput the line
+// a json.Decoder copies. Vars so tests can check that every template is
+// zeroed once refused, and that no decoder sees its text.
+var (
+	decoded     = func([]byte) {}
+	strictInput = func(b []byte) io.Reader { return bytes.NewReader(b) }
+)
+
+func (t *wireTemplate) UnmarshalJSON(b []byte) error {
+	if t.raw != nil {
+		return errors.New("template twice")
+	}
+	t.raw = b
+	if string(b) == "null" {
+		return nil
+	}
+	if len(b) < 2 || b[0] != '"' || b[len(b)-1] != '"' {
+		return errors.New("template is not a string")
+	}
+	s := b[1 : len(b)-1]
+	v := make([]byte, base64.StdEncoding.DecodedLen(len(s)))
+	n, err := base64.StdEncoding.Decode(v, s)
+	t.v = v[:n]
+	decoded(v)
+	return err
+}
+
+// decodeReply decodes one reply line: an object of Reply's fields with
+// none unknown, at any depth, and nothing after it. The template is
+// decoded first, in place; the rest is decoded strictly from a copy of
+// the line with the template's text left out, since a json.Decoder
+// copies its input into a buffer nothing zeroes. On an error the
+// template, if one was decoded, is zeroed.
+func decodeReply(line []byte) (_ Reply, err error) {
 	// An object only: null would decode as an empty reply.
 	if t := bytes.TrimLeft(line, " \t\r"); len(t) == 0 || t[0] != '{' {
 		return Reply{}, unavailable("reply is not an object")
 	}
-	dec := json.NewDecoder(bytes.NewReader(line))
-	dec.DisallowUnknownFields()
-	var r Reply
-	if err := dec.Decode(&r); err != nil {
+	// json.Unmarshal reads the line in place: no copy of it is made.
+	var tw struct {
+		Template wireTemplate `json:"template"`
+	}
+	defer func() {
+		if err != nil {
+			clear(tw.Template.v)
+		}
+	}()
+	if err := json.Unmarshal(line, &tw); err != nil {
 		return Reply{}, unavailable("malformed reply")
 	}
-	if _, err := dec.Token(); err != io.EOF {
-		return Reply{}, unavailable("data after the reply")
+	blank := line
+	if raw := tw.Template.raw; len(raw) > 0 && raw[0] == '"' {
+		// raw is a slice of line, so its offset is what its capacity
+		// lacks; if it is not, its text cannot be found to leave out.
+		at := cap(line) - cap(raw)
+		if at < 0 || at+len(raw) > len(line) || &line[at] != &raw[0] {
+			return Reply{}, unavailable("template not read in place")
+		}
+		// The line with the template's text as As: it never holds the text.
+		blank = make([]byte, 0, len(line))
+		blank = append(blank, line[:at+1]...)
+		blank = append(blank, bytes.Repeat([]byte("A"), len(raw)-2)...)
+		blank = append(blank, line[at+len(raw)-1:]...)
 	}
+	// json.Unmarshal above refused any data after the reply.
+	dec := json.NewDecoder(strictInput(blank))
+	dec.DisallowUnknownFields()
+	var w struct {
+		Reply
+		// Shallower than Reply.Template, so it takes the "template" key.
+		Template skipValue `json:"template"`
+	}
+	if err := dec.Decode(&w); err != nil {
+		return Reply{}, unavailable("malformed reply")
+	}
+	r := w.Reply
+	r.Template = tw.Template.v
+	return r, nil
+}
+
+// parseReply decodes one reply line for req and checks every field: an
+// unknown field, a field req's op does not take, or a value off its list
+// or outside its bound (a detection's against req's frame) is
+// Unavailable. A refused reply's template is zeroed, whichever check
+// refused it.
+func parseReply(req Request, line []byte, enrolled func(string) bool) (Reply, error) {
+	r, err := decodeReply(line)
+	if err != nil {
+		return Reply{}, err
+	}
+	if err := checkReply(req, r, enrolled); err != nil {
+		clear(r.Template)
+		return Reply{}, err
+	}
+	return r, nil
+}
+
+// checkReply checks a decoded reply against req's op.
+func checkReply(req Request, r Reply, enrolled func(string) bool) error {
+	op := req.Op
 	if r.Error != "" {
 		if !r.Error.Known() || r.State != "" || r.Device != "" || r.Model != "" || r.SHA256 != "" || r.Detections != nil || r.Sounds != nil || r.Template != nil {
-			return Reply{}, unavailable("malformed error reply")
+			return unavailable("malformed error reply")
 		}
-		return Reply{}, &Error{Cause: r.Error}
+		return &Error{Cause: r.Error}
 	}
 	if r.Template != nil && op != OpEnrol {
-		clear(r.Template)
-		return Reply{}, unavailable("template on a reply that takes none")
+		return unavailable("template on a reply that takes none")
 	}
 	hello := r.State != "" || r.Device != "" || r.Model != "" || r.SHA256 != ""
 	switch op {
 	case OpHello:
 		if r.State != StateReady || r.Device != DeviceCPU || !ValidModelName(r.Model) || !ValidHash(r.SHA256) {
-			return Reply{}, unavailable("hello reply is not ready")
+			return unavailable("hello reply is not ready")
 		}
 		if r.Detections != nil || r.Sounds != nil {
-			return Reply{}, unavailable("hello reply has other fields")
+			return unavailable("hello reply has other fields")
 		}
 	case OpDetect:
 		if hello || r.Sounds != nil {
-			return Reply{}, unavailable("detect reply has other fields")
+			return unavailable("detect reply has other fields")
 		}
-		if err := CheckDetections(r.Detections, req.Format, req.Width, req.Height, enrolled); err != nil {
-			return Reply{}, err
-		}
+		return CheckDetections(r.Detections, req.Format, req.Width, req.Height, enrolled)
 	case OpSound:
 		if hello || r.Detections != nil {
-			return Reply{}, unavailable("sound reply has other fields")
+			return unavailable("sound reply has other fields")
 		}
-		if err := CheckSounds(r.Sounds); err != nil {
-			return Reply{}, err
-		}
+		return CheckSounds(r.Sounds)
 	case OpEnrol:
 		if hello || r.Detections != nil || r.Sounds != nil {
-			clear(r.Template)
-			return Reply{}, unavailable("enrol reply has other fields")
+			return unavailable("enrol reply has other fields")
 		}
-		if err := CheckTemplate(r.Template); err != nil {
-			clear(r.Template)
-			return Reply{}, err
-		}
+		return CheckTemplate(r.Template)
 	case OpLend:
 		if r.State != StateReady || r.Device != "" || r.Model != "" || r.SHA256 != "" || r.Detections != nil || r.Sounds != nil {
-			return Reply{}, unavailable("lend reply is not ready")
+			return unavailable("lend reply is not ready")
 		}
 	default:
-		return Reply{}, badRequest("unknown op")
+		return badRequest("unknown op")
 	}
-	return r, nil
+	return nil
 }
 
 // ControlClient is the trusted side's client of the service's control
