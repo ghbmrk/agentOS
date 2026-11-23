@@ -1757,6 +1757,67 @@ def stale_deps(e, decls):
     return out
 
 
+
+# MUT-record-deps-audit (#6499, L3 on #6498): a reason that cites, as code, another top-level declaration of its own
+# package names it in deps, so an edit there stales the proof. A citation is an identifier inside a backtick span,
+# followed by `(` or `{`, or shaped as code (an uppercase letter, digit or `_` after its first character). A dotted
+# X.Y cites the method X.Y when the package declares one, else X: Y is a member (a field, a foreign method, an
+# imported package's name). `name.go` is a file. Bound: a citation in plain prose (`read`, `pair`), one to another
+# package or to the standard library is not seen, so review still reads each reason against its deps.
+CITED = re.compile(r"(?<![\w.])[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
+
+
+def cited_names(reason, declared=frozenset()):
+    """The identifiers reason cites as code (see CITED); a dotted one resolves its method against declared."""
+    spans = [m.span() for m in re.finditer(r"`[^`]*`", reason)]
+    out = set()
+    for m in CITED.finditer(reason):
+        parts, (s, e) = m.group().split("."), m.span()
+        if parts[-1] == "go" and len(parts) > 1:  # a file: name.go
+            continue
+        if len(parts) > 1 and (method := f"{parts[0]}.{parts[1]}") in declared:
+            out.add(method)
+            continue
+        x = parts[0]
+        if (any(a < s and e <= b for a, b in spans) or reason[s + len(x):s + len(x) + 1] in ("(", "{")
+                or re.search(r"[A-Z0-9_]", x[1:])):
+            out.add(x)
+    return out
+
+
+def package_decls(pkg, lister, pkg_dir=None):
+    """({name: [(path, digest)]} of every top-level name the non-test .go files of broker/<pkg>/ declare, None) or
+    (None, problem). The paths are dep files (see RECORD)."""
+    pkg_dir = pkg_dir or BROKER / pkg
+    paths = sorted(f"broker/{pkg}/{p.name}" for p in pkg_dir.glob("*.go") if not p.name.endswith("_test.go"))
+    decls, problem = list_dep_decls(paths, lister)
+    if problem:
+        return None, problem
+    out = collections.defaultdict(list)
+    for path, rows in sorted(decls.items()):
+        for names, digest in rows or ():
+            for n in names:
+                if n and n != "_":
+                    out[n].append((path, digest))
+    return out, None
+
+
+def undeclared_deps(pkg, entries, declared):
+    """[problem] for each name an entry's reason cites (cited_names) that its package declares (declared,
+    package_decls') outside the entry's own declaration while no dep of the entry names it."""
+    problems = []
+    for e in entries:
+        own, named = (f"broker/{pkg}/{e['file']}", e["decl"]), {(x["file"], x["func"]) for x in e.get("deps", ())}
+        for name in sorted(cited_names(e["reason"], declared)):
+            where = sorted({p for p, dg in declared.get(name, ()) if (p, dg) != own})
+            if where and not any((p, name) in named for p in where):
+                problems.append(f"broker/{pkg}/{RECORD}: the entry for {e['file']} {e['func'] or '(top level)'} "
+                                f"{e['stmt'][e['at']]!r} cites {name}, declared outside its own declaration in "
+                                f"{', '.join(where)}, with no dep naming it: read the proof again and, if it holds, "
+                                f"write it again with `mutgate.py waive --dep {where[0]}:{name}`")
+    return problems
+
+
 def read_record(pkg, pkg_dir=None):
     """(text or None, problem or None) of broker/<pkg>/MUTANTS-EQUIVALENT in the working tree."""
     path = (pkg_dir or BROKER / pkg) / RECORD
@@ -1819,8 +1880,13 @@ def record_waivers(pkgs, lister, base=None, head="HEAD"):
         if problem:
             problems.append(problem)
             continue
+        declared, problem = package_decls(pkg, lister)
+        if problem:
+            problems.append(problem)
+            continue
         found, bad = resolve_record(pkg, entries, keys, decls)
         problems += bad + [refused_entry(pkg, e) for e in entries if NOT_EQUIVALENT.search(e["reason"])]
+        problems += undeclared_deps(pkg, entries, declared)
         # An entry whose reason says not equivalent is no proof (#5909): it waives nothing and fails.
         found = {site: e for site, e in found.items() if not NOT_EQUIVALENT.search(e["reason"])}
         old = set()
@@ -1904,6 +1970,10 @@ def cmd_waive(args):
                     print(f"mutgate: {r}, then run waive again", file=sys.stderr)
                 return 1
             new = [record_entry(pkg, f, n, reason, args.accepted, keys, kind, col, deps) for f, n, reason, kind, col in sites]
+            declared, problem = package_decls(pkg, lister)
+            if problem or (problem := "\n".join(undeclared_deps(pkg, new, declared))):
+                print(f"mutgate: {problem}", file=sys.stderr)
+                return 1
             # Every line of a parsed declaration has its digest; a line outside any has nothing to prove.
             if nodigest := [f"broker/{pkg}/{e['file']}: {e['stmt'][e['at']]!r}" for e in new if not e["decl"]]:
                 print(f"mutgate: {', '.join(nodigest)} is in no top-level declaration, so no entry can key on one",
