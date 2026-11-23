@@ -19,7 +19,7 @@ import (
 func serveState(t *testing.T, c *custody) string {
 	t.Helper()
 	run := filepath.Join(t.TempDir(), "run")
-	srvs, err := serve(run, c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	srvs, err := serve(run, c, testRouter(t), nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}

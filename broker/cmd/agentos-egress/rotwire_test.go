@@ -55,7 +55,7 @@ func newWireRig(t *testing.T) *wireRig {
 	x := &wireRig{cardRig: newCardRig(t)}
 	x.open(t)
 	run := filepath.Join(t.TempDir(), "run")
-	srvs, err := serve(run, x.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	srvs, err := serve(run, x.c, testRouter(t), nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}

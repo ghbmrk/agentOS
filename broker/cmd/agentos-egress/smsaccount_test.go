@@ -279,7 +279,7 @@ func TestTheTextingTokenNeverLeaves(t *testing.T) {
 	}
 	sms.Send(ctx, "+15550000777", "hi")
 	sms.Poll(ctx)
-	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	srvs, err := serve(run, r.c, testRouter(t), nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,7 +337,7 @@ func TestAgentosdLearnsWhenTextsStopArriving(t *testing.T) {
 	var status atomic.Int32
 	r.c.smsHTTP = &http.Client{Transport: stubProvider{&status}}
 	run := filepath.Join(t.TempDir(), "run")
-	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	srvs, err := serve(run, r.c, testRouter(t), nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}

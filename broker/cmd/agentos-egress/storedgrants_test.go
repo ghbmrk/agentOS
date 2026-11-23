@@ -92,7 +92,7 @@ func TestAStoredKeyGrantsTheAgentMachine(t *testing.T) {
 	mw, err := wireModel(route.Rule{
 		"default": {{Provider: "openai", Model: "gpt-test"}},
 		"claude":  {{Provider: "anthropic", Model: "claude-test"}},
-	}, grants{}, map[string]bool{"openai": true, "anthropic": true}, *agent, "", "")
+	}, grants{}, map[string]bool{"openai": true, "anthropic": true}, *agent, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestAStoredKeyGrantsTheAgentMachine(t *testing.T) {
 	}
 	rt := mw.rt
 	run := filepath.Join(t.TempDir(), "run")
-	srvs, err := serve(run, r.c, rt, nil, nil, os.Getuid(), os.Getuid())
+	srvs, err := serve(run, r.c, rt, nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestAKeyHeldAtUnlockGrants(t *testing.T) {
 	var hook privateHook
 	hook.bind(r.c)
 	_, rt, err := modelRouting(route.Rule{"default": {{Provider: "openai", Model: "gpt-test"}}},
-		grants{}, map[string]bool{"openai": true}, nil, hook.granted, "", "")
+		grants{}, map[string]bool{"openai": true}, nil, hook.granted, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +283,7 @@ func TestServeCustodyFollowsTheFlags(t *testing.T) {
 }
 
 // -agent-machine names an agent machine: never a builder's or a replay
-// machine, whose grants come from -builder-from and -eval-from.
+// machine (builders take -builder-from's grants; replay machines have none).
 func TestCheckAgentMachine(t *testing.T) {
 	for _, m := range []string{"agent", "work-1", ""} {
 		if err := checkAgentMachine(m); err != nil {

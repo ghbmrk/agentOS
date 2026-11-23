@@ -12,9 +12,8 @@ import (
 // router (privateHook.granted) and the proxy (egress Config.Granted) both
 // ask storedGrant per call, so a key stored at setup serves without a
 // restart and without rebuilding the proxy. Only a key grants: the
-// private-data answer stays the router's own check (CAP-9), and builders'
-// and replay machines' grants still come only from -builder-from and
-// -eval-from.
+// private-data answer stays the router's own check (CAP-9), builders'
+// grants still come only from -builder-from, and replay machines have none.
 
 // storedGrant reports whether a stored key grants provider to machine:
 // machine is the agent machine, the vault is open, and it holds provider's
