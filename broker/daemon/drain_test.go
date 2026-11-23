@@ -66,7 +66,7 @@ func TestShutdownWaitsForAPageTextInTheModem(t *testing.T) {
 	go func() { d.Wait(); close(waited) }()
 	// This window shows only that Wait waits at all, not that it waits to
 	// the bound (Security S3, Potency P5 on #1746): the bound is
-	// TestShutdownDrainWaitsTheBoundWhenTheBridgeNeverPolls's.
+	// TestShutdownDrainWaitsTheBoundWhileTheBridgeHoldsAText's.
 	select {
 	case <-waited:
 		t.Fatal("Wait returned with the alert still in the modem")

@@ -72,13 +72,16 @@ func (s *Server) approvals(w http.ResponseWriter, r *http.Request) {
 	}
 	var rq localapi.Requests
 	if err := s.call(r.Context(), localapi.OpRequests, localapi.Auth{Token: tok}, &rq); err != nil {
-		if refused(err, localapi.ErrUnauthorized) {
+		// An answer's own message stands: "Nothing was approved or
+		// denied" would contradict a line that says it was, and a
+		// redirect to /unlock would drop it, as when the answer's wrong
+		// codes locked the session (#1752).
+		answered := v.Msg != "" || v.Err != ""
+		if refused(err, localapi.ErrUnauthorized) && !answered {
 			http.Redirect(w, r, "/unlock?next=/approvals/", http.StatusSeeOther)
 			return
 		}
-		// An answer's own message stands: "Nothing was approved or
-		// denied" would contradict a line that says it was.
-		if v.Msg == "" && v.Err == "" {
+		if !answered {
 			v.Err = unreachableText
 		}
 	}
@@ -175,7 +178,7 @@ const unreachableText = "I can't answer right now. Nothing was approved or denie
 // answerUnreachableText: the call to agentosd failed or timed out, but an
 // answer may already have taken effect, so the page claims nothing either way
 // (UX-2wb-1).
-const answerUnreachableText = "I didn't hear back. Your answer may or may not have gone through. Reload to see whether the request is still open."
+const answerUnreachableText = "I didn't hear back. Your answer may or may not have gone through. Open Approvals again or text STATUS to see whether the request is still open."
 
 const stalePage = "This page is out of date. Check the request below and answer again."
 

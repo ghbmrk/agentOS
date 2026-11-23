@@ -127,33 +127,47 @@ func (c *Channel) textAfterReply(alerts []string, signIn string, n, m int, now t
 	if len(alerts) == 0 && signIn == "" {
 		return
 	}
-	if c.inlineSends {
+	c.afterReply(func() {
 		for _, a := range alerts {
 			_ = c.alert(a)
 		}
 		if signIn != "" {
 			c.sendSignIns(signIn, n, m, now)
 		}
-		return
-	}
+	})
+}
+
+// afterReply runs do on its own goroutine, behind every batch started
+// before it, and counts it in c.sends for DrainSends. The count is taken
+// under sendMu, which DrainSends takes to mark the drain begun before it
+// waits, so no Add can race that Wait (Security N1 on #1686). Once the
+// drain has begun, do runs in the caller instead, behind the batches
+// before it: agentosd starts none then (O34), and a caller that does
+// (say, from Tick) waits for its text rather than lose it.
+func (c *Channel) afterReply(do func()) {
 	done := make(chan struct{})
 	c.sendMu.Lock()
 	prev := c.sendTail
 	c.sendTail = done
+	draining := c.draining
+	if !draining {
+		c.sends.Add(1)
+	}
 	c.sendMu.Unlock()
-	c.sends.Add(1)
-	go func() {
-		defer c.sends.Done()
+	run := func() {
 		defer close(done)
 		if prev != nil {
 			<-prev
 		}
-		for _, a := range alerts {
-			_ = c.alert(a)
-		}
-		if signIn != "" {
-			c.sendSignIns(signIn, n, m, now)
-		}
+		do()
+	}
+	if draining {
+		run()
+		return
+	}
+	go func() {
+		defer c.sends.Done()
+		run()
 	}()
 }
 
@@ -174,6 +188,9 @@ const SendDrain = 30 * time.Second
 // once it says no, at the start or any drainTick after, the drain ends
 // rather than wait out d for a bridge that has gone.
 func (c *Channel) DrainSends(d time.Duration, live func() bool) {
+	c.sendMu.Lock()
+	c.draining = true
+	c.sendMu.Unlock()
 	done := make(chan struct{})
 	go func() { c.sends.Wait(); close(done) }()
 	t := time.NewTimer(d)
@@ -319,10 +336,19 @@ func (c *Channel) localResetLocked(now time.Time) string {
 	return c.clock(c.codes.st.LocalStart.Add(WrongWindow))
 }
 
+// localWindowOver says whether the local bound's fixed window, begun at
+// start, has ended at now. A start after now, left by a clock set back,
+// counts as ended (O35), so the window and any pause it holds never last
+// longer by the skew, and "paused until" never names a time
+// more than 24 hours away.
+func localWindowOver(start, now time.Time) bool {
+	return start.IsZero() || start.After(now) || !now.Before(start.Add(WrongWindow))
+}
+
 // localLeftLocked is what the local bound has left at now.
 func (c *Channel) localLeftLocked(now time.Time) int {
 	st := c.codes.st
-	if st.LocalStart.IsZero() || !now.Before(st.LocalStart.Add(WrongWindow)) {
+	if localWindowOver(st.LocalStart, now) {
 		return LocalBound
 	}
 	return max(LocalBound-st.LocalUsed, 0)
@@ -406,7 +432,7 @@ func (c *Channel) LocalSignIn(code string) (until time.Time, locks uint64, err e
 func (c *Channel) takeLocalLocked(now time.Time) (bool, error) {
 	ok := false
 	err := c.codes.commit(func(s *State) {
-		if s.LocalStart.IsZero() || !now.Before(s.LocalStart.Add(WrongWindow)) {
+		if localWindowOver(s.LocalStart, now) {
 			s.LocalStart, s.LocalUsed = now, 0
 		}
 		if s.LocalUsed < LocalBound {
@@ -705,6 +731,10 @@ func (c *Channel) LocalAnswer(id, sum string, approve bool, code string) (string
 		text, ns, na = c.signInTextLocked(now)
 	}
 	c.mu.Unlock()
+	// Decide runs before the reply, not after it with the texts: the hook
+	// records the decision, and the page must not say "Approved" before
+	// that record exists. A slow hook delays the page as it delays a
+	// texted YES's reply (O34, #1752).
 	c.decide(decided)
 	c.textAfterReply(alerts, text, ns, na, now)
 	if err != nil {

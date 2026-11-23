@@ -51,6 +51,7 @@ func TestSpoofedHeldMessageRunsOnlyWhenTheOwnerMarksItOnThePage(t *testing.T) {
 	if n, err := r.ch.LocalRunHeld([]string{msgs[0].ID, msgs[1].ID}, []string{msgs[1].ID}); n != 1 || err != nil {
 		t.Fatalf("run: %d %v", n, err)
 	}
+	r.ch.WaitSends() // the run goes after the page's reply
 	if got := r.agent.got(); len(got) != 1 || got[0] != "book a table" {
 		t.Fatalf("agent got %v", got)
 	}
