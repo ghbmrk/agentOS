@@ -25,7 +25,7 @@
 /usr/bin/hardlink sha256=86a868c9029abdf3ae3a53534c390415f7f4ddc42a4759c187f8715f3791d8da
 /usr/bin/kmod sha256=a775c12b9d71d9548654ff98ecc0e5e3378bdaccd52ccb62fa80a5f41e849caf
 /usr/bin/less sha256=27dccb9e14cb983e7738289b71884c9776a4425a424c703dadffe5639d82d7f7
-/usr/bin/localedef sha256=6f1190173873a9d4864fc90e498ef151dac61835468a2f96a28be30170e245b9
+/usr/bin/localedef sha256=4a7f91a8aec9ed05fd5b8f7e4e7d4eea733795dba6dc964d1aa3969878aaa823
 /usr/bin/more sha256=cac3eb3b2db220c2ab0d7c648c1e0d751f5402e35a948384e2d92f69b9c61f7a
 /usr/bin/nl sha256=65b5cf1b0e28c06585b03d00db8d2732d0ec86bd42a59c0da6dfc7180817d20d
 /usr/bin/ptx sha256=4ad329af0c827f032df7c57dc32f5852fa1eb4f81460da2abfbcc4c1198197e8
@@ -127,7 +127,7 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 # ldconfig, a static copy of glibc (#6298), in the main tree and the initrd: its one glob() expands the
 # include patterns of root-owned /etc/ld.so.conf and ld.so.conf.d (elf/ldconfig.c), run by root at
 # package install and boot. It is also the sweep's control that the static scan still reads glibc's marks.
-/usr/sbin/ldconfig sha256=3a5ca649454250c3b725f0a68f2bac65f929a2060d423ba9f9cbe1a62620cce1
+/usr/sbin/ldconfig sha256=12ada6f9710fa5a5100f6c610a6547efb882eba2a82d07249a1b6c3c9e02e587
 
 # The openclaw guest's node imports dlsym and holds "glob" (#6298): the string is the name of its
 # JavaScript fs.glob API, implemented in JavaScript over readdir (lib/internal/fs/glob.js), and its
@@ -169,13 +169,13 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 # verity_symbols table from libcryptsetup; it exports no wrapper.
 /usr/lib/x86_64-linux-gnu/libmount.so.1.* sha256=1654d2cf948e3608cc0d38340807d4ddac1114315a3a77f7b274c4c859cb2181
 
-# libcrypto (OpenSSL 3.5.7): dlfcn_bind_func and dlfcn_globallookup (crypto/dso/dso_dlfcn.c) are its
+# libcrypto (OpenSSL 3.5.9): dlfcn_bind_func and dlfcn_globallookup (crypto/dso/dso_dlfcn.c) are its
 # only dlsym calls. A caller's name reaches them only through the exports DSO_bind_func,
 # DSO_global_lookup and DSO_METHOD_openssl, which the sweep counts as lookup functions of their own
 # (LOOKUP_FUNCS); libcrypto's own callers spell fixed names (provider_core.c OSSL_provider_init,
 # eng_dyn.c v_check and bind_engine, conf_mod.c OPENSSL_init and OPENSSL_finish, the comp/ loaders,
 # rand_unix.c getentropy).
-/usr/lib/x86_64-linux-gnu/libcrypto.so.3 sha256=8ae56f0a9481280a68c19f59809cd242a07a91ad7142944d21a878221992244b
+/usr/lib/x86_64-linux-gnu/libcrypto.so.3 sha256=a4e00ad0bb09d820ba5c41672567e965d4ca03153f7842751ef243355a569805
 
 [unresolved]
 # Files with a NEEDED name that no file or symbolic link of their place answers to (Security R4 on #6382),
