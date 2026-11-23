@@ -4796,6 +4796,56 @@ class Record(unittest.TestCase):
                          + ["STATEMENT_DELETION #5804", "STATEMENT_DELETION #5998"])
 
 
+class WaiveKeepsOrder(Record):
+    """TOOL-waive-keeps-order (#6573): waive keeps a record's lines in place, so premerge's union check reads it as kept."""
+    # REQ: TOOL-waive-keeps-order
+
+    def test_waive_keeps_an_unsorted_record_in_its_order(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        import premerge
+        with tempfile.TemporaryDirectory() as d:
+            git = lambda *a: subprocess.run(["git", "-C", d, "-c", "user.email=t@example.invalid", "-c", "user.name=t", *a],
+                                            check=True, capture_output=True, text=True).stdout.strip()
+            run = self.repo(d, self.SRC, self.SRC)
+            for line in (5, 8, 11):
+                self.waive(d, run, line)
+            path = pathlib.Path(d) / "broker" / "netguard" / mutgate.RECORD
+            rows = path.read_text().rstrip("\n").split("\n")
+            # A hand-ordered record: entries reversed, and a comment between them, kept word for word.
+            hand = [rows[0], rows[3], "# a note between entries", rows[2], rows[1]]
+            self.assertNotEqual(hand[1:], sorted(hand[1:]))
+            path.write_text("\n".join(hand) + "\n")
+            git("commit", "-qam", "base")
+            base = git("rev-parse", "HEAD")
+            # Rewrite one entry (line 8, a new reason) and add a new one (line 6).
+            (pathlib.Path(d) / "w.txt").write_text(
+                "Mutant-equivalent: broker/netguard/a.go:8 a new reason the review read for this site\n"
+                "Mutant-equivalent: broker/netguard/a.go:6 both returns give the same value on every input\n")
+            r = run("waive", str(pathlib.Path(d) / "w.txt"), "--accepted", "#6573")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("2 entries written, 4 in all", r.stdout)
+            out = path.read_text().rstrip("\n").split("\n")
+            self.assertEqual(out[:3], hand[:3])           # untouched lines in place
+            self.assertEqual(out[4], hand[4])
+            self.assertIn("a new reason", out[3])        # rewritten in its own place
+            self.assertEqual(json.loads(out[3])["stmt"], json.loads(hand[3])["stmt"])
+            self.assertEqual(json.loads(out[5])["stmt"], ["return 2"])  # new, after its file's last entry
+            self.assertEqual(len(out), 6)
+            git("commit", "-qam", "waive")
+            head = git("rev-parse", "HEAD")
+            rel = f"broker/netguard/{mutgate.RECORD}"
+            self.assertIs(premerge._records_kept(d, head, head, rel, head, base), True)
+            # The old sorted rewrite moves untouched entries, which premerge reads as changed.
+            moved = [out[0], out[1]] + sorted([out[3], out[4], out[5]]) + [out[2]]
+            path.write_text("\n".join(moved) + "\n")
+            git("commit", "-qam", "sorted")
+            head = git("rev-parse", "HEAD")
+            self.assertIs(premerge._records_kept(d, head, head, rel, head, base), False)
+
+    def test_waive_writes_a_head_into_a_new_record(self):
+        rows, total = mutgate.waive_rows("p", "", [])
+        self.assertEqual((rows[0][0], total), ("#", 0))
+
 
 class RecordDeps(unittest.TestCase):
     """MUT-record-deps (#6282): an entry names the declarations its proof rests on, in any file under broker/,
@@ -6365,6 +6415,7 @@ class LintHeldFollowUp(unittest.TestCase):
             out = st.enter_context(contextlib.redirect_stdout(io.StringIO()))
             code = mutgate.cmd_plan(types.SimpleNamespace(git="HEAD~1", targets_out=None))
         return code, out.getvalue(), err.getvalue()
+
 
 if __name__ == "__main__":
     unittest.main()
