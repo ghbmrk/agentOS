@@ -3473,6 +3473,11 @@ class MovedDecls(unittest.TestCase):
         self.assertEqual(self.reach(base, {**base, "z_test.go": new}, src=src, extra={"lib/lib.go": lib}), both)
         self.assertEqual(self.reach(base, {**base, "z_test.go": new}, src=src, extra={"lib/lib.go": lib.replace("t.Parallel()", "t.Helper()")}),
                          (["TestNew"], []))
+        # An imported package's own tests are not built into this package's test binary (#6372).
+        quiet = lib.replace("t.Parallel()", "t.Helper()")
+        self.assertEqual(self.reach(base, {**base, "z_test.go": new}, src=src,
+                                    extra={"lib/lib.go": quiet, "lib/lib_test.go": lib.replace("func Par(", "func par(")}),
+                         (["TestNew"], []))
 
     def test_a_declaration_of_a_cgo_file_never_moves(self):
         # #6385, from #6376: a cgo file's code binds its own preamble, so nothing moves out of one.
