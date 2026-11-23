@@ -58,7 +58,12 @@ const restoreStage = ".content-restore-"
 // its flock is used: it is never read or written, and it stays after.
 const restoreLock = ".content-restore.lock"
 
-func restoreSections(secs *backup.Sections, log io.Writer, contentDir string, stop func(i int) bool) error {
+// sections is what a restore reads: a backup.Sections, or a test's.
+type sections interface {
+	Next() (backup.Section, io.Reader, error)
+}
+
+func restoreSections(secs sections, log io.Writer, contentDir string, stop func(i int) bool) error {
 	parent := filepath.Dir(contentDir)
 	lock, err := os.OpenFile(filepath.Join(parent, restoreLock), os.O_RDONLY|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600)
 	if err != nil {
