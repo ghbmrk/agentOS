@@ -1236,10 +1236,12 @@ def _same_binding(sf, df, text, b, h):
                for q in set(QUALIFIER.findall(_uncommented(text, False))))
 
 
-def _package_reads(rel, commit):
-    """(names Parallel, module import paths) of broker/<rel>/'s .go files at commit, or None when a file
-    or an import spec is not read."""
+def _package_reads(rel, commit, tests=True):
+    """(names Parallel, module import paths) of broker/<rel>/'s .go files at commit, its _test.go files
+    left out unless tests, or None when a file or an import spec is not read."""
     files = _go_files(rel, commit)
+    if files is not None and not tests:
+        files = {p: t for p, t in files.items() if not is_test(p)}
     if files is None or any(NOT_GO_SPACE.search(t) for t in files.values()):
         return None
     facts = [_facts(p, t) for p, t in files.items()]
@@ -1251,13 +1253,15 @@ def _package_reads(rel, commit):
 def _parallel(pkg, commit, module, cache):
     """Whether a test of broker/<pkg>/ may call Parallel: the word in a .go file of it (test or not) or of
     a package of this module it imports, transitively; True when one is not read (L3 and Security on
-    #6421: a helper may call t.Parallel())."""
+    #6421: a helper may call t.Parallel()). An imported package's own _test.go files, and what only they
+    import, are not built into pkg's test binary, so they are not read (#6372: journal's model_test.go
+    made every cmd/agentosd test a change)."""
     seen, todo = {pkg}, [pkg]
     while todo:
         rel = todo.pop()
-        if (rel, commit) not in cache:
-            cache[(rel, commit)] = _package_reads(rel, commit)
-        got = cache[(rel, commit)]
+        if (rel, commit, rel == pkg) not in cache:
+            cache[(rel, commit, rel == pkg)] = _package_reads(rel, commit, tests=rel == pkg)
+        got = cache[(rel, commit, rel == pkg)]
         if got is None or got[0]:
             return True
         for path in got[1]:
