@@ -343,39 +343,35 @@ func byIDFindings(t testing.TB, fset *token.FileSet, pkg *types.Package, files [
 		}
 		return false
 	}
-	// A package interface's method is a resolver when a resolver method
-	// of the same name implements it, so a call through the interface
-	// counts too. (An interface of another package names no table: its
-	// implementations here are this package's own methods, which the
-	// value rule below sees when one is taken as a value; a conversion of
-	// a resolver's receiver to such an interface is not tracked.)
-	var ifaces []*types.Named
-	for _, n := range pkg.Scope().Names() {
-		if tn, ok := pkg.Scope().Lookup(n).(*types.TypeName); ok {
-			if nt, ok := tn.Type().(*types.Named); ok && types.IsInterface(nt) {
-				ifaces = append(ifaces, nt)
-			}
+	// An interface method the package names (its own interface's or
+	// another package's) is a resolver when a resolver method of the same
+	// name implements it, so a call through the interface counts too.
+	var ifaceMethods []*types.Func
+	seen := map[*types.Func]bool{}
+	for _, o := range info.Uses {
+		fn, ok := o.(*types.Func)
+		if !ok || seen[fn] || fn.Signature().Recv() == nil || !types.IsInterface(fn.Signature().Recv().Type()) {
+			continue
 		}
+		seen[fn] = true
+		ifaceMethods = append(ifaceMethods, fn)
 	}
 	resolvers := map[types.Object]bool{}
 	for grew := true; grew; {
 		grew = false
-		for _, it := range ifaces {
-			iface := it.Underlying().(*types.Interface)
-			for i := range iface.NumMethods() {
-				im := iface.Method(i)
-				if resolvers[im] {
+		for _, im := range ifaceMethods {
+			if resolvers[im] {
+				continue
+			}
+			iface := im.Signature().Recv().Type().Underlying().(*types.Interface)
+			for g := range resolvers {
+				fn, ok := g.(*types.Func)
+				if !ok || fn.Name() != im.Name() || fn.Signature().Recv() == nil {
 					continue
 				}
-				for g := range resolvers {
-					fn, ok := g.(*types.Func)
-					if !ok || fn.Name() != im.Name() || fn.Signature().Recv() == nil {
-						continue
-					}
-					if rt := fn.Signature().Recv().Type(); types.Implements(rt, iface) || types.Implements(types.NewPointer(rt), iface) {
-						resolvers[im], grew = true, true
-						break
-					}
+				if rt := fn.Signature().Recv().Type(); types.Implements(rt, iface) || types.Implements(types.NewPointer(rt), iface) {
+					resolvers[im], grew = true, true
+					break
 				}
 			}
 		}
@@ -624,6 +620,7 @@ func TestLockChecksCatchPlantedEvasions(t *testing.T) {
 		{"plantOtherType", "type plantReg struct{ m *Manager }\nfunc (r plantReg) find(id string) *machine { return r.m.machines[id] }\nfunc plantOtherType(r plantReg, mc *machine) { _ = r.find(mc.ID) }", byIDFindings},
 		{"plantVarResolver", "var plantFind = func(m *Manager, id string) *machine { return m.machines[id] }\nfunc plantVarResolver(m *Manager, mc *machine) { _ = plantFind(m, mc.ID) }", byIDFindings},
 		{"plantViaInterface", "type plantFinder interface{ find(string) *machine }\ntype plantReg struct{ m *Manager }\nfunc (r plantReg) find(id string) *machine { return r.m.machines[id] }\nfunc plantViaInterface(m *Manager, mc *machine) { var f plantFinder = plantReg{m}; _ = f.find(mc.ID) }", byIDFindings},
+		{"plantViaAnonInterface", "type plantReg struct{ m *Manager }\nfunc (r plantReg) Find(id string) *machine { return r.m.machines[id] }\nfunc plantViaAnonInterface(m *Manager, mc *machine) { var f interface{ Find(string) *machine } = plantReg{m}; _ = f.Find(mc.ID) }", byIDFindings},
 		{"plantNoIDResolver", "func (m *Manager) plantFirst() *machine { for _, x := range m.machines { return x }; return nil }\nfunc plantNoIDResolver(m *Manager, mc *machine) { _ = m.plantFirst() }", byIDFindings},
 		// The table other than by an index (Security 7109348060 1b).
 		{"plantTableRange", "func plantTableRange(m *Manager, mc *machine) { for id, x := range m.machines { if id == mc.ID { x.State = Stopped } } }", byIDFindings},
