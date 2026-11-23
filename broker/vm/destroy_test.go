@@ -876,7 +876,7 @@ func TestRES2CreateFailureTailLeavesASameIDSuccessorAlone(t *testing.T) {
 	e := newEnv(t, 4096)
 	ran := false
 	var succErr error
-	createTailGap = func(id string) {
+	e.m.createTailGap = func(id string) {
 		if ran || id != "a1" {
 			return
 		}
@@ -889,7 +889,6 @@ func TestRES2CreateFailureTailLeavesASameIDSuccessorAlone(t *testing.T) {
 		}
 		_, succErr = e.m.Create(bg, id, Spec{Image: "base", Class: admission.Experiment, MemMB: 500})
 	}
-	t.Cleanup(func() { createTailGap = func(string) {} })
 	e.rt.failNext = errors.New("start fails")
 	if _, err := e.m.Create(bg, "a1", Spec{Image: "base", Class: admission.Experiment, MemMB: 500}); err == nil {
 		t.Fatal("create with a failing start succeeded")
