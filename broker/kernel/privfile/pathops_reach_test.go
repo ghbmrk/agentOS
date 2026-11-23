@@ -169,6 +169,11 @@ func TestRootSideLintReach(t *testing.T) {
 		// The refusal names the link's template and the types a link may name (#6033 item 3).
 		"an instance linked to another template, named": {etc + "multi-user.target.wants/agentos-y@1.service", "../agentos-z@.service", "or to its template ../agentos-y@.service"},
 		"a link of a type no link may name":             {etc + "local-fs.target.wants/agentos-y.automount", "../agentos-y.automount", "a link may name only a .path, .service, .socket, .swap, .target, .timer or .mount unit"},
+		// A non-unit has no template to be told of (#6504 item 2).
+		"a linked non-unit of an instance's form": {etc + "agentos-y@1.conf", "../agentos-y@.conf", "other than a unit linked to ../agentos-y@1.conf or an instance to ../<its template>"},
+		// A dependency entry refused for another reason than its type
+		// keeps the full step, naming its own template (#6504 item 3).
+		"an entry linked to another instance": {etc + "multi-user.target.wants/agentos-y@1.service", "../agentos-z@1.service", "make the entry a link to ../agentos-y@1.service or ../agentos-y@.service, ship"},
 		// Each merge holding a link answers it: camnode builds common with
 		// cm4 and common with qemu, never all three (#6033 item 2).
 		"a board link only another board answers":       {camQemu + "etc/systemd/system/multi-user.target.wants/debug-shell.service", "../debug-shell.service", "no file in the image built from image/camnode/external/board/common/overlay and image/camnode/external/board/qemu/overlay"},
@@ -220,8 +225,18 @@ func TestRootSideLintReach(t *testing.T) {
 			}
 			// A dependency entry is started by name: a file in its place
 			// is no fix, so its refusal never says to ship one (#6493 UX 1).
-			if dep := isDependencyDir(path.Base(path.Dir(c.link))); dep != strings.HasSuffix(err.Error(), "; "+dependencyStep) || dep && strings.Contains(err.Error(), "ship the file itself") {
+			// An entry of a type no link may name stays refused whatever
+			// it names, so its only step is to drop it (#6504 item 3).
+			step := dependencyStep(path.Base(c.link), false)
+			if dep := isDependencyDir(path.Base(path.Dir(c.link))); dep != strings.HasSuffix(err.Error(), "; "+step) || dep && strings.Contains(err.Error(), "ship the file itself") {
 				t.Fatalf("got %v, want the dependency step exactly when %s is a dependency entry", err, c.link)
+			}
+			if !linkTypes[path.Ext(c.link)] && (strings.Contains(err.Error(), "make the entry a link") || strings.Contains(err.Error(), "ship that unit")) {
+				t.Fatalf("got %v, want %s, of a type no link may name, told only to drop the entry", err, c.link)
+			}
+			// The template wording is for a unit's instance only (#6504 item 2).
+			if !linkTypes[path.Ext(c.link)] && strings.Contains(err.Error(), "its template ../") {
+				t.Fatalf("got %v, want no template named for %s, which is no unit", err, c.link)
 			}
 		})
 	}
@@ -235,11 +250,48 @@ func TestRootSideLintReach(t *testing.T) {
 			files[camCm4+"etc/systemd/system/debug-shell.service"] = "[Service]\nExecStart=/bin/true\n"
 			entry := camQemu + "etc/systemd/system/" + dep + "/debug-shell.service"
 			files[entry] = "[Service]\nExecStart=/bin/true\n"
-			if _, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), entry+": a regular file in a dependency directory") || !strings.HasSuffix(err.Error(), dependencyStep) {
-				t.Fatalf("got %v, want %s refused as a file in a dependency directory", err, entry)
+			if _, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), entry+": a regular file in a dependency directory") || !strings.HasSuffix(err.Error(), "; replace the file with a link to ../debug-shell.service, ship that unit in an overlay of every build holding the entry (or move the entry to the overlay that ships it), or drop the entry") {
+				t.Fatalf("got %v, want %s refused as a file in a dependency directory, told to replace it with a link", err, entry)
 			}
 		})
 	}
+	// A regular file of a type no link may name stays refused as a link
+	// too, so its only step is to drop it; an instance's names its
+	// template (#6504 item 3).
+	for entry, want := range map[string]string{
+		"multi-user.target.wants/agentos-y.automount": "; drop the entry",
+		"multi-user.target.wants/agentos-y@1.service": "; replace the file with a link to ../agentos-y@1.service or ../agentos-y@.service, ship",
+	} {
+		t.Run("refuses a regular file "+entry, func(t *testing.T) {
+			files := reachBase()
+			files[camQemu+"etc/systemd/system/"+entry] = "[Service]\nExecStart=/bin/true\n"
+			_, err := rootBinaries(fakeRepo(t, files))
+			if err == nil || !strings.Contains(err.Error(), "a regular file in a dependency directory") || !strings.Contains(err.Error(), want) || want == "; drop the entry" && !strings.HasSuffix(err.Error(), want) {
+				t.Fatalf("got %v, want %s refused with %q", err, entry, want)
+			}
+		})
+	}
+	// Every unit-type list is a subset of systemd's unit types, so none
+	// can drift from it (#6504 item 5).
+	t.Run("unit-type lists are subsets of allUnitTypes", func(t *testing.T) {
+		for name, m := range map[string]map[string]bool{"execUnits": execUnits, "unitTypes": unitTypes, "linkTypes": linkTypes} {
+			for ext := range m {
+				if !allUnitTypes[ext] {
+					t.Errorf("%s holds %s, which is no unit type in allUnitTypes", name, ext)
+				}
+			}
+		}
+		for ext := range unitTypes {
+			if !linkTypes[ext] {
+				t.Errorf("unitTypes holds %s, which linkTypes lacks", ext)
+			}
+		}
+		for ext := range linkTypes {
+			if !strings.Contains(linkTypeList, ext) {
+				t.Errorf("linkTypeList does not name %s", ext)
+			}
+		}
+	})
 	t.Run("reads a regular file in a directory of no unit's dependencies", func(t *testing.T) {
 		files := reachBase()
 		files[ext+"etc/agentos/x.wants/notes"] = "plain\n"

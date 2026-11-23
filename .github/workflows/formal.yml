@@ -2,8 +2,8 @@ name: formal
 # FRM-key (#2936): model-checks KeyVerdict.tla and HoldRule.tla in broker/kernel/formal/ with
 # TLC, fails on any invariant or property violation, fails when the committed vectors differ
 # from a fresh run, and replays every model state (not just the committed sample) through
-# broker/kernel/key and the kernel. tla2tools.jar is the v1.7.4 release; vectors.py refuses
-# any other build.
+# broker/kernel/key and the kernel. tla2tools.jar is the v1.7.4 release, fetched through
+# tools/pins.py from its pin in tools/fetch.pins; vectors.py refuses any other build.
 on:
   pull_request:
     paths:
@@ -11,6 +11,8 @@ on:
       - 'broker/kernel/**'
       - 'broker/clerk/**'
       - '.github/workflows/formal.yml'
+      - 'tools/pins.py'
+      - 'tools/fetch.pins'
   push:
     branches: [main]
     paths:
@@ -18,6 +20,8 @@ on:
       - 'broker/kernel/**'
       - 'broker/clerk/**'
       - '.github/workflows/formal.yml'
+      - 'tools/pins.py'
+      - 'tools/fetch.pins'
 # CI-cancel-superseded (#5345, #5348): a PR's first-attempt run cancels that PR's older first
 # attempts, so a superseded head never holds the queue. A first-attempt push to main cancels main's
 # older one (CI-main-supersede, #6394), so main's tip always finishes. A rerun (attempt 2 or later) and
@@ -49,7 +53,7 @@ jobs:
       - name: TLC (tla2tools v1.7.4)
         run: |
           java -version
-          curl -sSfL -o "$RUNNER_TEMP/tla2tools.jar" https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+          python3 -I tools/pins.py fetch tools/fetch.pins tla2tools.jar "$RUNNER_TEMP/tla2tools.jar"
       - name: Model-check, and compare the committed vectors
         run: python3 broker/kernel/formal/vectors.py --jar "$RUNNER_TEMP/tla2tools.jar" --check --full "$RUNNER_TEMP/formal"
       - name: Replay every model state through the key library and the kernel

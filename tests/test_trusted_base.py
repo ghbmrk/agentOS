@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -1523,14 +1524,24 @@ class BodyIsNotRead(unittest.TestCase):
 
     # REQ: CI-trusted-base-records
     def test_check_takes_no_body(self):
+        # A deprecated --body is accepted for reruns of pre-#6491 runs, and never opened or passed on:
+        # run_check is called exactly as without it, and a path that does not exist is not an error.
         with tempfile.TemporaryDirectory() as d:
             body = os.path.join(d, "body.txt")
             pathlib.Path(body).write_text("Trusted-core: D-7\nCeiling: D-7\n")
-            err = io.StringIO()
-            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as e:
-                tb.main(["check", "--base-tree", d, "--head-tree", d, "--body", body, "--pr", str(PR)])
-            self.assertEqual(e.exception.code, 2)
-            self.assertIn("unrecognized arguments: --body", err.getvalue())
+            calls = []
+            with mock.patch.object(tb, "run_check", side_effect=lambda *a, **k: calls.append((a, k)) or ([], "")):
+                for extra in ([], ["--body", body], ["--body", os.path.join(d, "missing.txt")]):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        rc = tb.main(["check", "--base-tree", d, "--head-tree", d, "--pr", str(PR)] + extra)
+                    self.assertEqual(rc, 0, extra)
+            self.assertEqual(calls, [((d, d), {"pr": PR})] * 3)
+            for cmd in (["measure"], ["claims", "--base-tree", d, "--head-tree", d, "--repo", d]):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as e:
+                    tb.main(cmd + ["--body", body])
+                self.assertEqual(e.exception.code, 2, cmd)
+                self.assertIn("unrecognized arguments: --body", err.getvalue())
         self.assertNotIn("body", inspect.signature(tb.run_check).parameters)
         for name in ("compare_core", "compare_ceilings"):
             self.assertNotIn("body", inspect.signature(getattr(tb, name)).parameters, name)

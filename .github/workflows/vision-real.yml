@@ -17,6 +17,7 @@ on:
       - broker/go.sum
       - broker/vendor/github.com/yalue/**
       - .github/workflows/vision-real.yml
+      - tools/pins.py
   schedule:
     - cron: "17 4 * * *"
   workflow_dispatch:
@@ -52,25 +53,17 @@ jobs:
       - name: Download the pinned runtime and models, check each hash
         run: |
           pins=broker/cmd/agentos-vision/models.pins
-          pin() { awk -v f="$1" -v n="$2" '$1 !~ /^#/ && $2 == f {print $n}' "$pins"; }
-          check() { # file, pinned name
-            got=$(sha256sum "$1" | cut -d' ' -f1); want=$(pin "$2" 1)
-            echo "$2: sha256 $got (pinned: $want)"
-            [ -n "$want" ] && [ "$got" = "$want" ] || { echo "::error file=$pins::$2 hashes to $got, pinned $want"; exit 1; }
-          }
           d="$RUNNER_TEMP/vision-models"
           mkdir -p "$d" "$RUNNER_TEMP/ort"
-          tgz=onnxruntime-1.29.0-cp312-cp312-manylinux_2_28_x86_64.whl
-          curl -fsSL --retry 3 --retry-delay 5 -o "$RUNNER_TEMP/$tgz" "$(pin $tgz 3)"
-          check "$RUNNER_TEMP/$tgz" $tgz
-          python3 -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extract("onnxruntime/capi/libonnxruntime.so.1.29.0", sys.argv[2])' "$RUNNER_TEMP/$tgz" "$RUNNER_TEMP/ort"
+          whl=onnxruntime-1.29.0-cp312-cp312-manylinux_2_28_x86_64.whl
+          python3 -I tools/pins.py fetch "$pins" $whl "$RUNNER_TEMP/$whl"
+          python3 -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extract("onnxruntime/capi/libonnxruntime.so.1.29.0", sys.argv[2])' "$RUNNER_TEMP/$whl" "$RUNNER_TEMP/ort"
           lib=libonnxruntime.so.1.29.0
           cp "$RUNNER_TEMP/ort/onnxruntime/capi/$lib" "$d/$lib"
-          check "$d/$lib" $lib
+          python3 -I tools/pins.py verify "$pins" $lib "$d/$lib"
           for m in yolox_tiny.onnx face_detection_yunet_2023mar.onnx face_recognition_sface_2021dec.onnx \
               yolo-v9-t-416-license-plates-end2end.onnx cct_xs_v2_global.onnx yamnet.onnx; do
-            curl -fsSL --retry 3 --retry-delay 5 -o "$d/$m" "$(pin $m 3)"
-            check "$d/$m" $m
+            python3 -I tools/pins.py fetch "$pins" $m "$d/$m"
           done
           echo "AGENTOS_VISION_MODELS=$d" >> "$GITHUB_ENV"
       - name: Download the pinned scene set, check its hashes

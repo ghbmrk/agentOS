@@ -1673,7 +1673,7 @@ class KeyringSpikesTest(unittest.TestCase):
             "KernelModulesInitrdExclude", "Keymap", "Locale", "ManifestFormat", "Mirror", "Packages", "Release",
             "RemoveFiles", "RepartDirectories", "Repositories", "RootPassword", "Seed", "ShimBootloader",
             "SplitArtifacts", "Timezone", "UnifiedKernelImages", "WithDocs"}
-    SNAPSHOT = "https://snapshot.debian.org/archive/debian/20261001T000000Z/"
+    SNAPSHOT = "https://snapshot.debian.org/archive/debian/20261121T160000Z/"
     PINNED = {
         "image/mkosi": {"InitrdInclude": ["initrd/"], "Mirror": [SNAPSHOT], "Repositories": ["main"],
                         "Environment": ["SYSTEMD_REPART_MKFS_OPTIONS_EXT4=-Oquota,project"]},
