@@ -92,8 +92,8 @@ if [ "$MODE" = stage ]; then
 fi
 
 if [ "$MODE" = build ]; then
-	SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
-	VERSION=${VERSION:-$(TZ=UTC git log -1 --date=format-local:%Y%m%d.%H%M%S --format=%cd)}
+	SOURCE_DATE_EPOCH=$(git log -1 --format=%ct "$COMMIT")
+	VERSION=${VERSION:-$(TZ=UTC git log -1 --date=format-local:%Y%m%d.%H%M%S --format=%cd "$COMMIT")}
 	# W and every directory above it are root's (mktemp makes W 0700 in /var/lib): no non-root process can
 	# rename, replace or write anything the build reads from here on, the commit, the tar or what the steps
 	# write, so the tar hashed is the tar unpacked and the tree checked is the tree mkosi reads (#6417).
