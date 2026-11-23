@@ -85,7 +85,7 @@ func TestBeginRoutesASealedBoxToTheClaim(t *testing.T) {
 	if b.resets != 1 {
 		t.Fatalf("an unlatched start resets the vault first: %d", b.resets)
 	}
-	tok, err := fb.Claim.Claim(code)
+	tok, err := fb.Claim.Claim(code, "")
 	if err != nil || !fb.Claim.Claimant(tok) {
 		t.Fatalf("claim %v", err)
 	}
@@ -133,7 +133,7 @@ func TestBeginTakesTheDownloadRouteOnlyWhenConfigured(t *testing.T) {
 	if fb.Route != RouteReinstall || fb.Claim == nil || fb.Card.Hold() != ErrReinstall || fb.Card.Display() != nil {
 		t.Fatalf("route %q", fb.Route)
 	}
-	if _, err := fb.Claim.Claim("CANA-RYCL-AXMC-KDE2"); !errors.Is(err, claim.ErrAlreadyClaimed) {
+	if _, err := fb.Claim.Claim("CANA-RYCL-AXMC-KDE2", ""); !errors.Is(err, claim.ErrAlreadyClaimed) {
 		t.Fatalf("claim on a box with no claim state: %v", err)
 	}
 	if l, _ := b.latch.Load(); b.resets != 0 || b.shown.SetupSecret != "" || len(l) != 0 {
@@ -151,7 +151,7 @@ func TestBeginRoutesALostClaimStateToReinstall(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := fb.Claim.Claim(code); err != nil {
+		if _, err := fb.Claim.Claim(code, ""); err != nil {
 			t.Fatal(err)
 		}
 		if confirm {
@@ -175,7 +175,7 @@ func TestBeginRoutesALostClaimStateToReinstall(t *testing.T) {
 		if st := fb.Claim.Status(); !st.Claimed {
 			t.Fatalf("%s: status %+v", name, st)
 		}
-		if _, err := fb.Claim.Claim(code); !errors.Is(err, claim.ErrAlreadyClaimed) {
+		if _, err := fb.Claim.Claim(code, ""); !errors.Is(err, claim.ErrAlreadyClaimed) {
 			t.Fatalf("%s: claim %v", name, err)
 		}
 		if fb.Claim.Claimant(strings.Repeat("a", 64)) {
@@ -189,7 +189,7 @@ func TestBeginRoutesALostClaimStateToReinstall(t *testing.T) {
 func TestTheSealedMarkerSurvivesTheConfirm(t *testing.T) {
 	b, code := sealedBox(t)
 	fb, _ := b.begin(t)
-	fb.Claim.Claim(code)
+	fb.Claim.Claim(code, "")
 	b.confirm(t, fb.Card.Display())
 	raw, _ := b.latch.Load()
 	if !strings.Contains(string(raw), `"card_confirmed":true`) || !strings.Contains(string(raw), `"preloaded":true`) {
@@ -223,7 +223,7 @@ func TestClaimedCardDisplay(t *testing.T) {
 	if cc.Display() != nil {
 		t.Fatal("display before the claim")
 	}
-	cc.Claim(code)
+	cc.Claim(code, "")
 	if cc.Display() == nil || cc.Display() != cc.Card().Display() {
 		t.Fatal("display after the claim")
 	}

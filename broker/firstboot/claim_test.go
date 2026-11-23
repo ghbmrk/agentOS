@@ -101,7 +101,7 @@ func TestNoSecretBeforeClaim(t *testing.T) {
 	}
 	bad := []byte(code)
 	bad[0] ^= 1
-	if _, err := cb.step.Claim(string(bad)); !errors.Is(err, claim.ErrWrongCode) {
+	if _, err := cb.step.Claim(string(bad), ""); !errors.Is(err, claim.ErrWrongCode) {
 		t.Fatalf("wrong code: %v", err)
 	}
 	cb = startPreloaded(t, dir, "boot-2", rnd)
@@ -126,7 +126,7 @@ func TestNoSecretBeforeClaim(t *testing.T) {
 		t.Fatalf("canary before claim: %v %v %v", found, skipped, err)
 	}
 
-	tok, err := cb.step.Claim(code)
+	tok, err := cb.step.Claim(code, "")
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestNoSecretBeforeClaim(t *testing.T) {
 	// A second phone, and a restart, find the box claimed; the card step
 	// comes back on its own.
 	again := startPreloaded(t, dir, "boot-3", &canaryRand{})
-	if _, err := again.step.Claim(code); !errors.Is(err, claim.ErrAlreadyClaimed) {
+	if _, err := again.step.Claim(code, ""); !errors.Is(err, claim.ErrAlreadyClaimed) {
 		t.Fatalf("second claim: %v", err)
 	}
 	if again.step.Card() == nil || !again.step.Claimant(tok) {

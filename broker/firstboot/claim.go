@@ -59,12 +59,13 @@ func (c *ClaimedCard) card() (*CardStep, error) {
 // Status is the claim screen's state.
 func (c *ClaimedCard) Status() claim.Status { return c.cl.Status() }
 
-// Claim presents a sticker code. On the claim it returns the claiming
-// phone's token and starts the card step. If the card step cannot start,
-// the box is claimed all the same and the token is returned with the
-// error: Card and Hold retry it.
-func (c *ClaimedCard) Claim(code string) (string, error) {
-	tok, err := c.cl.Try(code)
+// Claim presents a sticker code from the phone whose page nonce is phone
+// (claim.TryFrom). On the claim it returns the claiming phone's token and
+// starts the card step. If the card step cannot start, the box is claimed
+// all the same and the token is returned with the error: Card and Hold
+// retry it.
+func (c *ClaimedCard) Claim(code, phone string) (string, error) {
+	tok, err := c.cl.TryFrom(code, phone)
 	if err != nil {
 		return "", err
 	}
@@ -77,6 +78,9 @@ func (c *ClaimedCard) Claim(code string) (string, error) {
 // Claimant reports whether tok names the phone that claimed the box: only
 // it is shown the Owner Card and continues setup.
 func (c *ClaimedCard) Claimant(tok string) bool { return c.cl.Claimant(tok) }
+
+// Reclaims reports whether phone may claim again (claim.Reclaims).
+func (c *ClaimedCard) Reclaims(phone string) bool { return c.cl.Reclaims(phone) }
 
 // Card is the card step: nil before the claim.
 func (c *ClaimedCard) Card() *CardStep {

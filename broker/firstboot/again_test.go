@@ -100,7 +100,7 @@ func TestClaimedCardAgain(t *testing.T) {
 	if err := fb.Again(); !errors.Is(err, ErrUnclaimed) {
 		t.Fatalf("before the claim: %v", err)
 	}
-	if _, err := fb.Claim.Claim(code); err != nil {
+	if _, err := fb.Claim.Claim(code, ""); err != nil {
 		t.Fatal(err)
 	}
 	first := fb.Card.Display()
@@ -172,7 +172,7 @@ func TestRetryRerunAfterAFailedReset(t *testing.T) {
 	if retried, err := RetryRerun(fb.Card); retried || err != nil {
 		t.Fatalf("before the claim: retried %v, %v", retried, err)
 	}
-	if _, err := fb.Claim.Claim(code); err != nil {
+	if _, err := fb.Claim.Claim(code, ""); err != nil {
 		t.Fatal(err)
 	}
 	b.confirm(t, fb.Card.Display())

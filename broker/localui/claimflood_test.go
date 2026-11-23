@@ -22,7 +22,8 @@ type slowClaim struct {
 }
 
 func (c *slowClaim) Status() claim.Status { return claim.Status{TriesLeft: 5} }
-func (c *slowClaim) Claim(string) (string, error) {
+func (c *slowClaim) Reclaims(string) bool { return false }
+func (c *slowClaim) Claim(string, string) (string, error) {
 	c.calls.Add(1)
 	<-c.gate
 	return "", claim.ErrWrongCode
