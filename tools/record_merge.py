@@ -51,6 +51,7 @@ RECORD = "MUTANTS-EQUIVALENT"  # tools/mutgate.py's RECORD: one JSON entry per l
 # whole (read_list): LF text, merged by git as text, never by the driver and never read as same by premerge.
 CLASSES = {"broker/core/core.txt": "list", "tools/trusted_core.txt": "list", "tools/ceilings.txt": "list",
            "tools/trusted_base_parsers.txt": "list", "tools/trusted_base_reasons.txt": "list",
+           "tools/word_budget_reasons.txt": "list",
            "tools/old_core.txt": "list", "tools/assumptions_legacy_ids.txt": "list",
            "tools/brief_acceptance_baseline.txt": "list", "tools/hostcheck_hw8.json": "list",
            "ASSUMPTIONS.md": "row", RECORD: "entry", "*_allow.txt": "line", "*.allow": "line", "allow*.txt": "line"}

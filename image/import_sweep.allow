@@ -129,7 +129,7 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 # spelt), or "*" where they are not counted (#5341). The SHA-256 keys an entry to the package version
 # whose source was read: an update that keeps the counts but changes where a name comes from still fails
 # (#5861). Each file matches one entry; read_allow refuses a malformed, empty or repeated entry.
-# AES-GCM-SIV has no OID or NID in OpenSSL 3.5.7, so it is selected only by one of the names
+# AES-GCM-SIV has no OID or NID in OpenSSL 3.5.9, so it is selected only by one of the names
 # AES-128-GCM-SIV, AES-192-GCM-SIV or AES-256-GCM-SIV (or a MAC or KDF "cipher" parameter, which has to
 # spell one; CMAC, GMAC, KBKDF and CTR-DRBG refuse it by mode, and KRB5KDF's callers are counted).
 # EVP_get_cipherbyname cannot return it at all: it returns only the legacy method table's ciphers
@@ -164,11 +164,11 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 
 # OpenSSL's loader_attic engine: both fetches are of the fixed name "RC4" (crypto/pem/pvkfmt.c, built
 # into it); nothing on the box loads engines.
-/usr/lib/x86_64-linux-gnu/engines-3/loader_attic.so sha256=2c99266b31bfc02d011955db1600bd36146554cd6970d3cbfe46011e11014c83 EVP_CIPHER_fetch=2
+/usr/lib/x86_64-linux-gnu/engines-3/loader_attic.so sha256=6f3f7a2b43f973bb6ef86f4e52fbecffd36702bd7c8938e86f8e55edde88050c EVP_CIPHER_fetch=2
 # The legacy provider: its one fetch and one EVP_get_cipherbyname are providers/common/provider_util.c
 # ossl_prov_cipher_load_from_params, for an algorithm's "cipher" parameter; none of legacy's algorithms
 # (old digests and ciphers, PBKDF1, PVKKDF) takes one.
-/usr/lib/x86_64-linux-gnu/ossl-modules/legacy.so sha256=533bb6758a00a87a2d7835bcd3ebca58e0def2c1096ec582dea180adceeb7404 EVP_CIPHER_fetch=1 EVP_get_cipherbyname=1
+/usr/lib/x86_64-linux-gnu/ossl-modules/legacy.so sha256=47af7436924d44b49719792780eaee3c472df720908cb969f00c940c219cba45 EVP_CIPHER_fetch=1 EVP_get_cipherbyname=1
 
 # The openclaw guest's node (nodejs.org v24.22.2) links its own OpenSSL statically. That copy is not
 # libssl3t64 and is outside these records; #5853 checks it against the same advisories.
