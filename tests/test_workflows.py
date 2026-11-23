@@ -910,6 +910,25 @@ def head_guard_problems(text):
     return []
 
 
+# CI-SOAK-cap (#1649): the most runners each soak.yml matrix may hold at once.
+SOAK_CAPS = {"fuzz": 3, "soak": 1}
+
+
+def soak_cap_problems(text):
+    """Return why a soak.yml matrix can run wider than SOAK_CAPS; empty when none can."""
+    problems = []
+    for job, cap in SOAK_CAPS.items():
+        if "\n  %s:\n" % job not in text:
+            problems.append("no %s job" % job)
+            continue
+        body = re.split(r"\n  (?=\S)", text.split("\n  %s:\n" % job, 1)[1], maxsplit=1)[0]
+        strategy = re.search(r"(?m)^    strategy:\n((?:(?:      .*)?\n)*)", body + "\n")
+        caps = re.findall(r"(?m)^      max-parallel:\s*(\S+)", strategy.group(1)) if strategy else []
+        if len(caps) != 1 or not re.fullmatch(r"[1-9]\d*", caps[0]) or int(caps[0]) > cap:
+            problems.append("%s: max-parallel %r, must be one integer of at most %d" % (job, caps, cap))
+    return problems
+
+
 def step_script(text, job, step):
     """The run: script of the step named `step` in `job` of a workflow, dedented to column 0."""
     body = text.split("\n  %s:\n" % job, 1)[1]
@@ -1741,6 +1760,24 @@ class WorkflowTest(unittest.TestCase):
         text = (WORKFLOWS / "mutgate.yml").read_text()
         block = text[text.index("\n  mutants:\n"):text.index("\n  mutgate:\n")]
         self.assertRegex(block, r"\n    strategy:\n(?:      .*\n)*?      max-parallel: 3\n")
+
+    def test_soak_matrices_hold_at_most_their_runner_caps(self):
+        # CI-SOAK-cap-l1 (#1665, L3 of #1649): soak.yml runs for hours a day, so each matrix keeps
+        # a max-parallel cap at or under CI-SOAK-cap's (fuzz 3, soak 1); an edit that drops a cap
+        # or raises it back toward the 8-runner original fails here. Lower caps (#6570) pass.
+        text = (WORKFLOWS / "soak.yml").read_text()
+        self.assertEqual(soak_cap_problems(text), [])
+        for job, cap in (("fuzz", 3), ("soak", 1)):
+            block = text[text.index("\n  %s:\n" % job):]
+            at = block.index("      max-parallel: ")
+            line = block[at:block.index("\n", at + 1)]
+            for bad in ("      max-parallel: %d" % (cap + 1), "      max-parallel: 8",
+                        "      max-parallel: ${{ inputs.n }}", "      # max-parallel: %d" % cap):
+                with self.subTest(job=job, bad=bad):
+                    self.assertNotEqual(soak_cap_problems(text.replace(line, bad, 1)), [])
+        for missing in ("\n  fuzz:\n", "\n  soak:\n"):
+            with self.subTest(missing=missing):
+                self.assertNotEqual(soak_cap_problems(text.replace(missing, "\n  renamed:\n", 1)), [])
 
     def test_steps_finds_steps(self):
         sample = "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          x: 1\n      - run: echo\n"
