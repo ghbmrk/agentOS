@@ -343,10 +343,10 @@ func TestMoreRefusesAnExpiredRequestItself(t *testing.T) {
 	r.inbox()
 	r.ch.mu.Lock()
 	exp := r.ch.open[id].expires
-	before := r.ch.moreLocked(id, 1, exp.Add(-time.Second))
-	at := r.ch.moreLocked(id, 1, exp)
+	before, _ := r.ch.moreLocked(id, 1, exp.Add(-time.Second))
+	at, fresh := r.ch.moreLocked(id, 1, exp)
 	r.ch.mu.Unlock()
-	if !strings.Contains(before, "items 1-2 of 2") || at != "No open request "+id+"." {
+	if !strings.Contains(before, "items 1-2 of 2") || at != "No open request "+id+"." || fresh {
 		t.Fatalf("before expiry %q, at expiry %q", before, at)
 	}
 }
@@ -412,7 +412,7 @@ func TestMoreWorstPageFitsWithTheLongestID(t *testing.T) {
 				r.ch.open[long] = req
 				var pages []string
 				for k := 1; k <= n; k++ {
-					p := r.ch.moreLocked(long, k, r.clock())
+					p, _ := r.ch.moreTextLocked(long, k, r.clock())
 					left := []int{}
 					for i := k - 1; i < n; i++ {
 						left = append(left, i)
@@ -611,5 +611,49 @@ func TestMoreShortLineKeepsTheUnverifiedStep(t *testing.T) {
 	r2.ch.Request([]Item{a, b}, 0)
 	if sms := r2.inbox(); strings.Contains(sms, "?.") || !strings.Contains(sms, "send it again? 2 ") {
 		t.Fatalf("request text: %q", sms)
+	}
+}
+
+// The Potency repro on #6625: with the default ReplyLimit and a locked
+// session, the owner pages every item of a 20-item long-target batch,
+// since each page's first send is free; a repeated page still counts,
+// so asking for pages again is held to ReplyLimit as before (CH-15).
+func TestMoreLockedOwnerReadsEveryItemWithinTheReplyLimit(t *testing.T) {
+	r := newRig(t, nil)
+	r.replyLimit = 0 // DefaultReplyLimit
+	r.ch = r.open()
+	var items []Item
+	for i := 1; i <= 20; i++ {
+		items = append(items, longItem(i, false))
+	}
+	id, _ := r.ch.Request(items, 0)
+	sms := r.inbox()
+	cmd, pages := "MORE "+id, 0
+	for ; cmd != ""; pages++ {
+		p := r.say(cmd)
+		if p == "" || pages > 20 {
+			t.Fatalf("%s after %d pages: %q", cmd, pages, p)
+		}
+		pageReplies(t, p, sms)
+		cmd = ""
+		if m := nextMoreRe.FindStringSubmatch(p); m != nil {
+			cmd = "MORE " + id + " " + m[2]
+		}
+	}
+	if pages != 20 {
+		t.Fatalf("read %d pages, want one per item", pages)
+	}
+	// Repeats count: DefaultReplyLimit of them are answered, no more.
+	var sent int
+	for k := 0; k < DefaultReplyLimit+3; k++ {
+		if r.say("MORE "+id) != "" {
+			sent++
+		}
+	}
+	if sent != DefaultReplyLimit {
+		t.Fatalf("repeated pages sent %d replies, want %d", sent, DefaultReplyLimit)
+	}
+	if d := r.decisions(); len(d) != 0 {
+		t.Fatalf("reading decided %v", d)
 	}
 }

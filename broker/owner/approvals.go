@@ -49,6 +49,9 @@ type request struct {
 	expires time.Time
 	wrong   int
 	done    []bool
+	// paged holds the first item of each MORE page already sent, so
+	// each page's first send is free of ReplyLimit (moreLocked).
+	paged map[int]bool
 }
 
 // Request opens an approval request for items and texts it to the owner.
@@ -404,10 +407,30 @@ func (c *Channel) localAsk(it Item) string {
 // item is reachable by paging. It is a function of the request alone, so
 // the same page reads the same while the request is unchanged; an
 // expired or closed request has no pages. Reading changes nothing.
-func (c *Channel) moreLocked(id string, from int, now time.Time) string {
+//
+// fresh reports a page of an open request not sent before: its send is
+// exempt from ReplyLimit, so a locked owner can read every item the box
+// texted them about (Potency on #6625). The exemption is bounded by the
+// box's own texts: at most one per item of a request it sent, to the
+// owner's number, over the request's life; a repeat counts as before.
+func (c *Channel) moreLocked(id string, from int, now time.Time) (page string, fresh bool) {
+	page, first := c.moreTextLocked(id, from, now)
+	if r := c.open[id]; r != nil && first > 0 && !r.paged[first] {
+		if r.paged == nil {
+			r.paged = map[int]bool{}
+		}
+		r.paged[first] = true
+		return page, true
+	}
+	return page, false
+}
+
+// moreTextLocked is moreLocked's page and the first item it shows (0 for
+// a reply that shows none).
+func (c *Channel) moreTextLocked(id string, from int, now time.Time) (string, int) {
 	r := c.open[id]
 	if r == nil || !now.Before(r.expires) {
-		return fmt.Sprintf("No open request %s.", id)
+		return fmt.Sprintf("No open request %s.", id), 0
 	}
 	if from < 1 {
 		from = 1
@@ -419,11 +442,11 @@ func (c *Channel) moreLocked(id string, from int, now time.Time) string {
 		}
 	}
 	if len(left) == 0 {
-		return fmt.Sprintf("%s has no undecided item from %d; it has %d. Reply MORE %s.", id, from, len(r.items), id)
+		return fmt.Sprintf("%s has no undecided item from %d; it has %d. Reply MORE %s.", id, from, len(r.items), id), 0
 	}
 	for shown := len(left); shown >= 1; shown-- {
 		if p := c.pageLocked(r, left, shown, lineFull); fits(p) {
-			return p
+			return p, left[0] + 1
 		}
 	}
 	// One item too long for its full line: the line gets shorter, never
@@ -433,10 +456,10 @@ func (c *Channel) moreLocked(id string, from int, now time.Time) string {
 	// should a field ever grow.
 	for _, lv := range []int{lineShort, lineLean} {
 		if p := c.pageLocked(r, left, 1, lv); fits(p) {
-			return p
+			return p, left[0] + 1
 		}
 	}
-	return c.pageLocked(r, left, 1, pageWiFi)
+	return c.pageLocked(r, left, 1, pageWiFi), left[0] + 1
 }
 
 // pageWiFi is moreLocked's last form: the page names its one item and
