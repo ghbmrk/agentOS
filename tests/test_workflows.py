@@ -933,6 +933,60 @@ def gate_runs(cancelled, result, packages):
     return eval(expr, {"__builtins__": {}}, {"cancelled": cancelled, "result": result, "packages": packages})
 
 
+# CI-apt-timeout (#6581): a stalled mirror held image's stage job in `apt-get update` to its 90-minute
+# timeout. Every apt-get call passes $APT_OPTS, which the workflow sets to these bounds.
+APT_OPTS = "-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+APT_CALL = re.compile(r"\bapt-get\b")
+APT_BOUNDED = re.compile(r"\bapt-get \$APT_OPTS ")
+APT_OTHER = re.compile(r"\b(?:apt|aptitude)\s+(?:-\S+\s+)*(?:update|install|upgrade|full-upgrade|dist-upgrade)\b")
+
+
+def apt_problems(text):
+    """Return each apt call in a workflow that can wait on a mirror without the APT_OPTS bounds; empty when none can.
+    A call is bounded when it reads `apt-get $APT_OPTS ` and the step's env (step, then job, then
+    workflow, as Actions resolves it) sets APT_OPTS to exactly APT_OPTS."""
+    import yaml
+    doc = yaml.safe_load(text) or {}
+    top = doc.get("env") or {}
+    out = []
+    for job, spec in (doc.get("jobs") or {}).items():
+        for n, step in enumerate(spec.get("steps") or []):
+            run = step.get("run") or ""
+            code = [l for l in run.splitlines() if l.strip() and not l.lstrip().startswith("#")]
+            calls = [l for l in code if APT_CALL.search(l) or APT_OTHER.search(l)]
+            if not calls:
+                continue
+            where = "%s step %d (%s)" % (job, n, step.get("name") or "unnamed")
+            env = {**top, **(spec.get("env") or {}), **(step.get("env") or {})}
+            if env.get("APT_OPTS") != APT_OPTS:
+                out.append("%s: APT_OPTS is %r, not the bounds" % (where, env.get("APT_OPTS")))
+            for l in calls:
+                if APT_OTHER.search(l) or len(APT_CALL.findall(l)) != len(APT_BOUNDED.findall(l)):
+                    out.append("%s: unbounded apt call: %s" % (where, l.strip()))
+    return out
+
+
+# image.yml's jobs that read build's release artifacts and run past a failed build (#1984). When build
+# was skipped or cancelled, no artifact exists, so their first step stops with that cause (#6581).
+BUILD_GUARD_JOBS = ("reproduce", "image-vulncheck")
+BUILD_GUARD_IF = "${{ needs.build.result == 'skipped' || needs.build.result == 'cancelled' }}"
+
+
+def build_guard_problems(text):
+    """Return each image.yml artifact consumer whose first step is not the build-result guard; empty when none."""
+    import yaml
+    jobs = (yaml.safe_load(text) or {}).get("jobs") or {}
+    out = []
+    for job in BUILD_GUARD_JOBS:
+        steps = (jobs.get(job) or {}).get("steps") or [{}]
+        first = steps[0]
+        run = first.get("run") or ""
+        if first.get("if") != BUILD_GUARD_IF or (first.get("env") or {}).get("RESULT") != "${{ needs.build.result }}" \
+                or not run.rstrip().endswith("exit 1") or "::error::" not in run:
+            out.append("%s does not stop first on a skipped or cancelled build" % job)
+    return out
+
+
 class WorkflowTest(unittest.TestCase):
     def test_a_pr_push_cancels_the_older_heads_runs(self):
         # CI-cancel-superseded (#5345): every PR-triggered workflow but premerge cancels a
@@ -1007,6 +1061,47 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(supersede_problems("premerge.yml", premerge), [])
         self.assertTrue(supersede_problems("premerge.yml", premerge.replace(
             "\njobs:\n", "\njobs:\n  x:\n    concurrency:\n      group: x\n      cancel-in-progress: true\n", 1)))
+
+    def test_every_apt_call_is_bounded(self):
+        for f in sorted(WORKFLOWS.glob("*.yml")):
+            with self.subTest(workflow=f.name):
+                self.assertEqual(apt_problems(f.read_text()), [])
+
+    def test_apt_check_catches_each_edit(self):
+        text = (WORKFLOWS / "image.yml").read_text()
+        self.assertIn("sudo apt-get $APT_OPTS update -q\n", text)
+        self.assertIn('  APT_OPTS: "%s"\n' % APT_OPTS, text)
+        mutants = {
+            "bare update": text.replace("sudo apt-get $APT_OPTS update -q\n", "sudo apt-get update -q\n", 1),
+            "bare install": text.replace("sudo apt-get $APT_OPTS install", "sudo apt-get install", 1),
+            "apt, not apt-get": text.replace("sudo apt-get $APT_OPTS update -q\n", "sudo apt update -q\n", 1),
+            "second call on a line": text.replace("sudo apt-get $APT_OPTS update -q\n",
+                                                  "sudo apt-get $APT_OPTS update -q && sudo apt-get install -yq jq\n", 1),
+            "no workflow env": text.replace('  APT_OPTS: "%s"\n' % APT_OPTS, ""),
+            "no retries": text.replace('APT_OPTS: "-o Acquire::Retries=3 ', 'APT_OPTS: "'),
+            "job env clears it": text.replace("\n    env:\n      DISK_NEED_GB:", "\n    env:\n      APT_OPTS: ''\n      DISK_NEED_GB:", 1),
+            "step env clears it": text.replace("      - name: Install staging tools\n",
+                                               "      - name: Install staging tools\n        env:\n          APT_OPTS: ''\n", 1),
+        }
+        for name, mutant in mutants.items():
+            with self.subTest(mutant=name):
+                self.assertNotEqual(mutant, text)
+                self.assertNotEqual(apt_problems(mutant), [])
+
+    def test_build_consumers_stop_first_on_a_missing_build(self):
+        text = (WORKFLOWS / "image.yml").read_text()
+        self.assertEqual(build_guard_problems(text), [])
+        guard = "        if: %s\n" % BUILD_GUARD_IF
+        self.assertEqual(text.count(guard), len(BUILD_GUARD_JOBS))
+        mutants = {
+            "guard skipped on cancel": text.replace(guard, "        if: ${{ needs.build.result == 'skipped' }}\n", 1),
+            "guard passes": text.replace("the cause is in the stage or build job\" >&2\n          exit 1\n",
+                                         "the cause is in the stage or build job\" >&2\n", 1),
+        }
+        for name, mutant in mutants.items():
+            with self.subTest(mutant=name):
+                self.assertNotEqual(mutant, text)
+                self.assertNotEqual(build_guard_problems(mutant), [])
 
     def test_triggers_read_as_github_reads_them(self):
         # CI-rerun-guard-rest-fu (#5377): YAML 1.1 reads a plain `on` as true, so a workflow may

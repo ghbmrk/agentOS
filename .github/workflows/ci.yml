@@ -26,6 +26,9 @@ concurrency:
 env:
   GOTOOLCHAIN: local
   GOWORK: "off"
+  # Every apt-get call passes $APT_OPTS, so a stalled mirror fails in minutes, not at the job
+  # timeout (CI-apt-timeout, #6581; tests/test_workflows.py checks each call).
+  APT_OPTS: "-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
 # Every job has a 30-minute timeout: a whole run takes about 4 minutes, and a
 # hung job would otherwise hold one of the few runners for GitHub's 6h default.
 # A records-only change (CI-docs; the set is tools/ci_scope.py's) runs only the document
@@ -91,7 +94,7 @@ jobs:
       - name: The image's systemd and kmod, from the image's apt sources
         if: steps.scope.outputs.records != 'true'
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
+          sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -y -q mmdebstrap debian-archive-keyring
           sh image/debian-archive-keyring.sh  # exactly the pinned keys (#5578)
           # snapshot.debian.org answers 503/504 for minutes at a time (#4518; #5011's run 42120504082
           # died on a 504 after the runner apt's 3 tries). Each attempt starts from an empty root and
@@ -146,7 +149,7 @@ jobs:
         run: |
           # erofs-utils: the /usr list tests build erofs images (#4470). acl: the modules' shared Go caches.
           pkgs=$(for t in strace:strace mkfs.erofs:erofs-utils setfacl:acl; do command -v "${t%%:*}" >/dev/null || echo "${t#*:}"; done)
-          [ -z "$pkgs" ] || { sudo apt-get update -q && sudo apt-get install -y -q $pkgs; }
+          [ -z "$pkgs" ] || { sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -y -q $pkgs; }
           d="$GITHUB_WORKSPACE"; while [ "$d" != / ]; do sudo chmod o+x "$d"; d=$(dirname "$d"); done
           sudo -E env "PATH=$PATH" python tools/unit_tests.py "$RUNNER_TEMP/reads" --shards 2 --index "$SHARD"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
@@ -222,7 +225,7 @@ jobs:
         # user, that test skips. The variable makes it fail rather than skip here.
         run: |
           pkgs=$(for t in strace:strace setfacl:acl; do command -v "${t%%:*}" >/dev/null || echo "${t#*:}"; done)
-          [ -z "$pkgs" ] || { sudo apt-get update -q && sudo apt-get install -y -q $pkgs; }
+          [ -z "$pkgs" ] || { sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -y -q $pkgs; }
           d="$GITHUB_WORKSPACE"; while [ "$d" != / ]; do sudo chmod o+x "$d"; d=$(dirname "$d"); done
           sudo -E env "PATH=$PATH" AGENTOS_REQUIRE_UID_BOUNDARY=1 python -m unittest tests.test_unit_tests -v
       - name: mutgate's cgroup containment (#6392)
@@ -257,12 +260,12 @@ jobs:
       - name: Inbound rules on a stand-in home network (DEV-net-e 2a)
         if: steps.scope.outputs.records != 'true'
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q nftables iproute2
+          sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -y -q nftables iproute2
           sudo AGENTOS_REQUIRE_IPV6=1 python3 -m unittest tests.test_inbound_netns -v
       - name: Codex worker tool sandbox on a stub worker (S8-W1, CRED-5)
         if: steps.scope.outputs.records != 'true'
         run: |
-          sudo apt-get install -y -q bubblewrap
+          sudo apt-get $APT_OPTS install -y -q bubblewrap
           sudo AGENTOS_REQUIRE_BWRAP=1 python3 -m unittest tests.test_codex_worker -v
       - name: Codex worker rootfs from the pinned CLI (S8-W1, #807)
         if: steps.scope.outputs.records != 'true'
@@ -272,7 +275,7 @@ jobs:
         # shell and tools come from the root image/guest-base.sh installs from the image's apt
         # sources, never from the runner (#5570), and its gcc compiles the patched bwrap (#5571).
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
+          sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -y -q mmdebstrap debian-archive-keyring
           sudo sh image/guest-base.sh "$RUNNER_TEMP/guest-base" "$RUNNER_TEMP/guest-base.manifest"
           sudo GUEST_BASE="$RUNNER_TEMP/guest-base" GUEST_SHIPPED="$RUNNER_TEMP/guest-shipped" AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs -v
       - name: Traceability (markers cite known IDs; checked on a regenerated TRACE.md)
@@ -431,12 +434,12 @@ jobs:
           [ "$free_gb" -ge "$DISK_FLOOR_GB" ] || { echo "::error title=runner disk::$cloud runner: / has $free_gb GB free after restoring $cache_mb MB of Go build cache, under the $DISK_FLOOR_GB GB floor; rerun the job, and if the cache is the bulk, see CI-disk-cause in tools/ASSUMPTIONS.md"; exit 1; }
       - name: Software TPM for the trusted-host slot (P2-4b)
         if: steps.scope.outputs.records != 'true'
-        run: sudo apt-get update -q && sudo apt-get install -yq swtpm
+        run: sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -yq swtpm
       # The enforcer's resolver tests run the real dnsmasq (briefs/ENF.md slice f);
       # dnsmasq-base is the binary alone, with no service started.
       - name: dnsmasq for the enforcer's resolver tests (ENF-f, #3664)
         if: steps.scope.outputs.records != 'true'
-        run: sudo apt-get install -yq dnsmasq-base
+        run: sudo apt-get $APT_OPTS install -yq dnsmasq-base
       # loops' canary-round test runs tools/canary.py, whose targets run as the
       # runner's first subordinate id in a user namespace (tools/ASSUMPTIONS.md D13).
       - name: Subordinate ids for the canary sandbox
@@ -445,7 +448,7 @@ jobs:
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
-          command -v newuidmap && command -v newgidmap || sudo apt-get install -yq uidmap
+          command -v newuidmap && command -v newgidmap || sudo apt-get $APT_OPTS install -yq uidmap
           grep -qE "^($(id -un)|$(id -u)):" /etc/subuid || sudo usermod --add-subuids 100000-165535 "$(id -un)"
           grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
       - name: This shard's packages (CI-SHARD)
@@ -633,7 +636,7 @@ jobs:
         # H.264-only build image/camdecode.sh links into agentos-camdecode, compiled as it is, in the
         # root image/guest-base.sh installs from the image's apt sources (#5582).
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
+          sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -y -q mmdebstrap debian-archive-keyring
           sudo sh ../image/guest-base.sh "$RUNNER_TEMP/guest-base" "$RUNNER_TEMP/guest-base.manifest"
           # The image's own decoder build in that root, with a host tar, xz and patch that fail if run.
           # It keeps its libavcodec at /tmp/agentos-libavcodec in the root, the one build of the
@@ -813,10 +816,10 @@ jobs:
         # runner's kernel keeps in linux-modules-extra; XFS has its own.
         # The quota tests run on each that mounts and fail if neither does.
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -yq xfsprogs acl
+          sudo apt-get $APT_OPTS update -q
+          sudo apt-get $APT_OPTS install -yq xfsprogs acl
           sudo modprobe quota_v2 2>/dev/null || {
-            sudo apt-get install -yq "linux-modules-extra-$(uname -r)" && sudo modprobe quota_v2
+            sudo apt-get $APT_OPTS install -yq "linux-modules-extra-$(uname -r)" && sudo modprobe quota_v2
           } || echo "::warning::no quota_v2 module: ext4 quota tests skip; XFS covers them"
       - name: Machine tests as root
         working-directory: broker
@@ -869,7 +872,7 @@ jobs:
           was=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)
           trap 'sudo sysctl -qw kernel.apparmor_restrict_unprivileged_userns=$was' EXIT
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
+          sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -y -q mmdebstrap debian-archive-keyring
           sh ../image/debian-archive-keyring.sh  # exactly the pinned keys (#5578)
           T=$RUNNER_TEMP/camdecode-tree
           # snapshot.debian.org has outages (#4518): four attempts, as the checks job's image tools.
@@ -976,7 +979,7 @@ jobs:
         working-directory: broker
         run: |
           python3 -I ../tools/root_tests.py
-          command -v swtpm >/dev/null || sudo apt-get install -yq swtpm
+          command -v swtpm >/dev/null || sudo apt-get $APT_OPTS install -yq swtpm
           python3 -I ../tools/root_tests.py --plan > "$RUNNER_TEMP/root-plan"
           fail=0
           while read -r pkg pat names <&3; do
@@ -992,7 +995,7 @@ jobs:
       - name: The guests' Debian userland, from the image's apt sources (#5570)
         # Both guest roots below copy their shell, tools and libraries from it, never from the runner.
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
+          sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -y -q mmdebstrap debian-archive-keyring
           sudo sh image/guest-base.sh /tmp/guest-base /tmp/guest-base.manifest
       - name: OpenClaw guest under gVisor (P1-7)
         # Real OpenClaw, pinned by version and hash, as an agent machine with
@@ -1090,8 +1093,8 @@ jobs:
       - name: tpm2-tools, virt-firmware and the stand-in's tools (from Ubuntu's archive)
         # They read the host's state and build the stand-in guest; the stack the check boots is not here.
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -yq qemu-utils tpm2-tools busybox-static ntfs-3g dosfstools cpio fdisk \
+          sudo apt-get $APT_OPTS update -q
+          sudo apt-get $APT_OPTS install -yq qemu-utils tpm2-tools busybox-static ntfs-3g dosfstools cpio fdisk \
             python3-virt-firmware mmdebstrap debian-archive-keyring
           sh image/debian-archive-keyring.sh  # exactly the pinned keys (#5578)
       # CI-hostcheck-image-tools (#4906): the VM stack hostcheck boots (qemu, swtpm, OVMF) comes from

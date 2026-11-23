@@ -102,6 +102,9 @@ on:
       - "assurance/vulncheck.json"
 env:
   GOWORK: "off" # = ci.yml: a go.work cannot change what a Go command here loads
+  # Every apt-get call passes $APT_OPTS, so a stalled mirror fails in minutes, not at the job
+  # timeout (CI-apt-timeout, #6581; tests/test_workflows.py checks each call).
+  APT_OPTS: "-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
 permissions:
   contents: read
 # CI-cancel-superseded (#5345, #5348): a PR's first-attempt run cancels that PR's older first
@@ -156,8 +159,8 @@ jobs:
           cache: false
       - name: Install staging tools
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends debian-archive-keyring erofs-utils dosfstools mtools \
+          sudo apt-get $APT_OPTS update -q
+          sudo apt-get $APT_OPTS install -y -q --no-install-recommends debian-archive-keyring erofs-utils dosfstools mtools \
             e2fsprogs cpio zstd kmod bubblewrap cryptsetup-bin mmdebstrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       # IMG-disk (#6150): the stage writes the stage in RUNNER_TEMP, build.sh's mktemp and GOCACHE in /tmp,
@@ -235,8 +238,8 @@ jobs:
           cache: false
       - name: Install build and boot tools
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends debian-archive-keyring systemd-boot systemd-boot-efi \
+          sudo apt-get $APT_OPTS update -q
+          sudo apt-get $APT_OPTS install -y -q --no-install-recommends debian-archive-keyring systemd-boot systemd-boot-efi \
             systemd-container erofs-utils dosfstools mtools e2fsprogs cpio zstd kmod bubblewrap cryptsetup-bin \
             qemu-system-x86 ovmf swtpm swtpm-tools mmdebstrap
           # Ubuntu 24.04 confines user namespaces via AppArmor, which breaks mkosi's bubblewrap sandbox.
@@ -461,6 +464,17 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     steps:
+      - name: build uploaded the release artifacts
+        # build is skipped when stage failed or timed out, and cancelled when it timed out itself:
+        # then no release-* artifact exists, so this job stops here with that cause, not at the
+        # download with "Artifact not found" (CI-apt-timeout, #6581). A failed build still uploads
+        # them (if: always()), so this job runs on after one (#1984).
+        if: ${{ needs.build.result == 'skipped' || needs.build.result == 'cancelled' }}
+        env:
+          RESULT: ${{ needs.build.result }}
+        run: |
+          echo "::error::build was $RESULT, so it uploaded no release artifacts; the cause is in the stage or build job" >&2
+          exit 1
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
@@ -501,8 +515,8 @@ jobs:
       - name: tpm2-tools, virt-firmware and the host disk's tools (from Ubuntu's archive)
         # They read the host's state and build the host disk; the stack the check boots is not here.
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -yq tpm2-tools busybox-static ntfs-3g dosfstools cpio fdisk zstd \
+          sudo apt-get $APT_OPTS update -q
+          sudo apt-get $APT_OPTS install -yq tpm2-tools busybox-static ntfs-3g dosfstools cpio fdisk zstd \
             python3-virt-firmware mmdebstrap debian-archive-keyring
           sh image/debian-archive-keyring.sh  # exactly the pinned keys (#5578)
       - name: QEMU, OVMF and swtpm, from the image's Debian snapshot
@@ -565,6 +579,17 @@ jobs:
     env:
       GOTOOLCHAIN: local
     steps:
+      - name: build uploaded the release artifacts
+        # build is skipped when stage failed or timed out, and cancelled when it timed out itself:
+        # then no release-* artifact exists, so this job stops here with that cause, not at the
+        # download with "Artifact not found" (CI-apt-timeout, #6581). A failed build still uploads
+        # them (if: always()), so this job runs on after one (#1984).
+        if: ${{ needs.build.result == 'skipped' || needs.build.result == 'cancelled' }}
+        env:
+          RESULT: ${{ needs.build.result }}
+        run: |
+          echo "::error::build was $RESULT, so it uploaded no release artifacts; the cause is in the stage or build job" >&2
+          exit 1
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false

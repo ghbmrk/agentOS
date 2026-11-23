@@ -24,6 +24,9 @@ concurrency:
 env:
   GOTOOLCHAIN: local
   GOWORK: "off"
+  # Every apt-get call passes $APT_OPTS, so a stalled mirror fails in minutes, not at the job
+  # timeout (CI-apt-timeout, #6581; tests/test_workflows.py checks each call).
+  APT_OPTS: "-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
 jobs:
   fuzz:
     runs-on: ubuntu-24.04
@@ -116,7 +119,7 @@ jobs:
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; go.mod names $want" >&2; exit 1; }
       - name: Software TPM for the trusted-host slot (P2-4b)
-        run: sudo apt-get update -q && sudo apt-get install -yq swtpm
+        run: sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -yq swtpm
       - name: Soak (full runs, shuffled, until time is up)
         # Each run gets a fresh shuffle seed; a failing run's log keeps the
         # "-test.shuffle N" line that replays its order.

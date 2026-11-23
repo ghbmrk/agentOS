@@ -24,6 +24,9 @@ concurrency:
 env:
   GOTOOLCHAIN: local
   GOWORK: "off"
+  # Every apt-get call passes $APT_OPTS, so a stalled mirror fails in minutes, not at the job
+  # timeout (CI-apt-timeout, #6581; tests/test_workflows.py checks each call).
+  APT_OPTS: "-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
 # Both harnesses are stdlib-only, so they use the runner's system python3: no
 # setup action to pin or trust.
 # Every job has a 30-minute timeout: a whole run takes about 4 minutes, and a
@@ -65,7 +68,7 @@ jobs:
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
-          command -v newuidmap && command -v newgidmap || { sudo apt-get update -q && sudo apt-get install -yq uidmap; }
+          command -v newuidmap && command -v newgidmap || { sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -yq uidmap; }
           grep -qE "^($(id -un)|$(id -u)):" /etc/subuid || sudo usermod --add-subuids 100000-165535 "$(id -un)"
           grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
       - name: Canary scan (A5), fresh canaries every round
@@ -110,12 +113,12 @@ jobs:
           fi
           # io_uring socket operations are invisible to strace; disable them outright.
           sudo sysctl -w kernel.io_uring_disabled=2
-          command -v strace || { sudo apt-get update -q && sudo apt-get install -yq strace; }
+          command -v strace || { sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -yq strace; }
           # The scenario runs as uid 1000 of the sandbox's user namespace, mapped to the
           # runner's first subordinate id (DEP-3): newuidmap/newgidmap and a range are needed.
           echo "probe: newuidmap=$(command -v newuidmap || echo none) newgidmap=$(command -v newgidmap || echo none)"
           echo "probe: subuid=$(grep -E "^($(id -un)|$(id -u)):" /etc/subuid || echo none) subgid=$(grep -E "^($(id -un)|$(id -u)):" /etc/subgid || echo none)"
-          command -v newuidmap && command -v newgidmap || { sudo apt-get update -q && sudo apt-get install -yq uidmap; }
+          command -v newuidmap && command -v newgidmap || { sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -yq uidmap; }
           grep -qE "^($(id -un)|$(id -u)):" /etc/subuid || sudo usermod --add-subuids 100000-165535 "$(id -un)"
           grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
       - name: Static endpoint scan (DEP-2)

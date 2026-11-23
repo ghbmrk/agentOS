@@ -1490,7 +1490,7 @@ class ClashTest(unittest.TestCase):
         self.assertEqual(step[step.index("        run: |"):], [
             "        run: |",
             '          pkgs=$(for t in strace:strace setfacl:acl; do command -v "${t%%:*}" >/dev/null || echo "${t#*:}"; done)',
-            '          [ -z "$pkgs" ] || { sudo apt-get update -q && sudo apt-get install -y -q $pkgs; }',
+            '          [ -z "$pkgs" ] || { sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -y -q $pkgs; }',
             '          d="$GITHUB_WORKSPACE"; while [ "$d" != / ]; do sudo chmod o+x "$d"; d=$(dirname "$d"); done',
             '          sudo -E env "PATH=$PATH" AGENTOS_REQUIRE_UID_BOUNDARY=1 python -m unittest tests.test_unit_tests -v'])
 

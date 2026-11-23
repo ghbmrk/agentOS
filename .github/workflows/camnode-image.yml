@@ -40,6 +40,9 @@ concurrency:
 env:
   GOTOOLCHAIN: local
   GOWORK: "off"
+  # Every apt-get call passes $APT_OPTS, so a stalled mirror fails in minutes, not at the job
+  # timeout (CI-apt-timeout, #6581; tests/test_workflows.py checks each call).
+  APT_OPTS: "-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
 jobs:
   build:
     strategy:
@@ -68,7 +71,7 @@ jobs:
         if: matrix.board == 'qemu'
         run: cd broker && go test -count=1 -race ../image/camnode/e2e/driver/*.go
       - name: Install Buildroot's host requirements and the test's DHCP server
-        run: sudo apt-get update -q && sudo apt-get install -y -q build-essential cpio rsync bc unzip file dnsmasq-base
+        run: sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -y -q build-essential cpio rsync bc unzip file dnsmasq-base
       # IMG-disk (#6357): the runner disk budget, against this job's DISK_NEED_GB (.github/actions/disk-budget).
       - name: Disk budget
         uses: ./.github/actions/disk-budget

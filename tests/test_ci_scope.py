@@ -286,6 +286,9 @@ CI_PREAMBLE_LINES = [
     'env:',
     '  GOTOOLCHAIN: local',
     '  GOWORK: "off"',
+    '  # Every apt-get call passes $APT_OPTS, so a stalled mirror fails in minutes, not at the job',
+    '  # timeout (CI-apt-timeout, #6581; tests/test_workflows.py checks each call).',
+    '  APT_OPTS: "-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"',
 ]
 
 # The machines job from its header through "Machine tests as root" (INFER-CI-2), pinned line by
@@ -348,7 +351,7 @@ MACHINES_LINES = [
     '          runsc --version',
     '      - name: Project quotas (SR2-3)',
     '        run: |',
-    '          sudo apt-get update -q',
+    '          sudo apt-get $APT_OPTS update -q',
     '          sudo apt-get install -yq xfsprogs acl',
     '          sudo modprobe quota_v2 2>/dev/null || {',
     '            sudo apt-get install -yq "linux-modules-extra-$(uname -r)" && sudo modprobe quota_v2',

@@ -30,6 +30,9 @@ concurrency:
 env:
   GOTOOLCHAIN: local
   GOWORK: "off"
+  # Every apt-get call passes $APT_OPTS, so a stalled mirror fails in minutes, not at the job
+  # timeout (CI-apt-timeout, #6581; tests/test_workflows.py checks each call).
+  APT_OPTS: "-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
 jobs:
   real:
     runs-on: ubuntu-24.04
@@ -51,7 +54,7 @@ jobs:
       # guest-base.sh installs from the image's apt sources, never the runner's compiler or libraries.
       - name: Build llama-server from the pinned source
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
+          sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -y -q mmdebstrap debian-archive-keyring
           sudo sh image/guest-base.sh "$RUNNER_TEMP/guest-base" "$RUNNER_TEMP/guest-base.manifest"
           mkdir -p "$RUNNER_TEMP/llama"
           sudo env GUEST_BASE="$RUNNER_TEMP/guest-base" LINKED_SHIPPED="$RUNNER_TEMP/linked.shipped" sh image/llamaserver.sh "$RUNNER_TEMP/llama/server"

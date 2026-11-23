@@ -36,6 +36,9 @@ on:
       - ".github/actions/disk-budget/**"
 env:
   GOWORK: "off"
+  # Every apt-get call passes $APT_OPTS, so a stalled mirror fails in minutes, not at the job
+  # timeout (CI-apt-timeout, #6581; tests/test_workflows.py checks each call).
+  APT_OPTS: "-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
 permissions:
   contents: read
 # CI-cancel-superseded (#5345, #5348, #5361): a PR's first-attempt run cancels that PR's older first
@@ -71,8 +74,8 @@ jobs:
         run: image/enforcer/throwaway_feeds.sh "$RUNNER_TEMP/feeds"
       - name: Install build and boot tools
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends debian-archive-keyring systemd-boot systemd-boot-efi \
+          sudo apt-get $APT_OPTS update -q
+          sudo apt-get $APT_OPTS install -y -q --no-install-recommends debian-archive-keyring systemd-boot systemd-boot-efi \
             systemd-container erofs-utils dosfstools mtools e2fsprogs cpio zstd kmod bubblewrap cryptsetup-bin \
             qemu-system-x86 ovmf swtpm swtpm-tools
           # Ubuntu 24.04 confines user namespaces via AppArmor, which breaks mkosi's bubblewrap sandbox.

@@ -36,6 +36,9 @@ concurrency:
 env:
   GOTOOLCHAIN: local
   GOWORK: "off"
+  # Every apt-get call passes $APT_OPTS, so a stalled mirror fails in minutes, not at the job
+  # timeout (CI-apt-timeout, #6581; tests/test_workflows.py checks each call).
+  APT_OPTS: "-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
   # MUT-swtpm-runner (#5896): the TPM tests fail rather than skip if swtpm is missing, as in
   # broker-race, so a mutant only they kill (seal.Unlock's TPM paths) cannot live in the gate.
   AGENTOS_REQUIRE_SWTPM: "1"
@@ -148,14 +151,14 @@ jobs:
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
-          command -v newuidmap && command -v newgidmap || sudo apt-get install -yq uidmap
+          command -v newuidmap && command -v newgidmap || sudo apt-get $APT_OPTS install -yq uidmap
           grep -qE "^($(id -un)|$(id -u)):" /etc/subuid || sudo usermod --add-subuids 100000-165535 "$(id -un)"
           grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
       - name: dnsmasq for the enforcer's resolver tests (ENF-f, #3664)
-        run: sudo apt-get update -q && sudo apt-get install -yq dnsmasq-base
+        run: sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -yq dnsmasq-base
       # The seal TPM tests run on swtpm; broker-race's step, kept equal by tests/test_workflows.py.
       - name: Software TPM for the trusted-host slot (P2-4b)
-        run: sudo apt-get update -q && sudo apt-get install -yq swtpm
+        run: sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -yq swtpm
       # MUT-memcap-cgroup (#6392): every mutant's and baseline's test run goes in a cgroup v2 leaf of this
       # delegated directory (memory.max, no swap, a group OOM kill, memory.peak); mutgate fails in CI
       # without it. The steps that run mutgate move their shell into main/ first, which takes root.
@@ -257,14 +260,14 @@ jobs:
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
-          command -v newuidmap && command -v newgidmap || sudo apt-get install -yq uidmap
+          command -v newuidmap && command -v newgidmap || sudo apt-get $APT_OPTS install -yq uidmap
           grep -qE "^($(id -un)|$(id -u)):" /etc/subuid || sudo usermod --add-subuids 100000-165535 "$(id -un)"
           grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
       - name: dnsmasq for the enforcer's resolver tests (ENF-f, #3664)
-        run: sudo apt-get update -q && sudo apt-get install -yq dnsmasq-base
+        run: sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -yq dnsmasq-base
       # The seal TPM tests run on swtpm; broker-race's step, kept equal by tests/test_workflows.py.
       - name: Software TPM for the trusted-host slot (P2-4b)
-        run: sudo apt-get update -q && sudo apt-get install -yq swtpm
+        run: sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -yq swtpm
       # MUT-memcap-cgroup (#6392): every mutant's and baseline's test run goes in a cgroup v2 leaf of this
       # delegated directory (memory.max, no swap, a group OOM kill, memory.peak); mutgate fails in CI
       # without it. The steps that run mutgate move their shell into main/ first, which takes root.
