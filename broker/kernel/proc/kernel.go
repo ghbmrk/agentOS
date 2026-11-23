@@ -378,7 +378,8 @@ func (h *Kernel) Erase(now int64, subject string) (kernel.Confirmation, error) {
 					c.StillHeld = append(c.StillHeld, kernel.BackupHold{Backup: id})
 				}
 			}
-			waits = append(waits, h.runningFor(w.ids)...)
+			// Each is in named(c) now, so the wait after the re-seals
+			// below takes any of them still running.
 			return nil
 		})
 	}
