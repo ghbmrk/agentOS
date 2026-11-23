@@ -17,6 +17,7 @@ miss it pass, and `fetch` writes DEST only after they match.
   pins.py live [FILE ...]        download every source of every pin (default: every tracked pin
                                  file but those in NOT_YET); exit 1 naming each one that fails
 """
+import ast
 import hashlib
 import os
 import pathlib
@@ -35,8 +36,8 @@ CURL = ["curl", "-q", "--proto", "=https", "--proto-redir", "=https", "-fsSL", "
         "--retry-delay", "5", "--retry-connrefused", "--connect-timeout", "30", "--max-time", "1800"]
 
 # Pin files not yet in this format, and direct downloads not yet through this reader. Each entry is
-# owed by the release row it names; tests/test_pins.py fails on an entry that no longer exists, so
-# this list only shrinks. A pin here is not checked by `live`.
+# owed by the release row it names; tests/test_pins.py fails on an entry that no longer exists or
+# that main's copy of this file lacks (`grown`), so this list only shrinks. A pin here is not checked by `live`.
 NOT_YET = {
     "broker/cmd/agentos-infer/llama.pins": "#6515",
     "broker/cmd/agentos-vision/faces.pins": "#6515",
@@ -48,26 +49,166 @@ NOT_YET = {
 }
 
 
-# Files that download with curl or wget directly instead of through this reader (tests/test_pins.py
-# reads every tracked workflow and shell script). Owed by the row named; shrink-only like NOT_YET.
+# Files that fetch over the network directly instead of through this reader, with how many fetch
+# sites `fetch_sites` finds in each (tests/test_pins.py requires that exact count, so a new fetch in a
+# listed file fails too). Owed by the row named; shrink-only like NOT_YET.
 FETCH_NOT_YET = {
-    ".github/workflows/ci.yml": "#6515",
-    ".github/workflows/infer-real.yml": "#6515",
-    ".github/workflows/vision-real.yml": "#6515",
-    "guest/codex/build-rootfs.sh": "#6515",
-    "guest/openclaw/build-rootfs.sh": "#6515",
-    "image/build.sh": "#6515",
-    "image/camnode/build.sh": "#6515",
-    "image/infer.sh": "#6515",
-    "image/libavcodec.sh": "#6515",
-    "image/llamaserver.sh": "#6515",
+    ".github/workflows/ci.yml": ("#6515", 3),
+    ".github/workflows/infer-real.yml": ("#6515", 1),
+    ".github/workflows/vision-real.yml": ("#6515", 6),
+    "guest/codex/build-rootfs.sh": ("#6515", 2),
+    "guest/openclaw/build-rootfs.sh": ("#6515", 1),
+    "image/build.sh": ("#6515", 1),
+    "image/camnode/build.sh": ("#6515", 1),
+    "image/infer.sh": ("#6515", 1),
+    "image/libavcodec.sh": ("#6515", 1),
+    "image/llamaserver.sh": ("#6515", 1),
 }
-# Files whose curl is not a pinned download, and why.
+# Files whose fetch sites are not pinned downloads: the count, and why.
 FETCH_EXEMPT = {
-    "image/security-snapshot.sh": "probes which debian-security snapshot run is served; apt's signed "
-                                  "InRelease is the authority for what it then installs",
-    "spikes/S4-openclaw-guest/run_gateway.sh": "talks to a gateway on 127.0.0.1; downloads nothing",
+    "image/security-snapshot.sh": (2, "probes which debian-security snapshot run is served; apt's signed "
+                                      "InRelease is the authority for what it then installs"),
+    "spikes/S4-openclaw-guest/run_gateway.sh": (2, "talks to a gateway on 127.0.0.1; downloads nothing"),
+    "spikes/S8-live/fwd.py": (1, "a measurement relay spike; downloads nothing it keeps"),
+    "tests/test_hostcheck.py": (3, "runs `curl --version` to check -q skips .curlrc; downloads nothing"),
+    "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
+    "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
+    "tools/board.py": (1, "GitHub API calls; downloads nothing it runs"),
+    "tools/metrics.py": (1, "GitHub API calls; downloads nothing it runs"),
+    "tests/test_vulncheck.py": (8, "names curl as a package in OSV fixtures"),
+    "tools/vulncheck.py": (2, "names curl as its canary's package; OSV and GitHub API queries, release "
+                              "notes read as text, and npm tarballs checked against the lockfile's sha512"),
 }
+
+# What `fetch_sites` counts. A word is split at shell quoting and punctuation and read by its basename,
+# so `/usr/bin/curl`, `x=curl; $x`, `"curl"` and a `curl\` continuation are each a curl.
+FETCHERS = frozenset(["curl", "wget", "aria2c"])
+WORDS = re.compile(r"[\s'\"`$(){}\[\];|&<>=\\,]+")
+NET_TEXT = re.compile(r"\burllib\.request\b|\burlopen\b|\bhttp\.client\b|\burllib3\b|\bhttpx\b|\baiohttp\b|"
+                      r"\bftplib\b|\b(?:import|from)\s+requests\b|\brelease\s+download\b")
+NET_MODULES = ("urllib.request", "urllib3", "requests", "http.client", "httpx", "aiohttp", "ftplib")
+RUNNERS = re.compile(r"^(?:subprocess\.\w+|os\.(?:system|popen|exec\w*|spawn\w*)|Popen|run|check_call|check_output|call)$")
+
+
+def text_sites(text):
+    """Fetch sites in shell-like text: a word naming a fetcher, a Python network module or a
+    `release download`. Line continuations are joined first; only whole-line `#` comments are skipped."""
+    n = 0
+    for line in text.replace("\\\n", " ").split("\n"):
+        if line.lstrip().startswith("#"):
+            continue
+        n += sum(1 for w in WORDS.split(line) if w.rsplit("/", 1)[-1] in FETCHERS)
+        n += len(NET_TEXT.findall(line))
+    return n
+
+
+def yaml_sites(text):
+    """Fetch sites in every scalar of a YAML file (run, with, env and keys alike), read from the
+    composed node tree, so escapes are decoded and a duplicate key cannot hide a value."""
+    import yaml  # only the repository test needs it; `live` runs without PyYAML
+    n, stack = 0, list(yaml.compose_all(text, Loader=yaml.SafeLoader))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, yaml.ScalarNode):
+            n += text_sites(node.value)
+        elif isinstance(node, yaml.SequenceNode):
+            stack.extend(node.value)
+        elif isinstance(node, yaml.MappingNode):
+            stack.extend(x for kv in node.value for x in kv)
+    return n
+
+
+def _name(f):
+    if isinstance(f, ast.Name):
+        return f.id
+    if isinstance(f, ast.Attribute):
+        return (_name(f.value) or "?") + "." + f.attr
+    return None
+
+
+def _exact(c):
+    return isinstance(c, ast.Constant) and isinstance(c.value, str) and c.value.rsplit("/", 1)[-1] in FETCHERS
+
+
+def py_sites(text):
+    """Fetch sites in Python: each import of a network module, each string that is a fetcher's name or
+    path (so `c = "curl"` counts where it is bound, not only where it runs), and each other fetch site
+    in a string in a process-running call's arguments."""
+    n = 0
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, ast.Import):
+            n += sum(1 for a in node.names if any(a.name == m or a.name.startswith(m + ".") for m in NET_MODULES))
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            mod = node.module or ""
+            if any(mod == m or mod.startswith(m + ".") for m in NET_MODULES):
+                n += 1
+            elif mod == "urllib" and any(a.name == "request" for a in node.names):
+                n += 1
+        elif _exact(node):
+            n += 1
+        elif isinstance(node, ast.Call) and RUNNERS.match(_name(node.func) or ""):
+            for a in node.args + [k.value for k in node.keywords]:
+                n += sum(text_sites(c.value) for c in ast.walk(a)
+                         if isinstance(c, ast.Constant) and isinstance(c.value, str) and not _exact(c))
+    return n
+
+
+def scanned():
+    """{repo-relative path: kind} for every file fetch_sites reads: each tracked workflow and action
+    (`.github/**.yml`, `.yaml`), Python file and script (by extension or `#!` line), bar vendored code
+    and this reader."""
+    out = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"], check=True, stdout=subprocess.PIPE).stdout
+    kinds = {}
+    for n in (x.decode("utf-8") for x in out.split(b"\0") if x):
+        if "/vendor/" in n or n == "tools/pins.py":
+            continue
+        if n.startswith(".github/") and n.endswith((".yml", ".yaml")):
+            kinds[n] = "yaml"
+        elif n.endswith(".py"):
+            kinds[n] = "python"
+        elif n.endswith((".sh", ".bash", ".mk")) or n.rsplit("/", 1)[-1] == "Makefile":
+            kinds[n] = "text"
+        else:
+            try:
+                with open(ROOT / n, "rb") as f:
+                    head = f.read(128)
+            except OSError:
+                continue
+            if head.startswith(b"#!"):
+                kinds[n] = "python" if b"python" in head.split(b"\n", 1)[0] else "text"
+    return kinds
+
+
+def fetch_sites(path, kind):
+    """How many direct network fetches the file at path holds; a file that does not parse raises."""
+    text = pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
+    return {"yaml": yaml_sites, "python": py_sites, "text": text_sites}[kind](text)
+
+
+def owed(text):
+    """{list name: {file: count or None}} for NOT_YET and FETCH_NOT_YET in a copy of this file's text,
+    read as literals (never run); a count is None where that copy records none."""
+    out = {}
+    for node in ast.parse(text).body:
+        if isinstance(node, ast.Assign) and [getattr(t, "id", None) for t in node.targets] in (["NOT_YET"], ["FETCH_NOT_YET"]):
+            v = ast.literal_eval(node.value)
+            out[node.targets[0].id] = {f: (row[1] if isinstance(row, tuple) else None) for f, row in v.items()}
+    if sorted(out) != ["FETCH_NOT_YET", "NOT_YET"]:
+        raise PinError("NOT_YET or FETCH_NOT_YET is not a literal assignment")
+    return out
+
+
+def grown(base, head):
+    """Entries of the owed lists in head's text that base's lacks, or whose count rose."""
+    b, h = owed(base), owed(head)
+    out = []
+    for name in sorted(h):
+        for f, n in sorted(h[name].items()):
+            if f not in b[name]:
+                out.append("%s adds %s" % (name, f))
+            elif n is not None and b[name][f] is not None and n > b[name][f]:
+                out.append("%s raises %s from %d to %d" % (name, f, b[name][f], n))
+    return out
 
 
 class PinError(Exception):
@@ -176,6 +317,21 @@ def tracked():
     return sorted(n.decode("utf-8") for n in out.split(b"\0") if n)
 
 
+MEMBER_MAX = 1 << 30  # bytes `live` reads of one zip member
+
+
+def member_sha256(zpath, member):
+    """sha256 of a zip member, read in blocks; PinError past MEMBER_MAX, whatever the header says."""
+    h, n = hashlib.sha256(), 0
+    with zipfile.ZipFile(zpath) as z, z.open(member) as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            n += len(block)
+            if n > MEMBER_MAX:
+                raise PinError("%s is over %d bytes" % (member, MEMBER_MAX))
+            h.update(block)
+    return h.hexdigest()
+
+
 def live(paths, fetcher=download):
     """Problems, one per source that no longer serves its pinned bytes; empty when all do."""
     problems = []
@@ -186,24 +342,25 @@ def live(paths, fetcher=download):
             except (PinError, OSError, UnicodeDecodeError) as e:
                 problems.append("%s: unreadable: %s" % (path, e))
                 continue
-            got = {}
+            got = {}  # name -> the downloaded file whose bytes matched its pin
             for i, p in enumerate(pins):
                 f = os.path.join(tmp, "%d" % i)
                 if URL.fullmatch(p.source):
                     if not fetcher(p.source, f):
                         problems.append("%s: %s no longer downloads from %s" % (p.where(), p.name, p.source))
                         continue
-                    got.setdefault(p.name, f)
                     h = sha256(f)
+                    if h == p.sha:
+                        got.setdefault(p.name, f)
                 else:
                     parent, member = p.source.split(":", 1)
                     if parent not in got:
-                        problems.append("%s: %s: its zip %s did not download" % (p.where(), p.name, parent))
+                        # A zip that did not download or missed its pin is never opened.
+                        problems.append("%s: %s: its zip %s did not download with its pinned bytes" % (p.where(), p.name, parent))
                         continue
                     try:
-                        with zipfile.ZipFile(got[parent]) as z:
-                            h = hashlib.sha256(z.read(member)).hexdigest()
-                    except (zipfile.BadZipFile, KeyError) as e:
+                        h = member_sha256(got[parent], member)
+                    except (zipfile.BadZipFile, KeyError, PinError) as e:
                         problems.append("%s: %s: %s" % (p.where(), p.name, e))
                         continue
                 if h != p.sha:

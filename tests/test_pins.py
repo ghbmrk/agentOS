@@ -2,7 +2,8 @@
 
 REQ: CI-pin-liveness-1 (one format, fail closed), CI-pin-liveness-2 (the hash is the only authority),
 CI-pin-liveness-3 (liveness names each dead source), CI-pin-liveness-4 (every pin and download
-site is covered or owed by a release row).
+site is covered or owed by a release row), CI-pin-liveness-fu (#6524: the owed lists shrink against
+main, fetch sites are found structurally and counted per file, `live` opens only a zip that matched).
 """
 import hashlib
 import io
@@ -171,7 +172,8 @@ class Fetch(unittest.TestCase):
             with self.subTest(flag=flag):
                 i = pins.CURL.index(flag[0])
                 self.assertEqual(pins.CURL[i:i + len(flag)], flag)
-        self.assertEqual(pins.CURL[:2], ["curl", "-q"])  # -q is only honoured first
+        self.assertIn(pins.CURL[0], pins.FETCHERS)
+        self.assertEqual(pins.CURL[1], "-q")  # -q is only honoured first
 
 
 class Live(unittest.TestCase):
@@ -211,8 +213,36 @@ class Live(unittest.TestCase):
     def test_a_dead_zip_names_its_members(self):
         text = "%s  w.whl  %s\n%s  lib.so  w.whl:x/lib.so\n" % (HA, U1, HB)
         self.assertEqual(self.check(text, {}), ["l.pins:1: w.whl no longer downloads from %s" % U1,
-                                                "l.pins:2: lib.so: its zip w.whl did not download"])
-        self.assertEqual(self.check(text, {U1: A}), ["l.pins:2: lib.so: File is not a zip file"])
+                                                "l.pins:2: lib.so: its zip w.whl did not download with its "
+                                                "pinned bytes"])
+        self.assertEqual(self.check("%s  w.whl  %s\n%s  lib.so  w.whl:x/lib.so\n" % (HA, U1, HB), {U1: A}),
+                         ["l.pins:2: lib.so: File is not a zip file"])
+
+    def test_a_zip_that_misses_its_pin_is_never_opened(self):
+        z = zipped("x/lib.so", B)
+        text = "%s  w.whl  %s\n%s  lib.so  w.whl:x/lib.so\n" % (HA, U1, HB)
+        with mock.patch.object(pins.zipfile, "ZipFile", side_effect=AssertionError("opened")):
+            got = self.check(text, {U1: z})
+        self.assertEqual(got, ["l.pins:1: w.whl from %s now hashes to %s, pinned %s" % (U1, hashlib.sha256(z).hexdigest(), HA),
+                               "l.pins:2: lib.so: its zip w.whl did not download with its pinned bytes"])
+
+    def test_a_member_past_the_bound_is_refused_whatever_its_header_says(self):
+        z = zipped("x/lib.so", B * 4)
+        hz = hashlib.sha256(z).hexdigest()
+        text = "%s  w.whl  %s\n%s  lib.so  w.whl:x/lib.so\n" % (hz, U1, hashlib.sha256(B * 4).hexdigest())
+        self.assertEqual(self.check(text, {U1: z}), [])
+        with mock.patch.object(pins, "MEMBER_MAX", len(B) * 4 - 1):
+            self.assertEqual(self.check(text, {U1: z}), ["l.pins:2: lib.so: x/lib.so is over %d bytes" % (len(B) * 4 - 1)])
+        # A deflated member that expands past the bound (a zip bomb) stops at the bound.
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as w:
+            w.writestr("x/lib.so", b"\0" * (3 << 20))
+        bomb = buf.getvalue()
+        self.assertLess(len(bomb), 1 << 16)
+        with mock.patch.object(pins, "MEMBER_MAX", 1 << 20):
+            got = self.check("%s  w.whl  %s\n%s  lib.so  w.whl:x/lib.so\n" % (hashlib.sha256(bomb).hexdigest(), U1, HB),
+                             {U1: bomb})
+        self.assertEqual(got, ["l.pins:2: lib.so: x/lib.so is over %d bytes" % (1 << 20)])
 
     def test_an_unreadable_pin_file_is_a_problem(self):
         got = self.check("not a pin\n", {})
@@ -237,23 +267,114 @@ class Repository(unittest.TestCase):
                     self.assertTrue(pins.load(ROOT / f), f)
         self.assertEqual(sorted(set(pins.NOT_YET) - set(tracked)), [], "NOT_YET names an untracked file")
 
-    def test_every_direct_download_is_owed_or_exempt(self):
-        out = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z", "--", ".github/workflows/*.yml",
-                              "*.sh"], check=True, stdout=subprocess.PIPE).stdout
-        names = [n.decode() for n in out.split(b"\0") if n and b"/vendor/" not in n]
-        call = re.compile(r"(^|[\s;|&({`$])(curl|wget)\s")
-        direct = set()
-        for n in names:
-            for line in (ROOT / n).read_text(encoding="utf-8", errors="replace").splitlines():
-                if not line.lstrip().startswith("#") and call.search(line):
-                    direct.add(n)
-        listed = set(pins.FETCH_NOT_YET) | set(pins.FETCH_EXEMPT)
-        self.assertEqual(sorted(direct - listed), [], "download through tools/pins.py fetch")
-        self.assertEqual(sorted(listed - direct), [], "a listed file no longer downloads directly: drop it")
+    def test_every_direct_fetch_is_owed_or_exempt_site_for_site(self):
+        kinds = pins.scanned()
+        for f in (".github/workflows/formal.yml", ".github/actions/scope/action.yml", "image/build.sh",
+                  "tools/board.py", "image/mkosi/mkosi.extra/usr/lib/agentos/health"):
+            self.assertIn(f, kinds)  # workflows, actions, scripts with and without an extension, Python
+        self.assertNotIn("tools/pins.py", kinds)
+        found = {f: n for f, n in ((f, pins.fetch_sites(ROOT / f, k)) for f, k in kinds.items()) if n}
+        listed = {f: v[1] for f, v in pins.FETCH_NOT_YET.items()}
+        listed.update({f: v[0] for f, v in pins.FETCH_EXEMPT.items()})
+        self.assertEqual(found, listed, "fetch through tools/pins.py, or set the file's count to what it holds")
         self.assertEqual(set(pins.FETCH_NOT_YET) & set(pins.FETCH_EXEMPT), set())
-        for row in pins.FETCH_NOT_YET.values():
+        for row, _ in pins.FETCH_NOT_YET.values():
             self.assertRegex(row, r"^#[1-9][0-9]*$")
-        self.assertNotIn(".github/workflows/formal.yml", listed)
+        self.assertNotIn(".github/workflows/formal.yml", found)
+
+    def test_the_owed_lists_hold_nothing_mains_copy_lacks(self):
+        def git(*a):
+            return subprocess.run(["git", "-C", str(ROOT), *a], capture_output=True, text=True)
+        base = git("merge-base", "HEAD", "origin/main")
+        self.assertEqual(base.returncode, 0, "no origin/main to compare the owed lists with: " + base.stderr)
+        text = git("show", base.stdout.strip() + ":tools/pins.py")
+        self.assertEqual(text.returncode, 0, text.stderr)
+        head = (ROOT / "tools/pins.py").read_text()
+        self.assertEqual(pins.grown(text.stdout, head), [])
+        # The literals read are the lists in force: nothing later in the file adds to them.
+        self.assertEqual(pins.owed(head), {"NOT_YET": {f: None for f in pins.NOT_YET},
+                                           "FETCH_NOT_YET": {f: v[1] for f, v in pins.FETCH_NOT_YET.items()}})
+
+
+class Grown(unittest.TestCase):
+    """CI-pin-liveness-fu item 1: NOT_YET and FETCH_NOT_YET only shrink against main."""
+    BASE = ('NOT_YET = {"a.pins": "#1", "b.pins": "#1"}\n'
+            'FETCH_NOT_YET = {"x.yml": ("#1", 2), "y.sh": ("#1", 1)}\n')
+
+    def test_a_removed_entry_or_a_lower_count_passes(self):
+        head = 'NOT_YET = {"a.pins": "#1"}\nFETCH_NOT_YET = {"x.yml": ("#1", 1)}\n'
+        self.assertEqual(pins.grown(self.BASE, head), [])
+        self.assertEqual(pins.grown(self.BASE, self.BASE), [])
+
+    def test_an_added_entry_or_a_higher_count_fails(self):
+        head = ('NOT_YET = {"a.pins": "#1", "b.pins": "#1", "c.pins": "#2"}\n'
+                'FETCH_NOT_YET = {"x.yml": ("#1", 3), "y.sh": ("#1", 1), "z.py": ("#1", 1)}\n')
+        self.assertEqual(pins.grown(self.BASE, head), ["FETCH_NOT_YET raises x.yml from 2 to 3", "FETCH_NOT_YET adds z.py",
+                                                       "NOT_YET adds c.pins"])
+
+    def test_a_base_without_counts_still_refuses_a_new_file(self):
+        base = 'NOT_YET = {}\nFETCH_NOT_YET = {"x.yml": "#1"}\n'
+        self.assertEqual(pins.grown(base, 'NOT_YET = {}\nFETCH_NOT_YET = {"x.yml": ("#1", 9)}\n'), [])
+        self.assertEqual(pins.grown(base, 'NOT_YET = {}\nFETCH_NOT_YET = {"q.sh": ("#1", 1)}\n'),
+                         ["FETCH_NOT_YET adds q.sh"])
+
+    def test_a_list_that_is_not_a_literal_fails(self):
+        for text in ['NOT_YET = {}\n', 'NOT_YET = dict()\nFETCH_NOT_YET = {}\n']:
+            with self.subTest(text=text):
+                self.assertRaises((pins.PinError, ValueError), pins.owed, text)
+
+
+class Sites(unittest.TestCase):
+    """CI-pin-liveness-fu item 2: fetch sites are found by structure, not by a line pattern."""
+
+    def test_each_shell_bypass_is_a_site(self):
+        for text in ["curl -o f https://e.org/f", "/usr/bin/curl -o f u", "curl\\\n  -o f u", "x=curl; $x -o f u",
+                     "X=\"/usr/bin/wget\"\n\"$X\" u", "$(command -v curl) u", "a|xargs -n1 curl", "sudo aria2c u",
+                     "python3 -c 'import urllib.request as r; r.urlopen(u)'",
+                     "gh release download v1 -R o/r", "gh release \\\n  download v1", "echo ok; `curl u`"]:
+            with self.subTest(text=text):
+                self.assertGreater(pins.text_sites(text), 0)
+
+    def test_plain_text_is_not_a_site(self):
+        for text in ["# curl -o f u", "  # wget u", "libcurl-dev --with-curl curl.h curly", "pins.py fetch f n d",
+                     "import urllib.parse", "git release-download"]:
+            with self.subTest(text=text):
+                self.assertEqual(pins.text_sites(text), 0)
+
+    def test_sites_are_counted_so_a_new_one_in_an_owed_file_shows(self):
+        self.assertEqual(pins.text_sites("curl a\nwget b\n# curl c\ncurl d; curl e\n"), 4)
+
+    def test_every_yaml_scalar_is_read_with_escapes_decoded(self):
+        wf = ("on: push\njobs:\n  j:\n    steps:\n      - run: |\n          echo hi\n"
+              "          # curl in a comment\n      - run: \"\\x63url u\"\n"
+              "      - uses: a/b@0\n        with:\n          script: wget u\n        env:\n          C: curl\n")
+        self.assertEqual(pins.yaml_sites(wf), 3)
+        self.assertEqual(pins.yaml_sites("a: &x curl u\nb: *x\n"), 2)  # an alias is read where it is used
+        self.assertEqual(pins.yaml_sites("a: curl u\na: echo\n"), 1)    # a duplicate key hides nothing
+
+    def test_python_imports_strings_and_runs(self):
+        cases = {
+            "import urllib.request\n": 1, "from urllib import request\n": 1, "from urllib.request import urlopen\n": 1,
+            "import requests, os\n": 1, "import http.client as h\n": 1, "import urllib.parse\nimport urllib.error\n": 0,
+            "from . import requests\n": 0,
+            'c = "curl"\nsubprocess.run([c, u])\n': 1, 'subprocess.run(["/usr/bin/wget", u])\n': 1,
+            'os.system("x=1; curl -o f " + u)\n': 1, 'subprocess.check_call("gh release download v1", shell=True)\n': 1,
+            'def f():\n    """Wraps curl."""\n': 0, 'print("curl u")\n': 0,
+        }
+        for text, n in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(pins.py_sites(text), n)
+        self.assertRaises(SyntaxError, pins.py_sites, "def (:\n")
+
+    def test_a_file_is_read_by_its_kind(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        f = pathlib.Path(d.name) / "s"
+        f.write_text("#!/bin/sh\ncurl u\n")
+        self.assertEqual(pins.fetch_sites(f, "text"), 1)
+        f.write_text("import requests\n")
+        self.assertEqual(pins.fetch_sites(f, "python"), 1)
+
 
     def test_the_tlc_pin_is_the_one_vectors_py_checks(self):
         src = (ROOT / "broker/kernel/formal/vectors.py").read_text()
@@ -269,6 +390,9 @@ class Repository(unittest.TestCase):
         self.assertNotIn("pull_request", w)
         self.assertIn("\npermissions:\n  contents: read\njobs:\n", w)
         self.assertEqual(w.count("permissions:"), 1)
+        for f in ("tools/fetch.pins", "tools/pins.py", ".github/workflows/pin-liveness.yml"):
+            self.assertNotIn("weekly", (ROOT / f).read_text(), f)  # the schedule above is daily
+        self.assertIn(" downloads every\n# source daily ", (ROOT / "tools/fetch.pins").read_text())
 
 
 if __name__ == "__main__":
