@@ -75,6 +75,9 @@ image    An OSV scan of the Debian packages in a built image: DIR holds the dpkg
          empty status fails (exit 2). --propose ISSUE also prints, and adds to the
          report as "proposed", the record each failing no-fix finding needs, citing ISSUE, with
          the template why the image records use (#5628); it accepts nothing itself.
+         --inherit MAIN_CONFIG --base REV (inherited mode, #6590): when the diff from REV
+         touches no IMAGE_INPUTS path, MAIN_CONFIG's image records accept what the config's
+         leave, and an unused record is noted, not failed (main's scans fail it).
 propose  The same records from REPORT, an `image --report` file such as the
          image-vulncheck-report.json artifact image.yml and vulncheck.yml upload, citing ISSUE,
          so a round needs no local build or scanner (#5631). A report with problems, no
@@ -107,7 +110,7 @@ assurance/vulncheck.json, so a change to the image records alone is scanned agai
 
 Usage:
   vulncheck.py run [--config F] [--root DIR] [--report F] [--check-issues]
-  vulncheck.py image DIR [--config F] [--report F] [--check-issues] [--propose ISSUE]
+  vulncheck.py image DIR [--config F] [--report F] [--check-issues] [--propose ISSUE] [--inherit F --base REV]
   vulncheck.py propose REPORT ISSUE [--config F]
   vulncheck.py reopen ISSUE [--config F]
   vulncheck.py control
@@ -1809,7 +1812,7 @@ def exclusion_problems(src, excluded):
     return problems
 
 
-def scan_image(config, src, osv_env=None, offline=False, allow=None, exclude=None):
+def scan_image(config, src, osv_env=None, offline=False, allow=None, exclude=None, main_records=()):
     """Findings and problems for one image's packages, its main tree's (with its static
     binaries' link inputs), its initrd's and its guests'; each tree's records applied to it alone.
     Every installed package's Built-Using sources are queried but those EXCLUDE names for a linked
@@ -1817,7 +1820,9 @@ def scan_image(config, src, osv_env=None, offline=False, allow=None, exclude=Non
     exclusion_problems).
 
     A record accepts only an advisory Debian has not fixed in the image's release: once a fix
-    ships, the finding fails until the image is rebuilt with it, and the record goes unused."""
+    ships, the finding fails until the image is rebuilt with it, and the record goes unused.
+    MAIN_RECORDS (inherited mode, #6590) accept what the config's records leave, by the same rule;
+    they are never reported unused here."""
     problems = record_problems(config.get("accepted", []))
     if problems:
         return [], problems, []
@@ -1844,7 +1849,56 @@ def scan_image(config, src, osv_env=None, offline=False, allow=None, exclude=Non
                                  excluded=frozenset(excluded.get(GUESTS, ())))
         findings += found
         problems += [f"guest: {p}" for p in probs]
-    return findings, problems, apply_records([f for f in findings if not f["fixed"]], records)
+    unused = apply_records([f for f in findings if not f["fixed"]], records)
+    apply_records([f for f in findings if not f["fixed"] and "accepted_by" not in f],
+                  [r for r in main_records if r.get("where") in IMAGE_TREES])
+    return findings, problems, unused
+
+
+# Inherited mode (#6590): a pull request whose diff touches none of IMAGE_INPUTS cannot change the image's
+# Debian packages, the records or the scan, so an advisory it meets is main's too. Its scan also applies main's
+# current image records (read live, so a record landed on main clears the PR on a rerun of this job, with no main
+# merge), and an unused record is noted, not failed: main's own push and daily scans fail it. Every finding still
+# needs a record citing an open issue (EVL-5). Fail closed: an unreadable diff or main config, an empty diff, or one
+# touching an input scans as before. A path wrongly left off the list only defers the unused check to main: a main
+# record accepts only its own tree, source package and advisory, which main's review already accepted.
+IMAGE_INPUTS = ("image/", "guest/", "assurance/", "broker/cmd/agentos-infer/", "tests/fixtures/vulncheck/",
+                "tools/vulncheck.py", "tools/record_merge.py", ".github/workflows/image.yml",
+                ".github/workflows/vulncheck.yml", ".github/actions/")
+
+
+def changed_paths(base, root=ROOT):
+    """The paths HEAD changes against BASE, or None when git cannot say."""
+    r = subprocess.run(["git", "-C", str(root), "diff", "--name-only", "-z", "--no-renames", base, "HEAD", "--"],
+                       capture_output=True)
+    if r.returncode:
+        return None
+    return [x for x in r.stdout.decode(errors="replace").split("\0") if x]
+
+
+def inherits(changed):
+    """Why inherited mode does not apply to CHANGED (the PR's paths), or "" when it does."""
+    if changed is None:
+        return "the diff against the base could not be read"
+    if not changed:
+        return "the diff against the base is empty"
+    hit = [x for x in changed if x.startswith(tuple(i for i in IMAGE_INPUTS if i.endswith("/")))
+           or x in IMAGE_INPUTS]
+    return f"it changes image inputs ({', '.join(sorted(hit)[:5])})" if hit else ""
+
+
+def inherited_records(main_config, base, root=ROOT):
+    """(main's image records, "") in inherited mode, else (None, why not)."""
+    why = inherits(changed_paths(base, root))
+    if why:
+        return None, why
+    try:
+        records = json.loads(pathlib.Path(main_config).read_text()).get("accepted", [])
+    except (OSError, ValueError, AttributeError) as e:
+        return None, f"main's config could not be read ({e})"
+    if not isinstance(records, list) or record_problems(records):
+        return None, "main's records have problems"
+    return records, ""
 
 
 def issue_records(config, cmd):
@@ -2114,6 +2168,8 @@ def main(argv=None):
     i.add_argument("--report")
     i.add_argument("--check-issues", action="store_true")
     i.add_argument("--propose", type=issue_number, metavar="ISSUE")
+    i.add_argument("--inherit", metavar="MAIN_CONFIG", help="main's current config: inherited mode (#6590)")
+    i.add_argument("--base", metavar="REV", help="with --inherit, the commit the PR's diff is read against")
     p = sub.add_parser("propose")
     p.add_argument("report", help="the report `image --report` wrote, such as CI's image-vulncheck-report.json")
     p.add_argument("issue", type=issue_number, help="the issue each record cites")
@@ -2160,8 +2216,16 @@ def main(argv=None):
             print("control: every plant caught" if not problems else "control: FAILED")
             return 1 if problems else 0
         config = json.loads(pathlib.Path(a.config).read_text())
+        main_records, deferred, inherited = (), [], False
+        if a.cmd == "image" and a.inherit:
+            main_records, why = inherited_records(a.inherit, a.base or "")
+            print("inherited mode: main's image records apply too; unused records are left to main's scans"
+                  if main_records is not None else f"inherited mode off: {why}; the full check runs")
+            inherited = main_records is not None
         if a.cmd == "image":
-            findings, problems, unused = scan_image(config, a.dir)
+            findings, problems, unused = scan_image(config, a.dir, main_records=main_records or ())
+            if inherited:
+                deferred, unused = unused, []
         else:
             findings, problems, unused = scan(config, a.root)
     except ScanError as e:
@@ -2173,8 +2237,14 @@ def main(argv=None):
         if not repo or not token:
             problems.append("--check-issues needs GITHUB_REPOSITORY and GITHUB_TOKEN")
         else:
-            problems += issue_problems(issue_records(config, a.cmd), repo, token)
+            problems += issue_problems(issue_records(config, a.cmd) + [
+                r for r in main_records or () if r.get("where") in IMAGE_TREES], repo, token)
+    for r in deferred:
+        print(f"inherited: record {r['id']} (issue #{r['issue']}) matches no finding; main's scans fail it")
     ok = summary(findings, problems, unused, config=shown(a.config))
+    if not ok and inherited:
+        print("inherited: this PR changes no image input, so a failing no-fix finding needs a record on main only; "
+              "once main has it, rerun this job (no main merge needed)")
     extra = {}
     if getattr(a, "propose", None):
         extra["proposed"] = propose(findings, a.propose)
@@ -2182,7 +2252,8 @@ def main(argv=None):
     if a.report:
         pathlib.Path(a.report).write_text(json.dumps(
             {"scan": a.cmd, "findings": [{**f, "verdict": verdict(f)} for f in findings],
-             "problems": problems, "unused_records": unused, **extra}, indent=1) + "\n")
+             "problems": problems, "unused_records": unused, **({"deferred_unused": deferred} if deferred else {}),
+             **extra}, indent=1) + "\n")
     return 0 if ok else 1
 
 
