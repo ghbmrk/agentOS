@@ -13,6 +13,7 @@ tools/trusted_core.txt text eol=lf
 tools/ceilings.txt text eol=lf
 tools/trusted_base_parsers.txt text eol=lf
 tools/trusted_base_reasons.txt text eol=lf
+tools/word_budget_reasons.txt text eol=lf
 tools/old_core.txt text eol=lf
 tools/assumptions_legacy_ids.txt text eol=lf
 tools/brief_acceptance_baseline.txt text eol=lf

@@ -437,7 +437,7 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 		"a specifier in an argument": {"image/mkosi/agentos-x@.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-%i\n", `% specifier`},
 		// The refusal tells a builder a template's command ignores its
 		// instance name (#6033 item 3).
-		"a template's instance name": {"image/mkosi/agentos-x@.service", "[Service]\nExecStart=/usr/lib/agentos/agentos-x %i\n", `no command of ours names one, so a template enabled as instances ignores its instance name`},
+		"a template's instance name": {"image/mkosi/agentos-x@.service", "[Service]\nExecStart=/usr/lib/agentos/agentos-x %i\n", `no command of ours names one, so a template enabled as instances ignores its instance name; drop the specifier and put per-instance settings in an agentos-x@<instance>.service.d drop-in`},
 		"a variable a wrapper runs":  {"image/mkosi/agentos-side.service", "[Service]\nEnvironment=P=/usr/lib/agentos/agentos-side\nExecStart=/usr/lib/agentos/with-uids ${P}\n", `holds a $ substitution`},
 		"a bare $ variable":          {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids $P\n", `holds a $ substitution`},
 		"a CR":                       {"image/mkosi/agentos-side.service", "[Service]\nUser=agentos-side\rExecStart=/usr/lib/agentos/agentos-side\n", `byte 0xd`},
@@ -470,6 +470,22 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 			files[c.path] = c.text
 			if bins, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("got %q, %v, want a refusal with %q", bins, err, c.want)
+			}
+		})
+	}
+	// A unit that is no template has no instance name to ignore: its
+	// specifier refusal names only the step (#6504 item 1). A leading @
+	// makes no template either: systemd needs a prefix before it.
+	for _, unit := range []string{"image/mkosi/agentos-h.service", "image/mkosi/agentos-h.socket", "image/mkosi/@agentos-h.service"} {
+		t.Run("refuses a specifier in "+path.Base(unit)+" without the template clause", func(t *testing.T) {
+			files := clone(files)
+			files[unit] = "[Service]\nExecStart=/usr/lib/agentos/agentos-h %H\n"
+			if strings.HasSuffix(unit, ".socket") {
+				files[unit] = "[Socket]\nExecStartPre=/usr/lib/agentos/agentos-h %H\n"
+			}
+			_, err := rootBinaries(fakeRepo(t, files))
+			if err == nil || !strings.Contains(err.Error(), `holds a % specifier, whose value the reader cannot see; drop the specifier`) || strings.Contains(err.Error(), "template") {
+				t.Fatalf("got %v, want the specifier refused with its step and no template clause", err)
 			}
 		})
 	}
@@ -1990,9 +2006,6 @@ var execUnits = map[string]bool{".service": true, ".socket": true}
 // settings, which swapon runs as root with (#4718 item 1).
 var unitTypes = map[string]bool{".service": true, ".socket": true, ".mount": true, ".swap": true}
 
-// isDropinDir reports whether dir names a drop-in directory of a unitTypes
-// type: a unit's or prefix's (x.service.d, agentos-.socket.d) or the
-// type's own (service.d).
 // isDependencyDir reports whether dir is a unit's dependency directory
 // (systemd.unit(5) ".wants/, .requires/, .upholds/"): systemd reads each
 // entry there by name only.
@@ -2009,9 +2022,26 @@ func isDependencyDir(dir string) bool {
 // units may own dependency directories.
 var allUnitTypes = map[string]bool{".service": true, ".socket": true, ".device": true, ".mount": true, ".automount": true, ".swap": true, ".target": true, ".path": true, ".timer": true, ".slice": true, ".scope": true}
 
-// dependencyStep is the fix a refused dependency entry is told.
-const dependencyStep = "make the entry a link to ../<its name> or ../<its template>, ship that unit in an overlay of every build holding the entry (or move the entry to the overlay that ships it), or drop the entry"
+// dependencyStep is the fix a refused dependency entry of the given name
+// is told, file when it is a regular file. An entry of a type no link may
+// name stays refused whatever it names, so it can only be dropped.
+func dependencyStep(name string, file bool) string {
+	if !linkTypes[path.Ext(name)] {
+		return "drop the entry"
+	}
+	step := "make the entry a link to ../" + name
+	if file {
+		step = "replace the file with a link to ../" + name
+	}
+	if tmpl := templateOf(name); tmpl != "" {
+		step += " or ../" + tmpl
+	}
+	return step + ", ship that unit in an overlay of every build holding the entry (or move the entry to the overlay that ships it), or drop the entry"
+}
 
+// isDropinDir reports whether dir names a drop-in directory of a unitTypes
+// type: a unit's or prefix's (x.service.d, agentos-.socket.d) or the
+// type's own (service.d).
 func isDropinDir(dir string) bool {
 	t, ok := strings.CutSuffix(dir, ".d")
 	return ok && (unitTypes[path.Ext(t)] || unitTypes["."+t])
@@ -2799,7 +2829,7 @@ func rootBinaries(root string) ([]string, error) {
 			// place is no fix (#6493 UX 1).
 			step := "ship the file itself"
 			if isDependencyDir(dir) {
-				step = dependencyStep
+				step = dependencyStep(d.Name(), false)
 			}
 			return fmt.Errorf("%s: %s; %s", relTo(root, p), linkWhy(root, p), step)
 		case d.Type()&os.ModeSymlink != 0 && overlayRoot(relTo(root, p)) != "":
@@ -2814,7 +2844,7 @@ func rootBinaries(root string) ([]string, error) {
 			// systemd reads only the entry's name and loads the unit of
 			// that name from its search path, so a file here is not what
 			// runs (#6493 UX 4).
-			return fmt.Errorf("%s: a regular file in a dependency directory, where systemd reads only the entry's name and starts the unit of that name from its search path, not this file; %s", relTo(root, p), dependencyStep)
+			return fmt.Errorf("%s: a regular file in a dependency directory, where systemd reads only the entry's name and starts the unit of that name from its search path, not this file; %s", relTo(root, p), dependencyStep(d.Name(), true))
 		case isManagerConf(p):
 			confs = append(confs, p)
 		case unitTypes[filepath.Ext(p)]:
@@ -3228,7 +3258,7 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 			}
 			for _, w := range words {
 				if substitutes(w, '%') {
-					errs = append(errs, fmt.Errorf("%s: %s=%s: word %q holds a %% specifier, whose value the reader cannot see; no command of ours names one, so a template enabled as instances ignores its instance name", rel, l.key, l.value, w))
+					errs = append(errs, fmt.Errorf("%s: %s=%s: word %q holds a %% specifier, whose value the reader cannot see; %s", rel, l.key, l.value, w, specifierStep(name)))
 					break
 				}
 			}
@@ -3538,6 +3568,19 @@ var linkTypes = map[string]bool{".service": true, ".socket": true, ".mount": tru
 // linkTypeList names linkTypes for a refusal.
 const linkTypeList = ".path, .service, .socket, .swap, .target, .timer or .mount"
 
+// specifierStep is the fix a refused % specifier in the unit name is
+// told. Only a template (pre@.type) or an instance has an instance name to
+// ignore, and its per-instance settings go in the instance's drop-in.
+func specifierStep(name string) string {
+	ext := path.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	at := strings.Index(base, "@")
+	if at <= 0 {
+		return "drop the specifier"
+	}
+	return "no command of ours names one, so a template enabled as instances ignores its instance name; drop the specifier and put per-instance settings in an " + base[:at+1] + "<instance>" + ext + ".d drop-in"
+}
+
 // templateOf is the template an instance name (pre@inst.type) is made
 // from (pre@.type), or "" for any other name.
 func templateOf(name string) string {
@@ -3585,7 +3628,7 @@ func linkWhy(root, p string) string {
 	switch {
 	case r != "" && (t != "../"+name && (tmpl == "" || t != "../"+tmpl) || !linkTypes[path.Ext(name)]):
 		why := "a link in an overlay other than a unit linked to ../" + name + " or an instance to ../<its template>"
-		if tmpl != "" {
+		if tmpl != "" && linkTypes[path.Ext(name)] {
 			why = "a link in an overlay other than a unit linked to ../" + name + " or to its template ../" + tmpl
 		}
 		if !linkTypes[path.Ext(name)] {

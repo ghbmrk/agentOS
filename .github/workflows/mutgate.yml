@@ -156,9 +156,19 @@ jobs:
       # The seal TPM tests run on swtpm; broker-race's step, kept equal by tests/test_workflows.py.
       - name: Software TPM for the trusted-host slot (P2-4b)
         run: sudo apt-get update -q && sudo apt-get install -yq swtpm
+      # MUT-memcap-cgroup (#6392): every mutant's and baseline's test run goes in a cgroup v2 leaf of this
+      # delegated directory (memory.max, no swap, a group OOM kill, memory.peak); mutgate fails in CI
+      # without it. The steps that run mutgate move their shell into main/ first, which takes root.
+      - name: A delegated cgroup for the mutation runs (#6392)
+        run: |
+          sudo mkdir /sys/fs/cgroup/mutgate /sys/fs/cgroup/mutgate/main
+          echo +memory | sudo tee /sys/fs/cgroup/mutgate/cgroup.subtree_control > /dev/null
+          sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/mutgate
+          echo "AGENTOS_MUTGATE_CGROUP=/sys/fs/cgroup/mutgate" >> "$GITHUB_ENV"
       - name: Shards for each package (#4961)
         id: plan
         run: |
+          echo $$ | sudo tee /sys/fs/cgroup/mutgate/main/cgroup.procs > /dev/null
           shards=$(python3 -I tools/mutgate.py plan --git "$BASE" --targets-out "$RUNNER_TEMP/targets.json")
           echo "$shards"
           echo "shards=$shards" >> "$GITHUB_OUTPUT"
@@ -255,6 +265,15 @@ jobs:
       # The seal TPM tests run on swtpm; broker-race's step, kept equal by tests/test_workflows.py.
       - name: Software TPM for the trusted-host slot (P2-4b)
         run: sudo apt-get update -q && sudo apt-get install -yq swtpm
+      # MUT-memcap-cgroup (#6392): every mutant's and baseline's test run goes in a cgroup v2 leaf of this
+      # delegated directory (memory.max, no swap, a group OOM kill, memory.peak); mutgate fails in CI
+      # without it. The steps that run mutgate move their shell into main/ first, which takes root.
+      - name: A delegated cgroup for the mutation runs (#6392)
+        run: |
+          sudo mkdir /sys/fs/cgroup/mutgate /sys/fs/cgroup/mutgate/main
+          echo +memory | sudo tee /sys/fs/cgroup/mutgate/cgroup.subtree_control > /dev/null
+          sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/mutgate
+          echo "AGENTOS_MUTGATE_CGROUP=/sys/fs/cgroup/mutgate" >> "$GITHUB_ENV"
       # Outside the workspace, so the result directory and the PR tree hold no copy (#4970).
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
@@ -270,6 +289,7 @@ jobs:
         run: |
           for s in ${SHARDS//,/ }; do
             [[ "$s" =~ ^[0-9]+$ ]] || { echo "::error::shard $s is not an index"; exit 1; }
+            echo $$ | sudo tee /sys/fs/cgroup/mutgate/main/cgroup.procs > /dev/null
             end=$((SECONDS + 3600)) rc=0
             timeout -k 30 3600 python3 -I tools/mutgate.py run "$PKG" --out "mutants/$s" --git "$BASE" --shard "$s" --of "$OF" \
               --targets "$RUNNER_TEMP/plan/targets.json" || rc=$?
