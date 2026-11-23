@@ -321,7 +321,7 @@ func (c *Channel) itemLineAs(it Item, lv int) string {
 	at := func(t time.Time) string { return t.In(c.cfg.Location).Format("15:04 Jan 2") }
 	// At lineLean a notice keeps its warning but not its time, which
 	// CH-12 does not list either; the Wi-Fi page shows both.
-	lean := lv >= lineLean && (it.Detail != "" || !it.Asked.IsZero() || !it.Sent.IsZero() || !it.Retried.IsZero())
+	lean := lv >= lineLean && (it.Unverified || it.Detail != "" || !it.Asked.IsZero() || !it.Sent.IsZero() || !it.Retried.IsZero())
 	when := func(pre string, t time.Time, post string) string {
 		if lv >= lineLean {
 			return ""
@@ -427,16 +427,22 @@ func (c *Channel) question(it Item, short bool) string {
 func (it Item) line() string { return it.lineAs(lineFull) }
 
 // lineAs is line in form lv (itemLineAs): from lineShort its UNVERIFIED
-// mark in fewer words, and from lineLean without Detail.
+// mark in fewer words, still naming the Wi-Fi page, and from lineLean
+// without Detail, the line's end naming the page instead.
 func (it Item) lineAs(lv int) string {
 	short := lv >= lineShort
 	s := field(it.Facts.Verb, 12) + " " + field(it.Object, 40)
 	if it.Detail != "" && lv < lineLean {
 		s += ", " + field(it.Detail, 40)
 	}
-	if it.Unverified && short {
+	switch {
+	case it.Unverified && lv >= lineLean:
+		// The line ends ", more on my Wi-Fi page" (itemLineAs).
 		s = "UNVERIFIED: " + s
-	} else if it.Unverified {
+	case it.Unverified && short:
+		// Fewer words, the same step (UX on #6625).
+		s = "UNVERIFIED, see my Wi-Fi page: " + s
+	case it.Unverified:
 		s = "UNVERIFIED, details on the Wi-Fi page: " + s
 	}
 	if it.Recipient != "" {

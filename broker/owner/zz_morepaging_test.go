@@ -119,6 +119,10 @@ func wantFields(t *testing.T, p string, it Item) {
 	if it.Amount != "" && !strings.Contains(p, field(it.Amount, 16)) {
 		t.Fatalf("page drops the amount %q: %q", it.Amount, p)
 	}
+	// An unverified item names where to check it (UX on #6625).
+	if it.Unverified && !strings.Contains(p, "Wi-Fi page") {
+		t.Fatalf("unverified item names no place to check: %q", p)
+	}
 	// A field left out is pointed to the Wi-Fi page.
 	dropped := it.Detail != "" && !strings.Contains(p, field(it.Detail, 40)) || !it.Asked.IsZero() && !strings.Contains(p, "restart")
 	if dropped && !strings.Contains(p, ", more on my Wi-Fi page") {
@@ -563,5 +567,49 @@ func TestMoreLeanLineKeepsEachRepeatWarning(t *testing.T) {
 		if strings.Contains(p, "Oct 14") {
 			t.Fatalf("%s: lean page keeps the notice time: %q", name, p)
 		}
+	}
+}
+
+// The UX repro on #6625: a shortened page for an unverified item still
+// names the Wi-Fi page, in each form (lineShort's mark, lineLean's
+// pointer), and the request text puts no stop after
+// an item that ends in a question.
+func TestMoreShortLineKeepsTheUnverifiedStep(t *testing.T) {
+	r := newRig(t, nil)
+	r.ch.mu.Lock()
+	r.ch.codes.challenge = "A10"
+	r.ch.mu.Unlock()
+	var items []Item
+	for i := 1; i <= 20; i++ {
+		it := longItem(i, false)
+		it.Unverified, it.Detail, it.UndoBy = true, strings.Repeat("D", 40), strings.Repeat("U", 24)
+		items = append(items, it)
+	}
+	id, _ := r.ch.Request(items, 0)
+	r.inbox()
+	p := r.say("MORE " + id + " 2")
+	if !strings.Contains(p, ": 2 UNVERIFIED") {
+		t.Fatalf("page: %q", p)
+	}
+	wantFields(t, p, items[1])
+	r.ch.mu.Lock()
+	for _, lv := range []int{lineShort, lineLean} {
+		if l := r.ch.itemLineAs(longItem(1, false), lv); strings.Contains(l, "Wi-Fi") {
+			t.Fatalf("form %d points a verified item to the page: %q", lv, l)
+		}
+		it := longItem(1, false)
+		it.Unverified = true
+		if l := r.ch.itemLineAs(it, lv); !strings.Contains(l, "Wi-Fi page") {
+			t.Fatalf("form %d drops the unverified step: %q", lv, l)
+		}
+	}
+	r.ch.mu.Unlock()
+
+	r2 := newRig(t, nil)
+	a, b := lowItem("a"), lowItem("b")
+	a.Sent = time.Date(2026, 10, 4, 9, 5, 0, 0, time.UTC)
+	r2.ch.Request([]Item{a, b}, 0)
+	if sms := r2.inbox(); strings.Contains(sms, "?.") || !strings.Contains(sms, "send it again? 2 ") {
+		t.Fatalf("request text: %q", sms)
 	}
 }

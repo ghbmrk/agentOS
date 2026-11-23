@@ -315,7 +315,11 @@ func (c *Channel) renderLocked(r *request) string {
 		var b strings.Builder
 		fmt.Fprintf(&b, "Can I do these %d things?", len(r.items))
 		for i := 0; i < shown; i++ {
-			fmt.Fprintf(&b, " %d %s.", i+1, c.itemLine(r.items[i]))
+			line := c.itemLine(r.items[i])
+			if !strings.HasSuffix(line, "?") {
+				line += "." // a question keeps its own stop (UX on #6625)
+			}
+			fmt.Fprintf(&b, " %d %s", i+1, line)
 		}
 		switch {
 		case shown+1 == len(r.items):
