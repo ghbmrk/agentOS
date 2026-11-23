@@ -793,7 +793,7 @@ func (t *Tools) rollback(ctx context.Context, c caller, raw json.RawMessage) (an
 	// Asked again at the restore, as for a fork (STOP-queued-start).
 	if err := t.M.Rollback(vm.WithHold(ctx, t.Stopped), w.ID, a.Snapshot); err != nil {
 		if errors.Is(err, vm.ErrLineage) && s.Machine == w.ID {
-			return nil, errEarlierLife
+			return nil, say("worker %s: %s", named(a.Name), errEarlierLife)
 		}
 		return nil, startErr(c, toolRollback, a.Name, err)
 	}

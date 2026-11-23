@@ -22,7 +22,7 @@ func TestCAP8RollbackToAnEarlierLifeSaysSo(t *testing.T) {
 	r.must("agent", toolDestroy, m{"name": "w"}, nil)
 	r.must("agent", toolCreate, m{"name": "w"}, nil)
 	err := r.call("agent", toolRollback, m{"name": "w", "snapshot": old.Snapshot}, nil)
-	if err == nil || !strings.Contains(err.Error(), "an earlier worker of this name") || !strings.Contains(err.Error(), "worker_diff") {
+	if want := "worker w: that snapshot is of an earlier worker of this name, destroyed since; a new worker cannot restart from it, though worker_diff can still compare it"; err == nil || err.Error() != want {
 		t.Fatalf("rollback to an earlier life: %v", err)
 	}
 	var now struct{ Snapshot string }
@@ -40,7 +40,7 @@ func TestCAP8RollbackToAnotherWorkersSnapshotSaysWhatItCanUse(t *testing.T) {
 	var sb struct{ Snapshot string }
 	r.must("agent", toolCkpt, m{"name": "b"}, &sb)
 	err := r.call("agent", toolRollback, m{"name": "a", "snapshot": sb.Snapshot}, nil)
-	if err == nil || !strings.Contains(err.Error(), "of another worker") || strings.Contains(err.Error(), "lineage") || strings.Contains(err.Error(), "of this name") {
+	if want := "worker a: that snapshot is of another worker; a worker restarts only from its own snapshots or the one it was forked from"; err == nil || err.Error() != want {
 		t.Fatalf("rollback to a sibling's snapshot: %v", err)
 	}
 }
