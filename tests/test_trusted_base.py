@@ -750,10 +750,35 @@ RERUN_PIN = [
     '    runs-on: ubuntu-24.04',
     '    timeout-minutes: 30',
     '    permissions:',
-    '      actions: write # rerun trusted-base runs, nothing else',
+    '      actions: write # rerun or cancel trusted-base runs, nothing else',
     "      contents: read # compare main's commits",
     '      pull-requests: read',
     '    steps:',
+    "      - name: Cancel waiting trusted-base attempts on no open PR's head",
+    '        shell: bash',
+    '        env:',
+    '          GH_TOKEN: ${{ github.token }}',
+    '          REPO: ${{ github.repository }}',
+    '        run: |',
+    '          waiting=""',
+    '          for s in queued pending; do',
+    '            w=$(gh api --paginate "repos/$REPO/actions/workflows/trusted-base.yml/runs?event=pull_request_target&status=$s&per_page=100" --jq \'.workflow_runs[] | "\\(.id) \\(.head_sha) \\([.pull_requests[].number] | join(","))"\') || { echo "::warning::cannot list $s trusted-base runs; nothing cancelled"; exit 0; }',
+    '            waiting="$waiting$w"$\'\\n\'',
+    '          done',
+    '          heads=$(gh api --paginate "repos/$REPO/pulls?state=open&per_page=100" --jq \'.[] | "\\(.number) \\(.head.sha)"\') || { echo "::warning::cannot list open PRs; nothing cancelled"; exit 0; }',
+    '          if grep -Evq \'^[1-9][0-9]* [0-9a-f]{40}$\' <<< "$heads"; then echo "::warning::an open PR\'s head is unreadable; nothing cancelled"; exit 0; fi',
+    '          cancelled=0',
+    '          while read -r id sha nums; do',
+    '            [[ $id =~ ^[1-9][0-9]*$ && $sha =~ ^[0-9a-f]{40}$ && $nums =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || continue',
+    '            ! grep -q " $sha\\$" <<< "$heads" || continue',
+    '            open=1',
+    '            for n in ${nums//,/ }; do grep -q "^$n " <<< "$heads" || open=0; done',
+    '            [ "$open" = 1 ] || continue',
+    '            now=$(gh api "repos/$REPO/actions/runs/$id" --jq \'select(.status == "queued" or .status == "pending") | "\\(.head_sha) \\([.pull_requests[].number] | join(","))"\') || { echo "::warning::run $id not re-read; left alone"; continue; }',
+    '            [ "$now" = "$sha $nums" ] || continue',
+    '            if gh api -X POST "repos/$REPO/actions/runs/$id/cancel" > /dev/null; then echo "cancelled run $id ($sha, PR $nums): no open PR\'s head"; cancelled=$((cancelled + 1)); else echo "::warning::cancel of run $id refused"; fi',
+    '          done <<< "$waiting"',
+    '          printf \'\\n%s\\n\' "Cancelled $cancelled waiting trusted-base attempt(s) on no open PR\'s head." | tee -a "$GITHUB_STEP_SUMMARY"',
     "      - name: Rerun every open PR's newest trusted-base run",
     '        shell: bash',
     '        env:',
@@ -901,7 +926,8 @@ class Workflow(unittest.TestCase):
 def rerun_script():
     """The rerun step's `run:` block of trusted-base-rerun.yml, as one bash script."""
     lines = (ROOT / ".github/workflows/trusted-base-rerun.yml").read_text().split("\n")
-    start = next(i for i, l in enumerate(lines) if l.strip() == "run: |") + 1
+    step = lines.index("      - name: Rerun every open PR's newest trusted-base run")
+    start = next(i for i, l in enumerate(lines) if i > step and l.strip() == "run: |") + 1
     return "\n".join(l[10:] for l in lines[start:] if l.strip()) + "\n"
 
 

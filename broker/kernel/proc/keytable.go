@@ -3,13 +3,11 @@ package proc
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"syscall"
 
@@ -50,15 +48,18 @@ func OpenFileKeys(dir string, logKey [32]byte) (*FileKeys, error) {
 	if _, err := dropTemps(dir); err != nil {
 		return nil, err
 	}
-	b, err := aes.NewCipher(logKey[:])
-	if err != nil {
-		return nil, err
-	}
-	a, err := cipher.NewGCM(b)
-	if err != nil {
-		return nil, err
-	}
-	return &FileKeys{dir: dir, aead: a}, nil
+	return &FileKeys{dir: dir, aead: sealer(logKey)}, nil
+}
+
+// sealer is AES-256-GCM under key with a fresh random nonce put before each
+// sealed value (cipher.NewGCMWithRandomNonce): the frame of the key table,
+// the backup records and the kernel's log. Neither call fails for a 32-byte
+// AES key; were one to, the nil AEAD panics at its first use, so nothing is
+// ever sealed or opened unchecked.
+func sealer(key [32]byte) cipher.AEAD {
+	b, _ := aes.NewCipher(key[:])
+	a, _ := cipher.NewGCMWithRandomNonce(b)
+	return a
 }
 
 func keyAAD(subject string) []byte { return []byte("agentos.keytable.v1\x00" + subject) }
@@ -74,11 +75,7 @@ func (f *FileKeys) Put(subject string, k kernel.SubjectKey) error {
 	if _, err := f.path(subject); err != nil {
 		return err
 	}
-	nonce := make([]byte, f.aead.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return err
-	}
-	return privfile.WriteAtomic(f.dir, subject+keyExt, f.aead.Seal(nonce, nonce, k[:], keyAAD(subject)), f.stop)
+	return privfile.WriteAtomic(f.dir, subject+keyExt, f.aead.Seal(nil, nil, k[:], keyAAD(subject)), f.stop)
 }
 
 func (f *FileKeys) Get(subject string) (kernel.SubjectKey, bool, error) {
@@ -98,17 +95,11 @@ func (f *FileKeys) Get(subject string) (kernel.SubjectKey, bool, error) {
 	if err := privfile.CheckFile(fd); err != nil {
 		return k, false, err
 	}
-	b, err := io.ReadAll(io.LimitReader(fd, 256))
-	if err != nil {
-		return k, false, err
-	}
-	ns := f.aead.NonceSize()
-	if len(b) < ns {
-		return k, false, ErrKeyFile
-	}
-	pt, err := f.aead.Open(nil, b[:ns], b[ns:], keyAAD(subject))
-	if err != nil || len(pt) != len(k) {
-		return k, false, ErrKeyFile
+	// A read that fails is a file that does not open, its error kept.
+	b, rerr := io.ReadAll(io.LimitReader(fd, 256))
+	pt, err := f.aead.Open(nil, nil, b, keyAAD(subject))
+	if rerr != nil || err != nil || len(pt) != len(k) {
+		return k, false, errors.Join(ErrKeyFile, rerr)
 	}
 	copy(k[:], pt)
 	return k, true, nil
@@ -135,13 +126,12 @@ func (f *FileKeys) List() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []string
+	var out []string // in name order, as os.ReadDir gives them
 	for _, de := range des {
 		sub, ok := strings.CutSuffix(de.Name(), keyExt)
 		if ok && kernel.ValidSubject(sub) {
 			out = append(out, sub)
 		}
 	}
-	slices.Sort(out)
 	return out, nil
 }
