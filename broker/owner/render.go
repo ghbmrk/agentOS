@@ -342,7 +342,11 @@ func (c *Channel) itemLineAs(it Item, lv int) string {
 		// Only an erased send matched (OP2-ER-2): it may not be this one.
 		s += ", may repeat a send whose record was erased (it went " + at(it.Sent) + "); send it?"
 	case !it.Sent.IsZero() && short:
-		s += ", sent" + when(" ", it.Sent, "") + "; again?"
+		if lv >= lineLean {
+			s += ", already sent; send again?"
+		} else {
+			s += ", sent " + at(it.Sent) + "; again?"
+		}
 	case !it.Sent.IsZero():
 		// Confirm repeats (D-116): said plainly, as a question.
 		s += ", already sent " + at(it.Sent) + "; send it again?"

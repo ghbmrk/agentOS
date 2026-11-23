@@ -527,3 +527,41 @@ func TestTextPointsMoreAtTheFirstItemLeftOut(t *testing.T) {
 		t.Fatalf("pointer %q leads to %q", m[0], p)
 	}
 }
+
+// At lineLean each repeat notice keeps its warning and drops only its
+// time (OWN-17, D-116, OP2-ER-2; Security on #6625): forced on the
+// worst high-tier item, the shortest line still warns, and says the
+// rest is on the Wi-Fi page.
+func TestMoreLeanLineKeepsEachRepeatWarning(t *testing.T) {
+	tm := time.Date(2026, 10, 14, 11, 0, 0, 0, time.UTC)
+	for name, c := range map[string]struct {
+		set  func(*Item)
+		want string
+	}{
+		"sent":        {func(it *Item) { it.SentErased = false }, ", already sent; send again?, more on my Wi-Fi page"},
+		"sent-erased": {func(it *Item) {}, ", may repeat an erased send, more on my Wi-Fi page"},
+		"retried":     {func(it *Item) { it.Sent, it.SentErased, it.Retried = time.Time{}, false, tm }, ", may go twice, more on my Wi-Fi page"},
+	} {
+		r := newRig(t, nil)
+		var items []Item
+		for i := 1; i <= 4; i++ {
+			it := longItem(i, true)
+			c.set(&it)
+			items = append(items, it)
+		}
+		id, err := r.ch.Request(items, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.inbox()
+		r.ch.mu.Lock()
+		p := r.ch.pageLocked(r.ch.open[id], []int{1, 2, 3}, 1, lineLean)
+		r.ch.mu.Unlock()
+		if !strings.Contains(p, c.want) || !strings.Contains(p, "code generator") {
+			t.Fatalf("%s: lean page lacks %q: %q", name, c.want, p)
+		}
+		if strings.Contains(p, "Oct 14") {
+			t.Fatalf("%s: lean page keeps the notice time: %q", name, p)
+		}
+	}
+}
