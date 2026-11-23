@@ -42,9 +42,10 @@ func followupPost(s *Server, tok, path string, form url.Values) *httptest.Respon
 
 // REQ: UX-2wb-1 (#1752 item 2)
 // The no-reply wording never says Reload: the page is a POST's, so a
-// reload sends the answer again. It points to Approvals and STATUS.
+// reload sends the answer again. It points to the page's Status link and
+// to STATUS by text.
 func TestTheNoReplyAnswerTextDoesNotSayReload(t *testing.T) {
-	if strings.Contains(answerUnreachableText, "Reload") || !strings.Contains(answerUnreachableText, "Approvals") || !strings.Contains(answerUnreachableText, "STATUS") {
+	if strings.Contains(answerUnreachableText, "Reload") || !strings.Contains(answerUnreachableText, "Open Status") || !strings.Contains(answerUnreachableText, "STATUS") {
 		t.Fatalf("answer wording %q", answerUnreachableText)
 	}
 }
@@ -81,15 +82,18 @@ func TestAnAnswerThatLocksTheSessionKeepsItsMessage(t *testing.T) {
 }
 
 // REQ: UX-2wb-1 (#1752, P8 on #1746)
-// A page STOP refused because agentosd is stopping says agentOS is
-// restarting, not the generic failure; any other failure keeps it.
-func TestAStopWhileRestartingSaysSo(t *testing.T) {
+// A page STOP refused because agentosd is stopping says it is stopping or
+// restarting, since any SIGTERM (a restart, a stop, a poweroff) refuses it
+// alike and the page cannot tell which; it never claims a restart alone,
+// nor tells the owner to retry on a clock. Any other failure keeps the
+// generic line.
+func TestAStopWhileAgentosdStopsSaysSo(t *testing.T) {
 	tok := strings.Repeat("ab", localapi.TokenBytes)
 	for _, c := range []struct {
 		err  error
 		want string
 	}{
-		{sockets.Code(refusedStopping), "stoprestarting"},
+		{sockets.Code(localapi.ErrStopping), "stopstopping"},
 		{sockets.ErrFailed, "stopfailed"},
 	} {
 		s := followupServer(t, tok, InProcess{
@@ -100,7 +104,32 @@ func TestAStopWhileRestartingSaysSo(t *testing.T) {
 			t.Fatalf("STOP refused with %v: %d %q", c.err, w.Code, loc)
 		}
 	}
-	if !strings.Contains(msgs["stoprestarting"], "restarting") || !strings.Contains(msgs["stoprestarting"], "STOP again") {
-		t.Fatalf("restarting text %q", msgs["stoprestarting"])
+	text := msgs["stopstopping"]
+	if !strings.Contains(text, "stopping or restarting") || strings.Contains(text, "in a minute") || !strings.Contains(text, "press STOP") {
+		t.Fatalf("stopping text %q", text)
+	}
+}
+
+// REQ: UX-2wb-1, CH-7 (#1752; L3 and UX blocker 1 on #6620)
+// Only an answer the channel replied to keeps its message over a refused
+// listing. A POST from an expired or revoked session (OpAnswer refused as
+// unauthorized), or with a stale form token, still goes to /unlock, as on
+// main: no "may or may not have gone through" hedge, and no "check the
+// request below" over an empty list.
+func TestAnUnauthorizedAnswerStillGoesToUnlock(t *testing.T) {
+	tok := strings.Repeat("ab", localapi.TokenBytes)
+	unauthorized := func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+		return nil, sockets.Code(localapi.ErrUnauthorized)
+	}
+	s := followupServer(t, tok, InProcess{localapi.OpAnswer: unauthorized, localapi.OpRequests: unauthorized})
+	sess, sum := tokenKey(tok), strings.Repeat("0", 64)
+	for name, form := range map[string]url.Values{
+		"expired session": {"id": {"Q2"}, "sum": {sum}, "tok": {s.formToken(sess, "Q2", sum)}, "answer": {"deny"}},
+		"stale form":      {"id": {"Q2"}, "sum": {sum}, "tok": {"stale"}, "answer": {"deny"}},
+	} {
+		w := followupPost(s, tok, "/approvals/", form)
+		if loc := w.Header().Get("Location"); w.Code != 303 || loc != "/unlock?next=/approvals/" {
+			t.Fatalf("%s: %d %q %s", name, w.Code, loc, w.Body.String())
+		}
 	}
 }

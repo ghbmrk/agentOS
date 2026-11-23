@@ -143,7 +143,9 @@ func (c *Channel) textAfterReply(alerts []string, signIn string, n, m int, now t
 // waits, so no Add can race that Wait (Security N1 on #1686). Once the
 // drain has begun, do runs in the caller instead, behind the batches
 // before it: agentosd starts none then (O34), and a caller that does
-// (say, from Tick) waits for its text rather than lose it.
+// (say, from Tick) waits for its text rather than lose it. That wait has
+// no bound: a caller behind a batch the modem holds waits for it, so a
+// post-drain caller that must not block needs its own bound.
 func (c *Channel) afterReply(do func()) {
 	done := make(chan struct{})
 	c.sendMu.Lock()

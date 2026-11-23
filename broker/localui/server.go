@@ -745,8 +745,8 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	msg := "stopped"
-	if err := s.call(r.Context(), localapi.OpStop, struct{}{}, nil); refused(err, refusedStopping) {
-		msg = "stoprestarting"
+	if err := s.call(r.Context(), localapi.OpStop, struct{}{}, nil); refused(err, localapi.ErrStopping) {
+		msg = "stopstopping"
 	} else if err != nil {
 		msg = "stopfailed"
 	}
@@ -959,17 +959,14 @@ func (s *Server) contact(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:"+s.setup.cardName()+"\r\nTEL;TYPE=CELL:"+n+"\r\nURL:http://"+page+"/\r\nEND:VCARD\r\n")
 }
 
-// refusedStopping is agentosd's refusal of a call while it stops
-// (daemon errStopping).
-const refusedStopping = "stopping"
-
 var msgs = map[string]string{
 	"stopped":    "Stopped. Nothing new starts until you resume.",
 	"stopfailed": "STOP failed to record. Nothing new starts now; press STOP again.",
-	// agentosd refuses page calls while it stops (owner O34), for up to
-	// owner.SendDrain; the generic failure would read as a fault (#1752).
-	"stoprestarting": "agentOS is restarting, so STOP was not recorded. Press STOP again in a minute.",
-	"resumefailed":   "RESUME failed to record. Still stopped.",
+	// agentosd refuses page calls once any SIGTERM ends its run (owner
+	// O34): a restart, a stop, a reboot or a poweroff. The page cannot
+	// tell which, so it names both (#1752).
+	"stopstopping": "agentOS is stopping or restarting, so STOP was not recorded. When this page loads again, press STOP.",
+	"resumefailed": "RESUME failed to record. Still stopped.",
 }
 
 func msgText(r *http.Request) string { return msgs[r.URL.Query().Get("m")] }
