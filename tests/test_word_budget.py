@@ -19,6 +19,13 @@ DECISIONS = "| ID | Date | Status | Decision | Source |\n|---|---|---|---|---|\n
             "| D-9 | 2026-10-23 | active | words for #420 and #4 | Mark |\n"
 
 
+NONE = ([], [])
+
+
+def rec(*lines):
+    return "# comment\n" + "".join(f"{x}\n" for x in lines)
+
+
 class CountTest(unittest.TestCase):
     def test_sets_take_the_named_docs_and_every_role_skill(self):
         got = word_budget.sets(["SPEC.md", "CLAUDE.md", "docs/OPERATING.md", "README.md",
@@ -47,36 +54,103 @@ class CheckTest(unittest.TestCase):
     base = {"spec": 100, "process": 50}
 
     def test_equal_or_smaller_passes(self):
-        ok, _ = word_budget.check(self.base, {"spec": 100, "process": 40}, "", DECISIONS)
+        ok, _ = word_budget.check(self.base, {"spec": 100, "process": 40}, NONE, DECISIONS)
         self.assertTrue(ok)
 
     def test_growth_fails_without_a_waiver(self):
-        ok, lines = word_budget.check(self.base, {"spec": 100, "process": 51}, "", DECISIONS)
+        ok, lines = word_budget.check(self.base, {"spec": 100, "process": 51}, NONE, DECISIONS)
         self.assertFalse(ok)
         self.assertIn("grew process", lines[-1])
 
     def test_cuts_in_one_set_do_not_pay_for_the_other(self):
-        ok, _ = word_budget.check(self.base, {"spec": 10, "process": 51}, "", DECISIONS)
+        ok, _ = word_budget.check(self.base, {"spec": 10, "process": 51}, NONE, DECISIONS)
         self.assertFalse(ok)
 
     def test_waiver_must_name_an_active_decision_that_names_the_pr(self):
         # #2945: an active row is not enough; it has to name this PR, so a standing row
         # (D-152 itself, say) cannot waive an unrelated PR's growth.
         head = {"spec": 120, "process": 50}
-        self.assertTrue(word_budget.check(self.base, head, "Body.\nWord-budget: D-7\n", DECISIONS, 42)[0])
+        w = lambda ident, pr=42, base="": word_budget.waivers(base, rec(f"word-budget #{pr} -- {ident}"), pr)
+        self.assertTrue(word_budget.check(self.base, head, w("D-7"), DECISIONS, 42)[0])
         # #4946 UX: the waiver does not lift SPEC.md above its D-310 ceiling, and the line says so.
-        ok, lines = word_budget.check(self.base, {"spec": 101, "process": 50}, "Word-budget: D-7", DECISIONS, 42)
+        ok, lines = word_budget.check(self.base, {"spec": 101, "process": 50}, w("D-7"), DECISIONS, 42)
         self.assertTrue(ok)
         self.assertIn("SPEC.md stays capped by tools/ceilings.txt (D-310)", lines[-1])
-        ok, lines = word_budget.check(self.base, {"spec": 100, "process": 51}, "Word-budget: D-7", DECISIONS, 42)
+        ok, lines = word_budget.check(self.base, {"spec": 100, "process": 51}, w("D-7"), DECISIONS, 42)
         self.assertNotIn("ceilings", lines[-1])
-        self.assertFalse(word_budget.check(self.base, head, "Word-budget: D-7", DECISIONS, 43)[0])
-        self.assertFalse(word_budget.check(self.base, head, "Word-budget: D-7", DECISIONS)[0])
-        self.assertFalse(word_budget.check(self.base, head, "Word-budget: D-8", DECISIONS, 42)[0])
-        self.assertFalse(word_budget.check(self.base, head, "Word-budget: D-9", DECISIONS, 42)[0])
-        self.assertTrue(word_budget.check(self.base, head, "Word-budget: D-9", DECISIONS, 420)[0])
-        self.assertFalse(word_budget.check(self.base, head, "Word-budget: D-10", DECISIONS, 42)[0])
-        self.assertFalse(word_budget.check(self.base, head, "See Word-budget: D-7 inline", DECISIONS, 42)[0])
+        self.assertFalse(word_budget.check(self.base, head, w("D-7"), DECISIONS, 43)[0])
+        self.assertFalse(word_budget.check(self.base, head, w("D-7"), DECISIONS)[0])
+        self.assertFalse(word_budget.check(self.base, head, w("D-8"), DECISIONS, 42)[0])
+        self.assertFalse(word_budget.check(self.base, head, w("D-9"), DECISIONS, 42)[0])
+        self.assertTrue(word_budget.check(self.base, head, w("D-9", 420), DECISIONS, 420)[0])
+        self.assertFalse(word_budget.check(self.base, head, w("D-10"), DECISIONS, 42)[0])
+
+
+class RecordTest(unittest.TestCase):
+    """#6490: the waiver is a committed record line the head adds, never PR-body text."""
+    # REQ: CI-word-budget-record
+    base = {"spec": 100, "process": 50}
+    grew = {"spec": 100, "process": 51}
+
+    def test_only_lines_the_base_lacks_count(self):
+        line = "word-budget #42 -- D-7"
+        self.assertEqual(word_budget.waivers(rec(line), rec(line), 42), NONE)
+        self.assertEqual(word_budget.waivers(rec("word-budget  #42  --  D-7"), rec(line), 42), NONE)
+        self.assertEqual(word_budget.waivers("", rec(line), 42), (["D-7"], []))
+        self.assertFalse(word_budget.check(self.base, self.grew, word_budget.waivers(rec(line), rec(line), 42),
+                                           DECISIONS, 42)[0])
+
+    def test_an_added_line_naming_another_pr_or_malformed_fails(self):
+        for line in ("word-budget #43 -- D-7", "word-budget #42 --", "word-budget #42 -- D-7 extra",
+                     "Word-budget: D-7", "ceiling #42 -- D-7", "word-budget #042 -- D-7"):
+            with self.subTest(line=line):
+                got = word_budget.waivers("", rec(line), 42)
+                self.assertEqual(len(got[1]), 1, got)
+                ok, lines = word_budget.check(self.base, self.base, got, DECISIONS, 42)
+                self.assertFalse(ok)
+                self.assertIn("tools/word_budget_reasons.txt", lines[-1])
+        self.assertEqual(len(word_budget.waivers("", rec("word-budget #42 -- D-7"), None)[1]), 1)
+
+    def test_comments_and_blanks_are_not_entries(self):
+        self.assertEqual(word_budget.waivers("", "# word-budget #43 -- D-7\n\n   \n  # x\n", 42), NONE)
+
+    def test_a_waiver_hidden_after_an_odd_line_break_is_refused(self):
+        # #6525 Security/L3: splitlines() ends a line at these, so a waiver inside a comment the
+        # diff shows as one line would count unseen. Split on "\n" only; refuse the rest, naming the line.
+        for brk in ("\x85", "\u2028", "\u2029", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\r", "\t", "\0"):
+            for base in (False, True):
+                with self.subTest(brk=repr(brk), base=base):
+                    text = f"# Lines stay as history{brk}word-budget #42 -- D-7\n"
+                    with self.assertRaises(SystemExit) as e:
+                        word_budget.waivers(text, "", 42) if base else word_budget.waivers("", text, 42)
+                    self.assertIn("tools/word_budget_reasons.txt", str(e.exception.code))
+                    self.assertIn(":1:", str(e.exception.code))
+
+    def test_the_failure_names_the_record(self):
+        ok, lines = word_budget.check(self.base, self.grew, NONE, DECISIONS, 42)
+        self.assertFalse(ok)
+        self.assertIn("no `word-budget #42 -- <decision ID>` line added to tools/word_budget_reasons.txt", lines[-1])
+
+    def test_a_body_cannot_change_the_result(self):
+        # The failure path: after the accepts, an author adds `Word-budget: D-7` to the body and the
+        # `edited` rerun went green. Now the tool reads no body and the workflow neither reruns on
+        # an edit nor passes the body.
+        wf = (pathlib.Path(__file__).resolve().parent.parent / ".github/workflows/word-budget.yml").read_text()
+        self.assertRegex(wf, r"(?m)^    types: \[opened, synchronize, reopened\]$")
+        for gone in ("pull_request.body", "PR_BODY", "--body-file", "body.md"):
+            self.assertNotIn(gone, wf)
+        tool = pathlib.Path(word_budget.__file__)
+        r = subprocess.run([sys.executable, "-I", str(tool), "--git", "HEAD", "HEAD", "--body-file", "x"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("unrecognized arguments", r.stderr)
+
+    def test_the_record_is_a_declared_list(self):
+        root = pathlib.Path(__file__).resolve().parent.parent
+        sys.path.insert(0, str(root / "tools"))
+        import record_merge
+        self.assertEqual(record_merge.record_class(word_budget.RECORD), "list")
+        self.assertTrue((root / word_budget.RECORD).is_file())
 
 
 class GitTest(unittest.TestCase):
@@ -105,13 +179,25 @@ class GitTest(unittest.TestCase):
             grew = run("--git", "HEAD~1", "HEAD")
             self.assertEqual(grew.returncode, 1, grew.stdout + grew.stderr)
             self.assertIn("process: 2 -> 3 words (+1)", grew.stdout)
-            (root / "body.md").write_text("Word-budget: D-7\n")
-            self.assertEqual(run("--git", "HEAD~1", "HEAD", "--body-file", "body.md").returncode, 0)
-            self.assertEqual(run("--git", "HEAD~1", "HEAD", "--body-file", "body.md", pr="").returncode, 1)
-            self.assertEqual(run("--git", "HEAD~1", "HEAD", "--body-file", "body.md", pr="43").returncode, 1)
-            (root / "body.md").write_text("Word-budget: D-11\n")
-            self.assertEqual(run("--git", "HEAD~1", "HEAD", "--body-file", "body.md").returncode, 1)
             self.assertEqual(run("--git", "HEAD", "HEAD~1").returncode, 0)
+            # #6490: the head commits the waiver line; it is read from the head tree, not a body.
+            (root / "tools").mkdir()
+            for ident, pr, want in (("D-7", "42", 0), ("D-7", "", 1), ("D-7", "43", 1), ("D-11", "42", 1)):
+                with self.subTest(ident=ident, pr=pr):
+                    (root / "tools/word_budget_reasons.txt").write_text(f"# waivers\nword-budget #42 -- {ident}\n")
+                    git("add", "-A")
+                    git("commit", "-qm", "waiver")
+                    got = run("--git", "HEAD~2", "HEAD", pr=pr)
+                    self.assertEqual(got.returncode, want, got.stdout + got.stderr)
+                    git("reset", "-q", "--hard", "HEAD~1")
+                    (root / "tools").mkdir(exist_ok=True)
+            # A base that already holds the line: history, so it waives nothing.
+            (root / "tools/word_budget_reasons.txt").write_text("word-budget #42 -- D-7\n")
+            git("add", "-A")
+            git("commit", "-qm", "old waiver")
+            (root / "CLAUDE.md").write_text("a b c d")
+            git("commit", "-qam", "more")
+            self.assertEqual(run("--git", "HEAD~1", "HEAD").returncode, 1)
 
     def test_quoted_skill_path_is_counted(self):
         # REV-LOW-tools finding 21: git quotes a non-ASCII, quote or backslash path unless -z, so a

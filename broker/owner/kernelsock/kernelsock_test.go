@@ -371,22 +371,8 @@ func capturingKernel(t *testing.T) (string, <-chan string) {
 	return path, lines
 }
 
-// RETRY sends the bytes kernel/proc's own client sends, so the kernel reads
-// the plan and step the owner approved, not another (#2783 b).
-func TestRetrySendsTheKernelsOwnCall(t *testing.T) {
-	needRoot(t)
-	path, lines := capturingKernel(t)
-	if err := (proc.Owner{Conn: proc.Conn{Socket: path, UID: os.Getuid(), Timeout: 5 * time.Second}}).Retry("plan:7", 2, 3); err != nil {
-		t.Fatal(err)
-	}
-	want := <-lines
-	if err := (Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}).Retry(context.Background(), "plan:7", 2, 3); err != nil {
-		t.Fatal(err)
-	}
-	if got := <-lines; got != want {
-		t.Fatalf("RETRY sends %q; kernel/proc sends %q", got, want)
-	}
-}
+// RETRY's wire is checked against the kernel's own retryArgs in kernel/proc
+// (TestRetrySendsTheKernelsOwnCall), where that type lives.
 
 // Status reads every field it names from the kernel's own frame
 // (kernel.Unsettled as the status read encodes it).
@@ -437,14 +423,14 @@ func TestSubmitAndPlanReachTheKernel(t *testing.T) {
 	}
 }
 
-// Submit and Plan send the bytes kernel/proc's own client sends.
+// Submit and Plan send the bytes kernel/proc's own framing sends.
 func TestSubmitAndPlanSendTheKernelsOwnCalls(t *testing.T) {
 	needRoot(t)
 	path, lines := capturingKernel(t)
-	pc := proc.Owner{Conn: proc.Conn{Socket: path, UID: os.Getuid(), Timeout: 5 * time.Second}}
+	pc := proc.Conn{Socket: path, UID: os.Getuid(), Timeout: 5 * time.Second}
 	o := Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}
 	p := kernel.Plan{ID: "m1/r1", Steps: []kernel.PlanStep{{Verb: "organize", Clerk: "mail", Args: map[string]string{"target": "t"}}}, Sig: []byte{1}}
-	if err := pc.Submit(p); err != nil {
+	if err := pc.Call("submit", p, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := <-lines
@@ -454,7 +440,7 @@ func TestSubmitAndPlanSendTheKernelsOwnCalls(t *testing.T) {
 	if got := <-lines; got != want {
 		t.Fatalf("submit sends %q; kernel/proc sends %q", got, want)
 	}
-	pc.Plan("m1/r1")
+	pc.Call("plan", "m1/r1", nil)
 	want = <-lines
 	o.Plan(context.Background(), "m1/r1")
 	if got := <-lines; got != want {
@@ -1011,7 +997,7 @@ func TestEraseByNameReachesTheKernel(t *testing.T) {
 	}
 }
 
-// ApproveCode sends the checker's approval as kernel/proc's own call, so the
+// ApproveCode sends the checker's approval as kernel/proc's own framing, so the
 // kernel, not this channel, checks the checker's signature (CH-4, #3682).
 func TestApproveCodeSendsTheKernelsOwnCall(t *testing.T) {
 	needRoot(t)
@@ -1021,7 +1007,7 @@ func TestApproveCodeSendsTheKernelsOwnCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := kernel.SignCode(priv, []kernel.CodeStep{{Plan: "plan:7", Index: 2, Hash: [32]byte{9}}})
-	if err := (proc.Owner{Conn: proc.Conn{Socket: path, UID: os.Getuid(), Timeout: 5 * time.Second}}).ApproveCode(a); err != nil {
+	if err := (proc.Conn{Socket: path, UID: os.Getuid(), Timeout: 5 * time.Second}).Call("approvecode", a, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := <-lines
