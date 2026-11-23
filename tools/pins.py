@@ -79,7 +79,7 @@ FETCH_EXEMPT = {
                                     ".curlrc; downloads nothing"),
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
     "tests/test_image.py": (1, "a busybox wget shebang as fixture text"),
-    "tests/test_pins.py": (95, "this reader's test cases"),
+    "tests/test_pins.py": (99, "this reader's test cases"),
     "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
@@ -103,7 +103,7 @@ NET_MODULES = ("urllib.request", "urllib3", "requests", "http.client", "httpx", 
 PIP = re.compile(r"pip(?:3(?:\.[0-9]+)?)?")
 JS_VERBS = {"npm": {"install", "i", "add", "exec", "x"}, "yarn": {"add", "dlx", "install"},
             "pnpm": {"add", "dlx", "install", "i"}}
-FROZEN = frozenset(["--frozen-lockfile", "--immutable"])  # yarn/pnpm install then holds to the lockfile
+FROZEN = frozenset(["--frozen-lockfile", "--immutable"])  # a yarn/pnpm install then holds to the lockfile
 WRAPPERS = frozenset(["sudo", "env", "exec", "retry", "command", "nice", "time", "timeout", "nohup", "xargs",
                       "stdbuf", "setsid"])
 WRAPPER_ARG = re.compile(r"-.*|[0-9.]+[smhd]?")  # a wrapper's flag or duration (`timeout 60`, `nice -n 5`)
@@ -122,8 +122,9 @@ def tool_sites(line):
         for i, x in enumerate(w):
             if PIP.fullmatch(x) and {"install", "download"} & set(w[i + 1:]) and "--require-hashes" not in w:
                 n += 1
-            elif x in JS_VERBS and JS_VERBS[x] & set(w[i + 1:]) and not ("install" in w[i + 1:] and FROZEN & set(w)):
-                n += 1
+            elif x in JS_VERBS and JS_VERBS[x] & set(w[i + 1:]):
+                # Only yarn and pnpm read FROZEN (npm ignores it), and only for a plain install.
+                n += not (x != "npm" and JS_VERBS[x] & set(w[i + 1:]) <= {"install", "i"} and FROZEN & set(w))
     return n
 
 
