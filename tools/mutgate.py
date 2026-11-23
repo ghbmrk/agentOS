@@ -282,11 +282,14 @@ def is_data(path):
 # its binaries and tests), and a broker/go.mod line that is a `go` or `godebug` directive or entry. Either is a
 # change of every test there, as #6377's test-file line is. A -U0 hunk shows no enclosing block, so a go.mod line
 # sets no default only when it is placed: blank, a comment, `)`, a directive of GO_MOD_QUIET (requirements and
-# replacements are go.sum's and vendor/'s, is_vendored; the toolchain changes code, not defaults), or an
+# replacements are go.sum's and vendor/'s, is_vendored), or an
 # indented entry of a module path or a retracted version; any other line fails closed to every test.
+# A changed `toolchain` line is every test of each package holding such a `//go:` line (directive_packages):
+# a new release can satisfy its file's `//go:build go1.N` line.
 # A change anywhere in a non-test file holding such a `//go:` line on either side is one too (dormant).
 MODULE_FILE = "broker/go.mod"
 EVERY_TEST = "\0every-test"  # the name of added_lines' key for every test of a directory; no git path holds a NUL
+DORMANT_TEST = "\0dormant-test"  # added_lines' key for every test of each package directive_packages names
 GO_MOD_QUIET = {"module", "require", "exclude", "replace", "retract", "toolchain", "tool"}
 GO_MOD_ENTRY = re.compile(r"[^\s/]*\.[^\s/]*(?:/\S*)?|\[?v\d\S*")
 
@@ -297,6 +300,8 @@ def widened(path, text):
     if path == MODULE_FILE:
         s = re.sub(r"\s=>\s", " ", text.split("//", 1)[0].strip())
         first = re.match(r"[^\s(]*", s)[0]
+        if first == "toolchain" and s != first:
+            return f"broker/{DORMANT_TEST}"  # a new release tag can build a dormant directive's file (Security on #6558)
         if (s in ("", ")") or first in GO_MOD_QUIET and s != first
                 or text[:1] in " \t" and "=" not in s and GO_MOD_ENTRY.fullmatch(first)):
             return None
@@ -329,6 +334,22 @@ def dormant(diff_text, base, head):
                    for m in DIRECTIVE.findall(base_text(rev, path) or "")):
                 out[f"{posixpath.dirname(path)}/{EVERY_TEST}"] = None
     return out
+
+
+@functools.lru_cache(maxsize=None)
+def directive_packages(broker):
+    """The broker/ packages holding a non-test, non-vendored .go file whose text has a package-wide `//go:` line
+    (not LOCAL_DIRECTIVES), comments included; a file go would not compile (go_text) counts, failing closed."""
+    out = set()
+    for d, dirs, files in os.walk(broker):
+        dirs[:] = sorted(x for x in dirs if x not in ("vendor", "testdata") and x[0] not in "._")
+        rel = pathlib.Path(d).relative_to(broker).as_posix()
+        for f in files:
+            if rel != "." and is_source(f):
+                text = go_text(pathlib.Path(d, f).read_bytes())
+                if text is None or any(m not in LOCAL_DIRECTIVES for m in DIRECTIVE.findall(text)):
+                    out.add(rel)
+    return frozenset(out)
 
 
 @functools.lru_cache(maxsize=None)
@@ -584,6 +605,8 @@ def owners(path, broker=None):
     its own package's when it is that package's data (data_owner), and every other package that
     names it by path (readers). A vendored file has none (is_vendored). A package's own _test.go
     file changes only the tests that reach its changed lines (owners_of, head_tests)."""
+    if path == f"broker/{DORMANT_TEST}":
+        return set(directive_packages((BROKER if broker is None else pathlib.Path(broker)).resolve()))
     if path.rsplit("/", 1)[-1] == EVERY_TEST:
         d = BROKER if broker is None else pathlib.Path(broker)
         return set(go_packages(d.resolve())) if path == f"broker/{EVERY_TEST}" else {package_of(path)}

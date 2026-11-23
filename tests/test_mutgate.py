@@ -6450,6 +6450,16 @@ class GoDebugEveryFu(unittest.TestCase):
                 with self.subTest(minus=minus, plus=plus):
                     added, tests = mutgate.added_lines(mod_diff("broker/go.mod", minus, plus))
                     self.assertEqual(mutgate.touched(added, tests), set())
+            # Security on #6558: a toolchain bump can satisfy an unchanged file's `//go:build go1.N` line and switch
+            # on its //go:debug, so it is every test of each package holding a package-wide directive, only those.
+            bump = mod_diff("broker/go.mod", ("toolchain go1.26.11",), ("toolchain go1.27.0",))
+            dormant = {"cmd/tool/new.go": "//go:build go1.27\n\n//go:debug panicnil=1\n\npackage main\n",
+                       "mail/x.go": "/*\n//go:debug x=1\n*/\npackage mail\n", "hint/y.go": "//go:noinline\npackage hint\n"}
+            with tempfile.TemporaryDirectory() as d2, DataFiles.tree(self, d2, {**self.CODE, **dormant}):
+                added, tests = mutgate.added_lines(bump)
+                self.assertEqual(mutgate.touched(added, tests), {"cmd/tool", "mail"})
+                self.assertIsNone(mutgate.head_tests(tests, "cmd/tool"))
+                self.assertEqual(mutgate.head_tests(tests, "hint"), [])
             # Another module's go.mod (third_party/, a replace directory) is that package's data, as before.
             added, tests = mutgate.added_lines(mod_diff("broker/hint/go.mod", (), ("go 1.27",)))
             self.assertEqual(mutgate.touched(added, tests), {"hint"})
