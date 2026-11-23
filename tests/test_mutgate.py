@@ -5687,6 +5687,7 @@ class GremlinsMemoryCap(unittest.TestCase):
         return bindir
 
     def shim(self, d, body, mem):
+        (pathlib.Path(d) / mutgate.REFUSED).touch()  # as `run` makes it before gremlins starts
         with mock.patch.dict(os.environ, {"PATH": f"{self.fake_go(d, body)}{os.pathsep}{os.environ['PATH']}"}):
             return mutgate.go_shim(d, mem) / "go"
 
@@ -5753,11 +5754,11 @@ class GremlinsMemoryCap(unittest.TestCase):
             prof = pathlib.Path(d) / "c"
             shim = self.shim(d, "exit 0\n", 1 << 30)
             for args in (["test", "-exec=x", "-coverprofile", str(prof), "./..."], ["test", "-exec", "x", "./p"]):
-                (pathlib.Path(d) / mutgate.REFUSED).unlink(missing_ok=True)
+                (pathlib.Path(d) / mutgate.REFUSED).write_text("")  # as `run` makes it
                 r = subprocess.run([str(shim), *args], capture_output=True, text=True)
                 self.assertEqual(r.returncode, 1)
                 self.assertIn("cannot be put under", r.stderr)
-                self.assertTrue((pathlib.Path(d) / mutgate.REFUSED).exists())
+                self.assertIn(args[-1], mutgate.refusal(d))
             self.assertEqual(subprocess.run([str(shim), "env", "GOWORK"]).returncode, 0)  # not `go test`: as is
 
     def test_a_mutant_runs_output_never_reaches_the_go_driver(self):
@@ -5787,11 +5788,12 @@ class GremlinsMemoryCap(unittest.TestCase):
         # reads as KILLED. It writes REFUSED instead, the only channel, on both cap_exec paths.
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {mutgate.CGROUP_ENV: self.broken_cgroup(d)}):
             refused = pathlib.Path(d) / mutgate.REFUSED
+            refused.touch()  # as `run` makes it
             r = subprocess.run([str(self.shim(d, "eval \"$x true\"\n", 1 << 30)), "test", "./p"], capture_output=True, text=True)
             self.assertNotEqual(r.returncode, 1, r.stderr)
             self.assertIn("no verdict", r.stderr)
             self.assertIn("cap_exec", refused.read_text())
-            refused.unlink()
+            refused.write_text("")
             prof = pathlib.Path(d) / "c"
             shim = self.shim(d, f"eval \"$x true\" || exit 1\n: > {prof}\n", 1 << 30)
             r = subprocess.run([str(shim), "test", "-coverprofile", str(prof), "./..."], capture_output=True, text=True)
@@ -5816,6 +5818,138 @@ class GremlinsMemoryCap(unittest.TestCase):
                 self.assertEqual(mutgate.main(["run", "hint", "--out", str(out)]), 1)
             self.assertFalse((out / mutgate.result_name("hint")).exists())
             self.assertIn("hint has no verdict", err.getvalue())
+
+    def test_the_half_cap_refusal_names_page_cache_the_cap_and_the_peak(self):
+        # #6512 (Lens on #6423): memory.peak counts page cache, so a refusal at a figure the tests never held
+        # as heap says why, with both figures, in gremlins' coverage run and in delete's base run alike.
+        why = mutgate.past_half(1017 << 20, 1820 << 20)
+        for part in ("peaked at 1017 MB", "1820 MB memory cap", "memory.peak", "page cache", "without a leak"):
+            self.assertIn(part, why)
+        self.assertIn("where the cap killed them", mutgate.past_half(1820 << 20, 1820 << 20, over=True))
+        with tempfile.TemporaryDirectory() as d:
+            prof = pathlib.Path(d) / "c"
+            shim = self.shim(d, f"eval \"$x python3 -c 'b = bytearray(64 << 20)'\"\n: > {prof}\n", 96 << 20)
+            r = subprocess.run([str(shim), "test", "-cover", "-coverprofile", str(prof), "./..."], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1, r.stderr)
+            self.assertRegex(r.stderr, r"peaked at (6[4-9]|[7-9]\d) MB, more than half of their 96 MB memory cap")
+            self.assertIn("page cache", r.stderr)
+
+    def test_a_shim_fault_with_an_unwritable_marker_never_reads_killed(self):
+        # #6512 (Security item 1 on #6423): a fault whose marker write failed exited 125, go test made that
+        # its own exit 1, and gremlins read KILLED. The marker is opened before the entry runs, so a later
+        # fault still writes it; where it cannot be opened the entry does not run, and `run` reads no verdict.
+        with tempfile.TemporaryDirectory() as d, contextlib.redirect_stderr(io.StringIO()):
+            tmp = pathlib.Path(d) / "tmp"
+            tmp.mkdir()
+            (tmp / mutgate.REFUSED).touch()
+            self.assertEqual(mutgate.refusal(tmp), "")
+
+            def fault():  # nothing can be opened any more, then the cgroup fails
+                mock.patch.object(mutgate, "open_marker", side_effect=PermissionError(13, "Permission denied")).start()
+                raise RuntimeError("memory.events: No such file or directory")
+            try:
+                self.assertEqual(mutgate.shim_entry(tmp, fault), mutgate.NO_VERDICT)
+            finally:
+                mock.patch.stopall()
+            self.assertIn("fault: RuntimeError('memory.events", mutgate.refusal(tmp))
+
+            gone = pathlib.Path(d) / "nonexistent"  # a marker that cannot be opened: a fault is told by refusal
+            self.assertEqual(mutgate.shim_entry(gone, fault), mutgate.NO_VERDICT)
+            mock.patch.stopall()
+            self.assertIn("cannot be written", mutgate.refusal(gone))
+            self.assertEqual(mutgate.shim_entry(gone, int, "7"), 7)  # with no fault, the run's own result
+
+            # Security on #6557: an open that fails before the entry runs, then a fault once it would pass,
+            # still writes the marker, as the open at fault time before #6512 did.
+            (tmp / mutgate.REFUSED).write_text("")
+            real, calls = mutgate.open_marker, []
+
+            def first_open_fails(tmp):
+                calls.append(tmp)
+                if len(calls) == 1:
+                    raise OSError(24, "Too many open files")
+                return real(tmp)
+
+            def cap_exec():
+                raise RuntimeError("cgroup write failed")
+            with mock.patch.object(mutgate, "open_marker", side_effect=first_open_fails):
+                self.assertEqual(mutgate.shim_entry(tmp, cap_exec), mutgate.NO_VERDICT)
+            self.assertEqual(len(calls), 2)
+            self.assertIn("cap_exec: RuntimeError('cgroup write failed')", mutgate.refusal(tmp))
+
+            # L3 on #6557: a marker that opens but cannot be written (a full disk) is removed, so `run` sees it gone.
+            (tmp / mutgate.REFUSED).write_text("")
+            full = mock.Mock(**{"write.side_effect": OSError(28, "No space left on device")})
+            with mock.patch.object(mutgate, "open_marker", return_value=full):
+                self.assertEqual(mutgate.shim_entry(tmp, cap_exec), mutgate.NO_VERDICT)
+            self.assertFalse((tmp / mutgate.REFUSED).exists())
+            self.assertIn("cannot be written", mutgate.refusal(tmp))  # gone after run made it: no verdict
+            # L3 round 3 on #6557: the next mutants, a clean one and a faulting one, never make it again.
+            self.assertEqual(mutgate.shim_entry(tmp, int, "0"), 0)
+            self.assertEqual(mutgate.shim_entry(tmp, cap_exec), mutgate.NO_VERDICT)
+            self.assertFalse((tmp / mutgate.REFUSED).exists())
+            self.assertIn("cannot be written", mutgate.refusal(tmp))
+
+            # Security on #6557: capped_go's own refusal, written to a full disk, removes the marker too.
+            (tmp / mutgate.REFUSED).write_text("")
+            with mock.patch.object(mutgate, "open_marker", return_value=full):
+                self.assertIsNone(mutgate.capped_go("go", tmp, ["test", "-exec=x", "./p"], 1 << 30))
+            self.assertIn("cannot be written", mutgate.refusal(tmp))
+
+    def test_run_gives_no_verdict_when_its_marker_is_gone(self):
+        # #6512: a shim that could not open the marker cannot say so, so `run` checks the channel it made.
+        with tempfile.TemporaryDirectory() as d:
+            bindir = self.fake_go(d, "exit 0\n")
+            (bindir / "gremlins").write_text(
+                "#!/bin/sh\nrm -f \"$(dirname \"$(command -v go)\")/../refused\"\n"
+                "while [ \"$1\" != -o ]; do shift; done\n"
+                "printf '%s' '{\"files\": [], \"mutants_total\": 0, \"mutants_killed\": 1, \"mutants_lived\": 0}' > \"$2\"\n")
+            (bindir / "gremlins").chmod(0o755)
+            out = pathlib.Path(d) / "out"
+            err = io.StringIO()
+            with mock.patch.dict(os.environ, {"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}), \
+                    mock.patch.object(mutgate, "available_memory", return_value=1 << 30), \
+                    mock.patch.object(mutgate, "default_jobs", return_value=2), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                self.assertEqual(mutgate.main(["run", "hint", "--out", str(out)]), 1)
+            self.assertFalse((out / mutgate.result_name("hint")).exists())
+            self.assertIn("hint has no verdict: its refused marker cannot be written", err.getvalue())
+
+    def fake_leaf(self, events):
+        """A stand-in for empty: its first call gives the leaf the files a cgroup's kernel would (memory.peak,
+        memory.events with events), its second clears the leaf so contained can remove it."""
+        calls = []
+
+        def empty(cg):
+            calls.append(cg)
+            if len(calls) == 1:
+                (cg / "memory.peak").write_text("4096\n")
+                (cg / "memory.events").write_text(events)
+            else:
+                for f in cg.iterdir():
+                    f.unlink()
+        return empty
+
+    def test_an_oom_kill_after_a_clean_exit_is_no_cap_kill(self):
+        # #6512 (Security item 4 on #6423): memory.oom.group kills argv with its leaf, so an oom_kill once argv
+        # has exited 0 hit only a child left behind after the tests passed; a run that did not exit 0 stays over.
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {mutgate.CGROUP_ENV: self.broken_cgroup(d)}):
+            for code, want in ((0, 0), (1, "over")):
+                with self.subTest(code=code), mock.patch.object(mutgate, "empty", self.fake_leaf("oom 1\noom_kill 1\n")):
+                    self.assertEqual(mutgate.contained(["/bin/sh", "-c", f"exit {code}"], 1 << 30), (want, 4096))
+                with self.subTest(code=code), mock.patch.object(mutgate, "empty", self.fake_leaf("oom_kill 0\n")):
+                    self.assertEqual(mutgate.contained(["/bin/sh", "-c", f"exit {code}"], 1 << 30), (code, 4096))
+
+    def test_a_cleanup_error_keeps_the_first_error_as_its_cause(self):
+        # #6512 (Security item 4 on #6423): `finally: empty(leaf)` raised over the run's own error and hid it.
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {mutgate.CGROUP_ENV: self.broken_cgroup(d)}):
+            first = RuntimeError("memory.max: Invalid argument")
+            with mock.patch.object(mutgate, "in_leaf", side_effect=first), \
+                    mock.patch.object(mutgate, "empty", side_effect=RuntimeError("outlived cgroup.kill")):
+                with self.assertRaises(RuntimeError) as got:
+                    mutgate.contained(["true"], 1 << 30)
+            self.assertIn("outlived", str(got.exception))
+            self.assertIs(got.exception.__cause__, first)
 
     def test_run_caps_gremlins_mutant_runs(self):
         # The wiring: `run` gives gremlins' shim each run's share of half the free memory.
