@@ -284,6 +284,7 @@ def is_data(path):
 # sets no default only when it is placed: blank, a comment, `)`, a directive of GO_MOD_QUIET (requirements and
 # replacements are go.sum's and vendor/'s, is_vendored; the toolchain changes code, not defaults), or an
 # indented entry of a module path or a retracted version; any other line fails closed to every test.
+# A change anywhere in a non-test file holding such a `//go:` line on either side is one too (dormant).
 MODULE_FILE = "broker/go.mod"
 EVERY_TEST = "\0every-test"  # the name of added_lines' key for every test of a directory; no git path holds a NUL
 GO_MOD_QUIET = {"module", "require", "exclude", "replace", "retract", "toolchain", "tool"}
@@ -300,11 +301,34 @@ def widened(path, text):
                 or text[:1] in " \t" and "=" not in s and GO_MOD_ENTRY.fullmatch(first)):
             return None
         return f"broker/{EVERY_TEST}"
-    m = DIRECTIVE.match(text)
+    m = DIRECTIVE.match(text.removeprefix("\ufeff"))  # go skips a file's leading BOM (go_text, L3 on #6558)
     if (path and path.startswith("broker/") and is_source(path) and not is_data(path) and not is_vendored(path)
             and m and m[1] not in LOCAL_DIRECTIVES):
         return f"{posixpath.dirname(path)}/{EVERY_TEST}"
     return None
+
+
+def dormant(diff_text, base, head):
+    """{key: None} of widened keys for the non-test broker .go files the diff changes in any way whose
+    text at the merge base or at head holds a package-wide `//go:` line (not LOCAL_DIRECTIVES), read
+    from git, comments included: an edit around an unchanged one (its file's `//go:build` line, a
+    `/* */` pair) can switch it on (Security on #6558). A file absent on a side holds nothing there."""
+    mb, paths, in_hunk = merge_base(base, head), set(), False
+    for raw in diff_text.split("\n"):
+        if raw.startswith("diff "):
+            in_hunk = False
+            paths.add(_diff_git_path(raw) if raw.startswith("diff --git ") else None)
+        elif HUNK.match(raw):
+            in_hunk = True
+        elif not in_hunk and raw.startswith(("--- ", "+++ ")):
+            paths.add(_header_path(raw, "a/" if raw.startswith("-") else "b/"))
+    out = {}
+    for path in paths:
+        if path and path.startswith("broker/") and is_source(path) and not is_data(path) and not is_vendored(path):
+            if any(m not in LOCAL_DIRECTIVES for rev in (mb, head)
+                   for m in DIRECTIVE.findall(base_text(rev, path) or "")):
+                out[f"{posixpath.dirname(path)}/{EVERY_TEST}"] = None
+    return out
 
 
 @functools.lru_cache(maxsize=None)
@@ -635,12 +659,16 @@ def records_changed(diff_text):
     return out - {None}
 
 
-def claimed(diff_text, packages=None):
+def claimed(diff_text, packages=None, base=None, head=None):
     """Tier-A and tier-B packages where the diff adds or changes a .go line, or changes the package's
     MUTANTS-EQUIVALENT record, sorted (#4908). A record-only claim has no target line; it is claimed so
     verify resolves the record and lists its new entries in the summary for review (#5786). A `REQ:`
-    marker is no longer needed; violations() reads no other package."""
-    return sorted((touched(*added_lines(diff_text)) | records_changed(diff_text))
+    marker is no longer needed; violations() reads no other package. With base and head, a file holding a
+    package-wide directive claims its package (dormant)."""
+    added, tests = added_lines(diff_text)
+    if base is not None:
+        tests = _widen(tests, dormant(diff_text, base, head))
+    return sorted((touched(added, tests) | records_changed(diff_text))
                   & set(gated_packages() if packages is None else packages))
 
 
@@ -832,7 +860,7 @@ def changes(diff_text, base, head):
     tests whose run order the diff changes in (#6385)."""
     pair, later = moved(diff_text, merge_base(base, head), head)
     added, tests = added_lines(diff_text, pair)
-    return added, _widen(tests, later[0])
+    return added, _widen(_widen(tests, later[0]), dormant(diff_text, base, head))
 
 
 # Moved declarations (TOOL-mutgate-moved-lines, #6369). The diffs ignore renames (#4147), so code moved
@@ -3767,7 +3795,7 @@ def cmd_verify(args):
     """The gate on JSON that PR code wrote (#4106): every claimed package has a readable result, then gate."""
     diff = broker_diff(args.git, args.head)
     added, tests = changes(diff, args.git, args.head)
-    pkgs = claimed(diff)
+    pkgs = claimed(diff, base=args.git, head=args.head)
     if not pkgs:
         write_summary(args.summary, "### mutgate\n\nThis diff changes no .go line in a tier-A or tier-B package, and no "
                       f"{RECORD} record of one (a changed record claims its package too).\n")
@@ -3987,11 +4015,12 @@ def cmd_plan(args):
     diff = broker_diff(args.git, "HEAD")
     added, tests = changes(diff, args.git, "HEAD")
     counts, planned = [], {}
-    bases = bases_for(diff, args.git, "HEAD", tests, claimed(diff))
+    pkgs = claimed(diff, base=args.git, head="HEAD")
+    bases = bases_for(diff, args.git, "HEAD", tests, pkgs)
     with tempfile.TemporaryDirectory() as tmp:
         if (lister := build_lister(tmp)) is None:
             return 1
-        for pkg in claimed(diff):
+        for pkg in pkgs:
             targets, suite = diff_targets(added, pkg), None
             if tests_changed(tests, pkg):
                 record, suite, problem = record_for(pkg, tests, bases, diff, args.git, tmp)
@@ -4045,7 +4074,7 @@ def cmd_plan(args):
 
 
 def cmd_claimed(args):
-    pkgs = claimed(broker_diff(args.git, args.head))
+    pkgs = claimed(broker_diff(args.git, args.head), base=args.git, head=args.head)
     print(json.dumps(pkgs) if args.json else "\n".join(pkgs))
     return 0
 

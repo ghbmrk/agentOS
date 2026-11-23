@@ -4003,7 +4003,7 @@ class Plan(unittest.TestCase):
                           ([], "0 shards: no claimed package was planned; rerun the mutgate workflow")):
             with self.subTest(pkgs), contextlib.ExitStack() as st:
                 for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
-                                    ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: pkgs),
+                                    ("build_lister", lambda tmp: "lister"), ("claimed", lambda d, **_: pkgs),
                                     ("diff_targets", lambda added, pkg: {f"broker/{pkg}/x.go": {1}}),
                                     ("deletion_sites", lambda *a: ([], None)), ("lint_budget", lambda pkg, sites: (0.0, [0.0] * len(sites))), ("suite_seconds", lambda *a: (1.0, None)),
                                     ("shard_count", lambda *a: 100)):
@@ -4020,7 +4020,7 @@ class Plan(unittest.TestCase):
         import contextlib, io, types
         with contextlib.ExitStack() as st:
             for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
-                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: sorted(pkg_targets)),
+                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d, **_: sorted(pkg_targets)),
                                 ("diff_targets", lambda added, pkg: pkg_targets[pkg][0]),
                                 ("deletion_sites", lambda pkg, t, lister: (pkg_targets[pkg][1], None)), ("lint_budget", lambda pkg, sites: (0.0, [0.0] * len(sites))),
                                 ("suite_seconds", lambda pkg, tmp: suite), ("site_costs", lambda *a: costs)):
@@ -4155,7 +4155,7 @@ class Plan(unittest.TestCase):
         timed = []
         with contextlib.ExitStack() as st:
             for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
-                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: ["kernel/sim", "other"]),
+                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d, **_: ["kernel/sim", "other"]),
                                 ("bases_for", lambda *a: {}), ("diff_targets", lambda added, pkg: sim),
                                 ("tests_changed", lambda tests, pkg: pkg == "kernel/sim"),
                                 ("record_for", lambda *a: ({"rec": 1}, 48.0, None)),
@@ -6309,7 +6309,7 @@ class LintHeldFollowUp(unittest.TestCase):
         import contextlib, io, types
         with contextlib.ExitStack() as st:
             for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
-                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: sorted(pkg_targets)),
+                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d, **_: sorted(pkg_targets)),
                                 ("diff_targets", lambda added, pkg: pkg_targets[pkg][0]),
                                 ("deletion_sites", lambda pkg, t, lister: (pkg_targets[pkg][1], None)),
                                 ("lint_budget", budget), ("suite_seconds", lambda pkg, tmp: (1.0, None)),
@@ -6355,6 +6355,9 @@ class GoDebugEveryFu(unittest.TestCase):
                                       ("changed", ("//go:debug panicnil=1",), ("//go:debug panicnil=0",)),
                                       ("removed", ("//go:debug panicnil=1",), ()),
                                       ("indented", (), ("\t//go:debug panicnil=1",)),
+                                      # L3 on #6558: go skips one leading byte order mark and reads the directive.
+                                      ("behind a byte order mark", (), ("\ufeff//go:debug panicnil=1",)),
+                                      ("removed behind a byte order mark", ("\ufeff//go:debug panicnil=1",), ()),
                                       ("a directive not known", (), ("//go:future x",))):
                 with self.subTest(name):
                     self.every(mod_diff("broker/cmd/tool/main.go", minus, plus), {"cmd/tool"})
@@ -6372,6 +6375,42 @@ class GoDebugEveryFu(unittest.TestCase):
             # A vendored file's directive is fixed by go.sum (is_vendored): no claim.
             added, tests = mutgate.added_lines(mod_diff("broker/vendor/x/y/y.go", (), ("//go:debug x=1",)))
             self.assertEqual(mutgate.touched(added, tests), set())
+
+    def test_an_edit_that_switches_on_an_unchanged_directive_is_every_test(self):
+        # Security on #6558: a //go:debug line the diff leaves alone is switched on by its file's //go:build
+        # line, or by removing a /* */ pair around it; any change to a non-test file holding a package-wide
+        # directive at the base or head is every test of its package (dormant, read from git).
+        # REQ: MUT-go-debug-every-fu
+        main = "//go:build never\n\n//go:debug panicnil=1\n\npackage main\n\nfunc main() {}\n"
+        hidden = "/*\n//go:debug http2client=0\n*/\n\npackage main\n\nfunc main() {}\n"
+        plain = "//go:build never\n\npackage main\n\nfunc main() {}\n"
+        for name, was, now, wide in (("its build line", main, main.replace("never", "linux"), True),
+                                     ("a comment pair removed", hidden, hidden.replace("/*\n", "").replace("*/\n", ""), True),
+                                     ("ordinary code beside it", main, main.replace("{}", "{ println() }"), True),
+                                     ("the directive's file deleted", main, None, True),
+                                     ("added in a new file", None, main, True),
+                                     ("no package-wide directive", plain, plain.replace("never", "linux"), False)):
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+                tool = pathlib.Path(d) / "broker" / "cmd" / "tool"
+                tool.mkdir(parents=True)
+                (tool / "main_test.go").write_text("package main\n")
+                git("init", "-q")
+                for text in (was, now):
+                    if text is None:
+                        (tool / "main.go").unlink(missing_ok=True)
+                    else:
+                        (tool / "main.go").write_text(text)
+                    git("add", "-A")
+                    git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "x")
+                diff = git("diff", "-U0", "--no-renames", "HEAD~1...HEAD", "--", "broker").stdout
+                with mock.patch.object(mutgate, "ROOT", pathlib.Path(d)), \
+                        mock.patch.object(mutgate, "BROKER", pathlib.Path(d) / "broker"):
+                    got = mutgate.dormant(diff, "HEAD~1", "HEAD")
+                    self.assertEqual(got, {f"broker/cmd/tool/{mutgate.EVERY_TEST}": None} if wide else {})
+                    tests = mutgate._widen(mutgate.added_lines(diff)[1], got)
+                    self.assertEqual(mutgate.head_tests(tests, "cmd/tool"), None if wide else [])
+                    self.assertEqual(mutgate.claimed(diff, ["cmd/tool"], "HEAD~1", "HEAD"), ["cmd/tool"])
 
     def test_a_go_mod_go_line_is_every_test_of_the_module(self):
         # REQ: MUT-go-debug-every-fu
@@ -6393,7 +6432,9 @@ class GoDebugEveryFu(unittest.TestCase):
     def test_an_unplaceable_go_mod_edit_is_every_test_of_the_module(self):
         # REQ: MUT-go-debug-every-fu
         with tempfile.TemporaryDirectory() as d, self.tree(d):
-            for line in ("ignore ./old", "use ./x", "\tx=>1", "garbage", "\ta = b", "godebug(", "go"):
+            # An unindented entry and a bare directive keyword are lines go refuses; they fail closed too.
+            for line in ("ignore ./old", "use ./x", "\tx=>1", "garbage", "\ta = b", "godebug(", "go",
+                         "github.com/a/b v1.0.0", "require", "toolchain", "\ufeffrequire x v1"):
                 with self.subTest(line):
                     self.every(mod_diff("broker/go.mod", (), (line,)), self.ALL)
             # What sets no default stays no claim: requirements (go.sum fixes vendor/), replacements,
