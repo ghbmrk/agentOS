@@ -1,0 +1,8 @@
+# Packages whose Built-Using sources tools/vulncheck.py image does not query (#6481), one per line:
+#   PKG GLOB REASON
+# GLOB must be a "GLOB linked LIST" entry of image/static_elf.allow, and PKG must be installed in LIST's
+# status and recorded in LIST/agentos.inputs as a link input of that file (image/guest-shipped.sh
+# SHIPPED_FOR); vulncheck.py fails on a line with no reason or either check unmet. The exclusion applies
+# in LIST's tree alone. Every other installed package's Built-Using sources are queried, since code Debian
+# records there also ships in files no ELF entry declares (shim-signed's and systemd-boot's PE loaders).
+libcap-dev /usr/lib/agentos/images/codex/usr/bin/bwrap is a development package (static archives, headers, link symlinks) installed only in the guest build root; its static code reaches the image only inside the bwrap builds, pinned by SHA-256 as "linked guest" inputs, so the guests' status already queries libcap-dev (source libcap2) by package; its stale "+built-using+glibc" stanza repeats the guests' own glibc findings with no remedy (#6481)
