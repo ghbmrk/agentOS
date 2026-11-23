@@ -949,6 +949,26 @@ class ImageTest(unittest.TestCase):
         self.assertIn("fix: rebuild the image", out.getvalue())
         self.assertNotIn("or add a record", out.getvalue())
 
+    def test_fixed_image_hint_names_the_main_snapshot_bump(self):
+        # VULN-debian-r14-hint (#6469), TN-vulncheck-6: a fix shipped only in a point release sits in
+        # the pinned main archive, so the hint names the pin move as well as the rebuild.
+        f = {"where": "image", "id": "DEBIAN-CVE-1", "aliases": [], "level": "image", "module": "",
+             "version": "2.41-12+deb13u4", "package": "Debian:13:glibc (libc6)", "function": "",
+             "fixed": "2.41-12+deb13u5", "fails": True}
+        out = io.StringIO()
+        self.assertFalse(vulncheck.summary([f], [], [], out))
+        text = out.getvalue()
+        self.assertIn("fix: rebuild the image if the fixed version is in debian-security", text)
+        self.assertIn("if it is only in the main archive (a point release), move the main-archive snapshot "
+                      "in image/mkosi/mkosi.conf, image/enforcer/mkosi/mkosi.conf, both mkosi.sources "
+                      "and NAME_ONLY_SNAPSHOT in image/mkosi/mkosi.finalize", text)
+        for path in ("image/mkosi/mkosi.conf", "image/enforcer/mkosi/mkosi.conf",
+                     "image/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources",
+                     "image/enforcer/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources",
+                     "image/mkosi/mkosi.finalize"):
+            self.assertTrue((ROOT / path).is_file(), path)
+        self.assertIn("NAME_ONLY_SNAPSHOT = ", (ROOT / "image/mkosi/mkosi.finalize").read_text())
+
 
 class ProposeTest(unittest.TestCase):
     """#5628 option A: `image --propose ISSUE` prints the record each unaccepted no-fix image

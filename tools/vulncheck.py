@@ -1965,8 +1965,11 @@ def summary(findings, problems, unused, out=None, config="assurance/vulncheck.js
     failing = [f for f in findings if verdict(f) == "FAIL"]
     print(f"{len(findings)} findings, {len(failing)} failing, {len(problems)} problems", file=out)
     if any(f["where"] in IMAGE_TREES and f["fixed"] for f in failing):
-        print("fix: rebuild the image; Debian has fixed each image finding that names a fixed "
-              "version, and no record can accept those", file=out)
+        print("fix: rebuild the image if the fixed version is in debian-security (each build reads a "
+              "fresh security snapshot); if it is only in the main archive (a point release), move the "
+              "main-archive snapshot in image/mkosi/mkosi.conf, image/enforcer/mkosi/mkosi.conf, both "
+              "mkosi.sources and NAME_ONLY_SNAPSHOT in image/mkosi/mkosi.finalize. Debian has fixed each "
+              "image finding that names a fixed version, and no record can accept those", file=out)
     if any(f["where"] == BUNDLED for f in failing):
         print(f"fix: pin a release of the holder whose copy has the fix, or add the id to its "
               f"\"bundled\" entry's ids in {config}, with the advisory's reach in its why, citing an open "
