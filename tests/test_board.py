@@ -702,6 +702,46 @@ class CliTest(unittest.TestCase):
             self.assertEqual((code, out), (1, ""), command)
             self.assertIn("listed no open work-item issues", err)
 
+    def test_render_out_rewrites_its_own_skeleton_in_place(self):
+        # #6500: `render --repo R > BOARD.md` truncates BOARD.md before render reads it; --out
+        # reads the skeleton first, then replaces the file whole.
+        generated = LIVE.replace("Intro prose.", board.GENERATED + "\n\nIntro prose.")
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d, "BOARD.md")
+            path.write_text(BOARD.replace("Intro prose.", board.GENERATED + "\n\nIntro prose."))
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = board.main(["render", "--repo", "o/r", "--out", str(path)],
+                                  read=path.read_text, fetch=github(opened(issues())))
+            self.assertEqual((code, out.getvalue()), (0, ""), err.getvalue())
+            self.assertEqual(path.read_text(), generated)
+            self.assertIn("| A-1 | [Pilot](briefs/A-1.md) |", path.read_text())
+            self.assertEqual(sorted(p.name for p in pathlib.Path(d).iterdir()), ["BOARD.md"])
+            # Plain render writes there too, and a failed render leaves the file as it was.
+            code = board.main(["render", "--out", str(path)], read=lambda: BOARD)
+            self.assertEqual((code, path.read_text()), (0, board.render(BOARD, issues())))
+            with redirect_stderr(io.StringIO()):
+                code = board.main(["render", "--repo", "o/r", "--out", str(path)], read=lambda: BOARD, fetch=github([]))
+            self.assertEqual((code, path.read_text()), (1, board.render(BOARD, issues())))
+
+    def test_render_refuses_a_skeleton_with_no_table(self):
+        # What the shell leaves for `render > BOARD.md` to read: render fails instead of emitting
+        # a board with every row gone.
+        for text in ("", "# BOARD\n\nIntro prose.\n"):
+            for args in (("render",), ("render", "--repo", "o/r")):
+                out_, err_ = io.StringIO(), io.StringIO()
+                with redirect_stdout(out_), redirect_stderr(err_):
+                    code = board.main(list(args), read=lambda: text, fetch=github(opened(issues())))
+                self.assertEqual((code, out_.getvalue()), (1, ""), (args, text))
+                self.assertIn("no table", err_.getvalue())
+
+    def test_check_names_the_in_place_render_command(self):
+        generated = LIVE.replace("Intro prose.", board.GENERATED + "\n\nIntro prose.")
+        edited = generated.replace("| A-1 | [Pilot](briefs/A-1.md) | — | building", "| A-1 | [Pilot](briefs/A-1.md) | — | in review")
+        _, _, err = self.run_repo("check", text=edited, items=opened(issues(generated)))
+        self.assertIn("render --repo o/r --out BOARD.md", err)
+        self.assertNotIn("> BOARD.md", err)
+
     def test_check_repo_compares_a_generated_board_with_the_live_issues(self):
         generated = LIVE.replace("Intro prose.", board.GENERATED + "\n\nIntro prose.")
         self.assertEqual(self.run_repo("check", text=generated, items=opened(issues(generated)))[0], 0)
