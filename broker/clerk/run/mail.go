@@ -384,6 +384,15 @@ type MailConfig struct {
 	// revocation endpoint, inbox's GmailBase, GmailToken, GmailConsent and
 	// GmailRevoke when empty: a fake's, in tests only.
 	gmail struct{ base, token, consent, revoke string }
+
+	// giveStop is each write of the record of grants owed a give-back's
+	// privfile.WriteAtomic stop (giveback.go); nil runs every step. Tests
+	// only.
+	giveStop func(i int) bool
+
+	// kept is the host's Gmail API and read cache (gmailKept), set by
+	// NewMailHost; nil, as for OpenMail, builds both for each box.
+	kept *gmailKept
 }
 
 // Mail is the mail clerk a process serves, and what it tells the owner.
@@ -536,7 +545,7 @@ func boxFor(s MailSettings, sec *clerk.Secrets, c MailConfig) (mailbox, error) {
 		return nil, errors.New("run: a mail clerk needs its sealer and its world")
 	}
 	if s.API == APIGmail {
-		return gmailBox(sec, slotOf(s), c)
+		return c.kept.box(sec, slotOf(s), c)
 	}
 	login := sec.Login(slotOf(s), s.login())
 	cfg := imapsmtp.Config{IMAP: s.IMAP, SMTP: s.SMTP, IMAPSec: imapsmtp.TLS, SMTPSec: imapsmtp.TLS, TLS: c.TLS,
@@ -561,13 +570,64 @@ func boxFor(s MailSettings, sec *clerk.Secrets, c MailConfig) (mailbox, error) {
 // (imapsmtp's default when nil), and trust c.TLS's roots, the system's when
 // none.
 func gmailBox(sec *clerk.Secrets, slot string, c MailConfig) (*inbox.Gmail, error) {
-	guard, roots := c.gmailNet()
-	base, token := cmp.Or(c.gmail.base, inbox.GmailBase), cmp.Or(c.gmail.token, inbox.GmailToken)
-	api, err := clerk.NewAPI(inbox.GmailDeclaration(base, token, slot, guard, nil), sec, roots)
+	api, err := gmailAPI(sec, slot, c)
 	if err != nil {
 		return nil, err
 	}
+	guard, _ := c.gmailNet()
 	return inbox.NewGmail(api).WithPoster(guard), nil
+}
+
+// gmailAPI is gmailBox's declared calls.
+func gmailAPI(sec *clerk.Secrets, slot string, c MailConfig) (*clerk.API, error) {
+	guard, roots := c.gmailNet()
+	base, token := cmp.Or(c.gmail.base, inbox.GmailBase), cmp.Or(c.gmail.token, inbox.GmailToken)
+	return clerk.NewAPI(inbox.GmailDeclaration(base, token, slot, guard, nil), sec, roots)
+}
+
+// gmailKept is the host's Gmail API and read cache for its account (#3010),
+// so each read and change check reuses the access token until it expires,
+// rather than redeeming the grant again, and Opened gets only the read mail
+// it has not got before. Each box over it is new, so a read never changes
+// what an earlier read's clerk acts on (its mail ids, Read's refs). It is
+// for one store and slot: a box for any other is built afresh. The host
+// drops it at each change of account and each setter's write, so a new
+// grant, or a stop that only setup clears, is never served by the old API.
+type gmailKept struct {
+	mu    sync.Mutex
+	sec   *clerk.Secrets
+	slot  string
+	api   *clerk.API
+	reads *inbox.ReadCache
+}
+
+// box is a Gmail mailbox over k's API for slot of sec, or gmailBox's when k
+// is nil.
+func (k *gmailKept) box(sec *clerk.Secrets, slot string, c MailConfig) (*inbox.Gmail, error) {
+	if k == nil {
+		return gmailBox(sec, slot, c)
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.api == nil || k.sec != sec || k.slot != slot {
+		api, err := gmailAPI(sec, slot, c)
+		if err != nil {
+			return nil, err
+		}
+		k.sec, k.slot, k.api, k.reads = sec, slot, api, inbox.NewReadCache()
+	}
+	guard, _ := c.gmailNet()
+	return inbox.NewGmail(k.api).WithPoster(guard).WithReadCache(k.reads), nil
+}
+
+// drop forgets the kept API and cache.
+func (k *gmailKept) drop() {
+	if k == nil {
+		return
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.sec, k.slot, k.api, k.reads = nil, "", nil, nil
 }
 
 // gmailNet is the home-network policy Gmail's calls go through, c.Guard or
