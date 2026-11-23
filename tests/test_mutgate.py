@@ -5014,6 +5014,68 @@ class Record(unittest.TestCase):
                          + ["STATEMENT_DELETION #5804", "STATEMENT_DELETION #5998"])
 
 
+class WaiveKeepsOrder(unittest.TestCase):
+    """TOOL-waive-keeps-order (#6573): waive keeps a record's lines in place, so premerge's union check reads it as kept."""
+    # REQ: TOOL-waive-keeps-order
+    SRC, repo, waive = Record.SRC, Record.repo, Record.waive
+
+    def test_waive_keeps_an_unsorted_record_in_its_order(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        import premerge
+        with tempfile.TemporaryDirectory() as d:
+            git = lambda *a: subprocess.run(["git", "-C", d, "-c", "user.email=t@example.invalid", "-c", "user.name=t", *a],
+                                            check=True, capture_output=True, text=True).stdout.strip()
+            run = self.repo(d, self.SRC, self.SRC)
+            pkg = pathlib.Path(d) / "broker" / "netguard"
+            (pkg / "b.go").write_text("package netguard\n\nfunc g(x int) int {\n\tif x > 1 {\n\t\treturn 2\n\t}\n\treturn x\n}\n")
+            wfile = pathlib.Path(d) / "w.txt"
+
+            def waive(*sites, accepted="#5743"):
+                wfile.write_text("".join(f"Mutant-equivalent: broker/netguard/{s} both give the same value on every input\n"
+                                         for s in sites))
+                r = run("waive", str(wfile), "--accepted", accepted)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                return r.stdout
+            for site in ("a.go:5", "a.go:8", "a.go:11", "b.go:4"):
+                waive(site)
+            path = pkg / mutgate.RECORD
+            rows = path.read_text().rstrip("\n").split("\n")
+            a5, a8, a11, b4 = rows[1:]  # each new site after its file's last entry: in waive order here
+            self.assertEqual([(e["file"], e["stmt"][e["at"]]) for e in map(json.loads, rows[1:])],
+                             [("a.go", "if x > 1 {"), ("a.go", "if x > 1 {"), ("a.go", "return x"), ("b.go", "if x > 1 {")])
+            # A hand-ordered record: a.go's entries reversed, a comment and a blank line between them, a word-for-word
+            # repeat of one entry, and b.go's entry last.
+            hand = [rows[0], a11, "# a note between entries", "", a8, a8, a5, b4]
+            path.write_text("\n".join(hand) + "\n")
+            git("add", "-A")
+            git("commit", "-qm", "base")
+            base = git("rev-parse", "HEAD")
+            # Rewrite a.go:8 (the repeated entry, under another accepting PR) and add a.go:6.
+            self.assertIn("2 entries written, 5 in all", waive("a.go:8", "a.go:6", accepted="#6573"))
+            out = path.read_text().rstrip("\n").split("\n")
+            self.assertEqual(out[:4], hand[:4])               # untouched lines in place, word for word
+            self.assertEqual(json.loads(out[4])["accepted"], "#6573")  # rewritten in its own place; its repeat gone
+            self.assertEqual(json.loads(out[4])["stmt"], json.loads(a8)["stmt"])
+            self.assertEqual(out[5], a5)
+            self.assertEqual(json.loads(out[6])["stmt"], ["return 2"])  # new: after a.go's last entry, not at the end
+            self.assertEqual(json.loads(out[6])["file"], "a.go")
+            self.assertEqual(out[7:], [b4])
+            git("add", "-A")
+            git("commit", "-qm", "waive")
+            head = git("rev-parse", "HEAD")
+            rel = f"broker/netguard/{mutgate.RECORD}"
+            self.assertIs(premerge._records_kept(d, head, head, rel, head, base), True)
+            # Two untouched entries swapped (as the old sorted rewrite moved them, #6559) read as changed.
+            moved = [out[0], out[5], out[2], out[3], out[4], out[1], out[6], out[7]]
+            path.write_text("\n".join(moved) + "\n")
+            git("commit", "-qam", "moved")
+            head = git("rev-parse", "HEAD")
+            self.assertIs(premerge._records_kept(d, head, head, rel, head, base), False)
+
+    def test_waive_writes_a_head_into_a_new_record(self):
+        rows, total = mutgate.waive_rows("p", "", [])
+        self.assertEqual((rows[0][0], total), ("#", 0))
+
 
 class RecordDeps(unittest.TestCase):
     """MUT-record-deps (#6282): an entry names the declarations its proof rests on, in any file under broker/,

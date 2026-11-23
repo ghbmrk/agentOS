@@ -2095,6 +2095,35 @@ def record_entry(pkg, fname, line, reason, accepted, keys, mutant=None, col=None
             **({"col": col} if col else {}), **({"deps": deps} if deps else {})}
 
 
+def waive_rows(pkg, text, new):
+    """(lines, entry count) of record `text` with `new` entries written in. Every other line stays word for word in
+    its place, since premerge reads a record as kept only with each side's entries in that side's order (#6314,
+    #6573). The same site and mutant written again is rewritten in its line's place, not doubled; a new site goes
+    after its file's last entry, or at the end."""
+    site = lambda e: (e["file"], e["mutant"], e.get("col"), _entry_key(e), tuple(e["occurrence"]))
+    todo = {site(e): json.dumps(e, ensure_ascii=False) for e in new}
+    rows, files, done = [], [], set()  # files[i]: the file of rows[i]'s entry, or None
+    for row in text.rstrip("\n").split("\n") if text.strip() else []:
+        e = None if not row.strip() or row.lstrip().startswith("#") else json.loads(row)
+        if e is not None and site(e) in todo:
+            if site(e) in done:
+                continue  # a word-for-word repeat of the entry already rewritten
+            done.add(site(e))
+            row = todo[site(e)]
+        rows.append(row)
+        files.append(e and e["file"])
+    if not any(r.lstrip().startswith("#") for r in rows):
+        rows.insert(0, f"# Mutant-equivalent proofs for broker/{pkg}, keyed by statement: see RECORD in tools/mutgate.py.")
+        files.insert(0, None)
+    for e in new:
+        if site(e) not in done:
+            done.add(site(e))
+            at = max((i + 1 for i, f in enumerate(files) if f == e["file"]), default=len(rows))
+            rows.insert(at, todo[site(e)])
+            files.insert(at, e["file"])
+    return rows, len(set(r for r, f in zip(rows, files) if f is not None))
+
+
 def cmd_waive(args):
     """Append an entry to each named site's package record, from `Mutant-equivalent:` lines in FILE."""
     text = pathlib.Path(args.lines).read_text(encoding="utf-8", errors="replace")
@@ -2163,16 +2192,9 @@ def cmd_waive(args):
                           f"{e['stmt'][e['at']]!r} ({e['mutant']}, occurrence {e['occurrence'][0]} of "
                           f"{e['occurrence'][1]}): delete its line, then run waive again", file=sys.stderr)
                 return 1
-            # The same site and mutant written again is rewritten, not doubled.
-            have = {(e["file"], e["mutant"], e.get("col"), _entry_key(e), tuple(e["occurrence"])) for e in new}
-            kept = [e for e in entries
-                    if (e["file"], e["mutant"], e.get("col"), _entry_key(e), tuple(e["occurrence"])) not in have]
-            head = [r for r in (text or "").split("\n") if r.lstrip().startswith("#")] or [
-                f"# Mutant-equivalent proofs for broker/{pkg}, keyed by statement: see RECORD in tools/mutgate.py."]
-            body = sorted(kept + new, key=lambda e: (e["file"], e["func"], e["stmt"], e["at"], e["occurrence"], e["mutant"],
-                                                     e.get("col") or 0))
-            (BROKER / pkg / RECORD).write_text("\n".join(head + [json.dumps(e, ensure_ascii=False) for e in body]) + "\n")
-            print(f"broker/{pkg}/{RECORD}: {len(new)} entries written, {len(body)} in all")
+            rows, total = waive_rows(pkg, text or "", new)
+            (BROKER / pkg / RECORD).write_text("\n".join(rows) + "\n")
+            print(f"broker/{pkg}/{RECORD}: {len(new)} entries written, {total} in all")
     return 0
 
 
