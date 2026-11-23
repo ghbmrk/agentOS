@@ -314,7 +314,7 @@ func (c *Channel) itemLineAs(it Item, short bool) string {
 	}
 	switch {
 	case !it.Sent.IsZero() && it.SentErased && short:
-		s += ", may repeat an erased send (" + at(it.Sent) + "); send it?"
+		s += ", may repeat an erased send (" + at(it.Sent) + ")"
 	case !it.Sent.IsZero() && it.SentErased:
 		// Only an erased send matched (OP2-ER-2): it may not be this one.
 		s += ", may repeat a send whose record was erased (it went " + at(it.Sent) + "); send it?"

@@ -298,9 +298,9 @@ func (c *Channel) renderLocked(r *request) string {
 	exp := r.expires.In(c.cfg.Location).Format("15:04")
 	var replies string
 	if r.local {
-		return c.localAsk(r.items[0]) + " " + c.repliesLocked(r, false)
+		return c.localAsk(r.items[0]) + " " + c.repliesLocked(r, repliesFull, 0)
 	}
-	replies = c.repliesLocked(r, false)
+	replies = c.repliesLocked(r, repliesFull, 0)
 	if len(r.items) == 1 {
 		// The full wording, or its short form when that would not fit
 		// three segments with the longest request ID and grid cell, so
@@ -328,29 +328,43 @@ func (c *Channel) renderLocked(r *request) string {
 	return fmt.Sprintf("Can I do these %d things? MORE %s lists them. Expires %s. %s", len(r.items), r.id, exp, replies)
 }
 
+// Reply forms for repliesLocked: the request text's own, and two
+// shorter ones for a MORE page whose one item would not fit three
+// segments otherwise.
+const (
+	repliesFull   = iota
+	repliesItem   // the one-item wording, the batch scope, and YES for this item
+	repliesScoped // the one-item wording and the batch scope
+)
+
 // repliesLocked is a texted request's valid replies (CH-12, CH-13): one
-// code for the whole batch, whatever page shows its items. compact is
-// the same replies without the guide to approving some items, for a MORE
-// page whose one item would not fit three segments otherwise.
-func (c *Channel) repliesLocked(r *request, compact bool) string {
-	switch {
-	case r.local:
+// code for the whole batch, whatever page shows its items. The shorter
+// forms keep the batch's scope: on a page of item n of a batch, they say
+// that YES approves all the items, and repliesItem says how to approve
+// item n alone, so a page never offers a YES whose reach it hides.
+func (c *Channel) repliesLocked(r *request, form, n int) string {
+	if r.local {
 		// First: a local request is High too, and is never approved by
 		// text, whatever form the page takes (CH-3, P2-2a).
 		return fmt.Sprintf("Approve or deny on my Wi-Fi page before %s, or reply NO %s.", r.expires.In(c.cfg.Location).Format("15:04"), r.id)
-	case compact && r.tier == High:
+	}
+	switch {
+	case len(r.items) == 1 && r.tier == High:
 		return fmt.Sprintf("Reply YES %s and a code from your code generator%s, or NO %s.", r.id, c.gridOr(), r.id)
-	case compact:
-		return fmt.Sprintf("Reply YES %s %s or NO %s.", r.id, r.code, r.id)
-	case r.tier == High && len(r.items) == 1:
-		return fmt.Sprintf("Reply YES %s and a code from your code generator%s, or NO %s.", r.id, c.gridOr(), r.id)
-	case r.tier == High:
-		return fmt.Sprintf("Reply YES %s and a code from your code generator%s (add item numbers to approve some; the rest are denied), or NO %s.", r.id, c.gridOr(), r.id)
 	case len(r.items) == 1:
 		return fmt.Sprintf("Reply YES %s %s or NO %s.", r.id, r.code, r.id)
-	default:
-		return fmt.Sprintf("Reply YES %s %s for all, YES %s 1 2 %s for some (the rest are denied), or NO %s.", r.id, r.code, r.id, r.code, r.id)
+	case form == repliesItem && r.tier == High:
+		return fmt.Sprintf("Reply YES %s and a code from your code generator%s, for all %d; YES %s %d and a code, for item %d only; or NO %s.", r.id, c.gridOr(), len(r.items), r.id, n, n, r.id)
+	case form == repliesItem:
+		return fmt.Sprintf("Reply YES %s %s for all %d, YES %s %d %s for item %d only, or NO %s.", r.id, r.code, len(r.items), r.id, n, r.code, n, r.id)
+	case form == repliesScoped && r.tier == High:
+		return fmt.Sprintf("Reply YES %s and a code from your code generator%s, for all %d, or NO %s.", r.id, c.gridOr(), len(r.items), r.id)
+	case form == repliesScoped:
+		return fmt.Sprintf("Reply YES %s %s for all %d, or NO %s.", r.id, r.code, len(r.items), r.id)
+	case r.tier == High:
+		return fmt.Sprintf("Reply YES %s and a code from your code generator%s (add item numbers to approve some; the rest are denied), or NO %s.", r.id, c.gridOr(), r.id)
 	}
+	return fmt.Sprintf("Reply YES %s %s for all, YES %s 1 2 %s for some (the rest are denied), or NO %s.", r.id, r.code, r.id, r.code, r.id)
 }
 
 // localAsk is a local-only item's question as its request text asks it,
@@ -412,7 +426,7 @@ func (c *Channel) moreLocked(id string, from int, now time.Time) string {
 		return fmt.Sprintf("%s has no undecided item from %d; it has %d. Reply MORE %s.", id, from, len(r.items), id)
 	}
 	exp := r.expires.In(c.cfg.Location).Format("15:04")
-	page := func(shown int, short bool) string {
+	page := func(shown int, short bool, form int) string {
 		var b strings.Builder
 		first, last := left[0]+1, left[shown-1]+1
 		if first == last {
@@ -426,23 +440,37 @@ func (c *Channel) moreLocked(id string, from int, now time.Time) string {
 				fmt.Fprintf(&b, " %d %s", i+1, c.localAsk(r.items[i]))
 				continue
 			}
-			fmt.Fprintf(&b, " %d %s.", i+1, c.itemLineAs(r.items[i], short))
+			line := c.itemLineAs(r.items[i], short)
+			if !strings.HasSuffix(line, "?") {
+				line += "."
+			}
+			if shown == 1 && short {
+				// The head already names the item; its number is not
+				// repeated, so the longest item keeps room for replies.
+				b.WriteString(" " + line)
+				continue
+			}
+			fmt.Fprintf(&b, " %d %s", i+1, line)
 		}
-		fmt.Fprintf(&b, " Expires %s. %s", exp, c.repliesLocked(r, short))
+		fmt.Fprintf(&b, " Expires %s. %s", exp, c.repliesLocked(r, form, first))
 		if shown < len(left) {
 			fmt.Fprintf(&b, " Next: MORE %s %d.", id, left[shown]+1)
 		}
 		return b.String()
 	}
 	for shown := len(left); shown >= 1; shown-- {
-		if p := page(shown, false); fits(p) {
+		if p := page(shown, false, repliesFull); fits(p) {
 			return p
 		}
 	}
 	// One item too long for its full wording: the same fields and
-	// notices, and the same replies, in fewer words. Every texted item
-	// fits this way (TestMorePagesReachEveryBatchItem's worst case).
-	return page(1, true)
+	// notices in fewer words, then replies in fewer words that keep the
+	// batch's scope. Every texted item fits the last form with the
+	// longest request ID (TestMoreWorstPageFitsWithTheLongestID).
+	if p := page(1, true, repliesItem); fits(p) {
+		return p
+	}
+	return page(1, true, repliesScoped)
 }
 
 // answerLocked applies YES or NO to a request (CH-13). accepted reports an
