@@ -6412,6 +6412,52 @@ class GoDebugEveryFu(unittest.TestCase):
                     self.assertEqual(mutgate.head_tests(tests, "cmd/tool"), None if wide else [])
                     self.assertEqual(mutgate.claimed(diff, ["cmd/tool"], "HEAD~1", "HEAD"), ["cmd/tool"])
 
+    def test_the_gate_entry_points_read_a_dormant_directive(self):
+        # L3 on #6558: changes(), cmd_plan, cmd_verify and cmd_claimed each read dormant(), so reverting any
+        # call site fails here. Security's case (b): only the /* */ pair around an unchanged //go:debug goes.
+        # REQ: MUT-go-debug-every-fu
+        import contextlib, io, types
+        hidden = "/*\n//go:debug http2client=0\n*/\n\npackage main\n\nfunc main() {}\n"
+        key = f"broker/cmd/tool/{mutgate.EVERY_TEST}"
+
+        class Reached(Exception):
+            pass
+
+        def stop(diff, base, head, tests, pkgs):
+            raise Reached(tests, pkgs)
+
+        with tempfile.TemporaryDirectory() as d:
+            git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+            tool = pathlib.Path(d) / "broker" / "cmd" / "tool"
+            tool.mkdir(parents=True)
+            (tool / "main_test.go").write_text("package main\n")
+            git("init", "-q")
+            for text in (hidden, hidden.replace("/*\n", "").replace("*/\n", "")):
+                (tool / "main.go").write_text(text)
+                git("add", "-A")
+                git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "x")
+            diff = git("diff", "-U0", "--no-renames", "HEAD~1...HEAD", "--", "broker").stdout
+            self.assertEqual(mutgate.claimed(diff, ["cmd/tool"]), [])  # the diff alone shows no directive line
+            with contextlib.ExitStack() as st:
+                for name, value in (("ROOT", pathlib.Path(d)), ("BROKER", pathlib.Path(d) / "broker"),
+                                    ("broker_diff", lambda *a: diff), ("gated_packages", lambda *a: ["cmd/tool"]),
+                                    ("advisory", lambda: None), ("build_lister", lambda tmp: "lister"),
+                                    ("bases_for", stop), ("read_results", lambda *a: ({}, []))):
+                    st.enter_context(mock.patch.object(mutgate, name, value))
+                st.enter_context(contextlib.redirect_stderr(io.StringIO()))
+                out = st.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                self.assertIn(key, mutgate.changes(diff, "HEAD~1", "HEAD")[1])
+                for name, cmd, args in (("plan", mutgate.cmd_plan, types.SimpleNamespace(git="HEAD~1", targets_out=None)),
+                                        ("verify", mutgate.cmd_verify,
+                                         types.SimpleNamespace(git="HEAD~1", head="HEAD", dir=d, summary=None))):
+                    with self.subTest(name), self.assertRaises(Reached) as got:
+                        cmd(args)
+                    tests, pkgs = got.exception.args
+                    self.assertIn(key, tests)
+                    self.assertEqual(pkgs, ["cmd/tool"])
+                self.assertEqual(mutgate.cmd_claimed(types.SimpleNamespace(git="HEAD~1", head="HEAD", json=True)), 0)
+                self.assertEqual(json.loads(out.getvalue().splitlines()[-1]), ["cmd/tool"])
+
     def test_a_go_mod_go_line_is_every_test_of_the_module(self):
         # REQ: MUT-go-debug-every-fu
         with tempfile.TemporaryDirectory() as d, self.tree(d):
