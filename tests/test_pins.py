@@ -485,9 +485,14 @@ class FollowUp2(unittest.TestCase):
                      "tar -cf o.tar -Iyarn f", "env -Syarn", "env -Snpx", "yarnpkg add x", "pip-3.12 install x",
                      "pip-3 install x", "node /usr/lib/node_modules/npm/bin/npm-cli.js install foo", "node yarn.js",
                      "tar xIf npx a.tar", 'tar --to-command=x -xf a "$n/bin/npx"',
-                     "pi[p] install --require-hashes -r r.txt"]:
+                     "pi[p] install --require-hashes -r r.txt",
+                     # L3 on #6630 at 970041e7: `name@version` and corepack count; neither earns credit.
+                     "yarn@1.22.22 add x", "npm@10 ci", "corepack enable", "pip@x install --require-hashes -r r.txt"]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 1)
+        for text in ["corepack yarn@1 add x", "corepack pnpm@8 i"]:  # corepack and the manager it runs
+            with self.subTest(text=text):
+                self.assertEqual(pins.text_sites(text), 2)
         for text in ["pip install --require-hashes -r r.txt", "python -m pip install --no-deps --require-hashes \\\n  -r r.txt",
                      "npm ci --ignore-scripts", "go install x@v1.2.3", "go mod download", 'tar x "$n/bin/npx" "$n/bin/npm"',
                      "pip list", "GOSUMDB=sum.golang.org go get x", "echo npm", "set -o pipefail", "pipx run x", "cat npm.log",

@@ -80,7 +80,7 @@ FETCH_EXEMPT = {
                                     ".curlrc; downloads nothing"),
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
     "tests/test_image.py": (1, "a busybox wget shebang as fixture text"),
-    "tests/test_pins.py": (168, "this reader's test cases"),
+    "tests/test_pins.py": (176, "this reader's test cases"),
     "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
@@ -104,9 +104,10 @@ NET_MODULES = ("urllib.request", "urllib3", "requests", "http.client", "httpx", 
 # tool_sites): every pip, npm, npx, pnpx, yarn or pnpm word counts, wherever it sits, unless a credit below
 # reads it as a known-safe form, plus a Go setting that turns off the checksum database.
 # A manager name, glued to any short-option prefix (`-mpip`, `-Iyarn`, `-Snpx`) and with any version or
-# script suffix (`pip-3.12`, `pip3.12`, `yarnpkg`, `npm-cli.js`, `yarn.js`); `pipe`, `pipx` and `npm.log` are not one.
-MANAGER = re.compile(r"(?:-+[A-Za-z]*?)?(pip|npm|npx|pnpx|yarn|pnpm)(?:pkg)?(?:-?[0-9][0-9.]*|-cli)?(?:\.[cm]?js)?")
-GLOB_NAMES = ("pip", "pip3", "npm", "npx", "pnpx", "yarn", "yarnpkg", "pnpm")
+# script suffix (`pip-3.12`, `pip3.12`, `yarnpkg`, `npm-cli.js`, `yarn.js`) or `@version` (`yarn@1`, as corepack
+# runs it), and `corepack` itself; `pipe`, `pipx` and `npm.log` are not one.
+MANAGER = re.compile(r"(?:-+[A-Za-z]*?)?(pip|npm|npx|pnpx|yarn|pnpm|corepack)(?:pkg)?(?:-?[0-9][0-9.]*|-cli)?(?:\.[cm]?js)?(?:@\S*)?")
+GLOB_NAMES = ("pip", "pip3", "npm", "npx", "pnpx", "yarn", "yarnpkg", "pnpm", "corepack")
 FILE_TOOLS = frozenset(["tar", "cp", "mv", "ln", "rm", "chmod", "chown", "ls", "stat", "test", "[", "echo", "printf"])
 PIP_READ_ONLY = frozenset(["list", "show", "freeze", "check", "hash", "help", "--version"])  # fetch nothing
 PIP_NO_VALUE = frozenset(["--require-hashes", "--no-deps", "-q", "--quiet", "--no-index", "--no-cache-dir",
@@ -174,8 +175,8 @@ def _credited(words, i, lead):
     """True when the manager word at words[i] is a known-safe form: a path argument of a file tool (`tar x
     "$n/bin/npx"`), `npm ci` with options only, a read-only pip verb, or a hashed pip install."""
     name, prev, args = _name(words[i]), words[i - 1] if i else "", words[i + 1:]
-    if re.search(r"[][*?]", words[i]):
-        return False  # a glob may expand to several words
+    if re.search(r"[][*?]", words[i]) or "@" in words[i].rsplit("/", 1)[-1]:
+        return False  # a glob may expand to several words; `name@version` runs through corepack
     if lead in FILE_TOOLS and i and not prev.startswith("-") and (lead != "tar" or _tar_runs_nothing(words)):
         return True
     if name == "npm":
