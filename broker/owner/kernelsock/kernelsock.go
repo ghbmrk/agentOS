@@ -6,7 +6,7 @@
 // the owner side's (asUID), so the peer the kernel reads is the one the
 // deployment names, and no frame carries a uid.
 //
-// This is the wire kernel/proc's Owner speaks, written out here rather
+// This is the wire kernel/proc's OwnerSide serves, written out here rather
 // than imported, as localsrv/accountsock writes out the mail clerk's:
 // kernel/proc is the kernel process's own host, which agentosd's control
 // path does not link (daemon TestARC2ControlPathCannotReachInference).
@@ -65,7 +65,7 @@ func (r Refused) Error() string { return "kernelsock: the kernel refused: " + r.
 // {"result"}, {"error"} or {"refusal"} answer (kernel/proc ServeOne).
 func (o Owner) call(ctx context.Context, op string, args, out any) error {
 	if args == nil {
-		args = struct{}{} // as kernel/proc's mustRaw sends no arguments
+		args = struct{}{} // as kernel/proc's Conn.Call sends no arguments
 	}
 	raw, err := json.Marshal(args)
 	if err != nil {

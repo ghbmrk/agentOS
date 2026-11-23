@@ -109,6 +109,7 @@ type test struct {
 var tests = []test{
 	{"test_no_shell", testNoShell},
 	{"test_altered_root_does_not_boot", testAlteredRoot},
+	{"test_panic_is_reported", testPanic},
 	{"test_only_stream_port", testOnlyStreamPort},
 	{"test_first_bundle_needs_button", testFirstBundle},
 	{"test_unsigned_settings_refused", testUnsignedSettings},
@@ -370,11 +371,33 @@ func testAlteredRoot(e *e2e) error {
 	if strings.Contains(log, "verified, mounted read-only") || strings.Contains(log, "systemd[1]") {
 		return errors.New("the altered root started")
 	}
-	// dm-verity's own report of the flipped block, not any other early failure.
-	if !regexp.MustCompile(`device-mapper: verity: [^\n]*data block \d+ is corrupted`).MatchString(log) {
-		return errors.New("the board restarted, but not on a verity failure")
+	// dm-verity's own restart, not any other early failure.
+	if cmd != "dm-verity device corrupted" {
+		return fmt.Errorf("the board restarted (%q), but not on a verity failure", cmd)
 	}
 	logf("altered root: restarted (%q) before systemd", cmd)
+	e.vm = nil
+	return nil
+}
+
+// testPanic boots a board whose kernel cannot start init (no such rdinit, no root device), so it
+// panics: the harness must report the panic as such, never as a restart, or a trial that panics
+// would pass for a failed one (test_update_rollback). It also shows the pvpanic device and its
+// driver are in place. Nothing is written: the kernel panics before any disk is opened.
+func testPanic(e *e2e) error {
+	pb := newBoard(e.board.tools, filepath.Join(e.work, "panic"), e.board.disk, e.board.element, tapName)
+	pb.mac = e.board.mac
+	pb.append = "rdinit=/camnode-e2e-no-such-init"
+	v, err := pb.power(false)
+	if err != nil {
+		return err
+	}
+	e.vm = v
+	_, err = v.stopped(pb, 2*time.Minute)
+	if !errors.Is(err, errPanic) {
+		return fmt.Errorf("a panicking kernel was reported as %v, want %v", err, errPanic)
+	}
+	logf("panic: reported as %v", err)
 	e.vm = nil
 	return nil
 }

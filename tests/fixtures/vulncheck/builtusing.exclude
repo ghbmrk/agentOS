@@ -1,0 +1,4 @@
+# tools/vulncheck.py control (#6481): agentos-nofix is excluded in the guests' tree only, where
+# guest/agentos.inputs records it as a link input; in the main tree its Built-Using source (DEB-10) is
+# still queried and must FAIL.
+agentos-nofix /usr/lib/agentos/images/control/bin/tool control: a recorded link input of a linked guest file
