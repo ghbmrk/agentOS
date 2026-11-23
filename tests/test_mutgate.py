@@ -4808,38 +4808,49 @@ class WaiveKeepsOrder(unittest.TestCase):
             git = lambda *a: subprocess.run(["git", "-C", d, "-c", "user.email=t@example.invalid", "-c", "user.name=t", *a],
                                             check=True, capture_output=True, text=True).stdout.strip()
             run = self.repo(d, self.SRC, self.SRC)
-            for line in (5, 8, 11):
-                self.waive(d, run, line)
-            path = pathlib.Path(d) / "broker" / "netguard" / mutgate.RECORD
+            pkg = pathlib.Path(d) / "broker" / "netguard"
+            (pkg / "b.go").write_text("package netguard\n\nfunc g(x int) int {\n\tif x > 1 {\n\t\treturn 2\n\t}\n\treturn x\n}\n")
+            wfile = pathlib.Path(d) / "w.txt"
+
+            def waive(*sites, accepted="#5743"):
+                wfile.write_text("".join(f"Mutant-equivalent: broker/netguard/{s} both give the same value on every input\n"
+                                         for s in sites))
+                r = run("waive", str(wfile), "--accepted", accepted)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                return r.stdout
+            for site in ("a.go:5", "a.go:8", "a.go:11", "b.go:4"):
+                waive(site)
+            path = pkg / mutgate.RECORD
             rows = path.read_text().rstrip("\n").split("\n")
-            # A hand-ordered record: entries reversed, and a comment between them, kept word for word.
-            hand = [rows[0], rows[3], "# a note between entries", rows[2], rows[1]]
-            self.assertNotEqual(hand[1:], sorted(hand[1:]))
+            a5, a8, a11, b4 = rows[1:]  # each new site after its file's last entry: in waive order here
+            self.assertEqual([(e["file"], e["stmt"][e["at"]]) for e in map(json.loads, rows[1:])],
+                             [("a.go", "if x > 1 {"), ("a.go", "if x > 1 {"), ("a.go", "return x"), ("b.go", "if x > 1 {")])
+            # A hand-ordered record: a.go's entries reversed, a comment and a blank line between them, a word-for-word
+            # repeat of one entry, and b.go's entry last.
+            hand = [rows[0], a11, "# a note between entries", "", a8, a8, a5, b4]
             path.write_text("\n".join(hand) + "\n")
-            git("add", "-A"); git("commit", "-qm", "base")
+            git("add", "-A")
+            git("commit", "-qm", "base")
             base = git("rev-parse", "HEAD")
-            # Rewrite one entry (line 8, a new reason) and add a new one (line 6).
-            (pathlib.Path(d) / "w.txt").write_text(
-                "Mutant-equivalent: broker/netguard/a.go:8 a new reason the review read for this site\n"
-                "Mutant-equivalent: broker/netguard/a.go:6 both returns give the same value on every input\n")
-            r = run("waive", str(pathlib.Path(d) / "w.txt"), "--accepted", "#6573")
-            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-            self.assertIn("2 entries written, 4 in all", r.stdout)
+            # Rewrite a.go:8 (the repeated entry, under another accepting PR) and add a.go:6.
+            self.assertIn("2 entries written, 5 in all", waive("a.go:8", "a.go:6", accepted="#6573"))
             out = path.read_text().rstrip("\n").split("\n")
-            self.assertEqual(out[:3], hand[:3])           # untouched lines in place
-            self.assertEqual(out[4], hand[4])
-            self.assertIn("a new reason", out[3])        # rewritten in its own place
-            self.assertEqual(json.loads(out[3])["stmt"], json.loads(hand[3])["stmt"])
-            self.assertEqual(json.loads(out[5])["stmt"], ["return 2"])  # new, after its file's last entry
-            self.assertEqual(len(out), 6)
-            git("add", "-A"); git("commit", "-qm", "waive")
+            self.assertEqual(out[:4], hand[:4])               # untouched lines in place, word for word
+            self.assertEqual(json.loads(out[4])["accepted"], "#6573")  # rewritten in its own place; its repeat gone
+            self.assertEqual(json.loads(out[4])["stmt"], json.loads(a8)["stmt"])
+            self.assertEqual(out[5], a5)
+            self.assertEqual(json.loads(out[6])["stmt"], ["return 2"])  # new: after a.go's last entry, not at the end
+            self.assertEqual(json.loads(out[6])["file"], "a.go")
+            self.assertEqual(out[7:], [b4])
+            git("add", "-A")
+            git("commit", "-qm", "waive")
             head = git("rev-parse", "HEAD")
             rel = f"broker/netguard/{mutgate.RECORD}"
             self.assertIs(premerge._records_kept(d, head, head, rel, head, base), True)
-            # Untouched entries moved (as the old sorted rewrite moved them, #6559) read as changed.
-            moved = [out[0], out[4], out[2], out[3], out[1], out[5]]
+            # Two untouched entries swapped (as the old sorted rewrite moved them, #6559) read as changed.
+            moved = [out[0], out[5], out[2], out[3], out[4], out[1], out[6], out[7]]
             path.write_text("\n".join(moved) + "\n")
-            git("commit", "-qam", "sorted")
+            git("commit", "-qam", "moved")
             head = git("rev-parse", "HEAD")
             self.assertIs(premerge._records_kept(d, head, head, rel, head, base), False)
 
