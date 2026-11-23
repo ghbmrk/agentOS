@@ -238,7 +238,7 @@ func TestGuestTaskRunsOnTheCodexPlan(t *testing.T) {
 		"usedup":       "provider_run 1 refused: provider_run: used up",
 		"rpcError":     "tools/call: error -32603",
 		"garbage":      "tools/call: unreadable answer",
-		"stray":        "the provider refused 1 calls",
+		"stray":        "the provider refused 1 call(s)",
 		"wrongText":    "not the model's",
 	} {
 		d, f := signedIn(t, mode)

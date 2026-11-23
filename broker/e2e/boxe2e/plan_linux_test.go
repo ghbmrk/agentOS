@@ -22,16 +22,17 @@ import (
 // sign-in starts on the owner's post and completes on a reload once the
 // owner approved the code at the provider.
 type fakeBox struct {
-	stub  *codexstub.Stub
-	offer bool   // step 6 offers the codex sign-in
-	host  string // the link's host
-	leak  bool   // the status page shows an issued token
-	stray bool   // the box makes a call the provider refuses
-	noRun bool   // the sign-in cannot start: the page shows localui's error
-	mu    sync.Mutex
-	dev   map[string]string
-	tok   map[string]string // the exchange's tokens, for a fake worker's model call
-	done  bool
+	stub     *codexstub.Stub
+	offer    bool   // step 6 offers the codex sign-in
+	host     string // the link's host
+	leak     bool   // the status page shows an issued token
+	stray    bool   // the box makes a call the provider refuses
+	noRun    bool   // the sign-in cannot start: the page shows localui's error
+	updating bool   // step 6 still waits for the first-boot update: no aiOpen
+	mu       sync.Mutex
+	dev      map[string]string
+	tok      map[string]string // the exchange's tokens, for a fake worker's model call
+	done     bool
 }
 
 func (f *fakeBox) provider(method, path, ctype string, body string) (int, map[string]string) {
@@ -76,6 +77,8 @@ func (f *fakeBox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<h2>6. Connect AI</h2><p class="muted">One is enough. You can add more later.</p><h3>ChatGPT</h3>` +
 			`<p>Open <a href="` + link + `">` + link + `</a> and enter <span class="mono">` + f.dev["user_code"] + `</span>.</p>` +
 			`<p>This code is from OpenAI.</p><p><a href="/setup">I signed in</a></p>`))
+	case r.URL.Path == "/setup" && f.updating:
+		w.Write([]byte(`<h2>6. Connect AI</h2><p class="muted">Updating this box. This can take a few minutes.</p>`))
 	case r.URL.Path == "/setup":
 		page := `<h2>6. Connect AI</h2><p class="muted">One is enough. You can add more later.</p><h3>ChatGPT</h3>`
 		if f.noRun {
@@ -222,7 +225,7 @@ func TestGuestTaskSignsInToThePlan(t *testing.T) {
 	}{
 		"link off the auth host": {&fakeBox{stub: codexstub.New(), offer: true, host: "auth.openai.com.evil.example"}, `host "auth.openai.com.evil.example"`},
 		"token on a page":        {&fakeBox{stub: codexstub.New(), offer: true, host: "auth.openai.com", leak: true}, "provider token: GET /status"},
-		"a refused call":         {&fakeBox{stub: codexstub.New(), offer: true, host: "auth.openai.com", stray: true}, "the provider refused 1 calls"},
+		"a refused call":         {&fakeBox{stub: codexstub.New(), offer: true, host: "auth.openai.com", stray: true}, "the provider refused 1 call(s)"},
 	} {
 		err := ok(c.f)
 		if err == nil || strings.HasPrefix(err.Error(), notDriven) {
@@ -314,5 +317,29 @@ func TestWorkerOutputRefusesTheGuestsLinks(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(secret); string(got) != "host-only canary" {
 		t.Fatalf("the link's target now holds %q", got)
+	}
+}
+
+// A step 6 that never lists providers, as while the first-boot update
+// runs, fails as "step 6 did not open" after the step's two minutes on the
+// driver's clock: a product failure, so FAIL and not the not-driven text
+// (#1890 item 5, ASSUMPTIONS E11). The clock is the driver's now and
+// sleep, so the wait takes no real time.
+func TestStep6ThatNeverOpensFails(t *testing.T) {
+	f := &fakeBox{stub: codexstub.New(), offer: true, host: "auth.openai.com", updating: true}
+	d := fakeDriver(f)
+	at := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	d.now = func() time.Time { return at }
+	d.sleep = func(t time.Duration) { at = at.Add(t) }
+	start := at
+	err := d.guestTask()
+	if err == nil || !strings.HasPrefix(err.Error(), "step 6 did not open: after 2m0s") || !strings.Contains(err.Error(), `"6. Connect AI"`) {
+		t.Fatalf("%v, want step 6 did not open", err)
+	}
+	if waited := at.Sub(start); waited < 2*time.Minute || waited > 2*time.Minute+2*time.Second {
+		t.Fatalf("waited %s on the driver's clock, want 2m", waited)
+	}
+	if f.stub.Hits()["usercode"] != 0 {
+		t.Fatalf("signed in on a page that never opened: %v", f.stub.Hits())
 	}
 }

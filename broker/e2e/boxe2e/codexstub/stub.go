@@ -190,12 +190,13 @@ func (s *Stub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.refuse(w, http.StatusNotFound)
 }
 
-// hostname is host without its port, as the provider ignores :443.
+// hostname is host without its port and the root's trailing dot, lower
+// case: the name the provider answers to whatever the spelling (#1890).
 func hostname(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	return strings.ToLower(host)
+	return strings.ToLower(strings.TrimSuffix(host, "."))
 }
 
 func (s *Stub) refuse(w http.ResponseWriter, code int) {

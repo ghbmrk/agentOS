@@ -330,7 +330,7 @@ func TestStubRefuses(t *testing.T) {
 }
 
 // Only requests for the Codex hosts go to the stub, matched by host name
-// whatever the port; one on a scheme other than https fails rather than
+// whatever the port and with or without the root's trailing dot (#1890); one on a scheme other than https fails rather than
 // reaching the fallback. Every other request goes to the fallback, so the
 // e2e build changes nothing else.
 func TestTransportSendsOnlyCodexHostsToTheStub(t *testing.T) {
@@ -351,7 +351,7 @@ func TestTransportSendsOnlyCodexHostsToTheStub(t *testing.T) {
 	if len(r.other.urls) != 4 || r.stub.Refused() != 0 {
 		t.Fatalf("fallback %v, stub refused %d", r.other.urls, r.stub.Refused())
 	}
-	for i, u := range []string{"https://chatgpt.com/nothing", "https://chatgpt.com:443/nothing", "https://CHATGPT.com:8443/nothing", "https://auth.openai.com:443/nothing"} {
+	for i, u := range []string{"https://chatgpt.com/nothing", "https://chatgpt.com:443/nothing", "https://CHATGPT.com:8443/nothing", "https://auth.openai.com:443/nothing", "https://chatgpt.com./nothing", "https://auth.openai.com.:443/nothing"} {
 		req := httptest.NewRequest("GET", u, nil)
 		resp, err := r.rt.RoundTrip(req)
 		if err != nil || resp.StatusCode != 404 || r.stub.Refused() != i+1 {
@@ -360,5 +360,27 @@ func TestTransportSendsOnlyCodexHostsToTheStub(t *testing.T) {
 	}
 	if len(r.other.urls) != 4 {
 		t.Fatalf("fallback %v", r.other.urls)
+	}
+}
+
+// The stub matches a declared endpoint by host name alone, as the
+// provider does: the port and the root's trailing dot are dropped and case
+// is ignored, so a request for the auth host in any of those spellings is
+// answered, not refused (#1890 items 2 and 4).
+func TestStubMatchesTheHostWhateverItsPortOrTrailingDot(t *testing.T) {
+	s := New()
+	hosts := []string{"auth.openai.com", "auth.openai.com:443", "auth.openai.com.", "AUTH.openai.com.:443"}
+	for _, host := range hosts {
+		req := httptest.NewRequest("POST", "https://"+host+"/api/accounts/deviceauth/usercode", strings.NewReader(`{"client_id":"app_synthetic"}`))
+		req.Host = host
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, req)
+		if w.Code != 200 {
+			t.Errorf("%s: %d, want 200", host, w.Code)
+		}
+	}
+	if s.Hits()["usercode"] != len(hosts) || s.Refused() != 0 {
+		t.Fatalf("hits %v refused %d", s.Hits(), s.Refused())
 	}
 }

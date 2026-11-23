@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"github.com/ghbmrk/agentos/broker/control"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -149,8 +151,18 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 		notice   bool   // the box's line sends recoveryNotice before its first reply
 		note     string // the step's note, "" for none
 		diag     bool   // a timeout, whose error carries modemDiag; a reply out of order carries none
+		lose     int    // the paired phone's first lose HELP texts never reach the box
+		probes   int    // HELP probes the step sent, 0 for any
 	}{
-		{name: "pass", st: owner.State{LastStep: step}, enrolled: true, done: true},
+		{name: "pass", st: owner.State{LastStep: step}, enrolled: true, done: true, note: "proved help-answered code-checked status-locked unpaired-ignored", probes: 1},
+		// The hand-over from setup can lose the owner's texts (E9): a lost
+		// HELP is sent again after 45 s, and the step passes on the retry.
+		{name: "first HELP lost, the retry answered", st: owner.State{LastStep: step}, enrolled: true, done: true,
+			lose: 1, note: "proved help-answered code-checked status-locked unpaired-ignored", probes: 2},
+		// Every HELP lost: the probe gives up at the 3-minute deadline and
+		// names its attempts, on the driver's clock (#1883 item 3).
+		{name: "every HELP lost", st: owner.State{LastStep: step}, enrolled: true, done: true,
+			lose: 1 << 20, want: "no reply to the paired number after 4 HELP attempts (BOARD P2-2w c4c r1", diag: true, probes: 4},
 		{name: "recovery notice passed over, noted and failed", st: owner.State{LastStep: step}, enrolled: true, done: true,
 			notice: true, want: "passed over 1 recovery notice(s)", note: "passed-over recovery notices=1 texts=2 requests=1|lost-send kind=request via=owner-channel-sendrequest"},
 		{name: "setup not finished", st: owner.State{LastStep: step}, enrolled: true, want: `setup not finished: GET /setup 200 "" at "7. AI"`},
@@ -225,6 +237,10 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 					case <-ctx.Done():
 						return
 					case m := <-line.Inbox():
+						if c.lose > 0 && m.From == phoneNum && m.Text == "HELP" {
+							c.lose--
+							continue
+						}
 						if c.notice {
 							c.notice = false
 							_ = line.Send(phoneNum, recoveryNotice)
@@ -282,6 +298,9 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 			if got := strings.Join(notes, "|"); got != c.note {
 				t.Fatalf("notes %q, want %q", got, c.note)
 			}
+			if got := readPhoneRun(carrier.Log(), 0).probes; c.probes != 0 && got != c.probes {
+				t.Fatalf("%d HELP probes, want %d", got, c.probes)
+			}
 		})
 	}
 }
@@ -298,4 +317,25 @@ func answered(ms []modem.SMS) bool {
 		}
 	}
 	return false
+}
+
+// REQ: CH-1. The NOTE a passing phone-control prints is one ci_boot.sh's
+// console check takes: the step's name, then lower-case words only, so a
+// pass that names its commands still reads as no step (#1883 item 4).
+func TestPhoneControlPassNoteReadsAsANote(t *testing.T) {
+	boot, err := os.ReadFile("../../../image/ci_boot.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`r ~ /(\^NOTE [^/]*)/ \{ next \}`).FindSubmatch(boot)
+	if m == nil {
+		t.Fatal("ci_boot.sh has no NOTE check")
+	}
+	var out bytes.Buffer
+	r := newReport(&out, nil)
+	r.step("phone-control", func() error { r.note(passNote); return nil })
+	line := strings.SplitN(out.String(), "\n", 2)[0]
+	if !regexp.MustCompile(string(m[1])).MatchString(strings.TrimPrefix(line, "agentos-e2e: ")) {
+		t.Fatalf("%q does not match ci_boot.sh's %s", line, m[1])
+	}
 }
