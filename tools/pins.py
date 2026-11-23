@@ -77,7 +77,7 @@ FETCH_EXEMPT = {
                                     ".curlrc; downloads nothing"),
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
     "tests/test_image.py": (1, "a busybox wget shebang as fixture text"),
-    "tests/test_pins.py": (49, "this reader's test cases"),
+    "tests/test_pins.py": (50, "this reader's test cases"),
     "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
@@ -104,7 +104,7 @@ def text_sites(text):
     n, joined, prev = 0, [], ""
     for line in text.split("\n"):
         if prev.endswith("\\") and not prev.lstrip().startswith("#"):
-            joined[-1] = joined[-1][:-1] + " " + line
+            joined[-1] = joined[-1][:-1] + line  # shell removes backslash-newline outright
         else:
             joined.append(line)
         prev = joined[-1]

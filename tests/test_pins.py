@@ -352,7 +352,7 @@ class Sites(unittest.TestCase):
                      "python3 -c 'import urllib.request as r; r.urlopen(u)'",
                      "gh release download v1 -R o/r", "gh release \\\n  download v1", "echo ok; `curl u`",
                      "# a comment ending in a backslash \\\ncurl -o f u", "curl \\\n# c\n -o f u",
-                     'cu""rl -o f u', "cu''rl u", "c\\url -o f u", "exec 3<>/dev/tcp/e.org/80"]:
+                     'cu""rl -o f u', "cu''rl u", "c\\url -o f u", "exec 3<>/dev/tcp/e.org/80", "cu\\\nrl u"]:
             with self.subTest(text=text):
                 self.assertGreater(pins.text_sites(text), 0)
 
