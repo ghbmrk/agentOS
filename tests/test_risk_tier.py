@@ -369,7 +369,10 @@ class RiskTierTest(unittest.TestCase):
         names = set()
         for item in listed.replace("; ", ", ").split(", "):
             item = item.split(": ", 1)[-1]  # drop the criterion label
-            names.update(n.rstrip("*") for n in item.split("/"))
+            for n in item.split("/"):
+                # A starred item names every broker package it prefixes (modem* is modem and modemlink).
+                names.update([n] if not n.endswith("*") else
+                             [d.name for d in (ROOT / "broker").glob(n) if d.is_dir()] or [n])
         # Every name is a real package, so a label cannot pass as one.
         missing = [n for n in sorted(names)
                    if not (ROOT / "broker" / n).is_dir()]
@@ -378,14 +381,12 @@ class RiskTierTest(unittest.TestCase):
         self.assertIn("claim", rt.TIER_A_BROKER)
         self.assertIn("firstboot", names)
         self.assertIn("firstboot", rt.TIER_A_BROKER)
-        # Every package OPERATING names as tier A is tier A in the tool
-        # (modem* covers modem and modemlink).
+        # Every package OPERATING names as tier A is tier A in the tool.
         not_a = [n for n in sorted(names)
                  if rt.tier_of("broker/" + n + "/x.go")[0] != "A"]
         self.assertEqual(not_a, [])
         # And the other way (#1704): every TIER_A_BROKER package is in the row, so dropping one from the
-        # row fails too. modem* names modemlink; cmd, core and internal are named by path after "plus".
-        names.add("modemlink")
+        # row fails too. cmd, core and internal are named by path after "plus".
         self.assertEqual(sorted(rt.TIER_A_BROKER - names - {"cmd", "core", "internal"}), [])
         for n in ("cmd", "core", "internal"):
             self.assertIn("`broker/" + n + "`", row)
