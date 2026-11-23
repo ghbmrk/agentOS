@@ -597,7 +597,10 @@ class Shape(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         cwd, argv, diff = seen.split("\n", 2)
         self.assertEqual(pathlib.Path(cwd).name, "hint")
-        self.assertRegex(argv, r"/broker/hint -D HEAD~1 --config \S+ --exclude-files / -o D/out/hint\.json --workers \d+$")
+        m = re.search(r"/broker/hint -D HEAD~1 --config \S+ --exclude-files / -o D/out/hint\.json --workers (\d+) "
+                      r"--timeout-coefficient (\d+)$", argv)
+        self.assertTrue(m, argv)
+        self.assertEqual(int(m[2]), mutgate.TIMEOUT_COEFFICIENT * int(m[1]))  # MUT-gremlins-timeout
         self.assertIn("+++ b/hint.go\n@@ -1,0 +2,2 @@", diff)
         self.assertNotIn("\n package hint\n", diff)  # no context line
         # A mutant gremlins skipped on a line the gate reads fails the run, not the gate empty.
@@ -5621,8 +5624,9 @@ class GremlinsMemoryCap(unittest.TestCase):
         seen, prof = pathlib.Path(d) / "seen", pathlib.Path(d) / "c"
         bindir = self.fake_go(d, f"eval \"$x python3 -c 'b = bytearray({grow}); import time; time.sleep(0.5)'\"\n: > {prof}\n")
         (bindir / "gremlins").write_text(
-            "#!/bin/sh\nw=; o=; while [ $# -gt 0 ]; do case \"$1\" in --workers) w=$2;; -o) o=$2;; esac; shift; done\n"
-            f"echo $w >> {seen}\n"
+            "#!/bin/sh\nw=; o=; c=; while [ $# -gt 0 ]; do case \"$1\" in --workers) w=$2;; -o) o=$2;; "
+            "--timeout-coefficient) c=$2;; esac; shift; done\n"
+            f"echo $w $c >> {seen}\n"
             f"go test -cover -coverprofile {prof} ./... 2>&1 | grep -q 'more than half' && exit 1\n"
             "printf '%s' '{\"files\": [], \"mutants_total\": 0, \"mutants_lived\": 0}' > \"$o\"\n")
         (bindir / "gremlins").chmod(0o755)
@@ -5631,7 +5635,11 @@ class GremlinsMemoryCap(unittest.TestCase):
                 mock.patch.object(mutgate, "default_jobs", return_value=jobs), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             code = mutgate.main(["run", *pkgs, "--out", str(pathlib.Path(d) / "out")])
-        return code, [int(w) for w in seen.read_text().split()]
+        runs = [line.split() for line in seen.read_text().splitlines()]
+        # MUT-gremlins-timeout (Security on #6575): each run's timeout scales with its workers.
+        for w, c in runs:
+            self.assertEqual(int(c), mutgate.TIMEOUT_COEFFICIENT * int(w), runs)
+        return code, [int(w) for w, _ in runs]
 
     def test_tests_past_half_a_share_run_again_on_fewer_workers(self):
         # #6396: egress's tests held 1017 MB of a 1820 MB share, so every run of it failed by name. The
