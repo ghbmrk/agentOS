@@ -124,6 +124,7 @@ import codecs
 import collections
 import concurrent.futures
 import contextlib
+import ctypes
 import fnmatch
 import functools
 import glob
@@ -412,8 +413,6 @@ def names_file(pkg_dir, rel):
     A file no code names this way is absent from every tree the gate runs tests in (hide_docs), so
     a read of it by any other means (a listing, a child process, a path built from runes, another
     package) fails the gate's run rather than going unseen (#6373)."""
-    parts = rel.split("/")
-    names = [parts[-1]] + ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]
     texts = []
     for f in sorted(pkg_dir.glob("*.go")):
         if f.is_symlink() or not f.is_file():
@@ -421,15 +420,127 @@ def names_file(pkg_dir, rel):
         if (text := go_text(f.read_bytes())) is None:
             return True
         texts.append(text)
-    for text in texts:
-        for lit in _literals(text) + _embeds(text):
-            if parts[-1] in lit or parts[0] in lit:
-                return True
-            if re.search(r"[*?\[]", lit) and (
-                    any(fnmatch.fnmatchcase(n, lit) for n in names)
-                    or fnmatch.fnmatchcase(parts[-1], lit.rstrip("/").rsplit("/", 1)[-1])):
-                return True
-    return False
+    return any(_names(lit, rel) for text in texts for lit in _literals(text) + _embeds(text))
+
+
+def _names(lit, rel):
+    """Whether one literal or embed pattern names rel, as names_file reads it."""
+    parts = rel.split("/")
+    names = [parts[-1]] + ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]
+    if parts[-1] in lit or parts[0] in lit:
+        return True
+    return bool(re.search(r"[*?\[]", lit)) and (
+        any(fnmatch.fnmatchcase(n, lit) for n in names)
+        or fnmatch.fnmatchcase(parts[-1], lit.rstrip("/").rsplit("/", 1)[-1]))
+
+
+# A //go:embed line and the package-level `var name Type` gofmt puts at column 0 under it, comment
+# lines between (Go's rule: only blank lines and line comments may come between them). The name is
+# unexported: another package's test could read an exported one, and read_index sees only literals.
+EMBED_VAR = re.compile(r"^//go:embed[ \t]+(.*)\n(?://.*\n)*var ([a-z_]\w*)[ \t]+[^=\n(]+\n", re.M)
+
+
+def embedded_by(pkg, rel):
+    """{repo path: {line}} of the package-level var declarations whose //go:embed directive is the
+    only way broker/<pkg>/'s .go files name rel, a path below it (names_file), or None. Each such
+    directive lists rel alone (quoted or `all:` too), no glob, right above a plain `var name Type`
+    at column 0 (comment lines between), name unexported, so the var holds that file's bytes and nothing else. Any
+    other namer (a string literal, a glob, a directive listing more or on another shape, a link or
+    unreadable file) is None. A change to rel then changes only what reads that var: the tests
+    reaching it (head_tests, #6458)."""
+    out, d = {}, BROKER / pkg
+    for f in sorted(d.glob("*.go")):
+        if f.is_symlink() or not f.is_file() or (text := go_text(f.read_bytes())) is None:
+            return None
+        if any(_names(lit, rel) for lit in _literals(text)):
+            return None
+        path, bare, held = f"broker/{pkg}/{f.name}", _uncommented(text, False).split("\n"), 0
+        for m in EMBED_VAR.finditer(text):
+            pats = [w.strip('"`').removeprefix("all:") for w in m[1].split()]
+            if not any(_names(x, rel) for x in pats):
+                continue
+            line = text.count("\n", 0, m.end())
+            if pats != [rel] or re.search(r"[*?\[]", rel) or not bare[line - 1].startswith(f"var {m[2]} ") or not any(
+                    k == "var" and names == {m[2]} and first <= line <= last
+                    for _, k, names, _r, _w, _e, first, last, _c in _decls(path, text)):
+                return None
+            out.setdefault(path, set()).add(line)
+            held += 1
+        if held != sum(1 for x in _embeds(text) if _names(x, rel)):
+            return None  # a directive naming rel that is not on such a var
+    return out or None
+
+
+# inotify's open and read events (inotify(7)), and its event header: wd, mask, cookie, name length.
+IN_ACCESS, IN_OPEN, IN_EVENT = 0x1, 0x20, 16
+
+
+@functools.cache
+def _inotify():
+    """libc with inotify_init1 and inotify_add_watch, or None where there is none (not Linux):
+    head_tests then narrows no embedded file, since no run could watch it (#6518)."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if not (hasattr(libc, "inotify_init1") and hasattr(libc, "inotify_add_watch")):
+            return None
+    except OSError:
+        return None
+    return libc
+
+
+@contextlib.contextmanager
+def watched_at_run(broker, paths, tmp):
+    """Yield (flags, opened) for a run of broker's tests with paths (repo paths, embedded files:
+    embedded_by) in place, bytes unchanged: flags build the tests reading each from a copy under
+    tmp through -overlay (which go reads for //go:embed too), so the build never opens them, and
+    opened(), called once the run ends, lists the paths some process opened or read meanwhile
+    (inotify on each file's inode: the test binary, a child process, through any link). A test that
+    reads one at run time is then seen whether or not it tolerates the file's absence, which hiding
+    it was not (Security on #6518, #6458). Only regular files (ValueError otherwise); no inotify
+    or a watch refused is OSError."""
+    tree = pathlib.Path(broker).resolve().parent
+    if not paths:
+        yield [], lambda: []
+        return
+    if (libc := _inotify()) is None:
+        raise OSError("inotify is unavailable")
+    store, files = pathlib.Path(tmp).resolve() / "embedded", {}
+    store.mkdir(exist_ok=True)
+    for n, path in enumerate(paths):
+        src = tree / path
+        if src.is_symlink() or not src.is_file():
+            raise ValueError(f"{path} is not a regular file")
+        shutil.copyfile(src, store / str(n))  # before the watch: this copy opens src
+        files[path] = (src, store / str(n))
+    (store / "overlay.json").write_text(json.dumps({"Replace": {str(a): str(b) for a, b in files.values()}}))
+    fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+    if fd < 0:
+        raise OSError(ctypes.get_errno(), "inotify_init1")
+    try:
+        wds = {}
+        for path, (src, _) in files.items():
+            if (wd := libc.inotify_add_watch(fd, os.fsencode(src), IN_OPEN | IN_ACCESS)) < 0:
+                raise OSError(ctypes.get_errno(), f"inotify_add_watch {path}")
+            wds[wd] = path
+
+        def opened():
+            got = set()
+            while True:
+                try:
+                    buf = os.read(fd, 1 << 16)
+                except BlockingIOError:
+                    return sorted(got)
+                at = 0
+                while at + IN_EVENT <= len(buf):
+                    wd = int.from_bytes(buf[at:at + 4], sys.byteorder, signed=True)
+                    # A full queue (wd -1, IN_Q_OVERFLOW) may have lost any path's event: all.
+                    got |= {wds[wd]} if wd in wds else set(wds.values())
+                    at += IN_EVENT + int.from_bytes(buf[at + 12:at + 16], sys.byteorder)
+        yield [f"-overlay={store / 'overlay.json'}"], opened
+    finally:
+        os.close(fd)
 
 
 # The trees this process made (scratch's worktree, base_covered's archive): the only ones hide_docs deletes in.
@@ -1125,10 +1236,12 @@ def _same_binding(sf, df, text, b, h):
                for q in set(QUALIFIER.findall(_uncommented(text, False))))
 
 
-def _package_reads(rel, commit):
-    """(names Parallel, module import paths) of broker/<rel>/'s .go files at commit, or None when a file
-    or an import spec is not read."""
+def _package_reads(rel, commit, tests=True):
+    """(names Parallel, module import paths) of broker/<rel>/'s .go files at commit, its _test.go files
+    left out unless tests, or None when a file or an import spec is not read."""
     files = _go_files(rel, commit)
+    if files is not None and not tests:
+        files = {p: t for p, t in files.items() if not is_test(p)}
     if files is None or any(NOT_GO_SPACE.search(t) for t in files.values()):
         return None
     facts = [_facts(p, t) for p, t in files.items()]
@@ -1140,13 +1253,15 @@ def _package_reads(rel, commit):
 def _parallel(pkg, commit, module, cache):
     """Whether a test of broker/<pkg>/ may call Parallel: the word in a .go file of it (test or not) or of
     a package of this module it imports, transitively; True when one is not read (L3 and Security on
-    #6421: a helper may call t.Parallel())."""
+    #6421: a helper may call t.Parallel()). An imported package's own _test.go files, and what only they
+    import, are not built into pkg's test binary, so they are not read (#6372: journal's model_test.go
+    made every cmd/agentosd test a change)."""
     seen, todo = {pkg}, [pkg]
     while todo:
         rel = todo.pop()
-        if (rel, commit) not in cache:
-            cache[(rel, commit)] = _package_reads(rel, commit)
-        got = cache[(rel, commit)]
+        if (rel, commit, rel == pkg) not in cache:
+            cache[(rel, commit, rel == pkg)] = _package_reads(rel, commit, tests=rel == pkg)
+        got = cache[(rel, commit, rel == pkg)]
         if got is None or got[0]:
             return True
         for path in got[1]:
@@ -1363,7 +1478,8 @@ def reaching_tests(files, changed):
              | {j for n in (d[2] if d[1] == "type" else ()) for j in methods.get(n, ())} for d in decls]
     reach = [set() for _ in decls]
     for i, (_, kind, names, recv, _w, every, *_rest) in enumerate(decls):
-        test = kind == "func" and not every and TEST_FUNC.match(f"func {next(iter(names), '')}(")
+        test = kind == "func" and not every and decls[i][0].endswith("_test.go") and TEST_FUNC.match(
+            f"func {next(iter(names), '')}(")
         if kind == "method" and (decls[i][8] is None or (decls[i][8], recv) not in types):
             every = True
         if not (test or every):
@@ -1401,24 +1517,60 @@ def head_tests(tests, pkg):
     """Sorted names of the head's test functions that reach the lines the diff changes in
     broker/<pkg>/'s _test.go files, or None for every test (reaching_tests). Every _test.go file of
     the package is read as text from the tree, never run; a link is not followed, so one in the
-    package is every test (L3 on #4643). A deleted file has no head lines: its base side runs."""
+    package is every test (L3 on #4643). A deleted file has no head lines: its base side runs. A
+    changed data file whose only namer is an embedding var (embedded_by) changes that var's
+    declaration, read over every .go file of the package so a test reaching it through package
+    code counts; an init or initialized var reaching it is every test (reaching_tests)."""
     d = BROKER / pkg
     if not tests_changed(tests, pkg):
         return []
-    if d.is_symlink() or any(pkg in owners(p) for p in tests):
-        return None  # a read file's readers are not traced: every test may read it (#5779, #6436)
+    if d.is_symlink():
+        return None
+    held = {}
+    for p in tests:
+        if pkg in owners(p):
+            # A read file's readers are not traced: every test may read it (#5779, #6436), unless
+            # the package's only namer is an embedding var, whose readers are (#6458).
+            # The whole-suite run watches the file for run-time reads, so no watch, no narrowing.
+            got = (embedded_by(pkg, p[len(f"broker/{pkg}/"):])
+                   if is_data(p) and pkg == data_owner(p) and _inotify() else None)
+            if got is None:
+                return None
+            held = union(held, got)
     files = {}
-    for f in sorted(d.glob("*_test.go")) if d.is_dir() else ():
+    for f in sorted(d.glob("*.go" if held else "*_test.go")) if d.is_dir() else ():
         if f.is_symlink():
             return None
         if f.is_file():
             if (text := go_text(f.read_bytes())) is None:
                 return None
-            files[f"broker/{pkg}/{f.name}"] = text
-    changed = {p: ls for p, ls in tests.items() if package_of(p) == pkg and p in files}
+            if is_test(f"broker/{pkg}/{f.name}") or not unbuilt(f.name, text):
+                files[f"broker/{pkg}/{f.name}"] = text
+    changed = {p: ls for p, ls in tests.items() if package_of(p) == pkg and is_test(p) and p in files}
     if any(ls is None for ls in changed.values()):
         return None
-    return reaching_tests(files, changed)
+    return reaching_tests(files, union(changed, held))
+
+
+# The build tags the go toolchain itself may set (go/build's Context and cmd/go's -race, -msan, -asan):
+# any other tag is on only when a -tags flag sets it, and no `go` command the gate runs passes one.
+TOOLCHAIN_TAGS = {"unix", "cgo", "gc", "gccgo", "race", "msan", "asan", "boringcrypto"}
+
+
+def unbuilt(name, text):
+    """Whether a non-test .go file is in no build the gate's `go test` runs: a name go ignores, or a
+    build constraint false whatever the toolchain's own tags (TOOLCHAIN_TAGS, any GOOS, GOARCH or
+    feature level, go1.N, goexperiment.X) hold, with every other tag off. A constraint not read, or a
+    GOFLAGS naming tags, keeps the file (#6458)."""
+    c = _constraint(name, text)
+    if c == "ignored":
+        return True
+    if c is None or "tags" in os.environ.get("GOFLAGS", ""):
+        return False
+    used, table = c
+    own = [t in TOOLCHAIN_TAGS | GOOS | GOARCH or t.split(".")[0] in GOARCH or t.startswith(("go1.", "goexperiment."))
+           for t in used]
+    return not any(v for k, v in enumerate(table) if all(own[i] for i in range(len(used)) if k >> i & 1))
 
 
 def changed_tests(tests, pkg, bases):
@@ -2220,11 +2372,12 @@ def echo_ok(stream):
     return last
 
 
-def timed_cover(pkg, names, tmp, broker=None, code=None):
+def timed_cover(pkg, names, tmp, broker=None, code=None, watched=()):
     """covered_by's (lines, seconds, problem): seconds is how long its test binary ran, so a plan
     that ran the whole suite under coverage sizes the shards from that run, not a fourth (#6155).
     A code dict gains {path: lines} of every block the profile lists, ran or not (#6216): the lines
-    a test could run, whichever tests ran."""
+    a test could run, whichever tests ran. watched names repo paths built in from copies and
+    watched while the tests run: any read of one is a problem (watched_at_run)."""
     broker = BROKER if broker is None else broker
     profile = pathlib.Path(tmp) / "tests.cover"
     profile.unlink(missing_ok=True)
@@ -2232,8 +2385,17 @@ def timed_cover(pkg, names, tmp, broker=None, code=None):
     if names is not None:
         cmd += ["-run", "^(" + "|".join(names) + ")$"]
     began = time.monotonic()
-    with subprocess.Popen([*cmd, "."], cwd=broker / pkg, stdout=subprocess.PIPE) as run:
-        ran = echo_ok(run.stdout)
+    try:
+        with watched_at_run(broker, watched, tmp) as (flags, opened):
+            with subprocess.Popen([*cmd, *flags, "."], cwd=broker / pkg, stdout=subprocess.PIPE) as run:
+                ran = echo_ok(run.stdout)
+            read = opened()
+    except (OSError, ValueError) as e:
+        return None, None, f"broker/{pkg}/: cannot watch {', '.join(watched)} while its tests run: {e}"
+    if read:
+        return None, None, (f"broker/{pkg}/: a test read {', '.join(read)} at run time, which only its //go:embed "
+                            "var names: name the file with a string literal in that test (every test is then a "
+                            "changed test)")
     if run.returncode or not profile.exists():
         return None, None, f"broker/{pkg}/'s tests {'(all)' if names is None else names} fail under -coverprofile"
     # `go test`'s own `ok` line times the test binary's run alone, as suite_seconds times it: the wall
@@ -2437,7 +2599,10 @@ def record_for(pkg, tests, bases, diff_text, base, tmp):
     # Every target line runs (L1 on #5770, #5942): a line no mutant and no deletion names (a brace, a
     # bare `return g()`) has no NOT COVERED verdict, so a weakened test that stops running it was unseen.
     # One whole-suite run at the head (none more when the changed tests are every test) names it.
-    every, secs, problem = (covered, secs, None) if names is None else timed_cover(pkg, None, tmp)
+    # A data file read only through an embedding var (head_tests) is watched while the whole suite
+    # runs: a test that opens or reads it at run time, by any path, fails the run (#6458, #6518).
+    watched = sorted(p for p in tests if pkg in owners(p)) if names is not None else []
+    every, secs, problem = (covered, secs, None) if names is None else timed_cover(pkg, None, tmp, watched=watched)
     if problem:
         return None, None, problem
     if gone := unrun(was, every, code):
@@ -2525,29 +2690,60 @@ def cmd_run(args):
     cfgdir = tempfile.TemporaryDirectory()
     cfg = pathlib.Path(cfgdir.name) / "gremlins.yaml"
     cfg.write_text("{}\n")
+    (pathlib.Path(cfgdir.name) / REFUSED).touch()  # the shims' only channel: gone or unwritable is no verdict (refusal)
     # Gremlins' coverage run reads its profile through with_cases, so it runs case-expression mutants
     # (#5822); with no go on PATH, gremlins can run no test at all.
     # MUT-gremlins-memcap (#6388): each of gremlins' parallel mutant runs (one per usable CPU, as
-    # runtime.NumCPU counts them) gets its share of half the memory free now, as `delete`'s do.
+    # runtime.NumCPU counts them) gets its share of half the memory free now, as `delete`'s do;
+    # a package whose tests need a larger share runs on fewer workers (unleash_fitted, #6396).
     free = available_memory()
-    if shim := go_shim(cfgdir.name, free // 2 // default_jobs() if free else None):
+    alone = free // 2 if free else None
+    if shim := go_shim(cfgdir.name, alone // default_jobs() if alone else None):
         env["PATH"] = f"{shim}{os.pathsep}{env.get('PATH', '')}"
+    else:
+        alone = None  # no shim: nothing to refit
     try:
         with cgroup_scope():
-            bad += run_packages(args, pkgs, out, added, tests, bases, planned, diff, cfgdir.name, cfg, env)
+            bad += run_packages(args, pkgs, out, added, tests, bases, planned, diff, cfgdir.name, cfg, env, alone)
     except RuntimeError as e:
         print(e, file=sys.stderr)
         bad += 1
-    if (refused := pathlib.Path(cfgdir.name) / REFUSED).exists():
-        print(f"mutgate: gremlins ran go in a way its test binaries could not be capped: {refused.read_text().strip()}",
-              file=sys.stderr)
+    if refused := refusal(cfgdir.name):
+        print(f"mutgate: gremlins ran go in a way its test binaries could not be capped: {refused}", file=sys.stderr)
         bad += 1
     cfgdir.cleanup()
     return 1 if bad else 0
 
 
-def run_packages(args, pkgs, out, added, tests, bases, planned, diff, tmp, cfg, env):
-    """`run`'s gremlins pass over pkgs, each package's result in out; the count of packages that failed."""
+HEADROOM = "headroom"  # go_cover's measured peak (empty: past its cap) where it failed the half-cap check
+
+
+def unleash_fitted(cmd, tmp, alone, **kw):
+    """unleash(cmd) on default_jobs() gremlins workers, each mutant run capped at its share of alone
+    bytes (go_shim); where gremlins' coverage run held more than half a share (go_cover's HEADROOM),
+    again on fewer workers with larger shares, down to one under all of alone (#6396: egress held
+    1017 MB of a 1820 MB share). The share, never the half-cap check, gives way: workers times share
+    stays alone, and every attempt's coverage run is checked against its own share."""
+    workers, head = default_jobs(), pathlib.Path(tmp) / HEADROOM
+    while True:
+        if alone:
+            go_shim(tmp, alone // workers)  # each package starts at the full count again
+        head.unlink(missing_ok=True)
+        r = unleash([*cmd, "--workers", str(workers)], **kw)
+        if not alone or r.returncode == 0 or workers == 1 or not head.exists():
+            return r
+        peak = int(head.read_text() or 0)
+        fit = max(1, min(workers - 1, alone // (2 * peak) if peak else 1))
+        print(f"mutgate: gremlins' tests hold {peak >> 20 if peak else 'past'} MB of a {alone // workers >> 20} MB "
+              f"share; again on {fit} workers, {alone // fit >> 20} MB each", file=sys.stderr)
+        if "-o" in cmd:
+            pathlib.Path(cmd[cmd.index("-o") + 1]).unlink(missing_ok=True)
+        workers = fit
+
+
+def run_packages(args, pkgs, out, added, tests, bases, planned, diff, tmp, cfg, env, alone=None):
+    """`run`'s gremlins pass over pkgs, each package's result in out; the count of packages that failed.
+    alone: the bytes gremlins' parallel mutant runs share (unleash_fitted), None for no cap."""
     bad, adv = 0, advisory()
     if CGROUP_ENV in os.environ:  # cgroup_scope's, for the shims' cap_exec
         env = {**env, CGROUP_ENV: os.environ[CGROUP_ENV]}
@@ -2582,15 +2778,16 @@ def run_packages(args, pkgs, out, added, tests, bases, planned, diff, tmp, cfg, 
             marked = record or args.of > 1
             try:
                 with marked_base(pkg, mine, tmp) if marked else contextlib.nullcontext(args.git) as base:
-                    r = unleash(["gremlins", "unleash", str(BROKER / pkg), "-D", base, "--config", str(cfg),
-                                 *SUBDIRS, "-o", str(dest)], cwd=BROKER / pkg, env={**env, **DIFF_GIT_CONFIG})
+                    r = unleash_fitted(["gremlins", "unleash", str(BROKER / pkg), "-D", base, "--config", str(cfg),
+                                        *SUBDIRS, "-o", str(dest)], tmp, alone, cwd=BROKER / pkg,
+                                       env={**env, **DIFF_GIT_CONFIG})
             except RuntimeError as e:
                 print(f"mutgate: no marked base for broker/{pkg}/: {e}", file=sys.stderr)
                 bad += 1
                 continue
         else:
-            r = unleash(["gremlins", "unleash", f"./{pkg}", "--config", str(cfg), *SUBDIRS, "-o", str(dest)],
-                        cwd=BROKER, env=env)
+            r = unleash_fitted(["gremlins", "unleash", f"./{pkg}", "--config", str(cfg), *SUBDIRS, "-o", str(dest)],
+                               tmp, alone, cwd=BROKER, env=env)
         if r.returncode == 0 and r.none and not dest.exists():
             # Gremlins found no mutant, not even a SKIPPED one, and wrote no -o file (#5173): its zero.
             dest.write_text(json.dumps({"files": [], "mutants_total": 0, "mutants_lived": 0}))
@@ -2604,8 +2801,8 @@ def run_packages(args, pkgs, out, added, tests, bases, planned, diff, tmp, cfg, 
             bad += 1
         elif args.git:
             dest.write_text(json.dumps({**(outside_lines(data, pkg, mine) if marked else data), **extra}))
-        if (pathlib.Path(tmp) / REFUSED).exists():  # a shim run failed in this package: no verdict (shim_entry)
-            print(f"mutgate: {pkg} has no verdict: {(pathlib.Path(tmp) / REFUSED).read_text().strip()}", file=sys.stderr)
+        if refused := refusal(tmp):  # a shim run failed in this package: no verdict (shim_entry)
+            print(f"mutgate: {pkg} has no verdict: {refused}", file=sys.stderr)
             dest.unlink(missing_ok=True)
             return bad + 1
         if adv and dest.exists():
@@ -2779,34 +2976,78 @@ def capped_go(real, tmp, args, mem, exits=None):
     if args[:1] != ["test"] or any(a in ("-exec", "--exec") or a.startswith(("-exec=", "--exec=")) for a in args):
         print(f"mutgate: gremlins ran `go {shlex.join(args[:1])}` with -exec or not as `go test`, so its test "
               "binaries cannot be put under their memory cap", file=sys.stderr)
-        (pathlib.Path(tmp) / REFUSED).write_text(shlex.join(args) + "\n")
+        record(tmp, shlex.join(args))
         return None
     q = shlex.quote
     wrap = f"{q(sys.executable)} -I {q(str(pathlib.Path(__file__).resolve()))} cap-exec {q(str(tmp))} {int(mem)} {q(str(exits or '-'))}"
     return [args[0], f"-exec={wrap}", *args[1:]]
 
 
-REFUSED = "refused"  # go_shim's runs that could not be capped: `run` gives no verdict while it exists
+def past_half(peak, mem, over=False):
+    """Why a base run's peak fails the half-cap check, naming the cap and the peak; a cgroup's memory.peak
+    counts page cache, so a large read can pass half the cap with no leak (#6512)."""
+    killed = ", where the cap killed them" if over else ""
+    return (f"peaked at {peak >> 20} MB{killed}, more than half of their {mem >> 20} MB memory cap (in a cgroup "
+            "the peak is memory.peak, which counts page cache, so a large file read can pass it without a leak)")
+
+
+REFUSED = "refused"  # go_shim's runs that could not be capped: `run` gives no verdict unless it is there and empty
 NO_VERDICT = 125  # a shim entry's own failure; the REFUSED marker, not this code, carries it (shim_entry)
+
+
+def open_marker(tmp):
+    """The REFUSED marker in tmp, opened to append, never created: only `run` makes it, before gremlins
+    starts, so a marker a fault removed stays gone for every later mutant and `run` reads no verdict (#6512)."""
+    return os.fdopen(os.open(pathlib.Path(tmp) / REFUSED, os.O_WRONLY | os.O_APPEND), "a")
+
+
+def record(tmp, why, marker=None):
+    """Append why to the REFUSED marker (through marker, else opened now); where that open or write fails
+    (a full disk, an I/O error), remove the marker, so `run` reads it gone, not present and empty (refusal)."""
+    try:
+        marker = marker or open_marker(tmp)
+        marker.write(why + "\n")
+        marker.flush()
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(pathlib.Path(tmp) / REFUSED)
+
+
+def refusal(tmp):
+    """Why a shim run in tmp gives no verdict, or "" for none: the REFUSED marker's text, or that the
+    marker `run` made before gremlins started is gone or cannot be written, so a failure could not be told."""
+    try:
+        os.close(os.open(pathlib.Path(tmp) / REFUSED, os.O_WRONLY | os.O_APPEND))
+        return (pathlib.Path(tmp) / REFUSED).read_text().strip()
+    except OSError as e:
+        return f"its {REFUSED} marker cannot be written, so a shim's failure could not be recorded: {e!r}"
 
 
 def shim_entry(tmp, fn, *args):
     """fn(*args) for one of go_shim's entries (go-cover, go-capped, cap-exec), which gremlins scores by
     exit code alone: any error of the entry itself (a cgroup file, a kill that did not empty its leaf)
     writes REFUSED in tmp, so `run` drops that package's result and gives no verdict (L3 and Security on
-    #6423). The marker is the only channel: `go test` turns any failing -exec into its own exit 1, which
-    gremlins reads as KILLED, so no exit code of cap_exec's can say "no verdict"; NO_VERDICT (read as LIVED
-    where it reaches gremlins directly) only keeps go-capped and go-cover from looking like a test failure."""
+    #6423). The marker is the only channel. cap-exec is go test's -exec, and `go test` turns any failing
+    -exec into its own exit 1, which gremlins reads as KILLED, so no exit code of cap_exec's can say "no
+    verdict". go-capped and go-cover are the go gremlins runs, so their NO_VERDICT reaches it directly and
+    reads LIVED, never a test failure. The marker is opened before fn runs, so a fault inside fn can always
+    write it (#6512). Where it cannot be opened, fn still runs, since only a fault needs the marker; a fault
+    then opens it once more, a failed write removes it (record), and `run` refuses a package whose marker is
+    gone or cannot be written (refusal)."""
+    try:
+        marker = open_marker(tmp)
+    except OSError as e:
+        print(f"mutgate: {fn.__name__} cannot open its {REFUSED} marker: {e!r}", file=sys.stderr)
+        marker = None
     try:
         return fn(*args)
-    except Exception as e:  # every class: a verdict needs a contained run that ended as reported
+    except BaseException as e:  # every class, an interrupt too: a verdict needs a run that ended as reported
         print(f"mutgate: {fn.__name__} failed, so this run gives no verdict: {e!r}", file=sys.stderr)
-        try:
-            with open(pathlib.Path(tmp) / REFUSED, "a") as f:
-                f.write(f"{fn.__name__}: {e!r}\n")
-        except OSError:
-            pass  # gremlins then reads NO_VERDICT as LIVED, which fails the gate: still closed
+        record(tmp, f"{fn.__name__}: {e!r}", marker)  # opened once more where the first open failed
         return NO_VERDICT
+    finally:
+        with contextlib.suppress(OSError):
+            marker and marker.close()
 
 
 def go_cover(real, tmp, args, mem=None):
@@ -2826,9 +3067,10 @@ def go_cover(real, tmp, args, mem=None):
     if mem:
         rows = [row.split() for row in exits.read_text().splitlines()]
         peak = sum(int(r[0]) for r in rows)
-        if any(r[1] == "over" for r in rows) or 2 * peak > mem:
-            print(f"mutgate: the tests hold {peak >> 20} MB before any mutant, more than half the {mem >> 20} MB "
-                  "memory cap of a gremlins mutant run, so a cap kill would not show a test failed", file=sys.stderr)
+        if (over := any(r[1] == "over" for r in rows)) or 2 * peak > mem:
+            (pathlib.Path(tmp) / HEADROOM).write_text("" if over else str(peak))  # for unleash_fitted
+            print(f"mutgate: the tests {past_half(peak, mem, over)} before any mutant, so a cap kill of a gremlins "
+                  "mutant run would not show a test failed", file=sys.stderr)
             return 1
     if code := exit_code(end):
         return code
@@ -3037,26 +3279,40 @@ def contained(argv, mem=None, timeout=None, **popen):
     leaf = parent / f"run-{os.getpid()}-{os.urandom(8).hex()}"
     leaf.mkdir()
     try:
-        for name, value in (("memory.max", str(mem) if mem else "max"), ("memory.swap.max", "0"), ("memory.oom.group", "1")):
-            (leaf / name).write_text(value)
-        # The shell moves itself into the leaf, then execs argv there: nothing argv starts runs outside it.
-        # (No preexec_fn: `delete` starts runs from several threads.)
-        p = subprocess.Popen(["/bin/sh", "-c", 'echo 0 > "$0" && exec "$@"', str(leaf / "cgroup.procs"), *argv], **popen)
+        result = in_leaf(leaf, argv, mem, timeout, popen)
+    except BaseException as first:
         try:
-            end = p.wait(timeout)
-        except subprocess.TimeoutExpired:
-            end = "timeout"
-        empty(leaf)
-        p.wait()
-        if not (peak := int((leaf / "memory.peak").read_text())):
-            raise RuntimeError(f"mutgate: {argv[0]} never ran in its cgroup leaf {leaf}")
-        events = dict(row.split() for row in (leaf / "memory.events").read_text().splitlines())
-        if int(events.get("oom_kill", 0)) or int(events.get("oom_group_kill", 0)):
-            end = "over"
-        return end, peak
-    finally:
-        empty(leaf)
-        leaf.rmdir()
+            empty(leaf)
+            leaf.rmdir()
+        except Exception as e:  # keep the first error as its cause, so the report says what went wrong (#6512)
+            raise e from first
+        raise
+    empty(leaf)
+    leaf.rmdir()
+    return result
+
+
+def in_leaf(leaf, argv, mem, timeout, popen):
+    """contained's (end, peak) for one run of argv in cgroup leaf, which the caller removes."""
+    for name, value in (("memory.max", str(mem) if mem else "max"), ("memory.swap.max", "0"), ("memory.oom.group", "1")):
+        (leaf / name).write_text(value)
+    # The shell moves itself into the leaf, then execs argv there: nothing argv starts runs outside it.
+    # (No preexec_fn: `delete` starts runs from several threads.)
+    p = subprocess.Popen(["/bin/sh", "-c", 'echo 0 > "$0" && exec "$@"', str(leaf / "cgroup.procs"), *argv], **popen)
+    try:
+        end = p.wait(timeout)
+    except subprocess.TimeoutExpired:
+        end = "timeout"
+    empty(leaf)
+    p.wait()
+    if not (peak := int((leaf / "memory.peak").read_text())):
+        raise RuntimeError(f"mutgate: {argv[0]} never ran in its cgroup leaf {leaf}")
+    events = dict(row.split() for row in (leaf / "memory.events").read_text().splitlines())
+    # memory.oom.group kills the whole leaf, argv included, so an OOM kill after argv exited 0 hit only
+    # what argv left running, after its tests passed: that is no cap kill of the run (#6512).
+    if end != 0 and (int(events.get("oom_kill", 0)) or int(events.get("oom_group_kill", 0))):
+        end = "over"
+    return end, peak
 
 
 def empty(cg):
@@ -3425,8 +3681,8 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
     end, peak = contained([str(base), "-test.failfast", f"-test.gocoverdir={counters}", f"-test.coverprofile={profile}"],
                           alone_mem, cwd=pkg_dir, env={**os.environ, "GOCOVERDIR": str(counters)})
     if alone_mem and (end == "over" or 2 * peak > alone_mem):
-        return None, (f"broker/{pkg}/'s tests hold {peak >> 20} MB before any statement is deleted, more than "
-                      f"half the {alone_mem >> 20} MB memory cap of a run, so a cap kill would not show a test failed")
+        return None, (f"broker/{pkg}/'s tests {past_half(peak, alone_mem, end == 'over')} before any statement "
+                      "is deleted, so a cap kill would not show a test failed")
     if end != 0 or not profile.exists():
         return None, f"broker/{pkg}/'s tests fail before any statement is deleted"
     if alone_mem and peak:
