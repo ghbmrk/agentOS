@@ -286,8 +286,6 @@ CI_PREAMBLE_LINES = [
     'env:',
     '  GOTOOLCHAIN: local',
     '  GOWORK: "off"',
-    '  # Every apt-get call passes $APT_OPTS, so a stalled mirror fails in minutes, not at the job',
-    '  # timeout (CI-apt-timeout, #6581; tests/test_workflows.py checks each call).',
     '  APT_OPTS: "-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"',
 ]
 
@@ -352,9 +350,9 @@ MACHINES_LINES = [
     '      - name: Project quotas (SR2-3)',
     '        run: |',
     '          sudo apt-get $APT_OPTS update -q',
-    '          sudo apt-get install -yq xfsprogs acl',
+    '          sudo apt-get $APT_OPTS install -yq xfsprogs acl',
     '          sudo modprobe quota_v2 2>/dev/null || {',
-    '            sudo apt-get install -yq "linux-modules-extra-$(uname -r)" && sudo modprobe quota_v2',
+    '            sudo apt-get $APT_OPTS install -yq "linux-modules-extra-$(uname -r)" && sudo modprobe quota_v2',
     '          } || echo "::warning::no quota_v2 module: ext4 quota tests skip; XFS covers them"',
     '      - name: Machine tests as root',
     '        working-directory: broker',
