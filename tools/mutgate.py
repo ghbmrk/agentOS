@@ -2790,10 +2790,13 @@ def shim_entry(tmp, fn, *args):
         return fn(*args)
     except Exception as e:  # every class: a verdict needs a contained run that ended as reported
         print(f"mutgate: {fn.__name__} failed, so this run gives no verdict: {e!r}", file=sys.stderr)
-        with contextlib.suppress(OSError):  # unwritten, gremlins may read KILLED through go test: refusal says
+        try:  # unwritten, gremlins may read KILLED through go test: refusal reads a gone marker as no verdict
             marker = marker or open(pathlib.Path(tmp) / REFUSED, "a")  # once more: the first open may have passed
-            marker.write(f"{fn.__name__}: {e!r}\n")  # whether the marker could be written at all
+            marker.write(f"{fn.__name__}: {e!r}\n")
             marker.flush()
+        except OSError:  # opened but not written (a full disk, an I/O error): remove it, so refusal sees it gone
+            with contextlib.suppress(OSError):
+                os.unlink(pathlib.Path(tmp) / REFUSED)
         return NO_VERDICT
     finally:
         with contextlib.suppress(OSError):

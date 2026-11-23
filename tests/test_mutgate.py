@@ -5656,7 +5656,13 @@ class GremlinsMemoryCap(unittest.TestCase):
                 self.assertEqual(mutgate.shim_entry(tmp, cap_exec), mutgate.NO_VERDICT)
             self.assertEqual(len(calls), 2)
             self.assertIn("cap_exec: RuntimeError('cgroup write failed')", mutgate.refusal(tmp))
-            (tmp / mutgate.REFUSED).unlink()
+
+            # L3 on #6557: a marker that opens but cannot be written (a full disk) is removed, so `run` sees it gone.
+            (tmp / mutgate.REFUSED).write_text("")
+            full = mock.Mock(**{"write.side_effect": OSError(28, "No space left on device")})
+            with mock.patch("builtins.open", return_value=full):
+                self.assertEqual(mutgate.shim_entry(tmp, cap_exec), mutgate.NO_VERDICT)
+            self.assertFalse((tmp / mutgate.REFUSED).exists())
             self.assertIn("cannot be written", mutgate.refusal(tmp))  # gone after run made it: no verdict
 
     def test_run_gives_no_verdict_when_its_marker_is_gone(self):
