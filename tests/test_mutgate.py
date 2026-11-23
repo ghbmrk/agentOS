@@ -5746,7 +5746,8 @@ class Workflow(unittest.TestCase):
 
     def test_mutgate_runs_only_on_touched_tier_a_packages(self):
         on = self.text.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
-        self.assertEqual(on.strip(), "pull_request:")
+        # CI-mutgate-after-ci (#6569): called from ci.yml's pull-request-only `mutgate` job (tests/test_workflows.py).
+        self.assertEqual(on.strip(), "workflow_call:")
         claimed = job(self.text, "claimed")
         self.assertIn('python3 -I tools/mutgate.py claimed --git "$BASE" --json', claimed)
         # The base is the merge commit's first parent, checked in both jobs, never the event's base sha.
