@@ -79,16 +79,17 @@ FETCH_EXEMPT = {
                                     ".curlrc; downloads nothing"),
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
     "tests/test_image.py": (1, "a busybox wget shebang as fixture text"),
-    "tests/test_pins.py": (120, "this reader's test cases"),
+    "tests/test_pins.py": (150, "this reader's test cases"),
     "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
     "tools/metrics.py": (1, "GitHub API calls; downloads nothing it runs"),
     "tests/test_workflows.py": (1, "`pip install` as a pattern a workflow must not hold"),
-    "tests/test_vulncheck.py": (8, "names curl as a package in OSV fixtures"),
-    "tools/vulncheck.py": (6, "names curl as its canary's package; OSV and GitHub API queries, release "
+    "tests/test_guest_userland.py": (2, "names npm and `npm ci` in comments and a pattern it checks; runs nothing"),
+    "tests/test_vulncheck.py": (18, "names curl as a package, and npm as an OSV ecosystem, in fixtures"),
+    "tools/vulncheck.py": (19, "names curl as its canary's package; OSV and GitHub API queries, release "
                               "notes read as text, npm tarballs checked against the lockfile's sha512, and "
-                              "pnpm store paths named in its docstring"),
+                              "npm and pnpm named in its docstrings, comments and OSV queries (the ecosystem, not a command)"),
 }
 
 # What `fetch_sites` counts. A word is split at shell quoting and punctuation and read by its basename,
@@ -98,13 +99,17 @@ WORDS = re.compile(r"[\s'\"`$(){}\[\];|&<>=\\,]+")
 NET_TEXT = re.compile(r"\burllib\.request\b|\burlopen\b|\bhttp\.client\b|\burllib3\b|\bhttpx\b|\baiohttp\b|"
                       r"\bftplib\b|\bxmlrpc\.client\b|\b(?:import|from)\s+requests\b|\brelease\s+download\b|/dev/(?:tcp|udp)/")
 NET_MODULES = ("urllib.request", "urllib3", "requests", "http.client", "httpx", "aiohttp", "ftplib", "xmlrpc.client")
-# Package-manager fetches their own check does not cover (CI-pin-liveness-fu2-2), failing closed (see tool_sites): pip
-# without the exact word --require-hashes, an npm verb that resolves outside the lockfile, any yarn or pnpm
-# command (no flag is credited: yarn 1 ignores --immutable), npx in any command not led by a file tool, and
-# a Go setting that turns off the checksum database. `npm ci`, hashed pip and `go install x@v` are not sites.
-PIP = re.compile(r"pip(?:3(?:\.[0-9]+)?)?")
-NPM_VERBS = frozenset(["install", "i", "add", "exec", "x"])
+# Package-manager fetches their own check does not cover (CI-pin-liveness-fu2-2), deny by default (see
+# tool_sites): every pip, npm, npx, pnpx, yarn or pnpm word counts, wherever it sits, unless a credit below
+# reads it as a known-safe form, plus a Go setting that turns off the checksum database.
+PIP = re.compile(r"(?:-m)?pip(?:3(?:\.[0-9]+)?)?")
+MANAGERS = frozenset(["npm", "npx", "pnpx", "yarn", "pnpm"])
 FILE_TOOLS = frozenset(["tar", "cp", "mv", "ln", "rm", "chmod", "chown", "ls", "stat", "test", "[", "echo", "printf"])
+PIP_READ_ONLY = frozenset(["list", "show", "freeze", "check", "hash", "help", "--version"])  # fetch nothing
+PIP_NO_VALUE = frozenset(["--require-hashes", "--no-deps", "-q", "--quiet", "--no-index", "--no-cache-dir",
+                          "--disable-pip-version-check", "--user", "-U", "--upgrade", "--no-build-isolation",
+                          "--break-system-packages", "--only-binary=:all:", "--only-binary=:none:"])
+PIP_VALUE = frozenset(["-r", "--requirement", "--only-binary"])  # each takes the next word as its value
 GO_UNCHECKED = re.compile(r"\bGOSUMDB=off\b|\bGONOSUMDB\b|\bGONOSUMCHECK\b|\bGOINSECURE\b|\bGOPRIVATE\b|"
                           r"\bGOFLAGS=\S*-insecure")
 
@@ -116,30 +121,64 @@ BOUNDARY = re.compile(r"[\s#" + re.escape(SEPARATORS) + "]")
 
 def _shifts(raw):
     """True when quote or backslash removal may move a word, command or comment boundary in this raw
-    line: any backslash, a lone quote, or a quoted span holding a space, a `#` or a separator."""
-    spans = QUOTED.findall(raw)
-    return ("\\" in raw or any(BOUNDARY.search(q) for q in spans)
-            or "'" in QUOTED.sub("", raw) or '"' in QUOTED.sub("", raw))
+    line: any backslash, a lone quote, a quoted span holding a space, a `#` or a separator, or an unquoted
+    `$`, `,` or brace expansion `{x`, each of which can make words this reader does not see."""
+    spans, bare = QUOTED.findall(raw), QUOTED.sub("", raw)
+    return ("\\" in raw or any(BOUNDARY.search(q) for q in spans) or "'" in bare or '"' in bare
+            or "$" in bare or re.search(r"\{\S|,", bare) is not None)
+
+
+def _name(word):
+    """The package manager a whole shell word names (`/usr/bin/pip3`, `-mpip`, `$n/bin/npx`), else None."""
+    x = word.rsplit("/", 1)[-1]
+    return "pip" if PIP.fullmatch(x) else x if x in MANAGERS else None
+
+
+def _pip_hashed(args):
+    """True when the words after `pip` are exactly `install`/`download` and options this reader knows,
+    `--require-hashes` among them: no option can then take the flag as its value, and no package is named
+    outside a requirements file whose hashes pip checks."""
+    if not args or args[0] not in ("install", "download") or "--require-hashes" not in args:
+        return False
+    i = 1
+    while i < len(args):
+        if args[i] in PIP_NO_VALUE or re.fullmatch(r"--requirement=[^-]\S*", args[i]):
+            i += 1
+        elif args[i] in PIP_VALUE and i + 1 < len(args) and not args[i + 1].startswith("-"):
+            i += 2
+        else:
+            return False
+    return True
+
+
+def _credited(words, i, lead):
+    """True when the manager word at words[i] is a known-safe form: a path argument of a file tool (`tar x
+    "$n/bin/npx"`), `npm ci` with options only, a read-only pip verb, or a hashed pip install."""
+    name, prev, args = _name(words[i]), words[i - 1] if i else "", words[i + 1:]
+    if lead in FILE_TOOLS and i and not prev.startswith("-"):
+        return True
+    if name == "npm":
+        return args[:1] == ["ci"] and all(x.startswith("-") for x in args[1:])
+    if name == "pip":
+        return args[:1] and args[0] in PIP_READ_ONLY or _pip_hashed(args)
+    return False
 
 
 def tool_sites(line, credit=True):
-    """Package-manager fetch sites in one shell line (quotes already removed), per command. Fails closed:
-    every command name counts, wherever it sits, and only a credit (the `--require-hashes` flag, a file-tool
-    lead) can make one not count. A credit is read only from words before the first one starting `#`, and
-    none at all where `credit` is false (the caller found quotes that move a boundary)."""
+    """Package-manager fetch sites in one shell line (quotes already removed). Deny by default and fail
+    closed: every manager name the broad `WORDS` split finds counts (so `P=pip`, `-mpip`, `{npm,i}` and
+    `npx${IFS}x` each count where written), and a site is taken back only for a whole whitespace word that
+    `_credited` reads as safe. A credit is read only from words before the first one starting `#`, and none
+    at all where `credit` is false (the caller found quotes, a backslash, an unquoted `$` or a brace that
+    may move a boundary or expand into words this reader does not see)."""
     n = len(GO_UNCHECKED.findall(line))
-    for cmd in re.split("[" + re.escape(SEPARATORS) + "]", line):
-        raw = cmd.split()
-        live = raw[:next((i for i, x in enumerate(raw) if x.startswith("#")), len(raw))] if credit else []
-        names = [x.rsplit("/", 1)[-1] for x in raw]  # the basename only names a command; credits read raw words
-        lead = next((x for x in live if "=" not in x), "").rsplit("/", 1)[-1]
-        for i, x in enumerate(names):
-            if PIP.fullmatch(x) and {"install", "download"} & set(raw[i + 1:]) and "--require-hashes" not in live:
-                n += 1
-            elif x == "npm" and NPM_VERBS & set(raw[i + 1:]) or x in ("yarn", "pnpm"):
-                n += 1
-            elif x in ("npx", "pnpx") and lead not in FILE_TOOLS:
-                n += 1
+    n += sum(1 for w in WORDS.split(line) if _name(w))
+    if credit:
+        for cmd in re.split("[" + re.escape(SEPARATORS) + "]", line):
+            raw = cmd.split()
+            live = raw[:next((i for i, x in enumerate(raw) if x.startswith("#")), len(raw))]
+            lead = next((x for x in live if "=" not in x), "").rsplit("/", 1)[-1]
+            n -= sum(1 for i, x in enumerate(live) if _name(x) and _credited(live, i, lead))
     return n
 
 
@@ -200,6 +239,18 @@ def _net(dotted):
     return next((m for m in NET_MODULES if dotted == m or dotted.startswith(m + ".")), None)
 
 
+def _dyn(node, bound):
+    """The modules a call to `import_module`/`__import__` (aliased too) with a constant name may return
+    (the named module and its top package, since `__import__` returns the latter), else none."""
+    if not (isinstance(node, ast.Call) and node.args and _str(node.args[0]) is not None and (
+            isinstance(node.func, ast.Name) and any(m.rsplit(".", 1)[-1] in DYN_IMPORTS
+                                                    for m in bound.get(node.func.id, {node.func.id}))
+            or isinstance(node.func, ast.Attribute) and node.func.attr in DYN_IMPORTS)):
+        return set()
+    name = _str(node.args[0])
+    return {name, name.split(".")[0]}
+
+
 def py_sites(text):
     """Fetch sites in Python: each import of a network module, each module reached by attribute
     (`import urllib` then `urllib.request.urlopen`) and not imported by name, once per file per module,
@@ -242,16 +293,13 @@ def py_sites(text):
             while isinstance(x, ast.Attribute):
                 chain.append(x.attr)
                 x = x.value
-            if isinstance(x, ast.Name):
-                reached |= {_net(".".join([m] + chain[::-1])) for m in bound.get(x.id, ())} - {None}
+            bases = bound.get(x.id, ()) if isinstance(x, ast.Name) else _dyn(x, bound)
+            reached |= {_net(".".join([m] + chain[::-1])) for m in bases} - {None}
         elif _exact(node):
             n += 1
         elif _str(node) is not None and id(node) not in docs:
             n += text_sites(_str(node))
-        if isinstance(node, ast.Call) and (isinstance(node.func, ast.Name) and any(
-                                           m.rsplit(".", 1)[-1] in DYN_IMPORTS for m in bound.get(node.func.id, {node.func.id}))
-                                           or isinstance(node.func, ast.Attribute) and node.func.attr in DYN_IMPORTS) \
-                and node.args and _str(node.args[0]) is not None and _net(_str(node.args[0])):
+        if any(_net(m) for m in _dyn(node, bound)):
             n += not text_sites(_str(node.args[0]))  # `import_module("requests")`; "urllib.request" counts as text
     return n + len(reached - imported)
 

@@ -424,6 +424,9 @@ class FollowUp2(unittest.TestCase):
     def test_python_reach_by_attribute_or_dynamic_import(self):
         cases = {
             "import urllib\nurllib.request.urlopen(u)\n": 1, "import urllib.parse\nurllib.request.urlopen(u)\n": 1,
+            '__import__("urllib").request.urlopen(u)\n': 1,  # a runtime import as a chain base (L3 3 on #6630)
+            'import importlib\nimportlib.import_module("urllib").request.urlopen(u)\n': 1,
+            '__import__("urllib.parse").request.urlopen(u)\n': 1,  # __import__ returns the top package
             "import urllib as x\nx.request.urlopen(u)\nx.request.Request(v)\n": 1,  # once per file per module
             "import http\nhttp.client.HTTPSConnection(h)\nimport urllib\nurllib.request.urlopen(u)\n": 2,
             "import urllib.request\nurllib.request.urlopen(u)\nurllib.request.Request(u)\n": 1,  # the import only
@@ -463,13 +466,23 @@ class FollowUp2(unittest.TestCase):
                      'X="a #b" pip install foo', "X='a #b' pip install foo", 'X="a #b" npx foo',
                      "pip --cache-dir '#d' install foo", "npm --prefix '#p' install evil", "# pip install foo",
                      'env "A=;"tar npx foo', 'pip install foo "x --require-hashes"',
-                     "pip install foo\\ --require-hashes", "pip install --require-hashes foo 'x"]:
+                     "pip install foo\\ --require-hashes", "pip install --require-hashes foo 'x",
+                     # Deny by default (Security and L3 on #6630): every manager word the broad split finds counts
+                     # unless a whole word is a known-safe form; an option can take no credit word as its value.
+                     "pip install --log --require-hashes foo", "pip install --no-binary --require-hashes foo",
+                     "npm in foo", "npm isntall foo", "npm it", "npm update", "npm up evil", "npm init vite",
+                     "npm create vite", "{npm,install,foo}", "{pip,install,foo}", "{npx,cowsay}", "npx${IFS}cowsay",
+                     "npm${IFS}install foo", "python3 -mpip install foo", "pip wheel foo", "pip3 wheel -w d evil",
+                     "P=pip; $P install evil", "N=npx; $N evil", "{pip,} install evil", "tar -I npx -xf a.tar",
+                     "echo ok  # npx foo", "npm ci evil", "npm ci $X", "pip install --require-hashes foo",
+                     "tar x $n/bin/npx", "pip install -r --require-hashes"]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 1)
         for text in ["pip install --require-hashes -r r.txt", "python -m pip install --no-deps --require-hashes \\\n  -r r.txt",
-                     "npm ci --ignore-scripts", "go install x@v1.2.3", "go mod download", "tar x $n/bin/npx $n/bin/npm",
-                     "pip list", "GOSUMDB=sum.golang.org go get x", "echo npm", "echo ok  # npx foo",
-                     'pip install --require-hashes -r "$R"', "tar 'x' $n/bin/npx"]:
+                     "npm ci --ignore-scripts", "go install x@v1.2.3", "go mod download", 'tar x "$n/bin/npx" "$n/bin/npm"',
+                     "pip list", "GOSUMDB=sum.golang.org go get x", "echo npm",
+                     'pip install --require-hashes -r "$R"', "tar 'x' \"$n/bin/npx\"", "pip show x",
+                     "python -m pip install --no-deps --only-binary=:all: --require-hashes -r tests/requirements.txt"]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 0)
         self.assertEqual(pins.py_sites('subprocess.run("pip install x", shell=True)\n'), 1)
