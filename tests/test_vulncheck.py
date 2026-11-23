@@ -946,7 +946,7 @@ class ImageTest(unittest.TestCase):
         self.assertEqual([vulncheck.verdict(f) for f in fs], ["FAIL", "accepted #1"])
         out = io.StringIO()
         vulncheck.summary(fs, [], unused, out)
-        self.assertIn("fix: rebuild the image", out.getvalue())
+        self.assertIn("debian-security), rebuild the image", out.getvalue())
         self.assertNotIn("or add a record", out.getvalue())
 
     def test_fixed_image_hint_names_the_main_snapshot_bump(self):
@@ -958,16 +958,27 @@ class ImageTest(unittest.TestCase):
         out = io.StringIO()
         self.assertFalse(vulncheck.summary([f], [], [], out))
         text = out.getvalue()
-        self.assertIn("fix: rebuild the image if the fixed version is in debian-security", text)
-        self.assertIn("if it is only in the main archive (a point release), move the main-archive snapshot "
-                      "in image/mkosi/mkosi.conf, image/enforcer/mkosi/mkosi.conf, both mkosi.sources "
-                      "and NAME_ONLY_SNAPSHOT in image/mkosi/mkosi.finalize", text)
-        for path in ("image/mkosi/mkosi.conf", "image/enforcer/mkosi/mkosi.conf",
-                     "image/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources",
-                     "image/enforcer/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources",
-                     "image/mkosi/mkosi.finalize"):
-            self.assertTrue((ROOT / path).is_file(), path)
+        self.assertIn("fix: if the fix is in the security suite (debian-security), rebuild the image", text)
+        self.assertIn("fix: if the fix is only in a point release (the main archive), move the main-archive "
+                      "snapshot timestamp (Mirror= in image/mkosi/mkosi.conf) in every copy: image/mkosi/mkosi.conf, "
+                      "image/enforcer/mkosi/mkosi.conf, ", text)
+        self.assertIn("image/mkosi/mkosi.finalize (NAME_ONLY_SNAPSHOT, after checking that snapshot's systemd "
+                      "is still NAME_ONLY_SYSTEMD), tests/test_image.py (MkosiRunBoundTest), "
+                      "tests/test_image_repro.py (KeyringSpikesTest); then update what else CI names, such as "
+                      "image/import_sweep.allow hashes", text)
+        # UX 1 and Potency 1-2 on #6538: the hand-kept list missed the two test pins, so the set is
+        # derived: every tracked file `git grep` finds holding the Mirror= timestamp is named, and
+        # every name is such a file.
+        stamp = re.search(r"^Mirror=https://snapshot\.debian\.org/archive/debian/(\d{8}T\d{6}Z)/$",
+                          (ROOT / "image/mkosi/mkosi.conf").read_text(), re.M).group(1)
+        hits = subprocess.run(["git", "grep", "-lF", stamp, "--", ".", ":!reviews", ":!docs"], cwd=ROOT,
+                              capture_output=True, text=True, check=True).stdout.split()
+        self.assertEqual(sorted(p.split(" ")[0] for p in vulncheck.SNAPSHOT_PINS), sorted(hits))
+        for path in hits:
+            self.assertIn(path, text)
         self.assertIn("NAME_ONLY_SNAPSHOT = ", (ROOT / "image/mkosi/mkosi.finalize").read_text())
+        self.assertIn("NAME_ONLY_SYSTEMD = ", (ROOT / "image/mkosi/mkosi.finalize").read_text())
+        self.assertTrue((ROOT / "image/import_sweep.allow").is_file())
 
 
 class ProposeTest(unittest.TestCase):
