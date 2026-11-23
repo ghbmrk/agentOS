@@ -120,6 +120,9 @@ type item struct {
 	bridgeproto.Item
 	result chan string   // nil: nobody waits (the recovery text)
 	handed chan struct{} // closed when a poll takes it; nil with result
+	// expires is when a handed-out item nobody waits for is forgotten, as
+	// a waiter forgets its own after SendWait (#1445); zero otherwise.
+	expires time.Time
 }
 
 // Link is agentosd's end of the modem bridge.
@@ -385,6 +388,7 @@ func receiptOf(id, code string) Receipt {
 func (l *Link) deliver(text string, request bool) Receipt {
 	now := l.cfg.Now()
 	l.mu.Lock()
+	l.expireLocked(now)
 	if !l.usableLocked(now) || len(l.queue)+len(l.out) >= MaxQueued {
 		counted := l.outage != nil
 		if counted {
@@ -449,6 +453,19 @@ func (l *Link) dropLocked(it *item) {
 		if q == it {
 			l.queue = append(l.queue[:i], l.queue[i+1:]...)
 			return
+		}
+	}
+}
+
+// expireLocked forgets the handed-out items nobody waits for whose result
+// is SendWait overdue: only a result or a waiter's own timeout clears the
+// others, so without this each outage's recovery text the bridge never
+// answered would keep a slot until the queue was full (#1445). A late
+// result for one is stray. Caller holds mu.
+func (l *Link) expireLocked(now time.Time) {
+	for id, it := range l.out {
+		if it.result == nil && now.After(it.expires) {
+			delete(l.out, id)
 		}
 	}
 }
@@ -589,6 +606,7 @@ func simEnds(iccid string) string {
 func (l *Link) Bridged() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.expireLocked(l.cfg.Now())
 	return l.polls > 0 || len(l.out) > 0 || !l.polled.IsZero() && l.cfg.Now().Sub(l.polled) < BridgeGap
 }
 
@@ -749,6 +767,9 @@ func (l *Link) outbox(ctx context.Context, _ sockets.Peer, _ json.RawMessage) (a
 			l.out[it.ID] = it
 			if it.handed != nil {
 				close(it.handed)
+			}
+			if it.result == nil {
+				it.expires = now.Add(l.cfg.SendWait)
 			}
 			l.mu.Unlock()
 			return map[string]any{"item": it.Item}, nil
