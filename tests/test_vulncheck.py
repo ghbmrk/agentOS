@@ -12,6 +12,7 @@ import gzip
 import hashlib
 import io
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -967,18 +968,38 @@ class ImageTest(unittest.TestCase):
                       "tests/test_image_repro.py (KeyringSpikesTest); then update what else CI names, such as "
                       "image/import_sweep.allow hashes", text)
         # UX 1 and Potency 1-2 on #6538: the hand-kept list missed the two test pins, so the set is
-        # derived: every tracked file `git grep` finds holding the Mirror= timestamp is named, and
-        # every name is such a file.
+        # derived: every file holding the Mirror= timestamp is named, and every name is such a file.
         stamp = re.search(r"^Mirror=https://snapshot\.debian\.org/archive/debian/(\d{8}T\d{6}Z)/$",
                           (ROOT / "image/mkosi/mkosi.conf").read_text(), re.M).group(1)
-        hits = subprocess.run(["git", "grep", "-lF", stamp, "--", ".", ":!reviews", ":!docs"], cwd=ROOT,
-                              capture_output=True, text=True, check=True).stdout.split()
+        hits = snapshot_copies(stamp)
         self.assertEqual(sorted(p.split(" ")[0] for p in vulncheck.SNAPSHOT_PINS), sorted(hits))
         for path in hits:
             self.assertIn(path, text)
         self.assertIn("NAME_ONLY_SNAPSHOT = ", (ROOT / "image/mkosi/mkosi.finalize").read_text())
         self.assertIn("NAME_ONLY_SYSTEMD = ", (ROOT / "image/mkosi/mkosi.finalize").read_text())
         self.assertTrue((ROOT / "image/import_sweep.allow").is_file())
+
+
+def snapshot_copies(stamp):
+    """Every repo file but a record holding stamp, the search `git grep` makes, done without git or
+    opening a record (the records-only CI step does not run this module; tests/records_audit.py)."""
+    import ci_scope
+    record_dirs = tuple(d.rstrip("/") for d in ci_scope.RECORD_DIRS)
+    hits = []
+    for top, dirs, files in os.walk(ROOT):
+        rel_top = os.path.relpath(top, ROOT)
+        rel_top = "" if rel_top == "." else rel_top + "/"
+        dirs[:] = sorted(d for d in dirs if d != ".git" and not any(rel_top + d == r or (rel_top + d).startswith(r + "/") for r in record_dirs)
+                         and not os.path.islink(os.path.join(top, d)))
+        for name in sorted(files):
+            rel = rel_top + name
+            path = os.path.join(top, name)
+            if ci_scope.is_record(rel) or os.path.islink(path):
+                continue
+            with open(path, "rb") as fh:
+                if stamp.encode() in fh.read():
+                    hits.append(rel)
+    return hits
 
 
 class ProposeTest(unittest.TestCase):
