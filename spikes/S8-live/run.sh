@@ -17,7 +17,8 @@
 #          lives in the machine's memory overlay and is gone when it exits.
 #   shapes credential shapes for #2313 (SHAPES.md): device sign-in through the forwarder, then
 #          shapes/ reads auth.json inside the machine and prints only shapes to its stdout, which
-#          run.sh cuts into shapes.json; the CLI logs out and auth.json is removed. No model call.
+#          run.sh cuts into shapes.json; the CLI logs out and auth.json is removed on every exit,
+#          failed sign-in included; session.out is removed and an empty shapes.json fails. No model call.
 #   clean  stop the forwarder and remove the work directory.
 # Logs never hold tokens or bodies: fwd.py writes paths, statuses, x-codex-* headers, tool types
 # and key names only. The printed user code is shown, never written: only its digest is.
@@ -97,27 +98,35 @@ shapes)
 	fwd relay "$W/shapes.jsonl"
 	mkdir -p "$W/work"
 	rm -f "$W/shapes.json" "$W/session.out"
+	# session.out holds the one-time device code: removed on every exit, after shapes.json is cut.
+	trap 'rm -f "$W/session.out"' EXIT
+	# The in-machine EXIT trap logs out and removes auth.json on every path, failed sign-in included.
 	cat >"$W/work/session.sh" <<'EOF'
+trap 'codex logout >/dev/null 2>&1; rm -f /var/lib/agentos-codex/auth.json' EXIT
 codex login --experimental_issuer http://127.0.0.1:18432 --device-auth || exit 1
 echo "== shapes begin"
 /opt/relay/shapes /var/lib/agentos-codex/auth.json
 echo "== shapes end"
-codex logout >/dev/null 2>&1
-rm -f /var/lib/agentos-codex/auth.json
 echo "== session done"
 EOF
 	echo "Sign-in page for the owner: https://auth.openai.com/codex/device (the CLI prints the forwarder's address)"
-	inm "$W/root" /bin/bash /var/lib/agentos-work/session.sh | tee "$W/session.out"
-	jq -c '{method, path, status, blocked, error}' "$W/shapes.jsonl"
+	st=0
+	inm "$W/root" /bin/bash /var/lib/agentos-work/session.sh | tee "$W/session.out" || st=$?
+	jq -c '{method, path, status, blocked, error}' "$W/shapes.jsonl" || true
 	sed -n '/^== shapes begin$/,/^== shapes end$/{//!p}' "$W/session.out" >"$W/shapes.json"
 	echo "== shapes.json"
 	cat "$W/shapes.json"
+	# A failed sign-in or extractor leaves shapes.json empty: fail instead of exiting 0.
+	if [ "$st" -ne 0 ] || [ ! -s "$W/shapes.json" ]; then
+		echo "run.sh: shapes session failed (status $st) or shapes.json is empty" >&2
+		exit 1
+	fi
 	;;
 clean)
 	[ -f "$W/fwd.pid" ] && kill "$(cat "$W/fwd.pid")" 2>/dev/null || true
 	rm -rf "$W"
 	;;
 *)
-	sed -n '2,20p' "$0"; exit 2
+	sed -n '2,22p' "$0"; exit 2
 	;;
 esac
