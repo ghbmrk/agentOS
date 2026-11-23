@@ -3710,22 +3710,61 @@ class DataFiles(unittest.TestCase):
                 self.assertEqual(got, {"hint"} if counts else set())
 
     def test_a_glob_counts_anywhere(self):
-        # #6390: a glob held as data ("*" in a table, a DNS wildcard) can reach any listing call
-        # through a variable, and no list of listing functions is complete (ParseGlob, Readdirnames),
-        # so a glob of wildcards alone counts anywhere, as every other glob does (#6328 and #6336
-        # counted it only beside a listing function the gate knew by name).
+        # #6390: a glob held as data can reach any listing call through a variable, and no list of
+        # listing functions is complete (ParseGlob, Readdirnames), so a glob holding part of a name
+        # counts anywhere (#6328 and #6336 counted it only beside a listing function the gate knew by name).
         # REQ: MUT-deleted-test-own-lines-fu
         self.assertNames((
-                ("a table's star", 'var table = map[rune]string{0x2217: "*"}', True),
-                ("a DNS wildcard", 'var _ = listHas(v, "email") || listHas(v, "*")', True),
-                ("an Accept header", 'var h = map[string]string{"Accept": "*/*"}', True),
-                ("a star in a variable", 'func f() { p := "*"; fs.Glob(F, p) }', True),
-                ("a star beside a template glob", 'var s = "*"\nvar _ = template.Must(template.ParseGlob(s))', True),
+                ("a star beside a name", 'var s = "ASSUMPTIONS*"', True),
+                ("a star before a dot", 'var s = "*.md"', True),
+                ("a star in a variable", 'func f() { p := "*.md"; fs.Glob(F, p) }', True),
                 ("a star embedded", '//go:embed *\nvar docs embed.FS', True),
-                ("a star only in a comment", '// "*"\nvar s = "x"', False),
+                ("stars embedded", '//go:embed */*\nvar docs embed.FS', True),
+                ("a star only in a comment", '// "*.md"\nvar s = "x"', False),
                 ("a glob of another name", 'var s = "*.html"', False)))
-        self.assertNames((('var q = "????"', 'var q = "????"', True), ('var q = "???"', 'var q = "???"', False)),
-                         "broker/hint/a.md")
+        self.assertNames((('var q = "??.md"', 'var q = "??.md"', True), ('var q = "?.md"', 'var q = "?.md"', False)),
+                         "broker/hint/ab.md")
+
+    def test_a_literal_of_wildcards_alone_names_no_markdown_file(self):
+        # #6584: a literal of `*`, `?` and `/` alone matches every name, so a table's "*" (#6514's
+        # confusables, #6485's skeleton fold) or a DNS wildcard made each ASSUMPTIONS.md edit claim
+        # every test of its package. It names none; a //go:embed pattern of wildcards still does.
+        # REQ: MUT-deleted-test-own-lines-fu
+        self.assertNames((
+                ("a table's star", 'var table = map[rune]string{0x2217: "*"}', False),
+                ("a DNS wildcard", 'var _ = listHas(v, "email") || listHas(v, "*")', False),
+                ("an Accept header", 'var h = map[string]string{"Accept": "*/*"}', False),
+                ("a raw star", "var s = `**`", False),
+                ("a star in a variable", 'func f() { p := "*"; fs.Glob(F, p) }', False),
+                ("a star beside a template glob", 'var s = "*"\nvar _ = template.Must(template.ParseGlob(s))', False),
+                ("a star and a name", 'var _, _ = "*", "ASSUMPTIONS.md"', True),
+                ("a star with a dot", 'var s = "*.*"', True),
+                ("a star with a bracket", 'var s = "[A-Z]*"', True),
+                ("a star embedded", '//go:embed *\nvar docs embed.FS', True)))
+        self.assertNames((('var q = "????"', 'var q = "????"', False), ('var q = "/????"', 'var q = "/????"', False),
+                          ('var q = "?.md"', 'var q = "?.md"', True)), "broker/hint/a.md")
+        self.assertNames((('var q = "*[*"', 'var q = "*[*"', True),), "broker/hint/a[1].md")  # a bracket is no wildcard here
+        # Another data file a "*" lists stays in every tree, so embedded_by still reads the star.
+        star = {**EMBED_PKG, "v/glob_test.go": 'package v\n\nvar _ = "*"\n'}
+        with tempfile.TemporaryDirectory() as d, self.tree(d, star):
+            self.assertIsNone(mutgate.embedded_by("v", "models.pins"))
+
+    def test_a_listing_by_a_star_reads_no_hidden_markdown_file(self):
+        # #6584: a test that lists its package with a bare "*" and needs ASSUMPTIONS.md fails in the
+        # gate's tree, closed: the file is hidden there, as for a listing by "." (#6373).
+        # REQ: MUT-deleted-test-own-lines-fu
+        test = ('package hint\n\nimport (\n\t"path/filepath"\n\t"testing"\n)\n\n'
+                'func TestDoc(t *testing.T) {\n\tm, _ := filepath.Glob("*")\n\tfor _, f := range m {\n'
+                '\t\tif f == "ASSUMPTIONS"+".md" {\n\t\t\treturn\n\t\t}\n\t}\n\tt.Fatal(m)\n}\n')
+        files = {"go.mod": "module example.com/b\n\ngo 1.21\n", "hint/hint.go": "package hint\n",
+                 "hint/hint_test.go": test, "hint/ASSUMPTIONS.md": "x"}
+        with tempfile.TemporaryDirectory() as d, self.tree(d, files), self.made(d):
+            broker = pathlib.Path(d) / "broker"
+            run = lambda: subprocess.run(["go", "test", "-count=1", "./hint"], cwd=broker, capture_output=True,
+                                         env={**os.environ, "GOFLAGS": "-mod=mod", "GOTOOLCHAIN": "local"})
+            self.assertEqual(run().returncode, 0)
+            self.assertEqual(mutgate.hide_docs(broker), ["broker/hint/ASSUMPTIONS.md"])
+            self.assertNotEqual(run().returncode, 0)
 
     def test_only_a_name_keeps_a_markdown_file(self):
         # #6373: a listing, a child process, cgo, a raw system call or a path built at run time
