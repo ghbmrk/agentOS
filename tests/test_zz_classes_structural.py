@@ -29,6 +29,7 @@ import risk_tier  # noqa: E402
 import srclint  # noqa: E402
 import trace  # noqa: E402
 import trusted_base  # noqa: E402
+import word_budget  # noqa: E402
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
 from test_list_readers import CASES  # noqa: E402
@@ -39,7 +40,7 @@ PATHLIKE = re.compile(r"[\w.+-]+(?:/[\w.+-]+)*")  # a relative path: no space, n
 # Each tool loads its own copy of record_merge (by path, for `python3 -I`); a test that drops a CLASSES entry
 # drops it from every copy.
 COPIES = {id(m.record_merge): m.record_merge for m in (assumptions_ids, doclint, hostcheck, netguardcheck, risk_tier,
-                                                         srclint, trace, trusted_base)} | {id(record_merge): record_merge}
+                                                         srclint, trace, trusted_base, word_budget)} | {id(record_merge): record_merge}
 
 
 def constants(tree):
