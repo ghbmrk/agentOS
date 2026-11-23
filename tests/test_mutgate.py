@@ -4126,7 +4126,31 @@ class EmbedReach(unittest.TestCase):
                         (tree / "broker/v/list_test.go").write_text(src)
                         problem = mutgate.timed_cover("v", None, tmp, watched=watched)[2]
                         self.assertIn("a test read broker/v/models.pins at run time", problem)
+                # Emptied, read by a reader that checks each line (so passes on no lines): a read of 0
+                # bytes raises no IN_ACCESS, only the open is seen (L3 on #6518).
+                pins.write_text("")
+                (tree / "broker/v/list_test.go").write_text(
+                    'package v\n\nimport (\n\t"os"\n\t"strings"\n\t"testing"\n)\n\nfunc TestLines(t *testing.T) {\n'
+                    '\tes, _ := os.ReadDir(".")\n\tfor _, e := range es {\n\t\tif strings.HasSuffix(e.Name(), ".pins") {\n'
+                    '\t\t\tb, _ := os.ReadFile(e.Name())\n\t\t\tfor _, l := range strings.Split(string(b), "\\n") {\n'
+                    '\t\t\t\tif l != "" && !strings.HasPrefix(l, "abc") {\n\t\t\t\t\tt.Fatal("weak pin")\n\t\t\t\t}\n'
+                    '\t\t\t}\n\t\t}\n\t}\n}\n')
+                self.assertIsNone(mutgate.timed_cover("v", None, tmp)[2])  # unwatched, it passes
+                problem = mutgate.timed_cover("v", None, tmp, watched=watched)[2]
+                self.assertIn("a test read broker/v/models.pins at run time", problem)
                 pins.write_text("abc lib.so\n")
+                # A reader through mmap: its reads raise no IN_ACCESS either (Security on #6518).
+                (tree / "broker/v/list_test.go").write_text(
+                    'package v\n\nimport (\n\t"os"\n\t"strings"\n\t"syscall"\n\t"testing"\n)\n\n'
+                    'func TestMapped(t *testing.T) {\n\tes, _ := os.ReadDir(".")\n\tfor _, e := range es {\n'
+                    '\t\tif strings.HasSuffix(e.Name(), ".pins") {\n\t\t\tf, err := os.Open(e.Name())\n'
+                    '\t\t\tif err != nil {\n\t\t\t\treturn\n\t\t\t}\n\t\t\tdefer f.Close()\n'
+                    '\t\t\tb, err := syscall.Mmap(int(f.Fd()), 0, 3, syscall.PROT_READ, syscall.MAP_SHARED)\n'
+                    '\t\t\tif err != nil {\n\t\t\t\tt.Fatal(err)\n\t\t\t}\n\t\t\tdefer syscall.Munmap(b)\n'
+                    '\t\t\tif string(b) != "abc" {\n\t\t\t\tt.Fatal("weak pin")\n\t\t\t}\n\t\t}\n\t}\n}\n')
+                self.assertIsNone(mutgate.timed_cover("v", None, tmp)[2])  # unwatched, it passes
+                problem = mutgate.timed_cover("v", None, tmp, watched=watched)[2]
+                self.assertIn("a test read broker/v/models.pins at run time", problem)
                 # The same for a testdata file embedded by its path.
                 (tree / "broker/v/testdata").mkdir()
                 (tree / "broker/v/testdata/m.pins").write_text("abc\n")
