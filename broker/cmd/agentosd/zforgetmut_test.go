@@ -12,6 +12,10 @@ import (
 	"github.com/ghbmrk/agentos/broker/localapi"
 )
 
+// These checks run inside existing tests in forgetpage_test.go, not as
+// tests of their own: a new top-level test changes this package's run
+// list, which mutgate reads as widening every test's reach (#6385).
+
 // steppedClock answers at for its first n calls and at+forgetFor after,
 // so a find expires between two named steps of one page op.
 func steppedClock(at time.Time, n int) func() time.Time {
@@ -27,7 +31,7 @@ func steppedClock(at time.Time, n int) func() time.Time {
 
 // A find that expires before the page reads its subjects back offers no
 // tap: the page gets ErrEraseUnavailable, not a challenge over no subjects.
-func TestAFindExpiredBeforeItsChallengeOffersNoTap(t *testing.T) {
+func aFindExpiredBeforeItsChallengeOffersNoTap(t *testing.T) {
 	r := newForgetPageRig(t)
 	r.b.f.now = steppedClock(time.Now(), 1) // find's clock read only
 	f, err := r.p.Find(context.Background(), "sess-a", "Bob")
@@ -38,7 +42,7 @@ func TestAFindExpiredBeforeItsChallengeOffersNoTap(t *testing.T) {
 
 // A find that expires after the tap verified but before the confirm takes
 // it is stale, so the page looks the name up again, and nothing is erased.
-func TestAFindExpiredAfterTheTapIsStale(t *testing.T) {
+func aFindExpiredAfterTheTapIsStale(t *testing.T) {
 	r := newForgetPageRig(t)
 	// find, Find's shown and Confirm's shown read the clock live; take
 	// reads it expired.
@@ -62,7 +66,7 @@ func (k keysFail) Enrollments(context.Context) ([]key.Enrollment, []key.PublicKe
 
 // Unreadable anchors or enrollments are an error, not an owner with no
 // keys: a tap is never checked against a partial key set.
-func TestOwnerKeysFailOnUnreadableKeys(t *testing.T) {
+func ownerKeysFailOnUnreadableKeys(t *testing.T) {
 	want := errors.New("kernel: keys unreadable")
 	for _, k := range []keysFail{{anchors: want}, {enrollments: want}} {
 		if _, _, _, err := ownerKeys(context.Background(), k); !errors.Is(err, want) {

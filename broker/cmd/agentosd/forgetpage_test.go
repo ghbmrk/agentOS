@@ -159,6 +159,8 @@ func TestATapOverAnythingElseErasesNothing(t *testing.T) {
 	if _, err := r.tap("sess-a", bob, bob.Challenge, r.pk.anchors[0]); err != nil || !slices.Equal(r.k.erases, []string{"s2"}) {
 		t.Fatalf("Bob's own tap: %v, erased %v", err, r.k.erases)
 	}
+	// Unreadable owner keys are an error, never an empty key set (zforgetmut_test.go).
+	ownerKeysFailOnUnreadableKeys(t)
 }
 
 // A tap replayed after its confirm, or made after the find expired,
@@ -187,6 +189,9 @@ func TestAReplayedOrLateTapErasesNothing(t *testing.T) {
 	if !slices.Equal(r.k.erases, []string{"s2"}) {
 		t.Fatalf("erased %v", r.k.erases)
 	}
+	// A find expiring before its challenge or after the tap (zforgetmut_test.go).
+	aFindExpiredBeforeItsChallengeOffersNoTap(t)
+	aFindExpiredAfterTheTapIsStale(t)
 }
 
 // namedFails is a kernel whose look-up answers err.
