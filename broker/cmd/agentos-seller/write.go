@@ -28,14 +28,9 @@ var mountsPath, swapsPath = "/proc/self/mounts", "/proc/swaps"
 // swap, held open exclusively by the kernel, or smaller than the image,
 // before writing anything.
 func write(image, sums, dev string, log io.Writer) error {
-	want, err := sumFor(image, sums)
+	want, err := checkSum(image, sums)
 	if err != nil {
 		return err
-	}
-	if got, err := fileSum(image); err != nil {
-		return err
-	} else if !bytes.Equal(got, want) {
-		return fmt.Errorf("%s does not match its line in %s", image, sums)
 	}
 	real, err := filepath.EvalSymlinks(dev)
 	if err != nil {

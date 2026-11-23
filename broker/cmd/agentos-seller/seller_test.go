@@ -405,7 +405,7 @@ func TestPrepSealsOneState(t *testing.T) {
 		t.Errorf("out dir mode: %v %v", fi.Mode(), err)
 	}
 	// The box image's SHA256SUMS is what write checks against.
-	if err := checkSum(box, filepath.Join(out, "SHA256SUMS")); err != nil {
+	if _, err := checkSum(box, filepath.Join(out, "SHA256SUMS")); err != nil {
 		t.Fatal(err)
 	}
 

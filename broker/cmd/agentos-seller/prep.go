@@ -50,14 +50,9 @@ func prep(c prepConfig) (err error) {
 	if strings.Contains(c.Image, "?") || strings.Contains(c.Out, "?") {
 		return errors.New("paths with '?' are not supported (debugfs reads it as an option)")
 	}
-	want, err := sumFor(c.Image, c.Sums)
+	want, err := checkSum(c.Image, c.Sums)
 	if err != nil {
 		return err
-	}
-	if got, err := fileSum(c.Image); err != nil {
-		return err
-	} else if !bytes.Equal(got, want) {
-		return fmt.Errorf("%s does not match its line in %s", c.Image, c.Sums)
 	}
 	logf("image matches %s", c.Sums)
 	off, err := rootOffset(c.Image)
@@ -226,9 +221,15 @@ func lookup(image string, off int64, p string) (entry, bool, error) {
 // parent: only the claim state's.
 var sealDirs = []string{path.Dir(claim.StatePath)}
 
+// sealDirMode is the mode and owner of every directory in sealDirs, as
+// lookup prints it: the box reads its claim state as root (A2).
+const sealDirMode = "040700 0:0"
+
 // preflight refuses an image without /var/lib or that already holds a
 // claim state, and reports which of sealDirs it lacks, in order. Once one
-// is missing, so is every one below it.
+// is missing, so is every one below it. A sealDirs entry the image already
+// has must be root:root 0700, so the box does not rely on its tmpfiles
+// line to fix it at boot.
 func preflight(image string, off int64) ([]string, error) {
 	lib, ok, err := lookup(image, off, "/var/lib")
 	if err != nil {
@@ -254,6 +255,9 @@ func preflight(image string, off int64) ([]string, error) {
 		if !d.dir() {
 			return nil, fmt.Errorf("%s: %s is not a directory", image, dir)
 		}
+		if d.String() != sealDirMode {
+			return nil, fmt.Errorf("%s: %s is %s, want %s", image, dir, d, sealDirMode)
+		}
 	}
 	if !slices.Contains(missing, path.Dir(claim.StatePath)) {
 		if _, held, err := lookup(image, off, claim.StatePath); err != nil {
@@ -273,7 +277,7 @@ func sealInto(box string, off int64, tmpDir string, files []sealed, missing []st
 	for _, dir := range missing {
 		cmds = append(cmds,
 			"mkdir "+dir,
-			"sif "+dir+" mode 040700",
+			"sif "+dir+" mode 040700", // sealDirMode
 			"sif "+dir+" uid 0",
 			"sif "+dir+" gid 0")
 	}
@@ -312,7 +316,7 @@ func checkSealed(box string, off int64, files []sealed, code string, missing []s
 		want[f.path] = "100600 0:0"
 	}
 	for _, dir := range missing {
-		want[dir] = "040700 0:0"
+		want[dir] = sealDirMode
 	}
 	for p, w := range want {
 		e, ok, err := lookup(box, off, p)
