@@ -434,9 +434,9 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-debian-r13-f5 | VULN-debian-r13-f5: import sweep [wrapper] entries: a test that a wrapper's own held names count (R5), and exports that forward a caller's name stay lookups (R6). Release. | #6299, #6382 | queued (release; tier A) |
 | SPEC-krn2-core-record | SPEC-krn2-core-record: KRN-2 says the core grows under a committed record line, not a PR-body line. Release. | #6404 | building (release; L1 spec-diff) |
 | MUT-record-deps-audit | MUT-record-deps-audit: re-record entries whose proof rests on outside declarations with --dep, and lint entries that name one without deps. Release. | #6282, #6498 | queued (release; tier A) |
-| REV-CHK-links-ns10 | REV-CHK-links-ns10: release findings from #6493's reviews (specifier and template wording, dependency-entry steps) | #6493 review | building (release; tier A; kernel lane) |
 | MUT-6368-fu | MUT-6368-fu: unlock sets the anchors file mode before the rename, seal tests pin that only TPM slots carry Policies, and a test pins the store-key wipe on every return. Release. | #6368, #6384 | queued (release; tier A) |
 | TOOL-mutgate-memcap-fu2 | TOOL-mutgate-memcap-fu2: the capped-run refusal message says memory.peak includes page cache and names the cap and the peak. Release. | #6392, #6423 | queued (release; tier A) |
+| REV-CHK-links-ns10 | REV-CHK-links-ns10: a link planted at run time on a made path's way reaches no check | #6474 re-plan | queued (release; tier A; kernel lane) |
 | CI-core-record-comments | CI-core-record-comments: trusted-base workflow and trusted_core.txt comments name the committed record line, not a PR-body line. Release. | #6489 | queued (release) |
 | CI-pin-liveness-fu | CI-pin-liveness-fu: NOT_YET lists shrink only by test, bypass detection is structural, live checks a zip's hash before reading a member, and the schedule comment says daily. Release. | #6424, #6517 | queued (release; tier A) |
 | CI-cancel-stale-sha | CI-cancel-stale-sha: queued or pending runs for a SHA that is not their PR's head (rerun attempts, stale premerge) are cancelled by class; the current head's runs never are. Release. | runner-queue check 2026-11-22 | building (release; tier A) |
@@ -504,6 +504,5 @@ issue #6500: body has no board-row block
 issue #6505: body has no board-row block
 issue #6509: title '6417-fu IMG-mkosi-local-fu4: local two-stage compare before a local image is accepted (blocked on Mark design pick)' does not start with '<ID>: '
 issue #6515: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #6519: a second issue for REV-CHK-links-ns10 (first is #6504)
 issue #6534: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 ```
