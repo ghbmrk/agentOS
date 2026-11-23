@@ -3,6 +3,7 @@ package route
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -68,7 +69,7 @@ func (d oaDelta) chars() int64 {
 }
 
 // Stream passes events through as sent, except the usage-only chunk when
-// the guest did not ask for one.
+// the guest did not ask for one and an error chunk (R6, R7).
 func (openAI) Stream(dst io.Writer, flush func(), src io.Reader, _ string, includeUsage bool) (Usage, error) {
 	sc := bufio.NewScanner(src)
 	sc.Buffer(make([]byte, 64<<10), 8<<20)
@@ -97,9 +98,19 @@ func (openAI) Stream(dst io.Writer, flush func(), src io.Reader, _ string, inclu
 			return u, fmt.Errorf("provider stream: %v", err)
 		}
 		// An error before anything reached the guest leaves the stream
-		// unstarted, so the router can still fail over.
-		if len(c.Error) > 0 && string(c.Error) != "null" && !wrote {
-			return u, errNotStarted
+		// unstarted, so the router can still fail over. A later one ends
+		// the stream with a generic error: the provider's wording (quota,
+		// billing) describes the owner's account, not the guest's call.
+		if len(c.Error) > 0 && string(c.Error) != "null" {
+			if !wrote {
+				return u, errNotStarted
+			}
+			_, err := fmt.Fprintf(dst, "data: %s\n\n", apiError("provider stream error", "server_error", ""))
+			flush()
+			if err != nil {
+				return u, err
+			}
+			return u, errors.New("provider stream ended with an error chunk")
 		}
 		for _, ch := range c.Choices {
 			u.OutputChars += ch.Delta.chars()

@@ -598,6 +598,12 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 				report(req.Context(), "", Usage{Failed: failed})
 			}
 			return
+		case a.cancelled:
+			// Terminal: the meter or the guest ended the call. What it
+			// already spent is charged; nothing is cooled or audited,
+			// since no route failed (#1567).
+			report(req.Context(), "", Usage{Failed: append(failed, failedAttempt(rt.Provider, a)), Unserved: true})
+			return
 		case a.failover:
 			tell := false
 			r.mu.Lock()
@@ -690,9 +696,12 @@ type attempt struct {
 	body     []byte // the error body, when not served
 	denied   bool   // the proxy refused it itself
 	failover bool   // the route is exhausted or broken; nothing reached the guest
-	until    time.Time
-	usage    *Usage
-	provider Provider
+	// cancelled: the call's context ended (a meter timeout or a guest that
+	// went away). The call is over, so no route is tried or cooled.
+	cancelled bool
+	until     time.Time
+	usage     *Usage
+	provider  Provider
 }
 
 // try sends one call and, unless it fails over or the proxy denied it,
@@ -723,6 +732,11 @@ func (r *Router) try(ctx context.Context, upstream http.Handler, w http.Response
 		r.mu.Unlock()
 	}
 	fail := func() *attempt {
+		if ctx.Err() != nil {
+			// The failure is the call's own end, not the route's.
+			a.cancelled = true
+			return a
+		}
 		wait := retryAfter(resp.Header, r.cfg.Now())
 		if wait <= 0 {
 			wait = r.cfg.Cooldown
