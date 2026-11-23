@@ -18,6 +18,7 @@ miss it pass, and `fetch` writes DEST only after they match.
                                  file but those in NOT_YET); exit 1 naming each one that fails
 """
 import ast
+import fnmatch
 import hashlib
 import os
 import pathlib
@@ -79,7 +80,7 @@ FETCH_EXEMPT = {
                                     ".curlrc; downloads nothing"),
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
     "tests/test_image.py": (1, "a busybox wget shebang as fixture text"),
-    "tests/test_pins.py": (150, "this reader's test cases"),
+    "tests/test_pins.py": (168, "this reader's test cases"),
     "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
@@ -102,8 +103,10 @@ NET_MODULES = ("urllib.request", "urllib3", "requests", "http.client", "httpx", 
 # Package-manager fetches their own check does not cover (CI-pin-liveness-fu2-2), deny by default (see
 # tool_sites): every pip, npm, npx, pnpx, yarn or pnpm word counts, wherever it sits, unless a credit below
 # reads it as a known-safe form, plus a Go setting that turns off the checksum database.
-PIP = re.compile(r"(?:-m)?pip(?:3(?:\.[0-9]+)?)?")
-MANAGERS = frozenset(["npm", "npx", "pnpx", "yarn", "pnpm"])
+# A manager name, glued to any short-option prefix (`-mpip`, `-Iyarn`, `-Snpx`) and with any version or
+# script suffix (`pip-3.12`, `pip3.12`, `yarnpkg`, `npm-cli.js`, `yarn.js`); `pipe`, `pipx` and `npm.log` are not one.
+MANAGER = re.compile(r"(?:-+[A-Za-z]*?)?(pip|npm|npx|pnpx|yarn|pnpm)(?:pkg)?(?:-?[0-9][0-9.]*|-cli)?(?:\.[cm]?js)?")
+GLOB_NAMES = ("pip", "pip3", "npm", "npx", "pnpx", "yarn", "yarnpkg", "pnpm")
 FILE_TOOLS = frozenset(["tar", "cp", "mv", "ln", "rm", "chmod", "chown", "ls", "stat", "test", "[", "echo", "printf"])
 PIP_READ_ONLY = frozenset(["list", "show", "freeze", "check", "hash", "help", "--version"])  # fetch nothing
 PIP_NO_VALUE = frozenset(["--require-hashes", "--no-deps", "-q", "--quiet", "--no-index", "--no-cache-dir",
@@ -129,9 +132,16 @@ def _shifts(raw):
 
 
 def _name(word):
-    """The package manager a whole shell word names (`/usr/bin/pip3`, `-mpip`, `$n/bin/npx`), else None."""
+    """The package manager a shell word names (`/usr/bin/pip3`, `-mpip`, `$n/bin/npx`, `-Iyarn`, a glob
+    such as `pi[p]` or `pip*` that matches a name), else None."""
     x = word.rsplit("/", 1)[-1]
-    return "pip" if PIP.fullmatch(x) else x if x in MANAGERS else None
+    m = MANAGER.fullmatch(x)
+    if m:
+        return m.group(1)
+    x = re.sub(r"^-+[A-Za-z]*", "", x) if re.search(r"[][*?]", x) else ""
+    if len(re.sub(r"\[[^]]*\]|[*?]", "", x)) < 2:
+        return None  # a glob with under two literal characters (`*`, `[a-z]*`) is named, not counted
+    return next((n for n in GLOB_NAMES if x and fnmatch.fnmatchcase(n, x)), None)
 
 
 def _pip_hashed(args):
@@ -142,20 +152,31 @@ def _pip_hashed(args):
         return False
     i = 1
     while i < len(args):
-        if args[i] in PIP_NO_VALUE or re.fullmatch(r"--requirement=[^-]\S*", args[i]):
+        if args[i] in PIP_NO_VALUE or re.fullmatch(r"--requirement=[^-:][^:]*", args[i]):
             i += 1
-        elif args[i] in PIP_VALUE and i + 1 < len(args) and not args[i + 1].startswith("-"):
+        elif (args[i] in PIP_VALUE and i + 1 < len(args) and not args[i + 1].startswith("-")
+              and (args[i] == "--only-binary" or ":" not in args[i + 1])):  # a `-r` URL's hashes are the server's
             i += 2
         else:
             return False
     return True
 
 
+def _tar_runs_nothing(words):
+    """True when every option of the `tar` command in words is one known to run no program: tar runs one
+    through `-I`, `-F`, `--to-command`, `--checkpoint-action` and the like, in a bundled key (`cIf`) too."""
+    i = next(i for i, x in enumerate(words) if x.rsplit("/", 1)[-1] == "tar")
+    opts = words[i + 1:i + 2] + [x for x in words[i + 2:] if x.startswith("-")]  # the first word may be a bare key
+    return all(re.fullmatch(r"-?[xctvzjJfCpkO]+|--strip-components=[0-9]+", x) for x in opts)
+
+
 def _credited(words, i, lead):
     """True when the manager word at words[i] is a known-safe form: a path argument of a file tool (`tar x
     "$n/bin/npx"`), `npm ci` with options only, a read-only pip verb, or a hashed pip install."""
     name, prev, args = _name(words[i]), words[i - 1] if i else "", words[i + 1:]
-    if lead in FILE_TOOLS and i and not prev.startswith("-"):
+    if re.search(r"[][*?]", words[i]):
+        return False  # a glob may expand to several words
+    if lead in FILE_TOOLS and i and not prev.startswith("-") and (lead != "tar" or _tar_runs_nothing(words)):
         return True
     if name == "npm":
         return args[:1] == ["ci"] and all(x.startswith("-") for x in args[1:])
@@ -173,6 +194,7 @@ def tool_sites(line, credit=True):
     may move a boundary or expand into words this reader does not see)."""
     n = len(GO_UNCHECKED.findall(line))
     n += sum(1 for w in WORDS.split(line) if _name(w))
+    n += sum(1 for w in re.split(r"[\s;|&(){}`<>,=$]+", line) if re.search(r"[][]", w) and _name(w))  # `pi[p]`
     if credit:
         for cmd in re.split("[" + re.escape(SEPARATORS) + "]", line):
             raw = cmd.split()
