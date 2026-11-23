@@ -5638,6 +5638,24 @@ class GremlinsMemoryCap(unittest.TestCase):
             mock.patch.stopall()
             self.assertIn("cannot be written", mutgate.refusal(gone))
             self.assertEqual(mutgate.shim_entry(gone, int, "7"), 7)  # with no fault, the run's own result
+
+            # Security on #6557: an open that fails before the entry runs, then a fault once it would pass,
+            # still writes the marker, as the open at fault time before #6512 did.
+            (tmp / mutgate.REFUSED).write_text("")
+            real, calls = open, []
+
+            def first_open_fails(*a, **k):
+                calls.append(a[0])
+                if len(calls) == 1:
+                    raise OSError(24, "Too many open files")
+                return real(*a, **k)
+
+            def cap_exec():
+                raise RuntimeError("cgroup write failed")
+            with mock.patch("builtins.open", side_effect=first_open_fails):
+                self.assertEqual(mutgate.shim_entry(tmp, cap_exec), mutgate.NO_VERDICT)
+            self.assertEqual(len(calls), 2)
+            self.assertIn("cap_exec: RuntimeError('cgroup write failed')", mutgate.refusal(tmp))
             (tmp / mutgate.REFUSED).unlink()
             self.assertIn("cannot be written", mutgate.refusal(tmp))  # gone after run made it: no verdict
 

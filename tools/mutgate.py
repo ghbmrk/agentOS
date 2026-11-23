@@ -2779,8 +2779,8 @@ def shim_entry(tmp, fn, *args):
     -exec into its own exit 1, which gremlins reads as KILLED, so no exit code of cap_exec's can say "no
     verdict". go-capped and go-cover are the go gremlins runs, so their NO_VERDICT reaches it directly and
     reads LIVED, never a test failure. The marker is opened before fn runs, so a fault inside fn can always
-    write it (#6512). Where it cannot be opened, fn still runs, since only a fault needs the marker, and
-    `run` refuses a package whose marker is gone or cannot be written (refusal)."""
+    write it (#6512). Where it cannot be opened, fn still runs, since only a fault needs the marker; a fault
+    then opens it once more, and `run` refuses a package whose marker is gone or cannot be written (refusal)."""
     try:
         marker = open(pathlib.Path(tmp) / REFUSED, "a")
     except OSError as e:
@@ -2791,8 +2791,9 @@ def shim_entry(tmp, fn, *args):
     except Exception as e:  # every class: a verdict needs a contained run that ended as reported
         print(f"mutgate: {fn.__name__} failed, so this run gives no verdict: {e!r}", file=sys.stderr)
         with contextlib.suppress(OSError):  # unwritten, gremlins may read KILLED through go test: refusal says
-            marker and marker.write(f"{fn.__name__}: {e!r}\n")  # whether the marker could be written at all
-            marker and marker.flush()
+            marker = marker or open(pathlib.Path(tmp) / REFUSED, "a")  # once more: the first open may have passed
+            marker.write(f"{fn.__name__}: {e!r}\n")  # whether the marker could be written at all
+            marker.flush()
         return NO_VERDICT
     finally:
         with contextlib.suppress(OSError):
