@@ -2458,13 +2458,17 @@ def cmd_run(args):
     # Gremlins' coverage run reads its profile through with_cases, so it runs case-expression mutants
     # (#5822); with no go on PATH, gremlins can run no test at all.
     # MUT-gremlins-memcap (#6388): each of gremlins' parallel mutant runs (one per usable CPU, as
-    # runtime.NumCPU counts them) gets its share of half the memory free now, as `delete`'s do.
+    # runtime.NumCPU counts them) gets its share of half the memory free now, as `delete`'s do;
+    # a package whose tests need a larger share runs on fewer workers (unleash_fitted, #6396).
     free = available_memory()
-    if shim := go_shim(cfgdir.name, free // 2 // default_jobs() if free else None):
+    alone = free // 2 if free else None
+    if shim := go_shim(cfgdir.name, alone // default_jobs() if alone else None):
         env["PATH"] = f"{shim}{os.pathsep}{env.get('PATH', '')}"
+    else:
+        alone = None  # no shim: nothing to refit
     try:
         with cgroup_scope():
-            bad += run_packages(args, pkgs, out, added, tests, bases, planned, diff, cfgdir.name, cfg, env)
+            bad += run_packages(args, pkgs, out, added, tests, bases, planned, diff, cfgdir.name, cfg, env, alone)
     except RuntimeError as e:
         print(e, file=sys.stderr)
         bad += 1
@@ -2476,8 +2480,35 @@ def cmd_run(args):
     return 1 if bad else 0
 
 
-def run_packages(args, pkgs, out, added, tests, bases, planned, diff, tmp, cfg, env):
-    """`run`'s gremlins pass over pkgs, each package's result in out; the count of packages that failed."""
+HEADROOM = "headroom"  # go_cover's measured peak (empty: past its cap) where it failed the half-cap check
+
+
+def unleash_fitted(cmd, tmp, alone, **kw):
+    """unleash(cmd) on default_jobs() gremlins workers, each mutant run capped at its share of alone
+    bytes (go_shim); where gremlins' coverage run held more than half a share (go_cover's HEADROOM),
+    again on fewer workers with larger shares, down to one under all of alone (#6396: egress held
+    1017 MB of a 1820 MB share). The share, never the half-cap check, gives way: workers times share
+    stays alone, and every attempt's coverage run is checked against its own share."""
+    workers, head = default_jobs(), pathlib.Path(tmp) / HEADROOM
+    while True:
+        if alone:
+            go_shim(tmp, alone // workers)  # each package starts at the full count again
+        head.unlink(missing_ok=True)
+        r = unleash([*cmd, "--workers", str(workers)], **kw)
+        if not alone or r.returncode == 0 or workers == 1 or not head.exists():
+            return r
+        peak = int(head.read_text() or 0)
+        fit = max(1, min(workers - 1, alone // (2 * peak) if peak else 1))
+        print(f"mutgate: gremlins' tests hold {peak >> 20 if peak else 'past'} MB of a {alone // workers >> 20} MB "
+              f"share; again on {fit} workers, {alone // fit >> 20} MB each", file=sys.stderr)
+        if "-o" in cmd:
+            pathlib.Path(cmd[cmd.index("-o") + 1]).unlink(missing_ok=True)
+        workers = fit
+
+
+def run_packages(args, pkgs, out, added, tests, bases, planned, diff, tmp, cfg, env, alone=None):
+    """`run`'s gremlins pass over pkgs, each package's result in out; the count of packages that failed.
+    alone: the bytes gremlins' parallel mutant runs share (unleash_fitted), None for no cap."""
     bad, adv = 0, advisory()
     if CGROUP_ENV in os.environ:  # cgroup_scope's, for the shims' cap_exec
         env = {**env, CGROUP_ENV: os.environ[CGROUP_ENV]}
@@ -2512,15 +2543,16 @@ def run_packages(args, pkgs, out, added, tests, bases, planned, diff, tmp, cfg, 
             marked = record or args.of > 1
             try:
                 with marked_base(pkg, mine, tmp) if marked else contextlib.nullcontext(args.git) as base:
-                    r = unleash(["gremlins", "unleash", str(BROKER / pkg), "-D", base, "--config", str(cfg),
-                                 *SUBDIRS, "-o", str(dest)], cwd=BROKER / pkg, env={**env, **DIFF_GIT_CONFIG})
+                    r = unleash_fitted(["gremlins", "unleash", str(BROKER / pkg), "-D", base, "--config", str(cfg),
+                                        *SUBDIRS, "-o", str(dest)], tmp, alone, cwd=BROKER / pkg,
+                                       env={**env, **DIFF_GIT_CONFIG})
             except RuntimeError as e:
                 print(f"mutgate: no marked base for broker/{pkg}/: {e}", file=sys.stderr)
                 bad += 1
                 continue
         else:
-            r = unleash(["gremlins", "unleash", f"./{pkg}", "--config", str(cfg), *SUBDIRS, "-o", str(dest)],
-                        cwd=BROKER, env=env)
+            r = unleash_fitted(["gremlins", "unleash", f"./{pkg}", "--config", str(cfg), *SUBDIRS, "-o", str(dest)],
+                               tmp, alone, cwd=BROKER, env=env)
         if r.returncode == 0 and r.none and not dest.exists():
             # Gremlins found no mutant, not even a SKIPPED one, and wrote no -o file (#5173): its zero.
             dest.write_text(json.dumps({"files": [], "mutants_total": 0, "mutants_lived": 0}))
@@ -2756,7 +2788,8 @@ def go_cover(real, tmp, args, mem=None):
     if mem:
         rows = [row.split() for row in exits.read_text().splitlines()]
         peak = sum(int(r[0]) for r in rows)
-        if any(r[1] == "over" for r in rows) or 2 * peak > mem:
+        if (over := any(r[1] == "over" for r in rows)) or 2 * peak > mem:
+            (pathlib.Path(tmp) / HEADROOM).write_text("" if over else str(peak))  # for unleash_fitted
             print(f"mutgate: the tests hold {peak >> 20} MB before any mutant, more than half the {mem >> 20} MB "
                   "memory cap of a gremlins mutant run, so a cap kill would not show a test failed", file=sys.stderr)
             return 1
