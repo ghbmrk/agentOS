@@ -190,12 +190,12 @@ func TestARecordWriteThatFailsChangesNothing(t *testing.T) {
 	if !h.still(GmailSlot(gmailtest.User)) || !sec.Has(GmailSlot(gmailtest.User)) || srv.Revokes() != 0 {
 		t.Fatalf("after a refused removal: set up %v, revoked %v", h.still(GmailSlot(gmailtest.User)), srv.Revoked())
 	}
-	h.mu.Lock()
-	prev, _ := readMail(dir)
-	_, err := h.holdGmail(prev)
-	h.mu.Unlock()
-	if err == nil {
-		t.Fatal("holdGmail passed with no record written")
+	imap := MailSettings{Address: "pat@imap.test", IMAP: "imap.example.test:993", SMTP: "smtp.example.test:465"}
+	if err := owner.SetMail(imap, "a long enough password"); err == nil {
+		t.Fatal("a setup whose record could not be written passed")
+	}
+	if !h.still(GmailSlot(gmailtest.User)) || sec.Len() != 1 || srv.Revokes() != 0 {
+		t.Fatalf("after a refused setup: set up %v, %d slots, revoked %v", h.still(GmailSlot(gmailtest.User)), sec.Len(), srv.Revoked())
 	}
 }
 
@@ -234,4 +234,66 @@ func TestASignInWhoseRecordFailsChangesNothing(t *testing.T) {
 	if !h.still(GmailSlot(gmailtest.User)) || sec.Len() != 1 || !slices.Equal(srv.Revoked(), []string{gmailtest.Issued(1)}) {
 		t.Fatalf("set up %v, %d slots, revoked %v; want the account before kept and the new grant given back", h.still(GmailSlot(gmailtest.User)), sec.Len(), srv.Revoked())
 	}
+}
+
+// A crash in a real sign-in for another address, after its new grant is put
+// and before the settings name it (#3028 window 2, through gmailFinish): the
+// next start gives the new grant back, drops its slot and keeps the account
+// before. The crash is a panic in setGmail's first step, so none of
+// gmailFinish's own clean-up runs.
+func TestACrashInASignInGivesTheNewGrantBackAtStart(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	c := signInConfig(srv)
+	c.setStop = func(int) bool { panic("crash") }
+	h := NewMailHost(context.Background(), dir, sec, c)
+	srv.As("other@gmail.test")
+	b := h.gmailBegin("watch", fakeClient)
+	landing, ok := srv.Approve(b.Consent)
+	if b.Detail != "" || !ok {
+		t.Fatalf("begin = %+v", b)
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("the sign-in did not reach the crash")
+			}
+		}()
+		h.gmailFinish("watch", landing)
+	}()
+	if !sec.Has(GmailSlot("other@gmail.test")) || srv.Revokes() != 0 {
+		t.Fatalf("at the crash: new slot %v, revoked %v", sec.Has(GmailSlot("other@gmail.test")), srv.Revoked())
+	}
+	c.setStop = nil
+	h2, sec2 := restart(t, dir, c)
+	if !slices.Equal(srv.Revoked(), []string{gmailtest.Issued(1)}) || sec2.Has(GmailSlot("other@gmail.test")) || !sec2.Has(GmailSlot(gmailtest.User)) {
+		t.Fatalf("after the restart: revoked %v, slots %v; want the new grant given back and the account before kept", srv.Revoked(), sec2.Names(clerk.MailSlots))
+	}
+	if !h2.still(GmailSlot(gmailtest.User)) || h2.why != "" {
+		t.Fatalf("the account before does not read: %q", h2.why)
+	}
+	noRecord(t, dir)
+}
+
+// A crash inside RemoveMail, after it drops the slots and before it drops
+// the settings: the settings still name the account, but its store no
+// longer holds the grant, so the start gives the held grant back once.
+func TestACrashInsideARemovalGivesTheGrantBack(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	c := signInConfig(srv)
+	h := NewMailHost(context.Background(), dir, sec, c)
+	h.mu.Lock()
+	prev, _ := readMail(dir)
+	_, err := h.holdGmail(prev)
+	if err == nil {
+		err = sec.RemovePrefix(clerk.MailSlots, "") // RemoveMail's first step
+	}
+	h.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restart(t, dir, c)
+	if !slices.Equal(srv.Revoked(), []string{gmailtest.Refresh}) || srv.Revokes() != 1 {
+		t.Fatalf("revoked %v in %d calls; want the held grant given back once", srv.Revoked(), srv.Revokes())
+	}
+	noRecord(t, dir)
 }

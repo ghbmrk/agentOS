@@ -85,6 +85,24 @@ func TestTheKeptGmailBoxIsForItsSlotOnly(t *testing.T) {
 	if b, err := k.box(sec, slot, c); err != nil || k.api != api || b == a {
 		t.Fatalf("a second box: %v, same API %v, same box %v; want a new box over the same API", err, k.api == api, b == a)
 	}
+	if _, err := k.box(sec, GmailSlot("other@example.test"), c); err == nil || k.api != api {
+		// NewAPI refuses a slot the store does not hold (CLK-1), and the
+		// kept API stays the slot's own.
+		t.Fatalf("a box for another slot: %v, same API %v; want refused and the kept API untouched", err, k.api == api)
+	}
+	two, err := OpenSecrets(shortDir(t), testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := two.Put(GmailSlot("other@example.test"), clerk.KindGrant, gmailtest.Grant()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.box(two, GmailSlot("other@example.test"), c); err != nil || k.api == api || k.slot != GmailSlot("other@example.test") {
+		t.Fatalf("a box for another slot shares the API: %v", err)
+	}
+	if _, err := k.box(two, slot, c); err == nil {
+		t.Fatal("a box for a slot the store does not hold reused the other slot's API")
+	}
 	other, err := OpenSecrets(shortDir(t), testSealer())
 	if err != nil {
 		t.Fatal(err)

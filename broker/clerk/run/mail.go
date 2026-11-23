@@ -385,6 +385,10 @@ type MailConfig struct {
 	// GmailRevoke when empty: a fake's, in tests only.
 	gmail struct{ base, token, consent, revoke string }
 
+	// setStop is the Gmail sign-in's setGmail stop; nil runs every step.
+	// Tests only.
+	setStop func(i int) bool
+
 	// giveStop is each write of the record of grants owed a give-back's
 	// privfile.WriteAtomic stop (giveback.go); nil runs every step. Tests
 	// only.

@@ -255,7 +255,7 @@ func (h *MailHost) gmailFinish(use, pasted string) (string, error) {
 	put := h.sec.Put(slot, clerk.KindGrant, g.grant)
 	err = put
 	if err == nil {
-		err = SetGmail(h.dir, h.sec, addr)
+		err = setGmail(h.dir, h.sec, addr, h.cfg.setStop)
 	}
 	h.wrote()
 	release()
