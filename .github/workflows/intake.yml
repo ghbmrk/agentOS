@@ -9,10 +9,6 @@ on:
     types: [opened, edited, labeled, unlabeled]
 permissions:
   contents: read
-# One run at a time per issue, so two quick edits cannot both post a first comment.
-concurrency:
-  group: intake-${{ github.event.issue.number }}
-  cancel-in-progress: false
 jobs:
   intake:
     # A work item, or one that just lost the label (its comment goes); an outsider's issue is
@@ -20,17 +16,24 @@ jobs:
     if: >-
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.issue.author_association)
       && (contains(github.event.issue.labels.*.name, 'work-item') || github.event.label.name == 'work-item')
+    # CI-issue-runs-coalesce: one sweep at a time across all issues, so two quick edits cannot both
+    # post a first comment, and a label burst keeps one running job and the newest pending one
+    # (GitHub cancels the older pending). Each run sweeps every issue's final state (--sweep), so a
+    # cancelled one loses nothing. Job-level, so a skipped run never enters the group.
+    concurrency:
+      group: intake
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
-      issues: write # the intake comment on this issue
+      issues: write # the intake comments
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
-      - name: Comment on the issue while it cannot render (tools/board.py intake)
+      - name: Comment on each work item while it cannot render (tools/board.py intake --sweep)
         env:
           GITHUB_TOKEN: ${{ github.token }}
           ISSUE: ${{ github.event.issue.number }}
-        run: python3 -I tools/board.py intake --repo "$GITHUB_REPOSITORY" --issue "$ISSUE"
+        run: python3 -I tools/board.py intake --repo "$GITHUB_REPOSITORY" --issue "$ISSUE" --sweep

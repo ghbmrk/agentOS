@@ -308,6 +308,19 @@ class TransitionTest(unittest.TestCase):
         for prev, new, pr in illegal:
             self.assertIsNotNone(board.transition_problem(prev, new, pr), (prev, new, pr))
 
+    def test_only_an_event_touching_merged_can_fail(self):
+        # CI-issue-runs-coalesce: board.yml runs the transition job only when the event's label is
+        # state:merged or the issue holds it at the event; every other state event is skipped and takes
+        # no runner. That filter is exact only while no other edge can fail, which this pins.
+        others = [s for s in STATES if s != "merged"]
+        for s in others:
+            for extra in [None, *others]:
+                held = [f"state:{x}" for x in {s, extra} if x]
+                for action in ("labeled", "unlabeled"):
+                    now = held if action == "labeled" else [h for h in held if h != f"state:{s}"]
+                    self.assertIsNone(board.report_transition(self.fetcher(now, []), "o/r", 7, f"state:{s}", action),
+                                      (s, extra, action))
+
     def fetcher(self, held, prs, title="W-3: fix", comments=(), calls=None, search=None):
         item = {"number": 7, "title": title, "labels": [{"name": n} for n in ["work-item", *held]]}
         calls = [] if calls is None else calls
@@ -628,6 +641,55 @@ class IntakeCommentTest(unittest.TestCase):
         self.assertEqual(self.run_intake(fixed, comments=[stale]), [])
         self.assertEqual([c[:2] for c in self.run_intake(300, comments=[stale])],
                          [("POST", "/repos/o/r/issues/300/comments")])
+
+    def run_sweep(self, number, items, comments, held=()):
+        """board.py intake --sweep with `comments` per issue and the search answering `held`."""
+        calls = []
+
+        def fetch(path, method="GET", payload=None):
+            if method != "GET":
+                calls.append((method, path, payload and payload["body"]))
+                return {}
+            m = re.fullmatch(r"/repos/o/r/issues/(\d+)/comments", path)
+            if m:
+                return [dict(c) for c in comments.get(int(m.group(1)), [])]
+            if path.startswith("/repos/o/r/issues?"):
+                return items
+            if path.startswith("/search/issues?q="):
+                self.assertIn("in%3Acomments", path)
+                self.assertIn(board.urllib.parse.quote(f'"{board.INTAKE_PHRASE}"', safe=""), path)
+                return {"items": [{"number": n} for n in held] + [{"number": 999, "pull_request": {}}]}
+            raise AssertionError(path)
+        with redirect_stdout(io.StringIO()):
+            code = board.main(["intake", "--repo", "o/r", "--issue", str(number), "--sweep"],
+                              read=lambda: BOARD + board.GENERATED + "\n", fetch=fetch)
+        self.assertEqual(code, 0)
+        return calls
+
+    def test_a_sweep_reaches_every_issue_a_replaced_run_would_have(self):
+        # CI-issue-runs-coalesce: intake.yml keeps one running sweep and the newest pending one, so a
+        # burst's other runs are cancelled. The survivor comments on every issue render blames (#300,
+        # #301) and clears the stale comment the search finds (#5, fixed since), whichever issue
+        # triggered it; the triggering issue is always read, and a PR hit is never touched.
+        first = board.intake_comment(["old"])
+        self.assertIn(board.INTAKE_PHRASE, first)
+        fixed = opened(issues())[0]["number"]
+        calls = self.run_sweep(fixed, self.items(), {5: [self.bot(first, id=70)], fixed: [self.bot(first, id=71)]},
+                               held=[5])
+        self.assertEqual(sorted(c[:2] for c in calls),
+                         [("DELETE", "/repos/o/r/issues/comments/70"), ("DELETE", "/repos/o/r/issues/comments/71"),
+                          ("POST", "/repos/o/r/issues/300/comments"), ("POST", "/repos/o/r/issues/301/comments")])
+        posted = {c[1]: c[2] for c in calls if c[0] == "POST"}
+        self.assertIn("issue #300: ", posted["/repos/o/r/issues/300/comments"])
+        self.assertNotIn("issue #301: ", posted["/repos/o/r/issues/300/comments"])
+        # A second sweep over the same final state changes nothing.
+        done = {300: [self.bot(posted["/repos/o/r/issues/300/comments"], id=80)],
+                301: [self.bot(posted["/repos/o/r/issues/301/comments"], id=81)]}
+        self.assertEqual(self.run_sweep(fixed, self.items(), done, held=[300, 301]), [])
+
+    def test_a_sweep_on_a_clean_board_changes_nothing(self):
+        clean = opened(issues())
+        self.assertEqual(self.run_sweep(clean[0]["number"], clean, {}), [])
 
     def test_the_bot_is_the_actions_login(self):
         # The login GITHUB_TOKEN comments as; the fixtures above build on board.BOT, so pin it here.
