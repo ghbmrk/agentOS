@@ -73,6 +73,25 @@ class SplitTest(unittest.TestCase):
         self.assertEqual(len({i for i, part in enumerate(parts) for p in part
                               if p in {f"{M}/guest", f"{M}/journal", f"{M}/holder"}}), 3)
 
+    def test_kernel_sim_runs_alone_on_the_last_shard(self):
+        # CI-race-sim-alone (#6582): beside decoy/match, enforcer/nft and agentos-enroll, which
+        # weighed 1, kernel/sim ran 970 s of its 25-minute timeout and sometimes ran out.
+        sim = f"{M}/kernel/sim"
+        pkgs = self.PKGS + [sim]
+        for n in (2, 3, 5):
+            parts = ci_split.split(pkgs, n)
+            self.assertExactCover(pkgs, parts)
+            self.assertEqual(parts[-1], [sim], n)
+        # One shard runs everything; a list without kernel/sim leaves no shard empty for it.
+        self.assertEqual(ci_split.split(pkgs, 1), [sorted(pkgs)])
+        self.assertTrue(all(ci_split.split(self.PKGS, 3)))
+
+    def test_kernel_sim_is_alone_in_the_brokers_split(self):
+        pkgs = go_list()
+        if pkgs is None:
+            self.skipTest("no go toolchain")
+        self.assertEqual(ci_split.split(pkgs, 3)[-1], [f"{M}/kernel/sim"])
+
     def test_a_duplicate_or_an_empty_list_or_no_shards_is_refused(self):
         with self.assertRaises(ValueError):
             ci_split.split(self.PKGS + [self.PKGS[0]], 3)
@@ -109,7 +128,7 @@ class SplitTest(unittest.TestCase):
         finally:
             sys.stdin = old
         out = buf.getvalue().split()
-        self.assertEqual(out[:4], [f"{M}/{p}" for p in ("journal", "guest", "holder", "update")])
+        self.assertEqual(out[:4], [f"{M}/{p}" for p in ("journal", "holder", "guest", "update")])
         self.assertEqual([ci_split.weight(p) for p in out], sorted((ci_split.weight(p) for p in out), reverse=True))
 
 
