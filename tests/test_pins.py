@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from unittest import mock
@@ -521,7 +522,7 @@ class FollowUp2(unittest.TestCase):
         for text in ["${X:-npm} install evil", '"${X:-npm}" install evil', "${X-npm} install evil", "{n,}pm i evil",
                      "n{p,}m i evil", "{np,x}m i evil", "p{i,}p install evil", "${C:-curl} https://e",
                      "cu{r,}l -o x https://e", "n$()pm i", "n``pm i", '"${X:-npm i}" evil', "${X:=pip} install x",
-                     "${X:+wget} x", "${X/#/npm} i", "${A:-${B:-yarn}} add x", "{n..n}pm i", "x{a,b}" * 9,
+                     "${X:+wget} x", "${X/#/npm} i", "${A:-${B:-yarn}} add x", "{n..n}pm i",
                      # Thread qb76so on eebc2d80: an unset variable, a substitution that prints nothing, an empty
                      # `$''` or `$""` and an ANSI-C escape each glue a name, and bash runs it.
                      "n${X}pm i x", "n$X\"\"pm i x", "n$(true)pm i x", "n`true`pm i x", "n$''pm i x", 'n$""pm i x',
@@ -531,13 +532,22 @@ class FollowUp2(unittest.TestCase):
         self.assertEqual(pins.yaml_sites("steps:\n  - run: ${X:-npm} install evil\n"), 1)
         # L3 fix-list on #6630 at caf4aa66: a subscripted unset variable and an Actions expression that renders
         # empty each glue the words around them.
-        for text in ["n${X[0]}pm i evil", "n${X[@]}pm i evil", "n${X[*]}pm i evil"]:
+        for text in ["n${X[0]}pm i evil", "n${X[@]}pm i evil", "n${X[*]}pm i evil", "n$'\\0'pm i evil",
+                     "n$'\\x00'pm i evil", "n${X~}pm i evil", "n${X~~}pm i evil", "n${X@U}pm i evil", "n${X,,}pm i evil",
+                     "n${X^^}pm i evil"]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 1)
         for text in ["n${{ '' }}pm i evil", "n${{ toJSON('') }}pm i evil", "n${{ github.x }}pm i evil"]:
             with self.subTest(text=text):
                 self.assertEqual(pins.yaml_sites('steps:\n  - run: "%s"\n' % text), 1)
         self.assertEqual(pins.yaml_sites("steps:\n  - run: echo ${{ github.sha }}\n"), 0)
+        # Security fix-list on #6630 at caf4aa66: past the cap a line is refused, never counted, and a repeated
+        # reading is kept once, so `{a,a}` repeats stay linear.
+        with self.assertRaisesRegex(pins.PinError, "more than 256 readings"):
+            pins.text_sites("x{a,b}" * 9)
+        start = time.monotonic()
+        self.assertEqual(pins.text_sites("{a,a}" * 200 + " ${X:-${Y:-${Z:-q}}}" * 3), 0)
+        self.assertLess(time.monotonic() - start, 2)
         self.assertEqual(pins.text_sites("n$(:)pm i"), 1)
         # L3 pre-probe on #6630 at eebc2d80: an Actions expression renders its literals before shell runs.
         for run in ["${{ 'n' }}pm install evil", "${{ format('{0}pm', 'n') }} i", "${{ 'n' }}${{ 'p' }}m i",

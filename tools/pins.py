@@ -81,7 +81,7 @@ FETCH_EXEMPT = {
                                     ".curlrc; downloads nothing"),
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
     "tests/test_image.py": (1, "a busybox wget shebang as fixture text"),
-    "tests/test_pins.py": (246, "this reader's test cases"),
+    "tests/test_pins.py": (253, "this reader's test cases"),
     "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
@@ -216,20 +216,28 @@ EXPAND_MAX = 256
 
 def _expansions(word):
     """The static readings of shell text, quotes removed: each static piece of a `${name<op>word}` operand
-    taken and each
-    `{a,b}` list and `{a..c}` sequence expanded, innermost first, with empty `$()` and backtick pairs dropped;
-    None past EXPAND_MAX readings. A value computed at run time stays unread."""
-    out, todo = set(), [re.sub(r"\$\(\s*\)|`\s*`", "", word)]
+    taken, and empty, and each `{a,b}` list and `{a..c}` sequence expanded, innermost first, with empty `$()`
+    and backtick pairs dropped. Each reading is kept once (`{a,a}` repeated stays linear); None past
+    EXPAND_MAX readings. A value computed at run time stays unread."""
+    out, seen, todo = set(), set(), []
+
+    def push(xs):
+        for x in xs:
+            if x not in seen:
+                seen.add(x)
+                todo.append(x)
+    push([re.sub(r"\$\(\s*\)|`\s*`", "", word)])
     while todo:
         w = todo.pop()
         m = PARAM.search(w) or PARAM_BARE.search(w) or BRACE.search(w)
         if not m:
             out.add(w)
         elif m.re is PARAM_BARE:
-            todo.append(w[:m.start()] + w[m.end():])
+            push([w[:m.start()] + w[m.end():]])
         elif m.re is PARAM:
-            # Each static piece, and empty: an unset variable, subscripted too (`n${X[0]}pm`), expands to nothing.
-            todo.extend(w[:m.start()] + x + w[m.end():] for x in set(re.split(r"[-:=+?/#%^,@]+", m.group(1))) | {""})
+            # Each static piece, and empty: an unset variable, subscripted too (`n${X[0]}pm`), or under a case or
+            # transform operator (`n${X~}pm`, `n${X@U}pm`) expands to nothing.
+            push(w[:m.start()] + x + w[m.end():] for x in set(re.split(r"[-:=+?/#%^,@]+", m.group(1))) | {""})
         else:
             if m.group(1) is not None:
                 alts = m.group(1).split(",")
@@ -242,8 +250,8 @@ def _expansions(word):
                     alts = [chr(x) for x in range(min(ord(a), ord(b)), max(ord(a), ord(b)) + 1)]
                 else:
                     alts = [m.group(0)[1:-1]]
-            todo.extend(w[:m.start()] + x + w[m.end():] for x in alts)
-        if len(out) + len(todo) > EXPAND_MAX:
+            push(w[:m.start()] + x + w[m.end():] for x in alts)
+        if len(out) > EXPAND_MAX or len(seen) > 8 * EXPAND_MAX:
             return None
     return out
 
@@ -279,7 +287,7 @@ def _ansi(m):
         if x[0] == "c":
             return chr(ord(x[1].upper()) ^ 0x40)
         return ANSI_NAMED.get(x, x)
-    return ANSI_ESC.sub(esc, m.group(1))
+    return ANSI_ESC.sub(esc, m.group(1)).split("\0", 1)[0]  # bash ends the string at a NUL (`n$'\\0'pm` is npm)
 
 
 def _unquote(line):
@@ -295,13 +303,15 @@ def _named(text):
 def hidden_sites(line):
     """Fetcher and manager names a line (quotes removed) holds only once statically expanded (`${X:-npm}`,
     `"${X:-npm i}"`, `{n,}pm`, `cu{r,}l`, `n$()pm`): the most any reading names beyond the line as written,
-    or one where the line has more than EXPAND_MAX readings. Never credited (`_shifts` already refuses a
+    PinError where the line has more than EXPAND_MAX readings. Never credited (`_shifts` already refuses a
     credit to a line holding `$`, `,` or `{x`)."""
     line = _unsub(line)
     if not re.search(r"\{|\$\(\s*\)|`\s*`", line):
         return 0
     e = _expansions(line)
-    return 1 if e is None else max(0, max(_named(x) for x in e) - _named(line))
+    if e is None:  # refused, not counted: a fixed count past the cap could hide a name behind it
+        raise PinError("a line expands to more than %d readings: %s" % (EXPAND_MAX, line[:80]))
+    return max(0, max(_named(x) for x in e) - _named(line))
 
 
 def text_sites(text):
