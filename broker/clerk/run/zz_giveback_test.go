@@ -379,3 +379,48 @@ func TestAnUnnamedKeptGrantWithNoAccountIsToldEverywhere(t *testing.T) {
 		t.Fatalf("keptNote with no account = %q, %q", got, named)
 	}
 }
+
+// A kept grant for the account set up here is that account's own second
+// sign-in: the notice names no step and warns off removing the app from it
+// (#6633 UX 2 point 2).
+func TestAKeptGrantForTheSetUpAccountNeedsNoStep(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	h := NewMailHost(context.Background(), dir, sec, signInConfig(srv))
+	h.mu.Lock()
+	n := h.keptNote(strings.ToUpper(gmailtest.User))
+	h.mu.Unlock()
+	if strings.Contains(n, "permissions") || strings.Contains(n, "that Gmail account") || !strings.Contains(n, "needs no step") ||
+		!strings.Contains(n, "Do not remove the app you made for agentOS from "+gmailtest.User) {
+		t.Fatalf("a kept grant for the set-up account is told %q", n)
+	}
+}
+
+// A sign-in again whose account changed meanwhile to the grant's own account
+// drops the new grant unrevoked, since revoking it would end the set-up
+// account's grant; to any other account, it gives the grant back.
+func TestASignInAgainOvertakenByItsOwnAccountRevokesNothing(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	h := NewMailHost(context.Background(), dir, sec, signInConfig(srv))
+	for _, own := range []bool{true, false} {
+		g, err := h.ownGmailSignIn()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := g.sec.Put(g.slot, clerk.KindGrant, otherGrant()); err != nil {
+			t.Fatal(err)
+		}
+		g.again, g.addr = true, gmailtest.User
+		slot := GmailSlot(gmailtest.User)
+		if !own {
+			slot = GmailSlot("other@gmail.test")
+		}
+		before := srv.Revokes()
+		h.mu.Lock()
+		prev, perr := readMail(dir)
+		h.changedMeanwhile(g, slot, prev, perr)
+		h.mu.Unlock()
+		if got := srv.Revokes() - before; got != map[bool]int{true: 0, false: 1}[own] {
+			t.Fatalf("own %v: %d revocations", own, got)
+		}
+	}
+}

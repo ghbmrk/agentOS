@@ -236,7 +236,7 @@ func (h *MailHost) gmailFinish(use, pasted string) (string, error) {
 	prev, perr := readMail(h.dir)
 	slot := GmailSlot(addr)
 	if g.again && (perr != nil || slotOf(prev) != g.slot) {
-		h.giveBack(g, true) // as above: the account changed meanwhile
+		h.changedMeanwhile(g, slot, prev, perr) // as above: the account changed meanwhile
 		return clerk.DNoSignIn, nil
 	}
 	same := perr == nil && slotOf(prev) == slot
@@ -311,6 +311,11 @@ func (h *MailHost) keptNote(addr string) string {
 		return "I could not give the Gmail sign-in for " + addr + " back to Google, so Google may still list it. " +
 			"To end it, open myaccount.google.com/permissions signed in to " + addr + ", and remove the app you made for agentOS. " +
 			"Do not remove it from " + s.Address + ", the account set up here, or its mail stops."
+	case set && addr != "":
+		// The kept grant is the set-up account's own (a second sign-in for
+		// it): Google's listing of the app is that account's, so no step.
+		return "Google may still list a second sign-in for " + s.Address + ", the account set up here. It needs no step from you. " +
+			"Do not remove the app you made for agentOS from " + s.Address + ", or its mail stops."
 	case set && addr == "":
 		return "I could not give a Gmail sign-in back to Google, and I cannot tell which Google account it was for, so Google may still list it. " +
 			"If you signed in to agentOS with a Google account other than " + s.Address + ", open myaccount.google.com/permissions in that account and remove the app you made for agentOS. " +
@@ -319,6 +324,19 @@ func (h *MailHost) keptNote(addr string) string {
 		return noteGmailUntold
 	}
 	return noteGmailKept
+}
+
+// changedMeanwhile drops g's new grant for slot once the account changed
+// during its sign-in again, to prev (perr its read's error), with h.mu held.
+// If the account is now the grant's own, Google's revocation of the new
+// grant would end the set-up account's grant too, so it is dropped, not
+// given back, as on a sign-in for the same address (#6633 UX 2 r2);
+// otherwise it is given back.
+func (h *MailHost) changedMeanwhile(g *gmailSignIn, slot string, prev MailSettings, perr error) {
+	if perr == nil && slotOf(prev) == slot {
+		return
+	}
+	h.giveBack(g, true)
 }
 
 // giveBack revokes g's new grant, which no account will use, with h.mu

@@ -938,7 +938,8 @@ func TestASignInForAnotherAddressRevokesTheOldGrantFirst(t *testing.T) {
 		if kept {
 			c.gmail.revoke = srv.Base() + "/revoke" // answers 401
 		}
-		owner := MailOwner{serveMail(t, NewMailHost(context.Background(), dir, sec, c), MailOwnerSide)}
+		h := NewMailHost(context.Background(), dir, sec, c)
+		owner := MailOwner{serveMail(t, h, MailOwnerSide)}
 		srv.As(other)
 		if d := signIn(t, srv, owner, "watch", fakeClient); d != clerk.DSignedIn+" watch" {
 			t.Fatalf("kept %v: GmailFinish = %q", kept, d)
@@ -951,6 +952,14 @@ func TestASignInForAnotherAddressRevokesTheOldGrantFirst(t *testing.T) {
 		st, _ := owner.Status()
 		if revoked == kept || slices.ContainsFunc(st.Notices, keptText) != kept || !slices.Contains(st.Notices, noteMailReplaced) {
 			t.Fatalf("kept %v: revoked %v, notices %v", kept, srv.Revoked(), st.Notices)
+		}
+		if kept {
+			// The old account's grant was kept: the notice names it and warns
+			// off the new account set up here (#6633 UX 2 point 1).
+			safeFor(t, h, other)
+			if ns := keptNotices(h); !strings.Contains(ns[0], "signed in to "+gmailtest.User) {
+				t.Fatalf("the kept old grant's notice does not name its account: %q", ns[0])
+			}
 		}
 	}
 }
