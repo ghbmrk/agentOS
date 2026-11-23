@@ -16,7 +16,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/localapi"
 )
 
-// REQ: ONB-3, CRED-8, CH-7, NET-2
+// REQ: ONB-3, CH-7, NET-2
 
 // codeErrs is the rig's hooks with EnrollCode and ConfirmCode answering
 // the given errors; EnrollCode's error comes with a good link, which the
