@@ -599,10 +599,12 @@ func (r *Router) serve(c caller, w http.ResponseWriter, req *http.Request) {
 			}
 			return
 		case a.cancelled:
-			// Terminal: the meter or the guest ended the call. What it
-			// already spent is charged; nothing is cooled or audited,
-			// since no route failed (#1567).
+			// Terminal: the meter's call time limit ended the call while
+			// the guest still waits. What it already spent is charged; the
+			// guest gets a timeout and the owner one non-failover record,
+			// and no route is cooled or scored, since none failed (#1567).
 			report(req.Context(), "", Usage{Failed: append(failed, failedAttempt(rt.Provider, a)), Unserved: true})
+			fail(http.StatusGatewayTimeout, "server_error", "timeout", "the call's time limit ended before a provider answered")
 			return
 		case a.failover:
 			tell := false
@@ -696,8 +698,8 @@ type attempt struct {
 	body     []byte // the error body, when not served
 	denied   bool   // the proxy refused it itself
 	failover bool   // the route is exhausted or broken; nothing reached the guest
-	// cancelled: the call's context ended (a meter timeout or a guest that
-	// went away). The call is over, so no route is tried or cooled.
+	// cancelled: the call's context ended (the meter's call time limit;
+	// nothing was written to the guest). No route is tried or cooled.
 	cancelled bool
 	until     time.Time
 	usage     *Usage

@@ -45,8 +45,8 @@ func TestOpenAILateStreamErrorSanitisedThroughRouter(t *testing.T) {
 	}
 }
 
-// A call whose context is cancelled (a meter timeout or a guest that went
-// away) stops the router: no later route is tried and the route it was on
+// A call whose context is cancelled (the meter's call time limit) stops
+// the router: no later route is tried and the route it was on
 // is not cooled (#1567).
 func TestCancelledCallIsTerminalAndCoolsNothing(t *testing.T) {
 	r := newRig(t, rigOpts{})
@@ -61,16 +61,12 @@ func TestCancelledCallIsTerminalAndCoolsNothing(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.router.Handler("m1").ServeHTTP(w, anyAttempt(req))
+	assertTimedOut(t, r, w)
 	if n := r.up.count(hostOpenAI); n != 0 {
 		t.Fatalf("a cancelled call tried another route (%d calls)", n)
 	}
 	if st := r.router.Stats()["anthropic/claude-fixture"]; st.Failovers != 0 {
 		t.Fatalf("a cancelled call counted a failover: %+v", st)
-	}
-	for _, d := range r.decisions {
-		if d.Outcome == Failover {
-			t.Fatalf("a cancelled call audited a failover: %+v", d)
-		}
 	}
 	// The route is not cooling: the next call is served from it.
 	r.up.set(hostAnthropic, serveFixture(200, "application/json", fixture(t, "anthropic_message.json")))
@@ -94,10 +90,23 @@ func TestCancelledStreamIsTerminalAndCoolsNothing(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.router.Handler("m1").ServeHTTP(w, anyAttempt(req))
+	assertTimedOut(t, r, w)
 	if n := r.up.count(hostOpenAI); n != 0 {
 		t.Fatalf("a cancelled stream tried another route (%d calls)", n)
 	}
 	if st := r.router.Stats()["anthropic/claude-fixture"]; st.Failovers != 0 {
 		t.Fatalf("a cancelled stream counted a failover: %+v", st)
+	}
+}
+
+// assertTimedOut checks the guest's answer and the single audit record of
+// a cancelled call: 504 timeout, one denied decision, no failover.
+func assertTimedOut(t *testing.T, r *rig, w *httptest.ResponseRecorder) {
+	t.Helper()
+	if w.Code != http.StatusGatewayTimeout || !strings.Contains(w.Body.String(), `"code":"timeout"`) || w.Header().Get("Retry-After") != "" {
+		t.Fatalf("guest answer: %d %q %v", w.Code, w.Body, w.Header())
+	}
+	if len(r.decisions) != 1 || r.decisions[0].Outcome != Denied || r.decisions[0].Status != http.StatusGatewayTimeout {
+		t.Fatalf("decisions: %+v", r.decisions)
 	}
 }
