@@ -894,6 +894,8 @@ class PremergeTest(unittest.TestCase):
     def test_mark_press_merge_paths(self):
         for f in ("CLAUDE.md", "docs/OPERATING.md", ".claude/settings.json", ".github/workflows/ci.yml",
                   "tools/risk_tier.py", "tools/premerge.py", "tools/ci_scope.py", "tools/ci_scope_x.py",
+                  # #1875: ci_split decides which broker packages each race shard runs, so it is a gate file too.
+                  "tools/ci_split.py", "tools/ci_split_x.py",
                   "docs/LANES.md", "tools/trace.py", "tools/old_core.txt",
                   # KRN-2cap (#2935): the trusted core's budget and the tool that enforces it.
                   "tools/trusted_base.py", "tools/trusted_core.txt", "tools/ceilings.txt",
@@ -908,7 +910,7 @@ class PremergeTest(unittest.TestCase):
         # The other gate tests stay as narrowed on Mark's "Narrow only" (2026-10-16).
         for f in ("tools/records.py", "reviews/l3/2026-10-15-pr1.md", "README.md", "docs/OTHER.md", "src/claude/x.go",
                   "reviews/README.md", "reviews/a/b/README.md", "tests/x/test_premerge.py", "tests/test_risk_tier.py",
-                  "tests/test_ci_scope.py", "tests/test_workflows.py", "tests/test_merge_queue.py",
+                  "tests/test_ci_scope.py", "tests/test_ci_split.py", "tests/test_workflows.py", "tests/test_merge_queue.py",
                   "tests/test_lane.py", "tools/trusted_base_parsers.txt", "tests/test_trusted_base.py",
                   "tools/mutgate.pyc", "tools/x/mutgate.py", "tests/test_mutgate.py",
                   "tools/claims.pyc", "tools/x/claims.py", "tests/test_claims.py"):

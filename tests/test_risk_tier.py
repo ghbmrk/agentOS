@@ -383,6 +383,15 @@ class RiskTierTest(unittest.TestCase):
         not_a = [n for n in sorted(names)
                  if rt.tier_of("broker/" + n + "/x.go")[0] != "A"]
         self.assertEqual(not_a, [])
+        # And the other way (#1704): every TIER_A_BROKER package is in the row, so dropping one from the
+        # row fails too. modem* names modemlink; cmd, core and internal are named by path after "plus".
+        names.add("modemlink")
+        self.assertEqual(sorted(rt.TIER_A_BROKER - names - {"cmd", "core", "internal"}), [])
+        for n in ("cmd", "core", "internal"):
+            self.assertIn("`broker/" + n + "`", row)
+        # Every guest path the tool rates A by name is in the row's guest build inputs (#1704).
+        missing = [p for p in sorted(rt.TIER_A_GUEST_PATHS) if "`" + p + "`" not in row]
+        self.assertEqual(missing, [])
 
     # REQ: ARC-1 (SIM-core: the trusted core is the list in broker/core/core.txt)
     def test_core_list_rates_core_and_wiring_a(self):
