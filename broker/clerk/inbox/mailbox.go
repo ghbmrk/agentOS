@@ -254,11 +254,11 @@ func (e *TooMuchReadMailError) Error() string { return ErrTooMuchReadMail.Error(
 func (e *TooMuchReadMailError) Unwrap() error { return ErrTooMuchReadMail }
 
 // opened is one Opened call's state: LastOpened as it is built, and the log
-// by digest, each entry marked when this read found its mail. Once a charge
-// runs past openedMax the read is full: it goes on through every folder, but
-// only to log read mail the log lacks, and keeps the newest of it within the
-// bound (keep), so the read mail the owner read last is what a failing read
-// hands back.
+// by digest, each entry this read logged marked when it found its mail. Once
+// a charge runs past openedMax the read is full: it goes on through every
+// folder, but only to log read mail the log lacks, and keeps the newest of it
+// within the bound (keep), so the read mail the owner read last is what a
+// failing read hands back.
 type opened struct {
 	today   string
 	watched bool
@@ -369,13 +369,11 @@ func newOpened(today string, log SeenLog) (*opened, error) {
 }
 
 // add logs a mail once and opens its sender on the entry's day; a mail this
-// read found is marked present, and one the log lacked carries its arrival.
+// read found and logs is marked present, and one the log lacked carries its
+// arrival. A mail already logged is left as it is: an entry from the log is
+// recent, and result keeps a recent entry whether this read found it or not.
 func (o *opened) add(id [16]byte, from, date string, present bool, arrived int64) error {
-	if e, ok := o.log[id]; ok {
-		if present && !e.present {
-			e.present = true
-			o.log[id] = e
-		}
+	if _, ok := o.log[id]; ok {
 		return nil
 	}
 	if present {
