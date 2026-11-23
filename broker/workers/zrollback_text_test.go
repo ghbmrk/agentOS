@@ -3,7 +3,6 @@ package workers
 // REQ: CAP-8
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/vm"
