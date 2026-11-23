@@ -135,11 +135,40 @@ func TestNeighboursFollowHolds(t *testing.T) {
 		nonce := []byte{14, 1, 1, 2, 3, 4, 5, 6}
 		h.frame(b, 0x86dd, allNodes, icmp6(a, "ff02::1", append(append(na, nonce...), lla(2)...)))
 	}
+	// settle returns once the enforcer has processed every frame the second
+	// host sent on seg before it. kept checks that an entry did not move, so
+	// polling for "unchanged" would pass at once or wait out the deadline:
+	// settle instead deletes the entry for the second host's own address
+	// (which nothing else on seg makes), sends a message from it that the
+	// enforcer must act on (a lease-held ARP request or solicitation from the
+	// second host to the enforcer, which creates the entry), and polls until
+	// the entry is back. The second host's frames reach the enforcer in the
+	// order it sent them, so the entry's return means the forged ones before
+	// it are done.
+	settle := func(seg string, v6 bool) {
+		t.Helper()
+		b, own, ifc := h.hosts[seg+"2"], segAddr(seg, 1), segIfc(seg)
+		if v6 {
+			own = seg6Addr(seg, 1)
+		}
+		exec.Command("ip", "neigh", "del", own, "dev", ifc).Run() // fails when there is no entry
+		if !v6 {
+			h.frame(b, 0x0806, bcast, arp(1, macB[seg], own, enfAddr(seg)))
+		} else {
+			gw := seg6Net(seg) + "1"
+			ns := append([]byte{135, 0, 0, 0, 0, 0, 0, 0}, net.ParseIP(gw).To16()...)
+			h.frame(b, 0x86dd, multicast6(solicited(gw)), icmp6(own, solicited(gw), append(ns, append([]byte{1, 1}, macB[seg]...)...)))
+		}
+		if !pollUntil(neighDeadline, func() bool { return h.neighbour(ifc, own) == macB[seg].String() }) {
+			t.Fatalf("%s (v6 %v): the enforcer did not process the second host's barrier message within %v", seg, v6, neighDeadline)
+		}
+	}
 	// kept checks the enforcer's entry for the first host's address on
-	// seg still names the first host's hardware address.
+	// seg still names the first host's hardware address, once the forged
+	// messages before it are processed (settle).
 	kept := func(seg string, v6 bool, why string) {
 		t.Helper()
-		time.Sleep(100 * time.Millisecond)
+		settle(seg, v6)
 		if got := h.neighbour(segIfc(seg), addrOf(seg, v6)); got != macA[seg].String() {
 			t.Errorf("%s (v6 %v), %s: the enforcer's entry for %s names %q, want the first host's %s", seg, v6, why, addrOf(seg, v6), got, macA[seg])
 		}
@@ -176,7 +205,8 @@ func TestNeighboursFollowHolds(t *testing.T) {
 			late := h.udpFlowTo(seg, peerOf(true), laterPort, "late")
 			h.move(seg, a, macA[seg].String(), macB[seg].String(), true)
 			h.injectTo(seg+"2", a, 9800, peerOf(true), laterPort, "take")
-			if !holds(ClaimSet(nftSeg(seg)), a+" . "+macB[seg].String()) {
+			key := a + " . " + macB[seg].String()
+			if !pollUntil(neighDeadline, func() bool { return holds(ClaimSet(nftSeg(seg)), key) }) {
 				t.Fatalf("%s: the second host did not take the address's hold", why)
 			}
 			attack(seg, true, false)
@@ -219,8 +249,14 @@ func TestNeighboursFollowHolds(t *testing.T) {
 				t.Fatalf("%s (v6 %v): the first host's flow is not answered under the mutant", seg, v6)
 			}
 			attack(seg, v6, false)
-			time.Sleep(100 * time.Millisecond)
-			if got := h.neighbour(segIfc(seg), addrOf(seg, v6)); got != macB[seg].String() {
+			// Here the entry is expected to move: poll for it until the
+			// deadline.
+			var got string
+			pollUntil(neighDeadline, func() bool {
+				got = h.neighbour(segIfc(seg), addrOf(seg, v6))
+				return got == macB[seg].String()
+			})
+			if got != macB[seg].String() {
 				t.Errorf("%s (v6 %v): with the checks taken out, the second host's message left the entry at %q, want %s: the test cannot see the attack", seg, v6, got, macB[seg])
 			}
 		}
@@ -358,7 +394,22 @@ func (h *home) injectTo(from, local string, lport int, peer string, port int, ms
 		c.Write([]byte(msg))
 		c.Close()
 	})
-	time.Sleep(100 * time.Millisecond)
+}
+
+// neighDeadline bounds each wait for the enforcer to act on a frame or
+// packet: long enough for a loaded runner, and paid only on a failure.
+const neighDeadline = 10 * time.Second
+
+// pollUntil is whether ok became true within wait, polled every 10 ms.
+func pollUntil(wait time.Duration, ok func() bool) bool {
+	for end := time.Now().Add(wait); ; time.Sleep(10 * time.Millisecond) {
+		if ok() {
+			return true
+		}
+		if time.Now().After(end) {
+			return false
+		}
+	}
 }
 
 // heardWithin is heard, waiting up to wait.
