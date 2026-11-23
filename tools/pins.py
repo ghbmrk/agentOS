@@ -56,32 +56,34 @@ FETCH_NOT_YET = {
     ".github/workflows/ci.yml": ("#6515", 3),
     ".github/workflows/infer-real.yml": ("#6515", 1),
     ".github/workflows/vision-real.yml": ("#6515", 6),
-    "guest/codex/build-rootfs.sh": ("#6515", 2),
-    "guest/openclaw/build-rootfs.sh": ("#6515", 1),
+    "guest/codex/build-rootfs.sh": ("#6515", 3),
+    "guest/openclaw/build-rootfs.sh": ("#6515", 2),
     "image/build.sh": ("#6515", 1),
     "image/camnode/build.sh": ("#6515", 1),
     "image/infer.sh": ("#6515", 1),
-    "image/libavcodec.sh": ("#6515", 1),
-    "image/llamaserver.sh": ("#6515", 1),
+    "image/libavcodec.sh": ("#6515", 2),
+    "image/llamaserver.sh": ("#6515", 2),
 }
 # Files whose fetch sites are not pinned downloads: the count, and why.
 FETCH_EXEMPT = {
-    "image/security-snapshot.sh": (2, "probes which debian-security snapshot run is served; apt's signed "
+    "image/security-snapshot.sh": (5, "probes which debian-security snapshot run is served; apt's signed "
                                       "InRelease is the authority for what it then installs"),
     "spikes/S4-openclaw-guest/run_gateway.sh": (2, "talks to a gateway on 127.0.0.1; downloads nothing"),
+    "spikes/PLAN-muse-capture/run.sh": (1, "probes a gate on 127.0.0.1 through bash's /dev/tcp"),
     "spikes/S8-live/fwd.py": (1, "a measurement relay spike; downloads nothing it keeps"),
     "tests/test_ci_scope.py": (6, "ci.yml download steps as fixture text it checks"),
     "tests/test_close_guard_hook.py": (1, "a curl command line fed to the close-guard hook, never run"),
     "tests/test_hostcheck.py": (30, "fetch lines as fixture text, and `curl --version` to check -q skips "
                                     ".curlrc; downloads nothing"),
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
-    "tests/test_pins.py": (42, "this reader's test cases"),
+    "tests/test_image.py": (1, "a busybox wget shebang as fixture text"),
+    "tests/test_pins.py": (49, "this reader's test cases"),
     "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
-    "tools/board.py": (1, "GitHub API calls; downloads nothing it runs"),
+    "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
     "tools/metrics.py": (1, "GitHub API calls; downloads nothing it runs"),
     "tests/test_vulncheck.py": (8, "names curl as a package in OSV fixtures"),
-    "tools/vulncheck.py": (2, "names curl as its canary's package; OSV and GitHub API queries, release "
+    "tools/vulncheck.py": (3, "names curl as its canary's package; OSV and GitHub API queries, release "
                               "notes read as text, and npm tarballs checked against the lockfile's sha512"),
 }
 
@@ -90,17 +92,24 @@ FETCH_EXEMPT = {
 FETCHERS = frozenset(["curl", "wget", "aria2c"])
 WORDS = re.compile(r"[\s'\"`$(){}\[\];|&<>=\\,]+")
 NET_TEXT = re.compile(r"\burllib\.request\b|\burlopen\b|\bhttp\.client\b|\burllib3\b|\bhttpx\b|\baiohttp\b|"
-                      r"\bftplib\b|\b(?:import|from)\s+requests\b|\brelease\s+download\b")
+                      r"\bftplib\b|\b(?:import|from)\s+requests\b|\brelease\s+download\b|/dev/(?:tcp|udp)/")
 NET_MODULES = ("urllib.request", "urllib3", "requests", "http.client", "httpx", "aiohttp", "ftplib")
 
 
 def text_sites(text):
     """Fetch sites in shell-like text: a word naming a fetcher, a Python network module or a
-    `release download`. Whole-line `#` comments are dropped first (shell does not continue a comment
-    ending in `\\`), then line continuations are joined."""
-    n = 0
-    kept = "\n".join(l for l in text.split("\n") if not l.lstrip().startswith("#"))
-    for line in kept.replace("\\\n", " ").split("\n"):
+    `release download` or a bash `/dev/tcp` path. A comment line is read too (it may sit in a quoted
+    string or heredoc) but never continues to the next line, as in shell; other continuations are
+    joined. Quotes and backslashes are removed, not split at, so `cu""rl` and `c\\url` read as curl."""
+    n, joined, prev = 0, [], ""
+    for line in text.split("\n"):
+        if prev.endswith("\\") and not prev.lstrip().startswith("#"):
+            joined[-1] = joined[-1][:-1] + " " + line
+        else:
+            joined.append(line)
+        prev = joined[-1]
+    for line in joined:
+        line = re.sub(r"[\"'\\]", "", line)
         n += sum(1 for w in WORDS.split(line) if w.rsplit("/", 1)[-1] in FETCHERS)
         n += len(NET_TEXT.findall(line))
     return n
@@ -109,26 +118,30 @@ def text_sites(text):
 def yaml_sites(text):
     """Fetch sites in every scalar of a YAML file (run, with, env and keys alike), read from the
     composed node tree, so escapes are decoded and a duplicate key cannot hide a value. A scalar
-    alias counts where it is used; a collection is walked once."""
+    alias counts each place it is used, from a per-node memo, so nested aliases cost linear time."""
     import yaml  # only the repository test needs it; `live` runs without PyYAML
-    n, stack, seen = 0, list(yaml.compose_all(text, Loader=yaml.SafeLoader)), set()
-    while stack:
-        node = stack.pop()
-        if isinstance(node, (yaml.SequenceNode, yaml.MappingNode)):
-            if id(node) in seen:
-                continue  # an alias of a collection already walked: nested aliases cannot blow up the walk
-            seen.add(id(node))
-        if isinstance(node, yaml.ScalarNode):
-            n += text_sites(node.value)
-        elif isinstance(node, yaml.SequenceNode):
-            stack.extend(node.value)
-        elif isinstance(node, yaml.MappingNode):
-            stack.extend(x for kv in node.value for x in kv)
-    return n
+    memo = {}
+
+    def count(node):
+        if id(node) not in memo:
+            if isinstance(node, yaml.ScalarNode):
+                memo[id(node)] = text_sites(node.value)
+            else:
+                kids = node.value if isinstance(node, yaml.SequenceNode) else [x for kv in node.value for x in kv]
+                memo[id(node)] = sum(count(k) for k in kids)
+        return memo[id(node)]
+    return sum(count(d) for d in yaml.compose_all(text, Loader=yaml.SafeLoader))
+
+
+def _str(c):
+    """A str or bytes constant's text (subprocess takes bytes on POSIX), else None."""
+    if isinstance(c, ast.Constant) and isinstance(c.value, (str, bytes)):
+        return c.value if isinstance(c.value, str) else c.value.decode("latin-1")
+    return None
 
 
 def _exact(c):
-    return isinstance(c, ast.Constant) and isinstance(c.value, str) and c.value.rsplit("/", 1)[-1] in FETCHERS
+    return _str(c) is not None and _str(c).rsplit("/", 1)[-1] in FETCHERS
 
 
 def py_sites(text):
@@ -139,6 +152,9 @@ def py_sites(text):
     docs = {id(d.body[0].value) for d in ast.walk(tree)
             if isinstance(d, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and d.body
             and isinstance(d.body[0], ast.Expr) and isinstance(d.body[0].value, ast.Constant)}
+    if any(isinstance(x, ast.Name) and x.id == "__doc__" or isinstance(x, ast.Attribute) and x.attr == "__doc__"
+           for x in ast.walk(tree)):
+        docs = set()  # a file that reads a docstring as data has its docstrings counted
     n = 0
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -147,12 +163,12 @@ def py_sites(text):
             mod = node.module or ""
             if any(mod == m or mod.startswith(m + ".") for m in NET_MODULES):
                 n += 1
-            elif mod == "urllib" and any(a.name == "request" for a in node.names):
-                n += 1
+            else:  # `from http import client`, `from urllib import request`
+                n += sum(1 for a in node.names if mod + "." + a.name in NET_MODULES)
         elif _exact(node):
             n += 1
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docs:
-            n += text_sites(node.value)
+        elif _str(node) is not None and id(node) not in docs:
+            n += text_sites(_str(node))
     return n
 
 

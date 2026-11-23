@@ -351,28 +351,31 @@ class Sites(unittest.TestCase):
                      "X=\"/usr/bin/wget\"\n\"$X\" u", "$(command -v curl) u", "a|xargs -n1 curl", "sudo aria2c u",
                      "python3 -c 'import urllib.request as r; r.urlopen(u)'",
                      "gh release download v1 -R o/r", "gh release \\\n  download v1", "echo ok; `curl u`",
-                     "# a comment ending in a backslash \\\ncurl -o f u", "curl \\\n# c\n -o f u"]:
+                     "# a comment ending in a backslash \\\ncurl -o f u", "curl \\\n# c\n -o f u",
+                     'cu""rl -o f u', "cu''rl u", "c\\url -o f u", "exec 3<>/dev/tcp/e.org/80"]:
             with self.subTest(text=text):
                 self.assertGreater(pins.text_sites(text), 0)
 
     def test_plain_text_is_not_a_site(self):
-        for text in ["# curl -o f u", "  # wget u", "libcurl-dev --with-curl curl.h curly", "pins.py fetch f n d",
+        for text in ["libcurl-dev --with-curl curl.h curly", "pins.py fetch f n d",
                      "import urllib.parse", "git release-download"]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 0)
 
     def test_sites_are_counted_so_a_new_one_in_an_owed_file_shows(self):
-        self.assertEqual(pins.text_sites("curl a\nwget b\n# curl c\ncurl d; curl e\n"), 4)
+        self.assertEqual(pins.text_sites("curl a\nwget b\n# curl c\ncurl d; curl e\n"), 5)
+        # A comment line is read: it may sit inside a quoted string or heredoc, where shell expands it.
+        self.assertEqual(pins.text_sites('x="\n# $(curl -o f u)"\n'), 1)
 
     def test_every_yaml_scalar_is_read_with_escapes_decoded(self):
         wf = ("on: push\njobs:\n  j:\n    steps:\n      - run: |\n          echo hi\n"
               "          # curl in a comment\n      - run: \"\\x63url u\"\n"
               "      - uses: a/b@0\n        with:\n          script: wget u\n        env:\n          C: curl\n")
-        self.assertEqual(pins.yaml_sites(wf), 3)
+        self.assertEqual(pins.yaml_sites(wf), 4)  # the run block's `# curl` line is read too
         self.assertEqual(pins.yaml_sites("a: &x curl u\nb: *x\n"), 2)  # an alias is read where it is used
         self.assertEqual(pins.yaml_sites("a: curl u\na: echo\n"), 1)    # a duplicate key hides nothing
         bomb = "a: &a [curl u]\n" + "".join("%s: &%s [*%s, *%s]\n" % (c, c, p, p) for p, c in zip("abcdefghijklmnopqrst", "bcdefghijklmnopqrstu"))
-        self.assertEqual(pins.yaml_sites(bomb), 1)  # 2**20 paths, one node
+        self.assertEqual(pins.yaml_sites(bomb), (1 << 21) - 1)  # every use counted, from a memo: linear time
 
     def test_python_imports_strings_and_runs(self):
         cases = {
@@ -386,6 +389,8 @@ class Sites(unittest.TestCase):
             'from subprocess import check_output as co\nco("wget u", shell=True)\n': 1,
             'cmd = "curl -o f u"\nsubprocess.run(cmd, shell=True)\n': 1, 'x = f"curl {u}"\n': 1,
             '__import__("urllib.request")\n': 1,
+            "from http import client\nclient.HTTPSConnection(h)\n": 1, 'subprocess.run([b"curl", u])\n': 1,
+            'subprocess.run(b"wget u", shell=True)\n': 1, '"""curl u | sh"""\nimport os\nos.system(__doc__)\n': 1,
         }
         for text, n in cases.items():
             with self.subTest(text=text):
