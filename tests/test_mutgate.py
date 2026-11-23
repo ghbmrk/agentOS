@@ -6320,5 +6320,99 @@ class LintHeldFollowUp(unittest.TestCase):
             code = mutgate.cmd_plan(types.SimpleNamespace(git="HEAD~1", targets_out=None))
         return code, out.getvalue(), err.getvalue()
 
+
+def mod_diff(path, minus=(), plus=()):
+    """A -U0 diff of one file that deletes the lines minus and adds the lines plus, in one hunk."""
+    out = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -3,{len(minus)} +3,{len(plus)} @@\n"
+    return out + "".join(f"-{x}\n" for x in minus) + "".join(f"+{x}\n" for x in plus)
+
+
+class GoDebugEveryFu(unittest.TestCase):
+    """MUT-go-debug-every-fu (#6420): an edit that changes Go's runtime defaults for a whole package or
+    module (a package-wide //go: directive in a non-test file, a go.mod `go` or `godebug` line) changes
+    every test there, as #6377's test-file directive does; an edit the go.mod reading cannot place is one."""
+
+    CODE = {"hint/hint.go": "package hint\n", "hint/hint_test.go": "package hint\n",
+            "cmd/tool/main.go": "package main\n", "cmd/tool/main_test.go": "package main\n",
+            "mail/mail.go": "package mail\n", "mail/mail_test.go": "package mail\n"}
+    ALL = {"hint", "cmd/tool", "mail"}
+
+    def tree(self, d):
+        return DataFiles.tree(self, d, self.CODE)
+
+    def every(self, diff, pkgs):
+        added, tests = mutgate.added_lines(diff)
+        self.assertEqual(mutgate.touched(added, tests), pkgs)
+        for pkg in pkgs:
+            self.assertTrue(mutgate.tests_changed(tests, pkg), pkg)
+            self.assertIsNone(mutgate.head_tests(tests, pkg), pkg)  # every test
+        self.assertEqual(mutgate.claimed(diff, packages=sorted(self.ALL)), sorted(pkgs))
+
+    def test_a_directive_in_a_main_file_is_every_test_of_its_package(self):
+        # REQ: MUT-go-debug-every-fu
+        with tempfile.TemporaryDirectory() as d, self.tree(d):
+            for name, minus, plus in (("added", (), ("//go:debug panicnil=1",)),
+                                      ("changed", ("//go:debug panicnil=1",), ("//go:debug panicnil=0",)),
+                                      ("removed", ("//go:debug panicnil=1",), ()),
+                                      ("indented", (), ("\t//go:debug panicnil=1",)),
+                                      ("a directive not known", (), ("//go:future x",))):
+                with self.subTest(name):
+                    self.every(mod_diff("broker/cmd/tool/main.go", minus, plus), {"cmd/tool"})
+            # A deleted main file takes its directive with it.
+            gone = data_diff("broker/cmd/tool/main.go", "delete").replace("-x\n", "-//go:debug panicnil=1\n")
+            self.every(gone, {"cmd/tool"})
+            # Any package's non-test file counts: go reads the directive only in main, the gate fails closed.
+            self.every(mod_diff("broker/hint/hint.go", (), ("//go:debug x=1",)), {"hint"})
+            # A directive that reaches only its declaration or file, or ordinary code, widens nothing.
+            for line in ("//go:build linux", "//go:noinline", "//go:embed x.txt", "x := 1", "// go:debug x=1"):
+                with self.subTest(line):
+                    added, tests = mutgate.added_lines(mod_diff("broker/cmd/tool/main.go", (), (line,)))
+                    self.assertEqual(tests, {})
+                    self.assertEqual(mutgate.touched(added, tests), {"cmd/tool"})
+            # A vendored file's directive is fixed by go.sum (is_vendored): no claim.
+            added, tests = mutgate.added_lines(mod_diff("broker/vendor/x/y/y.go", (), ("//go:debug x=1",)))
+            self.assertEqual(mutgate.touched(added, tests), set())
+
+    def test_a_go_mod_go_line_is_every_test_of_the_module(self):
+        # REQ: MUT-go-debug-every-fu
+        with tempfile.TemporaryDirectory() as d, self.tree(d):
+            for minus, plus in ((("go 1.26.4",), ("go 1.27",)), ((), ("go 1.27 // pinned",)), (("go 1.26.4",), ())):
+                with self.subTest(minus=minus, plus=plus):
+                    self.every(mod_diff("broker/go.mod", minus, plus), self.ALL)
+
+    def test_a_go_mod_godebug_line_is_every_test_of_the_module(self):
+        # REQ: MUT-go-debug-every-fu
+        with tempfile.TemporaryDirectory() as d, self.tree(d):
+            for minus, plus in (((), ("godebug default=go1.21",)),
+                                ((), ("godebug (", "\tpanicnil=1", ")")),
+                                (("\tpanicnil=1",), ("\tpanicnil=0",)),   # -U0: an entry with no block in sight
+                                (("\thttp2client=0 // off",), ())):
+                with self.subTest(minus=minus, plus=plus):
+                    self.every(mod_diff("broker/go.mod", minus, plus), self.ALL)
+
+    def test_an_unplaceable_go_mod_edit_is_every_test_of_the_module(self):
+        # REQ: MUT-go-debug-every-fu
+        with tempfile.TemporaryDirectory() as d, self.tree(d):
+            for line in ("ignore ./old", "use ./x", "\tx=>1", "garbage", "\ta = b", "godebug(", "go"):
+                with self.subTest(line):
+                    self.every(mod_diff("broker/go.mod", (), (line,)), self.ALL)
+            # What sets no default stays no claim: requirements (go.sum fixes vendor/), replacements,
+            # exclusions, retractions, the toolchain, comments and layout.
+            for minus, plus in ((("\tgithub.com/a/b v1.0.0",), ("\tgithub.com/a/b v1.1.0 // indirect",)),
+                                ((), ("require github.com/a/b v1.0.0",)),
+                                ((), ("require (", "\tgithub.com/a/b v1.0.0", ")")),
+                                ((), ("replace github.com/a/b => ./third_party/b",)),
+                                ((), ("\tgithub.com/a/b v1.0.0 => github.com/c/b v1.0.1",)),
+                                ((), ("exclude github.com/a/b v0.9.0", "retract [v1.0.0, v1.0.1] // bad")),
+                                (("toolchain go1.26.11",), ("toolchain go1.26.12",)),
+                                ((), ("// godebug panicnil=1", "", "module github.com/x/broker"))):
+                with self.subTest(minus=minus, plus=plus):
+                    added, tests = mutgate.added_lines(mod_diff("broker/go.mod", minus, plus))
+                    self.assertEqual(mutgate.touched(added, tests), set())
+            # Another module's go.mod (third_party/, a replace directory) is that package's data, as before.
+            added, tests = mutgate.added_lines(mod_diff("broker/hint/go.mod", (), ("go 1.27",)))
+            self.assertEqual(mutgate.touched(added, tests), {"hint"})
+
+
 if __name__ == "__main__":
     unittest.main()

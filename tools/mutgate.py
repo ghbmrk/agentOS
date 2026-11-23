@@ -277,6 +277,44 @@ def is_data(path):
             and ("testdata" in parts[1:-1] or not parts[-1].endswith(".go")))
 
 
+# Edits that set Go's defaults for a whole package or module (MUT-go-debug-every-fu, #6420): a package-wide
+# `//go:` line (not LOCAL_DIRECTIVES) of a non-test file, which go reads in a main package (a GODEBUG default of
+# its binaries and tests), and a broker/go.mod line that is a `go` or `godebug` directive or entry. Either is a
+# change of every test there, as #6377's test-file line is. A -U0 hunk shows no enclosing block, so a go.mod line
+# sets no default only when it is placed: blank, a comment, `)`, a directive of GO_MOD_QUIET (requirements and
+# replacements are go.sum's and vendor/'s, is_vendored; the toolchain changes code, not defaults), or an
+# indented entry of a module path or a retracted version; any other line fails closed to every test.
+MODULE_FILE = "broker/go.mod"
+EVERY_TEST = "\0every-test"  # the name of added_lines' key for every test of a directory; no git path holds a NUL
+GO_MOD_QUIET = {"module", "require", "exclude", "replace", "retract", "toolchain", "tool"}
+GO_MOD_ENTRY = re.compile(r"[^\s/]*\.[^\s/]*(?:/\S*)?|\[?v\d\S*")
+
+
+def widened(path, text):
+    """The added_lines key (a directory's EVERY_TEST) whose packages' tests a changed line text of path
+    changes, every one, or None when it changes only its own code's."""
+    if path == MODULE_FILE:
+        s = re.sub(r"\s=>\s", " ", text.split("//", 1)[0].strip())
+        first = re.match(r"[^\s(]*", s)[0]
+        if (s in ("", ")") or first in GO_MOD_QUIET and s != first
+                or text[:1] in " \t" and "=" not in s and GO_MOD_ENTRY.fullmatch(first)):
+            return None
+        return f"broker/{EVERY_TEST}"
+    m = DIRECTIVE.match(text)
+    if (path and path.startswith("broker/") and is_source(path) and not is_data(path) and not is_vendored(path)
+            and m and m[1] not in LOCAL_DIRECTIVES):
+        return f"{posixpath.dirname(path)}/{EVERY_TEST}"
+    return None
+
+
+@functools.lru_cache(maxsize=None)
+def go_packages(broker):
+    """The broker/ packages (as package_of names them) holding a .go file, vendor/ and testdata/ left out."""
+    return frozenset(rel for f in broker.rglob("*.go")
+                     if (rel := f.parent.relative_to(broker).as_posix()) != "."
+                     and not {"vendor", "testdata"} & set(rel.split("/")))
+
+
 def _diff_git_path(raw):
     """The repo path a `diff --git a/P b/P` header names (--no-renames: both sides are one path), or
     None when it does not parse. It names a change with no hunk (an empty file added or deleted, a
@@ -351,6 +389,8 @@ def added_lines(diff_text, moved=None):
                 path = _header_path(raw)
             data(old if raw.startswith("--- ") else path if raw.startswith("+++ ") else None)
             continue
+        if raw[:1] in ("+", "-") and (key := widened(path if raw[0] == "+" else old, raw[1:])):
+            tests[key] = None
         if path is None or raw.startswith("\\"):  # "\ No newline at end of file" is no line (#4103)
             continue
         if raw.startswith("+"):
@@ -520,6 +560,9 @@ def owners(path, broker=None):
     its own package's when it is that package's data (data_owner), and every other package that
     names it by path (readers). A vendored file has none (is_vendored). A package's own _test.go
     file changes only the tests that reach its changed lines (owners_of, head_tests)."""
+    if path.rsplit("/", 1)[-1] == EVERY_TEST:
+        d = BROKER if broker is None else pathlib.Path(broker)
+        return set(go_packages(d.resolve())) if path == f"broker/{EVERY_TEST}" else {package_of(path)}
     if is_vendored(path):
         return set()
     own = data_owner(path, broker) if is_data(path) else None
