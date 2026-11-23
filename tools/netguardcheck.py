@@ -16,9 +16,15 @@ the Go type checker): it finds the common dial forms and errs toward a flag.
 Usage: netguardcheck.py [--root DIR] [--allow FILE]
 """
 import argparse
+import importlib.util
 import pathlib
 import re
 import sys
+
+# By path, as premerge loads its imports: a run with `python3 -I` keeps tools/ off sys.path.
+_rm = importlib.util.spec_from_file_location("record_merge", pathlib.Path(__file__).resolve().parent / "record_merge.py")
+record_merge = importlib.util.module_from_spec(_rm)
+_rm.loader.exec_module(record_merge)
 
 GUARD = '"github.com/ghbmrk/agentos/broker/netguard"'
 DIAL = re.compile(
@@ -139,10 +145,11 @@ def hooked(path):
 
 def load_allow(path):
     allow = {}
+    record_merge.listed(path)  # a list in no class of CLASSES fails closed, present or not (#6441)
     if path.exists():
         # Bytes, so "\r" is not turned into "\n", and printable ASCII only: a hidden break would
         # add an entry (REV-CHK-crlf, #3902).
-        for n, raw in enumerate(path.read_bytes().decode("utf-8", "replace").split("\n"), 1):
+        for n, raw in enumerate(record_merge.read_list(path).split("\n"), 1):
             bad = [c for c in raw if not " " <= c <= "~"]
             if bad:
                 raise SystemExit(f"{path}:{n}: character {bad[0]!r} outside printable ASCII")

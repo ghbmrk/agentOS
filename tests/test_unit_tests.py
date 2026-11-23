@@ -5,6 +5,7 @@ written path or a bound address (tests/clash_audit.py, CI-par-clash).
 REQ: CI-PATHS
 """
 import io
+import json
 import os
 import pathlib
 import pwd
@@ -1484,8 +1485,144 @@ class ClashTest(unittest.TestCase):
         step = step[step.index("\n      - "):][1:]
         step = step[:step.index("\n      - ")].splitlines()
         self.assertEqual(step[1], "        if: steps.scope.outputs.records != 'true'")
-        self.assertEqual(step[-1], '        run: sudo -E env "PATH=$PATH" AGENTOS_REQUIRE_UID_BOUNDARY=1 python -m unittest '
-                                   'tests.test_unit_tests -v')
+        # checks runs no other unit tests (CI-checks-under-45), so the step installs what the test runs and
+        # gives the modules' users search permission down to the worktree, as the unit-tests step does.
+        self.assertEqual(step[step.index("        run: |"):], [
+            "        run: |",
+            '          pkgs=$(for t in strace:strace setfacl:acl; do command -v "${t%%:*}" >/dev/null || echo "${t#*:}"; done)',
+            '          [ -z "$pkgs" ] || { sudo apt-get update -q && sudo apt-get install -y -q $pkgs; }',
+            '          d="$GITHUB_WORKSPACE"; while [ "$d" != / ]; do sudo chmod o+x "$d"; d=$(dirname "$d"); done',
+            '          sudo -E env "PATH=$PATH" AGENTOS_REQUIRE_UID_BOUNDARY=1 python -m unittest tests.test_unit_tests -v'])
+
+
+class ShardTest(unittest.TestCase):
+    """CI-checks-under-45 (#6464): ci.yml runs the modules across shards, and checks judges them as one run."""
+
+    NAMES = ["test_a", "test_b", "test_c", "test_d", "test_e"]
+
+    def test_every_module_is_on_exactly_one_shard(self):
+        names = unit_tests.modules()
+        for n in range(1, 5):
+            with self.subTest(shards=n):
+                parts = [unit_tests.shard(names, n, i) for i in range(n)]
+                self.assertEqual(sorted(m for p in parts for m in p), names)
+                self.assertTrue(all(parts), parts)
+        for bad in ((2, 2), (2, -1), (0, 0)):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                unit_tests.shard(names, *bad)
+
+    def test_the_longest_modules_go_to_the_lightest_shard(self):
+        weights = {"test_a": 200, "test_b": 60, "test_c": 50, "test_d": 10}
+        with mock.patch.dict(unit_tests.SECONDS, weights, clear=True):
+            self.assertEqual([unit_tests.shard(self.NAMES, 2, i) for i in range(2)],
+                             [["test_a"], ["test_b", "test_c", "test_d", "test_e"]])
+            # An unmeasured module weighs 1 and lands on the lighter shard; it is never dropped.
+            self.assertEqual(unit_tests.shard(self.NAMES + ["test_new"], 2, 1),
+                             ["test_b", "test_c", "test_d", "test_e", "test_new"])
+
+    def test_ci_runs_every_shard_of_one_count(self):
+        ci = (unit_tests.ROOT / ".github/workflows/ci.yml").read_text()
+        job = ci[ci.index("\n  unit-tests:\n"):ci.index("\n  checks:\n")]
+        shards = re.findall(r"\n        shard: \[([0-9, ]+)\] # = range of unit_tests.py's --shards below\n", job)
+        n = re.findall(r'python tools/unit_tests.py "\$RUNNER_TEMP/reads" --shards (\d+) --index "\$SHARD"\n', job)
+        self.assertEqual(len(shards), 1)
+        self.assertEqual(len(n), 1)
+        self.assertEqual([int(i) for i in shards[0].split(",")], list(range(int(n[0]))))
+        self.assertIn("\n          SHARD: ${{ matrix.shard }}\n", job)
+        self.assertIn("\n      fail-fast: false\n", job)
+
+    def write(self, d, index, shards=2, results=None, jobs=4, lanes=(), name=None):
+        results = results if results is not None else {m: [0, 10.0, ""] for m in unit_tests.shard(self.NAMES, shards, index)}
+        pathlib.Path(d, name or f"shard-{index}.json").write_text(json.dumps(
+            {"shards": shards, "index": index, "jobs": jobs, "wall": 20.0 + index, "results": results,
+             "lanes": list(lanes)}))
+
+    def combine(self, d):
+        out = []
+        root = pathlib.Path(d, "root")
+        (root / "tests").mkdir(parents=True, exist_ok=True)
+        for m in self.NAMES:
+            (root / "tests" / f"{m}.py").write_text("")
+        with mock.patch.dict(unit_tests.SECONDS, {}, clear=True):
+            rc = unit_tests.combine(d, out.append, root=root)
+        return rc, "".join(out)
+
+    def test_combine_passes_only_every_shard_once_with_its_own_modules(self):
+        with mock.patch.dict(unit_tests.SECONDS, {}, clear=True):
+            parts = [unit_tests.shard(self.NAMES, 2, i) for i in range(2)]
+        cases = {
+            "every shard": (lambda d: [self.write(d, 0), self.write(d, 1)], 0, "5"),
+            "a shard missing": (lambda d: self.write(d, 0), 1, "shards [0] reported; want each of 0..1 once"),
+            "no shard": (lambda d: None, 1, "files name no shard counts"),
+            "two counts": (lambda d: [self.write(d, 0), self.write(d, 1, shards=3)], 1, "shard counts; want one"),
+            "one index twice": (lambda d: [self.write(d, 0), self.write(d, 0, name="shard-1.json")], 1,
+                                "shard-1.json holds shard 0"),
+            "a module on no shard": (lambda d: [self.write(d, 0), self.write(d, 1, results={
+                m: [0, 1.0, ""] for m in parts[1][1:]})], 1, "and not ['%s']" % parts[1][0]),
+            "a module on two shards": (lambda d: [self.write(d, 0), self.write(d, 1, results={
+                m: [0, 1.0, ""] for m in parts[1] + parts[0][:1]})], 1, "ran ['%s'] beyond" % parts[0][0]),
+            "a failed module": (lambda d: [self.write(d, 0), self.write(d, 1, results={
+                m: [1 if m == parts[1][0] else 0, 1.0, ""] for m in parts[1]})], 1, "::error::%s failed" % parts[1][0]),
+            "not a shard's file": (lambda d: [self.write(d, 0), self.write(d, 1),
+                                              pathlib.Path(d, "shard-2.json").write_text("{")], 1, "shard-2.json is not"),
+        }
+        for name, (make, rc, said) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                make(d)
+                got, out = self.combine(d)
+                self.assertEqual(got, rc, out)
+                self.assertIn(said, out)
+                self.assertEqual("::error::" in out, bool(rc), out)
+
+    def test_combine_holds_every_module_to_the_one_long_pole_line(self):
+        # The same line as one runner's run: total over one runner's jobs. 4 jobs, 5 modules, 100 s in
+        # all: ideal 25 s, so a 61 s module (over FLOOR and 1.25 times it) fails, wherever its shard is.
+        with mock.patch.dict(unit_tests.SECONDS, {}, clear=True):
+            parts = [unit_tests.shard(self.NAMES, 2, i) for i in range(2)]
+        for pole, rc in ((61.0, 1), (31.0, 0)):
+            rest = (100 - pole) / 4
+            with self.subTest(pole=pole), tempfile.TemporaryDirectory() as d:
+                for i in range(2):
+                    self.write(d, i, results={m: [0, pole if m == parts[1][0] else rest, ""] for m in parts[i]},
+                               lanes=[["w0", m] for m in parts[i]])
+                got, out = self.combine(d)
+                self.assertEqual(got, rc, out)
+                self.assertEqual("::error::%s took" % parts[1][0] in out, bool(rc), out)
+                self.assertIn("100s of tests over 4 jobs: 25s ideal, 21s wall\n", out)
+                self.assertIn("shard 0: 20s wall\nshard 1: 21s wall\nthe slowest shard is shard 1\n", out)
+                self.assertNotIn("::group::", out)  # each shard printed its modules' output already
+
+    def test_a_shard_runs_only_its_modules_writes_its_results_and_leaves_the_pole_to_combine(self):
+        names = unit_tests.modules()
+        mine = unit_tests.shard(names, 2, 1)
+        ran = []
+
+        def run(names, trace_dir, jobs, lanes):
+            ran.extend(names)
+            lanes.extend(("w0", m) for m in names)
+            # One module far over the long-pole line: a shard does not judge it.
+            return {m: (0, 1000.0 if m == names[0] else 1.0, f"{m} out\n") for m in names}
+        out, report = io.StringIO(), unit_tests.report
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(unit_tests, "prepare") as prep, \
+                mock.patch.object(unit_tests, "run", run), \
+                mock.patch.object(unit_tests, "report", lambda *a, **k: report(*a, out.write, **k)):
+            trace = pathlib.Path(d, "reads")
+            trace.mkdir()  # prepare() makes it
+            self.assertEqual(unit_tests.main([str(trace), "--shards", "2", "--index", "1", "--jobs", "4"]), 0,
+                             out.getvalue())
+            prep.assert_called_once_with(mine, str(trace))
+            self.assertEqual(sorted(ran), mine)
+            data = json.loads(pathlib.Path(trace, "shard-1.json").read_text())
+            self.assertEqual((data["shards"], data["index"], data["jobs"]), (2, 1, 4))
+            self.assertEqual(sorted(data["results"]), mine)
+            self.assertEqual(data["results"][mine[0]][2], f"{mine[0]} out\n")
+            self.assertIn(f"::group::{mine[0]} (ok, 1000s)", out.getvalue())
+            self.assertNotIn("::error::", out.getvalue())
+
+    def test_shards_and_index_go_together(self):
+        for argv in (["d", "--shards", "2"], ["d", "--index", "0"], ["d", "--shards", "2", "--index", "2"]):
+            with self.subTest(argv=argv), mock.patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+                unit_tests.main(argv)
 
 
 if __name__ == "__main__":

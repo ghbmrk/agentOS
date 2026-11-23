@@ -82,6 +82,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -434,6 +435,9 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 		// #4494 Security 2 and 3: a substitution hides what a wrapper runs.
 		"a specifier in a program":   {"image/mkosi/agentos-x@.service", "[Service]\nExecStart=/usr/lib/agentos/agentos-%i\n", `% specifier`},
 		"a specifier in an argument": {"image/mkosi/agentos-x@.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-%i\n", `% specifier`},
+		// The refusal tells a builder a template's command ignores its
+		// instance name (#6033 item 3).
+		"a template's instance name": {"image/mkosi/agentos-x@.service", "[Service]\nExecStart=/usr/lib/agentos/agentos-x %i\n", `no command of ours names one, so a template enabled as instances ignores its instance name; drop the specifier and put per-instance settings in an agentos-x@<instance>.service.d drop-in`},
 		"a variable a wrapper runs":  {"image/mkosi/agentos-side.service", "[Service]\nEnvironment=P=/usr/lib/agentos/agentos-side\nExecStart=/usr/lib/agentos/with-uids ${P}\n", `holds a $ substitution`},
 		"a bare $ variable":          {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids $P\n", `holds a $ substitution`},
 		"a CR":                       {"image/mkosi/agentos-side.service", "[Service]\nUser=agentos-side\rExecStart=/usr/lib/agentos/agentos-side\n", `byte 0xd`},
@@ -466,6 +470,22 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 			files[c.path] = c.text
 			if bins, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("got %q, %v, want a refusal with %q", bins, err, c.want)
+			}
+		})
+	}
+	// A unit that is no template has no instance name to ignore: its
+	// specifier refusal names only the step (#6504 item 1). A leading @
+	// makes no template either: systemd needs a prefix before it.
+	for _, unit := range []string{"image/mkosi/agentos-h.service", "image/mkosi/agentos-h.socket", "image/mkosi/@agentos-h.service"} {
+		t.Run("refuses a specifier in "+path.Base(unit)+" without the template clause", func(t *testing.T) {
+			files := clone(files)
+			files[unit] = "[Service]\nExecStart=/usr/lib/agentos/agentos-h %H\n"
+			if strings.HasSuffix(unit, ".socket") {
+				files[unit] = "[Socket]\nExecStartPre=/usr/lib/agentos/agentos-h %H\n"
+			}
+			_, err := rootBinaries(fakeRepo(t, files))
+			if err == nil || !strings.Contains(err.Error(), `holds a % specifier, whose value the reader cannot see; drop the specifier`) || strings.Contains(err.Error(), "template") {
+				t.Fatalf("got %v, want the specifier refused with its step and no template clause", err)
 			}
 		})
 	}
@@ -1986,6 +2006,39 @@ var execUnits = map[string]bool{".service": true, ".socket": true}
 // settings, which swapon runs as root with (#4718 item 1).
 var unitTypes = map[string]bool{".service": true, ".socket": true, ".mount": true, ".swap": true}
 
+// isDependencyDir reports whether dir is a unit's dependency directory
+// (systemd.unit(5) ".wants/, .requires/, .upholds/"): systemd reads each
+// entry there by name only.
+func isDependencyDir(dir string) bool {
+	for _, s := range []string{".wants", ".requires", ".upholds"} {
+		if t, ok := strings.CutSuffix(dir, s); ok && allUnitTypes[path.Ext(t)] {
+			return true
+		}
+	}
+	return false
+}
+
+// allUnitTypes are every unit type systemd loads (systemd.unit(5)), whose
+// units may own dependency directories.
+var allUnitTypes = map[string]bool{".service": true, ".socket": true, ".device": true, ".mount": true, ".automount": true, ".swap": true, ".target": true, ".path": true, ".timer": true, ".slice": true, ".scope": true}
+
+// dependencyStep is the fix a refused dependency entry of the given name
+// is told, file when it is a regular file. An entry of a type no link may
+// name stays refused whatever it names, so it can only be dropped.
+func dependencyStep(name string, file bool) string {
+	if !linkTypes[path.Ext(name)] {
+		return "drop the entry"
+	}
+	step := "make the entry a link to ../" + name
+	if file {
+		step = "replace the file with a link to ../" + name
+	}
+	if tmpl := templateOf(name); tmpl != "" {
+		step += " or ../" + tmpl
+	}
+	return step + ", ship that unit in an overlay of every build holding the entry (or move the entry to the overlay that ships it), or drop the entry"
+}
+
 // isDropinDir reports whether dir names a drop-in directory of a unitTypes
 // type: a unit's or prefix's (x.service.d, agentos-.socket.d) or the
 // type's own (service.d).
@@ -2506,8 +2559,7 @@ func envFileLines(name, text string) error {
 // user manager's included, and ManagerEnvironment= its generators, so
 // each is held as a root unit's Environment= (#4718 items 2 and 7).
 func managerEnv(root, f string) error {
-	rel, _ := filepath.Rel(root, f)
-	rel = filepath.ToSlash(rel)
+	rel := relTo(root, f)
 	b, err := os.ReadFile(f)
 	if err != nil {
 		return err
@@ -2550,8 +2602,8 @@ func shippedEnv(root string, files []string) envLookup {
 	}
 	return func(from, p string) (map[string]string, error) {
 		roots := allOverlays()
-		if rel, err := filepath.Rel(root, from); err == nil && !strings.HasPrefix(filepath.ToSlash(rel), "../") {
-			roots = overlaysOf(filepath.ToSlash(rel))
+		if rel := relTo(root, from); rel != "" && !strings.HasPrefix(rel, "../") {
+			roots = imageOf(rel).roots()
 		}
 		out := map[string]string{}
 		for _, r := range roots {
@@ -2577,55 +2629,66 @@ func shippedEnv(root string, files []string) envLookup {
 	}
 }
 
-// imageOverlays are image/'s images, by the directory that holds each, and
-// the overlay roots whose trees that image's build copies to /: mkosi's
-// extra trees and the camnode boards' overlays. TestImageOverlaysAreListed
-// fails on an overlay directory under image/ that is not listed here.
-var imageOverlays = []struct {
-	image string
-	roots []string
-}{
-	{"image/enforcer/", []string{"image/enforcer/mkosi/mkosi.extra"}},
-	{"image/camnode/", []string{"image/camnode/external/board/common/overlay", "image/camnode/external/board/cm4/overlay", "image/camnode/external/board/qemu/overlay"}},
-	{"image/mkosi/", []string{"image/mkosi/mkosi.extra"}},
+// overlayImage is one of image/'s images, by the directory that holds it,
+// and the merges its builds make: each the overlay roots one build copies
+// to /, in order, a later one's copy winning.
+type overlayImage struct {
+	dir    string
+	merges [][]string
 }
 
-// imageOf is the directory of the listed image holding rel, or "".
-func imageOf(rel string) string {
-	for _, im := range imageOverlays {
-		if strings.HasPrefix(rel, im.image) {
-			return im.image
-		}
-	}
-	return ""
+// imageOverlays are image/'s images: mkosi's extra trees, and camnode's
+// common overlay merged with each board's (BR2_ROOTFS_OVERLAY in
+// external/configs; cm4 and qemu are separate builds, #6033 item 2).
+// TestImageOverlaysAreListed fails on an overlay directory under image/ or
+// a camnode merge that is not listed here.
+var imageOverlays = []overlayImage{
+	{"image/enforcer/", [][]string{{"image/enforcer/mkosi/mkosi.extra"}}},
+	{"image/camnode/", [][]string{
+		{"image/camnode/external/board/common/overlay", "image/camnode/external/board/cm4/overlay"},
+		{"image/camnode/external/board/common/overlay", "image/camnode/external/board/qemu/overlay"},
+	}},
+	{"image/mkosi/", [][]string{{"image/mkosi/mkosi.extra"}}},
 }
 
-// instanceLink is an overlay link (rel) of an instance (name) to its
-// template.
-type instanceLink struct{ rel, name, template string }
-
-// relTo is p relative to root, with forward slashes.
-func relTo(root, p string) string {
-	rel, _ := filepath.Rel(root, p)
-	return filepath.ToSlash(rel)
-}
-
-// overlaysOf is the overlay roots of the image holding rel (a path relative
-// to the repository), or none.
-func overlaysOf(rel string) []string {
-	for _, im := range imageOverlays {
-		if strings.HasPrefix(rel, im.image) {
-			return im.roots
+// imageOf is the listed image holding rel (a path relative to the
+// repository), or nil.
+func imageOf(rel string) *overlayImage {
+	for i := range imageOverlays {
+		if strings.HasPrefix(rel, imageOverlays[i].dir) {
+			return &imageOverlays[i]
 		}
 	}
 	return nil
 }
 
+// roots is every overlay root of the image, each once, or none for nil.
+func (im *overlayImage) roots() []string {
+	var out []string
+	if im == nil {
+		return nil
+	}
+	for _, m := range im.merges {
+		for _, r := range m {
+			if !slices.Contains(out, r) {
+				out = append(out, r)
+			}
+		}
+	}
+	return out
+}
+
+// relTo is p relative to root, with forward slashes, or "" when it has none.
+func relTo(root, p string) string {
+	rel, _ := filepath.Rel(root, p)
+	return filepath.ToSlash(rel)
+}
+
 // allOverlays is every listed overlay root.
 func allOverlays() []string {
 	var out []string
-	for _, im := range imageOverlays {
-		out = append(out, im.roots...)
+	for i := range imageOverlays {
+		out = append(out, imageOverlays[i].roots()...)
 	}
 	return out
 }
@@ -2687,8 +2750,8 @@ func unitGrants(root string, settings []envLine, asUser bool) ([]grant, error) {
 		if base == "" {
 			continue
 		}
-		rel, _ := filepath.Rel(root, l.file)
-		where := fmt.Sprintf("%s: %s=%s", filepath.ToSlash(rel), l.key, l.value)
+		rel := relTo(root, l.file)
+		where := fmt.Sprintf("%s: %s=%s", rel, l.key, l.value)
 		how := open[l.key]
 		if asUser && l.key != "ConfigurationDirectory" {
 			how = "the unit's user owns"
@@ -2746,7 +2809,7 @@ func brokerUnits(root string, units map[string]string) error {
 func rootBinaries(root string) ([]string, error) {
 	units := map[string]string{}     // unit file path -> name
 	dropins := map[string][]string{} // drop-in directory name -> its .conf paths
-	var instances []instanceLink     // overlay links of an instance to its template
+	var instances []string           // overlay links of an instance to its template
 	var fstabs, confs, files []string
 	err := filepath.WalkDir(filepath.Join(root, "image"), func(p string, d os.DirEntry, err error) error {
 		dir := filepath.Base(filepath.Dir(p))
@@ -2762,17 +2825,26 @@ func rootBinaries(root string) ([]string, error) {
 			// WalkDir does not descend a link; systemd and the image
 			// build do (#4718 item 3). linkWhy says which links are
 			// read as the file they name; every other link is refused.
-			rel, _ := filepath.Rel(root, p)
-			return fmt.Errorf("%s: %s; ship the file itself", filepath.ToSlash(rel), linkWhy(root, p))
+			// A dependency entry is started by its name, so a file in its
+			// place is no fix (#6493 UX 1).
+			step := "ship the file itself"
+			if isDependencyDir(dir) {
+				step = dependencyStep(d.Name(), false)
+			}
+			return fmt.Errorf("%s: %s; %s", relTo(root, p), linkWhy(root, p), step)
 		case d.Type()&os.ModeSymlink != 0 && overlayRoot(relTo(root, p)) != "":
 			// An overlay link is read through every overlay's copy at its
 			// target's path (linkWhy): a copy of its own name is read as a
 			// file, and a template's under each instance linked to it.
-			rel := relTo(root, p)
 			if t, _ := os.Readlink(p); t != "../"+d.Name() {
-				instances = append(instances, instanceLink{rel, d.Name(), path.Base(t)})
+				instances = append(instances, relTo(root, p))
 			}
 			return nil
+		case d.Type()&os.ModeSymlink == 0 && isDependencyDir(dir):
+			// systemd reads only the entry's name and loads the unit of
+			// that name from its search path, so a file here is not what
+			// runs (#6493 UX 4).
+			return fmt.Errorf("%s: a regular file in a dependency directory, where systemd reads only the entry's name and starts the unit of that name from its search path, not this file; %s", relTo(root, p), dependencyStep(d.Name(), true))
 		case isManagerConf(p):
 			confs = append(confs, p)
 		case unitTypes[filepath.Ext(p)]:
@@ -2849,20 +2921,36 @@ func rootBinaries(root string) ([]string, error) {
 			return nil, err
 		}
 	}
-	// Each overlay copy of a template, in the image of a link to it, is
-	// also read as each instance linked to it, with that instance's
-	// drop-ins (#6022 item 1).
-	for _, l := range instances {
+	// Each copy of a template in an image is also read as each instance
+	// that image names, with that instance's drop-ins: one an overlay link
+	// enables (#6022 item 1), and one an instance drop-in directory
+	// extends, whatever starts it (a .timer's Unit=, a Wants=, a socket's
+	// instance; #6033 item 1).
+	type instance struct {
+		im   *overlayImage
+		name string
+	}
+	named := map[instance]bool{}
+	for _, rel := range instances {
+		named[instance{imageOf(rel), path.Base(rel)}] = true
+	}
+	for dir, confs := range dropins {
+		for _, f := range confs {
+			if n := strings.TrimSuffix(dir, ".d"); templateOf(n) != "" && imageOf(relTo(root, f)) != nil {
+				named[instance{imageOf(relTo(root, f)), n}] = true
+			}
+		}
+	}
+	for in := range named {
 		for p, name := range units {
-			rel := relTo(root, p)
-			if name != l.template || overlayRoot(rel) == "" || imageOf(rel) != imageOf(l.rel) {
+			if name != templateOf(in.name) || imageOf(relTo(root, p)) != in.im {
 				continue
 			}
 			paths := []string{p}
-			for _, dir := range dropinDirs(l.name) {
+			for _, dir := range dropinDirs(in.name) {
 				paths = append(paths, dropins[dir]...)
 			}
-			if err := c.unit(l.name, paths, false, nil); err != nil {
+			if err := c.unit(in.name, paths, false, nil); err != nil {
 				return nil, err
 			}
 		}
@@ -3002,39 +3090,39 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 		if err != nil {
 			return err
 		}
-		rel, _ := filepath.Rel(c.root, f)
+		rel := relTo(c.root, f)
 		ul, err := unitLines(string(b))
 		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %v", filepath.ToSlash(rel), err))
+			errs = append(errs, fmt.Errorf("%s: %v", rel, err))
 			continue
 		}
 		pkgFile = pkgFile || trusted[f]
 		for _, line := range ul {
 			k, v := line.key, line.value
 			if ours == "" && line.section == section && !trusted[f] {
-				ours = filepath.ToSlash(rel) + ": " + k + "=" + v
+				ours = rel + ": " + k + "=" + v
 			}
 			if unitOurs == "" && line.section == "Unit" && !trusted[f] && !orderKeys[k] {
-				unitOurs = filepath.ToSlash(rel) + ": " + k + "=" + v
+				unitOurs = rel + ": " + k + "=" + v
 			}
 			if edgeOurs == "" && line.section == "Unit" && !trusted[f] && !orderKeys[k] && c.namesHeld(k, v) != "" {
-				edgeOurs = filepath.ToSlash(rel) + ": " + k + "=" + v
+				edgeOurs = rel + ": " + k + "=" + v
 			}
 			if takes == "" && section == "Service" && line.section == section && !trusted[f] && k == "Sockets" {
-				takes = filepath.ToSlash(rel) + ": " + k + "=" + v
+				takes = rel + ": " + k + "=" + v
 			}
 			if listen == "" && section == "Socket" && line.section == section && !trusted[f] {
 				words, plain := endpointWords(k, v)
 				if !plain {
-					listen = filepath.ToSlash(rel) + ": " + k + "=" + v + ": a listen path of ours is quoted or escaped, which systemd reads and this does not; write it plainly"
+					listen = rel + ": " + k + "=" + v + ": a listen path of ours is quoted or escaped, which systemd reads and this does not; write it plainly"
 				}
 				for _, w := range words {
 					p, why := c.onPkgListen(k, w)
 					if why == "" && strings.HasPrefix(p, "/") {
-						c.endpoints = append(c.endpoints, grant{filepath.ToSlash(rel) + ": " + k + "=" + v, k, p})
+						c.endpoints = append(c.endpoints, grant{rel + ": " + k + "=" + v, k, p})
 					}
 					if listen == "" && why != "" {
-						listen = filepath.ToSlash(rel) + ": " + k + "=" + v + ": a listen path of ours " + why
+						listen = rel + ": " + k + "=" + v + ": a listen path of ours " + why
 					}
 				}
 			}
@@ -3043,10 +3131,10 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 				if k == "PIDFile" {
 					fix = "; drop PIDFile= and use Type=notify or Type=simple, which need no PID file"
 				}
-				errs = append(errs, fmt.Errorf("%s: %s=%s: the manager opens this path as root whatever the unit's User=, so it is an absolute path in rootTrees with no .., quote, escape or %% specifier (#4718)%s", filepath.ToSlash(rel), k, v, fix))
+				errs = append(errs, fmt.Errorf("%s: %s=%s: the manager opens this path as root whatever the unit's User=, so it is an absolute path in rootTrees with no .., quote, escape or %% specifier (#4718)%s", rel, k, v, fix))
 			}
 			if section == "Socket" && line.section == section && !trusted[f] && k == "DirectoryMode" && openMode(v) {
-				errs = append(errs, fmt.Errorf("%s: %s=%s: a directory mode of ours lets another uid write, or is not a plain octal mode; PID 1 makes a listen path's missing parents with it, and another uid could plant a package's path below them (#5620 R-a)", filepath.ToSlash(rel), k, v))
+				errs = append(errs, fmt.Errorf("%s: %s=%s: a directory mode of ours lets another uid write, or is not a plain octal mode; PID 1 makes a listen path's missing parents with it, and another uid could plant a package's path below them (#5620 R-a)", rel, k, v))
 			}
 			if line.section == section && !trusted[f] {
 				userOurs = userOurs || owners[k]
@@ -3055,8 +3143,8 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 					modeOurs[key] = true
 				}
 				if reread == "" && (owners[k] || mode && dirBases[key] != "") {
-					rel, _ := filepath.Rel(c.root, f)
-					reread = filepath.ToSlash(rel) + ": " + k + "=" + v
+					rel := relTo(c.root, f)
+					reread = rel + ": " + k + "=" + v
 				}
 			}
 			switch {
@@ -3146,10 +3234,10 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 			}
 			continue
 		}
-		rel, _ := filepath.Rel(c.root, l.file)
+		rel := relTo(c.root, l.file)
 		cmds, err := execWords(l.value)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %s=%s: %v", filepath.ToSlash(rel), l.key, l.value, err))
+			errs = append(errs, fmt.Errorf("%s: %s=%s: %v", rel, l.key, l.value, err))
 			continue
 		}
 		for _, words := range cmds {
@@ -3165,12 +3253,12 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 			// no $ substitution either, and no word holds a % specifier
 			// (agentos-%i in a template); $$ and %% are literal.
 			if strings.Contains(prefix, "|") || !strings.HasPrefix(prog, "/") || substitutes(prog, '$') || path.Clean(prog) != prog {
-				errs = append(errs, fmt.Errorf("%s: %s=%s: want a program that is a plain absolute path, with no | prefix, %% or $", filepath.ToSlash(rel), l.key, l.value))
+				errs = append(errs, fmt.Errorf("%s: %s=%s: want a program that is a plain absolute path, with no | prefix, %% or $", rel, l.key, l.value))
 				continue
 			}
 			for _, w := range words {
 				if substitutes(w, '%') {
-					errs = append(errs, fmt.Errorf("%s: %s=%s: word %q holds a %% specifier, whose value the reader cannot see", filepath.ToSlash(rel), l.key, l.value, w))
+					errs = append(errs, fmt.Errorf("%s: %s=%s: word %q holds a %% specifier, whose value the reader cannot see; %s", rel, l.key, l.value, w, specifierStep(name)))
 					break
 				}
 			}
@@ -3184,7 +3272,7 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 			// ${X} of unitVars (#4494).
 			for i, w := range words[1:] {
 				if !allowedVar(name, words, i+1, env) && substitutes(w, '$') {
-					errs = append(errs, fmt.Errorf("%s: %s=%s: word %q holds a $ substitution, whose value a wrapper or shell may run; only a whole-word ${X} of unitVars is read", filepath.ToSlash(rel), l.key, l.value, w))
+					errs = append(errs, fmt.Errorf("%s: %s=%s: word %q holds a $ substitution, whose value a wrapper or shell may run; only a whole-word ${X} of unitVars is read", rel, l.key, l.value, w))
 					break
 				}
 			}
@@ -3239,8 +3327,8 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 		// opens these as root before the command drops to it, following
 		// a link, so they are held as a root unit's are.
 		for _, l := range append(settings, env...) {
-			rel, _ := filepath.Rel(c.root, l.file)
-			where := filepath.ToSlash(rel) + ": " + l.key + "=" + l.value
+			rel := relTo(c.root, l.file)
+			where := rel + ": " + l.key + "=" + l.value
 			if managerOpens[l.key] {
 				if err := rootPathSetting(l.key, l.value); err != nil {
 					errs = append(errs, fmt.Errorf("%s: the manager opens this path as root whatever the unit's User=: %v", where, err))
@@ -3350,8 +3438,7 @@ var managerPaths = map[string]bool{"PIDFile": true, "USBFunctionDescriptors": tr
 // root to rootPathSetting, and what an EnvironmentFile= it names holds to
 // envFileLines (#4699).
 func (c *unitCheck) rootSetting(l envLine) error {
-	rel, _ := filepath.Rel(c.root, l.file)
-	rel = filepath.ToSlash(rel)
+	rel := relTo(c.root, l.file)
 	if err := rootPathSetting(l.key, l.value); err != nil {
 		return fmt.Errorf("%s: %s=%s: %v", rel, l.key, l.value, err)
 	}
@@ -3395,8 +3482,7 @@ func (c *unitCheck) mountUnit(name string, paths []string, alone bool, trusted m
 		if trusted[f] {
 			continue
 		}
-		rel, _ := filepath.Rel(c.root, f)
-		rel = filepath.ToSlash(rel)
+		rel := relTo(c.root, f)
 		b, err := os.ReadFile(f)
 		if err != nil {
 			return err
@@ -3479,6 +3565,22 @@ func buildTarget(t string) bool {
 // or a .timer's Unit= is as unread in a file as through a link.
 var linkTypes = map[string]bool{".service": true, ".socket": true, ".mount": true, ".swap": true, ".timer": true, ".target": true, ".path": true}
 
+// linkTypeList names linkTypes for a refusal.
+const linkTypeList = ".path, .service, .socket, .swap, .target, .timer or .mount"
+
+// specifierStep is the fix a refused % specifier in the unit name is
+// told. Only a template (pre@.type) or an instance has an instance name to
+// ignore, and its per-instance settings go in the instance's drop-in.
+func specifierStep(name string) string {
+	ext := path.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	at := strings.Index(base, "@")
+	if at <= 0 {
+		return "drop the specifier"
+	}
+	return "no command of ours names one, so a template enabled as instances ignores its instance name; drop the specifier and put per-instance settings in an " + base[:at+1] + "<instance>" + ext + ".d drop-in"
+}
+
 // templateOf is the template an instance name (pre@inst.type) is made
 // from (pre@.type), or "" for any other name.
 func templateOf(name string) string {
@@ -3511,11 +3613,10 @@ func templateOf(name string) string {
 // image/ outside every overlay. Neither kind may name a directory, another link or no
 // file, so the result never depends on the runner's tree.
 func linkWhy(root, p string) string {
-	from, err := filepath.Rel(root, p)
-	if err != nil {
+	from := relTo(root, p)
+	if from == "" {
 		return "a link the scan cannot place"
 	}
-	from = filepath.ToSlash(from)
 	r := overlayRoot(from)
 	t, err := os.Readlink(p)
 	if err != nil || !linkTarget.MatchString(t) && (r != "" || !buildTarget(t)) || t == ".." || t == "." || path.Base(t) == ".." || path.Base(t) == "." {
@@ -3526,7 +3627,14 @@ func linkWhy(root, p string) string {
 	tmpl := templateOf(name)
 	switch {
 	case r != "" && (t != "../"+name && (tmpl == "" || t != "../"+tmpl) || !linkTypes[path.Ext(name)]):
-		return "a link in an overlay other than a unit linked to ../" + name + " or an instance to ../<its template> (the image may take the target from another overlay, and the scan reads every copy only of a unit of the link's own name or template)"
+		why := "a link in an overlay other than a unit linked to ../" + name + " or an instance to ../<its template>"
+		if tmpl != "" && linkTypes[path.Ext(name)] {
+			why = "a link in an overlay other than a unit linked to ../" + name + " or to its template ../" + tmpl
+		}
+		if !linkTypes[path.Ext(name)] {
+			why += "; a link may name only a " + linkTypeList + " unit"
+		}
+		return why + " (the image may take the target from another overlay, and the scan reads every copy only of a unit of the link's own name or template)"
 	case r != "" && !strings.HasPrefix(to, r+"/"):
 		return "a link that leaves its overlay " + r
 	case r == "" && (!strings.HasPrefix(to, "image/") || overlayRoot(to) != ""):
@@ -3539,21 +3647,28 @@ func linkWhy(root, p string) string {
 		}
 		return ""
 	}
-	// In the image the target is whichever overlay's copy wins: one must
-	// be a regular file, and none a directory.
-	found := false
-	for _, o := range overlaysOf(from) {
-		st, err := os.Lstat(filepath.Join(root, filepath.FromSlash(o+strings.TrimPrefix(to, r))))
-		switch {
-		case err != nil:
-		case st.IsDir():
-			return why
-		case st.Mode().IsRegular():
-			found = true
+	// In each image built with the link's overlay the target is whichever
+	// of that build's copies wins: one must be a regular file, and none a
+	// directory. A build with none would fall back to a packaged unit of
+	// that name (#6033 item 2).
+	for _, m := range imageOf(from).merges {
+		if !slices.Contains(m, r) {
+			continue
 		}
-	}
-	if !found {
-		return why
+		found := false
+		for _, o := range m {
+			st, err := os.Lstat(filepath.Join(root, filepath.FromSlash(o+strings.TrimPrefix(to, r))))
+			switch {
+			case err != nil:
+			case st.IsDir():
+				return why
+			case st.Mode().IsRegular():
+				found = true
+			}
+		}
+		if !found {
+			return "a link to no file in the image built from " + strings.Join(m, " and ") + ", where systemd would start a packaged unit of that name, if any"
+		}
 	}
 	for _, q := range []string{from, to} {
 		if ip := strings.TrimPrefix(q, r); !rootOwned(ip) {
@@ -3938,8 +4053,11 @@ type unitRecords struct {
 	} `json:"managers"`
 	// Each env file an EnvironmentFile= line of ours names that the tree
 	// holds at boot as a regular file, by the path the line gives.
-	Env  map[string]string `json:"env"`
-	Want string            `json:"want"`
+	Env map[string]string `json:"env"`
+	// Each env file of ours a package's EnvironmentFile= line names (a
+	// conffile a build step changed), as the tree holds it at boot (#6312).
+	PkgEnv map[string]string `json:"pkg_env"`
+	Want   string            `json:"want"`
 }
 
 // builtUnits holds a built root file system's units, as its systemd loads
@@ -4029,6 +4147,19 @@ func builtUnitsWith(recs unitRecords, dir string, env envLookup) error {
 			continue
 		}
 		errs = append(errs, fmt.Errorf("%s: a file of ours hides a package's drop-in, %s, and with it the package's lines", m.Path, m.Hides))
+	}
+	// An env file of ours that a package's unit loads sets that unit's
+	// environment as a line of ours would, whatever the unit's User=, so it
+	// is held to envFileLines as a root unit's is (#6312).
+	envs := make([]string, 0, len(recs.PkgEnv))
+	for p := range recs.PkgEnv {
+		envs = append(envs, p)
+	}
+	sort.Strings(envs)
+	for _, p := range envs {
+		if err := envFileLines(p, recs.PkgEnv[p]); err != nil {
+			errs = append(errs, fmt.Errorf("a package's unit loads %s, a file of ours: %v", p, err))
+		}
 	}
 	if recs.Fstab != nil {
 		f, err := write(recs.Fstab.Path, recs.Fstab.Text)
@@ -4510,8 +4641,7 @@ func mountLines(root string, paths []string, unit string, trusted map[string]boo
 	typed, tmpfs, ourTmpfs, optioned, moded := false, false, false, false, true
 	var where string
 	for _, f := range paths {
-		rel, _ := filepath.Rel(root, f)
-		rel = filepath.ToSlash(rel)
+		rel := relTo(root, f)
 		b, err := os.ReadFile(f)
 		if err != nil {
 			return false, err
@@ -4570,8 +4700,7 @@ func mountLines(root string, paths []string, unit string, trusted map[string]boo
 // fstabLines reads an fstab file as systemd-fstab-generator does, holding
 // each line's type and options to mountLines' rules.
 func fstabLines(root, f string) error {
-	rel, _ := filepath.Rel(root, f)
-	rel = filepath.ToSlash(rel)
+	rel := relTo(root, f)
 	b, err := os.ReadFile(f)
 	if err != nil {
 		return err
@@ -4749,8 +4878,7 @@ func runBinaries(root string, pkgs map[string]string, seen map[string]bool, prog
 			case d.IsDir():
 				return nil
 			}
-			rel, _ := filepath.Rel(root, p)
-			rel = filepath.ToSlash(rel)
+			rel := relTo(root, p)
 			var kind *runKind
 			for i := range runKinds {
 				if runKinds[i].match(rel) {
@@ -5201,13 +5329,10 @@ func dropinDirs(name string) []string {
 	ext := path.Ext(name)
 	base := strings.TrimSuffix(name, ext)
 	dirs := []string{name + ".d"}
-	pre := base
-	if at := strings.Index(base, "@"); at >= 0 {
-		pre = base[:at]
-		if at < len(base)-1 {
-			dirs = append(dirs, base[:at+1]+ext+".d")
-		}
+	if tmpl := templateOf(name); tmpl != "" {
+		dirs = append(dirs, tmpl+".d")
 	}
+	pre, _, _ := strings.Cut(base, "@")
 	for i := len(pre) - 1; i > 0; i-- {
 		if pre[i] == '-' {
 			dirs = append(dirs, pre[:i+1]+ext+".d")
