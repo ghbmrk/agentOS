@@ -51,7 +51,7 @@ func TestCAP8DestroyDescriptionSaysARecreateCannotRestart(t *testing.T) {
 	for _, tl := range (&Tools{}).List() {
 		if tl["name"] == toolDestroy {
 			d, _ := tl["description"].(string)
-			if !strings.Contains(d, "cannot restart from them") || !strings.Contains(d, "worker_diff") {
+			if want := "Stop a worker and free its memory. Its snapshots stay in the broker's custody, but a worker created again under this name cannot restart from them."; d != want {
 				t.Fatalf("destroy description = %q", d)
 			}
 			return
