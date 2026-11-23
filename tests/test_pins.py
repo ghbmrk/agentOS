@@ -293,7 +293,8 @@ class Repository(unittest.TestCase):
         text = git("show", base.stdout.strip() + ":tools/pins.py")
         self.assertEqual(text.returncode, 0, text.stderr)
         head = (ROOT / "tools/pins.py").read_text()
-        self.assertEqual(pins.grown(text.stdout, head), [])
+        same = {f for f in pins.FETCH_NOT_YET if git("diff", "--quiet", base.stdout.strip(), "--", f).returncode == 0}
+        self.assertEqual(pins.grown(text.stdout, head, same), [])
         # The literals read are the lists in force: nothing later in the file adds to them.
         self.assertEqual(pins.owed(head), {"NOT_YET": {f: None for f in pins.NOT_YET},
                                            "FETCH_NOT_YET": {f: v[1] for f, v in pins.FETCH_NOT_YET.items()}})
@@ -333,6 +334,13 @@ class Grown(unittest.TestCase):
                 'FETCH_NOT_YET = {"x.yml": ("#1", 3), "y.sh": ("#1", 1), "z.py": ("#1", 1)}\n')
         self.assertEqual(pins.grown(self.BASE, head), ["FETCH_NOT_YET raises x.yml from 2 to 3", "FETCH_NOT_YET adds z.py",
                                                        "NOT_YET adds c.pins"])
+
+    def test_a_count_rises_only_for_a_file_whose_bytes_are_unchanged(self):
+        head = 'NOT_YET = {"a.pins": "#1", "b.pins": "#1"}\nFETCH_NOT_YET = {"x.yml": ("#1", 5), "y.sh": ("#1", 4)}\n'
+        self.assertEqual(pins.grown(self.BASE, head, {"x.yml"}), ["FETCH_NOT_YET raises y.sh from 1 to 4"])
+        self.assertEqual(pins.grown(self.BASE, head, {"x.yml", "y.sh"}), [])
+        added = 'NOT_YET = {"a.pins": "#1", "b.pins": "#1", "c.pins": "#1"}\nFETCH_NOT_YET = {"z.sh": ("#1", 1)}\n'
+        self.assertEqual(pins.grown(self.BASE, added, {"c.pins", "z.sh"}), ["FETCH_NOT_YET adds z.sh", "NOT_YET adds c.pins"])
 
     def test_a_base_without_counts_still_refuses_a_new_file(self):
         base = 'NOT_YET = {}\nFETCH_NOT_YET = {"x.yml": "#1"}\n'
@@ -489,22 +497,36 @@ class FollowUp2(unittest.TestCase):
                      # L3 on #6630 at 970041e7: `name@version` and corepack count; neither earns credit.
                      "yarn@1.22.22 add x", "npm@10 ci", "corepack enable", "pip@x install --require-hashes -r r.txt",
                      # Security on #6630 at 970041e7: make's `@`, `+` and `-` recipe prefixes hide no name or
-                     # fetcher, and a file-tool credit needs a path argument in text that redefines no command.
+                     # fetcher, and a manager path handed to another command earns no credit.
                      "\t@yarn install", "\t@npm install evil", "\t@pip install foo", "\t+yarn add evil",
                      "\t@-yarn add x", "\t@curl -o x https://h/x", "\t+wget x", 'cp() { "$@"; }\ncp yarn add evil',
                      'cp() { "$@"; }\ntar x "$n/bin/npx"', 'function tar { :; }\ntar x "$n/bin/npx"',
                      'alias tar=x\ntar x "$n/bin/npx"', '. ./lib.sh\ntar x "$n/bin/npx"',
-                     'source lib.sh\ntar x "$n/bin/npx"', "tar x npx", "echo npm", "\t@pi[p] install x", "tar -cf o.tar -Ipi[p] f"]:
+                     'source lib.sh\ntar x "$n/bin/npx"', "tar x npx", "echo npm", "\t@pi[p] install x", "tar -cf o.tar -Ipi[p] f",
+                     # Step back on #6630 at 896bcf5a (L3 and Security): no file-tool credit, since a path given to
+                     # a file tool can be printed into a shell, renamed and run, or run by a redefined tool.
+                     "echo /usr/bin/pip install evil | bash", "echo /n/npx evil | sh",
+                     "echo /usr/bin/npm i evil > s.sh; sh s.sh", "cp /usr/bin/npx ./x && ./x evil",
+                     "mv /n/pip /n/q; /n/q install evil", "tar xOf a.tar /n/npx | sh",
+                     'eval cp\\(\\)\\ \\{\\ \\"\\$@\\"\\;\\ \\}\ncp /usr/bin/yarn add evil',
+                     "cp ./node_modules/.bin/yarn add evil",  # b.sh, run after a.sh's `cp() { "$@"; }` and `export -f cp`
+                     "PATH=./shim:$PATH\ncp ./node_modules/.bin/yarn add evil", "tar 'x' \"$n/bin/npx\""]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 1)
+        # Security 2(b) on #6630: a job's BASH_ENV script can redefine `cp` for every bash run step.
+        self.assertEqual(pins.yaml_sites("jobs:\n  j:\n    env:\n      BASH_ENV: ./ci/fns.sh\n    steps:\n"
+                                         "      - run: cp ./node_modules/.bin/yarn add evil\n"), 1)
+        for text in ['tar x "$n/bin/npx" "$n/bin/npm"', "tar x $n/bin/npx; mv $n/bin/npx q; q evil",
+                     'tar -xJf "$w/n.tar.xz" --strip-components=1 -C usr/local "$n/bin/npm" "$n/bin/npx"']:
+            with self.subTest(text=text):
+                self.assertEqual(pins.text_sites(text), 2)
         for text in ["corepack yarn@1 add x", "corepack pnpm@8 i"]:  # corepack and the manager it runs
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 2)
         for text in ["pip install --require-hashes -r r.txt", "python -m pip install --no-deps --require-hashes \\\n  -r r.txt",
-                     "npm ci --ignore-scripts", "go install x@v1.2.3", "go mod download", 'tar x "$n/bin/npx" "$n/bin/npm"',
+                     "npm ci --ignore-scripts", "go install x@v1.2.3", "go mod download",
                      "pip list", "GOSUMDB=sum.golang.org go get x", "set -o pipefail", "pipx run x", "cat npm.log",
-                     'tar -xJf "$w/n.tar.xz" --strip-components=1 -C usr/local "$n/bin/npm" "$n/bin/npx"',
-                     'pip install --require-hashes -r "$R"', "tar 'x' \"$n/bin/npx\"", "pip show x",
+                     'pip install --require-hashes -r "$R"', "pip show x",
                      "python -m pip install --no-deps --only-binary=:all: --require-hashes -r tests/requirements.txt"]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 0)

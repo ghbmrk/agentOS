@@ -35,7 +35,7 @@ grep -qF "\"holder\": \"node@$NODE_VERSION\", \"copy\": \"openssl@$ossl\"" "$rep
 	{ echo "node $NODE_VERSION bundles OpenSSL $ossl; record it in assurance/vulncheck.json \"bundled\"" >&2; exit 1; }
 
 # OpenClaw, unmodified but for pruning (PLN-5, D-308), with every transitive dependency pinned by
-# the committed lockfile (a clean install checks each package's integrity). Install
+# the committed lockfile (npm ci checks each package's integrity). Install
 # scripts stay off, as in S4 (finding 8).
 cp "$here/package.json" "$here/package-lock.json" opt/openclaw/
 (cd opt/openclaw && PATH="$out/usr/local/bin:$PATH" npm ci --ignore-scripts --no-audit --no-fund --omit=dev \

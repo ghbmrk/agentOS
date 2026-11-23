@@ -38,7 +38,8 @@ CURL = ["curl", "-q", "--proto", "=https", "--proto-redir", "=https", "-fsSL", "
 
 # Pin files not yet in this format, and direct downloads not yet through this reader. Each entry is
 # owed by the release row it names; tests/test_pins.py fails on an entry that no longer exists or
-# that main's copy of this file lacks (`grown`), so this list only shrinks. A pin here is not checked by `live`.
+# that main's copy of this file lacks (`grown`), so this list only shrinks (a count rises only for a file
+# byte-identical to main's, when the reader grew stricter). A pin here is not checked by `live`.
 NOT_YET = {
     "broker/cmd/agentos-infer/llama.pins": "#6515",
     "broker/cmd/agentos-vision/faces.pins": "#6515",
@@ -58,7 +59,7 @@ FETCH_NOT_YET = {
     ".github/workflows/infer-real.yml": ("#6515", 1),
     ".github/workflows/vision-real.yml": ("#6515", 6),
     "guest/codex/build-rootfs.sh": ("#6515", 3),
-    "guest/openclaw/build-rootfs.sh": ("#6515", 2),
+    "guest/openclaw/build-rootfs.sh": ("#6515", 6),
     "image/build.sh": ("#6515", 1),
     "image/camnode/build.sh": ("#6515", 1),
     "image/infer.sh": ("#6515", 1),
@@ -80,7 +81,7 @@ FETCH_EXEMPT = {
                                     ".curlrc; downloads nothing"),
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
     "tests/test_image.py": (1, "a busybox wget shebang as fixture text"),
-    "tests/test_pins.py": (193, "this reader's test cases"),
+    "tests/test_pins.py": (210, "this reader's test cases"),
     "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
@@ -109,7 +110,6 @@ NET_MODULES = ("urllib.request", "urllib3", "requests", "http.client", "httpx", 
 # `pipe`, `pipx` and `npm.log` are not one.
 MANAGER = re.compile(r"(?:-+[A-Za-z]*?)?(pip|npm|npx|pnpx|yarn|pnpm|corepack)(?:pkg)?(?:-?[0-9][0-9.]*|-cli)?(?:\.[cm]?js)?")
 GLOB_NAMES = ("pip", "pip3", "npm", "npx", "pnpx", "yarn", "yarnpkg", "pnpm", "corepack")
-FILE_TOOLS = frozenset(["tar", "cp", "mv", "ln", "rm", "chmod", "chown", "ls", "stat", "test", "[", "echo", "printf"])
 PIP_READ_ONLY = frozenset(["list", "show", "freeze", "check", "hash", "help", "--version"])  # fetch nothing
 PIP_NO_VALUE = frozenset(["--require-hashes", "--no-deps", "-q", "--quiet", "--no-index", "--no-cache-dir",
                           "--disable-pip-version-check", "--user", "-U", "--upgrade", "--no-build-isolation",
@@ -168,29 +168,13 @@ def _pip_hashed(args):
     return True
 
 
-def _tar_runs_nothing(words):
-    """True when every option of the `tar` command in words is one known to run no program: tar runs one
-    through `-I`, `-F`, `--to-command`, `--checkpoint-action` and the like, in a bundled key (`cIf`) too."""
-    i = next(i for i, x in enumerate(words) if x.rsplit("/", 1)[-1] == "tar")
-    opts = words[i + 1:i + 2] + [x for x in words[i + 2:] if x.startswith("-")]  # the first word may be a bare key
-    return all(re.fullmatch(r"-?[xctvzjJfCpkO]+|--strip-components=[0-9]+", x) for x in opts)
-
-
-# A function, alias or sourced file can give a file tool's name another meaning (`cp() { "$@"; }`), so text
-# holding any of these earns no file-tool credit.
-REDEFINES = re.compile(r"\w[\w.:-]*\s*\(\s*\)|\b(?:function|alias|source|enable|BASH_ENV|ENV)\b|(?:^|[;&|({]\s*|\s)\.\s")
-
-
-def _credited(words, i, lead, file_tools=True):
-    """True when the manager word at words[i] is a known-safe form: a path argument (holding `/`) of a file
-    tool where file_tools allows it (`tar x "$n/bin/npx"`), `npm ci` with options only, a read-only pip
-    verb, or a hashed pip install."""
-    name, prev, args = _name(words[i]), words[i - 1] if i else "", words[i + 1:]
+def _credited(words, i):
+    """True when the manager word at words[i] is a known-safe form: `npm ci` with options only, a read-only
+    pip verb, or a hashed pip install. A manager path handed to another command (`tar x "$n/bin/npx"`) earns
+    none: `echo`, `cp`, a function, `BASH_ENV` or a PATH shim can each run it (#6549 step back)."""
+    name, args = _name(words[i]), words[i + 1:]
     if re.search(r"[][*?]", words[i]) or "@" in words[i].rsplit("/", 1)[-1]:
         return False  # a glob may expand to several words; `name@version` runs through corepack
-    if (file_tools and lead in FILE_TOOLS and i and "/" in words[i] and not prev.startswith("-")
-            and (lead != "tar" or _tar_runs_nothing(words))):
-        return True
     if name == "npm":
         return args[:1] == ["ci"] and all(x.startswith("-") for x in args[1:])
     if name == "pip":
@@ -198,7 +182,7 @@ def _credited(words, i, lead, file_tools=True):
     return False
 
 
-def tool_sites(line, credit=True, file_tools=True):
+def tool_sites(line, credit=True):
     """Package-manager fetch sites in one shell line (quotes already removed). Deny by default and fail
     closed: every manager name the broad `WORDS` split finds counts (so `P=pip`, `-mpip`, `{npm,i}` and
     `npx${IFS}x` each count where written), and a site is taken back only for a whole whitespace word that
@@ -212,8 +196,7 @@ def tool_sites(line, credit=True, file_tools=True):
         for cmd in re.split("[" + re.escape(SEPARATORS) + "]", line):
             raw = cmd.split()
             live = raw[:next((i for i, x in enumerate(raw) if x.startswith("#")), len(raw))]
-            lead = next((x for x in live if "=" not in x), "").rsplit("/", 1)[-1]
-            n -= sum(1 for i, x in enumerate(live) if _name(x) and _credited(live, i, lead, file_tools))
+            n -= sum(1 for i, x in enumerate(live) if _name(x) and _credited(live, i))
     return n
 
 
@@ -229,12 +212,11 @@ def text_sites(text):
         else:
             joined.append(line)
         prev = joined[-1]
-    file_tools = not any(REDEFINES.search(x) for x in joined)
     for line in joined:
         credit = not _shifts(line)
         line = re.sub(r"[\"'\\]", "", line)
         n += sum(1 for w in WORDS.split(line) if w.rsplit("/", 1)[-1] in FETCHERS)
-        n += len(NET_TEXT.findall(line)) + tool_sites(line, credit, file_tools)
+        n += len(NET_TEXT.findall(line)) + tool_sites(line, credit)
     return n
 
 
@@ -385,15 +367,17 @@ def owed(text):
     return out
 
 
-def grown(base, head):
-    """Entries of the owed lists in head's text that base's lacks, or whose count rose."""
+def grown(base, head, same=()):
+    """Entries of the owed lists in head's text that base's lacks, or whose count rose. A count may rise
+    only for a file in same, the files whose bytes equal base's copy: the rise then comes from a stricter
+    reader, not a new fetch (#6549), and the reader is a gate file, so the Security accept holds it."""
     b, h = owed(base), owed(head)
     out = []
     for name in sorted(h):
         for f, n in sorted(h[name].items()):
             if f not in b[name]:
                 out.append("%s adds %s" % (name, f))
-            elif n is not None and b[name][f] is not None and n > b[name][f]:
+            elif n is not None and b[name][f] is not None and n > b[name][f] and f not in same:
                 out.append("%s raises %s from %d to %d" % (name, f, b[name][f], n))
     return out
 
