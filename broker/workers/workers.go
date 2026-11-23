@@ -204,7 +204,7 @@ func (t *Tools) List() []map[string]any {
 			"inputSchema": obj(map[string]any{"a": pSnap, "b": pSnap}, "a", "b")},
 		{"name": toolRollback, "description": "Restart a worker from one of its snapshots (or the one it was forked from). This also revives a stopped worker: the broker checkpoints and stops a worker no tool has named for an hour, or whose creator has stopped, and worker_list shows the snapshot to roll back to.",
 			"inputSchema": obj(map[string]any{"name": pName, "snapshot": pSnap}, "name", "snapshot")},
-		{"name": toolDestroy, "description": "Stop a worker and free its memory. Its snapshots stay in the broker's custody.",
+		{"name": toolDestroy, "description": "Stop a worker and free its memory. Its snapshots stay in the broker's custody: worker_diff can still compare them, but a worker created again under this name cannot restart from them.",
 			"inputSchema": obj(map[string]any{"name": pName}, "name")},
 		{"name": toolList, "description": "List your workers: name, state, label, memory and newest snapshot.",
 			"inputSchema": obj(map[string]any{})},
@@ -786,11 +786,15 @@ func (t *Tools) rollback(ctx context.Context, c caller, raw json.RawMessage) (an
 	if err != nil {
 		return nil, err
 	}
-	if _, err := t.snapshot(c, a.Snapshot); err != nil {
+	s, err := t.snapshot(c, a.Snapshot)
+	if err != nil {
 		return nil, err
 	}
 	// Asked again at the restore, as for a fork (STOP-queued-start).
 	if err := t.M.Rollback(vm.WithHold(ctx, t.Stopped), w.ID, a.Snapshot); err != nil {
+		if errors.Is(err, vm.ErrLineage) && s.Machine == w.ID {
+			return nil, errEarlierLife
+		}
 		return nil, startErr(c, toolRollback, a.Name, err)
 	}
 	return map[string]any{"name": a.Name, "snapshot": a.Snapshot}, nil
