@@ -306,7 +306,11 @@ func (c *Channel) itemLine(it Item) string { return c.itemLineAs(it, lineFull) }
 const (
 	lineFull  = iota
 	lineShort // the same fields and notices in fewer words (CH12V-4)
-	lineCount // lineShort, with recipients counted and left to the Wi-Fi page
+	// lineLean is lineShort without the fields CH-12 does not list for a
+	// texted item (Detail, the restart note), pointed to the Wi-Fi page.
+	// It keeps verb, object, recipients, amount, reversibility and every
+	// repeat notice (CH-10, CH-12, OWN-17; L3 on #6625).
+	lineLean
 )
 
 // itemLineAs is itemLine in form lv.
@@ -314,7 +318,8 @@ func (c *Channel) itemLineAs(it Item, lv int) string {
 	s := it.lineAs(lv)
 	short := lv >= lineShort
 	at := func(t time.Time) string { return t.In(c.cfg.Location).Format("15:04 Jan 2") }
-	if !it.Asked.IsZero() {
+	lean := lv >= lineLean && (it.Detail != "" || !it.Asked.IsZero())
+	if !it.Asked.IsZero() && lv < lineLean {
 		if short {
 			s += ", asked " + it.Asked.In(c.cfg.Location).Format("15:04") + " before a restart"
 		} else {
@@ -336,6 +341,9 @@ func (c *Channel) itemLineAs(it Item, lv int) string {
 		s += ", may go twice, tried " + at(it.Retried)
 	case !it.Retried.IsZero():
 		s += ", may go twice, first tried " + at(it.Retried)
+	}
+	if lean {
+		s += ", more on my Wi-Fi page"
 	}
 	return s
 }
@@ -406,12 +414,11 @@ func (c *Channel) question(it Item, short bool) string {
 func (it Item) line() string { return it.lineAs(lineFull) }
 
 // lineAs is line in form lv (itemLineAs): from lineShort its UNVERIFIED
-// mark in fewer words, and at lineCount its recipients as a count, in
-// the wording a set too long to text already uses.
+// mark in fewer words, and from lineLean without Detail.
 func (it Item) lineAs(lv int) string {
 	short := lv >= lineShort
 	s := field(it.Facts.Verb, 12) + " " + field(it.Object, 40)
-	if it.Detail != "" {
+	if it.Detail != "" && lv < lineLean {
 		s += ", " + field(it.Detail, 40)
 	}
 	if it.Unverified && short {
@@ -420,7 +427,7 @@ func (it Item) lineAs(lv int) string {
 		s = "UNVERIFIED, details on the Wi-Fi page: " + s
 	}
 	if it.Recipient != "" {
-		if r, ok := recipientText(it.Recipient); ok && lv < lineCount {
+		if r, ok := recipientText(it.Recipient); ok {
 			s += " to " + r
 		} else {
 			n := len(strings.Split(it.Recipient, ","))

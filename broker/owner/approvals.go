@@ -342,7 +342,7 @@ func (c *Channel) repliesLocked(r *request) string {
 	case r.local:
 		// First: a local request is High too, and is never approved by
 		// text (CH-3, P2-2a).
-		return fmt.Sprintf("Approve or deny on my Wi-Fi page before %s, or reply NO %s.", r.expires.In(c.cfg.Location).Format("15:04"), r.id)
+		return c.pageOnlyReplies(r)
 	case r.tier == High && len(r.items) == 1:
 		return fmt.Sprintf("Reply YES %s and a code from your code generator%s, or NO %s.", r.id, c.gridOr(), r.id)
 	case r.tier == High:
@@ -351,6 +351,12 @@ func (c *Channel) repliesLocked(r *request) string {
 		return fmt.Sprintf("Reply YES %s %s or NO %s.", r.id, r.code, r.id)
 	}
 	return fmt.Sprintf("Reply YES %s %s for all, YES %s 1 2 %s for some (the rest are denied), or NO %s.", r.id, r.code, r.id, r.code, r.id)
+}
+
+// pageOnlyReplies is a local request text's replies: the Wi-Fi page or
+// NO, never a texted YES.
+func (c *Channel) pageOnlyReplies(r *request) string {
+	return fmt.Sprintf("Approve or deny on my Wi-Fi page before %s, or reply NO %s.", r.expires.In(c.cfg.Location).Format("15:04"), r.id)
 }
 
 // localAsk is a local-only item's question as its request text asks it,
@@ -417,10 +423,11 @@ func (c *Channel) moreLocked(id string, from int, now time.Time) string {
 		}
 	}
 	// One item too long for its full line: the line gets shorter, never
-	// the replies. Every texted item fits lineCount with the longest
-	// request ID and grid cell (TestMoreWorstPageFitsWithTheLongestID);
-	// pageWiFi is only a bound should a field ever grow.
-	for _, lv := range []int{lineShort, lineCount} {
+	// the replies, and never loses a field CH-12 lists. Every texted item
+	// fits lineLean with the longest request ID and grid cell
+	// (TestMoreWorstPageFitsWithTheLongestID); pageWiFi is only a bound
+	// should a field ever grow.
+	for _, lv := range []int{lineShort, lineLean} {
 		if p := c.pageLocked(r, left, 1, lv); fits(p) {
 			return p
 		}
@@ -429,12 +436,15 @@ func (c *Channel) moreLocked(id string, from int, now time.Time) string {
 }
 
 // pageWiFi is moreLocked's last form: the page names its one item and
-// leaves it to the Wi-Fi page, keeping the head, replies and next MORE.
-const pageWiFi = lineCount + 1
+// leaves it to the Wi-Fi page. A page that cannot state an item's
+// recipients offers no texted YES (CH-10, L3 on #6625): its replies are
+// the page-or-NO a local request text gives (pageOnlyReplies).
+const pageWiFi = lineLean + 1
 
 // pageLocked is a MORE page of request r showing the first shown of the
 // undecided items left (0-based), each in item line form lv. Its replies
-// are the request text's own, word for word (repliesLocked).
+// are the request text's own, word for word (repliesLocked), except in
+// the pageWiFi form, which states no item and so offers no texted YES.
 func (c *Channel) pageLocked(r *request, left []int, shown, lv int) string {
 	var b strings.Builder
 	first, last := left[0]+1, left[shown-1]+1
@@ -458,11 +468,13 @@ func (c *Channel) pageLocked(r *request, left []int, shown, lv int) string {
 			fmt.Fprintf(&b, " %d %s", i+1, line)
 		}
 	}
-	if !r.local {
-		// A local request's replies already name the expiry (UX on #6610).
-		fmt.Fprintf(&b, " Expires %s.", r.expires.In(c.cfg.Location).Format("15:04"))
+	if r.local || lv == pageWiFi {
+		// Page or NO, whose wording names the expiry (UX on #6610). A local
+		// request's are its text's own (repliesLocked).
+		b.WriteString(" " + c.pageOnlyReplies(r))
+	} else {
+		fmt.Fprintf(&b, " Expires %s. %s", r.expires.In(c.cfg.Location).Format("15:04"), c.repliesLocked(r))
 	}
-	b.WriteString(" " + c.repliesLocked(r))
 	if shown < len(left) {
 		fmt.Fprintf(&b, " Next: MORE %s %d.", r.id, left[shown]+1)
 	}

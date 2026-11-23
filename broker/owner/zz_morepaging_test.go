@@ -71,7 +71,8 @@ func pageReplies(t *testing.T, p, sms string) {
 
 var pageHeadRe = regexp.MustCompile(`^([A-Z][A-Z0-9]{0,2}) items? ([0-9]{1,2})(?:-[0-9]{1,2})? of ([0-9]{1,2}):`)
 
-func walk(t *testing.T, r *rig, id string, n int, sms string) []int {
+func walk(t *testing.T, r *rig, id string, items []Item, sms string) []int {
+	n := len(items)
 	t.Helper()
 	var seen []int
 	cmd := "MORE " + id
@@ -91,6 +92,7 @@ func walk(t *testing.T, r *rig, id string, n int, sms string) []int {
 		body, _, _ := strings.Cut(p, " Expires ")
 		for _, m := range pageItemRe.FindAllStringSubmatch(body, -1) {
 			k, _ := strconv.Atoi(m[1])
+			wantFields(t, p, items[k-1])
 			seen = append(seen, k)
 		}
 		cmd = ""
@@ -102,6 +104,24 @@ func walk(t *testing.T, r *rig, id string, n int, sms string) []int {
 		}
 	}
 	return seen
+}
+
+// wantFields checks that page p states the fields CH-12 lists for a
+// texted item: its exact canonical recipients (CH-10) and its amount
+// (L3 on #6625). A shorter line drops other fields first.
+func wantFields(t *testing.T, p string, it Item) {
+	t.Helper()
+	if rc, ok := recipientText(it.Recipient); ok && !strings.Contains(p, " to "+rc) {
+		t.Fatalf("page drops the recipients %q: %q", rc, p)
+	}
+	if it.Amount != "" && !strings.Contains(p, field(it.Amount, 16)) {
+		t.Fatalf("page drops the amount %q: %q", it.Amount, p)
+	}
+	// A field left out is pointed to the Wi-Fi page.
+	dropped := it.Detail != "" && !strings.Contains(p, field(it.Detail, 40)) || !it.Asked.IsZero() && !strings.Contains(p, "restart")
+	if dropped && !strings.Contains(p, ", more on my Wi-Fi page") {
+		t.Fatalf("page drops a field without saying so: %q", p)
+	}
 }
 
 func wantAll(t *testing.T, seen []int, n int) {
@@ -138,7 +158,7 @@ func TestMorePagesReachEveryBatchItem(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					wantAll(t, walk(t, r, id, n, r.inbox()), n)
+					wantAll(t, walk(t, r, id, items, r.inbox()), n)
 					if d := r.decisions(); len(d) != 0 {
 						t.Fatalf("reading decided %v", d)
 					}
@@ -331,15 +351,31 @@ func TestMoreRefusesAnExpiredRequestItself(t *testing.T) {
 // request text's replies word for word. It uses the longest item line
 // that fits, never the Wi-Fi form at today's bounds.
 func TestMoreWorstPageFitsWithTheLongestID(t *testing.T) {
-	for _, high := range []bool{false, true} {
+	// "unchecked": high tier by an unverified recipient, with no amount
+	// (the L3 repro on #6625), where the recipient is the reason for
+	// the code.
+	for _, kind := range []string{"low", "high", "unchecked"} {
 		for _, n := range []int{2, 4, 20} {
-			t.Run(fmt.Sprintf("n%d-high%v", n, high), func(t *testing.T) {
+			t.Run(fmt.Sprintf("n%d-%s", n, kind), func(t *testing.T) {
 				r := newRig(t, nil)
+				// The longest grid cell, in the text and on every page.
+				cell := ""
+				for _, l := range GridLabels() {
+					if len(l) > len(cell) {
+						cell = l
+					}
+				}
+				r.ch.mu.Lock()
+				r.ch.codes.challenge = cell
+				r.ch.mu.Unlock()
 				var items []Item
 				for i := 1; i <= n; i++ {
 					it := longItem(i, true)
-					if !high {
+					if kind != "high" {
 						it.Amount, it.Facts.HasAmount, it.Facts.Amount = "", false, 0
+					}
+					if kind == "unchecked" {
+						it.Facts.RecipientExists = false
 					}
 					items = append(items, it)
 				}
@@ -379,6 +415,10 @@ func TestMoreWorstPageFitsWithTheLongestID(t *testing.T) {
 				sms = strings.ReplaceAll(sms, " "+id+".", " "+long+".")
 				for k, p := range pages {
 					r.checkFormat(p)
+					wantFields(t, p, items[k])
+					if kind != "low" && !strings.Contains(p, "grid cell "+cell+" ") {
+						t.Fatalf("page %d lacks the longest cell %s: %q", k+1, cell, p)
+					}
 					if !strings.HasPrefix(p, fmt.Sprintf("%s item %d of %d: %d ", long, k+1, n, k+1)) {
 						t.Fatalf("page %d: %q", k+1, p)
 					}
@@ -423,8 +463,8 @@ func TestMorePageSaysThePartialYesDeniesTheRest(t *testing.T) {
 
 // The Wi-Fi form, a bound should a field ever outgrow the shorter lines,
 // keeps the head, names the item and leaves its fields to the page, and
-// ends with the text's replies and the next MORE; a local request keeps
-// its question in every form.
+// ends with page-or-NO and the next MORE, never a texted YES; a local
+// request keeps its question and its text's replies in every form.
 func TestMoreWiFiFormKeepsHeadAndReplies(t *testing.T) {
 	for _, high := range []bool{false, true} {
 		r := newRig(t, nil)
@@ -437,9 +477,9 @@ func TestMoreWiFiFormKeepsHeadAndReplies(t *testing.T) {
 		r.ch.mu.Lock()
 		p := r.ch.pageLocked(r.ch.open[id], []int{1, 2, 3}, 1, pageWiFi)
 		r.ch.mu.Unlock()
-		pageReplies(t, p, sms)
-		want := id + " item 2 of 4: 2 is too long to text; see it on my Wi-Fi page. Expires "
-		if !strings.HasPrefix(p, want) || !strings.HasSuffix(p, " Next: MORE "+id+" 3.") {
+		// It states no item, so it offers no texted YES (L3 on #6625).
+		want := id + " item 2 of 4: 2 is too long to text; see it on my Wi-Fi page. Approve or deny on my Wi-Fi page before "
+		if !strings.HasPrefix(p, want) || strings.Contains(p, "YES") || !strings.HasSuffix(p, ", or reply NO "+id+". Next: MORE "+id+" 3.") || !strings.Contains(sms, "YES") {
 			t.Fatalf("high %v Wi-Fi form: %q", high, p)
 		}
 	}
