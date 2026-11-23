@@ -124,6 +124,7 @@ import codecs
 import collections
 import concurrent.futures
 import contextlib
+import ctypes
 import fnmatch
 import functools
 import glob
@@ -434,15 +435,16 @@ def _names(lit, rel):
 
 
 # A //go:embed line and the package-level `var name Type` gofmt puts at column 0 under it, comment
-# lines between (Go's rule: only blank lines and line comments may come between them).
-EMBED_VAR = re.compile(r"^//go:embed[ \t]+(.*)\n(?://.*\n)*var ([A-Za-z_]\w*)[ \t]+[^=\n(]+\n", re.M)
+# lines between (Go's rule: only blank lines and line comments may come between them). The name is
+# unexported: another package's test could read an exported one, and read_index sees only literals.
+EMBED_VAR = re.compile(r"^//go:embed[ \t]+(.*)\n(?://.*\n)*var ([a-z_]\w*)[ \t]+[^=\n(]+\n", re.M)
 
 
 def embedded_by(pkg, rel):
     """{repo path: {line}} of the package-level var declarations whose //go:embed directive is the
     only way broker/<pkg>/'s .go files name rel, a path below it (names_file), or None. Each such
     directive lists rel alone (quoted or `all:` too), no glob, right above a plain `var name Type`
-    at column 0 (comment lines between), so the var holds that file's bytes and nothing else. Any
+    at column 0 (comment lines between), name unexported, so the var holds that file's bytes and nothing else. Any
     other namer (a string literal, a glob, a directive listing more or on another shape, a link or
     unreadable file) is None. A change to rel then changes only what reads that var: the tests
     reaching it (head_tests, #6458)."""
@@ -469,34 +471,76 @@ def embedded_by(pkg, rel):
     return out or None
 
 
-@contextlib.contextmanager
-def hidden_at_run(broker, paths, tmp):
-    """Yield the `go` flags that build broker's tests with paths (repo paths, embedded files:
-    embedded_by) as they are and run them with paths absent: each is moved under tmp and named in an
-    -overlay, which go reads for embedding too, and put back after. A test that reads one at run time
-    then fails the run, as hide_docs makes an unnamed doc's reader fail it (#6373, #6458). It moves
-    files only in a tree this process made (MADE), and only regular files (ValueError otherwise)."""
-    tree = pathlib.Path(broker).resolve().parent
-    if paths and tree not in MADE:
-        raise ValueError(f"{broker} is no tree mutgate made")
-    store, moved = pathlib.Path(tmp).resolve() / "hidden", []
+# inotify's open and read events (inotify(7)), and its event header: wd, mask, cookie, name length.
+IN_ACCESS, IN_OPEN, IN_EVENT = 0x1, 0x20, 16
+
+
+@functools.cache
+def _inotify():
+    """libc with inotify_init1 and inotify_add_watch, or None where there is none (not Linux):
+    head_tests then narrows no embedded file, since no run could watch it (#6518)."""
+    if not sys.platform.startswith("linux"):
+        return None
     try:
-        for n, path in enumerate(paths):
-            src = tree / path
-            if src.is_symlink() or not src.is_file():
-                raise ValueError(f"{path} is not a regular file")
-            store.mkdir(exist_ok=True)
-            shutil.copy2(src, store / str(n))
-            src.unlink()
-            moved.append((src, store / str(n)))
-        if not moved:
-            yield []
-            return
-        (store / "overlay.json").write_text(json.dumps({"Replace": {str(a): str(b) for a, b in moved}}))
-        yield [f"-overlay={store / 'overlay.json'}"]
+        libc = ctypes.CDLL(None, use_errno=True)
+        if not (hasattr(libc, "inotify_init1") and hasattr(libc, "inotify_add_watch")):
+            return None
+    except OSError:
+        return None
+    return libc
+
+
+@contextlib.contextmanager
+def watched_at_run(broker, paths, tmp):
+    """Yield (flags, opened) for a run of broker's tests with paths (repo paths, embedded files:
+    embedded_by) in place, bytes unchanged: flags build the tests reading each from a copy under
+    tmp through -overlay (which go reads for //go:embed too), so the build never opens them, and
+    opened(), called once the run ends, lists the paths some process opened or read meanwhile
+    (inotify on each file's inode: the test binary, a child process, through any link). A test that
+    reads one at run time is then seen whether or not it tolerates the file's absence, which hiding
+    it was not (Security on #6518, #6458). Only regular files (ValueError otherwise); no inotify
+    or a watch refused is OSError."""
+    tree = pathlib.Path(broker).resolve().parent
+    if not paths:
+        yield [], lambda: []
+        return
+    if (libc := _inotify()) is None:
+        raise OSError("inotify is unavailable")
+    store, files = pathlib.Path(tmp).resolve() / "embedded", {}
+    store.mkdir(exist_ok=True)
+    for n, path in enumerate(paths):
+        src = tree / path
+        if src.is_symlink() or not src.is_file():
+            raise ValueError(f"{path} is not a regular file")
+        shutil.copyfile(src, store / str(n))  # before the watch: this copy opens src
+        files[path] = (src, store / str(n))
+    (store / "overlay.json").write_text(json.dumps({"Replace": {str(a): str(b) for a, b in files.values()}}))
+    fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+    if fd < 0:
+        raise OSError(ctypes.get_errno(), "inotify_init1")
+    try:
+        wds = {}
+        for path, (src, _) in files.items():
+            if (wd := libc.inotify_add_watch(fd, os.fsencode(src), IN_OPEN | IN_ACCESS)) < 0:
+                raise OSError(ctypes.get_errno(), f"inotify_add_watch {path}")
+            wds[wd] = path
+
+        def opened():
+            got = set()
+            while True:
+                try:
+                    buf = os.read(fd, 1 << 16)
+                except BlockingIOError:
+                    return sorted(got)
+                at = 0
+                while at + IN_EVENT <= len(buf):
+                    wd = int.from_bytes(buf[at:at + 4], sys.byteorder, signed=True)
+                    # A full queue (wd -1, IN_Q_OVERFLOW) may have lost any path's event: all.
+                    got |= {wds[wd]} if wd in wds else set(wds.values())
+                    at += IN_EVENT + int.from_bytes(buf[at + 12:at + 16], sys.byteorder)
+        yield [f"-overlay={store / 'overlay.json'}"], opened
     finally:
-        for src, kept in moved:
-            shutil.copy2(kept, src)
+        os.close(fd)
 
 
 # The trees this process made (scratch's worktree, base_covered's archive): the only ones hide_docs deletes in.
@@ -1483,7 +1527,9 @@ def head_tests(tests, pkg):
         if pkg in owners(p):
             # A read file's readers are not traced: every test may read it (#5779, #6436), unless
             # the package's only namer is an embedding var, whose readers are (#6458).
-            got = embedded_by(pkg, p[len(f"broker/{pkg}/"):]) if is_data(p) and pkg == data_owner(p) else None
+            # The whole-suite run watches the file for run-time reads, so no watch, no narrowing.
+            got = (embedded_by(pkg, p[len(f"broker/{pkg}/"):])
+                   if is_data(p) and pkg == data_owner(p) and _inotify() else None)
             if got is None:
                 return None
             held = union(held, got)
@@ -2252,12 +2298,12 @@ def echo_ok(stream):
     return last
 
 
-def timed_cover(pkg, names, tmp, broker=None, code=None, hidden=()):
+def timed_cover(pkg, names, tmp, broker=None, code=None, watched=()):
     """covered_by's (lines, seconds, problem): seconds is how long its test binary ran, so a plan
     that ran the whole suite under coverage sizes the shards from that run, not a fourth (#6155).
     A code dict gains {path: lines} of every block the profile lists, ran or not (#6216): the lines
-    a test could run, whichever tests ran. hidden names repo paths built in but absent while the
-    tests run (hidden_at_run)."""
+    a test could run, whichever tests ran. watched names repo paths built in from copies and
+    watched while the tests run: any read of one is a problem (watched_at_run)."""
     broker = BROKER if broker is None else broker
     profile = pathlib.Path(tmp) / "tests.cover"
     profile.unlink(missing_ok=True)
@@ -2266,16 +2312,18 @@ def timed_cover(pkg, names, tmp, broker=None, code=None, hidden=()):
         cmd += ["-run", "^(" + "|".join(names) + ")$"]
     began = time.monotonic()
     try:
-        with hidden_at_run(broker, hidden, tmp) as flags:
+        with watched_at_run(broker, watched, tmp) as (flags, opened):
             with subprocess.Popen([*cmd, *flags, "."], cwd=broker / pkg, stdout=subprocess.PIPE) as run:
                 ran = echo_ok(run.stdout)
+            read = opened()
     except (OSError, ValueError) as e:
-        return None, None, f"broker/{pkg}/: cannot hide {', '.join(hidden)} from its tests' run: {e}"
+        return None, None, f"broker/{pkg}/: cannot watch {', '.join(watched)} while its tests run: {e}"
+    if read:
+        return None, None, (f"broker/{pkg}/: a test read {', '.join(read)} at run time, which only its //go:embed "
+                            "var names: name the file with a string literal in that test (every test is then a "
+                            "changed test)")
     if run.returncode or not profile.exists():
-        return None, None, (f"broker/{pkg}/'s tests {'(all)' if names is None else names} fail under -coverprofile"
-                            + (f" with {', '.join(hidden)} absent while they run: a test that reads one at run "
-                               "time must name it with a string literal (every test is then a changed test)"
-                               if hidden else ""))
+        return None, None, f"broker/{pkg}/'s tests {'(all)' if names is None else names} fail under -coverprofile"
     # `go test`'s own `ok` line times the test binary's run alone, as suite_seconds times it: the wall
     # time adds the build and vet, which a cold cache makes many times a fast suite (#6162).
     seconds = float(ran) if ran else time.monotonic() - began
@@ -2477,10 +2525,10 @@ def record_for(pkg, tests, bases, diff_text, base, tmp):
     # Every target line runs (L1 on #5770, #5942): a line no mutant and no deletion names (a brace, a
     # bare `return g()`) has no NOT COVERED verdict, so a weakened test that stops running it was unseen.
     # One whole-suite run at the head (none more when the changed tests are every test) names it.
-    # A data file read only through an embedding var (head_tests) is absent while the whole suite
-    # runs: a test that reads it another way fails the run, so no reader goes unseen (#6458).
-    hidden = sorted(p for p in tests if pkg in owners(p)) if names is not None else []
-    every, secs, problem = (covered, secs, None) if names is None else timed_cover(pkg, None, tmp, hidden=hidden)
+    # A data file read only through an embedding var (head_tests) is watched while the whole suite
+    # runs: a test that opens or reads it at run time, by any path, fails the run (#6458, #6518).
+    watched = sorted(p for p in tests if pkg in owners(p)) if names is not None else []
+    every, secs, problem = (covered, secs, None) if names is None else timed_cover(pkg, None, tmp, watched=watched)
     if problem:
         return None, None, problem
     if gone := unrun(was, every, code):

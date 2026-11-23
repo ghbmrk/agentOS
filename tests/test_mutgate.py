@@ -3930,9 +3930,15 @@ class EmbedReach(unittest.TestCase):
                 ("a toolchain-tagged init", {"v/init.go": "//go:build linux && amd64.v2\n\npackage v\n\nfunc init() { _ = modelPins }\n"}),
                 ("a linked file", {}),
                 ("a directive in a block comment", {"v/x.go": "package v\n\nvar x string\n\n/*\n//go:embed models.pins\nvar x string\n*/\n"}),
+                ("an exported var", {"v/pins.go": pins.replace("modelPins", "ModelPins")}),
+                ("no inotify to watch the run", {}),
                 ("nothing embeds it", {"v/pins.go": "package v\n\nvar modelPins string\n\nfunc pinFor(f string) string { return modelPins + f }\n"})):
             with self.subTest(name):
                 files = {**EMBED_PKG, **files}
+                if name == "no inotify to watch the run":
+                    with mock.patch.object(mutgate, "_inotify", lambda: None):
+                        self.assertIsNone(self.reach(files))
+                    continue
                 if name == "a linked file":
                     with tempfile.TemporaryDirectory() as d, DataFiles.tree(None, d, files):
                         (pathlib.Path(d) / "broker/v/link.go").symlink_to(pathlib.Path(d) / "broker/v/other.go")
@@ -3962,47 +3968,65 @@ class EmbedReach(unittest.TestCase):
         self.assertEqual(self.reach({**EMBED_PKG, "v/onnx_test.go": '//go:build vision_onnx\n\npackage v\n\nimport "testing"\n\n'
                                      'func TestOnnx(t *testing.T) { _ = modelPins }\n'}), ["TestOnnx", "TestPins"])
 
-    def test_the_whole_suite_runs_with_the_embedded_file_absent(self):
-        # The narrowing's other half (#6458, coordinator on #6518): the whole-suite run builds the
-        # package with the file and runs it without, so a test reading it at run time by a path no
-        # literal holds fails the gate's run, as hide_docs makes an unnamed doc's reader fail it.
+    def test_the_whole_suite_watches_the_embedded_file(self):
+        # The narrowing's other half (#6458; Security on #6518): the whole-suite run builds the
+        # package from a copy of the file and watches the file itself, so a test reading it at run
+        # time by a path no literal holds fails the gate's run, even one that passes with it absent.
         # REQ: MUT-embed-reach
-        lister = 'package v\n\nimport (\n\t"os"\n\t"testing"\n)\n\nfunc TestList(t *testing.T) {\n' \
-                 '\tes, _ := os.ReadDir(".")\n\tfor _, e := range es {\n\t\tif e.Name()[0] == \'m\' {\n' \
-                 '\t\t\tif _, err := os.ReadFile(e.Name()); err != nil {\n\t\t\t\tt.Fatal(err)\n\t\t\t}\n\t\t\treturn\n' \
-                 '\t\t}\n\t}\n\tt.Fatal("unlisted")\n}\n'
+        def lister(cond, read):
+            return ('package v\n\nimport (\n\t"os"\n\t"os/exec"\n\t"strings"\n\t"testing"\n)\n\n'
+                    'var _ = exec.Command\n\nfunc TestList(t *testing.T) {\n\tes, _ := os.ReadDir(".")\n'
+                    '\tfor _, e := range es {\n\t\tif ' + cond + ' {\n\t\t\tb, err := ' + read + '\n'
+                    '\t\t\tif err != nil {\n\t\t\t\treturn\n\t\t\t}\n'
+                    '\t\t\tif !strings.HasPrefix(string(b), "abc") {\n\t\t\t\tt.Fatal("weak pin")\n\t\t\t}\n\t\t}\n\t}\n}\n')
+        tolerant = lister('strings.HasSuffix(e.Name(), ".pins")', "os.ReadFile(e.Name())")
+        child = lister('strings.HasSuffix(e.Name(), ".pins")', 'exec.Command("cat", e.Name()).Output()')
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}):
             d = pathlib.Path(d).resolve()
             tree, tmp = d / "tree", d / "tmp"
             tmp.mkdir()
-            with DataFiles.tree(None, tree, {**EMBED_PKG, "go.mod": GO_MOD}), mock.patch.object(mutgate, "MADE", {tree}):
-                pins, hidden = tree / "broker/v/models.pins", ["broker/v/models.pins"]
-                got, _, problem = mutgate.timed_cover("v", None, tmp, hidden=hidden)
-                self.assertIsNone(problem)
+            with DataFiles.tree(None, tree, {**EMBED_PKG, "go.mod": GO_MOD}):
+                pins, watched = tree / "broker/v/models.pins", ["broker/v/models.pins"]
+                got, _, problem = mutgate.timed_cover("v", None, tmp, watched=watched)
+                self.assertIsNone(problem)  # the build reads the copy: no event
                 self.assertIn("broker/v/pins.go", got)
-                self.assertEqual(pins.read_text(), "abc lib.so\n")  # put back
-                (tree / "broker/v/list_test.go").write_text(lister)
-                self.assertIsNone(mutgate.timed_cover("v", None, tmp)[2])  # present: the listing reads it
-                _, _, problem = mutgate.timed_cover("v", None, tmp, hidden=hidden)
-                self.assertIn("with broker/v/models.pins absent while they run", problem)
-                self.assertEqual(pins.read_text(), "abc lib.so\n")
-                # Not a regular file, or a tree mutgate did not make: no run, a problem.
-                with mock.patch.object(mutgate, "MADE", set()):
-                    self.assertIn("cannot hide", mutgate.timed_cover("v", None, tmp, hidden=hidden)[2])
-                self.assertIn("not a regular file", mutgate.timed_cover("v", None, tmp, hidden=["broker/v/gone.pins"])[2])
-                self.assertEqual(pins.read_text(), "abc lib.so\n")
-                # record_for hides the narrowed package's embedded data files in its whole-suite run only.
+                self.assertEqual(pins.read_text(), "abc lib.so\n")  # untouched
+                # A reader that passes with the file absent, a child process reading it: seen.
+                pins.write_text("zzz lib.so\n")
+                for name, src in (("tolerant", tolerant), ("child", child)):
+                    with self.subTest(name):
+                        (tree / "broker/v/list_test.go").write_text(src)
+                        problem = mutgate.timed_cover("v", None, tmp, watched=watched)[2]
+                        self.assertIn("a test read broker/v/models.pins at run time", problem)
+                pins.write_text("abc lib.so\n")
+                # The same for a testdata file embedded by its path.
+                (tree / "broker/v/testdata").mkdir()
+                (tree / "broker/v/testdata/m.pins").write_text("abc\n")
+                (tree / "broker/v/pins.go").write_text(EMBED_PKG["v/pins.go"].replace("embed models.pins", "embed testdata/m.pins"))
+                (tree / "broker/v/list_test.go").write_text(
+                    tolerant.replace('os.ReadDir(".")', 'os.ReadDir("testdata")').replace(
+                        "os.ReadFile(e.Name())", 'os.ReadFile("testdata/" + e.Name())'))
+                problem = mutgate.timed_cover("v", None, tmp, watched=["broker/v/testdata/m.pins"])[2]
+                self.assertIn("a test read broker/v/testdata/m.pins at run time", problem)
+                self.assertIsNone(mutgate.timed_cover("v", None, tmp, watched=watched)[2])  # unread: fine
+                # Not a regular file, or no inotify: no run, a problem; and no narrowing without it.
+                self.assertIn("not a regular file", mutgate.timed_cover("v", None, tmp, watched=["broker/v/gone.pins"])[2])
+                with mock.patch.object(mutgate, "_inotify", lambda: None):
+                    self.assertIn("cannot watch", mutgate.timed_cover("v", None, tmp, watched=watched)[2])
+                # record_for watches the narrowed package's embedded data files in its whole-suite run only.
                 runs = []
 
-                def cover(pkg, names, tmp, code=None, hidden=()):
-                    runs.append((names, list(hidden)))
+                def cover(pkg, names, tmp, code=None, watched=()):
+                    runs.append((names, list(watched)))
                     return {}, 1.0, None
                 with mock.patch.object(mutgate, "timed_cover", cover), \
                         mock.patch.object(mutgate, "merge_base", lambda b, h: "b" * 40), \
                         mock.patch.object(mutgate, "base_covered", lambda *a: ({}, None)):
+                    (tree / "broker/v/pins.go").write_text(EMBED_PKG["v/pins.go"])
+                    (tree / "broker/v/list_test.go").unlink()
                     tests = {"broker/v/models.pins": None, "broker/v/other_test.go": {5}}
                     self.assertIsNone(mutgate.record_for("v", tests, {"v": []}, "", "HEAD~1", tmp)[2])
-                    self.assertEqual(runs, [(["TestOther", "TestPins"], []), (None, hidden)])
+                    self.assertEqual(runs, [(["TestOther", "TestPins"], []), (None, watched)])
                     runs.clear()
                     self.assertIsNone(mutgate.record_for("v", {"broker/v/other_test.go": {5}}, {"v": []}, "", "HEAD~1", tmp)[2])
                     self.assertEqual(runs, [(["TestOther"], []), (None, [])])
