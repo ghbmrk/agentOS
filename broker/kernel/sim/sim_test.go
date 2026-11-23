@@ -3,11 +3,14 @@ package sim
 // REQ: EVL-1, KRN-1, KRN-5, KRN-6, KRN-7, KRN-8, CLK-2, LOG-2, LOG-4
 
 import (
+	"fmt"
 	"os"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -18,17 +21,45 @@ func seeds() int {
 	return 40
 }
 
+// eachSeed runs f on seeds 0 to n-1, GOMAXPROCS at a time, and returns the
+// results in seed order. Every run builds its own state from its seed, so the
+// order they run in changes no result; the race build of this package took
+// most of its 25-minute timeout when the seeds ran one after another.
+func eachSeed[T any](n int, f func(seed int) T) []T {
+	out := make([]T, n)
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for range min(n, runtime.GOMAXPROCS(0)) {
+		wg.Go(func() {
+			for seed := int(next.Add(1) - 1); seed < n; seed = int(next.Add(1) - 1) {
+				out[seed] = f(seed)
+			}
+		})
+	}
+	wg.Wait()
+	return out
+}
+
 // sweep runs every seed once, for the tests that read the sweep, and sums
-// their counters; a seed whose invariants fail stops it.
+// their counters in seed order; the first seed whose invariants fail stops it.
 var traced = map[string]int{}
+
+type seedRun struct {
+	r      *Result
+	err    error
+	traced map[string]int
+}
 
 var sweep = sync.OnceValues(func() (Result, error) {
 	var sum Result
-	for seed := 0; seed < seeds(); seed++ {
+	for _, s := range eachSeed(seeds(), func(seed int) seedRun {
 		r, err := Run(Config{Seed: uint64(seed), Ops: 200})
-		if err != nil {
-			return sum, err
+		return seedRun{r, err, traceCounts(r)}
+	}) {
+		if s.err != nil {
+			return sum, s.err
 		}
+		r := s.r
 		sum.Effects += r.Effects
 		sum.Refused += r.Refused
 		sum.ClockBack += r.ClockBack
@@ -51,37 +82,50 @@ var sweep = sync.OnceValues(func() (Result, error) {
 		sum.TaskKeys += r.TaskKeys
 		sum.ReplayedTask += r.ReplayedTask
 		sum.CancelledTask += r.CancelledTask
-		for _, l := range r.Trace { // the trace names each op it ran
-			for _, op := range []string{"stop", "resume at once", "open task", "end task"} {
-				if _, rest, ok := strings.Cut(l, " "); ok && (rest == op || strings.HasPrefix(rest, op+" ")) {
-					traced[op]++
-				}
-			}
-			// The clock faults trace the offsets they set: a step back of
-			// 1 to 48 hours, a disagreement of 0 to 3 hours each way.
-			_, rest, _ := strings.Cut(l, " ")
-			if h, ok := strings.CutPrefix(rest, "kernel clock steps back "); ok {
-				traced["steps back"]++
-				if n, err := strconv.Atoi(strings.TrimSuffix(h, "h")); err != nil || n < 1 || n > 48 {
-					traced["clock offsets out of range"]++
-				}
-			}
-			if d, ok := strings.CutPrefix(rest, "clock sources disagree by -"); ok {
-				e, la, _ := strings.Cut(strings.TrimSuffix(d, "h"), "h +")
-				ne, err := strconv.Atoi(e)
-				nl, err2 := strconv.Atoi(la)
-				if err != nil || err2 != nil || ne < 0 || ne > 3 || nl < 0 || nl > 3 {
-					traced["clock offsets out of range"]++
-				}
-				traced["sources behind"] += min(ne, 1)
-				traced["sources ahead"] += min(nl, 1)
-			}
+		for k, n := range s.traced {
+			traced[k] += n
 		}
 	}
 	return sum, nil
 })
 
+// traceCounts counts the ops and clock faults one run's trace names.
+func traceCounts(r *Result) map[string]int {
+	traced := map[string]int{}
+	if r == nil {
+		return traced
+	}
+	for _, l := range r.Trace { // the trace names each op it ran
+		for _, op := range []string{"stop", "resume at once", "open task", "end task"} {
+			if _, rest, ok := strings.Cut(l, " "); ok && (rest == op || strings.HasPrefix(rest, op+" ")) {
+				traced[op]++
+			}
+		}
+		// The clock faults trace the offsets they set: a step back of
+		// 1 to 48 hours, a disagreement of 0 to 3 hours each way.
+		_, rest, _ := strings.Cut(l, " ")
+		if h, ok := strings.CutPrefix(rest, "kernel clock steps back "); ok {
+			traced["steps back"]++
+			if n, err := strconv.Atoi(strings.TrimSuffix(h, "h")); err != nil || n < 1 || n > 48 {
+				traced["clock offsets out of range"]++
+			}
+		}
+		if d, ok := strings.CutPrefix(rest, "clock sources disagree by -"); ok {
+			e, la, _ := strings.Cut(strings.TrimSuffix(d, "h"), "h +")
+			ne, err := strconv.Atoi(e)
+			nl, err2 := strconv.Atoi(la)
+			if err != nil || err2 != nil || ne < 0 || ne > 3 || nl < 0 || nl > 3 {
+				traced["clock offsets out of range"]++
+			}
+			traced["sources behind"] += min(ne, 1)
+			traced["sources ahead"] += min(nl, 1)
+		}
+	}
+	return traced
+}
+
 func TestSweepHoldsInvariants(t *testing.T) {
+	t.Parallel()
 	sum, err := sweep()
 	if err != nil {
 		t.Fatal(err)
@@ -93,6 +137,7 @@ func TestSweepHoldsInvariants(t *testing.T) {
 }
 
 func TestSameSeedGivesTheSameLog(t *testing.T) {
+	t.Parallel()
 	a, err := Run(Config{Seed: 7, Ops: 200})
 	if err != nil {
 		t.Fatal(err)
@@ -110,10 +155,11 @@ func TestSameSeedGivesTheSameLog(t *testing.T) {
 
 // Each mutant is caught within 100 seeds, on a seed the unmutated sim
 // passes, so a fault of the sim's own is never counted as a catch. The
-// seeds run four at a time, each run on its own state, so the race build's
-// run stays inside its timeout. Seed 75 at 200 ops once failed unmutated: the
+// seeds run GOMAXPROCS at a time, each run on its own state, so the race
+// build's run stays inside its timeout. Seed 75 at 200 ops once failed unmutated: the
 // cut-off judged a grant's hold on the sim's clock, not the kernel's.
 func TestMutantsAreCaught(t *testing.T) {
+	t.Parallel()
 	var clean [100]func() error
 	for i := range clean {
 		clean[i] = sync.OnceValue(func() error { _, err := Run(Config{Seed: uint64(i), Ops: 200}); return err })
@@ -125,7 +171,7 @@ func TestMutantsAreCaught(t *testing.T) {
 		var mu sync.Mutex
 		next, caught := 0, false
 		var wg sync.WaitGroup
-		for range 4 {
+		for range runtime.GOMAXPROCS(0) {
 			wg.Go(func() {
 				for {
 					mu.Lock()
@@ -160,6 +206,7 @@ func TestMutantsAreCaught(t *testing.T) {
 // that never moves back or a stale request that is not redelivered leaves its
 // counter at zero.
 func TestSweepFaultsTakeEffect(t *testing.T) {
+	t.Parallel()
 	sum, err := sweep()
 	if err != nil {
 		t.Fatal(err)
@@ -218,21 +265,38 @@ func TestSweepFaultsTakeEffect(t *testing.T) {
 // to the live one, and no reader's plan from after its first read live
 // (RunErase). The crashes must fall on each kind of write.
 func TestSimEraseReachesEveryViewOnce(t *testing.T) {
+	t.Parallel()
+	type seedErase struct {
+		hits   map[string]int
+		erased int
+		err    error
+	}
 	hits, erased := map[string]int{}, 0
-	for seed := 0; seed < seeds(); seed++ {
+	for _, s := range eachSeed(seeds(), func(seed int) seedErase {
+		out := seedErase{hits: map[string]int{}}
 		for at := 1; ; at++ {
 			r, err := RunErase(uint64(seed), at)
 			if err != nil {
-				t.Fatalf("seed %d crash at write %d: %v", seed, at, err)
+				out.err = fmt.Errorf("seed %d crash at write %d: %v", seed, at, err)
+				return out
 			}
-			erased += r.Erased
+			out.erased += r.Erased
 			if !r.Crashed {
 				break
 			}
-			hits[r.Hit]++
+			out.hits[r.Hit]++
 		}
 		if _, err := RunErase(uint64(seed), 0); err != nil {
-			t.Fatalf("seed %d, no crash: %v", seed, err)
+			out.err = fmt.Errorf("seed %d, no crash: %v", seed, err)
+		}
+		return out
+	}) {
+		if s.err != nil {
+			t.Fatal(s.err)
+		}
+		erased += s.erased
+		for k, n := range s.hits {
+			hits[k] += n
 		}
 	}
 	if erased == 0 {
