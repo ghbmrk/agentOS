@@ -43,6 +43,11 @@ const (
 	// noteGmailKept names the step that ends a grant Google kept (CH-12).
 	noteGmailKept = "I could not give the Gmail sign-in back to Google, so Google may still list it. " +
 		"To end it, open myaccount.google.com/permissions signed in to that Gmail account, and remove the app you made for agentOS."
+	// noteGmailUntold is noteGmailKept for a grant whose account the box
+	// cannot name, with no Gmail account set up (a record that does not
+	// load, #6633 UX 1): ending it everywhere ends no account's mail.
+	noteGmailUntold = "I could not give a Gmail sign-in back to Google, and I cannot tell which Google account it was for, so Google may still list it. " +
+		"To end it, open myaccount.google.com/permissions in each Google account you signed in to agentOS with, and remove the app you made for agentOS."
 	// noteGmailUnnamed is dropUnnamed's: nothing was given back, and the
 	// set-up account's grant must stay (#3027 L3 delta 1).
 	noteGmailUnnamed = "Google did not say which account you signed in as, so I set nothing up and left your Gmail account as it was. " +
@@ -61,6 +66,7 @@ type gmailSignIn struct {
 	slot  string
 	again bool // a sign-in again: slot is the account's, sec a copy of its grant
 	grant []byte
+	addr  string // the address Google's profile named for the grant; "" until then
 }
 
 // newGmailSignIn is a sign-in whose grant lives in slot of sec; hint, if
@@ -223,6 +229,7 @@ func (h *MailHost) gmailFinish(use, pasted string) (string, error) {
 		h.dropUnnamed(g) // no account will use it
 		return DGmailAddress, nil
 	}
+	g.addr = addr
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.idle()
@@ -245,7 +252,7 @@ func (h *MailHost) gmailFinish(use, pasted string) (string, error) {
 		// A crash before the settings name the new slot leaves the grant
 		// owed a give-back, settled at the next start (#3028). The same
 		// address keeps its slot named throughout.
-		if err := h.owedNew(slot, g.grant); err != nil {
+		if err := h.owedNew(slot, addr, g.grant); err != nil {
 			release() // the account before stands, so its grant is kept
 			h.giveBack(g, true)
 			return "", err
@@ -291,6 +298,29 @@ func (h *MailHost) gmailFinish(use, pasted string) (string, error) {
 	return d, nil
 }
 
+// keptNote is what the owner is told when Google keeps a grant for addr
+// ("" when the box cannot name it), with h.mu held (CH-12, #6633 UX 1).
+// While another Gmail account is set up, the step names the kept grant's
+// account, or says it cannot, and says not to remove the app from the
+// account set up here, since that would end its grant and its mail.
+func (h *MailHost) keptNote(addr string) string {
+	s, err := readMail(h.dir)
+	set := err == nil && s.API == APIGmail
+	switch {
+	case set && addr != "" && !strings.EqualFold(addr, s.Address):
+		return "I could not give the Gmail sign-in for " + addr + " back to Google, so Google may still list it. " +
+			"To end it, open myaccount.google.com/permissions signed in to " + addr + ", and remove the app you made for agentOS. " +
+			"Do not remove it from " + s.Address + ", the account set up here, or its mail stops."
+	case set && addr == "":
+		return "I could not give a Gmail sign-in back to Google, and I cannot tell which Google account it was for, so Google may still list it. " +
+			"If you signed in to agentOS with a Google account other than " + s.Address + ", open myaccount.google.com/permissions in that account and remove the app you made for agentOS. " +
+			"Do not remove it from " + s.Address + ", the account set up here, or its mail stops."
+	case addr == "":
+		return noteGmailUntold
+	}
+	return noteGmailKept
+}
+
 // giveBack revokes g's new grant, which no account will use, with h.mu
 // held if locked; it is sealed only in g's own store. If Google keeps it,
 // the owner is told the step that ends it.
@@ -300,7 +330,7 @@ func (h *MailHost) giveBack(g *gmailSignIn, locked bool) {
 		defer h.mu.Unlock()
 	}
 	if g.in.Revoke(h.ctx) != clerk.DRevoked {
-		h.notify(false, noteGmailKept)
+		h.notify(false, h.keptNote(g.addr))
 	}
 }
 
@@ -383,7 +413,7 @@ func (h *MailHost) holdGmail(s MailSettings) (release func(), err error) {
 	}
 	g, herr := h.heldGmailSignIn(slot, "")
 	if herr == nil {
-		if err := h.owe(slot, g.sec); err != nil {
+		if err := h.owe(slot, s.Address, g.sec); err != nil {
 			return nil, err
 		}
 	}
@@ -397,7 +427,7 @@ func (h *MailHost) holdGmail(s MailSettings) (release func(), err error) {
 		// A grant that could not be held is told as kept, and the change
 		// goes on, so the owner is never stuck on a store that does not copy.
 		if herr != nil || g.in.Revoke(h.ctx) != clerk.DRevoked {
-			h.notify(false, noteGmailKept)
+			h.notify(false, h.keptNote(s.Address))
 		}
 	}, nil
 }

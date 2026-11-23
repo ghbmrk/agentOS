@@ -36,10 +36,12 @@ const (
 
 func giveAAD() []byte { return []byte("agentOS gmail give-back\n") }
 
-// owed is one grant owed a give-back: its slot and its own store.
+// owed is one grant owed a give-back: its slot, the address of its
+// account (for the owner's notice if Google keeps it), and its own store.
 type owed struct {
-	Slot  string          `json:"slot"`
-	Store json.RawMessage `json:"store"`
+	Slot    string          `json:"slot"`
+	Address string          `json:"address"`
+	Store   json.RawMessage `json:"store"`
 }
 
 // errGiveRecord: the record is not the clerk's own, past its bound, or not
@@ -95,9 +97,9 @@ func saveOwed(dir string, s clerk.Sealer, o []owed, stop func(i int) bool) error
 	return privfile.WriteAtomic(dir, giveFile, blob, stop)
 }
 
-// owe adds slot of sec, a store holding that slot only, to the record; h.mu
-// is held. An error means nothing may change: the caller makes no change.
-func (h *MailHost) owe(slot string, sec *clerk.Secrets) error {
+// owe adds slot of sec, a store holding that slot only, for the account at
+// addr, to the record; h.mu is held. An error means nothing may change: the caller makes no change.
+func (h *MailHost) owe(slot, addr string, sec *clerk.Secrets) error {
 	b, err := sec.MarshalBinary()
 	if err != nil {
 		return err
@@ -107,12 +109,12 @@ func (h *MailHost) owe(slot string, sec *clerk.Secrets) error {
 		return err
 	}
 	o = slices.DeleteFunc(o, func(e owed) bool { return e.Slot == slot })
-	return saveOwed(h.dir, h.cfg.Sealer, append(o, owed{Slot: slot, Store: b}), h.cfg.giveStop)
+	return saveOwed(h.dir, h.cfg.Sealer, append(o, owed{Slot: slot, Address: addr, Store: b}), h.cfg.giveStop)
 }
 
-// owedNew adds grant, a sign-in's new grant for slot, to the record before
-// it is put in the account's store.
-func (h *MailHost) owedNew(slot string, grant []byte) error {
+// owedNew adds grant, a sign-in's new grant for slot (the account at addr),
+// to the record before it is put in the account's store.
+func (h *MailHost) owedNew(slot, addr string, grant []byte) error {
 	if h.cfg.Sealer == nil {
 		return errNoSealer
 	}
@@ -120,7 +122,7 @@ func (h *MailHost) owedNew(slot string, grant []byte) error {
 	if err := sec.Put(slot, clerk.KindGrant, grant); err != nil {
 		return err
 	}
-	return h.owe(slot, sec)
+	return h.owe(slot, addr, sec)
 }
 
 // paid drops slot from the record; h.mu is held. A failed write leaves the
@@ -141,11 +143,12 @@ func (h *MailHost) paid(slot string) {
 // back and its slot dropped from the account's store if it is there, which
 // a crash before the settings were written leaves. A grant Google keeps,
 // or an entry or record that does not load, is told with the step that
-// ends it (CH-12). The record goes once every entry is settled.
+// ends it, never one that would end the set-up account's grant (keptNote,
+// CH-12). The record goes once every entry is settled.
 func (h *MailHost) settleOwed() {
 	o, err := loadOwed(h.dir, h.cfg.Sealer)
 	if err != nil {
-		h.notify(false, noteGmailKept)
+		h.notify(false, h.keptNote("")) // which account it was for is lost with the record
 		_ = saveOwed(h.dir, h.cfg.Sealer, nil, nil)
 		return
 	}
@@ -167,7 +170,7 @@ func (h *MailHost) settleOwed() {
 			err = errGiveRecord
 		}
 		if err != nil || g.in.Revoke(h.ctx) != clerk.DRevoked {
-			h.notify(false, noteGmailKept)
+			h.notify(false, h.keptNote(e.Address))
 		}
 	}
 	_ = saveOwed(h.dir, h.cfg.Sealer, nil, h.cfg.giveStop)

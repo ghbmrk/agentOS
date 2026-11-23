@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
@@ -41,10 +42,45 @@ func noRecord(t *testing.T, dir string) {
 	}
 }
 
-func told(h *MailHost, text string) bool {
+// keptText is whether a notice is one telling of a grant Google kept
+// (keptNote's texts).
+func keptText(text string) bool { return strings.HasPrefix(text, "I could not give") }
+
+// toldKept is whether h told the owner of a grant Google kept.
+func toldKept(h *MailHost) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return slices.ContainsFunc(h.notices, func(n notice) bool { return n.text == text })
+	return slices.ContainsFunc(h.notices, func(n notice) bool { return keptText(n.text) })
+}
+
+// keptNotices is h's notices of a grant Google kept.
+func keptNotices(h *MailHost) []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []string
+	for _, n := range h.notices {
+		if keptText(n.text) {
+			out = append(out, n.text)
+		}
+	}
+	return out
+}
+
+// safeFor fails unless every kept notice h told, while setUp is the Gmail
+// account set up here, names no step that would end that account's grant
+// and says not to remove the app from it (#6633 UX 1).
+func safeFor(t *testing.T, h *MailHost, setUp string) {
+	t.Helper()
+	ns := keptNotices(h)
+	if len(ns) == 0 {
+		t.Fatal("no kept grant was told")
+	}
+	for _, n := range ns {
+		if strings.Contains(n, "signed in to "+setUp) || strings.Contains(n, "that Gmail account") ||
+			!strings.Contains(n, "Do not remove it from "+setUp+", the account set up here") {
+			t.Fatalf("a kept notice while %s is set up could end its grant: %q", setUp, n)
+		}
+	}
 }
 
 // A crash between a removal and the give-back of the held grant (#3028,
@@ -73,7 +109,7 @@ func TestACrashAfterARemovalGivesTheGrantBackAtStart(t *testing.T) {
 	if !slices.Equal(srv.Revoked(), []string{gmailtest.Refresh}) || sec2.Len() != 0 {
 		t.Fatalf("after the restart: revoked %v, %d slots; want the held grant given back", srv.Revoked(), sec2.Len())
 	}
-	if told(h2, noteGmailKept) {
+	if toldKept(h2) {
 		t.Fatal("a grant Google gave back was told as kept")
 	}
 	noRecord(t, dir)
@@ -111,7 +147,7 @@ func TestACrashBeforeTheSettingsGivesTheNewGrantBack(t *testing.T) {
 	other := GmailSlot("other@gmail.test")
 	grant := otherGrant()
 	h.mu.Lock()
-	err := h.owedNew(other, grant)
+	err := h.owedNew(other, "other@gmail.test", grant)
 	if err == nil {
 		err = sec.Put(other, clerk.KindGrant, grant)
 	}
@@ -135,7 +171,7 @@ func TestACrashAfterTheSettingsKeepsTheNewGrant(t *testing.T) {
 	c := signInConfig(srv)
 	h := NewMailHost(context.Background(), dir, sec, c)
 	h.mu.Lock()
-	err := h.owedNew(GmailSlot(gmailtest.User), gmailtest.Grant())
+	err := h.owedNew(GmailSlot(gmailtest.User), gmailtest.User, gmailtest.Grant())
 	h.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
@@ -156,22 +192,30 @@ func TestARecordThatDoesNotLoadIsTold(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := NewMailHost(context.Background(), dir, sec, c)
-	if !told(h, noteGmailKept) {
+	if !toldKept(h) {
 		t.Fatal("a record that does not load was not told")
+	}
+	safeFor(t, h, gmailtest.User)
+	if ns := keptNotices(h); !strings.Contains(ns[0], "cannot tell which Google account") {
+		t.Fatalf("a record that does not load names an account: %q", ns[0])
 	}
 	noRecord(t, dir)
 
 	// An entry Google keeps.
 	h.mu.Lock()
-	err := h.owedNew(GmailSlot("other@gmail.test"), gmailtest.Grant())
+	err := h.owedNew(GmailSlot("other@gmail.test"), "other@gmail.test", gmailtest.Grant())
 	h.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv.Close() // Google does not answer
 	h2, _ := restart(t, dir, c)
-	if !told(h2, noteGmailKept) {
+	if !toldKept(h2) {
 		t.Fatal("a grant Google kept was not told")
+	}
+	safeFor(t, h2, gmailtest.User)
+	if ns := keptNotices(h2); !strings.Contains(ns[0], "signed in to other@gmail.test") {
+		t.Fatalf("an entry Google kept does not name its account: %q", ns[0])
 	}
 	noRecord(t, dir)
 }
@@ -296,4 +340,42 @@ func TestACrashInsideARemovalGivesTheGrantBack(t *testing.T) {
 		t.Fatalf("revoked %v in %d calls; want the held grant given back once", srv.Revoked(), srv.Revokes())
 	}
 	noRecord(t, dir)
+}
+
+// A sign-in whose record cannot be written gives its new grant back; if
+// Google keeps it, the notice names the new account and warns off the one
+// set up here (#6633 UX 1, gmailFinish's record failures).
+func TestASignInWhoseRecordFailsTellsAKeptGrantSafely(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	c := signInConfig(srv)
+	c.giveStop = func(i int) bool { return i == 0 }
+	c.gmail.revoke = srv.Base() + "/revoke" // answers 401: Google keeps it
+	h := NewMailHost(context.Background(), dir, sec, c)
+	owner := MailOwner{serveMail(t, h, MailOwnerSide)}
+	srv.As("other@gmail.test")
+	if _, err := finishSignIn(t, srv, owner, fakeClient); err == nil {
+		t.Fatal("a sign-in whose record could not be written passed")
+	}
+	safeFor(t, h, gmailtest.User)
+	if ns := keptNotices(h); !strings.Contains(ns[0], "signed in to other@gmail.test") {
+		t.Fatalf("the kept new grant's notice does not name its account: %q", ns[0])
+	}
+}
+
+// With no Gmail account set up, a grant the box cannot name is told as one
+// to end in every account signed in with, which ends no account's mail.
+func TestAnUnnamedKeptGrantWithNoAccountIsToldEverywhere(t *testing.T) {
+	dir := shortDir(t)
+	sec, err := OpenSecrets(dir, testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewMailHost(context.Background(), dir, sec, mailConfig())
+	h.mu.Lock()
+	got := h.keptNote("")
+	named := h.keptNote("pat@gmail.test")
+	h.mu.Unlock()
+	if got != noteGmailUntold || named != noteGmailKept {
+		t.Fatalf("keptNote with no account = %q, %q", got, named)
+	}
 }
