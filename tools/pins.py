@@ -81,7 +81,7 @@ FETCH_EXEMPT = {
                                     ".curlrc; downloads nothing"),
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
     "tests/test_image.py": (1, "a busybox wget shebang as fixture text"),
-    "tests/test_pins.py": (228, "this reader's test cases"),
+    "tests/test_pins.py": (243, "this reader's test cases"),
     "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
@@ -203,6 +203,13 @@ def tool_sites(line, credit=True):
 # `${X:-npm}`, `${X/#/npm}` and every other operator form, innermost first; each static piece of the operand
 # is one reading.
 PARAM = re.compile(r"\$\{[#!]?[A-Za-z_0-9@*?-]+([^A-Za-z_0-9{}][^{}]*)\}")
+PARAM_BARE = re.compile(r"\$\{[#!]?(?:[A-Za-z_][A-Za-z_0-9]*|[0-9]+|[@*#?$!-])\}")  # `n${X}pm` runs npm with X unset
+SUBST = re.compile(r"\$\(|`")
+VAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])")
+ANSI_C = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
+ANSI_ESC = re.compile(r"\\(x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|[0-7]{1,3}|c.|.)")
+ANSI_NAMED = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t",
+              "v": "\v"}
 BRACE = re.compile(r"\{([^{}]*,[^{}]*)\}|\{(-?\w)\.\.(-?\w)(?:\.\.-?[0-9]+)?\}")
 EXPAND_MAX = 256
 
@@ -215,9 +222,11 @@ def _expansions(word):
     out, todo = set(), [re.sub(r"\$\(\s*\)|`\s*`", "", word)]
     while todo:
         w = todo.pop()
-        m = PARAM.search(w) or BRACE.search(w)
+        m = PARAM.search(w) or PARAM_BARE.search(w) or BRACE.search(w)
         if not m:
             out.add(w)
+        elif m.re is PARAM_BARE:
+            todo.append(w[:m.start()] + w[m.end():])
         elif m.re is PARAM:
             todo.extend(w[:m.start()] + x + w[m.end():] for x in set(re.split(r"[-:=+?/#%^,@]+", m.group(1))))
         else:
@@ -238,6 +247,46 @@ def _expansions(word):
     return out
 
 
+def _unsub(line):
+    """line with every command substitution (`$(...)`, `$((...))`, a backtick pair) cut to an empty `$()`, since
+    one that prints nothing (`n$(true)pm`) glues the words around it; what it held is counted on the line itself."""
+    out, i = "", 0
+    while i < len(line):
+        m = SUBST.search(line, i)
+        if not m:
+            return out + line[i:]
+        out += line[i:m.start()] + "$()"
+        if m.group() == "`":
+            j = line.find("`", m.end())
+            i = len(line) if j < 0 else j + 1
+            continue
+        depth, i = 1, m.end()
+        while i < len(line) and depth:
+            depth += (line[i] == "(") - (line[i] == ")")
+            i += 1
+    return out
+
+
+def _ansi(m):
+    """A bash `$'...'` string's text with its escapes decoded, so `$'\\x6e'pm` and `n$''pm` read as npm."""
+    def esc(e):
+        x = e.group(1)
+        if x[0] in "xuU":
+            return chr(int(x[1:], 16)) if int(x[1:], 16) < 0x110000 else ""
+        if x[0] in "01234567":
+            return chr(int(x, 8) & 0xFF)
+        if x[0] == "c":
+            return chr(ord(x[1].upper()) ^ 0x40)
+        return ANSI_NAMED.get(x, x)
+    return ANSI_ESC.sub(esc, m.group(1))
+
+
+def _unquote(line):
+    """line as shell removes quotes: `$'...'` decoded, `$"` read as `"`, and each `$name` braced first, so a
+    quote removed after it (`n$X""pm`) cannot glue it to the text that follows."""
+    return re.sub(r"[\"'\\]", "", VAR.sub(r"${\1}", ANSI_C.sub(_ansi, line).replace('$"', '"')))
+
+
 def _named(text):
     return sum(1 for w in WORDS.split(text) if _name(w) or w.rsplit("/", 1)[-1] in FETCHERS)
 
@@ -247,6 +296,7 @@ def hidden_sites(line):
     `"${X:-npm i}"`, `{n,}pm`, `cu{r,}l`, `n$()pm`): the most any reading names beyond the line as written,
     or one where the line has more than EXPAND_MAX readings. Never credited (`_shifts` already refuses a
     credit to a line holding `$`, `,` or `{x`)."""
+    line = _unsub(line)
     if not re.search(r"\{|\$\(\s*\)|`\s*`", line):
         return 0
     e = _expansions(line)
@@ -267,9 +317,85 @@ def text_sites(text):
         prev = joined[-1]
     for line in joined:
         credit = not _shifts(line)
-        line = re.sub(r"[\"'\\]", "", line)
+        line = _unquote(line)
         n += sum(1 for w in WORDS.split(line) if w.rsplit("/", 1)[-1] in FETCHERS)
         n += len(NET_TEXT.findall(line)) + tool_sites(line, credit) + hidden_sites(line)
+    return n
+
+
+GH_EXPR = re.compile(r"\$\{\{(.*?)\}\}", re.S)
+GH_LIT = re.compile(r"'((?:[^']|'')*)'")
+GH_WORDS = re.compile(r"\b(?:true|false|null|NaN|Infinity)\b|[0-9.eE+-]+")
+SPELLED = sorted(FETCHERS) + ["corepack", "npm", "npx", "pip", "pnpm", "pnpx", "yarn"]
+
+
+GH_NO_TEXT = re.compile(r"\b(?:hashFiles|contains|startsWith|endsWith)\(")  # return a hash or a boolean
+GH_COMPARED = re.compile(r"'(?:[^']|'')*'\s*(?:==|!=|<=|>=|<|>)|(?:==|!=|<=|>=|<|>)\s*'(?:[^']|'')*'")
+
+
+def _gh_rendered(expr):
+    """expr with the literals that never reach its output cut: each operand of a comparison, and every
+    argument of a function that returns a hash or a boolean."""
+    expr = GH_COMPARED.sub(" ", expr)
+    while True:
+        m = GH_NO_TEXT.search(expr)
+        if not m:
+            return expr
+        depth, j = 1, m.end()
+        while j < len(expr) and depth:
+            depth += (expr[j] == "(") - (expr[j] == ")")
+            j += 1
+        expr = expr[:m.start()] + " " + expr[j:]
+
+
+def _gh_chars(expr):
+    """Every character an Actions expression can render from its own text: its string literals (`\\uXXXX`
+    decoded, as fromJSON reads them), its keywords and its numbers. format, join, toJSON and fromJSON can
+    reorder and repeat them, so the output is read as any string of these characters; a context value
+    (`github.*`, `matrix.*`) is a run-time value and is not read."""
+    expr = _gh_rendered(expr)
+    lits = [x.replace("''", "'") for x in GH_LIT.findall(expr)]
+    lits += [chr(int(u, 16)) for x in lits for u in re.findall(r"\\u([0-9A-Fa-f]{4})", x)]
+    return set("".join(lits + GH_WORDS.findall(GH_LIT.sub(" ", expr))))
+
+
+def gh_sites(text):
+    """Names that an Actions expression renders into a run step before shell sees it, glued to the text
+    around it (`${{ 'n' }}pm`, `${{ format('{0}pm', 'n') }} i`): one site per name a line can spell with
+    at least one character an expression supplies, adjacent expressions and the text between them read
+    as one stretch (fail closed: any order, any repeat)."""
+    n = 0
+    for line in text.split("\n"):
+        if "${{" not in line:
+            continue
+        # The line as a pattern: a literal character, or a set the expression at that point may repeat.
+        pat, i = [], 0
+        for m in GH_EXPR.finditer(line):
+            pat += [(c, False) for c in line[i:m.start()]] + [(frozenset(_gh_chars(m.group(1))), True)]
+            i = m.end()
+        pat += [(c, False) for c in line[i:]]
+        for name in SPELLED:
+            # States (position, used an expression); a star element may be skipped or repeated.
+            def close(states):
+                out, todo = set(states), list(states)
+                while todo:
+                    p, used = todo.pop()
+                    if p < len(pat) and pat[p][1] and (p + 1, used) not in out:
+                        out.add((p + 1, used))
+                        todo.append((p + 1, used))
+                return out
+            states = close({(p, False) for p in range(len(pat) + 1)})
+            for c in name:
+                nxt = set()
+                for p, used in states:
+                    if p < len(pat):
+                        e, star = pat[p]
+                        if star and c in e:
+                            nxt.add((p, True))
+                        elif not star and e == c:
+                            nxt.add((p + 1, used))
+                states = close(nxt)
+            n += any(used for _, used in states)
     return n
 
 
@@ -283,7 +409,7 @@ def yaml_sites(text):
     def count(node):
         if id(node) not in memo:
             if isinstance(node, yaml.ScalarNode):
-                memo[id(node)] = text_sites(node.value)
+                memo[id(node)] = text_sites(node.value) + gh_sites(node.value)
             else:
                 kids = node.value if isinstance(node, yaml.SequenceNode) else [x for kv in node.value for x in kv]
                 memo[id(node)] = sum(count(k) for k in kids)

@@ -521,11 +521,27 @@ class FollowUp2(unittest.TestCase):
         for text in ["${X:-npm} install evil", '"${X:-npm}" install evil', "${X-npm} install evil", "{n,}pm i evil",
                      "n{p,}m i evil", "{np,x}m i evil", "p{i,}p install evil", "${C:-curl} https://e",
                      "cu{r,}l -o x https://e", "n$()pm i", "n``pm i", '"${X:-npm i}" evil', "${X:=pip} install x",
-                     "${X:+wget} x", "${X/#/npm} i", "${A:-${B:-yarn}} add x", "{n..n}pm i", "x{a,b}" * 9]:
+                     "${X:+wget} x", "${X/#/npm} i", "${A:-${B:-yarn}} add x", "{n..n}pm i", "x{a,b}" * 9,
+                     # Thread qb76so on eebc2d80: an unset variable, a substitution that prints nothing, an empty
+                     # `$''` or `$""` and an ANSI-C escape each glue a name, and bash runs it.
+                     "n${X}pm i x", "n$X\"\"pm i x", "n$(true)pm i x", "n`true`pm i x", "n$''pm i x", 'n$""pm i x',
+                     "$'\\x6e'pm i x", "$'\\156\\160\\155' i x", "c${X}url https://e", "$'\\x63url' https://e"]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 1)
         self.assertEqual(pins.yaml_sites("steps:\n  - run: ${X:-npm} install evil\n"), 1)
-        for text in ["${X:-default} run", "echo {a,b}", "${X%.sh}", "{ echo; }"]:
+        self.assertEqual(pins.text_sites("n$(:)pm i"), 1)
+        # L3 pre-probe on #6630 at eebc2d80: an Actions expression renders its literals before shell runs.
+        for run in ["${{ 'n' }}pm install evil", "${{ format('{0}pm', 'n') }} i", "${{ 'n' }}${{ 'p' }}m i",
+                    "${{ x && 'n' || 'q' }}pm i", "${{ fromJSON('\"\\u006epm\"') }} i", "c${{ 'u' }}rl https://e"]:
+            with self.subTest(run=run):
+                self.assertGreaterEqual(pins.yaml_sites("steps:\n  - run: " + run + "\n"), 1)
+        for run in ["${{ github.event_name == 'npm' }}", "${{ hashFiles('npm.lock') }}", "${{ matrix.os }}pm",
+                    "${{ startsWith(github.ref, 'pip') && 'x' }}"]:
+            with self.subTest(run=run):
+                self.assertEqual(pins.gh_sites("run: " + run), 0)
+        self.assertEqual(pins.text_sites("n$(curl x)pm i"), 2)  # the substitution's own fetcher, and the glued npm
+        for text in ["${X:-default} run", "echo {a,b}", "${X%.sh}", "{ echo; }", "echo $HOME ${X} $(date)",
+                     "echo $'a\\tb'"]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 0)
         # Security 2(b) on #6630: a job's BASH_ENV script can redefine `cp` for every bash run step.
