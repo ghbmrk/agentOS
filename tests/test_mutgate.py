@@ -4998,7 +4998,7 @@ class RecordDepsLint(unittest.TestCase):
                                        "\nfunc readAll() {}\n")
         for reason in ("as g always returns 1 and probe is set once",  # plain lowercase prose words
                        "t.probe and x.g() are members, not package names; kernel.readAll is another package's",
-                       "the guard at b.go:4 and c.go return first",  # file names
+                       "the guard at g.go:4 and `g.go` return first",  # file names, in a code span too
                        "f's `if x > 1` twin returns first, so f() is unchanged"):  # its own declaration
             with self.subTest(reason):
                 self.write(reason)
@@ -5014,10 +5014,39 @@ class RecordDepsLint(unittest.TestCase):
                 self.assertEqual(r.returncode, 1, r.stdout)
                 self.assertIn(f"cites {name}, declared outside its own declaration in broker/netguard/{file}", r.stderr)
 
+    def test_a_helper_in_the_entry_s_own_file_is_cited(self):
+        # #6498's shape: chrony.go's proof cites parseTracking, declared in chrony.go itself.
+        (self.pkg / "a.go").write_text(self.SRC + "\nfunc h() int {\n\treturn 1\n}\n")
+        self.write("both branches agree, as h() always returns 1")
+        r = self.records()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("cites h, declared outside its own declaration in broker/netguard/a.go", r.stderr)
+        self.record.unlink()
+        r = self.waive("broker/netguard/a.go:h", reason="both branches agree, as h() always returns 1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.records().returncode, 0)
+
+    def test_a_package_file_the_lister_cannot_read_fails_the_record(self):
+        # Fail closed (Security on #6561): no entry names z.go, yet the lint lists every file of the package.
+        self.write("g() returns 1", [self.dep("g")])
+        self.assertEqual(self.records().returncode, 0)
+        (self.pkg / "z.go").write_text("package netguard\n\nfunc {\n")
+        r = self.records()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("cannot list the declarations of broker/netguard/", r.stderr)
+        (self.pkg / "z.go").unlink()
+        (self.pkg / "z.go").symlink_to(self.pkg / "b.go")
+        r = self.records()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("symbolic link", r.stderr)
+
     def test_a_dep_in_any_file_declaring_the_name_satisfies_it(self):
         # Build-tagged twins: g in b.go and in c.go; a dep on either names it (the other file's edit is its own risk).
         (self.pkg / "c.go").write_text("//go:build never\n\npackage netguard\n\nfunc g() int {\n\treturn 1\n}\n")
         self.write("g() returns 1", [self.dep("g")])
+        r = self.records()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.write("g() returns 1", [{**self.dep("g"), "file": "broker/netguard/c.go"}])
         r = self.records()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.write("g() returns 1")

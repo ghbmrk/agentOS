@@ -17,6 +17,6 @@ Board row: #6499 (tier A, lane:primary, class:release). Source: L3 on #6498 (com
 - Out of scope: any `.go` file; the gate workflow.
 
 ## Acceptance tests
-**Acceptance tests:** `tests/test_mutgate.py::RecordDepsLint::test_an_entry_citing_another_function_without_deps_fails_and_with_its_dep_passes`, `::test_waive_refuses_a_cited_name_without_its_dep`, `::test_prose_members_files_and_the_own_declaration_are_not_citations`, `::test_a_dep_in_any_file_declaring_the_name_satisfies_it`, `Record::test_every_record_in_the_repository_resolves`.
+**Acceptance tests:** `tests/test_mutgate.py::RecordDepsLint::test_an_entry_citing_another_function_without_deps_fails_and_with_its_dep_passes`, `::test_waive_refuses_a_cited_name_without_its_dep`, `::test_prose_members_files_and_the_own_declaration_are_not_citations`, `::test_a_dep_in_any_file_declaring_the_name_satisfies_it`, `::test_a_helper_in_the_entry_s_own_file_is_cited`, `::test_a_package_file_the_lister_cannot_read_fails_the_record`, `Record::test_every_record_in_the_repository_resolves`.
 
 **Done:** CI green; the tests pass, and the first two fail on the base's `mutgate.py`.
