@@ -436,6 +436,8 @@ class FollowUp2(unittest.TestCase):
             "if True:\n    try:\n        import urllib\n    except ImportError:\n        pass\nr = urllib.request\nr.urlopen(x)\n": 1,
             "try:\n    if True:\n        import urllib\nexcept ImportError:\n    urllib = None\nu = urllib.request\n": 1,
             "from importlib import import_module as im\nim('requests')\n": 1, "import xmlrpc.client\n": 1,
+            # Every binding of a name is resolved, not the last (Potency R3 on #6593).
+            "import urllib as u\ndef f():\n    import os as u\nu.request.urlopen(1)\n": 1,
         }
         for text, n in cases.items():
             with self.subTest(text=text):
@@ -449,13 +451,18 @@ class FollowUp2(unittest.TestCase):
                      "pip install foo==1  # TODO: --require-hashes once #6588 lands", "time npx foo",
                      "timeout 60 npx foo", "nohup npx foo", "xargs npx foo", "nice -n 5 npx foo", "yarn install",
                      "pnpm install", "npm install evil --frozen-lockfile", "npm i x --immutable",
-                     "yarn add evil --frozen-lockfile", "pnpm add evil --frozen-lockfile"]:
+                     "yarn add evil --frozen-lockfile", "pnpm add evil --frozen-lockfile", "yarn",
+                     # No flag is credited to yarn or pnpm: yarn 1 ignores --immutable (L3 2, Potency 2 on #6593).
+                     "yarn install --immutable", "yarn install --frozen-lockfile", "pnpm i --frozen-lockfile",
+                     # Comment and flag tests read raw words, not basenames (L3 1, Potency 1 on #6593).
+                     "PIP_CACHE_DIR=/tmp/#c pip install foo", "HOME=/tmp/#x pip install foo",
+                     "pip install --index-url https://h/--require-hashes foo",
+                     "sudo -u bob npx foo", "timeout -s KILL 60 npx foo", "xargs -I % npx foo %"]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 1)
         for text in ["pip install --require-hashes -r r.txt", "python -m pip install --no-deps --require-hashes \\\n  -r r.txt",
                      "npm ci --ignore-scripts", "go install x@v1.2.3", "go mod download", "tar x $n/bin/npx $n/bin/npm",
-                     "pip list", "GOSUMDB=sum.golang.org go get x", "echo npm", "yarn install --frozen-lockfile",
-                     "pnpm install --frozen-lockfile", "pnpm i --frozen-lockfile", "yarn install --immutable", "echo ok  # npx foo"]:
+                     "pip list", "GOSUMDB=sum.golang.org go get x", "echo npm", "echo ok  # npx foo"]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 0)
         self.assertEqual(pins.py_sites('subprocess.run("pip install x", shell=True)\n'), 1)
