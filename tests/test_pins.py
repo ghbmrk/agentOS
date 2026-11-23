@@ -487,7 +487,14 @@ class FollowUp2(unittest.TestCase):
                      "tar xIf npx a.tar", 'tar --to-command=x -xf a "$n/bin/npx"',
                      "pi[p] install --require-hashes -r r.txt",
                      # L3 on #6630 at 970041e7: `name@version` and corepack count; neither earns credit.
-                     "yarn@1.22.22 add x", "npm@10 ci", "corepack enable", "pip@x install --require-hashes -r r.txt"]:
+                     "yarn@1.22.22 add x", "npm@10 ci", "corepack enable", "pip@x install --require-hashes -r r.txt",
+                     # Security on #6630 at 970041e7: make's `@`, `+` and `-` recipe prefixes hide no name or
+                     # fetcher, and a file-tool credit needs a path argument in text that redefines no command.
+                     "\t@yarn install", "\t@npm install evil", "\t@pip install foo", "\t+yarn add evil",
+                     "\t@-yarn add x", "\t@curl -o x https://h/x", "\t+wget x", 'cp() { "$@"; }\ncp yarn add evil',
+                     'cp() { "$@"; }\ntar x "$n/bin/npx"', 'function tar { :; }\ntar x "$n/bin/npx"',
+                     'alias tar=x\ntar x "$n/bin/npx"', '. ./lib.sh\ntar x "$n/bin/npx"',
+                     'source lib.sh\ntar x "$n/bin/npx"', "tar x npx", "echo npm", "\t@pi[p] install x", "tar -cf o.tar -Ipi[p] f"]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 1)
         for text in ["corepack yarn@1 add x", "corepack pnpm@8 i"]:  # corepack and the manager it runs
@@ -495,7 +502,7 @@ class FollowUp2(unittest.TestCase):
                 self.assertEqual(pins.text_sites(text), 2)
         for text in ["pip install --require-hashes -r r.txt", "python -m pip install --no-deps --require-hashes \\\n  -r r.txt",
                      "npm ci --ignore-scripts", "go install x@v1.2.3", "go mod download", 'tar x "$n/bin/npx" "$n/bin/npm"',
-                     "pip list", "GOSUMDB=sum.golang.org go get x", "echo npm", "set -o pipefail", "pipx run x", "cat npm.log",
+                     "pip list", "GOSUMDB=sum.golang.org go get x", "set -o pipefail", "pipx run x", "cat npm.log",
                      'tar -xJf "$w/n.tar.xz" --strip-components=1 -C usr/local "$n/bin/npm" "$n/bin/npx"',
                      'pip install --require-hashes -r "$R"', "tar 'x' \"$n/bin/npx\"", "pip show x",
                      "python -m pip install --no-deps --only-binary=:all: --require-hashes -r tests/requirements.txt"]:

@@ -80,7 +80,7 @@ FETCH_EXEMPT = {
                                     ".curlrc; downloads nothing"),
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
     "tests/test_image.py": (1, "a busybox wget shebang as fixture text"),
-    "tests/test_pins.py": (176, "this reader's test cases"),
+    "tests/test_pins.py": (193, "this reader's test cases"),
     "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
@@ -96,7 +96,7 @@ FETCH_EXEMPT = {
 # What `fetch_sites` counts. A word is split at shell quoting and punctuation and read by its basename,
 # so `/usr/bin/curl`, `x=curl; $x`, `"curl"` and a `curl\` continuation are each a curl.
 FETCHERS = frozenset(["curl", "wget", "aria2c"])
-WORDS = re.compile(r"[\s'\"`$(){}\[\];|&<>=\\,]+")
+WORDS = re.compile(r"[@+\s'\"`$(){}\[\];|&<>=\\,]+")
 NET_TEXT = re.compile(r"\burllib\.request\b|\burlopen\b|\bhttp\.client\b|\burllib3\b|\bhttpx\b|\baiohttp\b|"
                       r"\bftplib\b|\bxmlrpc\.client\b|\b(?:import|from)\s+requests\b|\brelease\s+download\b|/dev/(?:tcp|udp)/")
 NET_MODULES = ("urllib.request", "urllib3", "requests", "http.client", "httpx", "aiohttp", "ftplib", "xmlrpc.client")
@@ -104,9 +104,10 @@ NET_MODULES = ("urllib.request", "urllib3", "requests", "http.client", "httpx", 
 # tool_sites): every pip, npm, npx, pnpx, yarn or pnpm word counts, wherever it sits, unless a credit below
 # reads it as a known-safe form, plus a Go setting that turns off the checksum database.
 # A manager name, glued to any short-option prefix (`-mpip`, `-Iyarn`, `-Snpx`) and with any version or
-# script suffix (`pip-3.12`, `pip3.12`, `yarnpkg`, `npm-cli.js`, `yarn.js`) or `@version` (`yarn@1`, as corepack
-# runs it), and `corepack` itself; `pipe`, `pipx` and `npm.log` are not one.
-MANAGER = re.compile(r"(?:-+[A-Za-z]*?)?(pip|npm|npx|pnpx|yarn|pnpm|corepack)(?:pkg)?(?:-?[0-9][0-9.]*|-cli)?(?:\.[cm]?js)?(?:@\S*)?")
+# script suffix (`pip-3.12`, `pip3.12`, `yarnpkg`, `npm-cli.js`, `yarn.js`), and `corepack` itself; `WORDS`
+# splits at make's `@` and `+` recipe prefixes and at `@version` (`yarn@1`, as corepack runs it).
+# `pipe`, `pipx` and `npm.log` are not one.
+MANAGER = re.compile(r"(?:-+[A-Za-z]*?)?(pip|npm|npx|pnpx|yarn|pnpm|corepack)(?:pkg)?(?:-?[0-9][0-9.]*|-cli)?(?:\.[cm]?js)?")
 GLOB_NAMES = ("pip", "pip3", "npm", "npx", "pnpx", "yarn", "yarnpkg", "pnpm", "corepack")
 FILE_TOOLS = frozenset(["tar", "cp", "mv", "ln", "rm", "chmod", "chown", "ls", "stat", "test", "[", "echo", "printf"])
 PIP_READ_ONLY = frozenset(["list", "show", "freeze", "check", "hash", "help", "--version"])  # fetch nothing
@@ -139,10 +140,14 @@ def _name(word):
     m = MANAGER.fullmatch(x)
     if m:
         return m.group(1)
-    x = re.sub(r"^-+[A-Za-z]*", "", x) if re.search(r"[][*?]", x) else ""
-    if len(re.sub(r"\[[^]]*\]|[*?]", "", x)) < 2:
-        return None  # a glob with under two literal characters (`*`, `[a-z]*`) is named, not counted
-    return next((n for n in GLOB_NAMES if x and fnmatch.fnmatchcase(n, x)), None)
+    if not re.search(r"[][*?]", x):
+        return None
+    # The glob as written, past a make or option prefix, or past an option letter run (`-Ipi[p]`); one with
+    # under two literal characters (`*`, `[a-z]*`) is named, not counted.
+    y = re.sub(r"^[-@+]+", "", x)
+    k = len(re.match(r"[A-Za-z]*", y).group()) if y != x else 0
+    globs = {g for g in [x] + [y[j:] for j in range(k + 1)] if len(re.sub(r"\[[^]]*\]|[*?]", "", g)) >= 2}
+    return next((n for n in GLOB_NAMES for g in globs if fnmatch.fnmatchcase(n, g)), None)
 
 
 def _pip_hashed(args):
@@ -171,13 +176,20 @@ def _tar_runs_nothing(words):
     return all(re.fullmatch(r"-?[xctvzjJfCpkO]+|--strip-components=[0-9]+", x) for x in opts)
 
 
-def _credited(words, i, lead):
-    """True when the manager word at words[i] is a known-safe form: a path argument of a file tool (`tar x
-    "$n/bin/npx"`), `npm ci` with options only, a read-only pip verb, or a hashed pip install."""
+# A function, alias or sourced file can give a file tool's name another meaning (`cp() { "$@"; }`), so text
+# holding any of these earns no file-tool credit.
+REDEFINES = re.compile(r"\w[\w.:-]*\s*\(\s*\)|\b(?:function|alias|source|enable|BASH_ENV|ENV)\b|(?:^|[;&|({]\s*|\s)\.\s")
+
+
+def _credited(words, i, lead, file_tools=True):
+    """True when the manager word at words[i] is a known-safe form: a path argument (holding `/`) of a file
+    tool where file_tools allows it (`tar x "$n/bin/npx"`), `npm ci` with options only, a read-only pip
+    verb, or a hashed pip install."""
     name, prev, args = _name(words[i]), words[i - 1] if i else "", words[i + 1:]
     if re.search(r"[][*?]", words[i]) or "@" in words[i].rsplit("/", 1)[-1]:
         return False  # a glob may expand to several words; `name@version` runs through corepack
-    if lead in FILE_TOOLS and i and not prev.startswith("-") and (lead != "tar" or _tar_runs_nothing(words)):
+    if (file_tools and lead in FILE_TOOLS and i and "/" in words[i] and not prev.startswith("-")
+            and (lead != "tar" or _tar_runs_nothing(words))):
         return True
     if name == "npm":
         return args[:1] == ["ci"] and all(x.startswith("-") for x in args[1:])
@@ -186,7 +198,7 @@ def _credited(words, i, lead):
     return False
 
 
-def tool_sites(line, credit=True):
+def tool_sites(line, credit=True, file_tools=True):
     """Package-manager fetch sites in one shell line (quotes already removed). Deny by default and fail
     closed: every manager name the broad `WORDS` split finds counts (so `P=pip`, `-mpip`, `{npm,i}` and
     `npx${IFS}x` each count where written), and a site is taken back only for a whole whitespace word that
@@ -201,7 +213,7 @@ def tool_sites(line, credit=True):
             raw = cmd.split()
             live = raw[:next((i for i, x in enumerate(raw) if x.startswith("#")), len(raw))]
             lead = next((x for x in live if "=" not in x), "").rsplit("/", 1)[-1]
-            n -= sum(1 for i, x in enumerate(live) if _name(x) and _credited(live, i, lead))
+            n -= sum(1 for i, x in enumerate(live) if _name(x) and _credited(live, i, lead, file_tools))
     return n
 
 
@@ -217,11 +229,12 @@ def text_sites(text):
         else:
             joined.append(line)
         prev = joined[-1]
+    file_tools = not any(REDEFINES.search(x) for x in joined)
     for line in joined:
         credit = not _shifts(line)
         line = re.sub(r"[\"'\\]", "", line)
         n += sum(1 for w in WORDS.split(line) if w.rsplit("/", 1)[-1] in FETCHERS)
-        n += len(NET_TEXT.findall(line)) + tool_sites(line, credit)
+        n += len(NET_TEXT.findall(line)) + tool_sites(line, credit, file_tools)
     return n
 
 
