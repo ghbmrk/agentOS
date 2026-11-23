@@ -111,17 +111,23 @@ def acceptance_named(text, line):
     return False
 
 
+BASELINE = "tools/brief_acceptance_baseline.txt"
+
+
 def brief_baseline(root):
-    return baseline_names(root / "tools" / "brief_acceptance_baseline.txt")
+    return baseline_names(root / BASELINE)
 
 
 def baseline_names(f):
+    """The baseline's names from `f`, a copy of BASELINE (the base side's lands elsewhere), which CLASSES must
+    declare (#6441)."""
+    record_merge.listed(BASELINE)
     if not f.is_file():
         return set()
     # Bytes and "\n" only: read_text() and split() also break at "\r", U+2028 and others, so a
     # hidden break could add an entry (REV-CHK-crlf, #3902).
     names = set()
-    for n, line in enumerate(f.read_bytes().decode("utf-8", "replace").split("\n"), 1):
+    for n, line in enumerate(record_merge.read_list(f, BASELINE).split("\n"), 1):
         bad = [c for c in line if not " " <= c <= "~"]
         if bad:
             raise SystemExit(f"tools/brief_acceptance_baseline.txt:{n}: character {bad[0]!r} outside printable ASCII")

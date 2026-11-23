@@ -124,6 +124,11 @@ type service struct {
 	// it).
 	stuck func()
 
+	// loadWait runs once a ready call has found the load stale and
+	// before it waits on load, so a test can order a second caller
+	// behind the first (a no-op otherwise).
+	loadWait func()
+
 	mu   sync.Mutex
 	cur  loaded
 	held int // payloads allocated and not yet released
@@ -156,7 +161,7 @@ func newService(cfg Config, rt Runtime, log io.Writer) *service {
 		log = io.Discard
 	}
 	return &service{cfg: cfg, rt: rt, log: log, sem: make(chan struct{}, cfg.Concurrent),
-		stuck: func() { os.Exit(1) }, cur: loaded{cause: vision.Unavailable}}
+		stuck: func() { os.Exit(1) }, loadWait: func() {}, cur: loaded{cause: vision.Unavailable}}
 }
 
 // Serve answers each connection on the feed socket on its own goroutine
@@ -213,9 +218,7 @@ func (s *service) conn(c net.Conn, control bool) {
 			return
 		}
 		rep := s.answer(req, r)
-		ok := s.write(c, rep)
-		clear(rep.Template)
-		if !ok {
+		if !s.write(c, rep) {
 			return
 		}
 	}
@@ -233,7 +236,10 @@ func opName(op string) string {
 func errReply(c vision.Cause) vision.Reply { return vision.Reply{Error: c} }
 
 // write sends one reply line; a reply over the bound goes as Unavailable.
+// It zeroes r's template once sent, whether or not the send succeeded:
+// only the reply holds the slice service.encode made (DEV-7).
 func (s *service) write(c net.Conn, r vision.Reply) bool {
+	defer clear(r.Template)
 	b, err := json.Marshal(r)
 	if err != nil || len(b) > vision.MaxReplyLine {
 		fmt.Fprintf(s.log, "vision: reply over %d bytes\n", vision.MaxReplyLine)
@@ -442,6 +448,7 @@ func (s *service) ready() loaded {
 	if fresh(cur) {
 		return cur
 	}
+	s.loadWait()
 	s.load.Lock()
 	defer s.load.Unlock()
 	s.mu.Lock()

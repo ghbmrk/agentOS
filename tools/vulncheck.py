@@ -140,6 +140,10 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("finish_image", ROOT / "image" / "finish_image.py")
 finish_image = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(finish_image)
+# The declared-list reader (#6441), by path as premerge loads its imports: STATIC_ELF_ALLOW is read through it.
+_rm = importlib.util.spec_from_file_location("record_merge", ROOT / "tools" / "record_merge.py")
+record_merge = importlib.util.module_from_spec(_rm)
+_rm.loader.exec_module(record_merge)
 CONFIG = ROOT / "assurance" / "vulncheck.json"
 FIXTURE = ROOT / "tests" / "fixtures" / "vulncheck"
 STDLIB = "stdlib"
@@ -190,6 +194,15 @@ GUESTS = "guest"
 # Where image/build.sh puts the status and os-release of the base root's packages the main tree's
 # static binaries link (image/llamaserver.sh, #5885), scanned as part of the main tree.
 LINKED = "linked"
+# The allow-list image/static_elf.py holds each static ELF file to (#5885), and the packages whose
+# Built-Using sources the image scan does not query (#6481). Every installed package's Built-Using
+# sources are queried except one named in BUILTUSING_EXCLUDE: "PKG GLOB REASON", GLOB a "GLOB linked
+# LIST" entry of STATIC_ELF_ALLOW, so PKG's code reaches the image only as that file's link input,
+# which LIST's own status already queries by package (excluded_packages, exclusion_problems).
+STATIC_ELF_ALLOW = ROOT / "image" / "static_elf.allow"
+BUILTUSING_EXCLUDE = ROOT / "image" / "builtusing.exclude"
+# A linked list's link inputs by the shipped file's SHA-256 (image/guest-shipped.sh SHIPPED_FOR).
+LINKED_INPUTS = "agentos.inputs"
 # A package the image scan adds to every query: source curl at version 0, which every Debian
 # advisory against curl affects. osv-scanner's image scan reports packages with no
 # vulnerabilities when its OSV query fails, and exits 0; a canary with no advisory is that.
@@ -256,19 +269,30 @@ CONTROL_BARE_FILES = ("AGENTOS-VULNCHECK-INLINED-4", "npm:agentos-bare inlined i
 # agentos-guestonly); their base root's manifest also lists agentos-toolchain, which they do not
 # carry, so its advisory (DEB-7) must not be reported. The main tree's static link inputs (#5885;
 # FIXTURE/image/linked) hold libstatic-dev (source agentos-linkedonly), in no other status file, so
-# its advisory (DEB-8) is the main tree's.
+# its advisory (DEB-8) is the main tree's. agentos-fixed is Built-Using agentos-builtusing 1.0-1 (#5885), whose
+# advisory (DEB-9) Debian fixed in 1.0-2: it is queried as the main tree's, and no record can accept it.
+# agentos-nofix is Built-Using agentos-undeclared 1.0-1, whose advisory (DEB-10) has no fix and no
+# record: a stand-in for shim-signed, whose code ships in no listed ELF file, so the main tree must FAIL
+# it (#6481). In the guests agentos-nofix carries the same field, but the control's exclusion list
+# (CONTROL_EXCLUDE) names it there as a recorded link input (guest/agentos.inputs), so DEB-10 must not
+# be reported in the guests.
 CONTROL_IMAGE_FAILS = {(IMAGE, "AGENTOS-VULNCHECK-DEB-1"), (IMAGE, "AGENTOS-VULNCHECK-DEB-4"),
-                       (IMAGE, "AGENTOS-VULNCHECK-DEB-8"),
+                       (IMAGE, "AGENTOS-VULNCHECK-DEB-8"), (IMAGE, "AGENTOS-VULNCHECK-DEB-9"),
+                       (IMAGE, "AGENTOS-VULNCHECK-DEB-10"),
                        (INITRD, "AGENTOS-VULNCHECK-DEB-4"), (INITRD, "AGENTOS-VULNCHECK-DEB-5"),
                        (GUEST, "AGENTOS-VULNCHECK-DEB-4"), (GUEST, "AGENTOS-VULNCHECK-DEB-6")}
 # With the fixture's records: the fixed advisory still fails and its record goes unused, and the
 # main tree's record for agentos-nofix does not accept the same advisory in the initrd or the guests.
 CONTROL_IMAGE_VERDICTS = {(IMAGE, "AGENTOS-VULNCHECK-DEB-1", "FAIL"), (IMAGE, "AGENTOS-VULNCHECK-DEB-4", "accepted #1"),
-                          (IMAGE, "AGENTOS-VULNCHECK-DEB-8", "accepted #1"),
+                          (IMAGE, "AGENTOS-VULNCHECK-DEB-8", "accepted #1"), (IMAGE, "AGENTOS-VULNCHECK-DEB-9", "FAIL"),
+                          (IMAGE, "AGENTOS-VULNCHECK-DEB-10", "FAIL"),
                           (INITRD, "AGENTOS-VULNCHECK-DEB-4", "FAIL"), (INITRD, "AGENTOS-VULNCHECK-DEB-5", "accepted #1"),
                           (GUEST, "AGENTOS-VULNCHECK-DEB-4", "FAIL"), (GUEST, "AGENTOS-VULNCHECK-DEB-6", "accepted #1")}
 # The initrd's status file in the fixture, which the control packs into an initrd (control_image).
 CONTROL_INITRD = FIXTURE / "initrd" / "dpkg-status"
+# The control's allow-list and exclusion list (#6481): agentos-nofix is excluded in the guests only.
+CONTROL_ALLOW = FIXTURE / "static_elf.allow"
+CONTROL_EXCLUDE = FIXTURE / "builtusing.exclude"
 CONTROL_CONFIG = {
     "go_targets": ["gomod"],
     "osv_sources": ["npm/package-lock.json"],
@@ -1431,11 +1455,12 @@ def run_inlined(root, lockfiles, entries, env=None, offline=False, mirror=None, 
     return findings, problems
 
 
-def image_archive(src, dest, status=None):
+def image_archive(src, dest, status=None, excluded=frozenset()):
     """A one-layer docker-archive holding SRC's dpkg status (or STATUS, the initrd's) and
     os-release where a Debian tree keeps them, the input osv-scanner's image scan reads: its
     dpkg extractor takes the ecosystem from os-release and queries each installed package by its
-    source package. The status file gains the canary (CANARY_STANZA)."""
+    source package. The status file gains a stanza per Built-Using source of each package not in
+    EXCLUDED (built_using) and the canary (CANARY_STANZA)."""
     files = {"etc/os-release": pathlib.Path(src) / OS_RELEASE,
              "var/lib/dpkg/status": pathlib.Path(src) / DPKG_STATUS}
     for name, f in files.items():
@@ -1454,7 +1479,7 @@ def image_archive(src, dest, status=None):
         for name, f in files.items():
             data = status if status is not None and name == "var/lib/dpkg/status" else f.read_bytes()
             if name == "var/lib/dpkg/status":
-                data = data.rstrip(b"\n") + b"\n\n" + CANARY_STANZA.encode()
+                data = data.rstrip(b"\n") + b"\n\n" + built_using(data.decode("utf-8", "replace"), excluded).encode() + CANARY_STANZA.encode()
             ti = tarfile.TarInfo(name)
             ti.size, ti.mode = len(data), 0o644
             t.addfile(ti, io.BytesIO(data))
@@ -1471,6 +1496,26 @@ def image_archive(src, dest, status=None):
             ti = tarfile.TarInfo(name)
             ti.size = len(data)
             t.addfile(ti, io.BytesIO(data))
+
+
+def built_using(text, excluded=frozenset()):
+    """A stanza for each source package an installed package's Built-Using field names (#5885 SEL-6):
+    Debian records there the sources whose code a package's binaries carry, such as a static build's
+    libc, so each is queried as part of the same tree, under the binary name PACKAGE+built-using+SOURCE.
+    Every installed package's field is read except a package in EXCLUDED (excluded_packages, #6481):
+    Built-Using is not tied to the ELF allow-list, since boot loaders (PE files) and dynamic programs
+    carry such code too. Each ends in a blank line; "" when none names one."""
+    out = []
+    for stanza in re.split(r"\n\s*\n", text):
+        fields = dict(m.groups() for m in re.finditer(r"(?m)^([A-Za-z-]+):[ \t]*(.*(?:\n[ \t].*)*)", stanza))
+        if not fields.get("Status", "").endswith(" installed") or not fields.get("Package") \
+                or fields["Package"] in excluded:
+            continue
+        for src, version in re.findall(r"([a-z0-9][a-z0-9+.-]*)\s*\(\s*=\s*([^)\s]+)\s*\)", fields.get("Built-Using", "")):
+            out.append(f"Package: {fields['Package']}+built-using+{src}\nStatus: install ok installed\n"
+                       f"Architecture: {fields.get('Architecture', 'all')}\nSource: {src} ({version})\nVersion: {version}\n"
+                       f"Description: tools/vulncheck.py: {fields['Package']} is Built-Using {src}; not a package\n\n")
+    return "".join(sorted(set(out)))
 
 
 def image_findings(doc, where=IMAGE):
@@ -1601,12 +1646,12 @@ def debian_fix(pkg, ids, name, eco):
     return ""
 
 
-def run_image(src, env=None, offline=False, where=IMAGE, status=None):
+def run_image(src, env=None, offline=False, where=IMAGE, status=None, excluded=frozenset()):
     """Findings and problems for one tree of the image at SRC: the main tree's status file, or
-    with STATUS the initrd's."""
+    with STATUS the initrd's; EXCLUDED as image_archive takes it."""
     with tempfile.TemporaryDirectory() as tmp:
         tar = pathlib.Path(tmp) / "packages.tar"
-        image_archive(src, tar, status)
+        image_archive(src, tar, status, excluded)
         doc = osv_scan(["image", "--archive", str(tar)], tmp, env, offline)
     return image_findings(doc, where)
 
@@ -1714,9 +1759,62 @@ def scan(config, root, go_db=None, osv_env=None, offline=False, mirror=None):
     return findings, problems, unused
 
 
-def scan_image(config, src, osv_env=None, offline=False):
+def excluded_packages(path=BUILTUSING_EXCLUDE, allow=STATIC_ELF_ALLOW):
+    """{LIST: {PKG: GLOB}} from PATH's "PKG GLOB REASON" lines (#6481): PKG's Built-Using sources are
+    not queried in linked list LIST's tree. ScanError when either file cannot be read, a line names no
+    reason, or GLOB is not an entry "GLOB linked LIST" of ALLOW: an exclusion holds only for a package
+    whose code reaches the image as a pinned linked file's input, which LIST's status queries."""
+    try:
+        text = pathlib.Path(path).read_text()
+        allow_text = record_merge.read_list(allow, "image/static_elf.allow")
+    except OSError as e:
+        raise ScanError(f"unreadable Built-Using exclusions or allow-list ({e})")
+    linked = {}
+    for line in allow_text.splitlines():
+        parts = line.split("#", 1)[0].split()
+        if len(parts) == 3 and parts[1] == "linked":
+            linked[parts[0]] = parts[2]
+    out = {}
+    for n, line in enumerate(text.splitlines(), 1):
+        parts = line.split("#", 1)[0].split(None, 2)
+        if not parts:
+            continue
+        if len(parts) < 3 or not parts[2].strip():
+            raise ScanError(f"{path}:{n}: not \"PKG GLOB REASON\" (an exclusion needs its reason): {line!r}")
+        pkg, glob = parts[0], parts[1]
+        if glob not in linked:
+            raise ScanError(f"{path}:{n}: {pkg}: {glob} is no \"linked\" entry of {allow}, so nothing shows "
+                            "its code reaches the image only as a recorded link input")
+        out.setdefault(linked[glob], {})[pkg] = glob
+    return out
+
+
+def exclusion_problems(src, excluded):
+    """Each excluded package must be installed in its linked list's status under SRC and recorded
+    there as a link input (LINKED_INPUTS "SHA256 PKG"); else its exclusion names code the scan
+    cannot show is queried."""
+    problems = []
+    for name, pkgs in sorted(excluded.items()):
+        d = pathlib.Path(src) / name
+        try:
+            inputs = {l.split()[1] for l in (d / LINKED_INPUTS).read_text().splitlines() if len(l.split()) == 2}
+            installed = {p for p, _ in dpkg_installed((d / DPKG_STATUS).read_text())}
+        except OSError as e:
+            problems.append(f"{d}: Built-Using exclusions {sorted(pkgs)} uncheckable: {e}")
+            continue
+        for pkg in sorted(pkgs):
+            if pkg not in installed or pkg not in inputs:
+                problems.append(f"{d}: Built-Using exclusion {pkg} ({pkgs[pkg]}) is not an installed, recorded "
+                                f"link input there ({LINKED_INPUTS}, {DPKG_STATUS})")
+    return problems
+
+
+def scan_image(config, src, osv_env=None, offline=False, allow=None, exclude=None):
     """Findings and problems for one image's packages, its main tree's (with its static
     binaries' link inputs), its initrd's and its guests'; each tree's records applied to it alone.
+    Every installed package's Built-Using sources are queried but those EXCLUDE names for a linked
+    list's tree (excluded_packages against ALLOW, by default BUILTUSING_EXCLUDE and STATIC_ELF_ALLOW;
+    exclusion_problems).
 
     A record accepts only an advisory Debian has not fixed in the image's release: once a fix
     ships, the finding fails until the image is rebuilt with it, and the record goes unused."""
@@ -1724,10 +1822,12 @@ def scan_image(config, src, osv_env=None, offline=False):
     if problems:
         return [], problems, []
     records = [r for r in config.get("accepted", []) if r.get("where") in IMAGE_TREES]
+    excluded = excluded_packages(exclude or BUILTUSING_EXCLUDE, allow or STATIC_ELF_ALLOW)
     findings, problems = run_image(src, osv_env, offline)
     problems += manifest_problems(src)
     problems += linked_problems(src)
-    found, probs = run_image(pathlib.Path(src) / LINKED, osv_env, offline)
+    problems += exclusion_problems(src, {k: v for k, v in excluded.items() if k == LINKED})
+    found, probs = run_image(pathlib.Path(src) / LINKED, osv_env, offline, excluded=frozenset(excluded.get(LINKED, ())))
     findings += found
     problems += [f"linked: {p}" for p in probs]
     status, probs = initrd_status(src)
@@ -1739,7 +1839,9 @@ def scan_image(config, src, osv_env=None, offline=False):
     probs = guest_problems(src)
     problems += probs
     if not probs:
-        found, probs = run_image(pathlib.Path(src) / GUESTS, osv_env, offline, GUEST)
+        problems += exclusion_problems(src, {k: v for k, v in excluded.items() if k == GUESTS})
+        found, probs = run_image(pathlib.Path(src) / GUESTS, osv_env, offline, GUEST,
+                                 excluded=frozenset(excluded.get(GUESTS, ())))
         findings += found
         problems += [f"guest: {p}" for p in probs]
     return findings, problems, apply_records([f for f in findings if not f["fixed"]], records)
@@ -1848,6 +1950,16 @@ def verdict(f):
     return f"accepted #{f['accepted_by']}" if "accepted_by" in f else "FAIL"
 
 
+# Every tracked copy of the main-archive snapshot timestamp, which a point-release fix has to move
+# together (#6466, #6538); tests/test_vulncheck.py fails when `git grep` finds a copy not named here.
+SNAPSHOT_PINS = ("image/mkosi/mkosi.conf", "image/enforcer/mkosi/mkosi.conf",
+                 "image/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources",
+                 "image/enforcer/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources",
+                 "image/mkosi/mkosi.finalize (NAME_ONLY_SNAPSHOT, after checking that snapshot's systemd "
+                 "is still NAME_ONLY_SYSTEMD)", "tests/test_image.py (MkosiRunBoundTest)",
+                 "tests/test_image_repro.py (KeyringSpikesTest)")
+
+
 def summary(findings, problems, unused, out=None, config="assurance/vulncheck.json"):
     out = out or sys.stdout
     for f in findings:
@@ -1863,8 +1975,15 @@ def summary(findings, problems, unused, out=None, config="assurance/vulncheck.js
     failing = [f for f in findings if verdict(f) == "FAIL"]
     print(f"{len(findings)} findings, {len(failing)} failing, {len(problems)} problems", file=out)
     if any(f["where"] in IMAGE_TREES and f["fixed"] for f in failing):
-        print("fix: rebuild the image; Debian has fixed each image finding that names a fixed "
-              "version, and no record can accept those", file=out)
+        print("fix: Debian has fixed each image finding that names a fixed version, and no record can "
+              "accept those; the Debian security tracker's entry for the id names the suite that carries "
+              "the fix", file=out)
+        print("fix: if the fix is in the security suite (debian-security), rebuild the image: each "
+              "build reads a fresh security snapshot", file=out)
+        print("fix: if the fix is only in a point release (the main archive), move the main-archive "
+              "snapshot timestamp (Mirror= in image/mkosi/mkosi.conf) in every copy: "
+              f"{', '.join(SNAPSHOT_PINS)}; then update what else CI names, such as image/import_sweep.allow "
+              "hashes", file=out)
     if any(f["where"] == BUNDLED for f in failing):
         print(f"fix: pin a release of the holder whose copy has the fix, or add the id to its "
               f"\"bundled\" entry's ids in {config}, with the advisory's reach in its why, citing an open "
@@ -1963,7 +2082,7 @@ def control():
                             f"{sorted(CONTROL_STILL_FAILS)}: still failing {sorted(failing)}, "
                             f"unused {[r['id'] for r in unused]}")
 
-        img = dict(osv_env=kw["osv_env"], offline=True)
+        img = dict(osv_env=kw["osv_env"], offline=True, allow=CONTROL_ALLOW, exclude=CONTROL_EXCLUDE)
         image = control_image(pathlib.Path(tmp) / IMAGE)
         findings, probs, _ = scan_image(bare, image, **img)
         summary(findings, probs, [])

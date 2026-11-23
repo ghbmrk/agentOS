@@ -568,6 +568,29 @@ class TreeCheckTest(unittest.TestCase):
                 self.assertTrue(any(rel in v for v in check.violations(self.root)))
                 f.unlink()
 
+    # REQ: KRN-2
+    def test_a_user_tmpfiles_d_line_must_not_ship(self):
+        # #6506 L3 7076358038 item 1: root's user manager runs systemd-tmpfiles --user as root, which applies
+        # these lines anywhere (z /etc/agentos 0777), and no check reads them. An empty directory passes.
+        self.assertEqual(check.violations(self.root), [])
+        for d in check.USER_TMPFILES_DIRS:
+            with self.subTest(d=d):
+                (self.root / d).mkdir(parents=True)
+                self.assertEqual(check.violations(self.root), [])
+                f = write(self.root, d + "/x.conf", "z /etc/agentos 0777 - - -\n")
+                self.assertIn(d + ": a user-tmpfiles.d directory that holds something", " | ".join(check.violations(self.root)))
+                f.unlink()
+                (self.root / d).rmdir()
+                write(self.root, d, "")  # not a directory
+                self.assertIn(d + ": a user-tmpfiles.d directory", " | ".join(check.violations(self.root)))
+                (self.root / d).unlink()
+                (self.root / d).symlink_to("/var/tmp")  # a link
+                self.assertIn(d + ": a user-tmpfiles.d directory", " | ".join(check.violations(self.root)))
+                (self.root / d).unlink()
+        self.assertTrue(set(check.USER_TMPFILES_DIRS) >= {"root/.config/user-tmpfiles.d", "etc/xdg/user-tmpfiles.d",
+                                                           "usr/share/user-tmpfiles.d", "root/.local/share/user-tmpfiles.d",
+                                                           "usr/local/share/user-tmpfiles.d", "run/user/0/user-tmpfiles.d"})
+
     def test_owner_state_must_not_ship(self):
         write(self.root, "etc/agentos/agentosd.env", "AGENTOS_OWNER=+15550100\n")
         self.assertIn("etc/agentos", " ".join(check.violations(self.root)))
@@ -4046,7 +4069,9 @@ GUARDED_NAMES = ("sysctl.d", "modprobe.d", "tmpfiles.d", "systemd/network", "sys
                  "udev/rules.d", "modules-load.d", "systemd/system-environment-generators", "binfmt.d",
                  "systemd/system-shutdown", "systemd/system-sleep",
                  # #6312: root's user manager's generators and environment.d.
-                 "systemd/user-generators", "systemd/user-environment-generators", "environment.d")
+                 "systemd/user-generators", "systemd/user-environment-generators", "environment.d",
+                 # #6474: the XDG autostart files systemd-xdg-autostart-generator makes root user units of.
+                 "xdg/autostart")
 # #1543 reviews at bf7e5d3: B1 (C+ on an ancestor of /run/sysctl.d), B2 (a stock link with more
 # after its target, which systemd takes raw), B3 (/etc/sysctl.d and /etc/sysctl.conf) and R1 (every
 # other directory the tree check reads), plus /sys and ".." paths. Each must be refused.
@@ -4095,7 +4120,9 @@ TMPFILES_PROBES = (
     "C /usr/lib/systemd/system-sleep/x - - - - /usr/share/x/x", "f /etc/modules - - - - tun",
     # #6312: root's own environment.d, its parent made writable, and what systemd's 99-environment.conf names.
     "f /root/.config/environment.d/x.conf - - - - LD_PRELOAD=/tmp/x.so", "d /root/.config 0777",
-    "f+ /etc/environment - - - - LD_PRELOAD=/tmp/x.so", "f %h/.config/environment.d/x.conf")
+    "f+ /etc/environment - - - - LD_PRELOAD=/tmp/x.so", "f %h/.config/environment.d/x.conf",
+    # #6474: root's own XDG autostart directory.
+    "f /root/.config/autostart/x.desktop - - - - [Desktop Entry]", "L %h/.config/autostart - - - - /usr/share/x")
 # One probe per guarded name, under each configuration directory (#1543 P/UX B2). /usr is read-only
 # on the box and trixie's /lib is /usr/lib, but the check guards them anyway.
 TMPFILES_PROBES += tuple("f /%s/%s/x" % (top, n) for top in ("etc", "run", "usr/local/lib", "lib") for n in GUARDED_NAMES)
@@ -4444,8 +4471,8 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
                     f.unlink()
 
     def test_without_the_tmpfiles_link_rule_its_links_pass(self):
-        m = self.mutant('            elif typ[:1] == "L" and any(tmpfiles_link_refusal(root, path, p) for p in names[1:]):\n',
-                        "            elif False:\n")
+        m = self.mutant('        elif typ[:1] == "L" and any(tmpfiles_link_refusal(root, path, p) for p in names[1:]):\n',
+                        "        elif False:\n")
         self.tmpfiles("L /etc/udev/hwdb.d - - - - /var/tmp\n")
         self.assertNotIn("x.conf: line", self.v(m))
         self.assertIn("x.conf: line", self.v())
@@ -5157,6 +5184,42 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
             "var/lib/agentos-store", "var/lib/agentos/modem", "var/lib/agentos-wipe")))
 
 
+    def test_a_user_unit_directory_value_the_check_does_not_model_fails_the_build(self):
+        # #6474 (#6506 Security 7077682648): root's user manager's units are read too, quoted values included
+        for rel, text in (("usr/lib/systemd/user/m.service", '[Service]\nStateDirectory="e/agentos"\n'),
+                          ("root/.config/systemd/user/m.service", "[Service]\nCacheDirectory=x%i\n"),
+                          ("etc/systemd/user/m.service.d/x.conf", "[Service]\nConfigurationDirectory=../agentos\n"),
+                          ("usr/share/systemd/user/m.service", "[Service]\nLogsDirectory=/var/log/x\n")):
+            with self.subTest(rel=rel), tempfile.TemporaryDirectory() as t:
+                write(pathlib.Path(t), rel, text)
+                out = check.user_unit_made_dir_violations(t)
+                self.assertEqual(len(out), 1, out)
+                self.assertTrue(out[0].startswith(rel + ": "), out)
+                self.assertIn("in a user unit (#6474)", out[0])
+        with tempfile.TemporaryDirectory() as t:  # a link is read at its file, once; a mask and plain names pass
+            write(pathlib.Path(t), "usr/lib/systemd/user/m.service", "[Service]\nStateDirectory=x\nRuntimeDirectory='y'\n")
+            write(pathlib.Path(t), "usr/lib/systemd/user/ok.service", "[Service]\nStateDirectory=a/b c\n")
+            os.makedirs(os.path.join(t, "etc/systemd/user/default.target.wants"))
+            os.symlink("/usr/lib/systemd/user/m.service", os.path.join(t, "etc/systemd/user/default.target.wants/m.service"))
+            os.symlink("/dev/null", os.path.join(t, "etc/systemd/user/n.service"))
+            os.symlink("/var/tmp/gone", os.path.join(t, "etc/systemd/user/g.service"))
+            out = check.user_unit_made_dir_violations(t)
+        self.assertEqual(len(out), 2, out)
+        self.assertTrue(any(o.startswith("usr/lib/systemd/user/m.service: RuntimeDirectory='y'") for o in out), out)
+        self.assertTrue(any(o.startswith("etc/systemd/user/g.service: a link to /var/tmp/gone") for o in out), out)
+        # #6521 Security 7078329075: a unit directory that is a link, or sits under one, is refused, not read as empty
+        for link, target in (("root/.config/systemd/user", "/usr/share/u"), ("root/.config", "/usr/share/c")):
+            with self.subTest(link=link), tempfile.TemporaryDirectory() as t:
+                write(pathlib.Path(t), "usr/share/u/a.service", '[Service]\nStateDirectory="x y"\n')
+                write(pathlib.Path(t), "usr/share/c/systemd/user/a.service", '[Service]\nStateDirectory="x y"\n')
+                write(pathlib.Path(t), "etc/systemd/user/b.service", '[Service]\nStateDirectory="x y"\n')
+                os.makedirs(os.path.join(t, os.path.dirname(link)), exist_ok=True)
+                os.symlink(target, os.path.join(t, link))
+                out = check.user_unit_made_dir_violations(t)
+                self.assertTrue(any(o.startswith("etc/systemd/user/b.service: StateDirectory=") for o in out), out)
+                self.assertTrue(any(o.startswith(("root/.config/systemd/user: a user unit directory",
+                                                  "root/.config/systemd/user.control: a user unit directory")) for o in out), out)
+
 class ReferenceToolTest(unittest.TestCase):
     """#1531: the differential tests fail, not skip, where CI requires their reference tools."""
     # REQ: DEV-2, CH-9
@@ -5683,7 +5746,9 @@ class ExecAllowTest(unittest.TestCase):
                 "usr/lib/systemd/user-generators/x", "etc/systemd/user-environment-generators/x",
                 "usr/local/lib/systemd/user-environment-generators/x", "usr/lib/systemd/user-environment-generators/x",
                 "etc/environment.d/x.conf", "usr/local/lib/environment.d/x.conf", "usr/lib/environment.d/x.conf",
-                "root/.config/environment.d/x.conf")
+                "root/.config/environment.d/x.conf",
+                # #6474: XDG autostart, which systemd-xdg-autostart-generator makes root user units of.
+                "etc/xdg/autostart/x.desktop", "root/.config/autostart/x.desktop")
     # #2176's failure paths: each runs root code at boot from a file the old check never hashed.
     PATHS = {"usr/lib/modprobe.d/x.conf": "install tun /usr/sbin/sysctl -w net.ipv4.ip_forward=1\n",
              "usr/lib/sysctl.d/x.conf": "kernel.modprobe = /usr/local/bin/x\n",
@@ -5694,7 +5759,9 @@ class ExecAllowTest(unittest.TestCase):
              # #6312's: every unit root's user manager starts loads agentos-x-controlled code as root.
              "etc/environment.d/50-x.conf": "LD_PRELOAD=/var/lib/agentos-x/x.so\n",
              "root/.config/environment.d/50-x.conf": "LD_PRELOAD=/var/lib/agentos-x/x.so\n",
-             "etc/systemd/user-generators/x": "#!/bin/sh\nsysctl -w net.ipv4.ip_forward=1\n"}
+             "etc/systemd/user-generators/x": "#!/bin/sh\nsysctl -w net.ipv4.ip_forward=1\n",
+             # #6474's: a .desktop file the autostart generator turns into a root user unit.
+             "etc/xdg/autostart/x.desktop": "[Desktop Entry]\nType=Application\nExec=/var/lib/agentos-x/x\n"}
     GENERATORS = ("usr/lib/systemd/system-generators/systemd-sysv-generator",
                   "usr/lib/systemd/system-generators/systemd-rc-local-generator")
 
@@ -5938,8 +6005,8 @@ class ExecAllowTest(unittest.TestCase):
                 self.assertEqual(moved.exec_allow_violations(self.root), [])
             with unittest.mock.patch.dict(os.environ, {"SRCDIR": tmp}):
                 want = ["exec.allow: missing; every file in a boot-code channel (udev rules, generators, modules-load.d, "
-                        "modprobe.d, sysctl.d, binfmt.d, shutdown and sleep hooks, root's user manager's generators "
-                        "and environment.d) must be on it (#1556, #2176, #6312)"]
+                        "modprobe.d, sysctl.d, binfmt.d, shutdown and sleep hooks, root's user manager's generators, "
+                        "environment.d and XDG autostart) must be on it (#1556, #2176, #6312)"]
                 self.assertEqual(moved.exec_allow_violations(self.root), want)
                 self.assertIn(want[0], moved.violations(self.root))
 
@@ -6494,6 +6561,14 @@ class UplinkTest(unittest.TestCase):
         # image; the tree check refuses any that would (TreeCheckTest).
         removed = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
         self.assertIn("/usr/lib/systemd/network/80-*.network", removed)
+
+    def test_the_xdg_user_unit_link_is_removed_from_the_image(self):
+        # REQ: KRN-2 (#6521 Security 7078398840): upstream systemd ships etc/xdg/systemd/user -> ../../systemd/user;
+        # user_unit_made_dir_violations refuses a user unit directory that is a link, and etc/systemd/user, which
+        # it aliases, is read already, so the link goes.
+        removed = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
+        self.assertIn("/etc/xdg/systemd/user", removed)
+        self.assertIn("etc/systemd/user", check.USER_UNIT_PATHS)
 
     def test_the_mail_spool_link_is_removed_from_the_image(self):
         # REQ: HW-1, DEV-2 (#1829): Debian's var/spool/mail links to 2775 root:mail var/mail, a step
@@ -7973,8 +8048,8 @@ class MkosiRunBoundTest(unittest.TestCase):
                   '-C image/mkosi -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" '
                   '--environment=AGENTOS_SECURITY_SNAPSHOT="$AGENTOS_SECURITY_SNAPSHOT" '
                   '--extra-tree="$OUT/stage/usr:/usr" --output-dir "$OUT" build 2>&1 | tee "$RUNNER_TEMP/build.log"')
-    MIRROR, SECURITY = "20261001T000000Z", "20261112T180512Z"
-    INDEX = "snapshot.debian.org_archive_debian_20261001T000000Z_dists_trixie_main_binary-amd64_Packages"
+    MIRROR, SECURITY = "20261121T160000Z", "20261112T180512Z"
+    INDEX = "snapshot.debian.org_archive_debian_20261121T160000Z_dists_trixie_main_binary-amd64_Packages"
     SEC = "snapshot.debian.org_archive_debian-security_20261112T180512Z_dists_trixie-security_main_binary-amd64_Packages"
 
     def test_the_one_mkosi_line_is_pinned(self):
@@ -8933,7 +9008,7 @@ class EveryCheckCalledTest(unittest.TestCase):
               "sysctl_byte_violations", "network_violations", "resolved_violations", "tmpfiles_violations",
               "tmpfiles_allow_violations", "exec_allow_violations", "bus_daemon_violations", "made_allow_violations",
               "credstore_violations", "stray_violations", "manager_environment_violations", "unit_made_dirs",
-              "unit_made_paths", "unit_made_refusals", "inside_refusals", "gpt_auto_violations", "noexec_violations",
+              "unit_made_paths", "unit_made_refusals", "user_unit_made_dir_violations", "inside_refusals", "gpt_auto_violations", "noexec_violations",
               "keeper_violations", "isolate_violations", "ram_kept_violations", "kexec_loader_violations",
               "kexec_sysctl_violations", "clerk_key_violations", "assembly_violations", "driver_violations",
               "e2e_violations", "package_file_violations")
