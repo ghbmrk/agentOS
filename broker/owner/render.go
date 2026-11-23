@@ -307,7 +307,8 @@ const (
 	lineFull  = iota
 	lineShort // the same fields and notices in fewer words (CH12V-4)
 	// lineLean is lineShort without the fields CH-12 does not list for a
-	// texted item (Detail, the restart note), pointed to the Wi-Fi page.
+	// texted item (Detail, the restart note, notice times), pointed to
+	// the Wi-Fi page.
 	// It keeps verb, object, recipients, amount, reversibility and every
 	// repeat notice (CH-10, CH-12, OWN-17; L3 on #6625).
 	lineLean
@@ -318,7 +319,15 @@ func (c *Channel) itemLineAs(it Item, lv int) string {
 	s := it.lineAs(lv)
 	short := lv >= lineShort
 	at := func(t time.Time) string { return t.In(c.cfg.Location).Format("15:04 Jan 2") }
-	lean := lv >= lineLean && (it.Detail != "" || !it.Asked.IsZero())
+	// At lineLean a notice keeps its warning but not its time, which
+	// CH-12 does not list either; the Wi-Fi page shows both.
+	lean := lv >= lineLean && (it.Detail != "" || !it.Asked.IsZero() || !it.Sent.IsZero() || !it.Retried.IsZero())
+	when := func(pre string, t time.Time, post string) string {
+		if lv >= lineLean {
+			return ""
+		}
+		return pre + at(t) + post
+	}
 	if !it.Asked.IsZero() && lv < lineLean {
 		if short {
 			s += ", asked " + it.Asked.In(c.cfg.Location).Format("15:04") + " before a restart"
@@ -328,17 +337,17 @@ func (c *Channel) itemLineAs(it Item, lv int) string {
 	}
 	switch {
 	case !it.Sent.IsZero() && it.SentErased && short:
-		s += ", may repeat an erased send (" + at(it.Sent) + ")"
+		s += ", may repeat an erased send" + when(" (", it.Sent, ")")
 	case !it.Sent.IsZero() && it.SentErased:
 		// Only an erased send matched (OP2-ER-2): it may not be this one.
 		s += ", may repeat a send whose record was erased (it went " + at(it.Sent) + "); send it?"
 	case !it.Sent.IsZero() && short:
-		s += ", sent " + at(it.Sent) + "; again?"
+		s += ", sent" + when(" ", it.Sent, "") + "; again?"
 	case !it.Sent.IsZero():
 		// Confirm repeats (D-116): said plainly, as a question.
 		s += ", already sent " + at(it.Sent) + "; send it again?"
 	case !it.Retried.IsZero() && short:
-		s += ", may go twice, tried " + at(it.Retried)
+		s += ", may go twice" + when(", tried ", it.Retried, "")
 	case !it.Retried.IsZero():
 		s += ", may go twice, first tried " + at(it.Retried)
 	}

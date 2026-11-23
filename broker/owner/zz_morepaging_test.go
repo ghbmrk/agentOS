@@ -19,15 +19,17 @@ var pageItemRe = regexp.MustCompile(`[:.?] ([0-9]{1,2}) `)
 // detail, amount and undo wording, and every notice an item line can
 // carry.
 func longItem(i int, worst bool) Item {
-	rcpt := "a" + strings.Repeat("b", 30) + "@" + strings.Repeat("c", 20) + ".example"
-	for len(rcpt)+len(",x@y.example") <= MaxRecipientChars {
-		rcpt += ",x@y.example"
-	}
+	// Each field at its rendered bound: field keeps these whole (no
+	// digit run it collapses), and the recipients are exactly
+	// MaxRecipientChars (L3 on #6625).
+	tail := strings.Repeat(",x@y.example", 3)
+	rcpt := "a" + strings.Repeat("b", MaxRecipientChars-len(tail)-len("a@c.example")) + "@c.example" + tail
 	it := Item{Ref: fmt.Sprint(i), Object: fmt.Sprintf("o%02d", i) + strings.Repeat("O", 37),
-		Recipient: rcpt, Amount: "$" + strings.Repeat("9", 15),
+		Recipient: rcpt, Amount: "EUR 1,234,567.89",
 		Facts: Facts{Verb: "transmitting", RecipientChecked: true, RecipientExists: true, RecipientByOwner: true, HasAmount: true, Amount: 25000}}
 	if worst {
-		t := time.Date(2026, 10, 4, 11, 0, 0, 0, time.UTC)
+		// A two-digit day and hour: the longest notice dates.
+		t := time.Date(2026, 10, 14, 11, 0, 0, 0, time.UTC)
 		it.Detail = strings.Repeat("D", 40)
 		it.UndoBy = strings.Repeat("U", 24)
 		it.Unverified = true
@@ -351,6 +353,19 @@ func TestMoreRefusesAnExpiredRequestItself(t *testing.T) {
 // request text's replies word for word. It uses the longest item line
 // that fits, never the Wi-Fi form at today's bounds.
 func TestMoreWorstPageFitsWithTheLongestID(t *testing.T) {
+	w := longItem(1, true)
+	for name, f := range map[string][2]string{
+		"recipients": {func() string { rc, _ := recipientText(w.Recipient); return rc }(), fmt.Sprint(MaxRecipientChars)},
+		"amount":     {field(w.Amount, 16), "16"},
+		"undo":       {field(w.UndoBy, 24), "24"},
+		"object":     {field(w.Object, 40), "40"},
+		"detail":     {field(w.Detail, 40), "40"},
+		"verb":       {field(w.Facts.Verb, 12), "12"},
+	} {
+		if fmt.Sprint(len(f[0])) != f[1] {
+			t.Fatalf("corpus %s renders as %q, not at its bound %s", name, f[0], f[1])
+		}
+	}
 	// "unchecked": high tier by an unverified recipient, with no amount
 	// (the L3 repro on #6625), where the recipient is the reason for
 	// the code.
