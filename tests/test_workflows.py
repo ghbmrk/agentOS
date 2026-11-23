@@ -199,7 +199,7 @@ PREMERGE_LINES = [
     '  issue_comment:',
     '    types: [created, edited, deleted]',
     '  workflow_run:',
-    '    workflows: [ci, assurance, vulncheck, word-budget, lane-gate, trusted-base, formal, keycheck, image, testkit-image, mutgate, infer-real, vision-real, enforcer-image, camnode-image, drone-sitl]',
+    '    workflows: [ci, assurance, vulncheck, word-budget, lane-gate, trusted-base, formal, keycheck, image, testkit-image, infer-real, vision-real, enforcer-image, camnode-image, drone-sitl]',
     '    types: [completed]',
     '  workflow_dispatch:',
     '    inputs:',
@@ -637,7 +637,7 @@ def workflow_runners(text):
     starts = top.get("jobs", [])
     if len(starts) != 1 or lines[starts[0]].rstrip(SP) != "jobs:":
         return {}, problems + ["needs one block `jobs:`"]
-    jobs, job, key = {}, None, None
+    jobs, job, key, called = {}, None, None, set()
     for l in lines[starts[0] + 1:]:
         indent = len(l) - len(l.lstrip(SP))
         body = re.split(r" +#", l.strip(SP), maxsplit=1)[0]
@@ -665,6 +665,10 @@ def workflow_runners(text):
             key = m.group(1)
             if key == "runs-on":
                 jobs[job].append(m.group(2) or "")
+            elif key == "uses" and LOCAL_CALL.fullmatch(m.group(2) or "") and job not in called:
+                # CI-mutgate-after-ci (#6569): a workflow file in this directory, whose own jobs this reader
+                # checks as it checks every file here; any other reusable workflow's runs-on it cannot see.
+                called.add(job)
             elif key == "uses":
                 problems.append("%s: calls a reusable workflow, whose runs-on this cannot see" % job)
         elif indent > 4 and job and key:
@@ -675,9 +679,15 @@ def workflow_runners(text):
     if not jobs:
         problems.append("no jobs")
     for job, runs in jobs.items():
-        if runs != [RUNNER]:
+        if job in called:
+            if runs:
+                problems.append("%s: calls a workflow and names a runner" % job)
+        elif runs != [RUNNER]:
             problems.append("%s: runs-on %r, must be exactly [%r]" % (job, runs, RUNNER))
     return jobs, problems
+
+
+LOCAL_CALL = re.compile(r"\./\.github/workflows/[a-z0-9-]+\.yml")
 
 
 IMAGE_STEP = (
@@ -740,7 +750,10 @@ SUPERSEDE_LINES = [
 ]
 SUPERSEDE = ["trusted-base.yml", "lane-gate.yml", "word-budget.yml", "formal.yml", "keycheck.yml",
              "ci.yml", "assurance.yml", "vulncheck.yml", "image.yml", "infer-real.yml", "vision-real.yml",
-             "testkit.yml", "enforcer-image.yml", "camnode-image.yml", "drone-sitl.yml", "mutgate.yml"]
+             "testkit.yml", "enforcer-image.yml", "camnode-image.yml", "drone-sitl.yml"]
+# CI-mutgate-after-ci (#6569): a workflow that only ci.yml calls runs inside ci's run, under ci's group; a block of
+# its own would share ci's `github.workflow` name and wait on the run that called it, so it carries none.
+CALLED_BY_CI = {"mutgate.yml"}
 # premerge.yml queues its runs on purpose (its record handling) and never cancels one.
 KEEPS_EVERY_RUN = {"premerge.yml"}
 
@@ -910,6 +923,42 @@ def head_guard_problems(text):
     return []
 
 
+# CI-mutgate-after-ci (#6569): mutgate.yml is called only from ci.yml's `mutgate` job, which needs every other ci job,
+# so a head whose ci fails takes no mutgate runner; it runs on a pull request only, as mutgate.yml's own trigger did.
+CALL_LINES = [
+    "  mutgate:",
+    "    needs: [%s]",
+    "    if: ${{ github.event_name == 'pull_request' }}",
+    "    permissions:",
+    "      contents: read",
+    "      pull-requests: read",
+    "    uses: ./.github/workflows/mutgate.yml",
+]
+
+
+def ci_call_problems(ci, called):
+    """Return why mutgate.yml can run before every other ci job passed, or off a pull request; empty when it cannot."""
+    events, problems = workflow_triggers(called)
+    if problems:
+        return problems
+    if events != ["workflow_call"]:
+        return ["mutgate.yml has a trigger besides workflow_call: %r" % events]
+    if re.search(r"^[\"']?concurrency[\"']?\s*:", called, re.M):
+        return ["mutgate.yml sets a concurrency group, which waits on the ci run that called it"]
+    if "\njobs:\n" not in ci:
+        return ["no `jobs:` line in ci.yml"]
+    code = [l for l in ci.split("\njobs:\n", 1)[1].split("\n") if l.strip(SP) and not l.lstrip(SP).startswith("#")]
+    starts = [i for i, l in enumerate(code) if re.match(r"  \S", l)] + [len(code)]
+    ids = [code[i].strip(SP).rstrip(":") for i in starts[:-1]]
+    if ids.count("mutgate") != 1:
+        return ["ci.yml has %d `mutgate` jobs" % ids.count("mutgate")]
+    k = ids.index("mutgate")
+    want = [l % ", ".join(i for i in ids if i != "mutgate") if "%s" in l else l for l in CALL_LINES]
+    if code[starts[k]:starts[k + 1]] != want:
+        return ["ci's mutgate job is not the pinned pull-request call after every other ci job"]
+    return []
+
+
 def step_script(text, job, step):
     """The run: script of the step named `step` in `job` of a workflow, dedented to column 0."""
     body = text.split("\n  %s:\n" % job, 1)[1]
@@ -943,6 +992,41 @@ class WorkflowTest(unittest.TestCase):
             with self.subTest(f.name):
                 self.assertEqual(supersede_problems(f.name, f.read_text()), [])
         self.assertIn("  cancel-in-progress: false", (WORKFLOWS / "premerge.yml").read_text())
+
+    def test_mutgate_runs_only_after_every_ci_job(self):
+        # CI-mutgate-after-ci (#6569): ci.yml calls mutgate.yml from one job that needs every other ci job, on a pull
+        # request only, and nothing else calls it or triggers it; each weakening of that fails the check.
+        ci, called = (WORKFLOWS / "ci.yml").read_text(), (WORKFLOWS / "mutgate.yml").read_text()
+        self.assertEqual(ci_call_problems(ci, called), [])
+        for f in self.files():
+            if f.name != "ci.yml":
+                self.assertFalse(re.search(r"uses:.*workflows/mutgate\.yml", f.read_text()), f.name)
+        self.assertEqual(CALLED_BY_CI, {"mutgate.yml"})
+        needs = next(l for l in ci.split("\n") if l.startswith("    needs: [unit-tests, checks"))
+        ci_edits = {
+            "a ci job dropped from needs": (needs, needs.replace("hostcheck, ", "").replace(", hostcheck", "")),
+            "runs past a failed job": ("    if: ${{ github.event_name == 'pull_request' }}\n    permissions:\n      contents: read\n      pull-requests",
+                                       "    if: ${{ always() && github.event_name == 'pull_request' }}\n    permissions:\n      contents: read\n      pull-requests"),
+            "on every event": ("    if: ${{ github.event_name == 'pull_request' }}\n    permissions:\n      contents: read\n      pull-requests",
+                               "    permissions:\n      contents: read\n      pull-requests"),
+            "a new ci job it does not wait for": ("\n  mutgate:\n", "\n  late:\n    runs-on: ubuntu-24.04\n  mutgate:\n"),
+            "a second caller": ("\n  mutgate:\n", "\n  mutgate:\n    uses: ./.github/workflows/mutgate.yml\n  mutgate:\n"),
+            "no caller": ("    uses: ./.github/workflows/mutgate.yml", "    runs-on: ubuntu-24.04"),
+        }
+        for edit, (old, new) in ci_edits.items():
+            with self.subTest(edit):
+                self.assertIn(old, ci)
+                self.assertTrue(ci_call_problems(ci.replace(old, new, 1), called), edit)
+        on = "on:\n  workflow_call:\n"
+        called_edits = {
+            "also on pull requests": (on, "on:\n  workflow_call:\n  pull_request:\n"),
+            "on pull requests only": (on, "on:\n  pull_request:\n"),
+            "a concurrency group": (on, on + "concurrency:\n  group: x\n"),
+        }
+        for edit, (old, new) in called_edits.items():
+            with self.subTest(edit):
+                self.assertIn(old, called)
+                self.assertTrue(ci_call_problems(ci, called.replace(old, new, 1)), edit)
 
     def test_supersede_check_catches_each_edit(self):
         # CI-cancel-superseded (#5345): a rerun that cancels, a cancelled main push, one group
@@ -983,7 +1067,7 @@ class WorkflowTest(unittest.TestCase):
                 self.assertTrue(supersede_problems("x.yml", plain.replace("jobs:", block + "jobs:")))
         pinned = plain.replace("jobs:", "\n".join(SUPERSEDE_LINES) + "\njobs:")
         self.assertEqual(supersede_problems("x.yml", pinned), ["a PR workflow missing from SUPERSEDE"])
-        self.assertEqual(supersede_problems("mutgate.yml", pinned), [])
+        self.assertEqual(supersede_problems("formal.yml", pinned), [])
         # A PR workflow: `jobs: ` with a trailing space still exposes its jobs, and
         # a jobs line the check cannot find fails (#5348).
         testkit = (WORKFLOWS / "testkit.yml").read_text()
@@ -1011,8 +1095,8 @@ class WorkflowTest(unittest.TestCase):
                              "\n  push:\n    branches: [main]\n  \"pull_request_review\": {types: [submitted]}\n"]:
                 plain = "name: x\n" + key + ":" + triggers + "permissions:\n  contents: read\njobs:\n"
                 with self.subTest(key=key, triggers=triggers):
-                    self.assertTrue(supersede_problems("mutgate.yml", plain))
-                    self.assertEqual(supersede_problems("mutgate.yml", plain.replace("jobs:", block + "jobs:")), [])
+                    self.assertTrue(supersede_problems("formal.yml", plain))
+                    self.assertEqual(supersede_problems("formal.yml", plain.replace("jobs:", block + "jobs:")), [])
             with self.subTest(key=key, triggers="push"):
                 push = "name: x\n" + key + ":\n  push:\n    paths: [pull_request]\njobs:\n"
                 self.assertEqual(workflow_triggers(push), (["push"], []))
@@ -1052,13 +1136,13 @@ class WorkflowTest(unittest.TestCase):
         # L3 on #5408: a document indented by one space throughout is still one GitHub reads.
         indented = "".join(" " + line for line in plain.splitlines(True))
         self.assertTrue(workflow_triggers(indented)[1])
-        self.assertTrue(supersede_problems("mutgate.yml", indented))
+        self.assertTrue(supersede_problems("formal.yml", indented))
         for name, (old, new) in unread.items():
             with self.subTest(name):
                 self.assertIn(old, plain)
                 text = plain.replace(old, new, 1)
                 self.assertTrue(workflow_triggers(text)[1], name)
-                self.assertTrue(supersede_problems("mutgate.yml", text.replace("jobs:", block + "jobs:")), name)
+                self.assertTrue(supersede_problems("formal.yml", text.replace("jobs:", block + "jobs:")), name)
                 self.assertTrue(supersede_problems("x.yml", text.replace("pull_request", "push")), name)
 
     def test_a_stale_mutgate_run_stops_at_its_first_job(self):
@@ -1156,7 +1240,7 @@ class WorkflowTest(unittest.TestCase):
         plain = "name: x\non:\n  pull_request:\npermissions:\n  contents: read\njobs:\n"
         block = "\n".join(SUPERSEDE_LINES) + "\n"
         group, cancel = SUPERSEDE_LINES[1], SUPERSEDE_LINES[2]
-        self.assertEqual(supersede_problems("mutgate.yml", plain.replace("jobs:", block + "jobs:")), [])
+        self.assertEqual(supersede_problems("formal.yml", plain.replace("jobs:", block + "jobs:")), [])
         for edit, new in {
             "second cancel-in-progress": block + "  cancel-in-progress: true\n",
             "second group": block + "  group: shared\n",
@@ -1165,11 +1249,11 @@ class WorkflowTest(unittest.TestCase):
             "missing key": block.replace(cancel + "\n", ""),
         }.items():
             with self.subTest(edit):
-                self.assertTrue(supersede_problems("mutgate.yml", plain.replace("jobs:", new + "jobs:")), edit)
+                self.assertTrue(supersede_problems("formal.yml", plain.replace("jobs:", new + "jobs:")), edit)
         for edit, new in {"reordered": "concurrency:\n" + cancel + "\n" + group + "\n",
                           "comment and blank line inside": "concurrency:\n  # c\n\n" + group + "\n" + cancel + "\n"}.items():
             with self.subTest(edit):
-                self.assertEqual(supersede_problems("mutgate.yml", plain.replace("jobs:", new + "jobs:")), [], edit)
+                self.assertEqual(supersede_problems("formal.yml", plain.replace("jobs:", new + "jobs:")), [], edit)
 
     def test_unread_yaml_names_the_supported_subset(self):
         # Lens R1 on #5408: flow style, an anchor or a tab-indented block fails with the subset the
@@ -1192,8 +1276,8 @@ class WorkflowTest(unittest.TestCase):
             text = plain.replace("jobs:", block + "jobs:").replace(*new) if isinstance(new, tuple) \
                 else plain.replace("jobs:", new + "jobs:")
             with self.subTest(edit):
-                self.assertIn(SUBSET, supersede_problems("mutgate.yml", text), edit)
-        changed = supersede_problems("mutgate.yml", plain.replace("jobs:", block.replace(cancel, "  cancel-in-progress: true") + "jobs:"))
+                self.assertIn(SUBSET, supersede_problems("formal.yml", text), edit)
+        changed = supersede_problems("formal.yml", plain.replace("jobs:", block.replace(cancel, "  cancel-in-progress: true") + "jobs:"))
         self.assertEqual(len(changed), 1)
         self.assertNotIn(SUBSET, changed)
         self.assertIn("cancel-in-progress is 'true', pinned", changed[0])
@@ -1262,6 +1346,9 @@ class WorkflowTest(unittest.TestCase):
             "keys at six": (head, "\n  checks:\n      runs-on: self-hosted\n"),
             "keys at three": (head, "\n  checks:\n   runs-on: self-hosted\n"),
             "reusable workflow": (head, "\n  checks:\n    uses: other/repo/.github/workflows/x.yml@v1\n"),
+            "local call elsewhere": (head, "\n  checks:\n    uses: ./x/.github/workflows/x.yml\n"),
+            "local call and runs-on": (job, job + "    uses: ./.github/workflows/mutgate.yml\n"),
+            "local call twice": (head, "\n  checks:\n    uses: ./.github/workflows/a.yml\n    uses: ./.github/workflows/b.yml\n"),
             "tab": (job, "    runs-on:\tubuntu-24.04\n"),
             "no-break space after the value": (job, "    runs-on: ubuntu-24.04\u00a0\n"),
             "ideographic space after the value": (job, "    runs-on: ubuntu-24.04\u3000\n"),

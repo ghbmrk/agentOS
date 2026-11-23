@@ -709,7 +709,7 @@ def _named(v, kind, pr):
 # waits on Mark's #2919 paste). PREMERGE-held-rest (#5385) holds every other PR-triggered workflow file too, the slow
 # image and real-model ones included: a long run only delays the merge, while an unheld one merges past a cancel.
 HELD = {"assurance": (), "vulncheck": (), "image": ("image-vulncheck",), "lane-gate": (), "word-budget": (),
-        "formal": (), "keycheck": (), "mutgate": (), "infer-real": (), "vision-real": (), "testkit": (),
+        "formal": (), "keycheck": (), "infer-real": (), "vision-real": (), "testkit": (),
         "enforcer-image": (), "camnode-image": (), "drone-sitl": ()}
 # The PR-triggered workflow files left out of HELD: every job of ci and trusted-base is a required check of main's
 # ruleset, and premerge is the gate itself. A workflow file with a PR trigger is in exactly one of the two (#5385).
@@ -720,10 +720,26 @@ UNHELD = ("ci", "trusted-base", "premerge")
 # keeps the #3532 excusal of a failure the head inherited. PREMERGE-held-class-table (#6425): every HELD workflow has a
 # class here, a test keeps the keys equal to HELD's, and one missing from the table is read as DIFF_GATE (fail closed).
 DIFF_GATE, TREE = "diff-gate", "tree"
-HELD_CLASS = {"mutgate": DIFF_GATE, "lane-gate": DIFF_GATE, "word-budget": DIFF_GATE,
+HELD_CLASS = {"lane-gate": DIFF_GATE, "word-budget": DIFF_GATE,
               "assurance": TREE, "vulncheck": TREE, "image": TREE, "formal": TREE, "keycheck": TREE, "infer-real": TREE,
               "vision-real": TREE, "testkit": TREE, "enforcer-image": TREE, "camnode-image": TREE, "drone-sitl": TREE}
 PASSED = ("success", "skipped")
+# CI-mutgate-after-ci (#6569): mutgate.yml is a reusable workflow that ci.yml's `mutgate` job calls on a pull request once
+# every other ci job passed, so its jobs are `mutgate / <job>` in ci's run, and main's ruleset requires none of them.
+# --check holds `mutgate:<state>` until ci's newest pull_request run on the head completed with success, its one
+# `mutgate / claimed` job succeeded and no `mutgate / ` job failed. The calling job skipped (a ci job failed, or any
+# other cause) leaves no `mutgate / claimed` job, so it holds as mutgate:skipped: a skip never reads as a pass. The gate
+# is owed when main's ci.yml calls mutgate.yml or the head's does, so a PR that drops the call from its own ci.yml still
+# owes it, and a PR from before the call holds until it merges main.
+CI = ".github/workflows/ci.yml"
+MUTGATE_JOB, MUTGATE_CLAIM = "mutgate / ", "mutgate / claimed"
+_CALLS_MUTGATE = re.compile(r"^ +uses: *\./\.github/workflows/mutgate\.yml *(?:#.*)?$", re.M)
+
+
+def _calls_mutgate(cwd, ref):
+    """Whether `ref`'s ci.yml calls mutgate.yml."""
+    shown = subprocess.run(["git", "show", f"{ref}:{CI}"], cwd=cwd, capture_output=True)
+    return not shown.returncode and bool(_CALLS_MUTGATE.search(shown.stdout.decode(errors="replace")))
 NO_RUNS = "needs-runs: every verdict is in; pass --runs <runs.json> (tools/premerge_runs.sh builds it) to read the held checks"
 _GLOB = re.compile(r"[A-Za-z0-9._/*-]+")
 _ITEM = re.compile(r"""\s*-\s*(?:"([^"]*)"|'([^']*)'|([^\s#'"]+))\s*(?:#.*)?""")
@@ -837,12 +853,35 @@ def _base_failed(runs, path, onto, repo):
     return {n for n, c in _jobs(r, 1) or [] if c == "failure"}
 
 
+def mutgate_held(runs, pr, sha):
+    """`mutgate:<state>` unless ci's newest pull_request run on `sha` bound to this PR passed the mutation gate."""
+    bound = [(_bind(r, pr, runs["repo"]), r) for r in runs["head"]
+             if r.get("path") == CI and r.get("head_sha") == sha and r.get("event") == "pull_request"]
+    mine = [r for b, r in bound if b == "ours"]
+    if not mine:
+        return ["mutgate:unbound" if any(b == "unbound" for b, _ in bound) else "mutgate:missing"]
+    r = max(mine, key=lambda r: r.get("id") or 0)
+    if r.get("status") != "completed":
+        return [f"mutgate:{r.get('status') or 'unknown'}"]
+    jobs = _jobs(r, r.get("run_attempt"))
+    if jobs is None:
+        return ["mutgate:unknown"]
+    ours = [(n, c) for n, c in jobs if isinstance(n, str) and n.startswith(MUTGATE_JOB)]
+    claims = [c for n, c in ours if n == MUTGATE_CLAIM]
+    if claims != ["success"]:
+        return [f"mutgate:{claims[0] if len(claims) == 1 and claims[0] else 'skipped'}"]
+    bad = [c for _, c in ours if c not in PASSED]
+    if bad:
+        return [f"mutgate:{bad[0] or 'unknown'}"]
+    return [] if r.get("conclusion") == "success" else [f"mutgate:{r.get('conclusion') or 'unknown'}"]
+
+
 def checks_held(cwd, runs, head="HEAD", base="origin/main"):
     """`<workflow>:<state>` for each HELD workflow whose newest pull_request run on `head` did not pass.
 
     `runs` is {"repo": ..., "pr": {"number", "repo", "branch"}, "head": [...], "base": [...]}: this repository, the PR's
     number and head repository and branch, and the Actions runs (API JSON) on the head and on the merge base, each
-    failed one with a `jobs` list (the head's latest attempt, the base's first). Only this PR's runs count (`_bind`). A run passes on `success` or
+    failed one, and ci's, with a `jobs` list (the head's latest attempt, the base's first). Only this PR's runs count (`_bind`). A run passes on `success` or
     `skipped`, or on `failure` when every failed job is one HELD exempts or one that failed on the merge base too, never in
     a workflow HELD_CLASS does not class TREE.
     A queued, running, cancelled or timed-out run holds, and so does a missing one the workflow's PR trigger owes, as
@@ -875,6 +914,8 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
             if bad and all(c == "failure" and n in excused for n, c in bad):
                 continue
         held.append(f"{name}:{state or 'unknown'}")
+    if _calls_mutgate(cwd, base) or _calls_mutgate(cwd, sha):
+        held += mutgate_held(runs, pr, sha)
     return held
 
 
