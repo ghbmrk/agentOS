@@ -612,7 +612,7 @@ jobs:
           main="$RUNNER_TEMP/main-vulncheck.json"
           if [ "$EVENT" = pull_request ] && git rev-parse -q --verify 'HEAD^2' > /dev/null && \
               curl -fsS --retry 3 -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github.raw" \
-                -o "$main" "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/assurance/vulncheck.json?ref=main"; then
+                -o "$main" "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/assurance/vulncheck.json?ref=refs/heads/main"; then
             inherit=(--inherit "$main" --base 'HEAD^1')
           fi
           python3 tools/vulncheck.py image rec --check-issues --report image-vulncheck-report.json "${inherit[@]}"

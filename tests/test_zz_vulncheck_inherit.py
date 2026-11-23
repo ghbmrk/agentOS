@@ -63,6 +63,12 @@ class ScanTest(unittest.TestCase):
                                          rec("DSA-4", 4, where="broker")])
         self.assertEqual([vulncheck.verdict(f) for f in fs], ["FAIL"] * 4)
 
+    def test_a_main_record_with_no_tree_accepts_nothing(self):
+        # L3 on #6631: a record lacking `where` would match any tree in apply_records; main's must name an image tree.
+        loose = {k: v for k, v in rec("DSA-1", 1).items() if k != "where"}
+        fs, _, _ = self.scan([], [fail("DSA-1")], [loose])
+        self.assertEqual([vulncheck.verdict(f) for f in fs], ["FAIL"])
+
     def test_without_main_records_the_scan_is_unchanged(self):
         fs, _, unused = self.scan([rec("DSA-9", 9)], [fail("DSA-1")])
         self.assertEqual(([vulncheck.verdict(f) for f in fs], [r["id"] for r in unused]), (["FAIL"], ["DSA-9"]))
@@ -104,6 +110,19 @@ class InheritsTest(unittest.TestCase):
         d, main = self.repo("broker/kernel/a.go")
         self.assertEqual(vulncheck.inherited_records(main, "HEAD^1", d), ([rec("DSA-1", 1)], ""))
         d, main = self.repo("image/x")
+        records, why = vulncheck.inherited_records(main, "HEAD^1", d)
+        self.assertIsNone(records)
+        self.assertIn("image/x", why)
+
+    def test_a_file_renamed_out_of_the_inputs_still_counts_as_an_input(self):
+        # L3 on #6631: with rename detection the diff would name only the new path, outside every input.
+        d, main = self.repo("image/x")
+        (d / "image" / "x").write_text("a long enough body for git to see the same file\n" * 4)
+        self.git(d, "add", "-A")
+        self.git(d, "commit", "-qm", "grow")
+        (d / "broker").mkdir()
+        self.git(d, "mv", "image/x", "broker/x")
+        self.git(d, "commit", "-qm", "rename")
         records, why = vulncheck.inherited_records(main, "HEAD^1", d)
         self.assertIsNone(records)
         self.assertIn("image/x", why)
@@ -164,7 +183,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("fetch-depth: 2", job[:job.index("download-artifact")])
         guard = step[step.index("if [ "):step.index("then")]
         for want in ('[ "$EVENT" = pull_request ]', "git rev-parse -q --verify 'HEAD^2'", "curl -fsS",
-                     "contents/assurance/vulncheck.json?ref=main"):
+                     "contents/assurance/vulncheck.json?ref=refs/heads/main"):
             self.assertIn(want, guard)
         self.assertIn("inherit=(--inherit \"$main\" --base 'HEAD^1')", step)
         self.assertIn('python3 tools/vulncheck.py image rec --check-issues --report image-vulncheck-report.json '

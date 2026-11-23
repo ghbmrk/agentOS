@@ -2223,7 +2223,8 @@ def main(argv=None):
                   if main_records is not None else f"inherited mode off: {why}; the full check runs")
             inherited = main_records is not None
         if a.cmd == "image":
-            findings, problems, unused = scan_image(config, a.dir, main_records=main_records or ())
+            findings, problems, unused = (scan_image(config, a.dir, main_records=main_records) if inherited
+                                          else scan_image(config, a.dir))
             if inherited:
                 deferred, unused = unused, []
         else:
