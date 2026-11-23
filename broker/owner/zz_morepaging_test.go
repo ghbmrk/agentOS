@@ -57,50 +57,16 @@ var (
 	nextTailRe = regexp.MustCompile(` Next: MORE \S+ [0-9]{1,2}\.$`)
 )
 
-// pageReplies checks that page p ends with the request text's replies,
-// or a shorter form that keeps the batch's scope, each derived here from
-// the text, not the code: on a page of a batch, the one-item wording is
-// never offered alone, since its YES approves every item (Potency on
-// #6610). It returns the form found: "full", "item" or "scoped".
-func pageReplies(t *testing.T, p, sms string) string {
+// pageReplies checks that page p ends with the request text's replies
+// word for word, then the next MORE while items remain: a page never
+// offers a reply the text does not, or a shorter one that hides what it
+// does (L3 step back on #6610).
+func pageReplies(t *testing.T, p, sms string) {
 	t.Helper()
 	full := textReplies(t, sms)
-	m := expiresRe.FindAllStringIndex(p, -1)
-	if m == nil {
-		t.Fatalf("page has no expiry: %q", p)
+	if got := nextTailRe.ReplaceAllString(p, ""); !strings.HasSuffix(got, " "+full) {
+		t.Fatalf("page %q does not end with the text's replies %q", p, full)
 	}
-	got := nextTailRe.ReplaceAllString(p[m[len(m)-1][1]:], "")
-	if got == full {
-		return "full"
-	}
-	hm := pageHeadRe.FindStringSubmatch(p)
-	if hm == nil {
-		t.Fatalf("page head: %q", p)
-	}
-	id, first, total := hm[1], hm[2], hm[3]
-	if total == "1" {
-		t.Fatalf("one-item page replies %q, want the text's %q", got, full)
-	}
-	var scoped, item string
-	if lm := lowBatchRe.FindStringSubmatch(full); lm != nil {
-		scoped = "Reply YES " + id + " " + lm[2] + " for all " + total + ", or NO " + id + "."
-		item = "Reply YES " + id + " " + lm[2] + " for all " + total + ", YES " + id + " " + first + " " + lm[2] + " for item " + first + " only, or NO " + id + "."
-	} else {
-		gen, _, ok := strings.Cut(strings.TrimPrefix(full, "Reply YES "+id+" "), " (add item numbers to approve some; the rest are denied)")
-		if !ok || !strings.HasPrefix(gen, "and a code from your code generator") {
-			t.Fatalf("unknown batch replies %q", full)
-		}
-		scoped = "Reply YES " + id + " " + gen + ", for all " + total + ", or NO " + id + "."
-		item = "Reply YES " + id + " " + gen + ", for all " + total + "; YES " + id + " " + first + " and a code, for item " + first + " only; or NO " + id + "."
-	}
-	switch got {
-	case item:
-		return "item"
-	case scoped:
-		return "scoped"
-	}
-	t.Fatalf("page replies %q: neither the text's %q nor %q nor %q (page %q)", got, full, item, scoped, p)
-	return ""
 }
 
 var pageHeadRe = regexp.MustCompile(`^([A-Z][A-Z0-9]{0,2}) items? ([0-9]{1,2})(?:-[0-9]{1,2})? of ([0-9]{1,2}):`)
@@ -118,17 +84,12 @@ func walk(t *testing.T, r *rig, id string, n int, sms string) []int {
 			t.Fatalf("%s is not stable: %q then %q", cmd, p, again)
 		}
 		if !strings.HasPrefix(p, id+" item") || !strings.Contains(p, fmt.Sprintf(" of %d:", n)) ||
-			!strings.Contains(p, " Expires ") || !strings.Contains(p, "NO "+id+".") {
+			!strings.Contains(p, " Expires ") && !strings.Contains(p, " before ") || !strings.Contains(p, "NO "+id+".") {
 			t.Fatalf("%s page lacks request, range, expiry or replies: %q", cmd, p)
 		}
 		pageReplies(t, p, sms)
 		body, _, _ := strings.Cut(p, " Expires ")
-		ms := pageItemRe.FindAllStringSubmatch(body, -1)
-		if hm := pageHeadRe.FindStringSubmatch(p); len(ms) == 0 && hm != nil && !strings.Contains(p, " items ") {
-			// A one-item short page: the head names its item.
-			ms = [][]string{{"", hm[2]}}
-		}
-		for _, m := range ms {
+		for _, m := range pageItemRe.FindAllStringSubmatch(body, -1) {
 			k, _ := strconv.Atoi(m[1])
 			seen = append(seen, k)
 		}
@@ -260,6 +221,15 @@ func TestMoreLocalRequestOffersNoTextedYes(t *testing.T) {
 					t.Fatal(err)
 				}
 				sms := r.inbox()
+				// Each repeat notice keeps its warning (L3 release on #6610).
+				notice := map[string]string{
+					"sent":        " again? It was already sent 11:00 Oct 4.",
+					"sent-erased": "? It may repeat a send whose record was erased (11:00 Oct 4).",
+					"retried":     " again? It may go twice; first tried 11:00 Oct 4.",
+				}[name]
+				if !strings.Contains(sms, notice) {
+					t.Fatalf("text %q lacks %q", sms, notice)
+				}
 				p := r.say("MORE " + id)
 				if strings.Contains(p, "YES") || !strings.HasSuffix(p, "NO "+id+".") {
 					t.Fatalf("local page: %q", p)
@@ -267,8 +237,8 @@ func TestMoreLocalRequestOffersNoTextedYes(t *testing.T) {
 				pageReplies(t, p, sms)
 				ask, _, ok := strings.Cut(sms, " Approve or deny on my Wi-Fi page")
 				head := id + " item 1 of 1: 1 "
-				item, _, _ := strings.Cut(strings.TrimPrefix(p, head), " Expires ")
-				if !ok || !strings.HasPrefix(p, head) || item != ask {
+				item, _, _ := strings.Cut(strings.TrimPrefix(p, head), " Approve or deny on my Wi-Fi page")
+				if !ok || !strings.HasPrefix(p, head) || item != ask || strings.Contains(p, " Expires ") {
 					t.Fatalf("page item %q, text question %q (page %q)", item, ask, p)
 				}
 			})
@@ -339,27 +309,6 @@ func TestMoreStatusThroughTheChannelNeedsProof(t *testing.T) {
 	}
 }
 
-// A local request's replies stay page-or-NO in the compact form too: a
-// local request is High, and the local case must come first (L3 on
-// #6610).
-func TestMoreLocalCompactRepliesOfferNoTextedYes(t *testing.T) {
-	r := newRig(t, nil)
-	id, err := r.ch.RequestLocal(longItem(1, true), 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sms := r.inbox()
-	r.ch.mu.Lock()
-	var got []string
-	for _, f := range []int{repliesFull, repliesItem, repliesScoped} {
-		got = append(got, r.ch.repliesLocked(r.ch.open[id], f, 1))
-	}
-	r.ch.mu.Unlock()
-	if g := strings.Join(got, " | "); strings.Contains(g, "YES") || got[1] != textReplies(t, sms) || got[2] != got[1] {
-		t.Fatalf("compact local replies %q, text %q", got, sms)
-	}
-}
-
 // moreLocked refuses a request past its expiry itself, even before
 // expireLocked has closed it.
 func TestMoreRefusesAnExpiredRequestItself(t *testing.T) {
@@ -376,11 +325,11 @@ func TestMoreRefusesAnExpiredRequestItself(t *testing.T) {
 	}
 }
 
-// The long-item fallback in batches (Potency on #6610): with every
-// field at its bound and the longest request ID, every page of a 2- to
-// 20-item batch, low and high tier, fits three segments and keeps the
-// batch's scope; and the item-only YES a page offers approves that item
-// alone.
+// The long-item fallback (L3 step back on #6610): with every field at
+// its bound and the longest request ID and grid cell, every page of a 2-
+// to 20-item batch, low and high tier, fits three segments with the
+// request text's replies word for word. It uses the longest item line
+// that fits, never the Wi-Fi form at today's bounds.
 func TestMoreWorstPageFitsWithTheLongestID(t *testing.T) {
 	for _, high := range []bool{false, true} {
 		for _, n := range []int{2, 4, 20} {
@@ -408,14 +357,29 @@ func TestMoreWorstPageFitsWithTheLongestID(t *testing.T) {
 				r.ch.open[long] = req
 				var pages []string
 				for k := 1; k <= n; k++ {
-					pages = append(pages, r.ch.moreLocked(long, k, r.clock()))
+					p := r.ch.moreLocked(long, k, r.clock())
+					left := []int{}
+					for i := k - 1; i < n; i++ {
+						left = append(left, i)
+					}
+					// The longest form that fits, and no longer one.
+					var lv int
+					for lv = lineFull; lv < pageWiFi; lv++ {
+						if fits(r.ch.pageLocked(req, left, 1, lv)) {
+							break
+						}
+					}
+					if lv == pageWiFi || p != r.ch.pageLocked(req, left, 1, lv) {
+						t.Errorf("page %d: form %d, got %q", k, lv, p)
+					}
+					pages = append(pages, p)
 				}
 				r.ch.mu.Unlock()
 				sms = strings.ReplaceAll(sms, " "+id+" ", " "+long+" ")
 				sms = strings.ReplaceAll(sms, " "+id+".", " "+long+".")
 				for k, p := range pages {
 					r.checkFormat(p)
-					if !strings.HasPrefix(p, fmt.Sprintf("%s item %d of %d:", long, k+1, n)) {
+					if !strings.HasPrefix(p, fmt.Sprintf("%s item %d of %d: %d ", long, k+1, n, k+1)) {
 						t.Fatalf("page %d: %q", k+1, p)
 					}
 					pageReplies(t, p, sms)
@@ -423,10 +387,16 @@ func TestMoreWorstPageFitsWithTheLongestID(t *testing.T) {
 			})
 		}
 	}
-	// End to end: a compact page's item-only YES approves that item alone.
+}
+
+// The reviewer's repro on #6610: page 2 of a 20-item worst batch says,
+// as the request text does, that a YES naming some items denies the
+// rest; and that YES then approves item 2 alone and denies the rest,
+// as said.
+func TestMorePageSaysThePartialYesDeniesTheRest(t *testing.T) {
 	r := newRig(t, nil)
 	var items []Item
-	for i := 1; i <= 4; i++ {
+	for i := 1; i <= 20; i++ {
 		it := longItem(i, true)
 		it.Amount, it.Facts.HasAmount, it.Facts.Amount = "", false, 0
 		items = append(items, it)
@@ -434,22 +404,28 @@ func TestMoreWorstPageFitsWithTheLongestID(t *testing.T) {
 	id, _ := r.ch.Request(items, 0)
 	sms := r.inbox()
 	p := r.say("MORE " + id + " 2")
-	if form := pageReplies(t, p, sms); form != "item" {
-		t.Fatalf("4-item worst page offers no item-only YES (%s): %q", form, p)
+	pageReplies(t, p, sms)
+	if !strings.Contains(p, " for some (the rest are denied), or NO "+id+".") {
+		t.Fatalf("page 2 hides the denial: %q", p)
 	}
-	yes := regexp.MustCompile(`YES ` + id + ` 2 [0-9]{6}`).FindString(p)
-	r.say(yes)
-	for _, d := range r.decisions() {
-		if d.Approved != (d.Item == 2) {
-			t.Fatalf("%q decided %+v", yes, d)
+	code := lowCodeRe.FindStringSubmatch(sms)
+	r.say("YES " + id + " 2 " + code[2])
+	d := r.decisions()
+	if len(d) != 20 {
+		t.Fatalf("decided %d items: %+v", len(d), d)
+	}
+	for _, x := range d {
+		if x.Approved != (x.Item == 2) {
+			t.Fatalf("partial YES decided %+v", x)
 		}
 	}
 }
 
-// Every shorter reply form, low and high tier, keeps the batch's scope
-// as pageReplies derives it from the request text, including forms the
-// worst page does not need at today's field bounds.
-func TestMoreShortReplyFormsKeepTheBatchScope(t *testing.T) {
+// The Wi-Fi form, a bound should a field ever outgrow the shorter lines,
+// keeps the head, names the item and leaves its fields to the page, and
+// ends with the text's replies and the next MORE; a local request keeps
+// its question in every form.
+func TestMoreWiFiFormKeepsHeadAndReplies(t *testing.T) {
 	for _, high := range []bool{false, true} {
 		r := newRig(t, nil)
 		mk := lowItem
@@ -458,14 +434,41 @@ func TestMoreShortReplyFormsKeepTheBatchScope(t *testing.T) {
 		}
 		id, _ := r.ch.Request([]Item{mk("a"), mk("b"), mk("c"), mk("d")}, 0)
 		sms := r.inbox()
-		for form, want := range map[int]string{repliesItem: "item", repliesScoped: "scoped"} {
-			r.ch.mu.Lock()
-			req := r.ch.open[id]
-			p := fmt.Sprintf("%s item 2 of 4: x. Expires %s. %s", id, req.expires.In(time.UTC).Format("15:04"), r.ch.repliesLocked(req, form, 2))
-			r.ch.mu.Unlock()
-			if got := pageReplies(t, p, sms); got != want {
-				t.Fatalf("high %v form %d: %s, want %s: %q", high, form, got, want, p)
-			}
+		r.ch.mu.Lock()
+		p := r.ch.pageLocked(r.ch.open[id], []int{1, 2, 3}, 1, pageWiFi)
+		r.ch.mu.Unlock()
+		pageReplies(t, p, sms)
+		want := id + " item 2 of 4: 2 is too long to text; see it on my Wi-Fi page. Expires "
+		if !strings.HasPrefix(p, want) || !strings.HasSuffix(p, " Next: MORE "+id+" 3.") {
+			t.Fatalf("high %v Wi-Fi form: %q", high, p)
 		}
+	}
+	r := newRig(t, nil)
+	id, _ := r.ch.RequestLocal(longItem(1, true), 0)
+	sms := r.inbox()
+	r.ch.mu.Lock()
+	p := r.ch.pageLocked(r.ch.open[id], []int{0}, 1, pageWiFi)
+	r.ch.mu.Unlock()
+	if p != id+" item 1 of 1: 1 "+sms {
+		t.Fatalf("local Wi-Fi form %q, text %q", p, sms)
+	}
+}
+
+// The request text's pointer names the first item it left out, so the
+// owner's first MORE page is new to them, and one item left is "Item n".
+func TestTextPointsMoreAtTheFirstItemLeftOut(t *testing.T) {
+	r := newRig(t, nil)
+	var items []Item
+	for i := 1; i <= 20; i++ {
+		items = append(items, longItem(i, false))
+	}
+	id, _ := r.ch.Request(items, 0)
+	sms := r.inbox()
+	m := regexp.MustCompile(` Items ([0-9]+)-20: MORE ` + id + ` ([0-9]+)\.`).FindStringSubmatch(sms)
+	if m == nil || m[1] != m[2] || m[1] == "1" {
+		t.Fatalf("pointer: %q", sms)
+	}
+	if p := r.say("MORE " + id + " " + m[2]); !regexp.MustCompile(`^` + id + ` items? ` + m[2] + `[-0-9]* of 20: ` + m[2] + ` `).MatchString(p) {
+		t.Fatalf("pointer %q leads to %q", m[0], p)
 	}
 }

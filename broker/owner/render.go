@@ -297,17 +297,26 @@ func ItemSum(it Item) string {
 }
 
 // itemLine is an item's line as a text shows it, in the owner's time zone.
-func (c *Channel) itemLine(it Item) string { return c.itemLineAs(it, false) }
+func (c *Channel) itemLine(it Item) string { return c.itemLineAs(it, lineFull) }
 
-// itemLineAs is itemLine, or with short its same fields and notices in
-// fewer words, as question's short form (CH12V-4), for a MORE page whose
-// one item would not fit three segments otherwise.
-func (c *Channel) itemLineAs(it Item, short bool) string {
-	s := it.lineAs(short)
+// Item line forms, each shorter than the one before, for a MORE page
+// whose one item would not fit three segments with the request text's
+// replies. A page shortens its item line, never its replies (L3 step
+// back on #6610).
+const (
+	lineFull  = iota
+	lineShort // the same fields and notices in fewer words (CH12V-4)
+	lineCount // lineShort, with recipients counted and left to the Wi-Fi page
+)
+
+// itemLineAs is itemLine in form lv.
+func (c *Channel) itemLineAs(it Item, lv int) string {
+	s := it.lineAs(lv)
+	short := lv >= lineShort
 	at := func(t time.Time) string { return t.In(c.cfg.Location).Format("15:04 Jan 2") }
 	if !it.Asked.IsZero() {
 		if short {
-			s += ", asked " + it.Asked.In(c.cfg.Location).Format("15:04") + ", re-sent"
+			s += ", asked " + it.Asked.In(c.cfg.Location).Format("15:04") + " before a restart"
 		} else {
 			s += ", asked " + it.Asked.In(c.cfg.Location).Format("15:04") + ", re-sent after restart"
 		}
@@ -394,10 +403,13 @@ func (c *Channel) question(it Item, short bool) string {
 	return s
 }
 
-func (it Item) line() string { return it.lineAs(false) }
+func (it Item) line() string { return it.lineAs(lineFull) }
 
-// lineAs is line, or with short its UNVERIFIED mark in fewer words.
-func (it Item) lineAs(short bool) string {
+// lineAs is line in form lv (itemLineAs): from lineShort its UNVERIFIED
+// mark in fewer words, and at lineCount its recipients as a count, in
+// the wording a set too long to text already uses.
+func (it Item) lineAs(lv int) string {
+	short := lv >= lineShort
 	s := field(it.Facts.Verb, 12) + " " + field(it.Object, 40)
 	if it.Detail != "" {
 		s += ", " + field(it.Detail, 40)
@@ -408,7 +420,7 @@ func (it Item) lineAs(short bool) string {
 		s = "UNVERIFIED, details on the Wi-Fi page: " + s
 	}
 	if it.Recipient != "" {
-		if r, ok := recipientText(it.Recipient); ok {
+		if r, ok := recipientText(it.Recipient); ok && lv < lineCount {
 			s += " to " + r
 		} else {
 			n := len(strings.Split(it.Recipient, ","))
