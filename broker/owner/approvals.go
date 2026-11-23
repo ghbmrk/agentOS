@@ -298,40 +298,7 @@ func (c *Channel) renderLocked(r *request) string {
 	exp := r.expires.In(c.cfg.Location).Format("15:04")
 	var replies string
 	if r.local {
-		// Only the verified verb, object and recipient count: the page
-		// shows the rest (Security D4, UX A2).
-		it := r.items[0]
-		n := len(strings.Split(it.Recipient, ","))
-		pre := ""
-		if it.Unverified {
-			pre = "UNVERIFIED: "
-		}
-		if !it.Sent.IsZero() && it.SentErased {
-			// Only an erased send matched (OP2-ER-2): the notice says it
-			// may repeat one, never that this one was sent.
-			return fmt.Sprintf("%sCan I %s \"%s\"? It may repeat a send whose record was erased (%s). Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
-				pre, field(it.Facts.Verb, 12), field(it.Object, 40), it.Sent.In(c.cfg.Location).Format("15:04 Jan 2"), exp, r.id)
-		}
-		if !it.Sent.IsZero() {
-			// A repeat of a send known to have gone (confirm repeats,
-			// D-116): the notice says so and asks.
-			return fmt.Sprintf("%sCan I %s \"%s\" again? It was already sent %s. Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
-				pre, field(it.Facts.Verb, 12), field(it.Object, 40), it.Sent.In(c.cfg.Location).Format("15:04 Jan 2"), exp, r.id)
-		}
-		if !it.Retried.IsZero() {
-			// An owner retry (OP-2): the notice warns of a duplicate and
-			// names no recipient, which the page shows.
-			return fmt.Sprintf("%sCan I %s \"%s\" again? It may go twice; first tried %s. Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
-				pre, field(it.Facts.Verb, 12), field(it.Object, 40), it.Retried.In(c.cfg.Location).Format("15:04 Jan 2"), exp, r.id)
-		}
-		if SMSApprovable(it) {
-			// A change that needs the page's confirmation (CH-3,
-			// Security Q1 on P2-2a part 2): only NO by text.
-			return fmt.Sprintf("%sCan I %s \"%s\"? Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
-				pre, field(it.Facts.Verb, 12), field(it.Object, 40), exp, r.id)
-		}
-		return fmt.Sprintf("%sCan I %s \"%s\" to %d recipient%s? I can't show them in a text. Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
-			pre, field(it.Facts.Verb, 12), field(it.Object, 40), n, map[bool]string{true: "s"}[n != 1], exp, r.id)
+		return c.localAsk(r.items[0]) + " " + c.repliesLocked(r, false)
 	}
 	replies = c.repliesLocked(r, false)
 	if len(r.items) == 1 {
@@ -386,19 +353,37 @@ func (c *Channel) repliesLocked(r *request, compact bool) string {
 	}
 }
 
-// localLine is a local-only item's line on a MORE page: only what its
-// request text shows (the UNVERIFIED mark, verb, object and recipient
-// count), never the fields that text leaves to the page (Security D4).
-func localLine(it Item) string {
-	s := field(it.Facts.Verb, 12) + " \"" + field(it.Object, 40) + "\""
+// localAsk is a local-only item's question as its request text asks it,
+// before the replies: only the verified verb, object and recipient count,
+// with any repeat notice; the page shows the rest (Security D4, UX A2).
+// The request text and its MORE page both use it, so they cannot drift.
+func (c *Channel) localAsk(it Item) string {
+	n := len(strings.Split(it.Recipient, ","))
+	pre := ""
 	if it.Unverified {
-		s = "UNVERIFIED: " + s
+		pre = "UNVERIFIED: "
 	}
-	if it.Recipient != "" && !SMSApprovable(it) {
-		n := len(strings.Split(it.Recipient, ","))
-		s += fmt.Sprintf(" to %d recipient%s", n, map[bool]string{true: "s"}[n != 1])
+	at := func(t time.Time) string { return t.In(c.cfg.Location).Format("15:04 Jan 2") }
+	verb, obj := field(it.Facts.Verb, 12), field(it.Object, 40)
+	switch {
+	case !it.Sent.IsZero() && it.SentErased:
+		// Only an erased send matched (OP2-ER-2): the notice says it
+		// may repeat one, never that this one was sent.
+		return fmt.Sprintf("%sCan I %s \"%s\"? It may repeat a send whose record was erased (%s).", pre, verb, obj, at(it.Sent))
+	case !it.Sent.IsZero():
+		// A repeat of a send known to have gone (confirm repeats,
+		// D-116): the notice says so and asks.
+		return fmt.Sprintf("%sCan I %s \"%s\" again? It was already sent %s.", pre, verb, obj, at(it.Sent))
+	case !it.Retried.IsZero():
+		// An owner retry (OP-2): the notice warns of a duplicate and
+		// names no recipient, which the page shows.
+		return fmt.Sprintf("%sCan I %s \"%s\" again? It may go twice; first tried %s.", pre, verb, obj, at(it.Retried))
+	case SMSApprovable(it):
+		// A change that needs the page's confirmation (CH-3,
+		// Security Q1 on P2-2a part 2): only NO by text.
+		return fmt.Sprintf("%sCan I %s \"%s\"?", pre, verb, obj)
 	}
-	return s + "; details on my Wi-Fi page"
+	return fmt.Sprintf("%sCan I %s \"%s\" to %d recipient%s? I can't show them in a text.", pre, verb, obj, n, map[bool]string{true: "s"}[n != 1])
 }
 
 // moreLocked is CH-12's read-only MORE (D-079): the page of request id
@@ -436,11 +421,12 @@ func (c *Channel) moreLocked(id string, from int, now time.Time) string {
 			fmt.Fprintf(&b, "%s items %d-%d of %d:", id, first, last, len(r.items))
 		}
 		for _, i := range left[:shown] {
-			line := c.itemLineAs(r.items[i], short)
 			if r.local {
-				line = localLine(r.items[i])
+				// Exactly the request text's question (Security D4).
+				fmt.Fprintf(&b, " %d %s", i+1, c.localAsk(r.items[i]))
+				continue
 			}
-			fmt.Fprintf(&b, " %d %s.", i+1, line)
+			fmt.Fprintf(&b, " %d %s.", i+1, c.itemLineAs(r.items[i], short))
 		}
 		fmt.Fprintf(&b, " Expires %s. %s", exp, c.repliesLocked(r, short))
 		if shown < len(left) {

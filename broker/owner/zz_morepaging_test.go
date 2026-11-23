@@ -200,29 +200,45 @@ func TestMoreHasNoStaleView(t *testing.T) {
 }
 
 // A local-only request's page offers only the page or NO by text, never
-// a texted YES (CH-3, tier separation), and shows only what its request
-// text shows: no field that text leaves to the page (Security D4), even
-// for an item at every field's bound.
+// a texted YES (CH-3, tier separation), and its item is exactly the
+// request text's question: every notice the text carries and no fact it
+// leaves to the page (Security D4), in every local branch.
 func TestMoreLocalRequestOffersNoTextedYes(t *testing.T) {
-	for _, worst := range []bool{false, true} {
-		r := newRig(t, nil)
-		it := longItem(1, worst)
-		it.Detail, it.UndoBy = "DETAILWITHHELD", "UNDOWITHHELD"
-		it.Recipient = "not a canonical recipient, " + strings.Repeat("r,", 40) + "z"
-		id, err := r.ch.RequestLocal(it, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		sms := r.inbox()
-		p := r.say("MORE " + id)
-		if strings.Contains(p, "YES") || !strings.Contains(p, "Wi-Fi page") || !strings.HasSuffix(p, "NO "+id+".") {
-			t.Fatalf("local page: %q", p)
-		}
-		pageReplies(t, p, sms)
-		for _, f := range []string{"DETAILWITHHELD", "UNDOWITHHELD", "9999", "canonical", "undone", "asked", "erased"} {
-			if strings.Contains(p, f) && !strings.Contains(sms, f) {
-				t.Fatalf("local page shows %q, which its text withholds: %q (text %q)", f, p, sms)
-			}
+	tm := time.Date(2026, 10, 4, 11, 0, 0, 0, time.UTC)
+	branches := map[string]func(*Item){
+		"recipients":   func(it *Item) {},
+		"page-confirm": func(it *Item) { it.Recipient = "" },
+		"sent":         func(it *Item) { it.Sent = tm },
+		"sent-erased":  func(it *Item) { it.Sent, it.SentErased = tm, true },
+		"retried":      func(it *Item) { it.Retried = tm },
+	}
+	for name, set := range branches {
+		for _, worst := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s-worst%v", name, worst), func(t *testing.T) {
+				r := newRig(t, nil)
+				it := longItem(1, false)
+				it.Recipient = "not a canonical recipient, " + strings.Repeat("r,", 40) + "z"
+				if worst {
+					it.Detail, it.UndoBy, it.Unverified, it.Asked = "DETAILWITHHELD", "UNDOWITHHELD", true, tm
+				}
+				set(&it)
+				id, err := r.ch.RequestLocal(it, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				sms := r.inbox()
+				p := r.say("MORE " + id)
+				if strings.Contains(p, "YES") || !strings.HasSuffix(p, "NO "+id+".") {
+					t.Fatalf("local page: %q", p)
+				}
+				pageReplies(t, p, sms)
+				ask, _, ok := strings.Cut(sms, " Approve or deny on my Wi-Fi page")
+				head := id + " item 1 of 1: 1 "
+				item, _, _ := strings.Cut(strings.TrimPrefix(p, head), " Expires ")
+				if !ok || !strings.HasPrefix(p, head) || item != ask {
+					t.Fatalf("page item %q, text question %q (page %q)", item, ask, p)
+				}
+			})
 		}
 	}
 }
