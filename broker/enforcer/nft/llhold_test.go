@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -97,7 +98,7 @@ func TestLinkLocalIsHeld(t *testing.T) {
 	spoof := func(s *side, src string) {
 		t.Helper()
 		h.frame(h.hosts[s.seg+"2"], 0x86dd, s.hwE, udp6(src, s.enf, 9801, 9, []byte("x")))
-		time.Sleep(100 * time.Millisecond)
+		h.barrier(s.seg+"2", s.ifc)
 	}
 	// query opens a UDP flow from the first host's link-local address to
 	// the enforcer's resolver port (the harness's listener echoes it).
@@ -180,7 +181,7 @@ func TestLinkLocalIsHeld(t *testing.T) {
 			// with its own hardware address.
 			na := append(binary.BigEndian.AppendUint32([]byte{136, 0, 0, 0}, 0x20000000), net.ParseIP(s.a).To16()...)
 			h.frame(h.hosts[seg+"2"], 0x86dd, allNodes, icmp6(s.a, "ff02::1", append(na, append([]byte{2, 1}, s.hwB...)...)))
-			time.Sleep(100 * time.Millisecond)
+			h.barrier(seg+"2", s.ifc)
 			o.entry = h.neighbour(s.ifc, s.a)
 			if o.entry == s.hwA.String() {
 				f.say("q2")
@@ -295,4 +296,62 @@ func udp6(src, dst string, sport, dport int, payload []byte) []byte {
 	hdr := binary.BigEndian.AppendUint16([]byte{0x60, 0, 0, 0}, uint16(len(u)))
 	hdr = append(append(append(hdr, unix.IPPROTO_UDP, 64), s...), d...)
 	return append(hdr, u...)
+}
+
+// barrierProto is the IEEE local experimental EtherType (802 clause 9.2):
+// nothing in the enforcer's rulesets or stack acts on it, so a frame of it
+// passes every load's netdev chains (policy accept) and reaches only the
+// socket barrier opens.
+const barrierProto = 0x88b5
+
+var barriers atomic.Uint32
+
+// barrier returns once the enforcer has processed every frame and packet
+// host from sent toward its interface ifc before the call. It replaces a
+// fixed sleep before reading what those frames did, so a read on a loaded
+// runner no longer precedes the kernel's work.
+//
+// A packet from's stack holds for a neighbour it is still resolving goes
+// out after anything sent now, so barrier first waits until from has no
+// incomplete neighbour entry. It then sends a frame of barrierProto from
+// from and waits for it on ifc. A host's frames reach the enforcer in the
+// order it sent them, and the enforcer's receive path runs each frame's
+// hooks, set updates and neighbour changes before it takes the next, so the
+// frame's arrival means the ones before it are done (the same order
+// TestNeighboursFollowHolds's settle rests on).
+func (h *home) barrier(from, ifc string) {
+	t := h.t
+	t.Helper()
+	x := h.hosts[from]
+	if !pollUntil(neighDeadline, func() bool {
+		return strings.TrimSpace(h.in(x, "ip", "neigh", "show", "dev", "eth0", "nud", "incomplete")) == ""
+	}) {
+		t.Fatalf("%s still resolves a neighbour after %v: %s", from, neighDeadline, h.in(x, "ip", "neigh", "show", "dev", "eth0"))
+	}
+	in, err := net.InterfaceByName(ifc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proto := uint16(barrierProto<<8&0xff00 | barrierProto>>8)
+	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_DGRAM, int(proto))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	if err := unix.Bind(fd, &unix.SockaddrLinklayer{Protocol: proto, Ifindex: in.Index}); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &unix.Timeval{Usec: 100000}); err != nil {
+		t.Fatal(err)
+	}
+	nonce := binary.BigEndian.AppendUint32([]byte("barrier "), barriers.Add(1))
+	h.frame(x, barrierProto, bcast, nonce)
+	buf := make([]byte, 64)
+	for end := time.Now().Add(neighDeadline); time.Now().Before(end); {
+		n, _, err := unix.Recvfrom(fd, buf, 0)
+		if err == nil && string(buf[:n]) == string(nonce) {
+			return
+		}
+	}
+	t.Fatalf("%s's barrier frame did not reach %s within %v", from, ifc, neighDeadline)
 }

@@ -530,13 +530,24 @@ func TestSpoofedSourceDropped(t *testing.T) {
 			}
 		})
 	}
-	time.Sleep(100 * time.Millisecond)
+	// The real answer comes first, so conntrack has seen the flow's reply
+	// before anything is forged on it.
+	var got []string
+	buf := make([]byte, 64)
+	pc.SetReadDeadline(time.Now().Add(neighDeadline))
+	if n, from, err := pc.ReadFromUDP(buf); err == nil {
+		got = append(got, from.String()+" "+string(buf[:n]))
+	}
 	spoof("core", netAllow, enfWAN, 5300, 40053, "forged")
 	// A device poses as the core to the enforcer's resolver port.
 	spoof("101", "10.50.0.2", enfAddr("core"), 5300, 53, "as-core")
-	var got []string
-	pc.SetReadDeadline(time.Now().Add(time.Second))
-	buf := make([]byte, 64)
+	// Each forged datagram the enforcer drops moves the counter, so once
+	// it has moved by all six none is still on its way; one that got
+	// through instead leaves the counter short and is read below.
+	if !pollUntil(neighDeadline, func() bool { return h.counter(Spoofed)-before >= 6 }) {
+		t.Errorf("spoofed counter moved %d within %v, want at least 6", h.counter(Spoofed)-before, neighDeadline)
+	}
+	pc.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
 	for {
 		n, from, err := pc.ReadFromUDP(buf)
 		if err != nil {
@@ -546,8 +557,5 @@ func TestSpoofedSourceDropped(t *testing.T) {
 	}
 	if !slices.Equal(got, []string{netAllow + ":5300 query"}) {
 		t.Errorf("the enforcer's upstream socket read %q, want only the real answer", got)
-	}
-	if n := h.counter(Spoofed) - before; n < 6 {
-		t.Errorf("spoofed counter moved %d, want at least 6", n)
 	}
 }
