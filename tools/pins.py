@@ -81,7 +81,7 @@ FETCH_EXEMPT = {
                                     ".curlrc; downloads nothing"),
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
     "tests/test_image.py": (1, "a busybox wget shebang as fixture text"),
-    "tests/test_pins.py": (210, "this reader's test cases"),
+    "tests/test_pins.py": (228, "this reader's test cases"),
     "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
@@ -200,6 +200,59 @@ def tool_sites(line, credit=True):
     return n
 
 
+# `${X:-npm}`, `${X/#/npm}` and every other operator form, innermost first; each static piece of the operand
+# is one reading.
+PARAM = re.compile(r"\$\{[#!]?[A-Za-z_0-9@*?-]+([^A-Za-z_0-9{}][^{}]*)\}")
+BRACE = re.compile(r"\{([^{}]*,[^{}]*)\}|\{(-?\w)\.\.(-?\w)(?:\.\.-?[0-9]+)?\}")
+EXPAND_MAX = 256
+
+
+def _expansions(word):
+    """The static readings of shell text, quotes removed: each static piece of a `${name<op>word}` operand
+    taken and each
+    `{a,b}` list and `{a..c}` sequence expanded, innermost first, with empty `$()` and backtick pairs dropped;
+    None past EXPAND_MAX readings. A value computed at run time stays unread."""
+    out, todo = set(), [re.sub(r"\$\(\s*\)|`\s*`", "", word)]
+    while todo:
+        w = todo.pop()
+        m = PARAM.search(w) or BRACE.search(w)
+        if not m:
+            out.add(w)
+        elif m.re is PARAM:
+            todo.extend(w[:m.start()] + x + w[m.end():] for x in set(re.split(r"[-:=+?/#%^,@]+", m.group(1))))
+        else:
+            if m.group(1) is not None:
+                alts = m.group(1).split(",")
+            else:
+                a, b = m.group(2), m.group(3)
+                if re.fullmatch(r"-?[0-9]+", a) and re.fullmatch(r"-?[0-9]+", b):
+                    lo, hi = sorted((int(a), int(b)))
+                    alts = [str(x) for x in range(lo, min(hi, lo + EXPAND_MAX) + 1)]
+                elif len(a) == len(b) == 1:
+                    alts = [chr(x) for x in range(min(ord(a), ord(b)), max(ord(a), ord(b)) + 1)]
+                else:
+                    alts = [m.group(0)[1:-1]]
+            todo.extend(w[:m.start()] + x + w[m.end():] for x in alts)
+        if len(out) + len(todo) > EXPAND_MAX:
+            return None
+    return out
+
+
+def _named(text):
+    return sum(1 for w in WORDS.split(text) if _name(w) or w.rsplit("/", 1)[-1] in FETCHERS)
+
+
+def hidden_sites(line):
+    """Fetcher and manager names a line (quotes removed) holds only once statically expanded (`${X:-npm}`,
+    `"${X:-npm i}"`, `{n,}pm`, `cu{r,}l`, `n$()pm`): the most any reading names beyond the line as written,
+    or one where the line has more than EXPAND_MAX readings. Never credited (`_shifts` already refuses a
+    credit to a line holding `$`, `,` or `{x`)."""
+    if not re.search(r"\{|\$\(\s*\)|`\s*`", line):
+        return 0
+    e = _expansions(line)
+    return 1 if e is None else max(0, max(_named(x) for x in e) - _named(line))
+
+
 def text_sites(text):
     """Fetch sites in shell-like text: a word naming a fetcher, a Python network module or a
     `release download` or a bash `/dev/tcp` path. A comment line is read too (it may sit in a quoted
@@ -216,7 +269,7 @@ def text_sites(text):
         credit = not _shifts(line)
         line = re.sub(r"[\"'\\]", "", line)
         n += sum(1 for w in WORDS.split(line) if w.rsplit("/", 1)[-1] in FETCHERS)
-        n += len(NET_TEXT.findall(line)) + tool_sites(line, credit)
+        n += len(NET_TEXT.findall(line)) + tool_sites(line, credit) + hidden_sites(line)
     return n
 
 

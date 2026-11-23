@@ -293,7 +293,10 @@ class Repository(unittest.TestCase):
         text = git("show", base.stdout.strip() + ":tools/pins.py")
         self.assertEqual(text.returncode, 0, text.stderr)
         head = (ROOT / "tools/pins.py").read_text()
-        same = {f for f in pins.FETCH_NOT_YET if git("diff", "--quiet", base.stdout.strip(), "--", f).returncode == 0}
+        # Raw bytes, not `git diff`, which reads through clean filters and `.gitattributes` (L3 r3 on #6630).
+        same = {f for f in pins.FETCH_NOT_YET if subprocess.run(
+            ["git", "-C", str(ROOT), "show", base.stdout.strip() + ":" + f], capture_output=True).stdout
+            == (ROOT / f).read_bytes()}
         self.assertEqual(pins.grown(text.stdout, head, same), [])
         # The literals read are the lists in force: nothing later in the file adds to them.
         self.assertEqual(pins.owed(head), {"NOT_YET": {f: None for f in pins.NOT_YET},
@@ -513,6 +516,18 @@ class FollowUp2(unittest.TestCase):
                      "PATH=./shim:$PATH\ncp ./node_modules/.bin/yarn add evil", "tar 'x' \"$n/bin/npx\""]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 1)
+        # L3 on #6630 at aae15ad0: a static expansion hides no name (parameter defaults and other operands,
+        # brace lists and sequences, nested too, and empty substitutions), for fetchers as for managers.
+        for text in ["${X:-npm} install evil", '"${X:-npm}" install evil', "${X-npm} install evil", "{n,}pm i evil",
+                     "n{p,}m i evil", "{np,x}m i evil", "p{i,}p install evil", "${C:-curl} https://e",
+                     "cu{r,}l -o x https://e", "n$()pm i", "n``pm i", '"${X:-npm i}" evil', "${X:=pip} install x",
+                     "${X:+wget} x", "${X/#/npm} i", "${A:-${B:-yarn}} add x", "{n..n}pm i", "x{a,b}" * 9]:
+            with self.subTest(text=text):
+                self.assertEqual(pins.text_sites(text), 1)
+        self.assertEqual(pins.yaml_sites("steps:\n  - run: ${X:-npm} install evil\n"), 1)
+        for text in ["${X:-default} run", "echo {a,b}", "${X%.sh}", "{ echo; }"]:
+            with self.subTest(text=text):
+                self.assertEqual(pins.text_sites(text), 0)
         # Security 2(b) on #6630: a job's BASH_ENV script can redefine `cp` for every bash run step.
         self.assertEqual(pins.yaml_sites("jobs:\n  j:\n    env:\n      BASH_ENV: ./ci/fns.sh\n    steps:\n"
                                          "      - run: cp ./node_modules/.bin/yarn add evil\n"), 1)
