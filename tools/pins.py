@@ -70,8 +70,13 @@ FETCH_EXEMPT = {
                                       "InRelease is the authority for what it then installs"),
     "spikes/S4-openclaw-guest/run_gateway.sh": (2, "talks to a gateway on 127.0.0.1; downloads nothing"),
     "spikes/S8-live/fwd.py": (1, "a measurement relay spike; downloads nothing it keeps"),
-    "tests/test_hostcheck.py": (3, "runs `curl --version` to check -q skips .curlrc; downloads nothing"),
+    "tests/test_ci_scope.py": (6, "ci.yml download steps as fixture text it checks"),
+    "tests/test_close_guard_hook.py": (1, "a curl command line fed to the close-guard hook, never run"),
+    "tests/test_hostcheck.py": (30, "fetch lines as fixture text, and `curl --version` to check -q skips "
+                                    ".curlrc; downloads nothing"),
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
+    "tests/test_pins.py": (42, "this reader's test cases"),
+    "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (1, "GitHub API calls; downloads nothing it runs"),
     "tools/metrics.py": (1, "GitHub API calls; downloads nothing it runs"),
@@ -87,16 +92,15 @@ WORDS = re.compile(r"[\s'\"`$(){}\[\];|&<>=\\,]+")
 NET_TEXT = re.compile(r"\burllib\.request\b|\burlopen\b|\bhttp\.client\b|\burllib3\b|\bhttpx\b|\baiohttp\b|"
                       r"\bftplib\b|\b(?:import|from)\s+requests\b|\brelease\s+download\b")
 NET_MODULES = ("urllib.request", "urllib3", "requests", "http.client", "httpx", "aiohttp", "ftplib")
-RUNNERS = re.compile(r"^(?:subprocess\.\w+|os\.(?:system|popen|exec\w*|spawn\w*)|Popen|run|check_call|check_output|call)$")
 
 
 def text_sites(text):
     """Fetch sites in shell-like text: a word naming a fetcher, a Python network module or a
-    `release download`. Line continuations are joined first; only whole-line `#` comments are skipped."""
+    `release download`. Whole-line `#` comments are dropped first (shell does not continue a comment
+    ending in `\\`), then line continuations are joined."""
     n = 0
-    for line in text.replace("\\\n", " ").split("\n"):
-        if line.lstrip().startswith("#"):
-            continue
+    kept = "\n".join(l for l in text.split("\n") if not l.lstrip().startswith("#"))
+    for line in kept.replace("\\\n", " ").split("\n"):
         n += sum(1 for w in WORDS.split(line) if w.rsplit("/", 1)[-1] in FETCHERS)
         n += len(NET_TEXT.findall(line))
     return n
@@ -104,11 +108,16 @@ def text_sites(text):
 
 def yaml_sites(text):
     """Fetch sites in every scalar of a YAML file (run, with, env and keys alike), read from the
-    composed node tree, so escapes are decoded and a duplicate key cannot hide a value."""
+    composed node tree, so escapes are decoded and a duplicate key cannot hide a value. A scalar
+    alias counts where it is used; a collection is walked once."""
     import yaml  # only the repository test needs it; `live` runs without PyYAML
-    n, stack = 0, list(yaml.compose_all(text, Loader=yaml.SafeLoader))
+    n, stack, seen = 0, list(yaml.compose_all(text, Loader=yaml.SafeLoader)), set()
     while stack:
         node = stack.pop()
+        if isinstance(node, (yaml.SequenceNode, yaml.MappingNode)):
+            if id(node) in seen:
+                continue  # an alias of a collection already walked: nested aliases cannot blow up the walk
+            seen.add(id(node))
         if isinstance(node, yaml.ScalarNode):
             n += text_sites(node.value)
         elif isinstance(node, yaml.SequenceNode):
@@ -118,24 +127,20 @@ def yaml_sites(text):
     return n
 
 
-def _name(f):
-    if isinstance(f, ast.Name):
-        return f.id
-    if isinstance(f, ast.Attribute):
-        return (_name(f.value) or "?") + "." + f.attr
-    return None
-
-
 def _exact(c):
     return isinstance(c, ast.Constant) and isinstance(c.value, str) and c.value.rsplit("/", 1)[-1] in FETCHERS
 
 
 def py_sites(text):
     """Fetch sites in Python: each import of a network module, each string that is a fetcher's name or
-    path (so `c = "curl"` counts where it is bound, not only where it runs), and each other fetch site
-    in a string in a process-running call's arguments."""
+    path (so `c = "curl"` counts where it is bound), and each other fetch site in any string but a
+    docstring, wherever it is passed (an aliased runner or a command held in a variable hides none)."""
+    tree = ast.parse(text)
+    docs = {id(d.body[0].value) for d in ast.walk(tree)
+            if isinstance(d, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and d.body
+            and isinstance(d.body[0], ast.Expr) and isinstance(d.body[0].value, ast.Constant)}
     n = 0
-    for node in ast.walk(ast.parse(text)):
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             n += sum(1 for a in node.names if any(a.name == m or a.name.startswith(m + ".") for m in NET_MODULES))
         elif isinstance(node, ast.ImportFrom) and node.level == 0:
@@ -146,10 +151,8 @@ def py_sites(text):
                 n += 1
         elif _exact(node):
             n += 1
-        elif isinstance(node, ast.Call) and RUNNERS.match(_name(node.func) or ""):
-            for a in node.args + [k.value for k in node.keywords]:
-                n += sum(text_sites(c.value) for c in ast.walk(a)
-                         if isinstance(c, ast.Constant) and isinstance(c.value, str) and not _exact(c))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docs:
+            n += text_sites(node.value)
     return n
 
 

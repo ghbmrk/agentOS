@@ -296,6 +296,25 @@ class Repository(unittest.TestCase):
                                            "FETCH_NOT_YET": {f: v[1] for f, v in pins.FETCH_NOT_YET.items()}})
 
 
+    def test_the_tlc_pin_is_the_one_vectors_py_checks(self):
+        src = (ROOT / "broker/kernel/formal/vectors.py").read_text()
+        want = re.search(r'^JAR_SHA256 = "([0-9a-f]{64})"$', src, re.M).group(1)
+        self.assertEqual(pins.sources(ROOT / "tools/fetch.pins", "tla2tools.jar")[0].sha, want)
+        self.assertIn("tools/pins.py fetch tools/fetch.pins tla2tools.jar",
+                      (ROOT / ".github/workflows/formal.yml").read_text())
+
+    def test_the_liveness_workflow_runs_daily_over_every_pin(self):
+        w = (ROOT / ".github/workflows/pin-liveness.yml").read_text()
+        self.assertRegex(w, r'\n  schedule:\n    - cron: "\d+ \d+ \* \* \*"\n')
+        self.assertIn("\n        run: python3 -I tools/pins.py live\n", w)
+        self.assertNotIn("pull_request", w)
+        self.assertIn("\npermissions:\n  contents: read\njobs:\n", w)
+        self.assertEqual(w.count("permissions:"), 1)
+        for f in ("tools/fetch.pins", "tools/pins.py", ".github/workflows/pin-liveness.yml"):
+            self.assertNotIn("weekly", (ROOT / f).read_text(), f)  # the schedule above is daily
+        self.assertIn(" downloads every\n# source daily ", (ROOT / "tools/fetch.pins").read_text())
+
+
 class Grown(unittest.TestCase):
     """CI-pin-liveness-fu item 1: NOT_YET and FETCH_NOT_YET only shrink against main."""
     BASE = ('NOT_YET = {"a.pins": "#1", "b.pins": "#1"}\n'
@@ -331,7 +350,8 @@ class Sites(unittest.TestCase):
         for text in ["curl -o f https://e.org/f", "/usr/bin/curl -o f u", "curl\\\n  -o f u", "x=curl; $x -o f u",
                      "X=\"/usr/bin/wget\"\n\"$X\" u", "$(command -v curl) u", "a|xargs -n1 curl", "sudo aria2c u",
                      "python3 -c 'import urllib.request as r; r.urlopen(u)'",
-                     "gh release download v1 -R o/r", "gh release \\\n  download v1", "echo ok; `curl u`"]:
+                     "gh release download v1 -R o/r", "gh release \\\n  download v1", "echo ok; `curl u`",
+                     "# a comment ending in a backslash \\\ncurl -o f u", "curl \\\n# c\n -o f u"]:
             with self.subTest(text=text):
                 self.assertGreater(pins.text_sites(text), 0)
 
@@ -351,6 +371,8 @@ class Sites(unittest.TestCase):
         self.assertEqual(pins.yaml_sites(wf), 3)
         self.assertEqual(pins.yaml_sites("a: &x curl u\nb: *x\n"), 2)  # an alias is read where it is used
         self.assertEqual(pins.yaml_sites("a: curl u\na: echo\n"), 1)    # a duplicate key hides nothing
+        bomb = "a: &a [curl u]\n" + "".join("%s: &%s [*%s, *%s]\n" % (c, c, p, p) for p, c in zip("abcdefghijklmnopqrst", "bcdefghijklmnopqrstu"))
+        self.assertEqual(pins.yaml_sites(bomb), 1)  # 2**20 paths, one node
 
     def test_python_imports_strings_and_runs(self):
         cases = {
@@ -359,7 +381,11 @@ class Sites(unittest.TestCase):
             "from . import requests\n": 0,
             'c = "curl"\nsubprocess.run([c, u])\n': 1, 'subprocess.run(["/usr/bin/wget", u])\n': 1,
             'os.system("x=1; curl -o f " + u)\n': 1, 'subprocess.check_call("gh release download v1", shell=True)\n': 1,
-            'def f():\n    """Wraps curl."""\n': 0, 'print("curl u")\n': 0,
+            'def f():\n    """Wraps curl."""\n': 0, 'print("curl u")\n': 1,
+            'import subprocess as sp\nsp.run("curl -o f u", shell=True)\n': 1,
+            'from subprocess import check_output as co\nco("wget u", shell=True)\n': 1,
+            'cmd = "curl -o f u"\nsubprocess.run(cmd, shell=True)\n': 1, 'x = f"curl {u}"\n': 1,
+            '__import__("urllib.request")\n': 1,
         }
         for text, n in cases.items():
             with self.subTest(text=text):
@@ -374,25 +400,6 @@ class Sites(unittest.TestCase):
         self.assertEqual(pins.fetch_sites(f, "text"), 1)
         f.write_text("import requests\n")
         self.assertEqual(pins.fetch_sites(f, "python"), 1)
-
-
-    def test_the_tlc_pin_is_the_one_vectors_py_checks(self):
-        src = (ROOT / "broker/kernel/formal/vectors.py").read_text()
-        want = re.search(r'^JAR_SHA256 = "([0-9a-f]{64})"$', src, re.M).group(1)
-        self.assertEqual(pins.sources(ROOT / "tools/fetch.pins", "tla2tools.jar")[0].sha, want)
-        self.assertIn("tools/pins.py fetch tools/fetch.pins tla2tools.jar",
-                      (ROOT / ".github/workflows/formal.yml").read_text())
-
-    def test_the_liveness_workflow_runs_daily_over_every_pin(self):
-        w = (ROOT / ".github/workflows/pin-liveness.yml").read_text()
-        self.assertRegex(w, r'\n  schedule:\n    - cron: "\d+ \d+ \* \* \*"\n')
-        self.assertIn("\n        run: python3 -I tools/pins.py live\n", w)
-        self.assertNotIn("pull_request", w)
-        self.assertIn("\npermissions:\n  contents: read\njobs:\n", w)
-        self.assertEqual(w.count("permissions:"), 1)
-        for f in ("tools/fetch.pins", "tools/pins.py", ".github/workflows/pin-liveness.yml"):
-            self.assertNotIn("weekly", (ROOT / f).read_text(), f)  # the schedule above is daily
-        self.assertIn(" downloads every\n# source daily ", (ROOT / "tools/fetch.pins").read_text())
 
 
 if __name__ == "__main__":
