@@ -2741,8 +2741,7 @@ def capped_go(real, tmp, args, mem, exits=None):
     if args[:1] != ["test"] or any(a in ("-exec", "--exec") or a.startswith(("-exec=", "--exec=")) for a in args):
         print(f"mutgate: gremlins ran `go {shlex.join(args[:1])}` with -exec or not as `go test`, so its test "
               "binaries cannot be put under their memory cap", file=sys.stderr)
-        with open(pathlib.Path(tmp) / REFUSED, "a") as f:
-            f.write(shlex.join(args) + "\n")
+        record(tmp, shlex.join(args))
         return None
     q = shlex.quote
     wrap = f"{q(sys.executable)} -I {q(str(pathlib.Path(__file__).resolve()))} cap-exec {q(str(tmp))} {int(mem)} {q(str(exits or '-'))}"
@@ -2759,6 +2758,24 @@ def past_half(peak, mem, over=False):
 
 REFUSED = "refused"  # go_shim's runs that could not be capped: `run` gives no verdict unless it is there and empty
 NO_VERDICT = 125  # a shim entry's own failure; the REFUSED marker, not this code, carries it (shim_entry)
+
+
+def open_marker(tmp):
+    """The REFUSED marker in tmp, opened to append, never created: only `run` makes it, before gremlins
+    starts, so a marker a fault removed stays gone for every later mutant and `run` reads no verdict (#6512)."""
+    return os.fdopen(os.open(pathlib.Path(tmp) / REFUSED, os.O_WRONLY | os.O_APPEND), "a")
+
+
+def record(tmp, why, marker=None):
+    """Append why to the REFUSED marker (through marker, else opened now); where that open or write fails
+    (a full disk, an I/O error), remove the marker, so `run` reads it gone, not present and empty (refusal)."""
+    try:
+        marker = marker or open_marker(tmp)
+        marker.write(why + "\n")
+        marker.flush()
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(pathlib.Path(tmp) / REFUSED)
 
 
 def refusal(tmp):
@@ -2780,23 +2797,18 @@ def shim_entry(tmp, fn, *args):
     verdict". go-capped and go-cover are the go gremlins runs, so their NO_VERDICT reaches it directly and
     reads LIVED, never a test failure. The marker is opened before fn runs, so a fault inside fn can always
     write it (#6512). Where it cannot be opened, fn still runs, since only a fault needs the marker; a fault
-    then opens it once more, and `run` refuses a package whose marker is gone or cannot be written (refusal)."""
+    then opens it once more, a failed write removes it (record), and `run` refuses a package whose marker is
+    gone or cannot be written (refusal)."""
     try:
-        marker = open(pathlib.Path(tmp) / REFUSED, "a")
+        marker = open_marker(tmp)
     except OSError as e:
         print(f"mutgate: {fn.__name__} cannot open its {REFUSED} marker: {e!r}", file=sys.stderr)
         marker = None
     try:
         return fn(*args)
-    except Exception as e:  # every class: a verdict needs a contained run that ended as reported
+    except BaseException as e:  # every class, an interrupt too: a verdict needs a run that ended as reported
         print(f"mutgate: {fn.__name__} failed, so this run gives no verdict: {e!r}", file=sys.stderr)
-        try:  # unwritten, gremlins may read KILLED through go test: refusal reads a gone marker as no verdict
-            marker = marker or open(pathlib.Path(tmp) / REFUSED, "a")  # once more: the first open may have passed
-            marker.write(f"{fn.__name__}: {e!r}\n")
-            marker.flush()
-        except OSError:  # opened but not written (a full disk, an I/O error): remove it, so refusal sees it gone
-            with contextlib.suppress(OSError):
-                os.unlink(pathlib.Path(tmp) / REFUSED)
+        record(tmp, f"{fn.__name__}: {e!r}", marker)  # opened once more where the first open failed
         return NO_VERDICT
     finally:
         with contextlib.suppress(OSError):
