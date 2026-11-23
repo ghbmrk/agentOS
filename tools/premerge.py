@@ -728,10 +728,12 @@ PASSED = ("success", "skipped")
 # every other ci job passed, so its jobs are `mutgate / <job>` in ci's run, and main's ruleset requires none of them.
 # --check holds `mutgate:<state>` until ci's newest pull_request run on the head completed with success, its one
 # `mutgate / claimed` job succeeded and no `mutgate / ` job failed. The calling job skipped (a ci job failed, or any
-# other cause) leaves no `mutgate / claimed` job, so it holds as mutgate:skipped: a skip never reads as a pass. The gate
-# is owed when main's ci.yml calls mutgate.yml or the head's does, so a PR that drops the call from its own ci.yml still
-# owes it, and a PR from before the call holds until it merges main.
+# other cause) leaves no `mutgate / claimed` job, so it holds as mutgate:skipped: a skip never reads as a pass. This
+# check applies when the merge base's ci.yml calls mutgate.yml or the head's does, so a PR that drops the call from its
+# own ci.yml still owes it. A PR from before the call (neither calls it) is held by its standalone mutgate.yml
+# pull_request run instead, a DIFF_GATE run as HELD held it, owed whenever main calls it (checks_held).
 CI = ".github/workflows/ci.yml"
+LEGACY_MUTGATE = "mutgate"
 MUTGATE_JOB, MUTGATE_CLAIM = "mutgate / ", "mutgate / claimed"
 _CALLS_MUTGATE = re.compile(r"^ +uses: *\./\.github/workflows/mutgate\.yml *(?:#.*)?$", re.M)
 
@@ -894,13 +896,19 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
     onto = _git(cwd, "merge-base", base, head).decode().strip()
     files = [f for f in _git(cwd, *DIFF, onto, sha).decode(errors="surrogateescape").split("\0") if f]
     held = []
-    for name, exempt in HELD.items():
+    # CI-mutgate-after-ci (#6569): a PR whose merge base or head calls mutgate from ci is held by mutgate_held. One from
+    # before the call (neither does) is held, as HELD held it, by its own standalone mutgate.yml run, owed outright once
+    # main calls it, so the open PRs need no new ci run and dropping mutgate.yml escapes nothing.
+    called = _calls_mutgate(cwd, onto) or _calls_mutgate(cwd, sha)
+    legacy = [] if called else [(LEGACY_MUTGATE, ())]
+    main_calls = not called and _calls_mutgate(cwd, base)
+    for name, exempt in [*HELD.items(), *legacy]:
         path = f".github/workflows/{name}.yml"
         bound = [(_bind(r, pr, runs["repo"]), r) for r in runs["head"] if r.get("path") == path
                  and r.get("head_sha") == sha and r.get("event") in ("pull_request", "pull_request_target")]
         mine = [r for b, r in bound if b == "ours"]
         if not mine:
-            if _owed(cwd, sha, base, path, files):
+            if (name == LEGACY_MUTGATE and main_calls) or _owed(cwd, sha, base, path, files):
                 held.append(f"{name}:{'unbound' if any(b == 'unbound' for b, _ in bound) else 'missing'}")
             continue
         r = max(mine, key=lambda r: r.get("id") or 0)
@@ -914,7 +922,7 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
             if bad and all(c == "failure" and n in excused for n, c in bad):
                 continue
         held.append(f"{name}:{state or 'unknown'}")
-    if _calls_mutgate(cwd, base) or _calls_mutgate(cwd, sha):
+    if called:
         held += mutgate_held(runs, pr, sha)
     return held
 

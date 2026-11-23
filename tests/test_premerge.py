@@ -1604,8 +1604,10 @@ class PremergeTest(unittest.TestCase):
         # CI-premerge-event-filter (#6398): the list is exactly HELD plus the UNHELD workflows the merge job waits on (ci,
         # trusted-base), so a completion no check reads starts no run, and a new HELD entry fails until listed.
         name = lambda stem: next(l[6:].strip() for l in (wfs / f"{stem}.yml").read_text().splitlines() if l.startswith("name: "))
-        self.assertEqual(sorted(listed), sorted(name(s) for s in [*premerge.HELD, *premerge.UNHELD] if s != "premerge"))
-        # a diff gate's failed run holds (lane-gate.yml here; lane-gate runs in ci's run, lane-gate_held, #6569)
+        # mutgate too: a PR from before ci calls it is held by its standalone run (CI-mutgate-after-ci, #6569)
+        self.assertEqual(sorted(listed), sorted([*(name(s) for s in [*premerge.HELD, *premerge.UNHELD] if s != "premerge"),
+                                                 premerge.LEGACY_MUTGATE]))
+        # a diff gate's failed run holds (lane-gate.yml here; mutgate is ci's, held by mutgate_held, #6569)
         onto, sha = self.held_repo()
         self.write(".github/workflows/lane-gate.yml", "on:\n  pull_request:\n")
         sha = self.commit("lane-gate")
@@ -1703,6 +1705,46 @@ class PremergeTest(unittest.TestCase):
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertTrue(premerge._CALLS_MUTGATE.search(ci))
         self.assertFalse(premerge._CALLS_MUTGATE.search(ci.replace("uses: ./.github/workflows/mutgate.yml", "x: 1")))
+
+    def test_a_pr_from_before_the_call_is_held_by_its_standalone_mutgate_run(self):
+        # CI-mutgate-after-ci (#6569, L3 1): a PR branched before main's ci.yml called mutgate keeps its standalone
+        # mutgate.yml pull_request run, held as HELD held it (a diff gate, never base-excused), so an armed PR needs no
+        # new ci run; once main calls it the run is owed outright, so dropping mutgate.yml from the head escapes nothing.
+        (self.r / ".github/workflows").mkdir(parents=True)
+        plain = "name: ci\non:\n  pull_request:\njobs:\n  checks:\n    runs-on: ubuntu-24.04\n"
+        self.write(".github/workflows/ci.yml", plain)
+        self.write(".github/workflows/mutgate.yml", "name: mutgate\non:\n  pull_request:\n")
+        old = self.commit("before the call")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("b.md", "x\n")
+        sha = self.commit("code")
+        git(self.r, "checkout", "-q", "main")
+        self.write(".github/workflows/ci.yml", plain + self.CALL)
+        self.commit("the call")
+        git(self.r, "checkout", "-q", "pr")
+        held = lambda *runs, base=(): premerge.checks_held(self.r, bundle(runs, base), "HEAD", "main")
+        mg = lambda id, c, **k: self.wf(id, "mutgate", c, sha, **k)
+        self.assertEqual(held(), ["mutgate:missing"])
+        self.assertEqual(held(mg(1, "success")), [])
+        self.assertEqual(held(mg(1, "success"), mg(2, "cancelled")), ["mutgate:cancelled"])
+        self.assertEqual(held(mg(1, "failure", jobs=[("mutgate", "failure")])), ["mutgate:failure"])
+        mainrun = self.wf(9, "mutgate", "failure", old, event="push", branch="main", jobs=[("mutgate", "failure")])
+        self.assertEqual(held(mg(1, "failure", jobs=[("mutgate", "failure")]), base=[mainrun]), ["mutgate:failure"])
+        self.assertEqual(held(mg(1, "success", prs=((8, "main"),))), ["mutgate:unbound"])
+        # a ci run with mutgate jobs is not this PR's gate: its ci.yml does not call mutgate
+        self.assertEqual(held(self.ci(3, sha, jobs=[("mutgate / claimed", "success")])), ["mutgate:missing"])
+        # the head drops mutgate.yml: still owed, since main calls it
+        git(self.r, "rm", "-q", ".github/workflows/mutgate.yml")
+        sha = self.commit("drop the gate")
+        self.assertEqual(premerge.checks_held(self.r, bundle([self.wf(1, "mutgate", "success", "0" * 40)]), "HEAD", "main"),
+                         ["mutgate:missing"])
+        # once the PR merges main, its merge base calls mutgate and ci's run decides
+        git(self.r, "merge", "-q", "--no-edit", "main")
+        sha = git(self.r, "rev-parse", "HEAD").strip()
+        self.assertEqual(premerge.checks_held(self.r, bundle([self.wf(1, "mutgate", "success", sha)]), "HEAD", "main"),
+                         ["mutgate:missing"])
+        ok = self.ci(2, sha, jobs=[("mutgate / claimed", "success"), ("mutgate / mutgate", "success")])
+        self.assertEqual(premerge.checks_held(self.r, bundle([ok]), "HEAD", "main"), [])
 
     def test_check_prints_a_skipped_mutgate_as_held(self):
         # CI-mutgate-after-ci (#6569): through --check as premerge.yml runs it, a ci run that passed without running
