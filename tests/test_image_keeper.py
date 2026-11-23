@@ -2213,6 +2213,38 @@ class KeeperTreeTest(unittest.TestCase):
             with self.subTest(line):
                 sysusers.write_text(good + line + "\n")
                 self.assertEqual(self.v(), [])
+
+    def test_root_s_home_is_root(self):
+        # #6474: EXEC_HOME and unit_rules.py's MANAGER_CONF_DIRS read root's files under /root, so a build
+        # step that moves root's home to a service user's directory takes them out of every check.
+        write(self.root, "etc/passwd", "root:x:0:0:root:/var/lib/agentos-x:/bin/sh\n")
+        self.assertEqual(self.v(), ["etc/passwd:1: root's home is /var/lib/agentos-x, not /root, which every check "
+                                    "of root's own files reads (#6474)"])
+        write(self.root, "etc/passwd", "root:x:0:0:root:/root:/bin/sh\n")
+        self.assertEqual(self.v(), [])
+        rec = write(self.root, "etc/userdb/root.user", '{"userName": "root", "uid": 0, "homeDirectory": "/root"}')
+        self.assertEqual(self.v(), [])
+        for bad in ('{"userName": "root", "uid": 0, "homeDirectory": "/var/lib/agentos-x"}',
+                    '{"userName": "root", "perMachine": [{"homeDirectory": "/var/lib/agentos-x"}]}',
+                    '{"userName": "root", "binding": {"x": {"homeDirectory": "/var/lib/agentos-x"}}}'):
+            with self.subTest(bad):
+                rec.write_text(bad)
+                self.assertEqual(self.v(), ["etc/userdb/root.user: root's record gives a home other than /root, which "
+                                            "every check of root's own files reads (#6474)"])
+        rec.unlink()
+        sysusers = self.root / "usr/lib/sysusers.d/agentos-setup.conf"
+        good = sysusers.read_text()
+        n = len(good.splitlines()) + 1
+        for line in ('u root 0 "Super User" /var/lib/agentos-x', "u! root 0 - /var/lib/agentos-x /bin/sh"):
+            with self.subTest(line):
+                sysusers.write_text(good + line + "\n")
+                self.assertEqual(self.v(), ["usr/lib/sysusers.d/agentos-setup.conf:%d: gives root the home "
+                                            "/var/lib/agentos-x, not /root, which every check of root's own files "
+                                            "reads (#6474)" % n])
+        for line in ('u root 0 "Super User" /root', "u root 0 - -", "u root 0"):
+            with self.subTest(line):
+                sysusers.write_text(good + line + "\n")
+                self.assertEqual(self.v(), [])
         sysusers.write_text(good)
 
     def test_a_full_privilege_command_is_refused(self):
