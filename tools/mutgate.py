@@ -2620,6 +2620,7 @@ def cmd_run(args):
     cfgdir = tempfile.TemporaryDirectory()
     cfg = pathlib.Path(cfgdir.name) / "gremlins.yaml"
     cfg.write_text("{}\n")
+    (pathlib.Path(cfgdir.name) / REFUSED).touch()  # the shims' only channel: gone or unwritable is no verdict (refusal)
     # Gremlins' coverage run reads its profile through with_cases, so it runs case-expression mutants
     # (#5822); with no go on PATH, gremlins can run no test at all.
     # MUT-gremlins-memcap (#6388): each of gremlins' parallel mutant runs (one per usable CPU, as
@@ -2637,9 +2638,8 @@ def cmd_run(args):
     except RuntimeError as e:
         print(e, file=sys.stderr)
         bad += 1
-    if (refused := pathlib.Path(cfgdir.name) / REFUSED).exists():
-        print(f"mutgate: gremlins ran go in a way its test binaries could not be capped: {refused.read_text().strip()}",
-              file=sys.stderr)
+    if refused := refusal(cfgdir.name):
+        print(f"mutgate: gremlins ran go in a way its test binaries could not be capped: {refused}", file=sys.stderr)
         bad += 1
     cfgdir.cleanup()
     return 1 if bad else 0
@@ -2731,8 +2731,8 @@ def run_packages(args, pkgs, out, added, tests, bases, planned, diff, tmp, cfg, 
             bad += 1
         elif args.git:
             dest.write_text(json.dumps({**(outside_lines(data, pkg, mine) if marked else data), **extra}))
-        if (pathlib.Path(tmp) / REFUSED).exists():  # a shim run failed in this package: no verdict (shim_entry)
-            print(f"mutgate: {pkg} has no verdict: {(pathlib.Path(tmp) / REFUSED).read_text().strip()}", file=sys.stderr)
+        if refused := refusal(tmp):  # a shim run failed in this package: no verdict (shim_entry)
+            print(f"mutgate: {pkg} has no verdict: {refused}", file=sys.stderr)
             dest.unlink(missing_ok=True)
             return bad + 1
         if adv and dest.exists():
@@ -2906,34 +2906,78 @@ def capped_go(real, tmp, args, mem, exits=None):
     if args[:1] != ["test"] or any(a in ("-exec", "--exec") or a.startswith(("-exec=", "--exec=")) for a in args):
         print(f"mutgate: gremlins ran `go {shlex.join(args[:1])}` with -exec or not as `go test`, so its test "
               "binaries cannot be put under their memory cap", file=sys.stderr)
-        (pathlib.Path(tmp) / REFUSED).write_text(shlex.join(args) + "\n")
+        record(tmp, shlex.join(args))
         return None
     q = shlex.quote
     wrap = f"{q(sys.executable)} -I {q(str(pathlib.Path(__file__).resolve()))} cap-exec {q(str(tmp))} {int(mem)} {q(str(exits or '-'))}"
     return [args[0], f"-exec={wrap}", *args[1:]]
 
 
-REFUSED = "refused"  # go_shim's runs that could not be capped: `run` gives no verdict while it exists
+def past_half(peak, mem, over=False):
+    """Why a base run's peak fails the half-cap check, naming the cap and the peak; a cgroup's memory.peak
+    counts page cache, so a large read can pass half the cap with no leak (#6512)."""
+    killed = ", where the cap killed them" if over else ""
+    return (f"peaked at {peak >> 20} MB{killed}, more than half of their {mem >> 20} MB memory cap (in a cgroup "
+            "the peak is memory.peak, which counts page cache, so a large file read can pass it without a leak)")
+
+
+REFUSED = "refused"  # go_shim's runs that could not be capped: `run` gives no verdict unless it is there and empty
 NO_VERDICT = 125  # a shim entry's own failure; the REFUSED marker, not this code, carries it (shim_entry)
+
+
+def open_marker(tmp):
+    """The REFUSED marker in tmp, opened to append, never created: only `run` makes it, before gremlins
+    starts, so a marker a fault removed stays gone for every later mutant and `run` reads no verdict (#6512)."""
+    return os.fdopen(os.open(pathlib.Path(tmp) / REFUSED, os.O_WRONLY | os.O_APPEND), "a")
+
+
+def record(tmp, why, marker=None):
+    """Append why to the REFUSED marker (through marker, else opened now); where that open or write fails
+    (a full disk, an I/O error), remove the marker, so `run` reads it gone, not present and empty (refusal)."""
+    try:
+        marker = marker or open_marker(tmp)
+        marker.write(why + "\n")
+        marker.flush()
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(pathlib.Path(tmp) / REFUSED)
+
+
+def refusal(tmp):
+    """Why a shim run in tmp gives no verdict, or "" for none: the REFUSED marker's text, or that the
+    marker `run` made before gremlins started is gone or cannot be written, so a failure could not be told."""
+    try:
+        os.close(os.open(pathlib.Path(tmp) / REFUSED, os.O_WRONLY | os.O_APPEND))
+        return (pathlib.Path(tmp) / REFUSED).read_text().strip()
+    except OSError as e:
+        return f"its {REFUSED} marker cannot be written, so a shim's failure could not be recorded: {e!r}"
 
 
 def shim_entry(tmp, fn, *args):
     """fn(*args) for one of go_shim's entries (go-cover, go-capped, cap-exec), which gremlins scores by
     exit code alone: any error of the entry itself (a cgroup file, a kill that did not empty its leaf)
     writes REFUSED in tmp, so `run` drops that package's result and gives no verdict (L3 and Security on
-    #6423). The marker is the only channel: `go test` turns any failing -exec into its own exit 1, which
-    gremlins reads as KILLED, so no exit code of cap_exec's can say "no verdict"; NO_VERDICT (read as LIVED
-    where it reaches gremlins directly) only keeps go-capped and go-cover from looking like a test failure."""
+    #6423). The marker is the only channel. cap-exec is go test's -exec, and `go test` turns any failing
+    -exec into its own exit 1, which gremlins reads as KILLED, so no exit code of cap_exec's can say "no
+    verdict". go-capped and go-cover are the go gremlins runs, so their NO_VERDICT reaches it directly and
+    reads LIVED, never a test failure. The marker is opened before fn runs, so a fault inside fn can always
+    write it (#6512). Where it cannot be opened, fn still runs, since only a fault needs the marker; a fault
+    then opens it once more, a failed write removes it (record), and `run` refuses a package whose marker is
+    gone or cannot be written (refusal)."""
+    try:
+        marker = open_marker(tmp)
+    except OSError as e:
+        print(f"mutgate: {fn.__name__} cannot open its {REFUSED} marker: {e!r}", file=sys.stderr)
+        marker = None
     try:
         return fn(*args)
-    except Exception as e:  # every class: a verdict needs a contained run that ended as reported
+    except BaseException as e:  # every class, an interrupt too: a verdict needs a run that ended as reported
         print(f"mutgate: {fn.__name__} failed, so this run gives no verdict: {e!r}", file=sys.stderr)
-        try:
-            with open(pathlib.Path(tmp) / REFUSED, "a") as f:
-                f.write(f"{fn.__name__}: {e!r}\n")
-        except OSError:
-            pass  # gremlins then reads NO_VERDICT as LIVED, which fails the gate: still closed
+        record(tmp, f"{fn.__name__}: {e!r}", marker)  # opened once more where the first open failed
         return NO_VERDICT
+    finally:
+        with contextlib.suppress(OSError):
+            marker and marker.close()
 
 
 def go_cover(real, tmp, args, mem=None):
@@ -2955,8 +2999,8 @@ def go_cover(real, tmp, args, mem=None):
         peak = sum(int(r[0]) for r in rows)
         if (over := any(r[1] == "over" for r in rows)) or 2 * peak > mem:
             (pathlib.Path(tmp) / HEADROOM).write_text("" if over else str(peak))  # for unleash_fitted
-            print(f"mutgate: the tests hold {peak >> 20} MB before any mutant, more than half the {mem >> 20} MB "
-                  "memory cap of a gremlins mutant run, so a cap kill would not show a test failed", file=sys.stderr)
+            print(f"mutgate: the tests {past_half(peak, mem, over)} before any mutant, so a cap kill of a gremlins "
+                  "mutant run would not show a test failed", file=sys.stderr)
             return 1
     if code := exit_code(end):
         return code
@@ -3165,26 +3209,40 @@ def contained(argv, mem=None, timeout=None, **popen):
     leaf = parent / f"run-{os.getpid()}-{os.urandom(8).hex()}"
     leaf.mkdir()
     try:
-        for name, value in (("memory.max", str(mem) if mem else "max"), ("memory.swap.max", "0"), ("memory.oom.group", "1")):
-            (leaf / name).write_text(value)
-        # The shell moves itself into the leaf, then execs argv there: nothing argv starts runs outside it.
-        # (No preexec_fn: `delete` starts runs from several threads.)
-        p = subprocess.Popen(["/bin/sh", "-c", 'echo 0 > "$0" && exec "$@"', str(leaf / "cgroup.procs"), *argv], **popen)
+        result = in_leaf(leaf, argv, mem, timeout, popen)
+    except BaseException as first:
         try:
-            end = p.wait(timeout)
-        except subprocess.TimeoutExpired:
-            end = "timeout"
-        empty(leaf)
-        p.wait()
-        if not (peak := int((leaf / "memory.peak").read_text())):
-            raise RuntimeError(f"mutgate: {argv[0]} never ran in its cgroup leaf {leaf}")
-        events = dict(row.split() for row in (leaf / "memory.events").read_text().splitlines())
-        if int(events.get("oom_kill", 0)) or int(events.get("oom_group_kill", 0)):
-            end = "over"
-        return end, peak
-    finally:
-        empty(leaf)
-        leaf.rmdir()
+            empty(leaf)
+            leaf.rmdir()
+        except Exception as e:  # keep the first error as its cause, so the report says what went wrong (#6512)
+            raise e from first
+        raise
+    empty(leaf)
+    leaf.rmdir()
+    return result
+
+
+def in_leaf(leaf, argv, mem, timeout, popen):
+    """contained's (end, peak) for one run of argv in cgroup leaf, which the caller removes."""
+    for name, value in (("memory.max", str(mem) if mem else "max"), ("memory.swap.max", "0"), ("memory.oom.group", "1")):
+        (leaf / name).write_text(value)
+    # The shell moves itself into the leaf, then execs argv there: nothing argv starts runs outside it.
+    # (No preexec_fn: `delete` starts runs from several threads.)
+    p = subprocess.Popen(["/bin/sh", "-c", 'echo 0 > "$0" && exec "$@"', str(leaf / "cgroup.procs"), *argv], **popen)
+    try:
+        end = p.wait(timeout)
+    except subprocess.TimeoutExpired:
+        end = "timeout"
+    empty(leaf)
+    p.wait()
+    if not (peak := int((leaf / "memory.peak").read_text())):
+        raise RuntimeError(f"mutgate: {argv[0]} never ran in its cgroup leaf {leaf}")
+    events = dict(row.split() for row in (leaf / "memory.events").read_text().splitlines())
+    # memory.oom.group kills the whole leaf, argv included, so an OOM kill after argv exited 0 hit only
+    # what argv left running, after its tests passed: that is no cap kill of the run (#6512).
+    if end != 0 and (int(events.get("oom_kill", 0)) or int(events.get("oom_group_kill", 0))):
+        end = "over"
+    return end, peak
 
 
 def empty(cg):
@@ -3553,8 +3611,8 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
     end, peak = contained([str(base), "-test.failfast", f"-test.gocoverdir={counters}", f"-test.coverprofile={profile}"],
                           alone_mem, cwd=pkg_dir, env={**os.environ, "GOCOVERDIR": str(counters)})
     if alone_mem and (end == "over" or 2 * peak > alone_mem):
-        return None, (f"broker/{pkg}/'s tests hold {peak >> 20} MB before any statement is deleted, more than "
-                      f"half the {alone_mem >> 20} MB memory cap of a run, so a cap kill would not show a test failed")
+        return None, (f"broker/{pkg}/'s tests {past_half(peak, alone_mem, end == 'over')} before any statement "
+                      "is deleted, so a cap kill would not show a test failed")
     if end != 0 or not profile.exists():
         return None, f"broker/{pkg}/'s tests fail before any statement is deleted"
     if alone_mem and peak:
