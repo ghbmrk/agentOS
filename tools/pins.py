@@ -81,7 +81,7 @@ FETCH_EXEMPT = {
                                     ".curlrc; downloads nothing"),
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
     "tests/test_image.py": (1, "a busybox wget shebang as fixture text"),
-    "tests/test_pins.py": (243, "this reader's test cases"),
+    "tests/test_pins.py": (246, "this reader's test cases"),
     "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
@@ -228,7 +228,8 @@ def _expansions(word):
         elif m.re is PARAM_BARE:
             todo.append(w[:m.start()] + w[m.end():])
         elif m.re is PARAM:
-            todo.extend(w[:m.start()] + x + w[m.end():] for x in set(re.split(r"[-:=+?/#%^,@]+", m.group(1))))
+            # Each static piece, and empty: an unset variable, subscripted too (`n${X[0]}pm`), expands to nothing.
+            todo.extend(w[:m.start()] + x + w[m.end():] for x in set(re.split(r"[-:=+?/#%^,@]+", m.group(1))) | {""})
         else:
             if m.group(1) is not None:
                 alts = m.group(1).split(",")
@@ -364,7 +365,10 @@ def gh_sites(text):
     around it (`${{ 'n' }}pm`, `${{ format('{0}pm', 'n') }} i`): one site per name a line can spell with
     at least one character an expression supplies, adjacent expressions and the text between them read
     as one stretch (fail closed: any order, any repeat)."""
-    n = 0
+    if "${{" not in text:
+        return 0
+    # Any expression may render empty (`n${{ '' }}pm`, `n${{ github.x }}pm`): the text with every one cut.
+    n = max(0, text_sites(GH_EXPR.sub("", text)) - text_sites(text))
     for line in text.split("\n"):
         if "${{" not in line:
             continue

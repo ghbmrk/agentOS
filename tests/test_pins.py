@@ -529,6 +529,15 @@ class FollowUp2(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 1)
         self.assertEqual(pins.yaml_sites("steps:\n  - run: ${X:-npm} install evil\n"), 1)
+        # L3 fix-list on #6630 at caf4aa66: a subscripted unset variable and an Actions expression that renders
+        # empty each glue the words around them.
+        for text in ["n${X[0]}pm i evil", "n${X[@]}pm i evil", "n${X[*]}pm i evil"]:
+            with self.subTest(text=text):
+                self.assertEqual(pins.text_sites(text), 1)
+        for text in ["n${{ '' }}pm i evil", "n${{ toJSON('') }}pm i evil", "n${{ github.x }}pm i evil"]:
+            with self.subTest(text=text):
+                self.assertEqual(pins.yaml_sites('steps:\n  - run: "%s"\n' % text), 1)
+        self.assertEqual(pins.yaml_sites("steps:\n  - run: echo ${{ github.sha }}\n"), 0)
         self.assertEqual(pins.text_sites("n$(:)pm i"), 1)
         # L3 pre-probe on #6630 at eebc2d80: an Actions expression renders its literals before shell runs.
         for run in ["${{ 'n' }}pm install evil", "${{ format('{0}pm', 'n') }} i", "${{ 'n' }}${{ 'p' }}m i",
