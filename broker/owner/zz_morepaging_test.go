@@ -38,7 +38,46 @@ func longItem(i int, worst bool) Item {
 
 // walk follows MORE pages from MORE id to the last one, checking each
 // page's form, and returns the item numbers shown in order.
-func walk(t *testing.T, r *rig, id string, n int) []int {
+// textReplies is the valid replies that request text sms ends with.
+func textReplies(t *testing.T, sms string) string {
+	t.Helper()
+	if i := strings.Index(sms, "Approve or deny on my Wi-Fi page"); i >= 0 {
+		return sms[i:]
+	}
+	m := expiresRe.FindAllStringIndex(sms, -1)
+	if m == nil {
+		t.Fatalf("no replies in %q", sms)
+	}
+	return sms[m[len(m)-1][1]:]
+}
+
+var (
+	expiresRe  = regexp.MustCompile(` Expires [0-9]{2}:[0-9]{2}\. `)
+	lowBatchRe = regexp.MustCompile(`^Reply YES (\S+) ([0-9]{6}) for all, .* or NO (\S+)\.$`)
+	nextTailRe = regexp.MustCompile(` Next: MORE \S+ [0-9]{1,2}\.$`)
+)
+
+// pageReplies checks that page p ends with the request text's replies,
+// or their compact form (the same replies without the guide to
+// approving some items), derived here from the text, not the code.
+func pageReplies(t *testing.T, p, sms string) {
+	t.Helper()
+	full := textReplies(t, sms)
+	compact := strings.Replace(full, " (add item numbers to approve some; the rest are denied)", "", 1)
+	if m := lowBatchRe.FindStringSubmatch(full); m != nil {
+		compact = "Reply YES " + m[1] + " " + m[2] + " or NO " + m[3] + "."
+	}
+	m := expiresRe.FindAllStringIndex(p, -1)
+	if m == nil {
+		t.Fatalf("page has no expiry: %q", p)
+	}
+	got := nextTailRe.ReplaceAllString(p[m[len(m)-1][1]:], "")
+	if got != full && got != compact {
+		t.Fatalf("page replies %q, want %q or %q (page %q)", got, full, compact, p)
+	}
+}
+
+func walk(t *testing.T, r *rig, id string, n int, sms string) []int {
 	t.Helper()
 	var seen []int
 	cmd := "MORE " + id
@@ -54,6 +93,7 @@ func walk(t *testing.T, r *rig, id string, n int) []int {
 			!strings.Contains(p, " Expires ") || !strings.Contains(p, "NO "+id+".") {
 			t.Fatalf("%s page lacks request, range, expiry or replies: %q", cmd, p)
 		}
+		pageReplies(t, p, sms)
 		body, _, _ := strings.Cut(p, " Expires ")
 		for _, m := range pageItemRe.FindAllStringSubmatch(body, -1) {
 			k, _ := strconv.Atoi(m[1])
@@ -104,8 +144,7 @@ func TestMorePagesReachEveryBatchItem(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					r.inbox()
-					wantAll(t, walk(t, r, id, n), n)
+					wantAll(t, walk(t, r, id, n, r.inbox()), n)
 					if d := r.decisions(); len(d) != 0 {
 						t.Fatalf("reading decided %v", d)
 					}
@@ -161,19 +200,30 @@ func TestMoreHasNoStaleView(t *testing.T) {
 }
 
 // A local-only request's page offers only the page or NO by text, never
-// a texted YES (CH-3, tier separation).
+// a texted YES (CH-3, tier separation), and shows only what its request
+// text shows: no field that text leaves to the page (Security D4), even
+// for an item at every field's bound.
 func TestMoreLocalRequestOffersNoTextedYes(t *testing.T) {
-	r := newRig(t, nil)
-	it := lowItem("l")
-	it.Recipient = "not a canonical recipient"
-	id, err := r.ch.RequestLocal(it, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.inbox()
-	p := r.say("MORE " + id)
-	if strings.Contains(p, "YES") || !strings.Contains(p, "Wi-Fi page") || !strings.HasSuffix(p, "NO "+id+".") {
-		t.Fatalf("local page: %q", p)
+	for _, worst := range []bool{false, true} {
+		r := newRig(t, nil)
+		it := longItem(1, worst)
+		it.Detail, it.UndoBy = "DETAILWITHHELD", "UNDOWITHHELD"
+		it.Recipient = "not a canonical recipient, " + strings.Repeat("r,", 40) + "z"
+		id, err := r.ch.RequestLocal(it, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sms := r.inbox()
+		p := r.say("MORE " + id)
+		if strings.Contains(p, "YES") || !strings.Contains(p, "Wi-Fi page") || !strings.HasSuffix(p, "NO "+id+".") {
+			t.Fatalf("local page: %q", p)
+		}
+		pageReplies(t, p, sms)
+		for _, f := range []string{"DETAILWITHHELD", "UNDOWITHHELD", "9999", "canonical", "undone", "asked", "erased"} {
+			if strings.Contains(p, f) && !strings.Contains(sms, f) {
+				t.Fatalf("local page shows %q, which its text withholds: %q (text %q)", f, p, sms)
+			}
+		}
 	}
 }
 
@@ -237,5 +287,39 @@ func TestMoreStatusThroughTheChannelNeedsProof(t *testing.T) {
 	r.unlock()
 	if p := r.say("MORE STATUS"); p != "STATUS fits one text; nothing more to show." {
 		t.Fatalf("unlocked MORE STATUS: %q", p)
+	}
+}
+
+// A local request's replies stay page-or-NO in the compact form too: a
+// local request is High, and the local case must come first (L3 on
+// #6610).
+func TestMoreLocalCompactRepliesOfferNoTextedYes(t *testing.T) {
+	r := newRig(t, nil)
+	id, err := r.ch.RequestLocal(longItem(1, true), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sms := r.inbox()
+	r.ch.mu.Lock()
+	got := r.ch.repliesLocked(r.ch.open[id], true)
+	r.ch.mu.Unlock()
+	if strings.Contains(got, "YES") || got != textReplies(t, sms) {
+		t.Fatalf("compact local replies %q, text %q", got, sms)
+	}
+}
+
+// moreLocked refuses a request past its expiry itself, even before
+// expireLocked has closed it.
+func TestMoreRefusesAnExpiredRequestItself(t *testing.T) {
+	r := newRig(t, nil)
+	id, _ := r.ch.Request([]Item{lowItem("a"), lowItem("b")}, 0)
+	r.inbox()
+	r.ch.mu.Lock()
+	exp := r.ch.open[id].expires
+	before := r.ch.moreLocked(id, 1, exp.Add(-time.Second))
+	at := r.ch.moreLocked(id, 1, exp)
+	r.ch.mu.Unlock()
+	if !strings.Contains(before, "items 1-2 of 2") || at != "No open request "+id+"." {
+		t.Fatalf("before expiry %q, at expiry %q", before, at)
 	}
 }

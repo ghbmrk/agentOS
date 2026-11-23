@@ -367,12 +367,14 @@ func (c *Channel) renderLocked(r *request) string {
 // page whose one item would not fit three segments otherwise.
 func (c *Channel) repliesLocked(r *request, compact bool) string {
 	switch {
+	case r.local:
+		// First: a local request is High too, and is never approved by
+		// text, whatever form the page takes (CH-3, P2-2a).
+		return fmt.Sprintf("Approve or deny on my Wi-Fi page before %s, or reply NO %s.", r.expires.In(c.cfg.Location).Format("15:04"), r.id)
 	case compact && r.tier == High:
 		return fmt.Sprintf("Reply YES %s and a code from your code generator%s, or NO %s.", r.id, c.gridOr(), r.id)
-	case compact && !r.local:
+	case compact:
 		return fmt.Sprintf("Reply YES %s %s or NO %s.", r.id, r.code, r.id)
-	case r.local:
-		return fmt.Sprintf("Approve or deny on my Wi-Fi page before %s, or reply NO %s.", r.expires.In(c.cfg.Location).Format("15:04"), r.id)
 	case r.tier == High && len(r.items) == 1:
 		return fmt.Sprintf("Reply YES %s and a code from your code generator%s, or NO %s.", r.id, c.gridOr(), r.id)
 	case r.tier == High:
@@ -382,6 +384,21 @@ func (c *Channel) repliesLocked(r *request, compact bool) string {
 	default:
 		return fmt.Sprintf("Reply YES %s %s for all, YES %s 1 2 %s for some (the rest are denied), or NO %s.", r.id, r.code, r.id, r.code, r.id)
 	}
+}
+
+// localLine is a local-only item's line on a MORE page: only what its
+// request text shows (the UNVERIFIED mark, verb, object and recipient
+// count), never the fields that text leaves to the page (Security D4).
+func localLine(it Item) string {
+	s := field(it.Facts.Verb, 12) + " \"" + field(it.Object, 40) + "\""
+	if it.Unverified {
+		s = "UNVERIFIED: " + s
+	}
+	if it.Recipient != "" && !SMSApprovable(it) {
+		n := len(strings.Split(it.Recipient, ","))
+		s += fmt.Sprintf(" to %d recipient%s", n, map[bool]string{true: "s"}[n != 1])
+	}
+	return s + "; details on my Wi-Fi page"
 }
 
 // moreLocked is CH-12's read-only MORE (D-079): the page of request id
@@ -419,7 +436,11 @@ func (c *Channel) moreLocked(id string, from int, now time.Time) string {
 			fmt.Fprintf(&b, "%s items %d-%d of %d:", id, first, last, len(r.items))
 		}
 		for _, i := range left[:shown] {
-			fmt.Fprintf(&b, " %d %s.", i+1, c.itemLineAs(r.items[i], short))
+			line := c.itemLineAs(r.items[i], short)
+			if r.local {
+				line = localLine(r.items[i])
+			}
+			fmt.Fprintf(&b, " %d %s.", i+1, line)
 		}
 		fmt.Fprintf(&b, " Expires %s. %s", exp, c.repliesLocked(r, short))
 		if shown < len(left) {
