@@ -184,7 +184,7 @@ const unreachableText = "I can't answer right now. Nothing was approved or denie
 // answerUnreachableText: the call to agentosd failed or timed out, but an
 // answer may already have taken effect, so the page claims nothing either way
 // (UX-2wb-1).
-const answerUnreachableText = "I didn't hear back. Your answer may or may not have gone through. Open Status below, or text STATUS, to see whether the request is still open."
+const answerUnreachableText = "I didn't hear back. Your answer may or may not have gone through. Open Approvals below, or text STATUS, to see whether the request is still open."
 
 const stalePage = "This page is out of date. Check the request below and answer again."
 
