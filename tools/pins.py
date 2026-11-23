@@ -79,7 +79,7 @@ FETCH_EXEMPT = {
                                     ".curlrc; downloads nothing"),
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
     "tests/test_image.py": (1, "a busybox wget shebang as fixture text"),
-    "tests/test_pins.py": (110, "this reader's test cases"),
+    "tests/test_pins.py": (120, "this reader's test cases"),
     "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
@@ -98,7 +98,7 @@ WORDS = re.compile(r"[\s'\"`$(){}\[\];|&<>=\\,]+")
 NET_TEXT = re.compile(r"\burllib\.request\b|\burlopen\b|\bhttp\.client\b|\burllib3\b|\bhttpx\b|\baiohttp\b|"
                       r"\bftplib\b|\bxmlrpc\.client\b|\b(?:import|from)\s+requests\b|\brelease\s+download\b|/dev/(?:tcp|udp)/")
 NET_MODULES = ("urllib.request", "urllib3", "requests", "http.client", "httpx", "aiohttp", "ftplib", "xmlrpc.client")
-# Package-manager fetches their own check does not cover (CI-pin-liveness-fu2-2), failing closed: pip
+# Package-manager fetches their own check does not cover (CI-pin-liveness-fu2-2), failing closed (see tool_sites): pip
 # without the exact word --require-hashes, an npm verb that resolves outside the lockfile, any yarn or pnpm
 # command (no flag is credited: yarn 1 ignores --immutable), npx in any command not led by a file tool, and
 # a Go setting that turns off the checksum database. `npm ci`, hashed pip and `go install x@v` are not sites.
@@ -109,16 +109,32 @@ GO_UNCHECKED = re.compile(r"\bGOSUMDB=off\b|\bGONOSUMDB\b|\bGONOSUMCHECK\b|\bGOI
                           r"\bGOFLAGS=\S*-insecure")
 
 
-def tool_sites(line):
-    """Package-manager fetch sites in one shell line (quotes already removed), per command."""
+SEPARATORS = r";|&(){}`<>"
+QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")  # read left to right, so each span starts where shell opens one
+BOUNDARY = re.compile(r"[\s#" + re.escape(SEPARATORS) + "]")
+
+
+def _shifts(raw):
+    """True when quote or backslash removal may move a word, command or comment boundary in this raw
+    line: any backslash, a lone quote, or a quoted span holding a space, a `#` or a separator."""
+    spans = QUOTED.findall(raw)
+    return ("\\" in raw or any(BOUNDARY.search(q) for q in spans)
+            or "'" in QUOTED.sub("", raw) or '"' in QUOTED.sub("", raw))
+
+
+def tool_sites(line, credit=True):
+    """Package-manager fetch sites in one shell line (quotes already removed), per command. Fails closed:
+    every command name counts, wherever it sits, and only a credit (the `--require-hashes` flag, a file-tool
+    lead) can make one not count. A credit is read only from words before the first one starting `#`, and
+    none at all where `credit` is false (the caller found quotes that move a boundary)."""
     n = len(GO_UNCHECKED.findall(line))
-    for cmd in re.split(r"[;|&(){}`<>]", line):
+    for cmd in re.split("[" + re.escape(SEPARATORS) + "]", line):
         raw = cmd.split()
-        raw = raw[:next((i for i, x in enumerate(raw) if x.startswith("#")), len(raw))]  # shell's comment rule
-        names = [x.rsplit("/", 1)[-1] for x in raw]  # the basename only names a command; flags are raw words
-        lead = next((x for x in names if "=" not in x), None)
+        live = raw[:next((i for i, x in enumerate(raw) if x.startswith("#")), len(raw))] if credit else []
+        names = [x.rsplit("/", 1)[-1] for x in raw]  # the basename only names a command; credits read raw words
+        lead = next((x for x in live if "=" not in x), "").rsplit("/", 1)[-1]
         for i, x in enumerate(names):
-            if PIP.fullmatch(x) and {"install", "download"} & set(raw[i + 1:]) and "--require-hashes" not in raw:
+            if PIP.fullmatch(x) and {"install", "download"} & set(raw[i + 1:]) and "--require-hashes" not in live:
                 n += 1
             elif x == "npm" and NPM_VERBS & set(raw[i + 1:]) or x in ("yarn", "pnpm"):
                 n += 1
@@ -140,9 +156,10 @@ def text_sites(text):
             joined.append(line)
         prev = joined[-1]
     for line in joined:
+        credit = not _shifts(line)
         line = re.sub(r"[\"'\\]", "", line)
         n += sum(1 for w in WORDS.split(line) if w.rsplit("/", 1)[-1] in FETCHERS)
-        n += len(NET_TEXT.findall(line)) + tool_sites(line)
+        n += len(NET_TEXT.findall(line)) + tool_sites(line, credit)
     return n
 
 

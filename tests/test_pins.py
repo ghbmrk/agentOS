@@ -457,12 +457,19 @@ class FollowUp2(unittest.TestCase):
                      # Comment and flag tests read raw words, not basenames (L3 1, Potency 1 on #6593).
                      "PIP_CACHE_DIR=/tmp/#c pip install foo", "HOME=/tmp/#x pip install foo",
                      "pip install --index-url https://h/--require-hashes foo",
-                     "sudo -u bob npx foo", "timeout -s KILL 60 npx foo", "xargs -I % npx foo %"]:
+                     "sudo -u bob npx foo", "timeout -s KILL 60 npx foo", "xargs -I % npx foo %",
+                     # Fail closed (step back on #6593): a `#` word never hides a name, and no credit is read
+                     # from a line whose quotes or backslashes move a word, command or comment boundary.
+                     'X="a #b" pip install foo', "X='a #b' pip install foo", 'X="a #b" npx foo',
+                     "pip --cache-dir '#d' install foo", "npm --prefix '#p' install evil", "# pip install foo",
+                     'env "A=;"tar npx foo', 'pip install foo "x --require-hashes"',
+                     "pip install foo\\ --require-hashes", "pip install --require-hashes foo 'x"]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 1)
         for text in ["pip install --require-hashes -r r.txt", "python -m pip install --no-deps --require-hashes \\\n  -r r.txt",
                      "npm ci --ignore-scripts", "go install x@v1.2.3", "go mod download", "tar x $n/bin/npx $n/bin/npm",
-                     "pip list", "GOSUMDB=sum.golang.org go get x", "echo npm", "echo ok  # npx foo"]:
+                     "pip list", "GOSUMDB=sum.golang.org go get x", "echo npm", "echo ok  # npx foo",
+                     'pip install --require-hashes -r "$R"', "tar 'x' $n/bin/npx"]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 0)
         self.assertEqual(pins.py_sites('subprocess.run("pip install x", shell=True)\n'), 1)
