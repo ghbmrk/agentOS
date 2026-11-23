@@ -12,7 +12,7 @@ import (
 type reply struct {
 	word  string
 	id    string // request ID, "" if omitted
-	items []int  // batch item numbers, 1-based
+	items []int  // batch item numbers, 1-based; MORE's first item
 	code  string // trailing code of 6 or more digits
 	token string // challenge-mode token (UNLOCK, RESUME)
 }
@@ -42,7 +42,7 @@ func parserGaps(s string) string {
 // parseReply reports whether msg is one of the owner channel's words.
 //
 //	YES [id] [item...] [code]   NO [id] [item...]
-//	UNDO id   MORE id   RETRY
+//	UNDO id   MORE id [item]   RETRY
 //	RESUME [code]   RESUME token code   UNLOCK [token code]
 //	PAUSE grant   REVOKE grant
 //
@@ -59,6 +59,12 @@ func parseReply(msg string) (reply, bool) {
 	case "UNDO", "MORE":
 		if len(args) == 1 && isID(args[0]) {
 			r.id = args[0]
+			return r, true
+		}
+		// MORE id n is the page that starts at item n (CH-12, D-079).
+		if r.word == "MORE" && len(args) == 2 && isID(args[0]) && isItem(args[1]) {
+			n, _ := strconv.Atoi(args[1])
+			r.id, r.items = args[0], []int{n}
 			return r, true
 		}
 		return reply{}, false
@@ -98,13 +104,19 @@ func parseReply(msg string) (reply, bool) {
 		r.code, args = args[len(args)-1], args[:len(args)-1]
 	}
 	for _, a := range args {
-		n, err := strconv.Atoi(a)
-		if err != nil || len(a) > 2 || n < 1 {
+		if !isItem(a) {
 			return reply{}, false
 		}
+		n, _ := strconv.Atoi(a)
 		r.items = append(r.items, n)
 	}
 	return r, true
+}
+
+// isItem is a batch item number: 1 or 2 ASCII digits, not zero.
+func isItem(s string) bool {
+	n, err := strconv.Atoi(s)
+	return err == nil && allDigits(s) && len(s) <= 2 && n >= 1
 }
 
 func isID(s string) bool {

@@ -297,20 +297,36 @@ func ItemSum(it Item) string {
 }
 
 // itemLine is an item's line as a text shows it, in the owner's time zone.
-func (c *Channel) itemLine(it Item) string {
-	s := it.line()
+func (c *Channel) itemLine(it Item) string { return c.itemLineAs(it, false) }
+
+// itemLineAs is itemLine, or with short its same fields and notices in
+// fewer words, as question's short form (CH12V-4), for a MORE page whose
+// one item would not fit three segments otherwise.
+func (c *Channel) itemLineAs(it Item, short bool) string {
+	s := it.lineAs(short)
+	at := func(t time.Time) string { return t.In(c.cfg.Location).Format("15:04 Jan 2") }
 	if !it.Asked.IsZero() {
-		s += ", asked " + it.Asked.In(c.cfg.Location).Format("15:04") + ", re-sent after restart"
+		if short {
+			s += ", asked " + it.Asked.In(c.cfg.Location).Format("15:04") + ", re-sent"
+		} else {
+			s += ", asked " + it.Asked.In(c.cfg.Location).Format("15:04") + ", re-sent after restart"
+		}
 	}
 	switch {
+	case !it.Sent.IsZero() && it.SentErased && short:
+		s += ", may repeat an erased send (" + at(it.Sent) + "); send it?"
 	case !it.Sent.IsZero() && it.SentErased:
 		// Only an erased send matched (OP2-ER-2): it may not be this one.
-		s += ", may repeat a send whose record was erased (it went " + it.Sent.In(c.cfg.Location).Format("15:04 Jan 2") + "); send it?"
+		s += ", may repeat a send whose record was erased (it went " + at(it.Sent) + "); send it?"
+	case !it.Sent.IsZero() && short:
+		s += ", sent " + at(it.Sent) + "; again?"
 	case !it.Sent.IsZero():
 		// Confirm repeats (D-116): said plainly, as a question.
-		s += ", already sent " + it.Sent.In(c.cfg.Location).Format("15:04 Jan 2") + "; send it again?"
+		s += ", already sent " + at(it.Sent) + "; send it again?"
+	case !it.Retried.IsZero() && short:
+		s += ", may go twice, tried " + at(it.Retried)
 	case !it.Retried.IsZero():
-		s += ", may go twice, first tried " + it.Retried.In(c.cfg.Location).Format("15:04 Jan 2")
+		s += ", may go twice, first tried " + at(it.Retried)
 	}
 	return s
 }
@@ -378,12 +394,17 @@ func (c *Channel) question(it Item, short bool) string {
 	return s
 }
 
-func (it Item) line() string {
+func (it Item) line() string { return it.lineAs(false) }
+
+// lineAs is line, or with short its UNVERIFIED mark in fewer words.
+func (it Item) lineAs(short bool) string {
 	s := field(it.Facts.Verb, 12) + " " + field(it.Object, 40)
 	if it.Detail != "" {
 		s += ", " + field(it.Detail, 40)
 	}
-	if it.Unverified {
+	if it.Unverified && short {
+		s = "UNVERIFIED: " + s
+	} else if it.Unverified {
 		s = "UNVERIFIED, details on the Wi-Fi page: " + s
 	}
 	if it.Recipient != "" {

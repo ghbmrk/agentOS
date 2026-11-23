@@ -333,16 +333,7 @@ func (c *Channel) renderLocked(r *request) string {
 		return fmt.Sprintf("%sCan I %s \"%s\" to %d recipient%s? I can't show them in a text. Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
 			pre, field(it.Facts.Verb, 12), field(it.Object, 40), n, map[bool]string{true: "s"}[n != 1], exp, r.id)
 	}
-	switch {
-	case r.tier == High && len(r.items) == 1:
-		replies = fmt.Sprintf("Reply YES %s and a code from your code generator%s, or NO %s.", r.id, c.gridOr(), r.id)
-	case r.tier == High:
-		replies = fmt.Sprintf("Reply YES %s and a code from your code generator%s (add item numbers to approve some; the rest are denied), or NO %s.", r.id, c.gridOr(), r.id)
-	case len(r.items) == 1:
-		replies = fmt.Sprintf("Reply YES %s %s or NO %s.", r.id, r.code, r.id)
-	default:
-		replies = fmt.Sprintf("Reply YES %s %s for all, YES %s 1 2 %s for some (the rest are denied), or NO %s.", r.id, r.code, r.id, r.code, r.id)
-	}
+	replies = c.repliesLocked(r, false)
 	if len(r.items) == 1 {
 		// The full wording, or its short form when that would not fit
 		// three segments with the longest request ID and grid cell, so
@@ -370,26 +361,81 @@ func (c *Channel) renderLocked(r *request) string {
 	return fmt.Sprintf("Can I do these %d things? MORE %s lists them. Expires %s. %s", len(r.items), r.id, exp, replies)
 }
 
-// moreLocked lists a request's open items (CH-12's MORE).
-func (c *Channel) moreLocked(id string) string {
+// repliesLocked is a texted request's valid replies (CH-12, CH-13): one
+// code for the whole batch, whatever page shows its items. compact is
+// the same replies without the guide to approving some items, for a MORE
+// page whose one item would not fit three segments otherwise.
+func (c *Channel) repliesLocked(r *request, compact bool) string {
+	switch {
+	case compact && r.tier == High:
+		return fmt.Sprintf("Reply YES %s and a code from your code generator%s, or NO %s.", r.id, c.gridOr(), r.id)
+	case compact && !r.local:
+		return fmt.Sprintf("Reply YES %s %s or NO %s.", r.id, r.code, r.id)
+	case r.local:
+		return fmt.Sprintf("Approve or deny on my Wi-Fi page before %s, or reply NO %s.", r.expires.In(c.cfg.Location).Format("15:04"), r.id)
+	case r.tier == High && len(r.items) == 1:
+		return fmt.Sprintf("Reply YES %s and a code from your code generator%s, or NO %s.", r.id, c.gridOr(), r.id)
+	case r.tier == High:
+		return fmt.Sprintf("Reply YES %s and a code from your code generator%s (add item numbers to approve some; the rest are denied), or NO %s.", r.id, c.gridOr(), r.id)
+	case len(r.items) == 1:
+		return fmt.Sprintf("Reply YES %s %s or NO %s.", r.id, r.code, r.id)
+	default:
+		return fmt.Sprintf("Reply YES %s %s for all, YES %s 1 2 %s for some (the rest are denied), or NO %s.", r.id, r.code, r.id, r.code, r.id)
+	}
+}
+
+// moreLocked is CH-12's read-only MORE (D-079): the page of request id
+// that starts at item from (1-based). It names the request, the items
+// shown out of how many, and the expiry, then ends with the valid replies
+// and, while undecided items remain, the next MORE command. Within three
+// segments it shows as many whole items as fit, at least one, so every
+// item is reachable by paging. It is a function of the request alone, so
+// the same page reads the same while the request is unchanged; an
+// expired or closed request has no pages. Reading changes nothing.
+func (c *Channel) moreLocked(id string, from int, now time.Time) string {
 	r := c.open[id]
-	if r == nil {
+	if r == nil || !now.Before(r.expires) {
 		return fmt.Sprintf("No open request %s.", id)
 	}
-	var b strings.Builder
-	b.WriteString(id + ":")
-	for i, it := range r.items {
-		if r.done[i] {
-			continue
-		}
-		next := fmt.Sprintf(" %d %s.", i+1, c.itemLine(it))
-		if !fits(b.String() + next + " Rest on my Wi-Fi page.") {
-			b.WriteString(" Rest on my Wi-Fi page.")
-			break
-		}
-		b.WriteString(next)
+	if from < 1 {
+		from = 1
 	}
-	return b.String()
+	var left []int // undecided items from from on, 0-based
+	for i := from - 1; i < len(r.items); i++ {
+		if !r.done[i] {
+			left = append(left, i)
+		}
+	}
+	if len(left) == 0 {
+		return fmt.Sprintf("%s has no undecided item from %d; it has %d. Reply MORE %s.", id, from, len(r.items), id)
+	}
+	exp := r.expires.In(c.cfg.Location).Format("15:04")
+	page := func(shown int, short bool) string {
+		var b strings.Builder
+		first, last := left[0]+1, left[shown-1]+1
+		if first == last {
+			fmt.Fprintf(&b, "%s item %d of %d:", id, first, len(r.items))
+		} else {
+			fmt.Fprintf(&b, "%s items %d-%d of %d:", id, first, last, len(r.items))
+		}
+		for _, i := range left[:shown] {
+			fmt.Fprintf(&b, " %d %s.", i+1, c.itemLineAs(r.items[i], short))
+		}
+		fmt.Fprintf(&b, " Expires %s. %s", exp, c.repliesLocked(r, short))
+		if shown < len(left) {
+			fmt.Fprintf(&b, " Next: MORE %s %d.", id, left[shown]+1)
+		}
+		return b.String()
+	}
+	for shown := len(left); shown >= 1; shown-- {
+		if p := page(shown, false); fits(p) {
+			return p
+		}
+	}
+	// One item too long for its full wording: the same fields and
+	// notices, and the same replies, in fewer words. Every texted item
+	// fits this way (TestMorePagesReachEveryBatchItem's worst case).
+	return page(1, true)
 }
 
 // answerLocked applies YES or NO to a request (CH-13). accepted reports an
