@@ -98,8 +98,12 @@ if [ "$MODE" = build ]; then
 	# rename, replace or write anything the build reads from here on, the commit, the tar or what the steps
 	# write, so the tar hashed is the tar unpacked and the tree checked is the tree mkosi reads (#6417).
 	W=$(sudo mktemp -d /var/lib/agentos-build.XXXXXXXX)
-	BUILD_LOG="$W/build.log (root-only; $W stays for it)"
-	trap 'echo "local-build.sh: build log $BUILD_LOG" >&2' EXIT
+	# On exit, name the log only where it is: in DIR once the image is out, else in W once mkosi has written it.
+	# A failed build keeps W for reading (the log, or the copies a check before mkosi refused) and says how to remove it.
+	BUILD_LOG=
+	trap 'if [ -n "$BUILD_LOG" ]; then echo "local-build.sh: build log $BUILD_LOG" >&2
+	elif sudo test -e "$W/build.log"; then echo "local-build.sh: build log $W/build.log (root-only); once read: sudo rm -rf $W" >&2
+	else echo "local-build.sh: the build stopped before mkosi, so it wrote no log; $W (root-only) holds the copied commit and tar; once read: sudo rm -rf $W" >&2; fi' EXIT
 	sudo mkdir "$W/src" "$W/stage-in"
 	# The commit's objects (not its parents) go into root's own repository W/git, where index-pack checks every
 	# object against its id and fsck's rules, and root checks out COMMIT's tree with no config or attributes but its own and the tree's: the

@@ -8391,7 +8391,11 @@ class MkosiRunBoundTest(unittest.TestCase):
         self.assertEqual(copy.stat().st_mode & 0o7777, 0o444)
         self.assertEqual(pathlib.Path(w).stat().st_mode & 0o7777, 0o700)
         self.assertEqual(copy.read_bytes(), tar.read_bytes())
-        self.assertIn("build log %s/build.log (root-only" % w, r.stderr)
+        # No log exists before mkosi, so none is named (UX on #6440): the exit line says what W holds and how to remove it.
+        self.assertFalse((pathlib.Path(w) / "build.log").exists())
+        self.assertNotIn("build log", r.stderr)
+        self.assertIn("stopped before mkosi, so it wrote no log; %s (root-only) holds the copied commit and tar; "
+                      "once read: sudo rm -rf %s" % (w, w), r.stderr)
         self.assertEqual(list((d / "img").iterdir()), [])
         d, tar, _ = self.staged(snapshot=self.SECURITY)
         r, calls, _ = self.build(str(tar), "img", snapshot=self.SECURITY, d=d)
@@ -8457,7 +8461,7 @@ class MkosiRunBoundTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertEqual([c[0] for c in self.runs(calls)], ["env"])
         w = self.root_dir(calls)
-        self.assertIn("build log %s/build.log (root-only; %s stays for it)" % (w, w), r.stderr)
+        self.assertIn("build log %s/build.log (root-only); once read: sudo rm -rf %s" % (w, w), r.stderr)
         self.assertEqual((pathlib.Path(w) / "build.log").read_text(), "mkosi\n")
         self.assertFalse((d / "img/out").exists())
 

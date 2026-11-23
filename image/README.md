@@ -37,7 +37,9 @@ The image then moves to `DIR/out`.
    and `image/finish.sh`. The image is in `DIR/out`.
 
 `DIR` must not exist; relative paths are the caller's. Each half names its log on exit: `DIR/stage.log`, and
-`DIR/build.log` once the image is out (until then the root-only directory holds it, and stays for it). A checkout with changes or untracked files is refused, as CI builds only commits.
+`DIR/build.log` once the image is out. A build that fails keeps its root-only directory for reading and names
+it on exit, with the log if mkosi ran (a check before mkosi writes none), and the `sudo rm -rf` that removes it.
+A checkout with changes or untracked files is refused, as CI builds only commits.
 `VERSION` defaults to the commit time and may hold only `0-9 A-Z a-z . + _ -`. `AGENTOS_SECURITY_SNAPSHOT`,
 if set on both hosts, is the run's snapshot; unset, `build.sh` resolves one and the build host resolves the
 set it must be in, later, so the two can differ: the build then refuses and names the fix, setting it on both
