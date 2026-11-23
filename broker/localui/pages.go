@@ -231,6 +231,9 @@ form { margin: .6em 0 1.2em; }
 {{define "claimbox"}}{{template "head" ""}}
 <h1>Claim AgentOS</h1>
 {{if .Reinstall}}<p>I am already claimed. To set me up again, reinstall me.</p>
+{{else if .Reclaim}}<p>I am already claimed. If my answer never reached your phone, type my sticker's code again: until the phone that claimed me comes back, I still take it.</p>
+{{with .Err}}<p class="err">{{.}}</p>{{end}}
+{{template "claimform" .}}
 {{else if .Claimed}}<p>I am already claimed. Setup continues on the phone that claimed me. To claim me again, reinstall me.</p>
 {{else if .Locked}}<p class="err">Too many wrong codes. Restart me (turn me off and on again), then type the code again.</p>
 {{if gt .Reserve 0}}<p>If you hold my sticker, type its whole code exactly as printed: I still take it now.</p>

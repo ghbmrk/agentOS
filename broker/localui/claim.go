@@ -37,6 +37,9 @@ type claimView struct {
 	// Reinstall drops "setup continues on the phone that claimed me":
 	// the box lost its claim state, so no phone holds its setup.
 	Reinstall bool
+	// Reclaim keeps the form on a claimed box whose claim answer may
+	// never have reached the phone (claim CTRL-card-sock-s3-K1).
+	Reclaim bool
 }
 
 // claimGate keeps setup behind the box's claim: before it every setup
@@ -66,7 +69,7 @@ func (s *Server) claimGate(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	w.WriteHeader(http.StatusForbidden)
-	s.render(w, "claimbox", claimView{Claimed: true, Reinstall: s.cfg.Claim.Status().Reinstall})
+	s.render(w, "claimbox", s.claimView())
 	return true
 }
 
@@ -90,6 +93,10 @@ func (s *Server) claimPage(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			v := s.claimView()
 			v.Err = claimBusy
+			// Busy is not the owner's mistake: keep what was typed.
+			if len(typed) <= 32 {
+				v.Code = typed
+			}
 			s.render(w, "claimbox", v)
 			return
 		}
@@ -113,10 +120,13 @@ func (s *Server) claimPage(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, claim.ErrAlreadyClaimed):
 			code = http.StatusConflict
+			if v.Reclaim {
+				v.Err = claimWrong
+			}
 		case errors.Is(err, claim.ErrLocked):
 			code = http.StatusLocked
 		case errors.Is(err, claim.ErrWrongCode):
-			v.Err = "That code did not match my sticker. Check it and type it again."
+			v.Err = claimWrong
 		default:
 			code = http.StatusInternalServerError
 			v.Err = "I could not check that code. Try again."
@@ -147,6 +157,8 @@ const claimQueue = 4
 
 const claimBusy = "I am busy checking codes. Try again in a moment."
 
+const claimWrong = "That code did not match my sticker. Check it and type it again."
+
 // claimTurn waits for this post's turn to run Claim. It refuses at once
 // when claimQueue posts already wait, and refuses a post whose request
 // ended before its turn came, so Claim never runs for a phone that left.
@@ -172,5 +184,6 @@ func (s *Server) claimTurn(r *http.Request) (release func(), ok bool) {
 
 func (s *Server) claimView() claimView {
 	st := s.cfg.Claim.Status()
-	return claimView{TriesLeft: st.TriesLeft, Locked: st.Locked, Claimed: st.Claimed, Reserve: st.Reserve, Reinstall: st.Reinstall}
+	return claimView{TriesLeft: st.TriesLeft, Locked: st.Locked, Claimed: st.Claimed, Reserve: st.Reserve, Reinstall: st.Reinstall,
+		Reclaim: st.Claimed && st.Reclaim && !st.Reinstall}
 }

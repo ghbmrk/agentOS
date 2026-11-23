@@ -76,6 +76,8 @@ const (
 	EventRefused  = "claim: refused while locked"
 	EventUnlocked = "claim: screen unlocked by a restart"
 	EventReserve  = "claim: sticker reserve: wrong code"
+	EventAnswered = "claim: claimant token re-delivered"
+	EventBurned   = "claim: claimant phone came back; code dead"
 )
 
 // ReserveTries is the wrong codes per boot that start with the sticker's
@@ -170,6 +172,12 @@ type Claim struct {
 	// stuck is set when a wrong count could not be saved: the screen
 	// stays locked for this process (fail closed).
 	stuck bool
+	// lost is the code's verifier after a claim whose token no phone has
+	// presented yet (CTRL-card-sock-s3-K1): the right code re-delivers a token while it is
+	// set. It lives only in memory, so the disk keeps no code after the
+	// claim and a restart ends it. lostWrong counts wrong codes against it.
+	lost      *state
+	lostWrong int
 }
 
 // KernelBootID reads Linux's boot_id, which changes on every boot.
@@ -380,13 +388,17 @@ type Status struct {
 	// setup, so its screens say only "reinstall me" (firstboot's
 	// RouteReinstall). Claim never sets it.
 	Reinstall bool
+	// Reclaim marks a claimed box whose claimant token no phone has
+	// presented yet on this start: the sticker's code still re-delivers
+	// one (CTRL-card-sock-s3-K1).
+	Reclaim bool
 }
 
 // Status reports the claim's state.
 func (c *Claim) Status() Status {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	s := Status{Claimed: c.st.Claimed, Locked: !c.st.Claimed && c.lockedLocked()}
+	s := Status{Claimed: c.st.Claimed, Locked: !c.st.Claimed && c.lockedLocked(), Reclaim: c.st.Claimed && c.lost != nil}
 	if !s.Claimed && !s.Locked {
 		s.TriesLeft = c.allowed() - c.st.Wrong
 	}
@@ -413,11 +425,15 @@ func (c *Claim) Claimed() bool { c.mu.Lock(); defer c.mu.Unlock(); return c.st.C
 // Try presents a code. The right code on an unclaimed, unlocked box
 // claims it, as does the right code while the reserve has tries this boot: the code is burned and the returned token names the phone
 // that claimed it (Claimant). The claim is saved before Try returns; if
-// the save fails the box stays unclaimed.
+// the save fails the box stays unclaimed. On a claimed box the right code
+// re-delivers a new token until a phone presents one (CTRL-card-sock-s3-K1).
 func (c *Claim) Try(code string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.st.Claimed {
+		if c.lost != nil {
+			return c.reclaim(code)
+		}
 		c.journal(EventAgain)
 		return "", ErrAlreadyClaimed
 	}
@@ -496,7 +512,38 @@ func (c *Claim) claim() (string, error) {
 		c.st = prev
 		return "", err
 	}
+	c.lost = &state{Salt: prev.Salt, KDF: prev.KDF, Verifier: prev.Verifier}
+	c.lostWrong = 0
 	c.journal(EventClaimed)
+	return tok, nil
+}
+
+// reclaim tries the code against a claim whose answer may never have
+// reached the phone (CTRL-card-sock-s3-K1); c.mu is held and c.lost is set. The right code
+// replaces the claimant token, so only the newest phone holds setup. A
+// wrong one answers "already claimed" and counts against this boot's
+// allowance; spending it ends the window.
+func (c *Claim) reclaim(code string) (string, error) {
+	if subtle.ConstantTimeCompare(c.lost.verifier(Normalize(code)), c.lost.Verifier) != 1 {
+		c.lostWrong++
+		if c.lostWrong >= c.allowed() {
+			c.lost = nil
+		}
+		c.journal(EventAgain)
+		return "", ErrAlreadyClaimed
+	}
+	tb := make([]byte, 32)
+	if _, err := io.ReadFull(c.rand, tb); err != nil {
+		return "", err
+	}
+	tok := hex.EncodeToString(tb)
+	prev := c.st.Owner
+	c.st.Owner = tokenHash(tok)
+	if err := c.save(); err != nil {
+		c.st.Owner = prev
+		return "", err
+	}
+	c.journal(EventAnswered)
 	return tok, nil
 }
 
@@ -508,7 +555,13 @@ func (c *Claim) Claimant(tok string) bool {
 	if !c.st.Claimed || len(tok) != 64 {
 		return false
 	}
-	return subtle.ConstantTimeCompare(tokenHash(tok), c.st.Owner) == 1
+	ok := subtle.ConstantTimeCompare(tokenHash(tok), c.st.Owner) == 1
+	if ok && c.lost != nil {
+		// The answer reached the phone: the code dies here (CTRL-card-sock-s3-K1).
+		c.lost = nil
+		c.journal(EventBurned)
+	}
+	return ok
 }
 
 // readFile is os.ReadFile refusing a link at p (REV-CHK-links, #3945): boot_id

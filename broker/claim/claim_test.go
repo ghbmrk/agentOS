@@ -106,26 +106,39 @@ func TestCodeKeptHashedAndBurnedAtClaim(t *testing.T) {
 	}
 }
 
-// Two phones racing with the right code: exactly one claims the box.
+// Phones racing with the right code: exactly one token names the
+// claimant. Before any phone presents its token a later right code
+// re-delivers a new one in place of the first (K11), so the winner is the
+// last token handed out, and every other token is refused.
 func TestRacingClaimsOneWins(t *testing.T) {
 	b, code := newBox(t)
 	c := b.start()
-	res := make(chan error, 8)
+	type res struct {
+		tok string
+		err error
+	}
+	out := make(chan res, 8)
 	for i := 0; i < 8; i++ {
-		go func() { _, err := c.Try(code); res <- err }()
+		go func() { tok, err := c.Try(code); out <- res{tok, err} }()
+	}
+	var toks []string
+	for i := 0; i < 8; i++ {
+		r := <-out
+		switch {
+		case r.err == nil:
+			toks = append(toks, r.tok)
+		case !errors.Is(r.err, ErrAlreadyClaimed):
+			t.Fatal(r.err)
+		}
 	}
 	wins := 0
-	for i := 0; i < 8; i++ {
-		err := <-res
-		switch {
-		case err == nil:
+	for _, tok := range toks {
+		if c.Claimant(tok) {
 			wins++
-		case !errors.Is(err, ErrAlreadyClaimed):
-			t.Fatal(err)
 		}
 	}
 	if wins != 1 {
-		t.Fatalf("%d claims won", wins)
+		t.Fatalf("%d of %d tokens name the claimant", wins, len(toks))
 	}
 }
 
