@@ -4240,7 +4240,7 @@ class Plan(unittest.TestCase):
         from unittest import mock
         runs = []
 
-        def timed_cover(pkg, names, tmp, code=None, hidden=()):
+        def timed_cover(pkg, names, tmp, code=None, watched=()):
             runs.append(names)
             return {"broker/p/a.go": {1}}, (2.0 if names is not None else 40.0), None
         for names, want, ran in ((["TestFast"], 40.0, [["TestFast"], None]), (None, 40.0, [None])):
