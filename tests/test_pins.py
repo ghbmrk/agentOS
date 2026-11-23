@@ -432,6 +432,10 @@ class FollowUp2(unittest.TestCase):
             'out = {"requests": []}\n': 0, "self.urllib.request.x\n": 0,
             'importlib.import_module("requests")\n': 1, 'import_module("urllib3.util")\n': 1,
             '__import__("http.client")\n': 1, 'importlib.import_module("json")\n': 0,
+            # An import nested deeper than its use still binds it (L3 1 on #6593).
+            "if True:\n    try:\n        import urllib\n    except ImportError:\n        pass\nr = urllib.request\nr.urlopen(x)\n": 1,
+            "try:\n    if True:\n        import urllib\nexcept ImportError:\n    urllib = None\nu = urllib.request\n": 1,
+            "from importlib import import_module as im\nim('requests')\n": 1, "import xmlrpc.client\n": 1,
         }
         for text, n in cases.items():
             with self.subTest(text=text):
@@ -441,12 +445,16 @@ class FollowUp2(unittest.TestCase):
         for text in ["pip install foo==1", "python3 -m pip install x", '"$V/bin/pip" -q install x', "pip3.12 download x",
                      "cd d && pip install -r r.txt", "npm install x", "npm i", "yarn add x", "pnpm dlx x", "npx foo",
                      "sudo npx foo", "GOSUMDB=off go install x@v1", "GONOSUMDB=x go get y", "GOFLAGS=-insecure go get x",
-                     "export GOPRIVATE=x", "GOINSECURE=x go mod download"]:
+                     "export GOPRIVATE=x", "GOINSECURE=x go mod download",
+                     "pip install foo==1  # TODO: --require-hashes once #6588 lands", "time npx foo",
+                     "timeout 60 npx foo", "nohup npx foo", "xargs npx foo", "nice -n 5 npx foo", "yarn install",
+                     "pnpm install"]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 1)
         for text in ["pip install --require-hashes -r r.txt", "python -m pip install --no-deps --require-hashes \\\n  -r r.txt",
                      "npm ci --ignore-scripts", "go install x@v1.2.3", "go mod download", "tar x $n/bin/npx $n/bin/npm",
-                     "pip list", "GOSUMDB=sum.golang.org go get x", "echo npm"]:
+                     "pip list", "GOSUMDB=sum.golang.org go get x", "echo npm", "yarn install --frozen-lockfile",
+                     "pnpm install --frozen-lockfile", "echo ok  # npx foo"]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 0)
         self.assertEqual(pins.py_sites('subprocess.run("pip install x", shell=True)\n'), 1)

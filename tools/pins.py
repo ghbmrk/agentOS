@@ -79,7 +79,7 @@ FETCH_EXEMPT = {
                                     ".curlrc; downloads nothing"),
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
     "tests/test_image.py": (1, "a busybox wget shebang as fixture text"),
-    "tests/test_pins.py": (83, "this reader's test cases"),
+    "tests/test_pins.py": (95, "this reader's test cases"),
     "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
@@ -95,14 +95,18 @@ FETCH_EXEMPT = {
 FETCHERS = frozenset(["curl", "wget", "aria2c"])
 WORDS = re.compile(r"[\s'\"`$(){}\[\];|&<>=\\,]+")
 NET_TEXT = re.compile(r"\burllib\.request\b|\burlopen\b|\bhttp\.client\b|\burllib3\b|\bhttpx\b|\baiohttp\b|"
-                      r"\bftplib\b|\b(?:import|from)\s+requests\b|\brelease\s+download\b|/dev/(?:tcp|udp)/")
-NET_MODULES = ("urllib.request", "urllib3", "requests", "http.client", "httpx", "aiohttp", "ftplib")
+                      r"\bftplib\b|\bxmlrpc\.client\b|\b(?:import|from)\s+requests\b|\brelease\s+download\b|/dev/(?:tcp|udp)/")
+NET_MODULES = ("urllib.request", "urllib3", "requests", "http.client", "httpx", "aiohttp", "ftplib", "xmlrpc.client")
 # Package-manager fetches their own check does not cover (CI-pin-liveness-fu2-2): pip without
 # --require-hashes, an npm/yarn/pnpm verb that resolves outside the lockfile, npx as a command, and a
 # Go setting that turns off the checksum database. `npm ci`, hashed pip and `go install x@v` are not sites.
 PIP = re.compile(r"pip(?:3(?:\.[0-9]+)?)?")
-JS_VERBS = {"npm": {"install", "i", "add", "exec", "x"}, "yarn": {"add", "dlx"}, "pnpm": {"add", "dlx"}}
-WRAPPERS = frozenset(["sudo", "env", "exec", "retry", "command", "nice"])
+JS_VERBS = {"npm": {"install", "i", "add", "exec", "x"}, "yarn": {"add", "dlx", "install"},
+            "pnpm": {"add", "dlx", "install", "i"}}
+FROZEN = frozenset(["--frozen-lockfile", "--immutable"])  # yarn/pnpm install then holds to the lockfile
+WRAPPERS = frozenset(["sudo", "env", "exec", "retry", "command", "nice", "time", "timeout", "nohup", "xargs",
+                      "stdbuf", "setsid"])
+WRAPPER_ARG = re.compile(r"-.*|[0-9.]+[smhd]?")  # a wrapper's flag or duration (`timeout 60`, `nice -n 5`)
 GO_UNCHECKED = re.compile(r"\bGOSUMDB=off\b|\bGONOSUMDB\b|\bGONOSUMCHECK\b|\bGOINSECURE\b|\bGOPRIVATE\b|"
                           r"\bGOFLAGS=\S*-insecure")
 
@@ -112,12 +116,13 @@ def tool_sites(line):
     n = len(GO_UNCHECKED.findall(line))
     for cmd in re.split(r"[;|&(){}`<>]", line):
         w = [x.rsplit("/", 1)[-1] for x in cmd.split() if x not in ("\\",)]
-        lead = next((x for x in w if "=" not in x and x not in WRAPPERS), None)
+        w = w[:next((i for i, x in enumerate(w) if x.startswith("#")), len(w))]  # a trailing comment runs nothing
+        lead = next((x for x in w if "=" not in x and x not in WRAPPERS and not WRAPPER_ARG.fullmatch(x)), None)
         n += lead in ("npx", "pnpx")
         for i, x in enumerate(w):
             if PIP.fullmatch(x) and {"install", "download"} & set(w[i + 1:]) and "--require-hashes" not in w:
                 n += 1
-            elif x in JS_VERBS and JS_VERBS[x] & set(w[i + 1:]):
+            elif x in JS_VERBS and JS_VERBS[x] & set(w[i + 1:]) and not ("install" in w[i + 1:] and FROZEN & set(w)):
                 n += 1
     return n
 
@@ -191,18 +196,23 @@ def py_sites(text):
     if any(isinstance(x, ast.Name) and x.id == "__doc__" or isinstance(x, ast.Attribute) and x.attr == "__doc__"
            for x in ast.walk(tree)):
         docs = set()  # a file that reads a docstring as data has its docstrings counted
-    n, bound, imported, reached = 0, {}, set(), set()
+    bound = {}  # every name an import binds, from a first walk, so a use visited before its import resolves
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for a in node.names:
                 bound[a.asname or a.name.split(".")[0]] = a.name if a.asname else a.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            for a in node.names:
+                bound[a.asname or a.name] = (node.module or "") + "." + a.name
+    n, imported, reached = 0, set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
                 if _net(a.name):
                     n += 1
                     imported.add(_net(a.name))
         elif isinstance(node, ast.ImportFrom) and node.level == 0:
             mod = node.module or ""
-            for a in node.names:
-                bound[a.asname or a.name] = mod + "." + a.name
             if _net(mod):
                 n += 1
                 imported.add(_net(mod))
@@ -221,7 +231,9 @@ def py_sites(text):
             n += 1
         elif _str(node) is not None and id(node) not in docs:
             n += text_sites(_str(node))
-        if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", None)) in DYN_IMPORTS \
+        if isinstance(node, ast.Call) and (isinstance(node.func, ast.Name) and bound.get(node.func.id, node.func.id)
+                                           .rsplit(".", 1)[-1] in DYN_IMPORTS
+                                           or isinstance(node.func, ast.Attribute) and node.func.attr in DYN_IMPORTS) \
                 and node.args and _str(node.args[0]) is not None and _net(_str(node.args[0])):
             n += not text_sites(_str(node.args[0]))  # `import_module("requests")`; "urllib.request" counts as text
     return n + len(reached - imported)
