@@ -1,4 +1,4 @@
-"""Inherited mode of the image scan (#6590): a PR that changes no image input applies main's live records.
+"""Inherited mode of the image scan (#6631): a PR that changes no image input applies main's live records.
 
 REQ: EVL-5
 

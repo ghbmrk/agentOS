@@ -555,7 +555,7 @@ jobs:
     # root's manifest the reproduce job compares. The scanners and their pins are vulncheck.yml's, and the control
     # runs first, so a clean scan counts only because the same scanners caught every plant.
     # vulncheck.yml rescans main's latest image daily, for advisories published after a build.
-    # Inherited mode (#6590): on a PR, main's current records also apply, read live, so one record landed on
+    # Inherited mode (#6631): on a PR, main's current records also apply, read live, so one record landed on
     # main clears every PR that changes no image input on a rerun of this job alone (vulncheck.py IMAGE_INPUTS).
     needs: build
     if: ${{ !cancelled() }}

@@ -75,7 +75,7 @@ image    An OSV scan of the Debian packages in a built image: DIR holds the dpkg
          empty status fails (exit 2). --propose ISSUE also prints, and adds to the
          report as "proposed", the record each failing no-fix finding needs, citing ISSUE, with
          the template why the image records use (#5628); it accepts nothing itself.
-         --inherit MAIN_CONFIG --base REV (inherited mode, #6590): when the diff from REV
+         --inherit MAIN_CONFIG --base REV (inherited mode, #6631): when the diff from REV
          touches no IMAGE_INPUTS path, MAIN_CONFIG's image records accept what the config's
          leave, and an unused record is noted, not failed (main's scans fail it).
 propose  The same records from REPORT, an `image --report` file such as the
@@ -1821,7 +1821,7 @@ def scan_image(config, src, osv_env=None, offline=False, allow=None, exclude=Non
 
     A record accepts only an advisory Debian has not fixed in the image's release: once a fix
     ships, the finding fails until the image is rebuilt with it, and the record goes unused.
-    MAIN_RECORDS (inherited mode, #6590) accept what the config's records leave, by the same rule;
+    MAIN_RECORDS (inherited mode, #6631) accept what the config's records leave, by the same rule;
     they are never reported unused here."""
     problems = record_problems(config.get("accepted", []))
     if problems:
@@ -1855,7 +1855,7 @@ def scan_image(config, src, osv_env=None, offline=False, allow=None, exclude=Non
     return findings, problems, unused
 
 
-# Inherited mode (#6590): a pull request whose diff touches none of IMAGE_INPUTS cannot change the image's
+# Inherited mode (#6631): a pull request whose diff touches none of IMAGE_INPUTS cannot change the image's
 # Debian packages, the records or the scan, so an advisory it meets is main's too. Its scan also applies main's
 # current image records (read live, so a record landed on main clears the PR on a rerun of this job, with no main
 # merge), and an unused record is noted, not failed: main's own push and daily scans fail it. Every finding still
@@ -2168,7 +2168,7 @@ def main(argv=None):
     i.add_argument("--report")
     i.add_argument("--check-issues", action="store_true")
     i.add_argument("--propose", type=issue_number, metavar="ISSUE")
-    i.add_argument("--inherit", metavar="MAIN_CONFIG", help="main's current config: inherited mode (#6590)")
+    i.add_argument("--inherit", metavar="MAIN_CONFIG", help="main's current config: inherited mode (#6631)")
     i.add_argument("--base", metavar="REV", help="with --inherit, the commit the PR's diff is read against")
     p = sub.add_parser("propose")
     p.add_argument("report", help="the report `image --report` wrote, such as CI's image-vulncheck-report.json")
