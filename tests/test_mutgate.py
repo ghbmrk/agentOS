@@ -6970,6 +6970,39 @@ class GoDebugEveryFu(unittest.TestCase):
             added, tests = mutgate.added_lines(mod_diff("broker/hint/go.mod", (), ("go 1.27",)))
             self.assertEqual(mutgate.touched(added, tests), {"hint"})
 
+    def test_a_patch_level_go_line_bump_is_no_claim(self):
+        # REQ: MUT-go-patch-quiet
+        # The language version and the GODEBUG defaults follow go1.N, so one hunk swapping one `go` line for
+        # another of the same major.minor sets no default (#6567).
+        with tempfile.TemporaryDirectory() as d, self.tree(d):
+            for minus, plus in ((("go 1.26.4",), ("go 1.26.5",)), (("go 1.26",), ("go 1.26.0 // patch",)),
+                                (("go 1.26.5\r",), ("go 1.26.4",)), (("module x", "go 1.26.4"), ("module x", "go 1.26.5"))):
+                with self.subTest(minus=minus, plus=plus):
+                    added, tests = mutgate.added_lines(mod_diff("broker/go.mod", minus, plus))
+                    self.assertEqual(mutgate.touched(added, tests), set())
+            # Two hunks, the first pairing its own lines: still quiet.
+            two = mod_diff("broker/go.mod", ("go 1.26.4",), ("go 1.26.5",)) + "@@ -9,1 +9,1 @@\n-// a\n+// b\n"
+            self.assertEqual(mutgate.touched(*mutgate.added_lines(two)), set())
+
+    def test_any_other_go_line_change_is_every_test_of_the_module(self):
+        # REQ: MUT-go-patch-quiet
+        # Fail closed: a minor or major bump, one side only, an unparsable version on either side, two go
+        # lines on a side, the pair split across hunks or files, or an indented go line all widen.
+        with tempfile.TemporaryDirectory() as d, self.tree(d):
+            for minus, plus in ((("go 1.26.4",), ("go 1.27.0",)), (("go 1.26.4",), ("go 2.26.4",)),
+                                ((), ("go 1.26.5",)), (("go 1.26.4",), ()),
+                                (("go 1.26.4",), ("go 1.26rc1",)), (("go 1.26rc1",), ("go 1.26.4",)),
+                                (("go 1.26.4",), ("go 1.026.4",)), (("go 1.26.4",), ("go 1.26.4.1",)),
+                                (("go 1.26.4",), ("go 1.26.5", "go 1.26.6")), (("go 1.26.4", "go 1.26.4"), ("go 1.26.5",)),
+                                (("go 1.26.4",), ("\tgo 1.26.5",)), (("\tgo 1.26.4",), ("\tgo 1.26.5",)),
+                                (("go 1.26.4",), ("go 1.26.5 x",)), (("go 1.26.4",), ("go",))):
+                with self.subTest(minus=minus, plus=plus):
+                    self.every(mod_diff("broker/go.mod", minus, plus), self.ALL)
+            split = mod_diff("broker/go.mod", ("go 1.26.4",)) + "@@ -9,0 +9,1 @@\n+go 1.26.5\n"
+            self.every(split, self.ALL)
+            other = mod_diff("broker/go.mod", ("go 1.26.4",)) + mod_diff("broker/hint/go.mod", (), ("go 1.26.5",))
+            self.every(other, self.ALL)
+
 
 if __name__ == "__main__":
     unittest.main()
