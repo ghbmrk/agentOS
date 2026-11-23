@@ -231,9 +231,8 @@ func TestMoreInterleavedRestartAndPartialYes(t *testing.T) {
 // prompt, never status lines.
 func TestMoreStatusThroughTheChannelNeedsProof(t *testing.T) {
 	r := newRig(t, nil)
-	locked, status := r.say("MORE STATUS"), r.say("STATUS")
-	if locked != status || strings.Contains(locked, "more line") {
-		t.Fatalf("locked MORE STATUS %q, STATUS %q", locked, status)
+	if locked := r.say("MORE STATUS"); !strings.HasPrefix(locked, "This needs an unlocked session.") {
+		t.Fatalf("locked MORE STATUS: %q", locked)
 	}
 	r.unlock()
 	if p := r.say("MORE STATUS"); p != "STATUS fits one text; nothing more to show." {
