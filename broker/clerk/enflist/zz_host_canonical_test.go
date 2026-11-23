@@ -49,3 +49,12 @@ func TestProposeRefusesANonCanonicalHost(t *testing.T) {
 		t.Fatalf("a canonical host: %v", err)
 	}
 }
+
+// TestProposeNamesAnOffListBasis: a basis off the list is refused by
+// Propose itself, naming the host and the basis, before the policy sees it.
+func TestProposeNamesAnOffListBasis(t *testing.T) {
+	_, err := Propose(cur(), Inputs{Dests: []Dest{{"a.example", "guess", 1}}, EdgeDeclaredBytes: 1})
+	if !errors.Is(err, ErrInput) || !strings.Contains(err.Error(), `"a.example" has basis "guess"`) {
+		t.Fatalf("an off-list basis: %v, want ErrInput naming the host and basis", err)
+	}
+}

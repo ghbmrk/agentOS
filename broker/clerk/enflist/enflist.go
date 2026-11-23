@@ -107,9 +107,9 @@ type Next struct {
 // Propose is cur with its destination list, caps, bases and edge cap
 // replaced by in's, each cap equal to its stated figure. A destination or
 // edge with no daily bytes is *NoDailyBytes; a host listed twice, a host
-// that is not its CanonicalHost, a basis off the list, or a document the policy refuses (an invalid name, caps
-// summing past 2^64-1) is ErrInput. It reads nothing else and keeps
-// everything else in cur.
+// that is not its CanonicalHost, a basis off the list, or a document the
+// policy refuses (an invalid name, caps summing past 2^64-1) is ErrInput.
+// It reads nothing else and keeps everything else in cur.
 func Propose(cur policy.Document, in Inputs) (Next, error) {
 	d := cur
 	d.Destinations, d.Caps, d.Basis = nil, map[string]uint64{}, map[string]string{}
