@@ -298,12 +298,11 @@ func (a *Account) Facts(s key.Step) (string, []string, int64) { return "", nil, 
 func (a *Account) Probe(r kernel.Request, _ kernel.View) kernel.Result {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	v := r.Step().Verb
 	switch {
 	case a.done[r.Idem()]:
 		return kernel.Result{Outcome: "done"}
-	case a.sends[r.Idem()] >= kernel.MaxChecks:
-		return kernel.Result{Outcome: "unknown"}
-	case r.Step().Verb == key.Organize || r.Step().Verb == key.Trash:
+	case (v == key.Organize || v == key.Trash) && a.sends[r.Idem()] < kernel.MaxChecks:
 		return kernel.Result{Outcome: "notdone"}
 	}
 	return kernel.Result{Outcome: "unknown"}
