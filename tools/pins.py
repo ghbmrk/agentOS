@@ -66,10 +66,12 @@ FETCH_NOT_YET = {
 }
 # Files whose fetch sites are not pinned downloads: the count, and why.
 FETCH_EXEMPT = {
+    "broker/drone/sitl/build.sh": (1, "a pip install pinned by version only; hashes owed by #6588"),
     "image/security-snapshot.sh": (5, "probes which debian-security snapshot run is served; apt's signed "
                                       "InRelease is the authority for what it then installs"),
     "spikes/S4-openclaw-guest/run_gateway.sh": (2, "talks to a gateway on 127.0.0.1; downloads nothing"),
-    "spikes/PLAN-muse-capture/run.sh": (1, "probes a gate on 127.0.0.1 through bash's /dev/tcp"),
+    "spikes/PLAN-muse-capture/run.sh": (2, "probes a gate on 127.0.0.1 through bash's /dev/tcp, and a "
+                                           "manual spike's unhashed venv; not run by CI"),
     "spikes/S8-live/fwd.py": (1, "a measurement relay spike; downloads nothing it keeps"),
     "tests/test_ci_scope.py": (6, "ci.yml download steps as fixture text it checks"),
     "tests/test_close_guard_hook.py": (1, "a curl command line fed to the close-guard hook, never run"),
@@ -77,11 +79,12 @@ FETCH_EXEMPT = {
                                     ".curlrc; downloads nothing"),
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
     "tests/test_image.py": (1, "a busybox wget shebang as fixture text"),
-    "tests/test_pins.py": (50, "this reader's test cases"),
+    "tests/test_pins.py": (83, "this reader's test cases"),
     "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
     "tools/metrics.py": (1, "GitHub API calls; downloads nothing it runs"),
+    "tests/test_workflows.py": (1, "`pip install` as a pattern a workflow must not hold"),
     "tests/test_vulncheck.py": (8, "names curl as a package in OSV fixtures"),
     "tools/vulncheck.py": (3, "names curl as its canary's package; OSV and GitHub API queries, release "
                               "notes read as text, and npm tarballs checked against the lockfile's sha512"),
@@ -94,6 +97,29 @@ WORDS = re.compile(r"[\s'\"`$(){}\[\];|&<>=\\,]+")
 NET_TEXT = re.compile(r"\burllib\.request\b|\burlopen\b|\bhttp\.client\b|\burllib3\b|\bhttpx\b|\baiohttp\b|"
                       r"\bftplib\b|\b(?:import|from)\s+requests\b|\brelease\s+download\b|/dev/(?:tcp|udp)/")
 NET_MODULES = ("urllib.request", "urllib3", "requests", "http.client", "httpx", "aiohttp", "ftplib")
+# Package-manager fetches their own check does not cover (CI-pin-liveness-fu2-2): pip without
+# --require-hashes, an npm/yarn/pnpm verb that resolves outside the lockfile, npx as a command, and a
+# Go setting that turns off the checksum database. `npm ci`, hashed pip and `go install x@v` are not sites.
+PIP = re.compile(r"pip(?:3(?:\.[0-9]+)?)?")
+JS_VERBS = {"npm": {"install", "i", "add", "exec", "x"}, "yarn": {"add", "dlx"}, "pnpm": {"add", "dlx"}}
+WRAPPERS = frozenset(["sudo", "env", "exec", "retry", "command", "nice"])
+GO_UNCHECKED = re.compile(r"\bGOSUMDB=off\b|\bGONOSUMDB\b|\bGONOSUMCHECK\b|\bGOINSECURE\b|\bGOPRIVATE\b|"
+                          r"\bGOFLAGS=\S*-insecure")
+
+
+def tool_sites(line):
+    """Package-manager fetch sites in one shell line (quotes already removed), per command."""
+    n = len(GO_UNCHECKED.findall(line))
+    for cmd in re.split(r"[;|&(){}`<>]", line):
+        w = [x.rsplit("/", 1)[-1] for x in cmd.split() if x not in ("\\",)]
+        lead = next((x for x in w if "=" not in x and x not in WRAPPERS), None)
+        n += lead in ("npx", "pnpx")
+        for i, x in enumerate(w):
+            if PIP.fullmatch(x) and {"install", "download"} & set(w[i + 1:]) and "--require-hashes" not in w:
+                n += 1
+            elif x in JS_VERBS and JS_VERBS[x] & set(w[i + 1:]):
+                n += 1
+    return n
 
 
 def text_sites(text):
@@ -111,7 +137,7 @@ def text_sites(text):
     for line in joined:
         line = re.sub(r"[\"'\\]", "", line)
         n += sum(1 for w in WORDS.split(line) if w.rsplit("/", 1)[-1] in FETCHERS)
-        n += len(NET_TEXT.findall(line))
+        n += len(NET_TEXT.findall(line)) + tool_sites(line)
     return n
 
 
@@ -144,9 +170,19 @@ def _exact(c):
     return _str(c) is not None and _str(c).rsplit("/", 1)[-1] in FETCHERS
 
 
+DYN_IMPORTS = frozenset(["import_module", "__import__"])
+
+
+def _net(dotted):
+    """The NET_MODULES entry a dotted name is or lies under, else None."""
+    return next((m for m in NET_MODULES if dotted == m or dotted.startswith(m + ".")), None)
+
+
 def py_sites(text):
-    """Fetch sites in Python: each import of a network module, each string that is a fetcher's name or
-    path (so `c = "curl"` counts where it is bound), and each other fetch site in any string but a
+    """Fetch sites in Python: each import of a network module, each module reached by attribute
+    (`import urllib` then `urllib.request.urlopen`) and not imported by name, once per file per module,
+    each string that is a fetcher's name (so `c = "curl"` counts where bound), each
+    `import_module`/`__import__` of a network module named by a constant, and each other fetch site in any string but a
     docstring, wherever it is passed (an aliased runner or a command held in a variable hides none)."""
     tree = ast.parse(text)
     docs = {id(d.body[0].value) for d in ast.walk(tree)
@@ -155,21 +191,40 @@ def py_sites(text):
     if any(isinstance(x, ast.Name) and x.id == "__doc__" or isinstance(x, ast.Attribute) and x.attr == "__doc__"
            for x in ast.walk(tree)):
         docs = set()  # a file that reads a docstring as data has its docstrings counted
-    n = 0
+    n, bound, imported, reached = 0, {}, set(), set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            n += sum(1 for a in node.names if any(a.name == m or a.name.startswith(m + ".") for m in NET_MODULES))
+            for a in node.names:
+                bound[a.asname or a.name.split(".")[0]] = a.name if a.asname else a.name.split(".")[0]
+                if _net(a.name):
+                    n += 1
+                    imported.add(_net(a.name))
         elif isinstance(node, ast.ImportFrom) and node.level == 0:
             mod = node.module or ""
-            if any(mod == m or mod.startswith(m + ".") for m in NET_MODULES):
+            for a in node.names:
+                bound[a.asname or a.name] = mod + "." + a.name
+            if _net(mod):
                 n += 1
+                imported.add(_net(mod))
             else:  # `from http import client`, `from urllib import request`
-                n += sum(1 for a in node.names if mod + "." + a.name in NET_MODULES)
+                hit = {mod + "." + a.name for a in node.names} & set(NET_MODULES)
+                n += len(hit)
+                imported |= hit
+        elif isinstance(node, ast.Attribute):
+            chain, x = [], node
+            while isinstance(x, ast.Attribute):
+                chain.append(x.attr)
+                x = x.value
+            if isinstance(x, ast.Name) and x.id in bound and _net(".".join([bound[x.id]] + chain[::-1])):
+                reached.add(_net(".".join([bound[x.id]] + chain[::-1])))
         elif _exact(node):
             n += 1
         elif _str(node) is not None and id(node) not in docs:
             n += text_sites(_str(node))
-    return n
+        if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", None)) in DYN_IMPORTS \
+                and node.args and _str(node.args[0]) is not None and _net(_str(node.args[0])):
+            n += not text_sites(_str(node.args[0]))  # `import_module("requests")`; "urllib.request" counts as text
+    return n + len(reached - imported)
 
 
 def scanned():

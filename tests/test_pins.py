@@ -3,7 +3,9 @@
 REQ: CI-pin-liveness-1 (one format, fail closed), CI-pin-liveness-2 (the hash is the only authority),
 CI-pin-liveness-3 (liveness names each dead source), CI-pin-liveness-4 (every pin and download
 site is covered or owed by a release row), CI-pin-liveness-fu (#6524: the owed lists shrink against
-main, fetch sites are found structurally and counted per file, `live` opens only a zip that matched).
+main, fetch sites are found structurally and counted per file, `live` opens only a zip that matched),
+CI-pin-liveness-fu2 (#6549: this reader and its test are gate files; attribute and dynamic Python reach
+and unchecked package-manager fetches are sites).
 """
 import hashlib
 import io
@@ -20,6 +22,7 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import pins  # noqa: E402
+import premerge  # noqa: E402
 
 A = b"alpha bytes"
 B = b"beta bytes"
@@ -405,6 +408,48 @@ class Sites(unittest.TestCase):
         self.assertEqual(pins.fetch_sites(f, "text"), 1)
         f.write_text("import requests\n")
         self.assertEqual(pins.fetch_sites(f, "python"), 1)
+
+
+class FollowUp2(unittest.TestCase):
+    """CI-pin-liveness-fu2 (#6549)."""
+
+    def test_the_reader_and_its_test_are_gate_files(self):
+        # FETCH_EXEMPT can grow, and this test holds the owed lists shrink-only: each changes only with a
+        # Security accept (`premerge.py --needs-mark` prints `mark` for the files mark_paths returns).
+        for f in ("tools/pins.py", "tests/test_pins.py"):
+            self.assertEqual(premerge.mark_paths([f]), [f], f)
+        for f in ("tools/pins.pyc", "tests/test_pins_x.py", "tools/fetch.pins"):
+            self.assertEqual(premerge.mark_paths([f]), [], f)
+
+    def test_python_reach_by_attribute_or_dynamic_import(self):
+        cases = {
+            "import urllib\nurllib.request.urlopen(u)\n": 1, "import urllib.parse\nurllib.request.urlopen(u)\n": 1,
+            "import urllib as x\nx.request.urlopen(u)\nx.request.Request(v)\n": 1,  # once per file per module
+            "import http\nhttp.client.HTTPSConnection(h)\nimport urllib\nurllib.request.urlopen(u)\n": 2,
+            "import urllib.request\nurllib.request.urlopen(u)\nurllib.request.Request(u)\n": 1,  # the import only
+            "from urllib import request as rq\nrq.urlopen(u)\n": 1,
+            "import urllib\nurllib.parse.quote(u)\n": 0, "requests = []\nrequests.append(1)\n": 0,
+            'out = {"requests": []}\n': 0, "self.urllib.request.x\n": 0,
+            'importlib.import_module("requests")\n': 1, 'import_module("urllib3.util")\n': 1,
+            '__import__("http.client")\n': 1, 'importlib.import_module("json")\n': 0,
+        }
+        for text, n in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(pins.py_sites(text), n)
+
+    def test_package_manager_fetches_their_own_check_misses(self):
+        for text in ["pip install foo==1", "python3 -m pip install x", '"$V/bin/pip" -q install x', "pip3.12 download x",
+                     "cd d && pip install -r r.txt", "npm install x", "npm i", "yarn add x", "pnpm dlx x", "npx foo",
+                     "sudo npx foo", "GOSUMDB=off go install x@v1", "GONOSUMDB=x go get y", "GOFLAGS=-insecure go get x",
+                     "export GOPRIVATE=x", "GOINSECURE=x go mod download"]:
+            with self.subTest(text=text):
+                self.assertEqual(pins.text_sites(text), 1)
+        for text in ["pip install --require-hashes -r r.txt", "python -m pip install --no-deps --require-hashes \\\n  -r r.txt",
+                     "npm ci --ignore-scripts", "go install x@v1.2.3", "go mod download", "tar x $n/bin/npx $n/bin/npm",
+                     "pip list", "GOSUMDB=sum.golang.org go get x", "echo npm"]:
+            with self.subTest(text=text):
+                self.assertEqual(pins.text_sites(text), 0)
+        self.assertEqual(pins.py_sites('subprocess.run("pip install x", shell=True)\n'), 1)
 
 
 if __name__ == "__main__":
