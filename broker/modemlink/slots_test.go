@@ -33,13 +33,10 @@ func TestUnansweredRecoveryTextsDoNotFillTheQueue(t *testing.T) {
 	// Within SendWait of the last hand-off the slots still hold: the
 	// bridge may yet answer.
 	clk.add(l.cfg.SendWait)
-	if !l.Bridged() {
-		t.Fatal("an unanswered recovery text within SendWait reads as no bridge")
+	if err := l.Send(ownerNum, "too soon"); !errors.Is(err, modem.ErrNotSent) {
+		t.Fatalf("a send while %d recovery texts may still be answered: %v", MaxQueued, err)
 	}
 	clk.add(time.Nanosecond)
-	if l.Bridged() {
-		t.Fatal("recovery texts SendWait overdue still read as held by a bridge")
-	}
 	done := sendAsync(l, ownerNum, "after many outages")
 	it := poll(t, l)
 	if it.Text != "after many outages" {
@@ -53,6 +50,25 @@ func TestUnansweredRecoveryTextsDoNotFillTheQueue(t *testing.T) {
 	call(t, l, bridgeproto.OpSent, bridgeproto.Sent{ID: first.ID, Code: bridgeproto.CodeOK}, nil)
 	if l.Stray() != stray+1 {
 		t.Fatal("a late result for a forgotten recovery text is not stray")
+	}
+}
+
+// The shutdown drain's Bridged no longer reads a bridge from a recovery
+// text SendWait overdue (#1445): before, one unanswered recovery text made
+// every drain wait out its bound.
+func TestAnOverdueRecoveryTextIsNoBridge(t *testing.T) {
+	l, clk := rig(t)
+	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateDown}, nil)
+	l.Send(ownerNum, "missed")
+	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateOK}, nil)
+	poll(t, l)
+	clk.add(l.cfg.SendWait)
+	if !l.Bridged() {
+		t.Fatal("an unanswered recovery text within SendWait reads as no bridge")
+	}
+	clk.add(time.Nanosecond)
+	if l.Bridged() {
+		t.Fatal("a recovery text SendWait overdue still reads as held by a bridge")
 	}
 }
 

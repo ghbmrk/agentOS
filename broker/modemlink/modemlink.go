@@ -120,8 +120,8 @@ type item struct {
 	bridgeproto.Item
 	result chan string   // nil: nobody waits (the recovery text)
 	handed chan struct{} // closed when a poll takes it; nil with result
-	// expires is when a handed-out item nobody waits for is forgotten, as
-	// a waiter forgets its own after SendWait (#1445); zero otherwise.
+	// expires is SendWait after a poll took it: when, if nobody waits for
+	// it, it is forgotten, as a waiter forgets its own (#1445).
 	expires time.Time
 }
 
@@ -768,9 +768,7 @@ func (l *Link) outbox(ctx context.Context, _ sockets.Peer, _ json.RawMessage) (a
 			if it.handed != nil {
 				close(it.handed)
 			}
-			if it.result == nil {
-				it.expires = now.Add(l.cfg.SendWait)
-			}
+			it.expires = now.Add(l.cfg.SendWait)
 			l.mu.Unlock()
 			return map[string]any{"item": it.Item}, nil
 		}
