@@ -202,7 +202,7 @@ func decodeReply(line []byte) (_ Reply, err error) {
 	}
 	defer func() {
 		if err != nil {
-			clear(tw.Template.v)
+			clear(tw.Template.v[:cap(tw.Template.v)])
 		}
 	}()
 	if err := json.Unmarshal(line, &tw); err != nil {
@@ -210,10 +210,8 @@ func decodeReply(line []byte) (_ Reply, err error) {
 	}
 	blank := line
 	if raw := tw.Template.raw; len(raw) > 0 && raw[0] == '"' {
-		// raw is a slice of line, so its offset is what its capacity
-		// lacks; if it is not, its text cannot be found to leave out.
-		at := cap(line) - cap(raw)
-		if at < 0 || at+len(raw) > len(line) || &line[at] != &raw[0] {
+		at, ok := offsetIn(line, raw)
+		if !ok {
 			return Reply{}, unavailable("template not read in place")
 		}
 		// The line with the template's text as As: it never holds the text.
@@ -238,6 +236,18 @@ func decodeReply(line []byte) (_ Reply, err error) {
 	return r, nil
 }
 
+// offsetIn returns where raw starts in line, if raw is a non-empty slice
+// of line's own memory: its offset is what its capacity lacks. A raw
+// from anywhere else (an encoding/json that copied its input) is not, so
+// its text cannot be found in line to leave out.
+func offsetIn(line, raw []byte) (int, bool) {
+	at := cap(line) - cap(raw)
+	if len(raw) == 0 || at < 0 || at+len(raw) > len(line) || &line[at] != &raw[0] {
+		return 0, false
+	}
+	return at, true
+}
+
 // parseReply decodes one reply line for req and checks every field: an
 // unknown field, a field req's op does not take, or a value off its list
 // or outside its bound (a detection's against req's frame) is
@@ -249,7 +259,7 @@ func parseReply(req Request, line []byte, enrolled func(string) bool) (Reply, er
 		return Reply{}, err
 	}
 	if err := checkReply(req, r, enrolled); err != nil {
-		clear(r.Template)
+		clear(r.Template[:cap(r.Template)])
 		return Reply{}, err
 	}
 	return r, nil

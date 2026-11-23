@@ -182,3 +182,48 @@ func TestStrictDecoderNeverSeesTemplate(t *testing.T) {
 		t.Fatalf("null template: %v", err)
 	}
 }
+
+// offsetIn finds a template's text only in the line's own memory: a
+// slice of another allocation is refused, even one whose capacity puts
+// its computed offset inside the line, so a copying encoding/json fails
+// closed instead of blanking the wrong bytes.
+func TestOffsetInLineOnly(t *testing.T) {
+	// Spare capacity past the line, so a slice can run past its end.
+	text := `{"template":"` + tplB64 + `"}`
+	line := append(make([]byte, 0, len(text)+16), text...)
+	raw := line[12 : 12+len(tplB64)+2]
+	if at, ok := offsetIn(line, raw); !ok || at != 12 {
+		t.Fatalf("sub-slice: %d %v", at, ok)
+	}
+	elsewhere := bytes.Clone(raw)
+	if _, ok := offsetIn(line, elsewhere); ok {
+		t.Fatal("a slice of another allocation was taken")
+	}
+	// cap(line) - cap(inRange) is 12, inside the line.
+	inRange := make([]byte, len(raw), cap(line)-12)
+	copy(inRange, raw)
+	if at := cap(line) - cap(inRange); at+len(inRange) > len(line) {
+		t.Fatal("fixture's offset is not in range")
+	}
+	if _, ok := offsetIn(line, inRange); ok {
+		t.Fatal("a slice of another allocation with an in-range offset was taken")
+	}
+	// Offsets before the line, and past its end, are refused, not read.
+	before := make([]byte, len(raw), cap(line)+1)
+	if _, ok := offsetIn(line, before); ok {
+		t.Fatal("a slice with a negative offset was taken")
+	}
+	if at, ok := offsetIn(line, line[:3]); !ok || at != 0 {
+		t.Fatalf("the line's own first bytes: %d %v", at, ok)
+	}
+	if _, ok := offsetIn(line, line[len(line)-2:]); !ok {
+		t.Fatal("the line's own last bytes were refused")
+	}
+	tail := make([]byte, 4, cap(line)-len(line)+2) // offset len(line)-2
+	if _, ok := offsetIn(line, tail); ok {
+		t.Fatal("a slice running past the line's end was taken")
+	}
+	if _, ok := offsetIn(line, line[len(line):]); ok {
+		t.Fatal("an empty slice was taken")
+	}
+}
