@@ -575,7 +575,7 @@ func (bk *backups) snapItems(s *backupSnap) error {
 
 // Each content/<store> section is the store's items in hash order, each
 // framed as its SHA-256 (32 bytes), its length (4 bytes, big-endian) and
-// its ciphertext. A restore checks every hash and length (RestoreSections).
+// its ciphertext. A restore checks every hash and length (RestoreSections, in zrestore_test.go until #3186 wires it).
 const itemFrame = sha256.Size + 4
 
 // contentSources are snap's content/<store> sections, by store name.

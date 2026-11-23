@@ -2079,8 +2079,7 @@ var linkCalls = map[string]bool{
 // package that dials may make, called or taken as a value, and why; a
 // file that dials makes none. Any other file owes an entry by review.
 var linkOK = map[string]map[string]string{
-	"kernel/proc/backup.go":  {"os.Link": "links a backup's content file into its snapshot, under the kernel's backup dir; also held as backups.link, its only use"},
-	"kernel/proc/restore.go": {"os.Rename": "moves a restore's staged content into the content dir"},
+	"kernel/proc/backup.go": {"os.Link": "links a backup's content file into its snapshot, under the kernel's backup dir; also held as backups.link, its only use"},
 }
 
 // linkMethods are the method names that make, move or replace a directory

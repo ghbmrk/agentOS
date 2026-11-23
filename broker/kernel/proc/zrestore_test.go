@@ -20,6 +20,10 @@ import (
 // items of each content/<store> section go back into their store
 // directories before the kernel starts, and its start re-applies every
 // logged erase before it serves a read (kernel.OpenContent).
+//
+// No binary links the restore yet, so it lives with the tests that drive it,
+// outside the trusted core's lines (KRN-2-proc-test-support, #6386, D-310).
+// The restore row (#3186) that wires it moves this file back to restore.go.
 
 var (
 	// ErrRestoreNotEmpty: content is restored only onto an empty drive.
