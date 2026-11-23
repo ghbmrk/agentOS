@@ -57,6 +57,7 @@ the GENERATED line and its rows come from the live issues, never from hand edits
                                  exists again, so a stray LATER.md edit cannot merge into the archive
 """
 import argparse
+import calendar
 import difflib
 import json
 import os
@@ -531,19 +532,46 @@ def report_intake(fetch, repo, number, skeleton):
 INTAKE_PHRASE = "cannot render on BOARD.md"
 
 
-def sweep_intake(fetch, repo, number, skeleton):
-    """report_intake for issue `number` and every other issue it could have missed: each work item
-    render blames, and each issue a search finds holding an intake comment (CI-issue-runs-coalesce).
-    intake.yml runs one sweep at a time and a newer pending run replaces an older one, so a burst
-    takes about one job; a replaced run loses nothing, since the next sweep reads every issue's final
-    state. One render and one search per run, plus one comment read per issue swept. Returns
+INTAKE_WORKFLOW = "intake.yml"
+# GitHub fails a job queued over 24 hours, so with no earlier finished sweep a window this long
+# still reaches back past every event whose run could have been cancelled.
+INTAKE_FALLBACK = 25 * 3600
+SKEW = 300  # seconds: issue updated_at and run created_at come from different GitHub services
+
+
+def _iso(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+def _epoch(stamp):
+    return calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+
+
+def sweep_since(fetch, repo, now):
+    """The time from which an issue's update can lack a finished sweep: the creation of the newest
+    successful intake run, less SKEW. A run cancelled while pending was queued after that run held
+    the group, so its event came later; a failed run never moves the bound. Without one, INTAKE_FALLBACK."""
+    runs = fetch(f"/repos/{repo}/actions/workflows/{INTAKE_WORKFLOW}/runs?status=success")["workflow_runs"]
+    done = [_epoch(r["created_at"]) for r in runs]
+    return _iso((max(done) if done else now - INTAKE_FALLBACK) - SKEW)
+
+
+def sweep_intake(fetch, repo, number, skeleton, now=time.time):
+    """report_intake for issue `number` and every other issue it could have missed
+    (CI-issue-runs-coalesce): each work item render blames; each issue updated since sweep_since, from
+    the REST list, which is consistent and paged, so an issue whose own run was cancelled is read
+    whatever the search index holds; and each issue a search finds holding an intake comment, for
+    comments older than that. intake.yml runs one sweep at a time and a newer pending run replaces
+    an older one, so a burst takes about one job and a replaced run loses no final state. Returns
     {issue: problems}."""
+    since = sweep_since(fetch, repo, now())
     every = render_problems(skeleton, work_items(fetch, repo))
     blamed = {int(m.group(1)) for m in (re.match(r"issue #(\d+): ", p) for p in every) if m}
+    touched = {i["number"] for i in fetch(f"/repos/{repo}/issues?state=all&since={since}") if "pull_request" not in i}
     q = urllib.parse.quote(f'repo:{repo} is:issue in:comments "{INTAKE_PHRASE}"', safe="")
     held = {i["number"] for i in fetch(f"/search/issues?q={q}")["items"] if "pull_request" not in i}
     out = {}
-    for n in sorted({number} | blamed | held):
+    for n in sorted({number} | blamed | touched | held):
         out[n] = [p for p in every if p.startswith(f"issue #{n}: ")]
         sync_intake(fetch, repo, n, out[n])
     return out

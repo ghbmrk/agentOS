@@ -642,9 +642,11 @@ class IntakeCommentTest(unittest.TestCase):
         self.assertEqual([c[:2] for c in self.run_intake(300, comments=[stale])],
                          [("POST", "/repos/o/r/issues/300/comments")])
 
-    def run_sweep(self, number, items, comments, held=()):
-        """board.py intake --sweep with `comments` per issue and the search answering `held`."""
+    def run_sweep(self, number, items, comments, held=(), touched=(), runs=("2026-11-23T17:00:00Z",), seen=None):
+        """board.py intake --sweep with `comments` per issue, the search answering `held`, the REST
+        list since the last sweep answering `touched`, and `runs` the successful intake runs' times."""
         calls = []
+        seen = [] if seen is None else seen
 
         def fetch(path, method="GET", payload=None):
             if method != "GET":
@@ -653,8 +655,13 @@ class IntakeCommentTest(unittest.TestCase):
             m = re.fullmatch(r"/repos/o/r/issues/(\d+)/comments", path)
             if m:
                 return [dict(c) for c in comments.get(int(m.group(1)), [])]
-            if path.startswith("/repos/o/r/issues?"):
+            if path == f"/repos/o/r/issues?state=open&labels={board.MARKER}":
                 return items
+            if path.startswith("/repos/o/r/issues?state=all&since="):
+                seen.append(path.split("since=", 1)[1])
+                return [{"number": n} for n in touched] + [{"number": 998, "pull_request": {}}]
+            if path == "/repos/o/r/actions/workflows/intake.yml/runs?status=success":
+                return {"workflow_runs": [{"created_at": t} for t in runs]}
             if path.startswith("/search/issues?q="):
                 self.assertIn("in%3Acomments", path)
                 self.assertIn(board.urllib.parse.quote(f'"{board.INTAKE_PHRASE}"', safe=""), path)
@@ -665,6 +672,25 @@ class IntakeCommentTest(unittest.TestCase):
                               read=lambda: BOARD + board.GENERATED + "\n", fetch=fetch)
         self.assertEqual(code, 0)
         return calls
+
+    def test_a_fixed_issue_the_search_has_not_indexed_is_cleared(self):
+        # L3 on #6623: run A comments on X; X is fixed (run B queued); an event on Y queues C, which
+        # replaces B; C runs before the search index holds A's comment. X was updated after the last
+        # finished sweep, so the REST list since then names it and C clears the false comment.
+        clean = opened(issues())
+        x, y = clean[0]["number"], clean[1]["number"]
+        first = board.intake_comment(["old"])
+        self.assertEqual(self.run_sweep(y, clean, {x: [self.bot(first, id=71)]}, held=[], touched=[x, y]),
+                         [("DELETE", "/repos/o/r/issues/comments/71", None)])
+
+    def test_the_window_starts_at_the_newest_finished_sweep(self):
+        # The bound is the newest successful run's creation less SKEW; with none, INTAKE_FALLBACK back.
+        clean = opened(issues())
+        seen = []
+        self.run_sweep(clean[0]["number"], clean, {}, runs=("2026-11-23T16:00:00Z", "2026-11-23T17:00:00Z"), seen=seen)
+        self.assertEqual(seen, ["2026-11-23T16:55:00Z"])
+        self.assertEqual(board.sweep_since(lambda p: {"workflow_runs": []}, "o/r", board._epoch("2026-11-23T17:00:00Z")),
+                         "2026-11-22T15:55:00Z")
 
     def test_a_sweep_reaches_every_issue_a_replaced_run_would_have(self):
         # CI-issue-runs-coalesce: intake.yml keeps one running sweep and the newest pending one, so a
