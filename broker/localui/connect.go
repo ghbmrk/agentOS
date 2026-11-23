@@ -300,7 +300,7 @@ func connectText(detail string) string {
 	case dState:
 		return "That address is from a different sign-in. Start again below, and paste the address from that one."
 	case dUse:
-		return "That address is from a sign-in for a different use than the one you confirmed, so nothing is connected. Start again below, and use one tab."
+		return "That sign-in was replaced by a newer one for a different use, so nothing is connected. Start again below, and use one tab."
 	case dRefused:
 		return "You said no on Google's page, so nothing is connected. Start again below if you change your mind."
 	case dScope:
