@@ -57,8 +57,10 @@ const (
 	// ErrNotSent. It is answered within SetupSendTimeout.
 	OpSetupSend = "page_setup_send"
 	// OpSetupInbound waits up to SetupInboundWait for a text that reached
-	// the box and starts with PAIR, and answers it, or nothing. Each text
-	// is answered once; the page offers it to setup (§8.1 pairing).
+	// the box and starts with PAIR, and answers it, or nothing; the page
+	// offers it to setup (§8.1 pairing). A text is answered again until a
+	// call's SetupInboundDone names its ID, so one taken by a page loop
+	// that then dies is offered to the next (#1296).
 	OpSetupInbound = "page_setup_inbound"
 )
 
@@ -284,11 +286,18 @@ type SetupSend struct {
 	Text string `json:"text"`
 }
 
-// SetupInbound is a PAIR text that reached the box: From is E.164, both
-// empty when none came in the wait.
+// SetupInbound is a PAIR text that reached the box: From is E.164, all
+// empty when none came in the wait. ID names it for SetupInboundDone.
 type SetupInbound struct {
+	ID   uint64 `json:"id,omitempty"`
 	From string `json:"from,omitempty"`
 	Text string `json:"text,omitempty"`
+}
+
+// SetupInboundDone is OpSetupInbound's argument: Done is the ID of the
+// last text the page has offered to setup and answered, 0 for none.
+type SetupInboundDone struct {
+	Done uint64 `json:"done,omitempty"`
 }
 
 // String and GoString keep numbers and texts out of logs.

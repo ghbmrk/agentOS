@@ -86,20 +86,41 @@ func (s *Setup) allowText() bool {
 	return true
 }
 
-// inbound answers the next PAIR text, or nothing within
-// localapi.SetupInboundWait.
+// inbound answers the oldest PAIR text the page has not reported done,
+// or the next one, or nothing within localapi.SetupInboundWait. A text
+// stays held until a call names it done, so one whose answer the page
+// lost (its loop ended as the text was taken) is answered again (#1296).
 func (s *Setup) inbound(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
-	if err := decode(args, &struct{}{}); err != nil {
+	var a localapi.SetupInboundDone
+	if err := decode(args, &a); err != nil {
 		return nil, err
 	}
 	if s.cfg.Line == nil {
 		return localapi.SetupInbound{}, nil
 	}
+	s.inMu.Lock()
+	for i, in := range s.held {
+		if in.ID == a.Done {
+			s.held = append(s.held[:i:i], s.held[i+1:]...)
+			break
+		}
+	}
+	if len(s.held) > 0 {
+		in := s.held[0]
+		s.inMu.Unlock()
+		return in, nil
+	}
+	s.inMu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, localapi.SetupInboundWait)
 	defer cancel()
 	from, text, ok := s.cfg.Line.Next(ctx)
 	if !ok {
 		return localapi.SetupInbound{}, nil
 	}
-	return localapi.SetupInbound{From: from, Text: text}, nil
+	s.inMu.Lock()
+	defer s.inMu.Unlock()
+	s.seq++
+	in := localapi.SetupInbound{ID: s.seq, From: from, Text: text}
+	s.held = append(s.held, in)
+	return in, nil
 }

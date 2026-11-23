@@ -130,18 +130,39 @@ func TestSetupSendsOnlyItsFixedTextsWithinTheCaps(t *testing.T) {
 	}
 }
 
-// The page takes the PAIR texts that reached the box, one per call.
-func TestSetupInboundAnswersEachPairTextOnce(t *testing.T) {
+// REQ: CH-12
+// The page takes the PAIR texts that reached the box, one per call. A
+// text is answered again until a call reports it done, so a text whose
+// answer the page lost is not lost (#1296); a stale done changes nothing.
+func TestSetupInboundAnswersEachPairTextUntilDone(t *testing.T) {
 	r := newSetupRig(t)
 	var in localapi.SetupInbound
 	if err := r.call(localapi.OpSetupInbound, nil, &in); err != nil || in != (localapi.SetupInbound{}) {
 		t.Fatalf("no line: %v %+v", err, in)
 	}
-	f := &fakeLine{ready: true, inbox: make(chan [2]string, 1)}
+	f := &fakeLine{ready: true, inbox: make(chan [2]string, 2)}
 	r.s.cfg.Line = f
 	f.inbox <- [2]string{ownerNumber, "PAIR 4821"}
-	if err := r.call(localapi.OpSetupInbound, nil, &in); err != nil || in.From != ownerNumber || in.Text != "PAIR 4821" {
+	f.inbox <- [2]string{ownerNumber, "PAIR 9999"}
+	if err := r.call(localapi.OpSetupInbound, nil, &in); err != nil || in.From != ownerNumber || in.Text != "PAIR 4821" || in.ID == 0 {
 		t.Fatalf("inbound %v %+v", err, in)
+	}
+	first := in
+	for _, done := range []uint64{0, first.ID + 7} {
+		in = localapi.SetupInbound{}
+		if err := r.call(localapi.OpSetupInbound, localapi.SetupInboundDone{Done: done}, &in); err != nil || in != first {
+			t.Fatalf("not done (%d): %v %+v", done, err, in)
+		}
+	}
+	in = localapi.SetupInbound{}
+	if err := r.call(localapi.OpSetupInbound, localapi.SetupInboundDone{Done: first.ID}, &in); err != nil || in.Text != "PAIR 9999" || in.ID == first.ID {
+		t.Fatalf("after done: %v %+v", err, in)
+	}
+	f.inbox <- [2]string{ownerNumber, "PAIR 1111"}
+	second := in
+	in = localapi.SetupInbound{}
+	if err := r.call(localapi.OpSetupInbound, localapi.SetupInboundDone{Done: second.ID}, &in); err != nil || in.Text != "PAIR 1111" {
+		t.Fatalf("after the second is done: %v %+v", err, in)
 	}
 	if err := r.call(localapi.OpSetupInbound, map[string]any{"x": 1}, nil); code(err) != localapi.ErrBadArgs {
 		t.Fatalf("an extra field: %v", err)

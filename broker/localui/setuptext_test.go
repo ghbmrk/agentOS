@@ -196,6 +196,98 @@ func TestPairTextsReachThePageAndAreAnswered(t *testing.T) {
 	}
 }
 
+// dyingLoop is agentosd as seen by a page loop that ends just after
+// agentosd hands it a PAIR text: the first text's answer is lost and the
+// loop's ctx ends (#1296).
+type dyingLoop struct {
+	Owner
+	once sync.Once
+	end  func()
+}
+
+func (d *dyingLoop) Call(ctx context.Context, op string, args, out any) error {
+	if op != localapi.OpSetupInbound {
+		return d.Owner.Call(ctx, op, args, out)
+	}
+	var in localapi.SetupInbound
+	if err := d.Owner.Call(ctx, op, args, &in); err != nil || in.From == "" {
+		return err
+	}
+	lost := false
+	d.once.Do(func() { lost = true; d.end() })
+	if lost {
+		return context.Canceled
+	}
+	*out.(*localapi.SetupInbound) = in
+	return nil
+}
+
+// offers counts the texts agentosd hands a page loop, by ID.
+type offers struct {
+	Owner
+	mu  sync.Mutex
+	ids map[uint64]int
+}
+
+func (o *offers) Call(ctx context.Context, op string, args, out any) error {
+	err := o.Owner.Call(ctx, op, args, out)
+	if in, ok := out.(*localapi.SetupInbound); ok && err == nil && in.ID != 0 {
+		o.mu.Lock()
+		o.ids[in.ID]++
+		o.mu.Unlock()
+	}
+	return err
+}
+
+// REQ: CH-12
+// §8.1 pairing (#1296): a PAIR text taken by the page's loop just before
+// it ends is offered again to the next loop, which answers it, and a text
+// the page has answered is not offered again.
+func TestAPairTextTakenAsTheLoopEndsIsOfferedAgain(t *testing.T) {
+	r, line, a := textRig(t)
+	ctx1, end1 := context.WithCancel(context.Background())
+	first := a
+	first.Owner = &dyingLoop{Owner: a.Owner, end: end1}
+	done1 := make(chan struct{})
+	go func() { first.PairTexts(ctx1, r.srv, time.Millisecond); close(done1) }()
+	line.inbox <- [2]string{ownerNum, "PAIR " + r.card.SetupCode}
+	select {
+	case <-done1:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first loop did not end")
+	}
+	line.mu.Lock()
+	sent := len(line.sent)
+	line.mu.Unlock()
+	if sent != 0 || r.srv.setup.st.Owner != "" {
+		t.Fatal("the lost text was answered by the loop that lost it")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	next := a
+	o := &offers{Owner: a.Owner, ids: map[uint64]int{}}
+	next.Owner = o
+	done := make(chan struct{})
+	go func() { next.PairTexts(ctx, r.srv, time.Millisecond); close(done) }()
+	defer func() { cancel(); <-done }()
+	got := line.texts(t, 1)
+	if got[0][0] != ownerNum || !strings.HasPrefix(got[0][1], pairedText(a.HostInfo())) {
+		t.Fatalf("reply to the re-offered text %q", got[0])
+	}
+	if r.srv.setup.st.Owner != ownerNum {
+		t.Fatal("the re-offered PAIR text did not pair")
+	}
+	time.Sleep(20 * time.Millisecond)
+	line.mu.Lock()
+	n := len(line.sent)
+	line.mu.Unlock()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if n != 1 || len(o.ids) != 1 || o.ids[1] != 1 {
+		t.Fatalf("an answered text was offered again: %d texts sent, offers %v", n, o.ids)
+	}
+}
+
 // PairTexts stops once agentosd answers that setup is closed.
 func TestPairTextsStopWhenSetupCloses(t *testing.T) {
 	r := newRig(t)
