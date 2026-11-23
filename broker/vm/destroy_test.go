@@ -865,3 +865,48 @@ func TestRES2DeleteFilesLeavesASameIDSuccessorAlone(t *testing.T) {
 		t.Error("DeleteFiles admitted the successor")
 	}
 }
+
+// A create that fails returns its admission before it leaves the table
+// (#1712, Potency P3 on #1575). A destroy and a same-ID create run between
+// the two steps make a successor, which must keep its admission and its
+// table entry. With the steps swapped, the destroy finds nothing and the
+// successor's admit is refused, because the failed machine is still
+// admitted.
+func TestRES2CreateFailureTailLeavesASameIDSuccessorAlone(t *testing.T) {
+	e := newEnv(t, 4096)
+	ran := false
+	var succErr error
+	createTailGap = func(id string) {
+		if ran || id != "a1" {
+			return
+		}
+		ran = true
+		// With the steps swapped the failing machine is already out of
+		// the table; the successor's create still decides the test.
+		if err := e.m.Destroy(bg, id); err != nil && !errors.Is(err, ErrUnknown) {
+			succErr = fmt.Errorf("destroy of the failing machine: %w", err)
+			return
+		}
+		_, succErr = e.m.Create(bg, id, Spec{Image: "base", Class: admission.Experiment, MemMB: 500})
+	}
+	t.Cleanup(func() { createTailGap = func(string) {} })
+	e.rt.failNext = errors.New("start fails")
+	if _, err := e.m.Create(bg, "a1", Spec{Image: "base", Class: admission.Experiment, MemMB: 500}); err == nil {
+		t.Fatal("create with a failing start succeeded")
+	}
+	if !ran {
+		t.Fatal("the failure tail did not reach the seam")
+	}
+	if succErr != nil {
+		t.Fatalf("successor between release and unreserve: %v", succErr)
+	}
+	if w, err := e.m.Get("a1"); err != nil || w.State != Running {
+		t.Errorf("successor %+v (%v), want listed and running", w, err)
+	}
+	if _, ok := e.rt.memOf("a1"); !ok {
+		t.Error("the failure tail stopped the successor")
+	}
+	if _, ok := e.adm.Snapshot().Running["a1"]; !ok {
+		t.Error("the failure tail took the successor's admission")
+	}
+}

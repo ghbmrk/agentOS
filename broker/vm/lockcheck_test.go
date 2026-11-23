@@ -87,42 +87,75 @@ func TestMachineLockOnlyThroughLockLive(t *testing.T) {
 	lockEndingExec := sel.Obj()
 
 	found := map[string][]string{}
+	// Any other use of mc.mu or lockEndingExec, such as an alias
+	// (mu := &mc.mu; mu.Lock()), a method value (lk := mc.mu.Lock; lk()) or
+	// a method expression, would take the lock out of the check's sight
+	// (Security delta 2 P-L4 on #1575, #1710): each is refused outright.
+	var evade []string
 	for _, f := range files {
 		for _, d := range f.Decls {
-			fd, ok := d.(*ast.FuncDecl)
-			if !ok || fd.Body == nil {
-				continue
+			// A package-level func literal (a var's value) is read too,
+			// under no function's name, so no allowlist entry covers it.
+			var body ast.Node = d
+			name := "package-level declaration"
+			if fd, ok := d.(*ast.FuncDecl); ok {
+				if fd.Body == nil {
+					continue
+				}
+				body, name = fd.Body, funcName(fd)
 			}
-			name := funcName(fd)
-			ast.Inspect(fd.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
+			var stack []ast.Node
+			ast.Inspect(body, func(n ast.Node) bool {
+				if n == nil {
+					stack = stack[:len(stack)-1]
+					return true
+				}
+				parent := func(up int) ast.Node {
+					if len(stack) < up {
+						return nil
+					}
+					return stack[len(stack)-up]
+				}
+				stack = append(stack, n)
+				s, ok := n.(*ast.SelectorExpr)
 				if !ok {
 					return true
 				}
-				s, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok {
+				sl := info.Selections[s]
+				if sl == nil {
 					return true
 				}
-				switch s.Sel.Name {
-				case "Lock", "TryLock":
-					inner, ok := s.X.(*ast.SelectorExpr)
-					if !ok {
+				at := fset.Position(s.Pos()).String()
+				switch sl.Obj() {
+				case muField:
+					// Only mc.mu.Lock(), mc.mu.TryLock() and mc.mu.Unlock().
+					m, ok := parent(2).(*ast.SelectorExpr)
+					call, cok := parent(3).(*ast.CallExpr)
+					if !ok || m.X != s || !cok || call.Fun != m {
+						evade = append(evade, fmt.Sprintf("%s selects a machine's mu other than to call Lock, TryLock or Unlock on it: %s", name, at))
 						return true
 					}
-					if sl := info.Selections[inner]; sl != nil && sl.Obj() == muField {
+					switch m.Sel.Name {
+					case "Lock", "TryLock":
 						found[name] = append(found[name], fset.Position(call.Pos()).String())
+					case "Unlock":
+					default:
+						evade = append(evade, fmt.Sprintf("%s calls %s on a machine's mu: %s", name, m.Sel.Name, at))
 					}
-				case "lockEndingExec":
-					if sl := info.Selections[s]; sl != nil && sl.Obj() == lockEndingExec {
-						found[name] = append(found[name], fset.Position(call.Pos()).String())
+				case lockEndingExec:
+					call, ok := parent(2).(*ast.CallExpr)
+					if !ok || call.Fun != s {
+						evade = append(evade, fmt.Sprintf("%s uses lockEndingExec other than by calling it: %s", name, at))
+						return true
 					}
+					found[name] = append(found[name], fset.Position(call.Pos()).String())
 				}
 				return true
 			})
 		}
 	}
 
-	var bad []string
+	bad := evade
 	for name, at := range found {
 		if len(at) > plainLocks[name].n {
 			bad = append(bad, fmt.Sprintf("%s takes a machine's lock %d time(s) other than through lockLive (allowed %d): %s", name, len(at), plainLocks[name].n, strings.Join(at, ", ")))
@@ -142,6 +175,124 @@ func TestMachineLockOnlyThroughLockLive(t *testing.T) {
 	sort.Strings(bad)
 	if len(bad) > 0 {
 		t.Fatalf("a machine's lock taken other than through lockLive, lockEndingExecLive or tryLockLive (V38; a retired handle may name a new machine): use one of those, or add the function to plainLocks with why a retired handle is safe there:\n%s", strings.Join(bad, "\n"))
+	}
+}
+
+// byIDAfterHandle is the by-ID check's allowlist: each function of
+// package vm that holds a machine handle (any expression of type *machine)
+// and still names an exported Manager method, how many times, and why the
+// call cannot reach a same-ID successor. An exported method looks its
+// machine up by ID again, so a path that checked a handle and then calls
+// one may act on a successor Destroy let take the ID (L3 B2 on #1575:
+// DeleteFiles resumed by ID). Such a path calls the handle's own helper
+// instead (resumeOf, rebuildOf, takeOf, rollbackTo; V38 rule 2). An entry
+// no longer needed fails the check too.
+var byIDAfterHandle = map[string]struct {
+	n   int
+	why string
+}{
+	// Snapshot-store reads: they resolve a snapshot, not a machine, and
+	// the caller then tests the snapshot against its handle.
+	"Manager.ResumeFromCheckpoint": {1, "Snapshot(snapID) reads a snapshot record; ownSnap(mc, s) then refuses one not of mc's life"},
+	"Manager.Rollback":             {1, "Snapshot(snapID) reads a snapshot record; inLineage then refuses one not of mc's life"},
+	"Manager.Merge":                {1, "Snapshot(baseID) reads the fork point's record; it must name dst and be of its life (ownSnap)"},
+	"Manager.forgetMachine":        {1, "Snapshots(mc.ID) lists records by ID; ownSnap keeps only mc's own life"},
+	"Manager.ForgetSince":          {1, "Unread() lists unreadable snapshot IDs; no machine is resolved"},
+	"Manager.Prune":                {1, "Unread() lists unreadable snapshot IDs; no machine is resolved"},
+}
+
+// TestHandlePathsActOnlyThroughTheHandle type-checks package vm's non-test
+// files and fails on any function that holds a machine handle and names an
+// exported Manager method (called, as a method value or as a method
+// expression) beyond what byIDAfterHandle allows it (#1710 item 1).
+func TestHandlePathsActOnlyThroughTheHandle(t *testing.T) {
+	fset, pkg, files, info := typeCheckVM(t)
+	mt, ok := pkg.Scope().Lookup("machine").(*types.TypeName)
+	if !ok {
+		t.Fatal("no type machine in package vm")
+	}
+	mgr, ok := pkg.Scope().Lookup("Manager").(*types.TypeName)
+	if !ok {
+		t.Fatal("no type Manager in package vm")
+	}
+	handle := types.NewPointer(mt.Type())
+	isManager := func(fn *types.Func) bool {
+		r := fn.Signature().Recv()
+		if r == nil {
+			return false
+		}
+		rt := r.Type()
+		if p, ok := rt.(*types.Pointer); ok {
+			rt = p.Elem()
+		}
+		n, ok := rt.(*types.Named)
+		return ok && n.Obj() == mgr
+	}
+
+	found := map[string][]string{}
+	handles := 0
+	for _, f := range files {
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			holds := false
+			ast.Inspect(fd, func(n ast.Node) bool {
+				if e, ok := n.(ast.Expr); ok && !holds {
+					if tv, ok := info.Types[e]; ok && tv.Type != nil && types.Identical(tv.Type, handle) {
+						holds = true
+					}
+					if id, ok := e.(*ast.Ident); ok {
+						if o := info.Defs[id]; o != nil && types.Identical(o.Type(), handle) {
+							holds = true
+						}
+					}
+				}
+				return !holds
+			})
+			if !holds {
+				continue
+			}
+			handles++
+			name := funcName(fd)
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				s, ok := n.(*ast.SelectorExpr)
+				if !ok || !s.Sel.IsExported() {
+					return true
+				}
+				sl := info.Selections[s]
+				if sl == nil || (sl.Kind() != types.MethodVal && sl.Kind() != types.MethodExpr) {
+					return true
+				}
+				if fn, ok := sl.Obj().(*types.Func); ok && isManager(fn) {
+					found[name] = append(found[name], fmt.Sprintf("%s at %s", s.Sel.Name, fset.Position(s.Pos())))
+				}
+				return true
+			})
+		}
+	}
+	if handles == 0 {
+		t.Fatal("the check found no function holding a handle: it is not looking")
+	}
+
+	var bad []string
+	for name, at := range found {
+		if len(at) > byIDAfterHandle[name].n {
+			bad = append(bad, fmt.Sprintf("%s holds a machine handle and names an exported Manager method %d time(s) (allowed %d): %s", name, len(at), byIDAfterHandle[name].n, strings.Join(at, ", ")))
+		}
+	}
+	for name, a := range byIDAfterHandle {
+		if a.why == "" {
+			bad = append(bad, fmt.Sprintf("%s: an allowlist entry needs its reason", name))
+		}
+		if len(found[name]) < a.n {
+			bad = append(bad, fmt.Sprintf("%s: allowlisted for %d by-ID call(s), makes %d: lower the entry", name, a.n, len(found[name])))
+		}
+	}
+	sort.Strings(bad)
+	if len(bad) > 0 {
+		t.Fatalf("a path holding a machine handle acts by ID (V38 rule 2; the ID may name a same-ID successor): call the handle's own helper, or add the function to byIDAfterHandle with why the call cannot reach a successor:\n%s", strings.Join(bad, "\n"))
 	}
 }
 
