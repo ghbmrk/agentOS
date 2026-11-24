@@ -121,7 +121,7 @@ func TestClerkAnchorsRefuseAGroupWritableDirectory(t *testing.T) {
 	if err := os.Chmod(ok, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := putClerkAnchors(filepath.Join(ok, "anchors"), nil); err != nil {
+	if err := putClerkAnchors(filepath.Join(ok, "anchors"), nil, nil); err != nil {
 		t.Errorf("putClerkAnchors in a 0755 directory of mine: %v", err)
 	}
 	open := filepath.Join(d, "open")
@@ -135,7 +135,7 @@ func TestClerkAnchorsRefuseAGroupWritableDirectory(t *testing.T) {
 	if err := os.WriteFile(victim, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := putClerkAnchors(victim, nil); !errors.Is(err, errNotMine) {
+	if err := putClerkAnchors(victim, nil, nil); !errors.Is(err, errNotMine) {
 		t.Errorf("putClerkAnchors in a group-writable directory: %v, want errNotMine", err)
 	}
 	if _, err := os.Lstat(victim); err != nil {

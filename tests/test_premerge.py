@@ -675,6 +675,53 @@ class PremergeTest(unittest.TestCase):
                 self.commit("resolve")
                 self.assertEqual(self.check(reviewed), [self.RECFILE])
 
+    def test_records_pr_proof_main_carries_dropped_by_the_main_merge_reads_same(self):
+        # REQ: PREMERGE-records-dropped-same. #6472: the PR's proof landed on main (another PR) and the main merge
+        # kept main's copy only: word for word (#6358's rule), or another proof of the one key (#6032, #6265,
+        # record_merge.py's "keep one proof"), in main's place. Keeping the PR's proof instead edits a main line.
+        a, m, p = self.entry("a()"), self.entry("m()"), self.entry("p()")
+        top = "# Mutant-equivalent proofs for broker/k.\n"
+        for mains in (self.entry("s()"), self.entry("s()", "main's proof")):
+            with self.subTest(main=mains):
+                self.setUp()
+                reviewed = self.records_merge(a + m + mains, a + p + self.entry("s()"), a)
+                self.write(self.RECFILE, top + a + m + mains + p)
+                self.commit("keep main's proof, drop this PR's copy")
+                self.assertEqual(self.check(reviewed), [])
+                self.write(self.RECFILE, top + a + p + m + mains)
+                self.commit("this PR's entries first")
+                self.assertEqual(self.check(reviewed), [])
+        for wrong in (a + m + p + self.entry("s()"), a + m + self.entry("s()", "main's proof, edited") + p,
+                      a + m + self.entry("s()", "main's proof"), a + m + p + self.entry("s()", col=3),
+                      a + p + m + self.entry("s()", "main's proof") + self.entry("s()")):
+            with self.subTest(changed=wrong):  # PR's proof kept over main's; main's edited; p dropped; another key
+                self.setUp()
+                reviewed = self.records_merge(a + m + self.entry("s()", "main's proof"), a + p + self.entry("s()"), a)
+                self.write(self.RECFILE, top + wrong)
+                self.commit("resolve")
+                self.assertEqual(self.check(reviewed), [self.RECFILE])
+
+    def test_records_pr_proof_dropped_with_no_copy_on_main_is_changed(self):
+        # REQ: PREMERGE-records-dropped-same. Main proves another key (another column): the drop leaves s unproven.
+        a, m, p = self.entry("a()"), self.entry("m()"), self.entry("p()")
+        top = "# Mutant-equivalent proofs for broker/k.\n"
+        for mains in (m, m + self.entry("s()", col=3)):
+            with self.subTest(main=mains):
+                self.setUp()
+                reviewed = self.records_merge(a + mains, a + p + self.entry("s()"), a)
+                self.write(self.RECFILE, top + a + mains + p)
+                self.commit("drop this PR's proof")
+                self.assertEqual(self.check(reviewed), [self.RECFILE])
+
+    def test_records_pr_proof_of_a_key_main_edited_is_changed(self):
+        # REQ: PREMERGE-records-dropped-same. The key was in the merge base: an edit on each side is a real
+        # conflict, so keeping main's edit over the PR's is no shrink.
+        a, s = self.entry("a()"), self.entry("s()")
+        reviewed = self.records_merge(a + self.entry("s()", "main's proof"), a + self.entry("s()", "pr's proof"), a + s)
+        self.write(self.RECFILE, "# Mutant-equivalent proofs for broker/k.\n" + a + self.entry("s()", "main's proof"))
+        self.commit("keep main's edit")
+        self.assertEqual(self.check(reviewed), [self.RECFILE])
+
     def test_assumptions_one_row_both_sides_added_word_for_word_reads_same(self):
         # #6358 for the other record file: the union keeps the row twice; one copy or two is one row.
         reviewed = self.union_merge("| L-1 | edge old |\n| M-1 | main |\n| S-1 | shared |\n",
@@ -894,6 +941,8 @@ class PremergeTest(unittest.TestCase):
     def test_mark_press_merge_paths(self):
         for f in ("CLAUDE.md", "docs/OPERATING.md", ".claude/settings.json", ".github/workflows/ci.yml",
                   "tools/risk_tier.py", "tools/premerge.py", "tools/ci_scope.py", "tools/ci_scope_x.py",
+                  # #1875: ci_split decides which broker packages each race shard runs, so it is a gate file too.
+                  "tools/ci_split.py", "tools/ci_split_x.py",
                   "docs/LANES.md", "tools/trace.py", "tools/old_core.txt",
                   # KRN-2cap (#2935): the trusted core's budget and the tool that enforces it.
                   "tools/trusted_base.py", "tools/trusted_core.txt", "tools/ceilings.txt",
@@ -908,7 +957,7 @@ class PremergeTest(unittest.TestCase):
         # The other gate tests stay as narrowed on Mark's "Narrow only" (2026-10-16).
         for f in ("tools/records.py", "reviews/l3/2026-10-15-pr1.md", "README.md", "docs/OTHER.md", "src/claude/x.go",
                   "reviews/README.md", "reviews/a/b/README.md", "tests/x/test_premerge.py", "tests/test_risk_tier.py",
-                  "tests/test_ci_scope.py", "tests/test_workflows.py", "tests/test_merge_queue.py",
+                  "tests/test_ci_scope.py", "tests/test_ci_split.py", "tests/test_workflows.py", "tests/test_merge_queue.py",
                   "tests/test_lane.py", "tools/trusted_base_parsers.txt", "tests/test_trusted_base.py",
                   "tools/mutgate.pyc", "tools/x/mutgate.py", "tests/test_mutgate.py",
                   "tools/claims.pyc", "tools/x/claims.py", "tests/test_claims.py"):
