@@ -959,7 +959,7 @@ class ReproduceJobTest(unittest.TestCase):
         self.assertIn("\nconcurrency:\n  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && "
                       "github.run_attempt == 1 && "
                       "format('pr-{0}', github.event.pull_request.number) || "
-                      "github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && 'main' || format('run-{0}', github.run_id) }}\n"
+                      "github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && 'head' || format('run-{0}', github.run_id) }}\n"
                       "  cancel-in-progress: ${{ (startsWith(github.event_name, 'pull_request') || github.event_name == 'push' && github.ref == 'refs/heads/main') && github.run_attempt == 1 }}"
                       "\njobs:\n", wf)
         # Cancellation is workflow-wide only: no job sets its own group.
