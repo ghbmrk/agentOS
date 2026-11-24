@@ -463,28 +463,29 @@ INTAKE_LINES = [
     "    types: [opened, edited, labeled, unlabeled]",
     "permissions:",
     "  contents: read",
-    "concurrency:",
-    "  group: intake-${{ github.event.issue.number }}",
-    "  cancel-in-progress: false",
     "jobs:",
     "  intake:",
     "    if: >-",
     "      contains(fromJSON('[\"OWNER\", \"MEMBER\", \"COLLABORATOR\"]'), github.event.issue.author_association)",
     "      && (contains(github.event.issue.labels.*.name, 'work-item') || github.event.label.name == 'work-item')",
+    "    concurrency:",
+    "      group: intake",
+    "      cancel-in-progress: false",
     "    runs-on: ubuntu-24.04",
     "    timeout-minutes: 5",
     "    permissions:",
     "      contents: read",
-    "      issues: write # the intake comment on this issue",
+    "      issues: write # the intake comments",
+    "      actions: read # the newest successful intake run, where the sweep's window starts",
     "    steps:",
     "      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2",
     "        with:",
     "          persist-credentials: false",
-    "      - name: Comment on the issue while it cannot render (tools/board.py intake)",
+    "      - name: Comment on each work item while it cannot render (tools/board.py intake --sweep)",
     "        env:",
     "          GITHUB_TOKEN: ${{ github.token }}",
     "          ISSUE: ${{ github.event.issue.number }}",
-    '        run: python3 -I tools/board.py intake --repo "$GITHUB_REPOSITORY" --issue "$ISSUE"',
+    '        run: python3 -I tools/board.py intake --repo "$GITHUB_REPOSITORY" --issue "$ISSUE" --sweep',
 ]
 
 
@@ -909,6 +910,25 @@ def head_guard_problems(text):
                                   or '[ "$CLAIMED" = success ] || exit 1' not in body):
             return ["the mutgate job can pass or skip a claim that did not succeed with `[]`"]
     return []
+
+
+# CI-SOAK-cap (#1649): the most runners each soak.yml matrix may hold at once.
+SOAK_CAPS = {"fuzz": 3, "soak": 1}
+
+
+def soak_cap_problems(text):
+    """Return why a soak.yml matrix can run wider than SOAK_CAPS; empty when none can."""
+    problems = []
+    for job, cap in SOAK_CAPS.items():
+        if "\n  %s:\n" % job not in text:
+            problems.append("no %s job" % job)
+            continue
+        body = re.split(r"\n  (?=\S)", text.split("\n  %s:\n" % job, 1)[1], maxsplit=1)[0]
+        strategy = re.search(r"(?m)^    strategy:\n((?:(?:      .*)?\n)*)", body + "\n")
+        caps = re.findall(r"(?m)^      max-parallel:\s*(\S+)", strategy.group(1)) if strategy else []
+        if len(caps) != 1 or not re.fullmatch(r"[1-9]\d*", caps[0]) or int(caps[0]) > cap:
+            problems.append("%s: max-parallel %r, must be one integer of at most %d" % (job, caps, cap))
+    return problems
 
 
 def step_script(text, job, step):
@@ -1459,6 +1479,9 @@ class WorkflowTest(unittest.TestCase):
         transition = text.split("\n  transition:\n", 1)[1].split("\n  render:\n", 1)[0]
         # It writes, so only collaborator-opened work items reach it, as in intake.yml (#6060).
         self.assertIn("\n      && contains(fromJSON('[\"OWNER\", \"MEMBER\", \"COLLABORATOR\"]'), github.event.issue.author_association)\n", transition)
+        # CI-issue-runs-coalesce: only an event touching state:merged takes a runner; the relation
+        # fails no other edge (tests/test_board.py TransitionTest), so a burst's other events skip.
+        self.assertIn("\n      && (github.event.label.name == 'state:merged' || contains(github.event.issue.labels.*.name, 'state:merged'))\n", transition)
         # The one write is the issue comment naming the problem (#5989).
         self.assertEqual(re.findall(r"(?m)^      ([a-z-]+): write\b", transition), ["issues"])
         self.assertIn('python3 -I tools/board.py transition --repo "$GITHUB_REPOSITORY" --issue "$ISSUE" --label "$LABEL" --action "$ACTION" --comment', transition)
@@ -1572,7 +1595,7 @@ class WorkflowTest(unittest.TestCase):
         # BOARD-INTAKE-wf (#2668, INTAKE-3): each widening or issue-text path fails the pin.
         text = (WORKFLOWS / "intake.yml").read_text()
         run = INTAKE_LINES[-1][len("        run: "):]
-        step = "      - name: Comment on the issue while it cannot render (tools/board.py intake)\n"
+        step = "      - name: Comment on each work item while it cannot render (tools/board.py intake --sweep)\n"
         edits = {
             "comment trigger": ("on:\n  issues:", "on:\n  issue_comment:\n  issues:"),
             "closed type": ("labeled, unlabeled]", "labeled, unlabeled, closed]"),
@@ -1580,8 +1603,9 @@ class WorkflowTest(unittest.TestCase):
             "outsider": ("\"COLLABORATOR\"]", "\"COLLABORATOR\", \"NONE\"]"),
             "any label": ("contains(github.event.issue.labels.*.name, 'work-item')", "true"),
             "pull-requests write": ("      issues: write", "      issues: write\n      pull-requests: write"),
+            "actions write": ("      actions: read", "      actions: write"),
             "contents write": ("      contents: read\n      issues", "      contents: write\n      issues"),
-            "write-all": ("permissions:\n  contents: read\n#", "permissions: write-all\n#"),
+            "write-all": ("permissions:\n  contents: read\njobs:", "permissions: write-all\njobs:"),
             "title in env": ("          ISSUE: ${{ github.event.issue.number }}",
                              "          ISSUE: ${{ github.event.issue.title }}"),
             "body in run": (run, run + ' --note "${{ github.event.issue.body }}"'),
@@ -1592,7 +1616,9 @@ class WorkflowTest(unittest.TestCase):
             "not isolated": ("python3 -I tools", "python3 tools"),
             "no concurrency": ("  cancel-in-progress: false", "  cancel-in-progress: true"),
             "self-hosted": ("runs-on: ubuntu-24.04", "runs-on: self-hosted"),
-            "carriage return in comment": ("# One run at a time", "# One\r    if: false\r# run at a time"),
+            "carriage return in comment": ("# CI-issue-runs-coalesce: one sweep", "# CI-issue-runs-coalesce:\r    if: false\r# one sweep"),
+            "per-issue group": ("      group: intake\n", "      group: intake-${{ github.event.issue.number }}\n"),
+            "no sweep": (" --sweep\n", "\n"),
         }
         for name, (old, new) in edits.items():
             with self.subTest(name):
@@ -1749,6 +1775,24 @@ class WorkflowTest(unittest.TestCase):
         text = (WORKFLOWS / "mutgate.yml").read_text()
         block = text[text.index("\n  mutants:\n"):text.index("\n  mutgate:\n")]
         self.assertRegex(block, r"\n    strategy:\n(?:      .*\n)*?      max-parallel: 3\n")
+
+    def test_soak_matrices_hold_at_most_their_runner_caps(self):
+        # CI-SOAK-cap-l1 (#1665, L3 of #1649): soak.yml runs for hours a day, so each matrix keeps
+        # a max-parallel cap at or under CI-SOAK-cap's (fuzz 3, soak 1); an edit that drops a cap
+        # or raises it back toward the 8-runner original fails here. Lower caps (#6570) pass.
+        text = (WORKFLOWS / "soak.yml").read_text()
+        self.assertEqual(soak_cap_problems(text), [])
+        for job, cap in (("fuzz", 3), ("soak", 1)):
+            block = text[text.index("\n  %s:\n" % job):]
+            at = block.index("      max-parallel: ")
+            line = block[at:block.index("\n", at + 1)]
+            for bad in ("      max-parallel: %d" % (cap + 1), "      max-parallel: 8",
+                        "      max-parallel: ${{ inputs.n }}", "      # max-parallel: %d" % cap):
+                with self.subTest(job=job, bad=bad):
+                    self.assertNotEqual(soak_cap_problems(text.replace(line, bad, 1)), [])
+        for missing in ("\n  fuzz:\n", "\n  soak:\n"):
+            with self.subTest(missing=missing):
+                self.assertNotEqual(soak_cap_problems(text.replace(missing, "\n  renamed:\n", 1)), [])
 
     def test_steps_finds_steps(self):
         sample = "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          x: 1\n      - run: echo\n"

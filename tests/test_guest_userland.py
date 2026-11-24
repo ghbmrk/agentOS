@@ -4,6 +4,7 @@
 # ldd. image/guest-base.sh installs the root from the image's apt sources; image/guest-userland.sh
 # copies from it with the root's own loader and fails on anything that resolves outside it.
 # REQ: UPD-1a
+import hashlib
 import json
 import os
 import pathlib
@@ -92,9 +93,11 @@ class UserlandCopyTest(unittest.TestCase):
         shutil.copy(HOST_LD, lib / HOST_LD.name)
         self.out = self.tmp / "out"
 
-    def stage_dpkg(self, unowned=()):
+    def stage_dpkg(self, unowned=(), sums=None):
         """A dpkg database in the base: each program under usr/bin is its own package, every other
-        file belongs to staged-libs, except the base paths in UNOWNED."""
+        file belongs to staged-libs, except the base paths in UNOWNED; each package's md5sums hold its
+        files' bytes, or SUMS's MD5 for a base path it names. staged-libs is Multi-Arch: same, so its
+        md5sums carry the architecture, as libc6's do."""
         db = self.base / "var/lib/dpkg"
         shutil.rmtree(db, True)
         (db / "info").mkdir(parents=True)
@@ -108,13 +111,16 @@ class UserlandCopyTest(unittest.TestCase):
         stanzas = []
         for pkg, files in owners.items():
             (db / "info" / (pkg + ".list")).write_text("\n".join(files) + "\n")
+            md5 = "".join("%s  %s\n" % ((sums or {}).get(f) or hashlib.md5((self.base / f.lstrip("/")).read_bytes()).hexdigest(),
+                                        f.lstrip("/")) for f in files)
+            (db / "info" / (pkg + (":amd64" if pkg == "staged-libs" else "") + ".md5sums")).write_text(md5)
             stanzas.append("Package: %s\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1.0-1\n"
                            "Maintainer: agentOS test <test@example.invalid>\nDescription: staged\n" % pkg)
         (db / "status").write_text("\n".join(stanzas))
         (self.base / "usr/lib/os-release").write_text('ID=debian\nVERSION_ID="13"\n')
 
-    def run_userland(self, *paths, unowned=(), cwd=None):
-        self.stage_dpkg(unowned)
+    def run_userland(self, *paths, unowned=(), sums=None, cwd=None):
+        self.stage_dpkg(unowned, sums)
         self.shipped = self.tmp / "shipped"
         return subprocess.run(["sh", str(USERLAND), str(self.base), str(self.out), *paths], capture_output=True,
                               text=True, cwd=cwd, env={**os.environ, "GUEST_SHIPPED": str(self.shipped)})
@@ -138,6 +144,27 @@ class UserlandCopyTest(unittest.TestCase):
         self.assertEqual(sorted(re.findall(r"(?m)^Package: (\S+)$", status)), ["dash", "staged-libs"])
         self.assertIn("Status: install ok installed", status)
         self.assertEqual((st / "agentos.os-release").read_text(), (self.base / "usr/lib/os-release").read_text())
+
+    def test_each_copy_is_held_to_its_package_bytes_and_recorded(self):
+        # #6482 (Potency 7068815856 point 4): a copied file's bytes are its package's, by dpkg's md5sums,
+        # and "MD5 PACKAGE" goes to the status directory for image/static_elf.py; other bytes fail.
+        r = self.run_userland("/bin/sh")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        st = self.tmp / "status"
+        r = subprocess.run(["sh", str(SHIPPED_SH), "--status", str(self.base), str(st)], capture_output=True,
+                           text=True, env={**os.environ, "GUEST_SHIPPED": str(self.shipped)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = set(tuple(l.split()) for l in (st / "agentos.md5sums").read_text().splitlines())
+        md5 = lambda p: hashlib.md5(p.read_bytes()).hexdigest()
+        self.assertIn((md5(self.out / "bin/sh"), "dash"), got)
+        self.assertIn((md5(self.out / "lib64/ld-linux-x86-64.so.2"), "staged-libs"), got)
+        self.assertEqual({p for _, p in got}, {"dash", "staged-libs"})
+        self.assertFalse(pathlib.Path(str(self.shipped) + ".md5sums").exists())
+        shutil.rmtree(self.out)
+        r = self.run_userland("/bin/sh", sums={"/usr/bin/dash": "0" * 32})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("/usr/bin/dash (/usr/bin/dash): its bytes are not the ones dpkg installed", r.stderr)
+        self.assertFalse((self.out / "bin/sh").exists())
 
     def test_a_copied_file_no_package_owns_fails(self):
         # Fail closed: a file with no owner would ship with no package scanned for it.
