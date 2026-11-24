@@ -33,6 +33,8 @@ the GENERATED line and its rows come from the live issues, never from hand edits
                                  and this one does not, so a PR cannot switch the check off
   board.py render [--repo o/r]   print BOARD.md from the planned issues, or from GitHub's
                                  issues and PRs (GITHUB_TOKEN); PR disagreements go to stderr.
+           [--out FILE]          write FILE whole once rendered, instead of stdout: never
+                                 `> BOARD.md`, which empties the file render reads (#6500)
                                  With --repo, a malformed issue is listed at the end of the board
                                  (UNRENDERED) instead of failing the run, and an empty listing fails
   board.py stale --repo o/r      print each open work item whose PR merged while its state label is still
@@ -603,6 +605,22 @@ def work_items(fetch, repo):
     return sorted(items, key=lambda i: i["number"])
 
 
+def emit(text, out):
+    """Write text to stdout, or to out whole: a temporary file beside it, then os.replace, so the
+    file is never empty or half written, even when it is the skeleton render just read."""
+    if not out:
+        sys.stdout.write(text)
+        return 0
+    path = pathlib.Path(out)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return 0
+
+
 def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, root=ROOT):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("command", choices=("check", "render", "archive", "stale", "intake", "transition"))
@@ -614,6 +632,7 @@ def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, 
     ap.add_argument("--issue", type=int, metavar="N", help="intake, transition: the issue to judge")
     ap.add_argument("--label", help="transition: the label the event added or removed")
     ap.add_argument("--action", choices=("labeled", "unlabeled"), help="transition: the event")
+    ap.add_argument("--out", metavar="FILE", help="render: write FILE whole once rendered, instead of stdout")
     args = ap.parse_args(argv)
     if args.command == "intake":
         if not (args.repo and args.issue):
@@ -655,6 +674,9 @@ def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, 
               " (retiring the generated board needs a ci.yml change)", file=sys.stderr)
         return 1
     try:
+        if args.command == "render" and not any(k == "header" for _, k, _ in _table_lines(text)):
+            # `render > BOARD.md` empties BOARD.md before render reads it (#6500).
+            raise ValueError("BOARD.md has no table; refusing to render (use --out, never > BOARD.md)")
         if args.repo and (args.command == "render" or GENERATED in text):
             items = work_items(fetch, args.repo)
             if not items:
@@ -668,13 +690,12 @@ def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, 
             for note in pr_notes(items, fetch(f"/repos/{args.repo}/pulls?state=all")):
                 print(f"board: {note}", file=sys.stderr)
             if args.command == "render":
-                sys.stdout.write(generated)
-                return 0
+                return emit(generated, args.out)
             if generated != text:
                 diff = difflib.unified_diff(text.splitlines(), generated.splitlines(), "BOARD.md",
                                             f"rendered from {args.repo}", lineterm="")
                 print(f"board: BOARD.md differs from the live issues; run tools/board.py render --repo {args.repo}"
-                      " > BOARD.md, or wait for the board workflow:", *diff, sep="\n", file=sys.stderr)
+                      " --out BOARD.md, or wait for the board workflow:", *diff, sep="\n", file=sys.stderr)
                 return 1
             drift = frozen_drift(items)
             if drift:
@@ -691,8 +712,7 @@ def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, 
         print(f"board: {e}", file=sys.stderr)
         return 1
     if args.command == "render":
-        sys.stdout.write(generated)
-        return 0
+        return emit(generated, args.out)
     expected = live(text)
     if generated != expected:
         diff = difflib.unified_diff(expected.splitlines(), generated.splitlines(), "live rows", "generated", lineterm="")
