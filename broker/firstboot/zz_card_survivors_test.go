@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/change"
@@ -129,31 +130,47 @@ func TestCardStepOvertakenAgainKeepsTheLaterCard(t *testing.T) {
 }
 
 // A RetryRerun that lands after another has taken the failed reset, but
-// before that one's Again starts, finds nothing to retry: the two never
-// run the vault reset at once (#2362).
+// before that one's Again moves the generation, finds nothing to retry:
+// the two never run the vault reset at once (#2362). Holding provMu parks
+// the first retry inside Again, after it took failed and before Again
+// clears anything.
 func TestRetryRerunTakesTheResetOnce(t *testing.T) {
 	s, _ := survivorStep(t, func(*card.Card) error { return nil })
 	resets := 0
 	if err := s.Again(func() error { resets++; return errors.New("no") }); err == nil {
 		t.Fatal("failed reset passed")
 	}
-	var second bool
-	var secondErr error
-	called := false
-	s.retryTaken = func() {
-		if called {
-			return
+	s.provMu.Lock()
+	type result struct {
+		ran bool
+		err error
+	}
+	first := make(chan result, 1)
+	go func() {
+		ran, err := RetryRerun(s)
+		first <- result{ran, err}
+	}()
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(time.Millisecond) {
+		s.mu.Lock()
+		taken := s.failed == nil
+		s.mu.Unlock()
+		if taken {
+			break
 		}
-		called = true
-		second, secondErr = RetryRerun(s)
+		if time.Now().After(deadline) {
+			s.provMu.Unlock()
+			t.Fatal("the first retry did not take the failed reset")
+		}
 	}
-	if ran, err := RetryRerun(s); !ran || err == nil {
-		t.Fatalf("first retry ran %v, %v", ran, err)
+	second, secondErr := RetryRerun(s)
+	s.provMu.Unlock()
+	if second || secondErr != nil {
+		t.Fatalf("second retry ran %v, %v", second, secondErr)
 	}
-	if !called {
-		t.Fatal("the retry window was not reached")
+	if r := <-first; !r.ran || r.err == nil {
+		t.Fatalf("first retry ran %v, %v", r.ran, r.err)
 	}
-	if second || secondErr != nil || resets != 2 {
-		t.Fatalf("second retry ran %v, %v; resets %d", second, secondErr, resets)
+	if resets != 2 {
+		t.Fatalf("resets %d, want 2", resets)
 	}
 }
