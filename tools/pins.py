@@ -92,6 +92,7 @@ FETCH_EXEMPT = {
     "tools/vulncheck.py": (19, "names curl as its canary's package; OSV and GitHub API queries, release "
                               "notes read as text, npm tarballs checked against the lockfile's sha512, and "
                               "npm and pnpm named in its docstrings, comments and OSV queries (the ecosystem, not a command)"),
+    "tests/test_zz_vision_ort_nuget.py": (2, "writes a stand-in `curl` that copies local files; downloads nothing"),
 }
 
 # What `fetch_sites` counts. A word is split at shell quoting and punctuation and read by its basename,
