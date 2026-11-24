@@ -284,7 +284,8 @@ def is_data(path):
 # change of every test there, as #6377's test-file line is. A -U0 hunk shows no enclosing block, so a go.mod line
 # sets no default only when it is placed: blank, a comment, `)`, a directive of GO_MOD_QUIET (requirements and
 # replacements are go.sum's and vendor/'s, is_vendored), or an
-# indented entry of a module path or a retracted version; any other line fails closed to every test.
+# indented entry of a module path or a retracted version, or a patch-level `go` swap (GO_VERSION); any other
+# line fails closed to every test.
 # A changed `toolchain` line is every test of each package holding such a `//go:` line (directive_packages):
 # a new release can satisfy its file's `//go:build go1.N` line.
 # A change anywhere in a non-test file holding such a `//go:` line on either side is one too (dormant).
@@ -293,13 +294,30 @@ EVERY_TEST = "\0every-test"  # the name of added_lines' key for every test of a 
 DORMANT_TEST = "\0dormant-test"  # added_lines' key for every test of each package directive_packages names
 GO_MOD_QUIET = {"module", "require", "exclude", "replace", "retract", "toolchain", "tool"}
 GO_MOD_ENTRY = re.compile(r"[^\s/]*\.[^\s/]*(?:/\S*)?|\[?v\d\S*")
+# One hunk that deletes one `go` line and adds one of the same major.minor (go_line) sets no default: the
+# language version and the GODEBUG defaults follow go1.N (MUT-go-patch-quiet, #6567); any other shape widens.
+GO_VERSION = re.compile(r"go\s+(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.(?:0|[1-9]\d*))?")
+
+
+def _mod_line(text):
+    """A go.mod line text with its comment, edge space and ` => ` separators dropped."""
+    return re.sub(r"\s=>\s", " ", text.split("//", 1)[0].strip())
+
+
+def go_line(path, text):
+    """The (major, minor) of a changed line text of MODULE_FILE that is an unindented `go` directive,
+    False for one whose version is not `N.N` or `N.N.N` (no leading zeros), None for any other line."""
+    if path != MODULE_FILE or text[:1] in " \t" or re.match(r"[^\s(]*", _mod_line(text))[0] != "go":
+        return None
+    m = GO_VERSION.fullmatch(_mod_line(text))
+    return m and (m[1], m[2])
 
 
 def widened(path, text):
     """The added_lines key (a directory's EVERY_TEST) whose packages' tests a changed line text of path
     changes, every one, or None when it changes only its own code's."""
     if path == MODULE_FILE:
-        s = re.sub(r"\s=>\s", " ", text.split("//", 1)[0].strip())
+        s = _mod_line(text)
         first = re.match(r"[^\s(]*", s)[0]
         if first == "toolchain" and s != first:
             return f"broker/{DORMANT_TEST}"  # a new release tag can build a dormant directive's file (Security on #6558)
@@ -400,6 +418,14 @@ def added_lines(diff_text, moved=None):
         if tests.get(p, ()) is not None:
             tests.setdefault(p, set()).update(lines)
 
+    go_lines = []  # the current hunk's (sign, go_line) of MODULE_FILE `go` lines
+
+    def settle():  # a hunk's go lines widen unless they are one patch-level swap (MUT-go-patch-quiet)
+        signs, versions = sorted(x for x, _ in go_lines), {v for _, v in go_lines}
+        if go_lines and not (signs == ["+", "-"] and len(versions) == 1 and all(versions)):
+            tests[f"broker/{EVERY_TEST}"] = None
+        go_lines.clear()
+
     def data(*paths):
         for p in paths:
             if p is not None and (is_data(p) or not is_test(p) and readers(p)) and not is_vendored(p):
@@ -411,12 +437,14 @@ def added_lines(diff_text, moved=None):
         # Every line inside a hunk starts with space, + , - or \, so `diff ` can only be a file
         # header and a `+++ ` line is a header only before the first @@ (an added `++ x` is not one).
         if raw.startswith("diff "):
+            settle()
             in_hunk, path, old = False, None, None
             if raw.startswith("diff --git "):
                 data(_diff_git_path(raw))
             continue
         m = HUNK.match(raw)
         if m:
+            settle()
             in_hunk, line = True, int(m.group(1))
             if path is None and old is not None and is_test(old):
                 if not gone(m):
@@ -435,7 +463,9 @@ def added_lines(diff_text, moved=None):
                 path = _header_path(raw)
             data(old if raw.startswith("--- ") else path if raw.startswith("+++ ") else None)
             continue
-        if raw[:1] in ("+", "-") and (key := widened(path if raw[0] == "+" else old, raw[1:])):
+        if raw[:1] in ("+", "-") and (go := go_line(path if raw[0] == "+" else old, raw[1:])) is not None:
+            go_lines.append((raw[0], go))
+        elif raw[:1] in ("+", "-") and (key := widened(path if raw[0] == "+" else old, raw[1:])):
             tests[key] = None
         if path is None or raw.startswith("\\"):  # "\ No newline at end of file" is no line (#4103)
             continue
@@ -446,6 +476,7 @@ def added_lines(diff_text, moved=None):
             line += 1
         elif not raw.startswith("-"):
             line += 1
+    settle()
     return added, tests
 
 
@@ -460,6 +491,9 @@ def package_of(path):
 LITERAL = re.compile(r'"(?:[^"\\\n]|\\.)*"|`[^`]*`')
 # A Go interpreted string's escapes (the spec's list), so "ASSUMPTIONS\x2emd" names ASSUMPTIONS.md.
 ESCAPE = re.compile(r"\\(?:([0-7]{3})|x([0-9a-fA-F]{2})|u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})|(.))", re.S)
+# A literal of wildcards and slashes alone ("*", "*/*", "?") matches every name, so for a Markdown
+# file it names none (_naming).
+WILDCARDS = re.compile(r"[*?/]+")
 SIMPLE = {"a": b"\a", "b": b"\b", "f": b"\f", "n": b"\n", "r": b"\r", "t": b"\t", "v": b"\v"}
 
 
@@ -492,8 +526,8 @@ def _embeds(text):
 
 def names_file(pkg_dir, rel):
     """Whether a .go file of pkg_dir names rel (a path below it) as text: a string literal (escapes
-    decoded) or //go:embed pattern holding its base name or first directory, or holding a glob
-    (`*?[`) that matches its base name, rel or a leading directory of it, or whose last path part
+    decoded; one of wildcards alone left out, _naming) or //go:embed pattern holding its base name or
+    first directory, or holding a glob (`*?[`) that matches its base name, rel or a leading directory of it, or whose last path part
     matches its base name (dir + "/*.md", "**/*.md"). A link or an unreadable file names anything.
     A file no code names this way is absent from every tree the gate runs tests in (hide_docs), so
     a read of it by any other means (a listing, a child process, a path built from runes, another
@@ -505,7 +539,17 @@ def names_file(pkg_dir, rel):
         if (text := go_text(f.read_bytes())) is None:
             return True
         texts.append(text)
-    return any(_names(lit, rel) for text in texts for lit in _literals(text) + _embeds(text))
+    return any(_names(lit, rel) for text in texts for lit in _naming(text) + _embeds(text))
+
+
+def _naming(text):
+    """The string literals of a .go file that can name a file (_literals). One of wildcards alone
+    (WILDCARDS) names nothing: a table's "*" or a DNS wildcard claimed every Markdown file of its
+    package (#6584), and a listing by one reads only what a listing by "." reads, which hide_docs
+    keeps the gate closed on (#6373). A //go:embed pattern of wildcards still names: it holds the bytes.
+    Only Markdown files are hidden, so only names_file (read for those alone) drops them: embedded_by
+    keeps every literal, as another data file a "*" lists stays in the tree."""
+    return [x for x in _literals(text) if not WILDCARDS.fullmatch(x)]
 
 
 def _names(lit, rel):
