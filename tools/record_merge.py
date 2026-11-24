@@ -28,7 +28,8 @@ proof) is kept once: an identical duplicate is a no-op here, in doclint, in mutg
 both sides changed, differently, or one side changed and the other deleted, and any hunk holding a line that is no
 record line, keep conflict markers; a result with one key on two different lines (both sides added one ID, or two
 proofs of one mutant) keeps both and prints them. Either exits 1, so git stops the merge for the builder to
-resolve (renumber the PR's row, or keep one proof), which premerge reads as `same`. A side holding a carriage
+resolve (renumber the PR's row, or keep main's proof and drop the PR's), which premerge reads as `same`
+(#6472); keeping the PR's proof edits a main line and reads `changed`. A side holding a carriage
 return is refused, as doclint and mutgate refuse one: record and allow files end lines in LF only, so every reader
 reads one line the same way (#6375). Standard library only.
 """
