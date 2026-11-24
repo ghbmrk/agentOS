@@ -126,7 +126,7 @@ REPLAY_INPUTS = rf"{_CFG}\.gitattributes|\.gitmodules"
 NOT_REPLAY_INPUTS = (".gitignore", ".mailmap")
 MARK_PATHS = re.compile(rf"{_CFG}CLAUDE(?:\.local)?\.md|{_CFG}AGENTS\.md|{_CFG}\.mcp\.json|{_CFG}\.claude(?:/.*)?|"
                         r"docs/OPERATING\.md|docs/LANES\.md|\.github/.*|broker/core/core\.txt|"
-                        rf"tools/({'|'.join(GATE_TOOLS)})\.py|tools/(old_core|trusted_core|ceilings)\.txt|tools/ci_scope[^/]*|"
+                        rf"tools/({'|'.join(GATE_TOOLS)})\.py|tools/(old_core|trusted_core|ceilings)\.txt|tools/ci_s(?:cope|plit)[^/]*|"
                         r"tests/test_premerge[^/]*|reviews/[^/]+/README[^/]*|" + REPLAY_INPUTS
                         + (rf"|tools/({_IMPORTED})\.py|tests/test_({_IMPORTED})[^/]*" if _IMPORTED else ""),
                         re.DOTALL)
