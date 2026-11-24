@@ -127,3 +127,33 @@ func TestCardStepOvertakenAgainKeepsTheLaterCard(t *testing.T) {
 		t.Fatal("the overtaken rerun replaced the later card")
 	}
 }
+
+// A RetryRerun that lands after another has taken the failed reset, but
+// before that one's Again starts, finds nothing to retry: the two never
+// run the vault reset at once (#2362).
+func TestRetryRerunTakesTheResetOnce(t *testing.T) {
+	s, _ := survivorStep(t, func(*card.Card) error { return nil })
+	resets := 0
+	if err := s.Again(func() error { resets++; return errors.New("no") }); err == nil {
+		t.Fatal("failed reset passed")
+	}
+	var second bool
+	var secondErr error
+	called := false
+	s.retryTaken = func() {
+		if called {
+			return
+		}
+		called = true
+		second, secondErr = RetryRerun(s)
+	}
+	if ran, err := RetryRerun(s); !ran || err == nil {
+		t.Fatalf("first retry ran %v, %v", ran, err)
+	}
+	if !called {
+		t.Fatal("the retry window was not reached")
+	}
+	if second || secondErr != nil || resets != 2 {
+		t.Fatalf("second retry ran %v, %v; resets %d", second, secondErr, resets)
+	}
+}

@@ -70,6 +70,9 @@ type CardStep struct {
 	failed func() error
 	// note is the latest confirm's Line, until Note takes it.
 	note string
+	// retryTaken, nil outside tests, runs when RetryRerun has taken failed
+	// and before its Again, so a test can reach that window.
+	retryTaken func()
 }
 
 // NewCardStep loads the latch and, if the card was not confirmed yet,
@@ -217,9 +220,13 @@ func RetryRerun(c CardHold) (bool, error) {
 	s.mu.Lock()
 	reset := s.failed
 	s.failed = nil // one retry at a time; a failed one sets it again
+	hook := s.retryTaken
 	s.mu.Unlock()
 	if reset == nil {
 		return false, nil
+	}
+	if hook != nil {
+		hook()
 	}
 	return true, s.Again(reset)
 }
