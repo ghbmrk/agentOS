@@ -42,10 +42,11 @@ the GENERATED line and its rows come from the live issues, never from hand edits
                                  once per item and PR on the issue. Flags only: never relabels or closes.
                                  A collaborator's comment carrying FOLLOWUP_MARK for that PR names what
                                  is still owed and clears the flag until a newer PR merges (STALE-1-4).
-  board.py intake --repo o/r --issue N
+  board.py intake --repo o/r --issue N [--sweep]
                                  judge issue N with render's checks among the live work items and
                                  keep one comment on it naming every problem (INTAKE_MARK): posted,
-                                 edited in place, or deleted once the issue is well formed
+                                 edited in place, or deleted once the issue is well formed; --sweep
+                                 does the same for every issue render blames or holding the comment
   board.py transition --repo o/r --issue N --label L --action labeled|unlabeled [--comment]
                                  fail when a state-label event is illegal: merged is final, and
                                  state:merged needs a merged PR naming the row (the event's label
@@ -58,6 +59,7 @@ the GENERATED line and its rows come from the live issues, never from hand edits
                                  exists again, so a stray LATER.md edit cannot merge into the archive
 """
 import argparse
+import calendar
 import difflib
 import json
 import os
@@ -523,9 +525,63 @@ def intake_comment(problems):
 
 
 def report_intake(fetch, repo, number, skeleton):
-    """Keep at most one intake comment on issue `number`, matching its problems; returns them.
-    Only the bot's own marked comments count, so a marker someone else writes steers nothing."""
+    """Keep at most one intake comment on issue `number`, matching its problems; returns them."""
     problems = intake_problems(skeleton, work_items(fetch, repo), number)
+    sync_intake(fetch, repo, number, problems)
+    return problems
+
+
+INTAKE_PHRASE = "cannot render on BOARD.md"
+
+
+INTAKE_WORKFLOW = "intake.yml"
+# GitHub fails a job queued over 24 hours, so with no earlier finished sweep a window this long
+# still reaches back past every event whose run could have been cancelled.
+INTAKE_FALLBACK = 25 * 3600
+SKEW = 300  # seconds: issue updated_at and run created_at come from different GitHub services
+
+
+def _iso(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+def _epoch(stamp):
+    return calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+
+
+def sweep_since(fetch, repo, now):
+    """The time from which an issue's update can lack a finished sweep: the creation of the newest
+    successful intake run, less SKEW. A run cancelled while pending was queued after that run held
+    the group, so its event came later; a failed run never moves the bound. Without one, INTAKE_FALLBACK."""
+    runs = fetch(f"/repos/{repo}/actions/workflows/{INTAKE_WORKFLOW}/runs?status=success")["workflow_runs"]
+    done = [_epoch(r["created_at"]) for r in runs]
+    return _iso((max(done) if done else now - INTAKE_FALLBACK) - SKEW)
+
+
+def sweep_intake(fetch, repo, number, skeleton, now=time.time):
+    """report_intake for issue `number` and every other issue it could have missed
+    (CI-issue-runs-coalesce): each work item render blames; each issue updated since sweep_since, from
+    the REST list, which is consistent and paged, so an issue whose own run was cancelled is read
+    whatever the search index holds; and each issue a search finds holding an intake comment, for
+    comments older than that. intake.yml runs one sweep at a time and a newer pending run replaces
+    an older one, so a burst takes about one job and a replaced run loses no final state. Returns
+    {issue: problems}."""
+    since = sweep_since(fetch, repo, now())
+    every = render_problems(skeleton, work_items(fetch, repo))
+    blamed = {int(m.group(1)) for m in (re.match(r"issue #(\d+): ", p) for p in every) if m}
+    touched = {i["number"] for i in fetch(f"/repos/{repo}/issues?state=all&since={since}") if "pull_request" not in i}
+    q = urllib.parse.quote(f'repo:{repo} is:issue in:comments "{INTAKE_PHRASE}"', safe="")
+    held = {i["number"] for i in fetch(f"/search/issues?q={q}")["items"] if "pull_request" not in i}
+    out = {}
+    for n in sorted({number} | blamed | touched | held):
+        out[n] = [p for p in every if p.startswith(f"issue #{n}: ")]
+        sync_intake(fetch, repo, n, out[n])
+    return out
+
+
+def sync_intake(fetch, repo, number, problems):
+    """Keep at most one intake comment on issue `number`, naming `problems`, none when there are none.
+    Only the bot's own marked comments count, so a marker someone else writes steers nothing."""
     mine = [c for c in fetch(f"/repos/{repo}/issues/{number}/comments")
             if (c.get("user") or {}).get("login") == BOT and INTAKE_MARK in (c.get("body") or "")]
     body = intake_comment(problems) if problems else None
@@ -535,7 +591,6 @@ def report_intake(fetch, repo, number, skeleton):
         fetch(f"/repos/{repo}/issues/{number}/comments", "POST", {"body": body})
     elif body and mine[0].get("body") != body:
         fetch(f"/repos/{repo}/issues/comments/{mine[0]['id']}", "PATCH", {"body": body})
-    return problems
 
 
 def rate_limit_wait(code, headers, now):
@@ -630,6 +685,8 @@ def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, 
     ap.add_argument("--comment", action="store_true",
                     help="stale: comment once on each flagged issue; transition: keep one comment naming the problem")
     ap.add_argument("--issue", type=int, metavar="N", help="intake, transition: the issue to judge")
+    ap.add_argument("--sweep", action="store_true",
+                    help="intake: also every work item render blames and every issue holding an intake comment")
     ap.add_argument("--label", help="transition: the label the event added or removed")
     ap.add_argument("--action", choices=("labeled", "unlabeled"), help="transition: the event")
     ap.add_argument("--out", metavar="FILE", help="render: write FILE whole once rendered, instead of stdout")
@@ -637,8 +694,12 @@ def main(argv=None, read=lambda: (ROOT / "BOARD.md").read_text(), fetch=github, 
     if args.command == "intake":
         if not (args.repo and args.issue):
             ap.error("intake needs --repo and --issue")
-        problems = report_intake(fetch, args.repo, args.issue, read())
-        print(*(f"board: {p}" for p in problems or [f"issue #{args.issue}: well formed"]), sep="\n")
+        if not args.sweep:
+            problems = report_intake(fetch, args.repo, args.issue, read())
+            print(*(f"board: {p}" for p in problems or [f"issue #{args.issue}: well formed"]), sep="\n")
+            return 0
+        for n, problems in sweep_intake(fetch, args.repo, args.issue, read()).items():
+            print(*(f"board: {p}" for p in problems or [f"issue #{n}: well formed"]), sep="\n")
         return 0
     if args.command == "transition":
         if not (args.repo and args.issue and args.label and args.action):
