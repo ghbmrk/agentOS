@@ -36,10 +36,14 @@ jobs:
   transition:
     # Label events carry the label changed, not the previous one: the label plus the issue's other
     # state labels give both ends. Collaborator-opened work items only, as in intake.yml.
+    # CI-issue-runs-coalesce: only an edge into or out of merged can be illegal (transition_problem),
+    # so only an event whose label is state:merged, or on an issue holding it, takes a runner; a label
+    # burst's other state events are skipped (tests/test_board.py pins that no other edge fails).
     if: >-
       github.event_name == 'issues' && startsWith(github.event.label.name, 'state:')
       && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.issue.author_association)
       && contains(github.event.issue.labels.*.name, 'work-item')
+      && (github.event.label.name == 'state:merged' || contains(github.event.issue.labels.*.name, 'state:merged'))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

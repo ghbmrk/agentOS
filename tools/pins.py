@@ -82,6 +82,7 @@ FETCH_EXEMPT = {
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
     "tools/metrics.py": (1, "GitHub API calls; downloads nothing it runs"),
+    "tests/test_zz_vision_ort_nuget.py": (2, "writes a stand-in `curl` that copies local files; downloads nothing"),
     "tests/test_vulncheck.py": (8, "names curl as a package in OSV fixtures"),
     "tools/vulncheck.py": (3, "names curl as its canary's package; OSV and GitHub API queries, release "
                               "notes read as text, and npm tarballs checked against the lockfile's sha512"),

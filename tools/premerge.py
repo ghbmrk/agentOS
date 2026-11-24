@@ -13,7 +13,8 @@ and so does a DECISIONS.md whose only replay conflicts are table rows both sides
 keeping both sides' rows verbatim, either side first (#3224, #3233), the PR's rows renumbered or not when no other PR file names an old ID (#4030),
 and so does a `*_allow.txt` whose lines are main's plus the PR's line changes, in any order, a line both added kept once or twice (#3991, #6375),
 and so does any allow file (tools/record_merge.py CLASSES) that is the driver's clean merge of both sides (#6375),
-and so does a MUTANTS-EQUIVALENT whose entries are main's plus the PR's entry changes, each side's entries in its own order (#6314). A replay file that fails a cheap gate never reads
+and so does a MUTANTS-EQUIVALENT whose entries are main's plus the PR's entry changes, each side's entries in its own order (#6314),
+a PR entry dropped for main's other proof of its key counting as removed (#6472). A replay file that fails a cheap gate never reads
 same as is: a duplicate row ID (doclint) in an ASSUMPTIONS.md or DECISIONS.md, a MUTANTS-EQUIVALENT key on two different lines (an entry or row both sides added word for word is one, #6358), or an ASSUMPTIONS.md row or entry that
 `merge=union` brought back (in the merge base and main, not in the reviewed commit). A head that resolves each union
 hunk without those rows, keeping its rows inside the hunk, reads same (#3400, #3401), unless `git merge-file`
@@ -125,7 +126,7 @@ REPLAY_INPUTS = rf"{_CFG}\.gitattributes|\.gitmodules"
 NOT_REPLAY_INPUTS = (".gitignore", ".mailmap")
 MARK_PATHS = re.compile(rf"{_CFG}CLAUDE(?:\.local)?\.md|{_CFG}AGENTS\.md|{_CFG}\.mcp\.json|{_CFG}\.claude(?:/.*)?|"
                         r"docs/OPERATING\.md|docs/LANES\.md|\.github/.*|broker/core/core\.txt|"
-                        rf"tools/({'|'.join(GATE_TOOLS)})\.py|tools/(old_core|trusted_core|ceilings)\.txt|tools/ci_scope[^/]*|"
+                        rf"tools/({'|'.join(GATE_TOOLS)})\.py|tools/(old_core|trusted_core|ceilings)\.txt|tools/ci_s(?:cope|plit)[^/]*|"
                         r"tests/test_premerge[^/]*|reviews/[^/]+/README[^/]*|" + REPLAY_INPUTS
                         + (rf"|tools/({_IMPORTED})\.py|tests/test_({_IMPORTED})[^/]*" if _IMPORTED else ""),
                         re.DOTALL)
@@ -608,12 +609,26 @@ def _entry_keys(lines):
     return [json.dumps({k: v for k, v in e.items() if k not in ("reason", "accepted")}, sort_keys=True) for e in entries]
 
 
+def _proved_on_main(pr, mb, main, want):
+    """The entries of `pr` (the reviewed commit, each entry once) that `want` (the head's entries) drops for main's
+    other proof of its key: a key the merge base lacks and `pr` and main each hold on one line, `want` holding
+    main's line. A key in the merge base is an edit by each side, a conflict however resolved (#6472)."""
+    keys = [_entry_keys(x) for x in (pr, mb, main)]
+    if None in keys:
+        return set()
+    mine, base, theirs = (collections.Counter(k) for k in keys)
+    proof = dict(zip(keys[2], main))
+    return {x for x, k in zip(pr, keys[0]) if mine[k] == theirs[k] == 1 and not base[k]
+            and x not in want and proof[k] != x and proof[k] in want}
+
+
 def _records_kept(cwd, tree, head, path, reviewed, onto):
     """True when `path` is a MUTANTS-EQUIVALENT (merge=union, .gitattributes) and `head`'s lines, as a multiset,
     are main's plus the lines the reviewed commit added less those it removed, with each side's entries in that
     side's order and no key on two different lines: a union, or a hand merge keeping both sides (#6314). An entry
     both sides added word for word counts once, in either side's place (#6358). An entry the PR or the resolution
-    edited, dropped or reordered, a key on two lines, or an entry the union brought back, reads False; None for a
+    edited, dropped or reordered, a key on two lines, or an entry the union brought back, reads False, except a PR
+    entry dropped for main's other proof of a key the merge base lacks (`_proved_on_main`, #6472); None for a
     criss-cross merge, which reads as changed (L3 on #6315: its union can bring back an entry unseen)."""
     if path.rsplit("/", 1)[-1] != RECORD:
         return False
@@ -626,6 +641,10 @@ def _records_kept(cwd, tree, head, path, reviewed, onto):
     pr, mb, main, want = (_git(cwd, "show", f"{t}:{path}", ok=(0, 128)).split(b"\n") for t in (reviewed, bases[0], onto, head))
     count, is_entry = collections.Counter, lambda x: bool(x.strip()) and not x.lstrip().startswith(b"#")
     entry = lambda lines: list(dict.fromkeys(x for x in lines if is_entry(x)))  # each entry once, first place
+    # A PR entry whose key main added with another proof, `head` holding main's line and not the PR's, is a PR
+    # line the resolution dropped for main's reviewed one: the PR's change only shrinks (#6472, record_merge.py).
+    drop = _proved_on_main(entry(pr), entry(mb), entry(main), set(entry(want)))
+    pr = [x for x in pr if x not in drop]
     # An entry repeated word for word is one entry to every reader (#6358): entries compare as a set, comments by count.
     expect, have = count(main) + (count(pr) - count(mb)) - (count(mb) - count(pr)), count(want)
     if ({x for x in expect if is_entry(x)} != {x for x in have if is_entry(x)}
