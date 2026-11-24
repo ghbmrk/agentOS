@@ -491,6 +491,9 @@ def package_of(path):
 LITERAL = re.compile(r'"(?:[^"\\\n]|\\.)*"|`[^`]*`')
 # A Go interpreted string's escapes (the spec's list), so "ASSUMPTIONS\x2emd" names ASSUMPTIONS.md.
 ESCAPE = re.compile(r"\\(?:([0-7]{3})|x([0-9a-fA-F]{2})|u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})|(.))", re.S)
+# A literal of wildcards and slashes alone ("*", "*/*", "?") matches every name, so for a Markdown
+# file it names none (_naming).
+WILDCARDS = re.compile(r"[*?/]+")
 SIMPLE = {"a": b"\a", "b": b"\b", "f": b"\f", "n": b"\n", "r": b"\r", "t": b"\t", "v": b"\v"}
 
 
@@ -523,8 +526,8 @@ def _embeds(text):
 
 def names_file(pkg_dir, rel):
     """Whether a .go file of pkg_dir names rel (a path below it) as text: a string literal (escapes
-    decoded) or //go:embed pattern holding its base name or first directory, or holding a glob
-    (`*?[`) that matches its base name, rel or a leading directory of it, or whose last path part
+    decoded; one of wildcards alone left out, _naming) or //go:embed pattern holding its base name or
+    first directory, or holding a glob (`*?[`) that matches its base name, rel or a leading directory of it, or whose last path part
     matches its base name (dir + "/*.md", "**/*.md"). A link or an unreadable file names anything.
     A file no code names this way is absent from every tree the gate runs tests in (hide_docs), so
     a read of it by any other means (a listing, a child process, a path built from runes, another
@@ -536,7 +539,17 @@ def names_file(pkg_dir, rel):
         if (text := go_text(f.read_bytes())) is None:
             return True
         texts.append(text)
-    return any(_names(lit, rel) for text in texts for lit in _literals(text) + _embeds(text))
+    return any(_names(lit, rel) for text in texts for lit in _naming(text) + _embeds(text))
+
+
+def _naming(text):
+    """The string literals of a .go file that can name a file (_literals). One of wildcards alone
+    (WILDCARDS) names nothing: a table's "*" or a DNS wildcard claimed every Markdown file of its
+    package (#6584), and a listing by one reads only what a listing by "." reads, which hide_docs
+    keeps the gate closed on (#6373). A //go:embed pattern of wildcards still names: it holds the bytes.
+    Only Markdown files are hidden, so only names_file (read for those alone) drops them: embedded_by
+    keeps every literal, as another data file a "*" lists stays in the tree."""
+    return [x for x in _literals(text) if not WILDCARDS.fullmatch(x)]
 
 
 def _names(lit, rel):
