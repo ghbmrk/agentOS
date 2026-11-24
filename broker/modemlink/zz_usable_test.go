@@ -1,30 +1,45 @@
-package modemlink
+package modemlink_test
 
 import (
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/bridgeproto"
+	"github.com/ghbmrk/agentos/broker/modemlink"
 )
+
+// usableClock is the test's clock.
+type usableClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *usableClock) now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+func (c *usableClock) add(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
 
 // REQ: CH-12. #6292: Usable says whether the owner line can carry a text
 // now, as a send would find it, but opens no outage and counts nothing,
 // so a sender holding a refused text can ask before trying again. New's
 // defaults stand when the config leaves them unset.
 func TestUsableAsksWithoutCounting(t *testing.T) {
-	clk := &clock{t: time.Date(2026, 10, 5, 13, 5, 0, 0, time.UTC)}
-	l := New(Config{Owner: ownerNum, Now: clk.now})
-	if l.cfg.SendWait != SendWait || l.cfg.PollWait != bridgeproto.OutboxWait {
-		t.Fatalf("defaults %v %v, want %v %v", l.cfg.SendWait, l.cfg.PollWait, SendWait, bridgeproto.OutboxWait)
+	clk := &usableClock{t: time.Date(2026, 10, 5, 13, 5, 0, 0, time.UTC)}
+	l := modemlink.New(modemlink.Config{Owner: "+15550000999", Now: clk.now})
+	if c := modemlink.ConfigForTest(l); c.SendWait != modemlink.SendWait || c.PollWait != bridgeproto.OutboxWait {
+		t.Fatalf("defaults %v %v, want %v %v", c.SendWait, c.PollWait, modemlink.SendWait, bridgeproto.OutboxWait)
 	}
 	if l.Usable() {
 		t.Fatal("a line the bridge never reported reads as usable")
 	}
-	l.state, l.seen = bridgeproto.StateOK, clk.now()
+	modemlink.SetLineForTest(l, bridgeproto.StateOK, clk.now())
 	if !l.Usable() {
 		t.Fatal("a line reported ok just now reads as unusable")
 	}
-	clk.add(Silent)
+	clk.add(modemlink.Silent)
 	if !l.Usable() {
 		t.Fatal("a line heard exactly Silent ago reads as unusable")
 	}
@@ -32,7 +47,7 @@ func TestUsableAsksWithoutCounting(t *testing.T) {
 	if l.Usable() {
 		t.Fatal("a line silent past Silent reads as usable")
 	}
-	if l.outage != nil {
-		t.Fatalf("asking opened an outage: %+v", *l.outage)
+	if modemlink.OutageOpenForTest(l) {
+		t.Fatal("asking opened an outage")
 	}
 }
