@@ -972,7 +972,7 @@ func (d *driver) planSignIn() error {
 	}
 	pages = append(pages, seen{"GET /status", b})
 	if n := d.stub.Refused(); n != 0 {
-		return fmt.Errorf("the provider refused %d call(s) on the plan route: stub %v", n, d.stub.Hits())
+		return fmt.Errorf("the provider refused %d calls on the plan route: stub %v", n, d.stub.Hits())
 	}
 	if d.stub.Hits()["code"] == 0 {
 		return fmt.Errorf("sign-in skipped the provider: stub %v", d.stub.Hits())

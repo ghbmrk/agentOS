@@ -133,7 +133,7 @@ func (d *driver) providerRun(c *mcpClient, run int) error {
 	case hits <= before:
 		return fmt.Errorf("provider_run %d answered without a model call at the provider: stub %v", run, d.stub.Hits())
 	case d.stub.Refused() != refused:
-		return fmt.Errorf("the provider refused %d call(s) during provider_run %d: stub %v", d.stub.Refused()-refused, run, d.stub.Hits())
+		return fmt.Errorf("the provider refused %d calls during provider_run %d: stub %v", d.stub.Refused()-refused, run, d.stub.Hits())
 	}
 	return nil
 }
