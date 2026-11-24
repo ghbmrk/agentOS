@@ -74,7 +74,7 @@ func prep(c prepConfig) (err error) {
 	}()
 	// Mkdir's mode is masked by the umask; the sticker's directory is the
 	// owner's only.
-	if err := os.Chmod(c.Out, 0o700); err != nil {
+	if err := chmod(c.Out, 0o700); err != nil {
 		return err
 	}
 	box := filepath.Join(c.Out, "box.raw")
@@ -91,7 +91,7 @@ func prep(c prepConfig) (err error) {
 	if err != nil {
 		return err
 	}
-	st := &change.MemStore{}
+	st := newStore()
 	if err := claim.Seal(st, code, c.Rand, nil); err != nil {
 		return err
 	}
@@ -152,7 +152,7 @@ func rootOffset(image string) (int64, error) {
 		return 0, err
 	}
 	defer f.Close()
-	fi, err := f.Stat()
+	fi, err := statFile(f)
 	if err != nil {
 		return 0, err
 	}
@@ -194,7 +194,8 @@ func (e entry) dir() bool { return strings.HasPrefix(e.mode, "04") }
 
 // tool runs debugfs or e2fsck with only a fixed PATH and LANG, never this
 // process's environment (childproc).
-func tool(o childproc.Options, name string, args ...string) *childproc.Cmd {
+// It is a fault seam (faults.go).
+var tool = func(o childproc.Options, name string, args ...string) *childproc.Cmd {
 	env := childproc.NewEnv("PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C")
 	return childproc.Command(context.Background(), env, o, name, args...)
 }
@@ -374,11 +375,11 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
+	if _, err := copyBuf(out, in, nil); err != nil {
 		out.Close()
 		return err
 	}
-	if err := out.Sync(); err != nil {
+	if err := syncFile(out); err != nil {
 		out.Close()
 		return err
 	}
@@ -395,7 +396,7 @@ func writeNew(p string, b []byte) error {
 		f.Close()
 		return err
 	}
-	if err := f.Sync(); err != nil {
+	if err := syncFile(f); err != nil {
 		f.Close()
 		return err
 	}

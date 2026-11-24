@@ -36,23 +36,23 @@ func write(image, sums, dev string, log io.Writer) error {
 	if err != nil {
 		return err
 	}
-	fi, err := os.Stat(real)
+	fi, err := statPath(real)
 	if err != nil {
 		return err
 	}
-	block := fi.Mode()&os.ModeDevice != 0 && fi.Mode()&os.ModeCharDevice == 0
+	block := isBlock(fi.Mode())
 	if requireBlock && !block {
 		return fmt.Errorf("%s is not a block device", dev)
 	}
 	if err := notInUse(real); err != nil {
 		return err
 	}
-	src, err := os.Open(image)
+	src, err := openFile(image)
 	if err != nil {
 		return err
 	}
 	defer src.Close()
-	si, err := src.Stat()
+	si, err := statFile(src)
 	if err != nil {
 		return err
 	}
@@ -64,12 +64,12 @@ func write(image, sums, dev string, log io.Writer) error {
 		// it (a mount, swap, RAID or device-mapper member).
 		flags |= unix.O_EXCL
 	}
-	dst, err := os.OpenFile(real, flags, 0)
+	dst, err := openDev(real, flags, 0)
 	if err != nil {
 		return err
 	}
 	defer dst.Close()
-	room, err := dst.Seek(0, io.SeekEnd)
+	room, err := seekFile(dst, 0, io.SeekEnd)
 	if err != nil {
 		return err
 	}
@@ -81,20 +81,20 @@ func write(image, sums, dev string, log io.Writer) error {
 	}
 	fmt.Fprintf(log, "writing %s to %s (%d bytes)\n", image, dev, size)
 	buf := make([]byte, 4<<20)
-	if _, err := io.CopyBuffer(struct{ io.Writer }{dst}, src, buf); err != nil {
+	if _, err := copyBuf(struct{ io.Writer }{dst}, src, buf); err != nil {
 		return err
 	}
-	if err := dst.Sync(); err != nil {
+	if err := syncFile(dst); err != nil {
 		return err
 	}
 	if block {
 		// Drop the device's buffer cache so the read-back comes from the
 		// disk, not from what was just written.
-		if err := unix.IoctlSetInt(int(dst.Fd()), unix.BLKFLSBUF, 0); err != nil {
+		if err := flushBuf(int(dst.Fd())); err != nil {
 			return fmt.Errorf("flushing %s's cache: %w", dev, err)
 		}
 	}
-	if err := dst.Close(); err != nil {
+	if err := closeFile(dst); err != nil {
 		return err
 	}
 	fmt.Fprintf(log, "reading %s back\n", dev)
@@ -112,7 +112,7 @@ func verify(dev string, size int64, want []byte) error {
 		return err
 	}
 	defer f.Close()
-	_ = unix.Fadvise(int(f.Fd()), 0, size, unix.FADV_DONTNEED)
+	_ = fadvise(int(f.Fd()), 0, size, unix.FADV_DONTNEED)
 	h := sha256.New()
 	if _, err := io.CopyN(h, f, size); err != nil {
 		return fmt.Errorf("reading %s back: %w", dev, err)
@@ -184,9 +184,6 @@ func firstFields(p string) ([]string, error) {
 
 // unescape undoes /proc's octal escapes (\040 for a space).
 func unescape(s string) string {
-	if !strings.Contains(s, `\`) {
-		return s
-	}
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
 		if s[i] == '\\' && i+4 <= len(s) {

@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,7 +52,7 @@ func fileSum(path string) ([]byte, error) {
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := copyBuf(h, f, nil); err != nil {
 		return nil, err
 	}
 	return h.Sum(nil), nil
