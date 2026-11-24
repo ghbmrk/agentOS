@@ -208,7 +208,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | W5-Dc-r5 | Erase tombstones re-offered items: the LOG-4 erase entry keeps a keyed-hash tombstone of each erased item's source reference and `Seal` refuses a match; test across the mail clerk and the kernel, plus restore (D-239, #3931; release) | W5-Dc; after #3931 | queued |
 | W5-Dc-r17 | Forget reach into the owner hold (CAP-3): held texts carry no forget reference, so a forget does not reach a text held overnight and it is sent on release. Give `HeldText` a reference and let forget drop it (owner ASSUMPTIONS O25) (release, brief W5-Dc-r1 finding raised by the builder on #617; Security 6083602460 pt 5, lens 6083540407 pt 6) | W5-Dc-r1; Next build item B | queued (built in SIM-owner-hold, D-095) |
 | WS-image | [Workstation image: the signed image installs on a dedicated machine and loads GPU drivers under Secure Boot](briefs/WS-image.md) | CTRL-uki, NET-seg, G1 | queued (after G1, D-104; HW-9, HW-11; tier A) |
-| S8-W1 l1 | S8-W1 l1: Pin #1419's surviving config, launch and wrapper mutants, and the G1, bwrap-missing, apply_patch, stub-path and WORK real-path notes (later; Potency/L3 on #1419) | S8-W1 (#1419) | building (later; tier A; from #1419) |
 | IMG-fw-later | Install only the two MT7922 Wi-Fi firmware files instead of all of firmware-mediatek (saves about 35 MiB per image and OTA), and add tests for a '../' link and a wildcard 'install bt*' line in the radio and Bluetooth checks (later; tier A; #1450 L4, D1, D2) | P2-1 (#1450) | queued (later; tier A; #1450 L4, D1, D2) |
 | IMG-initrd-bt-polish | IMG-initrd-bt follow-ups: pin the real zstd magic in a test, test zero namesize / architecture-only package difference / brcm .hcd.zst, add QCA, TI, ar3k, NXP and Marvell BT firmware to BT_PATTERNS, report an unreadable or empty initrd by path, and add a fix hint to the Bluetooth failure (later; tier A; PR #1509 review) | IMG-initrd-bt-polish | queued (later; tier A; PR #1509 review P/UX/L3 L1-L5) |
 | S8-W1 l2 | S8-W1 l2: Codex tool HOME and TMPDIR below the workspace root, behavioural CliSandboxTest mutants for hooks/plugins and launch.json GIT_DIR/HOME, and a C15 note that workspace dotfiles run in tool shells (later; Potency/L3 delta review on #1505) | S8-W1 (#1419) | queued (later; tier A; PR #1505 delta review L1, L2, L3) |
@@ -344,7 +343,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | Image boot test | Reboot check can miss a truncated agentos-uplink: none console line in the image boot test (later; found building #1457; image CI run 38570617776) | — | queued (later; found building #1457) |
 | CI-SOAK-cap-l1 | CI-SOAK-cap l1: with fuzz at max-parallel 3, a 5h fuzztime dispatch runs ~33h and can skip the next daily run; failure reports land ~18h after start instead of ~9h; no test pins the max-parallel caps (later; tier A; from #1649) | CI-SOAK-cap | building (later; tier A; from CI-SOAK-cap #1649) |
 | PACE-race-later | PACE-race-later: the simulator's ErrNotSent is pinned by no test, the direct AT driver returns bare ErrDown for texts it never wrote (spends a slot; fails safe), and an in-flight stamp can be pruned before a long-queued send goes (later; #1686 P/UX/L3 delta findings 1-3) | PACE-allowance-race (#1686) | queued (later; tier A; from #1686) |
-| WORKERS-rollback-text | Worker rollback text misleads after a same-name recreate ("not in this worker's lineage"); say the snapshot is of an earlier worker of this name (later, recheck; from #1575 UX U-L1) | #1575 | building (later, recheck; from #1575 UX U-L1) |
 | APPROVE-reply-before-send-later | APPROVE-reply-before-send-later: ordering test, page wording, c.decide order (later; #1746 reviews) | #1441 | building |
 | CI-PATHS-fu | CI-PATHS-fu: cache guard test, cached Go builds. Harden the cache guard test, share GOCACHE in the machines job, and name D29 in tools/ASSUMPTIONS.md. (later; tier B; from PR #1823) | — | queued (later; tier B; from PR #1823) |
 | CARRIER-LAB-1 | CARRIER-LAB-1: Carrier-free cellular lab (later). (queued; class later; from owner's Questions thread) | — | queued (queued; class later; from owner's Questions thread) |
@@ -375,7 +373,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | NET-2-cap-sizing-owner | NET-2-cap-sizing-owner: the agentosd call site and backups wording call enflist.Propose, show ErrNoDailyBytes, and hand the owner the link. Sub B half of #4578. | #4578 | queued (release; tier A; sub B) |
 | ENF-down-report | ENF-down-report: a refused first firewall load exits the enforcer before any page is served and nothing reports the down enforcer. Release; from #5243. | #5243 | queued (release; tier A) |
 | TIM-1-interval-fu-b | TIM-1-interval-fu-b: agentosd's STATUS line moves to the interval, and the PLAN ON reply says consent is withdrawn. Release; from #5215. | #5215, #5216 | queued (release; tier A) |
-| KRN-forget-c-notice-words | KRN-forget-c-notice-words: the after-erase Forget notice names kinds in the kernel's household words, as the ask does, not raw class names. From #5163. | #5163, #5125 | building (release; tier A) |
 | KRN-clock-hold-gap | KRN-clock-hold-gap: a hold started while Latest-Earliest is wide is not lengthened by the gap (unit after time-sync, window from Earliest while monotonic, or bound via #5391); STATUS can say why. Release; from #5387. | #5147, #5387, #5391, #5279 | queued (release; tier A) |
 | IMG-initrd-global-ext-dirs | IMG-initrd-global-ext-dirs: INITRD_IMAGE_DIRS adds /.extra/global_sysext and /.extra/global_confext when the image's systemd moves past v257. Release; blocked on that bump; from #5501 (Security). | #5488, #5501 | queued (release; tier A; blocked on the systemd bump) |
 | TIM-1-interval-fu-c | TIM-1-interval-fu-c: the question book moves off Guard.Now to the interval, and the clock drops the restricted mode's last API. Release; from #5216. | #5216, #5279 | queued (release; tier A) |
@@ -437,7 +434,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-gobwas-ws-r2 | VULN-gobwas-ws-r2: sipline WS loopback test near sipgo's message-size limit. Release; from #6647. | #6646 | queued (release; tier A) |
 | B3-18b-r1 | B3-18b-r1: daemon B15 names agent_fit; S1 test kit comment names -agent-mem-mb. Release; from #6649. | #2797 | queued (release; tier C) |
 | B3-16-r1 | B3-16-r1: Gmail connect DUse after a finished sign-in says it is already connected. Release; from #6632. | #3014 | queued (release; tier A) |
-| TOOL-mutgate-read-file-scope | TOOL-mutgate-read-file-scope: a changed read file changes only the tests that reach its reader | #6455, #6617 | building (cleanup; tier A gate file; option 1, chosen in Decisions 8 under D-319) |
 | VM-snap-unread-notice-fu-2b | VM-snap-unread-notice-fu-2b: main wires link.Usable into the held unread notice | #6455, #6657 | queued (release; tier A; lane claude2) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
@@ -499,4 +495,5 @@ issue #6615: body has no board-row block
 issue #6639: body has no board-row block
 issue #6645: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #6660: title "6659-fu TOOL-mutgate-read-file-scope-fu: unblock main.go and boxe2e ASSUMPTIONS edits, and tighten the read trace's message and tests" does not start with '<ID>: '
+issue #6664: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 ```
