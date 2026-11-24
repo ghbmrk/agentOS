@@ -1,7 +1,5 @@
 package workers
 
-// REQ: CAP-8
-
 import (
 	"testing"
 

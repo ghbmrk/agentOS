@@ -1,7 +1,5 @@
 package workers
 
-// REQ: CAP-8, CAP-1
-
 import (
 	"context"
 	"fmt"
