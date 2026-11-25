@@ -3592,12 +3592,13 @@ class MovedDecls(unittest.TestCase):
                 ("TestMain syscall.Exec", imp('"os"', '"syscall"') + '\nfunc TestMain(m *testing.M) {\n\tif os.Getenv("X") == "" {\n'
                  '\t\tos.Setenv("X", "1")\n\t\tsyscall.Exec("/proc/self/exe", []string{"x", "-test.shuffle=on"}, os.Environ())\n'
                  '\t}\n\tos.Exit(m.Run())\n}\n', TWO_SRC),
+                # Inline, so only the os/exec import can fail it (L3 on #6686).
                 ("TestMain os/exec", imp('"os"', '"os/exec"') + '\nfunc TestMain(m *testing.M) {\n\tif os.Getenv("X") == "" {\n'
-                 '\t\tc := exec.Command("/proc/self/exe")\n\t\tc.Run()\n\t}\n\tos.Exit(m.Run())\n}\n', TWO_SRC)):
+                 '\t\texec.Command("/proc/self/exe").Run()\n\t}\n\tos.Exit(m.Run())\n}\n', TWO_SRC)):
             with self.subTest(name):
                 got, err = late(test, src)
                 self.assertEqual(got, (None, None))  # TestMain is in the run list: every test, its own too
-                self.assertRegex(err, r"broker/hint/hint_test\.go:\d+: TestMain may reorder it: every test is a change")
+                self.assertRegex(err, r"broker/hint/'s run list changes, so every test is a change \(broker/hint/hint_test\.go:\d+: TestMain\)")
         for name, test, src, where in (
                 # (1) an init that sets test.shuffle or test.count: in a test file, a non-test file, by a helper.
                 ("init flag", imp('"flag"') + '\nfunc init() {\n\tflag.Set("test.shuffle", "on")\n}\n', TWO_SRC, "hint_test.go:\\d+: init"),
@@ -3611,6 +3612,7 @@ class MovedDecls(unittest.TestCase):
                 ("init in a non-test file", MOVE_TEST, TWO_SRC.replace("package hint\n", 'package hint\n\nimport "flag"\n')
                  + '\nfunc init() {\n\tflag.Set("test.shuffle", "on")\n}\n', "hint.go:\\d+: init"),
                 ("package var", imp('"flag"') + '\nvar _ = flag.Set("test.shuffle", "on")\n', TWO_SRC, "hint_test.go:\\d+: package var"),
+                ("init os/exec", imp('"os/exec"') + '\nfunc init() {\n\texec.Command("true").Run()\n}\n', TWO_SRC, "hint_test.go:\\d+: init"),
                 ("package var helper", MOVE_TEST + '\nvar _ = setup()\n', TWO_SRC.replace("package hint\n", 'package hint\n\nimport "flag"\n')
                  + '\nfunc setup() error { return flag.Set("test.shuffle", "on") }\n', "hint_test.go:\\d+: package var"),
                 # (1) a subtest a goroutine runs may outlive its parent: Run, a T passed on, a Run method value.
@@ -3620,18 +3622,41 @@ class MovedDecls(unittest.TestCase):
                  TWO_SRC, "hint_test.go:\\d+: go statement"),
                 ("go helper", MOVE_TEST.replace('\tif Down(3)', '\tgo sub(t)\n\tif Down(3)')
                  + '\nfunc sub(t *testing.T) { t.Run("d", func(t *testing.T) {}) }\n', TWO_SRC, "hint_test.go:\\d+: go statement"),
+                ("grouped T", MOVE_TEST + '\nfunc helper(a, b *testing.T) { go a.Run("d", func(t *testing.T) {}) }\n', TWO_SRC,
+                 "hint_test.go:\\d+: go statement"),
                 ("Run method value", MOVE_TEST.replace('\tif Down(3)', '\trun := t.Run\n\trun("d", func(t *testing.T) {})\n\tif Down(3)'),
                  TWO_SRC, "hint_test.go:\\d+: Run method value")):
             with self.subTest(name):
                 got, err = late(test, src)
                 self.assertEqual(got, every)
-                self.assertRegex(err, rf"broker/hint/{where} may reorder it: every test is a change")
+                self.assertRegex(err, rf"broker/hint/'s run list changes, so every test is a change \(broker/hint/{where}")
         # An imported package's init counts the same.
         lib = 'package lib\n\nimport "flag"\n\nfunc init() {\n\tflag.Set("test.shuffle", "on")\n}\n'
         src = TWO_SRC.replace("package hint\n", 'package hint\n\nimport _ "example.invalid/broker/lib"\n')
         got, err = late(MOVE_TEST, src, extra={"lib/lib.go": lib})
         self.assertEqual(got, every)
         self.assertIn("broker/lib/lib.go:5: init", err)
+        # An init or var calling an imported module package's function that does, one hop or more, or its
+        # method; and a package not read (Security and L3 on #6686).
+        flags = 'package lib\n\nimport "flag"\n\n// On shuffles.\nfunc On() { set() }\n\nfunc set() { flag.Set("test.shuffle", "on") }\n\n' \
+                '// Plain does nothing.\nfunc Plain() {}\n\n// S is a setter.\ntype S int\n\n// M shuffles.\nfunc (S) M() { On() }\n'
+        uses = lambda body: imp('"example.invalid/broker/lib"') + body
+        for name, test, src, where in (
+                ("init", uses('\nfunc init() {\n\tlib.On()\n}\n'), TWO_SRC, "hint_test.go:\\d+: init"),
+                ("var literal", uses('\nvar _ = func() int {\n\tlib.On()\n\treturn 0\n}()\n'), TWO_SRC, "hint_test.go:\\d+: package var"),
+                ("method", uses('\nfunc init() {\n\tvar s lib.S\n\ts.M()\n}\n'), TWO_SRC, "hint_test.go:\\d+: init"),
+                ("non-test file", MOVE_TEST, TWO_SRC.replace("package hint\n", 'package hint\n\nimport "example.invalid/broker/lib"\n')
+                 + '\nfunc init() {\n\tlib.On()\n}\n', "hint.go:\\d+: init")):
+            with self.subTest("module package " + name):
+                got, err = late(test, src, extra={"lib/lib.go": flags})
+                self.assertEqual(got, every)
+                self.assertRegex(err, rf"\(broker/hint/{where}")
+        self.assertEqual(late(uses('\nfunc init() {\n\tlib.Plain()\n}\n'), extra={"lib/lib.go": flags}), (only, ""))
+        unread = 'package lib\n\nimport (\n\t"fmt"; "os"\n)\n\nvar _, _ = fmt.Sprint, os.Exit\n'
+        blank = TWO_SRC.replace("package hint\n", 'package hint\n\nimport _ "example.invalid/broker/lib"\n')
+        got, err = late(MOVE_TEST, blank, extra={"lib/lib.go": unread})
+        self.assertEqual(got, every)
+        self.assertIn("(broker/lib/ not read)", err)
         # What runs once and changes no flag keeps the narrowing, and says nothing: a plain TestMain, an
         # init or var naming only other things (a selector of an import named like a marked method too),
         # a goroutine that only logs on t.
@@ -3646,7 +3671,7 @@ class MovedDecls(unittest.TestCase):
                 self.assertEqual(late(test, src), (only, ""))
         # A Parallel read as no subtest's names its own place.
         par = MOVE_TEST.replace('t.Fatal("down")\n\t}', 't.Fatal("down")\n\t}\n\tt.Parallel()')
-        self.assertRegex(late(par)[1], r"broker/hint/hint_test\.go:\d+: Parallel not a subtest's first statement may reorder it")
+        self.assertRegex(late(par)[1], r"every test is a change \(broker/hint/hint_test\.go:\d+: Parallel not a subtest's first statement\)")
 
     def test_a_declaration_of_a_cgo_file_never_moves(self):
         # #6385, from #6376: a cgo file's code binds its own preamble, so nothing moves out of one.
