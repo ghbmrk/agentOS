@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -851,7 +852,7 @@ func TestTheInboxRunTakesTheBoundsAndNamesTheCount(t *testing.T) {
 	}
 	full[0] = strings.Repeat("9", localapi.MaxID)
 	out, err := r.call(localapi.OpRunInbox, localapi.RunInbox{Token: tok, Shown: full, Run: full})
-	if a, ok := out.(localapi.Answered); err != nil || !ok || a.Text != "Sent 64 messages." {
+	if a, ok := out.(localapi.Answered); err != nil || !ok || a.Text != fmt.Sprintf("Sent %d messages.", localapi.MaxInbox) {
 		t.Fatalf("full page %+v, %v", out, err)
 	}
 	if _, err := r.call(localapi.OpRunInbox, localapi.RunInbox{Token: tok, Shown: append(full, "x")}); code(err) != localapi.ErrBadArgs {

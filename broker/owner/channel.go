@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/modem"
@@ -30,8 +31,13 @@ import (
 
 // Defaults (CH-10, CH-14, CH-15, REV-3).
 const (
-	DefaultUnlockFor  = 7 * 24 * time.Hour
-	DefaultCodeTTL    = 15 * time.Minute
+	DefaultUnlockFor = 7 * 24 * time.Hour
+	DefaultCodeTTL   = 15 * time.Minute
+	// MaxHoldSegments is the largest hold the owner may set (CH-14). Every
+	// held message takes at least one segment, so the hold never has more
+	// messages than this, and the page's run lists (localapi.MaxInbox) are
+	// sized from it, so one tap can always carry a full hold (#5187).
+	MaxHoldSegments   = 128
 	DefaultUndoWindow = 10 * time.Minute
 	// DefaultReplyLimit caps, per hour, the replies to messages that prove
 	// only the owner's number (CH-15): unlock prompts, wrong-code and
@@ -71,6 +77,7 @@ type Config struct {
 	CodeTTL time.Duration
 	// HoldSegments bounds the text held for the page while the session
 	// is locked, in SMS segments (CH-14; DefaultHoldSegments when zero).
+	// The owner sets it, at most MaxHoldSegments; New refuses more.
 	HoldSegments int
 	// UndoWindow delays queued auto-replies (default 10 min).
 	UndoWindow time.Duration
@@ -285,6 +292,9 @@ func New(cfg Config) (*Channel, error) {
 	}
 	if cfg.HoldSegments == 0 {
 		cfg.HoldSegments = DefaultHoldSegments
+	}
+	if cfg.HoldSegments < 0 || cfg.HoldSegments > MaxHoldSegments {
+		return nil, fmt.Errorf("owner: hold of %d segments: the bound is 1 to %d", cfg.HoldSegments, MaxHoldSegments)
 	}
 	if cfg.UndoWindow == 0 {
 		cfg.UndoWindow = DefaultUndoWindow
@@ -809,7 +819,123 @@ func (c *Channel) lockedLocked(rest, code string, now time.Time) route {
 		}
 		return route{replies: []string{"That code is right, but no code by text opens a session. Sign in on my Wi-Fi page at home to open one."}}
 	}
+	rest = stripHeldCodes(rest)
+	if rest == "" {
+		return route{replies: []string{"Locked. That message held only codes, so nothing was kept. No code by text opens a session: sign in on my Wi-Fi page at home."}, limited: true}
+	}
 	return c.waitLocked(rest, false, now)
+}
+
+// stripHeldCodes removes every code of exactly codeDigits digits from
+// text, wherever it stands, with one space beside it (CH-18, #5187), so
+// "pay 123456 now" is held as "pay now" and the code never reaches a model
+// when the page runs it. A word is a run of letters and numbers, as the
+// reply parser reads one. Marks, format characters and default ignorables
+// are transparent: they neither split a code ("123<ZWJ>456") nor glue it
+// to a neighbouring word ("pay<ZWSP>123456"), and go with the code they
+// touch. A code is a word that reads, as written or through fold, as 6
+// digits, or a chain of all-number words joined only by transparent
+// characters that reads so once they are dropped, judged as a whole
+// chain. "AB482913", "room 12", "7654321" and "123<ZWJ>4567" are not
+// code-shaped and stay.
+func stripHeldCodes(text string) string {
+	clear := func(r rune) bool { return unicode.IsMark(r) || unicode.Is(unicode.Cf, r) || skelIgnorable(r) }
+	// A default ignorable that is also a letter (the Hangul fillers) is
+	// transparent, not part of a word (L3 on #5974).
+	word := func(r rune) bool { return (unicode.IsLetter(r) || unicode.IsNumber(r)) && !clear(r) }
+	digits := func(w string) bool {
+		return !strings.ContainsFunc(w, func(r rune) bool { return !unicode.IsNumber(r) })
+	}
+	isCodeText := func(w string) bool { return isTrailingCode(w) || isTrailingCode(fold(w)) }
+	type span struct{ s, e int }
+	var words []span
+	for i := 0; i < len(text); {
+		s := strings.IndexFunc(text[i:], word)
+		if s < 0 {
+			break
+		}
+		s += i
+		e := len(text)
+		if n := strings.IndexFunc(text[s:], func(r rune) bool { return !word(r) }); n >= 0 {
+			e = s + n
+		}
+		words = append(words, span{s, e})
+		i = e
+	}
+	// joined reports whether only transparent characters lie between
+	// words a and b.
+	joined := func(a, b span) bool {
+		return !strings.ContainsFunc(text[a.e:b.s], func(r rune) bool { return !clear(r) })
+	}
+	var cut []span
+	for i := 0; i < len(words); i++ {
+		// The maximal chain of number words joined only by transparent
+		// characters is judged whole, with them dropped; failing that,
+		// each word is judged alone, as fold's spaced reading sees it.
+		j := i
+		for j+1 < len(words) && digits(text[words[i].s:words[i].e]) && digits(text[words[j+1].s:words[j+1].e]) && joined(words[j], words[j+1]) {
+			j++
+		}
+		if j > i {
+			var b strings.Builder
+			for k := i; k <= j; k++ {
+				b.WriteString(text[words[k].s:words[k].e])
+			}
+			if utf8.RuneCountInString(b.String()) <= codeDigits && isCodeText(b.String()) {
+				cut = append(cut, span{words[i].s, words[j].e})
+				i = j
+				continue
+			}
+		}
+		for k := i; k <= j; k++ {
+			if isCodeText(text[words[k].s:words[k].e]) {
+				cut = append(cut, words[k])
+			}
+		}
+		i = j
+	}
+	if len(cut) == 0 {
+		return text
+	}
+	var out strings.Builder
+	at := 0
+	for _, c := range cut {
+		s, e := c.s, c.e
+		for s > at {
+			r, n := utf8.DecodeLastRuneInString(text[at:s])
+			if !clear(r) {
+				break
+			}
+			s -= n
+		}
+		for e < len(text) {
+			r, n := utf8.DecodeRuneInString(text[e:])
+			if !clear(r) {
+				break
+			}
+			e += n
+		}
+		// Drop one space beside the code, unless that would join the
+		// words on either side; with none, put one between them.
+		before, _ := utf8.DecodeLastRuneInString(text[:s])
+		after, _ := utf8.DecodeRuneInString(text[e:])
+		gap := ""
+		switch {
+		case s > at && before == ' ' && !word(after):
+			s--
+		case after == ' ' && !word(before):
+			e++
+		case word(before) && word(after):
+			// Keep the words apart, so the cut never joins them into a
+			// new word, code-shaped or not (Security on #5974).
+			gap = " "
+		}
+		out.WriteString(text[at:s])
+		out.WriteString(gap)
+		at = e
+	}
+	out.WriteString(text[at:])
+	return strings.TrimSpace(out.String())
 }
 
 // AlertEvery is the least time between two challenge-mode alerts by text;

@@ -353,9 +353,10 @@ type RunInbox struct {
 	Run   []string `json:"run,omitempty"`
 }
 
-// MaxInbox bounds RunInbox's lists: the hold is bounded by segments
-// (owner.DefaultHoldSegments), and every message takes one.
-const MaxInbox = 64
+// MaxInbox bounds RunInbox's lists: the hold is bounded by segments, at
+// most owner.MaxHoldSegments however the owner sets it, and every message
+// takes at least one, so one tap carries any full hold (#5187).
+const MaxInbox = owner.MaxHoldSegments
 
 // Requests are the open requests, as the owner channel lists them.
 type Requests struct {
