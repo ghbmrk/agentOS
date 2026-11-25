@@ -24,6 +24,9 @@ sys.path.insert(0, str(IMG))
 spec = importlib.util.spec_from_file_location("static_elf", IMG / "static_elf.py")
 se = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(se)
+vspec = importlib.util.spec_from_file_location("vulncheck", ROOT / "tools" / "vulncheck.py")
+vulncheck = importlib.util.module_from_spec(vspec)
+vspec.loader.exec_module(vulncheck)
 
 C = "int main(void) { return 0; }\n"
 CXX = ('#include <stdexcept>\nint main(int c, char **v) { try { if (c > 5) throw std::runtime_error(v[0]); }\n'
@@ -256,6 +259,96 @@ class StaticElfTest(unittest.TestCase):
         places["initrd:a/initrd"] = {"/usr/sbin/ldconfig": info}
         self.assertEqual(se.control(places, {}, {"initrd:a/initrd": {"libc-bin"}, "initrd:a/modules": None}), [])
 
+    def test_go_is_read_from_section_headers_and_syso_c_code_is_seen(self):
+        # #6482 (L3 7068815628 point 4a): Go is read from the section headers, not from marker bytes
+        # anywhere in the file; a C binary carrying .gopclntab's name and Go's build-info magic is no Go.
+        data = self.bins["static"].read_bytes()
+        pad = b"\0" * (-(len(data) + 12) % 16)
+        planted = data + b"\0.gopclntab\0" + pad + se.BUILDINFO + b"\x08\x02" + b"\0" * 16
+        self.assertIsNone(se.go_cgo(planted))
+        self.assertIsNone(se.go_cgo(data))
+        # Point 4b: C code an internal link takes from a .syso, with cgo off, is in the function table with
+        # no line table (Go refuses -linkmode=external with cgo off, so this is C's one way in).
+        w = pathlib.Path(self.tmp) / "w-syso"
+        w.mkdir()
+        (w / "go.mod").write_text("module m\n\ngo 1.21\n")
+        (w / "main.go").write_text("package main\n\nfunc cfunc() int\n\nfunc main() { println(cfunc()) }\n")
+        (w / "stub_amd64.s").write_text('#include "textflag.h"\nTEXT \u00b7cfunc(SB),NOSPLIT,$0-8\n'
+                                        "\tCALL my_c_func(SB)\n\tMOVQ AX, ret+0(FP)\n\tRET\n")
+        subprocess.run(["gcc", "-O2", "-c", "-x", "c", "-", "-o", str(w / "c_amd64.syso")],
+                       input="int my_c_func(void) { return 7; }\n", text=True, check=True)
+        syso = pathlib.Path(self.tmp) / "go-syso"
+        subprocess.run(["go", "build", "-trimpath", "-ldflags=-s -w", "-o", str(syso), "."], cwd=w, check=True,
+                       capture_output=True, env={**os.environ, "CGO_ENABLED": "0", "GOFLAGS": "-mod=mod", "GOWORK": "off"})
+        table = se.sections(syso.read_bytes())[".gopclntab"]
+        self.assertEqual(se.no_line_funcs(syso.read_bytes()[table[0]:table[0] + table[1]]), ["my_c_func"])
+        self.assertEqual(se.go_cgo(syso.read_bytes()), "0-c")
+        noinfo = pathlib.Path(str(syso) + "-noinfo")
+        subprocess.run(["objcopy", "-R", ".go.buildinfo", str(syso), str(noinfo)], check=True)
+        self.assertEqual(se.go_cgo(noinfo.read_bytes()), "c")
+        # A plain Go binary lists none.
+        table = se.sections(self.bins["go"].read_bytes())[".gopclntab"]
+        self.assertEqual(se.no_line_funcs(self.bins["go"].read_bytes()[table[0]:table[0] + table[1]]), [])
+        root, out, allow, config, _ = self.tree()
+        for src, want in ((syso, "Go CGO_ENABLED=0 but C functions with no line table"),
+                          (noinfo, "Go, no cgo setting, C functions with no line table")):
+            shutil.copy(src, root / "usr/lib/agentos/runsc")
+            errs = self.check(root, out, allow, config)
+            self.assertIn("/usr/lib/agentos/runsc: go : a Go binary with C code (%s)" % want, errs)
+        # A section table that is not inside the file, or a function table of an unknown format, is unread.
+        bad = bytearray(self.bins["go"].read_bytes())
+        bad[40:48] = (len(bad) + 1).to_bytes(8, "little")
+        with self.assertRaises(se.Unread):
+            se.go_cgo(bytes(bad))
+        with self.assertRaises(se.Unread):
+            se.no_line_funcs(b"\xfa\xff\xff\xff\0\0\x01\x08" + b"\0" * 64)
+
+    def test_guest_and_initrd_package_files_are_held_to_their_bytes(self):
+        # #6482 (Potency 7068815856 point 4): a guest-root file declared "package" must have bytes
+        # guest-userland.sh recorded copying from that package; an initrd member, the main tree's md5sum
+        # at its path with its package at the main tree's version.
+        ld = "/usr/lib/agentos/images/codex/lib64/ld-linux-x86-64.so.2"
+        md5 = hashlib.md5(self.bins["static"].read_bytes()).hexdigest()
+
+        def staged():
+            root, out, allow, config, _ = self.tree()
+            (root / ld.lstrip("/")).parent.mkdir(parents=True)
+            shutil.copy(self.bins["static"], root / ld.lstrip("/"))
+            allow.write_text(allow.read_text() + "%s package libc6\n" % ld)
+            st = out / "guest" / se.STATUS
+            st.write_text(st.read_text() + STATUS % "libc6")
+            (out / "guest" / se.COPIED).write_text("%s libc6\n" % md5)
+            return root, out, allow, config
+
+        root, out, allow, config = staged()
+        self.assertEqual(self.check(root, out, allow, config), [])
+        for name, edit, want in (
+                ("other bytes", lambda: (out / "guest" / se.COPIED).write_text("%s libc6\n" % ("0" * 32)),
+                 "are not a copy guest-userland.sh recorded from libc6"),
+                ("other package", lambda: (out / "guest" / se.COPIED).write_text("%s libgcc-s1\n" % md5),
+                 "are not a copy guest-userland.sh recorded from libc6"),
+                ("no record", lambda: (out / "guest" / se.COPIED).unlink(),
+                 "are not a copy guest-userland.sh recorded from libc6")):
+            with self.subTest(name):
+                root, out, allow, config = staged()
+                edit()
+                errs = self.check(root, out, allow, config)
+                self.assertTrue(any(ld in e and want in e for e in errs), errs)
+        # Initrd members, against the main tree's md5sums (ldconfig, libc-bin 1.0-1 in the fixture).
+        root, out, allow, config, _ = self.tree()
+        info = se.classify(self.bins["static"])
+        entries = [(1, "/usr/sbin/ldconfig", "package", "libc-bin")]
+        for name, status, member, want in (
+                ("same", {"libc-bin": "1.0-1"}, info, None),
+                ("other bytes", {"libc-bin": "1.0-1"}, {**info, "md5": "0" * 32}, "not the ones dpkg installed"),
+                ("other version", {"libc-bin": "2.0-1"}, info, "at version 2.0-1 here and 1.0-1 in the main tree"),
+                ("no version", {"libc-bin": None}, info, "at version None here")):
+            with self.subTest(name):
+                errs = se.refusals({"initrd:a/initrd": {"/usr/sbin/ldconfig": member}}, entries,
+                                   se.context(out, config), {"initrd:a/initrd": status})
+                self.assertEqual(errs, [] if want is None else errs[:1])
+                self.assertTrue(want is None or want in errs[0], errs)
+
     def test_guest_shipped_records_each_input_against_the_binary(self):
         # SEL-6 linked: with SHIPPED_FOR, each owner is recorded against the binary's SHA-256, and --status
         # moves the lines to DIR/agentos.inputs; without it, nothing is recorded per file.
@@ -302,6 +395,18 @@ class ShippedTest(unittest.TestCase):
                     f.flush()
                     with self.assertRaises(ValueError):
                         se.read_allow(f.name)
+
+    def test_each_built_using_exclusion_is_a_linked_entry_this_check_reads(self):
+        # #6481: vulncheck.py skips a package's Built-Using sources only where image/builtusing.exclude
+        # names it against a "linked" entry; differential: that entry, as this check reads the shipped
+        # allow-list, is "linked" with the same list, and the shipped exclusion is libcap-dev's alone.
+        self.assertEqual(vulncheck.STATIC_ELF_ALLOW, se.ALLOW)
+        linked = {g: a for _n, g, k, a in se.read_allow(se.ALLOW) if k == "linked"}
+        excluded = vulncheck.excluded_packages()
+        self.assertEqual({p for pkgs in excluded.values() for p in pkgs}, {"libcap-dev"})
+        for name, pkgs in excluded.items():
+            for pkg, glob in pkgs.items():
+                self.assertEqual(linked.get(glob), name, (pkg, glob))
 
     def test_each_link_record_sets_shipped_for_on_the_bytes_it_ships(self):
         # SEL-6 linked: the three static link builds record their inputs against the binary they install.

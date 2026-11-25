@@ -139,3 +139,30 @@ func TestFormatsMatchDeclaration(t *testing.T) {
 		t.Errorf("declare.go Codex CredFormats %q, extractor %q", got[0], formats)
 	}
 }
+
+// A lowercase vendor prefix is reported as generic with only its letters and separator, so a
+// widened generic pattern shows up here (#2338). Synthetic canaries only.
+func TestGenericPrefix(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"ab_CANARYGENERIC0123456789", "ab_ (generic)"},
+		{"abcd-CANARYGENERIC0123456789", "abcd- (generic)"},
+		{"a_CANARYGENERIC0123456789", "none"},     // one letter is too short
+		{"abcde_CANARYGENERIC0123456789", "none"}, // five letters is too long
+		{"AB_CANARYGENERIC0123456789", "none"},    // uppercase is not the vendor form
+		{"ab.CANARYGENERIC0123456789", "none"},    // only _ or - ends the prefix
+		{"xab_CANARYGENERIC0123456789", "xab_ (generic)"},
+	} {
+		if got := shape(c.in).Prefix; got != c.want {
+			t.Errorf("shape(%q).Prefix = %q, want %q", c.in, got, c.want)
+		}
+	}
+	o, err := run(mustJSON(map[string]any{"tokens": map[string]any{"access_token": "ab_CANARYGENERIC0123456789"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(o), "CANARY") {
+		t.Fatalf("output holds the generic canary's tail: %s", o)
+	}
+}
+
+func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }

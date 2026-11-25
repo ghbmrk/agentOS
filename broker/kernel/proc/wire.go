@@ -294,11 +294,8 @@ func (c remote) call(op string, r kernel.Request, s snapshot) (a *answer, sent, 
 		return nil, false, false
 	}
 	conn.SetDeadline(time.Now().Add(d))
-	if _, err := conn.Write(append(b, '\n')); err != nil {
-		return nil, true, false
-	}
 	var ans answer
-	if json.NewDecoder(io.LimitReader(conn, maxAnswer)).Decode(&ans) != nil {
+	if _, err := conn.Write(append(b, '\n')); err != nil || json.NewDecoder(io.LimitReader(conn, maxAnswer)).Decode(&ans) != nil {
 		return nil, true, false
 	}
 	return &ans, true, false
