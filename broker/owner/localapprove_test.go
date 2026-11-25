@@ -520,8 +520,13 @@ func TestOnlyThisRequestsTextedCodeGetsTheHint(t *testing.T) {
 	r.inbox()
 	b, _ := r.ch.Request([]Item{lowItem("b1")}, 0)
 	textedB := lowCodeRe.FindStringSubmatch(r.inbox())[2]
-	if _, err := r.ch.LocalAnswer(a, r.sum(a), true, textedB); err != ErrWrongCode || len(r.ch.codes.st.Wrong) != 1 {
-		t.Fatalf("B's code on A: %v, %d wrong", err, len(r.ch.codes.st.Wrong))
+	_, err := r.ch.LocalAnswer(a, r.sum(a), true, textedB)
+	r.ch.WaitSends() // the wrong-code alert runs after the reply and saves the state
+	r.ch.mu.Lock()
+	wrong := len(r.ch.codes.st.Wrong)
+	r.ch.mu.Unlock()
+	if err != ErrWrongCode || wrong != 1 {
+		t.Fatalf("B's code on A: %v, %d wrong", err, wrong)
 	}
 	if msg, err := r.ch.LocalAnswer(b, r.sum(b), false, textedB); err != nil || msg != "Denied "+b+"." {
 		t.Fatalf("deny with the code typed in: %q %v", msg, err)
