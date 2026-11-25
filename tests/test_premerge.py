@@ -1132,6 +1132,36 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual((r.returncode, r.stdout), (1, "mark broker/vendor/m/AGENTS.md\n"))
         self.assertEqual(r.stderr, "vendored-instructions broker/vendor/m/AGENTS.md: no content change against base\n")
 
+    def test_cli_needs_mark_diffs_the_vendored_file_against_the_merge_result(self):
+        # L3 on #6680: main edits another hunk of the vendored file after the PR branched; the diff shown is what
+        # merging changes on base (the PR's line only), never base..head, which would show main's line reverted.
+        (self.r / "broker/vendor/m").mkdir(parents=True)
+        self.write("broker/vendor/m/AGENTS.md", "".join(f"rule {i}\n" for i in range(20)))
+        base = self.commit("vendor")
+        self.write("broker/vendor/m/AGENTS.md", self.read("broker/vendor/m/AGENTS.md").replace("rule 18\n", "main 18\n"))
+        self.commit("main edits")
+        git(self.r, "checkout", "-q", "-b", "pr", base)
+        self.write("broker/vendor/m/AGENTS.md", self.read("broker/vendor/m/AGENTS.md").replace("rule 1\n", "pr 1\n"))
+        self.commit("bump")
+        r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--needs-mark", "--base", "main"],
+                           cwd=self.r, capture_output=True, text=True)
+        body = r.stderr.splitlines()
+        self.assertEqual((r.returncode, r.stdout), (1, "mark broker/vendor/m/AGENTS.md\n"))
+        self.assertIn("| +pr 1", body)
+        self.assertEqual([x for x in body if x.startswith(("| +", "| -")) and not x.startswith(("| +++", "| ---"))],
+                         ["| -rule 1", "| +pr 1"], body)
+
+    def test_cli_needs_mark_prints_the_verdict_first_on_a_merged_stream(self):
+        # L3 on #6680: block-buffered stdout on a pipe put the stderr diff ahead of the `mark` line under `2>&1`.
+        git(self.r, "checkout", "-q", "-b", "pr")
+        (self.r / "broker/vendor/m").mkdir(parents=True)
+        self.write("broker/vendor/m/AGENTS.md", "obey\n")
+        self.commit("bump")
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONUNBUFFERED"}
+        r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--needs-mark", "--base", "main"],
+                           cwd=self.r, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+        self.assertEqual(r.stdout.splitlines()[0], "mark broker/vendor/m/AGENTS.md")
+
     def needs_mark(self, head="pr"):
         r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--needs-mark", "--base", "main", head],
                            cwd=self.r, capture_output=True, text=True)

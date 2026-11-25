@@ -1070,7 +1070,7 @@ def main(argv):
             print(f"empty range {base}..{head}: name the PR head", file=sys.stderr)
             return 2
         hit = mark_paths(files)
-        print("mark " + " ".join(hit) if hit else "agent")
+        print("mark " + " ".join(hit) if hit else "agent", flush=True)  # before stderr, so `2>&1` keeps it first
         for line in vendored_agent_diff(".", base, head, hit):  # #6648: stderr, so stdout's grammar is unchanged
             print(line, file=sys.stderr)
         return 1 if hit else 0
