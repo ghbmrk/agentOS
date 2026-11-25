@@ -429,12 +429,12 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-debian-r17 | VULN-debian-r17: accept openssl's no-fix Debian 13 advisory DEBIAN-CVE-2026-107494 so image-vulncheck passes again. Release; no-fix Debian round. | #2919, #6542 | building (release; tier A) |
 | VIS-reply-read-wipe | VIS-reply-read-wipe: read an enrol reply into a client-owned buffer zeroed on every path, decode its template in place, and zero a refused error reply's template (#6587 review release findings, DEV-7). | #6587 | building (release; tier A) |
 | VIS-reply-read-wipe-fu | VIS-reply-read-wipe-fu: replace the vision client's package-level test seams with passed-in ones, and restore the trailing-data detail (#6636 review release findings, DEV-7). | #6636 | queued (release; tier A) |
-| VULN-gobwas-ws | VULN-gobwas-ws: bump github.com/gobwas/ws to v1.5.0 for GO-2026-6940 so vulncheck passes again. Release. | #2919 | building (release; tier A) |
 | VULN-gobwas-ws-r1 | VULN-gobwas-ws-r1: premerge shows the content of vendored agent-instruction files to the Security reviewer. Release; from #6647. | #6646 | queued (release; tier A) |
 | VULN-gobwas-ws-r2 | VULN-gobwas-ws-r2: sipline WS loopback test near sipgo's message-size limit. Release; from #6647. | #6646 | queued (release; tier A) |
 | B3-18b-r1 | B3-18b-r1: daemon B15 names agent_fit; S1 test kit comment names -agent-mem-mb. Release; from #6649. | #2797 | queued (release; tier C) |
 | B3-16-r1 | B3-16-r1: Gmail connect DUse after a finished sign-in says it is already connected. Release; from #6632. | #3014 | queued (release; tier A) |
 | VM-snap-unread-notice-fu-2b | VM-snap-unread-notice-fu-2b: main wires link.Usable into the held unread notice | #6455, #6657 | queued (release; tier A; lane claude2) |
+| VULN-debian-r18 | VULN-debian-r18: accept openssl's no-fix Debian 13 advisory DEBIAN-CVE-2026-84785 so image-vulncheck passes again. Release; no-fix Debian round. | #2919, #6628 | building (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
