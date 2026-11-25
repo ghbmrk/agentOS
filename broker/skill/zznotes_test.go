@@ -1,6 +1,6 @@
 package skill
 
-// REQ: CAP-5
+// REQ: HLD-4
 
 import (
 	"encoding/json"
