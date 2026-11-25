@@ -1429,11 +1429,7 @@ def _side(pkg, mb, module):
             return alias
         if module and (path == module or path.startswith(module + "/")):
             if path not in clauses:
-                rel = path[len(module) + 1:] if path != module else ""
-                got = _go_files(rel, mb) if ".." not in rel.split("/") else None
-                found = {(m := re.search(r"^package\s+(\w+)", _uncommented(t, False), re.M)) and m[1]
-                         for p, t in (got or {}).items() if not p.endswith("_test.go")}
-                clauses[path] = found.pop() if len(found) == 1 else None
+                clauses[path] = _clause(path, module, mb)
             return clauses[path]
         parts = path.split("/")
         if "." in parts[0]:
