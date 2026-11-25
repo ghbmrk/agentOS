@@ -83,6 +83,16 @@ func (p panicked) Error() string { return fmt.Sprint("panic: ", p.v, "\n", strin
 
 func recovered(v any) error { return panicked{v, debug.Stack()} }
 
+// errNotOwnSnap and errEarlierLife answer a rollback to a snapshot the
+// worker cannot restart from (vm.ErrLineage). A snapshot of an earlier
+// worker of the same name, destroyed since, says so rather than naming a
+// lineage, which the guest would read as its own (#1708, #1575 UX U-L1);
+// worker_diff still compares it.
+var (
+	errNotOwnSnap  = said{"that snapshot is of another worker; a worker restarts only from its own snapshots or the one it was forked from"}
+	errEarlierLife = said{"that snapshot is of an earlier worker of this name, destroyed since; a new worker cannot restart from it, though worker_diff can still compare it"}
+)
+
 // sentinel is the fixed text for the errors the guest can act on. An
 // unknown machine and a machine of another lineage read the same (no
 // such worker), so the text says nothing of machines the caller cannot
@@ -119,7 +129,7 @@ func sentinel(err error) (said, bool) {
 	case errors.Is(err, vm.ErrUnknown):
 		return errNoWorker, true
 	case errors.Is(err, vm.ErrLineage):
-		return said{"that snapshot is not in this worker's lineage"}, true
+		return errNotOwnSnap, true
 	case errors.Is(err, vm.ErrExists):
 		return said{"a worker of that name already exists"}, true
 	case errors.Is(err, vm.ErrContained):
