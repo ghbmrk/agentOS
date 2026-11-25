@@ -1163,3 +1163,14 @@ jobs:
           HOSTCHECK_QEMU: "1"
           HOSTCHECK_TOOLS_ROOT: ${{ runner.temp }}/hostcheck-tools
         run: python -m unittest tests.test_hostcheck -v
+  # CI-mutgate-after-ci (#6569): the mutation gate runs only once every other job here passed on this head, so a
+  # head whose ci fails takes no mutgate runner. A pull request only, as mutgate.yml's own trigger was. Its jobs
+  # are `mutgate / <job>` in this run; main's ruleset does not require them, so tools/premerge.py holds the merge
+  # until `mutgate / claimed` succeeded and no `mutgate / ` job failed: this job skipped never reads as a pass.
+  mutgate:
+    needs: [unit-tests, checks, broker-race, broker-checks, machines, hostcheck]
+    if: ${{ github.event_name == 'pull_request' }}
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/mutgate.yml

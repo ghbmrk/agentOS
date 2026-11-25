@@ -607,7 +607,9 @@ class WiringTest(unittest.TestCase):
         # No job waits for another to decide scope: main requires the split race jobs directly
         # (CI-par-5). checks waits for the unit-tests shards alone, for their traces (#6464).
         ci = (WORKFLOWS / "ci.yml").read_text()
-        self.assertEqual(ci.count("needs:"), 1)
+        # the other `needs:` is the mutation gate's, which waits on every job (CI-mutgate-after-ci, #6569)
+        self.assertEqual(ci.count("needs:"), 2)
+        self.assertEqual(jobs["mutgate"][1][:1], ["    needs: [unit-tests, checks, broker-race, broker-checks, machines, hostcheck]"])
         for job in FULL:
             self.assertFalse([s for s, c in jobs[job][2] if c and "records" in c], job)
         # The document checks never depend on scope.
@@ -802,6 +804,8 @@ class WiringTest(unittest.TestCase):
         # has an `if:`, and every scope step in ci.yml asks for
         # a full push run, which the action gives (test_scope_action_answers_...).
         jobs = ci_jobs()
+        # CI-mutgate-after-ci (#6569): the mutation gate runs on pull requests only, as it always has; no push runs it.
+        self.assertEqual(jobs.pop("mutgate")[0], "${{ github.event_name == 'pull_request' }}")
         self.assertEqual(set(jobs), {*SCOPED, *FULL})
         for job, (cond, _, steps) in jobs.items():
             # checks runs always, so a failed or cancelled shard fails it rather than skipping it.
@@ -839,8 +843,9 @@ class WiringTest(unittest.TestCase):
         self.assertIn("        shard: [0, 1, 2]", ci)
         # Main requires broker-race (0), (1), (2) and broker-checks; `broker` is gone (CI-par-5).
         # The unit-tests shards are not required by name: checks fails unless they all succeed.
+        # mutgate is no required check: premerge holds it (CI-mutgate-after-ci, #6569).
         self.assertEqual(sorted(jobs), sorted(["checks", "unit-tests", "broker-race", "broker-checks", "machines",
-                                               "hostcheck"]))
+                                               "hostcheck", "mutgate"]))
 
     def test_machines_job_lists_infer(self):
         # REQ: INFER-CI-1

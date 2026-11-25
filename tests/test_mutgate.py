@@ -2577,6 +2577,16 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
                 test = reader(path)
                 r, _ = self.gate_run(d, test, test, src, extra={path: pr}, base_extra={path: table}, plan_fails=True)
                 self.assertRegex(r.stderr, UNRUN_5)  # #5942: the plan fails it before any mutant runs
+        # The head narrows a read or embedded file to its readers (#6458, #6657), so the base's run is
+        # of the base's readers, traced in the base's .go files: an empty base run saw nothing.
+        # REQ: MUT-read-reach
+        embed = 'package hint\n\nimport _ "embed"\n\n//go:embed up.txt\nvar upTable string\n'
+        test = reader("up.txt").replace('b, err := os.ReadFile("up.txt")\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n',
+                                        "b := upTable\n").replace('\t"os"\n', "")
+        with tempfile.TemporaryDirectory() as d:
+            r, _ = self.gate_run(d, test, test, None, extra={"up.txt": ""}, base_extra={"up.txt": table, "table.go": embed},
+                                 plan_fails=True)
+            self.assertRegex(r.stderr, UNRUN_5)
 
     def test_a_line_no_mutant_names_fails_where_the_base_ran_it_and_the_head_runs_it_nowhere(self):
         # L1 on #5770 (#5942): every target line runs was checked only through NOT COVERED mutants, so
@@ -3710,22 +3720,61 @@ class DataFiles(unittest.TestCase):
                 self.assertEqual(got, {"hint"} if counts else set())
 
     def test_a_glob_counts_anywhere(self):
-        # #6390: a glob held as data ("*" in a table, a DNS wildcard) can reach any listing call
-        # through a variable, and no list of listing functions is complete (ParseGlob, Readdirnames),
-        # so a glob of wildcards alone counts anywhere, as every other glob does (#6328 and #6336
-        # counted it only beside a listing function the gate knew by name).
+        # #6390: a glob held as data can reach any listing call through a variable, and no list of
+        # listing functions is complete (ParseGlob, Readdirnames), so a glob holding part of a name
+        # counts anywhere (#6328 and #6336 counted it only beside a listing function the gate knew by name).
         # REQ: MUT-deleted-test-own-lines-fu
         self.assertNames((
-                ("a table's star", 'var table = map[rune]string{0x2217: "*"}', True),
-                ("a DNS wildcard", 'var _ = listHas(v, "email") || listHas(v, "*")', True),
-                ("an Accept header", 'var h = map[string]string{"Accept": "*/*"}', True),
-                ("a star in a variable", 'func f() { p := "*"; fs.Glob(F, p) }', True),
-                ("a star beside a template glob", 'var s = "*"\nvar _ = template.Must(template.ParseGlob(s))', True),
+                ("a star beside a name", 'var s = "ASSUMPTIONS*"', True),
+                ("a star before a dot", 'var s = "*.md"', True),
+                ("a star in a variable", 'func f() { p := "*.md"; fs.Glob(F, p) }', True),
                 ("a star embedded", '//go:embed *\nvar docs embed.FS', True),
-                ("a star only in a comment", '// "*"\nvar s = "x"', False),
+                ("stars embedded", '//go:embed */*\nvar docs embed.FS', True),
+                ("a star only in a comment", '// "*.md"\nvar s = "x"', False),
                 ("a glob of another name", 'var s = "*.html"', False)))
-        self.assertNames((('var q = "????"', 'var q = "????"', True), ('var q = "???"', 'var q = "???"', False)),
-                         "broker/hint/a.md")
+        self.assertNames((('var q = "??.md"', 'var q = "??.md"', True), ('var q = "?.md"', 'var q = "?.md"', False)),
+                         "broker/hint/ab.md")
+
+    def test_a_literal_of_wildcards_alone_names_no_markdown_file(self):
+        # #6584: a literal of `*`, `?` and `/` alone matches every name, so a table's "*" (#6514's
+        # confusables, #6485's skeleton fold) or a DNS wildcard made each ASSUMPTIONS.md edit claim
+        # every test of its package. It names none; a //go:embed pattern of wildcards still does.
+        # REQ: MUT-deleted-test-own-lines-fu
+        self.assertNames((
+                ("a table's star", 'var table = map[rune]string{0x2217: "*"}', False),
+                ("a DNS wildcard", 'var _ = listHas(v, "email") || listHas(v, "*")', False),
+                ("an Accept header", 'var h = map[string]string{"Accept": "*/*"}', False),
+                ("a raw star", "var s = `**`", False),
+                ("a star in a variable", 'func f() { p := "*"; fs.Glob(F, p) }', False),
+                ("a star beside a template glob", 'var s = "*"\nvar _ = template.Must(template.ParseGlob(s))', False),
+                ("a star and a name", 'var _, _ = "*", "ASSUMPTIONS.md"', True),
+                ("a star with a dot", 'var s = "*.*"', True),
+                ("a star with a bracket", 'var s = "[A-Z]*"', True),
+                ("a star embedded", '//go:embed *\nvar docs embed.FS', True)))
+        self.assertNames((('var q = "????"', 'var q = "????"', False), ('var q = "/????"', 'var q = "/????"', False),
+                          ('var q = "?.md"', 'var q = "?.md"', True)), "broker/hint/a.md")
+        self.assertNames((('var q = "*[*"', 'var q = "*[*"', True),), "broker/hint/a[1].md")  # a bracket is no wildcard here
+        # Another data file a "*" lists stays in every tree, so embedded_by still reads the star.
+        star = {**EMBED_PKG, "v/glob_test.go": 'package v\n\nvar _ = "*"\n'}
+        with tempfile.TemporaryDirectory() as d, self.tree(d, star):
+            self.assertIsNone(mutgate.embedded_by("v", "models.pins"))
+
+    def test_a_listing_by_a_star_reads_no_hidden_markdown_file(self):
+        # #6584: a test that lists its package with a bare "*" and needs ASSUMPTIONS.md fails in the
+        # gate's tree, closed: the file is hidden there, as for a listing by "." (#6373).
+        # REQ: MUT-deleted-test-own-lines-fu
+        test = ('package hint\n\nimport (\n\t"path/filepath"\n\t"testing"\n)\n\n'
+                'func TestDoc(t *testing.T) {\n\tm, _ := filepath.Glob("*")\n\tfor _, f := range m {\n'
+                '\t\tif f == "ASSUMPTIONS"+".md" {\n\t\t\treturn\n\t\t}\n\t}\n\tt.Fatal(m)\n}\n')
+        files = {"go.mod": "module example.com/b\n\ngo 1.21\n", "hint/hint.go": "package hint\n",
+                 "hint/hint_test.go": test, "hint/ASSUMPTIONS.md": "x"}
+        with tempfile.TemporaryDirectory() as d, self.tree(d, files), self.made(d):
+            broker = pathlib.Path(d) / "broker"
+            run = lambda: subprocess.run(["go", "test", "-count=1", "./hint"], cwd=broker, capture_output=True,
+                                         env={**os.environ, "GOFLAGS": "-mod=mod", "GOTOOLCHAIN": "local"})
+            self.assertEqual(run().returncode, 0)
+            self.assertEqual(mutgate.hide_docs(broker), ["broker/hint/ASSUMPTIONS.md"])
+            self.assertNotEqual(run().returncode, 0)
 
     def test_only_a_name_keeps_a_markdown_file(self):
         # #6373: a listing, a child process, cgo, a raw system call or a path built at run time
@@ -4210,6 +4259,143 @@ class EmbedReach(unittest.TestCase):
         self.assertLess(len(got), 20)
 
 
+
+READ_PKG = {
+    "r/r.go": "package r\n\nfunc other() int { return 1 }\n",
+    "r/cases.txt": "1 2\n",
+    "r/read_test.go": 'package r\n\nimport (\n\t"os"\n\t"testing"\n)\n\nfunc TestRead(t *testing.T) {\n'
+                      '\tb, err := os.ReadFile("cases.txt")\n\tif err != nil {\n\t\tt.Fatal("cases.txt: ", err)\n\t}\n\t_ = b\n}\n',
+    "r/other_test.go": 'package r\n\nimport "testing"\n\nfunc TestOther(t *testing.T) { _ = other() }\n',
+}
+
+
+def read_test(body, imports='"os"'):
+    """A test file of package r whose TestRead's body is body."""
+    return f'package r\n\nimport (\n\t{imports}\n\t"testing"\n)\n\nfunc TestRead(t *testing.T) {{\n\t{body}\n}}\n'
+
+
+class ReadReach(unittest.TestCase):
+    """MUT-read-reach (#6657): a changed file a package's tests read changes only the tests that reach
+    the recognised read calls naming it (os.ReadFile, os.Open, filepath.Glob, fs.ReadFile of os.DirFS,
+    each of literals or a filepath.Join of literals), through package code too; any other namer, a
+    path built at run time, or a reach every test may run, is every test."""
+
+    def reach(self, files, path="broker/r/cases.txt", pkg="r"):
+        with tempfile.TemporaryDirectory() as d, DataFiles.tree(None, d, files), \
+                mock.patch.dict(os.environ, {"GOFLAGS": ""}):
+            mutgate.read_index.cache_clear()
+            try:
+                added, tests = mutgate.added_lines(data_diff(path))
+                self.assertIn(pkg, mutgate.touched(added, tests))
+                return mutgate.head_tests(tests, pkg)
+            finally:
+                mutgate.read_index.cache_clear()
+
+    def test_a_read_file_changes_only_its_readers(self):
+        # REQ: MUT-read-reach
+        # The issue's acceptance: one reading test function is the only changed test.
+        self.assertEqual(self.reach(READ_PKG), ["TestRead"])
+        td = {**READ_PKG, "r/testdata/x.txt": ""}
+        for name, body, imports, path in (
+                ("os.Open", 'f, _ := os.Open("cases.txt")\n\t_ = f', '"os"', "broker/r/cases.txt"),
+                ("a Join of literals", 'b, _ := os.ReadFile(filepath.Join("testdata", "x.txt"))\n\t_ = b',
+                 '"os"\n\t"path/filepath"', "broker/r/testdata/x.txt"),
+                ("a matching Glob", 'm, _ := filepath.Glob("testdata/*.txt")\n\t_ = m', '"path/filepath"', "broker/r/testdata/x.txt"),
+                ("fs.ReadFile of os.DirFS", 'b, _ := fs.ReadFile(os.DirFS("testdata"), "x.txt")\n\t_ = b',
+                 '"io/fs"\n\t"os"', "broker/r/testdata/x.txt")):
+            with self.subTest(name):
+                self.assertEqual(self.reach({**td, "r/read_test.go": read_test(body, imports)}, path), ["TestRead"])
+        # A Glob or read of another file is no read of this one: the Glob's own test is not changed.
+        glob = {**READ_PKG, "r/glob_test.go": 'package r\n\nimport (\n\t"path/filepath"\n\t"testing"\n)\n\n'
+                'func TestGlob(t *testing.T) { _, _ = filepath.Glob("*.go") }\n\n'
+                'func TestBak(t *testing.T) { _, _ = filepath.Glob("cases.txt.bak") }\n'}
+        self.assertEqual(self.reach(glob), ["TestRead"])
+        # Through package code: the tests reaching the reading function count.
+        pkgread = {**READ_PKG, "r/r.go": 'package r\n\nimport "os"\n\nfunc other() int { return 1 }\n\n'
+                   'func load() []byte {\n\tb, _ := os.ReadFile("cases.txt")\n\treturn b\n}\n',
+                   "r/read_test.go": read_test("_ = load()", '"fmt"')}
+        self.assertEqual(self.reach(pkgread), ["TestRead"])
+        # A test reading what a reader left in a package var is changed too.
+        stash = {**READ_PKG, "r/read_test.go": read_test('cases, _ = os.ReadFile("cases.txt")') + "\nvar cases []byte\n",
+                 "r/use_test.go": 'package r\n\nimport "testing"\n\nfunc TestUse(t *testing.T) { _ = cases }\n'}
+        self.assertEqual(self.reach(stash), ["TestRead", "TestUse"])
+        # Another package reading the file by its path narrows to its own reader.
+        other = {**READ_PKG, "w/w.go": "package w\n",
+                 "w/w_test.go": read_test('b, _ := os.ReadFile("../r/cases.txt")\n\t_ = b').replace("package r", "package w"),
+                 "w/x_test.go": 'package w\n\nimport "testing"\n\nfunc TestX(t *testing.T) {}\n'}
+        self.assertEqual(self.reach(other, pkg="w"), ["TestRead"])
+
+    def test_any_other_read_is_every_test(self):
+        # REQ: MUT-read-reach
+        for name, files in (
+                ("package-level code", {"r/init_test.go": 'package r\n\nimport "os"\n\nvar cases, _ = os.ReadFile("cases.txt")\n'}),
+                ("an init", {"r/init_test.go": 'package r\n\nimport "os"\n\nfunc init() { _, _ = os.ReadFile("cases.txt") }\n'}),
+                ("TestMain", {"r/main_test.go": 'package r\n\nimport (\n\t"os"\n\t"testing"\n)\n\n'
+                              'func TestMain(m *testing.M) { _, _ = os.ReadFile("cases.txt"); os.Exit(m.Run()) }\n'}),
+                ("a variable path", {"r/read_test.go": read_test('p := "cases.txt"\n\t_, _ = os.ReadFile(p)')}),
+                ("a const path", {"r/read_test.go": read_test('_, _ = os.ReadFile(casesFile)') + 'const casesFile = "cases.txt"\n'}),
+                ("a Join over a variable", {"r/read_test.go": read_test('d := "."\n\t_, _ = os.ReadFile(filepath.Join(d, "cases.txt"))',
+                                                                         '"os"\n\t"path/filepath"')}),
+                ("a table of paths", {"r/read_test.go": read_test('for _, p := range []string{"cases.txt"} {\n\t\t_, _ = os.ReadFile(p)\n\t}')}),
+                ("an unrecognised read", {"r/read_test.go": read_test('_, _ = os.OpenFile("cases.txt", os.O_RDONLY, 0)')}),
+                ("ioutil", {"r/read_test.go": read_test('_, _ = ioutil.ReadFile("cases.txt")', '"io/ioutil"')}),
+                ("a child process", {"r/read_test.go": read_test('_, _ = exec.Command("cat", "cases.txt").Output()', '"os/exec"')}),
+                ("os bound to another import", {"r/read_test.go": read_test('_, _ = os.ReadFile("cases.txt")', 'os "example.invalid/fakeos"')}),
+                ("a directory open", {"r/testdata/x.txt": "", "r/read_test.go": read_test('_, _ = os.ReadDir("testdata")\n\t_, _ = os.ReadFile("testdata/x.txt")')}),
+                ("an embed too", {"r/e.go": 'package r\n\nimport _ "embed"\n\n//go:embed cases.txt\nvar c string\n'}),
+                ("no reader at all", {"r/read_test.go": read_test('_, _ = os.ReadFile("cases.txt.bak")')}),
+                ("a reader in an unbuilt file", {"r/r.go": 'package r\n\nfunc other() int { return 1 }\n',
+                                                 "r/x_other.go": '//go:build vision_onnx\n\npackage r\n\nimport "os"\n\n'
+                                                 'func load() { _, _ = os.ReadFile("cases.txt") }\n',
+                                                 "r/read_test.go": read_test("load()", '"fmt"')}),
+                ("no inotify to watch the run", {}),
+                ("a linked file", {})):
+            with self.subTest(name):
+                files = {**READ_PKG, **files}
+                if name == "no inotify to watch the run":
+                    with mock.patch.object(mutgate, "_inotify", lambda: None):
+                        self.assertIsNone(self.reach(files))
+                    continue
+                if name == "a linked file":
+                    with tempfile.TemporaryDirectory() as d, DataFiles.tree(None, d, files):
+                        (pathlib.Path(d) / "broker/r/link.go").symlink_to(pathlib.Path(d) / "broker/r/r.go")
+                        self.assertIsNone(mutgate.head_tests({"broker/r/cases.txt": None}, "r"))
+                    continue
+                path = "broker/r/testdata/x.txt" if name == "a directory open" else "broker/r/cases.txt"
+                self.assertIsNone(self.reach(files, path))
+
+    def test_the_other_tests_run_watched(self):
+        # REQ: MUT-read-reach
+        # The trace's other half: every test outside the narrowed ones runs with the file watched,
+        # so a read by a path no recognised call holds (a listing, a child process) fails the run.
+        lister = ('package r\n\nimport (\n\t"os"\n\t"strings"\n\t"testing"\n)\n\nfunc TestList(t *testing.T) {\n'
+                  '\tes, _ := os.ReadDir(".")\n\tfor _, e := range es {\n\t\tif strings.HasSuffix(e.Name(), ".txt") {\n'
+                  '\t\t\t_, _ = os.ReadFile(e.Name())\n\t\t}\n\t}\n}\n')
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}):
+            d = pathlib.Path(d).resolve()
+            tree, tmp = d / "tree", d / "tmp"
+            tmp.mkdir()
+            with DataFiles.tree(None, tree, {**READ_PKG, "go.mod": GO_MOD}):
+                watched = ["broker/r/cases.txt"]
+                self.assertIsNone(mutgate.timed_cover("r", None, tmp, watched=watched, skip=["TestRead"])[2])
+                self.assertIn("a test read broker/r/cases.txt at run time",
+                              mutgate.timed_cover("r", None, tmp, watched=watched)[2])
+                (tree / "broker/r/list_test.go").write_text(lister)
+                problem = mutgate.timed_cover("r", None, tmp, watched=watched, skip=["TestRead"])[2]
+                self.assertIn("a test other than TestRead read broker/r/cases.txt at run time", problem)
+                (tree / "broker/r/list_test.go").unlink()
+                # record_for: the narrowed tests, the whole suite, then every other test watched.
+                runs = []
+
+                def cover(pkg, names, tmp, code=None, watched=(), skip=None):
+                    runs.append((names, list(watched), skip))
+                    return {}, 1.0, None
+                with mock.patch.object(mutgate, "timed_cover", cover), \
+                        mock.patch.object(mutgate, "merge_base", lambda b, h: "b" * 40), \
+                        mock.patch.object(mutgate, "base_covered", lambda *a: ({}, None)):
+                    self.assertIsNone(mutgate.record_for("r", {"broker/r/cases.txt": None}, {"r": []}, "", "HEAD~1", tmp)[2])
+                    self.assertEqual(runs, [(["TestRead"], [], None), (None, [], None), (None, watched, ["TestRead"])])
+
 class Plan(unittest.TestCase):
     def test_a_plan_past_the_matrix_limit_names_a_remedy(self):
         # #4983: a refused plan says what to do next. Each claimed package plans 100 shards here.
@@ -4221,7 +4407,7 @@ class Plan(unittest.TestCase):
                           ([], "0 shards: no claimed package was planned; rerun the mutgate workflow")):
             with self.subTest(pkgs), contextlib.ExitStack() as st:
                 for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
-                                    ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: pkgs),
+                                    ("build_lister", lambda tmp: "lister"), ("claimed", lambda d, **_: pkgs),
                                     ("diff_targets", lambda added, pkg: {f"broker/{pkg}/x.go": {1}}),
                                     ("deletion_sites", lambda *a: ([], None)), ("lint_budget", lambda pkg, sites: (0.0, [0.0] * len(sites))), ("suite_seconds", lambda *a: (1.0, None)),
                                     ("shard_count", lambda *a: 100)):
@@ -4238,7 +4424,7 @@ class Plan(unittest.TestCase):
         import contextlib, io, types
         with contextlib.ExitStack() as st:
             for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
-                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: sorted(pkg_targets)),
+                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d, **_: sorted(pkg_targets)),
                                 ("diff_targets", lambda added, pkg: pkg_targets[pkg][0]),
                                 ("deletion_sites", lambda pkg, t, lister: (pkg_targets[pkg][1], None)), ("lint_budget", lambda pkg, sites: (0.0, [0.0] * len(sites))),
                                 ("suite_seconds", lambda pkg, tmp: suite), ("site_costs", lambda *a: costs)):
@@ -4373,7 +4559,7 @@ class Plan(unittest.TestCase):
         timed = []
         with contextlib.ExitStack() as st:
             for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
-                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: ["kernel/sim", "other"]),
+                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d, **_: ["kernel/sim", "other"]),
                                 ("bases_for", lambda *a: {}), ("diff_targets", lambda added, pkg: sim),
                                 ("tests_changed", lambda tests, pkg: pkg == "kernel/sim"),
                                 ("record_for", lambda *a: ({"rec": 1}, 48.0, None)),
@@ -5013,6 +5199,68 @@ class Record(unittest.TestCase):
                          ["STATEMENT_DELETION #5743"] * 19 + ["STATEMENT_DELETION #5780"] * 2
                          + ["STATEMENT_DELETION #5804", "STATEMENT_DELETION #5998"])
 
+
+class WaiveKeepsOrder(unittest.TestCase):
+    """TOOL-waive-keeps-order (#6573): waive keeps a record's lines in place, so premerge's union check reads it as kept."""
+    # REQ: TOOL-waive-keeps-order
+    SRC, repo, waive = Record.SRC, Record.repo, Record.waive
+
+    def test_waive_keeps_an_unsorted_record_in_its_order(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        import premerge
+        with tempfile.TemporaryDirectory() as d:
+            git = lambda *a: subprocess.run(["git", "-C", d, "-c", "user.email=t@example.invalid", "-c", "user.name=t", *a],
+                                            check=True, capture_output=True, text=True).stdout.strip()
+            run = self.repo(d, self.SRC, self.SRC)
+            pkg = pathlib.Path(d) / "broker" / "netguard"
+            (pkg / "b.go").write_text("package netguard\n\nfunc g(x int) int {\n\tif x > 1 {\n\t\treturn 2\n\t}\n\treturn x\n}\n")
+            wfile = pathlib.Path(d) / "w.txt"
+
+            def waive(*sites, accepted="#5743"):
+                wfile.write_text("".join(f"Mutant-equivalent: broker/netguard/{s} both give the same value on every input\n"
+                                         for s in sites))
+                r = run("waive", str(wfile), "--accepted", accepted)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                return r.stdout
+            for site in ("a.go:5", "a.go:8", "a.go:11", "b.go:4"):
+                waive(site)
+            path = pkg / mutgate.RECORD
+            rows = path.read_text().rstrip("\n").split("\n")
+            a5, a8, a11, b4 = rows[1:]  # each new site after its file's last entry: in waive order here
+            self.assertEqual([(e["file"], e["stmt"][e["at"]]) for e in map(json.loads, rows[1:])],
+                             [("a.go", "if x > 1 {"), ("a.go", "if x > 1 {"), ("a.go", "return x"), ("b.go", "if x > 1 {")])
+            # A hand-ordered record: a.go's entries reversed, a comment and a blank line between them, a word-for-word
+            # repeat of one entry, and b.go's entry last.
+            hand = [rows[0], a11, "# a note between entries", "", a8, a8, a5, b4]
+            path.write_text("\n".join(hand) + "\n")
+            git("add", "-A")
+            git("commit", "-qm", "base")
+            base = git("rev-parse", "HEAD")
+            # Rewrite a.go:8 (the repeated entry, under another accepting PR) and add a.go:6.
+            self.assertIn("2 entries written, 5 in all", waive("a.go:8", "a.go:6", accepted="#6573"))
+            out = path.read_text().rstrip("\n").split("\n")
+            self.assertEqual(out[:4], hand[:4])               # untouched lines in place, word for word
+            self.assertEqual(json.loads(out[4])["accepted"], "#6573")  # rewritten in its own place; its repeat gone
+            self.assertEqual(json.loads(out[4])["stmt"], json.loads(a8)["stmt"])
+            self.assertEqual(out[5], a5)
+            self.assertEqual(json.loads(out[6])["stmt"], ["return 2"])  # new: after a.go's last entry, not at the end
+            self.assertEqual(json.loads(out[6])["file"], "a.go")
+            self.assertEqual(out[7:], [b4])
+            git("add", "-A")
+            git("commit", "-qm", "waive")
+            head = git("rev-parse", "HEAD")
+            rel = f"broker/netguard/{mutgate.RECORD}"
+            self.assertIs(premerge._records_kept(d, head, head, rel, head, base), True)
+            # Two untouched entries swapped (as the old sorted rewrite moved them, #6559) read as changed.
+            moved = [out[0], out[5], out[2], out[3], out[4], out[1], out[6], out[7]]
+            path.write_text("\n".join(moved) + "\n")
+            git("commit", "-qam", "moved")
+            head = git("rev-parse", "HEAD")
+            self.assertIs(premerge._records_kept(d, head, head, rel, head, base), False)
+
+    def test_waive_writes_a_head_into_a_new_record(self):
+        rows, total = mutgate.waive_rows("p", "", [])
+        self.assertEqual((rows[0][0], total), ("#", 0))
 
 
 class RecordDeps(unittest.TestCase):
@@ -6144,7 +6392,8 @@ class Workflow(unittest.TestCase):
 
     def test_mutgate_runs_only_on_touched_tier_a_packages(self):
         on = self.text.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
-        self.assertEqual(on.strip(), "pull_request:")
+        # CI-mutgate-after-ci (#6569): called from ci.yml's pull-request-only `mutgate` job (tests/test_workflows.py).
+        self.assertEqual(on.strip(), "workflow_call:")
         claimed = job(self.text, "claimed")
         self.assertIn('python3 -I tools/mutgate.py claimed --git "$BASE" --json', claimed)
         # The base is the merge commit's first parent, checked in both jobs, never the event's base sha.
@@ -6707,7 +6956,7 @@ class LintHeldFollowUp(unittest.TestCase):
         import contextlib, io, types
         with contextlib.ExitStack() as st:
             for name, value in (("broker_diff", lambda *a: ""), ("changes", lambda *a: ({}, {})),
-                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: sorted(pkg_targets)),
+                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d, **_: sorted(pkg_targets)),
                                 ("diff_targets", lambda added, pkg: pkg_targets[pkg][0]),
                                 ("deletion_sites", lambda pkg, t, lister: (pkg_targets[pkg][1], None)),
                                 ("lint_budget", budget), ("suite_seconds", lambda pkg, tmp: (1.0, None)),
@@ -6717,6 +6966,230 @@ class LintHeldFollowUp(unittest.TestCase):
             out = st.enter_context(contextlib.redirect_stdout(io.StringIO()))
             code = mutgate.cmd_plan(types.SimpleNamespace(git="HEAD~1", targets_out=None))
         return code, out.getvalue(), err.getvalue()
+
+
+def mod_diff(path, minus=(), plus=()):
+    """A -U0 diff of one file that deletes the lines minus and adds the lines plus, in one hunk."""
+    out = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -3,{len(minus)} +3,{len(plus)} @@\n"
+    return out + "".join(f"-{x}\n" for x in minus) + "".join(f"+{x}\n" for x in plus)
+
+
+class GoDebugEveryFu(unittest.TestCase):
+    """MUT-go-debug-every-fu (#6420): an edit that changes Go's runtime defaults for a whole package or
+    module (a package-wide //go: directive in a non-test file, a go.mod `go` or `godebug` line) changes
+    every test there, as #6377's test-file directive does; an edit the go.mod reading cannot place is one."""
+
+    CODE = {"hint/hint.go": "package hint\n", "hint/hint_test.go": "package hint\n",
+            "cmd/tool/main.go": "package main\n", "cmd/tool/main_test.go": "package main\n",
+            "mail/mail.go": "package mail\n", "mail/mail_test.go": "package mail\n"}
+    ALL = {"hint", "cmd/tool", "mail"}
+
+    def tree(self, d):
+        return DataFiles.tree(self, d, self.CODE)
+
+    def every(self, diff, pkgs):
+        added, tests = mutgate.added_lines(diff)
+        self.assertEqual(mutgate.touched(added, tests), pkgs)
+        for pkg in pkgs:
+            self.assertTrue(mutgate.tests_changed(tests, pkg), pkg)
+            self.assertIsNone(mutgate.head_tests(tests, pkg), pkg)  # every test
+        self.assertEqual(mutgate.claimed(diff, packages=sorted(self.ALL)), sorted(pkgs))
+
+    def test_a_directive_in_a_main_file_is_every_test_of_its_package(self):
+        # REQ: MUT-go-debug-every-fu
+        with tempfile.TemporaryDirectory() as d, self.tree(d):
+            for name, minus, plus in (("added", (), ("//go:debug panicnil=1",)),
+                                      ("changed", ("//go:debug panicnil=1",), ("//go:debug panicnil=0",)),
+                                      ("removed", ("//go:debug panicnil=1",), ()),
+                                      ("indented", (), ("\t//go:debug panicnil=1",)),
+                                      # L3 on #6558: go skips one leading byte order mark and reads the directive.
+                                      ("behind a byte order mark", (), ("\ufeff//go:debug panicnil=1",)),
+                                      ("removed behind a byte order mark", ("\ufeff//go:debug panicnil=1",), ()),
+                                      ("a directive not known", (), ("//go:future x",))):
+                with self.subTest(name):
+                    self.every(mod_diff("broker/cmd/tool/main.go", minus, plus), {"cmd/tool"})
+            # A deleted main file takes its directive with it.
+            gone = data_diff("broker/cmd/tool/main.go", "delete").replace("-x\n", "-//go:debug panicnil=1\n")
+            self.every(gone, {"cmd/tool"})
+            # Any package's non-test file counts: go reads the directive only in main, the gate fails closed.
+            self.every(mod_diff("broker/hint/hint.go", (), ("//go:debug x=1",)), {"hint"})
+            # A directive that reaches only its declaration or file, or ordinary code, widens nothing.
+            for line in ("//go:build linux", "//go:noinline", "//go:embed x.txt", "x := 1", "// go:debug x=1"):
+                with self.subTest(line):
+                    added, tests = mutgate.added_lines(mod_diff("broker/cmd/tool/main.go", (), (line,)))
+                    self.assertEqual(tests, {})
+                    self.assertEqual(mutgate.touched(added, tests), {"cmd/tool"})
+            # A vendored file's directive is fixed by go.sum (is_vendored): no claim.
+            added, tests = mutgate.added_lines(mod_diff("broker/vendor/x/y/y.go", (), ("//go:debug x=1",)))
+            self.assertEqual(mutgate.touched(added, tests), set())
+
+    def test_an_edit_that_switches_on_an_unchanged_directive_is_every_test(self):
+        # Security on #6558: a //go:debug line the diff leaves alone is switched on by its file's //go:build
+        # line, or by removing a /* */ pair around it; any change to a non-test file holding a package-wide
+        # directive at the base or head is every test of its package (dormant, read from git).
+        # REQ: MUT-go-debug-every-fu
+        main = "//go:build never\n\n//go:debug panicnil=1\n\npackage main\n\nfunc main() {}\n"
+        hidden = "/*\n//go:debug http2client=0\n*/\n\npackage main\n\nfunc main() {}\n"
+        plain = "//go:build never\n\npackage main\n\nfunc main() {}\n"
+        for name, was, now, wide in (("its build line", main, main.replace("never", "linux"), True),
+                                     ("a comment pair removed", hidden, hidden.replace("/*\n", "").replace("*/\n", ""), True),
+                                     ("ordinary code beside it", main, main.replace("{}", "{ println() }"), True),
+                                     ("the directive's file deleted", main, None, True),
+                                     ("added in a new file", None, main, True),
+                                     ("no package-wide directive", plain, plain.replace("never", "linux"), False)):
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+                tool = pathlib.Path(d) / "broker" / "cmd" / "tool"
+                tool.mkdir(parents=True)
+                (tool / "main_test.go").write_text("package main\n")
+                git("init", "-q")
+                for text in (was, now):
+                    if text is None:
+                        (tool / "main.go").unlink(missing_ok=True)
+                    else:
+                        (tool / "main.go").write_text(text)
+                    git("add", "-A")
+                    git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "x")
+                diff = git("diff", "-U0", "--no-renames", "HEAD~1...HEAD", "--", "broker").stdout
+                with mock.patch.object(mutgate, "ROOT", pathlib.Path(d)), \
+                        mock.patch.object(mutgate, "BROKER", pathlib.Path(d) / "broker"):
+                    got = mutgate.dormant(diff, "HEAD~1", "HEAD")
+                    self.assertEqual(got, {f"broker/cmd/tool/{mutgate.EVERY_TEST}": None} if wide else {})
+                    tests = mutgate._widen(mutgate.added_lines(diff)[1], got)
+                    self.assertEqual(mutgate.head_tests(tests, "cmd/tool"), None if wide else [])
+                    self.assertEqual(mutgate.claimed(diff, ["cmd/tool"], "HEAD~1", "HEAD"), ["cmd/tool"])
+
+    def test_the_gate_entry_points_read_a_dormant_directive(self):
+        # L3 on #6558: changes(), cmd_plan, cmd_verify and cmd_claimed each read dormant(), so reverting any
+        # call site fails here. Security's case (b): only the /* */ pair around an unchanged //go:debug goes.
+        # REQ: MUT-go-debug-every-fu
+        import contextlib, io, types
+        hidden = "/*\n//go:debug http2client=0\n*/\n\npackage main\n\nfunc main() {}\n"
+        key = f"broker/cmd/tool/{mutgate.EVERY_TEST}"
+
+        class Reached(Exception):
+            pass
+
+        def stop(diff, base, head, tests, pkgs):
+            raise Reached(tests, pkgs)
+
+        with tempfile.TemporaryDirectory() as d:
+            git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+            tool = pathlib.Path(d) / "broker" / "cmd" / "tool"
+            tool.mkdir(parents=True)
+            (tool / "main_test.go").write_text("package main\n")
+            git("init", "-q")
+            for text in (hidden, hidden.replace("/*\n", "").replace("*/\n", "")):
+                (tool / "main.go").write_text(text)
+                git("add", "-A")
+                git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "x")
+            diff = git("diff", "-U0", "--no-renames", "HEAD~1...HEAD", "--", "broker").stdout
+            self.assertEqual(mutgate.claimed(diff, ["cmd/tool"]), [])  # the diff alone shows no directive line
+            with contextlib.ExitStack() as st:
+                for name, value in (("ROOT", pathlib.Path(d)), ("BROKER", pathlib.Path(d) / "broker"),
+                                    ("broker_diff", lambda *a: diff), ("gated_packages", lambda *a: ["cmd/tool"]),
+                                    ("advisory", lambda: None), ("build_lister", lambda tmp: "lister"),
+                                    ("bases_for", stop), ("read_results", lambda *a: ({}, []))):
+                    st.enter_context(mock.patch.object(mutgate, name, value))
+                st.enter_context(contextlib.redirect_stderr(io.StringIO()))
+                out = st.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                self.assertIn(key, mutgate.changes(diff, "HEAD~1", "HEAD")[1])
+                for name, cmd, args in (("plan", mutgate.cmd_plan, types.SimpleNamespace(git="HEAD~1", targets_out=None)),
+                                        ("verify", mutgate.cmd_verify,
+                                         types.SimpleNamespace(git="HEAD~1", head="HEAD", dir=d, summary=None))):
+                    with self.subTest(name), self.assertRaises(Reached) as got:
+                        cmd(args)
+                    tests, pkgs = got.exception.args
+                    self.assertIn(key, tests)
+                    self.assertEqual(pkgs, ["cmd/tool"])
+                self.assertEqual(mutgate.cmd_claimed(types.SimpleNamespace(git="HEAD~1", head="HEAD", json=True)), 0)
+                self.assertEqual(json.loads(out.getvalue().splitlines()[-1]), ["cmd/tool"])
+
+    def test_a_go_mod_go_line_is_every_test_of_the_module(self):
+        # REQ: MUT-go-debug-every-fu
+        with tempfile.TemporaryDirectory() as d, self.tree(d):
+            for minus, plus in ((("go 1.26.4",), ("go 1.27",)), ((), ("go 1.27 // pinned",)), (("go 1.26.4",), ())):
+                with self.subTest(minus=minus, plus=plus):
+                    self.every(mod_diff("broker/go.mod", minus, plus), self.ALL)
+
+    def test_a_go_mod_godebug_line_is_every_test_of_the_module(self):
+        # REQ: MUT-go-debug-every-fu
+        with tempfile.TemporaryDirectory() as d, self.tree(d):
+            for minus, plus in (((), ("godebug default=go1.21",)),
+                                ((), ("godebug (", "\tpanicnil=1", ")")),
+                                (("\tpanicnil=1",), ("\tpanicnil=0",)),   # -U0: an entry with no block in sight
+                                (("\thttp2client=0 // off",), ())):
+                with self.subTest(minus=minus, plus=plus):
+                    self.every(mod_diff("broker/go.mod", minus, plus), self.ALL)
+
+    def test_an_unplaceable_go_mod_edit_is_every_test_of_the_module(self):
+        # REQ: MUT-go-debug-every-fu
+        with tempfile.TemporaryDirectory() as d, self.tree(d):
+            # An unindented entry and a bare directive keyword are lines go refuses; they fail closed too.
+            for line in ("ignore ./old", "use ./x", "\tx=>1", "garbage", "\ta = b", "godebug(", "go",
+                         "github.com/a/b v1.0.0", "require", "toolchain", "\ufeffrequire x v1"):
+                with self.subTest(line):
+                    self.every(mod_diff("broker/go.mod", (), (line,)), self.ALL)
+            # What sets no default stays no claim: requirements (go.sum fixes vendor/), replacements,
+            # exclusions, retractions, the toolchain, comments and layout.
+            for minus, plus in ((("\tgithub.com/a/b v1.0.0",), ("\tgithub.com/a/b v1.1.0 // indirect",)),
+                                ((), ("require github.com/a/b v1.0.0",)),
+                                ((), ("require (", "\tgithub.com/a/b v1.0.0", ")")),
+                                ((), ("replace github.com/a/b => ./third_party/b",)),
+                                ((), ("\tgithub.com/a/b v1.0.0 => github.com/c/b v1.0.1",)),
+                                ((), ("exclude github.com/a/b v0.9.0", "retract [v1.0.0, v1.0.1] // bad")),
+                                (("toolchain go1.26.11",), ("toolchain go1.26.12",)),
+                                ((), ("// godebug panicnil=1", "", "module github.com/x/broker"))):
+                with self.subTest(minus=minus, plus=plus):
+                    added, tests = mutgate.added_lines(mod_diff("broker/go.mod", minus, plus))
+                    self.assertEqual(mutgate.touched(added, tests), set())
+            # Security on #6558: a toolchain bump can satisfy an unchanged file's `//go:build go1.N` line and switch
+            # on its //go:debug, so it is every test of each package holding a package-wide directive, only those.
+            bump = mod_diff("broker/go.mod", ("toolchain go1.26.11",), ("toolchain go1.27.0",))
+            dormant = {"cmd/tool/new.go": "//go:build go1.27\n\n//go:debug panicnil=1\n\npackage main\n",
+                       "mail/x.go": "/*\n//go:debug x=1\n*/\npackage mail\n", "hint/y.go": "//go:noinline\npackage hint\n"}
+            with tempfile.TemporaryDirectory() as d2, DataFiles.tree(self, d2, {**self.CODE, **dormant}):
+                added, tests = mutgate.added_lines(bump)
+                self.assertEqual(mutgate.touched(added, tests), {"cmd/tool", "mail"})
+                self.assertIsNone(mutgate.head_tests(tests, "cmd/tool"))
+                self.assertEqual(mutgate.head_tests(tests, "hint"), [])
+            # Another module's go.mod (third_party/, a replace directory) is that package's data, as before.
+            added, tests = mutgate.added_lines(mod_diff("broker/hint/go.mod", (), ("go 1.27",)))
+            self.assertEqual(mutgate.touched(added, tests), {"hint"})
+
+    def test_a_patch_level_go_line_bump_is_no_claim(self):
+        # REQ: MUT-go-patch-quiet
+        # The language version and the GODEBUG defaults follow go1.N, so one hunk swapping one `go` line for
+        # another of the same major.minor sets no default (#6567).
+        with tempfile.TemporaryDirectory() as d, self.tree(d):
+            for minus, plus in ((("go 1.26.4",), ("go 1.26.5",)), (("go 1.26",), ("go 1.26.0 // patch",)),
+                                (("go 1.26.5\r",), ("go 1.26.4",)), (("module x", "go 1.26.4"), ("module x", "go 1.26.5"))):
+                with self.subTest(minus=minus, plus=plus):
+                    added, tests = mutgate.added_lines(mod_diff("broker/go.mod", minus, plus))
+                    self.assertEqual(mutgate.touched(added, tests), set())
+            # Two hunks, the first pairing its own lines: still quiet.
+            two = mod_diff("broker/go.mod", ("go 1.26.4",), ("go 1.26.5",)) + "@@ -9,1 +9,1 @@\n-// a\n+// b\n"
+            self.assertEqual(mutgate.touched(*mutgate.added_lines(two)), set())
+
+    def test_any_other_go_line_change_is_every_test_of_the_module(self):
+        # REQ: MUT-go-patch-quiet
+        # Fail closed: a minor or major bump, one side only, an unparsable version on either side, two go
+        # lines on a side, the pair split across hunks or files, or an indented go line all widen.
+        with tempfile.TemporaryDirectory() as d, self.tree(d):
+            for minus, plus in ((("go 1.26.4",), ("go 1.27.0",)), (("go 1.26.4",), ("go 2.26.4",)),
+                                ((), ("go 1.26.5",)), (("go 1.26.4",), ()),
+                                (("go 1.26.4",), ("go 1.26rc1",)), (("go 1.26rc1",), ("go 1.26.4",)),
+                                (("go 1.26.4",), ("go 1.026.4",)), (("go 1.26.4",), ("go 1.26.4.1",)),
+                                (("go 1.26.4",), ("go 1.26.5", "go 1.26.6")), (("go 1.26.4", "go 1.26.4"), ("go 1.26.5",)),
+                                (("go 1.26.4",), ("\tgo 1.26.5",)), (("\tgo 1.26.4",), ("\tgo 1.26.5",)),
+                                (("go 1.26.4",), ("go 1.26.5 x",)), (("go 1.26.4",), ("go",))):
+                with self.subTest(minus=minus, plus=plus):
+                    self.every(mod_diff("broker/go.mod", minus, plus), self.ALL)
+            split = mod_diff("broker/go.mod", ("go 1.26.4",)) + "@@ -9,0 +9,1 @@\n+go 1.26.5\n"
+            self.every(split, self.ALL)
+            other = mod_diff("broker/go.mod", ("go 1.26.4",)) + mod_diff("broker/hint/go.mod", (), ("go 1.26.5",))
+            self.every(other, self.ALL)
+
 
 if __name__ == "__main__":
     unittest.main()
