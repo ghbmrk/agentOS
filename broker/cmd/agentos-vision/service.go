@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -238,19 +239,71 @@ func errReply(c vision.Cause) vision.Reply { return vision.Reply{Error: c} }
 // write sends one reply line; a reply over the bound goes as Unavailable.
 // It zeroes r's template once sent, whether or not the send succeeded:
 // only the reply holds the slice service.encode made (DEV-7).
+//
+// The template never passes through encoding/json, whose pooled encode
+// buffer is reset but not zeroed after each Marshal: the rest of the reply
+// is marshalled without it, and the template is base64-encoded straight
+// into line, a buffer write owns, sized to hold the whole line and its
+// newline, and zeroed once sent (DEV-7, #6564).
 func (s *service) write(c net.Conn, r vision.Reply) bool {
-	defer clear(r.Template)
-	b, err := json.Marshal(r)
-	if err != nil || len(b) > vision.MaxReplyLine {
+	tpl := r.Template
+	defer clear(tpl)
+	r.Template = nil
+	line := replyLine(r, tpl)
+	if line == nil {
 		fmt.Fprintf(s.log, "vision: reply over %d bytes\n", vision.MaxReplyLine)
-		b, _ = json.Marshal(errReply(vision.Unavailable))
+		line = replyLine(errReply(vision.Unavailable), nil)
 	}
+	defer clear(line)
 	c.SetWriteDeadline(time.Now().Add(s.cfg.CallTimeout))
-	_, err = c.Write(append(b, '\n'))
-	// An enrol reply's line holds a template as text.
-	clear(b[:cap(b)])
+	_, err := c.Write(line)
 	return err == nil
 }
+
+// templateKey opens the template field of a reply line; the field takes
+// Reply.Template's JSON name.
+const templateKey = `"template":"`
+
+// replyLine is r's line with tpl as its template field, and its newline,
+// in one buffer of exactly that length; nil when r does not marshal or the
+// line, without its newline, is over MaxReplyLine. r carries no template:
+// tpl, when not empty, is spliced in as the last field, base64 as
+// encoding/json writes a []byte, so the line decodes to the same Reply.
+func replyLine(r vision.Reply, tpl []byte) []byte {
+	b, err := marshal(r)
+	if err != nil {
+		return nil
+	}
+	n := len(b)
+	if len(tpl) > 0 {
+		n += len(templateKey) + base64.StdEncoding.EncodedLen(len(tpl)) + 1
+		if len(b) > 2 {
+			n++ // the comma before the template
+		}
+	}
+	if n > vision.MaxReplyLine {
+		return nil
+	}
+	line := make([]byte, 0, n+1)
+	if len(tpl) == 0 {
+		line = append(line, b...)
+	} else {
+		line = append(line, b[:len(b)-1]...)
+		if len(b) > 2 {
+			line = append(line, ',')
+		}
+		line = append(line, templateKey...)
+		k := len(line)
+		line = line[:k+base64.StdEncoding.EncodedLen(len(tpl))]
+		base64.StdEncoding.Encode(line[k:], tpl)
+		line = append(line, '"', '}')
+	}
+	return append(line, '\n')
+}
+
+// marshal is json.Marshal; a test swaps it to see what reaches
+// encoding/json.
+var marshal = json.Marshal
 
 // answer reads a checked request's payload from r and answers it. The
 // payload is read only once a slot is free, and the slot is given back,
