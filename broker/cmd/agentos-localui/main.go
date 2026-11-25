@@ -60,7 +60,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/claim"
 	"github.com/ghbmrk/agentos/broker/firstboot"
-	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localui"
 	"github.com/ghbmrk/agentos/broker/netguard/port1"
 )
@@ -563,9 +562,10 @@ func prepare(ctx context.Context, cfg localui.Config, sock string, fb boxFiles, 
 }
 
 // setupOpen is the page's one decision whether setup is open: agentosd's
-// answer to OpSetupProgress, open on an answer and closed on a refusal.
-// No answer is no decision: it asks again until wait has passed, then
-// errors, so the unit restarts the page (#1270). Hooks other than
+// answer to OpSetupProgress, open on an answer and closed on setup closed
+// or unknown op (localui.AgentosdSetup.Open). No answer, or any other
+// refusal, is no decision: it asks again until wait has passed, then
+// errors, so the unit restarts the page (#1270, #1617). Hooks other than
 // agentosd's answer through AlreadySetUp.
 func setupOpen(ctx context.Context, hooks localui.Hooks, wait time.Duration) (bool, error) {
 	a, ok := hooks.(localui.AgentosdSetup)
@@ -574,21 +574,11 @@ func setupOpen(ctx context.Context, hooks localui.Hooks, wait time.Duration) (bo
 	}
 	ctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
-	for {
-		var r localui.Refused
-		err := a.Owner.Call(ctx, localapi.OpSetupProgress, nil, nil)
-		switch {
-		case err == nil:
-			return true, nil
-		case errors.As(err, &r):
-			return false, nil
-		}
-		select {
-		case <-ctx.Done():
-			return false, errors.New("agentosd does not answer whether setup is open")
-		case <-time.After(200 * time.Millisecond):
-		}
+	open, err := a.Open(ctx, 200*time.Millisecond)
+	if err != nil {
+		return false, errors.New("agentosd does not answer whether setup is open")
 	}
+	return open, nil
 }
 
 // ownedSetup is agentosd's setup on a box whose setup prepare found

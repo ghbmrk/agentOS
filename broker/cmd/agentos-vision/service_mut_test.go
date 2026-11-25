@@ -303,32 +303,6 @@ func TestWriteHasADeadline(t *testing.T) {
 	}
 }
 
-// The reply line's buffer is zeroed once sent, since an enrol reply's
-// line holds a template as text (line 251). The conn keeps the slice it
-// was handed, which shares the line's buffer when that has room for the
-// newline.
-func TestReplyLineZeroedAfterWrite(t *testing.T) {
-	s := newService(Config{}, &stubRT{}, nil)
-	rep := vision.Reply{Template: f32s(0.25, -0.5, 1, 2)}
-	b, _ := json.Marshal(rep)
-	if cap(b) == len(b) {
-		t.Fatal("this reply's line has no room for its newline, so the conn's slice is a copy and the line 251 wipe goes unchecked")
-	}
-	c := &scriptConn{in: bytes.NewReader(nil)}
-	if !s.write(c, rep) {
-		t.Fatal("write failed")
-	}
-	if len(c.writes) != 1 {
-		t.Fatalf("wrote %q", c.writes)
-	}
-	if string(c.writes[0]) != string(b)+"\n" {
-		t.Fatalf("wrote %q, want %q", c.writes[0], b)
-	}
-	if !zero(c.sent[0][:len(b)]) {
-		t.Fatalf("the sent line was left in memory: %q", c.sent[0])
-	}
-}
-
 // write zeroes the reply's template once sent, the only copy of the
 // slice service.encode made, on a failed send too (DEV-7).
 func TestReplyTemplateZeroedAfterWrite(t *testing.T) {

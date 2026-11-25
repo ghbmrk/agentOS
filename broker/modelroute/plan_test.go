@@ -36,7 +36,7 @@ func seedServer(t *testing.T, status int, body string) string {
 // CRED-5: a seed asked of a vault with no plan login is the no-login
 // sentinel (#1858), apart from a vault that is locked or other failures.
 func TestSeedWithNoLoginIsTheNoLoginSentinel(t *testing.T) {
-	_, err := NewRouteControl(seedServer(t, http.StatusInternalServerError, "no plan login stored")).Seed("pw-a", false)
+	_, err := NewRouteControl(seedServer(t, http.StatusConflict, "no plan login stored")).Seed("pw-a", false)
 	if !errors.Is(err, ErrNoPlanLogin) {
 		t.Fatalf("no login stored = %v, want ErrNoPlanLogin", err)
 	}
