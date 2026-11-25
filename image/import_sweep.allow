@@ -180,3 +180,16 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 # version, and image.yml runs on a change to it, so a version bump meets these digests in its own PR.
 /usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex sha256=628e35487d888a28f0427fc37501da529dd3d81fcbad7a2c3421c1e8670d92e1 GCM-SIV=3 KRB5KDF=6
 /usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host sha256=ec71830690a7c0024916ee0c99fbdc635bc6e747ff665ea4f03a8389bbcb6b30 GCM-SIV=3 KRB5KDF=6
+
+[quic]
+# The files of the built image (main tree and initrds) that may import OpenSSL's QUIC entry points
+# (OSSL_QUIC_client_method, OSSL_QUIC_client_thread_method, OSSL_QUIC_server_method, SSL_new_listener), or
+# import dlsym or dlvsym and hold one's name (#6671): one glob per line. The openssl QUIC records in
+# assurance/vulncheck.json (DEBIAN-CVE-2026-88822, -95691, -124709, -107494 and -84785) accept their
+# advisories because nothing on the box reaches OpenSSL's QUIC stack, so a file no entry accepts fails the
+# step, and so does an entry that accepts no file. libssl defines the names and is not counted.
+
+# The openssl CLI, whose QUIC use is s_client -quic (apps/s_client.c, 3.5.9); nothing on the box runs
+# s_client. It is also the sweep's control that the QUIC scan still reads, as an entry accepting no file
+# fails.
+/usr/bin/openssl
