@@ -1493,18 +1493,209 @@ def _same_binding(sf, df, text, b, h):
                for q in set(QUALIFIER.findall(_uncommented(text, False))))
 
 
-def _package_reads(rel, commit, tests=True):
+def _package_reads(rel, commit, tests=True, module=None):
     """(names Parallel, module import paths) of broker/<rel>/'s .go files at commit, its _test.go files
-    left out unless tests, or None when a file or an import spec is not read."""
+    left out unless tests, or None when a file or an import spec is not read. With tests, a package
+    whose every Parallel is a subtest's (_subtests_only) names none."""
     files = _go_files(rel, commit)
     if files is not None and not tests:
         files = {p: t for p, t in files.items() if not is_test(p)}
     if files is None or any(NOT_GO_SPACE.search(t) for t in files.values()):
         return None
-    facts = [_facts(p, t) for p, t in files.items()]
-    if any(f.specs is None for f in facts):
+    facts = {p: _facts(p, t) for p, t in files.items()}
+    if any(f.specs is None for f in facts.values()):
         return None
-    return any(f.parallel for f in facts), frozenset(path for f in facts for _, path in f.specs)
+    # A linkname (in a comment, which f.parallel leaves out) may bind testing's Parallel under another name.
+    parallel = any(f.parallel or ("go:linkname" in files[p] and "Parallel" in files[p]) for p, f in facts.items())
+    if parallel and tests:
+        parallel = not _subtests_only(files, facts, lambda path: _clause(path, module, commit))
+    return parallel, frozenset(path for f in facts.values() for _, path in f.specs)
+
+
+# A Parallel only on subtests (TOOL-mutgate-subtest-parallel, #6675). A parallel subtest pauses until its
+# parent's function returns, then runs beside its parallel siblings only; the parent ends after they do,
+# and top-level tests that call no Parallel run one at a time in source order. So a Parallel called only
+# on a subtest's own *testing.T moves no other top-level test: it reorders the parent's own subtests,
+# which are already of the parent's reach. _subtests_only reads that from gofmt's layout and nothing
+# looser: each Parallel (any word of the code, string literals too) is `t.Parallel()` alone as the first
+# statement of a `func(t *testing.T) {` literal that is the second and last argument of a `t.Run(` call,
+# in a top-level `func TestX(t *testing.T) {` of a _test.go file, the same name t throughout, and t is
+# bound in that test's body only by those literals (any other use of it is `t.` or a call argument).
+# It fails closed (every test) for anything else: a Parallel in a non-test file, a helper, a method value,
+# a string, another name or another literal; a package with a linkname or a file where `testing` may bind another
+# package; a literal naming a package-level var (parallel siblings may interleave on it); and a TestMain
+# other than `func TestMain(m *testing.M) {` that names m only in one `m.Run()`, no package-level name,
+# no `flag`, `Args`, `unsafe` or `Parallel`, and qualifies only by its file's standard library imports.
+# A Parallel in an imported package fails closed as before (_parallel).
+SUBTEST_HEAD = re.compile(r"func\(([A-Za-z_]\w*) \*testing\.T\) \{")
+TEST_HEAD = re.compile(r"func Test\w*\(([A-Za-z_]\w*) \*testing\.T\) \{")
+MAIN_HEAD = re.compile(r"func TestMain\(([A-Za-z_]\w*) \*testing\.M\) \{")
+MAIN_BARRED = {"flag", "Args", "unsafe", "Parallel"}
+BRACKETS = {"(": ")", "[": "]", "{": "}"}
+
+
+def _clause(path, module, commit):
+    """The package clause of this module's package at import path, or None when not read."""
+    if not module or not (path == module or path.startswith(module + "/")):
+        return None
+    rel = path[len(module) + 1:] if path != module else ""
+    got = _go_files(rel, commit) if ".." not in rel.split("/") else None
+    found = {(m := re.search(r"^package\s+(\w+)", _uncommented(t, False), re.M)) and m[1]
+             for p, t in (got or {}).items() if not p.endswith("_test.go")}
+    return found.pop() if len(found) == 1 else None
+
+
+def _closer(bare, i):
+    """The index of the bracket closing bare[i] (comments and literal contents blanked), or None."""
+    stack = []
+    for j in range(i, len(bare)):
+        c = bare[j]
+        if c in BRACKETS:
+            stack.append(BRACKETS[c])
+        elif c in ")]}":
+            if not stack or stack.pop() != c:
+                return None
+            if not stack:
+                return j
+    return None
+
+
+def _opener(bare, lo, hi):
+    """The index of the innermost bracket of bare[lo:hi] still open at hi, or None."""
+    stack = []
+    for j in range(lo, hi):
+        if bare[j] in BRACKETS:
+            stack.append(j)
+        elif bare[j] in ")]}":
+            if not stack or BRACKETS[bare[stack.pop()]] != bare[j]:
+                return None
+    return stack[-1] if stack else None
+
+
+def _std_names(specs, clause):
+    """{name: path} of a file's standard library imports, or None when an import may bind `testing`
+    to another package: so named, or of a path whose name is not known for certain (clause)."""
+    std = {}
+    for alias, path in specs:
+        if alias in ("_", "."):
+            continue
+        known = "." not in path.split("/")[0]
+        parts = path.split("/")
+        name = alias or (parts[-1] if known else clause(path))
+        if name is None or (name == "testing" and path != "testing"):
+            return None
+        if known:
+            std[name] = path
+    return std
+
+
+def _subtests_only(files, facts, clause):
+    """Whether every Parallel of a package's .go files ({path: text}) is a subtest's, and its TestMain
+    (if any) runs m.Run once with nothing that may reorder it (see above)."""
+    decls = {p: _decls(p, t) for p, t in files.items()}
+    names = {n for ds in decls.values() for d in ds if d[1] != "header" for n in d[2]}
+    pkg_vars = {n for ds in decls.values() for d in ds if d[1] == "var" for n in d[2]} - {"_"}  # `_` names no var
+    if any("go:linkname" in text for text in files.values()):
+        return False
+    for p, text in files.items():
+        f = facts[p]
+        main = is_test(p) and any(d[1] == "func" and "TestMain" in d[2] for d in decls[p])
+        if not (f.parallel or main):
+            continue
+        std = _std_names(f.specs, clause)
+        if not is_test(p) or std is None:
+            return False
+        code, bare = _uncommented(text), _uncommented(text, False)
+        rows = bare.split("\n")
+        starts = [0]
+        for r in rows:
+            starts.append(starts[-1] + len(r) + 1)
+        safe = set()
+        for d in decls[p]:
+            if d[1] != "func":
+                continue
+            at = next((i for i in range(d[6], d[7] + 1) if DECL.match(rows[i - 1])), None)
+            head = rows[at - 1] if at else ""
+            open_ = starts[at - 1] + len(head) - 1 if at else None
+            close = _closer(bare, open_) if at and head.endswith("{") else None
+            if close is not None and close >= starts[d[7]]:
+                return False
+            if (m := MAIN_HEAD.fullmatch(head)) and close is not None:
+                if not _plain_main(m[1], code[open_:close + 1], bare[open_:close + 1], names - {"TestMain"}, std):
+                    return False
+            elif head.startswith("func TestMain"):
+                return False
+            if not (m := TEST_HEAD.fullmatch(head)) or close is None:
+                continue
+            got = _subtest_calls(m[1], bare, code, open_, close, pkg_vars)
+            if got is None:
+                return False
+            safe |= got
+        if any(m.start() not in safe for m in re.finditer(r"\bParallel\b", code)):
+            return False
+    return True
+
+
+def _subtest_calls(t, bare, code, open_, close, pkg_vars):
+    """The offsets of the subtest Parallel calls of one top-level test (its param t, body bare[open_:close]),
+    or None when its body binds t otherwise or a subtest literal names a package var."""
+    safe, heads = set(), []
+    for fn in re.finditer(r"\bfunc\b", bare[:close]):
+        if fn.start() <= open_:
+            continue
+        paren = fn.end() + len(bare[fn.end():]) - len(bare[fn.end():].lstrip(" \t"))
+        end = _closer(bare, paren) if bare[paren:paren + 1] == "(" else None
+        if end is None:
+            return None
+        if not re.search(rf"(?<![\w.]){t}\b", bare[paren:end]):
+            continue
+        h = SUBTEST_HEAD.match(bare, fn.start())
+        if h is None or h[1] != t:
+            return None  # t bound by another function's parameter
+        brace = h.end() - 1
+        last = _closer(bare, brace)
+        call = _opener(bare, open_ + 1, fn.start())
+        if last is None or last > close or not re.match(r"\s*\)", bare[last + 1:]) or call is None:
+            return None
+        args = bare[call + 1:fn.start()]
+        if (bare[call] != "(" or not re.search(rf"(?<![\w.]){t}\s*\.\s*Run$", bare[:call])
+                or not args.rstrip().endswith(",") or _top_commas(args) != 1):
+            return None
+        if set(WORD.findall(code[brace:last + 1])) & pkg_vars:
+            return None
+        if first := re.match(rf"\{{[ \t]*\n\s*{t}\.(Parallel)\(\)[ \t]*\n", bare[brace:]):
+            safe.add(brace + first.start(1))
+        heads.append((fn.start(), h.end()))
+    for w in re.finditer(rf"(?<![\w.]){t}\b", bare[open_:close]):
+        at = open_ + w.start()
+        if any(a <= at < b for a, b in heads):
+            continue
+        after, before = bare[at + len(t):], bare[:at]
+        if re.match(r"\s*\.", after) or (re.search(r"[(,]\s*$", before) and re.match(r"\s*[,)]", after)):
+            continue
+        return None
+    return safe
+
+
+def _top_commas(args):
+    """The number of commas of args outside any bracket."""
+    depth, n = 0, 0
+    for c in args:
+        depth += c in BRACKETS
+        depth -= c in ")]}"
+        n += c == "," and depth == 0
+    return n
+
+
+def _plain_main(m, code, bare, names, std):
+    """Whether a TestMain's body (param m) runs m.Run once and names nothing that may change what it runs."""
+    uses = [w.start() for w in re.finditer(rf"(?<![\w.]){m}\b", bare)]
+    if len(uses) != 1 or not re.match(rf"{m}\.Run\(\)", bare[uses[0]:]):
+        return False
+    words = set(WORD.findall(code[bare.index("{"):]))
+    if words & (names | MAIN_BARRED):
+        return False
+    return all(q == m or (q in std and std[q] != "flag") for q in QUALIFIER.findall(bare))
 
 
 def _parallel(pkg, commit, module, cache):
@@ -1517,7 +1708,7 @@ def _parallel(pkg, commit, module, cache):
     while todo:
         rel = todo.pop()
         if (rel, commit, rel == pkg) not in cache:
-            cache[(rel, commit, rel == pkg)] = _package_reads(rel, commit, tests=rel == pkg)
+            cache[(rel, commit, rel == pkg)] = _package_reads(rel, commit, tests=rel == pkg, module=module)
         got = cache[(rel, commit, rel == pkg)]
         if got is None or got[0]:
             return True
