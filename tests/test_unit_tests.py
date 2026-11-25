@@ -644,6 +644,8 @@ class StraceFaultTest(unittest.TestCase):
            "fail": ("test_a ... FAIL\n\nFAILED (failures=1)\n", "", 1),
            # #5355's shape: a child's PASS and coverage lines, then unittest's verdict on a bare line.
            "bare-fail-then-cut": ("test_a ... PASS\ncoverage: 100.0% of statements\nFAIL\ntest_b ... ", f"{CUT}\n", 1),
+           # #6574's shape: a passing test prints a go test's bare FAIL, then unittest's ok.
+           "go-fail-then-cut": ("test_a ... --- FAIL: TestSlow\nFAIL\nexit status 1\nok\ntest_b ... ", f"{CUT}\n", 1),
            # #5407: a test printing strace's text is the module's output, not strace's.
            "says-cut": (f"test_a ... {CUT}\n{CUT}\nok\n\nOK\n", "", 0)}
 
@@ -851,6 +853,12 @@ class StraceFaultTest(unittest.TestCase):
         self.assertEqual((rc, calls), (1, 1))
         self.assertIn("a test had already failed", out)
 
+    def test_a_childs_fail_line_in_a_passing_test_is_no_failed_test(self):
+        # #6574: only unittest's verdict is a failed test, so the cut module reruns.
+        rc, out, trace, calls = self.run_plan("go-fail-then-cut", "ok")
+        self.assertEqual((rc, trace, calls), (0, "ok", 2))
+        self.assertIn(unit_tests.RERAN, out)
+
     def test_a_split_module_cut_after_a_failed_test_is_not_rerun(self):
         # A SPLIT module's workers buffer their reports until they end; a failed test's verdict
         # still reaches the shared stdout as the test ends, so a cut after it stops the rerun.
@@ -914,9 +922,19 @@ class StraceFaultTest(unittest.TestCase):
         for line in ("t (m.T.t) ... FAIL", "t (m.T.t) ... ERROR", "ERROR: setUpClass (m.T)", "FAILED (errors=1)",
                      "FAIL", "t (m.T.t) ... partialFAIL", "t (m.T.t) ... unexpected success",
                      "  t (m.T.t) (i=1) ... ERROR"):
-            self.assertTrue(unit_tests.TEST_FAILED.search(line), line)
+            self.assertTrue(unit_tests.failed_test(line), line)
         for line in ("t (m.T.t) ... ok", "t (m.T.t) ... expected failure", "OK (skipped=2)"):
-            self.assertFalse(unit_tests.TEST_FAILED.search(line), line)
+            self.assertFalse(unit_tests.failed_test(line), line)
+        # #6574: a FAIL line a test prints is a failure only while no passing verdict follows it in
+        # that test; a passing verdict after the next test's ` ... ` line does not clear it.
+        for out in ("t (m.T.t) ... x\nFAIL\nsetup ok\nu (m.U.u) ... ok\n",
+                    "t (m.T.t) ... \n  t (m.T.t) (i=1) ... FAIL\nu (m.T.u) ... ok\n",
+                    "t (m.T.t) ... FAIL\nu (m.T.u) ... ok\n", "t (m.T.t) ... ok\n\nFAILED (failures=1)\n"):
+            self.assertTrue(unit_tests.failed_test(out), out)
+        for out in ("t (m.T.t) ... go\nFAIL\nok\nu (m.T.u) ... ok\n", "t (m.T.t) ... FAIL\r\nok\r\n",
+                    "t (m.T.t) ... --- FAIL: TestX\nFAIL\nskipped 'no go'\n",
+                    "t (m.T.t) ... FAIL\nexpected failure\nu (m.T.u) ... "):
+            self.assertFalse(unit_tests.failed_test(out), out)
 
 
 R = str(unit_tests.ROOT)

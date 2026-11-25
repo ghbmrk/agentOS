@@ -457,10 +457,32 @@ def split(module, workers, write=sys.stdout.write):
 # cut test_mutgate in or after a test whose code kills a traced process group (tools/mutgate.py
 # watch(): os.killpg SIGKILL), the likely trigger of strace's race.
 STRACE_FAULT = re.compile(r"(?m)^strace: .*(?:Input/output error|PTRACE_)")
-# A failed test in the output so far, failing closed: a match only stops a rerun. unittest's -v
-# verdict can land on a bare line or after a child's partial line, so any line ending FAIL or ERROR
-# counts, as do an unexpected success and the run's failure summary.
-TEST_FAILED = re.compile(r"(?m)(?:FAIL|ERROR)$|unexpected success|^(?:FAIL|ERROR): |^FAILED \(")
+# A failed test in the output so far (failed_test()), failing closed: a match only stops a rerun.
+# unittest's -v verdict follows the test's ` ... ` line, or a bare line or a child's partial line when
+# the test printed, so a line ending FAIL, ERROR or unexpected success is a failed test unless a bare
+# passing verdict follows it before the next ` ... ` line: then it was the test's own output, such as
+# a go test's FAIL (#6574). The run's failure summary always counts.
+FAILING = re.compile(r"(?:FAIL|ERROR|unexpected success)$")
+PASSING = re.compile(r"ok|skipped '.*'|expected failure")
+SUMMARY = re.compile(r"(?m)^(?:FAIL|ERROR): |^FAILED \(")
+
+
+def failed_test(out):
+    """Whether out, a module's -v output so far, shows a failed test (FAILING)."""
+    if SUMMARY.search(out):
+        return True
+    pending = False  # a failing line not yet followed by a passing verdict in its test
+    for line in out.split("\n"):
+        line = line.rstrip("\r")
+        if " ... " in line:  # the next test (or subtest) starts: the last one's verdict stands
+            if pending:
+                return True
+            line = line.rsplit(" ... ", 1)[1]
+        if FAILING.search(line):
+            pending = True
+        elif PASSING.fullmatch(line):
+            pending = False
+    return pending
 RERAN = "the module reruns whole into a fresh trace"
 # A module strace faults on runs once more, whole, into a fresh trace. Two, so at most one attempt
 # is cut and kept (CUT): a cut trace ends mid-line, so a second one could not follow it whole.
@@ -530,7 +552,7 @@ def run_one(module, trace_dir, root=ROOT):
             rc, out, err, held = attempt(command(module, trace_dir), root, env(module, trace_dir), module)
         finally:
             sweep(module)  # nothing of this attempt goes on, in or out of its session
-        failed = TEST_FAILED.search(out)
+        failed = failed_test(out)
         if err:  # strace's own lines, after the module's, on a line of their own
             out += ("\n" if out and not out.endswith("\n") else "") + err
         if held:
