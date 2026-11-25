@@ -141,7 +141,9 @@ func machinesOffLine(err error) string {
 // reads of their unread restore points: the STATUS line, and the notice
 // when any are deleted (main's seam, as openMachineDisk).
 func openVM(ctx context.Context, cfg vm.Config, caps *capState, inform func(string) error) (*vm.Manager, error) {
-	cfg.UnreadGone = newUnreadNotices(ctx, unreadRetry, inform).gone
+	u := newUnreadNotices(ctx, unreadRetry, inform)
+	u.up = caps.ownerLineUp
+	cfg.UnreadGone = u.gone
 	m, err := vm.Open(ctx, cfg)
 	if err != nil {
 		return nil, err
@@ -169,6 +171,11 @@ type unreadNotices struct {
 	ctx    context.Context
 	retry  time.Duration
 	inform func(string) error
+	// up, when set, says the owner line can carry a text now. While a
+	// refused notice is held and up says no, nothing is sent: each refusal
+	// would be one more missed text in the line's recovery text (CH-12,
+	// #6292).
+	up func() bool
 
 	mu      sync.Mutex
 	owed    [2]int // by kind: [0] disk space, [1] forget
@@ -178,6 +185,18 @@ type unreadNotices struct {
 
 func newUnreadNotices(ctx context.Context, retry time.Duration, inform func(string) error) *unreadNotices {
 	return &unreadNotices{ctx: ctx, retry: retry, inform: inform}
+}
+
+// armLocked arms one retry, unless one is armed. Caller holds mu.
+func (u *unreadNotices) armLocked() {
+	if u.timer == nil {
+		u.timer = time.AfterFunc(u.retry, func() {
+			u.mu.Lock()
+			defer u.mu.Unlock()
+			u.timer = nil
+			u.flushLocked()
+		})
+	}
 }
 
 // unreadNotSent reports whether err proves the notice never left: the
@@ -214,6 +233,10 @@ func (u *unreadNotices) flushLocked() {
 	if u.ctx.Err() != nil {
 		return
 	}
+	if u.failing && u.up != nil && !u.up() {
+		u.armLocked()
+		return
+	}
 	for _, kind := range []int{1, 0} {
 		n := u.owed[kind]
 		if n == 0 {
@@ -225,14 +248,7 @@ func (u *unreadNotices) flushLocked() {
 				log.Printf("vm: telling the owner of deleted unread snapshots: %v; trying again every %v", err, u.retry)
 				u.failing = true
 			}
-			if u.timer == nil {
-				u.timer = time.AfterFunc(u.retry, func() {
-					u.mu.Lock()
-					defer u.mu.Unlock()
-					u.timer = nil
-					u.flushLocked()
-				})
-			}
+			u.armLocked()
 			return
 		}
 		if err != nil {
@@ -441,6 +457,7 @@ type capState struct {
 	updates      atomic.Bool                     // C11: an update check runs
 	unread       atomic.Pointer[func() []string] // the machines' restore points kept unread (vm Unread)
 	wedged       atomic.Pointer[func() []string] // machines whose kills never end (vm Wedged)
+	ownerLine    atomic.Pointer[func() bool]     // the owner line can carry a text now (modemlink Usable)
 }
 
 func newCapState(modelSocket string) *capState {
@@ -481,6 +498,19 @@ func (s *capState) unreadLine() string {
 		return unreadLine((*l)())
 	}
 	return ""
+}
+
+// ownerLineUsable wires the owner line's state, when the box texts through
+// the modem bridge, for senders that retry (#6292).
+func (s *capState) ownerLineUsable(up func() bool) { s.ownerLine.Store(&up) }
+
+// ownerLineUp says the owner line can carry a text now; true when nothing
+// says otherwise, so a sender tries.
+func (s *capState) ownerLineUp() bool {
+	if up := s.ownerLine.Load(); up != nil {
+		return (*up)()
+	}
+	return true
 }
 
 // machinesWedged wires the wedged line to the machines' live list.

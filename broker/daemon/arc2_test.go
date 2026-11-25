@@ -459,7 +459,9 @@ func TestARC2ControlPathCannotReachInference(t *testing.T) {
 	for pkg, rule := range coreEnforcer {
 		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
 	}
-	checkImports(t, enforcerMain, enforcerMainRule.allowed, enforcerMainRule.forbid, nil)
+	// The access point pusher's packages and its SSH client (ENF-l-b2 part a).
+	mainAllowed := append(slices.Clone(enforcerMainRule.allowed), "enforcer/ap", "enforcer/ap/push", "golang.org/x/crypto/ssh")
+	checkImports(t, enforcerMain, mainAllowed, enforcerMainRule.forbid, nil)
 }
 
 // TestCoreLinksOnlyEnforcerFormats: no core package imports an enforcer
@@ -573,10 +575,11 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 	check([]string{module + enforcerWeb}, slices.DeleteFunc(slices.Clone(forbiddenDeps), func(s string) bool { return s == "net/http" || s == "crypto/tls" }), enforcerWebDeps...)
 	check([]string{module + enforcerSSH}, forbiddenDeps, enforcerSSHDeps...)
 	// The daemon links every enforcer package; nothing else of agentOS,
-	// no third party but the page's QR encoder and x/sys/unix, and no RPC,
+	// no third party but the page's QR encoder, the pusher's SSH client and
+	// x/sys/unix, and no RPC,
 	// mail or plugin loader.
 	check([]string{module + enforcerMain}, []string{"net/rpc", "net/smtp", "plugin"},
-		append(slices.Clone(enforcerWebDeps), "golang.org/x/sys/unix")...)
+		append(append(slices.Clone(enforcerWebDeps), enforcerSSHDeps...), "golang.org/x/sys/unix")...)
 	if len(own) < len(enforcer) {
 		t.Errorf("go list found %d enforcer packages, the rule map names %d", len(own), len(enforcer))
 	}

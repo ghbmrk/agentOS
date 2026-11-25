@@ -303,29 +303,19 @@ func TestWriteHasADeadline(t *testing.T) {
 	}
 }
 
-// The reply line's buffer is zeroed once sent, since an enrol reply's
-// line holds a template as text (line 245). The conn keeps the slice it
-// was handed, which shares the line's buffer when that has room for the
-// newline.
-func TestReplyLineZeroedAfterWrite(t *testing.T) {
+// write zeroes the reply's template once sent, the only copy of the
+// slice service.encode made, on a failed send too (DEV-7).
+func TestReplyTemplateZeroedAfterWrite(t *testing.T) {
 	s := newService(Config{}, &stubRT{}, nil)
-	rep := vision.Reply{Template: f32s(0.25, -0.5, 1, 2)}
-	b, _ := json.Marshal(rep)
-	if cap(b) == len(b) {
-		t.Fatal("this reply's line has no room for its newline, so the conn's slice is a copy and the line 245 wipe goes unchecked")
-	}
-	c := &scriptConn{in: bytes.NewReader(nil)}
-	if !s.write(c, rep) {
-		t.Fatal("write failed")
-	}
-	if len(c.writes) != 1 {
-		t.Fatalf("wrote %q", c.writes)
-	}
-	if string(c.writes[0]) != string(b)+"\n" {
-		t.Fatalf("wrote %q, want %q", c.writes[0], b)
-	}
-	if !zero(c.sent[0][:len(b)]) {
-		t.Fatalf("the sent line was left in memory: %q", c.sent[0])
+	for _, fail := range []bool{false, true} {
+		tpl := f32s(0.25, -0.5, 1, 2)
+		c := &scriptConn{in: bytes.NewReader(nil), failWrite: fail}
+		if ok := s.write(c, vision.Reply{Template: tpl}); ok == fail {
+			t.Fatalf("write with a failing conn %v returned %v", fail, ok)
+		}
+		if !zero(tpl) {
+			t.Fatalf("the template was left in memory after a send (failing %v): %v", fail, tpl)
+		}
 	}
 }
 
@@ -524,8 +514,10 @@ func TestStuckCallLogged(t *testing.T) {
 	}
 }
 
-// Two calls that find no load load once: the second, waiting on the
-// first's load, takes it (lines 448, 450-451).
+// Two calls that find no load load once: the second, having read the
+// stale load before the first stored its own, waits on the first's load
+// and takes it (lines 455, 457-458); a fresh load is returned at once
+// (lines 448-449).
 func TestConcurrentReadyLoadsOnce(t *testing.T) {
 	gate := make(chan struct{})
 	entered := make(chan struct{}, 2)
@@ -536,19 +528,41 @@ func TestConcurrentReadyLoadsOnce(t *testing.T) {
 		return Model{Name: "vis-stub", SHA256: sha}, nil
 	}
 	s := newService(Config{}, rt, nil)
+	stale := make(chan struct{}, 2)
+	s.loadWait = func() { stale <- struct{}{} }
+	wait := func(c <-chan struct{}, what string) {
+		select {
+		case <-c:
+		case <-time.After(3 * time.Second):
+			t.Fatal(what)
+		}
+	}
 	got := make(chan loaded, 2)
 	go func() { got <- s.ready() }()
-	<-entered // the first holds the load lock
+	wait(stale, "the first ready never found the load stale")
+	wait(entered, "the first ready never loaded") // it holds the load lock
 	go func() { got <- s.ready() }()
-	time.Sleep(200 * time.Millisecond) // the second waits on it
+	// The second has read the stale load before the first stores its
+	// own, so it can only take the locked path and its re-read.
+	wait(stale, "the second ready never found the load stale")
 	close(gate)
 	for range 2 {
-		if l := <-got; l.cause != "" || l.model.Name != "vis-stub" {
-			t.Fatalf("ready: %+v", l)
+		select {
+		case l := <-got:
+			if l.cause != "" || l.model.Name != "vis-stub" {
+				t.Fatalf("ready: %+v", l)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("a ready never returned")
 		}
 	}
 	if n := rt.loaded(); n != 1 {
 		t.Fatalf("%d loads, want 1", n)
+	}
+	// A fresh load is returned without waiting on the load lock.
+	s.loadWait = func() { t.Error("a ready on a fresh load waited on the load lock") }
+	if l := s.ready(); l.cause != "" || l.model.Name != "vis-stub" {
+		t.Fatalf("fresh ready: %+v", l)
 	}
 }
 

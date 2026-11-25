@@ -727,8 +727,14 @@ func TestRootSideUnitPathsAndGrants(t *testing.T) {
 			if bins, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("got %q, %v, want a refusal with %q", bins, err, c.want)
 			}
-			if err := underSystemd(t, imageUnits(files), nil); err == nil || !strings.Contains(err.Error(), c.want) {
-				t.Fatalf("under systemd: got %v, want a refusal with %q", err, c.want)
+			// unit_rules.py refuses an env file outside its root-only trees
+			// itself, before these rules read the records (#6474).
+			want := c.want
+			if strings.Contains(c.text, "EnvironmentFile=") {
+				want = "the trees only root writes"
+			}
+			if err := underSystemd(t, imageUnits(files), nil); err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("under systemd: got %v, want a refusal with %q", err, want)
 			}
 		})
 	}

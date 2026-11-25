@@ -31,6 +31,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/wire"
 	"github.com/ghbmrk/agentos/broker/enforcer/wol"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"golang.org/x/crypto/ssh"
 )
 
 // Silence is how long the core may send the enforcer nothing before the
@@ -84,10 +85,13 @@ type deps struct {
 	Elapsed func() time.Duration // CLOCK_BOOTTIME in production (#4507)
 	Rand    io.Reader
 	Fire    firewall
-	Network enrol.Network
-	Light   alert.Light
-	Radio   channel.Radio
-	Logf    func(string)
+	// AP makes the pusher of one access point from its admin address,
+	// its pinned host key and the enforcer's key (newPusher); it is
+	// called once per access point for the process's lifetime (ENF-g-8).
+	AP    func(addr string, host ssh.PublicKey, signer ssh.Signer) watcher
+	Light alert.Light
+	Radio channel.Radio
+	Logf  func(string)
 	// DNS runs the resolver's instances; MDNS is the pair relay
 	// (mdns.Serve) and Wake the Wake-on-LAN relay's loop (wol.Relay.Serve);
 	// Boot is this boot's id (traffic.BootID).
@@ -112,6 +116,8 @@ type deps struct {
 	// helloTimeout, idleTimeout and fireTimeout.
 	SaveFault, AfterFault         func(path string) error
 	HelloWait, IdleWait, FireWait time.Duration
+	// APWait replaces apReplaceWait.
+	APWait time.Duration
 }
 
 // Enforcer is the daemon: every piece of slices a to h wired to one
@@ -149,6 +155,7 @@ type Enforcer struct {
 	loaded    string // hash of the document the firewall last loaded
 	loadedDoc policy.Document
 	net       network // network.go: resolver, relays, byte caps
+	ap        *apNet  // apnet.go: the Wi-Fi access points
 
 	coreSeen atomic.Int64 // Elapsed at the core's last authenticated line, +1; 0 never
 	// revokeUnsaved: the owner's revocation of the core's key is in force
@@ -191,7 +198,7 @@ func open(cfg Config, dir string, dp deps) (*Enforcer, error) {
 	if dp.FireWait == 0 {
 		dp.FireWait = fireTimeout
 	}
-	if dp.Elapsed == nil || dp.Fire == nil || dp.Network == nil || dp.Light == nil || dp.Radio == nil || dp.Logf == nil ||
+	if dp.Elapsed == nil || dp.Fire == nil || dp.AP == nil || dp.Light == nil || dp.Radio == nil || dp.Logf == nil ||
 		dp.DNS == nil || dp.MDNS == nil || dp.Wake == nil || dp.Boot == nil || dp.Offload == nil {
 		return nil, errors.New("daemon: deps incomplete")
 	}
@@ -204,7 +211,10 @@ func open(cfg Config, dir string, dp deps) (*Enforcer, error) {
 	if d.alerts, err = alert.New(alert.Config{Send: d.send, Light: dp.Light, Journal: fileJournal{at(fileAlerts)}, Now: dp.Now}); err != nil {
 		return nil, fmt.Errorf("alerts: %w", err)
 	}
-	if d.book, err = enrol.Open(enrol.Config{Name: cfg.Name, Store: d.store(fileEnrol), Network: dp.Network,
+	if d.ap, err = d.openAP(); err != nil {
+		return nil, err
+	}
+	if d.book, err = enrol.Open(enrol.Config{Name: cfg.Name, Store: d.store(fileEnrol), Network: d.ap,
 		Alerts: d.alerts, Lock: &d.mu, Now: dp.Now, Rand: dp.Rand, Log: dp.Logf}); err != nil {
 		return nil, fmt.Errorf("enrolment: %w", err)
 	}
@@ -243,6 +253,7 @@ func open(cfg Config, dir string, dp deps) (*Enforcer, error) {
 		d.closeNetwork()
 		return nil, fmt.Errorf("first firewall load: %w", err)
 	}
+	d.ap.start()
 	if err := d.rebuildPage(); err != nil {
 		d.Close()
 		return nil, fmt.Errorf("page: %w", err)
@@ -378,6 +389,7 @@ func (d *Enforcer) Tick(ctx context.Context) {
 	}
 	d.tickFresh(ctx, now)
 	d.tickNetwork(ctx, now)
+	d.ap.tick()
 	d.upMu.Lock()
 	if up := d.coreUp(); up != d.toldUp {
 		d.toldUp = up
@@ -437,6 +449,9 @@ func (d *Enforcer) rebuildPage() error {
 		Heard:  mdns.HeardBy(d.net.filter, d.cfg.Layout),
 		Alerts: pageAlerts{d.alerts}, Caps: pageCaps{d}, Resolver: pageResolver{d}, Edge: pageEdge{d},
 	}
+	if len(d.ap.points) > 0 {
+		pc.AccessPoints = pageAPs{d.ap}
+	}
 	if d.ch != nil {
 		pc.Channel, pc.Core = d.cut, pageCore{d}
 	}
@@ -492,6 +507,7 @@ func (d *Enforcer) Close() {
 	}
 	d.pageMu.Unlock()
 	d.closeFresh()
+	d.ap.close()
 	d.closeNetwork()
 }
 
