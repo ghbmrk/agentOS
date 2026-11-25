@@ -369,7 +369,10 @@ class RiskTierTest(unittest.TestCase):
         names = set()
         for item in listed.replace("; ", ", ").split(", "):
             item = item.split(": ", 1)[-1]  # drop the criterion label
-            names.update(n.rstrip("*") for n in item.split("/"))
+            for n in item.split("/"):
+                # A starred item names every broker package it prefixes (modem* is modem and modemlink).
+                names.update([n] if not n.endswith("*") else
+                             [d.name for d in (ROOT / "broker").glob(n) if d.is_dir()] or [n])
         # Every name is a real package, so a label cannot pass as one.
         missing = [n for n in sorted(names)
                    if not (ROOT / "broker" / n).is_dir()]
@@ -378,11 +381,18 @@ class RiskTierTest(unittest.TestCase):
         self.assertIn("claim", rt.TIER_A_BROKER)
         self.assertIn("firstboot", names)
         self.assertIn("firstboot", rt.TIER_A_BROKER)
-        # Every package OPERATING names as tier A is tier A in the tool
-        # (modem* covers modem and modemlink).
+        # Every package OPERATING names as tier A is tier A in the tool.
         not_a = [n for n in sorted(names)
                  if rt.tier_of("broker/" + n + "/x.go")[0] != "A"]
         self.assertEqual(not_a, [])
+        # And the other way (#1704): every TIER_A_BROKER package is in the row, so dropping one from the
+        # row fails too. cmd, core and internal are named by path after "plus".
+        self.assertEqual(sorted(rt.TIER_A_BROKER - names - {"cmd", "core", "internal"}), [])
+        for n in ("cmd", "core", "internal"):
+            self.assertIn("`broker/" + n + "`", row)
+        # Every guest path the tool rates A by name is in the row's guest build inputs (#1704).
+        missing = [p for p in sorted(rt.TIER_A_GUEST_PATHS) if "`" + p + "`" not in row]
+        self.assertEqual(missing, [])
 
     # REQ: ARC-1 (SIM-core: the trusted core is the list in broker/core/core.txt)
     def test_core_list_rates_core_and_wiring_a(self):
@@ -424,29 +434,31 @@ class RiskTierTest(unittest.TestCase):
     def test_allow_line_parsing_matches_core_test(self):
         # Same grammar as broker/core/core_test.go: allow <pkg> <symbol> -- <reason>.
         with tempfile.TemporaryDirectory() as d:
-            ok = pathlib.Path(d) / "ok.txt"
+            ok = pathlib.Path(d) / "broker/core/core.txt"  # the declared list's path (#6441), read uncached
+            ok.parent.mkdir(parents=True)
             ok.write_text("core journal\nallow newpkg journal.Engine.Erase -- a reason\n")
-            self.assertEqual(rt.core_list(ok)[2], {"newpkg"})
+            self.assertEqual(rt.core_list.__wrapped__(ok)[2], {"newpkg"})
             # A fixture line reads but adds no package: its allow line does.
             ok.write_text("core journal\nallow newpkg journal.Engine.Erase -- a reason\nfixture newpkg\n")
-            self.assertEqual(rt.core_list(ok), ({"journal"}, set(), {"newpkg"}))
+            self.assertEqual(rt.core_list.__wrapped__(ok), ({"journal"}, set(), {"newpkg"}))
             for line in ("allow newpkg journal.Engine.Erase",
                          "allow newpkg journal.Engine.Erase --",
                          "fixture", "fixture newpkg -- a reason",
                          "allow newpkg journal.Engine.Erase because it must"):
-                bad = pathlib.Path(d) / "bad.txt"
+                bad = ok
                 bad.write_text("core journal\n" + line + "\n")
                 with self.subTest(line=line), self.assertRaises(SystemExit):
-                    rt.core_list(bad)
+                    rt.core_list.__wrapped__(bad)
 
     def test_core_list_unreadable_fails(self):
         with tempfile.TemporaryDirectory() as d:
-            bad = pathlib.Path(d) / "core.txt"
+            bad = pathlib.Path(d) / "broker/core/core.txt"  # the declared list's path (#6441)
+            bad.parent.mkdir(parents=True)
             bad.write_text("core journal\nkernel vault\n")
-            with self.assertRaises(SystemExit):
-                rt.core_list(bad)
-            with self.assertRaises(SystemExit):
-                rt.core_list(pathlib.Path(d) / "missing.txt")
+            with self.assertRaisesRegex(SystemExit, "kernel"):
+                rt.core_list.__wrapped__(bad)
+            with self.assertRaisesRegex(SystemExit, "cannot read"):
+                rt.core_list.__wrapped__(pathlib.Path(d) / "missing/broker/core/core.txt")
 
     # CTRL-lane-gate (#1300; a work item with no SPEC row, so no REQ marker): CI runs
     # `risk_tier.py --git BASE HEAD --pr-branch B --pr-title T` on every PR.

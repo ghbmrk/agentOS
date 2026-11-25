@@ -12,10 +12,16 @@ fails doclint. The list only shrinks after the snapshot: never add a line to it;
 
 Usage: python3 tools/assumptions_ids.py [repo root]    prints the legacy list for that tree
 """
+import importlib.util
 import pathlib
 import re
 import subprocess
 import sys
+
+# By path, as premerge loads its imports: a run with `python3 -I` keeps tools/ off sys.path.
+_rm = importlib.util.spec_from_file_location("record_merge", pathlib.Path(__file__).resolve().parent / "record_merge.py")
+record_merge = importlib.util.module_from_spec(_rm)
+_rm.loader.exec_module(record_merge)
 
 LEGACY = "tools/assumptions_legacy_ids.txt"
 # a letter-led token, a hyphen, then more: DEP-2-a, RT-1c, ASSUMPTIONS-ID-1. Bare A21 / D35 / 7 do not match.
@@ -54,8 +60,9 @@ def list_lines(text, where=LEGACY):
 
 def read_legacy(root):
     path = pathlib.Path(root) / LEGACY
+    record_merge.listed(path)  # a list in no class of CLASSES fails closed, present or not (#6441)
     # Bytes, so "\r" is not turned into "\n" before list_lines sees it.
-    return list_lines(path.read_bytes().decode("utf-8", "replace")) if path.is_file() else []
+    return list_lines(record_merge.read_list(path)) if path.is_file() else []
 
 
 def legacy(root):
@@ -64,6 +71,7 @@ def legacy(root):
 
 def growth(root, base_text):
     """Legacy lines the tree has beyond base_text (the base branch's copy of the list)."""
+    record_merge.listed(LEGACY)  # the base side's copy of the declared list (#6441)
     base = {l for l in list_lines(base_text, f"{LEGACY} (base)") if l.strip() and not l.startswith("#")}
     now = read_legacy(root)
     for line in now:

@@ -43,6 +43,7 @@ import ctypes
 import ctypes.util
 import functools
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -59,6 +60,10 @@ import threading
 import time
 
 CHUNK = 4 << 20
+# By path, as premerge loads its imports: a run with `python3 -I` keeps tools/ off sys.path.
+_rm = importlib.util.spec_from_file_location("record_merge", pathlib.Path(__file__).resolve().parent / "record_merge.py")
+record_merge = importlib.util.module_from_spec(_rm)
+_rm.loader.exec_module(record_merge)
 ALLOW = pathlib.Path(__file__).with_name("hostcheck_hw8.json")
 KINDS = ("disk", "uefi", "tpm-nv", "tpm-persistent", "tpm-setting")
 EFI_NON_VOLATILE = 0x1
@@ -462,7 +467,8 @@ def snapshot(disks, varstore=None, efivarfs=None, tcti=None, rtc_reference=None,
 # ---- diff against HW-8 ----
 
 def load_allow(path=ALLOW):
-    return json.loads(pathlib.Path(path).read_text())["rules"]
+    """HW-8's rules; a file in no class of tools/record_merge.py's CLASSES fails closed (#6441)."""
+    return json.loads(record_merge.read_list(path))["rules"]
 
 
 def diff(before, after):

@@ -1,6 +1,7 @@
 package proc
 
 import (
+	"cmp"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -113,10 +114,8 @@ func openFileContent(dir string) (*FileContent, []kernel.Hash, error) {
 // dropTemps removes every temporary a torn write left in dir, syncs it, and
 // returns what dir held.
 func dropTemps(dir string) ([]os.DirEntry, error) {
+	// A dir ReadDir cannot open, SyncDir cannot either: either error stands.
 	des, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
 	for _, de := range des {
 		if strings.HasSuffix(de.Name(), tmpExt) {
 			if err := os.Remove(filepath.Join(dir, de.Name())); err != nil {
@@ -124,7 +123,10 @@ func dropTemps(dir string) ([]os.DirEntry, error) {
 			}
 		}
 	}
-	return des, privfile.SyncDir(dir)
+	if err := errors.Join(err, privfile.SyncDir(dir)); err != nil {
+		return nil, err
+	}
+	return des, nil
 }
 
 func itemName(h kernel.Hash) string { return hex.EncodeToString(h[:]) + itemExt }
@@ -168,11 +170,8 @@ func (f *FileContent) Get(h kernel.Hash) ([]byte, error) {
 		return nil, err
 	}
 	ct, err := io.ReadAll(io.LimitReader(fd, maxSealed+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(ct) > maxSealed {
-		return nil, kernel.ErrItem
+	if err != nil || len(ct) > maxSealed {
+		return nil, cmp.Or(err, kernel.ErrItem)
 	}
 	return ct, nil
 }
