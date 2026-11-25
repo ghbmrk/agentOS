@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,25 +52,26 @@ func fileSum(path string) ([]byte, error) {
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := copyBuf(h, f, nil); err != nil {
 		return nil, err
 	}
 	return h.Sum(nil), nil
 }
 
-// checkSum checks image against its line in sums (I8, C3: a CI-built
-// image is what its SHA256SUMS lists).
-func checkSum(image, sums string) error {
+// checkSum checks image against its line in sums and returns that sum
+// (I8, C3: a CI-built image is what its SHA256SUMS lists). prep and write
+// both check through it.
+func checkSum(image, sums string) ([]byte, error) {
 	want, err := sumFor(image, sums)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	got, err := fileSum(image)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !bytes.Equal(got, want) {
-		return fmt.Errorf("%s does not match its line in %s", image, sums)
+		return nil, fmt.Errorf("%s does not match its line in %s", image, sums)
 	}
-	return nil
+	return want, nil
 }
