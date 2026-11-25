@@ -1531,13 +1531,12 @@ class PremergeTest(unittest.TestCase):
         # PREMERGE-gate-not-base-excusable (#6411): a diff gate's failed job holds even when main's own first-attempt run
         # of the merge base failed the same job; a tree check's inherited failure is still excused.
         gates = [n for n, c in premerge.HELD_CLASS.items() if c == premerge.DIFF_GATE]
-        self.assertEqual(gates, ["mutgate", "lane-gate", "word-budget"])
+        self.assertEqual(gates, ["lane-gate", "word-budget"])  # mutgate runs in ci now (mutgate_held, #6569)
         self.assertTrue(all(premerge.HELD[g] == () for g in gates))
         onto, sha = self.held_repo()
         ok = self.wf(1, "vulncheck", "success", sha)
         held = lambda *runs, base=(): premerge.checks_held(self.r, bundle([ok, *runs], base), "HEAD", "main")
-        for name, jobs in (("mutgate", ["claimed", "mutgate"]), ("mutgate", ["mutgate"]), ("mutgate", ["mutants pkg shard 1 of 2"]),
-                           ("lane-gate", ["lane-gate"]), ("word-budget", ["count"])):
+        for name, jobs in (("lane-gate", ["lane-gate"]), ("word-budget", ["count"])):
             run = self.wf(5, name, "failure", sha, jobs=[(j, "failure") for j in jobs])
             mainrun = self.wf(9, name, "failure", onto, event="push", branch="main", jobs=[(j, "failure") for j in jobs])
             self.assertEqual(held(run, base=[mainrun]), [f"{name}:failure"], (name, jobs))
@@ -1569,7 +1568,7 @@ class PremergeTest(unittest.TestCase):
         # #5366: image-vulncheck stays out (Mark's #2919 paste); every other image job is held.
         self.assertEqual(premerge.HELD["image"], ("image-vulncheck",))
         self.assertEqual(sorted(premerge.HELD), ["assurance", "camnode-image", "drone-sitl", "enforcer-image", "formal", "image",
-                                                 "infer-real", "keycheck", "lane-gate", "mutgate", "testkit", "vision-real",
+                                                 "infer-real", "keycheck", "lane-gate", "testkit", "vision-real",
                                                  "vulncheck", "word-budget"])
         self.assertEqual([x for x in premerge.HELD.values() if x != ()], [("image-vulncheck",)])
         onto, sha = self.held_repo()
@@ -1654,22 +1653,23 @@ class PremergeTest(unittest.TestCase):
         # CI-premerge-event-filter (#6398): the list is exactly HELD plus the UNHELD workflows the merge job waits on (ci,
         # trusted-base), so a completion no check reads starts no run, and a new HELD entry fails until listed.
         name = lambda stem: next(l[6:].strip() for l in (wfs / f"{stem}.yml").read_text().splitlines() if l.startswith("name: "))
-        self.assertEqual(sorted(listed), sorted(name(s) for s in [*premerge.HELD, *premerge.UNHELD] if s != "premerge"))
-        # a mutgate shard cut at its timeout fails the run (mutgate.yml), and that failure is not excused
+        # mutgate too: a PR from before ci calls it is held by its standalone run (CI-mutgate-after-ci, #6569)
+        self.assertEqual(sorted(listed), sorted([*(name(s) for s in [*premerge.HELD, *premerge.UNHELD] if s != "premerge"),
+                                                 premerge.LEGACY_MUTGATE]))
+        # a diff gate's failed run holds (lane-gate.yml here; mutgate is ci's, held by mutgate_held, #6569)
         onto, sha = self.held_repo()
-        self.write(".github/workflows/mutgate.yml", "on:\n  pull_request:\n")
-        sha = self.commit("mutgate")
+        self.write(".github/workflows/lane-gate.yml", "on:\n  pull_request:\n")
+        sha = self.commit("lane-gate")
         ok = self.wf(1, "vulncheck", "success", sha)
         held = lambda *runs: premerge.checks_held(self.r, bundle([ok, *runs]), "HEAD", "main")
-        self.assertEqual(held(), ["mutgate:missing"])
-        self.assertEqual(held(self.wf(2, "mutgate", "failure", sha, jobs=[("mutants x shard 0 of 2", "cancelled"),
-                                                                          ("mutgate", "failure")])), ["mutgate:failure"])
-        self.assertEqual(held(self.wf(2, "mutgate", "cancelled", sha)), ["mutgate:cancelled"])
-        self.assertEqual(held(self.wf(2, "mutgate", "success", sha)), [])
-        # the real testkit.yml filter: a PR changing only b.md and mutgate.yml owes no testkit run (#5432 L3)
+        self.assertEqual(held(), ["lane-gate:missing"])
+        self.assertEqual(held(self.wf(2, "lane-gate", "failure", sha, jobs=[("lane-gate", "failure")])), ["lane-gate:failure"])
+        self.assertEqual(held(self.wf(2, "lane-gate", "cancelled", sha)), ["lane-gate:cancelled"])
+        self.assertEqual(held(self.wf(2, "lane-gate", "success", sha)), [])
+        # the real testkit.yml filter: a PR changing only b.md and lane-gate.yml owes no testkit run (#5432 L3)
         self.write(".github/workflows/testkit.yml", (wfs / "testkit.yml").read_text())
         sha = self.commit("testkit")
-        mut = self.wf(2, "mutgate", "success", sha)
+        mut = self.wf(2, "lane-gate", "success", sha)
         self.assertEqual(premerge.checks_held(self.r, bundle([self.wf(1, "vulncheck", "success", sha), mut]), "HEAD", "main"),
                          ["testkit:missing"])  # the PR changes testkit.yml itself, so its run is owed
         git(self.r, "checkout", "-q", "main")
@@ -1678,7 +1678,138 @@ class PremergeTest(unittest.TestCase):
         self.write("c.md", "y\n")
         sha = self.commit("unrelated")
         self.assertEqual(premerge.checks_held(self.r, bundle([self.wf(1, "vulncheck", "success", sha),
-                                                              self.wf(2, "mutgate", "success", sha)]), "HEAD", "main"), [])
+                                                              self.wf(2, "lane-gate", "success", sha)]), "HEAD", "main"), [])
+
+    CALL = "  mutgate:\n    needs: [checks]\n    uses: ./.github/workflows/mutgate.yml\n"
+
+    def mutgate_repo(self, main_calls=True, pr_calls=True):
+        """Main's ci.yml calls mutgate.yml (or not); the PR changes b.md and, when the two differ, its own ci.yml."""
+        (self.r / ".github/workflows").mkdir(parents=True)
+        plain = "name: ci\non:\n  pull_request:\njobs:\n  checks:\n    runs-on: ubuntu-24.04\n"
+        self.write(".github/workflows/ci.yml", plain + (self.CALL if main_calls else ""))
+        onto = self.commit("ci")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("b.md", "x\n")
+        if pr_calls != main_calls:
+            self.write(".github/workflows/ci.yml", plain + (self.CALL if pr_calls else ""))
+        return onto, self.commit("code")
+
+    def ci(self, id, sha, conclusion="success", jobs=(), **k):
+        return self.wf(id, "ci", conclusion, sha, jobs=[("checks", "success"), *jobs], **k)
+
+    def test_mutgate_holds_until_ci_ran_and_passed_it(self):
+        # CI-mutgate-after-ci (#6569): mutgate runs as ci's `mutgate / ` jobs once every other ci job passed. A mutgate
+        # that did not run (a ci job failed, the calling job skipped for any reason) holds as mutgate:skipped, never a pass.
+        onto, sha = self.mutgate_repo()
+        held = lambda *runs: premerge.checks_held(self.r, bundle(runs), "HEAD", "main")
+        claimed, gate = ("mutgate / claimed", "success"), ("mutgate / mutgate", "success")
+        self.assertEqual(held(), ["mutgate:missing"])
+        self.assertEqual(held(self.ci(1, sha, status="in_progress")), ["mutgate:in_progress"])
+        self.assertEqual(held(self.ci(1, sha, status="queued")), ["mutgate:queued"])
+        # passes: the gate decided, or the claim printed [] so the deciding job skipped (#6401)
+        self.assertEqual(held(self.ci(1, sha, jobs=[claimed, gate])), [])
+        self.assertEqual(held(self.ci(1, sha, jobs=[claimed, ("mutgate / plan", "skipped"),
+                                                    ("mutgate / mutgate", "skipped")])), [])
+        cases = {
+            # a ci job failed, so the calling job skipped and no mutgate job ran
+            "ci failed": (self.ci(1, sha, "failure", [("unit-tests (0)", "failure"), ("mutgate", "skipped")]), "skipped"),
+            # the run reads as passed, yet mutgate never ran: the skip still holds
+            "caller skipped, run passed": (self.ci(1, sha, jobs=[("mutgate", "skipped")]), "skipped"),
+            "no mutgate job at all": (self.ci(1, sha), "skipped"),
+            "claim skipped": (self.ci(1, sha, jobs=[("mutgate / claimed", "skipped")]), "skipped"),
+            "claim failed": (self.ci(1, sha, "failure", [("mutgate / claimed", "failure"), ("mutgate / mutgate", "failure")]), "failure"),
+            "two claims": (self.ci(1, sha, jobs=[claimed, claimed, gate]), "skipped"),
+            "a claim of another name": (self.ci(1, sha, jobs=[("mutgate / claimed x", "success"), gate]), "skipped"),
+            "survivor": (self.ci(1, sha, "failure", [claimed, ("mutgate / mutgate", "failure")]), "failure"),
+            "shard cut at its timeout": (self.ci(1, sha, "failure", [claimed, ("mutgate / mutants p shard 0 of 2", "cancelled"),
+                                                                     ("mutgate / mutgate", "failure")]), "cancelled"),
+            "gate passed, run cancelled": (self.ci(1, sha, "cancelled", [claimed, gate]), "cancelled"),
+            "gate passed, run conclusion unread": (self.ci(1, sha, None, [claimed, gate]), "unknown"),
+            "jobs not supplied": ({**self.ci(1, sha), "jobs": None}, "unknown"),
+            "jobs of another attempt": (self.ci(1, sha, jobs=[claimed, gate], attempt=2) | {"jobs": [
+                {"run_id": 1, "run_attempt": 1, "name": n, "conclusion": c} for n, c in [claimed, gate]]}, "unknown"),
+        }
+        for name, (run, state) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(held(run), [f"mutgate:{state}"])
+        # the newest of this PR's pull_request runs on the head decides; another PR's, a target run or another head's never
+        ok = self.ci(1, sha, jobs=[claimed, gate])
+        self.assertEqual(held(ok, self.ci(2, sha, "failure", [("checks", "failure"), ("mutgate", "skipped")])), ["mutgate:skipped"])
+        self.assertEqual(held(self.ci(2, sha, "failure", [("mutgate", "skipped")]), self.ci(3, sha, jobs=[claimed, gate])), [])
+        self.assertEqual(held({**ok, "event": "pull_request_target"}), ["mutgate:missing"])
+        self.assertEqual(held({**ok, "head_sha": onto}), ["mutgate:missing"])
+        self.assertEqual(held({**ok, "path": ".github/workflows/mutgate.yml", "name": "mutgate"}), ["mutgate:missing"])
+        self.assertEqual(held(self.ci(1, sha, jobs=[claimed, gate], prs=((8, "main"),))), ["mutgate:unbound"])
+        self.assertEqual(held(self.ci(1, sha, jobs=[claimed, gate], branch="other")), ["mutgate:missing"])
+
+    def test_mutgate_is_owed_when_main_or_the_head_calls_it(self):
+        # CI-mutgate-after-ci (#6569): a PR that drops the call from its own ci.yml still owes the gate main's ci.yml calls.
+        for main_calls, pr_calls, owed in ((True, False, True), (False, True, True), (False, False, False)):
+            with self.subTest(main=main_calls, pr=pr_calls):
+                self.setUp()
+                _, sha = self.mutgate_repo(main_calls, pr_calls)
+                self.assertEqual(premerge.checks_held(self.r, bundle([self.ci(1, sha)]), "HEAD", "main"),
+                                 ["mutgate:skipped"] if owed else [])
+        # the call as ci.yml writes it is the line that makes the gate owed
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertTrue(premerge._CALLS_MUTGATE.search(ci))
+        self.assertFalse(premerge._CALLS_MUTGATE.search(ci.replace("uses: ./.github/workflows/mutgate.yml", "x: 1")))
+
+    def test_a_pr_from_before_the_call_is_held_by_its_standalone_mutgate_run(self):
+        # CI-mutgate-after-ci (#6569, L3 1): a PR branched before main's ci.yml called mutgate keeps its standalone
+        # mutgate.yml pull_request run, held as HELD held it (a diff gate, never base-excused), so an armed PR needs no
+        # new ci run; once main calls it the run is owed outright, so dropping mutgate.yml from the head escapes nothing.
+        (self.r / ".github/workflows").mkdir(parents=True)
+        plain = "name: ci\non:\n  pull_request:\njobs:\n  checks:\n    runs-on: ubuntu-24.04\n"
+        self.write(".github/workflows/ci.yml", plain)
+        self.write(".github/workflows/mutgate.yml", "name: mutgate\non:\n  pull_request:\n")
+        old = self.commit("before the call")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("b.md", "x\n")
+        sha = self.commit("code")
+        git(self.r, "checkout", "-q", "main")
+        self.write(".github/workflows/ci.yml", plain + self.CALL)
+        self.commit("the call")
+        git(self.r, "checkout", "-q", "pr")
+        held = lambda *runs, base=(): premerge.checks_held(self.r, bundle(runs, base), "HEAD", "main")
+        mg = lambda id, c, **k: self.wf(id, "mutgate", c, sha, **k)
+        self.assertEqual(held(), ["mutgate:missing"])
+        self.assertEqual(held(mg(1, "success")), [])
+        self.assertEqual(held(mg(1, "success"), mg(2, "cancelled")), ["mutgate:cancelled"])
+        self.assertEqual(held(mg(1, "failure", jobs=[("mutgate", "failure")])), ["mutgate:failure"])
+        mainrun = self.wf(9, "mutgate", "failure", old, event="push", branch="main", jobs=[("mutgate", "failure")])
+        self.assertEqual(held(mg(1, "failure", jobs=[("mutgate", "failure")]), base=[mainrun]), ["mutgate:failure"])
+        self.assertEqual(held(mg(1, "success", prs=((8, "main"),))), ["mutgate:unbound"])
+        # a ci run with mutgate jobs is not this PR's gate: its ci.yml does not call mutgate
+        self.assertEqual(held(self.ci(3, sha, jobs=[("mutgate / claimed", "success")])), ["mutgate:missing"])
+        # the head drops mutgate.yml: still owed, since main calls it
+        git(self.r, "rm", "-q", ".github/workflows/mutgate.yml")
+        sha = self.commit("drop the gate")
+        self.assertEqual(premerge.checks_held(self.r, bundle([self.wf(1, "mutgate", "success", "0" * 40)]), "HEAD", "main"),
+                         ["mutgate:missing"])
+        # once the PR merges main, its merge base calls mutgate and ci's run decides
+        git(self.r, "merge", "-q", "--no-edit", "main")
+        sha = git(self.r, "rev-parse", "HEAD").strip()
+        self.assertEqual(premerge.checks_held(self.r, bundle([self.wf(1, "mutgate", "success", sha)]), "HEAD", "main"),
+                         ["mutgate:missing"])
+        ok = self.ci(2, sha, jobs=[("mutgate / claimed", "success"), ("mutgate / mutgate", "success")])
+        self.assertEqual(premerge.checks_held(self.r, bundle([ok]), "HEAD", "main"), [])
+
+    def test_check_prints_a_skipped_mutgate_as_held(self):
+        # CI-mutgate-after-ci (#6569): through --check as premerge.yml runs it, a ci run that passed without running
+        # mutgate is never `same`, and one whose mutgate passed is.
+        import json
+        onto, sha = self.mutgate_repo()
+        f = pathlib.Path(self._d.name + ".comments.json")
+        self.addCleanup(lambda: f.unlink(missing_ok=True))
+        f.write_text(json.dumps([self.rec("accept", sha, "<!-- record: l3 -->\n")]))
+        def run(*runs):
+            r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--check", str(f), "7", "--runs",
+                                self.runs(head=runs), "--base", "main"], cwd=self.r, capture_output=True, text=True)
+            return r.returncode, r.stdout.split()
+        self.assertEqual(run(self.ci(1, sha, jobs=[("mutgate", "skipped")])), (1, ["needs-check", "mutgate:skipped"]))
+        self.assertEqual(run(self.ci(1, sha, jobs=[("mutgate / claimed", "success"), ("mutgate / mutgate", "success")])),
+                         (0, ["same"]))
 
     def test_pr_paths_reads_only_the_block_style_it_knows(self):
         p = premerge.pr_paths
@@ -1752,6 +1883,25 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(premerge.checks_held(self.r, doc, "HEAD", "main"), [])
         routes[f"{api}/21/attempts/1/jobs?per_page=100"] = [{**job(21, 1, "scan"), "name": "other"}]
         self.assertEqual(premerge.checks_held(self.r, self.runs_helper(routes, onto)[1], "HEAD", "main"), ["vulncheck:failure"])
+
+    def test_runs_helper_reads_the_heads_ci_jobs(self):
+        # CI-mutgate-after-ci (#6569): the mutation gate is ci's `mutgate / ` jobs, so the head's ci run carries its jobs
+        # whatever its conclusion; a passed run of anything else, and main's passed ci runs, are still read without them.
+        onto, sha = self.mutgate_repo()
+        api = f"repos/{REPO}/actions/runs"
+        ci = self.wf(11, "ci", "success", sha)
+        job = lambda name, c: {"run_id": 11, "run_attempt": 1, "name": name, "conclusion": c}
+        jobs = [job("checks", "success"), job("mutgate / claimed", "success"), job("mutgate / mutgate", "success")]
+        routes = {f"{api}?head_sha={sha}&per_page=100": [ci, self.wf(12, "formal", "success", sha)],
+                  f"{api}/11/jobs?per_page=100": jobs,
+                  f"{api}?head_sha={onto}&event=push&per_page=100": [self.wf(21, "ci", "success", onto, event="push", branch="main", prs=())],
+                  f"{api}?head_sha={onto}&event=schedule&per_page=100": []}
+        code, doc, calls = self.runs_helper(routes, onto)
+        self.assertEqual((code, calls), (0, list(routes)))
+        self.assertEqual(doc["head"][0]["jobs"], jobs)
+        self.assertEqual(premerge.checks_held(self.r, doc, "HEAD", "main"), [])
+        routes[f"{api}/11/jobs?per_page=100"] = jobs[:1] + [{**job("mutgate", "skipped")}]
+        self.assertEqual(premerge.checks_held(self.r, self.runs_helper(routes, onto)[1], "HEAD", "main"), ["mutgate:skipped"])
 
     def test_runs_helper_fails_closed(self):
         # PREMERGE-runs-local (#5386): any failed read, a bad merge base or a pr.json without a head prints nothing, so
