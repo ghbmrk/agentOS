@@ -1,0 +1,5 @@
+# Word-budget waivers (D-152; committed record, #6490). A PR that grows SPEC.md or the process docs
+# adds one line here: `word-budget #<PR> -- <decision ID>`, naming an active base-branch DECISIONS.md
+# row that names the PR and records Mark approving the addition. tools/word_budget.py counts only
+# lines the base lacks that name the PR being checked, so the waiver is part of the reviewed head
+# and a later body edit cannot change it. Lines stay as the history of past waivers; append, never edit.

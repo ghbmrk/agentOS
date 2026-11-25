@@ -12,6 +12,7 @@ import gzip
 import hashlib
 import io
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -946,8 +947,59 @@ class ImageTest(unittest.TestCase):
         self.assertEqual([vulncheck.verdict(f) for f in fs], ["FAIL", "accepted #1"])
         out = io.StringIO()
         vulncheck.summary(fs, [], unused, out)
-        self.assertIn("fix: rebuild the image", out.getvalue())
+        self.assertIn("debian-security), rebuild the image", out.getvalue())
         self.assertNotIn("or add a record", out.getvalue())
+
+    def test_fixed_image_hint_names_the_main_snapshot_bump(self):
+        # VULN-debian-r14-hint (#6469), TN-vulncheck-6: a fix shipped only in a point release sits in
+        # the pinned main archive, so the hint names the pin move as well as the rebuild.
+        f = {"where": "image", "id": "DEBIAN-CVE-1", "aliases": [], "level": "image", "module": "",
+             "version": "2.41-12+deb13u4", "package": "Debian:13:glibc (libc6)", "function": "",
+             "fixed": "2.41-12+deb13u5", "fails": True}
+        out = io.StringIO()
+        self.assertFalse(vulncheck.summary([f], [], [], out))
+        text = out.getvalue()
+        self.assertIn("fix: if the fix is in the security suite (debian-security), rebuild the image", text)
+        self.assertIn("fix: if the fix is only in a point release (the main archive), move the main-archive "
+                      "snapshot timestamp (Mirror= in image/mkosi/mkosi.conf) in every copy: image/mkosi/mkosi.conf, "
+                      "image/enforcer/mkosi/mkosi.conf, ", text)
+        self.assertIn("image/mkosi/mkosi.finalize (NAME_ONLY_SNAPSHOT, after checking that snapshot's systemd "
+                      "is still NAME_ONLY_SYSTEMD), tests/test_image.py (MkosiRunBoundTest), "
+                      "tests/test_image_repro.py (KeyringSpikesTest); then update what else CI names, such as "
+                      "image/import_sweep.allow hashes", text)
+        # UX 1 and Potency 1-2 on #6538: the hand-kept list missed the two test pins, so the set is
+        # derived: every file holding the Mirror= timestamp is named, and every name is such a file.
+        stamp = re.search(r"^Mirror=https://snapshot\.debian\.org/archive/debian/(\d{8}T\d{6}Z)/$",
+                          (ROOT / "image/mkosi/mkosi.conf").read_text(), re.M).group(1)
+        hits = snapshot_copies(stamp)
+        self.assertEqual(sorted(p.split(" ")[0] for p in vulncheck.SNAPSHOT_PINS), sorted(hits))
+        for path in hits:
+            self.assertIn(path, text)
+        self.assertIn("NAME_ONLY_SNAPSHOT = ", (ROOT / "image/mkosi/mkosi.finalize").read_text())
+        self.assertIn("NAME_ONLY_SYSTEMD = ", (ROOT / "image/mkosi/mkosi.finalize").read_text())
+        self.assertTrue((ROOT / "image/import_sweep.allow").is_file())
+
+
+def snapshot_copies(stamp):
+    """Every repo file but a record holding stamp, the search `git grep` makes, done without git or
+    opening a record (the records-only CI step does not run this module; tests/records_audit.py)."""
+    import ci_scope
+    record_dirs = tuple(d.rstrip("/") for d in ci_scope.RECORD_DIRS)
+    hits = []
+    for top, dirs, files in os.walk(ROOT):
+        rel_top = os.path.relpath(top, ROOT)
+        rel_top = "" if rel_top == "." else rel_top + "/"
+        dirs[:] = sorted(d for d in dirs if d != ".git" and not any(rel_top + d == r or (rel_top + d).startswith(r + "/") for r in record_dirs)
+                         and not os.path.islink(os.path.join(top, d)))
+        for name in sorted(files):
+            rel = rel_top + name
+            path = os.path.join(top, name)
+            if ci_scope.is_record(rel) or os.path.islink(path):
+                continue
+            with open(path, "rb") as fh:
+                if stamp.encode() in fh.read():
+                    hits.append(rel)
+    return hits
 
 
 class ProposeTest(unittest.TestCase):

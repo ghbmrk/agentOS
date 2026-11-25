@@ -103,7 +103,8 @@ func TestBuiltEnvFiles(t *testing.T) {
 		})
 		t.Run("refuses "+name+"'s env file reached through a link", func(t *testing.T) {
 			files := map[string]string{dir + "agentos-e.service": unit, "/etc/agentos/y.env": "-> z.env", "/etc/agentos/z.env": "BASH_ENV=/tmp/x\n"}
-			if err := underSystemd(t, files, ourEtc); err == nil || !strings.Contains(err.Error(), `/etc/agentos/y.env:1: variable "BASH_ENV"`) {
+			// unit_rules.py follows no link to an env file (#6474).
+			if err := underSystemd(t, files, ourEtc); err == nil || !strings.Contains(err.Error(), `EnvironmentFile=-/etc/agentos/y.env: /etc/agentos/y.env is a link`) {
 				t.Fatalf("got %v, want the linked env file refused", err)
 			}
 		})
@@ -117,7 +118,7 @@ func TestBuiltEnvFiles(t *testing.T) {
 	// What the tree holds under /run is not there at boot (BootView).
 	t.Run("refuses an env file linked under a boot mount", func(t *testing.T) {
 		files := map[string]string{"/etc/systemd/system/agentos-e.service": unit, "/etc/agentos/y.env": "-> /run/agentos/y.env", "/run/agentos/y.env": "GOMEMLIMIT=1\n"}
-		if err := underSystemd(t, files, ourEtc); err == nil || !strings.Contains(err.Error(), `names /etc/agentos/y.env, which no file under image/ ships`) {
+		if err := underSystemd(t, files, ourEtc); err == nil || !strings.Contains(err.Error(), `/etc/agentos/y.env is a link`) {
 			t.Fatalf("got %v, want the env file unread", err)
 		}
 	})
@@ -145,30 +146,31 @@ func TestBuiltEnvFiles(t *testing.T) {
 // lines, are not held (#6312).
 // REQ: KRN-2
 func TestBuiltPackageEnvFiles(t *testing.T) {
-	const pkgUnit = "[Service]\nExecStart=/usr/bin/pkgx\nEnvironmentFile=-/etc/default/pkgx\n"
-	ourEtc := func(p string) bool { return strings.HasPrefix(p, "/etc/") }
+	// unit_rules.py reads an env file only under /etc/agentos or /usr (#6474).
+	const pkgUnit = "[Service]\nExecStart=/usr/bin/pkgx\nEnvironmentFile=-/usr/lib/pkgx/env\n"
+	ourEnv := func(p string) bool { return p == "/usr/lib/pkgx/env" || strings.HasPrefix(p, "/etc/") }
 	for name, dir := range map[string]string{"a system unit": "/usr/lib/systemd/system/", "a user unit": "/usr/lib/systemd/user/"} {
 		t.Run("refuses an env file of ours that a package's "+name+" loads", func(t *testing.T) {
-			files := map[string]string{dir + "pkg-x.service": pkgUnit, "/etc/default/pkgx": "LD_PRELOAD=/var/lib/agentos-x/x.so\n"}
-			want := `a package's unit loads /etc/default/pkgx, a file of ours: /etc/default/pkgx:1: variable "LD_PRELOAD"`
-			if err := underSystemd(t, files, ourEtc); err == nil || !strings.Contains(err.Error(), want) {
+			files := map[string]string{dir + "pkg-x.service": pkgUnit, "/usr/lib/pkgx/env": "LD_PRELOAD=/var/lib/agentos-x/x.so\n"}
+			want := `a package's unit loads /usr/lib/pkgx/env, a file of ours: /usr/lib/pkgx/env:1: variable "LD_PRELOAD"`
+			if err := underSystemd(t, files, ourEnv); err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("got %v, want a refusal with %q", err, want)
 			}
 		})
 		t.Run("passes the env file a package's "+name+" loads as the package ships it", func(t *testing.T) {
-			files := map[string]string{dir + "pkg-x.service": pkgUnit, "/etc/default/pkgx": "LD_PRELOAD=/usr/lib/pkgx/x.so\n"}
+			files := map[string]string{dir + "pkg-x.service": pkgUnit, "/usr/lib/pkgx/env": "LD_PRELOAD=/usr/lib/pkgx/x.so\n"}
 			if err := underSystemd(t, files, func(string) bool { return false }); err != nil {
 				t.Fatal(err)
 			}
 		})
 	}
-	// A template's line names a file per instance (#6312 Security 1): every
-	// file of ours it may name is held, whatever instance is enabled.
+	// A template's line names a file per instance (#6312 Security 1), so
+	// unit_rules.py refuses the specifier rather than expand it (#6474).
 	t.Run("refuses an env file of ours that a package's template names by its instance", func(t *testing.T) {
 		files := map[string]string{"/usr/lib/systemd/system/pkgx@.service": "[Service]\nExecStart=/usr/bin/pkgx\nEnvironmentFile=-/etc/default/pkgx-%i\n",
 			"/etc/default/pkgx-a": "LD_PRELOAD=/var/lib/agentos-x/x.so\n"}
-		want := `a package's unit loads /etc/default/pkgx-a, a file of ours: /etc/default/pkgx-a:1: variable "LD_PRELOAD"`
-		if err := underSystemd(t, files, ourEtc); err == nil || !strings.Contains(err.Error(), want) {
+		want := `EnvironmentFile=-/etc/default/pkgx-%i: it holds a specifier`
+		if err := underSystemd(t, files, ourEnv); err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("got %v, want a refusal with %q", err, want)
 		}
 	})

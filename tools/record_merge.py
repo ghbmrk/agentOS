@@ -28,7 +28,8 @@ proof) is kept once: an identical duplicate is a no-op here, in doclint, in mutg
 both sides changed, differently, or one side changed and the other deleted, and any hunk holding a line that is no
 record line, keep conflict markers; a result with one key on two different lines (both sides added one ID, or two
 proofs of one mutant) keeps both and prints them. Either exits 1, so git stops the merge for the builder to
-resolve (renumber the PR's row, or keep one proof), which premerge reads as `same`. A side holding a carriage
+resolve (renumber the PR's row, or keep main's proof and drop the PR's), which premerge reads as `same`
+(#6472); keeping the PR's proof edits a main line and reads `changed`. A side holding a carriage
 return is refused, as doclint and mutgate refuse one: record and allow files end lines in LF only, so every reader
 reads one line the same way (#6375). Standard library only.
 """
@@ -51,6 +52,7 @@ RECORD = "MUTANTS-EQUIVALENT"  # tools/mutgate.py's RECORD: one JSON entry per l
 # whole (read_list): LF text, merged by git as text, never by the driver and never read as same by premerge.
 CLASSES = {"broker/core/core.txt": "list", "tools/trusted_core.txt": "list", "tools/ceilings.txt": "list",
            "tools/trusted_base_parsers.txt": "list", "tools/trusted_base_reasons.txt": "list",
+           "tools/word_budget_reasons.txt": "list",
            "tools/old_core.txt": "list", "tools/assumptions_legacy_ids.txt": "list",
            "tools/brief_acceptance_baseline.txt": "list", "tools/hostcheck_hw8.json": "list",
            "ASSUMPTIONS.md": "row", RECORD: "entry", "*_allow.txt": "line", "*.allow": "line", "allow*.txt": "line"}

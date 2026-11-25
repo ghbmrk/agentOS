@@ -78,12 +78,17 @@ func TestPrepSealsNoSetupNetwork(t *testing.T) {
 		}
 	}
 
-	// An image that already has /var/lib/agentos but no ap directory.
+	// An image that already has /var/lib/agentos, root:root 0700 as
+	// preflight requires (#1162), but no ap directory.
 	tree := map[string]string{"var/lib/agentos/": ""}
 	for k, v := range rootTree {
 		tree[k] = v
 	}
-	img, sums = writeImage(t, standardDisk(t, tree))
+	img, sums = writeImage(t, gptDisk([]part{
+		{typeESP, make([]byte, 1<<20)},
+		{typeUsr, make([]byte, 1<<20)},
+		{typeRoot, ext4Sif(t, tree, "sif /var/lib/agentos mode 040700", "sif /var/lib/agentos uid 0", "sif /var/lib/agentos gid 0")},
+	}))
 	if err := runPrep(img, sums, filepath.Join(t.TempDir(), "box2")); err != nil {
 		t.Fatalf("prep refused an image without the ap directory: %v", err)
 	}
