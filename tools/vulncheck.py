@@ -1950,6 +1950,16 @@ def verdict(f):
     return f"accepted #{f['accepted_by']}" if "accepted_by" in f else "FAIL"
 
 
+# Every tracked copy of the main-archive snapshot timestamp, which a point-release fix has to move
+# together (#6466, #6538); tests/test_vulncheck.py fails when `git grep` finds a copy not named here.
+SNAPSHOT_PINS = ("image/mkosi/mkosi.conf", "image/enforcer/mkosi/mkosi.conf",
+                 "image/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources",
+                 "image/enforcer/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources",
+                 "image/mkosi/mkosi.finalize (NAME_ONLY_SNAPSHOT, after checking that snapshot's systemd "
+                 "is still NAME_ONLY_SYSTEMD)", "tests/test_image.py (MkosiRunBoundTest)",
+                 "tests/test_image_repro.py (KeyringSpikesTest)")
+
+
 def summary(findings, problems, unused, out=None, config="assurance/vulncheck.json"):
     out = out or sys.stdout
     for f in findings:
@@ -1965,8 +1975,15 @@ def summary(findings, problems, unused, out=None, config="assurance/vulncheck.js
     failing = [f for f in findings if verdict(f) == "FAIL"]
     print(f"{len(findings)} findings, {len(failing)} failing, {len(problems)} problems", file=out)
     if any(f["where"] in IMAGE_TREES and f["fixed"] for f in failing):
-        print("fix: rebuild the image; Debian has fixed each image finding that names a fixed "
-              "version, and no record can accept those", file=out)
+        print("fix: Debian has fixed each image finding that names a fixed version, and no record can "
+              "accept those; the Debian security tracker's entry for the id names the suite that carries "
+              "the fix", file=out)
+        print("fix: if the fix is in the security suite (debian-security), rebuild the image: each "
+              "build reads a fresh security snapshot", file=out)
+        print("fix: if the fix is only in a point release (the main archive), move the main-archive "
+              "snapshot timestamp (Mirror= in image/mkosi/mkosi.conf) in every copy: "
+              f"{', '.join(SNAPSHOT_PINS)}; then update what else CI names, such as image/import_sweep.allow "
+              "hashes", file=out)
     if any(f["where"] == BUNDLED for f in failing):
         print(f"fix: pin a release of the holder whose copy has the fix, or add the id to its "
               f"\"bundled\" entry's ids in {config}, with the advisory's reach in its why, citing an open "

@@ -30,22 +30,38 @@ var ch3Rows = map[string]Act{
 	"Write firmware or software to a device (DEV-12)":                                                                 ActFirmwareWrite,
 }
 
-// spelled is how CH-3's proof column names a rung first.
-var spelled = map[string]Proof{"P0": P0, "P1": P1, "P2": P2, "P3": P3, "P4": P4,
-	"P3 with local confirmation": P3Local, "Local confirmation": P3Local}
+// spelled is how CH-3's proof column names a rung first: by its String,
+// which TestRungNamesAreCH3s pins to CH-3's words, or as the reverse-
+// engineering row does, by local confirmation alone.
+var spelled = func() map[string]Proof {
+	m := map[string]Proof{"Local confirmation": P3Local}
+	for p := P0; p <= PRecovery; p++ {
+		m[p.String()] = p
+	}
+	return m
+}()
 
-// TestCH3RowsAreTheFloor reads CH-3's table from SPEC.md: every row is a
-// case here, at worth.go's floor, which is the rung its proof names first
-// (a row naming none is given on the owner page, P3), and each holds as a rung
-// caveat: an owner event at that rung or above passes, one below is refused.
-func TestCH3RowsAreTheFloor(t *testing.T) {
+// ch3Text is CH-3's text in SPEC.md, from its bullet to CH-4's.
+func ch3Text(t *testing.T) string {
+	t.Helper()
 	spec, err := os.ReadFile("../../../SPEC.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := string(spec)
 	s = s[strings.Index(s, "- **CH-3** "):]
-	s = s[:strings.Index(s, "\n- **CH-4** ")]
+	return s[:strings.Index(s, "\n- **CH-4** ")]
+}
+
+// TestCH3RowsAreTheFloor reads CH-3's table from SPEC.md: every row is a
+// case here, at worth.go's floor, which is the rung its proof names first
+// (a row naming none must be given on the owner page, P3, as Unlock is), and
+// each holds as a rung caveat: an owner event at that rung or above passes,
+// one below is refused. The row whose action lists recovery must name the
+// recovery key for it, the floor of ActRecovery (#5062).
+func TestCH3RowsAreTheFloor(t *testing.T) {
+	s := ch3Text(t)
+	recovery := 0
 	first := regexp.MustCompile(`\bP[0-4]( with local confirmation)?\b|^ Local confirmation`)
 	rows := 0
 	for _, line := range strings.Split(s, "\n") {
@@ -67,6 +83,14 @@ func TestCH3RowsAreTheFloor(t *testing.T) {
 		rows++
 		if m := strings.TrimSpace(first.FindString(proof)); m != "" && spelled[m] != want {
 			t.Errorf("%q: SPEC names %s first, the floor %v", action, m, want)
+		} else if m == "" && (!strings.Contains(proof, "on the owner page") || want != P3) {
+			t.Errorf("%q names no rung: it must be given on the owner page, P3, not %v", action, want)
+		}
+		if strings.HasSuffix(action, ", recovery") {
+			recovery++
+			if !strings.Contains(proof, "recovery: "+PRecovery.String()+",") || floor[ActRecovery].proof != PRecovery {
+				t.Errorf("%q: recovery's proof is not %s at the floor %v", action, PRecovery, floor[ActRecovery].proof)
+			}
 		}
 		o, h, k := root(t)
 		d, err := Derive(k, h.priv, gen(3).pub, LimitRung(want))
@@ -85,6 +109,9 @@ func TestCH3RowsAreTheFloor(t *testing.T) {
 	}
 	if rows != len(ch3Rows) {
 		t.Errorf("SPEC's CH-3 has %d rows, the cases %d", rows, len(ch3Rows))
+	}
+	if recovery != 1 {
+		t.Errorf("%d CH-3 rows list recovery, want 1", recovery)
 	}
 }
 
@@ -128,17 +155,37 @@ func TestVoiceOnlyLowers(t *testing.T) {
 	}
 }
 
-// A refusal names rungs as CH-3 does (P3Local, not its ordinal).
+// Each rung's name is CH-3's own words for it, read from SPEC.md, so a
+// refusal's detail, which a log carries and Rederive compares byte for byte,
+// says what the owner reads in the spec, never a Go identifier (#5062).
+func TestRungNamesAreCH3s(t *testing.T) {
+	s := ch3Text(t)
+	for _, p := range []Proof{P0, P1, P2, P3, P4} {
+		if !strings.Contains(s, "  - **"+p.String()+":** ") {
+			t.Errorf("%v is not one of CH-3's rungs", p)
+		}
+	}
+	// CH-3 spells P3Local and recovery only in its table's proof column.
+	for p, in := range map[Proof]string{P3Local: "| " + P3Local.String() + ", the passkey", PRecovery: "recovery: " + PRecovery.String() + ", through"} {
+		if !strings.Contains(s, in) {
+			t.Errorf("CH-3 does not call %d %q", uint8(p), p)
+		}
+	}
+}
+
+// A refusal names rungs as CH-3 does, and a rung CH-3 has no name for as
+// unknown with its number (Limits.apply refuses one in a key, so only a
+// caller's out-of-range Context.Rung can print it).
 func TestRungNames(t *testing.T) {
-	got := fmt.Sprint(P0, P1, P2, P3, P3Local, P4, PRecovery, PRecovery+1)
-	if got != "P0 P1 P2 P3 P3Local P4 PRecovery Proof(7)" {
+	got := fmt.Sprint(P0, ",", P1, ",", P2, ",", P3, ",", P3Local, ",", P4, ",", PRecovery, ",", PRecovery+1, ",", Proof(255))
+	if got != "P0,P1,P2,P3,P3 with local confirmation,P4,the recovery key,unknown rung 7,unknown rung 255" {
 		t.Fatal(got)
 	}
 	o, h, k := root(t)
 	d, _ := Derive(k, h.priv, gen(3).pub, LimitRung(P3Local))
 	st := step(Trash)
 	st.Rung = P3
-	if rf := verified(t, d, o, gen(3)).Authorize(st, ctx(1, nil)); rf == nil || rf.Detail != "P3, the key asks P3Local" {
+	if rf := verified(t, d, o, gen(3)).Authorize(st, ctx(1, nil)); rf == nil || rf.Detail != "P3, the key asks P3 with local confirmation" {
 		t.Fatalf("%v", rf)
 	}
 }
