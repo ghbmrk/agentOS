@@ -9,21 +9,37 @@ host and the pinned mkosi on another where `build.sh` never ran, so the reposito
 mkosi, its config or its binary. Each host needs a checkout of the same commit with no changed, untracked or
 ignored file, a user who can sudo, and network to the Debian mirrors (cloud agent sessions have none; CI does).
 The stage host need not last: a disposable VM, thrown away once the tar is copied out, is a valid stage host.
+Each half marks its host before it starts (`/var/lib/agentos-stage-host`, `/var/lib/agentos-build-host`) and
+refuses a host holding the other's mark, so one host never plays both; a mark that cannot be read as root
+stops the run. The marks hold an honest operator to the split: root code on a host (`build.sh` on the stage
+host) can delete them.
+
+The SHA-256 the stage prints binds the tar in transit only: it proves the build host got the bytes the stage
+host packed, not that a hostile stage host packed an honest `/usr`.
+
+On the build host, nothing a non-root process can write is read as root: after its checks the build copies
+the commit and the tar into a root-only directory that `mktemp` makes in `/var/lib` (the commit's objects into
+root's own repository there, checked against their ids, then checked out with no config or attributes of the
+caller's, and refused unless the copy is exactly the commit's tree), and runs every later step there as root
+with root's own `PATH`, so the tar hashed is the tar unpacked and the tree checked is the tree mkosi reads.
+The image then moves to `DIR/out`.
 
 1. On the stage host, with `build.sh`'s tools (image.yml's "Install staging tools" step):
    `image/local-build.sh stage DIR` marks the host as one that staged (`/var/lib/agentos-stage-host`), runs
    `image/build.sh` as image.yml's stage job does, packs the stage as `DIR/stage-COMMIT.tar` and prints the
    build command with the tar's SHA-256.
-2. On the build host, which never staged (the wrapper refuses a host with the mark), with the pinned mkosi
-   v24.3 in `/opt/mkosi` (image.yml's "Install build and boot tools" step; the wrapper refuses any other
-   commit, and any changed, untracked or ignored file there): `image/local-build.sh build TAR SHA256 DIR
-   [VERSION]` refuses a tar whose content is not the SHA-256 the stage printed, holds it to `stage/usr`,
-   `agentos.sources`, `guest/` and `linked/`, then runs the one line image.yml's "Build image" step runs:
+2. On the build host, which never staged, with the pinned mkosi v24.3 in `/opt/mkosi` (image.yml's
+   "Install build and boot tools" step; the wrapper refuses any other commit, and any changed, untracked or
+   ignored file there): `image/local-build.sh build TAR SHA256 DIR [VERSION]` refuses the tar's root-only
+   copy if its content is not the SHA-256 the stage printed, holds it to `stage/usr`, `agentos.sources`,
+   `guest/` and `linked/`, then runs the one line image.yml's "Build image" step runs:
    `sudo env "PATH=$PATH" HOME=/root "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" /opt/mkosi/bin/mkosi -C image/mkosi -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" --environment=AGENTOS_SECURITY_SNAPSHOT="$AGENTOS_SECURITY_SNAPSHOT" --extra-tree="$OUT/stage/usr:/usr" --output-dir "$OUT" build`,
    and `image/finish.sh`. The image is in `DIR/out`.
 
-`DIR` must not exist; relative paths are the caller's. Each half names its log (`DIR/stage.log`,
-`DIR/build.log`) on exit. A checkout with changes or untracked files is refused, as CI builds only commits.
+`DIR` must not exist; relative paths are the caller's. Each half names its log on exit: `DIR/stage.log`, and
+`DIR/build.log` once the image is out. A build that fails keeps its root-only directory for reading and names
+it on exit, with the log if mkosi ran (a check before mkosi writes none), and the `sudo rm -rf` that removes it.
+A checkout with changes or untracked files is refused, as CI builds only commits.
 `VERSION` defaults to the commit time and may hold only `0-9 A-Z a-z . + _ -`. `AGENTOS_SECURITY_SNAPSHOT`,
 if set on both hosts, is the run's snapshot; unset, `build.sh` resolves one and the build host resolves the
 set it must be in, later, so the two can differ: the build then refuses and names the fix, setting it on both

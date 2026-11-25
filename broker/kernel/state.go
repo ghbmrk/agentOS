@@ -526,7 +526,7 @@ type State struct {
 	uses     map[key.ID][]usedRec
 	reserved map[uint64]*spendReserved   // open reservations by entry
 	seen     map[key.ID]map[string]int   // root -> shape -> completed, not undone
-	recent   map[key.ID]map[string]int64 // root -> fingerprint -> time of last completion
+	recent   map[key.ID]map[string]int64 // root -> irreversible fingerprint -> time of last completion
 }
 
 // Grant is a passkey grant and when it is live.
@@ -1259,10 +1259,7 @@ func (s *State) Apply(e Entry) error {
 		if p, st := s.step(b); st != nil && st.Phase == PDone && !st.Undone {
 			st.Undone = true
 			sp := p.Plan.Step(b.Index)
-			s.seen[p.Root][Shape(sp)]--
-			if c, _ := key.ClassOf(sp.Verb); !c.Irreversible() {
-				delete(s.recent[p.Root], Fingerprint(sp)) // an irreversible effect stays done
-			}
+			s.seen[p.Root][Shape(sp)]-- // an irreversible effect stays in s.recent: it stays done
 		}
 	case TStepRetried:
 		b, err := body[stepRef](e)
@@ -1307,7 +1304,9 @@ func (s *State) complete(p *PlanState, i int, at int64) {
 		s.seen[p.Root], s.recent[p.Root] = map[string]int{}, map[string]int64{}
 	}
 	s.seen[p.Root][Shape(sp)]++
-	s.recent[p.Root][Fingerprint(sp)] = at
+	if c, _ := key.ClassOf(sp.Verb); c.Irreversible() {
+		s.recent[p.Root][Fingerprint(sp)] = at // only the duplicate guard reads it, only for these
+	}
 	if p.Status == SActive && p.Next == i {
 		p.Next++
 		if p.Next == len(p.Steps) {
