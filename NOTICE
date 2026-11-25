@@ -69,7 +69,7 @@ MIT dependencies (broker/vendor)
   It grants no HEVC patent rights; HEVC is covered by patent pools and
   unpooled holders, and a distributor of an image with it may need their
   licences); broker/third_party/h265 is a patched copy of v0.2.3
-- github.com/gobwas/httphead, pool, ws
+- github.com/gobwas/httphead, ws
 - github.com/icholy/digest
 - github.com/makiuchi-d/gozxing
 - github.com/pion/logging, randutil, rtcp, rtp, sdp/v3, srtp/v3, transport/v5

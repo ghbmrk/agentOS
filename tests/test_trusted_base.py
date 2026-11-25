@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -749,10 +750,36 @@ RERUN_PIN = [
     '    runs-on: ubuntu-24.04',
     '    timeout-minutes: 30',
     '    permissions:',
-    '      actions: write # rerun trusted-base runs, nothing else',
+    '      actions: write # rerun or cancel trusted-base runs, nothing else',
     "      contents: read # compare main's commits",
     '      pull-requests: read',
     '    steps:',
+    "      - name: Cancel waiting trusted-base attempts on no open PR's head",
+    '        shell: bash',
+    '        continue-on-error: true # a failed cancel never fails the job or skips the reruns below',
+    '        env:',
+    '          GH_TOKEN: ${{ github.token }}',
+    '          REPO: ${{ github.repository }}',
+    '        run: |',
+    '          waiting=""',
+    '          for s in queued pending; do',
+    '            w=$(gh api --paginate "repos/$REPO/actions/workflows/trusted-base.yml/runs?event=pull_request_target&status=$s&per_page=100" --jq \'.workflow_runs[] | "\\(.id) \\(.head_sha) \\([.pull_requests[].number] | join(","))"\') || { echo "::warning::cannot list $s trusted-base runs; nothing cancelled"; exit 0; }',
+    '            waiting="$waiting$w"$\'\\n\'',
+    '          done',
+    '          heads=$(gh api --paginate "repos/$REPO/pulls?state=open&per_page=100" --jq \'.[] | "\\(.number) \\(.head.sha)"\') || { echo "::warning::cannot list open PRs; nothing cancelled"; exit 0; }',
+    '          if grep -Evq \'^[1-9][0-9]* [0-9a-f]{40}$\' <<< "$heads"; then echo "::warning::an open PR\'s head is unreadable; nothing cancelled"; exit 0; fi',
+    '          cancelled=0',
+    '          while read -r id sha nums; do',
+    '            [[ $id =~ ^[1-9][0-9]*$ && $sha =~ ^[0-9a-f]{40}$ && $nums =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || continue',
+    '            ! grep -q " $sha\\$" <<< "$heads" || continue',
+    '            open=1',
+    '            for n in ${nums//,/ }; do grep -q "^$n " <<< "$heads" || open=0; done',
+    '            [ "$open" = 1 ] || continue',
+    '            now=$(gh api "repos/$REPO/actions/runs/$id" --jq \'select(.status == "queued" or .status == "pending") | "\\(.head_sha) \\([.pull_requests[].number] | join(","))"\') || { echo "::warning::run $id not re-read; left alone"; continue; }',
+    '            [ "$now" = "$sha $nums" ] || continue',
+    '            if gh api -X POST "repos/$REPO/actions/runs/$id/cancel" > /dev/null; then echo "cancelled run $id ($sha, PR $nums): no open PR\'s head"; cancelled=$((cancelled + 1)); else echo "::warning::cancel of run $id refused"; fi',
+    '          done <<< "$waiting"',
+    '          printf \'\\n%s\\n\' "Cancelled $cancelled waiting trusted-base attempt(s) on no open PR\'s head." | tee -a "$GITHUB_STEP_SUMMARY"',
     "      - name: Rerun every open PR's newest trusted-base run",
     '        shell: bash',
     '        env:',
@@ -892,7 +919,10 @@ class Workflow(unittest.TestCase):
                          ('[ $? = 1 ]; }; }; then', '[ $? != 0 ]; }; }; then'),
                          ('all(.jobs[]; .conclusion == "success")', 'any(.jobs[]; .conclusion == "success")'),
                          ('&& [ -n "$passed" ]; then', '; then'),
-                         ("    runs-on: ubuntu-24.04", "    continue-on-error: true\n    runs-on: ubuntu-24.04")]:
+                         ("    runs-on: ubuntu-24.04", "    continue-on-error: true\n    runs-on: ubuntu-24.04"),
+                         # CI-cancel-stale-sha-fu (#6531): only the cancel step may fail without failing the job.
+                         ("        continue-on-error: true # a failed cancel", "        # a failed cancel"),
+                         ("          WAIT: 30\n", "          WAIT: 30\n        continue-on-error: true\n")]:
             self.assertIn(old, text)
             self.assertTrue(pin_problems(text.replace(old, new, 1), RERUN_PIN), old)
 
@@ -900,7 +930,8 @@ class Workflow(unittest.TestCase):
 def rerun_script():
     """The rerun step's `run:` block of trusted-base-rerun.yml, as one bash script."""
     lines = (ROOT / ".github/workflows/trusted-base-rerun.yml").read_text().split("\n")
-    start = next(i for i, l in enumerate(lines) if l.strip() == "run: |") + 1
+    step = lines.index("      - name: Rerun every open PR's newest trusted-base run")
+    start = next(i for i, l in enumerate(lines) if i > step and l.strip() == "run: |") + 1
     return "\n".join(l[10:] for l in lines[start:] if l.strip()) + "\n"
 
 
@@ -1523,14 +1554,24 @@ class BodyIsNotRead(unittest.TestCase):
 
     # REQ: CI-trusted-base-records
     def test_check_takes_no_body(self):
+        # A deprecated --body is accepted for reruns of pre-#6491 runs, and never opened or passed on:
+        # run_check is called exactly as without it, and a path that does not exist is not an error.
         with tempfile.TemporaryDirectory() as d:
             body = os.path.join(d, "body.txt")
             pathlib.Path(body).write_text("Trusted-core: D-7\nCeiling: D-7\n")
-            err = io.StringIO()
-            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as e:
-                tb.main(["check", "--base-tree", d, "--head-tree", d, "--body", body, "--pr", str(PR)])
-            self.assertEqual(e.exception.code, 2)
-            self.assertIn("unrecognized arguments: --body", err.getvalue())
+            calls = []
+            with mock.patch.object(tb, "run_check", side_effect=lambda *a, **k: calls.append((a, k)) or ([], "")):
+                for extra in ([], ["--body", body], ["--body", os.path.join(d, "missing.txt")]):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        rc = tb.main(["check", "--base-tree", d, "--head-tree", d, "--pr", str(PR)] + extra)
+                    self.assertEqual(rc, 0, extra)
+            self.assertEqual(calls, [((d, d), {"pr": PR})] * 3)
+            for cmd in (["measure"], ["claims", "--base-tree", d, "--head-tree", d, "--repo", d]):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as e:
+                    tb.main(cmd + ["--body", body])
+                self.assertEqual(e.exception.code, 2, cmd)
+                self.assertIn("unrecognized arguments: --body", err.getvalue())
         self.assertNotIn("body", inspect.signature(tb.run_check).parameters)
         for name in ("compare_core", "compare_ceilings"):
             self.assertNotIn("body", inspect.signature(getattr(tb, name)).parameters, name)
