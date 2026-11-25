@@ -69,3 +69,7 @@ func SetInbound(ack, latch time.Duration, clock func() time.Time) (restore func(
 	ackWait, latchWait, now = ack, latch, clock
 	return func() { ackWait, latchWait, now = a, l, n }
 }
+
+// TransportOptions exposes the line's transport-layer options, so a test
+// can drive the line's own WS transport.
+var TransportOptions = transportOptions

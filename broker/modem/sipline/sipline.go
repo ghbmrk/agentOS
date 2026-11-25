@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/netip"
 	"strconv"
@@ -167,7 +168,15 @@ func OwnerText(err error) string {
 // it directly rather than through a configured logger.
 var quiet = slog.New(slog.DiscardHandler)
 
-func init() { sip.SetDefaultLogger(quiet) }
+// sipgo reads each WS message into one TransportBufferReadSize buffer
+// (32768 in v1.5.0) and drops the rest, so a WS message above that size
+// fails to parse although the parser takes up to ParseMaxMessageLength.
+// The buffer is raised to the parser's limit, process-wide as sipgo keeps
+// it; TCP, TLS and UDP read with the same buffer (ASSUMPTIONS SL16).
+func init() {
+	sip.SetDefaultLogger(quiet)
+	sip.TransportBufferReadSize = uint16(min(sip.ParseMaxMessageLength, math.MaxUint16))
+}
 
 // Limits on incoming texts.
 const (
@@ -255,26 +264,7 @@ func Open(ctx context.Context, cfg Config) (*Line, error) {
 	}
 	uaOpts := []sipgo.UserAgentOption{sipgo.WithUserAgent("agentos"), sipgo.WithUserAgentHostname(cfg.Domain), sipgo.WithUserAgenTLSConfig(tc),
 		sipgo.WithUserAgentTransactionLayerOptions(sip.WithTransactionLayerLogger(quiet))}
-	// The transports dial through the guard's dialer (its Control hook
-	// checks each connect address), and the provider name is looked up
-	// only through the guard's resolver. Every request the line sends is
-	// pinned to TLS (request) and dialogs keep their INVITE's transport;
-	// WS dials through the guard too. sipgo's UDP and WSS transports have
-	// no dial hook, which is why nothing the line sends selects them
-	// (ASSUMPTIONS SL15).
-	dial := func(laddr net.Addr) net.Dialer {
-		d := *guardDialer(cfg.Guard)
-		d.LocalAddr = laddr
-		return d
-	}
-	tlOpts := []sip.TransportLayerOption{sip.WithTransportLayerLogger(quiet), sip.WithTransportLayerTransports(sip.TransportsConfig{
-		TCP: &sip.TransportTCP{DialerCreate: dial},
-		TLS: &sip.TransportTLS{TransportTCP: &sip.TransportTCP{DialerCreate: dial}},
-		WS: &sip.TransportWS{DialerCreate: func(laddr net.Addr) ws.Dialer {
-			d := dial(laddr)
-			return ws.Dialer{Protocols: sip.WebSocketProtocols, NetDial: d.DialContext}
-		}},
-	})}
+	tlOpts := transportOptions(cfg.Guard)
 	uaOpts = append(uaOpts, sipgo.WithUserAgentDNSResolver(cfg.Guard.Resolver()))
 	uaOpts = append(uaOpts, sipgo.WithUserAgentTransportLayerOptions(tlOpts...))
 	ua, err := sipgo.NewUA(uaOpts...)
@@ -889,4 +879,29 @@ func (l *Line) onBye(req *sip.Request, tx sip.ServerTransaction) {
 		_ = c.dlg.ReadBye(req, tx)
 	}
 	c.end(nil)
+}
+
+// transportOptions configures the line's transport layer.
+func transportOptions(g *netguard.Policy) []sip.TransportLayerOption {
+	// The transports dial through the guard's dialer (its Control hook
+	// checks each connect address), and the provider name is looked up
+	// only through the guard's resolver. Every request the line sends is
+	// pinned to TLS (request) and dialogs keep their INVITE's transport;
+	// WS dials through the guard too. sipgo's UDP and WSS transports have
+	// no dial hook, which is why nothing the line sends selects them
+	// (ASSUMPTIONS SL15).
+	dial := func(laddr net.Addr) net.Dialer {
+		d := *guardDialer(g)
+		d.LocalAddr = laddr
+		return d
+	}
+	tlOpts := []sip.TransportLayerOption{sip.WithTransportLayerLogger(quiet), sip.WithTransportLayerTransports(sip.TransportsConfig{
+		TCP: &sip.TransportTCP{DialerCreate: dial},
+		TLS: &sip.TransportTLS{TransportTCP: &sip.TransportTCP{DialerCreate: dial}},
+		WS: &sip.TransportWS{DialerCreate: func(laddr net.Addr) ws.Dialer {
+			d := dial(laddr)
+			return ws.Dialer{Protocols: sip.WebSocketProtocols, NetDial: d.DialContext}
+		}},
+	})}
+	return tlOpts
 }
