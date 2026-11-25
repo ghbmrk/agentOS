@@ -691,3 +691,44 @@ func TestZZSetupStateReportEmptiesTheQueue(t *testing.T) {
 		}
 	}
 }
+
+// A handed-out text the bridge never answers is dropped from the outbox
+// when its wait ends, counted once as timed out, and its late result is
+// stray.
+func TestZZAnUnansweredSendIsDroppedAndCounted(t *testing.T) {
+	l := New(Config{Owner: ownerNum, SendWait: 100 * time.Millisecond, PollWait: 50 * time.Millisecond})
+	call(t, l, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateOK}, nil)
+	done := sendAsync(l, ownerNum, "never answered")
+	it := poll(t, l)
+	if err := <-done; err == nil {
+		t.Fatal("an unanswered send succeeded")
+	}
+	l.mu.Lock()
+	out, queued := len(l.out), len(l.queue)
+	l.mu.Unlock()
+	if out != 0 || queued != 0 {
+		t.Fatalf("after the wait ended: %d out, %d queued", out, queued)
+	}
+	if n := l.TimedOut(); n != 1 {
+		t.Fatalf("timed out %d, want 1", n)
+	}
+	stray := l.Stray()
+	call(t, l, bridgeproto.OpSent, bridgeproto.Sent{ID: it.ID, Code: bridgeproto.CodeOK}, nil)
+	if l.Stray() != stray+1 {
+		t.Fatal("a late result for a dropped send is not stray")
+	}
+}
+
+// The local page reads an ok line as down only once it has been silent
+// for more than Silent.
+func TestZZOwnerLineNoteAtExactlySilent(t *testing.T) {
+	l, clk := rig(t)
+	clk.add(Silent)
+	if n := l.OwnerLineNote(); n != "" {
+		t.Fatalf("at exactly Silent: %q", n)
+	}
+	clk.add(time.Nanosecond)
+	if n := l.OwnerLineNote(); n == "" {
+		t.Fatal("past Silent the line still reads fine")
+	}
+}
