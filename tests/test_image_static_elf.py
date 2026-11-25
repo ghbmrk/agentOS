@@ -375,6 +375,50 @@ class StaticElfTest(unittest.TestCase):
                 struct.pack_into("<Q", bad, at + 40, struct.unpack_from("<Q", go, at + 40)[0] + 0x1000)
         self.assertIn("executable segment", se.go_outside(bytes(bad)))
 
+    def test_each_layout_guard_refuses_on_its_own(self):
+        # #6700 L3 7175192951 point 1: one edit of a plain Go binary per guard, every other guard still met, so
+        # each check is the one that refuses. Offsets: e_phoff 32, e_shoff 40; Elf64_Shdr sh_size at 32;
+        # Elf64_Phdr p_vaddr at 16, p_memsz at 40; the table's stored text start at 24 (0 from Go 1.26).
+        go = self.bins["go"].read_bytes()
+        self.assertIsNone(se.go_outside(go))
+        _o, size, addr, _f = se.sections(go)[".text"]
+        pcln = se.sections(go)[".gopclntab"][0]
+        shoff, = struct.unpack_from("<Q", go, 40)
+        strndx, = struct.unpack_from("<H", go, 62)
+        names = struct.unpack_from("<Q", go, shoff + 64 * strndx + 24)[0]
+        text_sh = next(shoff + 64 * k for k in range(struct.unpack_from("<H", go, 60)[0])
+                       if go[names + struct.unpack_from("<I", go, shoff + 64 * k)[0]:].startswith(b".text\0"))
+        phoff, = struct.unpack_from("<Q", go, 32)
+        run = [phoff + 56 * k for k in range(struct.unpack_from("<H", go, 56)[0])
+               if struct.unpack_from("<II", go, phoff + 56 * k) == (1, 5)]
+        self.assertEqual(len(run), 1)
+        seg = run[0]
+        vaddr, = struct.unpack_from("<Q", go, seg + 16)
+
+        def edited(*edits):
+            b = bytearray(go)
+            for at, form, value in edits:
+                struct.pack_into(form, b, at, value)
+            return bytes(b)
+        # The table stops short of .text's end: .text and its segment grown by a page, the stored start zeroed
+        # (as Go 1.26 stores it), so only the span check sees the bytes past the table.
+        grown = edited((text_sh + 32, "<Q", size + 0x1000), (seg + 40, "<Q", addr + size + 0x1000 - vaddr),
+                       (pcln + 24, "<Q", 0))
+        self.assertIn("function table spans", se.go_outside(grown))
+        self.assertEqual(se.go_cgo(grown), "0-o")
+        # The executable segment starts after .text's start (and still ends at its end).
+        late = edited((seg + 16, "<Q", addr + 16), (seg + 40, "<Q", size - 16))
+        self.assertIn("executable segment", se.go_outside(late))
+        # A stored text start that is not .text's address.
+        moved = edited((pcln + 24, "<Q", addr + 16))
+        self.assertIn("text start", se.go_outside(moved))
+        # A table whose entries are out of address order is unread (fails closed), not walked.
+        _base, funcs, _end = se.pcln_funcs(go[pcln:])
+        ftab = pcln + struct.unpack_from("<Q", go, pcln + 64)[0]
+        unordered = edited((ftab + 8, "<I", funcs[0][0]))
+        with self.assertRaises(se.Unread):
+            se.go_cgo(unordered)
+
     def test_a_forged_function_table_is_not_go(self):
         # #6563 item 2 (SGE-2): a .gopclntab section added to a static glibc C binary (a 1.20 header, no
         # functions) does not make it Go, and a real table edited to list no function is refused.
