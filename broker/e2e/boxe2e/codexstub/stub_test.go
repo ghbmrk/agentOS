@@ -384,3 +384,21 @@ func TestStubMatchesTheHostWhateverItsPortOrTrailingDot(t *testing.T) {
 		t.Fatalf("hits %v refused %d", s.Hits(), s.Refused())
 	}
 }
+
+// The redirect the code exchange must carry is the code endpoint's own
+// host and the route's callback path, set only from the code endpoint:
+// a route whose other endpoints sit on another host leaves it unchanged.
+func TestNewTakesTheRedirectFromTheCodeEndpoint(t *testing.T) {
+	if got, want := New().redirect, "https://auth.openai.com/deviceauth/callback"; got != want {
+		t.Fatalf("redirect %q, want %q", got, want)
+	}
+	r := egress.Codex()
+	for i := range r.Endpoints {
+		if r.Endpoints[i].Kind != egress.KindCode {
+			r.Endpoints[i].Host = "other.example"
+		}
+	}
+	if got, want := newStub(r).redirect, "https://auth.openai.com/deviceauth/callback"; got != want {
+		t.Fatalf("redirect %q, want %q", got, want)
+	}
+}
