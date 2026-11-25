@@ -461,7 +461,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// failure (PAGE-stopping-text, UX-2wb-1).
 	a := &answers{}
 	r = r.WithContext(context.WithValue(r.Context(), answersKey{}, a))
-	b := &buffered{h: h.Clone()}
+	b := &buffered{w: w, h: h.Clone()}
 	if !s.claimGate(b, r) {
 		s.mux.ServeHTTP(b, r)
 	}
@@ -469,6 +469,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	stopping, partway := a.stopping, a.partway
 	a.mu.Unlock()
 	if stopping {
+		// A page view does nothing, whatever its calls returned.
+		partway = partway && r.Method != http.MethodGet && r.Method != http.MethodHead
 		s.stopping(w, r, b.h.Values("Set-Cookie"), partway)
 		return
 	}
@@ -476,14 +478,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // buffered holds a page until ServeHTTP knows whether agentosd refused a
-// call because it is stopping.
+// call because it is stopping. It passes the connection's deadlines to w
+// (the upload bound, uploadWindow) but nothing that would write past the
+// buffer.
 type buffered struct {
+	w    http.ResponseWriter
 	h    http.Header
 	code int
 	body bytes.Buffer
 }
 
 func (b *buffered) Header() http.Header { return b.h }
+
+func (b *buffered) SetReadDeadline(t time.Time) error {
+	return http.NewResponseController(b.w).SetReadDeadline(t)
+}
+
+func (b *buffered) SetWriteDeadline(t time.Time) error {
+	return http.NewResponseController(b.w).SetWriteDeadline(t)
+}
 
 func (b *buffered) WriteHeader(code int) {
 	if b.code == 0 {

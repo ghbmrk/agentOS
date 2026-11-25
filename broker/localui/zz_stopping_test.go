@@ -15,9 +15,12 @@ import (
 )
 
 // stopOwner is agentosd once it is stopping: an InProcess that refuses
-// every op as stopping, except, with session set, the sign-in check (a
-// stop that begins after the page checked the session).
-type stopOwner struct{ session string }
+// every op as stopping, except, with session set, the sign-in check and
+// the ops in ok (a stop that begins after those returned).
+type stopOwner struct {
+	session string
+	ok      map[string]bool
+}
 
 func (o stopOwner) Call(ctx context.Context, op string, args, out any) error {
 	h := func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
@@ -27,6 +30,8 @@ func (o stopOwner) Call(ctx context.Context, op string, args, out any) error {
 		h = func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
 			return localapi.Session{Token: o.session, Until: time.Now().Add(time.Hour)}, nil
 		}
+	} else if o.ok[op] {
+		h = func(context.Context, sockets.Peer, json.RawMessage) (any, error) { return struct{}{}, nil }
 	}
 	return InProcess{op: h}.Call(ctx, op, args, out)
 }
@@ -117,25 +122,64 @@ func TestZEveryPageActionRefusedAsStoppingSaysSo(t *testing.T) {
 	}
 }
 
-// REQ: UX-2wb-1 (#6619)
+// REQ: UX-2wb-1 (#6619; L3 blocker 2 on #6699)
 // A stop that begins after the page checked the session refuses the
-// action's own call. Each signed-in action then says agentOS stopped
-// partway, since a call that returned before the refusal may have taken
-// effect: it never claims nothing was done.
-func TestZEachActionsOwnStoppingRefusalSaysPartway(t *testing.T) {
+// action's own call. The session check only reads, so each signed-in
+// action still says it did not do this, and never asks the owner to check
+// for an effect that cannot have happened.
+func TestZEachActionsOwnStoppingRefusalSaysNotDone(t *testing.T) {
 	tok := strings.Repeat("ab", localapi.TokenBytes)
 	s := stoppingServer(t, stopOwner{session: tok})
 	for _, a := range stoppingActions {
-		switch a.path {
-		case "/status", "/unlock", "/stop", "/signout":
-			// These call agentosd before or without the session check,
-			// so the refusal comes first: nothing was done.
-			continue
-		}
 		w := stoppingRequest(s, tok, a.method, a.path, a.form)
-		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "partway through") {
+		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "so it did not do this") {
 			t.Errorf("%s %s: %d %q %.200q", a.method, a.path, w.Code, w.Header().Get("Location"), w.Body.String())
 		}
+	}
+}
+
+// REQ: UX-2wb-1 (#6619; L3 blocker 2 on #6699)
+// Only a form whose acting call returned before the refusal says agentOS
+// stopped partway: RESUME recorded, then its status page refused. A page
+// view does nothing, so a GET says "did not do this" even when one of its
+// calls returned first.
+func TestZOnlyAnActionThatReturnedSaysPartway(t *testing.T) {
+	tok := strings.Repeat("ab", localapi.TokenBytes)
+	s := stoppingServer(t, stopOwner{session: tok, ok: map[string]bool{localapi.OpResume: true, localapi.OpRequests: true}})
+	w := stoppingRequest(s, tok, "POST", "/resume", fixed(url.Values{"code": {"123456"}}))
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "partway through") {
+		t.Fatalf("RESUME recorded, then refused: %d %.300q", w.Code, w.Body.String())
+	}
+	w = stoppingRequest(s, tok, "GET", "/home", nil)
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "so it did not do this") {
+		t.Fatalf("home view with a listing returned: %d %.300q", w.Code, w.Body.String())
+	}
+}
+
+// REQ: UX-2wb-1, L18 (#6619; L3 blocker 1 on #6699)
+// The buffered page still reaches the connection's deadlines, so the
+// upload bound (uploadWindow) a handler sets through ServeHTTP holds.
+func TestZABufferedPageKeepsTheConnectionDeadlines(t *testing.T) {
+	s := stoppingServer(t, stopOwner{})
+	var readErr, writeErr error
+	s.mux.HandleFunc("/deadline-probe", func(w http.ResponseWriter, r *http.Request) {
+		rc := http.NewResponseController(w)
+		readErr = rc.SetReadDeadline(time.Now().Add(uploadWindow))
+		writeErr = rc.SetWriteDeadline(time.Now().Add(uploadWindow))
+	})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.RemoteAddr = "10.42.0.20:5000"
+		r.Host = "10.42.0.1"
+		s.ServeHTTP(w, reaching(r))
+	}))
+	defer ts.Close()
+	res, err := http.Get(ts.URL + "/deadline-probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK || readErr != nil || writeErr != nil {
+		t.Fatalf("deadlines through the buffer: %d read %v write %v", res.StatusCode, readErr, writeErr)
 	}
 }
 

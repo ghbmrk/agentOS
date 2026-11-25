@@ -40,7 +40,7 @@ func (s Socket) Call(ctx context.Context, op string, args, out any) error {
 	if errors.Is(err, bridgeclient.ErrRefused) {
 		err = Refused(strings.TrimPrefix(err.Error(), "bridgeclient: "))
 	}
-	return note(ctx, err)
+	return note(ctx, op, err)
 }
 
 // answers is what agentosd answered one page request (PAGE-stopping-text):
@@ -55,10 +55,14 @@ type answers struct {
 
 type answersKey struct{}
 
-// note records err in the request's answers, if ctx carries them, and
-// returns it. A call that returned, or failed other than by a refusal
-// code, may have taken effect; a refused one did not.
-func note(ctx context.Context, err error) error {
+// readOps only read: their return before a refusal changed nothing.
+var readOps = map[string]bool{localapi.OpSession: true, localapi.OpStatus: true, localapi.OpGridCell: true}
+
+// note records op's err in the request's answers, if ctx carries them,
+// and returns it. A call that returned, or failed other than by a refusal
+// code, may have taken effect unless op only reads; a refused one did
+// not. ServeHTTP also counts nothing as done for a GET.
+func note(ctx context.Context, op string, err error) error {
 	a, _ := ctx.Value(answersKey{}).(*answers)
 	if a == nil {
 		return err
@@ -69,7 +73,7 @@ func note(ctx context.Context, err error) error {
 	switch {
 	case refused(err, localapi.ErrStopping):
 		a.stopping = true
-	case !a.stopping && !errors.As(err, &r):
+	case !a.stopping && !readOps[op] && !errors.As(err, &r):
 		a.partway = true
 	}
 	return err
@@ -82,7 +86,7 @@ type InProcess map[string]sockets.Handler
 
 // Call runs op's handler.
 func (p InProcess) Call(ctx context.Context, op string, args, out any) error {
-	return note(ctx, p.call(ctx, op, args, out))
+	return note(ctx, op, p.call(ctx, op, args, out))
 }
 
 func (p InProcess) call(ctx context.Context, op string, args, out any) error {
