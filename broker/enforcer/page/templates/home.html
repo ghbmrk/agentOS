@@ -36,6 +36,12 @@
 {{if .Unsaved}}<p>Your last step here is in force, but the disk has not confirmed it yet. The enforcer keeps saving it. If the enforcer restarts before then, check this page again.</p>{{end}}
 {{end}}</div>
 {{end}}
+{{with .APStalled}}<h2>Wi-Fi access point</h2>
+<div class="pending warn">
+{{range .}}<p>The access point at {{.Addr}} is stalled: {{.Abandoned}} of the enforcer's connections to it were cut off part way and are still waiting, so the enforcer sends it nothing more. It keeps the Wi-Fi settings it had, so a device you removed since may still be able to join.</p>
+{{end}}<p>Check the access point first: that its cable runs only between the access point and the enforcer's access-point port, with nothing else plugged into the access point. A factory reset gives the access point a new key, which the enforcer refuses until it is set up again: see "If the enforcer was compromised", step 4, in the owner's guide. Then restart the enforcer, which clears this and sends your settings again.</p>
+</div>
+{{end}}
 {{with .Resolver}}<h2>Names and addresses</h2>
 <div class="pending warn">
 <p>The enforcer has stopped answering name lookups and handing out addresses on every home network: no device, agentOS included, gets a name answered, and a device that joins or renews gets no address. A device already joined keeps its address until its lease ends, within 12 hours. Your rules stay in force.</p>
@@ -118,6 +124,17 @@
 <tr><th>Device</th><th>Network</th><th>Label</th></tr>
 {{range .Devices}}<tr><td>{{.ID}}</td><td>{{.Network}}</td><td>{{label .Label}}</td></tr>
 {{end}}</table>{{else}}<p>None yet.</p>{{end}}
+
+{{with .Cards}}<h2>Wi-Fi</h2>
+<details><summary>Show the Wi-Fi networks and their passwords</summary>
+<p>The spaces in a password only group it for reading: do not type them.</p>
+{{range .}}<div class="pending">
+<p>{{.Title}}: network <span class="code">{{.SSID}}</span><br>Password: <span class="code">{{.Shown}}</span></p>
+{{with .Note}}<p>{{.}}</p>
+{{end}}{{with .QR}}<svg class="qr" viewBox="0 0 {{.Size}} {{.Size}}" role="img" aria-label="Wi-Fi QR code"><path d="{{.Path}}"/></svg>
+{{end}}</div>
+{{end}}</details>
+{{end}}
 
 <h2>What this box cannot do</h2>
 <p>Full coverage is not promised.</p>
