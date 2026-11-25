@@ -18,7 +18,7 @@ const KindPlan = "plan"
 var ErrNoPlanLogin = errors.New("no plan login stored")
 
 // noLoginText is egress.ErrNoLogin's text, which the control socket writes
-// as the body of its 500 (cmd/agentos-egress workerroute.go).
+// as the body of its 409 (cmd/agentos-egress workerroute.go).
 const noLoginText = "no plan login stored"
 
 func isNoLogin(body string) bool { return strings.TrimSpace(body) == noLoginText }

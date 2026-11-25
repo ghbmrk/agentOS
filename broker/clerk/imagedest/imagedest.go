@@ -107,7 +107,9 @@ func (t *Table) Hosts() []string {
 
 // Join is the core's destination list for enflist.Inputs: the kernel's
 // own destinations, then declared, the accounts' (each Basis Declared or
-// Backup). A declared host the kernel also states is *Shared; a declared
+// Backup). A declared host the kernel also states, in any spelling of the
+// same DNS name (enflist.CanonicalHost: case, a trailing dot), is
+// *Shared, naming the declared spelling; a declared
 // destination claiming Basis Image is ErrTable, since only this statement
 // gives that basis.
 func (t *Table) Join(declared []enflist.Dest) ([]enflist.Dest, error) {
@@ -116,7 +118,7 @@ func (t *Table) Join(declared []enflist.Dest) ([]enflist.Dest, error) {
 		if x.Basis == enflist.Image {
 			return nil, fmt.Errorf("%w: %s claims the image's basis", ErrTable, strconv.QuoteToASCII(x.Host))
 		}
-		if slices.Contains(t.Hosts(), x.Host) {
+		if slices.Contains(t.Hosts(), enflist.CanonicalHost(x.Host)) {
 			return nil, &Shared{Host: x.Host}
 		}
 		out = append(out, x)
