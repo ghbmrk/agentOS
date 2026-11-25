@@ -1695,11 +1695,10 @@ def _order_seed(d, quals, specs, bare, refs, clause, outside):
     methods = set()
     for path in {p for p in paths.values() if not _std(p)}:
         methods |= {n for n in outside(path) or () if n[0] == "."}
-    # A dot import names its package's declarations bare (`On()`; L3 on #6686): one of a package whose
-    # names may change flags seeds; one of a module package seeds on a bare word it marks.
-    for path in (path for a, path in specs if a == "."):
-        if path in DOT_BARRED or not _std(path) and ((got := outside(path)) is None or refs & {n for n in got if n[0] == ""}):
-            return True
+    # A dot import names its package's declarations bare (`On()`, `s.M()`; L3 and Security on #6686): one
+    # of a standard package whose names may change flags, or of any non-standard one, seeds.
+    if any(a == "." and (path in DOT_BARRED or not _std(path)) for a, path in specs):
+        return True
     return bool(refs & methods)
 
 

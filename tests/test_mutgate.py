@@ -3657,12 +3657,14 @@ class MovedDecls(unittest.TestCase):
                 ("init", dot('\nfunc init() {\n\tOn()\n}\n\nvar _ = os.Exit\n')),
                 ("var literal", dot('\nvar _ = func() int {\n\tOn()\n\treturn 0\n}()\n\nvar _ = os.Exit\n')),
                 ("TestMain", dot('\nfunc TestMain(m *testing.M) {\n\tOn()\n\tos.Exit(m.Run())\n}\n')),
+                ("method", dot('\nfunc init() {\n\tvar s S\n\ts.M()\n}\n\nvar _ = os.Exit\n')),
                 ("flag", dot('\nfunc init() {\n\tSet("test.count", "2")\n}\n\nvar _ = os.Exit\n', '"flag"'))):
             with self.subTest("dot import " + name):
                 got, err = late(test, extra={"lib/lib.go": flags})
                 self.assertEqual(got, (None, None) if name == "TestMain" else every)
                 self.assertRegex(err, r"\(broker/hint/hint_test\.go:\d+: (init|package var|TestMain)")
-        self.assertEqual(late(dot('\nfunc init() {\n\tPlain()\n}\n\nvar _ = os.Exit\n'), extra={"lib/lib.go": flags}), (only, ""))
+        self.assertEqual(late(dot('\nfunc init() {\n\tPlain()\n}\n\nvar _ = os.Exit\n'), extra={"lib/lib.go": flags})[0], every)
+        self.assertEqual(late(imp('. "strings"', '"os"') + '\nvar _ = Repeat\n\nvar _ = os.Exit\n'), (only, ""))
         # An import named otherwise than its last element, a dot-imported os/exec, and a module package
         # with a name but no readable marks (Security on #6686).
         golib = flags.replace("package lib\n", "package golib\n")
