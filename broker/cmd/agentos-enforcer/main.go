@@ -7,16 +7,17 @@
 // links the enforcer's packages, broker/kernel/key and x/sys/unix for
 // CLOCK_BOOTTIME, and nothing else of agentOS.
 //
-//	agentos-enforcer -state DIR -provision CASEFILE   first boot only
+//	agentos-enforcer -state DIR -provision CASEFILE -ap-setup SETUPFILE   first boot only
 //	agentos-enforcer -state DIR -channel-pub          print the channel key
+//	agentos-enforcer -state DIR -ap-pub               print the access points' login key
 //	agentos-enforcer -state DIR -config FILE          run
 //
-// The case code is read from a file, never an argument or the
-// environment. ENF-l-b2 wires the access point, radios and
-// device secrets (the resolver, the pair relay, Wake-on-LAN and the byte
-// caps are wired, ENF-l-b1); until then enrolment fails closed (unwiredNetwork) and
-// every radio command is refused (noRadio). Its assumptions are in
-// ASSUMPTIONS.md.
+// The case code and the setup network's password (the sticker's) are read
+// from files, never an argument or the environment. The access points
+// are wired (apnet.go, ENF-l-b2 part a), as are the resolver, the pair
+// relay, Wake-on-LAN and the byte caps (ENF-l-b1); ENF-l-b2 parts b and c
+// wire the radios and device secrets, and until then every radio command
+// is refused (noRadio). Its assumptions are in ASSUMPTIONS.md.
 package main
 
 import (
@@ -39,7 +40,6 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/enforcer/alert"
 	dnsrun "github.com/ghbmrk/agentos/broker/enforcer/dns/run"
-	"github.com/ghbmrk/agentos/broker/enforcer/enrol"
 	"github.com/ghbmrk/agentos/broker/enforcer/mdns"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft/load"
 	"github.com/ghbmrk/agentos/broker/enforcer/offload"
@@ -65,19 +65,24 @@ func main() {
 	}
 }
 
+// getuid is os.Getuid; a test replaces it to see run refuse root.
+var getuid = os.Getuid
+
 func run(args []string) error {
 	fs := flag.NewFlagSet("agentos-enforcer", flag.ContinueOnError)
 	state := fs.String("state", "", "the enforcer's state directory (mode 0700, owned by this user)")
 	cfgPath := fs.String("config", "", "the enforcer's configuration file (JSON)")
 	provision := fs.String("provision", "", "first boot: provision enrolment with the case code in this file, then exit")
 	pub := fs.Bool("channel-pub", false, "print the enforcer's channel public key (base64) for the core to pin, then exit")
+	apSetup := fs.String("ap-setup", "", "with -provision: the setup network's Wi-Fi password, the sticker's, in this file")
+	apPub := fs.Bool("ap-pub", false, "print the enforcer's SSH public key for the access points' authorized_keys, then exit")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *state == "" {
 		return errors.New("-state is required")
 	}
-	if os.Getuid() == 0 {
+	if getuid() == 0 {
 		return errors.New("refusing to run as root: run as the enforcer's own user with CAP_NET_ADMIN and CAP_NET_BIND_SERVICE")
 	}
 	if err := checkStateDir(*state); err != nil {
@@ -85,11 +90,14 @@ func run(args []string) error {
 	}
 	switch {
 	case *provision != "":
-		b, err := os.ReadFile(*provision)
+		return provisionFiles(*state, *provision, *apSetup)
+	case *apPub:
+		s, err := apSSHKey(fileStore{path: filepath.Join(*state, fileAPSSH)}, nil)
 		if err != nil {
 			return err
 		}
-		return provisionState(*state, strings.TrimSpace(string(b)))
+		fmt.Println(authorizedKey(s))
+		return nil
 	case *pub:
 		k, err := channelKey(fileStore{path: filepath.Join(*state, fileChannelKey)}, nil)
 		if err != nil {
@@ -127,7 +135,7 @@ func run(args []string) error {
 		Served:  served,
 		Elapsed: bootTime,
 		Fire:    load.Loader{Bin: cfg.Nft},
-		Network: unwiredNetwork{},
+		AP:      newPusher(cfg.Layout.APMgmt),
 		Light:   newLogLight(logger),
 		Radio:   noRadio{},
 		Logf:    func(s string) { logger.Print(s) },
@@ -177,19 +185,7 @@ func run(args []string) error {
 	}
 }
 
-// unwiredNetwork is the access point until ENF-l-b wires slice g's pusher:
-// it refuses, so Finish enrols nothing and the setup network stays the
-// only one (enrol ASSUMPTIONS ENF-c-7). It never reports a handover that
-// did not happen.
-type unwiredNetwork struct{}
-
-func (unwiredNetwork) Replace() (enrol.Card, error) {
-	return enrol.Card{}, errors.New("access point not wired yet (ENF-l-b)")
-}
-
-func (unwiredNetwork) Replaced() bool { return false }
-
-// noRadio is the radio host until ENF-l-b wires slice k's: every command
+// noRadio is the radio host until ENF-l-b2 part b wires slice k's: every command
 // and state read is refused, so the channel answers Failed.
 type noRadio struct{}
 
@@ -222,4 +218,30 @@ func (l logLight) Show(c alert.Colour) error {
 	l.st.shown, l.st.last = true, c
 	l.l.Printf("light: %d", c)
 	return nil
+}
+
+// provisionFiles is first boot: the case code from caseFile and the setup
+// network's password from setupFile. The password is checked before
+// anything is written, so a refused one leaves the state directory as it
+// was and a corrected re-run can provision it (ENF-l-ap-4).
+func provisionFiles(state, caseFile, setupFile string) error {
+	b, err := os.ReadFile(caseFile)
+	if err != nil {
+		return err
+	}
+	if setupFile == "" {
+		return errors.New("-provision needs -ap-setup")
+	}
+	sb, err := os.ReadFile(setupFile)
+	if err != nil {
+		return err
+	}
+	setup := strings.TrimSpace(string(sb))
+	if err := checkSetup(setup); err != nil {
+		return err
+	}
+	if err := provisionState(state, strings.TrimSpace(string(b))); err != nil {
+		return err
+	}
+	return provisionAP(fileStore{path: filepath.Join(state, fileAPKeys)}, setup)
 }
