@@ -3535,6 +3535,19 @@ class MovedDecls(unittest.TestCase):
                  + '\nfunc TestMain(m *testing.M) {\n\tsetup()\n\tos.Exit(m.Run())\n}\n\nfunc setup() {}\n'),
                 ("TestMain passes m", sub.replace('\t"testing"\n', '\t"os"\n\t"testing"\n')
                  + '\nfunc TestMain(m *testing.M) {\n\tos.Exit(run(m))\n}\n\nfunc run(m *testing.M) int { return m.Run() }\n'),
+                ("TestMain os.Args", sub.replace('\t"testing"\n', '\t"os"\n\t"testing"\n')
+                 + '\nfunc TestMain(m *testing.M) {\n\tos.Args = append(os.Args, "-test.shuffle=on")\n\tos.Exit(m.Run())\n}\n'),
+                ("TestMain aliased flag", sub.replace('\t"testing"\n', '\tf "flag"\n\t"os"\n\t"testing"\n')
+                 + '\nfunc TestMain(m *testing.M) {\n\tf.Set("test.shuffle", "on")\n\tos.Exit(m.Run())\n}\n'),
+                # One m.Run() run twice: a loop, a jump back, a literal called twice (L3 and Potency on #6677).
+                ("TestMain loop", sub.replace('\t"testing"\n', '\t"os"\n\t"testing"\n')
+                 + '\nfunc TestMain(m *testing.M) {\n\tc := 0\n\tfor i := 0; i < 2; i++ {\n\t\tc = m.Run()\n\t}\n\tos.Exit(c)\n}\n'),
+                ("TestMain goto", sub.replace('\t"testing"\n', '\t"os"\n\t"testing"\n')
+                 + '\nfunc TestMain(m *testing.M) {\n\tn := 0\nagain:\n\tc := m.Run()\n\tif n++; n < 2 {\n\t\tgoto again\n\t}\n\tos.Exit(c)\n}\n'),
+                ("TestMain label", sub.replace('\t"testing"\n', '\t"os"\n\t"testing"\n')
+                 + '\nfunc TestMain(m *testing.M) {\nagain:\n\tos.Exit(m.Run())\n}\n'),
+                ("TestMain literal", sub.replace('\t"testing"\n', '\t"os"\n\t"testing"\n')
+                 + '\nfunc TestMain(m *testing.M) {\n\trun := func() int { return m.Run() }\n\trun()\n\tos.Exit(run())\n}\n'),
                 # (e) a parallel subtest's literal names a package var: its siblings may interleave on it.
                 ("package var", sub.replace('if Down(n) != n-1', 'if hits++; Down(n) != n-1') + "\nvar hits int\n")):
             with self.subTest(name):

@@ -1521,12 +1521,16 @@ def _package_reads(rel, commit, tests=True, module=None):
 # a string, another name or another literal; a package with a linkname or a file where `testing` may bind another
 # package; a literal naming a package-level var (parallel siblings may interleave on it); and a TestMain
 # other than `func TestMain(m *testing.M) {` that names m only in one `m.Run()`, no package-level name,
-# no `flag`, `Args`, `unsafe` or `Parallel`, and qualifies only by its file's standard library imports.
+# no `flag`, `Args`, `unsafe` or `Parallel`, no `for`, `goto`, label or func literal (which could run that
+# m.Run() twice), and qualifies only by its file's standard library imports other than `flag`.
 # A Parallel in an imported package fails closed as before (_parallel).
 SUBTEST_HEAD = re.compile(r"func\(([A-Za-z_]\w*) \*testing\.T\) \{")
 TEST_HEAD = re.compile(r"func Test\w*\(([A-Za-z_]\w*) \*testing\.T\) \{")
 MAIN_HEAD = re.compile(r"func TestMain\(([A-Za-z_]\w*) \*testing\.M\) \{")
-MAIN_BARRED = {"flag", "Args", "unsafe", "Parallel"}
+# A TestMain naming one of these may change what m.Run runs (flag, Args, unsafe, Parallel), or run one
+# m.Run() more than once (for, goto, func: a loop, a jump back, a literal called twice; L3 and Potency on #6677).
+MAIN_BARRED = {"flag", "Args", "unsafe", "Parallel", "for", "goto", "func"}
+LABEL = re.compile(r"^\s*[A-Za-z_]\w*\s*:(?!=)", re.M)  # a label (a `default:` too, which is safe to refuse)
 BRACKETS = {"(": ")", "[": "]", "{": "}"}
 
 
@@ -1684,7 +1688,10 @@ def _top_commas(args):
 
 
 def _plain_main(m, code, bare, names, std):
-    """Whether a TestMain's body (param m) runs m.Run once and names nothing that may change what it runs."""
+    """Whether a TestMain's body (param m) runs m.Run once and names nothing that may change what it runs:
+    m only in one `m.Run()`, and no loop, jump, label or func literal that could run it again."""
+    if LABEL.search(bare[bare.index("{") + 1:]):
+        return False
     uses = [w.start() for w in re.finditer(rf"(?<![\w.]){m}\b", bare)]
     if len(uses) != 1 or not re.match(rf"{m}\.Run\(\)", bare[uses[0]:]):
         return False
