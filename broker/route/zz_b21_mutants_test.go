@@ -825,3 +825,21 @@ func TestProxyDenialShape(t *testing.T) {
 		}
 	}
 }
+
+// A proxy refusal after a failover still charges the attempt that failed.
+func TestDeniedAfterFailoverReportsTheAttempt(t *testing.T) {
+	r := bareRouter(t, func(w http.ResponseWriter, req *http.Request) {
+		b, _ := io.ReadAll(req.Body)
+		if strings.Contains(string(b), `"gpt-a"`) {
+			serveFixture(429, "application/json", []byte(`{"error":{"message":"slow down","type":"rate_limit_error"}}`))(w, req)
+			return
+		}
+		denyWith(403, "egress denied: x")(w, req)
+	}, func(c *Config) {
+		c.Rule = Rule{"default": {{Provider: "openai", Model: "gpt-a"}, {Provider: "openai", Model: "gpt-b"}}}
+	})
+	w, reports := bareDoReports(r, simpleChat, nil)
+	if w.Code != 403 || len(reports) != 1 || len(reports[0].Failed) != 1 || reports[0].Failed[0].Status != 429 {
+		t.Fatalf("%d %+v", w.Code, reports)
+	}
+}
