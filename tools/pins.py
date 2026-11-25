@@ -18,6 +18,7 @@ miss it pass, and `fetch` writes DEST only after they match.
                                  file but those in NOT_YET); exit 1 naming each one that fails
 """
 import ast
+import fnmatch
 import hashlib
 import os
 import pathlib
@@ -37,7 +38,8 @@ CURL = ["curl", "-q", "--proto", "=https", "--proto-redir", "=https", "-fsSL", "
 
 # Pin files not yet in this format, and direct downloads not yet through this reader. Each entry is
 # owed by the release row it names; tests/test_pins.py fails on an entry that no longer exists or
-# that main's copy of this file lacks (`grown`), so this list only shrinks. A pin here is not checked by `live`.
+# that main's copy of this file lacks (`grown`), so this list only shrinks (a count rises only for a file
+# byte-identical to main's, when the reader grew stricter). A pin here is not checked by `live`.
 NOT_YET = {
     "broker/cmd/agentos-infer/llama.pins": "#6515",
     "broker/cmd/agentos-vision/faces.pins": "#6515",
@@ -57,7 +59,7 @@ FETCH_NOT_YET = {
     ".github/workflows/infer-real.yml": ("#6515", 1),
     ".github/workflows/vision-real.yml": ("#6515", 6),
     "guest/codex/build-rootfs.sh": ("#6515", 3),
-    "guest/openclaw/build-rootfs.sh": ("#6515", 2),
+    "guest/openclaw/build-rootfs.sh": ("#6515", 6),
     "image/build.sh": ("#6515", 1),
     "image/camnode/build.sh": ("#6515", 1),
     "image/infer.sh": ("#6515", 1),
@@ -66,10 +68,12 @@ FETCH_NOT_YET = {
 }
 # Files whose fetch sites are not pinned downloads: the count, and why.
 FETCH_EXEMPT = {
+    "broker/drone/sitl/build.sh": (1, "a pip install pinned by version only; hashes owed by #6588"),
     "image/security-snapshot.sh": (5, "probes which debian-security snapshot run is served; apt's signed "
                                       "InRelease is the authority for what it then installs"),
     "spikes/S4-openclaw-guest/run_gateway.sh": (2, "talks to a gateway on 127.0.0.1; downloads nothing"),
-    "spikes/PLAN-muse-capture/run.sh": (1, "probes a gate on 127.0.0.1 through bash's /dev/tcp"),
+    "spikes/PLAN-muse-capture/run.sh": (2, "probes a gate on 127.0.0.1 through bash's /dev/tcp, and a "
+                                           "manual spike's unhashed venv; not run by CI"),
     "spikes/S8-live/fwd.py": (1, "a measurement relay spike; downloads nothing it keeps"),
     "tests/test_ci_scope.py": (6, "ci.yml download steps as fixture text it checks"),
     "tests/test_close_guard_hook.py": (1, "a curl command line fed to the close-guard hook, never run"),
@@ -77,24 +81,238 @@ FETCH_EXEMPT = {
                                     ".curlrc; downloads nothing"),
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
     "tests/test_image.py": (1, "a busybox wget shebang as fixture text"),
-    "tests/test_pins.py": (50, "this reader's test cases"),
+    "tests/test_pins.py": (253, "this reader's test cases"),
     "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
     "tools/metrics.py": (1, "GitHub API calls; downloads nothing it runs"),
+    "tests/test_workflows.py": (1, "`pip install` as a pattern a workflow must not hold"),
+    "tests/test_guest_userland.py": (2, "names npm and `npm ci` in comments and a pattern it checks; runs nothing"),
+    "tests/test_vulncheck.py": (18, "names curl as a package, and npm as an OSV ecosystem, in fixtures"),
+    "tools/vulncheck.py": (19, "names curl as its canary's package; OSV and GitHub API queries, release "
+                              "notes read as text, npm tarballs checked against the lockfile's sha512, and "
+                              "npm and pnpm named in its docstrings, comments and OSV queries (the ecosystem, not a command)"),
     "tests/test_zz_vision_ort_nuget.py": (2, "writes a stand-in `curl` that copies local files; downloads nothing"),
-    "tests/test_vulncheck.py": (8, "names curl as a package in OSV fixtures"),
-    "tools/vulncheck.py": (3, "names curl as its canary's package; OSV and GitHub API queries, release "
-                              "notes read as text, and npm tarballs checked against the lockfile's sha512"),
 }
 
 # What `fetch_sites` counts. A word is split at shell quoting and punctuation and read by its basename,
 # so `/usr/bin/curl`, `x=curl; $x`, `"curl"` and a `curl\` continuation are each a curl.
 FETCHERS = frozenset(["curl", "wget", "aria2c"])
-WORDS = re.compile(r"[\s'\"`$(){}\[\];|&<>=\\,]+")
+WORDS = re.compile(r"[@+\s'\"`$(){}\[\];|&<>=\\,]+")
 NET_TEXT = re.compile(r"\burllib\.request\b|\burlopen\b|\bhttp\.client\b|\burllib3\b|\bhttpx\b|\baiohttp\b|"
-                      r"\bftplib\b|\b(?:import|from)\s+requests\b|\brelease\s+download\b|/dev/(?:tcp|udp)/")
-NET_MODULES = ("urllib.request", "urllib3", "requests", "http.client", "httpx", "aiohttp", "ftplib")
+                      r"\bftplib\b|\bxmlrpc\.client\b|\b(?:import|from)\s+requests\b|\brelease\s+download\b|/dev/(?:tcp|udp)/")
+NET_MODULES = ("urllib.request", "urllib3", "requests", "http.client", "httpx", "aiohttp", "ftplib", "xmlrpc.client")
+# Package-manager fetches their own check does not cover (CI-pin-liveness-fu2-2), deny by default (see
+# tool_sites): every pip, npm, npx, pnpx, yarn or pnpm word counts, wherever it sits, unless a credit below
+# reads it as a known-safe form, plus a Go setting that turns off the checksum database.
+# A manager name, glued to any short-option prefix (`-mpip`, `-Iyarn`, `-Snpx`) and with any version or
+# script suffix (`pip-3.12`, `pip3.12`, `yarnpkg`, `npm-cli.js`, `yarn.js`), and `corepack` itself; `WORDS`
+# splits at make's `@` and `+` recipe prefixes and at `@version` (`yarn@1`, as corepack runs it).
+# `pipe`, `pipx` and `npm.log` are not one.
+MANAGER = re.compile(r"(?:-+[A-Za-z]*?)?(pip|npm|npx|pnpx|yarn|pnpm|corepack)(?:pkg)?(?:-?[0-9][0-9.]*|-cli)?(?:\.[cm]?js)?")
+GLOB_NAMES = ("pip", "pip3", "npm", "npx", "pnpx", "yarn", "yarnpkg", "pnpm", "corepack")
+PIP_READ_ONLY = frozenset(["list", "show", "freeze", "check", "hash", "help", "--version"])  # fetch nothing
+PIP_NO_VALUE = frozenset(["--require-hashes", "--no-deps", "-q", "--quiet", "--no-index", "--no-cache-dir",
+                          "--disable-pip-version-check", "--user", "-U", "--upgrade", "--no-build-isolation",
+                          "--break-system-packages", "--only-binary=:all:", "--only-binary=:none:"])
+PIP_VALUE = frozenset(["-r", "--requirement", "--only-binary"])  # each takes the next word as its value
+GO_UNCHECKED = re.compile(r"\bGOSUMDB=off\b|\bGONOSUMDB\b|\bGONOSUMCHECK\b|\bGOINSECURE\b|\bGOPRIVATE\b|"
+                          r"\bGOFLAGS=\S*-insecure")
+
+
+SEPARATORS = r";|&(){}`<>"
+QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")  # read left to right, so each span starts where shell opens one
+BOUNDARY = re.compile(r"[\s#" + re.escape(SEPARATORS) + "]")
+
+
+def _shifts(raw):
+    """True when quote or backslash removal may move a word, command or comment boundary in this raw
+    line: any backslash, a lone quote, a quoted span holding a space, a `#` or a separator, or an unquoted
+    `$`, `,` or brace expansion `{x`, each of which can make words this reader does not see."""
+    spans, bare = QUOTED.findall(raw), QUOTED.sub("", raw)
+    return ("\\" in raw or any(BOUNDARY.search(q) for q in spans) or "'" in bare or '"' in bare
+            or "$" in bare or re.search(r"\{\S|,", bare) is not None)
+
+
+def _name(word):
+    """The package manager a shell word names (`/usr/bin/pip3`, `-mpip`, `$n/bin/npx`, `-Iyarn`, a glob
+    such as `pi[p]` or `pip*` that matches a name), else None."""
+    x = word.rsplit("/", 1)[-1]
+    m = MANAGER.fullmatch(x)
+    if m:
+        return m.group(1)
+    if not re.search(r"[][*?]", x):
+        return None
+    # The glob as written, past a make or option prefix, or past an option letter run (`-Ipi[p]`); one with
+    # under two literal characters (`*`, `[a-z]*`) is named, not counted.
+    y = re.sub(r"^[-@+]+", "", x)
+    k = len(re.match(r"[A-Za-z]*", y).group()) if y != x else 0
+    globs = {g for g in [x] + [y[j:] for j in range(k + 1)] if len(re.sub(r"\[[^]]*\]|[*?]", "", g)) >= 2}
+    return next((n for n in GLOB_NAMES for g in globs if fnmatch.fnmatchcase(n, g)), None)
+
+
+def _pip_hashed(args):
+    """True when the words after `pip` are exactly `install`/`download` and options this reader knows,
+    `--require-hashes` among them: no option can then take the flag as its value, and no package is named
+    outside a requirements file whose hashes pip checks."""
+    if not args or args[0] not in ("install", "download") or "--require-hashes" not in args:
+        return False
+    i = 1
+    while i < len(args):
+        if args[i] in PIP_NO_VALUE or re.fullmatch(r"--requirement=[^-:][^:]*", args[i]):
+            i += 1
+        elif (args[i] in PIP_VALUE and i + 1 < len(args) and not args[i + 1].startswith("-")
+              and (args[i] == "--only-binary" or ":" not in args[i + 1])):  # a `-r` URL's hashes are the server's
+            i += 2
+        else:
+            return False
+    return True
+
+
+def _credited(words, i):
+    """True when the manager word at words[i] is a known-safe form: `npm ci` with options only, a read-only
+    pip verb, or a hashed pip install. A manager path handed to another command (`tar x "$n/bin/npx"`) earns
+    none: `echo`, `cp`, a function, `BASH_ENV` or a PATH shim can each run it (#6549 step back)."""
+    name, args = _name(words[i]), words[i + 1:]
+    if re.search(r"[][*?]", words[i]) or "@" in words[i].rsplit("/", 1)[-1]:
+        return False  # a glob may expand to several words; `name@version` runs through corepack
+    if name == "npm":
+        return args[:1] == ["ci"] and all(x.startswith("-") for x in args[1:])
+    if name == "pip":
+        return args[:1] and args[0] in PIP_READ_ONLY or _pip_hashed(args)
+    return False
+
+
+def tool_sites(line, credit=True):
+    """Package-manager fetch sites in one shell line (quotes already removed). Deny by default and fail
+    closed: every manager name the broad `WORDS` split finds counts (so `P=pip`, `-mpip`, `{npm,i}` and
+    `npx${IFS}x` each count where written), and a site is taken back only for a whole whitespace word that
+    `_credited` reads as safe. A credit is read only from words before the first one starting `#`, and none
+    at all where `credit` is false (the caller found quotes, a backslash, an unquoted `$` or a brace that
+    may move a boundary or expand into words this reader does not see)."""
+    n = len(GO_UNCHECKED.findall(line))
+    n += sum(1 for w in WORDS.split(line) if _name(w))
+    n += sum(1 for w in re.split(r"[\s;|&(){}`<>,=$]+", line) if re.search(r"[][]", w) and _name(w))  # `pi[p]`
+    if credit:
+        for cmd in re.split("[" + re.escape(SEPARATORS) + "]", line):
+            raw = cmd.split()
+            live = raw[:next((i for i, x in enumerate(raw) if x.startswith("#")), len(raw))]
+            n -= sum(1 for i, x in enumerate(live) if _name(x) and _credited(live, i))
+    return n
+
+
+# `${X:-npm}`, `${X/#/npm}` and every other operator form, innermost first; each static piece of the operand
+# is one reading.
+PARAM = re.compile(r"\$\{[#!]?[A-Za-z_0-9@*?-]+([^A-Za-z_0-9{}][^{}]*)\}")
+PARAM_BARE = re.compile(r"\$\{[#!]?(?:[A-Za-z_][A-Za-z_0-9]*|[0-9]+|[@*#?$!-])\}")  # `n${X}pm` runs npm with X unset
+SUBST = re.compile(r"\$\(|`")
+VAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])")
+ANSI_C = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
+ANSI_ESC = re.compile(r"\\(x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|[0-7]{1,3}|c.|.)")
+ANSI_NAMED = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t",
+              "v": "\v"}
+BRACE = re.compile(r"\{([^{}]*,[^{}]*)\}|\{(-?\w)\.\.(-?\w)(?:\.\.-?[0-9]+)?\}")
+EXPAND_MAX = 256
+
+
+def _expansions(word):
+    """The static readings of shell text, quotes removed: each static piece of a `${name<op>word}` operand
+    taken, and empty, and each `{a,b}` list and `{a..c}` sequence expanded, innermost first, with empty `$()`
+    and backtick pairs dropped. Each reading is kept once (`{a,a}` repeated stays linear); None past
+    EXPAND_MAX readings. A value computed at run time stays unread."""
+    out, seen, todo = set(), set(), []
+
+    def push(xs):
+        for x in xs:
+            if x not in seen:
+                seen.add(x)
+                todo.append(x)
+    push([re.sub(r"\$\(\s*\)|`\s*`", "", word)])
+    while todo:
+        w = todo.pop()
+        m = PARAM.search(w) or PARAM_BARE.search(w) or BRACE.search(w)
+        if not m:
+            out.add(w)
+        elif m.re is PARAM_BARE:
+            push([w[:m.start()] + w[m.end():]])
+        elif m.re is PARAM:
+            # Each static piece, and empty: an unset variable, subscripted too (`n${X[0]}pm`), or under a case or
+            # transform operator (`n${X~}pm`, `n${X@U}pm`) expands to nothing.
+            push(w[:m.start()] + x + w[m.end():] for x in set(re.split(r"[-:=+?/#%^,@]+", m.group(1))) | {""})
+        else:
+            if m.group(1) is not None:
+                alts = m.group(1).split(",")
+            else:
+                a, b = m.group(2), m.group(3)
+                if re.fullmatch(r"-?[0-9]+", a) and re.fullmatch(r"-?[0-9]+", b):
+                    lo, hi = sorted((int(a), int(b)))
+                    alts = [str(x) for x in range(lo, min(hi, lo + EXPAND_MAX) + 1)]
+                elif len(a) == len(b) == 1:
+                    alts = [chr(x) for x in range(min(ord(a), ord(b)), max(ord(a), ord(b)) + 1)]
+                else:
+                    alts = [m.group(0)[1:-1]]
+            push(w[:m.start()] + x + w[m.end():] for x in alts)
+        if len(out) > EXPAND_MAX or len(seen) > 8 * EXPAND_MAX:
+            return None
+    return out
+
+
+def _unsub(line):
+    """line with every command substitution (`$(...)`, `$((...))`, a backtick pair) cut to an empty `$()`, since
+    one that prints nothing (`n$(true)pm`) glues the words around it; what it held is counted on the line itself."""
+    out, i = "", 0
+    while i < len(line):
+        m = SUBST.search(line, i)
+        if not m:
+            return out + line[i:]
+        out += line[i:m.start()] + "$()"
+        if m.group() == "`":
+            j = line.find("`", m.end())
+            i = len(line) if j < 0 else j + 1
+            continue
+        depth, i = 1, m.end()
+        while i < len(line) and depth:
+            depth += (line[i] == "(") - (line[i] == ")")
+            i += 1
+    return out
+
+
+def _ansi(m):
+    """A bash `$'...'` string's text with its escapes decoded, so `$'\\x6e'pm` and `n$''pm` read as npm."""
+    def esc(e):
+        x = e.group(1)
+        if x[0] in "xuU":
+            return chr(int(x[1:], 16)) if int(x[1:], 16) < 0x110000 else ""
+        if x[0] in "01234567":
+            return chr(int(x, 8) & 0xFF)
+        if x[0] == "c":
+            return chr(ord(x[1].upper()) ^ 0x40)
+        return ANSI_NAMED.get(x, x)
+    return ANSI_ESC.sub(esc, m.group(1)).split("\0", 1)[0]  # bash ends the string at a NUL (`n$'\\0'pm` is npm)
+
+
+def _unquote(line):
+    """line as shell removes quotes: `$'...'` decoded, `$"` read as `"`, and each `$name` braced first, so a
+    quote removed after it (`n$X""pm`) cannot glue it to the text that follows."""
+    return re.sub(r"[\"'\\]", "", VAR.sub(r"${\1}", ANSI_C.sub(_ansi, line).replace('$"', '"')))
+
+
+def _named(text):
+    return sum(1 for w in WORDS.split(text) if _name(w) or w.rsplit("/", 1)[-1] in FETCHERS)
+
+
+def hidden_sites(line):
+    """Fetcher and manager names a line (quotes removed) holds only once statically expanded (`${X:-npm}`,
+    `"${X:-npm i}"`, `{n,}pm`, `cu{r,}l`, `n$()pm`): the most any reading names beyond the line as written,
+    PinError where the line has more than EXPAND_MAX readings. Never credited (`_shifts` already refuses a
+    credit to a line holding `$`, `,` or `{x`)."""
+    line = _unsub(line)
+    if not re.search(r"\{|\$\(\s*\)|`\s*`", line):
+        return 0
+    e = _expansions(line)
+    if e is None:  # refused, not counted: a fixed count past the cap could hide a name behind it
+        raise PinError("a line expands to more than %d readings: %s" % (EXPAND_MAX, line[:80]))
+    return max(0, max(_named(x) for x in e) - _named(line))
 
 
 def text_sites(text):
@@ -110,9 +328,89 @@ def text_sites(text):
             joined.append(line)
         prev = joined[-1]
     for line in joined:
-        line = re.sub(r"[\"'\\]", "", line)
+        credit = not _shifts(line)
+        line = _unquote(line)
         n += sum(1 for w in WORDS.split(line) if w.rsplit("/", 1)[-1] in FETCHERS)
-        n += len(NET_TEXT.findall(line))
+        n += len(NET_TEXT.findall(line)) + tool_sites(line, credit) + hidden_sites(line)
+    return n
+
+
+GH_EXPR = re.compile(r"\$\{\{(.*?)\}\}", re.S)
+GH_LIT = re.compile(r"'((?:[^']|'')*)'")
+GH_WORDS = re.compile(r"\b(?:true|false|null|NaN|Infinity)\b|[0-9.eE+-]+")
+SPELLED = sorted(FETCHERS) + ["corepack", "npm", "npx", "pip", "pnpm", "pnpx", "yarn"]
+
+
+GH_NO_TEXT = re.compile(r"\b(?:hashFiles|contains|startsWith|endsWith)\(")  # return a hash or a boolean
+GH_COMPARED = re.compile(r"'(?:[^']|'')*'\s*(?:==|!=|<=|>=|<|>)|(?:==|!=|<=|>=|<|>)\s*'(?:[^']|'')*'")
+
+
+def _gh_rendered(expr):
+    """expr with the literals that never reach its output cut: each operand of a comparison, and every
+    argument of a function that returns a hash or a boolean."""
+    expr = GH_COMPARED.sub(" ", expr)
+    while True:
+        m = GH_NO_TEXT.search(expr)
+        if not m:
+            return expr
+        depth, j = 1, m.end()
+        while j < len(expr) and depth:
+            depth += (expr[j] == "(") - (expr[j] == ")")
+            j += 1
+        expr = expr[:m.start()] + " " + expr[j:]
+
+
+def _gh_chars(expr):
+    """Every character an Actions expression can render from its own text: its string literals (`\\uXXXX`
+    decoded, as fromJSON reads them), its keywords and its numbers. format, join, toJSON and fromJSON can
+    reorder and repeat them, so the output is read as any string of these characters; a context value
+    (`github.*`, `matrix.*`) is a run-time value and is not read."""
+    expr = _gh_rendered(expr)
+    lits = [x.replace("''", "'") for x in GH_LIT.findall(expr)]
+    lits += [chr(int(u, 16)) for x in lits for u in re.findall(r"\\u([0-9A-Fa-f]{4})", x)]
+    return set("".join(lits + GH_WORDS.findall(GH_LIT.sub(" ", expr))))
+
+
+def gh_sites(text):
+    """Names that an Actions expression renders into a run step before shell sees it, glued to the text
+    around it (`${{ 'n' }}pm`, `${{ format('{0}pm', 'n') }} i`): one site per name a line can spell with
+    at least one character an expression supplies, adjacent expressions and the text between them read
+    as one stretch (fail closed: any order, any repeat)."""
+    if "${{" not in text:
+        return 0
+    # Any expression may render empty (`n${{ '' }}pm`, `n${{ github.x }}pm`): the text with every one cut.
+    n = max(0, text_sites(GH_EXPR.sub("", text)) - text_sites(text))
+    for line in text.split("\n"):
+        if "${{" not in line:
+            continue
+        # The line as a pattern: a literal character, or a set the expression at that point may repeat.
+        pat, i = [], 0
+        for m in GH_EXPR.finditer(line):
+            pat += [(c, False) for c in line[i:m.start()]] + [(frozenset(_gh_chars(m.group(1))), True)]
+            i = m.end()
+        pat += [(c, False) for c in line[i:]]
+        for name in SPELLED:
+            # States (position, used an expression); a star element may be skipped or repeated.
+            def close(states):
+                out, todo = set(states), list(states)
+                while todo:
+                    p, used = todo.pop()
+                    if p < len(pat) and pat[p][1] and (p + 1, used) not in out:
+                        out.add((p + 1, used))
+                        todo.append((p + 1, used))
+                return out
+            states = close({(p, False) for p in range(len(pat) + 1)})
+            for c in name:
+                nxt = set()
+                for p, used in states:
+                    if p < len(pat):
+                        e, star = pat[p]
+                        if star and c in e:
+                            nxt.add((p, True))
+                        elif not star and e == c:
+                            nxt.add((p + 1, used))
+                states = close(nxt)
+            n += any(used for _, used in states)
     return n
 
 
@@ -126,7 +424,7 @@ def yaml_sites(text):
     def count(node):
         if id(node) not in memo:
             if isinstance(node, yaml.ScalarNode):
-                memo[id(node)] = text_sites(node.value)
+                memo[id(node)] = text_sites(node.value) + gh_sites(node.value)
             else:
                 kids = node.value if isinstance(node, yaml.SequenceNode) else [x for kv in node.value for x in kv]
                 memo[id(node)] = sum(count(k) for k in kids)
@@ -145,9 +443,31 @@ def _exact(c):
     return _str(c) is not None and _str(c).rsplit("/", 1)[-1] in FETCHERS
 
 
+DYN_IMPORTS = frozenset(["import_module", "__import__"])
+
+
+def _net(dotted):
+    """The NET_MODULES entry a dotted name is or lies under, else None."""
+    return next((m for m in NET_MODULES if dotted == m or dotted.startswith(m + ".")), None)
+
+
+def _dyn(node, bound):
+    """The modules a call to `import_module`/`__import__` (aliased too) with a constant name may return
+    (the named module and its top package, since `__import__` returns the latter), else none."""
+    if not (isinstance(node, ast.Call) and node.args and _str(node.args[0]) is not None and (
+            isinstance(node.func, ast.Name) and any(m.rsplit(".", 1)[-1] in DYN_IMPORTS
+                                                    for m in bound.get(node.func.id, {node.func.id}))
+            or isinstance(node.func, ast.Attribute) and node.func.attr in DYN_IMPORTS)):
+        return set()
+    name = _str(node.args[0])
+    return {name, name.split(".")[0]}
+
+
 def py_sites(text):
-    """Fetch sites in Python: each import of a network module, each string that is a fetcher's name or
-    path (so `c = "curl"` counts where it is bound), and each other fetch site in any string but a
+    """Fetch sites in Python: each import of a network module, each module reached by attribute
+    (`import urllib` then `urllib.request.urlopen`) and not imported by name, once per file per module,
+    each string that is a fetcher's name (so `c = "curl"` counts where bound), each
+    `import_module`/`__import__` of a network module named by a constant, and each other fetch site in any string but a
     docstring, wherever it is passed (an aliased runner or a command held in a variable hides none)."""
     tree = ast.parse(text)
     docs = {id(d.body[0].value) for d in ast.walk(tree)
@@ -156,21 +476,44 @@ def py_sites(text):
     if any(isinstance(x, ast.Name) and x.id == "__doc__" or isinstance(x, ast.Attribute) and x.attr == "__doc__"
            for x in ast.walk(tree)):
         docs = set()  # a file that reads a docstring as data has its docstrings counted
-    n = 0
+    bound = {}  # each name to every module an import binds it to, from a first walk, whatever the order or scope
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            n += sum(1 for a in node.names if any(a.name == m or a.name.startswith(m + ".") for m in NET_MODULES))
+            for a in node.names:
+                bound.setdefault(a.asname or a.name.split(".")[0], set()).add(a.name if a.asname else a.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            for a in node.names:
+                bound.setdefault(a.asname or a.name, set()).add((node.module or "") + "." + a.name)
+    n, imported, reached = 0, set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if _net(a.name):
+                    n += 1
+                    imported.add(_net(a.name))
         elif isinstance(node, ast.ImportFrom) and node.level == 0:
             mod = node.module or ""
-            if any(mod == m or mod.startswith(m + ".") for m in NET_MODULES):
+            if _net(mod):
                 n += 1
+                imported.add(_net(mod))
             else:  # `from http import client`, `from urllib import request`
-                n += sum(1 for a in node.names if mod + "." + a.name in NET_MODULES)
+                hit = {mod + "." + a.name for a in node.names} & set(NET_MODULES)
+                n += len(hit)
+                imported |= hit
+        elif isinstance(node, ast.Attribute):
+            chain, x = [], node
+            while isinstance(x, ast.Attribute):
+                chain.append(x.attr)
+                x = x.value
+            bases = bound.get(x.id, ()) if isinstance(x, ast.Name) else _dyn(x, bound)
+            reached |= {_net(".".join([m] + chain[::-1])) for m in bases} - {None}
         elif _exact(node):
             n += 1
         elif _str(node) is not None and id(node) not in docs:
             n += text_sites(_str(node))
-    return n
+        if any(_net(m) for m in _dyn(node, bound)):
+            n += not text_sites(_str(node.args[0]))  # `import_module("requests")`; "urllib.request" counts as text
+    return n + len(reached - imported)
 
 
 def scanned():
@@ -218,15 +561,17 @@ def owed(text):
     return out
 
 
-def grown(base, head):
-    """Entries of the owed lists in head's text that base's lacks, or whose count rose."""
+def grown(base, head, same=()):
+    """Entries of the owed lists in head's text that base's lacks, or whose count rose. A count may rise
+    only for a file in same, the files whose bytes equal base's copy: the rise then comes from a stricter
+    reader, not a new fetch (#6549), and the reader is a gate file, so the Security accept holds it."""
     b, h = owed(base), owed(head)
     out = []
     for name in sorted(h):
         for f, n in sorted(h[name].items()):
             if f not in b[name]:
                 out.append("%s adds %s" % (name, f))
-            elif n is not None and b[name][f] is not None and n > b[name][f]:
+            elif n is not None and b[name][f] is not None and n > b[name][f] and f not in same:
                 out.append("%s raises %s from %d to %d" % (name, f, b[name][f], n))
     return out
 
