@@ -130,6 +130,10 @@ open kernel.RecoveryRotateHash
 # key signs; the kernel recomputes it and checks the cosign against its own
 # anchors before it shows the card.
 open kernel.RecoveryCardHash
+# A pure rendering of item counts by class in the kernel's household words
+# (OWN-6, #5378): the owner side's Forget notice says kinds as the kernel's
+# ask does; it reads only its argument and writes nothing.
+open kernel.KindList
 
 # The one way in: an intent goes to the journal. The gate's Submit is the
 # same call behind the gate's refusal of broker-reserved intent IDs.

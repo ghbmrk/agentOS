@@ -40,7 +40,9 @@ name: trusted-base-rerun
 # whose PRs are all open and whose sha is no open PR's head (any base), re-reading the run just before. The runs are
 # listed before the heads, so a head is never older than the run it is compared with. A failed listing or an
 # unreadable head cancels nothing and only warns, so the reruns go ahead; only ids, shas and PR numbers that passed
-# their pattern are printed. First attempts are left to their PR group.
+# their pattern are printed. The attempt number does not matter: a waiting run of any attempt on a stale sha is
+# cancelled, and a run on an open PR's current head, whatever its attempt or state, never is. The step is
+# continue-on-error (CI-cancel-stale-sha-fu, #6531): a failed cancel step never fails the job or skips the reruns.
 # tests/test_trusted_base.py pins every line below and runs the script.
 on:
   push:
@@ -62,6 +64,7 @@ jobs:
     steps:
       - name: Cancel waiting trusted-base attempts on no open PR's head
         shell: bash
+        continue-on-error: true # a failed cancel never fails the job or skips the reruns below
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
