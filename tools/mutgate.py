@@ -1490,9 +1490,10 @@ def _same_binding(sf, df, text, b, h):
 
 
 def _package_reads(rel, commit, tests=True, module=None):
-    """(names Parallel, module import paths) of broker/<rel>/'s .go files at commit, its _test.go files
-    left out unless tests, or None when a file or an import spec is not read. With tests, a package
-    whose every Parallel is a subtest's (_subtests_only) names none."""
+    """(why, module import paths) of broker/<rel>/'s .go files at commit, its _test.go files left out
+    unless tests, or None when a file or an import spec is not read. why is the first file:line that may
+    reorder or rerun its tests (_order_risk, or a Parallel; with tests, not one _subtests_only reads as
+    a subtest's), or None."""
     files = _go_files(rel, commit)
     if files is not None and not tests:
         files = {p: t for p, t in files.items() if not is_test(p)}
@@ -1501,11 +1502,14 @@ def _package_reads(rel, commit, tests=True, module=None):
     facts = {p: _facts(p, t) for p, t in files.items()}
     if any(f.specs is None for f in facts.values()):
         return None
+    clause = lambda path: _clause(path, module, commit)
+    decls = {p: _decls(p, t) for p, t in files.items()}
+    why = _order_risk(files, facts, decls, clause)
     # A linkname (in a comment, which f.parallel leaves out) may bind testing's Parallel under another name.
-    parallel = any(f.parallel or ("go:linkname" in files[p] and "Parallel" in files[p]) for p, f in facts.items())
-    if parallel and tests:
-        parallel = not _subtests_only(files, facts, lambda path: _clause(path, module, commit))
-    return parallel, frozenset(path for f in facts.values() for _, path in f.specs)
+    par = [p for p, f in sorted(facts.items()) if f.parallel or ("go:linkname" in files[p] and "Parallel" in files[p])]
+    if why is None and par:
+        why = _subtests_only(files, facts, decls, clause) if tests else f"{par[0]}: Parallel"
+    return why, frozenset(path for f in facts.values() for _, path in f.specs)
 
 
 # A Parallel only on subtests (TOOL-mutgate-subtest-parallel, #6675). A parallel subtest pauses until its
@@ -1519,17 +1523,31 @@ def _package_reads(rel, commit, tests=True, module=None):
 # bound in that test's body only by those literals (any other use of it is `t.` or a call argument).
 # It fails closed (every test) for anything else: a Parallel in a non-test file, a helper, a method value,
 # a string, another name or another literal; a package with a linkname or a file where `testing` may bind another
-# package; a literal naming a package-level var (parallel siblings may interleave on it); and a TestMain
-# other than `func TestMain(m *testing.M) {` that names m only in one `m.Run()`, no package-level name,
-# no `flag`, `Args`, `unsafe` or `Parallel`, no `for`, `goto`, label or func literal (which could run that
-# m.Run() twice), and qualifies only by its file's standard library imports other than `flag`.
-# A Parallel in an imported package fails closed as before (_parallel).
+# package; and a literal naming a package-level var (parallel siblings may interleave on it). A Parallel
+# in an imported package fails closed as before (_parallel), and so does every package _order_risk reads.
+#
+# Order before and around m.Run (TOOL-mutgate-testmain-order, #6682). With or without Parallel, `go test`
+# runs top-level tests once each in source order only if nothing changes the flags or reruns them. What
+# runs first is TestMain, every init and every package var initializer, of the package and of each one it
+# imports; and a subtest started by a `go` statement may outlive its parent into the next test. So
+# _order_risk fails closed (every test) for: a TestMain other than `func TestMain(m *testing.M) {` that
+# names m only in one `m.Run()`, no package-level name, none of MAIN_BARRED, no label, and qualifies only
+# by its file's standard library imports other than ORDER_PATHS; an init or a package var whose text names
+# ORDER_WORDS, a qualifier of an ORDER_PATHS import, or a package-level declaration that does, transitively
+# by name; and, in a file importing testing, a `go` statement that calls a *testing.T or *testing.B
+# parameter's Run or passes one to a call, or a method value of one's Run.
 SUBTEST_HEAD = re.compile(r"func\(([A-Za-z_]\w*) \*testing\.T\) \{")
 TEST_HEAD = re.compile(r"func Test\w*\(([A-Za-z_]\w*) \*testing\.T\) \{")
 MAIN_HEAD = re.compile(r"func TestMain\(([A-Za-z_]\w*) \*testing\.M\) \{")
-# A TestMain naming one of these may change what m.Run runs (flag, Args, unsafe, Parallel), or run one
-# m.Run() more than once (for, goto, func: a loop, a jump back, a literal called twice; L3 and Potency on #6677).
-MAIN_BARRED = {"flag", "Args", "unsafe", "Parallel", "for", "goto", "func"}
+# A word that may change test flags or rerun the binary (flag set, os.Args, a re-exec with -test.shuffle;
+# Security on #6677), and imports whose qualifier may: one in a TestMain, init or package var fails closed.
+ORDER_WORDS = {"shuffle", "linkname"}  # string contents too: "-test.shuffle=on"
+ORDER_PATHS = {"flag", "os/exec", "unsafe"}
+ORDER_SELECTORS = {("os", "Args"), ("os", "Executable"), ("os", "StartProcess"), ("syscall", "Exec"),
+                   ("syscall", "ForkExec"), ("syscall", "StartProcess"), ("golang.org/x/sys/unix", "Exec")}
+# A TestMain naming one of these may also run one m.Run() more than once (for, goto, func: a loop, a jump
+# back, a literal called twice; L3 and Potency on #6677), or Parallel; it names no selector's word either.
+MAIN_BARRED = ORDER_WORDS | {"flag", "unsafe", "Parallel", "for", "goto", "func"} | {w for _, w in ORDER_SELECTORS}
 LABEL = re.compile(r"^\s*[A-Za-z_]\w*\s*:(?!=)", re.M)  # a label (a `default:` too, which is safe to refuse)
 BRACKETS = {"(": ")", "[": "]", "{": "}"}
 
@@ -1582,6 +1600,8 @@ def _std_names(specs, clause):
         known = "." not in path.split("/")[0]
         parts = path.split("/")
         name = alias or (parts[-1] if known else clause(path))
+        # Defence in depth (Security r1 on #6677): Go refuses a file that binds `testing` twice, and a
+        # standard path's name is its last element, so no compiling file reaches the second clause.
         if name is None or (name == "testing" and path != "testing"):
             return None
         if known:
@@ -1589,51 +1609,175 @@ def _std_names(specs, clause):
     return std
 
 
-def _subtests_only(files, facts, clause):
-    """Whether every Parallel of a package's .go files ({path: text}) is a subtest's, and its TestMain
-    (if any) runs m.Run once with nothing that may reorder it (see above)."""
-    decls = {p: _decls(p, t) for p, t in files.items()}
-    names = {n for ds in decls.values() for d in ds if d[1] != "header" for n in d[2]}
-    pkg_vars = {n for ds in decls.values() for d in ds if d[1] == "var" for n in d[2]} - {"_"}  # `_` names no var
-    if any("go:linkname" in text for text in files.values()):
-        return False
-    for p, text in files.items():
-        f = facts[p]
-        main = is_test(p) and any(d[1] == "func" and "TestMain" in d[2] for d in decls[p])
-        if not (f.parallel or main):
+def _bodies(p, text, decls):
+    """[(declaration, its line, head row, offset of its body's `{`, offset of its `}`)] of p's funcs, or
+    None when a body runs past its declaration (a layout not read). open_ or close is None where the head
+    does not end in `{` or the brace does not close."""
+    bare = _uncommented(text, False)
+    rows = bare.split("\n")
+    starts = [0]
+    for r in rows:
+        starts.append(starts[-1] + len(r) + 1)
+    out = []
+    for d in decls[p]:
+        if d[1] not in ("func", "method"):
             continue
-        std = _std_names(f.specs, clause)
-        if not is_test(p) or std is None:
-            return False
+        at = next((i for i in range(d[6], d[7] + 1) if DECL.match(rows[i - 1])), None)
+        head = rows[at - 1] if at else ""
+        open_ = starts[at - 1] + len(head) - 1 if at else None
+        close = _closer(bare, open_) if at and head.endswith("{") else None
+        if close is not None and close >= starts[d[7]]:
+            return None
+        out.append((d, at or d[6], head, open_, close))
+    return out
+
+
+def _order_risk(files, facts, decls, clause):
+    """The first file:line of a package's .go files ({path: text}) that may change test flags or rerun or
+    outlive a test (see above), or None."""
+    names = {n for ds in decls.values() for d in ds if d[1] != "header" for n in d[2]}
+    # marked: (kind, name) of a declaration whose text may change flags, to its file:line; kind "." is
+    # a method's (named after a `.`), "" any other's (named bare).
+    marked, own, refs = {}, {}, {}
+    for p in sorted(files):
+        rows = _uncommented(files[p], False).split("\n")
+        quals = {a or path.split("/")[-1] for a, path in facts[p].specs if path in ORDER_PATHS}
+        imports = {a or path.split("/")[-1] for a, path in facts[p].specs}
+        for i, d in enumerate(decls[p]):
+            if d[1] != "header":
+                kind = "." if d[1] == "method" else ""
+                own[(p, i)] = {(kind, n) for n in _own_names(d, rows) - {"_", "init"}}  # no code names either
+                refs[(p, i)] = _refs("\n".join(rows[d[6] - 1:d[7]]), imports)
+                if _order_seed(d, quals, facts[p].specs, "\n".join(rows[d[6] - 1:d[7]])):
+                    for n in own[(p, i)]:
+                        marked.setdefault(n, f"{p}:{d[6]}")
+    grew = True
+    while grew:  # a declaration naming a marked one is marked: by name, so a shadow counts too
+        grew = False
+        for k, ns in own.items():
+            for n in ns - marked.keys():
+                if got := refs[k] & (marked.keys() - {n}):
+                    marked[n], grew = marked[min(got)], True
+    for p in sorted(files):
+        f, text = facts[p], files[p]
+        quals = {a or path.split("/")[-1] for a, path in f.specs if path in ORDER_PATHS}
+        bodies = _bodies(p, text, decls)
+        if bodies is None:
+            return f"{p}: a body past its declaration"
         code, bare = _uncommented(text), _uncommented(text, False)
-        rows = bare.split("\n")
-        starts = [0]
-        for r in rows:
-            starts.append(starts[-1] + len(r) + 1)
+        for d, at, head, open_, close in bodies:
+            if d[1] == "func" and "TestMain" in d[2] and is_test(p):
+                std = _std_names(f.specs, clause)
+                m = MAIN_HEAD.fullmatch(head)
+                if (std is None or m is None or close is None or not _plain_main(
+                        m[1], code[open_:close + 1], bare[open_:close + 1], names - {"TestMain"}, std)):
+                    return f"{p}:{at}: TestMain"
+        for i, d in enumerate(decls[p]):
+            if d[1] in ("func", "var") and (d[1] == "var" or "init" in d[2]) and (
+                    refs[(p, i)] & marked.keys() or _order_seed(d, quals, f.specs, _decl_text(bare, d))):
+                return f"{p}:{d[6]}: " + ("package var" if d[1] == "var" else "init")
+        if (go := _go_risk(f.specs, bare)) is not None:
+            return f"{p}:{bare.count(chr(10), 0, go[0]) + 1}: {go[1]}"
+    return None
+
+
+def _order_seed(d, quals, specs, bare):
+    """Whether a declaration (bare: its text, comments and literal contents blanked) names ORDER_WORDS
+    (string contents too), a qualifier of an ORDER_PATHS import, or an ORDER_SELECTORS selector."""
+    paths = {a or path.split("/")[-1]: path for a, path in specs}
+    return bool(d[4] & (ORDER_WORDS | quals) or any(
+        (paths.get(q), w) in ORDER_SELECTORS for q, w in re.findall(r"\b([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)", bare)))
+
+
+def _decl_text(bare, d):
+    """A declaration's lines of a file's text."""
+    return "\n".join(bare.split("\n")[d[6] - 1:d[7]])
+
+
+def _refs(bare, imports):
+    """{(kind, name)} code (comments and literal contents blanked) may use of its package's own
+    declarations: ("", w) for each word w not after a `.`, (".", w) for one after a `.` whose base is
+    not an import's name (`x.setup()`, never `errors.New`)."""
+    out = set()
+    for w in re.finditer(r"(?:([A-Za-z_]\w*)?(\s*\.\s*))?\b([A-Za-z_]\w*)", bare):
+        if w[1]:
+            out.add(("", w[1]))
+        if not w[2]:
+            out.add(("", w[3]))
+        elif w[1] not in imports:  # None: the base is a call, an index or a literal (`f().x`)
+            out.add((".", w[3]))
+    return out
+
+
+def _own_names(d, rows):
+    """The names a declaration binds: a method's own name (its receiver's type aside), read from its
+    head row (rows: its file's lines), where _decls names none."""
+    if d[1] != "method":
+        return d[2]
+    at = next((rows[i - 1] for i in range(d[6], d[7] + 1) if DECL.match(rows[i - 1])), "")
+    m = re.match(r"func\s*\([^)]*\)\s*([A-Za-z_]\w*)", at)
+    return {m[1]} if m else set(d[4])  # not read: every word, which marks more, never less
+
+
+def _go_risk(specs, bare):
+    """(offset, what) of the first `go` statement of a file (bare: comments and literal contents blanked)
+    that calls Run on a *testing.T or *testing.B parameter or passes one to a call (which may), or of a
+    method value of one's Run; None when the file imports no testing. A subtest a goroutine starts may
+    outlive its parent (#6682); `t.Error` from a goroutine reorders nothing."""
+    alias = [a or "testing" for a, path in specs if path == "testing"]
+    if not alias:
+        return None
+    if "." in alias:
+        return 0, "testing dot-imported"  # its T is named bare: not read
+    ts = set()
+    for a in alias:
+        ts |= set(re.findall(rf"([A-Za-z_]\w*)\s+\*\s*{a}\s*\.\s*[TB]\b", bare))
+    for t in sorted(ts):
+        if v := re.search(rf"(?<!\w){t}\s*\.\s*Run\b(?!\s*\()", bare):
+            return v.start(), "Run method value"
+    for g in re.finditer(r"\bgo\b", bare):
+        depth, j = 0, g.end()
+        while j < len(bare) and not (depth == 0 and bare[j] in "\n;}"):
+            depth += bare[j] in BRACKETS
+            depth -= bare[j] in ")]}"
+            j += 1
+        seg = bare[g.end():j]
+        if any(re.search(rf"(?<!\w){t}\s*\.\s*Run\b|[(,]\s*{t}\s*[,)]", seg) for t in ts):
+            return g.start(), "go statement"
+    return None
+
+
+def _subtests_only(files, facts, decls, clause):
+    """None when every Parallel of a package's .go files ({path: text}) is a subtest's (see above), else
+    the first file:line read otherwise."""
+    pkg_vars = {n for ds in decls.values() for d in ds if d[1] == "var" for n in d[2]} - {"_"}  # `_` names no var
+    for p, text in sorted(files.items()):
+        if "go:linkname" in text:
+            return f"{p}: linkname"
+    for p, text in sorted(files.items()):
+        f = facts[p]
+        if not f.parallel:
+            continue
+        if not is_test(p):
+            return f"{p}: Parallel in a non-test file"
+        if _std_names(f.specs, clause) is None:
+            return f"{p}: testing may bind another package"
+        code, bare = _uncommented(text), _uncommented(text, False)
+        bodies = _bodies(p, text, decls)
+        if bodies is None:
+            return f"{p}: a body past its declaration"
         safe = set()
-        for d in decls[p]:
-            if d[1] != "func":
-                continue
-            at = next((i for i in range(d[6], d[7] + 1) if DECL.match(rows[i - 1])), None)
-            head = rows[at - 1] if at else ""
-            open_ = starts[at - 1] + len(head) - 1 if at else None
-            close = _closer(bare, open_) if at and head.endswith("{") else None
-            if close is not None and close >= starts[d[7]]:
-                return False
-            if (m := MAIN_HEAD.fullmatch(head)) and close is not None:
-                if not _plain_main(m[1], code[open_:close + 1], bare[open_:close + 1], names - {"TestMain"}, std):
-                    return False
-            elif head.startswith("func TestMain"):
-                return False
+        for d, at, head, open_, close in bodies:
             if not (m := TEST_HEAD.fullmatch(head)) or close is None:
                 continue
             got = _subtest_calls(m[1], bare, code, open_, close, pkg_vars)
             if got is None:
-                return False
+                return f"{p}:{at}: {d[2] and min(d[2])} binds t otherwise, or a subtest names a package var"
             safe |= got
-        if any(m.start() not in safe for m in re.finditer(r"\bParallel\b", code)):
-            return False
-    return True
+        for w in re.finditer(r"\bParallel\b", code):
+            if w.start() not in safe:
+                return f"{p}:{code.count(chr(10), 0, w.start()) + 1}: Parallel not a subtest's first statement"
+    return None
 
 
 def _subtest_calls(t, bare, code, open_, close, pkg_vars):
@@ -1650,6 +1794,8 @@ def _subtest_calls(t, bare, code, open_, close, pkg_vars):
         if not re.search(rf"(?<![\w.]){t}\b", bare[paren:end]):
             continue
         h = SUBTEST_HEAD.match(bare, fn.start())
+        # h[1] != t is defence in depth (Security r1 on #6677): the parameters name t, and a
+        # `func(x *testing.T)` head names only x, testing and T; t == "testing" would not compile.
         if h is None or h[1] != t:
             return None  # t bound by another function's parameter
         brace = h.end() - 1
@@ -1658,6 +1804,8 @@ def _subtest_calls(t, bare, code, open_, close, pkg_vars):
         if last is None or last > close or not re.match(r"\s*\)", bare[last + 1:]) or call is None:
             return None
         args = bare[call + 1:fn.start()]
+        # _top_commas(args) != 1 is defence in depth (Security r1 on #6677): T.Run takes two arguments,
+        # so a compiling `t.Run(` call with the literal last has exactly one comma before it.
         if (bare[call] != "(" or not re.search(rf"(?<![\w.]){t}\s*\.\s*Run$", bare[:call])
                 or not args.rstrip().endswith(",") or _top_commas(args) != 1):
             return None
@@ -1698,11 +1846,12 @@ def _plain_main(m, code, bare, names, std):
     words = set(WORD.findall(code[bare.index("{"):]))
     if words & (names | MAIN_BARRED):
         return False
-    return all(q == m or (q in std and std[q] != "flag") for q in QUALIFIER.findall(bare))
+    return all(q == m or (q in std and std[q] not in ORDER_PATHS) for q in QUALIFIER.findall(bare))
 
 
 def _parallel(pkg, commit, module, cache):
-    """Whether a test of broker/<pkg>/ may call Parallel: the word in a .go file of it (test or not) or of
+    """Why a test of broker/<pkg>/ may run out of source order (a file:line, see _order_risk), or None:
+    whether it may call Parallel: the word in a .go file of it (test or not) or of
     a package of this module it imports, transitively; True when one is not read (L3 and Security on
     #6421: a helper may call t.Parallel()). An imported package's own _test.go files, and what only they
     import, are not built into pkg's test binary, so they are not read (#6372: journal's model_test.go
@@ -1714,16 +1863,19 @@ def _parallel(pkg, commit, module, cache):
             cache[(rel, commit, rel == pkg)] = _package_reads(rel, commit, tests=rel == pkg, module=module)
         got = cache[(rel, commit, rel == pkg)]
         if got is None or got[0]:
-            return True
+            return got[0] if got else f"broker/{rel}/ is not read"
         for path in got[1]:
             if module and (path == module or path.startswith(module + "/")):
                 rel = path[len(module) + 1:] if path != module else ""
                 if ".." in rel.split("/"):
-                    return True
+                    return f"{path} is outside broker/"
                 if rel not in seen:
                     seen.add(rel)
                     todo.append(rel)
-    return False
+    return None
+
+
+SAID = set()  # (package, why) already reported, since moved() runs once per side
 
 
 def _run_list(side):
@@ -1761,7 +1913,12 @@ def moved(diff_text, mb, head):
             continue
         was, now_runs = ([r[:3] for r in rs] for rs in runs)
         if was != now_runs:
-            k = 0 if _parallel(pkg, mb, module, reads) or _parallel(pkg, head, module, reads) else next(
+            why = _parallel(pkg, mb, module, reads) or _parallel(pkg, head, module, reads)
+            if why and (pkg, why) not in SAID:
+                SAID.add((pkg, why))
+                print(f"mutgate: broker/{pkg}/'s run list changes and {why} may reorder it: every test is a change",
+                      file=sys.stderr)
+            k = 0 if why else next(
                 i for i in range(len(was) + 1) if i == len(was) or i == len(now_runs) or was[i] != now_runs[i])
             for side, rs in ((later_then, runs[0]), (later_now, runs[1])):
                 for p, _, _, first in rs[k:]:
