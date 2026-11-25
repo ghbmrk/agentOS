@@ -35,6 +35,7 @@ body { font-family: sans-serif; margin: 0 }
 <div class="label">Wi-Fi password</div>
 <div class="code">{{.Password}}</div>
 <div class="hint">Scan, or join network {{.SSID}} with this password. The enforcer's page opens and gives your phone the Owner network.</div>
+<div class="hint">Phone won't join: it needs WPA3.</div>
 <div class="step">2. Back on the Owner network, claim this agentOS box</div>
 {{.QR}}
 <div class="label">Claim code</div>
@@ -68,6 +69,7 @@ func writeSticker(dir, code string, net claim.SetupNet) error {
 	}
 	txt := fmt.Sprintf("1. Join the enforcer's setup Wi-Fi; its page gives your phone the Owner network.\n"+
 		"Wi-Fi network: %s\nWi-Fi password: %s\n"+
+		"Phone won't join: it needs WPA3.\n"+
 		"2. Back on the Owner network, claim this agentOS box.\n"+
 		"agentOS claim code: %s\nClaim page: %s\n",
 		net.SSID, net.Password, code, claimURL(code))

@@ -638,6 +638,10 @@ const (
 	ClassLabel = kernel.ClassLabel // the class of a subject's name
 )
 
+// KindList says counts by class in the kernel's household words, as its
+// Forget ask does, for the owner side's texts to match it (#5378).
+func KindList(classes map[string]int) string { return kernel.KindList(classes) }
+
 var (
 	ErrContentClosed = kernel.ErrContentClosed
 	ErrSubject       = kernel.ErrSubject

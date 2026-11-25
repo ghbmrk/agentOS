@@ -1,12 +1,13 @@
 # The vision runtime's pinned files (VIS-core part e, ASSUMPTIONS VIS-A27).
 # Each line: SHA-256, file name, where it is fetched from. The runtime
 # (runtime_onnx.go) refuses a model or library whose hash is not the one
-# here (the runtime is ONNX Runtime 1.29.0's official PyPI wheel, because the
-# GitHub release asset URL returns 404 since 2026-11-18);
+# here (the runtime is ONNX Runtime 1.29.0's official NuGet package, whose
+# library is the reviewed release library's bytes; the GitHub release asset
+# URL returns 404 since 2026-11-18);
 # .github/workflows/vision-real.yml checks every download against
 # these before anything runs.
-2b80d8c7ec2cc7438e4da3760b88c24568cba72c9ace96d668800a6c79419acb  onnxruntime-1.29.0-cp312-cp312-manylinux_2_28_x86_64.whl  https://files.pythonhosted.org/packages/96/eb/e6968f5e41aac3125f2ff5708855f09cb0b70d85ed3115b625b0b58305ba/onnxruntime-1.29.0-cp312-cp312-manylinux_2_28_x86_64.whl
-8902e52a04bf6bf26f1613746811d6194f9c97ce7a6a7a28452b48522d3bd8d0  libonnxruntime.so.1.29.0  onnxruntime-1.29.0-cp312-cp312-manylinux_2_28_x86_64.whl:onnxruntime/capi/libonnxruntime.so.1.29.0
+4557021fec4da3924e2e12ff44b1cc50b176de0d2c5c7daa89ab11c208b3a454  microsoft.ml.onnxruntime.1.29.0.nupkg  https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.29.0/microsoft.ml.onnxruntime.1.29.0.nupkg
+5715f06d8992ca8eeeddcce43df3a7d38f97d537052126f558e912cb312460ca  libonnxruntime.so.1.29.0  microsoft.ml.onnxruntime.1.29.0.nupkg:runtimes/linux-x64/native/libonnxruntime.so
 427cc366d34e27ff7a03e2899b5e3671425c262ea2291f88bb942bc1cc70b0f7  yolox_tiny.onnx  https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_tiny.onnx
 8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4  face_detection_yunet_2023mar.onnx  https://huggingface.co/opencv/face_detection_yunet/resolve/3cc26e7f1014a5ee5d74a42acee58bafc9d0a310/face_detection_yunet_2023mar.onnx
 0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79  face_recognition_sface_2021dec.onnx  https://huggingface.co/opencv/face_recognition_sface/resolve/3d7082438a6e4551e840c9b2bb60b71e8da4b524/face_recognition_sface_2021dec.onnx

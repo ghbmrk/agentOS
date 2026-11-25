@@ -756,6 +756,7 @@ RERUN_PIN = [
     '    steps:',
     "      - name: Cancel waiting trusted-base attempts on no open PR's head",
     '        shell: bash',
+    '        continue-on-error: true # a failed cancel never fails the job or skips the reruns below',
     '        env:',
     '          GH_TOKEN: ${{ github.token }}',
     '          REPO: ${{ github.repository }}',
@@ -918,7 +919,10 @@ class Workflow(unittest.TestCase):
                          ('[ $? = 1 ]; }; }; then', '[ $? != 0 ]; }; }; then'),
                          ('all(.jobs[]; .conclusion == "success")', 'any(.jobs[]; .conclusion == "success")'),
                          ('&& [ -n "$passed" ]; then', '; then'),
-                         ("    runs-on: ubuntu-24.04", "    continue-on-error: true\n    runs-on: ubuntu-24.04")]:
+                         ("    runs-on: ubuntu-24.04", "    continue-on-error: true\n    runs-on: ubuntu-24.04"),
+                         # CI-cancel-stale-sha-fu (#6531): only the cancel step may fail without failing the job.
+                         ("        continue-on-error: true # a failed cancel", "        # a failed cancel"),
+                         ("          WAIT: 30\n", "          WAIT: 30\n        continue-on-error: true\n")]:
             self.assertIn(old, text)
             self.assertTrue(pin_problems(text.replace(old, new, 1), RERUN_PIN), old)
 
