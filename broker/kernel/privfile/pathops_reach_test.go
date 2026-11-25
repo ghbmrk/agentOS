@@ -10,7 +10,9 @@ package privfile
 import (
 	"encoding/json"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -137,33 +139,45 @@ func TestRootSideLintReach(t *testing.T) {
 	const camQemu = "image/camnode/external/board/qemu/overlay/"
 	const camCm4 = "image/camnode/external/board/cm4/overlay/"
 	for name, c := range map[string]struct{ link, target, want string }{
-		"a linked drop-in directory":                    {"image/mkosi/agentos-side.service.d", "../elsewhere", "a link to a directory"},
-		"an absolute target":                            {"image/mkosi/agentos-side.service.d", "/usr/lib/agentos-l3/dropins", "not a file beside it"},
-		"an absolute target that exists on the runner":  {"image/mkosi/agentos-side.service.d", "/etc", "not a file beside it"},
-		"a dangling target":                             {"image/mkosi/agentos-side.service.d", "../nowhere", "no file"},
-		"a link loop":                                   {"image/mkosi/agentos-side.service.d", "agentos-side.service.d", "another link"},
-		"a chain of links":                              {"image/mkosi/agentos-q.service", "agentos-r.service", "another link"},
-		"a target outside the repo":                     {"image/mkosi/agentos-side.service.d", "../../../outside", "outside every overlay that lands in one or outside image/"},
-		"a climbing build link with a . step":           {"image/enforcer/mkosi/mkosi.configure", "../../mkosi/./agentos-z.service", "not a file beside it"},
-		"a climbing build link with a .. step":          {"image/enforcer/mkosi/mkosi.configure", "../../mkosi/../go.mod", "not a file beside it"},
-		"a climbing build link into an overlay":         {"image/enforcer/mkosi/mkosi.configure", "../../mkosi/mkosi.extra/x", "outside every overlay that lands in one"},
-		"a climbing build link to a directory":          {"image/enforcer/mkosi/mkosi.configure", "../../elsewhere", "a link to a directory"},
-		"a climbing link in an overlay":                 {etc + "agentos-y.service", "../../agentos-z.service", "not a file beside it"},
-		"a climb through the runner's root":             {etc + "agentos-z.service", strings.Repeat("../", 15) + "ROOT/image/mkosi/agentos-z.service", "not a file beside it"},
-		"a climb through /proc/self/root":               {etc + "agentos-z.service", strings.Repeat("../", 15) + "proc/self/root/ROOT/image/mkosi/agentos-z.service", "not a file beside it"},
-		"a nested target":                               {etc + "agentos-z.service", "../../../run/agentos-x/agentos-z.service", "not a file beside it"},
-		"a target in a grant":                           {ext + "var/lib/agentos-x/l.service", "../l.service", "/var/lib/agentos-x/l.service in the image, outside rootTrees"},
-		"a link out of its overlay":                     {ext + "l.service", "../l.service", "leaves its overlay image/mkosi/mkosi.extra"},
-		"an overlay link to another name":               {etc + "multi-user.target.wants/agentos-y.service", "../agentos-z.service", "other than a unit linked to ../agentos-y.service"},
-		"an overlay unit linked to a non-unit":          {camCommon + "etc/systemd/system/agentos-z.service", "../agentos-z.txt", "other than a unit linked to ../agentos-z.service"},
-		"an overlay link beside it":                     {etc + "agentos-y.service", "agentos-z.service", "other than a unit linked to ../agentos-y.service"},
-		"a linked drop-in in an overlay":                {etc + "agentos-y.service.d/a.conf", "../a.conf", "other than a unit linked to ../a.conf"},
-		"a linked overlay file of no unit type":         {etc + "x.target.wants/agentos-y.env", "../agentos-y.env", "other than a unit linked to ../agentos-y.env"},
-		"an instance linked to another template":        {etc + "multi-user.target.wants/agentos-y@1.service", "../agentos-z@.service", "other than a unit linked to ../agentos-y@1.service"},
-		"an instance linked to another instance":        {etc + "multi-user.target.wants/agentos-y@1.service", "../agentos-y@2.service", "other than a unit linked to ../agentos-y@1.service"},
-		"a template linked to an instance":              {etc + "agentos-y@.service", "../agentos-y@1.service", "other than a unit linked to ../agentos-y@.service"},
-		"an instance of no template linked":             {etc + "multi-user.target.wants/agentos-y.service", "../agentos-y@.service", "other than a unit linked to ../agentos-y.service"},
-		"a timer linked to another name":                {etc + "timers.target.wants/agentos-y.timer", "../agentos-z.timer", "other than a unit linked to ../agentos-y.timer"},
+		"a linked drop-in directory":                   {"image/mkosi/agentos-side.service.d", "../elsewhere", "a link to a directory"},
+		"an absolute target":                           {"image/mkosi/agentos-side.service.d", "/usr/lib/agentos-l3/dropins", "not a file beside it"},
+		"an absolute target that exists on the runner": {"image/mkosi/agentos-side.service.d", "/etc", "not a file beside it"},
+		"a dangling target":                            {"image/mkosi/agentos-side.service.d", "../nowhere", "no file"},
+		"a link loop":                                  {"image/mkosi/agentos-side.service.d", "agentos-side.service.d", "another link"},
+		"a chain of links":                             {"image/mkosi/agentos-q.service", "agentos-r.service", "another link"},
+		"a target outside the repo":                    {"image/mkosi/agentos-side.service.d", "../../../outside", "outside every overlay that lands in one or outside image/"},
+		"a climbing build link with a . step":          {"image/enforcer/mkosi/mkosi.configure", "../../mkosi/./agentos-z.service", "not a file beside it"},
+		"a climbing build link with a .. step":         {"image/enforcer/mkosi/mkosi.configure", "../../mkosi/../go.mod", "not a file beside it"},
+		"a climbing build link into an overlay":        {"image/enforcer/mkosi/mkosi.configure", "../../mkosi/mkosi.extra/x", "outside every overlay that lands in one"},
+		"a climbing build link to a directory":         {"image/enforcer/mkosi/mkosi.configure", "../../elsewhere", "a link to a directory"},
+		"a climbing link in an overlay":                {etc + "agentos-y.service", "../../agentos-z.service", "not a file beside it"},
+		"a climb through the runner's root":            {etc + "agentos-z.service", strings.Repeat("../", 15) + "ROOT/image/mkosi/agentos-z.service", "not a file beside it"},
+		"a climb through /proc/self/root":              {etc + "agentos-z.service", strings.Repeat("../", 15) + "proc/self/root/ROOT/image/mkosi/agentos-z.service", "not a file beside it"},
+		"a nested target":                              {etc + "agentos-z.service", "../../../run/agentos-x/agentos-z.service", "not a file beside it"},
+		"a target in a grant":                          {ext + "var/lib/agentos-x/l.service", "../l.service", "/var/lib/agentos-x/l.service in the image, outside rootTrees"},
+		"a link out of its overlay":                    {ext + "l.service", "../l.service", "leaves its overlay image/mkosi/mkosi.extra"},
+		"an overlay link to another name":              {etc + "multi-user.target.wants/agentos-y.service", "../agentos-z.service", "other than a unit linked to ../agentos-y.service"},
+		"an overlay unit linked to a non-unit":         {camCommon + "etc/systemd/system/agentos-z.service", "../agentos-z.txt", "other than a unit linked to ../agentos-z.service"},
+		"an overlay link beside it":                    {etc + "agentos-y.service", "agentos-z.service", "other than a unit linked to ../agentos-y.service"},
+		"a linked drop-in in an overlay":               {etc + "agentos-y.service.d/a.conf", "../a.conf", "other than a unit linked to ../a.conf"},
+		"a linked overlay file of no unit type":        {etc + "x.target.wants/agentos-y.env", "../agentos-y.env", "other than a unit linked to ../agentos-y.env"},
+		"an instance linked to another template":       {etc + "multi-user.target.wants/agentos-y@1.service", "../agentos-z@.service", "other than a unit linked to ../agentos-y@1.service"},
+		"an instance linked to another instance":       {etc + "multi-user.target.wants/agentos-y@1.service", "../agentos-y@2.service", "other than a unit linked to ../agentos-y@1.service"},
+		"a template linked to an instance":             {etc + "agentos-y@.service", "../agentos-y@1.service", "other than a unit linked to ../agentos-y@.service"},
+		"an instance of no template linked":            {etc + "multi-user.target.wants/agentos-y.service", "../agentos-y@.service", "other than a unit linked to ../agentos-y.service"},
+		"a timer linked to another name":               {etc + "timers.target.wants/agentos-y.timer", "../agentos-z.timer", "other than a unit linked to ../agentos-y.timer"},
+		// The refusal names the link's template and the types a link may name (#6033 item 3).
+		"an instance linked to another template, named": {etc + "multi-user.target.wants/agentos-y@1.service", "../agentos-z@.service", "or to its template ../agentos-y@.service"},
+		"a link of a type no link may name":             {etc + "local-fs.target.wants/agentos-y.automount", "../agentos-y.automount", "a link may name only a .path, .service, .socket, .swap, .target, .timer or .mount unit"},
+		// A non-unit has no template to be told of (#6504 item 2).
+		"a linked non-unit of an instance's form": {etc + "agentos-y@1.conf", "../agentos-y@.conf", "other than a unit linked to ../agentos-y@1.conf or an instance to ../<its template>"},
+		// A dependency entry refused for another reason than its type
+		// keeps the full step, naming its own template (#6504 item 3).
+		"an entry linked to another instance": {etc + "multi-user.target.wants/agentos-y@1.service", "../agentos-z@1.service", "make the entry a link to ../agentos-y@1.service or ../agentos-y@.service, ship"},
+		// Each merge holding a link answers it: camnode builds common with
+		// cm4 and common with qemu, never all three (#6033 item 2).
+		"a board link only another board answers":       {camQemu + "etc/systemd/system/multi-user.target.wants/debug-shell.service", "../debug-shell.service", "no file in the image built from image/camnode/external/board/common/overlay and image/camnode/external/board/qemu/overlay"},
+		"a common link only one board answers":          {camCommon + "etc/systemd/system/multi-user.target.wants/debug-shell.service", "../debug-shell.service", "no file in the image built from image/camnode/external/board/common/overlay and image/camnode/external/board/qemu/overlay"},
 		"a target linked out of its overlay":            {ext + "x.target", "../x.target", "leaves its overlay image/mkosi/mkosi.extra"},
 		"a board link no overlay's file answers":        {camQemu + "etc/systemd/system/multi-user.target.wants/agentos-q.service", "../agentos-q.service", "no file"},
 		"a board link another image answers":            {camQemu + "etc/systemd/system/multi-user.target.wants/agentos-m.service", "../agentos-m.service", "no file"},
@@ -187,6 +201,7 @@ func TestRootSideLintReach(t *testing.T) {
 			files[camCommon+"etc/systemd/system/agentos-d.service/x"] = ""
 			files[camCommon+"etc/systemd/system/agentos-e.service/x"] = ""
 			files[camCm4+"etc/systemd/system/agentos-e.service"] = "[Service]\nExecStart=/bin/true\n"
+			files[camCm4+"etc/systemd/system/debug-shell.service"] = "[Service]\nExecStart=/bin/true\n"
 			files["image/mkosi/mkosi.extra/x"] = ""
 			files["go.mod"] = "module x\n"
 			root := fakeRepo(t, files)
@@ -204,11 +219,86 @@ func TestRootSideLintReach(t *testing.T) {
 			if err := os.Symlink(target, filepath.Join(root, c.link)); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := rootBinaries(root); err == nil || !strings.Contains(err.Error(), c.link+": ") || !strings.Contains(err.Error(), c.want) {
+			_, err := rootBinaries(root)
+			if err == nil || !strings.Contains(err.Error(), c.link+": ") || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("got %v, want a refusal of %s with %q", err, c.link, c.want)
+			}
+			// A dependency entry is started by name: a file in its place
+			// is no fix, so its refusal never says to ship one (#6493 UX 1).
+			// An entry of a type no link may name stays refused whatever
+			// it names, so its only step is to drop it (#6504 item 3).
+			step := dependencyStep(path.Base(c.link), false)
+			if dep := isDependencyDir(path.Base(path.Dir(c.link))); dep != strings.HasSuffix(err.Error(), "; "+step) || dep && strings.Contains(err.Error(), "ship the file itself") {
+				t.Fatalf("got %v, want the dependency step exactly when %s is a dependency entry", err, c.link)
+			}
+			if !linkTypes[path.Ext(c.link)] && (strings.Contains(err.Error(), "make the entry a link") || strings.Contains(err.Error(), "ship that unit")) {
+				t.Fatalf("got %v, want %s, of a type no link may name, told only to drop the entry", err, c.link)
+			}
+			// The template wording is for a unit's instance only (#6504 item 2).
+			if !linkTypes[path.Ext(c.link)] && strings.Contains(err.Error(), "its template ../") {
+				t.Fatalf("got %v, want no template named for %s, which is no unit", err, c.link)
 			}
 		})
 	}
+	// systemd reads a dependency directory's entries by name only and
+	// starts the unit of that name from its search path, so a regular file
+	// there is not what runs: the qemu build would start the packaged
+	// debug-shell.service (#6493 UX 1 and 4).
+	for _, dep := range []string{"multi-user.target.wants", "multi-user.target.requires", "multi-user.target.upholds", "agentos-z.service.wants"} {
+		t.Run("refuses a regular file in "+dep, func(t *testing.T) {
+			files := reachBase()
+			files[camCm4+"etc/systemd/system/debug-shell.service"] = "[Service]\nExecStart=/bin/true\n"
+			entry := camQemu + "etc/systemd/system/" + dep + "/debug-shell.service"
+			files[entry] = "[Service]\nExecStart=/bin/true\n"
+			if _, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), entry+": a regular file in a dependency directory") || !strings.HasSuffix(err.Error(), "; replace the file with a link to ../debug-shell.service, ship that unit in an overlay of every build holding the entry (or move the entry to the overlay that ships it), or drop the entry") {
+				t.Fatalf("got %v, want %s refused as a file in a dependency directory, told to replace it with a link", err, entry)
+			}
+		})
+	}
+	// A regular file of a type no link may name stays refused as a link
+	// too, so its only step is to drop it; an instance's names its
+	// template (#6504 item 3).
+	for entry, want := range map[string]string{
+		"multi-user.target.wants/agentos-y.automount": "; drop the entry",
+		"multi-user.target.wants/agentos-y@1.service": "; replace the file with a link to ../agentos-y@1.service or ../agentos-y@.service, ship",
+	} {
+		t.Run("refuses a regular file "+entry, func(t *testing.T) {
+			files := reachBase()
+			files[camQemu+"etc/systemd/system/"+entry] = "[Service]\nExecStart=/bin/true\n"
+			_, err := rootBinaries(fakeRepo(t, files))
+			if err == nil || !strings.Contains(err.Error(), "a regular file in a dependency directory") || !strings.Contains(err.Error(), want) || want == "; drop the entry" && !strings.HasSuffix(err.Error(), want) {
+				t.Fatalf("got %v, want %s refused with %q", err, entry, want)
+			}
+		})
+	}
+	// Every unit-type list is a subset of systemd's unit types, so none
+	// can drift from it (#6504 item 5).
+	t.Run("unit-type lists are subsets of allUnitTypes", func(t *testing.T) {
+		for name, m := range map[string]map[string]bool{"execUnits": execUnits, "unitTypes": unitTypes, "linkTypes": linkTypes} {
+			for ext := range m {
+				if !allUnitTypes[ext] {
+					t.Errorf("%s holds %s, which is no unit type in allUnitTypes", name, ext)
+				}
+			}
+		}
+		for ext := range unitTypes {
+			if !linkTypes[ext] {
+				t.Errorf("unitTypes holds %s, which linkTypes lacks", ext)
+			}
+		}
+		for ext := range linkTypes {
+			if !strings.Contains(linkTypeList, ext) {
+				t.Errorf("linkTypeList does not name %s", ext)
+			}
+		}
+	})
+	t.Run("reads a regular file in a directory of no unit's dependencies", func(t *testing.T) {
+		files := reachBase()
+		files[ext+"etc/agentos/x.wants/notes"] = "plain\n"
+		if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
+			t.Fatal(err)
+		}
+	})
 	// An image merges its overlays, and a later one's copy wins (camnode:
 	// common, then the board's). A link in one overlay may land on another
 	// overlay's copy, so that copy must be read too (#6003 L3 round 3).
@@ -264,6 +354,45 @@ func TestRootSideLintReach(t *testing.T) {
 			// meets the drop-in as root's.
 			map[string]string{camCommon + "etc/systemd/system/agentos-z@.service": "[Service]\nUser=agentos-z\nExecStart=/bin/true\n", camQemu + "etc/systemd/system/agentos-z@.service": "[Service]\nExecStart=/bin/true\n", camCommon + "etc/systemd/system/agentos-z@1.service.d/z.conf": tmplDropin},
 			[][2]string{{camCommon + "etc/systemd/system/multi-user.target.wants/agentos-z@1.service", "../agentos-z@.service"}},
+		},
+	} {
+		t.Run("refuses "+name, func(t *testing.T) {
+			files := reachBase()
+			files["image/mkosi/agentos-x.service"] = "[Service]\nUser=agentos-x\nExecStart=/bin/true\nStateDirectory=agentos-x\n"
+			for p, text := range c.files {
+				files[p] = text
+			}
+			if _, err := linkedRepo(t, files, c.links); err == nil || !strings.Contains(err.Error(), "/var/lib/agentos-x/evil") {
+				t.Fatalf("got %v, want the instance's drop-in refused for running from /var/lib/agentos-x", err)
+			}
+		})
+	}
+	// An instance's drop-ins are read whatever starts it: a link naming
+	// it, a .timer's Unit=, a Wants=, a socket's instance, or nothing in
+	// image/ at all (#6033 item 1).
+	for name, c := range map[string]struct {
+		files map[string]string
+		links [][2]string
+	}{
+		"an instance drop-in no link names": {
+			map[string]string{etc + "agentos-z@.service": "[Service]\nExecStart=/bin/true\n", etc + "agentos-z@1.service.d/z.conf": tmplDropin},
+			nil,
+		},
+		"an instance a linked timer starts": {
+			map[string]string{etc + "agentos-z@.service": "[Service]\nExecStart=/bin/true\n", etc + "agentos-z@1.service.d/z.conf": tmplDropin, etc + "agentos-z.timer": "[Timer]\nOnBootSec=1\nUnit=agentos-z@1.service\n"},
+			[][2]string{{etc + "timers.target.wants/agentos-z.timer", "../agentos-z.timer"}},
+		},
+		"an instance a linked target wants": {
+			map[string]string{etc + "agentos-z@.service": "[Service]\nExecStart=/bin/true\n", etc + "agentos-z@1.service.d/z.conf": tmplDropin, etc + "agentos-z.target": "[Unit]\nWants=agentos-z@1.service\n"},
+			[][2]string{{etc + "multi-user.target.wants/agentos-z.target", "../agentos-z.target"}},
+		},
+		"an instance a linked socket instance starts": {
+			map[string]string{etc + "agentos-z@.service": "[Service]\nExecStart=/bin/true\n", etc + "agentos-z@1.service.d/z.conf": tmplDropin, etc + "agentos-z@.socket": "[Socket]\nListenStream=/run/agentos-z/z.sock\n"},
+			[][2]string{{etc + "sockets.target.wants/agentos-z@1.socket", "../agentos-z@.socket"}},
+		},
+		"a board's instance drop-in of a common template no link names": {
+			map[string]string{camCommon + "etc/systemd/system/agentos-z@.service": "[Service]\nExecStart=/bin/true\n", camQemu + "etc/systemd/system/agentos-z@1.service.d/z.conf": tmplDropin},
+			nil,
 		},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
@@ -455,14 +584,49 @@ func TestImageOverlaysAreListed(t *testing.T) {
 		if err != nil || !d.IsDir() || (d.Name() != "overlay" && d.Name() != "mkosi.extra" && d.Name() != "mkosi.skeleton" && d.Name() != "rootfs-overlay") {
 			return err
 		}
-		rel, _ := filepath.Rel(root, p)
-		if !listed[filepath.ToSlash(rel)] {
-			t.Errorf("%s is an overlay imageOverlays does not list", filepath.ToSlash(rel))
+		rel := relTo(root, p)
+		if !listed[rel] {
+			t.Errorf("%s is an overlay imageOverlays does not list", rel)
 		}
 		return filepath.SkipDir
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Each camnode build's BR2_ROOTFS_OVERLAY is one listed merge, and
+	// each listed merge one build's, so the link rule checks the images
+	// the builds make (#6033 item 2).
+	const ext = "$(BR2_EXTERNAL_CAMNODE_PATH)/"
+	configs, err := filepath.Glob(filepath.Join(root, "image/camnode/external/configs/*.config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var built [][]string
+	for _, f := range configs {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			if v, ok := strings.CutPrefix(line, "BR2_ROOTFS_OVERLAY="); ok {
+				var m []string
+				for _, r := range strings.Fields(strings.Trim(v, `"`)) {
+					m = append(m, "image/camnode/external/"+strings.TrimPrefix(r, ext))
+				}
+				built = append(built, m)
+			}
+		}
+	}
+	listedMerges := imageOf("image/camnode/").merges
+	for _, m := range built {
+		if !slices.ContainsFunc(listedMerges, func(l []string) bool { return slices.Equal(l, m) }) {
+			t.Errorf("camnode builds overlays %v, a merge imageOverlays does not list", m)
+		}
+	}
+	for _, l := range listedMerges {
+		if !slices.ContainsFunc(built, func(m []string) bool { return slices.Equal(l, m) }) {
+			t.Errorf("imageOverlays lists camnode merge %v, which no external/configs file builds", l)
+		}
 	}
 }
 

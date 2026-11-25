@@ -12,6 +12,7 @@ import gzip
 import hashlib
 import io
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -393,19 +394,28 @@ class ImageTest(unittest.TestCase):
     def scan(self, records, found, src="x"):
         """scan_image with each tree's findings FOUND (by where) and no file problems."""
         saved = (vulncheck.run_image, vulncheck.manifest_problems, vulncheck.initrd_status, vulncheck.guest_problems,
-                 vulncheck.linked_problems)
+                 vulncheck.linked_problems, vulncheck.exclusion_problems)
         # The main tree's findings come once, from its own status, not again from its linked inputs.
-        vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None: (
+        vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None, excluded=frozenset(): (
             [] if pathlib.Path(src).name == vulncheck.LINKED else [dict(f) for f in found if f["where"] == where], [])
         vulncheck.manifest_problems = lambda src: []
         vulncheck.initrd_status = lambda src: (b"Package: x\n", [])
         vulncheck.guest_problems = lambda src: []
         vulncheck.linked_problems = lambda src: []
+        vulncheck.exclusion_problems = lambda src, excluded: []
         try:
             return vulncheck.scan_image({"accepted": records}, src)
         finally:
             (vulncheck.run_image, vulncheck.manifest_problems, vulncheck.initrd_status,
-             vulncheck.guest_problems, vulncheck.linked_problems) = saved
+             vulncheck.guest_problems, vulncheck.linked_problems, vulncheck.exclusion_problems) = saved
+
+    def setUp(self):
+        # The fixture's image is held to the control's allow-list and exclusions (#6481), not the
+        # shipped ones, whose libcap-dev it does not hold.
+        saved = (vulncheck.STATIC_ELF_ALLOW, vulncheck.BUILTUSING_EXCLUDE)
+        vulncheck.STATIC_ELF_ALLOW, vulncheck.BUILTUSING_EXCLUDE = vulncheck.CONTROL_ALLOW, vulncheck.CONTROL_EXCLUDE
+        self.addCleanup(lambda: setattr(vulncheck, "STATIC_ELF_ALLOW", saved[0]) or
+                        setattr(vulncheck, "BUILTUSING_EXCLUDE", saved[1]))
 
     def image_dir(self):
         tmp = tempfile.TemporaryDirectory()
@@ -464,20 +474,115 @@ class ImageTest(unittest.TestCase):
         self.assertIn("Source: glibc (2.41-12)\n", got)
         self.assertIn("Source: gcc-14 (14.2.0-19)\n", got)
         self.assertEqual(vulncheck.built_using("Package: c\nStatus: install ok installed\n"), "")
+        # #6481: an excluded package's field is not read; the others still are.
+        self.assertEqual(vulncheck.built_using(text, {"a"}), "")
+        self.assertEqual(vulncheck.built_using(text, {"b", "c"}), got)
         # In the archive the scan reads, beside the tree's own packages: the control's agentos-fixed is
         # Built-Using agentos-builtusing, whose advisory (DEB-9) the main tree's control must report.
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         out = pathlib.Path(tmp.name) / "a.tar"
         vulncheck.image_archive(vulncheck.FIXTURE / "image", out)
-        with tarfile.open(out) as t:
-            manifest = json.load(t.extractfile("manifest.json"))
-            layer = tarfile.open(fileobj=t.extractfile(manifest[0]["Layers"][0]))
-            status = layer.extractfile("var/lib/dpkg/status").read().decode()
+        status = self.archived_status(out)
         self.assertIn(("agentos-fixed+built-using+agentos-builtusing", "1.0-1"), vulncheck.dpkg_installed(status))
         self.assertIn("Source: agentos-builtusing (1.0-1)\n", status)
         self.assertIn((vulncheck.IMAGE, "AGENTOS-VULNCHECK-DEB-9"), vulncheck.CONTROL_IMAGE_FAILS)
         self.assertIn((vulncheck.IMAGE, "AGENTOS-VULNCHECK-DEB-9", "FAIL"), vulncheck.CONTROL_IMAGE_VERDICTS)
+
+    @staticmethod
+    def archived_status(tar):
+        with tarfile.open(tar) as t:
+            manifest = json.load(t.extractfile("manifest.json"))
+            layer = tarfile.open(fileobj=t.extractfile(manifest[0]["Layers"][0]))
+            return layer.extractfile("var/lib/dpkg/status").read().decode()
+
+    def test_boot_loader_built_using_is_queried_and_only_linked_inputs_are_excluded(self):
+        # #6481 (Security 7074696444 fix 1): Built-Using is read for every installed package but those the
+        # shipped exclusions name. shim-signed and systemd-boot-efi-amd64-signed ship PE files no ELF entry
+        # can declare, so their sources stay queried under the shipped lists; libcap-dev, whose static
+        # code ships only as bwrap's "linked guest" input, is excluded in the guests' tree alone.
+        excluded = vulncheck.excluded_packages(ROOT / "image" / "builtusing.exclude", ROOT / "image" / "static_elf.allow")
+        self.assertEqual(excluded, {vulncheck.GUESTS: {"libcap-dev": "/usr/lib/agentos/images/codex/usr/bin/bwrap"}})
+        every = set().union(*excluded.values())
+        boot = ("Package: shim-signed\nStatus: install ok installed\nVersion: 1\nBuilt-Using: shim (= 16.1-2~deb13u1)\n\n"
+                "Package: systemd-boot-efi-amd64-signed\nStatus: install ok installed\nVersion: 1\n"
+                "Built-Using: systemd (= 257.9-1~deb13u1)\n")
+        self.assertEqual(vulncheck.dpkg_installed(vulncheck.built_using(boot, every)),
+                         {("shim-signed+built-using+shim", "16.1-2~deb13u1"),
+                          ("systemd-boot-efi-amd64-signed+built-using+systemd", "257.9-1~deb13u1")})
+        libcap = "Package: libcap-dev\nStatus: install ok installed\nVersion: 1:2.75-10\nBuilt-Using: glibc (= 2.41-12+deb13u4)\n"
+        self.assertEqual(vulncheck.built_using(libcap, every), "")
+        self.assertIn("libcap-dev+built-using+glibc", vulncheck.built_using(libcap))
+        # The control: agentos-nofix's Built-Using source (DEB-10) is queried in the main tree, where it
+        # must FAIL, and excluded in the guests, where the control's list names it as a link input.
+        ctl = vulncheck.excluded_packages(vulncheck.CONTROL_EXCLUDE, vulncheck.CONTROL_ALLOW)
+        self.assertEqual(set(ctl), {vulncheck.GUESTS})
+        self.assertIn("agentos-nofix", ctl[vulncheck.GUESTS])
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        out = pathlib.Path(tmp.name) / "a.tar"
+        vulncheck.image_archive(vulncheck.FIXTURE / "image", out)
+        self.assertIn(("agentos-nofix+built-using+agentos-undeclared", "1.0-1"),
+                      vulncheck.dpkg_installed(self.archived_status(out)))
+        vulncheck.image_archive(vulncheck.FIXTURE / "image" / vulncheck.GUESTS, out, excluded=frozenset(ctl[vulncheck.GUESTS]))
+        self.assertNotIn("+built-using+", self.archived_status(out))
+        vulncheck.image_archive(vulncheck.FIXTURE / "image" / vulncheck.GUESTS, out)
+        self.assertIn("agentos-nofix+built-using+agentos-undeclared", self.archived_status(out))
+        self.assertIn((vulncheck.IMAGE, "AGENTOS-VULNCHECK-DEB-10", "FAIL"), vulncheck.CONTROL_IMAGE_VERDICTS)
+        self.assertFalse({f for f in vulncheck.CONTROL_IMAGE_FAILS if f[1] == "AGENTOS-VULNCHECK-DEB-10" and f[0] != vulncheck.IMAGE})
+
+    def test_an_exclusion_needs_a_reason_and_a_linked_entry(self):
+        # #6481: an exclusion with no reason, one whose GLOB is no "linked" entry of the allow-list (a
+        # "package" entry, or none), and an unreadable list each stop the scan rather than narrow it.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = pathlib.Path(tmp.name)
+        allow = d / "static_elf.allow"
+        allow.write_text("/usr/bin/tool linked guest\n/usr/sbin/ldconfig package libc-bin\n")
+        ex = d / "builtusing.exclude"
+        ex.write_text("# comment\n\nlibfoo-dev /usr/bin/tool ships only libfoo.a, a recorded link input\n")
+        self.assertEqual(vulncheck.excluded_packages(ex, allow), {"guest": {"libfoo-dev": "/usr/bin/tool"}})
+        for name, line in {"no reason": "libfoo-dev /usr/bin/tool\n",
+                           "only a comment for a reason": "libfoo-dev /usr/bin/tool # ships libfoo.a\n",
+                           "a package entry": "libc-bin /usr/sbin/ldconfig static\n",
+                           "no entry": "libfoo-dev /usr/bin/other ships only libfoo.a\n"}.items():
+            with self.subTest(name):
+                ex.write_text(line)
+                with self.assertRaises(vulncheck.ScanError):
+                    vulncheck.excluded_packages(ex, allow)
+        with self.assertRaises(vulncheck.ScanError):
+            vulncheck.excluded_packages(d / "no-such.exclude", allow)
+        with self.assertRaises(vulncheck.ScanError):
+            vulncheck.excluded_packages(ex, d / "no-such.allow")
+        ex.write_text("libfoo-dev /usr/bin/tool\n")
+        with self.assertRaises(vulncheck.ScanError):
+            vulncheck.scan_image({"accepted": []}, vulncheck.FIXTURE / "image", offline=True, allow=allow, exclude=ex)
+
+    def test_an_exclusion_must_be_an_installed_recorded_link_input(self):
+        # #6481: in the built image, an excluded package must be in its list's status and recorded in its
+        # agentos.inputs against a shipped file's SHA-256; else the scan reports a problem.
+        d = self.image_dir()
+        ctl = vulncheck.excluded_packages(vulncheck.CONTROL_EXCLUDE, vulncheck.CONTROL_ALLOW)
+        self.assertEqual(vulncheck.exclusion_problems(d, ctl), [])
+        inputs = d / vulncheck.GUESTS / vulncheck.LINKED_INPUTS
+        for name, spoil in {"not recorded": lambda: inputs.write_text("0" * 64 + " libguest1\n"),
+                            "no inputs file": inputs.unlink,
+                            "not installed": lambda: ctl[vulncheck.GUESTS].update({"agentos-absent": "/x"})}.items():
+            with self.subTest(name):
+                inputs.write_text((vulncheck.FIXTURE / "image" / vulncheck.GUESTS / vulncheck.LINKED_INPUTS).read_text())
+                spoil()
+                if name == "not installed":
+                    inputs.write_text(inputs.read_text() + "0" * 64 + " agentos-absent\n")
+                self.assertTrue(vulncheck.exclusion_problems(d, ctl))
+        # And the image scan reports it: the guests' tree with the exclusion's input unrecorded.
+        inputs.unlink()
+        saved = vulncheck.run_image
+        vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None, excluded=frozenset(): ([], [])
+        try:
+            _, probs, _ = vulncheck.scan_image({"accepted": []}, d)
+        finally:
+            vulncheck.run_image = saved
+        self.assertTrue(any("Built-Using exclusion" in p and "agentos-nofix" in p for p in probs), probs)
 
     def test_a_missing_or_empty_list_fails(self):
         tmp = tempfile.TemporaryDirectory()
@@ -534,7 +639,7 @@ class ImageTest(unittest.TestCase):
         shutil.copytree(self.image_dir() / vulncheck.GUESTS, d / vulncheck.GUESTS)
         shutil.copytree(self.image_dir() / vulncheck.LINKED, d / vulncheck.LINKED)
         saved = vulncheck.run_image
-        vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None: ([], [])
+        vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None, excluded=frozenset(): ([], [])
         try:
             _, probs, _ = vulncheck.scan_image({"accepted": []}, d)
             self.assertEqual(probs, vulncheck.manifest_problems(d))
@@ -549,7 +654,7 @@ class ImageTest(unittest.TestCase):
         # like the main tree's, and its findings are the initrd's.
         d, calls = self.image_dir(), []
 
-        def run(src, env=None, offline=False, where="image", status=None):
+        def run(src, env=None, offline=False, where="image", status=None, excluded=frozenset()):
             calls.append((where, status))
             return [{**fail("DSA-1"), "where": where}], []
         saved = vulncheck.run_image
@@ -570,7 +675,7 @@ class ImageTest(unittest.TestCase):
         # directory is reported, never a scan of nothing.
         d, srcs = self.image_dir(), []
 
-        def run(src, env=None, offline=False, where="image", status=None):
+        def run(src, env=None, offline=False, where="image", status=None, excluded=frozenset()):
             srcs.append((where, pathlib.Path(src)))
             return [], []
         saved = vulncheck.run_image
@@ -641,7 +746,7 @@ class ImageTest(unittest.TestCase):
         # image record accepts them and no guest or initrd record does.
         d, srcs = self.image_dir(), []
 
-        def run(src, env=None, offline=False, where="image", status=None):
+        def run(src, env=None, offline=False, where="image", status=None, excluded=frozenset()):
             srcs.append((where, pathlib.Path(src)))
             if pathlib.Path(src).name != vulncheck.LINKED:
                 return [], []
@@ -672,7 +777,7 @@ class ImageTest(unittest.TestCase):
                      "Package: x\nStatus: deinstall ok config-files\n"),
                  "no directory": lambda d: shutil.rmtree(d)}
         saved = vulncheck.run_image
-        vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None: ([], [])
+        vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None, excluded=frozenset(): ([], [])
         try:
             for name, spoil in cases.items():
                 with self.subTest(name):
@@ -842,8 +947,59 @@ class ImageTest(unittest.TestCase):
         self.assertEqual([vulncheck.verdict(f) for f in fs], ["FAIL", "accepted #1"])
         out = io.StringIO()
         vulncheck.summary(fs, [], unused, out)
-        self.assertIn("fix: rebuild the image", out.getvalue())
+        self.assertIn("debian-security), rebuild the image", out.getvalue())
         self.assertNotIn("or add a record", out.getvalue())
+
+    def test_fixed_image_hint_names_the_main_snapshot_bump(self):
+        # VULN-debian-r14-hint (#6469), TN-vulncheck-6: a fix shipped only in a point release sits in
+        # the pinned main archive, so the hint names the pin move as well as the rebuild.
+        f = {"where": "image", "id": "DEBIAN-CVE-1", "aliases": [], "level": "image", "module": "",
+             "version": "2.41-12+deb13u4", "package": "Debian:13:glibc (libc6)", "function": "",
+             "fixed": "2.41-12+deb13u5", "fails": True}
+        out = io.StringIO()
+        self.assertFalse(vulncheck.summary([f], [], [], out))
+        text = out.getvalue()
+        self.assertIn("fix: if the fix is in the security suite (debian-security), rebuild the image", text)
+        self.assertIn("fix: if the fix is only in a point release (the main archive), move the main-archive "
+                      "snapshot timestamp (Mirror= in image/mkosi/mkosi.conf) in every copy: image/mkosi/mkosi.conf, "
+                      "image/enforcer/mkosi/mkosi.conf, ", text)
+        self.assertIn("image/mkosi/mkosi.finalize (NAME_ONLY_SNAPSHOT, after checking that snapshot's systemd "
+                      "is still NAME_ONLY_SYSTEMD), tests/test_image.py (MkosiRunBoundTest), "
+                      "tests/test_image_repro.py (KeyringSpikesTest); then update what else CI names, such as "
+                      "image/import_sweep.allow hashes", text)
+        # UX 1 and Potency 1-2 on #6538: the hand-kept list missed the two test pins, so the set is
+        # derived: every file holding the Mirror= timestamp is named, and every name is such a file.
+        stamp = re.search(r"^Mirror=https://snapshot\.debian\.org/archive/debian/(\d{8}T\d{6}Z)/$",
+                          (ROOT / "image/mkosi/mkosi.conf").read_text(), re.M).group(1)
+        hits = snapshot_copies(stamp)
+        self.assertEqual(sorted(p.split(" ")[0] for p in vulncheck.SNAPSHOT_PINS), sorted(hits))
+        for path in hits:
+            self.assertIn(path, text)
+        self.assertIn("NAME_ONLY_SNAPSHOT = ", (ROOT / "image/mkosi/mkosi.finalize").read_text())
+        self.assertIn("NAME_ONLY_SYSTEMD = ", (ROOT / "image/mkosi/mkosi.finalize").read_text())
+        self.assertTrue((ROOT / "image/import_sweep.allow").is_file())
+
+
+def snapshot_copies(stamp):
+    """Every repo file but a record holding stamp, the search `git grep` makes, done without git or
+    opening a record (the records-only CI step does not run this module; tests/records_audit.py)."""
+    import ci_scope
+    record_dirs = tuple(d.rstrip("/") for d in ci_scope.RECORD_DIRS)
+    hits = []
+    for top, dirs, files in os.walk(ROOT):
+        rel_top = os.path.relpath(top, ROOT)
+        rel_top = "" if rel_top == "." else rel_top + "/"
+        dirs[:] = sorted(d for d in dirs if d != ".git" and not any(rel_top + d == r or (rel_top + d).startswith(r + "/") for r in record_dirs)
+                         and not os.path.islink(os.path.join(top, d)))
+        for name in sorted(files):
+            rel = rel_top + name
+            path = os.path.join(top, name)
+            if ci_scope.is_record(rel) or os.path.islink(path):
+                continue
+            with open(path, "rb") as fh:
+                if stamp.encode() in fh.read():
+                    hits.append(rel)
+    return hits
 
 
 class ProposeTest(unittest.TestCase):

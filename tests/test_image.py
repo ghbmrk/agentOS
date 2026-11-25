@@ -568,6 +568,29 @@ class TreeCheckTest(unittest.TestCase):
                 self.assertTrue(any(rel in v for v in check.violations(self.root)))
                 f.unlink()
 
+    # REQ: KRN-2
+    def test_a_user_tmpfiles_d_line_must_not_ship(self):
+        # #6506 L3 7076358038 item 1: root's user manager runs systemd-tmpfiles --user as root, which applies
+        # these lines anywhere (z /etc/agentos 0777), and no check reads them. An empty directory passes.
+        self.assertEqual(check.violations(self.root), [])
+        for d in check.USER_TMPFILES_DIRS:
+            with self.subTest(d=d):
+                (self.root / d).mkdir(parents=True)
+                self.assertEqual(check.violations(self.root), [])
+                f = write(self.root, d + "/x.conf", "z /etc/agentos 0777 - - -\n")
+                self.assertIn(d + ": a user-tmpfiles.d directory that holds something", " | ".join(check.violations(self.root)))
+                f.unlink()
+                (self.root / d).rmdir()
+                write(self.root, d, "")  # not a directory
+                self.assertIn(d + ": a user-tmpfiles.d directory", " | ".join(check.violations(self.root)))
+                (self.root / d).unlink()
+                (self.root / d).symlink_to("/var/tmp")  # a link
+                self.assertIn(d + ": a user-tmpfiles.d directory", " | ".join(check.violations(self.root)))
+                (self.root / d).unlink()
+        self.assertTrue(set(check.USER_TMPFILES_DIRS) >= {"root/.config/user-tmpfiles.d", "etc/xdg/user-tmpfiles.d",
+                                                           "usr/share/user-tmpfiles.d", "root/.local/share/user-tmpfiles.d",
+                                                           "usr/local/share/user-tmpfiles.d", "run/user/0/user-tmpfiles.d"})
+
     def test_owner_state_must_not_ship(self):
         write(self.root, "etc/agentos/agentosd.env", "AGENTOS_OWNER=+15550100\n")
         self.assertIn("etc/agentos", " ".join(check.violations(self.root)))
@@ -4046,7 +4069,9 @@ GUARDED_NAMES = ("sysctl.d", "modprobe.d", "tmpfiles.d", "systemd/network", "sys
                  "udev/rules.d", "modules-load.d", "systemd/system-environment-generators", "binfmt.d",
                  "systemd/system-shutdown", "systemd/system-sleep",
                  # #6312: root's user manager's generators and environment.d.
-                 "systemd/user-generators", "systemd/user-environment-generators", "environment.d")
+                 "systemd/user-generators", "systemd/user-environment-generators", "environment.d",
+                 # #6474: the XDG autostart files systemd-xdg-autostart-generator makes root user units of.
+                 "xdg/autostart")
 # #1543 reviews at bf7e5d3: B1 (C+ on an ancestor of /run/sysctl.d), B2 (a stock link with more
 # after its target, which systemd takes raw), B3 (/etc/sysctl.d and /etc/sysctl.conf) and R1 (every
 # other directory the tree check reads), plus /sys and ".." paths. Each must be refused.
@@ -4095,7 +4120,9 @@ TMPFILES_PROBES = (
     "C /usr/lib/systemd/system-sleep/x - - - - /usr/share/x/x", "f /etc/modules - - - - tun",
     # #6312: root's own environment.d, its parent made writable, and what systemd's 99-environment.conf names.
     "f /root/.config/environment.d/x.conf - - - - LD_PRELOAD=/tmp/x.so", "d /root/.config 0777",
-    "f+ /etc/environment - - - - LD_PRELOAD=/tmp/x.so", "f %h/.config/environment.d/x.conf")
+    "f+ /etc/environment - - - - LD_PRELOAD=/tmp/x.so", "f %h/.config/environment.d/x.conf",
+    # #6474: root's own XDG autostart directory.
+    "f /root/.config/autostart/x.desktop - - - - [Desktop Entry]", "L %h/.config/autostart - - - - /usr/share/x")
 # One probe per guarded name, under each configuration directory (#1543 P/UX B2). /usr is read-only
 # on the box and trixie's /lib is /usr/lib, but the check guards them anyway.
 TMPFILES_PROBES += tuple("f /%s/%s/x" % (top, n) for top in ("etc", "run", "usr/local/lib", "lib") for n in GUARDED_NAMES)
@@ -4444,8 +4471,8 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
                     f.unlink()
 
     def test_without_the_tmpfiles_link_rule_its_links_pass(self):
-        m = self.mutant('            elif typ[:1] == "L" and any(tmpfiles_link_refusal(root, path, p) for p in names[1:]):\n',
-                        "            elif False:\n")
+        m = self.mutant('        elif typ[:1] == "L" and any(tmpfiles_link_refusal(root, path, p) for p in names[1:]):\n',
+                        "        elif False:\n")
         self.tmpfiles("L /etc/udev/hwdb.d - - - - /var/tmp\n")
         self.assertNotIn("x.conf: line", self.v(m))
         self.assertIn("x.conf: line", self.v())
@@ -5157,6 +5184,42 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
             "var/lib/agentos-store", "var/lib/agentos/modem", "var/lib/agentos-wipe")))
 
 
+    def test_a_user_unit_directory_value_the_check_does_not_model_fails_the_build(self):
+        # #6474 (#6506 Security 7077682648): root's user manager's units are read too, quoted values included
+        for rel, text in (("usr/lib/systemd/user/m.service", '[Service]\nStateDirectory="e/agentos"\n'),
+                          ("root/.config/systemd/user/m.service", "[Service]\nCacheDirectory=x%i\n"),
+                          ("etc/systemd/user/m.service.d/x.conf", "[Service]\nConfigurationDirectory=../agentos\n"),
+                          ("usr/share/systemd/user/m.service", "[Service]\nLogsDirectory=/var/log/x\n")):
+            with self.subTest(rel=rel), tempfile.TemporaryDirectory() as t:
+                write(pathlib.Path(t), rel, text)
+                out = check.user_unit_made_dir_violations(t)
+                self.assertEqual(len(out), 1, out)
+                self.assertTrue(out[0].startswith(rel + ": "), out)
+                self.assertIn("in a user unit (#6474)", out[0])
+        with tempfile.TemporaryDirectory() as t:  # a link is read at its file, once; a mask and plain names pass
+            write(pathlib.Path(t), "usr/lib/systemd/user/m.service", "[Service]\nStateDirectory=x\nRuntimeDirectory='y'\n")
+            write(pathlib.Path(t), "usr/lib/systemd/user/ok.service", "[Service]\nStateDirectory=a/b c\n")
+            os.makedirs(os.path.join(t, "etc/systemd/user/default.target.wants"))
+            os.symlink("/usr/lib/systemd/user/m.service", os.path.join(t, "etc/systemd/user/default.target.wants/m.service"))
+            os.symlink("/dev/null", os.path.join(t, "etc/systemd/user/n.service"))
+            os.symlink("/var/tmp/gone", os.path.join(t, "etc/systemd/user/g.service"))
+            out = check.user_unit_made_dir_violations(t)
+        self.assertEqual(len(out), 2, out)
+        self.assertTrue(any(o.startswith("usr/lib/systemd/user/m.service: RuntimeDirectory='y'") for o in out), out)
+        self.assertTrue(any(o.startswith("etc/systemd/user/g.service: a link to /var/tmp/gone") for o in out), out)
+        # #6521 Security 7078329075: a unit directory that is a link, or sits under one, is refused, not read as empty
+        for link, target in (("root/.config/systemd/user", "/usr/share/u"), ("root/.config", "/usr/share/c")):
+            with self.subTest(link=link), tempfile.TemporaryDirectory() as t:
+                write(pathlib.Path(t), "usr/share/u/a.service", '[Service]\nStateDirectory="x y"\n')
+                write(pathlib.Path(t), "usr/share/c/systemd/user/a.service", '[Service]\nStateDirectory="x y"\n')
+                write(pathlib.Path(t), "etc/systemd/user/b.service", '[Service]\nStateDirectory="x y"\n')
+                os.makedirs(os.path.join(t, os.path.dirname(link)), exist_ok=True)
+                os.symlink(target, os.path.join(t, link))
+                out = check.user_unit_made_dir_violations(t)
+                self.assertTrue(any(o.startswith("etc/systemd/user/b.service: StateDirectory=") for o in out), out)
+                self.assertTrue(any(o.startswith(("root/.config/systemd/user: a user unit directory",
+                                                  "root/.config/systemd/user.control: a user unit directory")) for o in out), out)
+
 class ReferenceToolTest(unittest.TestCase):
     """#1531: the differential tests fail, not skip, where CI requires their reference tools."""
     # REQ: DEV-2, CH-9
@@ -5683,7 +5746,9 @@ class ExecAllowTest(unittest.TestCase):
                 "usr/lib/systemd/user-generators/x", "etc/systemd/user-environment-generators/x",
                 "usr/local/lib/systemd/user-environment-generators/x", "usr/lib/systemd/user-environment-generators/x",
                 "etc/environment.d/x.conf", "usr/local/lib/environment.d/x.conf", "usr/lib/environment.d/x.conf",
-                "root/.config/environment.d/x.conf")
+                "root/.config/environment.d/x.conf",
+                # #6474: XDG autostart, which systemd-xdg-autostart-generator makes root user units of.
+                "etc/xdg/autostart/x.desktop", "root/.config/autostart/x.desktop")
     # #2176's failure paths: each runs root code at boot from a file the old check never hashed.
     PATHS = {"usr/lib/modprobe.d/x.conf": "install tun /usr/sbin/sysctl -w net.ipv4.ip_forward=1\n",
              "usr/lib/sysctl.d/x.conf": "kernel.modprobe = /usr/local/bin/x\n",
@@ -5694,7 +5759,9 @@ class ExecAllowTest(unittest.TestCase):
              # #6312's: every unit root's user manager starts loads agentos-x-controlled code as root.
              "etc/environment.d/50-x.conf": "LD_PRELOAD=/var/lib/agentos-x/x.so\n",
              "root/.config/environment.d/50-x.conf": "LD_PRELOAD=/var/lib/agentos-x/x.so\n",
-             "etc/systemd/user-generators/x": "#!/bin/sh\nsysctl -w net.ipv4.ip_forward=1\n"}
+             "etc/systemd/user-generators/x": "#!/bin/sh\nsysctl -w net.ipv4.ip_forward=1\n",
+             # #6474's: a .desktop file the autostart generator turns into a root user unit.
+             "etc/xdg/autostart/x.desktop": "[Desktop Entry]\nType=Application\nExec=/var/lib/agentos-x/x\n"}
     GENERATORS = ("usr/lib/systemd/system-generators/systemd-sysv-generator",
                   "usr/lib/systemd/system-generators/systemd-rc-local-generator")
 
@@ -5938,8 +6005,8 @@ class ExecAllowTest(unittest.TestCase):
                 self.assertEqual(moved.exec_allow_violations(self.root), [])
             with unittest.mock.patch.dict(os.environ, {"SRCDIR": tmp}):
                 want = ["exec.allow: missing; every file in a boot-code channel (udev rules, generators, modules-load.d, "
-                        "modprobe.d, sysctl.d, binfmt.d, shutdown and sleep hooks, root's user manager's generators "
-                        "and environment.d) must be on it (#1556, #2176, #6312)"]
+                        "modprobe.d, sysctl.d, binfmt.d, shutdown and sleep hooks, root's user manager's generators, "
+                        "environment.d and XDG autostart) must be on it (#1556, #2176, #6312)"]
                 self.assertEqual(moved.exec_allow_violations(self.root), want)
                 self.assertIn(want[0], moved.violations(self.root))
 
@@ -6494,6 +6561,14 @@ class UplinkTest(unittest.TestCase):
         # image; the tree check refuses any that would (TreeCheckTest).
         removed = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
         self.assertIn("/usr/lib/systemd/network/80-*.network", removed)
+
+    def test_the_xdg_user_unit_link_is_removed_from_the_image(self):
+        # REQ: KRN-2 (#6521 Security 7078398840): upstream systemd ships etc/xdg/systemd/user -> ../../systemd/user;
+        # user_unit_made_dir_violations refuses a user unit directory that is a link, and etc/systemd/user, which
+        # it aliases, is read already, so the link goes.
+        removed = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
+        self.assertIn("/etc/xdg/systemd/user", removed)
+        self.assertIn("etc/systemd/user", check.USER_UNIT_PATHS)
 
     def test_the_mail_spool_link_is_removed_from_the_image(self):
         # REQ: HW-1, DEV-2 (#1829): Debian's var/spool/mail links to 2775 root:mail var/mail, a step
@@ -7973,8 +8048,8 @@ class MkosiRunBoundTest(unittest.TestCase):
                   '-C image/mkosi -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" '
                   '--environment=AGENTOS_SECURITY_SNAPSHOT="$AGENTOS_SECURITY_SNAPSHOT" '
                   '--extra-tree="$OUT/stage/usr:/usr" --output-dir "$OUT" build 2>&1 | tee "$RUNNER_TEMP/build.log"')
-    MIRROR, SECURITY = "20261001T000000Z", "20261112T180512Z"
-    INDEX = "snapshot.debian.org_archive_debian_20261001T000000Z_dists_trixie_main_binary-amd64_Packages"
+    MIRROR, SECURITY = "20261121T160000Z", "20261112T180512Z"
+    INDEX = "snapshot.debian.org_archive_debian_20261121T160000Z_dists_trixie_main_binary-amd64_Packages"
     SEC = "snapshot.debian.org_archive_debian-security_20261112T180512Z_dists_trixie-security_main_binary-amd64_Packages"
 
     def test_the_one_mkosi_line_is_pinned(self):
@@ -8045,10 +8120,11 @@ class MkosiRunBoundTest(unittest.TestCase):
         self.assertEqual(re.findall(r"^MKOSI_COMMIT=([0-9a-f]{40}) ", wrapper, re.M), list(pins))
 
     def local_build(self, *args, sources=None, mkosi_fails=False, snapshot=None, resolved=None,
-                    mkosi_head=None, stage_extra="", d=None, cwd=None):
+                    mkosi_head=None, stage_extra="", d=None, cwd=None, sudo_fails=False):
         """Run image/local-build.sh ARGS in a one-commit copy of the repository (made once per D) with
         build.sh, finish.sh and sudo replaced by stand-ins that log their arguments, /opt/mkosi by the git
-        checkout D/mkosi (whose HEAD reads as MKOSI_HEAD) and the stage mark by D/stage-host; returns (the
+        checkout D/mkosi (whose HEAD reads as MKOSI_HEAD) and the host marks by D/agentos-stage-host and
+        D/agentos-build-host; returns (the
         run, the log's calls, D). A stand-in security-snapshot.sh answers resolve with RESOLVED and runs
         the real script otherwise."""
         if d is None:
@@ -8069,18 +8145,24 @@ class MkosiRunBoundTest(unittest.TestCase):
                     + log + 'mkdir -p "$2/stage/usr/lib" "$2/guest" "$2/linked" && echo x > "$2/stage/usr/lib/f"\n'
                     'cp "$SOURCES" "$2/agentos.sources"\neval "$STAGE_EXTRA"\n')
             write_x(repo / "image/finish.sh", '#!/bin/sh\nset -- finish.sh "$@" "SDE=$SOURCE_DATE_EPOCH"\n' + log)
+            # The marks live in D (/var/lib/agentos-X is D/agentos-X); SUDO_FAILS makes a mark read fail as
+            # sudo does (exit 1, nothing printed); root's PATH keeps the stand-ins first.
             write_x(bin_ / "sudo", "#!/bin/sh\n" + log + 'case " $* " in *" /opt/mkosi/bin/mkosi "*) '
-                    'echo mkosi; [ -z "$MKOSI_FAILS" ];; '
-                    '" git -C /opt/mkosi rev-parse HEAD ") echo "$MKOSI_HEAD";; '
+                    'echo mkosi; [ -z "$MKOSI_FAILS" ]; exit;; '
+                    '" git -C /opt/mkosi rev-parse HEAD ") echo "$MKOSI_HEAD"; exit;; '
                     '" git -C /opt/mkosi "*) shift 3; exec git -C "$MKOSI_DIR" "$@";; '
-                    '" touch /var/lib/agentos-stage-host ") touch "$MARK";; '
-                    '" test -e /var/lib/agentos-stage-host ") test -e "$MARK";; '
-                    '*) exec "$@";; esac\n')
+                    '" sh -c "*" /var/lib/agentos-"*) [ -z "$SUDO_FAILS" ] || exit 1;; esac\n'
+                    'for a; do shift; case $a in /var/lib/agentos-*) a="$MARKS/${a#/var/lib/}";; '
+                    'PATH=/usr/local/sbin:*) a="PATH=$STANDINS:${a#PATH=}";; '
+                    'esac; set -- "$@" "$a"; done\nAS_ROOT=1 exec "$@"\n')
+            # id -u reads 0 under the stand-in sudo, as it does under sudo, and 1000 outside it.
+            write_x(bin_ / "id", '#!/bin/sh\n[ "$*" = -u ] || exit 9\n[ -n "$AS_ROOT" ] && echo 0 || echo 1000\n')
             mk = d / "mkosi"
             (mk / "mkosi").mkdir(parents=True)
             (mk / ".gitignore").write_text("__pycache__\nmkosi.local.conf\n")
             (mk / "mkosi/__init__.py").write_text("")
-            for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "x"]):
+            # The checkout's commit has a parent, as a real one does (its copy takes no parent, #6417).
+            for cmd in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "base"], ["add", "-A"], ["commit", "-qm", "x"]):
                 for r_ in (repo, mk):
                     subprocess.run(["git", "-C", str(r_)] + cmd, env=self.git_env(), check=True)
         if sources is None:
@@ -8089,7 +8171,7 @@ class MkosiRunBoundTest(unittest.TestCase):
         env = dict(self.git_env(), PATH="%s:%s" % (bin_, os.environ["PATH"]), LOG=str(d / "log"),
                    SOURCES=str(d / "sources"), MKOSI_FAILS="1" if mkosi_fails else "", STAGE_EXTRA=stage_extra,
                    MKOSI_HEAD=mkosi_head or "26673f65e17ae099bb0cf65928fe70c93b8a6a37", MKOSI_DIR=str(d / "mkosi"),
-                   MARK=str(d / "stage-host"), RESOLVED=resolved or "")
+                   MARKS=str(d), STANDINS=str(bin_), SUDO_FAILS="1" if sudo_fails else "", RESOLVED=resolved or "")
         env.pop("AGENTOS_SECURITY_SNAPSHOT", None)
         if snapshot:
             env["AGENTOS_SECURITY_SNAPSHOT"] = snapshot
@@ -8112,7 +8194,7 @@ class MkosiRunBoundTest(unittest.TestCase):
         host's; returns (its D, the tar's path, the commit)."""
         r, calls, d = self.local_build("stage", "st", **kw)
         self.assertEqual(r.returncode, 0, r.stderr)
-        (d / "stage-host").unlink()
+        (d / "agentos-stage-host").unlink()
         commit = subprocess.check_output(["git", "-C", str(d / "repo"), "rev-parse", "HEAD"], text=True).strip()
         return d, d / "st" / ("stage-%s.tar" % commit), commit
 
@@ -8122,9 +8204,16 @@ class MkosiRunBoundTest(unittest.TestCase):
         return self.local_build("build", tar, sha or hashlib.sha256(path.read_bytes()).hexdigest(), *args, **kw)
 
     @staticmethod
+    def root_dir(calls):
+        """W, the root-only directory the build's second part ran in (#6417), from its call."""
+        again = [c for c in calls if "build-root" in c]
+        return again[0][again[0].index("build-root") + 1] if again else None
+
+    @staticmethod
     def runs(calls):
         """The privileged runs (sudo env ...) and the stand-ins' own calls, in order."""
-        return [c for c in calls if c[0] in ("env", "build.sh", "finish.sh")]
+        return [c for c in calls if c[0] in ("env", "build.sh", "finish.sh") and "build-root" not in c
+                and c[:2] != ["env", "-i"]]
 
     def test_the_local_wrapper_stages_as_image_yml_does(self):
         # The stage half runs build.sh as image.yml's stage job runs it (OUT only, the snapshot passed, the
@@ -8135,10 +8224,12 @@ class MkosiRunBoundTest(unittest.TestCase):
         self.assertEqual([c[0] for c in self.runs(calls)], ["env", "build.sh"])
         # #6380 item 3: the host is marked before build.sh runs as root.
         self.assertEqual(calls[0], ["touch", "/var/lib/agentos-stage-host"])
-        self.assertTrue((d / "stage-host").exists())
-        self.assertEqual(calls[1][2:], ["AGENTOS_SECURITY_SNAPSHOT=" + self.SECURITY, "HOME=/root",
+        self.assertTrue((d / "agentos-stage-host").exists())
+        # #6417 item 2: then, the mark written, it reads as root that the host never built.
+        self.assertEqual(calls[1][:2] + calls[1][-2:], ["sh", "-c", "sh", "/var/lib/agentos-build-host"])
+        self.assertEqual(calls[2][2:], ["AGENTOS_SECURITY_SNAPSHOT=" + self.SECURITY, "HOME=/root",
                                         "GOCACHE=/tmp/gocache", "image/build.sh", out])
-        self.assertEqual(calls[2], ["build.sh", out, "snap=" + self.SECURITY])
+        self.assertEqual(calls[3], ["build.sh", out, "snap=" + self.SECURITY])
         commit = subprocess.check_output(["git", "-C", str(d / "repo"), "rev-parse", "HEAD"], text=True).strip()
         tar = d / "st" / ("stage-%s.tar" % commit)
         # #6380 item 6: the stage prints the tar's SHA-256 in the build line the other host runs.
@@ -8151,7 +8242,7 @@ class MkosiRunBoundTest(unittest.TestCase):
         # Unset, the snapshot goes to build.sh empty, and build.sh resolves its own (build.sh's line 46).
         r, calls, _ = self.local_build("stage", "st")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(calls[2][-1], "snap=")
+        self.assertEqual(calls[3][-1], "snap=")
         # A stage of more than usr/ is not packed.
         r, calls, d = self.local_build("stage", "st", stage_extra='mkdir "$2/stage/etc"')
         self.assertNotEqual(r.returncode, 0)
@@ -8165,8 +8256,18 @@ class MkosiRunBoundTest(unittest.TestCase):
                 d, tar, _ = self.staged(snapshot=self.SECURITY)
                 r, calls, _ = self.build(str(tar), "img", *args, snapshot=self.SECURITY, d=d)
                 self.assertEqual(r.returncode, 0, r.stderr)
-                out = str(d / "img" / "out")
-                path = os.environ["PATH"]
+                # #6417: the steps run as root from W, a root-only directory mktemp makes in /var/lib, which
+                # holds the commit (git archive), the tar's copy and everything the steps write; the image
+                # then moves to DIR/out and W goes.
+                w = self.root_dir(calls)
+                self.assertIn(["mktemp", "-d", "/var/lib/agentos-build.XXXXXXXX"], calls)
+                self.assertTrue(w.startswith(str(d / "agentos-build.")), w)  # the stand-in's /var/lib is D
+                again = next(c for c in calls if "build-root" in c)
+                self.assertEqual(again[:2], ["env", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"])
+                self.assertEqual(again[2:], ["HOME=/root", "AGENTOS_SECURITY_SNAPSHOT=" + self.SECURITY,
+                                             "SOURCE_DATE_EPOCH=1763000000", "bash", w + "/src/image/local-build.sh",
+                                             "build-root", w, hashlib.sha256(tar.read_bytes()).hexdigest(), version])
+                out = w + "/out"
                 runs = self.runs(calls)
                 self.assertEqual([c[0] for c in runs], ["env", "env", "finish.sh"])
                 self.assertEqual(runs[0][3:], [
@@ -8174,7 +8275,7 @@ class MkosiRunBoundTest(unittest.TestCase):
                     "--package-manager-tree=%s/pkgmngr" % out, "--image-version=" + version,
                     "--environment=AGENTOS_SECURITY_SNAPSHOT=" + self.SECURITY,
                     "--extra-tree=%s/stage/usr:/usr" % out, "--output-dir", out, "build"])
-                self.assertTrue(runs[0][1].startswith("PATH=") and runs[0][1].endswith(":" + path), runs[0][1])
+                self.assertEqual(runs[0][1], "PATH=%s:%s" % (d / "bin", again[1][len("PATH="):]))  # root's, not the caller's
                 self.assertEqual(runs[0][2], "HOME=/root")
                 self.assertEqual(runs[1][3:], ["image/finish.sh", out, version])
                 self.assertEqual(runs[2], ["finish.sh", out, version, "SDE=1763000000"])
@@ -8183,7 +8284,9 @@ class MkosiRunBoundTest(unittest.TestCase):
                                  (d / "img/out/agentos.sources").read_bytes())
                 self.assertEqual((d / "img/out/stage/usr/lib/f").read_text(), "x\n")
                 self.assertIn("build log %s/build.log" % (d / "img"), r.stderr)
-                self.assertFalse((d / "img/stage-in").exists())
+                self.assertIn("agentOS image %s of " % version, r.stdout)
+                self.assertFalse(pathlib.Path(w).exists())
+                self.assertEqual(sorted(p.name for p in (d / "img").iterdir()), ["build.log", "out"])
         # Unset, the snapshot set is resolved on the build host, as image.yml's security-snapshot job does.
         d, tar, _ = self.staged(snapshot=self.SECURITY)
         r, calls, _ = self.build(str(tar), "img", resolved="20261113T000000Z " + self.SECURITY, d=d)
@@ -8199,7 +8302,7 @@ class MkosiRunBoundTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         tars = list((d / "here" / "st").glob("stage-*.tar"))
         self.assertEqual(len(tars), 1)
-        (d / "stage-host").unlink()  # the build is another host's
+        (d / "agentos-stage-host").unlink()  # the build is another host's
         self.assertFalse((d / "repo" / "st").exists())
         r, _, _ = self.build("st/" + tars[0].name, "img", snapshot=self.SECURITY, d=d, cwd=d / "here")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -8264,13 +8367,13 @@ class MkosiRunBoundTest(unittest.TestCase):
                 self.assertIn("usage:", r.stderr)
                 self.assertEqual(calls, [])
         # #6380 item 3: a host that staged never builds, whichever commit or tar it is given.
-        (d / "stage-host").touch()
+        (d / "agentos-stage-host").touch()
         r, calls, _ = self.build(str(tar), "img", snapshot=self.SECURITY, d=d)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("this host staged (/var/lib/agentos-stage-host)", r.stderr)
         self.assertEqual(self.runs(calls), [])
         self.assertFalse((d / "img").exists())
-        (d / "stage-host").unlink()
+        (d / "agentos-stage-host").unlink()
         # An existing DIR is refused: each half starts from a fresh directory, as each runner does.
         (d / "img").mkdir()
         r, calls, _ = self.build(str(tar), "img", snapshot=self.SECURITY, d=d)
@@ -8310,6 +8413,105 @@ class MkosiRunBoundTest(unittest.TestCase):
                 self.assertEqual(self.runs(calls), [])
                 shutil.rmtree(d / "img")
 
+    def test_the_local_wrapper_keeps_the_halves_on_separate_hosts(self):
+        # #6417 item 1: a sudo that fails reading a mark stops either half, never reads as "no mark".
+        d, tar, _ = self.staged(snapshot=self.SECURITY)
+        r, calls, _ = self.build(str(tar), "img", snapshot=self.SECURITY, d=d, sudo_fails=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("cannot read /var/lib/agentos-stage-host as root (sudo failed)", r.stderr)
+        self.assertEqual(self.runs(calls), [])
+        self.assertFalse((d / "img").exists())
+        r, calls, d2 = self.local_build("stage", "st", snapshot=self.SECURITY, sudo_fails=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("cannot read /var/lib/agentos-build-host as root (sudo failed)", r.stderr)
+        self.assertEqual(self.runs(calls), [])
+        self.assertFalse((d2 / "st").exists())
+        # A dangling link at the mark's path is a mark.
+        os.symlink(str(d / "nowhere"), str(d / "agentos-stage-host"))
+        r, calls, _ = self.build(str(tar), "img", snapshot=self.SECURITY, d=d)
+        self.assertIn("this host staged (/var/lib/agentos-stage-host), so it cannot build", r.stderr)
+        self.assertEqual(self.runs(calls), [])
+        (d / "agentos-stage-host").unlink()
+        # #6417 item 2: the build marks its host before any byte of the stage is read, and a host that built
+        # never stages: it refuses before build.sh runs, whichever order the two marks were written in.
+        r, calls, _ = self.build(str(tar), "img", snapshot=self.SECURITY, d=d)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((d / "agentos-build-host").exists())
+        firsts = [c[0] for c in calls if c[0] in ("touch", "sh", "install")]
+        self.assertEqual(firsts[:3], ["touch", "sh", "install"])
+        self.assertEqual(calls[2], ["touch", "/var/lib/agentos-build-host"])
+        r, calls, _ = self.local_build("stage", "st2", snapshot=self.SECURITY, d=d)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("this host built (/var/lib/agentos-build-host), so it cannot stage", r.stderr)
+        self.assertEqual(self.runs(calls), [])
+        self.assertFalse((d / "st2").exists())
+        # Each half writes its own mark before it reads the other's, so two run at once both refuse: the
+        # stage just refused left its mark, and now a build is refused too.
+        self.assertTrue((d / "agentos-stage-host").exists())
+        r, calls, _ = self.build(str(tar), "img2", snapshot=self.SECURITY, d=d)
+        self.assertIn("this host staged", r.stderr)
+        self.assertEqual(self.runs(calls), [])
+        # #6417 item 3 (B1 of L3 and Security on #6440): what the build reads after its checks lives only in W,
+        # a root-only directory mktemp makes in /var/lib, never under DIR or any path a non-root process can
+        # rename: the tar is copied read-only into W/stage-in before it is hashed, the commit is archived
+        # into W/src, and every step from the hash to finish.sh runs as root there and names no path in DIR.
+        # A copy refused by its hash stays in W, with the log.
+        d, tar, _ = self.staged(snapshot=self.SECURITY)
+        r, calls, _ = self.build(str(tar), "img", snapshot=self.SECURITY, d=d, sha="0" * 64)
+        self.assertIn("not the %s its stage printed" % ("0" * 64), r.stderr)
+        w = self.root_dir(calls)
+        self.assertIn(["mktemp", "-d", "/var/lib/agentos-build.XXXXXXXX"], calls)
+        self.assertIn(["install", "-m", "0444", str(tar), w + "/stage-in/stage.tar"], calls)
+        copy = pathlib.Path(w) / "stage-in/stage.tar"
+        self.assertEqual(copy.stat().st_mode & 0o7777, 0o444)
+        self.assertEqual(pathlib.Path(w).stat().st_mode & 0o7777, 0o700)
+        self.assertEqual(copy.read_bytes(), tar.read_bytes())
+        # No log exists before mkosi, so none is named (UX on #6440): the exit line says what W holds and how to remove it.
+        self.assertFalse((pathlib.Path(w) / "build.log").exists())
+        self.assertNotIn("build log", r.stderr)
+        self.assertIn("stopped before mkosi, so it wrote no log; %s (root-only) holds the copied commit and tar; "
+                      "once read: sudo rm -rf %s" % (w, w), r.stderr)
+        self.assertEqual(list((d / "img").iterdir()), [])
+        d, tar, _ = self.staged(snapshot=self.SECURITY)
+        r, calls, _ = self.build(str(tar), "img", snapshot=self.SECURITY, d=d)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        w, img = self.root_dir(calls), str(d / "img")
+        first = next(n for n, c in enumerate(calls) if "build-root" in c)
+        last = next(n for n, c in enumerate(calls) if c[:2] == ["mv", w + "/out"])
+        self.assertGreater(last, first)
+        for c in calls[first + 1:last]:
+            self.assertFalse([a for a in c if img in a], c)
+        self.assertFalse(pathlib.Path(w).exists())  # W goes on success
+
+    def test_the_local_wrapper_copies_the_commit_not_what_the_caller_s_git_makes_of_it(self):
+        # #6417, B2 of Security on #6440: the build's copy of the commit is the commit's tree, whatever the
+        # caller's .git/info/attributes, core.attributesFile or tar.* settings say (export-ignore drops a
+        # file from git archive, export-subst rewrites one): root checks the tree out from objects index-pack
+        # checked, with env -i and no config but its repository's own, and refuses a copy that differs.
+        d, tar, _ = self.staged(snapshot=self.SECURITY)
+        repo = d / "repo"
+        (repo / ".git/info").mkdir(exist_ok=True)
+        (repo / ".git/info/attributes").write_text("image/finish.sh export-ignore\nimage/security-snapshot.sh export-subst\n")
+        (d / "attrs").write_text("image/real-security-snapshot.sh export-ignore\n")
+        for k, v in (("core.attributesFile", str(d / "attrs")), ("tar.umask", "0")):
+            subprocess.run(["git", "-C", str(repo), "config", k, v], env=self.git_env(), check=True)
+        r, calls, _ = self.build(str(tar), "img", snapshot=self.SECURITY, d=d, mkosi_fails=True)
+        self.assertNotEqual(r.returncode, 0)  # mkosi's stand-in fails, so W stays to be read
+        w = pathlib.Path(self.root_dir(calls))
+        commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+        files = subprocess.check_output(["git", "-C", str(repo), "ls-files"], env=self.git_env(), text=True).split()
+        self.assertEqual(sorted(str(f.relative_to(w / "src")) for f in (w / "src").rglob("*") if not f.is_dir()), sorted(files))
+        for f in files:
+            self.assertEqual((w / "src" / f).read_bytes(), (repo / f).read_bytes(), f)
+        self.assertIn(["env", "-i", "PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root", "GIT_CONFIG_NOSYSTEM=1",
+                       "GIT_CONFIG_GLOBAL=/dev/null", "git", "--git-dir=%s/git" % w, "--work-tree=%s/src" % w,
+                       "read-tree", "-u", "--reset", commit + "^{tree}"], calls)
+        # build-root is only the build's second part: run by anyone but root, it refuses before reading anything.
+        r, calls, _ = self.local_build("build-root", str(w), "0" * 64, "1", d=d)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("build-root is the build's second part, run as root by build", r.stderr)
+        self.assertEqual(calls, [])
+
     def test_the_local_wrapper_stops_before_mkosi_on_a_bad_stage(self):
         # No snapshot in agentos.sources, or sources that are not exactly the ones security-snapshot.sh
         # writes for it: mkosi and finish.sh never run.
@@ -8333,8 +8535,10 @@ class MkosiRunBoundTest(unittest.TestCase):
         r, calls, _ = self.build(str(tar), "img", snapshot=self.SECURITY, mkosi_fails=True, d=d)
         self.assertNotEqual(r.returncode, 0)
         self.assertEqual([c[0] for c in self.runs(calls)], ["env"])
-        self.assertIn("build log %s/build.log" % (d / "img"), r.stderr)
-        self.assertEqual((d / "img/build.log").read_text(), "mkosi\n")
+        w = self.root_dir(calls)
+        self.assertIn("build log %s/build.log (root-only); once read: sudo rm -rf %s" % (w, w), r.stderr)
+        self.assertEqual((pathlib.Path(w) / "build.log").read_text(), "mkosi\n")
+        self.assertFalse((d / "img/out").exists())
 
     def test_the_local_wrapper_refuses_a_bad_call(self):
         for args in ((), ("stage",), ("stage", "a", "b"), ("build", "t"), ("build", "t", "d"),
@@ -8933,7 +9137,7 @@ class EveryCheckCalledTest(unittest.TestCase):
               "sysctl_byte_violations", "network_violations", "resolved_violations", "tmpfiles_violations",
               "tmpfiles_allow_violations", "exec_allow_violations", "bus_daemon_violations", "made_allow_violations",
               "credstore_violations", "stray_violations", "manager_environment_violations", "unit_made_dirs",
-              "unit_made_paths", "unit_made_refusals", "inside_refusals", "gpt_auto_violations", "noexec_violations",
+              "unit_made_paths", "unit_made_refusals", "user_unit_made_dir_violations", "inside_refusals", "gpt_auto_violations", "noexec_violations",
               "keeper_violations", "isolate_violations", "ram_kept_violations", "kexec_loader_violations",
               "kexec_sysctl_violations", "clerk_key_violations", "assembly_violations", "driver_violations",
               "e2e_violations", "package_file_violations")
