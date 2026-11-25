@@ -101,6 +101,10 @@ func TestHeldCodeMidMessageNeverReachesTheAgent(t *testing.T) {
 		// #5974).
 		{"x\u200b\u200b123456\u200b\u200by", "x y"},
 		{"pay 123\u200b654321\u200b456", "pay 123 456"},
+		// With no space before the code, the one after it goes.
+		{"pay:123456 now", "pay:now"},
+		// A message with no code is held exactly as sent.
+		{"  room 12  ", "  room 12  "},
 	}
 	for _, c := range cases {
 		r.say(c.say)
