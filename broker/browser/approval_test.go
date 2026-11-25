@@ -216,7 +216,7 @@ func TestToAloneReleasesNothing(t *testing.T) {
 	r.run(t, 1, "ask", r.root, read(pressOrder))
 	a := r.stepApproval(t, "ask")
 	r.run(t, 2, "bare", r.root, post(a.To, pressOrder))
-	if s := r.step("bare"); s.Phase != kernel.PFailed || s.Detail != check.RClaim {
+	if s := r.step("bare"); s.Phase != kernel.PFailed || s.Detail != check.RClaim.String() {
 		t.Fatalf("no print: phase %s (%s)", s.Phase, s.Detail)
 	}
 	// A standing key, here the root, covers no submit, print or not.
@@ -637,7 +637,7 @@ func TestOtherClaimIsNotAChangedPage(t *testing.T) {
 	s := submitStep(a, pressOrder)
 	s.Labels = []string{"synth"}
 	res := r.c.Do(kernel.Request{Plan: plan("x", r.approve(t, a.Print), s)}, r.k.State())
-	if res.Detail != check.RClaim {
+	if res.Detail != check.RClaim.String() {
 		t.Fatalf("got %+v", res)
 	}
 }

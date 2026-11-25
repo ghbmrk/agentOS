@@ -95,7 +95,7 @@ func TestRederiveAllowsNoSendCancelAfterAnAnsweredStep(t *testing.T) {
 			cancelB = e.Body
 		}
 	}
-	if !bytes.Contains(cancelB, []byte(`"code":"`+key.RRevoked+`"`)) {
+	if !bytes.Contains(cancelB, []byte(`"code":"`+key.RRevoked.String()+`"`)) {
 		t.Fatalf("b's cancel %s, want it revoked", cancelB)
 	}
 	must(t, r.k.Answer(4, ca, r.mail.Do(ca.Req, r.k.State())))
@@ -148,7 +148,7 @@ func TestRederiveAllowsNoSendCancelForAnEndedPlan(t *testing.T) {
 			stopped = e.Body
 		}
 	}
-	if !bytes.Contains(revoked, []byte(`"code":"`+key.RRevoked+`"`)) || !bytes.Contains(stopped, []byte(`"code":"`+key.RStopped+`"`)) {
+	if !bytes.Contains(revoked, []byte(`"code":"`+key.RRevoked.String()+`"`)) || !bytes.Contains(stopped, []byte(`"code":"`+key.RStopped.String()+`"`)) {
 		t.Fatalf("cancels %s and %s, want revoked and stopped", revoked, stopped)
 	}
 	last := es[len(es)-1]

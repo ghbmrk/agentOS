@@ -254,7 +254,7 @@ func (w *world) do(r kernel.Request, v kernel.View) kernel.Result {
 	if len(m.Effects()) > n {
 		w.judge(r, v)
 	}
-	if res.Outcome == "failed" && res.Detail == check.RHold {
+	if res.Outcome == "failed" && res.Detail == check.RHold.String() {
 		w.held++
 	}
 	return res

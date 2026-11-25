@@ -26,7 +26,7 @@ func (c *updateClerk) facts(st key.Step) (string, []string, int64) {
 
 func (c *updateClerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	if rf := check.Check([]key.PublicKey{c.pinned}, "update", c.facts, *c.now, r, v); rf != nil {
-		return kernel.Result{Outcome: "failed", Detail: rf.Code}
+		return kernel.Result{Outcome: "failed", Detail: rf.Code().String()}
 	}
 	c.done++
 	return kernel.Result{Outcome: "ok"}
@@ -113,7 +113,7 @@ func TestPinnedRootActivatesWithNoGrant(t *testing.T) {
 	bare, err := kernel.Boot(l, r.anchors(), nil, 4)
 	must(t, err)
 	p := kernel.SignPlan(kernel.Plan{ID: "a2", Key: r.up, Steps: []kernel.PlanStep{activate("a2")}}, r.image.priv)
-	if _, _, rf := kernel.Admit(bare.State(), p, 4); rf == nil || rf.Code != kernel.CKey {
+	if _, _, rf := kernel.Admit(bare.State(), p, 4); rf == nil || rf.Code() != kernel.CKey {
 		t.Fatalf("unpinned kernel admitted the update root: %v", rf)
 	}
 

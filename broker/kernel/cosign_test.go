@@ -208,13 +208,13 @@ func TestAVeryLargeOneOffNeedsASecondPasskey(t *testing.T) {
 	}
 	cases := []struct {
 		p    kernel.Plan
-		want string
+		want key.Code
 	}{
-		{plan("p1", "200"), ""},
+		{plan("p1", "200"), key.Code{}},
 		{plan("p2", "201"), kernel.CCosign},
 		{plan("p3", "201", r.owner), kernel.CCosign},
 		{plan("p4", "201", r.holder), kernel.CCosign},
-		{plan("p5", "201", r.spare), ""},
+		{plan("p5", "201", r.spare), key.Code{}},
 		{plan("p9", "4611686018427387903,4611686018427387905,1000"), kernel.CCosign}, // no wrap
 	}
 	for _, c := range cases {
@@ -304,7 +304,7 @@ func TestTIM1AWhatIsHeldIsLiveByEarliestAndNotLapsedByLatest(t *testing.T) {
 		must(t, err)
 		return root, ck
 	}
-	oneOff := func(r *rig, id string, root key.Key, amount string) string {
+	oneOff := func(r *rig, id string, root key.Key, amount string) key.Code {
 		s := kernel.PlanStep{Verb: key.Buy, Clerk: "bank", Args: map[string]string{}}
 		for _, n := range key.ArgNames(key.Buy) {
 			s.Args[n] = id

@@ -101,7 +101,7 @@ func TestSpendRefusesBelowTheKeyRung(t *testing.T) {
 	if r.status("low") != kernel.SActive {
 		t.Fatalf("the held step's plan: %s", r.status("low"))
 	}
-	if rf := r.admit(1, "low", 1); rf == nil || rf.Code != key.RRung {
+	if rf := r.admit(1, "low", 1); rf == nil || rf.Code() != key.RRung {
 		t.Fatalf("a P1 task's metered call under a P3 key: %v", rf)
 	}
 	if rf := r.admit(1, "high", 1); rf != nil {
@@ -175,7 +175,7 @@ func TestSpendInFlightAndExtensionKeepThePlansRung(t *testing.T) {
 	if rf != nil {
 		t.Fatal(rf)
 	}
-	if _, rf := r.k.AdmitSpend(1, "p", 50); rf == nil || rf.Code != kernel.CInFlight {
+	if _, rf := r.k.AdmitSpend(1, "p", 50); rf == nil || rf.Code() != kernel.CInFlight {
 		t.Fatalf("a call over the cap only while one is in flight: %v", rf)
 	}
 	must(t, r.k.Meter(1, a, "api", 100, "provider"))
@@ -186,7 +186,7 @@ func TestSpendInFlightAndExtensionKeepThePlansRung(t *testing.T) {
 	must(t, r.k.Hold(2, "p", rf))
 	must(t, r.k.Extend(3, extension(r, env, key.LimitSpendTask(300), key.LimitRung(key.P3)), "p"))
 	must(t, r.k.Revoke(4, k.Tip()))
-	if _, rf := r.k.AdmitSpend(5, "p", 1); rf == nil || rf.Code != key.RRevoked {
+	if _, rf := r.k.AdmitSpend(5, "p", 1); rf == nil || rf.Code() != key.RRevoked {
 		t.Fatalf("an extended plan whose own key was revoked: %v", rf)
 	}
 }

@@ -36,7 +36,7 @@ func TestClerkRefusesAStepBelowItsKeysRung(t *testing.T) {
 	anchors := []key.PublicKey{key.Ed25519(opubOf())}
 	for r := key.P0; r <= key.P4; r++ {
 		rf := check.Check(anchors, "mail", f.mail.Facts, 1, u, rungAt{inFlight{f.k.State(), f.plans}, r})
-		if r < key.P3 && (rf == nil || rf.Code != key.RRung) || r >= key.P3 && rf != nil {
+		if r < key.P3 && (rf == nil || rf.Code() != key.RRung) || r >= key.P3 && rf != nil {
 			t.Fatalf("%v: %v", r, rf)
 		}
 	}

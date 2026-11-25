@@ -808,7 +808,7 @@ func TestPlanOwnerCallsNameTheirPlan(t *testing.T) {
 	unknown := func(what string, err error) {
 		t.Helper()
 		var rf *key.Refusal
-		if !errors.As(err, &rf) || rf.Code != DPlanUnknown {
+		if !errors.As(err, &rf) || rf.Code() != DPlanUnknown {
 			t.Fatalf("%s: %v, want %s", what, err, DPlanUnknown)
 		}
 	}

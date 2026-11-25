@@ -128,10 +128,10 @@ type renewCase struct {
 }
 
 type verdict struct {
-	Valid bool     `json:"valid"`
-	Bad   string   `json:"bad"`
-	Codes []string `json:"codes"`
-	Hold  []int64  `json:"hold"`
+	Valid bool       `json:"valid"`
+	Bad   string     `json:"bad"`
+	Codes []key.Code `json:"codes"`
+	Hold  []int64    `json:"hold"`
 	// Windows is each verb's hold (Verified.Window, KEY-9), for every verb
 	// on the closed list and one off it.
 	Windows map[string][]int64 `json:"windows"`
@@ -193,7 +193,7 @@ var (
 	verbs    = []key.Verb{key.Read, key.Fetch, key.Draft, key.Organize, key.Trash, key.Present, key.Unsubscribe,
 		key.Send, key.Post, key.Actuate, key.Buy, key.Share, key.DeleteRemote, key.ChangeAccount,
 		key.RevealOrCreateSecret, key.ActuatePhysical}
-	codes = []string{key.RMalformed, key.RStopped, key.RRevoked, key.RPaused, key.RExpired, key.RClerk,
+	codes = []key.Code{key.RMalformed, key.RStopped, key.RRevoked, key.RPaused, key.RExpired, key.RClerk,
 		key.RVerb, key.RArg, key.RContent, key.RLabels, key.RSpendTask, key.RSpendDay, key.RRate, key.RUses, key.RTask}
 	chainErrs = []error{key.ErrMalformed, key.ErrWrongOwner, key.ErrBadSig, key.ErrLoosens, key.ErrNotHolder,
 		key.ErrUnknownKind, key.ErrUncaveated}
@@ -635,7 +635,7 @@ func toWire(s key.Step) wireStep {
 // rule fails the test instead of passing quietly.
 type tally struct {
 	mu        sync.Mutex
-	codes     map[string]int
+	codes     map[key.Code]int
 	errs      map[error]int
 	admitted  int
 	spendOK   int
@@ -652,10 +652,10 @@ func (t *tally) reach(r map[string]bool) {
 	}
 }
 
-func (t *tally) add(code string, err error, admitted, spendOK bool) {
+func (t *tally) add(code key.Code, err error, admitted, spendOK bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if code != "" {
+	if !code.IsZero() {
 		t.codes[code]++
 	}
 	for _, e := range chainErrs {
@@ -730,7 +730,7 @@ func one(c *checker, seed int64, t *tally) string {
 		return fmt.Sprintf("op %s: library chain err %v, keycheck valid %v (%s)", op, err, got.Valid, got.Bad)
 	}
 	if err != nil {
-		t.add("", err, false, false)
+		t.add(key.Code{}, err, false, false)
 		bad, _, _ := strings.Cut(got.Bad, "(")
 		if k := kindOf(err); k != bad {
 			t.mu.Lock()
@@ -782,12 +782,12 @@ func one(c *checker, seed int64, t *tally) string {
 	case "spend":
 		r = v.Spend(wc.Task, wc.Amount, ctx)
 	default:
-		t.add("", nil, false, false)
+		t.add(key.Code{}, nil, false, false)
 		return ""
 	}
-	code := ""
+	var code key.Code
 	if r != nil {
-		code = r.Code
+		code = r.Code()
 	}
 	t.add(code, nil, op == "authorize" && r == nil, op == "spend" && r == nil)
 	if r == nil && g.reached["huge-amount"] && len(got.Codes) > 0 && !slices.ContainsFunc(got.Codes, notMoney) {
@@ -800,7 +800,7 @@ func one(c *checker, seed int64, t *tally) string {
 		t.mu.Unlock()
 		return ""
 	}
-	if (r == nil) != (len(got.Codes) == 0) || (r != nil && !slices.Contains(got.Codes, r.Code)) {
+	if (r == nil) != (len(got.Codes) == 0) || (r != nil && !slices.Contains(got.Codes, r.Code())) {
 		return fmt.Sprintf("op %s: library %v, keycheck %v", op, r, got.Codes)
 	}
 	return ""
@@ -944,10 +944,10 @@ func kindOf(err error) string {
 	return err.Error()
 }
 
-func notMoney(code string) bool { return code != key.RSpendTask && code != key.RSpendDay }
+func notMoney(code key.Code) bool { return code != key.RSpendTask && code != key.RSpendDay }
 
 func newTally() *tally {
-	return &tally{codes: map[string]int{}, errs: map[error]int{}, kindDiffs: map[string]int{}, edges: map[string]int{}}
+	return &tally{codes: map[key.Code]int{}, errs: map[error]int{}, kindDiffs: map[string]int{}, edges: map[string]int{}}
 }
 
 // TestKeyDiff runs KEYDIFF_CASES seeds (default 20000) from KEYDIFF_FROM

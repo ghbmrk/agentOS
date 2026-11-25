@@ -88,7 +88,7 @@ func (c *Clerk) Facts(key.Step) (string, []string, int64) { return "", nil, 0 }
 func (c *Clerk) Do(r kernel.Request, v kernel.View) kernel.Result {
 	ctx := context.Background()
 	if rf := check.Check(c.anchors, Name, c.Facts, c.x.Latest(ctx).UnixMilli(), r, v); rf != nil {
-		return kernel.Result{Outcome: "failed", Detail: rf.Code}
+		return kernel.Result{Outcome: "failed", Detail: rf.Code().String()}
 	}
 	st := step(r)
 	if st.Verb != key.ChangeAccount {

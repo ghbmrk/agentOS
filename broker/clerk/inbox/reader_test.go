@@ -200,7 +200,7 @@ type ledger struct {
 
 func (l *ledger) AdmitSpend(int64, string, int64) (kernel.Admitted, *key.Refusal) {
 	if l.admits == 0 {
-		return kernel.Admitted{}, &key.Refusal{Code: key.RSpendTask}
+		return kernel.Admitted{}, key.Refuse(key.RSpendTask, "")
 	}
 	l.admits--
 	return kernel.Admitted{}, nil

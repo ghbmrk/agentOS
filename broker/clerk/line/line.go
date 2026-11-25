@@ -296,10 +296,10 @@ func (c *Clerk) DoContext(ctx context.Context, r kernel.Request, v kernel.View) 
 	}
 	c.mu.Unlock()
 	if v == nil {
-		return failed(check.RDispatch)
+		return failed(check.RDispatch.String())
 	}
 	if rf := check.Check(c.cfg.Anchors, Name, c.Facts, c.cfg.Clock.Now(), r, v); rf != nil {
-		return failed(rf.Code)
+		return failed(rf.Code().String())
 	}
 	s := r.Step()
 	if s.Verb != key.Send {

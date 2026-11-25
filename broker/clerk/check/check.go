@@ -19,10 +19,10 @@ import (
 type Facts func(key.Step) (content string, labels []string, amount int64)
 
 // Clerk refusal codes, beside the key package's and the kernel's.
-const (
-	RClaim    = "claim"    // a claim the clerk's facts contradict, or no facts to judge it
-	RDispatch = "dispatch" // the log has no such step in flight
-	RHold     = "hold"
+var (
+	RClaim    = key.RClaim    // a claim the clerk's facts contradict, or no facts to judge it
+	RDispatch = key.RDispatch // the log has no such step in flight
+	RHold     = key.RHold
 )
 
 // Check is the clerk's own authorization of a request at now, on the clerk's
@@ -52,23 +52,23 @@ func Verify(anchors []key.PublicKey, name string, facts Facts, now int64, r kern
 func verify(anchors []key.PublicKey, name string, facts Facts, now int64, r kernel.Request, v kernel.View) (*key.Verified, *key.Refusal) {
 	st := r.Step()
 	if st.Clerk != name {
-		return nil, &key.Refusal{Code: key.RClerk, Detail: st.Clerk}
+		return nil, key.Refuse(key.RClerk, st.Clerk)
 	}
 	// The recipient a key's caveats judge is the verb's first argument, the
 	// object the request acts on; a step claiming another is refused here.
 	if a := st.Args[key.RecipientArg(st.Verb)]; st.Recipient != a.Value {
-		return nil, &key.Refusal{Code: RClaim, Detail: "step recipient differs from its object argument"}
+		return nil, key.Refuse(RClaim, "step recipient differs from its object argument")
 	}
 	if facts == nil {
-		return nil, &key.Refusal{Code: RClaim, Detail: "clerk has no facts to judge the step's claims"}
+		return nil, key.Refuse(RClaim, "clerk has no facts to judge the step's claims")
 	}
 	if content, labels, amount := facts(st); content != st.Content || amount != st.Amount || !sameSet(labels, st.Labels) {
-		return nil, &key.Refusal{Code: RClaim, Detail: "step claims differ from the clerk's facts"}
+		return nil, key.Refuse(RClaim, "step claims differ from the clerk's facts")
 	}
 	owners := kernel.PlanOwners(v, anchors, r.Plan.Key)
 	ver, err := kernel.VerifyPlan(r.Plan, owners)
 	if err != nil {
-		return nil, &key.Refusal{Code: kernel.CKey, Detail: err.Error()}
+		return nil, key.Refuse(kernel.CKey, err.Error())
 	}
 	if rf := kernel.Live(v, ver, now); rf != nil {
 		return ver, rf
@@ -78,7 +78,7 @@ func verify(anchors []key.PublicKey, name string, facts Facts, now int64, r kern
 	}
 	d, ok := v.Dispatched(r)
 	if !ok {
-		return ver, &key.Refusal{Code: RDispatch, Detail: "the log has no such step in flight"}
+		return ver, key.Refuse(RDispatch, "the log has no such step in flight")
 	}
 	ctx := key.Context{Now: now, Changes: v.ChangesView(), Ledger: v.LedgerBefore(d.Seq)}
 	st.Rung = d.Rung // the log's, never the request's (CH-3)
@@ -87,10 +87,10 @@ func verify(anchors []key.PublicKey, name string, facts Facts, now int64, r kern
 	}
 	if c, ok := key.ClassOf(st.Verb); ok && c.Irreversible() && max(ver.Window(st.Verb, false), ver.Window(st.Verb, true)) > 0 {
 		if !d.Held {
-			return ver, &key.Refusal{Code: RHold, Detail: "step was not held"}
+			return ver, key.Refuse(RHold, "step was not held")
 		}
 		if !d.Approved && now < ver.Due(st.Verb, d.HeldAt, d.Novel) {
-			return ver, &key.Refusal{Code: RHold, Detail: "window not over"}
+			return ver, key.Refuse(RHold, "window not over")
 		}
 	}
 	return ver, nil

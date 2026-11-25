@@ -89,7 +89,7 @@ func TestClerkKeepsThePricedHoldWhenTheKernelClockRunsAhead(t *testing.T) {
 	if len(r.mail.Effects()) != 0 || r.status("p1") != kernel.SFailed {
 		t.Fatalf("status %s, %d effects", r.status("p1"), len(r.mail.Effects()))
 	}
-	if d := r.k.State().Plans["p1"].Steps[0].Detail; d != check.RHold {
+	if d := r.k.State().Plans["p1"].Steps[0].Detail; d != check.RHold.String() {
 		t.Fatalf("detail %q", d)
 	}
 }

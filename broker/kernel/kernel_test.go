@@ -172,7 +172,7 @@ func TestUnknownRootRejected(t *testing.T) {
 		r.owner.pass, r.holder.pub, 0, 1)
 	must(t, err)
 	p := r.sign(kernel.Plan{ID: "p1", Key: other, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})
-	if _, _, rf := kernel.Admit(r.k.State(), p, 0); rf == nil || rf.Code != kernel.CUngranted {
+	if _, _, rf := kernel.Admit(r.k.State(), p, 0); rf == nil || rf.Code() != kernel.CUngranted {
 		t.Fatalf("a root not in the log must not authorize (KEY-1): %v", rf)
 	}
 	must(t, r.k.Submit(0, p))
@@ -579,7 +579,7 @@ func TestFailedIssueHasNoEffectAndDoesNotSurviveReboot(t *testing.T) {
 
 	r, ck, _ = failedGrant(false) // the control: the same grant, anchored
 	r.boot(1)
-	if c := admits(r, r.sign(kernel.Plan{ID: "p2", Key: ck, Steps: steps}), 1); c != "" {
+	if c := admits(r, r.sign(kernel.Plan{ID: "p2", Key: ck, Steps: steps}), 1); !c.IsZero() {
 		t.Fatalf("a plan under an anchored grant: %q", c)
 	}
 	r.plan("p2", ck, steps...)
@@ -806,7 +806,7 @@ func TestStrippedKeyIsRefused(t *testing.T) {
 			t.Fatalf("%s: status %s, %d effects past LimitRate(2)", id, r.status(id), len(r.mail.Effects()))
 		}
 		// The clerk refuses it on its own check, whatever the kernel decided (CLK-2).
-		if rf := check.Check(r.anchors(), "mail", r.mail.Facts, 30, kernel.Request{Plan: p}, r.k.State()); rf == nil || rf.Code != kernel.CKey {
+		if rf := check.Check(r.anchors(), "mail", r.mail.Facts, 30, kernel.Request{Plan: p}, r.k.State()); rf == nil || rf.Code() != kernel.CKey {
 			t.Fatalf("%s: clerk check %v", id, rf)
 		}
 	}
@@ -919,7 +919,7 @@ func TestStatusListsUnsettledSteps(t *testing.T) {
 		t.Fatalf("status %+v, want %+v", got, want)
 	}
 	must(t, r.k.Cancel(kernel.MaxChecks*kernel.ProbeEvery*2, "p1"))
-	if got := r.k.State().Status(); len(got) != 1 || got[0].Retry || got[0].PlanStatus != kernel.SCancelled || got[0].Cancel != "owner" {
+	if got := r.k.State().Status(); len(got) != 1 || got[0].Retry || got[0].PlanStatus != kernel.SCancelled || got[0].Cancel != key.COwner {
 		t.Fatalf("a cancelled plan's parked step is still listed, with its cancel, and is not retried: %+v", got)
 	}
 }
@@ -1229,7 +1229,7 @@ func TestClerkKeepsTheHoldWhenTheKernelClockRunsAhead(t *testing.T) {
 	if len(r.mail.Effects()) != 0 || r.status("p1") != kernel.SFailed {
 		t.Fatalf("status %s, %d effects: the clerk released a hold on the kernel's clock", r.status("p1"), len(r.mail.Effects()))
 	}
-	if d := r.k.State().Plans["p1"].Steps[0].Detail; d != check.RHold {
+	if d := r.k.State().Plans["p1"].Steps[0].Detail; d != check.RHold.String() {
 		t.Fatalf("detail %q, want %q", d, check.RHold)
 	}
 }

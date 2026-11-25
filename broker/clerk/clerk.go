@@ -79,7 +79,7 @@ func (m *Mail) Do(r kernel.Request, v kernel.View) kernel.Result {
 		return kernel.Result{Outcome: "ok", Detail: "already done"}
 	}
 	if rf := check.Check(m.Anchors, m.Name, m.Facts, m.Clock.Now(), r, v); rf != nil {
-		return kernel.Result{Outcome: "failed", Detail: rf.Code}
+		return kernel.Result{Outcome: "failed", Detail: rf.Code().String()}
 	}
 	switch m.fault("do", r) {
 	case FaultFail:

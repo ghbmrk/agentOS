@@ -503,7 +503,7 @@ func TestAReconnectClaimingAnotherGrantIsRefused(t *testing.T) {
 	approved := grantDigest([]byte(`{"refresh_token":"canary-refresh-other","client_id":"agentos-test"}`))
 	digest := r.stage("claim", grant)
 	st, changed := r.reconnectClaiming("claim", r.approve(approved), "web", digest, grantPrint(approved))
-	if changed || st.Detail != check.RClaim {
+	if changed || st.Detail != check.RClaim.String() {
 		t.Fatalf("step %s %q, store changed %v", st.Phase, st.Detail, changed)
 	}
 }

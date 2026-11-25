@@ -202,7 +202,7 @@ func TestPlanGuestEndpointMetersEachCall(t *testing.T) {
 	// 50 out) does not fit, so it is refused with the cap's code and never
 	// sent.
 	st, body = call(`{"model":"m","stream":true}`)
-	if st != http.StatusTooManyRequests || !strings.Contains(body, DPlanRefused+" "+key.RSpendTask) || calls.Load() != 1 {
+	if st != http.StatusTooManyRequests || !strings.Contains(body, DPlanRefused+" "+key.RSpendTask.String()) || calls.Load() != 1 {
 		t.Fatalf("a call past the cap: %d %q, provider calls %d", st, body, calls.Load())
 	}
 }
@@ -239,7 +239,7 @@ func TestPlanGuestSettleErrorRefusesTheNextCall(t *testing.T) {
 		detail string
 	}{
 		"owed spend":      {downLog{down: true}, http.StatusServiceUnavailable, DPlanMeter},
-		"dropped reading": {downLog{notText: true}, http.StatusTooManyRequests, DPlanRefused + " " + kernel.CPool},
+		"dropped reading": {downLog{notText: true}, http.StatusTooManyRequests, DPlanRefused + " " + kernel.CPool.String()},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var calls atomic.Int32

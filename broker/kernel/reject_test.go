@@ -38,17 +38,18 @@ func TestARejectionNamesItsSessionAndStep(t *testing.T) {
 	r.plan("unknown", r.ck, st(key.Trash, "m1"), st("nope", "m2"))
 	r.plan("twice", r.ck, st(key.Unsubscribe, "list-a"), st(key.Unsubscribe, "list-a"))
 	for _, tc := range []struct {
-		plan, code, session, step string
-		at                        *int
+		plan, session, step string
+		code                key.Code
+		at                  *int
 	}{
-		{"step1", key.RVerb, `"t1"`, "1", ptr(1)},
-		{"whole", kernel.CTask, `"t2"`, "", nil},
-		{"step0", key.RVerb, "", "0", ptr(0)},
-		{"unknown", kernel.CPlan, "", "1", ptr(1)},
-		{"twice", kernel.CDuplicate, "", "1", ptr(1)},
+		{"step1", `"t1"`, "1", key.RVerb, ptr(1)},
+		{"whole", `"t2"`, "", kernel.CTask, nil},
+		{"step0", "", "0", key.RVerb, ptr(0)},
+		{"unknown", "", "1", kernel.CPlan, ptr(1)},
+		{"twice", "", "1", kernel.CDuplicate, ptr(1)},
 	} {
 		_, b := r.logged(tc.plan)
-		if string(b["code"]) != `"`+tc.code+`"` || string(b["session"]) != tc.session || string(b["step"]) != tc.step {
+		if string(b["code"]) != `"`+tc.code.String()+`"` || string(b["session"]) != tc.session || string(b["step"]) != tc.step {
 			t.Errorf("%s: logged code %s session %s step %s, want %s %s %s", tc.plan, b["code"], b["session"], b["step"], tc.code, tc.session, tc.step)
 		}
 		if got := r.k.State().Plans[tc.plan].RejectStep; (got == nil) != (tc.at == nil) || got != nil && *got != *tc.at {
@@ -106,9 +107,12 @@ func TestARejectionNamesNoSessionAnUnverifiedKeyClaims(t *testing.T) {
 	forged.Root.Sig[0] ^= 1
 	r.plan("forged", forged, st(key.Trash, "m1"))
 	r.plan("shape", r.serve("victim"), make([]kernel.PlanStep, kernel.MaxSteps+1)...)
-	for _, tc := range []struct{ plan, code string }{{"forged", kernel.CKey}, {"shape", kernel.CPlan}} {
+	for _, tc := range []struct {
+		plan string
+		code key.Code
+	}{{"forged", kernel.CKey}, {"shape", kernel.CPlan}} {
 		_, b := r.logged(tc.plan)
-		if string(b["code"]) != `"`+tc.code+`"` || b["session"] != nil {
+		if string(b["code"]) != `"`+tc.code.String()+`"` || b["session"] != nil {
 			t.Errorf("%s: logged code %s session %s, want %s and no session", tc.plan, b["code"], b["session"], tc.code)
 		}
 	}

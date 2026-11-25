@@ -423,7 +423,7 @@ func (x *Exit) Do(r kernel.Request, v kernel.View) kernel.Result {
 // check is the clerk's own authorization, run before every send.
 func (x *Exit) check(r kernel.Request, v kernel.View) (kernel.Result, bool) {
 	if rf := check.Check(x.anchors, x.name, x.Facts, x.clock.Now(), r, v); rf != nil {
-		return kernel.Result{Outcome: "failed", Detail: rf.Code}, false
+		return kernel.Result{Outcome: "failed", Detail: rf.Code().String()}, false
 	}
 	return kernel.Result{}, true
 }
