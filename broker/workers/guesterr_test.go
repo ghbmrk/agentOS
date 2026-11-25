@@ -66,7 +66,7 @@ func TestSentinelsKeepOnlyTheirFixedText(t *testing.T) {
 		{wrap(vm.ErrHeld), "STOP"},
 		{wrap(vm.ErrLabel), "private data"},
 		{wrap(vm.ErrUnknown), "no such worker"},
-		{wrap(vm.ErrLineage), "not in this worker's lineage"},
+		{wrap(vm.ErrLineage), "of another worker"},
 		{wrap(vm.ErrExists), "already exists"},
 		{wrap(vm.ErrPreempted), "preempted"},
 		{wrap(vm.ErrContained), "owner deleted"},

