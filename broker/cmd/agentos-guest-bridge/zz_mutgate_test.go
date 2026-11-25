@@ -1,6 +1,6 @@
 package main
 
-// REQ: ARC-6 (DEL-1d)
+// REQ: PLN-5
 
 import (
 	"bytes"
@@ -16,6 +16,9 @@ import (
 	"testing"
 	"time"
 )
+
+// slept records the waits bridgeRun's sleep stub was asked for.
+var slept []time.Duration
 
 // bridgeRun runs one owner message through ownerOnce against fakes. The
 // broker answers each post with the next of codes (a 400 carries body); the
@@ -55,7 +58,8 @@ func bridgeRun(t *testing.T, codes []int, body string, modelFails int) (error, [
 		json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": "answer"}}}})
 	}))
 	defer gateway.Close()
-	sleep = func(time.Duration) {}
+	slept = nil
+	sleep = func(d time.Duration) { slept = append(slept, d) }
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
 	defer func() { sleep = time.Sleep; log.SetOutput(os.Stderr) }()
@@ -82,6 +86,10 @@ func TestMutgateModelRetryIsLogged(t *testing.T) {
 	}
 	if !strings.Contains(logs, "owner message 0a0b0c0d0e0f: inbound API: 500 Internal Server Error; retrying") {
 		t.Fatalf("log %q", logs)
+	}
+	// The model is not asked again at once: askUntil backs off first.
+	if len(slept) != 1 || slept[0] != time.Second {
+		t.Fatalf("slept %v, want [1s]", slept)
 	}
 }
 
