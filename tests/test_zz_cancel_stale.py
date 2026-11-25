@@ -1,8 +1,10 @@
 """CI-cancel-stale-sha (#6529): trusted-base-rerun.yml's first step cancels waiting trusted-base attempts whose
 commit is no open PR's head. The step is pinned line by line in tests/test_trusted_base.py (RERUN_PIN); this
 runs it against a stub `gh` that answers each read from JSON with the step's own --jq expression.
+CI-cancel-stale-sha-fu (#6531): the step is continue-on-error, so a failed cancel step neither fails the job nor
+skips the rerun step; FailedCancel runs both steps under GitHub's step rule to show it.
 
-REQ: CI-cancel-stale-sha
+REQ: CI-cancel-stale-sha, CI-cancel-stale-sha-fu
 """
 import json
 import os
@@ -21,13 +23,22 @@ OLD, NEW, OTHER = "a" * 40, "b" * 40, "c" * 40
 LISTING = "repos/o/r/actions/workflows/trusted-base.yml/runs?event=pull_request_target&status={}&per_page=100"
 
 
+def steps(text=None):
+    """Each step of the job as (name, keys, script): keys are the step's `key: value` lines before `run: |`."""
+    lines = (text or WF.read_text()).split("\n")
+    heads = [j for j, l in enumerate(lines) if l.startswith("      - name: ")] + [len(lines)]
+    out = []
+    for i, end in zip(heads, heads[1:]):
+        start = next(j for j in range(i, end) if lines[j].strip() == "run: |") + 1
+        keys = {l.split(":", 1)[0].strip(): l.split(":", 1)[1].split(" #")[0].strip()
+                for l in lines[i + 1:start - 1] if l.startswith("        ") and not l.startswith("         ")}
+        out.append((lines[i][len("      - name: "):], keys, "\n".join(l[10:] for l in lines[start:end] if l.strip()) + "\n"))
+    return out
+
+
 def cancel_script():
     """The cancel step's `run:` block, as one bash script."""
-    lines = WF.read_text().split("\n")
-    i = lines.index(STEP)
-    start = next(j for j in range(i, len(lines)) if lines[j].strip() == "run: |") + 1
-    end = next(j for j in range(start, len(lines)) if lines[j].startswith("      - name:"))
-    return "\n".join(l[10:] for l in lines[start:end] if l.strip()) + "\n"
+    return next(s for n, _, s in steps() if "      - name: " + n == STEP)
 
 
 STUB = r'''import json, os, subprocess, sys
@@ -64,7 +75,7 @@ def run(rid, sha, status="queued", attempt=2, prs=(7,)):
             "pull_requests": [{"number": n} for n in prs]}
 
 
-class CancelStep(unittest.TestCase):
+class Harness(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -73,19 +84,23 @@ class CancelStep(unittest.TestCase):
         gh.write_text("#!%s\n%s" % (sys.executable, STUB))
         gh.chmod(0o755)
 
-    def sweep(self, heads, runs, **extra):
+    def sweep(self, heads, runs, script=None, summary=None, **extra):
         state = {"prs": [{"number": n, "head": {"sha": s}} for n, s in heads.items()], "runs": runs, **extra}
         pathlib.Path(self.tmp, "state.json").write_text(json.dumps(state))
         calls = pathlib.Path(self.tmp, "calls")
         if calls.exists():
             calls.unlink()
         env = {**os.environ, "PATH": os.path.join(self.tmp, "bin") + os.pathsep + os.environ["PATH"],
-               "STUB": self.tmp, "REPO": "o/r", "GITHUB_STEP_SUMMARY": os.path.join(self.tmp, "summary")}
-        r = subprocess.run(["bash", "-eo", "pipefail", "-c", cancel_script()], env=env, capture_output=True, text=True)
+               "STUB": self.tmp, "REPO": "o/r", "GITHUB_STEP_SUMMARY": summary or os.path.join(self.tmp, "summary"),
+               "GITHUB_RUN_ID": "99", "GITHUB_SHA": NEW}
+        r = subprocess.run(["bash", "-eo", "pipefail", "-c", script or cancel_script()], env=env, capture_output=True,
+                           text=True)
         self.calls = [json.loads(l) for l in calls.read_text().splitlines()] if calls.exists() else []
         cancelled = [int(c[3].split("/")[-2]) for c in self.calls if c[1:3] == ["-X", "POST"]]
         return r.returncode, r.stdout + r.stderr, cancelled
 
+
+class CancelStep(Harness):
     def test_only_waiting_attempts_on_an_old_sha_are_cancelled(self):
         # #7 moved OLD -> NEW: OLD's attempt 1 pending, attempt 2 queued; NEW's attempts 1 and 3 waiting.
         runs = [run(1, OLD, "pending", 1), run(2, OLD), run(11, NEW, attempt=1), run(12, NEW, "pending", 3),
@@ -175,6 +190,67 @@ class CancelStep(unittest.TestCase):
             want = [r["id"] for s in ("queued", "pending") for r in runs if r["status"] == s and r["pull_requests"]
                     and r["head_sha"] not in heads.values() and all(p["number"] in heads for p in r["pull_requests"])]
             self.assertEqual(cancelled, want)
+
+
+class FailedCancel(Harness):
+    """GitHub's step rule: after a failed step, a later step with no `if:` is skipped unless the failed step is
+    continue-on-error, and a continue-on-error step's failure does not fail the job."""
+
+    def job(self, heads, runs, broken_summary=False, text=None, **extra):
+        """Run every step in order under that rule; return (job failed, per-step (name, ran, code), cancelled)."""
+        failed, record, cancelled, calls = False, [], [], []
+        for i, (name, keys, script) in enumerate(steps(text)):
+            self.assertNotIn("if", keys, name)  # no step overrides the rule
+            if failed:
+                record.append((name, False, None))
+                continue
+            summary = os.path.join(self.tmp, f"summary-{i}")
+            if broken_summary and i == 0:
+                os.makedirs(summary, exist_ok=True)  # the step's summary cannot be written: the step fails
+            code, out, done = self.sweep(heads, runs, script=script, summary=summary, **extra)
+            cancelled += done
+            calls += self.calls
+            record.append((name, True, code))
+            if code != 0 and keys.get("continue-on-error") != "true":
+                failed = True
+        self.calls = calls
+        return failed, record, cancelled
+
+    def test_only_the_cancel_step_is_continue_on_error(self):
+        flags = [keys.get("continue-on-error") for _, keys, _ in steps()]
+        self.assertEqual(flags, ["true", None])
+
+    def test_a_failed_cancel_step_runs_the_reruns_and_cancels_nothing(self):
+        # Nothing is stale; the cancel step still fails (its summary write), and the rerun step runs after it.
+        failed, record, cancelled = self.job({7: NEW}, [run(1, NEW), run(2, NEW, "pending", 1)], broken_summary=True)
+        self.assertEqual(record[0][1:], (True, 1), record)
+        self.assertTrue(record[1][1], record)
+        self.assertEqual(cancelled, [])
+        rerun_reads = [c for c in self.calls if "repos/o/r/pulls?state=open&base=main&per_page=100" in c]
+        self.assertTrue(rerun_reads, self.calls)
+        # the stub has no answer for the rerun step's reads, so it fails; that failure, not the cancel's, is the job's
+        self.assertEqual(record[1][2], 1, record)
+        self.assertTrue(failed)
+        # with a stale run beside them, only the stale one is cancelled before the failure, and the reruns follow
+        runs = [run(1, NEW), run(2, NEW, "pending", 1), run(3, OLD, "pending", 1)]
+        failed, record, cancelled = self.job({7: NEW}, runs, broken_summary=True)
+        self.assertEqual((record[0][1:], record[1][1], cancelled), ((True, 1), True, [3]), record)
+
+    def test_failed_reads_cancel_nothing_and_the_reruns_follow(self):
+        for fail in (LISTING.format("queued"), LISTING.format("pending"), "repos/o/r/pulls?state=open&per_page=100",
+                     "repos/o/r/actions/runs/1"):
+            failed, record, cancelled = self.job({7: NEW}, [run(1, OLD)], fail=[fail])
+            self.assertEqual((record[0][1:], cancelled), ((True, 0), []), fail)
+            self.assertTrue(record[1][1], fail)
+
+    def test_without_continue_on_error_the_reruns_would_be_skipped(self):
+        # The rule the job relies on: drop the flag and a failed cancel step skips the rerun step.
+        text = WF.read_text()
+        flag = "        continue-on-error: true # a failed cancel never fails the job or skips the reruns below\n"
+        self.assertIn(flag, text)
+        failed, record, _ = self.job({7: NEW}, [run(1, NEW)], broken_summary=True, text=text.replace(flag, ""))
+        self.assertTrue(failed)
+        self.assertEqual(record[1][1], False, record)
 
 
 class Grouping(unittest.TestCase):
