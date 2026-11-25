@@ -46,6 +46,8 @@ case "$cwd" in
 "$WORK" | "$WORK"/*) ;;
 *) refuse "working directory $cwd is outside $WORK" ;;
 esac
+# Without bwrap every tool call would end in a bare exit 127 that does not say why.
+[ -x "$BWRAP" ] || refuse "bwrap missing at $BWRAP"
 
 hide=(--tmpfs /run --tmpfs /tmp --tmpfs /var/tmp)
 if [ -d "$CODEX_HOME" ]; then

@@ -112,22 +112,44 @@ type Sig struct {
 	Pass bool
 }
 
+// dkimSigMax bounds the DKIM-Signatures VerifyDKIM evaluates for one message
+// (#6422); a var for tests.
+var dkimSigMax = 4
+
+// bodyHash is the SHA-256 of body's relaxed form cut to limit; a var so tests
+// count its calls.
+var bodyHash = func(body []byte, limit int) [32]byte { return sha256.Sum256(relaxedBody(body, limit)) }
+
 // VerifyDKIM checks every DKIM-Signature of raw (RFC 6376: rsa-sha256,
 // relaxed/relaxed). keys maps "<s>._domainkey.<d>", d in A-labels, to a key
-// record's base64 p=.
+// record's base64 p=. A message with more than dkimSigMax signatures fails
+// closed: none is evaluated, and each reads as an absent, failing signature.
+// Otherwise the body is hashed once per l= value, so the work is bounded by
+// the message, not by how many signatures it repeats.
 func VerifyDKIM(raw []byte, keys map[string]string) []Sig {
 	hs, body := splitMessage(raw)
-	var out []Sig
+	var vs [][]byte
 	for _, h := range hs {
-		if h.key() != "dkim-signature" {
-			continue
+		if h.key() == "dkim-signature" {
+			vs = append(vs, h.value)
 		}
-		out = append(out, verifyOne(hs, body, h.value, keys))
+	}
+	out := make([]Sig, len(vs))
+	bhs := map[int]string{}
+	for i, v := range vs {
+		if len(vs) > dkimSigMax {
+			out[i] = Sig{T: -1, X: -1}
+		} else {
+			out[i] = verifyOne(hs, body, v, keys, bhs)
+		}
 	}
 	return out
 }
 
-func verifyOne(hs []header, body, value []byte, keys map[string]string) Sig {
+// verifyOne checks one signature's tags value. bhs holds the base64 body
+// hashes this message has computed, keyed by limit; the canonicalization is
+// always relaxed, so limit alone is the (canonicalization, l=) pair.
+func verifyOne(hs []header, body, value []byte, keys map[string]string, bhs map[int]string) Sig {
 	r := Sig{T: -1, X: -1}
 	t := sigTags(value)
 	r.D = strings.ToLower(t["d"])
@@ -162,8 +184,13 @@ func verifyOne(hs []header, body, value []byte, keys map[string]string) Sig {
 	if n, err := strconv.Atoi(l); hasL && err == nil && n >= 0 {
 		limit = n
 	}
-	bh := sha256.Sum256(relaxedBody(body, limit))
-	if base64.StdEncoding.EncodeToString(bh[:]) != t["bh"] {
+	bh, done := bhs[limit]
+	if !done {
+		sum := bodyHash(body, limit)
+		bh = base64.StdEncoding.EncodeToString(sum[:])
+		bhs[limit] = bh
+	}
+	if bh != t["bh"] {
 		return r
 	}
 	// An absent key reads as "", which parses as no key.
