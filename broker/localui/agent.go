@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/bridgeclient"
@@ -37,7 +38,39 @@ type Socket struct{ Path string }
 func (s Socket) Call(ctx context.Context, op string, args, out any) error {
 	err := bridgeclient.Client{Path: s.Path}.Call(ctx, op, args, out)
 	if errors.Is(err, bridgeclient.ErrRefused) {
-		return Refused(strings.TrimPrefix(err.Error(), "bridgeclient: "))
+		err = Refused(strings.TrimPrefix(err.Error(), "bridgeclient: "))
+	}
+	return note(ctx, err)
+}
+
+// answers is what agentosd answered one page request (PAGE-stopping-text):
+// whether a call was refused because agentosd is stopping, and whether a
+// call before that refusal may have taken effect. ServeHTTP reads it once
+// the handler returns.
+type answers struct {
+	mu       sync.Mutex
+	stopping bool
+	partway  bool
+}
+
+type answersKey struct{}
+
+// note records err in the request's answers, if ctx carries them, and
+// returns it. A call that returned, or failed other than by a refusal
+// code, may have taken effect; a refused one did not.
+func note(ctx context.Context, err error) error {
+	a, _ := ctx.Value(answersKey{}).(*answers)
+	if a == nil {
+		return err
+	}
+	var r Refused
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch {
+	case refused(err, localapi.ErrStopping):
+		a.stopping = true
+	case !a.stopping && !errors.As(err, &r):
+		a.partway = true
 	}
 	return err
 }
@@ -49,6 +82,10 @@ type InProcess map[string]sockets.Handler
 
 // Call runs op's handler.
 func (p InProcess) Call(ctx context.Context, op string, args, out any) error {
+	return note(ctx, p.call(ctx, op, args, out))
+}
+
+func (p InProcess) call(ctx context.Context, op string, args, out any) error {
 	h := p[op]
 	if h == nil {
 		return Refused(sockets.ErrUnknownOp)

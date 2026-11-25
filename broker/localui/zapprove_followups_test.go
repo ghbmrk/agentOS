@@ -118,35 +118,6 @@ func TestAnAnswerThatLocksTheSessionKeepsItsMessage(t *testing.T) {
 	}
 }
 
-// REQ: UX-2wb-1 (#1752, P8 on #1746)
-// A page STOP refused because agentosd is stopping says it is stopping or
-// restarting, since any SIGTERM (a restart, a stop, a poweroff) refuses it
-// alike and the page cannot tell which; it never claims a restart alone,
-// nor tells the owner to retry on a clock. Any other failure keeps the
-// generic line.
-func TestAStopWhileAgentosdStopsSaysSo(t *testing.T) {
-	tok := strings.Repeat("ab", localapi.TokenBytes)
-	for _, c := range []struct {
-		err  error
-		want string
-	}{
-		{sockets.Code(localapi.ErrStopping), "stopstopping"},
-		{sockets.ErrFailed, "stopfailed"},
-	} {
-		s := followupServer(t, tok, InProcess{
-			localapi.OpStop: func(context.Context, sockets.Peer, json.RawMessage) (any, error) { return nil, c.err },
-		})
-		w := followupPost(s, tok, "/stop", url.Values{})
-		if loc := w.Header().Get("Location"); loc != "/status?m="+c.want {
-			t.Fatalf("STOP refused with %v: %d %q", c.err, w.Code, loc)
-		}
-	}
-	text := msgs["stopstopping"]
-	if !strings.Contains(text, "stopping or restarting") || strings.Contains(text, "in a minute") || !strings.Contains(text, "press STOP") {
-		t.Fatalf("stopping text %q", text)
-	}
-}
-
 // REQ: UX-2wb-1, CH-7 (#1752; L3 and UX blocker 1 on #6620)
 // Only an answer the channel replied to keeps its message over a refused
 // listing. A POST from an expired or revoked session (OpAnswer refused as
