@@ -109,12 +109,15 @@ const (
 // Lower is rung r after a voice check that heard rung v: never higher (D-153).
 func Lower(r, v Proof) Proof { return min(r, v) }
 
-// String is a rung's CH-3 name, for refusals and logs.
+// String is a rung in CH-3's own words, for refusals and logs. A refusal's
+// detail carries it into the log, where Rederive compares it byte for byte, so
+// a rename needs a log migration (ASSUMPTIONS.md, OWN-rung-names). A number
+// CH-3 has no rung for prints as unknown, with the number.
 func (p Proof) String() string {
 	if p <= PRecovery {
-		return [...]string{"P0", "P1", "P2", "P3", "P3Local", "P4", "PRecovery"}[p]
+		return [...]string{"P0", "P1", "P2", "P3", "P3 with local confirmation", "P4", "the recovery key"}[p]
 	}
-	return fmt.Sprintf("Proof(%d)", uint8(p))
+	return fmt.Sprintf("unknown rung %d", uint8(p))
 }
 
 // Caveat is one typed predicate. Which fields count depends on Kind: Set for
