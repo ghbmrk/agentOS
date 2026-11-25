@@ -223,3 +223,52 @@ func TestAccountPlanSetUpRefusesUndeclaredLink(t *testing.T) {
 		t.Fatalf("no Connect step:\n%s", p)
 	}
 }
+
+// REQ: NET-2, CLK-14
+
+// TestAccountPlanShowsDailyBytesBeforeSetUp (#6145 acceptance 2): an item
+// whose declaration names destinations shows each with the daily figure the
+// table states, and the line that Set up confirms them, inside the item's
+// card and before its Set up button; an item that declares none shows no
+// figure. The figures are the embedded table's, read by ID: the clerk's
+// answer carries none.
+func TestAccountPlanShowsDailyBytesBeforeSetUp(t *testing.T) {
+	r, _ := accountPlanRig(t, GmailConnect)
+	r.signIn()
+	p := html.UnescapeString(r.get("/account-plan/"))
+	tbl, err := accounts.Known()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gmail, _ := tbl.Entry("gmail")
+	if len(gmail.Sends) == 0 {
+		t.Fatal("the shipped Gmail entry declares no destination")
+	}
+	card := p[strings.Index(p, "<b>Gmail</b>"):]
+	card = card[:strings.Index(card, "</div>")]
+	setup := strings.Index(card, `value="setup"`)
+	for _, x := range gmail.Sends {
+		line := "Sends up to " + dailyBytes(x.DailyBytes) + " a day to " + x.Host + "."
+		if i := strings.Index(card, line); i < 0 || i > setup {
+			t.Fatalf("Gmail's card lacks %q before Set up:\n%s", line, card)
+		}
+	}
+	if i := strings.Index(card, planConfirms); i < 0 || i > setup {
+		t.Fatalf("Gmail's card lacks the confirm line before Set up:\n%s", card)
+	}
+	if n := strings.Count(p, "Sends up to "); n != len(gmail.Sends) {
+		t.Fatalf("%d figure lines, want Gmail's %d only:\n%s", n, len(gmail.Sends), p)
+	}
+	if n := strings.Count(p, planConfirms); n != 1 {
+		t.Fatalf("%d confirm lines, want Gmail's only:\n%s", n, p)
+	}
+}
+
+func TestDailyBytesIsExact(t *testing.T) {
+	for n, want := range map[uint64]string{1: "1 byte", 1000: "1000 bytes", 1024: "1 KiB", 64 << 20: "64 MiB", 1<<20 + 1: "1048577 bytes",
+		3 << 30: "3 GiB", 1536 << 20: "1536 MiB", 1<<64 - 1: "18446744073709551615 bytes"} {
+		if got := dailyBytes(n); got != want {
+			t.Errorf("dailyBytes(%d) = %q, want %q", n, got, want)
+		}
+	}
+}

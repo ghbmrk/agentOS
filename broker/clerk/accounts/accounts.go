@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -67,6 +68,18 @@ type Entry struct {
 	AtHome    bool     `json:"at_home"`
 	Ongoing   bool     `json:"ongoing"`
 	ImpliedBy []string `json:"implied_by"`
+	Sends     []Send   `json:"sends"`
+}
+
+// Send is one internet destination the core reaches for an entry and the
+// daily bytes it sends there (CLK-14, NET-2 Byte caps). The table proposes
+// the figure; the owner confirms it by setting the account up on the plan,
+// whose screen shows it first; the enforcer's cap for Host is then exactly
+// it (Declared). A figure of zero, or none, is refused when the table
+// loads, so no destination reaches a signed cap without a stated figure.
+type Send struct {
+	Host       string `json:"host"`
+	DailyBytes uint64 `json:"daily_bytes"`
 }
 
 // SignInAllowed reports whether a sign-in may go to u: https, no user info
@@ -143,7 +156,7 @@ func under(d, p string) bool { return d == p || strings.HasSuffix(d, "."+p) }
 
 func validate(es []Entry) error {
 	ids := map[string]bool{}
-	var domains []string
+	var domains, hosts []string
 	for _, e := range es {
 		bad := func(why string) error { return fmt.Errorf("accounts: table: entry %q: %s", e.ID, why) }
 		switch {
@@ -179,6 +192,17 @@ func validate(es []Entry) error {
 				return bad("a sign-in host that is not a bare hostname: " + h)
 			}
 		}
+		for _, x := range e.Sends {
+			switch {
+			case !hostname(x.Host):
+				return bad("a destination that is not a bare hostname: " + x.Host)
+			case x.DailyBytes == 0:
+				return bad("a destination that states no daily bytes: " + x.Host)
+			case slices.Contains(hosts, x.Host):
+				return bad("a destination that sits in two entries or twice in one: " + x.Host)
+			}
+			hosts = append(hosts, x.Host)
+		}
 		for _, k := range e.ImpliedBy {
 			if !token.MatchString(k) {
 				return bad("a device kind outside [a-z0-9-]")
@@ -192,6 +216,37 @@ func validate(es []Entry) error {
 		}
 	}
 	return nil
+}
+
+// ErrNotInTable: Declared was given an id the table has no entry for.
+var ErrNotInTable = errors.New("accounts: not in the table")
+
+// Declared is the destinations the entries with ids declare, each with the
+// daily bytes its declaration states, in table order: the declared part of
+// enflist.Inputs for the accounts the owner has set up on the plan (CLK-14,
+// NET-2 Byte caps), each becoming an enflist.Dest with basis Declared. The
+// caller passes every account the owner confirmed, since Inputs is the
+// core's whole list and a destination left out is dropped; an id twice
+// counts once, and an id the table lacks is ErrNotInTable. The figures are
+// the embedded table's, the ones the plan's screen showed, never the mail
+// clerk's answer. The package does not import enflist, so that linking the
+// plan into agentosd and the mail clerk does not link the cap composer.
+func (t *Table) Declared(ids []string) ([]Send, error) {
+	if t == nil {
+		return nil, ErrNotInTable
+	}
+	for _, id := range ids {
+		if _, ok := t.Entry(id); !ok {
+			return nil, fmt.Errorf("%w: %s", ErrNotInTable, strconv.QuoteToASCII(id))
+		}
+	}
+	var out []Send
+	for _, e := range t.entries {
+		if slices.Contains(ids, e.ID) {
+			out = append(out, e.Sends...)
+		}
+	}
+	return out, nil
 }
 
 // Item is one line of the plan. Every string is the table's or a constant.

@@ -5,6 +5,7 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
 
 	"github.com/ghbmrk/agentos/broker/clerk/accounts"
@@ -30,7 +31,11 @@ const (
 	// planRefused is Set up on an item whose sign-in page the table does
 	// not declare: nothing is opened or recorded.
 	planRefused = "I can't connect that one from here: its sign-in page isn't one I know for it."
-	planFailed  = "I couldn't get the plan just now. I may still be reading who writes to you: open this page again in a minute."
+	// planConfirms stands beside Set up on an item that declares
+	// destinations: setting it up confirms their daily figures as the
+	// enforcer's caps (CLK-14, NET-2 Byte caps).
+	planConfirms = "Setting it up confirms these daily figures as its limits."
+	planFailed   = "I couldn't get the plan just now. I may still be reading who writes to you: open this page again in a minute."
 )
 
 // planReason is the owner's wording for the clerk's typed reason (clerk/run
@@ -80,6 +85,45 @@ type planRow struct {
 	localapi.AccountPlanItem
 	ShowLabel bool
 	State     string // "", "later" or "listed"
+	Sends     []planSend
+}
+
+// planSend is one destination an item declares and the daily figure its
+// set-up confirms (CLK-14, NET-2 Byte caps). It is read from the embedded
+// table by the item's ID, never from the clerk's answer, so the figure
+// shown is the one accounts.Table.Declared hands the cap's signing.
+type planSend struct {
+	Host, Figure string
+}
+
+// planSends is the destinations the table declares for id, each with its
+// daily figure in the owner's words.
+func planSends(t *accounts.Table, id string) []planSend {
+	if t == nil {
+		return nil
+	}
+	e, _ := t.Entry(id)
+	var out []planSend
+	for _, x := range e.Sends {
+		out = append(out, planSend{Host: x.Host, Figure: dailyBytes(x.DailyBytes)})
+	}
+	return out
+}
+
+// dailyBytes is n exactly, in the largest binary unit that divides it.
+func dailyBytes(n uint64) string {
+	for _, u := range []struct {
+		shift uint
+		name  string
+	}{{30, "GiB"}, {20, "MiB"}, {10, "KiB"}} {
+		if n >= 1<<u.shift && n%(1<<u.shift) == 0 {
+			return strconv.FormatUint(n>>u.shift, 10) + " " + u.name
+		}
+	}
+	if n == 1 {
+		return "1 byte"
+	}
+	return strconv.FormatUint(n, 10) + " bytes"
 }
 
 type planView struct {
@@ -88,6 +132,7 @@ type planView struct {
 	Reconnect   bool // the Accounts button: only reconnect is fixed there
 	Listed      string
 	Later       string
+	Confirms    string
 }
 
 // accountPlanPage serves /account-plan/ behind sign-in (CH-7): GET shows
@@ -110,7 +155,7 @@ func (s *Server) accountPlanPage(w http.ResponseWriter, r *http.Request) {
 	planner := s.cfg.Accounts.(AccountPlan)
 	ctx := r.Context()
 	p, ok := planner.Plan(ctx, cookieToken(r))
-	v := planView{Listed: planListed, Later: planLater}
+	v := planView{Listed: planListed, Later: planLater, Confirms: planConfirms}
 	switch {
 	case !ok:
 		v.Err = planFailed
@@ -152,8 +197,13 @@ func (s *Server) accountPlanPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if v.Reason == "" && ok {
+		// Known is nil on an error (a broken embedded table, which
+		// TestKnownTableLoadsAndValidates keeps from shipping): then no
+		// figure is shown, and accounts.Table.Declared signs none either.
+		t, _ := accounts.Known()
 		for _, it := range p.Items {
-			v.Rows = append(v.Rows, planRow{AccountPlanItem: it, ShowLabel: it.Source != string(accounts.Always), State: s.plan.get(it.ID)})
+			v.Rows = append(v.Rows, planRow{AccountPlanItem: it, ShowLabel: it.Source != string(accounts.Always), State: s.plan.get(it.ID),
+				Sends: planSends(t, it.ID)})
 		}
 	}
 	s.render(w, "accountplan", v)
@@ -194,9 +244,11 @@ func init() {
 {{range .Rows}}<div class="card">
 <p><b>{{.Name}}</b>{{if .Preselected}} <span class="muted">Suggested</span>{{end}}</p>
 {{if .ShowLabel}}<p class="muted">{{.Label}}</p>{{end}}{{with .Advice}}<p>{{.}}</p>{{end}}
-{{if .Connected}}<p class="ok">Connected.</p>
+{{range .Sends}}<p class="muted">Sends up to {{.Figure}} a day to {{.Host}}.</p>
+{{end}}{{if .Connected}}<p class="ok">Connected.</p>
 {{else if eq .State "listed"}}<p>{{$v.Listed}}</p>
 {{else}}{{if eq .State "later"}}<p class="muted">{{$v.Later}}</p>{{end}}
+{{if .Sends}}<p>{{$v.Confirms}}</p>{{end}}
 <form method="post" action="/account-plan/"><input type="hidden" name="id" value="{{.ID}}"><button name="choice" value="setup">Set up</button> <button class="plain" name="choice" value="later">Later</button></form>
 {{end}}</div>
 {{end}}
