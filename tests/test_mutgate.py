@@ -3651,6 +3651,32 @@ class MovedDecls(unittest.TestCase):
                 got, err = late(test, src, extra={"lib/lib.go": flags})
                 self.assertEqual(got, every)
                 self.assertRegex(err, rf"\(broker/hint/{where}")
+        # A dot import names them bare (L3 on #6686), and dot-imported flag or os names Set or Args bare.
+        dot = lambda body, path='"example.invalid/broker/lib"': imp('. ' + path, '"os"') + body
+        for name, test in (
+                ("init", dot('\nfunc init() {\n\tOn()\n}\n\nvar _ = os.Exit\n')),
+                ("var literal", dot('\nvar _ = func() int {\n\tOn()\n\treturn 0\n}()\n\nvar _ = os.Exit\n')),
+                ("TestMain", dot('\nfunc TestMain(m *testing.M) {\n\tOn()\n\tos.Exit(m.Run())\n}\n')),
+                ("flag", dot('\nfunc init() {\n\tSet("test.count", "2")\n}\n\nvar _ = os.Exit\n', '"flag"'))):
+            with self.subTest("dot import " + name):
+                got, err = late(test, extra={"lib/lib.go": flags})
+                self.assertEqual(got, (None, None) if name == "TestMain" else every)
+                self.assertRegex(err, r"\(broker/hint/hint_test\.go:\d+: (init|package var|TestMain)")
+        self.assertEqual(late(dot('\nfunc init() {\n\tPlain()\n}\n\nvar _ = os.Exit\n'), extra={"lib/lib.go": flags}), (only, ""))
+        # An import named otherwise than its last element, a dot-imported os/exec, and a module package
+        # with a name but no readable marks (Security on #6686).
+        golib = flags.replace("package lib\n", "package golib\n")
+        unread = 'package lib\n\nimport (\n\t"fmt"; "flag"\n)\n\nfunc On() { flag.Set(fmt.Sprint("test.count"), "2") }\n'
+        for name, test, extra in (
+                ("module package go-lib", imp('"example.invalid/broker/go-lib"') + '\nfunc init() {\n\tgolib.On()\n}\n', {"go-lib/lib.go": golib}),
+                ("lib/v2", imp('"github.com/x/lib/v2"') + '\nfunc init() {\n\tlib.On()\n}\n', {}),
+                ("go-lib", imp('"github.com/x/go-lib"') + '\nfunc init() {\n\tgolib.On()\n}\n', {}),
+                ("dot os/exec", imp('. "os/exec"') + '\nfunc init() {\n\tCommand("true").Run()\n}\n', {}),
+                ("module package not read", uses('\nfunc init() {\n\tlib.On()\n}\n'), {"lib/lib.go": unread})):
+            with self.subTest(name):
+                got, err = late(test, extra=extra)
+                self.assertEqual(got, every)
+                self.assertRegex(err, r"\(broker/hint/hint_test\.go:\d+: init\)")
         self.assertEqual(late(uses('\nfunc init() {\n\tlib.Plain()\n}\n'), extra={"lib/lib.go": flags}), (only, ""))
         unread = 'package lib\n\nimport (\n\t"fmt"; "os"\n)\n\nvar _, _ = fmt.Sprint, os.Exit\n'
         blank = TWO_SRC.replace("package hint\n", 'package hint\n\nimport _ "example.invalid/broker/lib"\n')

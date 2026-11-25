@@ -1543,6 +1543,7 @@ MAIN_HEAD = re.compile(r"func TestMain\(([A-Za-z_]\w*) \*testing\.M\) \{")
 # Security on #6677), and imports whose qualifier may: one in a TestMain, init or package var fails closed.
 ORDER_WORDS = {"shuffle", "linkname"}  # string contents too: "-test.shuffle=on"
 ORDER_PATHS = {"flag", "os/exec", "unsafe"}
+DOT_BARRED = {"flag", "os/exec", "unsafe", "os", "syscall", "golang.org/x/sys/unix"}
 ORDER_SELECTORS = {("os", "Args"), ("os", "Executable"), ("os", "StartProcess"), ("syscall", "Exec"),
                    ("syscall", "ForkExec"), ("syscall", "StartProcess"), ("golang.org/x/sys/unix", "Exec")}
 # A TestMain naming one of these may also run one m.Run() more than once (for, goto, func: a loop, a jump
@@ -1552,8 +1553,18 @@ LABEL = re.compile(r"^\s*[A-Za-z_]\w*\s*:(?!=)", re.M)  # a label (a `default:` 
 BRACKETS = {"(": ")", "[": "]", "{": "}"}
 
 
+CLAUSES = {}  # (path, module, commit): _clause's, cleared by moved() as OUTSIDE is
+
+
 def _clause(path, module, commit):
     """The package clause of this module's package at import path, or None when not read."""
+    if (path, module, commit) not in CLAUSES:
+        CLAUSES[(path, module, commit)] = _read_clause(path, module, commit)
+    return CLAUSES[(path, module, commit)]
+
+
+def _read_clause(path, module, commit):
+    """_clause, not memoized."""
     if not module or not (path == module or path.startswith(module + "/")):
         return None
     rel = path[len(module) + 1:] if path != module else ""
@@ -1636,7 +1647,7 @@ def _order_risk(files, facts, decls, clause, outside):
     """The first file:line of a package's .go files ({path: text}) that may change test flags or rerun or
     outlive a test (see above), or None. outside(import path) is _outside_marks'."""
     names = {n for ds in decls.values() for d in ds if d[1] != "header" for n in d[2]}
-    marked, refs = _marks(files, facts, decls, outside)
+    marked, refs = _marks(files, facts, decls, clause, outside)
     for p in sorted(files):
         f, text = facts[p], files[p]
         quals = {a or path.split("/")[-1] for a, path in f.specs if path in ORDER_PATHS}
@@ -1648,7 +1659,7 @@ def _order_risk(files, facts, decls, clause, outside):
             if d[1] == "func" and "TestMain" in d[2] and is_test(p):
                 std = _std_names(f.specs, clause)
                 m = MAIN_HEAD.fullmatch(head)
-                if (std is None or m is None or close is None or not _plain_main(
+                if (std is None or m is None or close is None or any(a == "." for a, _ in f.specs) or not _plain_main(
                         m[1], code[open_:close + 1], bare[open_:close + 1], names - {"TestMain"}, std)):
                     return f"{p}:{at}: TestMain"
         rows = bare.split("\n")
@@ -1658,20 +1669,20 @@ def _order_risk(files, facts, decls, clause, outside):
             what = f"{p}:{_decl_line(d, rows)}: " + ("package var" if d[1] == "var" else "init")
             if hit := refs[(p, i)] & marked.keys():
                 return f"{what} via {marked[min(hit)]}"
-            if _order_seed(d, quals, f.specs, _decl_text(bare, d), refs[(p, i)], outside):
+            if _order_seed(d, quals, f.specs, _decl_text(bare, d), refs[(p, i)], clause, outside):
                 return what
         if (go := _go_risk(f.specs, bare)) is not None:
             return f"{p}:{bare.count(chr(10), 0, go[0]) + 1}: {go[1]}"
     return None
 
 
-def _order_seed(d, quals, specs, bare, refs, outside):
+def _order_seed(d, quals, specs, bare, refs, clause, outside):
     """Whether a declaration (bare: its text, comments and literal contents blanked; refs: _refs') names
     ORDER_WORDS (string contents too), a qualifier of an ORDER_PATHS import, an ORDER_SELECTORS selector,
     or what another package marks (outside, _outside_marks): `lib.F` for its marked F, any `x.m` for a
     marked method m of a package the file imports, and any selector of a non-standard import not read
     (Security on #6686: `func init() { lib.Shuffle() }`)."""
-    paths = {a or path.split("/")[-1]: path for a, path in specs}
+    paths, unknown = _import_names(specs, clause)
     if d[4] & ORDER_WORDS or set(WORD.findall(bare)) & quals:  # a qualifier in a string is none (L3 on #6686)
         return True
     for q, w in re.findall(r"\b([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)", bare):
@@ -1679,10 +1690,37 @@ def _order_seed(d, quals, specs, bare, refs, outside):
             return True
         if q in paths and not _std(paths[q]) and ((got := outside(paths[q])) is None or ("", w) in got):
             return True
+        if q not in paths and unknown:
+            return True  # q may be an import whose name is not read (Security on #6686: `go-lib`, `lib/v2`)
     methods = set()
     for path in {p for p in paths.values() if not _std(p)}:
         methods |= {n for n in outside(path) or () if n[0] == "."}
+    # A dot import names its package's declarations bare (`On()`; L3 on #6686): one of a package whose
+    # names may change flags seeds; one of a module package seeds on a bare word it marks.
+    for path in (path for a, path in specs if a == "."):
+        if path in DOT_BARRED or not _std(path) and ((got := outside(path)) is None or refs & {n for n in got if n[0] == ""}):
+            return True
     return bool(refs & methods)
+
+
+def _import_names(specs, clause):
+    """({name: path} of a file's imports, whether one's name is not known): an alias; a standard path's
+    last element (the one before a `/vN`, as `math/rand/v2`'s rand); a module package's own clause; any
+    other path's name is not known, since its clause need not be its last element (`go-imap`, `lib/v2`)."""
+    out, unknown = {}, False
+    for alias, path in specs:
+        if alias in ("_", "."):
+            continue
+        parts = path.split("/")
+        if alias:
+            out[alias] = path
+        elif _std(path):
+            out[parts[-2] if len(parts) > 1 and re.fullmatch(r"v\d+", parts[-1]) else parts[-1]] = path
+        elif name := clause(path):
+            out[name] = path
+        else:
+            unknown = True
+    return out, unknown
 
 
 def _std(path):
@@ -1690,7 +1728,7 @@ def _std(path):
     return "." not in path.split("/")[0]
 
 
-def _marks(files, facts, decls, outside):
+def _marks(files, facts, decls, clause, outside):
     """(marked, refs): marked {(kind, name): file:line} of a package's declarations whose text may change
     test flags (_order_seed), transitively by name; kind "." is a method's (named after a `.`), "" any
     other's (named bare). refs {(path, index): _refs} of each declaration."""
@@ -1698,7 +1736,7 @@ def _marks(files, facts, decls, outside):
     for p in sorted(files):
         rows = _uncommented(files[p], False).split("\n")
         quals = {a or path.split("/")[-1] for a, path in facts[p].specs if path in ORDER_PATHS}
-        imports = {a or path.split("/")[-1] for a, path in facts[p].specs}
+        imports = set(_import_names(facts[p].specs, clause)[0])
         for i, d in enumerate(decls[p]):
             if d[1] != "header":
                 # A type or const runs no code: naming one runs nothing it declares (a method runs
@@ -1709,7 +1747,7 @@ def _marks(files, facts, decls, outside):
                 refs[(p, i)] = _refs(text, imports)
                 if d[1] in ("type", "const"):
                     own[(p, i)] = set()
-                elif _order_seed(d, quals, facts[p].specs, text, refs[(p, i)], outside):
+                elif _order_seed(d, quals, facts[p].specs, text, refs[(p, i)], clause, outside):
                     for n in own[(p, i)]:
                         marked.setdefault(n, f"{p}:{_decl_line(d, rows)}")
     grew = True
@@ -1744,7 +1782,8 @@ def _outside_marks(path, module, commit):
     if any(f.specs is None for f in facts.values()):
         return None
     decls = {p: _decls(p, t) for p, t in files.items()}
-    OUTSIDE[key] = frozenset(_marks(files, facts, decls, lambda q: _outside_marks(q, module, commit))[0])
+    OUTSIDE[key] = frozenset(_marks(files, facts, decls, lambda q: _clause(q, module, commit),
+                                    lambda q: _outside_marks(q, module, commit))[0])
     return OUTSIDE[key]
 
 
@@ -1969,6 +2008,7 @@ def moved(diff_text, mb, head):
     tests, btests = added_lines(diff_text)[1], base_test_lines(diff_text)[0]
     now, then, later_now, later_then, reads = {}, {}, {}, {}, {}
     OUTSIDE.clear()  # keyed by commit names such as HEAD, which only this call's tree fixes
+    CLAUSES.clear()
     module = (m := re.search(r"^module\s+(\S+)", base_text(head, "broker/go.mod") or "", re.M)) and m[1]
     for pkg in sorted({package_of(p) for p in [*tests, *btests] if is_test(p)} - {None}):
         b, h = _side(pkg, mb, module), _side(pkg, head, module)
