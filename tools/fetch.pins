@@ -1,6 +1,6 @@
 # Pinned downloads that CI and the build scripts fetch through tools/pins.py (CI-pin-liveness,
 # #6424). Each line: SHA-256, name, source (format: tools/pins.py). pin-liveness.yml downloads every
-# source weekly and fails naming any that stops serving its pinned bytes.
+# source daily and fails naming any that stops serving its pinned bytes.
 #
 # TLC, the TLA+ model checker formal.yml runs; broker/kernel/formal/vectors.py refuses any other jar
 # (its JAR_SHA256 equals this, tests/test_pins.py).
