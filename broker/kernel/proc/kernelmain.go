@@ -3,8 +3,6 @@ package proc
 import (
 	"bytes"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/ed25519"
 	"encoding/binary"
 	"errors"
@@ -24,7 +22,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
-	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/procguard"
 )
 
@@ -100,10 +97,6 @@ var ErrNoAuthority = errors.New("run: my store holds no page authority, so I cer
 // restored from a backup, which carries it (CH-9, BAK-1).
 var ErrPageRestore = errors.New("run: I am claimed but hold no page authority; restore me from a backup")
 
-// maxPageKey bounds a page key to certify: a P-256 key in PKIX DER is 91
-// bytes.
-const maxPageKey = 128
-
 // Certified is the certify call's answer: the page's serving certificate
 // and the authority's, both DER.
 type Certified struct {
@@ -124,9 +117,6 @@ func (h *Kernel) Certify(now int64, pub []byte) (Certified, error) {
 			return Certified{}, ErrPageRestore
 		}
 		return Certified{}, ErrNoAuthority
-	}
-	if len(pub) == 0 || len(pub) > maxPageKey {
-		return Certified{}, pageca.ErrKey
 	}
 	leaf, err := h.page.Issue(pub, time.UnixMilli(now), nil)
 	if err != nil {
@@ -222,10 +212,9 @@ func cardID(card []byte) (string, error) {
 	if len(card) != handoff.MadeCardLen {
 		return "", handoff.ErrHandoff
 	}
-	rec, err := handoff.StoreRecoveryKey(card[:handoff.CardKeyLen])
-	if err != nil {
-		return "", err
-	}
+	// It fails only for another length than CardKeyLen; RecipientFor
+	// refuses the nil key that would leave.
+	rec, _ := handoff.StoreRecoveryKey(card[:handoff.CardKeyLen])
 	defer clear(rec)
 	r, err := backup.RecipientFor(rec)
 	return r.ID(), err
@@ -283,10 +272,8 @@ func CheckerPin(clerks map[string]KeyClerk, root *[clerkkey.Len]byte) (ed25519.P
 	if _, ok := clerks[handoff.CheckerName]; !ok {
 		return nil, nil
 	}
-	k, err := clerkkey.Derive(root, handoff.CheckerName)
-	if err != nil {
-		return nil, err
-	}
+	// A zero root derives the nameless Key{}, whose Signer refuses.
+	k, _ := clerkkey.Derive(root, handoff.CheckerName)
 	sign, err := k.Signer()
 	k.Wipe()
 	if err != nil {
@@ -345,10 +332,8 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	if moved {
 		first = nil
 	}
-	checker, err := CheckerPin(cfg.ClerkKeys, keys.ClerkRoot.Ref())
-	if err != nil {
-		return err
-	}
+	// It fails only for a zero root, refused above.
+	checker, _ := CheckerPin(cfg.ClerkKeys, keys.ClerkRoot.Ref())
 	// The kernel reads kernelSource at each decision; OpenKernel floors it at the
 	// log and carries it on the monotonic clock (onLog): it never goes back (TIM-1, #5147).
 	clock := func() int64 { return time.Now().UnixMilli() }
@@ -358,7 +343,7 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 		Anchors: keys.Anchors, Clerks: cfg.Clerks, KeyDir: cfg.KeyDir,
 		ContentDir: cfg.ContentDir, Stores: slices.Sorted(maps.Keys(cfg.Content)),
 		BackupDir: cfg.BackupDir, Recipient: keys.Recipient, PageCA: keys.PageCA.Get(),
-		FirstEdge: first, LinkKey: keys.LinkKey.Get(), Checker: checker, Clock: kernelSource(cfg),
+		FirstEdge: first, LinkKey: keys.LinkKey.Get(), Checker: checker, Source: kernelSource(cfg),
 	}, clock())
 	if err != nil {
 		return err
@@ -385,28 +370,26 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 		sides = append(sides, served{r.Socket, r.UID, ContentSide(store)})
 	}
 	errs := make(chan error, len(sides)+len(cfg.ClerkKeys))
-	if len(cfg.ClerkKeys) > 0 {
-		root := keys.ClerkRoot.Get() // the kernel's copy, for its whole life
-		// Cleared only once every key socket's server, and so every
-		// hand-off, has returned; the listeners close first (defers run
-		// last-in, first-out).
-		var serving sync.WaitGroup
-		defer func() {
-			serving.Wait()
-			clear(root[:])
-		}()
-		for name, kc := range cfg.ClerkKeys {
-			ln, err := ListenClerkKey(kc.Socket)
-			if err != nil {
-				return err
-			}
-			defer ln.Close()
-			serving.Add(1)
-			go func() {
-				defer serving.Done()
-				errs <- fmt.Errorf("run: clerk %s's key socket: %w", name, ServeClerkKey(ln, name, kc.Cgroup, &root))
-			}()
+	root := keys.ClerkRoot.Get() // the kernel's copy, for its whole life
+	// Cleared only once every key socket's server, and so every hand-off,
+	// has returned; the listeners close first (defers run last-in,
+	// first-out).
+	var serving sync.WaitGroup
+	defer func() {
+		serving.Wait()
+		clear(root[:])
+	}()
+	for name, kc := range cfg.ClerkKeys {
+		ln, err := listenClerkKey(kc.Socket)
+		if err != nil {
+			return err
 		}
+		defer ln.Close()
+		serving.Add(1)
+		go func() {
+			defer serving.Done()
+			errs <- fmt.Errorf("run: clerk %s's key socket: %w", name, ServeClerkKey(ln, name, kc.Cgroup, &root))
+		}()
 	}
 	for _, s := range sides {
 		ln, err := ListenKernel(s.path, s.uid)
@@ -423,8 +406,7 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	if every <= 0 {
 		every = time.Second
 	}
-	t := time.NewTicker(every)
-	defer t.Stop()
+	t := time.NewTicker(every) // unreferenced once RunKernel returns, so collected (Go 1.23)
 	for {
 		select {
 		case <-ctx.Done():
@@ -438,6 +420,9 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 		}
 	}
 }
+
+// listenClerkKey is ListenClerkKey, or a test's.
+var listenClerkKey = ListenClerkKey
 
 // checkLogKey refuses a log whose first whole frame does not open under
 // key. kernel.Open trims a final frame it cannot open as torn, so a log of
@@ -459,30 +444,14 @@ func checkLogKey(path string, key [32]byte) error {
 	if _, err := io.ReadFull(f, n[:]); err != nil {
 		return nil // empty, or a torn length
 	}
-	fi, err := f.Stat()
-	if err != nil {
-		return err
-	}
+	// A frame the file does not hold whole is torn; ReadAll's growth is
+	// bounded by what the file holds, not by the length it claims.
 	size := int64(binary.BigEndian.Uint32(n[:]))
-	if 4+size > fi.Size() {
-		return nil // a torn first frame
+	fr, err := io.ReadAll(io.LimitReader(f, size))
+	if err != nil || int64(len(fr)) < size {
+		return err // a torn first frame, nil
 	}
-	fr := make([]byte, size)
-	if _, err := io.ReadFull(f, fr); err != nil {
-		return err
-	}
-	b, err := aes.NewCipher(key[:])
-	if err != nil {
-		return err
-	}
-	a, err := cipher.NewGCM(b)
-	if err != nil {
-		return err
-	}
-	if len(fr) < a.NonceSize()+a.Overhead() {
-		return ErrLogKey
-	}
-	pt, err := a.Open(nil, fr[:a.NonceSize()], fr[a.NonceSize():], binary.BigEndian.AppendUint64(nil, 1))
+	pt, err := sealer(key).Open(nil, nil, fr, binary.BigEndian.AppendUint64(nil, 1))
 	clear(pt)
 	if err != nil {
 		return ErrLogKey
@@ -501,4 +470,4 @@ func startReport(r kernel.ContentReport, unlogged []string) string {
 }
 
 // kernelSource is the kernel's TIM-1 source: chronyd at cfg.Chrony (#5391), else the box clock alone.
-func kernelSource(cfg MainConfig) kernel.Clock { return NewChrony(cfg.Chrony, cfg.ChronyReply).Read }
+func kernelSource(cfg MainConfig) Source { return NewChrony(cfg.Chrony, cfg.ChronyReply).Sample }

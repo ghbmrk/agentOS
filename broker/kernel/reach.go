@@ -49,9 +49,18 @@ func (k *Kernel) DeclareReach(at int64, d DeclReach) error {
 	return err
 }
 
-// DeclReach is what the log declared, for a writer sending only additions.
-func (s *State) DeclReach() DeclReach {
-	return DeclReach{slices.Collect(maps.Values(s.decl.nodes)), s.decl.edges}
+// DeclReach is a copy of what the log declared, for a writer sending only
+// additions: editing it leaves the fold, so no price, unchanged.
+func (s *State) DeclReach() (d DeclReach) {
+	for _, n := range s.decl.nodes {
+		n.Classes = slices.Clone(n.Classes)
+		d.Nodes = append(d.Nodes, n)
+	}
+	for _, e := range s.decl.edges {
+		e.From = slices.Clone(e.From)
+		d.Edges = append(d.Edges, e)
+	}
+	return d
 }
 
 // applyDecl folds a decl.reach entry, or drops it whole if declOK refuses.

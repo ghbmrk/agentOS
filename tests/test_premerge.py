@@ -2,6 +2,7 @@
 
 No requirement IDs: PLAN.md tooling, not SPEC.md behaviour. All data is synthetic.
 """
+import os
 import pathlib
 import re
 import subprocess
@@ -13,6 +14,7 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import premerge  # noqa: E402
+import ci_scope  # noqa: E402
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
 
@@ -247,6 +249,47 @@ class PremergeTest(unittest.TestCase):
         subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "main"],
                        cwd=self.r, capture_output=True)
         self.write("x_allow.txt", "# h\nallow a\nallow m\nallow p why\nallow q why\n")
+        self.commit("resolved")
+        self.assertEqual(self.check(reviewed), ["x_allow.txt"])
+
+    def test_an_allowlist_line_both_sides_added_may_be_kept_once(self):
+        # #6375: tools/record_merge.py keeps a line both sides appended once; one copy or two reads same, a third
+        # copy or a dropped line reads changed.
+        for text, want in (("# h\na\ns\nm\n", []), ("# h\na\ns\nm\ns\n", []), ("# h\na\ns\ns\ns\nm\n", ["x_allow.txt"]),
+                           ("# h\na\nm\n", ["x_allow.txt"]), ("# h\na\ns\n", ["x_allow.txt"])):
+            with self.subTest(text=text):
+                self.setUp()
+                git(self.r, "checkout", "-q", "main")
+                self.write("x_allow.txt", "# h\na\n")
+                self.commit("allow")
+                git(self.r, "checkout", "-q", "-b", "pr")
+                self.write("x_allow.txt", "# h\na\ns\n")
+                reviewed = self.commit("pr")
+                git(self.r, "checkout", "-q", "main")
+                self.write("x_allow.txt", "# h\na\ns\nm\n")
+                self.commit("main")
+                git(self.r, "checkout", "-q", "pr")
+                subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "main"],
+                               cwd=self.r, capture_output=True)
+                self.write("x_allow.txt", text)
+                self.commit("resolved")
+                self.assertEqual(self.check(reviewed), want)
+
+    def test_a_sectioned_allowlist_is_no_order_free_list(self):
+        # #6418 Security: in a file with sections, a line kept in another section means something else.
+        git(self.r, "checkout", "-q", "main")
+        self.write("x_allow.txt", "[a]\nx\n[b]\ny\n")
+        self.commit("allow")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("x_allow.txt", "[a]\nx\np\n[b]\ny\n")
+        reviewed = self.commit("pr")
+        git(self.r, "checkout", "-q", "main")
+        self.write("x_allow.txt", "[a]\nx\nm\n[b]\ny\n")
+        self.commit("main")
+        git(self.r, "checkout", "-q", "pr")
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "main"],
+                       cwd=self.r, capture_output=True)
+        self.write("x_allow.txt", "[a]\nx\np\n[b]\ny\nm\n")
         self.commit("resolved")
         self.assertEqual(self.check(reviewed), ["x_allow.txt"])
 
@@ -497,6 +540,33 @@ class PremergeTest(unittest.TestCase):
         self.commit("drop the stale row")
         self.assertEqual(self.check(reviewed), [])
 
+    def test_a_union_merge_under_a_criss_cross_merge_base_is_changed(self):
+        # #6316 (the #6315 Security finding's ASSUMPTIONS.md twin): with two merge bases `_stale` read nothing, so a
+        # union that brought back a row the PR deleted read `same`, as the head or renumbered.
+        self.write(".gitattributes", "ASSUMPTIONS.md merge=union\n")
+        self.write("ASSUMPTIONS.md", self.UNION + "| L-1 | edge old |\n")
+        self.commit("assumptions")
+        for side in ("x", "y"):
+            git(self.r, "checkout", "-q", "-b", side, "main")
+            self.write(side + ".txt", side + "\n")
+            self.commit(side)
+        git(self.r, "checkout", "-q", "-b", "m1", "x"), git(self.r, "merge", "-q", "--no-edit", "y")
+        self.write("ASSUMPTIONS.md", self.UNION + "| B-1 | bak |\n| L-1 | edge old |\n")
+        main = self.commit("main adds a row above L-1")
+        git(self.r, "checkout", "-q", "-b", "pr", "y"), git(self.r, "merge", "-q", "--no-edit", "x")
+        self.write("ASSUMPTIONS.md", self.UNION)
+        reviewed = self.commit("pr deletes L-1")
+        self.assertEqual(len(git(self.r, "merge-base", "--all", reviewed, main).split()), 2)
+        git(self.r, "merge", "-q", "--no-edit", main)
+        self.assertIn("| L-1 | edge old |", self.read("ASSUMPTIONS.md"), "the union driver was meant to bring L-1 back")
+        self.assertEqual(premerge.compare(self.r, reviewed, "HEAD", main), ["ASSUMPTIONS.md"])
+        self.write("ASSUMPTIONS.md", self.read("ASSUMPTIONS.md").replace("| L-1 |", "| L-2 |"))
+        self.commit("renumber the brought-back row")
+        self.assertEqual(premerge.compare(self.r, reviewed, "HEAD", main), ["ASSUMPTIONS.md"])
+        self.write("ASSUMPTIONS.md", self.UNION + "| B-1 | bak |\n")
+        self.commit("drop the stale row")
+        self.assertEqual(premerge.compare(self.r, reviewed, "HEAD", main), ["ASSUMPTIONS.md"], "unknown stays changed")
+
     def test_a_union_merge_of_two_edits_to_one_row_is_changed_however_resolved(self):
         # Both sides edited L-1: no stale row, a real conflict, so every resolution owes a delta review.
         reviewed = self.union_merge("| L-1 | main edit |\n", "| L-1 | pr edit |\n")
@@ -506,6 +576,195 @@ class PremergeTest(unittest.TestCase):
                 self.write("ASSUMPTIONS.md", self.UNION + rows)
                 self.commit("pick one")
                 self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+
+    RECFILE = "broker/k/MUTANTS-EQUIVALENT"
+
+    @staticmethod
+    def entry(stmt, reason="proof", col=None):
+        """One synthetic MUTANTS-EQUIVALENT entry (tools/mutgate.py RECORD), keyed by `stmt`."""
+        import json
+        e = {"file": "k.go", "mutant": "STATEMENT_DELETION", "func": "F", "decl": "0" * 64, "stmt": [stmt], "at": 0,
+             "after": "x := 1", "occurrence": [1, 1], "reason": reason, "accepted": "#1"}
+        return json.dumps(e | ({"col": col} if col else {})) + "\n"
+
+    def records_merge(self, main, pr, base=""):
+        """#6272's shape: main and the PR each append entries to one MUTANTS-EQUIVALENT under the repository's own
+        .gitattributes; returns the reviewed head, with main merged into the PR by the union driver."""
+        git(self.r, "checkout", "-q", "main")
+        self.write(".gitattributes", (ROOT / ".gitattributes").read_text())
+        (self.r / "broker/k").mkdir(parents=True)
+        head = "# Mutant-equivalent proofs for broker/k.\n"
+        self.write(self.RECFILE, head + base)
+        self.commit("record")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write(self.RECFILE, head + pr)
+        reviewed = self.commit("pr appends")
+        self.merge_main_after(lambda: self.write(self.RECFILE, head + main))
+        return reviewed
+
+    def test_records_both_appended_merge_by_union_and_read_same(self):
+        # #6314: #6262 and #6272 both appended to one record; the add/add conflict's hand merge voided every accept.
+        a, m, p = self.entry("a()"), self.entry("m()"), self.entry("p()")
+        reviewed = self.records_merge(a + m, a + p, a)
+        self.assertEqual(self.read(self.RECFILE).count("\n"), 4, "the union driver was meant to keep both entries")
+        self.assertEqual(self.check(reviewed), [])
+        for rows in (a + m + p, a + p + m):
+            with self.subTest(order=rows):  # by hand, either side first: each side's own order kept
+                self.write(self.RECFILE, "# Mutant-equivalent proofs for broker/k.\n" + rows)
+                self.commit("resolve by hand")
+                self.assertEqual(self.check(reviewed), [])
+        self.write(self.RECFILE, "# Mutant-equivalent proofs for broker/k.\n" + m + a + p)  # main's own order broken
+        self.commit("reorder main's entries")
+        self.assertEqual(self.check(reviewed), [self.RECFILE])
+
+    def test_records_union_with_a_pr_entry_changed_dropped_or_reordered_is_changed(self):
+        a, b, m, p = self.entry("a()"), self.entry("b()"), self.entry("m()"), self.entry("p()")
+        reviewed = self.records_merge(a + b + m, a + b + p, a + b)
+        self.assertEqual(self.check(reviewed), [])
+        for rows in (a + b + m + self.entry("p()", "proof, edited"), a + b + m, b + a + p + m, a + b + p,
+                     a + b + p + m + self.entry("z()")):
+            with self.subTest(wrong=rows):  # PR entry edited, dropped, reordered; main's dropped; one added
+                self.write(self.RECFILE, "# Mutant-equivalent proofs for broker/k.\n" + rows)
+                self.commit("another resolution")
+                self.assertEqual(self.check(reviewed), [self.RECFILE])
+
+    def test_records_union_that_keeps_an_edited_entry_twice_is_changed(self):
+        # The PR rewrote a's proof next to main's append: the union keeps both copies, one key twice.
+        a, m = self.entry("a()"), self.entry("m()")
+        reviewed = self.records_merge(a + m, self.entry("a()", "proof, edited"), a)
+        self.assertEqual(self.read(self.RECFILE).count('"a()"'), 2, "the union driver was meant to keep both")
+        self.assertEqual(self.check(reviewed), [self.RECFILE])
+        self.write(self.RECFILE, "# Mutant-equivalent proofs for broker/k.\n" + self.entry("a()", "proof, edited") + m)
+        self.commit("drop the stale entry")
+        self.assertEqual(self.check(reviewed), [])
+
+    def test_records_union_that_brings_back_a_deleted_entry_is_changed(self):
+        # The PR killed a's mutant and deleted its entry; the union brings it back beside main's append.
+        a, m = self.entry("a()"), self.entry("m()")
+        reviewed = self.records_merge(a + m, "", a)
+        self.assertIn('"a()"', self.read(self.RECFILE), "the union driver was meant to keep a")
+        self.assertEqual(self.check(reviewed), [self.RECFILE])
+        self.write(self.RECFILE, "# Mutant-equivalent proofs for broker/k.\n" + m)
+        self.commit("drop the stale entry")
+        self.assertEqual(self.check(reviewed), [])
+
+    def test_records_both_appending_one_key_is_changed(self):
+        # Two PRs proved the same mutant: the union is clean but mutgate would read one site twice.
+        a = self.entry("a()")
+        reviewed = self.records_merge(self.entry("d()", "main's proof"), self.entry("d()", "pr's proof"))
+        self.assertEqual(self.check(reviewed), [self.RECFILE])
+        self.setUp()
+        reviewed = self.records_merge(a, self.entry("a()", col=3), "")  # another column is another key
+        self.assertEqual(self.check(reviewed), [])
+
+    def test_records_one_entry_both_sides_added_word_for_word_reads_same(self):
+        # #6358: #6265, #6279, #6321 and #6032 carried one proof; the later merge dropped its copy, a new head.
+        a, b, m, p, s = (self.entry(x) for x in ("a()", "b()", "m()", "p()", "s()"))
+        top = "# Mutant-equivalent proofs for broker/k.\n"
+        reviewed = self.records_merge(a + m + s, a + p + s + b, a)
+        self.assertEqual(self.read(self.RECFILE).count('"s()"'), 2, "the union driver was meant to keep both copies")
+        self.assertEqual(self.check(reviewed), [])
+        for rows in (a + p + s + b + m, a + p + b + m + s, a + m + s + p + b, a + p + s + b + m + s):
+            with self.subTest(same=rows):  # kept once in either side's place (record_merge.py), or twice
+                self.write(self.RECFILE, top + rows)
+                self.commit("resolve")
+                self.assertEqual(self.check(reviewed), [])
+        for rows in (a + p + b + m, a + b + p + s + m, a + p + s + b + m + self.entry("s()", "another proof")):
+            with self.subTest(changed=rows):  # the shared entry dropped; the PR's own order broken; one key twice
+                self.write(self.RECFILE, top + rows)
+                self.commit("resolve")
+                self.assertEqual(self.check(reviewed), [self.RECFILE])
+
+    def test_records_pr_proof_main_carries_dropped_by_the_main_merge_reads_same(self):
+        # REQ: PREMERGE-records-dropped-same. #6472: the PR's proof landed on main (another PR) and the main merge
+        # kept main's copy only: word for word (#6358's rule), or another proof of the one key (#6032, #6265,
+        # record_merge.py's "keep one proof"), in main's place. Keeping the PR's proof instead edits a main line.
+        a, m, p = self.entry("a()"), self.entry("m()"), self.entry("p()")
+        top = "# Mutant-equivalent proofs for broker/k.\n"
+        for mains in (self.entry("s()"), self.entry("s()", "main's proof")):
+            with self.subTest(main=mains):
+                self.setUp()
+                reviewed = self.records_merge(a + m + mains, a + p + self.entry("s()"), a)
+                self.write(self.RECFILE, top + a + m + mains + p)
+                self.commit("keep main's proof, drop this PR's copy")
+                self.assertEqual(self.check(reviewed), [])
+                self.write(self.RECFILE, top + a + p + m + mains)
+                self.commit("this PR's entries first")
+                self.assertEqual(self.check(reviewed), [])
+        for wrong in (a + m + p + self.entry("s()"), a + m + self.entry("s()", "main's proof, edited") + p,
+                      a + m + self.entry("s()", "main's proof"), a + m + p + self.entry("s()", col=3),
+                      a + p + m + self.entry("s()", "main's proof") + self.entry("s()")):
+            with self.subTest(changed=wrong):  # PR's proof kept over main's; main's edited; p dropped; another key
+                self.setUp()
+                reviewed = self.records_merge(a + m + self.entry("s()", "main's proof"), a + p + self.entry("s()"), a)
+                self.write(self.RECFILE, top + wrong)
+                self.commit("resolve")
+                self.assertEqual(self.check(reviewed), [self.RECFILE])
+
+    def test_records_pr_proof_dropped_with_no_copy_on_main_is_changed(self):
+        # REQ: PREMERGE-records-dropped-same. Main proves another key (another column): the drop leaves s unproven.
+        a, m, p = self.entry("a()"), self.entry("m()"), self.entry("p()")
+        top = "# Mutant-equivalent proofs for broker/k.\n"
+        for mains in (m, m + self.entry("s()", col=3)):
+            with self.subTest(main=mains):
+                self.setUp()
+                reviewed = self.records_merge(a + mains, a + p + self.entry("s()"), a)
+                self.write(self.RECFILE, top + a + mains + p)
+                self.commit("drop this PR's proof")
+                self.assertEqual(self.check(reviewed), [self.RECFILE])
+
+    def test_records_pr_proof_of_a_key_main_edited_is_changed(self):
+        # REQ: PREMERGE-records-dropped-same. The key was in the merge base: an edit on each side is a real
+        # conflict, so keeping main's edit over the PR's is no shrink.
+        a, s = self.entry("a()"), self.entry("s()")
+        reviewed = self.records_merge(a + self.entry("s()", "main's proof"), a + self.entry("s()", "pr's proof"), a + s)
+        self.write(self.RECFILE, "# Mutant-equivalent proofs for broker/k.\n" + a + self.entry("s()", "main's proof"))
+        self.commit("keep main's edit")
+        self.assertEqual(self.check(reviewed), [self.RECFILE])
+
+    def test_assumptions_one_row_both_sides_added_word_for_word_reads_same(self):
+        # #6358 for the other record file: the union keeps the row twice; one copy or two is one row.
+        reviewed = self.union_merge("| L-1 | edge old |\n| M-1 | main |\n| S-1 | shared |\n",
+                                    "| L-1 | edge old |\n| S-1 | shared |\n| P-1 | pr |\n")
+        self.assertEqual(self.read("ASSUMPTIONS.md").count("| S-1 | shared |"), 2)
+        self.assertEqual(self.check(reviewed), [])
+        text, row = self.read("ASSUMPTIONS.md"), "| S-1 | shared |\n"
+        once = text[:text.rindex(row)] + text[text.rindex(row) + len(row):]  # tools/record_merge.py's result
+        self.write("ASSUMPTIONS.md", once)
+        self.commit("keep the shared row once")
+        self.assertEqual(self.check(reviewed), [])
+        self.write("ASSUMPTIONS.md", once.replace(row, "| S-1 | shared, edited |\n"))
+        self.commit("edit it")
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+
+    def test_records_union_under_a_criss_cross_merge_base_is_changed(self):
+        # L3 on #6315: with two merge bases the exemption reads nothing, and a union that brought back an entry the
+        # PR deleted read `same` once the head equalled the replay.
+        a, b, c, d = (self.entry(s) for s in ("a()", "b()", "c()", "d()"))
+        head = "# Mutant-equivalent proofs for broker/k.\n"
+        self.write(".gitattributes", (ROOT / ".gitattributes").read_text())
+        (self.r / "broker/k").mkdir(parents=True)
+        self.write(self.RECFILE, head + a + b + c)
+        self.commit("record")
+        for side in ("x", "y"):
+            git(self.r, "checkout", "-q", "-b", side, "main")
+            self.write(side + ".txt", side + "\n")
+            self.commit(side)
+        git(self.r, "checkout", "-q", "-b", "m1", "x"), git(self.r, "merge", "-q", "--no-edit", "y")
+        self.write(self.RECFILE, head + a + b + c + d)
+        main = self.commit("main appends d")
+        git(self.r, "checkout", "-q", "-b", "pr", "y"), git(self.r, "merge", "-q", "--no-edit", "x")
+        self.write(self.RECFILE, head + a + b)
+        reviewed = self.commit("pr deletes c")
+        self.assertEqual(len(git(self.r, "merge-base", "--all", reviewed, main).split()), 2)
+        git(self.r, "merge", "-q", "--no-edit", main)
+        self.assertIn('"c()"', self.read(self.RECFILE), "the union driver was meant to bring c back")
+        self.assertEqual(premerge.compare(self.r, reviewed, "HEAD", main), [self.RECFILE])
+
+    def test_records_union_with_a_mode_flip_is_changed(self):
+        reviewed = self.records_merge(self.entry("m()"), self.entry("p()"))
+        self.chmod_commit(self.RECFILE)
+        self.assertEqual(self.check(reviewed), [self.RECFILE])
 
     def test_a_clean_merge_that_repeats_a_decision_id_is_changed(self):
         # No union driver: both sides add D-9 far apart, git merges cleanly, doclint would fail the head.
@@ -682,6 +941,8 @@ class PremergeTest(unittest.TestCase):
     def test_mark_press_merge_paths(self):
         for f in ("CLAUDE.md", "docs/OPERATING.md", ".claude/settings.json", ".github/workflows/ci.yml",
                   "tools/risk_tier.py", "tools/premerge.py", "tools/ci_scope.py", "tools/ci_scope_x.py",
+                  # #1875: ci_split decides which broker packages each race shard runs, so it is a gate file too.
+                  "tools/ci_split.py", "tools/ci_split_x.py",
                   "docs/LANES.md", "tools/trace.py", "tools/old_core.txt",
                   # KRN-2cap (#2935): the trusted core's budget and the tool that enforces it.
                   "tools/trusted_base.py", "tools/trusted_core.txt", "tools/ceilings.txt",
@@ -696,11 +957,64 @@ class PremergeTest(unittest.TestCase):
         # The other gate tests stay as narrowed on Mark's "Narrow only" (2026-10-16).
         for f in ("tools/records.py", "reviews/l3/2026-10-15-pr1.md", "README.md", "docs/OTHER.md", "src/claude/x.go",
                   "reviews/README.md", "reviews/a/b/README.md", "tests/x/test_premerge.py", "tests/test_risk_tier.py",
-                  "tests/test_ci_scope.py", "tests/test_workflows.py", "tests/test_merge_queue.py",
+                  "tests/test_ci_scope.py", "tests/test_ci_split.py", "tests/test_workflows.py", "tests/test_merge_queue.py",
                   "tests/test_lane.py", "tools/trusted_base_parsers.txt", "tests/test_trusted_base.py",
                   "tools/mutgate.pyc", "tools/x/mutgate.py", "tests/test_mutgate.py",
                   "tools/claims.pyc", "tools/x/claims.py", "tests/test_claims.py"):
             self.assertEqual(premerge.mark_paths([f]), [], f)
+
+    def test_a_module_a_gate_tool_imports_is_a_gate_file_with_its_tests(self):
+        # #6418 Security: premerge decides `same` with tools/record_merge.py, which no hand list named.
+        for f in ("tools/record_merge.py", "tests/test_record_merge.py"):
+            self.assertEqual(premerge.mark_paths([f]), [f], f)
+        for f in ("tools/record_merge.pyc", "tools/x/record_merge.py", "tools/record_merge.py\n", "tools/doclint.py"):
+            self.assertEqual(premerge.mark_paths([f]), [], repr(f))
+        with tempfile.TemporaryDirectory() as d:
+            for name, text in {"g.py": "import a\nfrom b import x\nP = 'c.py'\n", "a.py": "import d, os\n", "b.py": "",
+                               "c.py": "", "d.py": "", "e.py": "", "h.py": "import g\n"}.items():
+                pathlib.Path(d, name).write_text(text)
+            self.assertEqual(premerge.gate_modules(pathlib.Path(d), ("g",)), {"g", "a", "b", "c", "d"},
+                             "followed to the end; a module nothing imports, or one outside tools/, is none")
+        # Every tools/ module a gate tool imports, now, is a gate file.
+        for m in premerge.gate_modules():
+            self.assertEqual(premerge.mark_paths([f"tools/{m}.py"]), [f"tools/{m}.py"], m)
+
+    # REQ: PREMERGE-replay-inputs-gate
+    def test_every_replay_input_is_a_gate_file(self):
+        # #6444: premerge's replay (`git merge-tree`, run in a checkout of the base) honours the base's attributes, so a
+        # `merge=` line, at the root or in a subdirectory, decides which heads read `same`.
+        (self.r / "sub").mkdir()
+        self.write("sub/R.md", "row 0\n")
+        self.commit("rows")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("sub/R.md", "row 0\nrow pr\n")
+        reviewed = self.commit("pr row")
+        git(self.r, "checkout", "-q", "main")
+        self.write("sub/R.md", "row 0\nrow main\n")
+        self.commit("main row")
+        conflicted = premerge._replayed(self.r, reviewed, "main")
+        self.write("sub/.gitattributes", "R.md merge=union\n")
+        self.commit("attributes")
+        self.assertNotEqual(premerge._replayed(self.r, reviewed, "main"), conflicted,
+                            "a nested .gitattributes is an input to the replay")
+        for f in (".gitattributes", "sub/.gitattributes", "broker/vendor/x/.gitattributes", ".gitmodules"):
+            self.assertEqual(premerge.mark_paths([f]), [f], f)
+        for f in (".gitattributes.bak", "x.gitattributes", ".gitattributes/x", "sub/.gitmodules", ".gitignore",
+                  "sub/.gitignore", ".mailmap", ".gitattributes\n"):
+            self.assertEqual(premerge.mark_paths([f]), [], repr(f))
+        # The class is closed: every file git gives meaning by name in a tree is a replay input or one the replay
+        # never reads (ignore rules and the mailmap shape no merge), so a new kind fails here until it is classed.
+        # Walked, not `git ls-files`: this module reads no record and no git store (records_audit); the record
+        # directories hold records only, and a .gitattributes in one is a gate file by the pattern above all the same.
+        skip = {".git", *(d.rstrip("/") for d in ci_scope.RECORD_DIRS)}
+        named = set()
+        for top, dirs, files in os.walk(ROOT):
+            rel = os.path.relpath(top, ROOT)
+            dirs[:] = [d for d in dirs if os.path.normpath(os.path.join(rel, d)) not in skip]
+            named |= {os.path.normpath(os.path.join(rel, f)) for f in files if f.startswith(".git") or f == ".mailmap"}
+        self.assertTrue(named, "the repository tracks .gitattributes")
+        for f in named:
+            self.assertTrue(premerge.mark_paths([f]) or f.rsplit("/", 1)[-1] in premerge.NOT_REPLAY_INPUTS, f)
 
     def test_mark_paths_cover_agent_config_and_tier_inputs(self):
         # Security R3 on #1824: MCP config, other teams' rules, nested CLAUDE files, and the
@@ -1213,11 +1527,48 @@ class PremergeTest(unittest.TestCase):
         mixed["jobs"].append({"run_id": 99, "run_attempt": 1, "name": "deps", "conclusion": "failure"})
         self.assertEqual(held([mixed], [mainrun()]), no)  # a list with any foreign job is unread, not filtered
 
+    def test_diff_gate_failure_is_never_base_excused(self):
+        # PREMERGE-gate-not-base-excusable (#6411): a diff gate's failed job holds even when main's own first-attempt run
+        # of the merge base failed the same job; a tree check's inherited failure is still excused.
+        gates = [n for n, c in premerge.HELD_CLASS.items() if c == premerge.DIFF_GATE]
+        self.assertEqual(gates, ["lane-gate", "word-budget"])  # mutgate runs in ci now (mutgate_held, #6569)
+        self.assertTrue(all(premerge.HELD[g] == () for g in gates))
+        onto, sha = self.held_repo()
+        ok = self.wf(1, "vulncheck", "success", sha)
+        held = lambda *runs, base=(): premerge.checks_held(self.r, bundle([ok, *runs], base), "HEAD", "main")
+        for name, jobs in (("lane-gate", ["lane-gate"]), ("word-budget", ["count"])):
+            run = self.wf(5, name, "failure", sha, jobs=[(j, "failure") for j in jobs])
+            mainrun = self.wf(9, name, "failure", onto, event="push", branch="main", jobs=[(j, "failure") for j in jobs])
+            self.assertEqual(held(run, base=[mainrun]), [f"{name}:failure"], (name, jobs))
+            self.assertEqual(held({**run, "name": "formal", "path": ".github/workflows/formal.yml"},
+                                  base=[{**mainrun, "name": "formal", "path": ".github/workflows/formal.yml"}]), [], (name, jobs))
+
+    def test_held_class_table_matches_held(self):
+        # PREMERGE-held-class-table (#6425): every HELD workflow is classed DIFF_GATE or TREE and the table names no
+        # other, so a new HELD workflow fails here until classed; the test reads HELD itself, no second list.
+        self.assertEqual(set(premerge.HELD_CLASS), set(premerge.HELD))
+        self.assertEqual(set(premerge.HELD_CLASS.values()), {premerge.DIFF_GATE, premerge.TREE})
+
+    def test_unclassed_held_workflow_is_never_base_excused(self):
+        # PREMERGE-held-class-table (#6425): a HELD workflow missing from HELD_CLASS counts as DIFF_GATE, so a failed job
+        # holds although main's run of the merge base failed it too; classed TREE, the same failure is excused.
+        onto, sha = self.held_repo()
+        ok = self.wf(1, "vulncheck", "success", sha)
+        run = self.wf(5, "formal", "failure", sha, jobs=[("formal", "failure")])
+        mainrun = self.wf(9, "formal", "failure", onto, event="push", branch="main", jobs=[("formal", "failure")])
+        held = lambda: premerge.checks_held(self.r, bundle([ok, run], [mainrun]), "HEAD", "main")
+        self.assertEqual(held(), [])
+        unclassed = {k: v for k, v in premerge.HELD_CLASS.items() if k != "formal"}
+        with mock.patch.object(premerge, "HELD_CLASS", unclassed):
+            self.assertEqual(held(), ["formal:failure"])
+        with mock.patch.object(premerge, "HELD_CLASS", {**premerge.HELD_CLASS, "formal": "unknown"}):
+            self.assertEqual(held(), ["formal:failure"])
+
     def test_image_vulncheck_is_the_one_exempt_job(self):
         # #5366: image-vulncheck stays out (Mark's #2919 paste); every other image job is held.
         self.assertEqual(premerge.HELD["image"], ("image-vulncheck",))
         self.assertEqual(sorted(premerge.HELD), ["assurance", "camnode-image", "drone-sitl", "enforcer-image", "formal", "image",
-                                                 "infer-real", "keycheck", "lane-gate", "mutgate", "testkit", "vision-real",
+                                                 "infer-real", "keycheck", "lane-gate", "testkit", "vision-real",
                                                  "vulncheck", "word-budget"])
         self.assertEqual([x for x in premerge.HELD.values() if x != ()], [("image-vulncheck",)])
         onto, sha = self.held_repo()
@@ -1231,6 +1582,53 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(held(img([("build (a)", "success"), ("image-vulncheck", "cancelled")], c="cancelled")), ["image:cancelled"])
         self.assertEqual(held(img([("image-vulncheck", "cancelled")])), ["image:failure"])
         self.assertEqual(held(), ["image:missing"])
+
+    def test_comment_filter_admits_every_verdict(self):
+        # CI-premerge-event-filter (#6398): premerge.yml starts the gate for a comment only when its body, or its body before
+        # an edit, contains premerge.VERDICT in any case (GitHub's contains() ignores case); any other comment's run takes
+        # a group of its own (run_id), so it cannot replace the PR group's pending run, and skips the gate.
+        lines = (ROOT / ".github" / "workflows" / "premerge.yml").read_text().splitlines()
+        f = "(contains(github.event.comment.body, '{0}') || contains(github.event.changes.body.from, '{0}'))".format(premerge.VERDICT)
+        group = [l for l in lines if l.startswith("  group: ")]
+        gate = [l for l in lines if l.startswith("    if: (github.event_name == 'pull_request_target'")]
+        self.assertEqual(len(group), 1)
+        self.assertEqual(len(gate), 1)
+        self.assertIn(f"|| ({f} && github.event.issue.number) ||", group[0])
+        self.assertIn(f"|| (github.event.issue.pull_request && {f}) ||", gate[0])
+        for line in group + gate:  # no unfiltered way for a comment into the group or the gate
+            self.assertEqual(line.count("github.event.issue."), 1, line)
+            self.assertEqual(line.count("github.event.comment"), 1, line)
+        runs = lambda *bodies: any(premerge.VERDICT.lower() in (b or "").lower() for b in bodies)
+        # Differential: every comment whose posting, deletion or edit changes any verdict --check reads must start a run.
+        sha = "a" * 40
+        def c(body, at, edited=False):
+            return {"author_association": "OWNER", "created_at": at, "updated_at": at + ("x" if edited else ""), "body": body}
+        rec = f"Record: PR #7 · package X-1 · head {sha}"
+        bodies = [f"Verdict: accept\n{rec}\n<!-- record: {k} -->" for k in ("l3", "security", "ux", "potency")] + [
+            f"Verdict: accept\n{rec}\n<!-- record: combined -->\n<!-- record: security -->",
+            f"  Verdict: fix-list\n{rec}\n<!-- record: l3 -->", f"Verdict: reject\n{rec}\n<!-- record: security -->",
+            f"Verdict: accept\n<!-- record: l3 -->\n{rec}",  # misplaced marker
+            f"Verdict: accept\nRecord: PR #7 · package X 1 · head {sha}\n<!-- record: l3 -->",  # unparsed
+            f"verdict: accept\n{rec}\n<!-- record: l3 -->", f"VERDICT: accept\n{rec}\n<!-- record: l3 -->",
+            f"{rec}\n<!-- record: l3 -->", "<!-- record: l3 -->", "looks good", "", None,
+            f"> Verdict: accept\n> {rec}\n> <!-- record: l3 -->\nquoted",
+        ]
+        reads = lambda cs: [premerge.verdict(cs, 7, security=s) for s in (False, True)] + \
+            [premerge.verdict(cs, 7, lens=k) for k in ("ux", "potency", "combined")]
+        prior = [[], [c(bodies[0], "1")], [c(bodies[5], "1")], [c(bodies[1], "1"), c(bodies[0], "2")]]
+        changed = 0
+        for before in prior:
+            for b in bodies:
+                posted = before + [c(b, "5")]
+                if reads(posted) != reads(before):  # created, or deleted (the event carries the deleted body)
+                    changed += 1
+                    self.assertTrue(runs(b), b)
+                for old in bodies:  # edited from `old` to `b`
+                    if reads(before + [c(b, "5", edited=True)]) != reads(before + [c(old, "5")]):
+                        self.assertTrue(runs(b, old), (old, b))
+        self.assertGreater(changed, 10)
+        for b in ("looks good", "<!-- record: l3 -->", f"{rec}\n<!-- record: l3 -->", "", None):
+            self.assertFalse(runs(b), b)
 
     def test_every_pr_workflow_is_held_or_required(self):
         # PREMERGE-held-rest (#5385): a PR-triggered workflow outside HELD merges past a cancelled run unless main's
@@ -1252,24 +1650,26 @@ class PremergeTest(unittest.TestCase):
         # names a workflow by its `name:`, which for testkit.yml is testkit-image.
         on = (wfs / "premerge.yml").read_text().split("workflow_run:\n", 1)[1].split("\n")[0]
         listed = {w.strip() for w in on.split("[", 1)[1].split("]", 1)[0].split(",")}
-        for stem in premerge.HELD:
-            name = next(l[6:].strip() for l in (wfs / f"{stem}.yml").read_text().splitlines() if l.startswith("name: "))
-            self.assertIn(name, listed, stem)
-        # a mutgate shard cut at its timeout fails the run (mutgate.yml), and that failure is not excused
+        # CI-premerge-event-filter (#6398): the list is exactly HELD plus the UNHELD workflows the merge job waits on (ci,
+        # trusted-base), so a completion no check reads starts no run, and a new HELD entry fails until listed.
+        name = lambda stem: next(l[6:].strip() for l in (wfs / f"{stem}.yml").read_text().splitlines() if l.startswith("name: "))
+        # mutgate too: a PR from before ci calls it is held by its standalone run (CI-mutgate-after-ci, #6569)
+        self.assertEqual(sorted(listed), sorted([*(name(s) for s in [*premerge.HELD, *premerge.UNHELD] if s != "premerge"),
+                                                 premerge.LEGACY_MUTGATE]))
+        # a diff gate's failed run holds (lane-gate.yml here; mutgate is ci's, held by mutgate_held, #6569)
         onto, sha = self.held_repo()
-        self.write(".github/workflows/mutgate.yml", "on:\n  pull_request:\n")
-        sha = self.commit("mutgate")
+        self.write(".github/workflows/lane-gate.yml", "on:\n  pull_request:\n")
+        sha = self.commit("lane-gate")
         ok = self.wf(1, "vulncheck", "success", sha)
         held = lambda *runs: premerge.checks_held(self.r, bundle([ok, *runs]), "HEAD", "main")
-        self.assertEqual(held(), ["mutgate:missing"])
-        self.assertEqual(held(self.wf(2, "mutgate", "failure", sha, jobs=[("mutants x shard 0 of 2", "cancelled"),
-                                                                          ("mutgate", "failure")])), ["mutgate:failure"])
-        self.assertEqual(held(self.wf(2, "mutgate", "cancelled", sha)), ["mutgate:cancelled"])
-        self.assertEqual(held(self.wf(2, "mutgate", "success", sha)), [])
-        # the real testkit.yml filter: a PR changing only b.md and mutgate.yml owes no testkit run (#5432 L3)
+        self.assertEqual(held(), ["lane-gate:missing"])
+        self.assertEqual(held(self.wf(2, "lane-gate", "failure", sha, jobs=[("lane-gate", "failure")])), ["lane-gate:failure"])
+        self.assertEqual(held(self.wf(2, "lane-gate", "cancelled", sha)), ["lane-gate:cancelled"])
+        self.assertEqual(held(self.wf(2, "lane-gate", "success", sha)), [])
+        # the real testkit.yml filter: a PR changing only b.md and lane-gate.yml owes no testkit run (#5432 L3)
         self.write(".github/workflows/testkit.yml", (wfs / "testkit.yml").read_text())
         sha = self.commit("testkit")
-        mut = self.wf(2, "mutgate", "success", sha)
+        mut = self.wf(2, "lane-gate", "success", sha)
         self.assertEqual(premerge.checks_held(self.r, bundle([self.wf(1, "vulncheck", "success", sha), mut]), "HEAD", "main"),
                          ["testkit:missing"])  # the PR changes testkit.yml itself, so its run is owed
         git(self.r, "checkout", "-q", "main")
@@ -1278,7 +1678,138 @@ class PremergeTest(unittest.TestCase):
         self.write("c.md", "y\n")
         sha = self.commit("unrelated")
         self.assertEqual(premerge.checks_held(self.r, bundle([self.wf(1, "vulncheck", "success", sha),
-                                                              self.wf(2, "mutgate", "success", sha)]), "HEAD", "main"), [])
+                                                              self.wf(2, "lane-gate", "success", sha)]), "HEAD", "main"), [])
+
+    CALL = "  mutgate:\n    needs: [checks]\n    uses: ./.github/workflows/mutgate.yml\n"
+
+    def mutgate_repo(self, main_calls=True, pr_calls=True):
+        """Main's ci.yml calls mutgate.yml (or not); the PR changes b.md and, when the two differ, its own ci.yml."""
+        (self.r / ".github/workflows").mkdir(parents=True)
+        plain = "name: ci\non:\n  pull_request:\njobs:\n  checks:\n    runs-on: ubuntu-24.04\n"
+        self.write(".github/workflows/ci.yml", plain + (self.CALL if main_calls else ""))
+        onto = self.commit("ci")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("b.md", "x\n")
+        if pr_calls != main_calls:
+            self.write(".github/workflows/ci.yml", plain + (self.CALL if pr_calls else ""))
+        return onto, self.commit("code")
+
+    def ci(self, id, sha, conclusion="success", jobs=(), **k):
+        return self.wf(id, "ci", conclusion, sha, jobs=[("checks", "success"), *jobs], **k)
+
+    def test_mutgate_holds_until_ci_ran_and_passed_it(self):
+        # CI-mutgate-after-ci (#6569): mutgate runs as ci's `mutgate / ` jobs once every other ci job passed. A mutgate
+        # that did not run (a ci job failed, the calling job skipped for any reason) holds as mutgate:skipped, never a pass.
+        onto, sha = self.mutgate_repo()
+        held = lambda *runs: premerge.checks_held(self.r, bundle(runs), "HEAD", "main")
+        claimed, gate = ("mutgate / claimed", "success"), ("mutgate / mutgate", "success")
+        self.assertEqual(held(), ["mutgate:missing"])
+        self.assertEqual(held(self.ci(1, sha, status="in_progress")), ["mutgate:in_progress"])
+        self.assertEqual(held(self.ci(1, sha, status="queued")), ["mutgate:queued"])
+        # passes: the gate decided, or the claim printed [] so the deciding job skipped (#6401)
+        self.assertEqual(held(self.ci(1, sha, jobs=[claimed, gate])), [])
+        self.assertEqual(held(self.ci(1, sha, jobs=[claimed, ("mutgate / plan", "skipped"),
+                                                    ("mutgate / mutgate", "skipped")])), [])
+        cases = {
+            # a ci job failed, so the calling job skipped and no mutgate job ran
+            "ci failed": (self.ci(1, sha, "failure", [("unit-tests (0)", "failure"), ("mutgate", "skipped")]), "skipped"),
+            # the run reads as passed, yet mutgate never ran: the skip still holds
+            "caller skipped, run passed": (self.ci(1, sha, jobs=[("mutgate", "skipped")]), "skipped"),
+            "no mutgate job at all": (self.ci(1, sha), "skipped"),
+            "claim skipped": (self.ci(1, sha, jobs=[("mutgate / claimed", "skipped")]), "skipped"),
+            "claim failed": (self.ci(1, sha, "failure", [("mutgate / claimed", "failure"), ("mutgate / mutgate", "failure")]), "failure"),
+            "two claims": (self.ci(1, sha, jobs=[claimed, claimed, gate]), "skipped"),
+            "a claim of another name": (self.ci(1, sha, jobs=[("mutgate / claimed x", "success"), gate]), "skipped"),
+            "survivor": (self.ci(1, sha, "failure", [claimed, ("mutgate / mutgate", "failure")]), "failure"),
+            "shard cut at its timeout": (self.ci(1, sha, "failure", [claimed, ("mutgate / mutants p shard 0 of 2", "cancelled"),
+                                                                     ("mutgate / mutgate", "failure")]), "cancelled"),
+            "gate passed, run cancelled": (self.ci(1, sha, "cancelled", [claimed, gate]), "cancelled"),
+            "gate passed, run conclusion unread": (self.ci(1, sha, None, [claimed, gate]), "unknown"),
+            "jobs not supplied": ({**self.ci(1, sha), "jobs": None}, "unknown"),
+            "jobs of another attempt": (self.ci(1, sha, jobs=[claimed, gate], attempt=2) | {"jobs": [
+                {"run_id": 1, "run_attempt": 1, "name": n, "conclusion": c} for n, c in [claimed, gate]]}, "unknown"),
+        }
+        for name, (run, state) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(held(run), [f"mutgate:{state}"])
+        # the newest of this PR's pull_request runs on the head decides; another PR's, a target run or another head's never
+        ok = self.ci(1, sha, jobs=[claimed, gate])
+        self.assertEqual(held(ok, self.ci(2, sha, "failure", [("checks", "failure"), ("mutgate", "skipped")])), ["mutgate:skipped"])
+        self.assertEqual(held(self.ci(2, sha, "failure", [("mutgate", "skipped")]), self.ci(3, sha, jobs=[claimed, gate])), [])
+        self.assertEqual(held({**ok, "event": "pull_request_target"}), ["mutgate:missing"])
+        self.assertEqual(held({**ok, "head_sha": onto}), ["mutgate:missing"])
+        self.assertEqual(held({**ok, "path": ".github/workflows/mutgate.yml", "name": "mutgate"}), ["mutgate:missing"])
+        self.assertEqual(held(self.ci(1, sha, jobs=[claimed, gate], prs=((8, "main"),))), ["mutgate:unbound"])
+        self.assertEqual(held(self.ci(1, sha, jobs=[claimed, gate], branch="other")), ["mutgate:missing"])
+
+    def test_mutgate_is_owed_when_main_or_the_head_calls_it(self):
+        # CI-mutgate-after-ci (#6569): a PR that drops the call from its own ci.yml still owes the gate main's ci.yml calls.
+        for main_calls, pr_calls, owed in ((True, False, True), (False, True, True), (False, False, False)):
+            with self.subTest(main=main_calls, pr=pr_calls):
+                self.setUp()
+                _, sha = self.mutgate_repo(main_calls, pr_calls)
+                self.assertEqual(premerge.checks_held(self.r, bundle([self.ci(1, sha)]), "HEAD", "main"),
+                                 ["mutgate:skipped"] if owed else [])
+        # the call as ci.yml writes it is the line that makes the gate owed
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertTrue(premerge._CALLS_MUTGATE.search(ci))
+        self.assertFalse(premerge._CALLS_MUTGATE.search(ci.replace("uses: ./.github/workflows/mutgate.yml", "x: 1")))
+
+    def test_a_pr_from_before_the_call_is_held_by_its_standalone_mutgate_run(self):
+        # CI-mutgate-after-ci (#6569, L3 1): a PR branched before main's ci.yml called mutgate keeps its standalone
+        # mutgate.yml pull_request run, held as HELD held it (a diff gate, never base-excused), so an armed PR needs no
+        # new ci run; once main calls it the run is owed outright, so dropping mutgate.yml from the head escapes nothing.
+        (self.r / ".github/workflows").mkdir(parents=True)
+        plain = "name: ci\non:\n  pull_request:\njobs:\n  checks:\n    runs-on: ubuntu-24.04\n"
+        self.write(".github/workflows/ci.yml", plain)
+        self.write(".github/workflows/mutgate.yml", "name: mutgate\non:\n  pull_request:\n")
+        old = self.commit("before the call")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("b.md", "x\n")
+        sha = self.commit("code")
+        git(self.r, "checkout", "-q", "main")
+        self.write(".github/workflows/ci.yml", plain + self.CALL)
+        self.commit("the call")
+        git(self.r, "checkout", "-q", "pr")
+        held = lambda *runs, base=(): premerge.checks_held(self.r, bundle(runs, base), "HEAD", "main")
+        mg = lambda id, c, **k: self.wf(id, "mutgate", c, sha, **k)
+        self.assertEqual(held(), ["mutgate:missing"])
+        self.assertEqual(held(mg(1, "success")), [])
+        self.assertEqual(held(mg(1, "success"), mg(2, "cancelled")), ["mutgate:cancelled"])
+        self.assertEqual(held(mg(1, "failure", jobs=[("mutgate", "failure")])), ["mutgate:failure"])
+        mainrun = self.wf(9, "mutgate", "failure", old, event="push", branch="main", jobs=[("mutgate", "failure")])
+        self.assertEqual(held(mg(1, "failure", jobs=[("mutgate", "failure")]), base=[mainrun]), ["mutgate:failure"])
+        self.assertEqual(held(mg(1, "success", prs=((8, "main"),))), ["mutgate:unbound"])
+        # a ci run with mutgate jobs is not this PR's gate: its ci.yml does not call mutgate
+        self.assertEqual(held(self.ci(3, sha, jobs=[("mutgate / claimed", "success")])), ["mutgate:missing"])
+        # the head drops mutgate.yml: still owed, since main calls it
+        git(self.r, "rm", "-q", ".github/workflows/mutgate.yml")
+        sha = self.commit("drop the gate")
+        self.assertEqual(premerge.checks_held(self.r, bundle([self.wf(1, "mutgate", "success", "0" * 40)]), "HEAD", "main"),
+                         ["mutgate:missing"])
+        # once the PR merges main, its merge base calls mutgate and ci's run decides
+        git(self.r, "merge", "-q", "--no-edit", "main")
+        sha = git(self.r, "rev-parse", "HEAD").strip()
+        self.assertEqual(premerge.checks_held(self.r, bundle([self.wf(1, "mutgate", "success", sha)]), "HEAD", "main"),
+                         ["mutgate:missing"])
+        ok = self.ci(2, sha, jobs=[("mutgate / claimed", "success"), ("mutgate / mutgate", "success")])
+        self.assertEqual(premerge.checks_held(self.r, bundle([ok]), "HEAD", "main"), [])
+
+    def test_check_prints_a_skipped_mutgate_as_held(self):
+        # CI-mutgate-after-ci (#6569): through --check as premerge.yml runs it, a ci run that passed without running
+        # mutgate is never `same`, and one whose mutgate passed is.
+        import json
+        onto, sha = self.mutgate_repo()
+        f = pathlib.Path(self._d.name + ".comments.json")
+        self.addCleanup(lambda: f.unlink(missing_ok=True))
+        f.write_text(json.dumps([self.rec("accept", sha, "<!-- record: l3 -->\n")]))
+        def run(*runs):
+            r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--check", str(f), "7", "--runs",
+                                self.runs(head=runs), "--base", "main"], cwd=self.r, capture_output=True, text=True)
+            return r.returncode, r.stdout.split()
+        self.assertEqual(run(self.ci(1, sha, jobs=[("mutgate", "skipped")])), (1, ["needs-check", "mutgate:skipped"]))
+        self.assertEqual(run(self.ci(1, sha, jobs=[("mutgate / claimed", "success"), ("mutgate / mutgate", "success")])),
+                         (0, ["same"]))
 
     def test_pr_paths_reads_only_the_block_style_it_knows(self):
         p = premerge.pr_paths
@@ -1352,6 +1883,25 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(premerge.checks_held(self.r, doc, "HEAD", "main"), [])
         routes[f"{api}/21/attempts/1/jobs?per_page=100"] = [{**job(21, 1, "scan"), "name": "other"}]
         self.assertEqual(premerge.checks_held(self.r, self.runs_helper(routes, onto)[1], "HEAD", "main"), ["vulncheck:failure"])
+
+    def test_runs_helper_reads_the_heads_ci_jobs(self):
+        # CI-mutgate-after-ci (#6569): the mutation gate is ci's `mutgate / ` jobs, so the head's ci run carries its jobs
+        # whatever its conclusion; a passed run of anything else, and main's passed ci runs, are still read without them.
+        onto, sha = self.mutgate_repo()
+        api = f"repos/{REPO}/actions/runs"
+        ci = self.wf(11, "ci", "success", sha)
+        job = lambda name, c: {"run_id": 11, "run_attempt": 1, "name": name, "conclusion": c}
+        jobs = [job("checks", "success"), job("mutgate / claimed", "success"), job("mutgate / mutgate", "success")]
+        routes = {f"{api}?head_sha={sha}&per_page=100": [ci, self.wf(12, "formal", "success", sha)],
+                  f"{api}/11/jobs?per_page=100": jobs,
+                  f"{api}?head_sha={onto}&event=push&per_page=100": [self.wf(21, "ci", "success", onto, event="push", branch="main", prs=())],
+                  f"{api}?head_sha={onto}&event=schedule&per_page=100": []}
+        code, doc, calls = self.runs_helper(routes, onto)
+        self.assertEqual((code, calls), (0, list(routes)))
+        self.assertEqual(doc["head"][0]["jobs"], jobs)
+        self.assertEqual(premerge.checks_held(self.r, doc, "HEAD", "main"), [])
+        routes[f"{api}/11/jobs?per_page=100"] = jobs[:1] + [{**job("mutgate", "skipped")}]
+        self.assertEqual(premerge.checks_held(self.r, self.runs_helper(routes, onto)[1], "HEAD", "main"), ["mutgate:skipped"])
 
     def test_runs_helper_fails_closed(self):
         # PREMERGE-runs-local (#5386): any failed read, a bad merge base or a pr.json without a head prints nothing, so

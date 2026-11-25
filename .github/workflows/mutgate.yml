@@ -3,9 +3,9 @@ name: mutgate
 # #1814) on every pull request. A PR fails when a mutant lives on one of a tier-A or tier-B broker
 # package's target lines: the lines it adds or changes in the package's non-test .go files, or, when
 # it changes only the package's tests, the lines its changed test functions run. The tests run that
-# line but do not check it. The one exception is a `Mutant-equivalent: <path>:<line>[:<col>][:<KIND>]
-# <reason>` line in the PR body for that mutant (#5792, #5828), which the reviewer checks; the body
-# reaches the gate through env as text, read by the base's tool. Gremlins runs only on those packages (`mutgate.py claimed`), and
+# line but do not check it. The one exception is an entry for that mutant in its package's
+# MUTANTS-EQUIVALENT record (#5776, #5792, #5828), which the reviewer checks; the PR body waives nothing
+# (#6379), since it can change after a review without changing the head. Gremlins runs only on those packages (`mutgate.py claimed`), and
 # only on their target lines (`run --git`), split into K shards a package, one job each (#4961): the
 # `plan` job counts each package's targets, times its suite (#5069) and picks K, so no job runs past its timeout, and measures a
 # test-only package's covered lines once for every shard to read (#4970). Every mutant
@@ -13,7 +13,7 @@ name: mutgate
 # statement, so `delete` deletes each statement holding one of those lines alone, on parallel
 # workers, and adds its verdict to gremlins' JSON (#4573, #4603, #4633). A package is also claimed
 # when the PR changes its MUTANTS-EQUIVALENT record, which `verify` resolves and whose new entries the
-# summary lists for review (#5786, #5812). A PR that changes no such package runs no gremlins and passes. The `mutgate` job is the one result to read, and its step
+# summary lists for review (#5786, #5812). A PR that changes no such package passes from the `claimed` job alone (#6401). The `mutgate` job is the one result to read, and its step
 # summary holds one table of every mutant on a target line and its verdict.
 # The `plan` and `mutants` jobs run the PR's own Go tests, which can write anything in that job (the
 # JSON, tools/, $GITHUB_ENV), so they only hand on data: plan the matrix, mutants gremlins' JSON as an
@@ -22,19 +22,16 @@ name: mutgate
 # broker/core/core.txt (the tier list risk_tier reads) with the base commit's before running
 # them, and `mutgate` reruns `run`'s checks on the artifact with `verify` (#4106), which builds the
 # base's statement lister (standard library only) to recount the deletion sites (#4602).
-# The body is the event's: a waiver added to the body later counts from the next push, as a failure says,
-# naming that push's head (#6077; the reasons the gate does not read the current body are in that PR).
+# CI-mutgate-after-ci (#6569): ci.yml's `mutgate` job calls this workflow on a pull request once every other
+# ci job passed on the head, so a head whose ci fails spends no mutgate runner. Its jobs run inside ci's run
+# (named `mutgate / <job>`) under ci's per-PR concurrency group, which cancels a superseded head's run; a
+# group here would share ci's name and wait on it. Main's ruleset does not require these jobs, so
+# tools/premerge.py holds the merge until `mutgate / claimed` succeeded in ci's run and no `mutgate / ` job
+# failed: a mutgate skipped because ci failed never reads as a pass.
 on:
-  pull_request:
+  workflow_call:
 permissions:
   contents: read
-# CI-cancel-superseded (#5345, #5348, #5361): a PR's first-attempt run cancels that PR's older first
-# attempts, so a superseded head never holds the queue. A rerun (attempt 2 or later) and every push,
-# merge-queue, schedule or dispatch run is a group of its own (run id), so it never cancels or
-# replaces the current head's run.
-concurrency:
-  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}
 env:
   GOTOOLCHAIN: local
   GOWORK: "off"
@@ -42,19 +39,23 @@ env:
   # broker-race, so a mutant only they kill (seal.Unlock's TPM paths) cannot live in the gate.
   AGENTOS_REQUIRE_SWTPM: "1"
 jobs:
-  # CI-mutgate-head-guard (#5409): a rerun keeps its event, so it can test a head the PR has left.
-  # This job reads the PR's head from the API and, when the run's head is older, ends with a notice
-  # and skips `claimed`; the `mutgate` job then fails, so a run that gated nothing never passes.
-  head:
+  # CI-mutgate-zero-target-fast (#6401): the first job reads the PR's head, then claims, so a PR that
+  # claims no package passes from one runner slot: `plan`, `mutants` and the `mutgate` job all skip, and
+  # a skipped job does not fail the run. The `mutgate` job skips only when this job succeeded and printed
+  # a literal `[]`; a claim that failed, timed out or printed anything else runs it, and it fails. A run
+  # of a head the PR has left (a rerun keeps its event, #5409) fails here, so it never passes.
+  claimed:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    permissions:
-      pull-requests: read
     outputs:
-      current: ${{ steps.head.outputs.current }}
+      packages: ${{ steps.claimed.outputs.packages }}
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
-      - name: This run's head is the PR's current head
-        id: head
+      # #5409 (L3): "Re-run failed jobs" copies a succeeded job's result from attempt 1, so each job
+      # that runs PR tests or decides reads the PR's head itself, first, and fails on an older one.
+      - name: This run's head is still the PR's current head
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -63,17 +64,7 @@ jobs:
         run: |
           now=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha) || { echo "::error::cannot read the PR's head"; exit 1; }
           [[ "$now" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::the PR's head is not a sha: $now"; exit 1; }
-          if [ "$now" = "$RUN_HEAD" ]; then echo "current=true" >> "$GITHUB_OUTPUT"; exit 0; fi
-          echo "::notice::this run's head $RUN_HEAD is not the PR's current head $now: no gate runs; the current head's own run decides"
-          echo "current=false" >> "$GITHUB_OUTPUT"
-  claimed:
-    needs: head
-    if: ${{ needs.head.outputs.current == 'true' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      packages: ${{ steps.claimed.outputs.packages }}
-    steps:
+          [ "$now" = "$RUN_HEAD" ] || { echo "::error::this run's head $RUN_HEAD is not the PR's current head $now: a rerun of an old head gates nothing; the current head's own run decides"; exit 1; }
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
@@ -98,7 +89,9 @@ jobs:
         run: |
           pkgs=$(python3 -I tools/mutgate.py claimed --git "$BASE" --json)
           echo "$pkgs"
+          [[ "$pkgs" =~ ^\[[^$'\n']*\]$ ]] || { echo "::error::the claim printed no one-line list"; exit 1; }
           echo "packages=$pkgs" >> "$GITHUB_OUTPUT"
+          if [ "$pkgs" = "[]" ]; then echo "No tier-A or tier-B package changed: mutgate passes with no plan and no shards." >> "$GITHUB_STEP_SUMMARY"; fi
   plan:
     needs: claimed
     if: ${{ needs.claimed.outputs.packages != '[]' }}
@@ -113,7 +106,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      # #5409 (L3): "Re-run failed jobs" copies the `head` job's result from attempt 1, so each job
+      # #5409 (L3): "Re-run failed jobs" copies a succeeded job's result from attempt 1, so each job
       # that runs PR tests or decides reads the PR's head itself, first, and fails on an older one.
       - name: This run's head is still the PR's current head
         env:
@@ -162,9 +155,19 @@ jobs:
       # The seal TPM tests run on swtpm; broker-race's step, kept equal by tests/test_workflows.py.
       - name: Software TPM for the trusted-host slot (P2-4b)
         run: sudo apt-get update -q && sudo apt-get install -yq swtpm
+      # MUT-memcap-cgroup (#6392): every mutant's and baseline's test run goes in a cgroup v2 leaf of this
+      # delegated directory (memory.max, no swap, a group OOM kill, memory.peak); mutgate fails in CI
+      # without it. The steps that run mutgate move their shell into main/ first, which takes root.
+      - name: A delegated cgroup for the mutation runs (#6392)
+        run: |
+          sudo mkdir /sys/fs/cgroup/mutgate /sys/fs/cgroup/mutgate/main
+          echo +memory | sudo tee /sys/fs/cgroup/mutgate/cgroup.subtree_control > /dev/null
+          sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/mutgate
+          echo "AGENTOS_MUTGATE_CGROUP=/sys/fs/cgroup/mutgate" >> "$GITHUB_ENV"
       - name: Shards for each package (#4961)
         id: plan
         run: |
+          echo $$ | sudo tee /sys/fs/cgroup/mutgate/main/cgroup.procs > /dev/null
           shards=$(python3 -I tools/mutgate.py plan --git "$BASE" --targets-out "$RUNNER_TEMP/targets.json")
           echo "$shards"
           echo "shards=$shards" >> "$GITHUB_OUTPUT"
@@ -201,7 +204,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      # #5409 (L3): "Re-run failed jobs" copies the `head` job's result from attempt 1, so each job
+      # #5409 (L3): "Re-run failed jobs" copies a succeeded job's result from attempt 1, so each job
       # that runs PR tests or decides reads the PR's head itself, first, and fails on an older one.
       - name: This run's head is still the PR's current head
         env:
@@ -261,6 +264,15 @@ jobs:
       # The seal TPM tests run on swtpm; broker-race's step, kept equal by tests/test_workflows.py.
       - name: Software TPM for the trusted-host slot (P2-4b)
         run: sudo apt-get update -q && sudo apt-get install -yq swtpm
+      # MUT-memcap-cgroup (#6392): every mutant's and baseline's test run goes in a cgroup v2 leaf of this
+      # delegated directory (memory.max, no swap, a group OOM kill, memory.peak); mutgate fails in CI
+      # without it. The steps that run mutgate move their shell into main/ first, which takes root.
+      - name: A delegated cgroup for the mutation runs (#6392)
+        run: |
+          sudo mkdir /sys/fs/cgroup/mutgate /sys/fs/cgroup/mutgate/main
+          echo +memory | sudo tee /sys/fs/cgroup/mutgate/cgroup.subtree_control > /dev/null
+          sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/mutgate
+          echo "AGENTOS_MUTGATE_CGROUP=/sys/fs/cgroup/mutgate" >> "$GITHUB_ENV"
       # Outside the workspace, so the result directory and the PR tree hold no copy (#4970).
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
@@ -276,6 +288,7 @@ jobs:
         run: |
           for s in ${SHARDS//,/ }; do
             [[ "$s" =~ ^[0-9]+$ ]] || { echo "::error::shard $s is not an index"; exit 1; }
+            echo $$ | sudo tee /sys/fs/cgroup/mutgate/main/cgroup.procs > /dev/null
             end=$((SECONDS + 3600)) rc=0
             timeout -k 30 3600 python3 -I tools/mutgate.py run "$PKG" --out "mutants/$s" --git "$BASE" --shard "$s" --of "$OF" \
               --targets "$RUNNER_TEMP/plan/targets.json" || rc=$?
@@ -308,14 +321,14 @@ jobs:
           retention-days: 7
   mutgate:
     needs: [claimed, plan, mutants]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (needs.claimed.result != 'success' || needs.claimed.outputs.packages != '[]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
       pull-requests: read
     steps:
-      # #5409 (L3): "Re-run failed jobs" copies the `head` job's result from attempt 1, so each job
+      # #5409 (L3): "Re-run failed jobs" copies a succeeded job's result from attempt 1, so each job
       # that runs PR tests or decides reads the PR's head itself, first, and fails on an older one.
       - name: This run's head is still the PR's current head
         env:
@@ -346,15 +359,13 @@ jobs:
             echo "::error::a mutants job timed out at its job limit (60 minutes for each shard it runs, plus 15 for setup; the cancelled job in the checks list), so it gave no verdict; no mutant was shown to survive. A shard past its own 60 minutes fails instead, with an error naming it, so this was the job's setup or the limit's slack. Rerun the failed jobs; if the same job times out again, raise SETUP_MINUTES in tools/mutgate.py."
             exit 1
           fi
-          if [ "$PACKAGES" = "[]" ]; then [ "$PLAN$MUTANTS" = skippedskipped ]; else [ "$PLAN$MUTANTS" = successsuccess ]; fi
+          [ "$PLAN$MUTANTS" = successsuccess ]
       # A fresh runner where no PR code has run. The PR tree is read only as data: its diff and file names.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-        if: ${{ needs.claimed.outputs.packages != '[]' }}
         with:
           persist-credentials: false
           fetch-depth: 0
       - name: The base this merge commit was built on
-        if: ${{ needs.claimed.outputs.packages != '[]' }}
         env:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
@@ -363,18 +374,15 @@ jobs:
       # Go builds the base's statement lister, which reads the PR's files as data, so verify can
       # list the deletion sites itself (#4602). Before the download, so no artifact stands in for it.
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
-        if: ${{ needs.claimed.outputs.packages != '[]' }}
         with:
           go-version: "1.26.11" # = the mutants job's, so both list the same sites
           cache: false
       # Before the base copy is written, so nothing an artifact unpacks can stand in for it.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
-        if: ${{ needs.claimed.outputs.packages != '[]' }}
         with:
           pattern: mutants-*
           path: ${{ runner.temp }}/mutants
       - name: The base copy of the gate
-        if: ${{ needs.claimed.outputs.packages != '[]' }}
         run: |
           rm -rf tools broker/core/core.txt
           git archive "$BASE" tools broker/core/core.txt | tar -x
@@ -382,14 +390,8 @@ jobs:
       # exactly one readable result for each shard of each claimed package across them, rechecks each
       # as `run` does, needs one deletion verdict per site it lists, joins the shards, then gates: the
       # JSON is data, never a verdict.
-      # The PR body is data: it reaches the tool through env and a file, never the script's text.
       - name: Gate (MUT-tierA)
-        if: ${{ needs.claimed.outputs.packages != '[]' }}
         env:
           RESULTS: ${{ runner.temp }}/mutants
-          PR_BODY: ${{ github.event.pull_request.body }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
-          python3 -I tools/mutgate.py verify "$RESULTS" --git "$BASE" --body "$RUNNER_TEMP/pr-body.md" --body-from "$PR_HEAD" \
-            --summary "$GITHUB_STEP_SUMMARY"
+          python3 -I tools/mutgate.py verify "$RESULTS" --git "$BASE" --summary "$GITHUB_STEP_SUMMARY"

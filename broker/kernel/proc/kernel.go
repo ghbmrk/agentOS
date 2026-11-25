@@ -67,8 +67,23 @@ type KernelConfig struct {
 	// Clock is the kernel process's TIM-1 reading, which the kernel reads at
 	// each decision (kernel.BootClock) and when a backup re-seal finishes,
 	// so a failure backs off from then (#3339); nil reads only the time
-	// each call is handed.
+	// each call is handed. It vouches for no fresh sample (onLog).
 	Clock kernel.Clock
+	// Source, when set, is read in Clock's place: the reading and the
+	// Stamp of the sample behind it (Chrony.Sample, #5759).
+	Source Source
+}
+
+// source is cfg's TIM-1 source for onLog: Source, else Clock on no
+// sample, else none.
+func (cfg KernelConfig) source() Source {
+	if cfg.Source != nil {
+		return cfg.Source
+	}
+	if cfg.Clock == nil {
+		return nil
+	}
+	return func() (kernel.Reading, Stamp) { return cfg.Clock(), Stamp{} }
 }
 
 // Format prints a KernelConfig as its type alone, never the log key or the
@@ -147,9 +162,7 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 		st.Close()
 		return nil, err
 	}
-	if cfg.Clock != nil {
-		cfg.Clock = onLog(l, cfg.Clock)
-	}
+	clock := onLog(l, cfg.source())
 	// A clerk's view is verified against the state's anchors, which setup
 	// may log after boot.
 	var k *kernel.Kernel
@@ -159,7 +172,7 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 		clerks[name] = remote{r, anchors, cfg.Pinned}
 		kc[name] = clerks[name]
 	}
-	if k, err = kernel.BootClock(l, cfg.Anchors, kc, cfg.Clock, now, cfg.Pinned...); err != nil {
+	if k, err = kernel.BootClock(l, cfg.Anchors, kc, clock, now, cfg.Pinned...); err != nil {
 		st.Close()
 		return nil, err
 	}
@@ -365,7 +378,8 @@ func (h *Kernel) Erase(now int64, subject string) (kernel.Confirmation, error) {
 					c.StillHeld = append(c.StillHeld, kernel.BackupHold{Backup: id})
 				}
 			}
-			waits = append(waits, h.runningFor(w.ids)...)
+			// Each is in named(c) now, so the wait after the re-seals
+			// below takes any of them still running.
 			return nil
 		})
 	}
@@ -415,12 +429,22 @@ func (h *Kernel) Close() error {
 // time is vouched past, 0 for none, as the box clock alone, TIM-1; Latest: its
 // bound above). Earliest starts at the later of the log's last time and c's
 // Earliest (its Latest when it vouches for none) and runs on the monotonic
-// clock; c only raises Latest. So a box clock ahead at a start ends no hold
-// early when the second source disagrees, a running box-clock step never moves
-// Earliest (chronyd follows a step under 10 s until its next sample), and a
-// start behind the log revives no key nor stops time (TIM-1, KEY-7, KEY-8).
-func onLog(l *kernel.Log, c kernel.Clock) kernel.Clock {
-	r, start := c(), time.Now()
+// clock. While running, c raises Latest, and raises Earliest to its own only
+// on a reading whose Stamp is not zero and differs from the last one seen: a
+// fresh chronyd sample, which has measured the box clock since. chronyd follows
+// a box step under 10 s until its next sample (its correction is a pending
+// slew), so a reading on the same sample never moves Earliest, and an unseen
+// step gains Earliest only what it moved the box between that sample and the
+// read (#5759). So a box clock ahead at a start ends no hold early when the
+// second source disagrees, a start behind the log revives no key nor stops
+// time, and once chronyd syncs a hold waits its length, not the gap (TIM-1,
+// KEY-7, KEY-8).
+func onLog(l *kernel.Log, c Source) kernel.Clock {
+	if c == nil {
+		return nil // the kernel reads the time each call is handed
+	}
+	r, last := c()
+	start := time.Now()
 	base := r.Earliest
 	if base == 0 {
 		base = r.Latest
@@ -428,8 +452,26 @@ func onLog(l *kernel.Log, c kernel.Clock) kernel.Clock {
 	if es := l.Entries(); len(es) > 0 {
 		base = max(base, es[len(es)-1].At)
 	}
+	// Re-seals read the clock off the kernel's lock, so each reading is
+	// taken and applied under mu: one taken before a fresher one but applied
+	// after it would set last back, and the fresher sample would then count
+	// as fresh again (#6304 L3 1, Security 1). Chrony.Sample serialises its
+	// reads on its own lock already, so this adds no wait.
+	var mu sync.Mutex
 	return func() kernel.Reading {
+		mu.Lock()
+		defer mu.Unlock()
+		r, ref := c()
 		e := base + time.Since(start).Milliseconds()
-		return kernel.Reading{Earliest: e, Latest: max(e, c().Latest)}
+		if ref != (Stamp{}) && ref != last {
+			last = ref
+			if r.Earliest > e {
+				// r.Earliest was bounded when the read began, so starting
+				// the run after it returned under-counts by the read's
+				// wait, the safe side (#6304 L3 R1).
+				base, start, e = r.Earliest, time.Now(), r.Earliest
+			}
+		}
+		return kernel.Reading{Earliest: e, Latest: max(e, r.Latest)}
 	}
 }

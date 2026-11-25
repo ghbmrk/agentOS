@@ -10,3 +10,12 @@ CONFIG_VIRTIO_BLK=y
 CONFIG_VIRTIO_NET=y
 CONFIG_PCI_HOST_GENERIC=y
 CONFIG_VIRTIO_CONSOLE=y
+# The harness's firmware page (e2e/driver/vm.go, mailbox): the reboot notifier writes the restart
+# command's word there, as the Pi's firmware driver hands tryboot to the firmware.
+CONFIG_POWER_RESET=y
+CONFIG_MFD_SYSCON=y
+CONFIG_SYSCON_REBOOT_MODE=y
+# The harness's panic signal (e2e/driver/vm.go, errPanic): the panic notifier writes to QEMU's
+# pvpanic-pci device before the panic's restart, which skips the reboot notifiers and so the mailbox.
+CONFIG_PVPANIC=y
+CONFIG_PVPANIC_PCI=y

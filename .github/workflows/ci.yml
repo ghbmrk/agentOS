@@ -30,39 +30,47 @@ env:
 # hung job would otherwise hold one of the few runners for GitHub's 6h default.
 # A records-only change (CI-docs; the set is tools/ci_scope.py's) runs only the document
 # checks: checks skips its Go, unit-test and network steps and runs the tests of the
-# document tools instead, and each broker-race shard skips every step. The code is main's,
-# which main's own run tested. No job waits for another to decide that (CI-par-4, #4336):
+# document tools instead, and each unit-tests and broker-race shard skips every step. The code is
+# main's, which main's own run tested. No job waits for another to decide that (CI-par-4, #4336):
 # the first step of checks and of each shard runs .github/actions/scope, and their later
-# steps run unless it says exactly 'true', so a failed scope step means full CI. broker-checks,
+# steps run unless it says exactly 'true', so a failed scope step means full CI. checks waits
+# for the unit-tests shards only to read their traces (CI-checks-under-45, #6464). broker-checks,
 # machines and hostcheck run in full on every change: their root steps may not carry an `if:`
 # (tools/root_tests.py), and a whole job can only be skipped by waiting for another job.
 # A push to main runs every job and every step whatever scope says (CI-mainguard, #2323):
 # main's green run then means main builds, even after a records-only merge that follows a
 # skewed code merge. Only pull requests, merge-queue builds and dispatches are scoped.
 jobs:
-  checks:
+  unit-tests:
+    # CI-checks-under-45 (#6464): the tests/test*.py modules, split across the shards by
+    # tools/unit_tests.py shard(), each module on exactly one. checks, the required check, waits
+    # for every shard and audits all their traces together, so no audit reads less than before.
     runs-on: ubuntu-24.04
-    # 45, not 30: a full run takes about 15 minutes, and the image-tools step may spend 18 retrying.
+    # 45, not 30: a shard takes about 20 minutes, and the image-tools step may spend 18 retrying.
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1] # = range of unit_tests.py's --shards below
     permissions:
       contents: read
-      issues: read # board.py check --repo reads the work-item issues
-      pull-requests: read # and cross-checks them against PRs (D21)
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
-          fetch-depth: 0 # base commit for the TRACE.md guard
+          fetch-depth: 0 # base commits, merge base and origin/main for the scope step
           persist-credentials: false
       - uses: ./.github/actions/scope
         id: scope
         with:
           push: full # CI-mainguard
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        if: steps.scope.outputs.records != 'true'
         with:
           python-version: "3.12"
       # tests/test_workflows.py reads the workflows with PyYAML (REV-LOW-tools, #5850): one wheel,
       # pinned by hash, no dependencies, no build step.
       - name: Python test dependencies (tests/requirements.txt)
+        if: steps.scope.outputs.records != 'true'
         run: 'python -m pip install --no-deps --only-binary=:all: --require-hashes -r tests/requirements.txt'
       # The harness tests build the broker.
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
@@ -134,12 +142,74 @@ jobs:
           AGENTOS_REQUIRE_REFERENCE_TOOLS: "1"
           AGENTOS_REFERENCE_ROOT: ${{ runner.temp }}/image-tools
           GOFLAGS: -buildvcs=false
+          SHARD: ${{ matrix.shard }}
         run: |
           # erofs-utils: the /usr list tests build erofs images (#4470). acl: the modules' shared Go caches.
           pkgs=$(for t in strace:strace mkfs.erofs:erofs-utils setfacl:acl; do command -v "${t%%:*}" >/dev/null || echo "${t#*:}"; done)
           [ -z "$pkgs" ] || { sudo apt-get update -q && sudo apt-get install -y -q $pkgs; }
           d="$GITHUB_WORKSPACE"; while [ "$d" != / ]; do sudo chmod o+x "$d"; d=$(dirname "$d"); done
-          sudo -E env "PATH=$PATH" python tools/unit_tests.py "$RUNNER_TEMP/reads"
+          sudo -E env "PATH=$PATH" python tools/unit_tests.py "$RUNNER_TEMP/reads" --shards 2 --index "$SHARD"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: steps.scope.outputs.records != 'true'
+        with:
+          name: unit-traces-${{ matrix.shard }} # the traces and shard-<index>.json, for checks
+          path: ${{ runner.temp }}/reads
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true # a rerun shard replaces its own
+  checks:
+    runs-on: ubuntu-24.04
+    # The one required check for the unit tests (CI-checks-under-45, #6464): it waits for every
+    # unit-tests shard and fails unless all succeeded. always(): a job skipped after a failed or
+    # cancelled shard would report success to the required check.
+    needs: unit-tests
+    if: ${{ always() }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      issues: read # board.py check --repo reads the work-item issues
+      pull-requests: read # and cross-checks them against PRs (D21)
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          fetch-depth: 0 # base commit for the TRACE.md guard
+          persist-credentials: false
+      - uses: ./.github/actions/scope
+        id: scope
+        with:
+          push: full # CI-mainguard
+      - name: Every unit-tests shard succeeded (CI-checks-under-45)
+        env:
+          SHARDS: ${{ needs.unit-tests.result }}
+        run: '[ "$SHARDS" = success ] || { echo "::error::the unit-tests shards ended $SHARDS"; exit 1; }'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12"
+      # tests/test_workflows.py reads the workflows with PyYAML (REV-LOW-tools, #5850): one wheel,
+      # pinned by hash, no dependencies, no build step.
+      - name: Python test dependencies (tests/requirements.txt)
+        run: 'python -m pip install --no-deps --only-binary=:all: --require-hashes -r tests/requirements.txt'
+      # The harness tests build the broker.
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        if: steps.scope.outputs.records != 'true'
+        with:
+          go-version: "1.26.11" # = broker/go.mod's toolchain line; checked below
+          cache: false
+      - name: Go is the toolchain go.mod names
+        if: steps.scope.outputs.records != 'true'
+        run: |
+          want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
+          got=$(go version | awk '{print $3}')
+          [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        if: steps.scope.outputs.records != 'true'
+        with:
+          pattern: unit-traces-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/reads
+      - name: Every unit-test module ran on exactly one shard and passed, and none sets the run's length (CI-par-clash-1)
+        if: steps.scope.outputs.records != 'true'
+        run: python tools/unit_tests.py --combine "$RUNNER_TEMP/reads"
       - name: The records-only step runs every test that reads a record (CI-PATHS)
         if: steps.scope.outputs.records != 'true'
         run: python tests/records_audit.py "$RUNNER_TEMP/reads"
@@ -150,12 +220,40 @@ jobs:
         if: steps.scope.outputs.records != 'true'
         # The uid boundary end to end, as root as tools/unit_tests.py runs; under it, as a module's
         # user, that test skips. The variable makes it fail rather than skip here.
-        run: sudo -E env "PATH=$PATH" AGENTOS_REQUIRE_UID_BOUNDARY=1 python -m unittest tests.test_unit_tests -v
+        run: |
+          pkgs=$(for t in strace:strace setfacl:acl; do command -v "${t%%:*}" >/dev/null || echo "${t#*:}"; done)
+          [ -z "$pkgs" ] || { sudo apt-get update -q && sudo apt-get install -y -q $pkgs; }
+          d="$GITHUB_WORKSPACE"; while [ "$d" != / ]; do sudo chmod o+x "$d"; d=$(dirname "$d"); done
+          sudo -E env "PATH=$PATH" AGENTOS_REQUIRE_UID_BOUNDARY=1 python -m unittest tests.test_unit_tests -v
+      - name: mutgate's cgroup containment (#6392)
+        if: steps.scope.outputs.records != 'true'
+        # MUT-memcap-cgroup: the unit tests run mutgate as a local, advisory run (no cgroup); its
+        # containment runs here as mutgate.yml runs it, in a delegated cgroup v2 directory, with no skip.
+        working-directory: tests
+        run: |
+          sudo mkdir /sys/fs/cgroup/mutgate /sys/fs/cgroup/mutgate/main
+          echo +memory | sudo tee /sys/fs/cgroup/mutgate/cgroup.subtree_control > /dev/null
+          sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/mutgate
+          echo $$ | sudo tee /sys/fs/cgroup/mutgate/main/cgroup.procs > /dev/null
+          AGENTOS_MUTGATE_CGROUP=/sys/fs/cgroup/mutgate python -m unittest \
+            test_mutgate.Deletion.test_a_cgroup_leaf_holds_every_descendant_and_its_exact_peak \
+            test_mutgate.Deletion.test_a_test_run_past_its_memory_cap_is_killed_with_its_children \
+            test_mutgate.Deletion.test_a_capped_run_kills_a_child_that_left_its_process_group \
+            test_mutgate.Deletion.test_ci_without_a_delegated_cgroup_is_an_error \
+            test_mutgate.GremlinsMemoryCap.test_a_mutant_run_past_its_cap_is_killed_and_exits_1 \
+            test_mutgate.GremlinsMemoryCap.test_a_mutant_run_under_its_cap_keeps_gos_exit_code \
+            test_mutgate.GremlinsMemoryCap.test_a_mutant_runs_own_toolchain_is_not_counted \
+            test_mutgate.GremlinsMemoryCap.test_a_cover_run_past_half_the_cap_fails \
+            test_mutgate.GremlinsMemoryCap.test_a_cover_run_counts_each_test_binarys_whole_life_peak \
+            test_mutgate.GremlinsMemoryCap.test_a_go_test_that_cannot_be_capped_is_refused \
+            test_mutgate.GremlinsMemoryCap.test_run_caps_gremlins_mutant_runs > "$RUNNER_TEMP/cgroup.log" 2>&1 || { cat "$RUNNER_TEMP/cgroup.log"; exit 1; }
+          cat "$RUNNER_TEMP/cgroup.log"
+          tail -n 1 "$RUNNER_TEMP/cgroup.log" | grep -qx OK
       - name: Document tool tests (records-only change; CI-docs)
         # The tests of the tools the steps below run, and every test that reads a record file;
         # full CI's record-read audit fails when a test that reads one is missing here.
         if: steps.scope.outputs.records == 'true'
-        run: python -m unittest tests.test_ci_scope tests.test_board tests.test_doclint tests.test_trace tests.test_metrics tests.test_risk_tier tests.test_product_name tests.test_specslice tests.test_stalequeued tests.test_clk7_consent tests.test_krn2_trusted_base tests.test_workflows -v
+        run: python -m unittest tests.test_ci_scope tests.test_board tests.test_doclint tests.test_trace tests.test_metrics tests.test_risk_tier tests.test_product_name tests.test_specslice tests.test_stalequeued tests.test_clk7_consent tests.test_krn2_trusted_base tests.test_workflows tests.test_pins -v
       - name: Inbound rules on a stand-in home network (DEV-net-e 2a)
         if: steps.scope.outputs.records != 'true'
         run: |
@@ -577,14 +675,17 @@ jobs:
         # require_ran.py for the Go tests; for the Python ones, AGENTOS_REQUIRE_BROWSER=1 and the
         # script run, which exits 1 on any skip. The zip may come from the cache step before; one
         # that fails the hash is fetched afresh and checked again (#6175), so a bad cache entry can
-        # neither supply another binary nor fail every run; a second mismatch still fails.
+        # neither supply another binary nor fail every run; a second mismatch still fails. The warning
+        # names the delete command for the entry the restore read: CFT_KEY is that step's key (#6188).
+        env:
+          CFT_KEY: cft-headless-shell-${{ steps.image.outputs.os }}-${{ env.CFT_SHELL_SHA256 }}
         run: |
           python3 -m venv "$RUNNER_TEMP/pw"
           "$RUNNER_TEMP/pw/bin/python" -m pip install -q --no-deps --only-binary=:all: --require-hashes \
             -r ../tests/requirements-browser.txt
           zip="$HOME/.cache/agentos-cft/shell.zip"
           if ! { [ -f "$zip" ] && echo "$CFT_SHELL_SHA256  $zip" | sha256sum -c -; }; then
-            [ ! -f "$zip" ] || echo "::warning::The cached headless shell fails its pin; fetching it afresh. Delete the cft-headless-shell cache entry so main saves a good one (#6175)."
+            [ ! -f "$zip" ] || echo "::warning::The cached headless shell fails its pin; fetching it afresh. Delete the bad entry so main saves a good one (#6175): gh api -X DELETE \"repos/$GITHUB_REPOSITORY/actions/caches?key=$CFT_KEY\""
             mkdir -p "${zip%/*}"
             curl -fsSL --retry 3 -o "$zip" "$CFT_SHELL_URL"
           fi
@@ -1059,3 +1160,14 @@ jobs:
           HOSTCHECK_QEMU: "1"
           HOSTCHECK_TOOLS_ROOT: ${{ runner.temp }}/hostcheck-tools
         run: python -m unittest tests.test_hostcheck -v
+  # CI-mutgate-after-ci (#6569): the mutation gate runs only once every other job here passed on this head, so a
+  # head whose ci fails takes no mutgate runner. A pull request only, as mutgate.yml's own trigger was. Its jobs
+  # are `mutgate / <job>` in this run; main's ruleset does not require them, so tools/premerge.py holds the merge
+  # until `mutgate / claimed` succeeded and no `mutgate / ` job failed: this job skipped never reads as a pass.
+  mutgate:
+    needs: [unit-tests, checks, broker-race, broker-checks, machines, hostcheck]
+    if: ${{ github.event_name == 'pull_request' }}
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/mutgate.yml

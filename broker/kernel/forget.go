@@ -18,7 +18,8 @@ import (
 // side texts it unchanged, and ForgetReply hands the subjects out only for
 // "YES <code>" from it. One ask waits at a time, unlogged: a newer ask,
 // STOP, any other reply, ForgetAskFor or a restart ends it, erasing nothing.
-// A reading too wide for any reply to arrive in time asks nothing.
+// The text names the time a reply has, which a wide reading shortens; a
+// reading too wide for any reply to arrive in time asks nothing.
 
 const ForgetAskFor int64 = 600_000 // ms
 
@@ -47,6 +48,32 @@ var kindWords = map[string][2]string{
 	"retrieve-vectors": {"search entry", "search entries"},
 }
 
+// KindList says counts by class in kindWords, as the ask and the owner
+// side's after-erase notice both show them: "1 face, 2 messages, 1 other
+// item", by word with other items last, never counting a name's label, and
+// "" when there are none (#5378).
+func KindList(classes map[string]int) string {
+	kinds, other := map[[2]string]int{}, [2]string{"other item", "other items"}
+	for c, n := range classes {
+		if w, ok := kindWords[c]; ok {
+			kinds[w] += n
+		} else if c != ClassLabel {
+			kinds[other] += n
+		}
+	}
+	rank := func(w [2]string) string { // by word, other items last
+		if w == other {
+			return "\x7f"
+		}
+		return w[0]
+	}
+	var list []string
+	for _, w := range slices.SortedFunc(maps.Keys(kinds), func(a, b [2]string) int { return strings.Compare(rank(a), rank(b)) }) {
+		list = append(list, fmt.Sprintf("%d %s", kinds[w], w[min(kinds[w], 2)-1]))
+	}
+	return strings.Join(list, ", ")
+}
+
 type forgetAsk struct {
 	subjects []string
 	code     string
@@ -70,44 +97,46 @@ func (k *Kernel) AskForget(at int64, label string) (string, error) {
 	// ForgetReply refuses a YES once Latest reaches the lapse, so it would
 	// refuse every YES while Latest does not narrow; were it to narrow, the
 	// refusal costs one retry and never an unwanted erase.
-	if now.Latest >= now.Earliest+ForgetAskFor {
+	// The YES is refused once Latest has run left more, wherever true time
+	// sits in the reading, so the text promises left rounded down; under a
+	// second no promise is true, and the refusal's "10 minutes or more" is
+	// true to the second (#5938).
+	left := now.Earliest + ForgetAskFor - now.Latest
+	if left < 1_000 {
 		return "", ErrForgetClock
+	}
+	within := plural(left/60_000, "minute")
+	if left < 60_000 {
+		within = plural(left/1_000, "second")
 	}
 	all := "everything"
 	if len(unread) > 0 {
 		all = "everything I can read" // a label that cannot be read may name it too
 	}
-	kinds, other := map[[2]string]int{}, [2]string{"other item", "other items"}
+	classes := map[string]int{}
 	for _, s := range subjects {
 		for _, it := range k.s.subjects[s].items {
-			if w, ok := kindWords[it.Class]; ok {
-				kinds[w]++
-			} else if it.Class != ClassLabel {
-				kinds[other]++
-			}
+			classes[it.Class]++
 		}
 	}
-	rank := func(w [2]string) string { // by word, other items last
-		if w == other {
-			return "\x7f"
-		}
-		return w[0]
-	}
-	var list []string
-	for _, w := range slices.SortedFunc(maps.Keys(kinds), func(a, b [2]string) int { return strings.Compare(rank(a), rank(b)) }) {
-		list = append(list, fmt.Sprintf("%d %s", kinds[w], w[min(kinds[w], 2)-1]))
-	}
-	items := "nothing but the name"
-	if len(list) > 0 {
-		items = strings.Join(list, ", ")
+	items := KindList(classes)
+	if items == "" {
+		items = "nothing but the name"
 	}
 	var b [8]byte // 10^6 codes from 2^64 draws: no code is notably likelier
 	if _, err := io.ReadFull((*k.log.p).cfg.Rand, b[:]); err != nil {
 		return "", err
 	}
 	k.forget = &forgetAsk{subjects, fmt.Sprintf("%06d", binary.BigEndian.Uint64(b[:])%1_000_000), now.Earliest + ForgetAskFor}
-	return fmt.Sprintf("Forget %s under “%s”, %s? Reply YES %s to forget it. Any other reply, or none within 10 minutes, forgets nothing.",
-		all, label, items, k.forget.code), nil
+	return fmt.Sprintf("Forget %s under “%s”, %s? Reply YES %s to forget it. Any other reply, or none within %s, forgets nothing.",
+		all, label, items, k.forget.code, within), nil
+}
+
+func plural(n int64, unit string) string {
+	if n == 1 {
+		return "1 " + unit
+	}
+	return fmt.Sprintf("%d %ss", n, unit)
 }
 
 // ForgetReply ends the waiting ask and, if reply is "YES <code>" from its

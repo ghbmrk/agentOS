@@ -4,9 +4,13 @@ broker/kernel/privfile's (TestUnitRulesUnderSystemd, TestBuiltUnits); these pin 
 
 REQ: KRN-2
 """
+import ast
 import hashlib
 import os
+import re
 import pathlib
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -1183,8 +1187,24 @@ class LintTest(unittest.TestCase):
                 def failed_generators(self):
                     return self.failed
 
+                def user_manager(self):
+                    return User()
+
                 def stop(self):
                     stopped.append(1)
+
+            class User:
+                """Root's user manager: its units are read from its UnitPath (#6002)."""
+                failed = set()
+
+                def unit_path(self):
+                    return ["/etc/systemd/user", "/usr/lib/systemd/user"]
+
+                def show(self, units, props):
+                    return shown({u: ("loaded", "/etc/systemd/user/" + u, []) for u in units})
+
+                def failed_generators(self):
+                    return self.failed
             real = offline_systemd.Manager
             offline_systemd.Manager = Fake
             try:
@@ -1194,11 +1214,19 @@ class LintTest(unittest.TestCase):
                         with self.assertRaisesRegex(SystemExit, "generators failed"):
                             r.lint(d, d, "", lambda view: lambda p: False)
                 Fake.failed = set()
-                self.assertEqual([u["unit"] for u in r.lint(d, d, "", lambda view: lambda p: False)["units"]],
-                                 ["a.service"])
+                User.failed = {"x-user-generator"}
+                with self.assertRaisesRegex(SystemExit, "root's user manager: generators failed"):
+                    r.lint(d, d, "", lambda view: lambda p: False)
+                User.failed = set()
+                (pathlib.Path(v.root) / "etc/systemd/user").mkdir(parents=True)
+                (pathlib.Path(v.root) / "etc/systemd/user/b.service").write_text("[Service]\n")
+                got = r.lint(d, d, "", lambda view: lambda p: False)
+                self.assertEqual([(u["unit"], u["user"]) for u in got["units"]],
+                                 [("a.service", False), ("b.service", True)])
+                self.assertEqual((got["managers"], got["env"], got["pkg_env"]), ([], {}, {}))
             finally:
                 offline_systemd.Manager = real
-            self.assertEqual(len(stopped), 3)
+            self.assertEqual(len(stopped), 4)
 
 
 class NamesTest(unittest.TestCase):
@@ -1258,11 +1286,686 @@ class NamesTest(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, "a name with a byte outside"):
                     r.names(v, r.unit_dirs(v))
 
-    def test_the_control_is_a_drop_in_of_ours_on_a_packaged_root_unit(self):
-        (p, text), = r.CONTROL.items()
-        self.assertTrue(p.startswith("etc/systemd/system/systemd-tmpfiles-setup.service.d/"))
-        self.assertIn("LD_PRELOAD", text)
-        self.assertEqual(r.CONTROL_WANT, 'variable "LD_PRELOAD"')
+    def test_the_control_is_a_drop_in_of_ours_on_a_packaged_root_unit_of_each_manager(self):
+        self.assertEqual(sorted(p.split("/")[2] for p in r.CONTROL), ["system", "user"])
+        want = r.CONTROL_WANT.split("\n")
+        self.assertEqual(len(want), 2)
+        for p, text in r.CONTROL.items():
+            self.assertTrue(p.split("/", 3)[3].startswith("systemd-tmpfiles-setup.service.d/"), p)
+            self.assertIn("LD_PRELOAD", text)
+            # each refusal names its own file, so one manager's cannot stand for the other's
+            self.assertEqual(len([w for w in want if p + ": Environment=LD_PRELOAD" in w]), 1, p)
+        self.assertTrue(want[1].startswith("root's user manager: "))
+
+
+class ManagerConfTest(unittest.TestCase):
+    """manager_confs() prints each system.conf, user.conf and .conf.d file of ours (#6002 item 2)."""
+
+    def test_only_files_of_ours_are_printed_and_a_mask_is_not(self):
+        bad = "[Manager]\nDefaultEnvironment=BASH_ENV=/tmp/x\n"
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/etc/systemd/user.conf.d/z.conf": bad, "/etc/systemd/system.conf": bad,
+                         "/usr/lib/systemd/user.conf.d/p.conf": bad, "/usr/lib/systemd/system.conf.d/l.conf":
+                         "-> /usr/lib/systemd/user.conf.d/p.conf", "/etc/systemd/system.conf.d/m.conf": "-> /dev/null",
+                         "/root/.config/systemd/user.conf": bad, "/etc/xdg/systemd/user.conf.d/x.conf": bad,
+                         "/etc/systemd/user.conf.d/z.txt": bad})
+            got = [c["path"] for c in r.manager_confs(v, lambda p: p == "/usr/lib/systemd/user.conf.d/p.conf")]
+        self.assertEqual(got, ["/etc/systemd/system.conf", "/etc/systemd/user.conf.d/z.conf",
+                               "/usr/lib/systemd/system.conf.d/l.conf", "/root/.config/systemd/user.conf",
+                               "/etc/xdg/systemd/user.conf.d/x.conf"])
+
+
+class EnvFilesTest(unittest.TestCase):
+    """env_files() holds every EnvironmentFile= to the reader-side rule (#6474 re-plan) and prints the env
+    files the tree holds at boot (#6002 item 3, #6312)."""
+
+    UID = os.getuid()  # a test tree's owner stands for root
+    PKG = "/usr/lib/systemd/system/pkgx.service"
+
+    def env(self, v, value, ours=False, packaged=lambda p: False, uid=None):
+        units = [{"files": [{"ours": ours, "path": self.PKG, "text": "[Service]\nEnvironmentFile=%s\n" % value}]}]
+        return r.env_files(v, units, packaged, uid=self.UID if uid is None else uid)
+
+    def refused(self, v, value, why, ours=False, uid=None):
+        for o in ((ours,) if ours is not None else (False, True)):
+            with self.subTest(value=value, ours=o):
+                with self.assertRaisesRegex(SystemExit, re.escape("unit rules: %s: EnvironmentFile=%s: " % (self.PKG, value))
+                                            + ".*" + why) as cm:
+                    self.env(v, value, o, uid=uid)
+                # #6506 UX 7077742901: the step follows the cause; the mask step only for a cause in the value
+                msg = str(cm.exception)
+                cause_steps = ("; move the mount off it", "; make that component a root-owned directory",
+                               "; drop or move that line", "; remove that setting from that unit",
+                               "; write it as a plain absolute path, or drop it")
+                if any(c in msg for c in cause_steps):
+                    self.assertNotIn("so mask it", msg)
+                    self.assertNotIn("name an env file under", msg)
+                elif not o:
+                    self.assertIn("the unit is a package's, so mask it", msg)
+                else:
+                    self.assertIn("; name an env file under /etc/agentos or /usr, a fixed path", msg)
+
+    def test_the_tree_copy_of_each_named_file(self):
+        unit = ("[Service]\nEnvironmentFile=-/etc/agentos/a.env\n EnvironmentFile = /usr/lib/agentos/b.env \n"
+                "EnvironmentFile=-/etc/agentos/gone.env\nEnvironmentFile=\n")
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/etc/agentos/a.env": "A=1\n", "/usr/lib/agentos/b.env": "B=1\n", "/usr/lib/x/p.env": "P=1\n",
+                         "/usr/lib/x/q.env": "Q=1\n"})
+            units = [{"files": [{"ours": True, "text": unit}]},
+                     {"files": [{"ours": False, "text": "[Service]\nEnvironmentFile=/usr/lib/x/p.env\n"
+                                                        "EnvironmentFile=/usr/lib/x/q.env\n"
+                                                        "EnvironmentFile=-/etc/agentos/a.env\n"}]}]
+            got = r.env_files(v, units, lambda p: p == "/usr/lib/x/p.env", uid=self.UID)
+        # a missing file is printed under no key; a package's own file is the package's; a file of ours a
+        # package's line names is in the second map, unless a line of ours names it too
+        self.assertEqual(got, ({"/etc/agentos/a.env": "A=1\n", "/usr/lib/agentos/b.env": "B=1\n"},
+                               {"/usr/lib/x/q.env": "Q=1\n"}))
+
+    def test_a_specifier_glob_or_backslash_fails_the_run(self):
+        # #6495 Security reject 7075986224: systemd 255 globs the value (safe_glob), so -/var/lib/*/env read
+        # a file a service user writes; a specifier (%i, %t) is the same unknowable set, so neither is expanded
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/usr/lib/x/a.env": "A=1\n"})
+            for value in ("-/var/lib/*/env", "-/usr/lib/x/*.env", "/usr/lib/x/?.env", "/usr/lib/x/[a].env",
+                          "-%t/pkgx-r", "/usr/lib/x/%i.env", "/usr/lib/x/%%.env", "/usr/lib/x/a\\x2e.env"):
+                self.refused(v, value, re.escape("holds a specifier, a glob (*, ? or [) or a backslash"), None)
+
+    def test_a_path_that_is_not_absolute_and_normal_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/usr/lib/x/a.env": "A=1\n"})
+            for value in ("rel.env", "-usr/lib/x/a.env", "//usr/lib/x/a.env", "/usr/lib/./x/a.env",
+                          "/usr/lib/y/../x/a.env", "/usr/lib/x/a.env/", "/usr//lib/x/a.env"):
+                self.refused(v, value, "it is not an absolute, normal path", None)
+
+    def test_a_path_outside_the_root_only_trees_fails_the_run(self):
+        # the fifth route (#6495 lens 7075856011 delta): d /var/tmp/agentos-n made a directory any local user
+        # could make first; /etc/default and /run are the earlier ones. Only /etc/agentos and /usr pass.
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/etc/default/pkgx": "X=1\n", "/etc/agentosx/e": "X=1\n"})
+            for value in ("-/var/tmp/agentos-n/env", "-/var/lib/agentos-n/env", "/etc/default/pkgx", "-/run/x.env",
+                          "-/tmp/x", "-/root/x", "-/home/x", "-/etc/agentosx/e", "-/etc/agentos", "-/usr", "-/etc/x",
+                          "-/boot/x", "-/var/run/x", "-/lib/x/a.env"):
+                self.refused(v, value, re.escape("it is not under /etc/agentos or /usr, the trees only root writes"), None)
+            self.assertEqual(self.env(v, "-/etc/agentos/agentosd.env"), ({}, {}))
+            self.assertEqual(self.env(v, "-/usr/lib/agentos/x/y.env", True), ({}, {}))
+
+    def test_a_mount_point_on_the_way_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {LIB + "etc-agentos.mount": "[Mount]\nWhat=/dev/sda9\nWhere=/etc/agentos\n",
+                         LIB + "usr-lib-x.automount": "[Automount]\nWhere=/usr/lib/x\n"})
+            self.refused(v, "-/etc/agentos/agentosd.env", re.escape("/etc/agentos is a mount point on its way"), None)
+            self.refused(v, "-/usr/lib/x/a.env", re.escape("/usr/lib/x is a mount point on its way"), None)
+            self.assertEqual(self.env(v, "-/usr/lib/y/a.env"), ({}, {}))
+
+    def test_a_chain_root_does_not_hold_alone_fails_the_run(self):
+        # every component the tree holds is a plain directory (the last a regular file) of root's, with no group
+        # or other write; the walk stops at the first one the tree lacks
+        cases = {
+            "link dir": ({"/etc/agentos": "-> /var/lib/agentos-n"}, "-/etc/agentos/agentosd.env",
+                         "/etc/agentos is a link"),
+            "link file": ({"/etc/agentos/agentosd.env": "-> /var/tmp/x"}, "-/etc/agentos/agentosd.env",
+                          "/etc/agentos/agentosd.env is a link"),
+            "dangling link": ({"/usr/lib/x/a.env": "-> /nowhere"}, "-/usr/lib/x/a.env", "/usr/lib/x/a.env is a link"),
+            "file on the way": ({"/etc/agentos": "X=1\n"}, "-/etc/agentos/agentosd.env",
+                                "/etc/agentos is not a directory"),
+            "directory at the end": ({"/usr/lib/x/a.env/b": "X=1\n"}, "-/usr/lib/x/a.env",
+                                     "/usr/lib/x/a.env is not a regular file"),
+        }
+        for name, (files, value, why) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
+                self.refused(tree(d, files), value, re.escape(why), None)
+        # modes: group or other write anywhere on the way, the file included, / included
+        for where, mode in (("/etc", 0o775), ("/etc", 0o757), ("/etc/agentos", 0o1777), ("/etc/agentos/agentosd.env", 0o666),
+                            ("/etc/agentos/agentosd.env", 0o620), ("/", 0o777)):
+            with self.subTest(where=where, mode=oct(mode)), tempfile.TemporaryDirectory() as d:
+                v = tree(d, {"/etc/agentos/agentosd.env": "A=1\n"})
+                os.chmod(v.root + where, mode)
+                self.refused(v, "-/etc/agentos/agentosd.env",
+                             re.escape("%s has mode %04o, which lets its group or others write it" % (where, mode)), None)
+        # /usr's own top, read through the usr view
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/usr/lib/x/a.env": "A=1\n"})
+            os.chmod(v.usr, 0o777)
+            self.refused(v, "/usr/lib/x/a.env", re.escape("/usr has mode 0777"), None)
+        # an owner other than root: the first component names it
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/usr/lib/x/a.env": "A=1\n"})
+            self.refused(v, "/usr/lib/x/a.env", re.escape("/ is owned by uid %d, not root" % self.UID), None,
+                         uid=self.UID + 1)
+        # root's 0700 /etc/agentos, a 0600 file, 0755 directories and a missing tail all pass
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/etc/agentos/agentosd.env": "A=1\n"})
+            os.chmod(v.root + "/etc/agentos", 0o700)
+            os.chmod(v.root + "/etc/agentos/agentosd.env", 0o600)
+            self.assertEqual(self.env(v, "-/etc/agentos/agentosd.env", True), ({"/etc/agentos/agentosd.env": "A=1\n"}, {}))
+            self.assertEqual(self.env(v, "-/etc/agentos/sub/gone.env"), ({}, {}))
+
+    def test_a_tmpfiles_line_on_the_way_fails_the_run(self):
+        # whatever its type or whose it is: a d line re-modes, an L line links, a C line copies, a z or Z
+        # line re-owns, an f or w line writes; a glob or specifier line by its fixed part, read as a prefix
+        pkg = lambda p: p == "/usr/lib/tmpfiles.d/pkg.conf"  # noqa: E731
+        for line in ("d /etc/agentos 0777 - - -", "L /etc/agentos - - - - /var/tmp/x", "z /etc 0777", "Z / 0777",
+                     "C /etc/agentos/agentosd.env - - - - /usr/share/x", "f /etc/agentos/agentosd.env - - - - X=1",
+                     "z /etc/agent* 0777", "z /etc/agentos/* 0666", "z /e?c/agentos 0777", "Z /e[t]c 0777",
+                     "z %E/agentos 0777", "L+ /etc/agentos/ - - - - /tmp", "a+ /etc/agentos - - - - u:nobody:rwx",
+                     # #6506 L3 7076358038 item 2: systemd-tmpfiles simplifies the path first (path_simplify)
+                     "z /etc//agentos 0777 - -", "z /etc/./agentos 0777 - -", "z //etc/agentos 0777 - -",
+                     "z /etc/agentos/. 0777 - -", "z /etc/agentos/./agentosd.env 0666"):
+            for conf in ("pkg.conf", "x.conf"):
+                with self.subTest(line=line, conf=conf), tempfile.TemporaryDirectory() as d:
+                    v = tree(d, {"/usr/lib/tmpfiles.d/" + conf: line + "\n"})
+                    units = [{"files": [{"ours": False, "path": self.PKG,
+                                         "text": "[Service]\nEnvironmentFile=-/etc/agentos/agentosd.env\n"}]}]
+                    with self.assertRaisesRegex(SystemExit, re.escape(
+                            "/usr/lib/tmpfiles.d/%s: tmpfiles.d line %r names it or a directory on its way" % (conf, line))):
+                        r.env_files(v, units, pkg, uid=self.UID)
+        # a line beside the way, or below a directory on it, passes
+        for line in ("d /etc/agentos-x 0777", "z /etc/agentosd.env 0666", "d /usr2 0777", "d /var/lib/agentos 0700",
+                     "d /etc/agen 0777", "z /etc/agentos/agentosd.en 0666"):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                v = tree(d, {"/usr/lib/tmpfiles.d/pkg.conf": line + "\n"})
+                self.assertEqual(self.env(v, "-/etc/agentos/agentosd.env", packaged=pkg), ({}, {}))
+
+    def test_a_directory_pid1_makes_on_the_way_fails_the_run(self):
+        # #6506 Security 7076346600 item 1: PID 1 makes /etc/agentos for a unit at start, with the unit's mode,
+        # before onboarding does; whoever owns the unit and whichever manager runs it
+        env = "[Service]\nEnvironmentFile=-/etc/agentos/agentosd.env\n"
+        refused = {
+            # the three repros
+            "[Service]\nConfigurationDirectory=agentos\nConfigurationDirectoryMode=0777\n":
+                "ConfigurationDirectory= in /usr/lib/systemd/system/m.service names /etc/agentos",
+            "[Service]\nUser=nobody\nConfigurationDirectory=x:agentos\n": "names /etc/agentos,",
+            "[Mount]\nWhat=/etc/agentos\nWhere=/mnt/x\nOptions=bind\nDirectoryMode=0777\n": "What= in",
+            # the rest of the class: a parent made below the tree's top, a dynamic user's form, a socket's
+            # directory, a path unit that makes its path, a mount point, an ancestor
+            "[Service]\nConfigurationDirectory=agentos/sub\n": "names /etc/agentos/sub,",
+            "[Socket]\nListenStream=/etc/agentos/s/sock\nDirectoryMode=0777\n": "ListenStream= in",
+            "[Path]\nPathChanged=/etc/agentos/q\nMakeDirectory=yes\nDirectoryMode=0777\n": "PathChanged= in",
+            "[Mount]\nWhat=tmpfs\nWhere=/etc/agentos/m\n": "Where= in",
+            "[Mount]\nWhat=/etc\nWhere=/mnt/y\nOptions=bind\n": "names /etc,",
+            "[Socket]\nListenFIFO=/etc//agentos/./f\n": "names /etc/agentos/f,",
+        }
+        for text, why in refused.items():
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
+                units = [{"files": [{"ours": False, "path": "/usr/lib/systemd/system/m.service", "text": text}]},
+                         {"files": [{"ours": True, "path": self.PKG, "text": env}]}]
+                with self.assertRaisesRegex(SystemExit, re.escape("EnvironmentFile=-/etc/agentos/agentosd.env: ") + ".*"
+                                            + re.escape(why) + ".*a directory PID 1 may make on its way"):
+                    r.env_files(tree(d, {}), units, lambda p: False, uid=self.UID)
+        # a value PID 1 would decode may make any path: it refuses an env path in /etc/agentos, not one in /usr
+        for text in ("[Socket]\nListenStream=/etc/%i/s\n", "[Socket]\nListenStream=%y/agentos\n",
+                     "[Socket]\nListenStream=/etc/x/.%i/agentos/s\n", "[Socket]\nListenStream=/run/%I/s\n",
+                     "[Socket]\nListenStream=/etc/x/%m.%i/../../agentos/s\n", "[Socket]\nListenStream=/run/x%I/s\n",
+                     "[Socket]\nListenStream=%i/agentos/s\n", "[Service]\nStateDirectory=x%I\n",
+                     "[Socket]\nListenStream=etc/agentos/%i\n",
+                     "[Mount]\nWhat=/etc/\\x61gentos\nWhere=/mnt/x\n", "[Socket]\nListenStream=etc/agentos/s\n",
+                     "[Service]\nConfigurationDirectory=../agentos\n"):
+            for value, refused in (("-/etc/agentos/agentosd.env", True), ("-/usr/lib/x/a.env", False)):
+                with self.subTest(text=text, value=value), tempfile.TemporaryDirectory() as d:
+                    units = [{"files": [{"ours": False, "path": "/usr/lib/systemd/system/m.service", "text": text}]},
+                             {"files": [{"ours": True, "path": self.PKG, "text": "[Service]\nEnvironmentFile=%s\n" % value}]}]
+                    if not refused:
+                        self.assertEqual(r.env_files(tree(d, {}), units, lambda p: False, uid=self.UID), ({}, {}))
+                        continue
+                    with self.assertRaisesRegex(SystemExit, re.escape("in /usr/lib/systemd/system/m.service holds a path "
+                                                                      "PID 1 may make that the lint does not read")):
+                        r.env_files(tree(d, {}), units, lambda p: False, uid=self.UID)
+        # #6506 L3 7076852851: a specifier is read as its values, or the value is cut there and read as a prefix
+        spec = {
+            "[Mount]\nWhat=%E/agentos\nWhere=/mnt/x\nOptions=bind\n": "What= in /usr/lib/systemd/system/m.service names /etc/agentos,",
+            "[Socket]\nListenStream=%E/agentos/s\n": "names /etc/agentos/s,",
+            "[Socket]\nListenStream=/etc/agen%i/s\n": "names /etc/agen,",
+            "[Service]\nConfigurationDirectory=%i\n": "names /etc/,",
+            "[Service]\nConfigurationDirectory=agentos%i\n": "names /etc/agentos,",
+            "[Socket]\nListenStream=/etc/agentos/%m.%i/s\n": "names /etc/agentos/,",
+            "[Socket]\nListenFIFO=-%E/agentos/%%x\n": "names /etc/agentos/%x,",
+            "[Socket]\nListenStream=/etc/agentos/q%i/s\n": "names /etc/agentos/q,",
+            "[Socket]\nListenStream=%E//agentos/./s\n": "names /etc/agentos/s,",
+            "[Mount]\nWhat=tmpfs\nWhere=/mnt/q\nOptions=x=%E/agentos,y\n": "names /etc/agentos,",
+        }
+        for text, why in spec.items():
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
+                units = [{"files": [{"ours": False, "path": "/usr/lib/systemd/system/m.service", "text": text}]},
+                         {"files": [{"ours": True, "path": self.PKG, "text": env}]}]
+                with self.assertRaisesRegex(SystemExit, re.escape(why) + " a directory PID 1 may make"):
+                    r.env_files(tree(d, {}), units, lambda p: False, uid=self.UID)
+        # synthetic copies of systemd's journald@.socket and root's user dbus.socket, and other specifier forms
+        # that reach no env path, pass
+        for text in ("[Unit]\nDescription=Journal Socket for Namespace %i\nDocumentation=man:systemd-journald.service(8)\n"
+                     "StopWhenUnneeded=yes\n[Socket]\nService=systemd-journald@%i.service\nListenStream=/run/systemd/journal.%i/stdout\n"
+                     "ListenDatagram=/run/systemd/journal.%i/socket\nListenDatagram=/run/systemd/journal.%i/dev-log\n"
+                     "SocketMode=0666\nPassCredentials=yes\nPassSecurity=yes\nReceiveBuffer=8M\nSendBuffer=8M\n",
+                     "[Unit]\nDescription=D-Bus User Message Bus Socket\n[Socket]\nListenStream=%t/bus\nExecStartPost=-/usr/bin/systemctl --user set-environment DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus\n[Install]\nWantedBy=sockets.target\nAlso=dbus.service\n",
+                     "[Service]\nLogsDirectory=journal/%m.%i\nRuntimeDirectory=systemd/journal.%i redis-%i\n",
+                     "[Socket]\nListenStream=/run/os-%o-%p/s\n",
+                     "[Socket]\nListenStream=%i\nSymlinks=/run/x/n-%N\nListenFIFO=%E/agentos-x/f\nListenSpecial=%h/x\n"
+                     "[Install]\nAlias=x@%i.socket\nDefaultInstance=%H\n"):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
+                units = [{"files": [{"ours": False, "path": "/usr/lib/systemd/system/m.socket", "text": text}]},
+                         {"files": [{"ours": True, "path": self.PKG, "text": env}]}]
+                self.assertEqual(r.env_files(tree(d, {}), units, lambda p: False, uid=self.UID), ({}, {}))
+        # a specifier that may unescape to a '/' (L3 7077264942 1(a)), or a .. a link before it would resolve,
+        # is refused, not modelled
+        unread = {
+            "L3 %I": "[Socket]\nListenStream=%I/s.sock\nDirectoryMode=0777\n",
+            "L3 Symlinks %I": "[Socket]\nListenStream=/run/m.sock\nSymlinks=%I/l\n",
+            "L3 path %I": "[Path]\nPathChanged=%I/q\nMakeDirectory=yes\nDirectoryMode=0777\n",
+            "%J": "[Socket]\nListenStream=/run/x%J/s\n",
+            "%P": "[Mount]\nWhat=/x%P\nWhere=/mnt/x\nOptions=bind\n",
+            # #6474: /var/run/../etc is /etc on the box, wherever the string says it is
+            ".. after a link": "[Socket]\nListenStream=/var/run/../etc/agentos/s\n",
+            ".. before a specifier": "[Socket]\nListenStream=/var/run/../etc/agentos/x%i\n",
+            ".. in a path unit": "[Path]\nPathChanged=/run/x/../../etc/agentos/q\nMakeDirectory=yes\n",
+        }
+        for name, text in unread.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
+                units = [{"files": [{"ours": False, "path": "/usr/lib/systemd/system/m@.socket", "text": text}]},
+                         {"files": [{"ours": True, "path": self.PKG, "text": env}]}]
+                with self.assertRaisesRegex(SystemExit, re.escape("EnvironmentFile=-/etc/agentos/agentosd.env: ") +
+                                            r".* in /usr/lib/systemd/system/m@\.socket holds a path PID 1 may make that "
+                                            r"the lint does not read"):
+                    r.env_files(tree(d, {}), units, lambda p: False, uid=self.UID)
+
+        with tempfile.TemporaryDirectory() as d:  # a tmpfiles.d line other than L makes no link
+            units = [{"files": [{"ours": False, "path": "/usr/lib/systemd/system/m.service",
+                                 "text": "[Socket]\nListenStream=/run/e/agentos/s.sock\n"}]},
+                     {"files": [{"ours": True, "path": self.PKG, "text": env}]}]
+            v = tree(d, {"/usr/lib/tmpfiles.d/pkg.conf": "C /run/e - - - - /etc\nd /run/e/agentos 0755\n"})
+            self.assertEqual(r.env_files(v, units, lambda p: p == "/usr/lib/tmpfiles.d/pkg.conf", uid=self.UID), ({}, {}))
+        with tempfile.TemporaryDirectory() as d:  # a link elsewhere passes
+            units = [{"files": [{"ours": False, "path": "/usr/lib/systemd/system/m.service",
+                                 "text": "[Socket]\nListenStream=/var/lib/e/agentos/s.sock\n"}]},
+                     {"files": [{"ours": True, "path": self.PKG, "text": env}]}]
+            self.assertEqual(r.env_files(tree(d, {"/var/lib/e": "-> /usr/lib", "/usr/lib/.keep": ""}), units,
+                                         lambda p: False, uid=self.UID), ({}, {}))
+        # elsewhere, or only watched, or a namespace mount, or below /usr's own env path's way: passes
+        for text in ("[Service]\nStateDirectory=agentos\nConfigurationDirectory=agentos-x\n",
+                     "[Path]\nPathExists=/etc/agentos/agentosd.env\nPathChanged=/etc/agentos/modem.env\n",
+                     "[Path]\nPathChanged=/etc/agentos/q\nMakeDirectory=no\n",
+                     "[Path]\nPathExists=/etc/agentos/q/x\nPathExistsGlob=/etc/agentos/*\nMakeDirectory=yes\n",
+                     "[Service]\nTemporaryFileSystem=/:ro\nBindReadOnlyPaths=/etc/agentos\n",
+                     "[Service]\nReadWritePaths=/etc/agentos\nEnvironmentFile=-/usr/lib/x/a.env\n",
+                     "[Service]\nWorkingDirectory=/usr/lib/y\nRuntimeDirectory=agentos\n",
+                     "[Service]\nWorkingDirectory=-/etc/agentos\nEnvironment=A=/etc/agentos PATH=%h\n"
+                     "UnsetEnvironment=/etc/agentos\nPassEnvironment=X\nOpenFile=/etc/agentos/f:f\n",
+                     # outside /etc a *Directory= value systemd refuses or expands stays under its own top
+                     "[Service]\nRuntimeDirectory=agentos-%i ../../etc/agentos /etc/agentos\nStateDirectory=%i\n",
+                     "[Service]\nRuntimeDirectory=../../etc/agentos /etc/agentos\n"):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
+                units = [{"files": [{"ours": False, "path": "/usr/lib/systemd/system/m.service", "text": text}]},
+                         {"files": [{"ours": True, "path": self.PKG,
+                                     "text": env + "EnvironmentFile=-/usr/lib/x/a.env\n"}]}]
+                self.assertEqual(r.env_files(tree(d, {}), units, lambda p: False, uid=self.UID), ({}, {}))
+        # /usr is the read-only image, so a path PID 1 may make there counts for nothing; MakeDirectory= in a
+        # drop-in counts
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {})
+            units = [{"files": [{"ours": False, "path": "/usr/lib/systemd/system/m.service",
+                                 "text": "[Mount]\nWhat=/usr/lib/x\nWhere=/mnt/z\nOptions=bind\n"}]},
+                     {"files": [{"ours": True, "path": self.PKG, "text": "[Service]\nEnvironmentFile=-/usr/lib/x/a.env\n"}]}]
+            self.assertEqual(r.env_files(v, units, lambda p: False, uid=self.UID), ({}, {}))  # /usr is read-only
+            units[0] = {"files": [{"ours": False, "path": "/usr/lib/systemd/system/m.path",
+                                   "text": "[Path]\nPathChanged=/etc/agentos/q\n"},
+                                  {"ours": True, "path": "/etc/systemd/system/m.path.d/z.conf",
+                                   "text": "[Path]\nMakeDirectory=yes\n"}]}
+            units[1]["files"][0]["text"] = env
+            with self.assertRaisesRegex(SystemExit, re.escape("PathChanged= in /usr/lib/systemd/system/m.path")):
+                r.env_files(v, units, lambda p: False, uid=self.UID)
+
+    def test_a_tmpfiles_path_is_read_unescaped_and_unquoted_as_systemd_tmpfiles_reads_it(self):
+        # #6495 Security 1: systemd-tmpfiles reads its words with EXTRACT_UNQUOTE | EXTRACT_CUNESCAPE, so
+        # "\x66" is the type f, and a quoted type is read unquoted
+        # each line reaches the way check by the path systemd-tmpfiles reads
+        for line in ('"z" /etc/agentos 0777', "\\x7a /etc/agentos 0777", "z '/etc/agentos' 0777",
+                     "z /etc/agent\\x6fs", 'z /etc/"agentos"'):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                v = tree(d, {"/usr/lib/tmpfiles.d/x.conf": line + "\n"})
+                with self.assertRaisesRegex(SystemExit, re.escape("tmpfiles.d line %r names it" % line)):
+                    self.env(v, "-/etc/agentos/agentosd.env")
+        # an escaped path is read unescaped for the way check too
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/usr/lib/tmpfiles.d/pkg.conf": "z /etc/\\x61gentos 0777\n"})
+            with self.assertRaisesRegex(SystemExit, re.escape("tmpfiles.d line 'z /etc/\\\\x61gentos 0777' names it")):
+                self.env(v, "-/etc/agentos/agentosd.env", packaged=lambda p: p == "/usr/lib/tmpfiles.d/pkg.conf")
+        # a line systemd-tmpfiles refuses fails the run
+        for line in ('d "/run/x', "d /run/x\\q", "d /run/x\\x00", "d /run/x\\", "d /run/x\\400", "d /run/\\U0000D800",
+                     "d /run/x 07\\q"):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                v = tree(d, {"/usr/lib/tmpfiles.d/x.conf": line + "\n"})
+                with self.assertRaisesRegex(SystemExit, "unit rules: /usr/lib/tmpfiles.d/x.conf: tmpfiles.d line of "
+                                            "ours .*: systemd-tmpfiles refuses its words"):
+                    r.env_files(v, [], lambda p: False)
+        # a package's line systemd-tmpfiles skips is skipped
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/usr/lib/tmpfiles.d/pkg.conf": 'z "/etc/agentos 0777\n'})
+            self.assertEqual(self.env(v, "-/etc/agentos/agentosd.env",
+                                      packaged=lambda p: p == "/usr/lib/tmpfiles.d/pkg.conf"), ({}, {}))
+        self.assertEqual(r.tmpfiles_words('f "/run/a b" - -'), (["f", "/run/a b", "-", "-"], ""))
+        self.assertEqual(r.tmpfiles_words("w /run/a\\tb\\303\\251", 2), (["w", "/run/a\tbé"], ""))
+        self.assertEqual(r.tmpfiles_words("d /run/a\\U0001F600 0700", 2), (["d", "/run/a\U0001F600"], "0700"))
+        self.assertEqual(r.tmpfiles_words('L "/run/x y" - - - -  /t "u v" '), (["L", "/run/x y", "-", "-", "-", "-"],
+                                                                             '/t "u v"'))
+
+    def test_a_tmpfiles_line_ends_at_nul_cr_or_lf_as_systemd_tmpfiles_reads_it(self):
+        # #6495 Security R1: read_line ends a line at NUL too, so "d /run/q\0f /run/pkgx-r ..." is two lines;
+        # a vertical tab or form feed ends none, and only space and tab are stripped
+        for text in ("d /run/q\0z /etc/agentos 0777\n", "d /run/q\rz /etc/agentos 0777\n"):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
+                v = tree(d, {"/usr/lib/tmpfiles.d/x.conf": text})
+                with self.assertRaisesRegex(SystemExit, re.escape("tmpfiles.d line 'z /etc/agentos 0777' names it")):
+                    self.env(v, "-/etc/agentos/agentosd.env")
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/usr/lib/tmpfiles.d/x.conf": "d /run/q\vf /run/x\n\x0c\n# c\0d /run/y\n"})
+            self.assertEqual(r.tmpfiles_lines(r.BootView(v)), [("/usr/lib/tmpfiles.d/x.conf", "d /run/q\vf /run/x"),
+                                                              ("/usr/lib/tmpfiles.d/x.conf", "\x0c"),
+                                                              ("/usr/lib/tmpfiles.d/x.conf", "d /run/y")])
+
+    @unittest.skipUnless(shutil.which("systemd-tmpfiles"), "no systemd-tmpfiles")
+    def test_tmpfiles_words_agree_with_systemd_tmpfiles(self):
+        # #6495 Security 1, differential: each line's path, and an L line's target, as systemd-tmpfiles
+        # --create makes it; a line the reader refuses makes nothing
+        def made(text):
+            with tempfile.TemporaryDirectory() as d:
+                conf = pathlib.Path(d) / "x.conf"
+                conf.write_bytes(text.encode("utf-8", "surrogateescape"))
+                subprocess.run(["systemd-tmpfiles", "--create", "--root=" + d, str(conf)],
+                               check=False, capture_output=True)
+                run = pathlib.Path(d, "run")
+                return sorted((str(p)[len(d):], os.readlink(p) if p.is_symlink() else None)
+                              for p in (run.iterdir() if run.is_dir() else []))
+
+        def read(text):
+            out = []
+            for _, line in r.FINALIZE.tmpfiles_lines(text.encode("utf-8", "surrogateescape")):
+                got = r.tmpfiles_words(line)
+                if got:
+                    (typ, path, *_), arg = got
+                    out.append((path, arg if typ == "L" else None))
+            return sorted(out)
+        for path in ("/run/pkg\\x78-r", '"/run/a b"', "/run/a\\sb", "/run/'q'x", '/run/x"y z"w', "/run/a\\\\b",
+                     "/run/c\\303\\251", "/run/d\\u00e9", "/run/e\\'f", "/run/f\\uFDD0", "/run/g\vh", "/run/i\\400",
+                     "/run/j\\x00", "/run/k\\q", '"/run/l', "/run/m\\uD800", "/run/n\\U0000D800",
+                     "/run/o\\U0010FFFF", "/run/p\\U0001F600", "/run/q\\uFFFE", "/run/r\\U00110000"):
+            with self.subTest(path=path):
+                self.assertEqual(made("f %s - - - - X=1\n" % path), read("f %s - - - - X=1\n" % path))
+        for text in ('L "/run/x y" - - - - /var/lib/d\n', "L /run/t - - - -     /etc\n", "L /run/z - - - - \"/e x\"\n",
+                     "d /run/q\0f /run/p - - - - X=1\n", "d /run/r\rd /run/s\n", "d /run/t\x0cd\n", "d /run/u\x85v\n"):
+            with self.subTest(text=text):
+                self.assertEqual(made(text), read(text))
+
+    def test_the_shipped_agentos_tmpfiles_conf_and_agentosd_pass(self):
+        # mkosi.extra's agentos.conf and agentosd.service's EnvironmentFile=, the one unit of ours naming one;
+        # a unit reading an env file from a service user's directory fails the run (#6495 lens view (b))
+        conf = (ROOT / "image/mkosi/mkosi.extra/usr/lib/tmpfiles.d/agentos.conf").read_text()
+        unit = (ROOT / "image/mkosi/mkosi.extra/usr/lib/systemd/system/agentosd.service").read_text()
+        units = [{"files": [{"ours": True, "path": "/usr/lib/systemd/system/agentosd.service", "text": unit}]}]
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/usr/lib/tmpfiles.d/agentos.conf": conf, "/etc/agentos/agentosd.env": "A=1\n"})
+            self.assertEqual(r.env_files(v, units, lambda p: False, uid=self.UID)[0],
+                             {"/etc/agentos/agentosd.env": "A=1\n"})
+            self.refused(v, "-/var/lib/agentos-kernel/env", "it is not under /etc/agentos or /usr", None)
+
+    def test_a_continued_environment_file_line_is_read_as_systemd_reads_it(self):
+        # #6495 Security R2: config_parse joins a line ending in a backslash with the next, the backslash
+        # read as a space, and skips a comment line inside the continuation
+        bad = "LD_PRELOAD=/x.so\n"
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/usr/lib/x/ pkgx": bad, "/usr/lib/x/pkgx": bad, "/etc/agentos/a .env": "A=1\n",
+                         "/etc/agentos/b.env": "B=1\n"})
+            pkg_unit = "[Service]\nEnvironmentFile=-/usr/lib/x/\\\npkgx\n"
+            ours_unit = "[Service]\nEnvironmentFile=-/etc/agentos/a\\\n;x\n.env\nEnvironmentFile=/etc/agentos/b.env\\\n"
+            units = [{"files": [{"ours": False, "text": pkg_unit}]}, {"files": [{"ours": True, "text": ours_unit}]}]
+            self.assertEqual(r.env_files(v, units, lambda p: False, uid=self.UID),
+                             ({"/etc/agentos/a .env": "A=1\n", "/etc/agentos/b.env": "B=1\n"},
+                              {"/usr/lib/x/ pkgx": bad}))
+            # a file the reader does not read fails the run, naming it, saying why (#6495 UX 7075856011 item 2:
+            # systemd reads a CR or NUL as a line end; only the lint refuses it) and giving a step that fits
+            # whose file it is
+            nul_cr = "holds a NUL or CR byte, which systemd reads as a line end and the unit lint refuses rather than models"
+            stops = r"systemd's config_parse stops reading it there \(line 1: invalid section header\)"
+            pkg_step = r"the file is a package's, so mask the unit .* replace it whole with a unit of ours"
+            ours_step = "rewrite the file with LF line ends and no NUL byte"
+            for text, why in (("[Service]\r\nExecStart=/x\r\n", nul_cr), ("[Service]\0\n", nul_cr),
+                              ("[Service\n", stops)):
+                for ours, step in ((False, pkg_step), (True, ours_step)):
+                    with self.subTest(text=text, ours=ours):
+                        u = [{"files": [{"ours": ours, "path": "/usr/lib/systemd/system/p.service", "text": text}]}]
+                        with self.assertRaisesRegex(SystemExit, "p.service: (it )?%s.*; %s" % (why, step)) as cm:
+                            r.env_files(v, u, lambda p: False)
+                        self.assertNotIn("systemd's config_parse refuses", str(cm.exception))
+                        if ours:
+                            self.assertNotIn("package", str(cm.exception))
+
+
+class TmpfilesReaderTest(unittest.TestCase):
+    """#6495: mkosi.finalize's tmpfiles_lines and tmpfiles_words are the one reading of tmpfiles.d lines and
+    fields. This parses unit_rules.py and mkosi.finalize and fails on any other read of one: a tmpfiles.d
+    line (from tmpfiles_lines or tmpfiles_entries, or tmpfiles_links' line) may be handed to tmpfiles_words
+    or tmpfiles_stock, compared, sliced from its start or formatted into a message, and nothing else."""
+
+    FILES = (ROOT / "image" / "unit_rules.py", ROOT / "image" / "mkosi" / "mkosi.finalize")
+    SOURCES = {"tmpfiles_lines": -1, "tmpfiles_entries": -1}  # which element of each yielded tuple is the line
+    READERS = {"tmpfiles_words", "tmpfiles_stock"}
+    PRODUCERS = {"tmpfiles_lines", "tmpfiles_entries", "tmpfiles_words", "tmpfiles_stock"}
+
+    def misuses(self, src):
+        tree_ = ast.parse(src)
+        parents = {}
+        for node in ast.walk(tree_):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+        out = []
+        for fn in [n for n in ast.walk(tree_) if isinstance(n, ast.FunctionDef) and n.name not in self.PRODUCERS]:
+            held = set()  # names bound to a call of a source (lines = tmpfiles_lines(...))
+            for n in ast.walk(fn):
+                if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call) and self.source(n.value):
+                    held |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+                if isinstance(n, ast.Assign) and isinstance(n.value, ast.Tuple):
+                    for t in n.targets:
+                        if isinstance(t, ast.Tuple):
+                            held |= {x.id for x, v in zip(t.elts, n.value.elts) if isinstance(x, ast.Name)
+                                     and isinstance(v, ast.Call) and self.source(v)}
+            tainted = set()
+            for n in ast.walk(fn):
+                it = n.iter if isinstance(n, (ast.For, ast.comprehension)) else None
+                if it is None:
+                    continue
+                if (isinstance(it, ast.Call) and self.source(it)) or (isinstance(it, ast.Name) and it.id in held):
+                    t = n.target
+                    line = t.elts[-1] if isinstance(t, ast.Tuple) else None
+                    if isinstance(line, ast.Name):
+                        tainted.add(line.id)
+                    elif not isinstance(line, ast.Name):
+                        out.append("%s line %d: a tmpfiles.d line bound to no name" % (fn.name, n.lineno))
+            for n in ast.walk(fn):
+                if isinstance(n, ast.Name) and n.id in tainted and isinstance(n.ctx, ast.Load):
+                    if not self.allowed(n, parents):
+                        out.append("%s line %d: %s" % (fn.name, n.lineno, ast.unparse(parents[n])))
+        return out
+
+    def source(self, call):
+        f = call.func
+        return (f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)) in self.SOURCES
+
+    def allowed(self, n, parents):
+        p = parents[n]
+        if isinstance(p, ast.Call) and n in p.args:
+            f = p.func
+            return (f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)) in self.READERS
+        if isinstance(p, ast.Subscript) and p.value is n:
+            return isinstance(p.slice, ast.Slice) and p.slice.lower is None and p.slice.step is None
+        if isinstance(p, ast.BinOp) and isinstance(p.op, ast.Mod) and p.right is n:
+            return True
+        return isinstance(p, (ast.Tuple, ast.List, ast.Set, ast.Compare, ast.FormattedValue))
+
+    def test_no_other_split_of_a_tmpfiles_d_line(self):
+        for f in self.FILES:
+            with self.subTest(file=f.name):
+                self.assertEqual(self.misuses(f.read_text()), [])
+        # unit_rules reads lines and fields with mkosi.finalize's own functions
+        self.assertIs(r.tmpfiles_words, r.FINALIZE.tmpfiles_words)
+        src = (ROOT / "image" / "unit_rules.py").read_text()
+        self.assertNotIn("def tmpfiles_words", src)
+        self.assertIn("FINALIZE.tmpfiles_lines(", src)
+        # the one split of a tmpfiles.d file into lines is mkosi.finalize's tmpfiles_lines: no other function
+        # named for tmpfiles.d, in either file, splits text into lines
+        for f in self.FILES:
+            src = f.read_text()
+            for fn in ast.walk(ast.parse(src)):
+                if isinstance(fn, ast.FunctionDef) and "tmpfiles" in fn.name and fn.name != "tmpfiles_lines":
+                    seg = ast.get_source_segment(src, fn)
+                    with self.subTest(fn=fn.name):
+                        self.assertFalse(any(x in seg for x in ("re.split(", "splitlines(", 'split("\\n")')), fn.name)
+
+    def test_the_check_refuses_each_other_split(self):
+        # the check's own mutants: each other reading of a tmpfiles.d line is caught
+        base = ("def a(view):\n    for f, line in tmpfiles_lines(view):\n        %s\n"
+                "def b(root):\n    lines = tmpfiles_lines(root)\n    for f, ln in lines:\n        %s\n")
+        for bad in ("w = line.split()", "w = line.split(None, 6)", "w = shlex.split(line)", "t = line[0]",
+                    "p = line.partition(' ')", "t = line.strip()", "x = re.split('\\\\s', line)", "w = (line or '').split()"):
+            with self.subTest(bad=bad):
+                self.assertTrue(self.misuses(base % (bad, "pass")))
+                self.assertTrue(self.misuses(base % ("pass", bad.replace("line", "ln"))))
+        good = ("w = tmpfiles_words(line)", "raise SystemExit('%r' % (line,))", "x = line[:80]",
+                "y = (f, line) in s", "z = any(c in line for c in '%')")
+        for ok in good:
+            with self.subTest(ok=ok):
+                self.assertEqual(self.misuses(base % (ok, "pass")), [])
+
+
+class UserManagerTest(unittest.TestCase):
+    """offline_systemd.UserManager asks root's user manager over its own bus (#6002)."""
+
+    def test_it_asks_with_user_and_reads_its_unit_path(self):
+        m = offline_systemd.Manager.__new__(offline_systemd.Manager)
+        calls = []
+
+        def ctl(args, check=True, user=False):
+            calls.append((user, args))
+            return type("R", (), {"stdout": "UnitPath=/etc/systemd/user /usr/lib/systemd/user\n"})()
+        m.ctl = ctl
+        u = offline_systemd.UserManager(m)
+        self.assertEqual(u.unit_path(), ["/etc/systemd/user", "/usr/lib/systemd/user"])
+        self.assertEqual(calls, [(True, ["show", "-p", "UnitPath"])])
+
+    def test_it_is_the_trees_systemd_user_outside_pid_1s_units(self):
+        # not a unit of PID 1, whose type-wide service.d drop-ins would apply to it
+        self.assertIn("exec env -i HOME=/root USER=root LOGNAME=root XDG_RUNTIME_DIR=/run/user/0 "
+                      "/usr/lib/systemd/systemd --user", offline_systemd.USER_MANAGER)
+        self.assertNotIn("systemd-run", offline_systemd.USER_MANAGER)
+
+class ZLinkRuleTest(unittest.TestCase):
+    """#6474 re-plan (#6506 Security 7077682648; #6521 arbitration 7078402683): no link the tree holds or an L
+    line makes ends at /, above a writable env tree or in one, so a made path is compared by its string; one
+    run names every refusal."""
+    PKG = "/usr/lib/systemd/system/pkgx.service"
+    UID = os.getuid()
+    ENV = "[Service]\nEnvironmentFile=-/etc/agentos/agentosd.env\n"
+
+    def run_env(self, files, text=None, user=False):
+        units = [{"files": [{"ours": True, "path": self.PKG, "text": self.ENV}]}]
+        if text:
+            units.append({"user": user, "files": [{"ours": False, "text": text,
+                                                   "path": "/usr/lib/systemd/%s/m.service" % ("user" if user else "system")}]})
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, files)
+            os.makedirs(os.path.join(d, "root", "usr"), exist_ok=True)  # so the walk from / reaches /usr
+            return r.env_files(v, units, lambda p: p == "/usr/lib/tmpfiles.d/pkg.conf", uid=self.UID)
+
+    def refused(self, files, link, end, text=None, user=False):
+        with self.assertRaisesRegex(SystemExit, re.escape("unit rules: %s, a link ending at %s, which is " % (link, end))
+                                    + "(in|above) /etc/agentos: a path PID 1 makes for a unit through it"):
+            self.run_env(files, text, user)
+
+    def test_a_link_under_root_s_user_manager_tops_fails_the_run(self):
+        # the three Security 7077682648 repros, a user unit of root's user manager, and the system control
+        for top, text in (("/root/.local/state", "[Service]\nStateDirectory=e/agentos\nStateDirectoryMode=0777\n"),
+                          ("/root/.local/state", '[Service]\nStateDirectory="e/agentos"\n'),
+                          ("/root/.cache", "[Service]\nCacheDirectory=e/agentos\n"),
+                          ("/root/.config", "[Service]\nConfigurationDirectory=e/agentos\n"),
+                          ("/var/lib", "[Service]\nStateDirectory=e/agentos\n")):
+            for user in (True, False):
+                with self.subTest(top=top, text=text, user=user):
+                    self.refused({top + "/e": "-> /etc"}, top + "/e", "/etc", text, user)
+
+    def test_a_link_is_refused_whatever_names_it_and_wherever_it_sits(self):
+        # each form a made path reached through in the rounds before, with no unit naming it at all
+        for files, link, end in (
+                ({"/var/lib/e": "-> /etc"}, "/var/lib/e", "/etc"),
+                ({"/etc/up": "-> ."}, "/etc/up", "/etc"),
+                ({"/var/lib/e": "-> /var/lib/f", "/var/lib/f": "-> /etc"}, "/var/lib/e", "/etc"),
+                ({"/var/lib/eX/a": "-> /etc"}, "/var/lib/eX/a", "/etc"),
+                ({"/var/lib/debian": "-> /etc"}, "/var/lib/debian", "/etc"),
+                ({"/usr/lib/tmpfiles.d/pkg.conf": "L /run/e - - - - ../etc\n"}, "/run/e", "/etc"),
+                ({"/srv/x": "-> /", "/srv/.keep": ""}, "/srv/x", "/"),
+                ({"/var/lib/g": "-> /etc/agentos/new"}, "/var/lib/g", "/etc/agentos/new"),  # dangling, in the tree
+                ({"/var/lib/h": "-> /etc/agentos"}, "/var/lib/h", "/etc/agentos"),
+                ({"/var/lib/i": "-> /etc/"}, "/var/lib/i", "/etc"),
+                # a link in read-only /usr still leads a made path out of it
+                ({"/usr/lib/x": "-> /etc", "/etc/.keep": ""}, "/usr/lib/x", "/etc"),
+                # one that ends at a file in a writable env tree, whatever its kind
+                ({"/etc/agentos/a.env": "A=1\n", "/var/lib/k": "-> /etc/agentos/a.env"}, "/var/lib/k",
+                 "/etc/agentos/a.env"),
+                ({"/var/run": "-> /etc"}, "/var/run", "/etc")):
+            with self.subTest(files=files):
+                self.refused(files, link, end)
+
+    def test_a_link_ending_elsewhere_passes(self):
+        # L3 7078398392 / Potency 7078401764: stock links that cannot reach /etc/agentos, whatever their kind
+        for files in ({"/var/lib/e": "-> /usr/lib", "/usr/lib/.keep": ""},
+                      {"/usr/lib/ssl/certs": "-> /etc/ssl/certs", "/usr/lib/ssl/private": "-> /etc/ssl/private",
+                       "/etc/ssl/certs/.keep": "", "/etc/ssl/private/.keep": ""},
+                      {"/etc/xdg/systemd/user": "-> ../../systemd/user", "/etc/systemd/user/.keep": ""},
+                      {"/var/lib/g": "-> /var/lib/gone"}, {"/var/lib/h": "-> /var/tmp"},
+                      {"/var/lib/e": "-> /etc/agentos-x"}, {"/var/lib/e": "-> /etcx"},
+                      {"/etc/mtab": "-> ../proc/self/mounts"},
+                      {"/etc/vconsole.conf": "-> default/keyboard", "/etc/default/keyboard": "X=1\n"},
+                      {"/var/run": "-> ../run", "/var/lock": "-> ../run/lock",
+                       "/etc/resolv.conf": "-> ../run/systemd/resolve/stub-resolv.conf"},
+                      {"/usr/lib/tmpfiles.d/pkg.conf": "L /var/run - - - - ../run\n"}):
+            with self.subTest(files=files):
+                self.assertEqual(self.run_env(files), ({}, {}))
+
+    def test_an_unread_directory_value_names_the_directory_step(self):
+        # #6521 UX 7078400301 item 1: the step matches mkosi.finalize's DIR_FIX, not "a plain absolute path"
+        with self.assertRaises(SystemExit) as cm:
+            self.run_env({}, '[Service]\nConfigurationDirectory="ag"\n')
+        self.assertIn("ConfigurationDirectory= in /usr/lib/systemd/system/m.service holds a path", str(cm.exception))
+        self.assertIn("write it as plain directory names under its top", str(cm.exception))
+        with self.assertRaises(SystemExit) as cm:
+            self.run_env({}, "[Socket]\nListenStream=/run/%I/s\n")
+        self.assertIn("write it as a plain absolute path, or drop it", str(cm.exception))
+
+    def test_one_run_names_every_refused_link(self):
+        with self.assertRaises(SystemExit) as cm:
+            self.run_env({"/var/lib/a": "-> /etc", "/root/.cache/b": "-> /etc"})
+        self.assertIn("/var/lib/a, a link ending at /etc", str(cm.exception))
+        self.assertIn("/root/.cache/b, a link ending at /etc", str(cm.exception))
+
+    def test_each_refusal_names_the_step_its_cause_takes(self):
+        # #6506 UX 7077742901 items 1 and 2, for a package's reading unit
+        pkg = "[Service]\nEnvironmentFile=-/etc/agentos/agentosd.env\n"
+        for files, other, step in (
+                ({}, None, None),  # the value itself: the reading unit's to fix
+                ({"/etc/agentos/.keep": ""}, None, "; make that component a root-owned directory"),
+                ({"/usr/lib/tmpfiles.d/x.conf": "z /etc/agentos 0700 root root -\n"}, None, "; drop or move that line"),
+                ({}, "[Service]\nConfigurationDirectory=agentos\n", "; remove that setting from that unit")):
+            with self.subTest(step=step), tempfile.TemporaryDirectory() as d:
+                v = tree(d, files)
+                if files.get("/etc/agentos/.keep") is not None:
+                    os.chmod(os.path.join(d, "root/etc/agentos"), 0o775)
+                value = "-/var/lib/x.env" if step is None else "-/etc/agentos/agentosd.env"
+                units = [{"files": [{"ours": False, "path": self.PKG, "text": pkg.replace("-/etc/agentos/agentosd.env", value)}]}]
+                if other:
+                    units.append({"files": [{"ours": False, "path": "/usr/lib/systemd/system/b.service", "text": other}]})
+                with self.assertRaises(SystemExit) as cm:
+                    r.env_files(v, units, lambda p: False, uid=self.UID)
+                msg = str(cm.exception)
+                if step is None:
+                    self.assertIn("the unit is a package's, so mask it", msg)
+                else:
+                    self.assertIn(step, msg)
+                    self.assertNotIn("so mask it", msg)
 
 
 if __name__ == "__main__":

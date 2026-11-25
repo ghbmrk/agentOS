@@ -11,8 +11,11 @@ commit with the merge-base of `base` and `head`) and compares that tree with `he
 bytes, binary content and modes count, except that an ASSUMPTIONS.md differing only in its rows' first-cell ids (a renumbering after a main-merge) reads as same,
 and so does a DECISIONS.md whose only replay conflicts are table rows both sides appended at one spot, resolved by
 keeping both sides' rows verbatim, either side first (#3224, #3233), the PR's rows renumbered or not when no other PR file names an old ID (#4030),
-and so does a `*_allow.txt` whose lines are main's plus the PR's line changes, in any order (#3991). A replay file that fails a cheap gate never reads
-same as is: a duplicate row ID (doclint) in an ASSUMPTIONS.md or DECISIONS.md, or an ASSUMPTIONS.md row that
+and so does a `*_allow.txt` whose lines are main's plus the PR's line changes, in any order, a line both added kept once or twice (#3991, #6375),
+and so does any allow file (tools/record_merge.py CLASSES) that is the driver's clean merge of both sides (#6375),
+and so does a MUTANTS-EQUIVALENT whose entries are main's plus the PR's entry changes, each side's entries in its own order (#6314),
+a PR entry dropped for main's other proof of its key counting as removed (#6472). A replay file that fails a cheap gate never reads
+same as is: a duplicate row ID (doclint) in an ASSUMPTIONS.md or DECISIONS.md, a MUTANTS-EQUIVALENT key on two different lines (an entry or row both sides added word for word is one, #6358), or an ASSUMPTIONS.md row or entry that
 `merge=union` brought back (in the merge base and main, not in the reviewed commit). A head that resolves each union
 hunk without those rows, keeping its rows inside the hunk, reads same (#3400, #3401), unless `git merge-file`
 aligns the file unlike the replay: then every head reads changed and is resolved by hand. Main merged into the branch therefore reads as same, even next
@@ -61,6 +64,7 @@ Otherwise it prints `not-bot <files>` (the diff) or `bot-unproven <why>` and exi
 the branch is this repository's, not a fork's, and fetches the run and artifact the head commit's `Bot-Run:`
 trailer names.
 """
+import ast
 import collections
 import importlib.util
 import json
@@ -74,6 +78,9 @@ import zipfile
 import zlib
 
 # By path: the workflow runs `python3 -I`, which keeps tools/ off sys.path.
+_rm = importlib.util.spec_from_file_location("record_merge", pathlib.Path(__file__).resolve().parent / "record_merge.py")
+record_merge = importlib.util.module_from_spec(_rm)
+_rm.loader.exec_module(record_merge)
 _spec = importlib.util.spec_from_file_location("risk_tier", pathlib.Path(__file__).resolve().parent / "risk_tier.py")
 risk_tier = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(risk_tier)
@@ -86,11 +93,42 @@ DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", 
 # CLAUDE*.md, AGENTS.md, .mcp.json and .claude (a directory or a symlink, #2138) count at any depth;
 # broker/core/core.txt sets risk tiers (risk_tier.py); tools/trace.py and tools/old_core.txt are the old-core ratchet (D-139); tools/trusted_base.py, tools/trusted_core.txt and tools/ceilings.txt are the trusted core's budget and the ceilings (KRN-2cap, #2935; D-310); tools/mutgate.py is the mutation gate, which the mutgate workflow decides with once it is on the base (#3955, #4106); the tests that pin the merge gates count too
 # (PREMERGE-paths, #1835), as do this gate's own tests and the lens rules, so a PR cannot weaken them on L3 alone (#2438). Matched with fullmatch and DOTALL, so a path with a newline in it cannot slip past `$`-style matching.
+# A module a gate tool imports decides with it, so the gate tools' tools/ imports, followed to the end, are gate
+# files too, with their tests (#6418 Security): derived from the base's sources, never a hand list.
+GATE_TOOLS = ("risk_tier", "premerge", "trace", "trusted_base", "mutgate", "claims")
+
+
+def gate_modules(tools=pathlib.Path(__file__).resolve().parent, roots=GATE_TOOLS):
+    """The tools/ modules `roots` import, directly or through each other: an `import` or `from` of a module in
+    `tools`, or a string naming one of its files (premerge loads its imports by path), followed to the end."""
+    out, todo = set(), list(roots)
+    while todo:
+        name = todo.pop()
+        if name in out or not (tools / f"{name}.py").is_file():
+            continue
+        out.add(name)
+        for n in ast.walk(ast.parse((tools / f"{name}.py").read_text())):
+            if isinstance(n, ast.Import):
+                todo += [a.name.split(".")[0] for a in n.names]
+            elif isinstance(n, ast.ImportFrom) and n.level == 0 and n.module:
+                todo.append(n.module.split(".")[0])
+            elif isinstance(n, ast.Constant) and isinstance(n.value, str) and re.fullmatch(r"\w+\.py", n.value):
+                todo.append(n.value[:-3])
+    return out
+
+
+_IMPORTED = "|".join(sorted(gate_modules() - set(GATE_TOOLS)))
 _CFG = r"(?:.*/)?"
+# The tree files premerge's replay reads (#6444): `git merge-tree`, run in a checkout of the base, takes each
+# directory's .gitattributes (a `merge=` line decides whether a conflict replays clean, so which heads read `same`),
+# and merge-ort finds a submodule through the root .gitmodules. The other names git reads in a tree shape no merge.
+REPLAY_INPUTS = rf"{_CFG}\.gitattributes|\.gitmodules"
+NOT_REPLAY_INPUTS = (".gitignore", ".mailmap")
 MARK_PATHS = re.compile(rf"{_CFG}CLAUDE(?:\.local)?\.md|{_CFG}AGENTS\.md|{_CFG}\.mcp\.json|{_CFG}\.claude(?:/.*)?|"
                         r"docs/OPERATING\.md|docs/LANES\.md|\.github/.*|broker/core/core\.txt|"
-                        r"tools/(risk_tier|premerge|trace|trusted_base|mutgate|claims)\.py|tools/(old_core|trusted_core|ceilings)\.txt|tools/ci_scope[^/]*|"
-                        r"tests/test_premerge[^/]*|reviews/[^/]+/README[^/]*",
+                        rf"tools/({'|'.join(GATE_TOOLS)})\.py|tools/(old_core|trusted_core|ceilings)\.txt|tools/ci_s(?:cope|plit)[^/]*|"
+                        r"tests/test_premerge[^/]*|reviews/[^/]+/README[^/]*|tools/pins\.py|tests/test_pins\.py|" + REPLAY_INPUTS
+                        + (rf"|tools/({_IMPORTED})\.py|tests/test_({_IMPORTED})[^/]*" if _IMPORTED else ""),
                         re.DOTALL)
 
 
@@ -111,6 +149,10 @@ def mark_range(cwd, base, head):
 
 
 TRUSTED = {"OWNER", "MEMBER", "COLLABORATOR"}
+# A comment is a verdict only when its first line, stripped, starts with VERDICT, so a comment lacking it anywhere can never
+# change --check's output; premerge.yml starts the gate for a comment only when its body, or the body it had before an
+# edit, contains VERDICT in any case (CI-premerge-event-filter, #6398).
+VERDICT = "Verdict:"
 _L3 = re.compile(r"^<!-- record: (?:l3|combined) -->$", re.M)
 # D-137: a gate-file or tier-A PR also needs a Security accept in a comment of its own, so one review cannot count twice.
 _SECURITY = re.compile(r"^<!-- record: security -->$", re.M)
@@ -175,7 +217,7 @@ def verdict(comments, pr, security=False, lens=None):
     for c in sorted(comments, key=lambda c: c.get("created_at") or ""):
         body = c.get("body") or ""
         first = body.split("\n", 1)[0].strip()
-        if c.get("author_association") not in TRUSTED or not first.startswith("Verdict:"):
+        if c.get("author_association") not in TRUSTED or not first.startswith(VERDICT):
             continue
         own, placed, line = _record_block(body)
         # Only an accept is held to its record block (#4261); any other verdict reads the whole comment, as before, so a
@@ -286,15 +328,16 @@ def _renumbered_only(cwd, tree, head, path, reviewed, onto):
         return False
     a, b = (_git(cwd, "show", f"{t}:{path}", ok=(0, 128)) for t in (tree, head))
     return (bool(a) and bool(b) and ROW_ID.sub(b"| # |", a) == ROW_ID.sub(b"| # |", b)
-            and not _stale(cwd, a, path, reviewed, onto) and _same_mode(cwd, tree, head, path))
+            and _stale(cwd, a, path, reviewed, onto) == collections.Counter() and _same_mode(cwd, tree, head, path))
 
 
 FIRST_CELL = re.compile(rb"^\|[ \t]*([^|\s][^|]*?)[ \t]*\|")
 
 
 def _duplicate_id(text):
-    """True when a table of `text` repeats a first-cell row ID: doclint's assumption_ids rule (tools/doclint.py)."""
-    seen, in_table = set(), False
+    """True when a table of `text` holds a first-cell row ID on two different lines: doclint's assumption_ids rule
+    (tools/doclint.py). A row repeated word for word is one row (#6358)."""
+    seen, in_table = {}, False
     for line in text.decode(errors="surrogateescape").splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         if not line.startswith("|"):
@@ -302,9 +345,8 @@ def _duplicate_id(text):
         elif cells[0] in ("ID", "#"):
             in_table = True
         elif in_table and not set(cells[0]) <= set("-: "):
-            if cells[0] in seen:
+            if seen.setdefault(cells[0], line) != line:
                 return True
-            seen.add(cells[0])
     return False
 
 
@@ -328,12 +370,13 @@ def _stale(cwd, text, path, reviewed, onto):
     merge's own (main's plus the reviewed commit's, less the base's), so a copy one side edited or deleted and the
     other left alone (#3369, #1912, #3441, #3502). A copy both sides deleted outside a conflict is gone from the
     merge too (#3534). Where `git merge-file` aligns the file unlike the replay, the whole file counts as one
-    conflict. Empty for any other file or a criss-cross merge."""
+    conflict. Empty for any other file; None for a criss-cross merge, which reads as stale (#6316: its union can
+    bring back a row unseen)."""
     if path.rsplit("/", 1)[-1] != "ASSUMPTIONS.md":
         return collections.Counter()
     bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
     if len(bases) != 1:
-        return collections.Counter()
+        return None
     merged, mark = _merge_file(cwd, path, reviewed, bases[0], onto)
     hunks, union, hunk, side = [], [], None, 0
     for line in merged.splitlines(keepends=True):
@@ -366,11 +409,14 @@ def _stale(cwd, text, path, reviewed, onto):
 
 def _broken(cwd, tree, path, reviewed, onto):
     """True when the replay's `path` fails a cheap gate, so a head that keeps it never reads same (#3400): a
-    duplicate row ID in an ASSUMPTIONS.md or DECISIONS.md (doclint), or a row `merge=union` brought back."""
+    duplicate row ID in an ASSUMPTIONS.md or DECISIONS.md (doclint), a row `merge=union` brought back, or a
+    MUTANTS-EQUIVALENT that is no merge of its two sides (`_records_kept`)."""
+    if path.rsplit("/", 1)[-1] == RECORD:
+        return _records_kept(cwd, tree, tree, path, reviewed, onto) is not True
     if path != "DECISIONS.md" and path.rsplit("/", 1)[-1] != "ASSUMPTIONS.md":
         return False
     text = _git(cwd, "show", f"{tree}:{path}", ok=(0, 128))
-    return _duplicate_id(text) or bool(_stale(cwd, text, path, reviewed, onto))
+    return _duplicate_id(text) or _stale(cwd, text, path, reviewed, onto) != collections.Counter()
 
 
 def _less(rows, drop):
@@ -432,8 +478,29 @@ def _stale_dropped(cwd, tree, head, path, reviewed, onto):
     want = _git(cwd, "show", f"{head}:{path}", ok=(0, 128))
     # merge-file's diff can align the file unlike merge-tree's: the union of its hunks must be the replay (#3401)
     replay = _git(cwd, "show", f"{tree}:{path}", ok=(0, 128))
-    return (hunk is None and conflicts > 0 and b"".join(out[2]) == replay and want in (b"".join(out[0]), b"".join(out[1]))
+    # With no conflict, out[0] can differ from the replay only by an identical duplicate the driver kept once (#6358).
+    return (hunk is None and b"".join(out[2]) == replay
+            and want in {b"".join(o) for o in out[:2]} | {_once(b"".join(o)) for o in out[:2]}
             and not _duplicate_id(want) and _same_mode(cwd, tree, head, path))
+
+
+def _once(text):
+    """`text` less each table row that repeats an earlier row word for word (tools/record_merge.py's `once`)."""
+    seen, out, in_table = set(), [], False
+    for line in text.splitlines(keepends=True):
+        cells = [c.strip() for c in line.decode(errors="surrogateescape").strip().strip("|").split("|")]
+        row = False
+        if not line.startswith(b"|"):
+            in_table = False
+        elif cells[0] in ("ID", "#"):
+            in_table = True
+        else:
+            row = in_table and not set(cells[0]) <= set("-: ")
+        if not (row and line.rstrip(b"\r\n") in seen):
+            out.append(line)
+        if row:
+            seen.add(line.rstrip(b"\r\n"))
+    return b"".join(out)
 
 
 def _appends_kept(cwd, tree, head, path, reviewed, onto):
@@ -497,7 +564,8 @@ def _names(ids, text):
 def _lines_kept(cwd, tree, head, path, reviewed, onto):
     """True when `path` is an allowlist (`*_allow.txt`, one entry per line, order free) and `head`'s lines, as a
     multiset, are main's plus the lines the reviewed commit added less those it removed: a main-merge that kept
-    both sides of a conflict at one spot (#3991) reads as same in any order. Any other line reads as changed."""
+    both sides of a conflict at one spot (#3991) reads as same in any order. A line both sides added word for word
+    may be kept once, as tools/record_merge.py keeps it (#6375). Any other line reads as changed."""
     if not path.endswith("_allow.txt"):
         return False
     bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
@@ -506,7 +574,91 @@ def _lines_kept(cwd, tree, head, path, reviewed, onto):
     # Split on \n only, as the readers do: bytes.splitlines() also splits on \r and would count unread entries (#4041).
     pr, mb, main, want = (collections.Counter(_git(cwd, "show", f"{t}:{path}", ok=(0, 128)).split(b"\n"))
                           for t in (reviewed, bases[0], onto, head))
-    return main + (pr - mb) - (mb - pr) == want
+    if any(record_merge._section(x) for side in (pr, main, want) for x in side):
+        return False  # a sectioned file is no order-free list (#6418 Security)
+    want_max = main + (pr - mb) - (mb - pr)
+    return not want - want_max and not (want_max - want) - ((pr - mb) & (main - mb))
+
+
+def _driver_kept(cwd, tree, head, path, reviewed, onto):
+    """True when `path` is an allow file (tools/record_merge.py's class `line`) and `head`'s copy is the driver's
+    clean merge of the reviewed commit's and main's copies on their one merge base: both sides' appends at one spot,
+    in place, a line both appended once (#6375). The driver leaves every other change to a line in conflict."""
+    if record_merge.record_class(path) != "line":
+        return False
+    bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
+    if len(bases) != 1 or not _same_mode(cwd, tree, head, path):
+        return False
+    pr, mb, main, want = (_git(cwd, "show", f"{t}:{path}", ok=(0, 128)) for t in (reviewed, bases[0], onto, head))
+    text, clean = record_merge.merge(mb, pr, main, path)
+    return clean and text == want
+
+
+RECORD = "MUTANTS-EQUIVALENT"  # tools/mutgate.py's RECORD: one JSON entry per line, `#` and blank lines comments
+
+
+def _entry_keys(lines):
+    """The keys of a record's entry lines, a key being an entry less its proof (`reason`, `accepted`): two
+    entries with one key name one mutant twice. None when a line is no JSON object (mutgate fails it)."""
+    try:
+        entries = [json.loads(x) for x in lines]
+    except ValueError:
+        return None
+    if not all(isinstance(e, dict) for e in entries):
+        return None
+    return [json.dumps({k: v for k, v in e.items() if k not in ("reason", "accepted")}, sort_keys=True) for e in entries]
+
+
+def _proved_on_main(pr, mb, main, want):
+    """The entries of `pr` (the reviewed commit, each entry once) that `want` (the head's entries) drops for main's
+    other proof of its key: a key the merge base lacks and `pr` and main each hold on one line, `want` holding
+    main's line. A key in the merge base is an edit by each side, a conflict however resolved (#6472)."""
+    keys = [_entry_keys(x) for x in (pr, mb, main)]
+    if None in keys:
+        return set()
+    mine, base, theirs = (collections.Counter(k) for k in keys)
+    proof = dict(zip(keys[2], main))
+    return {x for x, k in zip(pr, keys[0]) if mine[k] == theirs[k] == 1 and not base[k]
+            and x not in want and proof[k] != x and proof[k] in want}
+
+
+def _records_kept(cwd, tree, head, path, reviewed, onto):
+    """True when `path` is a MUTANTS-EQUIVALENT (merge=union, .gitattributes) and `head`'s lines, as a multiset,
+    are main's plus the lines the reviewed commit added less those it removed, with each side's entries in that
+    side's order and no key on two different lines: a union, or a hand merge keeping both sides (#6314). An entry
+    both sides added word for word counts once, in either side's place (#6358). An entry the PR or the resolution
+    edited, dropped or reordered, a key on two lines, or an entry the union brought back, reads False, except a PR
+    entry dropped for main's other proof of a key the merge base lacks (`_proved_on_main`, #6472); None for a
+    criss-cross merge, which reads as changed (L3 on #6315: its union can bring back an entry unseen)."""
+    if path.rsplit("/", 1)[-1] != RECORD:
+        return False
+    bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
+    if len(bases) != 1:
+        return None
+    if not _same_mode(cwd, tree, head, path):
+        return False
+    # Split on \n only, as mutgate's record_entries does.
+    pr, mb, main, want = (_git(cwd, "show", f"{t}:{path}", ok=(0, 128)).split(b"\n") for t in (reviewed, bases[0], onto, head))
+    count, is_entry = collections.Counter, lambda x: bool(x.strip()) and not x.lstrip().startswith(b"#")
+    entry = lambda lines: list(dict.fromkeys(x for x in lines if is_entry(x)))  # each entry once, first place
+    # A PR entry whose key main added with another proof, `head` holding main's line and not the PR's, is a PR
+    # line the resolution dropped for main's reviewed one: the PR's change only shrinks (#6472, record_merge.py).
+    drop = _proved_on_main(entry(pr), entry(mb), entry(main), set(entry(want)))
+    pr = [x for x in pr if x not in drop]
+    # An entry repeated word for word is one entry to every reader (#6358): entries compare as a set, comments by count.
+    expect, have = count(main) + (count(pr) - count(mb)) - (count(mb) - count(pr)), count(want)
+    if ({x for x in expect if is_entry(x)} != {x for x in have if is_entry(x)}
+            or +count({x: c for x, c in expect.items() if not is_entry(x)}) != count({x: c for x, c in have.items() if not is_entry(x)})):
+        return False
+    keys = _entry_keys(entry(want))
+    if keys is None or len(set(keys)) != len(keys):
+        return False
+    both = (set(entry(pr)) & set(entry(main))) - set(entry(mb))  # one entry both sides added: neither side's order
+    for side in (pr, main):  # each side's other surviving entries in its own order
+        mine, kept = set(entry(side)) - both, set(entry(want))
+        if [x for x in entry(want) if x in mine] != [x for x in entry(side) if x in kept and x in mine]:
+            return False
+    return True
 
 
 def compare(cwd, reviewed, head="HEAD", base="origin/main"):
@@ -521,6 +673,8 @@ def compare(cwd, reviewed, head="HEAD", base="origin/main"):
     return sorted(kept | {f for f in differ if not _renumbered_only(cwd, tree, head, f, reviewed, onto)
                           and not _appends_kept(cwd, tree, head, f, reviewed, onto)
                           and not _lines_kept(cwd, tree, head, f, reviewed, onto)
+                          and not _driver_kept(cwd, tree, head, f, reviewed, onto)
+                          and not _records_kept(cwd, tree, head, f, reviewed, onto)
                           and not _stale_dropped(cwd, tree, head, f, reviewed, onto)})
 
 
@@ -574,12 +728,39 @@ def _named(v, kind, pr):
 # waits on Mark's #2919 paste). PREMERGE-held-rest (#5385) holds every other PR-triggered workflow file too, the slow
 # image and real-model ones included: a long run only delays the merge, while an unheld one merges past a cancel.
 HELD = {"assurance": (), "vulncheck": (), "image": ("image-vulncheck",), "lane-gate": (), "word-budget": (),
-        "formal": (), "keycheck": (), "mutgate": (), "infer-real": (), "vision-real": (), "testkit": (),
+        "formal": (), "keycheck": (), "infer-real": (), "vision-real": (), "testkit": (),
         "enforcer-image": (), "camnode-image": (), "drone-sitl": ()}
 # The PR-triggered workflow files left out of HELD: every job of ci and trusted-base is a required check of main's
 # ruleset, and premerge is the gate itself. A workflow file with a PR trigger is in exactly one of the two (#5385).
 UNHELD = ("ci", "trusted-base", "premerge")
+# PREMERGE-gate-not-base-excusable (#6411): a DIFF_GATE workflow's verdict is on the PR's own diff (base to head), so a
+# failure in main's run of the merge base says nothing about the PR, and none of its jobs is ever excused: mutgate's
+# `claimed` carries a stale head and `mutgate` a survivor, whatever the base did. A TREE workflow judges the tree and
+# keeps the #3532 excusal of a failure the head inherited. PREMERGE-held-class-table (#6425): every HELD workflow has a
+# class here, a test keeps the keys equal to HELD's, and one missing from the table is read as DIFF_GATE (fail closed).
+DIFF_GATE, TREE = "diff-gate", "tree"
+HELD_CLASS = {"lane-gate": DIFF_GATE, "word-budget": DIFF_GATE,
+              "assurance": TREE, "vulncheck": TREE, "image": TREE, "formal": TREE, "keycheck": TREE, "infer-real": TREE,
+              "vision-real": TREE, "testkit": TREE, "enforcer-image": TREE, "camnode-image": TREE, "drone-sitl": TREE}
 PASSED = ("success", "skipped")
+# CI-mutgate-after-ci (#6569): mutgate.yml is a reusable workflow that ci.yml's `mutgate` job calls on a pull request once
+# every other ci job passed, so its jobs are `mutgate / <job>` in ci's run, and main's ruleset requires none of them.
+# --check holds `mutgate:<state>` until ci's newest pull_request run on the head completed with success, its one
+# `mutgate / claimed` job succeeded and no `mutgate / ` job failed. The calling job skipped (a ci job failed, or any
+# other cause) leaves no `mutgate / claimed` job, so it holds as mutgate:skipped: a skip never reads as a pass. This
+# check applies when the merge base's ci.yml calls mutgate.yml or the head's does, so a PR that drops the call from its
+# own ci.yml still owes it. A PR from before the call (neither calls it) is held by its standalone mutgate.yml
+# pull_request run instead, a DIFF_GATE run as HELD held it, owed whenever main calls it (checks_held).
+CI = ".github/workflows/ci.yml"
+LEGACY_MUTGATE = "mutgate"
+MUTGATE_JOB, MUTGATE_CLAIM = "mutgate / ", "mutgate / claimed"
+_CALLS_MUTGATE = re.compile(r"^ +uses: *\./\.github/workflows/mutgate\.yml *(?:#.*)?$", re.M)
+
+
+def _calls_mutgate(cwd, ref):
+    """Whether `ref`'s ci.yml calls mutgate.yml."""
+    shown = subprocess.run(["git", "show", f"{ref}:{CI}"], cwd=cwd, capture_output=True)
+    return not shown.returncode and bool(_CALLS_MUTGATE.search(shown.stdout.decode(errors="replace")))
 NO_RUNS = "needs-runs: every verdict is in; pass --runs <runs.json> (tools/premerge_runs.sh builds it) to read the held checks"
 _GLOB = re.compile(r"[A-Za-z0-9._/*-]+")
 _ITEM = re.compile(r"""\s*-\s*(?:"([^"]*)"|'([^']*)'|([^\s#'"]+))\s*(?:#.*)?""")
@@ -693,13 +874,37 @@ def _base_failed(runs, path, onto, repo):
     return {n for n, c in _jobs(r, 1) or [] if c == "failure"}
 
 
+def mutgate_held(runs, pr, sha):
+    """`mutgate:<state>` unless ci's newest pull_request run on `sha` bound to this PR passed the mutation gate."""
+    bound = [(_bind(r, pr, runs["repo"]), r) for r in runs["head"]
+             if r.get("path") == CI and r.get("head_sha") == sha and r.get("event") == "pull_request"]
+    mine = [r for b, r in bound if b == "ours"]
+    if not mine:
+        return ["mutgate:unbound" if any(b == "unbound" for b, _ in bound) else "mutgate:missing"]
+    r = max(mine, key=lambda r: r.get("id") or 0)
+    if r.get("status") != "completed":
+        return [f"mutgate:{r.get('status') or 'unknown'}"]
+    jobs = _jobs(r, r.get("run_attempt"))
+    if jobs is None:
+        return ["mutgate:unknown"]
+    ours = [(n, c) for n, c in jobs if isinstance(n, str) and n.startswith(MUTGATE_JOB)]
+    claims = [c for n, c in ours if n == MUTGATE_CLAIM]
+    if claims != ["success"]:
+        return [f"mutgate:{claims[0] if len(claims) == 1 and claims[0] else 'skipped'}"]
+    bad = [c for _, c in ours if c not in PASSED]
+    if bad:
+        return [f"mutgate:{bad[0] or 'unknown'}"]
+    return [] if r.get("conclusion") == "success" else [f"mutgate:{r.get('conclusion') or 'unknown'}"]
+
+
 def checks_held(cwd, runs, head="HEAD", base="origin/main"):
     """`<workflow>:<state>` for each HELD workflow whose newest pull_request run on `head` did not pass.
 
     `runs` is {"repo": ..., "pr": {"number", "repo", "branch"}, "head": [...], "base": [...]}: this repository, the PR's
     number and head repository and branch, and the Actions runs (API JSON) on the head and on the merge base, each
-    failed one with a `jobs` list (the head's latest attempt, the base's first). Only this PR's runs count (`_bind`). A run passes on `success` or
-    `skipped`, or on `failure` when every failed job is one HELD exempts or one that failed on the merge base too.
+    failed one, and ci's, with a `jobs` list (the head's latest attempt, the base's first). Only this PR's runs count (`_bind`). A run passes on `success` or
+    `skipped`, or on `failure` when every failed job is one HELD exempts or one that failed on the merge base too, never in
+    a workflow HELD_CLASS does not class TREE.
     A queued, running, cancelled or timed-out run holds, and so does a missing one the workflow's PR trigger owes, as
     `unbound` when only this branch's runs that name no PR or another PR are on the head."""
     pr = runs.get("pr") if isinstance(runs, dict) else None
@@ -710,13 +915,19 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
     onto = _git(cwd, "merge-base", base, head).decode().strip()
     files = [f for f in _git(cwd, *DIFF, onto, sha).decode(errors="surrogateescape").split("\0") if f]
     held = []
-    for name, exempt in HELD.items():
+    # CI-mutgate-after-ci (#6569): a PR whose merge base or head calls mutgate from ci is held by mutgate_held. One from
+    # before the call (neither does) is held, as HELD held it, by its own standalone mutgate.yml run, owed outright once
+    # main calls it, so the open PRs need no new ci run and dropping mutgate.yml escapes nothing.
+    called = _calls_mutgate(cwd, onto) or _calls_mutgate(cwd, sha)
+    legacy = [] if called else [(LEGACY_MUTGATE, ())]
+    main_calls = not called and _calls_mutgate(cwd, base)
+    for name, exempt in [*HELD.items(), *legacy]:
         path = f".github/workflows/{name}.yml"
         bound = [(_bind(r, pr, runs["repo"]), r) for r in runs["head"] if r.get("path") == path
                  and r.get("head_sha") == sha and r.get("event") in ("pull_request", "pull_request_target")]
         mine = [r for b, r in bound if b == "ours"]
         if not mine:
-            if _owed(cwd, sha, base, path, files):
+            if (name == LEGACY_MUTGATE and main_calls) or _owed(cwd, sha, base, path, files):
                 held.append(f"{name}:{'unbound' if any(b == 'unbound' for b, _ in bound) else 'missing'}")
             continue
         r = max(mine, key=lambda r: r.get("id") or 0)
@@ -725,11 +936,13 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
             continue
         if state == "failure":
             jobs = _jobs(r, r.get("run_attempt"))
-            excused = set(exempt) | _base_failed(runs["base"], path, onto, runs["repo"])
+            excused = set(exempt) | _base_failed(runs["base"], path, onto, runs["repo"]) if HELD_CLASS.get(name) == TREE else set()
             bad = [(n, c) for n, c in jobs or [] if c not in PASSED]
             if bad and all(c == "failure" and n in excused for n, c in bad):
                 continue
         held.append(f"{name}:{state or 'unknown'}")
+    if called:
+        held += mutgate_held(runs, pr, sha)
     return held
 
 

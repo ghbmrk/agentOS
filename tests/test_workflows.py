@@ -175,7 +175,17 @@ LANE_GATE_LINES = [
     "        env:",
 ] + ["          " + e for e in LANE_GATE_ENV] + [
     "        run: |",
-] + ["          " + r for r in LANE_GATE_RUN]
+] + ["          " + r for r in LANE_GATE_RUN] + [
+    # REV-PROOF-claims (#4909), here since CI-trusted-base-records (#6404): the body is this step's
+    # subject, so it runs where `edited` reruns it, from the base copy, and cannot be skipped.
+    "      - name: Closing keywords against deferred parts (base copy of tools/claims.py)",
+    "        if: ${{ !cancelled() }}",
+    "        env:",
+    "          PR_BODY: ${{ github.event.pull_request.body }}",
+    "        run: |",
+    "          printf '%s\\n' \"$PR_BODY\" > \"$RUNNER_TEMP/claims-body.txt\"",
+    "          python3 -I tools/claims.py closes --body \"$RUNNER_TEMP/claims-body.txt\" --markdown \"$GITHUB_STEP_SUMMARY\"",
+]
 
 
 # PREMERGE-wire (#1860): premerge.yml is pinned the same way. It needs `statuses: write`, so
@@ -200,12 +210,12 @@ PREMERGE_LINES = [
     'permissions:',
     '  contents: read',
     'concurrency:',
-    '  group: premerge-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || inputs.pr || github.run_id }}',
+    "  group: premerge-${{ github.event.pull_request.number || ((contains(github.event.comment.body, 'Verdict:') || contains(github.event.changes.body.from, 'Verdict:')) && github.event.issue.number) || github.event.workflow_run.pull_requests[0].number || inputs.pr || github.run_id }}",
     '  cancel-in-progress: false',
     'jobs:',
     '  premerge-gate:',
     '    name: premerge-gate',
-    "    if: (github.event_name == 'pull_request_target' && github.event.action != 'closed') || github.event.issue.pull_request || github.event.workflow_run.pull_requests[0] || github.event_name == 'workflow_dispatch'",
+    "    if: (github.event_name == 'pull_request_target' && github.event.action != 'closed') || (github.event.issue.pull_request && (contains(github.event.comment.body, 'Verdict:') || contains(github.event.changes.body.from, 'Verdict:'))) || github.event.workflow_run.pull_requests[0] || github.event_name == 'workflow_dispatch'",
     '    runs-on: ubuntu-24.04',
     '    timeout-minutes: 5',
     '    environment: premerge # deployment branches: main only; holds PREMERGE_APP_KEY',
@@ -453,28 +463,29 @@ INTAKE_LINES = [
     "    types: [opened, edited, labeled, unlabeled]",
     "permissions:",
     "  contents: read",
-    "concurrency:",
-    "  group: intake-${{ github.event.issue.number }}",
-    "  cancel-in-progress: false",
     "jobs:",
     "  intake:",
     "    if: >-",
     "      contains(fromJSON('[\"OWNER\", \"MEMBER\", \"COLLABORATOR\"]'), github.event.issue.author_association)",
     "      && (contains(github.event.issue.labels.*.name, 'work-item') || github.event.label.name == 'work-item')",
+    "    concurrency:",
+    "      group: intake",
+    "      cancel-in-progress: false",
     "    runs-on: ubuntu-24.04",
     "    timeout-minutes: 5",
     "    permissions:",
     "      contents: read",
-    "      issues: write # the intake comment on this issue",
+    "      issues: write # the intake comments",
+    "      actions: read # the newest successful intake run, where the sweep's window starts",
     "    steps:",
     "      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2",
     "        with:",
     "          persist-credentials: false",
-    "      - name: Comment on the issue while it cannot render (tools/board.py intake)",
+    "      - name: Comment on each work item while it cannot render (tools/board.py intake --sweep)",
     "        env:",
     "          GITHUB_TOKEN: ${{ github.token }}",
     "          ISSUE: ${{ github.event.issue.number }}",
-    '        run: python3 -I tools/board.py intake --repo "$GITHUB_REPOSITORY" --issue "$ISSUE"',
+    '        run: python3 -I tools/board.py intake --repo "$GITHUB_REPOSITORY" --issue "$ISSUE" --sweep',
 ]
 
 
@@ -627,7 +638,7 @@ def workflow_runners(text):
     starts = top.get("jobs", [])
     if len(starts) != 1 or lines[starts[0]].rstrip(SP) != "jobs:":
         return {}, problems + ["needs one block `jobs:`"]
-    jobs, job, key = {}, None, None
+    jobs, job, key, called = {}, None, None, set()
     for l in lines[starts[0] + 1:]:
         indent = len(l) - len(l.lstrip(SP))
         body = re.split(r" +#", l.strip(SP), maxsplit=1)[0]
@@ -655,6 +666,10 @@ def workflow_runners(text):
             key = m.group(1)
             if key == "runs-on":
                 jobs[job].append(m.group(2) or "")
+            elif key == "uses" and LOCAL_CALL.fullmatch(m.group(2) or "") and job not in called:
+                # CI-mutgate-after-ci (#6569): a workflow file in this directory, whose own jobs this reader
+                # checks as it checks every file here; any other reusable workflow's runs-on it cannot see.
+                called.add(job)
             elif key == "uses":
                 problems.append("%s: calls a reusable workflow, whose runs-on this cannot see" % job)
         elif indent > 4 and job and key:
@@ -665,9 +680,15 @@ def workflow_runners(text):
     if not jobs:
         problems.append("no jobs")
     for job, runs in jobs.items():
-        if runs != [RUNNER]:
+        if job in called:
+            if runs:
+                problems.append("%s: calls a workflow and names a runner" % job)
+        elif runs != [RUNNER]:
             problems.append("%s: runs-on %r, must be exactly [%r]" % (job, runs, RUNNER))
     return jobs, problems
+
+
+LOCAL_CALL = re.compile(r"\./\.github/workflows/[a-z0-9-]+\.yml")
 
 
 IMAGE_STEP = (
@@ -730,7 +751,10 @@ SUPERSEDE_LINES = [
 ]
 SUPERSEDE = ["trusted-base.yml", "lane-gate.yml", "word-budget.yml", "formal.yml", "keycheck.yml",
              "ci.yml", "assurance.yml", "vulncheck.yml", "image.yml", "infer-real.yml", "vision-real.yml",
-             "testkit.yml", "enforcer-image.yml", "camnode-image.yml", "drone-sitl.yml", "mutgate.yml"]
+             "testkit.yml", "enforcer-image.yml", "camnode-image.yml", "drone-sitl.yml"]
+# CI-mutgate-after-ci (#6569): a workflow that only ci.yml calls runs inside ci's run, under ci's group; a block of
+# its own would share ci's `github.workflow` name and wait on the run that called it, so it carries none.
+CALLED_BY_CI = {"mutgate.yml"}
 # premerge.yml queues its runs on purpose (its record handling) and never cancels one.
 KEEPS_EVERY_RUN = {"premerge.yml"}
 
@@ -847,21 +871,16 @@ def concurrency_problems(top):
     return []
 
 
-# CI-mutgate-head-guard (#5409): a rerun keeps its event, so it can test a head the PR has left.
-# mutgate's first job is this one, pinned whole: it reads the PR's head from the API and, when the
-# run's is older, ends with a notice. `claimed` runs only on its `current`, and no later job runs
-# past a skipped claim but the `mutgate` job, which then fails, so a stale run never passes.
-HEAD_GUARD_LINES = [
-    "  head:",
-    "    runs-on: ubuntu-24.04",
-    "    timeout-minutes: 5",
+# CI-mutgate-head-guard (#5409): a rerun keeps its event, so it can test a head the PR has left, and
+# "Re-run failed jobs" copies a succeeded job's result from attempt 1 (L3 on #5433). So each job that
+# runs PR tests or decides reads the PR's head itself as its first step and fails on an older one.
+HEAD_CHECK_JOBS = ("claimed", "plan", "mutants", "mutgate")
+HEAD_CHECK_LINES = [
     "    permissions:",
+    "      contents: read",
     "      pull-requests: read",
-    "    outputs:",
-    "      current: ${{ steps.head.outputs.current }}",
     "    steps:",
-    "      - name: This run's head is the PR's current head",
-    "        id: head",
+    "      - name: This run's head is still the PR's current head",
     "        env:",
     "          GH_TOKEN: ${{ github.token }}",
     "          REPO: ${{ github.repository }}",
@@ -871,40 +890,23 @@ HEAD_GUARD_LINES = [
     '          now=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha) || '
     '{ echo "::error::cannot read the PR\'s head"; exit 1; }',
     "          [[ \"$now\" =~ ^[0-9a-f]{40}$ ]] || { echo \"::error::the PR's head is not a sha: $now\"; exit 1; }",
-    '          if [ "$now" = "$RUN_HEAD" ]; then echo "current=true" >> "$GITHUB_OUTPUT"; exit 0; fi',
-    '          echo "::notice::this run\'s head $RUN_HEAD is not the PR\'s current head $now: no gate runs; '
-    'the current head\'s own run decides"',
-    '          echo "current=false" >> "$GITHUB_OUTPUT"',
-]
-CLAIM_WAITS = ["  claimed:", "    needs: head", "    if: ${{ needs.head.outputs.current == 'true' }}"]
-# L3 on #5433: "Re-run failed jobs" copies `head`'s current=true from attempt 1, so each job that
-# runs PR tests or decides reads the head itself as its first step and fails on an older one.
-HEAD_CHECK_JOBS = ("plan", "mutants", "mutgate")
-HEAD_CHECK_LINES = [
-    "    permissions:",
-    "      contents: read",
-    "      pull-requests: read",
-    "    steps:",
-    "      - name: This run's head is still the PR's current head",
-] + HEAD_GUARD_LINES[HEAD_GUARD_LINES.index("        env:"):-3] + [
     '          [ "$now" = "$RUN_HEAD" ] || { echo "::error::this run\'s head $RUN_HEAD is not the PR\'s current head '
     '$now: a rerun of an old head gates nothing; the current head\'s own run decides"; exit 1; }',
 ]
+# CI-mutgate-zero-target-fast (#6401): `claimed` is the first job, so a PR that claims nothing takes one
+# runner slot. The deciding job skips only on a claim that succeeded and printed a literal `[]`; any
+# other claim (failed, timed out, no list) runs it, and it fails unless the claim succeeded.
+GATE_IF = "    if: ${{ !cancelled() && (needs.claimed.result != 'success' || needs.claimed.outputs.packages != '[]') }}"
 
 
 def head_guard_problems(text):
-    """Return why mutgate.yml can run its gate on a head the PR has left; empty when it cannot."""
+    """Return why mutgate.yml can pass a head the PR has left or a claim that did not print `[]`; empty when it cannot."""
     if "\njobs:\n" not in text:
         return ["no `jobs:` line"]
     code = [l for l in text.split("\njobs:\n", 1)[1].split("\n") if l.strip(SP) and not l.lstrip(SP).startswith("#")]
     jobs = [i for i, l in enumerate(code) if re.match(r"  \S", l)] + [len(code)]
-    first = code[:jobs[1]] if len(jobs) > 1 else code
-    if first != HEAD_GUARD_LINES:
-        return ["the first job is not the pinned head check"]
-    claim = [i for i in jobs[:-1] if code[i] == "  claimed:"]
-    if not claim or code[claim[0]:claim[0] + 3] != CLAIM_WAITS:
-        return ["`claimed` does not wait on the head check"]
-    # Only the deciding job may run past a skipped claim, and it fails unless the claim succeeded.
+    if code[jobs[0]] != "  claimed:":
+        return ["the first job is not `claimed`"]
     for a, b in zip(jobs, jobs[1:]):
         body = "\n".join(code[a:b])
         name = code[a].strip(SP + ":")
@@ -913,11 +915,90 @@ def head_guard_problems(text):
             if [l for l in code[a:b] if l.startswith("    permissions")] != ["    permissions:"] or \
                     code[at[0]:at[0] + len(HEAD_CHECK_LINES)] != HEAD_CHECK_LINES or "    steps:" in code[a:at[0]]:
                 return ["%s does not read the PR's head first" % name]
-        if code[a] != "  mutgate:" and re.search(r"\b(always|cancelled|failure|success)\(", body):
-            return ["%s runs past a skipped claim" % name]
-        if code[a] == "  mutgate:" and '[ "$CLAIMED" = success ] || exit 1' not in body:
-            return ["the mutgate job does not fail when the claim did not run"]
+        # Only the deciding job may run past a failed claim, and it fails unless the claim succeeded.
+        if name != "mutgate" and re.search(r"\b(always|cancelled|failure|success)\(", body):
+            return ["%s runs past a failed claim" % name]
+        if name == "mutgate" and ([l for l in code[a:b] if l.startswith("    if:")] != [GATE_IF]
+                                  or '[ "$CLAIMED" = success ] || exit 1' not in body):
+            return ["the mutgate job can pass or skip a claim that did not succeed with `[]`"]
     return []
+
+
+# CI-mutgate-after-ci (#6569): mutgate.yml is called only from ci.yml's `mutgate` job, which needs every other ci job,
+# so a head whose ci fails takes no mutgate runner; it runs on a pull request only, as mutgate.yml's own trigger did.
+CALL_LINES = [
+    "  mutgate:",
+    "    needs: [%s]",
+    "    if: ${{ github.event_name == 'pull_request' }}",
+    "    permissions:",
+    "      contents: read",
+    "      pull-requests: read",
+    "    uses: ./.github/workflows/mutgate.yml",
+]
+
+
+def ci_call_problems(ci, called):
+    """Return why mutgate.yml can run before every other ci job passed, or off a pull request; empty when it cannot."""
+    events, problems = workflow_triggers(called)
+    if problems:
+        return problems
+    if events != ["workflow_call"]:
+        return ["mutgate.yml has a trigger besides workflow_call: %r" % events]
+    if re.search(r"^[\"']?concurrency[\"']?\s*:", called, re.M):
+        return ["mutgate.yml sets a concurrency group, which waits on the ci run that called it"]
+    if "\njobs:\n" not in ci:
+        return ["no `jobs:` line in ci.yml"]
+    code = [l for l in ci.split("\njobs:\n", 1)[1].split("\n") if l.strip(SP) and not l.lstrip(SP).startswith("#")]
+    starts = [i for i, l in enumerate(code) if re.match(r"  \S", l)] + [len(code)]
+    ids = [code[i].strip(SP).rstrip(":") for i in starts[:-1]]
+    if ids.count("mutgate") != 1:
+        return ["ci.yml has %d `mutgate` jobs" % ids.count("mutgate")]
+    k = ids.index("mutgate")
+    want = [l % ", ".join(i for i in ids if i != "mutgate") if "%s" in l else l for l in CALL_LINES]
+    if code[starts[k]:starts[k + 1]] != want:
+        return ["ci's mutgate job is not the pinned pull-request call after every other ci job"]
+    return []
+
+
+# CI-SOAK-cap (#1649): the most runners each soak.yml matrix may hold at once.
+SOAK_CAPS = {"fuzz": 3, "soak": 1}
+
+
+def soak_cap_problems(text):
+    """Return why a soak.yml matrix can run wider than SOAK_CAPS; empty when none can."""
+    problems = []
+    for job, cap in SOAK_CAPS.items():
+        if "\n  %s:\n" % job not in text:
+            problems.append("no %s job" % job)
+            continue
+        body = re.split(r"\n  (?=\S)", text.split("\n  %s:\n" % job, 1)[1], maxsplit=1)[0]
+        strategy = re.search(r"(?m)^    strategy:\n((?:(?:      .*)?\n)*)", body + "\n")
+        caps = re.findall(r"(?m)^      max-parallel:\s*(\S+)", strategy.group(1)) if strategy else []
+        if len(caps) != 1 or not re.fullmatch(r"[1-9]\d*", caps[0]) or int(caps[0]) > cap:
+            problems.append("%s: max-parallel %r, must be one integer of at most %d" % (job, caps, cap))
+    return problems
+
+
+def step_script(text, job, step):
+    """The run: script of the step named `step` in `job` of a workflow, dedented to column 0."""
+    body = text.split("\n  %s:\n" % job, 1)[1]
+    lines = body.split("      - name: %s\n" % step, 1)[1].split("\n")
+    run = lines.index("        run: |")
+    out = []
+    for l in lines[run + 1:]:
+        if l and not l.startswith("          "):
+            break
+        out.append(l[10:])
+    return "\n".join(out)
+
+
+def gate_runs(cancelled, result, packages):
+    """GATE_IF's expression evaluated for one run: whether the deciding job runs."""
+    expr = GATE_IF.split("${{", 1)[1].rsplit("}}", 1)[0]
+    for k, v in (("!cancelled()", "(not cancelled)"), ("needs.claimed.result", "result"),
+                 ("needs.claimed.outputs.packages", "packages"), ("&&", " and "), ("||", " or ")):
+        expr = expr.replace(k, v)
+    return eval(expr, {"__builtins__": {}}, {"cancelled": cancelled, "result": result, "packages": packages})
 
 
 class WorkflowTest(unittest.TestCase):
@@ -931,6 +1012,41 @@ class WorkflowTest(unittest.TestCase):
             with self.subTest(f.name):
                 self.assertEqual(supersede_problems(f.name, f.read_text()), [])
         self.assertIn("  cancel-in-progress: false", (WORKFLOWS / "premerge.yml").read_text())
+
+    def test_mutgate_runs_only_after_every_ci_job(self):
+        # CI-mutgate-after-ci (#6569): ci.yml calls mutgate.yml from one job that needs every other ci job, on a pull
+        # request only, and nothing else calls it or triggers it; each weakening of that fails the check.
+        ci, called = (WORKFLOWS / "ci.yml").read_text(), (WORKFLOWS / "mutgate.yml").read_text()
+        self.assertEqual(ci_call_problems(ci, called), [])
+        for f in self.files():
+            if f.name != "ci.yml":
+                self.assertFalse(re.search(r"uses:.*workflows/mutgate\.yml", f.read_text()), f.name)
+        self.assertEqual(CALLED_BY_CI, {"mutgate.yml"})
+        needs = next(l for l in ci.split("\n") if l.startswith("    needs: [unit-tests, checks"))
+        ci_edits = {
+            "a ci job dropped from needs": (needs, needs.replace("hostcheck, ", "").replace(", hostcheck", "")),
+            "runs past a failed job": ("    if: ${{ github.event_name == 'pull_request' }}\n    permissions:\n      contents: read\n      pull-requests",
+                                       "    if: ${{ always() && github.event_name == 'pull_request' }}\n    permissions:\n      contents: read\n      pull-requests"),
+            "on every event": ("    if: ${{ github.event_name == 'pull_request' }}\n    permissions:\n      contents: read\n      pull-requests",
+                               "    permissions:\n      contents: read\n      pull-requests"),
+            "a new ci job it does not wait for": ("\n  mutgate:\n", "\n  late:\n    runs-on: ubuntu-24.04\n  mutgate:\n"),
+            "a second caller": ("\n  mutgate:\n", "\n  mutgate:\n    uses: ./.github/workflows/mutgate.yml\n  mutgate:\n"),
+            "no caller": ("    uses: ./.github/workflows/mutgate.yml", "    runs-on: ubuntu-24.04"),
+        }
+        for edit, (old, new) in ci_edits.items():
+            with self.subTest(edit):
+                self.assertIn(old, ci)
+                self.assertTrue(ci_call_problems(ci.replace(old, new, 1), called), edit)
+        on = "on:\n  workflow_call:\n"
+        called_edits = {
+            "also on pull requests": (on, "on:\n  workflow_call:\n  pull_request:\n"),
+            "on pull requests only": (on, "on:\n  pull_request:\n"),
+            "a concurrency group": (on, on + "concurrency:\n  group: x\n"),
+        }
+        for edit, (old, new) in called_edits.items():
+            with self.subTest(edit):
+                self.assertIn(old, called)
+                self.assertTrue(ci_call_problems(ci, called.replace(old, new, 1)), edit)
 
     def test_supersede_check_catches_each_edit(self):
         # CI-cancel-superseded (#5345): a rerun that cancels, a cancelled main push, one group
@@ -971,7 +1087,7 @@ class WorkflowTest(unittest.TestCase):
                 self.assertTrue(supersede_problems("x.yml", plain.replace("jobs:", block + "jobs:")))
         pinned = plain.replace("jobs:", "\n".join(SUPERSEDE_LINES) + "\njobs:")
         self.assertEqual(supersede_problems("x.yml", pinned), ["a PR workflow missing from SUPERSEDE"])
-        self.assertEqual(supersede_problems("mutgate.yml", pinned), [])
+        self.assertEqual(supersede_problems("formal.yml", pinned), [])
         # A PR workflow: `jobs: ` with a trailing space still exposes its jobs, and
         # a jobs line the check cannot find fails (#5348).
         testkit = (WORKFLOWS / "testkit.yml").read_text()
@@ -999,8 +1115,8 @@ class WorkflowTest(unittest.TestCase):
                              "\n  push:\n    branches: [main]\n  \"pull_request_review\": {types: [submitted]}\n"]:
                 plain = "name: x\n" + key + ":" + triggers + "permissions:\n  contents: read\njobs:\n"
                 with self.subTest(key=key, triggers=triggers):
-                    self.assertTrue(supersede_problems("mutgate.yml", plain))
-                    self.assertEqual(supersede_problems("mutgate.yml", plain.replace("jobs:", block + "jobs:")), [])
+                    self.assertTrue(supersede_problems("formal.yml", plain))
+                    self.assertEqual(supersede_problems("formal.yml", plain.replace("jobs:", block + "jobs:")), [])
             with self.subTest(key=key, triggers="push"):
                 push = "name: x\n" + key + ":\n  push:\n    paths: [pull_request]\njobs:\n"
                 self.assertEqual(workflow_triggers(push), (["push"], []))
@@ -1040,37 +1156,34 @@ class WorkflowTest(unittest.TestCase):
         # L3 on #5408: a document indented by one space throughout is still one GitHub reads.
         indented = "".join(" " + line for line in plain.splitlines(True))
         self.assertTrue(workflow_triggers(indented)[1])
-        self.assertTrue(supersede_problems("mutgate.yml", indented))
+        self.assertTrue(supersede_problems("formal.yml", indented))
         for name, (old, new) in unread.items():
             with self.subTest(name):
                 self.assertIn(old, plain)
                 text = plain.replace(old, new, 1)
                 self.assertTrue(workflow_triggers(text)[1], name)
-                self.assertTrue(supersede_problems("mutgate.yml", text.replace("jobs:", block + "jobs:")), name)
+                self.assertTrue(supersede_problems("formal.yml", text.replace("jobs:", block + "jobs:")), name)
                 self.assertTrue(supersede_problems("x.yml", text.replace("pull_request", "push")), name)
 
     def test_a_stale_mutgate_run_stops_at_its_first_job(self):
-        # CI-mutgate-head-guard (#5409): mutgate's first job is the pinned head check, `claimed`
-        # waits on it, and no job but the failing `mutgate` one runs past a skipped claim.
+        # CI-mutgate-head-guard (#5409): every job that runs PR tests or decides reads the PR's head
+        # first; `claimed`, the first job, fails on an older head, so no later job runs but the failing gate.
         text = (WORKFLOWS / "mutgate.yml").read_text()
         self.assertEqual(head_guard_problems(text), [])
-        guard = "\n".join(HEAD_GUARD_LINES) + "\n"
         edits = {
-            "no guard": (guard, ""),
-            "a job before the guard": ("\njobs:\n", "\njobs:\n  early:\n    runs-on: ubuntu-24.04\n"),
-            "guard widened": ("      pull-requests: read\n", "      pull-requests: write\n"),
-            "guard always passes": ('if [ "$now" = "$RUN_HEAD" ]', 'if true || [ "$now" = "$RUN_HEAD" ]'),
-            "guard reads the event": ('gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha', 'echo "$RUN_HEAD"'),
-            "claim ignores it": ("    if: ${{ needs.head.outputs.current == 'true' }}\n", ""),
-            "claim waits on nothing": ("    needs: head\n", ""),
-            "plan runs past a skip": ("    if: ${{ needs.claimed.outputs.packages != '[]' }}\n",
-                                      "    if: ${{ always() && needs.claimed.outputs.packages != '[]' }}\n"),
-            "gate passes a skip": ('[ "$CLAIMED" = success ] || exit 1', '[ "$CLAIMED" != failure ] || exit 1'),
+            "a job before the claim": ("\njobs:\n", "\njobs:\n  early:\n    runs-on: ubuntu-24.04\n"),
+            "check widened": ("      pull-requests: read\n", "      pull-requests: write\n"),
+            "check reads the event": ('gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha', 'echo "$RUN_HEAD"'),
+            "plan runs past a failure": ("    if: ${{ needs.claimed.outputs.packages != '[]' }}\n",
+                                         "    if: ${{ always() && needs.claimed.outputs.packages != '[]' }}\n"),
+            "gate passes a failed claim": ('[ "$CLAIMED" = success ] || exit 1', '[ "$CLAIMED" != failure ] || exit 1'),
+            # CI-mutgate-zero-target-fast (#6401): the gate skips only on a successful literal `[]`.
+            "gate skips a failed claim's []": (GATE_IF + "\n", "    if: ${{ !cancelled() && needs.claimed.outputs.packages != '[]' }}\n"),
+            "gate skips an empty claim": (GATE_IF + "\n", GATE_IF.replace("!= '[]'", "!= '[]' && needs.claimed.outputs.packages != ''") + "\n"),
             "no jobs line": ("\njobs:\n", "\njobs: \n"),
-            # L3 on #5433: each job that runs PR tests or decides checks the head itself, first.
             "a job's check passes an old head": ('          [ "$now" = "$RUN_HEAD" ] || { echo "::error::this run',
                                                  '          true || { echo "::error::this run'),
-            "a second permissions key": ("    if: ${{ !cancelled() }}\n", "    if: ${{ !cancelled() }}\n    permissions: {}\n"),
+            "a second permissions key": (GATE_IF + "\n", GATE_IF + "\n    permissions: {}\n"),
         }
         check = "\n".join(HEAD_CHECK_LINES[4:]) + "\n"
         for job in HEAD_CHECK_JOBS:
@@ -1078,38 +1191,68 @@ class WorkflowTest(unittest.TestCase):
             edits["no check in " + job] = ("\n  %s:\n" % job + body[:body.index(check) + len(check)],
                                            "\n  %s:\n" % job + body[:body.index(check)].replace(
                                                "    permissions:\n      contents: read\n      pull-requests: read\n", ""))
-            edits["check after the checkout in " + job] = (
-                "\n  %s:\n" % job + body[:body.index(check) + len(check)] + "      - uses: actions/checkout@",
-                "\n  %s:\n" % job + body[:body.index(check)] + "      - uses: actions/checkout@x\n" + check
-                + "      - uses: actions/checkout@") if job != "mutgate" else (
-                "\n  %s:\n" % job + body[:body.index(check) + len(check)] + "      - name: The claim ran",
-                "\n  %s:\n" % job + body[:body.index(check)] + "      - run: true\n" + check + "      - name: The claim ran")
+            nxt = body[body.index(check) + len(check):].split("\n", 1)[0] + "\n"
+            edits["check after another step in " + job] = (
+                "\n  %s:\n" % job + body[:body.index(check) + len(check)] + nxt,
+                "\n  %s:\n" % job + body[:body.index(check)] + "      - run: true\n" + check + nxt)
         for edit, (old, new) in edits.items():
             with self.subTest(edit):
                 self.assertIn(old, text)
                 self.assertTrue(head_guard_problems(text.replace(old, new, 1)), edit)
-        # The guard's script: the current head runs the gate, an older one ends green with a notice,
-        # and an unreadable head fails the job (so `claimed` and every gate job skip and mutgate fails).
-        script = "\n".join(l[10:] for l in HEAD_GUARD_LINES[HEAD_GUARD_LINES.index("        run: |") + 1:])
+        # The check's script: only the current head goes on; anything else fails the job.
+        script = step_script(text, "claimed", "This run's head is still the PR's current head")
+        self.assertEqual(script.rstrip("\n").split("\n"), [l[10:] for l in HEAD_CHECK_LINES[11:]])
         sha, other = "a" * 40, "b" * 40
-        for out, rc, want_rc, want in [(sha, 0, 0, "current=true"), (other, 0, 0, "current=false"),
-                                       ("", 1, 1, ""), ("not a sha", 0, 1, ""), (sha + "\n" + sha, 0, 1, "")]:
+        for out, rc, ok in [(sha, 0, True), (other, 0, False), ("", 1, False), ("not a sha", 0, False),
+                            (sha + "\n" + sha, 0, False)]:
             with self.subTest(out=out, rc=rc), tempfile.TemporaryDirectory() as d:
                 gh = pathlib.Path(d, "gh")
                 gh.write_text("#!/bin/sh\nprintf '%s\\n' \"$STUB_OUT\"\nexit \"$STUB_RC\"\n")
                 gh.chmod(0o755)
                 env = {"PATH": d + ":/usr/bin:/bin", "STUB_OUT": out, "STUB_RC": str(rc), "RUN_HEAD": sha,
-                       "REPO": "o/r", "PR_NUMBER": "1", "GITHUB_OUTPUT": str(pathlib.Path(d, "out"))}
+                       "REPO": "o/r", "PR_NUMBER": "1"}
                 r = subprocess.run(["bash", "-e", "-c", script], env=env, capture_output=True, text=True)
-                self.assertEqual(r.returncode, want_rc, r.stdout + r.stderr)
-                got = pathlib.Path(d, "out").read_text().strip() if pathlib.Path(d, "out").exists() else ""
-                self.assertEqual(got, want)
-                self.assertEqual("::notice::this run's head" in r.stdout, want == "current=false")
-                # Each later job's own check: only the current head goes on; anything else fails the job.
-                check = "\n".join(l[10:] for l in HEAD_CHECK_LINES[HEAD_CHECK_LINES.index("        run: |") + 1:])
-                r = subprocess.run(["bash", "-e", "-c", check], env=env, capture_output=True, text=True)
-                self.assertEqual(r.returncode, 0 if want == "current=true" else 1, r.stdout + r.stderr)
-                self.assertEqual("a rerun of an old head gates nothing" in r.stdout, want == "current=false")
+                self.assertEqual(r.returncode, 0 if ok else 1, r.stdout + r.stderr)
+                self.assertEqual("a rerun of an old head gates nothing" in r.stdout, out == other)
+
+    def test_a_zero_target_mutgate_passes_only_on_a_claim_that_printed_an_empty_list(self):
+        # CI-mutgate-zero-target-fast (#6401): a PR that claims no package passes from `claimed` alone:
+        # plan, shards and the gate all skip, which GitHub counts as passing. Fail closed: the claim step
+        # fails unless the tool succeeded and printed one line holding a list, and the gate skips only
+        # when `claimed` succeeded with a literal `[]`; every other claim runs the gate, which fails it.
+        text = (WORKFLOWS / "mutgate.yml").read_text()
+        self.assertEqual(head_guard_problems(text), [])
+        for job in ("plan", "mutants"):
+            self.assertIn("\n  %s:\n" % job, text)
+            body = text.split("\n  %s:\n" % job, 1)[1]
+            self.assertIn("    if: ${{ needs.claimed.outputs.packages != '[]' }}\n", body.split("\n    steps:\n", 1)[0])
+        script = step_script(text, "claimed", "Tier-A and tier-B packages this PR changes")
+        self.assertIn('python3 -I tools/mutgate.py claimed --git "$BASE" --json', script)
+        for out, rc, want in [("[]", 0, "[]"), ('["hint"]', 0, '["hint"]'), ('["a", "kernel/b"]', 0, '["a", "kernel/b"]'),
+                              ("", 0, None), ("[]", 1, None), ("[]", 124, None), ("", 1, None), ("[]\n[]", 0, None),
+                              ("[\n]", 0, None), ("none", 0, None), ("[] trailing", 0, None), ("Traceback\n[]", 0, None)]:
+            with self.subTest(out=out, rc=rc), tempfile.TemporaryDirectory() as d:
+                py = pathlib.Path(d, "python3")
+                py.write_text("#!/bin/sh\nprintf '%s\\n' \"$STUB_OUT\"\nexit \"$STUB_RC\"\n")
+                py.chmod(0o755)
+                outf, summ = pathlib.Path(d, "out"), pathlib.Path(d, "summary")
+                env = {"PATH": d + ":/usr/bin:/bin", "STUB_OUT": out, "STUB_RC": str(rc), "BASE": "x",
+                       "GITHUB_OUTPUT": str(outf), "GITHUB_STEP_SUMMARY": str(summ)}
+                r = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
+                                   env=env, capture_output=True, text=True)
+                self.assertEqual(r.returncode == 0, want is not None, r.stdout + r.stderr)
+                got = outf.read_text() if outf.exists() else ""
+                self.assertEqual(got, "" if want is None else "packages=%s\n" % want)
+                self.assertEqual(summ.exists(), want == "[]")
+        # The deciding job: skipped only for a succeeded claim with a literal `[]`; a cancelled run is
+        # cancelled whatever it skips. Every result other than success runs the gate.
+        for result in ("success", "failure", "cancelled", "skipped", ""):
+            for packages in ("[]", '["hint"]', "", "[ ]", "null"):
+                with self.subTest(result=result, packages=packages):
+                    self.assertEqual(gate_runs(False, result, packages), not (result == "success" and packages == "[]"))
+                    self.assertFalse(gate_runs(True, result, packages))
+        # When it runs, it fails unless the claim succeeded: tests/test_mutgate.py's
+        # test_summary_fails_unless_the_claim_ran_and_each_package_passed pins its script.
 
     def test_concurrency_block_is_read_whole(self):
         # #5409 (from #5408's review): the pinned block's three lines with more after them fail,
@@ -1117,7 +1260,7 @@ class WorkflowTest(unittest.TestCase):
         plain = "name: x\non:\n  pull_request:\npermissions:\n  contents: read\njobs:\n"
         block = "\n".join(SUPERSEDE_LINES) + "\n"
         group, cancel = SUPERSEDE_LINES[1], SUPERSEDE_LINES[2]
-        self.assertEqual(supersede_problems("mutgate.yml", plain.replace("jobs:", block + "jobs:")), [])
+        self.assertEqual(supersede_problems("formal.yml", plain.replace("jobs:", block + "jobs:")), [])
         for edit, new in {
             "second cancel-in-progress": block + "  cancel-in-progress: true\n",
             "second group": block + "  group: shared\n",
@@ -1126,11 +1269,11 @@ class WorkflowTest(unittest.TestCase):
             "missing key": block.replace(cancel + "\n", ""),
         }.items():
             with self.subTest(edit):
-                self.assertTrue(supersede_problems("mutgate.yml", plain.replace("jobs:", new + "jobs:")), edit)
+                self.assertTrue(supersede_problems("formal.yml", plain.replace("jobs:", new + "jobs:")), edit)
         for edit, new in {"reordered": "concurrency:\n" + cancel + "\n" + group + "\n",
                           "comment and blank line inside": "concurrency:\n  # c\n\n" + group + "\n" + cancel + "\n"}.items():
             with self.subTest(edit):
-                self.assertEqual(supersede_problems("mutgate.yml", plain.replace("jobs:", new + "jobs:")), [], edit)
+                self.assertEqual(supersede_problems("formal.yml", plain.replace("jobs:", new + "jobs:")), [], edit)
 
     def test_unread_yaml_names_the_supported_subset(self):
         # Lens R1 on #5408: flow style, an anchor or a tab-indented block fails with the subset the
@@ -1153,8 +1296,8 @@ class WorkflowTest(unittest.TestCase):
             text = plain.replace("jobs:", block + "jobs:").replace(*new) if isinstance(new, tuple) \
                 else plain.replace("jobs:", new + "jobs:")
             with self.subTest(edit):
-                self.assertIn(SUBSET, supersede_problems("mutgate.yml", text), edit)
-        changed = supersede_problems("mutgate.yml", plain.replace("jobs:", block.replace(cancel, "  cancel-in-progress: true") + "jobs:"))
+                self.assertIn(SUBSET, supersede_problems("formal.yml", text), edit)
+        changed = supersede_problems("formal.yml", plain.replace("jobs:", block.replace(cancel, "  cancel-in-progress: true") + "jobs:"))
         self.assertEqual(len(changed), 1)
         self.assertNotIn(SUBSET, changed)
         self.assertIn("cancel-in-progress is 'true', pinned", changed[0])
@@ -1223,6 +1366,9 @@ class WorkflowTest(unittest.TestCase):
             "keys at six": (head, "\n  checks:\n      runs-on: self-hosted\n"),
             "keys at three": (head, "\n  checks:\n   runs-on: self-hosted\n"),
             "reusable workflow": (head, "\n  checks:\n    uses: other/repo/.github/workflows/x.yml@v1\n"),
+            "local call elsewhere": (head, "\n  checks:\n    uses: ./x/.github/workflows/x.yml\n"),
+            "local call and runs-on": (job, job + "    uses: ./.github/workflows/mutgate.yml\n"),
+            "local call twice": (head, "\n  checks:\n    uses: ./.github/workflows/a.yml\n    uses: ./.github/workflows/b.yml\n"),
             "tab": (job, "    runs-on:\tubuntu-24.04\n"),
             "no-break space after the value": (job, "    runs-on: ubuntu-24.04\u00a0\n"),
             "ideographic space after the value": (job, "    runs-on: ubuntu-24.04\u3000\n"),
@@ -1412,6 +1558,9 @@ class WorkflowTest(unittest.TestCase):
         transition = text.split("\n  transition:\n", 1)[1].split("\n  render:\n", 1)[0]
         # It writes, so only collaborator-opened work items reach it, as in intake.yml (#6060).
         self.assertIn("\n      && contains(fromJSON('[\"OWNER\", \"MEMBER\", \"COLLABORATOR\"]'), github.event.issue.author_association)\n", transition)
+        # CI-issue-runs-coalesce: only an event touching state:merged takes a runner; the relation
+        # fails no other edge (tests/test_board.py TransitionTest), so a burst's other events skip.
+        self.assertIn("\n      && (github.event.label.name == 'state:merged' || contains(github.event.issue.labels.*.name, 'state:merged'))\n", transition)
         # The one write is the issue comment naming the problem (#5989).
         self.assertEqual(re.findall(r"(?m)^      ([a-z-]+): write\b", transition), ["issues"])
         self.assertIn('python3 -I tools/board.py transition --repo "$GITHUB_REPOSITORY" --issue "$ISSUE" --label "$LABEL" --action "$ACTION" --comment', transition)
@@ -1525,7 +1674,7 @@ class WorkflowTest(unittest.TestCase):
         # BOARD-INTAKE-wf (#2668, INTAKE-3): each widening or issue-text path fails the pin.
         text = (WORKFLOWS / "intake.yml").read_text()
         run = INTAKE_LINES[-1][len("        run: "):]
-        step = "      - name: Comment on the issue while it cannot render (tools/board.py intake)\n"
+        step = "      - name: Comment on each work item while it cannot render (tools/board.py intake --sweep)\n"
         edits = {
             "comment trigger": ("on:\n  issues:", "on:\n  issue_comment:\n  issues:"),
             "closed type": ("labeled, unlabeled]", "labeled, unlabeled, closed]"),
@@ -1533,8 +1682,9 @@ class WorkflowTest(unittest.TestCase):
             "outsider": ("\"COLLABORATOR\"]", "\"COLLABORATOR\", \"NONE\"]"),
             "any label": ("contains(github.event.issue.labels.*.name, 'work-item')", "true"),
             "pull-requests write": ("      issues: write", "      issues: write\n      pull-requests: write"),
+            "actions write": ("      actions: read", "      actions: write"),
             "contents write": ("      contents: read\n      issues", "      contents: write\n      issues"),
-            "write-all": ("permissions:\n  contents: read\n#", "permissions: write-all\n#"),
+            "write-all": ("permissions:\n  contents: read\njobs:", "permissions: write-all\njobs:"),
             "title in env": ("          ISSUE: ${{ github.event.issue.number }}",
                              "          ISSUE: ${{ github.event.issue.title }}"),
             "body in run": (run, run + ' --note "${{ github.event.issue.body }}"'),
@@ -1545,7 +1695,9 @@ class WorkflowTest(unittest.TestCase):
             "not isolated": ("python3 -I tools", "python3 tools"),
             "no concurrency": ("  cancel-in-progress: false", "  cancel-in-progress: true"),
             "self-hosted": ("runs-on: ubuntu-24.04", "runs-on: self-hosted"),
-            "carriage return in comment": ("# One run at a time", "# One\r    if: false\r# run at a time"),
+            "carriage return in comment": ("# CI-issue-runs-coalesce: one sweep", "# CI-issue-runs-coalesce:\r    if: false\r# one sweep"),
+            "per-issue group": ("      group: intake\n", "      group: intake-${{ github.event.issue.number }}\n"),
+            "no sweep": (" --sweep\n", "\n"),
         }
         for name, (old, new) in edits.items():
             with self.subTest(name):
@@ -1702,6 +1854,24 @@ class WorkflowTest(unittest.TestCase):
         text = (WORKFLOWS / "mutgate.yml").read_text()
         block = text[text.index("\n  mutants:\n"):text.index("\n  mutgate:\n")]
         self.assertRegex(block, r"\n    strategy:\n(?:      .*\n)*?      max-parallel: 3\n")
+
+    def test_soak_matrices_hold_at_most_their_runner_caps(self):
+        # CI-SOAK-cap-l1 (#1665, L3 of #1649): soak.yml runs for hours a day, so each matrix keeps
+        # a max-parallel cap at or under CI-SOAK-cap's (fuzz 3, soak 1); an edit that drops a cap
+        # or raises it back toward the 8-runner original fails here. Lower caps (#6570) pass.
+        text = (WORKFLOWS / "soak.yml").read_text()
+        self.assertEqual(soak_cap_problems(text), [])
+        for job, cap in (("fuzz", 3), ("soak", 1)):
+            block = text[text.index("\n  %s:\n" % job):]
+            at = block.index("      max-parallel: ")
+            line = block[at:block.index("\n", at + 1)]
+            for bad in ("      max-parallel: %d" % (cap + 1), "      max-parallel: 8",
+                        "      max-parallel: ${{ inputs.n }}", "      # max-parallel: %d" % cap):
+                with self.subTest(job=job, bad=bad):
+                    self.assertNotEqual(soak_cap_problems(text.replace(line, bad, 1)), [])
+        for missing in ("\n  fuzz:\n", "\n  soak:\n"):
+            with self.subTest(missing=missing):
+                self.assertNotEqual(soak_cap_problems(text.replace(missing, "\n  renamed:\n", 1)), [])
 
     def test_steps_finds_steps(self):
         sample = "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          x: 1\n      - run: echo\n"

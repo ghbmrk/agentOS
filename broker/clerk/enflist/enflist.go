@@ -12,7 +12,8 @@
 // the cap lines from that signed document, never from the link's text.
 //
 // The seam is frozen for its one caller, cmd/agentosd: Basis, Dest,
-// Inputs, Figure, Propose, Next.Link, Next.Figures and ErrNoDailyBytes. It
+// Inputs, Figure, Propose, Next.Link, Next.Figures, ErrNoDailyBytes and
+// CanonicalHost. It
 // imports the standard library and broker/enforcer/policy only
 // (broker/daemon/arc2_test.go). Its assumptions are in ASSUMPTIONS.md.
 package enflist
@@ -80,6 +81,23 @@ func (e *NoDailyBytes) Error() string {
 
 func (e *NoDailyBytes) Is(target error) bool { return target == ErrNoDailyBytes }
 
+// CanonicalHost is h as one DNS name is spelled once: ASCII letters in
+// lower case and a single trailing dot dropped (RFC 4343: DNS compares
+// ASCII case-insensitively; "a.example." is the rooted "a.example").
+// Only ASCII is folded, since only ASCII case is equal in DNS. Propose
+// refuses a host that is not its own canonical form, and imagedest.Join
+// compares hosts by it, so one DNS name is one destination with one cap.
+func CanonicalHost(h string) string {
+	h = strings.TrimSuffix(h, ".")
+	b := []byte(h)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
+}
+
 // Next is a proposed document with its caps sized.
 type Next struct {
 	doc  []byte // canonical
@@ -88,10 +106,10 @@ type Next struct {
 
 // Propose is cur with its destination list, caps, bases and edge cap
 // replaced by in's, each cap equal to its stated figure. A destination or
-// edge with no daily bytes is *NoDailyBytes; a host listed twice, a basis
-// off the list, or a document the policy refuses (an invalid name, caps
-// summing past 2^64-1) is ErrInput. It reads nothing else and keeps
-// everything else in cur.
+// edge with no daily bytes is *NoDailyBytes; a host listed twice, a host
+// that is not its CanonicalHost, a basis off the list, or a document the
+// policy refuses (an invalid name, caps summing past 2^64-1) is ErrInput.
+// It reads nothing else and keeps everything else in cur.
 func Propose(cur policy.Document, in Inputs) (Next, error) {
 	d := cur
 	d.Destinations, d.Caps, d.Basis = nil, map[string]uint64{}, map[string]string{}
@@ -100,6 +118,8 @@ func Propose(cur policy.Document, in Inputs) (Next, error) {
 		switch {
 		case x.Basis != Declared && x.Basis != Image && x.Basis != Backup:
 			return Next{}, fmt.Errorf("%w: %s has basis %q", ErrInput, strconv.QuoteToASCII(x.Host), x.Basis)
+		case x.Host != CanonicalHost(x.Host):
+			return Next{}, fmt.Errorf("%w: %s is not a canonical host name (lower case, no trailing dot)", ErrInput, strconv.QuoteToASCII(x.Host))
 		case slices.Contains(d.Destinations, x.Host):
 			return Next{}, fmt.Errorf("%w: %s is listed twice", ErrInput, strconv.QuoteToASCII(x.Host))
 		case x.DailyBytes == 0:

@@ -13,8 +13,8 @@
 // statements are left out: deleting one never compiles or changes nothing. A file holding a
 // `//line` directive is refused.
 // With -decls it prints instead one JSON array of each file's top-level declarations: file, name
-// (`Recv.Name` for a method, a func's name, the first name a var or const declares, else ""), and the
-// first and last lines of its own text, which tools/mutgate.py's waiver record digests (#5776).
+// (`Recv.Name` for a method, a func's name, the first name a var or const declares, else ""), names
+// (every name it declares, #6282), and the first and last lines of its own text, which tools/mutgate.py's waiver record digests (#5776).
 // With -cases it prints one JSON array of each switch and select (MUT-case-clause-cover, #5822):
 // file, where it starts, whether it is a select, whether a clause of it falls through, and its clauses in source order, each with where its `case` (or
 // `default`) starts, where its colon is, and where its body's region ends (the next clause's start,
@@ -133,10 +133,11 @@ type cases struct {
 }
 
 type decl struct {
-	File  string `json:"file"`
-	Name  string `json:"name"`
-	Start int    `json:"start"`
-	End   int    `json:"end"`
+	File  string   `json:"file"`
+	Name  string   `json:"name"`
+	Names []string `json:"names"`
+	Start int      `json:"start"`
+	End   int      `json:"end"`
 }
 
 func declName(d ast.Decl) string {
@@ -171,6 +172,27 @@ func declName(d ast.Decl) string {
 	return ""
 }
 
+// declNames is every name a top-level declaration declares: declName for a func or method, and each
+// name of every spec of a var, const or type declaration, so a record's deps can name any of them.
+func declNames(d ast.Decl) []string {
+	out := []string{}
+	g, ok := d.(*ast.GenDecl)
+	if !ok {
+		return append(out, declName(d))
+	}
+	for _, sp := range g.Specs {
+		switch sp := sp.(type) {
+		case *ast.ValueSpec:
+			for _, n := range sp.Names {
+				out = append(out, n.Name)
+			}
+		case *ast.TypeSpec:
+			out = append(out, sp.Name.Name)
+		}
+	}
+	return out
+}
+
 func main() {
 	sites := []site{}
 	decls := []decl{}
@@ -203,7 +225,7 @@ func main() {
 		}
 		if listDecls {
 			for _, d := range f.Decls {
-				decls = append(decls, decl{filepath.Base(path), declName(d), pos(d.Pos()).Line, pos(d.End()).Line})
+				decls = append(decls, decl{filepath.Base(path), declName(d), declNames(d), pos(d.Pos()).Line, pos(d.End()).Line})
 			}
 			continue
 		}

@@ -26,15 +26,22 @@ its unlock unit gets no descriptor past 2 and a bounded restart count (#2899, #2
 (DEVSLOT-image) ships only as a binary drivers.json lists with its hash, under units rendered from
 DRIVER_TEMPLATE for its name, and nothing else names its user or the drivers' sockets.
 Run by mkosi, it also refuses a run whose scripts had the network (#4647), so neither mkosi.postinst nor
-this script can fetch a package outside mkosi's checked apt run.
+this script can fetch a package outside mkosi's checked apt run, and a tree with an installed package
+that no pinned, signature-checked Packages index lists at that version (#4690); any tree with a .deb.
+mkosi runs it on the default initrd too, for those two and the kexec loader check alone (INITRD_IMAGE, #6149,
+#6345).
 Usage outside mkosi: mkosi.finalize ROOT; mkosi.finalize --tmpfiles-allowlist ROOT and
 mkosi.finalize --exec-allowlist ROOT print those allowlists for a tree."""
+import bz2
 import errno
 import fnmatch
+import gzip
 import hashlib
 import json
+import lzma
 import os
 import re
+import shlex
 import stat
 import sys
 
@@ -44,6 +51,11 @@ GENERATED = ("var/lib/systemd/random-seed", "var/lib/systemd/credential.secret",
              "etc/credstore*/*", "var/lib/systemd/credential*/*")
 # Owner configuration and broker state. Created on the drive at onboarding, never in the image.
 OWNER_DIRS = ("etc/agentos", "var/lib/agentos")
+# #6506: where systemd-tmpfiles --user reads lines for root's user manager (XDG_CONFIG_HOME, XDG_RUNTIME_DIR,
+# XDG_DATA_HOME, XDG_CONFIG_DIRS, XDG_DATA_DIRS for uid 0, tmpfiles.c user_config_paths), plus /usr/lib.
+USER_TMPFILES_DIRS = ("root/.config/user-tmpfiles.d", "run/user/0/user-tmpfiles.d", "root/.local/share/user-tmpfiles.d",
+                      "etc/xdg/user-tmpfiles.d", "usr/local/share/user-tmpfiles.d", "usr/share/user-tmpfiles.d",
+                      "usr/lib/user-tmpfiles.d")
 # Content scan: where build-generated keys land. /usr is package content, the same for everyone.
 SCAN = ("etc", "var", "root", "home", "srv", "opt", "boot", "efi")
 KEY_MARKERS = (b"PRIVATE KEY-----", b"PGP PRIVATE KEY BLOCK", b"AGE-SECRET-KEY-")
@@ -257,7 +269,7 @@ FSTAB_PATH_FIX = "; write every bind source and option path in it as an absolute
 #   grep -E '^\{\{type\}\}\.' load-fragment-gperf.gperf.in   (v257 tag; list the parser per key)
 # Whether a key belongs on PID1_NAMES is judged by review against that proof, not by a tool (image/ASSUMPTIONS.md).
 NAME_ONLY_SYSTEMD = "257"
-NAME_ONLY_SNAPSHOT = "20261001T000000Z"
+NAME_ONLY_SNAPSHOT = "20261121T160000Z"
 NAME_ONLY_KEYS = frozenset(("Environment", "PassEnvironment", "UnsetEnvironment", "LogExtraFields", "SetCredential",
                             "SetCredentialEncrypted", "LogNamespace"))
 # #5191 (Lens R1 on #5566): every key systemd NAME_ONLY_SYSTEMD's unit file parser knows, read with NAME_ONLY_KEYS from
@@ -408,12 +420,20 @@ READ_CONF = ("sysctl.d", "tmpfiles.d", "systemd/network", "systemd/system", "sys
 # kernel.modprobe and kernel.hotplug name the kernel's usermode helpers; binfmt.d registers
 # interpreters; system-shutdown and system-sleep hold programs systemd runs as root (systemd 257 runs
 # them only from /usr/lib/systemd, so the other tops are a superset). Every file is hashed whole, so
-# no key or line is refused by name.
+# no key or line is refused by name. #6312: root's user manager (user@0.service, at a root login) runs
+# its user-generators and user-environment-generators as root, and systemd-environment-d-generator
+# (one of the latter) gives it every environment.d *.conf assignment, which each unit it starts
+# inherits; it also reads $XDG_CONFIG_HOME/environment.d, root's EXEC_HOME. #6474: systemd-xdg-autostart-generator
+# (a user generator) turns each .desktop file in $XDG_CONFIG_DIRS/autostart (etc/xdg) and
+# $XDG_CONFIG_HOME/autostart into a root user unit, so both are held the same way.
 EXEC_CHANNELS = (("udev/rules.d", ".rules", False), ("systemd/system-generators", "", False),
                  ("systemd/system-environment-generators", "", False), ("modules-load.d", ".conf", False),
                  ("modprobe.d", ".conf", True), ("sysctl.d", ".conf", False), ("binfmt.d", ".conf", False),
-                 ("systemd/system-shutdown", "", False), ("systemd/system-sleep", "", False))
+                 ("systemd/system-shutdown", "", False), ("systemd/system-sleep", "", False),
+                 ("systemd/user-generators", "", False), ("systemd/user-environment-generators", "", False),
+                 ("environment.d", ".conf", False), ("xdg/autostart", ".desktop", False))
 EXEC_TOPS = ("etc", "usr/local/lib", "usr/lib", "lib")
+EXEC_HOME = (("root/.config/environment.d", ".conf"), ("root/.config/autostart", ".desktop"))
 # #2622: the bus and authorisation policy the packages ship, held to exec.allow the same way. polkitd
 # runs every rules.d file as JavaScript and takes an action's defaults from actions; dbus-daemon reads
 # system.conf, which includes system.d and everything under etc/dbus-1, and starts system-services
@@ -521,6 +541,17 @@ def _violations(root):
             out.append("etc/agentos: owner configuration; written at onboarding only")
         elif d == "var/lib/agentos" and tree_dir(root, d) and tree_listdir(root, tree_dir(root, d)):
             out.append("var/lib/agentos: broker state; must be empty")
+    # #6506 L3 7076358038 item 1: root's user manager runs systemd-tmpfiles --user as uid 0, which applies
+    # these lines to any path (/etc/agentos included), and no check reads them, so none may ship.
+    for d in USER_TMPFILES_DIRS:
+        mode = entry_mode(root, d)
+        try:
+            held = mode and tree_listdir(root, d)
+        except OSError:
+            held = True  # not a directory, or a link: tree_listdir refuses both
+        if held:
+            out.append("%s: a user-tmpfiles.d directory that holds something; root's user manager applies its lines "
+                       "as root and no check reads them, so it ships empty or not at all (#6506)" % d)
     # The vault and the page's claim state: their units create them on the box (#1249, #1270).
     for d, what in (("var/lib/agentos-egress", "vault state"), ("var/lib/agentos-localui", "claim state")):
         if entry_mode(root, d):
@@ -550,10 +581,12 @@ def _violations(root):
             + exec_allow_violations(root) + bus_daemon_violations(root) + made_allow_violations(root) + credstore_violations(root) + stray_violations(root)
             + manager_environment_violations(root)
             + cached(unit_made_dirs, root)[1] + cached(unit_made_paths, root)[2] + unit_made_refusals(root)
+            + user_unit_made_dir_violations(root)
             + inside_refusals(root) + gpt_auto_violations(root)
             + noexec_violations(root)
-            + keeper_violations(root) + isolate_violations(root) + clerk_key_violations(root)
-            + assembly_violations(root) + driver_violations(root) + e2e_violations(root))
+            + keeper_violations(root) + isolate_violations(root) + ram_kept_violations(root)
+            + kexec_loader_violations(root) + kexec_sysctl_violations(root) + clerk_key_violations(root)
+            + assembly_violations(root) + driver_violations(root) + e2e_violations(root) + package_file_violations(root))
 
 
 # #1715 (G1-e2e ASSUMPTIONS E1): the in-image end-to-end run is CI-only. Its root-run driver
@@ -2133,6 +2166,71 @@ def unit_made_dirs(root):
     return made, out
 
 
+# #6474 (#6506 Security 7077682648): root's user manager's unit directories in the image (systemd 257
+# lookup_paths_init for a user manager, its persistent entries, with root's home ROOT_HOME). unit_made_dirs
+# reads only UNIT_PATHS, so a user unit's *Directory= value was read nowhere at build.
+USER_UNIT_PATHS = ("root/.config/systemd/user.control", "root/.config/systemd/user", "etc/systemd/user",
+                   "etc/xdg/systemd/user", "root/.local/share/systemd/user", "usr/local/share/systemd/user",
+                   "usr/share/systemd/user", "usr/local/lib/systemd/user", "usr/lib/systemd/user")
+
+
+def user_unit_made_dir_violations(root):
+    """#6474: one error per *Directory= value in a file under USER_UNIT_PATHS (or the regular file a link
+    there leads to) that made_dir_words does not model, as unit_made_dirs refuses it in a system unit: a
+    specifier, quote, escape, glob, '..' or leading '/' is refused, not decoded, so every user-manager-made
+    directory is a plain name under its top. A file or link the check cannot read is refused too, and so is a
+    USER_UNIT_PATHS entry that is a link, sits under one or cannot be listed."""
+    root, out, seen = str(root), [], set()
+    for d in USER_UNIT_PATHS:
+        # #6521 Security 7078329075: tree_walk reads a root that is a link, or sits under one, as empty
+        try:
+            top = tree_lstat(root, d)
+        except OSError as e:
+            out.append("%s: a user unit directory the tree check cannot list (%s); root's user manager reads it, so "
+                       "the check never passes it; make each step a plain directory (#6474)" % (d, e.strerror or e))
+            continue
+        if top is None:
+            continue
+        if not stat.S_ISDIR(top.st_mode):
+            out.append("%s: a user unit directory that is a link or not a directory; root's user manager reads it, "
+                       "so the check never passes it; make it a plain directory (#6474)" % d)
+            continue
+        for rel, st in tree_walk(root, d):
+            path = rel
+            if stat.S_ISLNK(st.st_mode):
+                if tree_readlink(root, rel) == MASK:
+                    continue
+                try:
+                    got, end = tree_chase(root, rel)
+                except OSError:
+                    got, end = None, None
+                if end is None or not stat.S_ISREG(end.st_mode):
+                    out.append("%s: a link to %s, not a file the tree holds; the tree check never passes a link "
+                               "in a user unit directory it cannot read (#6474)" % (rel, tree_readlink(root, rel)))
+                    continue
+                path = got
+            elif not stat.S_ISREG(st.st_mode):
+                continue
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                lines = config_lines(Conf(root, path).content())
+            except (OSError, Unparsable) as e:
+                out.append("%s: unreadable (%s); the tree check never passes a user unit file it cannot read (#6474)"
+                           % (rel, e.strerror if isinstance(e, OSError) else e))
+                continue
+            for _, key, v in lines:
+                if key not in UNIT_MADE_DIRS or not v:
+                    continue
+                try:
+                    made_dir_words(key, v)
+                except ValueError:
+                    out.append("%s: %s=%s: the tree check does not model it in a user unit (#6474)%s"
+                               % (path, key, v if v.isprintable() else repr(v), DIR_FIX))
+    return out
+
+
 def unit_file_lines(root):
     """#5359 (L3 6778896704 R1): {unit_files path: its config_lines, or the OSError or Unparsable reading it
     raised}, so unit_made_dirs, unit_made_words and unit_made_paths read each file once inside once()."""
@@ -2516,7 +2614,8 @@ def made_way_refusal(root, form):
     except OSError as e:
         return "is or sits under a link or a file in the tree (/%s)" % (e.filename or e.strerror)
     for rel, n, ln in tmpfiles_entries(root):
-        words = tmpfiles_words(ln)[0] if n is not None else []
+        # a line the reader refuses (None) systemd-tmpfiles skips, and tmpfiles_refusals fails the build on it
+        words = (tmpfiles_words(ln) or [[]])[0] if n is not None else []
         if len(words) < 2 or words[0][:1] in MADE_LAST_TYPES and set(words[0][1:]) <= TMPFILES_STEP_MODIFIERS:
             continue
         for m in tmpfiles_paths(root, words[1], words[0][:1] == "L"):
@@ -3043,6 +3142,93 @@ def isolate_violations(root):
     return out
 
 
+# MOR-soft-reboot (#6182; HW-8): systemd 257's soft-reboot.target requires SOFT_REBOOT, which requires
+# shutdown.target, so an orderly "systemctl soft-reboot" (or an isolate of the target, AllowIsolate=yes)
+# stops MOR_UNIT, whose stop clears MOR, while the kernel and its memory are kept; the next userspace's
+# MOR_UNIT only reads MOR, so the holders it starts run with MOR clear. mkosi.conf removes the unit, so
+# the target's start fails as a whole (a Requires= on a unit that is not found fails the transaction)
+# and stops nothing; "--force" and SuccessAction=soft-reboot-force stop no unit, so MOR stays set.
+SOFT_REBOOT = "systemd-soft-reboot.service"
+# MOR-kexec-class (#6311): kexec.target requires KEXEC the same way, and an orderly kexec boots the next
+# kernel without the firmware's pass, so RAM is kept and that kernel's MOR_UNIT only reads MOR. The core's
+# kernel (Debian's) has CONFIG_KEXEC=y and CONFIG_KEXEC_FILE=y, so mkosi.conf removes KEXEC too. The tree
+# also holds no kexec loader, so no kernel is ever loaded: "systemctl kexec" fails before any unit stops
+# (load_kexec_kernel needs /usr/sbin/kexec), and a forced kexec stops no unit and falls back to a firmware
+# reboot (systemd-shutdown's LINUX_REBOOT_CMD_KEXEC case), whose pass wipes RAM while MOR is set.
+KEXEC = "systemd-kexec.service"
+RAM_KEPT = ((SOFT_REBOOT, "an orderly soft reboot", "#6182"), (KEXEC, "an orderly kexec", "#6311"))
+KEXEC_LOADER = "kexec"
+KEXEC_LOADER_DIRS = ("usr/sbin", "usr/bin", "usr/local/sbin", "usr/local/bin")
+KEXEC_PACKAGES = (b"kexec-tools", b"kdump-tools")
+KEXEC_WHY = ("a kexec loader; with a kernel loaded, a kexec or a crash kernel runs the next kernel on memory the "
+             "firmware never wiped (remove it, #6311)")
+
+
+def ram_kept_violations(root):
+    """MOR-soft-reboot (#6182), MOR-kexec-class (#6311): for each RAM_KEPT unit, the first entry of its name in
+    the unit directories, in precedence order, is a mask (a link to exactly MASK, or a file of size 0:
+    systemd 257 reads either as masked), or there is none. Any other file or link of that name makes its
+    orderly transition runnable again, and one the check cannot read is refused."""
+    root = str(root)
+    dirs, out = unit_dirs(root)
+    for name, what, row in RAM_KEPT:
+        for d in dirs:
+            rel = d + "/" + name
+            if not tree_lstat(root, rel):
+                continue
+            try:
+                masked = Conf(root, rel).content() == b""
+            except OSError as e:
+                out.append("%s: unreadable (%s); the tree check never passes a unit it cannot read" % (rel, e.strerror or e))
+                break
+            if not masked:
+                out.append("%s: present; %s stops %s, whose stop clears MOR, while the kernel keeps its memory, "
+                           "so the holders after it run with MOR clear (remove it or mask it, %s)"
+                           % (rel, what, MOR_UNIT, row))
+            break
+    return out
+
+
+def kexec_loader_violations(root, status=None):
+    """MOR-kexec-class (#6311): a kexec loader wherever the box would run it from (whatever the entry is), or
+    a KEXEC_PACKAGES package dpkg has unpacked. A dpkg status the check cannot read is refused; none at all
+    (a test tree) passes here, and tree_package_violations refuses that on a built image. STATUS: the dpkg
+    status file to read, DPKG_STATUS unless given (the default initrd's run gives INITRD_STATUS, #6345)."""
+    root = str(root)
+    rel = status or DPKG_STATUS
+    out = ["%s/%s: %s" % (d, KEXEC_LOADER, KEXEC_WHY)
+           for d in KEXEC_LOADER_DIRS if tree_stat(root, d + "/" + KEXEC_LOADER) is not None]
+    try:
+        status = Conf(root, rel).content() if tree_lstat(root, rel) else b""
+    except OSError as e:
+        return out + ["%s: unreadable (%s); %s" % (rel, e.strerror or e, KEXEC_WHY)]
+    for p in deb822_fields(status, (b"Package", b"Status")):
+        words = p.get(b"Status", b"").split()
+        if p.get(b"Package") in KEXEC_PACKAGES and not (len(words) == 3 and words[2] in (b"not-installed",
+                                                                                          b"config-files")):
+            out.append("%s: %s is installed; %s" % (rel, p[b"Package"].decode(), KEXEC_WHY))
+    return out
+
+
+# MOR-kexec-class-fu (#6345): KEXEC_SYSCTL sets kernel.kexec_load_disabled=1 at sysinit, before any unit with
+# default dependencies starts. Linux 6.12's kexec_load_permitted (kernel/kexec_core.c), which kexec_load
+# (kernel/kexec.c) and kexec_file_load (kernel/kexec_file.c) both call first, refuses while it is 1, for root
+# too, and its sysctl entry takes only 1 (extra1 and extra2 are SYSCTL_ONE), so nothing sets it back to 0 until
+# the next boot: no process loads a kernel, whatever loader it carries.
+# The loader check above is then defence in depth. The value is checked as systemd-sysctl sets it, after every
+# file it reads, as NODUMP_SYSCTL's are.
+KEXEC_SYSCTL = "usr/lib/sysctl.d/99-agentos-kexec.conf"
+
+
+def kexec_sysctl_violations(root):
+    """MOR-kexec-class-fu (#6345): kernel.kexec_load_disabled ends up 1 after every sysctl.d file."""
+    v = sysctl(str(root), "kernel.kexec_load_disabled")
+    if v == "1":
+        return []
+    return ["%s: kernel.kexec_load_disabled is %s; must be 1, so no process loads a kernel that boots on memory "
+            "the firmware never wiped (#6345)" % (KEXEC_SYSCTL.rsplit("/", 1)[-1], v)]
+
+
 def bus_keep_violations(root, dirs):
     """#6037: each BUS_UNITS unit, its file (none for the transient agentos-kernel-reboot.service) and every
     drop-in systemd applies to it, lifts only BUS_DIR from the main side's mask: its InaccessiblePaths= is
@@ -3457,11 +3643,31 @@ def sysusers_tpm_violations(root):
                            % (f.rel, n, w[1], w[2].split(":", 1)[1]))
     return out
 
+# #6474: EXEC_HOME, unit_rules.py's MANAGER_CONF_DIRS and root's user unit directories read root's files under
+# this home, so every record of root's home is held to it.
+ROOT_HOME = "/root"
+
+
+def record_homes(rec):
+    """Every "homeDirectory" a userdb JSON record REC gives, at any depth (its "perMachine" and "binding"
+    sections override the top one), each as found."""
+    if isinstance(rec, dict):
+        for k, v in rec.items():
+            if k == "homeDirectory":
+                yield v
+            else:
+                yield from record_homes(v)
+    elif isinstance(rec, list):
+        for v in rec:
+            yield from record_homes(v)
+
+
 def uid0_violations(root):
     """#4641 R-g: no user record but root's has uid 0: an etc/passwd line, a userdb .user record (its "uid"
     read as JSON) or a sysusers.d u line whose ID's uid part is 0, each compared as a number (00 is 0, as glibc's
     strtoul and systemd's parse_uid read it), and a uid that does not read as a plain decimal is refused. Anything at uid 0 is root under another name,
-    outside every check that reads User=root."""
+    outside every check that reads User=root. #6474: root's home, in its passwd line, any userdb record of it
+    and a sysusers.d u line for it, is ROOT_HOME."""
     out = []
     try:
         text = Conf(root, "etc/passwd").text()
@@ -3477,6 +3683,9 @@ def uid0_violations(root):
             out.append("etc/passwd:%d: a line whose uid is not a plain decimal number (#4641)" % n)
         elif int(w[2]) == 0 and w[0] != "root":
             out.append("etc/passwd:%d: %s has uid 0; only root may (#4641)" % (n, w[0]))
+        if w[0] == "root" and len(w) > 5 and w[5] != ROOT_HOME:
+            out.append("etc/passwd:%d: root's home is %s, not %s, which every check of root's own files reads "
+                       "(#6474)" % (n, w[5], ROOT_HOME))
     for f in conf_files(root, ("etc/userdb", "usr/local/lib/userdb", "usr/lib/userdb"), ".user"):
         try:
             rec = json.loads(f.content())
@@ -3486,6 +3695,9 @@ def uid0_violations(root):
         uid = rec.get("uid") if isinstance(rec, dict) else None
         if not isinstance(rec, dict) or (uid is not None and (type(uid) is not int or uid == 0) and rec.get("userName") != "root"):
             out.append("%s: a user record with uid 0 other than root's, or not a JSON object (#4641)" % f.rel)
+        elif rec.get("userName") == "root" and any(h != ROOT_HOME for h in record_homes(rec)):
+            out.append("%s: root's record gives a home other than %s, which every check of root's own files "
+                       "reads (#6474)" % (f.rel, ROOT_HOME))
     for f in conf_files(root, conf_paths("sysusers.d")):
         try:
             lines = f.content().decode("utf-8", "replace").splitlines()
@@ -3494,6 +3706,14 @@ def uid0_violations(root):
             continue
         for n, ln in enumerate(lines, 1):
             w = ln.split()
+            if len(w) > 1 and w[0].rstrip("!") == "u" and w[1] == "root":
+                try:
+                    home = shlex.split(ln)[4:5]
+                except ValueError:
+                    home = ["(unreadable)"]
+                if home and home[0] not in ("-", ROOT_HOME):
+                    out.append("%s:%d: gives root the home %s, not %s, which every check of root's own files reads "
+                               "(#6474)" % (f.rel, n, home[0], ROOT_HOME))
             if len(w) < 3 or w[0].rstrip("!") != "u" or w[1] == "root":
                 continue
             uid = w[2].split(":", 1)[0]
@@ -3850,7 +4070,8 @@ CREDSTORE_ALLOWED = ("usr/lib/credstore/firstboot.keymap", "usr/lib/credstore/fi
 TMPFILES_TARGETS = (("proc",), ("sys",), ("etc", "sysctl.conf"), ("etc", "fstab"), ("usr", "lib", "firmware"),
                     ("lib", "firmware"), ("etc", "agentos"), ("efi",), ("boot",), ("etc", "modules")) + tuple(
     tuple(("%s/%s" % (top, n)).split("/")) for top in EXEC_TOPS + ("run",)
-    for n in READ_CONF + tuple(d for d, _, _ in EXEC_CHANNELS if d not in READ_CONF) + ("credstore", "credstore.encrypted"))
+    for n in READ_CONF + tuple(d for d, _, _ in EXEC_CHANNELS if d not in READ_CONF) + ("credstore", "credstore.encrypted")
+) + tuple(tuple(d.split("/")) for d, _ in EXEC_HOME) + (("etc", "environment"),)
 # Debian's own lines that touch one, as whole lines with runs of blanks collapsed: /var/run is
 # /run, and /etc/mtab names the mount table, a file (debian.conf, var.conf); trixie's credstore.conf
 # makes the empty stores (credstore_violations refuses anything in them); and four relative links
@@ -3871,7 +4092,10 @@ TMPFILES_STOCK = ("L /var/run - - - - ../run", "L+ /var/run - - - - ../run", "L 
                   "L! /etc/resolv.conf - - - - ../run/systemd/resolve/stub-resolv.conf",
                   # Debian's legacy.conf alias of /dev/shm, which the box mounts 1777 itself, as var/lock
                   # is of /run/lock; the link rule (#1803) would refuse it as a link into /dev.
-                  "L /run/shm - - - - /dev/shm")
+                  "L /run/shm - - - - /dev/shm",
+                  # provision.conf makes root's home if it is missing; it writes nothing in it, and EXEC_HOME's
+                  # root/.config/environment.d below it is a target since #6312.
+                  "d- /root :0700 root :root -")
 # systemd-tmpfiles 257.13's path specifiers for the system manager (src/tmpfiles/tmpfiles.c); the
 # others expand to names without a slash.
 TMPFILES_SPECIFIERS = {"t": "/run", "S": "/var/lib", "C": "/var/cache", "L": "/var/log", "T": "/tmp",
@@ -3880,41 +4104,64 @@ TMPFILES_SPECIFIERS = {"t": "/run", "S": "/var/lib", "C": "/var/cache", "L": "/v
                        # '/', so a glob component. Every other specifier (%u, %U, %g, %o, %a, %H, %A, %B, which may be
                        # empty and drop a component, and any a later systemd adds) is refused (tmpfiles_specifier).
                        "m": "*", "b": "*"}
-C_ESCAPES = {"a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", "s": " "}
+# cunescape_one's (src/basic/escape.c, v255 to v257) one-character escapes.
+TMPFILES_ESCAPES = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "\\": 92, '"': 34, "'": 39,
+                    "s": 32}
 
 
 def tmpfiles_words(ln, n=6):
-    """The first N words of LN as extract_first_word(EXTRACT_UNQUOTE|EXTRACT_CUNESCAPE) gives them,
-    and the rest of the line (the argument). Quotes may start anywhere in a word; \\xHH, octal,
-    \\u and C escapes are decoded and any other escaped character kept, which errs safe (systemd
-    refuses the line)."""
-    words, i = [], 0
+    """The one reader of a tmpfiles.d line's fields (#6495; mkosi.finalize and unit_rules.py both read
+    with it, and test_unit_rules' TmpfilesReaderTest refuses any other split of a tmpfiles.d line):
+    (the first N words of LN, the rest of the line) as systemd-tmpfiles 255 to 257 reads them with
+    extract_many_words(EXTRACT_UNQUOTE | EXTRACT_CUNESCAPE) (src/basic/extract-word.c): split at
+    unquoted space, tab, CR or LF; a quote (' or ") anywhere in a word opens a run that ends at the same
+    quote; a backslash escape (cunescape_one) is read inside or outside one. The rest (an L target, a C
+    source, f or w content) is the line after the Nth word and its blanks, as written. None where
+    systemd-tmpfiles refuses the line, so it acts on none of it: an unknown escape, one giving NUL, a
+    \\U code point unichar_is_valid refuses, a trailing backslash or an open quote."""
+    b, i, words = os.fsencode(ln), 0, []
+    hexd, octd = b"0123456789abcdefABCDEF", b"01234567"
     while len(words) < n:
-        while i < len(ln) and ln[i] in " \t\n\r":
+        while i < len(b) and b[i] in b" \t\n\r":
             i += 1
-        if i >= len(ln):
+        if i == len(b):
             break
-        w, quote = [], None
-        while i < len(ln) and (quote or ln[i] not in " \t\n\r"):
-            c = ln[i]
+        out, quote = bytearray(), None
+        while i < len(b) and (quote or b[i] not in b" \t\n\r"):
+            c = b[i]
             i += 1
-            if c == quote:
+            if quote and c == quote:
                 quote = None
-            elif quote is None and c in "'\"":
+            elif not quote and c in b"'\"":
                 quote = c
-            elif c == "\\" and i < len(ln):
-                m = re.match(r"x([0-9a-fA-F]{2})|([0-7]{3})|u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})", ln[i:])
-                if m:
-                    w.append(chr(int(m.group(1) or m.group(3) or m.group(4) or "0", 16) if not m.group(2)
-                                 else int(m.group(2), 8)))
-                    i += m.end()
-                else:
-                    w.append(C_ESCAPES.get(ln[i], ln[i]))
-                    i += 1
+            elif c != 0x5C:
+                out.append(c)
+            elif i == len(b):
+                return None
             else:
-                w.append(c)
-        words.append("".join(w))
-    return words, ln[i:].strip(" \t\n\r")
+                e, i = chr(b[i]), i + 1
+                k = {"x": 2, "u": 4, "U": 8}.get(e, 0)
+                if e in TMPFILES_ESCAPES:
+                    out.append(TMPFILES_ESCAPES[e])
+                elif k and len(b) >= i + k and all(x in hexd for x in b[i:i + k]):
+                    v, i = int(b[i:i + k], 16), i + k
+                    # cunescape_one checks \U with unichar_is_valid and \u not at all: systemd-tmpfiles 255.4 makes
+                    # /run/a\uD800 and /run/a\uFFFE, and refuses \U0000D800, \U0000FFFE and \U0010FFFF (#6495)
+                    if not v or e == "U" and (v > 0x10FFFF or 0xD800 <= v <= 0xDFFF or 0xFDD0 <= v <= 0xFDEF
+                                              or v & 0xFFFE == 0xFFFE):
+                        return None
+                    out += bytes([v]) if e == "x" else chr(v).encode("utf-8", "surrogatepass")
+                elif e in "0123" and len(b) >= i + 2 and all(x in octd for x in b[i:i + 2]):
+                    v, i = int(e + b[i:i + 2].decode(), 8), i + 2
+                    if not v:
+                        return None
+                    out.append(v)
+                else:
+                    return None
+        if quote:
+            return None
+        words.append(os.fsdecode(bytes(out)))
+    return words, os.fsdecode(b[i:]).strip(" \t\n\r")
 
 
 def tmpfiles_expand(p):
@@ -4062,45 +4309,52 @@ def tmpfiles_refusals(root):
     tell which lines this one refuses (#1543 P/UX U4-1)."""
     out, root = [], str(root)
     targets = tmpfiles_targets(root)
-    for f in tmpfiles_files(root):
-        try:
-            data = f.content()
-        except OSError as e:
-            out.append((f.rel, None, "%s: unreadable (%s); the tree check never passes a file it cannot read"
-                        % (f.rel, e.strerror)))
+    for rel, n, ln in tmpfiles_entries(root):
+        if n is None:
+            out.append((rel, None, "%s: unreadable (%s); the tree check never passes a file it cannot read" % (rel, ln)))
             continue
-        for n, raw in enumerate(re.split(rb"[\n\r\x00]", data), 1):
-            ln = os.fsdecode(raw).strip(" \t")
-            if not ln or ln.startswith("#") or re.sub(r"[ \t]+", " ", ln) in TMPFILES_STOCK:
-                continue
-            (typ, path, *_), arg = tmpfiles_words(ln) if len(tmpfiles_words(ln)[0]) >= 2 else ([ln, ""], "")
-            raw_path, path = path, tmpfiles_expand(path)
-            names, sources = [path], []
-            if typ[:1] in ("L", "C"):
-                words = tmpfiles_words(arg, 1)[0]
-                for a in {arg, words[0] if words else arg}:
-                    a = tmpfiles_expand(a)
-                    sources.append(a)
-                    if a in ("", "-"):
-                        a = "/usr/share/factory/" + path
-                    names.append(a if a.startswith("/") else path.rsplit("/", 1)[0] + "/" + a)
-            unread = tmpfiles_specifier(raw_path) or (typ[:1] in ("L", "C") and next(filter(None, map(
-                tmpfiles_specifier, {arg, (tmpfiles_words(arg, 1)[0] or [arg])[0]})), None))
-            if unread:
-                why = ("a specifier the tree check does not expand (%s), so it cannot tell what the line names; write "
-                       "the path without it (#5191)" % unread)
-            elif ".." in path.split("/"):
-                why = "a path with a '..' component (#1530)"
-            elif any(".." in a.split("/") for a in sources):
-                why = "a link target or copy source with a '..' component (#1543)"
-            elif any(tmpfiles_hits(root, path_parts(p), targets) for p in names):
-                why = "it reaches /proc, /sys or configuration the tree check reads (#1530)"
-            elif typ[:1] == "L" and any(tmpfiles_link_refusal(root, path, p) for p in names[1:]):
-                why = next(tmpfiles_link_refusal(root, path, p) for p in names[1:] if tmpfiles_link_refusal(root, path, p))
-            else:
-                continue
-            out.append((f.rel, n, "%s: line %d: %s; %s" % (f.rel, n, ln[:120], why)))
+        if tmpfiles_stock(ln):
+            continue
+        read = tmpfiles_words(ln)
+        if read is None:
+            out.append((rel, n, "%s: line %d: %s; systemd-tmpfiles refuses its words (an unknown or NUL escape, an "
+                        "open quote or a trailing backslash), so what it names is not read; write it plainly (#6495)"
+                        % (rel, n, ln[:120])))
+            continue
+        (typ, path, *_), arg = read if len(read[0]) >= 2 else ([ln, ""], "")
+        raw_path, path = path, tmpfiles_expand(path)
+        names, sources = [path], []
+        if typ[:1] in ("L", "C"):
+            words = (tmpfiles_words(arg, 1) or [[]])[0]
+            for a in {arg, words[0] if words else arg}:
+                a = tmpfiles_expand(a)
+                sources.append(a)
+                if a in ("", "-"):
+                    a = "/usr/share/factory/" + path
+                names.append(a if a.startswith("/") else path.rsplit("/", 1)[0] + "/" + a)
+        unread = tmpfiles_specifier(raw_path) or (typ[:1] in ("L", "C") and next(filter(None, map(
+            tmpfiles_specifier, {arg, ((tmpfiles_words(arg, 1) or [[]])[0] or [arg])[0]})), None))
+        if unread:
+            why = ("a specifier the tree check does not expand (%s), so it cannot tell what the line names; write "
+                   "the path without it (#5191)" % unread)
+        elif ".." in path.split("/"):
+            why = "a path with a '..' component (#1530)"
+        elif any(".." in a.split("/") for a in sources):
+            why = "a link target or copy source with a '..' component (#1543)"
+        elif any(tmpfiles_hits(root, path_parts(p), targets) for p in names):
+            why = "it reaches /proc, /sys or configuration the tree check reads (#1530)"
+        elif typ[:1] == "L" and any(tmpfiles_link_refusal(root, path, p) for p in names[1:]):
+            why = next(tmpfiles_link_refusal(root, path, p) for p in names[1:] if tmpfiles_link_refusal(root, path, p))
+        else:
+            continue
+        out.append((rel, n, "%s: line %d: %s; %s" % (rel, n, ln[:120], why)))
     return out
+
+
+def tmpfiles_stock(ln):
+    """Whether tmpfiles.d line LN is one of Debian's TMPFILES_STOCK lines, compared whole with its runs of
+    blanks read as one: a whole-line comparison, never a read of its fields (tmpfiles_words)."""
+    return re.sub(r"[ \t]+", " ", ln) in TMPFILES_STOCK
 
 
 def tmpfiles_link_refusal(root, path, to):
@@ -4128,7 +4382,7 @@ def tmpfiles_makers(root):
     but root: it counts only where the step's group, from the tree or a parent, is not root."""
     out = []
     for rel, n, ln in tmpfiles_entries(root):
-        words, arg = tmpfiles_words(ln) if n is not None else ([], "")
+        words, arg = (tmpfiles_words(ln) or ([], "")) if n is not None else ([], "")  # None: tmpfiles_refusals
         if len(words) < 2:
             continue
         typ, _, mode, user, group = (words + ["-"] * 5)[:5]
@@ -4169,7 +4423,7 @@ def tmpfiles_removers(root):
     runs --remove at boot) or a line with an age (systemd-tmpfiles-clean; x and X only exclude)."""
     out = []
     for rel, n, ln in tmpfiles_entries(root):
-        words, _ = tmpfiles_words(ln) if n is not None else ([], "")
+        words, _ = (tmpfiles_words(ln) or ([], "")) if n is not None else ([], "")  # None: tmpfiles_refusals
         if len(words) < 2:
             continue
         typ, age = words[0][:1], (words + ["-"] * 6)[5]
@@ -4319,7 +4573,8 @@ EXEC_ALLOW_REPO = "image/mkosi/" + EXEC_ALLOW
 EXEC_REGENERATE = "mkosi.finalize --exec-allowlist ROOT"
 # Links the stock tree ships that are read through: the link's path, its exact target, and the
 # in-image file whose content is hashed in its place. Any other link is refused (Conf.content).
-EXEC_LINKS = {"etc/modules-load.d/modules.conf": ("../modules", "etc/modules")}
+EXEC_LINKS = {"etc/modules-load.d/modules.conf": ("../modules", "etc/modules"),
+              "usr/lib/environment.d/99-environment.conf": ("/etc/environment", "etc/environment")}
 
 
 def exec_value(f):
@@ -4355,6 +4610,8 @@ def exec_files(root):
     for d, suffix, kmod in EXEC_CHANNELS:
         for top in EXEC_TOPS:
             yield from conf_files(root, ("%s/%s" % (top, d),), suffix, kmod)
+    for d, suffix in EXEC_HOME:
+        yield from conf_files(root, (d,), suffix)
     for d in POLICY_DIRS:
         if not entry_mode(root, d):
             continue
@@ -4489,7 +4746,8 @@ def exec_allow_violations(root, allowed=None):
     allowed = exec_allowed() if allowed is None else allowed
     if allowed is None:
         return ["%s: missing; every file in a boot-code channel (udev rules, generators, modules-load.d, modprobe.d, "
-                "sysctl.d, binfmt.d, shutdown and sleep hooks) must be on it (#1556, #2176)" % EXEC_ALLOW]
+                "sysctl.d, binfmt.d, shutdown and sleep hooks, root's user manager's generators, environment.d and XDG "
+                "autostart) must be on it (#1556, #2176, #6312)" % EXEC_ALLOW]
     out = []
     for d in ["run/" + d for d, _, _ in EXEC_CHANNELS] + list(POLICY_RUN):
         try:
@@ -4521,7 +4779,10 @@ EXEC_ALLOW_HEADER = """\
 # usr/lib and lib; and (#2622) every polkit rules.d and actions file, everything under etc/dbus-1, and the
 # D-Bus system.conf, system.d and system-services files; and (#4641) every PAM file in etc/pam.d and
 # usr/lib/pam.d, and etc/pam.conf; and (#5818) every file systemd merges into
-# dbus.service and dbus.socket, drop-ins included, so dbus-daemon's ExecStart is the reviewed one. One per line: the file's path in the image tree, a tab, and "sha256:" with the
+# dbus.service and dbus.socket, drop-ins included, so dbus-daemon's ExecStart is the reviewed one; and (#6312)
+# root's user manager's user-generators and user-environment-generators and every environment.d file,
+# root/.config/environment.d's too, and (#6474) the XDG autostart .desktop files in etc/xdg/autostart and
+# root/.config/autostart. One per line: the file's path in the image tree, a tab, and "sha256:" with the
 # SHA-256 of what the box reads, or "mask" for an empty file or a link to /dev/null. Every file is
 # listed, not only the one that wins its name. mkosi.finalize fails the build on any file not here
 # with that value, and on anything under the same directories in /run.
@@ -5070,6 +5331,167 @@ def script_network_violations(with_network, net_dev):
     return out
 
 
+# IMG-mkosi-run-bound (#4690, D-276): the image's packages come only from the pinned, signature-checked
+# sources. mkosi v24.3 mounts its apt state at /var/lib/apt for this script, and apt writes an index into
+# lists/ only after its InRelease signature (Signed-By, the keyrings image/debian-archive-keyring.sh pins)
+# and hash checked. The pinned sources are two snapshot.debian.org timestamps: the trixie archive's,
+# mkosi.conf's Mirror= (read from mkosi's config JSON), and the run's one debian-security snapshot, which
+# image.yml's mkosi line hands in as AGENTOS_SECURITY_SNAPSHOT (image/security-snapshot.sh, #5021). An
+# index from any other date (#6148 L3 B2: a signed but older snapshot), mkosi's local /repository or a
+# live archive counts for nothing, so a package only it lists is refused.
+APT_LISTS = "/var/lib/apt/lists"
+SNAPSHOT_TS = re.compile(r"\d{8}T\d{6}Z")
+MIRROR_URL = re.compile(r"https://snapshot\.debian\.org/archive/debian/(\d{8}T\d{6}Z)/?")
+
+
+def pinned_index(mirror, security):
+    """The Packages index names of the trixie archive at snapshot MIRROR and debian-security at SECURITY
+    (each YYYYMMDDTHHMMSSZ), plain or compressed; group 1 is the compression suffix."""
+    return re.compile(r"snapshot\.debian\.org_archive_(?:debian_%s_dists_trixie(?:-updates)?"
+                      r"|debian-security_%s_dists_trixie-security)_main_binary-(?:amd64|all)_Packages(\.gz|\.xz|\.bz2)?"
+                      % (re.escape(mirror), re.escape(security)))
+
+
+def run_config():
+    """(mkosi's config JSON for this run, $MKOSI_CONFIG, as a dict; refusals)."""
+    try:
+        with open(os.environ.get("MKOSI_CONFIG", "/work/config.json")) as f:
+            conf = json.load(f)
+        if isinstance(conf, dict):
+            return conf, []
+        why = "not a JSON object"
+    except (OSError, ValueError) as e:
+        why = e
+    return {}, ["mkosi's config JSON: unreadable (%s); %s" % (why, PACKAGE_WHY)]
+
+
+def run_snapshots(conf):
+    """(mirror timestamp, security timestamp, refusals) of this mkosi run: Mirror= from CONF, mkosi's config
+    JSON (run_config), the security one from $AGENTOS_SECURITY_SNAPSHOT."""
+    out = []
+    m = MIRROR_URL.fullmatch(str(conf.get("Mirror")))
+    mirror = m.group(1) if m else None
+    if not mirror:
+        out.append("mkosi's Mirror= is not a snapshot.debian.org debian snapshot; %s" % PACKAGE_WHY)
+    security = os.environ.get("AGENTOS_SECURITY_SNAPSHOT", "")
+    if not SNAPSHOT_TS.fullmatch(security):
+        out.append("AGENTOS_SECURITY_SNAPSHOT is %r, not one debian-security snapshot timestamp (image.yml's mkosi "
+                   "line sets it); %s" % (security, PACKAGE_WHY))
+        security = None
+    return mirror, security, out
+
+
+DPKG_STATUS = "var/lib/dpkg/status"
+# A Debian package file anywhere in the tree: a build step could install it outside apt's checked run.
+PACKAGE_FILES = (".deb", ".udeb", ".ddeb")
+PACKAGE_FILE_WHY = ("a Debian package file; the image's packages come only from mkosi's signature-checked apt run "
+                    "(#4690)")
+PACKAGE_WHY = "the image's packages come only from the pinned, signature-checked snapshot sources (#4690)"
+
+
+def deb822_fields(data, keys):
+    """(dict of KEYS) for each paragraph of DATA, a deb822 file (dpkg's status, an apt Packages index),
+    with each value stripped; continuation lines are not kept."""
+    para = {}
+    for line in data.split(b"\n"):
+        if not line.strip():
+            if para:
+                yield para
+            para = {}
+        elif line[:1] not in (b" ", b"\t") and b":" in line:
+            k, v = line.split(b":", 1)
+            if k in keys:
+                para[k] = v.strip()
+    if para:
+        yield para
+
+
+def pinned_packages(lists, index):
+    """((package, version, architecture) set, index names read, other Packages names seen, refusals) from
+    directory LISTS, apt's lists/: the indexes whose name INDEX (pinned_index) matches."""
+    got, read, other, out = set(), [], [], []
+    try:
+        names = sorted(os.listdir(lists))
+    except OSError as e:
+        return got, read, other, ["%s: unreadable (%s); %s" % (lists, e.strerror, PACKAGE_WHY)]
+    for n in names:
+        m = index.fullmatch(n)
+        if not m:
+            if "Packages" in n:
+                other.append(n)
+            continue
+        path = os.path.join(lists, n)
+        try:
+            st = os.lstat(path)
+            if not stat.S_ISREG(st.st_mode):
+                out.append("%s: not a regular file; %s" % (path, PACKAGE_WHY))
+                continue
+            with open(path, "rb") as f:
+                data = f.read()
+            data = {".gz": gzip.decompress, ".xz": lzma.decompress, ".bz2": bz2.decompress}.get(m.group(1), bytes)(data)
+        except (OSError, EOFError, lzma.LZMAError) as e:
+            out.append("%s: unreadable (%s); %s" % (path, e.strerror if isinstance(e, OSError) else e, PACKAGE_WHY))
+            continue
+        read.append(n)
+        for p in deb822_fields(data, (b"Package", b"Version", b"Architecture")):
+            got.add((p.get(b"Package"), p.get(b"Version"), p.get(b"Architecture")))
+    return got, read, other, out
+
+
+def package_source_violations(status, lists, mirror, security, name=DPKG_STATUS):
+    """Every package dpkg's STATUS (bytes, the tree's file NAME, default DPKG_STATUS) has unpacked whose name,
+    version and architecture no Packages index in directory LISTS from snapshots MIRROR and SECURITY lists,
+    one line each."""
+    got, read, other, out = pinned_packages(lists, pinned_index(mirror, security))
+    if not read:
+        return out + ["%s holds no Packages index from the pinned snapshot sources (other indexes: %s); %s"
+                      % (lists, ", ".join(other) or "none", PACKAGE_WHY)]
+    n = 0
+    for p in deb822_fields(status, (b"Package", b"Version", b"Architecture", b"Status")):
+        words = p.get(b"Status", b"").split()
+        if len(words) == 3 and words[2] in (b"not-installed", b"config-files"):
+            continue
+        n += 1
+        key = (p.get(b"Package"), p.get(b"Version"), p.get(b"Architecture"))
+        if key not in got:
+            out.append("%s: %s %s (%s) is installed, but no pinned Packages index lists that version; %s"
+                       % (name, *(v.decode("utf-8", "replace") if v is not None else "(none)" for v in key),
+                          PACKAGE_WHY))
+    if not n:
+        out.append("%s: lists no installed package; %s" % (name, PACKAGE_WHY))
+    return out
+
+
+def tree_package_violations(root, mirror, security, lists=None, status=DPKG_STATUS):
+    """package_source_violations for the tree at ROOT, its dpkg status file STATUS read inside the tree
+    (Conf's rules), against LISTS (default APT_LISTS, read at the call)."""
+    lists = APT_LISTS if lists is None else lists
+    try:
+        data = Conf(root, status).content()
+    except OSError as e:
+        return ["%s: unreadable (%s); %s" % (status, e.strerror, PACKAGE_WHY)]
+    return package_source_violations(data, lists, mirror, security, status)
+
+
+def package_file_violations(root):
+    """Every Debian package file (PACKAGE_FILES) in the tree at ROOT, one line each."""
+    return ["%s: %s" % (rel, PACKAGE_FILE_WHY) for rel, st in tree_walk(root)
+            if stat.S_ISREG(st.st_mode) and rel.endswith(PACKAGE_FILES)]
+
+
+# The default initrd (#6149): mkosi v24.3 builds it in a sub-run of its own (build_default_initrd), whose config
+# JSON names it Image "default-initrd", with this run's Mirror=, --environment and apt lists. initrd/mkosi.conf
+# adds this script to that run's finalize scripts, after initrd/mkosi.finalize. mkosi-initrd sets
+# CleanPackageMetadata=yes, so var/lib/dpkg is gone by then: the initrd's mkosi.postinst (drop.py) copies dpkg's
+# status, after its purges, to INITRD_STATUS, and the package check reads that copy. The kexec loader check
+# (#6345) runs on it too, on the same copy: a loader in the initrd could load a kernel before switch-root, while
+# kernel.kexec_load_disabled is still 0 (the initrd ships no sysctl.d of its own; KEXEC_SYSCTL is the main
+# tree's, applied after switch-root and before any first-party unit). The image's other checks are this tree's,
+# not the initrd's; initrd/mkosi.finalize holds the initrd's own.
+INITRD_IMAGE = "default-initrd"
+INITRD_STATUS = "usr/share/agentos/initrd.dpkg-status"
+
+
 def main():
     if sys.argv[1:2] == ["--tmpfiles-allowlist"] and len(sys.argv) == 3:
         sys.stdout.write(tmpfiles_allowlist_text(sys.argv[2]))
@@ -5083,16 +5505,30 @@ def main():
     root = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("BUILDROOT")
     if not root:
         sys.exit("usage: mkosi.finalize ROOT (or BUILDROOT=...)")
-    v = violations(root)
-    if len(sys.argv) == 1:  # run by mkosi, in its script sandbox
-        v += script_network_violations(os.environ.get("WITH_NETWORK"), script_net_dev())
+    if len(sys.argv) > 1:
+        return report(violations(root))
+    # Run by mkosi, in its script sandbox: the image's run, or the default initrd's.
+    conf, bad = run_config()
+    initrd = conf.get("Image") == INITRD_IMAGE
+    v = package_file_violations(root) + kexec_loader_violations(root, INITRD_STATUS) if initrd else violations(root)
+    v += script_network_violations(os.environ.get("WITH_NETWORK"), script_net_dev())
+    if not bad:
+        mirror, security, bad = run_snapshots(conf)
+    v += bad or tree_package_violations(root, mirror, security, status=INITRD_STATUS if initrd else DPKG_STATUS)
+    report(v, initrd)
+
+
+def report(v, initrd=False):
+    """Print each line of V; exit non-zero if there is any. INITRD: V is the default initrd's."""
+    label = "image check: initrd" if initrd else "image check"
     for line in v:
-        print("image check: " + line)
+        print("%s: %s" % (label, line))
+    if v and initrd:
+        sys.exit("%s: %d problem(s) in the default initrd's tree, each named above" % (label, len(v)))
     if v:
-        sys.exit("image check: %d problem(s) in the image tree, each named above; a tmpfiles.d line missing from %s "
-                 "that the guarded-path check passes ends in the entry to review and add there"
-                 % (len(v), TMPFILES_ALLOW_REPO))
-    print("image check: clean")
+        sys.exit("%s: %d problem(s) in the image tree, each named above; a tmpfiles.d line missing from %s that the "
+                 "guarded-path check passes ends in the entry to review and add there" % (label, len(v), TMPFILES_ALLOW_REPO))
+    print("%s: clean" % label)
 
 
 if __name__ == "__main__":

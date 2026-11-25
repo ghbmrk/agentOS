@@ -186,7 +186,7 @@ func TestCounterAnchorRefusesAnEditedFile(t *testing.T) {
 	}
 	older := head(priv, 3)
 	other := headKey(t)
-	resigned, _ := signAnchor(other, anchorRec{V: 1, N: rec.N, Head: rec.Head, Prev: rec.Prev})
+	resigned := signAnchor(other, anchorRec{V: 1, N: rec.N, Head: rec.Head, Prev: rec.Prev})
 	for name, b := range map[string][]byte{
 		"number":       edit(func(r *anchorRec) { r.N++ }),
 		"head swapped": edit(func(r *anchorRec) { r.Head = &older }),
@@ -456,11 +456,11 @@ func ownDir(t *testing.T) string {
 
 // The kernel process's Earliest runs on the monotonic clock from the later of
 // the log's last time and its source's Earliest, or the box clock at the
-// start when the source vouches for none; while running the source raises
-// only Latest. A start behind the log reads the log's time and moves on, and
-// a step of the box clock while running, back or forward, leaves Earliest
-// where the monotonic clock has it, even when a second source follows the
-// step (TIM-1, KEY-7, KEY-8, #5147, #5391).
+// start when the source vouches for none. A start behind the log reads the
+// log's time and moves on, and a step of the box clock while running, back
+// or forward, leaves Earliest where the monotonic clock has it, even when a
+// second source follows the step on its last sample (TIM-1, KEY-7, KEY-8,
+// #5147, #5391).
 //
 // REQ: TIM-1, KEY-7, KEY-8
 func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
@@ -473,8 +473,9 @@ func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
 	if _, err := l.Append(last, kernel.TStop, 1, struct{}{}); err != nil {
 		t.Fatal(err)
 	}
-	box := int64(0) // a flat CMOS battery: the clock restarted in the past
-	alone := func() kernel.Reading { return kernel.Reading{Latest: box} }
+	box := kernel.Reading{} // a flat CMOS battery: the clock restarted in the past
+	var none byte
+	alone := stamped(&box, &none)
 	c := onLog(l, alone)
 	if r := c(); r.Earliest < last || r.Latest < r.Earliest {
 		t.Fatalf("a clock behind the log read %+v, below the log's %d", r, last)
@@ -482,28 +483,28 @@ func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
 	// The monotonic clock carries it on: a stopped time spins to the test's timeout.
 	for r := c(); r.Earliest == last; r = c() {
 	}
-	box = 3 * last // a forward step while running
-	if r := c(); r.Earliest >= 2*last || r.Latest != box {
+	box.Latest = 3 * last // a forward step while running
+	if r := c(); r.Earliest >= 2*last || r.Latest != box.Latest {
 		t.Fatalf("a forward step read %+v: it moved Earliest, or Latest is not the box clock", r)
 	}
-	box = 0 // and back
+	box.Latest = 0 // and back
 	if r := c(); r.Earliest <= last || r.Latest != r.Earliest {
 		t.Fatalf("a step back read %+v", r)
 	}
-	box = 5 * last // a start ahead of the log with no second source starts there
-	if r := onLog(l, alone)(); r.Earliest < box {
+	box.Latest = 5 * last // a start ahead of the log with no second source starts there
+	if r := onLog(l, alone)(); r.Earliest < box.Latest {
 		t.Fatalf("a start ahead of the log read %+v", r)
 	}
 	// A source that vouches starts at its Earliest, not its Latest (the box
 	// clock ahead of it), and Latest follows the source's Latest.
-	src := kernel.Reading{Earliest: 2 * last, Latest: 6 * last}
-	w := onLog(l, func() kernel.Reading { return src })
+	src, at := kernel.Reading{Earliest: 2 * last, Latest: 6 * last}, byte(1)
+	w := onLog(l, stamped(&src, &at))
 	if r := w(); r.Earliest >= 3*last || r.Latest != 6*last {
 		t.Fatalf("a wide source at the start read %+v: Earliest is not its Earliest", r)
 	}
-	// A source's Earliest raises nothing while running: chronyd misses a box
-	// step under 10 s until its next sample, so its Earliest follows each
-	// small forward step while its sample stays the same (#5757 L3 1).
+	// A source's Earliest raises nothing while its sample stays the same:
+	// chronyd misses a box step under 10 s until its next sample, so its
+	// Earliest follows each small forward step meanwhile (#5757 L3 1).
 	stale := int64(9_000) // ms: one step chronyd does not see
 	for i := int64(1); i <= 200; i++ {
 		src = kernel.Reading{Earliest: 2*last + i*stale, Latest: 6*last + i*stale}
