@@ -45,6 +45,9 @@ TOOLSH = CODEX / "agentos-toolsh"
 LAUNCH = CODEX / "launch.json"
 STUB_CLI = ROOT / "tests/codex_worker/stub_cli.py"
 STUB_TOOL = ROOT / "tests/codex_worker/stub_tool.py"
+# Where the stub worker mounts the stub CLI: a system path, so its /tmp tmpfs cannot hide a
+# checkout kept under /tmp. The name keeps "stub_cli.py", which the stub tool looks for.
+STUB_CLI_IN = "/var/lib/agentos-test/stub_cli.py"
 # bwrap's launcher opens /proc/<pid>/ns for the child it clones, by the child's pid in the
 # launcher's own namespace. Under a /proc from an outer namespace that number names whatever has
 # it there, and where nothing does, bwrap dies before its tool starts (#1616). Under the host's
@@ -142,6 +145,7 @@ REQUIRED.update({("features", f): False for f in PROVIDER_READ_OFF})
 HOSTED = ("web_search", "file_search", "code_interpreter", "image_generation", "image_gen",
           "computer_use", "hosted", "remote_mcp")
 OFF = (False, "disabled", "off", "none")
+PROVIDER_KEYS = {"name"} | {p[2] for p in REQUIRED if p[:2] == ("model_providers", "agentos")}
 
 
 def hosted_tool_problems(cfg):
@@ -169,6 +173,17 @@ def hosted_tool_problems(cfg):
     for key in ("default_permissions", "permissions"):
         if key in cfg:
             problems.append(f"{key}: a managed permission profile is extended by lower layers")
+    # Only the agentos provider entry, and in it only the keys REQUIRED pins plus its name: a
+    # header, an env_key or another provider is a route or credential the forwarder did not
+    # declare, and a profile is a second set of settings a -p flag selects.
+    if "profiles" in cfg:
+        problems.append("profiles: no profiles in managed config")
+    providers = cfg.get("model_providers", {})
+    if set(providers) != {"agentos"}:
+        problems.append(f"model_providers has {sorted(providers)}, want only agentos")
+    extra = set(providers.get("agentos", {})) - PROVIDER_KEYS
+    if extra:
+        problems.append(f"model_providers.agentos has unpinned keys {sorted(extra)}")
     return problems
 
 
@@ -250,6 +265,14 @@ class ManagedConfigTest(unittest.TestCase):
             "base_url off the forwarder": put(("model_providers", "agentos", "base_url"),
                                               "https://chatgpt.com/backend-api/codex"),
             "other provider": put(("model_provider",), "openai"),
+            "second provider entry": put(("model_providers", "openai", "base_url"),
+                                         "https://api.openai.com/v1"),
+            "provider headers": put(("model_providers", "agentos", "http_headers", "X-A"), "b"),
+            "provider env_key": put(("model_providers", "agentos", "env_key"), "OPENAI_API_KEY"),
+            "a profile": put(("profiles", "x", "model_provider"), "openai"),
+            "plan traffic off the forwarder": put(("chatgpt_base_url",),
+                                                  "https://chatgpt.com/backend-api/"),
+            "plan traffic unpinned": drop(("chatgpt_base_url",)),
             "model unpinned (catalog default)": drop(("model",)),
             "other model": put(("model",), "gpt-5.5"),
             "auto-update check on": put(("check_for_update_on_startup",), True),
@@ -492,6 +515,31 @@ class ToolshRefusalTest(unittest.TestCase):
                 self.assertEqual(r.returncode, 126, r.stderr)
                 self.assertIn("refusing", r.stderr)
 
+    # REQ: A14
+    def test_refuses_with_a_reason_when_bwrap_is_missing(self):
+        # A copy whose workspace is a temporary directory and whose bwrap path names nothing:
+        # the wrapper says why, rather than every tool call ending in exec's bare 127.
+        text = TOOLSH.read_text()
+        with tempfile.TemporaryDirectory() as d:
+            work = os.path.realpath(d)
+            for name, edits, code in (
+                    ("as shipped", (), 126),
+                    ("check removed", (('[ -x "$BWRAP" ] || refuse "bwrap missing at $BWRAP"\n',
+                                        ""),), 127)):
+                with self.subTest(mutant=name):
+                    bad = text.replace("BWRAP=/usr/bin/bwrap", f"BWRAP={work}/no-bwrap", 1)
+                    bad = bad.replace("WORK=/var/lib/agentos-work", f"WORK={work}", 1)
+                    for old, new in edits:
+                        self.assertIn(old, bad)
+                        bad = bad.replace(old, new, 1)
+                    path = pathlib.Path(work, "toolsh")
+                    path.write_text(bad)
+                    path.chmod(0o755)
+                    r = subprocess.run([str(path), "true"], cwd=work, capture_output=True,
+                                       text=True, timeout=30)
+                    self.assertEqual(r.returncode, code, r.stderr)
+                    self.assertEqual("bwrap missing" in r.stderr, code == 126, r.stderr)
+
     # REQ: CRED-5
     def test_refuses_an_empty_command(self):
         with tempfile.TemporaryDirectory() as d:
@@ -591,6 +639,7 @@ class ToolSandboxTest(unittest.TestCase):
             # A system path: the tool runs without CAP_DAC_OVERRIDE, so it cannot
             # traverse a 0750 home such as the CI runner's checkout.
             "--ro-bind", str(STUB_TOOL), "/var/lib/agentos-stub-tool.py",
+            "--ro-bind", str(STUB_CLI), STUB_CLI_IN,
             *extra,
             "--chdir", chdir,
             "--setenv", "AGENTOS_SYNTHETIC_CANARY", self.canary,
@@ -655,7 +704,7 @@ class ToolSandboxTest(unittest.TestCase):
         flag = ("--skip-outlives",) if skip_outlives else ()
         # The outlives probe may wait stub_cli's BEAT_WAIT for its tool on top of the earlier
         # phases, so the deadline leaves room for both.
-        r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
+        r = self.worker(sys.executable, "-I", STUB_CLI_IN, str(self.fwd.port), self.canary,
                         *flag, toolsh=toolsh, codex_home=codex_home, extra=extra,
                         deadline=120, pidns=pidns)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -747,6 +796,41 @@ class ToolSandboxTest(unittest.TestCase):
                                   "unprivileged_userns=0)")
                     self.skipTest("the kernel refuses unprivileged user namespaces here anyway")
                 self.assertTrue(got, f"{name} went unnoticed")
+
+    # The /dev bwrap's --dev builds: a few character devices and links, no disk or console.
+    BWRAP_DEV = {"core", "fd", "full", "null", "ptmx", "pts", "random", "shm", "stderr", "stdin",
+                 "stdout", "tty", "urandom", "zero"}
+
+    # REQ: CRED-5, A14
+    def test_tool_home_is_its_directory_and_its_dev_is_bwraps_own(self):
+        # HOME is the tool's own working directory (here a subdirectory, so neither / nor the
+        # workspace root passes for it), and /dev is bwrap's minimal one: with the worker's /dev
+        # read-only bound in its place, a tool running as the worker's root user would still
+        # open its disks through their owner bits, capabilities or not.
+        body = f"""mkdir -p {WORK}/sub && cd {WORK}/sub
+/usr/local/bin/agentos-toolsh /bin/sh -c 'echo "home=$HOME"; ls -A /dev | tr "\\n" " "; echo'
+"""
+        worker_dev = set(os.listdir("/dev"))
+        for name, edits, home, dev_own in (
+                ("as shipped", (), WORK + "/sub", True),
+                ("HOME is /", (('--setenv HOME "$cwd"', "--setenv HOME /"),), "/", True),
+                ("HOME is the workspace root",
+                 (('--setenv HOME "$cwd"', '--setenv HOME "$WORK"'),), WORK, True),
+                ("worker's /dev", (("--proc /proc --dev /dev", "--proc /proc"),), WORK + "/sub",
+                 False)):
+            with self.subTest(mutant=name):
+                r = self.script(body, toolsh=self.mutant("toolsh-home", *edits))
+                self.assertEqual(r.returncode, 0, r.stderr)
+                lines = r.stdout.splitlines()
+                self.assertEqual(lines[0], "home=" + home, r.stdout)
+                dev = set(lines[1].split())
+                if dev_own:
+                    self.assertEqual(dev - self.BWRAP_DEV, set(),
+                                     "tool sees the worker's devices")
+                elif worker_dev <= self.BWRAP_DEV:
+                    self.skipTest("this host's /dev holds nothing bwrap's own does not")
+                else:
+                    self.assertEqual(dev, worker_dev, "the mutant must show the worker's /dev")
 
     # REQ: CRED-5, A14
     def test_allow_list_and_bind_order_each_keep_codex_home_hidden(self):
@@ -906,7 +990,7 @@ echo "func=$?"
         stuck = self.mutant("toolsh-stuck",
                             ('exec "$BWRAP" \\', 'case "$*" in *" beat") sleep 600 ;; esac\n'
                                                    'exec "$BWRAP" \\'))
-        r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
+        r = self.worker(sys.executable, "-I", STUB_CLI_IN, str(self.fwd.port), self.canary,
                         "--beat-wait=2", toolsh=stuck, pidns=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         tool = json.loads(r.stdout)["tool"]
@@ -920,7 +1004,7 @@ echo "func=$?"
         # A4: the stub CLI's --skip-outlives drops only the last phase. The descriptor probe
         # still runs, and the result carries no outlives verdict, so assert_contained fails it:
         # a run that must prove containment cannot skip the check unnoticed.
-        r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
+        r = self.worker(sys.executable, "-I", STUB_CLI_IN, str(self.fwd.port), self.canary,
                         "--skip-outlives", pidns=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         tool = json.loads(r.stdout)["tool"]
@@ -930,7 +1014,7 @@ echo "func=$?"
         self.assertNotIn("beat", r.stderr, "the beat tool must not start")
         with self.assertRaises(AssertionError):
             self.assert_contained(tool)
-        r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
+        r = self.worker(sys.executable, "-I", STUB_CLI_IN, str(self.fwd.port), self.canary,
                         "--skip-outlive")
         self.assertEqual(r.returncode, 2, "an unknown flag must not run a partial check")
 
