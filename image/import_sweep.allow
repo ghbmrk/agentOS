@@ -193,3 +193,18 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 # s_client. It is also the sweep's control that the QUIC scan still reads, as an entry accepting no file
 # fails.
 /usr/bin/openssl
+
+[dgram]
+# The files of the built image (main tree and initrds) that may import OpenSSL's datagram BIO constructors
+# (BIO_s_datagram, BIO_new_dgram, BIO_s_datagram_sctp, BIO_new_dgram_sctp, BIO_s_dgram_pair,
+# BIO_new_bio_dgram_pair), or import dlsym or dlvsym and hold one's name (#6671, L3 7157966663). The
+# DEBIAN-CVE-2026-88822 records' flaw is the datagram BIO's peer detection (BIO_dgram_detect_peer_addr),
+# which a file can ask of any datagram BIO it makes, QUIC or not. As in [quic], a file no entry accepts
+# fails the step, and so does an entry that accepts no file. libcrypto defines them and is not counted.
+
+# The openssl CLI's datagram BIOs are s_client's and s_server's -dtls and -quic sockets; nothing on the
+# box runs either.
+/usr/bin/openssl
+# libssl makes a datagram BIO only in SSL_set_fd, SSL_set_rfd and SSL_set_wfd on a QUIC object
+# (ssl/ssl_lib.c, 3.5.9), so it reaches the peer detection only for a caller [quic] holds.
+/usr/lib/x86_64-linux-gnu/libssl.so.3
