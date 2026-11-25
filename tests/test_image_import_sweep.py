@@ -1076,7 +1076,8 @@ class PerGroupLibraryTest(unittest.TestCase):
 
 # #6671: a stand-in libssl defining the QUIC entry points under OPENSSL_3.2.0 (as 3.5's does) and itself
 # importing dlsym, and the files using them in each way the sweep counts or does not.
-FAKE_SSL = ("#include <dlfcn.h>\nvoid *BIO_s_datagram(void);\n"
+FAKE_SSL = ("#include <dlfcn.h>\nvoid *BIO_s_datagram(void);\nvoid *BIO_s_connect(void);\n"
+            "void *BIO_new_ssl_connect(void *c) { return BIO_s_connect(); }\n"
             "void *OSSL_QUIC_client_method(void) { return dlsym(RTLD_DEFAULT, \"x\"); }\n"
             "void *SSL_set_fd(void) { return BIO_s_datagram(); }\n"
             "void *OSSL_QUIC_client_thread_method(void) { return 0; }\n"
@@ -1084,14 +1085,22 @@ FAKE_SSL = ("#include <dlfcn.h>\nvoid *BIO_s_datagram(void);\n"
             "void *SSL_new_listener(void *c, unsigned long f) { return c; }\n"
             "void *TLS_method(void) { return 0; }\n")
 SSL_MAP = ("OPENSSL_3.2.0 { global: OSSL_QUIC_client_method; OSSL_QUIC_client_thread_method; "
-           "OSSL_QUIC_server_method; SSL_new_listener; TLS_method; local: *; };\n")
+           "OSSL_QUIC_server_method; SSL_new_listener; TLS_method; BIO_new_ssl_connect; local: *; };\n")
 CLIENT = ("void *OSSL_QUIC_client_method(void);\nvoid *BIO_new_dgram(int, int);\n"
           "int main(void) { return OSSL_QUIC_client_method() != BIO_new_dgram(0, 0); }\n")
 # A stand-in libcrypto defining the datagram BIO constructors, and L3 7157966663's repro: a file making a
 # datagram BIO to ask its peer address, with no QUIC name (-88822).
 DGRAM_CRYPTO = ("void *BIO_s_datagram(void) { return 0; }\nvoid *BIO_new_dgram(int s, int f) { return 0; }\n"
+                "void *BIO_s_connect(void) { return 0; }\nvoid *BIO_new_connect(const char *h) { return 0; }\n"
                 "long BIO_ctrl(void *b, int c, long l, void *p) { return 0; }\n")
-CRYPTO_MAP = "OPENSSL_3.0.0 { global: BIO_s_datagram; BIO_new_dgram; BIO_ctrl; local: *; };\n"
+CRYPTO_MAP = ("OPENSSL_3.0.0 { global: BIO_s_datagram; BIO_new_dgram; BIO_s_connect; BIO_new_connect; BIO_ctrl; "
+              "local: *; };\n")
+# L3 7158175373 and Security 7158185323: a connect BIO set to SOCK_DGRAM (BIO_C_SET_SOCK_TYPE 157) makes a
+# datagram BIO and hands it out (BIO_C_GET_DGRAM_BIO 159); the file imports only BIO_new_connect and BIO_ctrl.
+CONN_USER = ("long BIO_ctrl(void *, int, long, void *);\nvoid *BIO_new_connect(const char *);\n"
+             "int main(void) { void *c = BIO_new_connect(\"h:1\"), *d = 0; BIO_ctrl(c, 157, 2, 0);\n"
+             "  BIO_ctrl(c, 159, 0, &d); return BIO_ctrl(d, 87, 0, 0); }\n")
+SSL_CONN_USER = "void *BIO_new_ssl_connect(void *);\nint main(void) { return BIO_new_ssl_connect(0) != 0; }\n"
 DGRAM_USER = ("void *BIO_new_dgram(int, int);\nlong BIO_ctrl(void *, int, long, void *);\n"
               "int main(void) { return BIO_ctrl(BIO_new_dgram(3, 0), 87, 0, 0); }\n")
 DGRAM_LOOKUP = '#include <dlfcn.h>\nint main(void) { return dlsym(RTLD_DEFAULT, "BIO_s_dgram_pair") != 0; }\n'
@@ -1145,6 +1154,8 @@ class QuicImportTest(unittest.TestCase):
         cc("held.c", QUIC_HELD_ONLY, cls.tree / "usr/bin/quicheld")
         cc("dgram.c", DGRAM_USER, cls.tree / "usr/bin/dgramd", "-L" + str(lib), "-l:libcrypto.so.3")
         cc("dgramlook.c", DGRAM_LOOKUP, cls.tree / "usr/bin/dgramlook", "-ldl")
+        cc("conn.c", CONN_USER, cls.tree / "usr/bin/connd", "-L" + str(lib), "-l:libcrypto.so.3")
+        cc("sslconn.c", SSL_CONN_USER, cls.tree / "usr/bin/sslconn", *ssl)
         cls.got = sweep.run_tree(str(cls.tree))
 
     @classmethod
@@ -1162,19 +1173,22 @@ class QuicImportTest(unittest.TestCase):
 
     def test_datagram_bio_makers_counted_libcrypto_not(self):
         # L3 7157966663: -88822 is reached through any datagram BIO, QUIC or not.
-        self.assertEqual(self.got["tree"]["dgram"], {"/usr/bin/dgramd": ["BIO_new_dgram"],
+        self.assertEqual(self.got["tree"]["dgram"], {"/usr/bin/connd": ["BIO_new_connect"],
+                                                     "/usr/bin/dgramd": ["BIO_new_dgram"],
                                                      "/usr/bin/dgramlook": ["BIO_s_dgram_pair"],
                                                      "/usr/bin/openssl": ["BIO_new_dgram"],
-                                                     "/usr/lib/libssl.so.3": ["BIO_s_datagram"]})
+                                                     "/usr/bin/sslconn": ["BIO_new_ssl_connect"],
+                                                     "/usr/lib/libssl.so.3": ["BIO_s_connect", "BIO_s_datagram"]})
         listed = {"quic": ["/usr/bin/openssl", "/usr/bin/quic*", "/usr/bin/thread"],
                   "dgram": ["/usr/bin/openssl", "/usr/lib/libssl.so.3"]}
         errs = sweep.openssl_refusals(self.got, listed)
-        self.assertEqual([e.split(": ", 2)[1].split()[0] for e in errs], ["/usr/bin/dgramd", "/usr/bin/dgramlook"])
-        self.assertEqual(errs[0], "tree: /usr/bin/dgramd imports or looks up OpenSSL's datagram BIO constructors "
-                         "(BIO_new_dgram) and is not in import_sweep.allow [dgram]; the DEBIAN-CVE-2026-88822 "
+        self.assertEqual([e.split(": ", 2)[1].split()[0] for e in errs],
+                         ["/usr/bin/connd", "/usr/bin/dgramd", "/usr/bin/dgramlook", "/usr/bin/sslconn"])
+        self.assertEqual(errs[1], "tree: /usr/bin/dgramd imports or looks up OpenSSL's datagram or connect BIO "
+                         "constructors (BIO_new_dgram) and is not in import_sweep.allow [dgram]; the DEBIAN-CVE-2026-88822 "
                          "records rest on no other file doing so: review what it does with them, update those "
                          "records, then add the entry: /usr/bin/dgramd")
-        self.assertEqual(sweep.openssl_refusals(self.got, dict(listed, dgram=listed["dgram"] + ["/usr/bin/dgram*"])),
+        self.assertEqual(sweep.openssl_refusals(self.got, dict(listed, dgram=listed["dgram"] + ["/usr/bin/dgram*", "/usr/bin/*conn*"])),
                          [])
 
     def test_only_listed_files_pass_and_unused_entries_fail(self):
@@ -1216,7 +1230,7 @@ class QuicImportTest(unittest.TestCase):
         lines = sweep.summary(self.got)
         self.assertIn("tree quic: 5 files import or look up OpenSSL's QUIC entry points", lines)
         self.assertIn("  quic /usr/bin/quicd: OSSL_QUIC_server_method SSL_new_listener", lines)
-        self.assertIn("tree dgram: 4 files import or look up OpenSSL's datagram BIO constructors", lines)
+        self.assertIn("tree dgram: 6 files import or look up OpenSSL's datagram or connect BIO constructors", lines)
         base = dict(imports={"/usr/bin/bash": ["regcomp"]}, via={}, scanned=3, cipher={"/l": {"EVP_CIPHER_fetch": 1}},
                     sha256={"/l": "0f" * 32}, static={"/usr/sbin/ldconfig": ["glob"]})
         with tempfile.TemporaryDirectory() as d:

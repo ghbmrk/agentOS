@@ -19,8 +19,8 @@ It also reads, for the openssl records (#5341), which files hold the name of a b
 selector or spell GCM-SIV or KRB5KDF, as selecting AES-GCM-SIV takes one of its names (see CIPHER_NAMES
 and SPELT), and counts their references to each selector and their spellings.
 And, for the openssl QUIC records (#6671), it reads which files import or look up OpenSSL's QUIC entry
-points (QUIC_NAMES), which only the openssl CLI may, and its datagram BIO constructors (DGRAM_NAMES), which
-only the openssl CLI and libssl may (OPENSSL_USES).
+points (QUIC_NAMES), which only the openssl CLI may, and its datagram or connect BIO constructors
+(DGRAM_NAMES), which only the files [dgram] names may (OPENSSL_USES).
 
 The JSON maps each place ("tree", and "initrd:<path>" for each initrd) to: "scanned", the ELF files read;
 "imports", each file importing an affected glibc symbol and those symbols; "lookups", each file importing
@@ -144,14 +144,22 @@ QUIC_NAMES = ("OSSL_QUIC_client_method", "OSSL_QUIC_client_thread_method", "OSSL
               "SSL_new_listener")
 QUIC_RECORDS = "DEBIAN-CVE-2026-88822, -95691, -124709, -107494 and -84785"
 # L3 7157966663: -88822's flaw is in the datagram BIO's peer detection (crypto/bio/bss_dgram.c,
-# BIO_CTRL_DGRAM_DETECT_PEER_ADDR), which a file can ask of any datagram BIO with no QUIC object. A datagram
-# BIO comes only from these constructors (the SCTP one falls back to dgram_ctrl; the pair is counted as
-# fail-closed), so their importers and lookups are held the same way, to [dgram].
+# BIO_CTRL_DGRAM_DETECT_PEER_ADDR), which a file can ask of any datagram BIO with no QUIC object. In OpenSSL
+# 3.5.4's crypto/ and ssl/ (every source their build.info files name, read for these constructors), a
+# datagram BIO comes from its own constructors (the SCTP one falls back to dgram_ctrl; the pair has no
+# peer detection and is counted as fail-closed), from a connect BIO set to SOCK_DGRAM, which makes one
+# (bss_conn.c conn_create_dgram_bio) and hands it out (BIO_get0_dgram_bio; L3 7158175373, Security
+# 7158185323), and from libssl's fd_method for a QUIC object. So the connect BIO's constructors, and libssl's
+# BIO_new_ssl_connect and BIO_new_buffer_ssl_connect over it, count too, and their importers and lookups are
+# held the same way, to [dgram]. libcrypto's own connect BIO user, the HTTP client, never sets SOCK_DGRAM.
 DGRAM_NAMES = ("BIO_s_datagram", "BIO_new_dgram", "BIO_s_datagram_sctp", "BIO_new_dgram_sctp", "BIO_s_dgram_pair",
-               "BIO_new_bio_dgram_pair")
+               "BIO_new_bio_dgram_pair", "BIO_s_connect", "BIO_new_connect", "BIO_new_ssl_connect",
+               "BIO_new_buffer_ssl_connect")
 # Each group: its names, what they are, and the records resting on no unlisted file using them.
-OPENSSL_USES = {"quic": (QUIC_NAMES, "OpenSSL's QUIC entry points", "the openssl QUIC records (%s)" % QUIC_RECORDS),
-                "dgram": (DGRAM_NAMES, "OpenSSL's datagram BIO constructors", "the DEBIAN-CVE-2026-88822 records")}
+OPENSSL_USES = {"quic": (QUIC_NAMES, "OpenSSL's QUIC entry points",
+                         "the openssl QUIC records (%s)" % QUIC_RECORDS),
+                "dgram": (DGRAM_NAMES, "OpenSSL's datagram or connect BIO constructors",
+                          "the DEBIAN-CVE-2026-88822 records")}
 OPENSSL_HELD = re.compile(b"(?:%s)(?=\0)" % b"|".join(n.encode() for names, _w, _r in OPENSSL_USES.values()
                                                       for n in names))
 
