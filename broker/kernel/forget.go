@@ -48,6 +48,32 @@ var kindWords = map[string][2]string{
 	"retrieve-vectors": {"search entry", "search entries"},
 }
 
+// KindList says counts by class in kindWords, as the ask and the owner
+// side's after-erase notice both show them: "1 face, 2 messages, 1 other
+// item", by word with other items last, never counting a name's label, and
+// "" when there are none (#5378).
+func KindList(classes map[string]int) string {
+	kinds, other := map[[2]string]int{}, [2]string{"other item", "other items"}
+	for c, n := range classes {
+		if w, ok := kindWords[c]; ok {
+			kinds[w] += n
+		} else if c != ClassLabel {
+			kinds[other] += n
+		}
+	}
+	rank := func(w [2]string) string { // by word, other items last
+		if w == other {
+			return "\x7f"
+		}
+		return w[0]
+	}
+	var list []string
+	for _, w := range slices.SortedFunc(maps.Keys(kinds), func(a, b [2]string) int { return strings.Compare(rank(a), rank(b)) }) {
+		list = append(list, fmt.Sprintf("%d %s", kinds[w], w[min(kinds[w], 2)-1]))
+	}
+	return strings.Join(list, ", ")
+}
+
 type forgetAsk struct {
 	subjects []string
 	code     string
@@ -87,29 +113,15 @@ func (k *Kernel) AskForget(at int64, label string) (string, error) {
 	if len(unread) > 0 {
 		all = "everything I can read" // a label that cannot be read may name it too
 	}
-	kinds, other := map[[2]string]int{}, [2]string{"other item", "other items"}
+	classes := map[string]int{}
 	for _, s := range subjects {
 		for _, it := range k.s.subjects[s].items {
-			if w, ok := kindWords[it.Class]; ok {
-				kinds[w]++
-			} else if it.Class != ClassLabel {
-				kinds[other]++
-			}
+			classes[it.Class]++
 		}
 	}
-	rank := func(w [2]string) string { // by word, other items last
-		if w == other {
-			return "\x7f"
-		}
-		return w[0]
-	}
-	var list []string
-	for _, w := range slices.SortedFunc(maps.Keys(kinds), func(a, b [2]string) int { return strings.Compare(rank(a), rank(b)) }) {
-		list = append(list, fmt.Sprintf("%d %s", kinds[w], w[min(kinds[w], 2)-1]))
-	}
-	items := "nothing but the name"
-	if len(list) > 0 {
-		items = strings.Join(list, ", ")
+	items := KindList(classes)
+	if items == "" {
+		items = "nothing but the name"
 	}
 	var b [8]byte // 10^6 codes from 2^64 draws: no code is notably likelier
 	if _, err := io.ReadFull((*k.log.p).cfg.Rand, b[:]); err != nil {

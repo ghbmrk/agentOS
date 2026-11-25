@@ -341,8 +341,7 @@ func (f forgetFound) Text() string {
 	return strings.Join(out, " ")
 }
 
-// kindList is counts by kind, as the readback and the page erase's notice
-// show them: "message 3, photo 1".
+// kindList is counts by kind, as the readback shows them: "message 3, photo 1".
 func kindList(kinds map[string]int) string {
 	var out []string
 	for _, k := range slices.Sorted(maps.Keys(kinds)) {
