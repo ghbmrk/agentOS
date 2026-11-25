@@ -7,7 +7,7 @@ with no gap and no duplicate: every shard runs it on the full list before its te
 
 The split is a pure function of the package list: packages are placed heaviest first
 (WEIGHTS, then name), each on the shard with the least weight so far (the lowest index on a
-tie). A package WEIGHTS does not name weighs 1, so a new package lands on the lightest shard;
+tie), after each ALONE package present takes one of the last shards for itself. A package WEIGHTS does not name weighs 1, so a new package lands on the lightest shard;
 the split never drops it, it only balances less well until WEIGHTS names it. `shard` prints a
 shard's packages heaviest first: `go test` starts packages in command-line order, so the
 longest one (journal) starts at once instead of after the packages that sort before it.
@@ -22,21 +22,39 @@ import sys
 
 MODULE = "github.com/ghbmrk/agentos/broker"
 
-# Seconds each package's `go test -race` took in the 3-shard run 38790596302 (2026-10-15,
-# rounded), for the packages at 10 s or over; the rest weigh 1. Stale numbers only unbalance
-# the shards.
+# Seconds each package's `go test -race` took in main's ci run 45142437210 (2026-11-23, rounded),
+# for the packages at 10 s or over; the rest weigh 1. Stale numbers only unbalance the shards, but
+# they did put three new heavy packages beside kernel/sim (CI-race-sim-alone, #6582).
 WEIGHTS = {
-    "journal": 223, "guest": 128, "cmd/agentosd": 124, "localui": 117,
-    "holder": 99, "cmd/agentos-egress": 83, "recovery": 72, "update": 62,
-    "kernel/sim": 35, "childproc": 35, "daemon": 34, "vm/gvisor": 33,
-    "change": 26, "loops": 25, "maintain": 18, "guesterr": 18, "core": 17,
-    "e2e": 16, "claim": 16, "vm/overlay": 14, "cmd/agentos-guest-bridge": 14, "firstboot": 14,
-    "apply": 13, "journal/check": 13, "modem/bridge": 11, "vault": 11, "probecmd": 10,
-    "cmd/agentos-seller": 10,
+    "kernel/sim": 970, "decoy/match": 445, "enforcer/nft": 445, "journal": 324,
+    "cmd/agentos-enroll": 235, "daemon": 225, "e2e/boxe2e": 135, "holder": 115, "drone": 114,
+    "guest": 105, "cmd/agentos-egress": 102, "cmd/agentos-vision": 100, "egress": 88, "localui": 87,
+    "kernel": 80, "browser": 74, "enforcer/mdns": 71, "vault": 71, "kernel/privfile": 66,
+    "recovery": 64, "owner": 59, "clerk/inbox": 58, "core": 57, "enforcer/dns": 57,
+    "clerk/run": 55, "cmd/agentos-photo": 55, "owner/graph": 53, "update": 51,
+    "cmd/agentos-unlock": 50, "apply": 49, "enforcer/channel": 41, "vm/requal/driver": 39,
+    "e2e": 37, "enforcer/dns/run": 36, "loops": 33, "cmd/agentosd": 31, "kernel/proc": 29,
+    "backup": 28, "cmd/agentos-clerk-model": 28, "attention": 25, "clerk/wipelint": 25,
+    "clerk/inbox/imapsmtp": 23, "clerk/inbox/cmd/slice": 20, "cmd/agentos-link": 20,
+    "guesterr": 17, "hostiletext": 17, "call": 16, "cmd/agentos-a8scan": 16, "journal/check": 16,
+    "enforcer/ap/push": 15, "kernel/key": 13, "vm/requal": 13, "durable": 12,
+    "enforcer/radio/ble": 12, "probecmd": 12, "apply/bootab": 11, "childproc": 11,
+    "enforcer/radio": 11, "firstboot": 11, "modem/bridge": 11, "apply/activatortest": 10,
+    "claim": 10, "vm/gvisor": 10,
 }
 
+# Packages that get a shard to themselves, the last shards in this order, while at least one
+# shard is left for the rest. kernel/sim uses every core (#6575) and ran 970 s of its 25-minute
+# timeout beside other heavy packages; alone it has the runner to itself (CI-race-sim-alone, #6582).
+ALONE = ("kernel/sim",)
+
+
+def name(pkg):
+    return pkg.removeprefix(MODULE).lstrip("/")
+
+
 def weight(pkg):
-    return WEIGHTS.get(pkg.removeprefix(MODULE).lstrip("/"), 1)
+    return WEIGHTS.get(name(pkg), 1)
 
 
 def split(packages, shards):
@@ -45,10 +63,14 @@ def split(packages, shards):
         raise ValueError("shards must be at least 1")
     if len(set(packages)) != len(packages):
         raise ValueError("duplicate package in the list")
-    load = [0] * shards
     out = [[] for _ in range(shards)]
-    for pkg in by_weight(packages):
-        i = min(range(shards), key=lambda s: (load[s], s))
+    alone = [p for a in ALONE for p in packages if name(p) == a][:shards - 1]
+    for i, pkg in enumerate(alone):
+        out[shards - 1 - i].append(pkg)
+    rest = shards - len(alone)
+    load = [0] * rest
+    for pkg in by_weight([p for p in packages if p not in alone]):
+        i = min(range(rest), key=lambda s: (load[s], s))
         load[i] += weight(pkg)
         out[i].append(pkg)
     return [sorted(s) for s in out]
