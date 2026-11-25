@@ -158,12 +158,14 @@ type wireTemplate struct {
 	raw []byte
 }
 
-// decoded sees each template as it is decoded, and strictInput the line
-// a json.Decoder copies. Vars so tests can check that every template is
-// zeroed once refused, and that no decoder sees its text.
+// decoded sees each template as it is decoded, strictInput the line a
+// json.Decoder copies, and unmarshal reads the template in place. Vars so
+// tests can check that every template is zeroed once refused, that no
+// decoder sees its text, and that an unmarshal reading a copy fails closed.
 var (
 	decoded     = func([]byte) {}
 	strictInput = func(b []byte) io.Reader { return bytes.NewReader(b) }
+	unmarshal   = json.Unmarshal
 )
 
 func (t *wireTemplate) UnmarshalJSON(b []byte) error {
@@ -205,7 +207,7 @@ func decodeReply(line []byte) (_ Reply, err error) {
 			clear(tw.Template.v[:cap(tw.Template.v)])
 		}
 	}()
-	if err := json.Unmarshal(line, &tw); err != nil {
+	if err := unmarshal(line, &tw); err != nil {
 		return Reply{}, unavailable("malformed reply")
 	}
 	blank := line

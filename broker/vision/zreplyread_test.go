@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -225,5 +226,34 @@ func TestOffsetInLineOnly(t *testing.T) {
 	}
 	if _, ok := offsetIn(line, line[len(line):]); ok {
 		t.Fatal("an empty slice was taken")
+	}
+}
+
+// An unmarshal that reads a copy of the line, as a future encoding/json
+// might, leaves the template's text outside it: the reply is refused,
+// not decoded strictly from a line still holding that text, and the
+// template decoded from the copy is zeroed.
+func TestTemplateReadFromCopyRefused(t *testing.T) {
+	got := recordDecoded(t)
+	old := unmarshal
+	unmarshal = func(b []byte, v any) error { return old(bytes.Clone(b), v) }
+	t.Cleanup(func() { unmarshal = old })
+	_, err := parseReply(Request{Op: OpEnrol}, []byte(`{"template":"`+tplB64+`"}`), nil)
+	var e *Error
+	if !errors.As(err, &e) || e.Cause != Unavailable || e.Detail != "template not read in place" {
+		t.Fatalf("got %v", err)
+	}
+	if len(*got) != 1 || !allZero((*got)[0]) {
+		t.Fatalf("template from the copy not zeroed: %v", *got)
+	}
+}
+
+// A request whose op the client does not know is refused as a bad
+// request whatever the reply says.
+func TestCheckReplyUnknownOp(t *testing.T) {
+	_, err := parseReply(Request{Op: "bogus"}, []byte(`{}`), nil)
+	var e *Error
+	if !errors.As(err, &e) || e.Cause != BadRequest || e.Detail != "unknown op" {
+		t.Fatalf("got %v", err)
 	}
 }
