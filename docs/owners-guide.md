@@ -51,6 +51,10 @@ After you type the key once, Windows starts normally again.
 
 Each morning at 8:00 the box texts you one short digest, even on a quiet day, when it says there is nothing else to report. If your phone was off or out of signal, the box keeps trying for the rest of that day and the next. If the box cannot tell whether a digest reached you, it never sends it twice; the next digest says so instead. If the box cannot read its own digest records, it sends you one short line saying so that day, and STATUS shows it until it is fixed. Reply STATUS any time for more.
 
+## If setup ends before you see your Wi-Fi password
+
+When you first set up the enforcer, your phone joins the setup Wi-Fi network printed on the sticker. The moment the enforcer takes your passkey, it switches that network off and starts your own networks, so your phone can lose the page before it shows your Owner Wi-Fi password and your recovery code. Your passkey is still set up. Plug a computer, or a phone with an Ethernet adapter, into the enforcer's admin port and open the enforcer's page: its home screen shows every Wi-Fi password. Then choose "Make a new recovery code with your passkey" there, since the first one was never shown to you. <!-- Interim for #6013 UX 1; the two-step enrolment row (#6338) rewords or removes this section. -->
+
 ## If the enforcer was compromised
 
 The enforcer controls its access point, the Wi-Fi box beside it, and can change anything on it. So whenever the enforcer may have been compromised, make the enforcer trustworthy first, then clean the access point.

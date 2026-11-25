@@ -39,15 +39,11 @@ github.com/gen2brain/h265/hevc
 # github.com/gobwas/httphead v0.1.0
 ## explicit; go 1.15
 github.com/gobwas/httphead
-# github.com/gobwas/pool v0.2.1
-## explicit
-github.com/gobwas/pool
-github.com/gobwas/pool/internal/pmath
-github.com/gobwas/pool/pbufio
-github.com/gobwas/pool/pbytes
-# github.com/gobwas/ws v1.3.2
-## explicit; go 1.15
+# github.com/gobwas/ws v1.5.0
+## explicit; go 1.26
 github.com/gobwas/ws
+github.com/gobwas/ws/internal/pool
+github.com/gobwas/ws/internal/saferio
 github.com/gobwas/ws/wsutil
 # github.com/google/go-containerregistry v0.20.7
 ## explicit; go 1.24.0
