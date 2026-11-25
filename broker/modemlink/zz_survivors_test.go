@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	_ "time/tzdata"
 
 	"github.com/ghbmrk/agentos/broker/bridgeproto"
 	"github.com/ghbmrk/agentos/broker/sockets"
@@ -124,13 +123,27 @@ func TestZZOutageStartsWhenTheLineWasLastHeardOrReported(t *testing.T) {
 	}
 }
 
-// A recovery text names the days when the outage ran exactly 24 hours but
-// ended on the same calendar day (the clocks went back in between).
-func TestZZRecoveryTextNamesTheDayForAFullDayOutage(t *testing.T) {
-	loc, err := time.LoadLocation("America/New_York")
+// zzEastern is US Eastern time with its daylight-saving rule, built from
+// TZif bytes in the test, not the tzdata package: a blank import's init
+// would reach every test of the package. The zone has no transitions, so
+// every instant follows the rule string.
+func zzEastern(t *testing.T) *time.Location {
+	t.Helper()
+	header := "TZif2" + strings.Repeat("\x00", 15) +
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" + // isut, isstd, leap
+		"\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x04" // time, type, char counts
+	data := "\xff\xff\xb9\xb0\x00\x00" + "EST\x00" // UTC-5, standard, abbreviation 0
+	loc, err := time.LoadLocationFromTZData("US/Eastern", []byte(header+data+header+data+"\nEST5EDT,M3.2.0,M11.1.0\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	return loc
+}
+
+// A recovery text names the days when the outage ran exactly 24 hours but
+// ended on the same calendar day (the clocks went back in between).
+func TestZZRecoveryTextNamesTheDayForAFullDayOutage(t *testing.T) {
+	loc := zzEastern(t)
 	from := time.Date(2026, 11, 1, 0, 30, 0, 0, loc)
 	to := from.Add(24 * time.Hour)
 	if from.Day() != to.Day() {
