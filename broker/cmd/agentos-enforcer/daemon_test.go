@@ -95,7 +95,7 @@ func TestDepsRequired(t *testing.T) {
 	for name, f := range map[string]func(*deps){
 		"Elapsed": func(d *deps) { d.Elapsed = nil },
 		"Fire":    func(d *deps) { d.Fire = nil },
-		"Network": func(d *deps) { d.Network = nil },
+		"AP":      func(d *deps) { d.AP = nil },
 		"Light":   func(d *deps) { d.Light = nil },
 		"Radio":   func(d *deps) { d.Radio = nil },
 		"Logf":    func(d *deps) { d.Logf = nil },
