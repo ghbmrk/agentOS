@@ -2577,6 +2577,16 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
                 test = reader(path)
                 r, _ = self.gate_run(d, test, test, src, extra={path: pr}, base_extra={path: table}, plan_fails=True)
                 self.assertRegex(r.stderr, UNRUN_5)  # #5942: the plan fails it before any mutant runs
+        # The head narrows a read or embedded file to its readers (#6458, #6657), so the base's run is
+        # of the base's readers, traced in the base's .go files: an empty base run saw nothing.
+        # REQ: MUT-read-reach
+        embed = 'package hint\n\nimport _ "embed"\n\n//go:embed up.txt\nvar upTable string\n'
+        test = reader("up.txt").replace('b, err := os.ReadFile("up.txt")\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n',
+                                        "b := upTable\n").replace('\t"os"\n', "")
+        with tempfile.TemporaryDirectory() as d:
+            r, _ = self.gate_run(d, test, test, None, extra={"up.txt": ""}, base_extra={"up.txt": table, "table.go": embed},
+                                 plan_fails=True)
+            self.assertRegex(r.stderr, UNRUN_5)
 
     def test_a_line_no_mutant_names_fails_where_the_base_ran_it_and_the_head_runs_it_nowhere(self):
         # L1 on #5770 (#5942): every target line runs was checked only through NOT COVERED mutants, so
@@ -3710,22 +3720,61 @@ class DataFiles(unittest.TestCase):
                 self.assertEqual(got, {"hint"} if counts else set())
 
     def test_a_glob_counts_anywhere(self):
-        # #6390: a glob held as data ("*" in a table, a DNS wildcard) can reach any listing call
-        # through a variable, and no list of listing functions is complete (ParseGlob, Readdirnames),
-        # so a glob of wildcards alone counts anywhere, as every other glob does (#6328 and #6336
-        # counted it only beside a listing function the gate knew by name).
+        # #6390: a glob held as data can reach any listing call through a variable, and no list of
+        # listing functions is complete (ParseGlob, Readdirnames), so a glob holding part of a name
+        # counts anywhere (#6328 and #6336 counted it only beside a listing function the gate knew by name).
         # REQ: MUT-deleted-test-own-lines-fu
         self.assertNames((
-                ("a table's star", 'var table = map[rune]string{0x2217: "*"}', True),
-                ("a DNS wildcard", 'var _ = listHas(v, "email") || listHas(v, "*")', True),
-                ("an Accept header", 'var h = map[string]string{"Accept": "*/*"}', True),
-                ("a star in a variable", 'func f() { p := "*"; fs.Glob(F, p) }', True),
-                ("a star beside a template glob", 'var s = "*"\nvar _ = template.Must(template.ParseGlob(s))', True),
+                ("a star beside a name", 'var s = "ASSUMPTIONS*"', True),
+                ("a star before a dot", 'var s = "*.md"', True),
+                ("a star in a variable", 'func f() { p := "*.md"; fs.Glob(F, p) }', True),
                 ("a star embedded", '//go:embed *\nvar docs embed.FS', True),
-                ("a star only in a comment", '// "*"\nvar s = "x"', False),
+                ("stars embedded", '//go:embed */*\nvar docs embed.FS', True),
+                ("a star only in a comment", '// "*.md"\nvar s = "x"', False),
                 ("a glob of another name", 'var s = "*.html"', False)))
-        self.assertNames((('var q = "????"', 'var q = "????"', True), ('var q = "???"', 'var q = "???"', False)),
-                         "broker/hint/a.md")
+        self.assertNames((('var q = "??.md"', 'var q = "??.md"', True), ('var q = "?.md"', 'var q = "?.md"', False)),
+                         "broker/hint/ab.md")
+
+    def test_a_literal_of_wildcards_alone_names_no_markdown_file(self):
+        # #6584: a literal of `*`, `?` and `/` alone matches every name, so a table's "*" (#6514's
+        # confusables, #6485's skeleton fold) or a DNS wildcard made each ASSUMPTIONS.md edit claim
+        # every test of its package. It names none; a //go:embed pattern of wildcards still does.
+        # REQ: MUT-deleted-test-own-lines-fu
+        self.assertNames((
+                ("a table's star", 'var table = map[rune]string{0x2217: "*"}', False),
+                ("a DNS wildcard", 'var _ = listHas(v, "email") || listHas(v, "*")', False),
+                ("an Accept header", 'var h = map[string]string{"Accept": "*/*"}', False),
+                ("a raw star", "var s = `**`", False),
+                ("a star in a variable", 'func f() { p := "*"; fs.Glob(F, p) }', False),
+                ("a star beside a template glob", 'var s = "*"\nvar _ = template.Must(template.ParseGlob(s))', False),
+                ("a star and a name", 'var _, _ = "*", "ASSUMPTIONS.md"', True),
+                ("a star with a dot", 'var s = "*.*"', True),
+                ("a star with a bracket", 'var s = "[A-Z]*"', True),
+                ("a star embedded", '//go:embed *\nvar docs embed.FS', True)))
+        self.assertNames((('var q = "????"', 'var q = "????"', False), ('var q = "/????"', 'var q = "/????"', False),
+                          ('var q = "?.md"', 'var q = "?.md"', True)), "broker/hint/a.md")
+        self.assertNames((('var q = "*[*"', 'var q = "*[*"', True),), "broker/hint/a[1].md")  # a bracket is no wildcard here
+        # Another data file a "*" lists stays in every tree, so embedded_by still reads the star.
+        star = {**EMBED_PKG, "v/glob_test.go": 'package v\n\nvar _ = "*"\n'}
+        with tempfile.TemporaryDirectory() as d, self.tree(d, star):
+            self.assertIsNone(mutgate.embedded_by("v", "models.pins"))
+
+    def test_a_listing_by_a_star_reads_no_hidden_markdown_file(self):
+        # #6584: a test that lists its package with a bare "*" and needs ASSUMPTIONS.md fails in the
+        # gate's tree, closed: the file is hidden there, as for a listing by "." (#6373).
+        # REQ: MUT-deleted-test-own-lines-fu
+        test = ('package hint\n\nimport (\n\t"path/filepath"\n\t"testing"\n)\n\n'
+                'func TestDoc(t *testing.T) {\n\tm, _ := filepath.Glob("*")\n\tfor _, f := range m {\n'
+                '\t\tif f == "ASSUMPTIONS"+".md" {\n\t\t\treturn\n\t\t}\n\t}\n\tt.Fatal(m)\n}\n')
+        files = {"go.mod": "module example.com/b\n\ngo 1.21\n", "hint/hint.go": "package hint\n",
+                 "hint/hint_test.go": test, "hint/ASSUMPTIONS.md": "x"}
+        with tempfile.TemporaryDirectory() as d, self.tree(d, files), self.made(d):
+            broker = pathlib.Path(d) / "broker"
+            run = lambda: subprocess.run(["go", "test", "-count=1", "./hint"], cwd=broker, capture_output=True,
+                                         env={**os.environ, "GOFLAGS": "-mod=mod", "GOTOOLCHAIN": "local"})
+            self.assertEqual(run().returncode, 0)
+            self.assertEqual(mutgate.hide_docs(broker), ["broker/hint/ASSUMPTIONS.md"])
+            self.assertNotEqual(run().returncode, 0)
 
     def test_only_a_name_keeps_a_markdown_file(self):
         # #6373: a listing, a child process, cgo, a raw system call or a path built at run time
@@ -4209,6 +4258,143 @@ class EmbedReach(unittest.TestCase):
         self.assertNotIn("TestHeatBlobBoxAndConfidence", got or ["x"])
         self.assertLess(len(got), 20)
 
+
+
+READ_PKG = {
+    "r/r.go": "package r\n\nfunc other() int { return 1 }\n",
+    "r/cases.txt": "1 2\n",
+    "r/read_test.go": 'package r\n\nimport (\n\t"os"\n\t"testing"\n)\n\nfunc TestRead(t *testing.T) {\n'
+                      '\tb, err := os.ReadFile("cases.txt")\n\tif err != nil {\n\t\tt.Fatal("cases.txt: ", err)\n\t}\n\t_ = b\n}\n',
+    "r/other_test.go": 'package r\n\nimport "testing"\n\nfunc TestOther(t *testing.T) { _ = other() }\n',
+}
+
+
+def read_test(body, imports='"os"'):
+    """A test file of package r whose TestRead's body is body."""
+    return f'package r\n\nimport (\n\t{imports}\n\t"testing"\n)\n\nfunc TestRead(t *testing.T) {{\n\t{body}\n}}\n'
+
+
+class ReadReach(unittest.TestCase):
+    """MUT-read-reach (#6657): a changed file a package's tests read changes only the tests that reach
+    the recognised read calls naming it (os.ReadFile, os.Open, filepath.Glob, fs.ReadFile of os.DirFS,
+    each of literals or a filepath.Join of literals), through package code too; any other namer, a
+    path built at run time, or a reach every test may run, is every test."""
+
+    def reach(self, files, path="broker/r/cases.txt", pkg="r"):
+        with tempfile.TemporaryDirectory() as d, DataFiles.tree(None, d, files), \
+                mock.patch.dict(os.environ, {"GOFLAGS": ""}):
+            mutgate.read_index.cache_clear()
+            try:
+                added, tests = mutgate.added_lines(data_diff(path))
+                self.assertIn(pkg, mutgate.touched(added, tests))
+                return mutgate.head_tests(tests, pkg)
+            finally:
+                mutgate.read_index.cache_clear()
+
+    def test_a_read_file_changes_only_its_readers(self):
+        # REQ: MUT-read-reach
+        # The issue's acceptance: one reading test function is the only changed test.
+        self.assertEqual(self.reach(READ_PKG), ["TestRead"])
+        td = {**READ_PKG, "r/testdata/x.txt": ""}
+        for name, body, imports, path in (
+                ("os.Open", 'f, _ := os.Open("cases.txt")\n\t_ = f', '"os"', "broker/r/cases.txt"),
+                ("a Join of literals", 'b, _ := os.ReadFile(filepath.Join("testdata", "x.txt"))\n\t_ = b',
+                 '"os"\n\t"path/filepath"', "broker/r/testdata/x.txt"),
+                ("a matching Glob", 'm, _ := filepath.Glob("testdata/*.txt")\n\t_ = m', '"path/filepath"', "broker/r/testdata/x.txt"),
+                ("fs.ReadFile of os.DirFS", 'b, _ := fs.ReadFile(os.DirFS("testdata"), "x.txt")\n\t_ = b',
+                 '"io/fs"\n\t"os"', "broker/r/testdata/x.txt")):
+            with self.subTest(name):
+                self.assertEqual(self.reach({**td, "r/read_test.go": read_test(body, imports)}, path), ["TestRead"])
+        # A Glob or read of another file is no read of this one: the Glob's own test is not changed.
+        glob = {**READ_PKG, "r/glob_test.go": 'package r\n\nimport (\n\t"path/filepath"\n\t"testing"\n)\n\n'
+                'func TestGlob(t *testing.T) { _, _ = filepath.Glob("*.go") }\n\n'
+                'func TestBak(t *testing.T) { _, _ = filepath.Glob("cases.txt.bak") }\n'}
+        self.assertEqual(self.reach(glob), ["TestRead"])
+        # Through package code: the tests reaching the reading function count.
+        pkgread = {**READ_PKG, "r/r.go": 'package r\n\nimport "os"\n\nfunc other() int { return 1 }\n\n'
+                   'func load() []byte {\n\tb, _ := os.ReadFile("cases.txt")\n\treturn b\n}\n',
+                   "r/read_test.go": read_test("_ = load()", '"fmt"')}
+        self.assertEqual(self.reach(pkgread), ["TestRead"])
+        # A test reading what a reader left in a package var is changed too.
+        stash = {**READ_PKG, "r/read_test.go": read_test('cases, _ = os.ReadFile("cases.txt")') + "\nvar cases []byte\n",
+                 "r/use_test.go": 'package r\n\nimport "testing"\n\nfunc TestUse(t *testing.T) { _ = cases }\n'}
+        self.assertEqual(self.reach(stash), ["TestRead", "TestUse"])
+        # Another package reading the file by its path narrows to its own reader.
+        other = {**READ_PKG, "w/w.go": "package w\n",
+                 "w/w_test.go": read_test('b, _ := os.ReadFile("../r/cases.txt")\n\t_ = b').replace("package r", "package w"),
+                 "w/x_test.go": 'package w\n\nimport "testing"\n\nfunc TestX(t *testing.T) {}\n'}
+        self.assertEqual(self.reach(other, pkg="w"), ["TestRead"])
+
+    def test_any_other_read_is_every_test(self):
+        # REQ: MUT-read-reach
+        for name, files in (
+                ("package-level code", {"r/init_test.go": 'package r\n\nimport "os"\n\nvar cases, _ = os.ReadFile("cases.txt")\n'}),
+                ("an init", {"r/init_test.go": 'package r\n\nimport "os"\n\nfunc init() { _, _ = os.ReadFile("cases.txt") }\n'}),
+                ("TestMain", {"r/main_test.go": 'package r\n\nimport (\n\t"os"\n\t"testing"\n)\n\n'
+                              'func TestMain(m *testing.M) { _, _ = os.ReadFile("cases.txt"); os.Exit(m.Run()) }\n'}),
+                ("a variable path", {"r/read_test.go": read_test('p := "cases.txt"\n\t_, _ = os.ReadFile(p)')}),
+                ("a const path", {"r/read_test.go": read_test('_, _ = os.ReadFile(casesFile)') + 'const casesFile = "cases.txt"\n'}),
+                ("a Join over a variable", {"r/read_test.go": read_test('d := "."\n\t_, _ = os.ReadFile(filepath.Join(d, "cases.txt"))',
+                                                                         '"os"\n\t"path/filepath"')}),
+                ("a table of paths", {"r/read_test.go": read_test('for _, p := range []string{"cases.txt"} {\n\t\t_, _ = os.ReadFile(p)\n\t}')}),
+                ("an unrecognised read", {"r/read_test.go": read_test('_, _ = os.OpenFile("cases.txt", os.O_RDONLY, 0)')}),
+                ("ioutil", {"r/read_test.go": read_test('_, _ = ioutil.ReadFile("cases.txt")', '"io/ioutil"')}),
+                ("a child process", {"r/read_test.go": read_test('_, _ = exec.Command("cat", "cases.txt").Output()', '"os/exec"')}),
+                ("os bound to another import", {"r/read_test.go": read_test('_, _ = os.ReadFile("cases.txt")', 'os "example.invalid/fakeos"')}),
+                ("a directory open", {"r/testdata/x.txt": "", "r/read_test.go": read_test('_, _ = os.ReadDir("testdata")\n\t_, _ = os.ReadFile("testdata/x.txt")')}),
+                ("an embed too", {"r/e.go": 'package r\n\nimport _ "embed"\n\n//go:embed cases.txt\nvar c string\n'}),
+                ("no reader at all", {"r/read_test.go": read_test('_, _ = os.ReadFile("cases.txt.bak")')}),
+                ("a reader in an unbuilt file", {"r/r.go": 'package r\n\nfunc other() int { return 1 }\n',
+                                                 "r/x_other.go": '//go:build vision_onnx\n\npackage r\n\nimport "os"\n\n'
+                                                 'func load() { _, _ = os.ReadFile("cases.txt") }\n',
+                                                 "r/read_test.go": read_test("load()", '"fmt"')}),
+                ("no inotify to watch the run", {}),
+                ("a linked file", {})):
+            with self.subTest(name):
+                files = {**READ_PKG, **files}
+                if name == "no inotify to watch the run":
+                    with mock.patch.object(mutgate, "_inotify", lambda: None):
+                        self.assertIsNone(self.reach(files))
+                    continue
+                if name == "a linked file":
+                    with tempfile.TemporaryDirectory() as d, DataFiles.tree(None, d, files):
+                        (pathlib.Path(d) / "broker/r/link.go").symlink_to(pathlib.Path(d) / "broker/r/r.go")
+                        self.assertIsNone(mutgate.head_tests({"broker/r/cases.txt": None}, "r"))
+                    continue
+                path = "broker/r/testdata/x.txt" if name == "a directory open" else "broker/r/cases.txt"
+                self.assertIsNone(self.reach(files, path))
+
+    def test_the_other_tests_run_watched(self):
+        # REQ: MUT-read-reach
+        # The trace's other half: every test outside the narrowed ones runs with the file watched,
+        # so a read by a path no recognised call holds (a listing, a child process) fails the run.
+        lister = ('package r\n\nimport (\n\t"os"\n\t"strings"\n\t"testing"\n)\n\nfunc TestList(t *testing.T) {\n'
+                  '\tes, _ := os.ReadDir(".")\n\tfor _, e := range es {\n\t\tif strings.HasSuffix(e.Name(), ".txt") {\n'
+                  '\t\t\t_, _ = os.ReadFile(e.Name())\n\t\t}\n\t}\n}\n')
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}):
+            d = pathlib.Path(d).resolve()
+            tree, tmp = d / "tree", d / "tmp"
+            tmp.mkdir()
+            with DataFiles.tree(None, tree, {**READ_PKG, "go.mod": GO_MOD}):
+                watched = ["broker/r/cases.txt"]
+                self.assertIsNone(mutgate.timed_cover("r", None, tmp, watched=watched, skip=["TestRead"])[2])
+                self.assertIn("a test read broker/r/cases.txt at run time",
+                              mutgate.timed_cover("r", None, tmp, watched=watched)[2])
+                (tree / "broker/r/list_test.go").write_text(lister)
+                problem = mutgate.timed_cover("r", None, tmp, watched=watched, skip=["TestRead"])[2]
+                self.assertIn("a test other than TestRead read broker/r/cases.txt at run time", problem)
+                (tree / "broker/r/list_test.go").unlink()
+                # record_for: the narrowed tests, the whole suite, then every other test watched.
+                runs = []
+
+                def cover(pkg, names, tmp, code=None, watched=(), skip=None):
+                    runs.append((names, list(watched), skip))
+                    return {}, 1.0, None
+                with mock.patch.object(mutgate, "timed_cover", cover), \
+                        mock.patch.object(mutgate, "merge_base", lambda b, h: "b" * 40), \
+                        mock.patch.object(mutgate, "base_covered", lambda *a: ({}, None)):
+                    self.assertIsNone(mutgate.record_for("r", {"broker/r/cases.txt": None}, {"r": []}, "", "HEAD~1", tmp)[2])
+                    self.assertEqual(runs, [(["TestRead"], [], None), (None, [], None), (None, watched, ["TestRead"])])
 
 class Plan(unittest.TestCase):
     def test_a_plan_past_the_matrix_limit_names_a_remedy(self):

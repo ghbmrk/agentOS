@@ -68,7 +68,8 @@ A changed file of a package that is not its Go code (anything under testdata/, a
 .go file of the package can name, such as an embedded or read file) changes its tests, every one of
 them (data_owner, #5779): emptying a test's table weakens it with no _test.go line changed. So does
 any file, in the repository or another package, that a package's .go file names by its exact path
-from the package's directory ("../../SPEC.md"; readers, #6436). vendor/ changes no test: CI rebuilds
+from the package's directory ("../../SPEC.md"; readers, #6436). Only the tests reaching its namer
+change when that is an embedding var or recognised read calls alone (narrowing, #6458, #6657). vendor/ changes no test: CI rebuilds
 it with `go mod vendor` and fails any difference (is_vendored). Coverage can differ from run to run
 (a timing branch, a retry), so in CI `plan` measures it once and every shard reads that one record
 (`--targets`), never a coverage run of its own: K shards of one package then name the same lines (#4970). Gremlins mutates a package's target
@@ -491,6 +492,9 @@ def package_of(path):
 LITERAL = re.compile(r'"(?:[^"\\\n]|\\.)*"|`[^`]*`')
 # A Go interpreted string's escapes (the spec's list), so "ASSUMPTIONS\x2emd" names ASSUMPTIONS.md.
 ESCAPE = re.compile(r"\\(?:([0-7]{3})|x([0-9a-fA-F]{2})|u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})|(.))", re.S)
+# A literal of wildcards and slashes alone ("*", "*/*", "?") matches every name, so for a Markdown
+# file it names none (_naming).
+WILDCARDS = re.compile(r"[*?/]+")
 SIMPLE = {"a": b"\a", "b": b"\b", "f": b"\f", "n": b"\n", "r": b"\r", "t": b"\t", "v": b"\v"}
 
 
@@ -523,8 +527,8 @@ def _embeds(text):
 
 def names_file(pkg_dir, rel):
     """Whether a .go file of pkg_dir names rel (a path below it) as text: a string literal (escapes
-    decoded) or //go:embed pattern holding its base name or first directory, or holding a glob
-    (`*?[`) that matches its base name, rel or a leading directory of it, or whose last path part
+    decoded; one of wildcards alone left out, _naming) or //go:embed pattern holding its base name or
+    first directory, or holding a glob (`*?[`) that matches its base name, rel or a leading directory of it, or whose last path part
     matches its base name (dir + "/*.md", "**/*.md"). A link or an unreadable file names anything.
     A file no code names this way is absent from every tree the gate runs tests in (hide_docs), so
     a read of it by any other means (a listing, a child process, a path built from runes, another
@@ -536,7 +540,17 @@ def names_file(pkg_dir, rel):
         if (text := go_text(f.read_bytes())) is None:
             return True
         texts.append(text)
-    return any(_names(lit, rel) for text in texts for lit in _literals(text) + _embeds(text))
+    return any(_names(lit, rel) for text in texts for lit in _naming(text) + _embeds(text))
+
+
+def _naming(text):
+    """The string literals of a .go file that can name a file (_literals). One of wildcards alone
+    (WILDCARDS) names nothing: a table's "*" or a DNS wildcard claimed every Markdown file of its
+    package (#6584), and a listing by one reads only what a listing by "." reads, which hide_docs
+    keeps the gate closed on (#6373). A //go:embed pattern of wildcards still names: it holds the bytes.
+    Only Markdown files are hidden, so only names_file (read for those alone) drops them: embedded_by
+    keeps every literal, as another data file a "*" lists stays in the tree."""
+    return [x for x in _literals(text) if not WILDCARDS.fullmatch(x)]
 
 
 def _names(lit, rel):
@@ -556,21 +570,30 @@ def _names(lit, rel):
 EMBED_VAR = re.compile(r"^//go:embed[ \t]+(.*)\n(?://.*\n)*var ([a-z_]\w*)[ \t]+[^=\n(]+\n", re.M)
 
 
-def embedded_by(pkg, rel):
+def _pkg_texts(pkg, texts=None):
+    """{file name: text, or None for a link or unreadable file} of broker/<pkg>/'s .go files: texts
+    when given (base_changed_tests passes the base's), else the tree's."""
+    if texts is not None:
+        return texts
+    return {f.name: None if f.is_symlink() or not f.is_file() else go_text(f.read_bytes())
+            for f in sorted((BROKER / pkg).glob("*.go"))}
+
+
+def embedded_by(pkg, rel, texts=None):
     """{repo path: {line}} of the package-level var declarations whose //go:embed directive is the
     only way broker/<pkg>/'s .go files name rel, a path below it (names_file), or None. Each such
     directive lists rel alone (quoted or `all:` too), no glob, right above a plain `var name Type`
     at column 0 (comment lines between), name unexported, so the var holds that file's bytes and nothing else. Any
     other namer (a string literal, a glob, a directive listing more or on another shape, a link or
     unreadable file) is None. A change to rel then changes only what reads that var: the tests
-    reaching it (head_tests, #6458)."""
-    out, d = {}, BROKER / pkg
-    for f in sorted(d.glob("*.go")):
-        if f.is_symlink() or not f.is_file() or (text := go_text(f.read_bytes())) is None:
+    reaching it (head_tests, #6458). texts is _pkg_texts'."""
+    out = {}
+    for name, text in sorted(_pkg_texts(pkg, texts).items()):
+        if text is None:
             return None
         if any(_names(lit, rel) for lit in _literals(text)):
             return None
-        path, bare, held = f"broker/{pkg}/{f.name}", _uncommented(text, False).split("\n"), 0
+        path, bare, held = f"broker/{pkg}/{name}", _uncommented(text, False).split("\n"), 0
         for m in EMBED_VAR.finditer(text):
             pats = [w.strip('"`').removeprefix("all:") for w in m[1].split()]
             if not any(_names(x, rel) for x in pats):
@@ -586,6 +609,100 @@ def embedded_by(pkg, rel):
             return None  # a directive naming rel that is not on such a var
     return out or None
 
+
+
+# A read call whose path is written in place (MUT-read-reach, #6657): os.ReadFile, os.Open or filepath.Glob of one
+# literal or of filepath.Join over literals alone, or fs.ReadFile of os.DirFS of such a path, with such a name.
+# Matched on _uncommented(text, False), whose literals keep their spans with contents blanked.
+_LIT = r'(?:"[^"\n]*"|`[^`]*`)'
+_PATH = rf'(?:{_LIT}|filepath\.Join\(\s*{_LIT}(?:\s*,\s*{_LIT})*\s*,?\s*\))'
+READ_CALL = re.compile(rf'(?<![\w.])(?:(os\.ReadFile|os\.Open|filepath\.Glob)\(\s*({_PATH})\s*,?\s*\)'
+                       rf'|fs\.ReadFile\(\s*os\.DirFS\(\s*({_PATH})\s*,?\s*\)\s*,\s*({_PATH})\s*,?\s*\))')
+# The import each recognised call's qualifier must bind; a file binding one of them to anything else reads nothing.
+READ_IMPORTS = {"os": "os", "filepath": "path/filepath", "fs": "io/fs"}
+READ_ALIAS = re.compile(r'(?<![\w.])(os|filepath|fs)\s+"([^"\n]*)"')
+# A message literal, the first argument of a testing.T, B or TB report (t, b or tb by name): it reads no file.
+REPORT = re.compile(rf'(?<![\w.])(?:t|b|tb)\.(?:Fatal|Fatalf|Error|Errorf|Log|Logf|Skip|Skipf)\(\s*({_LIT})')
+
+
+def _joined(pkg, values):
+    """The repo path a read call's literals name from broker/<pkg>/ (Go's filepath.Join: empty parts
+    dropped, then cleaned), or None for an absolute path, a NUL or one climbing out of the repository."""
+    joined = "/".join(v for v in values if v)
+    if not joined or joined.startswith("/") or "\x00" in joined:
+        return None
+    path = posixpath.normpath(posixpath.join("broker", pkg, joined))
+    return None if path == ".." or path.startswith("../") else path
+
+
+def _read_names(v, pkg, path):
+    """Whether literal v of broker/<pkg>/ may name path, a repo path, for read_by: as names_file reads
+    one below the package (a literal of wildcards alone aside, _naming), or holding its base name, or
+    resolving to it or to a directory of it below what it shares with the package's directory."""
+    rel = posixpath.relpath(path, f"broker/{pkg}")
+    if WILDCARDS.fullmatch(v):
+        return False
+    if not rel.startswith("../") and _names(v, rel):
+        return True
+    base = path.rsplit("/", 1)[-1]
+    if base in v or (re.search(r"[*?\[]", v) and fnmatch.fnmatchcase(base, v.rstrip("/").rsplit("/", 1)[-1])):
+        return True
+    shared = posixpath.commonpath([path, f"broker/{pkg}"])
+    r = _joined(pkg, [v])
+    return r is not None and (r == path or (len(r) > len(shared) and path.startswith(r + "/")))
+
+
+def _globbed(pattern, path):
+    """Whether filepath.Glob's pattern (a repo path, as _joined gives it) matches path part by part."""
+    a, b = pattern.split("/"), path.split("/")
+    return len(a) == len(b) and all(fnmatch.fnmatchcase(y, x) for x, y in zip(a, b))
+
+
+def read_by(pkg, path, texts=None):
+    """{repo path: {line}} of the recognised read calls (READ_CALL) through which broker/<pkg>/'s .go
+    files read path, a repo path (its own data file or another package's, owners), or None. Every
+    literal that may name path (_read_names) must be a path argument of one of them: a literal held
+    anywhere else (a variable, a table, a const, a non-literal filepath.Join, an unrecognised read
+    function or a child process; a test's report message, REPORT, aside) is a read this does not trace, and so is a call opening a directory of
+    path, a //go:embed pattern naming it, a file binding os, filepath or fs to another import, or a
+    link or unreadable file. A call reading another file (its literal holds path's name only) reads
+    nothing of path. A change to path then changes only the tests reaching those calls (head_tests),
+    and a read at run time by any other test fails the gate (record_for, #6657). texts is _pkg_texts'."""
+    out = {}
+    for name, text in sorted(_pkg_texts(pkg, texts).items()):
+        if text is None:
+            return None
+        rel = path[len(f"broker/{pkg}/"):] if path.startswith(f"broker/{pkg}/") else None
+        if rel is not None and any(_names(x, rel) for x in _embeds(text)):
+            return None
+        bare, code = _uncommented(text, False), _uncommented(text)
+        value = {m.start(): _go_string(code[m.start() + 1:m.end() - 1]) if code[m.start()] == '"'
+                 else code[m.start() + 1:m.end() - 1] for m in LITERAL.finditer(bare)}
+        named = {at for at, v in value.items() if _read_names(v, pkg, path)} - {
+            m.start(1) for m in REPORT.finditer(bare)}
+        if not named:
+            continue
+        if any(imp != READ_IMPORTS[q] for q, imp in READ_ALIAS.findall(code)):
+            return None
+        for m in READ_CALL.finditer(bare):
+            lits = {g: [x.start() for x in LITERAL.finditer(bare, m.start(g), m.end(g))] for g in (2, 3, 4) if m.group(g)}
+            held = named & {at for ats in lits.values() for at in ats}
+            if not held:
+                continue
+            named -= held
+            if m.group(1) == "filepath.Glob":
+                got = _joined(pkg, [value[a] for a in lits[2]])
+                reads = got is not None and _globbed(got, path)
+            else:
+                got = _joined(pkg, [value[a] for g in sorted(lits) for a in lits[g]])
+                if got is None or path.startswith(got + "/"):
+                    return None
+                reads = got == path
+            if reads:
+                out.setdefault(f"broker/{pkg}/{name}", set()).add(bare.count("\n", 0, m.start()) + 1)
+        if named:
+            return None  # a literal naming path outside every recognised read
+    return out or None
 
 # inotify's open and read events (inotify(7)), and its event header: wd, mask, cookie, name length.
 IN_ACCESS, IN_OPEN, IN_EVENT = 0x1, 0x20, 16
@@ -976,23 +1093,38 @@ def _gap_lines(text, after):
     return out
 
 
-def base_changed_tests(btests, pkg, mb):
+def base_changed_tests(btests, pkg, mb, tests=()):
     """Sorted names of the base's test functions that reach the base lines btests names in
     broker/<pkg>/ (every line of a deleted file), or None for every test (reaching_tests).
-    btests is base_test_lines' pair."""
+    btests is base_test_lines' pair. A file of tests (added_lines' second map) the package reads
+    (owners) adds the lines narrowing names in the base's .go files, so the base's run of its
+    readers shows what they checked before the file changed (#6657); none there is every test."""
     touched_lines, gaps = btests
     changed = {p: ls for p, ls in touched_lines.items() if package_of(p) == pkg}
-    files = {}
+    files, texts = {}, {}
     listing = subprocess.run(["git", "ls-tree", "-z", mb, "--", f"broker/{pkg}/"], cwd=ROOT,
                              capture_output=True, text=True, check=True).stdout
     for entry in filter(None, listing.split("\0")):
         meta, path = entry.split("\t", 1)
-        if not path.endswith("_test.go") or meta.split()[1] != "blob":
+        if not path.endswith(".go") or meta.split()[1] != "blob":
             continue
         text = base_text(mb, path)
+        texts[path.rsplit("/", 1)[-1]] = text
+        if not path.endswith("_test.go"):
+            continue
         if text is None:
             return None  # a link: its tests are unread, so any of them may reach the change
         files[path] = text
+    held, state = {}, {}
+    for p in tests:
+        if pkg in owners(p):
+            if (got := narrowing(pkg, p, texts)) is None:
+                return None
+            held = union(held, got[1])
+            state = union(state, got[1]) if got[0] == "read" else state
+    for name, text in texts.items() if held else ():
+        if not name.endswith("_test.go") and text is not None and not unbuilt(name, text):
+            files[f"broker/{pkg}/{name}"] = text
     for path, lines in changed.items():
         if lines is None:
             if path not in files:
@@ -1002,8 +1134,8 @@ def base_changed_tests(btests, pkg, mb):
         if package_of(path) == pkg and changed.get(path, ()) is not None and path in files:
             for after in afters:
                 changed.setdefault(path, set()).update(_gap_lines(files[path], after))
-    changed = {p: ls for p, ls in changed.items() if ls}
-    return reaching_tests(files, changed)
+    changed = union({p: ls for p, ls in changed.items() if ls}, held)
+    return reaching_tests(files, changed, state)
 
 
 def bases_for(diff_text, base, head, tests, pkgs):
@@ -1017,7 +1149,7 @@ def bases_for(diff_text, base, head, tests, pkgs):
     pair, later = moved(diff_text, mb, head)
     lines, gaps = base_test_lines(diff_text, pair)
     btests = (_widen(lines, later[1]), gaps)
-    return {pkg: None if head_tests(tests, pkg) is None else base_changed_tests(btests, pkg, mb) for pkg in pkgs}
+    return {pkg: None if head_tests(tests, pkg) is None else base_changed_tests(btests, pkg, mb, tests) for pkg in pkgs}
 
 
 def changes(diff_text, base, head):
@@ -1586,11 +1718,14 @@ def _decls(path, text):
     return out
 
 
-def reaching_tests(files, changed):
+def reaching_tests(files, changed, state=None):
     """Sorted names of the test functions in files ({path: text}, every _test.go file of one
     package) that reach the lines changed names ({path: set(line)}), or None when one of those lines
     is in a declaration every test may run (see WORD above) or that no test reaches. A line of a file's header (before its
-    first declaration, the package clause, an import) reaches what that file's declarations reach."""
+    first declaration, the package clause, an import) reaches what that file's declarations reach.
+    A line of state ({path: set(line)}, read_by's calls) also reaches the tests that reach any
+    package var the declaration holding it reaches, an init's or TestMain's reach aside: a test
+    can read what a reader left there without reaching the reader (#6657)."""
     decls = [d for path, text in sorted(files.items()) for d in _decls(path, text)]
     by_name, types = collections.defaultdict(list), {(d[8], n) for d in decls if d[1] == "type" for n in d[2]}
     methods = collections.defaultdict(list)
@@ -1631,6 +1766,13 @@ def reaching_tests(files, changed):
             if not hit or decls[hit[0]][1] == "header":
                 hit = mine if not hit or not decls[hit[0]][5] else hit
             got = set().union(*(reach[i] for i in hit))
+            if line in (state or {}).get(path, ()):
+                seen, todo = set(hit), list(hit)
+                while todo:
+                    for j in edges[todo.pop()] - seen:
+                        seen.add(j)
+                        todo.append(j)
+                got |= set().union(*(reach[j] - {EVERY} for j in seen if decls[j][1] == "var"))
             # No test reaches it (dead code, a benchmark, or a shape this reading missed): fail closed.
             if not got or EVERY in got or any(decls[i][1] == "header" and decls[i][5] for i in hit):
                 return None
@@ -1643,25 +1785,21 @@ def head_tests(tests, pkg):
     broker/<pkg>/'s _test.go files, or None for every test (reaching_tests). Every _test.go file of
     the package is read as text from the tree, never run; a link is not followed, so one in the
     package is every test (L3 on #4643). A deleted file has no head lines: its base side runs. A
-    changed data file whose only namer is an embedding var (embedded_by) changes that var's
-    declaration, read over every .go file of the package so a test reaching it through package
-    code counts; an init or initialized var reaching it is every test (reaching_tests)."""
+    changed file the package reads (owners) changes the lines narrowing names, read over every .go
+    file of the package so a test reaching them through package code counts; an init or initialized
+    var reaching them is every test (reaching_tests)."""
     d = BROKER / pkg
     if not tests_changed(tests, pkg):
         return []
     if d.is_symlink():
         return None
-    held = {}
+    held, state = {}, {}
     for p in tests:
         if pkg in owners(p):
-            # A read file's readers are not traced: every test may read it (#5779, #6436), unless
-            # the package's only namer is an embedding var, whose readers are (#6458).
-            # The whole-suite run watches the file for run-time reads, so no watch, no narrowing.
-            got = (embedded_by(pkg, p[len(f"broker/{pkg}/"):])
-                   if is_data(p) and pkg == data_owner(p) and _inotify() else None)
-            if got is None:
+            if (got := narrowing(pkg, p)) is None:
                 return None
-            held = union(held, got)
+            held = union(held, got[1])
+            state = union(state, got[1]) if got[0] == "read" else state
     files = {}
     for f in sorted(d.glob("*.go" if held else "*_test.go")) if d.is_dir() else ():
         if f.is_symlink():
@@ -1674,7 +1812,21 @@ def head_tests(tests, pkg):
     changed = {p: ls for p, ls in tests.items() if package_of(p) == pkg and is_test(p) and p in files}
     if any(ls is None for ls in changed.values()):
         return None
-    return reaching_tests(files, union(changed, held))
+    return reaching_tests(files, union(changed, held), state)
+
+
+def narrowing(pkg, path, texts=None):
+    """("embed", held) when broker/<pkg>/'s only namer of path, its own data file, is an embedding var
+    (embedded_by, #6458); else ("read", held) when only recognised read calls name it (read_by,
+    #6657); else None, every test (#5779, #6436). held is {repo path: {line}} for reaching_tests.
+    The whole-suite run watches an embedded file, and a run of the other tests a read one, for
+    run-time reads (record_for), so with no inotify nothing is narrowed. texts is _pkg_texts'."""
+    if not _inotify():
+        return None
+    if is_data(path) and pkg == data_owner(path) and (
+            got := embedded_by(pkg, path[len(f"broker/{pkg}/"):], texts)):
+        return "embed", got
+    return None if (got := read_by(pkg, path, texts)) is None else ("read", got)
 
 
 # The build tags the go toolchain itself may set (go/build's Context and cmd/go's -race, -msan, -asan):
@@ -2449,18 +2601,21 @@ def echo_ok(stream):
     return last
 
 
-def timed_cover(pkg, names, tmp, broker=None, code=None, watched=()):
+def timed_cover(pkg, names, tmp, broker=None, code=None, watched=(), skip=None):
     """covered_by's (lines, seconds, problem): seconds is how long its test binary ran, so a plan
     that ran the whole suite under coverage sizes the shards from that run, not a fourth (#6155).
     A code dict gains {path: lines} of every block the profile lists, ran or not (#6216): the lines
     a test could run, whichever tests ran. watched names repo paths built in from copies and
-    watched while the tests run: any read of one is a problem (watched_at_run)."""
+    watched while the tests run: any read of one is a problem (watched_at_run). skip names tests
+    the run leaves out (`-skip`), so a read by any other test is seen (record_for)."""
     broker = BROKER if broker is None else broker
     profile = pathlib.Path(tmp) / "tests.cover"
     profile.unlink(missing_ok=True)
     cmd = ["go", "test", "-count=1", "-covermode=count", f"-coverprofile={profile}"]
     if names is not None:
         cmd += ["-run", "^(" + "|".join(names) + ")$"]
+    if skip:
+        cmd += ["-skip", "^(" + "|".join(skip) + ")$"]
     began = time.monotonic()
     try:
         with watched_at_run(broker, watched, tmp) as (flags, opened):
@@ -2469,6 +2624,10 @@ def timed_cover(pkg, names, tmp, broker=None, code=None, watched=()):
             read = opened()
     except (OSError, ValueError) as e:
         return None, None, f"broker/{pkg}/: cannot watch {', '.join(watched)} while its tests run: {e}"
+    if read and skip:
+        return None, None, (f"broker/{pkg}/: a test other than {', '.join(skip)} read {', '.join(read)} at run time, "
+                            "which only those tests' read calls name: name the file in that test's own os.ReadFile, "
+                            "os.Open, filepath.Glob or fs.ReadFile(os.DirFS(...)) call (read_by)")
     if read:
         return None, None, (f"broker/{pkg}/: a test read {', '.join(read)} at run time, which only its //go:embed "
                             "var names: name the file with a string literal in that test (every test is then a "
@@ -2678,9 +2837,15 @@ def record_for(pkg, tests, bases, diff_text, base, tmp):
     # One whole-suite run at the head (none more when the changed tests are every test) names it.
     # A data file read only through an embedding var (head_tests) is watched while the whole suite
     # runs: a test that opens or reads it at run time, by any path, fails the run (#6458, #6518).
-    watched = sorted(p for p in tests if pkg in owners(p)) if names is not None else []
+    # A file read only through recognised read calls is watched while every other test runs: a
+    # test outside the changed ones that opens or reads it fails that run (read_by, #6657).
+    owned = {p: narrowing(pkg, p) for p in tests if pkg in owners(p)} if names is not None else {}
+    reads = sorted(p for p, got in owned.items() if got and got[0] == "read")
+    watched = sorted(set(owned) - set(reads))
     every, secs, problem = (covered, secs, None) if names is None else timed_cover(pkg, None, tmp, watched=watched)
     if problem:
+        return None, None, problem
+    if reads and (problem := timed_cover(pkg, None, tmp, watched=reads, skip=names)[2]):
         return None, None, problem
     if gone := unrun(was, every, code):
         return None, None, ("; ".join(f"{p}: {', '.join(map(str, ls))}" for p, ls in gone.items())
