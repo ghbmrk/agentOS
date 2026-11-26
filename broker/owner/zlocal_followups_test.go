@@ -24,7 +24,10 @@ func TestAFutureLocalStartCountsAsElapsed(t *testing.T) {
 			for i := 0; i < LocalBound; i++ {
 				r.ch.LocalSignIn(wrongCode(i))
 				if i == 0 {
-					if got := r.ch.codes.st.LocalStart; !got.Equal(now) {
+					r.ch.mu.Lock() // an alert's save may run on a send goroutine
+					got := r.ch.codes.st.LocalStart
+					r.ch.mu.Unlock()
+					if !got.Equal(now) {
 						t.Fatalf("window starts %v, want now %v", got, now)
 					}
 				}
