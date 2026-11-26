@@ -5625,6 +5625,115 @@ class RecordDeps(unittest.TestCase):
         self.assertIn("rests on orderProbe in broker/kernel/edge.go, which is no file now", problems[0])
 
 
+class RecordDepsLint(unittest.TestCase):
+    """MUT-record-deps-audit (#6499, L3 on #6498): an entry whose reason cites, as code, another top-level declaration
+    of its own package names it in deps, so an edit to that declaration stales the proof."""
+    # REQ: MUT-record-deps-audit
+
+    SRC, DEP = RecordDeps.SRC, RecordDeps.DEP
+    setUp, waive, records, entry = RecordDeps.setUp, RecordDeps.waive, RecordDeps.records, RecordDeps.entry
+
+    def write(self, reason, deps=None):
+        """A record of one entry for a.go:8 with this reason (and deps), as waive writes it."""
+        self.assertEqual(self.waive().returncode, 0)
+        e = {**self.entry(), "reason": reason, **({"deps": deps} if deps else {})}
+        self.record.write_text(f"# x\n{json.dumps(e)}\n")
+
+    def dep(self, name):
+        return {"file": "broker/netguard/b.go", "func": name,
+                "decl": {"g": Record.digest("func g() int {\nreturn 1\n}"),
+                         "probe": Record.digest("var (\nfirst = 1\nprobe = g()\n)")}[name]}
+
+    def test_an_entry_citing_another_function_without_deps_fails_and_with_its_dep_passes(self):
+        # Acceptance (#6499): a reason naming another function, no deps, fails; the same entry with that dep passes.
+        self.write("the two branches return the same value, as g() always returns 1")
+        r = self.records()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("a.go f 'if x > 1 {' cites g, declared outside its own declaration in broker/netguard/b.go, "
+                      "with no dep naming it", r.stderr)
+        self.assertIn("`mutgate.py waive --dep broker/netguard/b.go:g`", r.stderr)
+        self.write("the two branches return the same value, as g() always returns 1", [self.dep("g")])
+        r = self.records()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # A second cited name needs its own dep.
+        self.write("as g() returns 1 and `probe` is g's value", [self.dep("g")])
+        r = self.records()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("cites probe,", r.stderr)
+        self.assertNotIn("cites g,", r.stderr)
+
+    def test_waive_refuses_a_cited_name_without_its_dep(self):
+        r = self.waive(reason="the two branches return the same value, as g() always returns 1")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("cites g, declared outside its own declaration in broker/netguard/b.go", r.stderr)
+        self.assertFalse(self.record.exists())
+        r = self.waive("broker/netguard/b.go:g", reason="the two branches return the same value, as g() always returns 1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.records().returncode, 0)
+
+    def test_prose_members_files_and_the_own_declaration_are_not_citations(self):
+        (self.pkg / "c.go").write_text("package netguard\n\ntype T struct{ probe int }\n\nfunc (T) unrelated() {}\n"
+                                       "\nfunc readAll() {}\n")
+        for reason in ("as g always returns 1 and probe is set once",  # plain lowercase prose words
+                       "t.probe and x.g() are members, not package names; kernel.readAll is another package's",
+                       "the guard at g.go:4 and `g.go` return first",  # file names, in a code span too
+                       "f's `if x > 1` twin returns first, so f() is unchanged"):  # its own declaration
+            with self.subTest(reason):
+                self.write(reason)
+                r = self.records()
+                self.assertEqual(r.returncode, 0, r.stderr)
+        for reason, name, file in (("`probe` holds it", "probe", "b.go"), ("readAll() reads it", "readAll", "c.go"),
+                                   ("T.unrelated does nothing", "T.unrelated", "c.go"),
+                                   ("a T{} has no state", "T", "c.go"), ("as `x := g` shows", "g", "b.go"),
+                                   ("readAll, camel-shaped, is code", "readAll", "c.go")):
+            with self.subTest(reason):
+                self.write(reason)
+                r = self.records()
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn(f"cites {name}, declared outside its own declaration in broker/netguard/{file}", r.stderr)
+
+    def test_a_helper_in_the_entry_s_own_file_is_cited(self):
+        # #6498's shape: chrony.go's proof cites parseTracking, declared in chrony.go itself.
+        (self.pkg / "a.go").write_text(self.SRC + "\nfunc h() int {\n\treturn 1\n}\n")
+        self.write("both branches agree, as h() always returns 1")
+        r = self.records()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("cites h, declared outside its own declaration in broker/netguard/a.go", r.stderr)
+        self.record.unlink()
+        r = self.waive("broker/netguard/a.go:h", reason="both branches agree, as h() always returns 1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.records().returncode, 0)
+
+    def test_a_package_file_the_lister_cannot_read_fails_the_record(self):
+        # Fail closed (Security on #6561): no entry names z.go, yet the lint lists every file of the package.
+        self.write("g() returns 1", [self.dep("g")])
+        self.assertEqual(self.records().returncode, 0)
+        (self.pkg / "z.go").write_text("package netguard\n\nfunc {\n")
+        r = self.records()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("cannot list the declarations of broker/netguard/", r.stderr)
+        (self.pkg / "z.go").unlink()
+        (self.pkg / "z.go").symlink_to(self.pkg / "b.go")
+        r = self.records()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("symbolic link", r.stderr)
+
+    def test_a_dep_in_any_file_declaring_the_name_satisfies_it(self):
+        # Build-tagged twins: g in b.go and in c.go; a dep on either names it (the other file's edit is its own risk).
+        (self.pkg / "c.go").write_text("//go:build never\n\npackage netguard\n\nfunc g() int {\n\treturn 1\n}\n")
+        self.write("g() returns 1", [self.dep("g")])
+        r = self.records()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.write("g() returns 1", [{**self.dep("g"), "file": "broker/netguard/c.go"}])
+        r = self.records()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.write("g() returns 1")
+        r = self.records()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("cites g, declared outside its own declaration in broker/netguard/b.go, broker/netguard/c.go",
+                      r.stderr)
+
+
 class MutantScope(unittest.TestCase):
     """MUT-waiver-mutant-scope (#5792, Security on #5774): a waiver waives the one mutant it proves, never
     every mutant of its kind on its line."""
