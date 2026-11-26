@@ -139,7 +139,8 @@ class FloorFitTest(unittest.TestCase):
     def test_probe_key_is_agent_fit(self):
         src = open(tk.__file__).read()
         self.assertIn('("agent_fit", floor_fit(', src)
-        self.assertNotIn("agent_and_replay_fit", src)
+        self.assertNotIn("replay", src)
+        self.assertIn("-agent-mem-mb", src)
 
     def test_large_box_capacity_is_capped(self):
         self.assertIn("-capacity-mb 4500 here", tk.floor_fit("MemTotal: 16777216 kB\n", 4))

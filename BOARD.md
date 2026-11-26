@@ -217,8 +217,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | S8-W1-later | S8-W1-later: Codex image hardening and wording (later; #1719 reviews) | #807 | queued |
 | TREE-LINK-MSGS | TREE-LINK-MSGS: tree link refusal wording (unreadable xattrs, next steps, TMPFILES_STOCK vs BOX_LINKS), cache tmpfiles reads, pin /var/run rewrites. Serves DEV-2 (later; PR #1826 R1 UX 1-3, Pot 2, L3 4) | #1803 | queued (later; PR #1826 R1 UX 1-3, Pot 2, L3 4) |
 | BROKER-REVIEW-MINOR | BROKER-REVIEW-MINOR: confirmed low-risk findings from the 2026-10-15 external review. Eleven-item checklist; items 4 and 5 may become release. (queued; class later; recheck) | — | queued (queued; class later; recheck) |
-| G1-e2e-phonectl-fu1 | G1-e2e-phonectl-fu1: phone-control later notes: tier prefix, #1701 owner-text seam, lost-HELP test, PASS line, E7 seam. (queued; class later; from PR #1865 review) | — | building (queued; class later; from PR #1865 review) |
-| G1-e2e-ai-fu1 | G1-e2e-ai-fu1: later notes from the PR #1867 reviews: id_token canary check, trailing-dot host, CI for agentos_e2e-tagged tests, stub port-strip test, step-7 wait test and wording nits. (queued; class later; from PR #1867 review) | — | building (queued; class later; from PR #1867 review) |
 | G1-1688-f1-fu2 | G1-1688-f1-fu2: lost-send test gaps: missedFrames cap, lostSendVia cap, counted gate and + in the NOTE word filter survive mutation; a forged MissedLog journal line can put digits in a NOTE (later; tier A; from PR #2345 review) | — | queued (later; tier A; from PR #2345 review) |
 | ETC-AGENTOS-MODE | ETC-AGENTOS-MODE: image/ASSUMPTIONS.md I6 says /etc/agentos is 0700, but agentosd (ensureDir in broker/cmd/agentosd/modemenv.go, since #2339) creates it 0755; align I6 and ME1 on one mode, 0700 likely sufficient as only PID 1 reads modem.env (later; tier A; from the §4a Security review of #2339) | — | queued (later; tier A; from the §4a Security review of #2339) |
 | IMG-5-2 | systemd-boot: a held key at boot can no longer open the menu and boot the previous slot's release (IMG-5 Security review, #800). | UPD-antirollback-anchor, HW-6 | queued (later; tier A) |
@@ -396,7 +394,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | NET-2-drop-cap-row-basis | NET-2-drop-cap-row-basis: the "drop a core cap" row of TestCapChangesAreLoosenings clears its Basis, so it exercises Classify and not check. Release. | #6144 | queued (release; tier A) |
 | VULN-debian-r13-f5 | VULN-debian-r13-f5: import sweep [wrapper] entries: a test that a wrapper's own held names count (R5), and exports that forward a caller's name stay lookups (R6). Release. | #6299, #6382 | queued (release; tier A) |
 | SPEC-krn2-core-record | SPEC-krn2-core-record: KRN-2 says the core grows under a committed record line, not a PR-body line. Release. | #6404 | building (release; L1 spec-diff) |
-| MUT-record-deps-audit | MUT-record-deps-audit: re-record entries whose proof rests on outside declarations with --dep, and lint entries that name one without deps. Release. | #6282, #6498 | building (release; tier A) |
 | MUT-6368-fu | MUT-6368-fu: unlock sets the anchors file mode before the rename, seal tests pin that only TPM slots carry Policies, and a test pins the store-key wipe on every return. Release. | #6368, #6384 | queued (release; tier A) |
 | REV-CHK-links-ns10 | REV-CHK-links-ns10: a link planted at run time on a made path's way reaches no check | #6474 re-plan | queued (release; tier A; kernel lane) |
 | CI-core-record-comments | CI-core-record-comments: trusted-base workflow and trusted_core.txt comments name the committed record line, not a PR-body line. Release. | #6489 | building (release) |
@@ -412,7 +409,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CI-mutgate-after-ci | CI-mutgate-after-ci: mutgate runs only after ci passes on the same head (premerge still requires its pass); soak fuzz max-parallel 1. | runner-capacity cut 2026-11-23 | building (gate file) |
 | CI-soak-green | CI-soak-green: triage #190 and restore a passing soak run. Release. | #6569, #6570 | queued (release) |
 | TOOL-mutgate-memcap-fu3 | TOOL-mutgate-memcap-fu3: a shim fault with no writable marker (both opens fail, write and unlink fail, or the shim dies outside shim_entry) never reads KILLED. Release. | #6512, #6557 | queued (release; tier A) |
-| CI-mutgate-after-ci-fu | CI-mutgate-after-ci-fu: cite the live mutgate job names, pin mutgate_held's pull_request filter, soak report latency, tier-A fuzz order. Release. | #6569, #6570 | building (release; gate file) |
 | CI-apt-timeout | CI-apt-timeout: every workflow apt-get call carries bounded retries and timeouts; image artifact consumers fail fast with a readable cause when build did not succeed. Release. | #6575 run 45139943672 | building (release; tier A) |
 | DRONE-sitl-pip-hashes | DRONE-sitl-pip-hashes: the SITL build's PyPI install checks hashes. Release. | #6549 | building (release; tier A) |
 | ROUTE-anthropic-late-error | ROUTE-anthropic-late-error: a late Anthropic stream error event forwards the provider's message to the guest; send the generic provider stream error as OpenAI now does (release; from B2-1 #1460) | ROUTE-anthropic-late-error | queued (release; tier A; from B2-1) |
@@ -420,21 +416,22 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | WORKERS-diff-destroyed | worker_diff answers "no such worker" when its first snapshot's worker is destroyed; order-dependent (from #6602 UX) | #6602 | building (from #6602 UX) |
 | PAGE-stopping-text | PAGE-stopping-text: every local page action refused with 'stopping' says agentOS is restarting, not its generic failure (from #1752 P8; tier A) | #1752 | building |
 | VULN-debian-r17 | VULN-debian-r17: accept openssl's no-fix Debian 13 advisory DEBIAN-CVE-2026-107494 so image-vulncheck passes again. Release; no-fix Debian round. | #2919, #6542 | building (release; tier A) |
-| VIS-reply-read-wipe | VIS-reply-read-wipe: read an enrol reply into a client-owned buffer zeroed on every path, decode its template in place, and zero a refused error reply's template (#6587 review release findings, DEV-7). | #6587 | building (release; tier A) |
-| VIS-reply-read-wipe-fu | VIS-reply-read-wipe-fu: replace the vision client's package-level test seams with passed-in ones, and restore the trailing-data detail (#6636 review release findings, DEV-7). | #6636 | queued (release; tier A) |
+| VIS-reply-read-wipe-fu | VIS-reply-read-wipe-fu: replace the vision client's package-level test seams with passed-in ones, and restore the trailing-data detail (#6636 review release findings, DEV-7). | #6636 | building (release; tier A) |
 | VULN-gobwas-ws-r1 | VULN-gobwas-ws-r1: premerge shows the content of vendored agent-instruction files to the Security reviewer. Release; from #6647. | #6646 | building (release; tier A) |
 | VULN-gobwas-ws-r2 | VULN-gobwas-ws-r2: sipline WS loopback test near sipgo's message-size limit. Release; from #6647. | #6646 | building (release; tier A) |
-| B3-18b-r1 | B3-18b-r1: daemon B15 names agent_fit; S1 test kit comment names -agent-mem-mb. Release; from #6649. | #2797 | queued (release; tier C) |
+| B3-18b-r1 | B3-18b-r1: daemon B15 names agent_fit; S1 test kit comment names -agent-mem-mb. Release; from #6649. | #2797 | building (release; tier C) |
 | B3-16-r1 | B3-16-r1: Gmail connect DUse after a finished sign-in says it is already connected. Release; from #6632. | #3014 | queued (release; tier A) |
 | VM-snap-unread-notice-fu-2b | VM-snap-unread-notice-fu-2b: main wires link.Usable into the held unread notice | #6455, #6657 | queued (release; tier A; lane claude2) |
 | VULN-debian-r18 | VULN-debian-r18: accept openssl's no-fix Debian 13 advisory DEBIAN-CVE-2026-84785 so image-vulncheck passes again. Release; no-fix Debian round. | #2919, #6628 | building (release; tier A) |
 | MUT-kill-5974-owner | MUT-kill-5974-owner: kill or prove the 357 owner and localsrv survivors on main that #5974's mutgate exposed. | #5187, #5974 | queued (release; tier A) |
-| VULN-quic-import-sweep-fu | VULN-quic-import-sweep-fu: count every QUIC/datagram-BIO name holder; exempt definers by SONAME. Release; from #6672. | #6671 | queued (release; tier A) |
-| TOOL-mutgate-testmain-order | TOOL-mutgate-testmain-order: a TestMain or init that may rerun or reorder tests widens every package, Parallel or not | #6677, #6675 | building (release; tier A gate file) |
+| VULN-quic-import-sweep-fu | VULN-quic-import-sweep-fu: count every QUIC/datagram-BIO name holder; exempt definers by SONAME. Release; from #6672. | #6671 | building (release; tier A) |
 | TOOL-mutgate-order-marks-precision | TOOL-mutgate-order-marks-precision: a flag-defining var or an uncalled name mention widens no package | #6686, #6682 | queued (release; tier A gate file) |
 | CI-race-scope | CI-race-scope: broker-race skips PRs whose every change lies in a measured race-blind path set, backed by a read-set audit on main | #6689 | building (release; tier A gate file) |
 | PAGE-stopping-setup | PAGE-stopping-setup: setup page actions refused with 'stopping' show the stopping page (from #6619; tier A) | #6619 | queued |
 | VULN-static-elf-go-prefix | VULN-static-elf-go-prefix: a go file's executable bytes before .text held to headers and notes; the forged-table limit stated or narrowed. Release; from #6700. | #6563, #6700 | queued (release; tier A) |
+| CI-pin-build-isolation | CI-pin-build-isolation: a hashed pip install is credited only when it cannot fetch an unhashed build backend. Release. | #6697 | queued (release; tier A) |
+| DOC-trusted-core-line | DOC-trusted-core-line: briefs stop prescribing the ignored PR-body Trusted-core: line; doclint flags it | #6695, #6522 | building (release) |
+| PAGE-stopping-keep | PAGE-stopping-keep: the stopping page keeps the handler's known reply and outcome; provisions noted (from #6699 reviews; tier A) | #6619 | queued |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 

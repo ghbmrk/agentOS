@@ -47,7 +47,7 @@ Since #3332, `proc.Kernel.Erase` (`broker/kernel/proc/kernel.go`) re-seals backu
 
 **Requirement IDs:** LOG-4, KRN-7.
 
-**Guard files:** none. **Gate:** `broker/kernel/proc` is trusted core (`tools/trusted_core.txt`, `known`), so the build PR carries a `Trusted-core:` line. A one-row D-159 PR naming LOG-4 and this brief merges first (D-159 rule 3, the D-188 pattern).
+**Guard files:** none. **Gate:** `broker/kernel/proc` is trusted core (`tools/trusted_core.txt`, `known`), so the build PR adds a `trusted-core #<PR> -- <decision ID>` line to `tools/trusted_base_reasons.txt`. A one-row D-159 PR naming LOG-4 and this brief merges first (D-159 rule 3, the D-188 pattern).
 
 ## Acceptance tests
 
