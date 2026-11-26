@@ -742,3 +742,12 @@ func TestLiftEdgeCut(t *testing.T) {
 		t.Fatal("home still shows a lifted cut")
 	}
 }
+
+// TestBasisWordsQuoteAnUnknownBasis: a basis off the list, which no card
+// reaches (the document is refused before its root is drawn), is quoted in
+// printable ASCII rather than named as a figure.
+func TestBasisWordsQuoteAnUnknownBasis(t *testing.T) {
+	if got := basisWords("guess\u202e"); got != `"guess\u202e"` {
+		t.Errorf("basisWords of an unknown basis: %s", got)
+	}
+}

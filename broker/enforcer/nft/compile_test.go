@@ -250,19 +250,21 @@ func TestRulesetFollowsVLANsNotListOrder(t *testing.T) {
 	}
 }
 
-// TestPathsOfThePairs (NET-3): an Owner device's pair is a path from the
-// whole Owner network, the paths come sorted, and a pair with a device on
-// any other network than Owner, Household or Devices is refused at either
-// end, not left without a path.
+// TestPathsOfThePairs (NET-3): an Owner or Household device's pair is a
+// path from its whole network, whichever end of the pair names it, the
+// paths come sorted, and a pair with a device on any other network than
+// Owner, Household or Devices is refused at either end, not left without a
+// path. Mutant: a Devices device's pair with a Household one, the device
+// named first, compiled the wrong way round.
 func TestPathsOfThePairs(t *testing.T) {
 	d := fixturePolicy()
 	d.Devices = append(d.Devices, policy.Device{ID: "phone", Network: policy.NetOwner})
-	d.Pairs = append(d.Pairs, policy.Pair{A: "phone", B: "tv"})
+	d.Pairs = append(d.Pairs, policy.Pair{A: "phone", B: "tv"}, policy.Pair{A: "hub", B: "laptop"})
 	got, err := Paths(d, fixtureLayout())
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []Path{{From: "ap0.106", To: "ap0.107", Both: true}, {From: "hh0", To: "ap0.105"}, {From: "own0", To: "ap0.101"}}
+	want := []Path{{From: "ap0.106", To: "ap0.107", Both: true}, {From: "hh0", To: "ap0.105"}, {From: "hh0", To: "ap0.109"}, {From: "own0", To: "ap0.101"}}
 	if !slices.Equal(got, want) {
 		t.Errorf("paths %v, want %v", got, want)
 	}

@@ -1,6 +1,7 @@
 package traffic
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -85,8 +86,9 @@ func capListing(t *testing.T, handle uint64, core map[netip.Addr]uint64, edge ui
 // TestReadingOfTheFirewall (ENF-cap-1, ENF-cap-trip-c): a reading is the
 // firewall's own counters: each address's bytes in the counting sets, the
 // edge's counter, and each listed name's resolver set; nothing from any
-// other table. Mutants: the edge read from the wrong table, a name set
-// read under the wrong name, a counting set's counter skipped.
+// other table, the Gen's handle included. Mutants: the edge or the
+// handle read from the wrong table, a name set read under the wrong name,
+// a counting set's counter skipped.
 func TestReadingOfTheFirewall(t *testing.T) {
 	core := map[netip.Addr]uint64{addrA: 70, addrC: 30}
 	named := map[string][]netip.Addr{"a.example": {addrA}, "b.example": {addrA, addrC}}
@@ -99,6 +101,12 @@ func TestReadingOfTheFirewall(t *testing.T) {
 	}
 	if !reflect.DeepEqual(r.Named, map[string][]netip.Addr{"a.example": {addrA}, "b.example": {addrA, addrC}}) {
 		t.Fatalf("named %v", r.Named)
+	}
+	// The Gen is the enforcer table's handle: another table's handle
+	// changes nothing.
+	other := bytes.Replace(capListing(t, 4, core, 20, named), []byte(`"handle":5,"name":"other"`), []byte(`"handle":99,"name":"other"`), 1)
+	if r2, err := ReadingOf(capPolicy(), capLayout(), "boot-1", other); err != nil || r2.Gen != r.Gen || bytes.Equal(other, r.Listing) {
+		t.Fatalf("another table's handle: gen %d, %v; want %d", r2.Gen, err, r.Gen)
 	}
 	for _, bad := range map[string][]byte{
 		"not JSON":        []byte("{"),

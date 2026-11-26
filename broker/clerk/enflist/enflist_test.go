@@ -129,8 +129,10 @@ func TestNoDailyBytesIsRefused(t *testing.T) {
 }
 
 // TestBadListsAreRefused: a host listed twice, a basis off the policy's
-// list, a name the policy refuses, or caps past 2^64-1 give ErrInput and
-// no link; a link needs a plain enforcer name.
+// list (before any missing figure), a name the policy refuses, or caps past
+// 2^64-1 give ErrInput and no link; a link needs a plain enforcer name.
+// Mutant: an off-list basis left to the policy's own check, which a
+// missing figure reaches first.
 func TestBadListsAreRefused(t *testing.T) {
 	for name, ds := range map[string][]Dest{
 		"twice":        {{"a.example", Declared, 1}, {"a.example", Image, 2}},
@@ -142,6 +144,16 @@ func TestBadListsAreRefused(t *testing.T) {
 	} {
 		if _, err := Propose(cur(), Inputs{Dests: ds, EdgeDeclaredBytes: 1}); !errors.Is(err, ErrInput) {
 			t.Errorf("%s: %v, want ErrInput", name, err)
+		}
+	}
+	// A basis off the list is refused first, before a missing figure for
+	// it or for the edge.
+	for name, in := range map[string]Inputs{
+		"no figure":      {Dests: []Dest{{"a.example", "guess", 0}}, EdgeDeclaredBytes: 1},
+		"no edge figure": {Dests: []Dest{{"a.example", "guess", 1}}},
+	} {
+		if _, err := Propose(cur(), in); !errors.Is(err, ErrInput) {
+			t.Errorf("a guess with %s: %v, want ErrInput", name, err)
 		}
 	}
 	n, err := Propose(cur(), Inputs{EdgeDeclaredBytes: 1})

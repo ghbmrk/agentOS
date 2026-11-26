@@ -264,12 +264,45 @@ func TestDropsChargesSharedAddressToEachGroup(t *testing.T) {
 	}
 }
 
+// TestDropsRewriteEveryChainTheyFill: a drop text replaces the rules of
+// every chain it writes to, never appends to them, so an update leaves no
+// rule of the drop it replaces: each chain it adds a rule to is one it
+// flushes or adds, a v6 address's drop chain, the edge's, the cut's and a
+// shared address's chain among them. Mutants: a flush left out, a shared
+// chain's rules written to a chain the text never adds.
+func TestDropsRewriteEveryChainTheyFill(t *testing.T) {
+	own, both, six := netip.MustParseAddr("203.0.113.30"), netip.MustParseAddr("203.0.113.10"), netip.MustParseAddr("2001:db8::7")
+	a := DropGroup{Dests: []string{"a.example"}, Caps: []uint64{100}, Cap: 100, Addrs: []netip.Addr{both, own, six}}
+	b := DropGroup{Dests: []string{"b.example"}, Caps: []uint64{200}, Cap: 200, Addrs: []netip.Addr{both}}
+	text := mustDrops(t, twoCaps(), nil, Drop{Day: 1, EdgeCap: 50, Groups: []DropGroup{a, b}})
+	written := map[string]bool{}
+	filled := map[string]bool{}
+	for _, line := range strings.Split(text, "\n") {
+		switch f := strings.Fields(line); {
+		case len(f) > 4 && (f[0] == "flush" || f[0] == "add") && f[1] == "chain" && f[3] == Table:
+			written[f[4]] = true
+		case len(f) > 4 && f[0] == "add" && f[1] == "rule" && f[3] == Table:
+			filled[f[4]] = true
+		}
+	}
+	for _, c := range []string{capDropChain(false), capDropChain(true), dropEdgeChain, cutChain} {
+		if !filled[c] {
+			t.Errorf("the text writes no rule to %s:\n%s", c, text)
+		}
+	}
+	for c := range filled {
+		if !written[c] {
+			t.Errorf("the text adds rules to %s without flushing or adding it:\n%s", c, text)
+		}
+	}
+}
+
 // TestDropsWritesEveryCapTheKernelHolds (mutgate on #4611): Drops refuses
 // a layout Compile refuses; a cap of MaxDropCap, the largest the kernel's
 // quota holds, gets its quota and its drop; the vmap lists its addresses
 // in order, so the same state gives the same text; and a group's name
-// changes with its day and each cap, the edge's with its day and cap, so a
-// changed cap starts a new quota. Mutants: the layout check gone, the
+// changes with its day, each destination and each cap, the edge's with its
+// day and cap, so a changed cap starts a new quota. Mutants: the layout check gone, the
 // bound off by one either way, the vmap in map order, a field left out of
 // a name.
 func TestDropsWritesEveryCapTheKernelHolds(t *testing.T) {
@@ -304,6 +337,11 @@ func TestDropsWritesEveryCapTheKernelHolds(t *testing.T) {
 	}
 	if _, q2 := groupNames(2, g); q2 == q {
 		t.Error("a group's name ignores its day")
+	}
+	other = g
+	other.Dests = []string{"b.example"}
+	if c2, q2 := groupNames(1, other); c2 == c || q2 == q {
+		t.Error("a group's name ignores its destinations")
 	}
 	if edgeQuota(1, 50) == edgeQuota(2, 50) || edgeQuota(1, 50) == edgeQuota(1, 51) {
 		t.Error("the edge's quota name ignores its day or cap")
@@ -481,7 +519,10 @@ func TestEdgeTrippedFollowsTheText(t *testing.T) {
 		// others (#5445 item 3), not skipped.
 		`{"nftables": [` + set(`{"elem": {}}`) + `]}`, `{"nftables": [` + set(`{"elem": {"val": ""}}`) + `]}`,
 		`{"nftables": [` + set(`{"elem": {}}, "edge0"`) + `]}`, `{"nftables": [` + set(`"edge0", {"elem": {}}`) + `]}`,
-		`{"nftables": [` + set(`""`) + `]}`} {
+		`{"nftables": [` + set(`""`) + `]}`,
+		// An element object that does not read is an error, even where
+		// what it read before the fault names the edge.
+		`{"nftables": [` + set(`{"elem": {"val": "edge0"}, "elem": 7}`) + `]}`} {
 		if _, err := EdgeTripped([]byte(bad), l, p); err == nil {
 			t.Errorf("listing %s read back", bad)
 		}

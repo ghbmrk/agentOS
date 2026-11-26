@@ -1179,6 +1179,15 @@ func TestByteCapsCanonical(t *testing.T) {
 			t.Errorf("%s: %v, want ErrMalformed", name, err)
 		}
 	}
+	// A cap of 0 is refused as one, with or without a basis, not as a
+	// basis with no cap or a cap with no basis.
+	for _, basis := range []map[string]string{{"mail.example": BasisImage}, nil} {
+		if _, err := Encode(edit(1, func(d *Document) {
+			d.Caps, d.Basis = map[string]uint64{"mail.example": 0}, basis
+		})); err == nil || !strings.Contains(err.Error(), `byte cap 0 for "mail.example"`) {
+			t.Errorf("a cap of 0, basis %v: %v", basis, err)
+		}
+	}
 	if _, err := Encode(edit(1, func(d *Document) {
 		d.Caps = map[string]uint64{"mail.example": 1 << 63, "models.example": 1<<63 - 1}
 		d.Basis = map[string]string{"mail.example": BasisImage, "models.example": BasisImage}
