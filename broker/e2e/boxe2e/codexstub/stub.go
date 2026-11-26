@@ -72,8 +72,10 @@ type Stub struct {
 // New returns a stub that serves every endpoint egress.Codex declares. A
 // declared endpoint the stub cannot answer panics here, so a change to the
 // route shows up in the stub's own tests.
-func New() *Stub {
-	s := &Stub{route: egress.Codex(), hits: map[string]int{}, account: Canary + "acct-" + rnd()}
+func New() *Stub { return newStub(egress.Codex()) }
+
+func newStub(route egress.PlanRoute) *Stub {
+	s := &Stub{route: route, hits: map[string]int{}, account: Canary + "acct-" + rnd()}
 	for _, ep := range s.route.Endpoints {
 		if _, ok := handlers[ep.Name]; !ok {
 			panic("codexstub: no handler for endpoint " + ep.Name)
@@ -190,12 +192,13 @@ func (s *Stub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.refuse(w, http.StatusNotFound)
 }
 
-// hostname is host without its port, as the provider ignores :443.
+// hostname is host without its port and the root's trailing dot, lower
+// case: the name the provider answers to whatever the spelling (#1890).
 func hostname(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	return strings.ToLower(host)
+	return strings.ToLower(strings.TrimSuffix(host, "."))
 }
 
 func (s *Stub) refuse(w http.ResponseWriter, code int) {
