@@ -98,6 +98,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-unmarked-gaps | VULN-unmarked-gaps: unmarked copies the string-fingerprint check cannot see (small packages, minified-only packages, copies inside the holder's own unminified scripts, a second copy in a file that already names the package) | VULN-inlined-minified (#4234) | queued (later; tier A) |
 | MET-owner-export | MET-owner-export: the box writes its weekly owner-outcome counts to records/owner/ (needs brief; after G1) | #4935; G1 | queued (release; needs brief; after G1) |
 | VULN-prune-requalify | VULN-prune-requalify: requalify the pruned OpenClaw image (PLN-5, HLD-3) | VULN-controlui-drop (#4436) | queued (release) |
+| PREMERGE-records-merge-fu | PREMERGE-records-merge-fu: tool-and-record PRs get a route out of needs-records; manual merges rerun the gate first (release; from #6717) | #6717 | queued |
 
 ## Owner channel and approvals (SPEC §10)
 
@@ -410,7 +411,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ROUTE-cancel-race | ROUTE-cancel-race: a provider 429/5xx racing the meter's time limit is read as cancelled and the route is not cooled (release; from #6607) | ROUTE-cancel-race | queued (release; tier A; from #6607) |
 | PAGE-stopping-text | PAGE-stopping-text: every local page action refused with 'stopping' says agentOS is restarting, not its generic failure (from #1752 P8; tier A) | #1752 | building |
 | VULN-debian-r17 | VULN-debian-r17: accept openssl's no-fix Debian 13 advisory DEBIAN-CVE-2026-107494 so image-vulncheck passes again. Release; no-fix Debian round. | #2919, #6542 | building (release; tier A) |
-| VIS-reply-read-wipe-fu | VIS-reply-read-wipe-fu: replace the vision client's package-level test seams with passed-in ones, and restore the trailing-data detail (#6636 review release findings, DEV-7). | #6636 | building (release; tier A) |
 | VULN-gobwas-ws-r1 | VULN-gobwas-ws-r1: premerge shows the content of vendored agent-instruction files to the Security reviewer. Release; from #6647. | #6646 | building (release; tier A) |
 | VULN-gobwas-ws-r2 | VULN-gobwas-ws-r2: sipline WS loopback test near sipgo's message-size limit. Release; from #6647. | #6646 | building (release; tier A) |
 | B3-16-r1 | B3-16-r1: Gmail connect DUse after a finished sign-in says it is already connected. Release; from #6632. | #3014 | queued (release; tier A) |
