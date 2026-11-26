@@ -22,17 +22,16 @@ name: mutgate
 # broker/core/core.txt (the tier list risk_tier reads) with the base commit's before running
 # them, and `mutgate` reruns `run`'s checks on the artifact with `verify` (#4106), which builds the
 # base's statement lister (standard library only) to recount the deletion sites (#4602).
+# CI-mutgate-after-ci (#6569): ci.yml's `mutgate` job calls this workflow on a pull request once every other
+# ci job passed on the head, so a head whose ci fails spends no mutgate runner. Its jobs run inside ci's run
+# (named `mutgate / <job>`) under ci's per-PR concurrency group, which cancels a superseded head's run; a
+# group here would share ci's name and wait on it. Main's ruleset does not require these jobs, so
+# tools/premerge.py holds the merge until `mutgate / claimed` succeeded in ci's run and no `mutgate / ` job
+# failed: a mutgate skipped because ci failed never reads as a pass.
 on:
-  pull_request:
+  workflow_call:
 permissions:
   contents: read
-# CI-cancel-superseded (#5345, #5348, #5361): a PR's first-attempt run cancels that PR's older first
-# attempts, so a superseded head never holds the queue. A rerun (attempt 2 or later) and every push,
-# merge-queue, schedule or dispatch run is a group of its own (run id), so it never cancels or
-# replaces the current head's run.
-concurrency:
-  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}
 env:
   GOTOOLCHAIN: local
   GOWORK: "off"
