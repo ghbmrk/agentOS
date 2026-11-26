@@ -359,6 +359,14 @@ fexit:vfs_getattr /@stamp[pid] == 0/ {{
     }}
   }}
 }}
+fexit:vfs_getattr /str(args->path->dentry->d_name.name, 16) == "race_reads.py"/ {{
+  $e = args->path->dentry;
+  printf("D want %d %d; %s %d %d; %s %d %d; %s %d %d\\n", {ino}, {dev},
+         str($e->d_parent->d_name.name, 16), $e->d_parent->d_inode->i_ino, $e->d_parent->d_sb->s_dev,
+         str($e->d_parent->d_parent->d_name.name, 16), $e->d_parent->d_parent->d_inode->i_ino, $e->d_parent->d_parent->d_sb->s_dev,
+         str($e->d_parent->d_parent->d_parent->d_name.name, 16), $e->d_parent->d_parent->d_parent->d_inode->i_ino,
+         $e->d_parent->d_parent->d_parent->d_sb->s_dev);
+}}
 END {{ clear(@stamp); printf("END\\n"); }}
 """
 
@@ -398,8 +406,10 @@ def stat_lines(lines, root):
             path = posixpath.join(root, *(got[i] for i in reversed(range(k))))
             control |= path == posixpath.join(root, STAT_CONTROL)
             yield None, path
-        elif line.startswith("Attaching ") and not started:
+        elif line.startswith("Attaching ") and not started or not line:
             continue
+        elif line.startswith("D "):  # CI-race-scope bring-up: the probe's view of the control file
+            yield f"stat trace diagnostic: {line}", None
         else:
             yield f"stat trace: unexpected line {line!r} (lost events, or an error)", None
     if parts:
