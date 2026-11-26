@@ -79,7 +79,7 @@ class AuditTest(unittest.TestCase):
                             (trace(end=False), "did not run from start to end"),
                             ([], "did not run from start to end"),
                             ([l for l in trace() if l != TEST], "no test binary ran"),
-                            (trace("X 7 0 /usr/bin/go", "A 7 git status --porcelain  "), None),
+                            (trace("X 7 0 /usr/bin/go", "A 7 go git status --porcelain  "), None),
                             (trace("X 7 /usr/bin/go"), "unexpected line"),
                             (trace("Lost 12 events"), "unexpected line"),
                             (trace("FULL"), "process map is full"),
@@ -149,7 +149,8 @@ class ProgramTest(unittest.TestCase):
             self.assertIn(f'printf("E {kind} %d %d %d\\n", tid, pid, $k);', prog)
         self.assertNotIn("path(", prog)  # bpf_d_path is missing on the runner's kernel
         self.assertNotIn("vfs_getattr", prog)  # fentry saw no call of it on the runner
-        self.assertIn('str(args->argv[2], 32) == "--porcelain" && str(args->argv[3], 32) == ""', prog)
+        self.assertIn('args->argv[2] != 0 && str(args->argv[2], 32) == "--porcelain" && args->argv[3] == 0', prog)
+        self.assertNotIn('== ""', prog)  # str() of a NULL pointer can hold a stale string
         self.assertIn('str(args->argv[2], 32) == "log.showsignature=false"', prog)
         self.assertIn("(args->clone_flags & 0x10000) == 0", prog)  # threads share their process's key
         self.assertEqual(race_reads.kernel_dev(os.makedev(8, 1)), 8 << 20 | 1)
