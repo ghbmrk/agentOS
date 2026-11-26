@@ -41,7 +41,7 @@ func followupPost(s *Server, tok, path string, form url.Values) *httptest.Respon
 	return w
 }
 
-// REQ: UX-2wb-1 (#1752 item 2; UX blocker on #6620 round 2)
+// UX-2wb-1 (#1752 item 2; UX blocker on #6620 round 2)
 // The no-reply wording never says Reload: the page is a POST's, so a
 // reload sends the answer again. It names the Approvals link, and the page
 // it is shown on has that link (a GET, which lists the requests and resends
@@ -66,7 +66,7 @@ func TestTheNoReplyAnswerTextDoesNotSayReload(t *testing.T) {
 	}
 }
 
-// REQ: UX-2wb-1 (#1752, P3 on #1746; L3 blocker on #6620 round 2)
+// UX-2wb-1 (#1752, P3 on #1746; L3 blocker on #6620 round 2)
 // An answer whose listing is then refused as unauthorized shows the
 // channel's own reply instead of redirecting to /unlock, which would drop
 // it. The case this exists for is a wrong code that voids the request and
@@ -118,7 +118,7 @@ func TestAnAnswerThatLocksTheSessionKeepsItsMessage(t *testing.T) {
 	}
 }
 
-// REQ: UX-2wb-1 (#1752, P8 on #1746)
+// UX-2wb-1 (#1752, P8 on #1746)
 // A page STOP refused because agentosd is stopping says it is stopping or
 // restarting, since any SIGTERM (a restart, a stop, a poweroff) refuses it
 // alike and the page cannot tell which; it never claims a restart alone,
@@ -147,7 +147,7 @@ func TestAStopWhileAgentosdStopsSaysSo(t *testing.T) {
 	}
 }
 
-// REQ: UX-2wb-1, CH-7 (#1752; L3 and UX blocker 1 on #6620)
+// REQ: CH-7 (UX-2wb-1; #1752; L3 and UX blocker 1 on #6620)
 // Only an answer the channel replied to keeps its message over a refused
 // listing. A POST from an expired or revoked session (OpAnswer refused as
 // unauthorized), or with a stale form token, still goes to /unlock, as on
@@ -171,7 +171,7 @@ func TestAnUnauthorizedAnswerStillGoesToUnlock(t *testing.T) {
 	}
 }
 
-// REQ: UX-2wb-1 (#1752; L3 release 1 on #6620 round 2)
+// UX-2wb-1 (#1752; L3 release 1 on #6620 round 2)
 // An answer refused as unauthorized decided nothing, so even when the
 // listing then succeeds (a sign-in between the two calls) the page never
 // says the answer "may or may not have gone through".

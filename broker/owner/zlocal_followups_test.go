@@ -51,7 +51,7 @@ func TestAFutureLocalStartCountsAsElapsed(t *testing.T) {
 	}
 }
 
-// REQ: CH-15, UX-2wb-1 (#1752 item 1)
+// REQ: CH-15 (UX-2wb-1; #1752 item 1)
 // The texts a local page call sends after its reply go out in call order:
 // a later call's alert waits behind an earlier call's sign-in text still
 // in the modem (afterReply's sendTail chain), and follows it once sent.
@@ -82,7 +82,7 @@ func TestTextsAfterTheReplyGoInCallOrder(t *testing.T) {
 	}
 }
 
-// REQ: CH-7, UX-2wb-1 (#1802, Security N1 on #1686)
+// REQ: CH-7 (UX-2wb-1; #1802, Security N1 on #1686)
 // Once DrainSends has begun, a text after a reply is not started on a
 // goroutine the drain might miss (a WaitGroup Add racing its Wait): it is
 // sent in the caller, before the call returns, so it is neither lost nor
