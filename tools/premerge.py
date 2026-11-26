@@ -958,7 +958,6 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
 # need not be in the branch, so two PRs each green on their own base can break main's `mutgate.py records` together
 # (#6606 with #6561, fixed by #6713; #6640 with #6561, fixed by #6715). The gate reads them again on the merge it is
 # about to release. RECORDS_TOOLS change what `records` reports; RECORDS_TREE is what it reads.
-RECORD = "MUTANTS-EQUIVALENT"
 # Derived like the gate files: every tools/ module mutgate.py loads, directly or through risk_tier.py (record_merge.py
 # reads core.txt), plus the lister it builds and the tier list (#6717 L3).
 RECORDS_TOOLS = (*sorted(f"tools/{m}.py" for m in gate_modules(roots=("mutgate",))), "tools/mutgate_stmts.go", "broker/core/core.txt")
