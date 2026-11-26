@@ -1730,9 +1730,23 @@ QUIC_LOOKUP = ('#include <dlfcn.h>\n'
 # The name as the tail of a longer string, as GNU ld may store it: fail-closed, it counts.
 QUIC_TAIL = ('#include <dlfcn.h>\nconst char *n = "my_SSL_new_listener";\n'
              'int main(void) { return dlsym(RTLD_DEFAULT, n + 3) != 0; }\n')
-# The name held with no lookup function: nothing can resolve it by that string.
+# The name held with no lookup function of its own (#6673): a static copy holds the names so, and a
+# library the file loads could still be handed the string. Fail-closed, it counts.
 QUIC_HELD_ONLY = 'const char *n = "OSSL_QUIC_server_method";\nint main(void) { return n[0]; }\n'
+# Security 7157885119 item 1 (#6673): a file importing no dlsym hands a QUIC name to a loaded library's
+# lookup helper (a wrapper), which calls dlsym for it.
+HELPER = '#include <dlfcn.h>\nvoid *find(const char *n) { return dlsym(RTLD_DEFAULT, n); }\n'
+QUIC_WRAP = ('void *find(const char *);\n'
+             'int main(void) { return find("OSSL_QUIC_client_method") != 0; }\n')
+# L3 7157966663 item 4 (#6673): a shim defining a QUIC entry point and forwarding it through
+# dlsym(RTLD_NEXT, ...) defines the name it looks up, and still counts.
+QUIC_SHIM = ('#define _GNU_SOURCE\n#include <dlfcn.h>\nvoid *OSSL_QUIC_client_method(void) {\n'
+             '  void *(*f)(void) = (void *(*)(void))dlsym(RTLD_NEXT, "OSSL_QUIC_client_method");\n'
+             '  return f ? f() : 0; }\n')
+# A library calling itself libssl.so.3 off the path Debian installs libssl at is not the definer (#6673).
+SPOOF_SSL = "void *SSL_new_listener(void *c, unsigned long f) { return c; }\n"
 QUIC_ID_RE = re.compile(r"DEBIAN-CVE-2026-(\d+)")
+LIB = "/usr/lib/x86_64-linux-gnu"
 
 
 @NEEDS_CC
@@ -1745,8 +1759,8 @@ class QuicImportTest(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         t = pathlib.Path(cls.tmp.name)
         src, cls.tree = t / "src", t / "tree"
-        lib = cls.tree / "usr/lib"
-        for d in (src, lib, cls.tree / "usr/bin"):
+        lib, opt = cls.tree / "usr/lib/x86_64-linux-gnu", cls.tree / "opt/x"
+        for d in (src, lib, opt, cls.tree / "usr/bin"):
             d.mkdir(parents=True, exist_ok=True)
 
         def cc(name, code, out, *args):
@@ -1771,6 +1785,10 @@ class QuicImportTest(unittest.TestCase):
         cc("dgramlook.c", DGRAM_LOOKUP, cls.tree / "usr/bin/dgramlook", "-ldl")
         cc("conn.c", CONN_USER, cls.tree / "usr/bin/connd", "-L" + str(lib), "-l:libcrypto.so.3")
         cc("sslconn.c", SSL_CONN_USER, cls.tree / "usr/bin/sslconn", *ssl)
+        cc("helper.c", HELPER, lib / "libhelper.so.1", "-shared", "-fPIC", "-Wl,-soname,libhelper.so.1", "-ldl")
+        cc("wrap.c", QUIC_WRAP, cls.tree / "usr/bin/quicwrap", "-L" + str(lib), "-l:libhelper.so.1")
+        cc("shim.c", QUIC_SHIM, lib / "libshim.so.1", "-shared", "-fPIC", "-Wl,-soname,libshim.so.1", "-ldl")
+        cc("spoof.c", SPOOF_SSL, opt / "libssl.so.3", "-shared", "-fPIC", "-Wl,-soname,libssl.so.3")
         cls.got = sweep.run_tree(str(cls.tree))
 
     @classmethod
@@ -1779,12 +1797,49 @@ class QuicImportTest(unittest.TestCase):
 
     def test_importers_and_lookups_counted_definers_not(self):
         got = self.got["tree"]
-        self.assertEqual(got["quic"], {"/usr/bin/openssl": ["OSSL_QUIC_client_method"],
+        self.assertEqual(got["quic"], {"/opt/x/libssl.so.3": ["SSL_new_listener"],
+                                       "/usr/bin/openssl": ["OSSL_QUIC_client_method"],
                                        "/usr/bin/quicd": ["OSSL_QUIC_server_method", "SSL_new_listener"],
+                                       "/usr/bin/quicheld": ["OSSL_QUIC_server_method"],
                                        "/usr/bin/quiclookup": ["OSSL_QUIC_client_method"],
                                        "/usr/bin/quictail": ["SSL_new_listener"],
-                                       "/usr/bin/thread": ["OSSL_QUIC_client_thread_method"]})
+                                       "/usr/bin/quicwrap": ["OSSL_QUIC_client_method"],
+                                       "/usr/bin/thread": ["OSSL_QUIC_client_thread_method"],
+                                       LIB + "/liboldssl.so.1": ["OSSL_QUIC_client_thread_method"],
+                                       LIB + "/libshim.so.1": ["OSSL_QUIC_client_method"]})
         self.assertEqual(got["unread"], [])
+
+    def test_wrapper_holder_and_rtld_next_shim_counted(self):
+        # #6673: Security 7157885119 item 1 (a holder importing no dlsym) and L3 7157966663 item 4 (a
+        # definer that is not libssl).
+        got = self.got["tree"]["quic"]
+        self.assertEqual(got.get("/usr/bin/quicwrap"), ["OSSL_QUIC_client_method"])
+        self.assertEqual(got.get(LIB + "/libshim.so.1"), ["OSSL_QUIC_client_method"])
+        errs = sweep.openssl_refusals({"tree": {"quic": got}}, {"quic": ["/usr/bin/openssl", "/usr/bin/quic[dlt]*", "/usr/bin/thread",
+                                                          "/opt/*", LIB + "/liboldssl*"]})
+        self.assertEqual([e.split(": ", 2)[1].split()[0] for e in errs],
+                         ["/usr/bin/quicheld", "/usr/bin/quicwrap", LIB + "/libshim.so.1"])
+
+    def test_definer_exempt_only_by_soname_at_its_path(self):
+        # #6673: libssl.so.3 for [quic] and libcrypto.so.3 for [dgram], each by SONAME at the path Debian
+        # installs it, in the main tree or a guest root; nothing else is exempt.
+        quic = b"\0OSSL_QUIC_client_method\0BIO_new_dgram\0"
+        both = {"quic": ["OSSL_QUIC_client_method"], "dgram": ["BIO_new_dgram"]}
+        for shown, soname, want in ((LIB + "/libssl.so.3", "libssl.so.3", {"dgram": ["BIO_new_dgram"]}),
+                                    (LIB + "/libcrypto.so.3", "libcrypto.so.3", {"quic": ["OSSL_QUIC_client_method"]}),
+                                    ("/usr/lib/agentos/images/g" + LIB + "/libssl.so.3", "libssl.so.3",
+                                     {"dgram": ["BIO_new_dgram"]}),
+                                    (LIB + "/libssl.so.3", None, both),
+                                    (LIB + "/libssl.so.3", "libcrypto.so.3", both),
+                                    (LIB + "/libcrypto.so.3", "libssl.so.3", both),
+                                    ("/opt/x/libssl.so.3", "libssl.so.3", both),
+                                    (LIB + "/libssl.so.3.bak", "libssl.so.3", both),
+                                    ("/usr/bin/openssl", None, both)):
+            with self.subTest(shown=shown, soname=soname):
+                self.assertEqual(sweep.openssl_uses(quic, shown, soname), want)
+        self.assertEqual(sweep.openssl_uses(b"\0OSSL_QUIC_client_methodx\0TLS_method\0", "/a", None), {})
+        self.assertNotIn(LIB + "/libssl.so.3", self.got["tree"]["quic"])
+        self.assertNotIn(LIB + "/libcrypto.so.3", self.got["tree"]["dgram"])
 
     def test_datagram_bio_makers_counted_libcrypto_not(self):
         # L3 7157966663: -88822 is reached through any datagram BIO, QUIC or not.
@@ -1793,13 +1848,14 @@ class QuicImportTest(unittest.TestCase):
                                                      "/usr/bin/dgramlook": ["BIO_s_dgram_pair"],
                                                      "/usr/bin/openssl": ["BIO_new_dgram"],
                                                      "/usr/bin/sslconn": ["BIO_new_ssl_connect"],
-                                                     "/usr/lib/libssl.so.3": ["BIO_s_connect", "BIO_s_datagram"]})
-        listed = {"quic": ["/usr/bin/openssl", "/usr/bin/quic*", "/usr/bin/thread"],
-                  "dgram": ["/usr/bin/openssl", "/usr/lib/libssl.so.3"]}
+                                                     LIB + "/libssl.so.3": ["BIO_new_ssl_connect", "BIO_s_connect",
+                                                                            "BIO_s_datagram"]})
+        listed = {"quic": ["/usr/bin/openssl", "/usr/bin/quic*", "/usr/bin/thread", "/opt/*", LIB + "/lib*"],
+                  "dgram": ["/usr/bin/openssl", LIB + "/libssl.so.3"]}
         errs = sweep.openssl_refusals(self.got, listed)
         self.assertEqual([e.split(": ", 2)[1].split()[0] for e in errs],
                          ["/usr/bin/connd", "/usr/bin/dgramd", "/usr/bin/dgramlook", "/usr/bin/sslconn"])
-        self.assertEqual(errs[1], "tree: /usr/bin/dgramd imports or looks up OpenSSL's datagram or connect BIO "
+        self.assertEqual(errs[1], "tree: /usr/bin/dgramd holds the name of OpenSSL's datagram or connect BIO "
                          "constructors (BIO_new_dgram) and is not in import_sweep.allow [dgram]; the DEBIAN-CVE-2026-88822 "
                          "records rest on no other file doing so: review what it does with them, update those "
                          "records, then add the entry: /usr/bin/dgramd")
@@ -1807,17 +1863,19 @@ class QuicImportTest(unittest.TestCase):
                          [])
 
     def test_only_listed_files_pass_and_unused_entries_fail(self):
-        listed = ["/usr/bin/openssl", "/usr/bin/quic*", "/usr/bin/thread"]
+        listed = ["/usr/bin/openssl", "/usr/bin/quic*", "/usr/bin/thread", "/opt/*", LIB + "/lib*"]
         quic = {"tree": {"quic": self.got["tree"]["quic"]}}
         self.assertEqual(sweep.openssl_refusals(quic, {"quic": listed}), [])
         errs = sweep.openssl_refusals(quic, {"quic": ["/usr/bin/openssl", "/usr/bin/gone"]})
         self.assertEqual([e.split(": ", 2)[1].split()[0] for e in errs[:-1]],
-                         ["/usr/bin/quicd", "/usr/bin/quiclookup", "/usr/bin/quictail", "/usr/bin/thread"])
-        self.assertEqual(errs[0], "tree: /usr/bin/quicd imports or looks up OpenSSL's QUIC entry points "
+                         ["/opt/x/libssl.so.3", "/usr/bin/quicd", "/usr/bin/quicheld", "/usr/bin/quiclookup",
+                          "/usr/bin/quictail", "/usr/bin/quicwrap", "/usr/bin/thread", LIB + "/liboldssl.so.1",
+                          LIB + "/libshim.so.1"])
+        self.assertEqual(errs[1], "tree: /usr/bin/quicd holds the name of OpenSSL's QUIC entry points "
                          "(OSSL_QUIC_server_method SSL_new_listener) and is not in import_sweep.allow [quic]; the "
                          "openssl QUIC records (%s) rest on no other file doing so: review what it does with them, "
                          "update those records, then add the entry: /usr/bin/quicd" % sweep.QUIC_RECORDS)
-        unused = ("import_sweep.allow: [quic] %s matches no file importing or looking up OpenSSL's QUIC entry points; "
+        unused = ("import_sweep.allow: [quic] %s matches no file holding the name of OpenSSL's QUIC entry points; "
                   "each entry is also the control that this scan still reads them, so remove it only once that file "
                   "has left the image or stopped using them, and otherwise treat the scan as broken")
         self.assertEqual(errs[-1], unused % "/usr/bin/gone")
@@ -1830,22 +1888,22 @@ class QuicImportTest(unittest.TestCase):
                   "initrd:main": {"quic": {"/usr/bin/x": ["SSL_new_listener"]}}}
         errs = sweep.openssl_refusals(places, {"quic": ["/usr/bin/openssl"]})
         self.assertEqual(len(errs), 1)
-        self.assertTrue(errs[0].startswith("initrd:main: /usr/bin/x imports or looks up"), errs)
+        self.assertTrue(errs[0].startswith("initrd:main: /usr/bin/x holds the name of"), errs)
 
-    def test_objdump_failure_on_a_holder_is_unread(self):
+    def test_a_holder_objdump_fails_on_is_counted_and_unread(self):
+        # #6673: the holder count reads bytes only; read_elf still marks the file unread.
         with tempfile.TemporaryDirectory() as d:
             bad = pathlib.Path(d) / "bad"
             bad.write_bytes(b"\x7fELF" + b"\xff" * 60 + b"\0OSSL_QUIC_client_method\0")
-            self.assertEqual(sweep.openssl_uses(bad)[1], False)
-            plain = pathlib.Path(d) / "plain"
-            plain.write_bytes(b"\x7fELF" + b"\xff" * 60)
-            self.assertEqual(sweep.openssl_uses(plain), ({}, True))
+            got = sweep.sweep({"/usr/bin/bad": str(bad)})
+            self.assertEqual(got["quic"], {"/usr/bin/bad": ["OSSL_QUIC_client_method"]})
+            self.assertEqual(got["unread"], ["/usr/bin/bad"])
 
     def test_summary_and_exit(self):
         lines = sweep.summary(self.got)
-        self.assertIn("tree quic: 5 files import or look up OpenSSL's QUIC entry points", lines)
+        self.assertIn("tree quic: 10 files hold the name of OpenSSL's QUIC entry points", lines)
         self.assertIn("  quic /usr/bin/quicd: OSSL_QUIC_server_method SSL_new_listener", lines)
-        self.assertIn("tree dgram: 6 files import or look up OpenSSL's datagram or connect BIO constructors", lines)
+        self.assertIn("tree dgram: 6 files hold the name of OpenSSL's datagram or connect BIO constructors", lines)
         base = dict(imports={"/usr/bin/bash": ["regcomp"]}, via={}, scanned=3, cipher={"/l": {"EVP_CIPHER_fetch": 1}},
                     sha256={"/l": "0f" * 32, "/usr/bin/bash": D, "/usr/sbin/ldconfig": D},
                     carries={"/usr/sbin/ldconfig": ["glob"]},
