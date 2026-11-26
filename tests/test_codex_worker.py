@@ -40,6 +40,8 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CODEX = ROOT / "guest/codex"
 CONFIG = CODEX / "managed_config.toml"
+CATALOG = CODEX / "model_catalog.json"
+PLAN_GO = ROOT / "broker/clerk/plan/plan.go"
 REQUIREMENTS = CODEX / "requirements.toml"
 TOOLSH = CODEX / "agentos-toolsh"
 LAUNCH = CODEX / "launch.json"
@@ -81,6 +83,11 @@ WORK = "/var/lib/agentos-work"
 # guest/codex/ASSUMPTIONS.md C19): the default of the pinned CLI's bundled catalog, pinned so a
 # catalog refresh from the provider cannot change it between the qualification run and G1.
 MODEL = "gpt-6.1-sol"
+# The tools a code-mode turn of the pinned CLI declares under this managed config, as namespace.name:
+# the plan clerk's Codex declaration (broker/clerk/plan/plan.go) must list exactly these, and the
+# opt-in CliSandboxTest checks a real turn against them. No collaboration namespace (B2-21-C22).
+CLI_TOOLS = ["functions.exec", "functions.wait", "functions.request_user_input",
+             "functions.request_user_input_async", "clock.sleep"]
 MODEL_LINE = f'model = "{MODEL}"\n'
 
 # Settings that must hold exactly. The key names were measured against Codex CLI 0.162.1
@@ -92,6 +99,9 @@ REQUIRED = {
     # login calls chatgpt.com directly (#2085).
     ("chatgpt_base_url",): FORWARDER + "/backend-api/",
     ("model",): MODEL,
+    # The model metadata is the image's own pinned catalog, never the one the provider serves at
+    # each start: its entry turns multi-agent v2 off, which no [features] key does (#2111, B2-21-C22).
+    ("model_catalog_json",): "/etc/codex/model_catalog.json",
     ("model_providers", "agentos", "base_url"): FORWARDER + "/backend-api/codex",
     ("model_providers", "agentos", "wire_api"): "responses",
     ("model_providers", "agentos", "requires_openai_auth"): True,
@@ -230,6 +240,28 @@ class ManagedConfigTest(unittest.TestCase):
     def test_hosted_tools_off_and_route_pinned(self):
         cfg = tomllib.loads(CONFIG.read_text())
         self.assertEqual(hosted_tool_problems(cfg), [])
+
+    # REQ: CRED-5, CAP-11
+    def test_pinned_catalog_holds_the_pinned_model_with_multi_agent_off(self):
+        """#2111: multi-agent v2 (the collaboration tools) comes from the model's catalog entry,
+        not from features.multi_agent, so the image pins a catalog whose one entry, the pinned
+        model, has no multi-agent version (B2-21-C22)."""
+        models = json.loads(CATALOG.read_text())["models"]
+        self.assertEqual([m["slug"] for m in models], [MODEL])
+        self.assertIn("multi_agent_version", models[0], "the key must be present and null")
+        self.assertIsNone(models[0]["multi_agent_version"])
+        self.assertTrue(models[0].get("base_instructions"), "the entry must be the CLI's whole one")
+
+    # REQ: CAP-11
+    def test_clerk_declares_the_tools_the_pinned_cli_sends(self):
+        """The plan clerk refuses a model call declaring any other tool, so its Codex list and
+        CLI_TOOLS (what a real turn sends, CliSandboxTest) must agree."""
+        src = PLAN_GO.read_text()
+        block = re.search(r'func Codex\(.*?Tools: \[\]Tool\{(.*?)\n\t\t\t\},', src, re.S)
+        self.assertIsNotNone(block, "Codex().Body.Tools not found in plan.go")
+        got = [f"{ns}.{name}" for ns, name in re.findall(r'\{"([a-z_]+)", "([a-z_]+)", "[a-z]+"\}',
+                                                         block.group(1))]
+        self.assertEqual(got, CLI_TOOLS)
 
     # REQ: CRED-5, A14
     def test_checker_flags_each_bad_config(self):
@@ -1129,6 +1161,7 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
                 self.assertIn(old, text)
                 text = text.replace(old, new, 1)
             (etc / src.name).write_text(text)
+        shutil.copy(CATALOG, etc / CATALOG.name)
         log = run / "endpoint.log"
         cmd = cmd or f"python3 -I /var/lib/agentos-stub-tool.py probe {self.fwd.port}"
         fake = subprocess.Popen(
@@ -1183,6 +1216,15 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
                 "marks": {m for m in ("notify-ran", "mcp-ran", "preload-ran")
                           if (work / m).exists()}}
 
+    @staticmethod
+    def id_token():
+        """An unsigned id_token placeholder for a synthetic plan login."""
+        def jwt_part(o):
+            return base64.urlsafe_b64encode(json.dumps(o).encode()).rstrip(b"=").decode()
+        return (jwt_part({"alg": "none", "typ": "JWT"}) + "." + jwt_part(
+            {"exp": 4102444800, "https://api.openai.com/auth": {"chatgpt_account_id": "acct-syn"}})
+            + ".unsigned")
+
     def refresh_turn(self, status, body, last_refresh=None):
         """A turn on a plan login whose token the CLI refreshes while the tool watches auth.json.
 
@@ -1194,11 +1236,7 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
         fake refusing the tool's output with a 401; a stale last_refresh makes the CLI refresh at
         startup, before any tool runs. Returns the login, the tool's last attempt
         (stub_tool.py reread), the auth.json left on the host and the turn."""
-        def jwt_part(o):
-            return base64.urlsafe_b64encode(json.dumps(o).encode()).rstrip(b"=").decode()
-        id_token = (jwt_part({"alg": "none", "typ": "JWT"}) + "." + jwt_part(
-            {"exp": 4102444800, "https://api.openai.com/auth": {"chatgpt_account_id": "acct-syn"}})
-            + ".unsigned")
+        id_token = self.id_token()
         # A login about 8 days old is refreshed at startup, before any tool runs.
         login = {"OPENAI_API_KEY": None,
                  "last_refresh": last_refresh or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1321,6 +1359,42 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
         # Every turn asks for the pinned model, whatever the catalog says (#1396, C19).
         self.assertEqual({q["model"] for q in requests if q["method"] == "POST"}, {MODEL})
         self.assertFalse(any(q["upgrade"] for q in requests), "WebSocket transport used")
+
+    # REQ: CAP-11, CRED-5
+    def test_pinned_catalog_drops_the_collaboration_tools_and_the_models_fetch(self):
+        """#2111: on a plan login, the pinned catalog leaves exactly the clerk's tools in the
+        request and stops the start-up /models fetch; without the pin the bundled catalog's
+        multi-agent v2 adds the collaboration namespace (B2-21-C22). The image's entry is the
+        CLI's bundled one with only multi_agent_version changed, so a pin bump that leaves the
+        old catalog behind fails here."""
+        bundled = json.loads(subprocess.run(
+            [self.cli, "debug", "models", "--bundled"], capture_output=True, text=True,
+            env={"PATH": os.environ["PATH"], "CODEX_HOME": str(self.tmp)}, check=True).stdout)
+        want = [m for m in bundled["models"] if m["slug"] == MODEL]
+        self.assertEqual(len(want), 1, "the pinned model is not in the CLI's bundled catalog")
+        self.assertEqual(json.loads(CATALOG.read_text())["models"],
+                         [dict(want[0], multi_agent_version=None)])
+
+        def tools(got):
+            posts = [q for q in got["requests"] if q["method"] == "POST"
+                     and q["path"].endswith("/responses")]
+            self.assertTrue(posts, "no model call: " + got["stdout"][-2000:])
+            return posts[0]["tools"]
+        login = json.dumps({"OPENAI_API_KEY": None,
+                            "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            "tokens": {"id_token": self.id_token(), "account_id": "acct-syn",
+                                       "access_token": "agentos-ph-access",
+                                       "refresh_token": "agentos-ph-refresh"}})
+        got = self.turn(auth=login, cmd="true")
+        self.assertEqual(tools(got), CLI_TOOLS)
+        self.assertFalse([q for q in got["requests"] if "/models" in q["path"]],
+                         "the CLI fetched the provider's catalog")
+        line = 'model_catalog_json = "/etc/codex/model_catalog.json"\n'
+        unpinned = self.turn(config_edits=[(line, "")], auth=login, cmd="true")
+        self.assertTrue([q for q in unpinned["requests"] if "/models" in q["path"]],
+                        "control: unpinned, the CLI fetches the provider's catalog")
+        self.assertIn("collaboration.spawn_agent", tools(unpinned),
+                      "control: unpinned, the bundled catalog turns multi-agent v2 on")
 
     # REQ: CRED-5, A14
     def test_each_dropped_pin_lets_its_injection_through(self):
