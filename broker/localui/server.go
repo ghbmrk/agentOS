@@ -540,7 +540,12 @@ func (s *Server) checkPage(r *http.Request) (string, string) {
 	p := r.URL.Path
 	switch {
 	case r.Method == http.MethodGet:
-		return safeNext(r.URL.Path), "Reload this page"
+		// The page's own URL, query included, as its refresh reloads it.
+		u := safeNext(r.URL.EscapedPath())
+		if q := r.URL.RawQuery; q != "" && u != "/home" {
+			u += "?" + q
+		}
+		return u, "Reload this page"
 	case p == "/stop" || p == "/resume":
 		return "/status", "Open Status"
 	}

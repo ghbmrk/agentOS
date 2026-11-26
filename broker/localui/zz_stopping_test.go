@@ -255,6 +255,7 @@ func TestZACallThatRanThenFailedCountsAsPossiblyDone(t *testing.T) {
 	}{
 		{"answer failed", "/approvals/", answer, stopOwner{session: tok, failed: map[string]bool{localapi.OpAnswer: true}}, "partway through"},
 		{"ask failed", "/paused/", askResume, stopOwner{session: tok, failed: map[string]bool{localapi.OpAskResume: true}}, "partway through"},
+		{"answer internal error", "/approvals/", answer, stopOwner{session: tok, code: map[string]string{localapi.OpAnswer: string(sockets.ErrInternal)}}, "partway through"},
 		{"answer refused before it ran", "/approvals/", answer, stopOwner{session: tok, code: map[string]string{localapi.OpAnswer: localapi.ErrLimited}}, "so it did not do this"},
 	} {
 		w := stoppingRequest(stoppingServer(t, c.o), tok, "POST", c.path, c.form)
@@ -264,7 +265,7 @@ func TestZACallThatRanThenFailedCountsAsPossiblyDone(t *testing.T) {
 	}
 }
 
-// REQ: UX-2wb-1 (#6619; UX blocker 1 on #6699)
+// REQ: UX-2wb-1 (#6619; UX blockers on #6699)
 // The stopping page links where the request's effect shows, so "open the
 // page below and check" can be done as written: Status for STOP and
 // RESUME, a mounted page for its form, a GET's own page; else the root.
@@ -282,6 +283,8 @@ func TestZTheStoppingPageLinksWhereTheEffectShows(t *testing.T) {
 		{"POST", "/paused/", `<a href="/paused/">Open Paused</a>`},
 		{"POST", "/line/sim", `<a href="/">Open the home page</a>`},
 		{"GET", "/held/", `<a href="/held/">Reload this page</a>`},
+		{"GET", "/unlock?next=/approvals/", `<a href="/unlock?next=/approvals/">Reload this page</a>`},
+		{"GET", "/status?m=stopped", `<a href="/status?m=stopped">Reload this page</a>`},
 	} {
 		w := stoppingRequest(s, tok, c.method, c.path, fixed(url.Values{"code": {"123456"}}))
 		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), c.link) {
