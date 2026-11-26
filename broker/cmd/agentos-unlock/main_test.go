@@ -481,15 +481,25 @@ func (r *rig) boot() (*exec.Cmd, *bytes.Buffer) {
 	return cmd, &out
 }
 
-func (r *rig) owner() proc.Owner {
-	return proc.Owner{Conn: proc.Conn{Socket: r.mainConfig().OwnerSock, UID: r.kernelUID, Timeout: 5 * time.Second}}
+// owner is the kernel's owner socket. The tests speak it through proc.Conn with the kernel's own
+// wire types: proc's owner client lives with proc's tests, outside the trusted core's lines
+// (KRN-2-proc-test-support, #6386).
+func (r *rig) owner() proc.Conn {
+	return proc.Conn{Socket: r.mainConfig().OwnerSock, UID: r.kernelUID, Timeout: 5 * time.Second}
+}
+
+// answer calls op on the owner socket c with args and decodes its answer as a T.
+func answer[T any](c proc.Conn, op string, args any) (T, error) {
+	var v T
+	err := c.Call(op, args, &v)
+	return v, err
 }
 
 // up waits for the owner socket to answer, as the kernel's uid.
 func (r *rig) up(cmd *exec.Cmd, out *bytes.Buffer) {
 	r.t.Helper()
 	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(50 * time.Millisecond) {
-		if _, err := r.owner().Status(); err == nil {
+		if _, err := answer[[]kernel.Unsettled](r.owner(), "status", nil); err == nil {
 			return
 		}
 		if cmd.ProcessState != nil || time.Now().After(deadline) {
@@ -543,13 +553,13 @@ func TestTheUnlockStepBecomesTheKernel(t *testing.T) {
 	st.Close()
 	cmd, out := r.boot()
 	r.up(cmd, out)
-	n, err := r.owner().LineChanges()
+	n, err := answer[int](r.owner(), "linechanges", nil)
 	must(t, err)
 	what := kernel.LineHash(n, 300)
-	if err := r.owner().SetLine(300, key.Approve(ed, what)); !errors.Is(err, kernel.ErrNeedsCosign) {
+	if err := r.owner().Call("setline", proc.LineArgs{Percent: 300, Cosigns: []key.Cosign{key.Approve(ed, what)}}, nil); !errors.Is(err, kernel.ErrNeedsCosign) {
 		t.Fatalf("a raise with one anchor's cosign: got %v, want ErrNeedsCosign", err)
 	}
-	must(t, r.owner().SetLine(300, key.Approve(hw, what), key.Approve(ed, what)))
+	must(t, r.owner().Call("setline", proc.LineArgs{Percent: 300, Cosigns: []key.Cosign{key.Approve(hw, what), key.Approve(ed, what)}}, nil))
 	// #2998: once its sockets listen, the kernel marks itself up, as its
 	// own uid, for its unit to read when it exits.
 	if fi, err := os.Lstat(r.mainConfig().Up); err != nil || !fi.Mode().IsRegular() || fi.Size() != 0 {
@@ -584,12 +594,12 @@ func TestTheUnlockStepBecomesTheKernel(t *testing.T) {
 			}
 		}
 	}
-	must(t, r.owner().Stop())
+	must(t, r.owner().Call("stop", nil, nil))
 	r.shutdown(cmd, out)
 
 	cmd, out = r.boot()
 	r.up(cmd, out)
-	c, err := r.owner().Changes()
+	c, err := answer[key.Changes](r.owner(), "changes", nil)
 	must(t, err)
 	if !c.Stopped {
 		t.Fatal("the second boot lost the first boot's STOP")
@@ -609,10 +619,10 @@ func TestASetupOnlyKernelTakesTheOwnersKeysOnce(t *testing.T) {
 	cmd, out := r.boot()
 	r.up(cmd, out)
 	o := r.owner()
-	if err := o.Stop(); !errors.Is(err, proc.ErrSetupOnly) {
+	if err := o.Call("stop", nil, nil); !errors.Is(err, proc.ErrSetupOnly) {
 		t.Fatalf("STOP before setup: got %v, want ErrSetupOnly", err)
 	}
-	info, err := o.SetupInfo()
+	info, err := answer[proc.SetupInfo](o, "setupinfo", nil)
 	must(t, err)
 	box := r.keys.Head.Get().Public().(ed25519.PublicKey)
 	if !info.Open || !info.Box.Equal(box) {
@@ -637,26 +647,26 @@ func TestASetupOnlyKernelTakesTheOwnersKeysOnce(t *testing.T) {
 		"another box":        kernel.SignSetup(otherBox, key.Ed25519Signer(hw1), key.Ed25519Signer(hw2)),
 		"one key unsigned":   unsigned,
 	} {
-		if err := o.Setup(f); !errors.Is(err, kernel.ErrSetupKeys) {
+		if err := o.Call("setup", f, nil); !errors.Is(err, kernel.ErrSetupKeys) {
 			t.Errorf("%s: got %v, want ErrSetupKeys", name, err)
 		}
 	}
-	must(t, o.Setup(kernel.SignSetup(box, key.Ed25519Signer(hw1), key.Ed25519Signer(hw2))))
-	if info, err := o.SetupInfo(); err != nil || info.Open {
+	must(t, o.Call("setup", kernel.SignSetup(box, key.Ed25519Signer(hw1), key.Ed25519Signer(hw2)), nil))
+	if info, err := answer[proc.SetupInfo](o, "setupinfo", nil); err != nil || info.Open {
 		t.Fatalf("setup info after setup: %+v %v, want closed", info, err)
 	}
-	if err := o.Setup(kernel.SignSetup(box, key.Ed25519Signer(hw2), key.Ed25519Signer(hw1))); !errors.Is(err, kernel.ErrSetupClosed) {
+	if err := o.Call("setup", kernel.SignSetup(box, key.Ed25519Signer(hw2), key.Ed25519Signer(hw1)), nil); !errors.Is(err, kernel.ErrSetupClosed) {
 		t.Fatalf("a second setup: got %v, want ErrSetupClosed", err)
 	}
-	must(t, o.Stop()) // the kernel now serves as any other
+	must(t, o.Call("stop", nil, nil)) // the kernel now serves as any other
 	r.shutdown(cmd, out)
 
 	cmd, out = r.boot()
 	r.up(cmd, out)
-	if c, err := r.owner().Changes(); err != nil || !c.Stopped {
+	if c, err := answer[key.Changes](r.owner(), "changes", nil); err != nil || !c.Stopped {
 		t.Fatalf("the second boot: %v %v, want the first boot's STOP", c, err)
 	}
-	if err := r.owner().Setup(kernel.SignSetup(box, key.Ed25519Signer(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{14}, 32))), key.Ed25519Signer(hw1))); !errors.Is(err, kernel.ErrSetupClosed) {
+	if err := r.owner().Call("setup", kernel.SignSetup(box, key.Ed25519Signer(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{14}, 32))), key.Ed25519Signer(hw1)), nil); !errors.Is(err, kernel.ErrSetupClosed) {
 		t.Fatalf("setup on the second boot: got %v, want ErrSetupClosed", err)
 	}
 	r.shutdown(cmd, out)
@@ -691,7 +701,7 @@ func TestARolledBackDriveStartsNoKernel(t *testing.T) {
 	}
 	cmd, out = r.boot()
 	r.up(cmd, out)
-	must(t, r.owner().Stop())
+	must(t, r.owner().Call("stop", nil, nil))
 	r.shutdown(cmd, out)
 	for f, b := range saved {
 		must(t, os.WriteFile(f, b, 0o600))
@@ -1290,7 +1300,7 @@ func TestUnlockWritesTheClerksAnchors(t *testing.T) {
 	box := r.keys.Head.Get().Public().(ed25519.PublicKey)
 	hw1 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{11}, 32))
 	hw2 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{12}, 32))
-	must(t, r.owner().Setup(kernel.SignSetup(box, key.Ed25519Signer(hw1), key.Ed25519Signer(hw2))))
+	must(t, r.owner().Call("setup", kernel.SignSetup(box, key.Ed25519Signer(hw1), key.Ed25519Signer(hw2)), nil))
 	r.shutdown(cmd, out)
 	want := []key.PublicKey{key.Ed25519(hw1.Public().(ed25519.PublicKey)), key.Ed25519(hw2.Public().(ed25519.PublicKey))}
 	if a := written(path); a != nil {
@@ -1533,10 +1543,12 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 	r.ask(lostCardApproval(recipientOf(t, r.recovery)))
 	cmd, out := r.boot()
 	r.up(cmd, out)
-	id, err := r.owner().RecoveryCardID()
+	card, err := answer[proc.RecoveryCardID](r.owner(), "recoverycardid", nil)
 	must(t, err)
+	id := card.ID
 	tap := key.Approve(key.Ed25519Signer(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{1}, 32))), kernel.RecoveryCardHash(id))
-	bits, err := r.owner().RecoveryCard(tap)
+	read, err := answer[proc.RecoveryCardRead](r.owner(), "recoverycard", proc.RecoveryCardArgs{Cosign: tap})
+	bits := read.Key
 	if err != nil || len(bits) != handoff.MadeCardLen {
 		t.Fatalf("the kernel's card: %v (output %s)", err, out)
 	}
@@ -1547,11 +1559,11 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 	if bytes.Equal(newKey, r.recovery) {
 		t.Fatal("the kernel's card is the old one")
 	}
-	if v, err := r.owner().Backups(); err != nil || v.Recipient != recipientOf(t, newKey) {
+	if v, err := answer[proc.BackupsView](r.owner(), "backups", nil); err != nil || v.Recipient != recipientOf(t, newKey) {
 		t.Fatalf("the kernel's recipient after the rotation: %+v, %v", v, err)
 	}
-	must(t, r.owner().RecoveryCardDone())
-	if _, err := r.owner().RecoveryCardID(); !errors.Is(err, proc.ErrNoRecoveryCard) {
+	must(t, r.owner().Call("recoverycarddone", nil, nil))
+	if _, err := answer[proc.RecoveryCardID](r.owner(), "recoverycardid", nil); !errors.Is(err, proc.ErrNoRecoveryCard) {
 		t.Fatalf("after the confirm: %v", err)
 	}
 	r.shutdown(cmd, out)
@@ -1688,10 +1700,10 @@ func TestLostCardRequestIgnoredUnlessValid(t *testing.T) {
 	must(t, os.WriteFile(r.request, sign(r.keys.Head.Get(), expired), 0o600))
 	cmd, out := r.boot()
 	r.up(cmd, out)
-	if v, err := r.owner().Backups(); err != nil || v.Recipient != old {
+	if v, err := answer[proc.BackupsView](r.owner(), "backups", nil); err != nil || v.Recipient != old {
 		t.Fatalf("the kernel's recipient: %+v, %v", v, err)
 	}
-	if _, err := r.owner().RecoveryCardID(); !errors.Is(err, proc.ErrNoRecoveryCard) {
+	if _, err := answer[proc.RecoveryCardID](r.owner(), "recoverycardid", nil); !errors.Is(err, proc.ErrNoRecoveryCard) {
 		t.Fatalf("a kernel with no new key: %v", err)
 	}
 	r.shutdown(cmd, out)

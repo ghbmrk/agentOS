@@ -1,8 +1,9 @@
 package proc
 
 // The owner and content clients of the kernel process's sockets (KEY-9-reach-inbound-offset,
-// #5732): no binary links them, so they live with the tests that speak the wire through them,
-// outside the trusted core's lines (KRN-2, D-310). agentosd's client is owner/kernelsock.
+// #5732, KRN-2-proc-test-support #6386): no binary links them, so they live with the tests that
+// speak the wire through them, outside the trusted core's lines (KRN-2, D-310). agentosd's client
+// is owner/kernelsock; agentos-unlock's tests call proc.Conn with the kernel's own wire types.
 
 import (
 	"crypto/ed25519"
@@ -11,6 +12,49 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
+
+// Owner is the owner seam over the kernel process's owner socket.
+type Owner struct{ Conn }
+
+func (o Owner) SetLine(percent int64, cos ...key.Cosign) error {
+	return o.Call("setline", LineArgs{percent, cos}, nil)
+}
+
+func (o Owner) Stop() error { return o.Call("stop", nil, nil) }
+
+// Setup logs the owner's first hardware keys on a setup-only kernel.
+func (o Owner) Setup(f kernel.FirstAnchors) error { return o.Call("setup", f, nil) }
+
+// SetupInfo reads whether setup is open and the box key it signs over.
+func (o Owner) SetupInfo() (i SetupInfo, err error) { err = o.Call("setupinfo", nil, &i); return }
+
+func (o Owner) Status() (u []kernel.Unsettled, err error) { err = o.Call("status", nil, &u); return }
+func (o Owner) LineChanges() (n int, err error)           { err = o.Call("linechanges", nil, &n); return }
+
+// Changes is the revocations, pauses and STOP in force.
+func (o Owner) Changes() (c key.Changes, err error) { err = o.Call("changes", nil, &c); return }
+
+// Backups is the recipient's ID, every destination and every kept backup.
+func (o Owner) Backups() (v BackupsView, err error) { err = o.Call("backups", nil, &v); return }
+
+// RecoveryCardID is the held card's backup recipient ID.
+func (o Owner) RecoveryCardID() (string, error) {
+	var r RecoveryCardID
+	err := o.Call("recoverycardid", nil, &r)
+	return r.ID, err
+}
+
+// RecoveryCard is the recovery key the unlock step made at this boot on
+// the lost-card route, for the new card, on an anchor's signature c over
+// kernel.RecoveryCardHash of its ID; ErrNoRecoveryCard once confirmed.
+func (o Owner) RecoveryCard(c key.Cosign) ([]byte, error) {
+	var r RecoveryCardRead
+	err := o.Call("recoverycard", RecoveryCardArgs{c}, &r)
+	return r.Key, err
+}
+
+// RecoveryCardDone wipes it, once the owner has confirmed the card.
+func (o Owner) RecoveryCardDone() error { return o.Call("recoverycarddone", nil, nil) }
 
 func (o Owner) Submit(p kernel.Plan) error { return o.Call("submit", p, nil) }
 func (o Owner) Retry(plan string, index, attempt int) error {
