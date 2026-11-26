@@ -204,7 +204,7 @@ def read_verify():
         "PASS" if ok else "FAIL", size >> 20, dt, size / dt / 1e6 if dt else 0, errs)
 
 
-# PE2: the RES-2 floor budget, MiB, and the agent machine's size (broker/budget). What remains
+# PE2: the RES-2 floor budget, MiB, and the agent machine's size (agentosd's -agent-mem-mb default). What remains
 # after host, inference, browser and headroom is the agent-machine pool; it must hold the agent.
 FLOOR = {"host": 1024, "inference": 2048, "browser": 512, "headroom": 600}
 AGENT_MB = 1536
