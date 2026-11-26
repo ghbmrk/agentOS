@@ -3569,6 +3569,138 @@ class MovedDecls(unittest.TestCase):
             '\t}\n\tos.Exit(m.Run())\n}\n')
         self.assertEqual(late(plain), only)
 
+    def test_a_testmain_or_init_that_may_reorder_widens_every_package(self):
+        # #6682, from #6677: with or without Parallel, a TestMain, init or package var that may change the
+        # test flags or rerun the binary, or a goroutine that may run a subtest, moves every test.
+        # REQ: TOOL-mutgate-testmain-order
+        new = 'package hint\n\nimport "testing"\n\nfunc TestNew(t *testing.T) {\n\tif Up(2) != 3 {\n\t\tt.Fatal(0)\n\t}\n}\n'
+        every, only = (["TestDown", "TestNew", "TestUp"], ["TestDown", "TestUp"]), (["TestNew"], [])
+        imp = lambda *paths: MOVE_TEST.replace('\t"testing"\n', "".join(f'\t{p}\n' for p in paths) + '\t"testing"\n')
+
+        def late(test, src=TWO_SRC, **kw):
+            err = io.StringIO()
+            with mock.patch.object(mutgate, "SAID", set()), contextlib.redirect_stderr(err):
+                got = self.reach({"hint_test.go": test}, {"hint_test.go": test, "z_test.go": new}, src=src, **kw)
+            return got, err.getvalue()
+        for name, test, src in (
+                # (1) no Parallel at all: a TestMain that loops, jumps back or reruns (L3 probe on #6677).
+                ("TestMain loop", imp('"os"') + '\nfunc TestMain(m *testing.M) {\n\tc := 0\n\tfor i := 0; i < 2; i++ {\n'
+                 '\t\tc = m.Run()\n\t}\n\tos.Exit(c)\n}\n', TWO_SRC),
+                ("TestMain twice", imp('"os"') + '\nfunc TestMain(m *testing.M) {\n\tm.Run()\n\tos.Exit(m.Run())\n}\n', TWO_SRC),
+                ("TestMain helper", imp('"os"') + '\nfunc TestMain(m *testing.M) {\n\tsetup()\n\tos.Exit(m.Run())\n}\n\nfunc setup() {}\n', TWO_SRC),
+                # (2) a re-exec with -test.shuffle (Security r2 on #6677).
+                ("TestMain syscall.Exec", imp('"os"', '"syscall"') + '\nfunc TestMain(m *testing.M) {\n\tif os.Getenv("X") == "" {\n'
+                 '\t\tos.Setenv("X", "1")\n\t\tsyscall.Exec("/proc/self/exe", []string{"x", "-test.shuffle=on"}, os.Environ())\n'
+                 '\t}\n\tos.Exit(m.Run())\n}\n', TWO_SRC),
+                # Inline, so only the os/exec import can fail it (L3 on #6686).
+                ("TestMain os/exec", imp('"os"', '"os/exec"') + '\nfunc TestMain(m *testing.M) {\n\tif os.Getenv("X") == "" {\n'
+                 '\t\texec.Command("/proc/self/exe").Run()\n\t}\n\tos.Exit(m.Run())\n}\n', TWO_SRC)):
+            with self.subTest(name):
+                got, err = late(test, src)
+                self.assertEqual(got, (None, None))  # TestMain is in the run list: every test, its own too
+                self.assertRegex(err, r"broker/hint/'s run list changes, so every test is a change \(broker/hint/hint_test\.go:\d+: TestMain\)")
+        for name, test, src, where in (
+                # (1) an init that sets test.shuffle or test.count: in a test file, a non-test file, by a helper.
+                ("init flag", imp('"flag"') + '\nfunc init() {\n\tflag.Set("test.shuffle", "on")\n}\n', TWO_SRC, "hint_test.go:\\d+: init"),
+                ("init aliased flag", imp('f "flag"') + '\nfunc init() {\n\tf.Set("test.count", "2")\n}\n', TWO_SRC, "hint_test.go:\\d+: init"),
+                ("init os.Args", imp('"os"') + '\nfunc init() {\n\tos.Args = append(os.Args, "-test.count=2")\n}\n', TWO_SRC, "hint_test.go:\\d+: init"),
+                ("init shuffle string", imp('"os"') + '\nfunc init() {\n\tos.Setenv("X", "-test.shuffle=on")\n}\n', TWO_SRC, "hint_test.go:\\d+: init"),
+                ("init helper", MOVE_TEST + '\nfunc init() {\n\tsetup()\n}\n', TWO_SRC.replace("package hint\n", 'package hint\n\nimport "flag"\n')
+                 + '\nfunc setup() { mark() }\n\nfunc mark() { flag.Set("test.shuffle", "on") }\n', "hint_test.go:\\d+: init"),
+                ("init method", MOVE_TEST + '\nfunc init() {\n\tvar s S\n\ts.setup()\n}\n', TWO_SRC.replace("package hint\n", 'package hint\n\nimport "flag"\n')
+                 + '\n// S is a setter.\ntype S int\n\nfunc (S) setup() { flag.Set("test.shuffle", "on") }\n', "hint_test.go:\\d+: init"),
+                ("init in a non-test file", MOVE_TEST, TWO_SRC.replace("package hint\n", 'package hint\n\nimport "flag"\n')
+                 + '\nfunc init() {\n\tflag.Set("test.shuffle", "on")\n}\n', "hint.go:\\d+: init"),
+                ("package var", imp('"flag"') + '\nvar _ = flag.Set("test.shuffle", "on")\n', TWO_SRC, "hint_test.go:\\d+: package var"),
+                ("init os/exec", imp('"os/exec"') + '\nfunc init() {\n\texec.Command("true").Run()\n}\n', TWO_SRC, "hint_test.go:\\d+: init"),
+                ("package var helper", MOVE_TEST + '\nvar _ = setup()\n', TWO_SRC.replace("package hint\n", 'package hint\n\nimport "flag"\n')
+                 + '\nfunc setup() error { return flag.Set("test.shuffle", "on") }\n', "hint_test.go:\\d+: package var"),
+                # (1) a subtest a goroutine runs may outlive its parent: Run, a T passed on, a Run method value.
+                ("go t.Run", MOVE_TEST.replace('\tif Down(3)', '\tgo t.Run("d", func(t *testing.T) {})\n\tif Down(3)'), TWO_SRC,
+                 "hint_test.go:\\d+: go statement"),
+                ("go literal", MOVE_TEST.replace('\tif Down(3)', '\tgo func() {\n\t\tt.Run("d", func(t *testing.T) {})\n\t}()\n\tif Down(3)'),
+                 TWO_SRC, "hint_test.go:\\d+: go statement"),
+                ("go helper", MOVE_TEST.replace('\tif Down(3)', '\tgo sub(t)\n\tif Down(3)')
+                 + '\nfunc sub(t *testing.T) { t.Run("d", func(t *testing.T) {}) }\n', TWO_SRC, "hint_test.go:\\d+: go statement"),
+                ("grouped T", MOVE_TEST + '\nfunc helper(a, b *testing.T) { go a.Run("d", func(t *testing.T) {}) }\n', TWO_SRC,
+                 "hint_test.go:\\d+: go statement"),
+                ("Run method value", MOVE_TEST.replace('\tif Down(3)', '\trun := t.Run\n\trun("d", func(t *testing.T) {})\n\tif Down(3)'),
+                 TWO_SRC, "hint_test.go:\\d+: Run method value")):
+            with self.subTest(name):
+                got, err = late(test, src)
+                self.assertEqual(got, every)
+                self.assertRegex(err, rf"broker/hint/'s run list changes, so every test is a change \(broker/hint/{where}")
+        # An imported package's init counts the same.
+        lib = 'package lib\n\nimport "flag"\n\nfunc init() {\n\tflag.Set("test.shuffle", "on")\n}\n'
+        src = TWO_SRC.replace("package hint\n", 'package hint\n\nimport _ "example.invalid/broker/lib"\n')
+        got, err = late(MOVE_TEST, src, extra={"lib/lib.go": lib})
+        self.assertEqual(got, every)
+        self.assertIn("broker/lib/lib.go:5: init", err)
+        # An init or var calling an imported module package's function that does, one hop or more, or its
+        # method; and a package not read (Security and L3 on #6686).
+        flags = 'package lib\n\nimport "flag"\n\n// On shuffles.\nfunc On() { set() }\n\nfunc set() { flag.Set("test.shuffle", "on") }\n\n' \
+                '// Plain does nothing.\nfunc Plain() {}\n\n// S is a setter.\ntype S int\n\n// M shuffles.\nfunc (S) M() { On() }\n'
+        uses = lambda body: imp('"example.invalid/broker/lib"') + body
+        for name, test, src, where in (
+                ("init", uses('\nfunc init() {\n\tlib.On()\n}\n'), TWO_SRC, "hint_test.go:\\d+: init"),
+                ("var literal", uses('\nvar _ = func() int {\n\tlib.On()\n\treturn 0\n}()\n'), TWO_SRC, "hint_test.go:\\d+: package var"),
+                ("method", uses('\nfunc init() {\n\tvar s lib.S\n\ts.M()\n}\n'), TWO_SRC, "hint_test.go:\\d+: init"),
+                ("non-test file", MOVE_TEST, TWO_SRC.replace("package hint\n", 'package hint\n\nimport "example.invalid/broker/lib"\n')
+                 + '\nfunc init() {\n\tlib.On()\n}\n', "hint.go:\\d+: init")):
+            with self.subTest("module package " + name):
+                got, err = late(test, src, extra={"lib/lib.go": flags})
+                self.assertEqual(got, every)
+                self.assertRegex(err, rf"\(broker/hint/{where}")
+        # A dot import names them bare (L3 on #6686), and dot-imported flag or os names Set or Args bare.
+        dot = lambda body, path='"example.invalid/broker/lib"': imp('. ' + path, '"os"') + body
+        for name, test in (
+                ("init", dot('\nfunc init() {\n\tOn()\n}\n\nvar _ = os.Exit\n')),
+                ("var literal", dot('\nvar _ = func() int {\n\tOn()\n\treturn 0\n}()\n\nvar _ = os.Exit\n')),
+                ("TestMain", dot('\nfunc TestMain(m *testing.M) {\n\tOn()\n\tos.Exit(m.Run())\n}\n')),
+                ("method", dot('\nfunc init() {\n\tvar s S\n\ts.M()\n}\n\nvar _ = os.Exit\n')),
+                ("flag", dot('\nfunc init() {\n\tSet("test.count", "2")\n}\n\nvar _ = os.Exit\n', '"flag"'))):
+            with self.subTest("dot import " + name):
+                got, err = late(test, extra={"lib/lib.go": flags})
+                self.assertEqual(got, (None, None) if name == "TestMain" else every)
+                self.assertRegex(err, r"\(broker/hint/hint_test\.go:\d+: (init|package var|TestMain)")
+        self.assertEqual(late(dot('\nfunc init() {\n\tPlain()\n}\n\nvar _ = os.Exit\n'), extra={"lib/lib.go": flags})[0], every)
+        self.assertEqual(late(imp('. "strings"', '"os"') + '\nvar _ = Repeat\n\nvar _ = os.Exit\n'), (only, ""))
+        # An import named otherwise than its last element, a dot-imported os/exec, and a module package
+        # with a name but no readable marks (Security on #6686).
+        golib = flags.replace("package lib\n", "package golib\n")
+        unread = 'package lib\n\nimport (\n\t"fmt"; "flag"\n)\n\nfunc On() { flag.Set(fmt.Sprint("test.count"), "2") }\n'
+        for name, test, extra in (
+                ("module package go-lib", imp('"example.invalid/broker/go-lib"') + '\nfunc init() {\n\tgolib.On()\n}\n', {"go-lib/lib.go": golib}),
+                ("lib/v2", imp('"github.com/x/lib/v2"') + '\nfunc init() {\n\tlib.On()\n}\n', {}),
+                ("go-lib", imp('"github.com/x/go-lib"') + '\nfunc init() {\n\tgolib.On()\n}\n', {}),
+                ("dot os/exec", imp('. "os/exec"') + '\nfunc init() {\n\tCommand("true").Run()\n}\n', {}),
+                ("module package not read", uses('\nfunc init() {\n\tlib.On()\n}\n'), {"lib/lib.go": unread})):
+            with self.subTest(name):
+                got, err = late(test, extra=extra)
+                self.assertEqual(got, every)
+                self.assertRegex(err, r"\(broker/hint/hint_test\.go:\d+: init\)")
+        self.assertEqual(late(uses('\nfunc init() {\n\tlib.Plain()\n}\n'), extra={"lib/lib.go": flags}), (only, ""))
+        unread = 'package lib\n\nimport (\n\t"fmt"; "os"\n)\n\nvar _, _ = fmt.Sprint, os.Exit\n'
+        blank = TWO_SRC.replace("package hint\n", 'package hint\n\nimport _ "example.invalid/broker/lib"\n')
+        got, err = late(MOVE_TEST, blank, extra={"lib/lib.go": unread})
+        self.assertEqual(got, every)
+        self.assertIn("(broker/lib/ not read)", err)
+        # What runs once and changes no flag keeps the narrowing, and says nothing: a plain TestMain, an
+        # init or var naming only other things (a selector of an import named like a marked method too),
+        # a goroutine that only logs on t.
+        for name, test, src in (
+                ("plain TestMain", imp('"os"') + '\nfunc TestMain(m *testing.M) {\n\tos.Exit(m.Run())\n}\n', TWO_SRC),
+                ("plain init", MOVE_TEST + '\nvar n int\n\nfunc init() {\n\tn = Up(1)\n}\n', TWO_SRC),
+                ("selector", imp('"errors"') + '\nvar errUp = errors.New("up")\n', TWO_SRC.replace("package hint\n", 'package hint\n\nimport "flag"\n')
+                 + '\n// S is a setter.\ntype S int\n\nfunc (S) New() { flag.Set("test.shuffle", "on") }\n'),
+                ("go logs", MOVE_TEST.replace('\tif Down(3)', '\tdone := make(chan int)\n\tgo func() {\n\t\tt.Log("d")\n'
+                                              '\t\tclose(done)\n\t}()\n\t<-done\n\tif Down(3)'), TWO_SRC)):
+            with self.subTest(name):
+                self.assertEqual(late(test, src), (only, ""))
+        # A Parallel read as no subtest's names its own place.
+        par = MOVE_TEST.replace('t.Fatal("down")\n\t}', 't.Fatal("down")\n\t}\n\tt.Parallel()')
+        self.assertRegex(late(par)[1], r"every test is a change \(broker/hint/hint_test\.go:\d+: Parallel not a subtest's first statement\)")
+
     def test_a_declaration_of_a_cgo_file_never_moves(self):
         # #6385, from #6376: a cgo file's code binds its own preamble, so nothing moves out of one.
         # REQ: TOOL-mutgate-moved-lines-fu
@@ -5491,6 +5623,115 @@ class RecordDeps(unittest.TestCase):
         found, problems = mutgate.resolve_record("k", [{**good, "deps": [dep]}], keys)
         self.assertEqual(found, {})
         self.assertIn("rests on orderProbe in broker/kernel/edge.go, which is no file now", problems[0])
+
+
+class RecordDepsLint(unittest.TestCase):
+    """MUT-record-deps-audit (#6499, L3 on #6498): an entry whose reason cites, as code, another top-level declaration
+    of its own package names it in deps, so an edit to that declaration stales the proof."""
+    # REQ: MUT-record-deps-audit
+
+    SRC, DEP = RecordDeps.SRC, RecordDeps.DEP
+    setUp, waive, records, entry = RecordDeps.setUp, RecordDeps.waive, RecordDeps.records, RecordDeps.entry
+
+    def write(self, reason, deps=None):
+        """A record of one entry for a.go:8 with this reason (and deps), as waive writes it."""
+        self.assertEqual(self.waive().returncode, 0)
+        e = {**self.entry(), "reason": reason, **({"deps": deps} if deps else {})}
+        self.record.write_text(f"# x\n{json.dumps(e)}\n")
+
+    def dep(self, name):
+        return {"file": "broker/netguard/b.go", "func": name,
+                "decl": {"g": Record.digest("func g() int {\nreturn 1\n}"),
+                         "probe": Record.digest("var (\nfirst = 1\nprobe = g()\n)")}[name]}
+
+    def test_an_entry_citing_another_function_without_deps_fails_and_with_its_dep_passes(self):
+        # Acceptance (#6499): a reason naming another function, no deps, fails; the same entry with that dep passes.
+        self.write("the two branches return the same value, as g() always returns 1")
+        r = self.records()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("a.go f 'if x > 1 {' cites g, declared outside its own declaration in broker/netguard/b.go, "
+                      "with no dep naming it", r.stderr)
+        self.assertIn("`mutgate.py waive --dep broker/netguard/b.go:g`", r.stderr)
+        self.write("the two branches return the same value, as g() always returns 1", [self.dep("g")])
+        r = self.records()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # A second cited name needs its own dep.
+        self.write("as g() returns 1 and `probe` is g's value", [self.dep("g")])
+        r = self.records()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("cites probe,", r.stderr)
+        self.assertNotIn("cites g,", r.stderr)
+
+    def test_waive_refuses_a_cited_name_without_its_dep(self):
+        r = self.waive(reason="the two branches return the same value, as g() always returns 1")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("cites g, declared outside its own declaration in broker/netguard/b.go", r.stderr)
+        self.assertFalse(self.record.exists())
+        r = self.waive("broker/netguard/b.go:g", reason="the two branches return the same value, as g() always returns 1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.records().returncode, 0)
+
+    def test_prose_members_files_and_the_own_declaration_are_not_citations(self):
+        (self.pkg / "c.go").write_text("package netguard\n\ntype T struct{ probe int }\n\nfunc (T) unrelated() {}\n"
+                                       "\nfunc readAll() {}\n")
+        for reason in ("as g always returns 1 and probe is set once",  # plain lowercase prose words
+                       "t.probe and x.g() are members, not package names; kernel.readAll is another package's",
+                       "the guard at g.go:4 and `g.go` return first",  # file names, in a code span too
+                       "f's `if x > 1` twin returns first, so f() is unchanged"):  # its own declaration
+            with self.subTest(reason):
+                self.write(reason)
+                r = self.records()
+                self.assertEqual(r.returncode, 0, r.stderr)
+        for reason, name, file in (("`probe` holds it", "probe", "b.go"), ("readAll() reads it", "readAll", "c.go"),
+                                   ("T.unrelated does nothing", "T.unrelated", "c.go"),
+                                   ("a T{} has no state", "T", "c.go"), ("as `x := g` shows", "g", "b.go"),
+                                   ("readAll, camel-shaped, is code", "readAll", "c.go")):
+            with self.subTest(reason):
+                self.write(reason)
+                r = self.records()
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn(f"cites {name}, declared outside its own declaration in broker/netguard/{file}", r.stderr)
+
+    def test_a_helper_in_the_entry_s_own_file_is_cited(self):
+        # #6498's shape: chrony.go's proof cites parseTracking, declared in chrony.go itself.
+        (self.pkg / "a.go").write_text(self.SRC + "\nfunc h() int {\n\treturn 1\n}\n")
+        self.write("both branches agree, as h() always returns 1")
+        r = self.records()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("cites h, declared outside its own declaration in broker/netguard/a.go", r.stderr)
+        self.record.unlink()
+        r = self.waive("broker/netguard/a.go:h", reason="both branches agree, as h() always returns 1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.records().returncode, 0)
+
+    def test_a_package_file_the_lister_cannot_read_fails_the_record(self):
+        # Fail closed (Security on #6561): no entry names z.go, yet the lint lists every file of the package.
+        self.write("g() returns 1", [self.dep("g")])
+        self.assertEqual(self.records().returncode, 0)
+        (self.pkg / "z.go").write_text("package netguard\n\nfunc {\n")
+        r = self.records()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("cannot list the declarations of broker/netguard/", r.stderr)
+        (self.pkg / "z.go").unlink()
+        (self.pkg / "z.go").symlink_to(self.pkg / "b.go")
+        r = self.records()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("symbolic link", r.stderr)
+
+    def test_a_dep_in_any_file_declaring_the_name_satisfies_it(self):
+        # Build-tagged twins: g in b.go and in c.go; a dep on either names it (the other file's edit is its own risk).
+        (self.pkg / "c.go").write_text("//go:build never\n\npackage netguard\n\nfunc g() int {\n\treturn 1\n}\n")
+        self.write("g() returns 1", [self.dep("g")])
+        r = self.records()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.write("g() returns 1", [{**self.dep("g"), "file": "broker/netguard/c.go"}])
+        r = self.records()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.write("g() returns 1")
+        r = self.records()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("cites g, declared outside its own declaration in broker/netguard/b.go, broker/netguard/c.go",
+                      r.stderr)
 
 
 class MutantScope(unittest.TestCase):

@@ -18,7 +18,7 @@ KRN-7: STOP never waits on a slow external party. Since #3311 the kernel process
 - `broker/kernel/proc/kernel.go`, `backup.go`, `backup_test.go`, `content_test.go`, `reseal_test.go`, `ASSUMPTIONS.md`.
 - `briefs/KRN-reseal-unlocked.md`.
 
-**Guard files:** none. The change grows the trusted core (`broker/kernel`, `broker/backup`), so the PR needs a `Trusted-core:` line naming a D-159 row.
+**Guard files:** none. The change grows the trusted core (`broker/kernel`, `broker/backup`), so the PR needs a `trusted-core #<PR> -- <decision ID>` line in `tools/trusted_base_reasons.txt` naming a D-159 row.
 
 ## Acceptance tests
 
