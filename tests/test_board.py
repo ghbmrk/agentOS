@@ -812,6 +812,22 @@ class CliTest(unittest.TestCase):
                 code = board.main(["render", "--repo", "o/r", "--out", str(path)], read=lambda: BOARD, fetch=github([]))
             self.assertEqual((code, path.read_text()), (1, board.render(BOARD, issues())))
 
+    def test_out_is_refused_outside_render(self):
+        # #6548: a flag either acts or is refused; `check --out BOARD.md` once exited as a plain
+        # check and looked as if it had rewritten the board.
+        for command in ("check", "archive", "stale", "intake", "transition"):
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit) as e:
+                board.main([command, "--repo", "o/r", "--out", "BOARD.md"], read=lambda: BOARD,
+                           fetch=github(opened(issues())))
+            self.assertEqual(e.exception.code, 2, command)
+            self.assertIn("--out is for render only", err.getvalue())
+
+    def test_emit_documents_that_out_becomes_a_new_file(self):
+        # #6548: os.replace gives FILE a new inode, so a symlink becomes a regular file.
+        self.assertIn("new file", board.emit.__doc__)
+        self.assertIn("symlink", board.emit.__doc__)
+
     def test_render_refuses_a_skeleton_with_no_table(self):
         # What the shell leaves for `render > BOARD.md` to read: render fails instead of emitting
         # a board with every row gone.
