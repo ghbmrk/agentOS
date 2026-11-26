@@ -53,6 +53,10 @@ an armed PR past a cancelled one: `--runs` is the head's and merge base's Action
 workflow's newest pull_request run on the head must pass, else it prints `needs-check <workflow>:<state> ...` and
 exits 1. Without `--runs` it prints `needs-runs` and exits 1, so no caller reads `same` with the checks unread;
 `tools/premerge_runs.sh` builds the runs file, for premerge.yml and for a local check alike (#5386).
+Then it reads the MUTANTS-EQUIVALENT records on the merge of `head` into `base` (PREMERGE-records-merge, #6716), with this
+checkout's `tools/mutgate.py records` (Go on PATH): a problem the merge has and `base` lacks prints `needs-records <records>`,
+a check that could not run `needs-records error`, and a PR changing the check itself while main changed what it reads since
+the merge base `needs-main-merge <files>`; each exits 1 (`records_merged`).
 
 `--bot` is the gate form for the generated-file bot PRs, which carry no verdict (PREMERGE-wire, #1860): it
 prints `bot` (exit 0) only when `head-ref` is one of the BOT branches, base..head changes nothing but that
@@ -67,12 +71,16 @@ trailer names.
 import ast
 import collections
 import importlib.util
+import io
 import json
+import os
 import pathlib
 import re
 import secrets
+import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import zipfile
 import zlib
@@ -946,6 +954,84 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
     return held
 
 
+# PREMERGE-records-merge (#6716): CI resolves the MUTANTS-EQUIVALENT records on a PR's merge ref when CI runs, and main
+# need not be in the branch, so two PRs each green on their own base can break main's `mutgate.py records` together
+# (#6606 with #6561, fixed by #6713; #6640 with #6561, fixed by #6715). The gate reads them again on the merge it is
+# about to release. RECORDS_TOOLS change what `records` reports; RECORDS_TREE is what it reads.
+RECORD = "MUTANTS-EQUIVALENT"
+RECORDS_TOOLS = ("tools/mutgate.py", "tools/mutgate_stmts.go", "tools/risk_tier.py", "broker/core/core.txt")
+RECORDS_TREE = ("broker", ":(exclude)broker/vendor")
+RECORDS_TIMEOUT = 90  # seconds a side, two sides inside premerge-gate's 8 minutes
+TOOLS = pathlib.Path(__file__).resolve().parent
+# The child's environment: no token the gate step holds (GH_TOKEN, STATUS_TOKEN) reaches it.
+RECORDS_ENV = ("PATH", "HOME", "TMPDIR", "LANG", "GOROOT", "GOCACHE")
+NAMED = re.compile(r"broker/[^\s:'\"]+")
+
+
+def _records(cwd, treeish, tmp):
+    """The problems this checkout's `tools/mutgate.py records` prints on treeish's broker/ (vendor/ left out), run in a
+    copy under tmp with this checkout's tools/ and broker/core/core.txt, so the tree is only data, as in mutgate.yml's
+    trusted jobs. A run that fails naming no problem, or times out, returns why."""
+    dest = pathlib.Path(tempfile.mkdtemp(dir=tmp))
+    if not _git(cwd, "ls-tree", treeish, "--", "broker").strip():
+        return set()  # no broker/: no record to read
+    try:
+        with tarfile.open(fileobj=io.BytesIO(_git(cwd, "archive", "--format=tar", treeish, "--", *RECORDS_TREE))) as t:
+            t.extractall(dest, filter="data")  # refuses absolute paths and links leading out of dest
+    except tarfile.FilterError as e:
+        return {f"mutgate records: the tree is refused: {e}"}
+    shutil.copytree(TOOLS, dest / "tools", ignore=shutil.ignore_patterns("__pycache__"))
+    core = dest / "broker/core/core.txt"
+    core.parent.mkdir(parents=True, exist_ok=True)
+    core.unlink(missing_ok=True)
+    shutil.copyfile(TOOLS.parent / "broker/core/core.txt", core)
+    env = {k: os.environ[k] for k in RECORDS_ENV if k in os.environ} | {"GOFLAGS": "", "GOWORK": "off", "GOTOOLCHAIN": "local"}
+    try:
+        r = subprocess.run([sys.executable, "-I", str(dest / "tools/mutgate.py"), "records"], cwd=dest, env=env,
+                           capture_output=True, text=True, timeout=RECORDS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return {f"mutgate records ran past {RECORDS_TIMEOUT}s"}
+    found = {l for l in r.stderr.splitlines() if l.startswith("mutgate: ")}
+    return found or ({f"mutgate records exited {r.returncode}"} if r.returncode else set())
+
+
+def _files(cwd, a, b, *paths):
+    return [f for f in _git(cwd, *DIFF, a, b, "--", *paths).decode(errors="surrogateescape").split("\0") if f]
+
+
+def records_merged(cwd, head="HEAD", base="origin/main"):
+    """(why, [problem]) the merge of head into base fails MUTANTS-EQUIVALENT records it did not fail on base (#6716),
+    or (None, []).
+
+    The merge `git merge-tree` writes is read with this checkout's tools, on the merge and, when that fails, on base: a
+    problem naming broker/ that base's tree has too is main's own red and holds nothing; any other failure (the lister
+    did not build, a timeout) holds. A conflicted merge, or one that leaves broker/ as base has it, reads none: GitHub
+    cannot merge the first, and the second is base's tree. A PR changing RECORDS_TOOLS changes the check itself, which
+    the gate never runs from a PR, so it holds as `needs-main-merge` while main has changed, since the PR's merge base,
+    a record, a .go file under a directory holding one, or RECORDS_TOOLS: merging main in has CI run the PR's check on them."""
+    onto = _git(cwd, "merge-base", base, head).decode().strip()
+    mine = _files(cwd, onto, head, *RECORDS_TOOLS)
+    if mine:
+        held = {f.rsplit("/", 1)[0] for f in _git(cwd, "ls-tree", "-r", "-z", "--name-only", base, "--", "broker")
+                .decode(errors="surrogateescape").split("\0") if f.endswith("/" + RECORD)}
+        if _files(cwd, onto, base, *RECORDS_TOOLS, f":(glob)broker/**/{RECORD}", *(f":(glob){d}/**/*.go" for d in held)):
+            return "needs-main-merge " + " ".join(mine), []
+    out = subprocess.run(["git", "merge-tree", "--write-tree", "--no-messages", base, head], cwd=cwd, capture_output=True)
+    if out.returncode:
+        return None, []
+    tree = out.stdout.decode().split()[0]
+    if not _files(cwd, base, tree, *RECORDS_TREE):
+        return None, []
+    with tempfile.TemporaryDirectory() as tmp:
+        new = _records(cwd, tree, tmp)
+        if any(NAMED.search(p) for p in new):
+            new -= _records(cwd, base, tmp)
+    if not new:
+        return None, []
+    names = sorted({m.group(0) if (m := NAMED.search(p)) else "error" for p in new})
+    return "needs-records " + " ".join(names), sorted(new)
+
+
 def main(argv):
     args, base = argv[1:], "origin/main"
     needs_mark = "--needs-mark" in args  # in any position
@@ -997,6 +1083,12 @@ def main(argv):
         held = checks_held(".", runs, head, base)
         if held:
             print("needs-check " + " ".join(held))
+            return 1
+        why, problems = records_merged(".", head, base)
+        if why:
+            for p in problems:
+                print(p, file=sys.stderr)
+            print(why)
             return 1
         print("same")
         return 0
