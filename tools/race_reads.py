@@ -315,15 +315,17 @@ NAMELEN = 64  # bpftrace's string length for one path part; a part this long may
 
 
 def stats_program(ino, dev):
-    """The bpftrace program that traces stats in the kernel: every vfs_getattr, which each stat
-    call reaches with the dentry it resolved, of a file under the directory with inode `ino` on
+    """The bpftrace program that traces stats in the kernel: every security_inode_getattr, which
+    each stat call reaches (through vfs_getattr) with the dentry it resolved, of a file under the directory with inode `ino` on
     the filesystem with (kernel) device `dev`, and outside its broker/. A kernel-side probe makes
     no ptrace stop, so the stats the tests' child go commands make of GOROOT cost almost nothing
     (strace's stops for them doubled broker/kernel/sim's time). The probe walks d_parent from the
     file to root and prints the path's parts, leaf first, one line each ("C tid i name"), then
     "E tid pid parts"; the dentry walk gives the file's place in its filesystem, so a bind mount
     or a sandbox's root does not hide it. Go's VCS-stamp git (VCS_STAMP), marked at the exec a go
-    process makes, prints nothing."""
+    process makes, prints nothing. The probe is not on vfs_getattr itself: the runner's kernel
+    inlines it into fs/stat.c's stat calls, so its fexit saw none; security_inode_getattr lives in
+    another file and is always called. A probe that sees no stats fails the control stat."""
     ino, dev = int(ino), int(dev)
     a = [f"str(args->argv[{i}], 32)" for i in range(7)]
     walk = "\n".join(f"  $d{i + 1} = $d{i}->d_parent;" for i in range(LEVELS))
@@ -345,7 +347,7 @@ tracepoint:syscalls:sys_enter_execve {{
   }}
 }}
 tracepoint:sched:sched_process_exit /pid == tid/ {{ delete(@stamp[pid]); }}
-fexit:vfs_getattr /@stamp[pid] == 0/ {{
+fexit:security_inode_getattr /@stamp[pid] == 0/ {{
   $d0 = args->path->dentry;
 {walk}
   $k = 0;
@@ -358,14 +360,6 @@ fexit:vfs_getattr /@stamp[pid] == 0/ {{
       printf("E %d %d %d\\n", tid, pid, $k);
     }}
   }}
-}}
-fexit:vfs_getattr /str(args->path->dentry->d_name.name, 16) == "race_reads.py"/ {{
-  $e = args->path->dentry;
-  printf("D want %d %d; %s %d %d; %s %d %d; %s %d %d\\n", {ino}, {dev},
-         str($e->d_parent->d_name.name, 16), $e->d_parent->d_inode->i_ino, $e->d_parent->d_sb->s_dev,
-         str($e->d_parent->d_parent->d_name.name, 16), $e->d_parent->d_parent->d_inode->i_ino, $e->d_parent->d_parent->d_sb->s_dev,
-         str($e->d_parent->d_parent->d_parent->d_name.name, 16), $e->d_parent->d_parent->d_parent->d_inode->i_ino,
-         $e->d_parent->d_parent->d_parent->d_sb->s_dev);
 }}
 END {{ clear(@stamp); printf("END\\n"); }}
 """
@@ -406,10 +400,8 @@ def stat_lines(lines, root):
             path = posixpath.join(root, *(got[i] for i in reversed(range(k))))
             control |= path == posixpath.join(root, STAT_CONTROL)
             yield None, path
-        elif line.startswith("Attaching ") and not started or not line:
+        elif line.startswith("Attaching ") and not started:
             continue
-        elif line.startswith("D "):  # CI-race-scope bring-up: the probe's view of the control file
-            yield f"stat trace diagnostic: {line}", None
         else:
             yield f"stat trace: unexpected line {line!r} (lost events, or an error)", None
     if parts:

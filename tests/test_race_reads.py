@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -317,7 +318,11 @@ class StatTraceTest(unittest.TestCase):
         self.assertIn(f"$d1->d_inode->i_ino == 1234 && $d1->d_sb->s_dev == {5 << 20 | 6}", prog)
         self.assertIn(f"$d{race_reads.LEVELS} = $d{race_reads.LEVELS - 1}->d_parent;", prog)
         self.assertIn('!= "broker"', prog)
-        self.assertIn("fexit:vfs_getattr", prog)
+        # security_inode_getattr, not vfs_getattr: fs/stat.c inlines vfs_getattr into its stat
+        # calls on the runner's kernel, so a probe on vfs_getattr sees no stat a process makes.
+        self.assertIn("fexit:security_inode_getattr /", prog)
+        self.assertNotIn("vfs_getattr", prog)
+        self.assertEqual(prog.count("fexit:"), 1)
         self.assertNotIn("path(", prog)  # bpf_d_path is missing on the runner's kernel
         self.assertIn('== "--porcelain"', prog)
         self.assertIn('== "log.showsignature=false"', prog)
@@ -367,6 +372,18 @@ class RaceBlindScopeTest(unittest.TestCase):
         self.assertEqual(ci_scope.scope_of([("M", "tests/test_x.py"), ("M", "broker/x.go")]), ("full", "broker/x.go"))
         self.assertEqual(ci_scope.scope_of(["tests/test_x.py"]), ("full", "tests/test_x.py"))  # no status
         self.assertEqual(ci_scope.scope_of([]), ("full", None))
+
+    def test_a_record_a_broker_test_reads_never_skips_broker_race(self):
+        # The audit sends a record a test reads into RACE_READ; from then on a change to it,
+        # records-only or not, runs full, so broker-race runs the test that reads it.
+        read = (*ci_scope.RACE_READ, "briefs/x.md", "docs/learning/")
+        with unittest.mock.patch.object(ci_scope, "RACE_READ", read):
+            self.assertEqual(ci_scope.scope_of([("M", "briefs/x.md")]), ("full", "briefs/x.md"))
+            self.assertEqual(ci_scope.scope_of(["docs/learning/a.md", "BOARD.md"]), ("full", "docs/learning/a.md"))
+            self.assertEqual(ci_scope.scope_of([("M", "BOARD.md"), ("M", "tests/t.py"), ("M", "briefs/x.md")]),
+                             ("full", "briefs/x.md"))
+            self.assertEqual(ci_scope.scope_of([("M", "briefs/y.md")]), ("records", None))
+        self.assertEqual(ci_scope.scope_of([("M", "briefs/x.md")]), ("records", None))
 
     def test_changed_paths_carry_git_status(self):
         with tempfile.TemporaryDirectory() as d:
