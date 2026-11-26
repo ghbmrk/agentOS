@@ -57,7 +57,8 @@ RECORD_DIRS = ("reviews/", "decisions/", "briefs/", "handoff/",
 # the job, and the tools the job runs outside its traced steps.
 RACE_READ = (
     "assurance/", "evals/", "guest/", "image/", "spikes/",
-    "SPEC.md", "docs/owners-guide.md", "tools/canary.py", "tools/depaudit.py", "tools/old_core.txt",
+    "SPEC.md", "docs/owners-guide.md", "tools/canary.py", "tools/canary_controls.py", "tools/depaudit.py",
+    "tools/old_core.txt",
 )
 NEVER_BLIND = ("broker/", ".github/", ".git/", "tools/ci_scope.py", "tools/ci_split.py",
                "tools/race_reads.py")
