@@ -105,6 +105,22 @@ class LintTest(unittest.TestCase):
         self.assertEqual(self.lint(**{"broker/x/ASSUMPTIONS.md": text}),
                          ["broker/x/ASSUMPTIONS.md:6: duplicate ID X-U1 (first on line 3); a main merge keeps an edited row twice unless the clone ran `python3 tools/record_merge.py --install`"])
 
+    def test_a_body_trusted_core_line_in_a_brief_fails(self):
+        # REQ: DOC-trusted-core-line
+        got = self.lint(**{"briefs/A-1.md": GOOD["briefs/A-1.md"] + "The PR carries `Trusted-core: D-7`.\n"})
+        self.assertEqual(got, ["briefs/A-1.md:4: `Trusted-core:` names a PR-body line tools/trusted_base.py ignores; "
+                               "cite the committed `trusted-core #<PR> -- <decision ID>` line in tools/trusted_base_reasons.txt"])
+
+    def test_the_record_line_form_and_the_records_pass(self):
+        # REQ: DOC-trusted-core-line
+        line = "`Trusted-core: D-7` in the PR body\n"
+        self.assertEqual(self.lint(**{
+            "briefs/A-1.md": GOOD["briefs/A-1.md"] + "Add `trusted-core #<PR> -- D-7` to tools/trusted_base_reasons.txt.\n",
+            "README.md": WITH_DECISIONS.replace("| [BOARD.md]", "| [SPEC.md](SPEC.md) |\n| [BOARD.md]"),
+            "DECISIONS.md": line, "decisions/D-7.md": line, "SPEC.md": line,
+            "reviews/ux/README.md": line, "broker/x/ASSUMPTIONS.md": line}), [])
+        self.assertEqual(len(self.lint(**{"CLAUDE.md": GOOD["CLAUDE.md"] + line})), 1)
+
     def test_a_record_or_allow_file_in_no_class_is_reported(self):
         # #6375 item 2: tools/record_merge.py's CLASSES lists every record and allow file; one outside it is named.
         self.assertEqual(self.lint(**{"tools/x_allow.txt": "a\n", "image/x.allow": "a\n", "broker/h/allow.txt": "a\n",

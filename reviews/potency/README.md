@@ -19,6 +19,7 @@ Finding kinds CI now catches; the screen no longer looks for them by hand (OPERA
 | Finding kind | Check | Since |
 |---|---|---|
 | A defence can be reverted and the suite still passes (a surviving mutant) | `.github/workflows/mutgate.yml` runs `tools/mutgate.py` (gremlins v0.6.0, plus its own deletion of each statement, #4573) on each tier-A or tier-B package a PR changes and fails on a LIVED mutant on a target line (changed non-test lines; for a test-only diff, those its changed tests cover) without a `MUTANTS-EQUIVALENT` record entry (the PR body waives nothing, #6379). Bound: unchanged lines, uncovered code, tier-C code, waiver reasons and PR code its tests run stay held by review. | REV-CHK-mut (#3899), REV-PROOF-mut (#4908) |
+| A brief or rule file tells a builder to write a PR-body `Trusted-core:` line, which `tools/trusted_base.py` ignores | `tools/doclint.py` flags `Trusted-core:` in any markdown file outside DECISIONS.md, decisions/, reviews/, ASSUMPTIONS.md files and SPEC.md (#6523 drops SPEC's); the committed `trusted-core #<PR> -- <decision ID>` line in tools/trusted_base_reasons.txt is the form. Bound: PR bodies and non-markdown comments stay held by review. | DOC-trusted-core-line (#6707) |
 
 ## Spec-wide runs
 
