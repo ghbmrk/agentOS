@@ -28,7 +28,7 @@ import (
 
 // A clean scan says each check it passed, by name (main.go:132, :152,
 // :180).
-func TestCleanScanReportsEachCheck(t *testing.T) {
+func cleanScanReportsEachCheck(t *testing.T) {
 	d := newDrive(t)
 	var out bytes.Buffer
 	n, err := run(d.store, d.rk, d.rkText, "", shippedClerks, []string{d.esp()}, &out)
@@ -49,7 +49,7 @@ func TestCleanScanReportsEachCheck(t *testing.T) {
 // A needle list that cannot be built is the scan's error, not a later
 // one: a clerk name clerkkey refuses stops the scan with ErrKey, naming the
 // clerk (main.go:142, :243, :312).
-func TestBadClerkNameStopsTheScan(t *testing.T) {
+func badClerkNameStopsTheScan(t *testing.T) {
 	d := newDrive(t)
 	_, err := run(d.store, d.rk, d.rkText, "", []string{"Not A Clerk!"}, []string{d.esp()}, &bytes.Buffer{})
 	if !errors.Is(err, clerkkey.ErrKey) || !strings.Contains(err.Error(), `clerk "Not A Clerk!"`) {
@@ -61,7 +61,7 @@ func TestBadClerkNameStopsTheScan(t *testing.T) {
 // missing path, and a file whose reads fail (/proc/self/mem at offset 0
 // is unmapped, so its first read is EIO) (main.go:156, :173). A directory
 // target lists what it skipped (main.go:163).
-func TestTargetsThatCannotBeScanned(t *testing.T) {
+func targetsThatCannotBeScanned(t *testing.T) {
 	d := newDrive(t)
 	missing := filepath.Join(d.dir, "missing")
 	if _, err := run(d.store, d.rk, d.rkText, "", nil, []string{missing}, &bytes.Buffer{}); !errors.Is(err, fs.ErrNotExist) {
@@ -87,7 +87,7 @@ func TestTargetsThatCannotBeScanned(t *testing.T) {
 // recovery key that opens no slot of the file, a closed store, a file whose
 // recovery slot unwraps to a key the open store does not use, and card
 // text that is not a recovery key (main.go:196, :200, :204, :209, :266).
-func TestStoreNeedlesRefusals(t *testing.T) {
+func storeNeedlesRefusals(t *testing.T) {
 	d, other := newDrive(t), newDrive(t)
 	st := mustUnlock(t, d)
 	closed, err := seal.Unlock(d.store, seal.Recovery{Key: secret.Hide(d.rk)})
@@ -125,7 +125,7 @@ func TestStoreNeedlesRefusals(t *testing.T) {
 // A clerk named twice gets one set of needles (main.go:238, :241), and an
 // entry shorter than the scan's shortest pattern is said to be skipped and
 // is no needle (main.go:256).
-func TestDuplicateClerkAndShortEntry(t *testing.T) {
+func duplicateClerkAndShortEntry(t *testing.T) {
 	d := newDrive(t)
 	st, err := seal.Unlock(d.store, seal.Recovery{Key: secret.Hide(d.rk)})
 	if err != nil {
@@ -156,7 +156,7 @@ func TestDuplicateClerkAndShortEntry(t *testing.T) {
 // would pass for the value it is read as: 'I' read as index -1 is byte
 // 255, and this group's check symbol is the one cardCheck gives for 255
 // (main.go:382).
-func TestCardKeyRefusesSymbolOffTheAlphabet(t *testing.T) {
+func cardKeyRefusesSymbolOffTheAlphabet(t *testing.T) {
 	grp := []byte{255, 0, 0, 0}
 	g := "I" + cardAlphabet[:1] + cardAlphabet[:1] + cardAlphabet[:1] + string(cardAlphabet[cardCheck(grp)])
 	good := strings.Split(newDrive(t).rkText, "-")
@@ -169,7 +169,7 @@ func TestCardKeyRefusesSymbolOffTheAlphabet(t *testing.T) {
 // printable is false for bytes that are not UTF-8 and for control
 // characters other than tab, newline and carriage return (main.go:477,
 // :478, :480, :481).
-func TestPrintable(t *testing.T) {
+func printableCases(t *testing.T) {
 	for v, want := range map[string]bool{
 		"plain text\twith\r\nbreaks": true,
 		"bad \xff\xfe utf-8 bytes":   false,
@@ -185,7 +185,7 @@ func TestPrintable(t *testing.T) {
 // The passphrase slot's Argon2id cost is checked before it is used: a
 // missing cost, no rounds, too little memory and no threads are refused
 // (main.go:529).
-func TestPassphraseKEKRefusesCostOutOfRange(t *testing.T) {
+func passphraseKEKRefusesCostOutOfRange(t *testing.T) {
 	kek := passphraseKEK([]byte("correct horse battery staple"))
 	for name, a := range map[string]*argonCost{
 		"no cost":     nil,
@@ -204,7 +204,7 @@ func TestPassphraseKEKRefusesCostOutOfRange(t *testing.T) {
 // the kind is there, when the slot's wrap is too short to hold a nonce,
 // and when the slot's key cannot be made; it never reads a short wrap or
 // a key it did not make (main.go:556, :560, :570).
-func TestUnwrapSlotRefusals(t *testing.T) {
+func unwrapSlotRefusals(t *testing.T) {
 	file := func(slots ...fileSlot) []byte {
 		var f struct {
 			ID    []byte     `json:"id"`
@@ -239,7 +239,7 @@ func TestUnwrapSlotRefusals(t *testing.T) {
 // The self-check plants each needle in random data: a scanner whose only
 // pattern is zeros, under the same name, must not pass it by finding the
 // pad (main.go:589).
-func TestControlPadIsNotZeros(t *testing.T) {
+func controlPadIsNotZeros(t *testing.T) {
 	s, err := NewScanner([]Needle{{Name: "n", Value: make([]byte, 16)}})
 	if err != nil {
 		t.Fatal(err)
@@ -253,7 +253,7 @@ func TestControlPadIsNotZeros(t *testing.T) {
 // past, not listed as skipped or followed; a socket is skipped and
 // listed; findings come sorted by path, not in walk order; and each file
 // is closed once scanned (scan.go:201, :204, :205, :207, :215, :220).
-func TestTreeWalk(t *testing.T) {
+func treeWalk(t *testing.T) {
 	needle := []byte("tree-needle-0123456789")
 	s, err := NewScanner([]Needle{{Name: "n", Value: needle}})
 	if err != nil {
@@ -307,7 +307,7 @@ func TestTreeWalk(t *testing.T) {
 }
 
 // Each file target is closed once scanned (main.go:170).
-func TestRunClosesFileTargets(t *testing.T) {
+func runClosesFileTargets(t *testing.T) {
 	d := newDrive(t)
 	var targets []string
 	for i := 0; i < 16; i++ {
@@ -336,7 +336,7 @@ func noGC(t *testing.T) int {
 
 // A file Tree cannot open is the walk's error, as itself (scan.go:212).
 // Root opens every file, so this needs a user without that power.
-func TestTreeOpenError(t *testing.T) {
+func treeOpenError(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root opens a file of mode 000")
 	}
@@ -359,4 +359,25 @@ func openFDs(t *testing.T) int {
 		t.Skip("no /proc/self/fd:", err)
 	}
 	return len(es)
+}
+
+// mutgateKills runs, as subtests of TestSelfCheckStopsOnMissedNeedle, the checks this PR adds here.
+// mutgate reads an init or package var of this package, or of one it
+// imports, as order-dependent, so a new top-level test changes the run list
+// and makes every test of the package a changed test (#6000). These run as
+// subtests of TestSelfCheckStopsOnMissedNeedle instead.
+func mutgateKills(t *testing.T) {
+	t.Run("CleanScanReportsEachCheck", cleanScanReportsEachCheck)
+	t.Run("BadClerkNameStopsTheScan", badClerkNameStopsTheScan)
+	t.Run("TargetsThatCannotBeScanned", targetsThatCannotBeScanned)
+	t.Run("StoreNeedlesRefusals", storeNeedlesRefusals)
+	t.Run("DuplicateClerkAndShortEntry", duplicateClerkAndShortEntry)
+	t.Run("CardKeyRefusesSymbolOffTheAlphabet", cardKeyRefusesSymbolOffTheAlphabet)
+	t.Run("Printable", printableCases)
+	t.Run("PassphraseKEKRefusesCostOutOfRange", passphraseKEKRefusesCostOutOfRange)
+	t.Run("UnwrapSlotRefusals", unwrapSlotRefusals)
+	t.Run("ControlPadIsNotZeros", controlPadIsNotZeros)
+	t.Run("TreeWalk", treeWalk)
+	t.Run("RunClosesFileTargets", runClosesFileTargets)
+	t.Run("TreeOpenError", treeOpenError)
 }

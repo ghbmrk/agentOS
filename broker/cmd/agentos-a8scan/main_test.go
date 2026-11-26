@@ -150,6 +150,7 @@ func TestFindsSealedStoreKeyInEveryEncoding(t *testing.T) {
 // The self-check refuses to report a clean scan unless every needle
 // planted in a scratch blob is found.
 func TestSelfCheckStopsOnMissedNeedle(t *testing.T) {
+	mutgateKills(t)
 	needles := []Needle{{Name: "a", Value: []byte("needle-a-0123456789")}, {Name: "b", Value: []byte("needle-b-0123456789")}}
 	s, err := NewScanner(needles[:1])
 	if err != nil {

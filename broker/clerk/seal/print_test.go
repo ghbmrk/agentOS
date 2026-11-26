@@ -15,6 +15,7 @@ import (
 // fields (CLK-1, DECOY-b-8, #4833): the entries hold the log key's and head
 // key's sources, so a line that formats the store would put them in a log.
 func TestStorePrintsNoKey(t *testing.T) {
+	factorsPrintNoKeyHook(t)
 	rec := recovery(t)
 	path, s := create(t, rec)
 	entry := []byte("store-entry-canary-0123456789")
@@ -29,7 +30,7 @@ func TestStorePrintsNoKey(t *testing.T) {
 // Swap or in holders, in sixteen verbs (DECOY-b-8, CLK-1, #4860): a line
 // that formats a factor, or a ReplaceAndPut swap, would otherwise put the
 // key that opens the store in a log.
-func TestFactorsPrintNoKey(t *testing.T) {
+func factorsPrintNoKey(t *testing.T) {
 	phrase := []byte("passphrase-canary-0123456789")
 	key := []byte("recovery-key-canary-0123456789ab")
 	pin := "boot-pin-canary-0123456789"
@@ -46,4 +47,13 @@ func TestFactorsPrintNoKey(t *testing.T) {
 	swaps := []seal.Swap{{ID: "a", F: factors[0]}, {ID: "b", F: factors[1]}, {ID: "c", F: factors[2]}}
 	vs = append(vs, secrettest.Holders(swaps)...)
 	secrettest.NoKey(t, [][]byte{phrase, key, []byte(pin)}, vs...)
+}
+
+// factorsPrintNoKeyHook runs, as subtests of TestStorePrintsNoKey, the checks this PR adds here.
+// mutgate reads an init or package var of this package, or of one it
+// imports, as order-dependent, so a new top-level test changes the run list
+// and makes every test of the package a changed test (#6000). These run as
+// subtests of TestStorePrintsNoKey instead.
+func factorsPrintNoKeyHook(t *testing.T) {
+	t.Run("FactorsPrintNoKey", factorsPrintNoKey)
 }

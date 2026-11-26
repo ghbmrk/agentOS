@@ -118,6 +118,7 @@ func TestADisplacedValueIsWipedOnce(t *testing.T) {
 // entriesJSON writes json.Marshal's bytes in a buffer of exactly their
 // length, so encode leaves no grown-out or pooled copy of a value (#5913).
 func TestEntriesJSONIsMarshalInOneBuffer(t *testing.T) {
+	mutgateKills(t)
 	big := map[string][]byte{}
 	for i := range MaxEntries {
 		big[string([]byte{'y', '/', byte('a' + i%26), byte('a' + i/26)})] = slices.Repeat([]byte{byte(i)}, i*61)

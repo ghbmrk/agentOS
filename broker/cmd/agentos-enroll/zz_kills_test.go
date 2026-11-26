@@ -54,7 +54,7 @@ func notADir(t *testing.T) string {
 
 // A staged or published path whose check fails stops staging at that
 // check: nothing is made (stage.go:46, :50).
-func TestStagePageCAStopsWhenAPathDoesNotCheck(t *testing.T) {
+func stagePageCAStopsWhenAPathDoesNotCheck(t *testing.T) {
 	s := newStaging(t)
 	bad := notADir(t)
 	err := stagePageCA(bad, s.published, testBuilt)
@@ -71,7 +71,7 @@ func TestStagePageCAStopsWhenAPathDoesNotCheck(t *testing.T) {
 
 // An authority that cannot be made (no build time) is an error, and
 // nothing is written (stage.go:71).
-func TestStagePageCAWithNoBuildTime(t *testing.T) {
+func stagePageCAWithNoBuildTime(t *testing.T) {
 	s := newStaging(t)
 	if err := stagePageCA(s.staged, s.published, time.Time{}); err == nil {
 		t.Fatal("staged with no build time")
@@ -81,7 +81,7 @@ func TestStagePageCAWithNoBuildTime(t *testing.T) {
 }
 
 // An empty or oversized published certificate is refused (stage.go:146).
-func TestReadPublishedRefusesEmptyAndOversized(t *testing.T) {
+func readPublishedRefusesEmptyAndOversized(t *testing.T) {
 	dir := t.TempDir()
 	for _, n := range []int{0, maxPublished + 1} {
 		p := filepath.Join(dir, "cert")
@@ -102,7 +102,7 @@ func TestReadPublishedRefusesEmptyAndOversized(t *testing.T) {
 // writeOnce stops at the call that refused, and leaves nothing at path:
 // a missing directory at its open (stage.go:160, :161), a temporary name
 // too long to create at its create (:170).
-func TestWriteOnceStopsAtTheRefusingCall(t *testing.T) {
+func writeOnceStopsAtTheRefusingCall(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "gone", "f")
 	if err := writeOnce(missing, []byte("x"), 0o600); pathOp(err) != "open" || !errors.Is(err, syscall.ENOENT) {
 		t.Fatalf("a missing directory: got %v, want its open error", err)
@@ -115,7 +115,7 @@ func TestWriteOnceStopsAtTheRefusingCall(t *testing.T) {
 
 // A write that fails (the file-size limit) is a write error and links
 // nothing at path, so path never holds part of data (stage.go:186).
-func TestWriteOnceFailedWriteLeavesNothing(t *testing.T) {
+func writeOnceFailedWriteLeavesNothing(t *testing.T) {
 	var old syscall.Rlimit
 	noErr(t, syscall.Getrlimit(syscall.RLIMIT_FSIZE, &old))
 	signal.Ignore(syscall.SIGXFSZ)
@@ -139,7 +139,7 @@ func TestWriteOnceFailedWriteLeavesNothing(t *testing.T) {
 // The file readers and writeOnce close every descriptor they open, so a
 // long-running unit does not leak them (stage.go:136, :163, :183;
 // main.go:769). The GC is off, so no finalizer closes a leaked *os.File.
-func TestFileHelpersCloseTheirDescriptors(t *testing.T) {
+func fileHelpersCloseTheirDescriptors(t *testing.T) {
 	dir := t.TempDir()
 	cert, sec := filepath.Join(dir, "cert"), filepath.Join(dir, "secret")
 	noErr(t, os.WriteFile(cert, []byte("der"), 0o644))
@@ -169,7 +169,7 @@ func enrollFDs(t *testing.T) int {
 
 // A refused request exits 1 and its reason goes to the journal
 // (take.go:107, :108, :109); a good one exits 0.
-func TestTakeFactorsMainExitStatus(t *testing.T) {
+func takeFactorsMainExitStatus(t *testing.T) {
 	b := newSetupBox(t)
 	var out, errw bytes.Buffer
 	if code := takeFactorsMain(b.c, strings.NewReader("{"), &out, &errw); code != 1 || out.String() != "bad\n" || !strings.Contains(errw.String(), errBad.Error()) {
@@ -183,7 +183,7 @@ func TestTakeFactorsMainExitStatus(t *testing.T) {
 }
 
 // wipe zeroes both factors in place (take.go:95, :96).
-func TestSetupRequestWipe(t *testing.T) {
+func setupRequestWipe(t *testing.T) {
 	r := setupRequest{Passphrase: cardText("abc def"), RecoveryKey: cardText("ABCD-EFGH")}
 	p, k := r.Passphrase, r.RecoveryKey
 	r.wipe()
@@ -195,7 +195,7 @@ func TestSetupRequestWipe(t *testing.T) {
 // With no store, a published certificate others may write is its own
 // error, not an authority mismatch (take.go:152, :153); a missing one is
 // authority. Neither writes a factor.
-func TestTakeFactorsWithABadCertificate(t *testing.T) {
+func takeFactorsWithABadCertificate(t *testing.T) {
 	b := newSetupBox(t)
 	noErr(t, os.Chmod(b.s.published, 0o666))
 	if err := takeFactors(b.c, bytes.NewReader(setupRequestFor(newCard(t), b.fp))); !errors.Is(err, errPublished) {
@@ -213,7 +213,7 @@ func TestTakeFactorsWithABadCertificate(t *testing.T) {
 // putFactors stops at a file it cannot check or read, writing nothing:
 // a path whose check fails returns that check's error (take.go:181), and a
 // factor file it may not read is its read error, not taken (:187).
-func TestPutFactorsStopsAtAFileItCannotRead(t *testing.T) {
+func putFactorsStopsAtAFileItCannotRead(t *testing.T) {
 	bad := filepath.Dir(notADir(t))
 	if err := putFactors(bad, []byte("p"), []byte("r")); pathOp(err) != "lstat" || !errors.Is(err, syscall.ENOTDIR) {
 		t.Fatalf("a setup path that is a file: got %v, want its lstat error", err)
@@ -228,7 +228,7 @@ func TestPutFactorsStopsAtAFileItCannotRead(t *testing.T) {
 }
 
 // Each word's length and hyphen rules hold on their own (take.go:233).
-func TestValidPassphraseWordRules(t *testing.T) {
+func validPassphraseWordRules(t *testing.T) {
 	good := []string{"abc", "defgh", "ijk", "lmn", "opq", "rst", "uvw"}
 	if !validPassphrase([]byte(strings.Join(good, " "))) {
 		t.Fatal("the good passphrase is refused")
@@ -243,7 +243,7 @@ func TestValidPassphraseWordRules(t *testing.T) {
 
 // A symbol outside the alphabet is refused even where the group's check
 // symbol would hold for the value an unread symbol becomes (take.go:276).
-func TestStoreRecoveryKeyRefusesASymbolOutsideTheAlphabet(t *testing.T) {
+func storeRecoveryKeyRefusesASymbolOutsideTheAlphabet(t *testing.T) {
 	// Group 0 is "I" (not in the alphabet) and three symbols, with the check
 	// that a mis-read 0xff gives; the other seven groups are all-A with
 	// their check.
@@ -260,4 +260,24 @@ func TestStoreRecoveryKeyRefusesASymbolOutsideTheAlphabet(t *testing.T) {
 	if _, err := storeRecoveryKey(ok); err != nil {
 		t.Fatalf("the all-A key: %v", err)
 	}
+}
+
+// mutgateKills runs, as subtests of TestFactorFilesMustBePrivate, the checks this PR adds here.
+// mutgate reads an init or package var of this package, or of one it
+// imports, as order-dependent, so a new top-level test changes the run list
+// and makes every test of the package a changed test (#6000). These run as
+// subtests of TestFactorFilesMustBePrivate instead.
+func mutgateKills(t *testing.T) {
+	t.Run("StagePageCAStopsWhenAPathDoesNotCheck", stagePageCAStopsWhenAPathDoesNotCheck)
+	t.Run("StagePageCAWithNoBuildTime", stagePageCAWithNoBuildTime)
+	t.Run("ReadPublishedRefusesEmptyAndOversized", readPublishedRefusesEmptyAndOversized)
+	t.Run("WriteOnceStopsAtTheRefusingCall", writeOnceStopsAtTheRefusingCall)
+	t.Run("WriteOnceFailedWriteLeavesNothing", writeOnceFailedWriteLeavesNothing)
+	t.Run("FileHelpersCloseTheirDescriptors", fileHelpersCloseTheirDescriptors)
+	t.Run("TakeFactorsMainExitStatus", takeFactorsMainExitStatus)
+	t.Run("SetupRequestWipe", setupRequestWipe)
+	t.Run("TakeFactorsWithABadCertificate", takeFactorsWithABadCertificate)
+	t.Run("PutFactorsStopsAtAFileItCannotRead", putFactorsStopsAtAFileItCannotRead)
+	t.Run("ValidPassphraseWordRules", validPassphraseWordRules)
+	t.Run("StoreRecoveryKeyRefusesASymbolOutsideTheAlphabet", storeRecoveryKeyRefusesASymbolOutsideTheAlphabet)
 }

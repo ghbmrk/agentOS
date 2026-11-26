@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"html"
 	"image"
 	"image/color"
@@ -31,6 +32,7 @@ import (
 // server.go. They are subtests for the reason recoveryEdges gives: a new
 // top-level test in localui widens mutgate's targets to the whole package.
 func survivorKills(t *testing.T) {
+	t.Run("ScanTextNamesEachRefusal", scanTextNamesEachRefusal)
 	t.Run("RestartAndCancelEraseTheCard", restartAndCancelEraseTheCard)
 	t.Run("DisplayCancelWipesTheFactor", displayCancelWipesTheFactor)
 	t.Run("RefusedBeginWipesTheKey", refusedBeginWipesTheKey)
@@ -194,8 +196,8 @@ func eachAnswerWrittenOnce(t *testing.T) {
 		t.Fatalf("the first step ends with a second answer:\n%s", b)
 	}
 	w := r.do("PUT", "/recovery/", url.Values{"step": {"cancel"}})
-	if w.Code != http.StatusMethodNotAllowed || w.Body.String() != "Method not allowed\n" {
-		t.Fatalf("PUT: %d %q", w.Code, w.Body.String())
+	if w.Code != http.StatusMethodNotAllowed || w.Body.String() != "Method not allowed\n" || w.Header().Get("Allow") != "GET, POST" {
+		t.Fatalf("PUT: %d %q, Allow %q", w.Code, w.Body.String(), w.Header().Get("Allow"))
 	}
 	if w := r.factor(map[string]string{"passphrase": " "}); w.StatusCode != http.StatusOK || strings.Contains(readAll(w.Body), "Bad request") {
 		t.Fatalf("a refused factor: %d", w.StatusCode)
@@ -219,8 +221,8 @@ func readAll(rd io.Reader) string {
 func formBodiesAreBounded(t *testing.T) {
 	r := newRecoveryRig(t)
 	r.signIn()
-	if w := r.post("/recovery/", url.Values{"step": {"cancel"}, "pad": {strings.Repeat("a", 16<<10)}}); w.Code != http.StatusBadRequest {
-		t.Fatalf("a 16 KiB step post: %d", w.Code)
+	if w := r.post("/recovery/", url.Values{"step": {"cancel"}, "pad": {strings.Repeat("a", 16<<10)}}); w.Code != http.StatusBadRequest || w.Body.String() != "Bad request\n" {
+		t.Fatalf("a 16 KiB step post: %d %q", w.Code, w.Body.String())
 	}
 	var b bytes.Buffer
 	m := multipart.NewWriter(&b)
@@ -465,9 +467,11 @@ type codeHooks struct {
 	*fakeHooks
 	enrollErr, confirmErr error
 	enrollLink            string // EnrollCode's link beside enrollErr
+	enrolls               int    // EnrollCode calls
 }
 
 func (h *codeHooks) EnrollCode() (string, error) {
+	h.enrolls++
 	if h.enrollErr != nil {
 		return h.enrollLink, h.enrollErr
 	}
@@ -493,7 +497,7 @@ func codesStepNamesEachRefusal(t *testing.T) {
 	}
 	// A failed enroll is a 500 even beside a link that reads as a key.
 	h.enrollErr, h.enrollLink = errors.New("vault gone"), "otpauth://totp/agentOS:agentOS?secret=JBSWY3DPEHPK3PXP&issuer=agentOS&algorithm=SHA1&digits=6&period=30"
-	if w := r.do("GET", "/setup", nil); w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "Setup could not start this step.") {
+	if w := r.do("GET", "/setup", nil); w.Code != http.StatusInternalServerError || w.Body.String() != "Setup could not start this step. Reload the page.\n" {
 		t.Fatalf("failed enroll: %d %s", w.Code, w.Body.String())
 	}
 	h.enrollErr, h.enrollLink = nil, ""
@@ -507,10 +511,29 @@ func codesStepNamesEachRefusal(t *testing.T) {
 		{errors.New("vault gone"), "Could not check the code. Try again."},
 	} {
 		h.confirmErr = c.err
+		before := h.enrolls
 		w := r.post("/setup/codes", url.Values{"code": {"123456"}})
 		if b := html.UnescapeString(w.Body.String() + r.setupErr()); !strings.Contains(b, c.want) {
 			t.Fatalf("%v: %d\n%s", c.err, w.Code, b)
 		}
+		// A key no longer waiting takes the shown link off the page, so
+		// the page that answers makes a new one; other refusals keep it.
+		if made := h.enrolls > before; made != errors.Is(c.err, ErrNoCodeEnrollment) {
+			t.Fatalf("%v: a new link made %v", c.err, made)
+		}
+	}
+}
+
+// Each photo refusal has its own line, none the generic one.
+func scanTextNamesEachRefusal(t *testing.T) {
+	generic := scanText(errors.New("other"))
+	seen := map[string]error{generic: nil}
+	for _, err := range []error{ErrWiFiQR, ErrNoQR, ErrManyQR, ErrPhotoSize, ErrScanBusy} {
+		got := scanText(fmt.Errorf("wrapped: %w", err))
+		if prev, dup := seen[got]; dup {
+			t.Fatalf("%v reads as %v: %q", err, prev, got)
+		}
+		seen[got] = err
 	}
 }
 

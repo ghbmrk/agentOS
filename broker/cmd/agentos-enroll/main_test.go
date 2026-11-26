@@ -809,6 +809,7 @@ func TestParse(t *testing.T) {
 
 // The factors' files must be root-only (here: only the test's uid).
 func TestFactorFilesMustBePrivate(t *testing.T) {
+	mutgateKills(t)
 	b := newBox(t)
 	noErr(t, os.Chmod(b.c.passphrase, 0o644))
 	if err := enroll(b.c, b.sw.TPM()); err == nil {

@@ -638,7 +638,7 @@ func (f *failOnce) Read(p []byte) (int, error) {
 // The edges of each bound and each error path, so every check is shown to
 // matter (mutgate survivors on #6000, where a changed test made the whole
 // package's covered lines targets).
-func TestBoundsAndErrors(t *testing.T) {
+func boundsAndErrors(t *testing.T) {
 	boom := errors.New("boom")
 	fail := iotest.ErrReader(boom)
 	// uniform: n from 1 to 1<<16; one byte up to 256, two above; a byte at
@@ -865,7 +865,17 @@ func TestSSHDecoyOtherEncodings(t *testing.T) {
 
 // KRN-12: the matcher's shortest joined form is the table's shortest value.
 func TestMinJoinedIsMinValue(t *testing.T) {
+	boundsAndErrorsHook(t)
 	if match.MinJoined != MinValue {
 		t.Fatalf("match.MinJoined %d, decoy.MinValue %d", match.MinJoined, MinValue)
 	}
+}
+
+// boundsAndErrorsHook runs, as subtests of TestMinJoinedIsMinValue, the checks this PR adds here.
+// mutgate reads an init or package var of this package, or of one it
+// imports, as order-dependent, so a new top-level test changes the run list
+// and makes every test of the package a changed test (#6000). These run as
+// subtests of TestMinJoinedIsMinValue instead.
+func boundsAndErrorsHook(t *testing.T) {
+	t.Run("BoundsAndErrors", boundsAndErrors)
 }

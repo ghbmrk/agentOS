@@ -57,7 +57,7 @@ func fixedCard(t *testing.T) *Card {
 // Each read Generate makes can fail; every failure must come back as an
 // error with no card, never a card built past it (card.go:61, :69, :167,
 // :179, :190).
-func TestGenerateFailsOnEveryReadError(t *testing.T) {
+func generateFailsOnEveryReadError(t *testing.T) {
 	probe := &stream{}
 	if _, err := Generate(probe); err != nil {
 		t.Fatal(err)
@@ -79,7 +79,7 @@ func TestGenerateFailsOnEveryReadError(t *testing.T) {
 // Validate refuses each value that is not its full size or form, with
 // every other value valid (card.go:90, :93, :94, :100, :106, :110, :113,
 // :114, :118).
-func TestValidateRefusesEachBadValue(t *testing.T) {
+func validateRefusesEachBadValue(t *testing.T) {
 	if err := fixedCard(t).Validate(); err != nil {
 		t.Fatalf("a generated card: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestValidateRefusesEachBadValue(t *testing.T) {
 // The setup code is HMAC-SHA256 keyed by the normalized secret over the
 // domain string "agentos setup code v1": a known answer pins the domain
 // string, so a code printed by one build pairs on another (card.go:129).
-func TestSetupCodeKnownAnswer(t *testing.T) {
+func setupCodeKnownAnswer(t *testing.T) {
 	const secret = "ABCD-EFGH-JKLM-NPQR-STUV-WXYZ-23"
 	if got, want := SetupCodeFor(secret), "956A-7TYD"; got != want {
 		t.Fatalf("SetupCodeFor(%q) = %q, want %q", secret, got, want)
@@ -136,7 +136,7 @@ func TestSetupCodeKnownAnswer(t *testing.T) {
 // A mistyped group returns no partial key: the bits already read from the
 // groups before it are cleared from the returned array, for both a symbol
 // off the alphabet and a failed check symbol (recoverykey.go:118, :124).
-func TestMistypedRecoveryKeyReturnsNoPartialKey(t *testing.T) {
+func mistypedRecoveryKeyReturnsNoPartialKey(t *testing.T) {
 	gs := strings.Split(fixedCard(t).RecoveryKey, "-")
 	if len(gs) != recoveryGroups {
 		t.Fatalf("recovery key %d groups", len(gs))
@@ -159,5 +159,28 @@ func TestMistypedRecoveryKeyReturnsNoPartialKey(t *testing.T) {
 		if b != ([recoveryKeyBytes]byte{}) {
 			t.Fatalf("%s: the refused key returned bits %x", name, b)
 		}
+	}
+}
+
+// mutgateKills runs, as subtests of TestRotationNeedsAPart, the checks this PR adds here.
+// mutgate reads an init or package var of this package, or of one it
+// imports, as order-dependent, so a new top-level test changes the run list
+// and makes every test of the package a changed test (#6000). These run as
+// subtests of TestRotationNeedsAPart instead.
+func mutgateKills(t *testing.T) {
+	t.Run("GenerateFailsOnEveryReadError", generateFailsOnEveryReadError)
+	t.Run("ValidateRefusesEachBadValue", validateRefusesEachBadValue)
+	t.Run("SetupCodeKnownAnswer", setupCodeKnownAnswer)
+	t.Run("MistypedRecoveryKeyReturnsNoPartialKey", mistypedRecoveryKeyReturnsNoPartialKey)
+	t.Run("DisplayNeedsAProvisioner", displayNeedsAProvisioner)
+}
+
+// A display with a good authority but no provisioner is refused before it
+// draws any randomness, so a card is never shown that Confirm cannot keep.
+func displayNeedsAProvisioner(t *testing.T) {
+	r := &countingRand{}
+	d, err := NewDisplay(DisplayConfig{Rand: r, Authority: testAuthority(t)})
+	if err == nil || d != nil || !strings.Contains(err.Error(), "provisioner") || r.n != 0 {
+		t.Fatalf("no provisioner: %v %v, %d bytes read", d, err, r.n)
 	}
 }

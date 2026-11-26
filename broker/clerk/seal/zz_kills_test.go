@@ -69,7 +69,7 @@ func killTPM(t *testing.T, n int) (*swtpm.TPM, *ecdsa.PrivateKey, []tpmseal.Poli
 
 // A closed store refuses every call that needs its key with ErrClosed, and writes nothing
 // (STO-2, CLK-1): Anchor, AddSlot, RemoveSlot, SetPolicies and HeadKey.
-func TestAClosedStoreRefusesEveryKeyedCall(t *testing.T) {
+func aClosedStoreRefusesEveryKeyedCall(t *testing.T) {
 	path, s, r := killStore(t)
 	id := s.Slots()[0].ID
 	before, err := os.ReadFile(path)
@@ -101,7 +101,7 @@ func TestAClosedStoreRefusesEveryKeyedCall(t *testing.T) {
 }
 
 // HeadKey wipes the seed it derived, once (CLK-1).
-func TestHeadKeyWipesItsSeed(t *testing.T) {
+func headKeyWipesItsSeed(t *testing.T) {
 	_, s, _ := killStore(t)
 	held := refusalWipes(t)
 	k, err := s.HeadKey()
@@ -116,7 +116,7 @@ func TestHeadKeyWipesItsSeed(t *testing.T) {
 
 // A store holds MaxSlots slots and no more; an unknown slot is ErrNoSlot to RemoveSlot and
 // SetPolicies, and so is a slot that is not a tpm slot to SetPolicies (STO-2).
-func TestSlotBounds(t *testing.T) {
+func slotBounds(t *testing.T) {
 	path, s, r := killStore(t)
 	for i := 1; i < MaxSlots; i++ {
 		if _, err := s.AddSlot(killRecovery(byte(i), RecoveryLen)); err != nil {
@@ -144,7 +144,7 @@ func TestSlotBounds(t *testing.T) {
 
 // A slot write that fails before its rename returns no slot ID; one whose rename is done returns
 // its ID with the directory sync's error, wherever the slot sits (REC-4).
-func TestASlotIDIsReturnedOnlyOnceInPlace(t *testing.T) {
+func aSlotIDIsReturnedOnlyOnceInPlace(t *testing.T) {
 	path, s, _ := killStore(t)
 	fail := errors.New("disk full")
 	restore := FailWrite(fail)
@@ -169,7 +169,7 @@ func TestASlotIDIsReturnedOnlyOnceInPlace(t *testing.T) {
 
 // Create checks for an existing file before it makes a slot or writes, refuses a factor it
 // cannot make a slot for, and reports its write's and its directory sync's errors (STO-2).
-func TestCreateRefusals(t *testing.T) {
+func createRefusals(t *testing.T) {
 	path, _, _ := killStore(t)
 	fail := errors.New("disk full")
 	restore := FailWrite(fail)
@@ -204,7 +204,7 @@ func TestCreateRefusals(t *testing.T) {
 }
 
 // Every store file is mode 0600 whatever the umask, and a write leaves no file open (STO-2).
-func TestWritesAreOwnerOnlyAndCloseTheirFiles(t *testing.T) {
+func writesAreOwnerOnlyAndCloseTheirFiles(t *testing.T) {
 	path, s, _ := killStore(t)
 	old := syscall.Umask(0o277)
 	err := s.Put("x/a", []byte("v"))
@@ -235,7 +235,7 @@ func TestWritesAreOwnerOnlyAndCloseTheirFiles(t *testing.T) {
 
 // A temporary file that cannot be written in full is removed and its error returned: the store
 // file is not replaced (STO-2). RLIMIT_FSIZE makes the write fail.
-func TestAShortWriteReplacesNothing(t *testing.T) {
+func aShortWriteReplacesNothing(t *testing.T) {
 	path, s, r := killStore(t)
 	signal.Ignore(syscall.SIGXFSZ)
 	defer signal.Reset(syscall.SIGXFSZ)
@@ -266,7 +266,7 @@ func TestAShortWriteReplacesNothing(t *testing.T) {
 }
 
 // syncDir and readFile report the open's own error (STO-2).
-func TestOpenErrorsAreReported(t *testing.T) {
+func openErrorsAreReported(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 	if err := syncDir(missing); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("syncDir of a missing directory: %v, want ErrNotExist", err)
@@ -279,7 +279,7 @@ func TestOpenErrorsAreReported(t *testing.T) {
 // derive and gcm panic on a misuse no caller makes: a key past HKDF's length, a key that is not
 // an AES key. open refuses a blob shorter than a nonce as ErrCorrupt, and a blob of only a nonce
 // is GCM's own refusal (STO-2).
-func TestTheInternalGuards(t *testing.T) {
+func theInternalGuards(t *testing.T) {
 	for name, f := range map[string]func(){
 		"derive past 255 hashes": func() { derive(make([]byte, keyLen), nil, "x", 255*32+1) },
 		"gcm with a 31-byte key": func() { gcm(make([]byte, 31)) },
@@ -304,7 +304,7 @@ func TestTheInternalGuards(t *testing.T) {
 }
 
 // slotKey refuses a recovery key of the wrong length before any HKDF (REC-1, STO-2).
-func TestSlotKeyRefusesAShortRecoveryKey(t *testing.T) {
+func slotKeyRefusesAShortRecoveryKey(t *testing.T) {
 	sl, err := makeSlot(make([]byte, idLen), make([]byte, keyLen), killRecovery(1, RecoveryLen))
 	if err != nil {
 		t.Fatal(err)
@@ -317,7 +317,7 @@ func TestSlotKeyRefusesAShortRecoveryKey(t *testing.T) {
 }
 
 // A passphrase of exactly MinPassphrase bytes makes a slot (STO-2).
-func TestAPassphraseOfTheMinimumLength(t *testing.T) {
+func aPassphraseOfTheMinimumLength(t *testing.T) {
 	path, s, _ := killStore(t)
 	p := Passphrase{Phrase: secret.Hide([]byte(strings.Repeat("p", MinPassphrase)))}
 	if _, err := s.AddSlot(p); err != nil {
@@ -332,7 +332,7 @@ func TestAPassphraseOfTheMinimumLength(t *testing.T) {
 
 // encode writes a file of exactly MaxFile bytes and refuses one past it. The file's version
 // (which parse checks, not encode) and one value's length are tuned to land on MaxFile.
-func TestEncodeTakesExactlyMaxFile(t *testing.T) {
+func encodeTakesExactlyMaxFile(t *testing.T) {
 	_, s, _ := killStore(t)
 	size := func(v int, name string, n int) (int, error) {
 		nf := s.f
@@ -364,7 +364,7 @@ func TestEncodeTakesExactlyMaxFile(t *testing.T) {
 // the policy key, at enrollment (makeSlot), at SetPolicies and when the file is parsed; Slots
 // reports each slot's policy key and a copy of its boot paths. Each tpm slot makeSlot seals
 // wipes the key it sealed, once (CLK-1).
-func TestTPMSlotBounds(t *testing.T) {
+func tPMSlotBounds(t *testing.T) {
 	sw, key, ps := killTPM(t, MaxPolicies+1)
 	r := killRecovery(0x5a, RecoveryLen)
 	path := filepath.Join(t.TempDir(), "store")
@@ -456,7 +456,7 @@ func TestTPMSlotBounds(t *testing.T) {
 
 // A Create that fails after it made the store key wipes that key, once (CLK-1): it makes one
 // wipe more than a Create that succeeds, whether the slot, the write or the sync failed.
-func TestAFailedCreateWipesItsKey(t *testing.T) {
+func aFailedCreateWipesItsKey(t *testing.T) {
 	dir := t.TempDir()
 	wipes := func(name string, f Factor, fail func() func()) int {
 		held := refusalWipes(t)
@@ -487,4 +487,26 @@ func TestAFailedCreateWipesItsKey(t *testing.T) {
 	if n := wipes("nosync", killRecovery(1, RecoveryLen), func() func() { return FailDirSync(fail) }); n != ok+1 {
 		t.Errorf("a Create whose sync failed made %d wipes, want %d", n, ok+1)
 	}
+}
+
+// mutgateKills runs, as subtests of TestEntriesJSONIsMarshalInOneBuffer, the checks this PR adds here.
+// mutgate reads an init or package var of this package, or of one it
+// imports, as order-dependent, so a new top-level test changes the run list
+// and makes every test of the package a changed test (#6000). These run as
+// subtests of TestEntriesJSONIsMarshalInOneBuffer instead.
+func mutgateKills(t *testing.T) {
+	t.Run("AClosedStoreRefusesEveryKeyedCall", aClosedStoreRefusesEveryKeyedCall)
+	t.Run("HeadKeyWipesItsSeed", headKeyWipesItsSeed)
+	t.Run("SlotBounds", slotBounds)
+	t.Run("ASlotIDIsReturnedOnlyOnceInPlace", aSlotIDIsReturnedOnlyOnceInPlace)
+	t.Run("CreateRefusals", createRefusals)
+	t.Run("WritesAreOwnerOnlyAndCloseTheirFiles", writesAreOwnerOnlyAndCloseTheirFiles)
+	t.Run("AShortWriteReplacesNothing", aShortWriteReplacesNothing)
+	t.Run("OpenErrorsAreReported", openErrorsAreReported)
+	t.Run("TheInternalGuards", theInternalGuards)
+	t.Run("SlotKeyRefusesAShortRecoveryKey", slotKeyRefusesAShortRecoveryKey)
+	t.Run("APassphraseOfTheMinimumLength", aPassphraseOfTheMinimumLength)
+	t.Run("EncodeTakesExactlyMaxFile", encodeTakesExactlyMaxFile)
+	t.Run("TPMSlotBounds", tPMSlotBounds)
+	t.Run("AFailedCreateWipesItsKey", aFailedCreateWipesItsKey)
 }
