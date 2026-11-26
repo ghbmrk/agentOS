@@ -103,7 +103,7 @@ type (
 		Cosigns []key.Cosign `json:"cosigns"`
 		Keys    []key.Key    `json:"keys"`
 	}
-	lineArgs struct {
+	LineArgs struct {
 		Percent int64        `json:"percent"`
 		Cosigns []key.Cosign `json:"cosigns"`
 	}
@@ -198,16 +198,16 @@ type (
 	approvalRead struct {
 		Approval []byte `json:"approval"`
 	}
-	// recoveryCardRead is the new card, handoff.MadeCardLen bytes.
-	recoveryCardRead struct {
+	// RecoveryCardRead is the new card, handoff.MadeCardLen bytes.
+	RecoveryCardRead struct {
 		Key []byte `json:"key"`
 	}
-	// recoveryCardArgs is an anchor's signature over the card's
-	// kernel.RecoveryCardHash; recoveryCardID names the card.
-	recoveryCardArgs struct {
+	// RecoveryCardArgs is an anchor's signature over the card's
+	// kernel.RecoveryCardHash; RecoveryCardID names the card.
+	RecoveryCardArgs struct {
 		Cosign key.Cosign `json:"cosign"`
 	}
-	recoveryCardID struct {
+	RecoveryCardID struct {
 		ID string `json:"id"`
 	}
 	// recipientArgs is the new recipient in its wire form and its approval.
@@ -259,7 +259,7 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 		return k.Unenroll(now, u)
 	}),
 	"extend":  act(func(k *kernel.Kernel, now int64, a extendArgs) error { return k.Extend(now, a.Ext, a.Plan) }),
-	"setline": act(func(k *kernel.Kernel, now int64, a lineArgs) error { return k.SetLine(now, a.Percent, a.Cosigns...) }),
+	"setline": act(func(k *kernel.Kernel, now int64, a LineArgs) error { return k.SetLine(now, a.Percent, a.Cosigns...) }),
 	"reserve": act(func(k *kernel.Kernel, now int64, a poolArgs) error {
 		return k.Reserve(now, a.Pool, a.Reserve, a.Cosigns...)
 	}),
@@ -416,10 +416,10 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 		if err != nil {
 			return nil, err
 		}
-		return recoveryCardID{id}, nil
+		return RecoveryCardID{id}, nil
 	},
 	"recoverycard": func(h *Kernel, _ int64, raw json.RawMessage) (any, error) {
-		var a recoveryCardArgs
+		var a RecoveryCardArgs
 		if err := json.Unmarshal(raw, &a); err != nil {
 			return nil, ErrArgs
 		}
@@ -427,7 +427,7 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 		if err != nil {
 			return nil, err
 		}
-		return recoveryCardRead{b}, nil
+		return RecoveryCardRead{b}, nil
 	},
 	"recoverycarddone": func(h *Kernel, _ int64, _ json.RawMessage) (any, error) {
 		h.RecoveryCardDone()
@@ -851,57 +851,14 @@ func asRefusal(err error) *key.Refusal {
 	return &key.Refusal{Code: kernel.CBroken, Detail: err.Error()}
 }
 
-// Owner is the owner seam over the kernel process's owner socket.
-type Owner struct{ Conn }
-
-func (o Owner) SetLine(percent int64, cos ...key.Cosign) error {
-	return o.Call("setline", lineArgs{percent, cos}, nil)
-}
-
-func (o Owner) Stop() error { return o.Call("stop", nil, nil) }
-
-// Setup logs the owner's first hardware keys on a setup-only kernel.
-func (o Owner) Setup(f kernel.FirstAnchors) error { return o.Call("setup", f, nil) }
-
-// SetupInfo reads whether setup is open and the box key it signs over.
-func (o Owner) SetupInfo() (i SetupInfo, err error) { err = o.Call("setupinfo", nil, &i); return }
-
-func (o Owner) Status() (u []kernel.Unsettled, err error) { err = o.Call("status", nil, &u); return }
-func (o Owner) LineChanges() (n int, err error)           { err = o.Call("linechanges", nil, &n); return }
-
-// Changes is the revocations, pauses and STOP in force.
-func (o Owner) Changes() (c key.Changes, err error) { err = o.Call("changes", nil, &c); return }
-
-// Backups is the recipient's ID, every destination and every kept backup.
-func (o Owner) Backups() (v BackupsView, err error) { err = o.Call("backups", nil, &v); return }
-
 // MarshalJSON encodes the card's bits and clears them, so no copy stays
 // once the frame is written (#4128).
-func (r recoveryCardRead) MarshalJSON() ([]byte, error) {
+func (r RecoveryCardRead) MarshalJSON() ([]byte, error) {
 	defer clear(r.Key)
 	return json.Marshal(struct {
 		Key []byte `json:"key"`
 	}{r.Key})
 }
-
-// RecoveryCardID is the held card's backup recipient ID.
-func (o Owner) RecoveryCardID() (string, error) {
-	var r recoveryCardID
-	err := o.Call("recoverycardid", nil, &r)
-	return r.ID, err
-}
-
-// RecoveryCard is the recovery key the unlock step made at this boot on
-// the lost-card route, for the new card, on an anchor's signature c over
-// kernel.RecoveryCardHash of its ID; ErrNoRecoveryCard once confirmed.
-func (o Owner) RecoveryCard(c key.Cosign) ([]byte, error) {
-	var r recoveryCardRead
-	err := o.Call("recoverycard", recoveryCardArgs{c}, &r)
-	return r.Key, err
-}
-
-// RecoveryCardDone wipes it, once the owner has confirmed the card.
-func (o Owner) RecoveryCardDone() error { return o.Call("recoverycarddone", nil, nil) }
 
 // Meter is the metering seam over the kernel process's meter socket: a
 // model.Ledger for the model clerk's process. The now each method takes is
