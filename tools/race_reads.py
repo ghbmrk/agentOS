@@ -96,8 +96,9 @@ class Cwd:
 
 
 def _events(lines):
-    """(pid, syscall, args) for each whole call, an unfinished call joined to its resumed half,
-    and (pid, EXITED, status or None) for each process's exit (None: killed by a signal)."""
+    """(pid, syscall, args, resumed) for each whole call, an unfinished call joined to its resumed
+    half (resumed True), and (pid, EXITED, status or None, False) for each process's exit (None:
+    killed by a signal)."""
     pending = {}  # pid -> (syscall, args so far) of an <unfinished ...> line
     for line in lines:
         line = line.rstrip("\n")
@@ -106,7 +107,7 @@ def _events(lines):
             e = _EXIT.match(line)
             if e:
                 pending.pop(int(e.group(1)), None)
-                yield int(e.group(1)), EXITED, e.group(2)
+                yield int(e.group(1)), EXITED, e.group(2), False
             continue
         pid = int(m.group(1))
         if m.group(2):
@@ -114,10 +115,10 @@ def _events(lines):
             if args.endswith(" <unfinished ...>"):
                 pending[pid] = (name, args[:-len(" <unfinished ...>")])
                 continue
+            yield pid, name, args, False
         else:
             prev = pending.pop(pid, (m.group(4), ""))
-            name, args = prev[0], prev[1] + m.group(5)
-        yield pid, name, args
+            yield pid, prev[0], prev[1] + m.group(5), True
 
 
 def accesses(lines, start_cwd):
@@ -135,7 +136,24 @@ def accesses(lines, start_cwd):
     unborn = {}  # pid -> its events, until a clone returns it
     first = None
 
-    def run(pid, name, args):
+    def orphan(pid, evs):
+        """A process no clone can be shown to have made: from an unknown working directory."""
+        cwds[pid], fds[pid] = Cwd(None), {}
+        stamp.discard(pid)
+        for ev in evs:
+            yield from run(pid, *ev)
+
+    def segments(evs):
+        """The events split after each exit: one process's life per part."""
+        out, cur = [], []
+        for ev in evs:
+            cur.append(ev)
+            if ev[0] == EXITED:
+                out.append(cur)
+                cur = []
+        return out, cur
+
+    def run(pid, name, args, resumed=False):
         if name == EXITED:
             # The pid is free again: a later process given it starts from its own clone.
             cwds.pop(pid, None)
@@ -155,17 +173,25 @@ def accesses(lines, start_cwd):
             if r and int(r.group(r.lastindex)) > 0 and int(r.group(r.lastindex)) not in cwds:
                 # A live pid is never a new child.
                 child = int(r.group(r.lastindex))
+                lives, rest = segments(unborn.pop(child, []))
+                if not resumed:
+                    # A clone printed whole was made after every buffered life of its pid ended.
+                    for life in lives:
+                        yield from orphan(child, life)
+                    lives = []
+                # Unfinished across the child's first calls (vfork): the first buffered life is
+                # this clone's child, which may already have exited; later lives wait for theirs.
+                mine = lives[0] if lives else rest
+                later = [ev for life in lives[1:] for ev in life] + (rest if lives else [])
+                if later:
+                    unborn[child] = later
                 if pid in stamp:
                     stamp.add(child)
                 clone = name in ("clone", "clone3")
                 fds[child] = table if clone and "CLONE_FILES" in args else dict(table)
                 cwds[child] = cell if clone and "CLONE_FS" in args else Cwd(cell.path)
-                evs = unborn.pop(child, [])
-                for i, ev in enumerate(evs):
+                for ev in mine:
                     yield from run(child, *ev)
-                    if ev[0] == EXITED and evs[i + 1:]:
-                        unborn[child] = evs[i + 1:]  # a later process given the same pid
-                        break
             return
         if name == "fchdir":
             d = _FDDIR.match(args)
@@ -217,24 +243,21 @@ def accesses(lines, start_cwd):
             if r and r.group(1) == "0":
                 cell.path = path
 
-    for pid, name, args in _events(lines):
+    for pid, name, args, resumed in _events(lines):
         if first is None:
             first = pid
             cwds[pid], fds[pid] = Cwd(start_cwd), {}
         if pid not in cwds or pid in unborn:
-            if name == EXITED and not unborn.get(pid):
-                continue  # died before any traced call (a thread its process's death took)
-            unborn.setdefault(pid, []).append((name, args))
+            unborn.setdefault(pid, []).append((name, args, resumed))
             continue
-        yield from run(pid, name, args)
+        yield from run(pid, name, args, resumed)
     # A process no traced clone returned: its calls run from an unknown working directory, which
     # an AT_FDCWD decoration later fills; a relative path before that is unresolved.
     while unborn:
         pid = next(iter(unborn))
-        for name, args in unborn.pop(pid):
-            if pid not in cwds:
-                cwds[pid], fds[pid] = Cwd(None), {}
-            yield from run(pid, name, args)
+        lives, rest = segments(unborn.pop(pid))
+        for life in lives + ([rest] if rest else []):
+            yield from orphan(pid, life)
 
 
 def read_lines(paths):

@@ -87,11 +87,27 @@ class AccessesTest(unittest.TestCase):
                                ("execve", "/repo/image/mkosi/run"), ("stat", "/repo/image/mkosi/x")])
 
     def test_two_unborn_processes_on_one_pid_wait_for_their_own_clones(self):
-        got = acc(['1 stat("z", {}) = 0', '4 chdir("a") = 0', '4 +++ exited with 0 +++', '4 chdir("b") = 0',
-                   '1 clone(child_stack=NULL, flags=SIGCHLD) = 4', '1 chdir("/q") = 0',
-                   '1 clone(child_stack=NULL, flags=SIGCHLD) = 4', '4 stat("c", {}) = 0'])
+        # Each clone is unfinished across its child's calls; the first child exits before its clone prints.
+        got = acc(['1 stat("z", {}) = 0', '1 vfork( <unfinished ...>', '4 chdir("a") = 0', '4 +++ exited with 0 +++',
+                   '1 <... vfork resumed>) = 4', '1 chdir("/q") = 0', '1 vfork( <unfinished ...>',
+                   '4 chdir("b") = 0', '1 <... vfork resumed>) = 4', '4 stat("c", {}) = 0'])
         self.assertEqual(got, [("stat", "/repo/broker/z"), ("chdir", "/repo/broker/a"), ("chdir", "/q"),
                                ("chdir", "/q/b"), ("stat", "/q/b/c")])
+
+    def test_a_dead_child_never_shadows_its_pids_next_process(self):
+        # A vfork child exits before its clone line prints; later a whole clone returns the same pid, whose new
+        # process inherits the cloner's cwd and stamp, not the dead one's.
+        got = acc(['1 stat("z", {}) = 0', '1 vfork( <unfinished ...>', '4 chdir("/a") = 0', '4 +++ exited with 0 +++',
+                   '1 <... vfork resumed>) = 4', '1 chdir("/q") = 0',
+                   '1 clone(child_stack=NULL, flags=SIGCHLD) = 4', '4 stat("c", {}) = 0'])
+        self.assertEqual(got, [("stat", "/repo/broker/z"), ("chdir", "/a"), ("chdir", "/q"), ("stat", "/q/c")])
+
+    def test_a_stale_life_before_a_whole_clone_is_unplaced(self):
+        # A whole clone line means its child printed nothing yet: buffered calls on that pid were an earlier
+        # process no clone placed, so they resolve from an unknown cwd (fail closed).
+        got = acc(['1 stat("z", {}) = 0', '4 stat("a", {}) = 0', '4 +++ exited with 0 +++',
+                   '1 clone(child_stack=NULL, flags=SIGCHLD) = 4', '4 stat("c", {}) = 0'])
+        self.assertEqual(got, [("stat", "/repo/broker/z"), ("stat", None), ("stat", "/repo/broker/c")])
 
     def test_a_thread_killed_before_its_first_call_leaves_nothing(self):
         got = acc(['1 stat("z", {}) = 0', '6 +++ killed by SIGKILL +++',
