@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-// REQ: CRED-8, REC-1
+// REQ: REC-1
 
 // stream is a deterministic byte source: SHA-256 in counter mode. failAt,
 // when non-zero, makes that one Read call (counted from 1) fail; every
