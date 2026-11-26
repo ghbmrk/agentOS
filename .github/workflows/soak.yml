@@ -33,8 +33,9 @@ jobs:
       # CI-mutgate-after-ci (#6569): one target at a time, so with soak's one the workflow holds at most 2 of the
       # plan's 20 runners, not 4. 18 targets of 3 h take about 54 h. The `soak` group keeps one pending run and a
       # newer scheduled run cancels it, so Actions shows a cancelled soak run about every other day, runs go back
-      # to back, and each target, the race soak and the "Soak failures" report come about every 2.25 days (the
-      # report about 51 h after a run starts).
+      # to back, and each target, the race soak and the "Soak failures" report come about every 2.25 days (a
+      # failed run's report about 54 h after it starts: report needs fuzz and soak). Every target below is tier A
+      # (CI-mutgate-after-ci-fu-1, tools/ASSUMPTIONS.md), so no order puts tier A first; a tier-B target goes last.
       max-parallel: 1
       matrix:
         include:

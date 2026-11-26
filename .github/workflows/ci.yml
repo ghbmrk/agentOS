@@ -588,6 +588,13 @@ jobs:
         run: |
           go vet -tags infer_real,infer_llamacpp ./cmd/agentos-infer
           go test -count=1 -tags infer_llamacpp ./cmd/agentos-infer
+      - name: The agentos_e2e-tagged box-e2e driver and egress build, vetted and tested (#1890)
+        # image.yml builds agentos-egress with -tags agentos_e2e (the Codex stub's transport, boxe2e
+        # ASSUMPTIONS E10). Untagged go vet and go test skip that build's files and box-e2e's tagged
+        # tests of it (TestTaggedBuildsCarryE2ETag), so they run here.
+        run: |
+          go vet -tags agentos_e2e ./e2e/boxe2e/... ./cmd/agentos-egress/...
+          go test -count=1 -tags agentos_e2e ./e2e/boxe2e/... ./cmd/agentos-egress/...
       - name: Vendored code equals the modules go.sum pins (KRN-2cap-harden, #2945)
         # `go mod vendor` rewrites vendor/ from the checksum-verified modules (and the local
         # replace directories), so an edited, added or deleted vendored file shows as a change.
