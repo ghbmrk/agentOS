@@ -161,6 +161,40 @@ class RecordsMerged(unittest.TestCase):
         self.assertFalse(any("canary" in v for v in seen["env"].values()))
         self.assertEqual((seen["env"]["GOWORK"], seen["env"]["GOTOOLCHAIN"], seen["env"]["GOFLAGS"]), ("off", "local", ""))
 
+    def child(self, outcome):
+        """_records on the PR tree with the mutgate child replaced by outcome (a CompletedProcess's (code, stderr) or an exception)."""
+        if (self.r / "broker/p/a.go").read_text() != "package p // child\n":
+            self.write("broker/p/a.go", "package p // child\n")
+            self.commit("code")
+        real = subprocess.run
+        def run(argv, cwd=None, env=None, **kw):
+            if argv[0] == "git":
+                return real(argv, cwd=cwd, **kw)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return subprocess.CompletedProcess(argv, outcome[0], "", outcome[1])
+        with mock.patch.object(premerge.subprocess, "run", run), tempfile.TemporaryDirectory() as tmp:
+            return premerge._records(self.r, "pr", tmp)
+
+    def test_a_child_that_crashes_naming_no_problem_holds(self):
+        # #6717 Security: a traceback prints no `mutgate: ` line, so the exit code is what holds it.
+        crash = "Traceback (most recent call last):\n  File \"tools/mutgate.py\"\nKeyError: 'x'\n"
+        self.assertEqual(self.child((1, crash)), {"mutgate records exited 1"})
+        self.assertEqual(self.child((2, "")), {"mutgate records exited 2"})
+        self.assertEqual(self.child((0, "noise\n")), set())
+        self.assertEqual(self.child((1, PROBLEM + "\n" + crash)), {PROBLEM})
+
+    def test_a_child_that_hangs_holds(self):
+        # #6717 Security: a crafted tree that keeps the child past the cap must not read as no problem.
+        got = self.child(subprocess.TimeoutExpired(["mutgate"], premerge.RECORDS_TIMEOUT))
+        self.assertEqual(got, {f"mutgate records ran past {premerge.RECORDS_TIMEOUT}s"})
+        self.assertFalse(premerge.NAMED.search(next(iter(got))))  # never subtracted against base
+
+    def test_a_tree_without_broker_reads_no_problem(self):
+        empty = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # git's empty tree: no broker/ to read, so no child runs
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(premerge._records(self.r, empty, tmp), set())
+
     def test_a_link_out_of_the_tree_is_refused(self):
         (self.r / "broker/p/MUTANTS-EQUIVALENT").unlink()
         (self.r / "broker/p/MUTANTS-EQUIVALENT").symlink_to("/etc/passwd")
