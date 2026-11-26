@@ -43,6 +43,26 @@ class SitlPipHashes(unittest.TestCase):
             for flag in ("--require-hashes", "--no-deps", "-r "):
                 self.assertIn(flag, x)
 
+    def test_setuptools_installs_first_and_empy_builds_against_it(self):
+        # --require-hashes does not reach a build-isolation install: without --no-build-isolation pip fetches
+        # empy's build backend unhashed (#6697 Potency 1). The hashed setuptools must already be in the venv.
+        first, second = sitl_installs(BUILD.read_text())
+        self.assertRegex(first, r"-r build-requirements\.txt$")
+        self.assertRegex(second, r"-r requirements\.txt$")
+        self.assertIn("--no-build-isolation", second.split())
+        build_reqs = HEREDOC.findall(BUILD.read_text())[0].split("\n")
+        self.assertEqual([x.split("==")[0] for x in build_reqs], ["setuptools"])
+
+    def test_venv_interpreter_is_checked_before_either_install(self):
+        # #6697 Potency 2: the installs run as `python3 -m`, so python3 must be the build venv's.
+        lines = BUILD.read_text().split("\n")
+        guard = lines.index('  [ "$(command -v python3)" = "$src/.venv/bin/python3" ] || '
+                            '{ echo "python3 is not the build venv\'s" >&2; exit 1; }')
+        path = lines.index('  export PATH="$src/.venv/bin:$PATH"')
+        installs = [i for i, x in enumerate(lines) if x in sitl_installs(BUILD.read_text())]
+        self.assertLess(path, guard)
+        self.assertLess(guard, min(installs))
+
     def test_build_holds_no_uncredited_fetch_and_is_not_exempt(self):
         self.assertEqual(pins.fetch_sites(BUILD, "text"), 0)
         self.assertNotIn("broker/drone/sitl/build.sh", pins.FETCH_EXEMPT)
