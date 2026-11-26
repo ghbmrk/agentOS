@@ -22,19 +22,22 @@ import (
 // There is no owner yet, so no number is trusted: only texts that start
 // with PAIR are passed on (anyone else's never reach the page), at most
 // SetupInboundPerMinute a minute and MaxSetupInbound waiting. The SIM the
-// bridge finds while setup runs is recorded as the owner line's (Record),
-// once: it is the box's own SIM, and the owner pairs with its number.
+// bridge finds while setup runs is recorded as the owner line's (Record):
+// it is the box's own SIM, and the owner pairs with its number. A SIM
+// swapped in while setup runs replaces the one setup recorded (#1295), so
+// the owner pairs with the number in the box; setup records each SIM once.
 type SetupLine struct {
 	cfg SetupConfig
 
-	mu       sync.Mutex
-	ready    chan struct{} // closed and replaced when an item is queued
-	queue    []*item
-	out      map[string]*item
-	state    string
-	number   string
-	seen     time.Time
-	recorded bool
+	mu     sync.Mutex
+	ready  chan struct{} // closed and replaced when an item is queued
+	queue  []*item
+	out    map[string]*item
+	state  string
+	number string
+	seen   time.Time
+	// recorded is the SIM this setup recorded ("": none yet).
+	recorded string
 	inIDs    map[string]time.Time
 	inTimes  []time.Time
 	inbox    chan setupText
@@ -294,11 +297,14 @@ func (s *SetupLine) setState(_ context.Context, _ sockets.Peer, args json.RawMes
 		}
 		s.queue = nil
 	}
-	if st.OwnerLine == bridgeproto.StateUnbound && st.ICCID != "" && !s.recorded && s.cfg.Record != nil {
-		// The box's own SIM, found with no SIM recorded: setup binds it,
-		// once, and the bridge opens it at its next try.
+	// The box's own SIM, found with no SIM recorded (unbound), or swapped
+	// in for the one this setup recorded: setup binds it, once, and the
+	// bridge opens it at its next try (#1295). A swap from a SIM some
+	// earlier run recorded is left as it is: setup did not choose that one.
+	rebind := st.OwnerLine == bridgeproto.StateUnbound || st.OwnerLine == bridgeproto.StateSwapped && s.recorded != ""
+	if rebind && st.ICCID != "" && st.ICCID != s.recorded && s.cfg.Record != nil {
 		if err := s.cfg.Record(st.ICCID); err == nil {
-			s.recorded = true
+			s.recorded = st.ICCID
 		}
 	}
 	return struct{}{}, nil
