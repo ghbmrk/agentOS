@@ -93,6 +93,19 @@ class RecordsMerged(unittest.TestCase):
                 self.assertEqual(self.merged({"merge": {why}, "base": {why}}),
                                  (("needs-records error", [why]), ["merge"]))
 
+    def test_a_merge_tree_error_is_no_conflict(self):
+        # In CI's unit tests the object store was not writable: merge-tree failed (not 1) and the read was skipped.
+        self.write("broker/p/a.go", "package p // err\n")
+        self.commit("code")
+        real = subprocess.run
+        def run(argv, *a, **kw):
+            if argv[:2] == ["git", "merge-tree"]:
+                return subprocess.CompletedProcess(argv, 128, b"", b"fatal: unable to write object\n")
+            return real(argv, *a, **kw)
+        with mock.patch.object(premerge, "_records", lambda *a: set()), mock.patch.object(premerge.subprocess, "run", run), \
+                self.assertRaises(subprocess.CalledProcessError):
+            premerge.records_merged(self.r, "pr", "main")
+
     def test_a_conflicted_merge_reads_nothing(self):
         self.write("broker/p/a.go", "package p // pr\n")
         self.commit("pr side")
@@ -251,14 +264,21 @@ class Replays(unittest.TestCase):
         for sha in ("85751e94", "a14e71c2"):
             if subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=ROOT, capture_output=True).returncode:
                 self.skipTest("main's history is not in this clone (CI checks out with fetch-depth 0)")
+        # merge-tree writes objects, and CI runs the tests as a uid that cannot write this checkout's store: a shared
+        # clone borrows its objects and writes its own.
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.repo = pathlib.Path(d.name)
+        git(self.repo, "init", "-q")
+        (self.repo / ".git/objects/info/alternates").write_text(git(ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir") + "/objects\n")
 
     def test_6640_records_on_a_main_holding_6561(self):
-        why, _ = premerge.records_merged(ROOT, "85751e94^2", "85751e94^1")
+        why, _ = premerge.records_merged(self.repo, "85751e94^2", "85751e94^1")
         self.assertTrue(why.startswith("needs-records "), why)
         self.assertIn("broker/clerk/plan/MUTANTS-EQUIVALENT", why.split())
 
     def test_6561_check_on_a_main_holding_6606(self):
-        self.assertEqual(premerge.records_merged(ROOT, "a14e71c2^2", "a14e71c2^1"), ("needs-main-merge tools/mutgate.py", []))
+        self.assertEqual(premerge.records_merged(self.repo, "a14e71c2^2", "a14e71c2^1"), ("needs-main-merge tools/mutgate.py", []))
 
 
 class Workflow(unittest.TestCase):

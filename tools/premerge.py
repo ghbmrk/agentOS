@@ -959,8 +959,9 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
 # (#6606 with #6561, fixed by #6713; #6640 with #6561, fixed by #6715). The gate reads them again on the merge it is
 # about to release. RECORDS_TOOLS change what `records` reports; RECORDS_TREE is what it reads.
 # Derived like the gate files: every tools/ module mutgate.py loads, directly or through risk_tier.py (record_merge.py
-# reads core.txt), plus the lister it builds and the tier list (#6717 L3).
-RECORDS_TOOLS = (*sorted(f"tools/{m}.py" for m in gate_modules(roots=("mutgate",))), "tools/mutgate_stmts.go", "broker/core/core.txt")
+# reads core.txt), plus the lister it builds and the tier list, copied as bytes, never read here (#6717 L3).
+CORE = risk_tier.CORE_LIST.relative_to(risk_tier.CORE_LIST.parents[2]).as_posix()
+RECORDS_TOOLS = (*sorted(f"tools/{m}.py" for m in gate_modules(roots=("mutgate",))), "tools/mutgate_stmts.go", CORE)
 RECORDS_TREE = ("broker", ":(exclude)broker/vendor")
 RECORDS_TIMEOUT = 90  # seconds a side, two sides inside premerge-gate's 8 minutes
 TOOLS = pathlib.Path(__file__).resolve().parent
@@ -982,10 +983,10 @@ def _records(cwd, treeish, tmp):
     except tarfile.FilterError as e:
         return {f"mutgate records: the tree is refused: {e}"}
     shutil.copytree(TOOLS, dest / "tools", ignore=shutil.ignore_patterns("__pycache__"))
-    core = dest / "broker/core/core.txt"
+    core = dest / CORE
     core.parent.mkdir(parents=True, exist_ok=True)
     core.unlink(missing_ok=True)
-    shutil.copyfile(TOOLS.parent / "broker/core/core.txt", core)
+    shutil.copyfile(TOOLS.parent / CORE, core)
     env = {k: os.environ[k] for k in RECORDS_ENV if k in os.environ} | {"GOFLAGS": "", "GOWORK": "off", "GOTOOLCHAIN": "local"}
     try:
         r = subprocess.run([sys.executable, "-I", str(dest / "tools/mutgate.py"), "records"], cwd=dest, env=env,
@@ -1021,8 +1022,10 @@ def records_merged(cwd, head="HEAD", base="origin/main"):
         if _files(cwd, onto, base, *RECORDS_TOOLS, f":(glob)broker/**/{RECORD}", *(f":(glob){d}/**/*.go" for d in held)):
             return "needs-main-merge " + " ".join(mine), []
     out = subprocess.run(["git", "merge-tree", "--write-tree", "--no-messages", base, head], cwd=cwd, capture_output=True)
-    if out.returncode:
+    if out.returncode == 1:  # conflicts: GitHub cannot merge it
         return None, []
+    if out.returncode:  # an error (the object store not writable, a bad ref) never reads as a conflict
+        raise subprocess.CalledProcessError(out.returncode, out.args, out.stdout, out.stderr)
     tree = out.stdout.decode().split()[0]
     if not _files(cwd, base, tree, *RECORDS_TREE):
         return None, []
