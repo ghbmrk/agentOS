@@ -69,11 +69,14 @@ VCS_STAMP = (("git", "status", "--porcelain"),
 
 
 def _argv_is(argv):
-    """argv is exactly these strings. Each pointer is tested before its string is read, and the
-    end by its NULL pointer: str() of a NULL pointer leaves bpftrace's buffer as an earlier read
-    filled it, so a string test there could match a stale value."""
-    return " && ".join(f'args->argv[{i}] != 0 && str(args->argv[{i}], 32) == "{a}"' for i, a in enumerate(argv)) + \
-        f' && args->argv[{len(argv)}] == 0'
+    """The new image's argv is exactly these strings, read where exec laid them out: one after
+    another from mm->arg_start, each ending in a NUL, arg_end just past the last. The total length
+    is tested first, so every string read lies inside the argument area."""
+    tests, off = [f"$n == {sum(len(a) + 1 for a in argv)}"], 0
+    for a in argv:
+        tests.append(f'str(uptr($a + {off}), {len(a) + 1}) == "{a}"')
+        off += len(a) + 1
+    return " && ".join(tests)
 
 
 def program(ino, dev, seed):
@@ -82,7 +85,7 @@ def program(ino, dev, seed):
     pid `seed`. The probe walks d_parent from the file to root and prints the path's parts, leaf
     first, one line each ("C tid i name"), then "E kind tid pid parts"; the dentry walk gives the
     file's place in its filesystem, so a bind mount or a sandbox's root does not hide it. Each exec
-    in the tree prints "X pid stamped parent-comm filename", and each a go process makes "A pid argv...". Go's VCS-stamp git (VCS_STAMP) prints nothing."""
+    in the tree prints "X pid stamped parent-comm argv-bytes filename". Go's VCS-stamp git (VCS_STAMP) prints nothing."""
     ino, dev, seed = int(ino), int(dev), int(seed)
     walk = "\n".join(f"  $d{i + 1} = $d{i}->d_parent;" for i in range(LEVELS))
     find = "\n  else ".join(f"if ($d{i}->d_inode->i_ino == {ino} && $d{i}->d_sb->s_dev == {dev}) {{ $k = {i}; }}"
@@ -112,19 +115,16 @@ tracepoint:task:task_newtask /@tree[pid] && (args->clone_flags & 0x10000) == 0/ 
   @tree[args->pid] = 1;
   if (@tree[args->pid] == 0) {{ printf("FULL\\n"); }}
 }}
-tracepoint:syscalls:sys_enter_execve /@tree[pid] && comm == "go"/ {{
-  printf("A %d %s %s %s\\n", pid, str(args->argv[0], 32), str(args->argv[1], 32), str(args->argv[2], 32));
-}}
-tracepoint:syscalls:sys_enter_execve /@tree[pid]/ {{
-  if (comm == "go" &&
+tracepoint:sched:sched_process_exec /@tree[pid]/ {{
+  $a = curtask->mm->arg_start;
+  $n = curtask->mm->arg_end - $a;
+  if (curtask->real_parent->comm == "go" &&
       ({stamp})) {{
     @stamp[pid] = 1;
   }} else {{
     delete(@stamp[pid]);
   }}
-}}
-tracepoint:sched:sched_process_exec /@tree[pid]/ {{
-  printf("X %d %d %s %s\\n", pid, @stamp[pid], curtask->real_parent->comm, str(args->filename));
+  printf("X %d %d %s %d %s\\n", pid, @stamp[pid], curtask->real_parent->comm, $n, str(args->filename));
 }}
 tracepoint:sched:sched_process_exit /pid == tid/ {{ delete(@stamp[pid]); }}{probes}
 END {{ clear(@tree); clear(@stamp); printf("END\\n"); }}
@@ -205,10 +205,9 @@ def events(lines):
                 yield "problem", f"trace: a path part may be cut short at {NAMELEN} bytes: {got}"
             else:
                 yield "access", f[1], "/".join(got[i] for i in reversed(range(k)))
-        elif line.startswith("X ") and len(f := line.split(" ", 4)) == 5 and f[1].isdigit() and f[2] in ("0", "1"):
-            yield "exec", f[4]
-        elif line.startswith("A ") and line[2:].split(" ", 1)[0].isdigit():
-            continue  # the argv a go process execs, for the record (VCS_STAMP marks at it)
+        elif (line.startswith("X ") and len(f := line.split(" ", 5)) == 6 and f[1].isdigit()
+              and f[2] in ("0", "1") and f[4].isdigit()):
+            yield "exec", f[5]
         elif line == "FULL":
             yield "problem", f"trace: the process map is full ({TREE_KEYS} keys): a process went untraced"
         elif line:

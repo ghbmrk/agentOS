@@ -25,7 +25,7 @@ def ev(rel, kind="o", tid=1, pid=None):
 
 
 CONTROLS = [l for kind, rel in sorted(race_reads.CONTROLS) for l in ev(rel, kind)]
-TEST = "X 7 0 go /tmp/go-build1/b001/x.test"
+TEST = "X 7 0 go 7 /tmp/go-build1/b001/x.test"
 
 
 def trace(*lines, start=True, end=True):
@@ -79,8 +79,9 @@ class AuditTest(unittest.TestCase):
                             (trace(end=False), "did not run from start to end"),
                             ([], "did not run from start to end"),
                             ([l for l in trace() if l != TEST], "no test binary ran"),
-                            (trace("X 7 0 bash /usr/bin/go", "A 7 git status --porcelain"), None),
+                            (trace("X 7 1 go 23 /usr/bin/git"), None),
                             (trace("X 7 /usr/bin/go"), "unexpected line"),
+                            (trace("A 7 git status --porcelain"), "unexpected line"),
                             (trace("Lost 12 events"), "unexpected line"),
                             (trace("FULL"), "process map is full"),
                             (trace("E x 1 1 1"), "unreadable line"),
@@ -149,9 +150,12 @@ class ProgramTest(unittest.TestCase):
             self.assertIn(f'printf("E {kind} %d %d %d\\n", tid, pid, $k);', prog)
         self.assertNotIn("path(", prog)  # bpf_d_path is missing on the runner's kernel
         self.assertNotIn("vfs_getattr", prog)  # fentry saw no call of it on the runner
-        self.assertIn('args->argv[2] != 0 && str(args->argv[2], 32) == "--porcelain" && args->argv[3] == 0', prog)
-        self.assertNotIn('== ""', prog)  # str() of a NULL pointer can hold a stale string
-        self.assertIn('str(args->argv[2], 32) == "log.showsignature=false"', prog)
+        # argv is read from the new image's argument area, its length tested first.
+        self.assertIn('$n == 23 && str(uptr($a + 0), 4) == "git" && str(uptr($a + 4), 7) == "status" && '
+                      'str(uptr($a + 11), 12) == "--porcelain"', prog)
+        self.assertIn('curtask->real_parent->comm == "go"', prog)
+        self.assertNotIn("sys_enter_execve", prog)  # it missed most of go's git execs on the runner
+        self.assertIn('str(uptr($a + 7), 24) == "log.showsignature=false"', prog)
         self.assertIn("(args->clone_flags & 0x10000) == 0", prog)  # threads share their process's key
         self.assertEqual(race_reads.kernel_dev(os.makedev(8, 1)), 8 << 20 | 1)
 
