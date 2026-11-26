@@ -69,14 +69,17 @@ def _plain(path):
     return not ("" in parts or "." in parts or ".." in parts)
 
 
+def race_read(path):
+    """Whether broker-race's tests read the path, or the job runs it: RACE_READ or NEVER_BLIND."""
+    return any(path == e.rstrip("/") or e.endswith("/") and path.startswith(e) for e in (*RACE_READ, *NEVER_BLIND))
+
+
 def is_race_blind(path, status):
     """A change no broker test can see: a modification (git status M, mode unchanged) of a file
     outside RACE_READ and NEVER_BLIND. An addition, deletion, type or mode change alters a
     directory listing or what a stat shows, which the read audit does not trace, so it is never
     race-blind."""
-    if status != "M" or not _plain(path):
-        return False
-    return not any(path == e.rstrip("/") or e.endswith("/") and path.startswith(e) for e in (*RACE_READ, *NEVER_BLIND))
+    return status == "M" and _plain(path) and not race_read(path)
 
 
 def is_record(path):
@@ -97,7 +100,9 @@ def scope_of(paths):
     if not changes:
         return "full", None  # nothing changed, or nothing we can see: test everything
     for s, p in changes:
-        if not is_record(p) and not is_race_blind(p, s):
+        # A record the read audit found a broker test reading goes into RACE_READ; it then runs
+        # full, since a records-only change would skip broker-race, the test that reads it.
+        if not (is_record(p) and not race_read(p)) and not is_race_blind(p, s):
             return "full", p
     if all(is_record(p) for _, p in changes):
         return "records", None

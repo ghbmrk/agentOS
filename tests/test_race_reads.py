@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -196,6 +197,18 @@ class RaceBlindScopeTest(unittest.TestCase):
         self.assertEqual(ci_scope.scope_of([("M", "tests/test_x.py"), ("M", "broker/x.go")]), ("full", "broker/x.go"))
         self.assertEqual(ci_scope.scope_of(["tests/test_x.py"]), ("full", "tests/test_x.py"))  # no status
         self.assertEqual(ci_scope.scope_of([]), ("full", None))
+
+    def test_a_record_a_broker_test_reads_never_skips_broker_race(self):
+        # The audit sends a record a test reads into RACE_READ; from then on a change to it,
+        # records-only or not, runs full, so broker-race runs the test that reads it.
+        read = (*ci_scope.RACE_READ, "briefs/x.md", "docs/learning/")
+        with unittest.mock.patch.object(ci_scope, "RACE_READ", read):
+            self.assertEqual(ci_scope.scope_of([("M", "briefs/x.md")]), ("full", "briefs/x.md"))
+            self.assertEqual(ci_scope.scope_of(["docs/learning/a.md", "BOARD.md"]), ("full", "docs/learning/a.md"))
+            self.assertEqual(ci_scope.scope_of([("M", "BOARD.md"), ("M", "tests/t.py"), ("M", "briefs/x.md")]),
+                             ("full", "briefs/x.md"))
+            self.assertEqual(ci_scope.scope_of([("M", "briefs/y.md")]), ("records", None))
+        self.assertEqual(ci_scope.scope_of([("M", "briefs/x.md")]), ("records", None))
 
     def test_changed_paths_carry_git_status(self):
         with tempfile.TemporaryDirectory() as d:
