@@ -959,7 +959,9 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
 # (#6606 with #6561, fixed by #6713; #6640 with #6561, fixed by #6715). The gate reads them again on the merge it is
 # about to release. RECORDS_TOOLS change what `records` reports; RECORDS_TREE is what it reads.
 RECORD = "MUTANTS-EQUIVALENT"
-RECORDS_TOOLS = ("tools/mutgate.py", "tools/mutgate_stmts.go", "tools/risk_tier.py", "broker/core/core.txt")
+# Derived like the gate files: every tools/ module mutgate.py loads, directly or through risk_tier.py (record_merge.py
+# reads core.txt), plus the lister it builds and the tier list (#6717 L3).
+RECORDS_TOOLS = (*sorted(f"tools/{m}.py" for m in gate_modules(roots=("mutgate",))), "tools/mutgate_stmts.go", "broker/core/core.txt")
 RECORDS_TREE = ("broker", ":(exclude)broker/vendor")
 RECORDS_TIMEOUT = 90  # seconds a side, two sides inside premerge-gate's 8 minutes
 TOOLS = pathlib.Path(__file__).resolve().parent
@@ -991,6 +993,9 @@ def _records(cwd, treeish, tmp):
                            capture_output=True, text=True, timeout=RECORDS_TIMEOUT)
     except subprocess.TimeoutExpired:
         return {f"mutgate records ran past {RECORDS_TIMEOUT}s"}
+    # A named line is read as the run's whole answer even when the child then exits non-zero: `cmd_records` prints its
+    # problems only once every record is read, so a crash prints none. A mutgate that streams problems as it goes
+    # must keep a crash distinguishable here, or a crash after a line main also prints would subtract to a pass.
     found = {l for l in r.stderr.splitlines() if l.startswith("mutgate: ")}
     return found or ({f"mutgate records exited {r.returncode}"} if r.returncode else set())
 

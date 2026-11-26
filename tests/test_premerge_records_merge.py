@@ -133,6 +133,18 @@ class RecordsMerged(unittest.TestCase):
                     git(self.r, "merge", "-q", "--no-edit", "main")
                     self.assertEqual(self.merged({})[0][0], None)
 
+    def test_every_file_mutgate_loads_is_a_records_tool(self):
+        # #6717 L3: risk_tier.py loads record_merge.py to read core.txt, so a PR changing it changes the check too.
+        loaded = {f"tools/{m}.py" for m in premerge.gate_modules(roots=("mutgate",))}
+        self.assertTrue({"tools/mutgate.py", "tools/risk_tier.py", "tools/record_merge.py"} <= loaded, loaded)
+        built = {f"tools/{p.name}" for p in [__import__("mutgate").STMTS]}
+        self.assertEqual(set(premerge.RECORDS_TOOLS), loaded | built | {"broker/core/core.txt"})
+        # and the PR changing one holds while main changed a record
+        self.write("tools/record_merge.py", "# changed\n")
+        self.commit("tool")
+        self.on_main("broker/p/MUTANTS-EQUIVALENT", "# p3\n")
+        self.assertEqual(self.merged({})[0], ("needs-main-merge tools/record_merge.py", []))
+
     def test_the_tree_is_read_with_this_checkouts_tools_and_no_token(self):
         # The child runs this checkout's mutgate.py on a copy whose tools/ and core.txt are this checkout's,
         # and the gate step's tokens stay out of its environment.
