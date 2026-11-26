@@ -6,7 +6,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
-// REQ: CAP-8
+// REQ: PLN-6
 // Two snapshots of a destroyed worker, with no worker of its name made
 // again, still compare in either order: the caller owns both, so the
 // answer cannot hang on which one is named first (#6618, from #6602 UX).
