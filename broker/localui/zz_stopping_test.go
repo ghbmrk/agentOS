@@ -111,7 +111,7 @@ func stoppingRequest(s *Server, tok, method, path string, formFor func(*Server, 
 	return w
 }
 
-// REQ: UX-2wb-1 (#6619, from #1752 P8)
+// UX-2wb-1 (#6619, from #1752 P8)
 // While agentosd is stopping it refuses every page call. Every page action
 // then shows that agentOS is stopping or restarting, with a 503, rather
 // than its generic failure or a sign-in page: a planned restart never reads
@@ -134,7 +134,7 @@ func TestZEveryPageActionRefusedAsStoppingSaysSo(t *testing.T) {
 	}
 }
 
-// REQ: UX-2wb-1 (#6619; L3 blocker 2 on #6699)
+// UX-2wb-1 (#6619; L3 blocker 2 on #6699)
 // A stop that begins after the page checked the session refuses the
 // action's own call. The session check only reads, so each signed-in
 // action still says it did not do this, and never asks the owner to check
@@ -150,7 +150,7 @@ func TestZEachActionsOwnStoppingRefusalSaysNotDone(t *testing.T) {
 	}
 }
 
-// REQ: UX-2wb-1 (#6619; L3 blocker 2 on #6699)
+// UX-2wb-1 (#6619; L3 blocker 2 on #6699)
 // Only a form whose acting call returned before the refusal says agentOS
 // stopped partway: RESUME recorded, then its status page refused. A page
 // view does nothing, so a GET says "did not do this" even when one of its
@@ -168,7 +168,7 @@ func TestZOnlyAnActionThatReturnedSaysPartway(t *testing.T) {
 	}
 }
 
-// REQ: UX-2wb-1, L18 (#6619; L3 blocker 1 on #6699)
+// UX-2wb-1, L18 (#6619; L3 blocker 1 on #6699)
 // The buffered page still reaches the connection's deadlines, so the
 // upload bound (uploadWindow) a handler sets through ServeHTTP holds.
 func TestZABufferedPageKeepsTheConnectionDeadlines(t *testing.T) {
@@ -195,7 +195,7 @@ func TestZABufferedPageKeepsTheConnectionDeadlines(t *testing.T) {
 	}
 }
 
-// REQ: UX-2wb-1 (#6619)
+// UX-2wb-1 (#6619)
 // Any other refusal keeps the action's own text: a failed STOP still says
 // to press STOP again, and a page agentosd answered is sent as the handler
 // wrote it.
@@ -213,7 +213,7 @@ func TestZOnlyAStoppingRefusalShowsTheStoppingPage(t *testing.T) {
 	}
 }
 
-// REQ: UX-2wb-1 (#6619)
+// UX-2wb-1 (#6619)
 // The stopping page keeps a session cookie the handler set from a call
 // agentosd answered before it stopped, and keeps the page's guards.
 func TestZTheStoppingPageKeepsCookiesAndGuards(t *testing.T) {
@@ -232,7 +232,7 @@ func TestZTheStoppingPageKeepsCookiesAndGuards(t *testing.T) {
 	}
 }
 
-// REQ: UX-2wb-1, O34 (#6619; Potency blocker 1 on #6699)
+// UX-2wb-1, O34 (#6619; Potency blocker 1 on #6699)
 // A call agentosd ran and then failed ("request failed", "internal
 // error": a handler cut off at the stop) may have taken effect, as a lost
 // answer may. An approvals answer or a resume ask that failed so, then a
@@ -265,7 +265,7 @@ func TestZACallThatRanThenFailedCountsAsPossiblyDone(t *testing.T) {
 	}
 }
 
-// REQ: UX-2wb-1 (#6619; UX blockers on #6699)
+// UX-2wb-1 (#6619; UX blockers on #6699)
 // The stopping page links where the request's effect shows, so "open the
 // page below and check" can be done as written: Status for STOP and
 // RESUME, a mounted page for its form, a GET's own page; else the root.
