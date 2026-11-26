@@ -524,18 +524,41 @@ func (b *buffered) send(w http.ResponseWriter) {
 // may have taken effect, so the owner checks before trying again.
 const (
 	stoppingText = "agentOS is stopping or restarting, so it did not do this. When it is back, try again."
-	partwayText  = "agentOS began stopping or restarting partway through, so some of this may have been done. When it is back, check this page before trying again."
+	partwayText  = "agentOS began stopping or restarting partway through, so some of this may have been done. When it is back, open the page below and check before trying again."
 )
 
 type stoppingView struct {
 	Text    string
 	Refresh string
+	// Check is where the request's effect shows: a GET's own page, STOP
+	// and RESUME's Status, a mounted page's form its page; else the root.
+	Check, CheckTitle string
+}
+
+// checkPage is where r's effect shows, for the stopping page's link.
+func (s *Server) checkPage(r *http.Request) (string, string) {
+	p := r.URL.Path
+	switch {
+	case r.Method == http.MethodGet:
+		return safeNext(r.URL.Path), "Reload this page"
+	case p == "/stop" || p == "/resume":
+		return "/status", "Open Status"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, m := range s.mounts {
+		if p == m.Path || strings.HasPrefix(p, m.Path) {
+			return m.Path, "Open " + m.Title
+		}
+	}
+	return "/", "Open the home page"
 }
 
 // stopping shows the stopping page in place of the handler's. Cookies the
 // handler set stay: they carry sessions agentosd minted before it stopped.
 func (s *Server) stopping(w http.ResponseWriter, r *http.Request, cookies []string, partway bool) {
 	v := stoppingView{Text: stoppingText}
+	v.Check, v.CheckTitle = s.checkPage(r)
 	if partway {
 		v.Text = partwayText
 	}

@@ -58,10 +58,15 @@ type answersKey struct{}
 // readOps only read: their return before a refusal changed nothing.
 var readOps = map[string]bool{localapi.OpSession: true, localapi.OpStatus: true, localapi.OpGridCell: true}
 
+// ranCodes are refusals sent after the op's handler ran (sockets.handle,
+// InProcess.call): a handler error, a panic or an answer that would not
+// marshal. Like a lost answer, the op may have taken effect.
+var ranCodes = map[Refused]bool{Refused(sockets.ErrFailed): true, Refused(sockets.ErrInternal): true}
+
 // note records op's err in the request's answers, if ctx carries them,
-// and returns it. A call that returned, or failed other than by a refusal
-// code, may have taken effect unless op only reads; a refused one did
-// not. ServeHTTP also counts nothing as done for a GET.
+// and returns it. A call that returned, failed other than by a refusal
+// code, or was refused after its handler ran (ranCodes) may have taken
+// effect unless op only reads; any other refusal did not. ServeHTTP also counts nothing as done for a GET.
 func note(ctx context.Context, op string, err error) error {
 	a, _ := ctx.Value(answersKey{}).(*answers)
 	if a == nil {
@@ -73,7 +78,7 @@ func note(ctx context.Context, op string, err error) error {
 	switch {
 	case refused(err, localapi.ErrStopping):
 		a.stopping = true
-	case !a.stopping && !readOps[op] && !errors.As(err, &r):
+	case !a.stopping && !readOps[op] && (!errors.As(err, &r) || ranCodes[r]):
 		a.partway = true
 	}
 	return err

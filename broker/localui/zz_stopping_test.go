@@ -3,6 +3,7 @@ package localui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -20,6 +21,11 @@ import (
 type stopOwner struct {
 	session string
 	ok      map[string]bool
+	// failed ops run and then fail, as one cut off at the stop does: the
+	// handler's error comes back as "request failed". code ops are refused
+	// with code before they run.
+	failed map[string]bool
+	code   map[string]string
 }
 
 func (o stopOwner) Call(ctx context.Context, op string, args, out any) error {
@@ -32,6 +38,12 @@ func (o stopOwner) Call(ctx context.Context, op string, args, out any) error {
 		}
 	} else if o.ok[op] {
 		h = func(context.Context, sockets.Peer, json.RawMessage) (any, error) { return struct{}{}, nil }
+	} else if o.failed[op] {
+		h = func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+			return nil, errors.New("cut off at the stop")
+		}
+	} else if c := o.code[op]; c != "" {
+		h = func(context.Context, sockets.Peer, json.RawMessage) (any, error) { return nil, sockets.Code(c) }
 	}
 	return InProcess{op: h}.Call(ctx, op, args, out)
 }
@@ -217,5 +229,66 @@ func TestZTheStoppingPageKeepsCookiesAndGuards(t *testing.T) {
 	w = stoppingRequest(s, tok, "GET", "/status", nil)
 	if w.Header().Get("Content-Security-Policy") != pageCSP || w.Header().Get("X-Frame-Options") != "DENY" {
 		t.Fatalf("stopping page lost its guards: %v", w.Header())
+	}
+}
+
+// REQ: UX-2wb-1, O34 (#6619; Potency blocker 1 on #6699)
+// A call agentosd ran and then failed ("request failed", "internal
+// error": a handler cut off at the stop) may have taken effect, as a lost
+// answer may. An approvals answer or a resume ask that failed so, then a
+// refused listing, says agentOS stopped partway, never "did not do this".
+// A refusal sent before the op ran (too many tries) still says nothing was
+// done.
+func TestZACallThatRanThenFailedCountsAsPossiblyDone(t *testing.T) {
+	tok := strings.Repeat("ab", localapi.TokenBytes)
+	answer := func(s *Server, _ string) url.Values {
+		return url.Values{"id": {"r1"}, "sum": {"s"}, "answer": {"deny"}, "tok": {s.formToken(tokenKey(tok), "r1", "s")}}
+	}
+	askResume := func(s *Server, _ string) url.Values {
+		return url.Values{"grant": {"g1"}, "pause": {""}, "tok": {s.resumeToken(tokenKey(tok), "g1", "")}}
+	}
+	for _, c := range []struct {
+		name, path string
+		form       func(*Server, string) url.Values
+		o          stopOwner
+		want       string
+	}{
+		{"answer failed", "/approvals/", answer, stopOwner{session: tok, failed: map[string]bool{localapi.OpAnswer: true}}, "partway through"},
+		{"ask failed", "/paused/", askResume, stopOwner{session: tok, failed: map[string]bool{localapi.OpAskResume: true}}, "partway through"},
+		{"answer refused before it ran", "/approvals/", answer, stopOwner{session: tok, code: map[string]string{localapi.OpAnswer: localapi.ErrLimited}}, "so it did not do this"},
+	} {
+		w := stoppingRequest(stoppingServer(t, c.o), tok, "POST", c.path, c.form)
+		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), c.want) {
+			t.Errorf("%s: %d %.400q", c.name, w.Code, w.Body.String())
+		}
+	}
+}
+
+// REQ: UX-2wb-1 (#6619; UX blocker 1 on #6699)
+// The stopping page links where the request's effect shows, so "open the
+// page below and check" can be done as written: Status for STOP and
+// RESUME, a mounted page for its form, a GET's own page; else the root.
+// The POST page is never its own link, since reloading it sends the form
+// again.
+func TestZTheStoppingPageLinksWhereTheEffectShows(t *testing.T) {
+	tok := strings.Repeat("ab", localapi.TokenBytes)
+	s := stoppingServer(t, stopOwner{session: tok, ok: map[string]bool{localapi.OpResume: true}})
+	for _, c := range []struct {
+		method, path, link string
+	}{
+		{"POST", "/resume", `<a href="/status">Open Status</a>`},
+		{"POST", "/stop", `<a href="/status">Open Status</a>`},
+		{"POST", "/approvals/", `<a href="/approvals/">Open Approvals</a>`},
+		{"POST", "/paused/", `<a href="/paused/">Open Paused</a>`},
+		{"POST", "/line/sim", `<a href="/">Open the home page</a>`},
+		{"GET", "/held/", `<a href="/held/">Reload this page</a>`},
+	} {
+		w := stoppingRequest(s, tok, c.method, c.path, fixed(url.Values{"code": {"123456"}}))
+		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), c.link) {
+			t.Errorf("%s %s: %d %.600q", c.method, c.path, w.Code, w.Body.String())
+		}
+	}
+	if !strings.Contains(partwayText, "open the page below") || strings.Contains(partwayText, "this page") {
+		t.Fatalf("partway text %q", partwayText)
 	}
 }

@@ -245,7 +245,7 @@ form { margin: .6em 0 1.2em; }
 {{define "stopping"}}{{template "head" .Refresh}}
 <h1>agentOS</h1>
 <p class="err">{{.Text}}</p>
-{{if .Refresh}}<p>This page reloads by itself.</p>{{end}}<p><a href="/">Open the home page</a></p>
+{{if .Refresh}}<p>This page reloads by itself.</p>{{end}}<p><a href="{{.Check}}">{{.CheckTitle}}</a></p>
 {{template "foot"}}{{end}}
 {{define "notready"}}{{template "head" "30"}}
 <h1>AgentOS</h1>
