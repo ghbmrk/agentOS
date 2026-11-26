@@ -25,7 +25,7 @@ def ev(rel, kind="o", tid=1, pid=None):
 
 
 CONTROLS = [l for kind, rel in sorted(race_reads.CONTROLS) for l in ev(rel, kind)]
-TEST = "X 7 /tmp/go-build1/b001/x.test"
+TEST = "X 7 0 /tmp/go-build1/b001/x.test"
 
 
 def trace(*lines, start=True, end=True):
@@ -79,7 +79,8 @@ class AuditTest(unittest.TestCase):
                             (trace(end=False), "did not run from start to end"),
                             ([], "did not run from start to end"),
                             ([l for l in trace() if l != TEST], "no test binary ran"),
-                            (trace("X 7 /usr/bin/go"), None),
+                            (trace("X 7 0 /usr/bin/go", "A 7 git status --porcelain  "), None),
+                            (trace("X 7 /usr/bin/go"), "unexpected line"),
                             (trace("Lost 12 events"), "unexpected line"),
                             (trace("FULL"), "process map is full"),
                             (trace("E x 1 1 1"), "unreadable line"),
@@ -88,7 +89,8 @@ class AuditTest(unittest.TestCase):
                             (trace(*ev("image/a")[1:]), "did not all arrive"),
                             (trace(*ev("image/a")[:-1]), "no end line"),
                             (trace(*ev("image/" + "a" * 63)), "cut short"),
-                            ([*trace(), "E o 1 1 1"], "after END")):
+                            ([*trace(), "E o 1 1 1"], "after END"),
+                            ([*trace(), ""], None)):
             with self.subTest(lines=lines):
                 problems, _ = audit(lines, ("image/",))
                 if want is None:

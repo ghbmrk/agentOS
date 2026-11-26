@@ -55,6 +55,7 @@ CONTROL_LINK = ".race-reads-control/link"
 CONTROLS = {("o", CONTROL), ("s", CONTROL), ("l", CONTROL_LINK), ("f", CONTROL_LINK)}
 LEVELS = 16  # how far up from a file the probe looks for root; deeper tracked files fail the audit
 NAMELEN = 64  # bpftrace's string length for one path part; a part this long may be cut short
+RB_PAGES = 2048  # each CPU's output buffer, 8 MiB: a lost event fails the trace
 TREE_KEYS = 1 << 18  # room for the command's processes; an insert that does not fit fails the trace
 
 # The two git commands go's VCS stamp runs on a binary a test builds (cmd/go/internal/vcs), whose
@@ -78,7 +79,7 @@ def program(ino, dev, seed):
     pid `seed`. The probe walks d_parent from the file to root and prints the path's parts, leaf
     first, one line each ("C tid i name"), then "E kind tid pid parts"; the dentry walk gives the
     file's place in its filesystem, so a bind mount or a sandbox's root does not hide it. Each exec
-    in the tree prints "X pid filename". Go's VCS-stamp git (VCS_STAMP) prints nothing."""
+    in the tree prints "X pid stamped filename", and each a go process makes "A pid argv...". Go's VCS-stamp git (VCS_STAMP) prints nothing."""
     ino, dev, seed = int(ino), int(dev), int(seed)
     walk = "\n".join(f"  $d{i + 1} = $d{i}->d_parent;" for i in range(LEVELS))
     find = "\n  else ".join(f"if ($d{i}->d_inode->i_ino == {ino} && $d{i}->d_sb->s_dev == {dev}) {{ $k = {i}; }}"
@@ -108,6 +109,10 @@ tracepoint:task:task_newtask /@tree[pid] && (args->clone_flags & 0x10000) == 0/ 
   @tree[args->pid] = 1;
   if (@tree[args->pid] == 0) {{ printf("FULL\\n"); }}
 }}
+tracepoint:syscalls:sys_enter_execve /@tree[pid] && comm == "go"/ {{
+  printf("A %d %s %s %s %s %s\\n", pid, str(args->argv[0], 32), str(args->argv[1], 32), str(args->argv[2], 32),
+         str(args->argv[3], 32), str(args->argv[4], 32));
+}}
 tracepoint:syscalls:sys_enter_execve /@tree[pid]/ {{
   if (comm == "go" &&
       ({stamp})) {{
@@ -116,7 +121,7 @@ tracepoint:syscalls:sys_enter_execve /@tree[pid]/ {{
     delete(@stamp[pid]);
   }}
 }}
-tracepoint:sched:sched_process_exec /@tree[pid]/ {{ printf("X %d %s\\n", pid, str(args->filename)); }}
+tracepoint:sched:sched_process_exec /@tree[pid]/ {{ printf("X %d %d %s\\n", pid, @stamp[pid], str(args->filename)); }}
 tracepoint:sched:sched_process_exit /pid == tid/ {{ delete(@stamp[pid]); }}{probes}
 END {{ clear(@tree); clear(@stamp); printf("END\\n"); }}
 """
@@ -176,7 +181,7 @@ def events(lines):
             continue
         if line == "END" and not ended:
             ended = True
-        elif ended:
+        elif ended and line:
             yield "problem", f"trace: a line after END: {line!r}"
         elif line.startswith("C "):
             f = line.split(" ", 3)
@@ -196,8 +201,10 @@ def events(lines):
                 yield "problem", f"trace: a path part may be cut short at {NAMELEN} bytes: {got}"
             else:
                 yield "access", f[1], "/".join(got[i] for i in reversed(range(k)))
-        elif line.startswith("X ") and line[2:].split(" ", 1)[0].isdigit() and " " in line[2:]:
-            yield "exec", line[2:].split(" ", 1)[1]
+        elif line.startswith("X ") and len(f := line.split(" ", 3)) == 4 and f[1].isdigit() and f[2] in ("0", "1"):
+            yield "exec", f[3]
+        elif line.startswith("A ") and line[2:].split(" ", 1)[0].isdigit():
+            continue  # the argv a go process execs, for the record (VCS_STAMP marks at it)
         elif line == "FULL":
             yield "problem", f"trace: the process map is full ({TREE_KEYS} keys): a process went untraced"
         elif line:
@@ -268,7 +275,7 @@ def run(out, root, cmd, wait=120):
     st = os.stat(root)
     prog = program(st.st_ino, kernel_dev(st.st_dev), os.getpid())
     with open(out, "wb") as f:
-        tracer = subprocess.Popen([*sudo, "env", f"BPFTRACE_MAX_MAP_KEYS={TREE_KEYS}", bpftrace, "-e", prog],
+        tracer = subprocess.Popen([*sudo, "env", f"BPFTRACE_MAX_MAP_KEYS={TREE_KEYS}", f"BPFTRACE_PERF_RB_PAGES={RB_PAGES}", bpftrace, "-e", prog],
                                   stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
     try:
         deadline = time.monotonic() + wait
