@@ -1947,9 +1947,10 @@ class QuicAllowTest(unittest.TestCase):
                 self.assertIn(want, str(cm.exception))
 
     def test_shipped_entries(self):
-        self.assertEqual(sweep.read_allow(sweep.ALLOW)[5], {"quic": ["/usr/bin/openssl"],
+        node = "/usr/lib/agentos/images/openclaw/usr/local/bin/node"  # #6673: its static OpenSSL holds the names
+        self.assertEqual(sweep.read_allow(sweep.ALLOW)[5], {"quic": ["/usr/bin/openssl", node],
                                                             "dgram": ["/usr/bin/openssl",
-                                                                      "/usr/lib/x86_64-linux-gnu/libssl.so.3"]})
+                                                                      "/usr/lib/x86_64-linux-gnu/libssl.so.3", node]})
 
     def test_quic_records_cite_the_sweep(self):
         """Every openssl record of the image or its initrd whose advisory is in OpenSSL's QUIC stack names this

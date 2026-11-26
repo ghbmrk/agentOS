@@ -269,6 +269,11 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 # s_client. It is also the sweep's control that the QUIC scan still reads, as an entry accepting no file
 # fails.
 /usr/bin/openssl
+# The openclaw guest's node (nodejs.org v24) links its own OpenSSL statically and exports its symbols, so
+# it holds every name (#6673). That copy is not libssl3t64 and is outside these records: the node record in
+# assurance/vulncheck.json (#6075) reads its reach for the same advisories (node creates no OpenSSL QUIC
+# object; node:quic is ngtcp2, off by default, and nothing in the OpenClaw install imports it).
+/usr/lib/agentos/images/openclaw/usr/local/bin/node
 
 [dgram]
 # The files of the built image (main tree and initrds) that may hold the name of OpenSSL's datagram BIO
@@ -288,3 +293,6 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 # ssl/ssl_lib.c, read at 3.5.4), so it reaches the peer detection only for a caller [quic] holds. Its
 # BIO_new_ssl_connect (ssl/bio_ssl.c) builds a connect BIO for its caller, who is counted as holding it.
 /usr/lib/x86_64-linux-gnu/libssl.so.3
+# The openclaw guest's node, as in [quic]: its own static OpenSSL, held to the node record (#6075), which
+# reads that node makes no datagram BIO (no DTLS, no OpenSSL QUIC).
+/usr/lib/agentos/images/openclaw/usr/local/bin/node
