@@ -25,8 +25,6 @@ import (
 	"rsc.io/qr"
 )
 
-// REQ: REC-4, CRED-8
-
 // survivorKills runs, as subtests of TestRecoveryKeyWithCRLFOpensTheSlot
 // (through recoveryEdges), the checks that kill #6000's second set of
 // mutgate survivors in recovery.go, scan.go, setup.go, vault.go and
