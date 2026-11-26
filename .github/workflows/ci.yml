@@ -13,12 +13,12 @@ on:
 permissions:
   contents: read
 # CI-cancel-superseded (#5345, #5348): a PR's first-attempt run cancels that PR's older first
-# attempts, so a superseded head never holds the queue. A rerun (attempt 2 or later) and every push,
-# merge-queue, schedule or dispatch run is a group of its own (run id), so it never cancels or
-# replaces the current head's run.
+# attempts, so a superseded head never holds the queue. A first-attempt push to main cancels main's
+# older one (CI-main-supersede, #6394), so main's tip always finishes. A rerun (attempt 2 or later) and
+# every other run is a group of its own (run id), so it never cancels or replaces the current head's run.
 concurrency:
-  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}
+  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && 'head' || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ (startsWith(github.event_name, 'pull_request') || github.event_name == 'push' && github.ref == 'refs/heads/main') && github.run_attempt == 1 }}
 # Builds never download a Go toolchain: setup-go installs the one go.mod's
 # toolchain line names (setup-go's go-version-file reads only the go line),
 # each job checks it, and an offline build fails rather than fetch one. GOWORK=off: a
@@ -588,6 +588,13 @@ jobs:
         run: |
           go vet -tags infer_real,infer_llamacpp ./cmd/agentos-infer
           go test -count=1 -tags infer_llamacpp ./cmd/agentos-infer
+      - name: The agentos_e2e-tagged box-e2e driver and egress build, vetted and tested (#1890)
+        # image.yml builds agentos-egress with -tags agentos_e2e (the Codex stub's transport, boxe2e
+        # ASSUMPTIONS E10). Untagged go vet and go test skip that build's files and box-e2e's tagged
+        # tests of it (TestTaggedBuildsCarryE2ETag), so they run here.
+        run: |
+          go vet -tags agentos_e2e ./e2e/boxe2e/... ./cmd/agentos-egress/...
+          go test -count=1 -tags agentos_e2e ./e2e/boxe2e/... ./cmd/agentos-egress/...
       - name: Vendored code equals the modules go.sum pins (KRN-2cap-harden, #2945)
         # `go mod vendor` rewrites vendor/ from the checksum-verified modules (and the local
         # replace directories), so an edited, added or deleted vendored file shows as a change.
