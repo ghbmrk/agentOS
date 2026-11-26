@@ -243,7 +243,7 @@ form { margin: .6em 0 1.2em; }
 {{template "foot"}}{{end}}
 {{define "claimform"}}<form method="post" action="/claim"><label>Claim code<input type="text" name="code" value="{{.Code}}" placeholder="XXXX-XXXX-XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label><button>Claim</button></form>{{end}}
 {{define "stopping"}}{{template "head" .Refresh}}
-<h1>AgentOS</h1>
+<h1>agentOS</h1>
 <p class="err">{{.Text}}</p>
 {{if .Refresh}}<p>This page reloads by itself.</p>{{end}}<p><a href="/">Open the home page</a></p>
 {{template "foot"}}{{end}}
