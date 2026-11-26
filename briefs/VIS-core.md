@@ -107,7 +107,7 @@ Failure path: an unknown face's encoding is kept or searched, a planner matches 
 
 ## Scope
 
-`broker/vision/` (with its `ASSUMPTIONS.md`), `broker/vision/supervise/`, `broker/cmd/agentos-vision/`, the enrolment step in `broker/localui`, calls to the kernel's existing `Seal` and `ReadFor` (no change to `broker/kernel`, so no `Trusted-core:` line), (f)'s files (`broker/cmd/agentosd/vision.go`, `agentosd.service`, `agentos-setup.conf`, `with-uids`, the feed in `broker/cmd/agentos-camera`, `broker/e2e`), `broker/loops/plainname.go` (one line per fuzz target; shared, so parts that edit it run serially, D-111), this brief.
+`broker/vision/` (with its `ASSUMPTIONS.md`), `broker/vision/supervise/`, `broker/cmd/agentos-vision/`, the enrolment step in `broker/localui`, calls to the kernel's existing `Seal` and `ReadFor` (no change to `broker/kernel`, so no `trusted-core` record line), (f)'s files (`broker/cmd/agentosd/vision.go`, `agentosd.service`, `agentos-setup.conf`, `with-uids`, the feed in `broker/cmd/agentos-camera`, `broker/e2e`), `broker/loops/plainname.go` (one line per fuzz target; shared, so parts that edit it run serially, D-111), this brief.
 
 **Guard files:**
 - `tools/risk_tier.py` (`vision` in `TIER_A_BROKER`; it keys on the top directory, so this covers `vision/supervise`).
