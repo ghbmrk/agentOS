@@ -264,6 +264,7 @@ func TestTrailingDataDetail(t *testing.T) {
 		"nested":        {`{"sounds":[{"label":"x"}]}]`, "data after the reply"},
 		"malformed":     {`{"template":}{}`, "malformed reply"},
 		"cut short":     {`{"template":"` + tplB64 + `"`, "malformed reply"},
+		"escaped quote": {`{"a":"\"}"}x`, "data after the reply"},
 	} {
 		*got = nil
 		_, err := parseReplyWith(enrol, []byte(c.line), nil, s)
