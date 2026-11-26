@@ -443,4 +443,48 @@ func TestTPMSlotBounds(t *testing.T) {
 	if n := refusalCount(*held, k); n != 1 {
 		t.Errorf("makeSlot wiped the tpm slot's key %d times, want once", n)
 	}
+	// A planted slot that unseals to a short key: slotKey refuses it and wipes what it unsealed.
+	planted := sl
+	short := []byte("short-planted-key")
+	if planted.Sealed, err = tpmseal.SealTo(sl.Sealed.SRKPublic, short, &key.PublicKey, ""); err != nil {
+		t.Fatal(err)
+	}
+	if k, err := slotKey(&planted, f); !errors.Is(err, ErrCorrupt) || k != nil || refusalCount(*held, short) != 1 {
+		t.Errorf("a planted short key: %x, %v, wiped %d times; want ErrCorrupt, wiped once", k, err, refusalCount(*held, short))
+	}
+}
+
+// A Create that fails after it made the store key wipes that key, once (CLK-1): it makes one
+// wipe more than a Create that succeeds, whether the slot, the write or the sync failed.
+func TestAFailedCreateWipesItsKey(t *testing.T) {
+	dir := t.TempDir()
+	wipes := func(name string, f Factor, fail func() func()) int {
+		held := refusalWipes(t)
+		restore := fail()
+		s, err := Create(filepath.Join(dir, name), f)
+		restore()
+		n := len(*held) // before a good store's Close, which wipes its key too
+		if s != nil {
+			s.Close()
+		}
+		if err == nil {
+			n = -n
+		}
+		return n
+	}
+	none := func() func() { return func() {} }
+	fail := errors.New("disk full")
+	ok := -wipes("ok", killRecovery(1, RecoveryLen), none)
+	if ok <= 0 {
+		t.Fatalf("a good Create: %d wipes", ok)
+	}
+	if n := wipes("short", killRecovery(1, RecoveryLen-1), none); n != 1 {
+		t.Errorf("a Create refused for its factor made %d wipes, want 1 (the store key)", n)
+	}
+	if n := wipes("nowrite", killRecovery(1, RecoveryLen), func() func() { return FailWrite(fail) }); n != ok+1 {
+		t.Errorf("a Create whose write failed made %d wipes, want %d", n, ok+1)
+	}
+	if n := wipes("nosync", killRecovery(1, RecoveryLen), func() func() { return FailDirSync(fail) }); n != ok+1 {
+		t.Errorf("a Create whose sync failed made %d wipes, want %d", n, ok+1)
+	}
 }
