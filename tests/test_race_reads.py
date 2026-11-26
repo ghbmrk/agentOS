@@ -14,338 +14,167 @@ import ci_scope  # noqa: E402
 import race_reads  # noqa: E402
 
 R = "/repo"
+FILES = {"image/a", "tests/t.py", "tools/x.py", "SPEC.md", "broker/b.go", "docs/x.txt", race_reads.CONTROL}
 
 
-def acc(lines, cwd=R + "/broker"):
-    return [(n, p) for _, n, p, _ in race_reads.accesses(lines, cwd)]
+def ev(rel, kind="o", tid=1, pid=None):
+    """The lines the probe prints for one access of R/rel: its parts leaf first, then the end line."""
+    names = rel.split("/")[::-1]
+    return [f"C {tid} {i} {n}" for i, n in enumerate(names)] + [f"E {kind} {tid} {pid or tid} {len(names)}"]
 
 
-def trace(*lines, test=True, exited=True):
-    """A synthetic strace -f -y -q trace: a go test that execs a test binary, then lines."""
-    out = ['1 execve("/usr/bin/go", ["go", "test"]) = 0']
-    if test:
-        out.append('1 execve("/tmp/go-build1/b001/x.test", ["x.test"]) = 0')
-    out += lines
-    if exited:
-        out.append("1 +++ exited with 0 +++")
-    return [l + "\n" for l in out]
+CONTROLS = [l for kind, rel in sorted(race_reads.CONTROLS) for l in ev(rel, kind)]
+TEST = "X 7 /tmp/go-build1/b001/x.test"
 
 
-FILES = {"image/a", "tests/t.py", "tools/x.py", "SPEC.md", "broker/b.go", "docs/x.txt"}
+def trace(*lines, start=True, end=True):
+    """A synthetic whole trace: the tracer's banner, its controls, a test binary's exec, then lines."""
+    return ["Attaching 9 probes...", *(["START"] if start else []), *CONTROLS, TEST, *lines, *(["END"] if end else [])]
 
 
-def audit(lines, read, files=FILES):
+def audit(lines, read=(), files=FILES, gz=False):
     with tempfile.TemporaryDirectory() as d:
-        p = os.path.join(d, "t.gz")
-        with gzip.open(p, "wt") as f:
-            f.writelines(lines)
+        p = os.path.join(d, "t.gz" if gz else "t")
+        with (gzip.open if gz else open)(p, "wt") as f:
+            f.writelines(l + "\n" for l in lines)
         return race_reads.audit([p], R, read=read, files=files)
-
-
-class AccessesTest(unittest.TestCase):
-    def test_relative_paths_resolve_against_the_dirfd_decoration(self):
-        got = acc(['1 openat(AT_FDCWD</repo/broker/x>, "../../image/a", O_RDONLY) = 3</repo/image/a>',
-                   '1 newfstatat(5</repo/tests>, "f.py", {}, 0) = 0',
-                   '1 openat(AT_FDCWD</q>, "/repo/SPEC.md", O_RDONLY) = -1 ENOENT (No such file or directory)'])
-        self.assertEqual(got, [("openat", "/repo/image/a"), ("newfstatat", "/repo/tests/f.py"),
-                               ("openat", "/repo/SPEC.md")])
-
-    def test_a_link_counts_as_the_file_it_reached(self):
-        got = acc(['1 openat(AT_FDCWD</repo/broker>, "testdata/l", O_RDONLY) = 3</repo/tests/x>'])
-        self.assertEqual(got, [("openat", "/repo/broker/testdata/l"), ("openat", "/repo/tests/x")])
-
-    def test_unfinished_calls_join_their_resumed_half(self):
-        got = acc(['1 openat(AT_FDCWD</repo/broker>, "../tools/a.py", O_RDONLY <unfinished ...>',
-                   '1 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_THREAD}, 88) = 2',
-                   '2 openat(AT_FDCWD</repo/broker>, "../b", O_RDONLY) = 4</repo/b>',
-                   '1 <... openat resumed>)             = 3</repo/tools/a.py>'])
-        self.assertEqual(got, [("openat", "/repo/b"), ("openat", "/repo/tools/a.py")])
-
-    def test_working_directories_follow_chdir_and_clone(self):
-        got = acc(['1 chdir("../image") = 0',
-                   '1 stat("a", {}) = 0',
-                   '1 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 7',
-                   '7 chdir("mkosi") = 0',
-                   '7 execve("./run", ["run"]) = 0',
-                   '1 stat("b", {}) = 0',
-                   '1 clone3({flags=CLONE_VM|CLONE_FS|CLONE_THREAD, exit_signal=0}, 88) = 8',
-                   '8 chdir("/repo/tests") = 0',
-                   '1 access("c", R_OK) = 0'])
-        self.assertEqual(got, [("chdir", "/repo/image"), ("stat", "/repo/image/a"),
-                               ("chdir", "/repo/image/mkosi"), ("execve", "/repo/image/mkosi/run"),
-                               ("stat", "/repo/image/b"), ("chdir", "/repo/tests"), ("access", "/repo/tests/c")])
-
-    def test_a_vfork_child_waits_for_its_clone_line(self):
-        # The parent's clone prints its child's pid only after the child has chdir'd and exec'd.
-        got = acc(['1 chdir("../image") = 0',
-                   '1 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>',
-                   '4 chdir("mkosi") = 0',
-                   '4 execve("./run", ["run"]) = 0',
-                   '1 <... clone resumed>) = 4',
-                   '4 stat("x", {}) = 0'])
-        self.assertEqual(got, [("chdir", "/repo/image"), ("chdir", "/repo/image/mkosi"),
-                               ("execve", "/repo/image/mkosi/run"), ("stat", "/repo/image/mkosi/x")])
-
-    def test_two_unborn_processes_on_one_pid_wait_for_their_own_clones(self):
-        # Each clone is unfinished across its child's calls; the first child exits before its clone prints.
-        got = acc(['1 stat("z", {}) = 0', '1 vfork( <unfinished ...>', '4 chdir("a") = 0', '4 +++ exited with 0 +++',
-                   '1 <... vfork resumed>) = 4', '1 chdir("/q") = 0', '1 vfork( <unfinished ...>',
-                   '4 chdir("b") = 0', '1 <... vfork resumed>) = 4', '4 stat("c", {}) = 0'])
-        self.assertEqual(got, [("stat", "/repo/broker/z"), ("chdir", "/repo/broker/a"), ("chdir", "/q"),
-                               ("chdir", "/q/b"), ("stat", "/q/b/c")])
-
-    def test_a_dead_child_never_shadows_its_pids_next_process(self):
-        # A vfork child exits before its clone line prints; later a whole clone returns the same pid, whose new
-        # process inherits the cloner's cwd and stamp, not the dead one's.
-        got = acc(['1 stat("z", {}) = 0', '1 vfork( <unfinished ...>', '4 chdir("/a") = 0', '4 +++ exited with 0 +++',
-                   '1 <... vfork resumed>) = 4', '1 chdir("/q") = 0',
-                   '1 clone(child_stack=NULL, flags=SIGCHLD) = 4', '4 stat("c", {}) = 0'])
-        self.assertEqual(got, [("stat", "/repo/broker/z"), ("chdir", "/a"), ("chdir", "/q"), ("stat", "/q/c")])
-
-    def test_a_stale_life_before_a_whole_clone_is_unplaced(self):
-        # A whole clone line means its child printed nothing yet: buffered calls on that pid were an earlier
-        # process no clone placed, so they resolve from an unknown cwd (fail closed).
-        got = acc(['1 stat("z", {}) = 0', '4 stat("a", {}) = 0', '4 +++ exited with 0 +++',
-                   '1 clone(child_stack=NULL, flags=SIGCHLD) = 4', '4 stat("c", {}) = 0'])
-        self.assertEqual(got, [("stat", "/repo/broker/z"), ("stat", None), ("stat", "/repo/broker/c")])
-
-    def test_a_thread_killed_before_its_first_call_leaves_nothing(self):
-        got = acc(['1 stat("z", {}) = 0', '6 +++ killed by SIGKILL +++',
-                   '1 clone(child_stack=NULL, flags=SIGCHLD) = 6', '6 stat("y", {}) = 0'])
-        self.assertEqual(got, [("stat", "/repo/broker/z"), ("stat", "/repo/broker/y")])
-
-    def test_a_clone_in_a_pid_namespace_links_by_strace_s_pid(self):
-        got = acc(['1 chdir("/repo/image") = 0',
-                   "1 clone(child_stack=NULL, flags=SIGCHLD) = 2 /* 18866 in strace's PID NS */",
-                   '18866 stat("a", {}) = 0'])
-        self.assertEqual(got, [("chdir", "/repo/image"), ("stat", "/repo/image/a")])
-
-    def test_a_relative_path_in_an_unknown_directory_is_unresolved(self):
-        got = acc(['1 stat("x", {}) = 0', '9 execve("rel", ["rel"]) = 0'])
-        self.assertEqual(got, [("stat", "/repo/broker/x"), ("execve", None)])
-
-    def test_a_reused_pid_starts_from_its_own_clone(self):
-        got = acc(['1 stat("z", {}) = 0', '1 clone(child_stack=NULL, flags=SIGCHLD) = 3',
-                   '3 chdir("/repo/image") = 0', '3 +++ exited with 0 +++',
-                   '1 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 3',
-                   '3 stat("a", {}) = 0'])
-        self.assertEqual(got, [("stat", "/repo/broker/z"), ("chdir", "/repo/image"), ("stat", "/repo/broker/a")])
-
-    def test_go_vcs_stamp_git_reads_nothing_of_the_tree(self):
-        # Exactly go's two stamp commands, their threads included; any other git reads the store.
-        got = acc(['1 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 5',
-                   '1 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 7',
-                   '1 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 8',
-                   '5 execve("/usr/bin/git", ["git", "status", "--porcelain"], 0x1 /* 3 vars */ <unfinished ...>',
-                   '5 <... execve resumed>) = 0',
-                   '5 clone3({flags=CLONE_VM|CLONE_FS|CLONE_THREAD}, 88) = 6',
-                   '6 newfstatat(AT_FDCWD</repo>, "reviews/x", {}, 0) = 0',
-                   '5 openat(AT_FDCWD</repo>, ".git/index", O_RDONLY) = 3</repo/.git/index>',
-                   '8 execve("/usr/bin/git", ["git", "-c", "log.showsignature=false", "log", "-1", "--format=%H:%ct"], 0x1) = 0',
-                   '8 openat(AT_FDCWD</repo>, ".git/HEAD", O_RDONLY) = 3</repo/.git/HEAD>',
-                   '7 execve("/usr/bin/git", ["git", "status", "--porcelain", "--ignored"], 0x1) = 0',
-                   '7 openat(AT_FDCWD</repo>, ".git/x", O_RDONLY) = 3</repo/.git/x>'])
-        self.assertEqual(got, [("execve", "/usr/bin/git"), ("openat", "/repo/.git/x")])
-
-    def test_a_descriptor_past_path_max_resolves_from_its_open(self):
-        # -y prints no path for a directory past PATH_MAX; threads sharing CLONE_FILES share fds.
-        got = acc(['1 openat(AT_FDCWD</repo/broker>, "../tests", O_RDONLY|O_DIRECTORY) = 7</repo/tests>',
-                   '1 openat(7</repo/tests>, "c", O_RDONLY|O_DIRECTORY) = 8',
-                   '1 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_THREAD}, 88) = 2',
-                   '2 openat(8, "d", O_RDONLY) = 3',
-                   '1 clone(child_stack=NULL, flags=CLONE_VM|CLONE_VFORK|SIGCHLD) = 4',
-                   '4 openat(9, "e", O_RDONLY) = 3'])
-        self.assertEqual(got, [("openat", "/repo/tests"), ("openat", "/repo/tests/c"),
-                               ("openat", "/repo/tests/c/d"), ("openat", None)])
-
-    def test_a_link_s_content_is_not_an_access(self):
-        self.assertEqual(acc(['1 symlinkat("../../tests/x", AT_FDCWD</tmp>, "l") = 0',
-                              '1 symlink("tests", "/tmp/m") = 0']), [])
-
-    def test_escapes_decode(self):
-        got = acc([r'1 openat(AT_FDCWD</repo>, "a\"b\\c\303\251\x41", O_RDONLY) = -1 ENOENT'])
-        self.assertEqual(got, [("openat", '/repo/a"b\\céA')])
 
 
 class AuditTest(unittest.TestCase):
     def test_a_tracked_file_read_outside_the_set_fails(self):
-        lines = trace('1 openat(AT_FDCWD</repo/broker>, "../image/a", O_RDONLY) = 3</repo/image/a>',
-                      '1 newfstatat(AT_FDCWD</repo/broker>, "../tests/t.py", {}, 0) = 0',
-                      '1 openat(AT_FDCWD</repo/broker>, "b.go", O_RDONLY) = 3</repo/broker/b.go>',
-                      '1 openat(AT_FDCWD</repo/broker>, "/etc/passwd", O_RDONLY) = 3</etc/passwd>')
-        self.assertEqual(audit(lines, ("image/", "tests/t.py"))[0], [])
+        lines = trace(*ev("image/a"), *ev("tests/t.py", "s", tid=9), *ev("SPEC.md", "l"), *ev("docs/x.txt", "f"))
+        self.assertEqual(audit(lines, ("image/", "tests/t.py", "SPEC.md", "docs/"))[0], [])
         problems, reads = audit(lines, ("image/",))
-        self.assertEqual(problems, ["read outside RACE_READ: newfstatat(tests/t.py); add it to tools/ci_scope.py RACE_READ"])
-        self.assertEqual(reads, {"image/a", "tests/t.py", "broker/b.go"})
+        self.assertEqual(sorted(problems), [
+            "read outside RACE_READ: follow_link(docs/x.txt); add it to tools/ci_scope.py RACE_READ",
+            "read outside RACE_READ: readlink(SPEC.md); add it to tools/ci_scope.py RACE_READ",
+            "read outside RACE_READ: stat(tests/t.py); add it to tools/ci_scope.py RACE_READ"])
+        self.assertEqual(reads, {"image/a", "tests/t.py", "SPEC.md", "docs/x.txt", race_reads.CONTROL})
 
-    def test_directories_untracked_and_missing_paths_are_not_reads(self):
+    def test_two_threads_parts_interleave(self):
+        a, b = ev("tests/t.py", tid=3), ev("image/a", tid=4)
+        problems, reads = audit(trace(a[0], b[0], b[1], a[1], b[2], a[2]), ("image/",))
+        self.assertEqual(problems, ["read outside RACE_READ: open(tests/t.py); add it to tools/ci_scope.py RACE_READ"])
+        self.assertIn("image/a", reads)
+
+    def test_directories_and_untracked_paths_are_not_reads(self):
         # A race-blind change only modifies tracked files: listings, types and absent names stay.
-        lines = trace('1 openat(AT_FDCWD</repo/broker>, "..", O_RDONLY|O_DIRECTORY) = 3</repo>',
-                      '1 openat(AT_FDCWD</repo>, "tools", O_RDONLY|O_DIRECTORY) = 3</repo/tools>',
-                      '1 openat(AT_FDCWD</repo>, "tools/__pycache__/x.pyc", O_RDONLY) = 3</repo/tools/__pycache__/x.pyc>',
-                      '1 newfstatat(AT_FDCWD</repo>, "go.work", 0x1, 0) = -1 ENOENT (No such file or directory)')
-        self.assertEqual(audit(lines, ()), ([], set()))
+        lines = trace(*ev("tools"), *ev("tools/__pycache__/x.pyc"), *ev(".git/HEAD"), *ev(".git"))
+        self.assertEqual(audit(lines), ([], {race_reads.CONTROL}))
 
     def test_the_git_object_store_fails(self):
-        lines = trace('1 openat(AT_FDCWD</repo>, ".git/objects/pack/p.idx", O_RDONLY) = 3</repo/.git/objects/pack/p.idx>',
-                      '1 openat(AT_FDCWD</repo>, ".git/HEAD", O_RDONLY) = 3</repo/.git/HEAD>')
-        self.assertEqual(len(audit(lines, ())[0]), 1)
-        self.assertIn("git object store", audit(lines, ())[0][0])
+        problems, _ = audit(trace(*ev(".git/objects/ab/cd", "s"), *ev(".git/HEAD")))
+        self.assertEqual(problems, ["git object store read: stat(.git/objects/ab/cd): it holds every file"])
 
     def test_the_committed_set_covers_the_tree_as_it_is(self):
         files = race_reads.tracked(str(ROOT))
-        self.assertIn("tools/canary.py", files)
+        self.assertIn(race_reads.CONTROL, files)
+        self.assertNotIn(race_reads.CONTROL_LINK, files)
         for e in ci_scope.RACE_READ:
             self.assertTrue(any(f == e or e.endswith("/") and f.startswith(e) for f in files), e)
 
     def test_it_fails_closed(self):
-        self.assertIn("unresolved", audit(trace('4 stat("x", {}) = 0'), ())[0][0])
-        # The CLI reads the tracked set from git; a root that is not a repository is an error.
-        self.assertIn("no test binary ran", audit(trace(test=False), ())[0][0])
-        self.assertIn("cut short", audit(trace(exited=False), ())[0][0])
+        for lines, want in ((trace(start=False), "did not run from start to end"),
+                            (trace(end=False), "did not run from start to end"),
+                            ([], "did not run from start to end"),
+                            ([l for l in trace() if l != TEST], "no test binary ran"),
+                            (trace("X 7 /usr/bin/go"), None),
+                            (trace("Lost 12 events"), "unexpected line"),
+                            (trace("FULL"), "process map is full"),
+                            (trace("E x 1 1 1"), "unreadable line"),
+                            (trace("E o 1 1"), "unreadable line"),
+                            (trace("C 1 x a"), "unreadable line"),
+                            (trace(*ev("image/a")[1:]), "did not all arrive"),
+                            (trace(*ev("image/a")[:-1]), "no end line"),
+                            (trace(*ev("image/" + "a" * 63)), "cut short"),
+                            ([*trace(), "E o 1 1 1"], "after END")):
+            with self.subTest(lines=lines):
+                problems, _ = audit(lines, ("image/",))
+                if want is None:
+                    self.assertEqual(problems, [])
+                    continue
+                self.assertTrue(any(want in p for p in problems), problems)
+        for kind, rel in sorted(race_reads.CONTROLS):
+            with self.subTest(control=(kind, rel)):
+                drop = ev(rel, kind)
+                lines = [l for l in trace() if l not in drop[-1:]]
+                problems, _ = audit([l for l in lines if l not in drop[:-1]] if kind in "lf" else lines)
+                self.assertTrue(any(f"control {race_reads.KINDS[kind]} of {rel} is missing" in p for p in problems),
+                                problems)
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(OSError):
                 race_reads.audit([os.path.join(d, "missing.gz")], R, read=(), files=FILES)
             cut = os.path.join(d, "cut.gz")
             with open(cut, "wb") as f:
-                f.write(gzip.compress("".join(trace()).encode())[:-12])
+                f.write(gzip.compress("".join(l + "\n" for l in trace()).encode())[:-12])
             with self.assertRaises(EOFError):
                 race_reads.audit([cut], R, read=(), files=FILES)
+
+    def test_a_clean_trace_passes_gzipped_or_not(self):
+        for gz in (False, True):
+            self.assertEqual(audit(trace(*ev("image/a"), ""), ("image/",), gz=gz), ([], {"image/a", race_reads.CONTROL}))
+
+    def test_a_tracked_file_deeper_than_the_probe_looks_fails(self):
+        deep = "/".join(["image"] + ["d"] * race_reads.LEVELS)
+        problems, _ = audit(trace(), files=FILES | {deep})
+        self.assertEqual(problems, [f"tracked file deeper than the probe looks ({race_reads.LEVELS} parts): {deep}"])
+        self.assertEqual(race_reads.too_deep({"broker/" + deep, "image/a"}), [])
+        self.assertEqual(race_reads.too_deep(race_reads.tracked(str(ROOT))), [])
 
     def test_the_cli_exits_nonzero_on_a_problem(self):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "t")
-            pathlib.Path(p).write_text("".join(trace(test=False)))
+            pathlib.Path(p).write_text("".join(l + "\n" for l in trace() if l != TEST))
             out = subprocess.run([sys.executable, "-I", str(ROOT / "tools" / "race_reads.py"), "audit",
                                   "--root", str(ROOT), "--reads-out", os.path.join(d, "r"), p],
                                  capture_output=True, text=True)
             self.assertEqual(out.returncode, 1)
             self.assertIn("no test binary ran", out.stdout)
-
-    @unittest.skipUnless(shutil.which("strace") and os.geteuid() == 0, "needs strace, as root")
-    def test_a_real_trace_of_an_exec_child(self):
-        # A traced process cannot be traced again (unit-tests runs every module under strace), so
-        # this runs where it can; broker-race's own audit is the live case on every run.
-        status = pathlib.Path("/proc/self/status").read_text()
-        if "\nTracerPid:\t0\n" not in status:
-            self.skipTest("already traced")
-        with tempfile.TemporaryDirectory() as d:
-            d = os.path.realpath(d)
-            os.makedirs(os.path.join(d, "broker"))
-            os.makedirs(os.path.join(d, "image"))
-            pathlib.Path(d, "image", "a").write_text("x\n")
-            t = pathlib.Path(d, "broker", "x.test")
-            t.write_text("#!/bin/sh\ncd ../image && cat a >/dev/null && sh -c 'cat a' >/dev/null\n")
-            t.chmod(0o755)
-            tr = os.path.join(d, "t")
-            self.assertEqual(subprocess.call([sys.executable, "-I", str(ROOT / "tools" / "race_reads.py"), "run",
-                                              "--trace", tr, "--", "./x.test"], cwd=os.path.join(d, "broker")), 0)
-            files = {"image/a", "broker/x.test"}
-            self.assertEqual(race_reads.audit([tr], d, read=("image/",), files=files)[0], [])
-            problems, reads = race_reads.audit([tr], d, read=(), files=files)
-            self.assertIn("image/a", reads)
-            self.assertTrue(problems and all("image/a" in p for p in problems), problems)
+            self.assertEqual(pathlib.Path(d, "r").read_text(), race_reads.CONTROL + "\n")
 
 
-def stat_audit(stat_lines, read=("image/",), files=FILES | {race_reads.STAT_CONTROL}):
-    with tempfile.TemporaryDirectory() as d:
-        t, st = os.path.join(d, "t.gz"), os.path.join(d, "s.txt")
-        with gzip.open(t, "wt") as f:
-            f.writelines(trace())
-        pathlib.Path(st).write_text("".join(l + "\n" for l in stat_lines))
-        problems, reads = race_reads.audit([t], R, read=read, files=files, stats=[st])
-        return [p.replace(st + ": ", "") for p in problems], reads
-
-
-def st(rel, tid=7):
-    """The lines the stat probe prints for one stat of root/rel: its parts leaf first, then E."""
-    parts = rel.split("/")[::-1]
-    return [f"C {tid} {i} {n}" for i, n in enumerate(parts)] + [f"E {tid} {tid} {len(parts)}"]
-
-
-CONTROL = st(race_reads.STAT_CONTROL, tid=1)
-
-
-class StatTraceTest(unittest.TestCase):
-
-    def test_a_stat_outside_the_set_fails_and_one_inside_passes(self):
-        problems, reads = stat_audit(["Attaching 4 probes...", "START", *CONTROL, *st("tests/t.py"), *st("image/a"),
-                                      *st("SPEC.md", tid=9), "END"])
-        self.assertEqual(sorted(problems), ["read outside RACE_READ: stat(SPEC.md); add it to tools/ci_scope.py RACE_READ",
-                                            "read outside RACE_READ: stat(tests/t.py); add it to tools/ci_scope.py RACE_READ"])
-        self.assertIn("image/a", reads)
-
-    def test_two_threads_parts_interleave(self):
-        a, b = st("tests/t.py", tid=3), st("image/a", tid=4)
-        lines = ["START", *CONTROL, a[0], b[0], b[1], a[1], b[2], a[2], "END"]
-        problems, reads = stat_audit(lines)
-        self.assertEqual(problems, ["read outside RACE_READ: stat(tests/t.py); add it to tools/ci_scope.py RACE_READ"])
-        self.assertIn("image/a", reads)
-
-    def test_the_git_object_store_fails(self):
-        problems, _ = stat_audit(["START", *CONTROL, *st(".git/objects/ab/cd"), *st(".git/HEAD"), "END"])
-        self.assertEqual(problems, ["git object store read: stat(.git/objects/ab/cd): it holds every file"])
-
-    def test_a_trace_not_whole_fails_closed(self):
-        for lines, want in (([*CONTROL, "END"], "did not run from start to end"),
-                            (["START", *CONTROL], "did not run from start to end"),
-                            ([], "did not run from start to end"),
-                            (["START", "END"], "control stat"),
-                            (["START", *CONTROL, "Lost 12 events", "END"], "unexpected line"),
-                            (["START", *CONTROL, "E x 1 1", "END"], "unreadable line"),
-                            (["START", *CONTROL, *st("image/a")[1:], "END"], "did not all arrive"),
-                            (["START", *CONTROL, *st("image/a")[:-1], "END"], "no end line"),
-                            (["START", *CONTROL, *st("image/" + "a" * 63), "END"], "cut short")):
-            with self.subTest(lines=lines):
-                problems, _ = stat_audit(lines)
-                self.assertTrue(problems)
-                self.assertTrue(any(want in p for p in problems), problems)
-
-    def test_a_clean_stat_trace_passes(self):
-        self.assertEqual(stat_audit(["Attaching 4 probes...", "START", *CONTROL, *st("image/a"), "END"])[0], [])
-
-    def test_a_tracked_file_deeper_than_the_probe_looks_fails(self):
-        deep = "/".join(["image"] + ["d"] * race_reads.LEVELS)
-        problems, _ = stat_audit(["START", *CONTROL, "END"], files=FILES | {race_reads.STAT_CONTROL, deep})
-        self.assertEqual(problems, [f"tracked file deeper than the stat probe looks ({race_reads.LEVELS} parts): {deep}"])
-        self.assertEqual(race_reads.too_deep({"broker/" + deep, "image/a"}), [])
-        self.assertEqual(race_reads.too_deep({p.decode() for p in subprocess.run(
-            ["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, check=True).stdout.split(b"\0") if p}), [])
-
+class ProgramTest(unittest.TestCase):
     def test_the_program_walks_to_root_by_inode_and_device(self):
-        prog = race_reads.stats_program(1234, 5 << 20 | 6)
+        prog = race_reads.program(1234, 5 << 20 | 6, 99)
         self.assertIn(f"$d1->d_inode->i_ino == 1234 && $d1->d_sb->s_dev == {5 << 20 | 6}", prog)
         self.assertIn(f"$d{race_reads.LEVELS} = $d{race_reads.LEVELS - 1}->d_parent;", prog)
         self.assertIn('!= "broker"', prog)
-        self.assertIn("fexit:vfs_getattr", prog)
+        self.assertIn("@tree[99] = 1;", prog)
+        for kind, _, fn, dentry in race_reads.HOOKS:
+            self.assertIn(f"fentry:{fn} /@tree[pid] && @stamp[pid] == 0/", prog)
+            self.assertIn(f"$d0 = {dentry};", prog)
+            self.assertIn(f'printf("E {kind} %d %d %d\\n", tid, pid, $k);', prog)
         self.assertNotIn("path(", prog)  # bpf_d_path is missing on the runner's kernel
-        self.assertIn('== "--porcelain"', prog)
-        self.assertIn('== "log.showsignature=false"', prog)
+        self.assertNotIn("vfs_getattr", prog)  # fentry saw no call of it on the runner
+        self.assertIn('str(args->argv[2], 32) == "--porcelain" && str(args->argv[3], 32) == ""', prog)
+        self.assertIn('str(args->argv[2], 32) == "log.showsignature=false"', prog)
+        self.assertIn("(args->clone_flags & 0x10000) == 0", prog)  # threads share their process's key
         self.assertEqual(race_reads.kernel_dev(os.makedev(8, 1)), 8 << 20 | 1)
 
     @unittest.skipUnless(shutil.which("bpftrace") and os.geteuid() == 0, "needs bpftrace, as root")
-    def test_a_real_stat_trace(self):
+    def test_a_real_trace(self):
+        # broker-race's own audit is the live case on every run; this runs where eBPF can attach.
         with tempfile.TemporaryDirectory() as d:
             d = os.path.realpath(d)
-            for f in ("tools/race_reads.py", "image/a", "broker/b"):
+            for f in (race_reads.CONTROL, "image/a", "image/b", "broker/b"):
                 os.makedirs(os.path.dirname(os.path.join(d, f)), exist_ok=True)
                 pathlib.Path(d, f).write_text("x\n")
             out = os.path.join(d, "s.txt")
+            test = os.path.join(d, "x.test")
+            shutil.copy("/bin/sh", test)
             try:
-                code = race_reads.with_stats(out, d, [], lambda: subprocess.call(
-                    ["sh", "-c", "cd image && stat a >/dev/null && stat ../broker/b >/dev/null"], cwd=d), wait=60)
+                code = race_reads.run(out, d, [test, "-c", "cd image && cat a >/dev/null && stat -c %s b >/dev/null"
+                                               " && cat ../broker/b >/dev/null"], wait=60)
             except OSError as e:
                 self.skipTest(f"no bpftrace here: {e}")
             text = pathlib.Path(out).read_text()
             if code == 2 and "START" not in text:
                 self.skipTest(f"bpftrace cannot attach here: {text[-300:]}")
             self.assertEqual(code, 0)
-            got = list(race_reads.stat_lines(text.splitlines(True), d))
-            self.assertEqual([p for p, _ in got if p], [])
-            paths = {q for _, q in got}
-            self.assertIn(f"{d}/image/a", paths)
-            self.assertIn(f"{d}/tools/race_reads.py", paths)
-            self.assertNotIn(f"{d}/broker/b", paths)
+            problems, reads = race_reads.audit([out], d, read=("image/",),
+                                               files={race_reads.CONTROL, "image/a", "image/b", "broker/b"})
+            self.assertEqual(problems, [])
+            self.assertEqual(reads, {race_reads.CONTROL, "image/a", "image/b"})
 
 
 class RaceBlindScopeTest(unittest.TestCase):
@@ -394,13 +223,6 @@ class RaceBlindScopeTest(unittest.TestCase):
                 os.chdir(cwd)
             self.assertEqual(got, [("A", "e"), ("D", "b"), ("D", "c d"), ("M", "a"), ("X", "m"), ("X", "n")])
             self.assertFalse(ci_scope.is_race_blind("m", "X"))
-
-    def test_the_trace_leaves_out_only_the_stat_family(self):
-        names = {n.lstrip("?") for n in race_reads.TRACED}
-        self.assertFalse(names & {"stat", "lstat", "newfstatat", "statx", "fstat", "fstatat64"})
-        for n in ("open", "openat", "openat2", "execve", "execveat", "readlink", "readlinkat", "access",
-                  "faccessat2", "chdir", "fchdir", "clone", "clone3", "vfork", "rename", "unlinkat"):
-            self.assertIn(n, names)
 
     def test_the_sets_are_plain_and_apart(self):
         for e in (*ci_scope.RACE_READ, *ci_scope.NEVER_BLIND):
