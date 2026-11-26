@@ -70,9 +70,10 @@ def _plain(path):
 
 
 def is_race_blind(path, status):
-    """A change no broker test can see: a modification (git status M) of a file outside RACE_READ
-    and NEVER_BLIND. An addition, deletion or type change alters a directory listing or a file
-    type, which the read audit does not measure, so it is never race-blind."""
+    """A change no broker test can see: a modification (git status M, mode unchanged) of a file
+    outside RACE_READ and NEVER_BLIND. An addition, deletion, type or mode change alters a
+    directory listing or what a stat shows, which the read audit does not trace, so it is never
+    race-blind."""
     if status != "M" or not _plain(path):
         return False
     return not any(path == e.rstrip("/") or e.endswith("/") and path.startswith(e) for e in (*RACE_READ, *NEVER_BLIND))
@@ -104,18 +105,26 @@ def scope_of(paths):
 
 
 def changed_paths(base, head):
-    """(status letter, path) for each change. --no-renames lists a moved file under its old path
-    too, so moving broker/x.go to reviews/x.md is full. -z keeps git from quoting unusual names."""
+    """(status letter, path) for each change; a modification that also changes the file's mode
+    is "X", never "M". --no-renames lists a moved file under its old path too, so moving
+    broker/x.go to reviews/x.md is full. -z keeps git from quoting unusual names."""
     out = subprocess.run(
-        ["git", "diff", "--name-status", "-z", "--no-renames", f"{base}...{head}"],
+        ["git", "diff", "--raw", "-z", "--no-renames", f"{base}...{head}"],
         check=True, capture_output=True,
     ).stdout
     f = out.decode("utf-8", "surrogateescape").split("\0")
     if f and f[-1] == "":
         f.pop()
     if len(f) % 2:
-        raise OSError(f"git diff --name-status -z printed {len(f)} fields")
-    return [(f[i][:1], f[i + 1]) for i in range(0, len(f), 2)]
+        raise OSError(f"git diff --raw -z printed {len(f)} fields")
+    got = []
+    for i in range(0, len(f), 2):
+        meta = f[i].split(" ")
+        if len(meta) != 5 or not meta[0].startswith(":") or not meta[4]:
+            raise OSError(f"git diff --raw -z printed {f[i]!r}")
+        status = meta[4][:1]
+        got.append(("X" if status == "M" and meta[0][1:] != meta[1] else status, f[i + 1]))
+    return got
 
 
 def main(argv=None):

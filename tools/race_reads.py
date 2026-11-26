@@ -45,6 +45,19 @@ _STAMP = re.compile(r'^"(?:[^"\\]|\\.)*/git", (?:' + "|".join(re.escape(v) for v
 EXITED = "+++ exited"
 # Clones that do not pass CLONE_FS give the child its own copy of the working directory.
 CLONES = frozenset({"clone", "clone3", "fork", "vfork"})
+# strace's %file class less the stat family (stat, lstat, newfstatat, statx): on a 4-core runner
+# the child go commands' stats of GOROOT doubled broker/kernel/sim's time. A stat shows only a
+# file's type, mode and size; ci_scope's race-blind rule takes a modification only when type
+# and mode are unchanged, which leaves size. `?` lets strace skip a name this arch lacks.
+TRACED = tuple("?" + n for n in (
+    "open", "openat", "openat2", "creat", "access", "faccessat", "faccessat2", "readlink",
+    "readlinkat", "execve", "execveat", "chdir", "fchdir", "truncate", "link", "linkat", "unlink",
+    "unlinkat", "symlink", "symlinkat", "rename", "renameat", "renameat2", "mkdir", "mkdirat",
+    "rmdir", "mknod", "mknodat", "chmod", "fchmodat", "fchmodat2", "chown", "lchown", "fchownat",
+    "utime", "utimes", "futimesat", "utimensat", "statfs", "getxattr", "lgetxattr", "setxattr",
+    "lsetxattr", "listxattr", "llistxattr", "removexattr", "lremovexattr", "inotify_add_watch",
+    "fanotify_mark", "name_to_handle_at", "chroot", "pivot_root", "mount", "umount2", "open_tree",
+    "move_mount", "mount_setattr", "uselib", "acct", "swapon", "swapoff", "quotactl")) + tuple(sorted(CLONES))
 
 _LINE = re.compile(r"^(\d+) +(?:(\w+)\((.*)|<\.\.\. (\w+) resumed>(.*))$")
 _EXIT = re.compile(r"^(\d+) +\+\+\+ (?:exited with (\d+)|killed by .*) \+\+\+$")
@@ -330,7 +343,7 @@ def run(trace, cmd):
     # -q, not -qq: the first process's exit line is the audit's proof the trace is whole. As in
     # tools/unit_tests.py: --kill-on-exit, so nothing runs on untraced if strace gives up (#5364).
     base = [strace, "-f", "-y", "-q", "--kill-on-exit", "--seccomp-bpf", "--decode-pids=pidns", "-e", "signal=none",
-            "-e", "trace=%file,chdir,fchdir,clone,clone3,fork,vfork", "-o", trace]
+            "-e", "trace=" + ",".join(TRACED), "-o", trace]
     if os.geteuid() != 0:
         import pwd
         user = pwd.getpwuid(os.getuid()).pw_name

@@ -273,11 +273,14 @@ class RaceBlindScopeTest(unittest.TestCase):
             g("init", "-q", "-b", "main")
             g("config", "user.email", "t@example.invalid")
             g("config", "user.name", "t")
-            for f in ("a", "b", "c d"):
+            for f in ("a", "b", "c d", "m", "n"):
                 pathlib.Path(d, f).write_text("x\n")
             g("add", "-A")
             g("commit", "-qm", "base")
             pathlib.Path(d, "a").write_text("y\n")
+            pathlib.Path(d, "m").write_text("y\n")
+            os.chmod(os.path.join(d, "m"), 0o755)  # a stat shows the new mode: never race-blind
+            os.chmod(os.path.join(d, "n"), 0o755)
             os.remove(os.path.join(d, "b"))
             os.rename(os.path.join(d, "c d"), os.path.join(d, "e"))
             g("add", "-A")
@@ -288,7 +291,15 @@ class RaceBlindScopeTest(unittest.TestCase):
                 got = sorted(ci_scope.changed_paths("HEAD^", "HEAD"))
             finally:
                 os.chdir(cwd)
-            self.assertEqual(got, [("A", "e"), ("D", "b"), ("D", "c d"), ("M", "a")])
+            self.assertEqual(got, [("A", "e"), ("D", "b"), ("D", "c d"), ("M", "a"), ("X", "m"), ("X", "n")])
+            self.assertFalse(ci_scope.is_race_blind("m", "X"))
+
+    def test_the_trace_leaves_out_only_the_stat_family(self):
+        names = {n.lstrip("?") for n in race_reads.TRACED}
+        self.assertFalse(names & {"stat", "lstat", "newfstatat", "statx", "fstat", "fstatat64"})
+        for n in ("open", "openat", "openat2", "execve", "execveat", "readlink", "readlinkat", "access",
+                  "faccessat2", "chdir", "fchdir", "clone", "clone3", "vfork", "rename", "unlinkat"):
+            self.assertIn(n, names)
 
     def test_the_sets_are_plain_and_apart(self):
         for e in (*ci_scope.RACE_READ, *ci_scope.NEVER_BLIND):
