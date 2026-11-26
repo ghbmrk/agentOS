@@ -37,6 +37,9 @@ env:
 # for the unit-tests shards only to read their traces (CI-checks-under-45, #6464). broker-checks,
 # machines and hostcheck run in full on every change: their root steps may not carry an `if:`
 # (tools/root_tests.py), and a whole job can only be skipped by waiting for another job.
+# broker-race also skips every step on a race-blind change (CI-race-scope, #6692): records plus
+# modifications of files outside tools/ci_scope.py's RACE_READ, the measured set of tracked files its
+# tests read; each run traces its tests' reads and fails on one outside that set.
 # A push to main runs every job and every step whatever scope says (CI-mainguard, #2323):
 # main's green run then means main builds, even after a records-only merge that follows a
 # skewed code merge. Only pull requests, merge-queue builds and dispatches are scoped.
@@ -379,23 +382,23 @@ jobs:
         with:
           push: full # CI-mainguard
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
-        if: steps.scope.outputs.records != 'true'
+        if: steps.scope.outputs.race != 'skip'
         with:
           go-version: "1.26.11" # = broker/go.mod's toolchain line; checked below
           cache: false
       - name: Go is the toolchain go.mod names
-        if: steps.scope.outputs.records != 'true'
+        if: steps.scope.outputs.race != 'skip'
         run: |
           want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
       - name: Runner image (cache keys, #4785)
-        if: steps.scope.outputs.records != 'true'
+        if: steps.scope.outputs.race != 'skip'
         # Built outputs link the runner's libraries, so every cache key names the runner image.
         id: image
         run: (. /etc/os-release && echo "os=$ID-$VERSION_ID") >> "$GITHUB_OUTPUT"
       - name: Go build cache (CI-PATHS)
-        if: steps.scope.outputs.records != 'true'
+        if: steps.scope.outputs.race != 'skip'
         # One cache per shard; until a shard's own exists, the pre-split broker cache seeds it.
         # Restore only here: the save step at the end of the job runs on a push to main alone (D29).
         uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
@@ -406,7 +409,7 @@ jobs:
             go-build-broker-race-${{ matrix.shard }}-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
             go-build-broker-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
       - name: Runner disk after the cache restore (CI-disk-cause)
-        if: steps.scope.outputs.records != 'true'
+        if: steps.scope.outputs.race != 'skip'
         # Supporting evidence, not the fix (that is the build cache step before the save): the cloud,
         # / free after the restore and the restored cache's size, in one notice. A run under the floor
         # stops here naming its figure instead of failing later as ENOSPC with no test output. It also
@@ -430,17 +433,20 @@ jobs:
           touch -d "@$(( $(date +%s) - 3660 ))" "$RUNNER_TEMP/gocache.mark"
           [ "$free_gb" -ge "$DISK_FLOOR_GB" ] || { echo "::error title=runner disk::$cloud runner: / has $free_gb GB free after restoring $cache_mb MB of Go build cache, under the $DISK_FLOOR_GB GB floor; rerun the job, and if the cache is the bulk, see CI-disk-cause in tools/ASSUMPTIONS.md"; exit 1; }
       - name: Software TPM for the trusted-host slot (P2-4b)
-        if: steps.scope.outputs.records != 'true'
+        if: steps.scope.outputs.race != 'skip'
         run: sudo apt-get update -q && sudo apt-get install -yq swtpm
+      - name: strace for the read audit (CI-race-scope)
+        if: steps.scope.outputs.race != 'skip'
+        run: command -v strace || sudo apt-get install -yq strace
       # The enforcer's resolver tests run the real dnsmasq (briefs/ENF.md slice f);
       # dnsmasq-base is the binary alone, with no service started.
       - name: dnsmasq for the enforcer's resolver tests (ENF-f, #3664)
-        if: steps.scope.outputs.records != 'true'
+        if: steps.scope.outputs.race != 'skip'
         run: sudo apt-get install -yq dnsmasq-base
       # loops' canary-round test runs tools/canary.py, whose targets run as the
       # runner's first subordinate id in a user namespace (tools/ASSUMPTIONS.md D13).
       - name: Subordinate ids for the canary sandbox
-        if: steps.scope.outputs.records != 'true'
+        if: steps.scope.outputs.race != 'skip'
         run: |
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
@@ -449,7 +455,7 @@ jobs:
           grep -qE "^($(id -un)|$(id -u)):" /etc/subuid || sudo usermod --add-subuids 100000-165535 "$(id -un)"
           grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
       - name: This shard's packages (CI-SHARD)
-        if: steps.scope.outputs.records != 'true'
+        if: steps.scope.outputs.race != 'skip'
         env:
           SHARD: ${{ matrix.shard }}
         run: |
@@ -458,29 +464,46 @@ jobs:
           python3 -I ../tools/ci_split.py shard --shards 3 --index "$SHARD" < "$RUNNER_TEMP/packages" > "$RUNNER_TEMP/shard"
           cat "$RUNNER_TEMP/shard"
       - name: Tests (race detector)
-        if: steps.scope.outputs.records != 'true'
+        if: steps.scope.outputs.race != 'skip'
         # The TPM tests fail rather than skip if swtpm is missing. kernel/sim takes minutes
         # under -race, so go test's default 10-minute timeout flaked a slow runner (#2623);
         # the job's own timeout-minutes still bounds the step.
+        # CI-race-scope: under strace, every file syscall of the tests and all they run goes to a trace
+        # that the read audit below checks against ci_scope.py's RACE_READ. -buildvcs=false: go's VCS
+        # stamp (on binaries the tests build) runs git status, which walks the whole tree.
         env:
           AGENTOS_REQUIRE_SWTPM: "1"
-        run: go test -race -count=1 -timeout 25m $(cat "$RUNNER_TEMP/shard")
+          GOFLAGS: -buildvcs=false
+        run: python3 -I ../tools/race_reads.py run --trace "|gzip -1 > $RUNNER_TEMP/reads-race.gz" -- go test -race -count=1 -timeout 25m $(cat "$RUNNER_TEMP/shard")
       - name: The vision service's ONNX Runtime build, its real-runtime tests compiled (VIS-models, #3515)
-        if: steps.scope.outputs.records != 'true'
+        if: steps.scope.outputs.race != 'skip'
         # Default builds link no runtime; -tags vision_onnx links ONNX Runtime's Go binding,
         # which loads the pinned library only at run time. The real tests need the pinned
         # library, detector and scene set, so vision-real.yml runs them; here they compile,
         # and the tagged build's own tests run without the library.
         env:
           CGO_ENABLED: "1"
+          GOFLAGS: -buildvcs=false
         run: |
           go vet -tags vision_onnx,vision_real ./cmd/agentos-vision
-          go test -count=1 -tags vision_onnx ./cmd/agentos-vision
+          python3 -I ../tools/race_reads.py run --trace "|gzip -1 > $RUNNER_TEMP/reads-vision.gz" -- go test -count=1 -tags vision_onnx ./cmd/agentos-vision
+      - name: The tests read no tracked file outside RACE_READ (CI-race-scope, tools/race_reads.py)
+        if: steps.scope.outputs.race != 'skip'
+        # Fails on a tracked file read outside ci_scope.py's RACE_READ (this commit's copy, the one a
+        # PR based on it skips by), on git's object store, on a path it cannot place, and on a trace
+        # that ran no test binary or was cut short.
+        run: |
+          err=0
+          python3 -I ../tools/race_reads.py audit --root "$GITHUB_WORKSPACE" --reads-out "$RUNNER_TEMP/reads.txt" \
+            "$RUNNER_TEMP/reads-race.gz" "$RUNNER_TEMP/reads-vision.gz" || err=$?
+          { echo "### Tracked files outside broker/ the tests read, by directory"; echo '```'
+            grep -v '^broker/' "$RUNNER_TEMP/reads.txt" | cut -d/ -f1-2 | sort | uniq -c || true; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$err"
       - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: rm -rf "$(go env GOCACHE)/fuzz"
       - name: Build cache keeps only what this run used (CI-disk-cause)
-        if: steps.scope.outputs.records != 'true'
+        if: steps.scope.outputs.race != 'skip'
         # The cause of the full runner disk (#4422): each main push saved the restored cache plus its
         # own builds, and go drops an entry only after five days unused, so broker-race (1)'s cache
         # reached 5.1 GB compressed, restored on every run. Every run measures what it would drop;

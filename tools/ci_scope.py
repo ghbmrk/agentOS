@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CI scope of a change: `records` if it touches only record documents, else `full` (CI-docs).
+"""CI scope of a change: `records`, `race-blind` or `full` (CI-docs, CI-race-scope).
 
 A records-only change (review records, BOARD and LATER lines, briefs, decisions, the
 generated TRACE.md and METRICS.md) leaves every byte of code, tests, tools, workflows,
@@ -19,10 +19,15 @@ The workflows run the base commit's copy of this file (`git show BASE:tools/ci_s
 so a PR cannot widen the set for itself; a PR that edits this file is outside the set and
 runs full CI anyway. Standard library only, so that copy runs on its own.
 
+A change of records and modified files outside RACE_READ alone (and not records alone) is
+`race-blind`: every job runs in full except broker-race, which skips its steps as on a
+records-only change. RACE_READ is measured, not guessed: broker-race traces every file its tests
+and their children reach and fails on a tracked file outside it (tools/race_reads.py, CI-race-scope).
+
 Usage:
   tools/ci_scope.py PATH...            scope of the listed paths
   tools/ci_scope.py --git BASE [HEAD]  scope of `git diff --name-only BASE...HEAD`
-Prints `records` or `full` on stdout; on `full`, the first path that forced it on stderr.
+Prints `records`, `race-blind` or `full` on stdout; on `full`, the first path that forced it on stderr.
 """
 import argparse
 import subprocess
@@ -44,6 +49,34 @@ RECORD_DIRS = ("reviews/", "decisions/", "briefs/", "handoff/",
                "docs/development/", "docs/learning/", "docs/security/")
 
 
+# CI-race-scope (#6692): the tracked files outside broker/ that broker-race's tests, or anything
+# they run, read, as measured: each shard traces its `go test` and fails on a tracked file read
+# outside this set (tools/race_reads.py). A trailing "/" is a directory and all below it. A change
+# that only modifies files outside it and NEVER_BLIND (and records) is `race-blind`: broker-race
+# skips its steps. NEVER_BLIND is never race-blind: the broker, the workflows and actions that run
+# the job, and the tools the job runs outside its traced steps.
+RACE_READ = (
+    "assurance/", "evals/", "guest/", "image/", "spikes/",
+    "SPEC.md", "docs/owners-guide.md", "tools/canary.py", "tools/depaudit.py", "tools/old_core.txt",
+)
+NEVER_BLIND = ("broker/", ".github/", ".git/", "tools/ci_scope.py", "tools/ci_split.py",
+               "tools/race_reads.py")
+
+
+def _plain(path):
+    parts = path.split("/")
+    return not ("" in parts or "." in parts or ".." in parts)
+
+
+def is_race_blind(path, status):
+    """A change no broker test can see: a modification (git status M) of a file outside RACE_READ
+    and NEVER_BLIND. An addition, deletion or type change alters a directory listing or a file
+    type, which the read audit does not measure, so it is never race-blind."""
+    if status != "M" or not _plain(path):
+        return False
+    return not any(path == e.rstrip("/") or e.endswith("/") and path.startswith(e) for e in (*RACE_READ, *NEVER_BLIND))
+
+
 def is_record(path):
     if path in RECORD_FILES:
         return True
@@ -54,24 +87,34 @@ def is_record(path):
 
 
 def scope_of(paths):
-    """Return ("records" | "full", first path outside the set or None)."""
-    paths = [p for p in paths if p]
-    if not paths:
+    """Return ("records" | "race-blind" | "full", first path outside the sets or None). Each
+    entry is a path, or a (git status letter, path) pair; a bare path has no status, so it is
+    never race-blind."""
+    changes = [c if isinstance(c, tuple) else (None, c) for c in paths]
+    changes = [(s, p) for s, p in changes if p]
+    if not changes:
         return "full", None  # nothing changed, or nothing we can see: test everything
-    for p in paths:
-        if not is_record(p):
+    for s, p in changes:
+        if not is_record(p) and not is_race_blind(p, s):
             return "full", p
-    return "records", None
+    if all(is_record(p) for _, p in changes):
+        return "records", None
+    return "race-blind", None
 
 
 def changed_paths(base, head):
-    # --no-renames lists a moved file under its old path too, so moving broker/x.go to
-    # reviews/x.md is full. -z keeps git from quoting unusual names.
+    """(status letter, path) for each change. --no-renames lists a moved file under its old path
+    too, so moving broker/x.go to reviews/x.md is full. -z keeps git from quoting unusual names."""
     out = subprocess.run(
-        ["git", "diff", "--name-only", "-z", "--no-renames", f"{base}...{head}"],
+        ["git", "diff", "--name-status", "-z", "--no-renames", f"{base}...{head}"],
         check=True, capture_output=True,
     ).stdout
-    return out.decode("utf-8", "surrogateescape").split("\0")
+    f = out.decode("utf-8", "surrogateescape").split("\0")
+    if f and f[-1] == "":
+        f.pop()
+    if len(f) % 2:
+        raise OSError(f"git diff --name-status -z printed {len(f)} fields")
+    return [(f[i][:1], f[i + 1]) for i in range(0, len(f), 2)]
 
 
 def main(argv=None):
@@ -91,6 +134,8 @@ def main(argv=None):
         print(f"ci_scope: {why} is not a record document; full CI", file=sys.stderr)
     elif scope == "full":
         print("ci_scope: empty change; full CI", file=sys.stderr)
+    elif scope == "race-blind":
+        print("ci_scope: records and files no broker test reads; full CI but broker-race", file=sys.stderr)
     return 0
 
 

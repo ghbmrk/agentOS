@@ -1,0 +1,20 @@
+# CI-race-scope: broker-race skips changes no broker test can see, backed by a read audit
+
+Board section: Defects and later findings on surviving packages. Issue #6692 (follow-up from #6689).
+
+**Why.** broker-race is 19% of ci minutes. Of the 239 first-parent merges from 2026-11-18 to 2026-11-25, 109 were full-scope but changed no file under `broker/`; they re-ran the race tests on code main's run already tested. Go tests read files outside `broker/` (`image/`, `guest/`, `evals/`, `SPEC.md`, `tools/canary.py` through exec, and more), so a guessed path list would be a false-pass route.
+
+**Design.**
+- `tools/ci_scope.py` gains `RACE_READ`, the measured set of tracked files outside `broker/` that the tests read, and `NEVER_BLIND` (`broker/`, `.github/`, the tools the job runs outside its traced steps). A change is `race-blind` when every path is a record or a modification (git status `M`) of a file outside both. An addition, deletion or type change is never race-blind: it alters a directory listing or a file type, which the audit does not measure. The base commit's copy decides, as for records.
+- `.github/actions/scope` outputs `race=skip` on `records` or `race-blind`; broker-race's steps run unless it says exactly `skip`.
+- Each broker-race run (PR and main) runs its `go test` steps under `strace -f -y --seccomp-bpf` (`tools/race_reads.py run`), as the runner user from a root tracer so setuid helpers keep working. `race_reads.py audit` fails on: a tracked file read outside `RACE_READ`/`NEVER_BLIND`; any read of `.git/objects/`; a path it cannot place; a trace with no test binary or whose first process never exited. Only go's two VCS-stamp git commands are exempt (their output rests on no committed content).
+
+**Measured.** Full suite traced locally (go 1.26.11, no swtpm): reads outside `broker/` fall in `assurance/`, `evals/`, `guest/`, `image/`, `spikes/`, `SPEC.md`, `docs/owners-guide.md`, `tools/canary.py`, `tools/depaudit.py`, `tools/old_core.txt`. Tracing cost on `./owner/... ./kernel/...` under `-race`: 683 s plain, 678 s traced. With that set, 53 of the 109 merges above would have skipped broker-race. The CI audit is the authority: a read seen only on the runner (swtpm, canary sandbox) fails it and is added to `RACE_READ`.
+
+**Not chosen.** Go's test cache in place of `-count=1` (weaker: misses exec'd children and apt tool versions; needs Mark). Tracing on main pushes only: tracing is near free, and per-run auditing catches a new read on the PR that adds it.
+
+**Scope:** `tools/ci_scope.py`, `tools/race_reads.py` (new), `.github/actions/scope/action.yml`, `.github/workflows/ci.yml` (broker-race job), `tests/test_ci_scope.py`, `tests/test_race_reads.py` (new), `tests/test_workflows.py` (two guard strings), `tests/test_zz_classes_structural.py` (RACE_READ names a list file it does not read), `tools/risk_tier.py` (race_reads is tier A), `tools/ASSUMPTIONS.md`.
+
+**Acceptance:** `tests/test_race_reads.py` (resolution of relative paths, links, vfork ordering, CLONE_FS/CLONE_FILES sharing, PATH_MAX descriptors, the stamp exemption, fail-closed cases, the modify-only rule, `--name-status` parsing); `tests/test_ci_scope.py` (the action prints `race=skip` with `records=true`, and broker-race's steps carry the race guard); the PR's own broker-race shards green with their audit step passing.
+
+**Needs:** tier A; `.github/` and `tools/ci_scope.py` are gate files, so a separate Security accept.
