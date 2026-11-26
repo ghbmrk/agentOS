@@ -1832,7 +1832,7 @@ class WorkflowTest(unittest.TestCase):
         # ASSUMPTIONS.md D13). The mutants job sets them up with broker-race's own step, first.
         want = "Subordinate ids for the canary sandbox"
         race = dict(job_steps((WORKFLOWS / "ci.yml").read_text(), "broker-race"))
-        guard = "        if: steps.scope.outputs.records != 'true'\n"
+        guard = "        if: steps.scope.outputs.race != 'skip'\n"
         self.assertIn(guard, race[want])
         # #4961: `plan` runs a test-only diff's changed tests for their coverage, so it needs it too.
         for job, first in (("mutants", "Gremlins and statement deletions on the package (#4573)"), ("plan", "Shards for each package (#4961)")):
@@ -1840,7 +1840,7 @@ class WorkflowTest(unittest.TestCase):
             names = [n for n, _ in mut]
             self.assertIn(want, names)
             self.assertLess(names.index(want), names.index(first))
-            # broker-race's copy also skips on a records-only change (CI-par-4); the rest is the same.
+            # broker-race's copy also skips on a records-only or race-blind change (CI-par-4, CI-race-scope); the rest is the same.
             self.assertEqual(dict(mut)[want], race[want].replace(guard, "", 1))
 
     def test_mutgate_runs_the_tpm_tests_as_broker_race_does(self):
@@ -1850,7 +1850,7 @@ class WorkflowTest(unittest.TestCase):
         # and a missing swtpm fails the run, as in broker-race, instead of skipping.
         want = "Software TPM for the trusted-host slot (P2-4b)"
         race = dict(job_steps((WORKFLOWS / "ci.yml").read_text(), "broker-race"))
-        guard = "        if: steps.scope.outputs.records != 'true'\n"
+        guard = "        if: steps.scope.outputs.race != 'skip'\n"
         self.assertIn(guard, race[want])
         text = (WORKFLOWS / "mutgate.yml").read_text()
         for job, first in (("mutants", "Gremlins and statement deletions on the package (#4573)"), ("plan", "Shards for each package (#4961)")):

@@ -117,7 +117,7 @@ class StepsTest(unittest.TestCase):
                 # only main drops anything.
                 self.assertEqual(guard.get("if"), keep.get("if"))
                 self.assertNotIn("refs/heads/main", str(keep.get("if")))
-                self.assertIn(guard.get("if"), (None, "steps.scope.outputs.records != 'true'"))
+                self.assertIn(guard.get("if"), (None, "steps.scope.outputs.records != 'true'", "steps.scope.outputs.race != 'skip'"))
 
     def test_the_restore_is_the_one_read_for_the_mtime_premise(self):
         # #6031 item 2: if a restore set mtimes to extraction time, every entry would look used and
