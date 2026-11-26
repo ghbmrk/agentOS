@@ -494,7 +494,7 @@ func codesStepNamesEachRefusal(t *testing.T) {
 		t.Fatalf("limited enroll:\n%s", p)
 	}
 	// A failed enroll is a 500 even beside a link that reads as a key.
-	h.enrollErr, h.enrollLink = errors.New("vault gone"), "otpauth://totp/AgentOS:AgentOS?secret=JBSWY3DPEHPK3PXP&issuer=AgentOS&algorithm=SHA1&digits=6&period=30"
+	h.enrollErr, h.enrollLink = errors.New("vault gone"), "otpauth://totp/agentOS:agentOS?secret=JBSWY3DPEHPK3PXP&issuer=agentOS&algorithm=SHA1&digits=6&period=30"
 	if w := r.do("GET", "/setup", nil); w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "Setup could not start this step.") {
 		t.Fatalf("failed enroll: %d %s", w.Code, w.Body.String())
 	}
