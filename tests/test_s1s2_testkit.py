@@ -117,19 +117,29 @@ class FinishImageTest(unittest.TestCase):
 
 
 class FloorFitTest(unittest.TestCase):
-    # PE2: on the N95, the agent machine and one replay machine fit in the pool left after the
-    # RES-2 floor budget (host, inference, browser, headroom).
+    # PE2: on the N95, the agent machine fits in the pool left after the RES-2 floor budget (host, inference, browser, headroom).
     def test_n95_fits(self):
         out = tk.floor_fit("MemTotal:        7864320 kB\nMemAvailable:    7340032 kB\n", 4)
         self.assertTrue(out.startswith("PASS"), out)
         self.assertIn("pool 3496 MiB", out)
-        self.assertIn("agent 1536 + one replay 1024 = 2560", out)
+        self.assertIn("agent 1536", out)
         self.assertIn("-capacity-mb 4096", out)
 
     def test_small_pc_fails(self):
-        out = tk.floor_fit("MemTotal:        6291456 kB\n", 4)
+        out = tk.floor_fit("MemTotal:        4718592 kB\n", 4)
         self.assertTrue(out.startswith("FAIL"), out)
-        self.assertIn("pool 1960 MiB", out)
+        self.assertIn("pool 424 MiB", out)
+
+    def test_pool_holds_one_agent_only(self):
+        # No replay machine is sized: a pool of 1960 MiB holds the 1536 MiB agent.
+        out = tk.floor_fit("MemTotal:        6291456 kB\n", 4)
+        self.assertTrue(out.startswith("PASS"), out)
+        self.assertNotIn("replay", out)
+
+    def test_probe_key_is_agent_fit(self):
+        src = open(tk.__file__).read()
+        self.assertIn('("agent_fit", floor_fit(', src)
+        self.assertNotIn("agent_and_replay_fit", src)
 
     def test_large_box_capacity_is_capped(self):
         self.assertIn("-capacity-mb 4500 here", tk.floor_fit("MemTotal: 16777216 kB\n", 4))

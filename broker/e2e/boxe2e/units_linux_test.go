@@ -96,15 +96,8 @@ func TestVaultDropInSwapsOnlyTheBinary(t *testing.T) {
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("drop-in:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
-	// The workflow builds the tagged binary where the share's bind reads it,
-	// and ci_boot.sh passes the drop-in.
-	wf, err := os.ReadFile("../../../.github/workflows/image.yml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(wf), `go build -tags agentos_e2e -trimpath -ldflags=-buildid= -o "$RUNNER_TEMP/e2e/agentos-egress" ./cmd/agentos-egress`) {
-		t.Fatal("image.yml does not build the agentos_e2e vault process into the driver share")
-	}
+	// ci_boot.sh passes the drop-in; zz_imagewf_linux_test.go checks that the
+	// workflow builds the tagged binary where the share's bind reads it.
 	boot, err := os.ReadFile("../../../image/ci_boot.sh")
 	if err != nil {
 		t.Fatal(err)

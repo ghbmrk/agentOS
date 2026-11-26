@@ -103,6 +103,7 @@ class RiskTierTest(unittest.TestCase):
             "guest/codex/agentos-toolsh",
             "guest/codex/managed_config.toml",
             "guest/codex/requirements.toml",
+            "guest/codex/model_catalog.json",
             "guest/codex/launch.json",
             "broker/cmd/agentos-modem/agentos-modem.service",
             "broker/attention/systemd/x.conf",
@@ -277,6 +278,12 @@ class RiskTierTest(unittest.TestCase):
         self.assertEqual((tier, why), ("A", ["broker/vault/y.go"]))
         self.assertEqual(rt.tier_of_change(["docs/a.md", "broker/budget/q.go"])[0], "B")
         self.assertEqual(rt.tier_of_change([]), ("C", []))
+
+    # #6639 (a work item with no SPEC row, so no REQ marker): the model catalog's
+    # multi_agent_version decides which collaboration tools the Codex CLI declares.
+    def test_codex_model_catalog_only_change_is_a(self):
+        self.assertEqual(rt.tier_of_change(["guest/codex/model_catalog.json"]),
+                         ("A", ["guest/codex/model_catalog.json"]))
 
     def test_every_tier_a_package_exists(self):
         # A renamed package must not silently drop to tier B.

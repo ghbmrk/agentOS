@@ -165,7 +165,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | P2-2w c4e3 p1 | P2-2w c4e3 p1: an unfunded provider account is told, not silent; the first quota/credit failure sends one STATUS line naming the step (later, recheck; ONB-3; tier A; Potency P1 on #1343) | unsized | queued (later, recheck; Potency P1 on #1343) |
 | P2-2w c4e3 p2 | P2-2w c4e3 p2: OpenAI restricted keys without Models: Read are not reported as rejected; confirm live, then a distinct text naming the permission (later, recheck; ONB-3; tier A; Potency P2 on #1343) | unsized | building (later, recheck; Potency P2 on #1343) |
 | P2-2w c4e3 l2 | P2-2w c4e3 l2: ConnectAPIKey maps codes with a switch or fixed slice instead of ranging a map literal (later; tier A; L3 L2 on #1343) | unsized | building (later; L3 L2 on #1343) |
-| CTRL-claim-ap-3 | The sticker carries the minimum-phone line ("Phone won't join: it needs WPA3") beside the setup Wi-Fi in sticker.html, with a test, so an owner whose phone lacks WPA3 gets a reason on the first printed guide | CTRL-claim-ap | building (later, recheck; CH-7, ONB-7, D-081, CH-12; tier A; from #1313 finding 4) |
 | P2-2w c4f s1 | The claim decision moves out of the Wi-Fi page so a compromised page cannot forge "claimed" and have egress-setup make the setup vault; init -setup reads only claim state the page's uid cannot write (c4f s1; #1302 Security S-R1, builder release 2) | P2-2w c4f | queued (release; HW-10, K5, K22, A1; tier A; from #1302) |
 | P2-2w c4f l2 | test_image's flag check reads each unit's flags against the subcommand it runs, not the union of all FlagSets (later, recheck; L3 L2 on PR #1302) | P2-2w c4f | queued (later, recheck; from #1302; tier A) |
 | P2-2w c4f l4 | Test finish_image.main's call to swap_violations, as test_main_refuses_a_disk_without_quotas does for the quota check (later; L3 L4 and Potency round 3 on PR #1302) | P2-2w c4f | queued (later; from #1302; tier A) |
@@ -383,7 +382,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | NET-2-decl-daily-bytes | NET-2-decl-daily-bytes: each CLK-14 account declaration states the daily bytes it sends, proposed by the plan and confirmed by the owner (D-248) | #5157 | building (release; tier A) |
 | CTL-agent-starting-status | CTL-agent-starting-status: STATUS during boot shows a starting line, not 'not set up' or 'waiting for memory'. Release; from #6136 (UX). | #5429, #6136 | queued (release; tier A) |
 | MUT-kill-6032-guest | MUT-kill-6032-guest: kill the surviving mutants in broker/guest (blocks #6032) | #6032 | queued (release; tier A) |
-| MUT-simplify-kernel-recent | MUT-simplify-kernel-recent: record only irreversible steps in s.recent and drop undo's delete branch and its two waivers | #6279 | building (release; tier A) |
 | VM-snap-unread-notice-fu-1 | VM-snap-unread-notice-fu-1: add the ASSUMPTIONS.md row for the unread-snapshot notice once the 215 package-wide survivors it exposes in broker/cmd/agentosd are killed or proved | #6139 | queued (release; tier A; lane claude2) |
 | VM-snap-unread-notice-fu-2 | VM-snap-unread-notice-fu-2: a held unread notice's retries over a modem outage count one missed text, not one per retry; pin the single-timer guard | #6139 | building (release; tier A; lane claude2) |
 | VULN-debian-r13-f4 | VULN-debian-r13-f4: pin the import sweep's direct-importer allow entries by SHA-256 in every group, as [cipher] does. Release. | #6285, #6294 | building (release; tier A) |
@@ -398,7 +396,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | NET-2-owner-host-daily-bytes | NET-2-owner-host-daily-bytes: an owner-entered destination (IMAP server) states its daily bytes, confirmed at set-up (D-248) | #5157 | queued (release; tier A) |
 | VULN-codex-musl | VULN-codex-musl: the Codex CLI's static musl libc (and code-mode-host's libc++abi) is unversioned, so no advisory is queried for it. Release; from #5885. | #5885, #5894 | queued (release; tier A) |
 | NET-2-drop-cap-row-basis | NET-2-drop-cap-row-basis: the "drop a core cap" row of TestCapChangesAreLoosenings clears its Basis, so it exercises Classify and not check. Release. | #6144 | queued (release; tier A) |
-| NET-2-host-canonical | NET-2-host-canonical: imagedest.Join and enflist.Propose canonicalize destination hosts (case, trailing dot), so one DNS name never gets two caps. Release. | #6432, #6447 | building (release; tier A) |
 | VULN-debian-r13-f5 | VULN-debian-r13-f5: import sweep [wrapper] entries: a test that a wrapper's own held names count (R5), and exports that forward a caller's name stay lookups (R6). Release. | #6299, #6382 | queued (release; tier A) |
 | SPEC-krn2-core-record | SPEC-krn2-core-record: KRN-2 says the core grows under a committed record line, not a PR-body line. Release. | #6404 | building (release; L1 spec-diff) |
 | MUT-record-deps-audit | MUT-record-deps-audit: re-record entries whose proof rests on outside declarations with --dep, and lint entries that name one without deps. Release. | #6282, #6498 | building (release; tier A) |
@@ -412,7 +409,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | NET-2-host-shape | NET-2-host-shape: enflist.Propose refuses any host that is not LDH lower-case with two or more labels, so a signed name never stops every resolver. Release. | #6478, #6552 | queued (release; tier A) |
 | ENF-label-free-mutant | ENF-label-free-mutant: TestSharedLabelFreeLoad does not catch a record written when the label set did nothing. Release. | #6551 | queued (release; tier A) |
 | VULN-static-elf-go-entry | VULN-static-elf-go-entry: a go file's entry point inside a listed Go function, .text its only executable section, nfunc > 0, exact go: marker list. Release; from #6554. | #6482, #6554 | queued (release; tier A) |
-| VIS-reply-pool-wipe | VIS-reply-pool-wipe: build an enrol reply's line in a service-owned buffer wiped after write, so no base64 template stays in encoding/json's pool (#6559 Security release finding, DEV-7). | #6559 | building (release; tier A) |
 | ENF-nft-test-deadline-3 | ENF-nft-test-deadline-3: barrier and caps-test teardown fail loudly on a sender-side drop or a timed-out read. Release. | #6562 | queued (release; tier A) |
 | MUT-record-deps-lint-ux | MUT-record-deps-lint-ux: one waive line per entry with every missing --dep; cite receiver-variable method calls. Release. | #6499, #6561 | queued (release; tier A) |
 | CI-mutgate-after-ci | CI-mutgate-after-ci: mutgate runs only after ci passes on the same head (premerge still requires its pass); soak fuzz max-parallel 1. | runner-capacity cut 2026-11-23 | building (gate file) |
@@ -428,15 +424,17 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-debian-r17 | VULN-debian-r17: accept openssl's no-fix Debian 13 advisory DEBIAN-CVE-2026-107494 so image-vulncheck passes again. Release; no-fix Debian round. | #2919, #6542 | building (release; tier A) |
 | VIS-reply-read-wipe | VIS-reply-read-wipe: read an enrol reply into a client-owned buffer zeroed on every path, decode its template in place, and zero a refused error reply's template (#6587 review release findings, DEV-7). | #6587 | building (release; tier A) |
 | VIS-reply-read-wipe-fu | VIS-reply-read-wipe-fu: replace the vision client's package-level test seams with passed-in ones, and restore the trailing-data detail (#6636 review release findings, DEV-7). | #6636 | queued (release; tier A) |
-| VULN-gobwas-ws-r1 | VULN-gobwas-ws-r1: premerge shows the content of vendored agent-instruction files to the Security reviewer. Release; from #6647. | #6646 | queued (release; tier A) |
-| VULN-gobwas-ws-r2 | VULN-gobwas-ws-r2: sipline WS loopback test near sipgo's message-size limit. Release; from #6647. | #6646 | queued (release; tier A) |
+| VULN-gobwas-ws-r1 | VULN-gobwas-ws-r1: premerge shows the content of vendored agent-instruction files to the Security reviewer. Release; from #6647. | #6646 | building (release; tier A) |
+| VULN-gobwas-ws-r2 | VULN-gobwas-ws-r2: sipline WS loopback test near sipgo's message-size limit. Release; from #6647. | #6646 | building (release; tier A) |
 | B3-18b-r1 | B3-18b-r1: daemon B15 names agent_fit; S1 test kit comment names -agent-mem-mb. Release; from #6649. | #2797 | queued (release; tier C) |
 | B3-16-r1 | B3-16-r1: Gmail connect DUse after a finished sign-in says it is already connected. Release; from #6632. | #3014 | queued (release; tier A) |
 | VM-snap-unread-notice-fu-2b | VM-snap-unread-notice-fu-2b: main wires link.Usable into the held unread notice | #6455, #6657 | queued (release; tier A; lane claude2) |
 | VULN-debian-r18 | VULN-debian-r18: accept openssl's no-fix Debian 13 advisory DEBIAN-CVE-2026-84785 so image-vulncheck passes again. Release; no-fix Debian round. | #2919, #6628 | building (release; tier A) |
-| MUT-kill-5974-owner | MUT-kill-5974-owner: kill or prove the 357 owner and localsrv survivors on main that #5974's mutgate exposed. | #5187, #5974 | building (release; tier A) |
+| MUT-kill-5974-owner | MUT-kill-5974-owner: kill or prove the 357 owner and localsrv survivors on main that #5974's mutgate exposed. | #5187, #5974 | queued (release; tier A) |
 | VULN-quic-import-sweep | VULN-quic-import-sweep: import_sweep.py fails on any OSSL_QUIC_* importer but the openssl CLI. Release; from #6669 and #6629. | #6668 | building (release; tier A) |
 | VULN-quic-import-sweep-fu | VULN-quic-import-sweep-fu: count every QUIC/datagram-BIO name holder; exempt definers by SONAME. Release; from #6672. | #6671 | queued (release; tier A) |
+| TOOL-mutgate-subtest-parallel | TOOL-mutgate-subtest-parallel: a subtest-only t.Parallel in a non-parallel test no longer makes every test changed | #6674, #6670 | building (release; tier A gate file) |
+| TOOL-mutgate-testmain-order | TOOL-mutgate-testmain-order: a TestMain or init that may rerun or reorder tests widens every package, Parallel or not | #6677, #6675 | queued (release; tier A gate file) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -498,4 +496,5 @@ issue #6639: body has no board-row block
 issue #6645: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #6660: title "6659-fu TOOL-mutgate-read-file-scope-fu: unblock main.go and boxe2e ASSUMPTIONS edits, and tighten the read trace's message and tests" does not start with '<ID>: '
 issue #6664: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #6681: a second issue for VULN-gobwas-ws-r2 (first is #6650)
 ```

@@ -3489,6 +3489,86 @@ class MovedDecls(unittest.TestCase):
                                     extra={"lib/lib.go": quiet, "lib/lib_test.go": lib.replace("func Par(", "func par(")}),
                          (["TestNew"], []))
 
+    def test_a_parallel_only_on_subtests_reorders_no_other_test(self):
+        # #6675: a parallel subtest pauses until its parent's function returns and runs beside its parallel
+        # siblings only, so a Parallel only on subtests of a non-parallel test reorders no top-level test.
+        # REQ: TOOL-mutgate-subtest-parallel
+        new = 'package hint\n\nimport "testing"\n\nfunc TestNew(t *testing.T) {\n\tif Up(2) != 3 {\n\t\tt.Fatal(0)\n\t}\n}\n'
+        down = 'func TestDown(t *testing.T) {\n\tif Down(3) != 2 {\n\t\tt.Fatal("down")\n\t}\n}\n'
+        sub = MOVE_TEST.replace(down, (
+            'func TestDown(t *testing.T) {\n\tfor _, n := range []int{3, 4} {\n\t\tt.Run("n", func(t *testing.T) {\n'
+            '\t\t\tt.Parallel()\n\t\t\tif Down(n) != n-1 {\n\t\t\t\tt.Fatal("down")\n\t\t\t}\n\t\t})\n\t}\n}\n'))
+        self.assertNotEqual(sub, MOVE_TEST)
+        every, only = (["TestDown", "TestNew", "TestUp"], ["TestDown", "TestUp"]), (["TestNew"], [])
+        late = lambda test, **kw: self.reach({"hint_test.go": test}, {"hint_test.go": test, "z_test.go": new}, **kw)
+        # (a) only the unrelated new test changes; one named first still moves every test after it.
+        self.assertEqual(late(sub), only)
+        self.assertEqual(self.reach({"hint_test.go": sub}, {"hint_test.go": sub, "a_test.go": new}), every)
+        nested = sub.replace('\t\t\tt.Parallel()\n', '\t\t\tt.Parallel()\n\t\t\tt.Run("m", func(t *testing.T) {\n'
+                             '\t\t\t\tt.Parallel()\n\t\t\t\thelp(t, n)\n\t\t\t})\n') + "\nfunc help(t *testing.T, n int) { t.Helper() }\n"
+        self.assertEqual(late(nested), only)
+        for name, test in (
+                # (b) the parent test, or any top-level test, calls Parallel.
+                ("top level", sub.replace('\t}\n}\n', '\t}\n\tt.Parallel()\n}\n')),
+                ("top level, before its subtests", sub.replace('\tfor _, n', '\tt.Parallel()\n\tfor _, n')),
+                # (c) a helper, a method value, a string (reflect), another name, or a literal not passed to t.Run.
+                ("helper", sub.replace('\t\t\tt.Parallel()\n', '\t\t\tpar(t)\n') + "\nfunc par(t *testing.T) { t.Parallel() }\n"),
+                ("method value", sub.replace('\t\t\tt.Parallel()\n', '\t\t\tp := t.Parallel\n\t\t\tp()\n')),
+                ("not first", sub.replace('\t\t\tt.Parallel()\n', '\t\t\t_ = n\n\t\t\tt.Parallel()\n')),
+                ("reflect", sub.replace('\t\t\tt.Parallel()\n', '\t\t\t_ = "Parallel"\n')),
+                ("other name", sub.replace('func(t *testing.T) {\n\t\t\tt.Parallel()', 'func(s *testing.T) {\n\t\t\ts.Parallel()')),
+                ("wrapped", sub.replace('t.Run("n", func(t *testing.T) {', 't.Run("n", wrap(func(t *testing.T) {').replace('\t\t})\n', '\t\t}))\n')
+                 + "\nfunc wrap(f func(*testing.T)) func(*testing.T) { return f }\n"),
+                ("third argument", sub.replace('t.Run("n", func', 'run(t, "n", func').replace('\t\t})\n', '\t\t}, 0)\n')
+                 + "\nfunc run(t *testing.T, n string, f func(*testing.T), _ int) { t.Run(n, f) }\n"),
+                ("t rebound", sub.replace('\tfor _, n', '\tt = other\n\tfor _, n') + "\nvar other *testing.T\n"),
+                ("t a range var", sub.replace('\tfor _, n', '\tfor _, t := range []*testing.T{t} {\n\t\t_ = t\n\t}\n\tfor _, n')),
+                ("t of a helper literal", sub.replace('\tfor _, n', '\tcheck := func(t *testing.T) { t.Run("c", func(t *testing.T) {\n\t\tt.Parallel()\n\t}) }\n\tcheck(t)\n\tfor _, n')),
+                ("testing bound otherwise", sub.replace('\t"testing"\n', '\ttesting "example.invalid/broker/fake"\n\tstd "testing"\n')
+                 .replace("func TestUp(t *testing.T)", "func TestUp(t *std.T)").replace("func TestDown(t *testing.T)", "func TestDown(t *std.T)")),
+                # (d) a TestMain that may change what or how often m.Run runs.
+                ("TestMain flag", sub.replace('\t"testing"\n', '\t"flag"\n\t"os"\n\t"testing"\n')
+                 + '\nfunc TestMain(m *testing.M) {\n\tflag.Set("test.shuffle", "on")\n\tos.Exit(m.Run())\n}\n'),
+                ("TestMain twice", sub.replace('\t"testing"\n', '\t"os"\n\t"testing"\n')
+                 + '\nfunc TestMain(m *testing.M) {\n\tm.Run()\n\tos.Exit(m.Run())\n}\n'),
+                ("TestMain helper", sub.replace('\t"testing"\n', '\t"os"\n\t"testing"\n')
+                 + '\nfunc TestMain(m *testing.M) {\n\tsetup()\n\tos.Exit(m.Run())\n}\n\nfunc setup() {}\n'),
+                ("TestMain passes m", sub.replace('\t"testing"\n', '\t"os"\n\t"testing"\n')
+                 + '\nfunc TestMain(m *testing.M) {\n\tos.Exit(run(m))\n}\n\nfunc run(m *testing.M) int { return m.Run() }\n'),
+                ("TestMain os.Args", sub.replace('\t"testing"\n', '\t"os"\n\t"testing"\n')
+                 + '\nfunc TestMain(m *testing.M) {\n\tos.Args = append(os.Args, "-test.shuffle=on")\n\tos.Exit(m.Run())\n}\n'),
+                ("TestMain aliased flag", sub.replace('\t"testing"\n', '\tf "flag"\n\t"os"\n\t"testing"\n')
+                 + '\nfunc TestMain(m *testing.M) {\n\tf.Set("test.shuffle", "on")\n\tos.Exit(m.Run())\n}\n'),
+                # One m.Run() run twice: a loop, a jump back, a literal called twice (L3 and Potency on #6677).
+                ("TestMain loop", sub.replace('\t"testing"\n', '\t"os"\n\t"testing"\n')
+                 + '\nfunc TestMain(m *testing.M) {\n\tc := 0\n\tfor i := 0; i < 2; i++ {\n\t\tc = m.Run()\n\t}\n\tos.Exit(c)\n}\n'),
+                ("TestMain goto", sub.replace('\t"testing"\n', '\t"os"\n\t"testing"\n')
+                 + '\nfunc TestMain(m *testing.M) {\n\tn := 0\nagain:\n\tc := m.Run()\n\tif n++; n < 2 {\n\t\tgoto again\n\t}\n\tos.Exit(c)\n}\n'),
+                ("TestMain label", sub.replace('\t"testing"\n', '\t"os"\n\t"testing"\n')
+                 + '\nfunc TestMain(m *testing.M) {\nagain:\n\tos.Exit(m.Run())\n}\n'),
+                ("TestMain literal", sub.replace('\t"testing"\n', '\t"os"\n\t"testing"\n')
+                 + '\nfunc TestMain(m *testing.M) {\n\trun := func() int { return m.Run() }\n\trun()\n\tos.Exit(run())\n}\n'),
+                # (e) a parallel subtest's literal names a package var: its siblings may interleave on it.
+                ("package var", sub.replace('if Down(n) != n-1', 'if hits++; Down(n) != n-1') + "\nvar hits int\n")):
+            with self.subTest(name):
+                # TestMain is in the run list, so with Parallel read every test is a change, its own too: None.
+                self.assertEqual(late(test), (None, None) if name.startswith("TestMain") else every)
+        # (e) a var of a non-test file of the package counts the same.
+        self.assertEqual(late(sub.replace('if Down(n) != n-1', 'if hits++; Down(n) != n-1'), src=TWO_SRC + "\nvar hits int\n"), every)
+        # (c) Parallel in a non-test file, or a package imported, as before.
+        self.assertEqual(late(sub, src=TWO_SRC.replace("package hint\n", 'package hint\n\nimport "testing"\n')
+                              + "\nfunc par(t *testing.T) { t.Parallel() }\n"), every)
+        # A linkname anywhere in the package may reach testing's Parallel by another name.
+        linked = TWO_SRC.replace("package hint\n", 'package hint\n\nimport (\n\t"testing"\n\t_ "unsafe"\n)\n') + (
+            "\n//go:linkname par testing.(*T).Parallel\nfunc par(t *testing.T)\n")
+        self.assertEqual(late(sub, src=linked), every)
+        self.assertEqual(late(MOVE_TEST, src=linked), every)
+        # (d) a TestMain that only runs m.Run once, standard library calls around it, keeps the narrowing.
+        plain = sub.replace('\t"testing"\n', '\t"os"\n\t"testing"\n\t"time"\n') + (
+            '\nfunc TestMain(m *testing.M) {\n\tif z, err := time.LoadLocation("UTC"); err == nil {\n\t\ttime.Local = z\n'
+            '\t}\n\tos.Exit(m.Run())\n}\n')
+        self.assertEqual(late(plain), only)
+
     def test_a_declaration_of_a_cgo_file_never_moves(self):
         # #6385, from #6376: a cgo file's code binds its own preamble, so nothing moves out of one.
         # REQ: TOOL-mutgate-moved-lines-fu

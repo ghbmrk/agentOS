@@ -190,7 +190,7 @@ func (l *Link) Inbox() <-chan modem.SMS { return l.inbox }
 // usableLocked says the owner line can carry texts now, and opens an
 // outage when it cannot. Caller holds mu.
 func (l *Link) usableLocked(now time.Time) bool {
-	ok := l.state == bridgeproto.StateOK && now.Sub(l.seen) <= Silent
+	ok := l.okLocked(now)
 	if !ok && l.outage == nil {
 		from := now
 		if l.state == bridgeproto.StateOK { // silent: down since last heard
@@ -199,6 +199,21 @@ func (l *Link) usableLocked(now time.Time) bool {
 		l.outage = &Outage{From: from}
 	}
 	return ok
+}
+
+// okLocked says the owner line can carry texts at now. Caller holds mu.
+func (l *Link) okLocked(now time.Time) bool {
+	return l.state == bridgeproto.StateOK && now.Sub(l.seen) <= Silent
+}
+
+// Usable says the owner line can carry a text now, and opens no outage
+// and counts nothing. A sender holding a refused text asks it before
+// trying again, so its retries over an outage are not one more missed
+// text each (CH-12, #6292).
+func (l *Link) Usable() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.okLocked(l.cfg.Now())
 }
 
 // heardLocked notes the bridge spoke at now, and closes an outage the line
