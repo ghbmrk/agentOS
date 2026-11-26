@@ -1,6 +1,6 @@
 package provagent
 
-// REQ: CAP-11, CRED-5, CRED-7, ONB-3, OP-8, CRED-RS-2
+// REQ: ONB-3, CRED-RS-2
 
 import (
 	"context"
