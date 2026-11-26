@@ -18,7 +18,7 @@
                 has an `**Acceptance tests:**` line (or `## Acceptance tests` heading, `**Acceptance:**`) unless listed in tools/brief_acceptance_baseline.txt
                 (FIRST-PASS, #1818)
   all *.md      no `Trusted-core:` PR-body line outside the records (DECISIONS.md, decisions/, reviews/,
-                ASSUMPTIONS.md) and SPEC.md: tools/trusted_base.py reads only the committed
+                tools/ASSUMPTIONS.md) and SPEC.md: tools/trusted_base.py reads only the committed
                 `trusted-core #<PR> -- <decision ID>` line (#6404, DOC-trusted-core-line #6707)
 
 BOARD.md is generated from the work-item issues (tools/board.py), so its rows are checked there, not here.
@@ -241,7 +241,7 @@ def assumption_ids(root, files):
 
 BODY_WAIVER = "Trusted-core:"
 # Records keep past reasons; SPEC.md changes only through an L1 PR (#6523 drops its line).
-WAIVER_HISTORY = ("DECISIONS.md", "SPEC.md")
+WAIVER_HISTORY = ("DECISIONS.md", "SPEC.md", "tools/ASSUMPTIONS.md")  # KRN-2m-record-1 tells the history
 WAIVER_HISTORY_DIRS = ("decisions/", "reviews/")
 
 
@@ -249,8 +249,7 @@ def body_waivers(root, files):
     """A `Trusted-core:` line in a brief or rule file tells a builder to write a PR-body line the gate
     ignores, so the trusted-base run stays red and a reviewer can accept a waiver that does nothing (#6707)."""
     for name in files:
-        if name in WAIVER_HISTORY or name.startswith(WAIVER_HISTORY_DIRS) \
-                or pathlib.PurePosixPath(name).name == "ASSUMPTIONS.md":
+        if name in WAIVER_HISTORY or name.startswith(WAIVER_HISTORY_DIRS):
             continue
         for n, line in enumerate((root / name).read_text().splitlines(), 1):
             if BODY_WAIVER in line:

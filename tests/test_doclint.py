@@ -118,8 +118,9 @@ class LintTest(unittest.TestCase):
             "briefs/A-1.md": GOOD["briefs/A-1.md"] + "Add `trusted-core #<PR> -- D-7` to tools/trusted_base_reasons.txt.\n",
             "README.md": WITH_DECISIONS.replace("| [BOARD.md]", "| [SPEC.md](SPEC.md) |\n| [BOARD.md]"),
             "DECISIONS.md": line, "decisions/D-7.md": line, "SPEC.md": line,
-            "reviews/ux/README.md": line, "broker/x/ASSUMPTIONS.md": line}), [])
+            "reviews/ux/README.md": line, "tools/ASSUMPTIONS.md": line}), [])
         self.assertEqual(len(self.lint(**{"CLAUDE.md": GOOD["CLAUDE.md"] + line})), 1)
+        self.assertEqual(len(self.lint(**{"broker/x/ASSUMPTIONS.md": line})), 1)
 
     def test_a_record_or_allow_file_in_no_class_is_reported(self):
         # #6375 item 2: tools/record_merge.py's CLASSES lists every record and allow file; one outside it is named.
