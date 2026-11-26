@@ -159,6 +159,45 @@ class ProgramTest(unittest.TestCase):
         self.assertIn("(args->clone_flags & 0x10000) == 0", prog)  # threads share their process's key
         self.assertEqual(race_reads.kernel_dev(os.makedev(8, 1)), 8 << 20 | 1)
 
+    def test_the_hooks_and_controls_are_exactly_these(self):
+        # A hook or control dropped from either table would leave the suite green and the audit
+        # blind to that access, so both are pinned whole.
+        self.assertEqual(race_reads.HOOKS, (
+            ("o", "open", "security_file_open", "args->file->f_path.dentry"),
+            ("s", "stat", "security_inode_getattr", "args->path->dentry"),
+            ("l", "readlink", "security_inode_readlink", "args->dentry"),
+            ("f", "follow_link", "security_inode_follow_link", "args->dentry"),
+            ("h", "link", "security_inode_link", "args->old_dentry"),
+            ("r", "rename", "security_inode_rename", "args->old_dentry")))
+        d = ".race-reads-control"
+        self.assertEqual(race_reads.CONTROLS, {
+            ("o", "tools/race_reads.py"), ("s", "tools/race_reads.py"), ("l", f"{d}/link"), ("f", f"{d}/link"),
+            ("h", f"{d}/file"), ("r", f"{d}/hard")})
+        self.assertEqual({k for k, _ in race_reads.CONTROLS}, set(race_reads.KINDS))
+
+    def test_controls_make_one_access_of_each_kind(self):
+        # run()'s control accesses, as the calls that reach each hook, on a scratch root.
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "tools"))
+            pathlib.Path(root, race_reads.CONTROL).write_text("x\n")
+            os.makedirs(os.path.join(root, race_reads.CONTROL_LINK))  # a stale run's leftovers go first
+            j = lambda rel: os.path.join(root, rel)
+            calls = []
+            spy = lambda name, real: (lambda *a, **k: (calls.append((name, a[:2])), real(*a, **k))[1])
+            with unittest.mock.patch.object(race_reads.os, "stat", spy("stat", os.stat)), \
+                    unittest.mock.patch.object(race_reads.os, "readlink", spy("readlink", os.readlink)), \
+                    unittest.mock.patch.object(race_reads.os.path, "exists", spy("exists", os.path.exists)), \
+                    unittest.mock.patch.object(race_reads.os, "link", spy("link", os.link)), \
+                    unittest.mock.patch.object(race_reads.os, "rename", spy("rename", os.rename)), \
+                    unittest.mock.patch("builtins.open", spy("open", open)):
+                race_reads.controls(root)
+            for want in (("open", (j(race_reads.CONTROL), "rb")), ("stat", (j(race_reads.CONTROL),)),
+                         ("readlink", (j(race_reads.CONTROL_LINK),)), ("exists", (j(race_reads.CONTROL_LINK),)),
+                         ("link", (j(race_reads.CONTROL_FILE), j(race_reads.CONTROL_HARD))),
+                         ("rename", (j(race_reads.CONTROL_HARD), j(race_reads.CONTROL_DIR + "/moved")))):
+                self.assertIn(want, calls)
+            self.assertFalse(os.path.lexists(j(race_reads.CONTROL_DIR)))  # it leaves no trace in the tree
+
     def test_every_fail_closed_statement_is_in_the_program(self):
         # The program's text is what runs on the runner, where no test can attach it (mutgate does
         # not mutate it), so each statement that keeps the trace whole is pinned here, exactly.
