@@ -1,7 +1,8 @@
 """PREMERGE-records-merge (#6716): premerge reads the MUTANTS-EQUIVALENT records on the merge it releases.
 
-No requirement IDs: PLAN.md tooling, not SPEC.md behaviour. All data is synthetic, except the two replays of
-main's history (#6713, #6715), which read commits already on main.
+No requirement IDs: PLAN.md tooling, not SPEC.md behaviour. All data is synthetic. The replays of main's two breaks
+(#6713, #6715) are commands in #6717's body, not tests: a test reading this checkout's git store must run on ci.yml's
+records-only step (tests/records_audit.py), which builds no Go.
 """
 import contextlib
 import io
@@ -255,30 +256,6 @@ class CheckGate(unittest.TestCase):
         self.assertEqual((code, out.getvalue()), (1, "needs-records broker/p/MUTANTS-EQUIVALENT\n"))
         self.assertIn(PROBLEM, err.getvalue())
         rm.assert_called_once_with(".", "h", "main")
-
-
-class Replays(unittest.TestCase):
-    """Main's two breaks of 2026-11-26, replayed: each PR, read against the main it merged into, holds."""
-
-    def setUp(self):
-        for sha in ("85751e94", "a14e71c2"):
-            if subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=ROOT, capture_output=True).returncode:
-                self.skipTest("main's history is not in this clone (CI checks out with fetch-depth 0)")
-        # merge-tree writes objects, and CI runs the tests as a uid that cannot write this checkout's store: a shared
-        # clone borrows its objects and writes its own.
-        d = tempfile.TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        self.repo = pathlib.Path(d.name)
-        git(self.repo, "init", "-q")
-        (self.repo / ".git/objects/info/alternates").write_text(git(ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir") + "/objects\n")
-
-    def test_6640_records_on_a_main_holding_6561(self):
-        why, _ = premerge.records_merged(self.repo, "85751e94^2", "85751e94^1")
-        self.assertTrue(why.startswith("needs-records "), why)
-        self.assertIn("broker/clerk/plan/MUTANTS-EQUIVALENT", why.split())
-
-    def test_6561_check_on_a_main_holding_6606(self):
-        self.assertEqual(premerge.records_merged(self.repo, "a14e71c2^2", "a14e71c2^1"), ("needs-main-merge tools/mutgate.py", []))
 
 
 class Workflow(unittest.TestCase):
