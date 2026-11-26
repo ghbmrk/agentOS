@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
-	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
@@ -202,7 +201,7 @@ func (r *reopens) ReopenRoute(route, cause string) error {
 // CRED-5t: a route stopped for a cause that is not the owner's to lift is
 // not even asked to reopen.
 func TestSignedInAsksNoReopeningOfAnotherCause(t *testing.T) {
-	st := journalStops(t, &journal.MemStore{})
+	st := journalStops(t, &stopStore{})
 	if err := st.StopRoute("stub", StopUnswappable); err != nil {
 		t.Fatal(err)
 	}
