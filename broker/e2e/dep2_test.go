@@ -65,6 +65,10 @@ func checkHost(errorf func(string, ...any), where, raw string) {
 	if strings.HasPrefix(raw, "otpauth:") {
 		return // an authenticator-app label, not a network address
 	}
+	// Prose punctuation after a URL ends the sentence, not the host:
+	// "URIs like file://, vscode://" names no host, while
+	// "https://mirror.example.net/x," is still checked as that host.
+	raw = strings.TrimRight(raw, ",.;:!?")
 	host := raw
 	if u, err := url.Parse(raw); err == nil && u.Scheme != "" {
 		host = u.Hostname()
@@ -214,5 +218,23 @@ func TestProjectHostScanCatchesPlants(t *testing.T) {
 	ok := "package x\nimport _ \"github.com/ghbmrk/agentos/broker/journal\"\nvar u = \"http://127.0.0.1:18080/mcp\"\nvar s = \"agentos.slice\"\n"
 	if n := scan(ok); n != 0 {
 		t.Errorf("scan flags the module's import path, loopback or a unit name: %d", n)
+	}
+	hosts := func(text string) (n int) {
+		count := func(string, ...any) { n++ }
+		for _, u := range urlRe.FindAllString(text, -1) {
+			checkHost(count, "plant.json", u)
+		}
+		return n
+	}
+	for _, text := range []string{
+		"see https://mirror.example.net/x, then",
+		"from https://updates.agentos.org.",
+	} {
+		if hosts(text) == 0 {
+			t.Errorf("scan missed %q behind prose punctuation", text)
+		}
+	}
+	if n := hosts("Do not use URIs like file://, vscode://, or https:// for file links."); n != 0 {
+		t.Errorf("scan reads prose naming URI schemes as hosts: %d", n)
 	}
 }
