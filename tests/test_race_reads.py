@@ -153,11 +153,52 @@ class ProgramTest(unittest.TestCase):
         # argv is read from the new image's argument area, its length tested first.
         self.assertIn('$n == 23 && str(uptr($a + 0), 4) == "git" && str(uptr($a + 4), 7) == "status" && '
                       'str(uptr($a + 11), 12) == "--porcelain"', prog)
-        self.assertIn('curtask->real_parent->comm == "go"', prog)
+        self.assertIn('curtask->real_parent->comm == "go" && comm == "git"', prog)
         self.assertNotIn("sys_enter_execve", prog)  # it missed most of go's git execs on the runner
         self.assertIn('str(uptr($a + 7), 24) == "log.showsignature=false"', prog)
         self.assertIn("(args->clone_flags & 0x10000) == 0", prog)  # threads share their process's key
         self.assertEqual(race_reads.kernel_dev(os.makedev(8, 1)), 8 << 20 | 1)
+
+    def test_every_fail_closed_statement_is_in_the_program(self):
+        # The program's text is what runs on the runner, where no test can attach it (mutgate does
+        # not mutate it), so each statement that keeps the trace whole is pinned here, exactly.
+        prog = race_reads.program(1234, 5 << 20 | 6, 99)
+        stamp = " ||\n       ".join(f"({race_reads._argv_is(v)})" for v in race_reads.VCS_STAMP)
+        for block in (
+                'BEGIN { @tree[99] = 1; printf("START\\n"); }',
+                # every new process of the tree joins it, and an insert that does not fit says so
+                "tracepoint:task:task_newtask /@tree[pid] && (args->clone_flags & 0x10000) == 0/ {\n"
+                "  @tree[args->pid] = 1;\n"
+                '  if (@tree[args->pid] == 0) { printf("FULL\\n"); }\n}',
+                # each exec sets the stamp mark or clears it, so an exemption never outlives its image
+                "tracepoint:sched:sched_process_exec /@tree[pid]/ {\n"
+                "  $a = curtask->mm->arg_start;\n"
+                "  $n = curtask->mm->arg_end - $a;\n"
+                '  if (curtask->real_parent->comm == "go" && comm == "git" &&\n'
+                f"      ({stamp})) {{\n"
+                "    @stamp[pid] = 1;\n"
+                "  } else {\n"
+                "    delete(@stamp[pid]);\n"
+                "  }\n"
+                '  printf("X %d %d %s %d %s\\n", pid, @stamp[pid], curtask->real_parent->comm, $n, str(args->filename));\n}',
+                # a process's exit clears its mark, so a reused pid starts unmarked
+                "tracepoint:sched:sched_process_exit /pid == tid/ { delete(@stamp[pid]); }",
+                'END { clear(@tree); clear(@stamp); printf("END\\n"); }'):
+            with self.subTest(block=block[:40]):
+                self.assertIn(block, prog)
+        n, levels = len(race_reads.HOOKS), race_reads.LEVELS
+        for i in range(levels):
+            self.assertEqual(prog.count(f"  $d{i + 1} = $d{i}->d_parent;\n"), n)
+            self.assertEqual(prog.count(f"if ($d{i + 1}->d_inode->i_ino == 1234 && $d{i + 1}->d_sb->s_dev == {5 << 20 | 6}) "
+                                        f"{{ $k = {i + 1}; }}"), n)
+            self.assertEqual(prog.count(f"if ($k == {i + 1}) {{ $top = $d{i}; }}"), n)
+            self.assertEqual(prog.count(f'if ($k > {i}) {{ printf("C %d {i} %s\\n", tid, '
+                                        f'str($d{i}->d_name.name, {race_reads.NAMELEN})); }}'), n)
+        for line in ("  $k = 0;", "  if ($k > 0) {", "    $top = $d0;",
+                     f'    if (str($top->d_name.name, {race_reads.NAMELEN}) != "broker") {{'):
+            self.assertEqual(prog.count(line + "\n"), n, line)
+        self.assertEqual(prog.count("fentry:"), n)
+        self.assertEqual(prog.count("tracepoint:"), 3)
 
     @unittest.skipUnless(shutil.which("bpftrace") and os.geteuid() == 0, "needs bpftrace, as root")
     def test_a_real_trace(self):

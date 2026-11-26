@@ -40,19 +40,25 @@ import ci_scope  # noqa: E402
 # The hooks traced, by the kind letter a trace line carries, with the dentry each names. Every
 # open goes through security_file_open (do_dentry_open: open, openat2, io_uring, exec's own open,
 # an overlay's open of its real file); every stat through security_inode_getattr (vfs_getattr);
-# readlink and each symlink a path walk follows through the other two. They are called across
+# readlink and each symlink a path walk follows through the next two; a hard link or rename of a
+# file, which could give it a name outside the workspace that later reads use, through the last
+# two (their source dentry). They are called across
 # compilation units, so unlike vfs_getattr (which fentry saw no call of on the runner) no caller
 # inlines them. A kernel probe makes no ptrace stop: strace's stops doubled broker-race's time.
 HOOKS = (("o", "open", "security_file_open", "args->file->f_path.dentry"),
          ("s", "stat", "security_inode_getattr", "args->path->dentry"),
          ("l", "readlink", "security_inode_readlink", "args->dentry"),
-         ("f", "follow_link", "security_inode_follow_link", "args->dentry"))
+         ("f", "follow_link", "security_inode_follow_link", "args->dentry"),
+         ("h", "link", "security_inode_link", "args->old_dentry"),
+         ("r", "rename", "security_inode_rename", "args->old_dentry"))
 KINDS = {k: name for k, name, _, _ in HOOKS}
 # run() makes one access of each kind once the tracer is attached: the audit's proof that each
-# hook fires. The link is untracked and made fresh; the audit needs only its name.
+# hook fires. The control directory is untracked and made fresh; the audit needs only its names.
 CONTROL = "tools/race_reads.py"
-CONTROL_LINK = ".race-reads-control/link"
-CONTROLS = {("o", CONTROL), ("s", CONTROL), ("l", CONTROL_LINK), ("f", CONTROL_LINK)}
+CONTROL_DIR = ".race-reads-control"
+CONTROL_LINK, CONTROL_FILE, CONTROL_HARD = (f"{CONTROL_DIR}/{n}" for n in ("link", "file", "hard"))
+CONTROLS = {("o", CONTROL), ("s", CONTROL), ("l", CONTROL_LINK), ("f", CONTROL_LINK),
+            ("h", CONTROL_FILE), ("r", CONTROL_HARD)}
 LEVELS = 16  # how far up from a file the probe looks for root; deeper tracked files fail the audit
 NAMELEN = 64  # bpftrace's string length for one path part; a part this long may be cut short
 RB_PAGES = 2048  # each CPU's output buffer, 8 MiB: a lost event fails the trace
@@ -118,7 +124,7 @@ tracepoint:task:task_newtask /@tree[pid] && (args->clone_flags & 0x10000) == 0/ 
 tracepoint:sched:sched_process_exec /@tree[pid]/ {{
   $a = curtask->mm->arg_start;
   $n = curtask->mm->arg_end - $a;
-  if (curtask->real_parent->comm == "go" &&
+  if (curtask->real_parent->comm == "go" && comm == "git" &&
       ({stamp})) {{
     @stamp[pid] = 1;
   }} else {{
@@ -253,15 +259,19 @@ def controls(root):
     with open(os.path.join(root, CONTROL), "rb") as f:
         f.read(1)
     os.stat(os.path.join(root, CONTROL))
-    link = os.path.join(root, CONTROL_LINK)
-    shutil.rmtree(os.path.dirname(link), ignore_errors=True)
-    os.mkdir(os.path.dirname(link))
+    d = os.path.join(root, CONTROL_DIR)
+    shutil.rmtree(d, ignore_errors=True)
+    os.mkdir(d)
     try:
+        link = os.path.join(root, CONTROL_LINK)
         os.symlink("missing", link)
         os.readlink(link)
         os.path.exists(link)  # follows the link to its missing target
+        open(os.path.join(root, CONTROL_FILE), "wb").close()
+        os.link(os.path.join(root, CONTROL_FILE), os.path.join(root, CONTROL_HARD))
+        os.rename(os.path.join(root, CONTROL_HARD), os.path.join(d, "moved"))
     finally:
-        shutil.rmtree(os.path.dirname(link), ignore_errors=True)
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def run(out, root, cmd, wait=120):

@@ -468,9 +468,9 @@ jobs:
         # The TPM tests fail rather than skip if swtpm is missing. kernel/sim takes minutes
         # under -race, so go test's default 10-minute timeout flaked a slow runner (#2623);
         # the job's own timeout-minutes still bounds the step.
-        # CI-race-scope: a bpftrace program on the kernel's LSM hooks logs every open, exec, stat and
-        # link read of a file outside broker/ by the tests and all they run; the read audit below
-        # checks it against ci_scope.py's RACE_READ. -buildvcs=false: go's VCS stamp (on binaries the
+        # CI-race-scope: a bpftrace program on the kernel's LSM hooks logs every open, exec, stat,
+        # link read, hard link and rename of a file outside broker/ by the tests and all they run;
+        # the read audit below checks it against ci_scope.py's RACE_READ. -buildvcs=false: go's VCS stamp (on binaries the
         # tests build) runs git status, which walks the whole tree.
         env:
           AGENTOS_REQUIRE_SWTPM: "1"
@@ -497,9 +497,6 @@ jobs:
           err=0
           python3 -I ../tools/race_reads.py audit --root "$GITHUB_WORKSPACE" --reads-out "$RUNNER_TEMP/reads.txt" \
             "$RUNNER_TEMP/reads-race.txt" "$RUNNER_TEMP/reads-vision.txt" || err=$?
-          # Each git exec: whether it was marked as the VCS stamp, its parent, and its argv's length.
-          grep -hE '^X [0-9]+ [01] [^ ]+ [0-9]+ [^ ]*/git$' "$RUNNER_TEMP/reads-race.txt" "$RUNNER_TEMP/reads-vision.txt" \
-            | sed -E 's/^([AX]) [0-9]+ /\1 /' | sort | uniq -c | sort -rn | head -40 || true
           { echo "### Tracked files outside broker/ the tests read, by directory"; echo '```'
             grep -v '^broker/' "$RUNNER_TEMP/reads.txt" | cut -d/ -f1-2 | sort | uniq -c || true; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit "$err"
