@@ -32,6 +32,7 @@ func recoveryEdges(t *testing.T) {
 	t.Run("SetupDoneNamesNoStep", setupDoneNamesNoStep)
 	t.Run("CodesUnavailableNamesItsCause", codesUnavailableNamesItsCause)
 	t.Run("FormBytesRefusalHoldsNoBytes", formBytesRefusalHoldsNoBytes)
+	survivorKills(t)
 }
 
 // ctxRecovery records the context each begin, rotate and lost-state call
