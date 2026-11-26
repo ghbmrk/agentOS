@@ -270,6 +270,7 @@ func TestRecoveryKeyWithCRLFOpensTheSlot(t *testing.T) {
 	if !strings.Contains(string(body), "group 1 of the recovery key looks mistyped") || r.srv.recovery.p != nil {
 		t.Fatal("a mistyped key started a replacement")
 	}
+	recoveryEdges(t)
 }
 
 // Each refusal: a wrong tap, busy and no answer keep the replacement for
