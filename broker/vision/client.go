@@ -66,6 +66,44 @@ func (c Client) Sound(ctx context.Context, pcm []byte) ([]Sound, error) {
 // call sends one request and returns its checked reply, an error reply as
 // its *Error, and anything else that goes wrong as Unavailable.
 func (c Client) call(ctx context.Context, req Request, payload []byte) (Reply, error) {
+	return c.callWith(ctx, req, payload, seams{})
+}
+
+// seams are the points a test watches or replaces in one call: the
+// buffer a reply is read into, each template as it is decoded, the line
+// the strict json.Decoder copies, and the unmarshal that reads the
+// template in place. A nil field is the real one, so the zero value is
+// production and no state is shared between calls.
+type seams struct {
+	buf         func() []byte
+	decoded     func([]byte)
+	strictInput func([]byte) io.Reader
+	unmarshal   func([]byte, any) error
+}
+
+func (s seams) newBuf() []byte {
+	if s.buf != nil {
+		return s.buf()
+	}
+	return replyBuf()
+}
+
+func (s seams) strict(b []byte) io.Reader {
+	if s.strictInput != nil {
+		return s.strictInput(b)
+	}
+	return bytes.NewReader(b)
+}
+
+func (s seams) unmarshalLine(b []byte, v any) error {
+	if s.unmarshal != nil {
+		return s.unmarshal(b, v)
+	}
+	return json.Unmarshal(b, v)
+}
+
+// callWith is call with s's seams.
+func (c Client) callWith(ctx context.Context, req Request, payload []byte, s seams) (Reply, error) {
 	d := c.Timeout
 	if d <= 0 {
 		d = DefaultTimeout
@@ -99,7 +137,7 @@ func (c Client) call(ctx context.Context, req Request, payload []byte) (Reply, e
 	// read straight into one buffer this call owns and zeroes on every
 	// path: no bufio.Reader keeps a window of it, and no append growth
 	// leaves an earlier copy behind.
-	buf := replyBuf()
+	buf := s.newBuf()
 	defer clear(buf)
 	line, err := readLine(conn, buf)
 	if err != nil {
@@ -113,12 +151,12 @@ func (c Client) call(ctx context.Context, req Request, payload []byte) (Reply, e
 		}
 		return Reply{}, unavailable("no complete reply")
 	}
-	return parseReply(req, line, c.Enrolled)
+	return parseReplyWith(req, line, c.Enrolled, s)
 }
 
 // replyBuf returns the buffer one call reads its reply into: a line at
-// its bound and its newline. A var so tests can see it is zeroed.
-var replyBuf = func() []byte { return make([]byte, MaxReplyLine+1) }
+// its bound and its newline.
+func replyBuf() []byte { return make([]byte, MaxReplyLine+1) }
 
 // readLine reads one reply line from r into buf and returns it without
 // its newline, a slice of buf. A line that does not fit is
@@ -156,17 +194,9 @@ func (*skipValue) UnmarshalJSON([]byte) error { return nil }
 type wireTemplate struct {
 	v   []byte
 	raw []byte
+	// decoded, if set, sees each template as it is decoded.
+	decoded func([]byte)
 }
-
-// decoded sees each template as it is decoded, strictInput the line a
-// json.Decoder copies, and unmarshal reads the template in place. Vars so
-// tests can check that every template is zeroed once refused, that no
-// decoder sees its text, and that an unmarshal reading a copy fails closed.
-var (
-	decoded     = func([]byte) {}
-	strictInput = func(b []byte) io.Reader { return bytes.NewReader(b) }
-	unmarshal   = json.Unmarshal
-)
 
 func (t *wireTemplate) UnmarshalJSON(b []byte) error {
 	if t.raw != nil {
@@ -183,7 +213,9 @@ func (t *wireTemplate) UnmarshalJSON(b []byte) error {
 	v := make([]byte, base64.StdEncoding.DecodedLen(len(s)))
 	n, err := base64.StdEncoding.Decode(v, s)
 	t.v = v[:n]
-	decoded(v)
+	if t.decoded != nil {
+		t.decoded(v)
+	}
 	return err
 }
 
@@ -193,21 +225,30 @@ func (t *wireTemplate) UnmarshalJSON(b []byte) error {
 // the line with the template's text left out, since a json.Decoder
 // copies its input into a buffer nothing zeroes. On an error the
 // template, if one was decoded, is zeroed.
-func decodeReply(line []byte) (_ Reply, err error) {
+func decodeReply(line []byte) (Reply, error) { return decodeReplyWith(line, seams{}) }
+
+// decodeReplyWith is decodeReply with s's seams.
+func decodeReplyWith(line []byte, s seams) (_ Reply, err error) {
 	// An object only: null would decode as an empty reply.
 	if t := bytes.TrimLeft(line, " \t\r"); len(t) == 0 || t[0] != '{' {
 		return Reply{}, unavailable("reply is not an object")
+	}
+	// A valid object followed by more is its own fault, told apart from
+	// a malformed reply before json.Unmarshal refuses both alike.
+	if trailing(line) {
+		return Reply{}, unavailable("data after the reply")
 	}
 	// json.Unmarshal reads the line in place: no copy of it is made.
 	var tw struct {
 		Template wireTemplate `json:"template"`
 	}
+	tw.Template.decoded = s.decoded
 	defer func() {
 		if err != nil {
 			clear(tw.Template.v[:cap(tw.Template.v)])
 		}
 	}()
-	if err := unmarshal(line, &tw); err != nil {
+	if err := s.unmarshalLine(line, &tw); err != nil {
 		return Reply{}, unavailable("malformed reply")
 	}
 	blank := line
@@ -222,8 +263,8 @@ func decodeReply(line []byte) (_ Reply, err error) {
 		blank = append(blank, bytes.Repeat([]byte("A"), len(raw)-2)...)
 		blank = append(blank, line[at+len(raw)-1:]...)
 	}
-	// json.Unmarshal above refused any data after the reply.
-	dec := json.NewDecoder(strictInput(blank))
+	// trailing and json.Unmarshal above refused any data after the reply.
+	dec := json.NewDecoder(s.strict(blank))
 	dec.DisallowUnknownFields()
 	var w struct {
 		Reply
@@ -236,6 +277,38 @@ func decodeReply(line []byte) (_ Reply, err error) {
 	r := w.Reply
 	r.Template = tw.Template.v
 	return r, nil
+}
+
+// trailing reports whether line is one valid JSON object followed by
+// anything but white space. It scans the line in place and copies none
+// of it: the object ends where its depth, outside strings, returns to
+// zero.
+func trailing(line []byte) bool {
+	depth, inString, escaped := 0, false, false
+	for i, c := range line {
+		switch {
+		case inString:
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+		case c == '"':
+			inString = true
+		case c == '{' || c == '[':
+			depth++
+		case c == '}' || c == ']':
+			depth--
+			if depth == 0 {
+				end := i + 1
+				return len(bytes.TrimLeft(line[end:], " \t\r\n")) > 0 && json.Valid(line[:end])
+			}
+		}
+	}
+	return false
 }
 
 // offsetIn returns where raw starts in line, if raw is a non-empty slice
@@ -256,7 +329,12 @@ func offsetIn(line, raw []byte) (int, bool) {
 // Unavailable. A refused reply's template is zeroed, whichever check
 // refused it.
 func parseReply(req Request, line []byte, enrolled func(string) bool) (Reply, error) {
-	r, err := decodeReply(line)
+	return parseReplyWith(req, line, enrolled, seams{})
+}
+
+// parseReplyWith is parseReply with s's seams.
+func parseReplyWith(req Request, line []byte, enrolled func(string) bool, s seams) (Reply, error) {
+	r, err := decodeReplyWith(line, s)
 	if err != nil {
 		return Reply{}, err
 	}
