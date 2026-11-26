@@ -22,6 +22,13 @@ chatgpt_base_url = "http://127.0.0.1:18432/backend-api/"
 # model G1's provider_run sends (ASSUMPTIONS C19, #1396). A pin bump re-reads it there.
 model = "gpt-6.1-sol"
 
+# The model's metadata is pinned too: unset, 0.162.1 fetches the catalog from the provider at every
+# start, and the entry for the model decides multi-agent v2 (the collaboration tools: spawn_agent,
+# send_message and the rest), which no [features] key turns off. The image's catalog is the bundled
+# entry for the pinned model with no multi-agent version, so the CLI declares only the tools the
+# plan clerk allows and makes no /models request (ASSUMPTIONS B2-21-C22, #2111).
+model_catalog_json = "/etc/codex/model_catalog.json"
+
 # Hosted tools off: tools OpenAI runs on its side when the request asks for them ride inside the
 # one declared responses request, so the endpoint list cannot stop them. #1014's request-body
 # check is the enforcement; this keeps a correct CLI from tripping it. MCP servers are blocked by
