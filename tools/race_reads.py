@@ -450,7 +450,7 @@ def with_stats(out, root, sudo, body, wait=120):
         print("race_reads: bpftrace is not installed", file=sys.stderr)
         return 2
     with open(out, "wb") as f:
-        tracer = subprocess.Popen([*sudo, "env", f"BPFTRACE_STRLEN={STRLEN}", bpftrace, "-e", stats_program(root)],
+        tracer = subprocess.Popen([*sudo, "env", f"BPFTRACE_MAX_STRLEN={STRLEN}", bpftrace, "-e", stats_program(root)],
                                   stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
     try:
         deadline = time.monotonic() + wait
@@ -459,7 +459,9 @@ def with_stats(out, root, sudo, body, wait=120):
                 if b"START\n" in f.read():
                     break
             if tracer.poll() is not None or time.monotonic() > deadline:
-                print(f"race_reads: the stat tracer did not start (see {out})", file=sys.stderr)
+                with open(out, "rb") as f:
+                    said = f.read()[-4000:].decode("utf-8", "replace")
+                print(f"race_reads: the stat tracer did not start; it said:\n{said}", file=sys.stderr)
                 return 2
             time.sleep(0.2)
         os.stat(os.path.join(root, STAT_CONTROL))
