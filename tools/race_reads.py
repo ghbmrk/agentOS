@@ -82,7 +82,7 @@ def program(ino, dev, seed):
     pid `seed`. The probe walks d_parent from the file to root and prints the path's parts, leaf
     first, one line each ("C tid i name"), then "E kind tid pid parts"; the dentry walk gives the
     file's place in its filesystem, so a bind mount or a sandbox's root does not hide it. Each exec
-    in the tree prints "X pid stamped filename", and each a go process or a git command makes "A pid comm argv...". Go's VCS-stamp git (VCS_STAMP) prints nothing."""
+    in the tree prints "X pid stamped parent-comm filename", and each a go process makes "A pid argv...". Go's VCS-stamp git (VCS_STAMP) prints nothing."""
     ino, dev, seed = int(ino), int(dev), int(seed)
     walk = "\n".join(f"  $d{i + 1} = $d{i}->d_parent;" for i in range(LEVELS))
     find = "\n  else ".join(f"if ($d{i}->d_inode->i_ino == {ino} && $d{i}->d_sb->s_dev == {dev}) {{ $k = {i}; }}"
@@ -112,9 +112,8 @@ tracepoint:task:task_newtask /@tree[pid] && (args->clone_flags & 0x10000) == 0/ 
   @tree[args->pid] = 1;
   if (@tree[args->pid] == 0) {{ printf("FULL\\n"); }}
 }}
-tracepoint:syscalls:sys_enter_execve /@tree[pid] && (comm == "go" || str(args->argv[0], 32) == "git")/ {{
-  printf("A %d %s %s %s %s %s %s\\n", pid, comm, str(args->argv[0], 32), str(args->argv[1], 32), str(args->argv[2], 32),
-         str(args->argv[3], 32), str(args->argv[4], 32));
+tracepoint:syscalls:sys_enter_execve /@tree[pid] && comm == "go"/ {{
+  printf("A %d %s %s %s\\n", pid, str(args->argv[0], 32), str(args->argv[1], 32), str(args->argv[2], 32));
 }}
 tracepoint:syscalls:sys_enter_execve /@tree[pid]/ {{
   if (comm == "go" &&
@@ -124,7 +123,9 @@ tracepoint:syscalls:sys_enter_execve /@tree[pid]/ {{
     delete(@stamp[pid]);
   }}
 }}
-tracepoint:sched:sched_process_exec /@tree[pid]/ {{ printf("X %d %d %s\\n", pid, @stamp[pid], str(args->filename)); }}
+tracepoint:sched:sched_process_exec /@tree[pid]/ {{
+  printf("X %d %d %s %s\\n", pid, @stamp[pid], curtask->real_parent->comm, str(args->filename));
+}}
 tracepoint:sched:sched_process_exit /pid == tid/ {{ delete(@stamp[pid]); }}{probes}
 END {{ clear(@tree); clear(@stamp); printf("END\\n"); }}
 """
@@ -204,8 +205,8 @@ def events(lines):
                 yield "problem", f"trace: a path part may be cut short at {NAMELEN} bytes: {got}"
             else:
                 yield "access", f[1], "/".join(got[i] for i in reversed(range(k)))
-        elif line.startswith("X ") and len(f := line.split(" ", 3)) == 4 and f[1].isdigit() and f[2] in ("0", "1"):
-            yield "exec", f[3]
+        elif line.startswith("X ") and len(f := line.split(" ", 4)) == 5 and f[1].isdigit() and f[2] in ("0", "1"):
+            yield "exec", f[4]
         elif line.startswith("A ") and line[2:].split(" ", 1)[0].isdigit():
             continue  # the argv a go process execs, for the record (VCS_STAMP marks at it)
         elif line == "FULL":

@@ -498,7 +498,7 @@ jobs:
           python3 -I ../tools/race_reads.py audit --root "$GITHUB_WORKSPACE" --reads-out "$RUNNER_TEMP/reads.txt" \
             "$RUNNER_TEMP/reads-race.txt" "$RUNNER_TEMP/reads-vision.txt" || err=$?
           # The git commands go processes ran, and whether each exec was marked as the VCS stamp.
-          grep -hE '^A [0-9]+ [^ ]+ [^ ]*git |^X [0-9]+ [01] [^ ]*/git$' "$RUNNER_TEMP/reads-race.txt" "$RUNNER_TEMP/reads-vision.txt" \
+          grep -hE '^A [0-9]+ [^ ]*git |^X [0-9]+ [01] [^ ]+ [^ ]*/git$' "$RUNNER_TEMP/reads-race.txt" "$RUNNER_TEMP/reads-vision.txt" \
             | sed -E 's/^([AX]) [0-9]+ /\1 /' | sort | uniq -c | sort -rn | head -40 || true
           { echo "### Tracked files outside broker/ the tests read, by directory"; echo '```'
             grep -v '^broker/' "$RUNNER_TEMP/reads.txt" | cut -d/ -f1-2 | sort | uniq -c || true; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
