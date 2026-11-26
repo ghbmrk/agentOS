@@ -26,6 +26,7 @@ import (
 	"io"
 	"net"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -637,6 +638,10 @@ const (
 	ClassLabel = kernel.ClassLabel // the class of a subject's name
 )
 
+// KindList says counts by class in the kernel's household words, as its
+// Forget ask does, for the owner side's texts to match it (#5378).
+func KindList(classes map[string]int) string { return kernel.KindList(classes) }
+
 var (
 	ErrContentClosed = kernel.ErrContentClosed
 	ErrSubject       = kernel.ErrSubject
@@ -666,7 +671,13 @@ func contentTyped(err error) error {
 // Named is the live subjects label reads as: those found, and those whose
 // labels could not be read (kernel.Named). A blank label is
 // kernel.ErrLabel; before the kernel opens content, kernel.ErrContentClosed.
+// A label that is not valid UTF-8 is kernel.ErrLabel here, with nothing
+// sent: JSON would carry it as U+FFFD and match a label the owner did not
+// type (LOG-4).
 func (o Owner) Named(ctx context.Context, label string) (found, unread []string, err error) {
+	if !utf8.ValidString(label) {
+		return nil, nil, kernel.ErrLabel
+	}
 	var r struct {
 		Found  []string `json:"found"`
 		Unread []string `json:"unread"`

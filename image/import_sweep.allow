@@ -129,7 +129,7 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 # spelt), or "*" where they are not counted (#5341). The SHA-256 keys an entry to the package version
 # whose source was read: an update that keeps the counts but changes where a name comes from still fails
 # (#5861). Each file matches one entry; read_allow refuses a malformed, empty or repeated entry.
-# AES-GCM-SIV has no OID or NID in OpenSSL 3.5.7, so it is selected only by one of the names
+# AES-GCM-SIV has no OID or NID in OpenSSL 3.5.9, so it is selected only by one of the names
 # AES-128-GCM-SIV, AES-192-GCM-SIV or AES-256-GCM-SIV (or a MAC or KDF "cipher" parameter, which has to
 # spell one; CMAC, GMAC, KBKDF and CTR-DRBG refuse it by mode, and KRB5KDF's callers are counted).
 # EVP_get_cipherbyname cannot return it at all: it returns only the legacy method table's ciphers
@@ -164,11 +164,11 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 
 # OpenSSL's loader_attic engine: both fetches are of the fixed name "RC4" (crypto/pem/pvkfmt.c, built
 # into it); nothing on the box loads engines.
-/usr/lib/x86_64-linux-gnu/engines-3/loader_attic.so sha256=2c99266b31bfc02d011955db1600bd36146554cd6970d3cbfe46011e11014c83 EVP_CIPHER_fetch=2
+/usr/lib/x86_64-linux-gnu/engines-3/loader_attic.so sha256=6f3f7a2b43f973bb6ef86f4e52fbecffd36702bd7c8938e86f8e55edde88050c EVP_CIPHER_fetch=2
 # The legacy provider: its one fetch and one EVP_get_cipherbyname are providers/common/provider_util.c
 # ossl_prov_cipher_load_from_params, for an algorithm's "cipher" parameter; none of legacy's algorithms
 # (old digests and ciphers, PBKDF1, PVKKDF) takes one.
-/usr/lib/x86_64-linux-gnu/ossl-modules/legacy.so sha256=533bb6758a00a87a2d7835bcd3ebca58e0def2c1096ec582dea180adceeb7404 EVP_CIPHER_fetch=1 EVP_get_cipherbyname=1
+/usr/lib/x86_64-linux-gnu/ossl-modules/legacy.so sha256=47af7436924d44b49719792780eaee3c472df720908cb969f00c940c219cba45 EVP_CIPHER_fetch=1 EVP_get_cipherbyname=1
 
 # The openclaw guest's node (nodejs.org v24.22.2) links its own OpenSSL statically. That copy is not
 # libssl3t64 and is outside these records; #5853 checks it against the same advisories.
@@ -180,3 +180,35 @@ via /usr/lib/x86_64-linux-gnu/libpopt.so.0.*
 # version, and image.yml runs on a change to it, so a version bump meets these digests in its own PR.
 /usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex sha256=628e35487d888a28f0427fc37501da529dd3d81fcbad7a2c3421c1e8670d92e1 GCM-SIV=3 KRB5KDF=6
 /usr/lib/agentos/images/codex/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host sha256=ec71830690a7c0024916ee0c99fbdc635bc6e747ff665ea4f03a8389bbcb6b30 GCM-SIV=3 KRB5KDF=6
+
+[quic]
+# The files of the built image (main tree and initrds) that may import OpenSSL's QUIC entry points
+# (OSSL_QUIC_client_method, OSSL_QUIC_client_thread_method, OSSL_QUIC_server_method, SSL_new_listener), or
+# import dlsym or dlvsym and hold one's name (#6671): one glob per line. The openssl QUIC records in
+# assurance/vulncheck.json (DEBIAN-CVE-2026-88822, -95691, -124709, -107494 and -84785) accept their
+# advisories because nothing on the box reaches OpenSSL's QUIC stack, so a file no entry accepts fails the
+# step, and so does an entry that accepts no file. libssl defines the names and is not counted.
+
+# The openssl CLI, whose QUIC use is s_client -quic (apps/s_client.c, 3.5.9); nothing on the box runs
+# s_client. It is also the sweep's control that the QUIC scan still reads, as an entry accepting no file
+# fails.
+/usr/bin/openssl
+
+[dgram]
+# The files of the built image (main tree and initrds) that may import OpenSSL's datagram BIO constructors
+# (BIO_s_datagram, BIO_new_dgram, BIO_s_datagram_sctp, BIO_new_dgram_sctp, BIO_s_dgram_pair,
+# BIO_new_bio_dgram_pair) or its connect BIO's (BIO_s_connect, BIO_new_connect, BIO_new_ssl_connect,
+# BIO_new_buffer_ssl_connect), which makes a datagram BIO when set to SOCK_DGRAM and hands it out, or
+# import dlsym or dlvsym and hold one's name (#6671, L3 7157966663 and 7158175373). The
+# DEBIAN-CVE-2026-88822 records' flaw is the datagram BIO's peer detection (BIO_dgram_detect_peer_addr),
+# which a file can ask of any datagram BIO it holds, QUIC or not. As in [quic], a file no entry accepts
+# fails the step, and so does an entry that accepts no file. libcrypto and libssl's definitions are not
+# counted.
+
+# The openssl CLI: every datagram BIO it makes, its own or a connect BIO's, can reach the peer detection,
+# and nothing on the box runs it with a network subcommand.
+/usr/bin/openssl
+# libssl makes a datagram BIO only in fd_method for a QUIC object (SSL_set_fd, SSL_set_rfd, SSL_set_wfd;
+# ssl/ssl_lib.c, read at 3.5.4), so it reaches the peer detection only for a caller [quic] holds. Its
+# BIO_new_ssl_connect (ssl/bio_ssl.c) builds a connect BIO for its caller, who is counted as importing it.
+/usr/lib/x86_64-linux-gnu/libssl.so.3

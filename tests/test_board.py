@@ -308,6 +308,19 @@ class TransitionTest(unittest.TestCase):
         for prev, new, pr in illegal:
             self.assertIsNotNone(board.transition_problem(prev, new, pr), (prev, new, pr))
 
+    def test_only_an_event_touching_merged_can_fail(self):
+        # CI-issue-runs-coalesce: board.yml runs the transition job only when the event's label is
+        # state:merged or the issue holds it at the event; every other state event is skipped and takes
+        # no runner. That filter is exact only while no other edge can fail, which this pins.
+        others = [s for s in STATES if s != "merged"]
+        for s in others:
+            for extra in [None, *others]:
+                held = [f"state:{x}" for x in {s, extra} if x]
+                for action in ("labeled", "unlabeled"):
+                    now = held if action == "labeled" else [h for h in held if h != f"state:{s}"]
+                    self.assertIsNone(board.report_transition(self.fetcher(now, []), "o/r", 7, f"state:{s}", action),
+                                      (s, extra, action))
+
     def fetcher(self, held, prs, title="W-3: fix", comments=(), calls=None, search=None):
         item = {"number": 7, "title": title, "labels": [{"name": n} for n in ["work-item", *held]]}
         calls = [] if calls is None else calls
@@ -629,6 +642,81 @@ class IntakeCommentTest(unittest.TestCase):
         self.assertEqual([c[:2] for c in self.run_intake(300, comments=[stale])],
                          [("POST", "/repos/o/r/issues/300/comments")])
 
+    def run_sweep(self, number, items, comments, held=(), touched=(), runs=("2026-11-23T17:00:00Z",), seen=None):
+        """board.py intake --sweep with `comments` per issue, the search answering `held`, the REST
+        list since the last sweep answering `touched`, and `runs` the successful intake runs' times."""
+        calls = []
+        seen = [] if seen is None else seen
+
+        def fetch(path, method="GET", payload=None):
+            if method != "GET":
+                calls.append((method, path, payload and payload["body"]))
+                return {}
+            m = re.fullmatch(r"/repos/o/r/issues/(\d+)/comments", path)
+            if m:
+                return [dict(c) for c in comments.get(int(m.group(1)), [])]
+            if path == f"/repos/o/r/issues?state=open&labels={board.MARKER}":
+                return items
+            if path.startswith("/repos/o/r/issues?state=all&since="):
+                seen.append(path.split("since=", 1)[1])
+                return [{"number": n} for n in touched] + [{"number": 998, "pull_request": {}}]
+            if path == "/repos/o/r/actions/workflows/intake.yml/runs?status=success":
+                return {"workflow_runs": [{"created_at": t} for t in runs]}
+            if path.startswith("/search/issues?q="):
+                self.assertIn("in%3Acomments", path)
+                self.assertIn(board.urllib.parse.quote(f'"{board.INTAKE_PHRASE}"', safe=""), path)
+                return {"items": [{"number": n} for n in held] + [{"number": 999, "pull_request": {}}]}
+            raise AssertionError(path)
+        with redirect_stdout(io.StringIO()):
+            code = board.main(["intake", "--repo", "o/r", "--issue", str(number), "--sweep"],
+                              read=lambda: BOARD + board.GENERATED + "\n", fetch=fetch)
+        self.assertEqual(code, 0)
+        return calls
+
+    def test_a_fixed_issue_the_search_has_not_indexed_is_cleared(self):
+        # L3 on #6623: run A comments on X; X is fixed (run B queued); an event on Y queues C, which
+        # replaces B; C runs before the search index holds A's comment. X was updated after the last
+        # finished sweep, so the REST list since then names it and C clears the false comment.
+        clean = opened(issues())
+        x, y = clean[0]["number"], clean[1]["number"]
+        first = board.intake_comment(["old"])
+        self.assertEqual(self.run_sweep(y, clean, {x: [self.bot(first, id=71)]}, held=[], touched=[x, y]),
+                         [("DELETE", "/repos/o/r/issues/comments/71", None)])
+
+    def test_the_window_starts_at_the_newest_finished_sweep(self):
+        # The bound is the newest successful run's creation less SKEW; with none, INTAKE_FALLBACK back.
+        clean = opened(issues())
+        seen = []
+        self.run_sweep(clean[0]["number"], clean, {}, runs=("2026-11-23T16:00:00Z", "2026-11-23T17:00:00Z"), seen=seen)
+        self.assertEqual(seen, ["2026-11-23T16:55:00Z"])
+        self.assertEqual(board.sweep_since(lambda p: {"workflow_runs": []}, "o/r", board._epoch("2026-11-23T17:00:00Z")),
+                         "2026-11-22T15:55:00Z")
+
+    def test_a_sweep_reaches_every_issue_a_replaced_run_would_have(self):
+        # CI-issue-runs-coalesce: intake.yml keeps one running sweep and the newest pending one, so a
+        # burst's other runs are cancelled. The survivor comments on every issue render blames (#300,
+        # #301) and clears the stale comment the search finds (#5, fixed since), whichever issue
+        # triggered it; the triggering issue is always read, and a PR hit is never touched.
+        first = board.intake_comment(["old"])
+        self.assertIn(board.INTAKE_PHRASE, first)
+        fixed = opened(issues())[0]["number"]
+        calls = self.run_sweep(fixed, self.items(), {5: [self.bot(first, id=70)], fixed: [self.bot(first, id=71)]},
+                               held=[5])
+        self.assertEqual(sorted(c[:2] for c in calls),
+                         [("DELETE", "/repos/o/r/issues/comments/70"), ("DELETE", "/repos/o/r/issues/comments/71"),
+                          ("POST", "/repos/o/r/issues/300/comments"), ("POST", "/repos/o/r/issues/301/comments")])
+        posted = {c[1]: c[2] for c in calls if c[0] == "POST"}
+        self.assertIn("issue #300: ", posted["/repos/o/r/issues/300/comments"])
+        self.assertNotIn("issue #301: ", posted["/repos/o/r/issues/300/comments"])
+        # A second sweep over the same final state changes nothing.
+        done = {300: [self.bot(posted["/repos/o/r/issues/300/comments"], id=80)],
+                301: [self.bot(posted["/repos/o/r/issues/301/comments"], id=81)]}
+        self.assertEqual(self.run_sweep(fixed, self.items(), done, held=[300, 301]), [])
+
+    def test_a_sweep_on_a_clean_board_changes_nothing(self):
+        clean = opened(issues())
+        self.assertEqual(self.run_sweep(clean[0]["number"], clean, {}), [])
+
     def test_the_bot_is_the_actions_login(self):
         # The login GITHUB_TOKEN comments as; the fixtures above build on board.BOT, so pin it here.
         self.assertEqual(board.BOT, "github-actions[bot]")
@@ -701,6 +789,62 @@ class CliTest(unittest.TestCase):
             code, out, err = self.run_repo(command, text=generated, items=[])
             self.assertEqual((code, out), (1, ""), command)
             self.assertIn("listed no open work-item issues", err)
+
+    def test_render_out_rewrites_its_own_skeleton_in_place(self):
+        # #6500: `render --repo R > BOARD.md` truncates BOARD.md before render reads it; --out
+        # reads the skeleton first, then replaces the file whole.
+        generated = LIVE.replace("Intro prose.", board.GENERATED + "\n\nIntro prose.")
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d, "BOARD.md")
+            path.write_text(BOARD.replace("Intro prose.", board.GENERATED + "\n\nIntro prose."))
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = board.main(["render", "--repo", "o/r", "--out", str(path)],
+                                  read=path.read_text, fetch=github(opened(issues())))
+            self.assertEqual((code, out.getvalue()), (0, ""), err.getvalue())
+            self.assertEqual(path.read_text(), generated)
+            self.assertIn("| A-1 | [Pilot](briefs/A-1.md) |", path.read_text())
+            self.assertEqual(sorted(p.name for p in pathlib.Path(d).iterdir()), ["BOARD.md"])
+            # Plain render writes there too, and a failed render leaves the file as it was.
+            code = board.main(["render", "--out", str(path)], read=lambda: BOARD)
+            self.assertEqual((code, path.read_text()), (0, board.render(BOARD, issues())))
+            with redirect_stderr(io.StringIO()):
+                code = board.main(["render", "--repo", "o/r", "--out", str(path)], read=lambda: BOARD, fetch=github([]))
+            self.assertEqual((code, path.read_text()), (1, board.render(BOARD, issues())))
+
+    def test_out_is_refused_outside_render(self):
+        # #6548: a flag either acts or is refused; `check --out BOARD.md` once exited as a plain
+        # check and looked as if it had rewritten the board.
+        for command in ("check", "archive", "stale", "intake", "transition"):
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit) as e:
+                board.main([command, "--repo", "o/r", "--out", "BOARD.md"], read=lambda: BOARD,
+                           fetch=github(opened(issues())))
+            self.assertEqual(e.exception.code, 2, command)
+            self.assertIn("--out is for render only", err.getvalue())
+
+    def test_emit_documents_that_out_becomes_a_new_file(self):
+        # #6548: os.replace gives FILE a new inode, so a symlink becomes a regular file.
+        self.assertIn("new file", board.emit.__doc__)
+        self.assertIn("symlink", board.emit.__doc__)
+
+    def test_render_refuses_a_skeleton_with_no_table(self):
+        # What the shell leaves for `render > BOARD.md` to read: render fails instead of emitting
+        # a board with every row gone.
+        for text in ("", "# BOARD\n\nIntro prose.\n"):
+            for args in (("render",), ("render", "--repo", "o/r")):
+                out_, err_ = io.StringIO(), io.StringIO()
+                with redirect_stdout(out_), redirect_stderr(err_):
+                    code = board.main(list(args), read=lambda: text, fetch=github(opened(issues())))
+                self.assertEqual((code, out_.getvalue()), (1, ""), (args, text))
+                self.assertIn("no table", err_.getvalue())
+
+    def test_check_names_the_in_place_render_command(self):
+        generated = LIVE.replace("Intro prose.", board.GENERATED + "\n\nIntro prose.")
+        edited = generated.replace("| A-1 | [Pilot](briefs/A-1.md) | — | building", "| A-1 | [Pilot](briefs/A-1.md) | — | in review")
+        _, _, err = self.run_repo("check", text=edited, items=opened(issues(generated)))
+        self.assertIn("render --repo o/r --out BOARD.md", err)
+        self.assertNotIn("> BOARD.md", err)
 
     def test_check_repo_compares_a_generated_board_with_the_live_issues(self):
         generated = LIVE.replace("Intro prose.", board.GENERATED + "\n\nIntro prose.")

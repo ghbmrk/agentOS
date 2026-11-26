@@ -18,6 +18,9 @@ initrd of the boot entry (OUT/initrd/, every cpio member).
 It also reads, for the openssl records (#5341), which files hold the name of a by-name OpenSSL cipher
 selector or spell GCM-SIV or KRB5KDF, as selecting AES-GCM-SIV takes one of its names (see CIPHER_NAMES
 and SPELT), and counts their references to each selector and their spellings.
+And, for the openssl QUIC records (#6671), it reads which files import or look up OpenSSL's QUIC entry
+points (QUIC_NAMES), which only the openssl CLI may, and its datagram or connect BIO constructors
+(DGRAM_NAMES), which only the files [dgram] names may (OPENSSL_USES).
 
 The JSON maps each place ("tree", and "initrd:<path>" for each initrd) to: "scanned", the ELF files read;
 "imports", each file importing an affected glibc symbol and those symbols; "lookups", each file importing
@@ -29,7 +32,9 @@ NEEDED closure (by SONAME or file name, within that place) holds an importing li
 and those libraries, whether or not the file imports a symbol itself (#6297: a file importing one group's
 symbols can reach another group's through a library); "cipher", each file whose bytes hold a CIPHER_NAMES
 or SPELT name and its references to each (cipher_sites); "sha256", each of those files' SHA-256;
-"unread", each ELF file objdump failed on; and, for an initrd, "others", its executable members that are
+"quic" and "dgram", each file importing a name of that OPENSSL_USES group, or importing glibc's dlsym
+or dlvsym and holding one's name at the end of a string, and those names (#6671); "unread", each ELF file
+objdump failed on; and, for an initrd, "others", its executable members that are
 not ELF files. Only symbols bound to a GLIBC_ version count, so a library's own re_* names do not.
 
 --summary exits 1 when a claim the glibc records rest on stops holding: any file, in any place, imports
@@ -41,11 +46,14 @@ of which has an entry naming it (#6297): a reviewed library's dependents need no
 direct caller still fails. An entry that accepts nothing also fails, so each list stays its record's. It
 also exits 1 when a file holding a selector name or a SPELT name matches no [cipher] entry of ALLOW or
 more than one, or holds other sites or other bytes (SHA-256) than the counted entry it matches, or an
-entry matches nothing; and on an ALLOW it cannot read (read_allow). The control is the scan itself: it
-also exits 1 when objdump failed on a file, the main tree or an initrd with executable members read no
-ELF file, the main tree has no importer of regcomp (bash and grep always import it), or no call site of
-EVP_CIPHER_fetch (libcryptsetup and libcrypto always hold one), or no static file carrying glob() (Debian's
-ldconfig always does), so a clean result is not a scan that read nothing.
+entry matches nothing; when a file in "quic" or "dgram" matches no entry of the allow section of that
+name, or an entry matches no such file, so the openssl QUIC records' claim that only the files named there
+make a QUIC object or a datagram BIO is read from the tree (#6671); and on an ALLOW it cannot read
+(read_allow). The control is the scan itself: it also exits 1 when objdump failed on a file, the main
+tree or an initrd with executable members read no ELF file, the main tree has no importer of regcomp
+(bash and grep always import it), or no call site of EVP_CIPHER_fetch (libcryptsetup and libcrypto always
+hold one), or no static file carrying glob() (Debian's ldconfig always does), so a clean result is not a
+scan that read nothing.
 """
 import collections
 import fnmatch
@@ -77,7 +85,7 @@ GROUPS = {
 }
 # #5341: the openssl records (DEBIAN-CVE-2026-88823 and -95692 among them, AES-GCM-SIV) rest on no file
 # passing a name read from data to an OpenSSL cipher fetch. AES-GCM-SIV has no OID or NID
-# (crypto/objects/objects.txt, 3.5.7), so only a selector given one of its names picks it: EVP_CIPHER_fetch,
+# (crypto/objects/objects.txt, 3.5.9), so only a selector given one of its names picks it: EVP_CIPHER_fetch,
 # or systemd's openssl_cipher_many (src/shared/openssl-util.c, v257), which formats "%s-%zu-%s" from its
 # caller's arguments and fetches that. EVP_get_cipherbyname cannot return it (crypto/evp/names.c reads only
 # the legacy table) but is counted, as it hands a name to the same table. Every ELF file whose bytes hold one of these
@@ -123,6 +131,37 @@ LOOKUP = re.compile(b"(?<=\0)(?:%s)(?=\0)" % b"|".join(rx.pattern.rstrip("$").en
 # glob() (its include patterns), which is the control that the marks still read (problems()).
 CARRIES = {b"\0glob_in_dir\0": "glob", b"\0__vfwscanf_internal\0": "vfwscanf",
            b"\0Invalid preceding regular expression\0": "regcomp"}
+# #6671: the openssl QUIC records in assurance/vulncheck.json (QUIC_RECORDS) rest on no file but the openssl
+# CLI (s_client -quic, which nothing on the box runs) reaching OpenSSL's QUIC stack. A QUIC connection,
+# listener or domain needs an SSL_CTX made with one of the QUIC methods (ssl/quic/quic_method.c, 3.5.9;
+# TLS_method and the other TLS and DTLS methods make no QUIC object), and SSL_new_listener is 3.5's
+# server entry. A file importing one, under any version or none, counts; so does a file importing dlsym or
+# dlvsym that holds one's name at the end of a NUL-terminated string (GNU ld may store a name as the tail
+# of a longer one), unless it defines that name itself: libssl, the one file implementing them, holds them
+# all in its own dynamic table (libcrypto the datagram BIO's, below). A static copy of OpenSSL is not
+# libssl3t64 and is outside these records.
+QUIC_NAMES = ("OSSL_QUIC_client_method", "OSSL_QUIC_client_thread_method", "OSSL_QUIC_server_method",
+              "SSL_new_listener")
+QUIC_RECORDS = "DEBIAN-CVE-2026-88822, -95691, -124709, -107494 and -84785"
+# L3 7157966663: -88822's flaw is in the datagram BIO's peer detection (crypto/bio/bss_dgram.c,
+# BIO_CTRL_DGRAM_DETECT_PEER_ADDR), which a file can ask of any datagram BIO with no QUIC object. In OpenSSL
+# 3.5.4's crypto/ and ssl/ (every source their build.info files name, read for these constructors), a
+# datagram BIO comes from its own constructors (the SCTP one falls back to dgram_ctrl; the pair has no
+# peer detection and is counted as fail-closed), from a connect BIO set to SOCK_DGRAM, which makes one
+# (bss_conn.c conn_create_dgram_bio) and hands it out (BIO_get0_dgram_bio; L3 7158175373, Security
+# 7158185323), and from libssl's fd_method for a QUIC object. So the connect BIO's constructors, and libssl's
+# BIO_new_ssl_connect and BIO_new_buffer_ssl_connect over it, count too, and their importers and lookups are
+# held the same way, to [dgram]. libcrypto's own connect BIO user, the HTTP client, never sets SOCK_DGRAM.
+DGRAM_NAMES = ("BIO_s_datagram", "BIO_new_dgram", "BIO_s_datagram_sctp", "BIO_new_dgram_sctp", "BIO_s_dgram_pair",
+               "BIO_new_bio_dgram_pair", "BIO_s_connect", "BIO_new_connect", "BIO_new_ssl_connect",
+               "BIO_new_buffer_ssl_connect")
+# Each group: its names, what they are, and the records resting on no unlisted file using them.
+OPENSSL_USES = {"quic": (QUIC_NAMES, "OpenSSL's QUIC entry points",
+                         "the openssl QUIC records (%s)" % QUIC_RECORDS),
+                "dgram": (DGRAM_NAMES, "OpenSSL's datagram or connect BIO constructors",
+                          "the DEBIAN-CVE-2026-88822 records")}
+OPENSSL_HELD = re.compile(b"(?:%s)(?=\0)" % b"|".join(n.encode() for names, _w, _r in OPENSSL_USES.values()
+                                                      for n in names))
 
 
 def group_of(sym):
@@ -218,6 +257,30 @@ def held_names(path, how):
     return sorted({name for mark, name in CARRIES.items() if mark in data})
 
 
+def openssl_uses(path):
+    """({group: the names of that OPENSSL_USES group the ELF file at PATH imports or looks up, sorted} for each
+    group it uses; read). A file whose bytes end no string with one of the names is not read further. It looks
+    one up when it imports glibc's dlsym or dlvsym, holds the name (OPENSSL_HELD) and does not define it. READ
+    is False when objdump fails on it for any reason but its having no dynamic section, so a file it cannot
+    read is never counted clean."""
+    with open(path, "rb") as f:
+        held = {m.group().decode() for m in OPENSSL_HELD.finditer(f.read())}
+    if not held:
+        return {}, True
+    r = subprocess.run(["objdump", "-T", str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       text=True, errors="replace")
+    imports, defines, dl = set(), set(), False
+    for line in r.stdout.splitlines():
+        t = line.split()
+        if t and t[-1] in held:
+            (imports if "*UND*" in t else defines).add(t[-1])
+        m = UND.search(line)
+        dl = dl or bool(m and m.group(2) in LOOKUP_FUNCS)
+    used = imports | (held - defines if dl else set())
+    groups = {g: sorted(used & set(names)) for g, (names, _w, _r) in OPENSSL_USES.items()}
+    return {g: n for g, n in groups.items() if n}, r.returncode == 0 or "not a dynamic object" in r.stderr
+
+
 def own(v, p):
     """The group functions file P of place V imports itself: by import, by a run-time lookup of a name it
     holds, or as a static copy it carries (#6298)."""
@@ -227,6 +290,7 @@ def own(v, p):
 def sweep(files):
     """FILES maps a shown path to a readable path. Returns the place's record (module docstring)."""
     imports, needed, by_name, unread, cipher, digest, unseen = {}, {}, {}, [], {}, {}, {"lookups": {}, "static": {}}
+    uses = {g: {} for g in OPENSSL_USES}
     for shown, real in files.items():
         syms, needed[shown], soname, read, how = read_elf(real)
         if how:
@@ -238,7 +302,10 @@ def sweep(files):
             cipher[shown] = sites
             with open(real, "rb") as f:
                 digest[shown] = hashlib.sha256(f.read()).hexdigest()
-        if not (read and disassembled):
+        groups, openssl_read = openssl_uses(real)
+        for g, names in groups.items():
+            uses[g][shown] = names
+        if not (read and disassembled and openssl_read):
             unread.append(shown)
         if syms:
             imports[shown] = syms
@@ -263,7 +330,7 @@ def sweep(files):
     return {"scanned": len(files), "imports": dict(sorted(imports.items())), "via": dict(sorted(via.items())),
             "lookups": dict(sorted(unseen["lookups"].items())), "static": dict(sorted(unseen["static"].items())),
             "unread": sorted(unread), "cipher": dict(sorted(cipher.items())),
-            "sha256": dict(sorted(digest.items()))}
+            "sha256": dict(sorted(digest.items())), **{g: dict(sorted(u.items())) for g, u in uses.items()}}
 
 
 def cannot_read(e):
@@ -417,15 +484,16 @@ REVIEW = ("review where its names come from, then %s the [cipher] entry and the 
 
 
 def read_allow(path):
-    """(the regex entries, the [cipher] entries, the [glob] entries) of ALLOW. The regex entries come first,
-    one per line, then each section once, opened by its line ([glob] or [cipher]); a regex or [glob] entry
-    is an Entry (ENTRY_FORMAT), each given once. A [cipher] entry is a glob, then either "*" (not
+    """(the regex entries, the [cipher] entries, the [glob] entries, {"quic": its globs, "dgram": its globs})
+    of ALLOW. The regex entries come first, one per line, then each section once, opened by its line ([glob],
+    [cipher], [quic] or [dgram]); a regex or [glob] entry is an Entry (ENTRY_FORMAT), each given once, and a
+    [quic] or [dgram] entry one glob, given once. A [cipher] entry is a glob, then either "*" (not
     counted) or the SHA-256 of the file reviewed and the sites it holds exactly (FORMAT), read as
     {"sha256": hex, "sites": {name: count}}: a new package version changes the bytes, so the source is
     read again even when the counts hold (#5861). Exits naming the line on any other entry, a glob given
     twice, or a name or the digest given twice in one entry, and on a section line it does not know or
     has read already."""
-    regex, cipher, globs, section, seen = [], {}, [], None, set()
+    regex, cipher, globs, uses, section, seen = [], {}, [], {g: [] for g in OPENSSL_USES}, None, set()
     for n, l in enumerate(pathlib.Path(path).read_text().splitlines(), 1):
         l = l.split("#", 1)[0].strip()
 
@@ -433,8 +501,9 @@ def read_allow(path):
             sys.exit("import sweep: %s:%d: %s; a [cipher] entry is %s" % (path, n, why, FORMAT))
         if l.startswith("["):
             section = l[1:-1] if l.endswith("]") else l
-            if section not in ("glob", "cipher") or section in seen:
-                sys.exit("import sweep: %s:%d: %s is %s; the sections are [glob] and [cipher], each once"
+            if section not in ("glob", "cipher", *OPENSSL_USES) or section in seen:
+                sys.exit("import sweep: %s:%d: %s is %s; the sections are [glob], [cipher], [quic] and [dgram], "
+                         "each once"
                          % (path, n, l, "given again" if section in seen else "no section"))
             seen.add(section)
         elif l and section in (None, "glob"):
@@ -444,6 +513,11 @@ def read_allow(path):
                     path, n, "%s is given again" % l if e else "%s is not an entry" % l,
                     " [glob]" if section else " regex", ENTRY_FORMAT))
             into.append(e)
+        elif l and section in OPENSSL_USES:
+            if len(l.split()) != 1 or l in uses[section]:
+                sys.exit("import sweep: %s:%d: %s; a [%s] entry is one GLOB, each given once" % (
+                    path, n, "%s is given again" % l if l in uses[section] else "%s is not an entry" % l, section))
+            uses[section].append(l)
         elif l:
             glob, *want = l.split()
             if glob in cipher:
@@ -469,7 +543,7 @@ def read_allow(path):
             if not sites:
                 bad("%s counts no site" % glob)
             cipher[glob] = {"sha256": digests[0], "sites": sites}
-    return regex, cipher, globs
+    return regex, cipher, globs, uses
 
 
 def entry_line(p, sha, sites):
@@ -507,6 +581,28 @@ def cipher_refusals(places, entries):
                                                              entry_line(hit[0], sha, sites)))
     errs += ["import_sweep.allow: [cipher] %s matches no file holding a selector name or spelling %s; remove it"
              % (g, " or ".join(SPELT)) for g in entries if g not in used]
+    return errs
+
+
+def openssl_refusals(places, entries):
+    """Each file of PLACES using a name of an OPENSSL_USES group that matches no glob of that group's section
+    in ENTRIES ({group: globs}), and each glob matching no such file (#6671)."""
+    errs = []
+    for g, (_names, what, records) in OPENSSL_USES.items():
+        used = set()
+        for place, v in places.items():
+            for p, names in v.get(g, {}).items():
+                hit = [e for e in entries.get(g, []) if fnmatch.fnmatchcase(p, e)]
+                used.update(hit)
+                if not hit:
+                    errs.append("%s: %s imports or looks up %s (%s) and is not in import_sweep.allow [%s]; %s "
+                                "rest on no other file doing so: review what it does with them, update those "
+                                "records, then add the entry: %s" % (place, p, what, " ".join(names), g, records, p))
+        # L3 7157966663 item 3: an entry is also the control that this read still works.
+        errs += ["import_sweep.allow: [%s] %s matches no file importing or looking up %s; each entry is also "
+                 "the control that this scan still reads them, so remove it only once that file has left the "
+                 "image or stopped using them, and otherwise treat the scan as broken" % (g, e, what)
+                 for e in entries.get(g, []) if e not in used]
     return errs
 
 
@@ -570,6 +666,10 @@ def summary(places):
         lines.append("%s cipher: %d files hold a by-name cipher selector or spell %s"
                      % (place, len(cipher), " or ".join(SPELT)))
         lines += ["  sites %s" % entry_line(p, v.get("sha256", {}).get(p), s) for p, s in cipher.items()]
+        for g, (_names, what, _records) in OPENSSL_USES.items():
+            u = v.get(g, {})
+            lines.append("%s %s: %d files import or look up %s" % (place, g, len(u), what))
+            lines += ["  %s %s: %s" % (g, p, " ".join(names)) for p, names in u.items()]
     return lines
 
 
@@ -595,8 +695,9 @@ def main(argv):
         places = json.loads(pathlib.Path(argv[1]).read_text())
         lines = summary(places)
         print("\n".join(lines + annotations(lines)))
-        regex, cipher, globs = read_allow(argv[2] if len(argv) == 3 else ALLOW)
-        errs = problems(places) + refusals(places, regex, globs) + cipher_refusals(places, cipher)
+        regex, cipher, globs, uses = read_allow(argv[2] if len(argv) == 3 else ALLOW)
+        errs = (problems(places) + refusals(places, regex, globs) + cipher_refusals(places, cipher)
+                + openssl_refusals(places, uses))
         for e in errs[:10]:
             print("::error title=import sweep::" + e.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
     elif len(argv) == 2 and argv[0] == "--tree":

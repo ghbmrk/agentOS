@@ -103,6 +103,7 @@ class RiskTierTest(unittest.TestCase):
             "guest/codex/agentos-toolsh",
             "guest/codex/managed_config.toml",
             "guest/codex/requirements.toml",
+            "guest/codex/model_catalog.json",
             "guest/codex/launch.json",
             "broker/cmd/agentos-modem/agentos-modem.service",
             "broker/attention/systemd/x.conf",
@@ -278,6 +279,12 @@ class RiskTierTest(unittest.TestCase):
         self.assertEqual(rt.tier_of_change(["docs/a.md", "broker/budget/q.go"])[0], "B")
         self.assertEqual(rt.tier_of_change([]), ("C", []))
 
+    # #6639 (a work item with no SPEC row, so no REQ marker): the model catalog's
+    # multi_agent_version decides which collaboration tools the Codex CLI declares.
+    def test_codex_model_catalog_only_change_is_a(self):
+        self.assertEqual(rt.tier_of_change(["guest/codex/model_catalog.json"]),
+                         ("A", ["guest/codex/model_catalog.json"]))
+
     def test_every_tier_a_package_exists(self):
         # A renamed package must not silently drop to tier B.
         missing = [p for p in sorted(rt.TIER_A_BROKER) if not (ROOT / "broker" / p).is_dir()]
@@ -369,7 +376,10 @@ class RiskTierTest(unittest.TestCase):
         names = set()
         for item in listed.replace("; ", ", ").split(", "):
             item = item.split(": ", 1)[-1]  # drop the criterion label
-            names.update(n.rstrip("*") for n in item.split("/"))
+            for n in item.split("/"):
+                # A starred item names every broker package it prefixes (modem* is modem and modemlink).
+                names.update([n] if not n.endswith("*") else
+                             [d.name for d in (ROOT / "broker").glob(n) if d.is_dir()] or [n])
         # Every name is a real package, so a label cannot pass as one.
         missing = [n for n in sorted(names)
                    if not (ROOT / "broker" / n).is_dir()]
@@ -378,11 +388,18 @@ class RiskTierTest(unittest.TestCase):
         self.assertIn("claim", rt.TIER_A_BROKER)
         self.assertIn("firstboot", names)
         self.assertIn("firstboot", rt.TIER_A_BROKER)
-        # Every package OPERATING names as tier A is tier A in the tool
-        # (modem* covers modem and modemlink).
+        # Every package OPERATING names as tier A is tier A in the tool.
         not_a = [n for n in sorted(names)
                  if rt.tier_of("broker/" + n + "/x.go")[0] != "A"]
         self.assertEqual(not_a, [])
+        # And the other way (#1704): every TIER_A_BROKER package is in the row, so dropping one from the
+        # row fails too. cmd, core and internal are named by path after "plus".
+        self.assertEqual(sorted(rt.TIER_A_BROKER - names - {"cmd", "core", "internal"}), [])
+        for n in ("cmd", "core", "internal"):
+            self.assertIn("`broker/" + n + "`", row)
+        # Every guest path the tool rates A by name is in the row's guest build inputs (#1704).
+        missing = [p for p in sorted(rt.TIER_A_GUEST_PATHS) if "`" + p + "`" not in row]
+        self.assertEqual(missing, [])
 
     # REQ: ARC-1 (SIM-core: the trusted core is the list in broker/core/core.txt)
     def test_core_list_rates_core_and_wiring_a(self):

@@ -631,12 +631,15 @@ func serveKernel(conn net.Conn, h *Kernel, side Side, clock func() int64) {
 	ServeOne(conn, func(name string, args json.RawMessage) (out json.RawMessage, err error) {
 		f, ok := side.ops[name]
 		if p, own := side.procOps[name]; own {
-			if err := h.With(func(k *kernel.Kernel) error {
+			// The check stands on its own line: a condition after a
+			// multi-line call has no coverage block of its own.
+			err := h.With(func(k *kernel.Kernel) error {
 				if len(k.State().Anchors) == 0 && !setupOps[side.name+"/"+name] {
 					return ErrSetupOnly
 				}
 				return nil
-			}); err != nil {
+			})
+			if err != nil {
 				return nil, err
 			}
 			res, err := p(h, clock(), args)

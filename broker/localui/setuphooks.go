@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/localapi"
+	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
 // AgentosdSetup is Hooks over agentosd's setup ops on localui.sock
@@ -58,16 +59,33 @@ func (a AgentosdSetup) call(op string, args, out any) error {
 }
 
 // Wait returns once agentosd answers, so that a page started before
-// agentosd does not read its silence as setup being closed.
+// agentosd does not read its silence, or a stray refusal, as setup being
+// closed. It shares Open's rule (#1617).
 func (a AgentosdSetup) Wait(ctx context.Context, every time.Duration) error {
+	_, err := a.Open(ctx, every)
+	return err
+}
+
+// Open asks agentosd whether setup is open until it decides: open on an
+// answer to OpSetupProgress, closed on ErrSetupClosed or on unknown op (an
+// agentosd that serves no setup ops). No answer, and every other refusal
+// (too many connections, internal error and the other socket-level
+// codes), is no decision: it asks again every every until ctx ends, then
+// returns ctx's error (#1617).
+func (a AgentosdSetup) Open(ctx context.Context, every time.Duration) (bool, error) {
 	for {
-		var r Refused
-		if err := a.call(localapi.OpSetupProgress, nil, nil); err == nil || errors.As(err, &r) {
-			return nil
+		cctx, cancel := context.WithTimeout(ctx, callTimeout)
+		err := a.Owner.Call(cctx, localapi.OpSetupProgress, nil, nil)
+		cancel()
+		switch {
+		case err == nil:
+			return true, nil
+		case refused(err, localapi.ErrSetupClosed), refused(err, string(sockets.ErrUnknownOp)):
+			return false, nil
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return false, ctx.Err()
 		case <-time.After(every):
 		}
 	}

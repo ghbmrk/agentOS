@@ -56,10 +56,15 @@ type CardStep struct {
 	// (card.CheckAuthority), so no card is ever drawn (ASSUMPTIONS OWN-card-ca-3).
 	noAuth bool
 
-	mu   sync.Mutex
-	done bool
-	gen  int // the display whose confirm may latch; Again moves it on
-	d    *card.Display
+	// provMu serializes a confirm (generation check through latch) against
+	// Again's generation move, so a rerun's reset never runs under a
+	// replaced card's provision and that confirm cannot release the hold
+	// the rerun took (#2083). Taken before mu, never under it.
+	provMu sync.Mutex
+	mu     sync.Mutex
+	done   bool
+	gen    int // the display whose confirm may latch; Again moves it on
+	d      *card.Display
 	// failed is the reset of the latest rerun when that rerun showed no
 	// card; RetryRerun runs it again (#2362).
 	failed func() error
@@ -99,12 +104,15 @@ func NewCardStep(st Store, cfg card.DisplayConfig) (*CardStep, error) {
 }
 
 // display builds generation gen's card display: its confirm provisions,
-// latches and releases the hold, unless Again has moved on since. A
-// provision error that is a Line is kept for Note; ErrKept latches.
+// latches and releases the hold, unless Again has moved on since; it holds
+// provMu throughout, so Again cannot move on midway. A provision error that
+// is a Line is kept for Note; ErrKept latches.
 func (s *CardStep) display(gen int) (*card.Display, error) {
 	cfg := s.cfg
 	prov := cfg.Provision
 	cfg.Provision = func(c *card.Card) error {
+		s.provMu.Lock()
+		defer s.provMu.Unlock()
 		s.mu.Lock()
 		stale := s.gen != gen
 		s.note = ""
@@ -144,7 +152,8 @@ func (s *CardStep) display(gen int) (*card.Display, error) {
 // is shown whose confirm provisions and latches as before. The disk latch
 // is kept until that confirm, so it still reads confirmed.
 // A failed reset shows no card and keeps the hold; RetryRerun runs it
-// again (#2362).
+// again (#2362). A confirm whose provision is running finishes first, and
+// its latch is then overridden by this rerun (#2083).
 func (s *CardStep) Again(reset func() error) error {
 	if reset == nil {
 		return errors.New("firstboot: incomplete card reset config")
@@ -153,6 +162,7 @@ func (s *CardStep) Again(reset func() error) error {
 		// No card could follow the reset, so the vault is left as it is.
 		return ErrNoAuthority
 	}
+	s.provMu.Lock()
 	s.mu.Lock()
 	s.done = false
 	s.gen++
@@ -160,6 +170,7 @@ func (s *CardStep) Again(reset func() error) error {
 	s.d = nil
 	s.failed = nil
 	s.mu.Unlock()
+	s.provMu.Unlock()
 	if err := reset(); err != nil {
 		s.fail(gen, reset)
 		return fmt.Errorf("firstboot: resetting the vault for a new card: %w", err)
