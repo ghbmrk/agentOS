@@ -292,7 +292,94 @@ def covered(rel, read=None):
     return any(rel == e or e.endswith("/") and rel.startswith(e) for e in (*read, *ci_scope.NEVER_BLIND))
 
 
-def audit(traces, root, read=None, files=None, start_cwd=None):
+def judge(name, path, root, files, read, problems, reads):
+    """Record one access of an absolute path: a tracked file outside the read set, or any read of
+    git's object store, is a problem."""
+    if path != root and not path.startswith(root + "/"):
+        return
+    rel = posixpath.relpath(path, root)
+    if rel == ".git" or rel.startswith(".git/"):
+        if rel.startswith(".git/objects/"):
+            problems.append(f"git object store read: {name}({rel}): it holds every file")
+        return
+    if rel not in files:
+        return
+    reads.add(rel)
+    if not covered(rel, read):
+        problems.append(f"read outside RACE_READ: {name}({rel}); add it to tools/ci_scope.py RACE_READ")
+
+
+STAT_CONTROL = "tools/race_reads.py"  # stat'd once the stat tracer is attached: proof it sees stats
+STRLEN = 200  # bpftrace's longest string; a path this long may be cut short
+
+
+def stats_program(root):
+    """The bpftrace program that traces stats in the kernel: every vfs_getattr, which each stat
+    call reaches with the path it resolved, of a path under root and outside root/broker/. A
+    kernel-side probe makes no ptrace stop, so the stats the tests' child go commands make of
+    GOROOT cost almost nothing (strace's stops for them doubled broker/kernel/sim's time). Go's
+    VCS-stamp git (VCS_STAMP), marked at the exec a go process makes, prints nothing."""
+    for c in root:
+        if not (c.isalnum() or c in "/._-"):
+            raise ValueError(f"root {root!r}: only letters, digits and /._- are put in the program")
+    pre, broker = root + "/", root + "/broker/"
+    a = [f"str(args->argv[{i}], 32)" for i in range(7)]
+    return f"""
+BEGIN {{ printf("START\\n"); }}
+tracepoint:syscalls:sys_enter_execve {{
+  if (comm == "go" && {a[0]} == "git" &&
+      (({a[1]} == "status" && {a[2]} == "--porcelain" && {a[3]} == "") ||
+       ({a[1]} == "-c" && {a[2]} == "log.showsignature=false" && {a[3]} == "log" && {a[4]} == "-1" &&
+        {a[5]} == "--format=%H:%ct" && {a[6]} == ""))) {{
+    @stamp[pid] = 1;
+  }} else {{
+    delete(@stamp[pid]);
+  }}
+}}
+tracepoint:sched:sched_process_exit /pid == tid/ {{ delete(@stamp[pid]); }}
+fexit:vfs_getattr /@stamp[pid] == 0/ {{
+  $p = path(args->path);
+  if (strncmp($p, "{pre}", {len(pre)}) == 0 && strncmp($p, "{broker}", {len(broker)}) != 0) {{
+    printf("S %d %s\\n", pid, $p);
+  }}
+}}
+END {{ clear(@stamp); printf("END\\n"); }}
+"""
+
+
+def stat_lines(lines, root):
+    """(problem or None, path) for each line of a stat trace; the first item None when well
+    formed. A trace that did not start, did not end, lost events or never saw the control stat
+    is a problem."""
+    started = ended = control = False
+    for line in lines:
+        line = line.rstrip("\n")
+        if line == "START":
+            started = True
+        elif line == "END":
+            ended = True
+        elif line.startswith("S ") and started and not ended:
+            parts = line.split(" ", 2)
+            if len(parts) != 3 or not parts[1].isdigit() or not parts[2].startswith("/"):
+                yield f"stat trace: unreadable line {line!r}", None
+                continue
+            path = parts[2]
+            if len(path) >= STRLEN - 1:
+                yield f"stat trace: a path may be cut short at {STRLEN} bytes: {path!r}", None
+                continue
+            control |= path == posixpath.join(root, STAT_CONTROL)
+            yield None, path
+        elif line.startswith("Attaching ") and not started:
+            continue
+        else:
+            yield f"stat trace: unexpected line {line!r} (lost events, or an error)", None
+    if not started or not ended:
+        yield "stat trace: the stat tracer did not run from start to end", None
+    elif not control:
+        yield f"stat trace: the control stat of {STAT_CONTROL} is missing: the tracer saw no stats", None
+
+
+def audit(traces, root, read=None, files=None, start_cwd=None, stats=()):
     """Return (problems, reads): problems are lines naming each failure; reads the tracked files
     the traces reached, relative to root. Each trace is one traced command, read on its own."""
     root = posixpath.normpath(root)
@@ -311,27 +398,23 @@ def audit(traces, root, read=None, files=None, start_cwd=None):
             if path is None:
                 problems.append(f"unresolved: {name}({raw!r}) in process {pid}: its working directory is unknown")
                 continue
-            if path != root and not path.startswith(root + "/"):
-                continue
-            rel = posixpath.relpath(path, root)
-            if rel == ".git" or rel.startswith(".git/"):
-                if rel.startswith(".git/objects/"):
-                    problems.append(f"git object store read: {name}({rel}): it holds every file")
-                continue
-            if rel not in files:
-                continue
-            reads.add(rel)
-            if not covered(rel, read):
-                problems.append(f"read outside RACE_READ: {name}({rel}); add it to tools/ci_scope.py RACE_READ")
+            judge(name, path, root, files, read, problems, reads)
         if not execs:
             problems.append(f"{trace}: no test binary ran ({n} path accesses): not a test trace")
         if not exited:
             problems.append(f"{trace}: the traced command's first process never exited in it: the trace was cut short")
+    for st in stats:
+        for problem, path in stat_lines(read_lines([st]), root):
+            if problem:
+                problems.append(f"{st}: {problem}")
+            else:
+                judge("stat", posixpath.normpath(path), root, files, read, problems, reads)
     return problems, reads
 
 
-def run(trace, cmd):
-    """Run cmd under strace, writing the trace to `trace`; return its exit code.
+def run(trace, cmd, stats=None, root=None):
+    """Run cmd under strace, writing the trace to `trace`; return its exit code. With stats, a
+    bpftrace stat tracer (stats_program) runs around it as root, writing to `stats`.
 
     strace runs through sudo as root and runs cmd as the invoking user (-u), so setuid helpers
     the tests run (newuidmap, for the canary sandbox) keep their privilege under the trace, which
@@ -344,14 +427,54 @@ def run(trace, cmd):
     # tools/unit_tests.py: --kill-on-exit, so nothing runs on untraced if strace gives up (#5364).
     base = [strace, "-f", "-y", "-q", "--kill-on-exit", "--seccomp-bpf", "--decode-pids=pidns", "-e", "signal=none",
             "-e", "trace=" + ",".join(TRACED), "-o", trace]
-    if os.geteuid() != 0:
+    sudo = [] if os.geteuid() == 0 else ["sudo", "-n", "--"]
+    if sudo:
         import pwd
         user = pwd.getpwuid(os.getuid()).pw_name
         env = [f"{k}={v}" for k, v in os.environ.items()]
-        full = ["sudo", "-n", "--", "env", "-i", *env, *base, "-u", user, "--", *cmd]
+        full = [*sudo, "env", "-i", *env, *base, "-u", user, "--", *cmd]
     else:
         full = [*base, "--", *cmd]
-    return subprocess.call(full)
+    if not stats:
+        return subprocess.call(full)
+    return with_stats(stats, os.path.realpath(root), sudo, lambda: subprocess.call(full))
+
+
+def with_stats(out, root, sudo, body, wait=120):
+    """Run body() with the stat tracer attached; return body's result, or 2 when the tracer
+    never started. The tracer's own messages go to `out` too, so the audit sees a lost event."""
+    import signal
+    import time
+    bpftrace = shutil.which("bpftrace")
+    if not bpftrace:
+        print("race_reads: bpftrace is not installed", file=sys.stderr)
+        return 2
+    with open(out, "wb") as f:
+        tracer = subprocess.Popen([*sudo, "env", f"BPFTRACE_STRLEN={STRLEN}", bpftrace, "-e", stats_program(root)],
+                                  stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        deadline = time.monotonic() + wait
+        while True:
+            with open(out, "rb") as f:
+                if b"START\n" in f.read():
+                    break
+            if tracer.poll() is not None or time.monotonic() > deadline:
+                print(f"race_reads: the stat tracer did not start (see {out})", file=sys.stderr)
+                return 2
+            time.sleep(0.2)
+        os.stat(os.path.join(root, STAT_CONTROL))
+        return body()
+    finally:
+        if tracer.poll() is None:
+            # SIGINT runs the program's END block; sudo passes it on to bpftrace.
+            if sudo:
+                subprocess.call([*sudo, "kill", "-INT", str(tracer.pid)])
+            else:
+                os.kill(tracer.pid, signal.SIGINT)
+        try:
+            tracer.wait(timeout=wait)
+        except subprocess.TimeoutExpired:
+            tracer.kill()
 
 
 def main(argv=None):
@@ -359,20 +482,25 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")
     r.add_argument("--trace", required=True)
+    r.add_argument("--stats", help="also trace stats in the kernel (bpftrace) into this file")
+    r.add_argument("--root", help="the repository root the stat tracer keeps (with --stats)")
     r.add_argument("command", nargs=argparse.REMAINDER)
     a = sub.add_parser("audit")
     a.add_argument("--root", required=True)
     a.add_argument("--cwd", help="the traced command's working directory (default ROOT/broker)")
     a.add_argument("--reads-out")
+    a.add_argument("--stats", action="append", default=[], help="a stat trace (race_reads.py run --stats)")
     a.add_argument("traces", nargs="+")
     a = ap.parse_args(argv)
     if a.cmd == "run":
         cmd = a.command[1:] if a.command[:1] == ["--"] else a.command
         if not cmd:
             ap.error("run needs a command after --")
-        return run(a.trace, cmd)
+        if a.stats and not a.root:
+            ap.error("--stats needs --root")
+        return run(a.trace, cmd, a.stats, a.root)
     root = os.path.realpath(a.root)
-    problems, reads = audit(a.traces, root, start_cwd=os.path.realpath(a.cwd) if a.cwd else None)
+    problems, reads = audit(a.traces, root, start_cwd=os.path.realpath(a.cwd) if a.cwd else None, stats=a.stats)
     if a.reads_out:
         with open(a.reads_out, "w", encoding="utf-8", errors="surrogateescape") as f:
             f.writelines(p + "\n" for p in sorted(reads))

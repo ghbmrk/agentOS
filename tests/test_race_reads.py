@@ -247,6 +247,84 @@ class AuditTest(unittest.TestCase):
             self.assertTrue(problems and all("image/a" in p for p in problems), problems)
 
 
+def stat_audit(stat_lines, read=("image/",), files=FILES | {race_reads.STAT_CONTROL}):
+    with tempfile.TemporaryDirectory() as d:
+        t, st = os.path.join(d, "t.gz"), os.path.join(d, "s.txt")
+        with gzip.open(t, "wt") as f:
+            f.writelines(trace())
+        pathlib.Path(st).write_text("".join(l + "\n" for l in stat_lines))
+        problems, reads = race_reads.audit([t], R, read=read, files=files, stats=[st])
+        return [p.replace(st + ": ", "") for p in problems], reads
+
+
+CONTROL = f"S 1 {R}/{race_reads.STAT_CONTROL}"
+
+
+class StatTraceTest(unittest.TestCase):
+
+    def test_a_stat_outside_the_set_fails_and_one_inside_passes(self):
+        problems, reads = stat_audit(["Attaching 4 probes...", "START", CONTROL, f"S 9 {R}/tests/t.py",
+                                      f"S 9 {R}/image/a", f"S 9 {R}/image/../SPEC.md", "END"])
+        self.assertEqual(sorted(problems), ["read outside RACE_READ: stat(SPEC.md); add it to tools/ci_scope.py RACE_READ",
+                                            "read outside RACE_READ: stat(tests/t.py); add it to tools/ci_scope.py RACE_READ"])
+        self.assertIn("image/a", reads)
+
+    def test_the_git_object_store_fails(self):
+        problems, _ = stat_audit(["START", CONTROL, f"S 9 {R}/.git/objects/ab/cd", f"S 9 {R}/.git/HEAD", "END"])
+        self.assertEqual(problems, ["git object store read: stat(.git/objects/ab/cd): it holds every file"])
+
+    def test_a_trace_not_whole_fails_closed(self):
+        for lines, want in (([CONTROL, "END"], "did not run from start to end"),
+                            (["START", CONTROL], "did not run from start to end"),
+                            ([], "did not run from start to end"),
+                            (["START", "END"], "control stat"),
+                            (["START", CONTROL, "Lost 12 events", "END"], "unexpected line"),
+                            (["START", CONTROL, "S x /repo/a", "END"], "unreadable line"),
+                            (["START", CONTROL, "S 9 " + R + "/" + "a" * 200, "END"], "cut short")):
+            with self.subTest(lines=lines):
+                problems, _ = stat_audit(lines)
+                self.assertTrue(problems)
+                self.assertTrue(any(want in p for p in problems), problems)
+
+    def test_a_clean_stat_trace_passes(self):
+        self.assertEqual(stat_audit(["Attaching 4 probes...", "START", CONTROL, f"S 3 {R}/image/a", "END"])[0], [])
+
+    def test_the_program_filters_in_the_kernel_and_refuses_an_odd_root(self):
+        prog = race_reads.stats_program("/home/runner/work/agentOS/agentOS")
+        self.assertIn('strncmp($p, "/home/runner/work/agentOS/agentOS/", 34) == 0', prog)
+        self.assertIn('strncmp($p, "/home/runner/work/agentOS/agentOS/broker/", 41) != 0', prog)
+        self.assertIn("fexit:vfs_getattr", prog)
+        self.assertIn('== "--porcelain"', prog)
+        self.assertIn('== "log.showsignature=false"', prog)
+        for bad in ('/a"b', "/a b", "/a\\n", "/a$b"):
+            with self.subTest(root=bad), self.assertRaises(ValueError):
+                race_reads.stats_program(bad)
+
+    @unittest.skipUnless(shutil.which("bpftrace") and os.geteuid() == 0, "needs bpftrace, as root")
+    def test_a_real_stat_trace(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = os.path.realpath(d)
+            for f in ("tools/race_reads.py", "image/a", "broker/b"):
+                os.makedirs(os.path.dirname(os.path.join(d, f)), exist_ok=True)
+                pathlib.Path(d, f).write_text("x\n")
+            out = os.path.join(d, "s.txt")
+            try:
+                code = race_reads.with_stats(out, d, [], lambda: subprocess.call(
+                    ["sh", "-c", "cd image && stat a >/dev/null && stat ../broker/b >/dev/null"], cwd=d), wait=60)
+            except OSError as e:
+                self.skipTest(f"no bpftrace here: {e}")
+            text = pathlib.Path(out).read_text()
+            if code == 2 and "START" not in text:
+                self.skipTest(f"bpftrace cannot attach here: {text[-300:]}")
+            self.assertEqual(code, 0)
+            got = list(race_reads.stat_lines(text.splitlines(True), d))
+            self.assertEqual([p for p, _ in got if p], [])
+            paths = {q for _, q in got}
+            self.assertIn(f"{d}/image/a", paths)
+            self.assertIn(f"{d}/tools/race_reads.py", paths)
+            self.assertNotIn(f"{d}/broker/b", paths)
+
+
 class RaceBlindScopeTest(unittest.TestCase):
     def test_only_a_modification_outside_the_read_set_is_race_blind(self):
         for p in ("tests/test_x.py", "tools/board.py", "docs/x.txt", "LICENSE"):

@@ -435,9 +435,11 @@ jobs:
       - name: Software TPM for the trusted-host slot (P2-4b)
         if: steps.scope.outputs.race != 'skip'
         run: sudo apt-get update -q && sudo apt-get install -yq swtpm
-      - name: strace for the read audit (CI-race-scope)
+      - name: strace and bpftrace for the read audit (CI-race-scope)
         if: steps.scope.outputs.race != 'skip'
-        run: command -v strace || sudo apt-get install -yq strace
+        run: |
+          pkgs=$(for t in strace bpftrace; do command -v "$t" >/dev/null || echo "$t"; done)
+          [ -z "$pkgs" ] || sudo apt-get install -yq $pkgs
       # The enforcer's resolver tests run the real dnsmasq (briefs/ENF.md slice f);
       # dnsmasq-base is the binary alone, with no service started.
       - name: dnsmasq for the enforcer's resolver tests (ENF-f, #3664)
@@ -468,13 +470,14 @@ jobs:
         # The TPM tests fail rather than skip if swtpm is missing. kernel/sim takes minutes
         # under -race, so go test's default 10-minute timeout flaked a slow runner (#2623);
         # the job's own timeout-minutes still bounds the step.
-        # CI-race-scope: under strace, every file syscall of the tests and all they run goes to a trace
-        # that the read audit below checks against ci_scope.py's RACE_READ. -buildvcs=false: go's VCS
-        # stamp (on binaries the tests build) runs git status, which walks the whole tree.
+        # CI-race-scope: under strace, every file syscall of the tests and all they run but stats goes
+        # to a trace, and a bpftrace probe logs their stats in the kernel; the read audit below checks
+        # both against ci_scope.py's RACE_READ. -buildvcs=false: go's VCS stamp (on binaries the
+        # tests build) runs git status, which walks the whole tree.
         env:
           AGENTOS_REQUIRE_SWTPM: "1"
           GOFLAGS: -buildvcs=false
-        run: python3 -I ../tools/race_reads.py run --trace "|gzip -1 > $RUNNER_TEMP/reads-race.gz" -- go test -race -count=1 -timeout 25m $(cat "$RUNNER_TEMP/shard")
+        run: python3 -I ../tools/race_reads.py run --trace "|gzip -1 > $RUNNER_TEMP/reads-race.gz" --stats "$RUNNER_TEMP/stats-race.txt" --root "$GITHUB_WORKSPACE" -- go test -race -count=1 -timeout 25m $(cat "$RUNNER_TEMP/shard")
       - name: The vision service's ONNX Runtime build, its real-runtime tests compiled (VIS-models, #3515)
         if: steps.scope.outputs.race != 'skip'
         # Default builds link no runtime; -tags vision_onnx links ONNX Runtime's Go binding,
@@ -486,15 +489,17 @@ jobs:
           GOFLAGS: -buildvcs=false
         run: |
           go vet -tags vision_onnx,vision_real ./cmd/agentos-vision
-          python3 -I ../tools/race_reads.py run --trace "|gzip -1 > $RUNNER_TEMP/reads-vision.gz" -- go test -count=1 -tags vision_onnx ./cmd/agentos-vision
+          python3 -I ../tools/race_reads.py run --trace "|gzip -1 > $RUNNER_TEMP/reads-vision.gz" --stats "$RUNNER_TEMP/stats-vision.txt" --root "$GITHUB_WORKSPACE" -- go test -count=1 -tags vision_onnx ./cmd/agentos-vision
       - name: The tests read no tracked file outside RACE_READ (CI-race-scope, tools/race_reads.py)
         if: steps.scope.outputs.race != 'skip'
         # Fails on a tracked file read outside ci_scope.py's RACE_READ (this commit's copy, the one a
         # PR based on it skips by), on git's object store, on a path it cannot place, and on a trace
-        # that ran no test binary or was cut short.
+        # that ran no test binary or was cut short; and on a stat trace that lost events, did not run
+        # whole or missed its control stat.
         run: |
           err=0
           python3 -I ../tools/race_reads.py audit --root "$GITHUB_WORKSPACE" --reads-out "$RUNNER_TEMP/reads.txt" \
+            --stats "$RUNNER_TEMP/stats-race.txt" --stats "$RUNNER_TEMP/stats-vision.txt" \
             "$RUNNER_TEMP/reads-race.gz" "$RUNNER_TEMP/reads-vision.gz" || err=$?
           { echo "### Tracked files outside broker/ the tests read, by directory"; echo '```'
             grep -v '^broker/' "$RUNNER_TEMP/reads.txt" | cut -d/ -f1-2 | sort | uniq -c || true; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
