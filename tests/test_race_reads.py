@@ -257,48 +257,71 @@ def stat_audit(stat_lines, read=("image/",), files=FILES | {race_reads.STAT_CONT
         return [p.replace(st + ": ", "") for p in problems], reads
 
 
-CONTROL = f"S 1 {R}/{race_reads.STAT_CONTROL}"
+def st(rel, tid=7):
+    """The lines the stat probe prints for one stat of root/rel: its parts leaf first, then E."""
+    parts = rel.split("/")[::-1]
+    return [f"C {tid} {i} {n}" for i, n in enumerate(parts)] + [f"E {tid} {tid} {len(parts)}"]
+
+
+CONTROL = st(race_reads.STAT_CONTROL, tid=1)
 
 
 class StatTraceTest(unittest.TestCase):
 
     def test_a_stat_outside_the_set_fails_and_one_inside_passes(self):
-        problems, reads = stat_audit(["Attaching 4 probes...", "START", CONTROL, f"S 9 {R}/tests/t.py",
-                                      f"S 9 {R}/image/a", f"S 9 {R}/image/../SPEC.md", "END"])
+        problems, reads = stat_audit(["Attaching 4 probes...", "START", *CONTROL, *st("tests/t.py"), *st("image/a"),
+                                      *st("SPEC.md", tid=9), "END"])
         self.assertEqual(sorted(problems), ["read outside RACE_READ: stat(SPEC.md); add it to tools/ci_scope.py RACE_READ",
                                             "read outside RACE_READ: stat(tests/t.py); add it to tools/ci_scope.py RACE_READ"])
         self.assertIn("image/a", reads)
 
+    def test_two_threads_parts_interleave(self):
+        a, b = st("tests/t.py", tid=3), st("image/a", tid=4)
+        lines = ["START", *CONTROL, a[0], b[0], b[1], a[1], b[2], a[2], "END"]
+        problems, reads = stat_audit(lines)
+        self.assertEqual(problems, ["read outside RACE_READ: stat(tests/t.py); add it to tools/ci_scope.py RACE_READ"])
+        self.assertIn("image/a", reads)
+
     def test_the_git_object_store_fails(self):
-        problems, _ = stat_audit(["START", CONTROL, f"S 9 {R}/.git/objects/ab/cd", f"S 9 {R}/.git/HEAD", "END"])
+        problems, _ = stat_audit(["START", *CONTROL, *st(".git/objects/ab/cd"), *st(".git/HEAD"), "END"])
         self.assertEqual(problems, ["git object store read: stat(.git/objects/ab/cd): it holds every file"])
 
     def test_a_trace_not_whole_fails_closed(self):
-        for lines, want in (([CONTROL, "END"], "did not run from start to end"),
-                            (["START", CONTROL], "did not run from start to end"),
+        for lines, want in (([*CONTROL, "END"], "did not run from start to end"),
+                            (["START", *CONTROL], "did not run from start to end"),
                             ([], "did not run from start to end"),
                             (["START", "END"], "control stat"),
-                            (["START", CONTROL, "Lost 12 events", "END"], "unexpected line"),
-                            (["START", CONTROL, "S x /repo/a", "END"], "unreadable line"),
-                            (["START", CONTROL, "S 9 " + R + "/" + "a" * 200, "END"], "cut short")):
+                            (["START", *CONTROL, "Lost 12 events", "END"], "unexpected line"),
+                            (["START", *CONTROL, "E x 1 1", "END"], "unreadable line"),
+                            (["START", *CONTROL, *st("image/a")[1:], "END"], "did not all arrive"),
+                            (["START", *CONTROL, *st("image/a")[:-1], "END"], "no end line"),
+                            (["START", *CONTROL, *st("image/" + "a" * 63), "END"], "cut short")):
             with self.subTest(lines=lines):
                 problems, _ = stat_audit(lines)
                 self.assertTrue(problems)
                 self.assertTrue(any(want in p for p in problems), problems)
 
     def test_a_clean_stat_trace_passes(self):
-        self.assertEqual(stat_audit(["Attaching 4 probes...", "START", CONTROL, f"S 3 {R}/image/a", "END"])[0], [])
+        self.assertEqual(stat_audit(["Attaching 4 probes...", "START", *CONTROL, *st("image/a"), "END"])[0], [])
 
-    def test_the_program_filters_in_the_kernel_and_refuses_an_odd_root(self):
-        prog = race_reads.stats_program("/home/runner/work/agentOS/agentOS")
-        self.assertIn('strncmp($p, "/home/runner/work/agentOS/agentOS/", 34) == 0', prog)
-        self.assertIn('strncmp($p, "/home/runner/work/agentOS/agentOS/broker/", 41) != 0', prog)
+    def test_a_tracked_file_deeper_than_the_probe_looks_fails(self):
+        deep = "/".join(["image"] + ["d"] * race_reads.LEVELS)
+        problems, _ = stat_audit(["START", *CONTROL, "END"], files=FILES | {race_reads.STAT_CONTROL, deep})
+        self.assertEqual(problems, [f"tracked file deeper than the stat probe looks ({race_reads.LEVELS} parts): {deep}"])
+        self.assertEqual(race_reads.too_deep({"broker/" + deep, "image/a"}), [])
+        self.assertEqual(race_reads.too_deep({p.decode() for p in subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, check=True).stdout.split(b"\0") if p}), [])
+
+    def test_the_program_walks_to_root_by_inode_and_device(self):
+        prog = race_reads.stats_program(1234, 5 << 20 | 6)
+        self.assertIn(f"$d1->d_inode->i_ino == 1234 && $d1->d_sb->s_dev == {5 << 20 | 6}", prog)
+        self.assertIn(f"$d{race_reads.LEVELS} = $d{race_reads.LEVELS - 1}->d_parent;", prog)
+        self.assertIn('!= "broker"', prog)
         self.assertIn("fexit:vfs_getattr", prog)
+        self.assertNotIn("path(", prog)  # bpf_d_path is missing on the runner's kernel
         self.assertIn('== "--porcelain"', prog)
         self.assertIn('== "log.showsignature=false"', prog)
-        for bad in ('/a"b', "/a b", "/a\\n", "/a$b"):
-            with self.subTest(root=bad), self.assertRaises(ValueError):
-                race_reads.stats_program(bad)
+        self.assertEqual(race_reads.kernel_dev(os.makedev(8, 1)), 8 << 20 | 1)
 
     @unittest.skipUnless(shutil.which("bpftrace") and os.geteuid() == 0, "needs bpftrace, as root")
     def test_a_real_stat_trace(self):

@@ -310,20 +310,28 @@ def judge(name, path, root, files, read, problems, reads):
 
 
 STAT_CONTROL = "tools/race_reads.py"  # stat'd once the stat tracer is attached: proof it sees stats
-STRLEN = 200  # bpftrace's longest string; a path this long may be cut short
+LEVELS = 16  # how far up from a stat'd file the probe looks for root; deeper tracked files fail the audit
+NAMELEN = 64  # bpftrace's string length for one path part; a part this long may be cut short
 
 
-def stats_program(root):
+def stats_program(ino, dev):
     """The bpftrace program that traces stats in the kernel: every vfs_getattr, which each stat
-    call reaches with the path it resolved, of a path under root and outside root/broker/. A
-    kernel-side probe makes no ptrace stop, so the stats the tests' child go commands make of
-    GOROOT cost almost nothing (strace's stops for them doubled broker/kernel/sim's time). Go's
-    VCS-stamp git (VCS_STAMP), marked at the exec a go process makes, prints nothing."""
-    for c in root:
-        if not (c.isalnum() or c in "/._-"):
-            raise ValueError(f"root {root!r}: only letters, digits and /._- are put in the program")
-    pre, broker = root + "/", root + "/broker/"
+    call reaches with the dentry it resolved, of a file under the directory with inode `ino` on
+    the filesystem with (kernel) device `dev`, and outside its broker/. A kernel-side probe makes
+    no ptrace stop, so the stats the tests' child go commands make of GOROOT cost almost nothing
+    (strace's stops for them doubled broker/kernel/sim's time). The probe walks d_parent from the
+    file to root and prints the path's parts, leaf first, one line each ("C tid i name"), then
+    "E tid pid parts"; the dentry walk gives the file's place in its filesystem, so a bind mount
+    or a sandbox's root does not hide it. Go's VCS-stamp git (VCS_STAMP), marked at the exec a go
+    process makes, prints nothing."""
+    ino, dev = int(ino), int(dev)
     a = [f"str(args->argv[{i}], 32)" for i in range(7)]
+    walk = "\n".join(f"  $d{i + 1} = $d{i}->d_parent;" for i in range(LEVELS))
+    find = "\n  else ".join(f"if ($d{i}->d_inode->i_ino == {ino} && $d{i}->d_sb->s_dev == {dev}) {{ $k = {i}; }}"
+                            for i in range(1, LEVELS + 1))
+    top = "\n    ".join(f"if ($k == {i + 1}) {{ $top = $d{i}; }}" for i in range(LEVELS))
+    parts = "\n      ".join(f'if ($k > {i}) {{ printf("C %d {i} %s\\n", tid, str($d{i}->d_name.name, {NAMELEN})); }}'
+                            for i in range(LEVELS))
     return f"""
 BEGIN {{ printf("START\\n"); }}
 tracepoint:syscalls:sys_enter_execve {{
@@ -338,45 +346,73 @@ tracepoint:syscalls:sys_enter_execve {{
 }}
 tracepoint:sched:sched_process_exit /pid == tid/ {{ delete(@stamp[pid]); }}
 fexit:vfs_getattr /@stamp[pid] == 0/ {{
-  $p = path(args->path);
-  if (strncmp($p, "{pre}", {len(pre)}) == 0 && strncmp($p, "{broker}", {len(broker)}) != 0) {{
-    printf("S %d %s\\n", pid, $p);
+  $d0 = args->path->dentry;
+{walk}
+  $k = 0;
+  {find}
+  if ($k > 0) {{
+    $top = $d0;
+    {top}
+    if (str($top->d_name.name, {NAMELEN}) != "broker") {{
+      {parts}
+      printf("E %d %d %d\\n", tid, pid, $k);
+    }}
   }}
 }}
 END {{ clear(@stamp); printf("END\\n"); }}
 """
 
 
+def kernel_dev(st_dev):
+    """A stat's st_dev as the kernel's s_dev holds it (MKDEV: major << 20 | minor)."""
+    return os.major(st_dev) << 20 | os.minor(st_dev)
+
+
 def stat_lines(lines, root):
-    """(problem or None, path) for each line of a stat trace; the first item None when well
+    """(problem or None, path) for each stat a stat trace holds; the first item None when well
     formed. A trace that did not start, did not end, lost events or never saw the control stat
-    is a problem."""
+    is a problem, as is a path part that may have been cut short."""
     started = ended = control = False
+    parts = {}  # tid -> {index: name}
     for line in lines:
         line = line.rstrip("\n")
         if line == "START":
             started = True
         elif line == "END":
             ended = True
-        elif line.startswith("S ") and started and not ended:
-            parts = line.split(" ", 2)
-            if len(parts) != 3 or not parts[1].isdigit() or not parts[2].startswith("/"):
+        elif line.startswith(("C ", "E ")) and started and not ended:
+            f = line.split(" ", 3)
+            if line.startswith("C ") and len(f) == 4 and f[1].isdigit() and f[2].isdigit() and f[3]:
+                parts.setdefault(f[1], {})[int(f[2])] = f[3]
+                continue
+            if not (line.startswith("E ") and len(f) == 4 and all(x.isdigit() for x in f[1:])):
                 yield f"stat trace: unreadable line {line!r}", None
                 continue
-            path = parts[2]
-            if len(path) >= STRLEN - 1:
-                yield f"stat trace: a path may be cut short at {STRLEN} bytes: {path!r}", None
+            got, k = parts.pop(f[1], {}), int(f[3])
+            if sorted(got) != list(range(k)):
+                yield f"stat trace: process {f[2]} stat a path whose parts did not all arrive ({sorted(got)} of {k})", None
                 continue
+            if any(len(n.encode("utf-8", "surrogateescape")) >= NAMELEN - 1 for n in got.values()):
+                yield f"stat trace: a path part may be cut short at {NAMELEN} bytes: {got}", None
+                continue
+            path = posixpath.join(root, *(got[i] for i in reversed(range(k))))
             control |= path == posixpath.join(root, STAT_CONTROL)
             yield None, path
         elif line.startswith("Attaching ") and not started:
             continue
         else:
             yield f"stat trace: unexpected line {line!r} (lost events, or an error)", None
+    if parts:
+        yield f"stat trace: path parts with no end line, from threads {sorted(parts)}", None
     if not started or not ended:
         yield "stat trace: the stat tracer did not run from start to end", None
     elif not control:
         yield f"stat trace: the control stat of {STAT_CONTROL} is missing: the tracer saw no stats", None
+
+
+def too_deep(files):
+    """Tracked files outside broker/ deeper than the probe looks: their stats would go unseen."""
+    return sorted(f for f in files if not f.startswith("broker/") and f.count("/") + 1 >= LEVELS)
 
 
 def audit(traces, root, read=None, files=None, start_cwd=None, stats=()):
@@ -403,6 +439,9 @@ def audit(traces, root, read=None, files=None, start_cwd=None, stats=()):
             problems.append(f"{trace}: no test binary ran ({n} path accesses): not a test trace")
         if not exited:
             problems.append(f"{trace}: the traced command's first process never exited in it: the trace was cut short")
+    if stats:
+        for f in too_deep(files):
+            problems.append(f"tracked file deeper than the stat probe looks ({LEVELS} parts): {f}")
     for st in stats:
         for problem, path in stat_lines(read_lines([st]), root):
             if problem:
@@ -449,8 +488,9 @@ def with_stats(out, root, sudo, body, wait=120):
     if not bpftrace:
         print("race_reads: bpftrace is not installed", file=sys.stderr)
         return 2
+    st = os.stat(root)
     with open(out, "wb") as f:
-        tracer = subprocess.Popen([*sudo, "env", f"BPFTRACE_MAX_STRLEN={STRLEN}", bpftrace, "-e", stats_program(root)],
+        tracer = subprocess.Popen([*sudo, "env", bpftrace, "-e", stats_program(st.st_ino, kernel_dev(st.st_dev))],
                                   stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
     try:
         deadline = time.monotonic() + wait
