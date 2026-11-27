@@ -280,4 +280,5 @@ func mutgateKills(t *testing.T) {
 	t.Run("PutFactorsStopsAtAFileItCannotRead", putFactorsStopsAtAFileItCannotRead)
 	t.Run("ValidPassphraseWordRules", validPassphraseWordRules)
 	t.Run("StoreRecoveryKeyRefusesASymbolOutsideTheAlphabet", storeRecoveryKeyRefusesASymbolOutsideTheAlphabet)
+	mutgateKills2(t)
 }
