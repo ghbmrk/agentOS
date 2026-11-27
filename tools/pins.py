@@ -81,8 +81,9 @@ FETCH_EXEMPT = {
                                     ".curlrc; downloads nothing"),
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
     "tests/test_image.py": (1, "a busybox wget shebang as fixture text"),
-    "tests/test_pins.py": (257, "this reader's test cases"),
+    "tests/test_pins.py": (259, "this reader's test cases"),
     "tests/test_zz_pip_build_isolation.py": (21, "hashed pip installs as fixture text for the build-isolation credit"),
+    "tests/test_zz_pip_env.py": (34, "PIP_* variables beside hashed pip installs as fixture text"),
     "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
@@ -120,6 +121,13 @@ PIP_VALUE = frozenset(["-r", "--requirement", "--only-binary"])  # each takes th
 REQ_FILE = re.compile(r"(?:[^/]*[-_.])?requirements[^/]*\.(?:txt|in)")  # the names `scanned` reads as pip requirements files
 GO_UNCHECKED = re.compile(r"\bGOSUMDB=off\b|\bGONOSUMDB\b|\bGONOSUMCHECK\b|\bGOINSECURE\b|\bGOPRIVATE\b|"
                           r"\bGOFLAGS=\S*-insecure")
+# Any `PIP_` variable name (CI-pin-build-isolation-fu, #6727): pip reads every `PIP_<option>` from its
+# environment, and some add to the command line rather than yield to it (`PIP_REQUIREMENT` appends a
+# requirements file, `PIP_CONSTRAINT`, `PIP_CONFIG_FILE`, `PIP_NO_BINARY`, `PIP_INDEX_URL`), so a credited
+# hashed install could still build an sdist in isolation. Fail closed: every such word counts, wherever it
+# sits (an assignment, `export`, a workflow `env:` key at any level, a `$GITHUB_ENV` line, a read), in any
+# case (Windows upper-cases environment names) and with any or no suffix (`PIP_${X}`).
+PIP_ENV = re.compile(r"(?<![A-Za-z0-9_])PIP_[A-Za-z0-9_]*", re.I)
 
 
 SEPARATORS = r";|&(){}`<>"
@@ -211,7 +219,7 @@ def tool_sites(line, credit=True):
     `_credited` reads as safe. A credit is read only from words before the first one starting `#`, and none
     at all where `credit` is false (the caller found quotes, a backslash, an unquoted `$` or a brace that
     may move a boundary or expand into words this reader does not see)."""
-    n = len(GO_UNCHECKED.findall(line))
+    n = len(GO_UNCHECKED.findall(line)) + len(PIP_ENV.findall(line))
     n += sum(1 for w in WORDS.split(line) if _name(w))
     n += sum(1 for w in re.split(r"[\s;|&(){}`<>,=$]+", line) if re.search(r"[][]", w) and _name(w))  # `pi[p]`
     if credit:
@@ -319,7 +327,7 @@ def _unquote(line):
 
 
 def _named(text):
-    return sum(1 for w in WORDS.split(text) if _name(w) or w.rsplit("/", 1)[-1] in FETCHERS)
+    return sum(1 for w in WORDS.split(text) if _name(w) or w.rsplit("/", 1)[-1] in FETCHERS) + len(PIP_ENV.findall(text))
 
 
 def hidden_sites(line):
@@ -359,7 +367,7 @@ def text_sites(text):
 GH_EXPR = re.compile(r"\$\{\{(.*?)\}\}", re.S)
 GH_LIT = re.compile(r"'((?:[^']|'')*)'")
 GH_WORDS = re.compile(r"\b(?:true|false|null|NaN|Infinity)\b|[0-9.eE+-]+")
-SPELLED = sorted(FETCHERS) + ["corepack", "npm", "npx", "pip", "pnpm", "pnpx", "yarn"]
+SPELLED = sorted(FETCHERS) + ["corepack", "npm", "npx", "pip", "pnpm", "pnpx", "yarn", "PIP_", "pip_"]
 
 
 GH_NO_TEXT = re.compile(r"\b(?:hashFiles|contains|startsWith|endsWith)\(")  # return a hash or a boolean
@@ -532,6 +540,8 @@ def py_sites(text):
             n += 1
         elif _str(node) is not None and id(node) not in docs:
             n += text_sites(_str(node))
+        elif isinstance(node, ast.keyword) and node.arg and PIP_ENV.fullmatch(node.arg):
+            n += 1  # `dict(PIP_REQUIREMENT=x)`, `os.environ.update(PIP_X=y)`
         if any(_net(m) for m in _dyn(node, bound)):
             n += not text_sites(_str(node.args[0]))  # `import_module("requests")`; "urllib.request" counts as text
     return n + len(reached - imported)
