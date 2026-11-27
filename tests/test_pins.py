@@ -277,6 +277,10 @@ class Repository(unittest.TestCase):
                   "tools/board.py", "image/mkosi/mkosi.extra/usr/lib/agentos/health"):
             self.assertIn(f, kinds)  # workflows, actions, scripts with and without an extension, Python
         self.assertNotIn("tools/pins.py", kinds)
+        # CI-pin-build-isolation (#6706): a tracked requirements file is read for option lines.
+        for f in ("tests/requirements.txt", "tests/requirements-browser.txt"):
+            self.assertEqual(kinds.get(f), "requirements", f)
+        self.assertNotIn("broker/clerk/header/requests.txt", kinds)
         found = {f: n for f, n in ((f, pins.fetch_sites(ROOT / f, k)) for f, k in kinds.items()) if n}
         listed = {f: v[1] for f, v in pins.FETCH_NOT_YET.items()}
         listed.update({f: v[0] for f, v in pins.FETCH_EXEMPT.items()})
@@ -573,10 +577,17 @@ class FollowUp2(unittest.TestCase):
         for text in ["corepack yarn@1 add x", "corepack pnpm@8 i"]:  # corepack and the manager it runs
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 2)
+        # CI-pin-build-isolation (#6706): a hashed install that may build an sdist in an isolated env fetches
+        # its build backend unhashed, so it earns no credit (tests/test_zz_pip_build_isolation.py).
         for text in ["pip install --require-hashes -r r.txt", "python -m pip install --no-deps --require-hashes \\\n  -r r.txt",
+                     'pip install --require-hashes -r "$R"', 'pip install --only-binary :all: --require-hashes -r "$R"']:
+            with self.subTest(text=text):
+                self.assertEqual(pins.text_sites(text), 1)
+        for text in ["pip install --no-build-isolation --require-hashes -r requirements.txt",
+                     "python -m pip install --no-deps --only-binary=:all: --require-hashes \\\n  -r requirements.txt",
                      "npm ci --ignore-scripts", "go install x@v1.2.3", "go mod download",
                      "pip list", "GOSUMDB=sum.golang.org go get x", "set -o pipefail", "pipx run x", "cat npm.log",
-                     'pip install --require-hashes -r "$R"', "pip show x",
+                     'pip install --only-binary :all: --require-hashes -r "requirements.txt"', "pip show x",
                      "python -m pip install --no-deps --only-binary=:all: --require-hashes -r tests/requirements.txt"]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 0)

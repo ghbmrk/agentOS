@@ -46,7 +46,7 @@ Growth cites SPEC LOG-4, D-139 and Mark's card cmsg_01R91wiieBzMSvPKFsAJVvuKKsWF
 
 Not `log.go`: `Open` already keeps non-widening entries. Waits for #3112, #3113 and #3116 to merge (D-111: they hold `state.go` and `kernel.go`).
 
-**Guard files:** none (no new broker package). The trusted-core line count grows, so the PR needs a `Trusted-core:` line naming its own D-row (D-159 rule 3); tier A reviews apply.
+**Guard files:** none (no new broker package). The trusted-core line count grows, so the PR needs a `trusted-core #<PR> -- <decision ID>` line in `tools/trusted_base_reasons.txt` naming its own D-row (D-159 rule 3); tier A reviews apply.
 
 ## Acceptance tests
 
