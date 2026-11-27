@@ -169,7 +169,8 @@ class Requirements(unittest.TestCase):
         # records-only step, since scanned() opens every tracked file).
         for f in ("tests/requirements.txt", "tests/requirements-browser.txt"):
             with self.subTest(f=f):
-                self.assertEqual(pins.fetch_sites(ROOT / f, "requirements"), 0)
+                self.assertEqual(pins.fetch_sites(ROOT / f, "requirements"), 0,
+                                 "each line must be `name==version` followed only by `--hash=sha256:<64 hex>` words")
                 self.assertGreater(pins.req_sites((ROOT / f).read_text() + "--no-binary :all:\n"), 0)
 
 

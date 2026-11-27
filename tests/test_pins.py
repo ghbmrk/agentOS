@@ -284,7 +284,9 @@ class Repository(unittest.TestCase):
         found = {f: n for f, n in ((f, pins.fetch_sites(ROOT / f, k)) for f, k in kinds.items()) if n}
         listed = {f: v[1] for f, v in pins.FETCH_NOT_YET.items()}
         listed.update({f: v[0] for f, v in pins.FETCH_EXEMPT.items()})
-        self.assertEqual(found, listed, "fetch through tools/pins.py, or set the file's count to what it holds")
+        self.assertEqual(found, listed, "fetch through tools/pins.py, or set the file's count to what it holds; a hashed "
+                         "pip install also needs --only-binary=:all: or --no-build-isolation, a requirements file "
+                         "only plain `name==version --hash=sha256:...` lines, and no PIP_* variable may be set")
         self.assertEqual(set(pins.FETCH_NOT_YET) & set(pins.FETCH_EXEMPT), set())
         for row, _ in pins.FETCH_NOT_YET.values():
             self.assertRegex(row, r"^#[1-9][0-9]*$")
@@ -474,7 +476,7 @@ class FollowUp2(unittest.TestCase):
                      # No flag is credited to yarn or pnpm: yarn 1 ignores --immutable (L3 2, Potency 2 on #6593).
                      "yarn install --immutable", "yarn install --frozen-lockfile", "pnpm i --frozen-lockfile",
                      # Comment and flag tests read raw words, not basenames (L3 1, Potency 1 on #6593).
-                     "PIP_CACHE_DIR=/tmp/#c pip install foo", "HOME=/tmp/#x pip install foo",
+                     "TMPDIR=/tmp/#c pip install foo", "HOME=/tmp/#x pip install foo",
                      "pip install --index-url https://h/--require-hashes foo",
                      "sudo -u bob npx foo", "timeout -s KILL 60 npx foo", "xargs -I % npx foo %",
                      # Fail closed (step back on #6593): a `#` word never hides a name, and no credit is read
