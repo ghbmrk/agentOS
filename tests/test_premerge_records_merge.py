@@ -38,6 +38,7 @@ class RecordsMerged(unittest.TestCase):
         self.write("broker/q/b.go", "package q\n")
         self.write("tools/mutgate.py", "# gate\n")
         self.write("notes.md", "n\n")
+        self.write(premerge.RECORDS_PROOF[0], f"class Records:\n{premerge.RECORDS_PROOF[1]}\n        run('records')\n")
         self.commit("base")
         git(self.r, "checkout", "-q", "-b", "pr")
 
@@ -146,6 +147,46 @@ class RecordsMerged(unittest.TestCase):
                     self.assertEqual(self.merged({}), ((f"needs-main-merge {tool}", []), []))
                     git(self.r, "merge", "-q", "--no-edit", "main")
                     self.assertEqual(self.merged({})[0][0], None)
+
+    def tool_pr(self, tool="tools/mutgate.py"):
+        self.write(tool, "# stricter\n")
+        self.write("broker/p/MUTANTS-EQUIVALENT", "# proofs only the new check accepts\n")
+        self.commit("check and its records")
+
+    def test_a_pr_changing_the_check_is_read_by_its_own_ci_once_main_is_merged_in(self):
+        # #6718 item 1: base's older copy refuses the PR's re-proved records, which merging main in never clears.
+        # Once main changed nothing the check reads since the merge base, the PR's own CI ran the PR's copy on the
+        # same inputs the merge has, so the gate skips its read instead of holding as needs-records forever.
+        self.tool_pr()
+        self.on_main("broker/q/b.go", "package q // no record here\n")
+        self.assertEqual(self.merged({"merge": {PROBLEM}}), ((None, []), []))
+
+    def test_main_changing_and_restoring_a_record_still_owes_a_main_merge(self):
+        # CI ran on a merge with main as it was at the push: a record main changed, then restored, was read then.
+        self.tool_pr()
+        self.on_main("broker/p/a.go", "package p // changed\n")
+        self.on_main("broker/p/a.go", "package p\n\nfunc F() int {\n\treturn 1\n}\n")
+        self.assertEqual(self.merged({}), (("needs-main-merge tools/mutgate.py", []), []))
+        git(self.r, "merge", "-q", "--no-edit", "main")
+        self.assertEqual(self.merged({"merge": {PROBLEM}}), ((None, []), []))
+
+    def test_code_under_a_record_only_the_pr_adds_owes_a_main_merge(self):
+        self.write("broker/q/MUTANTS-EQUIVALENT", "# new\n")
+        self.tool_pr()
+        self.on_main("broker/q/b.go", "package q // changed under the PR's new record\n")
+        self.assertEqual(self.merged({})[0], ("needs-main-merge tools/mutgate.py", []))
+
+    def test_a_pr_changing_the_records_proof_is_read_with_bases_copy(self):
+        # The route rests on ci.yml running the PR's copy in test_every_record_in_the_repository_resolves: a PR that
+        # edits or drops that test is read as before, so a real new record problem still holds.
+        self.tool_pr()
+        self.assertEqual(self.merged({"merge": {PROBLEM}})[0], (None, []))
+        for text in (f"class Records:\n{premerge.RECORDS_PROOF[1]}\n        return\n", "class Records:\n    pass\n"):
+            with self.subTest(text):
+                self.write(premerge.RECORDS_PROOF[0], text)
+                self.commit("proof edited")
+                self.assertEqual(self.merged({"merge": {PROBLEM}})[0],
+                                 ("needs-records broker/p/MUTANTS-EQUIVALENT", [PROBLEM]))
 
     def test_every_file_mutgate_loads_is_a_records_tool(self):
         # #6717 L3: risk_tier.py loads record_merge.py to read core.txt, so a PR changing it changes the check too.
@@ -259,6 +300,19 @@ class CheckGate(unittest.TestCase):
 
 
 class Workflow(unittest.TestCase):
+    def test_the_records_proof_is_in_this_checkout(self):
+        path, line = premerge.RECORDS_PROOF
+        body = premerge._proof((ROOT / path).read_text())
+        self.assertIn(line, body)
+        self.assertIn('"records"', body)  # it runs `mutgate.py records` on the checkout CI tests
+
+    def test_a_merge_by_hand_reruns_the_gate_first(self):
+        # #6718 item 2: a manual merge hours after the last gate run would merge on that older records read.
+        ops = (ROOT / "docs/OPERATING.md").read_text().split("\n## 7.", 1)[1]
+        self.assertIn("gh workflow run premerge.yml -f pr=N", ops)
+        self.assertIn("workflow_dispatch:", (ROOT / ".github/workflows/premerge.yml").read_text())
+
+
     def test_the_gate_job_installs_go_mods_toolchain(self):
         wf = (ROOT / ".github/workflows/premerge.yml").read_text()
         want = re.search(r"^toolchain go(\S+)$", (ROOT / "broker/go.mod").read_text(), re.M).group(1)
