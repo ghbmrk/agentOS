@@ -277,6 +277,10 @@ class Repository(unittest.TestCase):
                   "tools/board.py", "image/mkosi/mkosi.extra/usr/lib/agentos/health"):
             self.assertIn(f, kinds)  # workflows, actions, scripts with and without an extension, Python
         self.assertNotIn("tools/pins.py", kinds)
+        # CI-pin-build-isolation (#6706): a tracked requirements file is read for option lines.
+        for f in ("tests/requirements.txt", "tests/requirements-browser.txt"):
+            self.assertEqual(kinds.get(f), "requirements", f)
+        self.assertNotIn("broker/clerk/header/requests.txt", kinds)
         found = {f: n for f, n in ((f, pins.fetch_sites(ROOT / f, k)) for f, k in kinds.items()) if n}
         listed = {f: v[1] for f, v in pins.FETCH_NOT_YET.items()}
         listed.update({f: v[0] for f, v in pins.FETCH_EXEMPT.items()})

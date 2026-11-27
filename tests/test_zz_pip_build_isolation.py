@@ -95,14 +95,13 @@ class Requirements(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(pins.req_sites(text), n)
 
-    def test_tracked_requirements_files_are_scanned_and_hold_no_option_line(self):
-        kinds = pins.scanned()
+    def test_tracked_requirements_files_hold_no_option_line(self):
+        # tests/test_pins.py checks pins.scanned() reads these as kind "requirements" (it runs in the
+        # records-only step, since scanned() opens every tracked file).
         for f in ("tests/requirements.txt", "tests/requirements-browser.txt"):
             with self.subTest(f=f):
-                self.assertEqual(kinds.get(f), "requirements")
                 self.assertEqual(pins.fetch_sites(ROOT / f, "requirements"), 0)
                 self.assertGreater(pins.req_sites((ROOT / f).read_text() + "--no-binary :all:\n"), 0)
-        self.assertNotIn("broker/clerk/header/requests.txt", kinds)
 
 
 if __name__ == "__main__":
