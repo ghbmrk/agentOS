@@ -573,10 +573,17 @@ class FollowUp2(unittest.TestCase):
         for text in ["corepack yarn@1 add x", "corepack pnpm@8 i"]:  # corepack and the manager it runs
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 2)
+        # CI-pin-build-isolation (#6706): a hashed install that may build an sdist in an isolated env fetches
+        # its build backend unhashed, so it earns no credit (tests/test_zz_pip_build_isolation.py).
         for text in ["pip install --require-hashes -r r.txt", "python -m pip install --no-deps --require-hashes \\\n  -r r.txt",
+                     'pip install --require-hashes -r "$R"']:
+            with self.subTest(text=text):
+                self.assertEqual(pins.text_sites(text), 1)
+        for text in ["pip install --no-build-isolation --require-hashes -r r.txt",
+                     "python -m pip install --no-deps --only-binary=:all: --require-hashes \\\n  -r r.txt",
                      "npm ci --ignore-scripts", "go install x@v1.2.3", "go mod download",
                      "pip list", "GOSUMDB=sum.golang.org go get x", "set -o pipefail", "pipx run x", "cat npm.log",
-                     'pip install --require-hashes -r "$R"', "pip show x",
+                     'pip install --only-binary :all: --require-hashes -r "$R"', "pip show x",
                      "python -m pip install --no-deps --only-binary=:all: --require-hashes -r tests/requirements.txt"]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 0)
