@@ -99,6 +99,21 @@ func readPublishedRefusesEmptyAndOversized(t *testing.T) {
 	}
 }
 
+// readSecretMax refuses a secret file one byte over its bound and returns
+// none of it (main.go:782); a file of exactly the bound reads whole.
+func readSecretMaxRefusesOversized(t *testing.T) {
+	const max = 16
+	p := filepath.Join(t.TempDir(), "secret")
+	noErr(t, os.WriteFile(p, bytes.Repeat([]byte{1}, max+1), 0o600))
+	if b, err := readSecretMax(p, max); err == nil || b != nil || !strings.Contains(err.Error(), "is over") {
+		t.Fatalf("%d bytes: got %d bytes, %v; want the over-size refusal", max+1, len(b), err)
+	}
+	noErr(t, os.Truncate(p, max))
+	if b, err := readSecretMax(p, max); err != nil || len(b) != max {
+		t.Fatalf("%d bytes: got %d, %v", max, len(b), err)
+	}
+}
+
 // writeOnce stops at the call that refused, and leaves nothing at path:
 // a missing directory at its open (stage.go:160, :161), a temporary name
 // too long to create at its create (:170).
@@ -271,6 +286,7 @@ func mutgateKills(t *testing.T) {
 	t.Run("StagePageCAStopsWhenAPathDoesNotCheck", stagePageCAStopsWhenAPathDoesNotCheck)
 	t.Run("StagePageCAWithNoBuildTime", stagePageCAWithNoBuildTime)
 	t.Run("ReadPublishedRefusesEmptyAndOversized", readPublishedRefusesEmptyAndOversized)
+	t.Run("ReadSecretMaxRefusesOversized", readSecretMaxRefusesOversized)
 	t.Run("WriteOnceStopsAtTheRefusingCall", writeOnceStopsAtTheRefusingCall)
 	t.Run("WriteOnceFailedWriteLeavesNothing", writeOnceFailedWriteLeavesNothing)
 	t.Run("FileHelpersCloseTheirDescriptors", fileHelpersCloseTheirDescriptors)
