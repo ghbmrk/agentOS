@@ -30,6 +30,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
@@ -192,7 +193,7 @@ func (b *box) enrolled() *seal.Store {
 	if err != nil || !k.PublicKey.Equal(f.PolicyKey) {
 		t.Fatalf("the pinned key is not the store's: %v", err)
 	}
-	for _, fac := range []seal.Factor{seal.Passphrase{Phrase: b.pass}, seal.Recovery{Key: b.recovery}} {
+	for _, fac := range []seal.Factor{seal.Passphrase{Phrase: secret.Hide(b.pass)}, seal.Recovery{Key: secret.Hide(b.recovery)}} {
 		o, err := seal.Unlock(b.c.storePath(), fac)
 		if err != nil {
 			t.Fatalf("%T: %v", fac, err)
@@ -646,7 +647,7 @@ func (b *box) who() []byte {
 	t.Helper()
 	f, err := seal.Pinned(b.sw.TPM(), b.c.storePath())
 	if errors.Is(err, tpmseal.ErrNoPins) {
-		st, err := seal.Unlock(b.c.storePath(), seal.Passphrase{Phrase: b.pass})
+		st, err := seal.Unlock(b.c.storePath(), seal.Passphrase{Phrase: secret.Hide(b.pass)})
 		if err != nil {
 			t.Fatalf("no pins and the passphrase fails: %v", err)
 		}
@@ -684,7 +685,7 @@ func TestRotate(t *testing.T) {
 					t.Fatalf("got %v, want the crash", err)
 				}
 				now := b.who()
-				nst := get(seal.Unlock(b.c.storePath(), seal.Passphrase{Phrase: b.pass}))
+				nst := get(seal.Unlock(b.c.storePath(), seal.Passphrase{Phrase: secret.Hide(b.pass)}))
 				next, ok, _ := nst.Get(nextKeyEntry)
 				nst.Close()
 				var nextPub []byte
@@ -808,6 +809,7 @@ func TestParse(t *testing.T) {
 
 // The factors' files must be root-only (here: only the test's uid).
 func TestFactorFilesMustBePrivate(t *testing.T) {
+	mutgateKills(t)
 	b := newBox(t)
 	noErr(t, os.Chmod(b.c.passphrase, 0o644))
 	if err := enroll(b.c, b.sw.TPM()); err == nil {
@@ -849,7 +851,7 @@ func TestRotateCutAfterEachTPMCommand(t *testing.T) {
 		err := rotate(b.c, &cutTPM{tpm: b.sw.TPM(), n: n})
 		b.reboot()
 		now := b.who()
-		st := get(seal.Unlock(b.c.storePath(), seal.Passphrase{Phrase: b.pass}))
+		st := get(seal.Unlock(b.c.storePath(), seal.Passphrase{Phrase: secret.Hide(b.pass)}))
 		var nextPub []byte
 		if next, found, _ := st.Get(nextKeyEntry); found {
 			nextPub = get(get(tpmseal.ParsePolicyKey(next)).PublicKey.Bytes())
@@ -1157,7 +1159,7 @@ func newRotBox(t *testing.T) *rotBox {
 	b := newBox(t)
 	noErr(t, enroll(b.c, b.sw.TPM()))
 	b.c.now = func() time.Time { return testNow }
-	st := get(seal.Unlock(b.c.storePath(), seal.Passphrase{Phrase: b.pass}))
+	st := get(seal.Unlock(b.c.storePath(), seal.Passphrase{Phrase: secret.Hide(b.pass)}))
 	defer st.Close()
 	return &rotBox{box: b, head: get(st.HeadKey()), old: get(storeRecipientID(st))}
 }
@@ -1212,7 +1214,7 @@ func slotIDs(st *seal.Store, k seal.Kind) []string {
 // way, so the old card is retired for good.
 func TestRotateRecoveryReplacesSlotAndRecipient(t *testing.T) {
 	b := newRotBox(t)
-	before := get(seal.Unlock(b.c.storePath(), seal.Passphrase{Phrase: b.pass}))
+	before := get(seal.Unlock(b.c.storePath(), seal.Passphrase{Phrase: secret.Hide(b.pass)}))
 	pass, tpm := slotIDs(before, seal.KindPassphrase), slotIDs(before, seal.KindTPM)
 	before.Close()
 
@@ -1220,10 +1222,10 @@ func TestRotateRecoveryReplacesSlotAndRecipient(t *testing.T) {
 	if w := b.ask(request("passphrase", b.pass, next, approve(b.head, handoff.RouteCard, b.old, recipientID(next)))); w != "ok" {
 		t.Fatalf("the rotation answered %q", w)
 	}
-	if _, err := seal.Unlock(b.c.storePath(), seal.Recovery{Key: b.recovery}); !errors.Is(err, seal.ErrWrongFactor) {
+	if _, err := seal.Unlock(b.c.storePath(), seal.Recovery{Key: secret.Hide(b.recovery)}); !errors.Is(err, seal.ErrWrongFactor) {
 		t.Fatalf("the old recovery key after the rotation: got %v, want ErrWrongFactor", err)
 	}
-	st := get(seal.Unlock(b.c.storePath(), seal.Recovery{Key: next}))
+	st := get(seal.Unlock(b.c.storePath(), seal.Recovery{Key: secret.Hide(next)}))
 	defer st.Close()
 	v, ok, err := st.Get(handoff.RecipientEntry)
 	if err != nil || !ok {
@@ -1244,11 +1246,11 @@ func TestRotateRecoveryReplacesSlotAndRecipient(t *testing.T) {
 		t.Fatalf("the rotation by the new key answered %q", w)
 	}
 	for _, k := range [][]byte{b.recovery, next} {
-		if _, err := seal.Unlock(b.c.storePath(), seal.Recovery{Key: k}); !errors.Is(err, seal.ErrWrongFactor) {
+		if _, err := seal.Unlock(b.c.storePath(), seal.Recovery{Key: secret.Hide(k)}); !errors.Is(err, seal.ErrWrongFactor) {
 			t.Fatalf("a retired recovery key: got %v, want ErrWrongFactor", err)
 		}
 	}
-	get(seal.Unlock(b.c.storePath(), seal.Recovery{Key: third})).Close()
+	get(seal.Unlock(b.c.storePath(), seal.Recovery{Key: secret.Hide(third)})).Close()
 }
 
 func slicesEqual(a, b []string) bool { return strings.Join(a, ",") == strings.Join(b, ",") }
@@ -1262,7 +1264,7 @@ func (b *rotBox) enrolledAfterRotation(next []byte) {
 	st := get(seal.Unlock(b.c.storePath(), f))
 	b.openAnchor(st)
 	st.Close()
-	get(seal.Unlock(b.c.storePath(), seal.Passphrase{Phrase: b.pass})).Close()
+	get(seal.Unlock(b.c.storePath(), seal.Passphrase{Phrase: secret.Hide(b.pass)})).Close()
 }
 
 // MIG-4-recovery-r2: every refusal answers its fixed word and leaves the
@@ -1307,7 +1309,7 @@ func TestRotateRecoveryRefuses(t *testing.T) {
 			}
 		})
 	}
-	get(seal.Unlock(b.c.storePath(), seal.Recovery{Key: b.recovery})).Close()
+	get(seal.Unlock(b.c.storePath(), seal.Recovery{Key: secret.Hide(b.recovery)})).Close()
 	// The approval that every case above refused around still works.
 	if w := b.ask(request("passphrase", b.pass, next, good)); w != "ok" {
 		t.Fatalf("the good request after the refusals answered %q", w)
@@ -1371,7 +1373,7 @@ func TestRotateRecoveryRetryAfterLostAnswer(t *testing.T) {
 			}
 		})
 	}
-	st := get(seal.Unlock(b.c.storePath(), seal.Recovery{Key: next}))
+	st := get(seal.Unlock(b.c.storePath(), seal.Recovery{Key: secret.Hide(next)}))
 	defer st.Close()
 	if got := get(storeRecipientID(st)); got != nextID {
 		t.Fatalf("the store's recipient is %q, not the new key's", got)
@@ -1400,7 +1402,7 @@ func TestRotateRecoveryRetryOnADamagedStore(t *testing.T) {
 	f.MAC[0] ^= 1
 	raw = bytes.Replace(raw, append([]byte(`"mac":`), good...), append([]byte(`"mac":`), get(json.Marshal(f.MAC))...), 1)
 	noErr(t, os.WriteFile(b.c.storePath(), raw, 0o600))
-	if _, err := seal.Unlock(b.c.storePath(), seal.Recovery{Key: next}); !errors.Is(err, seal.ErrTampered) {
+	if _, err := seal.Unlock(b.c.storePath(), seal.Recovery{Key: secret.Hide(next)}); !errors.Is(err, seal.ErrTampered) {
 		t.Fatalf("next on the damaged store: got %v, want ErrTampered", err)
 	}
 	again := approve(b.head, handoff.RouteCard, b.old, nextID)
@@ -1428,7 +1430,7 @@ func TestRotateRecoveryRetryOnADamagedStore(t *testing.T) {
 // any recipient is stale.
 func TestRotateRecoveryPreE1Store(t *testing.T) {
 	b := newRotBox(t)
-	st := get(seal.Unlock(b.c.storePath(), seal.Passphrase{Phrase: b.pass}))
+	st := get(seal.Unlock(b.c.storePath(), seal.Passphrase{Phrase: secret.Hide(b.pass)}))
 	noErr(t, st.Delete(handoff.RecipientEntry))
 	st.Close()
 	next := newKey(t)
@@ -1438,7 +1440,7 @@ func TestRotateRecoveryPreE1Store(t *testing.T) {
 	if w := b.ask(request("passphrase", b.pass, next, approve(b.head, handoff.RouteCard, "", recipientID(next)))); w != "ok" {
 		t.Fatalf("the first recipient answered %q", w)
 	}
-	st = get(seal.Unlock(b.c.storePath(), seal.Recovery{Key: next}))
+	st = get(seal.Unlock(b.c.storePath(), seal.Recovery{Key: secret.Hide(next)}))
 	defer st.Close()
 	if got := get(storeRecipientID(st)); got != recipientID(next) {
 		t.Fatalf("the store's recipient is %q, not the new key's", got)
