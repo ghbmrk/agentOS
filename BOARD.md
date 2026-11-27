@@ -80,7 +80,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | SPEC-krn12-owner-honey | SPEC-krn12-owner-honey: name the owner-side honey key case in KRN-12 Response (KRN-12) | #4219 | queued (release; L1 spec-diff; after #4167; from #4219) |
 | EDGE-link-edge | EDGE-link-edge: the edge box's own side of the link: its key, hello, pin of the core's link key, and new-core acceptance after a restore (HW-15; needs brief). | EDGE-link-core-c2 | queued (release; tier A; the unowned gap in briefs/EDGE-link-core.md) |
 | ERASE-contain-first | ERASE-contain-first: contain the reader lineage before the erase is logged, the guest plane refuses a contained lineage's plans, and the erase confirmation lists the cancelled plans (LOG-4) | #3870 | queued(release; tier A; size M; from #4805 reviews) |
-| KRN-keys-print-factors | KRN-keys-print-factors: the sealed store's factors print no passphrase, recovery key or PIN (DECOY-b-8, CLK-1) | #4833 | building(release; tier A; size S; waits on #4833, #4845 and sub B's OK for localui/recovery_test.go) |
 | MIG-4-plan-login-texts | Owner texts for the plan sign-in's `signin-code` and the late-exchange end, once the home page runs on the plan host (#3180 item 2; CH-12, CLK-7). | MIG-4-plan-login-texts | queued (release; after #2780; sub B) |
 
 ## Harness and operating model
@@ -394,10 +393,9 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | SPEC-krn2-core-record | SPEC-krn2-core-record: KRN-2 says the core grows under a committed record line, not a PR-body line. Release. | #6404 | building (release; L1 spec-diff) |
 | MUT-6368-fu | MUT-6368-fu: unlock sets the anchors file mode before the rename, seal tests pin that only TPM slots carry Policies, and a test pins the store-key wipe on every return. Release. | #6368, #6384 | queued (release; tier A) |
 | REV-CHK-links-ns10 | REV-CHK-links-ns10: a link planted at run time on a made path's way reaches no check | #6474 re-plan | queued (release; tier A; kernel lane) |
-| VULN-expatw-link-check | VULN-expatw-link-check: the image sweep fails when any ELF links libexpatw.so.1, so the expat record's 'UTF-8 build only' reason is a build property. Release. | #6542, #6382 | queued (release; tier A; after #6382 and #6543) |
 | ENF-neigh-test-deadline | ENF-neigh-test-deadline: TestNeighboursFollowHolds waits on a barrier with a deadline, not a fixed 100 ms sleep. Release. | #5951 | building (release; tier B) |
 | ENF-nft-test-deadline-2 | ENF-nft-test-deadline-2: replace fixed 100 ms sleeps in the other nft netns tests with barriers and deadlines. Release. | #6546 | building (release; tier B) |
-| NET-2-host-shape | NET-2-host-shape: enflist.Propose refuses any host that is not LDH lower-case with two or more labels, so a signed name never stops every resolver. Release. | #6478, #6552 | queued (release; tier A) |
+| NET-2-host-shape | NET-2-host-shape: enflist.Propose refuses any host that is not LDH lower-case with two or more labels, so a signed name never stops every resolver. Release. | #6478, #6552 | building (release; tier A) |
 | ENF-label-free-mutant | ENF-label-free-mutant: TestSharedLabelFreeLoad does not catch a record written when the label set did nothing. Release. | #6551 | queued (release; tier A) |
 | VULN-static-elf-go-entry | VULN-static-elf-go-entry: a go file's entry point inside a listed Go function, .text its only executable section, nfunc > 0, exact go: marker list. Release; from #6554. | #6482, #6554 | building (release; tier A) |
 | ENF-nft-test-deadline-3 | ENF-nft-test-deadline-3: barrier and caps-test teardown fail loudly on a sender-side drop or a timed-out read. Release. | #6562 | queued (release; tier A) |
@@ -418,12 +416,10 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-debian-r18 | VULN-debian-r18: accept openssl's no-fix Debian 13 advisory DEBIAN-CVE-2026-84785 so image-vulncheck passes again. Release; no-fix Debian round. | #2919, #6628 | building (release; tier A) |
 | MUT-kill-5974-owner | MUT-kill-5974-owner: kill or prove the 357 owner and localsrv survivors on main that #5974's mutgate exposed. | #5187, #5974 | queued (release; tier A) |
 | VULN-quic-import-sweep-fu | VULN-quic-import-sweep-fu: count every QUIC/datagram-BIO name holder; exempt definers by SONAME. Release; from #6672. | #6671 | building (release; tier A) |
-| TOOL-mutgate-order-marks-precision | TOOL-mutgate-order-marks-precision: a flag-defining var or an uncalled name mention widens no package | #6686, #6682 | queued (release; tier A gate file) |
 | CI-race-scope | CI-race-scope: broker-race skips PRs whose every change lies in a measured race-blind path set, backed by a read-set audit on main | #6689 | building (release; tier A gate file) |
 | PAGE-stopping-setup | PAGE-stopping-setup: setup page actions refused with 'stopping' show the stopping page (from #6619; tier A) | #6619 | queued |
 | VULN-static-elf-go-prefix | VULN-static-elf-go-prefix: a go file's executable bytes before .text held to headers and notes; the forged-table limit stated or narrowed. Release; from #6700. | #6563, #6700 | queued (release; tier A) |
 | PAGE-stopping-keep | PAGE-stopping-keep: the stopping page keeps the handler's known reply and outcome; provisions noted (from #6699 reviews; tier A) | #6619 | queued |
-| CI-pin-build-isolation-fu | CI-pin-build-isolation-fu: a PIP_* environment assignment that adds a requirements file or reopens sdists counts as a fetch site. Release. | #6723 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
