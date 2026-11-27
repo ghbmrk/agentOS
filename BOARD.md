@@ -98,7 +98,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-unmarked-gaps | VULN-unmarked-gaps: unmarked copies the string-fingerprint check cannot see (small packages, minified-only packages, copies inside the holder's own unminified scripts, a second copy in a file that already names the package) | VULN-inlined-minified (#4234) | queued (later; tier A) |
 | MET-owner-export | MET-owner-export: the box writes its weekly owner-outcome counts to records/owner/ (needs brief; after G1) | #4935; G1 | queued (release; needs brief; after G1) |
 | VULN-prune-requalify | VULN-prune-requalify: requalify the pruned OpenClaw image (PLN-5, HLD-3) | VULN-controlui-drop (#4436) | queued (release) |
-| PREMERGE-records-merge-fu | PREMERGE-records-merge-fu: tool-and-record PRs get a route out of needs-records; manual merges rerun the gate first (release; from #6717) | #6717 | queued |
+| PREMERGE-records-merge-fu | PREMERGE-records-merge-fu: tool-and-record PRs get a route out of needs-records; manual merges rerun the gate first (release; from #6717) | #6717 | building |
 
 ## Owner channel and approvals (SPEC §10)
 
@@ -403,7 +403,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-nft-test-deadline-3 | ENF-nft-test-deadline-3: barrier and caps-test teardown fail loudly on a sender-side drop or a timed-out read. Release. | #6562 | queued (release; tier A) |
 | MUT-record-deps-lint-ux | MUT-record-deps-lint-ux: one waive line per entry with every missing --dep; cite receiver-variable method calls. Release. | #6499, #6561 | queued (release; tier A) |
 | CI-mutgate-after-ci | CI-mutgate-after-ci: mutgate runs only after ci passes on the same head (premerge still requires its pass); soak fuzz max-parallel 1. | runner-capacity cut 2026-11-23 | building (gate file) |
-| CI-soak-green | CI-soak-green: triage #190 and restore a passing soak run. Release. | #6569, #6570 | queued (release) |
+| CI-soak-green | CI-soak-green: triage #190 and restore a passing soak run. Release. | #6569, #6570 | building (release) |
 | TOOL-mutgate-memcap-fu3 | TOOL-mutgate-memcap-fu3: a shim fault with no writable marker (both opens fail, write and unlink fail, or the shim dies outside shim_entry) never reads KILLED. Release. | #6512, #6557 | queued (release; tier A) |
 | CI-apt-timeout | CI-apt-timeout: every workflow apt-get call carries bounded retries and timeouts; image artifact consumers fail fast with a readable cause when build did not succeed. Release. | #6575 run 45139943672 | building (release; tier A) |
 | DRONE-sitl-pip-hashes | DRONE-sitl-pip-hashes: the SITL build's PyPI install checks hashes. Release. | #6549 | building (release; tier A) |
@@ -422,8 +422,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CI-race-scope | CI-race-scope: broker-race skips PRs whose every change lies in a measured race-blind path set, backed by a read-set audit on main | #6689 | building (release; tier A gate file) |
 | PAGE-stopping-setup | PAGE-stopping-setup: setup page actions refused with 'stopping' show the stopping page (from #6619; tier A) | #6619 | queued |
 | VULN-static-elf-go-prefix | VULN-static-elf-go-prefix: a go file's executable bytes before .text held to headers and notes; the forged-table limit stated or narrowed. Release; from #6700. | #6563, #6700 | queued (release; tier A) |
-| CI-pin-build-isolation | CI-pin-build-isolation: a hashed pip install is credited only when it cannot fetch an unhashed build backend. Release. | #6697 | queued (release; tier A) |
 | PAGE-stopping-keep | PAGE-stopping-keep: the stopping page keeps the handler's known reply and outcome; provisions noted (from #6699 reviews; tier A) | #6619 | queued |
+| CI-pin-build-isolation-fu | CI-pin-build-isolation-fu: a PIP_* environment assignment that adds a requirements file or reopens sdists counts as a fetch site. Release. | #6723 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -487,4 +487,6 @@ issue #6664: needs exactly one state label of queued, building, in review, merge
 issue #6681: a second issue for VULN-gobwas-ws-r2 (first is #6650)
 issue #6689: body has no board-row block
 issue #6691: body has no board-row block
+issue #6726: body has no board-row block
+issue #6728: body has no board-row block
 ```
