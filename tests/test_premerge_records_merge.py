@@ -161,6 +161,20 @@ class RecordsMerged(unittest.TestCase):
         self.on_main("broker/q/b.go", "package q // no record here\n")
         self.assertEqual(self.merged({"merge": {PROBLEM}}), ((None, []), []))
 
+    def test_a_check_file_outside_the_gate_files_is_read_with_bases_copy(self):
+        # #6724 L3: the lister is tier C with no Security accept, so a PR changing it (alone or with a gate file) and
+        # adding records only the changed lister resolves must not read itself.
+        outside = [f for f in premerge.RECORDS_TOOLS if not premerge.MARK_PATHS.fullmatch(f)]
+        self.assertIn("tools/mutgate_stmts.go", outside)
+        for files in ([f] for f in outside):
+            with self.subTest(files):
+                for f in files + ["tools/mutgate.py"]:
+                    self.write(f, f"# changed {f}\n")
+                self.write("broker/p/MUTANTS-EQUIVALENT", f"# proofs only the new lister accepts {files}\n")
+                self.commit("lister and its records")
+                self.assertEqual(self.merged({"merge": {PROBLEM}})[0],
+                                 ("needs-records broker/p/MUTANTS-EQUIVALENT", [PROBLEM]))
+
     def test_main_changing_and_restoring_a_record_still_owes_a_main_merge(self):
         # CI ran on a merge with main as it was at the push: a record main changed, then restored, was read then.
         self.tool_pr()

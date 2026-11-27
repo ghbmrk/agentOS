@@ -1034,7 +1034,8 @@ def records_merged(cwd, head="HEAD", base="origin/main"):
     the gate never runs from a PR, so it holds as `needs-main-merge` while any main commit since the PR's merge base
     changed a record, a .go file under a directory holding one on either side, or RECORDS_TOOLS: merging main in has CI
     run the PR's check on them. Once none did, every merge ref CI ran on had the inputs this merge has, so the PR's own
-    RECORDS_PROOF run is the read (#6718), unless the PR changed that test: then base's copy reads it as any PR."""
+    RECORDS_PROOF run is the read (#6718), unless the PR changed that test or a check file outside MARK_PATHS: then
+    base's copy reads it as any PR."""
     onto = _git(cwd, "merge-base", base, head).decode().strip()
     mine = _files(cwd, onto, head, *RECORDS_TOOLS)
     if mine:
@@ -1043,7 +1044,10 @@ def records_merged(cwd, head="HEAD", base="origin/main"):
         if _git(cwd, "log", "--first-parent", "--format=%H", f"{onto}..{base}", "--", *RECORDS_TOOLS,
                 f":(glob)broker/**/{RECORD}", *(f":(glob){d}/**/*.go" for d in sorted(held))).strip():
             return "needs-main-merge " + " ".join(mine), []
-        if (proof := _proof(_blob(cwd, base, RECORDS_PROOF[0]))) and proof == _proof(_blob(cwd, head, RECORDS_PROOF[0])):
+        # Only a check whose every changed file is a gate file (Security reviews it) is trusted to read itself: the
+        # lister tools/mutgate_stmts.go is tier C, so a PR changing it is still read with base's copy (#6724 L3).
+        if all(MARK_PATHS.fullmatch(f) for f in mine) and (proof := _proof(_blob(cwd, base, RECORDS_PROOF[0]))) \
+                and proof == _proof(_blob(cwd, head, RECORDS_PROOF[0])):
             return None, []
     out = subprocess.run(["git", "merge-tree", "--write-tree", "--no-messages", base, head], cwd=cwd, capture_output=True)
     if out.returncode == 1:  # conflicts: GitHub cannot merge it
