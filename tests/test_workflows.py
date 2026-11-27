@@ -987,6 +987,47 @@ def soak_cap_problems(text):
     return problems
 
 
+def job_body(text, job):
+    """The lines of `job` in a workflow, up to the next job."""
+    return re.split(r"\n  (?=\S)", text.split("\n  %s:\n" % job, 1)[1], maxsplit=1)[0]
+
+
+# CI-soak-green (#6571): what ci's broker-race installs only for its read audit, not for the tests.
+RACE_AUDIT_ONLY = {"bpftrace"}
+
+
+def soak_env_problems(ci, soak):
+    """Why soak.yml's soak job meets a different test environment than ci's broker-race: a tool
+    broker-race installs that it lacks, a different subordinate-id step, or a different go test
+    timeout. Empty when none."""
+    race, job = job_body(ci, "broker-race"), job_body(soak, "soak")
+    installs = lambda body: set(re.findall(r"apt-get install -yq ([\w.-]+)", body))
+    problems = ["soak lacks %s" % p for p in sorted(installs(race) - installs(job) - RACE_AUDIT_ONLY)]
+    sub = "      - name: Subordinate ids for the canary sandbox\n"
+    if sub not in race or sub not in job:
+        problems.append("no subordinate-id step in both")
+    else:
+        step = lambda body: re.split(r"\n      - ", body.split(sub, 1)[1], maxsplit=1)[0].replace(
+            "        if: steps.scope.outputs.race != 'skip'\n", "")
+        if step(race) != step(job):
+            problems.append("subordinate-id steps differ")
+    timeouts = lambda body: re.findall(r"go test [^\n]*?-timeout (\S+)", body)
+    if not timeouts(job) or set(timeouts(job)) != set(timeouts(race)):
+        problems.append("go test timeouts %r, ci's %r" % (timeouts(job), timeouts(race)))
+    return problems
+
+
+def soak_target_problems(soak, broker):
+    """Soak fuzz matrix entries whose package or Fuzz function is not in broker/; empty when none."""
+    problems = []
+    for pkg, target in re.findall(r"\{ pkg: ([\w/]+), target: (\w+) \}", job_body(soak, "fuzz")):
+        d = broker / pkg
+        src = "".join(f.read_text() for f in d.glob("*_test.go")) if d.is_dir() else ""
+        if not re.search(r"(?m)^func %s\(\w+ \*testing\.F\)" % target, src):
+            problems.append("%s %s" % (pkg, target))
+    return problems
+
+
 def step_script(text, job, step):
     """The run: script of the step named `step` in `job` of a workflow, dedented to column 0."""
     body = text.split("\n  %s:\n" % job, 1)[1]
@@ -1887,6 +1928,30 @@ class WorkflowTest(unittest.TestCase):
         for missing in ("\n  fuzz:\n", "\n  soak:\n"):
             with self.subTest(missing=missing):
                 self.assertNotEqual(soak_cap_problems(text.replace(missing, "\n  renamed:\n", 1)), [])
+
+    def test_soak_meets_the_environment_ci_race_tests_need(self):
+        # CI-soak-green (#6571): every soak run from 2026-11-17 to 11-25 failed every full run,
+        # because broker-race had gained tool steps (dnsmasq, subordinate ids) that the soak job
+        # lacked, and CI makes a missing tool fail the test. A step dropped from either side fails here.
+        ci, soak = ((WORKFLOWS / n).read_text() for n in ("ci.yml", "soak.yml"))
+        self.assertEqual(soak_env_problems(ci, soak), [])
+        for bad in (soak.replace("apt-get install -yq dnsmasq-base", "true", 1),
+                    soak.replace("      - name: Subordinate ids for the canary sandbox\n", "      - name: ids\n", 1),
+                    soak.replace("--add-subuids 100000-165535", "--add-subuids 1-2", 1),
+                    soak.replace("-count=1 -timeout 25m ./...", "-count=1 ./...", 1)):
+            self.assertNotEqual(soak_env_problems(ci, bad), [])
+        newtool = ci.replace("run: sudo apt-get install -yq dnsmasq-base", "run: sudo apt-get install -yq newtool", 1)
+        self.assertEqual(soak_env_problems(newtool, soak), ["soak lacks newtool"])
+
+    def test_soak_fuzz_targets_exist(self):
+        # CI-soak-green (#6571): `mail FuzzParse` outlived broker/mail and failed in 0 s on every run.
+        broker = WORKFLOWS.parent.parent / "broker"
+        soak = (WORKFLOWS / "soak.yml").read_text()
+        self.assertEqual(soak_target_problems(soak, broker), [])
+        bad = soak.replace("          - { pkg: owner,", "          - { pkg: mail, target: FuzzParse }\n          - { pkg: owner,", 1)
+        self.assertEqual(soak_target_problems(bad, broker), ["mail FuzzParse"])
+        bad = soak.replace("target: FuzzParseReply }", "target: FuzzGone }", 1)
+        self.assertEqual(soak_target_problems(bad, broker), ["owner FuzzGone"])
 
     def test_steps_finds_steps(self):
         sample = "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          x: 1\n      - run: echo\n"
