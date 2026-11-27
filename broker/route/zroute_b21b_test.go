@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// REQ: CAP-9, ADP-4
+// REQ: PLN-7
 //
 // Package B2-1 (#1460): the end of an OpenAI stream stays covered after the
 // late-error test stopped reaching it: a source that ends without [DONE]

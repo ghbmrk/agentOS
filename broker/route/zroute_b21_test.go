@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// REQ: CAP-9, ADP-4
+// REQ: PLN-7
 //
 // Package B2-1 (#1460, #1567): a late OpenAI error chunk is sanitised, a
 // chunk whose error is null passes through, and a cancelled call is

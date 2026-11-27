@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// REQ: CAP-9, ADP-4
+// REQ: PLN-7
 //
 // Package B2-1 (#1460, #1567), mutgate: the survivors on the lines this
 // package's changed tests run, each killed by a check of what the line
