@@ -2,32 +2,33 @@ package decoder_test
 
 // REQ: CH-23
 
+// This test drives the heic copy that photo/decoder builds with, and only it:
+// a decoder.Decode call here makes Decode's lines mutgate targets the test
+// cannot check (#6725). photo/decode.go maps a decode error to RefuseDecode.
+
 import (
 	"bytes"
 	"encoding/binary"
 	"errors"
 	"image"
-	"os"
 	"runtime"
-	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/gen2brain/h265/heic"
-	"github.com/ghbmrk/agentos/broker/photo/decoder"
 )
 
 // CI-soak-green (#6571): a grid whose tiles differ in chroma depth is
 // refused, never stitched. hevc stores a tile's planes 16-bit when either
 // depth is past 8, so a tile whose chroma depth differs from the grid's
 // has the other kind of planes, and copying it read nil ones. The deep
-// tiles' hvcC is the FuzzDecode crasher's (8-bit luma, 10-bit chroma); the
-// rest are the encoder's 8-bit tiles.
+// tiles' hvcC is deepHvcC's; the rest are the encoder's 8-bit tiles.
 func TestGridMixedChromaDepthRefused(t *testing.T) {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(max(runtime.GOMAXPROCS(0), 6)))
 	plain := encodeGrid(t)
-	deep := crasherHvcC(t)
-	// The control: every tile deep is one depth throughout, and decodes.
+	deep := deepHvcC(t, plain)
+	// The control, and the crasher's case: every tile deep is one depth
+	// throughout, and decodes (it panicked in blit before newGrid and blit
+	// read the planes' storage rather than the luma depth).
 	for _, threads := range []int{1, 6} {
 		all := withTileHvcC(t, plain, deep, func(int) bool { return true })
 		if _, err := heic.Decode(bytes.NewReader(all), heic.Options{Threads: threads}); err != nil {
@@ -52,10 +53,6 @@ func TestGridMixedChromaDepthRefused(t *testing.T) {
 				t.Fatalf("%s, %d threads: %v, want ErrInvalid", c.name, threads, err)
 			}
 		}
-		var r decoder.Refusal
-		if _, err := decoder.Decode(raw); !errors.As(err, &r) || r != decoder.RefuseDecode {
-			t.Fatalf("%s: Decode returned %v, want refusal decode", c.name, err)
-		}
 	}
 }
 
@@ -72,20 +69,19 @@ func encodeGrid(t *testing.T) []byte {
 	return b.Bytes()
 }
 
-// crasherHvcC is the first hvcC box of the committed FuzzDecode crasher.
-func crasherHvcC(t *testing.T) []byte {
+// deepHvcC is the tiles' hvcC of the encoder's 8-bit grid with the one
+// byte FuzzDecode's crasher (CI-soak-green, #6571) changed in it, which
+// makes its SPS code 8-bit luma and 10-bit chroma.
+func deepHvcC(t *testing.T, plain []byte) []byte {
 	t.Helper()
-	text, err := os.ReadFile("testdata/fuzz/FuzzDecode/8a16659925ba2df0")
-	if err != nil {
-		t.Fatal(err)
+	f := parseHEIF(t, plain)
+	h := append([]byte{}, f.props[f.colorProp-1]...)
+	const at, was, crasher = 85, 0x96, 0x7a
+	if len(h) != 102 || h[at] != was {
+		t.Fatalf("the encoder's hvcC changed (%d bytes): rebuild the deep hvcC", len(h))
 	}
-	_, lit, _ := strings.Cut(string(text), "\n")
-	s, err := strconv.Unquote(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(lit), "[]byte("), ")"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	f := parseHEIF(t, []byte(s))
-	return f.props[f.colorProp-1]
+	h[at] = crasher
+	return h
 }
 
 type box struct {
