@@ -81,7 +81,8 @@ FETCH_EXEMPT = {
                                     ".curlrc; downloads nothing"),
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
     "tests/test_image.py": (1, "a busybox wget shebang as fixture text"),
-    "tests/test_pins.py": (253, "this reader's test cases"),
+    "tests/test_pins.py": (257, "this reader's test cases"),
+    "tests/test_zz_pip_build_isolation.py": (21, "hashed pip installs as fixture text for the build-isolation credit"),
     "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
@@ -116,6 +117,7 @@ PIP_NO_VALUE = frozenset(["--require-hashes", "--no-deps", "-q", "--quiet", "--n
                           "--disable-pip-version-check", "--user", "-U", "--upgrade", "--no-build-isolation",
                           "--break-system-packages", "--only-binary=:all:", "--only-binary=:none:"])
 PIP_VALUE = frozenset(["-r", "--requirement", "--only-binary"])  # each takes the next word as its value
+REQ_FILE = re.compile(r"(?:[^/]*[-_.])?requirements[^/]*\.(?:txt|in)")  # the names `scanned` reads as pip requirements files
 GO_UNCHECKED = re.compile(r"\bGOSUMDB=off\b|\bGONOSUMDB\b|\bGONOSUMCHECK\b|\bGOINSECURE\b|\bGOPRIVATE\b|"
                           r"\bGOFLAGS=\S*-insecure")
 
@@ -151,22 +153,41 @@ def _name(word):
     return next((n for n in GLOB_NAMES for g in globs if fnmatch.fnmatchcase(n, g)), None)
 
 
+def _req_file(path):
+    """True when a `-r` value names a file `scanned` reads as kind "requirements": a `REQ_FILE` basename
+    outside any `vendor/` directory (`scanned` skips vendored code)."""
+    return REQ_FILE.fullmatch(path.rsplit("/", 1)[-1]) is not None and "vendor/" not in path
+
+
 def _pip_hashed(args):
     """True when the words after `pip` are exactly `install`/`download` and options this reader knows,
     `--require-hashes` among them: no option can then take the flag as its value, and no package is named
-    outside a requirements file whose hashes pip checks."""
+    outside a requirements file whose hashes pip checks. `--require-hashes` does not reach the isolated
+    environment pip builds an sdist in, which fetches the sdist's build backend (setuptools, hatchling …)
+    unhashed (#6706), so the install must also be unable to build one there: `--no-build-isolation` (pip
+    then installs no build requirement) or `--only-binary` `:all:` as its last value (no sdist is built; a
+    later `--only-binary` value of `:none:` or a name list is read as reopening sdists). A requirements
+    file can reopen sdists with its own `--no-binary` line; `req_sites` counts any option line in one."""
     if not args or args[0] not in ("install", "download") or "--require-hashes" not in args:
         return False
-    i = 1
+    i, isolated, sdists = 1, True, True
     while i < len(args):
-        if args[i] in PIP_NO_VALUE or re.fullmatch(r"--requirement=[^-:][^:]*", args[i]):
+        if args[i] in PIP_NO_VALUE or (re.fullmatch(r"--requirement=[^-:][^:]*", args[i])
+                                       and _req_file(args[i].split("=", 1)[1])):
+            isolated = isolated and args[i] != "--no-build-isolation"
+            if args[i].startswith("--only-binary="):
+                sdists = args[i] != "--only-binary=:all:"
             i += 1
         elif (args[i] in PIP_VALUE and i + 1 < len(args) and not args[i + 1].startswith("-")
-              and (args[i] == "--only-binary" or ":" not in args[i + 1])):  # a `-r` URL's hashes are the server's
+              and (args[i] == "--only-binary" or ":" not in args[i + 1] and _req_file(args[i + 1]))):
+            # A `-r` URL's hashes are the server's; a `-r` file is credited only under a name `scanned` reads
+            # as kind "requirements" (`req_sites`), so a tracked one's option lines are counted.
+            if args[i] == "--only-binary":
+                sdists = args[i + 1] != ":all:"
             i += 2
         else:
             return False
-    return True
+    return not (isolated and sdists)
 
 
 def _credited(words, i):
@@ -518,8 +539,8 @@ def py_sites(text):
 
 def scanned():
     """{repo-relative path: kind} for every file fetch_sites reads: each tracked workflow and action
-    (`.github/**.yml`, `.yaml`), Python file and script (by extension or `#!` line), bar vendored code
-    and this reader."""
+    (`.github/**.yml`, `.yaml`), Python file, script (by extension or `#!` line) and pip requirements
+    file (`requirements*.txt`, `.in`), bar vendored code and this reader."""
     out = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"], check=True, stdout=subprocess.PIPE).stdout
     kinds = {}
     for n in (x.decode("utf-8") for x in out.split(b"\0") if x):
@@ -529,6 +550,8 @@ def scanned():
             kinds[n] = "yaml"
         elif n.endswith(".py"):
             kinds[n] = "python"
+        elif _req_file(n):
+            kinds[n] = "requirements"
         elif n.endswith((".sh", ".bash", ".mk")) or n.rsplit("/", 1)[-1] == "Makefile":
             kinds[n] = "text"
         else:
@@ -542,10 +565,47 @@ def scanned():
     return kinds
 
 
+REQ_HASH = re.compile(r"--hash=sha256:[0-9a-f]{64}")
+# A public PEP 440 version ending in a digit, so no pin can end in an archive extension, which pip reads as a
+# local file (`six==1.16.0.tar.gz`), or carry a local `+` part (Security on #6723 at 00f08902).
+REQ_PIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?=="
+                     r"[0-9]+(?:\.[0-9]+)*(?:(?:a|b|rc)[0-9]+)?(?:\.post[0-9]+)?(?:\.dev[0-9]+)?")
+
+
+def req_sites(text):
+    """Lines of a pip requirements file that are not a plain hashed pin. Allow by exception: a line counts
+    unless it is `name==version` followed only by `--hash=sha256:<64 hex>` words. So an option line counts
+    (pip reads `--no-binary`, `--index-url`, `--find-links`, `-r`, `-c`, `-e` and the rest from the file
+    itself, so one can reopen sdists under a credited `--only-binary=:all:` install and so fetch an
+    unhashed build backend), and so does a direct reference (a URL, a path or `name @ URL`, which pip
+    builds from source whatever `--only-binary` says), a `${VAR}` that pip expands, an extra or a marker.
+    A file that is not plain ASCII, that holds `coding:` or `coding=` anywhere (pip decodes by BOM or
+    declaration, so a UTF-7 file can spell an option line in ASCII), or that breaks a line other than at
+    `\n` (a `\r` hides a declaration from a reader that splits there), counts one more for each. Lines are read as
+    pip's `preprocess` reads them: a line ending in a backslash joins the next unless it is a comment line,
+    then a `#` at the start or after whitespace ends it."""
+    raw = text.split("\n")
+    # Fail closed on how pip decodes: a `coding[:=]` anywhere (pip reads a declaration in the first two
+    # `\n` lines, which a `\r` or `\f` does not end) or a line break other than `\n` counts one more.
+    n = (not text.isascii()) + bool(re.search(r"coding[:=]", text)) + bool(re.search(r"[\r\v\f\x1c-\x1e]", text))
+    logical, part = [], ""
+    for line in raw:
+        if re.match(r"\s*#", line) or not line.endswith("\\"):
+            logical.append(part + line)
+            part = ""
+        else:
+            part += line.strip("\\")  # both ends, as pip strips it
+    logical.append(part)
+    for line in logical:
+        words = re.sub(r"(^|\s)#.*", "", line).split()
+        n += bool(words) and not (REQ_PIN.fullmatch(words[0]) and all(REQ_HASH.fullmatch(w) for w in words[1:]))
+    return n
+
+
 def fetch_sites(path, kind):
     """How many direct network fetches the file at path holds; a file that does not parse raises."""
     text = pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
-    return {"yaml": yaml_sites, "python": py_sites, "text": text_sites}[kind](text)
+    return {"yaml": yaml_sites, "python": py_sites, "text": text_sites, "requirements": req_sites}[kind](text)
 
 
 def owed(text):
