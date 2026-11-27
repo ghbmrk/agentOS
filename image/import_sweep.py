@@ -41,8 +41,9 @@ to each (cipher_sites); "sha256", the SHA-256 of each file reaching a group or h
 "quic" and "dgram", each file importing a name of that OPENSSL_USES group, or importing glibc's dlsym
 or dlvsym and holding one's name at the end of a string, and those names (#6671); "expatw", each file whose
 NEEDED closure holds a name or a library (by file name or SONAME) of expat's wide build, or, unless it is that
-build, whose bytes hold its name at the end of a string (a dlopen argument), and those names and libraries
-(#6545; a static copy of expat is not told apart from the UTF-8 build, nor a name built at run time); "unread", each ELF file objdump failed on; and, for an initrd, "others", its executable members that are not ELF files. Only symbols bound to a GLIBC_ version count, so a library's own
+build, whose bytes hold its name anywhere, terminated or not (a dlopen argument: Rust and Go literals carry no
+NUL), and those names and libraries (#6545; a static copy of expat is not told apart from the UTF-8 build, nor
+a name built at run time from pieces); "unread", each ELF file objdump failed on; and, for an initrd, "others", its executable members that are not ELF files. Only symbols bound to a GLIBC_ version count, so a library's own
 re_* names do not.
 
 --summary exits 1 when a claim the glibc records rest on stops holding: any file, in any place, imports
@@ -171,7 +172,7 @@ GLIBC_PATH = re.compile(r"^(/usr/lib/agentos/images/[^/]+)?/usr/lib/x86_64-linux
 # DEBIAN-CVE-2026-134703 record accepts (#6545): a NEEDED name, a file name or SONAME, and a by-name string
 # (a dlopen argument) that names it. libexpat1 installs the library itself; nothing may load it.
 EXPATW = re.compile(r"^libexpatw\.so(\.[0-9]+)*$")
-EXPATW_NAME = re.compile(rb"libexpatw\.so(?:\.[0-9]+)*(?=\0)")
+EXPATW_NAME = re.compile(rb"libexpatw\.so(?:\.[0-9]+)*")
 # A guest root in the main tree: a process there sees it as /, so its absolute links resolve under it.
 GUEST_ROOT = re.compile(r"^/usr/lib/agentos/images/[^/]+(?=/)")
 
@@ -488,7 +489,8 @@ def sweep(files, links=None):
     reached = {shown: closure(shown) for shown in files}
     # #6545: each file loading expat's wide build: a NEEDED name in its closure naming it, a library in its
     # closure that is it (by file name or SONAME, so a link of another name still counts), or, for a file
-    # that is not itself the wide build, a string naming it (a dlopen argument; dlopen maps it by name).
+    # that is not itself the wide build, its name anywhere in its bytes (a dlopen argument; dlopen maps it by
+    # name). No NUL is required after it: Rust and Go keep literals unterminated (L3 on #6733).
     def is_wide(p):
         return bool(EXPATW.match(os.path.basename(p)) or EXPATW.match(sonames.get(p) or ""))
     expatw = {shown: sorted({n for n in closure(shown, True) if EXPATW.match(n)}

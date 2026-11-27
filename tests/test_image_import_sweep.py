@@ -1919,6 +1919,12 @@ class QuicAllowTest(unittest.TestCase):
 EXPAT_LIB = "int XML_ParserCreate(void) { return 1; }\n"
 USES_EXPAT = "int XML_ParserCreate(void);\nint main(void) { return XML_ParserCreate(); }\n"
 DLOPENS_EXPATW = ('#include <dlfcn.h>\nint main(void) { return dlopen("libexpatw.so.1", RTLD_NOW) != 0; }\n')
+# Rust and Go keep string literals unterminated and build the C string at run time (CString::new,
+# C.CString), so the name is followed by the next literal's bytes, not a NUL (L3 on #6733). POOL is the
+# literal pool as rustc ("\\x15me") and the Go linker ("no ") lay it out; main copies the 14 bytes out.
+UNTERMINATED_EXPATW = ('#include <dlfcn.h>\n#include <string.h>\nstatic const char pool[] = "libexpatw.so.1%s";\n'
+                       'int main(void) { char n[15]; memcpy(n, pool, 14); n[14] = 0;'
+                       ' return dlopen(n, RTLD_NOW) != 0; }\n')
 
 
 @NEEDS_CC
@@ -1978,6 +1984,37 @@ class ExpatWideTest(unittest.TestCase):
         self.assertEqual(got["expatw"], want)
         self.assertEqual(self.errs(got), ["tree: %s %s" % (p, self.WHY % " ".join(w)) for p, w in sorted(want.items())])
         self.assertIn("  expatw /usr/bin/opener: libexpatw.so.1", sweep.summary({"tree": got}))
+
+    def test_an_unterminated_name_fails(self):
+        # The Rust and Go layouts of a dlopen("libexpatw.so.1") argument: no NUL after the name.
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d) / "t"
+            shutil.copytree(self.t, t, symlinks=True)
+            built(UNTERMINATED_EXPATW % "\\x15me", t / "usr/bin/rusty", "-ldl")
+            built(UNTERMINATED_EXPATW % "no ", t / "usr/bin/gopher", "-ldl")
+            for f in ("rusty", "gopher"):
+                data = (t / "usr/bin" / f).read_bytes()
+                self.assertNotIn(b"libexpatw.so.1\0", data)
+            got = sweep.run_tree(str(t))["tree"]
+        want = {"/usr/bin/gopher": ["libexpatw.so.1"], "/usr/bin/rusty": ["libexpatw.so.1"]}
+        self.assertEqual(got["expatw"], want)
+        self.assertEqual(self.errs(got), ["tree: %s %s" % (p, self.WHY % " ".join(w)) for p, w in sorted(want.items())])
+
+    def test_a_library_is_read_by_soname(self):
+        # x was linked against a stub libfoo.so (NEEDED libfoo.so); the file now there is the wide build
+        # under another file name, told apart only by its SONAME (the SONAME arm of is_wide; Security on #6733).
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d)
+            lib = t / "usr/lib"
+            lib.mkdir(parents=True)
+            (t / "usr/bin").mkdir()
+            built(EXPAT_LIB, lib / "libfoo.so", "-shared", "-fPIC")
+            built(USES_EXPAT, t / "usr/bin/x", "-L" + str(lib), "-lfoo")
+            (lib / "libfoo.so").unlink()
+            built(EXPAT_LIB, lib / "libfoo-real.so", "-shared", "-fPIC", "-Wl,-soname,libexpatw.so.1")
+            os.symlink("libfoo-real.so", lib / "libfoo.so")
+            got = sweep.run_tree(str(t))["tree"]
+        self.assertEqual(got["expatw"], {"/usr/bin/x": ["/usr/lib/libfoo-real.so"]})
 
     def test_an_alias_without_soname_is_read_by_file_name(self):
         with tempfile.TemporaryDirectory() as d:
