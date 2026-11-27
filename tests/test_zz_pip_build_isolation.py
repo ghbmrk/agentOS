@@ -133,6 +133,14 @@ class Requirements(unittest.TestCase):
             "a==1 " + H + "\n\n\n# coding: latin-1\n": 1,
             "a==1 " + H + "\r\n": 1,
             "a==1 " + H + "\x0c\n": 1,
+            # L3 on #6723 at 85bfbb65: pip's splitlines breaks a comment line at each of these, so an option
+            # after one is live; every member of the break class is held by a case.
+            "#x\x0b--no-binary=:all:\nsix==1.16.0 " + H + "\n": 1,
+            "#x\x1c--no-binary=:all:\nsix==1.16.0 " + H + "\n": 1,
+            "#x\x1d--no-binary=:all:\nsix==1.16.0 " + H + "\n": 1,
+            "#x\x1e--no-binary=:all:\nsix==1.16.0 " + H + "\n": 1,
+            "#x\r--no-binary=:all:\nsix==1.16.0 " + H + "\n": 1,
+            "#x\x0c--no-binary=:all:\nsix==1.16.0 " + H + "\n": 1,
             "a==1.0rc1 " + H + "\nb==2.post1 " + H + "\nc==3.0.dev2 " + H + "\n": 0,
             # A continuation at the end of the file is still read (Security release 4 on #6723).
             "a==1 " + H + "\n--no-binary :all: \\": 1,
