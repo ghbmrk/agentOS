@@ -1913,3 +1913,81 @@ class QuicAllowTest(unittest.TestCase):
                 if r["id"] == "DEBIAN-CVE-2026-88822":
                     self.assertIn("[dgram]", r["why"])
                 self.assertIn(QUIC_ID_RE.match(r["id"]).group(1), named)
+
+
+# #6545: stand-ins for libexpat1's two libraries, a dbus-daemon linking the UTF-8 one, and users of the wide one.
+EXPAT_LIB = "int XML_ParserCreate(void) { return 1; }\n"
+USES_EXPAT = "int XML_ParserCreate(void);\nint main(void) { return XML_ParserCreate(); }\n"
+DLOPENS_EXPATW = ('#include <dlfcn.h>\nint main(void) { return dlopen("libexpatw.so.1", RTLD_NOW) != 0; }\n')
+
+
+@NEEDS_CC
+class ExpatWideTest(unittest.TestCase):
+    """VULN-expatw-link-check (#6545): the DEBIAN-CVE-2026-134703 record accepts expat on the grounds that
+    nothing loads its wide build, libexpatw.so.1; the sweep reads that from the tree. A file whose NEEDED
+    closure holds the wide build, or that names it in a string (dlopen), fails --summary; the same tree with
+    the UTF-8 libexpat.so.1 only passes, and the wide library installed but unused passes too."""
+
+    WHY = ("loads expat's wide build (%s), which runs the UTF-16 converters DEBIAN-CVE-2026-134703 (#6542) "
+           "accepts as unreached; drop that user or the library, or read its reach and amend the record")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        t = cls.t = pathlib.Path(cls.tmp.name)
+        lib = cls.lib = t / "usr/lib/x86_64-linux-gnu"
+        lib.mkdir(parents=True)
+        (t / "usr/bin").mkdir()
+        # As Debian installs libexpat1: each file carries the version, the SONAME is a link.
+        for name in ("libexpat", "libexpatw"):
+            built(EXPAT_LIB, lib / (name + ".so.1.9.0"), "-shared", "-fPIC", "-Wl,-soname,%s.so.1" % name)
+            os.symlink(name + ".so.1.9.0", lib / (name + ".so.1"))
+        built(USES_EXPAT, t / "usr/bin/dbus-daemon", "-L" + str(lib), "-l:libexpat.so.1")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def errs(self, got):
+        return [e for e in sweep.problems({"tree": got}) if "wide build" in e]
+
+    def test_the_utf8_build_only_passes(self):
+        got = sweep.run_tree(str(self.t))["tree"]
+        self.assertEqual(got["expatw"], {})
+        self.assertEqual(self.errs(got), [])
+        self.assertFalse([line for line in sweep.summary({"tree": got}) if "expatw" in line])
+
+    def test_a_wide_user_fails(self):
+        W = "/usr/lib/x86_64-linux-gnu/libexpatw.so.1.9.0"
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d) / "t"
+            shutil.copytree(self.t, t, symlinks=True)
+            lib = t / "usr/lib/x86_64-linux-gnu"
+            # A direct NEEDED, a NEEDED through a library, and a dlopen by name.
+            built(USES_EXPAT, t / "usr/bin/direct", "-L" + str(lib), "-l:libexpatw.so.1")
+            built(USES_EXPAT.replace("main", "f"), lib / "libmid.so.1", "-shared", "-fPIC",
+                  "-Wl,-soname,libmid.so.1", "-L" + str(lib), "-l:libexpatw.so.1")
+            built("int f(void);\nint main(void) { return f(); }\n", t / "usr/bin/indirect",
+                  "-L" + str(lib), "-l:libmid.so.1")
+            built(DLOPENS_EXPATW, t / "usr/bin/opener", "-ldl")
+            got = sweep.run_tree(str(t))["tree"]
+        want = {"/usr/bin/direct": [W, "libexpatw.so.1"],
+                "/usr/bin/indirect": [W, "libexpatw.so.1"],
+                "/usr/lib/x86_64-linux-gnu/libmid.so.1": [W, "libexpatw.so.1"],
+                "/usr/bin/opener": ["libexpatw.so.1"]}
+        self.assertEqual(got["expatw"], want)
+        self.assertEqual(self.errs(got), ["tree: %s %s" % (p, self.WHY % " ".join(w)) for p, w in sorted(want.items())])
+        self.assertIn("  expatw /usr/bin/opener: libexpatw.so.1", sweep.summary({"tree": got}))
+
+    def test_an_alias_without_soname_is_read_by_file_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d)
+            lib = t / "usr/lib"
+            lib.mkdir(parents=True)
+            (t / "usr/bin").mkdir()
+            # No SONAME: the NEEDED name is the link's, and only the file it names says it is the wide build.
+            built(EXPAT_LIB, lib / "libexpatw.so.1", "-shared", "-fPIC")
+            os.symlink("libexpatw.so.1", lib / "libx.so")
+            built(USES_EXPAT, t / "usr/bin/x", "-L" + str(lib), "-lx")
+            got = sweep.run_tree(str(t))["tree"]
+        self.assertEqual(got["expatw"], {"/usr/bin/x": ["/usr/lib/libexpatw.so.1"]})
