@@ -81,8 +81,8 @@ FETCH_EXEMPT = {
                                     ".curlrc; downloads nothing"),
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
     "tests/test_image.py": (1, "a busybox wget shebang as fixture text"),
-    "tests/test_pins.py": (256, "this reader's test cases"),
-    "tests/test_zz_pip_build_isolation.py": (12, "hashed pip installs as fixture text for the build-isolation credit"),
+    "tests/test_pins.py": (257, "this reader's test cases"),
+    "tests/test_zz_pip_build_isolation.py": (18, "hashed pip installs as fixture text for the build-isolation credit"),
     "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
@@ -117,6 +117,7 @@ PIP_NO_VALUE = frozenset(["--require-hashes", "--no-deps", "-q", "--quiet", "--n
                           "--disable-pip-version-check", "--user", "-U", "--upgrade", "--no-build-isolation",
                           "--break-system-packages", "--only-binary=:all:", "--only-binary=:none:"])
 PIP_VALUE = frozenset(["-r", "--requirement", "--only-binary"])  # each takes the next word as its value
+REQ_FILE = re.compile(r"(?:[^/]*[-_.])?requirements[^/]*\.(?:txt|in)")  # the names `scanned` reads as pip requirements files
 GO_UNCHECKED = re.compile(r"\bGOSUMDB=off\b|\bGONOSUMDB\b|\bGONOSUMCHECK\b|\bGOINSECURE\b|\bGOPRIVATE\b|"
                           r"\bGOFLAGS=\S*-insecure")
 
@@ -165,13 +166,17 @@ def _pip_hashed(args):
         return False
     i, isolated, sdists = 1, True, True
     while i < len(args):
-        if args[i] in PIP_NO_VALUE or re.fullmatch(r"--requirement=[^-:][^:]*", args[i]):
+        if args[i] in PIP_NO_VALUE or (re.fullmatch(r"--requirement=[^-:][^:]*", args[i])
+                                       and REQ_FILE.fullmatch(args[i].rsplit("/", 1)[-1].split("=", 1)[-1])):
             isolated = isolated and args[i] != "--no-build-isolation"
             if args[i].startswith("--only-binary="):
                 sdists = args[i] != "--only-binary=:all:"
             i += 1
         elif (args[i] in PIP_VALUE and i + 1 < len(args) and not args[i + 1].startswith("-")
-              and (args[i] == "--only-binary" or ":" not in args[i + 1])):  # a `-r` URL's hashes are the server's
+              and (args[i] == "--only-binary"
+                   or ":" not in args[i + 1] and REQ_FILE.fullmatch(args[i + 1].rsplit("/", 1)[-1]))):
+            # A `-r` URL's hashes are the server's; a `-r` file is credited only under a name `scanned` reads
+            # as kind "requirements" (`req_sites`), so a tracked one's option lines are counted.
             if args[i] == "--only-binary":
                 sdists = args[i + 1] != ":all:"
             i += 2
@@ -540,7 +545,7 @@ def scanned():
             kinds[n] = "yaml"
         elif n.endswith(".py"):
             kinds[n] = "python"
-        elif re.fullmatch(r"requirements[^/]*\.(?:txt|in)", n.rsplit("/", 1)[-1]):
+        elif REQ_FILE.fullmatch(n.rsplit("/", 1)[-1]):
             kinds[n] = "requirements"
         elif n.endswith((".sh", ".bash", ".mk")) or n.rsplit("/", 1)[-1] == "Makefile":
             kinds[n] = "text"
@@ -556,17 +561,24 @@ def scanned():
 
 
 REQ_HASH = re.compile(r"--hash=sha256:[0-9a-f]{64}")
+REQ_PIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?==[A-Za-z0-9.!+_-]+")
 
 
 def req_sites(text):
-    """Option lines in a pip requirements file. Each counts: pip reads `--no-binary`, `--index-url`,
-    `--find-links`, `-r`, `-c`, `-e` and the rest from the file itself, so one can reopen sdists under a
-    credited `--only-binary=:all:` install (and so fetch an unhashed build backend), point at another file,
-    or name an editable source. A requirement line counts too when any word past its first is not a
-    `--hash=sha256:<64 hex>`. Lines are read as pip's `preprocess` reads them: a line ending in a backslash
-    joins the next unless it is a comment line, then a `#` at the start or after whitespace ends it."""
-    n, logical, part = 0, [], ""
-    for line in text.splitlines():
+    """Lines of a pip requirements file that are not a plain hashed pin. Allow by exception: a line counts
+    unless it is `name==version` followed only by `--hash=sha256:<64 hex>` words. So an option line counts
+    (pip reads `--no-binary`, `--index-url`, `--find-links`, `-r`, `-c`, `-e` and the rest from the file
+    itself, so one can reopen sdists under a credited `--only-binary=:all:` install and so fetch an
+    unhashed build backend), and so does a direct reference (a URL, a path or `name @ URL`, which pip
+    builds from source whatever `--only-binary` says), a `${VAR}` that pip expands, an extra or a marker.
+    A file that is not plain ASCII, or whose first two lines declare a `coding:` (pip decodes by BOM or
+    declaration, so a UTF-7 file can spell an option line in ASCII), counts one more. Lines are read as
+    pip's `preprocess` reads them: a line ending in a backslash joins the next unless it is a comment line,
+    then a `#` at the start or after whitespace ends it."""
+    raw = text.splitlines()
+    n = (not text.isascii()) + any(re.match(r"\s*#.*coding[:=]", x) for x in raw[:2])
+    logical, part = [], ""
+    for line in raw:
         if re.match(r"\s*#", line) or not line.endswith("\\"):
             logical.append(part + line)
             part = ""
@@ -575,7 +587,7 @@ def req_sites(text):
     logical.append(part)
     for line in logical:
         words = re.sub(r"(^|\s)#.*", "", line).split()
-        n += bool(words) and (words[0].startswith("-") or not all(REQ_HASH.fullmatch(w) for w in words[1:]))
+        n += bool(words) and not (REQ_PIN.fullmatch(words[0]) and all(REQ_HASH.fullmatch(w) for w in words[1:]))
     return n
 
 
