@@ -82,7 +82,7 @@ FETCH_EXEMPT = {
     "tests/test_image_wifidel_nm.py": (1, "names curl as a package the image must not ship"),
     "tests/test_image.py": (1, "a busybox wget shebang as fixture text"),
     "tests/test_pins.py": (257, "this reader's test cases"),
-    "tests/test_zz_pip_build_isolation.py": (18, "hashed pip installs as fixture text for the build-isolation credit"),
+    "tests/test_zz_pip_build_isolation.py": (21, "hashed pip installs as fixture text for the build-isolation credit"),
     "tests/test_py_names.py": (1, "an import line as fixture text"),
     "tests/test_s4_stub_broker.py": (1, "talks to its stub broker on 127.0.0.1"),
     "tools/board.py": (2, "GitHub API calls (its docstring is read as data, so counted); downloads nothing it runs"),
@@ -153,6 +153,12 @@ def _name(word):
     return next((n for n in GLOB_NAMES for g in globs if fnmatch.fnmatchcase(n, g)), None)
 
 
+def _req_file(path):
+    """True when a `-r` value names a file `scanned` reads as kind "requirements": a `REQ_FILE` basename
+    outside any `vendor/` directory (`scanned` skips vendored code)."""
+    return REQ_FILE.fullmatch(path.rsplit("/", 1)[-1]) is not None and "vendor/" not in path
+
+
 def _pip_hashed(args):
     """True when the words after `pip` are exactly `install`/`download` and options this reader knows,
     `--require-hashes` among them: no option can then take the flag as its value, and no package is named
@@ -167,14 +173,13 @@ def _pip_hashed(args):
     i, isolated, sdists = 1, True, True
     while i < len(args):
         if args[i] in PIP_NO_VALUE or (re.fullmatch(r"--requirement=[^-:][^:]*", args[i])
-                                       and REQ_FILE.fullmatch(args[i].rsplit("/", 1)[-1].split("=", 1)[-1])):
+                                       and _req_file(args[i].split("=", 1)[1])):
             isolated = isolated and args[i] != "--no-build-isolation"
             if args[i].startswith("--only-binary="):
                 sdists = args[i] != "--only-binary=:all:"
             i += 1
         elif (args[i] in PIP_VALUE and i + 1 < len(args) and not args[i + 1].startswith("-")
-              and (args[i] == "--only-binary"
-                   or ":" not in args[i + 1] and REQ_FILE.fullmatch(args[i + 1].rsplit("/", 1)[-1]))):
+              and (args[i] == "--only-binary" or ":" not in args[i + 1] and _req_file(args[i + 1]))):
             # A `-r` URL's hashes are the server's; a `-r` file is credited only under a name `scanned` reads
             # as kind "requirements" (`req_sites`), so a tracked one's option lines are counted.
             if args[i] == "--only-binary":
@@ -545,7 +550,7 @@ def scanned():
             kinds[n] = "yaml"
         elif n.endswith(".py"):
             kinds[n] = "python"
-        elif REQ_FILE.fullmatch(n.rsplit("/", 1)[-1]):
+        elif _req_file(n):
             kinds[n] = "requirements"
         elif n.endswith((".sh", ".bash", ".mk")) or n.rsplit("/", 1)[-1] == "Makefile":
             kinds[n] = "text"
@@ -561,7 +566,10 @@ def scanned():
 
 
 REQ_HASH = re.compile(r"--hash=sha256:[0-9a-f]{64}")
-REQ_PIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?==[A-Za-z0-9.!+_-]+")
+# A public PEP 440 version ending in a digit, so no pin can end in an archive extension, which pip reads as a
+# local file (`six==1.16.0.tar.gz`), or carry a local `+` part (Security on #6723 at 00f08902).
+REQ_PIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?=="
+                     r"[0-9]+(?:\.[0-9]+)*(?:(?:a|b|rc)[0-9]+)?(?:\.post[0-9]+)?(?:\.dev[0-9]+)?")
 
 
 def req_sites(text):
@@ -571,12 +579,15 @@ def req_sites(text):
     itself, so one can reopen sdists under a credited `--only-binary=:all:` install and so fetch an
     unhashed build backend), and so does a direct reference (a URL, a path or `name @ URL`, which pip
     builds from source whatever `--only-binary` says), a `${VAR}` that pip expands, an extra or a marker.
-    A file that is not plain ASCII, or whose first two lines declare a `coding:` (pip decodes by BOM or
-    declaration, so a UTF-7 file can spell an option line in ASCII), counts one more. Lines are read as
+    A file that is not plain ASCII, that holds `coding:` or `coding=` anywhere (pip decodes by BOM or
+    declaration, so a UTF-7 file can spell an option line in ASCII), or that breaks a line other than at
+    `\n` (a `\r` hides a declaration from a reader that splits there), counts one more for each. Lines are read as
     pip's `preprocess` reads them: a line ending in a backslash joins the next unless it is a comment line,
     then a `#` at the start or after whitespace ends it."""
-    raw = text.splitlines()
-    n = (not text.isascii()) + any(re.match(r"\s*#.*coding[:=]", x) for x in raw[:2])
+    raw = text.split("\n")
+    # Fail closed on how pip decodes: a `coding[:=]` anywhere (pip reads a declaration in the first two
+    # `\n` lines, which a `\r` or `\f` does not end) or a line break other than `\n` counts one more.
+    n = (not text.isascii()) + bool(re.search(r"coding[:=]", text)) + bool(re.search(r"[\r\v\f\x1c-\x1e]", text))
     logical, part = [], ""
     for line in raw:
         if re.match(r"\s*#", line) or not line.endswith("\\"):

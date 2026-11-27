@@ -12,6 +12,7 @@ last value, and counts every option line in a tracked requirements file, since s
 import pathlib
 import sys
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -42,7 +43,9 @@ class Credit(unittest.TestCase):
                      "pip install --only-binary=:all: --require-hashes --requirement=deps.txt",
                      "pip install --only-binary=:all: --require-hashes -r requirements.txt.bak",
                      "pip install --only-binary=:all: --require-hashes -r myrequirements.txt",
-                     'pip install --only-binary=:all: --require-hashes -r "$R"']:
+                     'pip install --only-binary=:all: --require-hashes -r "$R"',
+                     "pip install --only-binary=:all: --require-hashes -r x/vendor/requirements.txt",
+                     "pip install --only-binary=:all: --require-hashes --requirement=vendor/requirements.txt"]:
             with self.subTest(text=text):
                 self.assertEqual(pins.text_sites(text), 1)
         # A build flag on another command in the line earns the first command nothing.
@@ -118,13 +121,40 @@ class Requirements(unittest.TestCase):
             "\ufeffa==1 " + H + "\n": 2,  # not ASCII, and the BOM glued to the name is no pin
             "# -*- coding: utf-7 -*-\n+AC0ALQ-no-binary=:all:\n": 2,
             "a==1 " + H + "\n# coding: latin-1\n": 1,
-            "a==1 " + H + "\n\n# coding: latin-1\n": 0,  # pip reads a declaration only in the first two lines
+            # Security on #6723 at 00f08902: a pin ending in an archive extension is a local file to pip, and a
+            # local `+` version can carry UTF-7 text; a `coding` anywhere, or a break other than `\n`, counts.
+            "six==1.16.0.tar.gz " + H + "\n": 1,
+            "six==1.0+x.zip " + H + "\n": 1,
+            "six==1.0.whl " + H + "\n": 1,
+            "six==1.0+abc1 " + H + "\n": 1,
+            "six==v1 " + H + "\n": 1,
+            "six==1.16.0+AC0ALQ-no-binary=:all:- " + H + "\n": 1,
+            "#\r#\r# -*- coding: utf-7 -*-\nsix==1.16.0 " + H + "\n": 2,
+            "a==1 " + H + "\n\n\n# coding: latin-1\n": 1,
+            "a==1 " + H + "\r\n": 1,
+            "a==1 " + H + "\x0c\n": 1,
+            "a==1.0rc1 " + H + "\nb==2.post1 " + H + "\nc==3.0.dev2 " + H + "\n": 0,
             # A continuation at the end of the file is still read (Security release 4 on #6723).
             "a==1 " + H + "\n--no-binary :all: \\": 1,
         }
         for text, n in cases.items():
             with self.subTest(text=text):
                 self.assertEqual(pins.req_sites(text), n)
+
+    def test_scanned_reads_every_name_a_credited_install_may_name(self):
+        # L3 on #6723 at 00f08902: the names `_pip_hashed` credits and the names `scanned` reads are one rule.
+        names = ["build-requirements.txt", "d/requirements-x.in", "requirements.txt", "x/vendor/requirements.txt",
+                 "myrequirements.txt", "requirements.txt.bak", "r.txt"]
+        listing = mock.Mock(stdout=b"\0".join(n.encode() for n in names))
+        with mock.patch.object(pins.subprocess, "run", return_value=listing), \
+                mock.patch("builtins.open", side_effect=OSError):
+            kinds = pins.scanned()
+        self.assertEqual(sorted(f for f, k in kinds.items() if k == "requirements"),
+                         ["build-requirements.txt", "d/requirements-x.in", "requirements.txt"])
+        for n in names:
+            with self.subTest(n=n):
+                self.assertEqual(pins.text_sites("pip install --only-binary=:all: --require-hashes -r " + n),
+                                 0 if kinds.get(n) == "requirements" else 1)
 
     def test_tracked_requirements_files_hold_no_option_line(self):
         # tests/test_pins.py checks pins.scanned() reads these as kind "requirements" (it runs in the
