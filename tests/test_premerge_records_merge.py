@@ -307,12 +307,6 @@ class Workflow(unittest.TestCase):
         self.assertIn(line, body)
         self.assertIn('"records"', body)  # it runs `mutgate.py records` on the checkout CI tests
 
-    def test_a_merge_by_hand_reruns_the_gate_first(self):
-        # #6718 item 2: a manual merge hours after the last gate run would merge on that older records read.
-        ops = (ROOT / "docs/OPERATING.md").read_text().split("\n## 7.", 1)[1]
-        self.assertIn("gh workflow run premerge.yml -f pr=N", ops)
-        self.assertIn("workflow_dispatch:", (ROOT / ".github/workflows/premerge.yml").read_text())
-
 
     def test_the_gate_job_installs_go_mods_toolchain(self):
         wf = (ROOT / ".github/workflows/premerge.yml").read_text()

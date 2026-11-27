@@ -2466,6 +2466,13 @@ def wf_(name, id=1, status="completed", conclusion="success", path=None, event="
 
 
 class MergeRunTest(unittest.TestCase):
+    def test_a_merge_by_hand_reruns_the_gate_first(self):
+        # PREMERGE-records-merge-fu (#6718): a manual merge hours after the last gate run would merge on that older
+        # records read, so OPERATING section 7 has it dispatch the gate, whose workflow_dispatch input is the PR.
+        ops = (WORKFLOWS.parent.parent / "docs" / "OPERATING.md").read_text().split("\n## 7.", 1)[1]
+        self.assertIn("gh workflow run premerge.yml -f pr=N", ops)
+        self.assertIn("      pr:\n", (WORKFLOWS / "premerge.yml").read_text().split("workflow_dispatch:", 1)[1])
+
     SHA = "b" * 40
     # This run's own jobs (suite 99) are left out whatever their state; an older premerge run's are green.
     GREEN = [run_("checks"), run_("count"), run_("formal", conclusion="skipped"), run_("premerge-gate", suite=7),
