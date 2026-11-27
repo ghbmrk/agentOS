@@ -56,7 +56,8 @@ exits 1. Without `--runs` it prints `needs-runs` and exits 1, so no caller reads
 Then it reads the MUTANTS-EQUIVALENT records on the merge of `head` into `base` (PREMERGE-records-merge, #6716), with this
 checkout's `tools/mutgate.py records` (Go on PATH): a problem the merge has and `base` lacks prints `needs-records <records>`,
 a check that could not run `needs-records error`, and a PR changing the check itself while main changed what it reads since
-the merge base `needs-main-merge <files>`; each exits 1 (`records_merged`).
+the merge base `needs-main-merge <files>`; each exits 1 (`records_merged`). Once main changed none of it, such a PR is
+read by its own CI's records test instead (PREMERGE-records-merge-fu, #6718).
 
 `--bot` is the gate form for the generated-file bot PRs, which carry no verdict (PREMERGE-wire, #1860): it
 prints `bot` (exit 0) only when `head-ref` is one of the BOT branches, base..head changes nothing but that
@@ -1009,9 +1010,13 @@ RECORDS_PROOF = ("tests/test_mutgate.py", "    def test_every_record_in_the_repo
 
 
 def _proof(text):
-    """The RECORDS_PROOF test's lines in text, up to the next method or class, or '' when text has none."""
+    """The RECORDS_PROOF test's lines in text, its decorators through the line before the next method or class, or ''
+    when text has none: a skip added above the def changes it."""
     head, sep, rest = text.partition(RECORDS_PROOF[1] + "\n")
-    return sep + re.split(r"^(?=    def |\S)", rest, maxsplit=1, flags=re.M)[0] if sep else ""
+    if not sep:
+        return ""
+    above = re.search(r"(?:^    @.*\n)*\Z", head, re.M).group(0)
+    return above + sep + re.split(r"^(?=    def |\S)", rest, maxsplit=1, flags=re.M)[0]
 
 
 def _blob(cwd, rev, path):

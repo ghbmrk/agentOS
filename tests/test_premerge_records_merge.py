@@ -181,7 +181,8 @@ class RecordsMerged(unittest.TestCase):
         # edits or drops that test is read as before, so a real new record problem still holds.
         self.tool_pr()
         self.assertEqual(self.merged({"merge": {PROBLEM}})[0], (None, []))
-        for text in (f"class Records:\n{premerge.RECORDS_PROOF[1]}\n        return\n", "class Records:\n    pass\n"):
+        for text in (f"class Records:\n{premerge.RECORDS_PROOF[1]}\n        return\n", "class Records:\n    pass\n",
+                     f"class Records:\n    @unittest.skip('x')\n{premerge.RECORDS_PROOF[1]}\n        run('records')\n"):
             with self.subTest(text):
                 self.write(premerge.RECORDS_PROOF[0], text)
                 self.commit("proof edited")
