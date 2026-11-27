@@ -133,7 +133,7 @@ Covered: 155 / 197 requirement IDs
 | CH-20 | `broker/cmd/agentosd/evidence_test.go`, `broker/daemon/localui_test.go`, `broker/grants/evidence_test.go`, `broker/grants/pagewording_test.go` |
 | CH-21 | `broker/boxname/boxname_test.go`, `broker/boxname/hostiletext_test.go`, `broker/call/call_test.go`, `broker/call/loop_test.go`, `broker/cmd/agentosd/evidence_test.go`, `broker/firstboot/firstboot_test.go`, `broker/grants/pageresult_test.go`, `broker/grants/reversible_test.go`, `broker/grants/rig_test.go`, `broker/localsrv/held_test.go`, `broker/localsrv/setup_test.go`, `broker/localui/codeline_test.go`, `broker/localui/held_test.go`, `broker/localui/setupname_test.go`, `broker/owner/checkfolds_test.go`, `broker/owner/informquote_test.go`, `broker/owner/keep_test.go`, `broker/owner/name_test.go`, `broker/owner/noprefix_test.go`, `broker/owner/voicecheck_test.go`, `broker/question/voice_test.go`, `broker/recovery/unsigned_test.go`, `broker/speech/speech_test.go`, `broker/speech/wire/wire_test.go`, `broker/voice/fold_test.go`, `broker/voice/measure_test.go`, `broker/voice/shapes_test.go`, `broker/voice/split_test.go`, `broker/voice/voice_test.go` |
 | CH-22 | — |
-| CH-23 | `broker/cmd/agentos-photo/heic_test.go`, `broker/cmd/agentos-photo/photo_test.go`, `broker/photo/decode_test.go`, `broker/photo/decoder/fuzz_test.go`, `broker/photo/lint_test.go` |
+| CH-23 | `broker/cmd/agentos-photo/heic_test.go`, `broker/cmd/agentos-photo/photo_test.go`, `broker/photo/decode_test.go`, `broker/photo/decoder/fuzz_test.go`, `broker/photo/decoder/zz_grid_depth_test.go`, `broker/photo/lint_test.go` |
 | CH-24 | — |
 | CH-25 | — |
 | CH-26 | `broker/cmd/agentosd/forgetpage_test.go`, `broker/localui/forget_test.go` |
