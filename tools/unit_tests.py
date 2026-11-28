@@ -83,7 +83,8 @@ STRACE = ["strace", "-f", "--kill-on-exit", "--seccomp-bpf", "-q", "-y", "-e",
 SERIAL = {}
 # Modules whose tests run across workers inside their one strace tree (CI-par-3), with why.
 SPLIT = {"test_image": "about 10 min on a shared runner; one class is 45% of it, so it splits by test (#4332)",
-         "test_image_keeper": "481s on the runner after #5167's way tests, over the step's long pole; it splits by test"}
+         "test_image_keeper": "481s on the runner after #5167's way tests, over the step's long pole; it splits by test",
+         "test_mutgate": "890s to 1189s on #6000's runs (633s on main), over 1.25 times the step's ideal; it splits by test"}
 # Seconds per module on the CI runner (checks job 136812618291 of #6430's run, 2026-11-21), for
 # ordering and for shard(): a module not listed starts after these, biggest file first, and weighs 1.
 SECONDS = {"test_image_keeper": 1407, "test_mutgate": 746, "test_image": 480, "test_premerge": 246,

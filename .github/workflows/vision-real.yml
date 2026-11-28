@@ -111,8 +111,8 @@ jobs:
           # pyarrow, held to its wheels' hashes and no dependency, only reads the shard; the
           # files are named by row number, so no value in the shard can name a path.
           python3 -m venv "$RUNNER_TEMP/pa"
-          { printf 'pyarrow==%s' "$(pin pyarrow)"; awk '$1 == "pyarrow_wheel" {printf " --hash=sha256:%s", $2}' "$pins"; echo; } > "$RUNNER_TEMP/pa.txt"
-          "$RUNNER_TEMP/pa/bin/pip" install --quiet --no-deps --only-binary :all: --require-hashes -r "$RUNNER_TEMP/pa.txt"
+          { printf 'pyarrow==%s' "$(pin pyarrow)"; awk '$1 == "pyarrow_wheel" {printf " --hash=sha256:%s", $2}' "$pins"; echo; } > "$RUNNER_TEMP/requirements-pa.txt"
+          (cd "$RUNNER_TEMP" && pa/bin/pip install --quiet --no-deps --only-binary :all: --require-hashes -r requirements-pa.txt)
           "$RUNNER_TEMP/pa/bin/python" -I - "$RUNNER_TEMP/plates.parquet" "$d" <<'EOF'
           import sys, pyarrow.parquet as pq
           src, d = sys.argv[1], sys.argv[2]

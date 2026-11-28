@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/pageca"
 )
 
@@ -138,7 +139,7 @@ func takeFactors(c config, in io.Reader) error {
 	if ok, err := exists(c.storePath()); err != nil {
 		return err
 	} else if ok {
-		st, err := seal.Unlock(c.storePath(), seal.Passphrase{Phrase: r.Passphrase})
+		st, err := seal.Unlock(c.storePath(), seal.Passphrase{Phrase: secret.Hide([]byte(r.Passphrase))})
 		if errors.Is(err, seal.ErrWrongFactor) || errors.Is(err, seal.ErrNoSlot) {
 			return errKept
 		} else if err != nil {

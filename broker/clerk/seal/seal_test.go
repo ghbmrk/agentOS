@@ -17,6 +17,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
 )
@@ -31,7 +32,7 @@ func random(t *testing.T, n int) []byte {
 }
 
 func recovery(t *testing.T) seal.Recovery {
-	return seal.Recovery{Key: random(t, seal.RecoveryLen)}
+	return seal.Recovery{Key: secret.Hide(random(t, seal.RecoveryLen))}
 }
 
 func create(t *testing.T, f seal.Factor) (string, *seal.Store) {
@@ -79,7 +80,7 @@ func TestRecoveryRoundTrip(t *testing.T) {
 	if _, err := seal.Unlock(path, recovery(t)); !errors.Is(err, seal.ErrWrongFactor) {
 		t.Fatalf("another recovery key: got %v, want ErrWrongFactor", err)
 	}
-	if _, err := seal.Unlock(path, seal.Passphrase{Phrase: []byte("seven words from the card here")}); !errors.Is(err, seal.ErrNoSlot) {
+	if _, err := seal.Unlock(path, seal.Passphrase{Phrase: secret.Hide([]byte("seven words from the card here"))}); !errors.Is(err, seal.ErrNoSlot) {
 		t.Fatalf("a passphrase on a store without one: got %v, want ErrNoSlot", err)
 	}
 }
@@ -96,17 +97,17 @@ func TestCreateRefusesAnExistingStore(t *testing.T) {
 func TestPassphraseSlot(t *testing.T) {
 	r := recovery(t)
 	path, s := create(t, r)
-	pass := seal.Passphrase{Phrase: []byte("correct horse battery staple ocean lamp")}
+	pass := seal.Passphrase{Phrase: secret.Hide([]byte("correct horse battery staple ocean lamp"))}
 	id, err := s.AddSlot(pass)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sameKeys(t, s, unlock(t, path, pass))
-	if _, err := seal.Unlock(path, seal.Passphrase{Phrase: []byte("correct horse battery staple ocean lamb")}); !errors.Is(err, seal.ErrWrongFactor) {
+	if _, err := seal.Unlock(path, seal.Passphrase{Phrase: secret.Hide([]byte("correct horse battery staple ocean lamb"))}); !errors.Is(err, seal.ErrWrongFactor) {
 		t.Fatalf("wrong passphrase: got %v, want ErrWrongFactor", err)
 	}
 
-	next := seal.Passphrase{Phrase: []byte("a new card printed after rotation")}
+	next := seal.Passphrase{Phrase: secret.Hide([]byte("a new card printed after rotation"))}
 	nid, err := s.Replace(id, next)
 	if err != nil {
 		t.Fatal(err)
@@ -125,14 +126,14 @@ func TestPassphraseSlot(t *testing.T) {
 
 func TestPassphraseBounds(t *testing.T) {
 	_, s := create(t, recovery(t))
-	if _, err := s.AddSlot(seal.Passphrase{Phrase: []byte("short")}); err == nil {
+	if _, err := s.AddSlot(seal.Passphrase{Phrase: secret.Hide([]byte("short"))}); err == nil {
 		t.Error("a short passphrase made a slot")
 	}
-	low := seal.Passphrase{Phrase: []byte("long enough passphrase here"), Argon: seal.Argon{Time: 1, MemKiB: 64 << 10, Threads: 1}}
+	low := seal.Passphrase{Phrase: secret.Hide([]byte("long enough passphrase here")), Argon: seal.Argon{Time: 1, MemKiB: 64 << 10, Threads: 1}}
 	if _, err := s.AddSlot(low); err == nil {
 		t.Error("an Argon2id cost below 256 MiB made a slot")
 	}
-	if _, err := s.AddSlot(seal.Recovery{Key: make([]byte, 16)}); err == nil {
+	if _, err := s.AddSlot(seal.Recovery{Key: secret.Hide(make([]byte, 16))}); err == nil {
 		t.Error("a short recovery key made a slot")
 	}
 }
@@ -153,7 +154,7 @@ func TestCanaryKeyIsNotOnTheDrive(t *testing.T) {
 	r := recovery(t)
 	path, s := create(t, r)
 	pass := []byte("canary passphrase 7f3a9c1e5b")
-	if _, err := s.AddSlot(seal.Passphrase{Phrase: pass}); err != nil {
+	if _, err := s.AddSlot(seal.Passphrase{Phrase: secret.Hide(pass)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Put("ch4/seed", []byte("canary-ch4-seed-0b9d2e")); err != nil {
@@ -165,7 +166,7 @@ func TestCanaryKeyIsNotOnTheDrive(t *testing.T) {
 		"store key":    seal.StoreKey(s),
 		"log key":      logKey[:],
 		"head seed":    head.Seed(),
-		"recovery key": r.Key,
+		"recovery key": r.Key.Get(),
 		"passphrase":   pass,
 		"ch4 seed":     []byte("canary-ch4-seed-0b9d2e"),
 	}
@@ -285,7 +286,7 @@ func tpmFactor(t *testing.T, s *swtpm.TPM, key *ecdsa.PrivateKey, pin string) se
 	if err != nil {
 		t.Fatal(err)
 	}
-	return seal.TPM{TPM: s.TPM(), PIN: pin, PolicyKey: &key.PublicKey, Policies: []tpmseal.Policy{p}, Host: "Test PC"}
+	return seal.TPM{TPM: s.TPM(), PIN: secret.Hide(pin), PolicyKey: &key.PublicKey, Policies: []tpmseal.Policy{p}, Host: "Test PC"}
 }
 
 // STO-2, HW-5a, A8: the trusted host restarts unattended; a modified boot
@@ -353,7 +354,7 @@ func TestTrustedHostSlot(t *testing.T) {
 	if _, err := seal.Unlock(path, seal.TPM{TPM: sw.TPM(), PolicyKey: &key.PublicKey, Anchor: anchor}); !errors.Is(err, tpmseal.ErrNeedPIN) {
 		t.Fatalf("no PIN: got %v, want ErrNeedPIN", err)
 	}
-	sameKeys(t, s, unlock(t, path, seal.TPM{TPM: sw.TPM(), PolicyKey: &key.PublicKey, Anchor: anchor, PIN: "4711"}))
+	sameKeys(t, s, unlock(t, path, seal.TPM{TPM: sw.TPM(), PolicyKey: &key.PublicKey, Anchor: anchor, PIN: secret.Hide("4711")}))
 
 	// Another PC's TPM has no slot here.
 	sw2 := swtpm.Start(t)
@@ -419,7 +420,7 @@ func TestAStoreSealedUnderAnotherPolicyKeyDoesNotOpen(t *testing.T) {
 func TestAFailedDirSyncDoesNotReviveAReplacedSlot(t *testing.T) {
 	r := recovery(t)
 	path, s := create(t, r)
-	old := seal.Passphrase{Phrase: []byte("a passphrase seen over a shoulder")}
+	old := seal.Passphrase{Phrase: secret.Hide([]byte("a passphrase seen over a shoulder"))}
 	id, err := s.AddSlot(old)
 	if err != nil {
 		t.Fatal(err)
@@ -550,7 +551,7 @@ func TestReplaceAndPutIsOneWrite(t *testing.T) {
 // passphrase opening the store, or a slot named twice taking two new slots.
 func TestReplaceAndPutSwapsBothSlots(t *testing.T) {
 	old := recovery(t)
-	oldPass := seal.Passphrase{Phrase: []byte("seven words from the lost card here")}
+	oldPass := seal.Passphrase{Phrase: secret.Hide([]byte("seven words from the lost card here"))}
 	path, s := create(t, old)
 	if _, err := s.AddSlot(oldPass); err != nil {
 		t.Fatal(err)
@@ -565,7 +566,7 @@ func TestReplaceAndPutSwapsBothSlots(t *testing.T) {
 		}
 	}
 	next := recovery(t)
-	nextPass := seal.Passphrase{Phrase: []byte("seven other words on the new card")}
+	nextPass := seal.Passphrase{Phrase: secret.Hide([]byte("seven other words on the new card"))}
 	if _, err := s.ReplaceAndPut("backup/recipient", []byte("new"), seal.Swap{ID: rid, F: next}, seal.Swap{ID: rid, F: nextPass}); !errors.Is(err, seal.ErrNoSlot) {
 		t.Fatalf("a slot named twice: got %v, want ErrNoSlot", err)
 	}

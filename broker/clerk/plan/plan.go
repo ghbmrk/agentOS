@@ -1791,19 +1791,16 @@ func Codex(guard *netguard.Policy) Declaration {
 			Meta: codexMeta(),
 			// The tools CLI 0.162.1 declares in code mode under the image's
 			// managed config, as captured (#809): all in an additional_tools
-			// item.
+			// item. The image's pinned model catalog sets no multi-agent
+			// version, so the CLI declares no collaboration namespace
+			// (guest/codex ASSUMPTIONS B2-21-C22, #2111); tests/test_codex_worker.py
+			// checks this list against a real turn.
 			Tools: []Tool{
 				{"functions", "exec", "custom"},
 				{"functions", "wait", "function"},
 				{"functions", "request_user_input", "function"},
 				{"functions", "request_user_input_async", "function"},
 				{"clock", "sleep", "function"},
-				{"collaboration", "followup_task", "function"},
-				{"collaboration", "interrupt_agent", "function"},
-				{"collaboration", "list_agents", "function"},
-				{"collaboration", "send_message", "function"},
-				{"collaboration", "spawn_agent", "function"},
-				{"collaboration", "wait_agent", "function"},
 			},
 		},
 		// The 5-hour and weekly windows of the one Codex pool (#809).
