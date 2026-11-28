@@ -18,9 +18,9 @@ initrd of the boot entry (OUT/initrd/, every cpio member).
 It also reads, for the openssl records (#5341), which files hold the name of a by-name OpenSSL cipher
 selector or spell GCM-SIV or KRB5KDF, as selecting AES-GCM-SIV takes one of its names (see CIPHER_NAMES
 and SPELT), and counts their references to each selector and their spellings.
-And, for the openssl QUIC records (#6671), it reads which files import or look up OpenSSL's QUIC entry
-points (QUIC_NAMES), which only the openssl CLI may, and its datagram or connect BIO constructors
-(DGRAM_NAMES), which only the files [dgram] names may (OPENSSL_USES).
+And, for the openssl QUIC records (#6671), it reads which files hold the name of an OpenSSL QUIC entry
+point (QUIC_NAMES), which only the openssl CLI may, or of a datagram or connect BIO constructor
+(DGRAM_NAMES), which only the files [dgram] names may (OPENSSL_USES), each group's definer aside (#6673).
 And, for the expat record (DEBIAN-CVE-2026-134703, #6545), which files load expat's wide build, libexpatw.so.1,
 which alone runs the UTF-16 converters the record accepts as unreached (EXPATW).
 
@@ -38,8 +38,8 @@ file or symbolic link of the place answers to, and those names (each place's lin
 loader does; resolve()); "packed", each file whose code is not in its bytes as stored,
 and why (packed()); "cipher", each file whose bytes hold a CIPHER_NAMES or SPELT name and its references
 to each (cipher_sites); "sha256", the SHA-256 of each file reaching a group or held under "cipher";
-"quic" and "dgram", each file importing a name of that OPENSSL_USES group, or importing glibc's dlsym
-or dlvsym and holding one's name at the end of a string, and those names (#6671); "expatw", each file whose
+"quic" and "dgram", each file but that OPENSSL_USES group's definer (OPENSSL_DEFINER) holding one of its
+names at the end of a string, whatever it imports, and those names (#6671, #6673); "expatw", each file whose
 NEEDED closure holds a name or a library (by file name or SONAME) of expat's wide build, or, unless it is that
 build, whose bytes hold its name anywhere, terminated or not (a dlopen argument: Rust and Go literals carry no
 NUL), and those names and libraries (#6545; a static copy of expat is not told apart from the UTF-8 build, nor
@@ -213,11 +213,9 @@ def resolve(path, links, hops=40):
 # CLI (s_client -quic, which nothing on the box runs) reaching OpenSSL's QUIC stack. A QUIC connection,
 # listener or domain needs an SSL_CTX made with one of the QUIC methods (ssl/quic/quic_method.c, 3.5.9;
 # TLS_method and the other TLS and DTLS methods make no QUIC object), and SSL_new_listener is 3.5's
-# server entry. A file importing one, under any version or none, counts; so does a file importing dlsym or
-# dlvsym that holds one's name at the end of a NUL-terminated string (GNU ld may store a name as the tail
-# of a longer one), unless it defines that name itself: libssl, the one file implementing them, holds them
-# all in its own dynamic table (libcrypto the datagram BIO's, below). A static copy of OpenSSL is not
-# libssl3t64 and is outside these records.
+# server entry. A file holding one's name at the end of a NUL-terminated string counts (GNU ld may store a
+# name as the tail of a longer one; an import, under any version or none, is held so), but for libssl, the
+# one file implementing them (libcrypto the datagram BIO's, below; OPENSSL_DEFINER).
 QUIC_NAMES = ("OSSL_QUIC_client_method", "OSSL_QUIC_client_thread_method", "OSSL_QUIC_server_method",
               "SSL_new_listener")
 QUIC_RECORDS = "DEBIAN-CVE-2026-88822, -95691, -124709, -107494 and -84785"
@@ -238,6 +236,14 @@ OPENSSL_USES = {"quic": (QUIC_NAMES, "OpenSSL's QUIC entry points",
                          "the openssl QUIC records (%s)" % QUIC_RECORDS),
                 "dgram": (DGRAM_NAMES, "OpenSSL's datagram or connect BIO constructors",
                           "the DEBIAN-CVE-2026-88822 records")}
+# #6673 (Security 7157885119 item 1, L3 7157966663 item 4): a file holding a name counts, whatever it
+# imports: one importing no dlsym can hand the name to a loaded library's lookup helper, a static copy holds
+# the names, and a shim defining a name can forward it through dlsym(RTLD_NEXT, ...). So only each group's
+# definer is not counted: libssl for [quic], libcrypto for [dgram], each by its SONAME at the path Debian
+# installs it (as GLIBC_PATH), since a SONAME alone is any file's to claim. libssl still holds [dgram] names
+# (it imports BIO_s_connect and BIO_s_datagram and defines BIO_new_ssl_connect) and is listed there.
+OPENSSL_DEFINER = {"quic": "libssl.so.3", "dgram": "libcrypto.so.3"}
+OPENSSL_PATH = re.compile(r"^(/usr/lib/agentos/images/[^/]+)?/usr/lib/x86_64-linux-gnu/lib(ssl|crypto)\.so\.3$")
 OPENSSL_HELD = re.compile(b"(?:%s)(?=\0)" % b"|".join(n.encode() for names, _w, _r in OPENSSL_USES.values()
                                                       for n in names))
 
@@ -398,28 +404,16 @@ def unwrapped(places, wrappers):
     return out, sorted(set(errs), key=errs.index)
 
 
-def openssl_uses(path):
-    """({group: the names of that OPENSSL_USES group the ELF file at PATH imports or looks up, sorted} for each
-    group it uses; read). A file whose bytes end no string with one of the names is not read further. It looks
-    one up when it imports glibc's dlsym or dlvsym, holds the name (OPENSSL_HELD) and does not define it. READ
-    is False when objdump fails on it for any reason but its having no dynamic section, so a file it cannot
-    read is never counted clean."""
-    with open(path, "rb") as f:
-        held = {m.group().decode() for m in OPENSSL_HELD.finditer(f.read())}
-    if not held:
-        return {}, True
-    r = subprocess.run(["objdump", "-T", str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                       text=True, errors="replace")
-    imports, defines, dl = set(), set(), False
-    for line in r.stdout.splitlines():
-        t = line.split()
-        if t and t[-1] in held:
-            (imports if "*UND*" in t else defines).add(t[-1])
-        m = UND.search(line)
-        dl = dl or bool(m and m.group(2) in LOOKUP_FUNCS)
-    used = imports | (held - defines if dl else set())
-    groups = {g: sorted(used & set(names)) for g, (names, _w, _r) in OPENSSL_USES.items()}
-    return {g: n for g, n in groups.items() if n}, r.returncode == 0 or "not a dynamic object" in r.stderr
+def openssl_uses(data, shown, soname):
+    """{group: the names of that OPENSSL_USES group the bytes DATA of the file shown at SHOWN, with SONAME
+    (or None), hold at the end of a string, sorted} for each group it holds a name of (#6673): what it
+    imports, its lookups, its wrappers' and its own copy alike. Only a group's definer (OPENSSL_DEFINER) is
+    not counted in that group."""
+    held = {m.group().decode() for m in OPENSSL_HELD.finditer(data)}
+    groups = {g: sorted(held & set(names)) for g, (names, _w, _r) in OPENSSL_USES.items()
+              if not (soname == OPENSSL_DEFINER[g] and os.path.basename(shown) == soname
+                      and OPENSSL_PATH.match(shown))}
+    return {g: n for g, n in groups.items() if n}
 
 
 def own(v, p):
@@ -454,10 +448,9 @@ def sweep(files, links=None):
         sites, disassembled = cipher_sites(real)
         if sites is not None:
             cipher[shown] = sites
-        groups, openssl_read = openssl_uses(real)
-        for g, used in groups.items():
+        for g, used in openssl_uses(data, shown, soname).items():
             uses[g][shown] = used
-        if not (read and disassembled and openssl_read):
+        if not (read and disassembled):
             unread.append(shown)
         if syms:
             imports[shown] = syms
@@ -865,11 +858,11 @@ def openssl_refusals(places, entries):
                 hit = [e for e in entries.get(g, []) if fnmatch.fnmatchcase(p, e)]
                 used.update(hit)
                 if not hit:
-                    errs.append("%s: %s imports or looks up %s (%s) and is not in import_sweep.allow [%s]; %s "
+                    errs.append("%s: %s holds the name of %s (%s) and is not in import_sweep.allow [%s]; %s "
                                 "rest on no other file doing so: review what it does with them, update those "
                                 "records, then add the entry: %s" % (place, p, what, " ".join(names), g, records, p))
         # L3 7157966663 item 3: an entry is also the control that this read still works.
-        errs += ["import_sweep.allow: [%s] %s matches no file importing or looking up %s; each entry is also "
+        errs += ["import_sweep.allow: [%s] %s matches no file holding the name of %s; each entry is also "
                  "the control that this scan still reads them, so remove it only once that file has left the "
                  "image or stopped using them, and otherwise treat the scan as broken" % (g, e, what)
                  for e in entries.get(g, []) if e not in used]
@@ -962,7 +955,7 @@ def summary(places):
         lines += ["  sites %s" % entry_line(p, v.get("sha256", {}).get(p), s) for p, s in cipher.items()]
         for g, (_names, what, _records) in OPENSSL_USES.items():
             u = v.get(g, {})
-            lines.append("%s %s: %d files import or look up %s" % (place, g, len(u), what))
+            lines.append("%s %s: %d files hold the name of %s" % (place, g, len(u), what))
             lines += ["  %s %s: %s" % (g, p, " ".join(names)) for p, names in u.items()]
     return lines
 
