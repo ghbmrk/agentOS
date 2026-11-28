@@ -31,10 +31,19 @@ func boxAddrs() ([]netip.Addr, error) {
 		return nil, err
 	}
 	defer syscall.Close(fd)
+	return ifconfAddrs(func(c *ifconf) syscall.Errno {
+		_, _, e := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.SIOCGIFCONF, uintptr(unsafe.Pointer(c)))
+		return e
+	})
+}
+
+// ifconfAddrs is boxAddrs over ioctl, its SIOCGIFCONF call: from room for
+// 64 interfaces it asks again with more while the answer may be cut short.
+func ifconfAddrs(ioctl func(*ifconf) syscall.Errno) ([]netip.Addr, error) {
 	for n := 64; n <= 4096; n *= 4 {
 		buf := make([]byte, n*ifreqSize)
 		c := ifconf{len: int32(len(buf)), buf: &buf[0]}
-		_, _, e := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.SIOCGIFCONF, uintptr(unsafe.Pointer(&c)))
+		e := ioctl(&c)
 		runtime.KeepAlive(buf)
 		if e != 0 {
 			return nil, e
