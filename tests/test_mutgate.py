@@ -3697,9 +3697,65 @@ class MovedDecls(unittest.TestCase):
                                               '\t\tclose(done)\n\t}()\n\t<-done\n\tif Down(3)'), TWO_SRC)):
             with self.subTest(name):
                 self.assertEqual(late(test, src), (only, ""))
+        # A flag definition and a package var that holds marked code without calling it keep the narrowing
+        # (#6687): defining a flag changes no -test.* value, and an initializer with no call runs nothing.
+        # REQ: TOOL-mutgate-order-marks-precision
+        setter = TWO_SRC.replace("package hint\n", 'package hint\n\nimport "flag"\n') \
+            + '\nfunc mark() { flag.Set("test.count", "2") }\n'
+        for name, test, src in (
+                ("flag.Bool var", imp('"flag"') + '\nvar update = flag.Bool("update", false, "rewrite")\n', TWO_SRC),
+                ("aliased flag.StringVar init", imp('f "flag"') + '\nvar dir string\n\nfunc init() {\n'
+                 '\tf.StringVar(&dir, "dir", "", "where")\n}\n', TWO_SRC),
+                ("function value var", MOVE_TEST + '\nvar hook = mark\n', setter),
+                ("function value of a module package", imp('"example.invalid/broker/lib"') + '\nvar reader = lib.On\n', TWO_SRC),
+                ("func literal var", imp('"flag"') + '\nvar hook = func() error { return flag.Set("test.count", "2") }\n', TWO_SRC),
+                ("map of func literals", imp('"flag"') + '\nvar ops = map[string]func() error{\n'
+                 '\t"a": func() error { return flag.Set("test.count", "2") },\n}\n', TWO_SRC),
+                ("slice of function values", MOVE_TEST + '\nvar hooks = []func(){mark, func() { mark() }}\n', setter),
+                ("var holding CommandLine", imp('"flag"') + '\nvar fs = flag.CommandLine\n', TWO_SRC)):
+            with self.subTest("narrow " + name):
+                self.assertEqual(late(test, src, extra={"lib/lib.go": flags}), (only, ""))
+        # What sets a flag, or calls what does, still widens: a call not of the defining kind, a call of
+        # the held value from an init or another var, an immediately called literal, a conversion.
+        for name, test, src, where in (
+                ("flag.Set var", imp('"flag"') + '\nvar _ = flag.Set("test.count", "2")\n', TWO_SRC, "package var"),
+                ("flag.Lookup in a definition", imp('"flag"') + '\nvar v = flag.Bool("v", false, flag.Lookup("test.v").Usage)\n',
+                 TWO_SRC, "package var"),
+                ("flag.Var", imp('"flag"') + '\nvar d dir\n\nfunc init() {\n\tflag.Var(&d, "dir", "where")\n}\n\n'
+                 '// dir is a flag.Value.\ntype dir string\n\nfunc (d *dir) String() string { return "" }\n\n'
+                 'func (d *dir) Set(s string) error { return nil }\n', TWO_SRC, "init"),
+                ("init calls the held value", MOVE_TEST + '\nvar hook = mark\n\nfunc init() {\n\thook()\n}\n', setter, "init via"),
+                ("var calls the held value", MOVE_TEST + '\nvar hook = mark\n\nvar h = hook\n\nvar _ = run(h)\n\n'
+                 'func run(f func()) int {\n\tf()\n\treturn 0\n}\n', setter, "package var via"),
+                ("init calls a module package's value", imp('"example.invalid/broker/lib"') + '\nvar reader = lib.On\n\n'
+                 'func init() {\n\treader()\n}\n', TWO_SRC, "init via"),
+                ("called literal", imp('"flag"') + '\nvar _ = func() error { return flag.Set("test.count", "2") }()\n', TWO_SRC,
+                 "package var"),
+                ("conversion", MOVE_TEST + '\nvar hook = fn(mark)\n\n// fn is a func type.\ntype fn func()\n', setter, "package var via"),
+                ("shuffle in an uncalled literal", imp('"os"') + '\nvar hook = func() { os.Setenv("X", "-test.shuffle=on") }\n',
+                 TWO_SRC, "package var")):
+            with self.subTest("widen " + name):
+                got, err = late(test, src, extra={"lib/lib.go": flags})
+                self.assertEqual(got, every)
+                self.assertRegex(err, rf"\(broker/hint/hint_test\.go:\d+: {where}")
+        # Out of gofmt's layout, a composite literal's brace may read as a literal's body: it widens.
+        rough = setter + '\nvar _ = map[int]func() int {two(): two}\n\nfunc two() int {\n\tmark()\n\treturn 2\n}\n'
+        got, err = late(MOVE_TEST, rough)
+        self.assertEqual(got, every)
+        self.assertRegex(err, r"\(broker/hint/hint\.go:\d+: package var via")
+        self.assertEqual(late(MOVE_TEST, rough.replace("int {two", "int{two"))[0], every)  # gofmt's: a call
         # A Parallel read as no subtest's names its own place.
         par = MOVE_TEST.replace('t.Fatal("down")\n\t}', 't.Fatal("down")\n\t}\n\tt.Parallel()')
         self.assertRegex(late(par)[1], r"every test is a change \(broker/hint/hint_test\.go:\d+: Parallel not a subtest's first statement\)")
+
+    def test_a_package_outside_the_module_stays_all_marked_when_asked_twice(self):
+        # Security on #6686 (#6687 item 5): the memo's placeholder is None, so a lookup that returned
+        # early reads as everything marked the second time too, never as nothing marked.
+        # REQ: TOOL-mutgate-order-marks-precision
+        with mock.patch.object(mutgate, "OUTSIDE", {}):
+            for _ in range(2):
+                self.assertIsNone(mutgate._outside_marks("example.invalid/other", "example.invalid/broker", "HEAD"))
+                self.assertIsNone(mutgate._outside_marks("example.invalid/broker/x", "", "HEAD"))
 
     def test_a_declaration_of_a_cgo_file_never_moves(self):
         # #6385, from #6376: a cgo file's code binds its own preamble, so nothing moves out of one.

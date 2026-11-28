@@ -16,6 +16,8 @@ name: premerge
 # group, where it would replace a pending run that reads the records, and skips the gate. Both events
 # run the BASE branch's workflow file and tools/premerge.py: the PR head is fetched as git
 # objects for `git merge-tree` and `git diff`; it is never checked out, imported or executed.
+# PREMERGE-records-merge (#6716): before `same`, --check reads the MUTANTS-EQUIVALENT records on the merge of the
+# head into main with the base's mutgate, so a record main's tree now refuses holds the PR instead of breaking main.
 # Fail closed: anything but a clean `same` or `bot` posts `failure`.
 # PREMERGE-stale (#1946): the job's own result is not the gate, the status is. A `failure`
 # verdict leaves the job green: comment-time runs attach to main's head, so a red run there
@@ -91,6 +93,10 @@ on:
         type: number
 permissions:
   contents: read
+# The records read builds a Go program (PREMERGE-records-merge): the toolchain setup-go installs, no go.work (#4007).
+env:
+  GOTOOLCHAIN: local
+  GOWORK: "off"
 concurrency:
   group: premerge-${{ github.event.pull_request.number || ((contains(github.event.comment.body, 'Verdict:') || contains(github.event.changes.body.from, 'Verdict:')) && github.event.issue.number) || github.event.workflow_run.pull_requests[0].number || inputs.pr || github.run_id }}
   cancel-in-progress: false
@@ -99,7 +105,7 @@ jobs:
     name: premerge-gate
     if: (github.event_name == 'pull_request_target' && github.event.action != 'closed') || (github.event.issue.pull_request && (contains(github.event.comment.body, 'Verdict:') || contains(github.event.changes.body.from, 'Verdict:'))) || github.event.workflow_run.pull_requests[0] || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 8 # the records read (PREMERGE-records-merge) takes up to 90 s a side
     environment: premerge # deployment branches: main only; holds PREMERGE_APP_KEY
     outputs:
       merge-head: ${{ steps.gate.outputs.merge-head }}
@@ -117,6 +123,12 @@ jobs:
         with:
           fetch-depth: 0 # the merge base with the PR head
           persist-credentials: false
+      # PREMERGE-records-merge (#6716): --check builds the base's mutgate statement lister (standard library only)
+      # to read the merge's MUTANTS-EQUIVALENT records as data; no module of the PR is built or run.
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version: "1.26.11" # = broker/go.mod's toolchain line
+          cache: false
       - name: premerge App token
         id: app
         if: vars.PREMERGE_APP_CLIENT_ID != ''
