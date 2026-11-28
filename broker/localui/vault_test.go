@@ -716,6 +716,9 @@ func TestScanBoundsProgressiveJPEG(t *testing.T) {
 			t.Fatalf("segment length %d: progressive frame missed", n)
 		}
 	}
+	// MUT-kill-localui-9's checks (#6773), as subtests for the reason
+	// localui9Kills gives.
+	localui9Kills(t)
 }
 
 // A photo spends an attempt before it is read, even one with no code in
