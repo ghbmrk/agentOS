@@ -19,3 +19,10 @@ func Reached(s *State, node string) []string {
 	slices.Sort(out)
 	return out
 }
+
+// Narrowings is what the kernel would log now for every key whose reach
+// grew past its worth at grant.
+func Narrowings(s *State) []KeyNarrowed { return s.narrowings() }
+
+// WorthAt is the worth grant id was granted at.
+func WorthAt(s *State, id key.ID) (key.Rank, bool) { r, ok := s.decl.worth[id]; return r, ok }

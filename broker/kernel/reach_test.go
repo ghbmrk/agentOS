@@ -363,11 +363,10 @@ func TestDeclReachAppendCannotWiden(t *testing.T) {
 	}
 	n := r.k.Log().Len()
 	must(t, r.k.DeclareReach(0, base))
-	if got := r.k.Log().Len(); got != n+1 {
-		t.Fatalf("a declaration logged %d entries, want 1", got-n)
-	}
-	if es := r.k.Log().Entries(); es[len(es)-1].Type != kernel.TDeclReach || kernel.Widening(kernel.TDeclReach) {
-		t.Fatalf("logged %s, a widening: %v", es[len(es)-1].Type, kernel.Widening(kernel.TDeclReach))
+	// One declaration, then the kernel's narrowings of the keys it grew.
+	if es := r.k.Log().Entries()[n:]; es[0].Type != kernel.TDeclReach || kernel.Widening(kernel.TDeclReach) ||
+		slices.ContainsFunc(es[1:], func(e kernel.Entry) bool { return e.Type != kernel.TKeyNarrowed }) {
+		t.Fatalf("logged %d entries from %s, a widening: %v", len(es), es[0].Type, kernel.Widening(kernel.TDeclReach))
 	}
 	bad := map[string]kernel.DeclReach{
 		// Moving mail's clerk to an empty node drops the bank and the shop.

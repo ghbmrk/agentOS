@@ -80,6 +80,9 @@ func admit(s *State, p Plan, now Reading) (key.ID, []key.ID, *Refusal) {
 		if r := v.Authorize(st, ctx); r != nil {
 			return key.ID{}, nil, on(r, &i)
 		}
+		if r := s.grown(v, st.Verb); r != nil {
+			return key.ID{}, nil, on(r, &i)
+		}
 		if c.Irreversible() {
 			fp := Fingerprint(st)
 			if fresh[fp] || repeats(s, v.Root(), st, p.ID, now) {
@@ -210,6 +213,10 @@ func next(s *State, id string, now Reading) Act {
 		if r.Code == key.RPaused {
 			return a // waits for key.resumed
 		}
+		a.Kind, a.Refusal = ActCancel, r
+		return a
+	}
+	if r := s.grown(v, sp.Verb); r != nil {
 		a.Kind, a.Refusal = ActCancel, r
 		return a
 	}
@@ -915,7 +922,10 @@ func sendCheck(s *State, p *PlanState, st *StepState, i int, now Reading) *key.R
 	}
 	sp := p.Plan.Step(i)
 	sp.Rung = s.Rung(v.Limits.Task, p.Plan.Key, st.Approved)
-	return v.Authorize(sp, s.context(now, s.LedgerBefore(st.DispatchSeq)))
+	if r := v.Authorize(sp, s.context(now, s.LedgerBefore(st.DispatchSeq))); r != nil {
+		return r
+	}
+	return s.grown(v, sp.Verb)
 }
 
 // Tick retries the erases not yet confirmed and the backup re-seals due
@@ -924,6 +934,9 @@ func sendCheck(s *State, p *PlanState, st *StepState, i int, now Reading) *key.R
 // as it goes. A step that cannot move
 // yet is left for a later Tick.
 func (k *Kernel) Tick(at int64) error {
+	if err := k.narrowGrown(k.read(at)); err != nil {
+		return err
+	}
 	if k.keys != nil {
 		if err := k.confirmErases(k.read(at)); err != nil {
 			return err
