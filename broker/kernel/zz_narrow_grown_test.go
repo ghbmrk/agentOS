@@ -224,21 +224,91 @@ func canon(vs []key.Verb) []key.Verb {
 	return out
 }
 
-// A narrowing the kernel did not derive, here one keeping a verb the grown
-// key may not keep, folds to nothing and is a divergence on rederive.
+// A narrowing the kernel did not derive folds to nothing and is a
+// divergence on rederive: one keeping a verb that grew, one narrower than
+// the kernel's, and one whose offer names another proof.
 func TestAForgedNarrowingIsDropped(t *testing.T) {
-	r := newRig(t)
-	must(t, kernel.Emit(r.k, 0, kernel.TDeclReach, bankReset()))
-	forged := kernel.Narrowings(r.k.State())[0]
-	forged.Verbs = append(forged.Verbs, string(key.Trash))
-	must(t, kernel.Emit(r.k, 0, kernel.TKeyNarrowed, forged))
-	if len(kernel.Narrowings(r.k.State())) != 2 {
-		t.Fatal("a forged narrowing folded")
-	}
-	if _, err := kernel.Rederive(r.anchors(), r.k.Box(), r.k.Log().Entries()); err == nil {
-		t.Fatal("rederive passed a narrowing the kernel did not derive")
+	for name, forge := range map[string]func(*kernel.KeyNarrowed){
+		"keeps trash": func(n *kernel.KeyNarrowed) { n.Verbs = append(n.Verbs, string(key.Trash)) },
+		"narrower":    func(n *kernel.KeyNarrowed) { n.Verbs = []string{} },
+		"cheap offer": func(n *kernel.KeyNarrowed) { n.Proof = key.P0 },
+	} {
+		r := newRig(t)
+		must(t, kernel.Emit(r.k, 0, kernel.TDeclReach, bankReset()))
+		owed := kernel.Narrowings(r.k.State())
+		forged := owed[0]
+		forged.Verbs = slices.Clone(forged.Verbs)
+		forge(&forged)
+		must(t, kernel.Emit(r.k, 0, kernel.TKeyNarrowed, forged))
+		if _, ok := kernel.Kept(r.k.State(), forged.Key); ok || len(kernel.Narrowings(r.k.State())) != len(owed) {
+			t.Fatalf("%s: a forged narrowing folded", name)
+		}
+		if _, err := kernel.Rederive(r.anchors(), r.k.Box(), r.k.Log().Entries()); err == nil {
+			t.Fatalf("%s: rederive passed a narrowing the kernel did not derive", name)
+		}
 	}
 	if kernel.Widening(kernel.TKeyNarrowed) {
 		t.Fatal("a narrowing grants nothing back")
 	}
+}
+
+// A dispatch decided before the growth is not sent after it: the send
+// check refuses it, unsent, and cancels its plan (KEY-9).
+func TestASendAfterTheGrowthIsRefused(t *testing.T) {
+	r := newRig(t)
+	r.plan("p1", r.ck, st(key.Trash, "m1"))
+	c := r.calls(1, 1)[0]
+	must(t, r.k.DeclareReach(1, bankReset()))
+	if ok, err := r.k.Send(1, c); ok || err != nil {
+		t.Fatalf("sent a trash outside the narrowing: %v %v", ok, err)
+	}
+	if got := r.k.State().Plans["p1"].Cancel; got != kernel.CGrown {
+		t.Fatalf("cancel %q, want %s", got, kernel.CGrown)
+	}
+	r.replays()
+}
+
+// A root at the top rank never grows; its clerk key, limited to cheaper
+// verbs, does, and only the first link's narrowing refuses trash.
+func TestAGrownFirstLinkIsNarrowedAlone(t *testing.T) {
+	r := newRig(t)
+	ck := r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "mail",
+		Verbs: []key.Verb{key.Buy, key.Organize, key.Trash}, Serial: "top"}), 1<<40, key.LimitVerbs(key.Organize, key.Trash))
+	if rf := r.admits("before", ck, 0); rf != nil {
+		t.Fatalf("before: %v", rf)
+	}
+	must(t, r.k.DeclareReach(0, bankReset()))
+	got := narrowed(t, r)
+	if !slices.ContainsFunc(got, func(n kernel.KeyNarrowed) bool { return n.Key == ck.Tip() }) ||
+		slices.ContainsFunc(got, func(n kernel.KeyNarrowed) bool { return n.Key == rootOf(ck) }) {
+		t.Fatalf("narrowings %+v, want the clerk key's and not its root's", got)
+	}
+	if rf := r.admits("after", ck, 0); rf == nil || rf.Code != kernel.CGrown {
+		t.Fatalf("trash under a grown first link: %v", rf)
+	}
+	r.replays()
+}
+
+// Calls logs the narrowing owed before it decides a step, so after a crash
+// between a declaration and its narrowing a step the narrowing keeps still
+// runs, and a revoked grant is offered nothing.
+func TestCallsNarrowsFirstAndSkipsRevoked(t *testing.T) {
+	r := newRig(t)
+	r.plan("org", r.ck, st(key.Organize, "m1"))
+	must(t, r.k.Revoke(0, rootOf(r.ck)))
+	must(t, kernel.Emit(r.k, 0, kernel.TDeclReach, bankReset())) // the declaration alone
+	_, err := r.k.Calls(1)
+	must(t, err)
+	got := narrowed(t, r)
+	if len(got) != 1 || got[0].Key != r.ck.Tip() {
+		t.Fatalf("narrowings %+v, want the clerk key's only (its root is revoked)", got)
+	}
+	r2 := newRig(t)
+	r2.plan("org", r2.ck, st(key.Organize, "m1"))
+	must(t, kernel.Emit(r2.k, 0, kernel.TDeclReach, bankReset()))
+	if cs := r2.calls(1, 1); cs[0].Kind != kernel.ActDispatch || r2.status("org") != kernel.SActive {
+		t.Fatalf("a kept organize after the crash window: %+v, %s", cs, r2.status("org"))
+	}
+	r.replays()
+	r2.replays()
 }

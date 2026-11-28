@@ -26,3 +26,6 @@ func Narrowings(s *State) []KeyNarrowed { return s.narrowings() }
 
 // WorthAt is the worth grant id was granted at.
 func WorthAt(s *State, id key.ID) (key.Rank, bool) { r, ok := s.decl.worth[id]; return r, ok }
+
+// Kept is the verbs grant id's narrowing keeps, if it is narrowed.
+func Kept(s *State, id key.ID) ([]string, bool) { v, ok := s.decl.kept[id]; return v, ok }

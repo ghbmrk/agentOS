@@ -139,7 +139,7 @@ func (s *State) worthOf(id key.ID, verbs []string) key.Rank {
 func (s *State) narrowing(id key.ID) *KeyNarrowed {
 	old, ok := s.decl.worth[id]
 	vs := s.verbsOf(id, true)
-	if !ok || s.worthOf(id, vs) <= old {
+	if !ok || s.Changes.Revoked[id] || s.worthOf(id, vs) <= old { // a revoked grant is offered nothing
 		return nil
 	}
 	n := s.worthOf(id, s.verbsOf(id, false))

@@ -829,7 +829,11 @@ type Call struct {
 // once until Answer has its answer. A step whose clerk the kernel does not
 // have fails here.
 func (k *Kernel) Calls(at int64) ([]Call, error) {
-	if err := k.endDue(k.read(at)); err != nil {
+	start := k.read(at) // the ends due and the narrowings owed, one reading
+	if err := k.endDue(start); err != nil {
+		return nil, err
+	}
+	if err := k.narrowGrown(start); err != nil {
 		return nil, err
 	}
 	var out []Call
@@ -934,9 +938,6 @@ func sendCheck(s *State, p *PlanState, st *StepState, i int, now Reading) *key.R
 // as it goes. A step that cannot move
 // yet is left for a later Tick.
 func (k *Kernel) Tick(at int64) error {
-	if err := k.narrowGrown(k.read(at)); err != nil {
-		return err
-	}
 	if k.keys != nil {
 		if err := k.confirmErases(k.read(at)); err != nil {
 			return err
