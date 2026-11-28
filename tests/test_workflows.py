@@ -209,6 +209,9 @@ PREMERGE_LINES = [
     '        type: number',
     'permissions:',
     '  contents: read',
+    'env:',
+    '  GOTOOLCHAIN: local',
+    '  GOWORK: "off"',
     'concurrency:',
     "  group: premerge-${{ github.event.pull_request.number || ((contains(github.event.comment.body, 'Verdict:') || contains(github.event.changes.body.from, 'Verdict:')) && github.event.issue.number) || github.event.workflow_run.pull_requests[0].number || inputs.pr || github.run_id }}",
     '  cancel-in-progress: false',
@@ -217,7 +220,7 @@ PREMERGE_LINES = [
     '    name: premerge-gate',
     "    if: (github.event_name == 'pull_request_target' && github.event.action != 'closed') || (github.event.issue.pull_request && (contains(github.event.comment.body, 'Verdict:') || contains(github.event.changes.body.from, 'Verdict:'))) || github.event.workflow_run.pull_requests[0] || github.event_name == 'workflow_dispatch'",
     '    runs-on: ubuntu-24.04',
-    '    timeout-minutes: 5',
+    '    timeout-minutes: 8 # the records read (PREMERGE-records-merge) takes up to 90 s a side',
     '    environment: premerge # deployment branches: main only; holds PREMERGE_APP_KEY',
     '    outputs:',
     '      merge-head: ${{ steps.gate.outputs.merge-head }}',
@@ -235,6 +238,10 @@ PREMERGE_LINES = [
     '        with:',
     '          fetch-depth: 0 # the merge base with the PR head',
     '          persist-credentials: false',
+    '      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0',
+    '        with:',
+    '          go-version: "1.26.11" # = broker/go.mod\'s toolchain line',
+    '          cache: false',
     '      - name: premerge App token',
     '        id: app',
     "        if: vars.PREMERGE_APP_CLIENT_ID != ''",
@@ -977,6 +984,47 @@ def soak_cap_problems(text):
         caps = re.findall(r"(?m)^      max-parallel:\s*(\S+)", strategy.group(1)) if strategy else []
         if len(caps) != 1 or not re.fullmatch(r"[1-9]\d*", caps[0]) or int(caps[0]) > cap:
             problems.append("%s: max-parallel %r, must be one integer of at most %d" % (job, caps, cap))
+    return problems
+
+
+def job_body(text, job):
+    """The lines of `job` in a workflow, up to the next job."""
+    return re.split(r"\n  (?=\S)", text.split("\n  %s:\n" % job, 1)[1], maxsplit=1)[0]
+
+
+# CI-soak-green (#6571): what ci's broker-race installs only for its read audit, not for the tests.
+RACE_AUDIT_ONLY = {"bpftrace"}
+
+
+def soak_env_problems(ci, soak):
+    """Why soak.yml's soak job meets a different test environment than ci's broker-race: a tool
+    broker-race installs that it lacks, a different subordinate-id step, or a different go test
+    timeout. Empty when none."""
+    race, job = job_body(ci, "broker-race"), job_body(soak, "soak")
+    installs = lambda body: set(re.findall(r"apt-get install -yq ([\w.-]+)", body))
+    problems = ["soak lacks %s" % p for p in sorted(installs(race) - installs(job) - RACE_AUDIT_ONLY)]
+    sub = "      - name: Subordinate ids for the canary sandbox\n"
+    if sub not in race or sub not in job:
+        problems.append("no subordinate-id step in both")
+    else:
+        step = lambda body: re.split(r"\n      - ", body.split(sub, 1)[1], maxsplit=1)[0].replace(
+            "        if: steps.scope.outputs.race != 'skip'\n", "")
+        if step(race) != step(job):
+            problems.append("subordinate-id steps differ")
+    timeouts = lambda body: re.findall(r"go test [^\n]*?-timeout (\S+)", body)
+    if not timeouts(job) or set(timeouts(job)) != set(timeouts(race)):
+        problems.append("go test timeouts %r, ci's %r" % (timeouts(job), timeouts(race)))
+    return problems
+
+
+def soak_target_problems(soak, broker):
+    """Soak fuzz matrix entries whose package or Fuzz function is not in broker/; empty when none."""
+    problems = []
+    for pkg, target in re.findall(r"\{ pkg: ([\w/]+), target: (\w+) \}", job_body(soak, "fuzz")):
+        d = broker / pkg
+        src = "".join(f.read_text() for f in d.glob("*_test.go")) if d.is_dir() else ""
+        if not re.search(r"(?m)^func %s\(\w+ \*testing\.F\)" % target, src):
+            problems.append("%s %s" % (pkg, target))
     return problems
 
 
@@ -1825,7 +1873,7 @@ class WorkflowTest(unittest.TestCase):
         # ASSUMPTIONS.md D13). The mutants job sets them up with broker-race's own step, first.
         want = "Subordinate ids for the canary sandbox"
         race = dict(job_steps((WORKFLOWS / "ci.yml").read_text(), "broker-race"))
-        guard = "        if: steps.scope.outputs.records != 'true'\n"
+        guard = "        if: steps.scope.outputs.race != 'skip'\n"
         self.assertIn(guard, race[want])
         # #4961: `plan` runs a test-only diff's changed tests for their coverage, so it needs it too.
         for job, first in (("mutants", "Gremlins and statement deletions on the package (#4573)"), ("plan", "Shards for each package (#4961)")):
@@ -1833,7 +1881,7 @@ class WorkflowTest(unittest.TestCase):
             names = [n for n, _ in mut]
             self.assertIn(want, names)
             self.assertLess(names.index(want), names.index(first))
-            # broker-race's copy also skips on a records-only change (CI-par-4); the rest is the same.
+            # broker-race's copy also skips on a records-only or race-blind change (CI-par-4, CI-race-scope); the rest is the same.
             self.assertEqual(dict(mut)[want], race[want].replace(guard, "", 1))
 
     def test_mutgate_runs_the_tpm_tests_as_broker_race_does(self):
@@ -1843,7 +1891,7 @@ class WorkflowTest(unittest.TestCase):
         # and a missing swtpm fails the run, as in broker-race, instead of skipping.
         want = "Software TPM for the trusted-host slot (P2-4b)"
         race = dict(job_steps((WORKFLOWS / "ci.yml").read_text(), "broker-race"))
-        guard = "        if: steps.scope.outputs.records != 'true'\n"
+        guard = "        if: steps.scope.outputs.race != 'skip'\n"
         self.assertIn(guard, race[want])
         text = (WORKFLOWS / "mutgate.yml").read_text()
         for job, first in (("mutants", "Gremlins and statement deletions on the package (#4573)"), ("plan", "Shards for each package (#4961)")):
@@ -1880,6 +1928,62 @@ class WorkflowTest(unittest.TestCase):
         for missing in ("\n  fuzz:\n", "\n  soak:\n"):
             with self.subTest(missing=missing):
                 self.assertNotEqual(soak_cap_problems(text.replace(missing, "\n  renamed:\n", 1)), [])
+
+    def test_soak_meets_the_environment_ci_race_tests_need(self):
+        # CI-soak-green (#6571): every soak run from 2026-11-17 to 11-25 failed every full run,
+        # because broker-race had gained tool steps (dnsmasq, subordinate ids) that the soak job
+        # lacked, and CI makes a missing tool fail the test. A step dropped from either side fails here.
+        ci, soak = ((WORKFLOWS / n).read_text() for n in ("ci.yml", "soak.yml"))
+        self.assertEqual(soak_env_problems(ci, soak), [])
+        for bad in (soak.replace("apt-get install -yq dnsmasq-base", "true", 1),
+                    soak.replace("      - name: Subordinate ids for the canary sandbox\n", "      - name: ids\n", 1),
+                    soak.replace("--add-subuids 100000-165535", "--add-subuids 1-2", 1),
+                    soak.replace("-count=1 -timeout 25m ./...", "-count=1 ./...", 1)):
+            self.assertNotEqual(soak_env_problems(ci, bad), [])
+        newtool = ci.replace("run: sudo apt-get install -yq dnsmasq-base", "run: sudo apt-get install -yq newtool", 1)
+        self.assertEqual(soak_env_problems(newtool, soak), ["soak lacks newtool"])
+
+    def test_soak_failures_become_annotations(self):
+        # CI-soak-green (#190): run 54's race failures were readable only from its artifact and step
+        # summary, neither reachable through api.github.com. The soak step also prints each failing
+        # test or package as an `::error::` line; this runs those lines from soak.yml on sample input.
+        lines = (WORKFLOWS / "soak.yml").read_text().splitlines()
+        start = next(i for i, l in enumerate(lines) if "# Also as annotations" in l)
+        end = next(i for i in range(start, len(lines)) if lines[i].strip() == '[ "$fails" -eq 0 ]')
+        cmd = "\n".join(l.strip() for l in lines[start:end]).replace("${{ matrix.name }}", "race")
+
+        def annotate(text):
+            with tempfile.TemporaryDirectory() as out:
+                pathlib.Path(out, "failures.txt").write_text(text)
+                return subprocess.run(["bash", "-e", "-o", "pipefail", "-c", cmd], env={"out": out, "PATH": os.environ["PATH"]},
+                                      capture_output=True, text=True, check=True).stdout.splitlines()
+
+        pre = "::error title=soak race::"
+        # L3 of #6747: a test failing in every run must not fill the 10 slots with one line per run, nor
+        # nameless lines (bare FAIL, DATA RACE) push out a test or package that failed once.
+        flaky = "".join(f"run {r}: WARNING: DATA RACE\nrun {r}: --- FAIL: TestFlaky ({r}.25s)\nrun {r}: FAIL\n"
+                        f"run {r}: FAIL\tagentos/a\t3.{r}s\nrun {r}: -test.shuffle 1{r}\n" for r in range(1, 12))
+        got = annotate(flaky + "run 3: --- FAIL: TestOther (0.00s)\nrun 3: FAIL\tagentos/b\t0.1s\n"
+                       "run 3: --- FAIL: TestOther (0.01s)\nrun 4: panic: 100% bad\r\n")
+        self.assertEqual(got, [pre + "--- FAIL: TestFlaky (failed runs: 11)", pre + "FAIL\tagentos/a (failed runs: 11)",
+                               pre + "--- FAIL: TestOther (failed runs: 1)", pre + "FAIL\tagentos/b (failed runs: 1)",
+                               pre + "panic: 100%25 bad%0D (failed runs: 1)"])
+        many = annotate("".join(f"run 1: --- FAIL: TestN{i:02d} (0.00s)\n" for i in range(20)) + "run 2: --- FAIL: TestN19 (0.00s)\n")
+        self.assertEqual(len(many), 10)
+        self.assertEqual(many[0], pre + "--- FAIL: TestN19 (failed runs: 2)")
+        self.assertEqual(annotate("run 1: FAIL\tagentos/c [build failed]\n"), [pre + "FAIL\tagentos/c [build failed] (failed runs: 1)"])
+        self.assertEqual(annotate(""), [])
+        self.assertEqual(annotate("run 1: -test.shuffle 5\nrun 1: WARNING: DATA RACE\nrun 1: FAIL\n"), [])
+
+    def test_soak_fuzz_targets_exist(self):
+        # CI-soak-green (#6571): `mail FuzzParse` outlived broker/mail and failed in 0 s on every run.
+        broker = WORKFLOWS.parent.parent / "broker"
+        soak = (WORKFLOWS / "soak.yml").read_text()
+        self.assertEqual(soak_target_problems(soak, broker), [])
+        bad = soak.replace("          - { pkg: owner,", "          - { pkg: mail, target: FuzzParse }\n          - { pkg: owner,", 1)
+        self.assertEqual(soak_target_problems(bad, broker), ["mail FuzzParse"])
+        bad = soak.replace("target: FuzzParseReply }", "target: FuzzGone }", 1)
+        self.assertEqual(soak_target_problems(bad, broker), ["owner FuzzGone"])
 
     def test_steps_finds_steps(self):
         sample = "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          x: 1\n      - run: echo\n"

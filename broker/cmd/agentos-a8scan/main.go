@@ -51,6 +51,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 // shippedClerks are the clerks whose keys are needles without a -clerk
@@ -115,7 +116,7 @@ func readSecret(in *bufio.Reader, prompt string) string {
 // of clerks among them, and scans targets. It returns the number of
 // findings; an error means no scan result.
 func run(sp string, rk []byte, rkText, passphrase string, clerks, targets []string, out io.Writer) (int, error) {
-	st, err := seal.Unlock(sp, seal.Recovery{Key: rk})
+	st, err := seal.Unlock(sp, seal.Recovery{Key: secret.Hide(rk)})
 	if err != nil {
 		return 0, fmt.Errorf("the recovery key does not open this store: %w", err)
 	}

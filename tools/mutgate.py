@@ -1543,6 +1543,10 @@ MAIN_HEAD = re.compile(r"func TestMain\(([A-Za-z_]\w*) \*testing\.M\) \{")
 # Security on #6677), and imports whose qualifier may: one in a TestMain, init or package var fails closed.
 ORDER_WORDS = {"shuffle", "linkname"}  # string contents too: "-test.shuffle=on"
 ORDER_PATHS = {"flag", "os/exec", "unsafe"}
+# Calls of flag that only define a flag of a built-in kind (#6687): no -test.* value changes, and no
+# code of the package runs (flag.Var, Func, BoolFunc and TextVar call its methods or funcs, so seed).
+FLAG_DEFINES = {"Bool", "BoolVar", "Duration", "DurationVar", "Float64", "Float64Var", "Int", "IntVar", "Int64",
+                "Int64Var", "String", "StringVar", "Uint", "UintVar", "Uint64", "Uint64Var"}
 DOT_BARRED = {"flag", "os/exec", "unsafe", "os", "syscall", "golang.org/x/sys/unix"}
 ORDER_SELECTORS = {("os", "Args"), ("os", "Executable"), ("os", "StartProcess"), ("syscall", "Exec"),
                    ("syscall", "ForkExec"), ("syscall", "StartProcess"), ("golang.org/x/sys/unix", "Exec")}
@@ -1648,6 +1652,7 @@ def _order_risk(files, facts, decls, clause, outside):
     outlive a test (see above), or None. outside(import path) is _outside_marks'."""
     names = {n for ds in decls.values() for d in ds if d[1] != "header" for n in d[2]}
     marked, refs = _marks(files, facts, decls, clause, outside)
+    rough = None  # _unformatted(files), read once a var calling nothing would otherwise widen
     for p in sorted(files):
         f, text = facts[p], files[p]
         quals = {a or path.split("/")[-1] for a, path in f.specs if path in ORDER_PATHS}
@@ -1667,13 +1672,51 @@ def _order_risk(files, facts, decls, clause, outside):
             if d[1] not in ("func", "var") or (d[1] == "func" and "init" not in d[2]):
                 continue
             what = f"{p}:{_decl_line(d, rows)}: " + ("package var" if d[1] == "var" else "init")
-            if hit := refs[(p, i)] & marked.keys():
-                return f"{what} via {marked[min(hit)]}"
-            if _order_seed(d, quals, f.specs, _decl_text(bare, d), refs[(p, i)], clause, outside):
-                return what
+            hit = refs[(p, i)] & marked.keys()
+            if not hit and not _order_seed(d, quals, f.specs, _decl_text(bare, d), refs[(p, i)], clause, outside):
+                continue
+            # A var whose initializer calls nothing runs nothing; what it holds is marked (_marks), so
+            # what calls it is still read (#6687). Read from gofmt's layout only (_calls_nothing).
+            if d[1] == "var" and not d[4] & ORDER_WORDS and _calls_nothing(_decl_text(bare, d)):
+                if rough is None:
+                    rough = _unformatted(files)
+                if p not in rough:
+                    continue
+            return f"{what} via {marked[min(hit)]}" if hit else what
         if (go := _go_risk(f.specs, bare)) is not None:
             return f"{p}:{bare.count(chr(10), 0, go[0]) + 1}: {go[1]}"
     return None
+
+
+def _calls_nothing(bare):
+    """Whether a package var declaration (its text, comments and literal contents blanked) runs no call
+    when initialized (#6687): no `(` but a func literal's or func type's own, gofmt's layout read. A func
+    literal is `func(params)`, results, then ` {` and its body; a func type is the same with no ` {`
+    (`func() error{` opens a composite literal). Anything else with a `(` (a call, a conversion, a method
+    expression, a called literal's `}(`) reads as a call."""
+    at = re.search(r"\bvar\b", bare)
+    if at is None:
+        return False
+    text, i = bare[at.end():], 0
+    if text.lstrip().startswith("("):
+        open_ = len(text) - len(text.lstrip())
+        if (close := _closer(text, open_)) is None:
+            return False
+        text = text[open_ + 1:close] + text[close + 1:]
+    while m := re.search(r"\bfunc\(", text):
+        if (end := _closer(text, m.end() - 1)) is None:
+            return False
+        rest = text[end + 1:]
+        if (results := re.match(r"\s*\(", rest)) is not None:
+            if (shut := _closer(rest, results.end() - 1)) is None:
+                return False
+            end, rest = end + 1 + shut, rest[shut + 1:]
+        kind = re.match(r"[\w \t.*\[\]]*", rest)
+        if rest[kind.end():kind.end() + 1] == "{" and rest[kind.end() - 1:kind.end()] == " ":
+            if (end := _closer(text, end + 1 + kind.end())) is None:  # a literal: its body runs later
+                return False
+        text = text[:m.start()] + text[end + 1:]
+    return "(" not in text
 
 
 def _order_seed(d, quals, specs, bare, refs, clause, outside):
@@ -1683,8 +1726,13 @@ def _order_seed(d, quals, specs, bare, refs, clause, outside):
     marked method m of a package the file imports, and any selector of a non-standard import not read
     (Security on #6686: `func init() { lib.Shuffle() }`)."""
     paths, unknown = _import_names(specs, clause)
-    if d[4] & ORDER_WORDS or set(WORD.findall(bare)) & quals:  # a qualifier in a string is none (L3 on #6686)
+    if d[4] & ORDER_WORDS:
         return True
+    for q in set(WORD.findall(bare)) & quals:  # a qualifier in a string is none (L3 on #6686)
+        # A flag qualifier seeds unless each use is `q.F(` for a FLAG_DEFINES F (#6687).
+        if not (q in {a or path for a, path in specs if path == "flag"}
+                and len(re.findall(rf"\b{q}\b", bare)) == len(re.findall(rf"(?<![\w.]){q}\.(?:{'|'.join(FLAG_DEFINES)})\(", bare))):
+            return True
     for q, w in re.findall(r"\b([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)", bare):
         if (paths.get(q), w) in ORDER_SELECTORS:
             return True

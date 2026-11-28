@@ -21,6 +21,8 @@ and SPELT), and counts their references to each selector and their spellings.
 And, for the openssl QUIC records (#6671), it reads which files hold the name of an OpenSSL QUIC entry
 point (QUIC_NAMES), which only the openssl CLI may, or of a datagram or connect BIO constructor
 (DGRAM_NAMES), which only the files [dgram] names may (OPENSSL_USES), each group's definer aside (#6673).
+And, for the expat record (DEBIAN-CVE-2026-134703, #6545), which files load expat's wide build, libexpatw.so.1,
+which alone runs the UTF-16 converters the record accepts as unreached (EXPATW).
 
 The JSON maps each place ("tree", and "initrd:<path>" for each initrd) to: "scanned", the ELF files read;
 "imports", each file importing an affected glibc symbol and those symbols; "lookups", each file that holds
@@ -37,7 +39,11 @@ loader does; resolve()); "packed", each file whose code is not in its bytes as s
 and why (packed()); "cipher", each file whose bytes hold a CIPHER_NAMES or SPELT name and its references
 to each (cipher_sites); "sha256", the SHA-256 of each file reaching a group or held under "cipher";
 "quic" and "dgram", each file but that OPENSSL_USES group's definer (OPENSSL_DEFINER) holding one of its
-names at the end of a string, whatever it imports, and those names (#6671, #6673); "unread", each ELF file objdump failed on; and, for an initrd, "others", its executable members that are not ELF files. Only symbols bound to a GLIBC_ version count, so a library's own
+names at the end of a string, whatever it imports, and those names (#6671, #6673); "expatw", each file whose
+NEEDED closure holds a name or a library (by file name or SONAME) of expat's wide build, or, unless it is that
+build, whose bytes hold its name anywhere, terminated or not (a dlopen argument: Rust and Go literals carry no
+NUL), and those names and libraries (#6545; a static copy of expat is not told apart from the UTF-8 build, nor
+a name built at run time from pieces); "unread", each ELF file objdump failed on; and, for an initrd, "others", its executable members that are not ELF files. Only symbols bound to a GLIBC_ version count, so a library's own
 re_* names do not.
 
 --summary exits 1 when a claim the glibc records rest on stops holding: any file, in any place, imports
@@ -53,7 +59,8 @@ more than one, or holds other sites or other bytes (SHA-256) than the counted en
 entry matches nothing; on any packed file; on any unresolved NEEDED name that no [unresolved] entry pinning
 the file accepts (unresolved_refusals); when a file in "quic" or "dgram" matches no entry of the allow
 section of that name, or an entry matches no such file, so the openssl QUIC records' claim that only the files
-named there make a QUIC object or a datagram BIO is read from the tree (#6671); and on an ALLOW it cannot read (read_allow). The control is the
+named there make a QUIC object or a datagram BIO is read from the tree (#6671); on any file in "expatw", so the expat record's "nothing loads the wide build" is read
+from the tree (#6545); and on an ALLOW it cannot read (read_allow). The control is the
 scan itself: it also exits 1 when objdump failed on a file, the main tree or an initrd with executable
 members read no ELF file, the main tree has no importer of regcomp (bash and grep always import it), or no
 call site of EVP_CIPHER_fetch (libcryptsetup and libcrypto always hold one), no glibc, or no file carrying
@@ -161,6 +168,11 @@ CARRIES = {b"glob_in_dir\0": "glob", b"__vfwscanf_internal\0": "vfwscanf",
 # SONAME alone would let any file named so skip the carried-copy rule).
 GLIBC = "libc.so.6"
 GLIBC_PATH = re.compile(r"^(/usr/lib/agentos/images/[^/]+)?/usr/lib/x86_64-linux-gnu/libc\.so\.6$")
+# expat's wide (XML_UNICODE) build, the only one that runs the UTF-16-to-UTF-16 converters the
+# DEBIAN-CVE-2026-134703 record accepts (#6545): a NEEDED name, a file name or SONAME, and a by-name string
+# (a dlopen argument) that names it. libexpat1 installs the library itself; nothing may load it.
+EXPATW = re.compile(r"^libexpatw\.so(\.[0-9]+)*$")
+EXPATW_NAME = re.compile(rb"libexpatw\.so(?:\.[0-9]+)*")
 # A guest root in the main tree: a process there sees it as /, so its absolute links resolve under it.
 GUEST_ROOT = re.compile(r"^/usr/lib/agentos/images/[^/]+(?=/)")
 
@@ -415,12 +427,14 @@ def sweep(files, links=None):
     to its target, so a NEEDED name a link answers to resolves to the file the link names (resolve()).
     Returns the place's record (module docstring)."""
     imports, needed, by_name, unread, cipher, digest = {}, {}, {}, [], {}, {}
-    dl, names, carries, glibc, opaque = {}, {}, {}, {}, {}
+    dl, names, carries, glibc, opaque, sonames, wide_names = {}, {}, {}, {}, {}, {}, {}
     uses = {g: {} for g in OPENSSL_USES}
     for shown, real in files.items():
         syms, needed[shown], soname, read, dl[shown], _static = read_elf(real)
+        sonames[shown] = soname
         with open(real, "rb") as f:
             data = f.read()
+        wide_names[shown] = {m.group().decode() for m in EXPATW_NAME.finditer(data)}
         digest[shown] = hashlib.sha256(data).hexdigest()
         names[shown] = {m.group().decode() for m in LOOKUP.finditer(data)}
         marks = sorted({name for mark, name in CARRIES.items() if mark in data})
@@ -451,8 +465,9 @@ def sweep(files, links=None):
         if to in files and to not in by_name.get(n, []):
             by_name.setdefault(n, []).append(to)
 
-    def closure(shown):
-        """The files of this place in SHOWN's NEEDED closure, itself excluded: in SHOWN's root only."""
+    def closure(shown, names=False):
+        """The files of this place in SHOWN's NEEDED closure, itself excluded: in SHOWN's root only. With
+        NAMES, the NEEDED names met on the way (resolved or not) instead."""
         root = root_of(shown)
         seen, todo, libs = set(), list(needed[shown]), set()
         while todo:
@@ -463,8 +478,17 @@ def sweep(files, links=None):
             for lib in by_name.get((root, n), []):
                 libs.add(lib)
                 todo += needed.get(lib, [])
-        return libs - {shown}
+        return seen if names else libs - {shown}
     reached = {shown: closure(shown) for shown in files}
+    # #6545: each file loading expat's wide build: a NEEDED name in its closure naming it, a library in its
+    # closure that is it (by file name or SONAME, so a link of another name still counts), or, for a file
+    # that is not itself the wide build, its name anywhere in its bytes (a dlopen argument; dlopen maps it by
+    # name). No NUL is required after it: Rust and Go keep literals unterminated (L3 on #6733).
+    def is_wide(p):
+        return bool(EXPATW.match(os.path.basename(p)) or EXPATW.match(sonames.get(p) or ""))
+    expatw = {shown: sorted({n for n in closure(shown, True) if EXPATW.match(n)}
+                            | {lib for lib in reached[shown] if is_wide(lib)}
+                            | (set() if is_wide(shown) else wide_names[shown])) for shown in files}
     # A NEEDED name no file or link of the place answers to (Security R4 on #6382): what that library would
     # import or look up is not read, so it fails unless an [unresolved] entry says why it never loads there.
     unresolved = {shown: sorted(set(n for n in needed[shown] if (root_of(shown), n) not in by_name))
@@ -486,6 +510,7 @@ def sweep(files, links=None):
             "carries": dict(sorted(carries.items())),
             "glibc": dict(sorted(glibc.items())), "packed": dict(sorted(opaque.items())),
             "unresolved": {p: n for p, n in sorted(unresolved.items()) if n},
+            "expatw": {p: w for p, w in sorted(expatw.items()) if w},
             "unread": sorted(unread), "cipher": dict(sorted(cipher.items())),
             "sha256": {p: d for p, d in sorted(digest.items()) if p in pinned}, **{g: dict(sorted(u.items())) for g, u in uses.items()}}
 
@@ -613,6 +638,10 @@ def problems(places):
     if "glob" not in {s for names in places.get("tree", {}).get("carries", {}).values() for s in names}:
         errs.append("tree: no file carries glob() (Debian's static ldconfig always does), so the scan reads no "
                     "carried copy (control)")
+    # #6545: the expat record (DEBIAN-CVE-2026-134703) holds only while nothing loads the wide build.
+    errs += ["%s: %s loads expat's wide build (%s), which runs the UTF-16 converters DEBIAN-CVE-2026-134703 "
+             "(#6542) accepts as unreached; drop that user or the library, or read its reach and amend the record"
+             % (k, p, " ".join(w)) for k, v in places.items() for p, w in v.get("expatw", {}).items()]
     # #6299: a file whose code is not in its bytes as stored can hide any import, lookup or copy.
     errs += ["%s: %s is packed (%s): its code cannot be read for imports, lookups or carried copies"
              % (k, p, why) for k, v in places.items() for p, why in v.get("packed", {}).items()]
@@ -919,6 +948,7 @@ def summary(places):
         lines += ["  looks up through %s: %s" % (p, " ".join("%s=%s" % (lib, "+".join(f)) for lib, f in src.items()))
                   for p, src in v.get("through", {}).items()]
         lines += ["  unresolved %s: %s" % (p, " ".join(n)) for p, n in v.get("unresolved", {}).items()]
+        lines += ["  expatw %s: %s" % (p, " ".join(w)) for p, w in v.get("expatw", {}).items()]
         cipher = v.get("cipher", {})
         lines.append("%s cipher: %d files hold a by-name cipher selector or spell %s"
                      % (place, len(cipher), " or ".join(SPELT)))
