@@ -293,6 +293,18 @@ class InitrdTest(unittest.TestCase):
         self.assertEqual(sorted(purged), sorted(drop.INITRD_DROP))
         self.assertEqual((self.root / drop.INITRD_STATUS).read_text(), "Package: bash\n")
 
+    def test_the_initrd_keeps_its_regular_files_owners(self):
+        # #6801: import_sweep.py names an initrd file's package from the initrd's own lists; a directory, a
+        # link or a listed file a purge removed is left out.
+        info = self.root / "var/lib/dpkg/info"
+        info.mkdir(parents=True, exist_ok=True)
+        (info / "less.list").write_text("/.\n/usr\n/usr/bin/less\n/usr/bin/gone\n/bin/lessfile\n")
+        (self.root / "usr/bin").mkdir(parents=True, exist_ok=True)
+        (self.root / "usr/bin/less").write_bytes(b"x")
+        os.symlink("less", self.root / "usr/bin/lessfile")
+        drop.keep_initrd_status(str(self.root))
+        self.assertEqual(json.loads((self.root / drop.INITRD_OWNERS).read_text()), {"/usr/bin/less": "less"})
+
     def test_a_failed_check_keeps_no_status(self):
         (self.root / "usr/bin/odd").write_bytes(b"#!/usr/bin/perl\n")
         (self.root / "usr/bin/odd").chmod(0o755)

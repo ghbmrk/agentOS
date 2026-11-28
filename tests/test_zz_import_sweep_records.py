@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,8 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "image"))
+sys.path.insert(0, str(ROOT / "image/mkosi"))
+sys.path.insert(0, str(ROOT / "tests"))
 spec = importlib.util.spec_from_file_location("import_sweep", ROOT / "image" / "import_sweep.py")
 sweep = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sweep)
@@ -195,6 +198,43 @@ class PackageDataTest(unittest.TestCase):
             self.assertEqual(owner("/usr/lib/agentos/images/openclaw/usr/local/bin/node", other), ("-", "-"))
             (out / "agentos.dpkg-owners").unlink()
             self.assertEqual(sweep.package_data(out)("/usr/bin/bash", None), ("?", "?"))
+
+    def test_an_initrd_reads_its_own_package_data(self):
+        # #6801: less is the initrd's, not the main tree's; an initrd without its data reads none.
+        status = b"Package: less\nStatus: install ok installed\nVersion: 668-1\n"
+        owners = json.dumps({"/usr/bin/less": "less"}).encode()
+        owner = sweep.initrd_owner({sweep.INITRD_STATUS: status, sweep.INITRD_OWNERS: owners})
+        self.assertEqual(owner("/usr/bin/less", None), ("less", "668-1"))
+        self.assertEqual(owner("/usr/bin/own", None), ("-", "-"))
+        for members in ({sweep.INITRD_STATUS: status}, {sweep.INITRD_OWNERS: owners},
+                        {sweep.INITRD_STATUS: status, sweep.INITRD_OWNERS: b"not json"}):
+            with self.subTest(members=sorted(members)):
+                self.assertEqual(sweep.initrd_owner(members)("/usr/bin/less", None), ("?", "?"))
+        # The names drop.py writes are the ones the sweep reads.
+        import drop
+        self.assertEqual((sweep.INITRD_STATUS, sweep.INITRD_OWNERS),
+                         ("/" + drop.INITRD_STATUS, "/" + drop.INITRD_OWNERS))
+
+    @unittest.skipUnless(shutil.which("cc") and shutil.which("objdump"), "needs cc and objdump")
+    def test_initrd_place_records_from_the_initrd(self):
+        import test_image_import_sweep as t
+        with tempfile.TemporaryDirectory() as d:
+            src, exe = pathlib.Path(d, "a.c"), pathlib.Path(d, "less")
+            src.write_text(t.REGEX_LIB.replace("int f(void)", "int main(void)"))
+            subprocess.run(["cc", "-o", str(exe), str(src)], check=True)
+            status = b"Package: less\nStatus: install ok installed\nVersion: 668-1\n"
+            owners = json.dumps({"/usr/bin/less": "less"}).encode()
+            members = [("usr/bin/less", 0o100755, exe.read_bytes())]
+            data = [("usr/share/agentos/initrd.dpkg-status", 0o100644, status),
+                    ("usr/share/agentos/initrd.dpkg-owners", 0o100644, owners)]
+            for parts, want in ((members + data, ["less", "668-1"]), (members, ["?", "?"])):
+                img = pathlib.Path(d, "initrd")
+                img.write_bytes(t.newc(parts))
+                with self.subTest(data=len(parts) > 1), tempfile.TemporaryDirectory() as scratch:
+                    got = sweep.initrd_place(img, scratch, owner=sweep.unread)
+                    self.assertEqual(got["owner"]["/usr/bin/less"], want)
+                    # Without a build's owner (--tree), nothing is recorded.
+                    self.assertNotIn("owner", sweep.initrd_place(img, scratch))
 
     def test_postinst_writes_the_owners_the_sweep_reads(self):
         text = (ROOT / "image/mkosi/mkosi.postinst").read_text()

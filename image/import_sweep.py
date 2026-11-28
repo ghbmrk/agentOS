@@ -584,9 +584,11 @@ def initrd_place(path, scratch, owner=None):
     """The record of the initrd at PATH: each regular ELF member written under SCRATCH and read, with its
     symbolic links, and each other name of a hard-linked ELF member as a link to it (Security on #6382)."""
     import finish_image
-    files, others, links, group = {}, 0, {}, {}
+    files, others, links, group, data = {}, 0, {}, {}, {}
     for i, (name, mode, body, link) in enumerate(finish_image.cpio_members(pathlib.Path(path).read_bytes())):
         shown = "/" + name.lstrip("/")
+        if shown in (INITRD_STATUS, INITRD_OWNERS) and stat.S_ISREG(mode):
+            data[shown] = body
         if link is not None:
             group.setdefault(link, []).append(shown)
         if stat.S_ISLNK(mode):
@@ -602,7 +604,7 @@ def initrd_place(path, scratch, owner=None):
         links.update({n: to for n in names if to and n not in files})
     # "others": executable regular members that are not ELF files (problems()). A modules initrd's
     # modules, indexes and firmware are not executable.
-    return dict(owned(sweep(files, links), files, owner), others=others)
+    return dict(owned(sweep(files, links), files, owner and initrd_owner(data)), others=others)
 
 
 def owned(place, files, owner):
@@ -619,11 +621,12 @@ def run_tree(root, usr=None, owner=None):
     return {"tree": owned(sweep(files, links), files, owner)}
 
 
-# The build's package data (#6448), each a file of OUT: dpkg's status of the main tree, which also gives the
-# initrds' versions (mkosi.finalize holds each initrd's packages to the image's index); {path: package} of
+# The build's package data (#6448), each a file of OUT: dpkg's status of the main tree; {path: package} of
 # each path a main-tree package installed (mkosi.postinst, drop.py's owners(): dpkg's .list files, usrmerge
 # paths under /usr); and the guests' status with "MD5 PACKAGE" for each file image/guest-userland.sh copied
-# into a guest root (image/guest-shipped.sh). An initrd's file is the main tree's package's, by its path.
+# into a guest root (image/guest-shipped.sh).
+# Each initrd's own (drop.py, its postinst): its dpkg status and {path: package} of its regular files.
+INITRD_STATUS, INITRD_OWNERS = "/usr/share/agentos/initrd.dpkg-status", "/usr/share/agentos/initrd.dpkg-owners"
 STATUS, OWNERS, GUEST_STATUS, GUEST_MD5 = ("agentos.dpkg-status", "agentos.dpkg-owners", "guest/agentos.dpkg-status",
                                            "guest/agentos.md5sums")
 
@@ -641,34 +644,58 @@ def versions(text):
     return out
 
 
+def owners_of(by_path, status, by_md5=None, guest=None):
+    """OWNER(shown, readable path): (packages, versions), "," joined, of the packages that installed the file,
+    by its path in BY_PATH ({path: {package}}) at STATUS's versions, or for a guest root's file (with BY_MD5),
+    by its MD5 at GUEST's; ("-", "-") for a file none did, and ("?", "?") for a package its status lacks."""
+    def owner(shown, real):
+        if by_md5 is not None and GUEST_ROOT.match(shown):
+            with open(real, "rb") as f:
+                pkgs, st = by_md5.get(hashlib.md5(f.read()).hexdigest(), set()), guest
+        else:
+            # drop.py spells /bin and /sbin under /usr; a package may still list /lib or /lib64 unmerged.
+            pkgs, st = by_path.get(shown) or by_path.get(LIB_ALIAS.sub("/", shown), set()), status
+        if not pkgs:
+            return ("-", "-")
+        if any(p not in st for p in pkgs):
+            return ("?", "?")
+        return (",".join(sorted(pkgs)), ",".join(st[p] for p in sorted(pkgs)))
+    return owner
+
+
+def unread(shown, real):
+    return ("?", "?")
+
+
+def owner_map(text):
+    """{path: {package}} of an owners file ({path: package}, drop.py's owners())."""
+    return {p: {k.split(":")[0]} for p, k in json.loads(text).items()}
+
+
 def package_data(out):
-    """OWNER(shown, readable path) for the files of the build in OUT: (packages, versions), "," joined, of the
-    packages that installed the file, ("-", "-") for a file none did, and ("?", "?") when OUT's package data
-    cannot be read or names a package its status lacks, which no record holds (fail closed)."""
+    """OWNER(shown, readable path) for the main tree of the build in OUT (owners_of), or one that gives
+    ("?", "?") for every file when OUT's package data cannot be read, which no record holds (fail closed)."""
     o = pathlib.Path(out)
     try:
         main, guest = versions((o / STATUS).read_text()), versions((o / GUEST_STATUS).read_text())
-        by_path = {p: {k.split(":")[0]} for p, k in json.loads((o / OWNERS).read_text()).items()}
+        by_path = owner_map((o / OWNERS).read_text())
         by_md5 = {}
         for line in (o / GUEST_MD5).read_text().splitlines():
             md5, pkg = line.split()
             by_md5.setdefault(md5, set()).add(pkg.split(":")[0])
     except (OSError, ValueError, AttributeError):
-        return lambda shown, real: ("?", "?")
+        return unread
+    return owners_of(by_path, main, by_md5, guest)
 
-    def owner(shown, real):
-        if GUEST_ROOT.match(shown):
-            with open(real, "rb") as f:
-                pkgs, status = by_md5.get(hashlib.md5(f.read()).hexdigest(), set()), guest
-        else:
-            # drop.py spells /bin and /sbin under /usr; a package may still list /lib or /lib64 unmerged.
-            pkgs, status = by_path.get(shown) or by_path.get(LIB_ALIAS.sub("/", shown), set()), main
-        if not pkgs:
-            return ("-", "-")
-        if any(p not in status for p in pkgs):
-            return ("?", "?")
-        return (",".join(sorted(pkgs)), ",".join(status[p] for p in sorted(pkgs)))
-    return owner
+
+def initrd_owner(members):
+    """OWNER for an initrd's files from its own package data, MEMBERS ({shown: bytes}) holding drop.py's
+    INITRD_STATUS and INITRD_OWNERS (#6801): an initrd keeps packages the main tree drops. Without both, or
+    unreadable, every file gives ("?", "?") (fail closed)."""
+    try:
+        return owners_of(owner_map(members[INITRD_OWNERS].decode()), versions(members[INITRD_STATUS].decode()))
+    except (KeyError, ValueError, AttributeError, UnicodeDecodeError):
+        return unread
 
 
 def run_build(out, version):

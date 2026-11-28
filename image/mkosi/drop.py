@@ -17,6 +17,7 @@ Source names are Debian's (what the advisories and assurance/vulncheck.json name
 source has no image record there, and an initrd-dropped one no image/initrd record
 (tests/test_image_drop.py)."""
 import glob
+import json
 import os
 import shutil
 import stat
@@ -92,6 +93,9 @@ INITRD_FILES = tuple(f for f in FILES if f != "usr/bin/ss")
 # Where the initrd's dpkg status goes: mkosi-initrd sets CleanPackageMetadata=yes, so /var/lib/dpkg
 # is gone before mkosi.finalize runs; tools/vulncheck.py reads it from here (its INITRD_STATUS).
 INITRD_STATUS = "usr/share/agentos/initrd.dpkg-status"
+# And each regular file's package, {path: package} from owners(), for image/import_sweep.py's records of the
+# initrd's files: its packages are not all the image's (#6448, #6801).
+INITRD_OWNERS = "usr/share/agentos/initrd.dpkg-owners"
 # Kept packages whose perl scripts stay, unrunnable: package and admin tools that only maintainer
 # scripts or a person at a shell would start, and the box runs neither. The #! check refuses a perl
 # script from any other package, and a package here that ships none is stale.
@@ -316,10 +320,20 @@ def main(root, initrd=False):
 
 
 def keep_initrd_status(root):
-    """Copy the initrd's dpkg status, now without the dropped packages, to INITRD_STATUS."""
+    """Copy the initrd's dpkg status, now without the dropped packages, to INITRD_STATUS, and write the
+    package of each of its regular files to INITRD_OWNERS."""
     dest = os.path.join(root, INITRD_STATUS)
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     shutil.copyfile(os.path.join(root, "var/lib/dpkg/status"), dest)
+    def regular(p):
+        try:
+            return stat.S_ISREG(os.lstat(root + p).st_mode)
+        except OSError:  # listed, then removed (FILES, a purge)
+            return False
+    files = {p: pkg for p, pkg in owners(root).items() if regular(p)}
+    with open(os.path.join(root, INITRD_OWNERS), "w") as f:
+        json.dump(files, f, sort_keys=True)
+        f.write("\n")
 
 
 # The argument mkosi passes a postinst script (mkosi v24.3); it selects initrd mode.
