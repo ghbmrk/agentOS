@@ -185,7 +185,7 @@ func TestMutFieldHidesSecretsAndLongNumbers(t *testing.T) {
 	}
 }
 
-// ItemSum changes with the recipient's first-seen time (OP-3).
+// ItemSum changes with the recipient's first-seen time.
 func TestMutItemSumCoversRecipientSince(t *testing.T) {
 	a := Item{Object: "rent", Facts: Facts{Verb: "Pay"}}
 	b := a
