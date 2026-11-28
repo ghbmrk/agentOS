@@ -2,9 +2,11 @@ package main
 
 import (
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"strings"
+	"syscall"
 )
 
 // wipeFailed holds the files an orderly shutdown leaves when it ends with
@@ -45,9 +47,15 @@ func wipeNote(paths []string) func() string {
 	}
 }
 
-// again is whether the record at path ends " again".
+// again is whether the record at path ends " again". A link, or a record
+// that cannot be read, is not: the line then asks for a restart.
 func again(path string) bool {
-	b, err := os.ReadFile(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, 4096))
 	return err == nil && strings.HasSuffix(strings.TrimSpace(string(b)), " again")
 }
 

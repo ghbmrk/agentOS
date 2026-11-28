@@ -2310,7 +2310,7 @@ class ImageTest(unittest.TestCase):
         print(*[ln.decode(errors="replace") for ln in re.findall(rb"HOSTCHECK-CLEAR [^\r\n]*", after)[:20]],
               sep="\n", file=sys.stderr)
         self.assertRegex(after, rb"HOSTCHECK-CLEAR mode: 700\r?\n")
-        self.assertRegex(after, rb"HOSTCHECK-CLEAR record: exit-code[^\r\n]*\r?\n")
+        self.assertRegex(after, rb"HOSTCHECK-CLEAR record: exit-code exited [0-9]+\r?\n")
 
 
     def test_an_isolate_keeps_mor_set(self):

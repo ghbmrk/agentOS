@@ -233,9 +233,35 @@ func TestRepeatedClearFailureStopsAskingForRestart(t *testing.T) {
 	if got := note(); got != wipeFailedLine {
 		t.Fatalf("failure after a good clear: %q", got)
 	}
-	// Either record ending " again" is enough, and a record that cannot be
-	// read is told with the restart line.
-	if got := wipeNote([]string{record, filepath.Join(t.TempDir(), "x")})(); got != wipeFailedLine {
+	// A first-failure record beside an " again" one: the later record wins,
+	// whichever order the paths are in.
+	first := filepath.Join(t.TempDir(), "failed")
+	if err := os.WriteFile(first, []byte("exit-code\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("exit-code")
+	run("exit-code")
+	for _, paths := range [][]string{{first, record}, {record, first}} {
+		if got := wipeNote(paths)(); got != wipeFailedAgain {
+			t.Fatalf("%q: %q", paths, got)
+		}
+	}
+	// A record that is there but cannot be read (a directory) or is a link
+	// asks for a restart, and so does one that is only told once.
+	dirRec := filepath.Join(t.TempDir(), "refused")
+	if err := os.Mkdir(dirRec, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(record, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{dirRec, link} {
+		if got := wipeNote([]string{p})(); got != wipeFailedLine {
+			t.Fatalf("%s: %q", p, got)
+		}
+	}
+	if got := wipeNote([]string{first, filepath.Join(t.TempDir(), "x")})(); got != wipeFailedLine {
 		t.Fatalf("first record only: %q", got)
 	}
 }
