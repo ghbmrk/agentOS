@@ -166,3 +166,29 @@ func TestResumeWhileRunningVoidsCode(t *testing.T) {
 		t.Fatalf("old code after a later stop: %q", got)
 	}
 }
+
+// The fifth wrong code in 24 hours voids the code it was tried against,
+// so that code cannot resume once the oldest wrong code ages out and the
+// lock lifts while it is still within its CodeTTL (CH-18).
+func TestResumeLockVoidsCodeBeforeItLifts(t *testing.T) {
+	eng := &fakeEngine{stopped: true}
+	h, now := newHandler(t, eng, fakeAuth{unlocked: true}, nil)
+	t0 := *now
+	h.resumeCmd(nil) // 111111
+	for i := 0; i < maxWrong; i++ {
+		h.resumeCmd([]string{"000000"})
+	}
+	h.resumeCmd(nil) // 222222
+	h.resumeCmd([]string{"000000"})
+	*now = t0.Add(24*time.Hour - 10*time.Minute)
+	if got := h.resumeCmd(nil); got != "To restart all actions, reply RESUME 333333 within 15 min." {
+		t.Fatalf("new code: %q", got)
+	}
+	if got := h.resumeCmd([]string{"000000"}); got != "Wrong code 5 times in 24 hours. RESUME by texted code is locked. STOP still works." {
+		t.Fatalf("fifth wrong code: %q", got)
+	}
+	*now = t0.Add(24*time.Hour + time.Minute) // the four t0 entries age out; 333333 has 4 minutes left
+	if got := h.resumeCmd([]string{"333333"}); got != "No valid code. Reply RESUME for a new one." || !eng.Stopped() {
+		t.Fatalf("code tried at the lock, after it lifts: %q", got)
+	}
+}
