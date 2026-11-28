@@ -55,25 +55,30 @@ func (q *questions) Answer(ctx context.Context, msg string) (string, bool) {
 	return b.Answer(ctx, msg)
 }
 
+// clockNotRunning is STATUS's time check line while no guard is open
+// (#1246): there is then no interval to report, and agents' questions,
+// whose deadlines run on the guard, are not offered (TIM-1, #5279).
+const clockNotRunning = "Time check: not running, so my clock is unconfirmed and agents' questions wait for it."
+
 // Clock is STATUS's time check line (a control.Handler note): the guard's
-// last check in the box's zone, so a restriction is visible while the
-// guard texts nothing (UX R3, L3 S1 on #95). With no guard open the
-// line says so: time-sensitive checks are then restricted (#1246).
+// last check in the box's zone, so a wide interval is visible while the
+// guard texts nothing (UX R3, L3 S1 on #95).
 func (q *questions) Clock() string {
 	g := q.g.Load()
 	if g == nil {
-		return "Time check: not running (time-sensitive checks restricted)."
+		return clockNotRunning
 	}
 	return clockLine(g.Status(), time.Local)
 }
 
-// clockLine is the line for s, or "" when the sources agree: STATUS shows
-// only exceptions, degraded checks included (UX-98-1).
+// clockLine is the interval line for s (TIM-1, LOG-8: the moves a wide
+// interval delays and its lift), or "" when the sources agree: STATUS
+// shows only exceptions, degraded checks included (UX-98-1).
 func clockLine(s clock.Status, loc *time.Location) string {
 	if s.State == clock.Agreed {
 		return ""
 	}
-	return s.Line(loc)
+	return s.IntervalLine(loc)
 }
 
 // List and Call serve the question tools on each guest socket.
