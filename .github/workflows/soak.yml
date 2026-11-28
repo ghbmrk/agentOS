@@ -161,6 +161,8 @@ jobs:
           echo "soak ${{ matrix.name }}: $runs full runs, $fails failed" | tee -a "$GITHUB_STEP_SUMMARY"
           # awk, not head: head exits early, so pipefail failed the step on sort's broken pipe.
           [ ! -s "$out/failures.txt" ] || sort "$out/failures.txt" | uniq -c | sort -rn | awk 'NR <= 50' >> "$GITHUB_STEP_SUMMARY"
+          # Also as annotations, which the check-run API serves where the artifact host is unreachable (#190).
+          [ ! -s "$out/failures.txt" ] || sort -u "$out/failures.txt" | awk -v job="${{ matrix.name }}" '/^run [0-9]+: (--- FAIL|FAIL|panic:|WARNING: DATA RACE)/ && n++ < 10 { gsub(/%/, "%25"); print "::error title=soak " job "::" $0 }'
           [ "$fails" -eq 0 ]
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: failure()

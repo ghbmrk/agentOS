@@ -1943,6 +1943,29 @@ class WorkflowTest(unittest.TestCase):
         newtool = ci.replace("run: sudo apt-get install -yq dnsmasq-base", "run: sudo apt-get install -yq newtool", 1)
         self.assertEqual(soak_env_problems(newtool, soak), ["soak lacks newtool"])
 
+    def test_soak_failures_become_annotations(self):
+        # CI-soak-green (#190): run 54's race failures were readable only from its artifact and step
+        # summary, neither reachable through api.github.com. The soak step also prints each failing
+        # test as an `::error::` line; this runs that line from soak.yml on a sample failures.txt.
+        line = next(l for l in (WORKFLOWS / "soak.yml").read_text().splitlines() if "::error title=soak" in l)
+        with tempfile.TemporaryDirectory() as out:
+            pathlib.Path(out, "failures.txt").write_text("".join(
+                ["run 2: --- FAIL: TestA (0.10s)\n", "run 2: -test.shuffle 17\n", "run 3: panic: 100% bad\n",
+                 "run 3: FAIL\tagentos/x\t1.2s\n", "run 3: WARNING: DATA RACE\n"]
+                + ["run 4: --- FAIL: TestN%d (0.00s)\n" % i for i in range(20)]))
+            cmd = line.strip().replace("${{ matrix.name }}", "race")
+            got = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", cmd], env={"out": out, "PATH": os.environ["PATH"]},
+                                 capture_output=True, text=True, check=True).stdout.splitlines()
+        self.assertEqual(len(got), 10)
+        self.assertTrue(all(g.startswith("::error title=soak race::run ") for g in got), got)
+        self.assertIn("::error title=soak race::run 2: --- FAIL: TestA (0.10s)", got)
+        self.assertIn("::error title=soak race::run 3: panic: 100%25 bad", got)
+        self.assertFalse(any("-test.shuffle" in g for g in got))
+        with tempfile.TemporaryDirectory() as out:
+            empty = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", cmd], env={"out": out, "PATH": os.environ["PATH"]},
+                                   capture_output=True, text=True)
+        self.assertEqual((empty.returncode, empty.stdout), (0, ""))
+
     def test_soak_fuzz_targets_exist(self):
         # CI-soak-green (#6571): `mail FuzzParse` outlived broker/mail and failed in 0 s on every run.
         broker = WORKFLOWS.parent.parent / "broker"
