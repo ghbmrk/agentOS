@@ -172,7 +172,7 @@ var quiet = slog.New(slog.DiscardHandler)
 // (32768 in v1.5.0) and drops the rest, so a WS message above that size
 // fails to parse although the parser takes up to ParseMaxMessageLength.
 // The buffer is raised to the parser's limit, process-wide as sipgo keeps
-// it; TCP, TLS and UDP read with the same buffer (ASSUMPTIONS SL16).
+// it; TCP, TLS and UDP read with the same buffer (ASSUMPTIONS VULN-gobwas-ws-r2-1).
 func init() {
 	sip.SetDefaultLogger(quiet)
 	sip.TransportBufferReadSize = uint16(min(sip.ParseMaxMessageLength, math.MaxUint16))
