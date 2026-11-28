@@ -2295,7 +2295,7 @@ class ImageTest(unittest.TestCase):
             "[Unit]\nDescription=hostcheck clear probe (QEMU host check only)\n"
             "After=local-fs.target\nBefore=serial-getty@ttyS0.service\n"
             "[Service]\nType=oneshot\nStandardOutput=journal+console\nStandardError=journal+console\n"
-            "ExecStart=/bin/sh -c 'echo \"HOSTCHECK-CLEAR mode: $$(stat -c %a /var/lib/agentos-mor 2>&1)\"; "
+            "ExecStart=/bin/sh -c 'echo \"HOSTCHECK-CLEAR mode: $$(stat -c %%a /var/lib/agentos-mor 2>&1)\"; "
             "echo \"HOSTCHECK-CLEAR record: $$(cat /var/lib/agentos-mor/refused 2>&1)\"'\n")
         (d / "responder.conf").write_text("[Unit]\nWants=hostcheck-clear.service\nAfter=hostcheck-clear.service\n")
         phases = d / "phases.json"
