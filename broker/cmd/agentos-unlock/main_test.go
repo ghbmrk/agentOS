@@ -364,7 +364,7 @@ func newRig(t *testing.T, putAnchors bool) *rig {
 	rec[0] = 1
 	r.recovery = rec
 	r.store = filepath.Join(dir, "store")
-	st, err := seal.Create(r.store, seal.Recovery{Key: rec})
+	st, err := seal.Create(r.store, seal.Recovery{Key: secret.Hide(rec)})
 	must(t, err)
 	defer st.Close()
 	_, err = st.AddSlot(seal.TPM{TPM: r.sw.TPM(), PolicyKey: &r.policy.PublicKey, Policies: []tpmseal.Policy{p}, Host: "Test PC"})
@@ -481,15 +481,25 @@ func (r *rig) boot() (*exec.Cmd, *bytes.Buffer) {
 	return cmd, &out
 }
 
-func (r *rig) owner() proc.Owner {
-	return proc.Owner{Conn: proc.Conn{Socket: r.mainConfig().OwnerSock, UID: r.kernelUID, Timeout: 5 * time.Second}}
+// owner is the kernel's owner socket. The tests speak it through proc.Conn with the kernel's own
+// wire types: proc's owner client lives with proc's tests, outside the trusted core's lines
+// (KRN-2-proc-test-support, #6386).
+func (r *rig) owner() proc.Conn {
+	return proc.Conn{Socket: r.mainConfig().OwnerSock, UID: r.kernelUID, Timeout: 5 * time.Second}
+}
+
+// answer calls op on the owner socket c with args and decodes its answer as a T.
+func answer[T any](c proc.Conn, op string, args any) (T, error) {
+	var v T
+	err := c.Call(op, args, &v)
+	return v, err
 }
 
 // up waits for the owner socket to answer, as the kernel's uid.
 func (r *rig) up(cmd *exec.Cmd, out *bytes.Buffer) {
 	r.t.Helper()
 	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(50 * time.Millisecond) {
-		if _, err := r.owner().Status(); err == nil {
+		if _, err := answer[[]kernel.Unsettled](r.owner(), "status", nil); err == nil {
 			return
 		}
 		if cmd.ProcessState != nil || time.Now().After(deadline) {
@@ -537,19 +547,19 @@ func TestTheUnlockStepBecomesTheKernel(t *testing.T) {
 	ed := key.Ed25519Signer(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{1}, 32))) // gen(1)
 	v, err := handoff.EncodeAnchors([]key.PublicKey{hw.Public(), ed.Public()})
 	must(t, err)
-	st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+	st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 	must(t, err)
 	must(t, st.Put(handoff.AnchorsEntry, v))
 	st.Close()
 	cmd, out := r.boot()
 	r.up(cmd, out)
-	n, err := r.owner().LineChanges()
+	n, err := answer[int](r.owner(), "linechanges", nil)
 	must(t, err)
 	what := kernel.LineHash(n, 300)
-	if err := r.owner().SetLine(300, key.Approve(ed, what)); !errors.Is(err, kernel.ErrNeedsCosign) {
+	if err := r.owner().Call("setline", proc.LineArgs{Percent: 300, Cosigns: []key.Cosign{key.Approve(ed, what)}}, nil); !errors.Is(err, kernel.ErrNeedsCosign) {
 		t.Fatalf("a raise with one anchor's cosign: got %v, want ErrNeedsCosign", err)
 	}
-	must(t, r.owner().SetLine(300, key.Approve(hw, what), key.Approve(ed, what)))
+	must(t, r.owner().Call("setline", proc.LineArgs{Percent: 300, Cosigns: []key.Cosign{key.Approve(hw, what), key.Approve(ed, what)}}, nil))
 	// #2998: once its sockets listen, the kernel marks itself up, as its
 	// own uid, for its unit to read when it exits.
 	if fi, err := os.Lstat(r.mainConfig().Up); err != nil || !fi.Mode().IsRegular() || fi.Size() != 0 {
@@ -584,12 +594,12 @@ func TestTheUnlockStepBecomesTheKernel(t *testing.T) {
 			}
 		}
 	}
-	must(t, r.owner().Stop())
+	must(t, r.owner().Call("stop", nil, nil))
 	r.shutdown(cmd, out)
 
 	cmd, out = r.boot()
 	r.up(cmd, out)
-	c, err := r.owner().Changes()
+	c, err := answer[key.Changes](r.owner(), "changes", nil)
 	must(t, err)
 	if !c.Stopped {
 		t.Fatal("the second boot lost the first boot's STOP")
@@ -609,10 +619,10 @@ func TestASetupOnlyKernelTakesTheOwnersKeysOnce(t *testing.T) {
 	cmd, out := r.boot()
 	r.up(cmd, out)
 	o := r.owner()
-	if err := o.Stop(); !errors.Is(err, proc.ErrSetupOnly) {
+	if err := o.Call("stop", nil, nil); !errors.Is(err, proc.ErrSetupOnly) {
 		t.Fatalf("STOP before setup: got %v, want ErrSetupOnly", err)
 	}
-	info, err := o.SetupInfo()
+	info, err := answer[proc.SetupInfo](o, "setupinfo", nil)
 	must(t, err)
 	box := r.keys.Head.Get().Public().(ed25519.PublicKey)
 	if !info.Open || !info.Box.Equal(box) {
@@ -637,26 +647,26 @@ func TestASetupOnlyKernelTakesTheOwnersKeysOnce(t *testing.T) {
 		"another box":        kernel.SignSetup(otherBox, key.Ed25519Signer(hw1), key.Ed25519Signer(hw2)),
 		"one key unsigned":   unsigned,
 	} {
-		if err := o.Setup(f); !errors.Is(err, kernel.ErrSetupKeys) {
+		if err := o.Call("setup", f, nil); !errors.Is(err, kernel.ErrSetupKeys) {
 			t.Errorf("%s: got %v, want ErrSetupKeys", name, err)
 		}
 	}
-	must(t, o.Setup(kernel.SignSetup(box, key.Ed25519Signer(hw1), key.Ed25519Signer(hw2))))
-	if info, err := o.SetupInfo(); err != nil || info.Open {
+	must(t, o.Call("setup", kernel.SignSetup(box, key.Ed25519Signer(hw1), key.Ed25519Signer(hw2)), nil))
+	if info, err := answer[proc.SetupInfo](o, "setupinfo", nil); err != nil || info.Open {
 		t.Fatalf("setup info after setup: %+v %v, want closed", info, err)
 	}
-	if err := o.Setup(kernel.SignSetup(box, key.Ed25519Signer(hw2), key.Ed25519Signer(hw1))); !errors.Is(err, kernel.ErrSetupClosed) {
+	if err := o.Call("setup", kernel.SignSetup(box, key.Ed25519Signer(hw2), key.Ed25519Signer(hw1)), nil); !errors.Is(err, kernel.ErrSetupClosed) {
 		t.Fatalf("a second setup: got %v, want ErrSetupClosed", err)
 	}
-	must(t, o.Stop()) // the kernel now serves as any other
+	must(t, o.Call("stop", nil, nil)) // the kernel now serves as any other
 	r.shutdown(cmd, out)
 
 	cmd, out = r.boot()
 	r.up(cmd, out)
-	if c, err := r.owner().Changes(); err != nil || !c.Stopped {
+	if c, err := answer[key.Changes](r.owner(), "changes", nil); err != nil || !c.Stopped {
 		t.Fatalf("the second boot: %v %v, want the first boot's STOP", c, err)
 	}
-	if err := r.owner().Setup(kernel.SignSetup(box, key.Ed25519Signer(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{14}, 32))), key.Ed25519Signer(hw1))); !errors.Is(err, kernel.ErrSetupClosed) {
+	if err := r.owner().Call("setup", kernel.SignSetup(box, key.Ed25519Signer(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{14}, 32))), key.Ed25519Signer(hw1)), nil); !errors.Is(err, kernel.ErrSetupClosed) {
 		t.Fatalf("setup on the second boot: got %v, want ErrSetupClosed", err)
 	}
 	r.shutdown(cmd, out)
@@ -691,7 +701,7 @@ func TestARolledBackDriveStartsNoKernel(t *testing.T) {
 	}
 	cmd, out = r.boot()
 	r.up(cmd, out)
-	must(t, r.owner().Stop())
+	must(t, r.owner().Call("stop", nil, nil))
 	r.shutdown(cmd, out)
 	for f, b := range saved {
 		must(t, os.WriteFile(f, b, 0o600))
@@ -789,7 +799,7 @@ func TestTheUnlockStepFailsClosed(t *testing.T) {
 	if k, err := handoff.ReadKeys(pr); err != nil || len(k.Anchors) != 0 {
 		t.Fatalf("no owner's anchors: hand-off %v %v, want none", k.Anchors, err)
 	}
-	st, err := seal.Unlock(bare.store, seal.Recovery{Key: bare.recovery})
+	st, err := seal.Unlock(bare.store, seal.Recovery{Key: secret.Hide(bare.recovery)})
 	must(t, err)
 	must(t, st.Put(handoff.AnchorsEntry, []byte("short")))
 	st.Close()
@@ -802,7 +812,7 @@ func TestTheUnlockStepFailsClosed(t *testing.T) {
 	// the kernel nothing, so no kernel starts without its anchor.
 	ref := string(tpmseal.CounterRef{Handle: r.keys.Counter.Handle, Name: r.keys.Counter.Name}.Marshal())
 	for name, v := range map[string][]byte{"none": nil, "garbled": []byte(`{"ref":{"handle":1},"auth":"YQ=="}`), "no auth": []byte(`{"ref":` + ref + `}`), "null auth": []byte(`{"ref":` + ref + `,"auth":null}`)} {
-		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 		must(t, err)
 		if v == nil {
 			must(t, st.Delete(handoff.CounterEntry))
@@ -831,7 +841,7 @@ func TestUnlockHandsTheRecipient(t *testing.T) {
 	want, err := handoff.ParseRecipient(v)
 	must(t, err)
 	put := func(v []byte) {
-		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 		must(t, err)
 		if v == nil {
 			must(t, st.Delete(handoff.RecipientEntry))
@@ -985,7 +995,7 @@ func TestAnUncappableSlotUnlocksNothing(t *testing.T) {
 	r.sw.Measure(16, "resettable")
 	p, err := tpmseal.SignCurrent(r.sw.TPM(), r.policy, []uint{16})
 	must(t, err)
-	st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+	st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 	must(t, err)
 	_, err = st.AddSlot(seal.TPM{TPM: r.sw.TPM(), PolicyKey: &r.policy.PublicKey, Policies: []tpmseal.Policy{p}, Host: "Test PC"})
 	must(t, err)
@@ -1066,7 +1076,7 @@ func TestUnlockHandsThePageCA(t *testing.T) {
 	v, err := pageca.Marshal(a)
 	must(t, err)
 	put := func(v []byte) {
-		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 		must(t, err)
 		if v == nil {
 			must(t, st.Delete(handoff.PageCAEntry))
@@ -1137,13 +1147,13 @@ func TestUnlockHandsTheSlot(t *testing.T) {
 	r := newRig(t, true)
 	phrase := []byte("correct horse battery staple")
 	edit := func(f func(st *seal.Store)) {
-		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 		must(t, err)
 		f(st)
 		st.Close()
 	}
 	edit(func(st *seal.Store) {
-		_, err := st.AddSlot(seal.Passphrase{Phrase: phrase})
+		_, err := st.AddSlot(seal.Passphrase{Phrase: secret.Hide(phrase)})
 		must(t, err)
 	})
 	handed := func(pass []byte) (handoff.KernelKeys, error) {
@@ -1257,7 +1267,7 @@ func TestUnlockWritesTheClerksAnchors(t *testing.T) {
 		return a
 	}
 	root := func(r *rig) [32]byte {
-		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 		must(t, err)
 		defer st.Close()
 		k, err := st.ClerkRoot()
@@ -1290,7 +1300,7 @@ func TestUnlockWritesTheClerksAnchors(t *testing.T) {
 	box := r.keys.Head.Get().Public().(ed25519.PublicKey)
 	hw1 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{11}, 32))
 	hw2 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{12}, 32))
-	must(t, r.owner().Setup(kernel.SignSetup(box, key.Ed25519Signer(hw1), key.Ed25519Signer(hw2))))
+	must(t, r.owner().Call("setup", kernel.SignSetup(box, key.Ed25519Signer(hw1), key.Ed25519Signer(hw2)), nil))
 	r.shutdown(cmd, out)
 	want := []key.PublicKey{key.Ed25519(hw1.Public().(ed25519.PublicKey)), key.Ed25519(hw2.Public().(ed25519.PublicKey))}
 	if a := written(path); a != nil {
@@ -1365,13 +1375,13 @@ func lostRig(t *testing.T) *rig {
 	t.Helper()
 	r := newRig(t, true)
 	r.request = filepath.Join(r.dir, "recovery-request")
-	st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+	st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 	must(t, err)
 	defer st.Close()
 	must(t, st.Put(handoff.RecipientEntry, recipientEntry(t, r.recovery)))
 	// The card's passphrase slot, as enrollment makes it.
 	r.passphrase = []byte("correct horse battery staple")
-	_, err = st.AddSlot(seal.Passphrase{Phrase: r.passphrase})
+	_, err = st.AddSlot(seal.Passphrase{Phrase: secret.Hide(r.passphrase)})
 	must(t, err)
 	return r
 }
@@ -1463,7 +1473,7 @@ func (r *rig) unlockOnce(pass []byte) (handoff.KernelKeys, string, error) {
 func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 	r := lostRig(t)
 	slots := func() []seal.SlotInfo {
-		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 		must(t, err)
 		defer st.Close()
 		return st.Slots()
@@ -1494,19 +1504,19 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 	}
 	// The printed card's key opens the store (#3410).
 	next := printed(t, k.NewRecovery.Get())
-	if _, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery}); err == nil {
+	if _, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)}); err == nil {
 		t.Fatal("the old recovery key still opens the store")
 	}
-	if _, err := seal.Unlock(r.store, seal.Passphrase{Phrase: r.passphrase}); err == nil {
+	if _, err := seal.Unlock(r.store, seal.Passphrase{Phrase: secret.Hide(r.passphrase)}); err == nil {
 		t.Fatal("the old passphrase still opens the store")
 	}
 	// The new card's passphrase, as the page prints it, opens the store.
 	pass, err := words.FromSeed(k.NewRecovery.Get()[handoff.CardKeyLen:])
 	must(t, err)
-	st, err := seal.Unlock(r.store, seal.Passphrase{Phrase: pass})
+	st, err := seal.Unlock(r.store, seal.Passphrase{Phrase: secret.Hide(pass)})
 	must(t, err)
 	st.Close()
-	st, err = seal.Unlock(r.store, seal.Recovery{Key: next})
+	st, err = seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(next)})
 	must(t, err)
 	v, _, err := st.Get(handoff.RecipientEntry)
 	must(t, err)
@@ -1533,10 +1543,12 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 	r.ask(lostCardApproval(recipientOf(t, r.recovery)))
 	cmd, out := r.boot()
 	r.up(cmd, out)
-	id, err := r.owner().RecoveryCardID()
+	card, err := answer[proc.RecoveryCardID](r.owner(), "recoverycardid", nil)
 	must(t, err)
+	id := card.ID
 	tap := key.Approve(key.Ed25519Signer(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{1}, 32))), kernel.RecoveryCardHash(id))
-	bits, err := r.owner().RecoveryCard(tap)
+	read, err := answer[proc.RecoveryCardRead](r.owner(), "recoverycard", proc.RecoveryCardArgs{Cosign: tap})
+	bits := read.Key
 	if err != nil || len(bits) != handoff.MadeCardLen {
 		t.Fatalf("the kernel's card: %v (output %s)", err, out)
 	}
@@ -1547,23 +1559,23 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 	if bytes.Equal(newKey, r.recovery) {
 		t.Fatal("the kernel's card is the old one")
 	}
-	if v, err := r.owner().Backups(); err != nil || v.Recipient != recipientOf(t, newKey) {
+	if v, err := answer[proc.BackupsView](r.owner(), "backups", nil); err != nil || v.Recipient != recipientOf(t, newKey) {
 		t.Fatalf("the kernel's recipient after the rotation: %+v, %v", v, err)
 	}
-	must(t, r.owner().RecoveryCardDone())
-	if _, err := r.owner().RecoveryCardID(); !errors.Is(err, proc.ErrNoRecoveryCard) {
+	must(t, r.owner().Call("recoverycarddone", nil, nil))
+	if _, err := answer[proc.RecoveryCardID](r.owner(), "recoverycardid", nil); !errors.Is(err, proc.ErrNoRecoveryCard) {
 		t.Fatalf("after the confirm: %v", err)
 	}
 	r.shutdown(cmd, out)
-	st, err = seal.Unlock(r.store, seal.Recovery{Key: newKey})
+	st, err = seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(newKey)})
 	must(t, err)
 	st.Close()
 	pass, err = words.FromSeed(bits[handoff.CardKeyLen:])
 	must(t, err)
-	st, err = seal.Unlock(r.store, seal.Passphrase{Phrase: pass})
+	st, err = seal.Unlock(r.store, seal.Passphrase{Phrase: secret.Hide(pass)})
 	must(t, err)
 	st.Close()
-	if _, err := seal.Unlock(r.store, seal.Passphrase{Phrase: r.passphrase}); err == nil {
+	if _, err := seal.Unlock(r.store, seal.Passphrase{Phrase: secret.Hide(r.passphrase)}); err == nil {
 		t.Fatal("the first new card's passphrase still opens the store")
 	}
 }
@@ -1588,7 +1600,7 @@ func TestLostCardPassphraseOutlivesNoRetiredKey(t *testing.T) {
 	must(t, err)
 	// Route A's write (agentos-enroll -rotate-recovery): the recovery slot
 	// alone, with a new recipient.
-	st, err := seal.Unlock(r.store, seal.Recovery{Key: printed(t, made)})
+	st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(printed(t, made))})
 	must(t, err)
 	var rid string
 	for _, sl := range st.Slots() {
@@ -1597,10 +1609,10 @@ func TestLostCardPassphraseOutlivesNoRetiredKey(t *testing.T) {
 		}
 	}
 	later := bytes.Repeat([]byte{0x42}, seal.RecoveryLen)
-	_, err = st.ReplaceAndPut(handoff.RecipientEntry, recipientEntry(t, later), seal.Swap{ID: rid, F: seal.Recovery{Key: later}})
+	_, err = st.ReplaceAndPut(handoff.RecipientEntry, recipientEntry(t, later), seal.Swap{ID: rid, F: seal.Recovery{Key: secret.Hide(later)}})
 	st.Close()
 	must(t, err)
-	if _, err := seal.Unlock(r.store, seal.Recovery{Key: printed(t, made)}); err == nil {
+	if _, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(printed(t, made))}); err == nil {
 		t.Fatal("the retired recovery key still opens the store")
 	}
 	// No 16 bytes of the retired key's bits give the store's passphrase.
@@ -1608,11 +1620,11 @@ func TestLostCardPassphraseOutlivesNoRetiredKey(t *testing.T) {
 	for i := 0; i+16 <= len(bits); i++ {
 		p, err := words.FromSeed(bits[i : i+16])
 		must(t, err)
-		if _, err := seal.Unlock(r.store, seal.Passphrase{Phrase: p}); err == nil {
+		if _, err := seal.Unlock(r.store, seal.Passphrase{Phrase: secret.Hide(p)}); err == nil {
 			t.Fatalf("a passphrase from the retired bits at %d opens the store", i)
 		}
 	}
-	st, err = seal.Unlock(r.store, seal.Passphrase{Phrase: pass})
+	st, err = seal.Unlock(r.store, seal.Passphrase{Phrase: secret.Hide(pass)})
 	must(t, err)
 	st.Close()
 }
@@ -1688,10 +1700,10 @@ func TestLostCardRequestIgnoredUnlessValid(t *testing.T) {
 	must(t, os.WriteFile(r.request, sign(r.keys.Head.Get(), expired), 0o600))
 	cmd, out := r.boot()
 	r.up(cmd, out)
-	if v, err := r.owner().Backups(); err != nil || v.Recipient != old {
+	if v, err := answer[proc.BackupsView](r.owner(), "backups", nil); err != nil || v.Recipient != old {
 		t.Fatalf("the kernel's recipient: %+v, %v", v, err)
 	}
-	if _, err := r.owner().RecoveryCardID(); !errors.Is(err, proc.ErrNoRecoveryCard) {
+	if _, err := answer[proc.RecoveryCardID](r.owner(), "recoverycardid", nil); !errors.Is(err, proc.ErrNoRecoveryCard) {
 		t.Fatalf("a kernel with no new key: %v", err)
 	}
 	r.shutdown(cmd, out)
@@ -1708,11 +1720,11 @@ func TestLostCardRequestIgnoredUnlessValid(t *testing.T) {
 		shape func(*seal.Store) error
 	}{
 		{"two recovery slots", func(st *seal.Store) error {
-			_, err := st.AddSlot(seal.Recovery{Key: bytes.Repeat([]byte{7}, seal.RecoveryLen)})
+			_, err := st.AddSlot(seal.Recovery{Key: secret.Hide(bytes.Repeat([]byte{7}, seal.RecoveryLen))})
 			return err
 		}},
 		{"two passphrase slots", func(st *seal.Store) error {
-			_, err := st.AddSlot(seal.Passphrase{Phrase: []byte("another passphrase slot here")})
+			_, err := st.AddSlot(seal.Passphrase{Phrase: secret.Hide([]byte("another passphrase slot here"))})
 			return err
 		}},
 		{"no passphrase slot", func(st *seal.Store) error {
@@ -1725,7 +1737,7 @@ func TestLostCardRequestIgnoredUnlessValid(t *testing.T) {
 		}},
 	} {
 		two := lostRig(t)
-		st, err := seal.Unlock(two.store, seal.Recovery{Key: two.recovery})
+		st, err := seal.Unlock(two.store, seal.Recovery{Key: secret.Hide(two.recovery)})
 		must(t, err)
 		err = c.shape(st)
 		st.Close()
@@ -1784,7 +1796,7 @@ func TestUnlockHandsTheCheckerItsSeed(t *testing.T) {
 	path := filepath.Join(r.dir, "checker-seed", "seed")
 	seed := []byte("synthetic-code-seed-01")
 	edit := func(f func(st *seal.Store)) {
-		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 		must(t, err)
 		f(st)
 		st.Close()

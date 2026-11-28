@@ -205,7 +205,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		res := Run(ctx, sk, runID, args, s.Effects)
 		b, _ := json.Marshal(res)
-		writeRPC(w, req.ID, toolText(string(b), false), 0, "")
+		out := toolText(string(b), false)
+		for _, n := range res.Notes {
+			out["content"] = append(out["content"].([]map[string]string), map[string]string{"type": "text", "text": n})
+		}
+		writeRPC(w, req.ID, out, 0, "")
 	default:
 		writeRPC(w, req.ID, nil, -32601, "method not found")
 	}
@@ -279,13 +283,23 @@ func (m *MCPEffects) Request(ctx context.Context, e Effect) (State, error) {
 		return State{}, errors.New(out.Error.Message)
 	case out.Result == nil || len(out.Result.Content) == 0:
 		return State{}, errors.New("empty broker answer")
-	case out.Result.IsError:
-		return State{}, errors.New(out.Result.Content[0].Text)
+	}
+	// The text after Content[0] is a note for the agent (SR2-3s): it is
+	// carried on every answer, a refusal included, and never parsed.
+	var notes []string
+	for _, c := range out.Result.Content[1:] {
+		if c.Text != "" {
+			notes = append(notes, c.Text)
+		}
+	}
+	if out.Result.IsError {
+		return State{Notes: notes}, errors.New(out.Result.Content[0].Text)
 	}
 	var st State
 	if err := json.Unmarshal([]byte(out.Result.Content[0].Text), &st); err != nil {
-		return State{}, fmt.Errorf("broker answer: %v", err)
+		return State{Notes: notes}, fmt.Errorf("broker answer: %v", err)
 	}
+	st.Notes = notes
 	return st, nil
 }
 

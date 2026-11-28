@@ -225,14 +225,14 @@ func TestAskSendsTokenAndType(t *testing.T) {
 		auth, ctype = r.Header.Get("Authorization"), r.Header.Get("Content-Type")
 		w.Write([]byte(`{"choices":[{"message":{"content":"y"}}]}`))
 	}))
-	if got, err := ask(gateway.URL, "m", "t0k", "x"); err != nil || got != "y" {
+	if got, err := ask(gateway.URL, "m", "t0k", []turn{{"user", "x"}}); err != nil || got != "y" {
 		t.Fatalf("ask: %q, %v", got, err)
 	}
 	gateway.Close()
 	if auth != "Bearer t0k" || ctype != "application/json" {
 		t.Fatalf("headers %q %q", auth, ctype)
 	}
-	if _, err := ask(gateway.URL, "m", "t0k", "x"); err == nil {
+	if _, err := ask(gateway.URL, "m", "t0k", []turn{{"user", "x"}}); err == nil {
 		t.Fatal("closed gateway: no error")
 	}
 }
