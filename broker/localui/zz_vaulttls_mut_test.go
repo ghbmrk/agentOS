@@ -44,6 +44,7 @@ func vaultTLSKills(t *testing.T) {
 	t.Run("VaultTextsNameEachRefusal", vaultTextsNameEachRefusal)
 	t.Run("ScanSafeRecoversADecoderPanic", scanSafeRecoversADecoderPanic)
 	t.Run("PageTLSDefaultLog", pageTLSDefaultLog)
+	t.Run("PageTLSCustomRandReader", pageTLSCustomRandReader)
 	t.Run("PageTLSRefusesBadAnswers", pageTLSRefusesBadAnswers)
 	t.Run("PageTLSRunStops", pageTLSRunStops)
 }
@@ -364,6 +365,38 @@ func pageTLSDefaultLog(t *testing.T) {
 	if buf.String() != LogRenewFailed+"\n" {
 		t.Errorf("logged %q", buf.String())
 	}
+}
+
+// failingReader is a random source that always fails.
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("synthetic entropy failure") }
+
+// With GODEBUG cryptocustomrand=1 (settable at run time) GenerateKey reads
+// the reader NewPageTLS keeps: a nil one must become crypto/rand's, and a
+// failing one must fail the renewal rather than serve a nil key.
+func pageTLSCustomRandReader(t *testing.T) {
+	t.Setenv("GODEBUG", "cryptocustomrand=1")
+	func() {
+		defer func() {
+			if v := recover(); v != nil {
+				t.Fatalf("a nil reader panicked: %v", v)
+			}
+		}()
+		if _, err := NewPageTLS(context.Background(), DefaultPageName, newCertifier(t), nil, nil); err != nil {
+			t.Fatalf("a nil reader: %v", err)
+		}
+	}()
+	func() {
+		defer func() {
+			if v := recover(); v != nil {
+				t.Fatalf("a failing reader panicked: %v", v)
+			}
+		}()
+		if _, err := NewPageTLS(context.Background(), DefaultPageName, newCertifier(t), failingReader{}, nil); err == nil {
+			t.Fatal("a failing reader made a key")
+		}
+	}()
 }
 
 // certOwner answers OpCertify with what answer makes of the request's
