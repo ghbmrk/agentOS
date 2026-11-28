@@ -3531,6 +3531,9 @@ def cmd_run(args):
     return 1 if bad else 0
 
 
+# Gremlins v0.6.0's own default (executor.go DefaultTimeoutCoefficient): a lone mutant run's timeout
+# is this many times the coverage run's elapsed time (MUT-gremlins-timeout).
+TIMEOUT_COEFFICIENT = 3
 HEADROOM = "headroom"  # go_cover's measured peak (empty: past its cap) where it failed the half-cap check
 
 
@@ -3545,7 +3548,13 @@ def unleash_fitted(cmd, tmp, alone, **kw):
         if alone:
             go_shim(tmp, alone // workers)  # each package starts at the full count again
         head.unlink(missing_ok=True)
-        r = unleash([*cmd, "--workers", str(workers)], **kw)
+        # Gremlins times a mutant out at timeout-coefficient (default 3) times its coverage run's
+        # elapsed time, measured with the machine to itself, then runs `workers` mutants at once, and
+        # TIMED OUT counts as detected: tests that use every core run up to `workers` times slower
+        # in a full batch, so a living mutant would read TIMED OUT (Security on #6575). The
+        # coefficient scales with the workers, so contention alone never times a mutant out.
+        r = unleash([*cmd, "--workers", str(workers), "--timeout-coefficient", str(TIMEOUT_COEFFICIENT * workers)],
+                    **kw)
         if not alone or r.returncode == 0 or workers == 1 or not head.exists():
             return r
         peak = int(head.read_text() or 0)

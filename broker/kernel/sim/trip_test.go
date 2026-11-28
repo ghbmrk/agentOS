@@ -118,6 +118,7 @@ func tripRun(t *testing.T, seed uint64) ([]kernel.Entry, []key.PublicKey, *kerne
 // a plan gave is derived again from the entries before it (KRN-6). Catches a
 // nondeterministic matcher in the kernel.
 func TestTripDeterministic(t *testing.T) {
+	t.Parallel()
 	for seed := uint64(1); seed <= 8; seed++ {
 		es, anchors, k := tripRun(t, seed)
 		again, _, _ := tripRun(t, seed)
