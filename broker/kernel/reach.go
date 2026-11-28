@@ -1,8 +1,10 @@
 package kernel
 
 import (
+	"bytes"
 	"errors"
 	"maps"
+	"reflect"
 	"slices"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -33,8 +35,28 @@ type (
 		nodes  map[string]ReachNode
 		clerks map[string]string // clerk -> its node
 		edges  []ReachEdge
+		worth  map[key.ID]key.Rank // each grant's worth when first granted
+		kept   map[key.ID][]string // the verbs a grant's narrowing keeps
+	}
+	// KeyNarrowed is the kernel's narrowing of grant Key, whose reach grew
+	// from Old to New (KEY-9, KEY-3): the verbs it keeps, those whose reach
+	// stays within Old, and the offer of the wider key at Proof,
+	// key.Price(key.ActGrant, New).
+	KeyNarrowed struct {
+		Key   key.ID    `json:"key"`
+		Verbs []string  `json:"verbs"`
+		Old   key.Rank  `json:"old"`
+		New   key.Rank  `json:"new"`
+		Proof key.Proof `json:"proof"`
 	}
 )
+
+// TKeyNarrowed (v1) is a KeyNarrowed: a decision, derived again on replay.
+const TKeyNarrowed = "key.narrowed"
+
+// CGrown refuses a key whose reach grew past its worth at grant until the
+// kernel narrows it, and then a verb its narrowing does not keep.
+const CGrown = "grown"
 
 // ErrDeclReach refuses a declaration the fold would drop: malformed or lowering.
 var ErrDeclReach = errors.New("kernel: the declaration is malformed or would lower a price")
@@ -45,8 +67,123 @@ func (k *Kernel) DeclareReach(at int64, d DeclReach) error {
 	if !k.s.declOK(d) {
 		return ErrDeclReach
 	}
-	_, err := k.emit(k.read(at), TDeclReach, d)
+	now := k.read(at)
+	if _, err := k.emit(now, TDeclReach, d); err != nil {
+		return err
+	}
+	return k.narrowGrown(now)
+}
+
+// narrowGrown logs the narrowing of every grant whose reach grew.
+func (k *Kernel) narrowGrown(now Reading) error {
+	for _, n := range k.s.narrowings() {
+		if _, err := k.emit(now, TKeyNarrowed, n); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// granted records grant id's worth when first granted; a renewal is a new
+// grant, but a key under a narrowed root stays narrowed (State.grown).
+func (s *State) granted(id key.ID) {
+	if s.decl.worth == nil {
+		s.decl.worth, s.decl.kept = map[key.ID]key.Rank{}, map[key.ID][]string{}
+	}
+	if _, ok := s.decl.worth[id]; !ok {
+		s.decl.worth[id] = s.worthOf(id, s.verbsOf(id, false))
+	}
+}
+
+// verbsOf is grant id's verbs, narrowed (kept) or as granted. A grant was
+// checked at its entry, so its last verbs caveat is its verbs.
+func (s *State) verbsOf(id key.ID, kept bool) []string {
+	if n, ok := s.decl.kept[id]; ok && kept {
+		return n
+	}
+	k := s.Grants[id].Key
+	var vs []string
+	for _, v := range k.Root.Verbs {
+		vs = append(vs, string(v))
+	}
+	for _, l := range k.Links {
+		if f, _ := key.Fold(l.Caveats); f.Verbs != nil {
+			vs = f.Verbs
+		}
+	}
+	return vs
+}
+
+// worthOf is grant id with only verbs, priced as key.Worth prices a key.
+func (s *State) worthOf(id key.ID, verbs []string) key.Rank {
+	k := s.Grants[id].Key
+	capped := false
+	for _, l := range k.Links {
+		f, _ := key.Fold(l.Caveats)
+		capped = capped || f.Capped()
+	}
+	var reach []key.Asset
+	for _, v := range verbs {
+		as := key.AssetsOf(key.Verb(v))
+		if slices.ContainsFunc(as, func(a key.Asset) bool { return a >= key.AssetData }) {
+			as = append(as, s.graphReach(k.Root.Clerk)...)
+		}
+		reach = append(reach, as...)
+	}
+	return key.WorthOf(reach, capped)
+}
+
+// narrowing is the narrowing grant id needs now, if what it keeps grew past
+// its worth at grant: each verb alone within that worth, so the narrowed
+// key is worth no more (a key's worth is its highest verb's).
+func (s *State) narrowing(id key.ID) *KeyNarrowed {
+	old, ok := s.decl.worth[id]
+	vs := s.verbsOf(id, true)
+	if !ok || s.Changes.Revoked[id] || s.worthOf(id, vs) <= old { // a revoked grant is offered nothing
+		return nil
+	}
+	n := s.worthOf(id, s.verbsOf(id, false))
+	out := &KeyNarrowed{Key: id, Verbs: []string{}, Old: old, New: n, Proof: key.Price(key.ActGrant, n)}
+	for _, v := range vs {
+		if s.worthOf(id, []string{v}) <= old {
+			out.Verbs = append(out.Verbs, v)
+		}
+	}
+	return out
+}
+
+// narrowings is every narrowing owed, in grant ID order.
+func (s *State) narrowings() []KeyNarrowed {
+	var out []KeyNarrowed
+	for _, id := range slices.SortedFunc(maps.Keys(s.decl.worth), func(a, b key.ID) int { return bytes.Compare(a[:], b[:]) }) {
+		if n := s.narrowing(id); n != nil {
+			out = append(out, *n)
+		}
+	}
+	return out
+}
+
+// applyNarrowed folds a narrowing only as the kernel derives it now.
+func (s *State) applyNarrowed(e Entry) error {
+	b, err := body[KeyNarrowed](e)
+	if n := s.narrowing(b.Key); err == nil && n != nil && reflect.DeepEqual(*n, b) {
+		s.decl.kept[b.Key] = b.Verbs
+	}
 	return err
+}
+
+// grown refuses a key whose root or first link grew and is not narrowed
+// yet, or a verb vb outside a narrowing of either.
+func (s *State) grown(v *key.Verified, vb key.Verb) *key.Refusal {
+	for _, id := range v.IDs[:min(2, len(v.IDs))] {
+		if s.narrowing(id) != nil {
+			return &key.Refusal{Code: CGrown, Detail: "the key's reach grew; it waits for its narrowing"}
+		}
+		if n, ok := s.decl.kept[id]; ok && !slices.Contains(n, string(vb)) {
+			return &key.Refusal{Code: CGrown, Detail: "outside the key's narrowing: " + string(vb)}
+		}
+	}
+	return nil
 }
 
 // DeclReach is a copy of what the log declared, for a writer sending only

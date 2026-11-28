@@ -92,7 +92,7 @@ var schema = map[string]int{
 	TSubjectOpened: 1, TContentStored: 1, TSubjectErased: 1, TEraseConfirmed: 1, TContentRead: 1,
 	TBackupTarget: 1, TBackupUntarget: 1, TBackupTaken: 1, TRecoveryRotate: 1,
 	TEdgeEnrolled: 1, TEdgeCandidate: 1, TEdgeRevoked: 1, TEdgeCut: 1, TCodeApproved: 1,
-	TDecoyTable: 1, TTrip: 1, TTripOwner: 1, TTripResumed: 1, TSecurityCase: 1, TSecurityDrop: 1, TSecurityKept: 1, TDeclReach: 1,
+	TDecoyTable: 1, TTrip: 1, TTripOwner: 1, TTripResumed: 1, TSecurityCase: 1, TSecurityDrop: 1, TSecurityKept: 1, TDeclReach: 1, TKeyNarrowed: 1,
 }
 
 // Known reports whether the log may hold this type at this version.
@@ -1019,6 +1019,7 @@ func (s *State) Apply(e Entry) error {
 		for id, g := range add {
 			g.Rung = b.Rung
 			s.Grants[id] = g
+			s.granted(id)
 		}
 	case TEnrolled:
 		b, err := body[enrolled](e)
@@ -1289,6 +1290,8 @@ func (s *State) Apply(e Entry) error {
 		return s.applySecurity(e)
 	case TDeclReach:
 		return s.applyDecl(e)
+	case TKeyNarrowed:
+		return s.applyNarrowed(e)
 	default:
 		return ErrUnknown
 	}

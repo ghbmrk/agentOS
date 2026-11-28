@@ -158,6 +158,12 @@ func derive(s *State, e Entry, head ed25519.PublicKey, refused *derived) ([]deri
 		// else a divergence.
 		var t Trip
 		return nil, json.Unmarshal(e.Body, &t) != nil || !s.tripOK(t, "")
+	case TKeyNarrowed:
+		var cands []derived
+		for _, n := range s.narrowings() {
+			cands = append(cands, entry(TKeyNarrowed, n))
+		}
+		return cands, true
 	case TTripOwner:
 		// The call and its key are the owner's; the trip is derived again.
 		var b ownerTrip

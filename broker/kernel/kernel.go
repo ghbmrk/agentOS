@@ -80,6 +80,9 @@ func admit(s *State, p Plan, now Reading) (key.ID, []key.ID, *Refusal) {
 		if r := v.Authorize(st, ctx); r != nil {
 			return key.ID{}, nil, on(r, &i)
 		}
+		if r := s.grown(v, st.Verb); r != nil {
+			return key.ID{}, nil, on(r, &i)
+		}
 		if c.Irreversible() {
 			fp := Fingerprint(st)
 			if fresh[fp] || repeats(s, v.Root(), st, p.ID, now) {
@@ -210,6 +213,10 @@ func next(s *State, id string, now Reading) Act {
 		if r.Code == key.RPaused {
 			return a // waits for key.resumed
 		}
+		a.Kind, a.Refusal = ActCancel, r
+		return a
+	}
+	if r := s.grown(v, sp.Verb); r != nil {
 		a.Kind, a.Refusal = ActCancel, r
 		return a
 	}
@@ -822,7 +829,11 @@ type Call struct {
 // once until Answer has its answer. A step whose clerk the kernel does not
 // have fails here.
 func (k *Kernel) Calls(at int64) ([]Call, error) {
-	if err := k.endDue(k.read(at)); err != nil {
+	start := k.read(at) // the ends due and the narrowings owed, one reading
+	if err := k.endDue(start); err != nil {
+		return nil, err
+	}
+	if err := k.narrowGrown(start); err != nil {
 		return nil, err
 	}
 	var out []Call
@@ -915,7 +926,10 @@ func sendCheck(s *State, p *PlanState, st *StepState, i int, now Reading) *key.R
 	}
 	sp := p.Plan.Step(i)
 	sp.Rung = s.Rung(v.Limits.Task, p.Plan.Key, st.Approved)
-	return v.Authorize(sp, s.context(now, s.LedgerBefore(st.DispatchSeq)))
+	if r := v.Authorize(sp, s.context(now, s.LedgerBefore(st.DispatchSeq))); r != nil {
+		return r
+	}
+	return s.grown(v, sp.Verb)
 }
 
 // Tick retries the erases not yet confirmed and the backup re-seals due
