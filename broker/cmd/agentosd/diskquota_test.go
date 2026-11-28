@@ -27,6 +27,7 @@ func TestMachinesNeedADiskQuotaUnlessDeclaredOff(t *testing.T) {
 	if _, _, err := machineQuota("maybe", plain); err == nil {
 		t.Fatal("accepted -disk-quota=maybe")
 	}
+	mut3DiskQuotaRefusesBeforeTouchingTheDisk(t) // REV-CHK-mut (#5848)
 }
 
 func TestMachinesGetTheStateFileSystemsQuota(t *testing.T) {

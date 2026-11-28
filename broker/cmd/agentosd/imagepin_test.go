@@ -38,6 +38,7 @@ func TestImagePinReadsTheVersionLine(t *testing.T) {
 			t.Errorf("%q = %q, %v", v, got, err)
 		}
 	}
+	mut3ImagePinNamesAMissingFileAndClosesWhatItOpens(t) // REV-CHK-mut (#5848)
 }
 
 // Anything but one version line pins nothing (fails closed).

@@ -193,6 +193,7 @@ func TestInferenceLeafIsTheBudgetedComponent(t *testing.T) {
 	if err != nil || g.Path != leafDir {
 		t.Fatalf("leaf %v, %v; want %s", g, err, leafDir)
 	}
+	mut3InferFlagsAndRefusals(t) // REV-CHK-mut (#5848)
 }
 
 // INF-2, removal row: the service is off unless asked for, at the

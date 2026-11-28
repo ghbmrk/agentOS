@@ -114,6 +114,7 @@ func TestOSS10w2FollowSettingFlags(t *testing.T) {
 	if err := s.alert(context.Background(), "x"); err == nil {
 		t.Fatal("alert without a channel")
 	}
+	mut3FollowSettingSaysWhatIsMissingAndWhatIsFollowed(t) // REV-CHK-mut (#5848)
 }
 
 // An unchecked clock reads as the far future, so every root is expired.
