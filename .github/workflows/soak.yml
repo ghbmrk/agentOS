@@ -24,6 +24,9 @@ concurrency:
 env:
   GOTOOLCHAIN: local
   GOWORK: "off"
+  # Every apt-get call passes $APT_OPTS, so a stalled mirror fails in minutes, not at the job
+  # timeout (CI-apt-timeout, #6581; tests/test_workflows.py checks each call).
+  APT_OPTS: "-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
 jobs:
   fuzz:
     runs-on: ubuntu-24.04
@@ -123,15 +126,15 @@ jobs:
       # CI-soak-green (#6571): the tools ci's broker-race installs, so a full run here meets the same
       # environment. CI is set on every runner, so a test missing one fails rather than skips.
       - name: Software TPM for the trusted-host slot (P2-4b)
-        run: sudo apt-get update -q && sudo apt-get install -yq swtpm
+        run: sudo apt-get $APT_OPTS update -q && sudo apt-get $APT_OPTS install -yq swtpm
       - name: dnsmasq for the enforcer's resolver tests (ENF-f, #3664)
-        run: sudo apt-get install -yq dnsmasq-base
+        run: sudo apt-get $APT_OPTS install -yq dnsmasq-base
       - name: Subordinate ids for the canary sandbox
         run: |
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
-          command -v newuidmap && command -v newgidmap || sudo apt-get install -yq uidmap
+          command -v newuidmap && command -v newgidmap || sudo apt-get $APT_OPTS install -yq uidmap
           grep -qE "^($(id -un)|$(id -u)):" /etc/subuid || sudo usermod --add-subuids 100000-165535 "$(id -un)"
           grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
       - name: Soak (full runs, shuffled, until time is up)

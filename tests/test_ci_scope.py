@@ -290,6 +290,7 @@ CI_PREAMBLE_LINES = [
     'env:',
     '  GOTOOLCHAIN: local',
     '  GOWORK: "off"',
+    '  APT_OPTS: "-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"',
 ]
 
 # The machines job from its header through "Machine tests as root" (INFER-CI-2), pinned line by
@@ -352,10 +353,10 @@ MACHINES_LINES = [
     '          runsc --version',
     '      - name: Project quotas (SR2-3)',
     '        run: |',
-    '          sudo apt-get update -q',
-    '          sudo apt-get install -yq xfsprogs acl',
+    '          sudo apt-get $APT_OPTS update -q',
+    '          sudo apt-get $APT_OPTS install -yq xfsprogs acl',
     '          sudo modprobe quota_v2 2>/dev/null || {',
-    '            sudo apt-get install -yq "linux-modules-extra-$(uname -r)" && sudo modprobe quota_v2',
+    '            sudo apt-get $APT_OPTS install -yq "linux-modules-extra-$(uname -r)" && sudo modprobe quota_v2',
     '          } || echo "::warning::no quota_v2 module: ext4 quota tests skip; XFS covers them"',
     '      - name: Machine tests as root',
     '        working-directory: broker',
