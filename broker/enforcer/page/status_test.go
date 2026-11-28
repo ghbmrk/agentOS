@@ -846,3 +846,12 @@ func TestStalledAddressASCII(t *testing.T) {
 		t.Fatalf("a stalled access point's address is not quoted in ASCII:\n%s", h)
 	}
 }
+
+// TestBasisWordsQuoteAnUnknownBasis: a basis off the list, which no card
+// reaches (the document is refused before its root is drawn), is quoted in
+// printable ASCII rather than named as a figure.
+func TestBasisWordsQuoteAnUnknownBasis(t *testing.T) {
+	if got := basisWords("guess\u202e"); got != `"guess\u202e"` {
+		t.Errorf("basisWords of an unknown basis: %s", got)
+	}
+}

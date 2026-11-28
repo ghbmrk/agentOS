@@ -1143,12 +1143,16 @@ func TestGarageNeedsSafeguards(t *testing.T) {
 // the zero check gives one cap two encodings; dropping the overflow check
 // lets a group's cap wrap under its count.
 func TestByteCapsCanonical(t *testing.T) {
-	capped := edit(1, func(d *Document) { d.Caps = map[string]uint64{"mail.example": 7, "models.example": 9}; d.EdgeCap = 5 })
+	capped := edit(1, func(d *Document) {
+		d.Caps = map[string]uint64{"mail.example": 7, "models.example": 9}
+		d.Basis = map[string]string{"mail.example": BasisDeclared, "models.example": BasisImage}
+		d.EdgeCap = 5
+	})
 	b, err := Encode(capped)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), `"caps":{"mail.example":7,"models.example":9},"edge_cap":5`) {
+	if !strings.Contains(string(b), `"caps":{"mail.example":7,"models.example":9},"basis":{"mail.example":"declared","models.example":"image"},"edge_cap":5`) {
 		t.Errorf("encoding %s", b)
 	}
 	if d, err := Decode(b); err != nil || !reflect.DeepEqual(d, capped.normal()) {
@@ -1160,19 +1164,39 @@ func TestByteCapsCanonical(t *testing.T) {
 		t.Errorf("no caps encode as %s and %s", none, empty)
 	}
 	for name, f := range map[string]func(d *Document){
-		"a cap of 0":           func(d *Document) { d.Caps = map[string]uint64{"mail.example": 0} },
-		"a cap for no listing": func(d *Document) { d.Caps = map[string]uint64{"other.example": 1} },
-		"caps past 2^64-1":     func(d *Document) { d.Caps = map[string]uint64{"mail.example": 1 << 63, "models.example": 1 << 63} },
+		"a cap of 0": func(d *Document) {
+			d.Caps, d.Basis = map[string]uint64{"mail.example": 0}, map[string]string{"mail.example": BasisImage}
+		},
+		"a cap for no listing": func(d *Document) {
+			d.Caps, d.Basis = map[string]uint64{"other.example": 1}, map[string]string{"other.example": BasisImage}
+		},
+		"caps past 2^64-1": func(d *Document) {
+			d.Caps = map[string]uint64{"mail.example": 1 << 63, "models.example": 1 << 63}
+			d.Basis = map[string]string{"mail.example": BasisImage, "models.example": BasisImage}
+		},
 	} {
 		if _, err := Encode(edit(1, f)); !errors.Is(err, ErrMalformed) {
 			t.Errorf("%s: %v, want ErrMalformed", name, err)
 		}
 	}
-	if _, err := Encode(edit(1, func(d *Document) { d.Caps = map[string]uint64{"mail.example": 1 << 63, "models.example": 1<<63 - 1} })); err != nil {
+	// A cap of 0 is refused as one, with or without a basis, not as a
+	// basis with no cap or a cap with no basis.
+	for _, basis := range []map[string]string{{"mail.example": BasisImage}, nil} {
+		if _, err := Encode(edit(1, func(d *Document) {
+			d.Caps, d.Basis = map[string]uint64{"mail.example": 0}, basis
+		})); err == nil || !strings.Contains(err.Error(), `byte cap 0 for "mail.example"`) {
+			t.Errorf("a cap of 0, basis %v: %v", basis, err)
+		}
+	}
+	if _, err := Encode(edit(1, func(d *Document) {
+		d.Caps = map[string]uint64{"mail.example": 1 << 63, "models.example": 1<<63 - 1}
+		d.Basis = map[string]string{"mail.example": BasisImage, "models.example": BasisImage}
+	})); err != nil {
 		t.Errorf("caps summing to 2^64-1: %v", err)
 	}
 	// Each cap's basis (#4578) is signed beside it, from the closed list,
-	// only for a cap, with one encoding: none is no field.
+	// only for a cap, and every cap has one (#5199), so no cap is signed
+	// without the figure it was sized from.
 	sized := edit(1, func(d *Document) {
 		d.Caps = map[string]uint64{"mail.example": 7, "models.example": 9}
 		d.Basis = map[string]string{"mail.example": BasisDeclared, "models.example": BasisBackup}
@@ -1188,10 +1212,6 @@ func TestByteCapsCanonical(t *testing.T) {
 	n.Basis["mail.example"] = BasisImage
 	if sized.Basis["mail.example"] != BasisDeclared {
 		t.Error("normal shares the basis map")
-	}
-	noBasis, _ := Encode(edit(1, func(d *Document) { d.Caps = map[string]uint64{"mail.example": 7}; d.Basis = map[string]string{} }))
-	if strings.Contains(string(noBasis), "basis") {
-		t.Errorf("no basis encodes as %s", noBasis)
 	}
 	for _, b := range []string{BasisImage, BasisDeclared, BasisBackup} {
 		if _, err := Encode(edit(1, func(d *Document) {
@@ -1215,6 +1235,15 @@ func TestByteCapsCanonical(t *testing.T) {
 			d.Basis = map[string]string{"models.example": BasisImage}
 		},
 		"a basis with no caps": func(d *Document) { d.Basis = map[string]string{"mail.example": BasisImage} },
+		"a cap with no basis":  func(d *Document) { d.Caps = map[string]uint64{"mail.example": 7} },
+		"a cap with an empty basis map": func(d *Document) {
+			d.Caps = map[string]uint64{"mail.example": 7}
+			d.Basis = map[string]string{}
+		},
+		"one cap of two with no basis": func(d *Document) {
+			d.Caps = map[string]uint64{"mail.example": 7, "models.example": 9}
+			d.Basis = map[string]string{"models.example": BasisImage}
+		},
 	} {
 		if _, err := Encode(edit(1, f)); !errors.Is(err, ErrMalformed) {
 			t.Errorf("%s: %v, want ErrMalformed", name, err)
@@ -1225,6 +1254,7 @@ func TestByteCapsCanonical(t *testing.T) {
 	}
 	for name, bad := range map[string][]byte{
 		"explicit zero": []byte(`{"version":1,"destinations":["a"],"caps":{"a":0},"devices":[],"pairs":[],"standing":[],"holds":[],"drone":""}`),
+		"no basis":      []byte(`{"version":1,"destinations":["a"],"caps":{"a":1},"devices":[],"pairs":[],"standing":[],"holds":[],"drone":""}`),
 		"empty caps":    []byte(`{"version":1,"destinations":["a"],"caps":{},"devices":[],"pairs":[],"standing":[],"holds":[],"drone":""}`),
 		"edge zero":     []byte(`{"version":1,"destinations":[],"edge_cap":0,"devices":[],"pairs":[],"standing":[],"holds":[],"drone":""}`),
 	} {
@@ -1240,15 +1270,21 @@ func TestByteCapsCanonical(t *testing.T) {
 // Byte caps: "asks the owner for a raise"). A raise must never be a
 // tightening that applies at once.
 func TestCapChangesAreLoosenings(t *testing.T) {
-	base := edit(1, func(d *Document) { d.Caps = map[string]uint64{"mail.example": 100}; d.EdgeCap = 100 })
+	base := edit(1, func(d *Document) {
+		d.Caps, d.Basis = map[string]uint64{"mail.example": 100}, map[string]string{"mail.example": BasisImage}
+		d.EdgeCap = 100
+	})
 	for name, f := range map[string]func(d *Document){
-		"raise a core cap":     func(d *Document) { d.Caps = map[string]uint64{"mail.example": 101} },
-		"lower a core cap":     func(d *Document) { d.Caps = map[string]uint64{"mail.example": 99} },
-		"drop a core cap":      func(d *Document) { d.Caps = nil },
-		"cap another listing":  func(d *Document) { d.Caps = map[string]uint64{"mail.example": 100, "models.example": 1} },
+		"raise a core cap": func(d *Document) { d.Caps = map[string]uint64{"mail.example": 101} },
+		"lower a core cap": func(d *Document) { d.Caps = map[string]uint64{"mail.example": 99} },
+		"drop a core cap":  func(d *Document) { d.Caps = nil },
+		"cap another listing": func(d *Document) {
+			d.Caps = map[string]uint64{"mail.example": 100, "models.example": 1}
+			d.Basis = map[string]string{"mail.example": BasisImage, "models.example": BasisDeclared}
+		},
 		"raise the edge's cap": func(d *Document) { d.EdgeCap = 101 },
 		"lower the edge's cap": func(d *Document) { d.EdgeCap = 99 },
-		"name a cap's basis":   func(d *Document) { d.Basis = map[string]string{"mail.example": BasisDeclared} },
+		"change a cap's basis": func(d *Document) { d.Basis = map[string]string{"mail.example": BasisDeclared} },
 	} {
 		next := base.normal()
 		f(&next)

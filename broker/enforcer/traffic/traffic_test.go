@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
@@ -175,5 +178,115 @@ func TestSummaryShape(t *testing.T) {
 	r.List = func() ([]byte, error) { return []byte("{"), nil }
 	if _, err := r.Read("tv"); !errors.Is(err, ErrListing) {
 		t.Errorf("a broken listing: %v", err)
+	}
+}
+
+// TestADaysFirstCallStartsTheDay: the first call of a day rolls the
+// counter over before it acts, so what it records belongs to today. A cap
+// change at the day's start retires the old cap for today, and an address
+// resolved at the day's start is live today and joins its destinations'
+// groups. Mutants: SetCaps or Resolved acting on yesterday, so the next
+// call's rollover clears the retired cap or leaves the address idle.
+func TestADaysFirstCallStartsTheDay(t *testing.T) {
+	clk := &clock{noon}
+	c := NewCounter(clk.now, twoCap)
+	clk.t = noon.Add(24 * time.Hour)
+	c.SetCaps(Caps{Core: map[string]uint64{"a.example": 100}, Edge: 50})
+	c.Resolved("b.example", addrB)
+	if g := groupOf(t, c.Counts(), "b.example"); g.Cap != 100 {
+		t.Errorf("b.example taken off at the day's first change: %+v, want its cap 100 for the rest of the day", g)
+	}
+
+	clk.t = noon
+	c = NewCounter(clk.now, twoCap)
+	c.Resolved("a.example", addrA)
+	clk.t = noon.Add(24 * time.Hour)
+	c.Resolved("b.example", addrA)
+	if g := groupOf(t, c.Counts(), "a.example"); !slices.Equal(g.Dests, []string{"a.example", "b.example"}) {
+		t.Errorf("an address resolved at the day's start: group %+v, want a.example and b.example merged", g)
+	}
+}
+
+// TestListedAgainLeavesNoRetiredCap: a destination put back on the list
+// keeps no retired cap beside its listed one, so the saved state holds
+// none for it. Mutant: SetCaps keeping a listed destination's retired cap.
+func TestListedAgainLeavesNoRetiredCap(t *testing.T) {
+	c := NewCounter((&clock{noon}).now, Caps{Core: map[string]uint64{"x.example": 300}})
+	c.SetCaps(Caps{Core: map[string]uint64{}})
+	c.SetCaps(Caps{Core: map[string]uint64{"x.example": 100}})
+	var s State
+	if err := json.Unmarshal(c.Save(), &s); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Retired) != 0 {
+		t.Fatalf("saved retired caps %v for a listed destination", s.Retired)
+	}
+}
+
+// TestRestoreKeepsEachAddressesIdleClock: a counter restored from its
+// saved state forgets an idle address on the day the running counter
+// would, and an address the state names with no idle day starts its idle
+// clock on the counter's day, as one first seen in a resolver set does.
+// Mutants: Restore dropping Used, so an idle address is kept a day too
+// long; NewCounter leaving its day unset, so such an address is forgotten
+// a day early.
+func TestRestoreKeepsEachAddressesIdleClock(t *testing.T) {
+	clk := &clock{noon}
+	c := NewCounter(clk.now, twoCap)
+	c.Resolved("a.example", addrA)
+	clk.t = noon.Add(24 * time.Hour)
+	r, err := Restore(clk.now, twoCap, c.Save())
+	if err != nil {
+		t.Fatal(err)
+	}
+	clk.t = noon.Add(48 * time.Hour)
+	// state is c's saved state on the clock's day: Save itself does not
+	// roll the day over, so a count read does first.
+	state := func(c *Counter) State {
+		c.Counts()
+		var s State
+		if err := json.Unmarshal(c.Save(), &s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	if got, want := state(r), state(c); len(want.Dests)+len(want.Resolved)+len(want.Used) != 0 || !reflect.DeepEqual(got, want) {
+		t.Fatalf("restored state %+v, want %+v, which forgets the idle address", got, want)
+	}
+
+	clk.t = noon.Add(24 * time.Hour)
+	b, err := json.Marshal(State{Day: Day(clk.t), Dests: map[netip.Addr][]string{addrA: {"a.example"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, err = Restore(clk.now, twoCap, b); err != nil {
+		t.Fatal(err)
+	}
+	clk.t = noon.Add(48 * time.Hour)
+	if s := state(r); s.Used[addrA] != Day(noon)+1 || len(s.Dests[addrA]) != 1 {
+		t.Fatalf("an address saved with no idle day: %+v, want it kept with idle day %d", s, Day(noon)+1)
+	}
+}
+
+// TestRestoreOnALaterDayRollsOver: a state saved on an earlier day rolls
+// over at once in Restore, so the restored counter's own saved state is
+// today's, with yesterday's bytes gone, before any count is read. Mutant:
+// Restore keeping the saved day until the next call.
+func TestRestoreOnALaterDayRollsOver(t *testing.T) {
+	clk := &clock{noon}
+	c := NewCounter(clk.now, twoCap)
+	c.Resolved("a.example", addrA)
+	c.Add(reading(1, 5, addrA, 90))
+	clk.t = noon.Add(24 * time.Hour)
+	r, err := Restore(clk.now, twoCap, c.Save())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s State
+	if err := json.Unmarshal(r.Save(), &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.Day != Day(clk.t) || len(s.Bytes) != 0 || s.Edge != 0 {
+		t.Fatalf("restored on the next day, saved %+v, want day %d with no bytes", s, Day(clk.t))
 	}
 }
