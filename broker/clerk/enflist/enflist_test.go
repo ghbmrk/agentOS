@@ -108,8 +108,6 @@ func TestNoDailyBytesIsRefused(t *testing.T) {
 	}{
 		"a destination": {Inputs{Dests: []Dest{{Host: "ok.example", Basis: Declared, DailyBytes: 1}, {Host: "mail.example", Basis: Declared}}, EdgeDeclaredBytes: 1},
 			"mail.example", `"mail.example" states no daily bytes, so agentOS cannot size its cap; declare its daily bytes, then sign.`},
-		"a hostile name": {Inputs{Dests: []Dest{{Host: "moc.\u202eevil", Basis: Image}}, EdgeDeclaredBytes: 1},
-			"moc.\u202eevil", `"moc.\u202eevil" states no daily bytes`},
 		"the edge": {Inputs{Dests: []Dest{{Host: "ok.example", Basis: Backup, DailyBytes: 1}}},
 			"", "The edge states no daily total, so agentOS cannot size its cap; declare the edge's daily total, then sign."},
 	} {
@@ -121,6 +119,11 @@ func TestNoDailyBytesIsRefused(t *testing.T) {
 		if _, lerr := n.Link("enforcer.home.arpa"); lerr == nil {
 			t.Errorf("%s: a refused proposal has a link", name)
 		}
+	}
+	// A hostile name never reaches *NoDailyBytes through Propose, since it
+	// is not a host shape (#6553); its text still names it in ASCII.
+	if got := (&NoDailyBytes{Host: "moc.\u202eevil"}).Error(); !strings.HasPrefix(got, `"moc.\u202eevil" states no daily bytes`) {
+		t.Errorf("a hostile name: %q, want it quoted in printable ASCII", got)
 	}
 	if errors.Is(&NoDailyBytes{}, ErrInput) {
 		t.Error("NoDailyBytes is ErrInput")

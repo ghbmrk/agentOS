@@ -98,6 +98,30 @@ func CanonicalHost(h string) string {
 	return string(b)
 }
 
+// hostShape is the one host shape the enforcer's resolver serves
+// (enforcer/dns.Hostname, restated here since enflist imports only
+// policy): lower-case LDH, two or more labels, no label empty, over 63
+// bytes or opening or closing with a hyphen, 253 bytes in all. dns.Generate
+// refuses any other name whole, which would stop every resolver instance
+// (#6553). Every name of this shape is its own CanonicalHost.
+func hostShape(h string) bool {
+	labels := strings.Split(h, ".")
+	if len(h) > 253 || len(labels) < 2 {
+		return false
+	}
+	for _, l := range labels {
+		if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
+			return false
+		}
+		for _, c := range []byte(l) {
+			if !('a' <= c && c <= 'z' || '0' <= c && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // Next is a proposed document with its caps sized.
 type Next struct {
 	doc  []byte // canonical
@@ -107,7 +131,9 @@ type Next struct {
 // Propose is cur with its destination list, caps, bases and edge cap
 // replaced by in's, each cap equal to its stated figure. A destination or
 // edge with no daily bytes is *NoDailyBytes; a host listed twice, a host
-// that is not its CanonicalHost, a basis off the list, or a document the
+// the enforcer's resolver cannot serve (not lower-case LDH with two or
+// more labels, so never its non-canonical spelling), a basis off the
+// list, or a document the
 // policy refuses (an invalid name, caps summing past 2^64-1) is ErrInput.
 // It reads nothing else and keeps everything else in cur.
 func Propose(cur policy.Document, in Inputs) (Next, error) {
@@ -118,8 +144,11 @@ func Propose(cur policy.Document, in Inputs) (Next, error) {
 		switch {
 		case x.Basis != Declared && x.Basis != Image && x.Basis != Backup:
 			return Next{}, fmt.Errorf("%w: %s has basis %q", ErrInput, strconv.QuoteToASCII(x.Host), x.Basis)
-		case x.Host != CanonicalHost(x.Host):
-			return Next{}, fmt.Errorf("%w: %s is not a canonical host name (lower case, no trailing dot)", ErrInput, strconv.QuoteToASCII(x.Host))
+		case !hostShape(x.Host):
+			if c := CanonicalHost(x.Host); hostShape(c) {
+				return Next{}, fmt.Errorf("%w: %s is not a canonical host name; write it as %s", ErrInput, strconv.QuoteToASCII(x.Host), strconv.QuoteToASCII(c))
+			}
+			return Next{}, fmt.Errorf("%w: %s is not a host name the enforcer can resolve (lower-case letters, digits and hyphens, two or more labels)", ErrInput, strconv.QuoteToASCII(x.Host))
 		case slices.Contains(d.Destinations, x.Host):
 			return Next{}, fmt.Errorf("%w: %s is listed twice", ErrInput, strconv.QuoteToASCII(x.Host))
 		case x.DailyBytes == 0:
