@@ -3009,6 +3009,22 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
                 at = 1 + a.split("\n").index("var v = []int{1}")
                 self.assertIsNone(mutgate.reaching_tests({"broker/h/a_test.go": a, "broker/h/b_test.go": b},
                                                          {"broker/h/a_test.go": {at}}))
+        # Security on #6762: an external test file pulls a var or helper by symbol, naming it only in a
+        # directive (go test: TestExt fails once quietVar or helper changes).
+        b = ('package h\n\nimport "testing"\n\nvar quietVar = 1\n\nfunc helper() int {\n\treturn 1\n}\n\n'
+             'func TestA(t *testing.T) {\n\t_ = quietVar\n\t_ = helper()\n}\n')
+        for name, pull in (("var", "//go:linkname shared example.com/h.quietVar\nvar shared int\n"),
+                           ("helper", "//go:linkname h example.com/h.helper\nfunc h() int\n")):
+            with self.subTest("widen a linkname pull of a " + name):
+                c = ('package h_test\n\nimport (\n\t"testing"\n\t_ "unsafe"\n)\n\n' + pull +
+                     '\nfunc TestExt(t *testing.T) {}\n')
+                for line in (5, 8):
+                    self.assertIsNone(mutgate.reaching_tests({"broker/h/b_test.go": b, "broker/h/c_test.go": c},
+                                                             {"broker/h/b_test.go": {line}}))
+        with self.subTest("narrow beside a linkname in prose"):
+            c = 'package h_test\n\n// TestExt needs no //go:linkname here.\n\nfunc TestExt(t *testing.T) {}\n'
+            self.assertEqual(mutgate.reaching_tests({"broker/h/b_test.go": b, "broker/h/c_test.go": c},
+                                                    {"broker/h/b_test.go": {5}}), ["TestA"])
         with self.subTest("widen a package file's var"):  # package code, not only tests, may read it
             self.assertIsNone(mutgate.reaching_tests(
                 {"broker/h/a.go": "package h\n\nvar v = []int{1}\n",

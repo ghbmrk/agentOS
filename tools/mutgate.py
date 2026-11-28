@@ -2238,7 +2238,8 @@ def _quiet_vars(files, decls):
     layout, no linkname or cgo, no directive go reads package-wide on it, and its text (comments and
     literal contents blanked) holding no `(` but a func literal's or func type's own and no receive
     outside one's body (_calls_nothing, #6687). Such an initializer runs no statement and changes no
-    state before a test starts, and only test code, which names it, can read what it holds; what a
+    state before a test starts, and only test code, which names it, can read what it holds (a linkname
+    anywhere in the package is every test, reaching_tests); what a
     reached test later writes through it (an alias of another var) is the static-reach bound every
     helper and test body has (MUT-test-helper-scope-1). Any other initialized var stays every test."""
     bare = {p: _uncommented(t, False) for p, t in files.items()}
@@ -2256,6 +2257,9 @@ def _quiet_vars(files, decls):
     return out
 
 
+LINKNAME = re.compile(r"^\s*//go:linkname\b", re.M)
+
+
 def reaching_tests(files, changed, state=None):
     """Sorted names of the test functions in files ({path: text}, every _test.go file of one
     package) that reach the lines changed names ({path: set(line)}), or None when one of those lines
@@ -2263,7 +2267,11 @@ def reaching_tests(files, changed, state=None):
     first declaration, the package clause, an import) reaches what that file's declarations reach.
     A line of state ({path: set(line)}, read_by's calls) also reaches the tests that reach any
     package var the declaration holding it reaches, an init's or TestMain's reach aside: a test
-    can read what a reader left there without reaching the reader (#6657)."""
+    can read what a reader left there without reaching the reader (#6657). A `//go:linkname` line in
+    any file is every test: an external test file can pull a test-file declaration by symbol without
+    naming it in code (Security on #6762)."""
+    if any(LINKNAME.search(text) for text in files.values()):
+        return None
     decls = _quiet_vars(files, [d for path, text in sorted(files.items()) for d in _decls(path, text)])
     by_name, types = collections.defaultdict(list), {(d[8], n) for d in decls if d[1] == "type" for n in d[2]}
     methods = collections.defaultdict(list)
