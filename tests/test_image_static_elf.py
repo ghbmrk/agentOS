@@ -5,7 +5,7 @@ it links: a Go binary with cgo off links none; a "linked" file's link inputs wer
 against its SHA-256 (image/guest-shipped.sh SHIPPED_FOR) and each is in the status the scan reads; a
 "package" file is a Debian package's (whose Built-Using sources the scan also queries); a "bundled" file
 is a pinned download a vulncheck.json record names."""
-# REQ: EVL-5
+# REQ: EVL-5, SGE-1, SGE-2, SGE-3
 import hashlib
 import importlib.util
 import os
@@ -13,6 +13,7 @@ import pathlib
 import platform
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -302,6 +303,155 @@ class StaticElfTest(unittest.TestCase):
             se.go_cgo(bytes(bad))
         with self.assertRaises(se.Unread):
             se.no_line_funcs(b"\xfa\xff\xff\xff\0\0\x01\x08" + b"\0" * 64)
+
+    def syso_pkg(self, name, asm):
+        """A CGO_ENABLED=0 package whose Go stub calls my_c_func, C code in a .syso assembled from ASM."""
+        w = pathlib.Path(self.tmp) / ("w-" + name)
+        w.mkdir()
+        (w / "go.mod").write_text("module m\n\ngo 1.21\n")
+        (w / "main.go").write_text("package main\n\nfunc cfunc() int\n\nfunc main() { println(cfunc()) }\n")
+        (w / "stub_amd64.s").write_text('#include "textflag.h"\nTEXT \u00b7cfunc(SB),NOSPLIT,$0-8\n'
+                                        "\tCALL my_c_func(SB)\n\tMOVQ AX, ret+0(FP)\n\tRET\n")
+        (w / "c.s").write_text(asm)
+        subprocess.run(["gcc", "-c", str(w / "c.s"), "-o", str(w / "c_amd64.syso")], check=True)
+        (w / "c.s").unlink()
+        return w
+
+    def go_build(self, w, out, *flags):
+        subprocess.run(["go", "build", "-trimpath", "-ldflags=-s -w", *flags, "-o", str(out), "."], cwd=w, check=True,
+                       capture_output=True, env={**os.environ, "CGO_ENABLED": "0", "GOFLAGS": "-mod=mod", "GOWORK": "off"})
+        return out
+
+    def test_a_go_file_runs_only_code_its_function_table_lists(self):
+        # #6563 item 1 (SGE-1): cmd/link takes -linkmode=external with cgo off (a warning only; go build refuses,
+        # so the flag is added at the link step, as a build system calling the linker itself does). The C from a
+        # .syso then sits outside the function table and runtime/cgo is absent, yet the file holds glibc's crt.
+        asm = "\t.text\n\t.globl my_c_func\n\t.type my_c_func, @function\nmy_c_func:\n\tmovl $7, %eax\n\tret\n"
+        w = self.syso_pkg("ext", asm)
+        tx = pathlib.Path(self.tmp) / "toolexec.sh"
+        tx.write_text('#!/bin/sh\nt="$1"; shift\ncase "$(basename "$t")" in\n'
+                      '  link) exec "$t" -linkmode=external -extldflags=-static "$@";;\nesac\nexec "$t" "$@"\n')
+        tx.chmod(0o755)
+        ext = self.go_build(w, pathlib.Path(self.tmp) / "go-ext", "-toolexec=" + str(tx))
+        data = ext.read_bytes()
+        secs = se.sections(data)
+        self.assertTrue({".init", ".plt", ".fini"} <= set(secs))
+        o, n = secs[".gopclntab"][:2]
+        self.assertEqual(se.no_line_funcs(data[o:o + n]), [])  # the table alone does not see it
+        self.assertNotIn(se.CGO_MARK, data)
+        self.assertEqual(se.go_cgo(data), "0-o")
+        self.assertIn("executable sections", se.go_outside(data))
+        # Section flags are header text: with .init, .plt and .fini marked as data the crt and libc code still
+        # lies in .text outside the table, and in the executable segment.
+        flat = pathlib.Path(str(ext) + "-flat")
+        subprocess.run(["objcopy"] + [a for s in (".init", ".plt", ".fini")
+                                      for a in ("--set-section-flags", s + "=alloc,load,readonly,data")]
+                       + [str(ext), str(flat)], check=True)
+        self.assertEqual([k for k, v in se.sections(flat.read_bytes()).items() if v[3] & se.SHF_EXECINSTR], [".text"])
+        self.assertEqual(se.go_cgo(flat.read_bytes()), "0-o")
+        root, out, allow, config, _ = self.tree()
+        shutil.copy(ext, root / "usr/lib/agentos/runsc")
+        self.assertIn("/usr/lib/agentos/runsc: go : a Go binary with code outside its function table "
+                      "(Go CGO_ENABLED=0 but code outside its function table)", self.check(root, out, allow, config))
+        # An entry point outside every listed function, or on a linker marker (no line table), is refused.
+        go = self.bins["go"].read_bytes()
+        self.assertIsNone(se.go_outside(go))
+        _o, size, addr, _f = se.sections(go)[".text"]
+        o, n = se.sections(go)[".gopclntab"][:2]
+        _base, funcs, _end = se.pcln_funcs(go[o:o + n])
+        marker = [e for e, name, _l in funcs if name in se.GO_MARKERS]
+        for entry in [addr + size - 1] + [addr + e for e in marker]:
+            bad = bytearray(go)
+            bad[24:32] = entry.to_bytes(8, "little")
+            self.assertIn("entry point", se.go_outside(bytes(bad)))
+            self.assertEqual(se.go_cgo(bytes(bad)), "0-o")
+        # An executable segment reaching past .text is refused.
+        bad = bytearray(go)
+        phoff, = struct.unpack_from("<Q", go, 32)
+        for k in range(struct.unpack_from("<H", go, 56)[0]):
+            at = phoff + 56 * k
+            typ, flags = struct.unpack_from("<II", go, at)
+            if typ == 1 and flags & 1:
+                struct.pack_into("<Q", bad, at + 40, struct.unpack_from("<Q", go, at + 40)[0] + 0x1000)
+        self.assertIn("executable segment", se.go_outside(bytes(bad)))
+
+    def test_each_layout_guard_refuses_on_its_own(self):
+        # #6700 L3 7175192951 point 1: one edit of a plain Go binary per guard, every other guard still met, so
+        # each check is the one that refuses. Offsets: e_phoff 32, e_shoff 40; Elf64_Shdr sh_size at 32;
+        # Elf64_Phdr p_vaddr at 16, p_memsz at 40; the table's stored text start at 24 (0 from Go 1.26).
+        go = self.bins["go"].read_bytes()
+        self.assertIsNone(se.go_outside(go))
+        _o, size, addr, _f = se.sections(go)[".text"]
+        pcln = se.sections(go)[".gopclntab"][0]
+        shoff, = struct.unpack_from("<Q", go, 40)
+        strndx, = struct.unpack_from("<H", go, 62)
+        names = struct.unpack_from("<Q", go, shoff + 64 * strndx + 24)[0]
+        text_sh = next(shoff + 64 * k for k in range(struct.unpack_from("<H", go, 60)[0])
+                       if go[names + struct.unpack_from("<I", go, shoff + 64 * k)[0]:].startswith(b".text\0"))
+        phoff, = struct.unpack_from("<Q", go, 32)
+        run = [phoff + 56 * k for k in range(struct.unpack_from("<H", go, 56)[0])
+               if struct.unpack_from("<II", go, phoff + 56 * k) == (1, 5)]
+        self.assertEqual(len(run), 1)
+        seg = run[0]
+        vaddr, = struct.unpack_from("<Q", go, seg + 16)
+
+        def edited(*edits):
+            b = bytearray(go)
+            for at, form, value in edits:
+                struct.pack_into(form, b, at, value)
+            return bytes(b)
+        # The table stops short of .text's end: .text and its segment grown by a page, the stored start zeroed
+        # (as Go 1.26 stores it), so only the span check sees the bytes past the table.
+        grown = edited((text_sh + 32, "<Q", size + 0x1000), (seg + 40, "<Q", addr + size + 0x1000 - vaddr),
+                       (pcln + 24, "<Q", 0))
+        self.assertIn("function table spans", se.go_outside(grown))
+        self.assertEqual(se.go_cgo(grown), "0-o")
+        # The executable segment starts after .text's start (and still ends at its end).
+        late = edited((seg + 16, "<Q", addr + 16), (seg + 40, "<Q", size - 16))
+        self.assertIn("executable segment", se.go_outside(late))
+        # A stored text start that is not .text's address.
+        moved = edited((pcln + 24, "<Q", addr + 16))
+        self.assertIn("text start", se.go_outside(moved))
+        # A table whose entries are out of address order is unread (fails closed), not walked.
+        _base, funcs, _end = se.pcln_funcs(go[pcln:])
+        ftab = pcln + struct.unpack_from("<Q", go, pcln + 64)[0]
+        unordered = edited((ftab + 8, "<I", funcs[0][0]))
+        with self.assertRaises(se.Unread):
+            se.go_cgo(unordered)
+
+    def test_a_forged_function_table_is_not_go(self):
+        # #6563 item 2 (SGE-2): a .gopclntab section added to a static glibc C binary (a 1.20 header, no
+        # functions) does not make it Go, and a real table edited to list no function is refused.
+        head = struct.pack("<IBBBB8Q", 0xFFFFFFF1, 0, 0, 1, 8, 0, 0, 0, 72, 72, 72, 72, 72) + b"\0" * 16
+        hp = pathlib.Path(self.tmp) / "forged-head"
+        hp.write_bytes(head)
+        forged = pathlib.Path(self.tmp) / "forged"
+        subprocess.run(["objcopy", "--add-section", ".gopclntab=%s" % hp, str(self.bins["static"]), str(forged)],
+                       check=True)
+        self.assertIn(".gopclntab", se.sections(forged.read_bytes()))
+        self.assertEqual(se.go_cgo(forged.read_bytes()), "o")
+        self.assertIn("lists no function", se.go_outside(forged.read_bytes()))
+        go = bytearray(self.bins["go"].read_bytes())
+        o = se.sections(bytes(go))[".gopclntab"][0]
+        go[o + 8:o + 16] = b"\0" * 8
+        self.assertEqual(se.no_line_funcs(bytes(go[o:])), [])
+        self.assertIn("lists no function", se.go_outside(bytes(go)))
+        self.assertEqual(se.go_cgo(bytes(go)), "0-o")
+
+    def test_only_the_linkers_own_markers_are_exempt(self):
+        # #6563 item 3 (SGE-3): a .syso C function named "go:x" has no line table and is not exempt; only the
+        # names cmd/link gives its own text markers are.
+        asm = ('\t.text\n\t.globl "go:x"\n\t.type "go:x", @function\n"go:x":\n\tmovl $3, %eax\n\tret\n'
+               '\t.globl my_c_func\n\t.type my_c_func, @function\nmy_c_func:\n\tcall "go:x"\n\tret\n')
+        data = self.go_build(self.syso_pkg("gox", asm), pathlib.Path(self.tmp) / "go-gox").read_bytes()
+        o, n = se.sections(data)[".gopclntab"][:2]
+        self.assertEqual(se.no_line_funcs(data[o:o + n]), ["go:x", "my_c_func"])
+        self.assertEqual(se.GO_MARKERS, ("go:textfipsstart", "go:textfipsend"))
+        # The local toolchain's markers are a subset of the list (Go before 1.24 makes none).
+        go = self.bins["go"].read_bytes()
+        o, n = se.sections(go)[".gopclntab"][:2]
+        self.assertLessEqual({name for _e, name, lines in se.pcln_funcs(go[o:o + n])[1] if not lines},
+                             set(se.GO_MARKERS))
 
     def test_guest_and_initrd_package_files_are_held_to_their_bytes(self):
         # #6482 (Potency 7068815856 point 4): a guest-root file declared "package" must have bytes

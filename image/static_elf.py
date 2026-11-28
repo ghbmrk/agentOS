@@ -22,8 +22,10 @@ pattern on the file's path (an initrd's members by their path inside it) matched
 "*" never crosses "/" (matches). Kinds (SEL-6):
   go             a Go binary built without cgo, read from the file (go_cgo): its section headers name
                  .gopclntab; the build info at .go.buildinfo says CGO_ENABLED=0, or there is none or it records
-                 no setting; the file holds none of runtime/cgo's C code; and its function table lists no
-                 function without a line table (C code an internal link took from a .syso): no C library
+                 no setting; the file holds none of runtime/cgo's C code; its function table lists no
+                 function without a line table (C code an internal link took from a .syso) but the linker's
+                 GO_MARKERS; and it runs only code that table lists (go_outside: an external link, which
+                 cmd/link takes with cgo off, puts C there outside it): no C library
   linked LIST    a build step recorded the file's link inputs (image/guest-shipped.sh with SHIPPED_FOR):
                  OUT/LIST/agentos.inputs names the packages its link loaded, by the file's SHA-256, and
                  each must be in OUT/LIST/agentos.dpkg-status, the status the scan reads for LIST
@@ -81,13 +83,21 @@ CXX_MARKS = (b"terminate called after throwing an instance of '", b"\0N10__cxxab
 CXX_NEEDED = re.compile(r"^lib(std)?c\+\+\.so")
 BUILDINFO = b"\xff Go buildinf:"
 SHT_NOBITS = 8
+SHF_EXECINSTR, PT_LOAD, PF_X = 4, 1, 1
 # The function table formats read (Go 1.18 and 1.20 onward); an older one is unread.
 PCLN_MAGICS = (0xFFFFFFF0, 0xFFFFFFF1)
+# The text symbols cmd/link makes itself, with no line table: the FIPS 140 module's bounds (Go 1.24 onward;
+# the only "go:" text symbols in cmd/link/internal of go1.22.12 to go1.26.8 a static executable holds, and
+# the only functions without one in gVisor release-20260928.0's and esbuild 0.28.2's tables, #6563).
+GO_MARKERS = ("go:textfipsstart", "go:textfipsend")
+# .text past the table's end entry: runtime.etext, at most one 32-byte function alignment on, plus MinLC's
+# one byte (cmd/link data.go); 16 bytes in the pinned releases, 1 in go1.22.12's.
+TEXT_SLACK = 33
 # The largest file the sha256 kind may declare: gVisor's sidecars are 1.4 KiB; a static libc is far larger.
 SHA256_MAX = 16384
 # runtime/cgo's C code (gcc_libinit.c _cgo_try_pthread_create's message): in every cgo binary, static or
-# dynamic, glibc or musl, and in no binary built with cgo off. An external link, the one way C reaches a
-# Go binary outside its function table, needs cgo (Go refuses -linkmode=external with cgo off).
+# dynamic, glibc or musl, and in no binary built with cgo off. go build refuses -linkmode=external with cgo
+# off, but cmd/link takes it with a warning, so an external link with no runtime/cgo is go_outside's to see.
 CGO_MARK = b"pthread_create failed"
 
 
@@ -103,7 +113,7 @@ def header(data):
 
 
 def sections(data):
-    """{name: (file offset, size)} of ELF bytes DATA's section header table ({} when it has none);
+    """{name: (file offset, size, address, flags)} of ELF bytes DATA's section header table ({} when it has none);
     Unread when the table or a section lies outside the file (L3 7068815628 point 4a)."""
     try:
         if data[4] == 2:
@@ -120,37 +130,92 @@ def sections(data):
             raise Unread("its section header table is not inside the file")
         heads = [struct.unpack_from(form, data, shoff + k * want) for k in range(num)]
         out = {}
-        for name, typ, _flags, _addr, off, size in heads:
+        for name, typ, flags, addr, off, size in heads:
             if typ != SHT_NOBITS and off + size > len(data):
                 raise Unread("a section lies past the end of the file")
-            out[name] = (off, size) if typ != SHT_NOBITS else (off, 0)
+            out[name] = (off, size if typ != SHT_NOBITS else 0, addr, flags)
         names = data[heads[strndx][4]:heads[strndx][4] + heads[strndx][5]]
         return {names[n:names.index(b"\0", n)].decode("latin-1"): v for n, v in out.items()}
     except (struct.error, IndexError, ValueError) as e:
         raise Unread("its section header table cannot be read (%s)" % e)
 
 
-def no_line_funcs(table):
-    """The functions of Go function table bytes TABLE (.gopclntab) that have no line table, the linker's own
-    "go:" markers aside: code an internal link took from a host object (a .syso), which has no Go
-    source (L3 7068815628 point 4b). Unread for a format this cannot read."""
+def pcln_funcs(table):
+    """(text start, [(entry offset from it, name, has a line table)], end offset) of Go function table bytes
+    TABLE (.gopclntab), functions in address order; text start is 0 from Go 1.26, which no longer stores it.
+    Unread for a format this cannot read."""
     try:
         magic, = struct.unpack_from("<I", table, 0)
         if magic not in PCLN_MAGICS or table[7] != 8:
             raise Unread("its Go function table is of a format this cannot read (magic %#x)" % magic)
-        nfunc, _files, _text, names, _cu, _filetab, _pctab, funcs = struct.unpack_from("<8Q", table, 8)
+        nfunc, _files, text, names, _cu, _filetab, _pctab, funcs = struct.unpack_from("<8Q", table, 8)
         out = []
         for k in range(nfunc):
-            _entry, off = struct.unpack_from("<II", table, funcs + 8 * k)
+            entry, off = struct.unpack_from("<II", table, funcs + 8 * k)
             # _func: entryOff, nameOff, args, deferreturn, pcsp, pcfile, pcln (the same in both formats).
             _e, name, _a, _d, _sp, _file, pcln = struct.unpack_from("<IiIIIII", table, funcs + off)
             start = names + name
-            shown = table[start:table.index(b"\0", start)].decode("latin-1")
-            if pcln == 0 and not shown.startswith("go:"):
-                out.append(shown)
-        return out
+            out.append((entry, table[start:table.index(b"\0", start)].decode("latin-1"), pcln != 0))
+        end, = struct.unpack_from("<I", table, funcs + 8 * nfunc)
+        if any(a[0] >= b[0] for a, b in zip(out, out[1:] + [(end,)])):
+            raise Unread("its Go function table is not in address order")
+        return text, out, end
     except (struct.error, IndexError, ValueError) as e:
         raise Unread("its Go function table cannot be read (%s)" % e)
+
+
+def no_line_funcs(table):
+    """The functions of Go function table bytes TABLE that have no line table, GO_MARKERS aside: code an
+    internal link took from a host object (a .syso), which has no Go source (L3 7068815628 point 4b; an
+    exact list, not a "go:" prefix any assembler can name, #6563 item 3). Unread as pcln_funcs."""
+    return [name for _e, name, lines in pcln_funcs(table)[1] if not lines and name not in GO_MARKERS]
+
+
+def go_outside(data):
+    """Why the Go binary DATA (section headers naming .gopclntab) may run code its function table does not
+    list, or None (#6563 items 1 and 2): the table lists a function; .text is the only executable section;
+    the table starts at .text's start and ends within TEXT_SLACK of its end; every executable segment ends
+    at .text's end and starts at or before its start; and the entry point lies in a listed function with a
+    line table. An external link adds _start, .init, .plt and .fini and puts the C library in .text outside
+    the table; a .gopclntab added to a C binary lists no function or not its code. Unread when the headers
+    or the table cannot be read."""
+    if data[4] != 2:
+        raise Unread("a 32-bit file with a Go function table")
+    secs = sections(data)
+    o, n = secs[".gopclntab"][:2]
+    stored, funcs, end = pcln_funcs(data[o:o + n])
+    if not funcs:
+        return "its function table lists no function"
+    execs = sorted(k for k, v in secs.items() if v[3] & SHF_EXECINSTR)
+    if execs != [".text"]:
+        return "its executable sections are %s, not .text alone" % ", ".join(execs)
+    _o, size, addr, _f = secs[".text"]
+    if stored not in (0, addr):
+        return "its function table's text start %#x is not .text's %#x" % (stored, addr)
+    if funcs[0][0] != 0 or not 0 <= addr + size - (addr + end) <= TEXT_SLACK:
+        return "its function table spans %#x to %#x, not .text's %#x to %#x" % (
+            addr + funcs[0][0], addr + end, addr, addr + size)
+    try:
+        entry, phoff = struct.unpack_from("<QQ", data, 24)
+        phsize, phnum = struct.unpack_from("<HH", data, 54)
+        if phsize != 56:
+            raise Unread("its program headers are not ELF64's")
+        segs = [struct.unpack_from("<IIQQQQQQ", data, phoff + 56 * k) for k in range(phnum)]
+    except struct.error as e:
+        raise Unread("its program headers cannot be read (%s)" % e)
+    run = [(s[3], s[3] + s[6]) for s in segs if s[0] == PT_LOAD and s[1] & PF_X]
+    if not run:
+        return "no executable segment holds .text"
+    for lo, hi in run:
+        if lo > addr or hi != addr + size:
+            return "an executable segment spans %#x to %#x, not up to .text's end %#x" % (lo, hi, addr + size)
+    bounds = [e for e, _n, _l in funcs] + [end]
+    for k, (e, _name, lines) in enumerate(funcs):
+        if addr + e <= entry < addr + bounds[k + 1]:
+            if lines:
+                return None
+            break
+    return "its entry point %#x is in no function its table lists with a line table" % entry
 
 
 def go_cgo(data):
@@ -158,16 +223,17 @@ def go_cgo(data):
     binary, whatever bytes it holds). Else the build info's CGO_ENABLED, read at .go.buildinfo, "0" or
     "1", or "none" when there is no build info (esbuild's release) or it records no setting (Bazel's
     rules_go, as gVisor's release is built); suffixed "-cgo" ("cgo" for none) when the file holds
-    runtime/cgo's C code (CGO_MARK), or "-c" ("c" for none) when its function table lists a function
-    with no line table (no_line_funcs). Unread when the headers, the table or the build info cannot be
+    runtime/cgo's C code (CGO_MARK), "-c" ("c" for none) when its function table lists a function
+    with no line table (no_line_funcs), or "-o" ("o" for none) when it may run code outside that table
+    (go_outside). Unread when the headers, the table or the build info cannot be
     read (build info before Go 1.18 is by pointer)."""
     secs = sections(data)
     if ".gopclntab" not in secs:
         return None
-    off, size = secs[".gopclntab"]
+    off, size = secs[".gopclntab"][:2]
     setting = "none"
     if ".go.buildinfo" in secs:
-        i, n = secs[".go.buildinfo"]
+        i, n = secs[".go.buildinfo"][:2]
         if data[i:i + len(BUILDINFO)] != BUILDINFO:
             raise Unread(".go.buildinfo does not start with Go's build info")
         if n < 32 or not data[i + 15] & 2:
@@ -194,6 +260,8 @@ def go_cgo(data):
         return "cgo" if setting == "none" else "0-cgo"
     if setting != "1" and no_line_funcs(data[off:off + size]):
         return "c" if setting == "none" else "0-c"
+    if setting != "1" and go_outside(data):
+        return "o" if setting == "none" else "0-o"
     return setting
 
 
@@ -201,7 +269,9 @@ def go_shown(go):
     return {"0": "Go CGO_ENABLED=0", "1": "Go CGO_ENABLED=1", "none": "Go, no cgo setting, no cgo code",
             "cgo": "Go, no cgo setting, cgo code", "0-cgo": "Go CGO_ENABLED=0 but cgo code",
             "c": "Go, no cgo setting, C functions with no line table",
-            "0-c": "Go CGO_ENABLED=0 but C functions with no line table"}[go]
+            "0-c": "Go CGO_ENABLED=0 but C functions with no line table",
+            "o": "Go, no cgo setting, code outside its function table",
+            "0-o": "Go CGO_ENABLED=0 but code outside its function table"}[go]
 
 
 def classify(path):
@@ -317,7 +387,8 @@ def kind_refusal(shown, place, info, kind, arg, ctx, place_status):
             return None
         if info["go"] is None:
             return "not a Go binary"
-        return "a Go binary with %s (%s)" % ("C code" if info["go"] in ("c", "0-c") else "cgo", go_shown(info["go"]))
+        what = {"c": "C code", "o": "code outside its function table"}.get(info["go"].split("-")[-1], "cgo")
+        return "a Go binary with %s (%s)" % (what, go_shown(info["go"]))
     if kind == "sha256":
         # Bounded by what the check reads (Security 7068790342 R1): only a static file too small to hold a
         # C library can be declared by review alone.
