@@ -303,6 +303,7 @@ func TestLostCardNoCardNamesTheCardInEffect(t *testing.T) {
 // The made card is served only to the session that opened it: another
 // session's visit wipes that display and is asked its own tap.
 func TestLostCardOnlyToItsSession(t *testing.T) {
+	localui6Kills(t)
 	r := newRecoveryRig(t)
 	if w := r.do("GET", "/recovery/new", nil); w.Code != http.StatusSeeOther {
 		t.Fatalf("before sign-in: %d", w.Code)
