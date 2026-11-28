@@ -127,6 +127,8 @@ func TestNoticePullNewBootStartsOver(t *testing.T) {
 	if len(texts()) != 2 {
 		t.Fatalf("a restarted vault's notice 1 must be texted: %q", texts())
 	}
+	mut3NoticePollFailsAndResetsAsItShould(t)         // REV-CHK-mut (#5848)
+	mut3NoticeRunTextsWaitsBetweenFailuresAndStops(t) // REV-CHK-mut (#5848)
 }
 
 func TestNoticePullDropsWhatHasNoTextAndSaysWhenNoticesWereMissed(t *testing.T) {

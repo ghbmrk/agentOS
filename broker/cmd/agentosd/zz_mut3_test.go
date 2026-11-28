@@ -2,9 +2,14 @@ package main
 
 // REQ: REV-CHK-mut (#5848)
 //
-// OWN-page-session-mut3: each test below fails when mutgate deletes one of
+// OWN-page-session-mut3: each check below fails when mutgate deletes one of
 // the statements of plankeys.go, imagepin.go, noticepull.go, diskquota.go,
-// follow.go and infer.go that #5194's run listed as surviving.
+// follow.go and infer.go that #5194's run listed as surviving. The checks
+// are plain functions, each called at the end of one existing test of its
+// file, not Test functions of their own: a new Test changes the package's
+// run list, which mutgate reads as changing every test of the package
+// (pacing_test.go's at23, #5848's release finding), so the gate would then
+// count every old survivor of cmd/agentosd against this change.
 
 import (
 	"bytes"
@@ -59,7 +64,7 @@ func mut3Open(t *testing.T, path string) string {
 	return ""
 }
 
-func TestMut3PlanHolderReadsEachRefusalAsItself(t *testing.T) {
+func mut3PlanHolderReadsEachRefusalAsItself(t *testing.T) {
 	dir := t.TempDir()
 	// A file open to others is refused with the file check's own error, not
 	// read as a seed of the wrong size.
@@ -95,7 +100,7 @@ func TestMut3PlanHolderReadsEachRefusalAsItself(t *testing.T) {
 	}
 }
 
-func TestMut3PlanKeysLogWhyAGrantGivesNoKey(t *testing.T) {
+func mut3PlanKeysLogWhyAGrantGivesNoKey(t *testing.T) {
 	r := newGrantRig(t)
 	keys := r.keys()
 	var bad key.Key
@@ -129,7 +134,7 @@ func TestMut3PlanKeysLogWhyAGrantGivesNoKey(t *testing.T) {
 	}
 }
 
-func TestMut3MachineHolderIsTheDomainSeparatedHMAC(t *testing.T) {
+func mut3MachineHolderIsTheDomainSeparatedHMAC(t *testing.T) {
 	holder := seedKey(4)
 	mac := hmac.New(sha256.New, holder.Seed())
 	mac.Write([]byte("agentos guest plan holder\x00"))
@@ -140,7 +145,7 @@ func TestMut3MachineHolderIsTheDomainSeparatedHMAC(t *testing.T) {
 	}
 }
 
-func TestMut3ImagePinNamesAMissingFileAndClosesWhatItOpens(t *testing.T) {
+func mut3ImagePinNamesAMissingFileAndClosesWhatItOpens(t *testing.T) {
 	dir := t.TempDir()
 	if v, err := readCLIPin(dir); v != "" || !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("no pin file: %q, %v; want not-exist", v, err)
@@ -217,7 +222,7 @@ func mut3NoticeRig(t *testing.T) (*noticePuller, *mut3Notices, func() []string) 
 	return p, f, func() []string { mu.Lock(); defer mu.Unlock(); return append([]string{}, got...) }
 }
 
-func TestMut3NoticePollFailsAndResetsAsItShould(t *testing.T) {
+func mut3NoticePollFailsAndResetsAsItShould(t *testing.T) {
 	p, f, texts := mut3NoticeRig(t)
 	c := noticesock.New(p.socket)
 	f.set(true, notice.Batch{})
@@ -246,7 +251,7 @@ func TestMut3NoticePollFailsAndResetsAsItShould(t *testing.T) {
 	}
 }
 
-func TestMut3NoticeRunTextsWaitsBetweenFailuresAndStops(t *testing.T) {
+func mut3NoticeRunTextsWaitsBetweenFailuresAndStops(t *testing.T) {
 	p, f, texts := mut3NoticeRig(t)
 	// A failing socket is asked again after each pause, not in a spin.
 	p.retry = 50 * time.Millisecond
@@ -291,7 +296,7 @@ func TestMut3NoticeRunTextsWaitsBetweenFailuresAndStops(t *testing.T) {
 	}
 }
 
-func TestMut3DiskQuotaRefusesBeforeTouchingTheDisk(t *testing.T) {
+func mut3DiskQuotaRefusesBeforeTouchingTheDisk(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
 	if _, _, err := machineQuota("bogus", dir); err == nil || err.Error() != `-disk-quota="bogus": want on or off` {
 		t.Fatalf("bogus mode: %v", err)
@@ -319,7 +324,7 @@ func TestMut3DiskQuotaRefusesBeforeTouchingTheDisk(t *testing.T) {
 	}
 }
 
-func TestMut3FollowSettingSaysWhatIsMissingAndWhatIsFollowed(t *testing.T) {
+func mut3FollowSettingSaysWhatIsMissingAndWhatIsFollowed(t *testing.T) {
 	for _, c := range [][2]string{{t.TempDir(), ""}, {"", filepath.Join(t.TempDir(), "root.json")}} {
 		if _, err := newFollowSetting(c[0], c[1], noGuard); err == nil || err.Error() != "-update-store and -shipped-root go together" {
 			t.Fatalf("%q: %v", c, err)
@@ -353,7 +358,7 @@ func TestMut3FollowSettingSaysWhatIsMissingAndWhatIsFollowed(t *testing.T) {
 	}
 }
 
-func TestMut3InferFlagsAndRefusals(t *testing.T) {
+func mut3InferFlagsAndRefusals(t *testing.T) {
 	var f inferFlags
 	fl := flag.NewFlagSet("agentosd", flag.ContinueOnError)
 	f.register(fl)

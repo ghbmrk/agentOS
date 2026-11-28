@@ -207,4 +207,7 @@ func TestPlanKeysGiveNoKeyWithoutAGrantToTheHolder(t *testing.T) {
 			t.Errorf("%s: logs %v", name, r.logs)
 		}
 	}
+	mut3PlanHolderReadsEachRefusalAsItself(t)    // REV-CHK-mut (#5848)
+	mut3PlanKeysLogWhyAGrantGivesNoKey(t)        // REV-CHK-mut (#5848)
+	mut3MachineHolderIsTheDomainSeparatedHMAC(t) // REV-CHK-mut (#5848)
 }
