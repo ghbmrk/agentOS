@@ -449,17 +449,20 @@ class GlobImportsTest(unittest.TestCase):
         errs = refusals(self.got, [], listed[1:])
         self.assertEqual(errs, ["tree: /usr/lib/libglob-user.so.1.0 imports or reaches glob() and is not in "
                                 "import_sweep.allow [glob]; review it, name it in the -126765 records, then "
-                                "add the entry: /usr/lib/libglob-user.so.1.0 sha256=" + D])
+                                "add the entry: /usr/lib/libglob-user.so.1.0 sha256=" + D + " pkg=? ver=? syms=glob"])
 
 
 # #6299: every GLOB entry pins the SHA-256 of the files it accepts. Tests of reach (not of pins) pin every
 # reached file to D, through refusals() below; PinTest holds the pins to the real bytes.
 D = "ab" * 32
-PIN = " sha256=" + D
+# #6448: each pin carries its record; these tests' records are a file no package installs, with no symbols.
+REC = " pkg=- ver=- syms=-"
+PIN = " sha256=" + D + REC
 
 
 def E(glob, via=False, *pins):
-    return sweep.Entry(glob, via, () if via else tuple(sorted(pins or (D,))))
+    pins = () if via else tuple(sorted(pins or (D,)))
+    return sweep.Entry(glob, via, pins, tuple(sweep.Record(x, "-", "-", ()) for x in pins))
 
 
 def refusals(places, allow, globs=()):
@@ -491,7 +494,7 @@ class RefusalsTest(unittest.TestCase):
         errs = refusals(places, self.ALLOW)
         self.assertEqual(len(errs), 1)
         self.assertIn("/usr/lib/systemd/systemd imports or reaches a regex function", errs[0])
-        self.assertTrue(errs[0].endswith("entry: /usr/lib/systemd/systemd sha256=" + D))
+        self.assertTrue(errs[0].endswith("entry: /usr/lib/systemd/systemd sha256=" + D + " pkg=? ver=? syms=regexec"))
 
     def test_daemon_reaching_regex_through_a_library_fails(self):
         places = {"initrd:x": place({"/usr/lib/libsmartcols.so.1.1.0": ["regcomp"]},
@@ -558,11 +561,13 @@ class RefusalsTest(unittest.TestCase):
     def test_summary_exits_one_on_a_refusal(self):
         with tempfile.TemporaryDirectory() as d:
             j, a = pathlib.Path(d) / "p.json", pathlib.Path(d) / "allow"
-            a.write_text("# comment\n/usr/bin/bash{0}  # the shell\n/usr/lib/libsmartcols.so.1.*{0}\n"
-                         "/usr/bin/lsblk{0}\n[glob]\n/usr/sbin/ldconfig{0}\n"
-                         "[cipher]\n/usr/lib/libcs.so.12.* sha256={1} EVP_CIPHER_fetch=1  # why\n"
-                         "/usr/lib/libcrypto.so.3 *\n".format(PIN, "0f" * 32))
-            self.assertEqual(sweep.load_allow(a), [E(x) for x in self.ALLOW])
+            pin = " sha256=%s pkg=- ver=- syms=%%s" % D
+            a.write_text("# comment\n/usr/bin/bash{0}  # the shell\n/usr/lib/libsmartcols.so.1.*{1}\n"
+                         "/usr/bin/lsblk{2}\n[glob]\n/usr/sbin/ldconfig{3}\n"
+                         "[cipher]\n/usr/lib/libcs.so.12.* sha256={4} EVP_CIPHER_fetch=1  # why\n"
+                         "/usr/lib/libcrypto.so.3 *\n".format(pin % "regcomp", pin % "regexec", pin % "-",
+                                                              pin % "glob", "0f" * 32))
+            self.assertEqual([e[:3] for e in sweep.load_allow(a)], [E(x)[:3] for x in self.ALLOW])
             self.assertEqual(sweep.read_allow(a)[1], {"/usr/lib/libcs.so.12.*": {"sha256": "0f" * 32,
                                                                               "sites": {"EVP_CIPHER_fetch": 1}},
                                                       "/usr/lib/libcrypto.so.3": "*"})
@@ -575,15 +580,20 @@ class RefusalsTest(unittest.TestCase):
                                sha256=dict(self.OK["tree"]["sha256"], **dict.fromkeys(
                                    ["/usr/bin/bash", "/usr/lib/libsmartcols.so.1.1.0", "/usr/bin/lsblk",
                                     "/usr/sbin/ldconfig", "/usr/lib/systemd/systemd"], D)))}
-            for k in ("carries", "glibc", "sha256"):
+            # #6448: no package installs these stand-ins, as each entry records.
+            ok["tree"]["owner"] = {k: ["-", "-"] for k in ok["tree"]["sha256"]}
+            for k in ("carries", "glibc", "sha256", "owner"):
                 bad["tree"][k] = ok["tree"][k]
             body = a.read_text()
             # An unresolved NEEDED name fails --summary until a pinned [unresolved] entry accepts the file,
             # and a stale [wrapper] entry fails it (L3 and Lens on #6382: each refusal is wired into errs).
             gone = {"tree": dict(ok["tree"], unresolved={"/usr/bin/lsblk": ["libgone.so.1"]})}
             for places, extra, want in ((ok, "", 0), (bad, "", 1), (gone, "", 1),
-                                        (gone, "[unresolved]\n/usr/bin/lsblk%s  # never loaded\n" % PIN, 0),
-                                        (gone, "[unresolved]\n/usr/bin/lsblk sha256=%s\n" % ("cd" * 32), 1),
+                                        (gone, "[unresolved]\n/usr/bin/lsblk%s  # never loaded\n"
+                                         % (pin % "libgone.so.1"), 0),
+                                        (gone, "[unresolved]\n/usr/bin/lsblk sha256=%s%s\n" % ("cd" * 32, REC), 1),
+                                        # A stale record fails though the bytes are the ones pinned.
+                                        (gone, "[unresolved]\n/usr/bin/lsblk%s\n" % (pin % "libold.so.1"), 1),
                                         (ok, "[wrapper]\n/usr/lib/libgone.so.1%s\n" % PIN, 1)):
                 j.write_text(__import__("json").dumps(places))
                 a.write_text(body + extra)
@@ -723,7 +733,7 @@ class ReadErrorTest(unittest.TestCase):
             (pathlib.Path(d) / "initrd").mkdir()
             built = mock.patch.dict(sys.modules, offline_systemd=mock.Mock(
                 built_tree=lambda out, v: (d, None, None, lambda: None)))
-            with built, mock.patch.object(sweep, "run_tree", lambda root, usr: {}), \
+            with built, mock.patch.object(sweep, "run_tree", lambda root, usr, owner=None: {}), \
                     mock.patch.object(os, "scandir", fake), self.assertRaises(SystemExit) as cm:
                 sweep.run_build(d, "v")
         self.assertIn("cannot read %s" % os.path.join(d, "initrd"), str(cm.exception))
@@ -732,8 +742,8 @@ class ReadErrorTest(unittest.TestCase):
         """run_build over D's initrd directory alone, with its places' records as {name: path}."""
         built = mock.patch.dict(sys.modules, offline_systemd=mock.Mock(
             built_tree=lambda out, v: (d, None, None, lambda: None)))
-        with built, mock.patch.object(sweep, "run_tree", lambda root, usr: {}), \
-                mock.patch.object(sweep, "initrd_place", lambda p, scratch: os.fspath(p)):
+        with built, mock.patch.object(sweep, "run_tree", lambda root, usr, owner=None: {}), \
+                mock.patch.object(sweep, "initrd_place", lambda p, scratch, owner=None: os.fspath(p)):
             return sweep.run_build(d, "v")
 
     def test_a_stat_error_on_an_initrd_entry_fails_the_build(self):
@@ -827,7 +837,8 @@ class ViaEntryTest(unittest.TestCase):
             with self.subTest(syms=syms):
                 self.assertEqual(self.errs(places), [
                     "tree: /usr/bin/lsblk imports or reaches a regex function and is not in import_sweep.allow; "
-                    "review it, name it in the image -100290 record, then add the entry: /usr/bin/lsblk sha256=" + D])
+                    "review it, name it in the image -100290 record, then add the entry: /usr/bin/lsblk sha256=" + D
+                    + " pkg=? ver=? syms=" + syms[0]])
                 # Its own entry accepts it.
                 self.assertEqual(self.errs(places, self.ALLOW + [E("/usr/bin/lsblk")]), [])
 
@@ -868,7 +879,7 @@ class ViaEntryTest(unittest.TestCase):
         self.assertEqual(self.errs(places, allow + [E("/usr/bin/x")])[:1],
                          ["tree: /usr/lib/libedit.so.2.0.75 imports or reaches glob() and is not in "
                           "import_sweep.allow [glob]; review it, name it in the -126765 records, then add the "
-                          "entry: /usr/lib/libedit.so.2.0.75 sha256=" + D])
+                          "entry: /usr/lib/libedit.so.2.0.75 sha256=" + D + " pkg=? ver=? syms=glob"])
 
     def test_a_named_entry_still_accepts_a_dependent(self):
         self.assertEqual(self.errs(self.PLACES, self.ALLOW + [E("/usr/bin/lsblk")]), [])
@@ -910,13 +921,13 @@ class ViaEntryTest(unittest.TestCase):
                                ("/a sha256=00\n", ":1: /a sha256=00 is not an entry"),
                                ("/a%s b\n" % PIN, "is not an entry"),
                                ("sha256=%s\n" % D, "is not an entry"),
-                               ("[glob]\n/a b\n", ":2: /a b is not an entry; a [glob] entry is " + sweep.ENTRY_FORMAT),
+                               ("[glob]\n/a b\n", ":2: /a b is not an entry: b is not sha256=HEX; a [glob] entry is " + sweep.ENTRY_FORMAT),
                                # #6299: a GLOB entry that pins no file's bytes, or one twice, is refused.
                                ("/a\n", ":1: /a pins no SHA-256"),
                                ("[glob]\n/usr/bin/node  # its dlsym names\n", ":2: /usr/bin/node pins no SHA-256"),
-                               ("/a%s%s\n" % (PIN, PIN.upper().replace("SHA", "sha")), "gives a SHA-256 twice"),
+                               ("/a%s%s\n" % (PIN, PIN.replace(D, D.upper())), "gives a SHA-256 twice"),
                                ("/a%s\n/a%s\n" % (PIN, PIN), ":2: /a%s is given again" % PIN),
-                               ("/a%s\n/a sha256=%s\n" % (PIN, "cd" * 32), ":2: /a sha256=%s is given again" % ("cd" * 32)),
+                               ("/a%s\n/a sha256=%s%s\n" % (PIN, "cd" * 32, REC), ":2: /a sha256=%s%s is given again" % ("cd" * 32, REC)),
                                ("[glob]\nvia /a\nvia   /a\n", ":3: via   /a is given again")):
                 a.write_text(body)
                 with self.subTest(body=body), self.assertRaises(SystemExit) as cm:
@@ -1225,8 +1236,9 @@ class PinTest(unittest.TestCase):
         stale = [sweep.Entry("/usr/bin/node", False, ("cd" * 32,))]
         self.assertEqual(sweep.refusals(self.got, regex, stale), [
             "tree: /usr/bin/node reaches glob() and holds other bytes than import_sweep.allow [glob] /usr/bin/node "
-            "pins (a new version, or another file it matches); review it again, then pin them: /usr/bin/node "
-            "sha256=" + self.sha["/usr/bin/node"],
+            "pins (a new version, or another file it matches; recorded nothing, its package could not be read "
+            "from the build (the refusal stands); symbols +glob); review it again, then pin them: /usr/bin/node "
+            "sha256=" + self.sha["/usr/bin/node"] + " pkg=? ver=? syms=glob",
             "import_sweep.allow: [glob] /usr/bin/node pins sha256=%s, which no file it accepts holds; remove it"
             % ("cd" * 32)])
 
@@ -1262,8 +1274,10 @@ class PinTest(unittest.TestCase):
         errs = sweep.refusals(places, [self.entry("/usr/bin/rm*", "/usr/bin/rm", "/usr/bin/rm2")],
                               [self.entry("/usr/bin/node", "/usr/bin/node")])
         self.assertEqual(errs, ["initrd:x: /usr/bin/rm reaches a regex function and holds other bytes than "
-                                "import_sweep.allow /usr/bin/rm* pins (a new version, or another file it matches); "
-                                "review it again, then pin them: /usr/bin/rm* sha256=" + "cd" * 32])
+                                "import_sweep.allow /usr/bin/rm* pins (a new version, or another file it matches; "
+                                "recorded nothing, its package could not be read from the build (the refusal "
+                                "stands); symbols +rpmatch); review it again, then pin them: /usr/bin/rm* sha256="
+                                + "cd" * 32 + " pkg=? ver=? syms=rpmatch"])
 
     def test_a_via_entry_needs_no_pin(self):
         places = {"tree": dict(place({"/usr/lib/libs.so.1": ["regcomp"]}, {"/usr/bin/lsblk": ["/usr/lib/libs.so.1"]}),
@@ -1464,11 +1478,12 @@ class UnresolvedTest(unittest.TestCase):
         self.assertEqual(sweep.unresolved_refusals(places, []), [
             "t: /usr/bin/w needs libwraps.so.1, which no file or link there answers to, so what it would import "
             "through it is not read; find why it never loads there, then add the entry, with that reason, to "
-            "import_sweep.allow [unresolved]: /usr/bin/w sha256=" + sha])
+            "import_sweep.allow [unresolved]: /usr/bin/w sha256=" + sha + " pkg=? ver=? syms=libwraps.so.1"])
         self.assertEqual(sweep.unresolved_refusals(places, [sweep.Entry("/usr/bin/*", False, (sha,))]), [])
         self.assertEqual(sweep.unresolved_refusals(places, [sweep.Entry("/usr/bin/w", False, ("cd" * 32,))]), [
             "t: /usr/bin/w needs libwraps.so.1 and holds other bytes than import_sweep.allow [unresolved] /usr/bin/w "
-            "pins; review it again, then pin them: /usr/bin/w sha256=" + sha,
+            "pins (recorded nothing, its package could not be read from the build (the refusal stands); symbols "
+            "+libwraps.so.1); review it again, then pin them: /usr/bin/w sha256=" + sha + " pkg=? ver=? syms=libwraps.so.1",
             "import_sweep.allow: [unresolved] /usr/bin/w pins sha256=%s, which no file it matches holds; remove it"
             % ("cd" * 32)])
         self.assertEqual(sweep.unresolved_refusals(places, [sweep.Entry("/usr/bin/w", False, (sha,)),
@@ -1666,8 +1681,10 @@ class WrapperTest(unittest.TestCase):
         got, errs = sweep.unwrapped(self.got, stale)
         self.assertEqual(got["tree"]["lookups"]["/usr/bin/w"], ["glob"])
         self.assertIn("tree: /usr/lib/libwraps.so.1 holds other bytes than import_sweep.allow [wrapper] "
-                      "/usr/lib/libwraps.so.1 pins; review its dlsym calls again, then pin them: "
-                      "/usr/lib/libwraps.so.1 sha256=" + self.sha["/usr/lib/libwraps.so.1"], errs)
+                      "/usr/lib/libwraps.so.1 pins (recorded nothing, its package could not be read from the build "
+                      "(the refusal stands); symbols +dlsym); review its dlsym calls again, then pin them: "
+                      "/usr/lib/libwraps.so.1 sha256=" + self.sha["/usr/lib/libwraps.so.1"] + " pkg=? ver=? syms=dlsym",
+                      errs)
         self.assertIn("import_sweep.allow: [wrapper] /usr/lib/libwraps.so.1 pins sha256=%s, which no library "
                       "it matches holds; remove it" % ("cd" * 32), errs)
 
@@ -1849,11 +1866,13 @@ class QuicImportTest(unittest.TestCase):
         base = dict(imports={"/usr/bin/bash": ["regcomp"]}, via={}, scanned=3, cipher={"/l": {"EVP_CIPHER_fetch": 1}},
                     sha256={"/l": "0f" * 32, "/usr/bin/bash": D, "/usr/sbin/ldconfig": D},
                     carries={"/usr/sbin/ldconfig": ["glob"]},
-                    glibc={"/usr/lib/x86_64-linux-gnu/libc.so.6": ["glob", "regcomp", "vfwscanf"]})
+                    glibc={"/usr/lib/x86_64-linux-gnu/libc.so.6": ["glob", "regcomp", "vfwscanf"]},
+                    owner={"/usr/bin/bash": ["bash", "5.2.37-2"], "/usr/sbin/ldconfig": ["libc-bin", "2.41-12"]})
         with tempfile.TemporaryDirectory() as d:
             j, a = pathlib.Path(d) / "p.json", pathlib.Path(d) / "allow"
-            a.write_text("/usr/bin/bash%s\n[glob]\n/usr/sbin/ldconfig%s\n[cipher]\n/l *\n[quic]\n/usr/bin/openssl  # CLI\n"
-                         "[dgram]\n/usr/bin/openssl\n" % (PIN, PIN))
+            a.write_text("/usr/bin/bash sha256=%s pkg=bash ver=5.2.37-2 syms=regcomp\n[glob]\n/usr/sbin/ldconfig "
+                         "sha256=%s pkg=libc-bin ver=2.41-12 syms=glob\n[cipher]\n/l *\n[quic]\n/usr/bin/openssl  # CLI\n"
+                         "[dgram]\n/usr/bin/openssl\n" % (D, D))
             dgram = {"/usr/bin/openssl": ["BIO_new_dgram"]}
             for quic, dg, want in (({"/usr/bin/openssl": ["OSSL_QUIC_client_method"]}, dgram, 0),
                                    ({"/usr/bin/openssl": ["OSSL_QUIC_client_method"], "/usr/bin/d": ["SSL_new_listener"]},

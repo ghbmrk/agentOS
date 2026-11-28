@@ -14,6 +14,9 @@ initrd of the boot entry (OUT/initrd/, every cpio member).
   import_sweep.py --summary FILE [ALLOW]
                                   the JSON the two forms print, as lines and as ::notice annotations,
                                   held to ALLOW (default image/import_sweep.allow)
+  import_sweep.py --record FILE [ALLOW]
+                                  ALLOW with each pin's record (package, version, symbols) as FILE gives
+                                  it for the bytes already pinned: no digest is added or changed (#6448)
 
 It also reads, for the openssl records (#5341), which files hold the name of a by-name OpenSSL cipher
 selector or spell GCM-SIV or KRB5KDF, as selecting AES-GCM-SIV takes one of its names (see CIPHER_NAMES
@@ -39,7 +42,9 @@ loader does; resolve()); "packed", each file whose code is not in its bytes as s
 and why (packed()); "cipher", each file whose bytes hold a CIPHER_NAMES or SPELT name and its references
 to each (cipher_sites); "sha256", the SHA-256 of each file reaching a group or held under "cipher";
 "quic" and "dgram", each file importing a name of that OPENSSL_USES group, or importing glibc's dlsym
-or dlvsym and holding one's name at the end of a string, and those names (#6671); "expatw", each file whose
+or dlvsym and holding one's name at the end of a string, and those names (#6671); "owner", for a build (not
+--tree), the package and version that installed each file under "sha256", "-" for none (package_data; #6448);
+"expatw", each file whose
 NEEDED closure holds a name or a library (by file name or SONAME) of expat's wide build, or, unless it is that
 build, whose bytes hold its name anywhere, terminated or not (a dlopen argument: Rust and Go literals carry no
 NUL), and those names and libraries (#6545; a static copy of expat is not told apart from the UTF-8 build, nor
@@ -54,6 +59,9 @@ section (the -126765 records). A file is accepted by an entry naming it (a glob)
 entries naming every library it reaches them through, each of which has an entry naming it (#6297): a
 reviewed library's dependents need no entry each, and a new direct caller or new bytes still fail. An
 entry that accepts nothing, or a pin no accepted file holds, also fails, so each list stays its record's.
+Each pin also records what was reviewed: the file's package and version and the symbols the sweep reads in it
+(syms()); a pinned file whose record the build no longer gives fails (record_refusals; #6448), and a refused
+re-pin prints the old and new package version and the symbols added and removed beside the entry to paste.
 It also exits 1 when a file holding a selector name or a SPELT name matches no [cipher] entry of ALLOW or
 more than one, or holds other sites or other bytes (SHA-256) than the counted entry it matches, or an
 entry matches nothing; on any packed file; on any unresolved NEEDED name that no [unresolved] entry pinning
@@ -380,9 +388,10 @@ def unwrapped(places, wrappers):
                 used.update((e, sha) for e in ok)
                 used.update((e, None) for e in hit)
                 if hit and not ok:
-                    errs.append("%s: %s holds other bytes than import_sweep.allow [wrapper] %s pins; review its "
-                                "dlsym calls again, then pin them: %s sha256=%s" % (place, lib, hit[0].glob,
-                                                                                  hit[0].glob, sha))
+                    rec = found(places, "wrapper", [(place, lib)])[sha]
+                    errs.append("%s: %s holds other bytes than import_sweep.allow [wrapper] %s pins (%s); review its "
+                                "dlsym calls again, then pin them: %s" % (place, lib, hit[0].glob, drift(
+                                    hit[0].records, rec), entry_text(hit[0].glob, [rec])))
                 if not ok:
                     keep[lib] = funcs
             names = lookup_names(v["lookups"][p], keep)
@@ -571,13 +580,15 @@ def tree_files(top, prefix="/", skip=()):
     return files
 
 
-def initrd_place(path, scratch):
+def initrd_place(path, scratch, owner=None):
     """The record of the initrd at PATH: each regular ELF member written under SCRATCH and read, with its
     symbolic links, and each other name of a hard-linked ELF member as a link to it (Security on #6382)."""
     import finish_image
-    files, others, links, group = {}, 0, {}, {}
+    files, others, links, group, data = {}, 0, {}, {}, {}
     for i, (name, mode, body, link) in enumerate(finish_image.cpio_members(pathlib.Path(path).read_bytes())):
         shown = "/" + name.lstrip("/")
+        if shown in (INITRD_STATUS, INITRD_OWNERS) and stat.S_ISREG(mode):
+            data[shown] = body
         if link is not None:
             group.setdefault(link, []).append(shown)
         if stat.S_ISLNK(mode):
@@ -593,30 +604,113 @@ def initrd_place(path, scratch):
         links.update({n: to for n in names if to and n not in files})
     # "others": executable regular members that are not ELF files (problems()). A modules initrd's
     # modules, indexes and firmware are not executable.
-    return dict(sweep(files, links), others=others)
+    return dict(owned(sweep(files, links), files, owner and initrd_owner(data)), others=others)
 
 
-def run_tree(root, usr=None):
+def owned(place, files, owner):
+    """PLACE with "owner": OWNER(shown, readable path) of each file it pins (sha256), when OWNER is given."""
+    return dict(place, owner={p: list(owner(p, files[p])) for p in place["sha256"]}) if owner else place
+
+
+def run_tree(root, usr=None, owner=None):
     files = tree_files(root, skip=("usr",) if usr else ())
     links = tree_links(root, skip=("usr",) if usr else ())
     if usr:
         files.update(tree_files(usr, "/usr"))
         links.update(tree_links(usr, "/usr"))
-    return {"tree": sweep(files, links)}
+    return {"tree": owned(sweep(files, links), files, owner)}
+
+
+# The build's package data (#6448), each a file of OUT: dpkg's status of the main tree; {path: package} of
+# each path a main-tree package installed (mkosi.postinst, drop.py's owners(): dpkg's .list files, usrmerge
+# paths under /usr); and the guests' status with "MD5 PACKAGE" for each file image/guest-userland.sh copied
+# into a guest root (image/guest-shipped.sh).
+# Each initrd's own (drop.py, its postinst): its dpkg status and {path: package} of its regular files.
+INITRD_STATUS, INITRD_OWNERS = "/usr/share/agentos/initrd.dpkg-status", "/usr/share/agentos/initrd.dpkg-owners"
+STATUS, OWNERS, GUEST_STATUS, GUEST_MD5 = ("agentos.dpkg-status", "agentos.dpkg-owners", "guest/agentos.dpkg-status",
+                                           "guest/agentos.md5sums")
+
+
+LIB_ALIAS = re.compile(r"^/usr/(?=lib(64)?/)")
+
+
+def versions(text):
+    """{package: version} of the installed packages in dpkg status TEXT."""
+    out = {}
+    for para in text.split("\n\n"):
+        f = dict(l.split(": ", 1) for l in para.splitlines() if ": " in l and not l.startswith(" "))
+        if f.get("Status", "").endswith(" installed") and "Package" in f and "Version" in f:
+            out[f["Package"]] = f["Version"]
+    return out
+
+
+def owners_of(by_path, status, by_md5=None, guest=None):
+    """OWNER(shown, readable path): (packages, versions), "," joined, of the packages that installed the file,
+    by its path in BY_PATH ({path: {package}}) at STATUS's versions, or for a guest root's file (with BY_MD5),
+    by its MD5 at GUEST's; ("-", "-") for a file none did, and ("?", "?") for a package its status lacks."""
+    def owner(shown, real):
+        if by_md5 is not None and GUEST_ROOT.match(shown):
+            with open(real, "rb") as f:
+                pkgs, st = by_md5.get(hashlib.md5(f.read()).hexdigest(), set()), guest
+        else:
+            # drop.py spells /bin and /sbin under /usr; a package may still list /lib or /lib64 unmerged.
+            pkgs, st = by_path.get(shown) or by_path.get(LIB_ALIAS.sub("/", shown), set()), status
+        if not pkgs:
+            return ("-", "-")
+        if any(p not in st for p in pkgs):
+            return ("?", "?")
+        return (",".join(sorted(pkgs)), ",".join(st[p] for p in sorted(pkgs)))
+    return owner
+
+
+def unread(shown, real):
+    return ("?", "?")
+
+
+def owner_map(text):
+    """{path: {package}} of an owners file ({path: package}, drop.py's owners())."""
+    return {p: {k.split(":")[0]} for p, k in json.loads(text).items()}
+
+
+def package_data(out):
+    """OWNER(shown, readable path) for the main tree of the build in OUT (owners_of), or one that gives
+    ("?", "?") for every file when OUT's package data cannot be read, which no record holds (fail closed)."""
+    o = pathlib.Path(out)
+    try:
+        main, guest = versions((o / STATUS).read_text()), versions((o / GUEST_STATUS).read_text())
+        by_path = owner_map((o / OWNERS).read_text())
+        by_md5 = {}
+        for line in (o / GUEST_MD5).read_text().splitlines():
+            md5, pkg = line.split()
+            by_md5.setdefault(md5, set()).add(pkg.split(":")[0])
+    except (OSError, ValueError, AttributeError):
+        return unread
+    return owners_of(by_path, main, by_md5, guest)
+
+
+def initrd_owner(members):
+    """OWNER for an initrd's files from its own package data, MEMBERS ({shown: bytes}) holding drop.py's
+    INITRD_STATUS and INITRD_OWNERS (#6801): an initrd keeps packages the main tree drops. Without both, or
+    unreadable, every file gives ("?", "?") (fail closed)."""
+    try:
+        return owners_of(owner_map(members[INITRD_OWNERS].decode()), versions(members[INITRD_STATUS].decode()))
+    except (KeyError, ValueError, AttributeError, UnicodeDecodeError):
+        return unread
 
 
 def run_build(out, version):
     import offline_systemd
+    owner = package_data(out)
     root, usr, _cmdline, cleanup = offline_systemd.built_tree(out, version)
     try:
-        places = run_tree(root, usr)
+        places = run_tree(root, usr, owner)
     finally:
         cleanup()
     initrds = pathlib.Path(out) / "initrd"
     for p in sorted(pathlib.Path(d, n) for d, _, names in walk(initrds) for n in names
                     if is_file(os.path.join(d, n))):
         with tempfile.TemporaryDirectory() as scratch:
-            places["initrd:" + str(p.relative_to(initrds))] = initrd_place(p, scratch)
+            places["initrd:" + str(p.relative_to(initrds))] = initrd_place(p, scratch, owner)
     return places
 
 
@@ -674,11 +768,22 @@ def load_allow(path):
     return read_allow(path)[0]
 
 
-# A [regex] or [glob] entry: GLOB and the SHA-256 of each file reviewed under it, which accepts the files
-# it names whose bytes are one of those (#6299: as [cipher] entries are keyed, so a new version, or another
-# file the glob matches, is read before it is accepted), or "via GLOB", which accepts a file reaching the
-# group only through libraries it names (refusals), whose own GLOB entries pin them.
-Entry = collections.namedtuple("Entry", "glob via sha256", defaults=(False, ()))
+# A [regex], [glob], [wrapper] or [unresolved] entry: GLOB and, for each file reviewed under it, its SHA-256
+# and the record of what was reviewed (#6448): its Debian package and version and the symbols the sweep reads
+# in it for that section (syms()). The digests accept: a file GLOB names is accepted only when its bytes are
+# one of them (#6299: as [cipher] entries are keyed, so a new version, or another file the glob matches, is
+# read before it is accepted). The records hold: record_refusals() fails each one the image no longer gives,
+# so the allow file's diff shows what moved. Or "via GLOB", which accepts a file reaching the group only
+# through libraries it names (refusals), whose own GLOB entries pin them.
+Entry = collections.namedtuple("Entry", "glob via sha256 records", defaults=(False, (), ()))
+# One pin's record: SHA-256, package and version ("-" for a file no package installs; several packages are
+# joined by ",", their versions in the same order) and the sorted symbols, () for none.
+Record = collections.namedtuple("Record", "sha256 pkg ver syms")
+PKG = re.compile(r"^pkg=(-|[a-z0-9][a-z0-9+.-]*(?:,[a-z0-9][a-z0-9+.-]*)*)$")
+VER = re.compile(r"^ver=(-|[A-Za-z0-9.+~:-]+(?:,[A-Za-z0-9.+~:-]+)*)$")
+SYMS = re.compile(r"^syms=(-|[A-Za-z_][\w.+-]*(?:,[A-Za-z_][\w.+-]*)*)$")
+# The sections whose entries are Entry lines, by read_allow's name for each (None: the regex entries).
+PINNED = {None: "regex", "glob": "glob", "wrapper": "wrapper", "unresolved": "unresolved"}
 
 
 def shown(e):
@@ -690,22 +795,48 @@ def entry(e):
     return e if isinstance(e, Entry) else Entry(e)
 
 
+def record_text(pkg, ver, syms):
+    return "pkg=%s ver=%s syms=%s" % (pkg, ver, ",".join(syms) or "-")
+
+
+def entry_text(glob, records):
+    """The allow line of GLOB pinning RECORDS (Record, or (sha256, pkg, ver, syms)), in digest order."""
+    return " ".join([glob] + ["sha256=%s %s" % (r[0], record_text(*r[1:])) for r in sorted(records)])
+
+
 def parse_entry(line):
-    """The Entry a [regex] or [glob] line gives, or why it is none (ENTRY_FORMAT)."""
+    """The Entry a [regex], [glob], [wrapper] or [unresolved] line gives, or why it is none (ENTRY_FORMAT)."""
     t = line.split()
     if t[0] == "via":
         return Entry(t[1], True) if len(t) == 2 else "%s is not an entry" % line
-    pins = [w[len("sha256="):].lower() for w in t[1:] if DIGEST.match(w)]
-    if t[0].startswith("sha256=") or len(pins) < len(t) - 1:
+    if t[0].startswith("sha256="):
         return "%s is not an entry" % line
-    if not pins:
+    if len(t) == 1:
         return "%s pins no SHA-256" % line
+    records = []
+    for i in range(1, len(t), 4):
+        group = t[i:i + 4]
+        if not DIGEST.match(group[0]):
+            return "%s is not an entry: %s is not sha256=HEX" % (line, group[0])
+        ms = [rx.match(w) for rx, w in zip((PKG, VER, SYMS), group[1:])]
+        if len(group) < 4 or not all(ms):
+            return "%s: %s is not followed by pkg=NAME ver=VERSION syms=NAME,..." % (line, group[0])
+        pkg, ver, syms = (m.group(1) for m in ms)
+        names = () if syms == "-" else tuple(syms.split(","))
+        if pkg.count(",") != ver.count(",") or (pkg == "-") != (ver == "-"):
+            return "%s: %s gives %s and %s, not one version for each package" % (line, group[0], group[1], group[2])
+        if list(names) != sorted(set(names)):
+            return "%s: %s lists its syms out of order or twice" % (line, group[0])
+        records.append(Record(group[0][len("sha256="):].lower(), pkg, ver, names))
+    pins = [r.sha256 for r in records]
     if len(set(pins)) < len(pins):
         return "%s gives a SHA-256 twice" % line
-    return Entry(t[0], False, tuple(sorted(pins)))
+    records.sort()
+    return Entry(t[0], False, tuple(pins and sorted(pins)), tuple(records))
 
 
-ENTRY_FORMAT = "GLOB sha256=HEX ... (the SHA-256 of each file reviewed) or via GLOB"
+ENTRY_FORMAT = ("GLOB sha256=HEX pkg=NAME ver=VERSION syms=NAME,... ... (for each file reviewed: its SHA-256, "
+                "its package and version, - for none, and the symbols read in it, - for none) or via GLOB")
 
 
 # A [cipher] entry's tokens: the SHA-256 of the file reviewed (hex in either case, kept lowercased), and
@@ -800,15 +931,17 @@ def unresolved_refusals(places, entries):
             ok = [e for e in hit if sha in e.sha256]
             used.update((e, None) for e in hit)
             used.update((e, sha) for e in ok)
+            rec = found(places, "unresolved", [(place, p)])[sha] if not ok else None
             if not hit:
                 errs.append("%s: %s needs %s, which no file or link there answers to, so what it would import "
                             "through it is not read; find why it never loads there, then add the entry, with that "
-                            "reason, to import_sweep.allow [unresolved]: %s sha256=%s"
-                            % (place, p, " ".join(names), p, sha))
+                            "reason, to import_sweep.allow [unresolved]: %s"
+                            % (place, p, " ".join(names), entry_text(p, [rec])))
             elif not ok:
-                errs.append("%s: %s needs %s and holds other bytes than import_sweep.allow [unresolved] %s pins; "
-                            "review it again, then pin them: %s sha256=%s"
-                            % (place, p, " ".join(names), hit[0].glob, hit[0].glob, sha))
+                errs.append("%s: %s needs %s and holds other bytes than import_sweep.allow [unresolved] %s pins (%s); "
+                            "review it again, then pin them: %s"
+                            % (place, p, " ".join(names), hit[0].glob, drift(hit[0].records, rec),
+                               entry_text(hit[0].glob, [rec])))
     errs += ["import_sweep.allow: [unresolved] %s matches no file with an unresolved NEEDED name; remove it" % e.glob
              for e in entries if (e, None) not in used]
     errs += ["import_sweep.allow: [unresolved] %s pins sha256=%s, which no file it matches holds; remove it"
@@ -915,16 +1048,17 @@ def refusals(places, allow, globs=()):
                 continue
             used.update((g, e) for v in vias for e in v)
         what, section, record = LISTED[g]
-        pins = lambda d: " ".join("sha256=" + x for x in sorted(set(d.values())))
         if refused:
             errs.append("%s: %s imports or reaches %s and is not in import_sweep.allow%s; review it, name it in "
-                        "%s, then add the entry: %s %s" % (" ".join(refused), p, what, section, record, p,
-                                                           pins(refused)))
+                        "%s, then add the entry: %s" % (" ".join(refused), p, what, section, record, entry_text(
+                            p, found(places, g, [(k, p) for k in refused]).values())))
         if other:
+            new = found(places, g, [(k, p) for k in other]).values()
             errs.append("%s: %s reaches %s and holds other bytes than import_sweep.allow%s %s pins (a new version, "
-                        "or another file it matches); review it again, then pin them: %s %s" % (
-                            " ".join(other), p, what, section, " ".join(e.glob for e in named), named[0].glob,
-                            pins(other)))
+                        "or another file it matches; %s); review it again, then pin them: %s" % (
+                            " ".join(other), p, what, section, " ".join(e.glob for e in named), "; ".join(
+                                drift([r for e in named for r in e.records], n) for n in new),
+                            entry_text(named[0].glob, new)))
     errs += ["import_sweep.allow:%s %s %s; remove it" % (
         LISTED[g][1], shown(e), "accepts no file that reaches %s only through a library it names that has an entry "
         "naming it" % LISTED[g][0] if e.via else "matches no file that reaches %s" % LISTED[g][0])
@@ -933,6 +1067,115 @@ def refusals(places, allow, globs=()):
              % (LISTED[g][1], e.glob, d) for g in LISTED for e in entries[g] if (g, e) in used
              for d in e.sha256 if (g, e, d) not in pinned]
     return errs
+
+
+def syms(section, v, p):
+    """The symbols the sweep reads in file P of place V for SECTION (PINNED), which its entries record (#6448):
+    for regex and glob, the group's functions it imports, looks up or carries itself (own()); for a wrapper,
+    the LOOKUP_FUNCS it imports; for unresolved, its NEEDED names nothing in its place answers to."""
+    if section in GROUPS:
+        return tuple(sorted(x for x in own(v, p) if group_of(x) == section))
+    if section == "wrapper":
+        return tuple(sorted({f for src in v.get("through", {}).values() for f in src.get(p, [])}))
+    return tuple(sorted(v.get("unresolved", {}).get(p, [])))
+
+
+def owner(v, p):
+    """(package, version) of file P of place V, as run_build read them (package_data); ("?", "?") when they
+    were not read, which no record can hold."""
+    o = v.get("owner", {}).get(p)
+    return tuple(o) if o else ("?", "?")
+
+
+def found(places, section, at):
+    """The Record each sha256 of the files AT ([(place, path)]) gives for SECTION: {sha: Record}, the
+    symbols united over its files, and "?" where its files give no one package and version."""
+    out = {}
+    for k, p in at:
+        sha = places[k].get("sha256", {}).get(p) or "MISSING"
+        out.setdefault(sha, (set(), set()))
+        out[sha][0].add(owner(places[k], p))
+        out[sha][1].update(syms(section, places[k], p))
+    return {sha: Record(sha, *(next(iter(o)) if len(o) == 1 else ("?", "?")), tuple(sorted(n)))
+            for sha, (o, n) in out.items()}
+
+
+def drift(old, new):
+    """What moved from the records OLD (an entry's) to the Record NEW, for a refusal (#6448): the package and
+    version on each side, and the symbols added and removed against the record of the same package or, failing
+    that, every record's. Says so when the build's package data was not read; the refusal stands."""
+    base = [r for r in old if r.pkg == new.pkg] or list(old)
+    was = " or ".join(sorted({"%s %s" % (r.pkg, r.ver) for r in base})) or "nothing"
+    before = {x for r in base for x in r.syms}
+    moved = ["+" + x for x in sorted(set(new.syms) - before)] + ["-" + x for x in sorted(before - set(new.syms))]
+    now = ("its package could not be read from the build (the refusal stands)" if new.pkg == "?"
+           else "now %s %s" % (new.pkg, new.ver))
+    return "recorded %s, %s; symbols %s" % (was, now, " ".join(moved) or "unchanged (%s)" % (
+        ",".join(new.syms) or "none"))
+
+
+def accepted(places, sections):
+    """{(section, Entry, sha256): [(place, path)]}: each file a GLOB entry of SECTIONS ({PINNED name: entries})
+    names and pins by its bytes, among the files that section reads (reach for regex and glob, lookup sources
+    for wrapper, unresolved NEEDED names for unresolved)."""
+    out, r = {}, reach(places)
+    for s, entries in sections.items():
+        for place, v in places.items():
+            if s in GROUPS:
+                cands = {p for (g, p), at in r.items() if g == s and place in at}
+            elif s == "wrapper":
+                cands = {lib for src in v.get("through", {}).values() for lib in src}
+            else:
+                cands = set(v.get("unresolved", {}))
+            for p in sorted(cands):
+                sha = v.get("sha256", {}).get(p)
+                for e in entries:
+                    if not e.via and sha in e.sha256 and fnmatch.fnmatchcase(p, e.glob):
+                        out.setdefault((s, e, sha), []).append((place, p))
+    return out
+
+
+def record_refusals(places, sections):
+    """Each pin whose bytes the image holds but whose record it no longer gives (#6448): another package or
+    version, or other symbols, or a package not read. The digest still decides what is accepted; this keeps
+    the record a reviewer reads beside it true, so an allow diff shows what moved."""
+    errs = []
+    for (s, e, sha), at in sorted(accepted(places, sections).items(), key=lambda kv: (kv[0][0], kv[0][1].glob,
+                                                                                        kv[0][2])):
+        rec = {r.sha256: r for r in e.records}.get(sha)
+        new = found(places, s, at)[sha]
+        if rec != new:
+            errs.append("%s: %s holds the bytes import_sweep.allow%s %s pins (sha256=%s), but its record is stale: "
+                        "%s; review what moved, then record it (import_sweep.py --record): %s" % (
+                            " ".join(sorted({k for k, _ in at})), " ".join(sorted({p for _, p in at})),
+                            "" if s == "regex" else " [%s]" % s, e.glob, sha, drift([rec] if rec else [], new),
+                            entry_text(e.glob, [r for r in e.records if r.sha256 != sha] + [new])))
+    return errs
+
+
+def record(text, places, sections):
+    """TEXT, an allow file's lines, with each pinned entry's records as PLACES give them for the bytes it already
+    pins (#6448): no digest is added, changed or removed, so nothing it prints accepts a file the allow file
+    did not. Exits when a record cannot be read (a package not read)."""
+    new = {(s, e.glob, sha): rec for (s, e, sha), at in accepted(places, sections).items()
+           for rec in [found(places, s, at)[sha]]}
+    bad = sorted("%s %s sha256=%s" % (s, g, sha) for (s, g, sha), r in new.items() if r.pkg == "?")
+    if bad:
+        sys.exit("import sweep: no package and version read for %s" % "; ".join(bad))
+    out, section = [], None
+    for line in text.splitlines():
+        body, hash_, comment = line.partition("#")
+        if body.strip().startswith("["):
+            section = body.strip()[1:-1]
+        elif body.strip() and section in PINNED:
+            e = parse_entry(body.strip())
+            if isinstance(e, Entry) and not e.via:
+                recs = [new.get((PINNED[section], e.glob, r.sha256), r) for r in e.records]
+                lead = body[:len(body) - len(body.lstrip())]
+                gap = body[len(body.rstrip()):] if hash_ else ""
+                line = lead + entry_text(e.glob, recs) + gap + hash_ + comment
+        out.append(line)
+    return "\n".join(out) + "\n"
 
 
 def summary(places):
@@ -992,9 +1235,17 @@ def main(argv):
         regex, cipher, globs, wrappers, unres, uses = read_allow(argv[2] if len(argv) == 3 else ALLOW)
         places, wrapped = unwrapped(places, wrappers)
         errs = (problems(places) + unresolved_refusals(places, unres) + wrapped + refusals(places, regex, globs)
+                + record_refusals(places, {"regex": regex, "glob": globs, "wrapper": wrappers, "unresolved": unres})
                 + cipher_refusals(places, cipher) + openssl_refusals(places, uses))
         for e in errs[:10]:
             print("::error title=import sweep::" + e.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
+    elif argv[:1] == ["--record"] and len(argv) in (2, 3):
+        allow = argv[2] if len(argv) == 3 else ALLOW
+        regex, _cipher, globs, wrappers, unres, _uses = read_allow(allow)
+        places, _ = unwrapped(json.loads(pathlib.Path(argv[1]).read_text()), wrappers)
+        sys.stdout.write(record(pathlib.Path(allow).read_text(), places,
+                                {"regex": regex, "glob": globs, "wrapper": wrappers, "unresolved": unres}))
+        errs = []
     elif len(argv) == 2 and argv[0] == "--tree":
         places = run_tree(argv[1])
         json.dump(places, sys.stdout, indent=1, sort_keys=True)
