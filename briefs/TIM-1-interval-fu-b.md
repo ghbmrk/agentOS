@@ -5,8 +5,8 @@ Board section: Defects and later findings on surviving packages. Work item #5279
 **Problem:** SPEC TIM-1 (#5215) removed the restricted mode: time is an interval, widenings wait for its start, narrowings fire at its end, and STATUS lists each move a wide interval delays with its lift (LOG-8). `broker/cmd/agentosd/questions.go` still builds STATUS's time check line from `Status.Line` ("Time check: restricted since …") and, with no guard open, says "time-sensitive checks restricted". STATUS so names a mode SPEC no longer has.
 
 **Requirements:** TIM-1, LOG-8.
-1. `clockLine` returns `Status.IntervalLine` for every state but agreement, which stays "" (UX-98-1).
-2. With no guard open, the line names no restricted mode: it says the clock is unconfirmed and agents' questions wait for it (they open only after the guard, #1246).
+1. `clockLine` gives an interval line for every state but agreement, which stays "" (UX-98-1): a disagreement names what waits and its lift (LOG-8). Each line reaches STATUS whole: at most 100 characters, in `control`'s `plainLine` alphabet (#6754 UX 1).
+2. With no guard open, the line names no restricted mode: it says updates wait and agents cannot ask questions (#1246).
 3. agentosd's tests no longer read `Status.Restricted`, so #5751 can delete it.
 
 **Not built here, each its own release row:**

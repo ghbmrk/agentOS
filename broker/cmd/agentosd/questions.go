@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -56,9 +57,9 @@ func (q *questions) Answer(ctx context.Context, msg string) (string, bool) {
 }
 
 // clockNotRunning is STATUS's time check line while no guard is open
-// (#1246): there is then no interval to report, and agents' questions,
-// whose deadlines run on the guard, are not offered (TIM-1, #5279).
-const clockNotRunning = "Time check: not running, so my clock is unconfirmed and agents' questions wait for it."
+// (#1246): there is then no interval to report, update roots read as
+// expired (guardClock) and the question tools refuse asks (TIM-1, #5279).
+const clockNotRunning = "Time check: not running; updates wait and agents cannot ask you questions until it starts."
 
 // Clock is STATUS's time check line (a control.Handler note): the guard's
 // last check in the box's zone, so a wide interval is visible while the
@@ -71,14 +72,56 @@ func (q *questions) Clock() string {
 	return clockLine(g.Status(), time.Local)
 }
 
-// clockLine is the interval line for s (TIM-1, LOG-8: the moves a wide
-// interval delays and its lift), or "" when the sources agree: STATUS
-// shows only exceptions, degraded checks included (UX-98-1).
+// clockLine is STATUS's line for s, or "" when the sources agree: STATUS
+// shows only exceptions, degraded checks included (UX-98-1). A
+// disagreement names the moves its interval delays and its lift (TIM-1,
+// LOG-8). control.Handler keeps only a note's first 100 characters of
+// letters, digits, spaces and . , ; : ( ) -, so every line is written to
+// that size and alphabet and reaches the owner whole (#6754 UX 1).
 func clockLine(s clock.Status, loc *time.Location) string {
-	if s.State == clock.Agreed {
+	at := s.Since.In(loc).Format("15:04")
+	switch {
+	case s.State == clock.Agreed:
 		return ""
+	case s.State == clock.Disagree && s.Skew == 0 && s.Authenticated:
+		return "Time check: saved check unreadable at " + at + "; authenticated network time stands. Nothing to do."
+	case s.State == clock.Disagree && s.Skew == 0:
+		return "Time check: saved check unreadable since " + at + "; holds and timeouts wait until time is confirmed."
+	case s.State == clock.Disagree && s.Authenticated:
+		return "Time check: phone time off by " + skewWords(s.Skew) + " since " + at + "; authenticated network time stands."
+	case s.State == clock.Disagree:
+		return "Time check: phone time off by " + skewWords(s.Skew) + " since " + at + "; holds and timeouts wait until clocks agree."
+	case s.State == clock.Held:
+		return "Time check: clock jumped by " + skewWords(s.Skew) + " at " + at + ", unconfirmed; my own count of time stands."
+	case !s.Verified:
+		return "Time check: not confirmed since start at " + s.Start.In(loc).Format("15:04") + " (waiting for network or phone-network time)."
+	case s.State == clock.NetworkOnly:
+		return "Time check: network only (no phone-network time)."
+	case s.State == clock.CarrierOnly:
+		return "Time check: phone network only (offline)."
 	}
-	return s.IntervalLine(loc)
+	return "Time check: not checked."
+}
+
+// skewWords is d's size in at most 12 characters, rounded down: minutes
+// under an hour, hours under two days, days up to 99, then "over 99 days".
+func skewWords(d time.Duration) string {
+	if d < 0 {
+		d = -d // math.MinInt64 stays negative and reads as over 99 days
+	}
+	n, unit := int64(d/time.Minute), "minute"
+	switch {
+	case d < 0 || d >= 100*24*time.Hour:
+		return "over 99 days"
+	case d >= 48*time.Hour:
+		n, unit = int64(d/(24*time.Hour)), "day"
+	case d >= time.Hour:
+		n, unit = int64(d/time.Hour), "hour"
+	}
+	if n != 1 {
+		unit += "s"
+	}
+	return strconv.FormatInt(n, 10) + " " + unit
 }
 
 // List and Call serve the question tools on each guest socket.
