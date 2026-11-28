@@ -24,12 +24,12 @@ on:
 permissions:
   contents: read
 # CI-cancel-superseded (#5345, #5348, #5361): a PR's first-attempt run cancels that PR's older first
-# attempts, so a superseded head never holds the queue. A rerun (attempt 2 or later) and every push,
-# merge-queue, schedule or dispatch run is a group of its own (run id), so it never cancels or
-# replaces the current head's run.
+# attempts, so a superseded head never holds the queue. A first-attempt push to main cancels main's
+# older one (CI-main-supersede, #6394), so main's tip always finishes. A rerun (attempt 2 or later) and
+# every other run is a group of its own (run id), so it never cancels or replaces the current head's run.
 concurrency:
-  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}
+  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && 'head' || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ (startsWith(github.event_name, 'pull_request') || github.event_name == 'push' && github.ref == 'refs/heads/main') && github.run_attempt == 1 }}
 env:
   GOTOOLCHAIN: local
   GOWORK: "off"
@@ -55,11 +55,15 @@ jobs:
           pins=broker/cmd/agentos-vision/models.pins
           d="$RUNNER_TEMP/vision-models"
           mkdir -p "$d" "$RUNNER_TEMP/ort"
-          whl=onnxruntime-1.29.0-cp312-cp312-manylinux_2_28_x86_64.whl
-          python3 -I tools/pins.py fetch "$pins" $whl "$RUNNER_TEMP/$whl"
-          python3 -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extract("onnxruntime/capi/libonnxruntime.so.1.29.0", sys.argv[2])' "$RUNNER_TEMP/$whl" "$RUNNER_TEMP/ort"
+          # The library's pin names its package and the member inside it (VIS-A27): pins.py checks
+          # the package against its own pin, then the library against the reviewed one; either
+          # off its pin stops the run, with no other source tried.
           lib=libonnxruntime.so.1.29.0
-          cp "$RUNNER_TEMP/ort/onnxruntime/capi/$lib" "$d/$lib"
+          src=$(awk -v f="$lib" '$1 !~ /^#/ && $2 == f {print $3}' "$pins"); pkg=${src%%:*}; member=${src#*:}
+          [ -n "$pkg" ] && [ "$member" != "$src" ] || { echo "::error file=$pins::$lib names no package:member"; exit 1; }
+          python3 -I tools/pins.py fetch "$pins" "$pkg" "$RUNNER_TEMP/$pkg"
+          python3 -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extract(sys.argv[2], sys.argv[3])' "$RUNNER_TEMP/$pkg" "$member" "$RUNNER_TEMP/ort"
+          cp "$RUNNER_TEMP/ort/$member" "$d/$lib"
           python3 -I tools/pins.py verify "$pins" $lib "$d/$lib"
           for m in yolox_tiny.onnx face_detection_yunet_2023mar.onnx face_recognition_sface_2021dec.onnx \
               yolo-v9-t-416-license-plates-end2end.onnx cct_xs_v2_global.onnx yamnet.onnx; do
@@ -107,8 +111,8 @@ jobs:
           # pyarrow, held to its wheels' hashes and no dependency, only reads the shard; the
           # files are named by row number, so no value in the shard can name a path.
           python3 -m venv "$RUNNER_TEMP/pa"
-          { printf 'pyarrow==%s' "$(pin pyarrow)"; awk '$1 == "pyarrow_wheel" {printf " --hash=sha256:%s", $2}' "$pins"; echo; } > "$RUNNER_TEMP/pa.txt"
-          "$RUNNER_TEMP/pa/bin/pip" install --quiet --no-deps --only-binary :all: --require-hashes -r "$RUNNER_TEMP/pa.txt"
+          { printf 'pyarrow==%s' "$(pin pyarrow)"; awk '$1 == "pyarrow_wheel" {printf " --hash=sha256:%s", $2}' "$pins"; echo; } > "$RUNNER_TEMP/requirements-pa.txt"
+          (cd "$RUNNER_TEMP" && pa/bin/pip install --quiet --no-deps --only-binary :all: --require-hashes -r requirements-pa.txt)
           "$RUNNER_TEMP/pa/bin/python" -I - "$RUNNER_TEMP/plates.parquet" "$d" <<'EOF'
           import sys, pyarrow.parquet as pq
           src, d = sys.argv[1], sys.argv[2]

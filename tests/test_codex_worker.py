@@ -40,11 +40,16 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CODEX = ROOT / "guest/codex"
 CONFIG = CODEX / "managed_config.toml"
+CATALOG = CODEX / "model_catalog.json"
+PLAN_GO = ROOT / "broker/clerk/plan/plan.go"
 REQUIREMENTS = CODEX / "requirements.toml"
 TOOLSH = CODEX / "agentos-toolsh"
 LAUNCH = CODEX / "launch.json"
 STUB_CLI = ROOT / "tests/codex_worker/stub_cli.py"
 STUB_TOOL = ROOT / "tests/codex_worker/stub_tool.py"
+# Where the stub worker mounts the stub CLI: a system path, so its /tmp tmpfs cannot hide a
+# checkout kept under /tmp. The name keeps "stub_cli.py", which the stub tool looks for.
+STUB_CLI_IN = "/var/lib/agentos-test/stub_cli.py"
 # bwrap's launcher opens /proc/<pid>/ns for the child it clones, by the child's pid in the
 # launcher's own namespace. Under a /proc from an outer namespace that number names whatever has
 # it there, and where nothing does, bwrap dies before its tool starts (#1616). Under the host's
@@ -78,6 +83,11 @@ WORK = "/var/lib/agentos-work"
 # guest/codex/ASSUMPTIONS.md C19): the default of the pinned CLI's bundled catalog, pinned so a
 # catalog refresh from the provider cannot change it between the qualification run and G1.
 MODEL = "gpt-6.1-sol"
+# The tools a code-mode turn of the pinned CLI declares under this managed config, as namespace.name:
+# the plan clerk's Codex declaration (broker/clerk/plan/plan.go) must list exactly these, and the
+# opt-in CliSandboxTest checks a real turn against them. No collaboration namespace (B2-21-C22).
+CLI_TOOLS = ["functions.exec", "functions.wait", "functions.request_user_input",
+             "functions.request_user_input_async", "clock.sleep"]
 MODEL_LINE = f'model = "{MODEL}"\n'
 
 # Settings that must hold exactly. The key names were measured against Codex CLI 0.162.1
@@ -89,6 +99,9 @@ REQUIRED = {
     # login calls chatgpt.com directly (#2085).
     ("chatgpt_base_url",): FORWARDER + "/backend-api/",
     ("model",): MODEL,
+    # The model metadata is the image's own pinned catalog, never the one the provider serves at
+    # each start: its entry turns multi-agent v2 off, which no [features] key does (#2111, B2-21-C22).
+    ("model_catalog_json",): "/etc/codex/model_catalog.json",
     ("model_providers", "agentos", "base_url"): FORWARDER + "/backend-api/codex",
     ("model_providers", "agentos", "wire_api"): "responses",
     ("model_providers", "agentos", "requires_openai_auth"): True,
@@ -142,6 +155,7 @@ REQUIRED.update({("features", f): False for f in PROVIDER_READ_OFF})
 HOSTED = ("web_search", "file_search", "code_interpreter", "image_generation", "image_gen",
           "computer_use", "hosted", "remote_mcp")
 OFF = (False, "disabled", "off", "none")
+PROVIDER_KEYS = {"name"} | {p[2] for p in REQUIRED if p[:2] == ("model_providers", "agentos")}
 
 
 def hosted_tool_problems(cfg):
@@ -169,6 +183,17 @@ def hosted_tool_problems(cfg):
     for key in ("default_permissions", "permissions"):
         if key in cfg:
             problems.append(f"{key}: a managed permission profile is extended by lower layers")
+    # Only the agentos provider entry, and in it only the keys REQUIRED pins plus its name: a
+    # header, an env_key or another provider is a route or credential the forwarder did not
+    # declare, and a profile is a second set of settings a -p flag selects.
+    if "profiles" in cfg:
+        problems.append("profiles: no profiles in managed config")
+    providers = cfg.get("model_providers", {})
+    if set(providers) != {"agentos"}:
+        problems.append(f"model_providers has {sorted(providers)}, want only agentos")
+    extra = set(providers.get("agentos", {})) - PROVIDER_KEYS
+    if extra:
+        problems.append(f"model_providers.agentos has unpinned keys {sorted(extra)}")
     return problems
 
 
@@ -216,6 +241,28 @@ class ManagedConfigTest(unittest.TestCase):
         cfg = tomllib.loads(CONFIG.read_text())
         self.assertEqual(hosted_tool_problems(cfg), [])
 
+    # REQ: CRED-5, CAP-11
+    def test_pinned_catalog_holds_the_pinned_model_with_multi_agent_off(self):
+        """#2111: multi-agent v2 (the collaboration tools) comes from the model's catalog entry,
+        not from features.multi_agent, so the image pins a catalog whose one entry, the pinned
+        model, has no multi-agent version (B2-21-C22)."""
+        models = json.loads(CATALOG.read_text())["models"]
+        self.assertEqual([m["slug"] for m in models], [MODEL])
+        self.assertIn("multi_agent_version", models[0], "the key must be present and null")
+        self.assertIsNone(models[0]["multi_agent_version"])
+        self.assertTrue(models[0].get("base_instructions"), "the entry must be the CLI's whole one")
+
+    # REQ: CAP-11
+    def test_clerk_declares_the_tools_the_pinned_cli_sends(self):
+        """The plan clerk refuses a model call declaring any other tool, so its Codex list and
+        CLI_TOOLS (what a real turn sends, CliSandboxTest) must agree."""
+        src = PLAN_GO.read_text()
+        block = re.search(r'func Codex\(.*?Tools: \[\]Tool\{(.*?)\n\t\t\t\},', src, re.S)
+        self.assertIsNotNone(block, "Codex().Body.Tools not found in plan.go")
+        got = [f"{ns}.{name}" for ns, name in re.findall(r'\{"([a-z_]+)", "([a-z_]+)", "[a-z]+"\}',
+                                                         block.group(1))]
+        self.assertEqual(got, CLI_TOOLS)
+
     # REQ: CRED-5, A14
     def test_checker_flags_each_bad_config(self):
         good = tomllib.loads(CONFIG.read_text())
@@ -250,6 +297,14 @@ class ManagedConfigTest(unittest.TestCase):
             "base_url off the forwarder": put(("model_providers", "agentos", "base_url"),
                                               "https://chatgpt.com/backend-api/codex"),
             "other provider": put(("model_provider",), "openai"),
+            "second provider entry": put(("model_providers", "openai", "base_url"),
+                                         "https://api.openai.com/v1"),
+            "provider headers": put(("model_providers", "agentos", "http_headers", "X-A"), "b"),
+            "provider env_key": put(("model_providers", "agentos", "env_key"), "OPENAI_API_KEY"),
+            "a profile": put(("profiles", "x", "model_provider"), "openai"),
+            "plan traffic off the forwarder": put(("chatgpt_base_url",),
+                                                  "https://chatgpt.com/backend-api/"),
+            "plan traffic unpinned": drop(("chatgpt_base_url",)),
             "model unpinned (catalog default)": drop(("model",)),
             "other model": put(("model",), "gpt-5.5"),
             "auto-update check on": put(("check_for_update_on_startup",), True),
@@ -492,6 +547,31 @@ class ToolshRefusalTest(unittest.TestCase):
                 self.assertEqual(r.returncode, 126, r.stderr)
                 self.assertIn("refusing", r.stderr)
 
+    # REQ: A14
+    def test_refuses_with_a_reason_when_bwrap_is_missing(self):
+        # A copy whose workspace is a temporary directory and whose bwrap path names nothing:
+        # the wrapper says why, rather than every tool call ending in exec's bare 127.
+        text = TOOLSH.read_text()
+        with tempfile.TemporaryDirectory() as d:
+            work = os.path.realpath(d)
+            for name, edits, code in (
+                    ("as shipped", (), 126),
+                    ("check removed", (('[ -x "$BWRAP" ] || refuse "bwrap missing at $BWRAP"\n',
+                                        ""),), 127)):
+                with self.subTest(mutant=name):
+                    bad = text.replace("BWRAP=/usr/bin/bwrap", f"BWRAP={work}/no-bwrap", 1)
+                    bad = bad.replace("WORK=/var/lib/agentos-work", f"WORK={work}", 1)
+                    for old, new in edits:
+                        self.assertIn(old, bad)
+                        bad = bad.replace(old, new, 1)
+                    path = pathlib.Path(work, "toolsh")
+                    path.write_text(bad)
+                    path.chmod(0o755)
+                    r = subprocess.run([str(path), "true"], cwd=work, capture_output=True,
+                                       text=True, timeout=30)
+                    self.assertEqual(r.returncode, code, r.stderr)
+                    self.assertEqual("bwrap missing" in r.stderr, code == 126, r.stderr)
+
     # REQ: CRED-5
     def test_refuses_an_empty_command(self):
         with tempfile.TemporaryDirectory() as d:
@@ -591,6 +671,7 @@ class ToolSandboxTest(unittest.TestCase):
             # A system path: the tool runs without CAP_DAC_OVERRIDE, so it cannot
             # traverse a 0750 home such as the CI runner's checkout.
             "--ro-bind", str(STUB_TOOL), "/var/lib/agentos-stub-tool.py",
+            "--ro-bind", str(STUB_CLI), STUB_CLI_IN,
             *extra,
             "--chdir", chdir,
             "--setenv", "AGENTOS_SYNTHETIC_CANARY", self.canary,
@@ -655,7 +736,7 @@ class ToolSandboxTest(unittest.TestCase):
         flag = ("--skip-outlives",) if skip_outlives else ()
         # The outlives probe may wait stub_cli's BEAT_WAIT for its tool on top of the earlier
         # phases, so the deadline leaves room for both.
-        r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
+        r = self.worker(sys.executable, "-I", STUB_CLI_IN, str(self.fwd.port), self.canary,
                         *flag, toolsh=toolsh, codex_home=codex_home, extra=extra,
                         deadline=120, pidns=pidns)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -747,6 +828,41 @@ class ToolSandboxTest(unittest.TestCase):
                                   "unprivileged_userns=0)")
                     self.skipTest("the kernel refuses unprivileged user namespaces here anyway")
                 self.assertTrue(got, f"{name} went unnoticed")
+
+    # The /dev bwrap's --dev builds: a few character devices and links, no disk or console.
+    BWRAP_DEV = {"core", "fd", "full", "null", "ptmx", "pts", "random", "shm", "stderr", "stdin",
+                 "stdout", "tty", "urandom", "zero"}
+
+    # REQ: CRED-5, A14
+    def test_tool_home_is_its_directory_and_its_dev_is_bwraps_own(self):
+        # HOME is the tool's own working directory (here a subdirectory, so neither / nor the
+        # workspace root passes for it), and /dev is bwrap's minimal one: with the worker's /dev
+        # read-only bound in its place, a tool running as the worker's root user would still
+        # open its disks through their owner bits, capabilities or not.
+        body = f"""mkdir -p {WORK}/sub && cd {WORK}/sub
+/usr/local/bin/agentos-toolsh /bin/sh -c 'echo "home=$HOME"; ls -A /dev | tr "\\n" " "; echo'
+"""
+        worker_dev = set(os.listdir("/dev"))
+        for name, edits, home, dev_own in (
+                ("as shipped", (), WORK + "/sub", True),
+                ("HOME is /", (('--setenv HOME "$cwd"', "--setenv HOME /"),), "/", True),
+                ("HOME is the workspace root",
+                 (('--setenv HOME "$cwd"', '--setenv HOME "$WORK"'),), WORK, True),
+                ("worker's /dev", (("--proc /proc --dev /dev", "--proc /proc"),), WORK + "/sub",
+                 False)):
+            with self.subTest(mutant=name):
+                r = self.script(body, toolsh=self.mutant("toolsh-home", *edits))
+                self.assertEqual(r.returncode, 0, r.stderr)
+                lines = r.stdout.splitlines()
+                self.assertEqual(lines[0], "home=" + home, r.stdout)
+                dev = set(lines[1].split())
+                if dev_own:
+                    self.assertEqual(dev - self.BWRAP_DEV, set(),
+                                     "tool sees the worker's devices")
+                elif worker_dev <= self.BWRAP_DEV:
+                    self.skipTest("this host's /dev holds nothing bwrap's own does not")
+                else:
+                    self.assertEqual(dev, worker_dev, "the mutant must show the worker's /dev")
 
     # REQ: CRED-5, A14
     def test_allow_list_and_bind_order_each_keep_codex_home_hidden(self):
@@ -906,7 +1022,7 @@ echo "func=$?"
         stuck = self.mutant("toolsh-stuck",
                             ('exec "$BWRAP" \\', 'case "$*" in *" beat") sleep 600 ;; esac\n'
                                                    'exec "$BWRAP" \\'))
-        r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
+        r = self.worker(sys.executable, "-I", STUB_CLI_IN, str(self.fwd.port), self.canary,
                         "--beat-wait=2", toolsh=stuck, pidns=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         tool = json.loads(r.stdout)["tool"]
@@ -920,7 +1036,7 @@ echo "func=$?"
         # A4: the stub CLI's --skip-outlives drops only the last phase. The descriptor probe
         # still runs, and the result carries no outlives verdict, so assert_contained fails it:
         # a run that must prove containment cannot skip the check unnoticed.
-        r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
+        r = self.worker(sys.executable, "-I", STUB_CLI_IN, str(self.fwd.port), self.canary,
                         "--skip-outlives", pidns=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         tool = json.loads(r.stdout)["tool"]
@@ -930,7 +1046,7 @@ echo "func=$?"
         self.assertNotIn("beat", r.stderr, "the beat tool must not start")
         with self.assertRaises(AssertionError):
             self.assert_contained(tool)
-        r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
+        r = self.worker(sys.executable, "-I", STUB_CLI_IN, str(self.fwd.port), self.canary,
                         "--skip-outlive")
         self.assertEqual(r.returncode, 2, "an unknown flag must not run a partial check")
 
@@ -1045,6 +1161,7 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
                 self.assertIn(old, text)
                 text = text.replace(old, new, 1)
             (etc / src.name).write_text(text)
+        shutil.copy(CATALOG, etc / CATALOG.name)
         log = run / "endpoint.log"
         cmd = cmd or f"python3 -I /var/lib/agentos-stub-tool.py probe {self.fwd.port}"
         fake = subprocess.Popen(
@@ -1099,6 +1216,15 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
                 "marks": {m for m in ("notify-ran", "mcp-ran", "preload-ran")
                           if (work / m).exists()}}
 
+    @staticmethod
+    def id_token():
+        """An unsigned id_token placeholder for a synthetic plan login."""
+        def jwt_part(o):
+            return base64.urlsafe_b64encode(json.dumps(o).encode()).rstrip(b"=").decode()
+        return (jwt_part({"alg": "none", "typ": "JWT"}) + "." + jwt_part(
+            {"exp": 4102444800, "https://api.openai.com/auth": {"chatgpt_account_id": "acct-syn"}})
+            + ".unsigned")
+
     def refresh_turn(self, status, body, last_refresh=None):
         """A turn on a plan login whose token the CLI refreshes while the tool watches auth.json.
 
@@ -1110,11 +1236,7 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
         fake refusing the tool's output with a 401; a stale last_refresh makes the CLI refresh at
         startup, before any tool runs. Returns the login, the tool's last attempt
         (stub_tool.py reread), the auth.json left on the host and the turn."""
-        def jwt_part(o):
-            return base64.urlsafe_b64encode(json.dumps(o).encode()).rstrip(b"=").decode()
-        id_token = (jwt_part({"alg": "none", "typ": "JWT"}) + "." + jwt_part(
-            {"exp": 4102444800, "https://api.openai.com/auth": {"chatgpt_account_id": "acct-syn"}})
-            + ".unsigned")
+        id_token = self.id_token()
         # A login about 8 days old is refreshed at startup, before any tool runs.
         login = {"OPENAI_API_KEY": None,
                  "last_refresh": last_refresh or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1237,6 +1359,42 @@ args = ["-c", "touch {WORK}/mcp-ran; sleep 2"]
         # Every turn asks for the pinned model, whatever the catalog says (#1396, C19).
         self.assertEqual({q["model"] for q in requests if q["method"] == "POST"}, {MODEL})
         self.assertFalse(any(q["upgrade"] for q in requests), "WebSocket transport used")
+
+    # REQ: CAP-11, CRED-5
+    def test_pinned_catalog_drops_the_collaboration_tools_and_the_models_fetch(self):
+        """#2111: on a plan login, the pinned catalog leaves exactly the clerk's tools in the
+        request and stops the start-up /models fetch; without the pin the bundled catalog's
+        multi-agent v2 adds the collaboration namespace (B2-21-C22). The image's entry is the
+        CLI's bundled one with only multi_agent_version changed, so a pin bump that leaves the
+        old catalog behind fails here."""
+        bundled = json.loads(subprocess.run(
+            [self.cli, "debug", "models", "--bundled"], capture_output=True, text=True,
+            env={"PATH": os.environ["PATH"], "CODEX_HOME": str(self.tmp)}, check=True).stdout)
+        want = [m for m in bundled["models"] if m["slug"] == MODEL]
+        self.assertEqual(len(want), 1, "the pinned model is not in the CLI's bundled catalog")
+        self.assertEqual(json.loads(CATALOG.read_text())["models"],
+                         [dict(want[0], multi_agent_version=None)])
+
+        def tools(got):
+            posts = [q for q in got["requests"] if q["method"] == "POST"
+                     and q["path"].endswith("/responses")]
+            self.assertTrue(posts, "no model call: " + got["stdout"][-2000:])
+            return posts[0]["tools"]
+        login = json.dumps({"OPENAI_API_KEY": None,
+                            "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            "tokens": {"id_token": self.id_token(), "account_id": "acct-syn",
+                                       "access_token": "agentos-ph-access",
+                                       "refresh_token": "agentos-ph-refresh"}})
+        got = self.turn(auth=login, cmd="true")
+        self.assertEqual(tools(got), CLI_TOOLS)
+        self.assertFalse([q for q in got["requests"] if "/models" in q["path"]],
+                         "the CLI fetched the provider's catalog")
+        line = 'model_catalog_json = "/etc/codex/model_catalog.json"\n'
+        unpinned = self.turn(config_edits=[(line, "")], auth=login, cmd="true")
+        self.assertTrue([q for q in unpinned["requests"] if "/models" in q["path"]],
+                        "control: unpinned, the CLI fetches the provider's catalog")
+        self.assertIn("collaboration.spawn_agent", tools(unpinned),
+                      "control: unpinned, the bundled catalog turns multi-agent v2 on")
 
     # REQ: CRED-5, A14
     def test_each_dropped_pin_lets_its_injection_through(self):

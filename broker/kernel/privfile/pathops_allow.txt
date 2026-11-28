@@ -160,18 +160,11 @@ allow broker/kernel/proc/content.go openFileContent os.Mkdir a store directory i
 allow broker/kernel/proc/keytable.go FileKeys.Delete os.Remove unlink(2) of a subject's key file in -keys-dir, the kernel uid's 0700 /var/lib/agentos-kernel/keys; it removes a link at the name, never follows it
 allow broker/kernel/proc/keytable.go FileKeys.List os.ReadDir lists that key directory, checked at open by privfile.Check
 allow broker/kernel/proc/keytable.go OpenFileKeys os.Mkdir -keys-dir in the kernel uid's 0700 /var/lib/agentos-kernel; privfile.Check refuses it next unless it is a directory of that uid's alone
-allow broker/kernel/proc/restore.go restoreSections os.ReadDir lists the content folder and its parent; no caller outside tests yet, and the restore row (#3186) must pass a content folder whose parent no other uid writes, as -content-dir's /var/lib/agentos-kernel is
-allow broker/kernel/proc/restore.go restoreSections os.RemoveAll an old .content-restore-* staging in that parent, under the O_NOFOLLOW flock privfile.CheckFile took
-allow broker/kernel/proc/restore.go restoreSections os.MkdirTemp a fresh staging in that parent; mkdir(2) at a fresh random name refuses a link there
-allow broker/kernel/proc/restore.go restoreSections os.Mkdir a store directory in that fresh staging, which only this call made
-allow broker/kernel/proc/restore.go restoreSections os.Remove rmdir(2) of the empty content folder; it removes a link at the name, never follows it
-allow broker/kernel/proc/restore.go restoreSections os.Rename the staging over the content folder, both in that parent; rename(2) replaces a link at the name, never follows it
 allow broker/cmd/agentos-unlock/main.go unlock os.Remove unlink(2) of -recovery-request, /var/lib/agentos/recovery-request, in root's 0700 /var/lib/agentos
 allow broker/cmd/agentos-unlock/main.go writeClerkAnchors os.Remove unlink(2) of -clerk-anchors, /run/agentos-keeper/anchors, under root-owned /run, which only root writes; it removes a link at the name, never follows it
 allow broker/cmd/agentos-unlock/main.go ownDir os.Mkdir the clerk anchors' /run/agentos-keeper in root-owned /run, or -checker-seed's directory; mkdir(2) follows no link, and the Lstat next refuses a link, another uid's directory or one open to others (errNotMine)
-allow broker/cmd/agentos-unlock/main.go putClerkAnchors os.Remove unlink(2) of the anchors file, or of the temporary CreateTemp made, in that checked directory of root's alone
-allow broker/cmd/agentos-unlock/main.go putClerkAnchors os.CreateTemp in that checked directory of root's alone; O_CREAT|O_EXCL at a fresh random name refuses a link there
-allow broker/cmd/agentos-unlock/main.go putClerkAnchors os.Rename the temporary over the anchors file in that checked directory; rename(2) replaces a link at the name, never follows it
+allow broker/cmd/agentos-unlock/main.go putClerkAnchors os.Remove unlink(2) of the anchors file in that checked directory of root's alone
+allow broker/cmd/agentos-unlock/main.go putClerkAnchors os.Chmod the anchors file privfile.WriteAtomic just renamed into that checked directory of root's alone, where no other uid can put a link for chmod(2) to follow
 allow broker/cmd/agentos-unlock/main.go writeCheckerSeed os.Remove unlink(2) of -checker-seed, only after putCheckerSeed's Lstat showed its directory is root's alone (a failure before that, errNotMine, removes nothing; no unit passes the flag today); it removes a link at the name, never follows it
 allow broker/cmd/agentos-unlock/main.go putCheckerSeed os.Remove unlink(2) of the seed file in that checked 0700 directory of root's alone
 allow broker/cmd/agentos-unlock/main.go kernelTPM os.Stat -tpm, /dev/tpmrm0 on the box, in devtmpfs, which only root writes (a software TPM's socket only in tests)

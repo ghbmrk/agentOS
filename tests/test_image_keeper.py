@@ -21,6 +21,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 import unittest.mock
 
@@ -1157,12 +1158,9 @@ class KeeperTreeTest(unittest.TestCase):
                 remove()
 
     # REQ: STO-2
-    def test_pid1_acts_on_no_path_inside_a_directory_another_user_holds(self):
-        """#5233: PID 1 makes a socket's, a mount point's and a path unit's parents following links
-        (mkdir_p_label), chowns a socket node (socket_chown), places Symlinks= and opens OpenFile= and
-        StandardOutput=file:, so a path for any of them inside a directory another user can write is that
-        user's choice. Refused inside a world-writable directory, a service directory, and a unit-made
-        directory (either form) unless only units running as root make it; a path PID 1 only watches passes."""
+    def pid1_held(self):
+        """The cases of #5233's tests below. They were one test until CI-keeper-long-pole (#6689), split so
+        that SPLIT runs the parts on separate workers; the parts check the same cases with the same assertions."""
         etc, q = "etc/systemd/system/", SYSTEM + "q.service"
         nobody = {q: "[Service]\nRuntimeDirectory=hq\nStateDirectory=hq\nLogsDirectory=hq\nUser=nobody\n"}
         journald = {SYSTEM + "systemd-journald.service": "[Service]\nRuntimeDirectory=systemd/journal\n"
@@ -1177,7 +1175,7 @@ class KeeperTreeTest(unittest.TestCase):
                     "user puts on its way, so that user decides what PID 1 acts on; name a path only root can write, "
                     "or make the directory in a unit that runs as root (#5233)" % (where, path, d, owner))
         hq = "systemd makes for a unit and may hand to a user other than root (%%s= in %s)" % q
-        refused = (
+        refused_units = (
             # #5228 Security item 2: a socket node chowned (SocketUser=) inside the unit's runtime directory, and its
             # Symlinks=, OpenFile=, StandardOutput=file: and a FIFO.
             (dict(nobody, **{SYSTEM + "s.socket": "[Socket]\nListenStream=/run/hq/sock\nSocketUser=nobody\n"}),
@@ -1236,6 +1234,8 @@ class KeeperTreeTest(unittest.TestCase):
              "anyone on the box can write", "ListenStream= in %ss.socket" % SYSTEM),
             ({SYSTEM + "m.service": "[Service]\nBindPaths=/srv:/run/lock/m\n"}, "run/lock/m", "run/lock",
              "anyone on the box can write", "BindPaths= in %sm.service" % SYSTEM),
+        )
+        refused_journald = (
             # Journald's directory, once anything gives its unit a user, a group, a loose mode, a template, an
             # alias, or another unit (or a drop-in) names the same directory.
             (dict(journald, **sock, **{SYSTEM + "systemd-journald.service.d/u.conf": "[Service]\nUser=nobody\n"}),
@@ -1282,6 +1282,8 @@ class KeeperTreeTest(unittest.TestCase):
             (dict(journald, **sock, **{SYSTEM + "k.service": "[Service]\n", SYSTEM + "k.service.d/d.conf":
                                        "[Service]\nRuntimeDirectory=systemd/journal\n"}),
              "run/systemd/journal/stdout", "run/systemd/journal", jdir.replace("systemd-journald.service", "k.service.d/d.conf"), "ListenStream= in %sj.socket" % SYSTEM),
+        )
+        refused_box = (
             # The box's own /var/lock and /var/run links count before the tree holds them (#5382 Security 6782954731).
             ({SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lock/a/x\nSocketUser=nobody\n"}, "run/lock/a/x",
              "run/lock", "anyone on the box can write", "ListenStream= in %ss.socket" % SYSTEM),
@@ -1325,23 +1327,6 @@ class KeeperTreeTest(unittest.TestCase):
              "systemd makes for a unit and may hand to a user other than root (StateDirectory= in %sa.service)" % SYSTEM,
              "ListenStream= in %ss.socket" % SYSTEM),
         )
-        wired = ("Symlinks= in %ss.socket" % SYSTEM, "BindReadOnlyPaths= in %sb.service" % SYSTEM)
-        for files, path, d, owner, where in refused:
-            with self.subTest(files=files):
-                remove = self.place(files)
-                try:
-                    got = check.inside_refusals(self.root)
-                    if etc + "path.d/m.conf" in files:
-                        # A type-wide MakeDirectory= makes the image's own watch (agentos-egress-setup.path) a path
-                        # PID 1 makes too, inside agentos-localui's directory.
-                        self.assertIn("PathChanged= in %sagentos-egress-setup.path: /var/lib/agentos-localui/claim.json "
-                                      "is inside /var/lib/agentos-localui, " % SYSTEM, got[0])
-                        got = got[1:]
-                    self.assertEqual(got, [inside(path, d, owner, where)])
-                    if where in wired:  # through the whole check too
-                        self.assertIn(got[0], check.violations(self.root))
-                finally:
-                    remove()
         passing = (
             # Stock trixie's journald: its sockets live in the runtime directory a root unit makes.
             dict(journald, **{
@@ -1363,14 +1348,6 @@ class KeeperTreeTest(unittest.TestCase):
                                                   "ExecStart=/run/hq/x\n[Unit]\nRequiresMountsFor=/var/lib/hq/m\n",
                             SYSTEM + "s.socket": "[Socket]\nListenStream=/run/hq2/sock\n"}),
         )
-        for files in passing:
-            with self.subTest(files=files):
-                remove = self.place(files)
-                try:
-                    self.assertEqual(check.inside_refusals(self.root), [])
-                    self.assertEqual(check.unit_made_refusals(self.root), [])
-                finally:
-                    remove()
         # #5350 re-plan: a directory is held by its tree path, so no second name stands in for it. Each case runs
         # with its units under every order of file names, since no file order may decide what is held.
         nob, dyn = "User=nobody\n", "DynamicUser=yes\n"
@@ -1382,7 +1359,7 @@ class KeeperTreeTest(unittest.TestCase):
 
         def socket(path):
             return {SYSTEM + "s.socket": "[Socket]\nListenStream=/%s\nSocketUser=nobody\n" % path}
-        shuffled = (
+        shuffled_named = (
             # A non-root unit's a:b at the private form of a root unit's directory, and a root unit's a:b at a
             # dynamic unit's (Security 6778501910).
             ([nob + "StateDirectory=hqn:private/hq\n", "StateDirectory=hq\n"], "var/lib/private/hq/sock", "var/lib/private/hq"),
@@ -1407,6 +1384,8 @@ class KeeperTreeTest(unittest.TestCase):
              "var/lib/private/hq"),
             ([dyn + "RuntimeDirectory=hq\n", "RuntimeDirectory=q:private/private/hq\n"], "run/private/hq/sock",
              "run/private/hq"),
+        )
+        shuffled_again = (
             # Another user's directory named again by a root unit's a:b (Security 6781649895 2, L3 6781841386 1).
             ([dyn + "StateDirectory=q\n", "StateDirectory=x:q\n"], "var/lib/q/sock", "var/lib/q"),
             ([nob + "StateDirectory=q\n", "StateDirectory=x:q\n"], "var/lib/x/sock", "var/lib/x"),
@@ -1421,6 +1400,35 @@ class KeeperTreeTest(unittest.TestCase):
             (["StateDirectory=q2:private/hq2\n"], "var/lib/private/hq2/sock", "var/lib/private/hq2"),
             (["StateDirectory=hq\n", "StateDirectory=hq:x\n"], "var/lib/hq/sock", "var/lib/hq"),
         )
+        return types.SimpleNamespace(
+            etc=etc, nobody=nobody, inside=inside, hq=hq, refused_units=refused_units,
+            refused_journald=refused_journald, refused_box=refused_box, passing=passing, nob=nob,
+            orders=orders, socket=socket, shuffled_named=shuffled_named, shuffled_again=shuffled_again)
+
+    def pid1_refuses(self, refused):
+        h = self.pid1_held()
+        etc, inside = h.etc, h.inside
+        wired = ("Symlinks= in %ss.socket" % SYSTEM, "BindReadOnlyPaths= in %sb.service" % SYSTEM)
+        for files, path, d, owner, where in refused:
+            with self.subTest(files=files):
+                remove = self.place(files)
+                try:
+                    got = check.inside_refusals(self.root)
+                    if etc + "path.d/m.conf" in files:
+                        # A type-wide MakeDirectory= makes the image's own watch (agentos-egress-setup.path) a path
+                        # PID 1 makes too, inside agentos-localui's directory.
+                        self.assertIn("PathChanged= in %sagentos-egress-setup.path: /var/lib/agentos-localui/claim.json "
+                                      "is inside /var/lib/agentos-localui, " % SYSTEM, got[0])
+                        got = got[1:]
+                    self.assertEqual(got, [inside(path, d, owner, where)])
+                    if where in wired:  # through the whole check too
+                        self.assertIn(got[0], check.violations(self.root))
+                finally:
+                    remove()
+
+    def pid1_shuffled(self, shuffled):
+        h = self.pid1_held()
+        orders, socket = h.orders, h.socket
         for units, path, d in shuffled:
             for files in orders(units, socket(path)):
                 with self.subTest(files=files):
@@ -1433,6 +1441,49 @@ class KeeperTreeTest(unittest.TestCase):
                             "to a user other than root (" % (SYSTEM, path, d)), got)
                     finally:
                         remove()
+
+    def test_pid1_acts_on_no_path_inside_a_directory_another_user_holds(self):
+        """#5233: PID 1 makes a socket's, a mount point's and a path unit's parents following links
+        (mkdir_p_label), chowns a socket node (socket_chown), places Symlinks= and opens OpenFile= and
+        StandardOutput=file:, so a path for any of them inside a directory another user can write is that
+        user's choice. Refused inside a world-writable directory, a service directory, and a unit-made
+        directory (either form) unless only units running as root make it; a path PID 1 only watches passes.
+        This part: unit-made, service and world-writable directories."""
+        self.pid1_refuses(self.pid1_held().refused_units)
+
+    def test_pid1_acts_on_no_path_inside_journald_s_directory_once_another_user_may_hold_it(self):
+        """#5233, as above: journald's runtime directory, and root units' directories the tree or tmpfiles.d
+        reaches first."""
+        self.pid1_refuses(self.pid1_held().refused_journald)
+
+    def test_pid1_acts_on_no_path_through_the_box_s_links_or_inside_a_loosely_moded_directory(self):
+        """#5233, as above: the box's /var/lock and /var/run links, and *DirectoryMode= that lets others write."""
+        self.pid1_refuses(self.pid1_held().refused_box)
+
+    def test_a_path_pid1_only_watches_or_reads_inside_another_user_s_directory_passes(self):
+        """#5233, as above: what PID 1 only watches or reads, and paths beside the directory, pass."""
+        passing = self.pid1_held().passing
+        for files in passing:
+            with self.subTest(files=files):
+                remove = self.place(files)
+                try:
+                    self.assertEqual(check.inside_refusals(self.root), [])
+                    self.assertEqual(check.unit_made_refusals(self.root), [])
+                finally:
+                    remove()
+
+    def test_no_second_name_stands_in_for_a_directory_another_user_holds(self):
+        """#5233, as above: a unit's a:b or private/ form names another user's directory, in every file order."""
+        self.pid1_shuffled(self.pid1_held().shuffled_named)
+
+    def test_a_root_unit_s_link_names_again_no_directory_another_user_holds(self):
+        """#5233, as above: a root unit's a:b reaches another user's directory, in every file order."""
+        self.pid1_shuffled(self.pid1_held().shuffled_again)
+
+    def test_root_units_alone_hold_their_directories_and_stock_journald_passes_the_whole_check(self):
+        """#5233, as above: root units alone in any order, stock journald, and a group-writable tree directory."""
+        h = self.pid1_held()
+        nob, orders, socket, passing, inside = h.nob, h.orders, h.socket, h.passing, h.inside
         # Root units alone, in any order: the same one-field name twice, and two names beside each other.
         for units, path in (
                 (["StateDirectory=hq\n", "StateDirectory=hq\nRuntimeDirectory=hq\n"], "var/lib/hq/sock"),
@@ -1470,6 +1521,11 @@ class KeeperTreeTest(unittest.TestCase):
                     "(StateDirectory= in %srh.service)" % SYSTEM, "ListenStream= in %ss.socket" % SYSTEM)])
         finally:
             remove()
+
+    def test_pid1_acts_on_no_path_inside_a_root_directory_the_tree_a_mount_or_fstab_hands_on(self):
+        """#5233, as above: a tree uid, gid or ACL on a root unit's directory, a mount point, and etc/fstab."""
+        h = self.pid1_held()
+        nobody, hq, inside = h.nobody, h.hq, h.inside
         # The tree may hand a root unit's directory, in either form, to another uid, group or ACL before the unit
         # starts (#5350 Security 6778501910, L3 6778896704); CI does not run as root, so tree_lstat and tree_xattrs
         # report them. A group the tree gives counts once a tmpfiles.d line lets it write.
@@ -2210,6 +2266,38 @@ class KeeperTreeTest(unittest.TestCase):
                 self.assertEqual(self.v(), ["usr/lib/sysusers.d/agentos-setup.conf:%d: gives toor a uid that is not - or a "
                                             "plain decimal number (#4641)" % n])
         for line in ("u root 0", "u toor 900", "u toor -:0", "u toor -"):
+            with self.subTest(line):
+                sysusers.write_text(good + line + "\n")
+                self.assertEqual(self.v(), [])
+
+    def test_root_s_home_is_root(self):
+        # #6474: EXEC_HOME and unit_rules.py's MANAGER_CONF_DIRS read root's files under /root, so a build
+        # step that moves root's home to a service user's directory takes them out of every check.
+        write(self.root, "etc/passwd", "root:x:0:0:root:/var/lib/agentos-x:/bin/sh\n")
+        self.assertEqual(self.v(), ["etc/passwd:1: root's home is /var/lib/agentos-x, not /root, which every check "
+                                    "of root's own files reads (#6474)"])
+        write(self.root, "etc/passwd", "root:x:0:0:root:/root:/bin/sh\n")
+        self.assertEqual(self.v(), [])
+        rec = write(self.root, "etc/userdb/root.user", '{"userName": "root", "uid": 0, "homeDirectory": "/root"}')
+        self.assertEqual(self.v(), [])
+        for bad in ('{"userName": "root", "uid": 0, "homeDirectory": "/var/lib/agentos-x"}',
+                    '{"userName": "root", "perMachine": [{"homeDirectory": "/var/lib/agentos-x"}]}',
+                    '{"userName": "root", "binding": {"x": {"homeDirectory": "/var/lib/agentos-x"}}}'):
+            with self.subTest(bad):
+                rec.write_text(bad)
+                self.assertEqual(self.v(), ["etc/userdb/root.user: root's record gives a home other than /root, which "
+                                            "every check of root's own files reads (#6474)"])
+        rec.unlink()
+        sysusers = self.root / "usr/lib/sysusers.d/agentos-setup.conf"
+        good = sysusers.read_text()
+        n = len(good.splitlines()) + 1
+        for line in ('u root 0 "Super User" /var/lib/agentos-x', "u! root 0 - /var/lib/agentos-x /bin/sh"):
+            with self.subTest(line):
+                sysusers.write_text(good + line + "\n")
+                self.assertEqual(self.v(), ["usr/lib/sysusers.d/agentos-setup.conf:%d: gives root the home "
+                                            "/var/lib/agentos-x, not /root, which every check of root's own files "
+                                            "reads (#6474)" % n])
+        for line in ('u root 0 "Super User" /root', "u root 0 - -", "u root 0"):
             with self.subTest(line):
                 sysusers.write_text(good + line + "\n")
                 self.assertEqual(self.v(), [])

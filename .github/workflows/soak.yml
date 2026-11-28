@@ -30,13 +30,18 @@ jobs:
     timeout-minutes: 345 # under GitHub's 6h job limit
     strategy:
       fail-fast: false
-      max-parallel: 3 # leaves runners for pull-request CI (18 targets: six waves, about 18 h)
+      # CI-mutgate-after-ci (#6569): one target at a time, so with soak's one the workflow holds at most 2 of the
+      # plan's 20 runners, not 4. 17 targets of 3 h take about 51 h. The `soak` group keeps one pending run and a
+      # newer scheduled run cancels it, so Actions shows a cancelled soak run about every other day, runs go back
+      # to back, and each target, the race soak and the "Soak failures" report come about every 2.1 days (a
+      # failed run's report about 51 h after it starts: report needs fuzz and soak). Every target below is tier A
+      # (CI-mutgate-after-ci-fu-1, tools/ASSUMPTIONS.md), so no order puts tier A first; a tier-B target goes last.
+      max-parallel: 1
       matrix:
         include:
           - { pkg: owner, target: FuzzParseReply }
           - { pkg: control, target: FuzzParse }
           - { pkg: loops, target: FuzzParseText }
-          - { pkg: mail, target: FuzzParse }
           - { pkg: localui, target: FuzzScanPassphrase }
           - { pkg: update, target: FuzzParseAttestation }
           - { pkg: modem/at, target: FuzzDecodeDeliver }
@@ -92,7 +97,7 @@ jobs:
     timeout-minutes: 345
     strategy:
       fail-fast: false
-      max-parallel: 1 # with fuzz's 3, at most 4 runners at once; two shards take about 9 h
+      max-parallel: 1 # with fuzz's 1, at most 2 runners at once; two shards take about 9 h
       matrix:
         include:
           - { name: race, flags: "-race" }
@@ -115,8 +120,20 @@ jobs:
           want=$(awk '$1 == "toolchain" {print $2}' go.mod)
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; go.mod names $want" >&2; exit 1; }
+      # CI-soak-green (#6571): the tools ci's broker-race installs, so a full run here meets the same
+      # environment. CI is set on every runner, so a test missing one fails rather than skips.
       - name: Software TPM for the trusted-host slot (P2-4b)
         run: sudo apt-get update -q && sudo apt-get install -yq swtpm
+      - name: dnsmasq for the enforcer's resolver tests (ENF-f, #3664)
+        run: sudo apt-get install -yq dnsmasq-base
+      - name: Subordinate ids for the canary sandbox
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          command -v newuidmap && command -v newgidmap || sudo apt-get install -yq uidmap
+          grep -qE "^($(id -un)|$(id -u)):" /etc/subuid || sudo usermod --add-subuids 100000-165535 "$(id -un)"
+          grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
       - name: Soak (full runs, shuffled, until time is up)
         # Each run gets a fresh shuffle seed; a failing run's log keeps the
         # "-test.shuffle N" line that replays its order.
@@ -132,7 +149,8 @@ jobs:
             runs=$((runs + 1))
             # FLAGS is a word list on purpose.
             # shellcheck disable=SC2086
-            if go test $FLAGS -shuffle=on -count=1 ./... > "$out/run-$runs.log" 2>&1; then
+            # -timeout 25m as ci broker-race: a package slow under -race passes its 10-minute default (#2623).
+            if go test $FLAGS -shuffle=on -count=1 -timeout 25m ./... > "$out/run-$runs.log" 2>&1; then
               rm "$out/run-$runs.log"
             else
               fails=$((fails + 1))
@@ -141,7 +159,16 @@ jobs:
             fi
           done
           echo "soak ${{ matrix.name }}: $runs full runs, $fails failed" | tee -a "$GITHUB_STEP_SUMMARY"
-          [ -s "$out/failures.txt" ] && sort "$out/failures.txt" | uniq -c | sort -rn | head -50 >> "$GITHUB_STEP_SUMMARY"
+          # awk, not head: head exits early, so pipefail failed the step on sort's broken pipe.
+          [ ! -s "$out/failures.txt" ] || sort "$out/failures.txt" | uniq -c | sort -rn | awk 'NR <= 50' >> "$GITHUB_STEP_SUMMARY"
+          # Also as annotations, which the check-run API serves where the artifact host is unreachable (#190):
+          # one per test or package, without run prefix or timing, the 10 that failed in most runs first.
+          [ ! -s "$out/failures.txt" ] || awk '{ r = $2; sub(/^run [0-9]+: /, "") }
+            /^--- FAIL: / { sub(/ \([0-9.]+s\)$/, "") } /^FAIL\t/ { sub(/\t[0-9.]+s$/, "") }
+            /^(--- FAIL: |FAIL\t|panic: )/ && !seen[r, $0]++ { n[$0]++ }
+            END { for (k in n) print n[k] " " k }' "$out/failures.txt" | LC_ALL=C sort -k1,1rn -k2 \
+            | awk -v job="${{ matrix.name }}" 'NR <= 10 { c = $1; sub(/^[0-9]+ /, ""); gsub(/%/, "%25"); gsub(/\r/, "%0D")
+                print "::error title=soak " job "::" $0 " (failed runs: " c ")" }'
           [ "$fails" -eq 0 ]
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: failure()

@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 // REQ: STO-2, A8
@@ -14,7 +16,7 @@ import (
 // parses must hold to every bound and read back the same.
 func FuzzParse(f *testing.F) {
 	path := filepath.Join(f.TempDir(), "store")
-	s, err := Create(path, Recovery{Key: make([]byte, RecoveryLen)})
+	s, err := Create(path, Recovery{Key: secret.Hide(make([]byte, RecoveryLen))})
 	if err != nil {
 		f.Fatal(err)
 	}

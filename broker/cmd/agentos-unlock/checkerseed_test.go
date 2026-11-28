@@ -10,6 +10,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 // A -checker-seed whose directory the check refuses (open to others, or a
@@ -19,7 +20,7 @@ import (
 // REQ: CH-4
 func TestCheckerSeedRefusedDirectoryIsNotRemovedIn(t *testing.T) {
 	d := t.TempDir()
-	st, err := seal.Create(filepath.Join(d, "store"), seal.Recovery{Key: make([]byte, 32)})
+	st, err := seal.Create(filepath.Join(d, "store"), seal.Recovery{Key: secret.Hide(make([]byte, 32))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +121,7 @@ func TestClerkAnchorsRefuseAGroupWritableDirectory(t *testing.T) {
 	if err := os.Chmod(ok, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := putClerkAnchors(filepath.Join(ok, "anchors"), nil); err != nil {
+	if err := putClerkAnchors(filepath.Join(ok, "anchors"), nil, nil); err != nil {
 		t.Errorf("putClerkAnchors in a 0755 directory of mine: %v", err)
 	}
 	open := filepath.Join(d, "open")
@@ -134,7 +135,7 @@ func TestClerkAnchorsRefuseAGroupWritableDirectory(t *testing.T) {
 	if err := os.WriteFile(victim, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := putClerkAnchors(victim, nil); !errors.Is(err, errNotMine) {
+	if err := putClerkAnchors(victim, nil, nil); !errors.Is(err, errNotMine) {
 		t.Errorf("putClerkAnchors in a group-writable directory: %v, want errNotMine", err)
 	}
 	if _, err := os.Lstat(victim); err != nil {
@@ -149,7 +150,7 @@ func TestClerkAnchorsRefuseAGroupWritableDirectory(t *testing.T) {
 // REQ: CH-4
 func TestCheckerSeedFailureRemovesTheStaleSeed(t *testing.T) {
 	d := t.TempDir()
-	st, err := seal.Create(filepath.Join(d, "store"), seal.Recovery{Key: make([]byte, 32)})
+	st, err := seal.Create(filepath.Join(d, "store"), seal.Recovery{Key: secret.Hide(make([]byte, 32))})
 	if err != nil {
 		t.Fatal(err)
 	}

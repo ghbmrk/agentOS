@@ -2,10 +2,9 @@ package proc
 
 import (
 	"bytes"
-	"crypto/aes"
+	"cmp"
 	"crypto/cipher"
 	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -158,7 +157,7 @@ type backups struct {
 	// writing is the backup call writing now, if any; guarded by the
 	// kernel's lock (#3338).
 	writing *backupWrite
-	// For tests only: hook runs as each section opens, wrap, when set,
+	// For tests only: hook runs as the log section opens, wrap, when set,
 	// wraps every target, saveErr, when set, fails every save, link replaces
 	// os.Link in the snapshot, and stop ends the save's and the snapshot
 	// copy's file writes after step i.
@@ -180,15 +179,7 @@ func openBackups(cfg KernelConfig, keys kernel.Keys, k *kernel.Kernel, now int64
 	if err := privfile.Check(cfg.BackupDir, true); err != nil {
 		return nil, err
 	}
-	b, err := aes.NewCipher(cfg.Key[:])
-	if err != nil {
-		return nil, err
-	}
-	a, err := cipher.NewGCM(b)
-	if err != nil {
-		return nil, err
-	}
-	bk := &backups{dir: cfg.BackupDir, aead: a, log: cfg.Log, content: cfg.ContentDir, keys: keys, link: os.Link}
+	bk := &backups{dir: cfg.BackupDir, aead: sealer(cfg.Key), log: cfg.Log, content: cfg.ContentDir, keys: keys, link: os.Link}
 	if err := bk.dropSnaps(); err != nil {
 		return nil, err
 	}
@@ -199,16 +190,16 @@ func openBackups(cfg KernelConfig, keys kernel.Keys, k *kernel.Kernel, now int64
 		}
 		bk.recipient = &backup.Recipient{X: x, EK: ek}
 	}
+	// No content directory ("") resolves to ".", which no target's
+	// locator, absolute (kernel.BackupTarget), is or is in.
 	for _, d := range []string{filepath.Dir(cfg.Log), cfg.KeyDir, cfg.ContentDir, cfg.BackupDir} {
-		if d == "" {
-			continue
-		}
 		r, err := filepath.EvalSymlinks(d)
 		if err != nil {
 			return nil, err
 		}
 		bk.guard = append(bk.guard, r)
 	}
+	var err error
 	if bk.kept, err = bk.load(); err != nil {
 		return nil, err
 	}
@@ -266,7 +257,6 @@ func (bk *backups) union(k *kernel.Kernel, now int64) error {
 		if err != nil && !slices.ContainsFunc(st.BackupsTaken(), func(b kernel.BackupTaken) bool { return b.BackupID == kp.Record.BackupID }) {
 			return fmt.Errorf("%w: backup %s is not in my log and I cannot log it: %w", ErrRecordsFile, kp.Record.BackupID, err)
 		}
-		logged[kp.Record.BackupID] = true
 	}
 	have := map[string]bool{}
 	for _, kp := range bk.kept {
@@ -305,22 +295,14 @@ func (bk *backups) load() ([]Kept, error) {
 	if err := privfile.CheckFile(f); err != nil {
 		return nil, err
 	}
+	// One byte past the bound is read, so a longer file does not open:
+	// save writes none, and no other holds the key.
 	b, err := io.ReadAll(io.LimitReader(f, maxRecords+1))
-	if err != nil {
-		return nil, err
-	}
-	ns := bk.aead.NonceSize()
-	if len(b) > maxRecords || len(b) < ns {
-		return nil, ErrRecordsFile
-	}
-	pt, err := bk.aead.Open(nil, b[:ns], b[ns:], recordsAAD())
-	if err != nil {
-		return nil, ErrRecordsFile
-	}
+	pt, oerr := bk.aead.Open(nil, nil, b, recordsAAD())
 	var kept []Kept
 	dec := json.NewDecoder(bytes.NewReader(pt))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&kept); err != nil {
+	if err := cmp.Or(err, oerr, dec.Decode(&kept)); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrRecordsFile, err)
 	}
 	return kept, nil
@@ -337,11 +319,7 @@ func (bk *backups) save() error {
 	if err != nil {
 		return err
 	}
-	nonce := make([]byte, bk.aead.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return err
-	}
-	b := bk.aead.Seal(nonce, nonce, pt, recordsAAD())
+	b := bk.aead.Seal(nil, nil, pt, recordsAAD())
 	if len(b) > maxRecords {
 		return errors.New("run: the backup records are over 16 MiB")
 	}
@@ -370,10 +348,7 @@ func (bk *backups) saveRecord(rec backup.Record) error {
 // checkDir resolves locator and refuses one that is not a directory or is
 // inside, or is, one of the kernel's own data folders (#3251 review note 1).
 func (bk *backups) checkDir(locator string) (string, error) {
-	r, err := filepath.EvalSymlinks(locator)
-	if err != nil {
-		return "", fmt.Errorf("%w: %w", ErrTargetNotDir, err)
-	}
+	r, _ := filepath.EvalSymlinks(locator) // "" when it cannot, which Stat refuses
 	fi, err := os.Stat(r)
 	if err != nil || !fi.IsDir() {
 		return "", ErrTargetNotDir
@@ -465,7 +440,7 @@ type backupWrite struct {
 // live keys and the live subjects' items, all read under the kernel's lock
 // (brief decision 7). The items are linked, or copied, into dir, a fresh
 // directory in the backup directory, so an erase during the write cannot
-// take a file from under it; stores lists them by store, each sorted.
+// take a file from under it; stores lists them by store.
 type backupSnap struct {
 	n      int64
 	upto   uint64 // the log head's sequence number at n
@@ -481,17 +456,12 @@ const snapPrefix = "snap-"
 // dropSnaps removes every snapshot a stop left in the backup directory.
 func (bk *backups) dropSnaps() error {
 	des, err := os.ReadDir(bk.dir)
-	if err != nil {
-		return err
-	}
 	for _, de := range des {
 		if strings.HasPrefix(de.Name(), snapPrefix) {
-			if err := os.RemoveAll(filepath.Join(bk.dir, de.Name())); err != nil {
-				return err
-			}
+			err = errors.Join(err, os.RemoveAll(filepath.Join(bk.dir, de.Name())))
 		}
 	}
-	return nil
+	return err
 }
 
 func (h *Kernel) snap() (backupSnap, error) {
@@ -546,9 +516,6 @@ func (bk *backups) snapItems(s *backupSnap) error {
 		return err
 	}
 	for store, hs := range s.stores {
-		slices.SortFunc(hs, func(a, b kernel.Hash) int { return bytes.Compare(a[:], b[:]) })
-		hs = slices.Compact(hs)
-		s.stores[store] = hs
 		dst := filepath.Join(s.dir, store)
 		if err := os.Mkdir(dst, 0o700); err != nil {
 			return err
@@ -573,9 +540,9 @@ func (bk *backups) snapItems(s *backupSnap) error {
 	return nil
 }
 
-// Each content/<store> section is the store's items in hash order, each
+// Each content/<store> section is the store's items, each
 // framed as its SHA-256 (32 bytes), its length (4 bytes, big-endian) and
-// its ciphertext. A restore checks every hash and length (RestoreSections).
+// its ciphertext. A restore checks every hash and length (RestoreSections, in zrestore_test.go until #3186 wires it).
 const itemFrame = sha256.Size + 4
 
 // contentSources are snap's content/<store> sections, by store name.
@@ -584,9 +551,6 @@ func (bk *backups) contentSources(snap backupSnap) []backup.Source {
 	for _, store := range slices.Sorted(maps.Keys(snap.stores)) {
 		fc, hs := &FileContent{dir: filepath.Join(snap.dir, store)}, snap.stores[store]
 		out = append(out, backup.Source{Name: "content/" + store, Open: func() (io.ReadCloser, error) {
-			if bk.hook != nil {
-				bk.hook()
-			}
 			return io.NopCloser(&itemsReader{fc: fc, items: hs}), nil
 		}})
 	}
@@ -715,7 +679,6 @@ func (h *Kernel) Backup(now int64) ([]Taken, error) {
 			close(w.done)
 		}
 	})
-	defer over()
 	done := map[int]string{} // out's index: the backup ID written there
 	for _, t := range write {
 		id, err := h.writeOne(t, snap, now)
@@ -729,12 +692,10 @@ func (h *Kernel) Backup(now int64) ([]Taken, error) {
 		out = append(out, tk)
 	}
 	over()
-	if len(done) == 0 {
-		return out, nil
-	}
 	// Each Taken shows its backup as kept now: a re-seal during the
-	// write, or a finish that did not land, shows as it is.
-	err = h.With(func(k *kernel.Kernel) error {
+	// write, or a finish that did not land, shows as it is. With fails
+	// only on a closed kernel, which the re-seal returns too.
+	h.With(func(k *kernel.Kernel) error {
 		for j, id := range done {
 			if i := bk.find(id); i >= 0 {
 				v := bk.kept[i].view()
@@ -743,9 +704,6 @@ func (h *Kernel) Backup(now int64) ([]Taken, error) {
 		}
 		return nil
 	})
-	if err != nil {
-		return out, err
-	}
 	// A subject erased since the snapshot is in a new table: re-seal it
 	// at once, without the lock.
 	wg, err := h.reseal(now)
@@ -901,12 +859,10 @@ func (h *Kernel) writeOne(t kernel.BackupTarget, snap backupSnap, now int64) (st
 		Sections: append([]backup.Source{bk.logSource(snap.n)}, bk.contentSources(snap)...), Keys: snap.keys, State: snap.live,
 	})
 	if err == nil {
-		err = f.Sync()
+		err = privfile.SyncFile(f)
 	}
 	size, _ := f.Seek(0, io.SeekCurrent) // the content's length: Write only writes, in order
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
+	err = cmp.Or(err, f.Close())
 	if pp.id == "" || err != nil {
 		return pp.id, err
 	}
@@ -918,11 +874,8 @@ func (h *Kernel) writeOne(t kernel.BackupTarget, snap backupSnap, now int64) (st
 	}
 	verified := readBack(tg, dt.Dir, rec, size)
 	return pp.id, h.With(func(*kernel.Kernel) error {
-		i := bk.find(rec.BackupID)
-		if i < 0 {
-			return backup.ErrNoBackup
-		}
-		kp := &bk.kept[i]
+		// pendingPut saved it, and kept never drops a record.
+		kp := &bk.kept[bk.find(rec.BackupID)]
 		old := *kp
 		kp.Pending, kp.Verified, kp.Record.ContentSum = false, verified, rec.ContentSum
 		// A re-seal during the write has a newer table and sum already.

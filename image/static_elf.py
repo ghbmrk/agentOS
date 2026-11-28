@@ -13,23 +13,27 @@ and holds it to image/static_elf.allow:
 
 A file is listed (SEL-5) when it is an x86 executable or shared object (ET_EXEC or ET_DYN, EM_X86_64 or
 EM_386; relocatable objects and other machines' firmware run nothing here) and either names no
-interpreter and no NEEDED library (import_sweep.read_elf's "static"), or is dynamic, needs no libstdc++
+interpreter and no NEEDED library (import_sweep.read_elf's STATIC), or is dynamic, needs no libstdc++
 or libc++, and holds one of CXX_MARKS, a C++ runtime's own strings (a shipped file is stripped, so its
 symbols say nothing).
 
 Each listed file must match exactly one entry of ALLOW, a line "GLOB KIND [ARG]", GLOB an absolute
 pattern on the file's path (an initrd's members by their path inside it) matched segment by segment, so
 "*" never crosses "/" (matches). Kinds (SEL-6):
-  go             a Go binary built without cgo, read from the file: its build info says CGO_ENABLED=0, or
-                 records no setting and the file holds none of runtime/cgo's C code (go_cgo): no C library
+  go             a Go binary built without cgo, read from the file (go_cgo): its section headers name
+                 .gopclntab; the build info at .go.buildinfo says CGO_ENABLED=0, or there is none or it records
+                 no setting; the file holds none of runtime/cgo's C code; and its function table lists no
+                 function without a line table (C code an internal link took from a .syso): no C library
   linked LIST    a build step recorded the file's link inputs (image/guest-shipped.sh with SHIPPED_FOR):
                  OUT/LIST/agentos.inputs names the packages its link loaded, by the file's SHA-256, and
                  each must be in OUT/LIST/agentos.dpkg-status, the status the scan reads for LIST
                  ("linked": the main tree's, "guest": the guests')
-  package PKG    PKG, installed in the file's tree's status, ships it: the main tree's (and there the file
-                 must match dpkg's md5sum at its path, agentos.dpkg-md5sums), the guests' for a file under
-                 the guests' roots, the initrd's own for an initrd member. vulncheck.py also queries each
-                 source a package's Built-Using names, so a Debian static build's sources are scanned.
+  package PKG    PKG, installed in the file's tree's status, ships these bytes: in the main tree, dpkg's
+                 md5sum at its path (agentos.dpkg-md5sums); under the guests' roots, the guests' status and
+                 an MD5 image/guest-userland.sh recorded for PKG as it copied the file (guest/agentos.md5sums);
+                 in an initrd, its own status, PKG at the main tree's version, and the main tree's md5sum at
+                 its path. vulncheck.py also queries each source a package's Built-Using names, so a Debian
+                 static build's sources are scanned.
   bundled HOLDER a pinned download's binary: assurance/vulncheck.json "bundled" names HOLDER
   sha256 HEX     a pinned download's binary reviewed as linking no library (raw system calls), held to
                  those exact bytes, so a new release fails until it is read again; only a static file of
@@ -66,6 +70,8 @@ GUEST_ROOTS = "/usr/lib/agentos/images/"
 INITRD_REQUIRED = "/usr/sbin/ldconfig"
 LISTS = ("linked", "guest")
 INPUTS, STATUS, MD5SUMS = "agentos.inputs", "agentos.dpkg-status", "agentos.dpkg-md5sums"
+# "MD5 PACKAGE" for each file image/guest-userland.sh copied into a guest (guest-shipped.sh SHIPPED_BYTES).
+COPIED = "agentos.md5sums"
 INITRD_STATUS = "/usr/share/agentos/initrd.dpkg-status"
 # A C++ runtime's own code: strings libsupc++ and libc++abi hold (the verbose terminate handlers'
 # messages; __class_type_info's type name, which only the runtime defines, NUL on each side so the tail of
@@ -74,12 +80,14 @@ CXX_MARKS = (b"terminate called after throwing an instance of '", b"\0N10__cxxab
              b"terminating due to uncaught exception of type ")
 CXX_NEEDED = re.compile(r"^lib(std)?c\+\+\.so")
 BUILDINFO = b"\xff Go buildinf:"
+SHT_NOBITS = 8
+# The function table formats read (Go 1.18 and 1.20 onward); an older one is unread.
+PCLN_MAGICS = (0xFFFFFFF0, 0xFFFFFFF1)
 # The largest file the sha256 kind may declare: gVisor's sidecars are 1.4 KiB; a static libc is far larger.
 SHA256_MAX = 16384
-# A Go binary's section names, for one whose build info is missing.
-GO_SECTIONS = (b"\0.gopclntab\0", b"\0.go.buildinfo\0")
 # runtime/cgo's C code (gcc_libinit.c _cgo_try_pthread_create's message): in every cgo binary, static or
-# dynamic, glibc or musl, and in no binary built with cgo off.
+# dynamic, glibc or musl, and in no binary built with cgo off. An external link, the one way C reaches a
+# Go binary outside its function table, needs cgo (Go refuses -linkmode=external with cgo off).
 CGO_MARK = b"pthread_create failed"
 
 
@@ -94,46 +102,106 @@ def header(data):
     return struct.unpack_from("<HH", data, 16)
 
 
+def sections(data):
+    """{name: (file offset, size)} of ELF bytes DATA's section header table ({} when it has none);
+    Unread when the table or a section lies outside the file (L3 7068815628 point 4a)."""
+    try:
+        if data[4] == 2:
+            shoff, = struct.unpack_from("<Q", data, 40)
+            entsize, num, strndx = struct.unpack_from("<HHH", data, 58)
+            form, want = "<IIQQQQ", 64
+        else:
+            shoff, = struct.unpack_from("<I", data, 32)
+            entsize, num, strndx = struct.unpack_from("<HHH", data, 46)
+            form, want = "<IIIIII", 40
+        if num == 0:
+            return {}
+        if entsize != want or shoff + num * want > len(data) or strndx >= num:
+            raise Unread("its section header table is not inside the file")
+        heads = [struct.unpack_from(form, data, shoff + k * want) for k in range(num)]
+        out = {}
+        for name, typ, _flags, _addr, off, size in heads:
+            if typ != SHT_NOBITS and off + size > len(data):
+                raise Unread("a section lies past the end of the file")
+            out[name] = (off, size) if typ != SHT_NOBITS else (off, 0)
+        names = data[heads[strndx][4]:heads[strndx][4] + heads[strndx][5]]
+        return {names[n:names.index(b"\0", n)].decode("latin-1"): v for n, v in out.items()}
+    except (struct.error, IndexError, ValueError) as e:
+        raise Unread("its section header table cannot be read (%s)" % e)
+
+
+def no_line_funcs(table):
+    """The functions of Go function table bytes TABLE (.gopclntab) that have no line table, the linker's own
+    "go:" markers aside: code an internal link took from a host object (a .syso), which has no Go
+    source (L3 7068815628 point 4b). Unread for a format this cannot read."""
+    try:
+        magic, = struct.unpack_from("<I", table, 0)
+        if magic not in PCLN_MAGICS or table[7] != 8:
+            raise Unread("its Go function table is of a format this cannot read (magic %#x)" % magic)
+        nfunc, _files, _text, names, _cu, _filetab, _pctab, funcs = struct.unpack_from("<8Q", table, 8)
+        out = []
+        for k in range(nfunc):
+            _entry, off = struct.unpack_from("<II", table, funcs + 8 * k)
+            # _func: entryOff, nameOff, args, deferreturn, pcsp, pcfile, pcln (the same in both formats).
+            _e, name, _a, _d, _sp, _file, pcln = struct.unpack_from("<IiIIIII", table, funcs + off)
+            start = names + name
+            shown = table[start:table.index(b"\0", start)].decode("latin-1")
+            if pcln == 0 and not shown.startswith("go:"):
+                out.append(shown)
+        return out
+    except (struct.error, IndexError, ValueError) as e:
+        raise Unread("its Go function table cannot be read (%s)" % e)
+
+
 def go_cgo(data):
-    """A Go binary's cgo state, read from DATA: "0" or "1" from its build info's CGO_ENABLED; for a Go
-    binary whose build info records no setting (Bazel's rules_go, as gVisor's release is built) or that
-    has none (a .gopclntab section but no .go.buildinfo, as esbuild's release), "cgo" when it holds
-    runtime/cgo's C code (CGO_MARK) and "none" when it does not; None when DATA is no Go binary. Unread
-    when the build info is of a form this cannot read (pre-1.18, by pointer)."""
-    i = data.find(BUILDINFO)
-    while i >= 0 and i % 16:
-        i = data.find(BUILDINFO, i + 1)
-    if i < 0:
-        if not any(m in data for m in GO_SECTIONS):
-            return None
-        return "cgo" if CGO_MARK in data else "none"
-    if len(data) < i + 32 or not data[i + 15] & 2:
-        raise Unread("Go build info is not inline (Go before 1.18?)")
-    j, out = i + 32, []
-    for _ in range(2):
-        n = shift = 0
-        while True:
-            if j >= len(data):
-                raise Unread("Go build info is truncated")
-            b = data[j]
-            j += 1
-            n |= (b & 0x7F) << shift
-            shift += 7
-            if not b & 0x80:
-                break
-        out.append(data[j:j + n])
-        j += n
-    m = re.search(rb"(?m)^build\tCGO_ENABLED=(\d)$", out[1])
-    if m:
-        # Build info saying cgo off is held to the code too (Security 7068790342 R2): a file that holds
-        # runtime/cgo's C code is not taken as cgo off on its build info's word.
-        return "0-cgo" if m.group(1) == b"0" and CGO_MARK in data else m.group(1).decode()
-    return "cgo" if CGO_MARK in data else "none"
+    """A Go binary's cgo state, read from DATA: None when its section headers name no .gopclntab (no Go
+    binary, whatever bytes it holds). Else the build info's CGO_ENABLED, read at .go.buildinfo, "0" or
+    "1", or "none" when there is no build info (esbuild's release) or it records no setting (Bazel's
+    rules_go, as gVisor's release is built); suffixed "-cgo" ("cgo" for none) when the file holds
+    runtime/cgo's C code (CGO_MARK), or "-c" ("c" for none) when its function table lists a function
+    with no line table (no_line_funcs). Unread when the headers, the table or the build info cannot be
+    read (build info before Go 1.18 is by pointer)."""
+    secs = sections(data)
+    if ".gopclntab" not in secs:
+        return None
+    off, size = secs[".gopclntab"]
+    setting = "none"
+    if ".go.buildinfo" in secs:
+        i, n = secs[".go.buildinfo"]
+        if data[i:i + len(BUILDINFO)] != BUILDINFO:
+            raise Unread(".go.buildinfo does not start with Go's build info")
+        if n < 32 or not data[i + 15] & 2:
+            raise Unread("Go build info is not inline (Go before 1.18?)")
+        j, end, out = i + 32, i + n, []
+        for _ in range(2):
+            m = shift = 0
+            while True:
+                if j >= end:
+                    raise Unread("Go build info is truncated")
+                b = data[j]
+                j += 1
+                m |= (b & 0x7F) << shift
+                shift += 7
+                if not b & 0x80:
+                    break
+            out.append(data[j:j + m])
+            j += m
+        found = re.search(rb"(?m)^build\tCGO_ENABLED=(\d)$", out[1])
+        if found:
+            setting = found.group(1).decode()
+    # Build info saying cgo off is held to the code too (Security 7068790342 R2).
+    if setting != "1" and CGO_MARK in data:
+        return "cgo" if setting == "none" else "0-cgo"
+    if setting != "1" and no_line_funcs(data[off:off + size]):
+        return "c" if setting == "none" else "0-c"
+    return setting
 
 
 def go_shown(go):
     return {"0": "Go CGO_ENABLED=0", "1": "Go CGO_ENABLED=1", "none": "Go, no cgo setting, no cgo code",
-            "cgo": "Go, no cgo setting, cgo code", "0-cgo": "Go CGO_ENABLED=0 but cgo code"}[go]
+            "cgo": "Go, no cgo setting, cgo code", "0-cgo": "Go CGO_ENABLED=0 but cgo code",
+            "c": "Go, no cgo setting, C functions with no line table",
+            "0-c": "Go CGO_ENABLED=0 but C functions with no line table"}[go]
 
 
 def classify(path):
@@ -146,10 +214,10 @@ def classify(path):
     e_type, machine = header(data)
     if e_type not in (ET_EXEC, ET_DYN) or machine not in MACHINES:
         return None
-    _syms, needed, _soname, read, how = import_sweep.read_elf(path)
+    _syms, needed, _soname, read, _lookup, static = import_sweep.read_elf(path)
     if not read:
         raise Unread("objdump cannot read it")
-    if how == "static":
+    if static:
         why = "static"
     elif any(CXX_NEEDED.match(n) for n in needed):
         return None
@@ -157,7 +225,8 @@ def classify(path):
         why = "c++ runtime"
     else:
         return None
-    return {"why": why, "sha256": hashlib.sha256(data).hexdigest(), "go": go_cgo(data), "size": len(data)}
+    return {"why": why, "sha256": hashlib.sha256(data).hexdigest(), "md5": hashlib.md5(data).hexdigest(),
+            "go": go_cgo(data), "size": len(data)}
 
 
 def listed(files):
@@ -175,12 +244,13 @@ def listed(files):
 
 
 def installed(text):
-    """The name of each installed package in a dpkg status text (as tools/vulncheck.py dpkg_installed reads it)."""
-    out = set()
+    """{name: version} of each installed package in a dpkg status text (as tools/vulncheck.py
+    dpkg_installed reads it)."""
+    out = {}
     for stanza in re.split(r"\n\s*\n", text):
         f = dict(m.groups() for m in re.finditer(r"(?m)^([A-Za-z-]+):[ \t]*(.*)$", stanza))
         if f.get("Status", "").endswith(" installed") and f.get("Package"):
-            out.add(f["Package"])
+            out[f["Package"]] = f.get("Version")
     return out
 
 
@@ -209,6 +279,11 @@ def context(out, config=CONFIG):
         parts = line.split(None, 1)
         if len(parts) == 2:
             md5["/" + parts[1].strip().lstrip("/")] = parts[0]
+    copied = {}
+    for line in (read_text(out / "guest" / COPIED) or "").splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            copied.setdefault(parts[0], set()).add(parts[1])
     main = read_text(out / STATUS)
     try:
         holders = {b["holder"] for b in json.loads(pathlib.Path(config).read_text()).get("bundled", [])}
@@ -216,7 +291,7 @@ def context(out, config=CONFIG):
         holders = set()
     return {"lists": lists, "md5": md5, "status": {"tree": installed(main) if main else None,
                                                    "guest": lists["guest"]["status"]},
-            "holders": holders}
+            "holders": holders, "copied": copied}
 
 
 def read_allow(path):
@@ -240,7 +315,9 @@ def kind_refusal(shown, place, info, kind, arg, ctx, place_status):
     if kind == "go":
         if info["go"] in ("0", "none"):
             return None
-        return "not a Go binary" if info["go"] is None else "a Go binary with cgo (%s)" % go_shown(info["go"])
+        if info["go"] is None:
+            return "not a Go binary"
+        return "a Go binary with %s (%s)" % ("C code" if info["go"] in ("c", "0-c") else "cgo", go_shown(info["go"]))
     if kind == "sha256":
         # Bounded by what the check reads (Security 7068790342 R1): only a static file too small to hold a
         # C library can be declared by review alone.
@@ -257,19 +334,29 @@ def kind_refusal(shown, place, info, kind, arg, ctx, place_status):
             return "no link inputs recorded for its SHA-256 %s in %s/%s" % (info["sha256"], arg, INPUTS)
         if lst["status"] is None:
             return "%s/%s is missing or empty" % (arg, STATUS)
-        missing = sorted(pkgs - lst["status"])
+        missing = sorted(pkgs - set(lst["status"]))
         return "its link inputs %s are not in %s/%s" % (missing, arg, STATUS) if missing else None
     if kind == "package":
         if place_status is None:
             return "its tree has no dpkg status to own it"
         if arg not in place_status:
             return "package %s is not installed in its tree's status" % arg
-        if place == "tree" and not shown.startswith(GUEST_ROOTS):
-            want = ctx["md5"].get(shown) or ctx["md5"].get(shown[4:] if shown.startswith("/usr/") else None)
-            with open(info["real"], "rb") as f:
-                got = hashlib.md5(f.read()).hexdigest()
-            if want != got:
-                return "its bytes are not the ones dpkg installed at that path (%s)" % MD5SUMS
+        if place == "tree" and shown.startswith(GUEST_ROOTS):
+            # Bound to the bytes guest-userland.sh copied (Potency 7068815856 point 4).
+            if arg not in ctx["copied"].get(info["md5"], ()):
+                return "its bytes (MD5 %s) are not a copy guest-userland.sh recorded from %s (guest/%s)" % (
+                    info["md5"], arg, COPIED)
+            return None
+        if place != "tree":
+            # An initrd keeps no md5sums; it installs from the main tree's pinned sources, so PKG at the
+            # main tree's version ships the main tree's bytes at this path.
+            main = (ctx["status"]["tree"] or {}).get(arg)
+            if main is None or place_status[arg] != main:
+                return "package %s is at version %s here and %s in the main tree, so its bytes cannot be held to %s" % (
+                    arg, place_status[arg], main, MD5SUMS)
+        want = ctx["md5"].get(shown) or ctx["md5"].get(shown[4:] if shown.startswith("/usr/") else None)
+        if want != info["md5"]:
+            return "its bytes are not the ones dpkg installed at that path (%s)" % MD5SUMS
         return None
     if arg not in ctx["holders"]:
         return "assurance/vulncheck.json \"bundled\" names no holder %r" % arg
@@ -346,8 +433,6 @@ def initrd_places(out, places, unread, statuses):
                     pathlib.Path(f).write_bytes(body)
                     files[shown] = f
             places[key], unread[key] = listed(files)
-            for shown, info in places[key].items():
-                info["real"] = None  # md5 is read only for the main tree
         statuses[key] = status
 
 
@@ -355,8 +440,6 @@ def run(root, usr, out, allow):
     files = tree_files(root, usr)
     places, unread, statuses = {}, {}, {}
     places["tree"], unread["tree"] = listed(files)
-    for shown, info in places["tree"].items():
-        info["real"] = files[shown]
     if usr is not None:
         initrd_places(out, places, unread, statuses)
     entries = read_allow(allow)

@@ -13,7 +13,8 @@ and so does a DECISIONS.md whose only replay conflicts are table rows both sides
 keeping both sides' rows verbatim, either side first (#3224, #3233), the PR's rows renumbered or not when no other PR file names an old ID (#4030),
 and so does a `*_allow.txt` whose lines are main's plus the PR's line changes, in any order, a line both added kept once or twice (#3991, #6375),
 and so does any allow file (tools/record_merge.py CLASSES) that is the driver's clean merge of both sides (#6375),
-and so does a MUTANTS-EQUIVALENT whose entries are main's plus the PR's entry changes, each side's entries in its own order (#6314). A replay file that fails a cheap gate never reads
+and so does a MUTANTS-EQUIVALENT whose entries are main's plus the PR's entry changes, each side's entries in its own order (#6314),
+a PR entry dropped for main's other proof of its key counting as removed (#6472). A replay file that fails a cheap gate never reads
 same as is: a duplicate row ID (doclint) in an ASSUMPTIONS.md or DECISIONS.md, a MUTANTS-EQUIVALENT key on two different lines (an entry or row both sides added word for word is one, #6358), or an ASSUMPTIONS.md row or entry that
 `merge=union` brought back (in the merge base and main, not in the reviewed commit). A head that resolves each union
 hunk without those rows, keeping its rows inside the hunk, reads same (#3400, #3401), unless `git merge-file`
@@ -52,6 +53,10 @@ an armed PR past a cancelled one: `--runs` is the head's and merge base's Action
 workflow's newest pull_request run on the head must pass, else it prints `needs-check <workflow>:<state> ...` and
 exits 1. Without `--runs` it prints `needs-runs` and exits 1, so no caller reads `same` with the checks unread;
 `tools/premerge_runs.sh` builds the runs file, for premerge.yml and for a local check alike (#5386).
+Then it reads the MUTANTS-EQUIVALENT records on the merge of `head` into `base` (PREMERGE-records-merge, #6716), with this
+checkout's `tools/mutgate.py records` (Go on PATH): a problem the merge has and `base` lacks prints `needs-records <records>`,
+a check that could not run `needs-records error`, and a PR changing the check itself while main changed what it reads since
+the merge base `needs-main-merge <files>`; each exits 1 (`records_merged`).
 
 `--bot` is the gate form for the generated-file bot PRs, which carry no verdict (PREMERGE-wire, #1860): it
 prints `bot` (exit 0) only when `head-ref` is one of the BOT branches, base..head changes nothing but that
@@ -66,12 +71,16 @@ trailer names.
 import ast
 import collections
 import importlib.util
+import io
 import json
+import os
 import pathlib
 import re
 import secrets
+import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import zipfile
 import zlib
@@ -125,8 +134,8 @@ REPLAY_INPUTS = rf"{_CFG}\.gitattributes|\.gitmodules"
 NOT_REPLAY_INPUTS = (".gitignore", ".mailmap")
 MARK_PATHS = re.compile(rf"{_CFG}CLAUDE(?:\.local)?\.md|{_CFG}AGENTS\.md|{_CFG}\.mcp\.json|{_CFG}\.claude(?:/.*)?|"
                         r"docs/OPERATING\.md|docs/LANES\.md|\.github/.*|broker/core/core\.txt|"
-                        rf"tools/({'|'.join(GATE_TOOLS)})\.py|tools/(old_core|trusted_core|ceilings)\.txt|tools/ci_scope[^/]*|"
-                        r"tests/test_premerge[^/]*|reviews/[^/]+/README[^/]*|" + REPLAY_INPUTS
+                        rf"tools/({'|'.join(GATE_TOOLS)})\.py|tools/(old_core|trusted_core|ceilings)\.txt|tools/ci_s(?:cope|plit)[^/]*|"
+                        r"tests/test_premerge[^/]*|reviews/[^/]+/README[^/]*|tools/pins\.py|tests/test_pins\.py|" + REPLAY_INPUTS
                         + (rf"|tools/({_IMPORTED})\.py|tests/test_({_IMPORTED})[^/]*" if _IMPORTED else ""),
                         re.DOTALL)
 
@@ -608,12 +617,26 @@ def _entry_keys(lines):
     return [json.dumps({k: v for k, v in e.items() if k not in ("reason", "accepted")}, sort_keys=True) for e in entries]
 
 
+def _proved_on_main(pr, mb, main, want):
+    """The entries of `pr` (the reviewed commit, each entry once) that `want` (the head's entries) drops for main's
+    other proof of its key: a key the merge base lacks and `pr` and main each hold on one line, `want` holding
+    main's line. A key in the merge base is an edit by each side, a conflict however resolved (#6472)."""
+    keys = [_entry_keys(x) for x in (pr, mb, main)]
+    if None in keys:
+        return set()
+    mine, base, theirs = (collections.Counter(k) for k in keys)
+    proof = dict(zip(keys[2], main))
+    return {x for x, k in zip(pr, keys[0]) if mine[k] == theirs[k] == 1 and not base[k]
+            and x not in want and proof[k] != x and proof[k] in want}
+
+
 def _records_kept(cwd, tree, head, path, reviewed, onto):
     """True when `path` is a MUTANTS-EQUIVALENT (merge=union, .gitattributes) and `head`'s lines, as a multiset,
     are main's plus the lines the reviewed commit added less those it removed, with each side's entries in that
     side's order and no key on two different lines: a union, or a hand merge keeping both sides (#6314). An entry
     both sides added word for word counts once, in either side's place (#6358). An entry the PR or the resolution
-    edited, dropped or reordered, a key on two lines, or an entry the union brought back, reads False; None for a
+    edited, dropped or reordered, a key on two lines, or an entry the union brought back, reads False, except a PR
+    entry dropped for main's other proof of a key the merge base lacks (`_proved_on_main`, #6472); None for a
     criss-cross merge, which reads as changed (L3 on #6315: its union can bring back an entry unseen)."""
     if path.rsplit("/", 1)[-1] != RECORD:
         return False
@@ -626,6 +649,10 @@ def _records_kept(cwd, tree, head, path, reviewed, onto):
     pr, mb, main, want = (_git(cwd, "show", f"{t}:{path}", ok=(0, 128)).split(b"\n") for t in (reviewed, bases[0], onto, head))
     count, is_entry = collections.Counter, lambda x: bool(x.strip()) and not x.lstrip().startswith(b"#")
     entry = lambda lines: list(dict.fromkeys(x for x in lines if is_entry(x)))  # each entry once, first place
+    # A PR entry whose key main added with another proof, `head` holding main's line and not the PR's, is a PR
+    # line the resolution dropped for main's reviewed one: the PR's change only shrinks (#6472, record_merge.py).
+    drop = _proved_on_main(entry(pr), entry(mb), entry(main), set(entry(want)))
+    pr = [x for x in pr if x not in drop]
     # An entry repeated word for word is one entry to every reader (#6358): entries compare as a set, comments by count.
     expect, have = count(main) + (count(pr) - count(mb)) - (count(mb) - count(pr)), count(want)
     if ({x for x in expect if is_entry(x)} != {x for x in have if is_entry(x)}
@@ -709,7 +736,7 @@ def _named(v, kind, pr):
 # waits on Mark's #2919 paste). PREMERGE-held-rest (#5385) holds every other PR-triggered workflow file too, the slow
 # image and real-model ones included: a long run only delays the merge, while an unheld one merges past a cancel.
 HELD = {"assurance": (), "vulncheck": (), "image": ("image-vulncheck",), "lane-gate": (), "word-budget": (),
-        "formal": (), "keycheck": (), "mutgate": (), "infer-real": (), "vision-real": (), "testkit": (),
+        "formal": (), "keycheck": (), "infer-real": (), "vision-real": (), "testkit": (),
         "enforcer-image": (), "camnode-image": (), "drone-sitl": ()}
 # The PR-triggered workflow files left out of HELD: every job of ci and trusted-base is a required check of main's
 # ruleset, and premerge is the gate itself. A workflow file with a PR trigger is in exactly one of the two (#5385).
@@ -720,10 +747,28 @@ UNHELD = ("ci", "trusted-base", "premerge")
 # keeps the #3532 excusal of a failure the head inherited. PREMERGE-held-class-table (#6425): every HELD workflow has a
 # class here, a test keeps the keys equal to HELD's, and one missing from the table is read as DIFF_GATE (fail closed).
 DIFF_GATE, TREE = "diff-gate", "tree"
-HELD_CLASS = {"mutgate": DIFF_GATE, "lane-gate": DIFF_GATE, "word-budget": DIFF_GATE,
+HELD_CLASS = {"lane-gate": DIFF_GATE, "word-budget": DIFF_GATE,
               "assurance": TREE, "vulncheck": TREE, "image": TREE, "formal": TREE, "keycheck": TREE, "infer-real": TREE,
               "vision-real": TREE, "testkit": TREE, "enforcer-image": TREE, "camnode-image": TREE, "drone-sitl": TREE}
 PASSED = ("success", "skipped")
+# CI-mutgate-after-ci (#6569): mutgate.yml is a reusable workflow that ci.yml's `mutgate` job calls on a pull request once
+# every other ci job passed, so its jobs are `mutgate / <job>` in ci's run, and main's ruleset requires none of them.
+# --check holds `mutgate:<state>` until ci's newest pull_request run on the head completed with success, its one
+# `mutgate / claimed` job succeeded and no `mutgate / ` job failed. The calling job skipped (a ci job failed, or any
+# other cause) leaves no `mutgate / claimed` job, so it holds as mutgate:skipped: a skip never reads as a pass. This
+# check applies when the merge base's ci.yml calls mutgate.yml or the head's does, so a PR that drops the call from its
+# own ci.yml still owes it. A PR from before the call (neither calls it) is held by its standalone mutgate.yml
+# pull_request run instead, a DIFF_GATE run as HELD held it, owed whenever main calls it (checks_held).
+CI = ".github/workflows/ci.yml"
+LEGACY_MUTGATE = "mutgate"
+MUTGATE_JOB, MUTGATE_CLAIM = "mutgate / ", "mutgate / claimed"
+_CALLS_MUTGATE = re.compile(r"^ +uses: *\./\.github/workflows/mutgate\.yml *(?:#.*)?$", re.M)
+
+
+def _calls_mutgate(cwd, ref):
+    """Whether `ref`'s ci.yml calls mutgate.yml."""
+    shown = subprocess.run(["git", "show", f"{ref}:{CI}"], cwd=cwd, capture_output=True)
+    return not shown.returncode and bool(_CALLS_MUTGATE.search(shown.stdout.decode(errors="replace")))
 NO_RUNS = "needs-runs: every verdict is in; pass --runs <runs.json> (tools/premerge_runs.sh builds it) to read the held checks"
 _GLOB = re.compile(r"[A-Za-z0-9._/*-]+")
 _ITEM = re.compile(r"""\s*-\s*(?:"([^"]*)"|'([^']*)'|([^\s#'"]+))\s*(?:#.*)?""")
@@ -837,12 +882,35 @@ def _base_failed(runs, path, onto, repo):
     return {n for n, c in _jobs(r, 1) or [] if c == "failure"}
 
 
+def mutgate_held(runs, pr, sha):
+    """`mutgate:<state>` unless ci's newest pull_request run on `sha` bound to this PR passed the mutation gate."""
+    bound = [(_bind(r, pr, runs["repo"]), r) for r in runs["head"]
+             if r.get("path") == CI and r.get("head_sha") == sha and r.get("event") == "pull_request"]
+    mine = [r for b, r in bound if b == "ours"]
+    if not mine:
+        return ["mutgate:unbound" if any(b == "unbound" for b, _ in bound) else "mutgate:missing"]
+    r = max(mine, key=lambda r: r.get("id") or 0)
+    if r.get("status") != "completed":
+        return [f"mutgate:{r.get('status') or 'unknown'}"]
+    jobs = _jobs(r, r.get("run_attempt"))
+    if jobs is None:
+        return ["mutgate:unknown"]
+    ours = [(n, c) for n, c in jobs if isinstance(n, str) and n.startswith(MUTGATE_JOB)]
+    claims = [c for n, c in ours if n == MUTGATE_CLAIM]
+    if claims != ["success"]:
+        return [f"mutgate:{claims[0] if len(claims) == 1 and claims[0] else 'skipped'}"]
+    bad = [c for _, c in ours if c not in PASSED]
+    if bad:
+        return [f"mutgate:{bad[0] or 'unknown'}"]
+    return [] if r.get("conclusion") == "success" else [f"mutgate:{r.get('conclusion') or 'unknown'}"]
+
+
 def checks_held(cwd, runs, head="HEAD", base="origin/main"):
     """`<workflow>:<state>` for each HELD workflow whose newest pull_request run on `head` did not pass.
 
     `runs` is {"repo": ..., "pr": {"number", "repo", "branch"}, "head": [...], "base": [...]}: this repository, the PR's
     number and head repository and branch, and the Actions runs (API JSON) on the head and on the merge base, each
-    failed one with a `jobs` list (the head's latest attempt, the base's first). Only this PR's runs count (`_bind`). A run passes on `success` or
+    failed one, and ci's, with a `jobs` list (the head's latest attempt, the base's first). Only this PR's runs count (`_bind`). A run passes on `success` or
     `skipped`, or on `failure` when every failed job is one HELD exempts or one that failed on the merge base too, never in
     a workflow HELD_CLASS does not class TREE.
     A queued, running, cancelled or timed-out run holds, and so does a missing one the workflow's PR trigger owes, as
@@ -855,13 +923,19 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
     onto = _git(cwd, "merge-base", base, head).decode().strip()
     files = [f for f in _git(cwd, *DIFF, onto, sha).decode(errors="surrogateescape").split("\0") if f]
     held = []
-    for name, exempt in HELD.items():
+    # CI-mutgate-after-ci (#6569): a PR whose merge base or head calls mutgate from ci is held by mutgate_held. One from
+    # before the call (neither does) is held, as HELD held it, by its own standalone mutgate.yml run, owed outright once
+    # main calls it, so the open PRs need no new ci run and dropping mutgate.yml escapes nothing.
+    called = _calls_mutgate(cwd, onto) or _calls_mutgate(cwd, sha)
+    legacy = [] if called else [(LEGACY_MUTGATE, ())]
+    main_calls = not called and _calls_mutgate(cwd, base)
+    for name, exempt in [*HELD.items(), *legacy]:
         path = f".github/workflows/{name}.yml"
         bound = [(_bind(r, pr, runs["repo"]), r) for r in runs["head"] if r.get("path") == path
                  and r.get("head_sha") == sha and r.get("event") in ("pull_request", "pull_request_target")]
         mine = [r for b, r in bound if b == "ours"]
         if not mine:
-            if _owed(cwd, sha, base, path, files):
+            if (name == LEGACY_MUTGATE and main_calls) or _owed(cwd, sha, base, path, files):
                 held.append(f"{name}:{'unbound' if any(b == 'unbound' for b, _ in bound) else 'missing'}")
             continue
         r = max(mine, key=lambda r: r.get("id") or 0)
@@ -875,7 +949,94 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
             if bad and all(c == "failure" and n in excused for n, c in bad):
                 continue
         held.append(f"{name}:{state or 'unknown'}")
+    if called:
+        held += mutgate_held(runs, pr, sha)
     return held
+
+
+# PREMERGE-records-merge (#6716): CI resolves the MUTANTS-EQUIVALENT records on a PR's merge ref when CI runs, and main
+# need not be in the branch, so two PRs each green on their own base can break main's `mutgate.py records` together
+# (#6606 with #6561, fixed by #6713; #6640 with #6561, fixed by #6715). The gate reads them again on the merge it is
+# about to release. RECORDS_TOOLS change what `records` reports; RECORDS_TREE is what it reads.
+# Derived like the gate files: every tools/ module mutgate.py loads, directly or through risk_tier.py (record_merge.py
+# reads core.txt), plus the lister it builds and the tier list, copied as bytes, never read here (#6717 L3).
+CORE = risk_tier.CORE_LIST.relative_to(risk_tier.CORE_LIST.parents[2]).as_posix()
+RECORDS_TOOLS = (*sorted(f"tools/{m}.py" for m in gate_modules(roots=("mutgate",))), "tools/mutgate_stmts.go", CORE)
+RECORDS_TREE = ("broker", ":(exclude)broker/vendor")
+RECORDS_TIMEOUT = 90  # seconds a side, two sides inside premerge-gate's 8 minutes
+TOOLS = pathlib.Path(__file__).resolve().parent
+# The child's environment: no token the gate step holds (GH_TOKEN, STATUS_TOKEN) reaches it.
+RECORDS_ENV = ("PATH", "HOME", "TMPDIR", "LANG", "GOROOT", "GOCACHE")
+NAMED = re.compile(r"broker/[^\s:'\"]+")
+
+
+def _records(cwd, treeish, tmp):
+    """The problems this checkout's `tools/mutgate.py records` prints on treeish's broker/ (vendor/ left out), run in a
+    copy under tmp with this checkout's tools/ and broker/core/core.txt, so the tree is only data, as in mutgate.yml's
+    trusted jobs. A run that fails naming no problem, or times out, returns why."""
+    dest = pathlib.Path(tempfile.mkdtemp(dir=tmp))
+    if not _git(cwd, "ls-tree", treeish, "--", "broker").strip():
+        return set()  # no broker/: no record to read
+    try:
+        with tarfile.open(fileobj=io.BytesIO(_git(cwd, "archive", "--format=tar", treeish, "--", *RECORDS_TREE))) as t:
+            t.extractall(dest, filter="data")  # refuses absolute paths and links leading out of dest
+    except tarfile.FilterError as e:
+        return {f"mutgate records: the tree is refused: {e}"}
+    shutil.copytree(TOOLS, dest / "tools", ignore=shutil.ignore_patterns("__pycache__"))
+    core = dest / CORE
+    core.parent.mkdir(parents=True, exist_ok=True)
+    core.unlink(missing_ok=True)
+    shutil.copyfile(TOOLS.parent / CORE, core)
+    env = {k: os.environ[k] for k in RECORDS_ENV if k in os.environ} | {"GOFLAGS": "", "GOWORK": "off", "GOTOOLCHAIN": "local"}
+    try:
+        r = subprocess.run([sys.executable, "-I", str(dest / "tools/mutgate.py"), "records"], cwd=dest, env=env,
+                           capture_output=True, text=True, timeout=RECORDS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return {f"mutgate records ran past {RECORDS_TIMEOUT}s"}
+    # A named line is read as the run's whole answer even when the child then exits non-zero: `cmd_records` prints its
+    # problems only once every record is read, so a crash prints none. A mutgate that streams problems as it goes
+    # must keep a crash distinguishable here, or a crash after a line main also prints would subtract to a pass.
+    found = {l for l in r.stderr.splitlines() if l.startswith("mutgate: ")}
+    return found or ({f"mutgate records exited {r.returncode}"} if r.returncode else set())
+
+
+def _files(cwd, a, b, *paths):
+    return [f for f in _git(cwd, *DIFF, a, b, "--", *paths).decode(errors="surrogateescape").split("\0") if f]
+
+
+def records_merged(cwd, head="HEAD", base="origin/main"):
+    """(why, [problem]) the merge of head into base fails MUTANTS-EQUIVALENT records it did not fail on base (#6716),
+    or (None, []).
+
+    The merge `git merge-tree` writes is read with this checkout's tools, on the merge and, when that fails, on base: a
+    problem naming broker/ that base's tree has too is main's own red and holds nothing; any other failure (the lister
+    did not build, a timeout) holds. A conflicted merge, or one that leaves broker/ as base has it, reads none: GitHub
+    cannot merge the first, and the second is base's tree. A PR changing RECORDS_TOOLS changes the check itself, which
+    the gate never runs from a PR, so it holds as `needs-main-merge` while main has changed, since the PR's merge base,
+    a record, a .go file under a directory holding one, or RECORDS_TOOLS: merging main in has CI run the PR's check on them."""
+    onto = _git(cwd, "merge-base", base, head).decode().strip()
+    mine = _files(cwd, onto, head, *RECORDS_TOOLS)
+    if mine:
+        held = {f.rsplit("/", 1)[0] for f in _git(cwd, "ls-tree", "-r", "-z", "--name-only", base, "--", "broker")
+                .decode(errors="surrogateescape").split("\0") if f.endswith("/" + RECORD)}
+        if _files(cwd, onto, base, *RECORDS_TOOLS, f":(glob)broker/**/{RECORD}", *(f":(glob){d}/**/*.go" for d in held)):
+            return "needs-main-merge " + " ".join(mine), []
+    out = subprocess.run(["git", "merge-tree", "--write-tree", "--no-messages", base, head], cwd=cwd, capture_output=True)
+    if out.returncode == 1:  # conflicts: GitHub cannot merge it
+        return None, []
+    if out.returncode:  # an error (the object store not writable, a bad ref) never reads as a conflict
+        raise subprocess.CalledProcessError(out.returncode, out.args, out.stdout, out.stderr)
+    tree = out.stdout.decode().split()[0]
+    if not _files(cwd, base, tree, *RECORDS_TREE):
+        return None, []
+    with tempfile.TemporaryDirectory() as tmp:
+        new = _records(cwd, tree, tmp)
+        if any(NAMED.search(p) for p in new):
+            new -= _records(cwd, base, tmp)
+    if not new:
+        return None, []
+    names = sorted({m.group(0) if (m := NAMED.search(p)) else "error" for p in new})
+    return "needs-records " + " ".join(names), sorted(new)
 
 
 def main(argv):
@@ -929,6 +1090,12 @@ def main(argv):
         held = checks_held(".", runs, head, base)
         if held:
             print("needs-check " + " ".join(held))
+            return 1
+        why, problems = records_merged(".", head, base)
+        if why:
+            for p in problems:
+                print(p, file=sys.stderr)
+            print(why)
             return 1
         print("same")
         return 0
