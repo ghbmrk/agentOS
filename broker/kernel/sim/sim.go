@@ -1060,8 +1060,8 @@ func (s *sim) check() error {
 	return nil
 }
 
-// Run drives one seed and returns the trace, or the first violated invariant.
-func Run(c Config) (*Result, error) {
+// newSim boots seed c's machine and grants its four roots, ready for its first op.
+func newSim(c Config) (*sim, error) {
 	rng := rand.New(rand.NewPCG(c.Seed, 0xa6e57))
 	var nseed [32]byte
 	for i := range nseed {
@@ -1098,6 +1098,15 @@ func Run(c Config) (*Result, error) {
 		if hk, err := key.Derive(k, s.holder.priv, s.holder.pub, key.LimitHold(hour/6, hour/2)); err == nil {
 			s.pool = append(s.pool, hk)
 		}
+	}
+	return s, nil
+}
+
+// Run drives one seed and returns the trace, or the first violated invariant.
+func Run(c Config) (*Result, error) {
+	s, err := newSim(c)
+	if err != nil {
+		return nil, err
 	}
 	fail := func(err error) (*Result, error) {
 		return &Result{Trace: s.trace}, fmt.Errorf("seed %d op %d: %w\n%s", c.Seed, len(s.trace), err, strings.Join(tail(s.trace), "\n"))
