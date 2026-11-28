@@ -11,9 +11,9 @@ import (
 )
 
 // Synthetic page nonces of two phones.
-var (
-	phoneA = strings.Repeat("a1", 16)
-	phoneB = strings.Repeat("b2", 16)
+const (
+	phoneA = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+	phoneB = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
 )
 
 // CTRL-card-sock s3 (#1273): a right code whose answer never reached the
