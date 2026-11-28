@@ -47,6 +47,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "model": body.get("model") if isinstance(body, dict) else None,
             "auth_canary": bool(CANARY) and CANARY in (self.headers.get("Authorization") or ""),
             "outputs": outputs,
+            # The tools the request declares, as namespace.name (code mode puts them all in an
+            # additional_tools item).
+            "tools": [f"{ns.get('name')}.{t.get('name')}" if ns.get("type") == "namespace"
+                      else str(ns.get("name") or ns.get("type"))
+                      for x in (body.get("input", []) if isinstance(body, dict) else [])
+                      if isinstance(x, dict) and x.get("type") == "additional_tools"
+                      for ns in x.get("tools", [])
+                      for t in (ns.get("tools", []) if ns.get("type") == "namespace" else [ns])],
         }
         with open(LOG, "a") as f:
             f.write(json.dumps(entry) + "\n")

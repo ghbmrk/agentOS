@@ -3,7 +3,7 @@ name: trusted-base
 # SPEC KRN-2) and shows the table in this check's job summary; it fails a PR that adds a parser
 # without a `<key> #<PR> -- <reason>` line added to tools/trusted_base_reasons.txt (a body line
 # waives nothing, #6395: it can change after the reviews at the same head), or grows the trusted core
-# (tools/trusted_core.txt) without a `Trusted-core:` line. It runs on
+# (tools/trusted_core.txt) without a `trusted-core #<PR> -- <decision ID>` line there. It runs on
 # pull_request_target, so the workflow and tools/trusted_base.py are the base branch's copies:
 # a PR cannot loosen the check it is measured by. The base side is base.sha; the head side is
 # the PR head merged onto it with `git merge-tree`, so the measure is what lands and a branch
@@ -27,7 +27,7 @@ on:
 # older one (CI-main-supersede, #6394), so main's tip always finishes. A rerun (attempt 2 or later) and
 # every other run is a group of its own (run id), so it never cancels or replaces the current head's run.
 concurrency:
-  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && 'main' || format('run-{0}', github.run_id) }}
+  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && 'head' || format('run-{0}', github.run_id) }}
   cancel-in-progress: ${{ (startsWith(github.event_name, 'pull_request') || github.event_name == 'push' && github.ref == 'refs/heads/main') && github.run_attempt == 1 }}
 permissions:
   contents: read

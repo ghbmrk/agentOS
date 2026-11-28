@@ -23,6 +23,11 @@ import time
 FACTOR = 2.5  # a chunk may take this many times its expected time (the rate can halve)
 GROWTH = 4  # a chunk plans at most this many times the previous chunk's measured time
 DEFAULT_CALIBRATE = 20000
+# Executions go may spend minimizing each new input (CI-soak-green, #6571). Its default, 60s per
+# input, held every worker at 0 execs/s for most of a chunk (FuzzDecode: 68 of 80 progress lines
+# in 4 min, 25 new inputs), so chunks overran their caps and found little; at 100x the same 4 min
+# ran with none at 0/s, found 1231 new inputs and a crasher in 2 min. A count, never a duration.
+MINIMIZE = 1000
 # go test's `ok  \tpkg\t0.337s`: the run without the build, which a cold cache makes far longer
 OK_LINE = re.compile(r"^ok\s+\S+\s+([\d.]+)s\b")
 
@@ -119,7 +124,7 @@ def main(argv=None):
         expected = span if rate is None else n / rate
         cap = FACTOR * expected + grace
         cmd = ["go", "test", a.pkg, "-run", "^$", "-fuzz", f"^{a.target}$",
-               "-fuzztime", f"{n}x", "-timeout", f"{math.ceil(cap * 1000) / 1000}s"]
+               "-fuzztime", f"{n}x", "-fuzzminimizetime", f"{MINIMIZE}x", "-timeout", f"{math.ceil(cap * 1000) / 1000}s"]
         t0 = time.monotonic()
         rc, timed_out, ran = run_chunk(cmd, cap * 1.05 + a.slack)
         took = max(time.monotonic() - t0, 1e-9)

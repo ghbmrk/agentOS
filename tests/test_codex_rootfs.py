@@ -28,6 +28,7 @@ NEVER_ON = {
 INSTALLED = {
     "etc/codex/managed_config.toml": CODEX / "managed_config.toml",
     "etc/codex/requirements.toml": CODEX / "requirements.toml",
+    "etc/codex/model_catalog.json": CODEX / "model_catalog.json",
     "usr/lib/agentos/codex/launch.json": CODEX / "launch.json",
     "usr/local/bin/agentos-toolsh": CODEX / "agentos-toolsh",
 }

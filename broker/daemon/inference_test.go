@@ -2079,8 +2079,7 @@ var linkCalls = map[string]bool{
 // package that dials may make, called or taken as a value, and why; a
 // file that dials makes none. Any other file owes an entry by review.
 var linkOK = map[string]map[string]string{
-	"kernel/proc/backup.go":  {"os.Link": "links a backup's content file into its snapshot, under the kernel's backup dir; also held as backups.link, its only use"},
-	"kernel/proc/restore.go": {"os.Rename": "moves a restore's staged content into the content dir"},
+	"kernel/proc/backup.go": {"os.Link": "links a backup's content file into its snapshot, under the kernel's backup dir; also held as backups.link, its only use"},
 }
 
 // linkMethods are the method names that make, move or replace a directory
@@ -2615,15 +2614,21 @@ func dialChrony(sock, reply string) (*net.UnixConn, error) {
 	if got := useOf(t, "kernel/proc", chrony, src(``, `var c = NewChrony("/run/proxy.sock", "/run/r.sock")`)); !strings.Contains(got, "passes NewChrony an address not taken from configuration") {
 		t.Errorf("a literal handed to NewChrony passed: %q", got)
 	}
-	// kernel/proc's reviewed link and rename stand in their own files.
+	// kernel/proc's reviewed link stands in its own file.
 	files := map[string]string{
-		"conn.go":    src(`"net"`, `type Conn struct{ Socket string }; func (c *Conn) dial() { net.Dial("unix", c.Socket) }`),
-		"backup.go":  src(`"os"`, `type backups struct{ link func(a, b string) error }; var bk = backups{link: os.Link}; func g(a, b string) { os.Link(a, b) }`),
-		"restore.go": src(`"os"`, `func h(a, b string) { os.Rename(a, b) }`),
+		"conn.go":   src(`"net"`, `type Conn struct{ Socket string }; func (c *Conn) dial() { net.Dial("unix", c.Socket) }`),
+		"backup.go": src(`"os"`, `type backups struct{ link func(a, b string) error }; var bk = backups{link: os.Link}; func g(a, b string) { os.Link(a, b) }`),
 	}
 	if got := useFiles(t, "kernel/proc", files); got != "" {
-		t.Errorf("kernel/proc's reviewed link and rename flagged: %q", got)
+		t.Errorf("kernel/proc's reviewed link flagged: %q", got)
 	}
+	// The restore lives in a test file until #3186 wires it (#6386), so a
+	// rename in a compiled restore.go has no entry and is refused.
+	files["restore.go"] = src(`"os"`, `func h(a, b string) { os.Rename(a, b) }`)
+	if got := useFiles(t, "kernel/proc", files); !strings.Contains(got, "links or renames (os.Rename)") {
+		t.Errorf("a rename in restore.go passed: %q", got)
+	}
+	delete(files, "restore.go")
 	files["backup.go"] = src(`"os"`, `func g(a, b string) { os.Symlink(a, b) }`)
 	if got := useFiles(t, "kernel/proc", files); !strings.Contains(got, "links or renames (os.Symlink)") {
 		t.Errorf("a symlink in backup.go passed: %q", got)
