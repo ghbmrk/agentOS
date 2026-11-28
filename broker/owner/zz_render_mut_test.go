@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// REQ: CH-10, CH-12, CH-18, CH-19, OP-3
+// REQ: CH-10, CH-12, CH-18, CH-19
 // MUT-kill-5974-owner part 2 (#6670): the render.go, codes.go, state.go
 // and skelfold.go statements that mutgate's deletion left alive on #5974
 // are pinned here, each by a test that fails without it. The tests call
