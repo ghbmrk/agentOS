@@ -178,12 +178,17 @@ const _ uint = LeaseTimeout - 2*ClaimTimeout
 // that record, which it refreshes (bound): for HostTCPTimeout on a TCP
 // connection both ends have answered, which is how long conntrack keeps
 // one idle by default, and for HostTimeout otherwise, longer than conntrack
-// keeps any other idle connection. The set holds at most HostSize records
-// per family. A load carries every record, hold and claim to the new sets
-// (Reload). A connection without a record (its record expired or could not
-// be written, the set was full, or it opened while the ruleset was being
-// replaced) fails closed: its later packets from the segment are dropped,
-// never another host's passed.
+// keeps any other idle connection. Conntrack's idle time counts packets
+// both ways but the record's counts only the host's, so these bound how
+// long the host may stay idle, not the connection: a datagram flow the
+// host only receives on for longer than HostTimeout keeps its conntrack
+// entry and loses its record, and the host's next packet on it is
+// dropped (fails closed; ASSUMPTIONS ENF-ct-bind-2). The set holds at
+// most HostSize records per family. A load carries every record, hold
+// and claim to the new sets (Reload). A connection without a record (its
+// record expired or could not be written, the set was full, or it opened
+// while the ruleset was being replaced) fails closed: its later packets
+// from the segment are dropped, never another host's passed.
 func HostSet(seg string, v6 bool) string { return "host_" + seg + fam(v6) }
 
 // AnswerTimeout is how long, in seconds, an answer lets a new connection
@@ -1203,11 +1208,12 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 		w.line("accept")
 		w.close()
 
-		// The record is refreshed by every packet it passes, for as long
-		// as conntrack keeps the connection idle: a TCP connection both
+		// The record is refreshed by every packet it passes, which are
+		// the host's own (original direction only), for as long as
+		// conntrack keeps the connection idle: a TCP connection both
 		// ends answered for HostTCPTimeout (ct status reads the
 		// connection's, also for a related packet), any other for the
-		// set's HostTimeout.
+		// set's HostTimeout. A reply does not refresh it (HostSet).
 		w.open("chain " + bound(sg.name))
 		for _, v6 := range []bool{false, true} {
 			k, set := hostKey(v6), HostSet(sg.name, v6)
