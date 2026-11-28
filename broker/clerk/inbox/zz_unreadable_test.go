@@ -101,6 +101,7 @@ func TestMailTextReportsWhatItCannotRead(t *testing.T) {
 		{"quoted-printable", top + part("text/plain", "quoted-printable", "sign=\r\nin") + end, "S\nsignin", true},
 		{"unknown encoding", top + part("text/plain", "x-uuencode", "a") + end, "", false},
 		{"unknown encoding on a part not read", top + part("image/png", "x-uuencode", "a") + end, "S", true},
+		{"base64 across lines", top + part("text/plain", "base64", "c2lnbiBp\r\nbiBub3c=") + end, "S\nsign in now", true},
 		{"base64 that does not decode", top + part("text/plain", "base64", "!!!!") + end, "", false},
 		{"no closing boundary", top + part("text/plain", "", "a"), "", false},
 		{"no boundary parameter", "Subject: S\r\nContent-Type: multipart/mixed\r\n\r\n" + part("text/plain", "", "a") + end, "", false},
