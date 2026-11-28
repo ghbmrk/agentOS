@@ -204,7 +204,7 @@ func (t *Tools) List() []map[string]any {
 			"inputSchema": obj(map[string]any{"a": pSnap, "b": pSnap}, "a", "b")},
 		{"name": toolRollback, "description": "Restart a worker from one of its snapshots (or the one it was forked from). This also revives a stopped worker: the broker checkpoints and stops a worker no tool has named for an hour, or whose creator has stopped, and worker_list shows the snapshot to roll back to.",
 			"inputSchema": obj(map[string]any{"name": pName, "snapshot": pSnap}, "name", "snapshot")},
-		{"name": toolDestroy, "description": "Stop a worker and free its memory. Its snapshots stay in the broker's custody, but a worker created again under this name cannot restart from them.",
+		{"name": toolDestroy, "description": "Stop a worker and free its memory. Its snapshots stay in the broker's custody: worker_diff can still compare them, but a worker created again under this name cannot restart from them.",
 			"inputSchema": obj(map[string]any{"name": pName}, "name")},
 		{"name": toolList, "description": "List your workers: name, state, label, memory and newest snapshot.",
 			"inputSchema": obj(map[string]any{})},
@@ -755,14 +755,15 @@ func (t *Tools) diff(c caller, raw json.RawMessage) (any, error) {
 	if err := decode(raw, &a); err != nil {
 		return nil, err
 	}
-	sa, err := t.snapshot(c, a.A)
-	if err != nil {
+	if _, err := t.snapshot(c, a.A); err != nil {
 		return nil, err
 	}
 	if _, err := t.snapshot(c, a.B); err != nil {
 		return nil, err
 	}
-	changes, err := t.M.Diff(sa.Machine, a.A, a.B)
+	// The caller is the requester: it is live and owns both snapshots, so
+	// a destroyed worker's snapshot compares in either order (#6618).
+	changes, err := t.M.Diff(c.machine, a.A, a.B)
 	if err != nil {
 		return nil, err
 	}

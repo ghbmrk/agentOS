@@ -76,20 +76,61 @@ func TestSetupLineIsReadyOnlyWhileTheBridgeSaysOK(t *testing.T) {
 	}
 }
 
-// Setup binds the box's own SIM, found with none recorded, once; a later
-// SIM is not recorded over it.
+// Setup binds the box's own SIM, found with none recorded, once per SIM:
+// a report of the same SIM again records nothing more.
 func TestSetupRecordsTheBoxsSIMOnce(t *testing.T) {
 	var got []string
 	s := modemlink.NewSetup(modemlink.SetupConfig{Record: func(iccid string) error { got = append(got, iccid); return nil }})
 	setupCall(t, s, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateUnbound}, nil)
 	setupCall(t, s, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateUnbound, ICCID: setupSIM}, nil)
-	setupCall(t, s, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateUnbound, ICCID: "89010000000000000002"}, nil)
-	setupCall(t, s, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateSwapped, ICCID: "89010000000000000003"}, nil)
+	setupCall(t, s, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateUnbound, ICCID: setupSIM}, nil)
+	setupCall(t, s, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateDown}, nil)
+	setupCall(t, s, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateUnbound, ICCID: setupSIM}, nil)
 	if len(got) != 1 || got[0] != setupSIM {
 		t.Fatalf("recorded %q", got)
 	}
 	if s.Ready() {
 		t.Fatal("ready while unbound")
+	}
+}
+
+// REQ: CH-1, CH-12. #1295: a SIM swapped in while setup runs is the box's
+// SIM now, so setup records it over the one it recorded before, whether
+// the bridge reports it unbound (it has not re-read the roles file yet) or
+// swapped (it has), and the owner pairs with the number in the box. Each
+// SIM is recorded once, and a swap back records the first SIM again.
+func TestSetupReadoptsASIMSwappedWhileItRuns(t *testing.T) {
+	const second, third = "89010000000000000002", "89010000000000000003"
+	var got []string
+	s := modemlink.NewSetup(modemlink.SetupConfig{Record: func(iccid string) error { got = append(got, iccid); return nil }})
+	for _, st := range []bridgeproto.State{
+		{OwnerLine: bridgeproto.StateUnbound, ICCID: setupSIM},
+		{OwnerLine: bridgeproto.StateUnbound, ICCID: second},
+		{OwnerLine: bridgeproto.StateUnbound, ICCID: second},
+		{OwnerLine: bridgeproto.StateSwapped, ICCID: third},
+		{OwnerLine: bridgeproto.StateSwapped, ICCID: third},
+		{OwnerLine: bridgeproto.StateSwapped},
+		{OwnerLine: bridgeproto.StateSwapped, ICCID: setupSIM},
+	} {
+		if err := setupCall(t, s, bridgeproto.OpState, st, nil); err != nil {
+			t.Fatalf("state %+v: %v", st, err)
+		}
+	}
+	want := []string{setupSIM, second, third, setupSIM}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("recorded %q, want %q", got, want)
+	}
+}
+
+// A swap from a SIM an earlier run recorded is not setup's to undo: with
+// nothing recorded by this setup, a swapped SIM is not recorded, as before
+// #1295.
+func TestSetupLeavesASwapFromAnEarlierRunsSIM(t *testing.T) {
+	var got []string
+	s := modemlink.NewSetup(modemlink.SetupConfig{Record: func(iccid string) error { got = append(got, iccid); return nil }})
+	setupCall(t, s, bridgeproto.OpState, bridgeproto.State{OwnerLine: bridgeproto.StateSwapped, ICCID: setupSIM}, nil)
+	if len(got) != 0 {
+		t.Fatalf("recorded %q over an earlier run's SIM", got)
 	}
 }
 

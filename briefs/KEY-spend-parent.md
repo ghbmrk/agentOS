@@ -1,6 +1,6 @@
 # KEY-spend-parent: a lowered day cap counts the day's earlier spend
 
-Board row: issue #2838 (release, from Security 1 on #2837 and the #2847 delta L3). Tier A; grows the trusted core (`broker/kernel/key`), so the PR names a decision row in its `Trusted-core:` line (D-159 rule 3).
+Board row: issue #2838 (release, from Security 1 on #2837 and the #2847 delta L3). Tier A; grows the trusted core (`broker/kernel/key`), so the PR names a decision row in a `trusted-core #<PR> -- <decision ID>` line in `tools/trusted_base_reasons.txt` (D-159 rule 3).
 
 ## Requirements (local IDs, no SPEC row; serve KEY-3 and KEY-6)
 

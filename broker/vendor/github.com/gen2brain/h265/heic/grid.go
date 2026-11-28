@@ -146,7 +146,8 @@ func (f *file) decodeTiles(g gridInfo, tiles []uint32) (*hevc.Picture, error) {
 				}
 
 				if p.CropW != tw || p.CropH != th ||
-					p.ChromaFormat != out.ChromaFormat || p.BitDepth != out.BitDepth {
+					p.ChromaFormat != out.ChromaFormat || p.BitDepth != out.BitDepth ||
+					p.BitDepthC != out.BitDepthC {
 					p.Release()
 					setErr(ErrInvalid)
 
@@ -201,7 +202,8 @@ func (f *file) decodeTiles(g gridInfo, tiles []uint32) (*hevc.Picture, error) {
 		}
 
 		if p.CropW != tw || p.CropH != th ||
-			p.ChromaFormat != out.ChromaFormat || p.BitDepth != out.BitDepth {
+			p.ChromaFormat != out.ChromaFormat || p.BitDepth != out.BitDepth ||
+			p.BitDepthC != out.BitDepthC {
 			p.Release()
 			setErr(ErrInvalid)
 
@@ -275,6 +277,7 @@ func newGrid(first *hevc.Picture, g gridInfo) *hevc.Picture {
 		CropH:        g.h,
 		ChromaFormat: first.ChromaFormat,
 		BitDepth:     first.BitDepth,
+		BitDepthC:    first.BitDepthC,
 		StrideY:      g.w,
 	}
 
@@ -284,7 +287,10 @@ func newGrid(first *hevc.Picture, g gridInfo) *hevc.Picture {
 		out.StrideC = out.WidthC
 	}
 
-	if first.BitDepth > 8 {
+	// agentos: the planes are 16-bit when either depth exceeds 8, as
+	// hevc stores them (a tile with 8-bit luma and 10-bit chroma has no
+	// 8-bit planes); the luma depth alone read nil planes.
+	if first.Y16 != nil {
 		out.Y16 = make([]uint16, out.StrideY*g.h)
 		out.Cb16 = make([]uint16, out.StrideC*out.HeightC)
 		out.Cr16 = make([]uint16, out.StrideC*out.HeightC)
@@ -341,7 +347,7 @@ func blit(out, p *hevc.Picture, g gridInfo, i, tw, th int) {
 			continue
 		}
 
-		if out.BitDepth > 8 {
+		if out.Y16 != nil {
 			src, dst := planes16(p, out, pl)
 			for y := range ch {
 				copy(dst[(sy+y)*ds+sx:][:cw], src[(soy+y)*ss+sox:][:cw])

@@ -427,10 +427,10 @@ func enroll(c config, t transport.TPM) error {
 	if err := c.step("created"); err != nil {
 		return err
 	}
-	if _, err := st.AddSlot(seal.Passphrase{Phrase: pass}); err != nil {
+	if _, err := st.AddSlot(seal.Passphrase{Phrase: secret.Hide(pass)}); err != nil {
 		return err
 	}
-	if _, err := st.AddSlot(seal.Recovery{Key: rec}); err != nil {
+	if _, err := st.AddSlot(seal.Recovery{Key: secret.Hide(rec)}); err != nil {
 		return err
 	}
 	der, err := tpmseal.MarshalPolicyKey(key)
@@ -859,7 +859,7 @@ func open(c config, t transport.TPM) (*seal.Store, error) {
 		return nil, err
 	}
 	defer clear(pass)
-	return seal.Unlock(c.storePath(), seal.Passphrase{Phrase: bytes.TrimRight(pass, "\n")})
+	return seal.Unlock(c.storePath(), seal.Passphrase{Phrase: secret.Hide(bytes.TrimRight(pass, "\n"))})
 }
 
 // rotate moves the store's tpm slot to a new policy key. Steps, each named
@@ -1157,12 +1157,12 @@ func rotateRecovery(c config, in io.Reader) error {
 	var f seal.Factor
 	switch r.Factor {
 	case "passphrase":
-		f = seal.Passphrase{Phrase: r.Secret}
+		f = seal.Passphrase{Phrase: secret.Hide(r.Secret)}
 	case "recovery":
 		if len(r.Secret) != seal.RecoveryLen {
 			return errFactor
 		}
-		f = seal.Recovery{Key: r.Secret}
+		f = seal.Recovery{Key: secret.Hide(r.Secret)}
 	default:
 		return errRequest
 	}
@@ -1180,7 +1180,7 @@ func rotateRecovery(c config, in io.Reader) error {
 	// file, is the store's (MIG-4-recovery-r4c-later).
 	applied := false
 	if errors.Is(err, seal.ErrWrongFactor) || errors.Is(err, seal.ErrNoSlot) {
-		st, err = seal.Unlock(c.storePath(), seal.Recovery{Key: r.Next})
+		st, err = seal.Unlock(c.storePath(), seal.Recovery{Key: secret.Hide([]byte(r.Next))})
 		if errors.Is(err, seal.ErrWrongFactor) || errors.Is(err, seal.ErrNoSlot) {
 			return errFactor
 		}
@@ -1248,7 +1248,7 @@ func rotateRecovery(c config, in io.Reader) error {
 	// slot and recipient in place (seal.Store.commit): the store opens only
 	// with the new key, so the answer is ok, and the reason goes to the
 	// journal.
-	id, err := st.ReplaceAndPut(handoff.RecipientEntry, v, seal.Swap{ID: slot[0], F: seal.Recovery{Key: r.Next}})
+	id, err := st.ReplaceAndPut(handoff.RecipientEntry, v, seal.Swap{ID: slot[0], F: seal.Recovery{Key: secret.Hide([]byte(r.Next))}})
 	if id == nil {
 		return fmt.Errorf("%w: %w", errStoreOpen, err)
 	}

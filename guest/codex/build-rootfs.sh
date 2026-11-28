@@ -106,10 +106,11 @@ ln -s "$v/bin/codex" usr/local/bin/codex
 install -m 0755 "$src/bwrap/bwrap" usr/bin/bwrap
 install -m 0755 "$src/bwrap/bwrap" "opt/codex/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap"
 
-# The managed layers (they beat CODEX_HOME and the command line: ASSUMPTIONS C1, C12), the tool
-# wrapper and the launch spec, all root-owned.
+# The managed layers (they beat CODEX_HOME and the command line: ASSUMPTIONS C1, C12), the pinned
+# model catalog (B2-21-C22), the tool wrapper and the launch spec, all root-owned.
 install -m 0644 "$here/managed_config.toml" etc/codex/managed_config.toml
 install -m 0644 "$here/requirements.toml" etc/codex/requirements.toml
+install -m 0644 "$here/model_catalog.json" etc/codex/model_catalog.json
 install -m 0755 "$here/agentos-toolsh" usr/local/bin/agentos-toolsh
 install -m 0644 "$here/launch.json" usr/lib/agentos/codex/launch.json
 # The pinned CLI version, which agentosd reads as the image's ImageVersion (#1877): the provider

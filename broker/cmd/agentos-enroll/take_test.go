@@ -18,6 +18,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/pageca"
 )
 
@@ -182,8 +183,8 @@ func TestTakeFactorsAnswers(t *testing.T) {
 
 	// A store made from cd (enrollment removed the published certificate).
 	b = newSetupBox(t)
-	st := get(seal.Create(b.c.storePath(), seal.Recovery{Key: get(card.StoreRecoveryKey(cd.RecoveryKey))}))
-	get(st.AddSlot(seal.Passphrase{Phrase: []byte(cd.VaultPassphrase)}))
+	st := get(seal.Create(b.c.storePath(), seal.Recovery{Key: secret.Hide(get(card.StoreRecoveryKey(cd.RecoveryKey)))}))
+	get(st.AddSlot(seal.Passphrase{Phrase: secret.Hide([]byte(cd.VaultPassphrase))}))
 	st.Close()
 	noErr(t, os.Remove(b.s.published))
 	refused("ok", setupRequestFor(cd, "any"))
@@ -235,8 +236,8 @@ func TestTakeFactorsNeverLogsAFactor(t *testing.T) {
 	check(e, setupRequestFor(cd, e.fp), "", (&fs.PathError{Op: "open", Path: e.c.setupDir, Err: syscall.ENOENT}).Error())
 	// A store that this card opens, and one it does not.
 	s := newSetupBox(t)
-	st := get(seal.Create(s.c.storePath(), seal.Recovery{Key: get(card.StoreRecoveryKey(other.RecoveryKey))}))
-	get(st.AddSlot(seal.Passphrase{Phrase: []byte(other.VaultPassphrase)}))
+	st := get(seal.Create(s.c.storePath(), seal.Recovery{Key: secret.Hide(get(card.StoreRecoveryKey(other.RecoveryKey)))}))
+	get(st.AddSlot(seal.Passphrase{Phrase: secret.Hide([]byte(other.VaultPassphrase))}))
 	st.Close()
 	check(s, setupRequestFor(cd, s.fp), "kept")
 	canaries = append(canaries, other.VaultPassphrase)

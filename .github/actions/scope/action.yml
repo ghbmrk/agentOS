@@ -1,10 +1,10 @@
 name: scope
-description: "CI-docs: 'true' in records when the change touches only record documents (CI-par-4)"
+description: "CI-docs: 'true' in records when the change touches only record documents (CI-par-4); 'skip' in race when it touches only records and race-blind paths (CI-race-scope)"
 # The first step of each job that skips work on a records-only change, after its checkout
 # (fetch-depth: 0: the base commits, the merge base and origin/main). It replaces the scope job
 # each workflow used to queue for before any other job could start (#4304). Every later step of
 # the job runs unless `records` is exactly 'true', so a failure here means a full run.
-# tools/ci_scope.py holds the one records path set. It runs as the BASE commit has it, so a
+# tools/ci_scope.py holds the one records path set and the race-blind set (CI-race-scope). It runs as the BASE commit has it, so a
 # PR cannot widen the set for itself; with no base copy (or no base) the answer is full.
 # The changed paths are the same diff CI's other PR steps use: the PR branch against its
 # merge base; for a push to main, the pushed range; for a dispatch (trace.yml, metrics.yml
@@ -19,6 +19,9 @@ outputs:
   records:
     description: "'true' when the change touches only record documents"
     value: ${{ steps.scope.outputs.records }}
+  race:
+    description: "'skip' when the change touches only records and modifications outside tools/ci_scope.py RACE_READ and NEVER_BLIND, so broker-race skips its steps"
+    value: ${{ steps.scope.outputs.race }}
 runs:
   using: composite
   steps:
@@ -45,4 +48,8 @@ runs:
         echo "CI scope: $scope"
         if [ "$scope" = records ]; then
           echo "records=true" >> "$GITHUB_OUTPUT"
+        fi
+        # CI-race-scope: a base copy older than RACE_READ prints only records or full.
+        if [ "$scope" = records ] || [ "$scope" = race-blind ]; then
+          echo "race=skip" >> "$GITHUB_OUTPUT"
         fi
