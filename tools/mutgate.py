@@ -2269,7 +2269,8 @@ def reaching_tests(files, changed, state=None):
     package var the declaration holding it reaches, an init's or TestMain's reach aside: a test
     can read what a reader left there without reaching the reader (#6657). A `//go:linkname` line in
     any file is every test: an external test file can pull a test-file declaration by symbol without
-    naming it in code (Security on #6762)."""
+    naming it in code (Security on #6762). A pull from a non-test file or from assembly is srclint's
+    to refuse (MUT-test-helper-scope-1)."""
     if any(LINKNAME.search(text) for text in files.values()):
         return None
     decls = _quiet_vars(files, [d for path, text in sorted(files.items()) for d in _decls(path, text)])

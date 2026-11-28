@@ -3014,7 +3014,9 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
         b = ('package h\n\nimport "testing"\n\nvar quietVar = 1\n\nfunc helper() int {\n\treturn 1\n}\n\n'
              'func TestA(t *testing.T) {\n\t_ = quietVar\n\t_ = helper()\n}\n')
         for name, pull in (("var", "//go:linkname shared example.com/h.quietVar\nvar shared int\n"),
-                           ("helper", "//go:linkname h example.com/h.helper\nfunc h() int\n")):
+                           ("helper", "//go:linkname h example.com/h.helper\nfunc h() int\n"),
+                           ("var from a test body", "var shared int\n\nfunc TestIn(t *testing.T) {\n"
+                                                    "\t//go:linkname shared example.com/h.quietVar\n}\n")):
             with self.subTest("widen a linkname pull of a " + name):
                 c = ('package h_test\n\nimport (\n\t"testing"\n\t_ "unsafe"\n)\n\n' + pull +
                      '\nfunc TestExt(t *testing.T) {}\n')
