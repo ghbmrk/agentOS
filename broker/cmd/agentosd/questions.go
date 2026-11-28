@@ -75,7 +75,8 @@ func (q *questions) Clock() string {
 // clockLine is STATUS's line for s, or "" when the sources agree: STATUS
 // shows only exceptions, degraded checks included (UX-98-1). A
 // disagreement names the moves its interval delays and its lift (TIM-1,
-// LOG-8). control.Handler keeps only a note's first 100 characters of
+// LOG-8); without authenticated network time either clock may be wrong,
+// so that line blames neither (#6754 UX 1, Security 1). control.Handler keeps only a note's first 100 characters of
 // letters, digits, spaces and . , ; : ( ) -, so every line is written to
 // that size and alphabet and reaches the owner whole (#6754 UX 1).
 func clockLine(s clock.Status, loc *time.Location) string {
@@ -88,11 +89,11 @@ func clockLine(s clock.Status, loc *time.Location) string {
 	case s.State == clock.Disagree && s.Skew == 0:
 		return "Time check: saved check unreadable since " + at + "; holds and timeouts wait until time is confirmed."
 	case s.State == clock.Disagree && s.Authenticated:
-		return "Time check: phone time off by " + skewWords(s.Skew) + " since " + at + "; authenticated network time stands."
+		return "Time check: phone-network time off by " + skewWords(s.Skew) + " since " + at + "; authenticated network time stands."
 	case s.State == clock.Disagree:
-		return "Time check: phone time off by " + skewWords(s.Skew) + " since " + at + "; holds and timeouts wait until clocks agree."
+		return "Time check: clocks differ by " + skewWords(s.Skew) + " since " + at + "; holds and timeouts wait until they agree."
 	case s.State == clock.Held:
-		return "Time check: clock jumped by " + skewWords(s.Skew) + " at " + at + ", unconfirmed; my own count of time stands."
+		return "Time check: my clock jumped by " + skewWords(s.Skew) + " at " + at + ", unconfirmed; my own count of time stands."
 	case !s.Verified:
 		return "Time check: not confirmed since start at " + s.Start.In(loc).Format("15:04") + " (waiting for network or phone-network time)."
 	case s.State == clock.NetworkOnly:

@@ -48,17 +48,29 @@ func TestTIM1StatusLineIsTheInterval(t *testing.T) {
 		if !strings.HasPrefix(l, "Time check: ") || strings.Contains(strings.ToLower(l), "restricted") {
 			t.Errorf("%+v: line %q", s, l)
 		}
+		// Without authenticated network time either clock may be wrong:
+		// the line names no source as the wrong one (#6754 Security 1).
+		if s.State == clock.Disagree && !s.Authenticated && (strings.Contains(l, "phone") || strings.Contains(l, "off by")) {
+			t.Errorf("%+v: line %q blames one clock", s, l)
+		}
+		if strings.Contains(l, "phone time") {
+			t.Errorf("%+v: line %q says phone time, not phone network", s, l)
+		}
 	}
 	for _, c := range []struct {
 		s    clock.Status
 		want []string
 	}{
-		{clock.Status{State: clock.Disagree, Skew: 2 * time.Hour, Since: since, Verified: true}, []string{"2 hours since 09:30", "holds and timeouts wait", "until clocks agree"}},
+		{clock.Status{State: clock.Disagree, Skew: 2 * time.Hour, Since: since, Verified: true}, []string{"Time check: clocks differ by 2 hours since 09:30", "holds and timeouts wait", "until they agree"}},
 		{clock.Status{State: clock.Disagree, Since: since, Verified: true}, []string{"unreadable since 09:30", "holds and timeouts wait", "until time is confirmed"}},
-		{clock.Status{State: clock.Disagree, Skew: -90 * time.Minute, Since: since, Verified: true, Authenticated: true}, []string{"1 hour since 09:30", "authenticated network time stands"}},
+		{clock.Status{State: clock.Disagree, Skew: -90 * time.Minute, Since: since, Verified: true, Authenticated: true}, []string{"phone-network time off by 1 hour since 09:30", "authenticated network time stands"}},
 		{clock.Status{State: clock.Held, Skew: 10 * time.Minute, Since: since, Verified: true}, []string{"10 minutes at 09:30", "my own count of time stands"}},
 		{clock.Status{State: clock.Disagree, Skew: 3 * 24 * time.Hour, Since: since, Verified: true}, []string{"3 days"}},
 		{clock.Status{State: clock.Disagree, Skew: math.MinInt64, Since: since, Verified: true}, []string{"over 99 days"}},
+		{clock.Status{State: clock.Disagree, Skew: math.MaxInt64, Since: since, Verified: true}, []string{"over 99 days"}},
+		{clock.Status{State: clock.Disagree, Skew: 99 * 24 * time.Hour, Since: since, Verified: true}, []string{"99 days"}},
+		{clock.Status{State: clock.Disagree, Skew: 48*time.Hour - time.Minute, Since: since, Verified: true}, []string{"47 hours"}},
+		{clock.Status{State: clock.Disagree, Skew: 48 * time.Hour, Since: since, Verified: true}, []string{"2 days"}},
 	} {
 		if l := clockLine(c.s, time.UTC); !containsAll(l, c.want) {
 			t.Errorf("%+v: line %q lacks one of %q", c.s, l, c.want)
