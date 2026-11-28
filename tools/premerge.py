@@ -56,7 +56,10 @@ exits 1. Without `--runs` it prints `needs-runs` and exits 1, so no caller reads
 Then it reads the MUTANTS-EQUIVALENT records on the merge of `head` into `base` (PREMERGE-records-merge, #6716), with this
 checkout's `tools/mutgate.py records` (Go on PATH): a problem the merge has and `base` lacks prints `needs-records <records>`,
 a check that could not run `needs-records error`, and a PR changing the check itself while main changed what it reads since
-the merge base `needs-main-merge <files>`; each exits 1 (`records_merged`).
+the merge base `needs-main-merge <files>`; each exits 1 (`records_merged`). Once main changed none of it, such a PR whose
+changed check files are all gate files, and that leaves the records test as base has it, is read by its own CI's records
+test instead (PREMERGE-records-merge-fu, #6718); any other, such as one changing the lister tools/mutgate_stmts.go, is
+still read with base's copy, so merging main again does not clear its `needs-records`.
 
 `--bot` is the gate form for the generated-file bot PRs, which carry no verdict (PREMERGE-wire, #1860): it
 prints `bot` (exit 0) only when `head-ref` is one of the BOT branches, base..head changes nothing but that
@@ -1004,6 +1007,24 @@ def _files(cwd, a, b, *paths):
     return [f for f in _git(cwd, *DIFF, a, b, "--", *paths).decode(errors="surrogateescape").split("\0") if f]
 
 
+# PREMERGE-records-merge-fu (#6718): the test in which ci.yml runs a PR's own copy of the check on the PR's merge ref.
+RECORDS_PROOF = ("tests/test_mutgate.py", "    def test_every_record_in_the_repository_resolves(self):")
+
+
+def _proof(text):
+    """The RECORDS_PROOF test's lines in text, its decorators through the line before the next method or class, or ''
+    when text has none: a skip added above the def changes it."""
+    head, sep, rest = text.partition(RECORDS_PROOF[1] + "\n")
+    if not sep:
+        return ""
+    above = re.search(r"(?:^    @.*\n)*\Z", head, re.M).group(0)
+    return above + sep + re.split(r"^(?=    def |\S)", rest, maxsplit=1, flags=re.M)[0]
+
+
+def _blob(cwd, rev, path):
+    return _git(cwd, "cat-file", "-p", f"{rev}:{path}", ok=(0, 128)).decode(errors="surrogateescape")
+
+
 def records_merged(cwd, head="HEAD", base="origin/main"):
     """(why, [problem]) the merge of head into base fails MUTANTS-EQUIVALENT records it did not fail on base (#6716),
     or (None, []).
@@ -1012,15 +1033,24 @@ def records_merged(cwd, head="HEAD", base="origin/main"):
     problem naming broker/ that base's tree has too is main's own red and holds nothing; any other failure (the lister
     did not build, a timeout) holds. A conflicted merge, or one that leaves broker/ as base has it, reads none: GitHub
     cannot merge the first, and the second is base's tree. A PR changing RECORDS_TOOLS changes the check itself, which
-    the gate never runs from a PR, so it holds as `needs-main-merge` while main has changed, since the PR's merge base,
-    a record, a .go file under a directory holding one, or RECORDS_TOOLS: merging main in has CI run the PR's check on them."""
+    the gate never runs from a PR, so it holds as `needs-main-merge` while any main commit since the PR's merge base
+    changed a record, a .go file under a directory holding one on either side, or RECORDS_TOOLS: merging main in has CI
+    run the PR's check on them. Once none did, every merge ref CI ran on had the inputs this merge has, so the PR's own
+    RECORDS_PROOF run is the read (#6718), unless the PR changed that test or a check file outside MARK_PATHS: then
+    base's copy reads it as any PR."""
     onto = _git(cwd, "merge-base", base, head).decode().strip()
     mine = _files(cwd, onto, head, *RECORDS_TOOLS)
     if mine:
-        held = {f.rsplit("/", 1)[0] for f in _git(cwd, "ls-tree", "-r", "-z", "--name-only", base, "--", "broker")
-                .decode(errors="surrogateescape").split("\0") if f.endswith("/" + RECORD)}
-        if _files(cwd, onto, base, *RECORDS_TOOLS, f":(glob)broker/**/{RECORD}", *(f":(glob){d}/**/*.go" for d in held)):
+        held = {f.rsplit("/", 1)[0] for rev in (base, head) for f in _git(cwd, "ls-tree", "-r", "-z", "--name-only", rev,
+                "--", "broker").decode(errors="surrogateescape").split("\0") if f.endswith("/" + RECORD)}
+        if _git(cwd, "log", "--first-parent", "--format=%H", f"{onto}..{base}", "--", *RECORDS_TOOLS,
+                f":(glob)broker/**/{RECORD}", *(f":(glob){d}/**/*.go" for d in sorted(held))).strip():
             return "needs-main-merge " + " ".join(mine), []
+        # Only a check whose every changed file is a gate file (Security reviews it) is trusted to read itself: the
+        # lister tools/mutgate_stmts.go is tier C, so a PR changing it is still read with base's copy (#6724 L3).
+        if all(MARK_PATHS.fullmatch(f) for f in mine) and (proof := _proof(_blob(cwd, base, RECORDS_PROOF[0]))) \
+                and proof == _proof(_blob(cwd, head, RECORDS_PROOF[0])):
+            return None, []
     out = subprocess.run(["git", "merge-tree", "--write-tree", "--no-messages", base, head], cwd=cwd, capture_output=True)
     if out.returncode == 1:  # conflicts: GitHub cannot merge it
         return None, []
