@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -340,5 +341,43 @@ func TestSetupNetErrors(t *testing.T) {
 	h := sha256.Sum256(nil)
 	if _, err := NewSetupNet(bytes.NewReader(append(h[:], h[:]...))); err != nil {
 		t.Fatalf("enough randomness: %v", err)
+	}
+}
+
+// onceFailing fails its first read and then reads from r.
+type onceFailing struct {
+	failed bool
+	r      io.Reader
+}
+
+func (o *onceFailing) Read(p []byte) (int, error) {
+	if !o.failed {
+		o.failed = true
+		return 0, io.ErrUnexpectedEOF
+	}
+	return o.r.Read(p)
+}
+
+// A name that cannot be drawn fails NewSetupNet even when the reader
+// recovers for the password.
+func TestSetupNetNameError(t *testing.T) {
+	h := sha256.Sum256(nil)
+	if _, err := NewSetupNet(&onceFailing{r: bytes.NewReader(bytes.Repeat(h[:], 4))}); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("name error: %v", err)
+	}
+}
+
+// KernelBootID is the kernel's boot_id, trimmed, wherever it can be read.
+func TestKernelBootIDReadsBootID(t *testing.T) {
+	raw, rerr := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	id, err := KernelBootID()
+	if rerr != nil {
+		if err == nil {
+			t.Fatalf("boot id %q from an unreadable file", id)
+		}
+		return
+	}
+	if err != nil || id != strings.TrimSpace(string(raw)) || id == "" {
+		t.Fatalf("boot id %q %v, file %q", id, err, raw)
 	}
 }

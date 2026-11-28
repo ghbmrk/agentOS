@@ -90,9 +90,14 @@ func TestBeginErrors(t *testing.T) {
 	b, _ := sealedBox(t)
 	ok := func() error { return nil }
 	boot := func() (string, error) { return "boot-1", nil }
-	if _, err := Begin(BoxConfig{Claim: claim.Config{Store: &b.claim, BootID: boot}, Latch: &unreadLatch{},
-		Reset: ok, Card: claimCardConfig(t)}); err == nil || err.Error() != errLatch().Error() {
+	resets := 0
+	latch := &unreadLatch{}
+	if _, err := Begin(BoxConfig{Claim: claim.Config{Store: &b.claim, BootID: boot}, Latch: latch,
+		Reset: func() error { resets++; return nil }, Card: claimCardConfig(t)}); err == nil || err.Error() != errLatch().Error() {
 		t.Fatalf("unreadable latch: %v", err)
+	}
+	if saved, _ := latch.MemStore.Load(); saved != nil || resets != 0 {
+		t.Fatalf("an unreadable latch was written (%s) or reset (%d)", saved, resets)
 	}
 	if _, err := Begin(BoxConfig{Claim: claim.Config{Store: &unreadLatch{}, BootID: boot}, Latch: &change.MemStore{},
 		Reset: ok, Card: claimCardConfig(t)}); err == nil || err.Error() != errLatch().Error() {
