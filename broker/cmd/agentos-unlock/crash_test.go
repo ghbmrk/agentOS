@@ -20,7 +20,7 @@ import (
 // REQ: CH-4
 func TestStoppedCheckerSeedWriteRemovesTheStaleSeed(t *testing.T) {
 	d := t.TempDir()
-	st, err := seal.Create(filepath.Join(d, "store"), seal.Recovery{Key: make([]byte, 32)})
+	st, err := seal.Create(filepath.Join(d, "store"), seal.Recovery{Key: secret.Hide(make([]byte, 32))})
 	if err != nil {
 		t.Fatal(err)
 	}

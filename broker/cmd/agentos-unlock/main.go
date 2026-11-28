@@ -175,7 +175,7 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 	defer t.Close()
 	var k handoff.KernelKeys
 	defer k.Wipe()
-	var f seal.Factor = seal.Passphrase{Phrase: c.passphrase.Get()}
+	var f seal.Factor = seal.Passphrase{Phrase: c.passphrase}
 	k.Slot = handoff.SlotPassphrase
 	if c.passphrase.Get() == nil {
 		pk, anchor, err := pins(t)
@@ -426,8 +426,8 @@ func lostCard(st *seal.Store, request []byte, head ed25519.PublicKey, now int64)
 	// slots and recipient in place (seal.Store.commit): only the new card
 	// opens the store, so it is handed on.
 	id, err := st.ReplaceAndPut(handoff.RecipientEntry, v,
-		seal.Swap{ID: slot[seal.KindRecovery][0], F: seal.Recovery{Key: rec}},
-		seal.Swap{ID: slot[seal.KindPassphrase][0], F: seal.Passphrase{Phrase: pass}})
+		seal.Swap{ID: slot[seal.KindRecovery][0], F: seal.Recovery{Key: secret.Hide(rec)}},
+		seal.Swap{ID: slot[seal.KindPassphrase][0], F: seal.Passphrase{Phrase: secret.Hide(pass)}})
 	if id == nil {
 		clear(bits)
 		return nil, err
