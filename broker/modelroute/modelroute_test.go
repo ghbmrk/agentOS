@@ -627,6 +627,9 @@ func TestLOOP5CeilingRefusalsReachTheEvaluator(t *testing.T) {
 	var over []string
 	cfg.OverCeiling = func(m string) { over = append(over, m) }
 	call(cfg)
+	if len(over) != 1 {
+		t.Fatalf("a ceiling refusal reached OverCeiling %d times", len(over))
+	}
 	reason.Store("no declared operation matches")
 	call(cfg)
 	if len(over) != 1 || over[0] != "eval-0a1b" {

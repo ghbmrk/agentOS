@@ -247,6 +247,21 @@ func TestRoutingStateAnswers(t *testing.T) {
 	if _, err := r.State(context.Background()); err == nil {
 		t.Fatal("a 500 with a well-formed body was read")
 	}
+	// Three rules of MaxRule bytes each, the most the vault process sends,
+	// are read in full.
+	full := func(n int) RoutingState {
+		r := routerule.Rule{"c": {{Provider: "p", Model: strings.Repeat("m", n)}}}
+		return RoutingState{Rule: r, Candidate: r, Owner: r}
+	}
+	b, _ = json.Marshal(full(0))
+	b, _ = json.Marshal(full((3*MaxRule - len(b)) / 3))
+	if len(b) <= 3*MaxRule-64 || len(b) > 3*MaxRule {
+		t.Fatalf("full state is %d bytes", len(b))
+	}
+	spy.status, spy.body = 200, string(b)
+	if _, err := r.State(context.Background()); err != nil {
+		t.Fatalf("a full state of %d bytes: %v", len(b), err)
+	}
 }
 
 // A failed read leaves the count unknown, whatever the reader also
@@ -349,7 +364,7 @@ func TestStateProbeClosesTheAnswer(t *testing.T) {
 	}
 	select {
 	case <-finished:
-	case <-time.After(5 * time.Second):
+	case <-time.After(time.Second): // under the probe's own 2 s bound, which would close it too
 		t.Fatal("the vault process is still writing: the probe left the answer open")
 	}
 }
