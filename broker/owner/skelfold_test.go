@@ -31,7 +31,6 @@ func TestCH12FoldTablesMatchGoUnicode(t *testing.T) {
 func TestCH12FoldEveryCodePoint(t *testing.T) {
 	for _, v := range variants {
 		t.Run(v.name, func(t *testing.T) {
-			t.Parallel()
 			bad, deepest := 0, 0
 			for r := rune(0); r <= unicode.MaxRune; r++ {
 				if r >= 0xD800 && r <= 0xDFFF {

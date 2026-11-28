@@ -199,7 +199,7 @@ func (r *phoneRun) reply(text string) {
 	case !r.codeRight && k == "status":
 		r.err = errors.New("status reply to a code: the session was not locked")
 	case !r.codeRight && k == "already-unlocked":
-		r.err = errors.New("already unlocked: the session was not locked")
+		r.err = errors.New("a fresh code drew already unlocked: the session was not locked")
 	case !r.codeRight:
 		r.err = fmt.Errorf("a fresh code drew %s, not right-code", kindLead(text))
 	case !r.locked && k == "locked":

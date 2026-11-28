@@ -326,6 +326,7 @@ func contains(ss []string, s string) bool {
 }
 
 func TestRotationNeedsAPart(t *testing.T) {
+	mutgateKills(t)
 	_, err := NewDisplay(DisplayConfig{Rotate: &Parts{}, Authority: testAuthority(t), Provision: func(*Card) error { return nil }})
 	if err == nil {
 		t.Fatal("rotation of nothing shown")
