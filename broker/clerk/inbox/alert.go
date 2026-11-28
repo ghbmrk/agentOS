@@ -12,10 +12,14 @@ import (
 // keeps as an alert sender (the provider's security sender, a service the owner
 // holds an account with, a sender marked financial or identity); or, whoever
 // sent it, when it carries security-alert wording or a code (VRB-2's second
-// net, wordingAlert). The clerk never trashes or unsubscribes an alert,
-// whatever the reader called it.
+// net, wordingAlert), or when that net cannot read it (mailText). The clerk
+// never trashes or unsubscribes an alert, whatever the reader called it.
 func isAlert(raw []byte, w World) bool {
-	return alertSender(raw, w) || wordingAlert(mailText(raw))
+	if alertSender(raw, w) {
+		return true
+	}
+	text, ok := mailText(raw)
+	return !ok || wordingAlert(text)
 }
 
 // VerifiedAlert reports whether an alert counts as a signal (TN-gmail-api):

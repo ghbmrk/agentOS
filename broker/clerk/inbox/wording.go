@@ -206,12 +206,15 @@ const (
 // mailText is what the wording net reads: the decoded subject and every
 // text/plain and text/html part, decoded from quoted-printable or base64 and
 // with HTML's tags dropped and entities decoded, bounded. A charset other than
-// UTF-8 is read as it comes, which keeps ASCII wording readable. A mail that
-// does not parse is read whole, as it came.
-func mailText(raw []byte) string {
+// UTF-8 is read as it comes, which keeps ASCII wording readable. ok is false
+// when the net cannot read the mail: it does not parse, a Content-Type it
+// carries does not parse, a multipart body breaks off, or a text part's
+// transfer encoding is unknown or does not decode. Such a mail is an alert
+// (isAlert), so wording it hides is never trashed unread (#6416).
+func mailText(raw []byte) (text string, ok bool) {
 	m, err := mail.ReadMessage(bytes.NewReader(raw))
 	if err != nil {
-		return string(raw[:min(len(raw), maxTextBytes)])
+		return "", false
 	}
 	var b strings.Builder
 	subject := m.Header.Get("Subject")
@@ -220,8 +223,8 @@ func mailText(raw []byte) string {
 	}
 	b.WriteString(subject)
 	parts := 0
-	textParts(m.Header, m.Body, &b, &parts, 0)
-	return b.String()
+	ok = textParts(m.Header, m.Body, &b, &parts, 0)
+	return b.String(), ok
 }
 
 // rawCharset reads any charset's bytes as they come.
@@ -229,41 +232,52 @@ func rawCharset(_ string, r io.Reader) (io.Reader, error) { return r, nil }
 
 type getter interface{ Get(string) string }
 
-func textParts(h getter, body io.Reader, b *strings.Builder, parts *int, depth int) {
+// textParts adds body's text to b and reports whether it read without a
+// parse or decode failure. Stopping at a bound is no failure.
+func textParts(h getter, body io.Reader, b *strings.Builder, parts *int, depth int) bool {
 	if *parts++; *parts > maxTextParts || depth > 8 || b.Len() >= maxTextBytes {
-		return
+		return true
 	}
-	mt, params, err := mime.ParseMediaType(h.Get("Content-Type"))
-	if err != nil {
-		mt = "text/plain" // a missing or broken Content-Type is read, not skipped
+	mt, params := "text/plain", map[string]string(nil) // RFC 2045 §5.2: no Content-Type is text/plain
+	if ct := h.Get("Content-Type"); ct != "" {
+		var err error
+		if mt, params, err = mime.ParseMediaType(ct); err != nil {
+			return false
+		}
 	}
 	if strings.HasPrefix(mt, "multipart/") {
 		mr := multipart.NewReader(body, params["boundary"])
 		for {
 			p, err := mr.NextRawPart()
 			if err != nil {
-				return
+				return err == io.EOF
 			}
-			textParts(p.Header, p, b, parts, depth+1)
+			if !textParts(p.Header, p, b, parts, depth+1) {
+				return false
+			}
 		}
 	}
 	if mt != "text/plain" && mt != "text/html" {
-		return
+		return true
 	}
 	r := io.LimitReader(body, 4*maxTextBytes)
 	switch strings.ToLower(strings.TrimSpace(h.Get("Content-Transfer-Encoding"))) {
+	case "", "7bit", "8bit", "binary":
 	case "quoted-printable":
 		r = quotedprintable.NewReader(r)
 	case "base64":
 		r = base64.NewDecoder(base64.StdEncoding, lineDropper{r})
+	default:
+		return false
 	}
-	t, _ := io.ReadAll(io.LimitReader(r, int64(maxTextBytes-b.Len())))
+	t, err := io.ReadAll(io.LimitReader(r, int64(maxTextBytes-b.Len())))
 	s := string(t)
 	if mt == "text/html" {
 		s = html.UnescapeString(htmlTag.ReplaceAllString(s, " "))
 	}
 	b.WriteString("\n")
 	b.WriteString(s)
+	return err == nil
 }
 
 var htmlTag = regexp.MustCompile(`(?s)<(script|style)\b.*?</(script|style)\s*>|<[^>]*>`)
