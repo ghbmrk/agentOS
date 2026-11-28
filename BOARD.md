@@ -414,12 +414,17 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | B3-16-r1 | B3-16-r1: Gmail connect DUse after a finished sign-in says it is already connected. Release; from #6632. | #3014 | queued (release; tier A) |
 | VM-snap-unread-notice-fu-2b | VM-snap-unread-notice-fu-2b: main wires link.Usable into the held unread notice | #6455, #6657 | queued (release; tier A; lane claude2) |
 | VULN-debian-r18 | VULN-debian-r18: accept openssl's no-fix Debian 13 advisory DEBIAN-CVE-2026-84785 so image-vulncheck passes again. Release; no-fix Debian round. | #2919, #6628 | building (release; tier A) |
-| MUT-kill-5974-owner | MUT-kill-5974-owner: kill or prove the 357 owner and localsrv survivors on main that #5974's mutgate exposed. | #5187, #5974 | queued (release; tier A) |
+| MUT-kill-5974-owner | MUT-kill-5974-owner: kill or prove the 357 owner and localsrv survivors on main that #5974's mutgate exposed. | #5187, #5974 | building (release; tier A) |
 | VULN-quic-import-sweep-fu | VULN-quic-import-sweep-fu: count every QUIC/datagram-BIO name holder; exempt definers by SONAME. Release; from #6672. | #6671 | building (release; tier A) |
 | CI-race-scope | CI-race-scope: broker-race skips PRs whose every change lies in a measured race-blind path set, backed by a read-set audit on main | #6689 | building (release; tier A gate file) |
 | PAGE-stopping-setup | PAGE-stopping-setup: setup page actions refused with 'stopping' show the stopping page (from #6619; tier A) | #6619 | queued |
 | VULN-static-elf-go-prefix | VULN-static-elf-go-prefix: a go file's executable bytes before .text held to headers and notes; the forged-table limit stated or narrowed. Release; from #6700. | #6563, #6700 | queued (release; tier A) |
 | PAGE-stopping-keep | PAGE-stopping-keep: the stopping page keeps the handler's known reply and outcome; provisions noted (from #6699 reviews; tier A) | #6619 | queued |
+| MUT-kill-5974-owner-4 | MUT-kill-5974-owner-4: kill or prove reaction.go's 26 and autoreply.go's 16 owner survivors. | #6670, #6625 | building (release; tier A) |
+| MUT-kill-5974-owner-5 | MUT-kill-5974-owner-5: kill or prove the 43 owner survivors in voicecheck, converse, name, disclose, totp, boot, informquote, commit and codes. | #6670, #6625 | building (release; tier A) |
+| MUT-kill-5974-owner-6 | MUT-kill-5974-owner-6: kill or prove channel.go's 47 and local.go's 31 owner survivors once #6620 merges. | #6670, #6620 | queued (release; tier A) |
+| CTL-prefix-invalid-tail | CTL-prefix-invalid-tail: control.Prefix never returns more than len(s), invalid UTF-8 included. | #6625 | queued (release; tier A) |
+| MUT-kill-5974-owner-4-fu | MUT-kill-5974-owner-4-fu: auto-reply approval shows the reply, not only its filter name; tighten #6744's refusal tests. | #6741, #6744 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
