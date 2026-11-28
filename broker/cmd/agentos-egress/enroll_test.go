@@ -262,7 +262,7 @@ func TestWrongConfirmationsAreBounded(t *testing.T) {
 func TestEnrollOverTheVerifySocket(t *testing.T) {
 	r := newSetupRig(t)
 	run := filepath.Join(t.TempDir(), "run")
-	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	srvs, err := serve(run, r.c, testRouter(t), nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,7 +383,7 @@ func TestEnrollIsClosedOutsideSetupMode(t *testing.T) {
 func TestNotOpenIsAnsweredApartFromSealed(t *testing.T) {
 	r := openRig(t)
 	run := filepath.Join(t.TempDir(), "run")
-	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	srvs, err := serve(run, r.c, testRouter(t), nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}

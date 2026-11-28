@@ -30,12 +30,6 @@ func TestBuilderMachinesTakeBuilderFromsGrantsAsPrivate(t *testing.T) {
 		t.Fatal("-builder-from named a machine with no grants")
 	}
 	rule := route.Rule{"default": {{Provider: "openai", Model: "gpt-test"}}}
-	// Security R1 on #126: -eval-from never names builders' grants.
-	for _, from := range []string{"lb-", "lb-x", "eval-x"} {
-		if _, _, err := modelRouting(rule, grants{"agent": {"openai"}}, nil, nil, nil, "agent", from); err == nil {
-			t.Fatalf("-eval-from %s was accepted", from)
-		}
-	}
 	ok := func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
@@ -54,11 +48,11 @@ func TestBuilderMachinesTakeBuilderFromsGrantsAsPrivate(t *testing.T) {
 	} {
 		// The same setup run uses, so the router sees the builder's
 		// grants (L3 MUST 1 on #126).
-		g, rt, err := modelRouting(rule, grants{"agent": {"openai"}}, tc.privateOK, nil, nil, tc.from, "")
+		g, rt, err := modelRouting(rule, grants{"agent": {"openai"}}, tc.privateOK, nil, nil, tc.from)
 		if err != nil {
 			t.Fatal(err)
 		}
-		sock := serveModelGrants(t, rt, nil, g, ok)
+		sock := serveModelGrants(t, rt, g, ok)
 		fwd := modelroute.Forward(modelroute.Config{Socket: sock, Label: func(string) string { return "public" }, Denied: func(string, modelroute.Denial) {}})
 		if resp := chat(fwd(tc.machine)); resp.StatusCode != tc.want {
 			t.Errorf("%s: %d, want %d", tc.name, resp.StatusCode, tc.want)

@@ -28,8 +28,7 @@ var (
 
 // W3 (potency PW4 on #90): agentosd reads and sets the active routing
 // rule over the routing socket. Only a reordering of the owner's -rule is
-// taken; it is saved, applied to the router and to the evaluation price
-// ceiling, and survives a restart. Anything else is refused and changes
+// taken; it is saved, applied to the router, and survives a restart. Anything else is refused and changes
 // nothing.
 func TestRoutingAdoptionsOnlyReorderTheOwnersRoutes(t *testing.T) {
 	base := route.Rule{"chat": {ra, rb}}
@@ -37,11 +36,10 @@ func TestRoutingAdoptionsOnlyReorderTheOwnersRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ev := &evalRoute{From: "agent", Active: base}
 	path := filepath.Join(t.TempDir(), "routing.json")
-	ro := &routing{base: base, rt: rt, ev: ev, path: path}
+	ro := &routing{base: base, rt: rt, path: path}
 	run := filepath.Join(t.TempDir(), "run")
-	srvs, err := serve(run, &custody{notify: func(string) {}}, rt, ev, ro, os.Getuid(), os.Getuid()+1)
+	srvs, err := serve(run, &custody{notify: func(string) {}}, rt, ro, os.Getuid(), os.Getuid()+1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +69,7 @@ func TestRoutingAdoptionsOnlyReorderTheOwnersRoutes(t *testing.T) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("a refused rule was saved")
 	}
-	if rt.Rule()["chat"][0] != ra || ev.active()["chat"][0] != ra {
+	if rt.Rule()["chat"][0] != ra {
 		t.Fatal("a refused rule was applied")
 	}
 
@@ -79,8 +77,8 @@ func TestRoutingAdoptionsOnlyReorderTheOwnersRoutes(t *testing.T) {
 	if err := cl.Set(ctx, swapped); err != nil {
 		t.Fatal(err)
 	}
-	if rt.Rule()["chat"][0] != rb || ev.active()["chat"][0] != rb {
-		t.Fatalf("router %v, ceiling %v", rt.Rule(), ev.active())
+	if rt.Rule()["chat"][0] != rb {
+		t.Fatalf("router %v", rt.Rule())
 	}
 	// A restart starts from the adopted rule, and from -rule when the
 	// saved one no longer reorders it (the owner changed -rule).
@@ -98,8 +96,8 @@ func TestRoutingAdoptionsOnlyReorderTheOwnersRoutes(t *testing.T) {
 	if err := cl.Set(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
-	if rt.Rule()["chat"][0] != ra || ev.active()["chat"][0] != ra {
-		t.Fatalf("reset: router %v, ceiling %v", rt.Rule(), ev.active())
+	if rt.Rule()["chat"][0] != ra {
+		t.Fatalf("reset: router %v", rt.Rule())
 	}
 	if r, err := startRule(base, path); err != nil || r["chat"][0] != ra {
 		t.Fatalf("restart after reset: %v %v", r, err)
@@ -118,10 +116,9 @@ func TestRoutingErrorsAreNotRefusals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ev := &evalRoute{From: "agent", Active: base}
-	ro := &routing{base: base, rt: rt, ev: ev, path: filepath.Join(t.TempDir(), "gone", "routing.json")}
+	ro := &routing{base: base, rt: rt, path: filepath.Join(t.TempDir(), "gone", "routing.json")}
 	run := filepath.Join(t.TempDir(), "run")
-	srvs, err := serve(run, &custody{notify: func(string) {}}, rt, ev, ro, os.Getuid(), os.Getuid()+1)
+	srvs, err := serve(run, &custody{notify: func(string) {}}, rt, ro, os.Getuid(), os.Getuid()+1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +136,7 @@ func TestRoutingErrorsAreNotRefusals(t *testing.T) {
 	if err == nil || errors.Is(err, modelroute.ErrRoutingRefused) {
 		t.Fatalf("a failed save: %v", err)
 	}
-	if rt.Rule()["chat"][0] != ra || ev.active()["chat"][0] != ra {
+	if rt.Rule()["chat"][0] != ra {
 		t.Fatal("a rule that was not saved was applied")
 	}
 	big := route.Rule{"chat": {ra, rb}}

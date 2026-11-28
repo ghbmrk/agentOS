@@ -23,13 +23,11 @@ import (
 // owner's configured routes (-rule): the same classes, each with the same
 // routes, so no adoption adds a route, model, or provider here, whatever
 // agentosd sends (CAP-9). The adopted rule is kept in a file beside the
-// unlock state, so it survives a restart, and the evaluation price ceiling
-// follows it (ev.setActive).
+// unlock state, so it survives a restart.
 type routing struct {
 	mu   sync.Mutex
 	base route.Rule // -rule: the owner's configured routes
 	rt   *route.Router
-	ev   *evalRoute
 	path string // the adopted rule's file; "" keeps none
 }
 
@@ -115,8 +113,7 @@ func reorders(base, next route.Rule) error {
 	return nil
 }
 
-// set adopts next: checked, saved, then applied to the router and the
-// evaluation ceiling. A failed save applies nothing. An empty rule is the
+// set adopts next: checked, saved, then applied to the router. A failed save applies nothing. An empty rule is the
 // owner's -rule: the change pipeline's record before any adoption.
 func (ro *routing) set(next route.Rule) error {
 	ro.mu.Lock()
@@ -136,13 +133,7 @@ func (ro *routing) set(next route.Rule) error {
 			return err
 		}
 	}
-	if err := ro.rt.SetRule(next); err != nil {
-		return err
-	}
-	if ro.ev != nil {
-		ro.ev.setActive(next)
-	}
-	return nil
+	return ro.rt.SetRule(next)
 }
 
 // refusal is a rule set refuses: not a reordering of the owner's rule.

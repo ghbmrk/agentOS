@@ -44,18 +44,17 @@ func openModel(t *testing.T, rt *route.Router, provider http.HandlerFunc) (http.
 // returns the socket's path.
 func openModelSocket(t *testing.T, rt *route.Router, provider http.HandlerFunc) string {
 	t.Helper()
-	return serveModel(t, rt, nil, provider)
+	return serveModel(t, rt, provider)
 }
 
-// serveModel is openModelSocket with replay machines' evaluation route ev.
-// The machine "agent" is granted OpenAI.
-func serveModel(t *testing.T, rt *route.Router, ev *evalRoute, provider http.HandlerFunc) string {
+// serveModel is openModelSocket. The machine "agent" is granted OpenAI.
+func serveModel(t *testing.T, rt *route.Router, provider http.HandlerFunc) string {
 	t.Helper()
-	return serveModelGrants(t, rt, ev, map[string][]string{"agent": {"openai"}}, provider)
+	return serveModelGrants(t, rt, map[string][]string{"agent": {"openai"}}, provider)
 }
 
 // serveModelGrants is serveModel with the proxy's grants g.
-func serveModelGrants(t *testing.T, rt *route.Router, ev *evalRoute, g map[string][]string, provider http.HandlerFunc) string {
+func serveModelGrants(t *testing.T, rt *route.Router, g map[string][]string, provider http.HandlerFunc) string {
 	t.Helper()
 	prov := httptest.NewTLSServer(provider)
 	t.Cleanup(prov.Close)
@@ -79,7 +78,7 @@ func serveModelGrants(t *testing.T, rt *route.Router, ev *evalRoute, g map[strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := newServer(modelHandler(r.c, rt, ev))
+	srv := newServer(modelHandler(r.c, rt))
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close() })
 	return sock
@@ -150,7 +149,7 @@ func TestDefaultPrivateOKRefusesNonPublicLabels(t *testing.T) {
 		req.Header.Set(modelroute.HeaderMachine, "agent")
 		req.Header.Set(modelroute.HeaderLabel, label)
 		// Labels as the broker would send them on the socket.
-		modelHandler(r.c, rt, nil).ServeHTTP(w, req)
+		modelHandler(r.c, rt).ServeHTTP(w, req)
 		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "no_route") {
 			t.Fatalf("label %q: %d %s", label, w.Code, w.Body)
 		}

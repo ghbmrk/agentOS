@@ -122,7 +122,7 @@ func TestTheHandSocketCapsTheView(t *testing.T) {
 		t.Fatal(err)
 	}
 	var hand http.Handler
-	for _, s := range proxySockets(pv, testRouter(t), nil, nil, 101, 202) {
+	for _, s := range proxySockets(pv, testRouter(t), nil, 101, 202) {
 		if s.name == holder.HandSocket {
 			hand = s.h
 		}
@@ -150,7 +150,7 @@ func TestProxySocketsAdmitEachPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := map[string]int{}
-	for _, s := range proxySockets(pv, testRouter(t), nil, nil, 101, 202) {
+	for _, s := range proxySockets(pv, testRouter(t), nil, 101, 202) {
 		got[s.name] = s.uid
 	}
 	want := map[string]int{ModelSocket: 101, RoutingSocket: 101, holder.HandSocket: 202}
@@ -219,7 +219,7 @@ func TestServeWithProxyOpensNoModelSocket(t *testing.T) {
 				t.Fatalf("handTo(%q): router %v, view %v", tc.proxyDir, rt != nil, r.c.view != nil)
 			}
 			run := filepath.Join(t.TempDir(), "run")
-			srvs, err := serve(run, r.c, rt, nil, &routing{rt: testRouter(t)}, os.Getuid(), os.Getuid())
+			srvs, err := serve(run, r.c, rt, &routing{rt: testRouter(t)}, os.Getuid(), os.Getuid())
 			if err != nil {
 				t.Fatal(err)
 			}

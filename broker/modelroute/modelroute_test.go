@@ -551,86 +551,23 @@ func TestTruncatedBodyChargesEveryAllowedAttempt(t *testing.T) {
 
 // REQ: LOOP-5, CHG-1
 
-// A replay machine's calls go to the vault process like a live machine's,
-// always labelled private, carrying the routing rule of the tree under
-// evaluation; the vault process applies it within the owner's grants. A
-// guest cannot send a rule of its own, and a machine outside the replay
-// prefix never gets the evaluation route.
-func TestLOOP5EvaluationCallsCarryTheTreesRule(t *testing.T) {
+// No machine's route forwards a routing rule, whatever the guest sends:
+// the replay model route and its rule header are gone (#2797), and every
+// Agentos- header is the broker's.
+func TestForwardCarriesNoGuestRule(t *testing.T) {
 	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, `{"ok":true}`) }}
 	sock := serveUnix(t, fe)
-	ev := Evaluation(Config{Socket: sock, Label: func(string) string { return "public" }, Denied: (&denials{}).add, OverCeiling: func(string) {}})
-
-	rule := []byte(`{"chat":[{"provider":"anthropic","model":"m"}]}`)
-	for _, c := range []struct {
-		rule []byte
-		want string
-	}{{rule, base64.StdEncoding.EncodeToString(rule)}, {nil, ""}} {
+	fwd := Forward(Config{Socket: sock, Label: func(string) string { return "private" }, Denied: (&denials{}).add})
+	for _, m := range []string{"agent", EvalPrefix + "0a1b"} {
 		req := httptest.NewRequest("POST", "/openai/v1/chat/completions", strings.NewReader(`{}`))
-		req.Header.Set(HeaderRule, "eyJndWVzdCI6MX0=")
-		w := httptest.NewRecorder()
-		ev("eval-0a1b", c.rule).ServeHTTP(w, req)
-		if w.Code != 200 {
-			t.Fatalf("status %d", w.Code)
-		}
+		req.Header.Set("Agentos-Rule", base64.StdEncoding.EncodeToString([]byte(`{"chat":[{"provider":"anthropic","model":"m"}]}`)))
+		fwd(m).ServeHTTP(httptest.NewRecorder(), req)
 		fe.mu.Lock()
-		got := fe.seen[len(fe.seen)-1]
+		r := fe.seen[len(fe.seen)-1]
 		fe.mu.Unlock()
-		if got.Header.Get(HeaderRule) != c.want || got.Header.Get(HeaderLabel) != "private" || got.Header.Get(HeaderMachine) != "eval-0a1b" {
-			t.Errorf("rule %q label %q machine %q", got.Header.Get(HeaderRule), got.Header.Get(HeaderLabel), got.Header.Get(HeaderMachine))
+		if r.Header.Get("Agentos-Rule") != "" {
+			t.Fatalf("%s: forwarded a rule: %q", m, r.Header.Get("Agentos-Rule"))
 		}
-	}
-
-	n := len(fe.seen)
-	w := httptest.NewRecorder()
-	ev("agent", rule).ServeHTTP(w, httptest.NewRequest("POST", "/openai/v1/chat/completions", strings.NewReader(`{}`)))
-	if w.Code != http.StatusServiceUnavailable || len(fe.seen) != n {
-		t.Fatalf("non-replay machine: status %d, forwarded %d", w.Code, len(fe.seen)-n)
-	}
-
-	// The live route never forwards a rule, whatever the guest sends.
-	req := httptest.NewRequest("POST", "/openai/v1/chat/completions", strings.NewReader(`{}`))
-	req.Header.Set(HeaderRule, base64.StdEncoding.EncodeToString(rule))
-	Forward(Config{Socket: sock, Label: func(string) string { return "private" }, Denied: (&denials{}).add})("agent").ServeHTTP(httptest.NewRecorder(), req)
-	fe.mu.Lock()
-	defer fe.mu.Unlock()
-	if r := fe.seen[len(fe.seen)-1]; r.Header.Get(HeaderRule) != "" {
-		t.Fatalf("live route forwarded a rule: %q", r.Header.Get(HeaderRule))
-	}
-}
-
-// Evaluation needs somewhere to report a ceiling refusal: without
-// OverCeiling it forwards nothing. With it, a refusal the vault process
-// gives with ReasonEvalCeiling names the replay machine to OverCeiling,
-// and other denials do not.
-func TestLOOP5CeilingRefusalsReachTheEvaluator(t *testing.T) {
-	var reason atomic.Value
-	reason.Store(ReasonEvalCeiling)
-	fe := &fakeEgress{h: func(w http.ResponseWriter, r *http.Request) {
-		b, _ := json.Marshal(Denial{Adapter: "router", Method: r.Method, Status: 403, Reason: reason.Load().(string)})
-		w.Header().Set(HeaderDenial, string(b))
-		http.Error(w, "refused", 403)
-	}}
-	sock := serveUnix(t, fe)
-	call := func(cfg Config) {
-		w := httptest.NewRecorder()
-		Evaluation(cfg)("eval-0a1b", nil).ServeHTTP(w, httptest.NewRequest("POST", "/openai/v1/chat/completions", strings.NewReader(`{}`)))
-	}
-	cfg := Config{Socket: sock, Label: func(string) string { return "private" }, Denied: (&denials{}).add}
-	call(cfg)
-	fe.mu.Lock()
-	n := len(fe.seen)
-	fe.mu.Unlock()
-	if n != 0 {
-		t.Fatal("forwarded without OverCeiling")
-	}
-	var over []string
-	cfg.OverCeiling = func(m string) { over = append(over, m) }
-	call(cfg)
-	reason.Store("no declared operation matches")
-	call(cfg)
-	if len(over) != 1 || over[0] != "eval-0a1b" {
-		t.Fatalf("OverCeiling got %q", over)
 	}
 }
 

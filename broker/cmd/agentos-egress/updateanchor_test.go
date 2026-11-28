@@ -444,7 +444,7 @@ func TestUpdateAnchorSocket(t *testing.T) {
 	r := newPCRig(t)
 	r.trusted(t)
 	run := filepath.Join(t.TempDir(), "run")
-	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	srvs, err := serve(run, r.c, testRouter(t), nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -482,7 +482,7 @@ func TestUpdateAnchorSocket(t *testing.T) {
 	}
 
 	other := filepath.Join(t.TempDir(), "run")
-	srvs2, err := serve(other, r.c, testRouter(t), nil, nil, os.Getuid()+1, os.Getuid()+1)
+	srvs2, err := serve(other, r.c, testRouter(t), nil, os.Getuid()+1, os.Getuid()+1)
 	if err != nil {
 		t.Fatal(err)
 	}

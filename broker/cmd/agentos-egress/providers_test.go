@@ -207,7 +207,7 @@ func TestSetupProvidersCloseWithEnrollment(t *testing.T) {
 func TestSetupProvidersThroughTheVerifier(t *testing.T) {
 	r := newSetupRig(t)
 	run := filepath.Join(t.TempDir(), "run")
-	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	srvs, err := serve(run, r.c, testRouter(t), nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestSetupListsThePlanRoute(t *testing.T) {
 func TestTheRouterFollowsSetupsPrivateAnswer(t *testing.T) {
 	var hook privateHook
 	_, rt, err := modelRouting(route.Rule{"default": {{Provider: "openai", Model: "gpt-test"}}},
-		grants{"agent": {"openai"}}, nil, hook.allowed, nil, "", "")
+		grants{"agent": {"openai"}}, nil, hook.allowed, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +419,7 @@ func TestSetupKeyCheckHoldsNoLock(t *testing.T) {
 func TestSetupKeyAnswersThroughTheVerifier(t *testing.T) {
 	r := providerRig(t)
 	run := filepath.Join(t.TempDir(), "run")
-	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	srvs, err := serve(run, r.c, testRouter(t), nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}

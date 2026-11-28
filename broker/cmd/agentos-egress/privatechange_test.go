@@ -178,7 +178,7 @@ func TestTheModelStatePrivateField(t *testing.T) {
 
 // bind gives custody the -private-ok flags, which the model state reads.
 func TestBindCarriesThePrivateFlags(t *testing.T) {
-	mw, err := wireModel(route.Rule{"default": {{Provider: "openai", Model: "gpt-test"}}}, grants{"agent": {"openai"}}, map[string]bool{"openai": true}, "", "", "")
+	mw, err := wireModel(route.Rule{"default": {{Provider: "openai", Model: "gpt-test"}}}, grants{"agent": {"openai"}}, map[string]bool{"openai": true}, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

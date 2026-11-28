@@ -141,9 +141,9 @@ func withGrants(c *custody, g grants, agent string) *custody {
 var reservedPrefixes = []string{modelroute.BuilderPrefix, modelroute.EvalPrefix, "wk-", "cr-"}
 
 // checkAgentMachine checks -agent-machine: a machine name, never one with
-// a broker-reserved prefix (reservedPrefixes); builders and replay
-// machines take their grants from -builder-from and -eval-from. Empty is
-// allowed and grants by flags only.
+// a broker-reserved prefix (reservedPrefixes); builders take their grants
+// from -builder-from, and replay machines have none. Empty is allowed and
+// grants by flags only.
 func checkAgentMachine(m string) error {
 	if m == "" {
 		return nil
@@ -178,12 +178,12 @@ type modelWiring struct {
 
 // wireModel checks the agent machine and builds the router over the
 // flags' grants, asking the hook for stored-key grants.
-func wireModel(rule route.Rule, g grants, pok map[string]bool, agent, builderFrom, evalFrom string) (*modelWiring, error) {
+func wireModel(rule route.Rule, g grants, pok map[string]bool, agent, builderFrom string) (*modelWiring, error) {
 	if err := checkAgentMachine(agent); err != nil {
 		return nil, err
 	}
 	hook := new(privateHook)
-	g, rt, err := modelRouting(rule, g, pok, hook.allowed, hook.granted, builderFrom, evalFrom)
+	g, rt, err := modelRouting(rule, g, pok, hook.allowed, hook.granted, builderFrom)
 	if err != nil {
 		return nil, err
 	}
@@ -299,15 +299,10 @@ func grantsKey(machine string) string {
 // private-data answer from setup (privateHook), checked when privateOK
 // is false; stored is the grant a key stored at setup gives (privateHook,
 // storedGrant), checked when g grants nothing; nil adds none of either.
-func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, allowed func(string) bool, stored func(machine, provider string) bool, builderFrom, evalFrom string) (grants, *route.Router, error) {
-	// -eval-from names an agent machine: never a builder's grants key or a
-	// replay machine (security R1 on #126).
-	if strings.HasPrefix(evalFrom, modelroute.BuilderPrefix) || strings.HasPrefix(evalFrom, modelroute.EvalPrefix) {
-		return nil, nil, fmt.Errorf("-eval-from %s: name the owner's agent machine, whose grants replay uses", evalFrom)
-	}
+func modelRouting(rule route.Rule, g grants, privateOK map[string]bool, allowed func(string) bool, stored func(machine, provider string) bool, builderFrom string) (grants, *route.Router, error) {
 	for m := range g {
 		if strings.HasPrefix(m, modelroute.EvalPrefix) {
-			return nil, nil, fmt.Errorf("-grant %s: replay machines take -eval-from's grants, never their own", m)
+			return nil, nil, fmt.Errorf("-grant %s: replay machines have no model access", m)
 		}
 	}
 	g, err := builderGrants(g, builderFrom)
@@ -356,28 +351,6 @@ func newPrivateRouter(rule route.Rule, g map[string][]string, privateOK map[stri
 			log.Printf("provider %s rejected the vault's API key; replace it with put", provider)
 		},
 	})
-}
-
-// readPrices reads the evaluation price table; an empty path is an empty
-// table, which refuses every evaluation route.
-func readPrices(path string) (prices, error) {
-	ps := prices{}
-	if path == "" {
-		return ps, nil
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(b, &ps); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-	for k, p := range ps {
-		if p.Input < 0 || p.Output < 0 {
-			return nil, fmt.Errorf("%s: %s has a negative price", path, k)
-		}
-	}
-	return ps, nil
 }
 
 // readRule reads a routing rule: a JSON object from task class to routes
@@ -440,7 +413,7 @@ func serveCmd(args []string) error {
 	if *mf.routingPath == "" {
 		*mf.routingPath = filepath.Join(filepath.Dir(*keysPath), "routing.json")
 	}
-	mw, ev, ro, err := mf.wire()
+	mw, ro, err := mf.wire()
 	if err != nil {
 		return err
 	}
@@ -494,7 +467,7 @@ func serveCmd(args []string) error {
 	if _, err := egress.New(egress.Config{Adapters: adapters(), Grants: g, Vault: emptyVault{}, Audit: noAudit{}}); err != nil {
 		return err
 	}
-	srvs, err := serve(*run, c, c.handTo(ctx, *proxyDir, rt), ev, ro, *brokerUID, *unlockUID)
+	srvs, err := serve(*run, c, c.handTo(ctx, *proxyDir, rt), ro, *brokerUID, *unlockUID)
 	if err != nil {
 		return err
 	}
@@ -575,10 +548,10 @@ func (emptyVault) Redactor() (*vault.Redactor, error) { return vault.NewRedactor
 // until closed. The model and verify sockets admit the broker's uid only.
 // With rt nil the model and routing sockets are the proxy process's
 // (-proxy), and the vault process serves neither.
-func serve(dir string, c *custody, rt *route.Router, ev *evalRoute, ro *routing, brokerUID, unlockUID int) ([]*http.Server, error) {
+func serve(dir string, c *custody, rt *route.Router, ro *routing, brokerUID, unlockUID int) ([]*http.Server, error) {
 	var socks []socket
 	if rt != nil {
-		socks = modelSockets(c, rt, ev, ro, brokerUID)
+		socks = modelSockets(c, rt, ro, brokerUID)
 	}
 	socks = append(socks,
 		socket{VerifySocket, brokerUID, verifyHandler(c)},
@@ -597,12 +570,12 @@ type socket struct {
 
 // modelSockets are the model and routing sockets over src: the vault's
 // custody, or the proxy process's view.
-func modelSockets(src modelSource, rt *route.Router, ev *evalRoute, ro *routing, brokerUID int) []socket {
+func modelSockets(src modelSource, rt *route.Router, ro *routing, brokerUID int) []socket {
 	if ro == nil {
-		ro = &routing{base: rt.Rule(), rt: rt, ev: ev}
+		ro = &routing{base: rt.Rule(), rt: rt}
 	}
 	return []socket{
-		{ModelSocket, brokerUID, modelHandler(src, rt, ev)},
+		{ModelSocket, brokerUID, modelHandler(src, rt)},
 		{RoutingSocket, brokerUID, ro.handler()},
 	}
 }

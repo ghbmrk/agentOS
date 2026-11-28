@@ -49,7 +49,7 @@ func TestLocalPageClientAgainstVaultProcess(t *testing.T) {
 	}
 	defer c.lock()
 	run := filepath.Join(dir, "run")
-	srvs, err := serve(run, c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	srvs, err := serve(run, c, testRouter(t), nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestUnfinishedPassphraseChangeReported(t *testing.T) {
 	}
 	defer c.lock()
 	run := filepath.Join(dir, "run")
-	srvs, err := serve(run, c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	srvs, err := serve(run, c, testRouter(t), nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func writeFileT(t *testing.T, p string, b []byte) {
 func TestSecondLinePageClientAgainstVaultProcess(t *testing.T) {
 	r := openRig(t)
 	run := filepath.Join(t.TempDir(), "run")
-	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	srvs, err := serve(run, r.c, testRouter(t), nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +290,7 @@ func TestSecondLinePageClientAgainstVaultProcess(t *testing.T) {
 func TestTextingAccountClientAgainstVaultProcess(t *testing.T) {
 	r := openRig(t)
 	run := filepath.Join(t.TempDir(), "run")
-	srvs, err := serve(run, r.c, testRouter(t), nil, nil, os.Getuid(), os.Getuid())
+	srvs, err := serve(run, r.c, testRouter(t), nil, os.Getuid(), os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}

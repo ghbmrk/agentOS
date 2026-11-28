@@ -16,7 +16,6 @@ package modelroute
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -45,15 +44,11 @@ const (
 	// the call's meter holds, up to MaxRetries (SR3-7-f1b). Missing or
 	// unreadable, it is none.
 	HeaderAttempts = "Agentos-Attempts"
-	// HeaderRule carries, for a replay machine only, the routing rule of
-	// the tree under evaluation (base64 of its JSON); see Evaluation.
-	HeaderRule   = "Agentos-Rule"
-	headerPrefix = "Agentos-"
+	headerPrefix   = "Agentos-"
 )
 
-// EvalPrefix starts every replay machine's ID (vm.EvalPrefix). Only such
-// machines get the evaluation route, and the vault process applies a rule
-// only for them.
+// EvalPrefix starts every replay machine's ID (vm.EvalPrefix). Such
+// machines have no model route: the vault process refuses their calls.
 const EvalPrefix = "eval-"
 
 // BuilderPrefix starts every Loop 1 builder machine's ID (loopbuild,
@@ -61,13 +56,7 @@ const EvalPrefix = "eval-"
 // -builder-from, always as private (C-3c-6), never grants of their own.
 const BuilderPrefix = "lb-"
 
-// ReasonEvalCeiling is the vault process's denial reason when a tree under
-// evaluation routes to a model priced above the active rule's dearest
-// route, or to one with no known price. The broker reports such a tree as
-// not evaluated, never as passing or failing (security C1 on #62).
-const ReasonEvalCeiling = "evaluation route over the active price ceiling"
-
-// MaxRule bounds a forwarded routing rule.
+// MaxRule bounds a routing rule on the routing socket.
 const MaxRule = 16 << 10
 
 // Denial is one refused request, as the vault process reports it. It
@@ -121,11 +110,6 @@ type Config struct {
 	Denied func(machine string, d Denial)
 	// Logf reports forwarding faults. Nil is silent.
 	Logf func(format string, args ...any)
-	// OverCeiling is told, for Evaluation only, which replay machine the
-	// vault process refused with ReasonEvalCeiling, so the evaluator ends
-	// that run as not evaluated (replay.Evaluator.OverPriceCeiling).
-	// Evaluation requires it: without it every call answers 503.
-	OverCeiling func(machine string)
 	// Retries is the most attempts past the first the owner's rule lets
 	// a call spend (Spare.Retries), read on each call, so it must not
 	// block. The meter holds no more than that, nor MaxRetries. Nil, or
@@ -137,31 +121,6 @@ type Config struct {
 // machine, forwarding to the vault process. If that process is down the
 // guest gets 503, as when the vault is locked.
 func Forward(cfg Config) func(machine string) http.Handler {
-	fwd := forward(cfg)
-	return func(machine string) http.Handler { return fwd(machine, false, nil) }
-}
-
-// Evaluation returns the replay plane's model access (LOOP-5): machine's
-// calls go to the vault process like a live machine's, always labelled
-// private (owner task data, REV-5), carrying rule, the routing rule of the
-// tree under evaluation, or none to use the active one. The vault process
-// applies it within the owner's grants, which are its own configuration
-// (replay K1). A machine outside EvalPrefix, a rule over MaxRule, or a
-// Config without OverCeiling gets 503 and nothing is forwarded. A refusal
-// with ReasonEvalCeiling is reported to OverCeiling before Denied.
-func Evaluation(cfg Config) func(machine string, rule []byte) http.Handler {
-	fwd := forward(cfg)
-	return func(machine string, rule []byte) http.Handler {
-		if cfg.OverCeiling == nil || !strings.HasPrefix(machine, EvalPrefix) || len(rule) > MaxRule {
-			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				http.Error(w, "no evaluation model route", http.StatusServiceUnavailable)
-			})
-		}
-		return fwd(machine, true, rule)
-	}
-}
-
-func forward(cfg Config) func(machine string, eval bool, rule []byte) http.Handler {
 	logf := cfg.Logf
 	if logf == nil {
 		logf = func(string, ...any) {}
@@ -178,7 +137,7 @@ func forward(cfg Config) func(machine string, eval bool, rule []byte) http.Handl
 		// to 1 KiB); a larger header block is not its.
 		MaxResponseHeaderBytes: 64 << 10,
 	}
-	return func(machine string, eval bool, rule []byte) http.Handler {
+	return func(machine string) http.Handler {
 		rp := &httputil.ReverseProxy{
 			Transport:     tr,
 			FlushInterval: -1,
@@ -189,7 +148,7 @@ func forward(cfg Config) func(machine string, eval bool, rule []byte) http.Handl
 				// process too.
 				dropOurs(pr.Out.Trailer)
 				label := "private"
-				if !eval && cfg.Label(machine) == "public" {
+				if cfg.Label(machine) == "public" {
 					label = "public"
 				}
 				pr.Out.Header.Set(HeaderMachine, machine)
@@ -208,9 +167,6 @@ func forward(cfg Config) func(machine string, eval bool, rule []byte) http.Handl
 					n++
 				}
 				pr.Out.Header.Set(HeaderAttempts, strconv.Itoa(n))
-				if eval && rule != nil {
-					pr.Out.Header.Set(HeaderRule, base64.StdEncoding.EncodeToString(rule))
-				}
 			},
 			ModifyResponse: func(resp *http.Response) error {
 				raw := resp.Header.Get(HeaderDenial)
@@ -228,9 +184,6 @@ func forward(cfg Config) func(machine string, eval bool, rule []byte) http.Handl
 						d = Denial{Status: resp.StatusCode, Reason: "unreadable denial"}
 					}
 					d.Machine = machine
-					if eval && d.Reason == ReasonEvalCeiling {
-						cfg.OverCeiling(machine)
-					}
 					cfg.Denied(machine, d)
 				}
 				return nil

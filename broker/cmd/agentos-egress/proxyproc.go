@@ -23,9 +23,7 @@ type modelFlags struct {
 	held        holderDirs
 	rulePath    *string
 	routingPath *string
-	pricesPath  *string
 	builderFrom *string
-	evalFrom    *string
 	agent       *string
 	privateOK   *string
 }
@@ -38,9 +36,7 @@ func declareModelFlags(fs *flag.FlagSet, routingDefault string) *modelFlags {
 	fs.Var(f.held, "holder", "adapter=dir: the socket directory of the holder that keeps the adapter's API key (repeatable; every adapter or none); the proxy then adds no key itself (ARC-1)")
 	f.rulePath = fs.String("rule", "", "routing rule: JSON task class -> routes (P2-7); adoptions may only reorder its routes")
 	f.routingPath = fs.String("routing-state", "", "the adopted routing rule, kept across restarts (W3); "+routingDefault)
-	f.pricesPath = fs.String("prices", "", "model price table for evaluation routes: JSON \"provider/model\" -> {input, output} per million tokens; empty refuses every evaluation route")
 	f.builderFrom = fs.String("builder-from", "", "the owner's agent machine, whose model grants Loop 1's builder machines (lb-) use, always as private data (W3-builder); empty (the default) gives builders no model access")
-	f.evalFrom = fs.String("eval-from", "", "the owner's agent machine, whose model grants replay machines use (LOOP-5); empty (the default) gives replay no model access")
 	f.agent = agentFlag(fs)
 	f.privateOK = fs.String("private-ok", "", "providers the owner allowed for private data, comma-separated (CAP-9)")
 	return f
@@ -57,31 +53,23 @@ func (f *modelFlags) pok() map[string]bool {
 	return pok
 }
 
-// wire builds the model path over the flags: the router, the evaluation
-// route, and the routing socket's state, starting from the adopted rule.
-func (f *modelFlags) wire() (*modelWiring, *evalRoute, *routing, error) {
+// wire builds the model path over the flags: the router and the routing
+// socket's state, starting from the adopted rule.
+func (f *modelFlags) wire() (*modelWiring, *routing, error) {
 	rule, err := readRule(*f.rulePath)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	pok := f.pok()
 	base := rule
 	if rule, err = startRule(base, *f.routingPath); err != nil {
 		log.Printf("routing: starting from -rule: %v", err)
 	}
-	mw, err := wireModel(rule, f.g, pok, *f.agent, *f.builderFrom, *f.evalFrom)
+	mw, err := wireModel(rule, f.g, pok, *f.agent, *f.builderFrom)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
-	var ev *evalRoute
-	if *f.evalFrom != "" {
-		ps, err := readPrices(*f.pricesPath)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		ev = &evalRoute{From: *f.evalFrom, Grants: mw.g[*f.evalFrom], PrivateOK: pok, Active: rule, Prices: ps}
-	}
-	return mw, ev, &routing{base: base, rt: mw.rt, ev: ev, path: *f.routingPath}, nil
+	return mw, &routing{base: base, rt: mw.rt, path: *f.routingPath}, nil
 }
 
 // defaultProxyRun is the proxy process's socket directory.
@@ -102,8 +90,8 @@ func proxyUIDs(self, brokerUID, vaultUID int) error {
 
 // proxySockets are the proxy process's sockets: the model and routing
 // sockets for agentosd, and the hand socket for the vault process alone.
-func proxySockets(pv *proxyView, rt *route.Router, ev *evalRoute, ro *routing, brokerUID, vaultUID int) []socket {
-	return append(modelSockets(pv, rt, ev, ro, brokerUID),
+func proxySockets(pv *proxyView, rt *route.Router, ro *routing, brokerUID, vaultUID int) []socket {
+	return append(modelSockets(pv, rt, ro, brokerUID),
 		socket{holder.HandSocket, vaultUID, holder.HandHandler(pv, maxView)})
 }
 
@@ -122,7 +110,7 @@ func proxyCmd(args []string) error {
 	if err := proxyUIDs(os.Getuid(), *brokerUID, *vaultUID); err != nil {
 		return err
 	}
-	mw, ev, ro, err := mf.wire()
+	mw, ro, err := mf.wire()
 	if err != nil {
 		return err
 	}
@@ -137,7 +125,7 @@ func proxyCmd(args []string) error {
 		return err
 	}
 	mw.hook.bind(pv)
-	srvs, err := serveSockets(*run, proxySockets(pv, mw.rt, ev, ro, *brokerUID, *vaultUID))
+	srvs, err := serveSockets(*run, proxySockets(pv, mw.rt, ro, *brokerUID, *vaultUID))
 	if err != nil {
 		return err
 	}
