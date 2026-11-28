@@ -17,7 +17,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/routerule"
 )
 
-// REQ: REV-5, OP-8, ARC-7, A14, RES-5
+// REQ: RES-5
 
 // Tests that pin what the vault process's clients do on each answer, so a
 // changed line in them fails a test (mutgate, #6638). Each client's
