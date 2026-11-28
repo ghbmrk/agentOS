@@ -336,13 +336,15 @@ func (a AgentosdSetup) Send(to, text string) error {
 
 // PairTexts offers each PAIR text that reaches the box to s (OfferText)
 // and texts back its reply, until ctx ends or agentosd answers that setup
-// is closed (§8.1 pairing). A text that arrives while it is not running is
-// not offered again: the owner texts again.
+// is closed (§8.1 pairing). Each call reports the last text it answered
+// done, so agentosd offers again a text whose answer this loop lost or
+// did not reach before it ended, to this loop or the next one (#1296).
 func (a AgentosdSetup) PairTexts(ctx context.Context, s *Server, retry time.Duration) {
+	var done uint64
 	for ctx.Err() == nil {
 		var in localapi.SetupInbound
 		cctx, cancel := context.WithTimeout(ctx, localapi.SetupInboundWait+callTimeout)
-		err := a.Owner.Call(cctx, localapi.OpSetupInbound, nil, &in)
+		err := a.Owner.Call(cctx, localapi.OpSetupInbound, localapi.SetupInboundDone{Done: done}, &in)
 		cancel()
 		switch {
 		case refused(err, localapi.ErrSetupClosed):
@@ -359,6 +361,7 @@ func (a AgentosdSetup) PairTexts(ctx context.Context, s *Server, retry time.Dura
 		if reply, _ := s.OfferText(in.From, in.Text); reply != "" {
 			a.sendTwice(ctx, in.From, reply, retry)
 		}
+		done = in.ID
 	}
 }
 

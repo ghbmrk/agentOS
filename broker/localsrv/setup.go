@@ -40,6 +40,12 @@ type Setup struct {
 	keys    []time.Time
 	texts   []time.Time
 	signins []time.Time
+
+	// held are the PAIR texts handed to the page and not yet reported
+	// done, oldest first (#1296); seq numbers them.
+	inMu sync.Mutex
+	held []localapi.SetupInbound
+	seq  uint64
 }
 
 // SetupConfig configures a Setup.
