@@ -62,17 +62,22 @@ func (s *Server) approvals(w http.ResponseWriter, r *http.Request) {
 	tok := cookieToken(r)
 	sess := tokenKey(tok)
 	v := approvalsView{}
+	reached := false // the answer got the channel's reply
 	if r.Method == http.MethodPost {
 		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
-		v.Msg, v.Err = s.answer(r.Context(), tok, sess, r.PostForm)
+		v.Msg, v.Err, reached = s.answer(r.Context(), tok, sess, r.PostForm)
 	}
 	var rq localapi.Requests
 	if err := s.call(r.Context(), localapi.OpRequests, localapi.Auth{Token: tok}, &rq); err != nil {
-		if refused(err, localapi.ErrUnauthorized) {
+		// A reply from the channel stands: a redirect to /unlock would
+		// drop it, as when the answer's wrong codes locked the session
+		// (#1752). Anything else (a stale form, an expired or revoked
+		// session, no reply) goes to /unlock as before.
+		if refused(err, localapi.ErrUnauthorized) && !reached {
 			http.Redirect(w, r, "/unlock?next=/approvals/", http.StatusSeeOther)
 			return
 		}
@@ -89,8 +94,10 @@ func (s *Server) approvals(w http.ResponseWriter, r *http.Request) {
 }
 
 // answer settles one request from the page's form and returns the
-// channel's reply, or the owner-facing refusal.
-func (s *Server) answer(ctx context.Context, tok, sess string, f map[string][]string) (msg, refusal string) {
+// channel's reply, or the owner-facing refusal; reached says the channel
+// replied. An expired or revoked session's answer is refused unsaid, so
+// the page sends it to /unlock rather than hedge.
+func (s *Server) answer(ctx context.Context, tok, sess string, f map[string][]string) (msg, refusal string, reached bool) {
 	get := func(k string) string {
 		if v := f[k]; len(v) == 1 {
 			return v[0]
@@ -103,7 +110,7 @@ func (s *Server) answer(ctx context.Context, tok, sess string, f map[string][]st
 	// another phone cannot replay it, and the channel refuses it if the
 	// request changed or closed since, or its ID was reused (Security D1).
 	if !hmac.Equal([]byte(get("tok")), []byte(s.formToken(sess, id, sum))) {
-		return "", stalePage
+		return "", stalePage, false
 	}
 	approve := false
 	switch get("answer") {
@@ -111,11 +118,11 @@ func (s *Server) answer(ctx context.Context, tok, sess string, f map[string][]st
 		approve = true
 	case "deny":
 	default:
-		return "", "Choose Approve or Deny."
+		return "", "Choose Approve or Deny.", false
 	}
 	code := strings.TrimSpace(get("code"))
 	if approve && code == "" {
-		return "", "Enter a code from your code generator to approve."
+		return "", "Enter a code from your code generator to approve.", false
 	}
 	wrong := false
 	if approve {
@@ -124,49 +131,51 @@ func (s *Server) answer(ctx context.Context, tok, sess string, f map[string][]st
 		// held while the channel answers (L3 N3 on #165, and N1 after it).
 		release, ok := s.tryPage(sess)
 		if !ok {
-			return "", "Too many wrong codes from this phone. Wait a minute, then try again."
+			return "", "Too many wrong codes from this phone. Wait a minute, then try again.", false
 		}
 		defer func() { release(wrong) }()
 	}
 	if strings.HasPrefix(code, owner.UnlockProofPrefix) {
 		wrong = true
-		return "", "That code did not work. Each code works once; wait for the next one."
+		return "", "That code did not work. Each code works once; wait for the next one.", false
 	}
 	if len(id) > localapi.MaxID || len(sum) > localapi.MaxSum || len(code) > localapi.MaxCode {
-		return "", stalePage
+		return "", stalePage, false
 	}
 	var a localapi.Answered
 	err := s.call(ctx, localapi.OpAnswer, localapi.Answer{Token: tok, ID: id, Sum: sum, Approve: approve, Code: code}, &a)
 	switch {
+	case refused(err, localapi.ErrUnauthorized):
+		return "", "", false
 	case refused(err, localapi.ErrLimited):
-		return "", "Too many wrong codes from this phone. Wait a minute, then try again."
+		return "", "Too many wrong codes from this phone. Wait a minute, then try again.", false
 	case err != nil:
-		return "", answerUnreachableText
+		return "", answerUnreachableText, false
 	}
 	switch a.Refusal {
 	case "":
-		return a.Text, ""
+		return a.Text, "", true
 	case localapi.RefusedTooMany:
-		return "", "Too many tries on my Wi-Fi in the last day, so approving here is paused for up to 24 hours. Deny still works here, and NO by text."
+		return "", "Too many tries on my Wi-Fi in the last day, so approving here is paused for up to 24 hours. Deny still works here, and NO by text.", true
 	case localapi.RefusedWrongCode:
 		wrong = true
 		if a.Text != "" {
-			return "", a.Text // tries left, or void (UX A4)
+			return "", a.Text, true // tries left, or void (UX A4)
 		}
-		return "", wrongCodeText
+		return "", wrongCodeText, true
 	case localapi.RefusedTextedCode:
 		// Uncounted by the channel, but counted for this phone, or the
 		// page would test texted codes without limit (Security F1 on #171).
 		wrong = true
-		return "", owner.ErrTextedCode.Error()
+		return "", owner.ErrTextedCode.Error(), true
 	case localapi.RefusedNoRequest, localapi.RefusedChanged:
-		return "", stalePage
+		return "", stalePage, true
 	}
 	// The channel's own reply when nothing was settled.
 	if a.Text != "" {
-		return "", a.Text
+		return "", a.Text, true
 	}
-	return "", stalePage
+	return "", stalePage, true
 }
 
 // unreachableText: agentosd did not answer, so nothing was decided (UX-2wb-1).
@@ -175,7 +184,7 @@ const unreachableText = "I can't answer right now. Nothing was approved or denie
 // answerUnreachableText: the call to agentosd failed or timed out, but an
 // answer may already have taken effect, so the page claims nothing either way
 // (UX-2wb-1).
-const answerUnreachableText = "I didn't hear back. Your answer may or may not have gone through. Reload to see whether the request is still open."
+const answerUnreachableText = "I didn't hear back. Your answer may or may not have gone through. Open Approvals below, or text STATUS, to see whether the request is still open."
 
 const stalePage = "This page is out of date. Check the request below and answer again."
 

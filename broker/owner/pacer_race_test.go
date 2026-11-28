@@ -22,9 +22,26 @@ type gatedModem struct {
 	fail    error
 	// failAfter, when set, runs inside a failing Send, before it returns.
 	failAfter func()
+	mu        sync.Mutex
+	failed    int      // Sends that fail refused, so a test sees one was tried
+	texts     []string // every text that entered Send, in order
+}
+
+// tried returns the texts that entered Send, in order, and how many of
+// them failed.
+func (g *gatedModem) tried() ([]string, int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]string(nil), g.texts...), g.failed
 }
 
 func (g *gatedModem) Send(to, text string) error {
+	g.mu.Lock()
+	g.texts = append(g.texts, text)
+	if g.fail != nil {
+		g.failed++
+	}
+	g.mu.Unlock()
 	if g.fail != nil {
 		if g.failAfter != nil {
 			g.failAfter()
@@ -402,23 +419,6 @@ func TestCountRunsFromTheSend(t *testing.T) {
 	}
 }
 
-// asyncRaceRig is raceRig with textAfterReply sending on its own goroutine,
-// as agentosd runs it (#1746).
-func asyncRaceRig(t *testing.T, perHour int) (*rig, *gatedModem, func()) {
-	t.Helper()
-	st := &MemStore{}
-	if err := st.Save(State{Pacing: Pacing{PerHour: perHour, ApprovalHeld: true}}); err != nil {
-		t.Fatal(err)
-	}
-	r := newRig(t, st)
-	r.async = true
-	g := &gatedModem{entered: make(chan struct{}), open: make(chan struct{})}
-	r.edit = func(c *Config) { g.Modem = c.Modem; c.Modem = g }
-	r.ch = r.open()
-	var once sync.Once
-	return r, g, func() { once.Do(func() { close(g.open) }) }
-}
-
 // REQ: CH-15 (#1638, #1746)
 // The texts a local page call sends after its reply (textAfterReply: the
 // sign-in text and the wrong-code alert) are counted before they reach
@@ -429,22 +429,29 @@ func TestInFlightTextAfterReplySpendsTheAllowance(t *testing.T) {
 	calls := map[string]func(r *rig){
 		"sign-in": func(r *rig) {
 			if _, _, err := r.ch.LocalSignIn(r.totp()); err != nil {
-				r.t.Fatal(err)
+				r.t.Error(err) // not Fatal: the call may run on its own goroutine
 			}
 		},
 		"wrong-code": func(r *rig) {
 			if _, _, err := r.ch.LocalSignIn("000000"); err == nil {
-				r.t.Fatal("wrong code accepted")
+				r.t.Error("wrong code accepted")
 			}
 		},
 	}
 	for name, call := range calls {
 		t.Run(name, func(t *testing.T) {
-			r, g, open := asyncRaceRig(t, 1)
+			r, g, open := raceRig(t, 1)
 			defer func() { open(); r.ch.WaitSends() }()
 			// The reply comes first (#1746): the call returns while its
-			// text waits in the modem.
-			call(r)
+			// text waits in the modem. A call that sends first would wait
+			// on the gate, so it fails here rather than hang the run.
+			returned := make(chan struct{})
+			go func() { defer close(returned); call(r) }()
+			select {
+			case <-returned:
+			case <-time.After(5 * time.Second):
+				t.Fatal("page call did not return before its text was sent")
+			}
 			select {
 			case <-g.entered:
 			case <-time.After(5 * time.Second):
@@ -470,11 +477,14 @@ func TestInFlightTextAfterReplySpendsTheAllowance(t *testing.T) {
 			}
 		})
 		t.Run(name+"/not-sent", func(t *testing.T) {
-			r, g, open := asyncRaceRig(t, 1)
+			r, g, open := raceRig(t, 1)
 			open()
 			g.fail = modem.ErrNotSent
 			call(r)
 			r.ch.WaitSends()
+			if _, failed := g.tried(); failed == 0 {
+				t.Fatal("no text after the reply was tried")
+			}
 			if a := r.ch.Allowance(r.clock()); a != 1 {
 				t.Fatalf("allowance %d after an unsent text after the reply, want 1", a)
 			}

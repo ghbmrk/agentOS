@@ -223,22 +223,5 @@ func (c *Channel) runHeld(texts []string) {
 			}
 		}
 	}
-	if c.inlineSends {
-		do()
-		return
-	}
-	done := make(chan struct{})
-	c.sendMu.Lock()
-	prev := c.sendTail
-	c.sendTail = done
-	c.sendMu.Unlock()
-	c.sends.Add(1)
-	go func() {
-		defer c.sends.Done()
-		defer close(done)
-		if prev != nil {
-			<-prev
-		}
-		do()
-	}()
+	c.afterReply(do)
 }

@@ -190,7 +190,7 @@ form { margin: .6em 0 1.2em; }
 <button name="answer" value="approve">Approve</button> <button name="answer" value="deny" class="stop">Deny</button></form></section>
 {{else}}<p>Nothing is waiting for you.</p>{{end}}
 <p class="muted">Each answer here is texted to you.</p>
-<p><a href="/home">More</a> · <a href="/status">Status</a></p>
+<p><a href="/approvals/">Approvals</a> · <a href="/home">More</a> · <a href="/status">Status</a></p>
 {{template "foot"}}{{end}}
 
 {{define "follow"}}{{template "head" ""}}

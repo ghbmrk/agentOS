@@ -578,7 +578,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 // errStopping refuses a call that arrives once agentosd is stopping. The
 // modem bridge sends a refused inbound text again (bridgeproto.Retryable),
 // so the next start takes it rather than an inbox nobody reads.
-const errStopping = sockets.Code("stopping")
+const errStopping = sockets.Code(localapi.ErrStopping)
 
 // stage holds the ops that end at the stop, before the sockets close.
 type stage struct {

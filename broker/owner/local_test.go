@@ -70,7 +70,11 @@ func TestLocalWrongCodesCountAndAlertTheOwner(t *testing.T) {
 			t.Fatalf("wrong %d: %v", i, err)
 		}
 	}
-	if !r.ch.codes.st.LowLocked || r.ch.SessionUnlocked(r.clock()) {
+	r.ch.WaitSends() // the lock alert runs after the reply and saves the state
+	r.ch.mu.Lock()
+	locked := r.ch.codes.st.LowLocked
+	r.ch.mu.Unlock()
+	if !locked || r.ch.SessionUnlocked(r.clock()) {
 		t.Fatal("five wrong local codes did not lock")
 	}
 	if got := r.inbox(); !strings.Contains(got, "my Wi-Fi") {
