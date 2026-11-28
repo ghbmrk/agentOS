@@ -124,8 +124,9 @@ func heading(page []byte) string {
 	return strconv.Quote(s)
 }
 
-// aiOpen is the line the Connect AI step shows once it lists providers;
-// before the box has updated it shows only a wait message.
+// aiOpen is the line the Connect AI step shows once the first-boot update
+// has finished, whatever providers it lists; before that it shows only a
+// wait message (planSignIn, ASSUMPTIONS E11).
 const aiOpen = "One is enough. You can add more later."
 
 // deviceOffer reports whether the Connect AI step offers a device-code

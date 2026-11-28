@@ -1821,6 +1821,12 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(held(ok, self.ci(2, sha, "failure", [("checks", "failure"), ("mutgate", "skipped")])), ["mutgate:skipped"])
         self.assertEqual(held(self.ci(2, sha, "failure", [("mutgate", "skipped")]), self.ci(3, sha, jobs=[claimed, gate])), [])
         self.assertEqual(held({**ok, "event": "pull_request_target"}), ["mutgate:missing"])
+        # CI-mutgate-after-ci-fu (#6580): a push run on this PR's branch binds as ours, so only the event filter keeps
+        # its passing mutgate jobs from passing the PR, alone or as the newest run over a failed pull_request run.
+        push = {**self.ci(3, sha, jobs=[claimed, gate]), "event": "push"}
+        self.assertEqual(premerge._bind(push, bundle([])["pr"], bundle([])["repo"]), "ours")
+        self.assertEqual(held(push), ["mutgate:missing"])
+        self.assertEqual(held(self.ci(2, sha, "failure", [("checks", "failure"), ("mutgate", "skipped")]), push), ["mutgate:skipped"])
         self.assertEqual(held({**ok, "head_sha": onto}), ["mutgate:missing"])
         self.assertEqual(held({**ok, "path": ".github/workflows/mutgate.yml", "name": "mutgate"}), ["mutgate:missing"])
         self.assertEqual(held(self.ci(1, sha, jobs=[claimed, gate], prs=((8, "main"),))), ["mutgate:unbound"])
