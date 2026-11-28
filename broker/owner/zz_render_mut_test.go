@@ -19,7 +19,7 @@ import (
 // package as the lines they pin.
 
 // killAt is 14:02 on 13 Oct 2026, UTC: every time the texts below show.
-var killAt = time.Date(2026, 10, 13, 14, 2, 0, 0, time.UTC)
+func killAt() time.Time { return time.Date(2026, 10, 13, 14, 2, 0, 0, time.UTC) }
 
 func killChannel() *Channel { return &Channel{cfg: Config{Location: time.UTC}} }
 
@@ -86,12 +86,12 @@ func TestKillTermsEmptyIsEmpty(t *testing.T) {
 
 func TestKillItemSumCoversRecipientSince(t *testing.T) {
 	a, b := killItem(), killItem()
-	b.Facts.RecipientSince = killAt
+	b.Facts.RecipientSince = killAt()
 	if ItemSum(a) == ItemSum(b) {
 		t.Error("ItemSum ignores Facts.RecipientSince")
 	}
 	c := killItem()
-	c.Facts.RecipientSince = killAt.In(time.FixedZone("x", 3600))
+	c.Facts.RecipientSince = killAt().In(time.FixedZone("x", 3600))
 	if ItemSum(b) != ItemSum(c) {
 		t.Error("ItemSum depends on RecipientSince's zone, not its instant")
 	}
@@ -106,12 +106,12 @@ func TestKillItemLineShowsEveryNotice(t *testing.T) {
 		want string
 	}{
 		{"plain", func(*Item) {}, base},
-		{"asked", func(it *Item) { it.Asked = killAt }, base + ", asked 14:02, re-sent after restart"},
-		{"erased", func(it *Item) { it.Sent, it.SentErased = killAt, true },
+		{"asked", func(it *Item) { it.Asked = killAt() }, base + ", asked 14:02, re-sent after restart"},
+		{"erased", func(it *Item) { it.Sent, it.SentErased = killAt(), true },
 			base + ", may repeat a send whose record was erased (it went 14:02 Oct 13); send it?"},
-		{"sent", func(it *Item) { it.Sent = killAt }, base + ", already sent 14:02 Oct 13; send it again?"},
-		{"retried", func(it *Item) { it.Retried = killAt }, base + ", may go twice, first tried 14:02 Oct 13"},
-		{"sent beats retried", func(it *Item) { it.Sent, it.Retried = killAt, killAt.Add(-time.Hour) },
+		{"sent", func(it *Item) { it.Sent = killAt() }, base + ", already sent 14:02 Oct 13; send it again?"},
+		{"retried", func(it *Item) { it.Retried = killAt() }, base + ", may go twice, first tried 14:02 Oct 13"},
+		{"sent beats retried", func(it *Item) { it.Sent, it.Retried = killAt(), killAt().Add(-time.Hour) },
 			base + ", already sent 14:02 Oct 13; send it again?"},
 	} {
 		it := killItem()
@@ -142,10 +142,10 @@ func TestKillQuestionWording(t *testing.T) {
 		want  string
 	}{
 		{"detail last", func(it *Item) { it.Detail = "March" }, false, `Can I send "invoice", March? It can't be undone.`},
-		{"sent short", func(it *Item) { it.Sent = killAt }, true, `Can I send "invoice" again? It can't be undone. Already sent 14:02 Oct 13.`},
-		{"sent", func(it *Item) { it.Sent = killAt }, false, `Can I send "invoice" again? It can't be undone. It was already sent 14:02 Oct 13.`},
-		{"retried short", func(it *Item) { it.Retried = killAt }, true, `Can I send "invoice" again? It can't be undone. May go twice; tried 14:02 Oct 13.`},
-		{"retried", func(it *Item) { it.Retried = killAt }, false, `Can I send "invoice" again? It can't be undone. It may go twice; first tried 14:02 Oct 13.`},
+		{"sent short", func(it *Item) { it.Sent = killAt() }, true, `Can I send "invoice" again? It can't be undone. Already sent 14:02 Oct 13.`},
+		{"sent", func(it *Item) { it.Sent = killAt() }, false, `Can I send "invoice" again? It can't be undone. It was already sent 14:02 Oct 13.`},
+		{"retried short", func(it *Item) { it.Retried = killAt() }, true, `Can I send "invoice" again? It can't be undone. May go twice; tried 14:02 Oct 13.`},
+		{"retried", func(it *Item) { it.Retried = killAt() }, false, `Can I send "invoice" again? It can't be undone. It may go twice; first tried 14:02 Oct 13.`},
 	} {
 		it := killItem()
 		k.set(&it)
@@ -188,7 +188,7 @@ func TestKillWrongCodesLockAndCount(t *testing.T) {
 		c := &codes{store: st}
 		var locked bool
 		for i := 0; i < WrongToLock; i++ {
-			l, err := c.wrong(killAt.Add(time.Duration(i) * time.Second))
+			l, err := c.wrong(killAt().Add(time.Duration(i) * time.Second))
 			if failing != (err != nil) {
 				t.Fatalf("failing=%v: wrong err = %v", failing, err)
 			}
@@ -203,12 +203,12 @@ func TestKillWrongCodesLockAndCount(t *testing.T) {
 
 func TestKillLockHoldsInMemoryWhenTheSaveFails(t *testing.T) {
 	c := &codes{store: &failStore{fail: true}}
-	c.st.UnlockedUntil = killAt.Add(time.Hour)
+	c.st.UnlockedUntil = killAt().Add(time.Hour)
 	if err := c.lock(); err == nil {
 		t.Fatal("lock with a failing store returned nil")
 	}
-	if c.unlocked(killAt) || c.st.Locks != 1 {
-		t.Errorf("after a failed lock: unlocked=%v Locks=%d; want false, 1", c.unlocked(killAt), c.st.Locks)
+	if c.unlocked(killAt()) || c.st.Locks != 1 {
+		t.Errorf("after a failed lock: unlocked=%v Locks=%d; want false, 1", c.unlocked(killAt()), c.st.Locks)
 	}
 }
 
@@ -249,10 +249,10 @@ func TestKillRandIntPanicsWithoutRandomness(t *testing.T) {
 // killState is a State with one entry in every slice copyState copies.
 func killState() State {
 	s := State{
-		GridUsed: []string{"A1"}, Wrong: []time.Time{killAt}, LocalSignIns: []time.Time{killAt},
+		GridUsed: []string{"A1"}, Wrong: []time.Time{killAt()}, LocalSignIns: []time.Time{killAt()},
 		LocalAnswers: []LocalNote{{Text: "a"}}, Pending: []PendingRef{{ID: "a"}}, Queued: []QueuedRef{{ID: "a"}},
 		Held: []HeldText{{Text: "a"}}, Waiting: []WaitingMsg{{ID: "a"}}, Guarded: []GuardedMark{{Text: "a"}},
-		Sent: []time.Time{killAt}, Retired: map[string]time.Time{"a": killAt},
+		Sent: []time.Time{killAt()}, Retired: map[string]time.Time{"a": killAt()},
 	}
 	s.Pacing.Urgent = []Class{"a"}
 	return s
