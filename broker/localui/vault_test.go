@@ -655,6 +655,7 @@ func TestScanSafeRecovers(t *testing.T) {
 			t.Fatalf("%q decoded", b)
 		}
 	}
+	vaultTLSKills(t)
 }
 
 // FuzzScanPassphrase: no input makes the scan panic or hang.
