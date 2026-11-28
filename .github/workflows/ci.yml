@@ -1001,6 +1001,10 @@ jobs:
             github.com/ghbmrk/agentos/broker/enforcer/radio.TestSrpReachesController \
             github.com/ghbmrk/agentos/broker/enforcer/radio.TestStacksConfined || exit 1
           [ "$rc" -eq 0 ]
+      # Its own step: root_tests.py reads every line of the next one as a possible go command, and
+      # `sudo apt-get $APT_OPTS` has an expansion after sudo (CI-apt-timeout, #6592).
+      - name: Software TPM for the root-gated tests
+        run: command -v swtpm >/dev/null || sudo apt-get $APT_OPTS install -yq swtpm
       - name: Root-gated Go tests no other step runs (CI-root-go, #3539)
         # A test that skips off root is green in every other job (#3536: a renamed wire tag passed
         # CI). root_tests.py fails unless each root-gated test runs in a root step whose require_ran.py
@@ -1010,7 +1014,6 @@ jobs:
         working-directory: broker
         run: |
           python3 -I ../tools/root_tests.py
-          command -v swtpm >/dev/null || sudo apt-get $APT_OPTS install -yq swtpm
           python3 -I ../tools/root_tests.py --plan > "$RUNNER_TEMP/root-plan"
           fail=0
           while read -r pkg pat names <&3; do

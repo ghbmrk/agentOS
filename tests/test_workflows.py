@@ -1001,7 +1001,7 @@ def soak_env_problems(ci, soak):
     broker-race installs that it lacks, a different subordinate-id step, or a different go test
     timeout. Empty when none."""
     race, job = job_body(ci, "broker-race"), job_body(soak, "soak")
-    installs = lambda body: set(re.findall(r"apt-get install -yq ([\w.-]+)", body))
+    installs = lambda body: set(re.findall(r"apt-get (?:\$APT_OPTS )?install -yq ([\w.-]+)", body))
     problems = ["soak lacks %s" % p for p in sorted(installs(race) - installs(job) - RACE_AUDIT_ONLY)]
     sub = "      - name: Subordinate ids for the canary sandbox\n"
     if sub not in race or sub not in job:
@@ -2030,12 +2030,12 @@ class WorkflowTest(unittest.TestCase):
         # lacked, and CI makes a missing tool fail the test. A step dropped from either side fails here.
         ci, soak = ((WORKFLOWS / n).read_text() for n in ("ci.yml", "soak.yml"))
         self.assertEqual(soak_env_problems(ci, soak), [])
-        for bad in (soak.replace("apt-get install -yq dnsmasq-base", "true", 1),
+        for bad in (soak.replace("apt-get $APT_OPTS install -yq dnsmasq-base", "true", 1),
                     soak.replace("      - name: Subordinate ids for the canary sandbox\n", "      - name: ids\n", 1),
                     soak.replace("--add-subuids 100000-165535", "--add-subuids 1-2", 1),
                     soak.replace("-count=1 -timeout 25m ./...", "-count=1 ./...", 1)):
             self.assertNotEqual(soak_env_problems(ci, bad), [])
-        newtool = ci.replace("run: sudo apt-get install -yq dnsmasq-base", "run: sudo apt-get install -yq newtool", 1)
+        newtool = ci.replace("run: sudo apt-get $APT_OPTS install -yq dnsmasq-base", "run: sudo apt-get $APT_OPTS install -yq newtool", 1)
         self.assertEqual(soak_env_problems(newtool, soak), ["soak lacks newtool"])
 
     def test_soak_failures_become_annotations(self):
