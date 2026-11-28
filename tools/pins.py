@@ -95,6 +95,9 @@ FETCH_EXEMPT = {
                               "notes read as text, npm tarballs checked against the lockfile's sha512, and "
                               "npm and pnpm named in its docstrings, comments and OSV queries (the ecosystem, not a command)"),
     "tests/test_zz_vision_ort_nuget.py": (2, "writes a stand-in `curl` that copies local files; downloads nothing"),
+    ".github/workflows/image.yml": (1, "reads main's assurance/vulncheck.json through the GitHub contents API as "
+                                       "records data for inherited mode (#6631); downloads nothing it runs"),
+    "tests/test_zz_vulncheck_inherit.py": (1, "image.yml's inherited-mode curl step as fixture text it checks"),
 }
 
 # What `fetch_sites` counts. A word is split at shell quoting and punctuation and read by its basename,
