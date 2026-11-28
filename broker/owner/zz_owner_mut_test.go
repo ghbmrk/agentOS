@@ -260,7 +260,7 @@ func TestMutCheckFoldsMarksAndRepeats(t *testing.T) {
 // FoldPattern's output is fixed: a space is one or more spaces and each
 // character's folds are listed in order.
 func TestMutFoldPatternIsFixed(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 200; i++ {
 		if got, want := FoldPattern("i m"), "(?:i|l) +(?:rn)"; got != want {
 			t.Fatalf("FoldPattern %q, want %q", got, want)
 		}
