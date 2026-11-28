@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// REQ: CH-2, CH-12, CH-15, CH-18, CH-19, OP-3
+// REQ: CH-2, CH-12, CH-15, CH-18, CH-19
 // MUT-kill-5974-owner (#6670): the statements outside approvals.go that
 // mutgate's deletion left alive once #6674's tests reached them, each
 // pinned by a test that fails without it. They call the function that
