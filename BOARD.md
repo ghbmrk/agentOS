@@ -80,7 +80,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | SPEC-krn12-owner-honey | SPEC-krn12-owner-honey: name the owner-side honey key case in KRN-12 Response (KRN-12) | #4219 | queued (release; L1 spec-diff; after #4167; from #4219) |
 | EDGE-link-edge | EDGE-link-edge: the edge box's own side of the link: its key, hello, pin of the core's link key, and new-core acceptance after a restore (HW-15; needs brief). | EDGE-link-core-c2 | queued (release; tier A; the unowned gap in briefs/EDGE-link-core.md) |
 | ERASE-contain-first | ERASE-contain-first: contain the reader lineage before the erase is logged, the guest plane refuses a contained lineage's plans, and the erase confirmation lists the cancelled plans (LOG-4) | #3870 | queued(release; tier A; size M; from #4805 reviews) |
-| KRN-keys-print-factors | KRN-keys-print-factors: the sealed store's factors print no passphrase, recovery key or PIN (DECOY-b-8, CLK-1) | #4833 | building(release; tier A; size S; waits on #4833, #4845 and sub B's OK for localui/recovery_test.go) |
 | MIG-4-plan-login-texts | Owner texts for the plan sign-in's `signin-code` and the late-exchange end, once the home page runs on the plan host (#3180 item 2; CH-12, CLK-7). | MIG-4-plan-login-texts | queued (release; after #2780; sub B) |
 
 ## Harness and operating model
@@ -98,6 +97,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-unmarked-gaps | VULN-unmarked-gaps: unmarked copies the string-fingerprint check cannot see (small packages, minified-only packages, copies inside the holder's own unminified scripts, a second copy in a file that already names the package) | VULN-inlined-minified (#4234) | queued (later; tier A) |
 | MET-owner-export | MET-owner-export: the box writes its weekly owner-outcome counts to records/owner/ (needs brief; after G1) | #4935; G1 | queued (release; needs brief; after G1) |
 | VULN-prune-requalify | VULN-prune-requalify: requalify the pruned OpenClaw image (PLN-5, HLD-3) | VULN-controlui-drop (#4436) | queued (release) |
+| PREMERGE-records-merge-fu | PREMERGE-records-merge-fu: tool-and-record PRs get a route out of needs-records; manual merges rerun the gate first (release; from #6717) | #6717 | building |
 
 ## Owner channel and approvals (SPEC §10)
 
@@ -393,16 +393,15 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | SPEC-krn2-core-record | SPEC-krn2-core-record: KRN-2 says the core grows under a committed record line, not a PR-body line. Release. | #6404 | building (release; L1 spec-diff) |
 | MUT-6368-fu | MUT-6368-fu: unlock sets the anchors file mode before the rename, seal tests pin that only TPM slots carry Policies, and a test pins the store-key wipe on every return. Release. | #6368, #6384 | queued (release; tier A) |
 | REV-CHK-links-ns10 | REV-CHK-links-ns10: a link planted at run time on a made path's way reaches no check | #6474 re-plan | queued (release; tier A; kernel lane) |
-| VULN-expatw-link-check | VULN-expatw-link-check: the image sweep fails when any ELF links libexpatw.so.1, so the expat record's 'UTF-8 build only' reason is a build property. Release. | #6542, #6382 | queued (release; tier A; after #6382 and #6543) |
 | ENF-neigh-test-deadline | ENF-neigh-test-deadline: TestNeighboursFollowHolds waits on a barrier with a deadline, not a fixed 100 ms sleep. Release. | #5951 | building (release; tier B) |
 | ENF-nft-test-deadline-2 | ENF-nft-test-deadline-2: replace fixed 100 ms sleeps in the other nft netns tests with barriers and deadlines. Release. | #6546 | building (release; tier B) |
-| NET-2-host-shape | NET-2-host-shape: enflist.Propose refuses any host that is not LDH lower-case with two or more labels, so a signed name never stops every resolver. Release. | #6478, #6552 | queued (release; tier A) |
+| NET-2-host-shape | NET-2-host-shape: enflist.Propose refuses any host that is not LDH lower-case with two or more labels, so a signed name never stops every resolver. Release. | #6478, #6552 | building (release; tier A) |
 | ENF-label-free-mutant | ENF-label-free-mutant: TestSharedLabelFreeLoad does not catch a record written when the label set did nothing. Release. | #6551 | queued (release; tier A) |
 | VULN-static-elf-go-entry | VULN-static-elf-go-entry: a go file's entry point inside a listed Go function, .text its only executable section, nfunc > 0, exact go: marker list. Release; from #6554. | #6482, #6554 | building (release; tier A) |
 | ENF-nft-test-deadline-3 | ENF-nft-test-deadline-3: barrier and caps-test teardown fail loudly on a sender-side drop or a timed-out read. Release. | #6562 | queued (release; tier A) |
 | MUT-record-deps-lint-ux | MUT-record-deps-lint-ux: one waive line per entry with every missing --dep; cite receiver-variable method calls. Release. | #6499, #6561 | queued (release; tier A) |
 | CI-mutgate-after-ci | CI-mutgate-after-ci: mutgate runs only after ci passes on the same head (premerge still requires its pass); soak fuzz max-parallel 1. | runner-capacity cut 2026-11-23 | building (gate file) |
-| CI-soak-green | CI-soak-green: triage #190 and restore a passing soak run. Release. | #6569, #6570 | queued (release) |
+| CI-soak-green | CI-soak-green: triage #190 and restore a passing soak run. Release. | #6569, #6570 | building (release) |
 | TOOL-mutgate-memcap-fu3 | TOOL-mutgate-memcap-fu3: a shim fault with no writable marker (both opens fail, write and unlink fail, or the shim dies outside shim_entry) never reads KILLED. Release. | #6512, #6557 | queued (release; tier A) |
 | CI-apt-timeout | CI-apt-timeout: every workflow apt-get call carries bounded retries and timeouts; image artifact consumers fail fast with a readable cause when build did not succeed. Release. | #6575 run 45139943672 | building (release; tier A) |
 | DRONE-sitl-pip-hashes | DRONE-sitl-pip-hashes: the SITL build's PyPI install checks hashes. Release. | #6549 | building (release; tier A) |
@@ -410,20 +409,22 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ROUTE-cancel-race | ROUTE-cancel-race: a provider 429/5xx racing the meter's time limit is read as cancelled and the route is not cooled (release; from #6607) | ROUTE-cancel-race | queued (release; tier A; from #6607) |
 | PAGE-stopping-text | PAGE-stopping-text: every local page action refused with 'stopping' says agentOS is restarting, not its generic failure (from #1752 P8; tier A) | #1752 | building |
 | VULN-debian-r17 | VULN-debian-r17: accept openssl's no-fix Debian 13 advisory DEBIAN-CVE-2026-107494 so image-vulncheck passes again. Release; no-fix Debian round. | #2919, #6542 | building (release; tier A) |
-| VIS-reply-read-wipe-fu | VIS-reply-read-wipe-fu: replace the vision client's package-level test seams with passed-in ones, and restore the trailing-data detail (#6636 review release findings, DEV-7). | #6636 | building (release; tier A) |
 | VULN-gobwas-ws-r1 | VULN-gobwas-ws-r1: premerge shows the content of vendored agent-instruction files to the Security reviewer. Release; from #6647. | #6646 | building (release; tier A) |
 | VULN-gobwas-ws-r2 | VULN-gobwas-ws-r2: sipline WS loopback test near sipgo's message-size limit. Release; from #6647. | #6646 | building (release; tier A) |
 | B3-16-r1 | B3-16-r1: Gmail connect DUse after a finished sign-in says it is already connected. Release; from #6632. | #3014 | queued (release; tier A) |
 | VM-snap-unread-notice-fu-2b | VM-snap-unread-notice-fu-2b: main wires link.Usable into the held unread notice | #6455, #6657 | queued (release; tier A; lane claude2) |
 | VULN-debian-r18 | VULN-debian-r18: accept openssl's no-fix Debian 13 advisory DEBIAN-CVE-2026-84785 so image-vulncheck passes again. Release; no-fix Debian round. | #2919, #6628 | building (release; tier A) |
-| MUT-kill-5974-owner | MUT-kill-5974-owner: kill or prove the 357 owner and localsrv survivors on main that #5974's mutgate exposed. | #5187, #5974 | queued (release; tier A) |
+| MUT-kill-5974-owner | MUT-kill-5974-owner: kill or prove the 357 owner and localsrv survivors on main that #5974's mutgate exposed. | #5187, #5974 | building (release; tier A) |
 | VULN-quic-import-sweep-fu | VULN-quic-import-sweep-fu: count every QUIC/datagram-BIO name holder; exempt definers by SONAME. Release; from #6672. | #6671 | building (release; tier A) |
-| TOOL-mutgate-order-marks-precision | TOOL-mutgate-order-marks-precision: a flag-defining var or an uncalled name mention widens no package | #6686, #6682 | queued (release; tier A gate file) |
 | CI-race-scope | CI-race-scope: broker-race skips PRs whose every change lies in a measured race-blind path set, backed by a read-set audit on main | #6689 | building (release; tier A gate file) |
 | PAGE-stopping-setup | PAGE-stopping-setup: setup page actions refused with 'stopping' show the stopping page (from #6619; tier A) | #6619 | queued |
 | VULN-static-elf-go-prefix | VULN-static-elf-go-prefix: a go file's executable bytes before .text held to headers and notes; the forged-table limit stated or narrowed. Release; from #6700. | #6563, #6700 | queued (release; tier A) |
-| CI-pin-build-isolation | CI-pin-build-isolation: a hashed pip install is credited only when it cannot fetch an unhashed build backend. Release. | #6697 | queued (release; tier A) |
 | PAGE-stopping-keep | PAGE-stopping-keep: the stopping page keeps the handler's known reply and outcome; provisions noted (from #6699 reviews; tier A) | #6619 | queued |
+| MUT-kill-5974-owner-4 | MUT-kill-5974-owner-4: kill or prove reaction.go's 26 and autoreply.go's 16 owner survivors. | #6670, #6625 | building (release; tier A) |
+| MUT-kill-5974-owner-5 | MUT-kill-5974-owner-5: kill or prove the 43 owner survivors in voicecheck, converse, name, disclose, totp, boot, informquote, commit and codes. | #6670, #6625 | building (release; tier A) |
+| MUT-kill-5974-owner-6 | MUT-kill-5974-owner-6: kill or prove channel.go's 47 and local.go's 31 owner survivors once #6620 merges. | #6670, #6620 | queued (release; tier A) |
+| CTL-prefix-invalid-tail | CTL-prefix-invalid-tail: control.Prefix never returns more than len(s), invalid UTF-8 included. | #6625 | queued (release; tier A) |
+| MUT-kill-5974-owner-4-fu | MUT-kill-5974-owner-4-fu: auto-reply approval shows the reply, not only its filter name; tighten #6744's refusal tests. | #6741, #6744 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -487,4 +488,6 @@ issue #6664: needs exactly one state label of queued, building, in review, merge
 issue #6681: a second issue for VULN-gobwas-ws-r2 (first is #6650)
 issue #6689: body has no board-row block
 issue #6691: body has no board-row block
+issue #6726: body has no board-row block
+issue #6728: body has no board-row block
 ```

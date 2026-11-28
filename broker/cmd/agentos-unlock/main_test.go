@@ -364,7 +364,7 @@ func newRig(t *testing.T, putAnchors bool) *rig {
 	rec[0] = 1
 	r.recovery = rec
 	r.store = filepath.Join(dir, "store")
-	st, err := seal.Create(r.store, seal.Recovery{Key: rec})
+	st, err := seal.Create(r.store, seal.Recovery{Key: secret.Hide(rec)})
 	must(t, err)
 	defer st.Close()
 	_, err = st.AddSlot(seal.TPM{TPM: r.sw.TPM(), PolicyKey: &r.policy.PublicKey, Policies: []tpmseal.Policy{p}, Host: "Test PC"})
@@ -547,7 +547,7 @@ func TestTheUnlockStepBecomesTheKernel(t *testing.T) {
 	ed := key.Ed25519Signer(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{1}, 32))) // gen(1)
 	v, err := handoff.EncodeAnchors([]key.PublicKey{hw.Public(), ed.Public()})
 	must(t, err)
-	st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+	st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 	must(t, err)
 	must(t, st.Put(handoff.AnchorsEntry, v))
 	st.Close()
@@ -799,7 +799,7 @@ func TestTheUnlockStepFailsClosed(t *testing.T) {
 	if k, err := handoff.ReadKeys(pr); err != nil || len(k.Anchors) != 0 {
 		t.Fatalf("no owner's anchors: hand-off %v %v, want none", k.Anchors, err)
 	}
-	st, err := seal.Unlock(bare.store, seal.Recovery{Key: bare.recovery})
+	st, err := seal.Unlock(bare.store, seal.Recovery{Key: secret.Hide(bare.recovery)})
 	must(t, err)
 	must(t, st.Put(handoff.AnchorsEntry, []byte("short")))
 	st.Close()
@@ -812,7 +812,7 @@ func TestTheUnlockStepFailsClosed(t *testing.T) {
 	// the kernel nothing, so no kernel starts without its anchor.
 	ref := string(tpmseal.CounterRef{Handle: r.keys.Counter.Handle, Name: r.keys.Counter.Name}.Marshal())
 	for name, v := range map[string][]byte{"none": nil, "garbled": []byte(`{"ref":{"handle":1},"auth":"YQ=="}`), "no auth": []byte(`{"ref":` + ref + `}`), "null auth": []byte(`{"ref":` + ref + `,"auth":null}`)} {
-		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 		must(t, err)
 		if v == nil {
 			must(t, st.Delete(handoff.CounterEntry))
@@ -841,7 +841,7 @@ func TestUnlockHandsTheRecipient(t *testing.T) {
 	want, err := handoff.ParseRecipient(v)
 	must(t, err)
 	put := func(v []byte) {
-		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 		must(t, err)
 		if v == nil {
 			must(t, st.Delete(handoff.RecipientEntry))
@@ -995,7 +995,7 @@ func TestAnUncappableSlotUnlocksNothing(t *testing.T) {
 	r.sw.Measure(16, "resettable")
 	p, err := tpmseal.SignCurrent(r.sw.TPM(), r.policy, []uint{16})
 	must(t, err)
-	st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+	st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 	must(t, err)
 	_, err = st.AddSlot(seal.TPM{TPM: r.sw.TPM(), PolicyKey: &r.policy.PublicKey, Policies: []tpmseal.Policy{p}, Host: "Test PC"})
 	must(t, err)
@@ -1076,7 +1076,7 @@ func TestUnlockHandsThePageCA(t *testing.T) {
 	v, err := pageca.Marshal(a)
 	must(t, err)
 	put := func(v []byte) {
-		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 		must(t, err)
 		if v == nil {
 			must(t, st.Delete(handoff.PageCAEntry))
@@ -1147,13 +1147,13 @@ func TestUnlockHandsTheSlot(t *testing.T) {
 	r := newRig(t, true)
 	phrase := []byte("correct horse battery staple")
 	edit := func(f func(st *seal.Store)) {
-		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 		must(t, err)
 		f(st)
 		st.Close()
 	}
 	edit(func(st *seal.Store) {
-		_, err := st.AddSlot(seal.Passphrase{Phrase: phrase})
+		_, err := st.AddSlot(seal.Passphrase{Phrase: secret.Hide(phrase)})
 		must(t, err)
 	})
 	handed := func(pass []byte) (handoff.KernelKeys, error) {
@@ -1267,7 +1267,7 @@ func TestUnlockWritesTheClerksAnchors(t *testing.T) {
 		return a
 	}
 	root := func(r *rig) [32]byte {
-		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 		must(t, err)
 		defer st.Close()
 		k, err := st.ClerkRoot()
@@ -1375,13 +1375,13 @@ func lostRig(t *testing.T) *rig {
 	t.Helper()
 	r := newRig(t, true)
 	r.request = filepath.Join(r.dir, "recovery-request")
-	st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+	st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 	must(t, err)
 	defer st.Close()
 	must(t, st.Put(handoff.RecipientEntry, recipientEntry(t, r.recovery)))
 	// The card's passphrase slot, as enrollment makes it.
 	r.passphrase = []byte("correct horse battery staple")
-	_, err = st.AddSlot(seal.Passphrase{Phrase: r.passphrase})
+	_, err = st.AddSlot(seal.Passphrase{Phrase: secret.Hide(r.passphrase)})
 	must(t, err)
 	return r
 }
@@ -1473,7 +1473,7 @@ func (r *rig) unlockOnce(pass []byte) (handoff.KernelKeys, string, error) {
 func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 	r := lostRig(t)
 	slots := func() []seal.SlotInfo {
-		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 		must(t, err)
 		defer st.Close()
 		return st.Slots()
@@ -1504,19 +1504,19 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 	}
 	// The printed card's key opens the store (#3410).
 	next := printed(t, k.NewRecovery.Get())
-	if _, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery}); err == nil {
+	if _, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)}); err == nil {
 		t.Fatal("the old recovery key still opens the store")
 	}
-	if _, err := seal.Unlock(r.store, seal.Passphrase{Phrase: r.passphrase}); err == nil {
+	if _, err := seal.Unlock(r.store, seal.Passphrase{Phrase: secret.Hide(r.passphrase)}); err == nil {
 		t.Fatal("the old passphrase still opens the store")
 	}
 	// The new card's passphrase, as the page prints it, opens the store.
 	pass, err := words.FromSeed(k.NewRecovery.Get()[handoff.CardKeyLen:])
 	must(t, err)
-	st, err := seal.Unlock(r.store, seal.Passphrase{Phrase: pass})
+	st, err := seal.Unlock(r.store, seal.Passphrase{Phrase: secret.Hide(pass)})
 	must(t, err)
 	st.Close()
-	st, err = seal.Unlock(r.store, seal.Recovery{Key: next})
+	st, err = seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(next)})
 	must(t, err)
 	v, _, err := st.Get(handoff.RecipientEntry)
 	must(t, err)
@@ -1567,15 +1567,15 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 		t.Fatalf("after the confirm: %v", err)
 	}
 	r.shutdown(cmd, out)
-	st, err = seal.Unlock(r.store, seal.Recovery{Key: newKey})
+	st, err = seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(newKey)})
 	must(t, err)
 	st.Close()
 	pass, err = words.FromSeed(bits[handoff.CardKeyLen:])
 	must(t, err)
-	st, err = seal.Unlock(r.store, seal.Passphrase{Phrase: pass})
+	st, err = seal.Unlock(r.store, seal.Passphrase{Phrase: secret.Hide(pass)})
 	must(t, err)
 	st.Close()
-	if _, err := seal.Unlock(r.store, seal.Passphrase{Phrase: r.passphrase}); err == nil {
+	if _, err := seal.Unlock(r.store, seal.Passphrase{Phrase: secret.Hide(r.passphrase)}); err == nil {
 		t.Fatal("the first new card's passphrase still opens the store")
 	}
 }
@@ -1600,7 +1600,7 @@ func TestLostCardPassphraseOutlivesNoRetiredKey(t *testing.T) {
 	must(t, err)
 	// Route A's write (agentos-enroll -rotate-recovery): the recovery slot
 	// alone, with a new recipient.
-	st, err := seal.Unlock(r.store, seal.Recovery{Key: printed(t, made)})
+	st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(printed(t, made))})
 	must(t, err)
 	var rid string
 	for _, sl := range st.Slots() {
@@ -1609,10 +1609,10 @@ func TestLostCardPassphraseOutlivesNoRetiredKey(t *testing.T) {
 		}
 	}
 	later := bytes.Repeat([]byte{0x42}, seal.RecoveryLen)
-	_, err = st.ReplaceAndPut(handoff.RecipientEntry, recipientEntry(t, later), seal.Swap{ID: rid, F: seal.Recovery{Key: later}})
+	_, err = st.ReplaceAndPut(handoff.RecipientEntry, recipientEntry(t, later), seal.Swap{ID: rid, F: seal.Recovery{Key: secret.Hide(later)}})
 	st.Close()
 	must(t, err)
-	if _, err := seal.Unlock(r.store, seal.Recovery{Key: printed(t, made)}); err == nil {
+	if _, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(printed(t, made))}); err == nil {
 		t.Fatal("the retired recovery key still opens the store")
 	}
 	// No 16 bytes of the retired key's bits give the store's passphrase.
@@ -1620,11 +1620,11 @@ func TestLostCardPassphraseOutlivesNoRetiredKey(t *testing.T) {
 	for i := 0; i+16 <= len(bits); i++ {
 		p, err := words.FromSeed(bits[i : i+16])
 		must(t, err)
-		if _, err := seal.Unlock(r.store, seal.Passphrase{Phrase: p}); err == nil {
+		if _, err := seal.Unlock(r.store, seal.Passphrase{Phrase: secret.Hide(p)}); err == nil {
 			t.Fatalf("a passphrase from the retired bits at %d opens the store", i)
 		}
 	}
-	st, err = seal.Unlock(r.store, seal.Passphrase{Phrase: pass})
+	st, err = seal.Unlock(r.store, seal.Passphrase{Phrase: secret.Hide(pass)})
 	must(t, err)
 	st.Close()
 }
@@ -1720,11 +1720,11 @@ func TestLostCardRequestIgnoredUnlessValid(t *testing.T) {
 		shape func(*seal.Store) error
 	}{
 		{"two recovery slots", func(st *seal.Store) error {
-			_, err := st.AddSlot(seal.Recovery{Key: bytes.Repeat([]byte{7}, seal.RecoveryLen)})
+			_, err := st.AddSlot(seal.Recovery{Key: secret.Hide(bytes.Repeat([]byte{7}, seal.RecoveryLen))})
 			return err
 		}},
 		{"two passphrase slots", func(st *seal.Store) error {
-			_, err := st.AddSlot(seal.Passphrase{Phrase: []byte("another passphrase slot here")})
+			_, err := st.AddSlot(seal.Passphrase{Phrase: secret.Hide([]byte("another passphrase slot here"))})
 			return err
 		}},
 		{"no passphrase slot", func(st *seal.Store) error {
@@ -1737,7 +1737,7 @@ func TestLostCardRequestIgnoredUnlessValid(t *testing.T) {
 		}},
 	} {
 		two := lostRig(t)
-		st, err := seal.Unlock(two.store, seal.Recovery{Key: two.recovery})
+		st, err := seal.Unlock(two.store, seal.Recovery{Key: secret.Hide(two.recovery)})
 		must(t, err)
 		err = c.shape(st)
 		st.Close()
@@ -1796,7 +1796,7 @@ func TestUnlockHandsTheCheckerItsSeed(t *testing.T) {
 	path := filepath.Join(r.dir, "checker-seed", "seed")
 	seed := []byte("synthetic-code-seed-01")
 	edit := func(f func(st *seal.Store)) {
-		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: secret.Hide(r.recovery)})
 		must(t, err)
 		f(st)
 		st.Close()

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -25,15 +26,11 @@ func allZero(b []byte) bool {
 	return true
 }
 
-// recordDecoded keeps every template decodeReply decodes until the test
-// ends.
-func recordDecoded(t *testing.T) *[][]byte {
-	t.Helper()
+// recordDecoded returns seams that keep every template decoded through
+// them, and where they keep it.
+func recordDecoded() (seams, *[][]byte) {
 	var got [][]byte
-	old := decoded
-	decoded = func(v []byte) { got = append(got, v) }
-	t.Cleanup(func() { decoded = old })
-	return &got
+	return seams{decoded: func(v []byte) { got = append(got, v) }}, &got
 }
 
 // The reply is read into one buffer the call owns, and every byte of it
@@ -42,14 +39,14 @@ func recordDecoded(t *testing.T) *[][]byte {
 // only the line, or none, shows.
 func TestReplyReadBufferZeroed(t *testing.T) {
 	var bufs [][]byte
-	old := replyBuf
-	replyBuf = func() []byte {
+	s := seams{buf: func() []byte {
 		b := bytes.Repeat([]byte{0xAA}, MaxReplyLine+1)
 		bufs = append(bufs, b)
 		return b
-	}
-	t.Cleanup(func() { replyBuf = old })
+	}}
 	ctx := context.Background()
+	f := frame(4, 4)
+	req := Request{Op: OpEnrol, Format: f.Format, Width: f.Width, Height: f.Height, Bytes: len(f.Data)}
 	long := `{"template":"` + strings.Repeat("A", MaxReplyLine) + `"}`
 	for name, line := range map[string]string{
 		"taken":       `{"template":"` + tplB64 + `"}` + "\n",
@@ -60,10 +57,10 @@ func TestReplyReadBufferZeroed(t *testing.T) {
 	} {
 		bufs = nil
 		path := serve(t, func(Request) []byte { return []byte(line) })
-		got, err := ControlClient{Path: path, Timeout: time.Second}.Enrol(ctx, frame(4, 4))
+		r, err := Client{Path: path, Timeout: time.Second}.callWith(ctx, req, f.Data, s)
 		if name == "taken" {
-			if err != nil || base64.StdEncoding.EncodeToString(got) != tplB64 {
-				t.Fatalf("%s: %v %v", name, got, err)
+			if err != nil || base64.StdEncoding.EncodeToString(r.Template) != tplB64 {
+				t.Fatalf("%s: %v %v", name, r.Template, err)
 			}
 		} else if err == nil {
 			t.Fatalf("%s: accepted", name)
@@ -103,7 +100,7 @@ func TestReadLineIntoBuffer(t *testing.T) {
 // Every template decoded from a refused reply is zero once parseReply
 // returns, whichever check refused it: the error-reply branch included.
 func TestRefusedReplyTemplateZeroed(t *testing.T) {
-	got := recordDecoded(t)
+	s, got := recordDecoded()
 	enrol := Request{Op: OpEnrol}
 	for name, c := range map[string]struct {
 		req  Request
@@ -121,7 +118,7 @@ func TestRefusedReplyTemplateZeroed(t *testing.T) {
 		"wrong type":    {enrol, `{"template":"` + tplB64 + `","state":1}`},
 	} {
 		*got = nil
-		if _, err := parseReply(c.req, []byte(c.line), nil); err == nil {
+		if _, err := parseReplyWith(c.req, []byte(c.line), nil, s); err == nil {
 			t.Errorf("%s: accepted", name)
 			continue
 		}
@@ -139,8 +136,8 @@ func TestRefusedReplyTemplateZeroed(t *testing.T) {
 // A taken template is the one buffer it was decoded into, so the
 // caller's wipe of it is the only one needed.
 func TestTakenTemplateIsDecodedBuffer(t *testing.T) {
-	got := recordDecoded(t)
-	r, err := parseReply(Request{Op: OpEnrol}, []byte(`{"template":"`+tplB64+`"}`), nil)
+	s, got := recordDecoded()
+	r, err := parseReplyWith(Request{Op: OpEnrol}, []byte(`{"template":"`+tplB64+`"}`), nil, s)
 	if err != nil || len(*got) != 1 || base64.StdEncoding.EncodeToString(r.Template) != tplB64 {
 		t.Fatalf("%+v %v %d", r, err, len(*got))
 	}
@@ -155,14 +152,12 @@ func TestTakenTemplateIsDecodedBuffer(t *testing.T) {
 // or not a string) is refused, and a null one takes no part.
 func TestStrictDecoderNeverSeesTemplate(t *testing.T) {
 	var seen [][]byte
-	old := strictInput
-	strictInput = func(b []byte) io.Reader {
+	s := seams{strictInput: func(b []byte) io.Reader {
 		seen = append(seen, bytes.Clone(b))
 		return bytes.NewReader(b)
-	}
-	t.Cleanup(func() { strictInput = old })
+	}}
 	line := `{ "template" : "` + tplB64 + `" }`
-	if _, err := parseReply(Request{Op: OpEnrol}, []byte(line), nil); err != nil {
+	if _, err := parseReplyWith(Request{Op: OpEnrol}, []byte(line), nil, s); err != nil {
 		t.Fatal(err)
 	}
 	want := strings.Replace(line, tplB64, strings.Repeat("A", len(tplB64)), 1)
@@ -234,11 +229,9 @@ func TestOffsetInLineOnly(t *testing.T) {
 // not decoded strictly from a line still holding that text, and the
 // template decoded from the copy is zeroed.
 func TestTemplateReadFromCopyRefused(t *testing.T) {
-	got := recordDecoded(t)
-	old := unmarshal
-	unmarshal = func(b []byte, v any) error { return old(bytes.Clone(b), v) }
-	t.Cleanup(func() { unmarshal = old })
-	_, err := parseReply(Request{Op: OpEnrol}, []byte(`{"template":"`+tplB64+`"}`), nil)
+	s, got := recordDecoded()
+	s.unmarshal = func(b []byte, v any) error { return json.Unmarshal(bytes.Clone(b), v) }
+	_, err := parseReplyWith(Request{Op: OpEnrol}, []byte(`{"template":"`+tplB64+`"}`), nil, s)
 	var e *Error
 	if !errors.As(err, &e) || e.Cause != Unavailable || e.Detail != "template not read in place" {
 		t.Fatalf("got %v", err)
@@ -255,5 +248,64 @@ func TestCheckReplyUnknownOp(t *testing.T) {
 	var e *Error
 	if !errors.As(err, &e) || e.Cause != BadRequest || e.Detail != "unknown op" {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// Data after a valid reply object has its own detail, apart from a
+// malformed reply; white space after it, or braces inside a string, do
+// not count, and a malformed object followed by more is still malformed.
+// The template decoded from such a line, if any, is never kept.
+func TestTrailingDataDetail(t *testing.T) {
+	s, got := recordDecoded()
+	enrol := Request{Op: OpEnrol}
+	for name, c := range map[string]struct{ line, detail string }{
+		"second object": {`{"template":"` + tplB64 + `"}{"template":"` + tplB64 + `"}`, "data after the reply"},
+		"spaced":        {`{"error":"no_face"} x`, "data after the reply"},
+		"nested":        {`{"sounds":[{"label":"x"}]}]`, "data after the reply"},
+		"malformed":     {`{"template":}{}`, "malformed reply"},
+		"cut short":     {`{"template":"` + tplB64 + `"`, "malformed reply"},
+		"escaped quote": {`{"a":"\"}"}x`, "data after the reply"},
+	} {
+		*got = nil
+		_, err := parseReplyWith(enrol, []byte(c.line), nil, s)
+		var e *Error
+		if !errors.As(err, &e) || e.Cause != Unavailable || e.Detail != c.detail {
+			t.Errorf("%s: got %v, want %q", name, err, c.detail)
+		}
+		for _, v := range *got {
+			if !allZero(v) {
+				t.Errorf("%s: a refused template is not zeroed", name)
+			}
+		}
+	}
+	for name, line := range map[string]string{
+		"white space after": `{"template":"` + tplB64 + "\"} \t\r\n",
+		"braces in strings": `{"error":"no_face","detail":"}{\"]"}`,
+	} {
+		_, err := parseReplyWith(enrol, []byte(line), nil, s)
+		var e *Error
+		if errors.As(err, &e) && e.Detail == "data after the reply" {
+			t.Errorf("%s: read as trailing data", name)
+		}
+	}
+}
+
+// The zero seams are the real ones: production shares no state a test
+// could swap, and every nil seam falls back to the library call.
+func TestZeroSeamsAreReal(t *testing.T) {
+	var s seams
+	if b := s.newBuf(); len(b) != MaxReplyLine+1 {
+		t.Fatalf("buffer: %d", len(b))
+	}
+	if b, _ := io.ReadAll(s.strict([]byte("ab"))); string(b) != "ab" {
+		t.Fatalf("strict input: %q", b)
+	}
+	var v struct{ A int }
+	if err := s.unmarshalLine([]byte(`{"A":1}`), &v); err != nil || v.A != 1 {
+		t.Fatalf("unmarshal: %v %v", v, err)
+	}
+	r, err := parseReply(Request{Op: OpEnrol}, []byte(`{"template":"`+tplB64+`"}`), nil)
+	if err != nil || base64.StdEncoding.EncodeToString(r.Template) != tplB64 {
+		t.Fatalf("parseReply: %v %v", r, err)
 	}
 }
