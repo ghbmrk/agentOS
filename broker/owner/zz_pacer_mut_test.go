@@ -11,7 +11,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/modem"
 )
 
-// REQ: CH-12, CH-15, CH-19, CH-21, QH-1, QH-4, QH-5, QH-6, PACE-1
+// REQ: CH-12, CH-15, CH-19, CH-21
 // MUT-kill-5974-owner (#6670), part 3: the pacer.go statements mutgate's
 // deletion left alive, each pinned by a test that fails without it. They
 // call the function that holds the line directly where they can.
