@@ -76,6 +76,8 @@ const (
 	EventRefused  = "claim: refused while locked"
 	EventUnlocked = "claim: screen unlocked by a restart"
 	EventReserve  = "claim: sticker reserve: wrong code"
+	EventAnswered = "claim: claimant token re-delivered"
+	EventBurned   = "claim: claimant phone came back; code dead"
 )
 
 // ReserveTries is the wrong codes per boot that start with the sticker's
@@ -170,7 +172,25 @@ type Claim struct {
 	// stuck is set when a wrong count could not be saved: the screen
 	// stays locked for this process (fail closed).
 	stuck bool
+	// lost is the code's verifier after a claim whose token no phone has
+	// presented yet (CTRL-card-sock-s3-K1): while it is set, the right
+	// code from the phone that claimed (lostPhone, a hash of its page
+	// nonce) re-delivers a token. It lives only in memory, so the disk
+	// keeps no code after the claim and a restart ends it. lostLeft is the
+	// wrong codes this boot still allowed when the claim was made.
+	lost      *state
+	lostPhone []byte
+	lostLeft  int
 }
+
+// phoneHash is what the claim keeps of a phone's page nonce.
+func phoneHash(phone string) []byte {
+	h := sha256.Sum256([]byte("agentos claim phone v1\x00" + phone))
+	return h[:]
+}
+
+// MinPhone is the shortest page nonce that names a phone (128 bits hex).
+const MinPhone = 32
 
 // KernelBootID reads Linux's boot_id, which changes on every boot.
 func KernelBootID() (string, error) {
@@ -413,11 +433,23 @@ func (c *Claim) Claimed() bool { c.mu.Lock(); defer c.mu.Unlock(); return c.st.C
 // Try presents a code. The right code on an unclaimed, unlocked box
 // claims it, as does the right code while the reserve has tries this boot: the code is burned and the returned token names the phone
 // that claimed it (Claimant). The claim is saved before Try returns; if
-// the save fails the box stays unclaimed.
-func (c *Claim) Try(code string) (string, error) {
+// the save fails the box stays unclaimed. Try names no phone, so its
+// claim opens no re-claim window (TryFrom).
+func (c *Claim) Try(code string) (string, error) { return c.TryFrom(code, "") }
+
+// TryFrom is Try from the phone whose page nonce is phone. A claim it
+// makes keeps a re-claim window for that phone alone: until a phone
+// presents the claimant token, the right code from the same phone
+// re-delivers a new one (CTRL-card-sock-s3-K1). Any other phone, or a
+// phone shorter than MinPhone, gets "already claimed" as before, without
+// a derivation.
+func (c *Claim) TryFrom(code, phone string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.st.Claimed {
+		if c.reclaims(phone) {
+			return c.reclaim(code)
+		}
 		c.journal(EventAgain)
 		return "", ErrAlreadyClaimed
 	}
@@ -436,7 +468,7 @@ func (c *Claim) Try(code string) (string, error) {
 	}
 	if prefixRight {
 		if subtle.ConstantTimeCompare(c.st.verifier(n), c.st.Verifier) == 1 {
-			return c.claim()
+			return c.claim(phone)
 		}
 		if c.st.ReserveBoot != c.boot {
 			c.st.ReserveBoot, c.st.Reserve = c.boot, 0
@@ -480,11 +512,11 @@ func (c *Claim) Try(code string) (string, error) {
 		}
 		return "", ErrWrongCode
 	}
-	return c.claim()
+	return c.claim(phone)
 }
 
 // claim burns the code and returns the claimant's token; c.mu is held.
-func (c *Claim) claim() (string, error) {
+func (c *Claim) claim(phone string) (string, error) {
 	tb := make([]byte, 32)
 	if _, err := io.ReadFull(c.rand, tb); err != nil {
 		return "", err
@@ -496,7 +528,58 @@ func (c *Claim) claim() (string, error) {
 		c.st = prev
 		return "", err
 	}
+	if len(phone) >= MinPhone {
+		c.lost = &state{Salt: prev.Salt, KDF: prev.KDF, Verifier: prev.Verifier}
+		c.lostPhone = phoneHash(phone)
+		// The window shares this boot's allowance: it gives a guesser no
+		// more wrong codes than the unclaimed screen had left, and at
+		// least one, which closes it.
+		c.lostLeft = max(c.allowed()-prev.Wrong, 1)
+	}
 	c.journal(EventClaimed)
+	return tok, nil
+}
+
+// reclaims reports whether phone is the claiming phone of an open
+// re-claim window; c.mu is held.
+func (c *Claim) reclaims(phone string) bool {
+	return c.lost != nil && len(phone) >= MinPhone && subtle.ConstantTimeCompare(phoneHash(phone), c.lostPhone) == 1
+}
+
+// Reclaims reports whether the phone whose page nonce is phone may claim
+// again: it made the claim, and no phone has presented the token yet.
+func (c *Claim) Reclaims(phone string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.st.Claimed && c.reclaims(phone)
+}
+
+// reclaim tries the code from the claiming phone, whose answer may never
+// have reached it (CTRL-card-sock-s3-K1); c.mu is held and reclaims(phone)
+// holds. The right code replaces the claimant token. A wrong one answers
+// "already claimed" and spends the window's share of this boot's
+// allowance; spending it ends the window.
+func (c *Claim) reclaim(code string) (string, error) {
+	if subtle.ConstantTimeCompare(c.lost.verifier(Normalize(code)), c.lost.Verifier) != 1 {
+		c.lostLeft--
+		if c.lostLeft <= 0 {
+			c.lost, c.lostPhone = nil, nil
+		}
+		c.journal(EventAgain)
+		return "", ErrAlreadyClaimed
+	}
+	tb := make([]byte, 32)
+	if _, err := io.ReadFull(c.rand, tb); err != nil {
+		return "", err
+	}
+	tok := hex.EncodeToString(tb)
+	prev := c.st.Owner
+	c.st.Owner = tokenHash(tok)
+	if err := c.save(); err != nil {
+		c.st.Owner = prev
+		return "", err
+	}
+	c.journal(EventAnswered)
 	return tok, nil
 }
 
@@ -508,7 +591,13 @@ func (c *Claim) Claimant(tok string) bool {
 	if !c.st.Claimed || len(tok) != 64 {
 		return false
 	}
-	return subtle.ConstantTimeCompare(tokenHash(tok), c.st.Owner) == 1
+	ok := subtle.ConstantTimeCompare(tokenHash(tok), c.st.Owner) == 1
+	if ok && c.lost != nil {
+		// The answer reached the phone: the code dies here (CTRL-card-sock-s3-K1).
+		c.lost, c.lostPhone = nil, nil
+		c.journal(EventBurned)
+	}
+	return ok
 }
 
 // readFile is os.ReadFile refusing a link at p (REV-CHK-links, #3945): boot_id

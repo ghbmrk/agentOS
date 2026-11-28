@@ -52,7 +52,8 @@ type BoxConfig struct {
 // ClaimScreen is what the claim screen needs (localui.BoxClaim).
 type ClaimScreen interface {
 	Status() claim.Status
-	Claim(code string) (string, error)
+	Claim(code, phone string) (string, error)
+	Reclaims(phone string) bool
 	Claimant(tok string) bool
 }
 
@@ -157,9 +158,10 @@ func begin(cfg BoxConfig) (*FirstBoot, error) {
 type reinstall struct{}
 
 func (reinstall) Status() claim.Status { return claim.Status{Claimed: true, Reinstall: true} }
-func (reinstall) Claim(string) (string, error) {
+func (reinstall) Claim(string, string) (string, error) {
 	return "", claim.ErrAlreadyClaimed
 }
+func (reinstall) Reclaims(string) bool   { return false }
 func (reinstall) Claimant(string) bool   { return false }
 func (reinstall) Display() *card.Display { return nil }
 func (reinstall) Hold() error            { return ErrReinstall }

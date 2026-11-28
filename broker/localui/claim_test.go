@@ -21,9 +21,10 @@ const claimCode = "CANA-RYCL-AXMC-KDE2"
 // boxClaim is what firstboot.ClaimedCard gives the UI, without the card.
 type boxClaim struct{ cl *claim.Claim }
 
-func (b boxClaim) Status() claim.Status              { return b.cl.Status() }
-func (b boxClaim) Claim(code string) (string, error) { return b.cl.Try(code) }
-func (b boxClaim) Claimant(tok string) bool          { return b.cl.Claimant(tok) }
+func (b boxClaim) Status() claim.Status                     { return b.cl.Status() }
+func (b boxClaim) Claim(code, phone string) (string, error) { return b.cl.TryFrom(code, phone) }
+func (b boxClaim) Reclaims(phone string) bool               { return b.cl.Reclaims(phone) }
+func (b boxClaim) Claimant(tok string) bool                 { return b.cl.Claimant(tok) }
 
 // claimRig is a rig whose box waits to be claimed; boot is its kernel
 // boot ID and reopen starts the UI again from the same disk.
