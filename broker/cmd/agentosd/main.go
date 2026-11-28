@@ -218,6 +218,9 @@ type replyWait struct {
 }
 
 func (l *lateStatus) Status() string {
+	// starting is read first and tested last: main stores the keeper or
+	// names the cause before settle, so a false read here sees them.
+	starting := l.starting.Load()
 	if w := l.replies.Load(); w != nil && w.p.RepliesWaiting() {
 		return repliesWaiting
 	}
@@ -230,7 +233,7 @@ func (l *lateStatus) Status() string {
 	if l.caps != nil && l.caps.agentNamed() {
 		return ""
 	}
-	if l.starting.Load() {
+	if starting {
 		return agentStarting
 	}
 	return agentNotSet

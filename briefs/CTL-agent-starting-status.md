@@ -9,7 +9,7 @@ Work item: #6176 (release items 2 and 3 of the UX lens on #6136, comment 6981648
 
 ## Scope
 
-- `broker/cmd/agentosd/{main.go,agent.go,zz_agentstarting_test.go,ASSUMPTIONS.md}`
+- `broker/cmd/agentosd/{main.go,agent.go,zz_agentstarting_test.go,capoff_test.go,ASSUMPTIONS.md}` (`capoff_test.go`: `capBox` boots a `newLateStatus` and its one-agent-line guard refuses the starting line too; review release items on #6753)
 - `briefs/CTL-agent-starting-status.md`
 
 **Requirement IDs:** CH-12, OWN-17.
@@ -19,3 +19,5 @@ Work item: #6176 (release items 2 and 3 of the UX lens on #6136, comment 6981648
 - `broker/cmd/agentosd/zz_agentstarting_test.go::TestAgentStatusDuringBootSaysStarting`: before the plane opens, and with a keeper stored that has not tried yet, STATUS is the starting line, not `agentNotSet` or `agentWaiting`; after a try refused for memory it is `agentWaiting`.
 - `::TestAgentStatusAfterBootWithNoKeeperSaysNotSet`: after start-up with no keeper and no cause, `agentNotSet`.
 - `::TestAgentStatusOffWinsOverStarting`: a cause named before the daemon runs wins over the starting line.
+- `::TestAgentStatusCapsCauseWinsOverStarting`: a cause named through caps during boot keeps STATUS to that one agent line.
+- `::TestMainSettlesAfterEveryAgentStartPath`: `main` calls `settle` exactly once, after every keeper store and `caps.agentOff`.
