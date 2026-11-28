@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// REQ: CH-11, CH-12, CH-15, CH-18, CH-19, CH-21, OWN-4, ADP-11
+// REQ: CH-11, CH-12, CH-15, CH-18, CH-19, CH-21, OWN-4
 // MUT-kill-5974-owner-5 (#6742): the statements in voicecheck.go,
 // converse.go, name.go, disclose.go, totp.go, boot.go, informquote.go and
 // commit.go that mutgate's deletion left alive, each pinned by a test that
@@ -308,4 +308,3 @@ func TestMutOwnerPhraseIsNormalised(t *testing.T) {
 		t.Fatalf("defaults alone: %q", got)
 	}
 }
-
