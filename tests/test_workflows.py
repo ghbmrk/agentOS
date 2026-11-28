@@ -1946,25 +1946,34 @@ class WorkflowTest(unittest.TestCase):
     def test_soak_failures_become_annotations(self):
         # CI-soak-green (#190): run 54's race failures were readable only from its artifact and step
         # summary, neither reachable through api.github.com. The soak step also prints each failing
-        # test as an `::error::` line; this runs that line from soak.yml on a sample failures.txt.
-        line = next(l for l in (WORKFLOWS / "soak.yml").read_text().splitlines() if "::error title=soak" in l)
-        with tempfile.TemporaryDirectory() as out:
-            pathlib.Path(out, "failures.txt").write_text("".join(
-                ["run 2: --- FAIL: TestA (0.10s)\n", "run 2: -test.shuffle 17\n", "run 3: panic: 100% bad\n",
-                 "run 3: FAIL\tagentos/x\t1.2s\n", "run 3: WARNING: DATA RACE\n"]
-                + ["run 4: --- FAIL: TestN%d (0.00s)\n" % i for i in range(20)]))
-            cmd = line.strip().replace("${{ matrix.name }}", "race")
-            got = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", cmd], env={"out": out, "PATH": os.environ["PATH"]},
-                                 capture_output=True, text=True, check=True).stdout.splitlines()
-        self.assertEqual(len(got), 10)
-        self.assertTrue(all(g.startswith("::error title=soak race::run ") for g in got), got)
-        self.assertIn("::error title=soak race::run 2: --- FAIL: TestA (0.10s)", got)
-        self.assertIn("::error title=soak race::run 3: panic: 100%25 bad", got)
-        self.assertFalse(any("-test.shuffle" in g for g in got))
-        with tempfile.TemporaryDirectory() as out:
-            empty = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", cmd], env={"out": out, "PATH": os.environ["PATH"]},
-                                   capture_output=True, text=True)
-        self.assertEqual((empty.returncode, empty.stdout), (0, ""))
+        # test or package as an `::error::` line; this runs those lines from soak.yml on sample input.
+        lines = (WORKFLOWS / "soak.yml").read_text().splitlines()
+        start = next(i for i, l in enumerate(lines) if "# Also as annotations" in l)
+        end = next(i for i in range(start, len(lines)) if lines[i].strip() == '[ "$fails" -eq 0 ]')
+        cmd = "\n".join(l.strip() for l in lines[start:end]).replace("${{ matrix.name }}", "race")
+
+        def annotate(text):
+            with tempfile.TemporaryDirectory() as out:
+                pathlib.Path(out, "failures.txt").write_text(text)
+                return subprocess.run(["bash", "-e", "-o", "pipefail", "-c", cmd], env={"out": out, "PATH": os.environ["PATH"]},
+                                      capture_output=True, text=True, check=True).stdout.splitlines()
+
+        pre = "::error title=soak race::"
+        # L3 of #6747: a test failing in every run must not fill the 10 slots with one line per run, nor
+        # nameless lines (bare FAIL, DATA RACE) push out a test or package that failed once.
+        flaky = "".join(f"run {r}: WARNING: DATA RACE\nrun {r}: --- FAIL: TestFlaky ({r}.25s)\nrun {r}: FAIL\n"
+                        f"run {r}: FAIL\tagentos/a\t3.{r}s\nrun {r}: -test.shuffle 1{r}\n" for r in range(1, 12))
+        got = annotate(flaky + "run 3: --- FAIL: TestOther (0.00s)\nrun 3: FAIL\tagentos/b\t0.1s\n"
+                       "run 3: --- FAIL: TestOther (0.01s)\nrun 4: panic: 100% bad\r\n")
+        self.assertEqual(got, [pre + "--- FAIL: TestFlaky (failed runs: 11)", pre + "FAIL\tagentos/a (failed runs: 11)",
+                               pre + "--- FAIL: TestOther (failed runs: 1)", pre + "FAIL\tagentos/b (failed runs: 1)",
+                               pre + "panic: 100%25 bad%0D (failed runs: 1)"])
+        many = annotate("".join(f"run 1: --- FAIL: TestN{i:02d} (0.00s)\n" for i in range(20)) + "run 2: --- FAIL: TestN19 (0.00s)\n")
+        self.assertEqual(len(many), 10)
+        self.assertEqual(many[0], pre + "--- FAIL: TestN19 (failed runs: 2)")
+        self.assertEqual(annotate("run 1: FAIL\tagentos/c [build failed]\n"), [pre + "FAIL\tagentos/c [build failed] (failed runs: 1)"])
+        self.assertEqual(annotate(""), [])
+        self.assertEqual(annotate("run 1: -test.shuffle 5\nrun 1: WARNING: DATA RACE\nrun 1: FAIL\n"), [])
 
     def test_soak_fuzz_targets_exist(self):
         # CI-soak-green (#6571): `mail FuzzParse` outlived broker/mail and failed in 0 s on every run.

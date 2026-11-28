@@ -161,8 +161,14 @@ jobs:
           echo "soak ${{ matrix.name }}: $runs full runs, $fails failed" | tee -a "$GITHUB_STEP_SUMMARY"
           # awk, not head: head exits early, so pipefail failed the step on sort's broken pipe.
           [ ! -s "$out/failures.txt" ] || sort "$out/failures.txt" | uniq -c | sort -rn | awk 'NR <= 50' >> "$GITHUB_STEP_SUMMARY"
-          # Also as annotations, which the check-run API serves where the artifact host is unreachable (#190).
-          [ ! -s "$out/failures.txt" ] || sort -u "$out/failures.txt" | awk -v job="${{ matrix.name }}" '/^run [0-9]+: (--- FAIL|FAIL|panic:|WARNING: DATA RACE)/ && n++ < 10 { gsub(/%/, "%25"); print "::error title=soak " job "::" $0 }'
+          # Also as annotations, which the check-run API serves where the artifact host is unreachable (#190):
+          # one per test or package, without run prefix or timing, the 10 that failed in most runs first.
+          [ ! -s "$out/failures.txt" ] || awk '{ r = $2; sub(/^run [0-9]+: /, "") }
+            /^--- FAIL: / { sub(/ \([0-9.]+s\)$/, "") } /^FAIL\t/ { sub(/\t[0-9.]+s$/, "") }
+            /^(--- FAIL: |FAIL\t|panic: )/ && !seen[r, $0]++ { n[$0]++ }
+            END { for (k in n) print n[k] " " k }' "$out/failures.txt" | LC_ALL=C sort -k1,1rn -k2 \
+            | awk -v job="${{ matrix.name }}" 'NR <= 10 { c = $1; sub(/^[0-9]+ /, ""); gsub(/%/, "%25"); gsub(/\r/, "%0D")
+                print "::error title=soak " job "::" $0 " (failed runs: " c ")" }'
           [ "$fails" -eq 0 ]
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: failure()
