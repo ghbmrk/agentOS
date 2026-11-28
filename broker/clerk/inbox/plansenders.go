@@ -84,11 +84,7 @@ func planSender(fs [][2]string, authServ string) string {
 		}
 		d, ok := r.Props["header.d"]
 		if !ok {
-			i := r.Props["header.i"]
-			if !strings.Contains(i, "@") {
-				continue
-			}
-			d = domainOf(i)
+			d = domainOf(r.Props["header.i"]) // "" without an @
 		}
 		if d = alabel(d); d != "" && (fd == d || strings.HasSuffix(fd, "."+d)) {
 			return d

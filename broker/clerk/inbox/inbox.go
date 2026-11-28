@@ -269,7 +269,6 @@ func (a *Account) Do(r kernel.Request, v kernel.View) kernel.Result {
 		if !ok {
 			return a.refuse(string(s.Verb), id, "no-longer-eligible")
 		}
-		a.sends[r.Idem()]++
 		p := Post{Method: "POST", URL: u, Body: a.body,
 			Headers: map[string]string{"Content-Type": "application/x-www-form-urlencoded"}}
 		if res, ok := a.landed(string(s.Verb), id, a.box.Post(context.Background(), p)); !ok {
