@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/bridgeclient"
@@ -37,7 +38,48 @@ type Socket struct{ Path string }
 func (s Socket) Call(ctx context.Context, op string, args, out any) error {
 	err := bridgeclient.Client{Path: s.Path}.Call(ctx, op, args, out)
 	if errors.Is(err, bridgeclient.ErrRefused) {
-		return Refused(strings.TrimPrefix(err.Error(), "bridgeclient: "))
+		err = Refused(strings.TrimPrefix(err.Error(), "bridgeclient: "))
+	}
+	return note(ctx, op, err)
+}
+
+// answers is what agentosd answered one page request (PAGE-stopping-text):
+// whether a call was refused because agentosd is stopping, and whether a
+// call before that refusal may have taken effect. ServeHTTP reads it once
+// the handler returns.
+type answers struct {
+	mu       sync.Mutex
+	stopping bool
+	partway  bool
+}
+
+type answersKey struct{}
+
+// readOps only read: their return before a refusal changed nothing.
+var readOps = map[string]bool{localapi.OpSession: true, localapi.OpStatus: true, localapi.OpGridCell: true}
+
+// ranCodes are refusals sent after the op's handler ran (sockets.handle,
+// InProcess.call): a handler error, a panic or an answer that would not
+// marshal. Like a lost answer, the op may have taken effect.
+var ranCodes = map[Refused]bool{Refused(sockets.ErrFailed): true, Refused(sockets.ErrInternal): true}
+
+// note records op's err in the request's answers, if ctx carries them,
+// and returns it. A call that returned, failed other than by a refusal
+// code, or was refused after its handler ran (ranCodes) may have taken
+// effect unless op only reads; any other refusal did not. ServeHTTP also counts nothing as done for a GET.
+func note(ctx context.Context, op string, err error) error {
+	a, _ := ctx.Value(answersKey{}).(*answers)
+	if a == nil {
+		return err
+	}
+	var r Refused
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch {
+	case refused(err, localapi.ErrStopping):
+		a.stopping = true
+	case !a.stopping && !readOps[op] && (!errors.As(err, &r) || ranCodes[r]):
+		a.partway = true
 	}
 	return err
 }
@@ -49,6 +91,10 @@ type InProcess map[string]sockets.Handler
 
 // Call runs op's handler.
 func (p InProcess) Call(ctx context.Context, op string, args, out any) error {
+	return note(ctx, op, p.call(ctx, op, args, out))
+}
+
+func (p InProcess) call(ctx context.Context, op string, args, out any) error {
 	h := p[op]
 	if h == nil {
 		return Refused(sockets.ErrUnknownOp)

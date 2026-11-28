@@ -36,7 +36,6 @@ func (m *heldModem) Send(to, text string) error {
 // generation is refused at its commit point.
 func TestLocalSignInReportsItsOwnLockGeneration(t *testing.T) {
 	r := newRig(t, nil)
-	r.async = true
 	held := &heldModem{entered: make(chan struct{}), let: make(chan struct{})}
 	r.edit = func(c *Config) { held.Modem = c.Modem; c.Modem = held }
 	r.ch = r.open()
@@ -86,7 +85,6 @@ func TestLocalSignInReportsItsOwnLockGeneration(t *testing.T) {
 // once the modem lets it.
 func TestLocalSignInRepliesBeforeItsTextIsSent(t *testing.T) {
 	r := newRig(t, nil)
-	r.async = true
 	held := &heldModem{entered: make(chan struct{}), let: make(chan struct{})}
 	r.edit = func(c *Config) { held.Modem = c.Modem; c.Modem = held }
 	r.ch = r.open()
@@ -116,7 +114,6 @@ func TestLocalSignInRepliesBeforeItsTextIsSent(t *testing.T) {
 // lets it.
 func TestLocalAnswerRepliesBeforeItsTextIsSent(t *testing.T) {
 	r := newRig(t, nil)
-	r.async = true
 	held := &heldModem{entered: make(chan struct{}), let: make(chan struct{})}
 	r.edit = func(c *Config) { held.Modem = c.Modem; c.Modem = held }
 	r.ch = r.open()
@@ -156,7 +153,6 @@ func TestLocalAnswerRepliesBeforeItsTextIsSent(t *testing.T) {
 // The shutdown drain (DrainSends) waits for texts in flight, up to its bound.
 func TestShutdownDrainWaitsForTextsInFlightUpToItsBound(t *testing.T) {
 	r := newRig(t, nil)
-	r.async = true
 	held := &heldModem{entered: make(chan struct{}), let: make(chan struct{})}
 	r.edit = func(c *Config) { held.Modem = c.Modem; c.Modem = held }
 	r.ch = r.open()
@@ -184,7 +180,6 @@ func TestShutdownDrainWaitsForTextsInFlightUpToItsBound(t *testing.T) {
 // Potency P6 on #1746).
 func TestShutdownDrainEndsWhenNothingIsLeftToSend(t *testing.T) {
 	r := newRig(t, nil)
-	r.async = true
 	held := &heldModem{entered: make(chan struct{}), let: make(chan struct{})}
 	r.edit = func(c *Config) { held.Modem = c.Modem; c.Modem = held }
 	r.ch = r.open()

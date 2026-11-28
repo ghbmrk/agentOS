@@ -213,7 +213,7 @@ func TestAnAnswerWithNoReplyDoesNotClaimNothingHappened(t *testing.T) {
 		},
 	})
 	sess, sum := "sess", strings.Repeat("0", 64)
-	_, refusal := s.answer(context.Background(), tok, sess, map[string][]string{
+	_, refusal, _ := s.answer(context.Background(), tok, sess, map[string][]string{
 		"id": {"Q2"}, "sum": {sum}, "tok": {s.formToken(sess, "Q2", sum)}, "answer": {"deny"},
 	})
 	if refusal != answerUnreachableText {

@@ -12,12 +12,15 @@
 package localui
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"html/template"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"strconv"
@@ -453,10 +456,125 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	if s.claimGate(w, r) {
+	// The page is buffered so that, if agentosd refused a call because it
+	// is stopping, the page says so instead of the handler's generic
+	// failure (PAGE-stopping-text, UX-2wb-1).
+	a := &answers{}
+	r = r.WithContext(context.WithValue(r.Context(), answersKey{}, a))
+	b := &buffered{w: w, h: h.Clone()}
+	if !s.claimGate(b, r) {
+		s.mux.ServeHTTP(b, r)
+	}
+	a.mu.Lock()
+	stopping, partway := a.stopping, a.partway
+	a.mu.Unlock()
+	if stopping {
+		// A page view does nothing, whatever its calls returned.
+		partway = partway && r.Method != http.MethodGet && r.Method != http.MethodHead
+		s.stopping(w, r, b.h.Values("Set-Cookie"), partway)
 		return
 	}
-	s.mux.ServeHTTP(w, r)
+	b.send(w)
+}
+
+// buffered holds a page until ServeHTTP knows whether agentosd refused a
+// call because it is stopping. It passes the connection's deadlines to w
+// (the upload bound, uploadWindow) but nothing that would write past the
+// buffer.
+type buffered struct {
+	w    http.ResponseWriter
+	h    http.Header
+	code int
+	body bytes.Buffer
+}
+
+func (b *buffered) Header() http.Header { return b.h }
+
+func (b *buffered) SetReadDeadline(t time.Time) error {
+	return http.NewResponseController(b.w).SetReadDeadline(t)
+}
+
+func (b *buffered) SetWriteDeadline(t time.Time) error {
+	return http.NewResponseController(b.w).SetWriteDeadline(t)
+}
+
+func (b *buffered) WriteHeader(code int) {
+	if b.code == 0 {
+		b.code = code
+	}
+}
+
+func (b *buffered) Write(p []byte) (int, error) {
+	b.WriteHeader(http.StatusOK)
+	return b.body.Write(p)
+}
+
+func (b *buffered) send(w http.ResponseWriter) {
+	maps.Copy(w.Header(), b.h)
+	if b.code == 0 {
+		b.code = http.StatusOK
+	}
+	w.WriteHeader(b.code)
+	b.body.WriteTo(w)
+}
+
+// Text for a page request agentosd refused because it is stopping (owner
+// O34): a restart, a stop, a reboot or a poweroff alike, so the page names
+// both and sets no clock (#1752). A call that returned before the refusal
+// may have taken effect, so the owner checks before trying again.
+const (
+	stoppingText = "agentOS is stopping or restarting, so it did not do this. When it is back, try again."
+	partwayText  = "agentOS began stopping or restarting partway through, so some of this may have been done. When it is back, open the page below and check before trying again."
+)
+
+type stoppingView struct {
+	Text    string
+	Refresh string
+	// Check is where the request's effect shows: a GET's own page, STOP
+	// and RESUME's Status, a mounted page's form its page; else the root.
+	Check, CheckTitle string
+}
+
+// checkPage is where r's effect shows, for the stopping page's link.
+func (s *Server) checkPage(r *http.Request) (string, string) {
+	p := r.URL.Path
+	switch {
+	case r.Method == http.MethodGet:
+		// The page's own URL, query included, as its refresh reloads it.
+		u := safeNext(r.URL.EscapedPath())
+		if q := r.URL.RawQuery; q != "" && u != "/home" {
+			u += "?" + q
+		}
+		return u, "Reload this page"
+	case p == "/stop" || p == "/resume":
+		return "/status", "Open Status"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, m := range s.mounts {
+		if p == m.Path || strings.HasPrefix(p, m.Path) {
+			return m.Path, "Open " + m.Title
+		}
+	}
+	return "/", "Open the home page"
+}
+
+// stopping shows the stopping page in place of the handler's. Cookies the
+// handler set stay: they carry sessions agentosd minted before it stopped.
+func (s *Server) stopping(w http.ResponseWriter, r *http.Request, cookies []string, partway bool) {
+	v := stoppingView{Text: stoppingText}
+	v.Check, v.CheckTitle = s.checkPage(r)
+	if partway {
+		v.Text = partwayText
+	}
+	if r.Method == http.MethodGet {
+		v.Refresh = "15"
+	}
+	for _, c := range cookies {
+		w.Header().Add("Set-Cookie", c)
+	}
+	w.WriteHeader(http.StatusServiceUnavailable)
+	s.render(w, "stopping", v)
 }
 
 // sameOrigin refuses cross-site form posts. Cookies are SameSite=Strict
@@ -745,7 +863,7 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	msg := "stopped"
-	if err := s.call(r.Context(), localapi.OpStop, struct{}{}, nil); err != nil {
+	if s.call(r.Context(), localapi.OpStop, struct{}{}, nil) != nil {
 		msg = "stopfailed"
 	}
 	http.Redirect(w, r, "/status?m="+msg, http.StatusSeeOther)

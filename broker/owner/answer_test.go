@@ -80,6 +80,7 @@ func TestALockedQuestionAnswerRunsOnlyFromThePage(t *testing.T) {
 	if n, err := r.ch.LocalRunHeld(shown, []string{q}); n != 1 || err != nil {
 		t.Fatalf("run: %d %v", n, err)
 	}
+	r.ch.WaitSends() // the run goes after the page's reply
 	if len(got) != 1 || got[0] != "Q104 yes" {
 		t.Fatalf("hook got %q", got)
 	}

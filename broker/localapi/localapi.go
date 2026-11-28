@@ -117,6 +117,7 @@ const (
 	ErrFailed       = "failed"       // the owner channel could not act
 	ErrNoAuthority  = "no authority" // OpCertify: no page authority; the page serves HTTP only
 	ErrRestore      = "restore"      // OpCertify: a claimed box lost its page authority; restore it
+	ErrStopping     = "stopping"     // agentosd is stopping (any SIGTERM: restart, stop, reboot, poweroff)
 )
 
 // Bounds on string fields (Security L3). Tokens are TokenBytes random

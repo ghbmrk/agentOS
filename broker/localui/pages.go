@@ -190,7 +190,7 @@ form { margin: .6em 0 1.2em; }
 <button name="answer" value="approve">Approve</button> <button name="answer" value="deny" class="stop">Deny</button></form></section>
 {{else}}<p>Nothing is waiting for you.</p>{{end}}
 <p class="muted">Each answer here is texted to you.</p>
-<p><a href="/home">More</a> · <a href="/status">Status</a></p>
+<p><a href="/approvals/">Approvals</a> · <a href="/home">More</a> · <a href="/status">Status</a></p>
 {{template "foot"}}{{end}}
 
 {{define "follow"}}{{template "head" ""}}
@@ -242,6 +242,11 @@ form { margin: .6em 0 1.2em; }
 <p class="muted">{{.TriesLeft}} wrong {{if eq .TriesLeft 1}}code{{else}}codes{{end}} left before I lock this page until I restart.</p>{{end}}
 {{template "foot"}}{{end}}
 {{define "claimform"}}<form method="post" action="/claim"><label>Claim code<input type="text" name="code" value="{{.Code}}" placeholder="XXXX-XXXX-XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label><button>Claim</button></form>{{end}}
+{{define "stopping"}}{{template "head" .Refresh}}
+<h1>agentOS</h1>
+<p class="err">{{.Text}}</p>
+{{if .Refresh}}<p>This page reloads by itself.</p>{{end}}<p><a href="{{.Check}}">{{.CheckTitle}}</a></p>
+{{template "foot"}}{{end}}
 {{define "notready"}}{{template "head" "30"}}
 <h1>AgentOS</h1>
 <p>I'm not ready yet. This page reloads by itself. If it stays like this for more than a few minutes, turn the PC off and on again.</p>
