@@ -2271,14 +2271,46 @@ class ImageTest(unittest.TestCase):
         journal = re.findall(rb"HOSTCHECK-WIPE journal: ([^\r\n]*)", after)
         self.assertTrue([j for j in journal if re.search(rb"find: .*/run/hostcheck-no-such-dir.*No such file", j)],
                         journal)
-        # The record is "$SERVICE_RESULT $EXIT_CODE $EXIT_STATUS". The unit has no main process (no ExecStart=), and
-        # systemd sets EXIT_CODE and EXIT_STATUS for the main process only, so on the first image run (#6130) the
-        # record held "exit-code" and two empty words. Any record other than success is what wipenote.go reads.
+        # The record is "$SERVICE_RESULT". The unit has no main process (no ExecStart=), and systemd sets EXIT_CODE
+        # and EXIT_STATUS for the main process only, so on the first image run (#6130) the old record held
+        # "exit-code" and two empty words, which the record no longer carries (#6133). Any record other than
+        # success is what wipenote.go reads.
         self.assertRegex(after, rb"HOSTCHECK-WIPE record: exit-code *\r?\n")
         # The clear rests not on the wipe's result but on the directories it empties, which no setup filled
         # here: MOR is cleared and the host is as it was.
         report = self.report("wipefail")
         self.assertEqual(rc, 0, [dict(x, snapshot=None) for x in report["phases"]])
+
+    def test_a_refused_clear_is_on_disk_at_the_next_boot(self):
+        # MOR-clear-owner-fu (#6133, #6111): one boot whose shutdown clear fails (a drop-in makes ExecStop
+        # fail), then a fresh QEMU process on the same drive. A probe unit prints the record and its
+        # directory's mode before the responder starts: the record is there and the directory is 0700, so the
+        # step's mkdir and write are observed by effect, not pinned by text. The sync's effect is not
+        # observed (image/ASSUMPTIONS.md MOR-clear-owner): a clean poweroff syncs every file system anyway.
+        # MOR stays set after this clear fails, so the run's own report is not asserted.
+        d = self.dir / "clearfail-in"
+        d.mkdir(exist_ok=True)
+        (d / "clear.conf").write_text("[Service]\nExecStop=\nExecStop=/usr/bin/false\n")
+        (d / "probe.service").write_text(
+            "[Unit]\nDescription=hostcheck clear probe (QEMU host check only)\n"
+            "After=local-fs.target\nBefore=serial-getty@ttyS0.service\n"
+            "[Service]\nType=oneshot\nStandardOutput=journal+console\nStandardError=journal+console\n"
+            "ExecStart=/bin/sh -c 'echo \"HOSTCHECK-CLEAR mode: $$(stat -c %a /var/lib/agentos-mor 2>&1)\"; "
+            "echo \"HOSTCHECK-CLEAR record: $$(cat /var/lib/agentos-mor/refused 2>&1)\"'\n")
+        (d / "responder.conf").write_text("[Unit]\nWants=hostcheck-clear.service\nAfter=hostcheck-clear.service\n")
+        phases = d / "phases.json"
+        boot = [[OS_START, "os"], ["HOSTCHECK-READY", "serial:poweroff\n"]]
+        phases.write_text(json.dumps({"fail": boot, "after": boot}))
+        argv = self.argv("clearfail", "fail,after", phases) + [
+            "--credential", f"systemd.unit-dropin.agentos-mor.service={d / 'clear.conf'}",
+            "--credential", f"systemd.extra-unit.hostcheck-clear.service={d / 'probe.service'}",
+            "--credential", f"systemd.unit-dropin.{RESPONDER}={d / 'responder.conf'}"]
+        hostcheck.main(argv)
+        after = (self.dir / "clearfail" / "console-after.log").read_bytes()
+        print(*[ln.decode(errors="replace") for ln in re.findall(rb"HOSTCHECK-CLEAR [^\r\n]*", after)[:20]],
+              sep="\n", file=sys.stderr)
+        self.assertRegex(after, rb"HOSTCHECK-CLEAR mode: 700\r?\n")
+        self.assertRegex(after, rb"HOSTCHECK-CLEAR record: exit-code[^\r\n]*\r?\n")
 
 
     def test_an_isolate_keeps_mor_set(self):

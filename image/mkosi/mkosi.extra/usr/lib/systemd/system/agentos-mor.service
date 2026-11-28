@@ -32,8 +32,9 @@ ExecStop=/usr/lib/agentos/agentos-mor clear
 # (broker/cmd/agentosd/wipenote.go). Not StateDirectory=: systemd would make the directory at this
 # unit's start, in early boot, and a failure there would stop the clear itself. /var/lib is on the
 # root partition, which is never unmounted, so the write reaches it after every other unit has
-# stopped (image/ASSUMPTIONS.md MOR-clear-owner).
-ExecStopPost=/usr/bin/sh -c 'if [ "$$SERVICE_RESULT" = success ]; then exec /usr/bin/rm -f -- /var/lib/agentos-mor/refused; fi; /usr/bin/mkdir -p -m 0700 /var/lib/agentos-mor && echo "$$SERVICE_RESULT $$EXIT_CODE $$EXIT_STATUS" >/var/lib/agentos-mor/refused && exec /usr/bin/sync -f /var/lib/agentos-mor/refused'
+# stopped (image/ASSUMPTIONS.md MOR-clear-owner). A record already there means the last shutdown's
+# clear failed too: the new one ends " again" and STATUS stops asking for a restart (#6133).
+ExecStopPost=/usr/bin/sh -c 'if [ "$$SERVICE_RESULT" = success ]; then exec /usr/bin/rm -f -- /var/lib/agentos-mor/refused; fi; a=; [ -e /var/lib/agentos-mor/refused ] && a=" again"; /usr/bin/mkdir -p -m 0700 /var/lib/agentos-mor && echo "$$SERVICE_RESULT $$EXIT_CODE $$EXIT_STATUS$$a" >/var/lib/agentos-mor/refused && exec /usr/bin/sync -f /var/lib/agentos-mor/refused'
 StandardOutput=journal+console
 # No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
 NoExecPaths=/

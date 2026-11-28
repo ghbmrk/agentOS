@@ -4,7 +4,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-	"slices"
+	"strings"
 )
 
 // wipeFailed holds the files an orderly shutdown leaves when it ends with
@@ -20,13 +20,35 @@ var wipeFailed = []string{"/var/lib/agentos-wipe/failed", "/var/lib/agentos-mor/
 // restart runs the wipe and the clear again, and their success removes it.
 const wipeFailedLine = "Shutdown: my last one could not finish erasing my memory; " + fixRestart + "."
 
+// wipeFailedAgain is the line once a record ends " again": the shutdown
+// before it failed too, so a restart has been tried and did not help
+// (MOR-clear-owner-fu, #6133). The record's mtime cannot tell: it is
+// written at a shutdown, so it always predates the boot that reads it.
+const wipeFailedAgain = "Shutdown: my last one could not finish erasing my memory; tell support."
+
 // wipeNote is STATUS's note on the last shutdown's wipe, read from paths
-// at each STATUS. A file that cannot be checked counts as there, so an
-// unknown result is told, never hidden.
+// at each STATUS. A file that cannot be checked or read counts as there
+// and asks for a restart, so an unknown result is told, never hidden.
 func wipeNote(paths []string) func() string {
 	return func() string {
-		return lineIf(slices.ContainsFunc(paths, recorded), wipeFailedLine)
+		line := ""
+		for _, p := range paths {
+			if !recorded(p) {
+				continue
+			}
+			if again(p) {
+				return wipeFailedAgain
+			}
+			line = wipeFailedLine
+		}
+		return line
 	}
+}
+
+// again is whether the record at path ends " again".
+func again(path string) bool {
+	b, err := os.ReadFile(path)
+	return err == nil && strings.HasSuffix(strings.TrimSpace(string(b)), " again")
 }
 
 // recorded is whether path is there or cannot be checked.
