@@ -49,6 +49,9 @@ type request struct {
 	expires time.Time
 	wrong   int
 	done    []bool
+	// paged holds the first item of each MORE page already sent, so
+	// each page's first send is free of ReplyLimit (moreLocked).
+	paged map[int]bool
 }
 
 // Request opens an approval request for items and texts it to the owner.
@@ -298,51 +301,9 @@ func (c *Channel) renderLocked(r *request) string {
 	exp := r.expires.In(c.cfg.Location).Format("15:04")
 	var replies string
 	if r.local {
-		// Only the verified verb, object and recipient count: the page
-		// shows the rest (Security D4, UX A2).
-		it := r.items[0]
-		n := len(strings.Split(it.Recipient, ","))
-		pre := ""
-		if it.Unverified {
-			pre = "UNVERIFIED: "
-		}
-		if !it.Sent.IsZero() && it.SentErased {
-			// Only an erased send matched (OP2-ER-2): the notice says it
-			// may repeat one, never that this one was sent.
-			return fmt.Sprintf("%sCan I %s \"%s\"? It may repeat a send whose record was erased (%s). Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
-				pre, field(it.Facts.Verb, 12), field(it.Object, 40), it.Sent.In(c.cfg.Location).Format("15:04 Jan 2"), exp, r.id)
-		}
-		if !it.Sent.IsZero() {
-			// A repeat of a send known to have gone (confirm repeats,
-			// D-116): the notice says so and asks.
-			return fmt.Sprintf("%sCan I %s \"%s\" again? It was already sent %s. Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
-				pre, field(it.Facts.Verb, 12), field(it.Object, 40), it.Sent.In(c.cfg.Location).Format("15:04 Jan 2"), exp, r.id)
-		}
-		if !it.Retried.IsZero() {
-			// An owner retry (OP-2): the notice warns of a duplicate and
-			// names no recipient, which the page shows.
-			return fmt.Sprintf("%sCan I %s \"%s\" again? It may go twice; first tried %s. Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
-				pre, field(it.Facts.Verb, 12), field(it.Object, 40), it.Retried.In(c.cfg.Location).Format("15:04 Jan 2"), exp, r.id)
-		}
-		if SMSApprovable(it) {
-			// A change that needs the page's confirmation (CH-3,
-			// Security Q1 on P2-2a part 2): only NO by text.
-			return fmt.Sprintf("%sCan I %s \"%s\"? Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
-				pre, field(it.Facts.Verb, 12), field(it.Object, 40), exp, r.id)
-		}
-		return fmt.Sprintf("%sCan I %s \"%s\" to %d recipient%s? I can't show them in a text. Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
-			pre, field(it.Facts.Verb, 12), field(it.Object, 40), n, map[bool]string{true: "s"}[n != 1], exp, r.id)
+		return c.localAsk(r.items[0]) + " " + c.repliesLocked(r)
 	}
-	switch {
-	case r.tier == High && len(r.items) == 1:
-		replies = fmt.Sprintf("Reply YES %s and a code from your code generator%s, or NO %s.", r.id, c.gridOr(), r.id)
-	case r.tier == High:
-		replies = fmt.Sprintf("Reply YES %s and a code from your code generator%s (add item numbers to approve some; the rest are denied), or NO %s.", r.id, c.gridOr(), r.id)
-	case len(r.items) == 1:
-		replies = fmt.Sprintf("Reply YES %s %s or NO %s.", r.id, r.code, r.id)
-	default:
-		replies = fmt.Sprintf("Reply YES %s %s for all, YES %s 1 2 %s for some (the rest are denied), or NO %s.", r.id, r.code, r.id, r.code, r.id)
-	}
+	replies = c.repliesLocked(r)
 	if len(r.items) == 1 {
 		// The full wording, or its short form when that would not fit
 		// three segments with the longest request ID and grid cell, so
@@ -357,10 +318,19 @@ func (c *Channel) renderLocked(r *request) string {
 		var b strings.Builder
 		fmt.Fprintf(&b, "Can I do these %d things?", len(r.items))
 		for i := 0; i < shown; i++ {
-			fmt.Fprintf(&b, " %d %s.", i+1, c.itemLine(r.items[i]))
+			line := c.itemLine(r.items[i])
+			if !strings.HasSuffix(line, "?") {
+				line += "." // a question keeps its own stop (UX on #6625)
+			}
+			fmt.Fprintf(&b, " %d %s", i+1, line)
 		}
-		if shown < len(r.items) {
-			fmt.Fprintf(&b, " Items %d-%d: MORE %s.", shown+1, len(r.items), r.id)
+		switch {
+		case shown+1 == len(r.items):
+			fmt.Fprintf(&b, " Item %d: MORE %s %d.", shown+1, r.id, shown+1)
+		case shown < len(r.items) && shown > 0:
+			fmt.Fprintf(&b, " Items %d-%d: MORE %s %d.", shown+1, len(r.items), r.id, shown+1)
+		case shown == 0:
+			fmt.Fprintf(&b, " Items 1-%d: MORE %s.", len(r.items), r.id)
 		}
 		fmt.Fprintf(&b, " Expires %s. %s", exp, replies)
 		if fits(b.String()) {
@@ -370,24 +340,164 @@ func (c *Channel) renderLocked(r *request) string {
 	return fmt.Sprintf("Can I do these %d things? MORE %s lists them. Expires %s. %s", len(r.items), r.id, exp, replies)
 }
 
-// moreLocked lists a request's open items (CH-12's MORE).
-func (c *Channel) moreLocked(id string) string {
-	r := c.open[id]
-	if r == nil {
-		return fmt.Sprintf("No open request %s.", id)
+// repliesLocked is a texted request's valid replies (CH-12, CH-13): one
+// code for the whole batch. The request text and every MORE page end with
+// this same string, so a page never offers a reply the text does not, or
+// hides what a reply does (L3 step back on #6610).
+func (c *Channel) repliesLocked(r *request) string {
+	switch {
+	case r.local:
+		// First: a local request is High too, and is never approved by
+		// text (CH-3, P2-2a).
+		return c.pageOnlyReplies(r)
+	case r.tier == High && len(r.items) == 1:
+		return fmt.Sprintf("Reply YES %s and a code from your code generator%s, or NO %s.", r.id, c.gridOr(), r.id)
+	case r.tier == High:
+		return fmt.Sprintf("Reply YES %s and a code from your code generator%s (add item numbers to approve some; the rest are denied), or NO %s.", r.id, c.gridOr(), r.id)
+	case len(r.items) == 1:
+		return fmt.Sprintf("Reply YES %s %s or NO %s.", r.id, r.code, r.id)
 	}
+	return fmt.Sprintf("Reply YES %s %s for all, YES %s 1 2 %s for some (the rest are denied), or NO %s.", r.id, r.code, r.id, r.code, r.id)
+}
+
+// pageOnlyReplies is a local request text's replies: the Wi-Fi page or
+// NO, never a texted YES.
+func (c *Channel) pageOnlyReplies(r *request) string {
+	return fmt.Sprintf("Approve or deny on my Wi-Fi page before %s, or reply NO %s.", r.expires.In(c.cfg.Location).Format("15:04"), r.id)
+}
+
+// localAsk is a local-only item's question as its request text asks it,
+// before the replies: only the verified verb, object and recipient count,
+// with any repeat notice; the page shows the rest (Security D4, UX A2).
+// The request text and its MORE page both use it, so they cannot drift.
+func (c *Channel) localAsk(it Item) string {
+	n := len(strings.Split(it.Recipient, ","))
+	pre := ""
+	if it.Unverified {
+		pre = "UNVERIFIED: "
+	}
+	at := func(t time.Time) string { return t.In(c.cfg.Location).Format("15:04 Jan 2") }
+	verb, obj := field(it.Facts.Verb, 12), field(it.Object, 40)
+	switch {
+	case !it.Sent.IsZero() && it.SentErased:
+		// Only an erased send matched (OP2-ER-2): the notice says it
+		// may repeat one, never that this one was sent.
+		return fmt.Sprintf("%sCan I %s \"%s\"? It may repeat a send whose record was erased (%s).", pre, verb, obj, at(it.Sent))
+	case !it.Sent.IsZero():
+		// A repeat of a send known to have gone (confirm repeats,
+		// D-116): the notice says so and asks.
+		return fmt.Sprintf("%sCan I %s \"%s\" again? It was already sent %s.", pre, verb, obj, at(it.Sent))
+	case !it.Retried.IsZero():
+		// An owner retry (OP-2): the notice warns of a duplicate and
+		// names no recipient, which the page shows.
+		return fmt.Sprintf("%sCan I %s \"%s\" again? It may go twice; first tried %s.", pre, verb, obj, at(it.Retried))
+	case SMSApprovable(it):
+		// A change that needs the page's confirmation (CH-3,
+		// Security Q1 on P2-2a part 2): only NO by text.
+		return fmt.Sprintf("%sCan I %s \"%s\"?", pre, verb, obj)
+	}
+	return fmt.Sprintf("%sCan I %s \"%s\" to %d recipient%s? I can't show them in a text.", pre, verb, obj, n, map[bool]string{true: "s"}[n != 1])
+}
+
+// moreLocked is CH-12's read-only MORE (D-079): the page of request id
+// that starts at item from (1-based). It names the request, the items
+// shown out of how many, and the expiry, then ends with the valid replies
+// and, while undecided items remain, the next MORE command. Within three
+// segments it shows as many whole items as fit, at least one, so every
+// item is reachable by paging. It is a function of the request alone, so
+// the same page reads the same while the request is unchanged; an
+// expired or closed request has no pages. Reading changes nothing.
+//
+// fresh reports a page of an open request not sent before: its send is
+// exempt from ReplyLimit, so a locked owner can read every item the box
+// texted them about (Potency on #6625). The exemption is bounded by the
+// box's own texts: at most one per item of a request it sent, to the
+// owner's number, over the request's life; a repeat counts as before.
+func (c *Channel) moreLocked(id string, from int, now time.Time) (page string, fresh bool) {
+	page, first := c.moreTextLocked(id, from, now)
+	if r := c.open[id]; r != nil && first > 0 && !r.paged[first] {
+		if r.paged == nil {
+			r.paged = map[int]bool{}
+		}
+		r.paged[first] = true
+		return page, true
+	}
+	return page, false
+}
+
+// moreTextLocked is moreLocked's page and the first item it shows (0 for
+// a reply that shows none).
+func (c *Channel) moreTextLocked(id string, from int, now time.Time) (string, int) {
+	r := c.open[id]
+	if r == nil || !now.Before(r.expires) {
+		return fmt.Sprintf("No open request %s.", id), 0
+	}
+	if from < 1 {
+		from = 1
+	}
+	var left []int // undecided items from from on, 0-based
+	for i := from - 1; i < len(r.items); i++ {
+		if !r.done[i] {
+			left = append(left, i)
+		}
+	}
+	if len(left) == 0 {
+		return fmt.Sprintf("%s has no undecided item from %d; it has %d. Reply MORE %s.", id, from, len(r.items), id), 0
+	}
+	for shown := len(left); shown >= 1; shown-- {
+		if p := c.pageLocked(r, left, shown, lineFull); fits(p) {
+			return p, left[0] + 1
+		}
+	}
+	// One item too long for its full line: the line gets shorter, never
+	// the replies, and never loses a field CH-12 lists. Every texted item
+	// fits lineLean with the longest request ID and grid cell
+	// (TestMoreWorstPageFitsWithTheLongestID); pageWiFi is only a bound
+	// should a field ever grow.
+	for _, lv := range []int{lineShort, lineLean} {
+		if p := c.pageLocked(r, left, 1, lv); fits(p) {
+			return p, left[0] + 1
+		}
+	}
+	return c.pageLocked(r, left, 1, pageWiFi), left[0] + 1
+}
+
+// pageLocked is a MORE page of request r showing the first shown of the
+// undecided items left (0-based), each in item line form lv. Its replies
+// are the request text's own, word for word (repliesLocked), except in
+// the pageWiFi form, which states no item and so offers no texted YES.
+func (c *Channel) pageLocked(r *request, left []int, shown, lv int) string {
 	var b strings.Builder
-	b.WriteString(id + ":")
-	for i, it := range r.items {
-		if r.done[i] {
-			continue
+	first, last := left[0]+1, left[shown-1]+1
+	if first == last {
+		fmt.Fprintf(&b, "%s item %d of %d:", r.id, first, len(r.items))
+	} else {
+		fmt.Fprintf(&b, "%s items %d-%d of %d:", r.id, first, last, len(r.items))
+	}
+	for _, i := range left[:shown] {
+		switch {
+		case r.local:
+			// Exactly the request text's question (Security D4).
+			fmt.Fprintf(&b, " %d %s", i+1, c.localAsk(r.items[i]))
+		case lv == pageWiFi:
+			fmt.Fprintf(&b, " %d is too long to text; see it on my Wi-Fi page.", i+1)
+		default:
+			line := c.itemLineAs(r.items[i], lv)
+			if !strings.HasSuffix(line, "?") {
+				line += "."
+			}
+			fmt.Fprintf(&b, " %d %s", i+1, line)
 		}
-		next := fmt.Sprintf(" %d %s.", i+1, c.itemLine(it))
-		if !fits(b.String() + next + " Rest on my Wi-Fi page.") {
-			b.WriteString(" Rest on my Wi-Fi page.")
-			break
-		}
-		b.WriteString(next)
+	}
+	if r.local || lv == pageWiFi {
+		// Page or NO, whose wording names the expiry (UX on #6610). A local
+		// request's are its text's own (repliesLocked).
+		b.WriteString(" " + c.pageOnlyReplies(r))
+	} else {
+		fmt.Fprintf(&b, " Expires %s. %s", r.expires.In(c.cfg.Location).Format("15:04"), c.repliesLocked(r))
+	}
+	if shown < len(left) {
+		fmt.Fprintf(&b, " Next: MORE %s %d.", r.id, left[shown]+1)
 	}
 	return b.String()
 }

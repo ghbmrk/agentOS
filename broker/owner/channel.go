@@ -626,7 +626,12 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 		case "PAUSE", "REVOKE":
 			return route{narrow: &r, limited: !unlocked}
 		case "MORE":
-			return route{replies: []string{c.moreLocked(r.id)}, limited: !unlocked}
+			from := 1
+			if len(r.items) == 1 {
+				from = r.items[0]
+			}
+			page, fresh := c.moreLocked(r.id, from, now)
+			return route{replies: []string{page}, limited: !unlocked && !fresh}
 		case "UNLOCK":
 			return route{replies: []string{"Codes are not locked."}, limited: !unlocked}
 		case "RETRY":

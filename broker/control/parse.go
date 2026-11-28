@@ -102,8 +102,17 @@ func argsFit(w Word, args []string) bool {
 		return len(args) > 0 && allDigits(args)
 	case WordNo:
 		return allDigits(args)
-	case WordUndo, WordMore:
-		return len(args) == 1 && len(args[0]) <= 3 && alnum(args[0])
+	case WordUndo:
+		return len(args) == 1 && isReqID(args[0])
+	case WordMore:
+		// MORE id, MORE id n, MORE STATUS and MORE STATUS n (CH-12, D-079).
+		switch {
+		case len(args) == 1:
+			return isReqID(args[0]) || args[0] == string(WordStatus)
+		case len(args) == 2:
+			return (isReqID(args[0]) || args[0] == string(WordStatus)) && isItemNum(args[1])
+		}
+		return false
 	}
 	return false
 }
@@ -115,6 +124,12 @@ func afterFirstWord(msg string) string {
 	s = s[len("PUBLIC"):]
 	return strings.TrimLeftFunc(s, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
 }
+
+// isReqID is a request ID's shape: 1 to 3 letters or digits.
+func isReqID(s string) bool { return len(s) <= 3 && alnum(s) }
+
+// isItemNum is MORE's item or line number: 1 or 2 digits, not zero.
+func isItemNum(s string) bool { return len(s) <= 2 && digits(s) && s != "0" && s != "00" }
 
 func digits(s string) bool {
 	for _, r := range s {

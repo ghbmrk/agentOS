@@ -297,20 +297,71 @@ func ItemSum(it Item) string {
 }
 
 // itemLine is an item's line as a text shows it, in the owner's time zone.
-func (c *Channel) itemLine(it Item) string {
-	s := it.line()
-	if !it.Asked.IsZero() {
-		s += ", asked " + it.Asked.In(c.cfg.Location).Format("15:04") + ", re-sent after restart"
+func (c *Channel) itemLine(it Item) string { return c.itemLineAs(it, lineFull) }
+
+// Item line forms, each shorter than the one before, for a MORE page
+// whose one item would not fit three segments with the request text's
+// replies. A page shortens its item line, never its replies (L3 step
+// back on #6610).
+const (
+	lineFull  = iota
+	lineShort // the same fields and notices in fewer words (CH12V-4)
+	// lineLean is lineShort without the fields CH-12 does not list for a
+	// texted item (Detail, the restart note, notice times), pointed to
+	// the Wi-Fi page.
+	// It keeps verb, object, recipients, amount, reversibility and every
+	// repeat notice (CH-10, CH-12, OWN-17; L3 on #6625).
+	lineLean
+	// pageWiFi is moreLocked's last form: the page names its one item and
+	// leaves it to the Wi-Fi page. A page that cannot state an item's
+	// recipients offers no texted YES (CH-10, L3 on #6625): its replies are
+	// the page-or-NO a local request text gives (pageOnlyReplies).
+	pageWiFi
+)
+
+// itemLineAs is itemLine in form lv.
+func (c *Channel) itemLineAs(it Item, lv int) string {
+	s := it.lineAs(lv)
+	short := lv >= lineShort
+	at := func(t time.Time) string { return t.In(c.cfg.Location).Format("15:04 Jan 2") }
+	// At lineLean a notice keeps its warning but not its time, which
+	// CH-12 does not list either; the Wi-Fi page shows both.
+	lean := lv >= lineLean && (it.Unverified || it.Detail != "" || !it.Asked.IsZero() || !it.Sent.IsZero() || !it.Retried.IsZero())
+	when := func(pre string, t time.Time, post string) string {
+		if lv >= lineLean {
+			return ""
+		}
+		return pre + at(t) + post
+	}
+	if !it.Asked.IsZero() && lv < lineLean {
+		if short {
+			s += ", asked " + it.Asked.In(c.cfg.Location).Format("15:04") + " before a restart"
+		} else {
+			s += ", asked " + it.Asked.In(c.cfg.Location).Format("15:04") + ", re-sent after restart"
+		}
 	}
 	switch {
+	case !it.Sent.IsZero() && it.SentErased && short:
+		s += ", may repeat an erased send" + when(" (", it.Sent, ")")
 	case !it.Sent.IsZero() && it.SentErased:
 		// Only an erased send matched (OP2-ER-2): it may not be this one.
-		s += ", may repeat a send whose record was erased (it went " + it.Sent.In(c.cfg.Location).Format("15:04 Jan 2") + "); send it?"
+		s += ", may repeat a send whose record was erased (it went " + at(it.Sent) + "); send it?"
+	case !it.Sent.IsZero() && short:
+		if lv >= lineLean {
+			s += ", already sent; send again?"
+		} else {
+			s += ", sent " + at(it.Sent) + "; again?"
+		}
 	case !it.Sent.IsZero():
 		// Confirm repeats (D-116): said plainly, as a question.
-		s += ", already sent " + it.Sent.In(c.cfg.Location).Format("15:04 Jan 2") + "; send it again?"
+		s += ", already sent " + at(it.Sent) + "; send it again?"
+	case !it.Retried.IsZero() && short:
+		s += ", may go twice" + when(", tried ", it.Retried, "")
 	case !it.Retried.IsZero():
-		s += ", may go twice, first tried " + it.Retried.In(c.cfg.Location).Format("15:04 Jan 2")
+		s += ", may go twice, first tried " + at(it.Retried)
+	}
+	if lean {
+		s += ", more on my Wi-Fi page"
 	}
 	return s
 }
@@ -378,12 +429,25 @@ func (c *Channel) question(it Item, short bool) string {
 	return s
 }
 
-func (it Item) line() string {
+func (it Item) line() string { return it.lineAs(lineFull) }
+
+// lineAs is line in form lv (itemLineAs): from lineShort its UNVERIFIED
+// mark in fewer words, still naming the Wi-Fi page, and from lineLean
+// without Detail, the line's end naming the page instead.
+func (it Item) lineAs(lv int) string {
+	short := lv >= lineShort
 	s := field(it.Facts.Verb, 12) + " " + field(it.Object, 40)
-	if it.Detail != "" {
+	if it.Detail != "" && lv < lineLean {
 		s += ", " + field(it.Detail, 40)
 	}
-	if it.Unverified {
+	switch {
+	case it.Unverified && lv >= lineLean:
+		// The line ends ", more on my Wi-Fi page" (itemLineAs).
+		s = "UNVERIFIED: " + s
+	case it.Unverified && short:
+		// Fewer words, the same step (UX on #6625).
+		s = "UNVERIFIED, see my Wi-Fi page: " + s
+	case it.Unverified:
 		s = "UNVERIFIED, details on the Wi-Fi page: " + s
 	}
 	if it.Recipient != "" {

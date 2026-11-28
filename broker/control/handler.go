@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -151,7 +152,21 @@ func (h *Handler) Handle(ctx context.Context, from, msg string) []string {
 		}
 	case WordYes, WordNo:
 		r = "No open requests."
-	case WordUndo, WordMore:
+	case WordMore:
+		switch {
+		case cmd.Args[0] != string(WordStatus):
+			r = fmt.Sprintf("No request %s.", cmd.Args[0])
+		case !h.Auth.SessionUnlocked(h.now()):
+			// MORE STATUS needs the same proof as STATUS (CH-12).
+			r = unlockText
+		default:
+			from := 1
+			if len(cmd.Args) == 2 {
+				from, _ = strconv.Atoi(cmd.Args[1])
+			}
+			r = h.moreStatus(from, MaxText)
+		}
+	case WordUndo:
 		r = fmt.Sprintf("No request %s.", cmd.Args[0])
 	case WordUnclear:
 		r = UnclearReply
@@ -268,7 +283,7 @@ func (h *Handler) deliver(ctx context.Context, cmd Command) bool {
 }
 
 const helpText = "Commands: STOP pauses all actions. RESUME restarts them (needs a texted code). " +
-	"STATUS. YES or NO answers a request, e.g. YES 1 3 <code>. UNDO <id>. MORE <id>. " +
+	"STATUS. YES or NO answers a request, e.g. YES 1 3 <code>. UNDO <id>. MORE <id>, MORE <id> <item>, MORE STATUS. " +
 	"NAME shows my name; NAME <new name> changes it. " +
 	"Start a task with PUBLIC to mark it public. Anything else goes to your agent."
 
@@ -420,13 +435,64 @@ func since(ts []time.Time, cutoff time.Time) []time.Time {
 func (h *Handler) Status() string { return h.status(0) }
 
 // moreMax is the longest tail status writes after the notes it left out.
-const moreMax = len(" 99 more lines on my Wi-Fi page.")
+const moreMax = len(" 99 more lines: MORE STATUS.")
 
 // status is STATUS's text. With max > 0 it adds whole notes only, in
 // order, while the reply stays within max bytes; a note that does not fit
-// is left out, never cut, and a tail counts what was left out. Status
-// itself (the Wi-Fi page) has no bound and shows every note.
+// is left out, never cut, and a tail counts what was left out and names
+// MORE STATUS (CH-12, D-079). Status itself (the Wi-Fi page) has no bound
+// and shows every note.
 func (h *Handler) status(max int) string {
+	head, lines := h.statusLines()
+	text, left := statusFit(head, lines, max)
+	switch {
+	case len(left) == 1:
+		text += " 1 more line: MORE STATUS."
+	case len(left) > 1:
+		text += fmt.Sprintf(" %d more lines: MORE STATUS.", len(left))
+	}
+	return text
+}
+
+// moreStatus is MORE STATUS from line from (1-based) of the lines the
+// texted STATUS left out: whole lines while the page fits max, at least
+// one, then the next MORE STATUS command while lines remain. Reading it
+// changes nothing.
+func (h *Handler) moreStatus(from, max int) string {
+	head, lines := h.statusLines()
+	_, left := statusFit(head, lines, max)
+	switch {
+	case len(left) == 0:
+		return "STATUS fits one text; nothing more to show."
+	case from > len(left):
+		return fmt.Sprintf("STATUS has %d more line%s. Reply MORE STATUS.", len(left), map[bool]string{true: "s"}[len(left) != 1])
+	}
+	page := func(shown int) string {
+		var b strings.Builder
+		last := from + shown - 1
+		if shown == 1 {
+			fmt.Fprintf(&b, "STATUS, more line %d of %d:", from, len(left))
+		} else {
+			fmt.Fprintf(&b, "STATUS, more lines %d-%d of %d:", from, last, len(left))
+		}
+		for _, l := range left[from-1 : last] {
+			b.WriteString(" " + l)
+		}
+		if last < len(left) {
+			fmt.Fprintf(&b, " Next: MORE STATUS %d.", last+1)
+		}
+		return b.String()
+	}
+	for shown := len(left) - from + 1; shown > 1; shown-- {
+		if p := page(shown); len(p) <= max {
+			return p
+		}
+	}
+	return page(1) // a line is at most 100 bytes, so one always fits
+}
+
+// statusLines is STATUS's fixed head and its note lines, in order.
+func (h *Handler) statusLines() (string, []string) {
 	var b strings.Builder
 	if h.Engine.Stopped() {
 		b.WriteString("Stopped.")
@@ -451,32 +517,37 @@ func (h *Handler) status(max int) string {
 		b.WriteString(" " + plainLine(h.Machines(), 80))
 	}
 	var lines []string
-	n := b.Len()
 	for _, note := range h.Notes {
 		l, _, _ := strings.Cut(note(), "\n")
 		if l = plainLine(l, 100); l != "" {
 			lines = append(lines, l)
-			n += 1 + len(l)
 		}
 	}
-	room, left := max-moreMax, 0
+	return b.String(), lines
+}
+
+// statusFit is head with whole lines added in order while the text stays
+// within max bytes, leaving room for the tail when any is left out; left
+// is the lines left out, in order. max <= 0 adds every line.
+func statusFit(head string, lines []string, max int) (text string, left []string) {
+	n := len(head)
+	for _, l := range lines {
+		n += 1 + len(l)
+	}
+	room := max - moreMax
 	if max <= 0 || n <= max {
 		room = n
 	}
+	var b strings.Builder
+	b.WriteString(head)
 	for _, l := range lines {
 		if b.Len()+1+len(l) > room {
-			left++
+			left = append(left, l)
 			continue
 		}
 		b.WriteString(" " + l)
 	}
-	switch {
-	case left == 1:
-		b.WriteString(" 1 more line on my Wi-Fi page.")
-	case left > 1:
-		fmt.Fprintf(&b, " %d more lines on my Wi-Fi page.", left)
-	}
-	return b.String()
+	return b.String(), left
 }
 
 // sample lists up to three labels, so STATUS stays within three segments.

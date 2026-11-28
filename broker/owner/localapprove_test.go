@@ -831,7 +831,7 @@ func TestTheTextedStatusKeepsTheWiFiLineFirst(t *testing.T) {
 			shown++
 		}
 	}
-	if shown == len(long) || !strings.HasSuffix(got, fmt.Sprintf(" %d more lines on my Wi-Fi page.", len(long)-shown)) {
+	if shown == len(long) || !strings.HasSuffix(got, fmt.Sprintf(" %d more lines: MORE STATUS.", len(long)-shown)) {
 		t.Fatalf("%d of %d notes shown: %q", shown, len(long), got)
 	}
 }

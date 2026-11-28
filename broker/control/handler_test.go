@@ -436,7 +436,7 @@ func TestStatusTailWording(t *testing.T) {
 	for _, l := range fill {
 		h.Notes = append(h.Notes, func() string { return l })
 	}
-	for i, want := range []string{" 1 more line on my Wi-Fi page.", " 2 more lines on my Wi-Fi page."} {
+	for i, want := range []string{" 1 more line: MORE STATUS.", " 2 more lines: MORE STATUS."} {
 		// Longer than the tail, so the notes no longer all fit.
 		h.Notes = append(h.Notes, func() string { return fmt.Sprintf("Extra %d: ", i) + strings.Repeat("e", moreMax) })
 		s := one(t, h.Handle(context.Background(), owner, "STATUS"))
@@ -453,7 +453,7 @@ func TestStatusAddsWholeNotesOnly(t *testing.T) {
 	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{unlocked: true}, nil)
 	var notes []string
 	for i := 0; i < 6; i++ {
-		l := fmt.Sprintf("Note %d: ", i) + strings.Repeat("x", 80) + "."
+		l := fmt.Sprintf("Note %d: ", i) + strings.Repeat("x", 81) + "."
 		notes = append(notes, l)
 		h.Notes = append(h.Notes, func() string { return l })
 	}
@@ -469,7 +469,7 @@ func TestStatusAddsWholeNotesOnly(t *testing.T) {
 		}
 	}
 	if shown == 0 || shown == len(notes) || !strings.Contains(s, " "+short+" ") ||
-		!strings.HasSuffix(s, fmt.Sprintf(" %d more lines on my Wi-Fi page.", len(notes)-shown)) {
+		!strings.HasSuffix(s, fmt.Sprintf(" %d more lines: MORE STATUS.", len(notes)-shown)) {
 		t.Fatalf("%d shown: %q", shown, s)
 	}
 	page := h.Status()
