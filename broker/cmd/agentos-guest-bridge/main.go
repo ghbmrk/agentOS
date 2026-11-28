@@ -36,6 +36,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -203,37 +204,74 @@ func ownerOnce(ctx context.Context, broker *http.Client, gateway, model, token s
 	if err := json.Unmarshal(body, &msg); err != nil {
 		return err
 	}
-	// The runtime may still be starting (OpenClaw takes about 27 s cold):
-	// keep this message and retry, rather than wait out its lease.
-	var answer string
-	for wait := time.Second; ; wait = min(2*wait, 30*time.Second) {
-		if answer, err = ask(gateway, model, token, msg.Text); err == nil {
-			break
+	// A 400 is the broker refusing this answer while the message stays
+	// pending (an agent reaction, CH-11, or a body over the 64 KiB reply
+	// limit): the model is asked once more, with its refused answer and the
+	// broker's words, and that answer is posted (#2297). A second refusal
+	// is final: retrying would stall every later owner message.
+	conv := []turn{{"user", msg.Text}}
+	for again := false; ; again = true {
+		answer := askUntil(gateway, model, token, msg.ID, conv)
+		refused, err := reply(broker, msg.ID, answer)
+		if err != nil || refused == "" {
+			return err
 		}
-		log.Printf("owner message %s: %v; retrying", msg.ID, err)
+		if again {
+			return fmt.Errorf("reply %s: refused again: %s", msg.ID, refused)
+		}
+		log.Printf("owner reply %s: refused (%s); asking again", msg.ID, refused)
+		conv = append(conv, turn{"assistant", answer},
+			turn{"user", "The broker refused your reply: " + refused + ". Answer the owner's message again."})
+	}
+}
+
+// turn is one chat message to the guest's inbound API.
+type turn struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// askUntil asks the model until it answers. The runtime may still be
+// starting (OpenClaw takes about 27 s cold): keep this message and retry,
+// rather than wait out its lease.
+func askUntil(gateway, model, token, id string, conv []turn) string {
+	for wait := time.Second; ; wait = min(2*wait, 30*time.Second) {
+		answer, err := ask(gateway, model, token, conv)
+		if err == nil {
+			return answer
+		}
+		log.Printf("owner message %s: %v; retrying", id, err)
 		sleep(wait)
 	}
-	// The answer is kept until the broker has it (DEL-1d): a network error
-	// or any other status (503: not stored yet; 429: the machine has too
-	// many requests in flight) is retried with the same body, never by
-	// asking the model again. 204, 404 and 409 are final: stored, never
-	// handed to this machine, or already answered. So is 400, which the
-	// same body can never pass (an answer over the 64 KiB reply limit):
-	// retrying it would stall every later owner message.
-	out, _ := json.Marshal(map[string]string{"id": msg.ID, "text": answer})
+}
+
+// reply posts one answer. It is kept until the broker has it (DEL-1d): a
+// network error or any other status (503: not stored yet; 429: the machine
+// has too many requests in flight) is retried with the same body, never by
+// asking the model again. 204 is stored; 404 and 409 are final (never
+// handed to this machine, or already answered). A 400 returns the broker's
+// refusal words, at most 512 bytes of them, for the caller to ask again.
+func reply(broker *http.Client, id, answer string) (refused string, err error) {
+	out, _ := json.Marshal(map[string]string{"id": id, "text": answer})
 	for wait := time.Second; ; wait = min(2*wait, 30*time.Second) {
-		resp, err = broker.Post("http://broker.localhost/owner/reply", "application/json", bytes.NewReader(out))
+		resp, err := broker.Post("http://broker.localhost/owner/reply", "application/json", bytes.NewReader(out))
 		if err == nil {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 			resp.Body.Close()
 			switch resp.StatusCode {
 			case http.StatusNoContent:
-				return nil
-			case http.StatusBadRequest, http.StatusNotFound, http.StatusConflict:
-				return fmt.Errorf("reply %s: %s", msg.ID, resp.Status)
+				return "", nil
+			case http.StatusBadRequest:
+				if w := strings.Join(strings.Fields(string(b)), " "); w != "" {
+					return w, nil
+				}
+				return resp.Status, nil
+			case http.StatusNotFound, http.StatusConflict:
+				return "", fmt.Errorf("reply %s: %s", id, resp.Status)
 			}
 			err = fmt.Errorf("%s", resp.Status)
 		}
-		log.Printf("owner reply %s: %v; retrying", msg.ID, err)
+		log.Printf("owner reply %s: %v; retrying", id, err)
 		sleep(wait)
 	}
 }
@@ -241,13 +279,10 @@ func ownerOnce(ctx context.Context, broker *http.Client, gateway, model, token s
 // sleep waits between retries; tests replace it.
 var sleep = time.Sleep
 
-// ask sends one owner message to the guest's inbound API and returns its
-// answer text.
-func ask(gateway, model, token, text string) (string, error) {
-	req, _ := json.Marshal(map[string]any{
-		"model": model, "user": "owner",
-		"messages": []map[string]string{{"role": "user", "content": text}},
-	})
+// ask sends one owner conversation to the guest's inbound API and returns
+// its answer text.
+func ask(gateway, model, token string, conv []turn) (string, error) {
+	req, _ := json.Marshal(map[string]any{"model": model, "user": "owner", "messages": conv})
 	r, _ := http.NewRequest("POST", gateway+"/v1/chat/completions", bytes.NewReader(req))
 	r.Header.Set("Authorization", "Bearer "+token)
 	r.Header.Set("Content-Type", "application/json")

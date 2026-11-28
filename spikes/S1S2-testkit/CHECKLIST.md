@@ -39,7 +39,7 @@ Boot-menu keys (common, not guaranteed): Dell F12 · HP Esc then F9 · Lenovo F1
 
 Pass for S1: at least 3 of 3 vendors switch off by themselves with no keys, either straight away or after fix A once.
 
-On the N95, also read the results file's `agent_and_replay_fit` line: **PASS** means the agent machine and one replay machine fit in memory beside the rest of the floor budget. Note it here: ________
+On the N95, also read the results file's `agent_fit` line: **PASS** means the agent machine fits in memory beside the rest of the floor budget. Note it here: ________
 
 Also read the `agent_warm_wake` line: **PASS** means waking the agent from its overnight sleep spends under 15 s on disk and hashing, before "One moment" would be sent (PE7). Note it here: ________
 

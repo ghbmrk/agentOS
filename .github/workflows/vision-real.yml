@@ -24,12 +24,12 @@ on:
 permissions:
   contents: read
 # CI-cancel-superseded (#5345, #5348, #5361): a PR's first-attempt run cancels that PR's older first
-# attempts, so a superseded head never holds the queue. A rerun (attempt 2 or later) and every push,
-# merge-queue, schedule or dispatch run is a group of its own (run id), so it never cancels or
-# replaces the current head's run.
+# attempts, so a superseded head never holds the queue. A first-attempt push to main cancels main's
+# older one (CI-main-supersede, #6394), so main's tip always finishes. A rerun (attempt 2 or later) and
+# every other run is a group of its own (run id), so it never cancels or replaces the current head's run.
 concurrency:
-  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}
+  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && 'head' || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ (startsWith(github.event_name, 'pull_request') || github.event_name == 'push' && github.ref == 'refs/heads/main') && github.run_attempt == 1 }}
 env:
   GOTOOLCHAIN: local
   GOWORK: "off"
@@ -111,8 +111,8 @@ jobs:
           # pyarrow, held to its wheels' hashes and no dependency, only reads the shard; the
           # files are named by row number, so no value in the shard can name a path.
           python3 -m venv "$RUNNER_TEMP/pa"
-          { printf 'pyarrow==%s' "$(pin pyarrow)"; awk '$1 == "pyarrow_wheel" {printf " --hash=sha256:%s", $2}' "$pins"; echo; } > "$RUNNER_TEMP/pa.txt"
-          "$RUNNER_TEMP/pa/bin/pip" install --quiet --no-deps --only-binary :all: --require-hashes -r "$RUNNER_TEMP/pa.txt"
+          { printf 'pyarrow==%s' "$(pin pyarrow)"; awk '$1 == "pyarrow_wheel" {printf " --hash=sha256:%s", $2}' "$pins"; echo; } > "$RUNNER_TEMP/requirements-pa.txt"
+          (cd "$RUNNER_TEMP" && pa/bin/pip install --quiet --no-deps --only-binary :all: --require-hashes -r requirements-pa.txt)
           "$RUNNER_TEMP/pa/bin/python" -I - "$RUNNER_TEMP/plates.parquet" "$d" <<'EOF'
           import sys, pyarrow.parquet as pq
           src, d = sys.argv[1], sys.argv[2]

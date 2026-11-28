@@ -1091,8 +1091,20 @@ func (d *driver) phoneControl() error {
 	if err := controlErr(d.carrier.Log(), start); err != nil {
 		return err
 	}
-	return passedOverErr(readPhoneRun(d.carrier.Log(), start))
+	if err := passedOverErr(readPhoneRun(d.carrier.Log(), start)); err != nil {
+		return err
+	}
+	// The PASS line takes the step's name alone (ci_boot.sh's console
+	// check), so a NOTE names what each command proved (#1883 item 4).
+	if d.note != nil {
+		d.note(passNote)
+	}
+	return nil
 }
+
+// passNote is phoneControl's NOTE on a pass: HELP answered, the code
+// checked, STATUS held while locked, the unpaired number's code ignored.
+const passNote = "proved help-answered code-checked status-locked unpaired-ignored"
 
 // settle is how long phoneControl keeps reading the log after the
 // barrier's reply. The stranger's text was handled before the barrier's,
